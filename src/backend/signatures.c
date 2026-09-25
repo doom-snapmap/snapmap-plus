@@ -1252,6 +1252,11 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "48 89 7C 24 60 44 8D 43 03 48 8D 79 08 4C 89 7C 24 50 48 8B CF "
       "48 8D 55 D4 E8 ?? ?? ?? ?? F3 0F 10 45 D4 BA 02 00 00 00 8B D8 E8 ?? ?? ?? ?? 83 FB 01",
       0x1D2EB70u },
+    { "AudioAuxBusCreate", /* Auxiliary bus constructor; its shared construction also builds normal buses. */
+      "48 89 5C 24 08 57 48 83 EC 20 8B F9 BA 68 01 00 00 8B 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? "
+      "48 8B D8 48 85 C0 74 35 8B D7 48 8B C8 E8 ?? ?? ?? ?? 48 8D 05 ?? ?? ?? ?? 48 8B CB 48 89 03 "
+      "48 8D 05 ?? ?? ?? ?? 48 89 43 18 E8 ?? ?? ?? ?? 83 F8 01 74 16",
+      0x1D6B8E0u },
     { "AudioStateGroupEnsure", /* Native detached group construction from a manager table prefix. */
       "48 89 6C 24 10 48 89 74 24 18 48 89 7C 24 20 41 56 48 83 EC 20 "
       "48 8B 01 8B F2 44 8B 41 08 4C 8B F1 49 C1 E0 04 BF 01 00 00 00 "

@@ -7,6 +7,7 @@
 #include "../src/backend/audio_parameter_native.c"
 #include "../src/backend/audio_subscription_native.c"
 #include "../src/backend/audio_switch_native.c"
+#include "../src/backend/audio_bus_native.c"
 #include "../src/backend/audio_bank_gate.c"
 #include "../src/backend/audio_banks_native.c"
 
@@ -584,9 +585,96 @@ static void rp_drop_objects(uint32_t bank)
     }
     rp_object_count = used; rp_rebuild_objects();
 }
+/* Buses following the native rules the bus leg relies on: an ID index,
+ * reference counts, parent attach/detach through the vtable. */
+static unsigned char rb_index[0x2000], *rb_index_value = rb_index;
+static unsigned char *rb_objects[16];
+static size_t rb_object_count;
+static void *rb_normal[0x2b8 / 8], *rb_aux[0x2b8 / 8], *rb_consumer[8];
+static unsigned char *rb_roots[2];
+static uint32_t rb_rate = 48000, rb_expect_bus, rb_expect_bank;
+static uint16_t rb_floor = 16;
+static int32_t rb_properties[AB_PROPERTY_COUNT];
+static int rb_missing_at_load, rb_value_notices;
+static unsigned char *rb_registered(uint32_t id)
+{ for (size_t i = 0; i < rb_object_count; i++) if (ab_u32(rb_objects[i] + AB_ID) == id) return rb_objects[i]; return NULL; }
+static uint32_t rb_refs(const unsigned char *o) { return ab_u32(o + 0x14); }
+static void rb_set_refs(unsigned char *o, uint32_t v) { memcpy(o + 0x14, &v, 4); }
+static int rb_addref(void *o) { rb_set_refs(o, rb_refs(o) + 1); return (int)rb_refs(o); }
+static void rb_detach(void *parent, void *child);
+static int rb_release(void *o)
+{
+    unsigned char *bus = o; CHECK(rb_refs(bus) > 0);
+    rb_set_refs(bus, rb_refs(bus) - 1);
+    if (rb_refs(bus)) return (int)rb_refs(bus);
+    for (size_t i = 0; i < rb_object_count; i++) if (rb_objects[i] == bus) { rb_objects[i] = rb_objects[--rb_object_count]; break; }
+    if (ab_ptr(bus + AB_PARENT)) rb_detach(ab_ptr(bus + AB_PARENT), bus);
+    if (ab_ptr(bus + AB_PROPERTIES)) free(ab_ptr(bus + AB_PROPERTIES));
+    free(bus); return 0;
+}
+static int rb_attach(void *parent, void *child)
+{
+    int result = 1;
+    if (ab_ptr((unsigned char *)child + AB_PARENT)) result = 0x15;
+    else { ab_set_ptr((unsigned char *)child + AB_PARENT, parent); rb_addref(parent); }
+    rb_release(child); return result;
+}
+static void rb_detach(void *parent, void *child)
+{
+    if (ab_ptr((unsigned char *)child + AB_PARENT) != parent) return;
+    ab_set_ptr((unsigned char *)child + AB_PARENT, NULL); rb_release(parent);
+}
+static void rb_value(void *consumer, char flag, uint32_t parameter) { (void)consumer; (void)flag; (void)parameter; rb_value_notices++; }
+static void *rb_lookup(void *table, uint32_t id)
+{
+    CHECK(table == rb_index + AB_TABLE);
+    unsigned char *o = rb_registered(id);
+    if (o) rb_addref(o);
+    return o;
+}
+static void *rb_construct(void *memory, uint32_t id)
+{
+    unsigned char *bus = memory; uint32_t floor_volume = 0xc2c0999a, limit = 100;
+    memset(bus, 0, AB_SIZE); ab_set_ptr(bus, rb_normal); ab_set_ptr(bus + AB_CONSUMER, rb_consumer);
+    memcpy(bus + AB_ID, &id, 4); rb_set_refs(bus, 1);
+    bus[AB_FLAGS_A] = 0x20; bus[AB_FLAGS_B] = 0x01; bus[AB_FLAGS_C] = 0x30;
+    memcpy(bus + AB_FLOOR, &floor_volume, 4); memcpy(bus + 0xdc, &limit, 4);
+    return bus;
+}
+static int rb_initialize(void *bus) { CHECK(rb_object_count < 16); rb_objects[rb_object_count++] = bus; return 1; }
+static void *rb_create_aux(uint32_t id)
+{
+    unsigned char *bus = program_state_allocate(17, AB_SIZE);
+    rb_construct(bus, id); ab_set_ptr(bus, rb_aux); rb_initialize(bus); return bus;
+}
+static int rb_mixer(void *bus, uint32_t id, char shared, int priority) { (void)bus; (void)shared; (void)priority; return id ? 2 : 1; }
+static void rb_none(void *bus) { (void)bus; }
+static void rb_curve(void *bus, uint32_t parameter) { (void)bus; (void)parameter; }
+static void rb_setup(void **manager, CRITICAL_SECTION *lock)
+{
+    void **tables[2] = {rb_normal, rb_aux};
+    for (int i = 0; i < 2; i++) {
+        tables[i][1] = (void *)rb_addref; tables[i][2] = (void *)rb_release; tables[i][0x48 / 8] = (void *)rb_attach;
+        tables[i][0x60 / 8] = (void *)rb_detach; tables[i][0xe8 / 8] = (void *)rb_curve; tables[i][0x1b0 / 8] = (void *)rb_none;
+        tables[i][0x1c8 / 8] = (void *)rb_mixer;
+    }
+    rb_consumer[3] = (void *)rb_value;
+    for (int i = 0; i < AB_PROPERTY_COUNT; i++) rb_properties[i] = i < 6 ? i : 64;
+    memset(&g_bus, 0, sizeof(g_bus));
+    g_bus.subscriptions = &g_subscription; g_bus.render_lock = lock; g_bus.manager_slot = manager;
+    g_bus.index_slot = (unsigned char **)&rb_index_value; g_bus.lookup = rb_lookup; g_bus.construct = rb_construct;
+    g_bus.initialize = rb_initialize; g_bus.create_aux = rb_create_aux; g_bus.normal_vtable = rb_normal;
+    g_bus.aux_vtable = rb_aux; g_bus.consumer_vtable = rb_consumer;
+    g_bus.roots[0] = (void **)&rb_roots[0]; g_bus.roots[1] = (void **)&rb_roots[1];
+    g_bus.sample_rate = &rb_rate; g_bus.duck_floor = &rb_floor; g_bus.property_parameters = rb_properties;
+    /* The master bus, held by its bank. */
+    unsigned char *master = rb_construct(program_state_allocate(17, AB_SIZE), 1);
+    rb_initialize(master); rb_roots[0] = master;
+}
 static int rp_bank_load(uint32_t id)
 {
     ++rp_loads;
+    if (id == rb_expect_bank && rb_expect_bus && !rb_registered(rb_expect_bus)) rb_missing_at_load++;
     if (id == rp_fail_id && rp_fail_id_count-- > 0) return 2;
     if (rp_find_slot(id, NULL)) return 69;
     unsigned char *slot = calloc(1, 0x80); if (!slot) return 52;
@@ -616,15 +704,29 @@ static void rp_set_refs(uint32_t id, int32_t refs)
 static int rp_occupied(void *context, sh_audio_identity_domain domain, uint32_t id, char *error, size_t capacity)
 { (void)context; (void)domain; return sh_audio_registry_occupied(&g_registry, id, error, capacity); }
 typedef struct rp_owner { int references; } rp_owner;
-static rp_owner rp_owners[6];
+static rp_owner rp_owners[8];
 static void rp_release(void *owner) { rp_owner *o = owner; CHECK(o->references > 0); o->references--; }
 static sh_audio_active_program rp_ref(size_t owner, sh_package_audio_program *program, sh_audio_id_lease *lease)
 { rp_owners[owner].references++; return (sh_audio_active_program){rp_owners + owner, program, lease}; }
 /* Optional STMG switch record for the next built bank: group, RTPC
  * controller and two points mapping inputs 0 and 10 to two switch values. */
-static uint32_t rp_switch_group, rp_switch_controller = 77;
+static uint32_t rp_switch_group, rp_switch_controller = 77, rp_bus_id;
+/* An event and one new normal bus under the master bus with a volume. */
+static size_t rp_bus_bank(unsigned char *bank, const char *name, uint32_t event, uint32_t bus)
+{
+    uint32_t id = 0, version = 113, size = 16, count = 2, length = 8, bus_length = 48, parent = 1; float volume = -6.0f;
+    CHECK(sh_audio_bank_identity(name, &id)); memset(bank, 0, 160);
+    memcpy(bank, "BKHD", 4); memcpy(bank + 4, &size, 4); memcpy(bank + 8, &version, 4); memcpy(bank + 12, &id, 4);
+    memcpy(bank + 24, "HIRC", 4); size = 70; memcpy(bank + 28, &size, 4); memcpy(bank + 32, &count, 4);
+    bank[36] = 4; memcpy(bank + 37, &length, 4); memcpy(bank + 41, &event, 4);
+    unsigned char *o = bank + 49;
+    o[0] = 8; memcpy(o + 1, &bus_length, 4); memcpy(o + 5, &bus, 4); memcpy(o + 9, &parent, 4);
+    o[13] = 1; o[14] = 0; memcpy(o + 15, &volume, 4);
+    return 102;
+}
 static size_t rp_bank(unsigned char *bank, const char *name, uint32_t event, float threshold)
 {
+    if (rp_bus_id) return rp_bus_bank(bank, name, event, rp_bus_id);
     uint32_t id = 0, version = 113, size = 16, count = 1, length = 8; CHECK(sh_audio_bank_identity(name, &id));
     memset(bank, 0, 160);
     memcpy(bank, "BKHD", 4); memcpy(bank + 4, &size, 4); memcpy(bank + 8, &version, 4); memcpy(bank + 12, &id, 4);
@@ -767,6 +869,7 @@ static void retained_programs(void)
     g_subscription = (sh_audio_subscription_native){&rp_subscription_parameters, &rp_modulator_slot, rp_reverse_add,
         rp_reverse_remove, rp_modulator_add, rp_modulator_remove, rp_refresh, program_curve, &rp_switch_slot, rp_switch_ensure};
     CHECK(sh_audio_switch_native_bind(&g_switch, &g_subscription, &g_limits));
+    rb_setup(&audio_manager, &lock);
     /* Native Init baseline: -60 threshold, 64 voices. */
     unsigned char init[18] = {0}; float baseline_threshold = -60; uint16_t baseline_voices = 64;
     memcpy(init, &baseline_threshold, 4); memcpy(init + 4, &baseline_voices, 2);
@@ -774,13 +877,14 @@ static void retained_programs(void)
     sh_audio_shared_policy baseline = {0};
     CHECK(sh_audio_shared_policy_compile(&init_input, 1, &baseline, error, sizeof(error)));
     sh_audio_id_pool *pool = sh_audio_id_pool_open(rp_occupied, NULL); CHECK(pool);
-    static rp_program a, b, c, s, d, w;
+    static rp_program a, b, c, s, d, w, v;
     CHECK(rp_build(&a, originals, pool, "pa.bnk", NULL, 70, 0));
     CHECK(rp_build(&b, originals, pool, "pb.bnk", NULL, 80, 0));
     CHECK(rp_build(&c, originals, pool, "pc1.bnk", "pc2.bnk", 90, 0));
     CHECK(rp_build(&s, originals, pool, "ps.bnk", NULL, 100, -72));
     CHECK(rp_build(&d, originals, pool, "pd.bnk", NULL, 110, 0));
     rp_switch_group = 620; CHECK(rp_build(&w, originals, pool, "pw.bnk", NULL, 120, -60)); rp_switch_group = 0;
+    rp_bus_id = 630; CHECK(rp_build(&v, originals, pool, "pv.bnk", NULL, 130, 0)); rp_bus_id = 0;
     rp_plan pa = rp_loads_of(&a), pb = rp_loads_of(&b), pc = rp_loads_of(&c), pd = rp_loads_of(&d);
     uint32_t pa_id = 0; CHECK(sh_audio_bank_identity("pa.bnk", &pa_id));
     CHECK(pa.count == 1 && pa.ids[0] != pa_id && pc.count == 2 && pb.count == 1);
@@ -868,6 +972,23 @@ static void retained_programs(void)
     set[0] = rp_ref(1, b.program, b.lease);
     CHECK(sh_audio_banks_native_programs_activate(set, 1, &baseline, rp_release, error, sizeof(error)));
     CHECK(rp_switch(620) == group && !group->controller && !group->values.count && !g_switch.original_count && !g_switch.pending);
+    /* 7c. A new bus exists before the private bank routing to it loads, is
+     * configured afterwards, and is released once no program defines it. */
+    const sh_audio_bus_policy *buses = sh_package_audio_program_bound_bus_policy(v.program); uint32_t made_id = 0;
+    for (size_t i = 0; buses && i < buses->bus_count; i++) if (buses->buses[i].kind == 8) made_id = buses->buses[i].bus;
+    CHECK(made_id && sh_package_audio_program_bus_edited(v.program));
+    rp_plan pv = rp_loads_of(&v); rb_expect_bank = pv.ids[0]; rb_expect_bus = made_id;
+    set[0] = rp_ref(6, v.program, v.lease);
+    CHECK(sh_audio_banks_native_programs_activate(set, 1, &baseline, rp_release, error, sizeof(error)));
+    unsigned char *made = rb_registered(made_id), *block = made ? ab_ptr(made + AB_PROPERTIES) : NULL;
+    float made_volume = 0; if (block) memcpy(&made_volume, block + 4, 4);
+    CHECK(made && ab_ptr(made + AB_PARENT) == rb_roots[0] && !rb_missing_at_load && rp_find_slot(pv.ids[0], NULL));
+    CHECK(block && block[0] == 1 && made_volume == -6.0f && rb_value_notices == 1);
+    CHECK(g_bus.owned_count == 1 && !g_bus.pending && rb_refs(rb_roots[0]) == 2);
+    set[0] = rp_ref(1, b.program, b.lease);
+    CHECK(sh_audio_banks_native_programs_activate(set, 1, &baseline, rp_release, error, sizeof(error)));
+    CHECK(!rb_registered(made_id) && !g_bus.owned_count && rb_refs(rb_roots[0]) == 1);
+    rb_expect_bus = rb_expect_bank = 0;
     /* 8. Additive admission: rollback unloads, accept activates the lease. */
     sh_audio_bank_addition *addition = sh_audio_banks_native_additions_begin(error, sizeof(error)); CHECK(addition);
     set[0] = rp_ref(4, d.program, d.lease);
@@ -890,10 +1011,10 @@ static void retained_programs(void)
     /* 10. Leaving every program restores baseline controls and retires all. */
     CHECK(sh_audio_banks_native_programs_activate(NULL, 0, &baseline, rp_release, error, sizeof(error)));
     CHECK(sh_audio_banks_native_programs_count() == 0 && !rp_find_slot(pb.ids[0], NULL) && !rp_find_slot(pd.ids[0], NULL));
-    for (size_t i = 0; i < 6; i++) CHECK(rp_owners[i].references == 0);
+    for (size_t i = 0; i < 8; i++) CHECK(rp_owners[i].references == 0);
     CHECK(!rp_cut_voices && !g_pbank_count);
-    rp_program *all[] = {&a, &b, &c, &s, &d, &w};
-    for (size_t i = 0; i < 6; i++) { sh_audio_id_lease_release(all[i]->lease); sh_package_audio_program_close(all[i]->program); }
+    rp_program *all[] = {&a, &b, &c, &s, &d, &w, &v};
+    for (size_t i = 0; i < 7; i++) { sh_audio_id_lease_release(all[i]->lease); sh_package_audio_program_close(all[i]->program); }
     CHECK(sh_audio_id_pool_close(pool));
     sh_audio_shared_policy_free(&baseline); sh_audio_originals_close(originals);
     DeleteCriticalSection(&g_bank_gate.lock); memset(&g_bank_gate, 0, sizeof(g_bank_gate));
@@ -910,6 +1031,9 @@ static void retained_programs(void)
     memset(&rp_switches, 0, sizeof(rp_switches)); memset(&parameters, 0, sizeof(parameters));
     aw_originals_free(g_switch.originals, g_switch.original_count);
     memset(&g_switch, 0, sizeof(g_switch)); memset(&g_subscription, 0, sizeof(g_subscription));
+    while (rb_object_count) { unsigned char *o = rb_objects[0]; rb_set_refs(o, 1); rb_release(o); }
+    free(g_bus.owned); free(g_bus.touched); memset(&g_bus, 0, sizeof(g_bus));
+    sh_audio_bus_policy_free(&g_bus_baseline); sh_audio_bus_policy_free(&g_bus_effective); g_bus_baseline_known = 0;
     DeleteCriticalSection(&lock);
     g_commands = saved_commands; g_registry = saved_registry; g_load = saved_load; g_unload = saved_unload;
     for (size_t i = 0; i < 12; i++) DeleteCriticalSection((CRITICAL_SECTION *)(rp_index + i * 0x638));

@@ -273,6 +273,8 @@ int sh_audio_bus_policy_compile(const sh_audio_link_graph *graph,const sh_audio_
         sh_audio_bus_setting *setting=policy.settings+policy.count++;
         setting->bus=winner->bus;setting->field=winner->field;setting->field.offset=0;
         setting->removed=winner->removed || group->empty_mode;setting->recipe=winner->recipe;
+        /* A mode left without curves exists only because edits removed them. */
+        setting->edited=winner->edited || group->empty_mode;
         setting->value=group->empty_mode ? SIZE_MAX : winner->value;
         if(setting->removed)setting->field.length=0;
         else {

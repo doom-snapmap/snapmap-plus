@@ -24,6 +24,7 @@
 #include "audio_state_native.h"
 #include "audio_parameter_native.h"
 #include "audio_switch_native.h"
+#include "audio_bus_native.h"
 #include "audio_bank_gate.h"
 
 /* Binding checks must never invoke live reflection on the mapped PE. */
@@ -262,6 +263,49 @@ int main(int argc, char **argv)
             switches.manager_slot!=limits.manager_slot) {
             puts("BAD native audio subscription binding");bad++;
         } else puts("OK  native audio subscription binding");
+        /* Bus construction, cooked-reader setters, state helpers and globals
+         * derive from the auxiliary constructor and the bus vtables. */
+        const char *bus_names[]={"AudioAuxBusCreate","AudioBankLoad","AudioEventPost","AudioBankPrepare"};
+        sig_result bus_results[4]={0};sh_audio_registry bus_registry={0};sh_audio_bus_native buses={0};
+        for(size_t n=0;n<4;n++) {
+            const sig_entry *entry=NULL;
+            for(size_t i=0;BACKEND_ENGINE_SIGNATURES[i].name;i++)
+                if(!strcmp(BACKEND_ENGINE_SIGNATURES[i].name,bus_names[n]))entry=BACKEND_ENGINE_SIGNATURES+i;
+            if(!entry || sig_resolve_one(base,entry,bus_results+n)!=SIG_OK)resolved=0;
+        }
+        const uintptr_t b=(uintptr_t)base;
+        if(!resolved || !sh_audio_registry_bind(&bus_registry,base,bus_results+1,3) ||
+            !sh_audio_bus_native_bind(&buses,base,bus_results,1,&subscription,&limits,&bus_registry,&state) ||
+            (uintptr_t)buses.create_aux!=b+(pinned ? 0x1d6b8e0u : 0x1d84e10u) ||
+            (uintptr_t)buses.construct!=b+(pinned ? 0x1d40390u : 0x1d59760u) ||
+            (uintptr_t)buses.initialize!=b+(pinned ? 0x1d42760u : 0x1d5b9e0u) ||
+            (uintptr_t)buses.normal_vtable!=b+(pinned ? 0x281c518u : 0x2848568u) ||
+            (uintptr_t)buses.aux_vtable!=b+(pinned ? 0x281dd30u : 0x2849de0u) ||
+            (uintptr_t)buses.lookup!=b+(pinned ? 0x1d2c540u : 0x1d415d0u) ||
+            (uintptr_t)buses.roots[0]!=b+(pinned ? 0x70d4258u : 0x59df9a8u) ||
+            (uintptr_t)buses.roots[1]!=b+(pinned ? 0x70d4260u : 0x59df9b0u) ||
+            (uintptr_t)buses.sample_rate!=b+(pinned ? 0x55bd8b8u : 0x3ebff28u) ||
+            (uintptr_t)buses.duck_floor!=b+(pinned ? 0x55bd8c4u : 0x3ebff34u) ||
+            (uintptr_t)buses.property_parameters!=b+(pinned ? 0x281ba80u : 0x2847ac0u) ||
+            (uintptr_t)buses.set_effect!=b+(pinned ? 0x1d355c0u : 0x1d4eaa0u) ||
+            (uintptr_t)buses.set_bypass!=b+(pinned ? 0x1d34510u : 0x1d4d9e0u) ||
+            (uintptr_t)buses.set_limit_kill!=b+(pinned ? 0x1d35840u : 0x1d4ed20u) ||
+            (uintptr_t)buses.set_limit_virtual!=b+(pinned ? 0x1d35b50u : 0x1d4f030u) ||
+            (uintptr_t)buses.set_channels!=b+(pinned ? 0x1d40dc0u : 0x1d5a0e0u) ||
+            (uintptr_t)buses.add_background!=b+(pinned ? 0x1d439b0u : 0x1d5cc30u) ||
+            (uintptr_t)buses.remove_background!=b+(pinned ? 0x1d44420u : 0x1d5d6a0u) ||
+            (uintptr_t)buses.set_duck!=b+(pinned ? 0x1d40ad0u : 0x1d59ea0u) ||
+            (uintptr_t)buses.rtpc_ready!=b+(pinned ? 0x1d3c0f0u : 0x1d55610u) ||
+            (uintptr_t)buses.rtpc_mark!=b+(pinned ? 0x1d3c280u : 0x1d557a0u) ||
+            (uintptr_t)buses.state_group!=b+(pinned ? 0x1d32150u : 0x1d4b620u) ||
+            (uintptr_t)buses.state_bind!=b+(pinned ? 0x1d31fb0u : 0x1d4b480u) ||
+            (uintptr_t)buses.state_unbind!=b+(pinned ? 0x1d35050u : 0x1d4e530u) ||
+            (uintptr_t)buses.state_unregister!=b+(pinned ? 0x1d29230u : 0x1d426d0u) ||
+            (uintptr_t)buses.transition_unregister!=b+(pinned ? 0x1d280f0u : 0x1d413b0u) ||
+            (uintptr_t)buses.transition_slot!=b+(pinned ? 0x70d4028u : 0x59df778u) ||
+            buses.render_lock!=limits.render_lock || (void *)buses.state_slot!=(void *)state.state_slot) {
+            puts("BAD native audio bus binding");bad++;
+        } else puts("OK  native audio bus binding");
         const sig_entry *dispatch=NULL;sig_result dispatch_result={0};sh_audio_bank_gate gate={0};
         for(size_t i=0;BACKEND_ENGINE_SIGNATURES[i].name;i++)
             if(!strcmp(BACKEND_ENGINE_SIGNATURES[i].name,"AudioBankDispatch"))dispatch=BACKEND_ENGINE_SIGNATURES+i;

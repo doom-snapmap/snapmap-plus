@@ -955,8 +955,8 @@ static void bus_baseline_program(void)
         for(size_t i=0;policy && i<policy->count;i++) {
             const sh_audio_bus_setting *s=policy->settings+i;const sh_package_owners *owners=NULL,*gameplay=NULL;
             CHECK(sh_package_audio_program_bus_policy_owners(p,i,&owners,&gameplay));
-            if(s->field.field==SH_AUDIO_BUS_FIELD_PROPERTY)CHECK(s->body[0]==20 && owners->bits==1 && gameplay->bits==1);
-            else CHECK(!owners->bits && !gameplay->bits);
+            if(s->field.field==SH_AUDIO_BUS_FIELD_PROPERTY)CHECK(s->body[0]==20 && s->edited && owners->bits==1 && gameplay->bits==1);
+            else CHECK(!s->edited && !owners->bits && !gameplay->bits);
         }
     }
     sh_package_audio_program_close(p);
@@ -984,7 +984,17 @@ static void bus_baseline_program(void)
         CHECK(sh_package_audio_program_bind(p,&output,program_assign,&ids,error,sizeof(error)));
         const sh_audio_bus_policy *bound=sh_package_audio_program_bound_bus_policy(p);CHECK(bound);
         for(size_t i=0;bound && i<bound->count;i++)if(bound->settings[i].field.field==SH_AUDIO_BUS_FIELD_PROPERTY)
-            CHECK(bound->settings[i].removed && !bound->settings[i].body);
+            CHECK(bound->settings[i].removed && bound->settings[i].edited && !bound->settings[i].body);
+        /* The native configuration keeps the removed key's original value. */
+        const sh_audio_bus_policy *native=sh_package_audio_program_bound_baseline_bus(p);int kept=0;
+        CHECK(native && native->count && native->bus_count==bound->bus_count);
+        for(size_t i=0;native && i<native->count;i++) {
+            CHECK(!native->settings[i].edited);
+            if(native->settings[i].field.field==SH_AUDIO_BUS_FIELD_PROPERTY) {
+                kept++;CHECK(!native->settings[i].removed && native->settings[i].body[0]==10);
+            }
+        }
+        CHECK(kept==1);
     }
     sh_package_audio_program_close(p);
     /* Missing explicit roots must not silently capture a different bank. */
@@ -1122,6 +1132,18 @@ static int probe_policy(const char *base,const char *filename)
             snprintf(error,sizeof(error),"original bus setting gained an edit or owner");goto done;
         }
         removed+=b->removed!=0;
+    }
+    /* Installed originals: the native-only composition is the same policy. */
+    const sh_audio_bus_policy *native=sh_package_audio_program_bound_baseline_bus(program);
+    if(!native || native->count!=bound->count || native->bus_count!=bound->bus_count) {
+        snprintf(error,sizeof(error),"native baseline bus policy differs from the composed originals");goto done;
+    }
+    for(size_t i=0;i<native->count;i++) {
+        const sh_audio_bus_setting *a=native->settings+i,*b=bound->settings+i;
+        if(a->edited || b->edited || a->bus!=b->bus || a->field.field!=b->field.field || a->field.length!=b->field.length ||
+            (a->field.length && memcmp(a->body,b->body,a->field.length))) {
+            snprintf(error,sizeof(error),"native baseline bus setting differs from the composed originals");goto done;
+        }
     }
     /* Shared STMG/ENVS/PLAT: exact graph identities certify the installed
      * controls as baseline, and binding never changes their bytes. */

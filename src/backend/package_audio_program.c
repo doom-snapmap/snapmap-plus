@@ -58,6 +58,7 @@ struct sh_package_audio_program {
     size_t bus_recipe_count;
     sh_audio_bus_policy bus_policy;
     sh_audio_bus_policy bound_bus_policy;
+    sh_audio_bus_policy baseline_bus_policy, bound_baseline_bus_policy;
     int bus_bound;
     pap_bus_owners *bus_policy_owners;
     size_t failed_scope; /* Scope whose capture failed in the last prepare. */
@@ -103,6 +104,7 @@ static int pap_files_capture(pap_scope *scope)
 static void pap_bus_clear(sh_package_audio_program *p)
 {
     sh_audio_bus_policy_free(&p->bound_bus_policy);p->bus_bound=0;
+    sh_audio_bus_policy_free(&p->baseline_bus_policy);sh_audio_bus_policy_free(&p->bound_baseline_bus_policy);
     if(p->bus_policy_owners)for(size_t i=0;i<p->bus_policy.count;i++) {
         sh_package_owners_free(&p->bus_policy_owners[i].owners);
         sh_package_owners_free(&p->bus_policy_owners[i].gameplay);
@@ -354,6 +356,13 @@ static int pap_bus_compose(sh_package_audio_program *p,sh_audio_link_graph *grap
             values+recipe->first,recipe->count};
     }
     if(!sh_audio_bus_policy_compile(graph,inputs,p->bus_recipe_count,&p->bus_policy,error,capacity))goto done;
+    /* The native configuration alone: it restores keys a departed program
+     * edited even when no active program retains their baseline rows. */
+    {
+        size_t used=0;
+        for(size_t i=0;i<p->bus_recipe_count;i++)if(inputs[i].baseline)inputs[used++]=inputs[i];
+        if(!sh_audio_bus_policy_compile(graph,inputs,used,&p->baseline_bus_policy,error,capacity))goto done;
+    }
     p->bus_policy_owners=calloc(p->bus_policy.count ? p->bus_policy.count : 1,sizeof(*p->bus_policy_owners));
     if(!p->bus_policy_owners)goto done;
     for(size_t i=0;i<p->bus_policy.count;i++) {
@@ -381,12 +390,11 @@ done:
 int sh_package_audio_program_bus_edited(const sh_package_audio_program *p)
 {
     if(!p || !p->graph)return 0;
-    for(size_t i=0;i<p->bus_policy.count;i++) {
-        const sh_audio_bus_setting *setting=p->bus_policy.settings+i;
-        if(setting->removed || setting->recipe>=p->bus_recipe_count || !p->bus_recipes[setting->recipe].baseline)return 1;
-    }
+    for(size_t i=0;i<p->bus_policy.count;i++)if(p->bus_policy.settings[i].edited)return 1;
     return 0;
 }
+const sh_audio_bus_policy *sh_package_audio_program_bound_baseline_bus(const sh_package_audio_program *p)
+{ return p && p->bus_bound ? &p->bound_baseline_bus_policy : NULL; }
 const sh_audio_bus_policy *sh_package_audio_program_bus_policy(const sh_package_audio_program *p)
 { return p && p->graph ? &p->bus_policy : NULL; }
 const sh_audio_bus_policy *sh_package_audio_program_bound_bus_policy(const sh_package_audio_program *p)
@@ -717,10 +725,9 @@ int sh_package_audio_program_owners(const sh_package_audio_program *p,
     *owners = &sound->owners; *gameplay = &sound->gameplay; return 1;
 }
 typedef struct pap_binding { sh_compiled_resource *resource; size_t scope; uint32_t event; } pap_binding;
-static int pap_bus_bind(const sh_package_audio_program *p,const sh_audio_link_binding *binding,
-    sh_audio_bus_policy *out,char *error,size_t capacity)
+static int pap_bus_bind(const sh_package_audio_program *p,const sh_audio_bus_policy *input,
+    const sh_audio_link_binding *binding,sh_audio_bus_policy *out,char *error,size_t capacity)
 {
-    const sh_audio_bus_policy *input=&p->bus_policy;
     out->buses=calloc(input->bus_count ? input->bus_count : 1,sizeof(*out->buses));
     out->settings=calloc(input->count ? input->count : 1,sizeof(*out->settings));
     if(!out->buses || !out->settings)return pap_fail(error,capacity,"cannot retain bound bus policy",NULL);
@@ -769,7 +776,7 @@ int sh_package_audio_program_bind(sh_package_audio_program *p, sh_package_compil
     sh_audio_graph_assign assign, void *context, char *error, size_t capacity)
 {
     pap_binding *bindings = NULL; size_t count = 0; int ok = 0;
-    sh_audio_link_binding *transaction=NULL;sh_audio_bus_policy bus={0};sh_audio_shared_policy shared={0};
+    sh_audio_link_binding *transaction=NULL;sh_audio_bus_policy bus={0},baseline_bus={0};sh_audio_shared_policy shared={0};
     if (!p || !p->graph || !compiled || !assign || compiled->resource_count > SIZE_MAX / sizeof(*bindings))
         return pap_fail(error, capacity, "invalid audio publication input", NULL);
     bindings = calloc(compiled->resource_count ? compiled->resource_count : 1, sizeof(*bindings));
@@ -798,12 +805,15 @@ int sh_package_audio_program_bind(sh_package_audio_program *p, sh_package_compil
         bindings[count++] = (pap_binding){r, scope, found->event};
     }
     transaction=sh_audio_link_graph_prepare_bind(p->graph,assign,context,error,capacity);
-    if(!transaction || !pap_bus_bind(p,transaction,&bus,error,capacity) ||
+    if(!transaction || !pap_bus_bind(p,&p->bus_policy,transaction,&bus,error,capacity) ||
+        !pap_bus_bind(p,&p->baseline_bus_policy,transaction,&baseline_bus,error,capacity) ||
         !pap_shared_bind(p,transaction,&shared,error,capacity))goto done;
     /* Every root was proved during prepare; a successful bind assigns all
      * roots atomically. No fallible allocation or validation remains here. */
     sh_audio_link_graph_commit_bind(transaction);transaction=NULL;
     sh_audio_bus_policy_free(&p->bound_bus_policy);p->bound_bus_policy=bus;memset(&bus,0,sizeof(bus));p->bus_bound=1;
+    sh_audio_bus_policy_free(&p->bound_baseline_bus_policy);p->bound_baseline_bus_policy=baseline_bus;
+    memset(&baseline_bus,0,sizeof(baseline_bus));
     sh_audio_shared_policy_free(&p->bound_shared);p->bound_shared=shared;memset(&shared,0,sizeof(shared));p->shared_bound=1;
     for (size_t i = 0; i < count; i++) {
         uint32_t event = 0;
@@ -813,6 +823,7 @@ int sh_package_audio_program_bind(sh_package_audio_program *p, sh_package_compil
     ok = 1;
 done:
     sh_audio_link_graph_cancel_bind(transaction);sh_audio_bus_policy_free(&bus);sh_audio_shared_policy_free(&shared);
+    sh_audio_bus_policy_free(&baseline_bus);
     free(bindings);
     if (!ok && error && capacity && !*error) pap_fail(error, capacity, "cannot bind audio program", NULL);
     return ok;
