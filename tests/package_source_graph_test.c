@@ -2956,8 +2956,8 @@ static void test_inherited_editor_parent(fixture *f, sh_decl_registry_source reg
     }
     assert(children >= 1);
     sh_package_library_free(&library); sh_package_sources_free(sources);
-    /* A different parent declaration is a different layout: the patch cannot
-     * be composed with the stock child's. */
+    /* A different parent declaration is its author's own variant: it keeps
+     * its private identity and parent, and the stock child still composes. */
     create("overrides/editor/assets/generated/decls/snapeditorentitydef/other_parent.decl",
         "{ edit = { target = \"root\"; propertySheets = { num = 1; item[0] = { properties = { num = 1; "
         "item[0] = { path = \"armor\"; type = \"float\"; } } } } } }");
@@ -2973,28 +2973,207 @@ static void test_inherited_editor_parent(fixture *f, sh_decl_registry_source reg
     create("overrides/zzz-peer/assets/generated/decls/snapeditorentitydef/demo_parent.decl",
         "{ edit = { target = \"modifier-child\"; propertySheets = { num = 1; item[0] = { properties = { num = 2; "
         "item[0] = { path = \"health\"; type = \"float\"; } item[1] = { path = \"speed\"; type = \"float\"; } } } } } }");
+    for (int round = 0; round < 2; round++) {
+        size_t invalid = SIZE_MAX, variants = 0, stock = 0;
+        if (round) {
+            /* Another package keeps the stock parent: it composes with stock. */
+            create("overrides/zzz-peer/assets/generated/decls/snapeditorentitydef/demo_child.decl",
+                "{ inherit = \"demo_parent\"; edit = { target = \"root\"; "
+                "propertySheets = { item[0] = { properties = { item[1] = { descriptionTag = \"#str_peer\"; } } } } } }");
+        }
+        env.invalid_package = &invalid;
+        sources = sh_package_sources_scan(root, error, sizeof(error)); assert(sources);
+        ok = sh_package_library_compile(sources, &env, NULL, contribution_original, &originals,
+            registry, (uintptr_t)f->reflection, NULL, &library, error, sizeof(error));
+        if (!ok) fprintf(stderr, "changed editor parent %d: %s\n", round, error);
+        assert(ok && unserved == SIZE_MAX && invalid == SIZE_MAX);
+        for (size_t i = 0; i < library.compiled->resource_count; i++) {
+            const sh_compiled_resource *file = library.compiled->resources + i;
+            const char *authored = file->original_path ? file->original_path : file->engine_path;
+            if (strcmp(authored, "generated/decls/snapeditorentitydef/demo_child.decl")) continue;
+            if (strstr((char *)file->body, "#str_other")) {
+                variants++; assert(!strstr((char *)file->body, "#str_peer") && strcmp(file->name, "demo_child"));
+            } else if (!strcmp(file->name, "demo_child")) {
+                stock++; assert(!!strstr((char *)file->body, "#str_peer") == round);
+            }
+        }
+        if (variants != 1 || stock != 1) fprintf(stderr, "changed editor parent %d: variants=%zu stock=%zu\n", round, variants, stock);
+        assert(variants == 1 && stock == 1);
+        env.invalid_package = NULL;
+        sh_package_library_free(&library); sh_package_sources_free(sources);
+    }
+    cleanup(); assert(!failures);
+}
+
+/* A package relaying a parent's controls (armor first) leaves each sparse
+ * child patch on its intended control, for the stock child and a peer's
+ * unchanged stock copy alike; failures keep their cause: one package's own
+ * invalid list rejects it, a composition the product cannot perform leaves
+ * a contributor unserved, and an unreadable source blames nobody. */
+static void test_editor_parent_contracts(fixture *f, sh_decl_registry_source registry)
+{
+    char temporary[MAX_PATH], error[1024];
+    source_link_fixture originals = {f};
+    sh_package_compile_environment env = {0}; sh_package_library library = {0};
+    size_t unserved = SIZE_MAX, invalid = SIZE_MAX;
+    assert(GetTempPathA(sizeof(temporary), temporary));
+    snprintf(root, sizeof(root), "%ssmp-editor-contracts-%lu-%llu", temporary, GetCurrentProcessId(), GetTickCount64());
+    assert(CreateDirectoryA(root, NULL));
+    env.baseline = contribution_original; env.baseline_context = &originals;
+    env.unserved_package = &unserved; env.invalid_package = &invalid;
+    create("overrides/layout/package.json", "{\"id\":\"local.layout\",\"name\":\"layout\"}");
+    create("overrides/layout/assets/generated/decls/snapeditorentitydef/demo_parent.decl",
+        "{ edit = { target = \"parent-only\"; propertySheets = { num = 1; item[0] = { properties = { num = 3; "
+        "item[0] = { path = \"armor\"; type = \"float\"; } item[1] = { path = \"health\"; type = \"float\"; } "
+        "item[2] = { path = \"speed\"; type = \"float\"; } } } } } }");
+    create("overrides/copy/package.json", "{\"id\":\"local.copy\",\"name\":\"copy\"}");
+    create("overrides/copy/assets/generated/decls/snapeditorentitydef/demo_child.decl", demo_child_original);
+    sh_package_sources *sources = sh_package_sources_scan(root, error, sizeof(error)); assert(sources);
+    int ok = sh_package_library_compile(sources, &env, NULL, contribution_original, &originals,
+        registry, (uintptr_t)f->reflection, NULL, &library, error, sizeof(error));
+    if (!ok) fprintf(stderr, "relaid editor parent: %s\n", error);
+    assert(ok && unserved == SIZE_MAX && invalid == SIZE_MAX);
+    {
+        const sh_compiled_resource *child = named_resource(library.compiled, "snapeditorentitydef", "demo_child");
+        const sh_compiled_resource *parent = named_resource(library.compiled, "snapeditorentitydef", "demo_parent");
+        assert(child && parent && strstr((char *)parent->body, "\"armor\""));
+        sh_decl_node *tree = sh_decl_tree_parse((sh_decl_source){(char *)child->body, child->body_length}, NULL, 0);
+        const sh_decl_node *properties = sh_decl_tree_member(sh_decl_tree_member(sh_decl_tree_member(
+            sh_decl_tree_member(tree, "edit"), "propertySheets"), "item[0]"), "properties");
+        size_t speed = SIZE_MAX, labelled = 0;
+        char slot[32];
+        assert(properties && sh_decl_tree_member(properties, "num"));
+        for (size_t k = 0; k < 3; k++) {
+            snprintf(slot, sizeof(slot), "item[%zu]", k);
+            const sh_decl_node *item = sh_decl_tree_member(properties, slot);
+            assert(item);
+            if (!strcmp(node_value(sh_decl_tree_member(item, "path")), "speed")) speed = k;
+            if (sh_decl_tree_member(item, "descriptionTag")) labelled++;
+        }
+        /* The published parent's slot order is kept; the patch follows speed. */
+        assert(speed == 2 && labelled == 1);
+        snprintf(slot, sizeof(slot), "item[%zu]", speed);
+        assert(!strcmp(node_value(sh_decl_tree_member(sh_decl_tree_member(properties, slot), "descriptionTag")), "#str_child"));
+        sh_decl_tree_free(tree);
+    }
+    sh_package_library_free(&library); sh_package_sources_free(sources);
+    /* One package's own input: an unreadable declaration rejects it; a list
+     * member no product reader covers leaves it unserved. Peers compile. */
+    for (int round = 0; round < 2; round++) {
+        size_t *owner = round ? &unserved : &invalid;
+        create("overrides/bad/package.json", "{\"id\":\"local.bad\",\"name\":\"bad\"}");
+        create("overrides/bad/assets/generated/decls/snapeditorentitydef/demo_child.decl", round ?
+            "{ inherit = \"demo_parent\"; edit = { target = \"parent-only\"; propertySheets = { bogus = 1; } } }" :
+            "{ inherit = \"demo_parent\"; edit = { target = \"parent-only\"; propertySheets = { num = 1; } }");
+        sources = sh_package_sources_scan(root, error, sizeof(error)); assert(sources);
+        assert(!sh_package_library_compile(sources, &env, NULL, contribution_original, &originals,
+            registry, (uintptr_t)f->reflection, NULL, &library, error, sizeof(error)));
+        if (*owner >= sources->package_count)
+            fprintf(stderr, "bad editor input %d: invalid=%zu unserved=%zu %s\n", round, invalid, unserved, error);
+        assert(*owner < sources->package_count && !strcmp(sources->packages[*owner].name, "bad"));
+        assert((round ? invalid : unserved) == SIZE_MAX);
+        assert(sh_package_sources_remove(sources, *owner));
+        ok = sh_package_library_compile(sources, &env, NULL, contribution_original, &originals,
+            registry, (uintptr_t)f->reflection, NULL, &library, error, sizeof(error));
+        if (!ok) fprintf(stderr, "peers without the bad package %d: %s\n", round, error);
+        assert(ok && invalid == SIZE_MAX && unserved == SIZE_MAX);
+        sh_package_library_free(&library); sh_package_sources_free(sources);
+    }
+    create("overrides/bad/assets/generated/decls/snapeditorentitydef/demo_child.decl", demo_child_original);
+    /* Environment: an unreadable source blames nothing, not even the package
+     * that authored a change to that declaration (layout's relaid parent);
+     * the previous usable generation stays with the caller. */
     sources = sh_package_sources_scan(root, error, sizeof(error)); assert(sources);
+    sh_package_library_test_contribution_read_failures("demo_parent", 1);
     assert(!sh_package_library_compile(sources, &env, NULL, contribution_original, &originals,
         registry, (uintptr_t)f->reflection, NULL, &library, error, sizeof(error)));
-    if (unserved >= sources->package_count || !strstr(error, "snapeditorentitydef demo_child: edit.propertySheets: "))
-        fprintf(stderr, "different editor parent: %s\n", error);
-    assert(unserved < sources->package_count && !strcmp(sources->packages[unserved].name, "editor"));
-    assert(strstr(error, "snapeditorentitydef demo_child: edit.propertySheets: "));
-    /* Without that package the healthy peer compiles. */
+    sh_package_library_test_contribution_read_failures(NULL, 0);
+    assert(invalid == SIZE_MAX && unserved == SIZE_MAX && strstr(error, "unreadable") && !library.compiled);
+    sh_package_library_free(&library); sh_package_sources_free(sources);
+    /* Coverage: a parent chain the product cannot follow (circular) leaves
+     * its contributing package unserved, not rejected. */
+    create("overrides/cycle/package.json", "{\"id\":\"local.cycle\",\"name\":\"cycle\"}");
+    create("overrides/cycle/assets/generated/decls/snapeditorentitydef/demo_parent.decl",
+        "{ inherit = \"demo_child\"; edit = { target = \"parent-only\"; } }");
+    sources = sh_package_sources_scan(root, error, sizeof(error)); assert(sources);
+    ok = sh_package_library_compile(sources, &env, NULL, contribution_original, &originals,
+        registry, (uintptr_t)f->reflection, NULL, &library, error, sizeof(error));
+    if (ok || invalid != SIZE_MAX || unserved >= sources->package_count || strcmp(sources->packages[unserved].name, "cycle"))
+        fprintf(stderr, "editor inheritance cycle: ok=%d invalid=%zu unserved=%zu %s\n", ok, invalid, unserved, error);
+    assert(!ok && invalid == SIZE_MAX && unserved < sources->package_count &&
+        !strcmp(sources->packages[unserved].name, "cycle"));
     assert(sh_package_sources_remove(sources, unserved));
     assert(sh_package_library_compile(sources, &env, NULL, contribution_original, &originals,
         registry, (uintptr_t)f->reflection, NULL, &library, error, sizeof(error)) && unserved == SIZE_MAX);
-    sh_package_library_free(&library); sh_package_sources_free(sources);
-    /* Two packages disagreeing about the parent blame neither. */
-    create("overrides/zzz-peer/assets/generated/decls/snapeditorentitydef/demo_child.decl",
-        "{ inherit = \"demo_parent\"; edit = { target = \"root\"; "
-        "propertySheets = { item[0] = { properties = { item[1] = { descriptionTag = \"#str_peer\"; } } } } } }");
-    sources = sh_package_sources_scan(root, error, sizeof(error)); assert(sources);
-    assert(!sh_package_library_compile(sources, &env, NULL, contribution_original, &originals,
-        registry, (uintptr_t)f->reflection, NULL, &library, error, sizeof(error)));
-    assert(unserved == SIZE_MAX && strstr(error, "snapeditorentitydef demo_child: "));
     sh_package_library_free(&library); sh_package_sources_free(sources); cleanup(); assert(!failures);
 }
+
+/* The published child's first sheet as "path[=tag],..." in slot order. */
+static void child_layout(const sh_package_compilation *compiled, char *out, size_t capacity)
+{
+    const sh_compiled_resource *child = named_resource(compiled, "snapeditorentitydef", "demo_child");
+    size_t used = 0;
+    out[0] = 0;
+    assert(child);
+    sh_decl_node *tree = sh_decl_tree_parse((sh_decl_source){(char *)child->body, child->body_length}, NULL, 0);
+    const sh_decl_node *properties = sh_decl_tree_member(sh_decl_tree_member(sh_decl_tree_member(
+        sh_decl_tree_member(tree, "edit"), "propertySheets"), "item[0]"), "properties");
+    assert(properties);
+    for (size_t k = 0;; k++) {
+        char slot[32]; snprintf(slot, sizeof(slot), "item[%zu]", k);
+        const sh_decl_node *item = sh_decl_tree_member(properties, slot), *tag;
+        if (!item) break;
+        const sh_decl_node *path = sh_decl_tree_member(item, "path");
+        used += snprintf(out + used, capacity - used, "%s%s", k ? "," : "", path ? node_value(path) : "?");
+        if ((tag = sh_decl_tree_member(item, "descriptionTag")))
+            used += snprintf(out + used, capacity - used, "=%s", node_value(tag));
+        assert(used < capacity);
+    }
+    sh_decl_tree_free(tree);
+}
+
+/* One package relays the parent (armor first) and also carries demo_child:
+ * - an unchanged stock copy was authored against the stock parent, not the
+ *   relaid parent its own scope reaches, so its patch stays on speed;
+ * - its own child authored against the relaid parent patches armor there and
+ *   restates the whole list, so the stock child's label on speed is its own
+ *   removal rather than a sparse patch the others cannot align with. */
+static void test_editor_rebase_scopes(fixture *f, sh_decl_registry_source registry)
+{
+    static const char *children[] = {NULL,
+        "{ inherit = \"demo_parent\"; edit = { target = \"parent-only\"; propertySheets = { item[0] = { "
+        "properties = { item[0] = { descriptionTag = \"#str_armor\"; } } } } } }"};
+    static const char *expected[] = {"armor,health,speed=#str_child", "armor=#str_armor,health,speed"};
+    char temporary[MAX_PATH], error[1024], layout[512];
+    source_link_fixture originals = {f};
+    for (int round = 0; round < 2; round++) {
+        sh_package_compile_environment env = {0}; sh_package_library library = {0};
+        size_t unserved = SIZE_MAX, invalid = SIZE_MAX;
+        assert(GetTempPathA(sizeof(temporary), temporary));
+        snprintf(root, sizeof(root), "%ssmp-editor-scopes-%d-%lu-%llu", temporary, round, GetCurrentProcessId(), GetTickCount64());
+        assert(CreateDirectoryA(root, NULL));
+        env.baseline = contribution_original; env.baseline_context = &originals;
+        env.unserved_package = &unserved; env.invalid_package = &invalid;
+        create("overrides/layout/package.json", "{\"id\":\"local.layout\",\"name\":\"layout\"}");
+        create("overrides/layout/assets/generated/decls/snapeditorentitydef/demo_parent.decl",
+            "{ edit = { target = \"parent-only\"; propertySheets = { num = 1; item[0] = { properties = { num = 3; "
+            "item[0] = { path = \"armor\"; type = \"float\"; } item[1] = { path = \"health\"; type = \"float\"; } "
+            "item[2] = { path = \"speed\"; type = \"float\"; } } } } } }");
+        create("overrides/layout/assets/generated/decls/snapeditorentitydef/demo_child.decl",
+            children[round] ? children[round] : demo_child_original);
+        sh_package_sources *sources = sh_package_sources_scan(root, error, sizeof(error)); assert(sources);
+        int ok = sh_package_library_compile(sources, &env, NULL, contribution_original, &originals,
+            registry, (uintptr_t)f->reflection, NULL, &library, error, sizeof(error));
+        if (!ok) fprintf(stderr, "editor rebase scopes %d: %s\n", round, error);
+        assert(ok && unserved == SIZE_MAX && invalid == SIZE_MAX);
+        child_layout(library.compiled, layout, sizeof(layout));
+        if (strcmp(layout, expected[round])) fprintf(stderr, "editor rebase scopes %d: %s\n", round, layout);
+        assert(!strcmp(layout, expected[round]));
+        sh_package_library_free(&library); sh_package_sources_free(sources); cleanup();
+    }
+    assert(!failures);
+}
+
 
 /* A reflected declaration of another family (a package weapon inheriting a
  * stock weapon) is walked in its effective inherited state; its parent and
@@ -3035,6 +3214,13 @@ static int native_gap_original(void *context, const char *path, unsigned char **
     if (!strcmp(path, "generated/decls/actormodifier/stockbroken.decl"))
         text = "{ edit = { target = \"modifier-child\"; } } trailing";
     else if (!strcmp(path, "generated/decls/actormodifier/leafmod.decl")) text = "{ edit = { target = \"leaf-entity\"; } }";
+    else if (!strcmp(path, "generated/decls/entitydef/stock-host.decl"))
+        text = "{ class = \"Entity\"; edit = { modifier = \"campaignbroken\"; } }";
+    else if (!strcmp(path, "generated/decls/actormodifier/campaignbroken.decl")) {
+        text = "{ edit = { target = \"modifier-child\"; } } trailing";
+        *length = strlen(text); *body = (unsigned char *)_strdup(text);
+        return *body ? 2 : -1;
+    }
     else if (!strcmp(path, "generated/decls/entitydef/leaf-entity.decl"))
         text = "{ class = \"Entity\"; edit = { image = \"absent/pic\"; } }";
     if (!text) return original(context, path, body, length);
@@ -3084,6 +3270,147 @@ static void test_native_original_gaps(fixture *f, sh_decl_registry_source regist
         else assert(paths.incomplete && report.gaps && strstr(report.first_gap, "absent/pic"));
         sh_package_references_free(&paths);
     }
+    /* A campaign-only declaration with a reader gap that only a SnapMap
+     * original names first is walked (depth 2) before a candidate chain names
+     * it too (walked at depth 4): its gap waits for the walk's end and then
+     * counts; with the original alone naming it, it stays native. */
+    for (int round = 0; round < 2; round++) {
+        sh_compiled_resource files[5]; /* in engine path order */
+        files[0] = link_decl("mid-mod", "generated/decls/actormodifier/mid-mod.decl",
+            "{ edit = { target = \"mid-entity2\"; } }");
+        files[1] = link_decl("mid-mod2", "generated/decls/actormodifier/mid-mod2.decl",
+            "{ edit = { target = \"late-entity\"; } }");
+        files[2] = link_decl("late-entity", "generated/decls/entitydef/late-entity.decl", round ?
+            "{ class = \"Entity\"; edit = { modifier = \"campaignbroken\"; } }" :
+            "{ class = \"Entity\"; edit = { modifier = \"mid-mod\"; } }");
+        files[3] = link_decl("mid-entity2", "generated/decls/entitydef/mid-entity2.decl",
+            "{ class = \"Entity\"; edit = { modifier = \"mid-mod2\"; } }");
+        files[4] = link_decl("uses-late", "generated/decls/entitydef/uses-late.decl",
+            "{ class = \"Entity\"; edit = { target = \"stock-host\"; modifier = \"mid-mod\"; } }");
+        files[0].type = files[1].type = "actormodifier";
+        native_gap_scope = 1;
+        sh_package_compilation compiled = {0}; compiled.resources = files; compiled.resource_count = 5;
+        sh_package_references paths = {0}; sh_package_source_graph_report report = {0};
+        const char *json = "{\"targetType\":\"idDeclEntityDef\",\"value\":\"uses-late\"}";
+        assert(sh_package_source_graph(&compiled, NULL, native_gap_original, f, registry, (uintptr_t)f->reflection,
+            json, strlen(json), &paths, &report, error, sizeof(error)));
+        if (round ? !paths.incomplete : (paths.incomplete || !report.native_gaps))
+            fprintf(stderr, "late candidate %d: gaps=%zu native=%zu %s\n", round, report.gaps, report.native_gaps, report.first_gap);
+        assert(has(&paths, "entitydef/late-entity.decl") && !!has(&paths, "actormodifier/campaignbroken.decl") == round);
+        if (!round) assert(!paths.incomplete && !report.gaps && report.native_gaps);
+        else assert(paths.incomplete && report.gaps && strstr(report.first_gap, "campaignbroken"));
+        sh_package_references_free(&paths);
+    }
+}
+
+/* A conductor-shaped entity class: aiTypeList rows of {aiType, entityDef}. */
+static void conductor_reflection(fixture *native)
+{
+    void *container = *(void **)native->reflection;
+    void *records = alloc(native, 22 * 0x38), *objects = alloc(native, 22 * 16), *pointers = alloc(native, 22 * 16);
+    void *element = alloc(native, 0x48);
+    memcpy(records, *(void **)((char *)container + 0x20), 20 * 0x38);
+    memcpy(objects, *(void **)((char *)native->reflection + 0x88), 20 * 16);
+    memcpy(pointers, *(void **)((char *)native->reflection + 0xa0), 20 * 16);
+    pointer(container, 0x20, records);
+    pointer(native->reflection, 0x88, objects); number(native->reflection, 0x90, 22);
+    pointer(native->reflection, 0xa0, pointers); number(native->reflection, 0xa8, 22);
+    pointer(records, 19 * 0x38, string(native, "SpawnInfo")); pointer(records, 19 * 0x38 + 8, string(native, ""));
+    pointer(records, 20 * 0x38, string(native, "idList < SpawnInfo >")); pointer(records, 20 * 0x38 + 8, string(native, ""));
+    pointer(objects, 20 * 16 + 8, (void *)0x80);
+    pointer(records, 20 * 0x38 + 0x18, element);
+    pointer(element, 0, string(native, "SpawnInfo")); pointer(element, 8, string(native, ""));
+    pointer(element, 0x10, string(native, "element")); number(element, 0x1c, 8);
+    {
+        const char *t[] = {"idStr", "idDeclEntityDef"}, *o[] = {"", "*"}, *n[] = {"aiType", "entityDef"};
+        fields(native, (char *)records + 19 * 0x38, 2, t, o, n);
+    }
+    {
+        const char *t[] = {"idDeclEntityDef", "OpaqueStringReader", "idDeclActorModifier", "idDeclSnapEditorEntity",
+            "idRenderModel", "idImage", "idList < SpawnInfo >"};
+        const char *o[] = {"*", "", "*", "*", "*", "*", ""};
+        const char *n[] = {"target", "custom", "modifier", "preview", "model", "image", "aiTypeList"};
+        fields(native, (char *)records + 0x38, 7, t, o, n);
+    }
+}
+static const char *stock_conductor = "{ class = \"Entity\"; edit = { aiTypeList = { num = 1; "
+    "item[0] = { aiType = \"IMP\"; entityDef = \"imp\"; } } } }";
+static int registration_original(void *context, const char *path, unsigned char **body, size_t *length)
+{
+    const char *text = !strcmp(path, "generated/decls/entitydef/conductor.decl") ? stock_conductor :
+        !strcmp(path, "generated/decls/entitydef/imp.decl") ? "{ class = \"Entity\"; edit = { } }" : NULL;
+    if (!text) return library_original(context, path, body, length);
+    *length = strlen(text); *body = (unsigned char *)_strdup(text); return *body ? 1 : -1;
+}
+static void registration_package(const char *package, const char *key)
+{
+    char path[512], text[512];
+    snprintf(path, sizeof(path), "overrides/%s/package.json", package);
+    snprintf(text, sizeof(text), "{\"id\":\"local.%s\",\"name\":\"%s\"}", package, package); create(path, text);
+    snprintf(path, sizeof(path), "overrides/%s/assets/generated/decls/entitydef/conductor.decl", package);
+    snprintf(text, sizeof(text), "{ class = \"Entity\"; edit = { aiTypeList = { num = 2; "
+        "item[0] = { aiType = \"IMP\"; entityDef = \"imp\"; } item[1] = { aiType = \"%s\"; entityDef = \"%s_boss\"; } } } }",
+        key, package); create(path, text);
+    snprintf(path, sizeof(path), "overrides/%s/assets/generated/decls/entitydef/%s_boss.decl", package, package);
+    snprintf(text, sizeof(text), "{ class = \"Entity\"; edit = { target = \"%s\"; } }",
+        !strcmp(package, "alpha") ? "parent-only" : !strcmp(package, "beta") ? "modifier-child" : "local-only"); create(path, text);
+}
+/* A conductor's aiTypeList is a shared gameplay registration list: each
+ * package's rows join the stock-named declaration, each still naming its own
+ * package's bound definition, so every package's AI type can spawn. Two
+ * packages claiming one native key for different definitions cannot both be
+ * registered (a relocated key is needed): the later is left unserved. */
+static void test_registration_lists(void)
+{
+    fixture storage; fixture *f = &storage; setup(f); conductor_reflection(f);
+    sh_decl_registry_source registry = {f, read_memory, (uintptr_t)f->registry, NULL};
+    char temporary[MAX_PATH], error[1024];
+    source_link_fixture originals = {f};
+    sh_package_compile_environment env = {0}; sh_package_library library = {0};
+    size_t unserved = SIZE_MAX, invalid = SIZE_MAX;
+    assert(GetTempPathA(sizeof(temporary), temporary));
+    snprintf(root, sizeof(root), "%ssmp-registration-%lu-%llu", temporary, GetCurrentProcessId(), GetTickCount64());
+    assert(CreateDirectoryA(root, NULL));
+    env.baseline = registration_original; env.baseline_context = &originals;
+    env.unserved_package = &unserved; env.invalid_package = &invalid;
+    registration_package("alpha", "524288"); registration_package("beta", "16777216");
+    sh_package_sources *sources = sh_package_sources_scan(root, error, sizeof(error)); assert(sources);
+    int ok = sh_package_library_compile(sources, &env, NULL, registration_original, &originals,
+        registry, (uintptr_t)f->reflection, NULL, &library, error, sizeof(error));
+    if (!ok) fprintf(stderr, "registration lists: %s\n", error);
+    assert(ok && unserved == SIZE_MAX && invalid == SIZE_MAX);
+    {
+        const sh_compiled_resource *conductor = named_resource(library.compiled, "entitydef", "conductor");
+        const sh_compiled_resource *alpha = NULL, *beta = NULL;
+        for (size_t i = 0; i < library.compiled->resource_count; i++) {
+            const sh_compiled_resource *file = library.compiled->resources + i;
+            const char *authored = file->original_path ? file->original_path : file->engine_path;
+            if (!strcmp(authored, "generated/decls/entitydef/alpha_boss.decl")) alpha = file;
+            if (!strcmp(authored, "generated/decls/entitydef/beta_boss.decl")) beta = file;
+        }
+        if (!conductor) for (size_t i = 0; i < library.compiled->resource_count; i++)
+            fprintf(stderr, "  %s %s\n", library.compiled->resources[i].engine_path, library.compiled->resources[i].name ? library.compiled->resources[i].name : "");
+        assert(conductor && alpha && beta);
+        const char *body = (const char *)conductor->body, *first = strstr(body, "\"IMP\"");
+        char bound[512];
+        assert(strstr(body, "\"524288\"") && strstr(body, "\"16777216\"") && first && !strstr(first + 1, "\"IMP\""));
+        snprintf(bound, sizeof(bound), "\"%s\"", alpha->name); assert(strstr(body, bound));
+        snprintf(bound, sizeof(bound), "\"%s\"", beta->name); assert(strstr(body, bound));
+    }
+    sh_package_library_free(&library); sh_package_sources_free(sources);
+    /* gamma claims alpha's key for its own definition. */
+    registration_package("gamma", "524288");
+    sources = sh_package_sources_scan(root, error, sizeof(error)); assert(sources);
+    ok = sh_package_library_compile(sources, &env, NULL, registration_original, &originals,
+        registry, (uintptr_t)f->reflection, NULL, &library, error, sizeof(error));
+    if (ok || unserved >= sources->package_count) fprintf(stderr, "registration collision: ok=%d %s\n", ok, error);
+    assert(!ok && invalid == SIZE_MAX && unserved < sources->package_count &&
+        !strcmp(sources->packages[unserved].name, "gamma"));
+    assert(sh_package_sources_remove(sources, unserved));
+    assert(sh_package_library_compile(sources, &env, NULL, registration_original, &originals,
+        registry, (uintptr_t)f->reflection, NULL, &library, error, sizeof(error)) && unserved == SIZE_MAX);
+    sh_package_library_free(&library); sh_package_sources_free(sources); cleanup(); assert(!failures);
+    while (f->count) free(f->regions[--f->count].address);
 }
 
 static void test_material_path(fixture *f, sh_decl_registry_source registry)
@@ -3963,6 +4290,7 @@ int main(void)
     test_font_library(&f, registry);
     test_movie_source_link();
     test_preview_model();
+    test_registration_lists();
     test_contribution_movie_token();
     test_open_effect_body();
     test_map_occurrences(&f, registry);
@@ -3977,6 +4305,8 @@ int main(void)
     test_bound_contributions(&f, registry);
     test_inherited_editor_parent(&f, registry);
     test_inherited_reflected_state(&f, registry);
+    test_editor_parent_contracts(&f, registry);
+    test_editor_rebase_scopes(&f, registry);
     test_native_original_gaps(&f, registry);
     test_material_path(&f, registry);
     test_library_atlas(&f, registry);

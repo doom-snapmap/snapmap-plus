@@ -92,4 +92,9 @@ int sh_package_library_compile_contexts(const sh_package_sources *sources,
     void *original_context, sh_decl_registry_source registry, uintptr_t reflection,
     const sh_package_library_native *native, sh_package_library *out,
     char *error, size_t capacity);
+#ifdef SH_PACKAGE_LIBRARY_TESTING
+/* Fail the next count editor contribution reads of one declaration name
+ * (any name when NULL) as an unreadable source would. */
+void sh_package_library_test_contribution_read_failures(const char *name, long count);
+#endif
 #endif

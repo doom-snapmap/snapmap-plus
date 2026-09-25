@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "package_compiler.h"
+#include "decl_tree.h"
 #include "resource_catalog.h"
 #include "package_fixture.h"
 
@@ -658,6 +659,140 @@ static void test_duplicate_editor_controls(void)
     sh_package_compilation_free(compiled); sh_package_sources_free(sources);
 }
 
+/* Paths of one page (or scalar values of a flat list) joined by commas; the
+ * page's first control label, when asked, follows a semicolon. */
+static void rebased_layout(const char *text, const char *list, int page, char *out, size_t capacity)
+{
+    sh_decl_node *tree = sh_decl_tree_parse((sh_decl_source){text, strlen(text)}, NULL, 0);
+    const sh_decl_node *items = tree ? sh_decl_tree_member(sh_decl_tree_member(tree, "edit"), list) : NULL;
+    char slot[32];
+    *out = 0;
+    if (items && page >= 0) {
+        snprintf(slot, sizeof(slot), "item[%d]", page);
+        items = sh_decl_tree_member(sh_decl_tree_member(items, slot), "properties");
+    }
+    for (int k = 0; items; k++) {
+        const sh_decl_node *item, *value; const char *spelling; size_t length;
+        snprintf(slot, sizeof(slot), "item[%d]", k);
+        if (!(item = sh_decl_tree_member(items, slot))) break;
+        value = page >= 0 ? sh_decl_tree_member(item, "path") : item;
+        if (!sh_decl_tree_literal(value, &spelling, &length)) { strcat_s(out, capacity, "?"); continue; }
+        if (*out) strcat_s(out, capacity, ",");
+        strncat_s(out, capacity, spelling, length);
+        const sh_decl_node *label = page >= 0 ? sh_decl_tree_member(item, "descriptionTag") : NULL;
+        if (label && sh_decl_tree_literal(label, &spelling, &length)) {
+            strcat_s(out, capacity, "=");
+            strncat_s(out, capacity, spelling, length);
+        }
+    }
+    sh_decl_tree_free(tree);
+}
+#define SHEET(paths) "{ edit = { propertySheets = { num = 1; item[0] = { properties = { " paths " } } } } }"
+static char *rebase_one(const char *child, const char *authored, const char *published, int force, int *result, int *kind)
+{
+    sh_decl_source a = {authored, strlen(authored)}, b = {published, strlen(published)};
+    sh_package_editor_failure failure; char error[512], *out = NULL; size_t length = 0;
+    *result = sh_package_editor_rebase("snapeditorentitydef", (sh_decl_source){child, strlen(child)},
+        &a, 1, &b, 1, force, &out, &length, &failure, error, sizeof(error));
+    *kind = failure.kind;
+    if (*result < 0) fprintf(stderr, "rebase: %s\n", error);
+    return out;
+}
+/* A child's sparse list addresses its parent's controls by position. When the
+ * published parent's layout differs from its author's, each patch still lands
+ * on its intended control, the parent's additions survive and the child's own
+ * removals, restatements and pages are kept. */
+static void test_editor_rebase(void)
+{
+    char layout[512]; int result, kind; char *out;
+    const char *stock = SHEET("num = 2; item[0] = { path = \"displayName\"; } item[1] = { path = \"actionDelay\"; }");
+    const char *added = SHEET("num = 3; item[0] = { path = \"displayName\"; } item[1] = { path = \"actionDelay\"; } "
+        "item[2] = { path = \"comment\"; descriptionTag = \"#str_comment\"; }");
+    /* Appending by index (stock apply_buff) would overwrite the added control. */
+    out = rebase_one("{ inherit = \"input_base\"; edit = { propertySheets = { num = 1; item[0] = { properties = { num = 4; "
+        "item[2] = { path = \"modType\"; } item[3] = { path = \"modValue\"; } } } } } }", stock, added, 0, &result, &kind);
+    CHECK(result == 1 && out); if (out) rebased_layout(out, "propertySheets", 0, layout, sizeof(layout));
+    CHECK(out && !strcmp(layout, "displayName,actionDelay,comment=#str_comment,modType,modValue"));
+    CHECK(out && strstr(out, "inherit = \"input_base\""));
+    free(out);
+    /* Equal layouts are left to native inheritance unless forced. */
+    out = rebase_one("{ inherit = \"input_base\"; edit = { propertySheets = { item[0] = { properties = { "
+        "item[1] = { descriptionTag = \"#str_delay\"; } } } } } }", stock, stock, 0, &result, &kind);
+    CHECK(result == 0 && !out);
+    out = rebase_one("{ inherit = \"input_base\"; edit = { propertySheets = { item[0] = { properties = { "
+        "item[1] = { descriptionTag = \"#str_delay\"; } } } } } }", stock, stock, 1, &result, &kind);
+    CHECK(result == 1 && out); if (out) rebased_layout(out, "propertySheets", 0, layout, sizeof(layout));
+    CHECK(out && !strcmp(layout, "displayName,actionDelay=#str_delay"));
+    free(out);
+    /* A control inserted first: the patch follows speed, not its old slot. */
+    out = rebase_one("{ inherit = \"p\"; edit = { propertySheets = { item[0] = { properties = { "
+        "item[1] = { descriptionTag = \"#str_child\"; } } } } } }",
+        SHEET("num = 2; item[0] = { path = \"health\"; } item[1] = { path = \"speed\"; }"),
+        SHEET("num = 3; item[0] = { path = \"armor\"; } item[1] = { path = \"health\"; } item[2] = { path = \"speed\"; }"),
+        0, &result, &kind);
+    CHECK(result == 1 && out); if (out) rebased_layout(out, "propertySheets", 0, layout, sizeof(layout));
+    CHECK(out && !strcmp(layout, "armor,health,speed=#str_child"));
+    free(out);
+    /* Restating shifted slots (stock keycards): each restated control is the
+     * published one at its published slot, the addition keeps its place and
+     * the child's new control follows, so no slot inherits another's fields. */
+    out = rebase_one("{ inherit = \"p\"; edit = { propertySheets = { item[0] = { properties = { num = 4; "
+        "item[1] = { path = \"m\"; } item[2] = { path = \"f\"; } item[3] = { path = \"c\"; } } } } } }",
+        SHEET("num = 3; item[0] = { path = \"a\"; } item[1] = { path = \"f\"; } item[2] = { path = \"c\"; }"),
+        SHEET("num = 4; item[0] = { path = \"a\"; } item[1] = { path = \"f\"; descriptionTag = \"#str_f\"; } "
+            "item[2] = { path = \"c\"; } item[3] = { path = \"z\"; }"), 0, &result, &kind);
+    CHECK(result == 1 && out); if (out) rebased_layout(out, "propertySheets", 0, layout, sizeof(layout));
+    CHECK(out && !strcmp(layout, "a,f=#str_f,c,z,m"));
+    free(out);
+    /* The child's truncation stays; a control the parent's authors removed is
+     * kept only where the child edited it. */
+    out = rebase_one("{ inherit = \"p\"; edit = { propertySheets = { item[0] = { properties = { num = 2; } } } } }",
+        SHEET("num = 3; item[0] = { path = \"a\"; } item[1] = { path = \"b\"; } item[2] = { path = \"c\"; }"),
+        SHEET("num = 4; item[0] = { path = \"a\"; } item[1] = { path = \"b\"; } item[2] = { path = \"c\"; } item[3] = { path = \"z\"; }"),
+        0, &result, &kind);
+    CHECK(result == 1 && out); if (out) rebased_layout(out, "propertySheets", 0, layout, sizeof(layout));
+    CHECK(out && !strcmp(layout, "a,b,z"));
+    free(out);
+    out = rebase_one("{ inherit = \"p\"; edit = { propertySheets = { item[0] = { properties = { "
+        "item[1] = { descriptionTag = \"#str_b\"; } } } } } }",
+        SHEET("num = 3; item[0] = { path = \"a\"; } item[1] = { path = \"b\"; } item[2] = { path = \"c\"; }"),
+        SHEET("num = 2; item[0] = { path = \"a\"; } item[1] = { path = \"c\"; }"), 0, &result, &kind);
+    CHECK(result == 1 && out); if (out) rebased_layout(out, "propertySheets", 0, layout, sizeof(layout));
+    CHECK(out && !strcmp(layout, "a,c,b=#str_b"));
+    free(out);
+    /* Pages: the package moved b to its own page; the child's new page follows
+     * the published pages. */
+    out = rebase_one("{ inherit = \"p\"; edit = { propertySheets = { num = 2; item[0] = { properties = { "
+        "item[1] = { descriptionTag = \"#str_b\"; } } } item[1] = { properties = { num = 1; item[0] = { path = \"q\"; } } } } } }",
+        SHEET("num = 2; item[0] = { path = \"a\"; } item[1] = { path = \"b\"; }"),
+        "{ edit = { propertySheets = { num = 2; item[0] = { properties = { num = 1; item[0] = { path = \"a\"; } } } "
+        "item[1] = { properties = { num = 1; item[0] = { path = \"b\"; } } } } } }", 0, &result, &kind);
+    CHECK(result == 1 && out);
+    if (out) rebased_layout(out, "propertySheets", 0, layout, sizeof(layout));
+    CHECK(out && !strcmp(layout, "a"));
+    if (out) rebased_layout(out, "propertySheets", 1, layout, sizeof(layout));
+    CHECK(out && !strcmp(layout, "b=#str_b"));
+    if (out) rebased_layout(out, "propertySheets", 2, layout, sizeof(layout));
+    CHECK(out && !strcmp(layout, "q"));
+    free(out);
+    /* Flat lists rebase by value. */
+    out = rebase_one("{ inherit = \"p\"; edit = { inputs = { num = 3; item[2] = \"z\"; } } }",
+        "{ edit = { inputs = { num = 2; item[0] = \"x\"; item[1] = \"y\"; } } }",
+        "{ edit = { inputs = { num = 3; item[0] = \"x\"; item[1] = \"y\"; item[2] = \"w\"; } } }", 0, &result, &kind);
+    CHECK(result == 1 && out); if (out) rebased_layout(out, "inputs", -1, layout, sizeof(layout));
+    CHECK(out && !strcmp(layout, "x,y,w,z"));
+    free(out);
+    /* Only the child's own list shape can make it malformed. */
+    out = rebase_one("{ inherit = \"p\"; edit = { inputs = { bogus = 1; } } }",
+        "{ edit = { inputs = { num = 1; item[0] = \"x\"; } } }",
+        "{ edit = { inputs = { num = 2; item[0] = \"x\"; item[1] = \"w\"; } } }", 0, &result, &kind);
+    CHECK(result < 0 && kind == SH_PACKAGE_EDITOR_FAILURE_SOURCE && !out);
+    out = rebase_one("{ inherit = \"p\"; edit = { inputs = { num = 2; item[1] = \"z\"; } } }",
+        "{ edit = { inputs = { num = broken; } } }",
+        "{ edit = { inputs = { num = 1; item[0] = \"w\"; } } }", 0, &result, &kind);
+    CHECK(result < 0 && kind != SH_PACKAGE_EDITOR_FAILURE_SOURCE && !out);
+}
+
 static void test_requirement_reduction(void)
 {
     const char *descriptors[] = {
@@ -842,7 +977,7 @@ int main(int argc, char **argv)
 done:
     sh_package_compilation_free(compiled); sh_package_sources_free(sources);
     test_new_declarations(); test_native_original_provenance(); test_duplicate_editor_controls();
-    test_requirement_reduction(); cleanup();
+    test_requirement_reduction(); test_editor_rebase(); cleanup();
     if (failures) return 1;
     puts("package compiler checks passed"); return 0;
 }

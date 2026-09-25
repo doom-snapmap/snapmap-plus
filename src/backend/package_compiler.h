@@ -260,6 +260,49 @@ int sh_package_editor_contribution_phase(const char *type);
 char *sh_package_editor_contributions(const char *type, sh_decl_source baseline,
     const sh_decl_source *sources, size_t count, sh_decl_source target, int private_binding,
     size_t *length, char *error, size_t capacity);
+
+/* Why editor composition failed. Environment (allocation, reads) blames no
+ * content. Source names one contribution invalid in its own authored context.
+ * Coverage is valid input the product cannot compose yet. */
+enum {
+    SH_PACKAGE_EDITOR_FAILURE_NONE = 0,
+    SH_PACKAGE_EDITOR_FAILURE_ENVIRONMENT,
+    SH_PACKAGE_EDITOR_FAILURE_SOURCE,
+    SH_PACKAGE_EDITOR_FAILURE_COVERAGE
+};
+typedef struct sh_package_editor_failure {
+    int kind;
+    size_t source; /* sources[] index for SOURCE, otherwise SIZE_MAX */
+} sh_package_editor_failure;
+/* The same composition, classifying a failure. */
+char *sh_package_editor_contributions_report(const char *type, sh_decl_source baseline,
+    const sh_decl_source *sources, size_t count, sh_decl_source target, int private_binding,
+    size_t *length, sh_package_editor_failure *failure, char *error, size_t capacity);
+
+/* Registration lists (a conductor's aiTypeList and globalAIMods) of one entity
+ * declaration: rows keyed by their native aiType compose from every member
+ * into each, every row keeping the binding its own source gave it; the rest
+ * of target is kept. Equal keys with different bindings are a composition
+ * gap (they need a relocated key), reported as coverage. */
+char *sh_package_registration_contributions_report(sh_decl_source baseline,
+    const sh_decl_source *sources, size_t count, sh_decl_source target,
+    size_t *length, sh_package_editor_failure *failure, char *error, size_t capacity);
+/* 1 when an entity declaration states registration lists in its edit block. */
+int sh_package_registration_lists(sh_decl_source text);
+
+/* Rebase a child editor definition's inherited collections. authored and
+ * published are the parent chains (nearest first) as the child's author saw
+ * them and as the library publishes them. A list the child states and whose
+ * parent layout (control identities by position) differs, or every stated
+ * list when force is set, is restated as a complete list: the child's
+ * effective controls in its own order, each inherited one as published plus
+ * the child's changes, the published parent's additions after their
+ * predecessors, and the child's removals kept. Returns 1 with malloc-owned
+ * *out, 0 when nothing changes, -1 on failure (failure->kind). */
+int sh_package_editor_rebase(const char *type, sh_decl_source child,
+    const sh_decl_source *authored, size_t authored_count,
+    const sh_decl_source *published, size_t published_count, int force,
+    char **out, size_t *length, sh_package_editor_failure *failure, char *error, size_t capacity);
 /* Final source-preserving projection after the linker has proved equivalence
  * and rebound every selected dependency. Inputs use this inventory's original
  * indices (including borrowed component views). Each projection is one served

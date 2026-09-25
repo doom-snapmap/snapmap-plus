@@ -78,7 +78,8 @@ typedef struct pl_build {
     const sh_package_provenance *contexts;
     sh_package_native_registry *identities;
     pl_contributions *contributions;
-    size_t contribution_owner; /* sole authored contributor of a failed group */
+    size_t contribution_owner;   /* package left unserved by a composition gap */
+    size_t contribution_invalid; /* package whose own editor source is invalid */
 } pl_build;
 
 static void pl_native_close(pl_build *b)
@@ -1055,80 +1056,295 @@ static int pl_edges_same(pl_contributions *c, size_t unit, const pl_contribution
     return 1;
 }
 
-/* A group the product cannot compose names its declaration. When one package
- * alone supplies the group's authored members, its delivery stays unserved for
- * this candidate and healthy peers compile without it; several contributors,
- * or stock and product units alone, blame nobody. */
-static void pl_contribution_failure(pl_build *b, const sh_package_sources *sources,
-    const size_t *members, size_t count, const sh_package_link_unit *input, char *error, size_t capacity)
+/* The package supplying a member's own authored bytes; SIZE_MAX for stock,
+ * product content and byte-identical copies of an installed original. */
+static size_t pl_member_owner(const pl_build *b, const sh_package_sources *sources, size_t unit)
 {
-    pl_contributions *c = b->contributions;
+    const sh_package_link_unit *value = sh_package_source_link_inputs(b->contributions->source)->units + unit;
+    size_t scope = b->contributions->inputs.scopes[unit];
+    int authored = 0;
+    for (size_t f = 0; f < value->file_count; f++)
+        if (value->files[f]->source_count && !value->files[f]->native_original) authored = 1;
+    if (!authored || scope >= b->authored_count || scope >= sources->component_count) return SIZE_MAX;
+    return sources->components[scope].owner;
+}
+
+/* A group the product cannot compose names its declaration. A package's own
+ * invalid source rejects that package. A gap in one member's own content
+ * leaves its package unserved for this candidate; a gap only in combining
+ * them leaves one contributing package unserved, the last in package order,
+ * so healthy peers still compile. Stock or product content alone blames
+ * nobody, and environment failures never judge content. */
+static void pl_contribution_failure(pl_build *b, const sh_package_sources *sources,
+    const size_t *members, size_t count, const sh_package_link_unit *input,
+    int kind, size_t culprit, char *error, size_t capacity)
+{
     char reason[768];
     size_t owner = SIZE_MAX;
     snprintf(reason, sizeof(reason), "%s", error);
     snprintf(error, capacity, "%s %s: %s", input->family, input->name, reason);
+    if (kind == SH_PACKAGE_EDITOR_FAILURE_ENVIRONMENT) return;
+    if (culprit != SIZE_MAX && (owner = pl_member_owner(b, sources, culprit)) != SIZE_MAX) {
+        if (kind == SH_PACKAGE_EDITOR_FAILURE_SOURCE) b->contribution_invalid = owner;
+        else b->contribution_owner = owner;
+        return;
+    }
     for (size_t i = 0; i < count; i++) {
-        const sh_package_link_unit *unit = c->inputs.units + members[i];
-        size_t scope = c->inputs.scopes[members[i]];
-        int authored = 0;
-        for (size_t f = 0; f < unit->file_count; f++) if (unit->files[f]->source_count) authored = 1;
-        if (!authored || scope >= b->authored_count || scope >= sources->component_count) continue;
-        if (owner == SIZE_MAX) owner = sources->components[scope].owner;
-        else if (owner != sources->components[scope].owner) return;
+        size_t candidate = pl_member_owner(b, sources, members[i]);
+        if (candidate != SIZE_MAX && (owner == SIZE_MAX || candidate > owner)) owner = candidate;
     }
     b->contribution_owner = owner;
 }
 
+/* 1 with the inherit literal of a contribution text (NULL when absent). */
+static int pl_inherit_name(sh_decl_source text, char **out)
+{
+    sh_decl_node *tree = sh_decl_tree_parse(text, NULL, 0);
+    const char *value; size_t length;
+    *out = NULL;
+    if (!tree) return 0;
+    if (sh_decl_tree_literal(sh_decl_tree_member(tree, "inherit"), &value, &length)) {
+        if (!(*out = malloc(length + 1))) { sh_decl_tree_free(tree); return 0; }
+        memcpy(*out, value, length); (*out)[length] = 0;
+    }
+    sh_decl_tree_free(tree); return 1;
+}
+static char *pl_token_text(pl_contributions *c, size_t unit, size_t *length, char *error, size_t capacity)
+{
+    const sh_package_link_unit *input = c->inputs.units + unit;
+    size_t size = 0;
+    unsigned char *body = sh_package_compilation_read(input->compilation, input->files[0], SIZE_MAX, &size, error, capacity);
+    if (!body) return NULL;
+    pl_contribution_walk walk = {c, unit, NULL, NULL, NULL, error, capacity};
+    unsigned char *text = sh_package_source_link_bind_derived(c->source, unit, body, size,
+        pl_token_reference, &walk, pl_derived_exists, &walk, length, error, capacity);
+    free(body); return (char *)text;
+}
+/* The unit's original text as its author wrote it, bound in its own scope. */
+static int pl_original_token_reference(void *context, const char *slot, const char *family,
+    const char *name, const char **replacement)
+{
+    pl_contribution_walk *walk = context;
+    pl_contributions *c = walk->graph;
+    size_t target;
+    if (!sh_package_source_link_resolve_unit(c->source, walk->unit, family, name, &target, walk->error, walk->capacity)) return -1;
+    if (pl_lexical_inherit(c, walk->unit, slot)) return 0;
+    *replacement = c->tokens[c->classes.nodes[target]]; return 1;
+}
+static char *pl_original_text(pl_contributions *c, size_t unit, size_t *length, char *error, size_t capacity)
+{
+    const sh_package_link_unit *input = sh_package_source_link_inputs(c->source)->units + unit;
+    size_t size = 0;
+    unsigned char *body = sh_package_compilation_read(input->compilation, input->files[0], SIZE_MAX, &size, error, capacity);
+    if (!body) return NULL;
+    pl_contribution_walk walk = {c, unit, NULL, NULL, NULL, error, capacity};
+    unsigned char *text = sh_package_source_link_bind_file(c->source, unit, input->files[0], body, size,
+        pl_original_token_reference, &walk, length, error, capacity);
+    free(body); return (char *)text;
+}
+typedef struct pl_chain { sh_decl_source *texts; size_t count; } pl_chain;
+static void pl_chain_free(pl_chain *chain)
+{
+    for (size_t i = 0; chain->texts && i < chain->count; i++) free((char *)chain->texts[i].text);
+    free(chain->texts); memset(chain, 0, sizeof(*chain));
+}
+/* Parent texts, nearest first: published follows the bound (possibly composed)
+ * parents; otherwise the original parents the unit's author saw. */
+static int pl_parent_chain(pl_contributions *c, size_t unit, sh_decl_source own, int published,
+    pl_chain *out, int *kind, char *error, size_t capacity)
+{
+    const char *family = c->inputs.units[unit].family;
+    sh_decl_source text = own;
+    size_t current = unit;
+    memset(out, 0, sizeof(*out));
+    *kind = SH_PACKAGE_EDITOR_FAILURE_ENVIRONMENT;
+    for (size_t depth = 0;; depth++) {
+        char *parent = NULL; size_t target, length = 0;
+        if (!pl_inherit_name(text, &parent)) { snprintf(error, capacity, "editor definition text cannot be read"); goto failed; }
+        if (!parent) return 1;
+        if (depth >= 32) {
+            *kind = SH_PACKAGE_EDITOR_FAILURE_COVERAGE;
+            snprintf(error, capacity, "inherit '%s': editor inheritance is circular or deeper than the native limit", parent);
+            free(parent); goto failed;
+        }
+        int resolved = published ? pl_bound_target(c, current, "inherit", family, parent, &target, error, capacity) :
+            sh_package_source_link_resolve_unit(c->source, current, family, parent, &target, error, capacity);
+        free(parent);
+        if (!resolved) { *kind = SH_PACKAGE_EDITOR_FAILURE_COVERAGE; goto failed; }
+        char *next = published ? pl_token_text(c, target, &length, error, capacity) :
+            pl_original_text(c, target, &length, error, capacity);
+        if (!next) goto failed;
+        sh_decl_source *grown = out->count < SIZE_MAX / sizeof(*grown) - 1 ?
+            realloc(out->texts, (out->count + 1) * sizeof(*grown)) : NULL;
+        if (!grown) { free(next); goto failed; }
+        out->texts = grown; out->texts[out->count++] = (sh_decl_source){next, length};
+        text = out->texts[out->count - 1]; current = target;
+    }
+failed:
+    pl_chain_free(out); return 0;
+}
+static int pl_stock_authored(const pl_contributions *c, size_t unit)
+{
+    const sh_package_link_unit *value = sh_package_source_link_inputs(c->source)->units + unit;
+    for (size_t f = 0; f < value->file_count; f++)
+        if (value->files[f]->source_count && !value->files[f]->native_original) return 0;
+    return 1;
+}
+static int pl_same_parent(const char *a, const char *b)
+{ return (!a && !b) || (a && b && !strcmp(a, b)); }
+
+/* Restore captured references in a composed or rebased text and stage it as
+ * this unit's owned file, unless it equals the current one. */
+static int pl_contribution_stage(pl_build *b, const sh_package_sources *sources, size_t unit,
+    const char *body, size_t length, const sh_compiled_resource *const *peers, size_t peer_count,
+    pl_contribution_unit *pending, char *error, size_t capacity)
+{
+    pl_contributions *c = b->contributions;
+    const sh_package_link_unit *input = c->inputs.units + unit;
+    const sh_compiled_resource **owners = calloc(peer_count + 1, sizeof(*owners));
+    size_t native_length = 0;
+    pl_contribution_walk walk = {c, unit, NULL, NULL, pending, error, capacity};
+    unsigned char *native;
+    if (!owners) { snprintf(error, capacity, "editor contribution allocation failed"); return 0; }
+    native = sh_package_source_link_bind_derived(c->source, unit, (const unsigned char *)body,
+        length, pl_restore_reference, &walk, pl_derived_exists, &walk, &native_length, error, capacity);
+    if (!native) { free((void *)owners); return 0; }
+    if (input->files[0]->body && native_length == input->files[0]->body_length &&
+        !memcmp(native, input->files[0]->body, native_length) && pl_edges_same(c, unit, pending)) {
+        free(native); free((void *)owners); pl_contribution_unit_free(pending); return 1;
+    }
+    owners[0] = input->files[0];
+    for (size_t j = 0; j < peer_count; j++) owners[j + 1] = peers[j];
+    sh_package_resource_projection projection = {input->files[0]->engine_path, owners, peer_count + 1,
+        native, native_length, NULL, NULL, 1};
+    pending->owned = sh_package_compilation_project(sources, &projection, 1, NULL,
+        b->shared->canonical_path, error, capacity);
+    free(native); free((void *)owners);
+    if (!pending->owned) return 0;
+    pending->file = pending->owned->resources; return 1;
+}
+
+#ifdef SH_PACKAGE_LIBRARY_TESTING
+static long g_contribution_read_failures;
+static const char *g_contribution_read_name;
+/* Make the next editor contribution reads fail like an unreadable source. */
+void sh_package_library_test_contribution_read_failures(const char *name, long count)
+{ g_contribution_read_name = name; g_contribution_read_failures = count; }
+#endif
+
+/* One declaration's editor contributions. Members naming the reference
+ * member's parent compose into one shared surface; a member whose author gave
+ * it another parent is that author's own variant and is only rebased. Every
+ * member's inherited sparse lists are first rebased from the parent layout
+ * its author saw onto the published parent's, parents composing first. */
 static int pl_contribution_group(pl_build *b, const sh_package_sources *sources,
     const size_t *members, size_t count, char *error, size_t capacity)
 {
     pl_contributions *c = b->contributions;
-    sh_decl_source *texts = calloc(count, sizeof(*texts)), *parts = calloc(count, sizeof(*parts));
-    const sh_compiled_resource **owners = calloc(count + 1, sizeof(*owners));
+    const sh_package_link_unit *input = c->inputs.units + members[0];
+    int phase = sh_package_editor_contribution_phase(input->family);
+    sh_decl_source *texts = calloc(count, sizeof(*texts)), *parts = calloc(count + 1, sizeof(*parts));
+    const sh_compiled_resource **peers = calloc(count + 1, sizeof(*peers));
     pl_contribution_unit *pending = calloc(count, sizeof(*pending));
+    char **parents = calloc(count, sizeof(*parents));
+    unsigned char *included = calloc(count, 1), *rebased = calloc(count, 1);
+    size_t *part_member = calloc(count + 1, sizeof(*part_member));
     sh_decl_source base = {"{}", 2};
-    size_t source_count = 0;
-    int ok = 0;
-    if (!texts || !parts || !owners || !pending) goto done;
+    size_t source_count = 0, base_member = SIZE_MAX, reference, culprit = SIZE_MAX;
+    int ok = 0, kind = SH_PACKAGE_EDITOR_FAILURE_ENVIRONMENT, any_rebased = 0;
+    pl_chain published = {0}, authored_base = {0};
+    if (!texts || !parts || !peers || !pending || !parents || !included || !rebased || !part_member) {
+        snprintf(error, capacity, "editor contribution allocation failed"); goto failed;
+    }
     for (size_t i = 0; i < count; i++) {
         size_t unit = members[i];
         const sh_compiled_resource *file = c->inputs.units[unit].files[0];
         size_t length = 0;
         unsigned char *body = sh_package_compilation_read(c->inputs.units[unit].compilation, file,
             SIZE_MAX, &length, error, capacity);
-        if (!body) goto done;
+#ifdef SH_PACKAGE_LIBRARY_TESTING
+        if (body && g_contribution_read_failures > 0 && (!g_contribution_read_name ||
+                !strcmp(c->inputs.units[unit].name, g_contribution_read_name)) && g_contribution_read_failures--) {
+            free(body); body = NULL; snprintf(error, capacity, "editor contribution source is unreadable");
+        }
+#endif
+        if (!body) goto failed;
         pl_contribution_walk walk = {c, unit, NULL, NULL, NULL, error, capacity};
         texts[i].text = (char *)sh_package_source_link_bind_derived(c->source, unit, body, length,
             pl_token_reference, &walk, pl_derived_exists, &walk, &texts[i].length, error, capacity);
-        free(body); if (!texts[i].text) goto done;
-        if (c->inputs.scopes[unit] == b->count - 1) base = texts[i];
-        else parts[source_count++] = texts[i];
-    }
-    if (!source_count) { ok = 1; goto done; }
-    for (size_t i = 0; i < count; i++) {
-        size_t unit = members[i], length = 0, native_length = 0, owner_count = 1;
-        const sh_package_link_unit *input = c->inputs.units + unit;
-        char *body = sh_package_editor_contributions(input->family, base, parts, source_count,
-            texts[i], !sh_package_source_link_shared(c->source)[unit], &length, error, capacity);
-        if (!body) { pl_contribution_failure(b, sources, members, count, input, error, capacity); goto done; }
-        pl_contribution_walk walk = {c, unit, NULL, NULL, pending + i, error, capacity};
-        unsigned char *native = sh_package_source_link_bind_derived(c->source, unit, (unsigned char *)body,
-            length, pl_restore_reference, &walk, pl_derived_exists, &walk, &native_length, error, capacity);
-        free(body); if (!native) goto done;
-        if (input->files[0]->body && native_length == input->files[0]->body_length &&
-            !memcmp(native, input->files[0]->body, native_length) && pl_edges_same(c, unit, pending + i)) {
-            free(native); pl_contribution_unit_free(pending + i); continue;
+        free(body); if (!texts[i].text) goto failed;
+        if (c->inputs.scopes[unit] == b->count - 1) base_member = i;
+        if (phase != 2 && !pl_inherit_name(texts[i], parents + i)) {
+            snprintf(error, capacity, "editor definition text cannot be read"); goto failed;
         }
-        owners[0] = input->files[0];
-        for (size_t j = 0; j < count; j++) if (j != i && c->inputs.scopes[members[j]] != b->count - 1)
-            owners[owner_count++] = c->inputs.units[members[j]].files[0];
-        sh_package_resource_projection projection = {input->files[0]->engine_path, owners, owner_count,
-            native, native_length, NULL, NULL, 1};
-        pending[i].owned = sh_package_compilation_project(sources, &projection, 1, NULL,
-            b->shared->canonical_path, error, capacity);
-        free(native); if (!pending[i].owned) goto done;
-        pending[i].file = pending[i].owned->resources;
     }
+    reference = base_member != SIZE_MAX ? base_member : 0;
+    for (size_t i = 0; i < count; i++) included[i] = phase == 2 || pl_same_parent(parents[i], parents[reference]);
+    /* Rebase inherited collections: first only where the published parent's
+     * layout differs, then, if any member changed, every member of the shared
+     * surface, so all of them state complete lists. */
+    for (int pass = 0; phase != 2 && pass < 2 && (pass == 0 || any_rebased); pass++)
+        for (size_t i = 0; i < count; i++) {
+            pl_chain own_published = {0}, own_authored = {0};
+            const pl_chain *authored = &own_authored, *target = included[i] ? &published : &own_published;
+            char *out = NULL; size_t out_length = 0;
+            sh_package_editor_failure failure;
+            int result;
+            if (!parents[i] || (pass && (!included[i] || rebased[i]))) continue;
+            if (included[i] && !published.texts && !published.count &&
+                !pl_parent_chain(c, members[reference], texts[reference], 1, &published, &kind, error, capacity)) {
+                culprit = members[reference]; goto failed;
+            }
+            if (!included[i] && !pl_parent_chain(c, members[i], texts[i], 1, &own_published, &kind, error, capacity)) {
+                culprit = members[i]; goto failed;
+            }
+            if (pl_stock_authored(c, members[i]) && base_member != SIZE_MAX && pl_same_parent(parents[i], parents[base_member])) {
+                if (!authored_base.count &&
+                    !pl_parent_chain(c, members[base_member], texts[base_member], 0, &authored_base, &kind, error, capacity)) {
+                    pl_chain_free(&own_published); culprit = members[base_member]; goto failed;
+                }
+                authored = &authored_base;
+            } else if (!pl_parent_chain(c, members[i], texts[i], 0, &own_authored, &kind, error, capacity)) {
+                pl_chain_free(&own_published); culprit = members[i]; goto failed;
+            }
+            result = sh_package_editor_rebase(input->family, texts[i], authored->texts, authored->count,
+                target->texts, target->count, pass, &out, &out_length, &failure, error, capacity);
+            pl_chain_free(&own_published); pl_chain_free(&own_authored);
+            if (result < 0) { kind = failure.kind; culprit = members[i]; goto failed; }
+            if (result) {
+                free((char *)texts[i].text); texts[i] = (sh_decl_source){out, out_length};
+                rebased[i] = 1; if (included[i]) any_rebased = 1;
+            }
+        }
+    for (size_t i = 0; i < count; i++) if (included[i]) {
+        if (i == base_member) base = texts[i];
+        else { part_member[source_count] = i; parts[source_count++] = texts[i]; }
+    }
+    /* A stock child of a relaid parent republishes its rebased lists. */
+    if (!source_count && base_member != SIZE_MAX && rebased[base_member]) {
+        part_member[source_count] = base_member; parts[source_count++] = base;
+    }
+    for (size_t i = 0; i < count && source_count; i++) {
+        size_t unit = members[i], length = 0, peer_count = 0;
+        sh_package_editor_failure failure;
+        if (!included[i]) continue;
+        char *body = sh_package_editor_contributions_report(input->family, base, parts, source_count,
+            texts[i], !sh_package_source_link_shared(c->source)[unit], &length, &failure, error, capacity);
+        if (!body) {
+            kind = failure.kind;
+            if (kind == SH_PACKAGE_EDITOR_FAILURE_SOURCE && failure.source < source_count)
+                culprit = members[part_member[failure.source]];
+            goto failed;
+        }
+        for (size_t j = 0; j < count; j++) if (j != i && included[j] && c->inputs.scopes[members[j]] != b->count - 1)
+            peers[peer_count++] = c->inputs.units[members[j]].files[0];
+        int staged = pl_contribution_stage(b, sources, unit, body, length, peers, peer_count, pending + i, error, capacity);
+        free(body); if (!staged) goto failed;
+    }
+    /* A member with another parent is its author's own variant: only rebased. */
+    for (size_t i = 0; i < count; i++) if (!included[i] && rebased[i] &&
+        !pl_contribution_stage(b, sources, members[i], texts[i].text, texts[i].length, NULL, 0, pending + i, error, capacity))
+        goto failed;
     /* Commit the phase together: no later supplier observes a partly composed
      * peer, and failure leaves the previous captured graph intact. */
     for (size_t i = 0; i < count; i++) {
@@ -1144,17 +1360,197 @@ static int pl_contribution_group(pl_build *b, const sh_package_sources *sources,
             !memcmp(original->files[0]->body, c->units[unit].file->body, c->units[unit].file->body_length);
     }
     ok = 1;
+    goto done;
+failed:
+    pl_contribution_failure(b, sources, members, count, input, kind, culprit, error, capacity);
 done:
     if (texts) for (size_t i = 0; i < count; i++) free((char *)texts[i].text);
     if (pending) for (size_t i = 0; i < count; i++) pl_contribution_unit_free(pending + i);
-    free(texts); free(parts); free(owners); free(pending); return ok;
+    if (parents) for (size_t i = 0; i < count; i++) free(parents[i]);
+    pl_chain_free(&published); pl_chain_free(&authored_base);
+    free(texts); free(parts); free((void *)peers); free(pending); free(parents); free(included); free(rebased); free(part_member);
+    return ok;
+}
+
+/* Shared gameplay registration lists (a conductor's aiTypeList): every source
+ * of the declaration contributes its rows, each bound in its own scope, and
+ * every member receives the union keyed by the native aiType. The stock-named
+ * declaration therefore registers each package's AI variants for spawning;
+ * equal keys with different bindings are a composition gap reported like any
+ * other contribution failure. */
+static int pl_registration_group(pl_build *b, const sh_package_sources *sources,
+    const size_t *members, size_t count, char *error, size_t capacity)
+{
+    pl_contributions *c = b->contributions;
+    const sh_package_link_unit *input = c->inputs.units + members[0];
+    sh_decl_source *texts = calloc(count, sizeof(*texts)), *parts = calloc(count + 1, sizeof(*parts));
+    const sh_compiled_resource **peers = calloc(count + 1, sizeof(*peers));
+    pl_contribution_unit *pending = calloc(count, sizeof(*pending));
+    size_t *part_member = calloc(count + 1, sizeof(*part_member));
+    sh_decl_source base = {"{}", 2};
+    size_t source_count = 0, culprit = SIZE_MAX;
+    int ok = 0, kind = SH_PACKAGE_EDITOR_FAILURE_ENVIRONMENT, stated = 0;
+    if (!texts || !parts || !peers || !pending || !part_member) {
+        snprintf(error, capacity, "registration contribution allocation failed"); goto failed;
+    }
+    for (size_t i = 0; i < count; i++) {
+        size_t length = 0;
+        if (!(texts[i].text = pl_token_text(c, members[i], &texts[i].length, error, capacity))) goto failed;
+        (void)length;
+        if (sh_package_registration_lists(texts[i])) stated = 1;
+        if (c->inputs.scopes[members[i]] == b->count - 1) base = texts[i];
+        else { part_member[source_count] = i; parts[source_count++] = texts[i]; }
+    }
+    if (!stated || !source_count) { ok = 1; goto done; }
+    for (size_t i = 0; i < count; i++) {
+        size_t length = 0, peer_count = 0;
+        sh_package_editor_failure failure;
+        char *body = sh_package_registration_contributions_report(base, parts, source_count, texts[i],
+            &length, &failure, error, capacity);
+        if (!body) {
+            kind = failure.kind;
+            if (kind == SH_PACKAGE_EDITOR_FAILURE_SOURCE && failure.source < source_count)
+                culprit = members[part_member[failure.source]];
+            goto failed;
+        }
+        for (size_t j = 0; j < count; j++) if (j != i && c->inputs.scopes[members[j]] != b->count - 1)
+            peers[peer_count++] = c->inputs.units[members[j]].files[0];
+        int staged = pl_contribution_stage(b, sources, members[i], body, length, peers, peer_count, pending + i, error, capacity);
+        free(body); if (!staged) goto failed;
+    }
+    for (size_t i = 0; i < count; i++) {
+        size_t unit = members[i];
+        if (!pending[i].owned) continue;
+        c->dirty = 1;
+        pl_contribution_unit_free(c->units + unit); c->units[unit] = pending[i]; memset(pending + i, 0, sizeof(*pending));
+        c->inputs.units[unit].compilation = c->units[unit].owned;
+        c->inputs.units[unit].files = &c->units[unit].file;
+        const sh_package_link_unit *original = sh_package_source_link_inputs(c->source)->units + unit;
+        c->inputs.units[unit].original_binding = original->original_binding &&
+            original->files[0]->body && original->files[0]->body_length == c->units[unit].file->body_length &&
+            !memcmp(original->files[0]->body, c->units[unit].file->body, c->units[unit].file->body_length);
+    }
+    ok = 1;
+    goto done;
+failed:
+    pl_contribution_failure(b, sources, members, count, input, kind, culprit, error, capacity);
+done:
+    if (texts) for (size_t i = 0; i < count; i++) free((char *)texts[i].text);
+    if (pending) for (size_t i = 0; i < count; i++) pl_contribution_unit_free(pending + i);
+    free(texts); free(parts); free((void *)peers); free(pending); free(part_member);
+    return ok;
+}
+/* Entity groups whose sources state registration lists; a cheap byte check
+ * precedes parsing because most entity declarations have none. */
+static int pl_registration_phase(pl_build *b, const sh_package_sources *sources, const size_t *order,
+    size_t order_count, char *error, size_t capacity)
+{
+    pl_contributions *c = b->contributions;
+    for (size_t i = 0; i < order_count;) {
+        const sh_package_link_unit *unit = c->inputs.units + order[i];
+        size_t end = i + 1;
+        int candidate = 0;
+        while (end < order_count && !strcmp(c->inputs.units[order[end]].family, unit->family) &&
+            !strcmp(c->inputs.units[order[end]].name, unit->name)) end++;
+        if (!strcmp(unit->family, "entitydef") && end - i > 1)
+            for (size_t k = i; k < end && !candidate; k++) {
+                const sh_compiled_resource *file = c->inputs.units[order[k]].files[0];
+                size_t length = 0;
+                unsigned char *body = sh_package_compilation_read(c->inputs.units[order[k]].compilation, file,
+                    SIZE_MAX, &length, error, capacity);
+                if (!body) return 0;
+                for (size_t at = 0; !candidate && at + 12 <= length; at++)
+                    candidate = !memcmp(body + at, "aiTypeList", 10) || (at + 12 <= length && !memcmp(body + at, "globalAIMods", 12));
+                free(body);
+            }
+        if (candidate && !pl_registration_group(b, sources, order + i, end - i, error, capacity)) return 0;
+        i = end;
+    }
+    return 1;
+}
+
+static int pl_unit_name_order(void *context, const void *left, const void *right)
+{
+    const sh_package_link_unit *units = context;
+    const sh_package_link_unit *a = units + *(const size_t *)left, *b = units + *(const size_t *)right;
+    int order = strcmp(a->family, b->family);
+    if (!order) order = strcmp(a->name, b->name);
+    return order ? order : (*(const size_t *)left < *(const size_t *)right ? -1 : 1);
+}
+typedef struct pl_group { size_t first, count, parent; } pl_group;
+/* Compose one phase's groups (runs of equal family and name in order), each
+ * after the group of the parent it names, so a child rebases onto its
+ * published parent. A cycle cannot order; the chain reader refuses it. */
+static int pl_contribution_phase(pl_build *b, const sh_package_sources *sources, const size_t *order,
+    size_t order_count, int phase, char *error, size_t capacity)
+{
+    pl_contributions *c = b->contributions;
+    pl_group *groups = NULL;
+    size_t group_count = 0, *stack = NULL, depth = 0;
+    unsigned char *state = NULL;
+    int ok = 0;
+    for (size_t i = 0; i < order_count;) {
+        const sh_package_link_unit *unit = c->inputs.units + order[i];
+        size_t end = i + 1;
+        while (end < order_count && !strcmp(c->inputs.units[order[end]].family, unit->family) &&
+            !strcmp(c->inputs.units[order[end]].name, unit->name)) end++;
+        if (sh_package_editor_contribution_phase(unit->family) == phase) {
+            pl_group *grown = realloc(groups, (group_count + 1) * sizeof(*grown));
+            if (!grown) { snprintf(error, capacity, "editor contribution allocation failed"); goto done; }
+            groups = grown; groups[group_count++] = (pl_group){i, end - i, SIZE_MAX};
+        }
+        i = end;
+    }
+    if (!(state = calloc(group_count + 1, 1)) || !(stack = calloc(group_count + 1, sizeof(*stack)))) {
+        snprintf(error, capacity, "editor contribution allocation failed"); goto done;
+    }
+    if (phase != 2) for (size_t g = 0; g < group_count; g++) {
+        /* The parent the reference member (the stock one when present) names. */
+        size_t reference = order[groups[g].first], length = 0;
+        for (size_t k = 0; k < groups[g].count; k++)
+            if (c->inputs.scopes[order[groups[g].first + k]] == b->count - 1) reference = order[groups[g].first + k];
+        const sh_package_link_unit *unit = c->inputs.units + reference;
+        unsigned char *body = sh_package_compilation_read(unit->compilation, unit->files[0], SIZE_MAX, &length, error, capacity);
+        char *parent = NULL;
+        if (!body) goto done;
+        int read = pl_inherit_name((sh_decl_source){(const char *)body, length}, &parent);
+        free(body);
+        if (!read) continue; /* composition reports the unreadable text */
+        for (size_t low = 0, high = group_count; parent && low < high;) {
+            size_t middle = low + (high - low) / 2;
+            const sh_package_link_unit *probe = c->inputs.units + order[groups[middle].first];
+            int cmp = strcmp(probe->family, unit->family);
+            if (!cmp) cmp = strcmp(probe->name, parent);
+            if (!cmp) { groups[g].parent = middle; break; }
+            if (cmp < 0) low = middle + 1; else high = middle;
+        }
+        free(parent);
+    }
+    for (size_t g = 0; g < group_count; g++) {
+        if (state[g]) continue;
+        stack[depth++] = g;
+        while (depth) {
+            size_t top = stack[depth - 1], parent = groups[top].parent;
+            if (!state[top]) {
+                state[top] = 1;
+                if (parent != SIZE_MAX && !state[parent]) { stack[depth++] = parent; continue; }
+            }
+            depth--;
+            if (state[top] == 2) continue;
+            state[top] = 2;
+            if (!pl_contribution_group(b, sources, order + groups[top].first, groups[top].count, error, capacity)) goto done;
+        }
+    }
+    ok = 1;
+done:
+    free(groups); free(stack); free(state); return ok;
 }
 
 static int pl_contributions_open(pl_build *b, const sh_package_sources *sources, char *error, size_t capacity)
 {
     pl_contributions *c = calloc(1, sizeof(*c));
     const sh_package_link_inputs *original = sh_package_source_link_inputs(b->reader);
-    size_t *members = NULL;
+    size_t *members = NULL, eligible = 0;
     unsigned char *done = NULL;
     if (!c) return 0;
     b->contributions = c; c->source = b->reader; c->inputs.count = original->count; c->inputs.scopes = original->scopes;
@@ -1169,24 +1565,20 @@ static int pl_contributions_open(pl_build *b, const sh_package_sources *sources,
     if (!c->reuse || !c->inputs.units || !c->units || !c->shared || !members || !done) goto bad;
     memcpy(c->inputs.units, original->units, original->count * sizeof(*c->inputs.units));
     if (!pl_localize(b, sources, error, capacity)) goto bad;
+    /* Group members once: eligible units sorted by family and name. */
+    for (size_t i = 0; i < original->count; i++) {
+        const sh_package_link_unit *unit = c->inputs.units + i;
+        if (unit->file_count == 1 && pl_modern(b, original->scopes[i]) && sh_package_editor_contribution_phase(unit->family))
+            members[eligible++] = i;
+    }
+    qsort_s(members, eligible, sizeof(*members), pl_unit_name_order, c->inputs.units);
+    (void)done;
     for (int phase = 1; phase <= 3; phase++) {
         if (!pl_tokens(c, error, capacity)) goto bad;
-        memset(done, 0, original->count);
-        for (size_t i = 0; i < original->count; i++) {
-            const sh_package_link_unit *unit = c->inputs.units + i;
-            size_t count = 0;
-            if (done[i] || unit->file_count != 1 || !pl_modern(b, original->scopes[i]) ||
-                sh_package_editor_contribution_phase(unit->family) != phase) continue;
-            for (size_t j = i; j < original->count; j++) {
-                const sh_package_link_unit *peer = c->inputs.units + j;
-                if (peer->file_count == 1 && pl_modern(b, original->scopes[j]) &&
-                    !strcmp(unit->family, peer->family) && !strcmp(unit->name, peer->name)) {
-                    done[j] = 1; members[count++] = j;
-                }
-            }
-            if (!pl_contribution_group(b, sources, members, count, error, capacity)) goto bad;
-        }
+        if (!pl_contribution_phase(b, sources, members, eligible, phase, error, capacity)) goto bad;
     }
+    if (!pl_tokens(c, error, capacity) ||
+        !pl_registration_phase(b, sources, members, eligible, error, capacity)) goto bad;
     if (!pl_tokens(c, error, capacity)) goto bad;
     /* Keep a verified baseline selector/bank slot. Other bound variants get
      * private native identities; historical contexts are never overwritten by
@@ -1333,7 +1725,7 @@ static int pl_compile(const sh_package_sources *sources, const sh_package_proven
     char *error, size_t capacity)
 {
     pl_build b = {0};
-    b.contribution_owner = SIZE_MAX;
+    b.contribution_owner = b.contribution_invalid = SIZE_MAX;
     sh_package_source_link_native source_native = {&b, pl_admit, pl_semantics,
         native ? native->source.shader : NULL, pl_material_companions, pl_material_seeds, pl_implicit, pl_source_owners};
     sh_package_compile_environment env;
@@ -1444,7 +1836,9 @@ static int pl_compile(const sh_package_sources *sources, const sh_package_proven
         snprintf(error, capacity, "cannot account package coverage"); goto done;
     }
     if (!pl_contributions_open(&b, sources, error, capacity)) {
-        if (!contexts && b.contribution_owner != SIZE_MAX && environment->unserved_package)
+        if (!contexts && b.contribution_invalid != SIZE_MAX && environment->invalid_package)
+            *environment->invalid_package = b.contribution_invalid;
+        else if (!contexts && b.contribution_owner != SIZE_MAX && environment->unserved_package)
             *environment->unserved_package = b.contribution_owner;
         goto done;
     }
