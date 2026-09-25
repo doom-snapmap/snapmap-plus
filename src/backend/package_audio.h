@@ -82,6 +82,10 @@ void sh_package_audio_scope_close(sh_package_audio_scope *scope);
  * object or media fails; control-action targets are allowed native no-ops. */
 int sh_package_audio_scope_event(sh_package_audio_scope *scope, uint32_t event,
     sh_package_audio_path_visit visit, void *context, char *error, size_t capacity);
+/* 1 when a bank of this effective scope and locale implements the event. The
+ * engine plays nothing for an event no bank implements; callers decide whether
+ * such a reference is allowed. */
+int sh_package_audio_scope_implements(const sh_package_audio_scope *scope, uint32_t event);
 /* Capture the union once in native inventory order, independent of requested
  * event order. The resulting construction order is also used by audio linking. */
 int sh_package_audio_scope_events(sh_package_audio_scope *scope, const uint32_t *events,

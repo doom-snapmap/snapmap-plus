@@ -631,7 +631,8 @@ static int sg_sound(sg_walk *walk, const char *name)
     const sh_package_audio_reference *references;
     uint32_t event;
     size_t count;
-    if (!sh_package_sound_event(walk->compiled, name, &event) && !sh_audio_event_identity(name, &event)) {
+    int authored = sh_package_sound_event(walk->compiled, name, &event);
+    if (!authored && !sh_audio_event_identity(name, &event)) {
         sg_gap(walk, "", "sound", "sound name cannot be represented by native event conversion"); return 1;
     }
     if (!walk->audio) {
@@ -643,7 +644,13 @@ static int sg_sound(sg_walk *walk, const char *name)
     if (walk->audio_source.originals) {
         if (!walk->audio_scope) walk->audio_scope = sh_package_audio_scope_open(walk->compiled,
             walk->audio_source.originals, walk->error, walk->capacity);
-        if (!walk->audio_scope || !sh_package_audio_scope_event(walk->audio_scope, event,
+        if (!walk->audio_scope) { walk->failed = 1; return 0; }
+        /* As in the library, a SnapMap sound whose event no bank implements
+         * keeps its native binding: the engine plays nothing for it (stock
+         * demon player forms name such a sound), so nothing is required. An
+         * event a package declaration authors still needs its bank. */
+        if (!authored && !sh_package_audio_scope_implements(walk->audio_scope, event)) return 1;
+        if (!sh_package_audio_scope_event(walk->audio_scope, event,
             sg_audio_path, walk, walk->error, walk->capacity)) {
             walk->failed = 1; return 0;
         }

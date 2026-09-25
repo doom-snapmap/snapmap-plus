@@ -463,6 +463,13 @@ int sh_package_audio_scope_banks(sh_package_audio_scope *scope,
 int sh_package_audio_scope_event(sh_package_audio_scope *scope, uint32_t event,
     sh_package_audio_path_visit visit, void *context, char *error, size_t capacity)
 { return sh_package_audio_scope_events(scope, &event, 1, visit, context, error, capacity); }
+int sh_package_audio_scope_implements(const sh_package_audio_scope *scope, uint32_t event)
+{
+    if (!scope || !event) return 0;
+    for (size_t i = 0; i < scope->count; i++)
+        if (sh_audio_bank_has_event(scope->metadata[i], event)) return 1;
+    return 0;
+}
 int sh_package_audio_scope_refine(sh_package_audio_scope *scope, const char *path, const sh_audio_bank *metadata)
 {
     if (!scope || !path || !metadata) return 0;

@@ -4181,6 +4181,31 @@ int main(void)
                 fprintf(stderr,"audio source closure: references=%zu gaps=%zu %s\n",report.references,report.gaps,report.first_gap);
             assert(!paths.incomplete && !report.gaps && report.references==1);
             assert(has(&paths,"english(us)/a.bnk") && !has(&paths,"pc/a.bnk") && !has(&paths,"pc/b.bnk"));
+            {
+                /* A SnapMap sound no bank implements (the stock "default") keeps
+                 * its native binding: nothing plays and nothing is required. The
+                 * same event authored by a package declaration needs its bank. */
+                const char *bankless="{\"targetType\":\"idSoundShader\",\"value\":\"default\"}";
+                assert(sh_package_source_graph_with_contracts(&compiled,NULL,sound_original,&sound_fixture,
+                    sound_registry,(uintptr_t)sound_fixture.reflection,
+                    NULL,&audio,NULL,bankless,strlen(bankless),&paths,&report,error,sizeof(error)));
+                assert(!paths.incomplete && !report.gaps && !report.references);
+                assert(paths.count==1 && has(&paths,"sound/default.decl"));
+                sh_compiled_resource authored[4]={0};
+                authored[0].engine_path="generated/decls/sound/default.decl";
+                authored[0].body=(unsigned char *)"{ }"; authored[0].body_length=3;
+                authored[0].type=authored[0].native_type="sound";
+                authored[0].name=authored[0].native_name="default";
+                assert(sh_audio_event_identity("default",&authored[0].sound_authored_event));
+                authored[0].sound_event=authored[0].sound_authored_event;
+                for(size_t i=0;i<3;i++) authored[i+1]=banks[i];
+                compiled.resources=authored; compiled.resource_count=4;
+                assert(!sh_package_source_graph_with_contracts(&compiled,NULL,sound_original,&sound_fixture,
+                    sound_registry,(uintptr_t)sound_fixture.reflection,
+                    NULL,&audio,NULL,bankless,strlen(bankless),&paths,&report,error,sizeof(error)));
+                assert(strstr(error,"has no bank in its source scope"));
+                compiled.resources=banks; compiled.resource_count=3;
+            }
             sh_audio_originals_close(originals);assert(RemoveDirectoryA(empty));
             for(size_t i=0;i<sound_fixture.count;i++) free(sound_fixture.regions[i].address);
             /* Preserve the legacy API's explicit incomplete inventory for its
