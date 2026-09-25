@@ -382,6 +382,9 @@ static int rg_impact_compare(const void *a, const void *b)
 }
 sh_resource_graph_status sh_resource_graph_consumers(const sh_resource_graph_identity *seeds,
     size_t count, sh_resource_graph_impact *out)
+{ return sh_resource_graph_consumers_bounded(seeds, count, NULL, NULL, out); }
+sh_resource_graph_status sh_resource_graph_consumers_bounded(const sh_resource_graph_identity *seeds,
+    size_t count, sh_resource_graph_barrier barrier, void *context, sh_resource_graph_impact *out)
 {
     typedef struct rg_reverse_edge { size_t parent, next; } rg_reverse_edge;
     rg_reverse_edge *edges = NULL;
@@ -455,7 +458,10 @@ sh_resource_graph_status sh_resource_graph_consumers(const sh_resource_graph_ide
         size_t edge;
         for (edge = heads[queue[position++]]; edge != SIZE_MAX; edge = edges[edge].next) {
             size_t parent = edges[edge].parent;
-            if (!visited[parent]) { visited[parent] = 1; queue[queued++] = parent; }
+            if (visited[parent]) continue;
+            visited[parent] = 1;
+            if (!barrier || !barrier(context, g_nodes[parent].type, g_nodes[parent].name))
+                queue[queued++] = parent;
         }
     }
     if (queued > SIZE_MAX / sizeof(*out->items)) goto done;

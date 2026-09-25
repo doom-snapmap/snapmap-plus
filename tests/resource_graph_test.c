@@ -315,6 +315,59 @@ static void impact_checks(void)
     sh_resource_graph_impact_free(&impact);
     sh_resource_graph_test_reset();
 }
+/* A barrier type is neither returned nor followed unless it is a seed; its
+ * consumers still arrive through any other path. */
+static int fixed_barrier(void *context, const char *type, const char *name)
+{
+    (void)name; ++*(int *)context;
+    return !strcmp(type, "renderparm");
+}
+static void barrier_checks(void)
+{
+    sh_resource_graph_frame frame;
+    sh_resource_graph_impact impact = {0};
+    sh_resource_graph_identity image = {"image", "black"}, parm = {"renderparm", "transmap"};
+    int calls = 0;
+    impact_source("image", "black", "generated/image/black.bimage");
+    sh_resource_graph_begin(&frame, "renderParm", "transmap");
+    sh_resource_graph_reference("image", "black");
+    sh_resource_graph_end(&frame, 1);
+    sh_resource_graph_begin(&frame, "renderProg", "font");
+    sh_resource_graph_reference("renderParm", "transmap");
+    sh_resource_graph_end(&frame, 1);
+    sh_resource_graph_begin(&frame, "material", "glyphs");
+    sh_resource_graph_reference("renderProg", "font");
+    sh_resource_graph_end(&frame, 1);
+    sh_resource_graph_begin(&frame, "material", "direct");
+    sh_resource_graph_reference("image", "black");
+    sh_resource_graph_end(&frame, 1);
+    CHECK(sh_resource_graph_consumers(&image, 1, &impact) == SH_RESOURCE_GRAPH_COMPLETE);
+    CHECK(impact.count == 5 && impact_has(&impact, "renderparm", "transmap") &&
+          impact_has(&impact, "material", "glyphs"));
+    sh_resource_graph_impact_free(&impact);
+    CHECK(sh_resource_graph_consumers_bounded(&image, 1, fixed_barrier, &calls, &impact) ==
+          SH_RESOURCE_GRAPH_COMPLETE);
+    CHECK(calls == 2 && impact.count == 2 && impact_has(&impact, "image", "black") &&
+          impact_has(&impact, "material", "direct"));
+    sh_resource_graph_impact_free(&impact);
+    /* A supplied barrier object keeps its consumers. */
+    CHECK(sh_resource_graph_consumers_bounded(&parm, 1, fixed_barrier, &calls, &impact) ==
+          SH_RESOURCE_GRAPH_COMPLETE);
+    CHECK(impact.count == 3 && impact_has(&impact, "renderparm", "transmap") &&
+          impact_has(&impact, "renderprog", "font") && impact_has(&impact, "material", "glyphs"));
+    sh_resource_graph_impact_free(&impact);
+    /* A shared consumer reached another way is still returned. */
+    sh_resource_graph_begin(&frame, "material", "glyphs");
+    sh_resource_graph_reference("renderProg", "font");
+    sh_resource_graph_reference("image", "black");
+    sh_resource_graph_end(&frame, 1);
+    CHECK(sh_resource_graph_consumers_bounded(&image, 1, fixed_barrier, &calls, &impact) ==
+          SH_RESOURCE_GRAPH_COMPLETE);
+    CHECK(impact.count == 3 && impact_has(&impact, "material", "glyphs") &&
+          !impact_has(&impact, "renderprog", "font"));
+    sh_resource_graph_impact_free(&impact);
+    sh_resource_graph_test_reset();
+}
 int main(void)
 {
     {
@@ -389,6 +442,7 @@ int main(void)
     producer_checks();
     sh_resource_graph_test_reset();
     impact_checks();
+    barrier_checks();
     if (failures) return 1;
     puts("native dependency graph checks passed"); return 0;
 }

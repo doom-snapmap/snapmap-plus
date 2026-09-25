@@ -115,6 +115,18 @@ static int rr_seed(sh_resource_graph_impact *set, const char *type, const char *
     next->type = *type ? rr_copy(type) : _strdup(""); next->name = rr_copy(name);
     return next->type && next->name;
 }
+/* Renderer parameters and program flags are engine-fixed objects: they hold
+ * their dependencies (a default image, say) as live objects that refresh in
+ * place, and each owns a native slot that compiled programs address.
+ * Rebuilding one in place disturbs programs already bound to it: after a boot
+ * rebuilt transmap, the SDF font program sampled its default image. Unless the
+ * provider supplies the object itself, it is neither rebuilt nor a path to its
+ * consumers. */
+static int rr_fixed_renderer(void *context, const char *type, const char *name)
+{
+    (void)context; (void)name;
+    return !_stricmp(type, "renderparm") || !_stricmp(type, "renderprogflag");
+}
 static int rr_has(const sh_resource_graph_impact *set, const rr_entry *entry)
 {
     sh_resource_graph_identity key = {entry->type, entry->name};
@@ -409,7 +421,8 @@ sh_resource_resident *sh_resource_resident_begin(const sh_package_changes *chang
             if (entry->selected && !rr_seed(&seeds, entry->type, entry->name)) goto done;
         }
         current = NULL; phase = "recorded consumers";
-        if (sh_resource_graph_consumers(seeds.items, seeds.count, &impact) == SH_RESOURCE_GRAPH_ERROR) goto done;
+        if (sh_resource_graph_consumers_bounded(seeds.items, seeds.count, rr_fixed_renderer, NULL,
+                &impact) == SH_RESOURCE_GRAPH_ERROR) goto done;
         qsort(seeds.items, seeds.count, sizeof(*seeds.items), rr_compare);
         qsort(retired.items, retired.count, sizeof(*retired.items), rr_compare);
         for (size_t i = 0; i < pass->count; i++) {

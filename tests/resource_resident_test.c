@@ -26,7 +26,7 @@ int sh_package_runtime_serves_native_identity(const char *type, const char *name
 { return retained_alias && !strcmp(type, "model") && !strcmp(name, "body.lwo"); }
 /* Bitmask of the objects a case expects the pass to reconstruct. */
 static int expect_reconstructed = 3;
-static unsigned char heap_object[0xd0], renderer_object[0x20], manager_object[0x30];
+static unsigned char heap_object[0xd0], renderer_object[0x20], manager_object[0x30], parm_manager[0x30];
 /* Wide enough for every field the pass reads, including the implicit-text
  * flag at +0x48. */
 static unsigned char objects[3][0x800];
@@ -175,7 +175,7 @@ static void load(void *self)
 }
 static void *lookup(void *manager, const char *name)
 {
-    CHECK(manager == manager_object);
+    CHECK(manager == manager_object || manager == parm_manager);
     for (int i = 0; i < 3; i++) if (!strcmp(*(const char **)(objects[i] + 8), name)) {
         if ((objects[i][0x2c] & RR_PENDING) && !lookup_leaves_pending) {
             objects[i][0x2c] &= (unsigned char)~RR_PENDING; load(objects[i]);
@@ -827,10 +827,43 @@ static void additive_finalization_cases(void)
     CHECK(!sh_resource_resident_end(pass, 0, error, sizeof(error)));
     check_restored();
 }
+/* A renderer parameter or program flag naming a changed dependency holds it
+ * as a live object and owns a native slot. Only one the provider supplies is
+ * rebuilt. */
+static void fixed_renderer_cases(void)
+{
+    char error[256];
+    static void *parm_entries[1];
+    for (int run = 0; run < 4; run++) {
+        int supplied = run & 1;
+        const char *family = run & 2 ? "renderProgFlag" : "renderParm";
+        sh_package_change rows[] = {{(char *)paths[0], SH_PACKAGE_RESOURCE_REPLACED},
+            {(char *)paths[2], SH_PACKAGE_RESOURCE_REPLACED}};
+        sh_package_changes changes = {rows, supplied ? 2u : 1u};
+        sh_resource_graph_frame frame;
+        sh_resource_resident *pass;
+        reset(); expect_reconstructed = supplied ? 7 : 3;
+        memset(parm_manager, 0, sizeof(parm_manager));
+        *(const char **)(parm_manager + 8) = family;
+        parm_entries[0] = objects[2];
+        *(void ***)(parm_manager + 0x20) = parm_entries; *(int *)(parm_manager + 0x28) = 1;
+        *(void **)(manager_object + 0x18) = parm_manager; *(int *)(manager_object + 0x28) = 2;
+        *(void **)(objects[2] + 0x10) = parm_manager; *(const char **)(objects[2] + 8) = "transmap";
+        sh_resource_graph_begin(&frame, family, "transmap");
+        sh_resource_graph_reference("model", "body.lwo");
+        sh_resource_graph_end(&frame, 1);
+        pass = sh_resource_resident_begin(&changes, 0, 0, error, sizeof(error));
+        CHECK(pass && pass->count == (supplied ? 3u : 2u)); if (!pass) continue;
+        CHECK(sh_resource_resident_selected(pass, objects[2]) == supplied);
+        CHECK(sh_resource_resident_reconstruct(pass, error, sizeof(error)));
+        CHECK(sh_resource_resident_drain(pass, error, sizeof(error)) && counts[2] == supplied);
+        CHECK(sh_resource_resident_end(pass, 1, error, sizeof(error))); check_restored();
+    }
+}
 int main(void)
 {
     success_cases(); world_text_cases(); initial_publication_cases(); failure_cases(); atlas_failure_cases(); scope_failure_cases(); scope_ownership_cases();
-    additive_finalization_cases();
+    additive_finalization_cases(); fixed_renderer_cases();
     rr_free(g_rr_recovery); g_rr_recovery = NULL;
     sh_resource_graph_test_reset();
     printf("resident refresh: %d failure(s)\n", failures); return failures ? 1 : 0;

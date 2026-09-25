@@ -93,6 +93,14 @@ sh_resource_graph_status sh_resource_graph_affected(const char *const *paths,
  * even when the original native read preceded graph instrumentation. */
 sh_resource_graph_status sh_resource_graph_consumers(
     const sh_resource_graph_identity *seeds, size_t count, sh_resource_graph_impact *out);
+/* The same closure stopped at consumers the barrier admits: such a node is
+ * neither returned nor followed unless it is itself a seed. Coverage is still
+ * reported for the whole recorded graph. The barrier runs under the graph lock
+ * and must not call back into the graph. */
+typedef int (*sh_resource_graph_barrier)(void *context, const char *type, const char *name);
+sh_resource_graph_status sh_resource_graph_consumers_bounded(
+    const sh_resource_graph_identity *seeds, size_t count,
+    sh_resource_graph_barrier barrier, void *context, sh_resource_graph_impact *out);
 void sh_resource_graph_impact_free(sh_resource_graph_impact *impact);
 void sh_resource_graph_counts(size_t *nodes, size_t *complete, size_t *edges);
 
