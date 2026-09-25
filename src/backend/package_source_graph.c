@@ -54,6 +54,7 @@ typedef struct sh_package_source_reader {
     sh_package_source_shader shader;
     int shader_configured;
     sg_shader_abi *shader_parameters;
+    sh_package_source_admission admission;
 } sg_walk;
 
 static int sg_editor(const char *type)
@@ -849,9 +850,23 @@ static int sg_inspect(sg_walk *walk, const char *type, const char *name)
             if (!inspected) ok = 0;
         }
         if (leaf) inspected = known != 0;
+        /* With no catalogued or supplied file, the library link still admits
+         * a SnapMap row registered without data and a verified engine-created
+         * identity such as the intrinsic _black image. Nothing is delivered. */
+        if (ok && !known) {
+            unsigned char semantics[32];
+            for (size_t i = 0; !inspected && i < count; i++)
+                inspected = !*entries[i]->path && entries[i]->archive < 2;
+            if (!inspected && walk->admission.admit) {
+                int admitted = walk->admission.admit(walk->admission.context, 0, type, name,
+                    semantics, walk->error, walk->capacity);
+                if (admitted < 0) { walk->failed = 1; ok = 0; }
+                else inspected = admitted;
+            }
+        }
         /* Image generated-path spelling is a verified native rule. Other leaf
          * families require catalog or compiler identities; no guessed paths. */
-        if (ok && !known && !strcmp(type, "image")) {
+        if (ok && !known && !inspected && !strcmp(type, "image")) {
             char *image_path = sh_package_cooked_path(type, name);
             if (image_path) { inspected = sg_leaf_file(walk, image_path); free(image_path); }
             ok = !walk->failed;
@@ -1916,6 +1931,7 @@ int sh_package_source_graph_with_contracts(const sh_package_compilation *compile
     const sh_resource_catalog *catalog, sh_package_baseline_reader original,
     void *original_context, sh_decl_registry_source registry, uintptr_t reflection,
     const sh_package_source_shader *shader, const sh_package_source_audio *audio,
+    const sh_package_source_admission *admission,
     const char *json, size_t length, sh_package_references *out,
     sh_package_source_graph_report *report, char *error, size_t capacity)
 {
@@ -1936,6 +1952,7 @@ int sh_package_source_graph_with_contracts(const sh_package_compilation *compile
     walk.error = error; walk.capacity = capacity;
     if (shader && !sh_package_source_reader_shader(&walk, shader)) goto done;
     if (audio && !sh_package_source_reader_audio(&walk, audio)) goto done;
+    if (admission) walk.admission = *admission;
     candidate = (sh_decl_registry_source){&walk, sg_native_read, registry.registry, sg_exists};
     metadata = (sh_decl_native_source){&walk, sg_native_read, reflection, registry.scripts};
     observer = (sh_decl_dependency_observer){&walk, sg_reference, sg_field_gap};
@@ -1970,7 +1987,7 @@ int sh_package_source_graph_with_shader(const sh_package_compilation *compiled,
     sh_package_references *out, sh_package_source_graph_report *report, char *error, size_t capacity)
 {
     return sh_package_source_graph_with_contracts(compiled, catalog, original, original_context,
-        registry, reflection, shader, NULL, json, length, out, report, error, capacity);
+        registry, reflection, shader, NULL, NULL, json, length, out, report, error, capacity);
 }
 
 int sh_package_source_graph(const sh_package_compilation *compiled,

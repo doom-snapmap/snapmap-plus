@@ -3000,11 +3000,12 @@ int sh_package_map_plan_source_resources(const sh_package_map_plan *plan,
     if (plan) {
         sh_package_source_audio audio = {plan->provider->audio_originals};
         sh_package_library_native native = sh_package_native_assets_adapter(plan->provider->native_assets);
+        sh_package_source_admission admission = {native.source.context, native.source.admit};
         char scope_error[512];
         sh_package_native_assets_shader_scope_begin(plan->provider->native_assets);
         ok = sh_package_source_graph_with_contracts(plan->provider->compiled, plan->provider->catalog,
             pr_original, &original, registry, reflection, native.source.shader,
-            audio.originals ? &audio : NULL, json, length, out, report, error, capacity);
+            audio.originals ? &audio : NULL, &admission, json, length, out, report, error, capacity);
         if (!sh_package_native_assets_shader_scope_end(plan->provider->native_assets, scope_error,
             sizeof(scope_error)) && ok) {
             ok = 0; if (out) sh_package_references_free(out);

@@ -3583,6 +3583,29 @@ static void test_open_effect_body(void)
     assert(!native->object_state_reads);
     while (native->count) free(native->regions[--native->count].address);
 }
+static int admit_intrinsic(void *context, size_t scope, const char *family, const char *name,
+    unsigned char semantics[32], char *error, size_t capacity)
+{
+    (void)context; (void)scope; (void)error; (void)capacity; memset(semantics, 0, 32);
+    return !strcmp(family, "image") && !strcmp(name, "_black");
+}
+/* One image row registered without a payload path. */
+static void fileless_catalog(const char *relative, const char *name)
+{
+    unsigned char bytes[256] = {5, 'S', 'E', 'R'}; size_t at = 40;
+    const char *strings[] = {"image", name, ""};
+    bytes[35] = 1;
+    for (size_t s = 0; s < 3; s++) {
+        size_t length = strlen(strings[s]); number(bytes, at, (int)length); at += 4;
+        memcpy(bytes + at, strings[s], length); at += length;
+    }
+    at += 21;
+    uint32_t size = (uint32_t)at - 32;
+    bytes[4] = (unsigned char)(size >> 24); bytes[5] = (unsigned char)(size >> 16);
+    bytes[6] = (unsigned char)(size >> 8); bytes[7] = (unsigned char)size;
+    sound_binary(relative, bytes, at);
+}
+
 int main(void)
 {
     fixture f;
@@ -3705,6 +3728,39 @@ int main(void)
         json, strlen(json), &paths, &report, error, sizeof(error)));
     assert(paths.incomplete && has(&paths, "generated/image/image/absent.bimage"));
     assert(strstr(report.first_gap, "candidate and original resource sources are absent"));
+    /* With no catalogued or supplied file, map coverage admits what the library
+     * link admits: a verified engine-created image and a SnapMap row registered
+     * without data. An unlisted name or a campaign-only row keeps its gap. */
+    {
+        sh_package_source_admission admission = {NULL, admit_intrinsic};
+        char temporary[MAX_PATH], base[MAX_PATH + 32];
+        json = "{\"targetType\":\"idImage\",\"value\":\"_black\"}";
+        assert(sh_package_source_graph_with_contracts(&compiled, NULL, original, &f, registry, (uintptr_t)f.reflection,
+            NULL, NULL, &admission, json, strlen(json), &paths, &report, error, sizeof(error)));
+        assert(!paths.count && !report.gaps && !paths.incomplete);
+        assert(sh_package_source_graph(&compiled, NULL, original, &f, registry, (uintptr_t)f.reflection,
+            json, strlen(json), &paths, &report, error, sizeof(error)) && paths.incomplete);
+        json = "{\"targetType\":\"idImage\",\"value\":\"_unlisted\"}";
+        assert(sh_package_source_graph_with_contracts(&compiled, NULL, original, &f, registry, (uintptr_t)f.reflection,
+            NULL, NULL, &admission, json, strlen(json), &paths, &report, error, sizeof(error)) && paths.incomplete);
+        assert(GetTempPathA(sizeof(temporary), temporary));
+        snprintf(root, sizeof(root), "%ssmp-fileless-%lu-%llu", temporary, GetCurrentProcessId(), GetTickCount64());
+        assert(CreateDirectoryA(root, NULL));
+        fileless_catalog("base/snap_gameresources.pindex", "textures/registered");
+        fileless_catalog("base/gameresources.pindex", "textures/campaign");
+        create("base/snap_gameresources.resources", ""); create("base/snap_gameresources.patch", "");
+        create("base/gameresources.resources", ""); create("base/gameresources.patch", "");
+        snprintf(base, sizeof(base), "%s/base", root);
+        sh_resource_catalog *catalog = sh_resource_catalog_open(base, error, sizeof(error)); assert(catalog);
+        json = "{\"targetType\":\"idImage\",\"value\":\"textures/registered\"}";
+        assert(sh_package_source_graph(&compiled, catalog, original, &f, registry, (uintptr_t)f.reflection,
+            json, strlen(json), &paths, &report, error, sizeof(error)));
+        assert(!paths.count && !report.gaps && !paths.incomplete);
+        json = "{\"targetType\":\"idImage\",\"value\":\"textures/campaign\"}";
+        assert(sh_package_source_graph(&compiled, catalog, original, &f, registry, (uintptr_t)f.reflection,
+            json, strlen(json), &paths, &report, error, sizeof(error)) && paths.incomplete);
+        sh_resource_catalog_close(catalog); cleanup();
+    }
     json = "{\"targetType\":\"idImage\",\"value\":\"image/body\"}";
     /* Private binary identities retain all compiler-assigned companions. An
      * unrelated payload in the same complete compilation is not required. */
@@ -3878,7 +3934,7 @@ int main(void)
             sh_decl_registry_source sound_registry={&sound_fixture,read_memory,(uintptr_t)sound_fixture.registry,NULL};
             assert(sh_package_source_graph_with_contracts(&compiled,NULL,sound_original,&sound_fixture,
                 sound_registry,(uintptr_t)sound_fixture.reflection,
-                NULL,&audio,json,strlen(json),&paths,&report,error,sizeof(error)));
+                NULL,&audio,NULL,json,strlen(json),&paths,&report,error,sizeof(error)));
             if(paths.incomplete || report.gaps || report.references!=1)
                 fprintf(stderr,"audio source closure: references=%zu gaps=%zu %s\n",report.references,report.gaps,report.first_gap);
             assert(!paths.incomplete && !report.gaps && report.references==1);

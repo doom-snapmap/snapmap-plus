@@ -68,10 +68,20 @@ int sh_package_source_graph_with_shader(const sh_package_compilation *compiled,
     const sh_package_source_shader *shader, const char *json, size_t length,
     sh_package_references *out, sh_package_source_graph_report *report,
     char *error, size_t capacity);
+/* The library link's admission of a verified engine-created identity with no
+ * physical source, such as an intrinsic image. It is asked only after no
+ * catalogued or supplied file exists; 1 admits, 0 is unsupported, -1 fails.
+ * Callback/context are borrowed for the walk. */
+typedef struct sh_package_source_admission {
+    void *context;
+    int (*admit)(void *context, size_t scope, const char *family, const char *name,
+        unsigned char semantics[32], char *error, size_t capacity);
+} sh_package_source_admission;
 int sh_package_source_graph_with_contracts(const sh_package_compilation *compiled,
     const sh_resource_catalog *catalog, sh_package_baseline_reader original,
     void *original_context, sh_decl_registry_source registry, uintptr_t reflection,
     const sh_package_source_shader *shader, const sh_package_source_audio *audio,
+    const sh_package_source_admission *admission,
     const char *json, size_t length, sh_package_references *out,
     sh_package_source_graph_report *report, char *error, size_t capacity);
 /* Keep one immutable scope and native metadata snapshot through both the graph
