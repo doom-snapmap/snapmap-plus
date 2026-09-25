@@ -291,6 +291,12 @@ sh_package_compilation *sh_package_compilation_project(const sh_package_sources 
 sh_package_compilation *sh_package_compilation_overlay(
     const sh_package_compilation *local, const sh_package_compilation *map,
     char *error, size_t error_capacity);
+/* Unchanged SnapMap originals stay native: drop resources whose exact bytes the
+ * game already serves under the same identity (not renamed, restored, composed
+ * or aliased), and the bound-dependency entries naming them. Publishing them
+ * would re-register engine-owned declarations and reload their consumers for
+ * no change. Order is kept. Returns the number dropped. */
+size_t sh_package_compilation_prune_native(sh_package_compilation *compiled);
 /* Retain removed SnapMap or built-in product identities with original bytes so
  * native refresh also rebuilds their existing objects. Neither input changes
  * on failure. Campaign imports and new identities have no SnapMap original. */

@@ -286,6 +286,46 @@ static int restoration_baseline(void *context, const char *path, unsigned char *
     return result;
 }
 
+/* Unchanged SnapMap originals stay native: the published provider drops them
+ * and the links naming them. Campaign, restored, renamed, composed and rebound
+ * resources remain. */
+static void test_prune_native(void)
+{
+    static const char *const paths[] = {"generated/decls/entitydef/changed.decl",
+        "generated/decls/material/composed.decl", "generated/decls/material/renamed.decl",
+        "generated/decls/material/restored.decl", "generated/decls/material/stock.decl",
+        "generated/decls/sound/bound.decl", "generated/image/campaign.bimage", "generated/image/stock.bimage"};
+    sh_package_compilation *compiled = calloc(1, sizeof(*compiled));
+    CHECK(compiled); if (!compiled) return;
+    compiled->resources = calloc(8, sizeof(*compiled->resources)); compiled->resource_count = 8;
+    CHECK(compiled->resources); if (!compiled->resources) { free(compiled); return; }
+    for (size_t i = 0; i < 8; i++) {
+        sh_compiled_resource *r = compiled->resources + i;
+        r->engine_path = _strdup(paths[i]); r->owns_engine_path = 1; r->source = SIZE_MAX;
+        r->native_original = 1; r->baseline_known = 1;
+    }
+    sh_compiled_resource *changed = compiled->resources;
+    changed->native_original = 0;
+    changed->bound_dependencies = calloc(3, sizeof(char *)); changed->bound_dependency_count = 3;
+    changed->bound_dependencies[0] = _strdup("generated/decls/material/stock.decl");
+    changed->bound_dependencies[1] = _strdup("generated/image/campaign.bimage");
+    changed->bound_dependencies[2] = _strdup("generated/image/stock.bimage");
+    compiled->resources[1].composed = 1;
+    compiled->resources[2].original_path = _strdup("generated/decls/material/stock.decl");
+    compiled->resources[3].restored_original = 1;
+    compiled->resources[5].sound_authored_event = 7; compiled->resources[5].sound_event = 9;
+    compiled->resources[6].native_original = 0; compiled->resources[6].baseline_known = 2;
+    CHECK(sh_package_compilation_prune_native(compiled) == 2);
+    CHECK(compiled->resource_count == 6);
+    CHECK(!sh_package_compilation_find(compiled, "generated/decls/material/stock.decl"));
+    CHECK(!sh_package_compilation_find(compiled, "generated/image/stock.bimage"));
+    CHECK(sh_package_compilation_find(compiled, "generated/image/campaign.bimage"));
+    CHECK(sh_package_compilation_find(compiled, "generated/decls/material/restored.decl"));
+    CHECK(changed->bound_dependency_count == 1 && !strcmp(changed->bound_dependencies[0], "generated/image/campaign.bimage"));
+    CHECK(sh_package_compilation_prune_native(compiled) == 0 && compiled->resource_count == 6);
+    sh_package_compilation_free(compiled);
+}
+
 static void test_restoration(const sh_package_compilation *previous)
 {
     sh_package_sources empty_sources = {0};
@@ -746,6 +786,7 @@ int main(int argc, char **argv)
     }
     test_changes(compiled);
     test_restoration(compiled);
+    test_prune_native();
     test_builtin_composition(compiled);
     test_editor_wiring_collections();
     sh_package_compilation_free(compiled); compiled = NULL;

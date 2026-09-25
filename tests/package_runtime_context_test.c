@@ -1647,9 +1647,9 @@ static void test_historical_private_preparation(void)
     create("historical-equal/overrides/a/assets/generated/decls/entitydef/history/root.decl", historical_original);
     snprintf(authored, sizeof(authored), "%s/historical-equal", root);
     equal = sh_package_runtime_prepare_map(data, authored, error, sizeof(error)); CHECK(equal);
-    const sh_compiled_resource *unchanged = historical_resource(sh_package_map_plan_compilation(equal), historical_root);
-    CHECK(unchanged && unchanged->native_name && !strcmp(unchanged->native_name, "history/root") &&
-        !sh_package_owners_count(&unchanged->gameplay_owners));
+    /* An unchanged SnapMap original stays native: it is not published again,
+     * so it claims no name, path or gameplay ownership of its own. */
+    CHECK(!historical_resource(sh_package_map_plan_compilation(equal), historical_root));
     /* An unsupported registered custom reader must not fall back to publishing
      * a global old-name resource after private context linking fails. */
     create("historical-gap/overrides/a/package.json", "{\"id\":\"shared-id\",\"name\":\"Unknown custom reader\"}");

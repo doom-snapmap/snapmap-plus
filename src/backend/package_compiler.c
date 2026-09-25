@@ -2183,6 +2183,46 @@ bad:
     sh_package_compilation_free(out); return NULL;
 }
 
+static int pc_native_unchanged(const sh_compiled_resource *resource)
+{
+    return resource->native_original && resource->baseline_known == 1 && !resource->original_path &&
+        !resource->restored_original && !resource->composed && sh_package_resource_native_count(resource) <= 1 &&
+        resource->sound_event == resource->sound_authored_event;
+}
+
+size_t sh_package_compilation_prune_native(sh_package_compilation *compiled)
+{
+    size_t kept = 0, dropped = 0;
+    if (!compiled || (compiled->resource_count && !compiled->resources)) return 0;
+    for (size_t i = 0; i < compiled->resource_count; i++) {
+        if (pc_native_unchanged(compiled->resources + i)) { pc_resource_free(compiled->resources + i); dropped++; continue; }
+        if (kept != i) compiled->resources[kept] = compiled->resources[i];
+        kept++;
+    }
+    compiled->resource_count = kept;
+    if (!dropped) return 0;
+    /* A link to a native original resolves natively; nothing here serves it.
+     * Bound dependencies hold canonical engine paths of this ordered table. */
+    for (size_t i = 0; i < compiled->resource_count; i++) {
+        sh_compiled_resource *resource = compiled->resources + i;
+        size_t used = 0;
+        for (size_t d = 0; d < resource->bound_dependency_count; d++) {
+            char *path = resource->bound_dependencies[d];
+            size_t low = 0, high = compiled->resource_count;
+            int found = 0;
+            while (low < high && !found) {
+                size_t middle = low + (high - low) / 2;
+                int order = strcmp(path, compiled->resources[middle].engine_path);
+                if (!order) found = 1; else if (order < 0) high = middle; else low = middle + 1;
+            }
+            if (found) resource->bound_dependencies[used++] = path;
+            else free(path);
+        }
+        resource->bound_dependency_count = used;
+    }
+    return dropped;
+}
+
 int sh_package_compilation_restore_missing(sh_package_compilation *current,
     const sh_package_compilation *previous, sh_package_baseline_reader baseline,
     void *context, char *error, size_t error_capacity)

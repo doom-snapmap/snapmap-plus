@@ -826,6 +826,7 @@ static pr_provider *pr_prepare_deliveries(const char *data_root, const char *sou
     size_t invalid_package = SIZE_MAX, unserved_package = SIZE_MAX;
     sh_package_owners conflicted = {0};
     sh_package_library isolated = {0};
+    int library_output = 0;
     sh_package_provenance historical = {0}, authoring_contexts = {0};
     uintptr_t reflection = 0;
     pr_provider *provider = NULL;
@@ -1061,7 +1062,7 @@ static pr_provider *pr_prepare_deliveries(const char *data_root, const char *sou
             /* Accounted coverage gaps help diagnose a later refusal too. */
             if (!linked && isolated.coverage) backend_log(isolated.coverage);
             if (linked) {
-                compiled = isolated.compiled; isolated.compiled = NULL;
+                compiled = isolated.compiled; isolated.compiled = NULL; library_output = 1;
             }
         } else
             compiled = sh_package_compile_with(sources, &environment, error, sizeof(error));
@@ -1138,6 +1139,15 @@ static pr_provider *pr_prepare_deliveries(const char *data_root, const char *sou
 #endif
     if (source_root && !contexts && !pr_legacy_bindings(compiled, catalog, &isolated.bindings)) {
         snprintf(error, sizeof(error), "cannot retain the map's historical source context"); goto done;
+    }
+    /* A linked library holds every scope's complete closure; its unchanged
+     * SnapMap originals stay native rather than being published again. */
+    if (library_output) {
+        size_t native = sh_package_compilation_prune_native(compiled);
+        char line[160];
+        snprintf(line, sizeof(line), "package library: %zu published resources; %zu unchanged SnapMap resources stay native",
+            compiled->resource_count, native);
+        backend_log(line);
     }
     if (!pr_cache_resources(compiled, data_root, error, sizeof(error))) goto done;
     provider = calloc(1, sizeof(*provider));
