@@ -2587,6 +2587,13 @@ static void test_library(fixture *f, sh_decl_registry_source registry)
     sh_package_library_free(&library); sh_package_sources_free(sources); cleanup(); assert(!failures);
 }
 
+/* A stock parent editor definition with a complete property list, and a child
+ * that patches one parent property by index (like demons/archvile_enc). */
+static const char *demo_parent_original = "{ edit = { target = \"parent-only\"; propertySheets = { num = 1; "
+    "item[0] = { properties = { num = 2; item[0] = { path = \"health\"; type = \"float\"; } "
+    "item[1] = { path = \"speed\"; type = \"float\"; } } } } } }";
+static const char *demo_child_original = "{ inherit = \"demo_parent\"; edit = { target = \"parent-only\"; "
+    "propertySheets = { item[0] = { properties = { item[1] = { descriptionTag = \"#str_child\"; } } } } } }";
 static const char *rebound_selector = "{ edit = { propertySheets = { num = 1; item[0] = { properties = { num = 1; "
     "item[0] = { path = \"mode\"; type = \"string\"; inspector = \"behavior\"; } } } } } }";
 static int contribution_original(void *context, const char *path, unsigned char **body, size_t *length)
@@ -2605,6 +2612,10 @@ static int contribution_original(void *context, const char *path, unsigned char 
         text = "{ edit = { mode = \"stock\"; validEncounters = { num = 0; } } }";
     else if (!strcmp(path, "generated/decls/entitydef/root.decl"))
         text = "{ class = \"Entity\"; edit = { target = \"local-only\"; } }";
+    else if (!strcmp(path, "generated/decls/snapeditorentitydef/demo_parent.decl"))
+        text = demo_parent_original;
+    else if (!strcmp(path, "generated/decls/snapeditorentitydef/demo_child.decl"))
+        text = demo_child_original;
     if (!text) return library_original(context, path, body, length);
     *length = strlen(text); *body = (unsigned char *)_strdup(text); return *body ? 1 : -1;
 }
@@ -2895,6 +2906,93 @@ static void test_bound_contributions(fixture *f, sh_decl_registry_source registr
         sh_package_library_free(&restored); sh_package_provenance_free(&recorded);
     }
     for (size_t i = 0; i < sources->file_count; i++) if (!sources->files[i].directory) assert(sh_package_source_verify(sources->files + i));
+    sh_package_library_free(&library); sh_package_sources_free(sources); cleanup(); assert(!failures);
+}
+
+/* The user's editor package changed demons/demon_base's placement flags and
+ * demons/archvile_enc's placeable flag, keeping archvile's stock sparse patch
+ * of its parent's property list. Different parent bindings with one parent
+ * declaration compose; a different parent declaration cannot, and then only
+ * its sole contributing package is left unserved, with the unit named. */
+static void test_inherited_editor_parent(fixture *f, sh_decl_registry_source registry)
+{
+    char temporary[MAX_PATH], error[1024];
+    source_link_fixture originals = {f};
+    sh_package_compile_environment env = {0}; sh_package_library library = {0};
+    size_t unserved = SIZE_MAX;
+    assert(GetTempPathA(sizeof(temporary), temporary));
+    snprintf(root, sizeof(root), "%ssmp-editor-parent-%lu-%llu", temporary, GetCurrentProcessId(), GetTickCount64());
+    assert(CreateDirectoryA(root, NULL));
+    create("overrides/editor/package.json", "{\"id\":\"local.editor\",\"name\":\"editor\"}");
+    create("overrides/editor/assets/generated/decls/snapeditorentitydef/demo_parent.decl",
+        "{ edit = { target = \"root\"; propertySheets = { num = 1; item[0] = { properties = { num = 2; "
+        "item[0] = { path = \"health\"; type = \"float\"; } item[1] = { path = \"speed\"; type = \"float\"; } } } } } }");
+    create("overrides/editor/assets/generated/decls/snapeditorentitydef/demo_child.decl",
+        "{ inherit = \"demo_parent\"; edit = { target = \"root\"; "
+        "propertySheets = { item[0] = { properties = { item[1] = { descriptionTag = \"#str_package\"; } } } } } }");
+    sh_package_sources *sources = sh_package_sources_scan(root, error, sizeof(error)); assert(sources);
+    env.baseline = contribution_original; env.baseline_context = &originals;
+    env.unserved_package = &unserved;
+    int ok = sh_package_library_compile(sources, &env, NULL, contribution_original, &originals,
+        registry, (uintptr_t)f->reflection, NULL, &library, error, sizeof(error));
+    if (!ok) fprintf(stderr, "inherited editor parent: %s\n", error);
+    assert(ok && unserved == SIZE_MAX);
+    size_t children = 0;
+    for (size_t i = 0; i < library.compiled->resource_count; i++) {
+        const sh_compiled_resource *file = library.compiled->resources + i;
+        const char *authored = file->original_path ? file->original_path : file->engine_path;
+        if (strcmp(authored, "generated/decls/snapeditorentitydef/demo_child.decl")) continue;
+        children++;
+        /* The patch keeps addressing the parent's second property by index. */
+        sh_decl_node *tree = sh_decl_tree_parse((sh_decl_source){(char *)file->body, file->body_length}, NULL, 0);
+        const sh_decl_node *properties = sh_decl_tree_member(sh_decl_tree_member(sh_decl_tree_member(
+            sh_decl_tree_member(tree, "edit"), "propertySheets"), "item[0]"), "properties");
+        assert(properties && !sh_decl_tree_member(properties, "num") &&
+            !strcmp(node_value(sh_decl_tree_member(sh_decl_tree_member(properties, "item[1]"), "descriptionTag")), "#str_package"));
+        const char *parent = node_value(sh_decl_tree_member(tree, "inherit"));
+        const sh_compiled_resource *bound = named_resource(library.compiled, "snapeditorentitydef", parent);
+        assert(bound && strstr((char *)bound->body, "\"speed\""));
+        sh_decl_tree_free(tree);
+    }
+    assert(children >= 1);
+    sh_package_library_free(&library); sh_package_sources_free(sources);
+    /* A different parent declaration is a different layout: the patch cannot
+     * be composed with the stock child's. */
+    create("overrides/editor/assets/generated/decls/snapeditorentitydef/other_parent.decl",
+        "{ edit = { target = \"root\"; propertySheets = { num = 1; item[0] = { properties = { num = 1; "
+        "item[0] = { path = \"armor\"; type = \"float\"; } } } } } }");
+    create("overrides/editor/assets/generated/decls/snapeditorentitydef/demo_child.decl",
+        "{ inherit = \"other_parent\"; edit = { target = \"root\"; "
+        "propertySheets = { item[0] = { properties = { item[0] = { descriptionTag = \"#str_other\"; } } } } } }");
+    create("overrides/zzz-peer/package.json", "{\"id\":\"local.peer\",\"name\":\"peer\"}");
+    create("overrides/zzz-peer/assets/generated/decls/entitydef/peer_only.decl", "{ class = \"Entity\"; edit = { } }");
+    /* The peer changes the stock parent too and extends the stock child: the
+     * stock child it reaches in its own scope is not the peer's contribution. */
+    create("overrides/zzz-peer/assets/generated/decls/snapeditorentitydef/peer_grandchild.decl",
+        "{ inherit = \"demo_child\"; edit = { target = \"root\"; } }");
+    create("overrides/zzz-peer/assets/generated/decls/snapeditorentitydef/demo_parent.decl",
+        "{ edit = { target = \"modifier-child\"; propertySheets = { num = 1; item[0] = { properties = { num = 2; "
+        "item[0] = { path = \"health\"; type = \"float\"; } item[1] = { path = \"speed\"; type = \"float\"; } } } } } }");
+    sources = sh_package_sources_scan(root, error, sizeof(error)); assert(sources);
+    assert(!sh_package_library_compile(sources, &env, NULL, contribution_original, &originals,
+        registry, (uintptr_t)f->reflection, NULL, &library, error, sizeof(error)));
+    if (unserved >= sources->package_count || !strstr(error, "snapeditorentitydef demo_child: edit.propertySheets: "))
+        fprintf(stderr, "different editor parent: %s\n", error);
+    assert(unserved < sources->package_count && !strcmp(sources->packages[unserved].name, "editor"));
+    assert(strstr(error, "snapeditorentitydef demo_child: edit.propertySheets: "));
+    /* Without that package the healthy peer compiles. */
+    assert(sh_package_sources_remove(sources, unserved));
+    assert(sh_package_library_compile(sources, &env, NULL, contribution_original, &originals,
+        registry, (uintptr_t)f->reflection, NULL, &library, error, sizeof(error)) && unserved == SIZE_MAX);
+    sh_package_library_free(&library); sh_package_sources_free(sources);
+    /* Two packages disagreeing about the parent blame neither. */
+    create("overrides/zzz-peer/assets/generated/decls/snapeditorentitydef/demo_child.decl",
+        "{ inherit = \"demo_parent\"; edit = { target = \"root\"; "
+        "propertySheets = { item[0] = { properties = { item[1] = { descriptionTag = \"#str_peer\"; } } } } } }");
+    sources = sh_package_sources_scan(root, error, sizeof(error)); assert(sources);
+    assert(!sh_package_library_compile(sources, &env, NULL, contribution_original, &originals,
+        registry, (uintptr_t)f->reflection, NULL, &library, error, sizeof(error)));
+    assert(unserved == SIZE_MAX && strstr(error, "snapeditorentitydef demo_child: "));
     sh_package_library_free(&library); sh_package_sources_free(sources); cleanup(); assert(!failures);
 }
 
@@ -3777,6 +3875,7 @@ int main(void)
     test_absent_declaration_defaults();
     test_contribution_projection();
     test_bound_contributions(&f, registry);
+    test_inherited_editor_parent(&f, registry);
     test_material_path(&f, registry);
     test_library_atlas(&f, registry);
     {

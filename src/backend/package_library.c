@@ -78,6 +78,7 @@ typedef struct pl_build {
     const sh_package_provenance *contexts;
     sh_package_native_registry *identities;
     pl_contributions *contributions;
+    size_t contribution_owner; /* sole authored contributor of a failed group */
 } pl_build;
 
 static void pl_native_close(pl_build *b)
@@ -789,15 +790,21 @@ done:
     if (nodes) for (size_t i = 0; i < count; i++) free((void *)nodes[i].edges);
     free(nodes); free(local); free(retained); return ok;
 }
+/* Contribution headers stay lexical; their captured scope is unchanged. The
+ * entity reader resolves its inherited native class before walking fields.
+ * An inspector or editor definition's sparse inherited list indexes its parent
+ * declaration's list in whichever bound variant a scope holds, so composition
+ * compares parents by name; a parent differing only in other fields (a
+ * placement flag) is not a different layout. Restore re-resolves each scope. */
+static int pl_lexical_inherit(const pl_contributions *c, size_t unit, const char *slot)
+{ return !strcmp(slot, "inherit") && sh_package_editor_contribution_phase(c->inputs.units[unit].family); }
 static int pl_token_reference(void *context, const char *slot, const char *family,
     const char *name, const char **replacement)
 {
     pl_contribution_walk *walk = context;
     size_t target;
     if (!pl_bound_target(walk->graph, walk->unit, slot, family, name, &target, walk->error, walk->capacity)) return -1;
-    /* The entity reader resolves its inherited native class before walking
-     * fields. Leave this header lexical; its captured scope is unchanged. */
-    if (!strcmp(slot, "inherit") && !strcmp(walk->graph->inputs.units[walk->unit].family, "entitydef")) return 0;
+    if (pl_lexical_inherit(walk->graph, walk->unit, slot)) return 0;
     *replacement = walk->graph->tokens[walk->graph->classes.nodes[target]]; return 1;
 }
 static int pl_capture_edge(pl_contribution_unit *capture, const char *slot, size_t target)
@@ -824,8 +831,8 @@ static int pl_restore_reference(void *context, const char *slot, const char *fam
         target = c->classes.representatives[i]; break;
     }
     if (target == SIZE_MAX) {
-        /* Only a deliberately un-tokenized inherited class remains lexical. */
-        if (strcmp(slot, "inherit") || strcmp(c->inputs.units[walk->unit].family, "entitydef") ||
+        /* Only a deliberately un-tokenized inherited header remains lexical. */
+        if (!pl_lexical_inherit(c, walk->unit, slot) ||
             !pl_bound_target(c, walk->unit, slot, family, name, &target, walk->error, walk->capacity)) {
             snprintf(walk->error, walk->capacity, "editor contribution contains an uncaptured reference: %s", slot); return -1;
         }
@@ -1048,6 +1055,30 @@ static int pl_edges_same(pl_contributions *c, size_t unit, const pl_contribution
     return 1;
 }
 
+/* A group the product cannot compose names its declaration. When one package
+ * alone supplies the group's authored members, its delivery stays unserved for
+ * this candidate and healthy peers compile without it; several contributors,
+ * or stock and product units alone, blame nobody. */
+static void pl_contribution_failure(pl_build *b, const sh_package_sources *sources,
+    const size_t *members, size_t count, const sh_package_link_unit *input, char *error, size_t capacity)
+{
+    pl_contributions *c = b->contributions;
+    char reason[768];
+    size_t owner = SIZE_MAX;
+    snprintf(reason, sizeof(reason), "%s", error);
+    snprintf(error, capacity, "%s %s: %s", input->family, input->name, reason);
+    for (size_t i = 0; i < count; i++) {
+        const sh_package_link_unit *unit = c->inputs.units + members[i];
+        size_t scope = c->inputs.scopes[members[i]];
+        int authored = 0;
+        for (size_t f = 0; f < unit->file_count; f++) if (unit->files[f]->source_count) authored = 1;
+        if (!authored || scope >= b->authored_count || scope >= sources->component_count) continue;
+        if (owner == SIZE_MAX) owner = sources->components[scope].owner;
+        else if (owner != sources->components[scope].owner) return;
+    }
+    b->contribution_owner = owner;
+}
+
 static int pl_contribution_group(pl_build *b, const sh_package_sources *sources,
     const size_t *members, size_t count, char *error, size_t capacity)
 {
@@ -1079,7 +1110,7 @@ static int pl_contribution_group(pl_build *b, const sh_package_sources *sources,
         const sh_package_link_unit *input = c->inputs.units + unit;
         char *body = sh_package_editor_contributions(input->family, base, parts, source_count,
             texts[i], !sh_package_source_link_shared(c->source)[unit], &length, error, capacity);
-        if (!body) goto done;
+        if (!body) { pl_contribution_failure(b, sources, members, count, input, error, capacity); goto done; }
         pl_contribution_walk walk = {c, unit, NULL, NULL, pending + i, error, capacity};
         unsigned char *native = sh_package_source_link_bind_derived(c->source, unit, (unsigned char *)body,
             length, pl_restore_reference, &walk, pl_derived_exists, &walk, &native_length, error, capacity);
@@ -1302,6 +1333,7 @@ static int pl_compile(const sh_package_sources *sources, const sh_package_proven
     char *error, size_t capacity)
 {
     pl_build b = {0};
+    b.contribution_owner = SIZE_MAX;
     sh_package_source_link_native source_native = {&b, pl_admit, pl_semantics,
         native ? native->source.shader : NULL, pl_material_companions, pl_material_seeds, pl_implicit, pl_source_owners};
     sh_package_compile_environment env;
@@ -1411,7 +1443,11 @@ static int pl_compile(const sh_package_sources *sources, const sh_package_proven
     if (!pl_coverage(&b, sources, &out->coverage)) {
         snprintf(error, capacity, "cannot account package coverage"); goto done;
     }
-    if (!pl_contributions_open(&b, sources, error, capacity)) goto done;
+    if (!pl_contributions_open(&b, sources, error, capacity)) {
+        if (!contexts && b.contribution_owner != SIZE_MAX && environment->unserved_package)
+            *environment->unserved_package = b.contribution_owner;
+        goto done;
+    }
     if (contexts && !pl_document_shared(&b, original, original_context, error, capacity)) goto done;
     pl_phase(out, SH_PACKAGE_LIBRARY_PHASE_CONTRIBUTIONS, &mark);
     /* Authored documents carry their own selector/inspector behavior. Changed
