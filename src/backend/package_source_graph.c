@@ -1111,9 +1111,15 @@ static int sg_bind_typed(void *context, const char *slot, sh_decl_value_type typ
     }
     if (result < 0) {
         char reason[384];
-        snprintf(reason, sizeof(reason), "native source binding could not be resolved%s%s%s%s",
-            reference.resource.name ? ": " : "", reference.resource.type ? reference.resource.type : "",
-            reference.resource.name ? " " : "", reference.resource.name ? reference.resource.name : "");
+        /* A name with no native identity is reported as authored, so a refused
+         * map names what it lacks. */
+        if (reference.resource.name)
+            snprintf(reason, sizeof(reason), "native source binding could not be resolved: %s %s",
+                reference.resource.type ? reference.resource.type : "", reference.resource.name);
+        else if (name && length && length != SIZE_MAX && !memchr(name, 0, length))
+            snprintf(reason, sizeof(reason), "native source binding could not be resolved for \"%.*s\"",
+                (int)(length > 256 ? 256 : length), name);
+        else snprintf(reason, sizeof(reason), "native source binding could not be resolved");
         sg_gap(binding->reader, slot, type.name, reason);
     }
     sh_decl_native_reference_clear(&reference); return result;

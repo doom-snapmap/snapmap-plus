@@ -382,6 +382,15 @@ static void test_bind(fixture *f, sh_package_compilation *compiled, sh_decl_regi
             &length, &result, error, sizeof(error));
         assert(!bound && !length && !result.changed); f->unreadable = NULL;
     }
+    {
+        /* A map root with no native identity refuses the map and names it. */
+        const char *map = "{\"actor\":{\"targetType\":\"idDeclEntityDef\",\"inherit\":\"absent/boss\"}}";
+        char *bound = sh_package_source_bind_map(reader, map, strlen(map), map_saved_binding, NULL,
+            &length, &result, error, sizeof(error));
+        if (bound || !strstr(error, "map/root")) fprintf(stderr, "absent map root: %s\n", error);
+        assert(!bound && result.inspection.gaps && strstr(error, "map/root") &&
+            strstr(error, "resolved for \"absent/boss\"") && !strcmp(error + strlen(error) - 13, "\"absent/boss\""));
+    }
     out = sh_package_source_bind(reader, "entitydef", "example", (const unsigned char *)entity,
         strlen(entity), bind_reference, &bindings, &length, &result, error, sizeof(error));
     if (!out) fprintf(stderr, "%s\n", error);

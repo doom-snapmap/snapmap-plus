@@ -1669,7 +1669,9 @@ static int preflight_load(void *editor, const void *save_name)
         /* Availability changes whether consent is needed, not the native load
          * contract. In particular, covered maps must commit their prepared
          * inventory and cancel native failures just like installed maps. */
-        backend_log("MPKG: all required map resources are available; continuing without package installation");
+        backend_log(g_pending_map.plan ?
+            "MPKG: all required map resources are available; continuing without package installation" :
+            "MPKG: the map carries no package context; continuing its native load");
         enter = 1;
 done:;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
