@@ -146,6 +146,63 @@ static int dj_array(dj_walk *walk, const char *json, size_t length,
     return 1;
 }
 
+/* A fixed native array serializes as an object holding only the elements that
+ * differ from their defaults, named as in declaration text: the item spelling
+ * or the field's own name, then the index. spawnOrientation, for example, is
+ * {"mat":{"mat[0]":{"x":0,"y":1},"mat[1]":{"x":-1,"y":0}}}. */
+typedef struct dj_fixed {
+    dj_walk *walk;
+    const sh_decl_value_shape *shape;
+    sh_decl_value_type type;
+    const char *path, *prefix;
+    size_t prefix_length;
+    unsigned depth;
+} dj_fixed;
+
+static int dj_fixed_members(void *context, const sh_json_field_span *fields, size_t count, unsigned depth)
+{
+    dj_fixed *array = context;
+    size_t i;
+    (void)depth;
+    for (i = 0; i < count; i++) {
+        const char *key = fields[i].key, *reason = NULL;
+        size_t length = fields[i].key_length, at, index = 0;
+        char *child_path;
+        int ok;
+        if (length < array->prefix_length + 3 || memcmp(key, array->prefix, array->prefix_length) ||
+            key[array->prefix_length] != '[' || key[length - 1] != ']') reason = "unsupported collection member";
+        for (at = array->prefix_length + 1; !reason && at < length - 1; at++) {
+            unsigned digit = (unsigned char)key[at] - (unsigned)'0';
+            if (digit > 9 || index > (SIZE_MAX - digit) / 10) reason = "unsupported collection member";
+            else index = index * 10 + digit;
+        }
+        if (!reason && array->shape->count_known && index >= array->shape->count)
+            reason = "collection index exceeds native count";
+        child_path = dj_path(array->path, key);
+        if (!child_path) return 0;
+        ok = reason ? dj_gap(array->walk, child_path, array->type, reason) :
+            dj_value(array->walk, fields[i].value, fields[i].value_length, array->shape->element,
+                child_path, array->depth + 1);
+        free(child_path);
+        if (!ok) return 0;
+    }
+    return 1;
+}
+
+static int dj_fixed_array(dj_walk *walk, const char *json, size_t length,
+                          const sh_decl_value_shape *shape, sh_decl_value_type type,
+                          const char *path, unsigned depth)
+{
+    const char *field = strrchr(path, '.');
+    dj_fixed array = {walk, shape, type, path, shape->item_key, 0, depth};
+    if (!array.prefix) array.prefix = field ? field + 1 : path;
+    array.prefix_length = strcspn(array.prefix, "[");
+    /* Counted lists serialize as JSON arrays; no keyed form is verified. */
+    if (shape->count_key || !shape->element.name || json[length - 1] != '}')
+        return dj_gap(walk, path, type, "collection JSON requires a verified array reader");
+    return sh_native_json_visit_objects_filtered(json, length, 128, dj_fixed_members, dj_shallow, &array);
+}
+
 static int dj_value(dj_walk *walk, const char *json, size_t length,
                     sh_decl_value_type type, const char *path, unsigned depth)
 {
@@ -177,7 +234,8 @@ static int dj_value(dj_walk *walk, const char *json, size_t length,
         free(name); return ok;
     }
     if (shape.kind == SH_DECL_VALUE_COLLECTION)
-        return dj_array(walk, json, length, &shape, type, path, depth);
+        return length && json[0] == '{' ? dj_fixed_array(walk, json, length, &shape, type, path, depth) :
+            dj_array(walk, json, length, &shape, type, path, depth);
     if (shape.kind == SH_DECL_VALUE_SCRIPT) {
         if (length && (json[0] == '"' || json[0] == 'n')) {
             sh_decl_value_type selected;

@@ -19,6 +19,9 @@ static int describe(void *context, sh_decl_value_type type, sh_decl_value_shape 
     else if (!strcmp(type.name, "References")) {
         shape->kind = SH_DECL_VALUE_COLLECTION; shape->element = (sh_decl_value_type){"Resource", "*"};
         shape->item_key = "item"; shape->count_key = "num";
+    } else if (!strcmp(type.name, "Fixed")) {
+        shape->kind = SH_DECL_VALUE_COLLECTION; shape->element = (sh_decl_value_type){"Resource", "*"};
+        shape->count = 3; shape->count_known = 1;
     } else if (!strcmp(type.name, "Resource") || !strcmp(type.name, "idDeclEntityDef"))
         shape->kind = SH_DECL_VALUE_REFERENCE;
     return 1;
@@ -31,6 +34,7 @@ static int field(void *context, sh_decl_value_type type, const char *key, sh_dec
     if (!strcmp(key, "modelInfo")) out->name = "ModelInfo";
     else if (!strcmp(key, "resource")) *out = (sh_decl_value_type){"Resource", "*"};
     else if (!strcmp(key, "references")) out->name = "References";
+    else if (!strcmp(key, "slots")) out->name = "Fixed";
     else if (!strcmp(key, "opaque")) out->name = "Unsupported";
     return 1;
 }
@@ -90,6 +94,14 @@ static void json_bindings(void)
     f = (fixture){"scope/red/", 0, 2};
     out = sh_decl_rebind_json((sh_decl_source){json, strlen(json)}, entity, &schema, resolve, &f, &length, &result);
     assert(!out && !length && !result.changed && result.dependencies.aborted && f.calls == 2);
+
+    /* A fixed array keeps its native keyed members; each element rebinds in place. */
+    const char *fixed = "{\"slots\":{\"slots[0]\":\"material/red\",\"slots[2]\":\"sound/wind\"}}";
+    f = (fixture){"scope/red/"};
+    out = sh_decl_rebind_json((sh_decl_source){fixed, strlen(fixed)}, entity, &schema, resolve, &f, &length, &result);
+    assert(out && !strcmp(out, "{\"slots\":{\"slots[0]\":\"scope/red/material/red\",\"slots[2]\":\"scope/red/sound/wind\"}}"));
+    assert(result.changed == 2 && f.calls == 2);
+    free(out);
 }
 
 static void declaration_bindings(void)

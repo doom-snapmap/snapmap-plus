@@ -27,6 +27,10 @@ static int describe(void *context, sh_decl_value_type type, sh_decl_value_shape 
         shape->kind = SH_DECL_VALUE_COLLECTION;
         shape->element.name = "idDeclEntityDef"; shape->element.ops = "*";
         shape->count = 3; shape->count_known = 1;
+    } else if (!strcmp(type.name, "TestSlotFixed")) {
+        shape->kind = SH_DECL_VALUE_COLLECTION;
+        shape->element.name = "TestSlot"; shape->element.ops = "";
+        shape->count = 2; shape->count_known = 1;
     } else if (!strcmp(type.name, "TestArrayList")) {
         shape->kind = SH_DECL_VALUE_COLLECTION;
         shape->element.name = "TestFixedRefs"; shape->element.ops = "";
@@ -45,6 +49,7 @@ static int field(void *context, sh_decl_value_type owner, const char *key, sh_de
         else if (!strcmp(key, "startingInventory")) out->name = "TestSlotList";
         else if (!strcmp(key, "name")) out->name = "idStr";
         else if (!strcmp(key, "links")) out->name = "TestFixedRefs";
+        else if (!strcmp(key, "slots")) out->name = "TestSlotFixed";
         else if (!strcmp(key, "arrays")) out->name = "TestArrayList";
         else if (!strcmp(key, "custom")) out->name = "UnsupportedTemplate";
         else if (!strcmp(key, "unknownProperty")) return -1;
@@ -134,6 +139,20 @@ static void json_checks(void)
     memset(&f, 0, sizeof(f));
     assert(!inspect_json("{\"links\":[\"a\",\"b\",\"c\",\"outside\"]}", &f, &result));
     assert(result.references == 3 && result.gaps == 1 && !result.aborted && !strstr(f.references, "outside"));
+    /* Native fixed arrays serialize as objects of their non-default elements. */
+    memset(&f, 0, sizeof(f));
+    assert(inspect_json("{\"links\":{\"links[0]\":\"entity/first\",\"links[2]\":\"entity/third\"},"
+        "\"slots\":{\"slots[1]\":{\"inventoryDecl\":\"ammo/second\",\"count\":2}}}", &f, &result));
+    assert(result.references == 3 && !result.gaps && !result.aborted);
+    assert(strstr(f.references, "edit.links.links[2]|idDeclEntityDef|entity/third\n"));
+    assert(strstr(f.references, "edit.slots.slots[1].inventoryDecl|idDeclInventory|ammo/second\n"));
+    memset(&f, 0, sizeof(f));
+    assert(!inspect_json("{\"links\":{\"links[3]\":\"entity/outside\",\"item[0]\":\"entity/misnamed\","
+        "\"links[x]\":\"entity/letter\",\"links[]\":\"entity/empty\",\"links[1]\":\"entity/kept\"}}", &f, &result));
+    assert(result.references == 1 && result.gaps == 4 && !result.aborted && strstr(f.references, "entity/kept"));
+    memset(&f, 0, sizeof(f));
+    assert(!inspect_json("{\"startingInventory\":{\"item[0]\":{\"inventoryDecl\":\"ammo/listed\"}}}", &f, &result));
+    assert(!result.references && result.gaps == 1 && !result.aborted);
     memset(&f, 0, sizeof(f)); f.refuse = 1;
     assert(!inspect_json(json, &f, &result) && result.aborted);
 }
