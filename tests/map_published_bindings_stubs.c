@@ -30,6 +30,8 @@ int sh_rawmap_preflight_loading_request(const char *json, size_t length, const s
 int sh_virtual_material_runtime_status(char *error, size_t capacity)
 { (void)error; (void)capacity; assert(0); return 0; }
 void sh_virtual_material_runtime_collect(void) { assert(0); }
+int sh_virtual_material_runtime_providers(char *error, size_t capacity)
+{ (void)error; (void)capacity; assert(0); return 0; }
 void *hook_prepare(void *target, void *detour, size_t stolen)
 { (void)target; (void)detour; (void)stolen; assert(0); return NULL; }
 void *hook_prepare_relative_call(void *target, void *detour, size_t stolen, size_t offset)

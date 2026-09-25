@@ -467,6 +467,10 @@ sh_resource_resident *sh_resource_resident_begin(const sh_package_changes *chang
 render_scope:
         phase = "renderer scope";
         if (!sh_render_scope_enter(g_rr.renderer, g_rr.thread, &pass->render)) goto done;
+        /* Private page providers must exist before any material that names
+         * one parses; the engine classifies the material by that name. */
+        phase = "virtual texture page providers";
+        if (!sh_virtual_material_runtime_providers(NULL, 0)) goto done;
         ok = 1;
 done:;
     } __except (EXCEPTION_EXECUTE_HANDLER) { ok = 0; }

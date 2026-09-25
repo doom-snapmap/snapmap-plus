@@ -34,6 +34,104 @@ static void *parse_material(size_t i)
 }
 static int keep_material(void *context, const char *name)
 { return context ? !strcmp(context, name) : -1; }
+
+/* Private page providers against an engine-shaped provider table. */
+enum { VT_STRIDE = 0x458, VT_PAGE = 0x199 };
+static unsigned char *vt_system;
+static void *vt_head;
+static int vt_builds, vt_releases, vt_fail, vt_owner;
+static const int vt_modes[3] = {0, 1, 2};
+static const char *vt_empty = "";
+static char vt_names[32][64], vt_paths[32][96];
+static void vt_text(unsigned char *p, size_t at, const char *text) { memcpy(p + at, &text, sizeof(text)); }
+static void vt_release(void *object)
+{
+    unsigned char *p = object; vt_releases++;
+    vt_text(p, 0x70, vt_empty); vt_text(p, 0x1a0, vt_empty); memset(p, 0, 16); memset(p + 0x3d8, 0, 8);
+}
+static void vt_quiesce(void *system) { assert(system == vt_system); }
+static unsigned char vt_set_source(void *object, const char *name, const char *path,
+    int mode, int kind, unsigned char direct, void *reader)
+{
+    unsigned char *p = object; int slot = (int)((p - vt_system) / VT_STRIDE);
+    const void *mode_object = vt_modes + mode; void *owner = &vt_owner;
+    assert(mode == 2 && kind == 2 && !direct && !reader && slot >= 2 && slot <= 30);
+    if (vt_fail) return 0;
+    vt_builds++;
+    snprintf(vt_names[slot], sizeof(vt_names[slot]), "%s", name);
+    snprintf(vt_paths[slot], sizeof(vt_paths[slot]), "%s", path);
+    vt_text(p, 0x1a0, vt_names[slot]); vt_text(p, 0x70, vt_paths[slot]);
+    memcpy(p, &kind, 4); memcpy(p + 8, &owner, 8); memcpy(p + 0x3d8, &mode_object, 8);
+    return 1;
+}
+static int vt_absent(void *context, const char *path, sh_package_file **file, char *error, size_t capacity)
+{ (void)context; (void)path; (void)error; (void)capacity; *file = NULL; return 0; }
+static void vt_put(unsigned char *p, uint64_t x, unsigned bytes)
+{ for (unsigned i = 0; i < bytes; i++) p[i] = (unsigned char)(x >> (i * 8)); }
+static void private_providers(void)
+{
+    static unsigned char mega2[VT_PAGE];
+    static const char atlas[] = "smp/vt/0123456789abcdef01234567";
+    static const char page_path[] = "virtualtextures/smp/vt/0123456789abcdef01234567_sq1.mega2";
+    const char *paths[21] = {page_path};
+    sh_compiled_resource member = {0}; sh_package_compilation scope = {0}; sh_package_sources inventory = {0};
+    sh_virtual_material_view *view, *previous = NULL; char error[512];
+    unsigned char **table;
+    /* A minimal valid mega2 member supplies the whole captured family. */
+    vt_put(mega2, 0xa63fbb21u, 4); vt_put(mega2 + 4, 2, 4); vt_put(mega2 + 0xc, 12, 4);
+    vt_put(mega2 + 0x38, 0x170, 8); vt_put(mega2 + 0x40, 0x180, 8); vt_put(mega2 + 0x48, 1, 4);
+    vt_put(mega2 + 0x4c, 2, 4); vt_put(mega2 + 0x58, 2, 4); vt_put(mega2 + 0x5c, 1, 4); vt_put(mega2 + 0x64, 2, 4);
+    vt_put(mega2 + 0x170, 0x188, 8); vt_put(mega2 + 0x178, 17, 8); vt_put(mega2 + 0x184, UINT32_MAX, 4);
+    memset(mega2 + 0x188, 0x5a, 17);
+    member.engine_path = "virtualtextures/_vmtr_sq1.mega2"; member.body = mega2; member.body_length = VT_PAGE;
+    member.source = SIZE_MAX; scope.resources = &member; scope.resource_count = 1; scope.sources = &inventory;
+    sh_virtual_page_source *pages = sh_virtual_page_source_open(&scope, "virtualtextures/_vmtr", vt_absent, NULL,
+        error, sizeof(error));
+    assert(pages);
+    sh_virtual_material_runtime_binding binding = {"private/stone", atlas, NULL, 0, pages, 2, 2, paths};
+    view = sh_virtual_material_runtime_prepare(&binding, 1, error, sizeof(error)); assert(view);
+    sh_virtual_page_source_release(pages);
+    /* Publication needs the provider layer before any private material parses. */
+    assert(!sh_virtual_material_runtime_publish(view, &previous, error, sizeof(error)) && strstr(error, "page providers"));
+    vt_system = calloc(1, 32 * VT_STRIDE + 32 * sizeof(void *)); assert(vt_system);
+    table = (unsigned char **)(vt_system + 32 * VT_STRIDE);
+    for (int slot = 0; slot < 32; slot++) {
+        table[slot] = vt_system + slot * VT_STRIDE; memcpy(table[slot] + 0x2c0, &slot, 4);
+        vt_text(table[slot], 0x70, vt_empty); vt_text(table[slot], 0x1a0, vt_empty);
+    }
+    {
+        const void *global_mode = vt_modes; void *owner = &vt_owner; int kind = 2;
+        vt_text(table[1], 0x1a0, "_vmtr"); vt_text(table[1], 0x70, "virtualtextures/_vmtr.pages");
+        memcpy(table[1], &kind, 4); memcpy(table[1] + 8, &owner, 8); memcpy(table[1] + 0x3d8, &global_mode, 8);
+    }
+    sh_vt_native native = {vt_system, VT_STRIDE, vt_set_source, vt_release, vt_quiesce, NULL, NULL, &vt_head};
+    assert(sh_vt_provider_bind(&native));
+    assert(sh_virtual_material_runtime_publish(view, &previous, error, sizeof(error)) && !previous);
+    /* The active view's private atlas is built once, then re-verified. */
+    assert(sh_virtual_material_runtime_providers(error, sizeof(error)) && vt_builds == 1);
+    assert(!strcmp(vt_names[2], atlas) && !strcmp(vt_paths[2], "virtualtextures/smp/vt/0123456789abcdef01234567.pages"));
+    assert(sh_virtual_material_runtime_providers(error, sizeof(error)) && vt_builds == 1);
+    sh_virtual_material_runtime_collect(); assert(!vt_releases); /* The active view keeps it. */
+    /* Retiring the view lets collect release its provider. */
+    assert(sh_virtual_material_runtime_publish(NULL, &previous, error, sizeof(error)) && previous == view);
+    assert(sh_virtual_material_runtime_retire(&previous) && !previous);
+    sh_virtual_material_runtime_collect(); assert(vt_releases == 1 && !g_vmr_views && !*vt_names[2] == 0);
+    assert(!strcmp(*(const char **)(table[2] + 0x1a0), ""));
+    /* A provider that cannot be built faults the active view's status. */
+    pages = sh_virtual_page_source_open(&scope, "virtualtextures/_vmtr", vt_absent, NULL, error, sizeof(error)); assert(pages);
+    binding.pages = pages;
+    view = sh_virtual_material_runtime_prepare(&binding, 1, error, sizeof(error)); assert(view);
+    sh_virtual_page_source_release(pages);
+    assert(sh_virtual_material_runtime_publish(view, &previous, error, sizeof(error)));
+    vt_fail = 1;
+    assert(!sh_virtual_material_runtime_providers(error, sizeof(error)) && strstr(error, "construction failed"));
+    assert(!sh_virtual_material_runtime_status(error, sizeof(error)) && strstr(error, "construction failed"));
+    vt_fail = 0;
+    assert(sh_virtual_material_runtime_publish(NULL, &previous, error, sizeof(error)) && previous == view);
+    assert(sh_virtual_material_runtime_retire(&previous));
+    sh_virtual_material_runtime_collect(); assert(!g_vmr_views);
+    free(vt_system);
+}
 int main(void)
 {
     sh_virtual_material_record source = {"surfaces/source", 16, 32, 64, 32, 2, 3, -4}, changed = source;
@@ -141,5 +239,6 @@ int main(void)
     changed.x = INT32_MAX; bindings[0].record = &changed;
     assert(!sh_virtual_material_runtime_prepare(bindings, 1, error, sizeof(error)));
     assert(!strcmp(source.name, "surfaces/source") && source.x == 16);
+    private_providers();
     puts("virtual material runtime tests passed"); return 0;
 }
