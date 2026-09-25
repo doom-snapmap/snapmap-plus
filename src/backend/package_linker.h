@@ -136,7 +136,22 @@ typedef struct sh_package_link_adapter {
     int (*assign_members)(void *context, size_t unit, const char *name,
         const sh_compiled_resource *const *files, const char *const *paths, size_t count,
         char ***names, char *error, size_t capacity);
+    /* Optional; NULL captures every unit on every pass. */
+    struct sh_package_link_reuse *reuse;
 } sh_package_link_adapter;
+
+/* Capture reuse across identity passes over one unit array. A unit's capture
+ * (file identities, bindings, witnesses, implicit bindings) and the exact-byte
+ * equality proofs between captured units are reused while the unit stays
+ * valid. The owner invalidates a unit before any pass in which its files,
+ * compilation, semantics, witnesses or binding behavior may differ; an
+ * invalidated unit is captured afresh on every later pass. Never share one
+ * reuse object between different unit arrays or adapters with different
+ * resolve/bind behavior. */
+typedef struct sh_package_link_reuse sh_package_link_reuse;
+sh_package_link_reuse *sh_package_link_reuse_open(size_t count);
+void sh_package_link_reuse_invalidate(sh_package_link_reuse *reuse, size_t unit);
+void sh_package_link_reuse_close(sh_package_link_reuse *reuse);
 
 typedef struct sh_package_link_implicit_binding {
     size_t owner, target; /* Equivalence-class indices in this output. */

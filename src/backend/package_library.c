@@ -501,6 +501,9 @@ struct pl_contributions {
     unsigned char *shared;
     pl_assignment *assignment;
     int dirty;
+    /* Identity captures of untouched units, shared by every pass of this
+     * build: the contribution phases and the final link bind them alike. */
+    sh_package_link_reuse *reuse;
 };
 
 static void pl_contribution_unit_free(pl_contribution_unit *unit)
@@ -518,7 +521,42 @@ static void pl_contributions_close(pl_contributions *c)
     if (!c) return;
     if (c->units) for (size_t i = 0; i < c->inputs.count; i++) pl_contribution_unit_free(c->units + i);
     pl_tokens_free(c); sh_package_link_classes_free(&c->classes);
+    sh_package_link_reuse_close(c->reuse);
     free(c->units); free(c->inputs.units); free(c->shared); free(c);
+}
+/* A composed or localized unit binds through the current tokens, so only
+ * untouched units may reuse an earlier identity capture. */
+static void pl_reuse_refresh(pl_contributions *c)
+{
+    for (size_t i = 0; c->reuse && i < c->inputs.count; i++)
+        if (c->units[i].owned) sh_package_link_reuse_invalidate(c->reuse, i);
+}
+
+/* Borrowed-string set for exact collision checks over many names. */
+typedef struct pl_names { const char **slots; size_t capacity; } pl_names;
+static uint64_t pl_names_hash(const char *text)
+{
+    uint64_t hash = UINT64_C(14695981039346656037);
+    for (; *text; text++) { hash ^= (unsigned char)*text; hash *= UINT64_C(1099511628211); }
+    return hash;
+}
+static int pl_names_open(pl_names *set, size_t count)
+{
+    size_t capacity = 64;
+    while (capacity < count * 2 + 1) { if (capacity > SIZE_MAX / 4) return 0; capacity *= 2; }
+    set->slots = calloc(capacity, sizeof(*set->slots)); set->capacity = capacity;
+    return set->slots != NULL;
+}
+/* Return 1 when text is present; otherwise add it when add is set. */
+static int pl_names_seen(pl_names *set, const char *text, int add)
+{
+    size_t at = (size_t)pl_names_hash(text) & (set->capacity - 1);
+    while (set->slots[at]) {
+        if (!strcmp(set->slots[at], text)) return 1;
+        at = (at + 1) & (set->capacity - 1);
+    }
+    if (add) set->slots[at] = text;
+    return 0;
 }
 
 /* A merged field is resolved by its retained slot binding, not by looking up
@@ -623,12 +661,17 @@ static int pl_bound_assign_members(void *context, size_t unit, const char *name,
 
 static int pl_tokens(pl_contributions *c, char *error, size_t capacity)
 {
+    pl_names captured = {0}, issued = {0};
+    int ok = 0;
     if (!c->dirty) return 1;
     pl_tokens_free(c);
+    pl_reuse_refresh(c);
     sh_package_link_adapter adapter = {c, pl_bound_resolve, pl_bound_bind};
+    adapter.reuse = c->reuse;
     if (!sh_package_link_identify_units(c->inputs.units, c->inputs.count, &adapter, &c->classes, error, capacity)) return 0;
     c->tokens = calloc(c->classes.count ? c->classes.count : 1, sizeof(*c->tokens));
-    if (!c->tokens) return 0;
+    if (!c->tokens || !pl_names_open(&captured, c->inputs.count) || !pl_names_open(&issued, c->classes.count)) goto done;
+    for (size_t j = 0; j < c->inputs.count; j++) (void)pl_names_seen(&captured, c->inputs.units[j].name, 1);
     c->token_count = c->classes.count;
     for (size_t i = 0; i < c->token_count; i++) {
         /* A token must read back through its field's reader: a movie field
@@ -646,23 +689,25 @@ static int pl_tokens(pl_contributions *c, char *error, size_t capacity)
             sh_swf_binary_paths linked;
             snprintf(alias, sizeof(alias), "swf/%s.swf", token);
             if (!sh_swf_binary_paths_for(alias, &linked) || strlen(linked.movie) >= sizeof(token)) {
-                snprintf(error, capacity, "editor binding token has no movie spelling"); return 0;
+                snprintf(error, capacity, "editor binding token has no movie spelling"); goto done;
             }
             strcpy_s(token, sizeof(token), linked.movie);
         } else if (dot && dot > (slash ? slash : represented->name) && dot[1] && strlen(dot) < 16)
             strcat_s(token, sizeof(token), dot);
         /* These tokens exist only while composing. Verify their disjointness
          * from captured native names and from every unequal exact class. */
-        for (size_t j = 0; j < c->inputs.count; j++) if (!strcmp(token, c->inputs.units[j].name)) {
-            snprintf(error, capacity, "editor binding token collides with a captured resource"); return 0;
+        if (pl_names_seen(&captured, token, 0)) {
+            snprintf(error, capacity, "editor binding token collides with a captured resource"); goto done;
         }
-        for (size_t j = 0; j < i; j++) if (!strcmp(token, c->tokens[j])) {
-            snprintf(error, capacity, "unequal editor bindings have colliding identities"); return 0;
+        if (!(c->tokens[i] = _strdup(token))) goto done;
+        if (pl_names_seen(&issued, c->tokens[i], 1)) {
+            snprintf(error, capacity, "unequal editor bindings have colliding identities"); goto done;
         }
-        if (!(c->tokens[i] = _strdup(token))) return 0;
     }
-    c->dirty = 0;
-    return 1;
+    c->dirty = 0; ok = 1;
+done:
+    free((void *)captured.slots); free((void *)issued.slots);
+    return ok;
 }
 
 typedef struct pl_original_walk {
@@ -1084,12 +1129,13 @@ static int pl_contributions_open(pl_build *b, const sh_package_sources *sources,
     b->contributions = c; c->source = b->reader; c->inputs.count = original->count; c->inputs.scopes = original->scopes;
     c->dirty = 1;
     c->pending_unit = c->pending_target = SIZE_MAX;
+    c->reuse = sh_package_link_reuse_open(original->count);
     c->inputs.units = calloc(original->count ? original->count : 1, sizeof(*c->inputs.units));
     c->units = calloc(original->count ? original->count : 1, sizeof(*c->units));
     c->shared = calloc(original->count ? original->count : 1, 1);
     members = calloc(original->count ? original->count : 1, sizeof(*members));
     done = calloc(original->count ? original->count : 1, 1);
-    if (!c->inputs.units || !c->units || !c->shared || !members || !done) goto bad;
+    if (!c->reuse || !c->inputs.units || !c->units || !c->shared || !members || !done) goto bad;
     memcpy(c->inputs.units, original->units, original->count * sizeof(*c->inputs.units));
     if (!pl_localize(b, sources, error, capacity)) goto bad;
     for (int phase = 1; phase <= 3; phase++) {
@@ -1389,7 +1435,8 @@ static int pl_compile(const sh_package_sources *sources, const sh_package_proven
     }
     pl_phase(out, SH_PACKAGE_LIBRARY_PHASE_IDENTITIES, &mark);
     sh_package_link_adapter adapter = {b.contributions, pl_bound_resolve, pl_bound_bind, pl_bound_assign,
-        b.identities ? &identity_adapter : NULL, pl_bound_assign_members};
+        b.identities ? &identity_adapter : NULL, pl_bound_assign_members, b.contributions->reuse};
+    pl_reuse_refresh(b.contributions);
     if (!sh_package_link(sources, assignment.inputs->units, assignment.inputs->count, &adapter, &b.shared->policy,
         environment->canonical_path, &b.linked, error, capacity) ||
         (b.identities && !sh_package_native_registry_validate(b.identities, error, capacity))) goto done;

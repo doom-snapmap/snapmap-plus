@@ -112,6 +112,103 @@ static void pl_clear(pl_work *w)
     sh_package_link_output_free(&w->output);
 }
 
+/* One unit's capture, kept between identity passes while the unit is valid. */
+typedef struct pl_reuse_unit {
+    int captured, invalid;
+    pl_file *files, *witnesses;
+    const sh_package_link_witness **witness_order;
+    sh_package_link_edge *edges, *implicit;
+    size_t file_count, witness_count, edge_count, implicit_count, implicit_begin;
+    uint64_t length;
+    unsigned char content[32];
+} pl_reuse_unit;
+struct sh_package_link_reuse {
+    pl_reuse_unit *units;
+    size_t count;
+    uint64_t *proven; /* open addressing: (left + 1) << 32 | (right + 1), 0 empty */
+    size_t proven_count, proven_capacity;
+};
+static sh_package_link_edge *pl_edges_copy(const sh_package_link_edge *edges, size_t count)
+{
+    sh_package_link_edge *out = pl_alloc(count, sizeof(*out));
+    for (size_t i = 0; out && i < count; i++) {
+        out[i].target = edges[i].target;
+        if (!(out[i].slot = _strdup(edges[i].slot))) {
+            while (i) free((char *)out[--i].slot);
+            free(out); out = NULL;
+        }
+    }
+    return out;
+}
+static void pl_edges_free(sh_package_link_edge *edges, size_t count)
+{
+    for (size_t i = 0; edges && i < count; i++) free((char *)edges[i].slot);
+    free(edges);
+}
+static void pl_reuse_unit_clear(pl_reuse_unit *u)
+{
+    int invalid = u->invalid;
+    pl_edges_free(u->edges, u->edge_count); pl_edges_free(u->implicit, u->implicit_count);
+    free(u->files); free(u->witnesses); free(u->witness_order);
+    memset(u, 0, sizeof(*u)); u->invalid = invalid;
+}
+sh_package_link_reuse *sh_package_link_reuse_open(size_t count)
+{
+    sh_package_link_reuse *reuse = calloc(1, sizeof(*reuse));
+    if (!reuse || count >= UINT32_MAX || !(reuse->units = pl_alloc(count, sizeof(*reuse->units)))) {
+        free(reuse); return NULL;
+    }
+    reuse->count = count; return reuse;
+}
+void sh_package_link_reuse_invalidate(sh_package_link_reuse *reuse, size_t unit)
+{
+    if (!reuse || unit >= reuse->count) return;
+    pl_reuse_unit_clear(reuse->units + unit); reuse->units[unit].invalid = 1;
+}
+void sh_package_link_reuse_close(sh_package_link_reuse *reuse)
+{
+    if (!reuse) return;
+    for (size_t i = 0; i < reuse->count; i++) pl_reuse_unit_clear(reuse->units + i);
+    free(reuse->units); free(reuse->proven); free(reuse);
+}
+static int pl_reuse_valid(const sh_package_link_reuse *reuse, size_t unit)
+{ return reuse && unit < reuse->count && reuse->units[unit].captured && !reuse->units[unit].invalid; }
+static uint64_t pl_reuse_pair(size_t left, size_t right)
+{
+    if (left > right) { size_t swap = left; left = right; right = swap; }
+    return (uint64_t)(left + 1) << 32 | (uint64_t)(right + 1);
+}
+static size_t pl_reuse_slot(const sh_package_link_reuse *reuse, uint64_t key)
+{
+    uint64_t mixed = key * UINT64_C(0x9e3779b97f4a7c15);
+    size_t at = (size_t)(mixed ^ (mixed >> 29)) & (reuse->proven_capacity - 1);
+    while (reuse->proven[at] && reuse->proven[at] != key) at = (at + 1) & (reuse->proven_capacity - 1);
+    return at;
+}
+/* Exact bytes of two valid captures were compared equal on an earlier pass. */
+static int pl_reuse_proven(const sh_package_link_reuse *reuse, size_t left, size_t right)
+{
+    if (!pl_reuse_valid(reuse, left) || !pl_reuse_valid(reuse, right) || !reuse->proven_capacity) return 0;
+    uint64_t key = pl_reuse_pair(left, right);
+    return reuse->proven[pl_reuse_slot(reuse, key)] == key;
+}
+static void pl_reuse_prove(sh_package_link_reuse *reuse, size_t left, size_t right)
+{
+    if (!pl_reuse_valid(reuse, left) || !pl_reuse_valid(reuse, right)) return;
+    if (reuse->proven_count + 1 > reuse->proven_capacity / 2) {
+        size_t capacity = reuse->proven_capacity ? reuse->proven_capacity * 2 : 64;
+        uint64_t *old = reuse->proven, *grown = capacity <= SIZE_MAX / sizeof(*grown) ? calloc(capacity, sizeof(*grown)) : NULL;
+        size_t old_capacity = reuse->proven_capacity;
+        if (!grown) return; /* Reuse is optional: the next pass compares again. */
+        reuse->proven = grown; reuse->proven_capacity = capacity;
+        for (size_t i = 0; i < old_capacity; i++) if (old[i]) reuse->proven[pl_reuse_slot(reuse, old[i])] = old[i];
+        free(old);
+    }
+    uint64_t key = pl_reuse_pair(left, right);
+    size_t at = pl_reuse_slot(reuse, key);
+    if (!reuse->proven[at]) { reuse->proven[at] = key; reuse->proven_count++; }
+}
+
 static char *pl_slot(const char *path, const char *slot)
 {
     size_t p = strlen(path), s = strlen(slot);
@@ -293,12 +390,75 @@ static void pl_u64(unsigned char **cursor, uint64_t value)
     *cursor += 8;
 }
 
+/* Restore a valid earlier capture of this unit. Return 1 when restored, 0 to
+ * capture afresh; an incomplete copy is discarded and captured afresh. */
+static int pl_reuse_restore(pl_work *w, const sh_package_link_unit *source, pl_unit *u, sh_package_link_node *node)
+{
+    const sh_package_link_reuse *reuse = w->adapter->reuse;
+    if (!pl_reuse_valid(reuse, w->unit)) return 0;
+    const pl_reuse_unit *c = reuse->units + w->unit;
+    if (c->file_count != source->file_count || c->witness_count != source->witness_count) return 0;
+    u->files = pl_alloc(c->file_count, sizeof(*u->files));
+    u->edges = pl_edges_copy(c->edges, c->edge_count);
+    u->implicit = pl_edges_copy(c->implicit, c->implicit_count);
+    if (c->witness_count) {
+        u->witnesses = pl_alloc(c->witness_count, sizeof(*u->witnesses));
+        u->witness_order = pl_alloc(c->witness_count, sizeof(*u->witness_order));
+    }
+    if (!u->files || !u->edges || !u->implicit || (c->witness_count && (!u->witnesses || !u->witness_order))) {
+        pl_edges_free(u->edges, c->edge_count); pl_edges_free(u->implicit, c->implicit_count);
+        free(u->files); free(u->witnesses); free(u->witness_order);
+        memset(u, 0, sizeof(*u)); return 0;
+    }
+    memcpy(u->files, c->files, c->file_count * sizeof(*u->files));
+    if (c->witness_count) {
+        memcpy(u->witnesses, c->witnesses, c->witness_count * sizeof(*u->witnesses));
+        memcpy((void *)u->witness_order, c->witness_order, c->witness_count * sizeof(*u->witness_order));
+    }
+    u->edge_count = u->edge_capacity = c->edge_count;
+    u->implicit_count = c->implicit_count; u->implicit_begin = c->implicit_begin;
+    node->family = source->family; node->path = source->name; node->length = c->length;
+    memcpy(node->content, c->content, 32); memcpy(node->semantics, source->semantics, 32);
+    node->edges = u->edges; node->edge_count = u->edge_count;
+    return 1;
+}
+/* Keep this unit's completed capture for later passes, unless invalidated. */
+static void pl_reuse_store(pl_work *w, const sh_package_link_unit *source, const pl_unit *u,
+    const sh_package_link_node *node)
+{
+    sh_package_link_reuse *reuse = w->adapter->reuse;
+    pl_reuse_unit next = {0};
+    if (!reuse || w->unit >= reuse->count || reuse->units[w->unit].invalid) return;
+    next.files = pl_alloc(source->file_count, sizeof(*next.files));
+    next.edges = pl_edges_copy(u->edges, u->edge_count);
+    next.implicit = pl_edges_copy(u->implicit, u->implicit_count);
+    if (source->witness_count) {
+        next.witnesses = pl_alloc(source->witness_count, sizeof(*next.witnesses));
+        next.witness_order = pl_alloc(source->witness_count, sizeof(*next.witness_order));
+    }
+    next.edge_count = u->edge_count; next.implicit_count = u->implicit_count;
+    if (!next.files || !next.edges || !next.implicit ||
+        (source->witness_count && (!next.witnesses || !next.witness_order))) {
+        pl_reuse_unit_clear(&next); return; /* Reuse is optional: capture again next pass. */
+    }
+    memcpy(next.files, u->files, source->file_count * sizeof(*next.files));
+    if (source->witness_count) {
+        memcpy(next.witnesses, u->witnesses, source->witness_count * sizeof(*next.witnesses));
+        memcpy((void *)next.witness_order, u->witness_order, source->witness_count * sizeof(*next.witness_order));
+    }
+    next.file_count = source->file_count; next.witness_count = source->witness_count;
+    next.implicit_begin = u->implicit_begin; next.length = node->length;
+    memcpy(next.content, node->content, 32); next.captured = 1;
+    pl_reuse_unit_clear(reuse->units + w->unit); reuse->units[w->unit] = next;
+}
+
 static int pl_collect(pl_work *w)
 {
     for (w->unit = 0; w->unit < w->count; w->unit++) {
         const sh_package_link_unit *source = &w->units[w->unit];
         pl_unit *u = &w->work[w->unit];
         sh_package_link_node *node = &w->nodes[w->unit];
+        if (pl_reuse_restore(w, source, u, node)) continue;
         size_t manifest_size = 8, companions = 0, primary_members = 0;
         unsigned char *manifest, *cursor;
         sh_package_file_identity identity;
@@ -419,6 +579,7 @@ static int pl_collect(pl_work *w)
         node->family = source->family; node->path = source->name;
         memcpy(node->content, identity.digest, 32); memcpy(node->semantics, source->semantics, 32);
         node->edges = u->edges; node->edge_count = u->edge_count;
+        pl_reuse_store(w, source, u, node);
     }
     return 1;
 }
@@ -488,6 +649,7 @@ static int pl_verify_equal(void *context, size_t left, size_t right, char *error
     pl_work *w = context;
     unsigned char a[16384], b[16384];
     (void)error; (void)capacity;
+    if (pl_reuse_proven(w->adapter->reuse, left, right)) return 1;
     if (w->units[left].file_count != w->units[right].file_count ||
         w->units[left].witness_count != w->units[right].witness_count)
         return pl_fail(w, "resource fingerprint collision: physical file sets differ");
@@ -529,6 +691,7 @@ done:
         if (second.stream) fclose(second.stream);
         if (!ok) return 0;
     }
+    pl_reuse_prove(w->adapter->reuse, left, right);
     return 1;
 }
 

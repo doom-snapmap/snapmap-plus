@@ -832,6 +832,48 @@ int main(void)
         sh_package_link_classes_free(&captured);
     }
     {
+        /* Later passes reuse each valid unit's capture and exact-byte proofs:
+         * nothing is bound again and the classes are identical. An invalidated
+         * unit is captured afresh from its current bytes. */
+        sh_package_link_classes first = {0}, again = {0};
+        sh_package_link_reuse *reuse = sh_package_link_reuse_open(f.count);
+        sh_package_link_adapter inspect = {&f, resolve, bind_file};
+        inspect.reuse = reuse;
+        size_t bound = f.bound;
+        assert(reuse && sh_package_link_identify_units(f.units, f.count, &inspect, &first, error, sizeof(error)));
+        assert(f.bound - bound == f.count && first.count == 4);
+        bound = f.bound;
+        assert(sh_package_link_identify_units(f.units, f.count, &inspect, &again, error, sizeof(error)));
+        assert(f.bound == bound && again.count == first.count);
+        for (size_t i = 0; i < f.count; i++)
+            assert(again.nodes[i] == first.nodes[i] &&
+                !memcmp(again.identities[again.nodes[i]], first.identities[first.nodes[i]], 32));
+        /* The full link binds its replay only; its classes match the passes. */
+        sh_package_link_output linked = {0};
+        inspect.assign = assign; bound = f.bound;
+        assert(sh_package_link(sources, f.units, f.count, &inspect, NULL, NULL, &linked, error, sizeof(error)));
+        assert(linked.classes.count == first.count && f.bound - bound < 2 * f.count);
+        sh_package_link_output_free(&linked); inspect.assign = NULL;
+        /* Green's stone becomes red: stale captures would keep four classes. */
+        sh_compiled_resource *stone = (sh_compiled_resource *)f.units[materials[1]].files[0];
+        unsigned char kept[64]; size_t length = stone->body_length;
+        assert(stone->body && length == strlen(colors[1]) && length < sizeof(kept));
+        memcpy(kept, stone->body, length); memcpy(stone->body, colors[0], length);
+        bound = f.bound;
+        assert(sh_package_link_identify_units(f.units, f.count, &inspect, &again, error, sizeof(error)));
+        assert(f.bound == bound && again.count == 4);
+        sh_package_link_reuse_invalidate(reuse, materials[1]);
+        assert(sh_package_link_identify_units(f.units, f.count, &inspect, &again, error, sizeof(error)));
+        assert(f.bound - bound == 1 && again.count == 2);
+        assert(again.nodes[entities[0]] == again.nodes[entities[1]] && again.nodes[materials[0]] == again.nodes[materials[1]]);
+        memcpy(stone->body, kept, length);
+        bound = f.bound;
+        assert(sh_package_link_identify_units(f.units, f.count, &inspect, &again, error, sizeof(error)));
+        assert(f.bound - bound == 1 && again.count == 4);
+        sh_package_link_reuse_close(reuse);
+        sh_package_link_classes_free(&first); sh_package_link_classes_free(&again);
+    }
+    {
         const char map[] = "{\"variables\":{\"allocCount\":[0,0,0,0,0],\"string\":[]}}";
         sh_package_provenance contexts = {0}, saved = {0}, restored = {0};
         size_t unit_contexts[7], roots[3] = {entities[0], entities[2], entities[0]}, length;
