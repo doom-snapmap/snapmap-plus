@@ -295,6 +295,11 @@ static void test_implicit_roots(fixture *game, const sh_package_sources *sources
         (uintptr_t)game->reflection, &native, &out, error, sizeof(error));
     if (!ok) fprintf(stderr, "implicit reverse root: %s\n", error); assert(ok);
     assert(f.observed && f.admitted && f.absent && f.baseline >= sources->component_count);
+    char phases[256]; /* The activation log names every phase of both levels. */
+    sh_package_library_phases(&out, phases, sizeof(phases));
+    assert(strstr(phases, "scopes ") && strstr(phases, ", source link ") && strstr(phases, ", link ") && strstr(phases, ", audio "));
+    assert(strstr(out.source_phases, "readers ") && strstr(out.source_phases, ", discovery ") &&
+        strstr(out.source_phases, ", certification ") && strstr(out.source_phases, ", inputs "));
     const sh_package_provenance_binding *red = binding(&out, sources, "Red", "", "entitydef", "props/rock");
     const sh_package_provenance_binding *green = binding(&out, sources, "Green", "", "entitydef", "props/rock");
     const sh_package_provenance_binding *copy = binding(&out, sources, "Red Copy", "", "entitydef", "props/rock");

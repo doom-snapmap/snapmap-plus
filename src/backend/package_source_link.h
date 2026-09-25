@@ -157,6 +157,9 @@ size_t sh_package_source_link_reverse_gaps(const sh_package_source_link *source,
     const sh_package_reverse_gap **gaps);
 /* Borrowed, captured source units, sorted by scope/family/name. */
 const sh_package_link_inputs *sh_package_source_link_inputs(const sh_package_source_link *source);
+/* Write "readers N ms, seeds N ms, ..." for the capture that opened source;
+ * returns out. A diagnostic only. */
+const char *sh_package_source_link_phases(const sh_package_source_link *source, char *out, size_t capacity);
 /* One byte per input unit: its complete captured dependency closure has no
  * gameplay contribution. Editor collection composition uses this eligibility;
  * an editor resource reaching private gameplay must follow that asset scope.

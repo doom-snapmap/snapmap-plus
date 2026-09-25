@@ -31,6 +31,13 @@ typedef struct sh_package_library_native {
     sh_audio_originals *audio;
 } sh_package_library_native;
 
+/* Build phases timed for the activation log. */
+enum {
+    SH_PACKAGE_LIBRARY_PHASE_SCOPES, SH_PACKAGE_LIBRARY_PHASE_NATIVE, SH_PACKAGE_LIBRARY_PHASE_SOURCE_LINK,
+    SH_PACKAGE_LIBRARY_PHASE_CONTRIBUTIONS, SH_PACKAGE_LIBRARY_PHASE_IDENTITIES, SH_PACKAGE_LIBRARY_PHASE_LINK,
+    SH_PACKAGE_LIBRARY_PHASE_OUTPUTS, SH_PACKAGE_LIBRARY_PHASE_AUDIO, SH_PACKAGE_LIBRARY_PHASES
+};
+
 typedef struct sh_package_library {
     sh_package_compilation *compiled;
     /* Complete local binding index. A map selects only the bindings it uses
@@ -45,7 +52,14 @@ typedef struct sh_package_library {
      * library, one line per item; NULL when coverage was complete. After a
      * failed compile it may remain set, as a diagnostic, until library_free. */
     char *coverage;
+    /* Wall-clock milliseconds of each build phase in the last compile; like
+     * coverage it survives a failed compile, as a diagnostic only. */
+    unsigned long long phase_ms[SH_PACKAGE_LIBRARY_PHASES];
+    char source_phases[256]; /* The source capture's own phases, when it opened. */
 } sh_package_library;
+
+/* Write "scopes N ms, native N ms, ..." for the last compile; returns out. */
+const char *sh_package_library_phases(const sh_package_library *library, char *out, size_t capacity);
 
 /* Compile lexical component scopes before comparing any peer gameplay edits.
  * Typed source bindings are captured before registered editor fields compose.

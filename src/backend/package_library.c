@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 typedef struct pl_original {
     char *path;
@@ -241,6 +242,33 @@ static int pl_source_owners(void *context, size_t scope, const char *family, con
     if (!sh_package_audio_program_contains(b->audio, scope, name)) return 1; /* Native binding. */
     if (sh_package_audio_program_owners(b->audio, scope, name, owners, gameplay)) return 1;
     snprintf(error, capacity, "sound has no captured dependency ownership: %s", name); return 0;
+}
+
+static unsigned long long pl_now_ms(void)
+{
+    struct timespec now;
+    return timespec_get(&now, TIME_UTC) ? (unsigned long long)now.tv_sec * 1000u + (unsigned long long)now.tv_nsec / 1000000u : 0;
+}
+/* Charge the time since *mark to phase and restart the mark. */
+static void pl_phase(sh_package_library *out, int phase, unsigned long long *mark)
+{
+    unsigned long long now = pl_now_ms();
+    out->phase_ms[phase] += now >= *mark ? now - *mark : 0; *mark = now;
+}
+const char *sh_package_library_phases(const sh_package_library *library, char *out, size_t capacity)
+{
+    static const char *const names[SH_PACKAGE_LIBRARY_PHASES] = {
+        "scopes", "native", "source link", "contributions", "identities", "link", "outputs", "audio"
+    };
+    size_t used = 0;
+    if (!out || !capacity) return out;
+    *out = 0;
+    for (int i = 0; library && i < SH_PACKAGE_LIBRARY_PHASES && used < capacity; i++) {
+        int n = snprintf(out + used, capacity - used, "%s%s %llu ms", i ? ", " : "", names[i], library->phase_ms[i]);
+        if (n < 0) break;
+        used += (size_t)n;
+    }
+    return out;
 }
 
 void sh_package_library_free(sh_package_library *library)
@@ -1232,6 +1260,7 @@ static int pl_compile(const sh_package_sources *sources, const sh_package_proven
         native ? native->source.shader : NULL, pl_material_companions, pl_material_seeds, pl_implicit, pl_source_owners};
     sh_package_compile_environment env;
     char fallback[1024]; int ok = 0;
+    unsigned long long mark = pl_now_ms();
     if (!error || !capacity) { error = fallback; capacity = sizeof(fallback); }
     *error = 0;
     if (!out) return 0;
@@ -1294,10 +1323,12 @@ static int pl_compile(const sh_package_sources *sources, const sh_package_proven
         if (!prepared) goto done;
         sh_package_policy_free(&b.shared->policy); b.shared->policy = policy;
     }
+    pl_phase(out, SH_PACKAGE_LIBRARY_PHASE_SCOPES, &mark);
     if (!pl_product_scope(&b, sources, error, capacity)) goto done;
     if (!pl_baseline_scope(&b, sources, env.baseline ? env.baseline : original,
         env.baseline ? env.baseline_context : original_context, error, capacity)) goto done;
     if (!pl_native_open(&b, catalog, original, original_context, registry, reflection, error, capacity)) goto done;
+    pl_phase(out, SH_PACKAGE_LIBRARY_PHASE_NATIVE, &mark);
     source_native.audio = b.audio;
     unsigned char *discover = calloc(b.count ? b.count : 1, 1);
     if (!discover) goto done;
@@ -1309,6 +1340,8 @@ static int pl_compile(const sh_package_sources *sources, const sh_package_proven
         b.count, catalog, original, original_context, registry, reflection, &source_native,
         &root_plan, &failure, error, capacity);
     free(discover);
+    pl_phase(out, SH_PACKAGE_LIBRARY_PHASE_SOURCE_LINK, &mark);
+    if (b.reader) sh_package_source_link_phases(b.reader, out->source_phases, sizeof(out->source_phases));
     if (!b.reader) {
         /* Only content a local component supplied makes it responsible: its own
          * unit refused by a reader is malformed source; content reaching a unit
@@ -1334,6 +1367,7 @@ static int pl_compile(const sh_package_sources *sources, const sh_package_proven
     }
     if (!pl_contributions_open(&b, sources, error, capacity)) goto done;
     if (contexts && !pl_document_shared(&b, original, original_context, error, capacity)) goto done;
+    pl_phase(out, SH_PACKAGE_LIBRARY_PHASE_CONTRIBUTIONS, &mark);
     /* Authored documents carry their own selector/inspector behavior. Changed
      * editor units receive ordinary bound aliases just like their gameplay
      * dependencies, so importing them never rewrites the open editor's shared
@@ -1353,12 +1387,14 @@ static int pl_compile(const sh_package_sources *sources, const sh_package_proven
         }
         identity_adapter = sh_package_native_registry_adapter(b.identities);
     }
+    pl_phase(out, SH_PACKAGE_LIBRARY_PHASE_IDENTITIES, &mark);
     sh_package_link_adapter adapter = {b.contributions, pl_bound_resolve, pl_bound_bind, pl_bound_assign,
         b.identities ? &identity_adapter : NULL, pl_bound_assign_members};
     if (!sh_package_link(sources, assignment.inputs->units, assignment.inputs->count, &adapter, &b.shared->policy,
         environment->canonical_path, &b.linked, error, capacity) ||
-        (b.identities && !sh_package_native_registry_validate(b.identities, error, capacity)) ||
-        !pl_provenance(&b, sources, &out->bindings) || !pl_hud(&b, error, capacity) ||
+        (b.identities && !sh_package_native_registry_validate(b.identities, error, capacity))) goto done;
+    pl_phase(out, SH_PACKAGE_LIBRARY_PHASE_LINK, &mark);
+    if (!pl_provenance(&b, sources, &out->bindings) || !pl_hud(&b, error, capacity) ||
         !sh_package_sound_prepare(b.linked.compiled, error, capacity) ||
         !pl_consumers(assignment.inputs, &b.linked, &out->consumers, error, capacity)) goto done;
     if (b.materials) {
@@ -1366,6 +1402,7 @@ static int pl_compile(const sh_package_sources *sources, const sh_package_proven
             &b.linked, error, capacity);
         if (!out->virtual_materials) goto done;
     }
+    pl_phase(out, SH_PACKAGE_LIBRARY_PHASE_OUTPUTS, &mark);
     if (b.audio) {
         if (!sh_package_audio_program_prepare(b.audio, error, capacity)) goto done;
         for (size_t i = 0; i < assignment.inputs->count; i++) {
@@ -1377,14 +1414,19 @@ static int pl_compile(const sh_package_sources *sources, const sh_package_proven
         }
         out->audio = b.audio; b.audio = NULL;
     }
+    pl_phase(out, SH_PACKAGE_LIBRARY_PHASE_AUDIO, &mark);
     out->compiled = b.linked.compiled; b.linked.compiled = NULL;
     out->compiled->independent_sources = 1; ok = 1;
 done:
     pl_close(&b);
     if (!ok) {
-        /* Accounted coverage survives a later failure as a diagnostic only. */
+        /* Accounted coverage and phase timings survive a later failure as
+         * diagnostics only. */
         char *coverage = out->coverage; out->coverage = NULL;
+        unsigned long long phases[SH_PACKAGE_LIBRARY_PHASES]; char source_phases[sizeof(out->source_phases)];
+        memcpy(phases, out->phase_ms, sizeof(phases)); memcpy(source_phases, out->source_phases, sizeof(source_phases));
         sh_package_library_free(out); out->coverage = coverage;
+        memcpy(out->phase_ms, phases, sizeof(phases)); memcpy(out->source_phases, source_phases, sizeof(source_phases));
         if (!*error) snprintf(error, capacity, "scoped package library could not be prepared");
     }
     return ok;

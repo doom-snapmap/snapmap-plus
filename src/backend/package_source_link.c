@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 typedef struct sl_shader_program {
     char *name;
@@ -67,7 +68,21 @@ struct sh_package_source_link {
     sl_unit *discovering; /* Unit whose readers are requesting new units. */
     const sl_unit *failed_unit; /* Unit whose strict discovery failed, if known. */
     size_t failed_scope; /* Input scope whose supplied files failed seeding. */
+    unsigned long long phase_ms[9]; /* Wall-clock capture phases, see sl_phase_names. */
 };
+static const char *const sl_phase_names[9] = {
+    "readers", "seeds", "reverse roots", "discovery", "shaders", "audio", "certification", "owners", "inputs"
+};
+static unsigned long long sl_now_ms(void)
+{
+    struct timespec now;
+    return timespec_get(&now, TIME_UTC) ? (unsigned long long)now.tv_sec * 1000u + (unsigned long long)now.tv_nsec / 1000000u : 0;
+}
+static void sl_phase(sh_package_source_link *s, int phase, unsigned long long *mark)
+{
+    unsigned long long now = sl_now_ms();
+    s->phase_ms[phase] += now >= *mark ? now - *mark : 0; *mark = now;
+}
 
 static uint64_t sl_hash_text(uint64_t hash, const char *text)
 {
@@ -1257,6 +1272,7 @@ sh_package_source_link *sh_package_source_link_open_attributed(const sh_package_
     sh_package_source_link *s = calloc(1, sizeof(*s));
     sh_package_link_inputs roots = {0};
     char fallback[1024];
+    unsigned long long mark = sl_now_ms();
     if (!error || !capacity) { error = fallback; capacity = sizeof(fallback); }
     *error = 0;
     if (failure) {
@@ -1290,9 +1306,12 @@ sh_package_source_link *sh_package_source_link_open_attributed(const sh_package_
             s->environment = 1; goto failed;
         }
     }
+    sl_phase(s, 0, &mark);
     if (!sl_seed_inputs(s)) goto failed;
+    sl_phase(s, 1, &mark);
     /* Stock reverse discovery refuses only for I/O, allocation or setup. */
     if (!sl_reverse_roots(s, root_plan, registry, reflection)) { s->environment = 1; goto failed; }
+    sl_phase(s, 2, &mark);
     size_t inspected = 0;
     for (int pass = 0; pass < 2; pass++) {
         if (pass && !sl_seed_orphan_binaries(s)) goto failed;
@@ -1304,13 +1323,16 @@ sh_package_source_link *sh_package_source_link_open_attributed(const sh_package_
             if (!sl_movie_identities(s, unit)) { s->failed_unit = unit; goto failed; }
         }
     }
+    sl_phase(s, 3, &mark);
     if (!sl_shader_accounted(s)) goto failed;
+    sl_phase(s, 4, &mark);
     if (s->native.audio && !sh_package_audio_program_prepare(s->native.audio, error, capacity)) {
         /* The capture of one scope's sounds and banks failed: that scope's
          * supplied audio is responsible, not its peers. */
         s->failed_scope = sh_package_audio_program_failed_scope(s->native.audio);
         goto failed;
     }
+    sl_phase(s, 5, &mark);
     /* Complete explicit source closure before preparing potentially large
      * implicit renderer/audio data. A missing reference or malformed source
      * must fail before any expensive native-provider capture. */
@@ -1351,12 +1373,14 @@ sh_package_source_link *sh_package_source_link_open_attributed(const sh_package_
         }
         unit->unit.original_binding = original_bytes;
     }
+    sl_phase(s, 6, &mark);
     for (size_t i = 0; s->native.owners && i < s->count; i++) {
         sl_unit *unit = s->units[i];
         if (unit->unit.file_count && s->native.owners(s->native.context, unit->scope,
             unit->unit.family, unit->unit.name, &unit->unit.implicit_owners,
             &unit->unit.implicit_gameplay_owners, error, capacity) != 1) { s->failed_unit = unit; goto failed; }
     }
+    sl_phase(s, 7, &mark);
     if (s->count > 1) qsort(s->units, s->count, sizeof(*s->units), sl_unit_order);
     if (s->count > SIZE_MAX / sizeof(*s->inputs.units) || s->count > SIZE_MAX / sizeof(*s->inputs.scopes)) goto failed;
     s->inputs.units = calloc(s->count ? s->count : 1, sizeof(*s->inputs.units));
@@ -1376,6 +1400,7 @@ sh_package_source_link *sh_package_source_link_open_attributed(const sh_package_
         s->inputs.units[i] = unit->unit; s->inputs.scopes[i] = unit->scope;
     }
     if (!sl_shared(s)) goto failed;
+    sl_phase(s, 8, &mark);
     s->inputs.count = s->count; s->frozen = 1; s->error = NULL; s->error_capacity = 0;
     sh_package_link_inputs_free(&roots); return s;
 failed:
@@ -1401,6 +1426,18 @@ sh_package_source_link *sh_package_source_link_open(const sh_package_compilation
 }
 const sh_package_link_inputs *sh_package_source_link_inputs(const sh_package_source_link *source)
 { return source ? &source->inputs : NULL; }
+const char *sh_package_source_link_phases(const sh_package_source_link *source, char *out, size_t capacity)
+{
+    size_t used = 0;
+    if (!out || !capacity) return out;
+    *out = 0;
+    for (int i = 0; source && i < 9 && used < capacity; i++) {
+        int n = snprintf(out + used, capacity - used, "%s%s %llu ms", i ? ", " : "", sl_phase_names[i], source->phase_ms[i]);
+        if (n < 0) break;
+        used += (size_t)n;
+    }
+    return out;
+}
 const unsigned char *sh_package_source_link_shared(const sh_package_source_link *source)
 { return source && source->frozen ? source->shared : NULL; }
 typedef struct sl_compile { sh_package_source_link *source; const sh_package_link_adapter *native; } sl_compile;
