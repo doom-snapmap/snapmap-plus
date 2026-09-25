@@ -159,16 +159,35 @@ typedef struct dj_fixed {
     unsigned depth;
 } dj_fixed;
 
+static int dj_count_key(const dj_fixed *array, const sh_json_field_span *field)
+{
+    const char *key = array->shape->count_key;
+    return key && field->key_length == strlen(key) && !memcmp(field->key, key, field->key_length);
+}
+
 static int dj_fixed_members(void *context, const sh_json_field_span *fields, size_t count, unsigned depth)
 {
     dj_fixed *array = context;
-    size_t i;
+    size_t i, extent = SIZE_MAX;
     (void)depth;
+    /* A counted list may state its count; its slots may not exceed it. */
+    for (i = 0; i < count; i++) if (dj_count_key(array, fields + i)) {
+        size_t at, value = 0;
+        int valid = fields[i].value_length > 0;
+        for (at = 0; valid && at < fields[i].value_length; at++) {
+            unsigned digit = (unsigned char)fields[i].value[at] - (unsigned)'0';
+            if (digit > 9 || value > (SIZE_MAX - 1 - digit) / 10) valid = 0;
+            else value = value * 10 + digit;
+        }
+        if (!valid) return dj_gap(array->walk, array->path, array->type, "collection count is not a native count");
+        extent = value;
+    }
     for (i = 0; i < count; i++) {
         const char *key = fields[i].key, *reason = NULL;
         size_t length = fields[i].key_length, at, index = 0;
         char *child_path;
         int ok;
+        if (dj_count_key(array, fields + i)) continue;
         if (length < array->prefix_length + 3 || memcmp(key, array->prefix, array->prefix_length) ||
             key[array->prefix_length] != '[' || key[length - 1] != ']') reason = "unsupported collection member";
         for (at = array->prefix_length + 1; !reason && at < length - 1; at++) {
@@ -178,6 +197,7 @@ static int dj_fixed_members(void *context, const sh_json_field_span *fields, siz
         }
         if (!reason && array->shape->count_known && index >= array->shape->count)
             reason = "collection index exceeds native count";
+        if (!reason && index >= extent) reason = "collection index exceeds its stated count";
         child_path = dj_path(array->path, key);
         if (!child_path) return 0;
         ok = reason ? dj_gap(array->walk, child_path, array->type, reason) :
@@ -197,8 +217,10 @@ static int dj_fixed_array(dj_walk *walk, const char *json, size_t length,
     dj_fixed array = {walk, shape, type, path, shape->item_key, 0, depth};
     if (!array.prefix) array.prefix = field ? field + 1 : path;
     array.prefix_length = strcspn(array.prefix, "[");
-    /* Counted lists serialize as JSON arrays; no keyed form is verified. */
-    if (shape->count_key || !shape->element.name || json[length - 1] != '}')
+    /* Native entity state writes counted lists keyed like declaration text as
+     * well: sparse slots and an optional count, for example a player inventory's
+     * {"item[0]":"weapon/zion/player/sp/pistol","item[1]":"NULL"}. */
+    if (!shape->element.name || json[length - 1] != '}')
         return dj_gap(walk, path, type, "collection JSON requires a verified array reader");
     return sh_native_json_visit_objects_filtered(json, length, 128, dj_fixed_members, dj_shallow, &array);
 }
@@ -223,6 +245,8 @@ static int dj_value(dj_walk *walk, const char *json, size_t length,
         if (length == SIZE_MAX || !(name = (char *)malloc(length + 1))) return 0;
         if (!sh_native_json_decode_string(json, length, name, length + 1, &decoded) || strlen(name) != decoded)
             ok = dj_gap(walk, path, type, "resource JSON is not a literal name");
+        /* The native writer spells an empty reference as declaration text does. */
+        else if (decoded == 4 && !memcmp(name, "NULL", 4)) ok = 1;
         else if (decoded) {
             ok = walk->schema->reference(walk->schema->context, path, type, name, decoded);
             if (ok && walk->schema->reference_site) {

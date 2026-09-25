@@ -3826,6 +3826,16 @@ static void test_preview_model(void)
                 strstr((char *)out, "item[0] = \"bound/models/crate.lwo\"") &&
                 strstr((char *)out, "item[1] = \"_empty\"") && strstr((char *)out, "item[2] = \"\""));
             free(out);
+            /* A saved map keys a counted list's slots, with NULL for an empty one. */
+            const char *map = "{\"actor\":{\"targetType\":\"idDeclEntityDef\",\"inherit\":\"saved/root\","
+                "\"state\":{\"edit\":{\"previewModels\":{\"num\":2,\"item[0]\":\"saved/zion/boss.md6\",\"item[1]\":\"NULL\"}}}}}";
+            const char *expected = "{\"actor\":{\"targetType\":\"idDeclEntityDef\",\"inherit\":\"root\","
+                "\"state\":{\"edit\":{\"previewModels\":{\"num\":2,\"item[0]\":\"zion/boss.md6\",\"item[1]\":\"NULL\"}}}}}";
+            char *bound_map = sh_package_source_bind_map(reader, map, strlen(map), map_saved_binding, NULL,
+                &length, &result, error, sizeof(error));
+            if (!bound_map || strcmp(bound_map, expected)) fprintf(stderr, "keyed map list: %s\n", bound_map ? bound_map : error);
+            assert(bound_map && !strcmp(bound_map, expected) && result.changed == 2 && !result.inspection.gaps);
+            free(bound_map);
             const char *effect = "{ class = \"Entity\"; edit = { previewModel = \"fx/sparks.fx\"; } }";
             out = sh_package_source_bind(reader, "entitydef", "preview", (const unsigned char *)effect,
                 strlen(effect), bind_reference, &bindings, &length, &result, error, sizeof(error));

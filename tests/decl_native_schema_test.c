@@ -578,6 +578,33 @@ int main(void)
     assert(strstr(f.references, "edit.array.array[5]|idDeclInventory|array/ref"));
     assert(!strstr(f.references, "not/a/ref"));
     assert(inspect(&f, "{ edit = { angle = { value = 30; } } }", &result) && !result.references);
+    {
+        sh_decl_native_schema *native = open_schema(&f);
+        const char *json;
+        /* Native entity state keys counted lists as declaration text does; the
+         * writer spells an empty pointer NULL (a saved player inventory). */
+        f.references[0] = 0;
+        json = "{\"inventory\":{\"item[0]\":\"weapon/ref\",\"item[1]\":\"NULL\"},\"target\":\"NULL\"}";
+        int keyed = sh_decl_json_state_dependencies(json, strlen(json), (sh_decl_value_type){"Entity", ""},
+            sh_decl_native_schema_view(native), &result);
+        if (!keyed || result.references != 1 || result.gaps) fprintf(stderr, "keyed list JSON: ok=%d refs=%zu gaps=%zu aborted=%d [%s]\n",
+            keyed, result.references, result.gaps, result.aborted, f.references);
+        assert(keyed && result.references == 1 && !result.gaps);
+        assert(strstr(f.references, "edit.inventory.item[0]|idDeclInventory|weapon/ref") || strstr(f.references, "inventory.item[0]|idDeclInventory|weapon/ref"));
+        json = "{\"inventory\":{\"num\":3,\"item[2]\":\"weapon/ref\"}}";
+        assert(sh_decl_json_state_dependencies(json, strlen(json), (sh_decl_value_type){"Entity", ""},
+            sh_decl_native_schema_view(native), &result) && result.references == 1 && !result.gaps);
+        json = "{\"inventory\":{\"num\":1,\"item[2]\":\"weapon/ref\"}}";
+        assert(!sh_decl_json_state_dependencies(json, strlen(json), (sh_decl_value_type){"Entity", ""},
+            sh_decl_native_schema_view(native), &result) && result.gaps == 1 && !result.references);
+        json = "{\"inventory\":{\"num\":\"2\",\"item[0]\":\"weapon/ref\"}}";
+        assert(!sh_decl_json_state_dependencies(json, strlen(json), (sh_decl_value_type){"Entity", ""},
+            sh_decl_native_schema_view(native), &result) && result.gaps == 1);
+        json = "{\"inventory\":{\"slot[0]\":\"weapon/ref\"}}";
+        assert(!sh_decl_json_state_dependencies(json, strlen(json), (sh_decl_value_type){"Entity", ""},
+            sh_decl_native_schema_view(native), &result) && result.gaps == 1);
+        sh_decl_native_schema_close(native);
+    }
     assert(inspect(&f, "{ edit = { duration = 1.25; } }", &result) && !result.references);
     assert(inspect(&f, "{ edit = { duration = { value = 2; } } }", &result) && !result.references);
     assert(inspect(&f, "{ edit = { deadline = 1000; } }", &result) && !result.references);

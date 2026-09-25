@@ -150,9 +150,11 @@ static void json_checks(void)
     assert(!inspect_json("{\"links\":{\"links[3]\":\"entity/outside\",\"item[0]\":\"entity/misnamed\","
         "\"links[x]\":\"entity/letter\",\"links[]\":\"entity/empty\",\"links[1]\":\"entity/kept\"}}", &f, &result));
     assert(result.references == 1 && result.gaps == 4 && !result.aborted && strstr(f.references, "entity/kept"));
+    /* Native entity state keys counted lists the same way (a saved player
+     * inventory writes {"item[0]":...,"item[1]":"NULL"}). */
     memset(&f, 0, sizeof(f));
-    assert(!inspect_json("{\"startingInventory\":{\"item[0]\":{\"inventoryDecl\":\"ammo/listed\"}}}", &f, &result));
-    assert(!result.references && result.gaps == 1 && !result.aborted);
+    assert(inspect_json("{\"startingInventory\":{\"item[0]\":{\"inventoryDecl\":\"ammo/listed\"}}}", &f, &result));
+    assert(result.references == 1 && !result.gaps && !result.aborted && strstr(f.references, "ammo/listed"));
     memset(&f, 0, sizeof(f)); f.refuse = 1;
     assert(!inspect_json(json, &f, &result) && result.aborted);
 }
