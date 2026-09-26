@@ -627,6 +627,11 @@ static const sh_decl_collection_rule *pc_rules(const char *type, size_t *count)
 {
     static const sh_decl_collection_rule blocking = {"edit.renderModelInfoList", "renderModelMaterial"};
     static const sh_decl_collection_rule encounters = {"edit.validEncounters", NULL};
+    /* A bit-flag inspector's choices: one checkbox per value; the list position
+     * is presentation (the property holds the checked values, not indices). */
+    static const char *const choice_labels[] = {"label", "description", NULL};
+    static const sh_decl_collection_rule choices = {"edit.values", "enumValue", NULL, NULL, choice_labels,
+        SH_DECL_COLLECTION_PRESENTATION_ORDER};
     static const char *const property_labels[] = {"displayNameTag", "descriptionTag", NULL};
     static const sh_decl_collection_rule editor_collections[] = {
         {"edit.propertySheets", "", "properties", "path", property_labels},
@@ -645,6 +650,7 @@ static const sh_decl_collection_rule *pc_rules(const char *type, size_t *count)
     if (!_stricmp(type, "snappropertyinspector_blockingvolumerendermodel")) { *count = 1; return &blocking; }
     if (!_stricmp(type, "snappropertyinspector_whitelistencounterdecl") ||
         !_stricmp(type, "snappropertyinspector_whitelistencounterdecllist")) { *count = 1; return &encounters; }
+    if (!_stricmp(type, "snappropertyinspector_bitflag")) { *count = 1; return &choices; }
     if (!_stricmp(type, "snapeditorentitydef")) {
         *count = sizeof(editor_collections) / sizeof(editor_collections[0]); return editor_collections;
     }
@@ -659,7 +665,8 @@ int sh_package_editor_contribution_phase(const char *type)
     if (!type) return 0;
     if (!_stricmp(type, "snappropertyinspector_blockingvolumerendermodel") ||
         !_stricmp(type, "snappropertyinspector_whitelistencounterdecl") ||
-        !_stricmp(type, "snappropertyinspector_whitelistencounterdecllist")) return 1;
+        !_stricmp(type, "snappropertyinspector_whitelistencounterdecllist") ||
+        !_stricmp(type, "snappropertyinspector_bitflag")) return 1;
     if (!_stricmp(type, "entitydef")) return 2;
     return !_stricmp(type, "snapeditorentitydef") ? 3 : 0;
 }
@@ -685,7 +692,7 @@ static int pc_editor_field(const char *type, const char *key)
     if (phase == 2) return !strcmp(key, "editorVars");
     if (phase == 3) return !strcmp(key, "propertySheets") || !strcmp(key, "inputs") || !strcmp(key, "outputs");
     if (phase == 1) return !strcmp(key, !_stricmp(type, "snappropertyinspector_blockingvolumerendermodel") ?
-        "renderModelInfoList" : "validEncounters");
+        "renderModelInfoList" : !_stricmp(type, "snappropertyinspector_bitflag") ? "values" : "validEncounters");
     return 0;
 }
 

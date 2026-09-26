@@ -1024,6 +1024,10 @@ copy can fill a missing label. Counts and indices are rebuilt in the private
 compiled tree. Other fields must agree, fixed arrays and inherited sparse patches
 retain their slot semantics, and distinct target paths remain distinct controls.
 Assignment/reset operations also remain significant when comparing duplicates.
+A bit-flag inspector's choices are one such collection, identified by value:
+a package copy of a stock-named inspector (the AI filter's included) extends
+the list the stock control binds, with each package's AI choice at the key it
+holds after relocation, rather than becoming a private copy no control names.
 For shared editor presentation, opposing valid cosmetic preferences resolve in
 a stable order. A private gameplay binding keeps its own edited presentation
 while accepting compatible collection contributions. Gameplay fields never use

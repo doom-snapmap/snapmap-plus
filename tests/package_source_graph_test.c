@@ -3429,10 +3429,15 @@ static const char *stock_conductor = "{ class = \"Entity\"; edit = { aiTypeList 
     "item[0] = { aiType = \"IMP\"; entityDef = \"imp\"; } } } }";
 /* A test's own stock conductor, when it needs more stock rows. */
 static const char *registration_conductor;
+/* The stock AI filter's inspector: named choices only. */
+static const char *stock_choices = "{ edit = { enumType = \"spawnAIType_t\"; values = { num = 3; "
+    "item[0] = { enumValue = \"IMP\"; label = \"imp\"; } item[1] = { enumValue = \"T3\"; label = \"t3\"; } "
+    "item[2] = { enumValue = \"T4\"; label = \"t4\"; } } } }";
 static int registration_original(void *context, const char *path, unsigned char **body, size_t *length)
 {
     const char *text = !strcmp(path, "generated/decls/entitydef/conductor.decl") ?
         (registration_conductor ? registration_conductor : stock_conductor) :
+        !strcmp(path, "generated/decls/snappropertyinspector_bitflag/spawnaitypebitflaginspector.decl") ? stock_choices :
         !strcmp(path, "generated/decls/entitydef/imp.decl") || !strcmp(path, "generated/decls/entitydef/t3.decl") ?
         "{ class = \"Entity\"; edit = { } }" : NULL;
     if (!text) return library_original(context, path, body, length);
@@ -4192,6 +4197,107 @@ static void test_registration_private_variants(void)
     }
     rename_package("zz-fire", "fire"); rename_package("aa-ice", "ice");
     registration_conductor = NULL;
+    cleanup(); assert(!failures);
+    while (f->count) free(f->regions[--f->count].address);
+}
+/* A package's copy of the stock AI filter inspector: the stock choices in
+ * the given order (a permutation of IMP, T3, T4), one for its key and one for
+ * the named T5 the stock list lacks, under the package's own label. */
+static void stock_inspector_package(const char *package, const char *key, const char *order)
+{
+    char path[512], text[1024], items[640] = "";
+    for (size_t i = 0; i < 3; i++) {
+        const char *choice = order[i] == 'i' ? "{ enumValue = \"IMP\"; label = \"imp\"; }" :
+            order[i] == '3' ? "{ enumValue = \"T3\"; label = \"t3\"; }" : "{ enumValue = \"T4\"; label = \"t4\"; }";
+        size_t used = strlen(items);
+        snprintf(items + used, sizeof(items) - used, "item[%zu] = %s ", i, choice);
+    }
+    snprintf(path, sizeof(path),
+        "overrides/%s/assets/generated/decls/snappropertyinspector_bitflag/spawnaitypebitflaginspector.decl", package);
+    snprintf(text, sizeof(text), "{ edit = { enumType = \"spawnAIType_t\"; values = { num = 5; %s"
+        "item[3] = { enumValue = \"%s\"; label = \"%s\"; } item[4] = { enumValue = \"T5\"; label = \"%s-t5\"; } } } }",
+        items, key, package, package); create(path, text);
+}
+/* The choices a served inspector offers, in order: "label=enumValue". */
+static size_t served_choices(const sh_compiled_resource *inspector, char rows[][96], size_t capacity)
+{
+    sh_decl_node *tree = sh_decl_tree_parse((sh_decl_source){(char *)inspector->body, inspector->body_length}, NULL, 0);
+    const sh_decl_node *values = sh_decl_tree_member(sh_decl_tree_member(tree, "edit"), "values");
+    size_t count = 0;
+    char num[16];
+    assert(values);
+    for (const sh_decl_node *item = values->children; item; item = item->next) {
+        if (!item->compound) continue;
+        char label[48];
+        assert(count < capacity);
+        snprintf(label, sizeof(label), "%s", node_value(sh_decl_tree_member(item, "label")));
+        snprintf(rows[count++], 96, "%s=%s", label, node_value(sh_decl_tree_member(item, "enumValue")));
+    }
+    snprintf(num, sizeof(num), "%zu", count);
+    assert(!strcmp(node_value(sh_decl_tree_member(values, "num")), num));
+    sh_decl_tree_free(tree); return count;
+}
+/* Packages add choices to the stock AI filter by shipping its stock-named
+ * inspector. The choices are one shared list keyed by value: the stock-named
+ * inspector, which the stock filter's property binds, is served with every
+ * package's choice at the key its AI holds after relocation (a decimal the
+ * native inspector needs key_inspector.c to offer) and each copied stock
+ * choice once. A private copy nothing binds would hide them. A value is one
+ * choice whatever its labels (both packages add T5), and positions are
+ * presentation: opposing moves of a stock choice do not refuse the list. */
+static void test_registration_stock_inspector(void)
+{
+    fixture storage; fixture *f = &storage; setup(f); conductor_reflection(f);
+    sh_decl_registry_source registry = {f, read_memory, (uintptr_t)f->registry, NULL};
+    char error[1024];
+    source_link_fixture originals = {f};
+    sh_package_compile_environment env = {0};
+    size_t unserved = SIZE_MAX, invalid = SIZE_MAX;
+    registration_root("registration-stock-inspector");
+    env.baseline = registration_original; env.baseline_context = &originals;
+    env.unserved_package = &unserved; env.invalid_package = &invalid;
+    registration_package("alpha", "524288"); registration_package("gamma", "524288");
+    stock_inspector_package("alpha", "524288", "3i4"); stock_inspector_package("gamma", "524288", "i43");
+    for (int mode = 0; mode < 2; mode++) {
+        sh_package_library library = {0}; sh_package_library_native native = {0};
+        char rows[8][96], expected[96], alpha[32], gamma[32];
+        native.private_keys = 1;
+        sh_package_sources *sources = sh_package_sources_scan(root, error, sizeof(error)); assert(sources);
+        int ok = sh_package_library_compile(sources, &env, NULL, registration_original, &originals,
+            registry, (uintptr_t)f->reflection, mode ? &native : NULL, &library, error, sizeof(error));
+        if (!ok) fprintf(stderr, "stock inspector %d: %s\n", mode, error);
+        assert(ok && unserved == SIZE_MAX && invalid == SIZE_MAX);
+        const sh_compiled_resource *inspector = named_resource(library.compiled, "snappropertyinspector_bitflag",
+            "spawnaitypebitflaginspector");
+        size_t served = 0;
+        for (size_t i = 0; i < library.compiled->resource_count; i++) {
+            const sh_compiled_resource *file = library.compiled->resources + i;
+            if (!strcmp(file->original_path ? file->original_path : file->engine_path,
+                    "generated/decls/snappropertyinspector_bitflag/spawnaitypebitflaginspector.decl")) served++;
+        }
+        if (!inspector || served != 1) for (size_t i = 0; i < library.compiled->resource_count; i++)
+            fprintf(stderr, "  %s %s\n", library.compiled->resources[i].engine_path,
+                library.compiled->resources[i].original_path ? library.compiled->resources[i].original_path : "");
+        assert(inspector && served == 1 && !strcmp(inspector->engine_path,
+            "generated/decls/snappropertyinspector_bitflag/spawnaitypebitflaginspector.decl"));
+        size_t count = served_choices(inspector, rows, 8);
+        snprintf(alpha, sizeof(alpha), "%s", inspector_key(library.compiled, "alpha"));
+        snprintf(gamma, sizeof(gamma), "%s", inspector_key(library.compiled, "gamma"));
+        if (count != 6) for (size_t i = 0; i < count; i++) fprintf(stderr, "  choice %s\n", rows[i]);
+        assert(count == 6 && strcmp(alpha, gamma) && row_index(rows, count, "imp=IMP") != SIZE_MAX &&
+            row_index(rows, count, "t3=T3") != SIZE_MAX && row_index(rows, count, "t4=T4") != SIZE_MAX &&
+            (row_index(rows, count, "alpha-t5=T5") != SIZE_MAX) != (row_index(rows, count, "gamma-t5=T5") != SIZE_MAX));
+        /* Each package's choice is the key its own inspector and spawner hold. */
+        snprintf(expected, sizeof(expected), "alpha=%s", alpha); assert(row_index(rows, count, expected) != SIZE_MAX);
+        snprintf(expected, sizeof(expected), "gamma=%s", gamma); assert(row_index(rows, count, expected) != SIZE_MAX);
+        assert(!strcmp(spawner_key(library.compiled, "alpha"), alpha) &&
+            !strcmp(spawner_key(library.compiled, "gamma"), gamma));
+        if (!mode) assert((!strcmp(alpha, "524288") && !strcmp(gamma, "1048576")) ||
+            (!strcmp(alpha, "1048576") && !strcmp(gamma, "524288")));
+        else assert(sh_package_key_private_valid((uint32_t)strtoul(alpha, NULL, 10)) &&
+            sh_package_key_private_valid((uint32_t)strtoul(gamma, NULL, 10)));
+        sh_package_library_free(&library); sh_package_sources_free(sources);
+    }
     cleanup(); assert(!failures);
     while (f->count) free(f->regions[--f->count].address);
 }
@@ -6009,6 +6115,7 @@ int main(void)
     test_registration_modifier_precedence();
     test_registration_capacity();
     test_registration_private_variants();
+    test_registration_stock_inspector();
     test_registration_private_capacity();
     test_registration_private_hybrid();
     test_registration_marked_groups();
