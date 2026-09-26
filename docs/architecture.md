@@ -1177,7 +1177,10 @@ if a failed parse erased their dependency edges. Archive aliases count as direct
 changes even when the native path names cooked data. Compiled declaration
 identities also travel with the provider diff: a package-only source
 has no archive alias, and its removal must retire the native object rather than
-attempt to reload the missing source. Reflection-verified native
+attempt to reload the missing source. A removed private copy of the blocking
+volume render model inspector instead keeps its last parsed content: Play's
+precache resolves every instance's hotspot and triplanar models, and the
+engine default leaves them empty. Reflection-verified native
 parent links also select declarations that copied fields from a changed ancestor,
 including startup children whose lifetime has not yet been promoted. Ordinary
 startup consumers and runtime map-owned consumers keep their lifetime exclusions.

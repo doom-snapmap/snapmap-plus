@@ -321,6 +321,25 @@ static void success_cases(void)
         CHECK(loads == (removed ? 1 : 2) && defaults == removed);
         CHECK(sh_resource_resident_end(pass, 1, error, sizeof(error))); check_restored();
     }
+    for (int family = 0; family < 2; family++) {
+        /* A removed blocking volume render model inspector copy keeps its
+         * parsed content (Play's precache walks every instance): it is
+         * neither rebuilt nor defaulted, unlike an equal removal elsewhere. */
+        char *type = family ? "snapPropertyInspector_BlockingVolumeRenderModel" : "model";
+        reset(); expect_reconstructed = family ? 0 : 3;
+        *(const char **)(manager_object + 8) = type;
+        sh_package_change row = {(char *)paths[0], SH_PACKAGE_RESOURCE_REMOVED, type, "body.lwo"};
+        sh_package_native_identity removed = {type, "body.lwo"};
+        sh_package_changes changes = {&row, 1};
+        changes.identities_complete = 1; changes.removed = &removed; changes.removed_count = 1;
+        sh_resource_resident *pass = sh_resource_resident_begin(&changes, 0, 0, error, sizeof(error));
+        CHECK(pass); if (!pass) continue;
+        CHECK(sh_resource_resident_selected(pass, objects[0]) == !family);
+        CHECK(sh_resource_resident_reconstruct(pass, error, sizeof(error)));
+        CHECK(sh_resource_resident_drain(pass, error, sizeof(error)));
+        CHECK(counts[0] == !family && defaults == !family);
+        CHECK(sh_resource_resident_end(pass, 1, error, sizeof(error))); check_restored();
+    }
     for (int alternate = 0; alternate < 2; alternate++) {
         sh_resource_resident *pass;
         reset(); lookup_leaves_pending = alternate;

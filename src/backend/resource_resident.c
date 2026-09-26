@@ -30,6 +30,8 @@ typedef struct rr_entry {
     void *resource, *manager, *parent;
     char *type, *name;
     int selected, external, retired, reconstructed;
+    /* A removed identity left as last parsed (rr_keeps_parsed_content). */
+    int kept;
     /* State as captured before this pass touched anything. A resource the
      * engine already served as a default, or that already retained a source
      * record, must be allowed to come back the same way. */
@@ -127,6 +129,15 @@ static int rr_fixed_renderer(void *context, const char *type, const char *name)
     (void)context; (void)name;
     return !_stricmp(type, "renderparm") || !_stricmp(type, "renderprogflag");
 }
+/* A removed private copy of these families keeps its last parsed content
+ * instead of the engine default: the engine never drops a declaration, and a
+ * native consumer walks every instance and uses its parsed fields. Play's
+ * precache resolves each blocking volume render model inspector's
+ * hotspotModel and triplanarModel by name and dereferences the result (VK
+ * FUN_1411caba0), which a default instance's empty names fault. Nothing
+ * current names a removed copy, and its names change with its content. */
+static int rr_keeps_parsed_content(const char *type)
+{ return type && !_stricmp(type, "snappropertyinspector_blockingvolumerendermodel"); }
 static int rr_has(const sh_resource_graph_impact *set, const rr_entry *entry)
 {
     sh_resource_graph_identity key = {entry->type, entry->name};
@@ -432,6 +443,9 @@ sh_resource_resident *sh_resource_resident_begin(const sh_package_changes *chang
              * even before startup promotes them to permanent lifetime. */
             int supplied = entry->selected || rr_has(&seeds, entry);
             if (rr_has(&retired, entry)) entry->retired = 1;
+            if (entry->retired && rr_keeps_parsed_content(entry->type)) {
+                entry->retired = entry->selected = 0; entry->kept = 1; continue;
+            }
             entry->selected = supplied || rr_has(&impact, entry);
             /* Only content this provider supplies, or permanent content it can
              * change, may be rebuilt. A map-scoped identity such as the live
@@ -455,7 +469,7 @@ sh_resource_resident *sh_resource_resident_begin(const sh_package_changes *chang
             rr_entry *entry = pass->items + i;
             void *parent = entry->parent;
             size_t depth = 0;
-            if (entry->selected || entry->implicit ||
+            if (entry->selected || entry->kept || entry->implicit ||
                 (!initial && entry->captured_level != RR_LEVEL_PERMANENT)) continue;
             while (parent) {
                 const rr_known *known = bsearch(&parent, pass->known, pass->known_count,
