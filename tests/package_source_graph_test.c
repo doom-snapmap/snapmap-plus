@@ -3380,19 +3380,23 @@ static void conductor_reflection(fixture *native)
     }
     {
         const char *t[] = {"idDeclEntityDef", "OpaqueStringReader", "idDeclActorModifier", "idDeclSnapEditorEntity",
-            "idRenderModel", "idImage", "idList < SpawnInfo >", "spawnAIType_t", "idList < AIMod >"};
-        const char *o[] = {"*", "", "*", "*", "*", "*", "", "", ""};
+            "idRenderModel", "idImage", "idList < SpawnInfo >", "spawnAIType_t", "idList < AIMod >", "spawnAIType_t"};
+        const char *o[] = {"*", "", "*", "*", "*", "*", "", "", "", ""};
         const char *n[] = {"target", "custom", "modifier", "preview", "model", "image", "aiTypeList", "spawnType",
-            "globalAIMods"};
-        fields(native, (char *)records + 0x38, 9, t, o, n);
+            "globalAIMods", "aiFilter"};
+        fields(native, (char *)records + 0x38, 10, t, o, n);
     }
 }
 static const char *stock_conductor = "{ class = \"Entity\"; edit = { aiTypeList = { num = 1; "
     "item[0] = { aiType = \"IMP\"; entityDef = \"imp\"; } } } }";
+/* A test's own stock conductor, when it needs more stock rows. */
+static const char *registration_conductor;
 static int registration_original(void *context, const char *path, unsigned char **body, size_t *length)
 {
-    const char *text = !strcmp(path, "generated/decls/entitydef/conductor.decl") ? stock_conductor :
-        !strcmp(path, "generated/decls/entitydef/imp.decl") ? "{ class = \"Entity\"; edit = { } }" : NULL;
+    const char *text = !strcmp(path, "generated/decls/entitydef/conductor.decl") ?
+        (registration_conductor ? registration_conductor : stock_conductor) :
+        !strcmp(path, "generated/decls/entitydef/imp.decl") || !strcmp(path, "generated/decls/entitydef/t3.decl") ?
+        "{ class = \"Entity\"; edit = { } }" : NULL;
     if (!text) return library_original(context, path, body, length);
     *length = strlen(text); *body = (unsigned char *)_strdup(text); return *body ? 1 : -1;
 }
@@ -3411,13 +3415,33 @@ static void registration_package(const char *package, const char *key)
         !strcmp(package, "alpha") ? "parent-only" : !strcmp(package, "beta") ? "modifier-child" : "local-only"); create(path, text);
     /* A spawner naming the key, like an encounter member or spawn target. */
     snprintf(path, sizeof(path), "overrides/%s/assets/generated/decls/entitydef/%s_spawner.decl", package, package);
-    snprintf(text, sizeof(text), "{ class = \"Entity\"; edit = { spawnType = \"IMP %s\"; } }", key); create(path, text);
+    snprintf(text, sizeof(text), "{ class = \"Entity\"; edit = { spawnType = \"%lu\"; } }", 4ul | strtoul(key, NULL, 10));
+    create(path, text);
     /* An author-facing choice for the key, as the AI filter's inspector offers. */
     snprintf(path, sizeof(path), "overrides/%s/assets/generated/decls/snappropertyinspector_bitflag/%s_types.decl",
         package, package);
     snprintf(text, sizeof(text), "{ edit = { enumType = \"spawnAIType_t\"; values = { num = 2; "
         "item[0] = { enumValue = \"IMP\"; label = \"imp\"; } item[1] = { enumValue = \"%s\"; label = \"%s\"; } } } }",
         key, package); create(path, text);
+    /* An AI filter classifying imps and the package's AI. */
+    snprintf(path, sizeof(path), "overrides/%s/assets/generated/decls/entitydef/%s_filter.decl", package, package);
+    snprintf(text, sizeof(text), "{ class = \"Entity\"; edit = { aiFilter = \"%lu\"; } }", 4ul | strtoul(key, NULL, 10));
+    create(path, text);
+}
+/* The AI filter mask a package's filter ended with, by authored path. */
+static const char *filter_value(const sh_package_compilation *compiled, const char *package)
+{
+    static char value[64];
+    char authored[256];
+    snprintf(authored, sizeof(authored), "generated/decls/entitydef/%s_filter.decl", package);
+    for (size_t i = 0; i < compiled->resource_count; i++) {
+        const sh_compiled_resource *file = compiled->resources + i;
+        if (strcmp(file->original_path ? file->original_path : file->engine_path, authored)) continue;
+        sh_decl_node *tree = sh_decl_tree_parse((sh_decl_source){(char *)file->body, file->body_length}, NULL, 0);
+        snprintf(value, sizeof(value), "%s", node_value(sh_decl_tree_member(sh_decl_tree_member(tree, "edit"), "aiFilter")));
+        sh_decl_tree_free(tree); return value;
+    }
+    return NULL;
 }
 /* The enumValue a package's inspector offers for its own AI, by authored path. */
 static const char *inspector_key(const sh_package_compilation *compiled, const char *package)
@@ -3440,7 +3464,7 @@ static const char *inspector_key(const sh_package_compilation *compiled, const c
     }
     return NULL;
 }
-/* The spawn-type value a package's spawner ended with, by authored path. */
+/* The key a package's spawner requests beside IMP, by authored path. */
 static const char *spawner_key(const sh_package_compilation *compiled, const char *package)
 {
     static char value[64];
@@ -3449,11 +3473,12 @@ static const char *spawner_key(const sh_package_compilation *compiled, const cha
     for (size_t i = 0; i < compiled->resource_count; i++) {
         const sh_compiled_resource *file = compiled->resources + i;
         if (strcmp(file->original_path ? file->original_path : file->engine_path, authored)) continue;
-        const char *at = strstr((const char *)file->body, "spawnType = \"IMP ");
+        /* The spawner requests IMP with the key, as one number. */
+        const char *at = strstr((const char *)file->body, "spawnType = \"");
         assert(at);
-        at += strlen("spawnType = \"IMP ");
-        size_t n = strcspn(at, "\"");
-        assert(n < sizeof(value)); memcpy(value, at, n); value[n] = 0; return value;
+        unsigned long requested = strtoul(at + strlen("spawnType = \""), NULL, 10);
+        assert(requested & 4ul);
+        snprintf(value, sizeof(value), "%lu", requested & ~4ul); return value;
     }
     return NULL;
 }
@@ -3597,6 +3622,8 @@ static void test_registration_lists(void)
         /* The moved package's author-facing choice follows its AI. */
         assert(inspector_key(library.compiled, mover) && !strcmp(inspector_key(library.compiled, mover), "1048576"));
         assert(inspector_key(library.compiled, keeper) && !strcmp(inspector_key(library.compiled, keeper), "524288"));
+        /* A filter keeps IMP and follows the package's own key. */
+        assert(!strcmp(filter_value(library.compiled, mover), "1048580") && !strcmp(filter_value(library.compiled, keeper), "524292"));
         /* Every package key is bound for maps: the moved one to its new bit,
          * the kept one to itself, the shared one in both equal sources. */
         assert(key_binding(&library.bindings, "524288", "1048576") == 1 &&
@@ -3620,9 +3647,9 @@ static void test_registration_lists(void)
 static int key_rewrite(void *context, const char *slot, const char *value, size_t length, const char **replacement)
 {
     static char owned[256];
-    const unsigned char *to = context;
+    const sh_package_key_move *to = context;
     size_t out_length = 0; int failed = 0;
-    char *moved = sh_package_key_relocate(value, length, to, &out_length, &failed);
+    char *moved = sh_package_key_relocate(NULL, value, length, to, NULL, &out_length, &failed);
     (void)slot;
     if (failed) return -1;
     if (!moved) return 0;
@@ -3633,6 +3660,1094 @@ static int key_rewrite(void *context, const char *slot, const char *value, size_
  * bit no single-bit constant names is a package's key. Relocation rewrites
  * only decimal tokens, keeps names and spacing, and reaches every reflected
  * spawn-type site of a declaration (both registration lists here). */
+/* Rows of one conductor list, in order: "aiType=field" per row. */
+static size_t conductor_rows(const sh_compiled_resource *conductor, const char *list_name, const char *field,
+    char rows[][96], size_t capacity)
+{
+    sh_decl_node *tree = sh_decl_tree_parse((sh_decl_source){(char *)conductor->body, conductor->body_length}, NULL, 0);
+    const sh_decl_node *list = sh_decl_tree_member(sh_decl_tree_member(tree, "edit"), list_name);
+    size_t count = 0;
+    for (const sh_decl_node *item = list ? list->children : NULL; item; item = item->next) {
+        if (!item->compound) continue;
+        char type[96];
+        assert(count < capacity);
+        snprintf(type, sizeof(type), "%s", node_value(sh_decl_tree_member(item, "aiType")));
+        snprintf(rows[count++], 96, "%s=%s", type, node_value(sh_decl_tree_member(item, field)));
+    }
+    sh_decl_tree_free(tree); return count;
+}
+static size_t row_index(char rows[][96], size_t count, const char *row)
+{
+    for (size_t i = 0; i < count; i++) if (!strcmp(rows[i], row)) return i;
+    return SIZE_MAX;
+}
+/* The spawn-type value of a package spawner that names no custom key. */
+static const char *spawner_value(const sh_package_compilation *compiled, const char *package)
+{
+    static char value[64];
+    char authored[256];
+    snprintf(authored, sizeof(authored), "generated/decls/entitydef/%s_spawner.decl", package);
+    for (size_t i = 0; i < compiled->resource_count; i++) {
+        const sh_compiled_resource *file = compiled->resources + i;
+        if (strcmp(file->original_path ? file->original_path : file->engine_path, authored)) continue;
+        sh_decl_node *tree = sh_decl_tree_parse((sh_decl_source){(char *)file->body, file->body_length}, NULL, 0);
+        snprintf(value, sizeof(value), "%s", node_value(sh_decl_tree_member(sh_decl_tree_member(tree, "edit"), "spawnType")));
+        sh_decl_tree_free(tree); return value;
+    }
+    return NULL;
+}
+static const char *authored_name(const sh_package_compilation *compiled, const char *leaf)
+{
+    char authored[256];
+    snprintf(authored, sizeof(authored), "generated/decls/entitydef/%s.decl", leaf);
+    for (size_t i = 0; i < compiled->resource_count; i++) {
+        const sh_compiled_resource *file = compiled->resources + i;
+        if (!strcmp(file->original_path ? file->original_path : file->engine_path, authored)) return file->name;
+    }
+    return NULL;
+}
+/* A package whose conductor copy changes the stock IMP row (typed IMP and the
+ * any-zombie group bit it shares with T3) to its own AI and IMP's modifier,
+ * keeping the stock T3 row; its spawner and inspector name IMP beside a named
+ * T3 bit, the group bit and the all-bits composite. */
+static void variant_package(const char *package, const char *ai, const char *health)
+{
+    char path[512], text[768];
+    snprintf(path, sizeof(path), "overrides/%s/package.json", package);
+    snprintf(text, sizeof(text), "{\"id\":\"local.%s\",\"name\":\"%s\"}", package, package); create(path, text);
+    snprintf(path, sizeof(path), "overrides/%s/assets/generated/decls/entitydef/conductor.decl", package);
+    snprintf(text, sizeof(text), "{ class = \"Entity\"; edit = { aiTypeList = { num = 2; "
+        "item[0] = { aiType = \"IMP ANY_ZOMBIE\"; entityDef = \"%s\"; } "
+        "item[1] = { aiType = \"T3 ANY_ZOMBIE\"; entityDef = \"t3\"; } } "
+        "globalAIMods = { num = 2; item[0] = { aiType = \"T3\"; healthMod = \"stock-t3\"; } "
+        "item[1] = { aiType = \"IMP\"; healthMod = \"%s\"; } } } }", ai, health); create(path, text);
+    snprintf(path, sizeof(path), "overrides/%s/assets/generated/decls/entitydef/%s.decl", package, ai);
+    create(path, "{ class = \"Entity\"; edit = { target = \"local-only\"; } }");
+    snprintf(path, sizeof(path), "overrides/%s/assets/generated/decls/entitydef/%s_spawner.decl", package, package);
+    create(path, "{ class = \"Entity\"; edit = { spawnType = \"IMP T3 ANY_ZOMBIE\"; } }");
+    snprintf(path, sizeof(path), "overrides/%s/assets/generated/decls/entitydef/%s_group_spawner.decl", package, package);
+    create(path, "{ class = \"Entity\"; edit = { spawnType = \"ANY_ZOMBIE\"; } }");
+    snprintf(path, sizeof(path), "overrides/%s/assets/generated/decls/entitydef/%s_filter.decl", package, package);
+    create(path, "{ class = \"Entity\"; edit = { aiFilter = \"IMP ANY_ZOMBIE\"; } }");
+    snprintf(path, sizeof(path), "overrides/%s/assets/generated/decls/snappropertyinspector_bitflag/%s_types.decl",
+        package, package);
+    snprintf(text, sizeof(text), "{ edit = { enumType = \"spawnAIType_t\"; values = { num = 2; "
+        "item[0] = { enumValue = \"IMP\"; label = \"%s\"; } item[1] = { enumValue = \"ALL\"; label = \"all\"; } } } }",
+        package); create(path, text);
+}
+static const char *variant_stock = "{ class = \"Entity\"; edit = { aiTypeList = { num = 2; "
+    "item[0] = { aiType = \"IMP ANY_ZOMBIE\"; entityDef = \"imp\"; } "
+    "item[1] = { aiType = \"T3 ANY_ZOMBIE\"; entityDef = \"t3\"; } } "
+    "globalAIMods = { num = 2; item[0] = { aiType = \"T3\"; healthMod = \"stock-t3\"; } "
+    "item[1] = { aiType = \"IMP\"; healthMod = \"stock\"; } } } }";
+static void registration_root(const char *label)
+{
+    char temporary[MAX_PATH];
+    assert(GetTempPathA(sizeof(temporary), temporary));
+    snprintf(root, sizeof(root), "%ssmp-%s-%lu-%llu", temporary, label, GetCurrentProcessId(), GetTickCount64());
+    assert(CreateDirectoryA(root, NULL));
+}
+static void rename_package(const char *from_name, const char *to_name)
+{
+    char from[MAX_PATH], to[MAX_PATH];
+    snprintf(from, sizeof(from), "%s\\overrides\\%s", root, from_name);
+    snprintf(to, sizeof(to), "%s\\overrides\\%s", root, to_name);
+    assert(MoveFileA(from, to));
+}
+/* Packages changing one stock row to different AI. fire and ember change IMP
+ * to exactly equal AI (ember ships a copy of fire's) and modifier, ice to its
+ * own AI with the stock modifier: each distinct change keeps a row typed IMP
+ * (and any zombie), now with a private bit, so stock IMP requests pick among
+ * the variants and the native type consumers still see IMP; each package's own
+ * IMP requests (spawner, inspector choice) move to its private bit alone while
+ * the group bit stays shared, and a changed modifier moves there too, ahead of
+ * the stock IMP modifier, which stays. solo changes T3 uncontended: its change
+ * applies to the stock key as authored. The order follows stable source
+ * identity, so reversed discovery gives each package the same key. */
+static void test_registration_variants(void)
+{
+    fixture storage; fixture *f = &storage; setup(f); conductor_reflection(f);
+    sh_decl_registry_source registry = {f, read_memory, (uintptr_t)f->registry, NULL};
+    char error[1024], fire_key[32] = "", ice_key[32] = "";
+    source_link_fixture originals = {f};
+    sh_package_compile_environment env = {0}; sh_package_library library = {0};
+    size_t unserved = SIZE_MAX, invalid = SIZE_MAX;
+    registration_root("registration-variants");
+    registration_conductor = variant_stock;
+    env.baseline = registration_original; env.baseline_context = &originals;
+    env.unserved_package = &unserved; env.invalid_package = &invalid;
+    variant_package("fire", "fire_imp", "fire"); variant_package("ember", "fire_imp", "fire");
+    variant_package("ice", "ice_imp", "stock");
+    create("overrides/solo/package.json", "{\"id\":\"local.solo\",\"name\":\"solo\"}");
+    create("overrides/solo/assets/generated/decls/entitydef/conductor.decl", "{ class = \"Entity\"; edit = { "
+        "aiTypeList = { num = 2; item[0] = { aiType = \"IMP ANY_ZOMBIE\"; entityDef = \"imp\"; } "
+        "item[1] = { aiType = \"T3 ANY_ZOMBIE\"; entityDef = \"solo_t3\"; } } } }");
+    create("overrides/solo/assets/generated/decls/entitydef/solo_t3.decl", "{ class = \"Entity\"; edit = { target = \"local-only\"; } }");
+    create("overrides/solo/assets/generated/decls/entitydef/solo_spawner.decl", "{ class = \"Entity\"; edit = { spawnType = \"T3\"; } }");
+    for (int round = 0; round < 2; round++) {
+        if (round) { rename_package("fire", "zz-fire"); rename_package("ice", "aa-ice"); }
+        sh_package_sources *sources = sh_package_sources_scan(root, error, sizeof(error)); assert(sources);
+        int ok = sh_package_library_compile(sources, &env, NULL, registration_original, &originals,
+            registry, (uintptr_t)f->reflection, NULL, &library, error, sizeof(error));
+        if (!ok) fprintf(stderr, "registration variants %d: %s\n", round, error);
+        assert(ok && unserved == SIZE_MAX && invalid == SIZE_MAX);
+        const sh_compiled_resource *conductor = named_resource(library.compiled, "entitydef", "conductor");
+        char rows[16][96], mods[16][96], row[160];
+        assert(conductor);
+        size_t count = conductor_rows(conductor, "aiTypeList", "entityDef", rows, 16);
+        size_t mod_count = conductor_rows(conductor, "globalAIMods", "healthMod", mods, 16);
+        char fire[64], ember[64], ice[64];
+        assert(spawner_value(library.compiled, "fire") && spawner_value(library.compiled, "ember") &&
+            spawner_value(library.compiled, "ice"));
+        snprintf(fire, sizeof(fire), "%s", spawner_value(library.compiled, "fire"));
+        snprintf(ember, sizeof(ember), "%s", spawner_value(library.compiled, "ember"));
+        snprintf(ice, sizeof(ice), "%s", spawner_value(library.compiled, "ice"));
+        /* The spawner's IMP is the variant's key now, T3 and the group bit
+         * as written: one number, as the engine reads unnamed bits. */
+        char fire_now[32], ice_now[32];
+        snprintf(fire_now, sizeof(fire_now), "%lu", strtoul(fire, NULL, 10) & ~(8ul | 131072ul));
+        snprintf(ice_now, sizeof(ice_now), "%lu", strtoul(ice, NULL, 10) & ~(8ul | 131072ul));
+        if (round) assert(!strcmp(fire_now, fire_key) && !strcmp(ice_now, ice_key));
+        else {
+            /* Private bits: the lowest two unnamed ones. */
+            snprintf(fire_key, sizeof(fire_key), "%s", fire_now); snprintf(ice_key, sizeof(ice_key), "%s", ice_now);
+            assert(strcmp(fire_key, ice_key) && (!strcmp(fire_key, "524288") || !strcmp(fire_key, "1048576")) &&
+                (!strcmp(ice_key, "524288") || !strcmp(ice_key, "1048576")));
+        }
+        snprintf(row, sizeof(row), "%lu", strtoul(fire_key, NULL, 10) | 8ul | 131072ul);
+        assert(!strcmp(fire, row) && !strcmp(ember, row));
+        snprintf(row, sizeof(row), "%lu", strtoul(ice_key, NULL, 10) | 8ul | 131072ul); assert(!strcmp(ice, row));
+        assert(!strcmp(spawner_value(library.compiled, "solo"), "T3"));
+        assert(!strcmp(spawner_value(library.compiled, "fire_group"), "ANY_ZOMBIE"));
+        /* The stock IMP row is replaced by the two variants (the equal
+         * change once), each still typed IMP; solo's T3 change applies. */
+        const char *fire_ai = authored_name(library.compiled, "fire_imp");
+        const char *ice_ai = authored_name(library.compiled, "ice_imp");
+        const char *solo_ai = authored_name(library.compiled, "solo_t3");
+        assert(fire_ai && ice_ai && solo_ai && count == 3);
+        snprintf(row, sizeof(row), "%lu=%s", 4ul | 131072ul | strtoul(fire_key, NULL, 10), fire_ai);
+        assert(row_index(rows, count, row) != SIZE_MAX);
+        snprintf(row, sizeof(row), "%lu=%s", 4ul | 131072ul | strtoul(ice_key, NULL, 10), ice_ai);
+        assert(row_index(rows, count, row) != SIZE_MAX);
+        snprintf(row, sizeof(row), "T3 ANY_ZOMBIE=%s", solo_ai); assert(row_index(rows, count, row) != SIZE_MAX);
+        /* fire's modifier precedes the stock IMP modifier, which stays and
+         * serves ice's variant; ice's unchanged modifier adds no row. */
+        char fire_mod[64];
+        snprintf(fire_mod, sizeof(fire_mod), "%s=fire", fire_key);
+        size_t stock_mod = row_index(mods, mod_count, "IMP=stock");
+        assert(mod_count == 3 && stock_mod != SIZE_MAX && row_index(mods, mod_count, "T3=stock-t3") != SIZE_MAX);
+        assert(row_index(mods, mod_count, fire_mod) < stock_mod);
+        /* The package's author-facing IMP choice sets AI filters, which
+         * classify: it keeps naming every imp, its variant included. */
+        const char *choice = inspector_key(library.compiled, "fire");
+        assert(choice && !strcmp(choice, "IMP"));
+        choice = inspector_key(library.compiled, "ice");
+        assert(choice && !strcmp(choice, "IMP"));
+        /* So does a filter: it names every imp and zombie as authored. */
+        assert(!strcmp(filter_value(library.compiled, "fire"), "IMP ANY_ZOMBIE") &&
+            !strcmp(filter_value(library.compiled, "ice"), "IMP ANY_ZOMBIE"));
+        /* Maps bind the IMP bit of each changing package to its private bit,
+         * or to itself where the change is uncontended. */
+        assert(key_binding(&library.bindings, "4", fire_key) == 2 && key_binding(&library.bindings, "4", ice_key) == 1);
+        assert(key_binding(&library.bindings, "8", "8") == 1);
+        assert(!library.coverage || !strstr(library.coverage, "spawn"));
+        sh_package_library_free(&library); sh_package_sources_free(sources);
+    }
+    rename_package("zz-fire", "fire"); rename_package("aa-ice", "ice");
+    /* ice alone: its change applies to the stock key, with no private bit. */
+    rename_package("fire", "off-fire"); rename_package("ember", "off-ember");
+    {
+        char held[MAX_PATH];
+        snprintf(held, sizeof(held), "%s\\held", root); assert(CreateDirectoryA(held, NULL));
+        char from[MAX_PATH], to[MAX_PATH];
+        snprintf(from, sizeof(from), "%s\\overrides\\off-fire", root); snprintf(to, sizeof(to), "%s\\off-fire", held);
+        assert(MoveFileA(from, to));
+        snprintf(from, sizeof(from), "%s\\overrides\\off-ember", root); snprintf(to, sizeof(to), "%s\\off-ember", held);
+        assert(MoveFileA(from, to));
+        sh_package_sources *sources = sh_package_sources_scan(root, error, sizeof(error)); assert(sources);
+        int ok = sh_package_library_compile(sources, &env, NULL, registration_original, &originals,
+            registry, (uintptr_t)f->reflection, NULL, &library, error, sizeof(error));
+        if (!ok) fprintf(stderr, "registration variant alone: %s\n", error);
+        assert(ok && unserved == SIZE_MAX && invalid == SIZE_MAX);
+        const sh_compiled_resource *conductor = named_resource(library.compiled, "entitydef", "conductor");
+        char rows[16][96], mods[16][96], row[160];
+        size_t count = conductor_rows(conductor, "aiTypeList", "entityDef", rows, 16);
+        size_t mod_count = conductor_rows(conductor, "globalAIMods", "healthMod", mods, 16);
+        snprintf(row, sizeof(row), "IMP ANY_ZOMBIE=%s", authored_name(library.compiled, "ice_imp"));
+        assert(count == 2 && row_index(rows, count, row) != SIZE_MAX);
+        assert(mod_count == 2 && row_index(mods, mod_count, "IMP=stock") != SIZE_MAX);
+        assert(!strcmp(spawner_value(library.compiled, "ice"), "IMP T3 ANY_ZOMBIE"));
+        assert(key_binding(&library.bindings, "4", "4") == 1);
+        sh_package_library_free(&library); sh_package_sources_free(sources);
+        assert(MoveFileA(to, from));
+        snprintf(from, sizeof(from), "%s\\overrides\\off-fire", root); snprintf(to, sizeof(to), "%s\\off-fire", held);
+        assert(MoveFileA(to, from));
+        assert(RemoveDirectoryA(held));
+    }
+    rename_package("off-fire", "fire"); rename_package("off-ember", "ember");
+    registration_conductor = NULL;
+    cleanup(); assert(!failures);
+    while (f->count) free(f->regions[--f->count].address);
+}
+/* Global modifiers apply first-match, one row per mask: two packages that
+ * change only the stock IMP modifier keep the first in stable source order,
+ * the other's row reverts to stock, both stay served and the library accounts
+ * the shadowed change. Reversed discovery keeps the same winner. */
+static void test_registration_modifier_precedence(void)
+{
+    fixture storage; fixture *f = &storage; setup(f); conductor_reflection(f);
+    sh_decl_registry_source registry = {f, read_memory, (uintptr_t)f->registry, NULL};
+    char error[1024], winner[32] = "";
+    source_link_fixture originals = {f};
+    sh_package_compile_environment env = {0}; sh_package_library library = {0};
+    size_t unserved = SIZE_MAX, invalid = SIZE_MAX;
+    registration_root("registration-modifiers");
+    registration_conductor = variant_stock;
+    env.baseline = registration_original; env.baseline_context = &originals;
+    env.unserved_package = &unserved; env.invalid_package = &invalid;
+    const char *names[] = {"tough", "frail"};
+    for (size_t i = 0; i < 2; i++) {
+        char path[256], text[640];
+        snprintf(path, sizeof(path), "overrides/%s/package.json", names[i]);
+        snprintf(text, sizeof(text), "{\"id\":\"local.%s\",\"name\":\"%s\"}", names[i], names[i]); create(path, text);
+        snprintf(path, sizeof(path), "overrides/%s/assets/generated/decls/entitydef/conductor.decl", names[i]);
+        snprintf(text, sizeof(text), "{ class = \"Entity\"; edit = { aiTypeList = { num = 2; "
+            "item[0] = { aiType = \"IMP\"; entityDef = \"imp\"; } item[1] = { aiType = \"T3\"; entityDef = \"t3\"; } } "
+            "globalAIMods = { num = 2; item[0] = { aiType = \"T3\"; healthMod = \"stock-t3\"; } "
+            "item[1] = { aiType = \"IMP\"; healthMod = \"%s\"; } } } }", names[i]); create(path, text);
+    }
+    for (int round = 0; round < 2; round++) {
+        if (round) { rename_package("tough", "zz-tough"); rename_package("frail", "aa-frail"); }
+        sh_package_sources *sources = sh_package_sources_scan(root, error, sizeof(error)); assert(sources);
+        int ok = sh_package_library_compile(sources, &env, NULL, registration_original, &originals,
+            registry, (uintptr_t)f->reflection, NULL, &library, error, sizeof(error));
+        if (!ok) fprintf(stderr, "registration modifiers %d: %s\n", round, error);
+        assert(ok && unserved == SIZE_MAX && invalid == SIZE_MAX);
+        const sh_compiled_resource *conductor = named_resource(library.compiled, "entitydef", "conductor");
+        const char *mod = conductor_list_row(conductor, "globalAIMods", "IMP", "healthMod");
+        assert(mod && (!strcmp(mod, "tough") || !strcmp(mod, "frail")));
+        if (!round) snprintf(winner, sizeof(winner), "%s", mod);
+        else assert(!strcmp(winner, mod));
+        char note[160];
+        snprintf(note, sizeof(note), "its global AI modifier for IMP differs from %s's", winner);
+        assert(library.coverage && strstr(library.coverage, note) && conductor_row(conductor, "IMP") &&
+            !strcmp(conductor_row(conductor, "IMP"), "imp"));
+        sh_package_library_free(&library); sh_package_sources_free(sources);
+    }
+    rename_package("zz-tough", "tough"); rename_package("aa-frail", "frail");
+    registration_conductor = NULL;
+    cleanup(); assert(!failures);
+    while (f->count) free(f->regions[--f->count].address);
+}
+/* Thirteen packages register distinct AI under one authored key. The engine
+ * dispatches 32-bit keys, so eleven unnamed bits give eleven exclusive keys:
+ * the first keeps it, ten move, and the last two keep the authored key and
+ * share its requests (the spawn manager picks among the rows). All stay
+ * served with their AI registered; the shared keys and the modifier rows they
+ * shadow are accounted. */
+static void test_registration_capacity(void)
+{
+    fixture storage; fixture *f = &storage; setup(f); conductor_reflection(f);
+    sh_decl_registry_source registry = {f, read_memory, (uintptr_t)f->registry, NULL};
+    char error[1024], names[13][16];
+    source_link_fixture originals = {f};
+    sh_package_compile_environment env = {0}; sh_package_library library = {0};
+    size_t unserved = SIZE_MAX, invalid = SIZE_MAX;
+    registration_root("registration-capacity");
+    env.baseline = registration_original; env.baseline_context = &originals;
+    env.unserved_package = &unserved; env.invalid_package = &invalid;
+    for (int i = 0; i < 13; i++) { snprintf(names[i], sizeof(names[i]), "cap%02d", i); registration_package(names[i], "524288"); }
+    sh_package_sources *sources = sh_package_sources_scan(root, error, sizeof(error)); assert(sources);
+    int ok = sh_package_library_compile(sources, &env, NULL, registration_original, &originals,
+        registry, (uintptr_t)f->reflection, NULL, &library, error, sizeof(error));
+    if (!ok) fprintf(stderr, "registration capacity: %s\n", error);
+    assert(ok && unserved == SIZE_MAX && invalid == SIZE_MAX);
+    const sh_compiled_resource *conductor = named_resource(library.compiled, "entitydef", "conductor");
+    char rows[32][96], mods[32][96], row[160];
+    size_t count = conductor_rows(conductor, "aiTypeList", "entityDef", rows, 32);
+    size_t mod_count = conductor_rows(conductor, "globalAIMods", "healthMod", mods, 32);
+    uint32_t keys = 0;
+    size_t shared = 0;
+    for (int i = 0; i < 13; i++) {
+        const char *key = spawner_key(library.compiled, names[i]);
+        unsigned long value = strtoul(key, NULL, 10);
+        assert(value && !(value & (value - 1)) && value >= 524288u && value <= 536870912u);
+        keys |= (uint32_t)value;
+        if (value == 524288u) shared++;
+        /* Every package's AI stays registered under the key it holds. */
+        snprintf(row, sizeof(row), "%s=%s", key, package_boss(library.compiled, names[i]));
+        assert(row_index(rows, count, row) != SIZE_MAX);
+    }
+    assert(keys == 0x3ff80000u && shared == 3 && count == 14);
+    /* One modifier row per mask; the keeper's holds the shared key. */
+    size_t at_shared = 0;
+    for (size_t i = 0; i < mod_count; i++) if (!strncmp(mods[i], "524288=", 7)) at_shared++;
+    assert(mod_count == 11 && at_shared == 1);
+    size_t notes = 0, shadowed = 0;
+    for (const char *at = library.coverage; at && (at = strstr(at, "shares its spawn requests")); at++) notes++;
+    for (const char *at = library.coverage; at && (at = strstr(at, "global AI modifier for 524288")); at++) shadowed++;
+    assert(notes == 2 && shadowed == 2);
+    {
+        const char *with = strstr(library.coverage, "shares its spawn requests with ");
+        char keeper[32], expected[64];
+        assert(with); with += strlen("shares its spawn requests with ");
+        size_t n = strcspn(with, ";");
+        assert(n < sizeof(keeper)); memcpy(keeper, with, n); keeper[n] = 0;
+        snprintf(expected, sizeof(expected), "524288=%s", keeper);
+        assert(row_index(mods, mod_count, expected) != SIZE_MAX && !strcmp(spawner_key(library.compiled, keeper), "524288"));
+    }
+    sh_package_library_free(&library); sh_package_sources_free(sources);
+    cleanup(); assert(!failures);
+    while (f->count) free(f->regions[--f->count].address);
+}
+
+/* The spawn-type bits of every row of one conductor list, with its field. */
+typedef struct key_row { uint32_t mask; char field[96]; } key_row;
+static size_t key_rows(fixture *f, const sh_compiled_resource *conductor, const char *list_name, const char *field,
+    key_row *rows, size_t capacity)
+{
+    char text[32][96], error[512];
+    size_t count = conductor_rows(conductor, list_name, field, text, 32);
+    sh_decl_native_schema *schema = sh_decl_native_schema_open(
+        (sh_decl_native_source){f, read_memory, (uintptr_t)f->reflection}, (sh_decl_dependency_observer){0},
+        error, sizeof(error));
+    sh_package_key_space space;
+    assert(schema && sh_package_key_space_read(schema, &space) == 1 && count <= capacity);
+    for (size_t i = 0; i < count; i++) {
+        const char *equals = strchr(text[i], '=');
+        assert(equals && sh_package_key_bits(&space, text[i], (size_t)(equals - text[i]), &rows[i].mask));
+        snprintf(rows[i].field, sizeof(rows[i].field), "%s", equals + 1);
+    }
+    sh_decl_native_schema_close(schema);
+    return count;
+}
+/* The group codes of the library under test (package_keys.h). */
+static const sh_package_key_groups *g_key_groups;
+/* The AI a request can select under the native private-key contract. */
+static size_t selected(const key_row *rows, size_t count, uint32_t request, const char *out[], size_t capacity)
+{
+    size_t n = 0;
+    for (size_t i = 0; i < count; i++)
+        if (sh_package_key_request_matches(g_key_groups, request, rows[i].mask)) { assert(n < capacity); out[n++] = rows[i].field; }
+    return n;
+}
+static int holds(const char *const *list, size_t count, const char *value)
+{
+    for (size_t i = 0; i < count; i++) if (value && !strcmp(list[i], value)) return 1;
+    return 0;
+}
+/* The modifier the native lookup gives an AI typed by its first row. */
+static const char *modifier_for(const key_row *mods, size_t count, uint32_t type)
+{
+    for (size_t i = 0; i < count; i++) if (sh_package_key_modifier_matches(g_key_groups, type, mods[i].mask)) return mods[i].field;
+    return NULL;
+}
+/* Under the native private-key contract every package's changed stock row
+ * takes its own key, contended or not: the stock rows stay (restored where a
+ * package's copy replaced them), so stock IMP requests select only the stock
+ * imp, as native-only maps need; each variant row keeps the stock bits ("IMP
+ * ANY_ZOMBIE <key>"), so type consumers still see an imp and a zombie; each
+ * package's own requests reach its variant beside the stock rows its other
+ * bits name, never another package's; a changed modifier moves to the key
+ * ahead of the stock row. Reversed discovery gives each package the same key. */
+static void test_registration_private_variants(void)
+{
+    fixture storage; fixture *f = &storage; setup(f); conductor_reflection(f);
+    sh_decl_registry_source registry = {f, read_memory, (uintptr_t)f->registry, NULL};
+    char error[1024], fire_key[32] = "", ice_key[32] = "";
+    source_link_fixture originals = {f};
+    sh_package_compile_environment env = {0}; sh_package_library library = {0};
+    sh_package_library_native native = {0};
+    size_t unserved = SIZE_MAX, invalid = SIZE_MAX;
+    native.private_keys = 1;
+    registration_root("registration-private");
+    registration_conductor = variant_stock;
+    env.baseline = registration_original; env.baseline_context = &originals;
+    env.unserved_package = &unserved; env.invalid_package = &invalid;
+    variant_package("fire", "fire_imp", "fire"); variant_package("ember", "fire_imp", "fire");
+    variant_package("ice", "ice_imp", "stock");
+    create("overrides/solo/package.json", "{\"id\":\"local.solo\",\"name\":\"solo\"}");
+    create("overrides/solo/assets/generated/decls/entitydef/conductor.decl", "{ class = \"Entity\"; edit = { "
+        "aiTypeList = { num = 2; item[0] = { aiType = \"IMP ANY_ZOMBIE\"; entityDef = \"imp\"; } "
+        "item[1] = { aiType = \"T3 ANY_ZOMBIE\"; entityDef = \"solo_t3\"; } } } }");
+    create("overrides/solo/assets/generated/decls/entitydef/solo_t3.decl", "{ class = \"Entity\"; edit = { target = \"local-only\"; } }");
+    create("overrides/solo/assets/generated/decls/entitydef/solo_spawner.decl", "{ class = \"Entity\"; edit = { spawnType = \"T3\"; } }");
+    for (int round = 0; round < 2; round++) {
+        if (round) { rename_package("fire", "zz-fire"); rename_package("ice", "aa-ice"); }
+        sh_package_sources *sources = sh_package_sources_scan(root, error, sizeof(error)); assert(sources);
+        int ok = sh_package_library_compile(sources, &env, NULL, registration_original, &originals,
+            registry, (uintptr_t)f->reflection, &native, &library, error, sizeof(error));
+        if (!ok) fprintf(stderr, "registration private %d: %s\n", round, error);
+        assert(ok && unserved == SIZE_MAX && invalid == SIZE_MAX);
+        g_key_groups = library.key_groups;
+        const sh_compiled_resource *conductor = named_resource(library.compiled, "entitydef", "conductor");
+        key_row rows[16], mods[16];
+        char fire[64], ember[64], ice[64], row[160];
+        assert(conductor);
+        size_t count = key_rows(f, conductor, "aiTypeList", "entityDef", rows, 16);
+        size_t mod_count = key_rows(f, conductor, "globalAIMods", "healthMod", mods, 16);
+        snprintf(fire, sizeof(fire), "%s", spawner_value(library.compiled, "fire"));
+        snprintf(ember, sizeof(ember), "%s", spawner_value(library.compiled, "ember"));
+        snprintf(ice, sizeof(ice), "%s", spawner_value(library.compiled, "ice"));
+        char fire_now[32], ice_now[32];
+        snprintf(fire_now, sizeof(fire_now), "%lu", strtoul(fire, NULL, 10) & ~(8ul | 131072ul));
+        snprintf(ice_now, sizeof(ice_now), "%lu", strtoul(ice, NULL, 10) & ~(8ul | 131072ul));
+        if (round) assert(!strcmp(fire_now, fire_key) && !strcmp(ice_now, ice_key));
+        else {
+            snprintf(fire_key, sizeof(fire_key), "%s", fire_now); snprintf(ice_key, sizeof(ice_key), "%s", ice_now);
+            assert(strcmp(fire_key, ice_key) && (!strcmp(fire_key, "524288") || !strcmp(fire_key, "1048576")) &&
+                (!strcmp(ice_key, "524288") || !strcmp(ice_key, "1048576")));
+        }
+        snprintf(row, sizeof(row), "%lu", strtoul(fire_key, NULL, 10) | 8ul | 131072ul);
+        assert(!strcmp(fire, row) && !strcmp(ember, row));
+        snprintf(row, sizeof(row), "%lu", strtoul(ice_key, NULL, 10) | 8ul | 131072ul); assert(!strcmp(ice, row));
+        assert(!strcmp(spawner_value(library.compiled, "solo"), "2097152"));
+        /* A package's own group request includes its variant's key. */
+        snprintf(row, sizeof(row), "%lu", 131072ul | strtoul(fire_key, NULL, 10));
+        assert(!strcmp(spawner_value(library.compiled, "fire_group"), row));
+        const char *fire_ai = authored_name(library.compiled, "fire_imp"), *ice_ai = authored_name(library.compiled, "ice_imp");
+        const char *solo_ai = authored_name(library.compiled, "solo_t3");
+        const char *imp = authored_name(library.compiled, "imp"), *t3 = authored_name(library.compiled, "t3");
+        assert(fire_ai && ice_ai && solo_ai && count == 5);
+        const char *out[16];
+        /* Stock requests: the stock AI alone. */
+        size_t n = selected(rows, count, 4u, out, 16);
+        assert(n == 1 && (!imp ? !strcmp(out[0], "imp") : !strcmp(out[0], imp)));
+        n = selected(rows, count, 131072u, out, 16);
+        assert(n == 2 && !holds(out, n, fire_ai) && !holds(out, n, ice_ai) && !holds(out, n, solo_ai));
+        n = selected(rows, count, 0xffffffffu, out, 16);
+        assert(n == 2);
+        (void)t3;
+        /* A package's own requests: its variant beside the stock rows its
+         * other bits name, never another package's variant. */
+        uint32_t fire_request = (uint32_t)strtoul(fire_key, NULL, 10) | 8u | 131072u;
+        n = selected(rows, count, fire_request, out, 16);
+        assert(n == 3 && holds(out, n, fire_ai) && !holds(out, n, ice_ai) && !holds(out, n, solo_ai));
+        n = selected(rows, count, 2097152u, out, 16);
+        assert(n == 1 && !strcmp(out[0], solo_ai));
+        n = selected(rows, count, 131072u | (uint32_t)strtoul(fire_key, NULL, 10), out, 16);
+        assert(n == 3 && holds(out, n, fire_ai) && !holds(out, n, ice_ai));
+        /* Type consumers: each variant stays an imp; fire's changed modifier
+         * reaches only fire's variant, the stock one every other imp. */
+        uint32_t fire_type = 0, ice_type = 0;
+        for (size_t i = 0; i < count; i++) {
+            if (!strcmp(rows[i].field, fire_ai)) fire_type = rows[i].mask;
+            if (!strcmp(rows[i].field, ice_ai)) ice_type = rows[i].mask;
+        }
+        assert((fire_type & 4u) && (ice_type & 4u) && (fire_type & 131072u));
+        assert(mod_count == 3 && !strcmp(modifier_for(mods, mod_count, fire_type), "fire"));
+        assert(!strcmp(modifier_for(mods, mod_count, ice_type), "stock") && !strcmp(modifier_for(mods, mod_count, 4u | 131072u), "stock"));
+        /* A filter choice classifies: IMP stays every imp, variants included. */
+        const char *choice = inspector_key(library.compiled, "fire");
+        assert(choice && !strcmp(choice, "IMP") && sh_package_key_filter_matches(g_key_groups, 4u, fire_type));
+        assert(!strcmp(filter_value(library.compiled, "fire"), "IMP ANY_ZOMBIE"));
+        /* Maps bind each changing package's IMP bit to its key. */
+        assert(key_binding(&library.bindings, "4", fire_key) == 2 && key_binding(&library.bindings, "4", ice_key) == 1);
+        assert(key_binding(&library.bindings, "8", "2097152") == 1);
+        {
+            char grouped[32];
+            snprintf(grouped, sizeof(grouped), "%u", 131072u | (uint32_t)strtoul(fire_key, NULL, 10));
+            assert(key_binding(&library.bindings, "131072", grouped) == 2);
+        }
+        assert(!library.coverage || !strstr(library.coverage, "spawn"));
+        sh_package_library_free(&library); sh_package_sources_free(sources);
+    }
+    rename_package("zz-fire", "fire"); rename_package("aa-ice", "ice");
+    registration_conductor = NULL;
+    cleanup(); assert(!failures);
+    while (f->count) free(f->regions[--f->count].address);
+}
+/* Under the native private-key contract thirteen distinct registrations of
+ * one authored key each get their own: nine single-bit keys, then marked
+ * multi-bit keys. Every package's own request selects exactly its AI beside
+ * the stock row it names, its modifier row stays its own, and nothing shares. */
+static void test_registration_private_capacity(void)
+{
+    fixture storage; fixture *f = &storage; setup(f); conductor_reflection(f);
+    sh_decl_registry_source registry = {f, read_memory, (uintptr_t)f->registry, NULL};
+    char error[1024], names[13][16];
+    source_link_fixture originals = {f};
+    sh_package_compile_environment env = {0}; sh_package_library library = {0};
+    sh_package_library_native native = {0};
+    size_t unserved = SIZE_MAX, invalid = SIZE_MAX;
+    native.private_keys = 1;
+    registration_root("registration-private-capacity");
+    env.baseline = registration_original; env.baseline_context = &originals;
+    env.unserved_package = &unserved; env.invalid_package = &invalid;
+    for (int i = 0; i < 13; i++) { snprintf(names[i], sizeof(names[i]), "cap%02d", i); registration_package(names[i], "524288"); }
+    sh_package_sources *sources = sh_package_sources_scan(root, error, sizeof(error)); assert(sources);
+    int ok = sh_package_library_compile(sources, &env, NULL, registration_original, &originals,
+        registry, (uintptr_t)f->reflection, &native, &library, error, sizeof(error));
+    if (!ok) fprintf(stderr, "registration private capacity: %s\n", error);
+    assert(ok && unserved == SIZE_MAX && invalid == SIZE_MAX);
+    g_key_groups = library.key_groups;
+    const sh_compiled_resource *conductor = named_resource(library.compiled, "entitydef", "conductor");
+    key_row rows[16], mods[16];
+    size_t count = key_rows(f, conductor, "aiTypeList", "entityDef", rows, 16);
+    size_t mod_count = key_rows(f, conductor, "globalAIMods", "healthMod", mods, 16);
+    uint32_t keys[13];
+    size_t marked = 0;
+    assert(count == 14 && mod_count == 13);
+    for (int i = 0; i < 13; i++) {
+        const char *out[16], *boss = package_boss(library.compiled, names[i]);
+        keys[i] = (uint32_t)strtoul(spawner_key(library.compiled, names[i]), NULL, 10);
+        assert(sh_package_key_private_valid(keys[i]));
+        if (keys[i] & SH_PACKAGE_KEY_MARKER) marked++;
+        for (int j = 0; j < i; j++) assert(keys[j] != keys[i]);
+        size_t n = selected(rows, count, 4u | keys[i], out, 16);
+        assert(n == 2 && holds(out, n, boss) && holds(out, n, "imp"));
+        n = selected(rows, count, keys[i], out, 16);
+        assert(n == 1 && !strcmp(out[0], boss));
+        uint32_t type = 0;
+        for (size_t r = 0; r < count; r++) if (!strcmp(rows[r].field, boss)) type = rows[r].mask;
+        assert(type == keys[i] && !strcmp(modifier_for(mods, mod_count, type), names[i]));
+    }
+    assert(marked == 4 && (!library.coverage || !strstr(library.coverage, "spawn")));
+    sh_package_library_free(&library); sh_package_sources_free(sources);
+    cleanup(); assert(!failures);
+    while (f->count) free(f->regions[--f->count].address);
+}
+
+/* A compile given a peer library's keys (a map compile beside the installed
+ * library, or a recompile) keys every scope of the same source as the peer
+ * does, so identical sources keep their outputs and served names; a package
+ * the peer lacks takes a key no peer scope holds, even where it would
+ * otherwise sort first and keep its authored bit. */
+static void pinned_compile(fixture *f, const sh_package_provenance *keys, sh_package_sources **sources,
+    sh_package_library *library)
+{
+    sh_decl_registry_source registry = {f, read_memory, (uintptr_t)f->registry, NULL};
+    source_link_fixture originals = {f};
+    sh_package_compile_environment env = {0};
+    sh_package_library_native native = {0};
+    size_t unserved = SIZE_MAX, invalid = SIZE_MAX;
+    char error[1024];
+    native.private_keys = 1; native.keys = keys;
+    env.baseline = registration_original; env.baseline_context = &originals;
+    env.unserved_package = &unserved; env.invalid_package = &invalid;
+    *sources = sh_package_sources_scan(root, error, sizeof(error)); assert(*sources);
+    int ok = sh_package_library_compile(*sources, &env, NULL, registration_original, &originals,
+        registry, (uintptr_t)f->reflection, &native, library, error, sizeof(error));
+    if (!ok) fprintf(stderr, "registration pinned: %s\n", error);
+    assert(ok && unserved == SIZE_MAX && invalid == SIZE_MAX);
+}
+static uint32_t variant_key(const sh_package_compilation *compiled, const char *package)
+{ return (uint32_t)(strtoul(spawner_value(compiled, package), NULL, 10) & ~(8ul | 131072ul)); }
+static void test_registration_pinned_keys(void)
+{
+    fixture storage; fixture *f = &storage; setup(f); conductor_reflection(f);
+    sh_package_library first = {0}, second = {0};
+    sh_package_sources *sources = NULL, *more = NULL;
+    char names[12][16], parked[MAX_PATH], from[MAX_PATH];
+    uint32_t held[11];
+    int keeper = -1;
+    /* Custom keys: eleven holders (two past the single bits), then without
+     * the keeper of 524288 a newcomer of the same authored key. */
+    registration_root("registration-pinned");
+    for (int i = 0; i < 11; i++) { snprintf(names[i], sizeof(names[i]), "pin%02d", i); registration_package(names[i], "524288"); }
+    pinned_compile(f, NULL, &sources, &first);
+    for (int i = 0; i < 11; i++) {
+        held[i] = (uint32_t)strtoul(spawner_key(first.compiled, names[i]), NULL, 10);
+        if (held[i] == 524288u) keeper = i;
+    }
+    assert(keeper >= 0);
+    snprintf(from, sizeof(from), "%s\\overrides\\%s", root, names[keeper]);
+    snprintf(parked, sizeof(parked), "%s\\parked", root);
+    assert(MoveFileA(from, parked));
+    snprintf(names[11], sizeof(names[11]), "aaa0"); registration_package(names[11], "524288");
+    pinned_compile(f, &first.bindings, &more, &second);
+    uint32_t newcomer = (uint32_t)strtoul(spawner_key(second.compiled, names[11]), NULL, 10);
+    assert(sh_package_key_private_valid(newcomer));
+    for (int i = 0; i < 11; i++) {
+        assert(newcomer != held[i]);
+        if (i != keeper) assert((uint32_t)strtoul(spawner_key(second.compiled, names[i]), NULL, 10) == held[i]);
+    }
+    sh_package_library_free(&second); sh_package_sources_free(more);
+    sh_package_library_free(&first); sh_package_sources_free(sources);
+    assert(MoveFileA(parked, from));
+    cleanup();
+    /* Named variants: two changes of the stock imp, then a third. */
+    registration_root("registration-pinned-named");
+    registration_conductor = variant_stock;
+    variant_package("fire", "fire_imp", "fire"); variant_package("ice", "ice_imp", "stock");
+    pinned_compile(f, NULL, &sources, &first);
+    uint32_t fire = variant_key(first.compiled, "fire"), ice = variant_key(first.compiled, "ice");
+    variant_package("aaa1", "aaa1_imp", "aaa1");
+    pinned_compile(f, &first.bindings, &more, &second);
+    uint32_t ash = variant_key(second.compiled, "aaa1");
+    assert(variant_key(second.compiled, "fire") == fire && variant_key(second.compiled, "ice") == ice);
+    assert(sh_package_key_private_valid(ash) && ash != fire && ash != ice);
+    sh_package_library_free(&second); sh_package_sources_free(more);
+    sh_package_library_free(&first); sh_package_sources_free(sources);
+    registration_conductor = NULL;
+    cleanup(); assert(!failures);
+    while (f->count) free(f->regions[--f->count].address);
+}
+
+/* A map compile recompiles the packages a saved map uses under that map's
+ * contexts. Given the installed library's keys it serves every one of their
+ * resources under the installed library's names, so each saved use resolves
+ * to exactly one current binding: a spawner's relocated key and a holder
+ * referring to that spawner keep their served identities. */
+static void test_registration_context_names(void)
+{
+    fixture storage; fixture *f = &storage; setup(f); conductor_reflection(f);
+    sh_decl_registry_source registry = {f, read_memory, (uintptr_t)f->registry, NULL};
+    source_link_fixture originals = {f};
+    sh_package_compile_environment env = {0};
+    sh_package_library_native native = {0};
+    sh_package_library library = {0}, restored = {0};
+    size_t unserved = SIZE_MAX, invalid = SIZE_MAX, length = 0, checked = 0;
+    char error[1024], path[512], text[256];
+    native.private_keys = 1;
+    env.baseline = registration_original; env.baseline_context = &originals;
+    env.unserved_package = &unserved; env.invalid_package = &invalid;
+    registration_root("registration-context-names");
+    for (int i = 0; i < 12; i++) {
+        char name[16];
+        snprintf(name, sizeof(name), "ctx%02d", i); registration_package(name, "524288");
+        snprintf(path, sizeof(path), "overrides/%s/assets/generated/decls/entitydef/%s_holder.decl", name, name);
+        snprintf(text, sizeof(text), "{ class = \"Entity\"; edit = { target = \"%s_spawner\"; } }", name);
+        create(path, text);
+    }
+    sh_package_sources *sources = sh_package_sources_scan(root, error, sizeof(error)); assert(sources);
+    int ok = sh_package_library_compile(sources, &env, NULL, registration_original, &originals,
+        registry, (uintptr_t)f->reflection, &native, &library, error, sizeof(error));
+    if (!ok) fprintf(stderr, "registration context names: %s\n", error);
+    assert(ok && unserved == SIZE_MAX && invalid == SIZE_MAX);
+    sh_package_provenance saved = {0};
+    unsigned char *encoded = sh_package_provenance_encode(&library.bindings, &length, error, sizeof(error));
+    assert(encoded && sh_package_provenance_decode(encoded, length, &saved, error, sizeof(error))); free(encoded);
+    native.keys = &library.bindings;
+    ok = sh_package_library_compile_contexts(sources, &saved, &env, NULL, registration_original, &originals,
+        registry, (uintptr_t)f->reflection, &native, &restored, error, sizeof(error));
+    if (!ok) fprintf(stderr, "registration context names restored: %s\n", error);
+    assert(ok);
+    for (size_t i = 0; i < saved.binding_count; i++) {
+        const sh_package_provenance_binding *binding = saved.bindings + i;
+        const char *name = NULL;
+        /* The stock-named registration list itself is no map use. */
+        if (strcmp(binding->family, "entitydef") || !strcmp(binding->original, "conductor")) continue;
+        int resolved = sh_package_provenance_resolve(&saved, &restored.bindings, binding->family, binding->name, &name);
+        if (resolved != 1 || strcmp(name, binding->name)) {
+            char detail[768];
+            sh_package_provenance context_view = {0};
+            (void)context_view;
+            fprintf(stderr, "context compile renamed %s %s: %s -> %s\n", binding->family, binding->original,
+                binding->name, name ? name : "(none)");
+            (void)detail;
+        }
+        assert(resolved == 1 && !strcmp(name, binding->name));
+        checked++;
+    }
+    assert(checked >= 24);
+    /* A map uses a few of them: only their contexts are compiled. */
+    {
+        sh_package_provenance uses = {0};
+        sh_package_library map = {0};
+        size_t picked = 0;
+        for (size_t i = 0; i < saved.binding_count; i++) {
+            const sh_package_provenance_binding *binding = saved.bindings + i;
+            size_t context;
+            if (strcmp(binding->family, "entitydef") || (!strstr(binding->original, "ctx03_holder") &&
+                !strstr(binding->original, "ctx09_holder")) || binding->context_count != 1) continue;
+            const sh_package_provenance_context *recorded = saved.contexts + binding->contexts[0];
+            context = sh_package_provenance_context_add(&uses, recorded->mode, recorded->trees, recorded->tree_count,
+                recorded->component);
+            assert(context != SIZE_MAX && sh_package_provenance_bind(&uses, binding->family, binding->original,
+                binding->name, &context, 1));
+            picked++;
+        }
+        assert(picked == 2);
+        ok = sh_package_library_compile_contexts(sources, &uses, &env, NULL, registration_original, &originals,
+            registry, (uintptr_t)f->reflection, &native, &map, error, sizeof(error));
+        if (!ok) fprintf(stderr, "registration context names map: %s\n", error);
+        assert(ok);
+        for (size_t i = 0; i < uses.binding_count; i++) {
+            const char *name = NULL;
+            int resolved = sh_package_provenance_resolve(&uses, &map.bindings, uses.bindings[i].family,
+                uses.bindings[i].name, &name);
+            if (resolved != 1 || strcmp(name, uses.bindings[i].name))
+                fprintf(stderr, "map compile renamed %s: %s -> %s\n", uses.bindings[i].original, uses.bindings[i].name,
+                    name ? name : "(none)");
+            assert(resolved == 1 && !strcmp(name, uses.bindings[i].name));
+        }
+        sh_package_library_free(&map); sh_package_provenance_free(&uses);
+    }
+    sh_package_provenance_free(&saved);
+    sh_package_library_free(&restored); sh_package_library_free(&library); sh_package_sources_free(sources);
+    cleanup(); assert(!failures);
+    while (f->count) free(f->regions[--f->count].address);
+}
+
+/* The engine ignores a number after a name, so a row spelled "IMP 524288"
+ * registers a new imp and nothing more. Under the contract that new imp takes
+ * a private key and the package's own IMP requests gain it, so they still
+ * reach its AI beside the stock imp, while stock IMP requests do not. A row
+ * written as one number of IMP's bit and a key ("524292") is natively an imp
+ * and that key: its package's IMP requests gain the key it holds, so they keep
+ * reaching that AI. Bit 29 marks stock composites under the contract, so a key
+ * authored there moves;
+ * natively both stay as authored. A conductor copy that leaves the stock rows
+ * out removes them natively, but under the contract the stock registration
+ * stays for everyone else. */
+static void test_registration_private_hybrid(void)
+{
+    fixture storage; fixture *f = &storage; setup(f); conductor_reflection(f);
+    sh_decl_registry_source registry = {f, read_memory, (uintptr_t)f->registry, NULL};
+    char error[1024];
+    source_link_fixture originals = {f};
+    sh_package_compile_environment env = {0}; sh_package_library library = {0};
+    sh_package_library_native native = {0};
+    size_t unserved = SIZE_MAX, invalid = SIZE_MAX;
+    registration_root("registration-hybrid");
+    env.baseline = registration_original; env.baseline_context = &originals;
+    env.unserved_package = &unserved; env.invalid_package = &invalid;
+    create("overrides/hybrid/package.json", "{\"id\":\"local.hybrid\",\"name\":\"hybrid\"}");
+    create("overrides/hybrid/assets/generated/decls/entitydef/conductor.decl", "{ class = \"Entity\"; edit = { "
+        "aiTypeList = { num = 2; item[0] = { aiType = \"IMP\"; entityDef = \"imp\"; } "
+        "item[1] = { aiType = \"IMP 524288\"; entityDef = \"hybrid_imp\"; } } } }");
+    create("overrides/hybrid/assets/generated/decls/entitydef/hybrid_imp.decl", "{ class = \"Entity\"; edit = { target = \"local-only\"; } }");
+    create("overrides/hybrid/assets/generated/decls/entitydef/hybrid_spawner.decl", "{ class = \"Entity\"; edit = { spawnType = \"IMP\"; } }");
+    registration_package("high", "536870912");
+    create("overrides/numeric/package.json", "{\"id\":\"local.numeric\",\"name\":\"numeric\"}");
+    create("overrides/numeric/assets/generated/decls/entitydef/conductor.decl", "{ class = \"Entity\"; edit = { "
+        "aiTypeList = { num = 1; item[0] = { aiType = \"524292\"; entityDef = \"numeric_imp\"; } } } }");
+    create("overrides/numeric/assets/generated/decls/entitydef/numeric_imp.decl", "{ class = \"Entity\"; edit = { target = \"local-only\"; } }");
+    create("overrides/numeric/assets/generated/decls/entitydef/numeric_spawner.decl", "{ class = \"Entity\"; edit = { spawnType = \"IMP\"; } }");
+    create("overrides/sparse/package.json", "{\"id\":\"local.sparse\",\"name\":\"sparse\"}");
+    create("overrides/sparse/assets/generated/decls/entitydef/conductor.decl", "{ class = \"Entity\"; edit = { "
+        "aiTypeList = { num = 1; item[0] = { aiType = \"2097152\"; entityDef = \"sparse_boss\"; } } } }");
+    create("overrides/sparse/assets/generated/decls/entitydef/sparse_boss.decl", "{ class = \"Entity\"; edit = { target = \"local-only\"; } }");
+    for (int mode = 0; mode < 2; mode++) {
+        native.private_keys = mode;
+        sh_package_sources *sources = sh_package_sources_scan(root, error, sizeof(error)); assert(sources);
+        int ok = sh_package_library_compile(sources, &env, NULL, registration_original, &originals,
+            registry, (uintptr_t)f->reflection, &native, &library, error, sizeof(error));
+        if (!ok) fprintf(stderr, "registration hybrid %d: %s\n", mode, error);
+        assert(ok && unserved == SIZE_MAX && invalid == SIZE_MAX);
+        g_key_groups = library.key_groups;
+        const char *hybrid = spawner_value(library.compiled, "hybrid"), *high = spawner_key(library.compiled, "high");
+        assert(hybrid && high);
+        if (!mode) {
+            assert(!strcmp(hybrid, "IMP") && !strcmp(high, "536870912") &&
+                !strcmp(spawner_value(library.compiled, "numeric"), "IMP"));
+            assert(!conductor_row(named_resource(library.compiled, "entitydef", "conductor"), "IMP"));
+        }
+        else {
+            const sh_compiled_resource *conductor = named_resource(library.compiled, "entitydef", "conductor");
+            key_row rows[16];
+            const char *out[16], *ai = authored_name(library.compiled, "hybrid_imp");
+            size_t count = key_rows(f, conductor, "aiTypeList", "entityDef", rows, 16);
+            uint32_t requested = (uint32_t)strtoul(hybrid, NULL, 10), key = requested & ~4u;
+            uint32_t held = (uint32_t)strtoul(high, NULL, 10);
+            assert((requested & 4u) && sh_package_key_private_valid(key) && strcmp(high, "536870912") &&
+                sh_package_key_private_valid(held) && held != key);
+            size_t n = selected(rows, count, 4u, out, 16);
+            assert(n == 1 && !strcmp(out[0], "imp"));
+            n = selected(rows, count, requested, out, 16);
+            assert(n == 2 && holds(out, n, ai) && holds(out, n, "imp"));
+            n = selected(rows, count, key, out, 16);
+            assert(n == 1 && !strcmp(out[0], ai));
+            /* The numeric row's package asks for IMP with the key its row holds. */
+            const char *numeric = spawner_value(library.compiled, "numeric"), *numeric_ai = authored_name(library.compiled, "numeric_imp");
+            uint32_t asked = (uint32_t)strtoul(numeric, NULL, 10), numeric_key = asked & ~4u;
+            assert((asked & 4u) && sh_package_key_private_valid(numeric_key) && numeric_key != key && numeric_key != held);
+            n = selected(rows, count, asked, out, 16);
+            assert(n == 2 && holds(out, n, numeric_ai) && holds(out, n, "imp"));
+        }
+        sh_package_library_free(&library); sh_package_sources_free(sources);
+    }
+    cleanup(); assert(!failures);
+    while (f->count) free(f->regions[--f->count].address);
+}
+
+/* One package registering two custom AI (authored keys 524288 and 1048576)
+ * with a spawner, AI filter and modifier row for both (1572864). */
+static void group_package(const char *package)
+{
+    char path[512], text[768];
+    snprintf(path, sizeof(path), "overrides/%s/package.json", package);
+    snprintf(text, sizeof(text), "{\"id\":\"local.%s\",\"name\":\"%s\"}", package, package); create(path, text);
+    snprintf(path, sizeof(path), "overrides/%s/assets/generated/decls/entitydef/conductor.decl", package);
+    snprintf(text, sizeof(text), "{ class = \"Entity\"; edit = { aiTypeList = { num = 3; "
+        "item[0] = { aiType = \"IMP\"; entityDef = \"imp\"; } item[1] = { aiType = \"524288\"; entityDef = \"%s_one\"; } "
+        "item[2] = { aiType = \"1048576\"; entityDef = \"%s_two\"; } } "
+        "globalAIMods = { num = 1; item[0] = { aiType = \"1572864\"; healthMod = \"%s\"; } } } }",
+        package, package, package); create(path, text);
+    for (int i = 0; i < 2; i++) {
+        snprintf(path, sizeof(path), "overrides/%s/assets/generated/decls/entitydef/%s_%s.decl", package, package, i ? "two" : "one");
+        snprintf(text, sizeof(text), "{ class = \"Entity\"; edit = { target = \"local-only\"; } }"); create(path, text);
+    }
+    snprintf(path, sizeof(path), "overrides/%s/assets/generated/decls/entitydef/%s_spawner.decl", package, package);
+    create(path, "{ class = \"Entity\"; edit = { spawnType = \"1572868\"; } }");
+    snprintf(path, sizeof(path), "overrides/%s/assets/generated/decls/entitydef/%s_filter.decl", package, package);
+    create(path, "{ class = \"Entity\"; edit = { aiFilter = \"1572868\"; } }");
+}
+static void group_pin(sh_package_provenance *peer, const sh_package_sources *sources, const char *package,
+    const char *original, uint32_t key)
+{
+    char current[16];
+    size_t owner = SIZE_MAX, context;
+    for (size_t i = 0; i < sources->package_count; i++) if (!strcmp(sources->packages[i].name, package)) owner = i;
+    assert(owner != SIZE_MAX);
+    context = sh_package_provenance_context_add(peer, SH_PACKAGE_CONTEXT_ISOLATED,
+        (const unsigned char (*)[32])sh_package_source_tree(sources, owner), 1, "");
+    snprintf(current, sizeof(current), "%u", key);
+    assert(context != SIZE_MAX && sh_package_provenance_bind(peer, SH_PACKAGE_KEY_FAMILY, original, current, &context, 1));
+}
+static void group_compile(fixture *f, const sh_package_provenance *keys, const sh_package_key_groups *groups,
+    sh_package_sources **sources, sh_package_library *library)
+{
+    sh_decl_registry_source registry = {f, read_memory, (uintptr_t)f->registry, NULL};
+    source_link_fixture originals = {f};
+    sh_package_compile_environment env = {0};
+    sh_package_library_native native = {0};
+    size_t unserved = SIZE_MAX, invalid = SIZE_MAX;
+    char error[1024];
+    native.private_keys = 1; native.keys = keys; native.key_groups = groups;
+    env.baseline = registration_original; env.baseline_context = &originals;
+    env.unserved_package = &unserved; env.invalid_package = &invalid;
+    *sources = sh_package_sources_scan(root, error, sizeof(error)); assert(*sources);
+    int ok = sh_package_library_compile(*sources, &env, NULL, registration_original, &originals,
+        registry, (uintptr_t)f->reflection, &native, library, error, sizeof(error));
+    if (!ok) fprintf(stderr, "registration groups: %s\n", error);
+    assert(ok && unserved == SIZE_MAX && invalid == SIZE_MAX);
+    g_key_groups = library->key_groups;
+}
+static uint32_t group_value(const char *value) { return (uint32_t)strtoul(value, NULL, 10); }
+/* The counterexample: A = marker|19|20 and B = marker|19|21 OR to C = 272105472.
+ * The pair package's keys are A and B, the third package holds C. The pair's
+ * request, filter and modifier for both carry one group code {A, B}: they
+ * meet exactly the pair's two AI, never the third row, and C itself selects
+ * only the third. A mixed package (a single-bit key and a multi-bit key) gets
+ * a mixed group. A compile given this one as peer (a map compile or recompile)
+ * keeps both group codes while a new package takes a fresh one. */
+static void test_registration_marked_groups(void)
+{
+    fixture storage; fixture *f = &storage; setup(f); conductor_reflection(f);
+    const uint32_t a = 270008320u, b = 271056896u, c = 272105472u, k23 = 1u << 23, d = SH_PACKAGE_KEY_MARKER | (1u << 20);
+    sh_package_library first = {0}, second = {0};
+    sh_package_sources *scan = NULL, *sources = NULL, *more = NULL;
+    sh_package_provenance peer = {0};
+    char error[1024];
+    registration_root("registration-groups");
+    group_package("pair"); group_package("mixed"); registration_package("third", "524288");
+    scan = sh_package_sources_scan(root, error, sizeof(error)); assert(scan);
+    group_pin(&peer, scan, "pair", "524288", a); group_pin(&peer, scan, "pair", "1048576", b);
+    group_pin(&peer, scan, "third", "524288", c);
+    group_pin(&peer, scan, "mixed", "524288", k23); group_pin(&peer, scan, "mixed", "1048576", d);
+    sh_package_sources_free(scan);
+    group_compile(f, &peer, NULL, &sources, &first);
+    assert(first.key_groups && first.key_groups->count == 2);
+    const sh_compiled_resource *conductor = named_resource(first.compiled, "entitydef", "conductor");
+    key_row rows[16], mods[16];
+    size_t count = key_rows(f, conductor, "aiTypeList", "entityDef", rows, 16);
+    size_t mod_count = key_rows(f, conductor, "globalAIMods", "healthMod", mods, 16);
+    const char *out[16];
+    uint32_t g = group_value(spawner_key(first.compiled, "pair")), h = group_value(spawner_key(first.compiled, "mixed"));
+    uint32_t third = group_value(spawner_key(first.compiled, "third"));
+    const char *pair_one = NULL, *pair_two = NULL, *mixed_one = NULL, *mixed_two = NULL, *third_boss = NULL;
+    uint32_t type_one = 0, type_two = 0, type_third = 0;
+    for (size_t r = 0; r < count; r++) {
+        if (rows[r].mask == a) { pair_one = rows[r].field; type_one = rows[r].mask; }
+        if (rows[r].mask == b) { pair_two = rows[r].field; type_two = rows[r].mask; }
+        if (rows[r].mask == k23) mixed_one = rows[r].field;
+        if (rows[r].mask == d) mixed_two = rows[r].field;
+        if (rows[r].mask == c) { third_boss = rows[r].field; type_third = rows[r].mask; }
+    }
+    assert(pair_one && pair_two && mixed_one && mixed_two && third_boss && third == c);
+    /* The group codes are neither keys nor the OR of their members. */
+    assert((g & SH_PACKAGE_KEY_MARKER) && g != a && g != b && g != c && g != (a | b));
+    assert((h & SH_PACKAGE_KEY_MARKER) && h != k23 && h != d && h != (k23 | d) && h != g);
+    size_t n = selected(rows, count, g, out, 16);
+    assert(n == 2 && holds(out, n, pair_one) && holds(out, n, pair_two));
+    n = selected(rows, count, 4u | g, out, 16);
+    assert(n == 3 && holds(out, n, "imp") && holds(out, n, pair_one) && holds(out, n, pair_two));
+    n = selected(rows, count, h, out, 16);
+    assert(n == 2 && holds(out, n, mixed_one) && holds(out, n, mixed_two));
+    n = selected(rows, count, a | b, out, 16);
+    assert(n == 1 && !strcmp(out[0], third_boss));
+    /* Filters classify the same two, never the third. */
+    uint32_t filter = group_value(filter_value(first.compiled, "pair"));
+    assert(filter == (4u | g) && sh_package_key_filter_matches(first.key_groups, filter, type_one) &&
+        sh_package_key_filter_matches(first.key_groups, filter, type_two) &&
+        !sh_package_key_filter_matches(first.key_groups, filter, type_third) &&
+        sh_package_key_filter_matches(first.key_groups, filter, 4u));
+    /* The pair's modifier row reaches both its AI and not the third's. */
+    assert(!strcmp(modifier_for(mods, mod_count, type_one), "pair") && !strcmp(modifier_for(mods, mod_count, type_two), "pair"));
+    assert(!strcmp(modifier_for(mods, mod_count, type_third), "third"));
+    (void)mod_count;
+    /* A peer-grouped compile (the map beside this library, or a recompile)
+     * with a new group user: equal sets keep their codes, the new set takes
+     * a code none of them holds. */
+    group_package("aaa_new");
+    group_compile(f, &first.bindings, first.key_groups, &more, &second);
+    assert(group_value(spawner_key(second.compiled, "pair")) == g && group_value(spawner_key(second.compiled, "mixed")) == h);
+    /* The newcomer keeps the free authored bits (single-bit keys): their
+     * union already names each, so it needs no group code. */
+    uint32_t fresh = group_value(spawner_key(second.compiled, "aaa_new"));
+    assert(fresh == (524288u | 1048576u) && second.key_groups && second.key_groups->count == 2);
+    {
+        const sh_compiled_resource *again = named_resource(second.compiled, "entitydef", "conductor");
+        key_row more_rows[20];
+        size_t more_count = key_rows(f, again, "aiTypeList", "entityDef", more_rows, 20);
+        n = selected(more_rows, more_count, fresh, out, 16);
+        assert(n == 2);
+        for (size_t i = 0; i < n; i++) assert(strstr(out[i], "aaa_new") || strstr(out[i], "smp/"));
+        n = selected(more_rows, more_count, g, out, 16);
+        assert(n == 2);
+    }
+    sh_package_library_free(&second); sh_package_sources_free(more);
+    sh_package_library_free(&first); sh_package_sources_free(sources); sh_package_provenance_free(&peer);
+    g_key_groups = NULL;
+    cleanup(); assert(!failures);
+    while (f->count) free(f->regions[--f->count].address);
+}
+
+/* A package whose IMP bit names two keys: it changes the stock IMP row to its
+ * own AI and registers a custom AI whose row also names IMP (524292); its
+ * spawner requests IMP. */
+static void named_pair_package(const char *package)
+{
+    char path[512], text[768];
+    snprintf(path, sizeof(path), "overrides/%s/package.json", package);
+    snprintf(text, sizeof(text), "{\"id\":\"local.%s\",\"name\":\"%s\"}", package, package); create(path, text);
+    snprintf(path, sizeof(path), "overrides/%s/assets/generated/decls/entitydef/conductor.decl", package);
+    snprintf(text, sizeof(text), "{ class = \"Entity\"; edit = { aiTypeList = { num = 2; "
+        "item[0] = { aiType = \"IMP\"; entityDef = \"%s_one\"; } "
+        "item[1] = { aiType = \"524292\"; entityDef = \"%s_two\"; } } } }", package, package); create(path, text);
+    for (int i = 0; i < 2; i++) {
+        snprintf(path, sizeof(path), "overrides/%s/assets/generated/decls/entitydef/%s_%s.decl", package, package, i ? "two" : "one");
+        create(path, i ? "{ class = \"Entity\"; edit = { target = \"parent-only\"; } }" :
+            "{ class = \"Entity\"; edit = { target = \"local-only\"; } }");
+    }
+    snprintf(path, sizeof(path), "overrides/%s/assets/generated/decls/entitydef/%s_spawner.decl", package, package);
+    create(path, "{ class = \"Entity\"; edit = { spawnType = \"IMP\"; } }");
+}
+/* The key one scope's authored bit ended with, from the library's provenance. */
+static uint32_t bound_key(const sh_package_library *library, const sh_package_sources *sources,
+    const char *package, const char *original)
+{
+    size_t owner = SIZE_MAX;
+    for (size_t i = 0; i < sources->package_count; i++) if (!strcmp(sources->packages[i].name, package)) owner = i;
+    assert(owner != SIZE_MAX);
+    const unsigned char *tree = sh_package_source_tree(sources, owner);
+    for (size_t i = 0; i < library->bindings.binding_count; i++) {
+        const sh_package_provenance_binding *b = library->bindings.bindings + i;
+        if (strcmp(b->family, SH_PACKAGE_KEY_FAMILY) || strcmp(b->original, original)) continue;
+        for (size_t c = 0; c < b->context_count; c++)
+            if (!memcmp(library->bindings.contexts[b->contexts[c]].trees[0], tree, 32)) return (uint32_t)strtoul(b->name, NULL, 10);
+    }
+    return 0;
+}
+/* Past the single-bit keys: thirteen holders of 524288 take the nine single
+ * bits and four multi-bit keys. A group allocated afterwards never takes one
+ * of those keys; two new IMP rows of one package (both multi-bit) make its
+ * IMP bit a group, recorded as that group in provenance; a recompile given
+ * this library as peer cannot reuse that group code as either row's key; and
+ * a package whose custom bit stays its own key still names it in its ALL. */
+static void test_registration_group_capacity(void)
+{
+    fixture storage; fixture *f = &storage; setup(f); conductor_reflection(f);
+    sh_package_library first = {0}, second = {0};
+    sh_package_sources *sources = NULL, *more = NULL;
+    sh_package_provenance peer = {0};
+    char names[13][16], error[1024];
+    registration_root("registration-group-capacity");
+    for (int i = 0; i < 13; i++) { snprintf(names[i], sizeof(names[i]), "cap%02d", i); registration_package(names[i], "524288"); }
+    group_package("pair"); named_pair_package("named");
+    {
+        /* The pair's first key is pinned to the first multi-bit code, so its
+         * group is mixed and every later multi-bit code a holder takes is one
+         * the group allocation must skip. */
+        sh_package_sources *scan = sh_package_sources_scan(root, error, sizeof(error));
+        assert(scan);
+        group_pin(&peer, scan, "pair", "524288", SH_PACKAGE_KEY_MARKER | 524288u);
+        sh_package_sources_free(scan);
+    }
+    group_compile(f, &peer, NULL, &sources, &first);
+    const sh_compiled_resource *conductor = named_resource(first.compiled, "entitydef", "conductor");
+    key_row rows[24];
+    size_t count = key_rows(f, conductor, "aiTypeList", "entityDef", rows, 24);
+    const char *out[24];
+    uint32_t holders[13];
+    for (int i = 0; i < 13; i++) holders[i] = (uint32_t)strtoul(spawner_key(first.compiled, names[i]), NULL, 10);
+    /* The pair's group selects exactly its two AI, never a holder's. */
+    uint32_t pair_one = bound_key(&first, sources, "pair", "524288"), pair_two = bound_key(&first, sources, "pair", "1048576");
+    uint32_t group = (uint32_t)strtoul(spawner_key(first.compiled, "pair"), NULL, 10);
+    assert(pair_one == (SH_PACKAGE_KEY_MARKER | 524288u) && pair_two == 1048576u);
+    assert((group & SH_PACKAGE_KEY_MARKER) && first.key_groups && first.key_groups->defined[(group & SH_PACKAGE_KEY_SINGLE) >> 19]);
+    for (int i = 0; i < 13; i++) assert(group != holders[i]);
+    size_t n = selected(rows, count, group, out, 24);
+    assert(n == 2);
+    for (size_t i = 0; i < n; i++) {
+        uint32_t mask = 0;
+        for (size_t r = 0; r < count; r++) if (!strcmp(rows[r].field, out[i])) mask = rows[r].mask;
+        assert(mask == pair_one || mask == pair_two);
+    }
+    /* The changed IMP row's key and the custom row's key: one group for the
+     * IMP bit, recorded as that group in provenance. The package's IMP
+     * request selects its two AI (its IMP replaced the stock one). */
+    uint32_t named_bit = bound_key(&first, sources, "named", "4");
+    sh_package_key_set members;
+    sh_package_key_decode(first.key_groups, named_bit, &members);
+    assert((named_bit & SH_PACKAGE_KEY_MARKER) && sh_package_key_set_count(&members) == 2 &&
+        first.key_groups->defined[(named_bit & SH_PACKAGE_KEY_SINGLE) >> 19]);
+    uint32_t imp_request = group_value(spawner_value(first.compiled, "named"));
+    n = selected(rows, count, imp_request, out, 24);
+    assert(n == 2 && !holds(out, n, "imp"));
+    n = selected(rows, count, imp_request | 4u, out, 24);
+    assert(n == 3 && holds(out, n, "imp"));
+    /* A recompile with this peer keeps distinct keys for the two rows. */
+    group_compile(f, &first.bindings, first.key_groups, &more, &second);
+    uint32_t again = bound_key(&second, more, "named", "4");
+    sh_package_key_set now;
+    sh_package_key_decode(second.key_groups, again, &now);
+    assert(sh_package_key_set_count(&now) == 2);
+    for (size_t i = 0; i < SH_PACKAGE_KEY_CODES; i++) {
+        uint32_t code = sh_package_key_code(i);
+        if (!sh_package_key_set_has(&now, code)) continue;
+        assert(!(code & SH_PACKAGE_KEY_MARKER) || !first.key_groups->defined[(code & SH_PACKAGE_KEY_SINGLE) >> 19]);
+    }
+    sh_package_library_free(&second); sh_package_sources_free(more);
+    sh_package_library_free(&first); sh_package_sources_free(sources); sh_package_provenance_free(&peer);
+    cleanup();
+    /* A kept custom key: the scope's ALL names the stock rows and its AI. */
+    registration_root("registration-group-all");
+    registration_package("solo", "524288");
+    {
+        char path[512];
+        snprintf(path, sizeof(path), "overrides/solo/assets/generated/decls/entitydef/solo_spawner.decl");
+        create(path, "{ class = \"Entity\"; edit = { spawnType = \"ALL\"; } }");
+    }
+    group_compile(f, NULL, NULL, &sources, &first);
+    conductor = named_resource(first.compiled, "entitydef", "conductor");
+    count = key_rows(f, conductor, "aiTypeList", "entityDef", rows, 24);
+    uint32_t all = group_value(spawner_key(first.compiled, "solo")) | 4u;
+    assert(!(all & SH_PACKAGE_KEY_COMPOSITE) && (all & 524288u));
+    n = selected(rows, count, all, out, 24);
+    assert(n == count);
+    sh_package_library_free(&first); sh_package_sources_free(sources);
+    g_key_groups = NULL;
+    cleanup(); assert(!failures);
+    while (f->count) free(f->regions[--f->count].address);
+}
+
+/* A test encoder: an equal set keeps its code; a new set takes the next of
+ * marker|bit27, marker|bit26, ... ; none when exhausted. */
+typedef struct test_group_state { sh_package_key_groups *groups; int calls, exhausted; uint32_t last; } test_group_state;
+static int test_group_code(void *context, const sh_package_key_set *keys, uint32_t *code)
+{
+    test_group_state *state = context;
+    uint32_t found = sh_package_key_groups_find(state->groups, keys);
+    if (found) { *code = found; return 1; }
+    if (state->exhausted) return 0;
+    state->calls++;
+    state->last = SH_PACKAGE_KEY_MARKER | (1u << (28 - state->calls));
+    if (!sh_package_key_groups_define(state->groups, state->last, keys)) return -1;
+    *code = state->last; return 1;
+}
 static void test_registration_keys(void)
 {
     fixture storage; fixture *f = &storage; setup(f); conductor_reflection(f);
@@ -3643,34 +4758,206 @@ static void test_registration_keys(void)
         error, sizeof(error));
     sh_package_key_space space;
     uint32_t bits = 0;
-    unsigned char to[SH_PACKAGE_KEY_BITS];
-    assert(schema && sh_package_key_space_read(schema, &space) == 1);
+    sh_package_key_moves to;
+    memset(to, 0, sizeof(to));
+    assert(schema && sh_package_key_space_read(schema, &space) == 1 && sh_package_key_space_private(&space));
     assert(space.named == (0x7ffffu | (1u << 30)) && space.pool == 0x3ff80000u);
-    assert(sh_package_key_custom_bits(&space, "IMP 524288", 10, &bits) && bits == 524288u);
+    /* The engine reads a value as one number or as a list of names only. */
+    assert(sh_package_key_custom_bits(&space, "524292", 6, &bits) && bits == 524288u);
+    assert(sh_package_key_custom_bits(&space, "IMP 524288", 10, &bits) && !bits);
     assert(sh_package_key_custom_bits(&space, "1572868", 7, &bits) && bits == (524288u | 1048576u));
     assert(sh_package_key_custom_bits(&space, "ALL ANY", 7, &bits) && !bits);
-    assert(!sh_package_key_custom_bits(&space, "12a", 3, &bits));
+    assert(sh_package_key_custom_bits(&space, "524288 1048576", 14, &bits) && bits == 524288u);
+    assert(sh_package_key_custom_bits(&space, "-1", 2, &bits) && bits == ~space.named);
+    /* Names resolve through the enum, composites included. */
+    assert(sh_package_key_bits(&space, "IMP ANY_ZOMBIE 524288", 21, &bits) && bits == (4u | 131072u));
+    assert(sh_package_key_bits(&space, "ALL", 3, &bits) && bits == 0xffffffffu);
+    assert(sh_package_key_bits(&space, "UNKNOWN 8", 9, &bits) && !bits);
+    assert(sh_package_key_bits(&space, "9999999999", 10, &bits) && bits == 0x7fffffffu);
+    assert(sh_package_key_bits(&space, "IM", 2, &bits) && !bits);
+    /* Only decimals and single-bit names are movable, never composites. */
+    assert(sh_package_key_movable_bits(&space, "IMP ALL 524288", 14, &bits) && !bits);
+    assert(sh_package_key_movable_bits(&space, "IMP T3", 6, &bits) && bits == 12u);
+    assert(sh_package_key_movable_bits(&space, "524292", 6, &bits) && bits == 524292u);
+    {
+        /* A moved single-bit name makes the value one number of all its bits;
+         * a composite name covering it keeps the list as written. */
+        sh_package_key_moves named;
+        size_t length = 0; int failed = 1;
+        memset(named, 0, sizeof(named));
+        sh_package_key_move_to(named + 2, 0, 1u << 25); sh_package_key_move_to(named + 19, 0, 1u << 20);
+        char *moved = sh_package_key_relocate(&space, "IMP T3", 6, named, NULL, &length, &failed);
+        assert(!failed && moved && !strcmp(moved, "33554440") && length == strlen(moved));
+        free(moved);
+        assert(!sh_package_key_relocate(&space, "IMP T3 ALL", 10, named, NULL, &length, &failed) && !failed);
+        assert(!sh_package_key_relocate(&space, "T3 UNKNOWN", 10, named, NULL, &length, &failed) && !failed);
+        /* A number keeps what follows its first token (the engine ignores it). */
+        moved = sh_package_key_relocate(&space, "524292 T3", 9, named, NULL, &length, &failed);
+        assert(!failed && moved && !strcmp(moved, "34603008 T3")); free(moved);
+        /* A group constant gains a key beside its own bit. */
+        sh_package_key_move_add(named + 17, 17, 0, 1u << 25);
+        moved = sh_package_key_relocate(&space, "ANY_ZOMBIE", 10, named, NULL, &length, &failed);
+        assert(!failed && moved && !strcmp(moved, "33685504")); free(moved);
+        moved = sh_package_key_relocate(&space, "IMP T3 ANY_ZOMBIE", 17, named, NULL, &length, &failed);
+        assert(!failed && moved && !strcmp(moved, "33685512")); free(moved);
+        /* A whole marked key replaces its bits. */
+        sh_package_key_moves whole;
+        memset(whole, 0, sizeof(whole));
+        sh_package_key_move_to(whole + 20, 0, 524288u); whole[28].kind = SH_PACKAGE_KEY_DROP;
+        moved = sh_package_key_relocate(&space, "269484036", 9, whole, NULL, &length, &failed);
+        assert(!failed && moved && !strcmp(moved, "524292")); free(moved);
+        /* Bit 31 is written as the negative number the engine reads. */
+        sh_package_key_moves high;
+        memset(high, 0, sizeof(high));
+        sh_package_key_move_to(high + 30, 0, 0xc0000000u);
+        moved = sh_package_key_relocate(&space, "ANY", 3, high, NULL, &length, &failed);
+        assert(!failed && moved && !strcmp(moved, "-1073741824")); free(moved);
+        const char *inspector = "{ edit = { enumType = \"spawnAIType_t\"; values = { num = 2; "
+            "item[0] = { enumValue = \"IMP\"; label = \"a\"; } item[1] = { enumValue = \"ALL\"; label = \"b\"; } } } }";
+        moved = sh_package_key_relocate_inspector(&space, inspector, strlen(inspector), named, NULL, &length, &failed);
+        assert(!failed && moved && strstr(moved, "\"33554432\"") && strstr(moved, "\"ALL\"") && !strstr(moved, "\"IMP\""));
+        free(moved);
+        /* Without the enum a name stays a name. */
+        assert(!sh_package_key_relocate(NULL, "IMP", 3, named, NULL, &length, &failed) && !failed);
+    }
+    /* The native contract under the detours. Stock rows answer native
+     * intersection; private rows answer only requests naming their key, never
+     * stock types or the stock composites (bit 29); marked keys match exactly. */
+    {
+        const uint32_t imp = 4u, zombie = 131072u, all = 0xffffffffu, k19 = 524288u, k20 = 1048576u;
+        const uint32_t m19 = SH_PACKAGE_KEY_MARKER | k19, m1920 = SH_PACKAGE_KEY_MARKER | k19 | k20;
+        assert(sh_package_key_request_matches(NULL, imp, imp) && sh_package_key_request_matches(NULL, all, imp));
+        assert(!sh_package_key_request_matches(NULL, imp, imp | k19) && !sh_package_key_request_matches(NULL, all, imp | k19));
+        /* Stock composites name the widest marked key's bits yet never select it. */
+        assert(!sh_package_key_request_matches(NULL, all, SH_PACKAGE_KEY_PRIVATE) &&
+            !sh_package_key_request_matches(NULL, 0xbffdffffu, SH_PACKAGE_KEY_PRIVATE) &&
+            sh_package_key_request_matches(NULL, SH_PACKAGE_KEY_PRIVATE, SH_PACKAGE_KEY_PRIVATE));
+        assert(sh_package_key_request_matches(NULL, k19, imp | k19) && sh_package_key_request_matches(NULL, k19 | k20, k20));
+        assert(sh_package_key_request_matches(NULL, imp | k19, imp) && sh_package_key_request_matches(NULL, imp | k19, imp | k19));
+        assert(sh_package_key_request_matches(NULL, m19, m19) && !sh_package_key_request_matches(NULL, m19, k19));
+        assert(!sh_package_key_request_matches(NULL, m1920, m19) && !sh_package_key_request_matches(NULL, k19, m19));
+        assert(!sh_package_key_request_matches(NULL, zombie, zombie | k19) && sh_package_key_request_matches(NULL, zombie | k19, zombie | k19));
+        assert(sh_package_key_modifier_matches(NULL, imp, imp) && !sh_package_key_modifier_matches(NULL, imp, k19));
+        assert(sh_package_key_modifier_matches(NULL, imp | k19, k19) && sh_package_key_modifier_matches(NULL, imp | k19, imp));
+        assert(!sh_package_key_modifier_matches(NULL, imp | k20, k19) && !sh_package_key_modifier_matches(NULL, m19, m1920));
+        assert(sh_package_key_modifier_matches(NULL, m1920, m1920) && sh_package_key_modifier_matches(NULL, k19, imp | k19) &&
+            !sh_package_key_modifier_matches(NULL, imp, imp | k19));
+        assert(sh_package_key_filter_matches(NULL, imp, imp | k19) && sh_package_key_filter_matches(NULL, all, m19));
+        assert(sh_package_key_filter_matches(NULL, k19, k19) && !sh_package_key_filter_matches(NULL, k19, imp));
+        assert(!sh_package_key_filter_matches(NULL, m1920, m19) && sh_package_key_filter_matches(NULL, k19 | k20, k20));
+        /* Keys: single bits 19-27, then marked keys, fewer bits first. */
+        assert(sh_package_key_private(0) == k19 && sh_package_key_private(8) == (1u << 27));
+        assert(sh_package_key_private(9) == m19 && sh_package_key_private(18) == (SH_PACKAGE_KEY_MARKER | (1u << 19) | (1u << 20)));
+        assert(sh_package_key_private(9 + 511) == 0 && sh_package_key_private_valid(m1920) &&
+            !sh_package_key_private_valid(SH_PACKAGE_KEY_MARKER) && !sh_package_key_private_valid(k19 | k20));
+        /* Code indices cover each private code once, singles first; the
+         * allocation order visits every one of them. */
+        for (size_t i = 0; i < SH_PACKAGE_KEY_CODES; i++) {
+            sh_package_key_set only = {{0}};
+            assert(sh_package_key_index(sh_package_key_code(i)) == i && (i >= 9) == !!(sh_package_key_code(i) & SH_PACKAGE_KEY_MARKER));
+            assert(sh_package_key_index(sh_package_key_private(i)) != SIZE_MAX);
+            assert(sh_package_key_set_add(&only, sh_package_key_private(i)) && sh_package_key_set_count(&only) == 1);
+        }
+        assert(sh_package_key_index(k19 | k20) == SIZE_MAX && sh_package_key_index(SH_PACKAGE_KEY_MARKER) == SIZE_MAX &&
+            sh_package_key_index(imp) == SIZE_MAX && !sh_package_key_code(SH_PACKAGE_KEY_CODES));
+    }
+    /* Groups: two multi-bit keys OR to a third code. A = marker|19|20 and
+     * B = marker|19|21 give 272105472 = C, a key of its own; a request, filter
+     * or modifier meant for A and B carries a group code G defined as {A, B}
+     * and meets exactly those two. Without the group table G names itself. */
+    {
+        const uint32_t imp = 4u, k19 = 524288u, a = 270008320u, b = 271056896u, c = 272105472u;
+        const uint32_t g = SH_PACKAGE_KEY_MARKER | (1u << 22), h = SH_PACKAGE_KEY_MARKER | (1u << 23);
+        sh_package_key_groups groups;
+        sh_package_key_set ab = {{0}}, mixed = {{0}}, one = {{0}};
+        memset(&groups, 0, sizeof(groups));
+        assert((a | b) == c && sh_package_key_set_add(&ab, a) && sh_package_key_set_add(&ab, b));
+        assert(sh_package_key_set_add(&mixed, k19) && sh_package_key_set_add(&mixed, a));
+        assert(sh_package_key_set_add(&one, a) && !sh_package_key_groups_define(&groups, g, &one));
+        assert(sh_package_key_groups_define(&groups, g, &ab) && !sh_package_key_groups_define(&groups, g, &mixed));
+        assert(sh_package_key_groups_define(&groups, h, &mixed) && !sh_package_key_groups_define(&groups, k19, &ab));
+        assert(sh_package_key_groups_find(&groups, &ab) == g && sh_package_key_groups_find(&groups, &mixed) == h &&
+            !sh_package_key_groups_find(&groups, &one) && groups.count == 2);
+        assert(sh_package_key_request_matches(&groups, g, a) && sh_package_key_request_matches(&groups, g, b) &&
+            !sh_package_key_request_matches(&groups, g, c) && !sh_package_key_request_matches(&groups, c, a));
+        assert(!sh_package_key_request_matches(NULL, g, a) && !sh_package_key_request_matches(&groups, g, imp | k19));
+        assert(sh_package_key_request_matches(&groups, imp | g, imp) && sh_package_key_request_matches(&groups, imp | g, imp | a));
+        assert(sh_package_key_request_matches(&groups, h, k19) && sh_package_key_request_matches(&groups, h, imp | a) &&
+            !sh_package_key_request_matches(&groups, h, b) && !sh_package_key_request_matches(&groups, h, c));
+        assert(sh_package_key_modifier_matches(&groups, a, g) && sh_package_key_modifier_matches(&groups, imp | b, g) &&
+            !sh_package_key_modifier_matches(&groups, c, g) && !sh_package_key_modifier_matches(&groups, imp, g));
+        assert(sh_package_key_filter_matches(&groups, g, a) && sh_package_key_filter_matches(&groups, g, b) &&
+            !sh_package_key_filter_matches(&groups, g, c) && sh_package_key_filter_matches(&groups, imp | g, imp));
+        /* A row registered under a group code (a row naming two keys) answers
+         * requests for either key. */
+        assert(sh_package_key_request_matches(&groups, a, g) && sh_package_key_request_matches(&groups, b, imp | g) &&
+            !sh_package_key_request_matches(&groups, c, g));
+    }
+    /* Relocation under the contract spells a set of keys as one code: several
+     * single-bit keys stay their union, one multi-bit key is itself, and a set
+     * holding a multi-bit key takes a group code from the encoder. A package's
+     * ALL covers the stock bits it keeps and exactly its own keys. */
+    {
+        sh_package_key_moves moves;
+        sh_package_key_groups groups;
+        size_t length = 0; int failed = 1;
+        char *moved;
+        memset(moves, 0, sizeof(moves)); memset(&groups, 0, sizeof(groups));
+        sh_package_key_move_to(moves + 19, 1, 270008320u); sh_package_key_move_to(moves + 20, 1, 271056896u);
+        sh_package_key_move_to(moves + 21, 1, 1u << 22);
+        test_group_state state = {&groups, 0, 0, 0};
+        sh_package_key_encoder encoder = {test_group_code, &state};
+        moved = sh_package_key_relocate(&space, "1572864", 7, moves, &encoder, &length, &failed);
+        assert(!failed && moved && strtoul(moved, NULL, 10) == state.last && state.calls == 1); free(moved);
+        /* The same set reuses its code. */
+        moved = sh_package_key_relocate(&space, "1572868", 7, moves, &encoder, &length, &failed);
+        assert(!failed && moved && strtoul(moved, NULL, 10) == (state.last | 4u) && state.calls == 1); free(moved);
+        moved = sh_package_key_relocate(&space, "524288", 6, moves, &encoder, &length, &failed);
+        assert(!failed && moved && !strcmp(moved, "270008320")); free(moved);
+        moved = sh_package_key_relocate(&space, "2097152", 7, moves, &encoder, &length, &failed);
+        assert(!failed && moved && !strcmp(moved, "4194304")); free(moved);
+        /* A single-bit key beside a multi-bit one is a mixed group. */
+        moved = sh_package_key_relocate(&space, "2621440", 7, moves, &encoder, &length, &failed);
+        assert(!failed && moved && state.calls == 2); free(moved);
+        /* ALL keeps the stock bits and names this scope's keys only. */
+        moved = sh_package_key_relocate(&space, "ALL", 3, moves, &encoder, &length, &failed);
+        uint32_t all = moved ? (uint32_t)strtoul(moved, NULL, 10) : 0;
+        sh_package_key_set seen = {{0}};
+        sh_package_key_decode(&groups, all, &seen);
+        assert(!failed && moved && (all & 0x4007ffffu) == 0x4007ffffu && !(all & SH_PACKAGE_KEY_COMPOSITE) &&
+            sh_package_key_set_count(&seen) == 3 && sh_package_key_set_has(&seen, 270008320u) &&
+            sh_package_key_set_has(&seen, 271056896u) && sh_package_key_set_has(&seen, 1u << 22)); free(moved);
+        /* Without moves a composite is untouched: a stock or unkeyed ALL keeps
+         * its native meaning. */
+        sh_package_key_moves none;
+        memset(none, 0, sizeof(none));
+        assert(!sh_package_key_relocate(&space, "ALL", 3, none, &encoder, &length, &failed) && !failed);
+        /* An exhausted allocator is reported, never spelled as an OR. */
+        state.exhausted = 1;
+        sh_package_key_move_to(moves + 22, 1, 272105472u);
+        assert(!sh_package_key_relocate(&space, "4718592 5", 9, moves, &encoder, &length, &failed) && failed == 2);
+    }
     sh_decl_native_schema_close(schema);
-    memset(to, 0xff, sizeof(to)); to[19] = 25;
+    sh_package_key_move_to(to + 19, 0, 1u << 25);
     {
         size_t length = 0; int failed = 1;
-        char *moved = sh_package_key_relocate("IMP  524288", 11, to, &length, &failed);
-        assert(!failed && moved && !strcmp(moved, "IMP  33554432") && length == 13); free(moved);
-        moved = sh_package_key_relocate("1572868", 7, to, &length, &failed);
+        char *moved = sh_package_key_relocate(NULL, "524288 1048576", 14, to, NULL, &length, &failed);
+        assert(!failed && moved && !strcmp(moved, "33554432 1048576") && length == 16); free(moved);
+        moved = sh_package_key_relocate(NULL, "1572868", 7, to, NULL, &length, &failed);
         assert(!failed && moved && !strcmp(moved, "34603012")); free(moved);
-        assert(!sh_package_key_relocate("IMP 1048576", 11, to, &length, &failed) && !failed);
+        assert(!sh_package_key_relocate(NULL, "IMP 1048576", 11, to, NULL, &length, &failed) && !failed);
         const char *inspector = "{ edit = { enumType = \"spawnAIType_t\"; values = { num = 2; "
-            "item[0] = { enumValue = \"IMP\"; label = \"a\"; } item[1] = { enumValue = \"IMP 524288\"; label = \"b\"; } } } }";
-        moved = sh_package_key_relocate_inspector(inspector, strlen(inspector), to, &length, &failed);
-        assert(!failed && moved && strstr(moved, "\"IMP 33554432\"") && strstr(moved, "\"IMP\"") && !strstr(moved, "524288"));
+            "item[0] = { enumValue = \"IMP\"; label = \"a\"; } item[1] = { enumValue = \"524292\"; label = \"b\"; } } } }";
+        moved = sh_package_key_relocate_inspector(NULL, inspector, strlen(inspector), to, NULL, &length, &failed);
+        assert(!failed && moved && strstr(moved, "\"33554436\"") && strstr(moved, "\"IMP\"") && !strstr(moved, "524292"));
         free(moved);
         const char *other = "{ edit = { enumType = \"teamFilter_t\"; values = { num = 1; "
             "item[0] = { enumValue = \"524288\"; label = \"a\"; } } } }";
-        assert(!sh_package_key_relocate_inspector(other, strlen(other), to, &length, &failed) && !failed);
+        assert(!sh_package_key_relocate_inspector(NULL, other, strlen(other), to, NULL, &length, &failed) && !failed);
     }
     sh_compiled_resource file = link_decl("conductor", "generated/decls/entitydef/conductor.decl",
         "{ class = \"Entity\"; edit = { aiTypeList = { num = 2; item[0] = { aiType = \"IMP\"; entityDef = \"imp\"; } "
-        "item[1] = { aiType = \"IMP 524288\"; entityDef = \"boss\"; } } } }");
+        "item[1] = { aiType = \"524292\"; entityDef = \"boss\"; } } } }");
     sh_package_compilation compiled = {0}; compiled.resources = &file; compiled.resource_count = 1;
     sh_package_source_reader *reader = sh_package_source_reader_open(&compiled, NULL, registration_original, f,
         registry, (uintptr_t)f->reflection, error, sizeof(error));
@@ -3683,8 +4970,8 @@ static void test_registration_keys(void)
         key_rewrite, to, &out, &length, &result, error, sizeof(error));
     if (bound != 1) fprintf(stderr, "registration key sites: %s\n", error);
     assert(bound == 1 && out && result.references == 2 && result.changed == 1);
-    assert(strstr((char *)out, "aiType = \"IMP\";") && strstr((char *)out, "aiType = \"IMP 33554432\";") &&
-        !strstr((char *)out, "524288") && strstr((char *)out, "entityDef = \"boss\";"));
+    assert(strstr((char *)out, "aiType = \"IMP\";") && strstr((char *)out, "aiType = \"33554436\";") &&
+        !strstr((char *)out, "524292") && strstr((char *)out, "entityDef = \"boss\";"));
     free(out); out = NULL;
     /* A family with no reflected state reader has no key site. */
     assert(sh_package_source_bind_keys(reader, "image", "conductor", file.body, file.body_length,
@@ -4571,6 +5858,16 @@ int main(void)
     test_movie_source_link();
     test_preview_model();
     test_registration_lists();
+    test_registration_variants();
+    test_registration_modifier_precedence();
+    test_registration_capacity();
+    test_registration_private_variants();
+    test_registration_private_capacity();
+    test_registration_private_hybrid();
+    test_registration_marked_groups();
+    test_registration_group_capacity();
+    test_registration_pinned_keys();
+    test_registration_context_names();
     test_registration_keys();
     test_contribution_movie_token();
     test_open_effect_body();

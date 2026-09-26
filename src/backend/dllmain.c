@@ -31,6 +31,7 @@
 #include "grid_room_editor.h"
 #include "map_render.h"
 #include "grid_room_snap.h"
+#include "spawn_keys.h"
 #include "package_requirements.h"
 #include "weapon_hud.h"
 #include "navmesh.h"
@@ -374,6 +375,10 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
             backend_log("GRID: native module variants unavailable on this build");
         if (grid_installed && !sh_grid_snap_install(results, db, g_doom_base))
             backend_log("GRID: exact doorway attachment unavailable on this build");
+
+        /* Package AI registration keys are private at native dispatch before
+         * the first package library compiles (package_keys.h). */
+        sh_spawn_keys_install(results, db);
 
         /* Navigation uses the resource shadow and map funnel; report its startup state. */
         sh_navmesh_install();

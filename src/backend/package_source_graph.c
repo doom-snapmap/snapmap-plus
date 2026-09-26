@@ -49,6 +49,11 @@ typedef struct sh_package_source_reader {
     int failed;
     sh_package_binding_resolver saved_binding;
     void *saved_context;
+    /* Registration-key groups for map-authored values (package_keys.h). */
+    sh_package_key_groups *key_groups;
+    const sh_package_key_groups *other_key_groups;
+    const sh_package_key_set *key_taken;
+    sh_package_saved_keys_fn saved_keys;
     sh_package_bound_exists bound_exists;
     int bound_absent; /* The last lookup was positively absent from bound outputs. */
     void *bound_context;
@@ -2126,46 +2131,113 @@ static void sg_map_key_gap(void *context, const char *path, sh_decl_value_type t
     sg_map_binding *map = context;
     if (map->native->gap) map->native->gap(map->native->context, path, type, reason);
 }
-/* A map-authored spawn-type value: every unnamed bit is a package key, bound
- * like a typed reference of its own at "<site>#<bit>" so each keeps the
- * package it was chosen from; the value is rewritten through the current bits. */
+/* One map-authored key bound like a typed reference at "<site>#<key>": 1 with
+ * the key its source context holds now, 0 when that context binds none. */
+static int sg_map_key_bind(sg_map_binding *map, const char *slot, const sh_package_provenance_site *location,
+    uint32_t key, uint32_t *target)
+{
+    char decimal[16], *reference, *end = NULL;
+    const char *bound = NULL;
+    size_t reference_length;
+    int status;
+    snprintf(decimal, sizeof(decimal), "%u", key);
+    reference_length = strlen(location->reference) + strlen(decimal) + 2;
+    if (!(reference = malloc(reference_length))) return -1;
+    snprintf(reference, reference_length, "%s#%s", location->reference, decimal);
+    sh_package_provenance_site site = {location->kind, location->owner, reference};
+    if (map->legacy) status = map->legacy(map->context, slot, SH_PACKAGE_KEY_FAMILY, decimal, &bound);
+    else if (map->observed) status = map->observed(map->context, &site, SH_PACKAGE_KEY_FAMILY, decimal, &bound);
+    else status = map->occurrence(map->context, &site, SH_PACKAGE_KEY_FAMILY, decimal, &bound);
+    free(reference);
+    if (status < 0) return -1;
+    if (status != 1 || !bound) return 0;
+    unsigned long number = strtoul(bound, &end, 10);
+    if (!end || *end || !number || number > 0xffffffffu) return -1;
+    *target = (uint32_t)number; return 1;
+}
+void sh_package_source_reader_key_codes(sh_package_source_reader *reader, sh_package_key_groups *groups,
+    const sh_package_key_groups *other, const sh_package_key_set *taken, sh_package_saved_keys_fn saved_keys)
+{
+    if (!reader) return;
+    reader->key_groups = groups; reader->other_key_groups = other;
+    reader->key_taken = taken; reader->saved_keys = saved_keys;
+}
+/* A map-authored multi-bit code no saved or current key binding names on its
+ * own is a group of keys: the site's saved member keys (a loaded map) or, for
+ * a value set in this session, the serving generation's definition. Each
+ * member binds at "<site>#<member>" like a key of its own, and the value then
+ * carries the code the serving generation gives the resulting set. 1 with the
+ * code, 0 when the code is no known group, -1 on failure. */
+static int sg_map_key_group(sg_map_binding *map, const char *slot, const sh_package_provenance_site *location,
+    uint32_t marked, uint32_t *code)
+{
+    sh_package_source_reader *reader = map->binding.reader;
+    uint32_t members[64];
+    size_t count = 0;
+    sh_package_key_set current;
+    memset(&current, 0, sizeof(current));
+    if (reader->saved_keys) {
+        int found = reader->saved_keys(map->context, location, members, sizeof(members) / sizeof(*members));
+        if (found < 0 || (size_t)found > sizeof(members) / sizeof(*members)) return -1;
+        for (int i = 0; i < found; i++)
+            if (sh_package_key_index(members[i]) != SIZE_MAX) members[count++] = members[i];
+    }
+    if (!count) {
+        sh_package_key_set defined;
+        sh_package_key_decode(reader->key_groups, marked, &defined);
+        if (sh_package_key_set_count(&defined) < 2) sh_package_key_decode(reader->other_key_groups, marked, &defined);
+        for (size_t i = 0; i < SH_PACKAGE_KEY_CODES && count < sizeof(members) / sizeof(*members); i++)
+            if (sh_package_key_set_has(&defined, sh_package_key_code(i))) members[count++] = sh_package_key_code(i);
+    }
+    if (count < 2) return 0;
+    for (size_t i = 0; i < count; i++) {
+        uint32_t target = members[i];
+        int status = sg_map_key_bind(map, slot, location, members[i], &target);
+        if (status < 0) return -1;
+        if (!sh_package_key_set_add(&current, status ? target : members[i])) return -1;
+    }
+    if (!(*code = sh_package_key_groups_code(reader->key_groups, reader->other_key_groups, reader->key_taken, &current))) {
+        snprintf(reader->error, reader->capacity, "a map value names a set of package AI keys no free group code can hold");
+        return -1;
+    }
+    return 1;
+}
+/* A map-authored spawn-type value: each key it names on its own (a decimal
+ * bit or single-bit constant, or a whole marked private key) is bound at
+ * "<site>#<key>". An unnamed bit is a package key, and a stock type bit is
+ * one where a package's row holds or extends it, so each keeps the package it
+ * was chosen from; the value is rewritten through the keys held now. A key
+ * no package in the site's context binds stays as authored. */
 static int sg_map_key_site(sg_map_binding *map, const char *slot, const sh_package_provenance_site *location,
     const char *value, size_t length, const char **replacement)
 {
-    unsigned char to[SH_PACKAGE_KEY_BITS];
-    uint32_t bits = 0;
-    int moved = 0;
+    sh_package_key_moves to;
+    uint32_t bits = 0, target = 0, marked;
+    int moved = 0, status;
     if (!map->key_state) map->key_state = sh_package_key_space_read(map->binding.reader->schema, &map->key_space) == 1 ? 1 : -1;
-    if (map->key_state < 0 || !sh_package_key_custom_bits(&map->key_space, value, length, &bits) || !bits) return 0;
-    memset(to, 0xff, sizeof(to));
-    for (unsigned bit = 0; bit < SH_PACKAGE_KEY_BITS; bit++) {
-        char decimal[16], *reference;
-        const char *target = NULL;
-        size_t reference_length;
-        int status;
-        if (!(bits >> bit & 1u)) continue;
-        snprintf(decimal, sizeof(decimal), "%u", 1u << bit);
-        reference_length = strlen(location->reference) + strlen(decimal) + 2;
-        if (!(reference = malloc(reference_length))) return -1;
-        snprintf(reference, reference_length, "%s#%s", location->reference, decimal);
-        sh_package_provenance_site site = {location->kind, location->owner, reference};
-        if (map->legacy) status = map->legacy(map->context, slot, SH_PACKAGE_KEY_FAMILY, decimal, &target);
-        else if (map->observed) status = map->observed(map->context, &site, SH_PACKAGE_KEY_FAMILY, decimal, &target);
-        else status = map->occurrence(map->context, &site, SH_PACKAGE_KEY_FAMILY, decimal, &target);
-        free(reference);
-        if (status < 0) return -1;
-        if (status == 1 && target) {
-            char *end = NULL;
-            unsigned long number = strtoul(target, &end, 10);
-            unsigned slot_bit;
-            if (!end || *end || !number || number > 0xffffffffu || (number & (number - 1))) return -1;
-            for (slot_bit = 0; !((uint32_t)number >> slot_bit & 1u); slot_bit++) {}
-            if (slot_bit != bit) { to[bit] = (unsigned char)slot_bit; moved = 1; }
+    if (map->key_state < 0 || !sh_package_key_movable_bits(&map->key_space, value, length, &bits) || !bits) return 0;
+    memset(to, 0, sizeof(to));
+    marked = (bits & SH_PACKAGE_KEY_MARKER) && sh_package_key_space_private(&map->key_space) ? bits & SH_PACKAGE_KEY_PRIVATE : 0;
+    if (marked) {
+        if ((status = sg_map_key_bind(map, slot, location, marked, &target)) < 0) return -1;
+        if (!status && (status = sg_map_key_group(map, slot, location, marked, &target)) < 0) return -1;
+        if (status && target != marked) {
+            unsigned low = 0;
+            while (!(marked >> low & 1u)) low++;
+            for (unsigned bit = low + 1; bit < SH_PACKAGE_KEY_BITS; bit++)
+                if (marked >> bit & 1u) to[bit].kind = SH_PACKAGE_KEY_DROP;
+            sh_package_key_move_to(to + low, 0, target); moved = 1;
         }
+        bits &= ~marked;
+    }
+    for (unsigned bit = 0; bit < SH_PACKAGE_KEY_BITS; bit++) {
+        if (!(bits >> bit & 1u)) continue;
+        if ((status = sg_map_key_bind(map, slot, location, 1u << bit, &target)) < 0) return -1;
+        if (status && target != 1u << bit) { sh_package_key_move_to(to + bit, 0, target); moved = 1; }
     }
     if (!moved) return 0;
     size_t out_length = 0; int failed = 0;
-    char *out = sh_package_key_relocate(value, length, to, &out_length, &failed);
+    char *out = sh_package_key_relocate(&map->key_space, value, length, to, NULL, &out_length, &failed);
     if (failed) return -1;
     if (!out) return 0;
     free(map->key_replacement); map->key_replacement = out; *replacement = out; return 1;

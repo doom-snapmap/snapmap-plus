@@ -510,10 +510,13 @@ static void test_prepared_map(const char *map_root)
     for (int failure = 1; failure <= 2; failure++) {
         state.fail = failure; CHECK(!activate_plan(plan, &state));
         CHECK(state.calls == failure && state.recoveries == failure);
+        /* The spawn-key detours read the restored generation's groups. */
+        CHECK(sh_package_runtime_test_key_groups_current() && !sh_package_runtime_has_map_provider());
         CHECK(sh_package_map_plan_compilation(plan) == candidate);
         for (size_t i = 0; i < sizeof(paths) / sizeof(paths[0]); i++) expect_current(paths[i], "local");
     }
     state.fail = 0; CHECK(activate_plan(plan, &state)); CHECK(sh_package_runtime_ready());
+    CHECK(sh_package_runtime_test_key_groups_current() && sh_package_runtime_has_map_provider());
     {
         CHECK(sh_package_runtime_acquire() != NULL);
         const sh_package_provenance *bindings = sh_package_runtime_bindings();
@@ -537,8 +540,10 @@ static void test_prepared_map(const char *map_root)
     for (size_t i = 0; i < sizeof(paths) / sizeof(paths[0]); i++) expect_current(paths[i], "prepared");
     state.next_health = "health = 16000"; state.previous_health = "health = 10"; state.map_active = 0;
     state.fail = 1; CHECK(!activate_plan(NULL, &state)); CHECK(sh_package_runtime_has_map_provider());
+    CHECK(sh_package_runtime_test_key_groups_current());
     for (size_t i = 0; i < sizeof(paths) / sizeof(paths[0]); i++) expect_current(paths[i], "prepared");
     state.fail = 0; CHECK(activate_plan(NULL, &state)); CHECK(!sh_package_runtime_has_map_provider());
+    CHECK(sh_package_runtime_test_key_groups_current());
     for (size_t i = 0; i < sizeof(paths) / sizeof(paths[0]); i++) expect_current(paths[i], "local");
 }
 
@@ -603,6 +608,8 @@ static void test_committed_install_joins_library(void)
      * changes, and a following exit retires the map provider normally. */
     state.library_changed = 1; state.expected_count = 0;
     CHECK(activate_plan(plan, &state)); CHECK(state.calls == calls + 1);
+    /* The committed library replaced the installed one under the map. */
+    CHECK(sh_package_runtime_test_key_groups_current());
     state.library_changed = 0; state.map_active = 0;
     CHECK(activate_plan(NULL, &state)); CHECK(state.calls == calls + 2);
     sh_package_map_plan_free(plan);
@@ -746,6 +753,8 @@ static void test_installed_inventory_is_not_active_composition(void)
     inventory_commit_failure = 0;
     CHECK(!sh_package_runtime_commit_map(NULL, commit_inventory, error, sizeof(error)) && inventory_commit_calls == 2);
     CHECK(sh_package_runtime_commit_map(plan, commit_inventory, error, sizeof(error)) && inventory_commit_calls == 3);
+    /* The committed library's group codes are the ones the detours read. */
+    CHECK(sh_package_runtime_test_key_groups_current());
     CHECK(sh_package_map_plan_payload_missing(plan, &missing, error, sizeof(error)) && !missing.count);
     expect_current(health_path, "health = 10"); expect_library("health = 16000");
     CHECK(sh_package_runtime_refresh(root));
@@ -2234,6 +2243,7 @@ static void test_additive_occurrence_admission(void)
     CHECK(!sh_package_runtime_commit_occurrences(plans[1], documents[1], commit_inventory, error, sizeof(error)) && inventory_commit_calls == 1);
     inventory_commit_failure = 0;
     CHECK(sh_package_runtime_commit_occurrences(plans[1], documents[1], commit_inventory, error, sizeof(error)) && inventory_commit_calls == 2);
+    CHECK(sh_package_runtime_test_key_groups_current());
     CHECK(sh_package_runtime_commit_map(plans[0], commit_inventory, error, sizeof(error)) && inventory_commit_calls == 3);
     CHECK(!sh_package_runtime_commit_map(plans[1], commit_inventory, error, sizeof(error)) && inventory_commit_calls == 3);
     expect_current(old_path, "health = 10"); expect_current(new_path, "health = 20"); expect_current(dependency, "health = 30");

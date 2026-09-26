@@ -6,6 +6,7 @@
 #include "package_strings.h"
 #include "package_consumers.h"
 #include "package_audio_program.h"
+#include "package_keys.h"
 
 typedef struct sh_package_library_native {
     sh_package_source_link_native source;
@@ -29,6 +30,17 @@ typedef struct sh_package_library_native {
      * beyond the returned audio program's lifetime. Native activation remains
      * separate from compilation and must publish the complete prepared recipe. */
     sh_audio_originals *audio;
+    /* The backend's spawn-key detours are installed (spawn_keys.c): package
+     * registrations take private keys (package_keys.h). 0 keeps native bits. */
+    int private_keys;
+    /* The registration keys a peer library holds (its spawnaitype bindings).
+     * A scope of the same source tree and component keeps that key, so a map
+     * compile serves installed packages exactly as the installed library does
+     * and a recompile keeps live keys; other scopes take keys it leaves free. */
+    const sh_package_provenance *keys;
+    /* The same peer's group codes (package_keys.h): an equal set keeps its
+     * code, and no other set takes one of them. */
+    const sh_package_key_groups *key_groups;
 } sh_package_library_native;
 
 /* Build phases timed for the activation log. */
@@ -48,6 +60,9 @@ typedef struct sh_package_library {
     /* Immutable constructor requests, retained with this provider's files. */
     sh_package_consumers *consumers;
     sh_package_audio_program *audio;
+    /* Owned group codes the relocated values use (NULL when none): the spawn
+     * key detours need them to read those values; publish with the provider. */
+    sh_package_key_groups *key_groups;
     /* Owned text accounting missing product coverage that did not refuse the
      * library, one line per item; NULL when coverage was complete. After a
      * failed compile it may remain set, as a diagnostic, until library_free. */

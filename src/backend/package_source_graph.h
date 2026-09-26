@@ -237,6 +237,16 @@ char *sh_package_source_bind_map_sites(sh_package_source_reader *reader,
  * only for actual final source values, never those metadata reads. It has the
  * same binding return contract; callers retain observations transactionally
  * only when the entire output succeeds. Both callbacks borrow source sites. */
+/* Registration-key groups in map-authored values (package_keys.h): groups is
+ * the serving generation's table that new sets join, other the table beside
+ * it, taken the codes serving keys hold; saved_keys lists the keys a saved
+ * map recorded at one value site ("<site>#<key>"), for the binding context. */
+typedef int (*sh_package_saved_keys_fn)(void *context, const sh_package_provenance_site *site,
+    uint32_t *keys, size_t capacity);
+struct sh_package_key_groups;
+struct sh_package_key_set;
+void sh_package_source_reader_key_codes(sh_package_source_reader *reader, struct sh_package_key_groups *groups,
+    const struct sh_package_key_groups *other, const struct sh_package_key_set *taken, sh_package_saved_keys_fn saved_keys);
 char *sh_package_source_bind_map_sites_observed(sh_package_source_reader *reader,
     const char *json, size_t length, sh_package_map_binding_resolver lookup,
     sh_package_map_binding_resolver observe, void *context, size_t *output_length,

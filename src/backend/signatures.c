@@ -1477,5 +1477,18 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "4C 8B C6 48 8B D7 48 8B CB E8 ?? ?? ?? ?? 48 85 C0 74 ?? 4C 8D 80 90 00 "
       "00 00 0F 28 CE 48 8B CB E8 ?? ?? ?? ?? B0 01 48 8B 5C 24 40 48 8B 74 24 "
       "48", 0 },
+    /* Spawn-type dispatch (spawn_keys.c), bodies equal in both images apart
+     * from call and global displacements: the spawn manager's entry selection
+     * (VK 0x1123830, GL 0x1115610), the global modifier lookup (VK 0x110faa0,
+     * GL 0x1101890) and the AI filter test (VK 0x1268070, GL 0x1259f70). */
+    { "SpawnSelectEntry",
+      "48 8B C4 41 54 41 56 41 57 48 83 EC 40 48 C7 40 C8 FE FF FF FF 48 89 58 08 48 89 68 10 "
+      "48 89 70 18 48 89 78 20 44 8B E2 4C 8B F9 33 ED C7 40 E0 00 00 05 00", 0 },
+    { "SpawnGlobalModifier",
+      "48 89 74 24 10 57 48 83 EC 50 48 8B F2 4C 89 44 24 20 48 8B F9 E8 ?? ?? ?? ?? 48 63 8F 18 22 00 00 "
+      "85 C9 0F 8E ?? ?? ?? ?? 48 89 5C 24 60 45 33 C0 48 8B 9F 10 22 00 00 85 43 08", 0 },
+    { "SnapFilterAiMatches",
+      "48 89 5C 24 08 48 89 74 24 10 57 48 83 EC 20 48 8B F2 48 8B D9 8B 91 A4 0C 00 00 83 FA FF 74 26 "
+      "48 8B 05 ?? ?? ?? ?? 4C 8B 80 28 81 29 00 49 8B 48 48 E8 ?? ?? ?? ?? 48 8B D0 48 8B CB E8", 0 },
     { NULL, NULL, 0 }   /* terminator */
 };

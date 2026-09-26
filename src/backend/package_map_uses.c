@@ -1,3 +1,4 @@
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -353,6 +354,29 @@ static int mu_choose(sh_package_map_uses *selection, const sh_package_provenance
         return mu_fail(selection, "cannot retain typed map references");
     if (!resolved || !strcmp(resolved, name)) return 0;
     *replacement = resolved; return 1;
+}
+int sh_package_map_uses_saved_keys(void *selection, const sh_package_provenance_site *site,
+    uint32_t *keys, size_t capacity)
+{
+    sh_package_map_uses *s = selection;
+    size_t count = 0, prefix;
+    if (!s || !site || !site->owner || !site->reference) return -1;
+    prefix = strlen(site->reference);
+    for (size_t i = 0; i < s->saved.use_count; i++) {
+        const sh_package_provenance_use *use = s->saved.uses + i;
+        char *end = NULL;
+        unsigned long key;
+        if (use->kind != site->kind || !use->owner || !use->reference || strcmp(use->owner, site->owner) ||
+            use->binding >= s->saved.binding_count ||
+            strcmp(s->saved.bindings[use->binding].family, SH_PACKAGE_KEY_FAMILY) ||
+            strncmp(use->reference, site->reference, prefix) || use->reference[prefix] != '#') continue;
+        key = strtoul(use->reference + prefix + 1, &end, 10);
+        if (!end || *end || !key || key > 0xfffffffful) continue;
+        if (count < capacity) keys[count] = (uint32_t)key;
+        if (count == INT_MAX) return -1;
+        count++;
+    }
+    return (int)count;
 }
 int sh_package_map_uses_lookup(void *selection, const sh_package_provenance_site *site,
     const char *family, const char *name, const char **replacement)

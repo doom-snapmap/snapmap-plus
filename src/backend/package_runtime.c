@@ -22,6 +22,9 @@
 #include "audio_originals.h"
 #include "audio_files_native.h"
 #include "package_library.h"
+#ifndef SH_PACKAGE_RUNTIME_TESTING
+#include "spawn_keys.h"
+#endif
 #include "package_hud.h"
 #include "package_sound.h"
 #include "package_native_assets.h"
@@ -78,6 +81,7 @@ typedef struct pr_provider {
     char *rejections;
     char *unserved; /* Valid installed packages this build cannot link yet. */
     char *coverage; /* Accounted missing product coverage; packages still served. */
+    sh_package_key_groups *key_groups; /* Group codes its relocated values use. */
     volatile LONG references;
 } pr_provider;
 typedef struct pr_occurrence_lease {
@@ -187,7 +191,7 @@ static void pr_release(pr_provider *provider)
     for (size_t i = 0; i < provider->audio_source_count; i++) pr_release(provider->audio_sources[i]);
     free(provider->audio_sources);
     pr_release(provider->parent); free(provider->data_root); free(provider->rejections);
-    free(provider->unserved); free(provider->coverage); free(provider);
+    free(provider->unserved); free(provider->coverage); free(provider->key_groups); free(provider);
 }
 /* Precedence follows call order; one owner appears once. A view contributes
  * the owners it already retains, a root provider itself when it has audio. */
@@ -208,9 +212,26 @@ static int pr_audio_source_add(pr_provider *view, const pr_provider *source)
     return 1;
 }
 
+/* The spawn-key detours read the group codes of the providers now serving:
+ * the installed library's and the active map's. */
+#ifdef SH_PACKAGE_RUNTIME_TESTING
+static const void *g_test_key_groups[4];
+#endif
+static void pr_publish_key_groups(void)
+{
+#ifndef SH_PACKAGE_RUNTIME_TESTING
+    if (!sh_spawn_keys_publish_groups(g_library_provider ? g_library_provider->key_groups : NULL,
+        g_map_provider ? g_map_provider->key_groups : NULL))
+        backend_log("SPAWN-KEYS: the map's group codes disagree with the library's; the previous codes stay");
+#else
+    g_test_key_groups[0] = g_library_provider; g_test_key_groups[1] = g_library_provider ? g_library_provider->key_groups : NULL;
+    g_test_key_groups[2] = g_map_provider; g_test_key_groups[3] = g_map_provider ? g_map_provider->key_groups : NULL;
+#endif
+}
 static void pr_publish(pr_provider *current, pr_provider *library, pr_provider *map)
 {
     g_current_provider = current; g_library_provider = library; g_map_provider = map;
+    pr_publish_key_groups();
     g_sources = current ? current->sources : NULL;
     g_compiled = current ? current->compiled : NULL;
     g_catalog = current ? current->catalog : NULL;
@@ -1040,6 +1061,17 @@ static pr_provider *pr_prepare_deliveries(const char *data_root, const char *sou
             sh_decl_registry_source registry = {0};
             pr_original_source originals = {baseline, baseline_context, native_assets};
             sh_package_library_native native = sh_package_native_assets_adapter(native_assets);
+#ifndef SH_PACKAGE_RUNTIME_TESTING
+            native.private_keys = sh_spawn_keys_active();
+#endif
+            /* Installed packages keep the registration keys the installed
+             * library gave them: a map compile keys installed scopes as that
+             * library does, and a library recompile keeps its live keys. */
+            {
+                const pr_provider *keys = source_root ? string_peer : previous;
+                native.keys = keys ? &keys->bindings : NULL;
+                native.key_groups = keys ? keys->key_groups : NULL;
+            }
             /* Audio compiles into one retained program per provider. Native
              * activation publishes that program; there is no old-path fallback. */
             native.audio = audio_originals;
@@ -1198,6 +1230,7 @@ static pr_provider *pr_prepare_deliveries(const char *data_root, const char *sou
     }
     provider->sources = sources; provider->compiled = compiled; provider->catalog = catalog;
     provider->bindings = isolated.bindings; memset(&isolated.bindings, 0, sizeof(isolated.bindings));
+    provider->key_groups = isolated.key_groups; isolated.key_groups = NULL;
     provider->historical_bindings = historical; memset(&historical, 0, sizeof(historical));
     provider->virtual_materials = isolated.virtual_materials; isolated.virtual_materials = NULL;
     provider->consumers = isolated.consumers; isolated.consumers = NULL;
@@ -2417,20 +2450,25 @@ static int pr_update(const char *data_root, int change_map, const char *map_sour
         current->sources->package_count, current->sources->component_count, current->compiled->resource_count,
         current->compiled->duplicate_count, current->compiled->composed_count, map ? "; temporary map provider active" : "");
     backend_log(line);
-    /* Name each registration key this library moved, with its package. */
+    /* Name each registration key this library moved, with its packages. */
     for (size_t i = 0; i < current->bindings.binding_count; i++) {
         const sh_package_provenance_binding *binding = current->bindings.bindings + i;
-        const char *package = "a package";
+        char packages[192] = "";
+        size_t used = 0;
         if (strcmp(binding->family, SH_PACKAGE_KEY_FAMILY) || !strcmp(binding->original, binding->name)) continue;
         for (size_t c = 0; c < binding->context_count && binding->contexts[c] < current->bindings.context_count; c++) {
             const sh_package_provenance_context *context = current->bindings.contexts + binding->contexts[c];
             for (size_t owner = 0; context->tree_count && owner < current->sources->package_count; owner++) {
                 const unsigned char *tree = sh_package_source_tree(current->sources, owner);
-                if (tree && !memcmp(tree, context->trees[0], 32)) package = current->sources->packages[owner].name;
+                int n;
+                if (!tree || memcmp(tree, context->trees[0], 32)) continue;
+                n = snprintf(packages + used, sizeof(packages) - used, "%s%s", used ? ", " : "",
+                    current->sources->packages[owner].name);
+                if (n > 0 && (size_t)n < sizeof(packages) - used) used += (size_t)n; else packages[used] = 0;
             }
         }
-        snprintf(line, sizeof(line), "registration key %s of %s is served as %s: another package registers %s for different AI",
-            binding->original, package, binding->name, binding->original);
+        snprintf(line, sizeof(line), "%s: AI registration key %s is held as %s; its spawn requests and map uses follow it",
+            used ? packages : "a package", binding->original, binding->name);
         backend_log(line);
     }
     if (library_rescanned) InterlockedExchange(&g_sources_changed, 0);
@@ -2520,6 +2558,7 @@ static void pr_commit_inventory_locked(sh_package_map_plan *plan,
         *previous_inventory = g_inventory; g_inventory = pr_inventory_retain(plan->inventory);
         if (plan->library) {
             *previous_library = g_library_provider; g_library_provider = pr_retain(plan->library);
+            pr_publish_key_groups();
             InterlockedExchange(&g_sources_changed, 0); g_authoring_error[0] = 0;
         }
         plan->inventory_committed = 1;
@@ -3617,12 +3656,60 @@ int sh_package_runtime_read_decl_alias(const char *alias, unsigned char **body, 
 /* All callbacks below read retained data or native reflection. They must not
  * load declarations while the provider is acquired. Native construction stays
  * in the admitted activation route. */
+/* Every code a provider's registration keys hold, from its key bindings. */
+static void pr_key_taken(const pr_provider *provider, sh_package_key_set *taken)
+{
+    for (size_t i = 0; provider && i < provider->bindings.binding_count; i++) {
+        const sh_package_provenance_binding *binding = provider->bindings.bindings + i;
+        sh_package_key_set held;
+        char *end = NULL;
+        unsigned long value;
+        if (strcmp(binding->family, SH_PACKAGE_KEY_FAMILY)) continue;
+        value = strtoul(binding->name, &end, 10);
+        if (!end || *end || value > 0xfffffffful) continue;
+        sh_package_key_decode(NULL, (uint32_t)value, &held);
+        for (size_t w = 0; w < sizeof(held.words) / sizeof(held.words[0]); w++) taken->words[w] |= held.words[w];
+    }
+}
+/* The group codes a document capture may extend: a copy of the serving
+ * generation's table (the map's while one serves, else the library's), the
+ * other table beside it and the codes their keys hold. The copy is adopted
+ * only if the capture defines new sets. */
+typedef struct pr_key_context {
+    pr_provider *owner;
+    const sh_package_key_groups *other;
+    sh_package_key_groups *scratch;
+    sh_package_key_set taken;
+} pr_key_context;
+static void pr_key_context_open(pr_key_context *keys, pr_provider *owner)
+{
+    memset(keys, 0, sizeof(*keys));
+    keys->owner = owner;
+    keys->other = owner && owner != g_library_provider && g_library_provider ? g_library_provider->key_groups : NULL;
+    keys->scratch = owner ? calloc(1, sizeof(*keys->scratch)) : NULL;
+    if (keys->scratch && owner->key_groups) *keys->scratch = *owner->key_groups;
+    pr_key_taken(g_library_provider, &keys->taken);
+    pr_key_taken(owner, &keys->taken);
+}
+/* Adopt new group codes a capture defined, and publish them (exclusive). */
+static void pr_key_context_close(pr_key_context *keys, int adopt)
+{
+    if (adopt && keys->scratch && keys->owner &&
+        keys->scratch->count > (keys->owner->key_groups ? keys->owner->key_groups->count : 0)) {
+        AcquireSRWLockExclusive(&g_lock);
+        sh_package_key_groups *old = keys->owner->key_groups;
+        keys->owner->key_groups = keys->scratch; keys->scratch = old;
+        pr_publish_key_groups();
+        ReleaseSRWLockExclusive(&g_lock);
+    }
+    free(keys->scratch); keys->scratch = NULL;
+}
 static char *pr_capture_document(const pr_provider *provider,
     sh_decl_registry_source registry, uintptr_t reflection, int retain_native,
     const sh_package_provenance *saved, const sh_package_bundle_binding *additional,
     size_t additional_count, const char *json, size_t length, size_t *output_length,
     sh_package_occurrence_snapshot **ownership, sh_mpkg_used **deliveries,
-    size_t *delivery_count, char *error, size_t capacity)
+    size_t *delivery_count, pr_key_context *keys, char *error, size_t capacity)
 {
     sh_package_bundle_binding *rows = NULL;
     sh_package_source_reader *reader = NULL;
@@ -3656,6 +3743,8 @@ static char *pr_capture_document(const pr_provider *provider,
     reader = sh_package_source_reader_open(provider->compiled, provider->catalog,
         pr_original, &originals, registry, reflection, error, capacity);
     if (!reader) goto done;
+    if (keys) sh_package_source_reader_key_codes(reader, keys->scratch, keys->other, &keys->taken,
+        sh_package_map_uses_saved_keys);
     sh_mpkg_use_requirements required = {provider->compiled, provider->catalog};
     out = sh_package_map_uses_select_retained(reader, json, length, saved, &provider->bindings,
         rows, row_count, sh_mpkg_new_use_required, &required,
@@ -3695,6 +3784,8 @@ char *sh_package_runtime_capture_document(const sh_package_map_plan *plan,
     if (output_length) *output_length = 0;
     if (!g_activation_callback) AcquireSRWLockExclusive(&g_refresh_lock);
     AcquireSRWLockShared(&g_lock);
+    pr_key_context keys;
+    pr_key_context_open(&keys, plan ? plan->provider : g_map_provider ? g_map_provider : g_library_provider);
 #ifndef SH_PACKAGE_RUNTIME_TESTING
     sh_decl_registry_source registry = {0};
     sh_decl_native_source metadata = {NULL, pr_native_read, 0, g_native_scripts};
@@ -3702,21 +3793,31 @@ char *sh_package_runtime_capture_document(const sh_package_map_plan *plan,
         g_native_accessor, g_native_types, g_native_game_system) == 1)
         out = pr_capture_document(plan ? plan->provider : g_current_provider, registry, metadata.reflection, !plan,
             saved, additional, additional_count, json, length, output_length, ownership,
-            deliveries, delivery_count, error, capacity);
+            deliveries, delivery_count, &keys, error, capacity);
 #else
     sh_decl_registry_source registry = {0}; uintptr_t reflection = 0;
     if (sh_package_runtime_test_source_inputs(&registry, &reflection, NULL, NULL))
         out = pr_capture_document(plan ? plan->provider : g_current_provider, registry, reflection, !plan,
             saved, additional, additional_count, json, length, output_length, ownership,
-            deliveries, delivery_count, error, capacity);
+            deliveries, delivery_count, &keys, error, capacity);
 #endif
     ReleaseSRWLockShared(&g_lock);
+    pr_key_context_close(&keys, out != NULL);
     if (!g_activation_callback) ReleaseSRWLockExclusive(&g_refresh_lock);
     if (!out && error && capacity && !*error) snprintf(error, capacity, "native map occurrence reader is unavailable");
     return out;
 }
 
 #ifdef SH_PACKAGE_RUNTIME_TESTING
+int sh_package_runtime_test_key_groups_current(void)
+{
+    AcquireSRWLockShared(&g_lock);
+    int current = g_test_key_groups[0] == g_library_provider &&
+        g_test_key_groups[1] == (g_library_provider ? g_library_provider->key_groups : NULL) &&
+        g_test_key_groups[2] == g_map_provider && g_test_key_groups[3] == (g_map_provider ? g_map_provider->key_groups : NULL);
+    ReleaseSRWLockShared(&g_lock);
+    return current;
+}
 void sh_package_runtime_test_dispose(void)
 {
     pr_provider *current, *library, *map;

@@ -115,6 +115,7 @@ $tests = @(
     @{ name = "grid_room_editor_test"; src = 'grid_room_editor_test.c ..\src\backend\grid_room.c ..\src\backend\patch.c ..\src\backend\hook.c'; arg = "" }
     @{ name = "grid_room_native_test"; src = 'grid_room_native_test.c ..\src\backend\grid_room.c ..\src\backend\grid_room_decl.c ..\src\backend\config_json.c ..\src\backend\grid_room_edit.c ..\src\backend\patch.c ..\src\backend\hook.c'; arg = "" }
     @{ name = "grid_room_snap_test"; src = 'grid_room_snap_test.c ..\src\backend\grid_room.c ..\src\backend\patch.c ..\src\backend\hook.c'; arg = "" }
+    @{ name = "spawn_keys_test"; src = 'spawn_keys_test.c ..\src\backend\spawn_keys.c ..\src\backend\package_keys.c ..\src\backend\decl_tree.c ..\src\backend\patch.c ..\src\backend\hook.c'; defs = '/DSH_SPAWN_KEYS_TESTING'; arg = "" }
     @{ name = "nav_heap_test"; src = 'nav_heap_test.c'; arg = "" }
     @{ name = "nav_heap_hook_test"; src = 'nav_heap_hook_test.c ..\src\backend\patch.c ..\src\backend\hook.c'; defs = '/DSH_PATCH_TESTING'; arg = "" }
     @{ name = "patch_test"; src = 'patch_test.c ..\src\backend\patch.c ..\src\backend\hook.c'; defs = '/DSH_PATCH_TESTING'; arg = "" }

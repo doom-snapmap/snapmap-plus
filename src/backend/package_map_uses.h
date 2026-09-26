@@ -32,6 +32,10 @@ void sh_package_map_uses_close(sh_package_map_uses *selection);
 /* Source-reader callbacks. Lookup must never record ownership: parent/class
  * reads can carry their child's inherit site. Observe is for actual final
  * typed values only. Both use the ordinary map binding callback contract. */
+/* The keys the saved map recorded at one value site ("<site>#<key>" uses of
+ * the key family). Returns how many exist (writing at most capacity), or -1. */
+int sh_package_map_uses_saved_keys(void *selection, const sh_package_provenance_site *site,
+    uint32_t *keys, size_t capacity);
 int sh_package_map_uses_lookup(void *selection, const sh_package_provenance_site *site,
     const char *family, const char *name, const char **replacement);
 int sh_package_map_uses_observe(void *selection, const sh_package_provenance_site *site,

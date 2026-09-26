@@ -43,9 +43,9 @@ sh_virtual_material_view *sh_virtual_material_runtime_prepare(
 int sh_virtual_material_runtime_retire(sh_virtual_material_view **view) { assert(!view || !*view); return 1; }
 
 typedef struct region { void *address; size_t length; } region;
-typedef struct fixture { region regions[48]; size_t count; void *registry, *reflection; } fixture;
+typedef struct fixture { region regions[96]; size_t count; void *registry, *reflection; } fixture;
 static void *allocation(fixture *f, size_t n)
-{ void *p = calloc(1, n); assert(p && f->count < 48); f->regions[f->count++] = (region){p,n}; return p; }
+{ void *p = calloc(1, n); assert(p && f->count < 96); f->regions[f->count++] = (region){p,n}; return p; }
 static void pointer(void *p, size_t at, const void *value)
 { uintptr_t v = (uintptr_t)value; memcpy((char *)p + at, &v, 8); }
 static void number(void *p, size_t at, int n) { memcpy((char *)p + at, &n, 4); }
@@ -85,13 +85,19 @@ static void setup(fixture *f)
     pointer(fields, 0x10, string(f, "target")); number(fields, 0x1c, 8);
     pointer(fields, 0x48, string(f, classes[2])); pointer(fields, 0x48 + 8, string(f, ""));
     pointer(fields, 0x48 + 0x10, string(f, "text")); number(fields, 0x48 + 0x1c, 8);
-    /* A spawn-type field and its enum: IMP (bit 2) and the all-bits composite. */
+    /* A spawn-type field and its enum as the game registers it: single-bit
+     * constants for bits 0-18 (IMP is bit 2), the "any" bit 30 and the
+     * all-bits composite, leaving bits 19-29 unnamed. */
     pointer(fields, 0x90, string(f, SH_PACKAGE_KEY_TYPE)); pointer(fields, 0x90 + 8, string(f, ""));
     pointer(fields, 0x90 + 0x10, string(f, "spawnType")); number(fields, 0x90 + 0x1c, 8);
-    void *enums = allocation(f, 2 * 0x18), *readers = allocation(f, 2 * 16), *members = allocation(f, 3 * 0x10);
+    void *enums = allocation(f, 2 * 0x18), *readers = allocation(f, 2 * 16), *members = allocation(f, 22 * 0x10);
     pointer(enums, 0, string(f, SH_PACKAGE_KEY_TYPE)); pointer(enums, 0x10, members);
-    pointer(members, 0, string(f, "IMP")); number(members, 8, 4);
-    pointer(members, 0x10, string(f, "ALL")); number(members, 0x18, -1);
+    for (int i = 0; i < 21; i++) {
+        char name[16];
+        snprintf(name, sizeof(name), "T%d", i);
+        pointer(members, i * 0x10, string(f, i == 2 ? "IMP" : i == 19 ? "ANY" : i == 20 ? "ALL" : name));
+        number(members, i * 0x10 + 8, i < 19 ? 1 << i : i == 19 ? 1 << 30 : -1);
+    }
     pointer(container, 0x10, enums); pointer(f->reflection, 0x58, readers); number(f->reflection, 0x60, 2);
 }
 static int baseline(void *context, const char *path, unsigned char **body, size_t *length)
@@ -405,9 +411,9 @@ static void run_keys(sh_package_source_reader *reader, sh_package_compilation *c
     char error[1024], site[160];
     static const char key_site[] = "/k:entityDef/k:state/k:edit/k:spawnType";
     static const char authored[] = "{\"entities\":[{\"uniqueId\":42,\"entityDef\":{\"targetType\":\"idDeclEntityDef\","
-        "\"inherit\":\"vanilla\",\"state\":{\"edit\":{\"spawnType\":\"IMP 524288\"}}}}]}";
+        "\"inherit\":\"vanilla\",\"state\":{\"edit\":{\"spawnType\":\"524292\"}}}}]}";
     static const char moved[] = "{\"entities\":[{\"uniqueId\":42,\"entityDef\":{\"targetType\":\"idDeclEntityDef\","
-        "\"inherit\":\"vanilla\",\"state\":{\"edit\":{\"spawnType\":\"IMP 1048576\"}}}}]}";
+        "\"inherit\":\"vanilla\",\"state\":{\"edit\":{\"spawnType\":\"1048580\"}}}}]}";
     /* This library moved rows[1]'s authored key 524288 to 1048576 and rows[0]
      * kept 524288; rows[1] alone keeps it. */
     for (size_t i = 0; i < 2; i++) contexts[i] = isolated(&catalog, rows + i);
@@ -454,6 +460,183 @@ static void run_keys(sh_package_source_reader *reader, sh_package_compilation *c
     assert(text && !strcmp(text, authored) && out.use_count == 1 &&
         !memcmp(site_context(&out, "entity/0", site)->trees[0], sh_package_bundle_fingerprint(rows[0].original), 32));
     free(text);
+    /* A package that changed a stock row holds a private bit for that stock
+     * type where others change it too (the library binds the stock bit, 4
+     * here, to it). A map value chosen there returns to the stock bit where
+     * the package's change is uncontended, and back. */
+    {
+        sh_package_provenance held = {0}, plain = {0}, record = {0}, back = {0};
+        size_t held_context = isolated(&held, rows + 1), plain_context = isolated(&plain, rows + 1);
+        static const char variant[] = "{\"entities\":[{\"uniqueId\":42,\"entityDef\":{\"targetType\":\"idDeclEntityDef\","
+            "\"inherit\":\"vanilla\",\"state\":{\"edit\":{\"spawnType\":\"1048584\"}}}}]}";
+        static const char stock[] = "{\"entities\":[{\"uniqueId\":42,\"entityDef\":{\"targetType\":\"idDeclEntityDef\","
+            "\"inherit\":\"vanilla\",\"state\":{\"edit\":{\"spawnType\":\"12\"}}}}]}";
+        assert(sh_package_provenance_bind(&held, SH_PACKAGE_KEY_FAMILY, "4", "1048576", &held_context, 1));
+        assert(sh_package_provenance_bind(&plain, SH_PACKAGE_KEY_FAMILY, "4", "4", &plain_context, 1));
+        text = sh_package_map_uses_select(reader, variant, sizeof(variant) - 1, NULL, &held, rows, 3,
+            sh_mpkg_new_use_required, &requirements, &length, &record, &references, &inspection, error, sizeof(error));
+        snprintf(site, sizeof(site), "%s#1048576", key_site);
+        assert(text && !strcmp(text, variant) && record.use_count == 1 &&
+            !memcmp(site_context(&record, "entity/0", site)->trees[0], sh_package_bundle_fingerprint(rows[1].original), 32));
+        free(text);
+        text = sh_package_map_uses_select(reader, variant, sizeof(variant) - 1, &record, &plain, rows, 3,
+            sh_mpkg_new_use_required, &requirements, &length, &back, &references, &inspection, error, sizeof(error));
+        if (!text || strcmp(text, stock)) fprintf(stderr, "named key reopen: %s\n", text ? text : error);
+        assert(text && !strcmp(text, stock) && back.use_count == 1); free(text);
+        sh_package_provenance_free(&record);
+        text = sh_package_map_uses_select(reader, stock, sizeof(stock) - 1, &back, &held, rows, 3,
+            sh_mpkg_new_use_required, &requirements, &length, &record, &references, &inspection, error, sizeof(error));
+        assert(text && !strcmp(text, variant)); free(text);
+        sh_package_provenance_free(&held); sh_package_provenance_free(&plain);
+        sh_package_provenance_free(&record); sh_package_provenance_free(&back);
+    }
+    /* A marked private key (bit 28 with bit 20) binds whole: past the single
+     * bits a package's authored key 524288 is held as 269484032, and back. */
+    {
+        sh_package_provenance held = {0}, plain = {0}, record = {0}, back = {0};
+        size_t held_context = isolated(&held, rows + 1), plain_context = isolated(&plain, rows + 1);
+        static const char coded[] = "{\"entities\":[{\"uniqueId\":42,\"entityDef\":{\"targetType\":\"idDeclEntityDef\","
+            "\"inherit\":\"vanilla\",\"state\":{\"edit\":{\"spawnType\":\"269484036\"}}}}]}";
+        assert(sh_package_provenance_bind(&held, SH_PACKAGE_KEY_FAMILY, "524288", "269484032", &held_context, 1));
+        assert(sh_package_provenance_bind(&plain, SH_PACKAGE_KEY_FAMILY, "524288", "524288", &plain_context, 1));
+        text = sh_package_map_uses_select(reader, coded, sizeof(coded) - 1, NULL, &held, rows, 3,
+            sh_mpkg_new_use_required, &requirements, &length, &record, &references, &inspection, error, sizeof(error));
+        snprintf(site, sizeof(site), "%s#269484032", key_site);
+        assert(text && !strcmp(text, coded) && record.use_count == 1 &&
+            !memcmp(site_context(&record, "entity/0", site)->trees[0], sh_package_bundle_fingerprint(rows[1].original), 32));
+        free(text);
+        text = sh_package_map_uses_select(reader, coded, sizeof(coded) - 1, &record, &plain, rows, 3,
+            sh_mpkg_new_use_required, &requirements, &length, &back, &references, &inspection, error, sizeof(error));
+        if (!text || strcmp(text, authored)) fprintf(stderr, "marked key reopen: %s\n", text ? text : error);
+        assert(text && !strcmp(text, authored) && back.use_count == 1); free(text);
+        sh_package_provenance_free(&record);
+        text = sh_package_map_uses_select(reader, authored, sizeof(authored) - 1, &back, &held, rows, 3,
+            sh_mpkg_new_use_required, &requirements, &length, &record, &references, &inspection, error, sizeof(error));
+        assert(text && !strcmp(text, coded)); free(text);
+        sh_package_provenance_free(&held); sh_package_provenance_free(&plain);
+        sh_package_provenance_free(&record); sh_package_provenance_free(&back);
+    }
+    /* A group code: rows[1]'s authored keys 524288 and 1048576 held as the
+     * multi-bit keys A (bits 28|19|20) and B (28|19|21), whose OR is neither,
+     * and a map value naming both (G, the group code for {A, B}). Saving
+     * records each member at "<site>#<member>". Reopened where the keys are A2
+     * and B2 the value carries the first code that library's keys do not hold
+     * and neither of its tables defines in allocation order (28|19 is held
+     * and the table beside defines 28|20, so 28|21), never an OR; and back. */
+    {
+        const uint32_t a = 270008320u, b = 271056896u, g = 269484032u, a2 = 276824064u, b2 = 285212672u;
+        const uint32_t held_there = 268959744u, g2 = 270532608u;
+        sh_package_provenance held = {0}, moved_keys = {0}, record = {0}, back = {0}, again = {0};
+        sh_package_key_groups author, client, beside, empty;
+        sh_package_key_set members = {{0}}, unrelated = {{0}}, author_taken = {{0}}, client_taken = {{0}}, now = {{0}};
+        size_t held_context = isolated(&held, rows + 1), moved_context = isolated(&moved_keys, rows + 1);
+        char valued[256], expected[256], number[16];
+        memset(&author, 0, sizeof(author)); memset(&client, 0, sizeof(client));
+        memset(&beside, 0, sizeof(beside)); memset(&empty, 0, sizeof(empty));
+        assert(sh_package_key_set_add(&members, a) && sh_package_key_set_add(&members, b));
+        assert(sh_package_key_groups_define(&author, g, &members));
+        assert(sh_package_key_set_add(&unrelated, 301989888u) && sh_package_key_set_add(&unrelated, 335544320u));
+        assert(sh_package_key_groups_define(&beside, g, &unrelated));
+        assert(sh_package_key_set_add(&author_taken, a) && sh_package_key_set_add(&author_taken, b));
+        assert(sh_package_key_set_add(&client_taken, a2) && sh_package_key_set_add(&client_taken, b2) &&
+            sh_package_key_set_add(&client_taken, held_there));
+        snprintf(number, sizeof(number), "%u", a);
+        assert(sh_package_provenance_bind(&held, SH_PACKAGE_KEY_FAMILY, "524288", number, &held_context, 1));
+        snprintf(number, sizeof(number), "%u", b);
+        assert(sh_package_provenance_bind(&held, SH_PACKAGE_KEY_FAMILY, "1048576", number, &held_context, 1));
+        snprintf(number, sizeof(number), "%u", a2);
+        assert(sh_package_provenance_bind(&moved_keys, SH_PACKAGE_KEY_FAMILY, "524288", number, &moved_context, 1));
+        snprintf(number, sizeof(number), "%u", b2);
+        assert(sh_package_provenance_bind(&moved_keys, SH_PACKAGE_KEY_FAMILY, "1048576", number, &moved_context, 1));
+        snprintf(valued, sizeof(valued), "{\"entities\":[{\"uniqueId\":42,\"entityDef\":{\"targetType\":\"idDeclEntityDef\","
+            "\"inherit\":\"vanilla\",\"state\":{\"edit\":{\"spawnType\":\"%u\"}}}}]}", g);
+        snprintf(expected, sizeof(expected), "{\"entities\":[{\"uniqueId\":42,\"entityDef\":{\"targetType\":\"idDeclEntityDef\","
+            "\"inherit\":\"vanilla\",\"state\":{\"edit\":{\"spawnType\":\"%u\"}}}}]}", g2);
+        sh_package_source_reader_key_codes(reader, &author, NULL, &author_taken, sh_package_map_uses_saved_keys);
+        text = sh_package_map_uses_select(reader, valued, strlen(valued), NULL, &held, rows, 3,
+            sh_mpkg_new_use_required, &requirements, &length, &record, &references, &inspection, error, sizeof(error));
+        if (!text) fprintf(stderr, "group save: %s\n", error);
+        assert(text && !strcmp(text, valued) && record.use_count == 2); free(text);
+        snprintf(site, sizeof(site), "%s#%u", key_site, a);
+        assert(site_context(&record, "entity/0", site));
+        snprintf(site, sizeof(site), "%s#%u", key_site, b);
+        assert(site_context(&record, "entity/0", site));
+        sh_package_source_reader_key_codes(reader, &client, &beside, &client_taken, sh_package_map_uses_saved_keys);
+        text = sh_package_map_uses_select(reader, valued, strlen(valued), &record, &moved_keys, rows, 3,
+            sh_mpkg_new_use_required, &requirements, &length, &back, &references, &inspection, error, sizeof(error));
+        if (!text || strcmp(text, expected)) fprintf(stderr, "group reopen: %s\n", text ? text : error);
+        assert(sh_package_key_set_add(&now, a2) && sh_package_key_set_add(&now, b2));
+        assert(text && !strcmp(text, expected) && sh_package_key_groups_find(&client, &now) == g2);
+        assert(back.use_count == 2 && client.count == 1 && beside.count == 1); free(text);
+        sh_package_source_reader_key_codes(reader, &author, NULL, &author_taken, sh_package_map_uses_saved_keys);
+        text = sh_package_map_uses_select(reader, expected, strlen(expected), &back, &held, rows, 3,
+            sh_mpkg_new_use_required, &requirements, &length, &again, &references, &inspection, error, sizeof(error));
+        assert(text && !strcmp(text, valued) && again.use_count == 2 && author.count == 1); free(text);
+        /* Two values at one site path in different entities: each decodes
+         * from its own entity's saved members ({A, B} and {A, C}), and a
+         * saved use of another family at "<site>#<n>" is no member. */
+        {
+            const uint32_t c = 273154048u, c2 = 402653184u, h = 469762048u;
+            sh_package_key_groups client2;
+            sh_package_key_set pair_ac = {{0}}, now_ab = {{0}}, now_ac = {{0}};
+            sh_package_provenance two = {0}, rebound = {0};
+            char both[512], rewritten[512];
+            size_t entity_binding = SIZE_MAX;
+            memset(&client2, 0, sizeof(client2));
+            assert(sh_package_key_set_add(&pair_ac, a) && sh_package_key_set_add(&pair_ac, c));
+            assert(sh_package_key_groups_define(&author, h, &pair_ac) && sh_package_key_set_add(&author_taken, c));
+            assert(sh_package_key_set_add(&client_taken, c2));
+            snprintf(number, sizeof(number), "%u", c);
+            assert(sh_package_provenance_bind(&held, SH_PACKAGE_KEY_FAMILY, "2097152", number, &held_context, 1));
+            snprintf(number, sizeof(number), "%u", c2);
+            assert(sh_package_provenance_bind(&moved_keys, SH_PACKAGE_KEY_FAMILY, "2097152", number, &moved_context, 1));
+            snprintf(both, sizeof(both), "{\"entities\":[{\"uniqueId\":42,\"entityDef\":{\"targetType\":\"idDeclEntityDef\","
+                "\"inherit\":\"vanilla\",\"state\":{\"edit\":{\"spawnType\":\"%u\"}}}},{\"uniqueId\":43,\"entityDef\":"
+                "{\"targetType\":\"idDeclEntityDef\",\"inherit\":\"vanilla\",\"state\":{\"edit\":{\"spawnType\":\"%u\"}}}}]}", g, h);
+            sh_package_source_reader_key_codes(reader, &author, NULL, &author_taken, sh_package_map_uses_saved_keys);
+            text = sh_package_map_uses_select(reader, both, strlen(both), NULL, &held, rows, 3,
+                sh_mpkg_new_use_required, &requirements, &length, &two, &references, &inspection, error, sizeof(error));
+            if (!text) fprintf(stderr, "two groups save: %s\n", error);
+            assert(text && !strcmp(text, both) && two.use_count == 4); free(text);
+            snprintf(site, sizeof(site), "%s#%u", key_site, c);
+            assert(site_context(&two, "entity/1", site));
+            for (size_t i = 0; i < two.binding_count; i++)
+                if (!strcmp(two.bindings[i].family, "entitydef")) entity_binding = i;
+            if (entity_binding == SIZE_MAX) {
+                assert(sh_package_provenance_bind(&two, "entitydef", "vanilla", "vanilla", two.uses[0].contexts, 1));
+                entity_binding = two.binding_count - 1;
+            }
+            use(&two, "entity/0", site, entity_binding, two.uses[0].contexts[0]);
+            sh_package_source_reader_key_codes(reader, &client2, NULL, &client_taken, sh_package_map_uses_saved_keys);
+            text = sh_package_map_uses_select(reader, both, strlen(both), &two, &moved_keys, rows, 3,
+                sh_mpkg_new_use_required, &requirements, &length, &rebound, &references, &inspection, error, sizeof(error));
+            if (!text) fprintf(stderr, "two groups reopen: %s\n", error);
+            assert(sh_package_key_set_add(&now_ab, a2) && sh_package_key_set_add(&now_ab, b2));
+            assert(sh_package_key_set_add(&now_ac, a2) && sh_package_key_set_add(&now_ac, c2));
+            snprintf(rewritten, sizeof(rewritten), "{\"entities\":[{\"uniqueId\":42,\"entityDef\":{\"targetType\":\"idDeclEntityDef\","
+                "\"inherit\":\"vanilla\",\"state\":{\"edit\":{\"spawnType\":\"%u\"}}}},{\"uniqueId\":43,\"entityDef\":"
+                "{\"targetType\":\"idDeclEntityDef\",\"inherit\":\"vanilla\",\"state\":{\"edit\":{\"spawnType\":\"%u\"}}}}]}",
+                sh_package_key_groups_find(&client2, &now_ab), sh_package_key_groups_find(&client2, &now_ac));
+            if (text && strcmp(text, rewritten)) fprintf(stderr, "two groups reopen: %s\n", text);
+            assert(text && client2.count == 2 && !strcmp(text, rewritten) && rebound.use_count == 4); free(text);
+            sh_package_provenance_free(&two); sh_package_provenance_free(&rebound);
+        }
+        /* A value set in this session under a code the table beside the
+         * serving one defines (the library's, while a map serves) keeps it. */
+        sh_package_source_reader_key_codes(reader, &empty, &author, &author_taken, sh_package_map_uses_saved_keys);
+        sh_package_provenance_free(&again);
+        text = sh_package_map_uses_select(reader, valued, strlen(valued), NULL, &held, rows, 3,
+            sh_mpkg_new_use_required, &requirements, &length, &again, &references, &inspection, error, sizeof(error));
+        assert(text && !strcmp(text, valued) && again.use_count == 2 && !empty.count); free(text);
+        /* Without a group table a code no binding names stays as authored. */
+        sh_package_source_reader_key_codes(reader, NULL, NULL, NULL, NULL);
+        sh_package_provenance_free(&again);
+        text = sh_package_map_uses_select(reader, valued, strlen(valued), NULL, &held, rows, 3,
+            sh_mpkg_new_use_required, &requirements, &length, &again, &references, &inspection, error, sizeof(error));
+        assert(text && !strcmp(text, valued) && !again.use_count); free(text);
+        sh_package_provenance_free(&held); sh_package_provenance_free(&moved_keys); sh_package_provenance_free(&record);
+        sh_package_provenance_free(&back); sh_package_provenance_free(&again);
+    }
     sh_package_provenance_free(&catalog); sh_package_provenance_free(&alone); sh_package_provenance_free(&saved);
     sh_package_provenance_free(&out); sh_package_provenance_free(&reopened); sh_package_references_free(&references);
 }

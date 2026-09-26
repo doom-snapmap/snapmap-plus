@@ -669,6 +669,16 @@ int sh_package_editor_contribution_phase(const char *type)
 static int pc_registration_field(const char *key)
 { return !strcmp(key, "aiTypeList") || !strcmp(key, "globalAIMods"); }
 
+/* The library's registration union (after package keys are assigned): the
+ * spawn manager picks among every row sharing a bit with a request, so one
+ * type may register several AI and a row is its type and bound AI. Modifiers
+ * apply first-match, one row per mask. The whole-file composer keeps plain
+ * keys, so an equal key bound differently there remains a conflict. */
+static const sh_decl_collection_rule pc_registration_rules[] = {
+    {"edit.aiTypeList", "aiType", NULL, NULL, NULL, SH_DECL_COLLECTION_DISTINCT_BEHAVIOR},
+    {"edit.globalAIMods", "aiType"}
+};
+
 static int pc_editor_field(const char *type, const char *key)
 {
     int phase = sh_package_editor_contribution_phase(type);
@@ -1585,7 +1595,10 @@ static char *pc_contributions(const char *type, int registration, sh_decl_source
         if (target.length == SIZE_MAX || !(out = malloc(target.length + 1))) goto done;
         memcpy(out, target.text, target.length); out[target.length] = 0; *length = target.length; goto done;
     }
-    rules = registration ? pc_rules("entitydef", &rule_count) : pc_editor_rules(type, &rule_count);
+    if (registration) {
+        rules = pc_registration_rules;
+        rule_count = sizeof(pc_registration_rules) / sizeof(*pc_registration_rules);
+    } else rules = pc_editor_rules(type, &rule_count);
     if (phase == 2 && !registration) {
         size_t target_length = 0;
         char *projected = pc_editor_projection(type, private_binding ? target : baseline,

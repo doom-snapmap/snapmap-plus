@@ -1132,6 +1132,8 @@ static int sl_reverse_roots(sh_package_source_link *s, const sh_package_source_r
      * still bind in exactly the recorded source context, never current local. */
     if (plan->recorded) for (size_t i = 0; i < plan->recorded->binding_count; i++) {
         const sh_package_provenance_binding *binding = plan->recorded->bindings + i;
+        /* A registration key names no resource (package_keys.h). */
+        if (!strcmp(binding->family, SH_PACKAGE_KEY_FAMILY)) continue;
         for (size_t j = 0; j < binding->context_count; j++) {
             size_t scope = binding->contexts[j];
             if (scope >= plan->recorded->context_count || scope >= s->scope_count ||

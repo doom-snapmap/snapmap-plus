@@ -430,6 +430,9 @@ void sh_package_runtime_test_source_readers(sh_decl_registry_source registry, ui
 void sh_package_runtime_test_installed_links(int enabled);
 int sh_package_runtime_test_source_inputs(sh_decl_registry_source *registry, uintptr_t *reflection,
     sh_package_baseline_reader *baseline, void **baseline_context);
+/* 1 when the spawn-key group tables last published are the serving
+ * providers' (the installed library's and the active map's). */
+int sh_package_runtime_test_key_groups_current(void);
 /* Offline fixture teardown only. No engine callbacks or native game reset. */
 void sh_package_runtime_test_dispose(void);
 #endif
