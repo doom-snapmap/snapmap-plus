@@ -32,6 +32,7 @@
 #include "map_render.h"
 #include "grid_room_snap.h"
 #include "spawn_keys.h"
+#include "snap_type_cache.h"
 #include "package_requirements.h"
 #include "weapon_hud.h"
 #include "navmesh.h"
@@ -379,6 +380,10 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
         /* Package AI registration keys are private at native dispatch before
          * the first package library compiles (package_keys.h). */
         sh_spawn_keys_install(results, db);
+
+        /* Editor entities read their defaults from a type cache built once;
+         * complete it for entity types published afterwards. */
+        sh_snap_type_cache_install(results, db, g_doom_base);
 
         /* Navigation uses the resource shadow and map funnel; report its startup state. */
         sh_navmesh_install();

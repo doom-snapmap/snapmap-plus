@@ -1490,5 +1490,18 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
     { "SnapFilterAiMatches",
       "48 89 5C 24 08 48 89 74 24 10 57 48 83 EC 20 48 8B F2 48 8B D9 8B 91 A4 0C 00 00 83 FA FF 74 26 "
       "48 8B 05 ?? ?? ?? ?? 4C 8B 80 28 81 29 00 49 8B 48 48 E8 ?? ?? ?? ?? 48 8B D0 48 8B CB E8", 0 },
+    /* idSnapTypeInfoCache: Build, Get and Find (VK 0x5f2b00 / 0x5f2dc0 /
+     * 0x5f2ff0, GL 0x5f2700 / 0x5f29c0 / 0x5f2bf0; snap_type_cache.c). */
+    { "SnapTypeCacheBuild",
+      "40 56 57 41 56 B8 70 12 00 00 E8 ?? ?? ?? ?? 48 2B E0 48 C7 44 24 48 FE FF FF FF 48 89 9C 24 98 12 00 00 "
+      "48 89 AC 24 A0 12 00 00 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 84 24 60 12 00 00 48 8B D9 83 39 00 "
+      "0F 85 CB 01 00 00 48 8B 0D ?? ?? ?? ?? 48 8B 01 FF 90 28 02 00 00", 0x5f2b00 },
+    { "SnapTypeCacheGet",
+      "40 55 56 57 41 54 41 55 41 56 41 57 B8 90 12 00 00 E8 ?? ?? ?? ?? 48 2B E0 48 C7 44 24 50 FE FF FF FF "
+      "48 89 9C 24 E8 12 00 00 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 84 24 80 12 00 00 49 8B E8 4C 89 44 24 30 "
+      "4C 8B E2 48 8B D1 48 89 4C 24 48 33 F6 89 74 24 38 49 8B 58 58", 0x5f2dc0 },
+    { "SnapTypeCacheFind",
+      "48 89 5C 24 08 57 48 83 EC 20 48 8B FA 48 8B D9 E8 ?? ?? ?? ?? 3B 03 75 1C 48 8B 17 48 8D 0D ?? ?? ?? ?? "
+      "E8 ?? ?? ?? ?? 33 C0 48 8B 5C 24 30 48 83 C4 20 5F C3 48 98 48 8D 04 C0 48 8D 80 DD 05 00 00 48 8D 04 C3", 0x5f2ff0 },
     { NULL, NULL, 0 }   /* terminator */
 };
