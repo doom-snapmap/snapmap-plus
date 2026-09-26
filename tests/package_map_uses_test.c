@@ -444,6 +444,20 @@ static void run_keys(sh_package_source_reader *reader, sh_package_compilation *c
     assert(text && !strcmp(text, moved) && !inspection.changed && reopened.use_count == 1);
     assert(!memcmp(site_context(&reopened, "entity/0", site)->trees[0], sh_package_bundle_fingerprint(rows[1].original), 32));
     free(text);
+    /* Native capture retains objects, and a key is none: the retained-use
+     * witness is never asked about it (it would find no served file), so
+     * a capture of keys chosen in this session rebinds them as above. */
+    {
+        retained_fixture witness = {-1, 0};
+        sh_package_provenance recaptured = {0};
+        text = sh_package_map_uses_select_retained(reader, moved, sizeof(moved) - 1, &reopened, &catalog, rows, 3,
+            sh_mpkg_new_use_required, &requirements, retained_native, &witness,
+            &length, &recaptured, &references, &inspection, error, sizeof(error));
+        if (!text) fprintf(stderr, "retained key capture: %s\n", error);
+        assert(text && !strcmp(text, moved) && !witness.calls && recaptured.use_count == 1 &&
+            !strcmp(recaptured.bindings[recaptured.uses[0].binding].name, "1048576"));
+        free(text); sh_package_provenance_free(&recaptured);
+    }
     /* That record reopened where rows[1] keeps its authored key. */
     text = sh_package_map_uses_select(reader, moved, sizeof(moved) - 1, &reopened, &alone, rows, 3,
         sh_mpkg_new_use_required, &requirements, &length, &out, &references, &inspection, error, sizeof(error));

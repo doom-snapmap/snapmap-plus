@@ -208,7 +208,9 @@ static int mu_saved_match(sh_package_map_uses *selection, size_t use,
     const sh_package_provenance_binding *binding = selection->saved.bindings + entry->binding;
     if (_stricmp(binding->family, family)) return 0;
     int same = !_stricmp(binding->name, name);
-    if (same && selection->retained) {
+    /* A key names no native object a capture could retain: the serving
+     * catalog alone rebinds it, as it does in a portable document. */
+    if (same && selection->retained && strcmp(binding->family, SH_PACKAGE_KEY_FAMILY)) {
         int kept = selection->retained(selection->retained_context, &selection->saved, use, resolved);
         if (kept < 0) return mu_fail(selection, "retained native map use could not be verified");
         if (kept) return *resolved && !_stricmp(*resolved, binding->name) ? 1 :
