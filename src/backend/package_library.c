@@ -1271,6 +1271,18 @@ void sh_package_library_test_contribution_read_failures(const char *name, long c
 { g_contribution_read_name = name; g_contribution_read_failures = count; }
 #endif
 
+/* 1 when two declaration texts state the same tree (spelling aside), 0 when
+ * they differ or one does not parse, -1 on allocation failure. */
+static int pl_same_declaration(sh_decl_source left, sh_decl_source right)
+{
+    sh_decl_node *a = sh_decl_tree_parse(left, NULL, 0), *z = sh_decl_tree_parse(right, NULL, 0);
+    size_t a_length = 0, z_length = 0;
+    char *x = a ? sh_decl_tree_write(a, &a_length) : NULL, *y = z ? sh_decl_tree_write(z, &z_length) : NULL;
+    int same = x && y ? a_length == z_length && !memcmp(x, y, a_length) : (a && !x) || (z && !y) ? -1 : 0;
+    free(x); free(y); sh_decl_tree_free(a); sh_decl_tree_free(z);
+    return same;
+}
+
 /* One declaration's editor contributions. Members naming the reference
  * member's parent compose into one shared surface; a member whose author gave
  * it another parent is that author's own variant and is only rebased. Every
@@ -1374,6 +1386,14 @@ static int pl_contribution_group(pl_build *b, const sh_package_sources *sources,
             if (kind == SH_PACKAGE_EDITOR_FAILURE_SOURCE && failure.source < source_count)
                 culprit = members[part_member[failure.source]];
             goto failed;
+        }
+        /* A member the union leaves as it was keeps its exact bytes, and with
+         * them its native identity, whatever else the group holds: only a
+         * recomposed spelling would differ. */
+        if (!rebased[i]) {
+            int same = pl_same_declaration(texts[i], (sh_decl_source){body, length});
+            if (same < 0) { free(body); snprintf(error, capacity, "editor contribution allocation failed"); goto failed; }
+            if (same) { free(body); continue; }
         }
         for (size_t j = 0; j < count; j++) if (j != i && included[j] && c->inputs.scopes[members[j]] != b->count - 1)
             peers[peer_count++] = c->inputs.units[members[j]].files[0];

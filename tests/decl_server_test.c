@@ -1551,6 +1551,69 @@ static void test_cyber_shaped_registration_order(void)
     HeapFree(GetProcessHeap(), 0, decl_memory);
 }
 
+/* A private child perk named before its private parent existed was created on
+ * demand and completed with its default. Reached in dependency order, after
+ * the parent, it is rebuilt and parsed from its source; an identity that
+ * parsed is left alone, and a child still ahead of its parent stays refused. */
+static unsigned char *g_rd_parent, *g_rd_child;
+static int g_rd_parent_made, g_rd_reconstructs, g_rd_child_parses;
+static void *rd_type_by_name(void *registry, const char *short_name)
+{ (void)registry; (void)short_name; return (void *)(uintptr_t)0x44000000u; }
+static void *rd_source_find(void *type_manager, const char *logical_name)
+{ (void)type_manager; (void)logical_name; return (void *)(uintptr_t)0x44100000u; }
+static void *rd_find_decl(void *type_manager, const char *logical_name, unsigned char make_default)
+{
+    (void)type_manager;
+    if (!strcmp(logical_name, "smp/parent")) {
+        if (make_default) g_rd_parent_made = 1;
+        return g_rd_parent_made ? g_rd_parent : NULL;
+    }
+    if (strcmp(logical_name, "smp/child")) return NULL;
+    /* A pending lookup parses a rebuilt object (the child inherits the
+     * parent); a defaulted object only drops the request, as observed. */
+    if (g_rd_child[0x2c] & 0x02) {
+        if (g_rd_child[0x2c] & 0x04) g_rd_child[0x2c] &= (unsigned char)~0x02;
+        else { g_rd_child_parses++; g_rd_child[0x2c] = g_rd_parent_made ? 0x00 : 0x04; }
+    }
+    return g_rd_child;
+}
+static void rd_reconstruct(void *decl) { g_rd_reconstructs++; ((unsigned char *)decl)[0x2c] = 0x00; }
+
+static void test_defaulted_identity_reparse(void)
+{
+    static const unsigned char parent_body[] = "{ edit = { maxNumUses = 4; } }";
+    static const unsigned char child_body[] = "{ inherit = \"smp/parent\"; edit = { upgradeStat = \"STAT_INVALID\"; } }";
+    sh_decl_server_test_materialize_item items[] = {
+        { "perks", "smp/parent", "parent", SH_DECL_SERVER_TEST_MISSING, parent_body, sizeof(parent_body) - 1 },
+        { "perks", "smp/child", "child", SH_DECL_SERVER_TEST_MISSING, child_body, sizeof(child_body) - 1 }
+    }, reversed[2];
+    int materialized = 0;
+    g_rd_parent = (unsigned char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, DS_TEST_DECL_BYTES);
+    g_rd_child = (unsigned char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, DS_TEST_DECL_BYTES);
+    CHECK(g_rd_parent && g_rd_child);
+    if (!g_rd_parent || !g_rd_child) return;
+    sh_decl_server_test_set_reconstruct(rd_reconstruct, NULL);
+    g_rd_parent_made = g_rd_reconstructs = g_rd_child_parses = 0;
+    g_rd_child[0x2c] = 0x04;
+    CHECK(sh_decl_server_test_materialize_missing_sedefs(items, 2, (void *)(uintptr_t)0x44200000u,
+        rd_type_by_name, rd_source_find, rd_find_decl, &materialized) == 1);
+    CHECK(materialized == 1 && g_rd_reconstructs == 1 && g_rd_child_parses == 1 && g_rd_child[0x2c] == 0x00);
+    /* An existing identity that parsed is not rebuilt. */
+    g_rd_parent_made = g_rd_reconstructs = g_rd_child_parses = 0; materialized = 0;
+    CHECK(sh_decl_server_test_materialize_missing_sedefs(items, 2, (void *)(uintptr_t)0x44200000u,
+        rd_type_by_name, rd_source_find, rd_find_decl, &materialized) == 1);
+    CHECK(materialized == 1 && !g_rd_reconstructs && !g_rd_child_parses);
+    /* Ahead of its parent the rebuilt child still completes with its default. */
+    reversed[0] = items[1]; reversed[1] = items[0];
+    g_rd_parent_made = g_rd_reconstructs = g_rd_child_parses = 0; materialized = 0;
+    g_rd_child[0x2c] = 0x04;
+    CHECK(sh_decl_server_test_materialize_missing_sedefs(reversed, 2, (void *)(uintptr_t)0x44200000u,
+        rd_type_by_name, rd_source_find, rd_find_decl, &materialized) == 0);
+    CHECK(g_rd_reconstructs == 1 && g_rd_child[0x2c] == 0x04);
+    sh_decl_server_test_set_reconstruct(NULL, NULL);
+    HeapFree(GetProcessHeap(), 0, g_rd_parent); HeapFree(GetProcessHeap(), 0, g_rd_child);
+}
+
 static void test_materialization_failure_guards(void)
 {
     static const unsigned char root_body[] =
@@ -1926,6 +1989,29 @@ static void test_material_table_dependency_ordering(void)
         if (items[i].value == (void *)2) table_index = i;
     }
     CHECK(table_index < material_index);
+}
+
+/* A boss (parent) lists its AI component, the component's groupEntityDefs
+ * load its weapon entities, and those inherit the boss: one component of the
+ * reference graph. Materializing the component loads the weapons, so their
+ * parent must come first even when the component's name sorts earlier. */
+static void test_scc_parent_before_loading_member(void)
+{
+    static const unsigned char boss[] =
+        "{ edit = { components = { ptr[0] = { componentDecl = \"smp/22d0\"; } } } }";
+    static const unsigned char guard[] = "{ edit = { groupEntityDefs = { item[0] = \"smp/47f2\"; } } }";
+    static const unsigned char hammer[] = "{ inherit = \"smp/665b\"; }";
+    sh_decl_reference_item items[] = {
+        { "smp/22d0", guard, sizeof(guard) - 1, (void *)(uintptr_t)1 },
+        { "smp/47f2", hammer, sizeof(hammer) - 1, (void *)(uintptr_t)2 },
+        { "smp/665b", boss, sizeof(boss) - 1, (void *)(uintptr_t)3 }
+    };
+    size_t edges = 0, cycles = 0;
+    CHECK(sh_decl_text_order_by_references(items, 3, &edges, &cycles) == 1);
+    CHECK(edges == 3 && cycles == 3);
+    CHECK(strcmp(items[0].name, "smp/665b") == 0);
+    CHECK(strcmp(items[1].name, "smp/22d0") == 0);
+    CHECK(strcmp(items[2].name, "smp/47f2") == 0);
 }
 
 static void test_scc_dependency_ordering(void)
@@ -3758,6 +3844,7 @@ int main(void)
     test_reference_dependency_ordering();
     test_material_table_dependency_ordering();
     test_scc_dependency_ordering();
+    test_scc_parent_before_loading_member();
     test_inheritance_cycle_refusal();
     test_complete_set_collision_ordering();
     test_walk_error_propagation();
@@ -3767,6 +3854,7 @@ int main(void)
     test_many_runtime_marks();
     test_shader_preparation_lifetime();
     test_occurrence_admission();
+    test_defaulted_identity_reparse();
     if (g_failed) {
         fprintf(stderr, "%d decl-server test(s) failed\n", g_failed);
         return 1;

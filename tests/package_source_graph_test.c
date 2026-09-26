@@ -3011,6 +3011,44 @@ static void test_inherited_editor_parent(fixture *f, sh_decl_registry_source reg
  * unchanged stock copy alike; failures keep their cause: one package's own
  * invalid list rejects it, a composition the product cannot perform leaves
  * a contributor unserved, and an unreadable source blames nobody. */
+/* Packages that ship an editor declaration exactly as SnapMap does (here in
+ * its compact original spelling) contribute nothing: composing the group
+ * leaves each copy's tree as it was, so each keeps its exact bytes and native
+ * identity instead of a respelled private copy, and nothing that references
+ * it turns private with it. */
+static void test_unchanged_editor_copies(fixture *f, sh_decl_registry_source registry)
+{
+    char temporary[MAX_PATH], error[1024];
+    source_link_fixture originals = {f};
+    sh_package_compile_environment env = {0}; sh_package_library library = {0};
+    size_t found = 0;
+    assert(GetTempPathA(sizeof(temporary), temporary));
+    snprintf(root, sizeof(root), "%ssmp-unchanged-editor-%lu-%llu", temporary, GetCurrentProcessId(), GetTickCount64());
+    assert(CreateDirectoryA(root, NULL));
+    env.baseline = contribution_original; env.baseline_context = &originals;
+    create("overrides/one/package.json", "{\"id\":\"local.one\",\"name\":\"one\"}");
+    create("overrides/one/assets/generated/decls/snapeditorentitydef/demo_parent.decl", demo_parent_original);
+    create("overrides/two/package.json", "{\"id\":\"local.two\",\"name\":\"two\"}");
+    create("overrides/two/assets/generated/decls/snapeditorentitydef/demo_parent.decl", demo_parent_original);
+    sh_package_sources *sources = sh_package_sources_scan(root, error, sizeof(error)); assert(sources);
+    int ok = sh_package_library_compile(sources, &env, NULL, contribution_original, &originals,
+        registry, (uintptr_t)f->reflection, NULL, &library, error, sizeof(error));
+    if (!ok) fprintf(stderr, "unchanged editor copies: %s\n", error);
+    assert(ok);
+    for (size_t i = 0; i < library.compiled->resource_count; i++) {
+        const sh_compiled_resource *file = library.compiled->resources + i;
+        const char *authored = file->original_path ? file->original_path : file->engine_path;
+        if (strcmp(authored, "generated/decls/snapeditorentitydef/demo_parent.decl")) continue;
+        found++;
+        if (!file->native_original)
+            fprintf(stderr, "unchanged editor copy respelled: %.*s\n", (int)file->body_length, (char *)file->body);
+        assert(file->native_original && file->body_length == strlen(demo_parent_original) &&
+            !memcmp(file->body, demo_parent_original, file->body_length));
+    }
+    assert(found == 1);
+    sh_package_library_free(&library); sh_package_sources_free(sources); cleanup(); assert(!failures);
+}
+
 static void test_editor_parent_contracts(fixture *f, sh_decl_registry_source registry)
 {
     char temporary[MAX_PATH], error[1024];
@@ -5884,6 +5922,7 @@ int main(void)
     test_inherited_editor_parent(&f, registry);
     test_inherited_reflected_state(&f, registry);
     test_editor_parent_contracts(&f, registry);
+    test_unchanged_editor_copies(&f, registry);
     test_editor_rebase_scopes(&f, registry);
     test_native_original_gaps(&f, registry);
     test_material_path(&f, registry);

@@ -242,12 +242,14 @@ typedef struct decl_heap {
     size_t count;
     const sh_decl_reference_item *items;
     const size_t *key; /* NULL: the entry is its own item */
+    const unsigned char *parent; /* NULL, or 1 for an item that comes first */
 } decl_heap;
 
 static int decl_heap_less(const decl_heap *heap, size_t left, size_t right)
 {
     size_t a = heap->key ? heap->key[left] : left;
     size_t b = heap->key ? heap->key[right] : right;
+    if (heap->parent && heap->parent[a] != heap->parent[b]) return heap->parent[a] > heap->parent[b];
     return decl_name_compare(heap->items, a, b) < 0;
 }
 
@@ -305,7 +307,7 @@ int sh_decl_text_order_by_references(sh_decl_reference_item *items, size_t count
     size_t *component = NULL, *first = NULL, *member_offsets = NULL, *members = NULL, *cursor = NULL;
     size_t *component_offsets = NULL, *component_targets = NULL, *component_indegree = NULL;
     size_t *member_indegree = NULL, *heap_slots = NULL, *member_slots = NULL;
-    unsigned char *on_stack = NULL;
+    unsigned char *on_stack = NULL, *parents = NULL;
     decl_pair *component_pairs = NULL;
     sh_decl_reference_item *ordered = NULL;
     size_t component_count = 0, cycle_count = 0, ordered_count = 0, next_index = 0;
@@ -401,8 +403,9 @@ int sh_decl_text_order_by_references(sh_decl_reference_item *items, size_t count
     heap_slots = (size_t *)malloc(component_count * sizeof(*heap_slots));
     component_indegree = (size_t *)calloc(component_count, sizeof(*component_indegree));
     component_pairs = (decl_pair *)malloc((w.edge_count ? w.edge_count : 1) * sizeof(*component_pairs));
+    parents = (unsigned char *)calloc(count, 1);
     if (!first || !member_offsets || !members || !cursor || !member_indegree || !member_slots ||
-        !heap_slots || !component_indegree || !component_pairs) goto done;
+        !heap_slots || !component_indegree || !component_pairs || !parents) goto done;
     for (i = 0; i < component_count; i++) first[i] = SIZE_MAX;
     for (i = 0; i < count; i++) {
         size_t c = component[i];
@@ -418,9 +421,16 @@ int sh_decl_text_order_by_references(sh_decl_reference_item *items, size_t count
         size_t member_count = member_offsets[i + 1] - member_offsets[i];
         if (member_count > 1) cycle_count += member_count;
     }
-    /* A self-inherit never reaches indegree zero and refuses below. */
+    /* A self-inherit never reaches indegree zero and refuses below. A member
+     * another member of its component inherits comes before the members that
+     * inherit nothing there: loading one of those can load a child through
+     * another reference (an AI component's groupEntityDefs), and the child's
+     * parent must already exist. */
     for (i = 0; i < w.inherit_count; i++)
-        if (component[w.inherits[i].from] == component[w.inherits[i].to]) member_indegree[w.inherits[i].to]++;
+        if (component[w.inherits[i].from] == component[w.inherits[i].to]) {
+            member_indegree[w.inherits[i].to]++;
+            parents[w.inherits[i].from] = 1;
+        }
 
     /* Condensed edges and their indegrees. */
     for (i = 0; i < w.edge_count; i++) {
@@ -441,7 +451,7 @@ int sh_decl_text_order_by_references(sh_decl_reference_item *items, size_t count
             if (!component_indegree[i]) decl_heap_push(&ready, i);
         while (ready.count) {
             size_t selected = decl_heap_pop(&ready), emitted = 0, k;
-            decl_heap order = {member_slots, 0, items, NULL};
+            decl_heap order = {member_slots, 0, items, NULL, parents};
             for (k = member_offsets[selected]; k < member_offsets[selected + 1]; k++)
                 if (!member_indegree[members[k]]) decl_heap_push(&order, members[k]);
             while (order.count) {
@@ -475,7 +485,7 @@ done:
     free(component); free(first); free(member_offsets); free(members); free(cursor);
     free(component_offsets); free(component_targets); free(component_indegree);
     free(component_pairs); free(member_indegree); free(heap_slots); free(member_slots);
-    free(ordered);
+    free(parents); free(ordered);
     return ok;
 }
 

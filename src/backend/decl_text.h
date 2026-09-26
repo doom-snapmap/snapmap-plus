@@ -62,9 +62,10 @@ int sh_decl_text_collect_entitydef_dependencies(const unsigned char *text,
  * callers provide `type` to enable these typed edges. Comments are ignored;
  * strings retain native literal backslashes. Ambiguous names create no edge. Strongly
  * connected components are condensed and selected by logical-name order, while
- * members of a component are also name-ordered unless explicit inherit edges
- * require a parent-first order. A true explicit-inherit cycle refuses the
- * snapshot (return 0), as does bounded scratch allocation failure. */
+ * members of a component follow explicit inherit edges parent first, members
+ * another member inherits ahead of the rest, then name order. A true
+ * explicit-inherit cycle refuses the snapshot (return 0), as does bounded
+ * scratch allocation failure. */
 int sh_decl_text_order_by_references(sh_decl_reference_item *items, size_t count,
                                      size_t *out_edge_count,
                                      size_t *out_cycle_count);

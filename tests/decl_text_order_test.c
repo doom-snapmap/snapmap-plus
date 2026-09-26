@@ -283,9 +283,17 @@ static int order_component_members(const sh_decl_reference_item *items,
         size_t selected = count;
         size_t dependent;
         for (i = 0; i < count; i++) {
+            int parent_i = 0, parent_s = 0;
             if (component[i] != component_id || member_emitted[i] ||
                 member_indegree[i] != 0) continue;
-            if (selected == count || decl_name_compare(items, i, selected) < 0)
+            /* Members another member of the component inherits come first. */
+            for (dependent = 0; dependent < count; dependent++) {
+                if (component[dependent] != component_id) continue;
+                if (inherit_edges[i * count + dependent]) parent_i = 1;
+                if (selected != count && inherit_edges[selected * count + dependent]) parent_s = 1;
+            }
+            if (selected == count || parent_i > parent_s ||
+                (parent_i == parent_s && decl_name_compare(items, i, selected) < 0))
                 selected = i;
         }
         if (selected == count) {

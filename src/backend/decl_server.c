@@ -1507,6 +1507,48 @@ static int ds_materialize_failure(int index, const char *type,
     return 0;
 }
 
+/* An identity a declaration named before this identity's own dependencies
+ * existed was created on demand and completed with its default (a private
+ * perk inheriting a private perk not yet registered). Materialization reaches
+ * it in the snapshot's dependency order, after those dependencies: rebuild it
+ * in place and parse it from its source, as a runtime refresh rebuilds a
+ * defaulted identity. 1 when nothing faulted (the caller still validates). */
+static int ds_reparse_defaulted(ds_materialize_context *context, void *type_manager,
+                                const ds_candidate *candidate, void **decl)
+{
+    unsigned char *state;
+    __try {
+        state = (unsigned char *)*decl + DS_DECL_STATE_OFFSET;
+        if ((*state & (DS_DECL_IN_PROGRESS | DS_DECL_DEFAULTED)) != DS_DECL_DEFAULTED || !g_reconstruct)
+            return 1;
+        unsigned int *level = (unsigned int *)((unsigned char *)*decl + DS_RES_LEVEL_OFF), kept = *level;
+        /* The native destructor runs with static lifetime released, as in
+         * the runtime reconstruction; the lifetime is restored even on a
+         * throw. */
+        __try {
+            if (*level == 4u) *level = 2u;
+            sh_package_shader_receipt_invalidate((uintptr_t)*decl);
+            g_reconstruct(*decl);
+        } __finally {
+            *level = kept;
+        }
+        state = (unsigned char *)*decl + DS_DECL_STATE_OFFSET;
+        *state = (unsigned char)(*state | DS_DECL_PENDING_LOAD);
+        void *resolved = context->find_decl(type_manager, candidate->name, 0);
+        if (resolved) *decl = resolved;
+        state = (unsigned char *)*decl + DS_DECL_STATE_OFFSET;
+        if ((*state & DS_DECL_PENDING_LOAD) && g_generic_load) {
+            *state = (unsigned char)(*state & ~DS_DECL_PENDING_LOAD);
+            g_generic_load(*decl);
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 0;
+    }
+    ds_log("REPARSED", candidate->source,
+           "an identity named before its dependencies existed had completed with its default; rebuilt and parsed from its source");
+    return 1;
+}
+
 /* Give one registered identity a live object in its own manager. A lookup is
  * tried first because the engine may already have created and loaded the
  * object from the source scan; make-default is used only when no object
@@ -1539,6 +1581,10 @@ static int ds_materialize_identity(ds_materialize_context *context, int index)
         reason = "engine exception during identity materialization";
     }
 
+    if (!fault && !reason && decl && !made_default && !ds_reparse_defaulted(context, type_manager, candidate, &decl)) {
+        fault = 1;
+        reason = "engine exception while re-parsing a defaulted identity";
+    }
     if (!fault && !reason && !ds_candidate_usable(candidate, decl, &reason) && !reason)
         reason = "materialized identity failed native state validation";
     if (fault || reason) {
