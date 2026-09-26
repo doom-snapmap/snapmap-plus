@@ -191,9 +191,10 @@ int sh_package_source_link_bind_keys(sh_package_source_link *source, size_t unit
     const unsigned char *body, size_t length, sh_package_key_site_resolver resolver, void *context,
     unsigned char **output, size_t *output_length, char *error, size_t capacity);
 int sh_package_source_link_key_space(sh_package_source_link *source, struct sh_package_key_space *space);
-/* 1 when an entity's idPlayer::handsAnimWeb names this animation web in any
- * captured graph (including stock roots observed by reverse discovery): the
- * one global web every weapon's subweb is resolved in. */
+/* 1 when the stock player the engine spawns for co-op (the rules entity's
+ * playerSpawnDef, default player/mp) names this animation web in
+ * idPlayer::handsAnimWeb or _D1: the one global web every weapon's subweb is
+ * resolved in. */
 int sh_package_source_link_player_hands(const sh_package_source_link *source, const char *name);
 /* Physical members of multi-file units use their captured role. In particular,
  * shader source, cooked records and stage modules are different formats. */

@@ -122,11 +122,16 @@ static int original(void *context, const char *path, unsigned char **body, size_
     else if (!strcmp(path, "generated/decls/entitydef/props/unrelated.decl")) {
         if (f->absent_target) return 0;
         value = f->reader_gap ? "{ class = \"Entity\"; edit = { image = \"textures/unrelated\"; "
-            "model = \"models/campaign.lwo\"; gui = \"swf/unrelated\"; } }" : f->hands ?
+            "model = \"models/campaign.lwo\"; gui = \"swf/unrelated\"; } }" : f->hands == 2 ?
             "{ class = \"Entity\"; edit = { image = \"textures/unrelated\"; target = \"player-def\"; } }" :
             "{ class = \"Entity\"; edit = { image = \"textures/unrelated\"; } }";
     }
-    else if (f->hands && !strcmp(path, "generated/decls/entitydef/player-def.decl"))
+    /* The co-op rules entity names the spawned player (hands 1 and 2); with
+     * no such rules the engine's default player/mp is used (hands 3). */
+    else if (f->hands && f->hands != 3 && !strcmp(path, "generated/decls/entitydef/mp/modes/coop/game_challenge.decl"))
+        value = "{ class = \"Entity\"; edit = { playerSpawnDef = \"player-def\"; } }";
+    else if (f->hands && !strcmp(path, f->hands == 3 ? "generated/decls/entitydef/player/mp.decl" :
+        "generated/decls/entitydef/player-def.decl"))
         value = "{ class = \"Entity\"; edit = { handsAnimWeb = \"hands\"; } }";
     else if (f->hands && !strcmp(path, "generated/decls/animweb/hands.decl"))
         value = "{ props { } states { } subWebs { subWeb \"pistol\" { } } }";
@@ -515,11 +520,13 @@ static void test_failure_attribution(fixture *f, const sh_package_compile_enviro
     sh_package_library_free(&out); sh_package_sources_free(sources);
 }
 
-/* A stock palette root reaches a player entity, whose handsAnimWeb names the
- * one web the hands animator resolves every weapon's subweb in. A package
- * changing that web (adding its weapon's subweb) changes the global web: it is
- * served under its stock name, and roots reaching it only through the player
- * gain no variant. A second such package composes by native records. */
+/* The player the engine spawns for co-op (the rules entity's playerSpawnDef,
+ * default player/mp) names in handsAnimWeb the one web the hands animator
+ * resolves every weapon's subweb in. A package changing that web (adding its
+ * weapon's subweb) changes the global web: it is served under its stock name
+ * whether or not a placed object reaches the player, and a stock root that
+ * reaches it through the player gains no variant. A second such package
+ * composes by native records. */
 static void test_player_hands(fixture *f, const sh_package_compile_environment *base,
     const sh_resource_catalog *catalog, sh_decl_registry_source registry, const sh_package_library_native *native)
 {
@@ -530,30 +537,34 @@ static void test_player_hands(fixture *f, const sh_package_compile_environment *
      * so only the player reaches the web (observed by reverse discovery). */
     snprintf(home, sizeof(home), "%s\\overrides\\gap", root); snprintf(held, sizeof(held), "%s\\gap-held", root);
     assert(MoveFileA(home, held));
-    f->hands = 1;
     package("weapon", "Weapon", "generated/decls/animweb/hands.decl",
         "{ props { } states { } subWebs { subWeb \"pistol\" { } subWeb \"sp_pistol\" { } } }");
     sh_package_sources *sources = sh_package_sources_scan(root, error, sizeof(error)); assert(sources);
-    int ok = sh_package_library_compile(sources, &env, catalog, original, f, registry,
-        (uintptr_t)f->reflection, native, &library, error, sizeof(error));
-    if (!ok) fprintf(stderr, "player hands: %s\n", error);
-    assert(ok);
-    const sh_compiled_resource *web = resource(&library, "animweb", "hands");
-    if (!web) for (size_t i = 0; i < library.compiled->resource_count; i++)
-        fprintf(stderr, "  %s %s\n", library.compiled->resources[i].engine_path, library.compiled->resources[i].name);
-    assert(web); contains(&library, web, "sp_pistol");
-    assert(!binding(&library, sources, "Weapon", "", "snapeditorentitydef", "unrelated"));
-    assert(!binding(&library, sources, "Weapon", "", "entitydef", "props/unrelated"));
-    sh_package_library_free(&library); sh_package_sources_free(sources);
+    for (int hands = 1; hands <= 3; hands++) {
+        f->hands = hands;
+        int ok = sh_package_library_compile(sources, &env, catalog, original, f, registry,
+            (uintptr_t)f->reflection, native, &library, error, sizeof(error));
+        if (!ok) fprintf(stderr, "player hands %d: %s\n", hands, error);
+        assert(ok);
+        const sh_compiled_resource *web = resource(&library, "animweb", "hands");
+        if (!web) for (size_t i = 0; i < library.compiled->resource_count; i++)
+            fprintf(stderr, "  %s %s\n", library.compiled->resources[i].engine_path, library.compiled->resources[i].name);
+        assert(web); contains(&library, web, "sp_pistol");
+        assert(!binding(&library, sources, "Weapon", "", "snapeditorentitydef", "unrelated"));
+        assert(!binding(&library, sources, "Weapon", "", "entitydef", "props/unrelated"));
+        sh_package_library_free(&library);
+    }
+    sh_package_sources_free(sources);
+    f->hands = 2;
     /* A second weapon package adds its own subweb: both join the stock web. */
     package("weapon2", "Weapon Two", "generated/decls/animweb/hands.decl",
         "{ props { } states { } subWebs { subWeb \"pistol\" { } subWeb \"plasma\" { } } }");
     sources = sh_package_sources_scan(root, error, sizeof(error)); assert(sources);
-    ok = sh_package_library_compile(sources, &env, catalog, original, f, registry,
+    int ok = sh_package_library_compile(sources, &env, catalog, original, f, registry,
         (uintptr_t)f->reflection, native, &library, error, sizeof(error));
     if (!ok) fprintf(stderr, "player hands composed: %s\n", error);
     assert(ok);
-    web = resource(&library, "animweb", "hands");
+    const sh_compiled_resource *web = resource(&library, "animweb", "hands");
     assert(web); contains(&library, web, "sp_pistol"); contains(&library, web, "plasma");
     sh_package_library_free(&library); sh_package_sources_free(sources);
     f->hands = 0;

@@ -1,5 +1,6 @@
 #include "package_source_link.h"
 #include "package_keys.h"
+#include "decl_entity_class.h"
 #include "package_virtual_material.h"
 #include "package_font.h"
 #include "package_movie.h"
@@ -37,7 +38,6 @@ typedef struct sl_unit {
     struct sl_unit *parent; /* Unit whose discovery first requested it; NULL for seeds. */
     char *seed; /* Why a unit without a same-scope parent entered the capture. */
     int nominated; /* Seeded as a stock root affected by its scope's changes. */
-    int player_hands; /* Named by an entity's idPlayer::handsAnimWeb (see sl_reference). */
     int movie_captured; /* Constructor requests of a cooked movie were enumerated. */
     sh_package_link_file_identity *identities; /* Owned per-file identities (movie pairs). */
 } sl_unit;
@@ -702,19 +702,6 @@ static int sl_shader_accounted(sh_package_source_link *s)
     return 1;
 }
 typedef struct sl_discover { sh_package_source_link *source; sl_unit *unit; } sl_discover;
-/* idPlayer::handsAnimWeb (and its _D1 alternate) names the one animation web
- * the hands animator resolves every weapon's subweb in by name (Vulkan
- * FUN_1403c0e30 / FUN_1403c16f0 look subwebs up in the animator's single web).
- * Only idPlayer reflects these fields. The game spawns the player from the
- * game rules' playerSpawnDef, so that web is one global registry of weapon
- * subwebs, not an asset a placed object selects. */
-static int sl_player_hands_slot(const char *slot)
-{
-    const char *last = slot, *at;
-    if (!slot) return 0;
-    for (at = slot; *at; at++) if (*at == '.' || *at == '/') last = at + 1;
-    return !strcmp(last, "handsAnimWeb") || !strcmp(last, "handsAnimWeb_D1");
-}
 static int sl_player_hands_add(sh_package_source_link *s, const char *name)
 {
     for (size_t i = 0; i < s->player_hand_count; i++) if (!strcmp(s->player_hands[i], name)) return 1;
@@ -729,15 +716,8 @@ static int sl_reference(void *context, const char *slot, const char *family, con
     sl_discover *walk = context;
     sl_unit *unit = walk->unit;
     sl_unit *target = sl_find(walk->source, unit->scope, family, name, 1);
-    *replacement = NULL;
+    (void)slot; *replacement = NULL;
     if (!target) return -1;
-    if (!strcmp(target->unit.family, "animweb") && !strcmp(unit->unit.family, "entitydef") &&
-        sl_player_hands_slot(slot)) {
-        target->player_hands = 1;
-        if (!sl_player_hands_add(walk->source, target->unit.name)) {
-            sl_env_fail(walk->source, "cannot retain the player hands web", name); return -1;
-        }
-    }
     if (!sl_grow((void ***)&unit->dependencies, &unit->dependency_capacity, unit->dependency_count)) {
         sl_env_fail(walk->source, "cannot retain scoped dependency", name); return -1;
     }
@@ -1047,6 +1027,66 @@ static int sl_reverse_changed(sh_package_source_link *s, size_t scope, const sl_
     char *path = sh_package_cooked_path(unit->unit.family, unit->unit.name);
     int changed = sl_reverse_file_changed(s, scope, path); free(path); return changed;
 }
+/* ---- The player hands web --------------------------------------------------
+ * idPlayer::handsAnimWeb (and its _D1 alternate) names the one animation web
+ * the hands animator resolves every weapon's subweb in by name (Vulkan
+ * FUN_1403c0e30 / FUN_1403c16f0: subweb lookup in the animator's single web).
+ * The engine spawns the co-op rules entity mp/modes/coop/game_challenge and
+ * the player from its playerSpawnDef, defaulting to player/mp
+ * (CreateDefaultChallengeEntityFromSession, Vulkan FUN_14030cb20; the same
+ * constant is at OpenGL 0x142017bc0); SnapMap plays the co-op mode. So that
+ * web is one global registry of weapon subwebs, whether or not any placed
+ * object reaches the player. The stock rules and player decide it. */
+static int sl_stock_parent(void *context, const char *name, sh_decl_source *source)
+{
+    sh_package_source_link *s = context;
+    unsigned char *body = NULL; size_t length = 0;
+    char *path = sl_decl_path("entitydef", name);
+    int status = path ? sl_read_original(s, path, &body, &length) : -1;
+    free(path);
+    if (status <= 0) { free(body); return status; }
+    source->text = (const char *)body; source->length = length; return 1;
+}
+/* One field of a stock entity's expanded edit state; NULL when absent. */
+static char *sl_stock_field(sh_package_source_link *s, const char *entity, const char *field, int *failed)
+{
+    sh_decl_source source = {0};
+    sh_decl_entity_class_source parents = {s, sl_stock_parent, NULL};
+    const char *value = NULL; size_t length = 0;
+    char *out = NULL;
+    int status = sl_stock_parent(s, entity, &source);
+    if (status < 0) *failed = 1;
+    if (status <= 0) return NULL;
+    sh_decl_node *tree = sh_decl_tree_parse(source, NULL, 0);
+    free((char *)source.text);
+    sh_decl_node *state = tree ? sh_decl_entity_expanded_state(tree, &parents, NULL, 0) : NULL;
+    const sh_decl_node *edit = state ? sh_decl_tree_member(state, "edit") : NULL;
+    if (edit && sh_decl_tree_literal(sh_decl_tree_member(edit, field), &value, &length) && length) {
+        if ((out = malloc(length + 1))) { memcpy(out, value, length); out[length] = 0; }
+        else *failed = 1;
+    }
+    sh_decl_tree_free(state); sh_decl_tree_free(tree); return out;
+}
+static int sl_player_contract(sh_package_source_link *s)
+{
+    static const char *const fields[] = {"handsAnimWeb", "handsAnimWeb_D1"};
+    int failed = 0, supplied = 0;
+    /* Only a supplied animation web can change the hands web. */
+    for (size_t scope = 0; scope < s->scope_count && !supplied; scope++)
+        for (size_t i = 0; i < s->scopes[scope]->resource_count && !supplied; i++) {
+            const sh_compiled_resource *file = s->scopes[scope]->resources + i;
+            supplied = file->type && !strcmp(file->type, "animweb") && file->source_count;
+        }
+    if (!s->original || !supplied) return 1;
+    char *player = sl_stock_field(s, "mp/modes/coop/game_challenge", "playerSpawnDef", &failed);
+    for (size_t i = 0; !failed && i < sizeof(fields) / sizeof(fields[0]); i++) {
+        char *web = sl_stock_field(s, player ? player : "player/mp", fields[i], &failed);
+        if (web && !sl_player_hands_add(s, web)) failed = 1;
+        free(web);
+    }
+    free(player);
+    return failed ? sl_env_fail(s, "cannot read the stock player hands web", "mp/modes/coop/game_challenge") : 1;
+}
 static int sl_reverse_roots(sh_package_source_link *s, const sh_package_source_root_plan *plan,
     sh_decl_registry_source registry, uintptr_t reflection)
 {
@@ -1135,18 +1175,17 @@ static int sl_reverse_roots(sh_package_source_link *s, const sh_package_source_r
         for (size_t j = 0; j < unit->dependency_count; j++) edges[at++].target = unit->dependencies[j]->index;
         local[i] = !unit->reverse_gap;
     }
-    for (size_t i = 0; i < base->player_hand_count; i++)
-        if (!sl_player_hands_add(s, base->player_hands[i])) {
-            sl_env_fail(s, "cannot retain the player hands web", base->player_hands[i]); goto done;
-        }
     /* A root is completely observed only when no reachable unit stopped early. */
     if (!sh_package_link_originals(nodes, base->count, local, complete, s->error, s->error_capacity)) goto done;
     for (size_t scope = 0; scope < s->scope_count; scope++) if (plan->discover[scope]) {
         memset(local, 1, base->count);
         /* A player hands web changes globally (the library composes it under
          * its stock name), so reaching it gives a stock root no variant. */
-        for (size_t i = 0; i < base->count; i++)
-            if (!base->units[i]->player_hands && sl_reverse_changed(s, scope, base->units[i])) local[i] = 0;
+        for (size_t i = 0; i < base->count; i++) {
+            const sl_unit *unit = base->units[i];
+            if (!strcmp(unit->unit.family, "animweb") && sh_package_source_link_player_hands(s, unit->unit.name)) continue;
+            if (sl_reverse_changed(s, scope, unit)) local[i] = 0;
+        }
         /* Reverse propagation is candidate discovery only. Final scoped graph
          * equality/certification still decides whether a private root exists. */
         if (!sh_package_link_originals(nodes, base->count, local, unchanged, s->error, s->error_capacity)) goto done;
@@ -1378,6 +1417,7 @@ sh_package_source_link *sh_package_source_link_open_attributed(const sh_package_
     sl_phase(s, 0, &mark);
     if (!sl_seed_inputs(s)) goto failed;
     sl_phase(s, 1, &mark);
+    if (!sl_player_contract(s)) { s->environment = 1; goto failed; }
     /* Stock reverse discovery refuses only for I/O, allocation or setup. */
     if (!sl_reverse_roots(s, root_plan, registry, reflection)) { s->environment = 1; goto failed; }
     sl_phase(s, 2, &mark);
