@@ -385,6 +385,22 @@ static int pl_shared_sources(pl_build *b, const sh_package_sources *sources,
     return 1;
 }
 
+/* 1 when an authored entity declaration states registration lists (a
+ * conductor's aiTypeList or globalAIMods), 0 when not, -1 when unreadable. A
+ * cheap byte check precedes parsing: few declarations register AI. */
+static int pl_registration_file(const sh_package_compilation *compiled, const sh_compiled_resource *file,
+    char *error, size_t capacity)
+{
+    size_t length = 0;
+    int stated = 0;
+    if (!file->type || strcmp(file->type, "entitydef") || !file->source_count) return 0;
+    unsigned char *body = sh_package_compilation_read(compiled, file, SIZE_MAX, &length, error, capacity);
+    if (!body) return -1;
+    for (size_t at = 0; !stated && at + 10 <= length; at++)
+        stated = !memcmp(body + at, "aiTypeList", 10) || (at + 12 <= length && !memcmp(body + at, "globalAIMods", 12));
+    free(body); return stated;
+}
+
 static int pl_builtin_has_authored_editor(const sh_package_sources *scope, const char *path)
 {
     char family[256];
@@ -453,13 +469,19 @@ static int pl_baseline_scope(pl_build *b, const sh_package_sources *sources,
             break;
         }
     for (size_t scope = 0; scope < b->count; scope++) {
-        if (b->contexts && scope < b->authored_count &&
-            b->contexts->contexts[scope].mode == SH_PACKAGE_CONTEXT_COMPOSED) continue;
+        int legacy = b->contexts && scope < b->authored_count &&
+            b->contexts->contexts[scope].mode == SH_PACKAGE_CONTEXT_COMPOSED;
         const sh_package_compilation *compiled = b->scopes[scope];
         for (size_t i = 0; i < compiled->resource_count; i++) {
             const sh_compiled_resource *file = compiled->resources + i;
             size_t prior;
             int several = 0;
+            /* A frozen legacy context composes only its AI registrations. */
+            if (legacy) {
+                int stated = pl_registration_file(compiled, file, error, capacity);
+                if (stated < 0) goto done;
+                if (!stated) continue;
+            }
             if (file->type && !strcmp(file->type, "animweb")) {
                 for (size_t other = 0; other < b->count && !several; other++)
                     several = other != scope && sh_package_compilation_find(b->scopes[other], file->engine_path) != NULL;
@@ -2488,7 +2510,10 @@ done:
  * (the spawn manager picks among several rows of one type). The stock-named
  * declaration therefore registers each package's AI variants for spawning;
  * colliding package keys were relocated first (pl_key_phase), and modifier
- * rows sharing one mask keep the first in stable source order. */
+ * rows sharing one mask keep the first in stable source order. A frozen legacy
+ * context's copy joins with its authored keys and without restored stock rows
+ * (they stay removed, as in its whole-file conductor); the result keeps the
+ * stock name in a map document too, where the engine still finds it by name. */
 static int pl_registration_group(pl_build *b, const sh_package_sources *sources,
     const size_t *members, size_t count, char *error, size_t capacity)
 {
@@ -2500,10 +2525,12 @@ static int pl_registration_group(pl_build *b, const sh_package_sources *sources,
     size_t *part_member = calloc(count + 1, sizeof(*part_member));
     sh_decl_source base = {"{}", 2};
     size_t source_count = 0, culprit = SIZE_MAX;
-    int ok = 0, kind = SH_PACKAGE_EDITOR_FAILURE_ENVIRONMENT, stated = 0;
+    int ok = 0, kind = SH_PACKAGE_EDITOR_FAILURE_ENVIRONMENT, stated = 0, historical = 0;
     if (!texts || !parts || !peers || !pending || !part_member) {
         snprintf(error, capacity, "registration contribution allocation failed"); goto failed;
     }
+    for (size_t i = 0; i < count; i++)
+        if (c->inputs.scopes[members[i]] < b->authored_count && !pl_modern(b, c->inputs.scopes[members[i]])) historical = 1;
     for (size_t i = 0; i < count; i++) {
         if (!(texts[i].text = pl_token_text(c, members[i], &texts[i].length, error, capacity))) goto failed;
         if (sh_package_registration_lists(texts[i])) stated = 1;
@@ -2537,6 +2564,7 @@ static int pl_registration_group(pl_build *b, const sh_package_sources *sources,
     }
     for (size_t i = 0; i < count; i++) {
         size_t unit = members[i];
+        if (historical) c->global[unit] = 1;
         if (!pending[i].owned) continue;
         c->dirty = 1;
         pl_contribution_unit_free(c->units + unit); c->units[unit] = pending[i]; memset(pending + i, 0, sizeof(*pending));
@@ -2838,7 +2866,7 @@ static int pl_contributions_open(pl_build *b, const sh_package_sources *sources,
 {
     pl_contributions *c = calloc(1, sizeof(*c));
     const sh_package_link_inputs *original = sh_package_source_link_inputs(b->reader);
-    size_t *members = NULL, eligible = 0;
+    size_t *members = NULL, *registrations = NULL, eligible = 0, registration_count;
     unsigned char *done = NULL;
     if (!c) return 0;
     b->contributions = c; c->source = b->reader; c->inputs.count = original->count; c->inputs.scopes = original->scopes;
@@ -2850,8 +2878,10 @@ static int pl_contributions_open(pl_build *b, const sh_package_sources *sources,
     c->shared = calloc(original->count ? original->count : 1, 1);
     c->global = calloc(original->count ? original->count : 1, 1);
     members = calloc(original->count ? original->count : 1, sizeof(*members));
+    registrations = calloc(original->count ? original->count : 1, sizeof(*registrations));
     done = calloc(original->count ? original->count : 1, 1);
-    if (!c->reuse || !c->inputs.units || !c->units || !c->shared || !c->global || !members || !done) goto bad;
+    if (!c->reuse || !c->inputs.units || !c->units || !c->shared || !c->global || !members || !registrations ||
+        !done) goto bad;
     memcpy(c->inputs.units, original->units, original->count * sizeof(*c->inputs.units));
     if (!pl_localize(b, sources, error, capacity)) goto bad;
     /* Group members once: eligible units sorted by family and name. */
@@ -2861,6 +2891,18 @@ static int pl_contributions_open(pl_build *b, const sh_package_sources *sources,
             members[eligible++] = i;
     }
     qsort_s(members, eligible, sizeof(*members), pl_unit_name_order, c->inputs.units);
+    /* A legacy context's conductor copy registers AI too: the engine finds the
+     * conductor by its stock name, so it composes like a package copy. */
+    memcpy(registrations, members, eligible * sizeof(*members));
+    registration_count = eligible;
+    for (size_t i = 0; i < original->count; i++) {
+        const sh_package_link_unit *unit = c->inputs.units + i;
+        if (unit->file_count != 1 || pl_modern(b, original->scopes[i])) continue;
+        int stated = pl_registration_file(unit->compilation, unit->files[0], error, capacity);
+        if (stated < 0) goto bad;
+        if (stated) registrations[registration_count++] = i;
+    }
+    qsort_s(registrations, registration_count, sizeof(*registrations), pl_unit_name_order, c->inputs.units);
     (void)done;
     /* Package keys move before any shared collection composes, so inspector
      * choices and registration rows already carry each package's final key. */
@@ -2870,7 +2912,7 @@ static int pl_contributions_open(pl_build *b, const sh_package_sources *sources,
         if (!pl_contribution_phase(b, sources, members, eligible, phase, error, capacity)) goto bad;
     }
     if (!pl_tokens(c, error, capacity) ||
-        !pl_registration_phase(b, sources, members, eligible, error, capacity)) goto bad;
+        !pl_registration_phase(b, sources, registrations, registration_count, error, capacity)) goto bad;
     if (!pl_tokens(c, error, capacity) || !pl_hands_phase(b, sources, error, capacity)) goto bad;
     if (!pl_tokens(c, error, capacity)) goto bad;
     /* Keep a verified baseline selector/bank slot. Other bound variants get
@@ -2892,9 +2934,9 @@ static int pl_contributions_open(pl_build *b, const sh_package_sources *sources,
         if (selected == SIZE_MAX && equal && eligible) selected = first;
         c->shared[i] = c->classes.nodes[i] == selected;
     }
-    pl_tokens_free(c); free(members); free(done); return 1;
+    pl_tokens_free(c); free(members); free(registrations); free(done); return 1;
 bad:
-    free(members); free(done); return 0;
+    free(members); free(registrations); free(done); return 0;
 }
 
 /* Registration keys are bound like typed identities: the bit a package

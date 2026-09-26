@@ -1035,7 +1035,12 @@ first-match and keep their order. Stock rows a copy omits are restored in
 stock order ahead of its own rows. When valid contributions cannot compose
 together, they are composed one at a time in stable source order and only the
 first that cannot join those before it is left unserved; owners outside the
-conflict stay served.
+conflict stay served. A frozen legacy context's conductor copy composes into
+the stock-named conductor with its authored keys, and the stock rows it
+removed stay removed, so its requests keep their historical members. The
+engine resolves the conductor by name, so in a map document that composition
+keeps the stock name; a modern map's copy stays private and the installed
+library's conductor serves its rows.
 For shared editor presentation, opposing valid cosmetic preferences resolve in
 a stable order. A private gameplay binding keeps its own edited presentation
 while accepting compatible collection contributions. Gameplay fields never use

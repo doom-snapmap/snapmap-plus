@@ -4893,6 +4893,71 @@ static void test_registration_historical_keys(void)
     assert(!failures);
     while (f->count) free(f->regions[--f->count].address);
 }
+/* A frozen legacy context's AI registrations reach the engine as its
+ * whole-file conductor did: the engine finds the conductor by its stock name,
+ * so the legacy copy composes against the stock one under that name, keeping
+ * its authored keys, and the stock rows it removed stay removed (its requests
+ * keep their historical members). A modern context beside it adds its rows
+ * under a key clear of the historical bits. */
+static void test_registration_historical_conductor(void)
+{
+    static const char *historical_stock = "{ class = \"Entity\"; edit = { aiTypeList = { num = 2; "
+        "item[0] = { aiType = \"IMP\"; entityDef = \"imp\"; } item[1] = { aiType = \"T3\"; entityDef = \"t3\"; } } "
+        "globalAIMods = { num = 1; item[0] = { aiType = \"IMP\"; healthMod = \"stock\"; } } } }";
+    fixture storage; fixture *f = &storage; setup(f); conductor_reflection(f);
+    sh_package_library legacy = {0}, mixed = {0};
+    sh_package_sources *sources = NULL, *more = NULL;
+    char rows[16][96], mods[16][96], row[160];
+    registration_root("registration-historical-conductor");
+    registration_conductor = historical_stock;
+    registration_package("zlegacy", "524288"); registration_package("amodern", "524288");
+    historical_compile(f, NULL, "zlegacy", NULL, 0, &sources, &legacy);
+    const sh_compiled_resource *conductor = named_resource(legacy.compiled, "entitydef", "conductor");
+    assert(conductor && !strcmp(conductor->engine_path, "generated/decls/entitydef/conductor.decl"));
+    size_t count = conductor_rows(conductor, "aiTypeList", "entityDef", rows, 16);
+    size_t mod_count = conductor_rows(conductor, "globalAIMods", "healthMod", mods, 16);
+    snprintf(row, sizeof(row), "524288=%s", authored_name(legacy.compiled, "zlegacy_boss"));
+    assert(count == 2 && row_index(rows, count, "IMP=imp") != SIZE_MAX && row_index(rows, count, row) != SIZE_MAX);
+    assert(mod_count == 1 && row_index(mods, mod_count, "524288=zlegacy") != SIZE_MAX);
+    const char *const modern[] = {"amodern"};
+    historical_compile(f, NULL, "zlegacy", modern, 1, &more, &mixed);
+    conductor = named_resource(mixed.compiled, "entitydef", "conductor");
+    assert(conductor);
+    count = conductor_rows(conductor, "aiTypeList", "entityDef", rows, 16);
+    uint32_t moved = (uint32_t)strtoul(spawner_key(mixed.compiled, "amodern"), NULL, 10);
+    assert(moved != 524288u && !(moved & 524288u));
+    snprintf(row, sizeof(row), "524288=%s", authored_name(mixed.compiled, "zlegacy_boss"));
+    assert(row_index(rows, count, "IMP=imp") != SIZE_MAX && row_index(rows, count, row) != SIZE_MAX);
+    snprintf(row, sizeof(row), "%u=%s", moved, authored_name(mixed.compiled, "amodern_boss"));
+    assert(row_index(rows, count, row) != SIZE_MAX && count == 3);
+    /* A modern map's copy alone stays private: the installed library's
+     * conductor serves its rows under the keys the library gave them. */
+    {
+        sh_decl_registry_source registry = {f, read_memory, (uintptr_t)f->registry, NULL};
+        source_link_fixture originals = {f};
+        sh_package_compile_environment env = {0};
+        sh_package_library_native native = {0};
+        sh_package_provenance contexts = {0};
+        sh_package_library modern_only = {0};
+        char error[1024];
+        size_t modern_index = SIZE_MAX;
+        native.private_keys = 1;
+        env.baseline = registration_original; env.baseline_context = &originals;
+        for (size_t i = 0; i < more->package_count; i++) if (!strcmp(more->packages[i].name, "amodern")) modern_index = i;
+        assert(modern_index != SIZE_MAX && sh_package_provenance_context_add(&contexts, SH_PACKAGE_CONTEXT_ISOLATED,
+            (const unsigned char (*)[32])sh_package_source_tree(more, modern_index), 1, "") != SIZE_MAX);
+        int ok = sh_package_library_compile_contexts(more, &contexts, &env, NULL, registration_original, &originals,
+            registry, (uintptr_t)f->reflection, &native, &modern_only, error, sizeof(error));
+        if (!ok) fprintf(stderr, "modern map conductor: %s\n", error);
+        assert(ok && !named_resource(modern_only.compiled, "entitydef", "conductor"));
+        sh_package_library_free(&modern_only); sh_package_provenance_free(&contexts);
+    }
+    sh_package_library_free(&mixed); sh_package_sources_free(more);
+    sh_package_library_free(&legacy); sh_package_sources_free(sources);
+    registration_conductor = NULL;
+    cleanup(); assert(!failures);
+    while (f->count) free(f->regions[--f->count].address);
+}
 static void test_registration_pinned_keys(void)
 {
     fixture storage; fixture *f = &storage; setup(f); conductor_reflection(f);
@@ -6532,6 +6597,7 @@ int main(void)
     test_registration_group_capacity();
     test_registration_pinned_keys();
     test_registration_historical_keys();
+    test_registration_historical_conductor();
     test_registration_context_names();
     test_registration_keys();
     test_contribution_movie_token();
