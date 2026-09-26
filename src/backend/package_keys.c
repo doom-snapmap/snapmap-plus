@@ -349,9 +349,17 @@ static int pk_meets(const sh_package_key_groups *groups, uint32_t left, uint32_t
     return sh_package_key_set_meets(&a, &b);
 }
 
+/* A frozen legacy registration or row: every private bit is historical. No
+ * key of the generation shares those bits, so native matching is its own. */
+static int pk_historical(const sh_package_key_groups *groups, uint32_t value)
+{
+    uint32_t keys = value & SH_PACKAGE_KEY_PRIVATE;
+    return groups && keys && !(keys & ~groups->historical);
+}
+
 int sh_package_key_request_matches(const sh_package_key_groups *groups, uint32_t request, uint32_t entry)
 {
-    if (!(entry & SH_PACKAGE_KEY_PRIVATE)) return (entry & request) != 0;
+    if (!(entry & SH_PACKAGE_KEY_PRIVATE) || pk_historical(groups, entry)) return (entry & request) != 0;
     if ((request & SH_PACKAGE_KEY_COMPOSITE) || !(request & SH_PACKAGE_KEY_PRIVATE)) return 0;
     return pk_meets(groups, request, entry);
 }
@@ -359,7 +367,7 @@ int sh_package_key_request_matches(const sh_package_key_groups *groups, uint32_t
 int sh_package_key_modifier_matches(const sh_package_key_groups *groups, uint32_t type, uint32_t row)
 {
     uint32_t own = type & SH_PACKAGE_KEY_PRIVATE, key = row & SH_PACKAGE_KEY_PRIVATE;
-    if (row & SH_PACKAGE_KEY_COMPOSITE) return (row & type) != 0;
+    if ((row & SH_PACKAGE_KEY_COMPOSITE) || pk_historical(groups, row)) return (row & type) != 0;
     if (!own) return !key && (row & type) != 0;
     if (key) return pk_meets(groups, row, type);
     return (row & type & ~SH_PACKAGE_KEY_PRIVATE) != 0;
@@ -368,7 +376,7 @@ int sh_package_key_modifier_matches(const sh_package_key_groups *groups, uint32_
 int sh_package_key_filter_matches(const sh_package_key_groups *groups, uint32_t filter, uint32_t type)
 {
     uint32_t own = type & SH_PACKAGE_KEY_PRIVATE, key = filter & SH_PACKAGE_KEY_PRIVATE;
-    if (filter & SH_PACKAGE_KEY_COMPOSITE) return (filter & type) != 0;
+    if ((filter & SH_PACKAGE_KEY_COMPOSITE) || pk_historical(groups, filter)) return (filter & type) != 0;
     if (filter & type & ~SH_PACKAGE_KEY_PRIVATE) return 1;
     return own && key && pk_meets(groups, filter, type);
 }

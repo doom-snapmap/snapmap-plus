@@ -151,6 +151,34 @@ static void test_filter(void)
  * never the row holding their OR; a group modifier row reaches its members;
  * a group filter classifies them. Two tables disagreeing on one code are not
  * published, and later publications replace earlier ones. */
+/* A map generation publishing historical bits: its frozen legacy row keeps
+ * native matching (the stock composites select it) while a private row does
+ * not; publishing without them restores the private contract. */
+static void test_historical(void)
+{
+    sh_package_key_groups map;
+    uint8_t *manager = calloc(1, 0x5920), *entries = calloc(3, 0x30);
+    const uint32_t types[3] = {IMP, K19, K20};
+    memset(&map, 0, sizeof(map));
+    map.historical = K19;
+    assert(manager && entries);
+    for (int i = 0; i < 3; i++) memcpy(entries + i * 0x30, types + i, 4);
+    memcpy(manager + 0x5908, &entries, sizeof(entries));
+    *(int *)(manager + 0x5910) = 3;
+    assert(sh_spawn_keys_publish_groups(NULL, &map));
+    for (uint32_t state = 1; state < 40; state++) {
+        *seed() = state;
+        uint64_t chosen = sh_spawn_keys_test_select(manager, 0xffffffffu);
+        assert(chosen == (uint64_t)(uintptr_t)(entries + (native_pick(state, 2) ? 1 : 0) * 0x30));
+    }
+    *seed() = 3u;
+    assert(sh_spawn_keys_test_select(manager, K19 | K20) != (uint64_t)(uintptr_t)entries);
+    assert(sh_spawn_keys_publish_groups(NULL, NULL));
+    *seed() = 3u;
+    assert(sh_spawn_keys_test_select(manager, 0xffffffffu) == (uint64_t)(uintptr_t)entries);
+    free(entries); free(manager);
+}
+
 static void test_groups(void)
 {
     const uint32_t a = 270008320u, b = 271056896u, c = 272105472u, g = SH_PACKAGE_KEY_MARKER | (1u << 22);
@@ -309,6 +337,7 @@ int main(void)
     test_modifier();
     test_filter();
     test_groups();
+    test_historical();
     test_publication();
     free(g_game_state);
     assert(!sh_spawn_keys_active());

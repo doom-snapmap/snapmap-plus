@@ -4271,6 +4271,115 @@ static void pinned_compile(fixture *f, const sh_package_provenance *keys, sh_pac
 }
 static uint32_t variant_key(const sh_package_compilation *compiled, const char *package)
 { return (uint32_t)(strtoul(spawner_value(compiled, package), NULL, 10) & ~(8ul | 131072ul)); }
+/* A frozen legacy (composed) context keeps the authored bits of its AI
+ * registrations and publishes them as historical: they keep native matching
+ * there (stock composites and legacy group masks select them, as they did
+ * natively), a modern scope authoring or holding the same bit in the same
+ * compile takes another key, and no key or group code of the compile touches a
+ * historical bit. Native-only generations have none. */
+static void historical_compile(fixture *f, const sh_package_provenance *keys, const char *legacy_name,
+    const char *const *modern_names, size_t modern_count, sh_package_sources **sources, sh_package_library *out)
+{
+    sh_decl_registry_source registry = {f, read_memory, (uintptr_t)f->registry, NULL};
+    source_link_fixture originals = {f};
+    sh_package_compile_environment env = {0};
+    sh_package_library_native native = {0};
+    sh_package_provenance contexts = {0};
+    size_t legacy = SIZE_MAX, added = 0;
+    char error[1024];
+    native.private_keys = 1; native.keys = keys;
+    env.baseline = registration_original; env.baseline_context = &originals;
+    *sources = sh_package_sources_scan(root, error, sizeof(error)); assert(*sources);
+    for (size_t i = 0; i < (*sources)->package_count; i++) {
+        if (!strcmp((*sources)->packages[i].name, legacy_name)) legacy = i;
+        for (size_t m = 0; m < modern_count; m++) if (!strcmp((*sources)->packages[i].name, modern_names[m])) {
+            assert(sh_package_provenance_context_add(&contexts, SH_PACKAGE_CONTEXT_ISOLATED,
+                (const unsigned char (*)[32])sh_package_source_tree(*sources, i), 1, "") != SIZE_MAX);
+            added++;
+        }
+    }
+    assert(legacy != SIZE_MAX && added == modern_count);
+    assert(sh_package_provenance_context_add(&contexts, SH_PACKAGE_CONTEXT_COMPOSED,
+        (const unsigned char (*)[32])sh_package_source_tree(*sources, legacy), 1, NULL) != SIZE_MAX);
+    int ok = sh_package_library_compile_contexts(*sources, &contexts, &env, NULL, registration_original, &originals,
+        registry, (uintptr_t)f->reflection, &native, out, error, sizeof(error));
+    if (!ok) fprintf(stderr, "historical keys: %s\n", error);
+    assert(ok);
+    sh_package_provenance_free(&contexts);
+}
+static void test_registration_historical_keys(void)
+{
+    fixture storage; fixture *f = &storage; setup(f); conductor_reflection(f);
+    const uint32_t imp = 4u, all = 0xffffffffu, k19 = 524288u, k20 = 1048576u, m19 = SH_PACKAGE_KEY_MARKER | k19;
+    sh_package_key_groups history = {0};
+    history.historical = k19 | k20;
+    assert(sh_package_key_request_matches(&history, all, k19) && sh_package_key_request_matches(&history, 0xbffdffffu, imp | k19));
+    assert(sh_package_key_request_matches(&history, imp, imp | k19) && sh_package_key_request_matches(&history, k19 | k20, k20));
+    assert(!sh_package_key_request_matches(&history, all, 1u << 21) && !sh_package_key_request_matches(&history, all, m19));
+    assert(!sh_package_key_request_matches(NULL, all, k19) && !sh_package_key_request_matches(NULL, imp, imp | k19));
+    assert(sh_package_key_modifier_matches(&history, imp | k19, imp | k20) && !sh_package_key_modifier_matches(NULL, imp | k19, imp | k20));
+    assert(sh_package_key_filter_matches(&history, k19 | k20, imp | k19) && !sh_package_key_filter_matches(&history, 1u << 21, imp | k19));
+    /* A legacy registration may use bit 28: natively it is a plain bit, not a
+     * marked code, for requests and filters alike. */
+    sh_package_key_groups marked = {0};
+    marked.historical = SH_PACKAGE_KEY_MARKER | k20;
+    assert(sh_package_key_request_matches(&marked, SH_PACKAGE_KEY_MARKER, SH_PACKAGE_KEY_MARKER | k20) &&
+        !sh_package_key_request_matches(NULL, SH_PACKAGE_KEY_MARKER, SH_PACKAGE_KEY_MARKER | k20));
+    assert(sh_package_key_filter_matches(&marked, SH_PACKAGE_KEY_MARKER, SH_PACKAGE_KEY_MARKER | k20) &&
+        !sh_package_key_filter_matches(NULL, SH_PACKAGE_KEY_MARKER, SH_PACKAGE_KEY_MARKER | k20));
+    /* A mixed context: the legacy package keeps its authored key while the
+     * modern one moves off every historical bit. */
+    sh_package_library first = {0}, library = {0}, second = {0};
+    sh_package_sources *sources = NULL, *more = NULL, *installed = NULL;
+    registration_root("registration-historical");
+    registration_package("zlegacy", "524288"); registration_package("amodern", "524288");
+    const char *const modern[] = {"amodern"};
+    historical_compile(f, NULL, "zlegacy", modern, 1, &sources, &first);
+    uint32_t kept = (uint32_t)strtoul(spawner_key(first.compiled, "zlegacy"), NULL, 10);
+    uint32_t moved = (uint32_t)strtoul(spawner_key(first.compiled, "amodern"), NULL, 10);
+    assert(kept == k19 && moved != k19 && sh_package_key_private_valid(moved) && !(moved & k19));
+    assert(first.key_groups && first.key_groups->historical == k19);
+    /* The installed library, compiled natively, may give the bit to the modern
+     * package: a map context holding it historically moves that pin. */
+    pinned_compile(f, NULL, &installed, &library);
+    assert(strtoul(spawner_key(library.compiled, "amodern"), NULL, 10) == k19);
+    assert(!library.key_groups || !library.key_groups->historical);
+    historical_compile(f, &library.bindings, "zlegacy", modern, 1, &more, &second);
+    kept = (uint32_t)strtoul(spawner_key(second.compiled, "zlegacy"), NULL, 10);
+    moved = (uint32_t)strtoul(spawner_key(second.compiled, "amodern"), NULL, 10);
+    assert(kept == k19 && moved != k19 && !(moved & k19) && second.key_groups && second.key_groups->historical == k19);
+    sh_package_library_free(&second); sh_package_sources_free(more);
+    sh_package_library_free(&library); sh_package_sources_free(installed);
+    sh_package_library_free(&first); sh_package_sources_free(sources);
+    cleanup();
+    /* Ten modern packages beside the legacy one holding another bit: one
+     * keeps its authored bit, seven take the other free single keys, two take
+     * marked keys, and none carries the historical bit. */
+    {
+        char names[10][8]; const char *list[10];
+        sh_package_library many = {0};
+        sh_package_key_set seen = {{0}};
+        registration_root("registration-historical-many");
+        registration_package("zlegacy", "1048576");
+        for (int i = 0; i < 10; i++) {
+            snprintf(names[i], sizeof(names[i]), "m%02d", i); list[i] = names[i]; registration_package(names[i], "524288");
+        }
+        historical_compile(f, NULL, "zlegacy", list, 10, &sources, &many);
+        assert((uint32_t)strtoul(spawner_key(many.compiled, "zlegacy"), NULL, 10) == k20);
+        int marks = 0;
+        for (int i = 0; i < 10; i++) {
+            uint32_t key = (uint32_t)strtoul(spawner_key(many.compiled, names[i]), NULL, 10);
+            assert(sh_package_key_private_valid(key) && !(key & k20) && sh_package_key_set_add(&seen, key));
+            marks += (key & SH_PACKAGE_KEY_MARKER) != 0;
+        }
+        assert(marks == 2 && sh_package_key_set_count(&seen) == 10);
+        assert(many.key_groups && many.key_groups->historical == k20);
+        sh_package_library_free(&many); sh_package_sources_free(sources);
+        cleanup();
+    }
+    assert(!failures);
+    while (f->count) free(f->regions[--f->count].address);
+}
 static void test_registration_pinned_keys(void)
 {
     fixture storage; fixture *f = &storage; setup(f); conductor_reflection(f);
@@ -5905,6 +6014,7 @@ int main(void)
     test_registration_marked_groups();
     test_registration_group_capacity();
     test_registration_pinned_keys();
+    test_registration_historical_keys();
     test_registration_context_names();
     test_registration_keys();
     test_contribution_movie_token();

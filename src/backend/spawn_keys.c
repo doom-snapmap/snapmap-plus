@@ -209,6 +209,8 @@ int sh_spawn_keys_publish_groups(const sh_package_key_groups *library, const sh_
     memset(out, 0, sizeof(*out));
     for (int source = 0; source < 2; source++) {
         const sh_package_key_groups *table = source ? map : library;
+        /* A frozen legacy context's keys: only a map generation holds any. */
+        if (table) out->historical |= table->historical;
         for (uint32_t pattern = 1; table && pattern < SH_PACKAGE_KEY_PATTERNS; pattern++)
             if (table->defined[pattern] && !out->defined[pattern]) {
                 out->defined[pattern] = 1; out->members[pattern] = table->members[pattern]; out->count++;

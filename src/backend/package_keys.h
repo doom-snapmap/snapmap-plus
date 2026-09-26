@@ -62,11 +62,14 @@ size_t sh_package_key_set_count(const sh_package_key_set *set);
 int sh_package_key_set_equal(const sh_package_key_set *left, const sh_package_key_set *right);
 
 /* One generation's group codes, by their bits 19-27. A code the table does not
- * define names itself. */
+ * define names itself. historical holds the private-range bits a frozen legacy
+ * (composed) context's registrations keep as authored; no key or group code of
+ * the generation uses them. */
 typedef struct sh_package_key_groups {
     size_t count;
     unsigned char defined[SH_PACKAGE_KEY_PATTERNS];
     sh_package_key_set members[SH_PACKAGE_KEY_PATTERNS];
+    uint32_t historical;
 } sh_package_key_groups;
 /* Define code (multi-bit, not yet defined) as a group of at least two keys. */
 int sh_package_key_groups_define(sh_package_key_groups *groups, uint32_t code, const sh_package_key_set *members);
@@ -87,7 +90,10 @@ uint32_t sh_package_key_groups_code(sh_package_key_groups *groups, const sh_pack
  * with keys applies only to AI sharing one and a stock modifier row to private
  * AI through named bits alone; a filter names stock types natively and private
  * AI by key. Stock composites keep their native meaning everywhere except
- * that a request never selects private rows through them. */
+ * that a request never selects private rows through them. A value whose
+ * private bits are all historical keeps the native intersection throughout:
+ * the legacy context selected, modified and filtered those registrations
+ * natively, its composites and group masks included. */
 int sh_package_key_request_matches(const sh_package_key_groups *groups, uint32_t request, uint32_t entry);
 int sh_package_key_modifier_matches(const sh_package_key_groups *groups, uint32_t type, uint32_t row);
 int sh_package_key_filter_matches(const sh_package_key_groups *groups, uint32_t filter, uint32_t type);

@@ -1655,16 +1655,18 @@ done:
 }
 /* Custom-bit rows of every package conductor, each with the bound AI token,
  * and every package row with named bits only that is not a stock row of the
- * same declaration (new rows count only under the private contract). */
+ * same declaration (new rows count only under the private contract). A frozen
+ * legacy (composed) context's registrations keep their authored bits: those
+ * bits are only collected into historical. */
 static int pl_key_rows(pl_build *b, const sh_package_key_space *space, int private_keys, pl_keys *keys,
-    pl_key_changes *changes, unsigned char *conductors, char *error, size_t capacity)
+    pl_key_changes *changes, unsigned char *conductors, uint32_t *historical, char *error, size_t capacity)
 {
     pl_contributions *c = b->contributions;
     for (size_t i = 0; i < c->inputs.count; i++) {
         const sh_package_link_unit *unit = c->inputs.units + i;
         size_t scope = c->inputs.scopes[i], length = 0, base, base_length = 0;
-        int stated = 0, ok = 1;
-        if (scope >= b->authored_count || !pl_modern(b, scope) || unit->file_count != 1 ||
+        int stated = 0, ok = 1, legacy = scope < b->authored_count && !pl_modern(b, scope);
+        if (scope >= b->authored_count || unit->file_count != 1 ||
             strcmp(unit->family, "entitydef") || !unit->files[0]->source_count) continue;
         unsigned char *body = sh_package_compilation_read(unit->compilation, unit->files[0], SIZE_MAX, &length, error, capacity);
         if (!body) return 0;
@@ -1673,6 +1675,21 @@ static int pl_key_rows(pl_build *b, const sh_package_key_space *space, int priva
             stated = !memcmp(body + at, "aiTypeList", 10) || (at + 12 <= length && !memcmp(body + at, "globalAIMods", 12));
         free(body);
         if (!stated) continue;
+        if (legacy) {
+            char *text = pl_token_text(c, i, &length, error, capacity);
+            if (!text) return 0;
+            sh_decl_node *tree = sh_decl_tree_parse((sh_decl_source){text, length}, NULL, 0);
+            const sh_decl_node *list = pl_list(tree, "aiTypeList");
+            for (const sh_decl_node *item = list ? list->children : NULL; item; item = item->next) {
+                const char *value = NULL;
+                size_t value_length = 0;
+                uint32_t bits = 0;
+                if (pl_row_key(item, &value, &value_length) && sh_package_key_custom_bits(space, value, value_length, &bits))
+                    *historical |= bits & SH_PACKAGE_KEY_PRIVATE;
+            }
+            sh_decl_tree_free(tree); free(text);
+            continue;
+        }
         conductors[i] = 1;
         char *text = pl_token_text(c, i, &length, error, capacity), *base_text = NULL;
         if (!text) return 0;
@@ -1738,12 +1755,15 @@ static size_t pl_scope_owner(const pl_build *b, const sh_package_sources *source
 }
 /* Free keys: private keys in allocation order under the contract, otherwise
  * the lowest unnamed bit. 0 when none is left. A peer's multi-bit keys are
- * held in held[]. */
+ * held in held[]; no key touches a historical bit. */
 typedef struct pl_key_pool {
-    int private_keys; uint32_t pool, used; size_t cursor;
+    int private_keys; uint32_t pool, used, historical; size_t cursor;
     const uint32_t *held; size_t held_count;
     sh_package_key_set taken; /* multi-bit keys issued by this compile */
 } pl_key_pool;
+/* A multi-bit code sharing a bit with a frozen legacy registration. */
+static int pl_key_historical(const pl_key_pool *p, uint32_t code)
+{ return (code & p->historical) != 0 || (p->historical & SH_PACKAGE_KEY_MARKER && code & SH_PACKAGE_KEY_MARKER); }
 static uint32_t pl_key_take(pl_key_pool *p)
 {
     if (!p->private_keys) {
@@ -1755,6 +1775,7 @@ static uint32_t pl_key_take(pl_key_pool *p)
         p->cursor++;
         /* Marked keys come only from here; single bits skip authored ones. */
         if (key & SH_PACKAGE_KEY_MARKER) {
+            if (pl_key_historical(p, key)) continue;
             while (h < p->held_count && p->held[h] != key) h++;
             if (h == p->held_count) { sh_package_key_set_add(&p->taken, key); return key; }
             continue;
@@ -1848,13 +1869,14 @@ static int pl_key_group(void *context, const sh_package_key_set *keys, uint32_t 
     uint32_t found;
     if (!b->key_groups && !(b->key_groups = calloc(1, sizeof(*b->key_groups)))) return -1;
     if ((found = sh_package_key_groups_find(b->key_groups, keys))) { *code = found; return 1; }
-    found = sh_package_key_groups_find(g->peer, keys);
+    if ((found = sh_package_key_groups_find(g->peer, keys)) && pl_key_historical(g->pool, found)) found = 0;
     for (size_t n = 9; !found; n++) {
         uint32_t candidate = sh_package_key_private(n), pattern;
         size_t h = 0;
         if (!candidate) return 0;
         pattern = (candidate & SH_PACKAGE_KEY_SINGLE) >> 19;
-        if (sh_package_key_set_has(&g->pool->taken, candidate) || b->key_groups->defined[pattern]) continue;
+        if (sh_package_key_set_has(&g->pool->taken, candidate) || b->key_groups->defined[pattern] ||
+            pl_key_historical(g->pool, candidate)) continue;
         while (h < g->pool->held_count && g->pool->held[h] != candidate) h++;
         if (h == g->pool->held_count) found = candidate;
     }
@@ -2095,7 +2117,7 @@ static int pl_key_phase(pl_build *b, const sh_package_sources *sources, char *er
     pl_key_pool pool = {0};
     pl_key_pins pins = {0};
     unsigned char *conductors = NULL;
-    uint32_t pinned_bits = 0;
+    uint32_t pinned_bits = 0, historical = 0;
     char line[768];
     int status = sh_package_source_link_key_space(b->reader, &space), ok = 0, private_keys;
     if (status < 0) { snprintf(error, capacity, "spawn-type reflection is unreadable"); return 0; }
@@ -2103,7 +2125,15 @@ static int pl_key_phase(pl_build *b, const sh_package_sources *sources, char *er
     private_keys = b->native && b->native->private_keys && sh_package_key_space_private(&space);
     pool.private_keys = private_keys; pool.pool = space.pool;
     if (!(conductors = calloc(b->contributions->inputs.count + 1, 1))) goto allocation;
-    if (!pl_key_rows(b, &space, private_keys, &keys, &changes, conductors, error, capacity)) goto done;
+    if (!pl_key_rows(b, &space, private_keys, &keys, &changes, conductors, &historical, error, capacity)) goto done;
+    /* Under the contract a frozen legacy context's authored keys stay its own:
+     * the generation publishes them, and no key or group code here uses them. */
+    if (!private_keys) historical = 0;
+    if (historical) {
+        if (!b->key_groups && !(b->key_groups = calloc(1, sizeof(*b->key_groups)))) goto allocation;
+        b->key_groups->historical = historical;
+        pool.used |= historical & SH_PACKAGE_KEY_SINGLE; pool.historical = historical;
+    }
     int copies = 0;
     for (size_t i = 0; private_keys && !copies && i < b->contributions->inputs.count; i++) copies = conductors[i];
     if (!keys.count && !changes.count && !copies) { ok = 1; goto done; }
@@ -2138,10 +2168,12 @@ static int pl_key_phase(pl_build *b, const sh_package_sources *sources, char *er
         /* Scopes a peer keys come first and keep its keys; the bit itself
          * stays with the first scope only while no peer key holds it. */
         size_t pinned = 0;
-        int kept = (pinned_bits & (1u << bit)) != 0;
+        int kept = (pinned_bits & (1u << bit)) != 0 || (historical & (1u << bit)) != 0;
         for (size_t k = 0; k < count; k++) {
             uint32_t current = 0;
-            if (!pl_key_pinned(b, sources, &pins, scopes[order[k]], 1u << bit, &current)) continue;
+            /* A peer's key on a historical bit is not this generation's to keep. */
+            if (!pl_key_pinned(b, sources, &pins, scopes[order[k]], 1u << bit, &current) ||
+                pl_key_historical(&pool, current)) continue;
             size_t moved = order[k];
             memmove(order + pinned + 1, order + pinned, (k - pinned) * sizeof(*order));
             order[pinned++] = moved;
@@ -2217,6 +2249,7 @@ static int pl_key_phase(pl_build *b, const sh_package_sources *sources, char *er
                             uint32_t pinned = current & ~(1u << named) & SH_PACKAGE_KEY_UNNAMED;
                             const sh_package_key_groups *peer = b->native ? b->native->key_groups : NULL;
                             if (!private_keys ? pinned != 0 : sh_package_key_private_valid(pinned) &&
+                                !pl_key_historical(&pool, pinned) &&
                                 !((pinned & SH_PACKAGE_KEY_MARKER) && peer &&
                                     peer->defined[(pinned & SH_PACKAGE_KEY_SINGLE) >> 19])) target = pinned;
                         }
