@@ -100,6 +100,11 @@ int sh_package_provenance_resolve(const sh_package_provenance *saved,
 /* Resolve one occurrence using only its exact selected contexts. */
 int sh_package_provenance_resolve_use(const sh_package_provenance *saved, size_t use,
     const sh_package_provenance *current, const char **replacement);
+/* Why an occurrence resolves as it does, for a refusal: its saved binding and
+ * every current binding of the same authored source, each marked by whether
+ * one of its suppliers is the occurrence's own. Writes a NUL-terminated text. */
+void sh_package_provenance_describe_use(const sh_package_provenance *saved, size_t use,
+    const sh_package_provenance *current, char *out, size_t capacity);
 /* Match the actual document owner and typed value location before resolving.
  * A removed/changed/unrecorded occurrence returns 0 even if another occurrence
  * has the same native name. Historical aggregates retain their old name-level

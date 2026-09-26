@@ -298,13 +298,43 @@ static size_t pp_binding_index(const sh_package_provenance *index, const char *f
         if (!strcmp(index->bindings[i].family, family) && !strcmp(index->bindings[i].name, name)) return i;
     return SIZE_MAX;
 }
+/* 1 when the map provider serves this authored resource from an equal
+ * source context: its binding is then the one a map use of that source means. */
+static int pp_map_serves(const sh_package_provenance *map, const sh_package_provenance_binding *binding,
+    const sh_package_provenance_context *context)
+{
+    for (size_t i = 0; map && i < map->binding_count; i++) {
+        const sh_package_provenance_binding *candidate = map->bindings + i;
+        if (strcmp(candidate->family, binding->family) || strcmp(candidate->original, binding->original)) continue;
+        for (size_t k = 0; k < candidate->context_count; k++)
+            if (candidate->contexts[k] < map->context_count &&
+                !pp_context_compare(map->contexts + candidate->contexts[k], context)) return 1;
+    }
+    return 0;
+}
 int sh_package_provenance_overlay(const sh_package_provenance *local,
     const sh_package_provenance *map, sh_package_provenance *out)
 {
     if (!out || out == local || out == map) return 0;
     sh_package_provenance_free(out);
-    if (local) for (size_t i = 0; i < local->binding_count; i++)
-        if (!pp_find(map, local->bindings[i].family, local->bindings[i].name) && !pp_append(out, local, i)) goto failed;
+    /* The map provider recompiles the sources its map uses; where its output
+     * differs from the local library's, a context it serves is its own and the
+     * local binding keeps only its other contexts. */
+    if (local) for (size_t i = 0; i < local->binding_count; i++) {
+        const sh_package_provenance_binding *binding = local->bindings + i;
+        size_t kept = 0, *keep, *mapped;
+        int ok;
+        if (pp_find(map, binding->family, binding->name)) continue;
+        if (!binding->context_count || binding->context_count > SIZE_MAX / sizeof(*keep)) goto failed;
+        keep = malloc(binding->context_count * sizeof(*keep)); mapped = malloc(binding->context_count * sizeof(*mapped));
+        if (!keep || !mapped) { free(keep); free(mapped); goto failed; }
+        for (size_t k = 0; k < binding->context_count; k++)
+            if (binding->contexts[k] >= local->context_count ||
+                !pp_map_serves(map, binding, local->contexts + binding->contexts[k])) keep[kept++] = binding->contexts[k];
+        ok = !kept || pp_append_contexts(out, local, i, keep, kept, mapped, NULL);
+        free(keep); free(mapped);
+        if (!ok) goto failed;
+    }
     if (map) for (size_t i = 0; i < map->binding_count; i++) if (!pp_append(out, map, i)) goto failed;
     /* Provider lookup may prefer a map binding, but that never transfers the
      * source ownership of another recorded occurrence to the map's supplier. */
@@ -381,6 +411,35 @@ int sh_package_provenance_resolve_use(const sh_package_provenance *saved, size_t
         !current || !replacement || saved->uses[use].binding >= saved->binding_count) return -1;
     const sh_package_provenance_use *entry = saved->uses + use;
     return pp_resolve(saved, saved->bindings + entry->binding, entry->contexts, entry->context_count, current, replacement);
+}
+void sh_package_provenance_describe_use(const sh_package_provenance *saved, size_t use,
+    const sh_package_provenance *current, char *out, size_t capacity)
+{
+    size_t used = 0, candidates = 0;
+    int n;
+    if (!out || !capacity) return;
+    out[0] = 0;
+    if (!saved || use >= saved->use_count || saved->uses[use].binding >= saved->binding_count) return;
+    const sh_package_provenance_use *entry = saved->uses + use;
+    const sh_package_provenance_binding *source = saved->bindings + entry->binding;
+    n = snprintf(out, capacity, "%s %s saved as %s", source->family, source->original, source->name);
+    if (n < 0 || (size_t)n >= capacity) return;
+    used = (size_t)n;
+    for (size_t i = 0; current && i < current->binding_count; i++) {
+        const sh_package_provenance_binding *candidate = current->bindings + i;
+        int own = 0;
+        if (strcmp(source->family, candidate->family) || strcmp(source->original, candidate->original)) continue;
+        for (size_t k = 0; k < candidate->context_count && !own; k++)
+            for (size_t c = 0; c < entry->context_count && !own; c++)
+                own = candidate->contexts[k] < current->context_count && entry->contexts[c] < saved->context_count &&
+                    !pp_context_compare(saved->contexts + entry->contexts[c], current->contexts + candidate->contexts[k]);
+        candidates++;
+        n = snprintf(out + used, capacity - used, "%s%s (%s)", candidates == 1 ? "; now " : ", ",
+            candidate->name, own ? "its source" : "another source");
+        if (n < 0 || (size_t)n >= capacity - used) return;
+        used += (size_t)n;
+    }
+    if (!candidates) snprintf(out + used, capacity - used, "; no current binding of that source");
 }
 int sh_package_provenance_resolve(const sh_package_provenance *saved,
     const sh_package_provenance *current, const char *family, const char *name, const char **replacement)

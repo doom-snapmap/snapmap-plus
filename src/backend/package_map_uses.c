@@ -215,7 +215,13 @@ static int mu_saved_match(sh_package_map_uses *selection, size_t use,
     }
     int found = entry->kind == SH_PACKAGE_USE_HISTORICAL ? mu_historical_resolve(selection, use, resolved) :
         sh_package_provenance_resolve_use(&selection->saved, use, selection->current, resolved);
-    if (found != 1) return same ? mu_fail(selection, "an unchanged map use cannot resolve its saved source context") : 0;
+    if (found != 1 && same) {
+        char detail[768], reason[1024];
+        sh_package_provenance_describe_use(&selection->saved, use, selection->current, detail, sizeof(detail));
+        snprintf(reason, sizeof(reason), "an unchanged map use cannot resolve its saved source context (%s)", detail);
+        return mu_fail(selection, reason);
+    }
+    if (found != 1) return 0;
     return same || !_stricmp(*resolved, name);
 }
 static int mu_append(sh_package_map_uses *selection, const sh_package_provenance *source,

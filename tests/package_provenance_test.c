@@ -145,6 +145,71 @@ static void providers(void)
     CHECK(!selected.binding_count && !selected.context_count);
     sh_package_provenance_free(&local); sh_package_provenance_free(&map); sh_package_provenance_free(&view);
     sh_package_provenance_free(&selected); sh_package_provenance_free(&rebuilt);
+    /* A map provider serving a source the local library also serves, under
+     * another name: a saved use of that source means the map's binding, and
+     * the local binding keeps its other suppliers. */
+    {
+        sh_package_provenance saved = {0}, twin = {0};
+        unsigned char both[2][32] = {{5}, {6}};
+        size_t a = sh_package_provenance_context_add(&local, SH_PACKAGE_CONTEXT_ISOLATED, both, 1, "");
+        size_t b = sh_package_provenance_context_add(&local, SH_PACKAGE_CONTEXT_ISOLATED, both + 1, 1, "");
+        size_t pair[2] = {a, b};
+        CHECK(sh_package_provenance_bind(&local, "entitydef", "placed", "smp/local", pair, 2));
+        size_t served = sh_package_provenance_context_add(&map, SH_PACKAGE_CONTEXT_ISOLATED, both + 1, 1, "");
+        CHECK(sh_package_provenance_bind(&map, "entitydef", "placed", "smp/map", &served, 1));
+        CHECK(sh_package_provenance_overlay(&local, &map, &view));
+        size_t used = sh_package_provenance_context_add(&saved, SH_PACKAGE_CONTEXT_ISOLATED, both + 1, 1, "");
+        CHECK(sh_package_provenance_bind(&saved, "entitydef", "placed", "smp/local", &used, 1));
+        CHECK(sh_package_provenance_resolve(&saved, &view, "entitydef", "smp/local", &replacement) == 1 &&
+            !strcmp(replacement, "smp/map"));
+        used = sh_package_provenance_context_add(&twin, SH_PACKAGE_CONTEXT_ISOLATED, both, 1, "");
+        CHECK(sh_package_provenance_bind(&twin, "entitydef", "placed", "smp/local", &used, 1));
+        CHECK(sh_package_provenance_resolve(&twin, &view, "entitydef", "smp/local", &replacement) == 1 &&
+            !strcmp(replacement, "smp/local"));
+        sh_package_provenance_free(&local); sh_package_provenance_free(&map); sh_package_provenance_free(&view);
+        sh_package_provenance_free(&saved); sh_package_provenance_free(&twin);
+    }
+    /* Nested components of one tree serving one native name: the map serves
+     * only the north component, so a saved use of north means the map's
+     * binding, south keeps its own local binding, and neither can select the
+     * other component's. */
+    {
+        sh_package_provenance saved = {0}, other = {0};
+        unsigned char tree[1][32] = {{7}};
+        size_t north = sh_package_provenance_context_add(&local, SH_PACKAGE_CONTEXT_ISOLATED, tree, 1, "north");
+        size_t south = sh_package_provenance_context_add(&local, SH_PACKAGE_CONTEXT_ISOLATED, tree, 1, "south");
+        CHECK(sh_package_provenance_bind(&local, "entitydef", "nested", "smp/north-local", &north, 1));
+        CHECK(sh_package_provenance_bind(&local, "entitydef", "nested", "smp/south-local", &south, 1));
+        CHECK(sh_package_provenance_bind(&local, "entitydef", "unused", "smp/unused-local", &north, 1));
+        size_t served = sh_package_provenance_context_add(&map, SH_PACKAGE_CONTEXT_ISOLATED, tree, 1, "north");
+        CHECK(sh_package_provenance_bind(&map, "entitydef", "nested", "smp/north-map", &served, 1));
+        CHECK(sh_package_provenance_overlay(&local, &map, &view));
+        {
+            /* The map serves north's "nested" only: north's other resources
+             * stay with their local bindings. */
+            sh_package_provenance kept = {0};
+            size_t context = sh_package_provenance_context_add(&kept, SH_PACKAGE_CONTEXT_ISOLATED, tree, 1, "north");
+            CHECK(sh_package_provenance_bind(&kept, "entitydef", "unused", "smp/unused-local", &context, 1));
+            CHECK(sh_package_provenance_resolve(&kept, &view, "entitydef", "smp/unused-local", &replacement) == 1 &&
+                !strcmp(replacement, "smp/unused-local"));
+            sh_package_provenance_free(&kept);
+        }
+        size_t used = sh_package_provenance_context_add(&saved, SH_PACKAGE_CONTEXT_ISOLATED, tree, 1, "north");
+        CHECK(sh_package_provenance_bind(&saved, "entitydef", "nested", "smp/north-local", &used, 1));
+        CHECK(sh_package_provenance_resolve(&saved, &view, "entitydef", "smp/north-local", &replacement) == 1 &&
+            !strcmp(replacement, "smp/north-map"));
+        used = sh_package_provenance_context_add(&other, SH_PACKAGE_CONTEXT_ISOLATED, tree, 1, "south");
+        CHECK(sh_package_provenance_bind(&other, "entitydef", "nested", "smp/south-local", &used, 1));
+        CHECK(sh_package_provenance_resolve(&other, &view, "entitydef", "smp/south-local", &replacement) == 1 &&
+            !strcmp(replacement, "smp/south-local"));
+        /* The map binding never claims the other component's context. */
+        size_t found = SIZE_MAX;
+        for (size_t i = 0; i < view.binding_count; i++) if (!strcmp(view.bindings[i].name, "smp/north-map")) found = i;
+        CHECK(found != SIZE_MAX && view.bindings[found].context_count == 1 &&
+            !strcmp(view.contexts[view.bindings[found].contexts[0]].component, "north"));
+        sh_package_provenance_free(&local); sh_package_provenance_free(&map); sh_package_provenance_free(&view);
+        sh_package_provenance_free(&saved); sh_package_provenance_free(&other);
+    }
 }
 
 static size_t binding(const sh_package_provenance *value, const char *family, const char *name)
