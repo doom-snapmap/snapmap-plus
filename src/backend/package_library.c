@@ -1111,28 +1111,55 @@ static size_t pl_member_owner(const pl_build *b, const sh_package_sources *sourc
 /* A group the product cannot compose names its declaration. A package's own
  * invalid source rejects that package. A gap in one member's own content
  * leaves its package unserved for this candidate; a gap only in combining
- * them leaves one contributing package unserved, the last in package order,
- * so healthy peers still compile. Stock or product content alone blames
- * nobody, and environment failures never judge content. */
+ * them leaves unserved the contribution pl_coverage_participant proves takes
+ * part, so healthy peers still compile and no other owner is judged. Stock or
+ * product content alone blames nobody, and environment failures never judge
+ * content. */
 static void pl_contribution_failure(pl_build *b, const sh_package_sources *sources,
-    const size_t *members, size_t count, const sh_package_link_unit *input,
-    int kind, size_t culprit, char *error, size_t capacity)
+    const sh_package_link_unit *input, int kind, size_t culprit, char *error, size_t capacity)
 {
     char reason[768];
-    size_t owner = SIZE_MAX;
+    size_t owner;
     snprintf(reason, sizeof(reason), "%s", error);
     snprintf(error, capacity, "%s %s: %s", input->family, input->name, reason);
-    if (kind == SH_PACKAGE_EDITOR_FAILURE_ENVIRONMENT) return;
-    if (culprit != SIZE_MAX && (owner = pl_member_owner(b, sources, culprit)) != SIZE_MAX) {
-        if (kind == SH_PACKAGE_EDITOR_FAILURE_SOURCE) b->contribution_invalid = owner;
-        else b->contribution_owner = owner;
-        return;
-    }
-    for (size_t i = 0; i < count; i++) {
-        size_t candidate = pl_member_owner(b, sources, members[i]);
-        if (candidate != SIZE_MAX && (owner == SIZE_MAX || candidate > owner)) owner = candidate;
-    }
-    b->contribution_owner = owner;
+    if (kind == SH_PACKAGE_EDITOR_FAILURE_ENVIRONMENT || culprit == SIZE_MAX ||
+        (owner = pl_member_owner(b, sources, culprit)) == SIZE_MAX) return;
+    if (kind == SH_PACKAGE_EDITOR_FAILURE_SOURCE) b->contribution_invalid = owner;
+    else b->contribution_owner = owner;
+}
+
+/* Whether contributions compose: 1 yes, 0 no, -1 environment. */
+typedef int (*pl_compose_probe)(void *context, const sh_decl_source *parts, size_t count);
+static size_t pl_coverage_participant(const pl_build *b, const sh_package_sources *sources,
+    const size_t *members, const size_t *part_member, const sh_decl_source *parts, size_t part_count,
+    pl_compose_probe probe, void *context);
+typedef struct pl_collection_probe {
+    const char *family;
+    int registration, private_binding;
+    sh_decl_source base, target;
+} pl_collection_probe;
+#ifdef SH_PACKAGE_LIBRARY_TESTING
+static long g_probe_failures;
+void sh_package_library_test_probe_failures(long count) { g_probe_failures = count; }
+#endif
+static int pl_collection_composes(void *context, const sh_decl_source *parts, size_t count)
+{
+    const pl_collection_probe *p = context;
+    sh_package_editor_failure failure;
+    char error[512];
+    size_t length = 0;
+    char *body = NULL;
+#ifdef SH_PACKAGE_LIBRARY_TESTING
+    if (g_probe_failures > 0 && g_probe_failures--) failure.kind = SH_PACKAGE_EDITOR_FAILURE_ENVIRONMENT;
+    else
+#endif
+    body = p->registration ?
+        sh_package_registration_contributions_report(p->base, parts, count, p->target, &length, &failure,
+            error, sizeof(error)) :
+        sh_package_editor_contributions_report(p->family, p->base, parts, count, p->target, p->private_binding,
+            &length, &failure, error, sizeof(error));
+    if (body) { free(body); return 1; }
+    return failure.kind == SH_PACKAGE_EDITOR_FAILURE_ENVIRONMENT ? -1 : 0;
 }
 
 /* 1 with the inherit literal of a contribution text (NULL when absent). */
@@ -1385,6 +1412,12 @@ static int pl_contribution_group(pl_build *b, const sh_package_sources *sources,
             kind = failure.kind;
             if (kind == SH_PACKAGE_EDITOR_FAILURE_SOURCE && failure.source < source_count)
                 culprit = members[part_member[failure.source]];
+            else if (kind == SH_PACKAGE_EDITOR_FAILURE_COVERAGE) {
+                pl_collection_probe probe = {input->family, 0, !sh_package_source_link_shared(c->source)[unit],
+                    base, texts[i]};
+                culprit = pl_coverage_participant(b, sources, members, part_member, parts, source_count,
+                    pl_collection_composes, &probe);
+            }
             goto failed;
         }
         /* A member the union leaves as it was keeps its exact bytes, and with
@@ -1421,7 +1454,7 @@ static int pl_contribution_group(pl_build *b, const sh_package_sources *sources,
     ok = 1;
     goto done;
 failed:
-    pl_contribution_failure(b, sources, members, count, input, kind, culprit, error, capacity);
+    pl_contribution_failure(b, sources, input, kind, culprit, error, capacity);
 done:
     if (texts) for (size_t i = 0; i < count; i++) free((char *)texts[i].text);
     if (pending) for (size_t i = 0; i < count; i++) pl_contribution_unit_free(pending + i);
@@ -1539,6 +1572,44 @@ static void pl_scope_sort(const pl_build *b, const sh_package_sources *sources, 
         for (size_t m = k; m > 0 && pl_scope_order(&context, scopes + order[m - 1], scopes + order[m]) > 0; m--) {
             size_t swap = order[m]; order[m] = order[m - 1]; order[m - 1] = swap;
         }
+}
+/* The participant a combination gap leaves unserved. Product and stock parts
+ * compose first, then contributions one at a time in stable source order:
+ * the first that cannot join those before it takes part in the conflict, and
+ * leaving it out lets every earlier owner compose. SIZE_MAX (nobody) when
+ * product parts alone fail or composition cannot run. */
+static size_t pl_coverage_participant(const pl_build *b, const sh_package_sources *sources,
+    const size_t *members, const size_t *part_member, const sh_decl_source *parts, size_t part_count,
+    pl_compose_probe probe, void *context)
+{
+    size_t *order = calloc(part_count ? part_count : 1, sizeof(*order));
+    size_t *scopes = calloc(part_count ? part_count : 1, sizeof(*scopes));
+    sh_decl_source *trial = calloc(part_count ? part_count : 1, sizeof(*trial));
+    size_t product = 0, authored, accepted = 0, culprit = SIZE_MAX;
+    if (!order || !scopes || !trial) goto done;
+    for (size_t k = 0; k < part_count; k++) {
+        scopes[k] = b->contributions->inputs.scopes[members[part_member[k]]];
+        if (pl_member_owner(b, sources, members[part_member[k]]) == SIZE_MAX) order[product++] = k;
+    }
+    authored = product;
+    for (size_t k = 0; k < part_count; k++)
+        if (pl_member_owner(b, sources, members[part_member[k]]) != SIZE_MAX) order[authored++] = k;
+    {
+        pl_key_order stable = {b, sources};
+        for (size_t k = product + 1; k < part_count; k++)
+            for (size_t m = k; m > product && pl_scope_order(&stable, scopes + order[m - 1], scopes + order[m]) > 0; m--) {
+                size_t swap = order[m]; order[m] = order[m - 1]; order[m - 1] = swap;
+            }
+    }
+    for (size_t i = 0; i < part_count; i++) {
+        trial[accepted] = parts[order[i]];
+        int status = probe(context, trial, accepted + 1);
+        if (status > 0) { accepted++; continue; }
+        if (!status && i >= product) culprit = members[part_member[order[i]]];
+        break;
+    }
+done:
+    free(order); free(scopes); free(trial); return culprit;
 }
 static const char *pl_scope_label(const pl_build *b, const sh_package_sources *sources, size_t scope)
 {
@@ -1918,27 +1989,22 @@ static int pl_key_rewrite(void *context, const char *slot, const char *value, si
     if (!moved) return 0;
     free(edit->owned); edit->owned = moved; *replacement = moved; return 1;
 }
-/* Insert copies of the stock rows no package row carries, each before the
- * next stock row the package keeps (or last), so a package never removes a
- * stock registration or modifier for anyone else. */
+/* Insert copies of the stock rows no package row carries, so a package never
+ * removes a stock registration or modifier for anyone else. Each follows the
+ * stock row before it (the first leads the rows), as in the stock list: a
+ * partial list's own rows stay after the stock rows, like a complete list's. */
 static int pl_key_restore(sh_decl_node *list, const sh_decl_node *stock, int *changed)
 {
+    sh_decl_node *previous = NULL;
     for (const sh_decl_node *row = stock ? stock->children : NULL; row; row = row->next) {
         const char *key = NULL;
         size_t length = 0;
-        if (!pl_row_key(row, &key, &length) || pl_row_find(list, key, length)) continue;
-        sh_decl_node *copy = pl_node_clone(row), **link = &list->children;
+        sh_decl_node *held;
+        if (!pl_row_key(row, &key, &length)) continue;
+        if ((held = pl_row_find(list, key, length))) { previous = held; continue; }
+        sh_decl_node *copy = pl_node_clone(row), **link = previous ? &previous->next : &list->children;
         if (!copy) return 0;
-        for (const sh_decl_node *next = row->next; next; next = next->next) {
-            const char *next_key = NULL;
-            size_t next_length = 0;
-            sh_decl_node *kept = pl_row_key(next, &next_key, &next_length) ? pl_row_find(list, next_key, next_length) : NULL;
-            if (!kept) continue;
-            while (*link && *link != kept) link = &(*link)->next;
-            break;
-        }
-        if (!*link) { link = &list->children; while (*link) link = &(*link)->next; }
-        copy->next = *link; *link = copy; *changed = 1;
+        copy->next = *link; *link = copy; previous = copy; *changed = 1;
     }
     return 1;
 }
@@ -2457,6 +2523,11 @@ static int pl_registration_group(pl_build *b, const sh_package_sources *sources,
             kind = failure.kind;
             if (kind == SH_PACKAGE_EDITOR_FAILURE_SOURCE && failure.source < source_count)
                 culprit = members[part_member[failure.source]];
+            else if (kind == SH_PACKAGE_EDITOR_FAILURE_COVERAGE) {
+                pl_collection_probe probe = {"entitydef", 1, 0, base, texts[i]};
+                culprit = pl_coverage_participant(b, sources, members, part_member, parts, source_count,
+                    pl_collection_composes, &probe);
+            }
             goto failed;
         }
         for (size_t j = 0; j < count; j++) if (j != i && c->inputs.scopes[members[j]] != b->count - 1)
@@ -2479,7 +2550,7 @@ static int pl_registration_group(pl_build *b, const sh_package_sources *sources,
     ok = 1;
     goto done;
 failed:
-    pl_contribution_failure(b, sources, members, count, input, kind, culprit, error, capacity);
+    pl_contribution_failure(b, sources, input, kind, culprit, error, capacity);
 done:
     if (texts) for (size_t i = 0; i < count; i++) free((char *)texts[i].text);
     if (pending) for (size_t i = 0; i < count; i++) pl_contribution_unit_free(pending + i);
@@ -2642,7 +2713,7 @@ static int pl_hands_group(pl_build *b, const sh_package_sources *sources,
     ok = 1;
     goto done;
 failed:
-    pl_contribution_failure(b, sources, members, count, input, kind, culprit, error, capacity);
+    pl_contribution_failure(b, sources, input, kind, culprit, error, capacity);
 done:
     if (texts) for (size_t i = 0; i < count; i++) free((char *)texts[i].text);
     if (pending) for (size_t i = 0; i < count; i++) pl_contribution_unit_free(pending + i);

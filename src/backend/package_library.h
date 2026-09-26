@@ -111,5 +111,8 @@ int sh_package_library_compile_contexts(const sh_package_sources *sources,
 /* Fail the next count editor contribution reads of one declaration name
  * (any name when NULL) as an unreadable source would. */
 void sh_package_library_test_contribution_read_failures(const char *name, long count);
+/* Fail the next count compositions that isolate a combination gap's
+ * participant as an environment failure (allocation) would. */
+void sh_package_library_test_probe_failures(long count);
 #endif
 #endif

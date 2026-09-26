@@ -641,8 +641,11 @@ static const sh_decl_collection_rule *pc_rules(const char *type, size_t *count)
         {"edit.inputs", NULL},
         {"edit.outputs", NULL}
     };
+    /* Row order is presentation: the spawn manager picks uniformly among every
+     * row sharing a bit with a request (VK FUN_141123830). Modifiers apply
+     * first-match, so their order stays significant. */
     static const sh_decl_collection_rule conductor[] = {
-        {"edit.aiTypeList", "aiType"},
+        {"edit.aiTypeList", "aiType", NULL, NULL, NULL, SH_DECL_COLLECTION_PRESENTATION_ORDER},
         {"edit.globalAIMods", "aiType"}
     };
     *count = 0;
@@ -677,12 +680,14 @@ static int pc_registration_field(const char *key)
 { return !strcmp(key, "aiTypeList") || !strcmp(key, "globalAIMods"); }
 
 /* The library's registration union (after package keys are assigned): the
- * spawn manager picks among every row sharing a bit with a request, so one
- * type may register several AI and a row is its type and bound AI. Modifiers
- * apply first-match, one row per mask. The whole-file composer keeps plain
- * keys, so an equal key bound differently there remains a conflict. */
+ * spawn manager picks uniformly among every row sharing a bit with a request,
+ * so one type may register several AI, a row is its type and bound AI, and
+ * row order is presentation. Modifiers apply first-match, one row per mask.
+ * The whole-file composer keeps plain keys, so an equal key bound differently
+ * there remains a conflict. */
 static const sh_decl_collection_rule pc_registration_rules[] = {
-    {"edit.aiTypeList", "aiType", NULL, NULL, NULL, SH_DECL_COLLECTION_DISTINCT_BEHAVIOR},
+    {"edit.aiTypeList", "aiType", NULL, NULL, NULL,
+        SH_DECL_COLLECTION_DISTINCT_BEHAVIOR | SH_DECL_COLLECTION_PRESENTATION_ORDER},
     {"edit.globalAIMods", "aiType"}
 };
 

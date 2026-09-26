@@ -1028,6 +1028,14 @@ A bit-flag inspector's choices are one such collection, identified by value:
 a package copy of a stock-named inspector (the AI filter's included) extends
 the list the stock control binds, with each package's AI choice at the key it
 holds after relocation, rather than becoming a private copy no control names.
+A conductor's AI registrations are presentation-ordered: the spawn manager
+picks uniformly among every row sharing a bit with a request, so copies that
+list stock rows in different orders compose. Global AI modifiers apply
+first-match and keep their order. Stock rows a copy omits are restored in
+stock order ahead of its own rows. When valid contributions cannot compose
+together, they are composed one at a time in stable source order and only the
+first that cannot join those before it is left unserved; owners outside the
+conflict stay served.
 For shared editor presentation, opposing valid cosmetic preferences resolve in
 a stable order. A private gameplay binding keeps its own edited presentation
 while accepting compatible collection contributions. Gameplay fields never use
