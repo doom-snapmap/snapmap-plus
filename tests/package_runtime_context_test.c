@@ -527,6 +527,35 @@ static void test_prepared_map(const char *map_root)
     state.fail = 0; CHECK(activate_plan(plan, &state)); CHECK(sh_package_runtime_ready());
     CHECK(sh_package_runtime_test_key_groups_current() && sh_package_runtime_has_map_provider());
     {
+        /* Editor inspectors read the serving (map) generation's key codes, a
+         * code only the library defines there, and extend the map's table. */
+        sh_package_key_groups library = {0}, map = {0};
+        sh_package_key_set pair = {0}, trio = {0}, fresh = {0}, single = {0}, keys;
+        uint32_t a = sh_package_key_private(40), b = sh_package_key_private(41), c = sh_package_key_private(42);
+        uint32_t library_group = sh_package_key_private(12), map_group = sh_package_key_private(13);
+        uint32_t code = 0, again = 0, historical = 0;
+        sh_package_key_set_add(&pair, a); sh_package_key_set_add(&pair, b);
+        trio = pair; sh_package_key_set_add(&trio, c);
+        sh_package_key_set_add(&fresh, a); sh_package_key_set_add(&fresh, c);
+        sh_package_key_set_add(&single, a);
+        CHECK(sh_package_key_groups_define(&library, library_group, &pair));
+        CHECK(sh_package_key_groups_define(&map, map_group, &trio));
+        map.historical = 1u << 27;
+        sh_package_runtime_test_key_tables(&library, &map);
+        CHECK(sh_package_runtime_test_key_groups_current());
+        sh_package_runtime_key_decode(library_group | 4u, &keys, &historical);
+        CHECK(sh_package_key_set_equal(&keys, &pair) && historical == 1u << 27);
+        sh_package_runtime_key_decode(map_group, &keys, NULL);
+        CHECK(sh_package_key_set_equal(&keys, &trio));
+        CHECK(sh_package_runtime_key_code(&pair, &code) == 1 && code == library_group);
+        CHECK(sh_package_runtime_key_code(&single, &code) == 1 && code == a);
+        CHECK(sh_package_runtime_key_code(&fresh, &code) == 1 && code == sh_package_key_private(9));
+        sh_package_runtime_key_decode(code, &keys, NULL);
+        CHECK(sh_package_key_set_equal(&keys, &fresh) && sh_package_runtime_test_key_groups_current());
+        CHECK(sh_package_runtime_key_code(&fresh, &again) == 1 && again == code);
+        CHECK(sh_package_runtime_key_code(NULL, &again) == -1 && sh_package_runtime_key_code(&fresh, NULL) == -1);
+    }
+    {
         CHECK(sh_package_runtime_acquire() != NULL);
         const sh_package_provenance *bindings = sh_package_runtime_bindings();
         CHECK(bindings && bindings->context_count == 1 && bindings->binding_count);

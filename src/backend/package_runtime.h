@@ -13,6 +13,7 @@
 #include "audio_id_reservations.h"
 #include "virtual_material_runtime.h"
 #include "package_consumers.h"
+#include "package_keys.h"
 
 typedef struct sh_package_consumer_hold {
     const sh_package_consumer *binding;
@@ -282,6 +283,15 @@ void sh_package_map_plan_free(sh_package_map_plan *plan);
  * Pair with runtime_release. This is the input to local availability checks. */
 const sh_package_compilation *sh_package_runtime_library_acquire(void);
 int sh_package_runtime_has_map_provider(void);
+/* Editor inspectors read and extend the serving generation's spawn-type key
+ * codes (the map's while one serves, else the library's). decode gives the
+ * keys a value's private bits name (a marked code only the other table
+ * defines is read there) and the bits the generation keeps historically. code
+ * gives the one code for a set of keys, adopting a new group code into that
+ * generation's table and publishing it as a document capture does: 1 with
+ * *code, 0 when no code is left, -1 while a refresh holds the providers. */
+void sh_package_runtime_key_decode(uint32_t value, sh_package_key_set *keys, uint32_t *historical);
+int sh_package_runtime_key_code(const sh_package_key_set *keys, uint32_t *code);
 /* Bind verified startup metadata addresses once before the first refresh.
  * Native status is 1 after reader registration, 0 initializing, -1 invalid.
  * These are product startup services, not package author controls. */
@@ -433,6 +443,8 @@ int sh_package_runtime_test_source_inputs(sh_decl_registry_source *registry, uin
 /* 1 when the spawn-key group tables last published are the serving
  * providers' (the installed library's and the active map's). */
 int sh_package_runtime_test_key_groups_current(void);
+/* Give the serving providers these group tables (copies) and publish them. */
+void sh_package_runtime_test_key_tables(const sh_package_key_groups *library, const sh_package_key_groups *map);
 /* Offline fixture teardown only. No engine callbacks or native game reset. */
 void sh_package_runtime_test_dispose(void);
 #endif

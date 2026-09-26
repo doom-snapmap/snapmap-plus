@@ -3704,6 +3704,40 @@ static void pr_key_context_close(pr_key_context *keys, int adopt)
     }
     free(keys->scratch); keys->scratch = NULL;
 }
+
+void sh_package_runtime_key_decode(uint32_t value, sh_package_key_set *keys, uint32_t *historical)
+{
+    AcquireSRWLockShared(&g_lock);
+    pr_provider *owner = g_map_provider ? g_map_provider : g_library_provider;
+    const sh_package_key_groups *groups = owner ? owner->key_groups : NULL;
+    const sh_package_key_groups *other = owner && owner != g_library_provider && g_library_provider ?
+        g_library_provider->key_groups : NULL;
+    uint32_t pattern = (value & SH_PACKAGE_KEY_SINGLE) >> 19;
+    if ((value & SH_PACKAGE_KEY_MARKER) && !(groups && groups->defined[pattern]) && other && other->defined[pattern])
+        groups = other;
+    sh_package_key_decode(groups, value, keys);
+    if (historical) *historical = owner && owner->key_groups ? owner->key_groups->historical : 0;
+    ReleaseSRWLockShared(&g_lock);
+}
+
+int sh_package_runtime_key_code(const sh_package_key_set *keys, uint32_t *code)
+{
+    pr_key_context context;
+    int result = -1;
+    if (code) *code = 0;
+    /* An editor edit never waits for a refresh; capture holds this lock too. */
+    if (!keys || !code || !TryAcquireSRWLockExclusive(&g_refresh_lock)) return -1;
+    AcquireSRWLockShared(&g_lock);
+    pr_key_context_open(&context, g_map_provider ? g_map_provider : g_library_provider);
+    if (context.scratch) {
+        *code = sh_package_key_groups_code(context.scratch, context.other, &context.taken, keys);
+        result = *code != 0;
+    }
+    ReleaseSRWLockShared(&g_lock);
+    pr_key_context_close(&context, result == 1);
+    ReleaseSRWLockExclusive(&g_refresh_lock);
+    return result;
+}
 static char *pr_capture_document(const pr_provider *provider,
     sh_decl_registry_source registry, uintptr_t reflection, int retain_native,
     const sh_package_provenance *saved, const sh_package_bundle_binding *additional,
@@ -3809,6 +3843,18 @@ char *sh_package_runtime_capture_document(const sh_package_map_plan *plan,
 }
 
 #ifdef SH_PACKAGE_RUNTIME_TESTING
+void sh_package_runtime_test_key_tables(const sh_package_key_groups *library, const sh_package_key_groups *map)
+{
+    AcquireSRWLockExclusive(&g_lock);
+    pr_provider *owners[2] = {g_library_provider, g_map_provider};
+    const sh_package_key_groups *tables[2] = {library, map};
+    for (int i = 0; i < 2; i++) if (owners[i]) {
+        free(owners[i]->key_groups); owners[i]->key_groups = NULL;
+        if (tables[i] && (owners[i]->key_groups = malloc(sizeof(*tables[i])))) *owners[i]->key_groups = *tables[i];
+    }
+    pr_publish_key_groups();
+    ReleaseSRWLockExclusive(&g_lock);
+}
 int sh_package_runtime_test_key_groups_current(void)
 {
     AcquireSRWLockShared(&g_lock);

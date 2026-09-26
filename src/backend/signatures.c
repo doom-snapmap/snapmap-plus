@@ -1503,5 +1503,13 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
     { "SnapTypeCacheFind",
       "48 89 5C 24 08 57 48 83 EC 20 48 8B FA 48 8B D9 E8 ?? ?? ?? ?? 3B 03 75 1C 48 8B 17 48 8D 0D ?? ?? ?? ?? "
       "E8 ?? ?? ?? ?? 33 C0 48 8B 5C 24 30 48 83 C4 20 5F C3 48 98 48 8D 04 C0 48 8D 80 DD 05 00 00 48 8D 04 C3", 0x5f2ff0 },
+    /* Model<idSnapBitFlagInspector> build and apply (key_inspector.c). */
+    { "BitFlagInspectorBuild",
+      "40 55 56 57 41 54 41 55 41 56 41 57 48 81 EC 90 00 00 00 48 C7 44 24 50 FE FF FF FF 48 89 9C 24 E0 00 00 00 "
+      "48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 84 24 88 00 00 00 4C 89 44 24 40 48 89 54 24 48 4C 8B E1 48 8D 4C 24 58 "
+      "E8 ?? ?? ?? ?? 90 49 8B 04 24 41 B1 01 4C 8D 44 24 58 49 8B 54 24 10 48 8B 08 E8", 0x5c25c0 },
+    { "BitFlagInspectorApply",
+      "40 57 48 83 EC 60 48 C7 44 24 20 FE FF FF FF 48 89 5C 24 78 48 89 B4 24 80 00 00 00 48 8B 05 ?? ?? ?? ?? "
+      "48 33 C4 48 89 44 24 58 48 8B F1 44 8B 41 38 8B 79 3C F7 D7 41 23 F8 83 79 28 00 7E 29 48 8B 41 20 8B 51 28", 0x5cf600 },
     { NULL, NULL, 0 }   /* terminator */
 };

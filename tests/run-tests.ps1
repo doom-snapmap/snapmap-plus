@@ -117,6 +117,7 @@ $tests = @(
     @{ name = "grid_room_snap_test"; src = 'grid_room_snap_test.c ..\src\backend\grid_room.c ..\src\backend\patch.c ..\src\backend\hook.c'; arg = "" }
     @{ name = "spawn_keys_test"; src = 'spawn_keys_test.c ..\src\backend\spawn_keys.c ..\src\backend\package_keys.c ..\src\backend\decl_tree.c ..\src\backend\patch.c ..\src\backend\hook.c'; defs = '/DSH_SPAWN_KEYS_TESTING'; arg = "" }
     @{ name = "snap_type_cache_test"; src = 'snap_type_cache_test.c ..\src\backend\snap_type_cache.c ..\src\backend\patch.c ..\src\backend\hook.c'; defs = '/DSH_SNAP_TYPE_CACHE_TESTING'; arg = "" }
+    @{ name = "key_inspector_test"; src = 'key_inspector_test.c ..\src\backend\key_inspector.c ..\src\backend\package_keys.c ..\src\backend\decl_tree.c ..\src\backend\patch.c ..\src\backend\hook.c'; defs = '/DSH_KEY_INSPECTOR_TESTING'; arg = "" }
     @{ name = "nav_heap_test"; src = 'nav_heap_test.c'; arg = "" }
     @{ name = "nav_heap_hook_test"; src = 'nav_heap_hook_test.c ..\src\backend\patch.c ..\src\backend\hook.c'; defs = '/DSH_PATCH_TESTING'; arg = "" }
     @{ name = "patch_test"; src = 'patch_test.c ..\src\backend\patch.c ..\src\backend\hook.c'; defs = '/DSH_PATCH_TESTING'; arg = "" }

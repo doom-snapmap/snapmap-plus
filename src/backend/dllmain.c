@@ -33,6 +33,7 @@
 #include "grid_room_snap.h"
 #include "spawn_keys.h"
 #include "snap_type_cache.h"
+#include "key_inspector.h"
 #include "package_requirements.h"
 #include "weapon_hud.h"
 #include "navmesh.h"
@@ -384,6 +385,10 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
         /* Editor entities read their defaults from a type cache built once;
          * complete it for entity types published afterwards. */
         sh_snap_type_cache_install(results, db, g_doom_base);
+
+        /* The AI filter's choices can name package keys, which the stock
+         * bit-flag inspector cannot offer or write. */
+        sh_key_inspector_install(results, db, g_doom_base);
 
         /* Navigation uses the resource shadow and map funnel; report its startup state. */
         sh_navmesh_install();
