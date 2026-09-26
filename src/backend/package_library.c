@@ -1824,6 +1824,17 @@ static int pl_hands_phase(pl_build *b, const sh_package_sources *sources, char *
     size_t *members = calloc(c->inputs.count ? c->inputs.count : 1, sizeof(*members));
     int ok = 0;
     if (!seen || !members) { snprintf(error, capacity, "player hands web allocation failed"); goto done; }
+    /* Every scope reaches the web by its stock name, so what reaches it binds
+     * alike in every scope (a model it names can name it again). Rebind the
+     * tokens that way before composing, so equal records compare equal. */
+    for (size_t i = 0; i < c->inputs.count; i++) {
+        sh_package_link_unit *unit = c->inputs.units + i;
+        if (unit->file_count == 1 && !strcmp(unit->family, "animweb") &&
+            sh_package_source_link_player_hands(b->reader, unit->name) && !unit->stable_name) {
+            unit->stable_name = 1; c->dirty = 1;
+        }
+    }
+    if (!pl_tokens(c, error, capacity)) goto done;
     for (size_t i = 0; i < c->inputs.count; i++) {
         const sh_package_link_unit *unit = c->inputs.units + i;
         size_t count = 0;

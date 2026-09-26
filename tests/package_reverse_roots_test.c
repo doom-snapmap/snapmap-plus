@@ -134,7 +134,12 @@ static int original(void *context, const char *path, unsigned char **body, size_
         "generated/decls/entitydef/player-def.decl"))
         value = "{ class = \"Entity\"; edit = { handsAnimWeb = \"hands\"; } }";
     else if (f->hands && !strcmp(path, "generated/decls/animweb/hands.decl"))
-        value = "{ props { } states { } subWebs { subWeb \"pistol\" { } } }";
+        value = "{ props { modelInfos { \"hands.md6\" \"\" } } states { } subWebs { subWeb \"pistol\" { } } }";
+    /* The web's hands model names the web again through an animation event
+     * argument: a stock cycle through the one global web. */
+    else if (f->hands && !strcmp(path, "generated/decls/md6def/hands.md6.decl"))
+        value = "{ init { } jointGroups { } events { anim \"hands/idle.md6anim\" { event \"ae_web\" { "
+            "frame 1 row 0 locked 0 animWeb \"hands\" } } } aliases { } props { } }";
     else if (!strcmp(path, "cooked/model/models/campaign.bmodel")) {
         /* Present only in the campaign archive: absent from SnapMap. */
         b = model("generic/rock");
@@ -244,12 +249,25 @@ static const sh_compiled_resource *resource(const sh_package_library *library, c
     }
     return result;
 }
-static void contains(const sh_package_library *library, const sh_compiled_resource *r, const char *needle)
+static int holds(const sh_package_library *library, const sh_compiled_resource *r, const char *needle)
 {
     char error[1024]; size_t length = 0;
     unsigned char *body = r ? sh_package_compilation_read(library->compiled, r, SIZE_MAX, &length, error, sizeof(error)) : NULL;
     assert(body); unsigned char *terminated = realloc(body, length + 1); assert(terminated); terminated[length] = 0;
-    assert(strstr((const char *)terminated, needle)); free(terminated);
+    int found = strstr((const char *)terminated, needle) != NULL; free(terminated); return found;
+}
+static void contains(const sh_package_library *library, const sh_compiled_resource *r, const char *needle)
+{ assert(holds(library, r, needle)); }
+/* Private copies of one family whose text holds the needle. */
+static size_t published(const sh_package_library *library, const char *family, const char *needle)
+{
+    size_t count = 0;
+    for (size_t i = 0; i < library->compiled->resource_count; i++) {
+        const sh_compiled_resource *r = library->compiled->resources + i;
+        if (r->native_type && !strcmp(r->native_type, family) && r->native_name &&
+            !strncmp(r->native_name, "smp/", 4) && holds(library, r, needle)) count++;
+    }
+    return count;
 }
 
 typedef struct implicit_adapter {
@@ -538,7 +556,7 @@ static void test_player_hands(fixture *f, const sh_package_compile_environment *
     snprintf(home, sizeof(home), "%s\\overrides\\gap", root); snprintf(held, sizeof(held), "%s\\gap-held", root);
     assert(MoveFileA(home, held));
     package("weapon", "Weapon", "generated/decls/animweb/hands.decl",
-        "{ props { } states { } subWebs { subWeb \"pistol\" { } subWeb \"sp_pistol\" { } } }");
+        "{ props { modelInfos { \"hands.md6\" \"\" } } states { } subWebs { subWeb \"pistol\" { } subWeb \"sp_pistol\" { } } }");
     sh_package_sources *sources = sh_package_sources_scan(root, error, sizeof(error)); assert(sources);
     for (int hands = 1; hands <= 3; hands++) {
         f->hands = hands;
@@ -552,13 +570,21 @@ static void test_player_hands(fixture *f, const sh_package_compile_environment *
         assert(web); contains(&library, web, "sp_pistol");
         assert(!binding(&library, sources, "Weapon", "", "snapeditorentitydef", "unrelated"));
         assert(!binding(&library, sources, "Weapon", "", "entitydef", "props/unrelated"));
+        /* Every scope reaches the web by its stock name, so a stock model the
+         * web names and that names the web again gains no private copy the
+         * web's parse would have to load first. */
+        int copied = published(&library, "md6def", "ae_web") || !holds(&library, web, "\"hands.md6\"");
+        if (copied) for (size_t i = 0; i < library.compiled->resource_count; i++)
+            fprintf(stderr, "  published %s %s\n", library.compiled->resources[i].engine_path,
+                library.compiled->resources[i].native_name ? library.compiled->resources[i].native_name : "");
+        assert(!copied);
         sh_package_library_free(&library);
     }
     sh_package_sources_free(sources);
     f->hands = 2;
     /* A second weapon package adds its own subweb: both join the stock web. */
     package("weapon2", "Weapon Two", "generated/decls/animweb/hands.decl",
-        "{ props { } states { } subWebs { subWeb \"pistol\" { } subWeb \"plasma\" { } } }");
+        "{ props { modelInfos { \"hands.md6\" \"\" } } states { } subWebs { subWeb \"pistol\" { } subWeb \"plasma\" { } } }");
     sources = sh_package_sources_scan(root, error, sizeof(error)); assert(sources);
     int ok = sh_package_library_compile(sources, &env, catalog, original, f, registry,
         (uintptr_t)f->reflection, native, &library, error, sizeof(error));

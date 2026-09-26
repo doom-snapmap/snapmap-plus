@@ -948,6 +948,35 @@ done:
     free(files); free(identities); return ok;
 }
 
+/* The graph as dependents see it: a stable-name unit is reached by its one
+ * native name in every scope (sh_package_link_unit.stable_name), so neither
+ * its per-scope content nor its changed bytes enter a dependent's identity or
+ * original certification; the dependent's own bytes carry the name. The unit
+ * keeps its own edges. NULL on allocation failure. */
+static sh_package_link_node *pl_stable_view(pl_work *w, sh_package_link_edge **storage)
+{
+    size_t edges = 0, at = 0;
+    int stable = 0;
+    *storage = NULL;
+    for (size_t i = 0; i < w->count; i++) {
+        stable |= w->units[i].stable_name != 0;
+        if (w->nodes[i].edge_count > SIZE_MAX - edges) return NULL;
+        edges += w->nodes[i].edge_count;
+    }
+    if (!stable) return w->nodes;
+    sh_package_link_node *view = pl_alloc(w->count, sizeof(*view));
+    sh_package_link_edge *kept = pl_alloc(edges, sizeof(*kept));
+    if (!view || !kept) { free(view); free(kept); return NULL; }
+    for (size_t i = 0; i < w->count; i++) {
+        view[i] = w->nodes[i]; view[i].edges = kept + at; view[i].edge_count = 0;
+        for (size_t e = 0; e < w->nodes[i].edge_count; e++)
+            if (!w->units[w->nodes[i].edges[e].target].stable_name) {
+                kept[at++] = w->nodes[i].edges[e]; view[i].edge_count++;
+            }
+    }
+    *storage = kept; return view;
+}
+
 static int pl_assign(pl_work *w)
 {
     sh_package_link_classes *classes = &w->output.classes;
@@ -971,26 +1000,30 @@ static int pl_assign(pl_work *w)
      * makes a dependent original, and keeps its own name only while every
      * dependency it binds keeps its name too. */
     unsigned char *own = pl_alloc(w->count, 1);
-    if (!own) return pl_fail(w, "cannot allocate original binding certification");
+    sh_package_link_edge *view_edges = NULL;
+    sh_package_link_node *view = own ? pl_stable_view(w, &view_edges) : NULL;
+    if (!own || !view) { free(own); return pl_fail(w, "cannot allocate original binding certification"); }
     memcpy(own, w->originals, w->count);
     for (size_t i = 0; i < w->count; i++) if (w->units[i].original_binding == 2) w->originals[i] = 0;
-    if (!sh_package_link_originals(w->nodes, w->count, w->originals, w->originals, w->error, w->capacity)) {
-        free(own); return 0;
+    if (!sh_package_link_originals(view, w->count, w->originals, w->originals, w->error, w->capacity)) {
+        if (view != w->nodes) free(view);
+        free(view_edges); free(own); return 0;
     }
     for (int changed = 1; changed;) {
         changed = 0;
         for (size_t i = 0; i < w->count; i++) {
             if (w->units[i].original_binding != 2 || !own[i]) continue;
             int kept = 1;
-            for (size_t e = 0; kept && e < w->nodes[i].edge_count; e++) {
-                size_t target = w->nodes[i].edges[e].target;
+            for (size_t e = 0; kept && e < view[i].edge_count; e++) {
+                size_t target = view[i].edges[e].target;
                 kept = w->units[target].original_binding == 2 ? own[target] : w->originals[target];
             }
             if (!kept) { own[i] = 0; changed = 1; }
         }
     }
     for (size_t i = 0; i < w->count; i++) if (w->units[i].original_binding == 2) w->originals[i] = own[i];
-    free(own);
+    if (view != w->nodes) free(view);
+    free(view_edges); free(own);
     order = pl_alloc(classes->count, sizeof(*order));
     if (!order) goto allocation;
     for (size_t c = 0; c < classes->count; c++) {
@@ -1327,9 +1360,14 @@ static int pl_identify(pl_work *w)
         return pl_fail(w, "resource identity inputs contain an unnamed unit");
     w->work = pl_alloc(w->count, sizeof(*w->work));
     w->nodes = pl_alloc(w->count, sizeof(*w->nodes));
-    return w->work && w->nodes && pl_collect(w) &&
-        sh_package_link_identify_verified(w->nodes, w->count, pl_verify_equal, w,
-            &w->output.classes, w->error, w->capacity);
+    if (!w->work || !w->nodes || !pl_collect(w)) return 0;
+    sh_package_link_edge *edges = NULL;
+    sh_package_link_node *view = pl_stable_view(w, &edges);
+    if (!view) return pl_fail(w, "cannot allocate resource identity view");
+    int ok = sh_package_link_identify_verified(view, w->count, pl_verify_equal, w,
+        &w->output.classes, w->error, w->capacity);
+    if (view != w->nodes) free(view);
+    free(edges); return ok;
 }
 
 int sh_package_link_identify_units(const sh_package_link_unit *units, size_t count,

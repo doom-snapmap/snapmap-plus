@@ -1732,7 +1732,7 @@ static void ds_runtime_premark(ds_materialize_context *context)
  * guard leaves pending-load set, clear the bit and call generic load
  * directly. Type-specific reload lifetime still requires native validation.
  */
-static void ds_runtime_reload_shadowed(ds_materialize_context *context)
+static void ds_runtime_promote_marks(void)
 {
     int i;
 
@@ -1751,8 +1751,11 @@ static void ds_runtime_reload_shadowed(ds_materialize_context *context)
             g_rt_marks[i].shadowed = 0;
         }
     }
+}
 
-    for (i = 0; i < g_rt_mark_count; i++) {
+static void ds_runtime_reload_mark(ds_materialize_context *context, int i)
+{
+    {
         ds_candidate *candidate;
         void *decl;
         unsigned char state = 0;
@@ -1777,7 +1780,7 @@ static void ds_runtime_reload_shadowed(ds_materialize_context *context)
             InterlockedIncrement(&g_rearm_drain_faults);
             ds_log("DRAIN-FAULT", candidate->source,
                    "forced re-parse raised an engine exception; pending mark will be swept");
-            continue;
+            return;
         }
         if ((state & DS_DECL_PENDING_LOAD) != 0 && g_generic_load) {
             /* If ordinary lookup leaves the mark, clear it and invoke generic
@@ -1797,7 +1800,7 @@ static void ds_runtime_reload_shadowed(ds_materialize_context *context)
                 InterlockedIncrement(&g_rearm_drain_faults);
                 ds_log("DRAIN-FAULT", candidate->source,
                        "direct generic load raised an engine exception");
-                continue;
+                return;
             }
         }
         if (ds_candidate_usable(candidate, decl, NULL)) {
@@ -1964,7 +1967,7 @@ static int ds_materialize_missing_sedefs(void *registry,
                                          int *materialized)
 {
     ds_materialize_context context;
-    int i;
+    int i, refresh, mark = 0, failed = 0;
 
     if (materialized) *materialized = 0;
     if (!registry || !type_by_name || !source_find || !find_decl) return 0;
@@ -1976,19 +1979,10 @@ static int ds_materialize_missing_sedefs(void *registry,
 
     /* A runtime pass refreshes stale pre-existing decls with the engine's own pending-load
      * mechanism; every mark must exist before the first drain (see ds_runtime_premark). */
-    if (g_boot_refresh || InterlockedCompareExchange(&g_rearm_is_runtime, 0, 0))
+    refresh = g_boot_refresh || InterlockedCompareExchange(&g_rearm_is_runtime, 0, 0);
+    if (refresh)
         ds_runtime_premark(&context);
-    if ((g_boot_refresh || InterlockedCompareExchange(&g_rearm_is_runtime, 0, 0)) &&
-        InterlockedCompareExchange(&g_rearm_drain_faults, 0, 0)) return 0;
-
-    /* Finish every reconstructed object before validating new identities.
-     * A rejected new material must not strand unrelated existing resources
-     * in their empty constructor state. This also drains reused defaults;
-     * dependency lookups may have completed some targets already. */
-    if (g_boot_refresh || InterlockedCompareExchange(&g_rearm_is_runtime, 0, 0)) {
-        ds_runtime_reload_shadowed(&context);
-        if (InterlockedCompareExchange(&g_rearm_drain_faults, 0, 0)) return 0;
-    }
+    if (refresh && InterlockedCompareExchange(&g_rearm_drain_faults, 0, 0)) return 0;
 
     for (i = 0; i < g_candidate_count; i++) {
         ds_candidate *candidate = &g_candidates[i];
@@ -2002,13 +1996,26 @@ static int ds_materialize_missing_sedefs(void *registry,
                    "source-only snapEditorEntityDef has no direct edit.entityDef or inherit assignment; excluded from materialization and palette admission");
         }
     }
+    /* Reload stale identities and materialize new ones in the snapshot's
+     * dependency order: a live declaration naming a new identity (the stock
+     * player hands web naming a package's model) must parse after that
+     * identity exists. Every reconstructed object is still reloaded before a
+     * failure is reported, so a rejected new material never strands an
+     * unrelated resource in its empty constructor state; after a failure or
+     * drain fault no further identity is materialized. */
+    if (refresh) ds_runtime_promote_marks();
     for (i = 0; i < g_candidate_count; i++) {
         ds_candidate *candidate = &g_candidates[i];
-        if (candidate->outcome != DS_CANDIDATE_MISSING ||
+        for (; refresh && mark < g_rt_mark_count && g_rt_marks[mark].candidate == i; mark++)
+            ds_runtime_reload_mark(&context, mark);
+        if (failed || candidate->outcome != DS_CANDIDATE_MISSING ||
             _stricmp(candidate->type, "snapEditorEntityDef") == 0)
             continue;
-        if (!ds_materialize_identity(&context, i)) return 0;
+        if (refresh && InterlockedCompareExchange(&g_rearm_drain_faults, 0, 0)) { failed = 1; continue; }
+        if (!ds_materialize_identity(&context, i)) failed = 1;
     }
+    for (; refresh && mark < g_rt_mark_count; mark++) ds_runtime_reload_mark(&context, mark);
+    if (failed || (refresh && InterlockedCompareExchange(&g_rearm_drain_faults, 0, 0))) return 0;
     for (i = 0; i < g_candidate_count; i++) {
         ds_candidate *candidate = &g_candidates[i];
         if (candidate->outcome != DS_CANDIDATE_MISSING ||

@@ -2398,6 +2398,48 @@ static void test_runtime_premark_reused_empties(void)
     HeapFree(GetProcessHeap(), 0, b);
 }
 
+/* A live declaration naming a new identity (the stock player hands web naming
+ * a package's private model) re-parses only after that identity exists: the
+ * pass follows the snapshot's dependency order, not reloads first. */
+static unsigned char g_order_model[0x300];
+static int g_order_clock, g_order_model_made, g_order_web_loaded;
+static void *rt_order_find(void *type_manager, const char *logical_name, unsigned char make_default)
+{
+    if (logical_name && !strcmp(logical_name, "rt/model")) {
+        if (make_default && !g_order_model_made) g_order_model_made = ++g_order_clock;
+        return g_order_model_made ? g_order_model : NULL;
+    }
+    if (logical_name && !strcmp(logical_name, "rt/web") && g_rt_objects[0] &&
+        (g_rt_objects[0][0x2c] & 0x02) && !g_order_web_loaded)
+        g_order_web_loaded = ++g_order_clock;
+    return rt_find_decl(type_manager, logical_name, make_default);
+}
+static void test_runtime_reload_follows_new_dependencies(void)
+{
+    static const unsigned char body[] = "{ }";
+    sh_decl_server_test_materialize_item items[] = {
+        { "md6Def", "rt/model", "generated/decls/md6def/rt/model.decl",
+          SH_DECL_SERVER_TEST_MISSING, body, sizeof(body) - 1, 0 },
+        { "animWeb", "rt/web", "generated/decls/animweb/rt/web.decl",
+          SH_DECL_SERVER_TEST_SHADOWED, NULL, 0, SH_DECL_SERVER_TEST_SHADOW_LIVE }
+    };
+    unsigned char web[0x300] = {0};
+    int materialized = -1;
+    memset(g_order_model, 0, sizeof(g_order_model));
+    g_order_clock = g_order_model_made = g_order_web_loaded = 0;
+    rt_reset(); sh_decl_server_test_reset_runtime_state();
+    g_rt_names[0] = "rt/web"; g_rt_objects[0] = web;
+    *(unsigned int *)(web + 0x28) = 4u;
+    sh_decl_server_test_set_runtime(1);
+    CHECK(sh_decl_server_test_materialize_missing_sedefs(items, 2, (void *)(uintptr_t)0x98760000u,
+        rt_type_by_name, rt_source_find, rt_order_find, &materialized) == 1);
+    sh_decl_server_test_set_runtime(0);
+    CHECK(materialized == 1 && g_rt_loads[0] == 1);
+    CHECK(g_order_model_made && g_order_web_loaded && g_order_model_made < g_order_web_loaded);
+    CHECK((web[0x2c] & 0x02) == 0 && sh_decl_server_test_clear_stray_pending() == 0);
+    rt_reset(); sh_decl_server_test_reset_runtime_state();
+}
+
 static void test_runtime_preserves_unaffected_caches(void)
 {
     unsigned char objects[2][0x800] = {0};
@@ -3693,6 +3735,7 @@ int main(void)
     test_sedef_materialization();
     test_runtime_premark_reused_empties();
     test_runtime_shadowed_refresh();
+    test_runtime_reload_follows_new_dependencies();
     test_runtime_preserves_unaffected_caches();
     test_runtime_reconstruction_fault_restores_lifetime();
     test_rejected_new_identity_does_not_strand_replacements();

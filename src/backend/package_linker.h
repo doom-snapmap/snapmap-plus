@@ -61,6 +61,11 @@ typedef struct sh_package_link_unit {
      * foreign file indices to this declaration's physical source list. Borrowed
      * through linking; the output receives independent sets. */
     const sh_package_owners *implicit_owners, *implicit_gameplay_owners;
+    /* A unit every consumer reaches by its one native name (the player hands
+     * web). Each scope binds that same name, so neither its per-scope content
+     * nor its changes enter a dependent's identity or original certification;
+     * its own bytes and edges are identified and certified as usual. */
+    int stable_name;
 } sh_package_link_unit;
 
 typedef int (*sh_package_link_reference)(void *context, const char *slot,
