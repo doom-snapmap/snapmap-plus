@@ -70,6 +70,165 @@ static void refuse(const char *name, const char *family, const char *baseline,
     }
 }
 
+/* The player's hands web: whole-copy contributions aligned, then composed. */
+static char *hands(const char *name, const char *baseline, const char **texts, size_t count,
+    sh_decl_animweb_move **moves, size_t *move_count)
+{
+    sh_decl_source sources[4];
+    char *owned[4], error[512] = "", *out = NULL;
+    size_t length = 0;
+    for (size_t i = 0; i < count; i++) sources[i] = src(texts[i]);
+    if (!sh_decl_animweb_prepare(src(baseline), sources, count, owned, moves, move_count, error, sizeof(error))) {
+        report(name, error[0] ? error : "prepare refused"); return NULL;
+    }
+    out = sh_decl_block_compose("animweb", src(baseline), sources, count, &length, error, sizeof(error), NULL);
+    for (size_t i = 0; i < count; i++) free(owned[i]);
+    if (!out) report(name, error[0] ? error : "compose refused");
+    return out;
+}
+static void holds(const char *name, const char *out, const char *needle, int present)
+{
+    if (!out || (strstr(out, needle) != NULL) != present) {
+        char detail[900];
+        snprintf(detail, sizeof(detail), "%s '%s' in:\n%s", present ? "missing" : "unexpected", needle, out ? out : "(none)");
+        report(name, detail);
+    }
+}
+static size_t occurrences(const char *out, const char *needle)
+{
+    size_t count = 0;
+    for (const char *at = out; at && (at = strstr(at, needle)); at += strlen(needle)) count++;
+    return count;
+}
+
+#define AW_STOCK \
+    "{ props { editPos ( 1 2 3 ) modelInfos { \"hands\" \"\" } }\n" \
+    "states { state \"up\" { } state \"down\" { } }\n" \
+    "subWebs {\n" \
+    "subWeb \"rifle\" { node \"down\" { edges {\n" \
+    "edge { toState \"up\" toSubWeb \"pistol\" blendParms { duration 3 } } } }\n" \
+    "node \"up\" { blendTrees { tree { modelIndex 0 anims { alias { name \"rifle_up\" } } } } } }\n" \
+    "subWeb \"pistol\" { node \"down\" { edges {\n" \
+    "edge { toState \"up\" toSubWeb \"rifle\" blendParms { duration 3 } } } }\n" \
+    "node \"up\" { blendTrees { tree { modelIndex 0 anims { alias { name \"pistol_up\" } } } } } } } }"
+
+/* A weapon package's whole copy: the stock web, its own model and subweb,
+ * and glue edges from the stock subwebs into it. */
+#define AW_WEAPON(view, model, sub, anim) \
+    "{ props { editPos " view " modelInfos { \"hands\" \"\" \"" model "\" \"\" } }\n" \
+    "states { state \"up\" { } state \"down\" { } }\n" \
+    "subWebs {\n" \
+    "subWeb \"rifle\" { node \"down\" { edges {\n" \
+    "edge { toState \"up\" toSubWeb \"pistol\" blendParms { duration 3 } }\n" \
+    "edge { toState \"up\" toSubWeb \"" sub "\" blendParms { duration 3 } } } }\n" \
+    "node \"up\" { blendTrees { tree { modelIndex 0 anims { alias { name \"rifle_up\" } } } } } }\n" \
+    "subWeb \"pistol\" { node \"down\" { edges {\n" \
+    "edge { toState \"up\" toSubWeb \"rifle\" blendParms { duration 3 } }\n" \
+    "edge { toState \"up\" toSubWeb \"" sub "\" blendParms { duration 3 } } } }\n" \
+    "node \"up\" { blendTrees { tree { modelIndex 0 anims { alias { name \"pistol_up\" } } } } } }\n" \
+    "subWeb \"" sub "\" { node \"down\" { edges {\n" \
+    "edge { toState \"up\" toSubWeb \"rifle\" blendParms { duration 3 } } } }\n" \
+    "node \"up\" { blendTrees { tree { modelIndex 1 anims { alias { name \"" anim "\" } } } } } } } }"
+
+static void test_hands_web(void)
+{
+    sh_decl_animweb_move *moves = NULL; size_t move_count = 0;
+    /* Disjoint weapons: both subwebs, both glue edges in every stock node,
+     * one model list with each weapon's index following its model, and the
+     * authors' editor views never collide. */
+    {
+        const char *texts[] = {AW_WEAPON("( 9 9 9 )", "sp", "sp_pistol", "sp_up"),
+            AW_WEAPON("( 7 7 7 )", "plasma", "plasma", "plasma_up")};
+        char *out = hands("hands disjoint", AW_STOCK, texts, 2, &moves, &move_count);
+        holds("hands disjoint", out, "subWeb \"sp_pistol\"", 1);
+        holds("hands disjoint", out, "subWeb \"plasma\"", 1);
+        holds("hands disjoint", out, "\"sp\" \"\"", 1);
+        holds("hands disjoint", out, "\"plasma\" \"\"", 1);
+        holds("hands disjoint", out, "editPos ( 1 2 3 )", 1);
+        if (out && occurrences(out, "toSubWeb \"sp_pistol\"") != 2) report("hands disjoint", "sp_pistol glue edges");
+        if (out && occurrences(out, "toSubWeb \"plasma\"") != 2) report("hands disjoint", "plasma glue edges");
+        /* plasma's model is third in the union; its node follows it. */
+        const char *plasma = out ? strstr(out, "subWeb \"plasma\"") : NULL;
+        if (!plasma || !strstr(plasma, "modelIndex 2") || strstr(out, "subWeb \"sp_pistol\"") > plasma) {
+            const char *sp = out ? strstr(out, "subWeb \"sp_pistol\"") : NULL;
+            if (!plasma || !strstr(plasma, "modelIndex 2") || (sp && strstr(sp, "modelIndex 1") == NULL))
+                report("hands disjoint", "model indices do not follow their models");
+        }
+        if (move_count) report("hands disjoint", "disjoint weapons must not move");
+        sh_decl_animweb_moves_free(moves, move_count); moves = NULL; move_count = 0; free(out);
+    }
+    /* Exact-equal weapons compose once. */
+    {
+        const char *texts[] = {AW_WEAPON("( 9 9 9 )", "sp", "sp_pistol", "sp_up"),
+            AW_WEAPON("( 5 5 5 )", "sp", "sp_pistol", "sp_up")};
+        char *out = hands("hands equal", AW_STOCK, texts, 2, &moves, &move_count);
+        if (out && occurrences(out, "subWeb \"sp_pistol") != 1) report("hands equal", "equal subwebs must compose once");
+        if (move_count) report("hands equal", "equal weapons must not move");
+        sh_decl_animweb_moves_free(moves, move_count); moves = NULL; move_count = 0; free(out);
+    }
+    /* Same subweb name, different behavior: the later weapon gets its own
+     * copy, entered from every stock subweb, and neither inherits the other. */
+    {
+        const char *texts[] = {AW_WEAPON("( 9 9 9 )", "sp", "sp_pistol", "sp_up"),
+            AW_WEAPON("( 9 9 9 )", "sp2", "sp_pistol", "sp2_up")};
+        char *out = hands("hands variants", AW_STOCK, texts, 2, &moves, &move_count);
+        if (move_count != 1 || !moves || moves[0].source != 1 || strcmp(moves[0].from, "sp_pistol") ||
+            strncmp(moves[0].to, "sp_pistol_", 10)) report("hands variants", "the later weapon's subweb must move");
+        else {
+            char block[128], edge[128];
+            snprintf(block, sizeof(block), "subWeb \"%s\"", moves[0].to);
+            snprintf(edge, sizeof(edge), "toSubWeb \"%s\"", moves[0].to);
+            holds("hands variants", out, block, 1);
+            if (out && occurrences(out, edge) != 2) report("hands variants", "the moved copy needs its entering twins");
+            const char *mine = out ? strstr(out, block) : NULL, *first = out ? strstr(out, "subWeb \"sp_pistol\"") : NULL;
+            if (!mine || !first || !strstr(mine, "sp2_up") || strstr(first, "sp_up") == NULL ||
+                (strstr(first, "sp2_up") && strstr(first, "sp2_up") < mine && first < mine))
+                report("hands variants", "each copy must keep its own animation");
+        }
+        if (out && occurrences(out, "toSubWeb \"sp_pistol\"") != 2) report("hands variants", "original glue edges");
+        sh_decl_animweb_moves_free(moves, move_count); moves = NULL; move_count = 0; free(out);
+    }
+    /* Two later weapons with one equal version share one copy of it. */
+    {
+        const char *texts[] = {AW_WEAPON("( 9 9 9 )", "sp", "sp_pistol", "sp_up"),
+            AW_WEAPON("( 9 9 9 )", "sp2", "sp_pistol", "sp2_up"),
+            AW_WEAPON("( 4 4 4 )", "sp2", "sp_pistol", "sp2_up")};
+        char *out = hands("hands shared copy", AW_STOCK, texts, 3, &moves, &move_count);
+        if (move_count != 2 || !moves || strcmp(moves[0].to, moves[1].to)) report("hands shared copy", "equal versions must share a name");
+        if (out && occurrences(out, "subWeb \"sp_pistol") != 2) report("hands shared copy", "one original and one shared copy");
+        sh_decl_animweb_moves_free(moves, move_count); moves = NULL; move_count = 0; free(out);
+    }
+    /* A weapon that changes a stock subweb's behavior owns its copy; the
+     * stock subweb stays stock but keeps the weapon's glue into its subweb. */
+    {
+        const char *texts[] = {
+            "{ props { editPos ( 1 2 3 ) modelInfos { \"hands\" \"\" \"sp\" \"\" } }\n"
+            "states { state \"up\" { } state \"down\" { } }\n"
+            "subWebs {\n"
+            "subWeb \"rifle\" { node \"down\" { edges {\n"
+            "edge { toState \"up\" toSubWeb \"pistol\" blendParms { duration 3 } }\n"
+            "edge { toState \"up\" toSubWeb \"sp_pistol\" blendParms { duration 3 } } } }\n"
+            "node \"up\" { blendTrees { tree { modelIndex 0 anims { alias { name \"rifle_fast\" } } } } } }\n"
+            "subWeb \"sp_pistol\" { node \"down\" { edges {\n"
+            "edge { toState \"up\" toSubWeb \"rifle\" blendParms { duration 3 } } } }\n"
+            "node \"up\" { blendTrees { tree { modelIndex 1 anims { alias { name \"sp_up\" } } } } } } } }"};
+        char *out = hands("hands stock change", AW_STOCK, texts, 1, &moves, &move_count);
+        if (move_count != 1 || !moves || strcmp(moves[0].from, "rifle")) report("hands stock change", "the changed stock subweb must move");
+        holds("hands stock change", out, "rifle_up", 1);
+        holds("hands stock change", out, "rifle_fast", 1);
+        /* The stock pistol subweb, deleted by this copy, stays for the others. */
+        holds("hands stock change", out, "subWeb \"pistol\"", 1);
+        holds("hands stock change", out, "pistol_up", 1);
+        /* Stock rifle and the weapon's copy both enter sp_pistol. */
+        if (out && occurrences(out, "toSubWeb \"sp_pistol\"") != 2) report("hands stock change", "stock rifle keeps the weapon's glue");
+        /* Stock subwebs keep their order: rifle stays first, then pistol. */
+        const char *first = out ? strstr(out, "subWeb \"") : NULL, *pistol = out ? strstr(out, "subWeb \"pistol\"") : NULL;
+        if (!first || strncmp(first, "subWeb \"rifle\" {", 16) || !pistol || strstr(out, "subWeb \"rifle\" {") > pistol)
+            report("hands stock change", "stock subwebs must keep their order");
+        sh_decl_animweb_moves_free(moves, move_count); moves = NULL; move_count = 0; free(out);
+    }
+}
+
 int main(void)
 {
     /* ---------------------------------------------------------- breakable */
@@ -229,17 +388,40 @@ int main(void)
             expect, sizeof(expect) / sizeof(expect[0]));
     }
     {
-        /* A node deep inside a sub-web composes at its own field granularity. */
-        static const char *expect[] = {"toState \"unlocked\"", "destDuration 12"};
+        /* A node deep inside a sub-web composes at its own field granularity:
+         * two contributions tune different blend fields of one transition. */
+        static const char *expect[] = {"duration 7", "destDuration 12", "toState \"locked\""};
         pass("animweb nested edge parms", "animweb",
             "{ subWebs { subWeb \"w\" { node \"locked\" { edges { edge {\n"
             "toState \"locked\" blendParms { destDuration 4 duration 0 } } } } } } }",
             "{ subWebs { subWeb \"w\" { node \"locked\" { edges { edge {\n"
-            "toState \"unlocked\" blendParms { destDuration 4 duration 0 } } } } } } }",
+            "toState \"locked\" blendParms { destDuration 4 duration 7 } } } } } } }",
             "{ subWebs { subWeb \"w\" { node \"locked\" { edges { edge {\n"
             "toState \"locked\" blendParms { destDuration 12 duration 0 } } } } } } }",
             expect, sizeof(expect) / sizeof(expect[0]));
     }
+    {
+        /* An edge is the transition to its destination: edges two
+         * contributions insert into one node both survive, and an insertion
+         * before an edge another contribution tunes renumbers nothing. */
+        static const char *expect[] = {"toSubWeb \"sp\"", "toSubWeb \"plasma\"", "duration 9"};
+        pass("animweb inserted edges", "animweb",
+            "{ subWebs { subWeb \"w\" { node \"down\" { edges {\n"
+            "edge { toState \"up\" toSubWeb \"rifle\" blendParms { duration 3 } } } } } } }",
+            "{ subWebs { subWeb \"w\" { node \"down\" { edges {\n"
+            "edge { toState \"up\" toSubWeb \"sp\" blendParms { duration 3 } }\n"
+            "edge { toState \"up\" toSubWeb \"rifle\" blendParms { duration 3 } } } } } } }",
+            "{ subWebs { subWeb \"w\" { node \"down\" { edges {\n"
+            "edge { toState \"up\" toSubWeb \"rifle\" blendParms { duration 9 } }\n"
+            "edge { toState \"up\" toSubWeb \"plasma\" blendParms { duration 3 } } } } } } }",
+            expect, sizeof(expect) / sizeof(expect[0]));
+    }
+    /* Retargeting a transition removes it; tuning the old one then conflicts. */
+    refuse("animweb retargeted edge", "animweb",
+        "{ subWebs { subWeb \"w\" { node \"n\" { edges { edge { toState \"a\" blendParms { duration 0 } } } } } } }",
+        "{ subWebs { subWeb \"w\" { node \"n\" { edges { edge { toState \"b\" blendParms { duration 0 } } } } } } }",
+        "{ subWebs { subWeb \"w\" { node \"n\" { edges { edge { toState \"a\" blendParms { duration 4 } } } } } } }",
+        "incompatible");
     {
         /* wrap takes one enum value; the reader does not read to end of line. */
         static const char *expect[] = {"wrap WRAP_REPEAT", "rate 2"};
@@ -295,6 +477,8 @@ int main(void)
             "{ phonemeSet \"english\" weightScale 2 durationScale 1 phonemes { } }",
             NULL, expect, sizeof(expect) / sizeof(expect[0]));
     }
+
+    test_hands_web();
 
     /* ------------------------------------------------------------ families */
     if (!sh_decl_block_family("breakable")) report("family table", "breakable is not registered");

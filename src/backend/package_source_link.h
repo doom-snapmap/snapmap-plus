@@ -196,6 +196,11 @@ int sh_package_source_link_key_space(sh_package_source_link *source, struct sh_p
  * idPlayer::handsAnimWeb or _D1: the one global web every weapon's subweb is
  * resolved in. */
 int sh_package_source_link_player_hands(const sh_package_source_link *source, const char *name);
+/* The same stock contract read through a baseline reader alone: the names of
+ * the hands webs (malloc-owned, possibly none). 0 when a stock entity it needs
+ * is unreadable. */
+int sh_package_player_hands_webs(sh_package_baseline_reader original, void *context,
+    char ***names, size_t *count);
 /* Physical members of multi-file units use their captured role. In particular,
  * shader source, cooked records and stage modules are different formats. */
 unsigned char *sh_package_source_link_bind_file(sh_package_source_link *source, size_t unit,

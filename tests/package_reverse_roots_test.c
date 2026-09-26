@@ -57,26 +57,26 @@ static void setup(fixture *f)
 {
     static const char *classes[] = {"idDeclEntityDef", "Entity", "idDeclTypeInfo",
         "idDeclSnapEditorEntity", "idImage", "idRenderModel", "idStaticModel", "idStr", "idDeclTypeInfoGraph",
-        "idDeclRenderProg", "idDeclAnimWeb"};
-    static const char *types[] = {"entityDef", "snapEditorEntityDef", "image", "renderProg", "animWeb"};
-    static const size_t indices[] = {0, 3, 4, 9, 10};
+        "idDeclRenderProg", "idDeclAnimWeb", "idDeclWeapon"};
+    static const char *types[] = {"entityDef", "snapEditorEntityDef", "image", "renderProg", "animWeb", "weapon"};
+    static const size_t indices[] = {0, 3, 4, 9, 10, 11};
     f->registry = allocate(f, 0x18);
-    void *managers = allocate(f, 5 * 8);
-    pointer(f->registry, 8, managers); number(f->registry, 0x10, 5);
-    for (size_t i = 0; i < 5; i++) {
+    void *managers = allocate(f, 6 * 8);
+    pointer(f->registry, 8, managers); number(f->registry, 0x10, 6);
+    for (size_t i = 0; i < 6; i++) {
         void *manager = allocate(f, 0x90); pointer(managers, i * 8, manager);
         pointer(manager, 8, text(f, types[i])); pointer(manager, 0x10, text(f, classes[indices[i]]));
     }
     f->reflection = allocate(f, 0xb0);
-    void *container = allocate(f, 0x30), *records = allocate(f, 12 * 0x38);
-    void *objects = allocate(f, 12 * 16), *pointers = allocate(f, 12 * 16);
+    void *container = allocate(f, 0x30), *records = allocate(f, 13 * 0x38);
+    void *objects = allocate(f, 13 * 16), *pointers = allocate(f, 13 * 16);
     pointer(f->reflection, 0, container); pointer(container, 0x20, records);
-    pointer(f->reflection, 0x88, objects); number(f->reflection, 0x90, 12);
-    pointer(f->reflection, 0xa0, pointers); number(f->reflection, 0xa8, 12);
-    pointer(pointers, 10 * 16 + 8, (void *)0x10);
-    for (size_t i = 0; i < 11; i++) {
+    pointer(f->reflection, 0x88, objects); number(f->reflection, 0x90, 13);
+    pointer(f->reflection, 0xa0, pointers); number(f->reflection, 0xa8, 13);
+    pointer(pointers, 10 * 16 + 8, (void *)0x10); pointer(pointers, 11 * 16 + 8, (void *)0x10);
+    for (size_t i = 0; i < 12; i++) {
         pointer(records, i * 0x38, text(f, classes[i]));
-        pointer(records, i * 0x38 + 8, text(f, i == 3 || i == 8 ? "idDeclTypeInfo" : ""));
+        pointer(records, i * 0x38 + 8, text(f, i == 3 || i == 8 || i == 11 ? "idDeclTypeInfo" : ""));
     }
     pointer(pointers, 8, (void *)0x10); pointer(pointers, 3 * 16 + 8, (void *)0x10);
     pointer(pointers, 4 * 16 + 8, (void *)0x40); pointer(pointers, 5 * 16 + 8, (void *)0x50);
@@ -90,6 +90,9 @@ static void setup(fixture *f)
     const char *st[] = {"idDeclEntityDef", "idStr", "idStr"};
     const char *so[] = {"*", "", ""}, *sn[] = {"entityDef", "category", "displayName"};
     fields(f, (char *)records + 3 * 0x38, 3, st, so, sn);
+    /* A weapon names its hands subwebs by string. */
+    const char *wt[] = {"idStr", "idStr"}, *wo[] = {"", ""}, *wn[] = {"subweb_normal", "handsHitReactionSubweb"};
+    fields(f, (char *)records + 11 * 0x38, 2, wt, wo, wn);
 }
 
 typedef struct bytes { unsigned char data[4096]; size_t length; } bytes;
@@ -555,8 +558,12 @@ static void test_player_hands(fixture *f, const sh_package_compile_environment *
      * so only the player reaches the web (observed by reverse discovery). */
     snprintf(home, sizeof(home), "%s\\overrides\\gap", root); snprintf(held, sizeof(held), "%s\\gap-held", root);
     assert(MoveFileA(home, held));
+    /* The weapon also changes the stock pistol subweb: even as the web's only
+     * supplier its copy aligns against the stock original, so the stock
+     * pistol stays for everyone and the weapon owns its changed copy. */
     package("weapon", "Weapon", "generated/decls/animweb/hands.decl",
-        "{ props { modelInfos { \"hands.md6\" \"\" } } states { } subWebs { subWeb \"pistol\" { } subWeb \"sp_pistol\" { } } }");
+        "{ props { modelInfos { \"hands.md6\" \"\" } } states { } subWebs { subWeb \"pistol\" { "
+        "node \"own\" { props { } blendTrees { } edges { } } } subWeb \"sp_pistol\" { } } }");
     sh_package_sources *sources = sh_package_sources_scan(root, error, sizeof(error)); assert(sources);
     for (int hands = 1; hands <= 3; hands++) {
         f->hands = hands;
@@ -568,6 +575,7 @@ static void test_player_hands(fixture *f, const sh_package_compile_environment *
         if (!web) for (size_t i = 0; i < library.compiled->resource_count; i++)
             fprintf(stderr, "  %s %s\n", library.compiled->resources[i].engine_path, library.compiled->resources[i].name);
         assert(web); contains(&library, web, "sp_pistol");
+        contains(&library, web, "subWeb \"pistol\" {"); contains(&library, web, "subWeb \"pistol_");
         assert(!binding(&library, sources, "Weapon", "", "snapeditorentitydef", "unrelated"));
         assert(!binding(&library, sources, "Weapon", "", "entitydef", "props/unrelated"));
         /* Every scope reaches the web by its stock name, so a stock model the
@@ -593,6 +601,80 @@ static void test_player_hands(fixture *f, const sh_package_compile_environment *
     const sh_compiled_resource *web = resource(&library, "animweb", "hands");
     assert(web); contains(&library, web, "sp_pistol"); contains(&library, web, "plasma");
     sh_package_library_free(&library); sh_package_sources_free(sources);
+    /* A third package defines sp_pistol differently: whichever package is
+     * later in stable source order owns its copy under another name, and each
+     * weapon names the subweb carrying its own nodes. */
+    create("overrides/weapon/assets/generated/decls/weapon/first.decl",
+        "{ edit = { subweb_normal = \"sp_pistol\"; handsHitReactionSubweb = \"pistol\"; } }");
+    package("weapon3", "Weapon Three", "generated/decls/animweb/hands.decl",
+        "{ props { modelInfos { \"hands.md6\" \"\" } } states { } subWebs { subWeb \"pistol\" { } "
+        "subWeb \"sp_pistol\" { node \"third\" { props { } blendTrees { } edges { } } } } }");
+    create("overrides/weapon3/assets/generated/decls/weapon/third.decl",
+        "{ edit = { subweb_normal = \"sp_pistol\"; handsHitReactionSubweb = \"sp_pistol\"; } }");
+    /* Reversing discovery order (renamed folders, same trees) keeps the same
+     * package on the contested name. */
+    int kept_by_third = -1;
+    for (int round = 0; round < 2; round++) {
+    if (round) {
+        char from[MAX_PATH], to[MAX_PATH];
+        snprintf(from, sizeof(from), "%s\\overrides\\weapon", root); snprintf(to, sizeof(to), "%s\\overrides\\zz-weapon", root);
+        assert(MoveFileA(from, to));
+        snprintf(from, sizeof(from), "%s\\overrides\\weapon3", root); snprintf(to, sizeof(to), "%s\\overrides\\aa-weapon3", root);
+        assert(MoveFileA(from, to));
+    }
+    sources = sh_package_sources_scan(root, error, sizeof(error)); assert(sources);
+    ok = sh_package_library_compile(sources, &env, catalog, original, f, registry,
+        (uintptr_t)f->reflection, native, &library, error, sizeof(error));
+    if (!ok) fprintf(stderr, "player hands variants %d: %s\n", round, error);
+    assert(ok);
+    web = resource(&library, "animweb", "hands");
+    assert(web); contains(&library, web, "plasma");
+    size_t weapons = 0;
+    for (size_t i = 0; i < library.compiled->resource_count; i++) {
+        const sh_compiled_resource *r = library.compiled->resources + i;
+        if (!r->native_type || strcmp(r->native_type, "weapon")) continue;
+        char text[512], name[128], block[160];
+        size_t length = 0;
+        unsigned char *body = sh_package_compilation_read(library.compiled, r, SIZE_MAX, &length, error, sizeof(error));
+        assert(body && length < sizeof(text)); memcpy(text, body, length); text[length] = 0; free(body);
+        const char *at = strstr(text, "subweb_normal = \"");
+        assert(at); at += strlen("subweb_normal = \"");
+        size_t n = strcspn(at, "\""); assert(n < sizeof(name)); memcpy(name, at, n); name[n] = 0;
+        snprintf(block, sizeof(block), "subWeb \"%s\" {", name);
+        assert(holds(&library, web, block));
+        /* The named copy holds this weapon's own node. */
+        char *served = NULL; size_t served_length = 0;
+        unsigned char *raw_web = sh_package_compilation_read(library.compiled, web, SIZE_MAX, &served_length, error, sizeof(error));
+        assert(raw_web); served = realloc(raw_web, served_length + 1); assert(served); served[served_length] = 0;
+        const char *mine = strstr(served, block), *end = mine ? strstr(mine + 1, "subWeb \"") : NULL;
+        /* The third weapon's hit reaction names its own subweb. */
+        const char *hit_at = strstr(text, "handsHitReactionSubweb = \"");
+        assert(hit_at); hit_at += strlen("handsHitReactionSubweb = \"");
+        int third = !strncmp(hit_at, name, n) && hit_at[n] == '"';
+        const char *node = mine ? strstr(mine, "node \"third\"") : NULL;
+        if (third) assert(node && (!end || node < end));
+        else assert(!node || (end && node > end));
+        /* A hit-reaction subweb naming the same subweb follows it too. */
+        /* The first weapon's hit reaction names the pistol copy its package
+         * owns, never the stock pistol. */
+        if (!third) assert(!strncmp(hit_at, "pistol_", 7));
+        if (!strcmp(name, "sp_pistol")) {
+            if (!round) kept_by_third = third;
+            else assert(kept_by_third == third);
+        }
+        free(served);
+        weapons++;
+    }
+    assert(weapons == 2 && kept_by_third >= 0);
+    sh_package_library_free(&library); sh_package_sources_free(sources);
+    }
+    {
+        char from[MAX_PATH], to[MAX_PATH];
+        snprintf(from, sizeof(from), "%s\\overrides\\zz-weapon", root); snprintf(to, sizeof(to), "%s\\overrides\\weapon", root);
+        assert(MoveFileA(from, to));
+        snprintf(from, sizeof(from), "%s\\overrides\\aa-weapon3", root); snprintf(to, sizeof(to), "%s\\overrides\\weapon3", root);
+        assert(MoveFileA(from, to));
+    }
     f->hands = 0;
     assert(MoveFileA(held, home));
 }

@@ -26,6 +26,9 @@ typedef struct bc_scope {
     const char *named;   /* blocks whose keyword is followed by one name token */
     int arity;           /* BC_LIST: tokens per record */
     int any_block;       /* BC_KEYED: any other name opens a nested "*" body */
+    /* "<block> <key>...": an unnamed block identified by the values of those
+     * keys in its own body rather than by its position among its peers. */
+    const char *keyed;
 } bc_scope;
 
 typedef struct bc_grammar {
@@ -166,7 +169,10 @@ static const bc_scope bc_animweb[] = {
     {"subWebs/subWeb/node/blendTrees/tree/anims", BC_KEYED, "", "", "alias", "", 0, 0},
     {"subWebs/subWeb/node/blendTrees/tree/anims/alias", BC_KEYED,
      "name md6anim wrap rate randomStart tags", "", "", "", 0, 0},
-    {"subWebs/subWeb/node/edges", BC_KEYED, "", "", "edge", "", 0, 0},
+    /* An edge is the transition to its destination (the engine searches edges
+     * for a path to a desired state and reports "could not find path"), so
+     * inserting one does not renumber its peers. */
+    {"subWebs/subWeb/node/edges", BC_KEYED, "", "", "edge", "", 0, 0, "edge toSubWeb toState"},
     {"subWebs/subWeb/node/edges/edge", BC_KEYED,
      "toState toSubWeb weightScale randomizeWeight customFlags", "", "blendParms", "", 0, 0},
     {"subWebs/subWeb/node/edges/edge/blendParms", BC_KEYED,
@@ -409,6 +415,45 @@ static int bc_keyword(const bc_context *c, const bc_scope *scope, size_t index)
         bc_listed(scope->blocks, text, length);
 }
 
+/* A keyed block's identity (bc_scope.keyed): the unquoted values of its
+ * identifying keys directly in its own body, joined by '/'. 0 when the block
+ * is not keyed in this scope. */
+static int bc_keyed_identity(bc_context *c, const bc_scope *scope, const char *key, size_t key_length,
+    size_t begin, size_t end, char *out, size_t capacity)
+{
+    const char *at = scope->keyed;
+    size_t used = 0, word = 0;
+    int first = 1;
+    if (!at) return 0;
+    while (at[word] && at[word] != ' ') word++;
+    if (word != key_length || memcmp(at, key, key_length)) return 0;
+    out[0] = 0;
+    for (at += word; *at;) {
+        const char *field, *value = "";
+        size_t field_length, value_length = 0;
+        while (*at == ' ') at++;
+        field = at;
+        while (*at && *at != ' ') at++;
+        field_length = (size_t)(at - field);
+        if (!field_length) break;
+        for (size_t i = begin; i < end;) {
+            size_t n; const char *text = bc_text(c, i, &n);
+            if (bc_is_name(c, i) && n == field_length && !memcmp(text, field, n) &&
+                i + 1 < end && bc_is_word(c, i + 1)) {
+                value = bc_text(c, i + 1, &value_length);
+                if (value_length >= 2 && *value == '"') { value++; value_length -= 2; }
+                break;
+            }
+            i = bc_opens(c, i) ? c->tokens.items[i].close + 1 : i + 1;
+        }
+        if (used + value_length + 2 > capacity) { bc_fail(c, "keyed block identity is too long"); return 0; }
+        if (!first) out[used++] = '/';
+        memcpy(out + used, value, value_length); used += value_length; out[used] = 0;
+        first = 0;
+    }
+    return 1;
+}
+
 /* --------------------------------------------------------------- normalizing */
 
 static int bc_body_records(bc_context *c, const bc_scope *scope, const char *path,
@@ -640,6 +685,11 @@ static int bc_body_records(bc_context *c, const bc_scope *scope, const char *pat
             inner = c->tokens.items[head].close;
             if (inner == SIZE_MAX || inner >= end)
                 return bc_fail(c, "block body is not closed inside its parent");
+            char keyed[192];
+            if (!name && bc_keyed_identity(c, scope, key, key_length, head + 1, inner, keyed, sizeof(keyed))) {
+                name = keyed; name_length = strlen(keyed);
+            }
+            if (c->failed) return 0;
             {
                 char prefix[288];
                 if (name) snprintf(prefix, sizeof(prefix), "%.*s:%.*s", (int)key_length, key,
@@ -846,4 +896,678 @@ done:
     if (normalized) for (size_t i = 0; i <= count; i++) free(normalized[i]);
     free(normalized); free(views);
     return out;
+}
+
+/* ------------------------------------------------------ player hands web */
+
+/* The player's hands web is one global registry: a weapon names its subweb
+ * (subweb_normal), its hit-reaction subweb and its states, and the hands
+ * animator resolves each by exact name in that one web (Vulkan FUN_140cbd0c0,
+ * FUN_1402652d0, FUN_140265170). Contributions are whole copies of the web, so
+ * before they compose each is aligned against the stock original here. */
+
+typedef struct aw_block { size_t key, open, close; const char *name; size_t name_length; } aw_block;
+typedef struct aw_web {
+    sh_decl_tokens tokens;
+    size_t props_open, props_close, models_open, models_close;
+    size_t subwebs_open, subwebs_close, states_open, states_close, layers_open, layers_close;
+    aw_block *subwebs, *states;
+    size_t subweb_count, state_count;
+    size_t *models, model_count;      /* token of each modelInfos entry's model */
+    size_t *map;                      /* entry position -> aligned position */
+} aw_web;
+typedef struct aw_edit { size_t begin, end, order; char *text; size_t length; } aw_edit;
+typedef struct aw_edits { aw_edit *items; size_t count, capacity; } aw_edits;
+
+static int aw_fail(char *error, size_t capacity, const char *reason)
+{
+    if (error && capacity) snprintf(error, capacity, "player hands web: %s", reason);
+    return 0;
+}
+static const char *aw_text(const aw_web *w, size_t i, size_t *n)
+{
+    const sh_decl_token *t = w->tokens.items + i;
+    *n = t->end - t->begin; return w->tokens.source.text + t->begin;
+}
+static int aw_is(const aw_web *w, size_t i, const char *text) { return sh_decl_token_is(&w->tokens, i, text); }
+static int aw_opens(const aw_web *w, size_t i)
+{
+    size_t n; const char *text = aw_text(w, i, &n);
+    return w->tokens.items[i].kind == SH_DECL_TOKEN_PUNCTUATION && n == 1 &&
+        (*text == '{' || *text == '(' || *text == '[');
+}
+static size_t aw_skip(const aw_web *w, size_t i) { return aw_opens(w, i) ? w->tokens.items[i].close + 1 : i + 1; }
+static int aw_word(const aw_web *w, size_t i)
+{ return i < w->tokens.count && w->tokens.items[i].kind != SH_DECL_TOKEN_PUNCTUATION; }
+static void aw_unquote(const char **text, size_t *n) { if (*n >= 2 && **text == '"') { (*text)++; *n -= 2; } }
+/* Token i spells this unquoted name. */
+static int aw_names(const aw_web *w, size_t i, const char *name, size_t length)
+{
+    size_t n; const char *text;
+    if (!aw_word(w, i)) return 0;
+    text = aw_text(w, i, &n); aw_unquote(&text, &n);
+    return n == length && !memcmp(text, name, length);
+}
+/* Key followed by a braced body at depth 0 of (open, close); SIZE_MAX absent. */
+static size_t aw_find(const aw_web *w, size_t open, size_t close, const char *key)
+{
+    for (size_t i = open + 1; i < close;) {
+        if (aw_is(w, i, key) && i + 1 < close && aw_is(w, i + 1, "{")) return i;
+        i = aw_skip(w, i);
+    }
+    return SIZE_MAX;
+}
+static int aw_named(aw_web *w, size_t open, size_t close, const char *key, aw_block **out, size_t *count)
+{
+    size_t capacity = 0;
+    if (open == SIZE_MAX) return 1;
+    for (size_t i = open + 1; i < close;) {
+        if (aw_is(w, i, key) && i + 2 < close && aw_word(w, i + 1) && aw_is(w, i + 2, "{")) {
+            aw_block *grown = *out;
+            if (*count == capacity) {
+                capacity = capacity ? capacity * 2 : 16;
+                if (!(grown = realloc(*out, capacity * sizeof(*grown)))) return 0;
+                *out = grown;
+            }
+            aw_block *b = *out + (*count)++;
+            b->key = i; b->open = i + 2; b->close = w->tokens.items[i + 2].close;
+            b->name = aw_text(w, i + 1, &b->name_length); aw_unquote(&b->name, &b->name_length);
+            i = b->close + 1; continue;
+        }
+        i = aw_skip(w, i);
+    }
+    return 1;
+}
+static void aw_free(aw_web *w)
+{
+    sh_decl_tokens_free(&w->tokens); free(w->subwebs); free(w->states); free(w->models); free(w->map);
+    memset(w, 0, sizeof(*w));
+}
+static int aw_parse(aw_web *w, sh_decl_source source, char *error, size_t capacity)
+{
+    size_t count, found;
+    memset(w, 0, sizeof(*w));
+    w->props_open = w->props_close = w->models_open = w->models_close = SIZE_MAX;
+    w->subwebs_open = w->subwebs_close = w->states_open = w->states_close = SIZE_MAX;
+    w->layers_open = w->layers_close = SIZE_MAX;
+    if (!sh_decl_native_lex(source, &w->tokens, error, capacity)) return 0;
+    count = w->tokens.count;
+    if (!count || !aw_is(w, 0, "{") || w->tokens.items[0].close != count - 1)
+        return aw_fail(error, capacity, "the web must be one braced body");
+    if ((found = aw_find(w, 0, count - 1, "props")) != SIZE_MAX) {
+        w->props_open = found + 1; w->props_close = w->tokens.items[found + 1].close;
+        if ((found = aw_find(w, w->props_open, w->props_close, "modelInfos")) != SIZE_MAX) {
+            w->models_open = found + 1; w->models_close = w->tokens.items[found + 1].close;
+        }
+    }
+    if ((found = aw_find(w, 0, count - 1, "subWebs")) != SIZE_MAX) {
+        w->subwebs_open = found + 1; w->subwebs_close = w->tokens.items[found + 1].close;
+    }
+    if ((found = aw_find(w, 0, count - 1, "states")) != SIZE_MAX) {
+        w->states_open = found + 1; w->states_close = w->tokens.items[found + 1].close;
+    }
+    if ((found = aw_find(w, 0, count - 1, "layers")) != SIZE_MAX) {
+        w->layers_open = found + 1; w->layers_close = w->tokens.items[found + 1].close;
+    }
+    if (w->models_open != SIZE_MAX) {
+        size_t capacity_models = 0;
+        for (size_t i = w->models_open + 1; i < w->models_close;) {
+            if (w->model_count == capacity_models) {
+                size_t *grown;
+                capacity_models = capacity_models ? capacity_models * 2 : 32;
+                if (!(grown = realloc(w->models, capacity_models * sizeof(*grown)))) return aw_fail(error, capacity, "allocation failed");
+                w->models = grown;
+            }
+            w->models[w->model_count++] = i;
+            i = aw_skip(w, i);
+            if (i < w->models_close) i = aw_skip(w, i);
+        }
+    }
+    if (!aw_named(w, w->subwebs_open, w->subwebs_close, "subWeb", &w->subwebs, &w->subweb_count) ||
+        !aw_named(w, w->states_open, w->states_close, "state", &w->states, &w->state_count))
+        return aw_fail(error, capacity, "allocation failed");
+    if (!(w->map = calloc(w->model_count ? w->model_count : 1, sizeof(*w->map))))
+        return aw_fail(error, capacity, "allocation failed");
+    for (size_t i = 0; i < w->model_count; i++) w->map[i] = i;
+    return 1;
+}
+static const aw_block *aw_block_named(const aw_block *blocks, size_t count, const char *name, size_t length)
+{
+    for (size_t i = 0; i < count; i++)
+        if (blocks[i].name_length == length && !memcmp(blocks[i].name, name, length)) return blocks + i;
+    return NULL;
+}
+
+static int aw_add_edit(aw_edits *e, size_t begin, size_t end, const char *text, size_t length)
+{
+    if (e->count == e->capacity) {
+        size_t capacity = e->capacity ? e->capacity * 2 : 64;
+        aw_edit *grown = realloc(e->items, capacity * sizeof(*grown));
+        if (!grown) return 0;
+        e->items = grown; e->capacity = capacity;
+    }
+    aw_edit *item = e->items + e->count;
+    if (!(item->text = malloc(length + 1))) return 0;
+    memcpy(item->text, text, length); item->text[length] = 0;
+    item->begin = begin; item->end = end; item->length = length; item->order = e->count++;
+    return 1;
+}
+static void aw_edits_free(aw_edits *e)
+{
+    for (size_t i = 0; i < e->count; i++) free(e->items[i].text);
+    free(e->items); memset(e, 0, sizeof(*e));
+}
+static int aw_edit_order(const void *left, const void *right)
+{
+    const aw_edit *a = left, *b = right;
+    if (a->begin != b->begin) return a->begin < b->begin ? -1 : 1;
+    return a->order < b->order ? -1 : a->order > b->order;
+}
+/* Apply edits to a source slice [from, to); NULL on overlap or allocation. */
+static char *aw_apply(const char *source, size_t from, size_t to, aw_edits *e, size_t *length)
+{
+    size_t total = to - from, at = from, used = 0;
+    char *out;
+    qsort(e->items, e->count, sizeof(*e->items), aw_edit_order);
+    for (size_t i = 0; i < e->count; i++) {
+        if (e->items[i].begin < at || e->items[i].end > to) return NULL;
+        at = e->items[i].end;
+        total += e->items[i].length;
+    }
+    if (!(out = malloc(total + 1))) return NULL;
+    at = from;
+    for (size_t i = 0; i < e->count; i++) {
+        memcpy(out + used, source + at, e->items[i].begin - at); used += e->items[i].begin - at;
+        memcpy(out + used, e->items[i].text, e->items[i].length); used += e->items[i].length;
+        at = e->items[i].end;
+    }
+    memcpy(out + used, source + at, to - at); used += to - at;
+    out[used] = 0; *length = used; return out;
+}
+
+/* An edge whose destination subweb the stock web lacks: the transition into a
+ * contribution's own new weapon, which joins every web it is written in. */
+static int aw_glue(const aw_web *w, size_t open, const aw_web *base)
+{
+    for (size_t i = open + 1; i < w->tokens.items[open].close;) {
+        if (aw_is(w, i, "toSubWeb") && aw_word(w, i + 1)) {
+            size_t n; const char *name = aw_text(w, i + 1, &n); aw_unquote(&name, &n);
+            return !aw_block_named(base->subwebs, base->subweb_count, name, n);
+        }
+        i = aw_skip(w, i);
+    }
+    return 0;
+}
+/* Next token of a subweb walk: skips editor-only placement (node pos, subweb
+ * color) and, when base is given, glue edges. */
+static size_t aw_walk(const aw_web *w, size_t i, size_t end, const aw_web *base)
+{
+    while (i < end) {
+        if ((aw_is(w, i, "pos") || aw_is(w, i, "color")) && i + 1 < end && aw_is(w, i + 1, "(")) {
+            i = w->tokens.items[i + 1].close + 1; continue;
+        }
+        if (base && aw_is(w, i, "edge") && i + 1 < end && aw_is(w, i + 1, "{") && aw_glue(w, i + 1, base)) {
+            i = w->tokens.items[i + 1].close + 1; continue;
+        }
+        break;
+    }
+    return i;
+}
+/* The value a token carries after alignment: a model index maps through its
+ * web's model table. */
+static int aw_token_same(const aw_web *a, size_t i, const aw_web *b, size_t j)
+{
+    size_t n, m; const char *x = aw_text(a, i, &n), *y = aw_text(b, j, &m);
+    if (i && j && aw_is(a, i - 1, "modelIndex") && aw_is(b, j - 1, "modelIndex") &&
+        a->tokens.items[i].kind == SH_DECL_TOKEN_NUMBER && b->tokens.items[j].kind == SH_DECL_TOKEN_NUMBER) {
+        size_t p = (size_t)strtoul(x, NULL, 10), q = (size_t)strtoul(y, NULL, 10);
+        if (p < a->model_count) p = a->map[p];
+        if (q < b->model_count) q = b->map[q];
+        return p == q;
+    }
+    return n == m && !memcmp(x, y, n);
+}
+/* Two subweb blocks bind the same behavior (names aside). glue_base, when
+ * given, lets a's glue edges into new subwebs stand beside b's records. */
+static int aw_same_subweb(const aw_web *a, const aw_block *x, const aw_web *b, const aw_block *y, const aw_web *glue_base)
+{
+    size_t i = aw_walk(a, x->open, x->close + 1, glue_base), j = aw_walk(b, y->open, y->close + 1, NULL);
+    while (i <= x->close && j <= y->close) {
+        if (!aw_token_same(a, i, b, j)) return 0;
+        i = aw_walk(a, i + 1, x->close + 1, glue_base); j = aw_walk(b, j + 1, y->close + 1, NULL);
+    }
+    return i > x->close && j > y->close;
+}
+static uint64_t aw_hash_subweb(const aw_web *w, const aw_block *x)
+{
+    uint64_t hash = 1469598103934665603ull;
+    for (size_t i = aw_walk(w, x->open, x->close + 1, NULL); i <= x->close; i = aw_walk(w, i + 1, x->close + 1, NULL)) {
+        size_t n; const char *text = aw_text(w, i, &n);
+        char number[32];
+        if (i && aw_is(w, i - 1, "modelIndex") && w->tokens.items[i].kind == SH_DECL_TOKEN_NUMBER) {
+            size_t p = (size_t)strtoul(text, NULL, 10);
+            snprintf(number, sizeof(number), "%zu", p < w->model_count ? w->map[p] : p);
+            text = number; n = strlen(number);
+        }
+        for (size_t k = 0; k < n; k++) { hash ^= (unsigned char)text[k]; hash *= 1099511628211ull; }
+        hash ^= 0x1f; hash *= 1099511628211ull;
+    }
+    return hash;
+}
+/* Whitespace that leads token i's line, for inserted siblings. */
+static size_t aw_indent(const aw_web *w, size_t i)
+{
+    const char *text = w->tokens.source.text;
+    size_t at = w->tokens.items[i].begin, begin = at;
+    while (begin && (text[begin - 1] == ' ' || text[begin - 1] == '\t')) begin--;
+    return at - begin;
+}
+
+typedef struct aw_move { size_t source; char *from, *to; uint64_t hash; } aw_move;
+typedef struct aw_state {
+    const aw_web *base;
+    aw_web *webs;
+    size_t count;
+    aw_edits *edits;
+    aw_move *moves;
+    size_t move_count;
+    char **merged; size_t *merged_lengths, merged_count; /* aligned modelInfos entries */
+    char *error; size_t capacity;
+} aw_state;
+
+/* One relocation of subweb x in web s to `to`: its own edges follow it, each
+ * other edge entering it gains a twin entering the copy, and a layer naming it
+ * names the copy too. */
+static int aw_relocate(aw_state *st, size_t s, const aw_block *x, const char *to, uint64_t hash)
+{
+    const aw_web *w = st->webs + s;
+    aw_edits *e = st->edits + s;
+    size_t to_length = strlen(to);
+    char quoted[512];
+    snprintf(quoted, sizeof(quoted), "\"%s\"", to);
+    if (!aw_add_edit(e, w->tokens.items[x->key + 1].begin, w->tokens.items[x->key + 1].end, quoted, to_length + 2)) return 0;
+    for (size_t i = x->open; i < x->close; i++)
+        if (aw_is(w, i, "toSubWeb") && aw_names(w, i + 1, x->name, x->name_length) &&
+            !aw_add_edit(e, w->tokens.items[i + 1].begin, w->tokens.items[i + 1].end, quoted, to_length + 2)) return 0;
+    for (size_t i = w->subwebs_open + 1; i < w->subwebs_close; i++) {
+        if (i >= x->key && i <= x->close) continue;
+        if (!aw_is(w, i, "edge") || !aw_is(w, i + 1, "{")) continue;
+        size_t close = w->tokens.items[i + 1].close, value = SIZE_MAX;
+        for (size_t k = i + 2; k < close;) {
+            if (aw_is(w, k, "toSubWeb") && aw_names(w, k + 1, x->name, x->name_length)) { value = k + 1; break; }
+            k = aw_skip(w, k);
+        }
+        if (value == SIZE_MAX) continue;
+        aw_edits twin = {0};
+        size_t length = 0, indent = aw_indent(w, i);
+        char *copy;
+        if (!aw_add_edit(&twin, w->tokens.items[value].begin, w->tokens.items[value].end, quoted, to_length + 2) ||
+            !(copy = aw_apply(w->tokens.source.text, w->tokens.items[i].begin - indent, w->tokens.items[close].end, &twin, &length))) {
+            aw_edits_free(&twin); return 0;
+        }
+        aw_edits_free(&twin);
+        char *line = malloc(length + 2);
+        if (!line) { free(copy); return 0; }
+        line[0] = '\n'; memcpy(line + 1, copy, length); free(copy);
+        int ok = aw_add_edit(e, w->tokens.items[close].end, w->tokens.items[close].end, line, length + 1);
+        free(line);
+        if (!ok) return 0;
+    }
+    if (w->layers_open != SIZE_MAX) {
+        char spaced[520];
+        snprintf(spaced, sizeof(spaced), " %s", quoted);
+        for (size_t i = w->layers_open + 1; i < w->layers_close; i++)
+            if (w->tokens.items[i].kind == SH_DECL_TOKEN_STRING && aw_names(w, i, x->name, x->name_length) &&
+                !aw_add_edit(e, w->tokens.items[i].end, w->tokens.items[i].end, spaced, strlen(spaced))) return 0;
+    }
+    aw_move *grown = realloc(st->moves, (st->move_count + 1) * sizeof(*grown));
+    if (!grown) return 0;
+    st->moves = grown;
+    aw_move *m = st->moves + st->move_count;
+    m->source = s; m->hash = hash; m->from = malloc(x->name_length + 1); m->to = malloc(to_length + 1);
+    if (!m->from || !m->to) { free(m->from); free(m->to); return 0; }
+    memcpy(m->from, x->name, x->name_length); m->from[x->name_length] = 0; memcpy(m->to, to, to_length + 1);
+    st->move_count++;
+    return 1;
+}
+/* The stock subweb as this contribution sees it: the original block with the
+ * contribution's glue edges placed in the same nodes. */
+static char *aw_stock_with_glue(const aw_state *st, size_t s, const aw_block *x, const aw_block *stock, size_t *length)
+{
+    const aw_web *w = st->webs + s, *base = st->base;
+    aw_edits e = {0};
+    const char *node = NULL; size_t node_length = 0, node_close = 0;
+    char *out;
+    for (size_t i = x->open + 1; i < x->close; i++) {
+        if (aw_is(w, i, "node") && aw_word(w, i + 1) && aw_is(w, i + 2, "{")) {
+            node = aw_text(w, i + 1, &node_length); aw_unquote(&node, &node_length);
+            node_close = w->tokens.items[i + 2].close;
+        }
+        if (node && i > node_close) node = NULL;
+        if (!node || !aw_is(w, i, "edge") || !aw_is(w, i + 1, "{") || !aw_glue(w, i + 1, base)) continue;
+        /* The same node of the stock subweb receives the edge beside its peers. */
+        size_t target = SIZE_MAX, edges = SIZE_MAX, close = w->tokens.items[i + 1].close, indent = aw_indent(w, i);
+        for (size_t k = stock->open + 1; k < stock->close;) {
+            if (aw_is(base, k, "node") && aw_names(base, k + 1, node, node_length) && aw_is(base, k + 2, "{")) { target = k + 2; break; }
+            k = aw_skip(base, k);
+        }
+        if (target == SIZE_MAX) { i = close; continue; } /* a node only this contribution has */
+        edges = aw_find(base, target, base->tokens.items[target].close, "edges");
+        const char *text = w->tokens.source.text + w->tokens.items[i].begin - indent;
+        size_t n = w->tokens.items[close].end - w->tokens.items[i].begin + indent;
+        char *line = malloc(n + 16);
+        if (!line) { aw_edits_free(&e); return NULL; }
+        size_t at;
+        if (edges != SIZE_MAX) {
+            line[0] = '\n'; memcpy(line + 1, text, n);
+            at = base->tokens.items[base->tokens.items[edges + 1].close].begin;
+            if (!aw_add_edit(&e, at, at, line, n + 1)) { free(line); aw_edits_free(&e); return NULL; }
+        } else {
+            static const char head[] = "\nedges {\n", tail[] = "\n}\n";
+            char *block = malloc(n + sizeof(head) + sizeof(tail));
+            if (!block) { free(line); aw_edits_free(&e); return NULL; }
+            memcpy(block, head, sizeof(head) - 1); memcpy(block + sizeof(head) - 1, text, n);
+            memcpy(block + sizeof(head) - 1 + n, tail, sizeof(tail));
+            at = base->tokens.items[base->tokens.items[target].close].begin;
+            int ok = aw_add_edit(&e, at, at, block, strlen(block));
+            free(block);
+            if (!ok) { free(line); aw_edits_free(&e); return NULL; }
+        }
+        free(line);
+        i = close;
+    }
+    out = aw_apply(base->tokens.source.text, base->tokens.items[stock->key].begin,
+        base->tokens.items[stock->close].end, &e, length);
+    aw_edits_free(&e); return out;
+}
+static int aw_insert(aw_edits *e, const aw_web *w, size_t close, const char *text, size_t length)
+{
+    size_t at = w->tokens.items[close].begin;
+    char *line = malloc(length + 2);
+    if (!line) return 0;
+    line[0] = '\n'; memcpy(line + 1, text, length);
+    int ok = aw_add_edit(e, at, at, line, length + 1);
+    free(line); return ok;
+}
+/* Insert a block before token `key`, which starts a line at its indentation,
+ * so the inserted block takes that position among its siblings. */
+static int aw_insert_before(aw_edits *e, const aw_web *w, size_t key, const char *text, size_t length)
+{
+    size_t indent = aw_indent(w, key), at = w->tokens.items[key].begin;
+    char *line = malloc(length + indent + 2);
+    if (!line) return 0;
+    memcpy(line, text, length); line[length] = '\n';
+    memcpy(line + length + 1, w->tokens.source.text + at - indent, indent);
+    int ok = aw_add_edit(e, at, at, line, length + indent + 1);
+    free(line); return ok;
+}
+/* Restore a stock block this contribution lacks where the stock order puts
+ * it: before the next stock block the contribution has, else at the end. */
+static int aw_restore(aw_edits *e, const aw_web *w, const aw_block *own, size_t own_count, size_t close,
+    const aw_web *base, const aw_block *stock, size_t stock_count, size_t index)
+{
+    const char *text = base->tokens.source.text + base->tokens.items[stock[index].key].begin;
+    size_t length = base->tokens.items[stock[index].close].end - base->tokens.items[stock[index].key].begin;
+    for (size_t next = index + 1; next < stock_count; next++) {
+        const aw_block *mine = aw_block_named(own, own_count, stock[next].name, stock[next].name_length);
+        if (mine) return aw_insert_before(e, w, mine->key, text, length);
+    }
+    return aw_insert(e, w, close, text, length);
+}
+/* A unique name for a contribution's own copy of subweb `name`. */
+static int aw_relocated_name(const aw_state *st, const char *name, size_t length, uint64_t hash, char *out, size_t capacity)
+{
+    for (int digits = 8; digits <= 16; digits += 8) {
+        int taken = 0;
+        snprintf(out, capacity, "%.*s_%0*llx", (int)length, name, digits,
+            (unsigned long long)(digits == 8 ? hash >> 32 : hash));
+        size_t n = strlen(out);
+        taken |= aw_block_named(st->base->subwebs, st->base->subweb_count, out, n) != NULL;
+        for (size_t s = 0; s < st->count && !taken; s++)
+            taken |= aw_block_named(st->webs[s].subwebs, st->webs[s].subweb_count, out, n) != NULL;
+        for (size_t m = 0; m < st->move_count && !taken; m++)
+            taken |= !strcmp(st->moves[m].to, out) && (strlen(st->moves[m].from) != length ||
+                memcmp(st->moves[m].from, name, length) || st->moves[m].hash != hash);
+        if (!taken) return 1;
+    }
+    return 0;
+}
+
+int sh_decl_animweb_prepare(sh_decl_source baseline, sh_decl_source *sources, size_t count,
+    char **owned, sh_decl_animweb_move **moves, size_t *move_count, char *error, size_t capacity)
+{
+    static const char *editor_keys[] = {"editPos", "gridSize", "snapToGrid", "showGrid",
+        "alwaysShowIntraSubwebLinks", "alwaysShowNodeProps", "showAbbreviatedNodeProps",
+        "showIncomingLinks", "showAnimName", "showWrapMode", "showRate", "showDelta",
+        "showBlendEq", "showTransition", "showWeakRefs"};
+    aw_web base;
+    aw_state st = {0};
+    size_t merged_capacity = 0, *model_length = NULL, *label_length = NULL;
+    const char **model_text = NULL, **label_text = NULL;
+    int ok = 0;
+    if (moves) *moves = NULL;
+    if (move_count) *move_count = 0;
+    if (error && capacity) *error = 0;
+    for (size_t i = 0; i < count; i++) owned[i] = NULL;
+    if (!aw_parse(&base, baseline, error, capacity)) { aw_free(&base); return 0; }
+    st.base = &base; st.count = count; st.error = error; st.capacity = capacity;
+    st.webs = calloc(count ? count : 1, sizeof(*st.webs));
+    st.edits = calloc(count ? count : 1, sizeof(*st.edits));
+    if (!st.webs || !st.edits) { aw_fail(error, capacity, "allocation failed"); goto done; }
+    for (size_t s = 0; s < count; s++)
+        if (!aw_parse(st.webs + s, sources[s], error, capacity)) goto done;
+
+    /* Models: the stock list, then each contribution's additions in order;
+     * every model index follows its entry. */
+    for (size_t pass = 0; pass <= count; pass++) {
+        aw_web *w = pass ? st.webs + pass - 1 : &base;
+        for (size_t k = 0; k < w->model_count; k++) {
+            size_t n, lab = 0; const char *text = aw_text(w, w->models[k], &n), *label = "";
+            size_t next = aw_skip(w, w->models[k]);
+            if (next < w->models_close) label = aw_text(w, next, &lab);
+            size_t found;
+            for (found = 0; found < st.merged_count; found++)
+                if (model_length[found] == n && !memcmp(model_text[found], text, n)) break;
+            if (found == st.merged_count) {
+                if (st.merged_count == merged_capacity) {
+                    merged_capacity = merged_capacity ? merged_capacity * 2 : 64;
+                    const char **mt = realloc((void *)model_text, merged_capacity * sizeof(*mt));
+                    if (mt) model_text = mt;
+                    const char **lt = realloc((void *)label_text, merged_capacity * sizeof(*lt));
+                    if (lt) label_text = lt;
+                    size_t *ml = realloc(model_length, merged_capacity * sizeof(*ml));
+                    if (ml) model_length = ml;
+                    size_t *ll = realloc(label_length, merged_capacity * sizeof(*ll));
+                    if (ll) label_length = ll;
+                    if (!mt || !lt || !ml || !ll) { aw_fail(error, capacity, "allocation failed"); goto models_done; }
+                }
+                model_text[found] = text; model_length[found] = n;
+                label_text[found] = label; label_length[found] = lab;
+                st.merged_count++;
+            }
+            w->map[k] = found;
+        }
+    }
+    for (size_t s = 0; s < count; s++) {
+        aw_web *w = st.webs + s;
+        int same = w->model_count == st.merged_count;
+        for (size_t k = 0; same && k < w->model_count; k++) same = w->map[k] == k;
+        if (!same && st.merged_count) {
+            size_t total = 16;
+            for (size_t k = 0; k < st.merged_count; k++) total += model_length[k] + label_length[k] + 8;
+            char *list = malloc(total + 64), *at = list;
+            if (!list) { aw_fail(error, capacity, "allocation failed"); goto models_done; }
+            if (w->models_open == SIZE_MAX) at += sprintf(at, "\n\t\tmodelInfos {");
+            for (size_t k = 0; k < st.merged_count; k++) {
+                at += sprintf(at, "\n\t\t\t%.*s %.*s", (int)model_length[k], model_text[k],
+                    (int)label_length[k], label_text[k]);
+            }
+            at += sprintf(at, "\n\t\t");
+            if (w->models_open == SIZE_MAX) at += sprintf(at, "}\n\t");
+            int placed;
+            if (w->models_open != SIZE_MAX)
+                placed = aw_add_edit(st.edits + s, w->tokens.items[w->models_open].end,
+                    w->tokens.items[w->models_close].begin, list, (size_t)(at - list));
+            else if (w->props_open != SIZE_MAX)
+                placed = aw_add_edit(st.edits + s, w->tokens.items[w->props_close].begin,
+                    w->tokens.items[w->props_close].begin, list, (size_t)(at - list));
+            else placed = 1; /* no props at all: the stock props compose unchanged */
+            free(list);
+            if (!placed) { aw_fail(error, capacity, "allocation failed"); goto models_done; }
+        }
+        for (size_t i = 0; i + 1 < w->tokens.count; i++) {
+            if (!aw_is(w, i, "modelIndex") || w->tokens.items[i + 1].kind != SH_DECL_TOKEN_NUMBER) continue;
+            size_t n; const char *text = aw_text(w, i + 1, &n);
+            size_t p = (size_t)strtoul(text, NULL, 10);
+            if (p >= w->model_count || w->map[p] == p) continue;
+            char number[32]; int written = snprintf(number, sizeof(number), "%zu", w->map[p]);
+            if (!aw_add_edit(st.edits + s, w->tokens.items[i + 1].begin, w->tokens.items[i + 1].end, number, (size_t)written)) {
+                aw_fail(error, capacity, "allocation failed"); goto models_done;
+            }
+        }
+        /* Editor view settings are not behavior: every contribution keeps the
+         * stock values, so authors' different views never collide. */
+        for (size_t i = w->props_open == SIZE_MAX ? SIZE_MAX : w->props_open + 1;
+             w->props_open != SIZE_MAX && i < w->props_close; i = aw_skip(w, i)) {
+            for (size_t k = 0; k < sizeof(editor_keys) / sizeof(editor_keys[0]); k++) {
+                if (!aw_is(w, i, editor_keys[k]) || i + 1 >= w->props_close) continue;
+                size_t at = base.props_open == SIZE_MAX ? SIZE_MAX : base.props_open + 1;
+                for (; at != SIZE_MAX && at < base.props_close; at = aw_skip(&base, at))
+                    if (aw_is(&base, at, editor_keys[k]) && at + 1 < base.props_close) break;
+                if (at == SIZE_MAX || at >= base.props_close) continue;
+                size_t value_end = aw_skip(w, i + 1) - 1, base_end = aw_skip(&base, at + 1) - 1;
+                const char *stock = base.tokens.source.text + base.tokens.items[at + 1].begin;
+                size_t stock_length = base.tokens.items[base_end].end - base.tokens.items[at + 1].begin;
+                const char *own = w->tokens.source.text + w->tokens.items[i + 1].begin;
+                size_t own_length = w->tokens.items[value_end].end - w->tokens.items[i + 1].begin;
+                if (own_length == stock_length && !memcmp(own, stock, own_length)) continue;
+                if (!aw_add_edit(st.edits + s, w->tokens.items[i + 1].begin, w->tokens.items[value_end].end, stock, stock_length)) {
+                    aw_fail(error, capacity, "allocation failed"); goto models_done;
+                }
+            }
+        }
+    }
+    free((void *)model_text); free((void *)label_text); free(model_length); free(label_length);
+    model_text = label_text = NULL; model_length = label_length = NULL;
+
+    /* Subwebs: a stock subweb a contribution changes beyond glue, or a new
+     * subweb another contribution defines differently, becomes that
+     * contribution's own copy; equal copies share one name. */
+    for (size_t s = 0; s < count; s++) {
+        aw_web *w = st.webs + s;
+        for (size_t b = 0; b < w->subweb_count; b++) {
+            const aw_block *x = w->subwebs + b;
+            const aw_block *stock = aw_block_named(base.subwebs, base.subweb_count, x->name, x->name_length);
+            int move = 0;
+            if (stock) move = !aw_same_subweb(w, x, &base, stock, &base);
+            else {
+                /* The earliest contribution defining this name keeps it. */
+                for (size_t t = 0; t < s && !move; t++) {
+                    const aw_block *y = aw_block_named(st.webs[t].subwebs, st.webs[t].subweb_count, x->name, x->name_length);
+                    if (!y) continue;
+                    int kept = 1;
+                    for (size_t m = 0; m < st.move_count; m++)
+                        if (st.moves[m].source == t && strlen(st.moves[m].from) == x->name_length &&
+                            !memcmp(st.moves[m].from, x->name, x->name_length)) kept = 0;
+                    if (kept) move = !aw_same_subweb(w, x, st.webs + t, y, NULL);
+                }
+            }
+            if (!move) continue;
+            char name[512];
+            uint64_t hash = aw_hash_subweb(w, x);
+            if (!aw_relocated_name(&st, x->name, x->name_length, hash, name, sizeof(name))) {
+                aw_fail(error, capacity, "no unique name for a contribution's own subweb"); goto done;
+            }
+            if (!aw_relocate(&st, s, x, name, hash)) { aw_fail(error, capacity, "allocation failed"); goto done; }
+            if (stock) {
+                /* The stock subweb keeps its place; the copy follows it. */
+                size_t length = 0;
+                char *restored = aw_stock_with_glue(&st, s, x, stock, &length);
+                if (!restored || !aw_insert_before(st.edits + s, w, x->key, restored, length)) {
+                    free(restored); aw_fail(error, capacity, "allocation failed"); goto done;
+                }
+                free(restored);
+            }
+        }
+        /* A contribution never deletes a stock subweb or state for the others. */
+        if (w->subwebs_open != SIZE_MAX) for (size_t b = 0; b < base.subweb_count; b++) {
+            const aw_block *y = base.subwebs + b;
+            if (aw_block_named(w->subwebs, w->subweb_count, y->name, y->name_length)) continue;
+            if (!aw_restore(st.edits + s, w, w->subwebs, w->subweb_count, w->subwebs_close,
+                &base, base.subwebs, base.subweb_count, b)) { aw_fail(error, capacity, "allocation failed"); goto done; }
+        }
+        if (w->states_open != SIZE_MAX) for (size_t b = 0; b < base.state_count; b++) {
+            const aw_block *y = base.states + b;
+            if (aw_block_named(w->states, w->state_count, y->name, y->name_length)) continue;
+            if (!aw_restore(st.edits + s, w, w->states, w->state_count, w->states_close,
+                &base, base.states, base.state_count, b)) { aw_fail(error, capacity, "allocation failed"); goto done; }
+        }
+    }
+    for (size_t s = 0; s < count; s++) {
+        if (!st.edits[s].count) continue;
+        size_t length = 0;
+        owned[s] = aw_apply(sources[s].text, 0, sources[s].length, st.edits + s, &length);
+        if (!owned[s]) { aw_fail(error, capacity, "contribution edits overlap"); goto done; }
+        sources[s] = (sh_decl_source){owned[s], length};
+    }
+    if (moves && st.move_count) {
+        *moves = calloc(st.move_count, sizeof(**moves));
+        if (!*moves) { aw_fail(error, capacity, "allocation failed"); goto done; }
+        for (size_t m = 0; m < st.move_count; m++) {
+            (*moves)[m].source = st.moves[m].source; (*moves)[m].from = st.moves[m].from; (*moves)[m].to = st.moves[m].to;
+            st.moves[m].from = st.moves[m].to = NULL;
+        }
+        *move_count = st.move_count;
+    }
+    ok = 1;
+    goto done;
+models_done:
+    free((void *)model_text); free((void *)label_text); free(model_length); free(label_length);
+done:
+    if (!ok) for (size_t i = 0; i < count; i++) { free(owned[i]); owned[i] = NULL; }
+    for (size_t m = 0; m < st.move_count; m++) { free(st.moves[m].from); free(st.moves[m].to); }
+    free(st.moves);
+    if (st.webs) for (size_t s = 0; s < count; s++) aw_free(st.webs + s);
+    if (st.edits) for (size_t s = 0; s < count; s++) aw_edits_free(st.edits + s);
+    free(st.webs); free(st.edits); aw_free(&base);
+    return ok;
+}
+
+void sh_decl_animweb_moves_free(sh_decl_animweb_move *moves, size_t count)
+{
+    for (size_t i = 0; moves && i < count; i++) { free(moves[i].from); free(moves[i].to); }
+    free(moves);
+}
+
+char *sh_decl_weapon_subweb_rename(sh_decl_source weapon, const char *from, const char *to,
+    size_t *length, int *changed, char *error, size_t capacity)
+{
+    static const char *fields[] = {"subweb_normal", "handsHitReactionSubweb"};
+    sh_decl_tokens tokens = {0};
+    aw_edits e = {0};
+    char quoted[512];
+    char *out = NULL;
+    size_t from_length = strlen(from);
+    *changed = 0; *length = 0;
+    if (error && capacity) *error = 0;
+    if (strlen(to) + 3 > sizeof(quoted)) { aw_fail(error, capacity, "subweb name is too long"); return NULL; }
+    snprintf(quoted, sizeof(quoted), "\"%s\"", to);
+    if (!sh_decl_native_lex(weapon, &tokens, error, capacity)) return NULL;
+    for (size_t i = 0; i + 2 < tokens.count; i++) {
+        int field = 0;
+        for (size_t k = 0; k < sizeof(fields) / sizeof(fields[0]); k++) field |= sh_decl_token_is(&tokens, i, fields[k]);
+        if (!field || !sh_decl_token_is(&tokens, i + 1, "=") || tokens.items[i + 2].kind != SH_DECL_TOKEN_STRING) continue;
+        const char *value = tokens.source.text + tokens.items[i + 2].begin;
+        size_t n = tokens.items[i + 2].end - tokens.items[i + 2].begin;
+        if (n != from_length + 2 || memcmp(value + 1, from, from_length)) continue;
+        if (!aw_add_edit(&e, tokens.items[i + 2].begin, tokens.items[i + 2].end, quoted, strlen(quoted))) {
+            aw_fail(error, capacity, "allocation failed"); goto done;
+        }
+    }
+    if (!e.count) goto done;
+    out = aw_apply(weapon.text, 0, weapon.length, &e, length);
+    if (!out) aw_fail(error, capacity, "allocation failed");
+    else *changed = 1;
+done:
+    aw_edits_free(&e); sh_decl_tokens_free(&tokens); return out;
 }

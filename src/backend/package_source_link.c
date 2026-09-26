@@ -1037,24 +1037,25 @@ static int sl_reverse_changed(sh_package_source_link *s, size_t scope, const sl_
  * constant is at OpenGL 0x142017bc0); SnapMap plays the co-op mode. So that
  * web is one global registry of weapon subwebs, whether or not any placed
  * object reaches the player. The stock rules and player decide it. */
+typedef struct sl_stock_reader { sh_package_baseline_reader read; void *context; } sl_stock_reader;
 static int sl_stock_parent(void *context, const char *name, sh_decl_source *source)
 {
-    sh_package_source_link *s = context;
+    sl_stock_reader *reader = context;
     unsigned char *body = NULL; size_t length = 0;
     char *path = sl_decl_path("entitydef", name);
-    int status = path ? sl_read_original(s, path, &body, &length) : -1;
+    int status = path ? reader->read(reader->context, path, &body, &length) : -1;
     free(path);
     if (status <= 0) { free(body); return status; }
     source->text = (const char *)body; source->length = length; return 1;
 }
 /* One field of a stock entity's expanded edit state; NULL when absent. */
-static char *sl_stock_field(sh_package_source_link *s, const char *entity, const char *field, int *failed)
+static char *sl_stock_field(sl_stock_reader *reader, const char *entity, const char *field, int *failed)
 {
     sh_decl_source source = {0};
-    sh_decl_entity_class_source parents = {s, sl_stock_parent, NULL};
+    sh_decl_entity_class_source parents = {reader, sl_stock_parent, NULL};
     const char *value = NULL; size_t length = 0;
     char *out = NULL;
-    int status = sl_stock_parent(s, entity, &source);
+    int status = sl_stock_parent(reader, entity, &source);
     if (status < 0) *failed = 1;
     if (status <= 0) return NULL;
     sh_decl_node *tree = sh_decl_tree_parse(source, NULL, 0);
@@ -1067,10 +1068,34 @@ static char *sl_stock_field(sh_package_source_link *s, const char *entity, const
     }
     sh_decl_tree_free(state); sh_decl_tree_free(tree); return out;
 }
-static int sl_player_contract(sh_package_source_link *s)
+int sh_package_player_hands_webs(sh_package_baseline_reader original, void *context,
+    char ***names, size_t *count)
 {
     static const char *const fields[] = {"handsAnimWeb", "handsAnimWeb_D1"};
-    int failed = 0, supplied = 0;
+    sl_stock_reader reader = {original, context};
+    int failed = 0;
+    *names = NULL; *count = 0;
+    if (!original) return 1;
+    char *player = sl_stock_field(&reader, "mp/modes/coop/game_challenge", "playerSpawnDef", &failed);
+    for (size_t i = 0; !failed && i < sizeof(fields) / sizeof(fields[0]); i++) {
+        char *web = sl_stock_field(&reader, player ? player : "player/mp", fields[i], &failed);
+        int seen = 0;
+        for (size_t k = 0; web && k < *count; k++) seen |= !strcmp((*names)[k], web);
+        if (web && !seen) {
+            char **grown = realloc(*names, (*count + 1) * sizeof(*grown));
+            if (!grown) { free(web); failed = 1; break; }
+            *names = grown; (*names)[(*count)++] = web; web = NULL;
+        }
+        free(web);
+    }
+    free(player);
+    if (!failed) return 1;
+    for (size_t k = 0; k < *count; k++) free((*names)[k]);
+    free(*names); *names = NULL; *count = 0; return 0;
+}
+static int sl_player_contract(sh_package_source_link *s)
+{
+    int supplied = 0;
     /* Only a supplied animation web can change the hands web. */
     for (size_t scope = 0; scope < s->scope_count && !supplied; scope++)
         for (size_t i = 0; i < s->scopes[scope]->resource_count && !supplied; i++) {
@@ -1078,13 +1103,13 @@ static int sl_player_contract(sh_package_source_link *s)
             supplied = file->type && !strcmp(file->type, "animweb") && file->source_count;
         }
     if (!s->original || !supplied) return 1;
-    char *player = sl_stock_field(s, "mp/modes/coop/game_challenge", "playerSpawnDef", &failed);
-    for (size_t i = 0; !failed && i < sizeof(fields) / sizeof(fields[0]); i++) {
-        char *web = sl_stock_field(s, player ? player : "player/mp", fields[i], &failed);
-        if (web && !sl_player_hands_add(s, web)) failed = 1;
-        free(web);
+    char **names = NULL; size_t count = 0;
+    int failed = !sh_package_player_hands_webs(sl_read_original, s, &names, &count);
+    for (size_t i = 0; i < count; i++) {
+        if (!failed && !sl_player_hands_add(s, names[i])) failed = 1;
+        free(names[i]);
     }
-    free(player);
+    free(names);
     return failed ? sl_env_fail(s, "cannot read the stock player hands web", "mp/modes/coop/game_challenge") : 1;
 }
 static int sl_reverse_roots(sh_package_source_link *s, const sh_package_source_root_plan *plan,

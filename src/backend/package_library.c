@@ -422,7 +422,8 @@ static int pl_baseline_scope(pl_build *b, const sh_package_sources *sources,
     sh_package_resource_projection *projections = NULL;
     sh_compiled_resource *seeds = NULL;
     const sh_compiled_resource **members = NULL;
-    size_t maximum = b->shared->resource_count, count = 0;
+    size_t maximum = b->shared->resource_count, count = 0, hand_count = 0;
+    char **hands = NULL;
     int ok = 0;
     for (size_t i = 0; i < b->count; i++) {
         if (b->scopes[i]->resource_count > SIZE_MAX - maximum) return 0;
@@ -433,6 +434,17 @@ static int pl_baseline_scope(pl_build *b, const sh_package_sources *sources,
     members = calloc(maximum ? maximum : 1, sizeof(*members));
     seeds = calloc(maximum ? maximum : 1, sizeof(*seeds));
     if (!projections || !members || !seeds) goto done;
+    /* The player hands web composes against its stock original whenever a
+     * package supplies it, even alone: a package copy aligns before serving. */
+    for (size_t scope = 0; scope < b->count && !hands; scope++)
+        for (size_t i = 0; i < b->scopes[scope]->resource_count; i++) {
+            const sh_compiled_resource *file = b->scopes[scope]->resources + i;
+            if (!file->type || strcmp(file->type, "animweb") || !file->source_count) continue;
+            if (!sh_package_player_hands_webs(original, context, &hands, &hand_count)) goto done;
+            if (!hands) hands = calloc(1, sizeof(*hands));
+            if (!hands) goto done;
+            break;
+        }
     for (size_t scope = 0; scope < b->count; scope++) {
         if (b->contexts && scope < b->authored_count &&
             b->contexts->contexts[scope].mode == SH_PACKAGE_CONTEXT_COMPOSED) continue;
@@ -441,9 +453,15 @@ static int pl_baseline_scope(pl_build *b, const sh_package_sources *sources,
             const sh_compiled_resource *file = compiled->resources + i;
             size_t prior;
             int several = 0;
-            if (file->type && !strcmp(file->type, "animweb"))
+            if (file->type && !strcmp(file->type, "animweb")) {
                 for (size_t other = 0; other < b->count && !several; other++)
                     several = other != scope && sh_package_compilation_find(b->scopes[other], file->engine_path) != NULL;
+                for (size_t h = 0; h < hand_count && !several; h++) {
+                    char path[512];
+                    snprintf(path, sizeof(path), "generated/decls/animweb/%s.decl", hands[h]);
+                    several = !_stricmp(path, file->engine_path);
+                }
+            }
             if (!pl_shared_declaration(file->type) && !several) continue;
             for (prior = 0; prior < count; prior++) if (!strcmp(projections[prior].engine_path, file->engine_path)) break;
             if (prior < count) continue;
@@ -464,7 +482,8 @@ static int pl_baseline_scope(pl_build *b, const sh_package_sources *sources,
     b->count++; ok = 1;
 done:
     if (seeds) for (size_t i = 0; i < maximum; i++) free(seeds[i].body);
-    free(seeds); free(projections); free(members); return ok;
+    for (size_t h = 0; h < hand_count; h++) free(hands[h]);
+    free(hands); free(seeds); free(projections); free(members); return ok;
 }
 
 typedef struct pl_assignment {
@@ -1741,12 +1760,44 @@ static int pl_registration_phase(pl_build *b, const sh_package_sources *sources,
 
 /* ---- The player hands web -------------------------------------------------
  * The web idPlayer::handsAnimWeb names is one global registry: the hands
- * animator looks every weapon's subweb up in it by name. A package changing it
- * (adding its weapon's subweb and switch edges) changes that global web, so
- * package changes compose by native records (the animation web block grammar)
- * into the stock-named declaration every player uses; one changing package
- * supplies it whole. Records two packages change differently cannot compose,
- * which leaves the later package unserved as a coverage gap. */
+ * animator looks every weapon's subweb up in it by name (Vulkan FUN_140cbd0c0).
+ * A package changing it (adding its weapon's subweb and switch edges) changes
+ * that global web, so package copies align against the stock original and
+ * compose by native records into the stock-named declaration every player
+ * uses (sh_decl_animweb_prepare): edges into a package's new subweb join the
+ * stock subwebs, while a stock subweb a package changes otherwise, or a new
+ * subweb an earlier package defines differently, becomes that package's own
+ * copy, which the package's weapons then name. */
+/* A weapon of this scope naming a subweb the scope now owns under its own name
+ * names the copy (subweb_normal, handsHitReactionSubweb). */
+static int pl_hands_weapons(pl_build *b, const sh_package_sources *sources, size_t scope,
+    const char *from, const char *to, char *error, size_t capacity)
+{
+    pl_contributions *c = b->contributions;
+    for (size_t i = 0; i < c->inputs.count; i++) {
+        const sh_package_link_unit *unit = c->inputs.units + i;
+        pl_contribution_unit pending = {0};
+        size_t length = 0, out_length = 0;
+        int changed = 0;
+        if (c->inputs.scopes[i] != scope || unit->file_count != 1 || strcmp(unit->family, "weapon")) continue;
+        char *text = pl_token_text(c, i, &length, error, capacity);
+        if (!text) return 0;
+        char *out = sh_decl_weapon_subweb_rename((sh_decl_source){text, length}, from, to, &out_length,
+            &changed, error, capacity);
+        free(text);
+        if (!changed) { if (*error) return 0; continue; }
+        int staged = pl_contribution_stage(b, sources, i, out, out_length, NULL, 0, &pending, error, capacity);
+        free(out);
+        if (!staged) { pl_contribution_unit_free(&pending); return 0; }
+        if (!pending.owned) continue;
+        c->dirty = 1;
+        pl_contribution_unit_free(c->units + i); c->units[i] = pending;
+        c->inputs.units[i].compilation = c->units[i].owned;
+        c->inputs.units[i].files = &c->units[i].file;
+        c->inputs.units[i].original_binding = 0;
+    }
+    return 1;
+}
 static int pl_hands_group(pl_build *b, const sh_package_sources *sources,
     const size_t *members, size_t count, char *error, size_t capacity)
 {
@@ -1755,33 +1806,54 @@ static int pl_hands_group(pl_build *b, const sh_package_sources *sources,
     sh_decl_source *texts = calloc(count, sizeof(*texts)), *parts = calloc(count + 1, sizeof(*parts));
     const sh_compiled_resource **peers = calloc(count + 1, sizeof(*peers));
     pl_contribution_unit *pending = calloc(count, sizeof(*pending));
-    size_t *part_member = calloc(count + 1, sizeof(*part_member));
-    size_t base_member = SIZE_MAX, part_count = 0, culprit = SIZE_MAX, composed_length = 0;
+    size_t *part_member = calloc(count + 1, sizeof(*part_member)), *part_scope = calloc(count + 1, sizeof(*part_scope));
+    char **owned = calloc(count + 1, sizeof(*owned));
+    sh_decl_animweb_move *moves = NULL;
+    size_t base_member = SIZE_MAX, part_count = 0, culprit = SIZE_MAX, composed_length = 0, move_count = 0;
     char *composed = NULL;
     int ok = 0, kind = SH_PACKAGE_EDITOR_FAILURE_ENVIRONMENT;
-    if (!texts || !parts || !peers || !pending || !part_member) {
+    if (!texts || !parts || !peers || !pending || !part_member || !part_scope || !owned) {
         snprintf(error, capacity, "player hands web allocation failed"); goto failed;
     }
     for (size_t i = 0; i < count; i++) {
         size_t unit = members[i];
         if (!(texts[i].text = pl_token_text(c, unit, &texts[i].length, error, capacity))) goto failed;
         if (c->inputs.scopes[unit] == b->count - 1) base_member = i;
-        else if (!pl_stock_authored(c, unit)) { part_member[part_count] = i; parts[part_count++] = texts[i]; }
+        else if (!pl_stock_authored(c, unit)) part_member[part_count++] = i;
     }
     if (!part_count) { ok = 1; goto done; }
-    if (part_count == 1) {
-        if (!(composed = malloc(parts[0].length + 1))) { snprintf(error, capacity, "player hands web allocation failed"); goto failed; }
-        memcpy(composed, parts[0].text, parts[0].length); composed[parts[0].length] = 0; composed_length = parts[0].length;
-    } else {
-        sh_decl_conflict conflict = {SIZE_MAX, SIZE_MAX, 0, 0};
-        if (base_member == SIZE_MAX) {
+    /* Package copies align in stable source order, so the earlier package
+     * keeps a contested subweb name whatever order they are discovered in. */
+    for (size_t k = 0; k < part_count; k++) part_scope[k] = c->inputs.scopes[members[part_member[k]]];
+    {
+        pl_key_order order = {b, sources};
+        for (size_t k = 1; k < part_count; k++)
+            for (size_t m = k; m > 0 && pl_scope_order(&order, part_scope + m - 1, part_scope + m) > 0; m--) {
+                size_t swap = part_member[m]; part_member[m] = part_member[m - 1]; part_member[m - 1] = swap;
+                swap = part_scope[m]; part_scope[m] = part_scope[m - 1]; part_scope[m - 1] = swap;
+            }
+    }
+    for (size_t k = 0; k < part_count; k++) parts[k] = texts[part_member[k]];
+    if (base_member == SIZE_MAX) {
+        if (part_count > 1) {
             kind = SH_PACKAGE_EDITOR_FAILURE_COVERAGE; culprit = members[part_member[part_count - 1]];
             snprintf(error, capacity, "several packages change the player hands web without its captured stock original");
             goto failed;
         }
-        composed = sh_decl_block_compose("animweb", texts[base_member], parts, part_count, &composed_length,
-            error, capacity, &conflict);
-        if (!composed) {
+        if (!(composed = malloc(parts[0].length + 1))) { snprintf(error, capacity, "player hands web allocation failed"); goto failed; }
+        memcpy(composed, parts[0].text, parts[0].length); composed[parts[0].length] = 0; composed_length = parts[0].length;
+    } else {
+        sh_decl_conflict conflict = {SIZE_MAX, SIZE_MAX, 0, 0};
+        if (!sh_decl_animweb_prepare(texts[base_member], parts, part_count, owned, &moves, &move_count, error, capacity)) {
+            if (!strstr(error, "allocation")) { kind = SH_PACKAGE_EDITOR_FAILURE_COVERAGE; culprit = members[part_member[part_count - 1]]; }
+            goto failed;
+        }
+        if (part_count == 1 && !owned[0] && !move_count) {
+            /* One package copy the stock web needs no alignment for is served whole. */
+            if (!(composed = malloc(parts[0].length + 1))) { snprintf(error, capacity, "player hands web allocation failed"); goto failed; }
+            memcpy(composed, parts[0].text, parts[0].length); composed[parts[0].length] = 0; composed_length = parts[0].length;
+        } else if (!(composed = sh_decl_block_compose("animweb", texts[base_member], parts, part_count, &composed_length,
+            error, capacity, &conflict))) {
             if (!strstr(error, "allocation")) {
                 kind = SH_PACKAGE_EDITOR_FAILURE_COVERAGE;
                 size_t blamed = conflict.second < part_count ? conflict.second : conflict.first;
@@ -1807,6 +1879,9 @@ static int pl_hands_group(pl_build *b, const sh_package_sources *sources,
         c->inputs.units[unit].files = &c->units[unit].file;
         c->inputs.units[unit].original_binding = 0;
     }
+    /* Each package's weapons name the copies it now owns. */
+    for (size_t m = 0; m < move_count; m++)
+        if (!pl_hands_weapons(b, sources, part_scope[moves[m].source], moves[m].from, moves[m].to, error, capacity)) goto failed;
     ok = 1;
     goto done;
 failed:
@@ -1814,7 +1889,9 @@ failed:
 done:
     if (texts) for (size_t i = 0; i < count; i++) free((char *)texts[i].text);
     if (pending) for (size_t i = 0; i < count; i++) pl_contribution_unit_free(pending + i);
-    free(texts); free(parts); free((void *)peers); free(pending); free(part_member); free(composed);
+    if (owned) for (size_t i = 0; i <= count; i++) free(owned[i]);
+    sh_decl_animweb_moves_free(moves, move_count);
+    free(texts); free(parts); free((void *)peers); free(pending); free(part_member); free(part_scope); free(owned); free(composed);
     return ok;
 }
 static int pl_hands_phase(pl_build *b, const sh_package_sources *sources, char *error, size_t capacity)
