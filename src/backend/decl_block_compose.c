@@ -1395,15 +1395,15 @@ int sh_decl_animweb_prepare(sh_decl_source baseline, sh_decl_source *sources, si
         if (!same && st.merged_count) {
             size_t total = 16;
             for (size_t k = 0; k < st.merged_count; k++) total += model_length[k] + label_length[k] + 8;
-            char *list = malloc(total + 64), *at = list;
+            char *list = malloc(total + 64), *at = list, *limit = list + total + 64;
             if (!list) { aw_fail(error, capacity, "allocation failed"); goto models_done; }
-            if (w->models_open == SIZE_MAX) at += sprintf(at, "\n\t\tmodelInfos {");
+            if (w->models_open == SIZE_MAX) at += snprintf(at, (size_t)(limit - at), "\n\t\tmodelInfos {");
             for (size_t k = 0; k < st.merged_count; k++) {
-                at += sprintf(at, "\n\t\t\t%.*s %.*s", (int)model_length[k], model_text[k],
+                at += snprintf(at, (size_t)(limit - at), "\n\t\t\t%.*s %.*s", (int)model_length[k], model_text[k],
                     (int)label_length[k], label_text[k]);
             }
-            at += sprintf(at, "\n\t\t");
-            if (w->models_open == SIZE_MAX) at += sprintf(at, "}\n\t");
+            at += snprintf(at, (size_t)(limit - at), "\n\t\t");
+            if (w->models_open == SIZE_MAX) at += snprintf(at, (size_t)(limit - at), "}\n\t");
             int placed;
             if (w->models_open != SIZE_MAX)
                 placed = aw_add_edit(st.edits + s, w->tokens.items[w->models_open].end,
