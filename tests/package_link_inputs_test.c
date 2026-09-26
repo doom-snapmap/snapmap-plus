@@ -26,7 +26,8 @@ static void catalog_file(const char *relative)
         {"renderProg", "shaders/alternate", "shader/vertex.bin"},
         {"model", "models/catalog-special.obj", "cooked/model/models/custom.bmodel"},
         {"image", "images/rock", "generated/image/rock$a00.bimage"},
-        {"image", "images/rock", "generated/image/rock$b00.bimage"}
+        {"image", "images/rock", "generated/image/rock$b00.bimage"},
+        {"cm", "md6/guard/body.md6", ""}
     };
     unsigned char body[4096] = {0};
     char path[4096]; size_t at = 0x24;
@@ -175,14 +176,14 @@ static int image_catalog(const char *base)
 int main(int argc, char **argv)
 {
     char temporary[MAX_PATH], base[4096], error[1024];
-    sh_compiled_resource files[8] = {0}, duplicate[2];
+    sh_compiled_resource files[9] = {0}, duplicate[2];
     sh_package_compilation scope = {0}, malformed = {0};
     const sh_package_compilation *scopes[] = {&scope, &scope};
     sh_package_link_inputs inputs = {0};
     const char *paths[] = {"generated/decls/entitydef/props/rock.decl", "shader/vertex.bin",
         "shader/fragment.bin", "cooked/model/models/custom.bmodel", "generated/image/rock$a00.bimage",
         "generated/image/rock$b00.bimage", "generated/basemodel/md6/guard/body.bmd6model",
-        "cooked/anim/md6/guard/walk.bmd6anim"};
+        "cooked/anim/md6/guard/walk.bmd6anim", "md6/guard/body.md6"};
     if (argc == 2) return image_catalog(argv[1]);
     cooked_paths();
     assert(GetTempPathA(sizeof(temporary),temporary));
@@ -193,11 +194,11 @@ int main(int argc, char **argv)
     create("base/gameresources.resources",""); create("base/gameresources.patch","");
     snprintf(base,sizeof(base),"%s/base",root);
     sh_resource_catalog *catalog=sh_resource_catalog_open(base,error,sizeof(error));
-    assert(catalog && sh_resource_catalog_count(catalog)==14);
-    scope.resources=files; scope.resource_count=8;
-    for(size_t i=0;i<8;i++) files[i].engine_path=paths[i];
+    assert(catalog && sh_resource_catalog_count(catalog)==16);
+    scope.resources=files; scope.resource_count=9;
+    for(size_t i=0;i<9;i++) files[i].engine_path=paths[i];
     files[0].type="entitydef"; files[0].name="props/rock";
-    assert(sh_package_link_inputs_open(scopes,2,catalog,&inputs,error,sizeof(error)) && inputs.count==14);
+    assert(sh_package_link_inputs_open(scopes,2,catalog,&inputs,error,sizeof(error)) && inputs.count==16);
     for(size_t s=0;s<2;s++) {
         size_t shader=sh_package_link_inputs_find(&inputs,s,"renderprog","shaders/shared");
         size_t alternate=sh_package_link_inputs_find(&inputs,s,"renderprog","shaders/alternate");
@@ -212,6 +213,11 @@ int main(int argc, char **argv)
         assert(sh_package_link_inputs_find(&inputs,s,"basemodel","md6/guard/body.md6mesh")!=SIZE_MAX);
         assert(sh_package_link_inputs_find(&inputs,s,"anim","md6/guard/walk.md6anim")!=SIZE_MAX);
         assert(sh_package_link_inputs_find(&inputs,s,"entitydef","props/rock")!=SIZE_MAX);
+        /* An unnamed index row is supplied under its resource name, as a
+         * converted legacy manifest imports zero-byte collision placeholders. */
+        size_t placeholder=sh_package_link_inputs_find(&inputs,s,"cm","md6/guard/body.md6");
+        assert(placeholder!=SIZE_MAX && inputs.units[placeholder].file_count==1);
+        assert(inputs.units[placeholder].files[0]==files+8);
     }
     assert(sh_package_link_inputs_find(&inputs,2,"entitydef","props/rock")==SIZE_MAX);
     assert(sh_package_link_inputs_find(&inputs,0,"image","missing")==SIZE_MAX);
@@ -228,6 +234,10 @@ int main(int argc, char **argv)
     files[7].engine_path="unknown/physical-resource.bin";
     assert(!sh_package_link_inputs_open(scopes,2,catalog,&inputs,error,sizeof(error)));
     assert(strstr(error,files[7].engine_path) && !inputs.count && !inputs.units && !inputs.scopes);
+    /* A named row's resource name is not a provider path. */
+    files[7].engine_path="images/rock";
+    assert(!sh_package_link_inputs_open(scopes,2,catalog,&inputs,error,sizeof(error)));
+    assert(strstr(error,"native resource identity adapter") && strstr(error,files[7].engine_path));
     files[7].engine_path=paths[7];
     files[0].name=NULL;
     assert(!sh_package_link_inputs_open(scopes,2,catalog,&inputs,error,sizeof(error)) && strstr(error,"declaration identity"));

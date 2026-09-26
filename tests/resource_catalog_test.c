@@ -437,6 +437,7 @@ static void test_legacy_imports(void)
 {
     unsigned char index[1024] = {0};
     sh_resource_catalog *catalog;
+    const sh_resource_catalog_entry *const *found = NULL;
     unsigned char *body = NULL;
     size_t length = 0, n, pos;
     char error[512];
@@ -444,6 +445,9 @@ static void test_legacy_imports(void)
     catalog = open_catalog(); if (!catalog) return;
     CHECK(sh_resource_catalog_legacy_read(catalog, "entityDef", "ai/demon/cyberdemon", resource_path,
         &body, &length, error, sizeof(error)) == 1 && body && length == 832);
+    /* A named row is provided only by its filename, never by its name. */
+    CHECK(sh_resource_catalog_find_provider(catalog, resource_path, &found) == 1 && found);
+    CHECK(sh_resource_catalog_find_provider(catalog, "ai/demon/cyberdemon", &found) == 0 && !found);
     free(body); body = NULL;
     CHECK(!sh_resource_catalog_legacy_read(catalog, "model", "ai/demon/cyberdemon", resource_path,
         &body, &length, error, sizeof(error)) && !body);
@@ -478,11 +482,45 @@ static void test_legacy_imports(void)
         &body, &length, error, sizeof(error)) == 1 && body && !length);
     free(body); body = NULL;
     CHECK(sh_resource_catalog_legacy_read(catalog, NULL, NULL, "models/boss.md6", NULL, NULL, error, sizeof(error)) == 1);
+    /* The imported file keeps that name as its provider path, so discovery
+     * resolves the same identity through the unnamed row. */
+    CHECK(sh_resource_catalog_find_path(catalog, "models/boss.md6", &found) == 0 && !found);
+    CHECK(sh_resource_catalog_find_provider(catalog, "MODELS\\Boss.md6", &found) == 1 && found &&
+        !strcmp(found[0]->type, "cm") && !strcmp(found[0]->name, "models/boss.md6") && !*found[0]->path);
+    CHECK(sh_resource_catalog_find_provider(catalog, "models/boss", &found) == 0 && !found);
+    CHECK(sh_resource_catalog_find_provider(catalog, "", &found) == 0 && !found);
+    CHECK(sh_resource_catalog_find_provider(catalog, NULL, &found) == 0 && !found);
+    CHECK(sh_resource_catalog_find_provider(NULL, "models/boss.md6", &found) == 0 && !found);
+    CHECK(sh_resource_catalog_find_provider(catalog, "models/boss.md6", NULL) == 0);
+    /* Its original is the campaign's empty placeholder, not an absent file. */
+    CHECK(sh_resource_catalog_read_path(catalog, "models/boss.md6", &body, &length) == 2 && body && !length);
+    free(body); body = NULL;
+    CHECK(sh_resource_catalog_read_path(catalog, "models/boss", &body, &length) == 0 && !body && !length);
     sh_resource_catalog_close(catalog);
     put_file("snap_gameresources.pindex", index, n);
     catalog = open_catalog(); if (!catalog) return;
     CHECK(sh_resource_catalog_legacy_read(catalog, "cm", "models/boss.md6", "models/boss.md6",
         &body, &length, error, sizeof(error)) == 2 && !body && !length);
+    CHECK(sh_resource_catalog_find_provider(catalog, "models/boss.md6", &found) == 2 && found &&
+        !strcmp(found[0]->type, "cm") && !strcmp(found[1]->type, "cm"));
+    CHECK(sh_resource_catalog_read_path(catalog, "models/boss.md6", &body, &length) == 1 && body && !length);
+    free(body); body = NULL;
+    sh_resource_catalog_close(catalog);
+    /* A real filename wins over an unnamed row spelled the same way. */
+    pos = append_pindex_row(index, 0x24, 1, "model", "models/other.lwo", "models/boss.md6", 0, 0, 0, 0);
+    put_file("snap_gameresources.pindex", index, finish_pindex(index, sizeof(index), 1, pos));
+    catalog = open_catalog(); if (!catalog) return;
+    CHECK(sh_resource_catalog_find_provider(catalog, "models/boss.md6", &found) == 1 && found &&
+        !strcmp(found[0]->type, "model") && !strcmp(found[0]->name, "models/other.lwo"));
+    sh_resource_catalog_close(catalog);
+    /* Divergent unnamed rows in one catalog never pick a winner. */
+    fixture_reset();
+    pos = append_pindex_row(index, 0x24, 1, "cm", "models/boss.md6", "", 0, 1, 1, 1);
+    pos = append_pindex_row(index, pos, 2, "model", "models/boss.md6", "", 1, 1, 1, 1);
+    put_file("gameresources.pindex", index, finish_pindex(index, sizeof(index), 2, pos));
+    put_file("gameresources.patch", "AB", 2);
+    catalog = open_catalog(); if (!catalog) return;
+    CHECK(sh_resource_catalog_read_path(catalog, "models/boss.md6", &body, &length) == -1 && !body && !length);
     sh_resource_catalog_close(catalog);
 }
 

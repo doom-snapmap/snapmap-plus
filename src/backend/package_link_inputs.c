@@ -213,7 +213,7 @@ int sh_package_link_inputs_open(const sh_package_compilation *const *scopes,
                 if (!li_add(&rows, &used, &allocated, s, file, file->type, file->name)) goto done;
                 continue;
             }
-            entries_count = sh_resource_catalog_find_path(catalog, path, &entries);
+            entries_count = sh_resource_catalog_find_provider(catalog, path, &entries);
             if (entries_count) {
                 for (size_t e = 0; e < entries_count; e++) {
                     if (!*entries[e]->type || !*entries[e]->name) {

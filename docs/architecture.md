@@ -852,6 +852,9 @@ original binding. This is an internal adapter, with no package descriptor change
 `package_link_inputs` discovers these units from retained component compilations.
 Declarations use compiler identities; opaque resources use the installed catalog,
 including multiple physical permutations and multiple identities for one file.
+An index row without a filename is supplied under its resource name, the provider
+path legacy import writes for zero-byte collision placeholders; a named row is
+never matched by its name.
 Repeated catalog rows collapse inside a unit. Different authored scopes remain
 separate inputs until dependency-sensitive equivalence runs. New cooked model,
 MD6 mesh and animation paths use the same verified naming contract as source

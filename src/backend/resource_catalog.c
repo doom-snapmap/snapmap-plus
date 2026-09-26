@@ -258,6 +258,32 @@ static char *rc_key(const char *text)
     return out;
 }
 
+/* Rows without a filename are provided under their resource name. Every
+ * catalog row of this kind is a zero-byte placeholder; SnapMap's rows win and
+ * divergent rows in one catalog still refuse. */
+static int rc_read_unnamed(sh_resource_catalog *catalog, const char *key, unsigned char **body, size_t *length)
+{
+    const sh_resource_catalog_entry *const *rows = NULL;
+    size_t count = sh_resource_catalog_find_provider(catalog, key, &rows), i;
+    unsigned class = 2;
+    unsigned char *first = NULL;
+    size_t first_length = 0;
+    for (i = 0; i < count; i++) if (rows[i]->archive / 2u < class) class = rows[i]->archive / 2u;
+    for (i = 0; i < count; i++) {
+        unsigned char *other = NULL;
+        size_t other_length = 0;
+        int same;
+        if (rows[i]->archive / 2u != class) continue;
+        if (!rc_read(catalog, rows[i], &other, &other_length, NULL)) { free(first); return -1; }
+        if (!first) { first = other; first_length = other_length; continue; }
+        same = first_length == other_length && (!first_length || !memcmp(first, other, first_length));
+        free(other);
+        if (!same) { free(first); return -1; }
+    }
+    if (!first) return 0;
+    *body = first; *length = first_length; return class ? 2 : 1;
+}
+
 int sh_resource_catalog_read_path(void *context, const char *path, unsigned char **body, size_t *length)
 {
     sh_resource_catalog *catalog = (sh_resource_catalog *)context;
@@ -275,7 +301,9 @@ int sh_resource_catalog_read_path(void *context, const char *path, unsigned char
         size_t mid = low + (high - low) / 2u;
         if (strcmp(catalog->paths[mid]->path, key) < 0) low = mid + 1u; else high = mid;
     }
-    if (low == catalog->count || strcmp(catalog->paths[low]->path, key)) goto done;
+    if (low == catalog->count || strcmp(catalog->paths[low]->path, key)) {
+        result = rc_read_unnamed(catalog, key, body, length); goto done;
+    }
     initial = catalog->paths[low];
     if (!rc_read(catalog, initial, &first, &first_length, &encoded)) { result = -1; goto done; }
     for (i = low + 1u; i < catalog->count && !strcmp(catalog->paths[i]->path, key) &&
@@ -323,6 +351,24 @@ size_t sh_resource_catalog_find_path(const sh_resource_catalog *catalog,
     }
     for (end = low; end < catalog->count && !strcmp(catalog->paths[end]->path, key); end++) {}
     if (end > low) *entries = (const sh_resource_catalog_entry *const *)(catalog->paths + low);
+    free(key); return end - low;
+}
+
+size_t sh_resource_catalog_find_provider(const sh_resource_catalog *catalog,
+    const char *path, const sh_resource_catalog_entry *const **entries)
+{
+    size_t low = 0, high, end, count = sh_resource_catalog_find_path(catalog, path, entries);
+    char *key;
+    if (count || !catalog || !entries || !(key = rc_key(path))) return count;
+    if (!*key) { free(key); return 0; }
+    high = catalog->count;
+    while (low < high) {
+        size_t mid = low + (high - low) / 2u;
+        if (strcmp(rc_legacy_provider(catalog->legacy_paths[mid]), key) < 0) low = mid + 1u; else high = mid;
+    }
+    /* No row has this filename, so every match here is an unnamed row. */
+    for (end = low; end < catalog->count && !strcmp(rc_legacy_provider(catalog->legacy_paths[end]), key); end++) {}
+    if (end > low) *entries = (const sh_resource_catalog_entry *const *)(catalog->legacy_paths + low);
     free(key); return end - low;
 }
 

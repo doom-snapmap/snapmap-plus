@@ -139,13 +139,19 @@ static void pindex_str(pindex_bytes *b, const char *text)
     unsigned char p[4] = {(unsigned char)n, (unsigned char)(n >> 8), (unsigned char)(n >> 16), (unsigned char)(n >> 24)};
     pindex_raw(b, p, 4); pindex_raw(b, text, n);
 }
-static void pindex_write(const char *relative, const char *program)
+static void pindex_write(const char *relative, const char *program, const char *placeholder)
 {
     pindex_bytes b = {{0}, 0}; unsigned char head[0x20] = {5, 'S', 'E', 'R'}, tail[21] = {0};
     char path[MAX_PATH + 64]; FILE *file;
-    pindex_raw(&b, head, sizeof(head)); pindex_be(&b, 1);
+    pindex_raw(&b, head, sizeof(head)); pindex_be(&b, placeholder ? 2 : 1);
     pindex_be(&b, 0); pindex_str(&b, "renderProg"); pindex_str(&b, program);
     pindex_str(&b, "decls/renderprogs/common.inc"); pindex_raw(&b, tail, sizeof(tail));
+    /* A zero-byte placeholder row has no filename, as campaign collision
+     * models for md6 names do. */
+    if (placeholder) {
+        pindex_be(&b, 1); pindex_str(&b, "cm"); pindex_str(&b, placeholder); pindex_str(&b, "");
+        pindex_raw(&b, tail, sizeof(tail));
+    }
     uint32_t size = (uint32_t)b.length - 0x20;
     b.data[4] = (unsigned char)(size >> 24); b.data[5] = (unsigned char)(size >> 16);
     b.data[6] = (unsigned char)(size >> 8); b.data[7] = (unsigned char)size;
@@ -159,27 +165,30 @@ static void test_legacy_include_bindings(void)
     char base[MAX_PATH], path[MAX_PATH], error[1024];
     create("legacy-catalog/snap_gameresources.resources", ""); create("legacy-catalog/snap_gameresources.patch", "");
     create("legacy-catalog/gameresources.resources", ""); create("legacy-catalog/gameresources.patch", "");
-    pindex_write("legacy-catalog/snap_gameresources.pindex", "fixture");
-    pindex_write("legacy-catalog/gameresources.pindex", "campaignonly");
+    pindex_write("legacy-catalog/snap_gameresources.pindex", "fixture", NULL);
+    pindex_write("legacy-catalog/gameresources.pindex", "campaignonly", "zion/boss.md6");
     snprintf(base, sizeof(base), "%s\\legacy-catalog", root);
     sh_resource_catalog *catalog = sh_resource_catalog_open(base, error, sizeof(error));
     create("legacy-include/overrides/shader/package.json", "{\"id\":\"legacy-shader\",\"name\":\"Legacy shader\"}");
     create("legacy-include/overrides/shader/assets/decls/renderprogs/common.inc", "// shared include\n");
+    /* Legacy import supplies that placeholder under its resource name. */
+    create("legacy-include/overrides/shader/assets/zion/boss.md6", "");
     snprintf(path, sizeof(path), "%s\\legacy-include", root);
     sh_package_sources *sources = sh_package_sources_scan(path, error, sizeof(error));
     sh_package_compilation *compiled = sources ? sh_package_compile(sources, NULL, NULL, error, sizeof(error)) : NULL;
     sh_package_provenance historical = {0};
     CHECK(catalog && sources && compiled);
     CHECK(compiled && catalog && sh_package_runtime_test_legacy_bindings(compiled, catalog, &historical));
-    size_t snapmap = 0, campaign = 0;
+    size_t snapmap = 0, campaign = 0, placeholder = 0;
     for (size_t i = 0; i < historical.binding_count; i++) {
         const sh_package_provenance_binding *binding = historical.bindings + i;
+        placeholder += !strcmp(binding->family, "cm") && !strcmp(binding->original, "zion/boss.md6");
         if (strcmp(binding->family, "renderprog")) continue;
         snapmap += !strcmp(binding->original, "fixture");
         campaign += !strcmp(binding->original, "campaignonly");
     }
     if (snapmap != 1 || campaign) fprintf(stderr, "legacy include bindings: %zu SnapMap, %zu campaign\n", snapmap, campaign);
-    CHECK(snapmap == 1 && !campaign);
+    CHECK(snapmap == 1 && !campaign && placeholder == 1);
     sh_package_provenance_free(&historical); sh_package_compilation_free(compiled);
     sh_package_sources_free(sources); sh_resource_catalog_close(catalog);
 }

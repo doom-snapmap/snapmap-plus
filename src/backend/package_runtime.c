@@ -644,7 +644,7 @@ static int pr_legacy_bindings(const sh_package_compilation *compiled,
         int ok = 1;
         if (!resource->source_count) continue;
         if (!family || !name) {
-            count = sh_resource_catalog_find_path(catalog, resource->engine_path, &entries);
+            count = sh_resource_catalog_find_provider(catalog, resource->engine_path, &entries);
             if (!count) {
                 int status = sh_package_cooked_identity(resource->engine_path, &family, &cooked);
                 if (status < 0) return 0;

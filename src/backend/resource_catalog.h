@@ -24,7 +24,9 @@ const sh_resource_catalog_entry *sh_resource_catalog_at(const sh_resource_catalo
 
 /* Compatible with the package compiler's baseline-reader callback. Return 1
  * for SnapMap, 2 for campaign-only, 0 if absent, -1 on unreadable/ambiguous
- * data. Bytes are malloc-owned. Conflicting duplicate rows never pick a winner. */
+ * data. Bytes are malloc-owned. Conflicting duplicate rows never pick a winner.
+ * A path no row names reads the rows provided under it without a filename
+ * (sh_resource_catalog_find_provider). */
 int sh_resource_catalog_read_path(void *catalog, const char *path,
                                    unsigned char **body, size_t *length);
 int sh_resource_catalog_read_entry(sh_resource_catalog *catalog, size_t index,
@@ -45,6 +47,12 @@ size_t sh_resource_catalog_find(const sh_resource_catalog *catalog,
 /* Reverse lookup includes every identity/permutation and both archives. This
  * supplies native cache identities, not a precedence decision or file read. */
 size_t sh_resource_catalog_find_path(const sh_resource_catalog *catalog,
+    const char *path, const sh_resource_catalog_entry *const **entries);
+
+/* Identity of a supplied file. Rows with this filename win; otherwise an index
+ * row without a filename is provided under its resource name, as the earlier
+ * resource bridge and legacy import served it (zero-byte collision placeholders). */
+size_t sh_resource_catalog_find_provider(const sh_resource_catalog *catalog,
     const char *path, const sh_resource_catalog_entry *const **entries);
 
 #endif
