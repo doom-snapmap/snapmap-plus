@@ -983,8 +983,11 @@ static int rg_cook_read(const char *path, unsigned char **body, size_t *length)
     *body = NULL; *length = 0;
     __try {
         filesystem = *g_cook_api.filesystem;
-        int (*read)(void *, const char *, void **, void *) = (void *)(*(void ***)filesystem)[25];
-        bytes = read(filesystem, path, &native, NULL);
+        /* Both native ReadFile implementations forward the fifth argument to
+         * OpenFile and the allocation flags. Match the declaration reader's
+         * zero flags instead of letting unrelated stack bytes select a mode. */
+        int (*read)(void *, const char *, void **, void *, unsigned) = (void *)(*(void ***)filesystem)[25];
+        bytes = read(filesystem, path, &native, NULL, 0);
         if (bytes > 0 && bytes <= 16 * 1024 * 1024 && native) {
             *body = malloc((size_t)bytes + 1);
             if (*body) {

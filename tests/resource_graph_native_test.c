@@ -291,9 +291,9 @@ static unsigned char cook_lexer_error(void *value)
 { return cook_mode==3 || (cook_mode==4 && strstr(((cook_lexer *)value)->body,"permutations")); }
 static unsigned char cook_lexer_warning(void *value) { (void)value;return 0; }
 static int cook_native_mode(void) { return 2; }
-static int cook_read_file(void *fs,const char *path,void **body,void *timestamp)
+static int cook_read_file(void *fs,const char *path,void **body,void *timestamp,unsigned flags)
 {
-    CHECK(fs==cook_fs_slot && !timestamp);cook_reads++;
+    CHECK(fs==cook_fs_slot && !timestamp && !flags);cook_reads++;
     const char *text=NULL;
     if(!strcmp(path,"generated/decls/renderprog/example.decl") && cook_mode!=1)text=cook_root;
     if(!strcmp(path,"generated/decls/renderprog/base.decl") && cook_mode!=2)text=cook_base;
