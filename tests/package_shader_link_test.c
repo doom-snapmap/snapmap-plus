@@ -187,8 +187,23 @@ static void complete_and_bind(sh_package_shader_renderer renderer)
     unsigned char *changed_decl=NULL,*changed_bin=NULL;size_t decl_length=0,bin_length=0;
     for(size_t i=0;i<u->file_count;i++) {
         const sh_compiled_resource *file=u->files[i];size_t length=0;binding b={0};
+        int companion = strstr(file->engine_path,".vspv") || strstr(file->engine_path,".inc");
+        int abi_calls = f.calls, flag_calls = f.flag_calls;
         unsigned char *out=sh_package_source_link_bind_file(s,unit,file,file->body,file->body_length,bind_fixture,&b,&length,error,sizeof(error));
         assert(out && length==file->body_length && !memcmp(out,file->body,length));free(out);
+        if(companion) {
+            /* A frozen exact companion must not decode the owning program
+             * again, but foreign or truncated bytes are still rejected. */
+            assert(f.calls==abi_calls && f.flag_calls==flag_calls && !b.calls);
+            unsigned char *changed=malloc(file->body_length);assert(changed && file->body_length);
+            memcpy(changed,file->body,file->body_length);changed[file->body_length-1]^=1;
+            assert(!sh_package_source_link_bind_file(s,unit,file,changed,file->body_length,
+                bind_fixture,&b,&length,error,sizeof(error)));
+            assert(strstr(error,"companion differs") && !length);
+            assert(!sh_package_source_link_bind_file(s,unit,file,file->body,file->body_length-1,
+                bind_fixture,&b,&length,error,sizeof(error)));
+            assert(!length);free(changed);
+        }
         b=(binding){1,0,0};out=sh_package_source_link_bind_file(s,unit,file,file->body,file->body_length,bind_fixture,&b,&length,error,sizeof(error));
         if(!out)fprintf(stderr,"bind %s: %s\n",file->engine_path,error);assert(out);
         if(!strcmp(file->engine_path,"generated/decls/renderprog/fixture.decl")){changed_decl=out;decl_length=length;assert(strstr((char *)out,"private/texture"));}

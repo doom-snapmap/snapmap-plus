@@ -495,7 +495,26 @@ static unsigned char *sl_bind_member(sh_package_source_link *s, sl_unit *unit,
     if (!strcmp(unit->unit.family, "renderprog")) {
         for (size_t i = 0; i < unit->shader_file_count; i++) {
             const sl_shader_file *member = unit->shader_files + i;
-            if (member->file == file)
+            if (member->file != file) continue;
+            if (member->kind == SH_PACKAGE_SHADER_SPIRV ||
+                member->kind == SH_PACKAGE_SHADER_SOURCE_INCLUDE) {
+                /* Discovery already validated this companion against its
+                 * captured program. It has no relocatable reference sites.
+                 * Verify the exact retained member rather than reopening,
+                 * decoding and checking every companion of the whole program
+                 * once for each stage/include on every identity pass. */
+                size_t expected_length = 0;
+                unsigned char *expected = sh_package_compilation_read(unit->unit.compilation,
+                    file, SIZE_MAX, &expected_length, error, capacity);
+                if (!expected) return NULL;
+                if (length != expected_length || memcmp(body, expected, length)) {
+                    free(expected);
+                    snprintf(error, capacity, "shader companion differs from its captured source unit");
+                    return NULL;
+                }
+                *output_length = expected_length; return expected;
+            }
+            else
                 return sh_package_source_shader_bind(s->readers[unit->scope],
                     unit->programs[member->program].name, file->engine_path,
                     body, length, reference, context, output_length, error, capacity);
