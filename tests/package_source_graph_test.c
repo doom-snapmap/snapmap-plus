@@ -4175,26 +4175,43 @@ static void test_registration_mixed_lists(void)
     cleanup(); assert(!failures);
     while (f->count) free(f->regions[--f->count].address);
 }
-/* A package whose conductor copy adds the modifier rows first and second, in
- * that order, after the stock IMP row. */
-static void joint_clash(const char *name, const char *first, const char *first_mod, const char *second,
-    const char *second_mod)
+/* A package whose conductor copy lists, after the stock IMP row, the rows of
+ * one list: "aiType=value" pairs separated by '|' (modifiers take the value as
+ * healthMod, registrations as entityDef). */
+static void first_rows(const char *name, const char *list, const char *rows)
 {
-    char path[256], text[512];
+    int modifiers = !strcmp(list, "globalAIMods");
+    const char *field = modifiers ? "healthMod" : "entityDef", *first = modifiers ? "stock-imp" : "imp";
+    char path[256], text[1400], items[1200];
+    size_t n = 1;
+    snprintf(items, sizeof(items), "item[0] = { aiType = \"IMP\"; %s = \"%s\"; } ", field, first);
+    for (const char *at = rows; *at;) {
+        const char *bar = strchr(at, '|'), *eq = strchr(at, '=');
+        size_t length = bar ? (size_t)(bar - at) : strlen(at), used = strlen(items);
+        assert(eq && eq < at + length);
+        snprintf(items + used, sizeof(items) - used, "item[%zu] = { aiType = \"%.*s\"; %s = \"%.*s\"; } ",
+            n++, (int)(eq - at), at, field, (int)(at + length - eq - 1), eq + 1);
+        at += length + (bar ? 1 : 0);
+    }
     snprintf(path, sizeof(path), "overrides/%s/package.json", name);
     snprintf(text, sizeof(text), "{\"id\":\"local.%s\",\"name\":\"%s\"}", name, name); create(path, text);
     snprintf(path, sizeof(path), "overrides/%s/assets/generated/decls/entitydef/conductor.decl", name);
-    snprintf(text, sizeof(text), "{ class = \"Entity\"; edit = { globalAIMods = { num = 3; "
-        "item[0] = { aiType = \"IMP\"; healthMod = \"stock-imp\"; } item[1] = { aiType = \"%s\"; healthMod = \"%s\"; } "
-        "item[2] = { aiType = \"%s\"; healthMod = \"%s\"; } } } }", first, first_mod, second, second_mod);
+    snprintf(text, sizeof(text), "{ class = \"Entity\"; edit = { %s = { num = %zu; %s} } }", list, n, items);
     create(path, text);
 }
-/* Two valid packages order the same two new modifier rows oppositely. The
- * engine applies the first row whose mask meets an AI's type, so the order of
- * a T5 and a T6 row is observed only through a registered type meeting both:
- * with none, both orders are one behavior and compose, in either discovery
- * order; once the conductor registers AI typed T5 and T6 together, no one list
- * serves both packages and the candidate fails naming them. */
+static size_t first_package(const sh_package_sources *sources, const char *name)
+{
+    for (size_t i = 0; i < sources->package_count; i++)
+        if (!strcmp(sources->packages[i].name, name)) return i;
+    return SIZE_MAX;
+}
+/* Two valid packages order a T5 and a T6 modifier row oppositely. An AI takes
+ * the first modifier row meeting its type, so their order is observed only
+ * through a registered type meeting both: with none, both orders are one
+ * behavior and compose silently. Once the conductor registers AI typed T5 and
+ * T6 together, the earlier package in stable source order keeps its order and
+ * the other's is accounted. Nobody is excluded, and discovery order changes
+ * nothing. */
 static void test_registration_modifier_order(void)
 {
     static const char *separate = "{ class = \"Entity\"; edit = { aiTypeList = { num = 1; "
@@ -4209,12 +4226,12 @@ static void test_registration_modifier_order(void)
     sh_package_compile_environment env = {0};
     sh_package_library_native native = {0};
     size_t unserved = SIZE_MAX, invalid = SIZE_MAX;
-    char error[1024];
+    char error[1024], kept[2][8][96];
     registration_root("registration-modifier-order");
     env.baseline = registration_original; env.baseline_context = &originals;
     env.unserved_package = &unserved; env.invalid_package = &invalid;
     native.private_keys = 1;
-    joint_clash("order-a", "T5", "five", "T6", "six"); joint_clash("order-b", "T6", "six", "T5", "five");
+    first_rows("order-a", "globalAIMods", "T5=five|T6=six"); first_rows("order-b", "globalAIMods", "T6=six|T5=five");
     for (int round = 0; round < 4; round++) {
         sh_package_library library = {0};
         char mods[8][96];
@@ -4223,16 +4240,22 @@ static void test_registration_modifier_order(void)
         sh_package_sources *sources = sh_package_sources_scan(root, error, sizeof(error)); assert(sources);
         int ok = sh_package_library_compile(sources, &env, NULL, registration_original, &originals, registry,
             (uintptr_t)f->reflection, &native, &library, error, sizeof(error));
-        if (ok != !(round & 1)) fprintf(stderr, "modifier order %d: ok=%d %s\n", round, ok, error);
-        assert(ok == !(round & 1) && unserved == SIZE_MAX && invalid == SIZE_MAX);
+        if (!ok) fprintf(stderr, "modifier order %d: %s\n", round, error);
+        assert(ok && unserved == SIZE_MAX && invalid == SIZE_MAX);
+        const sh_compiled_resource *conductor = named_resource(library.compiled, "entitydef", "conductor");
+        size_t count = conductor ? conductor_rows(conductor, "globalAIMods", "healthMod", mods, 8) : 0;
+        size_t five = row_index(mods, count, "T5=five"), six = row_index(mods, count, "T6=six");
+        assert(count == 3 && row_index(mods, count, "IMP=stock-imp") == 0 && five != SIZE_MAX && six != SIZE_MAX);
+        const char *notes = library.coverage ? library.coverage : "";
         if (round & 1) {
-            assert(strstr(error, "order-a") && strstr(error, "order-b") && strstr(error, "product coverage"));
-        } else {
-            const sh_compiled_resource *conductor = named_resource(library.compiled, "entitydef", "conductor");
-            size_t count = conductor ? conductor_rows(conductor, "globalAIMods", "healthMod", mods, 8) : 0;
-            assert(count == 3 && row_index(mods, count, "IMP=stock-imp") == 0 &&
-                row_index(mods, count, "T5=five") != SIZE_MAX && row_index(mods, count, "T6=six") != SIZE_MAX);
-        }
+            int a_kept = strstr(notes, "so order-a's applies") != NULL;
+            if (!strstr(notes, "first global AI modifier for type 96")) fprintf(stderr, "modifier order notes: %s\n", notes);
+            assert(strstr(notes, a_kept ? "order-b: its first global AI modifier for type 96 differs from order-a's" :
+                "order-a: its first global AI modifier for type 96 differs from order-b's"));
+            assert(a_kept ? five < six : six < five);
+        } else assert(!strstr(notes, "global AI modifier"));
+        if (round < 2) memcpy(kept[round & 1], mods, sizeof(mods));
+        else for (size_t r = 0; r < count; r++) assert(!strcmp(kept[round & 1][r], mods[r]));
         sh_package_library_free(&library); sh_package_sources_free(sources);
     }
     rename_package("zz-order-a", "order-a");
@@ -4240,26 +4263,22 @@ static void test_registration_modifier_order(void)
     cleanup(); assert(!failures);
     while (f->count) free(f->regions[--f->count].address);
 }
-/* Two valid packages order a T5 row and a T5-or-T6 row oppositely, and the
- * conductor registers AI typed T5: an AI of that type takes whichever row
- * comes first, so no composed list serves both. That is product coverage,
- * not evidence against either owner: the candidate fails naming both and
- * leaves nothing unserved, in either discovery order, and the caller keeps
- * its previous generation. Two packages ordering T7 and T8 rows oppositely,
- * found first, are no part of it: no registered type observes their order. A
- * malformed package beside them is rejected on its own evidence; once the user
- * removes one of the two, everything else serves. */
-static size_t joint_index(const sh_package_sources *sources, const char *name)
+/* Modifier winners beside every other kind of package. The stock conductor
+ * registers IMP and T5 AI and has an IMP and a T5 modifier. clash-a and
+ * clash-b each list a new row meeting T5 ahead of the stock T5 row, so each
+ * changes which row a T5 AI takes: the earlier in stable source order keeps
+ * its row first and the other's change is accounted. shade-a and shade-b
+ * order two rows meeting T5 oppositely behind the stock T5 row, which wins
+ * either way, and calm-a and calm-b order rows no registered type meets: both
+ * pairs compose silently. Three packages register private AI. A malformed
+ * package is rejected on its own evidence; nothing else is excluded, the
+ * candidate is not refused, and discovery order changes nothing. */
+static void test_registration_first_match(void)
 {
-    for (size_t i = 0; i < sources->package_count; i++)
-        if (!strcmp(sources->packages[i].name, name)) return i;
-    return SIZE_MAX;
-}
-static void test_registration_joint_gap(void)
-{
-    static const char *joint_stock = "{ class = \"Entity\"; edit = { aiTypeList = { num = 2; "
+    static const char *first_stock = "{ class = \"Entity\"; edit = { aiTypeList = { num = 2; "
         "item[0] = { aiType = \"IMP\"; entityDef = \"imp\"; } item[1] = { aiType = \"T5\"; entityDef = \"t3\"; } } "
-        "globalAIMods = { num = 1; item[0] = { aiType = \"IMP\"; healthMod = \"stock-imp\"; } } } }";
+        "globalAIMods = { num = 2; item[0] = { aiType = \"IMP\"; healthMod = \"stock-imp\"; } "
+        "item[1] = { aiType = \"T5\"; healthMod = \"stock-five\"; } } } }";
     static const char *const peers[] = {"peer-1", "peer-2", "peer-3"}, *const targets[] = {"local-only",
         "parent-only", "modifier-child"};
     fixture storage; fixture *f = &storage; setup(f); conductor_reflection(f);
@@ -4267,16 +4286,20 @@ static void test_registration_joint_gap(void)
     source_link_fixture originals = {f};
     sh_package_compile_environment env = {0};
     sh_package_library_native native = {0};
-    sh_package_library library = {0};
     size_t unserved = SIZE_MAX, invalid = SIZE_MAX;
-    char path[256], text[1024], error[1024], held[MAX_PATH], from[MAX_PATH];
-    registration_root("registration-joint-gap");
-    registration_conductor = joint_stock;
+    char path[256], text[1024], error[1024], kept[16][96];
+    size_t kept_count = 0;
+    registration_root("registration-first-match");
+    registration_conductor = first_stock;
     env.baseline = registration_original; env.baseline_context = &originals;
     env.unserved_package = &unserved; env.invalid_package = &invalid;
     native.private_keys = 1;
-    joint_clash("clash-a", "T5", "five", "T5 T6", "both"); joint_clash("clash-b", "T5 T6", "both", "T5", "five");
-    joint_clash("calm-a", "T7", "seven", "T8", "eight"); joint_clash("calm-b", "T8", "eight", "T7", "seven");
+    first_rows("clash-a", "globalAIMods", "T5 T6=six|T5=stock-five");
+    first_rows("clash-b", "globalAIMods", "T5 T7=seven|T5=stock-five");
+    first_rows("shade-a", "globalAIMods", "T5=stock-five|T5 T9=nine|T5 T10=ten");
+    first_rows("shade-b", "globalAIMods", "T5=stock-five|T5 T10=ten|T5 T9=nine");
+    first_rows("calm-a", "globalAIMods", "T11=eleven|T12=twelve");
+    first_rows("calm-b", "globalAIMods", "T12=twelve|T11=eleven");
     for (size_t i = 0; i < 3; i++) {
         snprintf(path, sizeof(path), "overrides/%s/package.json", peers[i]);
         snprintf(text, sizeof(text), "{\"id\":\"local.%s\",\"name\":\"%s\"}", peers[i], peers[i]); create(path, text);
@@ -4287,58 +4310,24 @@ static void test_registration_joint_gap(void)
         snprintf(path, sizeof(path), "overrides/%s/assets/generated/decls/entitydef/peer_%zu.decl", peers[i], i + 1);
         snprintf(text, sizeof(text), "{ class = \"Entity\"; edit = { target = \"%s\"; } }", targets[i]); create(path, text);
     }
+    create("overrides/broken/package.json", "{\"id\":\"local.broken\",\"name\":\"broken\"}");
+    create("overrides/broken/assets/generated/decls/entitydef/conductor.decl",
+        "{ class = \"Entity\"; edit = { globalAIMods = { num = 1; }");
     for (int round = 0; round < 2; round++) {
+        sh_package_library library = {0};
+        char rows[16][96], mods[16][96], leaf[16], row[160];
         if (round) { rename_package("clash-a", "zz-clash-a"); rename_package("clash-b", "zy-clash-b"); }
         sh_package_sources *sources = sh_package_sources_scan(root, error, sizeof(error)); assert(sources);
         int ok = sh_package_library_compile(sources, &env, NULL, registration_original, &originals, registry,
             (uintptr_t)f->reflection, &native, &library, error, sizeof(error));
-        if (ok || unserved != SIZE_MAX || invalid != SIZE_MAX || !strstr(error, "clash-a") || !strstr(error, "clash-b"))
-            fprintf(stderr, "joint gap %d: ok=%d unserved=%zu invalid=%zu %s\n", round, ok, unserved, invalid, error);
-        assert(!ok && unserved == SIZE_MAX && invalid == SIZE_MAX && !library.compiled);
-        assert(strstr(error, "clash-a") && strstr(error, "clash-b") && strstr(error, "product coverage") &&
-            !strstr(error, "calm-"));
-        sh_package_library_free(&library); sh_package_sources_free(sources);
-    }
-    rename_package("zz-clash-a", "clash-a"); rename_package("zy-clash-b", "clash-b");
-    /* An environment failure while naming the participants guesses nothing. */
-    {
-        sh_package_sources *sources = sh_package_sources_scan(root, error, sizeof(error)); assert(sources);
-        sh_package_library_test_probe_failures(1);
-        int ok = sh_package_library_compile(sources, &env, NULL, registration_original, &originals, registry,
-            (uintptr_t)f->reflection, &native, &library, error, sizeof(error));
-        sh_package_library_test_probe_failures(0);
-        assert(!ok && unserved == SIZE_MAX && invalid == SIZE_MAX && !strstr(error, "cannot compose"));
-        sh_package_library_free(&library); sh_package_sources_free(sources);
-    }
-    /* A malformed owner is rejected on its own evidence; the joint gap stays. */
-    create("overrides/broken/package.json", "{\"id\":\"local.broken\",\"name\":\"broken\"}");
-    create("overrides/broken/assets/generated/decls/entitydef/conductor.decl",
-        "{ class = \"Entity\"; edit = { globalAIMods = { num = 1; }");
-    {
-        sh_package_sources *sources = sh_package_sources_scan(root, error, sizeof(error)); assert(sources);
-        int ok = sh_package_library_compile(sources, &env, NULL, registration_original, &originals, registry,
-            (uintptr_t)f->reflection, &native, &library, error, sizeof(error));
-        if (ok || invalid != joint_index(sources, "broken"))
-            fprintf(stderr, "malformed beside joint gap: ok=%d invalid=%zu unserved=%zu %s\n", ok, invalid, unserved, error);
-        assert(!ok && invalid == joint_index(sources, "broken") && invalid != SIZE_MAX && unserved == SIZE_MAX);
+        if (ok || invalid != first_package(sources, "broken"))
+            fprintf(stderr, "malformed beside first-match packages: ok=%d invalid=%zu %s\n", ok, invalid, error);
+        assert(!ok && invalid == first_package(sources, "broken") && invalid != SIZE_MAX && unserved == SIZE_MAX);
+        sh_package_library_free(&library);
         assert(sh_package_sources_remove(sources, invalid));
         ok = sh_package_library_compile(sources, &env, NULL, registration_original, &originals, registry,
             (uintptr_t)f->reflection, &native, &library, error, sizeof(error));
-        assert(!ok && unserved == SIZE_MAX && invalid == SIZE_MAX && strstr(error, "product coverage"));
-        sh_package_library_free(&library); sh_package_sources_free(sources);
-    }
-    /* The user removes one of the two: every other package serves. */
-    snprintf(held, sizeof(held), "%s\\held", root); assert(CreateDirectoryA(held, NULL));
-    snprintf(from, sizeof(from), "%s\\overrides\\clash-b", root); snprintf(path, sizeof(path), "%s\\clash-b", held);
-    assert(MoveFileA(from, path));
-    snprintf(from, sizeof(from), "%s\\overrides\\broken", root); snprintf(path, sizeof(path), "%s\\broken", held);
-    assert(MoveFileA(from, path));
-    {
-        char rows[16][96], mods[16][96], leaf[16], row[160];
-        sh_package_sources *sources = sh_package_sources_scan(root, error, sizeof(error)); assert(sources);
-        int ok = sh_package_library_compile(sources, &env, NULL, registration_original, &originals, registry,
-            (uintptr_t)f->reflection, &native, &library, error, sizeof(error));
-        if (!ok) fprintf(stderr, "joint gap resolved: %s\n", error);
+        if (!ok) fprintf(stderr, "first-match packages: %s\n", error);
         assert(ok && unserved == SIZE_MAX && invalid == SIZE_MAX);
         const sh_compiled_resource *conductor = named_resource(library.compiled, "entitydef", "conductor");
         size_t count = conductor ? conductor_rows(conductor, "aiTypeList", "entityDef", rows, 16) : 0;
@@ -4355,30 +4344,124 @@ static void test_registration_joint_gap(void)
             }
             assert(seen == 1);
         }
-        assert(count == 5 && mod_count == 5 &&
-            row_index(mods, mod_count, "T5=five") < row_index(mods, mod_count, "T5 T6=both") &&
-            row_index(mods, mod_count, "T7=seven") != SIZE_MAX && row_index(mods, mod_count, "T8=eight") != SIZE_MAX);
+        const char *notes = library.coverage ? library.coverage : "";
+        int a_kept = strstr(notes, "so clash-a's applies") != NULL;
+        size_t winner = row_index(mods, mod_count, a_kept ? "T5 T6=six" : "T5 T7=seven"),
+            other = row_index(mods, mod_count, a_kept ? "T5 T7=seven" : "T5 T6=six"),
+            stock = row_index(mods, mod_count, "T5=stock-five");
+        if (!strstr(notes, "first global AI modifier for type 32")) fprintf(stderr, "first-match notes: %s\n", notes);
+        assert(strstr(notes, a_kept ? "clash-b: its first global AI modifier for type 32 differs from clash-a's" :
+            "clash-a: its first global AI modifier for type 32 differs from clash-b's"));
+        assert(!strstr(notes, "shade-") && !strstr(notes, "calm-"));
+        assert(count == 5 && mod_count == 8 && row_index(mods, mod_count, "IMP=stock-imp") == 0);
+        assert(winner < other && winner < stock && winner < row_index(mods, mod_count, "T5 T9=nine") &&
+            winner < row_index(mods, mod_count, "T5 T10=ten") && row_index(mods, mod_count, "T11=eleven") != SIZE_MAX &&
+            row_index(mods, mod_count, "T12=twelve") != SIZE_MAX);
+        if (!round) { memcpy(kept, mods, sizeof(mods)); kept_count = mod_count; }
+        else for (size_t r = 0; r < kept_count; r++) assert(!strcmp(kept[r], mods[r]));
         sh_package_library_free(&library); sh_package_sources_free(sources);
     }
-    snprintf(from, sizeof(from), "%s\\overrides\\clash-b", root); snprintf(path, sizeof(path), "%s\\clash-b", held);
-    assert(MoveFileA(path, from));
-    snprintf(from, sizeof(from), "%s\\overrides\\broken", root); snprintf(path, sizeof(path), "%s\\broken", held);
-    assert(MoveFileA(path, from));
-    assert(RemoveDirectoryA(held));
+    rename_package("zz-clash-a", "clash-a"); rename_package("zy-clash-b", "clash-b");
     registration_conductor = NULL;
     cleanup(); assert(!failures);
     while (f->count) free(f->regions[--f->count].address);
 }
-/* The same for an editor collection: two packages order the same two
- * encounters oppositely in a whitelist inspector (a strict list) beside three
- * packages adding their own. */
-static void test_editor_joint_gap(fixture *f, sh_decl_registry_source registry)
+/* The fixture enum's bits of a registration row's aiType ("T5", "IMP" or a
+ * number, as relocation writes a package's own key beside its named bits). */
+static unsigned long first_bits(const char *row)
+{
+    const char *eq = strrchr(row, '='), *end = eq ? eq : row + strlen(row);
+    unsigned long bits = 0;
+    for (const char *at = row; at < end;) {
+        const char *stop;
+        while (at < end && *at == ' ') at++;
+        for (stop = at; stop < end && *stop != ' '; stop++) {}
+        if (stop > at) bits |= *at >= '0' && *at <= '9' ? strtoul(at, NULL, 10) :
+            stop - at == 3 && !strncmp(at, "IMP", 3) ? 4ul : *at == 'T' ? 1ul << atoi(at + 1) : 0ul;
+        at = stop;
+    }
+    return bits;
+}
+/* A definition's first registration types its AI. The stock conductor
+ * registers t3 under T5. reg-a lists t3 under T6 ahead of it, so its t3 AI
+ * are typed T6; reg-b adds T7 behind the stock row and changes nothing. Three
+ * packages list imp under T8, T9 and T10 behind the stock IMP row in a cyclic
+ * presentation order, so the composer drops layout preferences: each
+ * definition's first registration must survive that. Then reg-c lists T7 first
+ * as well: the earlier of reg-a and reg-c in stable source order keeps t3's
+ * type and the other's change is accounted. Relocation gives each package's
+ * own rows a private key beside their named bits, so types compare by the
+ * named bit. */
+static void test_registration_first_registration(void)
+{
+    static const char *types_stock = "{ class = \"Entity\"; edit = { aiTypeList = { num = 2; "
+        "item[0] = { aiType = \"IMP\"; entityDef = \"imp\"; } item[1] = { aiType = \"T5\"; entityDef = \"t3\"; } } "
+        "globalAIMods = { num = 1; item[0] = { aiType = \"IMP\"; healthMod = \"stock-imp\"; } } } }";
+    fixture storage; fixture *f = &storage; setup(f); conductor_reflection(f);
+    sh_decl_registry_source registry = {f, read_memory, (uintptr_t)f->registry, NULL};
+    source_link_fixture originals = {f};
+    sh_package_compile_environment env = {0};
+    sh_package_library_native native = {0};
+    size_t unserved = SIZE_MAX, invalid = SIZE_MAX;
+    char error[1024];
+    registration_root("registration-first-registration");
+    registration_conductor = types_stock;
+    env.baseline = registration_original; env.baseline_context = &originals;
+    env.unserved_package = &unserved; env.invalid_package = &invalid;
+    native.private_keys = 1;
+    first_rows("reg-a", "aiTypeList", "T6=t3|T5=t3"); first_rows("reg-b", "aiTypeList", "T5=t3|T7=t3");
+    first_rows("cyc-a", "aiTypeList", "T8=imp|T9=imp"); first_rows("cyc-b", "aiTypeList", "T9=imp|T10=imp");
+    first_rows("cyc-c", "aiTypeList", "T10=imp|T8=imp");
+    for (int round = 0; round < 2; round++) {
+        sh_package_library library = {0};
+        char rows[16][96];
+        if (round) first_rows("reg-c", "aiTypeList", "T7=t3|T5=t3");
+        sh_package_sources *sources = sh_package_sources_scan(root, error, sizeof(error)); assert(sources);
+        int ok = sh_package_library_compile(sources, &env, NULL, registration_original, &originals, registry,
+            (uintptr_t)f->reflection, &native, &library, error, sizeof(error));
+        if (!ok) fprintf(stderr, "first registration %d: %s\n", round, error);
+        assert(ok && unserved == SIZE_MAX && invalid == SIZE_MAX);
+        const sh_compiled_resource *conductor = named_resource(library.compiled, "entitydef", "conductor");
+        size_t count = conductor ? conductor_rows(conductor, "aiTypeList", "entityDef", rows, 16) : 0;
+        size_t first_t3 = SIZE_MAX, first_imp = SIZE_MAX;
+        for (size_t r = count; r > 0; r--) {
+            const char *tail = strrchr(rows[r - 1], '=');
+            if (tail && !strcmp(tail, "=t3")) first_t3 = r - 1;
+            if (tail && !strcmp(tail, "=imp")) first_imp = r - 1;
+        }
+        const char *notes = library.coverage ? library.coverage : "";
+        assert(count == 7 && first_imp != SIZE_MAX && !strcmp(rows[first_imp], "IMP=imp") && first_t3 != SIZE_MAX);
+        if (!round) {
+            assert((first_bits(rows[first_t3]) & 0x1ff) == 64 && !strstr(notes, "first registration"));
+        } else {
+            int a_kept = strstr(notes, "so reg-a's applies") != NULL;
+            if (!strstr(notes, "first registration of t3")) fprintf(stderr, "first registration notes: %s\n", notes);
+            assert((first_bits(rows[first_t3]) & 0x1ff) == (a_kept ? 64ul : 128ul));
+            assert(strstr(notes, a_kept ? "reg-c: its first registration of t3 differs from reg-a's" :
+                "reg-a: its first registration of t3 differs from reg-c's"));
+            assert(!strstr(notes, "smp-contribution/"));
+        }
+        sh_package_library_free(&library); sh_package_sources_free(sources);
+    }
+    registration_conductor = NULL;
+    cleanup(); assert(!failures);
+    while (f->count) free(f->regions[--f->count].address);
+}
+/* Individually valid packages the product cannot compose together, against
+ * a malformed one. Two packages order the same two encounters oppositely in a
+ * whitelist inspector (a strict list) beside three adding their own. That is
+ * product coverage, not evidence against either owner: the candidate fails
+ * naming both, leaves nothing unserved and the caller keeps its previous
+ * generation; an environment failure while naming them guesses nobody. A
+ * malformed package is rejected on its own evidence and the joint gap stays;
+ * once the user removes one of the two, everything else serves. */
+static void test_editor_membership_order(fixture *f, sh_decl_registry_source registry)
 {
     static const char *const names[] = {"clash-a", "clash-b", "peer-1", "peer-2", "peer-3"};
     static const char *const lists[] = {"item[0] = \"parent-only\"; item[1] = \"modifier-child\";",
         "item[0] = \"modifier-child\"; item[1] = \"parent-only\";", "item[0] = \"local-only\";",
         "item[0] = \"local-only\";", "item[0] = \"local-only\";"};
-    char temporary[MAX_PATH], path[256], text[512], error[1024], held[MAX_PATH], from[MAX_PATH];
+    char temporary[MAX_PATH], path[256], text[512], error[1024];
     source_link_fixture originals = {f};
     sh_package_compile_environment env = {0};
     sh_package_library library = {0};
@@ -4399,27 +4482,42 @@ static void test_editor_joint_gap(fixture *f, sh_decl_registry_source registry)
     sh_package_sources *sources = sh_package_sources_scan(root, error, sizeof(error)); assert(sources);
     int ok = sh_package_library_compile(sources, &env, NULL, contribution_original, &originals, registry,
         (uintptr_t)f->reflection, NULL, &library, error, sizeof(error));
-    if (ok || unserved != SIZE_MAX || invalid != SIZE_MAX || !strstr(error, "clash-a") || !strstr(error, "clash-b"))
-        fprintf(stderr, "editor joint gap: ok=%d unserved=%zu invalid=%zu %s\n", ok, unserved, invalid, error);
-    assert(!ok && unserved == SIZE_MAX && invalid == SIZE_MAX && strstr(error, "clash-a") && strstr(error, "clash-b"));
-    sh_package_library_free(&library); sh_package_sources_free(sources);
-    snprintf(held, sizeof(held), "%s\\held", root); assert(CreateDirectoryA(held, NULL));
-    snprintf(from, sizeof(from), "%s\\overrides\\clash-b", root); snprintf(path, sizeof(path), "%s\\clash-b", held);
-    assert(MoveFileA(from, path));
-    sources = sh_package_sources_scan(root, error, sizeof(error)); assert(sources);
-    ok = sh_package_library_compile(sources, &env, NULL, contribution_original, &originals, registry,
-        (uintptr_t)f->reflection, NULL, &library, error, sizeof(error));
-    if (!ok) fprintf(stderr, "editor joint gap resolved: %s\n", error);
+    if (!ok) fprintf(stderr, "editor membership union: %s\n", error);
     assert(ok && unserved == SIZE_MAX && invalid == SIZE_MAX);
     const sh_compiled_resource *list = named_resource(library.compiled,
         "snappropertyinspector_whitelistencounterdecl", "list");
-    assert(list);
+    assert(list && sh_package_owners_count(&list->owners) == 5 &&
+        !sh_package_owners_count(&list->gameplay_owners));
     sh_decl_node *tree = sh_decl_tree_parse((sh_decl_source){(char *)list->body, list->body_length}, NULL, 0);
     const sh_decl_node *encounters = sh_decl_tree_member(sh_decl_tree_member(tree, "edit"), "validEncounters");
     assert(encounters && !strcmp(node_value(sh_decl_tree_member(encounters, "num")), "3"));
+    assert(strstr((char *)list->body, "parent-only") && strstr((char *)list->body, "modifier-child") &&
+        strstr((char *)list->body, "local-only"));
+    sh_decl_tree_free(tree);
+    sh_package_library_free(&library);
+    sh_package_sources_free(sources);
+    create("overrides/broken/package.json", "{\"id\":\"local.broken\",\"name\":\"broken\"}");
+    create("overrides/broken/assets/generated/decls/snappropertyinspector_whitelistencounterdecl/list.decl",
+        "{ edit = { mode = \"shared\"; validEncounters = { num = 1; }");
+    sources = sh_package_sources_scan(root, error, sizeof(error)); assert(sources);
+    ok = sh_package_library_compile(sources, &env, NULL, contribution_original, &originals, registry,
+        (uintptr_t)f->reflection, NULL, &library, error, sizeof(error));
+    if (ok || invalid != first_package(sources, "broken"))
+        fprintf(stderr, "malformed beside editor membership union: ok=%d invalid=%zu %s\n", ok, invalid, error);
+    assert(!ok && invalid == first_package(sources, "broken") && invalid != SIZE_MAX && unserved == SIZE_MAX);
+    sh_package_library_free(&library);
+    assert(sh_package_sources_remove(sources, invalid));
+    ok = sh_package_library_compile(sources, &env, NULL, contribution_original, &originals, registry,
+        (uintptr_t)f->reflection, NULL, &library, error, sizeof(error));
+    assert(ok && unserved == SIZE_MAX && invalid == SIZE_MAX);
+    list = named_resource(library.compiled,
+        "snappropertyinspector_whitelistencounterdecl", "list");
+    assert(list && sh_package_owners_count(&list->owners) == 5);
+    tree = sh_decl_tree_parse((sh_decl_source){(char *)list->body, list->body_length}, NULL, 0);
+    encounters = sh_decl_tree_member(sh_decl_tree_member(tree, "edit"), "validEncounters");
+    assert(encounters && !strcmp(node_value(sh_decl_tree_member(encounters, "num")), "3"));
     sh_decl_tree_free(tree);
     sh_package_library_free(&library); sh_package_sources_free(sources);
-    assert(MoveFileA(path, from)); assert(RemoveDirectoryA(held));
     cleanup(); assert(!failures);
 }
 /* Thirteen packages register distinct AI under one authored key. The engine
@@ -6621,7 +6719,8 @@ int main(void)
     test_registration_row_order();
     test_registration_mixed_lists();
     test_registration_modifier_order();
-    test_registration_joint_gap();
+    test_registration_first_match();
+    test_registration_first_registration();
     test_registration_capacity();
     test_registration_private_variants();
     test_registration_stock_inspector();
@@ -6649,7 +6748,7 @@ int main(void)
     test_inherited_editor_parent(&f, registry);
     test_inherited_reflected_state(&f, registry);
     test_editor_parent_contracts(&f, registry);
-    test_editor_joint_gap(&f, registry);
+    test_editor_membership_order(&f, registry);
     test_unchanged_editor_copies(&f, registry);
     test_editor_rebase_scopes(&f, registry);
     test_native_original_gaps(&f, registry);

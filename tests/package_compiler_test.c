@@ -889,6 +889,33 @@ static void test_requirement_reduction(void)
     sh_package_owners_free(&conflicted); free(expected);
 }
 
+static void test_encounter_membership_order(void)
+{
+    static const char *types[] = {"snappropertyinspector_whitelistencounterdecl",
+        "snappropertyinspector_whitelistencounterdecllist"};
+    const char *base_text = "{ edit = { validEncounters = { num = 0; } } }";
+    const char *a = "{ edit = { validEncounters = { num = 2; item[0] = \"alpha\"; item[1] = \"beta\"; } } }";
+    const char *b = "{ edit = { validEncounters = { num = 4; item[0] = \"beta\"; item[1] = \"alpha\"; "
+        "item[2] = \"gamma\"; item[3] = \"beta\"; } } }";
+    sh_decl_source base = {base_text, strlen(base_text)}, parts[] = {{a, strlen(a)}, {b, strlen(b)}};
+    for (size_t type = 0; type < 2; type++) for (int reverse = 0; reverse < 2; reverse++) {
+        sh_decl_source inputs[] = {parts[reverse], parts[!reverse]};
+        char error[1024]; size_t length = 0;
+        char *out = sh_package_editor_contributions(types[type], base, inputs, 2, inputs[0], 0,
+            &length, error, sizeof(error));
+        if (!out) fprintf(stderr, "encounter membership %s: %s\n", types[type], error);
+        CHECK(out);
+        if (out) {
+            sh_decl_node *tree = sh_decl_tree_parse((sh_decl_source){out, length}, error, sizeof(error));
+            const sh_decl_node *list = sh_decl_tree_member(sh_decl_tree_member(tree, "edit"), "validEncounters");
+            const sh_decl_node *num = sh_decl_tree_member(list, "num");
+            CHECK(num && !strcmp(num->value, "3"));
+            CHECK(strstr(out, "\"alpha\"") && strstr(out, "\"beta\"") && strstr(out, "\"gamma\""));
+            sh_decl_tree_free(tree); free(out);
+        }
+    }
+}
+
 int main(int argc, char **argv)
 {
     char temp[MAX_PATH], error[2048];
@@ -977,7 +1004,7 @@ int main(int argc, char **argv)
 done:
     sh_package_compilation_free(compiled); sh_package_sources_free(sources);
     test_new_declarations(); test_native_original_provenance(); test_duplicate_editor_controls();
-    test_requirement_reduction(); test_editor_rebase(); cleanup();
+    test_requirement_reduction(); test_editor_rebase(); test_encounter_membership_order(); cleanup();
     if (failures) return 1;
     puts("package compiler checks passed"); return 0;
 }

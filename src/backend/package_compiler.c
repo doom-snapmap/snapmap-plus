@@ -626,7 +626,10 @@ static int pc_equal(const unsigned char *a, size_t an, const unsigned char *b, s
 static const sh_decl_collection_rule *pc_rules(const char *type, size_t *count)
 {
     static const sh_decl_collection_rule blocking = {"edit.renderModelInfoList", "renderModelMaterial"};
-    static const sh_decl_collection_rule encounters = {"edit.validEncounters", NULL};
+    /* Both encounter inspectors filter the native registry by membership and
+     * write declaration names into map properties, never whitelist indices. */
+    static const sh_decl_collection_rule encounters = {"edit.validEncounters", NULL, NULL, NULL, NULL,
+        SH_DECL_COLLECTION_PRESENTATION_ORDER};
     /* A bit-flag inspector's choices: one checkbox per value; the list position
      * is presentation (the property holds the checked values, not indices). */
     static const char *const choice_labels[] = {"label", "description", NULL};

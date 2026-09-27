@@ -1689,6 +1689,20 @@ static const char *pl_scope_label(const pl_build *b, const sh_package_sources *s
     const sh_package_component *component = sources->components + b->views[scope].component;
     return component->descriptor.name[0] ? component->descriptor.name : sources->packages[component->owner].name;
 }
+/* Composition tokens are private graph identities, not useful author-facing
+ * names. Prefer this source's spelling when an exact class has several names. */
+static const char *pl_authored_name(const pl_contributions *c, size_t scope, const char *family, const char *name)
+{
+    for (size_t k = 0; k < c->token_count; k++) if (!strcmp(c->tokens[k], name)) {
+        const sh_package_link_unit *unit = c->inputs.units + c->classes.representatives[k];
+        if (strcmp(unit->family, family)) return name;
+        for (size_t i = 0; i < c->inputs.count; i++)
+            if (c->inputs.scopes[i] == scope && c->classes.nodes[i] == k)
+                return c->inputs.units[i].name;
+        return unit->name;
+    }
+    return name;
+}
 /* One registration row's fields as text. Bound references are already class
  * tokens, so equal text is an equal registration. */
 static char *pl_row_text(const sh_decl_node *item)
@@ -2557,59 +2571,267 @@ done:
     return ok;
 }
 
-/* The native order contract of a conductor's modifier rows. The engine gives
- * an AI the type of the first aiTypeList row registering its definition and
- * applies the first globalAIMods row whose mask meets that type (Vulkan
- * 0x141124470, 0x14110faa0; under the private key contract, its matching).
- * Two modifier rows' order is therefore observed only when a registered type
- * meets both; any other order is presentation. The types are every row's of
- * every input, a superset of the composed list's, so a pair is never taken
- * for free that the result could observe. */
-typedef struct pl_registration_order {
-    const sh_package_key_space *space;
-    const sh_package_key_groups *groups;
-    int private_keys;
-    uint32_t *types;
-    size_t type_count;
-} pl_registration_order;
-static int pl_row_bits(const pl_registration_order *o, const sh_decl_node *row, const char *field, uint32_t *bits)
+/* First-match winners of a conductor's lists. An AI takes the key of the first
+ * aiTypeList row registering its definition, and the first globalAIMods row
+ * whose mask meets that type applies (Vulkan 0x141124470, 0x14110faa0; the
+ * private-key detour keeps the same first match). Those winners are the only
+ * order either list has: each stays first among the rows answering its
+ * definition or type, and every other order is presentation, so rows an
+ * earlier one shadows compose in any order. A source keeps each winner it
+ * changes from the stock list's. When sources change one winner differently,
+ * or a change would contradict winners already kept, the earlier source keeps
+ * its choice (a frozen legacy context before packages, then stable source
+ * order, as for equal modifier masks) and the other's is accounted. */
+typedef struct pl_first_list {
+    size_t count;
+    char **types, **defs;   /* each row's aiType and (aiTypeList) entityDef text */
+    uint32_t *bits;
+    unsigned char *before;  /* count x count: row a stays before row b */
+} pl_first_list;
+typedef struct pl_first_match {
+    pl_build *build;
+    const sh_package_sources *sources;
+    pl_first_list lists[2]; /* aiTypeList, globalAIMods */
+    size_t **rows, *row_count; /* per source and list: its rows in authored order */
+    size_t *scopes, source_count; /* the stock (or empty) original first, then contributions */
+} pl_first_match;
+static const char *const pl_first_names[2] = {"aiTypeList", "globalAIMods"};
+static int pl_first_literal(const sh_decl_node *row, const char *field, const char **text, size_t *length)
+{ return row && row->compound && sh_decl_tree_literal(sh_decl_tree_member(row, field), text, length); }
+static size_t pl_first_find(const pl_first_list *l, int registration, const sh_decl_node *row)
 {
-    const char *text = NULL;
-    size_t length = 0;
-    return row && sh_decl_tree_literal(sh_decl_tree_member(row, field), &text, &length) &&
-        sh_package_key_bits(o->space, text, length, bits);
+    const char *type, *def = NULL;
+    size_t type_length, def_length = 0;
+    if (!pl_first_literal(row, "aiType", &type, &type_length) ||
+        (registration && !pl_first_literal(row, "entityDef", &def, &def_length))) return SIZE_MAX;
+    for (size_t i = 0; i < l->count; i++)
+        if (strlen(l->types[i]) == type_length && !memcmp(l->types[i], type, type_length) &&
+            (!registration || (strlen(l->defs[i]) == def_length && !memcmp(l->defs[i], def, def_length)))) return i;
+    return SIZE_MAX;
 }
-static int pl_registration_significant(void *context, const char *path, const sh_decl_node *left,
-    const sh_decl_node *right)
+static char *pl_first_copy(const char *text, size_t length)
 {
-    const pl_registration_order *o = context;
-    uint32_t a, b;
-    if (strcmp(path, "edit.globalAIMods")) return -1;
-    if (!pl_row_bits(o, left, "aiType", &a) || !pl_row_bits(o, right, "aiType", &b)) return 1;
-    for (size_t i = 0; i < o->type_count; i++) {
-        uint32_t type = o->types[i];
-        if (o->private_keys ? sh_package_key_modifier_matches(o->groups, type, a) &&
-                sh_package_key_modifier_matches(o->groups, type, b) : (type & a) && (type & b)) return 1;
+    char *copy = malloc(length + 1);
+    if (copy) { memcpy(copy, text, length); copy[length] = 0; }
+    return copy;
+}
+/* The row's index, adding it when new; SIZE_MAX for a row without the fields. */
+static int pl_first_add(pl_first_match *m, int list, const sh_decl_node *row, size_t *index)
+{
+    pl_first_list *l = m->lists + list;
+    const char *type, *def = NULL;
+    size_t type_length, def_length = 0;
+    *index = SIZE_MAX;
+    if (!pl_first_literal(row, "aiType", &type, &type_length) ||
+        (!list && !pl_first_literal(row, "entityDef", &def, &def_length))) return 1;
+    if ((*index = pl_first_find(l, !list, row)) != SIZE_MAX) return 1;
+    char **types = realloc(l->types, (l->count + 1) * sizeof(*types));
+    if (types) l->types = types;
+    char **defs = types ? realloc(l->defs, (l->count + 1) * sizeof(*defs)) : NULL;
+    if (defs) l->defs = defs;
+    uint32_t *bits = defs ? realloc(l->bits, (l->count + 1) * sizeof(*bits)) : NULL;
+    if (!bits) return 0;
+    l->bits = bits;
+    l->types[l->count] = pl_first_copy(type, type_length);
+    l->defs[l->count] = list ? NULL : pl_first_copy(def, def_length);
+    l->bits[l->count] = 0;
+    if (!l->types[l->count] || (!list && !l->defs[l->count])) {
+        free(l->types[l->count]); free(l->defs[l->count]); return 0;
+    }
+    sh_package_key_bits(&m->build->key_space, type, type_length, l->bits + l->count);
+    *index = l->count++;
+    return 1;
+}
+static void pl_first_close(pl_first_match *m)
+{
+    for (int k = 0; k < 2; k++) {
+        pl_first_list *l = m->lists + k;
+        for (size_t i = 0; i < l->count; i++) { free(l->types[i]); free(l->defs[i]); }
+        free(l->types); free(l->defs); free(l->bits); free(l->before);
+    }
+    if (m->rows) for (size_t i = 0; i < m->source_count * 2; i++) free(m->rows[i]);
+    free(m->rows); free(m->row_count); free(m->scopes);
+    memset(m, 0, sizeof(*m));
+}
+/* Whether row answers query: a definition's registrations, or the modifier
+ * rows meeting a type (under the private-key contract when it serves). */
+static int pl_first_answers(const pl_first_match *m, int list, size_t row, const void *query)
+{
+    const pl_first_list *l = m->lists + list;
+    if (!list) return !strcmp(l->defs[row], (const char *)query);
+    uint32_t type = *(const uint32_t *)query;
+    return m->build->private_keys ? sh_package_key_modifier_matches(m->build->key_groups, type, l->bits[row]) :
+        (type & l->bits[row]) != 0;
+}
+static size_t pl_first_winner(const pl_first_match *m, int list, size_t source, const void *query)
+{
+    const size_t *rows = m->rows[source * 2 + list];
+    for (size_t i = 0; i < m->row_count[source * 2 + list]; i++)
+        if (rows[i] != SIZE_MAX && pl_first_answers(m, list, rows[i], query)) return rows[i];
+    return SIZE_MAX;
+}
+/* Whether a path of kept orders already leads from row to target. */
+static int pl_first_reaches(const pl_first_list *l, size_t row, size_t target, unsigned char *seen, size_t *stack)
+{
+    size_t depth = 0;
+    memset(seen, 0, l->count);
+    stack[depth++] = row; seen[row] = 1;
+    while (depth) {
+        size_t at = stack[--depth];
+        if (at == target) return 1;
+        for (size_t next = 0; next < l->count; next++)
+            if (l->before[at * l->count + next] && !seen[next]) { seen[next] = 1; stack[depth++] = next; }
     }
     return 0;
 }
-static int pl_registration_types(pl_registration_order *o, const sh_decl_source *texts, size_t count)
+/* Keep winner first among the rows answering query unless that contradicts
+ * the orders already kept. */
+static int pl_first_keep(pl_first_match *m, int list, size_t winner, const void *query, unsigned char *seen, size_t *stack)
 {
-    for (size_t i = 0; i < count; i++) {
-        sh_decl_node *tree = sh_decl_tree_parse(texts[i], NULL, 0);
-        const sh_decl_node *list = pl_list(tree, "aiTypeList");
-        for (const sh_decl_node *row = list ? list->children : NULL; row; row = row->next) {
-            uint32_t bits = 0, *grown;
-            size_t k = 0;
-            if (!pl_row_bits(o, row, "aiType", &bits) || !bits) continue;
-            while (k < o->type_count && o->types[k] != bits) k++;
-            if (k < o->type_count) continue;
-            if (!(grown = realloc(o->types, (o->type_count + 1) * sizeof(*grown)))) { sh_decl_tree_free(tree); return 0; }
-            o->types = grown; o->types[o->type_count++] = bits;
+    pl_first_list *l = m->lists + list;
+    for (size_t row = 0; row < l->count; row++)
+        if (row != winner && pl_first_answers(m, list, row, query) && pl_first_reaches(l, row, winner, seen, stack))
+            return 0;
+    for (size_t row = 0; row < l->count; row++)
+        if (row != winner && pl_first_answers(m, list, row, query)) l->before[winner * l->count + row] = 1;
+    return 1;
+}
+/* Decide one list's winners: every contribution's changed winner in
+ * precedence, then the stock winner where nobody changed it. */
+static int pl_first_decide(pl_first_match *m, int list, const void *queries, size_t query_count, size_t *winners)
+{
+    pl_first_list *l = m->lists + list;
+    unsigned char *seen = malloc(l->count ? l->count : 1);
+    size_t *stack = malloc((l->count ? l->count : 1) * sizeof(*stack)), *keeper = malloc((query_count ? query_count : 1) * sizeof(*keeper));
+    char line[768];
+    int ok = 0;
+    if (!seen || !stack || !keeper) goto done;
+    for (size_t q = 0; q < query_count; q++) { winners[q] = SIZE_MAX; keeper[q] = SIZE_MAX; }
+    for (size_t s = 1; s < m->source_count; s++)
+        for (size_t q = 0; q < query_count; q++) {
+            const void *query = list ? (const void *)((const uint32_t *)queries + q) : ((const char *const *)queries)[q];
+            size_t stock = pl_first_winner(m, list, 0, query), mine = pl_first_winner(m, list, s, query);
+            if (mine == SIZE_MAX || mine == stock || mine == winners[q]) continue;
+            const char *who = pl_scope_label(m->build, m->sources, m->scopes[s]);
+            if (winners[q] == SIZE_MAX && pl_first_keep(m, list, mine, query, seen, stack)) {
+                winners[q] = mine; keeper[q] = s; continue;
+            }
+            const char *kept = keeper[q] != SIZE_MAX ? pl_scope_label(m->build, m->sources, m->scopes[keeper[q]]) :
+                "earlier packages";
+            if (list)
+                snprintf(line, sizeof(line), "%s: its first global AI modifier for type %lu differs from %s's; the "
+                    "engine applies only the first matching row, so %s's applies", who,
+                    (unsigned long)*(const uint32_t *)query, kept, kept);
+            else
+                snprintf(line, sizeof(line), "%s: its first registration of %s differs from %s's; the engine "
+                    "types an AI by its definition's first registration, so %s's applies", who,
+                    pl_authored_name(m->build->contributions, m->scopes[s], "entitydef", query), kept, kept);
+            if (!pl_key_note(m->build, line)) goto done;
+        }
+    for (size_t q = 0; q < query_count; q++) {
+        const void *query = list ? (const void *)((const uint32_t *)queries + q) : ((const char *const *)queries)[q];
+        size_t stock = pl_first_winner(m, list, 0, query);
+        if (winners[q] == SIZE_MAX && stock != SIZE_MAX && pl_first_keep(m, list, stock, query, seen, stack))
+            winners[q] = stock;
+    }
+    ok = 1;
+done:
+    free(seen); free(stack); free(keeper); return ok;
+}
+static int pl_first_relation(void *context, const char *path, const sh_decl_node *left, const sh_decl_node *right)
+{
+    const pl_first_match *m = context;
+    int list = !strcmp(path, "edit.aiTypeList") ? 0 : !strcmp(path, "edit.globalAIMods") ? 1 : -1;
+    if (list < 0) return 0;
+    const pl_first_list *l = m->lists + list;
+    size_t a = pl_first_find(l, !list, left), z = pl_first_find(l, !list, right);
+    if (a == SIZE_MAX || z == SIZE_MAX || a == z || !l->before) return 0;
+    return l->before[a * l->count + z] ? -1 : l->before[z * l->count + a] ? 1 : 0;
+}
+/* Kept winners are the modifier list's behavior; the rest is presentation. */
+static int pl_first_significant(void *context, const char *path, const sh_decl_node *left, const sh_decl_node *right)
+{
+    (void)context; (void)left; (void)right;
+    return strcmp(path, "edit.globalAIMods") ? -1 : 0;
+}
+static int pl_first_precedes(const pl_build *b, const sh_package_sources *sources, size_t x, size_t y)
+{
+    int hx = x < b->authored_count && !pl_modern(b, x), hy = y < b->authored_count && !pl_modern(b, y);
+    pl_key_order order = {b, sources};
+    if (hx != hy) return hx ? -1 : 1;
+    return pl_scope_order(&order, &x, &y);
+}
+/* Read every source's rows and decide both lists' winners. base is the stock
+ * member's index in texts (SIZE_MAX: none). */
+static int pl_first_open(pl_build *b, const sh_package_sources *sources, const size_t *members,
+    const sh_decl_source *texts, size_t count, size_t base, pl_first_match *m, char *error, size_t capacity)
+{
+    pl_contributions *c = b->contributions;
+    size_t *order = calloc(count + 1, sizeof(*order)), *winners = NULL, def_count = 0, type_count = 0;
+    const char **defs = NULL;
+    uint32_t *types = NULL;
+    int ok = 0;
+    m->build = b; m->sources = sources;
+    m->source_count = count + (base == SIZE_MAX);
+    m->rows = calloc(m->source_count * 2, sizeof(*m->rows));
+    m->row_count = calloc(m->source_count * 2, sizeof(*m->row_count));
+    m->scopes = calloc(m->source_count, sizeof(*m->scopes));
+    if (!order || !m->rows || !m->row_count || !m->scopes) goto allocation;
+    /* Source 0 is the original; the rest in precedence. */
+    size_t ordered = 0;
+    for (size_t i = 0; i < count; i++) if (i != base) order[ordered++] = i;
+    for (size_t k = 1; k < ordered; k++)
+        for (size_t j = k; j > 0 && pl_first_precedes(b, sources, c->inputs.scopes[members[order[j - 1]]],
+            c->inputs.scopes[members[order[j]]]) > 0; j--) {
+            size_t swap = order[j]; order[j] = order[j - 1]; order[j - 1] = swap;
+        }
+    for (size_t s = 0; s < m->source_count; s++) {
+        size_t text = s ? order[s - 1] : base;
+        sh_decl_node *tree = text == SIZE_MAX ? NULL : sh_decl_tree_parse(texts[text], NULL, 0);
+        m->scopes[s] = text == SIZE_MAX ? SIZE_MAX : c->inputs.scopes[members[text]];
+        for (int list = 0; list < 2; list++) {
+            const sh_decl_node *rows = pl_list(tree, pl_first_names[list]);
+            size_t n = 0;
+            for (const sh_decl_node *row = rows ? rows->children : NULL; row; row = row->next) n++;
+            if (!(m->rows[s * 2 + list] = malloc((n ? n : 1) * sizeof(size_t)))) { sh_decl_tree_free(tree); goto allocation; }
+            for (const sh_decl_node *row = rows ? rows->children : NULL; row; row = row->next) {
+                size_t index;
+                if (!pl_first_add(m, list, row, &index)) { sh_decl_tree_free(tree); goto allocation; }
+                if (index != SIZE_MAX) m->rows[s * 2 + list][m->row_count[s * 2 + list]++] = index;
+            }
         }
         sh_decl_tree_free(tree);
     }
-    return 1;
+    for (int list = 0; list < 2; list++) {
+        size_t n = m->lists[list].count;
+        if (n && !(m->lists[list].before = calloc(n, n))) goto allocation;
+    }
+    /* Registrations first: their winners give the types modifiers answer. */
+    if (!(defs = calloc(m->lists[0].count + 1, sizeof(*defs)))) goto allocation;
+    for (size_t i = 0; i < m->lists[0].count; i++) {
+        size_t k = 0;
+        while (k < def_count && strcmp(defs[k], m->lists[0].defs[i])) k++;
+        if (k == def_count) defs[def_count++] = m->lists[0].defs[i];
+    }
+    if (!(winners = calloc(def_count + 1, sizeof(*winners))) ||
+        !pl_first_decide(m, 0, defs, def_count, winners)) goto allocation;
+    if (!(types = calloc(def_count + 1, sizeof(*types)))) goto allocation;
+    for (size_t q = 0; q < def_count; q++) {
+        uint32_t bits = winners[q] == SIZE_MAX ? 0 : m->lists[0].bits[winners[q]];
+        size_t k = 0;
+        while (k < type_count && types[k] != bits) k++;
+        if (bits && k == type_count) types[type_count++] = bits;
+    }
+    free(winners);
+    if (!(winners = calloc(type_count + 1, sizeof(*winners))) ||
+        !pl_first_decide(m, 1, types, type_count, winners)) goto allocation;
+    ok = 1;
+    goto done;
+allocation:
+    snprintf(error, capacity, "registration contribution allocation failed");
+done:
+    free(order); free(winners); free(defs); free(types);
+    return ok;
 }
 
 /* Shared gameplay registration lists (a conductor's aiTypeList): every source
@@ -2617,8 +2839,9 @@ static int pl_registration_types(pl_registration_order *o, const sh_decl_source 
  * every member receives the union keyed by the native aiType and bound AI
  * (the spawn manager picks among several rows of one type). The stock-named
  * declaration therefore registers each package's AI variants for spawning;
- * colliding package keys were relocated first (pl_key_phase), and modifier
- * rows sharing one mask keep the first in stable source order. A frozen legacy
+ * colliding package keys were relocated first (pl_key_phase), modifier rows
+ * sharing one mask keep the first in stable source order, and both lists keep
+ * their first-match winners (pl_first_open). A frozen legacy
  * context's copy joins with its authored keys and without restored stock rows
  * (they stay removed, as in its whole-file conductor); the result keeps the
  * stock name in a map document too, where the engine still finds it by name. */
@@ -2634,9 +2857,10 @@ static int pl_registration_group(pl_build *b, const sh_package_sources *sources,
     sh_decl_source base = {"{}", 2};
     size_t source_count = 0, culprit = SIZE_MAX;
     int ok = 0, kind = SH_PACKAGE_EDITOR_FAILURE_ENVIRONMENT, stated = 0, historical = 0;
-    pl_registration_order contract = {&b->key_space, b->private_keys ? b->key_groups : NULL, b->private_keys, NULL, 0};
-    sh_decl_collection_order order = {&contract, NULL, pl_registration_significant};
-    const sh_decl_collection_order *ordering = b->key_space_read ? &order : NULL;
+    pl_first_match first = {0};
+    sh_decl_collection_order order = {&first, pl_first_relation, pl_first_significant};
+    const sh_decl_collection_order *ordering = NULL;
+    size_t base_index = SIZE_MAX;
     if (!texts || !parts || !peers || !pending || !part_member) {
         snprintf(error, capacity, "registration contribution allocation failed"); goto failed;
     }
@@ -2648,12 +2872,13 @@ static int pl_registration_group(pl_build *b, const sh_package_sources *sources,
     }
     if (stated && !pl_modifier_precedence(b, sources, members, count, texts, error, capacity)) goto failed;
     for (size_t i = 0; i < count; i++) {
-        if (c->inputs.scopes[members[i]] == b->count - 1) base = texts[i];
+        if (c->inputs.scopes[members[i]] == b->count - 1) { base = texts[i]; base_index = i; }
         else { part_member[source_count] = i; parts[source_count++] = texts[i]; }
     }
     if (!stated || !source_count) { ok = 1; goto done; }
-    if (ordering && !pl_registration_types(&contract, texts, count)) {
-        snprintf(error, capacity, "registration contribution allocation failed"); goto failed;
+    if (b->key_space_read) {
+        if (!pl_first_open(b, sources, members, texts, count, base_index, &first, error, capacity)) goto failed;
+        ordering = &order;
     }
     for (size_t i = 0; i < count; i++) {
         size_t length = 0, peer_count = 0;
@@ -2696,7 +2921,7 @@ failed:
 done:
     if (texts) for (size_t i = 0; i < count; i++) free((char *)texts[i].text);
     if (pending) for (size_t i = 0; i < count; i++) pl_contribution_unit_free(pending + i);
-    free(texts); free(parts); free((void *)peers); free(pending); free(part_member); free(contract.types);
+    free(texts); free(parts); free((void *)peers); free(pending); free(part_member); pl_first_close(&first);
     return ok;
 }
 /* Entity groups whose sources state registration lists; a cheap byte check

@@ -1028,12 +1028,20 @@ A bit-flag inspector's choices are one such collection, identified by value:
 a package copy of a stock-named inspector (the AI filter's included) extends
 the list the stock control binds, with each package's AI choice at the key it
 holds after relocation, rather than becoming a private copy no control names.
+Encounter whitelists also compose as membership collections. Both native
+inspectors walk the encounter registry, filter by membership and store selected
+declaration names, so different whitelist orders and repeated entries do not
+create a conflict or change a saved selection.
 A conductor's AI registrations are presentation-ordered: the spawn manager
 picks uniformly among every row sharing a bit with a request, so copies that
 list stock rows in different orders compose. An AI's type is the key of the
 first row registering its definition, and the first global AI modifier whose
-mask meets that type applies, so two modifier rows keep their order only when
-a registered type meets both; other opposing orders compose. Stock rows a copy
+mask meets that type applies. Composition preserves these first-match winners,
+not every pairwise order: rows already shadowed by a winner can appear in either
+order without changing behavior. A contribution's changed winner takes precedence
+over the stock choice. Different changes to the same shared winner resolve in
+stable source order, with a frozen map context first, and the decision is recorded
+against the authored source names. All valid rows remain available. Stock rows a copy
 omits are restored in stock order ahead of its own rows. When individually
 valid contributions cannot compose together, that is product coverage, not
 evidence against an owner: the compile names the contributions involved and
