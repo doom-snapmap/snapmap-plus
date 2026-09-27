@@ -1078,7 +1078,7 @@ static uintptr_t rg_shader_worker_hook(void *resource, void *metadata, const cha
 static int rg_cook_install(void)
 {
     const unsigned char *base = sh_host_image_base(); int vk = sh_host_is_vulkan();
-    if (!base || vk < 0 || !sh_host_is_pinned_rva_build()) return 0;
+    if (!base || vk < 0 || !sh_host_is_pinned_renderer_build(vk)) return 0;
     /* A renderer-library observation alone must not select a different table.
      * This call-only helper was independently resolved by the signature pass. */
     if ((const void *)g_shader_write != base + (vk ? 0xd80280 : 0xd80630)) return 0;

@@ -39,6 +39,9 @@ patch differs only there.
 A raw-RVA fallback requires an exact fingerprint of a supported reference
 executable. The hook-tolerant fallback additionally checks the detour and remaining
 signature bytes. A filename or a readable address is not sufficient evidence.
+The legacy `sh_host_is_pinned_rva_build` gate admits Vulkan only. Code with
+independently verified mappings for both renderers, such as shader source cooking,
+uses `sh_host_is_pinned_renderer_build` to match the selected table to its executable.
 Contributor changes to signatures or anchors require the two-image test gate in
 [contributing](contributing.md#7-run-the-tests).
 

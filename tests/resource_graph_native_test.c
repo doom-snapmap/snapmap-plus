@@ -9,6 +9,7 @@ static int test_vulkan;
 int sh_host_is_vulkan(void) { return test_vulkan; }
 const uint8_t *sh_host_image_base(void) { return NULL; }
 int sh_host_is_pinned_rva_build(void) { return 0; }
+int sh_host_is_pinned_renderer_build(int vulkan) { (void)vulkan; return 0; }
 void sh_resource_resident_touch(void *resource) { (void)resource; }
 static void *expected_entity, *expected_reader;
 static unsigned char expected_initialize;
