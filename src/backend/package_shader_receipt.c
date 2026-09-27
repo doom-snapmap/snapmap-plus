@@ -60,11 +60,6 @@ static char sr_fold(char value)
     if (value >= 'A' && value <= 'Z') value += 'a' - 'A';
     return value == '\\' ? '/' : value;
 }
-const char *sh_package_shader_input_path(const char *path)
-{
-    if (path) while (*path == '/' || *path == '\\') path++;
-    return path;
-}
 static int sr_equal(const char *a, const char *b)
 {
     if (!a || !b) return 0;

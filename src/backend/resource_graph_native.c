@@ -1058,7 +1058,10 @@ static int rg_cook_source(const char *name, const void *settings, int inherited,
         if (!text || text_length <= 0) __leave;
         sh_package_shader_receipt_retained(text, (size_t)text_length);
         g_cook_api.lexer_init(lexer, 0); lexer_ready = 1;
-        g_cook_api.lexer_flags(lexer, inherited || g_cook_api.renderer ? 0x4c630 : 0x4c430);
+        /* The native lexer bit 4 records diagnostics without throwing an
+         * engine session error. Preparation still rejects lexer_error below
+         * and restores its scope; malformed input cannot tear down the game. */
+        g_cook_api.lexer_flags(lexer, (inherited || g_cook_api.renderer ? 0x4c630 : 0x4c430) | 4);
         if (!g_cook_api.lexer_load(lexer, text, text_length, label) ||
             !g_cook_api.lexer_expect(lexer, "{")) __leave;
         uintptr_t returned = g_shader_compile((uintptr_t)metadata, (uintptr_t)name, (uintptr_t)settings,

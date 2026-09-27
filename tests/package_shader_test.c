@@ -20,6 +20,7 @@ static const unsigned char declaration[] = "{ fixture }";
 static const unsigned char linked_declaration[] = "{ linked fixture }";
 static const char vertex[] = "#version 450 core\nvoid main(){ /* textures/source */ }";
 static const char fragment[] = "#version 450 core\nvoid main(){}";
+static const char *fixture_include = "decls/renderprogs/global.inc";
 static void parameter(bytes *b, unsigned char operation, const char *name)
 { byte(b, operation); byte(b, 15); string(b, name); }
 static bytes fixture(void)
@@ -40,7 +41,7 @@ static bytes fixture(void)
         be(&b, group ? 0 : 2);
         if (!group) { string(&b, "color"); string(&b, stage == 2 ? "native_abi_slot" : "diffuse"); }
     }
-    be(&b, 1); string(&b, "decls/renderprogs/global.inc"); be(&b, 0x12345678);
+    be(&b, 1); string(&b, fixture_include); be(&b, 0x12345678);
     be(&b, 1); string(&b, "FEATURE_TOKEN");
     big64(&b, 0); be(&b, 2); big64(&b, 1); big64(&b, UINT64_C(0xabcdef0123456789));
     fill(&b, 192, 0x63);
@@ -223,5 +224,9 @@ static void test_paths(void)
 int main(void)
 {
     test_checksums();test_decode();test_rebind();test_modules();test_paths();
+    fixture_include = "/decls/renderprogs/global.inc";
+    test_decode();test_rebind();test_paths();
+    fixture_include = "\\Decls\\Renderprogs\\Global.inc";
+    test_decode();test_rebind();test_paths();
     puts("package_shader_test: PASS");return 0;
 }
