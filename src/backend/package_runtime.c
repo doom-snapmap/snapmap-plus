@@ -1100,7 +1100,7 @@ static pr_provider *pr_prepare_deliveries(const char *data_root, const char *sou
             native.source.implicit = g_test_constructor ? pr_test_constructor : NULL;
 #endif
             ULONGLONG started = GetTickCount64();
-            char scope_error[512], line[768];
+            char scope_error[512], line[1280];
             sh_package_native_assets_shader_scope_begin(native_assets);
             int linked = contexts ? sh_package_library_compile_contexts(sources, contexts, &environment,
                 catalog, pr_original, &originals, registry, reflection, &native, &isolated, error, sizeof(error)) :

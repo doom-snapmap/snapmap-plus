@@ -64,7 +64,7 @@ void backend_log_close(void)
 
 void backend_log(const char *msg)
 {
-    char line[512];
+    char line[1024];
     SYSTEMTIME st;
     DWORD n;
     SH_PERF_BEGIN(t0);
@@ -73,7 +73,11 @@ void backend_log(const char *msg)
         "[snapmap+] %04d-%02d-%02d %02d:%02d:%02d.%03d %s\n",
         st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, st.wMilliseconds,
         msg ? msg : "");
-    if ((int)n <= 0) n = (DWORD)strlen(line);
+    if ((int)n <= 0) {
+        /* A truncated line still ends its record. */
+        n = (DWORD)strlen(line);
+        if (n) line[n - 1] = '\n';
+    }
 
     OutputDebugStringA(line);   /* Debugger sink; installed output hooks may also forward this text. */
 

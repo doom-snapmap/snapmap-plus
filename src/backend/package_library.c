@@ -2827,7 +2827,7 @@ static int pl_contribution_phase(pl_build *b, const sh_package_sources *sources,
 {
     pl_contributions *c = b->contributions;
     pl_group *groups = NULL;
-    size_t group_count = 0, *stack = NULL, depth = 0;
+    size_t group_count = 0, group_capacity = 0, *stack = NULL, depth = 0;
     unsigned char *state = NULL;
     int ok = 0;
     for (size_t i = 0; i < order_count;) {
@@ -2836,9 +2836,13 @@ static int pl_contribution_phase(pl_build *b, const sh_package_sources *sources,
         while (end < order_count && !strcmp(c->inputs.units[order[end]].family, unit->family) &&
             !strcmp(c->inputs.units[order[end]].name, unit->name)) end++;
         if (sh_package_editor_contribution_phase(unit->family) == phase) {
-            pl_group *grown = realloc(groups, (group_count + 1) * sizeof(*grown));
-            if (!grown) { snprintf(error, capacity, "editor contribution allocation failed"); goto done; }
-            groups = grown; groups[group_count++] = (pl_group){i, end - i, SIZE_MAX};
+            if (group_count == group_capacity) {
+                size_t grown_capacity = group_capacity ? group_capacity * 2 : 64;
+                pl_group *grown = realloc(groups, grown_capacity * sizeof(*grown));
+                if (!grown) { snprintf(error, capacity, "editor contribution allocation failed"); goto done; }
+                groups = grown; group_capacity = grown_capacity;
+            }
+            groups[group_count++] = (pl_group){i, end - i, SIZE_MAX};
         }
         i = end;
     }
@@ -2957,21 +2961,27 @@ static int pl_contributions_open(pl_build *b, const sh_package_sources *sources,
     /* Keep a verified baseline selector/bank slot. Other bound variants get
      * private native identities; historical contexts are never overwritten by
      * the modern field union. With no baseline, only one equal shared class can
-     * occupy the authored name. Registry allocation still verifies native IDs. */
-    for (size_t i = 0; i < original->count; i++) {
-        const sh_package_link_unit *unit = c->inputs.units + i;
-        if (!pl_shared_declaration(unit->family)) continue;
+     * occupy the authored name. Registry allocation still verifies native IDs.
+     * Units sharing a family and name are visited as one run of the sorted
+     * index, in unit order. */
+    size_t named_count = 0;
+    for (size_t i = 0; i < original->count; i++)
+        if (pl_shared_declaration(c->inputs.units[i].family)) registrations[named_count++] = i;
+    qsort_s(registrations, named_count, sizeof(*registrations), pl_unit_name_order, c->inputs.units);
+    for (size_t start = 0, end; start < named_count; start = end) {
+        const sh_package_link_unit *unit = c->inputs.units + registrations[start];
         size_t selected = SIZE_MAX, first = SIZE_MAX; int equal = 1, eligible = 0;
-        for (size_t j = 0; j < original->count; j++) {
+        for (end = start; end < named_count; end++) {
+            size_t j = registrations[end];
             const sh_package_link_unit *peer = c->inputs.units + j;
-            if (strcmp(unit->family, peer->family) || strcmp(unit->name, peer->name)) continue;
+            if (strcmp(unit->family, peer->family) || strcmp(unit->name, peer->name)) break;
             size_t binding = c->classes.nodes[j];
             if (first == SIZE_MAX) first = binding; else if (first != binding) equal = 0;
             if (original->scopes[j] == b->count - 1) selected = binding;
             if (sh_package_source_link_shared(b->reader)[j]) eligible = 1;
         }
         if (selected == SIZE_MAX && equal && eligible) selected = first;
-        c->shared[i] = c->classes.nodes[i] == selected;
+        for (size_t k = start; k < end; k++) c->shared[registrations[k]] = c->classes.nodes[registrations[k]] == selected;
     }
     pl_step(b, PL_STEP_SHARED, &mark);
     pl_tokens_free(c); free(members); free(registrations); free(done); return 1;

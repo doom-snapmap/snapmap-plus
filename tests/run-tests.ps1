@@ -190,6 +190,7 @@ $tests = @(
     @{ name = "theme_contract_test"; src = 'theme_contract_test.c'; arg = (Join-Path $here '..\src\ui\webview\mockup.html') }
     @{ name = "entity_settings_contract_test"; src = 'entity_settings_contract_test.c'; arg = (Join-Path $here '..\src\ui\webview\mockup.html') }
     @{ name = "growing_text_buffer_test"; src = 'growing_text_buffer_test.cpp'; cxx = $true; arg = "" }
+    @{ name = "backend_log_test"; src = 'backend_log_test.c ..\src\backend\backend_log.c ..\src\backend\perf.c ..\src\common\log_rotate.c'; arg = "" }
     @{ name = "preview_test";     src = 'preview_test.c ..\src\backend\preview.c';              arg = "" }
     @{ name = "bcn_test";         src = 'bcn_test.c ..\src\backend\bcn.c';                      arg = "" }
     @{ name = "audio_banks_test"; src = 'audio_banks_test.c ..\src\backend\audio_banks.c';             arg = "" }
