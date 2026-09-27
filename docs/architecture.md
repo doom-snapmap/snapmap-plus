@@ -61,6 +61,11 @@ declaration not used by the selected renderer can remain an inactive delivery
 artifact when paired with the other renderer's binary and matching source
 checksum. That check accounts for preserved inventory; it does not admit the
 inactive program. Selecting it later still requires complete shader validation.
+Shared shader includes only fan out to catalogued SnapMap programs when their
+bytes differ from the immutable SnapMap source. Exact copies remain in the
+authored delivery and bind normally for selected programs without expanding
+unrelated stock shaders. Campaign and product-baseline copies do not qualify
+for this optimization, and an unreadable original never counts as equal.
 Contributor changes to signatures or anchors require the two-image test gate in
 [contributing](contributing.md#7-run-the-tests).
 

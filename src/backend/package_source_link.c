@@ -604,6 +604,24 @@ static int sl_seed_material(void *context, const char *name)
 { return sl_seed_family(context, "material", name); }
 static int sl_seed_sound(void *context, const char *name)
 { return sl_seed_family(context, "sound", name); }
+/* A byte-identical SnapMap include contributes no change to catalogued programs.
+ * Keep it in the authored delivery and bind it normally when a selected program
+ * reads it, but do not expand the entire stock shader library just for its copy. */
+static int sl_shader_stock_include(sh_package_source_link *s, size_t scope,
+    const sh_compiled_resource *file)
+{
+    if (strncmp(file->engine_path, "decls/renderprogs/", 18)) return 0;
+    sl_original *original = sl_original_get(s, file->engine_path);
+    if (!original || original->status < 0) return -1;
+    if (original->status != 1) return 0;
+    size_t length = 0;
+    unsigned char *body = sh_package_compilation_read(s->scopes[scope], file, SIZE_MAX,
+        &length, s->error, s->error_capacity);
+    if (!body) { sl_env_fail(s, "shader include could not be read", file->engine_path); return -1; }
+    int same = length == original->resource.body_length &&
+        !memcmp(body, original->resource.body, length);
+    free(body); return same;
+}
 static int sl_seed_inputs(sh_package_source_link *s)
 {
     for (size_t scope = 0; scope < s->scope_count; scope++) {
@@ -640,6 +658,9 @@ static int sl_seed_inputs(sh_package_source_link *s)
             else if (name) ok = sl_find(s, scope, "renderprog", name, 1) != NULL;
             else if (!shader) filtered.resources[filtered.resource_count++] = *file;
             else {
+                int stock = sl_shader_stock_include(s, scope, file);
+                if (stock < 0) { ok = 0; break; }
+                if (stock) continue;
                 /* A shared shader source reaches the SnapMap programs catalogued
                  * beneath it. Campaign-only programs are not SnapMap resources;
                  * a scope that needs one supplies its declaration, which seeds it. */
@@ -773,6 +794,9 @@ static int sl_shader_accounted(sh_package_source_link *s)
         for (size_t u = 0; !found && u < s->count; u++) if (s->units[u]->scope == scope)
             for (size_t m = 0; !found && m < s->units[u]->unit.file_count; m++) found = s->units[u]->unit.files[m] == file;
         if (!found) {
+            int stock = sl_shader_stock_include(s, scope, file);
+            if (stock < 0) { s->failed_scope = scope; return 0; }
+            if (stock) continue;
             int dormant = sl_shader_inactive_source(s, scope, file);
             if (dormant < 0) { s->failed_scope = scope; return 0; }
             if (!dormant) { s->failed_scope = scope; return sl_fail(s, "shader source input has no verified companion owner", path); }

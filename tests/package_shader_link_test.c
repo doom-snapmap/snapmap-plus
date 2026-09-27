@@ -55,7 +55,7 @@ typedef struct fixture {
     sh_package_compilation compiled;
     sh_compiled_resource files[20];
     int deny, kind, index, mutate, calls, admit_calls, absent, read_failure, flag_deny, flag_mutate, flag_calls;
-    int campaign, stale;
+    int campaign, stale, include_status;
 } fixture;
 static unsigned char *memory(fixture *f, size_t length)
 {
@@ -136,6 +136,7 @@ static int original(void *context,const char *path,unsigned char **body,size_t *
     if(!file)return 0;
     *body=malloc(file->body_length+1);assert(*body);memcpy(*body,file->body,file->body_length+1);*length=file->body_length;
     if(f->stale && strstr(path,"_pc_vulkan.bin"))(*body)[0]^=1; /* An installed original cooked differently. */
+    if (f->include_status && !strcmp(path,"decls/renderprogs/common.inc")) return f->include_status;
     return f->campaign ? 2 : 1;
 }
 static int flag_abi(void *context,const char *name,sh_decl_source source,uint64_t *mask,char *error,size_t capacity)
@@ -230,8 +231,9 @@ static void include_index(const char *path,const char *program)
     b.data[4]=(unsigned char)(size>>24);b.data[5]=(unsigned char)(size>>16);b.data[6]=(unsigned char)(size>>8);b.data[7]=(unsigned char)size;
     write_file(path,b.data,b.length);
 }
-/* A supplied shared include reaches the SnapMap programs catalogued beneath
- * it, never a program only the campaign archive lists. */
+/* Only a changed shared include fans out to the SnapMap programs beneath it.
+ * An exact stock copy stays delivery data; campaign copies and failed reads
+ * cannot be mistaken for unchanged SnapMap data. */
 static void include_fanout_snapmap_only(void)
 {
     static const char *const archives[]={"snap_gameresources.resources","snap_gameresources.patch",
@@ -249,13 +251,22 @@ static void include_fanout_snapmap_only(void)
     const sh_package_compilation *scope=&supplied;
     sh_package_source_shader shader={SH_PACKAGE_SHADER_VULKAN,&f,abi,flag_abi};
     sh_package_source_link_native native={&f,admit,semantics,&shader};
-    sh_package_source_link *s=sh_package_source_link_open(&scope,1,catalog,original,&f,
-        (sh_decl_registry_source){&f,read_memory,f.registry,NULL},f.reflection,&native,error,sizeof(error));
-    if(!s)fprintf(stderr,"include fan-out: %s\n",error);assert(s);
-    const sh_package_link_inputs *inputs=sh_package_source_link_inputs(s);
-    assert(sh_package_link_inputs_find(inputs,0,"renderprog","fixture")!=SIZE_MAX);
-    assert(sh_package_link_inputs_find(inputs,0,"renderprog","campaignonly")==SIZE_MAX);
-    sh_package_source_link_close(s);sh_resource_catalog_close(catalog);clear(&f);
+    unsigned char *authored=malloc(include.body_length+1);assert(authored);
+    memcpy(authored,include.body,include.body_length+1);include.body=authored;
+    for(int mode=0;mode<5;mode++) {
+        authored[3]=mode==1 ? 'x' : 'r'; /* Same length, different comment bytes. */
+        f.include_status=mode==2 ? 2 : mode==3 ? 3 : 0;f.read_failure=mode==4;
+        sh_package_source_link *s=sh_package_source_link_open(&scope,1,catalog,original,&f,
+            (sh_decl_registry_source){&f,read_memory,f.registry,NULL},f.reflection,&native,error,sizeof(error));
+        if(mode==4) { assert(!s && strstr(error,"original resource could not be captured"));continue; }
+        if(!s)fprintf(stderr,"include fan-out %d: %s\n",mode,error);assert(s);
+        const sh_package_link_inputs *inputs=sh_package_source_link_inputs(s);
+        assert((sh_package_link_inputs_find(inputs,0,"renderprog","fixture")!=SIZE_MAX)==(mode!=0));
+        assert(sh_package_link_inputs_find(inputs,0,"renderprog","campaignonly")==SIZE_MAX);
+        if(mode==0) { assert(!inputs->count);assert(supplied.resource_count==1 && include.body==authored); }
+        sh_package_source_link_close(s);
+    }
+    free(authored);sh_resource_catalog_close(catalog);clear(&f);
     for(size_t i=0;i<6;i++){snprintf(path,sizeof(path),"%s/%s",base,archives[i]);assert(DeleteFileA(path));}
     assert(RemoveDirectoryA(base));
 }
