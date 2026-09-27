@@ -73,6 +73,11 @@ int sh_package_native_assets_read(void *context, const char *path,
  * Authored scope files still take precedence over this original-reader route. */
 int sh_package_native_assets_shader_read(void *context, const char *path,
     unsigned char **body, size_t *length);
+/* Immutable installed inputs for synchronous native source preparation. This
+ * bypasses cooked products and every authored provider. The caller retains the
+ * assets for the entire read/cook. Uses the baseline-reader ownership contract. */
+int sh_package_native_assets_shader_original_read(void *context, const char *path,
+    unsigned char **body, size_t *length);
 /* Configure once before sharing this handle or requesting its adapter. The
  * registry source uses the ADDRESS OF the all-manager head pointer. Callbacks
  * and original_context remain valid until close; original must bypass all

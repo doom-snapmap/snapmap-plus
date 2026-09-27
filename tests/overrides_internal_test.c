@@ -8,6 +8,9 @@
 
 #include "overrides.h"
 #include "package_shader_receipt.h"
+#include "resource_graph_native.h"
+int sh_resource_graph_native_cook_input(const char *path,unsigned char **body,size_t *length)
+{ (void)path;*body=NULL;*length=0;return 0; }
 
 static int g_failed;
 static int g_user_enabled;

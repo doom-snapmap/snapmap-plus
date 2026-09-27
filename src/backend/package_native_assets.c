@@ -225,6 +225,20 @@ int sh_package_native_assets_shader_read(void *context, const char *path, unsign
     }
     ReleaseSRWLockShared(&a->lock); return result;
 }
+int sh_package_native_assets_shader_original_read(void *context, const char *path,
+    unsigned char **body, size_t *length)
+{
+    sh_package_native_assets *a = context;
+    sh_package_baseline_reader reader = NULL; void *reader_context = NULL;
+    *body = NULL; *length = 0;
+    if (!a || !path) return -1;
+    AcquireSRWLockShared(&a->lock);
+    reader = a->shader_original; reader_context = a->shader_original_context;
+    ReleaseSRWLockShared(&a->lock);
+    /* Configuration is immutable once shared. Do not hold an asset lock while
+     * invoking the installed reader; native preparation runs outside them. */
+    return reader ? reader(reader_context, path, body, length) : -1;
+}
 
 /* _vmtr selects one engine-owned provider, not one provider per package. Its
  * nominal identity is enough to establish that all untouched bindings select

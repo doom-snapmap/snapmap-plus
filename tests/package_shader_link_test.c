@@ -347,6 +347,15 @@ static void preparation_contract(void)
     sh_native_resource_registry_source registry={&f,read_memory,(uintptr_t)head};
     assert(sh_package_native_assets_configure_shader(assets,SH_PACKAGE_SHADER_OPENGL,registry,original,&f,error,sizeof(error)));
     sh_package_library_native adapter=sh_package_native_assets_adapter(assets);
+    for(int campaign=0;campaign<2;campaign++) {
+        unsigned char *captured=NULL;size_t length=0;f.campaign=campaign;
+        assert(sh_package_native_assets_shader_original_read(assets,
+            "generated/decls/renderparm/tex.decl",&captured,&length)==(campaign?2:1));
+        assert(length==strlen(parameter) && !memcmp(captured,parameter,length));free(captured);
+        assert(!sh_package_native_assets_shader_original_read(assets,"missing.inc",&captured,&length));
+        assert(!captured && !length);
+    }
+    f.campaign=0;
     const sh_package_source_shader *shader=adapter.source.shader;int kind;uint32_t index;
     sh_decl_source source={parameter,strlen(parameter)};
     prepare_context c={&f,assets,object,0,0,0,0};uint64_t task_id=0;

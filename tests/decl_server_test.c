@@ -502,10 +502,12 @@ int sh_resource_graph_native_prepare_shader(void *resource, const char *family,
     return 1;
 }
 int sh_resource_graph_native_prepare_program(void *manager, const char *name,
-    const void *source, size_t length, int (*admitted)(void *), void *context,
+    const void *source, size_t length, sh_resource_shader_source_reader original,
+    void *original_context, int (*admitted)(void *), void *context,
     char *error, size_t capacity)
 {
     (void)manager; (void)name; (void)source; (void)length; (void)error; (void)capacity;
+    CHECK(original == sh_package_native_assets_shader_original_read && original_context);
     CHECK(admitted(context));
     /* Program cooking and its isolated receipt are exercised by the native
      * graph fixture. Fixed-slot tests must never enter this route. */

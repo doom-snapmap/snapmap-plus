@@ -3124,6 +3124,7 @@ static int ds_activate_provider(void *context, int restoring,
 typedef struct ds_shader_preparation {
     sh_resource_resident *resident;
     sh_resource_shader_state *state;
+    sh_package_native_assets *assets; /* retained even if recovery outlives batch */
     DWORD thread;
     LONG previous_state, previous_registration;
     int recovered;
@@ -3162,6 +3163,7 @@ static int ds_shader_prepare_one(void *context, const sh_package_shader_request 
         if (!strcmp(request->family, "renderprog"))
             return sh_resource_graph_native_prepare_program((void *)request->manager,
                 request->name, request->source, request->source_length,
+                sh_package_native_assets_shader_original_read, pass->assets,
                 ds_shader_admitted, pass, error, capacity);
         resource = ds_peek_decl((void *)request->manager, request->name);
         if (request->resource && resource != (void *)request->resource) return 0;
@@ -3230,6 +3232,7 @@ static void ds_shader_dispose(ds_shader_preparation *pass, int failed)
     g_shader_prepare_scope--;
     InterlockedExchange(&g_state, failed ? DS_STATE_FAILED : pass->previous_state);
     InterlockedExchange(&g_registration_succeeded, failed ? 0 : pass->previous_registration);
+    sh_package_native_assets_close(pass->assets);
     free(pass);
 }
 static int ds_shader_recovery_poll(void)
@@ -3266,6 +3269,8 @@ int sh_decl_server_prepare_shaders(sh_package_shader_preparation *batch, char *e
         return 0;
     }
     if (!(pass = calloc(1, sizeof(*pass)))) goto done;
+    pass->assets = sh_package_native_assets_retain(sh_package_shader_preparation_assets(batch));
+    if (!pass->assets) { free(pass); goto done; }
     pass->previous_state = InterlockedCompareExchange(&g_state, 0, 0);
     pass->previous_registration = InterlockedCompareExchange(&g_registration_succeeded, 0, 0);
     pass->thread = GetCurrentThreadId();

@@ -145,9 +145,24 @@ typedef struct rg_cook_context {
     rg_cook_frame *frame;
     rg_cook_unit *units, *tail;
     unsigned char settings[12];
+    sh_resource_shader_source_reader original;
+    void *original_context;
     int failed;
 } rg_cook_context;
 static __declspec(thread) rg_cook_context *g_cook;
+int sh_resource_graph_native_cook_input(const char *path, unsigned char **body, size_t *length)
+{
+    int status = -1;
+    *body = NULL; *length = 0;
+    if (!g_cook || !g_cook->original) return 0;
+    __try {
+        status = g_cook->original(g_cook->original_context, path, body, length);
+        if ((status == 1 || status == 2) && *body && *length <= 16u * 1024u * 1024u) return 1;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { status = -1; }
+    free(*body); *body = NULL; *length = 0;
+    if (status != 0) g_cook->failed = 1;
+    return -1;
+}
 static int rg_cook_install(void);
 static void *rg_cook_lookup(void *manager, const char *name, int *handled);
 static const char *const g_required[] = {
@@ -1271,6 +1286,7 @@ static int rg_cook_one(rg_cook_unit *unit)
 }
 int sh_resource_graph_native_prepare_program(void *manager, const char *name,
     const void *expected_source, size_t length,
+    sh_resource_shader_source_reader original, void *original_context,
     sh_resource_shader_admission admitted, void *context, char *error, size_t capacity)
 {
     const char *reason = "isolated shader cooking requires admitted native renderer ownership";
@@ -1284,6 +1300,7 @@ int sh_resource_graph_native_prepare_program(void *manager, const char *name,
     __try {
         const char *family = *(const char **)((unsigned char *)manager + 8);
         if (!family || _stricmp(family, "renderprog") || g_cook_api.mode() < 2 || !rg_cook_settings(cook.settings)) __leave;
+        cook.original = original; cook.original_context = original_context;
         g_cook = &cook;
         reason = "isolated native shader source cooking failed; original GPU objects remain intact";
         ok = rg_cook_enqueue(NULL, name, expected_source, length, 1);
@@ -1337,7 +1354,7 @@ int sh_resource_graph_native_prepare_shader(void *resource, const char *family,
     }
     if (program) {
         return sh_resource_graph_native_prepare_program(*(void **)(before + 0x10), name,
-            expected_source, length, admitted, context, error, capacity);
+            expected_source, length, NULL, NULL, admitted, context, error, capacity);
     }
     if (!program && sh_package_shader_receipt_matches((uintptr_t)resource, family, name,
         expected_source, length, before, bytes)) { ok = 1; goto done; }

@@ -7,6 +7,7 @@
 #include "overrides.h"
 #include "package_runtime.h"
 #include "resource_graph.h"
+#include "resource_graph_native.h"
 #include "package_fixture.h"
 #include "../src/backend/overrides_baked.h"
 
@@ -17,6 +18,14 @@ void backend_log(const char *message)
 }
 
 static int user_layer_enabled = 1;
+static int cook_input_mode;
+int sh_resource_graph_native_cook_input(const char *path,unsigned char **body,size_t *length)
+{
+    (void)path;*body=NULL;*length=0;
+    if(!cook_input_mode)return 0;
+    if(cook_input_mode<0)return -1;
+    *body=(unsigned char *)_strdup("captured original");*length=strlen((char *)*body);return 1;
+}
 int sh_user_overrides_enabled_for_launch(void)
 {
     return user_layer_enabled;
@@ -552,6 +561,20 @@ int main(void)
     CHECK(matches("generated/image/demon.bimage", "image bytes"));
     CHECK(matches("cooked/model/demon.bmodel", "model bytes"));
     CHECK(matches("md6/demon.md6rig", "rig bytes"));
+    /* Preparation inputs take precedence over a healthy published provider.
+     * Missing captured input must never silently borrow that provider's file. */
+    cook_input_mode=1;
+    CHECK(matches("generated/image/demon.bimage", "captured original"));
+    void *captured=sh_overrides_test_open("generated/image/demon.bimage",0);
+    CHECK(captured);
+    cook_input_mode=-1;
+    CHECK(!sh_overrides_test_open("generated/image/demon.bimage",0));
+    cook_input_mode=0;
+    CHECK(matches("generated/image/demon.bimage", "image bytes"));
+    char captured_bytes[32]={0};
+    CHECK(captured && sh_overrides_test_stream_read(captured,captured_bytes,sizeof(captured_bytes))==17);
+    CHECK(!strcmp(captured_bytes,"captured original"));
+    if(captured)sh_overrides_test_stream_close(captured);
     {
         char bytes[32768];
         size_t read = 0;

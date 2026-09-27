@@ -53,6 +53,17 @@ int sh_resource_graph_native_prepare_shader(void *resource, const char *family,
     const char *name, const void *expected_source, size_t length,
     sh_resource_shader_admission admitted, void *context, char *error, size_t capacity);
 
+/* Immutable installed source view, owned by the caller through the synchronous
+ * cook. Use the baseline-reader contract: 1 SnapMap or 2 campaign/multiplayer
+ * with malloc-owned bytes, 0 absent, -1 failed. Native source and
+ * include opens use this view instead of any currently published overrides.
+ * An absent input must not fall through to a different authored generation. */
+typedef int (*sh_resource_shader_source_reader)(void *context, const char *path,
+    unsigned char **body, size_t *length);
+/* Provider bridge: 0 outside a cook source view, 1 with malloc-owned bytes,
+ * -1 for a claimed absent/failed read. This is thread-local and synchronous. */
+int sh_resource_graph_native_cook_input(const char *path, unsigned char **body, size_t *length);
+
 /* Cook original program source into an isolated, scope-owned native parser and
  * metadata workspace. Call before finding/materializing a renderprog, whether
  * its native name is cold or already registered. No GPU program, registry slot
@@ -62,5 +73,6 @@ int sh_resource_graph_native_prepare_shader(void *resource, const char *family,
  * contract still applies on success/failure, including retained restoration. */
 int sh_resource_graph_native_prepare_program(void *manager, const char *name,
     const void *expected_source, size_t length,
+    sh_resource_shader_source_reader original, void *original_context,
     sh_resource_shader_admission admitted, void *context, char *error, size_t capacity);
 #endif

@@ -19,6 +19,7 @@
 #include "packages.h"
 #include "package_runtime.h"
 #include "resource_graph.h"
+#include "resource_graph_native.h"
 #include "package_shader_receipt.h"
 #include "grid_room_asset.h"
 #include "user_overrides.h"
@@ -1067,6 +1068,27 @@ static void *ov_open_body(void *self, const char *name, unsigned char b1, unsign
     if (g_orig_open == NULL) return NULL;   /* defensive: never happens once installed */
 #endif
     if (g_provider_self == NULL) g_provider_self = self;
+
+    /* Source preparation is a synchronous original-only read scope. Includes
+     * and ancestors must use the same captured installed view as the root,
+     * including when campaign files are outside the active SnapMap mount. */
+    if (mode < 2 && name) {
+        unsigned char *bytes = NULL, *owned = NULL; size_t length = 0;
+        int claimed = sh_resource_graph_native_cook_input(name, &bytes, &length);
+        if (claimed) {
+            ov_stream *stream = NULL;
+            if (claimed > 0 && length <= LLONG_MAX) {
+                owned = HeapAlloc(GetProcessHeap(), 0, length ? length : 1u);
+                if (owned) {
+                    if (length) memcpy(owned, bytes, length);
+                    stream = make_mem_stream(owned, (long long)length, name, 1);
+                }
+            }
+            free(bytes);
+            if (!stream && owned) HeapFree(GetProcessHeap(), 0, owned);
+            return stream;
+        }
+    }
 
     /* Let embedded or marked-volume navigation take precedence over the
      * resized room's base AAS; its source reader still resolves that base. */

@@ -235,7 +235,7 @@ static const char cook_formatted[]=
 static unsigned char cook_program[0x1800],cook_flags[2][0x60],cook_flag_names[2][0x30];
 static uint64_t cook_mask=2;
 static unsigned char cook_sparse,cook_aniso;
-static int cook_feedback,cook_validate,cook_mode,cook_reads,cook_frees;
+static int cook_feedback,cook_validate,cook_mode,cook_reads,cook_frees,cook_missing;
 static int cook_strings,cook_stages,cook_metadata,cook_lexers,cook_texts,cook_compiles,cook_lookups;
 static void *cook_fs_vtable[26],*cook_heap_vtable[3],**cook_fs=cook_fs_vtable,**cook_heap=cook_heap_vtable;
 static void *cook_fs_slot=&cook_fs,*cook_heap_slot=&cook_heap;
@@ -291,12 +291,33 @@ static unsigned char cook_lexer_error(void *value)
 { return cook_mode==3 || (cook_mode==4 && strstr(((cook_lexer *)value)->body,"permutations")); }
 static unsigned char cook_lexer_warning(void *value) { (void)value;return 0; }
 static int cook_native_mode(void) { return 2; }
+static int cook_original(void *context,const char *path,unsigned char **body,size_t *length)
+{
+    const char *text=NULL; CHECK(context==cook_program);
+    *body=NULL;*length=0;
+    if(!strcmp(path,"generated/decls/renderprog/example.decl"))text=cook_mode==15?"wrong":cook_root;
+    if(!strcmp(path,"generated/decls/renderprog/base.decl"))text=cook_base;
+    if(!strcmp(path,"decls/renderprogs/base.inc")) {
+        if(cook_mode==12)return 0;
+        if(cook_mode==13)return -1;
+        if(cook_mode==14)RaiseException(0xe0420111,0,0,NULL);
+        text=cook_include;
+    }
+    if(text) { *body=(unsigned char *)_strdup(text);*length=strlen(text); }
+    return cook_mode==16?-1:!text?0:cook_mode==17?2:1;
+}
 static int cook_read_file(void *fs,const char *path,void **body,void *timestamp,unsigned flags)
 {
     CHECK(fs==cook_fs_slot && !timestamp && !flags);cook_reads++;
+    size_t length=0;
+    int claimed=sh_resource_graph_native_cook_input(path,(unsigned char **)body,&length);
+    if(claimed) { if(claimed<0)cook_missing++;return claimed>0?(int)length:-1; }
+    CHECK(cook_mode<11); /* Captured missing/error inputs cannot use local bytes. */
     const char *text=NULL;
     if(!strcmp(path,"generated/decls/renderprog/example.decl") && cook_mode!=1)text=cook_root;
     if(!strcmp(path,"generated/decls/renderprog/base.decl") && cook_mode!=2)text=cook_base;
+    if(!strcmp(path,"decls/renderprogs/base.inc"))text=cook_include;
+    if(!text)cook_missing++;
     *body=text?_strdup(text):NULL;return text?(int)strlen(text):-1;
 }
 static void cook_free_file(void *heap,void *body,size_t alignment)
@@ -348,7 +369,14 @@ static uintptr_t cook_compile(uintptr_t out,uintptr_t name_arg,uintptr_t config,
     }
     if(!strcmp(name,"base")) {
         cook_inherited_sections(sections,(void *)vertex);
-        sh_package_shader_receipt_bytes("decls/renderprogs/base.inc",strlen(cook_include),0,cook_include,strlen(cook_include));
+        void *include=NULL;
+        int bytes=cook_read_file(cook_fs_slot,"decls/renderprogs/base.inc",&include,NULL,0);
+        if(bytes<0)g_cook->failed=1;
+        else {
+            CHECK(bytes==(int)strlen(cook_include) && !memcmp(include,cook_include,(size_t)bytes));
+            sh_package_shader_receipt_bytes("decls/renderprogs/base.inc",(size_t)bytes,0,include,(size_t)bytes);
+            cook_free_file(cook_heap_slot,include,16);
+        }
     } else if(!strcmp(name,"example")) {
         cook_own_sections(sections,(void *)fragment,(void *)compute);
         put_pointer(metadata,0x9d0,cook_flag_names);*(int *)(metadata+0x9d8)=2;
@@ -393,15 +421,19 @@ static void test_isolated_program_cook(void)
     g_cook_api.filesystem=&cook_fs_slot;g_cook_api.heap=&cook_heap_slot;g_cook_api.flag_manager=cook_flags;
     g_cook_api.sparse=&cook_sparse;g_cook_api.aniso=&cook_aniso;
     g_cook_api.feedback=&cook_feedback;g_cook_api.validate=&cook_validate;g_cook_api.ready=1;
-    for(test_vulkan=0;test_vulkan<2;test_vulkan++)for(cook_mode=0;cook_mode<11;cook_mode++) {
-        g_cook_api.renderer=test_vulkan;cook_reads=cook_frees=cook_compiles=cook_lookups=0;cook_feedback=0;
+    for(test_vulkan=0;test_vulkan<2;test_vulkan++)for(cook_mode=0;cook_mode<18;cook_mode++) {
+        g_cook_api.renderer=test_vulkan;cook_reads=cook_frees=cook_compiles=cook_lookups=cook_missing=0;cook_feedback=0;
         sh_resource_shader_state *scope=sh_resource_graph_native_shader_state_begin(shader_admitted,(void *)1,error,sizeof(error));
         CHECK(scope);program_loads=0;
         int ok=sh_resource_graph_native_prepare_program(manager,"example",cook_mode==8?"wrong":cook_root,
-            cook_mode==8?5:strlen(cook_root),shader_admitted,(void *)1,error,sizeof(error));
-        CHECK(ok==(cook_mode==0 || cook_mode==10));CHECK(!program_loads && !g_cook && !memcmp(original,cook_program,sizeof(original)));
+            cook_mode==8?5:strlen(cook_root),cook_mode>=11?cook_original:NULL,cook_program,
+            shader_admitted,(void *)1,error,sizeof(error));
+        CHECK(ok==(cook_mode==0 || cook_mode==10 || cook_mode==11 || cook_mode==17));CHECK(!program_loads && !g_cook && !memcmp(original,cook_program,sizeof(original)));
         CHECK(!cook_strings && !cook_stages && !cook_metadata && !cook_lexers && !cook_texts);
-        CHECK(cook_frees==cook_reads-(cook_mode==1 || cook_mode==2));
+        CHECK(cook_frees==cook_reads-cook_missing);
+        unsigned char *outside=NULL;size_t outside_length=0;
+        CHECK(!sh_resource_graph_native_cook_input("generated/decls/renderprog/example.decl",&outside,&outside_length));
+        CHECK(!outside && !outside_length);
         sh_package_shader_capture capture={0};
         CHECK(sh_package_shader_cook_copy(test_vulkan,"example",cook_root,strlen(cook_root),&capture)==ok);
         if(ok) {

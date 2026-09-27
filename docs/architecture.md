@@ -42,6 +42,12 @@ signature bytes. A filename or a readable address is not sufficient evidence.
 The legacy `sh_host_is_pinned_rva_build` gate admits Vulkan only. Code with
 independently verified mappings for both renderers, such as shader source cooking,
 uses `sh_host_is_pinned_renderer_build` to match the selected table to its executable.
+Isolated shader source cooking reads the retained installed catalog through a
+synchronous thread-local input view. Root sources, ancestors and native include
+opens share that view even when campaign files are outside the active SnapMap
+mount. Missing inputs cannot fall through to local or map overrides. Native
+reads and parser output still establish the source receipts; the input view
+does not publish a provider, allocate GPU programs or certify driver acceptance.
 Contributor changes to signatures or anchors require the two-image test gate in
 [contributing](contributing.md#7-run-the-tests).
 
