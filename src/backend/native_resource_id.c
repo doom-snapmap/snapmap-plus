@@ -44,17 +44,32 @@ char *sh_native_resource_name(const char *name)
     return out;
 }
 
+static int nri_type(const char *native_type, uint32_t *hash)
+{
+    size_t length;
+    if (!native_type || !(length = strlen(native_type)) || length > UINT32_MAX) return 0;
+    for (size_t i = 0; i < length; i++) if ((unsigned char)native_type[i] >= 128) return 0;
+    *hash = nri_hash((const unsigned char *)native_type, (uint32_t)length, UINT32_C(0x566f8ad7));
+    return 1;
+}
+
 int sh_native_resource_id(const char *native_type, const char *name, uint32_t *identity)
 {
     char *canonical;
-    size_t length;
     uint32_t hash;
     if (identity) *identity = 0;
-    if (!identity || !native_type || !(length = strlen(native_type)) || length > UINT32_MAX) return 0;
-    for (size_t i = 0; i < length; i++) if ((unsigned char)native_type[i] >= 128) return 0;
+    if (!identity || !nri_type(native_type, &hash)) return 0;
     canonical = sh_native_resource_name(name);
     if (!canonical) return 0;
-    hash = nri_hash((const unsigned char *)native_type, (uint32_t)length, UINT32_C(0x566f8ad7));
     hash = nri_hash((const unsigned char *)canonical, (uint32_t)strlen(canonical), hash);
     free(canonical); *identity = hash ? hash : 1; return 1;
+}
+
+int sh_native_resource_unnamed_id(const char *native_type, uint32_t *identity)
+{
+    uint32_t hash;
+    if (identity) *identity = 0;
+    if (!identity || !nri_type(native_type, &hash)) return 0;
+    hash = nri_hash((const unsigned char *)"", 0, hash);
+    *identity = hash ? hash : 1; return 1;
 }

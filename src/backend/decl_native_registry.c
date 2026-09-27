@@ -465,11 +465,17 @@ static int dr_capture_ids(sh_decl_native_registry *r, dr_manager *m)
         char *canonical;
         int valid;
         if (!entry->address) continue;
-        canonical = sh_native_resource_name(entry->name);
-        valid = canonical && !strcmp(canonical, entry->name);
-        free(canonical);
-        if (!valid || !sh_native_resource_id(m->type, entry->name, &expected) ||
-            !dr_read(r, entry->address, 0x20, &entry->id, sizeof(entry->id)) || entry->id != expected) return 0;
+        if (!entry->name[0]) {
+            /* The engine creates some resources unnamed (a font request with
+             * no face); none can be a package name, but its ID still occupies
+             * the native table, so it stays in the collision index. */
+            valid = sh_native_resource_unnamed_id(m->type, &expected);
+        } else {
+            canonical = sh_native_resource_name(entry->name);
+            valid = canonical && !strcmp(canonical, entry->name) && sh_native_resource_id(m->type, entry->name, &expected);
+            free(canonical);
+        }
+        if (!valid || !dr_read(r, entry->address, 0x20, &entry->id, sizeof(entry->id)) || entry->id != expected) return 0;
         m->ids[m->id_count++] = entry;
     }
     if (!dr_identity_entries(r, m)) return 0;

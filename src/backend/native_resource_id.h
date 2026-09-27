@@ -15,4 +15,9 @@ char *sh_native_resource_name(const char *name);
  * clear *identity on failure. Do not pass a lowercased logical family unless
  * that is the actual registered spelling. This is not a content fingerprint. */
 int sh_native_resource_id(const char *native_type, const char *name, uint32_t *identity);
+
+/* The same identity for an empty name, which only the engine itself creates
+ * (a font request with no face opens "fonts//<size>.dat"; live font ID
+ * 0xec305aad). Package names are never empty. */
+int sh_native_resource_unnamed_id(const char *native_type, uint32_t *identity);
 #endif

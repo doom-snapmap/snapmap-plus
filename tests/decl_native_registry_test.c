@@ -347,6 +347,32 @@ static void test_native_identity_collisions(void)
     sh_native_resource_registry_close(r); cleanup(&f, NULL);
 }
 
+/* The engine creates some resources unnamed (live: a font request with no
+ * face opened "fonts//12.dat" and left font "" with ID 0xec305aad). Such an
+ * entry keeps the snapshot usable; its ID must still be the unnamed one. */
+static void test_native_identity_unnamed(void)
+{
+    fixture f;
+    uintptr_t head = native_setup(&f);
+    sh_native_resource_identity out = {0};
+    char error[256];
+    uint32_t id = 0, font = 0;
+    assert(sh_native_resource_unnamed_id("font", &font) && font == UINT32_C(0xec305aad));
+    assert(!sh_native_resource_unnamed_id("", &id) && !id && !sh_native_resource_id("font", "", &id));
+    ptr(f.managers[0], 8, str(&f, "font"));
+    uintptr_t unnamed = loaded(&f, 0, "");
+    memcpy((void *)(unnamed + 0x20), &font, sizeof(font));
+    sh_native_resource_registry *r = native_open(&f, head); assert(r);
+    assert(sh_native_resource_registry_identity(r, "font", "zero threes", &out, error, sizeof(error)) == SH_NATIVE_RESOURCE_ID_FREE);
+    sh_native_resource_identity_clear(&out);
+    assert(sh_native_resource_registry_validate(r, error, sizeof(error)));
+    sh_native_resource_registry_close(r);
+    id = font + 1; memcpy((void *)(unnamed + 0x20), &id, sizeof(id));
+    r = native_open(&f, head); assert(r);
+    assert(sh_native_resource_registry_identity(r, "font", "zero threes", &out, error, sizeof(error)) == SH_NATIVE_RESOURCE_ID_ERROR);
+    sh_native_resource_registry_close(r); cleanup(&f, NULL);
+}
+
 static void test_native_identity_changes(void)
 {
     for (int fault = 0; fault < 8; fault++) {
@@ -479,7 +505,7 @@ int main(void)
 {
     test_lookup_order(); test_unknown_and_ancestry(); test_memory_and_names(); test_type_class();
     test_candidate_sources(); test_candidate_observation();
-    test_decl_identity(); test_native_identity_collisions(); test_native_identity_changes();
+    test_decl_identity(); test_native_identity_collisions(); test_native_identity_unnamed(); test_native_identity_changes();
     test_native_identity_bucket_validation(); test_native_identity_empty_and_malformed();
     puts("decl_native_registry_test: PASS"); return 0;
 }
