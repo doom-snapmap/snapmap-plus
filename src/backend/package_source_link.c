@@ -66,6 +66,8 @@ struct sh_package_source_link {
     sh_package_reverse_gap *reverse_gaps;
     size_t reverse_gap_count, reverse_gap_capacity;
     int reader_gap; /* The last discovery stopped in a registered reader, not I/O. */
+    int preparing; /* Last unit has an explicitly retained native program request. */
+    char preparation_reason[1024]; /* First deferred request in this frontier. */
     int malformed; /* That reader could not parse the text in the native grammar. */
     int environment; /* A failure came from I/O, allocation or configuration. */
     sl_unit *discovering; /* Unit whose readers are requesting new units. */
@@ -110,6 +112,16 @@ static int sl_env_fail(sh_package_source_link *s, const char *reason, const char
 {
     s->environment = 1;
     return sl_fail(s, reason, name);
+}
+/* Continue discovering independent units, but never certify or publish this
+ * incomplete frontier. A fresh pass must consume the prepared native output. */
+static int sl_defer_preparation(sh_package_source_link *s)
+{
+    s->preparing = 1;
+    if (!*s->preparation_reason) snprintf(s->preparation_reason, sizeof(s->preparation_reason), "%s",
+        s->error && *s->error ? s->error : "shader environment requires native preparation");
+    if (s->error && s->error_capacity) *s->error = 0;
+    return 0;
 }
 /* Missing product coverage for a source that was read successfully. Ordinary
  * linking still refuses it. Reverse observation of stock roots accounts it as
@@ -367,9 +379,10 @@ static int sl_shader_files(sh_package_source_link *s, sl_unit *unit)
     if (probe.declaration == 1 && !probe.cooked && s->native.shader->program) {
         unsigned char *declaration = NULL, *binary = NULL; size_t declaration_length = 0, binary_length = 0;
         sh_package_shader_program decoded = {0};
-        (void)sh_package_source_shader_open(s->readers[unit->scope], unit->unit.name,
+        sh_package_source_shader_status status = sh_package_source_shader_open(s->readers[unit->scope], unit->unit.name,
             &declaration, &declaration_length, &binary, &binary_length, &decoded, s->error, s->error_capacity);
         free(declaration); free(binary); sh_package_shader_program_clear(&decoded);
+        if (status == SH_PACKAGE_SOURCE_SHADER_PREPARING) return sl_defer_preparation(s);
     }
     if (probe.declaration != 1 || probe.cooked != 1)
         return sl_gap_fail(s, "shader declaration and selected renderer binary must both be supplied", unit->unit.name);
@@ -378,8 +391,10 @@ static int sl_shader_files(sh_package_source_link *s, sl_unit *unit)
         unsigned char *declaration = NULL, *binary = NULL; size_t declaration_length = 0, binary_length = 0;
         sh_package_shader_program decoded = {0};
         const char *name = unit->programs[p].name;
-        if (!sh_package_source_shader_open(s->readers[unit->scope], name, &declaration, &declaration_length,
-            &binary, &binary_length, &decoded, s->error, s->error_capacity)) return 0;
+        sh_package_source_shader_status status = sh_package_source_shader_open(s->readers[unit->scope], name,
+            &declaration, &declaration_length, &binary, &binary_length, &decoded, s->error, s->error_capacity);
+        if (status == SH_PACKAGE_SOURCE_SHADER_PREPARING) return sl_defer_preparation(s);
+        if (status != SH_PACKAGE_SOURCE_SHADER_READY) return 0;
         sl_shader_collect walk = {s, unit, p, 0, &decoded, binary, 0, 0, 0};
         int ok = sh_package_shader_paths(s->native.shader->renderer, name, name, &decoded,
             sl_shader_collect_path, &walk, s->error, s->error_capacity) == SH_PACKAGE_SHADER_OK;
@@ -929,7 +944,7 @@ static int sl_discover_unit(sh_package_source_link *s, sl_unit *unit)
 static int sl_discover_unit_requests(sh_package_source_link *s, sl_unit *unit)
 {
     if (!sl_files(s, unit)) {
-        if (s->observe && !s->failed) s->reader_gap = 1;
+        if (s->observe && !s->failed && !s->preparing) s->reader_gap = 1;
         return 0;
     }
     for (size_t j = 0; j < unit->unit.file_count; j++) {
@@ -1191,8 +1206,9 @@ static int sl_reverse_roots(sh_package_source_link *s, const sh_package_source_r
     roots = base->count;
     for (size_t i = 0; i < base->count; i++) {
         sl_unit *unit = base->units[i];
-        base->reader_gap = 0;
+        base->reader_gap = base->preparing = 0;
         if (!sl_reverse_leaf(unit->unit.family) && !sl_discover_unit(base, unit)) {
+            if (base->preparing) continue;
             /* Unreadable originals, allocation and constructor capture failures
              * stop discovery. A stock source beyond the registered readers is a
              * product coverage gap in that root, not in an unrelated package:
@@ -1206,6 +1222,9 @@ static int sl_reverse_roots(sh_package_source_link *s, const sh_package_source_r
         }
         if (unit->dependency_count > SIZE_MAX - edge_count) goto done;
         edge_count += unit->dependency_count;
+    }
+    if (*base->preparation_reason) {
+        sl_env_fail(base, base->preparation_reason, NULL); goto done;
     }
     if (base->count > SIZE_MAX / sizeof(*nodes) || base->count > SIZE_MAX / sizeof(*stack) ||
         edge_count > SIZE_MAX / sizeof(*edges)) goto done;
@@ -1472,11 +1491,15 @@ sh_package_source_link *sh_package_source_link_open_attributed(const sh_package_
         if (pass && !sl_seed_orphan_binaries(s)) goto failed;
         for (; inspected < s->count; inspected++) {
             sl_unit *unit = s->units[inspected];
-            s->reader_gap = s->malformed = 0;
-            if (!sl_discover_unit(s, unit)) { s->failed_unit = unit; goto failed; }
+            s->reader_gap = s->malformed = s->preparing = 0;
+            if (!sl_discover_unit(s, unit)) {
+                if (s->preparing) continue;
+                s->failed_unit = unit; goto failed;
+            }
             if (unit->unit.file_count > 1) qsort((void *)unit->unit.files, unit->unit.file_count, sizeof(*unit->unit.files), sl_file_order);
             if (!sl_movie_identities(s, unit)) { s->failed_unit = unit; goto failed; }
         }
+        if (*s->preparation_reason) { sl_env_fail(s, s->preparation_reason, NULL); goto failed; }
     }
     sl_phase(s, 3, &mark);
     if (!sl_shader_accounted(s)) goto failed;

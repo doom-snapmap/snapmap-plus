@@ -20,6 +20,7 @@ typedef struct fixture {
     region regions[192]; size_t count;
     void *registry, *reflection;
     int missing_unrelated, absent_target, implicit_root, reader_gap, absent_program, hands;
+    int prepare_programs, preparation_calls, program_read_failure;
 } fixture;
 static void *allocate(fixture *f, size_t length)
 {
@@ -119,12 +120,14 @@ static int original(void *context, const char *path, unsigned char **body, size_
         if (f->missing_unrelated) return -1;
         value = "{ edit = { entityDef = \"props/unrelated\"; category = \"Unrelated\"; } }";
     } else if (!strcmp(path, "generated/decls/entitydef/props/rock.decl"))
-        value = f->implicit_root ? "{ class = \"Entity\"; edit = {} }" : f->absent_program ?
+        value = f->prepare_programs ? "{ class = \"Entity\"; edit = { program = \"first\"; } }" :
+            f->implicit_root ? "{ class = \"Entity\"; edit = {} }" : f->absent_program ?
             "{ class = \"Entity\"; edit = { model = \"models/rock.lwo\"; program = \"absentprog\"; } }" :
             "{ class = \"Entity\"; edit = { model = \"models/rock.lwo\"; } }";
     else if (!strcmp(path, "generated/decls/entitydef/props/unrelated.decl")) {
         if (f->absent_target) return 0;
-        value = f->reader_gap ? "{ class = \"Entity\"; edit = { image = \"textures/unrelated\"; "
+        value = f->prepare_programs ? "{ class = \"Entity\"; edit = { program = \"second\"; } }" :
+            f->reader_gap ? "{ class = \"Entity\"; edit = { image = \"textures/unrelated\"; "
             "model = \"models/campaign.lwo\"; gui = \"swf/unrelated\"; } }" : f->hands == 2 ?
             "{ class = \"Entity\"; edit = { image = \"textures/unrelated\"; target = \"player-def\"; } }" :
             "{ class = \"Entity\"; edit = { image = \"textures/unrelated\"; } }";
@@ -161,6 +164,11 @@ static int original(void *context, const char *path, unsigned char **body, size_
     else if (!strcmp(path, "generated/decls/md6def/gore/chunk.md6.decl")) value = "{ init { } }";
     else if (!strcmp(path, "generated/transsortatlas/textures/fx/campaignglow.bimage")) {
         *length = 14; *body = malloc(15); assert(*body); memcpy(*body, "campaign-atlas", 15); return 2;
+    }
+    else if (f->prepare_programs && (!strcmp(path,"generated/decls/renderprog/first.decl") ||
+        !strcmp(path,"generated/decls/renderprog/second.decl"))) {
+        if (f->program_read_failure && strstr(path,"/second.decl")) return -1;
+        value = "{ }";
     }
     else return 0;
     *length = value ? strlen(value) : b.length; *body = malloc(*length + 1); assert(*body);
@@ -679,6 +687,34 @@ static void test_player_hands(fixture *f, const sh_package_compile_environment *
     assert(MoveFileA(held, home));
 }
 
+static int queue_original_program(void *context, const char *name, sh_decl_source source, char *error, size_t capacity)
+{
+    fixture *f=context;assert(!strcmp(name,"first") || !strcmp(name,"second"));
+    assert(source.length==3 && !memcmp(source.text,"{ }",3));f->preparation_calls++;
+    snprintf(error,capacity,"queued original %s",name);return 1;
+}
+static void reverse_preparation_frontier(fixture *f, const sh_resource_catalog *catalog)
+{
+    char error[1024];sh_compiled_resource file={0};
+    file.engine_path="generated/image/textures/rock.bimage";file.type="image";file.name="textures/rock";
+    file.body=(unsigned char *)"changed";file.body_length=7;
+    assert(sh_package_owners_add(&file.gameplay_owners,0));
+    sh_package_compilation changed={0},empty={0};changed.resources=&file;changed.resource_count=1;
+    const sh_package_compilation *scopes[]={&changed,&empty};unsigned char discover[]={1,0};
+    sh_package_source_root_plan plan={discover,1,NULL};sh_package_source_failure failure={0};
+    sh_package_source_shader shader={SH_PACKAGE_SHADER_OPENGL,f,NULL,NULL,queue_original_program};
+    sh_package_source_link_native native={0};native.shader=&shader;
+    sh_decl_registry_source registry={f,read_memory,(uintptr_t)f->registry};
+    f->prepare_programs=1;f->preparation_calls=0;
+    assert(!sh_package_source_link_open_attributed(scopes,2,catalog,original,f,registry,(uintptr_t)f->reflection,
+        &native,&plan,&failure,error,sizeof(error)));
+    assert(f->preparation_calls==2 && failure.kind==SH_PACKAGE_SOURCE_FAILURE_ENVIRONMENT && strstr(error,"queued original first"));
+    f->program_read_failure=1;f->preparation_calls=0;
+    assert(!sh_package_source_link_open_attributed(scopes,2,catalog,original,f,registry,(uintptr_t)f->reflection,
+        &native,&plan,&failure,error,sizeof(error)));
+    assert(f->preparation_calls==1 && failure.kind==SH_PACKAGE_SOURCE_FAILURE_ENVIRONMENT && !strstr(error,"queued original"));
+    f->prepare_programs=f->program_read_failure=0;sh_package_owners_free(&file.gameplay_owners);
+}
 int main(void)
 {
     char temporary[MAX_PATH], path[4096], error[1024]; fixture f = {0}; setup(&f);
@@ -690,6 +726,7 @@ int main(void)
     create("base/gameresources.resources", ""); create("base/gameresources.patch", "");
     snprintf(path, sizeof(path), "%s/base", root);
     sh_resource_catalog *catalog = sh_resource_catalog_open(path, error, sizeof(error)); assert(catalog);
+    reverse_preparation_frontier(&f,catalog);
     const char *image = "generated/image/textures/rock.bimage";
     package("a", "Red", image, "red-image"); package("b", "Green", image, "green-image");
     package("c", "Red Copy", image, "red-image"); package("d", "Original", image, "stock-image");

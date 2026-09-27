@@ -597,7 +597,7 @@ static int na_shader_program(void *context, const char *name, sh_decl_source sou
         "source-only shader has no stable native preparation identity", name);
 done:
     sh_native_resource_identity_clear(&identity); sh_native_resource_registry_close(registry);
-    ReleaseSRWLockExclusive(&a->lock); return 0;
+    ReleaseSRWLockExclusive(&a->lock); return queued ? 1 : 0;
 }
 size_t sh_package_native_assets_shader_pending(sh_package_native_assets *a)
 {

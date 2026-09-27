@@ -561,14 +561,14 @@ static int sg_shader_first_paths(void *context, sh_package_shader_path_kind kind
     if (kind == SH_PACKAGE_SHADER_BINARY) snprintf(paths->binary, 256, "%s", original);
     return 1;
 }
-int sh_package_source_shader_open(sh_package_source_reader *reader, const char *name,
+sh_package_source_shader_status sh_package_source_shader_open(sh_package_source_reader *reader, const char *name,
     unsigned char **declaration, size_t *declaration_length,
     unsigned char **binary, size_t *binary_length, sh_package_shader_program *program,
     char *error, size_t capacity)
 {
     sg_shader_paths paths = {0}; sh_package_shader_program empty = {0};
     sh_package_shader_schema schema = {reader, sg_shader_parameter};
-    char *old_error; size_t old_capacity; int ok = 0;
+    char *old_error; size_t old_capacity; sh_package_source_shader_status ok = SH_PACKAGE_SOURCE_SHADER_ERROR;
     if (error && capacity) *error = 0;
     if (declaration) *declaration = NULL;
     if (declaration_length) *declaration_length = 0;
@@ -583,9 +583,11 @@ int sh_package_source_shader_open(sh_package_source_reader *reader, const char *
         sg_shader_first_paths, &paths, error, capacity) != SH_PACKAGE_SHADER_OK) goto done;
     int declaration_status = sg_read_path(reader, paths.declaration, declaration, declaration_length);
     int binary_status = declaration_status > 0 ? sg_read_path(reader, paths.binary, binary, binary_length) : 0;
-    if (declaration_status > 0 && !binary_status && reader->shader.program)
+    if (declaration_status > 0 && !binary_status && reader->shader.program &&
         reader->shader.program(reader->shader.context, name,
-            (sh_decl_source){(const char *)*declaration, *declaration_length}, error, capacity);
+            (sh_decl_source){(const char *)*declaration, *declaration_length}, error, capacity) == 1) {
+        ok = SH_PACKAGE_SOURCE_SHADER_PREPARING; goto done;
+    }
     if (declaration_status <= 0 || binary_status <= 0) {
         sg_shader_error(reader, "shader declaration or renderer binary is absent", name); goto done;
     }
@@ -598,9 +600,9 @@ int sh_package_source_shader_open(sh_package_source_reader *reader, const char *
         if (ref->kind == SH_PACKAGE_SHADER_PARAMETER && sg_shader_parameter(reader, ref->name, &kind) != 1) goto done;
         if (ref->kind == SH_PACKAGE_SHADER_FLAG && !sg_shader_flag(reader, ref->name)) goto done;
     }
-    ok = 1;
+    ok = SH_PACKAGE_SOURCE_SHADER_READY;
 done:
-    if (!ok) {
+    if (ok != SH_PACKAGE_SOURCE_SHADER_READY) {
         free(*declaration); free(*binary); *declaration = *binary = NULL; *declaration_length = *binary_length = 0;
         sh_package_shader_program_clear(program);
     }
@@ -641,8 +643,8 @@ static int sg_renderprog(sg_walk *walk, const char *name)
 {
     unsigned char *declaration = NULL, *binary = NULL; size_t declaration_length = 0, binary_length = 0;
     sh_package_shader_program program = {0}; char detail[1024] = "";
-    if (!sh_package_source_shader_open(walk, name, &declaration, &declaration_length,
-        &binary, &binary_length, &program, detail, sizeof(detail))) {
+    if (sh_package_source_shader_open(walk, name, &declaration, &declaration_length,
+        &binary, &binary_length, &program, detail, sizeof(detail)) != SH_PACKAGE_SOURCE_SHADER_READY) {
         sg_gap(walk, "", "renderprog", detail[0] ? detail : "shader unit is unavailable"); return !walk->failed;
     }
     walk->report.declarations++;
@@ -1558,8 +1560,8 @@ unsigned char *sh_package_source_shader_bind(sh_package_source_reader *reader,
     *error = 0; if (output_length) *output_length = 0;
     if (!reader || !name || !path || !body || !resolver || !output_length || length == SIZE_MAX) goto done;
     old_error = reader->error; old_capacity = reader->capacity; reader->error = error; reader->capacity = capacity;
-    if (!sh_package_source_shader_open(reader, name, &declaration, &declaration_length,
-        &binary, &binary_length, &program, error, capacity) ||
+    if (sh_package_source_shader_open(reader, name, &declaration, &declaration_length,
+        &binary, &binary_length, &program, error, capacity) != SH_PACKAGE_SOURCE_SHADER_READY ||
         sh_package_shader_paths(reader->shader.renderer, name, name, &empty,
         sg_shader_first_paths, &paths, error, capacity) != SH_PACKAGE_SHADER_OK) goto done;
     int is_declaration = !strcmp(path, paths.declaration), is_binary = !strcmp(path, paths.binary);

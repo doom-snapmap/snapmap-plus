@@ -61,7 +61,9 @@ typedef struct sh_package_source_shader {
         uint64_t *mask, char *error, size_t capacity);
     /* Missing OpenGL cooked output may require admitted native source cooking.
      * This read-only callback retains an environment request; it never invokes
-     * the engine. The caller retries the same immutable scope after preparation. */
+     * the engine. Return 1 only after retaining a request, 0 when unsupported,
+     * or -1 on a failed read. The caller retries the same immutable scope after
+     * preparation; a queued request is not a usable compiled program. */
     int (*program)(void *context, const char *name, sh_decl_source source,
         char *error, size_t capacity);
 } sh_package_source_shader;
@@ -105,10 +107,17 @@ int sh_package_source_reader_shader(sh_package_source_reader *reader,
     const sh_package_source_shader *shader);
 int sh_package_source_reader_audio(sh_package_source_reader *reader,
     const sh_package_source_audio *audio);
+typedef enum sh_package_source_shader_status {
+    SH_PACKAGE_SOURCE_SHADER_ERROR = 0,
+    SH_PACKAGE_SOURCE_SHADER_READY = 1,
+    SH_PACKAGE_SOURCE_SHADER_PREPARING = 2
+} sh_package_source_shader_status;
 /* Decode the selected renderer's cooked program with scoped parameter kinds.
  * Validate every retained fixed parameter ABI and the declaration checksum.
- * All returned bytes/program arrays are owned by the caller. */
-int sh_package_source_shader_open(sh_package_source_reader *reader, const char *name,
+ * All returned bytes/program arrays are owned by the caller only on READY.
+ * PREPARING means a missing cooked program has a retained native request, not
+ * a coverage gap. Outputs are empty until a subsequent READY result. */
+sh_package_source_shader_status sh_package_source_shader_open(sh_package_source_reader *reader, const char *name,
     unsigned char **declaration, size_t *declaration_length,
     unsigned char **binary, size_t *binary_length, sh_package_shader_program *program,
     char *error, size_t capacity);

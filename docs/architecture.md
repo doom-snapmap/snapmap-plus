@@ -52,6 +52,10 @@ Lexer source labels retain native casing for relative includes, while catalog
 and dependency keys normalize the virtual-root spelling. Preparation uses the
 native nonfatal diagnostic flag and rejects recorded parser errors through its
 recovery path instead of invoking an engine session error.
+Source discovery collects explicitly retained program-preparation requests across
+the current dependency frontier before retrying. Waiting programs are neither
+reader coverage gaps nor usable units: no partial graph reaches certification
+or publication. Ordinary read and validation failures still stop discovery.
 Contributor changes to signatures or anchors require the two-image test gate in
 [contributing](contributing.md#7-run-the-tests).
 

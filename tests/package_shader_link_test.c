@@ -474,6 +474,61 @@ static sh_package_source_link *open_cooked_link(cook_context *c,char *error)
     return sh_package_source_link_open(&scope,1,NULL,cooked_original,c,
         (sh_decl_registry_source){f,read_memory,f->registry,NULL},f->reflection,&native.source,error,512);
 }
+typedef struct frontier_fixture { fixture *source; int calls, reject; } frontier_fixture;
+static int frontier_parameter(void *context,const char *name,sh_decl_source source,int *kind,uint32_t *index,char *error,size_t capacity)
+{ return abi(((frontier_fixture *)context)->source,name,source,kind,index,error,capacity); }
+static int frontier_flag(void *context,const char *name,sh_decl_source source,uint64_t *mask,char *error,size_t capacity)
+{ return flag_abi(((frontier_fixture *)context)->source,name,source,mask,error,capacity); }
+static int queue_frontier(void *context,const char *name,sh_decl_source source,char *error,size_t capacity)
+{
+    frontier_fixture *f=context;f->calls++;
+    assert(source.length==strlen(declaration) && !memcmp(source.text,declaration,source.length));
+    if(f->reject && !strcmp(name,"third")) { snprintf(error,capacity,"incompatible original source");return 0; }
+    snprintf(error,capacity,"queued %s",name);return 1;
+}
+/* Missing programs form one preparation frontier. None is accepted until the
+ * exact cooked output exists; a later real failure must survive earlier queues. */
+static void preparation_frontier(void)
+{
+    fixture f;setup(&f,0);char error[512];frontier_fixture pending={&f};
+    remove_file(&f,"generated/renderprogs/fixture_pc.bin");
+    add(&f,"generated/decls/renderprog/second.decl","renderprog","second",declaration,strlen(declaration));
+    add(&f,"generated/decls/renderprog/third.decl","renderprog","third",declaration,strlen(declaration));
+    qsort(f.files,f.compiled.resource_count,sizeof(*f.files),order);
+    sh_package_source_shader shader={SH_PACKAGE_SHADER_OPENGL,&pending,frontier_parameter,frontier_flag,queue_frontier};
+    sh_package_source_link_native native={0};native.shader=&shader;
+    sh_decl_registry_source registry={&f,read_memory,f.registry,NULL};
+    const sh_package_compilation *scope=&f.compiled;sh_package_source_failure failure={0};
+    assert(!sh_package_source_link_open_attributed(&scope,1,NULL,original,&f,registry,f.reflection,
+        &native,NULL,&failure,error,sizeof(error)));
+    if(pending.calls!=3 || failure.kind!=SH_PACKAGE_SOURCE_FAILURE_ENVIRONMENT || !strstr(error,"queued fixture"))
+        fprintf(stderr,"frontier calls=%d kind=%d: %s\n",pending.calls,failure.kind,error);
+    assert(pending.calls==3 && failure.kind==SH_PACKAGE_SOURCE_FAILURE_ENVIRONMENT && strstr(error,"queued fixture"));
+    pending=(frontier_fixture){&f,0,1};
+    assert(!sh_package_source_link_open_attributed(&scope,1,NULL,original,&f,registry,f.reflection,
+        &native,NULL,&failure,error,sizeof(error)));
+    assert(pending.calls==3 && strstr(error,"incompatible original source"));
+    /* PREPARING owns no returned source, binary or decoded arrays. */
+    sh_package_source_reader *reader=sh_package_source_reader_open(&f.compiled,NULL,original,&f,
+        registry,f.reflection,error,sizeof(error));assert(reader);
+    assert(sh_package_source_reader_shader(reader,&shader));
+    unsigned char *decl=NULL,*binary=NULL;size_t dl=0,bl=0;sh_package_shader_program decoded={0};
+    assert(sh_package_source_shader_open(reader,"fixture",&decl,&dl,&binary,&bl,&decoded,error,sizeof(error))==SH_PACKAGE_SOURCE_SHADER_PREPARING);
+    assert(!decl && !binary && !dl && !bl && !decoded.reference_count);
+    f.read_failure=1;
+    assert(sh_package_source_shader_open(reader,"missing",&decl,&dl,&binary,&bl,&decoded,error,sizeof(error))==SH_PACKAGE_SOURCE_SHADER_ERROR);
+    assert(pending.calls==4);f.read_failure=0;sh_package_source_reader_close(reader);
+    /* A retry consumes complete bytes through the ordinary validation route. */
+    bytes cooked=program(0);
+    add(&f,"generated/renderprogs/fixture_pc.bin",NULL,NULL,cooked.data,cooked.length);
+    add(&f,"generated/renderprogs/second_pc.bin",NULL,NULL,cooked.data,cooked.length);
+    add(&f,"generated/renderprogs/third_pc.bin",NULL,NULL,cooked.data,cooked.length);
+    qsort(f.files,f.compiled.resource_count,sizeof(*f.files),order);
+    sh_package_source_link *link=open_link(&f,SH_PACKAGE_SHADER_OPENGL,error);
+    if(!link)fprintf(stderr,"frontier retry: %s\n",error);assert(link);
+    assert(sh_package_link_inputs_find(sh_package_source_link_inputs(link),0,"renderprog","third")!=SIZE_MAX);
+    sh_package_source_link_close(link);clear(&f);
+}
 static void source_only_opengl(int cold)
 {
     fixture f;setup(&f,1);char error[512];
@@ -552,4 +607,4 @@ static void native_contract(void)
     sh_package_native_assets_close(assets);clear(&f);
 }
 int main(void)
-{ complete_and_bind(SH_PACKAGE_SHADER_VULKAN);complete_and_bind(SH_PACKAGE_SHADER_OPENGL);include_fanout_snapmap_only();unshipped_program();reject_incomplete();native_contract();preparation_contract();shader_scope_contract();source_only_opengl(0);source_only_opengl(1);puts("package_shader_link_test: PASS");return 0; }
+{ complete_and_bind(SH_PACKAGE_SHADER_VULKAN);complete_and_bind(SH_PACKAGE_SHADER_OPENGL);include_fanout_snapmap_only();unshipped_program();reject_incomplete();native_contract();preparation_contract();shader_scope_contract();preparation_frontier();source_only_opengl(0);source_only_opengl(1);puts("package_shader_link_test: PASS");return 0; }
