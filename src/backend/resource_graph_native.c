@@ -156,7 +156,7 @@ int sh_resource_graph_native_cook_input(const char *path, unsigned char **body, 
     *body = NULL; *length = 0;
     if (!g_cook || !g_cook->original) return 0;
     __try {
-        status = g_cook->original(g_cook->original_context, sh_package_shader_input_path(path), body, length);
+        status = g_cook->original(g_cook->original_context, sh_native_virtual_path(path), body, length);
         if ((status == 1 || status == 2) && *body && *length <= 16u * 1024u * 1024u) return 1;
     } __except (EXCEPTION_EXECUTE_HANDLER) { status = -1; }
     free(*body); *body = NULL; *length = 0;

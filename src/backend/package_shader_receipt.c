@@ -175,7 +175,7 @@ void sh_package_shader_cook_begin(sh_package_shader_receipt_frame *frame,
 }
 int sh_package_shader_receipt_wants(const char *path)
 {
-    path = sh_package_shader_input_path(path);
+    path = sh_native_virtual_path(path);
     if (!path || !*path) return 0;
     for (sh_package_shader_receipt_frame *frame = sr_current; frame; frame = frame->parent) {
         sr_pending *pending = frame->pending;
@@ -252,7 +252,7 @@ static void sr_bytes(sr_pending *pending, const char *path, size_t total,
 void sh_package_shader_receipt_bytes(const char *path, size_t total,
     size_t offset, const void *body, size_t length)
 {
-    path = sh_package_shader_input_path(path);
+    path = sh_native_virtual_path(path);
     sr_pending *last = NULL;
     for (sh_package_shader_receipt_frame *frame = sr_current; frame; frame = frame->parent) {
         sr_pending *pending = frame->pending;

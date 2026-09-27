@@ -1229,6 +1229,14 @@ The declaration server registers new identities and refreshes existing shadows;
 the installed-resource bridge supplies data already present in the game. A
 package can therefore refer to installed assets without redistributing them.
 
+Native virtual-filesystem paths are catalog-relative identities, including
+opens written with a leading root slash by DOOM's shader preprocessor. The
+dependency graph, map usage walk and shader receipts normalize that spelling
+consistently, so a successful native read cannot later prevent a map save or
+split one resource's producer and consumer edges. Authored package paths retain
+their separate strict member validation; declaration names are not filesystem
+paths and do not receive this normalization.
+
 Declaration classification reads source records and the live registry without
 loading content. Native `DeclFind` can materialize archive resources even with
 `makeDefault=0`; using it after the resident snapshot creates consumers that miss

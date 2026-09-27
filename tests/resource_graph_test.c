@@ -368,8 +368,54 @@ static void barrier_checks(void)
     sh_resource_graph_impact_free(&impact);
     sh_resource_graph_test_reset();
 }
+static int rooted_file_visit(void *context, const char *parent_type, const char *parent_name,
+    const char *type, const char *name)
+{
+    unsigned *seen = context;
+    (void)parent_type; (void)parent_name;
+    if (!*type) {
+        CHECK(!strcmp(name, "decls/renderprogs/global.inc")); ++*seen;
+    }
+    return 1;
+}
+static void rooted_file_checks(void)
+{
+    sh_resource_graph_frame frame;
+    sh_resource_graph_impact impact = {0};
+    const char *input[] = {"\\DECLS\\renderprogs\\GLOBAL.inc"};
+    size_t nodes, complete, edges;
+    unsigned seen = 0;
+    sh_resource_graph_test_reset();
+    sh_resource_graph_begin(&frame, "material", "stock/cap");
+    sh_resource_graph_file("/decls/renderprogs/global.inc");
+    sh_resource_graph_file(input[0]);
+    sh_resource_graph_file("decls/renderprogs/global.inc");
+    sh_resource_graph_end(&frame, 1);
+    CHECK(sh_resource_graph_walk_status("material", "stock/cap", rooted_file_visit, &seen) ==
+        SH_RESOURCE_GRAPH_COMPLETE && seen == 1);
+    sh_resource_graph_counts(&nodes, &complete, &edges);
+    CHECK(nodes == 2 && complete == 2 && edges == 1);
+    CHECK(sh_resource_graph_walk_status("", "/decls/renderprogs/global.inc", rooted_file_visit, &seen) ==
+        SH_RESOURCE_GRAPH_COMPLETE && seen == 2);
+    CHECK(sh_resource_graph_producer_inputs("shader compile", "/generated/program.bin", input, 1));
+    CHECK(sh_resource_graph_affected(input, 1, &impact) == SH_RESOURCE_GRAPH_COMPLETE);
+    CHECK(impact.count == 3 && impact_has(&impact, "material", "stock/cap") &&
+        impact_has(&impact, "", "generated/program.bin"));
+    sh_resource_graph_impact_free(&impact);
+    CHECK(sh_resource_graph_producer_inputs("shader compile", "generated/program.bin", NULL, 0));
+    CHECK(sh_resource_graph_affected(input, 1, &impact) == SH_RESOURCE_GRAPH_COMPLETE);
+    CHECK(impact.count == 2 && !impact_has(&impact, "", "generated/program.bin"));
+    sh_resource_graph_impact_free(&impact);
+    /* Only filesystem identities use the virtual-root rule. */
+    sh_resource_graph_begin(&frame, "material", "/named");
+    sh_resource_graph_end(&frame, 1);
+    CHECK(sh_resource_graph_walk_status("material", "named", rooted_file_visit, &seen) ==
+        SH_RESOURCE_GRAPH_INCOMPLETE);
+    sh_resource_graph_test_reset();
+}
 int main(void)
 {
+    rooted_file_checks();
     {
         sh_resource_graph_frame source, native, fallback;
         sh_resource_graph_begin(&source, "entitydef", "static_guard");

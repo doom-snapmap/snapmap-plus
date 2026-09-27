@@ -4,6 +4,7 @@
 #include "package_usage.h"
 #include "resource_types.h"
 #include "resource_graph.h"
+#include "native_filename.h"
 
 typedef struct pu_visit {
     sh_package_reference_visitor visitor;
@@ -179,6 +180,7 @@ static int pu_collect(pu_owners *used, const char *type, const char *name)
     char *path;
     size_t count, i, a, b, capacity;
     if (!*type) {
+        name = sh_native_virtual_path(name);
         resource = sh_package_compilation_find(used->compiled, name);
         return pu_resource(used, resource, resource ? resource->engine_path : name);
     }

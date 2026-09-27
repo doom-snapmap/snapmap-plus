@@ -4,6 +4,15 @@
 #include <stddef.h>
 #include <string.h>
 
+/* Native virtual-filesystem opens may start at its root, including shader
+ * includes. Return a borrowed catalog-relative spelling, not a host filesystem
+ * path. Authored package members still use their separate strict validation. */
+static inline const char *sh_native_virtual_path(const char *path)
+{
+    if (path) while (*path == '/' || *path == '\\') path++;
+    return path;
+}
+
 /* Inputs are already normalized for their native consumer. Unlike idResource's
  * generated-path routine, this does not sanitize punctuation, preserve options
  * before replacing an extension, or bypass the prefix for a cooked extension.

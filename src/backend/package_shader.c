@@ -122,7 +122,7 @@ static int ps_reference(ps_reader *r, sh_package_shader_reference_kind kind, con
     if (!name) return ps_fail(r, SH_PACKAGE_SHADER_ERROR, "shader dependency allocation failed");
     memcpy(name, r->body + offset + 4, length); name[length] = 0;
     if (kind == SH_PACKAGE_SHADER_INCLUDE) {
-        const char *relative = sh_package_shader_input_path(name);
+        const char *relative = sh_native_virtual_path(name);
         memmove(name, relative, strlen(relative) + 1);
         for (char *p = name; *p; p++) {
             if (*p == '\\') *p = '/';

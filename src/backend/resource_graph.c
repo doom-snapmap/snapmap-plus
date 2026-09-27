@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "resource_graph.h"
+#include "native_filename.h"
 
 typedef struct rg_phase {
     size_t *children, count;
@@ -45,6 +46,7 @@ static uint64_t rg_hash_key(const char *type, const char *name)
 {
     uint64_t hash = 14695981039346656037ULL;
     unsigned i;
+    if (!*type) name = sh_native_virtual_path(name);
     for (i = 0; i < 2; i++) {
         const char *s = i ? name : type;
         do { hash = (hash ^ (unsigned char)rg_fold(*s)) * 1099511628211ULL; } while (*s++);
@@ -77,6 +79,7 @@ static int rg_rehash(size_t capacity)
 static size_t rg_find(const char *type, const char *name, uint64_t hash)
 {
     size_t slot;
+    if (!*type) name = sh_native_virtual_path(name);
     if (!g_hash_capacity) return SIZE_MAX;
     slot = (size_t)hash & (g_hash_capacity - 1);
     while (g_hash[slot]) {
@@ -91,7 +94,9 @@ static size_t rg_intern(const char *type, const char *name)
     uint64_t hash;
     size_t index, slot;
     rg_node node = {0};
-    if (!type || !name || !*name) return SIZE_MAX;
+    if (!type || !name) return SIZE_MAX;
+    if (!*type) name = sh_native_virtual_path(name);
+    if (!*name) return SIZE_MAX;
     hash = rg_hash_key(type, name);
     index = rg_find(type, name, hash);
     if (index != SIZE_MAX) return index;

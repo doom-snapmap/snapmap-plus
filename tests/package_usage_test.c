@@ -165,6 +165,8 @@ static void resource_path_checks(sh_package_compilation *compiled)
     entity("demons/cyber", "model", "demons/cyber");
     sh_resource_graph_begin(&frame, "model", "demons/cyber");
     sh_resource_graph_file("GENERATED\\MODELS\\shared.bmodel");
+    sh_resource_graph_file("/GENERATED/MODELS/shared.bmodel");
+    sh_resource_graph_file("\\generated\\models\\shared.bmodel");
     sh_resource_graph_file("sound/not-delivered.wem");
     sh_resource_graph_reference("snapeditorentitydef", "palette");
     sh_resource_graph_end(&frame, 1);
@@ -175,6 +177,7 @@ static void resource_path_checks(sh_package_compilation *compiled)
     CHECK(has_path(&paths, "generated/models/shared.bmodel") && has_path(&paths, "sound/not-delivered.wem"));
     CHECK(!has_path(&paths, "image/editor-preview.bimage") && !has_path(&paths, "generated/decls/entitydef/replaced.decl"));
     CHECK(sh_package_references_add(&instance, "", "GENERATED/MODELS/shared.bmodel"));
+    CHECK(sh_package_references_add(&instance, "", "/generated/models/shared.bmodel"));
     instance.incomplete = 1;
     CHECK(sh_package_map_resources(compiled, NULL, cyber, strlen(cyber), &instance, &paths));
     CHECK(paths.incomplete && paths.count == 3); /* Canonical duplicates collapse. */

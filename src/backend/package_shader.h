@@ -3,15 +3,7 @@
 #define SH_PACKAGE_SHADER_H
 #include <stddef.h>
 #include <stdint.h>
-
-/* Native shader include opens may spell a virtual-root path with a leading
- * slash. Return its borrowed catalog-relative spelling; this does not resolve
- * host filesystem paths or change authored package path validation. */
-static inline const char *sh_package_shader_input_path(const char *path)
-{
-    if (path) while (*path == '/' || *path == '\\') path++;
-    return path;
-}
+#include "native_filename.h"
 
 typedef enum sh_package_shader_renderer {
     SH_PACKAGE_SHADER_OPENGL, SH_PACKAGE_SHADER_VULKAN
