@@ -3197,16 +3197,31 @@ static int ds_shader_recover(void *context, const sh_package_shader_preparation 
 static int ds_shader_finish(ds_shader_preparation *pass, int accepted, char *error, size_t capacity)
 {
     int restored = 1;
+    char cleanup[512] = "";
     if (pass->state) {
-        restored = sh_resource_graph_native_shader_state_end(pass->state, accepted, error, capacity);
-        if (restored < 0) return -1;
+        restored = sh_resource_graph_native_shader_state_end(pass->state, accepted, cleanup, sizeof(cleanup));
+        if (restored < 0) goto done;
         pass->state = NULL;
     }
     if (pass->resident) {
         sh_resource_resident *resident = pass->resident; pass->resident = NULL;
+        char resident_error[512] = "";
         /* Even a rejected source read has been restored above. An empty
          * preparation pass must never enqueue fixed-slot reconstruction. */
-        if (!sh_resource_resident_end(resident, 1, error, capacity)) restored = -1;
+        if (!sh_resource_resident_end(resident, 1, resident_error, sizeof(resident_error))) {
+            restored = -1;
+            size_t used = strlen(cleanup);
+            snprintf(cleanup + used, sizeof(cleanup) - used, "%s%s", used ? "; " : "",
+                *resident_error ? resident_error : "native shader resident cleanup failed");
+        }
+    }
+done:
+    /* Successful cleanup may clear its output buffer. Keep the construction
+     * failure, and append a cleanup failure without losing either cause. */
+    if (restored <= 0 && error && capacity) {
+        size_t used = strnlen(error, capacity);
+        if (used < capacity) snprintf(error + used, capacity - used, "%s%s", used ? "; " : "",
+            *cleanup ? cleanup : "native shader state cleanup failed");
     }
     return restored;
 }

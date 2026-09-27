@@ -96,6 +96,7 @@ int sh_resource_resident_drain_additions(sh_resource_resident *pass, void *const
 int sh_resource_resident_end(sh_resource_resident *pass, int succeeded, char *error, size_t capacity)
 {
     (void)pass; (void)error; (void)capacity; ++g_resident_end_calls;
+    if (g_shader_fixture_active && error && capacity) *error = 0;
     shader_event('X'); g_shader_resident_live = 0; return succeeded;
 }
 #include "decl_server_path.h"
@@ -491,7 +492,9 @@ int sh_resource_graph_native_prepare_shader(void *resource, const char *family,
     CHECK(g_shader_fixture_active && g_shader_scope_live && admitted(context));
     shader_event('P');
     if (g_shader_mode == 3) RaiseException(0xe0504453, 0, 0, NULL);
-    if (g_shader_mode == 1) return 0;
+    if (g_shader_mode == 1 || g_shader_mode == 5) {
+        snprintf(error, capacity, "fixture shader source failed"); return 0;
+    }
     sh_package_shader_receipt_frame receipt;
     sh_package_shader_receipt_begin(&receipt, (uintptr_t)resource, family, name);
     sh_package_shader_receipt_retained(source, length);
@@ -3696,10 +3699,10 @@ static void test_shader_preparation_lifetime(void)
     *(uint32_t *)(g_shader_native.object + 0x20) = id;
     *(uint32_t *)(g_shader_native.object + 0x68) = 0x410;
     *(uint32_t *)(g_shader_native.object + 0x6c) = 1;
-    for (int mode = 0; mode < 5; mode++) {
+    for (int mode = 0; mode < 6; mode++) {
         int kind = 0; uint32_t index = 0;
         sh_decl_server_test_reset_install();
-        g_shader_fixture_active = 1; g_shader_mode = mode; g_shader_hold_end = mode == 4;
+        g_shader_fixture_active = 1; g_shader_mode = mode; g_shader_hold_end = mode >= 4;
         g_shader_restores = 0; g_shader_event_count = 0; g_shader_events[0] = 0;
         sh_package_shader_receipt_invalidate((uintptr_t)g_shader_native.object);
         sh_package_native_assets *assets = sh_package_native_assets_open("C:/shader-decl-server-fixture");
@@ -3713,17 +3716,23 @@ static void test_shader_preparation_lifetime(void)
         sh_package_shader_preparation *batch = sh_package_native_assets_shader_take(assets);
         CHECK(batch && sh_package_shader_preparation_count(batch) == 1);
         int result = sh_decl_server_test_prepare_shaders(batch, shader_find, error, sizeof(error));
-        CHECK(result == (mode == 0 ? 1 : mode == 4 ? -1 : 0));
-        CHECK(!strcmp(g_shader_events, mode == 4 ? "RBPE" : mode == 1 || mode == 3 ? "RBPTEX" : "RBPEX"));
-        CHECK(g_shader_restores == ((mode == 1 || mode == 3) ? 1 : 0));
+        CHECK(result == (mode == 0 ? 1 : mode >= 4 ? -1 : 0));
+        if (mode == 0) CHECK(!*error);
+        if (mode == 1) CHECK(strstr(error, "fixture shader source failed") && strstr(error, "prior provider recovered"));
+        if (mode == 2) CHECK(strstr(error, "native shader state cleanup failed"));
+        if (mode == 3) CHECK(strstr(error, "native shader construction raised exception"));
+        if (mode >= 4) CHECK(strstr(error, "fixture restoration remains owed"));
+        if (mode == 5) CHECK(strstr(error, "fixture shader source failed") && strstr(error, "prior provider recovered"));
+        CHECK(!strcmp(g_shader_events, mode == 5 ? "RBPTE" : mode == 4 ? "RBPE" : mode == 1 || mode == 3 ? "RBPTEX" : "RBPEX"));
+        CHECK(g_shader_restores == ((mode == 1 || mode == 3 || mode == 5) ? 1 : 0));
         sh_package_shader_preparation_free(batch); sh_package_native_assets_close(assets);
-        if (mode == 4) {
+        if (mode >= 4) {
             CHECK(g_shader_scope_live && g_shader_resident_live);
             /* Borrowed batch/stack is gone; the native state callback still
              * owns a valid context until final restoration and scope exit. */
             g_shader_hold_end = 0;
             CHECK(sh_decl_server_test_shader_recovery());
-            CHECK(!strcmp(g_shader_events, "RBPEEX"));
+            CHECK(!strcmp(g_shader_events, mode == 5 ? "RBPTEEX" : "RBPEEX"));
         }
         CHECK(!g_shader_scope_live && !g_shader_resident_live);
         g_shader_fixture_active = 0;
