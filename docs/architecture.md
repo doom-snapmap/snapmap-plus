@@ -30,6 +30,16 @@ Function signatures identify engine code. Generated anchors derive global
 addresses from code references. Vulkan and OpenGL share these portable resolution
 paths; field layouts still need explicit verification when porting.
 
+Native declaration construction separates source registration from object
+creation. Reference cycles containing inheritance reserve their missing native
+identities through the engine constructor and registration API before parsing.
+Pending loads can then resolve those identities without the cold loader's
+in-progress-parent failure. Inheritance descending from an initializing parent
+is copied again in parent-first order after source parsing, so late parent fields
+reach every child. Existing ready objects retain their caches; failed reservation
+precedes reconstruction of existing content. True inheritance cycles remain
+invalid, and no pending newly reserved object survives a failed admission.
+
 A pattern that matches more than once is not an identification. Where two
 functions share a body, the caller must confirm its target by something the
 pattern cannot carry: the rawmap branch answer follows the call its candidate

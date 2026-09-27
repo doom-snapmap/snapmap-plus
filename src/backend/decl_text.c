@@ -451,12 +451,18 @@ int sh_decl_text_order_by_references(sh_decl_reference_item *items, size_t count
             if (!component_indegree[i]) decl_heap_push(&ready, i);
         while (ready.count) {
             size_t selected = decl_heap_pop(&ready), emitted = 0, k;
+            int reserve = 0;
             decl_heap order = {member_slots, 0, items, NULL, parents};
+            for (k = member_offsets[selected]; k < member_offsets[selected + 1]; k++)
+                if (parents[members[k]]) reserve = 1;
             for (k = member_offsets[selected]; k < member_offsets[selected + 1]; k++)
                 if (!member_indegree[members[k]]) decl_heap_push(&order, members[k]);
             while (order.count) {
                 size_t member = decl_heap_pop(&order);
-                ordered[ordered_count++] = items[member];
+                indices[member] = ordered_count;
+                ordered[ordered_count] = items[member];
+                ordered[ordered_count].reserve_cycle = reserve;
+                ordered[ordered_count++].inherit_parent = 0;
                 emitted++;
                 for (k = inherit_offsets[member]; k < inherit_offsets[member + 1]; k++) {
                     size_t dependent = inherit_targets[k];
@@ -472,6 +478,8 @@ int sh_decl_text_order_by_references(sh_decl_reference_item *items, size_t count
         }
     }
     if (ordered_count != count) goto done;
+    for (i = 0; i < w.inherit_count; i++)
+        ordered[indices[w.inherits[i].to]].inherit_parent = indices[w.inherits[i].from] + 1;
 
     memcpy(items, ordered, count * sizeof(items[0]));
     if (out_edge_count) *out_edge_count = w.edge_count;

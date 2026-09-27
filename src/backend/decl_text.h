@@ -12,6 +12,11 @@ typedef struct sh_decl_reference_item {
     size_t text_length;
     void *value;
     const char *type;
+    /* Ordering outputs: reserve identities in a reference cycle containing
+     * inheritance before parsing. Parent is a one-based index in the final
+     * order, or zero when there is no uniquely resolved explicit parent. */
+    int reserve_cycle;
+    size_t inherit_parent;
 } sh_decl_reference_item;
 
 /* Return 1 when `text` is non-empty, contains no embedded NUL, and has balanced

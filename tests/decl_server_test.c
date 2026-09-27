@@ -3051,6 +3051,7 @@ static void test_empty_launch_and_runtime_results(void)
         {"IdStrCtor", pipeline_ctor}, {"IdStrDtor", pipeline_dtor},
         {"ResourceStaticPromote", lifecycle_promote}, {"CmdExecuteBuffer", lifecycle_noop},
         {"ResourceGenericLoad", rt_generic_load}, {"ResourceReconstruct", rt_reconstruct},
+        {"ResourceListAdd", lifecycle_noop},
         {"AddCommand", lifecycle_add_command},
         {"MemLocalGet", heap_get}, {"MemLocalPushHeap", heap_push},
         {"MemLocalPopHeap", heap_pop}
@@ -3825,6 +3826,147 @@ static void test_occurrence_admission(void)
     g_resident_filter = 0; g_boundary_resource_head = NULL;
     sh_decl_server_test_reset_install();
 }
+/* Model the independently verified native cold/pending load distinction.
+ * Two children can observe their parent's early fields through a pointer
+ * cycle. Final inheritance must also receive its late fields; suppressing an
+ * in-progress error alone would leave both children and a descendant wrong. */
+static const char *const cycle_names[] = {
+    "cycle/base", "cycle/edge", "cycle/child1", "cycle/child2", "cycle/grand"
+};
+static unsigned char cycle_objects[5][0x100];
+static int cycle_present[5], cycle_reads[5], cycle_constructed, cycle_faults;
+static int cycle_fail_create, cycle_fail_finish, cycle_first_read_constructed, cycle_late;
+static void *cycle_vtable[4], *cycle_manager;
+static int cycle_index(const char *name)
+{ for (int i=0;i<5;i++) if (!strcmp(name,cycle_names[i])) return i; return -1; }
+static void *cycle_type(void *registry,const char *name)
+{ (void)registry;(void)name;return &cycle_manager; }
+static void *cycle_peek(void *manager,const char *name,unsigned char make_default)
+{ (void)manager;(void)make_default;int i=cycle_index(name);return i>=0 && cycle_present[i] ? cycle_objects[i] : NULL; }
+static void *cycle_source(void *manager,const char *name)
+{ (void)manager;return cycle_index(name)>=0 ? (void *)1 : NULL; }
+static void *cycle_create(void *manager,const char *name)
+{
+    (void)manager;int i=cycle_index(name);CHECK(i>=0);
+    if(i==cycle_fail_create)return NULL;
+    unsigned char *o=cycle_objects[i];memset(o,0,0x100);
+    *(const char **)(o+8)=cycle_names[i];cycle_constructed++;return o;
+}
+static void cycle_add(void *manager,void *object)
+{
+    unsigned char *o=object;int i=cycle_index(*(const char **)(o+8));CHECK(i>=0 && !cycle_present[i]);
+    cycle_present[i]=1;*(void **)(o+0x10)=manager;*(unsigned *)(o+0x20)=(unsigned)i+1;
+}
+static void cycle_read(void *object);
+static void *cycle_find(void *manager,const char *name,unsigned char make_default)
+{
+    int i=cycle_index(name);if(i<0)return NULL;
+    unsigned char *o=cycle_objects[i];
+    if(!cycle_present[i]) {
+        if(!make_default || !cycle_create(manager,name))return NULL;
+        cycle_add(manager,o);o[0x2c]|=1;cycle_read(o);o[0x2c]&=(unsigned char)~1;
+    } else if(o[0x2c]&2) { o[0x2c]&=(unsigned char)~2;cycle_read(o); }
+    return o;
+}
+static void cycle_read(void *object)
+{
+    unsigned char *o=object;int i=cycle_index(*(const char **)(o+8));
+    if(cycle_first_read_constructed<0)cycle_first_read_constructed=cycle_constructed;
+    cycle_reads[i]++;
+    if(i==0) {
+        *(int *)(o+0x50)=17;
+        CHECK(cycle_find(&cycle_manager,cycle_names[1],1)!=NULL);
+        *(int *)(o+0x54)=cycle_late;
+    } else if(i==1) {
+        CHECK(cycle_find(&cycle_manager,cycle_names[2],1)!=NULL);
+        CHECK(cycle_find(&cycle_manager,cycle_names[3],1)!=NULL);
+    } else {
+        unsigned char *parent=cycle_find(&cycle_manager,cycle_names[i==4 ? 2 : 0],1);
+        CHECK(parent!=NULL);
+        if(parent[0x2c]&1) { cycle_faults++;o[0x2c]|=4;return; }
+        memcpy(o+0x50,parent+0x50,8);
+        if(cycle_fail_finish && i==2 && cycle_reads[i]>1)o[0x2c]|=4;
+    }
+}
+static void cycle_reconstruct(void *object)
+{
+    unsigned char *o=object;
+    CHECK(*(unsigned *)(o+0x28)!=4);memset(o+0x48,0,0x100-0x48);o[0x2c]=0;
+}
+static void test_native_cycle_construction(void)
+{
+    static const unsigned char base[]="{ edit = { pointer = \"cycle/edge\"; early = 17; late = 83; } }";
+    static const unsigned char edge[]="{ a = \"cycle/child1\"; b = \"cycle/child2\"; }";
+    static const unsigned char child[]="{ inherit = \"cycle/base\"; }";
+    static const unsigned char grand[]="{ inherit = \"cycle/child1\"; }";
+    const unsigned char *bodies[]={base,edge,child,child,grand};
+    sh_decl_reference_item order[5]={0};
+    for(int i=0;i<5;i++)order[i]=(sh_decl_reference_item){cycle_names[i],bodies[i],strlen((const char *)bodies[i]),(void *)(uintptr_t)i,"perks"};
+    size_t edges,cycles;
+    CHECK(sh_decl_text_order_by_references(order,5,&edges,&cycles));CHECK(cycles==4);
+    sh_decl_server_test_materialize_item items[5]={0};
+    for(int i=0;i<5;i++) {
+        items[i]=(sh_decl_server_test_materialize_item){"perks",order[i].name,order[i].name,
+            SH_DECL_SERVER_TEST_MISSING,order[i].text,order[i].text_length,0,0,order[i].reserve_cycle,order[i].inherit_parent};
+        CHECK(order[i].reserve_cycle==(strcmp(order[i].name,"cycle/grand")!=0));
+        CHECK(!order[i].inherit_parent || order[i].inherit_parent<=(size_t)i);
+    }
+    for(int mode=0;mode<3;mode++) {
+        memset(cycle_objects,0,sizeof(cycle_objects));memset(cycle_present,0,sizeof(cycle_present));
+        memset(cycle_reads,0,sizeof(cycle_reads));cycle_constructed=cycle_faults=0;cycle_first_read_constructed=-1;
+        cycle_fail_create=mode==1 ? 2 : -1;cycle_fail_finish=mode==2;cycle_late=83;
+        cycle_vtable[3]=cycle_create;cycle_manager=cycle_vtable;
+        sh_decl_server_test_reset_runtime_state();sh_decl_server_test_set_runtime(0);
+        sh_decl_server_test_set_resource_add(cycle_add);
+        sh_decl_server_test_set_reconstruct(cycle_reconstruct,cycle_peek);
+        sh_decl_server_test_set_generic_load(cycle_read);
+        int grand_index=-1;
+        if(mode==1) {
+            /* Reservation failure precedes any reconstruction of old content. */
+            cycle_add(&cycle_manager,cycle_create(&cycle_manager,cycle_names[4]));
+            *(unsigned *)(cycle_objects[4]+0x28)=4;
+            *(int *)(cycle_objects[4]+0x54)=301;
+            for(int i=0;i<5;i++)if(!strcmp(items[i].name,cycle_names[4]))grand_index=i;
+            CHECK(grand_index>=0);items[grand_index].outcome=SH_DECL_SERVER_TEST_SHADOWED;
+            sh_decl_server_test_set_runtime(1);
+        }
+        int made=-1;
+        int ok=sh_decl_server_test_materialize_missing_sedefs(items,5,(void *)1,
+            cycle_type,cycle_source,cycle_find,&made);
+        CHECK(ok==(mode==0));CHECK(cycle_faults==0);
+        for(int i=0;i<5;i++)if(cycle_present[i])CHECK(!(cycle_objects[i][0x2c]&2));
+        if(mode==1) {
+            CHECK(cycle_first_read_constructed==-1);CHECK(cycle_objects[0][0x2c]&4);
+            CHECK(*(int *)(cycle_objects[4]+0x54)==301 && cycle_objects[4][0x2c]==0);
+            items[grand_index].outcome=SH_DECL_SERVER_TEST_MISSING;
+            sh_decl_server_test_set_runtime(0);cycle_fail_create=-1;
+            CHECK(sh_decl_server_test_materialize_missing_sedefs(items,5,(void *)1,
+                cycle_type,cycle_source,cycle_find,&made));
+            CHECK(cycle_constructed==5 && cycle_faults==0);
+            for(int i=2;i<5;i++)CHECK(*(int *)(cycle_objects[i]+0x54)==83);
+            continue;
+        }
+        CHECK(cycle_first_read_constructed==4);
+        if(mode==2)continue;
+        CHECK(made==5 && cycle_constructed==5);
+        for(int i=2;i<5;i++) { CHECK(*(int *)(cycle_objects[i]+0x50)==17);CHECK(*(int *)(cycle_objects[i]+0x54)==83); }
+        int reads=0;for(int i=0;i<5;i++)reads+=cycle_reads[i];
+        CHECK(sh_decl_server_test_materialize_missing_sedefs(items,5,(void *)1,cycle_type,cycle_source,cycle_find,&made));
+        CHECK(made==0 && cycle_constructed==5);
+        for(int i=0;i<5;i++)reads-=cycle_reads[i];CHECK(reads==0);
+        /* The same obligation applies to a cycle refreshed in place. */
+        for(int i=0;i<5;i++)items[i].outcome=SH_DECL_SERVER_TEST_SHADOWED;
+        cycle_late=97;sh_decl_server_test_set_runtime(1);
+        CHECK(sh_decl_server_test_materialize_missing_sedefs(items,5,(void *)1,cycle_type,cycle_source,cycle_find,&made));
+        CHECK(made==0 && cycle_constructed==5 && cycle_faults==0);
+        for(int i=2;i<5;i++)CHECK(*(int *)(cycle_objects[i]+0x54)==97);
+        CHECK(sh_decl_server_test_clear_stray_pending()==0);
+        for(int i=0;i<5;i++)items[i].outcome=SH_DECL_SERVER_TEST_MISSING;
+        sh_decl_server_test_set_runtime(0);
+    }
+    sh_decl_server_test_reset_runtime_state();sh_decl_server_test_set_reconstruct(NULL,NULL);
+}
+
 int main(void)
 {
     test_native_idstr_boundary();
@@ -3866,6 +4008,7 @@ int main(void)
     test_shader_preparation_lifetime();
     test_occurrence_admission();
     test_defaulted_identity_reparse();
+    test_native_cycle_construction();
     if (g_failed) {
         fprintf(stderr, "%d decl-server test(s) failed\n", g_failed);
         return 1;

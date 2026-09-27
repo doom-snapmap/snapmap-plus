@@ -609,6 +609,14 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "C6 81 ?? ?? 02 00 00 48 8B 0D ?? ?? ?? ?? 48 8B 01 C7 44 24 30 FF FF FF FF "
       "BF 80 00 00 00 89 7C 24 28 C6 44 24 20 01 44 8D 4F A7 41 B8 00 02 00 00 48 8D 15",
       0xE18440u },
+    { "ResourceListAdd", /* void(manager, resource). Native identity registration,
+                           * also used by static preallocation before source reads.
+                           * VK 0x1800700 / GL 0x17f3050, independently verified. */
+      "40 57 48 83 EC 40 48 C7 44 24 20 FE FF FF FF 48 89 5C 24 50 "
+      "48 89 6C 24 58 48 89 74 24 60 48 8B FA 48 8B D9 E8 ?? ?? ?? ?? "
+      "48 8B E8 48 89 44 24 28 B2 01 48 8B C8 E8 ?? ?? ?? ?? "
+      "C6 44 24 30 01 83 7F 20 00 74 0D 48 8D 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? CC",
+      0x1800700u },
     { "ResourceGenericLoad", /* void(idResource*). Read source and run native post-parse.
                              * Reconstruction belongs to its fallback path, not every load.
                             * DeclFind normally reaches this through the pending-load path;

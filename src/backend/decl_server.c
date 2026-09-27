@@ -130,6 +130,9 @@ typedef void *(*decl_find_fn)(void *type_manager, const char *logical_name,
 typedef int (*decl_palette_refresh_fn)(void);
 typedef void (*resource_promote_static_fn)(void);
 typedef void (*resource_generic_load_fn)(void *decl);
+typedef void (*resource_list_add_fn)(void *manager, void *decl);
+typedef void *(*resource_create_fn)(void *manager, const char *name);
+static resource_list_add_fn g_resource_add;
 static resource_generic_load_fn g_reconstruct;
 static int g_boot_refresh;
 #ifdef SH_DECL_SERVER_TESTING
@@ -150,6 +153,8 @@ typedef struct ds_candidate {
     int outcome;
     int shadow_kind;
     int native_original;
+    int reserve_cycle, reserved, initializing, finish_inherit;
+    size_t inherit_parent;
 } ds_candidate;
 
 enum {
@@ -983,6 +988,8 @@ static int ds_capture_snapshot_locked(const sh_package_compilation *compiled)
         for (i = 0; i < (size_t)g_candidate_count; i++) {
             size_t source_index = (size_t)(uintptr_t)references[i].value - 1u;
             dependency_order[i] = g_candidates[source_index];
+            dependency_order[i].reserve_cycle = references[i].reserve_cycle;
+            dependency_order[i].inherit_parent = references[i].inherit_parent;
         }
         memcpy(g_candidates, dependency_order,
                (size_t)g_candidate_count * sizeof(g_candidates[0]));
@@ -1514,13 +1521,15 @@ static int ds_materialize_failure(int index, const char *type,
  * in place and parse it from its source, as a runtime refresh rebuilds a
  * defaulted identity. 1 when nothing faulted (the caller still validates). */
 static int ds_reparse_defaulted(ds_materialize_context *context, void *type_manager,
-                                const ds_candidate *candidate, void **decl)
+                                const ds_candidate *candidate, void **decl, int complete_inherit)
 {
     unsigned char *state;
     __try {
         state = (unsigned char *)*decl + DS_DECL_STATE_OFFSET;
-        if ((*state & (DS_DECL_IN_PROGRESS | DS_DECL_DEFAULTED)) != DS_DECL_DEFAULTED || !g_reconstruct)
+        if (!complete_inherit &&
+            ((*state & (DS_DECL_IN_PROGRESS | DS_DECL_DEFAULTED)) != DS_DECL_DEFAULTED || !g_reconstruct))
             return 1;
+        if ((*state & DS_DECL_IN_PROGRESS) || !g_reconstruct) return 0;
         unsigned int *level = (unsigned int *)((unsigned char *)*decl + DS_RES_LEVEL_OFF), kept = *level;
         /* The native destructor runs with static lifetime released, as in
          * the runtime reconstruction; the lifetime is restored even on a
@@ -1544,7 +1553,8 @@ static int ds_reparse_defaulted(ds_materialize_context *context, void *type_mana
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return 0;
     }
-    ds_log("REPARSED", candidate->source,
+    ds_log("REPARSED", candidate->source, complete_inherit ?
+           "inheritance copied again after its cyclic parent finished source parsing" :
            "an identity named before its dependencies existed had completed with its default; rebuilt and parsed from its source");
     return 1;
 }
@@ -1581,7 +1591,7 @@ static int ds_materialize_identity(ds_materialize_context *context, int index)
         reason = "engine exception during identity materialization";
     }
 
-    if (!fault && !reason && decl && !made_default && !ds_reparse_defaulted(context, type_manager, candidate, &decl)) {
+    if (!fault && !reason && decl && !made_default && !ds_reparse_defaulted(context, type_manager, candidate, &decl, 0)) {
         fault = 1;
         reason = "engine exception while re-parsing a defaulted identity";
     }
@@ -1641,6 +1651,103 @@ static void *ds_peek_decl(void *manager, const char *name)
         if (existing && !_stricmp(existing, name)) return entry;
     }
     return NULL;
+}
+
+/* The engine preallocates code-resource identities before reading their
+ * sources. Use that same constructor/Add/pending-load route for mixed
+ * reference/inheritance cycles. Cold make-default marks a parent in progress
+ * and raises an engine error when a recursive pointer reaches its child.
+ * Existing objects are never reconstructed by reservation. */
+static int ds_plan_inheritance_completion(void)
+{
+    for (int i = 0; i < g_candidate_count; i++) {
+        ds_candidate *candidate = &g_candidates[i];
+        if (!candidate->inherit_parent) continue;
+        if (candidate->inherit_parent > (size_t)i)
+            return ds_materialize_failure(i, candidate->type, candidate->name,
+                "inheritance construction plan is not parent-first");
+        ds_candidate *parent = &g_candidates[candidate->inherit_parent - 1];
+        candidate->finish_inherit = parent->initializing || parent->finish_inherit;
+    }
+    return 1;
+}
+static int ds_reserve_cycles(ds_materialize_context *context)
+{
+    for (int i = 0; i < g_candidate_count; i++) {
+        ds_candidate *candidate = &g_candidates[i];
+        void *manager = NULL, *decl = NULL;
+        int registered = 0;
+        if (!candidate->reserve_cycle || candidate->outcome != DS_CANDIDATE_MISSING) continue;
+        __try {
+            manager = context->type_by_name(context->registry, candidate->type);
+            if (!manager) __leave;
+            unsigned char *existing = ds_peek_decl(manager, candidate->name);
+            if (existing) {
+                if (existing[DS_DECL_STATE_OFFSET] & DS_DECL_IN_PROGRESS) __leave;
+                candidate->initializing = (existing[DS_DECL_STATE_OFFSET] &
+                    (DS_DECL_PENDING_LOAD | DS_DECL_DEFAULTED)) != 0;
+                continue;
+            }
+            if (!g_resource_add) __leave;
+            resource_create_fn create = *(resource_create_fn *)(*(unsigned char **)manager + 0x18);
+            if (!create || !(decl = create(manager, candidate->name))) __leave;
+            g_resource_add(manager, decl);
+            registered = ds_peek_decl(manager, candidate->name) == decl;
+            if (!registered) __leave;
+            candidate->reserved = 1;
+            candidate->initializing = 1;
+            *(unsigned int *)((unsigned char *)decl + DS_RES_LEVEL_OFF) = 4u;
+            unsigned char *state = (unsigned char *)decl + DS_DECL_STATE_OFFSET;
+            *state = (unsigned char)(*state | DS_DECL_PENDING_LOAD);
+        } __except (EXCEPTION_EXECUTE_HANDLER) { registered = 0; }
+        if (!registered) {
+            /* A constructor that never entered a manager has no consumers. */
+            if (decl && !candidate->reserved) __try {
+                if (!*(void **)((unsigned char *)decl + 0x10))
+                    (*(void (**)(void *, unsigned int))*(void ***)decl)(decl, 1u);
+            } __except (EXCEPTION_EXECUTE_HANDLER) { /* Preserve the original failure. */ }
+            return ds_materialize_failure(i, candidate->type, candidate->name,
+                "native cyclic identity reservation failed");
+        }
+        if (context->materialized) (*context->materialized)++;
+    }
+    /* A recursive pending read can copy a parent before its last fields have
+     * been parsed. Re-copy only inheritance descending from newly reserved
+     * objects, in the already-proven parent-first order, once all are ready. */
+    return ds_plan_inheritance_completion();
+}
+
+static int ds_complete_inheritance(ds_materialize_context *context)
+{
+    for (int i = 0; i < g_candidate_count; i++) {
+        ds_candidate *candidate = &g_candidates[i];
+        if (!candidate->finish_inherit ||
+            (candidate->outcome != DS_CANDIDATE_MISSING && candidate->outcome != DS_CANDIDATE_SHADOWED)) continue;
+        int ok = 0;
+        __try {
+            void *manager = context->type_by_name(context->registry, candidate->type);
+            void *decl = manager ? ds_peek_decl(manager, candidate->name) : NULL;
+            ok = decl && ds_reparse_defaulted(context, manager, candidate, &decl, 1) &&
+                ds_candidate_usable(candidate, decl, NULL);
+        } __except (EXCEPTION_EXECUTE_HANDLER) { ok = 0; }
+        if (!ok) return ds_materialize_failure(i, candidate->type, candidate->name,
+            "native inheritance completion failed");
+    }
+    return 1;
+}
+
+/* Failed admission must not leave an unparsed staged object looking ready or
+ * allow its pending read to fire later against the restored provider. A later
+ * valid activation uses the ordinary defaulted-object reconstruction path. */
+static void ds_cancel_reservations(ds_materialize_context *context)
+{
+    for (int i = 0; i < g_candidate_count; i++) if (g_candidates[i].reserved) __try {
+        ds_candidate *candidate = &g_candidates[i];
+        void *manager = context->type_by_name(context->registry, candidate->type);
+        unsigned char *decl = manager ? ds_peek_decl(manager, candidate->name) : NULL;
+        if (decl && (decl[DS_DECL_STATE_OFFSET] & DS_DECL_PENDING_LOAD))
+            decl[DS_DECL_STATE_OFFSET] = (unsigned char)((decl[DS_DECL_STATE_OFFSET] & ~DS_DECL_PENDING_LOAD) | DS_DECL_DEFAULTED);
+    } __except (EXCEPTION_EXECUTE_HANDLER) { InterlockedIncrement(&g_rearm_drain_faults); }
 }
 
 /* Collect first, reconstruct second, then mark the complete set. No parser
@@ -2026,9 +2133,6 @@ static int ds_materialize_missing_sedefs(void *registry,
     /* A runtime pass refreshes stale pre-existing decls with the engine's own pending-load
      * mechanism; every mark must exist before the first drain (see ds_runtime_premark). */
     refresh = g_boot_refresh || InterlockedCompareExchange(&g_rearm_is_runtime, 0, 0);
-    if (refresh)
-        ds_runtime_premark(&context);
-    if (refresh && InterlockedCompareExchange(&g_rearm_drain_faults, 0, 0)) return 0;
 
     for (i = 0; i < g_candidate_count; i++) {
         ds_candidate *candidate = &g_candidates[i];
@@ -2049,25 +2153,41 @@ static int ds_materialize_missing_sedefs(void *registry,
      * failure is reported, so a rejected new material never strands an
      * unrelated resource in its empty constructor state; after a failure or
      * drain fault no further identity is materialized. */
+    if (!ds_reserve_cycles(&context)) { ds_cancel_reservations(&context); return 0; }
+    if (refresh) ds_runtime_premark(&context);
+    if (refresh && InterlockedCompareExchange(&g_rearm_drain_faults, 0, 0)) {
+        ds_cancel_reservations(&context); return 0;
+    }
+    if (refresh) {
+        for (i = 0; i < g_rt_mark_count; i++) {
+            ds_candidate *candidate = &g_candidates[g_rt_marks[i].candidate];
+            if (candidate->reserve_cycle) candidate->initializing = 1;
+        }
+        /* Ordering was checked before reconstruction; only initialization
+         * state changed while collecting the actual refresh set. */
+        ds_plan_inheritance_completion();
+    }
     if (refresh) ds_runtime_promote_marks();
     for (i = 0; i < g_candidate_count; i++) {
         ds_candidate *candidate = &g_candidates[i];
         for (; refresh && mark < g_rt_mark_count && g_rt_marks[mark].candidate == i; mark++)
             ds_runtime_reload_mark(&context, mark);
         if (failed || candidate->outcome != DS_CANDIDATE_MISSING ||
-            _stricmp(candidate->type, "snapEditorEntityDef") == 0)
+            (_stricmp(candidate->type, "snapEditorEntityDef") == 0 &&
+             !candidate->reserved && !candidate->finish_inherit))
             continue;
         if (refresh && InterlockedCompareExchange(&g_rearm_drain_faults, 0, 0)) { failed = 1; continue; }
         if (!ds_materialize_identity(&context, i)) failed = 1;
     }
     for (; refresh && mark < g_rt_mark_count; mark++) ds_runtime_reload_mark(&context, mark);
-    if (failed || (refresh && InterlockedCompareExchange(&g_rearm_drain_faults, 0, 0))) return 0;
+    if (failed || (refresh && InterlockedCompareExchange(&g_rearm_drain_faults, 0, 0)) ||
+        !ds_complete_inheritance(&context)) { ds_cancel_reservations(&context); return 0; }
     for (i = 0; i < g_candidate_count; i++) {
         ds_candidate *candidate = &g_candidates[i];
         if (candidate->outcome != DS_CANDIDATE_MISSING ||
             _stricmp(candidate->type, "snapEditorEntityDef") != 0)
             continue;
-        if (!ds_materialize_root(&context, i)) return 0;
+        if (!ds_materialize_root(&context, i)) { ds_cancel_reservations(&context); return 0; }
     }
     return !(g_boot_refresh || InterlockedCompareExchange(&g_rearm_is_runtime, 0, 0)) ||
            InterlockedCompareExchange(&g_rearm_drain_faults, 0, 0) == 0;
@@ -2234,6 +2354,8 @@ void sh_decl_server_test_set_reconstruct(sh_decl_server_test_generic_load_fn fn,
     g_reconstruct = (resource_generic_load_fn)fn;
     g_test_peek = (decl_find_fn)peek;
 }
+void sh_decl_server_test_set_resource_add(void (*fn)(void *manager, void *decl))
+{ g_resource_add = fn; }
 
 void sh_decl_server_test_reset_runtime_state(void)
 {
@@ -2242,6 +2364,7 @@ void sh_decl_server_test_reset_runtime_state(void)
     g_rt_marks = NULL;
     g_test_fail_mark_allocation = 0;
     g_generic_load = NULL;
+    g_resource_add = NULL;
     memset(&g_runtime_heap, 0, sizeof(g_runtime_heap));
     InterlockedExchange(&g_rearm_touched_promoted, 0);
     InterlockedExchange(&g_rearm_marked_pending, 0);
@@ -2307,6 +2430,8 @@ int sh_decl_server_test_materialize_missing_sedefs(
             test_candidates[i].body = (char *)items[i].body;
             test_candidates[i].body_length = items[i].body_length;
             test_candidates[i].native_original = items[i].native_original;
+            test_candidates[i].reserve_cycle = items[i].reserve_cycle;
+            test_candidates[i].inherit_parent = items[i].inherit_parent;
         }
     }
     g_candidates = test_candidates;
@@ -2364,6 +2489,8 @@ int sh_decl_server_test_scan_and_materialize_missing(
             test_candidates[i].body = (char *)items[i].body;
             test_candidates[i].body_length = items[i].body_length;
             test_candidates[i].native_original = items[i].native_original;
+            test_candidates[i].reserve_cycle = items[i].reserve_cycle;
+            test_candidates[i].inherit_parent = items[i].inherit_parent;
         }
     }
     g_candidates = test_candidates;
@@ -3876,7 +4003,7 @@ int sh_decl_server_install(const sig_result *results, size_t count,
     uintptr_t idstr_dtor;
     uintptr_t boot_promote;
     uintptr_t execute_commands;
-    uintptr_t generic_load, reconstruct;
+    uintptr_t generic_load, reconstruct, resource_add;
     int command_registered = 0;
     if (g_boot_promotion_original) {
         if (hook_is_installed((void *)g_boot_promotion_original))
@@ -3924,13 +4051,14 @@ int sh_decl_server_install(const sig_result *results, size_t count,
     /* Require a clean generic-load signature for the runtime fallback. */
     generic_load = ds_clean_addr(results, count, "ResourceGenericLoad");
     reconstruct = ds_clean_addr(results, count, "ResourceReconstruct");
+    resource_add = ds_clean_addr(results, count, "ResourceListAdd");
     if (!anchor || anchor->status != SIG_OK || !type_method || !register_file || !find_decl ||
         !source_find || source_find->status != SIG_OK || !source_find->addr ||
         type_method->status != SIG_OK || register_file->status != SIG_OK ||
         find_decl->status != SIG_OK || !type_method->addr ||
         !register_file->addr || !find_decl->addr ||
         !idstr_ctor || !idstr_dtor || !boot_promote || !execute_commands ||
-        !generic_load || !reconstruct || !add_command || !cmdsys || !module_base ||
+        !generic_load || !reconstruct || !resource_add || !add_command || !cmdsys || !module_base ||
         !sh_process_heap_bind(&g_runtime_heap, results, count, module_base) ||
         !ds_clean_identity(results, count, "DeclRegistryAnchor", module_base, DS_PINNED_ANCHOR_RVA) ||
         !ds_clean_identity(results, count, "DeclTypeByName", module_base, DS_PINNED_TYPE_RVA) ||
@@ -3946,7 +4074,8 @@ int sh_decl_server_install(const sig_result *results, size_t count,
         !ds_clean_identity(results, count, "ResourceGenericLoad", module_base,
                            DS_PINNED_GENERIC_LOAD_RVA) ||
         !ds_clean_identity(results, count, "ResourceReconstruct", module_base,
-                           DS_PINNED_RECONSTRUCT_RVA)) {
+                           DS_PINNED_RECONSTRUCT_RVA) ||
+        !ds_clean_identity(results, count, "ResourceListAdd", module_base, 0x1800700u)) {
         backend_log("decl-server REFUSED: a registry/idStr/boot-promotion ABI, command-system, or module-base dependency did not resolve to a clean, uniquely identified engine function");
         InterlockedExchange(&g_state, DS_STATE_FAILED);
         ds_free_candidates();
@@ -3967,6 +4096,7 @@ int sh_decl_server_install(const sig_result *results, size_t count,
     g_execute_commands = (cmd_execute_buffer_fn)execute_commands;
     g_generic_load = (resource_generic_load_fn)generic_load;
     g_reconstruct = (resource_generic_load_fn)reconstruct;
+    g_resource_add = (resource_list_add_fn)resource_add;
     /* Resolve once, including failure; never scan an unknown image on every tick. */
     g_boundary_editor = glb_resolve(module_base, "editor_singleton", NULL);
     g_boundary_shell_slot = glb_resolve(module_base, "shell_ptr_slot", NULL);
@@ -4073,6 +4203,7 @@ void sh_decl_server_test_reset_install(void)
     g_idstr_dtor = NULL;
     g_execute_commands = NULL;
     g_generic_load = NULL;
+    g_resource_add = NULL;
     g_cmdsys = NULL;
     g_add_command = NULL;
     g_boundary_editor = g_boundary_shell_slot = 0;

@@ -175,7 +175,11 @@ typedef struct sh_decl_server_test_materialize_item {
     size_t body_length;
     int shadow_kind;
     int native_original;
+    int reserve_cycle;
+    size_t inherit_parent;
 } sh_decl_server_test_materialize_item;
+
+void sh_decl_server_test_set_resource_add(void (*fn)(void *manager, void *decl));
 
 /* Exercise the production source-first classification order. The return value
  * distinguishes an existing native source record from a live decl fallback;
