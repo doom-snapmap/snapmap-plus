@@ -48,6 +48,10 @@ opens share that view even when campaign files are outside the active SnapMap
 mount. Missing inputs cannot fall through to local or map overrides. Native
 reads and parser output still establish the source receipts; the input view
 does not publish a provider, allocate GPU programs or certify driver acceptance.
+Lexer source labels retain native casing for relative includes, while catalog
+and dependency keys normalize the virtual-root spelling. Preparation uses the
+native nonfatal diagnostic flag and rejects recorded parser errors through its
+recovery path instead of invoking an engine session error.
 Contributor changes to signatures or anchors require the two-image test gate in
 [contributing](contributing.md#7-run-the-tests).
 

@@ -282,7 +282,11 @@ static unsigned char cook_lexer_load(void *value,const void *body,int length,con
     cook_lexer *lexer=value;lexer->body=body;lexer->length=length;
     CHECK(length>0 && ((const char *)body)[length-1]!='\n');
     if(!strcmp(label,"generated/renderprogs/base.decl"))CHECK(lexer->flags==0x4c634);
-    else CHECK(lexer->flags==(test_vulkan?0x4c634:0x4c434));
+    else {
+        CHECK(lexer->flags==(test_vulkan?0x4c634:0x4c434));
+        CHECK(!strcmp(label,"generated/decls/renderProg/example.decl") ||
+            !strncmp(label,"generated/renderprogs/permutations/",34));
+    }
     return 1;
 }
 static unsigned char cook_lexer_expect(void *value,const char *text)

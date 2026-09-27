@@ -986,10 +986,14 @@ static int rg_cook_settings(unsigned char settings[12])
         return 1;
     } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
 }
-static int rg_cook_path(const char *name, int inherited, char path[4096])
+/* Catalog keys are lowercase, but the native preprocessor recognizes the
+ * case-sensitive renderProg source label when resolving relative includes.
+ * kind: 0 catalog input, 1 inherited lexer, 2 root lexer. */
+static int rg_cook_path(const char *name, int kind, char path[4096])
 {
-    int n = snprintf(path, 4096, strstr(name, ".decl") ? "%s" : inherited ?
-        "generated/renderprogs/%s.decl" : "generated/decls/renderprog/%s.decl", name);
+    int n = snprintf(path, 4096, strstr(name, ".decl") ? "%s" : kind == 1 ?
+        "generated/renderprogs/%s.decl" : kind == 2 ?
+        "generated/decls/renderProg/%s.decl" : "generated/decls/renderprog/%s.decl", name);
     return n > 0 && n < 4096;
 }
 static int rg_cook_read(const char *path, unsigned char **body, size_t *length)
@@ -1039,7 +1043,7 @@ static int rg_cook_source(const char *name, const void *settings, int inherited,
     for (rg_cook_frame *old = call.parent; old; old = old->parent)
         if (!_stricmp(old->name, name)) { g_cook->failed = 1; return 0; }
     if (!rg_cook_path(name, 0, path) ||
-        !rg_cook_path(name, inherited, label)) { g_cook->failed = 1; return 0; }
+        !rg_cook_path(name, inherited ? 1 : 2, label)) { g_cook->failed = 1; return 0; }
     g_cook->frame = &call;
     sh_package_shader_cook_begin(&receipt, (uintptr_t)&call, g_cook_api.renderer, name);
     __try {
