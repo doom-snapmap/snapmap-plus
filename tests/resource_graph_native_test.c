@@ -370,7 +370,7 @@ static uintptr_t cook_compile(uintptr_t out,uintptr_t name_arg,uintptr_t config,
     if(!strcmp(name,"base")) {
         cook_inherited_sections(sections,(void *)vertex);
         void *include=NULL;
-        int bytes=cook_read_file(cook_fs_slot,"decls/renderprogs/base.inc",&include,NULL,0);
+        int bytes=cook_read_file(cook_fs_slot,cook_mode>=11?"/decls/renderprogs/base.inc":"decls/renderprogs/base.inc",&include,NULL,0);
         if(bytes<0)g_cook->failed=1;
         else {
             CHECK(bytes==(int)strlen(cook_include) && !memcmp(include,cook_include,(size_t)bytes));

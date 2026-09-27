@@ -142,7 +142,10 @@ static void isolated_cook_witness(void)
          * from either the current cook or the enclosing inherited cook. */
         sh_package_shader_receipt_begin(&pause,99,"material","other");
         assert(sh_package_shader_receipt_wants(include_path));
+        assert(sh_package_shader_receipt_wants("/decls/renderprogs/shared.inc"));
         sh_package_shader_receipt_bytes(include_path,strlen(include),0,include,mode==1?1:strlen(include));
+        sh_package_shader_receipt_bytes("/decls/renderprogs/shared.inc",strlen(include),0,include,mode==1?1:strlen(include));
+        sh_package_shader_receipt_bytes("\\decls\\renderprogs\\shared.inc",strlen(include),0,include,mode==1?1:strlen(include));
         if(mode==2)sh_package_shader_receipt_bytes(include_path,strlen(include),0,"X",1);
         sh_package_shader_receipt_end(&pause,1,read_memory,NULL);
         sh_package_shader_receipt_program_compiled(12);

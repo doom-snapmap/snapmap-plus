@@ -4,6 +4,11 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/* Native shader include opens may spell a virtual-root path with a leading
+ * slash. Return its borrowed catalog-relative spelling; this does not resolve
+ * host filesystem paths or change authored package path validation. */
+const char *sh_package_shader_input_path(const char *path);
+
 typedef int (*sh_package_shader_receipt_read)(void *context, uintptr_t address,
     void *destination, size_t length);
 typedef struct sh_package_shader_receipt_frame {
