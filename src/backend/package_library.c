@@ -588,6 +588,7 @@ struct pl_contributions {
     pl_contribution_unit *units;
     sh_package_link_classes classes;
     char **tokens;
+    size_t *token_order;
     size_t token_count, pending_unit, pending_target;
     unsigned char *shared;
     unsigned char *global; /* members of a composed player hands web */
@@ -607,6 +608,26 @@ static void pl_tokens_free(pl_contributions *c)
 {
     for (size_t i = 0; i < c->token_count; i++) free(c->tokens[i]);
     free(c->tokens); c->tokens = NULL; c->token_count = 0;
+    free(c->token_order); c->token_order = NULL;
+}
+/* Readers probe ordinary native names as well as contribution tokens. Keep
+ * the exact token lookup logarithmic for both hits and misses; a miss must
+ * still follow the captured source scope. Class indexes do not change. */
+static int pl_token_order(void *context, const void *left, const void *right)
+{
+    const pl_contributions *c = context;
+    return strcmp(c->tokens[*(const size_t *)left], c->tokens[*(const size_t *)right]);
+}
+static size_t pl_token_find(const pl_contributions *c, const char *name)
+{
+    size_t low = 0, high = c->token_count;
+    while (low < high) {
+        size_t mid = low + (high - low) / 2, index = c->token_order[mid];
+        int cmp = strcmp(c->tokens[index], name);
+        if (!cmp) return index;
+        if (cmp < 0) low = mid + 1; else high = mid;
+    }
+    return SIZE_MAX;
 }
 static void pl_contributions_close(pl_contributions *c)
 {
@@ -685,7 +706,8 @@ static int pl_derived_exists(void *context, const char *family, const char *name
 {
     pl_contribution_walk *walk = context;
     pl_contributions *c = walk->graph;
-    for (size_t i = 0; i < c->token_count; i++) if (!strcmp(c->tokens[i], name)) {
+    size_t i = pl_token_find(c, name);
+    if (i != SIZE_MAX) {
         const sh_package_link_unit *target = c->inputs.units + c->classes.representatives[i];
         *exists = !strcmp(target->family, family); return 1;
     }
@@ -762,7 +784,8 @@ static int pl_tokens(pl_contributions *c, char *error, size_t capacity)
     adapter.reuse = c->reuse;
     if (!sh_package_link_identify_units(c->inputs.units, c->inputs.count, &adapter, &c->classes, error, capacity)) return 0;
     c->tokens = calloc(c->classes.count ? c->classes.count : 1, sizeof(*c->tokens));
-    if (!c->tokens || !pl_names_open(&captured, c->inputs.count) || !pl_names_open(&issued, c->classes.count)) goto done;
+    c->token_order = calloc(c->classes.count ? c->classes.count : 1, sizeof(*c->token_order));
+    if (!c->tokens || !c->token_order || !pl_names_open(&captured, c->inputs.count) || !pl_names_open(&issued, c->classes.count)) goto done;
     for (size_t j = 0; j < c->inputs.count; j++) (void)pl_names_seen(&captured, c->inputs.units[j].name, 1);
     c->token_count = c->classes.count;
     for (size_t i = 0; i < c->token_count; i++) {
@@ -792,10 +815,12 @@ static int pl_tokens(pl_contributions *c, char *error, size_t capacity)
             snprintf(error, capacity, "editor binding token collides with a captured resource"); goto done;
         }
         if (!(c->tokens[i] = _strdup(token))) goto done;
+        c->token_order[i] = i;
         if (pl_names_seen(&issued, c->tokens[i], 1)) {
             snprintf(error, capacity, "unequal editor bindings have colliding identities"); goto done;
         }
     }
+    qsort_s(c->token_order, c->token_count, sizeof(*c->token_order), pl_token_order, c);
     c->dirty = 0; ok = 1;
 done:
     free((void *)captured.slots); free((void *)issued.slots);
@@ -917,10 +942,8 @@ static int pl_restore_reference(void *context, const char *slot, const char *fam
     pl_contribution_walk *walk = context;
     pl_contributions *c = walk->graph;
     pl_contribution_unit *capture = walk->capture;
-    size_t target = SIZE_MAX;
-    for (size_t i = 0; i < c->token_count; i++) if (!strcmp(c->tokens[i], name)) {
-        target = c->classes.representatives[i]; break;
-    }
+    size_t token = pl_token_find(c, name);
+    size_t target = token != SIZE_MAX ? c->classes.representatives[token] : SIZE_MAX;
     if (target == SIZE_MAX) {
         /* Only a deliberately un-tokenized inherited header remains lexical. */
         if (!pl_lexical_inherit(c, walk->unit, slot) ||

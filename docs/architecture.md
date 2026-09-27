@@ -1186,6 +1186,10 @@ Compilation includes built-in overrides and package sources relative to verified
 originals. Compatible shared contributions compose using native field and
 collection semantics. Private bindings retain their authored values and complete
 opaque payloads; binary data is never appended as text.
+Contribution tokens have an exact sorted lookup index rebuilt with each binding
+pass. Hits keep their original class and family checks; misses still resolve in
+the captured source scope. Large libraries do not scan every token for each
+ordinary resource reference, and lookup order never changes resource identities.
 The provider never modifies authored sources or installed game archives. Native
 reader and resource-family details belong alongside their implementation.
 
