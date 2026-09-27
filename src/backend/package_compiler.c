@@ -682,9 +682,10 @@ static int pc_registration_field(const char *key)
 /* The library's registration union (after package keys are assigned): the
  * spawn manager picks uniformly among every row sharing a bit with a request,
  * so one type may register several AI, a row is its type and bound AI, and
- * row order is presentation. Modifiers apply first-match, one row per mask.
- * The whole-file composer keeps plain keys, so an equal key bound differently
- * there remains a conflict. */
+ * row order is presentation. Modifiers apply first-match, one row per mask;
+ * the caller's order contract says which of their orders a registered type
+ * observes. The whole-file composer keeps plain keys, so an equal key bound
+ * differently there remains a conflict. */
 static const sh_decl_collection_rule pc_registration_rules[] = {
     {"edit.aiTypeList", "aiType", NULL, NULL, NULL,
         SH_DECL_COLLECTION_DISTINCT_BEHAVIOR | SH_DECL_COLLECTION_PRESENTATION_ORDER},
@@ -1532,19 +1533,21 @@ char *sh_package_editor_contributions(const char *type, sh_decl_source baseline,
 
 static char *pc_contributions(const char *type, int registration, sh_decl_source baseline,
     const sh_decl_source *sources, size_t count, sh_decl_source target, int private_binding,
+    const sh_decl_collection_order *order,
     size_t *length, sh_package_editor_failure *failure, char *error, size_t capacity);
 char *sh_package_editor_contributions_report(const char *type, sh_decl_source baseline,
     const sh_decl_source *sources, size_t count, sh_decl_source target, int private_binding,
     size_t *length, sh_package_editor_failure *failure, char *error, size_t capacity)
 {
-    return pc_contributions(type, 0, baseline, sources, count, target, private_binding,
+    return pc_contributions(type, 0, baseline, sources, count, target, private_binding, NULL,
         length, failure, error, capacity);
 }
 char *sh_package_registration_contributions_report(sh_decl_source baseline,
     const sh_decl_source *sources, size_t count, sh_decl_source target,
+    const sh_decl_collection_order *order,
     size_t *length, sh_package_editor_failure *failure, char *error, size_t capacity)
 {
-    return pc_contributions("entitydef", 1, baseline, sources, count, target, 0,
+    return pc_contributions("entitydef", 1, baseline, sources, count, target, 0, order,
         length, failure, error, capacity);
 }
 int sh_package_registration_lists(sh_decl_source text)
@@ -1557,6 +1560,7 @@ int sh_package_registration_lists(sh_decl_source text)
 
 static char *pc_contributions(const char *type, int registration, sh_decl_source baseline,
     const sh_decl_source *sources, size_t count, sh_decl_source target, int private_binding,
+    const sh_decl_collection_order *order,
     size_t *length, sh_package_editor_failure *failure, char *error, size_t capacity)
 {
     sh_decl_source *parts = NULL;
@@ -1622,8 +1626,8 @@ static char *pc_contributions(const char *type, int registration, sh_decl_source
         merged = sh_decl_compose_editor_variant((sh_decl_source){base, base_length}, parts, count,
             (sh_decl_source){completed, target_length}, &merged_length, error, capacity);
         free(completed);
-    } else merged = sh_decl_compose_resource(type, (sh_decl_source){base, base_length},
-        parts, count, rules, rule_count, NULL, &merged_length, error, capacity, NULL);
+    } else merged = sh_decl_compose_resource_ordered(type, (sh_decl_source){base, base_length},
+        parts, count, rules, rule_count, NULL, order, &merged_length, error, capacity, NULL, NULL);
     if (!merged && failure && !pc_editor_operational(error)) {
         /* A contribution that cannot compose even alone with the baseline is
          * invalid in its own context; otherwise their combination is a
@@ -1634,8 +1638,8 @@ static char *pc_contributions(const char *type, int registration, sh_decl_source
             char *alone = phase == 2 && !registration ?
                 sh_decl_compose_editor_variant((sh_decl_source){base, base_length}, parts + i, 1, parts[i],
                     &alone_length, detail, sizeof(detail)) :
-                sh_decl_compose_resource_report(type, (sh_decl_source){base, base_length}, parts + i, 1,
-                    rules, rule_count, NULL, &alone_length, detail, sizeof(detail), &cause, NULL);
+                sh_decl_compose_resource_ordered(type, (sh_decl_source){base, base_length}, parts + i, 1,
+                    rules, rule_count, NULL, order, &alone_length, detail, sizeof(detail), &cause, NULL);
             if (alone) { free(alone); continue; }
             if (pc_editor_operational(detail)) { snprintf(error, capacity, "%s", detail); break; }
             if ((phase == 2 && !registration) || cause.first == 0) { failed_source = i; snprintf(error, capacity, "%s", detail); }

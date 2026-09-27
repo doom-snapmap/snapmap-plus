@@ -90,6 +90,10 @@ typedef struct pl_build {
     char *key_notes;
     /* Group codes this compile's relocated values use (package_keys.h). */
     sh_package_key_groups *key_groups;
+    /* The spawn-type enum (key_space_read) and whether the private key
+     * contract serves this compile, as the key phase found them. */
+    sh_package_key_space key_space;
+    int key_space_read, private_keys;
     /* Wall-clock milliseconds of the contribution phase's steps (PL_STEP_*). */
     unsigned long long step_ms[9];
 } pl_build;
@@ -1157,11 +1161,12 @@ static size_t pl_member_owner(const pl_build *b, const sh_package_sources *sourc
 
 /* A group the product cannot compose names its declaration. A package's own
  * invalid source rejects that package. A gap in one member's own content
- * leaves its package unserved for this candidate; a gap only in combining
- * them leaves unserved the contribution pl_coverage_participant proves takes
- * part, so healthy peers still compile and no other owner is judged. Stock or
- * product content alone blames nobody, and environment failures never judge
- * content. */
+ * leaves its package unserved for this candidate. A gap only in combining
+ * individually valid contributions is product coverage, not evidence against
+ * any owner: its participants are named (pl_joint_participants) and nobody is
+ * excluded, so the candidate fails and the previous usable generation stays.
+ * Stock or product content alone blames nobody, and environment failures never
+ * judge content. */
 static void pl_contribution_failure(pl_build *b, const sh_package_sources *sources,
     const sh_package_link_unit *input, int kind, size_t culprit, char *error, size_t capacity)
 {
@@ -1177,13 +1182,14 @@ static void pl_contribution_failure(pl_build *b, const sh_package_sources *sourc
 
 /* Whether contributions compose: 1 yes, 0 no, -1 environment. */
 typedef int (*pl_compose_probe)(void *context, const sh_decl_source *parts, size_t count);
-static size_t pl_coverage_participant(const pl_build *b, const sh_package_sources *sources,
+static void pl_joint_participants(const pl_build *b, const sh_package_sources *sources,
     const size_t *members, const size_t *part_member, const sh_decl_source *parts, size_t part_count,
-    pl_compose_probe probe, void *context);
+    pl_compose_probe probe, void *context, char *error, size_t capacity);
 typedef struct pl_collection_probe {
     const char *family;
     int registration, private_binding;
     sh_decl_source base, target;
+    const sh_decl_collection_order *order;
 } pl_collection_probe;
 #ifdef SH_PACKAGE_LIBRARY_TESTING
 static long g_probe_failures;
@@ -1201,8 +1207,8 @@ static int pl_collection_composes(void *context, const sh_decl_source *parts, si
     else
 #endif
     body = p->registration ?
-        sh_package_registration_contributions_report(p->base, parts, count, p->target, &length, &failure,
-            error, sizeof(error)) :
+        sh_package_registration_contributions_report(p->base, parts, count, p->target, p->order, &length,
+            &failure, error, sizeof(error)) :
         sh_package_editor_contributions_report(p->family, p->base, parts, count, p->target, p->private_binding,
             &length, &failure, error, sizeof(error));
     if (body) { free(body); return 1; }
@@ -1462,8 +1468,8 @@ static int pl_contribution_group(pl_build *b, const sh_package_sources *sources,
             else if (kind == SH_PACKAGE_EDITOR_FAILURE_COVERAGE) {
                 pl_collection_probe probe = {input->family, 0, !sh_package_source_link_shared(c->source)[unit],
                     base, texts[i]};
-                culprit = pl_coverage_participant(b, sources, members, part_member, parts, source_count,
-                    pl_collection_composes, &probe);
+                pl_joint_participants(b, sources, members, part_member, parts, source_count,
+                    pl_collection_composes, &probe, error, capacity);
             }
             goto failed;
         }
@@ -1620,19 +1626,20 @@ static void pl_scope_sort(const pl_build *b, const sh_package_sources *sources, 
             size_t swap = order[m]; order[m] = order[m - 1]; order[m - 1] = swap;
         }
 }
-/* The participant a combination gap leaves unserved. Product and stock parts
- * compose first, then contributions one at a time in stable source order:
- * the first that cannot join those before it takes part in the conflict, and
- * leaving it out lets every earlier owner compose. SIZE_MAX (nobody) when
- * product parts alone fail or composition cannot run. */
-static size_t pl_coverage_participant(const pl_build *b, const sh_package_sources *sources,
+static const char *pl_scope_label(const pl_build *b, const sh_package_sources *sources, size_t scope);
+/* Append the contributions a combination gap involves to its diagnostic.
+ * Product and stock parts compose first, then contributions one at a time in
+ * stable source order; the first that cannot join those before it takes part,
+ * with the earlier contribution it cannot compose with alone when there is
+ * one. This names causes only: no owner is judged by it. */
+static void pl_joint_participants(const pl_build *b, const sh_package_sources *sources,
     const size_t *members, const size_t *part_member, const sh_decl_source *parts, size_t part_count,
-    pl_compose_probe probe, void *context)
+    pl_compose_probe probe, void *context, char *error, size_t capacity)
 {
     size_t *order = calloc(part_count ? part_count : 1, sizeof(*order));
     size_t *scopes = calloc(part_count ? part_count : 1, sizeof(*scopes));
     sh_decl_source *trial = calloc(part_count ? part_count : 1, sizeof(*trial));
-    size_t product = 0, authored, accepted = 0, culprit = SIZE_MAX;
+    size_t product = 0, authored, accepted = 0, later = SIZE_MAX, earlier = SIZE_MAX;
     if (!order || !scopes || !trial) goto done;
     for (size_t k = 0; k < part_count; k++) {
         scopes[k] = b->contributions->inputs.scopes[members[part_member[k]]];
@@ -1652,11 +1659,28 @@ static size_t pl_coverage_participant(const pl_build *b, const sh_package_source
         trial[accepted] = parts[order[i]];
         int status = probe(context, trial, accepted + 1);
         if (status > 0) { accepted++; continue; }
-        if (!status && i >= product) culprit = members[part_member[order[i]]];
+        if (!status && i >= product) later = i;
         break;
     }
+    /* The earlier contribution the later one cannot compose with alone. */
+    for (size_t i = product; later != SIZE_MAX && i < later && earlier == SIZE_MAX; i++) {
+        size_t n = 0;
+        for (size_t k = 0; k < product; k++) trial[n++] = parts[order[k]];
+        trial[n++] = parts[order[i]]; trial[n++] = parts[order[later]];
+        if (!probe(context, trial, n)) earlier = i;
+    }
+    if (later != SIZE_MAX) {
+        size_t used = strlen(error);
+        const char *second = pl_scope_label(b, sources, scopes[order[later]]);
+        if (earlier != SIZE_MAX)
+            snprintf(error + used, capacity - used, "; %s and %s cannot compose together (product coverage)",
+                pl_scope_label(b, sources, scopes[order[earlier]]), second);
+        else
+            snprintf(error + used, capacity - used, "; %s cannot compose with earlier contributions (product coverage)",
+                second);
+    }
 done:
-    free(order); free(scopes); free(trial); return culprit;
+    free(order); free(scopes); free(trial);
 }
 static const char *pl_scope_label(const pl_build *b, const sh_package_sources *sources, size_t scope)
 {
@@ -2234,8 +2258,12 @@ static int pl_key_phase(pl_build *b, const sh_package_sources *sources, char *er
     char line[768];
     int status = sh_package_source_link_key_space(b->reader, &space), ok = 0, private_keys;
     if (status < 0) { snprintf(error, capacity, "spawn-type reflection is unreadable"); return 0; }
+    if (status) {
+        b->key_space = space; b->key_space_read = 1;
+        b->private_keys = b->native && b->native->private_keys && sh_package_key_space_private(&space);
+    }
     if (!status || !b->authored_count) return 1;
-    private_keys = b->native && b->native->private_keys && sh_package_key_space_private(&space);
+    private_keys = b->private_keys;
     pool.private_keys = private_keys; pool.pool = space.pool;
     if (!(conductors = calloc(b->contributions->inputs.count + 1, 1))) goto allocation;
     if (!pl_key_rows(b, &space, private_keys, &keys, &changes, conductors, &historical, error, capacity)) goto done;
@@ -2529,6 +2557,61 @@ done:
     return ok;
 }
 
+/* The native order contract of a conductor's modifier rows. The engine gives
+ * an AI the type of the first aiTypeList row registering its definition and
+ * applies the first globalAIMods row whose mask meets that type (Vulkan
+ * 0x141124470, 0x14110faa0; under the private key contract, its matching).
+ * Two modifier rows' order is therefore observed only when a registered type
+ * meets both; any other order is presentation. The types are every row's of
+ * every input, a superset of the composed list's, so a pair is never taken
+ * for free that the result could observe. */
+typedef struct pl_registration_order {
+    const sh_package_key_space *space;
+    const sh_package_key_groups *groups;
+    int private_keys;
+    uint32_t *types;
+    size_t type_count;
+} pl_registration_order;
+static int pl_row_bits(const pl_registration_order *o, const sh_decl_node *row, const char *field, uint32_t *bits)
+{
+    const char *text = NULL;
+    size_t length = 0;
+    return row && sh_decl_tree_literal(sh_decl_tree_member(row, field), &text, &length) &&
+        sh_package_key_bits(o->space, text, length, bits);
+}
+static int pl_registration_significant(void *context, const char *path, const sh_decl_node *left,
+    const sh_decl_node *right)
+{
+    const pl_registration_order *o = context;
+    uint32_t a, b;
+    if (strcmp(path, "edit.globalAIMods")) return -1;
+    if (!pl_row_bits(o, left, "aiType", &a) || !pl_row_bits(o, right, "aiType", &b)) return 1;
+    for (size_t i = 0; i < o->type_count; i++) {
+        uint32_t type = o->types[i];
+        if (o->private_keys ? sh_package_key_modifier_matches(o->groups, type, a) &&
+                sh_package_key_modifier_matches(o->groups, type, b) : (type & a) && (type & b)) return 1;
+    }
+    return 0;
+}
+static int pl_registration_types(pl_registration_order *o, const sh_decl_source *texts, size_t count)
+{
+    for (size_t i = 0; i < count; i++) {
+        sh_decl_node *tree = sh_decl_tree_parse(texts[i], NULL, 0);
+        const sh_decl_node *list = pl_list(tree, "aiTypeList");
+        for (const sh_decl_node *row = list ? list->children : NULL; row; row = row->next) {
+            uint32_t bits = 0, *grown;
+            size_t k = 0;
+            if (!pl_row_bits(o, row, "aiType", &bits) || !bits) continue;
+            while (k < o->type_count && o->types[k] != bits) k++;
+            if (k < o->type_count) continue;
+            if (!(grown = realloc(o->types, (o->type_count + 1) * sizeof(*grown)))) { sh_decl_tree_free(tree); return 0; }
+            o->types = grown; o->types[o->type_count++] = bits;
+        }
+        sh_decl_tree_free(tree);
+    }
+    return 1;
+}
+
 /* Shared gameplay registration lists (a conductor's aiTypeList): every source
  * of the declaration contributes its rows, each bound in its own scope, and
  * every member receives the union keyed by the native aiType and bound AI
@@ -2551,6 +2634,9 @@ static int pl_registration_group(pl_build *b, const sh_package_sources *sources,
     sh_decl_source base = {"{}", 2};
     size_t source_count = 0, culprit = SIZE_MAX;
     int ok = 0, kind = SH_PACKAGE_EDITOR_FAILURE_ENVIRONMENT, stated = 0, historical = 0;
+    pl_registration_order contract = {&b->key_space, b->private_keys ? b->key_groups : NULL, b->private_keys, NULL, 0};
+    sh_decl_collection_order order = {&contract, NULL, pl_registration_significant};
+    const sh_decl_collection_order *ordering = b->key_space_read ? &order : NULL;
     if (!texts || !parts || !peers || !pending || !part_member) {
         snprintf(error, capacity, "registration contribution allocation failed"); goto failed;
     }
@@ -2566,19 +2652,22 @@ static int pl_registration_group(pl_build *b, const sh_package_sources *sources,
         else { part_member[source_count] = i; parts[source_count++] = texts[i]; }
     }
     if (!stated || !source_count) { ok = 1; goto done; }
+    if (ordering && !pl_registration_types(&contract, texts, count)) {
+        snprintf(error, capacity, "registration contribution allocation failed"); goto failed;
+    }
     for (size_t i = 0; i < count; i++) {
         size_t length = 0, peer_count = 0;
         sh_package_editor_failure failure;
         char *body = sh_package_registration_contributions_report(base, parts, source_count, texts[i],
-            &length, &failure, error, capacity);
+            ordering, &length, &failure, error, capacity);
         if (!body) {
             kind = failure.kind;
             if (kind == SH_PACKAGE_EDITOR_FAILURE_SOURCE && failure.source < source_count)
                 culprit = members[part_member[failure.source]];
             else if (kind == SH_PACKAGE_EDITOR_FAILURE_COVERAGE) {
-                pl_collection_probe probe = {"entitydef", 1, 0, base, texts[i]};
-                culprit = pl_coverage_participant(b, sources, members, part_member, parts, source_count,
-                    pl_collection_composes, &probe);
+                pl_collection_probe probe = {"entitydef", 1, 0, base, texts[i], ordering};
+                pl_joint_participants(b, sources, members, part_member, parts, source_count,
+                    pl_collection_composes, &probe, error, capacity);
             }
             goto failed;
         }
@@ -2607,7 +2696,7 @@ failed:
 done:
     if (texts) for (size_t i = 0; i < count; i++) free((char *)texts[i].text);
     if (pending) for (size_t i = 0; i < count; i++) pl_contribution_unit_free(pending + i);
-    free(texts); free(parts); free((void *)peers); free(pending); free(part_member);
+    free(texts); free(parts); free((void *)peers); free(pending); free(part_member); free(contract.types);
     return ok;
 }
 /* Entity groups whose sources state registration lists; a cheap byte check
@@ -2717,8 +2806,9 @@ static int pl_hands_group(pl_build *b, const sh_package_sources *sources,
     for (size_t k = 0; k < part_count; k++) parts[k] = texts[part_member[k]];
     if (base_member == SIZE_MAX) {
         if (part_count > 1) {
-            kind = SH_PACKAGE_EDITOR_FAILURE_COVERAGE; culprit = members[part_member[part_count - 1]];
-            snprintf(error, capacity, "several packages change the player hands web without its captured stock original");
+            kind = SH_PACKAGE_EDITOR_FAILURE_COVERAGE;
+            snprintf(error, capacity, "%s and %s change the player hands web without its captured stock original",
+                pl_scope_label(b, sources, part_scope[0]), pl_scope_label(b, sources, part_scope[1]));
             goto failed;
         }
         if (!(composed = malloc(parts[0].length + 1))) { snprintf(error, capacity, "player hands web allocation failed"); goto failed; }
@@ -2726,7 +2816,7 @@ static int pl_hands_group(pl_build *b, const sh_package_sources *sources,
     } else {
         sh_decl_conflict conflict = {SIZE_MAX, SIZE_MAX, 0, 0};
         if (!sh_decl_animweb_prepare(texts[base_member], parts, part_count, owned, &moves, &move_count, error, capacity)) {
-            if (!strstr(error, "allocation")) { kind = SH_PACKAGE_EDITOR_FAILURE_COVERAGE; culprit = members[part_member[part_count - 1]]; }
+            if (!strstr(error, "allocation")) kind = SH_PACKAGE_EDITOR_FAILURE_COVERAGE;
             goto failed;
         }
         if (part_count == 1 && !owned[0] && !move_count) {
@@ -2736,9 +2826,12 @@ static int pl_hands_group(pl_build *b, const sh_package_sources *sources,
         } else if (!(composed = sh_decl_block_compose("animweb", texts[base_member], parts, part_count, &composed_length,
             error, capacity, &conflict))) {
             if (!strstr(error, "allocation")) {
+                size_t used = strlen(error);
                 kind = SH_PACKAGE_EDITOR_FAILURE_COVERAGE;
-                size_t blamed = conflict.second < part_count ? conflict.second : conflict.first;
-                culprit = members[part_member[blamed < part_count ? blamed : part_count - 1]];
+                if (conflict.first < part_count && conflict.second < part_count && used < capacity)
+                    snprintf(error + used, capacity - used, "; %s and %s cannot compose together (product coverage)",
+                        pl_scope_label(b, sources, part_scope[conflict.first]),
+                        pl_scope_label(b, sources, part_scope[conflict.second]));
             }
             goto failed;
         }

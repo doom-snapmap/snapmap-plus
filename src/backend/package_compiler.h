@@ -283,9 +283,11 @@ char *sh_package_editor_contributions_report(const char *type, sh_decl_source ba
  * declaration: rows keyed by their native aiType compose from every member
  * into each, every row keeping the binding its own source gave it; the rest
  * of target is kept. Equal keys with different bindings are a composition
- * gap (they need a relocated key), reported as coverage. */
+ * gap (they need a relocated key), reported as coverage. order is the key
+ * contract's row-order significance (NULL: the lists' rule flags alone). */
 char *sh_package_registration_contributions_report(sh_decl_source baseline,
     const sh_decl_source *sources, size_t count, sh_decl_source target,
+    const sh_decl_collection_order *order,
     size_t *length, sh_package_editor_failure *failure, char *error, size_t capacity);
 /* 1 when an entity declaration states registration lists in its edit block. */
 int sh_package_registration_lists(sh_decl_source text);

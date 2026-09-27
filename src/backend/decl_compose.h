@@ -29,7 +29,8 @@ enum {
  * A path may use [*] for a numeric index in a verified nested collection.
  * Semantic collections preserve compatible authored ordering constraints;
  * independent additions use identity order only to break unconstrained ties.
- * Only an explicit presentation-order flag makes those positions advisory.
+ * Only an explicit presentation-order flag, or a native adapter's significance
+ * contract (sh_decl_collection_order), makes those positions advisory.
  * Index-referenced collections require a separate verified relocation contract. */
 typedef struct sh_decl_collection_rule {
     const char *path;
@@ -63,6 +64,15 @@ typedef struct sh_decl_collection_rule {
 typedef struct sh_decl_collection_order {
     void *context;
     int (*relation)(void *context, const char *path,
+        const sh_decl_node *left, const sh_decl_node *right);
+    /* Optional: whether the native consumer observes the relative order of
+     * two distinct entries of the collection at path. 1 it does, 0 it cannot
+     * (for example a first-match list no one value reaches both entries of),
+     * -1 the rule's flags decide. An order nobody observes is a presentation
+     * preference, resolved deterministically; an observed one stays mandatory
+     * even in a presentation collection. Symmetric and pure, like relation.
+     * Either callback may be NULL, not both. */
+    int (*significant)(void *context, const char *path,
         const sh_decl_node *left, const sh_decl_node *right);
 } sh_decl_collection_order;
 
@@ -166,6 +176,13 @@ char *sh_decl_compose_resource_report(const char *declaration_type,
     size_t count, const sh_decl_collection_rule *rules, size_t rule_count,
     const sh_decl_composition_schema *schema, size_t *out_length,
     char *error, size_t error_capacity, sh_decl_conflict *conflict,
+    unsigned char *conflicting_sources);
+/* The same under a native adapter's order contract (NULL for none). */
+char *sh_decl_compose_resource_ordered(const char *declaration_type,
+    sh_decl_source baseline, const sh_decl_source *sources,
+    size_t count, const sh_decl_collection_rule *rules, size_t rule_count,
+    const sh_decl_composition_schema *schema, const sh_decl_collection_order *order,
+    size_t *out_length, char *error, size_t error_capacity, sh_decl_conflict *conflict,
     unsigned char *conflicting_sources);
 
 #endif

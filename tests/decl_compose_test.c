@@ -494,6 +494,74 @@ static void derived_ordering(void)
     free(base); free(a); free(b); free(c);
 }
 
+/* Letters of one half of the alphabet observe each other's order; letters of
+ * different halves do not. A negative mode defers every pair to the rule. */
+static int significant_relation(void *context, const char *path,
+    const sh_decl_node *left, const sh_decl_node *right)
+{
+    int mode = *(int *)context;
+    if (strcmp(path, "items")) return -1;
+    CHECK(left && right && left->value && right->value);
+    if (!left || !right || !left->value || !right->value) return 1;
+    if (mode < 0) return -1;
+    return (left->value[1] <= 'm') == (right->value[1] <= 'm');
+}
+static char *order_merge_contract(const char *original, const char *const *edits, size_t count,
+    unsigned flags, const sh_decl_collection_order *order, char *error)
+{
+    sh_decl_collection_rule rule = {"items", NULL};
+    sh_decl_source sources[4];
+    char *base = sequence(original), *result = NULL;
+    size_t i, length;
+    rule.flags = flags;
+    CHECK(base && count <= 4);
+    for (i = 0; i < count; i++) sources[i] = view(sequence(edits[i]));
+    result = sh_decl_compose_ordered(view(base), sources, count, &rule, 1, order, &length, error, 512, NULL);
+    for (i = 0; i < count; i++) free((char *)sources[i].text);
+    free(base); return result;
+}
+static void significant_ordering(void)
+{
+    int mode = 1;
+    sh_decl_collection_order order = {&mode, NULL, significant_relation};
+    const char *free_pair[] = {"ax", "xa"}, *bound_pair[] = {"ab", "ba"}, *cycle[] = {"ax", "xb", "ba"};
+    const char *free_move[] = {"ab", "xab"}, *bound_move[] = {"ac", "bac"};
+    char error[512], *result;
+    for (size_t i = 0; i < 2; i++) {
+        const char *edits[] = {free_pair[i], free_pair[1 - i]};
+        /* An order nobody observes composes, deterministically, in a strict
+         * list; one observed order stays mandatory even in a presentation
+         * list. */
+        result = order_merge_contract("", edits, 2, 0, &order, error);
+        order_is(result, "ax"); free(result);
+        edits[0] = bound_pair[i]; edits[1] = bound_pair[1 - i];
+        result = order_merge_contract("", edits, 2, 0, &order, error);
+        CHECK(!result && strstr(error, "ordering")); free(result);
+        result = order_merge_contract("", edits, 2, SH_DECL_COLLECTION_PRESENTATION_ORDER, &order, error);
+        CHECK(!result && strstr(error, "ordering")); free(result);
+        edits[0] = free_pair[i]; edits[1] = free_pair[1 - i];
+        result = order_merge_contract("", edits, 2, SH_DECL_COLLECTION_PRESENTATION_ORDER, &order, error);
+        order_is(result, "ax"); free(result);
+        /* Deferring to the strict rule restores the conflict. */
+        mode = -1;
+        result = order_merge_contract("", edits, 2, 0, &order, error);
+        CHECK(!result && strstr(error, "ordering")); free(result);
+        mode = 1;
+    }
+    /* A cycle through unobserved preferences drops them and keeps the
+     * observed b-before-a. */
+    result = order_merge_contract("", cycle, 3, 0, &order, error);
+    order_is(result, "bax"); free(result);
+    /* Deleting x does not conflict with moving it where nobody observes; b's
+     * deletion still conflicts with moving it before a. */
+    result = order_merge_contract("abx", free_move, 2, 0, &order, error);
+    order_is(result, "ab"); free(result);
+    result = order_merge_contract("abc", bound_move, 2, 0, &order, error);
+    CHECK(!result && strstr(error, "deletion conflicts with reordering")); free(result);
+    result = order_merge_contract("abc", bound_move, 2, SH_DECL_COLLECTION_PRESENTATION_ORDER, &order, error);
+    CHECK(!result && strstr(error, "deletion conflicts with reordering")); free(result);
+}
+
 static void presentation_ordering(void)
 {
     const char *opposed[] = {"abx", "axb"}, *cycle[] = {"bac", "acb"};
@@ -946,7 +1014,7 @@ int main(int argc, char **argv)
     presentation_ordering(); control_behavior_identity();
     inherited_collection_patches();
     typed_source_annotations();
-    fields(); lists(); blocking(); editor_properties(); ordering(); derived_ordering(); added_objects(); conflict_sources(); typed_collections(); entity_header_order(); malformed(); large_text();
+    fields(); lists(); blocking(); editor_properties(); ordering(); derived_ordering(); significant_ordering(); added_objects(); conflict_sources(); typed_collections(); entity_header_order(); malformed(); large_text();
     if (argc == 2) native_file(argv[1]);
     if (failures) return 1;
     puts("declaration composition checks passed");

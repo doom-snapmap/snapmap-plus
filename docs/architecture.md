@@ -1030,12 +1030,15 @@ the list the stock control binds, with each package's AI choice at the key it
 holds after relocation, rather than becoming a private copy no control names.
 A conductor's AI registrations are presentation-ordered: the spawn manager
 picks uniformly among every row sharing a bit with a request, so copies that
-list stock rows in different orders compose. Global AI modifiers apply
-first-match and keep their order. Stock rows a copy omits are restored in
-stock order ahead of its own rows. When valid contributions cannot compose
-together, they are composed one at a time in stable source order and only the
-first that cannot join those before it is left unserved; owners outside the
-conflict stay served. A frozen legacy context's conductor copy composes into
+list stock rows in different orders compose. An AI's type is the key of the
+first row registering its definition, and the first global AI modifier whose
+mask meets that type applies, so two modifier rows keep their order only when
+a registered type meets both; other opposing orders compose. Stock rows a copy
+omits are restored in stock order ahead of its own rows. When individually
+valid contributions cannot compose together, that is product coverage, not
+evidence against an owner: the compile names the contributions involved and
+leaves none unserved, so the candidate fails and the previous usable
+generation stays. A frozen legacy context's conductor copy composes into
 the stock-named conductor with its authored keys, and the stock rows it
 removed stay removed, so its requests keep their historical members. The
 engine resolves the conductor by name, so in a map document that composition

@@ -873,18 +873,29 @@ static int dc_relation(const dc_entry *a, const dc_entry *b, size_t source_count
     return baseline ? baseline : order;
 }
 
+/* Whether two entries' authored order is only a presentation preference: the
+ * adapter's significance contract decides, else the rule's flags. */
+static int dc_advisory(dc_context *context, const char *path, const dc_entry *a, const dc_entry *b,
+    int presentation)
+{
+    int significant = context->order && context->order->significant ?
+        context->order->significant(context->order->context, path, a->identity, b->identity) : -1;
+    return significant < 0 ? presentation : !significant;
+}
+
 static int dc_entry_relation(dc_context *context, const char *path,
     const dc_entry *a, const dc_entry *b, size_t source_count,
     int presentation, int hard_only, size_t *first, size_t *second)
 {
     int authored = dc_relation(a, b, source_count, first, second), derived, reverse;
-    if (presentation && (authored == 2 || hard_only)) authored = 0;
-    if (authored == 2 || !context->order) return authored;
+    int advisory = dc_advisory(context, path, a, b, presentation);
+    if (advisory && (authored == 2 || hard_only)) authored = 0;
+    if (authored == 2 || !context->order || !context->order->relation) return authored;
     derived = context->order->relation(context->order->context, path, a->merged, b->merged);
     if (derived < -1 || derived > 1) return 2;
     reverse = context->order->relation(context->order->context, path, b->merged, a->merged);
     if (reverse < -1 || reverse > 1 || derived != -reverse) return 2;
-    if (!presentation && derived && authored && derived != authored) return 2;
+    if (!advisory && derived && authored && derived != authored) return 2;
     return derived ? derived : authored;
 }
 
@@ -935,9 +946,10 @@ static dc_node *dc_emit_entries(const dc_node *first, dc_entry *entries, size_t 
         }
         if (!remaining) break;
         if (next == SIZE_MAX) {
-            if (presentation && !hard_only) {
+            if ((presentation || (context->order && context->order->significant)) && !hard_only) {
                 /* Discard only unresolved layout preferences. Native derived
-                 * relations remain mandatory, including their cycle checks. */
+                 * relations and observed orders remain mandatory, including
+                 * their cycle checks. */
                 hard_only = 1;
                 for (i = 0; i < entry_count; i++) entries[i].incoming = 0;
                 for (i = 0; i < entry_count; i++) if (entries[i].merged && !entries[i].emitted)
@@ -977,11 +989,14 @@ static int dc_deleted_order(dc_entry *entries, size_t entry_count, size_t source
     const sh_decl_collection_rule *rule, dc_context *context, const char *path)
 {
     size_t i, j, k;
-    if (rule->flags & SH_DECL_COLLECTION_PRESENTATION_ORDER) return 1;
+    int presentation = (rule->flags & SH_DECL_COLLECTION_PRESENTATION_ORDER) != 0;
+    if (presentation && !(context->order && context->order->significant)) return 1;
     /* Removing an entry conflicts with moving that same baseline entry. New
-     * neighbors alone do not count as a move of an existing entry. */
+     * neighbors alone do not count as a move of an existing entry, and nor
+     * does an order the native consumer cannot observe. */
     for (i = 0; i < entry_count; i++) if (!entries[i].merged && entries[i].positions[0] != SIZE_MAX) {
-        for (j = 0; j < entry_count; j++) if (i != j && entries[j].positions[0] != SIZE_MAX) {
+        for (j = 0; j < entry_count; j++) if (i != j && entries[j].positions[0] != SIZE_MAX &&
+            !dc_advisory(context, path, &entries[i], &entries[j], presentation)) {
             int original = entries[i].positions[0] < entries[j].positions[0];
             for (k = 1; k <= source_count; k++) if (entries[i].positions[k] != SIZE_MAX &&
                 entries[j].positions[k] != SIZE_MAX &&
@@ -1756,7 +1771,8 @@ static char *dc_compose_resource(const char *declaration_type,
     if (out_length) *out_length = 0;
     if (conflict) { conflict->first = conflict->second = SIZE_MAX; conflict->all_sources = conflict->precise_sources = 0; }
     if (error && error_capacity) error[0] = '\0';
-    if (!out_length || !sources || !count || (rule_count && !rules) || (order && !order->relation)) {
+    if (!out_length || !sources || !count || (rule_count && !rules) ||
+        (order && !order->relation && !order->significant)) {
         dc_fail(&context, NULL, "invalid composition inputs"); return NULL;
     }
     if (schema && (!schema->types || !schema->types->describe || !schema->types->field ||
@@ -1842,6 +1858,17 @@ char *sh_decl_compose_resource_report(const char *declaration_type,
 {
     return dc_compose_resource(declaration_type, baseline, sources, count, rules,
         rule_count, schema, NULL, out_length, error, error_capacity, conflict, conflicting_sources, SIZE_MAX);
+}
+
+char *sh_decl_compose_resource_ordered(const char *declaration_type,
+    sh_decl_source baseline, const sh_decl_source *sources,
+    size_t count, const sh_decl_collection_rule *rules, size_t rule_count,
+    const sh_decl_composition_schema *schema, const sh_decl_collection_order *order,
+    size_t *out_length, char *error, size_t error_capacity, sh_decl_conflict *conflict,
+    unsigned char *conflicting_sources)
+{
+    return dc_compose_resource(declaration_type, baseline, sources, count, rules,
+        rule_count, schema, order, out_length, error, error_capacity, conflict, conflicting_sources, SIZE_MAX);
 }
 
 char *sh_decl_compose_ordered(sh_decl_source baseline, const sh_decl_source *sources,

@@ -4175,95 +4175,108 @@ static void test_registration_mixed_lists(void)
     cleanup(); assert(!failures);
     while (f->count) free(f->regions[--f->count].address);
 }
-/* Compiles as the runtime does: a failed candidate leaves the package it
- * names unserved and the library compiles again. Returns the attempts until
- * the library serves; excluded[] names the packages left out, in order. */
-static size_t isolation_compile(fixture *f, sh_decl_registry_source registry, sh_package_baseline_reader original,
-    source_link_fixture *originals, sh_package_compile_environment *env, const sh_package_library_native *native,
-    size_t *unserved, size_t *invalid, sh_package_library *library, char excluded[][64], size_t capacity)
-{
-    char error[1024];
-    size_t attempts = 0;
-    sh_package_sources *sources = sh_package_sources_scan(root, error, sizeof(error));
-    assert(sources);
-    for (size_t i = 0; i < capacity; i++) excluded[i][0] = 0;
-    for (;;) {
-        attempts++;
-        if (sh_package_library_compile(sources, env, NULL, original, originals, registry, (uintptr_t)f->reflection,
-                native, library, error, sizeof(error))) break;
-        if (*unserved >= sources->package_count || *invalid != SIZE_MAX || attempts > capacity)
-            fprintf(stderr, "owner isolation attempt %zu: unserved=%zu invalid=%zu %s\n",
-                attempts, *unserved, *invalid, error);
-        assert(*unserved < sources->package_count && *invalid == SIZE_MAX && attempts <= capacity);
-        snprintf(excluded[attempts - 1], 64, "%s", sources->packages[*unserved].name);
-        assert(sh_package_sources_remove(sources, *unserved));
-    }
-    sh_package_sources_free(sources);
-    return attempts;
-}
-/* Of the named packages (by folder suffix), the latest (or earliest) in
- * stable source order: tree bytes, as each has one root component. */
-static const char *isolation_pick(const char *const *names, size_t count, int latest)
-{
-    char error[1024];
-    sh_package_sources *sources = sh_package_sources_scan(root, error, sizeof(error));
-    const unsigned char *chosen = NULL;
-    const char *name = NULL;
-    assert(sources);
-    for (size_t i = 0; i < sources->package_count; i++)
-        for (size_t n = 0; n < count; n++) {
-            const char *at = strstr(sources->packages[i].name, names[n]);
-            if (!at || strcmp(at, names[n])) continue;
-            const unsigned char *tree = sh_package_source_tree(sources, i);
-            int order = chosen ? memcmp(tree, chosen, 32) : 0;
-            if (!chosen || (latest ? order > 0 : order < 0)) { chosen = tree; name = names[n]; }
-        }
-    sh_package_sources_free(sources);
-    return name;
-}
-/* A combination the product cannot compose leaves one of its participants
- * unserved, never an owner outside it. Two packages order the same two new
- * modifier rows oppositely (first-match order is significant) beside three
- * packages registering their own AI: the later of the two in stable source
- * order is left out and one more attempt serves every other package, whatever
- * the discovery order. With a third package ordering them like the second,
- * the first of the two that cannot join the earliest is left out first. A
- * composition that cannot run while isolating blames nobody. */
-static void isolation_clash(const char *name, int reversed, int filler)
+/* A package whose conductor copy adds the modifier rows first and second, in
+ * that order, after the stock IMP row. */
+static void joint_clash(const char *name, const char *first, const char *first_mod, const char *second,
+    const char *second_mod)
 {
     char path[256], text[512];
-    /* The description only moves the package's place in stable order. */
     snprintf(path, sizeof(path), "overrides/%s/package.json", name);
-    snprintf(text, sizeof(text), "{\"id\":\"local.%s\",\"name\":\"%s\",\"description\":\"%d\"}", name, name, filler);
-    create(path, text);
+    snprintf(text, sizeof(text), "{\"id\":\"local.%s\",\"name\":\"%s\"}", name, name); create(path, text);
     snprintf(path, sizeof(path), "overrides/%s/assets/generated/decls/entitydef/conductor.decl", name);
     snprintf(text, sizeof(text), "{ class = \"Entity\"; edit = { globalAIMods = { num = 3; "
         "item[0] = { aiType = \"IMP\"; healthMod = \"stock-imp\"; } item[1] = { aiType = \"%s\"; healthMod = \"%s\"; } "
-        "item[2] = { aiType = \"%s\"; healthMod = \"%s\"; } } } }",
-        reversed ? "T6" : "T5", reversed ? "six" : "five", reversed ? "T5" : "T6", reversed ? "five" : "six");
+        "item[2] = { aiType = \"%s\"; healthMod = \"%s\"; } } } }", first, first_mod, second, second_mod);
     create(path, text);
 }
-static void test_registration_owner_isolation(void)
+/* Two valid packages order the same two new modifier rows oppositely. The
+ * engine applies the first row whose mask meets an AI's type, so the order of
+ * a T5 and a T6 row is observed only through a registered type meeting both:
+ * with none, both orders are one behavior and compose, in either discovery
+ * order; once the conductor registers AI typed T5 and T6 together, no one list
+ * serves both packages and the candidate fails naming them. */
+static void test_registration_modifier_order(void)
 {
-    static const char *isolation_stock = "{ class = \"Entity\"; edit = { aiTypeList = { num = 1; "
+    static const char *separate = "{ class = \"Entity\"; edit = { aiTypeList = { num = 1; "
         "item[0] = { aiType = \"IMP\"; entityDef = \"imp\"; } } globalAIMods = { num = 1; "
         "item[0] = { aiType = \"IMP\"; healthMod = \"stock-imp\"; } } } }";
-    static const char *const peers[] = {"peer-1", "peer-2", "peer-3"}, *const targets[] = {"local-only",
-        "parent-only", "modifier-child"};
-    static const char *const pair[] = {"clash-a", "clash-b"}, *const later_pair[] = {"clash-b", "clash-c"};
+    static const char *together = "{ class = \"Entity\"; edit = { aiTypeList = { num = 2; "
+        "item[0] = { aiType = \"IMP\"; entityDef = \"imp\"; } item[1] = { aiType = \"T5 T6\"; entityDef = \"t3\"; } } "
+        "globalAIMods = { num = 1; item[0] = { aiType = \"IMP\"; healthMod = \"stock-imp\"; } } } }";
     fixture storage; fixture *f = &storage; setup(f); conductor_reflection(f);
     sh_decl_registry_source registry = {f, read_memory, (uintptr_t)f->registry, NULL};
     source_link_fixture originals = {f};
     sh_package_compile_environment env = {0};
     sh_package_library_native native = {0};
     size_t unserved = SIZE_MAX, invalid = SIZE_MAX;
-    char path[256], text[1024], excluded[3][64], error[1024];
-    registration_root("registration-isolation");
-    registration_conductor = isolation_stock;
+    char error[1024];
+    registration_root("registration-modifier-order");
     env.baseline = registration_original; env.baseline_context = &originals;
     env.unserved_package = &unserved; env.invalid_package = &invalid;
     native.private_keys = 1;
-    isolation_clash("clash-a", 0, 0); isolation_clash("clash-b", 1, 0);
+    joint_clash("order-a", "T5", "five", "T6", "six"); joint_clash("order-b", "T6", "six", "T5", "five");
+    for (int round = 0; round < 4; round++) {
+        sh_package_library library = {0};
+        char mods[8][96];
+        if (round == 2) rename_package("order-a", "zz-order-a");
+        registration_conductor = round & 1 ? together : separate;
+        sh_package_sources *sources = sh_package_sources_scan(root, error, sizeof(error)); assert(sources);
+        int ok = sh_package_library_compile(sources, &env, NULL, registration_original, &originals, registry,
+            (uintptr_t)f->reflection, &native, &library, error, sizeof(error));
+        if (ok != !(round & 1)) fprintf(stderr, "modifier order %d: ok=%d %s\n", round, ok, error);
+        assert(ok == !(round & 1) && unserved == SIZE_MAX && invalid == SIZE_MAX);
+        if (round & 1) {
+            assert(strstr(error, "order-a") && strstr(error, "order-b") && strstr(error, "product coverage"));
+        } else {
+            const sh_compiled_resource *conductor = named_resource(library.compiled, "entitydef", "conductor");
+            size_t count = conductor ? conductor_rows(conductor, "globalAIMods", "healthMod", mods, 8) : 0;
+            assert(count == 3 && row_index(mods, count, "IMP=stock-imp") == 0 &&
+                row_index(mods, count, "T5=five") != SIZE_MAX && row_index(mods, count, "T6=six") != SIZE_MAX);
+        }
+        sh_package_library_free(&library); sh_package_sources_free(sources);
+    }
+    rename_package("zz-order-a", "order-a");
+    registration_conductor = NULL;
+    cleanup(); assert(!failures);
+    while (f->count) free(f->regions[--f->count].address);
+}
+/* Two valid packages order a T5 row and a T5-or-T6 row oppositely, and the
+ * conductor registers AI typed T5: an AI of that type takes whichever row
+ * comes first, so no composed list serves both. That is product coverage,
+ * not evidence against either owner: the candidate fails naming both and
+ * leaves nothing unserved, in either discovery order, and the caller keeps
+ * its previous generation. Two packages ordering T7 and T8 rows oppositely,
+ * found first, are no part of it: no registered type observes their order. A
+ * malformed package beside them is rejected on its own evidence; once the user
+ * removes one of the two, everything else serves. */
+static size_t joint_index(const sh_package_sources *sources, const char *name)
+{
+    for (size_t i = 0; i < sources->package_count; i++)
+        if (!strcmp(sources->packages[i].name, name)) return i;
+    return SIZE_MAX;
+}
+static void test_registration_joint_gap(void)
+{
+    static const char *joint_stock = "{ class = \"Entity\"; edit = { aiTypeList = { num = 2; "
+        "item[0] = { aiType = \"IMP\"; entityDef = \"imp\"; } item[1] = { aiType = \"T5\"; entityDef = \"t3\"; } } "
+        "globalAIMods = { num = 1; item[0] = { aiType = \"IMP\"; healthMod = \"stock-imp\"; } } } }";
+    static const char *const peers[] = {"peer-1", "peer-2", "peer-3"}, *const targets[] = {"local-only",
+        "parent-only", "modifier-child"};
+    fixture storage; fixture *f = &storage; setup(f); conductor_reflection(f);
+    sh_decl_registry_source registry = {f, read_memory, (uintptr_t)f->registry, NULL};
+    source_link_fixture originals = {f};
+    sh_package_compile_environment env = {0};
+    sh_package_library_native native = {0};
+    sh_package_library library = {0};
+    size_t unserved = SIZE_MAX, invalid = SIZE_MAX;
+    char path[256], text[1024], error[1024], held[MAX_PATH], from[MAX_PATH];
+    registration_root("registration-joint-gap");
+    registration_conductor = joint_stock;
+    env.baseline = registration_original; env.baseline_context = &originals;
+    env.unserved_package = &unserved; env.invalid_package = &invalid;
+    native.private_keys = 1;
+    joint_clash("clash-a", "T5", "five", "T5 T6", "both"); joint_clash("clash-b", "T5 T6", "both", "T5", "five");
+    joint_clash("calm-a", "T7", "seven", "T8", "eight"); joint_clash("calm-b", "T8", "eight", "T7", "seven");
     for (size_t i = 0; i < 3; i++) {
         snprintf(path, sizeof(path), "overrides/%s/package.json", peers[i]);
         snprintf(text, sizeof(text), "{\"id\":\"local.%s\",\"name\":\"%s\"}", peers[i], peers[i]); create(path, text);
@@ -4274,25 +4287,63 @@ static void test_registration_owner_isolation(void)
         snprintf(path, sizeof(path), "overrides/%s/assets/generated/decls/entitydef/peer_%zu.decl", peers[i], i + 1);
         snprintf(text, sizeof(text), "{ class = \"Entity\"; edit = { target = \"%s\"; } }", targets[i]); create(path, text);
     }
-    const char *expected = isolation_pick(pair, 2, 1);
-    assert(expected);
     for (int round = 0; round < 2; round++) {
-        sh_package_library library = {0};
-        char rows[16][96], mods[16][96], leaf[16];
-        if (round) {
-            /* Reversed discovery: the clashing packages now follow the peers. */
-            rename_package("clash-a", "zz-clash-a"); rename_package("clash-b", "zy-clash-b");
-        }
-        size_t attempts = isolation_compile(f, registry, registration_original, &originals, &env, &native,
-            &unserved, &invalid, &library, excluded, 3);
-        /* Package names are folder names; renamed folders keep their suffix. */
-        const char *left = strstr(excluded[0], "clash-");
-        assert(attempts == 2 && left && !strcmp(left, expected));
+        if (round) { rename_package("clash-a", "zz-clash-a"); rename_package("clash-b", "zy-clash-b"); }
+        sh_package_sources *sources = sh_package_sources_scan(root, error, sizeof(error)); assert(sources);
+        int ok = sh_package_library_compile(sources, &env, NULL, registration_original, &originals, registry,
+            (uintptr_t)f->reflection, &native, &library, error, sizeof(error));
+        if (ok || unserved != SIZE_MAX || invalid != SIZE_MAX || !strstr(error, "clash-a") || !strstr(error, "clash-b"))
+            fprintf(stderr, "joint gap %d: ok=%d unserved=%zu invalid=%zu %s\n", round, ok, unserved, invalid, error);
+        assert(!ok && unserved == SIZE_MAX && invalid == SIZE_MAX && !library.compiled);
+        assert(strstr(error, "clash-a") && strstr(error, "clash-b") && strstr(error, "product coverage") &&
+            !strstr(error, "calm-"));
+        sh_package_library_free(&library); sh_package_sources_free(sources);
+    }
+    rename_package("zz-clash-a", "clash-a"); rename_package("zy-clash-b", "clash-b");
+    /* An environment failure while naming the participants guesses nothing. */
+    {
+        sh_package_sources *sources = sh_package_sources_scan(root, error, sizeof(error)); assert(sources);
+        sh_package_library_test_probe_failures(1);
+        int ok = sh_package_library_compile(sources, &env, NULL, registration_original, &originals, registry,
+            (uintptr_t)f->reflection, &native, &library, error, sizeof(error));
+        sh_package_library_test_probe_failures(0);
+        assert(!ok && unserved == SIZE_MAX && invalid == SIZE_MAX && !strstr(error, "cannot compose"));
+        sh_package_library_free(&library); sh_package_sources_free(sources);
+    }
+    /* A malformed owner is rejected on its own evidence; the joint gap stays. */
+    create("overrides/broken/package.json", "{\"id\":\"local.broken\",\"name\":\"broken\"}");
+    create("overrides/broken/assets/generated/decls/entitydef/conductor.decl",
+        "{ class = \"Entity\"; edit = { globalAIMods = { num = 1; }");
+    {
+        sh_package_sources *sources = sh_package_sources_scan(root, error, sizeof(error)); assert(sources);
+        int ok = sh_package_library_compile(sources, &env, NULL, registration_original, &originals, registry,
+            (uintptr_t)f->reflection, &native, &library, error, sizeof(error));
+        if (ok || invalid != joint_index(sources, "broken"))
+            fprintf(stderr, "malformed beside joint gap: ok=%d invalid=%zu unserved=%zu %s\n", ok, invalid, unserved, error);
+        assert(!ok && invalid == joint_index(sources, "broken") && invalid != SIZE_MAX && unserved == SIZE_MAX);
+        assert(sh_package_sources_remove(sources, invalid));
+        ok = sh_package_library_compile(sources, &env, NULL, registration_original, &originals, registry,
+            (uintptr_t)f->reflection, &native, &library, error, sizeof(error));
+        assert(!ok && unserved == SIZE_MAX && invalid == SIZE_MAX && strstr(error, "product coverage"));
+        sh_package_library_free(&library); sh_package_sources_free(sources);
+    }
+    /* The user removes one of the two: every other package serves. */
+    snprintf(held, sizeof(held), "%s\\held", root); assert(CreateDirectoryA(held, NULL));
+    snprintf(from, sizeof(from), "%s\\overrides\\clash-b", root); snprintf(path, sizeof(path), "%s\\clash-b", held);
+    assert(MoveFileA(from, path));
+    snprintf(from, sizeof(from), "%s\\overrides\\broken", root); snprintf(path, sizeof(path), "%s\\broken", held);
+    assert(MoveFileA(from, path));
+    {
+        char rows[16][96], mods[16][96], leaf[16], row[160];
+        sh_package_sources *sources = sh_package_sources_scan(root, error, sizeof(error)); assert(sources);
+        int ok = sh_package_library_compile(sources, &env, NULL, registration_original, &originals, registry,
+            (uintptr_t)f->reflection, &native, &library, error, sizeof(error));
+        if (!ok) fprintf(stderr, "joint gap resolved: %s\n", error);
+        assert(ok && unserved == SIZE_MAX && invalid == SIZE_MAX);
         const sh_compiled_resource *conductor = named_resource(library.compiled, "entitydef", "conductor");
         size_t count = conductor ? conductor_rows(conductor, "aiTypeList", "entityDef", rows, 16) : 0;
         size_t mod_count = conductor ? conductor_rows(conductor, "globalAIMods", "healthMod", mods, 16) : 0;
         for (size_t i = 0; i < 3; i++) {
-            char row[160];
             snprintf(leaf, sizeof(leaf), "peer_%zu", i + 1);
             const char *ai = authored_name(library.compiled, leaf);
             size_t seen = 0;
@@ -4304,62 +4355,36 @@ static void test_registration_owner_isolation(void)
             }
             assert(seen == 1);
         }
-        /* The participant kept serves its modifiers. */
-        assert(count == 4 && mod_count == 3 && row_index(mods, mod_count, "T5=five") != SIZE_MAX &&
-            row_index(mods, mod_count, "T6=six") != SIZE_MAX);
-        sh_package_library_free(&library);
-    }
-    rename_package("zz-clash-a", "clash-a"); rename_package("zy-clash-b", "clash-b");
-    /* An isolating composition that cannot run judges nobody: the candidate
-     * fails with no package left out, and the caller keeps its generation. */
-    {
-        sh_package_library library = {0};
-        sh_package_sources *sources = sh_package_sources_scan(root, error, sizeof(error));
-        assert(sources);
-        sh_package_library_test_probe_failures(1);
-        int ok = sh_package_library_compile(sources, &env, NULL, registration_original, &originals, registry,
-            (uintptr_t)f->reflection, &native, &library, error, sizeof(error));
-        sh_package_library_test_probe_failures(0);
-        assert(!ok && unserved == SIZE_MAX && invalid == SIZE_MAX && !library.compiled);
+        assert(count == 5 && mod_count == 5 &&
+            row_index(mods, mod_count, "T5=five") < row_index(mods, mod_count, "T5 T6=both") &&
+            row_index(mods, mod_count, "T7=seven") != SIZE_MAX && row_index(mods, mod_count, "T8=eight") != SIZE_MAX);
         sh_package_library_free(&library); sh_package_sources_free(sources);
     }
-    /* A third package orders the rows like clash-b. With clash-a earliest in
-     * stable order (its description moves it there), clash-b and clash-c each
-     * cannot join it: the earlier of them is left out first, then the other. */
-    isolation_clash("clash-c", 1, 0);
-    for (int filler = 1;; filler++) {
-        static const char *const all[] = {"clash-a", "clash-b", "clash-c"};
-        if (!strcmp(isolation_pick(all, 3, 0), "clash-a")) break;
-        assert(filler < 64);
-        isolation_clash("clash-a", 0, filler);
-    }
-    {
-        sh_package_library library = {0};
-        const char *last = isolation_pick(later_pair, 2, 1), *first = isolation_pick(later_pair, 2, 0);
-        size_t attempts = isolation_compile(f, registry, registration_original, &originals, &env, &native,
-            &unserved, &invalid, &library, excluded, 3);
-        assert(attempts == 3 && !strcmp(excluded[0], first) && !strcmp(excluded[1], last));
-        sh_package_library_free(&library);
-    }
+    snprintf(from, sizeof(from), "%s\\overrides\\clash-b", root); snprintf(path, sizeof(path), "%s\\clash-b", held);
+    assert(MoveFileA(path, from));
+    snprintf(from, sizeof(from), "%s\\overrides\\broken", root); snprintf(path, sizeof(path), "%s\\broken", held);
+    assert(MoveFileA(path, from));
+    assert(RemoveDirectoryA(held));
     registration_conductor = NULL;
     cleanup(); assert(!failures);
     while (f->count) free(f->regions[--f->count].address);
 }
 /* The same for an editor collection: two packages order the same two
- * encounters oppositely in a whitelist inspector (a strict list) beside
- * three packages adding their own. */
-static void test_editor_owner_isolation(fixture *f, sh_decl_registry_source registry)
+ * encounters oppositely in a whitelist inspector (a strict list) beside three
+ * packages adding their own. */
+static void test_editor_joint_gap(fixture *f, sh_decl_registry_source registry)
 {
     static const char *const names[] = {"clash-a", "clash-b", "peer-1", "peer-2", "peer-3"};
     static const char *const lists[] = {"item[0] = \"parent-only\"; item[1] = \"modifier-child\";",
         "item[0] = \"modifier-child\"; item[1] = \"parent-only\";", "item[0] = \"local-only\";",
         "item[0] = \"local-only\";", "item[0] = \"local-only\";"};
-    char temporary[MAX_PATH], path[256], text[512], excluded[2][64];
+    char temporary[MAX_PATH], path[256], text[512], error[1024], held[MAX_PATH], from[MAX_PATH];
     source_link_fixture originals = {f};
     sh_package_compile_environment env = {0};
+    sh_package_library library = {0};
     size_t unserved = SIZE_MAX, invalid = SIZE_MAX;
     assert(GetTempPathA(sizeof(temporary), temporary));
-    snprintf(root, sizeof(root), "%ssmp-editor-isolation-%lu-%llu", temporary, GetCurrentProcessId(), GetTickCount64());
+    snprintf(root, sizeof(root), "%ssmp-editor-joint-%lu-%llu", temporary, GetCurrentProcessId(), GetTickCount64());
     assert(CreateDirectoryA(root, NULL));
     env.baseline = contribution_original; env.baseline_context = &originals;
     env.unserved_package = &unserved; env.invalid_package = &invalid;
@@ -4371,25 +4396,30 @@ static void test_editor_owner_isolation(fixture *f, sh_decl_registry_source regi
         snprintf(text, sizeof(text), "{ edit = { mode = \"shared\"; validEncounters = { num = %d; %s } } }",
             i < 2 ? 2 : 1, lists[i]); create(path, text);
     }
-    const char *expected = isolation_pick(names, 2, 1);
-    assert(expected);
-    for (int round = 0; round < 2; round++) {
-        sh_package_library library = {0};
-        if (round) { rename_package("clash-a", "zz-clash-a"); rename_package("clash-b", "zy-clash-b"); }
-        size_t attempts = isolation_compile(f, registry, contribution_original, &originals, &env, NULL,
-            &unserved, &invalid, &library, excluded, 2);
-        const char *left = strstr(excluded[0], "clash-");
-        assert(attempts == 2 && left && !strcmp(left, expected));
-        const sh_compiled_resource *list = named_resource(library.compiled,
-            "snappropertyinspector_whitelistencounterdecl", "list");
-        assert(list);
-        sh_decl_node *tree = sh_decl_tree_parse((sh_decl_source){(char *)list->body, list->body_length}, NULL, 0);
-        const sh_decl_node *encounters = sh_decl_tree_member(sh_decl_tree_member(tree, "edit"), "validEncounters");
-        assert(encounters && !strcmp(node_value(sh_decl_tree_member(encounters, "num")), "3"));
-        sh_decl_tree_free(tree);
-        sh_package_library_free(&library);
-    }
-    rename_package("zz-clash-a", "clash-a"); rename_package("zy-clash-b", "clash-b");
+    sh_package_sources *sources = sh_package_sources_scan(root, error, sizeof(error)); assert(sources);
+    int ok = sh_package_library_compile(sources, &env, NULL, contribution_original, &originals, registry,
+        (uintptr_t)f->reflection, NULL, &library, error, sizeof(error));
+    if (ok || unserved != SIZE_MAX || invalid != SIZE_MAX || !strstr(error, "clash-a") || !strstr(error, "clash-b"))
+        fprintf(stderr, "editor joint gap: ok=%d unserved=%zu invalid=%zu %s\n", ok, unserved, invalid, error);
+    assert(!ok && unserved == SIZE_MAX && invalid == SIZE_MAX && strstr(error, "clash-a") && strstr(error, "clash-b"));
+    sh_package_library_free(&library); sh_package_sources_free(sources);
+    snprintf(held, sizeof(held), "%s\\held", root); assert(CreateDirectoryA(held, NULL));
+    snprintf(from, sizeof(from), "%s\\overrides\\clash-b", root); snprintf(path, sizeof(path), "%s\\clash-b", held);
+    assert(MoveFileA(from, path));
+    sources = sh_package_sources_scan(root, error, sizeof(error)); assert(sources);
+    ok = sh_package_library_compile(sources, &env, NULL, contribution_original, &originals, registry,
+        (uintptr_t)f->reflection, NULL, &library, error, sizeof(error));
+    if (!ok) fprintf(stderr, "editor joint gap resolved: %s\n", error);
+    assert(ok && unserved == SIZE_MAX && invalid == SIZE_MAX);
+    const sh_compiled_resource *list = named_resource(library.compiled,
+        "snappropertyinspector_whitelistencounterdecl", "list");
+    assert(list);
+    sh_decl_node *tree = sh_decl_tree_parse((sh_decl_source){(char *)list->body, list->body_length}, NULL, 0);
+    const sh_decl_node *encounters = sh_decl_tree_member(sh_decl_tree_member(tree, "edit"), "validEncounters");
+    assert(encounters && !strcmp(node_value(sh_decl_tree_member(encounters, "num")), "3"));
+    sh_decl_tree_free(tree);
+    sh_package_library_free(&library); sh_package_sources_free(sources);
+    assert(MoveFileA(path, from)); assert(RemoveDirectoryA(held));
     cleanup(); assert(!failures);
 }
 /* Thirteen packages register distinct AI under one authored key. The engine
@@ -6590,7 +6620,8 @@ int main(void)
     test_registration_modifier_precedence();
     test_registration_row_order();
     test_registration_mixed_lists();
-    test_registration_owner_isolation();
+    test_registration_modifier_order();
+    test_registration_joint_gap();
     test_registration_capacity();
     test_registration_private_variants();
     test_registration_stock_inspector();
@@ -6618,7 +6649,7 @@ int main(void)
     test_inherited_editor_parent(&f, registry);
     test_inherited_reflected_state(&f, registry);
     test_editor_parent_contracts(&f, registry);
-    test_editor_owner_isolation(&f, registry);
+    test_editor_joint_gap(&f, registry);
     test_unchanged_editor_copies(&f, registry);
     test_editor_rebase_scopes(&f, registry);
     test_native_original_gaps(&f, registry);
