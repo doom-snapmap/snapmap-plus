@@ -713,6 +713,47 @@ static int sl_seed_orphan_binaries(sh_package_source_link *s)
     }
     return 1;
 }
+static int sl_shader_binary_path(void *context, sh_package_shader_path_kind kind,
+    const char *original, const char *linked)
+{
+    (void)linked;
+    if (kind == SH_PACKAGE_SHADER_BINARY) snprintf(context, 256, "%s", original);
+    return 1;
+}
+/* The other renderer can generate a different permutation set from the same
+ * root (for example, platform extension defines). Its unselected declaration
+ * remains delivery data alongside its renderer-specific binary. This only
+ * accounts the dormant pair; it never certifies or publishes that program.
+ * Selected permutations have already passed complete discovery above. */
+static int sl_shader_inactive_source(sh_package_source_link *s, size_t scope,
+    const sh_compiled_resource *file)
+{
+    const char *path = file->engine_path;
+    size_t n = strlen(path);
+    if (!s->native.shader || strncmp(path, "generated/renderprogs/permutations/", 35) ||
+        n <= 40 || strcmp(path + n - 5, ".decl")) return 0;
+    char binary_path[256] = ""; sh_package_shader_program empty = {0};
+    sh_package_shader_renderer other = s->native.shader->renderer == SH_PACKAGE_SHADER_OPENGL ?
+        SH_PACKAGE_SHADER_VULKAN : SH_PACKAGE_SHADER_OPENGL;
+    if (sh_package_shader_paths(other, path, path, &empty, sl_shader_binary_path, binary_path,
+        s->error, s->error_capacity) != SH_PACKAGE_SHADER_OK) return -1;
+    const sh_compiled_resource *binary_file = NULL;
+    int status = sl_source_file(s, scope, binary_path, 1, &binary_file);
+    if (status != 1) return status;
+    size_t declaration_length = 0, binary_length = 0;
+    unsigned char *declaration = sh_package_compilation_read(s->scopes[scope], file, SIZE_MAX,
+        &declaration_length, s->error, s->error_capacity);
+    unsigned char *binary = declaration ? sh_package_compilation_read(s->scopes[scope], binary_file, SIZE_MAX,
+        &binary_length, s->error, s->error_capacity) : NULL;
+    int paired = 0;
+    if (!declaration || !binary) { sl_env_fail(s, "inactive shader pair could not be read", path); paired = -1; }
+    else if (binary_length >= 8 && !memcmp(binary, "\xb6\x88\x00\xad", 4)) {
+        uint32_t checksum = (uint32_t)binary[4] << 24 | (uint32_t)binary[5] << 16 |
+            (uint32_t)binary[6] << 8 | binary[7];
+        paired = checksum == sh_package_shader_declaration_checksum(declaration, declaration_length);
+    }
+    free(declaration); free(binary); return paired;
+}
 static int sl_shader_accounted(sh_package_source_link *s)
 {
     for (size_t scope = 0; scope < s->scope_count; scope++) for (size_t f = 0; f < s->scopes[scope]->resource_count; f++) {
@@ -731,7 +772,11 @@ static int sl_shader_accounted(sh_package_source_link *s)
         int found = 0;
         for (size_t u = 0; !found && u < s->count; u++) if (s->units[u]->scope == scope)
             for (size_t m = 0; !found && m < s->units[u]->unit.file_count; m++) found = s->units[u]->unit.files[m] == file;
-        if (!found) { s->failed_scope = scope; return sl_fail(s, "shader source input has no verified companion owner", path); }
+        if (!found) {
+            int dormant = sl_shader_inactive_source(s, scope, file);
+            if (dormant < 0) { s->failed_scope = scope; return 0; }
+            if (!dormant) { s->failed_scope = scope; return sl_fail(s, "shader source input has no verified companion owner", path); }
+        }
     }
     return 1;
 }

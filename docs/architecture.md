@@ -56,6 +56,11 @@ Source discovery collects explicitly retained program-preparation requests acros
 the current dependency frontier before retrying. Waiting programs are neither
 reader coverage gaps nor usable units: no partial graph reaches certification
 or publication. Ordinary read and validation failures still stop discovery.
+Renderer selection also applies to generated permutation declarations. A
+declaration not used by the selected renderer can remain an inactive delivery
+artifact when paired with the other renderer's binary and matching source
+checksum. That check accounts for preserved inventory; it does not admit the
+inactive program. Selecting it later still requires complete shader validation.
 Contributor changes to signatures or anchors require the two-image test gate in
 [contributing](contributing.md#7-run-the-tests).
 

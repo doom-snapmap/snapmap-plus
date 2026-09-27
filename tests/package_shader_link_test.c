@@ -436,6 +436,34 @@ static void remove_file(fixture *f,const char *path)
     }
     assert(0);
 }
+static void inactive_permutations(sh_package_shader_renderer renderer)
+{
+    fixture f;setup(&f,1);char error[512];bytes root=program(0);
+    const char *root_path=renderer==SH_PACKAGE_SHADER_OPENGL ? "generated/renderprogs/fixture_pc.bin" :
+        "generated/renderprogs/fixture_pc_vulkan.bin";
+    remove_file(&f,root_path);add(&f,root_path,NULL,NULL,root.data,root.length);
+    remove_file(&f,renderer==SH_PACKAGE_SHADER_OPENGL ? "generated/renderprogs/permutations/fixture_0000000000000001_pc.bin" :
+        "generated/renderprogs/permutations/fixture_0000000000000001_pc_vulkan.bin");
+    if(renderer==SH_PACKAGE_SHADER_VULKAN)
+        remove_file(&f,"generated/spirv/generated/renderprogs/permutations/fixture_0000000000000001.vspv");
+    qsort(f.files,f.compiled.resource_count,sizeof(*f.files),order);
+    sh_package_source_link *link=open_link(&f,renderer,error);
+    if(!link)fprintf(stderr,"inactive permutation: %s\n",error);assert(link);
+    const sh_package_link_inputs *inputs=sh_package_source_link_inputs(link);
+    size_t owner=sh_package_link_inputs_find(inputs,0,"renderprog","fixture");assert(owner!=SIZE_MAX);
+    for(size_t i=0;i<inputs->units[owner].file_count;i++)
+        assert(!strstr(inputs->units[owner].files[i]->engine_path,"permutations/"));
+    sh_package_source_link_close(link);
+    sh_compiled_resource *permutation=(sh_compiled_resource *)sh_package_compilation_find(&f.compiled,permutation_name);
+    assert(permutation);permutation->body[2]^=1;
+    assert(!open_link(&f,renderer,error) && strstr(error,"companion owner"));
+    permutation->body[2]^=1;
+    /* A selected permutation still needs this renderer's full companions. */
+    sh_compiled_resource *selected=(sh_compiled_resource *)sh_package_compilation_find(&f.compiled,root_path);
+    root=program(1);free(selected->body);selected->body=malloc(root.length);assert(selected->body);
+    memcpy(selected->body,root.data,root.length);selected->body_length=root.length;
+    assert(!open_link(&f,renderer,error));clear(&f);
+}
 static int cooked_original(void *context,const char *path,unsigned char **body,size_t *length)
 {
     cook_context *c=context;int present=sh_package_native_assets_shader_read(c->assets,path,body,length);
@@ -607,4 +635,4 @@ static void native_contract(void)
     sh_package_native_assets_close(assets);clear(&f);
 }
 int main(void)
-{ complete_and_bind(SH_PACKAGE_SHADER_VULKAN);complete_and_bind(SH_PACKAGE_SHADER_OPENGL);include_fanout_snapmap_only();unshipped_program();reject_incomplete();native_contract();preparation_contract();shader_scope_contract();preparation_frontier();source_only_opengl(0);source_only_opengl(1);puts("package_shader_link_test: PASS");return 0; }
+{ complete_and_bind(SH_PACKAGE_SHADER_VULKAN);complete_and_bind(SH_PACKAGE_SHADER_OPENGL);include_fanout_snapmap_only();unshipped_program();reject_incomplete();native_contract();preparation_contract();shader_scope_contract();inactive_permutations(SH_PACKAGE_SHADER_OPENGL);inactive_permutations(SH_PACKAGE_SHADER_VULKAN);preparation_frontier();source_only_opengl(0);source_only_opengl(1);puts("package_shader_link_test: PASS");return 0; }
