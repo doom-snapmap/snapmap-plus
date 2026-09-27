@@ -1117,10 +1117,12 @@ static pr_provider *pr_prepare_deliveries(const char *data_root, const char *sou
                 (unsigned long long)(GetTickCount64() - started), linked ? "" : ": ", linked ? "" : error);
             backend_log(line);
             char phases[256];
-            snprintf(line, sizeof(line), "package library phases: %s%s%s%s",
+            snprintf(line, sizeof(line), "package library phases: %s%s%s%s%s%s%s",
                 sh_package_library_phases(&isolated, phases, sizeof(phases)),
                 isolated.source_phases[0] ? " (source link: " : "", isolated.source_phases,
-                isolated.source_phases[0] ? ")" : "");
+                isolated.source_phases[0] ? ")" : "",
+                isolated.contribution_phases[0] ? " (contributions: " : "", isolated.contribution_phases,
+                isolated.contribution_phases[0] ? ")" : "");
             backend_log(line);
             /* Accounted coverage gaps help diagnose a later refusal too. */
             if (!linked && isolated.coverage) backend_log(isolated.coverage);

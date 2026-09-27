@@ -71,6 +71,7 @@ typedef struct sh_package_library {
      * coverage it survives a failed compile, as a diagnostic only. */
     unsigned long long phase_ms[SH_PACKAGE_LIBRARY_PHASES];
     char source_phases[256]; /* The source capture's own phases, when it opened. */
+    char contribution_phases[256]; /* The contribution phase's own steps, when it ran. */
 } sh_package_library;
 
 /* Write "scopes N ms, native N ms, ..." for the last compile; returns out. */

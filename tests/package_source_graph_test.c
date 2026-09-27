@@ -4131,6 +4131,9 @@ static void test_registration_mixed_lists(void)
         registry, (uintptr_t)f->reflection, &native, &library, error, sizeof(error));
     if (!ok) fprintf(stderr, "registration mixed lists: %s\n", error);
     assert(ok && unserved == SIZE_MAX && invalid == SIZE_MAX);
+    /* The activation log breaks the contribution phase into its steps. */
+    assert(strstr(library.contribution_phases, "keys ") && strstr(library.contribution_phases, "registration ") &&
+        strstr(library.contribution_phases, "document "));
     const sh_compiled_resource *conductor = named_resource(library.compiled, "entitydef", "conductor");
     size_t count = conductor ? conductor_rows(conductor, "aiTypeList", "entityDef", rows, 16) : 0;
     static const char *const stock_rows[] = {"IMP=imp", "T3=t3", "T4=imp", "T5=t3", "T6=imp"};

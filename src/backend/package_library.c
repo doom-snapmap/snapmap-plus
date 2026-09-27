@@ -90,7 +90,13 @@ typedef struct pl_build {
     char *key_notes;
     /* Group codes this compile's relocated values use (package_keys.h). */
     sh_package_key_groups *key_groups;
+    /* Wall-clock milliseconds of the contribution phase's steps (PL_STEP_*). */
+    unsigned long long step_ms[9];
 } pl_build;
+enum {
+    PL_STEP_COVERAGE, PL_STEP_LOCALIZE, PL_STEP_TOKENS, PL_STEP_KEYS, PL_STEP_EDITOR,
+    PL_STEP_REGISTRATION, PL_STEP_HANDS, PL_STEP_SHARED, PL_STEP_DOCUMENT, PL_STEPS
+};
 
 static void pl_native_close(pl_build *b)
 {
@@ -269,6 +275,25 @@ static void pl_phase(sh_package_library *out, int phase, unsigned long long *mar
 {
     unsigned long long now = pl_now_ms();
     out->phase_ms[phase] += now >= *mark ? now - *mark : 0; *mark = now;
+}
+/* The same for one step of the contribution phase. */
+static void pl_step(pl_build *b, int step, unsigned long long *mark)
+{
+    unsigned long long now = pl_now_ms();
+    b->step_ms[step] += now >= *mark ? now - *mark : 0; *mark = now;
+}
+static void pl_steps(const pl_build *b, char *out, size_t capacity)
+{
+    static const char *const names[PL_STEPS] = {
+        "coverage", "localize", "tokens", "keys", "editor", "registration", "hands", "shared", "document"
+    };
+    size_t used = 0;
+    *out = 0;
+    for (int i = 0; i < PL_STEPS && used < capacity; i++) {
+        int n = snprintf(out + used, capacity - used, "%s%s %llu ms", i ? ", " : "", names[i], b->step_ms[i]);
+        if (n < 0) break;
+        used += (size_t)n;
+    }
 }
 const char *sh_package_library_phases(const sh_package_library *library, char *out, size_t capacity)
 {
@@ -2883,7 +2908,9 @@ static int pl_contributions_open(pl_build *b, const sh_package_sources *sources,
     if (!c->reuse || !c->inputs.units || !c->units || !c->shared || !c->global || !members || !registrations ||
         !done) goto bad;
     memcpy(c->inputs.units, original->units, original->count * sizeof(*c->inputs.units));
+    unsigned long long mark = pl_now_ms();
     if (!pl_localize(b, sources, error, capacity)) goto bad;
+    pl_step(b, PL_STEP_LOCALIZE, &mark);
     /* Group members once: eligible units sorted by family and name. */
     for (size_t i = 0; i < original->count; i++) {
         const sh_package_link_unit *unit = c->inputs.units + i;
@@ -2906,15 +2933,27 @@ static int pl_contributions_open(pl_build *b, const sh_package_sources *sources,
     (void)done;
     /* Package keys move before any shared collection composes, so inspector
      * choices and registration rows already carry each package's final key. */
-    if (!pl_tokens(c, error, capacity) || !pl_key_phase(b, sources, error, capacity)) goto bad;
+    pl_step(b, PL_STEP_REGISTRATION, &mark);
+    if (!pl_tokens(c, error, capacity)) goto bad;
+    pl_step(b, PL_STEP_TOKENS, &mark);
+    if (!pl_key_phase(b, sources, error, capacity)) goto bad;
+    pl_step(b, PL_STEP_KEYS, &mark);
     for (int phase = 1; phase <= 3; phase++) {
         if (!pl_tokens(c, error, capacity)) goto bad;
+        pl_step(b, PL_STEP_TOKENS, &mark);
         if (!pl_contribution_phase(b, sources, members, eligible, phase, error, capacity)) goto bad;
+        pl_step(b, PL_STEP_EDITOR, &mark);
     }
-    if (!pl_tokens(c, error, capacity) ||
-        !pl_registration_phase(b, sources, registrations, registration_count, error, capacity)) goto bad;
-    if (!pl_tokens(c, error, capacity) || !pl_hands_phase(b, sources, error, capacity)) goto bad;
     if (!pl_tokens(c, error, capacity)) goto bad;
+    pl_step(b, PL_STEP_TOKENS, &mark);
+    if (!pl_registration_phase(b, sources, registrations, registration_count, error, capacity)) goto bad;
+    pl_step(b, PL_STEP_REGISTRATION, &mark);
+    if (!pl_tokens(c, error, capacity)) goto bad;
+    pl_step(b, PL_STEP_TOKENS, &mark);
+    if (!pl_hands_phase(b, sources, error, capacity)) goto bad;
+    pl_step(b, PL_STEP_HANDS, &mark);
+    if (!pl_tokens(c, error, capacity)) goto bad;
+    pl_step(b, PL_STEP_TOKENS, &mark);
     /* Keep a verified baseline selector/bank slot. Other bound variants get
      * private native identities; historical contexts are never overwritten by
      * the modern field union. With no baseline, only one equal shared class can
@@ -2934,6 +2973,7 @@ static int pl_contributions_open(pl_build *b, const sh_package_sources *sources,
         if (selected == SIZE_MAX && equal && eligible) selected = first;
         c->shared[i] = c->classes.nodes[i] == selected;
     }
+    pl_step(b, PL_STEP_SHARED, &mark);
     pl_tokens_free(c); free(members); free(registrations); free(done); return 1;
 bad:
     free(members); free(registrations); free(done); return 0;
@@ -3198,10 +3238,14 @@ static int pl_compile(const sh_package_sources *sources, const sh_package_proven
         }
         goto done;
     }
+    unsigned long long step_mark = pl_now_ms();
     if (!pl_coverage(&b, sources, &out->coverage)) {
         snprintf(error, capacity, "cannot account package coverage"); goto done;
     }
-    if (!pl_contributions_open(&b, sources, error, capacity)) {
+    pl_step(&b, PL_STEP_COVERAGE, &step_mark);
+    int opened = pl_contributions_open(&b, sources, error, capacity);
+    pl_steps(&b, out->contribution_phases, sizeof(out->contribution_phases));
+    if (!opened) {
         if (!contexts && b.contribution_invalid != SIZE_MAX && environment->invalid_package)
             *environment->invalid_package = b.contribution_invalid;
         else if (!contexts && b.contribution_owner != SIZE_MAX && environment->unserved_package)
@@ -3214,7 +3258,10 @@ static int pl_compile(const sh_package_sources *sources, const sh_package_proven
         if (!grown) { snprintf(error, capacity, "cannot account package coverage"); goto done; }
         memcpy(grown + used, b.key_notes, add + 1); out->coverage = grown;
     }
+    step_mark = pl_now_ms();
     if (contexts && !pl_document_shared(&b, original, original_context, error, capacity)) goto done;
+    pl_step(&b, PL_STEP_DOCUMENT, &step_mark);
+    pl_steps(&b, out->contribution_phases, sizeof(out->contribution_phases));
     pl_phase(out, SH_PACKAGE_LIBRARY_PHASE_CONTRIBUTIONS, &mark);
     /* Authored documents carry their own selector/inspector behavior. Changed
      * editor units receive ordinary bound aliases just like their gameplay
@@ -3275,9 +3322,12 @@ done:
          * diagnostics only. */
         char *coverage = out->coverage; out->coverage = NULL;
         unsigned long long phases[SH_PACKAGE_LIBRARY_PHASES]; char source_phases[sizeof(out->source_phases)];
+        char contribution_phases[sizeof(out->contribution_phases)];
         memcpy(phases, out->phase_ms, sizeof(phases)); memcpy(source_phases, out->source_phases, sizeof(source_phases));
+        memcpy(contribution_phases, out->contribution_phases, sizeof(contribution_phases));
         sh_package_library_free(out); out->coverage = coverage;
         memcpy(out->phase_ms, phases, sizeof(phases)); memcpy(out->source_phases, source_phases, sizeof(source_phases));
+        memcpy(out->contribution_phases, contribution_phases, sizeof(contribution_phases));
         if (!*error) snprintf(error, capacity, "scoped package library could not be prepared");
     }
     return ok;
