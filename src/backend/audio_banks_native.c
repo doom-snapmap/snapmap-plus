@@ -952,7 +952,12 @@ static int an_pbank_load(size_t index, uint32_t **loaded, size_t *loaded_count, 
     if (b->uncertain) return an_fail(error, capacity, "native audio bank %u has an uncertain earlier load or unload", b->id);
     int present = sh_audio_registry_bank(&g_registry, b->id, &usage, error, capacity);
     if (present < 0) return 0;
-    if (present && usage.loaded) return 1;
+    /* Sound init prepares doom_initial.bnk rather than loading it: the prepare
+     * path (VK 141d2d790, GL 141d46bb0) runs the same bank reader and counts
+     * +0x74 but never sets the loaded bit. Its objects are registered, so a
+     * prepared slot already serves lookups. A load over it set the loaded bit
+     * without a slot reference, so it could never be released. */
+    if (present && (usage.loaded || usage.prepared > 0)) return 1;
     b->owned = 0; /* An owned load that vanished was unloaded externally. */
     int result = b->numeric ? sh_audio_bank_commands_load(&g_commands, b->id) : an_named_load(b->filename, b->id);
     if (result == 69) return 1;

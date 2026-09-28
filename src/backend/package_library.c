@@ -372,6 +372,38 @@ static int pl_coverage(const pl_build *b, const sh_package_sources *sources, cha
     *out = text; return 1;
 }
 
+/* An authored event edit SnapMap never runs is reported, not repaired: the
+ * native registration order keeps the earlier bank's copy (R039), exactly as
+ * replacing that bank file in the game would. */
+typedef struct pl_shadow_notes {
+    const pl_build *build;
+    const sh_package_sources *sources;
+    char *text;
+} pl_shadow_notes;
+static int pl_shadow_note(void *context, size_t scope, uint32_t event, const char *sound,
+    const char *bank, const char *first)
+{
+    static const char format[] = "%s%s%s%s: audio event %u%s%s%s edited in %s never plays in SnapMap: "
+        "%s registers that event first, so this edit has no effect.\n";
+    pl_shadow_notes *notes = context;
+    const char *label = "map source", *id = "", *leaf = bank ? strrchr(bank, '/') : NULL, *earlier = first ? strrchr(first, '/') : NULL;
+    if (!notes->build->contexts && scope < notes->sources->component_count) {
+        const sh_package_component *component = notes->sources->components + scope;
+        label = component->descriptor.name[0] ? component->descriptor.name : notes->sources->packages[component->owner].name;
+        id = component->descriptor.id;
+    }
+    leaf = leaf ? leaf + 1 : bank ? bank : "?"; earlier = earlier ? earlier + 1 : first ? first : "?";
+    int n = snprintf(NULL, 0, format, label, *id ? " [" : "", id, *id ? "]" : "", event,
+        sound ? " (" : "", sound ? sound : "", sound ? ")" : "", leaf, earlier);
+    size_t used = notes->text ? strlen(notes->text) : 0;
+    if (n < 0 || (size_t)n > SIZE_MAX - used - 1) return 0;
+    char *grown = realloc(notes->text, used + (size_t)n + 1); if (!grown) return 0;
+    notes->text = grown;
+    snprintf(grown + used, (size_t)n + 1, format, label, *id ? " [" : "", id, *id ? "]" : "", event,
+        sound ? " (" : "", sound ? sound : "", sound ? ")" : "", leaf, earlier);
+    return 1;
+}
+
 /* Policy and product defaults have their own view. Peer declaration bytes are
  * never passed through the unbound whole-file composer. */
 static int pl_shared_sources(pl_build *b, const sh_package_sources *sources,
@@ -4007,7 +4039,10 @@ static int pl_compile(const sh_package_sources *sources, const sh_package_proven
     if (!discover) goto done;
     if (!contexts || !contexts->binding_count) for (size_t i = 0; i < b.authored_count; i++)
         discover[i] = !contexts || contexts->contexts[i].mode == SH_PACKAGE_CONTEXT_ISOLATED;
-    sh_package_source_root_plan root_plan = {discover, b.count - 1, contexts};
+    else if (native && native->document_roots) for (size_t i = 0; i < b.authored_count; i++)
+        discover[i] = contexts->contexts[i].mode == SH_PACKAGE_CONTEXT_COMPOSED;
+    sh_package_source_root_plan root_plan = {discover, b.count - 1, contexts,
+        contexts && native ? native->document_roots : NULL};
     sh_package_source_failure failure;
     b.reader = sh_package_source_link_open_attributed((const sh_package_compilation *const *)b.scopes,
         b.count, catalog, original, original_context, registry, reflection, &source_native,
@@ -4110,6 +4145,16 @@ static int pl_compile(const sh_package_sources *sources, const sh_package_proven
                 sh_package_audio_program_contains(b.audio, assignment.inputs->scopes[i], unit->name) &&
                 !sh_package_audio_program_output(b.audio, assignment.inputs->scopes[i], unit->name,
                     b.linked.names[b.linked.classes.nodes[i]], error, capacity)) goto done;
+        }
+        pl_shadow_notes notes = {&b, sources, NULL};
+        if (!sh_package_audio_program_shadowed(b.audio, pl_shadow_note, &notes)) {
+            free(notes.text); snprintf(error, capacity, "cannot account ineffective audio edits"); goto done;
+        }
+        if (notes.text) {
+            size_t used = out->coverage ? strlen(out->coverage) : 0, add = strlen(notes.text);
+            char *grown = add < SIZE_MAX - used ? realloc(out->coverage, used + add + 1) : NULL;
+            if (!grown) { free(notes.text); snprintf(error, capacity, "cannot account ineffective audio edits"); goto done; }
+            memcpy(grown + used, notes.text, add + 1); out->coverage = grown; free(notes.text);
         }
         out->audio = b.audio; b.audio = NULL;
     }

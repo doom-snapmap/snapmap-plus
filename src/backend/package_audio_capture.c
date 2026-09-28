@@ -24,6 +24,8 @@ struct sh_package_audio_capture {
     int inventory;
     uint32_t *roots;
     size_t root_count;
+    uint32_t *absent; /* native unresolved lookups captured from the scope */
+    size_t absent_count;
 };
 typedef struct pac_visit {
     sh_package_audio_capture *capture;
@@ -133,7 +135,8 @@ static int pac_collect(void *context, const char *path, int original)
     sh_package_audio_capture *capture = context; (void)original;
     for (pac_file *file = capture->files; file; file = file->next) if (!strcmp(file->path, path)) {
         if (file->bank) capture->banks[capture->input.bank_count++] =
-            (sh_audio_graph_bank){file->path, file->source, &file->codec, file->original};
+            (sh_audio_graph_bank){file->path, file->source, &file->codec, file->original,
+                file->original && sh_package_audio_scope_native(capture->scope, file->path)};
         return 1;
     }
     return 0;
@@ -142,7 +145,17 @@ void sh_package_audio_capture_close(sh_package_audio_capture *capture)
 {
     if (!capture) return;
     while (capture->files) { pac_file *file = capture->files; capture->files = file->next; pac_file_close(file); }
-    free(capture->roots);free(capture->banks); sh_package_audio_scope_close(capture->scope); free(capture);
+    free(capture->roots);free(capture->banks);free(capture->absent); sh_package_audio_scope_close(capture->scope); free(capture);
+}
+static int pac_absent(void *context, uint32_t id)
+{
+    const sh_package_audio_capture *capture = context;
+    size_t low = 0, high = capture->absent_count;
+    while (low < high) {
+        size_t middle = low + (high - low) / 2;
+        if (capture->absent[middle] < id) low = middle + 1; else high = middle;
+    }
+    return low < capture->absent_count && capture->absent[low] == id;
 }
 static int pac_select(sh_package_audio_capture *capture,const uint32_t *events,size_t count,
     sh_package_audio_path_visit visit,void *context,char *error,size_t capacity)
@@ -170,8 +183,13 @@ int sh_package_audio_capture_extend(sh_package_audio_capture *capture,
     if (banks > SIZE_MAX / sizeof(*capture->banks)) goto failed;
     sh_audio_graph_bank *selected = calloc(banks ? banks : 1, sizeof(*selected)); if (!selected) goto failed;
     free(capture->banks); capture->banks = selected;
-    capture->input = (sh_audio_graph_scope){capture->banks, 0, capture, pac_media};
+    capture->input = (sh_audio_graph_scope){capture->banks, 0, capture, pac_media, pac_absent};
     if (!pac_select(capture, events, count, pac_collect, capture, error, capacity)) goto failed;
+    const uint32_t *absent = NULL; size_t absent_count = sh_package_audio_scope_absent(capture->scope, &absent);
+    if (absent_count > SIZE_MAX / sizeof(*absent)) goto failed;
+    uint32_t *copy = malloc((absent_count ? absent_count : 1) * sizeof(*copy)); if (!copy) goto failed;
+    if (absent_count) memcpy(copy, absent, absent_count * sizeof(*copy));
+    free(capture->absent); capture->absent = copy; capture->absent_count = absent_count;
     return 1;
 failed:
     if (error && capacity && !*error) pac_fail(error, capacity, "cannot prepare captured audio scope", NULL);

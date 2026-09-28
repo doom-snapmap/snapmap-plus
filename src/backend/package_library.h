@@ -43,6 +43,11 @@ typedef struct sh_package_library_native {
     const sh_package_key_groups *key_groups;
     /* Shared process-lifetime native binding/alias reservations. */
     sh_package_link_history *history;
+    /* A legacy map's own typed values. Its historical composed contexts then
+     * derive exactly those stock roots their sources change (a bank's sound,
+     * an entity reaching a changed material or model); nothing else is
+     * discovered, and only the document's sites select any of them. */
+    const sh_package_references *document_roots;
 } sh_package_library_native;
 
 /* Build phases timed for the activation log. */

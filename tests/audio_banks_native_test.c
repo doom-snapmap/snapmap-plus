@@ -831,6 +831,41 @@ static int rp_exclusive_visit(void *context, sh_audio_identity_domain domain, ui
 { rp_exclusive *e = context; (void)domain; if (id != e->except && !e->found) e->found = id; return 1; }
 static uint32_t rp_first_exclusive(sh_audio_id_lease *lease, uint32_t except)
 { rp_exclusive e = {except, 0}; CHECK(sh_audio_id_lease_exclusive(lease, rp_exclusive_visit, &e) && e.found); return e.found; }
+static int prepared_loads;
+static int prepared_named_load(const char *name, int pool, uint32_t *id)
+{ (void)pool; prepared_loads++; return sh_audio_bank_identity(name, id) ? 1 : 2; }
+/* Sound init prepares doom_initial.bnk (VK 141d2d790, GL 141d46bb0): one
+ * preparation reference, no load reference and a clear loaded bit. Its
+ * objects are registered, so a program shares it and never loads over it. */
+static void prepared_native_slot(void)
+{
+    unsigned char *manager = calloc(1, 0xca0), *slot = calloc(1, 0x80);
+    uint32_t id = 0, *owned = NULL; int32_t one = 1, refs = -1, prepared = -1; size_t owned_count = 0;
+    char error[256] = {0}; CRITICAL_SECTION lock;
+    CHECK(manager && slot && sh_audio_bank_identity("doom_initial.bnk", &id));
+    if (!manager || !slot) { free(manager); free(slot); return; }
+    InitializeCriticalSection(&lock);
+    memcpy(slot + 0x10, &id, 4); memcpy(slot + 0x74, &one, 4);
+    memcpy(manager + 0x690 + (id % 193) * 8, &slot, sizeof(slot));
+    void *manager_slot = manager;
+    sh_audio_registry saved_registry = g_registry; ab_load_fn saved_load = g_load;
+    an_pbank *saved_banks = g_pbanks; size_t saved_count = g_pbank_count;
+    an_pbank bank = {0}; bank.id = id; strcpy_s(bank.filename, sizeof(bank.filename), "doom_initial.bnk");
+    g_registry = (sh_audio_registry){&manager_slot, NULL, &lock}; g_load = prepared_named_load;
+    g_pbanks = &bank; g_pbank_count = 1; prepared_loads = 0;
+    CHECK(an_pbank_load(0, &owned, &owned_count, error, sizeof(error)) == 1);
+    CHECK(!prepared_loads && !bank.owned && !owned_count);
+    CHECK(an_pbank_unload_idle(0, error, sizeof(error)) == 1);
+    memcpy(&refs, slot + 0x70, 4); memcpy(&prepared, slot + 0x74, 4);
+    CHECK(!refs && prepared == 1 && !(slot[0x78] & 1));
+    /* Without a native slot the same plan does load (and then owns) the bank. */
+    memset(manager + 0x690 + (id % 193) * 8, 0, sizeof(slot));
+    CHECK(an_pbank_load(0, &owned, &owned_count, error, sizeof(error)) == 1);
+    CHECK(prepared_loads == 1 && bank.owned && owned_count == 1);
+    free(owned);
+    g_registry = saved_registry; g_load = saved_load; g_pbanks = saved_banks; g_pbank_count = saved_count;
+    DeleteCriticalSection(&lock); free(slot); free(manager);
+}
 static void retained_programs(void)
 {
     char base[MAX_PATH], error[512];
@@ -1256,6 +1291,7 @@ int main(void)
     }
     an_clear_catalog();g_catalog_ready=0;
     compiled_playback_settings();
+    prepared_native_slot();
     retained_programs();
     snprintf(path,sizeof(path),"%s\\a.bnk",root); CHECK(DeleteFileA(path));
     snprintf(path,sizeof(path),"%s\\b.bnk",root); CHECK(DeleteFileA(path));

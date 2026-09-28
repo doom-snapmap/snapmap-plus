@@ -1471,7 +1471,9 @@ static int historical_baseline(void *context, const char *path, unsigned char **
         !strcmp(path, "generated/decls/entitydef/history/stockbase.decl") ?
             "{ class = \"Entity\"; edit = { health = 1; target = \"\"; } }" :
         !strcmp(path, "generated/decls/entitydef/history/child.decl") ?
-            "{ class = \"Entity\"; edit = { health = 1; } }" : NULL;
+            "{ class = \"Entity\"; edit = { health = 1; } }" :
+        !strcmp(path, "generated/decls/entitydef/history/holder.decl") ?
+            "{ class = \"Entity\"; edit = { health = 3; target = \"history/child\"; } }" : NULL;
     (void)context; *body = NULL; *length = 0;
     if (!text) return 0;
     *length = strlen(text); *body = (unsigned char *)_strdup(text); return *body ? 1 : -1;
@@ -1869,6 +1871,201 @@ done:
     cleanup_resources(data);
 }
 
+/* A legacy map's package may change only a dependency: history/child here,
+ * as a texture, material or bank changes the stock resources that reach it.
+ * Under the file replacement the map was authored with, the stock
+ * history/holder its entity names meant the changed child. Its own typed
+ * values name that derived identity; an unaffected stock entity and the local
+ * library's different child are not used, and a vanilla map gains nothing. */
+static int derived_resource_health(const sh_package_compilation *compiled, const char *native, const char *health)
+{
+    if (compiled) for (size_t i = 0; i < compiled->resource_count; i++) {
+        const sh_compiled_resource *r = compiled->resources + i;
+        if (r->native_name && !strcmp(r->native_name, native) && r->body && strstr((const char *)r->body, health)) return 1;
+    }
+    return 0;
+}
+static void test_historical_derived_identities(void)
+{
+    const char *json = "{\"variables\":{\"allocCount\":[0,0,0,0,0],\"string\":[]},\"entities\":["
+        "{\"targetType\":\"idDeclEntityDef\",\"inherit\":\"history/holder\"},"
+        "{\"targetType\":\"idDeclEntityDef\",\"inherit\":\"history/stockbase\"}]}";
+    char data[MAX_PATH], map[MAX_PATH], vanilla[MAX_PATH], error[2048];
+    admission_fixture f; admission_setup(&f);
+    sh_decl_registry_source registry = {&f, admission_read, (uintptr_t)f.registry, NULL};
+    sh_package_map_plan *before = NULL, *plan = NULL, *stock = NULL;
+    sh_package_sources *sources = NULL;
+    sh_package_bundle_binding row = {0};
+    sh_package_provenance selected = {0};
+    char *old = NULL, *bound = NULL, *plain = NULL; size_t old_length = 0, length = 0, plain_length = 0;
+    create("derived-data/overrides/local/package.json", "{\"id\":\"local-child\",\"name\":\"Local child\"}");
+    create("derived-data/overrides/local/assets/generated/decls/entitydef/history/child.decl",
+        "{ class = \"Entity\"; edit = { health = 50; } }");
+    create("derived-map/overrides/pkg/package.json", "{\"id\":\"legacy-child\",\"name\":\"Legacy child\"}");
+    create("derived-map/overrides/pkg/assets/generated/decls/entitydef/history/child.decl",
+        "{ class = \"Entity\"; edit = { health = 9; } }");
+    create("derived-vanilla/overrides", NULL);
+    snprintf(data, sizeof(data), "%s/derived-data", root);
+    snprintf(map, sizeof(map), "%s/derived-map", root);
+    snprintf(vanilla, sizeof(vanilla), "%s/derived-vanilla", root);
+    sh_package_runtime_test_dispose();
+    sh_package_runtime_test_baseline(historical_baseline, NULL);
+    CHECK(sh_package_runtime_refresh(data));
+    sources = sh_package_sources_scan(map, error, sizeof(error));
+    CHECK(sources && sources->package_count == 1); if (!sources || sources->package_count != 1) goto done;
+    strcpy_s(row.source_name, sizeof(row.source_name), sources->packages[0].name);
+    memcpy(row.compiler_tree, sources->fingerprints[0], 32);
+    row.original = sh_package_bundle_capture(sources, 0, data, error, sizeof(error)); CHECK(row.original);
+    if (!row.original) goto done;
+    sh_package_runtime_test_source_readers(registry, (uintptr_t)f.reflection);
+    /* Authored files alone leave the derived holder stock (the old recipe). */
+    before = sh_package_runtime_prepare_map_deliveries(data, map, NULL, &row, 1, error, sizeof(error));
+    if (!before) fprintf(stderr, "derived before: %s\n", error);
+    CHECK(before);
+    if (before) {
+        old = sh_package_map_plan_rebind(before, NULL, json, strlen(json), &old_length, error, sizeof(error));
+        CHECK(old && strstr(old, "\"inherit\":\"history/holder\""));
+    }
+    plan = sh_package_runtime_prepare_map_document(data, map, NULL, &row, 1, json, strlen(json), error, sizeof(error));
+    if (!plan) fprintf(stderr, "derived document: %s\n", error);
+    CHECK(plan); if (!plan) goto done;
+    bound = sh_package_map_plan_rebind(plan, NULL, json, strlen(json), &length, error, sizeof(error));
+    if (!bound) fprintf(stderr, "derived rebind: %s\n", error);
+    CHECK(bound && !strstr(bound, "\"inherit\":\"history/holder\"") && strstr(bound, "\"inherit\":\"history/stockbase\""));
+    if (bound) {
+        int present = 0;
+        CHECK(sh_map_provenance_read(bound, length, &selected, &present, error, sizeof(error)) && present);
+        /* One actual site selected the derived holder in the map's own context. */
+        CHECK(selected.use_count == 1 && selected.binding_count == 1 &&
+            !strcmp(selected.bindings[0].original, "history/holder") &&
+            !strncmp(selected.bindings[0].name, "smp/", 4) &&
+            selected.context_count == 1 && selected.contexts[0].mode == SH_PACKAGE_CONTEXT_COMPOSED);
+        const sh_package_compilation *compiled = sh_package_map_plan_compilation(plan);
+        /* The holder variant reaches the map's child, never the local library's. */
+        const sh_compiled_resource *child = historical_resource(compiled, "generated/decls/entitydef/history/child.decl");
+        CHECK(child && child->native_name && strstr((const char *)child->body, "health = 9"));
+        if (child && child->native_name && selected.binding_count)
+            CHECK(derived_resource_health(compiled, selected.bindings[0].name, child->native_name));
+    }
+    stock = sh_package_runtime_prepare_map_document(data, vanilla, NULL, NULL, 0, json, strlen(json), error, sizeof(error));
+    CHECK(stock);
+    if (stock) {
+        plain = sh_package_map_plan_rebind(stock, NULL, json, strlen(json), &plain_length, error, sizeof(error));
+        CHECK(plain && plain_length == strlen(json) && !memcmp(plain, json, plain_length));
+    }
+done:
+    if (plain) HeapFree(GetProcessHeap(), 0, plain);
+    if (bound) HeapFree(GetProcessHeap(), 0, bound);
+    if (old) HeapFree(GetProcessHeap(), 0, old);
+    sh_package_provenance_free(&selected);
+    sh_package_map_plan_free(stock); sh_package_map_plan_free(plan); sh_package_map_plan_free(before);
+    sh_package_bundle_release(row.original); sh_package_sources_free(sources);
+    sh_package_runtime_test_source_readers((sh_decl_registry_source){0}, 0);
+    sh_package_runtime_test_dispose(); sh_package_runtime_test_baseline(baseline, NULL);
+    for (size_t i = 0; i < f.count; i++) free(f.regions[i].address);
+    cleanup_resources(data);
+}
+/* The recipe keeps only changed derived identities the document names, in the
+ * map's own context, and never replaces an authored row. */
+static void test_historical_derived_recipe(void)
+{
+    sh_package_provenance historical = {0}, linked = {0};
+    sh_package_references roots = {0};
+    unsigned char own[1][32] = {{1}}, other[1][32] = {{2}};
+    size_t h = sh_package_provenance_context_add(&historical, SH_PACKAGE_CONTEXT_COMPOSED, own, 1, NULL);
+    size_t mine = sh_package_provenance_context_add(&linked, SH_PACKAGE_CONTEXT_COMPOSED, own, 1, NULL);
+    size_t theirs = sh_package_provenance_context_add(&linked, SH_PACKAGE_CONTEXT_COMPOSED, other, 1, NULL);
+    historical.semantics = SH_PACKAGE_PROVENANCE_HISTORICAL;
+    CHECK(h != SIZE_MAX && mine != SIZE_MAX && theirs != SIZE_MAX);
+    CHECK(sh_package_provenance_bind(&historical, "material", "authored/mat", "authored/mat", &h, 1));
+    CHECK(sh_package_provenance_bind(&linked, "material", "authored/mat", "smp/mat", &mine, 1));
+    CHECK(sh_package_provenance_bind(&linked, "sound", "play_changed", "smp/sound", &mine, 1));
+    CHECK(sh_package_provenance_bind(&linked, "entitydef", "props/reaches", "smp/entity", &mine, 1));
+    CHECK(sh_package_provenance_bind(&linked, "entitydef", "props/unchanged", "props/unchanged", &mine, 1));
+    CHECK(sh_package_provenance_bind(&linked, "entitydef", "props/elsewhere", "smp/elsewhere", &theirs, 1));
+    CHECK(sh_package_provenance_bind(&linked, "sound", "play_unused", "smp/unused", &mine, 1));
+    const char *named[][2] = {{"material", "authored/mat"}, {"sound", "play_changed"}, {"entitydef", "props/reaches"},
+        {"entitydef", "props/unchanged"}, {"entitydef", "props/elsewhere"}};
+    for (size_t i = 0; i < sizeof(named) / sizeof(*named); i++) CHECK(sh_package_references_add(&roots, named[i][0], named[i][1]));
+    CHECK(sh_package_runtime_test_historical_derived(&historical, &linked, &roots));
+    int material = 0, sound = 0, reaches = 0, unchanged = 0, elsewhere = 0, unused = 0;
+    for (size_t i = 0; i < historical.binding_count; i++) {
+        const sh_package_provenance_binding *b = historical.bindings + i;
+        CHECK(!strcmp(b->name, b->original) && b->context_count == 1 && b->contexts[0] == h);
+        material += !strcmp(b->original, "authored/mat"); sound += !strcmp(b->original, "play_changed");
+        reaches += !strcmp(b->original, "props/reaches"); unchanged += !strcmp(b->original, "props/unchanged");
+        elsewhere += !strcmp(b->original, "props/elsewhere"); unused += !strcmp(b->original, "play_unused");
+    }
+    CHECK(material == 1 && sound == 1 && reaches == 1 && !unchanged && !elsewhere && !unused);
+    sh_package_references_free(&roots); sh_package_provenance_free(&historical); sh_package_provenance_free(&linked);
+}
+/* A legacy package may author an exact copy of a stock resource beside its
+ * real edits (as the lever audio package authors play_console_uac_beeps while
+ * its bank edit never runs). Once exact dedupe resolves that row to the native
+ * identity itself, a site using it is vanilla: SnapMap serves the identity, the
+ * provider publishes nothing for it, and neither the load nor a later native
+ * capture (Play) may record, lease or verify it as a package use. */
+static int native_identity_activate(void *context, int restoring, const sh_package_changes *changes,
+    char *error, size_t capacity)
+{ (void)context; (void)restoring; (void)changes; (void)error; (void)capacity; return 1; }
+static void test_historical_native_identity_use(void)
+{
+    const char *json = "{\"variables\":{\"allocCount\":[0,0,0,0,0],\"string\":[]},\"entities\":["
+        "{\"targetType\":\"idDeclEntityDef\",\"inherit\":\"history/root\"}]}";
+    char data[MAX_PATH], map[MAX_PATH], error[2048];
+    admission_fixture f; admission_setup(&f);
+    sh_decl_registry_source registry = {&f, admission_read, (uintptr_t)f.registry, NULL};
+    sh_package_map_plan *plan = NULL;
+    sh_package_occurrence_snapshot *document = NULL, *played = NULL, *world = NULL;
+    sh_package_occurrence_tracker *tracker = sh_package_occurrence_tracker_create();
+    uintptr_t object = 0x1000;
+    sh_package_provenance selected = {0};
+    char *bound = NULL, *captured = NULL, *replayed = NULL;
+    size_t bound_length = 0, captured_length = 0, replayed_length = 0;
+    create("identity-data/overrides", NULL);
+    create("identity-map/overrides/equal/package.json", "{\"id\":\"equal-copy\",\"name\":\"Equal copy\"}");
+    create("identity-map/overrides/equal/assets/generated/decls/entitydef/history/root.decl", historical_original);
+    create("identity-map/overrides/equal/assets/generated/decls/entitydef/history/child.decl",
+        "{ class = \"Entity\"; edit = { health = 5; } }");
+    snprintf(data, sizeof(data), "%s/identity-data", root);
+    snprintf(map, sizeof(map), "%s/identity-map", root);
+    sh_package_runtime_test_dispose(); sh_package_runtime_test_baseline(historical_baseline, NULL);
+    CHECK(sh_package_runtime_refresh(data));
+    sh_package_runtime_test_source_readers(registry, (uintptr_t)f.reflection);
+    plan = sh_package_runtime_prepare_map(data, map, error, sizeof(error));
+    if (!plan) fprintf(stderr, "identity prepare: %s\n", error);
+    CHECK(plan); if (!plan) goto done;
+    bound = sh_package_map_plan_rebind(plan, NULL, json, strlen(json), &bound_length, error, sizeof(error));
+    if (!bound) fprintf(stderr, "identity rebind: %s\n", error);
+    CHECK(bound && strstr(bound, "\"inherit\":\"history/root\""));
+    if (!bound) goto done;
+    int present = 0;
+    CHECK(sh_map_provenance_read(bound, bound_length, &selected, &present, error, sizeof(error)));
+    /* The native identity is no package use and needs no delivery. */
+    CHECK(!selected.use_count);
+    captured = sh_package_runtime_capture_document(plan, &selected, NULL, 0, bound, bound_length,
+        &captured_length, &document, NULL, NULL, error, sizeof(error));
+    if (!captured) fprintf(stderr, "identity capture: %s\n", error);
+    CHECK(captured && document); if (!document) goto done;
+    /* The loaded editor object holds its occurrence (and any leases) live. */
+    CHECK(sh_package_occurrence_attach_snapshot(tracker, 1, &object, 1, document, &world, error, sizeof(error)));
+    CHECK(sh_package_runtime_activate_prepared_map(plan, (sh_package_activation_guard){0}, native_identity_activate, NULL));
+    /* Play captures the live document against the active provider's retained
+     * native uses; a vanilla site must not be refused there. */
+    replayed = sh_package_runtime_capture_document(NULL, sh_package_occurrence_provenance(document), NULL, 0,
+        captured, captured_length, &replayed_length, &played, NULL, NULL, error, sizeof(error));
+    if (!replayed) fprintf(stderr, "identity native capture: %s\n", error);
+    CHECK(replayed && played && replayed_length == captured_length && !memcmp(replayed, captured, captured_length));
+done:
+    free(replayed); free(captured); if (bound) HeapFree(GetProcessHeap(), 0, bound);
+    sh_package_occurrence_release(played); sh_package_occurrence_release(world); sh_package_occurrence_release(document);
+    sh_package_occurrence_tracker_free(tracker);
+    sh_package_provenance_free(&selected); sh_package_map_plan_free(plan);
+    sh_package_runtime_test_source_readers((sh_decl_registry_source){0}, 0); sh_package_runtime_test_dispose();
+    sh_package_runtime_test_baseline(baseline, NULL);
+    for (size_t i = 0; i < f.count; i++) free(f.regions[i].address);
+    cleanup_resources(data);
+}
 typedef struct lease_activation {
     const char *path;
     int before, after, fail, calls, recovered, removed;
@@ -3264,6 +3461,9 @@ int main(int argc, char **argv)
     test_complete_source_snapshots();
     test_original_deliveries_before_compilation();
     test_historical_private_preparation();
+    test_historical_derived_identities();
+    test_historical_derived_recipe();
+    test_historical_native_identity_use();
     test_constructor_provider_lifetimes();
     test_constructor_binding_changes();
     test_native_membership_changes();

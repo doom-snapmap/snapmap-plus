@@ -9,6 +9,9 @@ typedef struct sh_audio_graph_bank {
     sh_audio_bank_source source;
     const sh_audio_bank_codec *codec;
     int original; /* Exact captured original bytes, not mere availability. */
+    /* SnapMap's own sound init registers these exact bytes, so SnapMap owns
+     * the references it leaves unresolved (see the scope's absent lookup). */
+    int native;
 } sh_audio_graph_bank;
 typedef struct sh_audio_graph_media {
     const char *path;
@@ -27,6 +30,10 @@ typedef struct sh_audio_graph_scope {
      * 0 absent, -1 IO. Returned metadata/source stay valid through graph close. */
     int (*media)(void *context, uint32_t id, sh_audio_graph_media *out,
         char *error, size_t capacity);
+    /* 1 when only native banks reference this object and only banks SnapMap
+     * never registers define it: an unresolved native lookup, not a gap.
+     * NULL means every required reference must be captured. */
+    int (*absent)(void *context, uint32_t id);
 } sh_audio_graph_scope;
 typedef struct sh_audio_link_graph sh_audio_link_graph;
 
@@ -43,6 +50,19 @@ typedef struct sh_audio_graph_root {
 } sh_audio_graph_root;
 int sh_audio_link_graph_event(const sh_audio_link_graph *graph, size_t scope,
     uint32_t event, sh_audio_graph_root *out, char *error, size_t capacity);
+/* A later copy of an event that an earlier registered bank already defines in
+ * this scope. SnapMap never runs it (events register once), so an authored
+ * change to that copy is an ineffective contribution. record identifies the
+ * copy for sh_audio_link_graph_same_bytes. Paths borrow graph inputs. */
+typedef struct sh_audio_graph_shadow {
+    size_t scope, record;
+    uint32_t event;
+    const char *bank, *first;
+} sh_audio_graph_shadow;
+size_t sh_audio_link_graph_shadowed(const sh_audio_link_graph *graph);
+int sh_audio_link_graph_shadow(const sh_audio_link_graph *graph, size_t index, sh_audio_graph_shadow *out);
+/* 1 when two retained records hold exactly the same bytes, 0 when not, -1 IO. */
+int sh_audio_link_graph_same_bytes(const sh_audio_link_graph *graph, size_t left, size_t right);
 /* Exact equality check over retained source bytes and resolved dependency
  * classes, suitable for certifying a positive outer sound fingerprint match. */
 int sh_audio_link_graph_equal(const sh_audio_link_graph *graph, size_t left, size_t right);
@@ -143,6 +163,12 @@ const sh_audio_bank_binding *sh_audio_link_graph_bank(const sh_audio_link_graph 
  * stream. The full binding above remains available for shared bus recipes. */
 const sh_audio_bank_binding *sh_audio_link_graph_private_bank(const sh_audio_link_graph *graph,
     size_t scope,size_t bank);
+/* 1 when the bound authored bank's private projection carries no payload (no
+ * HIRC record, resident media or other bank-level chunk: everything it defines
+ * is served natively or never registers, as with a shadowed event edit) AND no
+ * retained private record locates this bank identity. Such a projection has no
+ * native registration or lifetime role; a referenced empty bank does. */
+int sh_audio_link_graph_private_empty(const sh_audio_link_graph *graph,size_t scope,size_t bank);
 int sh_audio_link_graph_event_id(const sh_audio_link_graph *graph, size_t scope,
     uint32_t authored, uint32_t *id);
 int sh_audio_link_graph_media_id(const sh_audio_link_graph *graph, size_t scope,

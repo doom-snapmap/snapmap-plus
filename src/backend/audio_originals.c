@@ -31,6 +31,10 @@ struct sh_audio_originals {
     int scanned, scan_failed;
     char **bank_names;
     size_t bank_name_count;
+    /* Root and current-language bank paths in the directory's own listing
+     * order, which is the order the engine's unsorted ListFiles returns. */
+    char **listed;
+    size_t listed_count;
     SRWLOCK catalog_lock;
     sh_audio_original_bank *banks;
     size_t bank_count;
@@ -68,6 +72,8 @@ void sh_audio_originals_close(sh_audio_originals *originals)
     for(size_t i=0;i<originals->count;i++)ao_file_free(originals->files[i]);
     for(size_t i=0;i<originals->answer_count;i++)free(originals->answers[i].path);
     for(size_t i=0;i<originals->bank_name_count;i++)free(originals->bank_names[i]);
+    for(size_t i=0;i<originals->listed_count;i++)free(originals->listed[i]);
+    free(originals->listed);
     for(size_t i=0;i<originals->bank_count;i++) {
         free((char *)originals->banks[i].path);sh_audio_bank_free(&originals->banks[i].metadata);
     }
@@ -154,6 +160,15 @@ static int ao_bank_name(sh_audio_originals *originals,const char *name)
     if(!grown[originals->bank_name_count])return 0;
     originals->bank_name_count++;return 1;
 }
+static int ao_listed_add(sh_audio_originals *originals,const char *path)
+{
+    if(originals->listed_count>=SIZE_MAX/sizeof(char *)-1)return 0;
+    char **grown=realloc(originals->listed,(originals->listed_count+1)*sizeof(*grown));
+    if(!grown)return 0;
+    originals->listed=grown;grown[originals->listed_count]=_strdup(path);
+    if(!grown[originals->listed_count])return 0;
+    originals->listed_count++;return 1;
+}
 static int ao_id_append(uint32_t **ids,size_t *count,size_t *capacity,uint32_t id)
 {
     if(!id)return 1;
@@ -200,7 +215,8 @@ static int ao_scan(sh_audio_originals *originals,const char *relative,int descen
             if(dot && !strcmp(dot,".bnk") &&
                 (!*relative || (originals->language && !strcmp(relative,originals->language)))) {
                 const char *filename=strrchr(path,'/');filename=filename ? filename+1 : path;
-                if((found.dwFileAttributes&FILE_ATTRIBUTE_REPARSE_POINT) || !ao_bank_name(originals,filename))result=-1;
+                if((found.dwFileAttributes&FILE_ATTRIBUTE_REPARSE_POINT) || !ao_bank_name(originals,filename) ||
+                    !ao_listed_add(originals,path))result=-1;
             }
             if(is_package) {
                 ao_file *file=NULL;result=ao_open(originals,path,&file);
@@ -393,6 +409,66 @@ int sh_audio_originals_identity(void *context,const char *path,sh_package_origin
     originals->answers=grown;grown[originals->answer_count++]=(ao_answer){canonical,candidate};canonical=NULL;*out=candidate;
 done:
     ReleaseSRWLockExclusive(&originals->lock);free(canonical);return result;
+}
+
+/* Sound init (VK FUN_1402b97d0, GL FUN_1402b87c0) loads Init.bnk, prepares
+ * doom_initial.bnk, then requests every root bank the file system lists and
+ * then every language bank, skipping names containing "initial" and, in
+ * SnapMap mode, "_sp" (VK FUN_1402babc0, GL FUN_1402b9bb0). Its ListFiles
+ * (VK FUN_141a56700, GL FUN_141a48be0) is unsorted: each search directory is
+ * read with _findfirst64/_findnext64 (VK FUN_141a48280, GL FUN_141a3a7e0) and
+ * kept in that order, so the position here is this directory's own listing
+ * order, not a name order. The file reader serves a requested name from the
+ * language directory first; a language file whose name the root also lists is
+ * therefore registered by the root pass at that root position. */
+static size_t ao_listed_position(sh_audio_originals *originals,const char *relative)
+{
+    size_t position=SIZE_MAX;
+    AcquireSRWLockExclusive(&originals->lock);
+    for(size_t i=0;i<originals->listed_count;i++)if(!strcmp(originals->listed[i],relative)){position=i;break;}
+    ReleaseSRWLockExclusive(&originals->lock);
+    return position;
+}
+int sh_audio_originals_registration(sh_audio_originals *originals,const char *path,
+    int authored,int authored_root,sh_audio_native_rank *rank,char *error,size_t capacity)
+{
+    sh_package_original_identity identity={0};
+    char *canonical,*root_path=NULL;const char *relative,*name,*extension;int result=0,present,root;
+    size_t prefix;
+    if(rank)*rank=(sh_audio_native_rank){0,SIZE_MAX};
+    if(error && capacity)*error=0;
+    if(!originals || !path || !rank)return ao_fail(error,capacity,"invalid native bank registration query");
+    if(!originals->language)return ao_fail(error,capacity,"native audio language is still initializing");
+    canonical=sh_package_engine_path(path);if(!canonical)return ao_fail(error,capacity,"invalid installed audio path");
+    prefix=strlen(originals->engine_prefix);
+    if(strncmp(canonical,originals->engine_prefix,prefix))goto done;
+    relative=canonical+prefix;name=strrchr(relative,'/');name=name ? name+1 : relative;
+    extension=strrchr(name,'.');
+    if(!extension || strcmp(extension,".bnk"))goto done;
+    root=name==relative;
+    if(!root && ((size_t)(name-relative)-1!=strlen(originals->language) ||
+        strncmp(relative,originals->language,(size_t)(name-relative)-1)))goto done;
+    if(root && !strcmp(name,"init.bnk"))rank->phase=0;
+    else if(root && !strcmp(name,"doom_initial.bnk"))rank->phase=1;
+    else if(strstr(name,"initial") || !strcmp(name,"init.bnk") || strstr(name,"_sp"))goto done;
+    else rank->phase=root ? 2 : 3;
+    /* An installed bank must also be a loose file that the enumeration lists. */
+    present=sh_audio_originals_identity(originals,canonical,&identity,error,capacity);
+    if(present<0){result=-1;goto done;}
+    if(!authored && (!present || identity.scope!=1))goto done;
+    result=1;
+    if(rank->phase>=2)rank->position=ao_listed_position(originals,relative);
+    if(rank->phase==3) {
+        size_t length=strlen(name),listed;
+        if(prefix>SIZE_MAX-length-1 || !(root_path=malloc(prefix+length+1))){result=ao_fail(error,capacity,"cannot inspect a root audio bank");goto done;}
+        memcpy(root_path,originals->engine_prefix,prefix);memcpy(root_path+prefix,name,length+1);
+        present=sh_audio_originals_identity(originals,root_path,&identity,error,capacity);
+        if(present<0){result=-1;goto done;}
+        listed=present && identity.scope==1 ? ao_listed_position(originals,name) : SIZE_MAX;
+        if(listed!=SIZE_MAX || authored_root){rank->phase=2;rank->position=listed;}
+    }
+done:
+    free(root_path);free(canonical);return result;
 }
 
 int sh_audio_originals_read(void *context,const char *path,uint64_t offset,void *out,size_t span,

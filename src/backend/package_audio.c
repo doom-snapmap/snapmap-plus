@@ -236,6 +236,11 @@ typedef struct pa_effective_bank {
     const char *path;
     const sh_audio_bank *metadata;
     int original;
+    /* registered: SnapMap's own sound init registers this lookup. native: the
+     * registered bytes are the installed original, so SnapMap already owns the
+     * bank and its unresolved references; the program never loads it. */
+    int registered, native;
+    sh_audio_native_rank rank;
     const sh_audio_identity_span *spans;
     size_t span_count;
 } pa_effective_bank;
@@ -249,11 +254,60 @@ struct sh_package_audio_scope {
     pa_scope_ref *refs;
     size_t ref_count;
     int refs_ready;
+    /* Objects only natively registered originals name, defined solely in banks
+     * SnapMap never registers. SnapMap leaves them unresolved; so does this. */
+    uint32_t *absent;
+    size_t absent_count;
 };
 void sh_package_audio_scope_close(sh_package_audio_scope *scope)
 {
     if (!scope) return;
-    sh_package_audio_close(scope->candidate); free(scope->banks); free(scope->metadata); free(scope->refs); free(scope);
+    sh_package_audio_close(scope->candidate); free(scope->banks); free(scope->metadata); free(scope->refs);
+    free(scope->absent); free(scope);
+}
+/* Registered banks first, in native registration order. Within a listing
+ * pass, an authored name the installed directory does not list has no native
+ * position; its place after listed names (then by path) is a compiler choice. */
+static int pa_bank_order(const void *left, const void *right)
+{
+    const pa_effective_bank *a = left, *b = right;
+    if (a->registered != b->registered) return a->registered ? -1 : 1;
+    if (a->registered && a->rank.phase != b->rank.phase) return a->rank.phase < b->rank.phase ? -1 : 1;
+    if (a->registered && a->rank.position != b->rank.position) return a->rank.position < b->rank.position ? -1 : 1;
+    return strcmp(a->path, b->path);
+}
+static int pa_scope_rank(sh_package_audio_scope *scope, char *error, size_t capacity)
+{
+    for (size_t i = 0; i < scope->count; i++) {
+        pa_effective_bank *bank = scope->banks + i;
+        const pa_bank *authored = NULL;
+        char *paths[2] = {0}; int authored_root = 0, result;
+        for (size_t c = 0; !bank->original && c < scope->candidate->count; c++)
+            if (!strcmp(scope->candidate->banks[c].path, bank->path)) authored = scope->candidate->banks + c;
+        if (!sh_audio_originals_paths(scope->originals, strrchr(bank->path, '/') + 1, paths, paths + 1)) goto memory;
+        for (size_t c = 0; c < scope->candidate->count; c++)
+            if (!strcmp(scope->candidate->banks[c].path, paths[1])) authored_root = 1;
+        result = sh_audio_originals_registration(scope->originals, bank->path, !bank->original,
+            authored_root, &bank->rank, error, capacity);
+        bank->registered = result == 1; bank->native = bank->registered && bank->original;
+        if (result == 1 && authored) {
+            /* An authored exact copy of a registered original is that native bank. */
+            sh_package_original_identity installed = {0};
+            int present = sh_audio_originals_identity(scope->originals, bank->path, &installed, error, capacity);
+            if (present < 0) result = -1;
+            bank->native = present > 0 && installed.scope == 1 &&
+                installed.file.length == authored->identity.length &&
+                !memcmp(installed.file.digest, authored->identity.digest, sizeof(installed.file.digest));
+        }
+        free(paths[0]); free(paths[1]);
+        if (result < 0) return 0;
+    }
+    if (scope->count > 1) qsort(scope->banks, scope->count, sizeof(*scope->banks), pa_bank_order);
+    for (size_t i = 0; i < scope->count; i++) scope->metadata[i] = scope->banks[i].metadata;
+    return 1;
+memory:
+    if (error && capacity) snprintf(error, capacity, "cannot rank native audio banks");
+    return 0;
 }
 static int pa_scope_bank(sh_package_audio_scope *scope, const char *filename,
     const sh_audio_original_bank *originals, size_t original_count, char *error, size_t capacity)
@@ -301,6 +355,7 @@ sh_package_audio_scope *sh_package_audio_scope_open(const sh_package_compilation
         if (!pa_scope_bank(scope, banks[i].filename, banks, count, error, capacity)) goto failed;
     for (size_t i = 0; i < scope->candidate->count; i++)
         if (!pa_scope_bank(scope, scope->candidate->banks[i].filename, banks, count, error, capacity)) goto failed;
+    if (!pa_scope_rank(scope, error, capacity)) goto failed;
     return scope;
 failed:
     if (error && capacity && !*error) snprintf(error, capacity, "cannot capture audio source scope");
@@ -338,6 +393,20 @@ static int pa_ref_order(const void *left, const void *right)
     if (a->domain != b->domain) return a->domain < b->domain ? -1 : 1;
     return a->id < b->id ? -1 : a->id != b->id;
 }
+static int pa_absent_add(void *context, uint32_t id)
+{
+    sh_package_audio_scope *scope = context;
+    size_t low = 0, high = scope->absent_count;
+    while (low < high) {
+        size_t middle = low + (high - low) / 2;
+        if (scope->absent[middle] < id) low = middle + 1; else high = middle;
+    }
+    if (low < scope->absent_count && scope->absent[low] == id) return 1;
+    if (scope->absent_count >= SIZE_MAX / sizeof(*scope->absent) - 1) return 0;
+    uint32_t *grown = realloc(scope->absent, (scope->absent_count + 1) * sizeof(*grown)); if (!grown) return 0;
+    memmove(grown + low + 1, grown + low, (scope->absent_count - low) * sizeof(*grown));
+    grown[low] = id; scope->absent = grown; scope->absent_count++; return 1;
+}
 static int pa_scope_links(sh_package_audio_scope *scope, unsigned char *selected,int reverse)
 {
     if (!scope->refs_ready) {
@@ -360,26 +429,38 @@ static int pa_scope_links(sh_package_audio_scope *scope, unsigned char *selected
         free(scope->refs); scope->refs = refs; scope->ref_count = at; scope->refs_ready = 1;
     }
     /* A changed definition can be used by events in a different bank. Include
-     * every such consumer (and duplicate definition recipe) before forward
-     * closure. Exact event comparison later removes conservative nominations. */
+     * every such registered consumer (and duplicate definition recipe) before
+     * forward closure. Exact event comparison later removes conservative
+     * nominations; a bank SnapMap never registers consumes nothing there. */
     for (int changed = 1; changed;) {
         changed = 0;
         for (size_t first = 0; first < scope->ref_count;) {
-            size_t end = first + 1,provider=SIZE_MAX; int affected = 0,required=0,provided=0;
+            size_t end = first + 1,provider=SIZE_MAX,fallback=SIZE_MAX;
+            int affected = 0,required=0,provided=0,authored=0;
             while (end < scope->ref_count && !pa_ref_order(scope->refs + first, scope->refs + end)) end++;
             for (size_t i = first; i < end; i++) {
-                if(scope->refs[i].definition && scope->refs[i].bank<provider)provider=scope->refs[i].bank;
+                const pa_effective_bank *bank=scope->banks+scope->refs[i].bank;
+                if(scope->refs[i].definition && bank->registered && scope->refs[i].bank<provider)provider=scope->refs[i].bank;
+                if(scope->refs[i].definition && scope->refs[i].bank<fallback)fallback=scope->refs[i].bank;
                 if(selected[scope->refs[i].bank]) {
                     provided|=scope->refs[i].definition;
                     affected|=reverse && scope->refs[i].definition;required|=scope->refs[i].required;
+                    authored|=scope->refs[i].required && !bank->native;
                 }
             }
             /* A satisfied forward lookup does not load every dormant duplicate
-             * definition in the game. Otherwise choose the first scoped native
-             * provider, as the existing resident-media closure does. */
-            if(required && !provided && provider!=SIZE_MAX){selected[provider]=1;changed=1;}
+             * definition in the game. Otherwise choose the first registered
+             * provider, as the resident-media closure does. A bank this
+             * program supplies may also need a provider SnapMap never loads
+             * (campaign or imported content); a registered original keeps its
+             * native unresolved lookup instead. */
+            if(required && !provided) {
+                size_t chosen=provider!=SIZE_MAX ? provider : authored ? fallback : SIZE_MAX;
+                if(chosen!=SIZE_MAX){selected[chosen]=1;changed=1;}
+                else if(fallback!=SIZE_MAX && !pa_absent_add(scope,scope->refs[first].id))return 0;
+            }
             for (size_t i = first; i < end; i++) if (affected &&
-                !selected[scope->refs[i].bank]) {
+                !selected[scope->refs[i].bank] && scope->banks[scope->refs[i].bank].registered) {
                 selected[scope->refs[i].bank] = 1; changed = 1;
             }
             first = end;
@@ -391,11 +472,15 @@ static int pa_scope_select(sh_package_audio_scope *scope, const uint32_t *events
     const uint32_t *roots, size_t root_count,
     sh_package_audio_path_visit visit, void *context, char *error, size_t capacity)
 {
-    unsigned char *selected = NULL; int ok = 0;
+    unsigned char *selected = NULL, *native = NULL; int ok = 0;
     if (error && capacity) *error = 0;
     if (!scope || (count && !events) || (root_count && !roots) || !visit) goto done;
     for (size_t i = 0; i < count; i++) if (!events[i]) goto done;
     selected = calloc(scope->count ? scope->count : 1, 1); if (!selected) goto done;
+    native = calloc(scope->count ? scope->count : 1, 1); if (!native) goto done;
+    for (size_t i = 0; i < scope->count; i++)
+        native[i] = (unsigned char)((scope->banks[i].registered ? SH_AUDIO_CLOSURE_REGISTERED : 0) |
+            (scope->banks[i].native ? SH_AUDIO_CLOSURE_NATIVE : 0));
     for(size_t r=0;r<root_count;r++) {
         size_t b=0;while(b<scope->count && scope->banks[b].metadata->id!=roots[r])b++;
         if(!roots[r] || b==scope->count) {
@@ -423,7 +508,8 @@ static int pa_scope_select(sh_package_audio_scope *scope, const uint32_t *events
     for(;;) {
         size_t before=0,after=0;for(size_t i=0;i<scope->count;i++)before+=!!selected[i];
         if(!pa_scope_links(scope,selected,inventory) ||
-            !sh_audio_bank_closure(scope->metadata, scope->count, events, count, 1, selected, NULL, error, capacity))goto done;
+            !sh_audio_bank_closure_native(scope->metadata, native, scope->count, events, count, 1, selected, NULL,
+                pa_absent_add, scope, error, capacity))goto done;
         for(size_t i=0;i<scope->count;i++)after+=!!selected[i];if(before==after)break;
     }
     for (size_t i = 0; i < scope->count; i++) if (selected[i]) {
@@ -439,7 +525,7 @@ static int pa_scope_select(sh_package_audio_scope *scope, const uint32_t *events
     }
     ok = 1;
 done:
-    free(selected);
+    free(selected); free(native);
     if (!ok && error && capacity && !*error) snprintf(error, capacity, "cannot resolve audio source dependencies");
     return ok;
 }
@@ -469,6 +555,17 @@ int sh_package_audio_scope_implements(const sh_package_audio_scope *scope, uint3
     for (size_t i = 0; i < scope->count; i++)
         if (sh_audio_bank_has_event(scope->metadata[i], event)) return 1;
     return 0;
+}
+int sh_package_audio_scope_native(const sh_package_audio_scope *scope, const char *path)
+{
+    for (size_t i = 0; scope && path && i < scope->count; i++)
+        if (!strcmp(scope->banks[i].path, path)) return scope->banks[i].native;
+    return 0;
+}
+size_t sh_package_audio_scope_absent(const sh_package_audio_scope *scope, const uint32_t **ids)
+{
+    if (ids) *ids = scope ? scope->absent : NULL;
+    return scope && ids ? scope->absent_count : 0;
 }
 int sh_package_audio_scope_refine(sh_package_audio_scope *scope, const char *path, const sh_audio_bank *metadata)
 {

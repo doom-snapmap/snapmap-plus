@@ -84,6 +84,7 @@ const sh_audio_bank_media *sh_audio_bank_find_media(const sh_audio_bank *bank, u
 
 typedef struct sh_audio_bank_closure_report {
     size_t matched_events, dependency_banks, optional_targets;
+    size_t native_absent; /* lookups SnapMap itself leaves unresolved */
 } sh_audio_bank_closure_report;
 /* Pure selection shared by immutable source analysis and native activation.
  * selected contains caller-owned seed banks and receives the complete union.
@@ -99,6 +100,20 @@ typedef struct sh_audio_bank_closure_report {
 int sh_audio_bank_closure(const sh_audio_bank *const *banks, size_t bank_count,
     const uint32_t *events, size_t event_count, int require_events,
     unsigned char *selected, sh_audio_bank_closure_report *report,
+    char *error, size_t capacity);
+/* The same closure over SnapMap's native bank set. flags[i] (NULL means every
+ * bank is registered and none is native): REGISTERED banks are loaded by
+ * SnapMap's own sound init and are preferred providers; a NATIVE bank is that
+ * registered installed original, so its own references need no provider that
+ * SnapMap never registers (absent receives each such object ID). A bank the
+ * program supplies may still select such a provider, and an event defined
+ * only there selects it: startup filtering is not a ban on used content. */
+#define SH_AUDIO_CLOSURE_REGISTERED 1u
+#define SH_AUDIO_CLOSURE_NATIVE 2u
+int sh_audio_bank_closure_native(const sh_audio_bank *const *banks, const unsigned char *flags,
+    size_t bank_count, const uint32_t *events, size_t event_count, int require_events,
+    unsigned char *selected, sh_audio_bank_closure_report *report,
+    int (*absent)(void *context, uint32_t id), void *absent_context,
     char *error, size_t capacity);
 
 typedef struct sh_audio_bank_slot {

@@ -86,6 +86,12 @@ int sh_package_audio_scope_event(sh_package_audio_scope *scope, uint32_t event,
  * engine plays nothing for an event no bank implements; callers decide whether
  * such a reference is allowed. */
 int sh_package_audio_scope_implements(const sh_package_audio_scope *scope, uint32_t event);
+/* Whether the effective bank at path is SnapMap's registered installed
+ * original (native activation owns it and its unresolved references). */
+int sh_package_audio_scope_native(const sh_package_audio_scope *scope, const char *path);
+/* Sorted object IDs that only native originals reference and only banks
+ * SnapMap never registers define; borrowed until the scope closes. */
+size_t sh_package_audio_scope_absent(const sh_package_audio_scope *scope, const uint32_t **ids);
 /* Capture the union once in native inventory order, independent of requested
  * event order. The resulting construction order is also used by audio linking. */
 int sh_package_audio_scope_events(sh_package_audio_scope *scope, const uint32_t *events,

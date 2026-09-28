@@ -191,6 +191,14 @@ sh_package_map_plan *sh_package_runtime_prepare_map_with_bindings(const char *da
 sh_package_map_plan *sh_package_runtime_prepare_map_deliveries(const char *data_root,
     const char *map_source_root, const sh_package_provenance *bindings,
     const sh_package_bundle_binding *deliveries, size_t count, char *error, size_t capacity);
+/* The same route for a map document. Without recorded bindings, a legacy map's
+ * own typed values name the stock identities its historical context derives
+ * (for example a sound whose event a delivered bank changes, or an entity that
+ * reaches a delivered material); only its sites can select them. */
+sh_package_map_plan *sh_package_runtime_prepare_map_document(const char *data_root,
+    const char *map_source_root, const sh_package_provenance *bindings,
+    const sh_package_bundle_binding *deliveries, size_t count,
+    const char *json, size_t length, char *error, size_t capacity);
 /* Rebind saved typed references to the prepared names. Returns a process-heap
  * buffer; native byte strings outside reference sites remain unchanged. */
 char *sh_package_map_plan_rebind(const sh_package_map_plan *plan, const sh_package_provenance *saved,
@@ -424,6 +432,8 @@ void sh_package_runtime_test_constructor_requests(sh_package_source_implicit cap
 /* The historical bindings a map without recorded provenance receives. */
 int sh_package_runtime_test_legacy_bindings(const sh_package_compilation *compiled,
     const sh_resource_catalog *catalog, sh_package_provenance *out);
+int sh_package_runtime_test_historical_derived(sh_package_provenance *historical,
+    const sh_package_provenance *linked, const sh_package_references *roots);
 int sh_package_runtime_test_consumer_changes(const sh_package_consumers *before,
     const sh_package_consumers *after, sh_package_changes *changes);
 int sh_package_runtime_test_native_changes(const sh_package_compilation *before,

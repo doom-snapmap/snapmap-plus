@@ -301,7 +301,7 @@ static void test_selected_projection(void)
     char error[512];resolver ids={0,SIZE_MAX};
     assert(sh_audio_bank_codec_read(source,&bank,error,sizeof(error))==1);
     assert(sh_audio_bank_codec_bind(source,&bank,assign,&ids,&full,error,sizeof(error)));
-    assert(sh_audio_bank_binding_select(source,&bank,&full,selected_media,NULL,&projected,error,sizeof(error)));
+    assert(sh_audio_bank_binding_select(source,&bank,&full,selected_media,NULL,&projected,NULL,error,sizeof(error)));
     /* Compilation above must not read media. Only final streaming reads it. */
     source.read=read_copy;
     assert(sh_audio_bank_binding_write(source,&projected,sink,&out,error,sizeof(error)));
@@ -310,7 +310,7 @@ static void test_selected_projection(void)
     assert(get32(out.data+32)==1902 && get32(out.data+36)==2 && get32(out.data+40)==2);
     assert(get32(out.data+44)==1901 && get32(out.data+48)==0 && get32(out.data+52)==4);
     assert(!memcmp(out.data+parsed.chunks[2].offset+8,b.data+b.media_at+32,32));
-    assert(!sh_audio_bank_binding_select(source,&bank,&full,selected_media,&ids,&bad,error,sizeof(error)) && !bad.edits);
+    assert(!sh_audio_bank_binding_select(source,&bank,&full,selected_media,&ids,&bad,NULL,error,sizeof(error)) && !bad.edits);
     sh_audio_bank_binding_free(&projected);sh_audio_bank_binding_free(&full);
     sh_audio_bank_codec_free(&parsed);sh_audio_bank_codec_free(&bank);
 }

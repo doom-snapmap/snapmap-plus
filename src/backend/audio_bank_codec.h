@@ -84,10 +84,13 @@ int sh_audio_bank_binding_private(sh_audio_bank_source source,const sh_audio_ban
 /* Additionally omit definitions served by retained native banks. keep returns
  * 1 to retain, 0 to omit, -1 on failure. Resident media is compacted in aligned
  * ranges without decoding or reading DATA, including overlapping DIDX ranges.
- * The caller must activate/retain the native providers before this projection. */
+ * The caller must activate/retain the native providers before this projection.
+ * kept (optional) receives the HIRC records, resident media entries and other
+ * bank-level chunks (beyond BKHD) the projection still carries; zero means it
+ * holds no payload. That alone does not make its bank identity unreferenced. */
 int sh_audio_bank_binding_select(sh_audio_bank_source source,const sh_audio_bank_codec *bank,
     const sh_audio_bank_binding *binding,int (*keep)(void *,sh_audio_identity_domain,uint32_t),
-    void *context,sh_audio_bank_binding *out,char *error,size_t capacity);
+    void *context,sh_audio_bank_binding *out,size_t *kept,char *error,size_t capacity);
 /* Capture one cooked object's bound body, including its numeric definition ID.
  * Used for shared policy recipes whose dependencies have private bindings.
  * The caller owns the output; no whole-bank or media payload copy is made. */

@@ -109,6 +109,10 @@ typedef struct sh_package_source_root_plan {
      * context indices. This reconstructs derived roots without promoting
      * unused authoring inventory into a document's selected occurrences. */
     const sh_package_provenance *recorded;
+    /* The typed values a legacy document actually names. When set, discovery
+     * walks these stock roots instead of the SnapMap palette, so a discovering
+     * scope nominates only the ones it changes that the document uses. */
+    const sh_package_references *candidates;
 } sh_package_source_root_plan;
 sh_package_source_link *sh_package_source_link_open_roots(
     const sh_package_compilation *const *scopes, size_t count,

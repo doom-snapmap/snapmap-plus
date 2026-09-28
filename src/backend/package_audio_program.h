@@ -35,6 +35,14 @@ int sh_package_audio_program_prepare(sh_package_audio_program *program,
  * event binding and need no program root, owners or output. */
 int sh_package_audio_program_contains(const sh_package_audio_program *program,
     size_t scope, const char *sound);
+/* Authored event edits SnapMap never runs: the scope changed a bank's copy of
+ * an event that an earlier registered bank already defines (for example
+ * doom_initial.bnk, prepared at sound init). sound is a collected sound
+ * declaration playing that event, else NULL. Visit returns 0 to stop.
+ * Prepared programs only; 1 complete, 0 stopped or unprepared. */
+int sh_package_audio_program_shadowed(const sh_package_audio_program *program,
+    int (*visit)(void *context, size_t scope, uint32_t event, const char *sound,
+        const char *bank, const char *first), void *context);
 /* The scope whose audio capture failed during the last prepare, else SIZE_MAX. */
 size_t sh_package_audio_program_failed_scope(const sh_package_audio_program *program);
 /* Retained shared bus assignments with exact private dependency identities and
@@ -134,7 +142,8 @@ const sh_audio_bank_binding *sh_package_audio_program_private_bank(
  * numeric=1 loads the bound
  * identity by file ID (relocated or decimally named banks); otherwise the
  * native name loader opens filename. Originals retain the native records omitted
- * by private projections. Visit returns 0 to stop; the call then fails. */
+ * by private projections. A private projection with no payload that no retained
+ * record locates is not loaded. Visit returns 0 to stop; the call then fails. */
 int sh_package_audio_program_loads(const sh_package_audio_program *program,
     int (*visit)(void *, uint32_t id, const char *filename, int numeric), void *context,
     char *error, size_t capacity);

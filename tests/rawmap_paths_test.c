@@ -161,6 +161,15 @@ sh_package_map_plan *sh_package_runtime_prepare_map_deliveries(const char *root,
     return bindings ? sh_package_runtime_prepare_map_with_bindings(root, map, bindings, error, capacity) :
         sh_package_runtime_prepare_map(root, map, error, capacity);
 }
+/* The document route passes the map's own JSON for its legacy historical
+ * context; recorded bindings keep their saved recipe. */
+sh_package_map_plan *sh_package_runtime_prepare_map_document(const char *root, const char *map,
+    const sh_package_provenance *bindings, const sh_package_bundle_binding *bundles,
+    size_t count, const char *json, size_t length, char *error, size_t capacity)
+{
+    if (!json || !length) pf_order_error++;
+    return sh_package_runtime_prepare_map_deliveries(root, map, bindings, bundles, count, error, capacity);
+}
 char *sh_package_map_plan_rebind(const sh_package_map_plan *plan, const sh_package_provenance *saved,
     const char *json, size_t length, size_t *out_length, char *error, size_t capacity)
 {

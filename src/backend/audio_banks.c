@@ -552,9 +552,18 @@ int sh_audio_bank_copy(const sh_audio_bank *source, sh_audio_bank *out)
     copy.target_count = source->target_count; *out = copy; return 1;
 }
 
-int sh_audio_bank_closure(const sh_audio_bank *const *banks, size_t bank_count,
-    const uint32_t *events, size_t event_count, int require_events,
+/* flags[i] SH_AUDIO_CLOSURE_REGISTERED: SnapMap's own sound init registers
+ * bank i, so any of its definitions serves a lookup. SH_AUDIO_CLOSURE_NATIVE:
+ * it is that registered installed original, owned by SnapMap together with
+ * the references SnapMap leaves unresolved. Providers SnapMap never registers
+ * still serve banks a program supplies (campaign or imported content), and
+ * events defined nowhere else, because those loads are explicitly used. */
+#define AB_REGISTERED(i) (!flags || (flags[i] & SH_AUDIO_CLOSURE_REGISTERED))
+#define AB_NATIVE(i) (flags && (flags[i] & SH_AUDIO_CLOSURE_NATIVE))
+int sh_audio_bank_closure_native(const sh_audio_bank *const *banks, const unsigned char *flags,
+    size_t bank_count, const uint32_t *events, size_t event_count, int require_events,
     unsigned char *selected, sh_audio_bank_closure_report *report,
+    int (*absent)(void *context, uint32_t id), void *absent_context,
     char *error, size_t capacity)
 {
     sh_audio_bank_closure_report result = {0};
@@ -577,9 +586,11 @@ int sh_audio_bank_closure(const sh_audio_bank *const *banks, size_t bank_count,
     }
     for (size_t e = 0; e < event_count; e++) {
         int found = 0;
-        for (size_t b = 0; b < bank_count; b++) if (sh_audio_bank_has_event(banks[b], events[e])) {
-            selected[b] = 1; found = 1;
-        }
+        for (int pass = 0; pass < 2 && !found; pass++)
+            for (size_t b = 0; b < bank_count; b++)
+                if ((pass || AB_REGISTERED(b)) && sh_audio_bank_has_event(banks[b], events[e])) {
+                    selected[b] = 1; found = 1;
+                }
         if (!found && require_events) {
             if (error && capacity) snprintf(error, capacity, "audio event %u has no bank in its source scope", events[e]);
             return 0;
@@ -594,7 +605,14 @@ int sh_audio_bank_closure(const sh_audio_bank *const *banks, size_t bank_count,
                 int found = 0;
                 for (size_t i = 0; i < bank_count; i++) if (banks[i] && banks[i]->id == bank->banks[d]) {
                     found = 1;
-                    if (!selected[i]) { selected[i] = 1; changed = 1; result.dependency_banks++; }
+                    if (selected[i]) continue;
+                    if (!AB_REGISTERED(i) && AB_NATIVE(b)) {
+                        result.native_absent++;
+                        if (absent && !absent(absent_context, bank->banks[d]))
+                            return ab_error(error, capacity, "cannot retain a natively unresolved audio reference");
+                        continue;
+                    }
+                    selected[i] = 1; changed = 1; result.dependency_banks++;
                 }
                 if (!found) {
                     if (error && capacity) snprintf(error, capacity, "audio bank %u requires absent bank %u", bank->id, bank->banks[d]);
@@ -608,11 +626,21 @@ int sh_audio_bank_closure(const sh_audio_bank *const *banks, size_t bank_count,
              * that provider's own dependencies. Prefer an existing supplier so
              * dormant duplicate definitions do not become unnecessary loads. */
             for (size_t r = 0; r < bank->required_count; r++) {
-                size_t provider = SIZE_MAX;
+                size_t provider = SIZE_MAX, fallback = SIZE_MAX;
                 for (size_t i = 0; i < bank_count; i++) {
                     if (!banks[i] || !ab_contains(banks[i]->objects, banks[i]->object_count, bank->required[r])) continue;
-                    if (provider == SIZE_MAX || selected[i]) provider = i;
-                    if (selected[i]) break;
+                    size_t *slot = AB_REGISTERED(i) ? &provider : &fallback;
+                    if (*slot == SIZE_MAX || selected[i]) *slot = i;
+                    if (selected[i] && slot == &provider) break;
+                }
+                if (provider == SIZE_MAX && !AB_NATIVE(b)) provider = fallback;
+                if (provider == SIZE_MAX && fallback != SIZE_MAX) {
+                    if (!selected[fallback]) {
+                        result.native_absent++;
+                        if (absent && !absent(absent_context, bank->required[r]))
+                            return ab_error(error, capacity, "cannot retain a natively unresolved audio reference");
+                    }
+                    continue;
                 }
                 if (provider == SIZE_MAX) {
                     if (error && capacity) snprintf(error, capacity, "audio bank %u requires absent object %u", bank->id, bank->required[r]);
@@ -628,13 +656,15 @@ int sh_audio_bank_closure(const sh_audio_bank *const *banks, size_t bank_count,
             for (size_t m = 0; m < bank->media_count; m++) {
                 const sh_audio_bank_media *media = &bank->media[m];
                 if (media->stream || media->embedded) continue;
-                size_t provider = SIZE_MAX;
+                size_t provider = SIZE_MAX, fallback = SIZE_MAX;
                 for (size_t i = 0; i < bank_count; i++) {
                     const sh_audio_bank_media *candidate = sh_audio_bank_find_media(banks[i], media->id);
                     if (!candidate || !candidate->embedded) continue;
-                    if (provider == SIZE_MAX || selected[i]) provider = i;
-                    if (selected[i]) break;
+                    size_t *slot = AB_REGISTERED(i) ? &provider : &fallback;
+                    if (*slot == SIZE_MAX || selected[i]) *slot = i;
+                    if (selected[i] && slot == &provider) break;
                 }
+                if (provider == SIZE_MAX && !AB_NATIVE(b)) provider = fallback;
                 if (provider != SIZE_MAX && !selected[provider]) {
                     selected[provider] = 1; changed = 1; result.dependency_banks++;
                 }
@@ -644,9 +674,19 @@ int sh_audio_bank_closure(const sh_audio_bank *const *banks, size_t bank_count,
     for (size_t b = 0; b < bank_count; b++) if (selected[b]) {
         const sh_audio_bank *bank = banks[b];
         for (size_t t = 0; t < bank->target_count; t++) {
-            const sh_audio_bank_target *target = bank->targets + t; int found = 0;
-            for (size_t i = 0; i < bank_count; i++) if (selected[i] && banks[i]->id == target->bank &&
-                ab_contains(banks[i]->objects, banks[i]->object_count, target->object)) { found = 1; break; }
+            const sh_audio_bank_target *target = bank->targets + t; int found = 0, unregistered = 0;
+            for (size_t i = 0; i < bank_count; i++) {
+                if (!banks[i] || banks[i]->id != target->bank) continue;
+                unregistered |= !AB_REGISTERED(i) && !selected[i];
+                if (selected[i] && ab_contains(banks[i]->objects, banks[i]->object_count, target->object)) { found = 1; break; }
+            }
+            /* SnapMap's own bank keeps a preparation target it never loads. */
+            if (!found && unregistered && AB_NATIVE(b)) {
+                result.native_absent++;
+                if (absent && (!absent(absent_context, target->bank) || !absent(absent_context, target->object)))
+                    return ab_error(error, capacity, "cannot retain a natively unresolved audio reference");
+                continue;
+            }
             if (!found) {
                 if (error && capacity) snprintf(error, capacity, "audio bank %u requires absent object %u in bank %u",
                     bank->id, target->object, target->bank);
@@ -657,6 +697,16 @@ int sh_audio_bank_closure(const sh_audio_bank *const *banks, size_t bank_count,
     }
     if (report) *report = result;
     return 1;
+}
+#undef AB_REGISTERED
+#undef AB_NATIVE
+int sh_audio_bank_closure(const sh_audio_bank *const *banks, size_t bank_count,
+    const uint32_t *events, size_t event_count, int require_events,
+    unsigned char *selected, sh_audio_bank_closure_report *report,
+    char *error, size_t capacity)
+{
+    return sh_audio_bank_closure_native(banks, NULL, bank_count, events, event_count, require_events,
+        selected, report, NULL, NULL, error, capacity);
 }
 
 int sh_audio_banks_append(sh_audio_bank_slot *slots, size_t count,

@@ -1280,7 +1280,7 @@ static int sl_reverse_roots(sh_package_source_link *s, const sh_package_source_r
         for (size_t f = 0; f < s->scopes[scope]->resource_count; f++)
             if (sh_package_owners_count(&s->scopes[scope]->resources[f].gameplay_owners)) needed = 1;
     }
-    if (!needed || !sh_resource_catalog_count(s->catalog)) return 1;
+    if (!needed || (!plan->candidates && !sh_resource_catalog_count(s->catalog))) return 1;
     base = calloc(1, sizeof(*base)); if (!base) goto done;
     base->scopes = calloc(1, sizeof(*base->scopes)); base->readers = calloc(1, sizeof(*base->readers));
     if (!base->scopes || !base->readers) goto done;
@@ -1299,8 +1299,15 @@ static int sl_reverse_roots(sh_package_source_link *s, const sh_package_source_r
     if (!base->readers[0] || (s->native.shader &&
         !sh_package_source_reader_shader(base->readers[0], s->native.shader))) goto done;
     /* PaletteBuild enumerates the snapEditorEntityDef manager. Campaign-only
-     * entries and generic entity declarations are not additional palette roots. */
-    for (size_t i = 0; i < sh_resource_catalog_count(s->catalog); i++) {
+     * entries and generic entity declarations are not additional palette roots.
+     * A legacy document instead names its own roots; a name with no stock
+     * source is an empty leaf here and is never nominated. */
+    if (plan->candidates) for (size_t i = 0; i < plan->candidates->count; i++) {
+        const sh_package_reference *root = plan->candidates->items + i;
+        if (!root->type || !*root->type || !root->name || !*root->name ||
+            !strcmp(root->type, SH_PACKAGE_KEY_FAMILY)) continue;
+        if (!sl_find(base, 0, root->type, root->name, 1)) goto done;
+    } else for (size_t i = 0; i < sh_resource_catalog_count(s->catalog); i++) {
         const sh_resource_catalog_entry *row = sh_resource_catalog_at(s->catalog, i);
         if (row->archive < 2 && !strcmp(row->type, "snapeditorentitydef") && *row->name &&
             !sl_find(base, 0, row->type, row->name, 1)) goto done;

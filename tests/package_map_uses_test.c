@@ -724,6 +724,38 @@ static void run_local(sh_package_source_reader *reader, sh_package_bundle_bindin
     assert(!out && !length);
     sh_package_provenance_free(&library);
 }
+/* A saved or historical row that now resolves to the native identity it names
+ * is vanilla unless the current provider still supplies that identity (a
+ * composition published under the stock name). The site keeps its value. */
+static void run_native_identity(sh_package_source_reader *reader, sh_package_compilation *compiled,
+    sh_package_bundle_binding rows[3])
+{
+    const char *json = "{\"entities\":[{\"entityDef\":{\"targetType\":\"idDeclEntityDef\",\"inherit\":\"root\"}}]}";
+    sh_package_provenance catalog = {0}, saved = {0}, out = {0};
+    sh_package_references references = {0};
+    sh_package_source_binding inspection; size_t length; char error[1024];
+    sh_mpkg_use_requirements requirements = {compiled, NULL};
+    size_t context = isolated(&catalog, rows), saved_context = isolated(&saved, rows);
+    bind(&catalog, "root", "root", &context, 1);
+    bind(&saved, "root", "root", &saved_context, 1);
+    use(&saved, "entity/0", root_site, 0, saved_context);
+    char *text = sh_package_map_uses_select(reader, json, strlen(json), &saved, &catalog, rows, 3,
+        sh_mpkg_new_use_required, &requirements, &length, &out, &references, &inspection, error, sizeof(error));
+    if (!text) fprintf(stderr, "native identity: %s\n", error);
+    assert(text && !strcmp(text, json) && !out.use_count); free(text);
+    /* Published under that stock name by this provider: still a package use. */
+    sh_compiled_resource *files = compiled->resources; size_t count = compiled->resource_count;
+    sh_compiled_resource *more = malloc((count + 1) * sizeof(*more)); assert(more);
+    memcpy(more, files, count * sizeof(*more));
+    more[count] = declaration("root", "generated/decls/entitydef/root.decl", "{ class = \"Entity\"; edit = { health = 3; } }");
+    compiled->resources = more; compiled->resource_count = count + 1;
+    text = sh_package_map_uses_select(reader, json, strlen(json), &saved, &catalog, rows, 3,
+        sh_mpkg_new_use_required, &requirements, &length, &out, &references, &inspection, error, sizeof(error));
+    assert(text && !strcmp(text, json) && out.use_count == 1 && !strcmp(out.bindings[0].name, "root")); free(text);
+    compiled->resources = files; compiled->resource_count = count; free(more);
+    sh_package_provenance_free(&catalog); sh_package_provenance_free(&saved); sh_package_provenance_free(&out);
+    sh_package_references_free(&references);
+}
 int main(void)
 {
     fixture f = {0}; sh_package_sources sources = {0}; sh_package_compilation compiled = {0};
@@ -752,6 +784,7 @@ int main(void)
     assert(reader);
     run_local(reader, rows);
     run_keys(reader, &compiled, rows);
+    run_native_identity(reader, &compiled, rows);
     run(reader, &compiled, rows, archives, lengths);
     sh_package_source_reader_close(reader);
     while (f.count) free(f.regions[--f.count].address);

@@ -1364,6 +1364,208 @@ static void native_event_witness(void)
     }
     sh_package_audio_program_close(p); sh_audio_originals_close(originals);
 }
+/* One bank of this test's HIRC shapes: an optional event naming one action,
+ * Play actions (0x0403) targeting one sound in target_bank, and an optional
+ * streamed sound. Bank IDs follow the native file name hash. */
+typedef struct precedence_bank {
+    const char *name;
+    uint32_t event, event_action, target, target_bank, sound;
+    uint32_t actions[2];
+} precedence_bank;
+static size_t precedence_bytes(unsigned char bytes[512], const precedence_bank *h)
+{
+    uint32_t id = 0; size_t at = 36, count = 0;
+    CHECK(sh_audio_bank_identity(h->name, &id));
+    memset(bytes, 0, 512); memcpy(bytes, "BKHD", 4); put32(bytes + 4, 16); put32(bytes + 8, 113); put32(bytes + 12, id);
+    memcpy(bytes + 24, "HIRC", 4);
+    if (h->event) {
+        bytes[at] = 4; put32(bytes + at + 1, 12); put32(bytes + at + 5, h->event);
+        put32(bytes + at + 9, 1); put32(bytes + at + 13, h->event_action); at += 17; count++;
+    }
+    for (size_t i = 0; i < 2 && h->actions[i]; i++) {
+        bytes[at] = 3; put32(bytes + at + 1, 18); put32(bytes + at + 5, h->actions[i]); bytes[at + 9] = 3; bytes[at + 10] = 4;
+        put32(bytes + at + 11, h->target); put32(bytes + at + 19, h->target_bank ? h->target_bank : id); at += 23; count++;
+    }
+    if (h->sound) {
+        bytes[at] = 2; put32(bytes + at + 1, 46); put32(bytes + at + 5, h->sound); put32(bytes + at + 9, 0x20001);
+        bytes[at + 13] = 1; put32(bytes + at + 14, 99); at += 51; count++;
+    }
+    put32(bytes + 28, (uint32_t)(at - 32)); put32(bytes + 32, (uint32_t)count); return at;
+}
+typedef struct precedence_loads { uint32_t ids[16]; char names[16][32]; int numeric[16]; size_t count; } precedence_loads;
+static int precedence_load(void *context, uint32_t id, const char *filename, int numeric)
+{
+    precedence_loads *plan = context;
+    if (plan->count == 16) return 0;
+    plan->ids[plan->count] = id; plan->numeric[plan->count] = numeric;
+    snprintf(plan->names[plan->count++], 32, "%s", filename); return 1;
+}
+static int precedence_named(const precedence_loads *plan, const char *name)
+{
+    for (size_t i = 0; i < plan->count; i++) if (!plan->numeric[i] && !strcmp(plan->names[i], name)) return 1;
+    return 0;
+}
+/* Private projections are loaded by their bound file ID. */
+static int precedence_private(const precedence_loads *plan, const char *name)
+{
+    for (size_t i = 0; i < plan->count; i++) if (plan->numeric[i] && !strcmp(plan->names[i], name)) return 1;
+    return 0;
+}
+/* Ineffective authored event edits the last prepared case reported. */
+static size_t precedence_shadowed; static char precedence_shadow_bank[64], precedence_shadow_first[64];
+static int precedence_shadow(void *context, size_t scope, uint32_t event, const char *sound,
+    const char *bank, const char *first)
+{
+    (void)context; (void)scope; (void)event; (void)sound; precedence_shadowed++;
+    snprintf(precedence_shadow_bank, sizeof(precedence_shadow_bank), "%s", strrchr(bank, '/') + 1);
+    snprintf(precedence_shadow_first, sizeof(precedence_shadow_first), "%s", strrchr(first, '/') + 1);
+    return 1;
+}
+/* Installed banks, authored banks, one played sound. Returns whether the
+ * sound's prepared root stayed the native original, or -1 on failure. */
+static int precedence_case(const char *label, const precedence_bank *installed, size_t count,
+    const precedence_bank *authored, size_t authored_count, const char *sound, precedence_loads *plan)
+{
+    unsigned char bytes[512], body[2][512], media[4] = {1, 2, 3, 4};
+    char relative[512], base[4096], path[2][256], error[1024] = {0};
+    int result = -1;
+    CHECK(authored_count >= 1 && authored_count <= 2);
+    for (size_t i = 0; i < count; i++) {
+        size_t length = precedence_bytes(bytes, installed + i);
+        snprintf(relative, sizeof(relative), "%s/sound/soundbanks/pc/%s", label, installed[i].name);
+        binary(relative, bytes, length);
+    }
+    snprintf(relative, sizeof(relative), "%s/sound/soundbanks/pc/99.wem", label);
+    binary(relative, media, sizeof(media));
+    snprintf(base, sizeof(base), "%s/%s", root, label);
+    sh_audio_originals *originals = sh_audio_originals_open(base, L"English(US)", NULL); CHECK(originals);
+    sh_compiled_resource files[2] = {{0}}; sh_package_compilation scope = {0};
+    for (size_t i = 0; i < authored_count; i++) {
+        sh_compiled_resource *file = files + i;
+        snprintf(path[i], sizeof(path[i]), "sound/soundbanks/pc/%s", authored[i].name);
+        file->engine_path = path[i]; file->body = body[i]; file->body_length = precedence_bytes(body[i], authored + i);
+        file->baseline_known = 1; file->owners.bits = file->gameplay_owners.bits = 1;
+    }
+    scope.resources = files; scope.resource_count = authored_count;
+    const sh_package_compilation *input = &scope;
+    sh_package_audio_program *p = sh_package_audio_program_open(&input, 1, originals, error, sizeof(error)); CHECK(p);
+    if (p && sh_package_audio_program_collect(p, 0, sound, error, sizeof(error)) &&
+        sh_package_audio_program_prepare(p, error, sizeof(error))) {
+        sh_audio_graph_root root_binding = {0};
+        if (sh_package_audio_program_root(p, 0, sound, &root_binding, error, sizeof(error))) result = root_binding.original;
+        precedence_shadowed = 0; precedence_shadow_bank[0] = precedence_shadow_first[0] = 0;
+        if (!sh_package_audio_program_shadowed(p, precedence_shadow, NULL)) result = -1;
+        if (plan) {
+            sh_package_compilation output = {0}; program_ids ids = {0}; ids.remaining = 1000;
+            if (!sh_package_audio_program_bind(p, &output, program_assign, &ids, error, sizeof(error)) ||
+                !sh_package_audio_program_loads(p, precedence_load, plan, error, sizeof(error))) result = -1;
+        }
+    }
+    if (result < 0) fprintf(stderr, "%s: %s\n", label, error);
+    sh_package_audio_program_close(p); sh_audio_originals_close(originals);
+    return result;
+}
+/* The directory's own listing order, which the engine's unsorted ListFiles
+ * uses (VK FUN_141a48280, GL FUN_141a3a7e0: _findfirst64/_findnext64). */
+static int precedence_listed_first(const char *label, const char *a, const char *b)
+{
+    char pattern[4096]; WIN32_FIND_DATAA found; int first = -1;
+    snprintf(pattern, sizeof(pattern), "%s\\%s\\sound\\soundbanks\\pc\\*", root, label);
+    HANDLE search = FindFirstFileA(pattern, &found); CHECK(search != INVALID_HANDLE_VALUE);
+    if (search == INVALID_HANDLE_VALUE) return -1;
+    do {
+        if (!_stricmp(found.cFileName, a)) { first = 0; break; }
+        if (!_stricmp(found.cFileName, b)) { first = 1; break; }
+    } while (FindNextFileA(search, &found));
+    FindClose(search); return first;
+}
+static void native_bank_precedence(void)
+{
+    uint32_t event, stock, missing; const char *sound = "events/precedence", *stock_sound = "events/stock_only";
+    CHECK(sh_audio_event_identity(sound, &event));
+    CHECK(sh_audio_event_identity(stock_sound, &stock));
+    CHECK(sh_audio_event_identity("events/campaign_only", &missing));
+    /* Original lever/scream shape: an identical stock event in doom_initial.bnk
+     * (prepared at sound init) and doom_items.bnk (listed later). Editing only
+     * the listed copy never runs in SnapMap; editing the prepared copy does. */
+    precedence_bank initial = {"doom_initial.bnk", event, 50, 600, 0, 600, {50, 51}};
+    precedence_bank items = {"doom_items.bnk", event, 50, 600, 0, 600, {50, 51}};
+    precedence_bank pair[2] = {initial, items};
+    precedence_bank edited_items = items; edited_items.event_action = 51;
+    precedence_bank edited_initial = initial; edited_initial.event_action = 51;
+    CHECK(precedence_case("precedence-shadowed", pair, 2, &edited_items, 1, sound, NULL) == 1);
+    /* The ineffective contribution is reported with both banks, not repaired. */
+    CHECK(precedence_shadowed == 1 && !strcmp(precedence_shadow_bank, "doom_items.bnk") &&
+        !strcmp(precedence_shadow_first, "doom_initial.bnk"));
+    CHECK(precedence_case("precedence-effective", pair, 2, &edited_initial, 1, sound, NULL) == 0);
+    CHECK(!precedence_shadowed); /* the unchanged later copy is no edit */
+    /* Explicit preparation precedes every listed name, including names that
+     * sort before it. */
+    precedence_bank early = {"aaa.bnk", event, 50, 600, 0, 600, {50, 51}};
+    precedence_bank before[2] = {initial, early};
+    precedence_bank edited_early = early; edited_early.event_action = 51;
+    CHECK(precedence_case("precedence-prepared-first", before, 2, &edited_early, 1, sound, NULL) == 1);
+    /* Within one listing pass the directory's own order decides, whatever the
+     * names' sort order is (on NTFS "ab" lists before "a_b"). */
+    precedence_bank under = {"a_b.bnk", event, 50, 600, 0, 600, {50, 51}};
+    precedence_bank plain = {"ab.bnk", event, 50, 600, 0, 600, {50, 51}};
+    precedence_bank listed[2] = {under, plain};
+    precedence_bank edited_under = under; edited_under.event_action = 51;
+    int result = precedence_case("precedence-listing", listed, 2, &edited_under, 1, sound, NULL);
+    int first = precedence_listed_first("precedence-listing", "a_b.bnk", "ab.bnk");
+    CHECK(first >= 0 && result == (first == 1));
+    /* Only events are first-registration objects. A Play action edited in
+     * place in the later bank is reparsed natively, so it stays effective. */
+    precedence_bank reparse = items; reparse.target = 601; reparse.sound = 601;
+    CHECK(precedence_case("precedence-action-reparse", pair, 2, &reparse, 1, sound, NULL) == 0);
+    /* A campaign-only bank edit shadowed by a registered copy stays ineffective. */
+    precedence_bank excluded = {"x_sp.bnk", event, 50, 600, 0, 600, {50, 51}};
+    precedence_bank with_excluded[2] = {initial, excluded};
+    precedence_bank edited_excluded = excluded; edited_excluded.event_action = 51;
+    CHECK(precedence_case("precedence-excluded-shadowed", with_excluded, 2, &edited_excluded, 1, sound, NULL) == 1);
+    /* A native reference SnapMap leaves unresolved (its target lives only in a
+     * bank SnapMap never registers) is not repaired by loading that bank. */
+    uint32_t excluded_id = 0; CHECK(sh_audio_bank_identity("x_sp.bnk", &excluded_id));
+    precedence_bank dangling = {"doom_initial.bnk", stock, 52, 700, excluded_id, 0, {52, 0}};
+    precedence_bank campaign = {"x_sp.bnk", missing, 53, 700, 0, 700, {53, 0}};
+    precedence_bank native_set[3] = {dangling, items, campaign};
+    precedence_loads plan = {0};
+    CHECK(precedence_case("precedence-native-absent", native_set, 3, &edited_items, 1, stock_sound, &plan) == 1);
+    CHECK(!precedence_named(&plan, "x_sp.bnk"));
+    /* Startup filtering is no ban on used content: an event defined only by a
+     * bank SnapMap never registers still selects and loads that bank. */
+    memset(&plan, 0, sizeof(plan));
+    CHECK(precedence_case("precedence-campaign-use", native_set, 3, &edited_items, 1, "events/campaign_only", &plan) == 1);
+    CHECK(precedence_named(&plan, "x_sp.bnk"));
+    /* An authored bank that SnapMap would skip at startup is still supplied. */
+    precedence_bank authored_campaign = {"mod_sp.bnk", missing, 54, 600, 0, 600, {54, 0}};
+    memset(&plan, 0, sizeof(plan));
+    CHECK(precedence_case("precedence-authored-campaign", pair, 2, &authored_campaign, 1, "events/campaign_only", &plan) == 0);
+    int private_load = 0; for (size_t i = 0; i < plan.count; i++) private_load |= plan.numeric[i];
+    CHECK(private_load);
+    /* A private projection whose only change is a shadowed event keeps no
+     * record, media or bank-level chunk, and no retained locator names it: it is
+     * published but never loaded (the live lever/scream shape). The effective
+     * edit of the prepared copy is loaded. */
+    memset(&plan, 0, sizeof(plan));
+    CHECK(precedence_case("precedence-shadowed-plan", pair, 2, &edited_items, 1, sound, &plan) == 1);
+    CHECK(!precedence_private(&plan, "doom_items.bnk"));
+    memset(&plan, 0, sizeof(plan));
+    CHECK(precedence_case("precedence-effective-plan", pair, 2, &edited_initial, 1, sound, &plan) == 0);
+    CHECK(precedence_private(&plan, "doom_initial.bnk"));
+    /* The same empty projection stays loaded while a retained private Play
+     * action's bank locator names its scoped identity: native preparation and
+     * release go through that locator even though every object the action
+     * reaches resolves in another bank (R134/R135). */
+    uint32_t items_id = 0, locator_event = 0;
+    CHECK(sh_audio_bank_identity("doom_items.bnk", &items_id));
+    CHECK(sh_audio_event_identity("events/locator", &locator_event));
+    precedence_bank locating = {"zz_locator.bnk", locator_event, 77, 600, items_id, 0, {77, 0}};
+    precedence_bank located[2] = {edited_items, locating};
+    memset(&plan, 0, sizeof(plan));
+    CHECK(precedence_case("precedence-located-empty", pair, 2, located, 2, "events/locator", &plan) >= 0);
+    CHECK(precedence_private(&plan, "zz_locator.bnk") && precedence_private(&plan, "doom_items.bnk"));
+}
 typedef struct probe_reservations {
     const uint32_t *originals; size_t original_count, native_count[11], private_count[11];
     uint32_t next;
@@ -1380,6 +1582,15 @@ static int probe_reserve(void *context, const sh_audio_link_graph *graph, size_t
         if(!++p->next) {snprintf(error,capacity,"probe exhausted numeric IDs");return 0;}
     } while(bsearch(&p->next,p->originals,p->original_count,sizeof(uint32_t),probe_number_order));
     p->private_count[domain]++;*id=p->next;return 1;
+}
+static int probe_load_visit(void *context,uint32_t id,const char *filename,int numeric)
+{ (void)context; printf("activation load: %s id=%u %s\n",filename,id,numeric ? "by file ID" : "by name"); return 1; }
+static int probe_shadow_visit(void *context,size_t scope,uint32_t event,const char *sound,const char *bank,const char *first)
+{
+    (void)context;
+    printf("ineffective edit: scope=%zu event=%u sound=%s in %s, registered first by %s\n",scope,event,
+        sound ? sound : "-",bank,first);
+    return 1;
 }
 static int probe_authored_bank(const char *base,const char *engine_path,const char *filename)
 {
@@ -1413,15 +1624,103 @@ static int probe_authored_bank(const char *base,const char *engine_path,const ch
     printf("selected banks=%zu private banks=%zu private bytes=%llu\n",sh_package_audio_program_banks(program,0),
         private_banks,(unsigned long long)private_bytes);
     for(size_t i=0;i<11;i++)printf("domain=%zu native=%zu private=%zu\n",i,ids.native_count[i],ids.private_count[i]);
+    if(!sh_package_audio_program_loads(program,probe_load_visit,NULL,error,sizeof(error)))goto done;
     ok=1;
 done:
     if(!ok)fprintf(stderr,"authored bank probe: %s\n",*error ? error : "input unavailable");
     if(stream)fclose(stream);
     sh_package_audio_program_close(program);sh_audio_originals_close(originals);free(file.body);return ok ? 0 : 1;
 }
+/* Read-only: which catalog sounds a scope with one authored bank nominates as
+ * affected (seed), and whether the named sounds are among them. */
+typedef struct probe_seeded { size_t count; const char *const *names; size_t name_count; } probe_seeded;
+static int probe_seed_visit(void *context,const char *name)
+{
+    probe_seeded *seeded=context;seeded->count++;
+    for(size_t i=0;i<seeded->name_count;i++)if(!strcmp(name,seeded->names[i]))printf("seeded: %s\n",name);
+    return 1;
+}
+static int probe_seed_bank(const char *base,const char *engine_path,const char *filename,
+    const char *const *names,size_t name_count)
+{
+    char error[1024]={0};int ok=0;FILE *stream=NULL;__int64 length=0;
+    sh_audio_originals *originals=NULL;sh_package_audio_program *program=NULL;sh_resource_catalog *catalog=NULL;
+    sh_compiled_resource file={0};sh_package_compilation scope={0};
+    stream=fopen(filename,"rb");if(!stream || _fseeki64(stream,0,SEEK_END) ||
+        (length=_ftelli64(stream))<0 || (uint64_t)length>SIZE_MAX || _fseeki64(stream,0,SEEK_SET))goto done;
+    file.body=malloc(length ? (size_t)length : 1);file.body_length=(size_t)length;
+    if(!file.body || fread(file.body,1,file.body_length,stream)!=file.body_length)goto done;
+    fclose(stream);stream=NULL;
+    file.engine_path=engine_path;file.baseline_known=1;file.owners.bits=file.gameplay_owners.bits=1;
+    scope.resources=&file;scope.resource_count=1;
+    originals=sh_audio_originals_open(base,L"English(US)",NULL);
+    catalog=sh_resource_catalog_open(base,error,sizeof(error));
+    if(!originals || !catalog)goto done;
+    const sh_package_compilation *input=&scope;
+    program=sh_package_audio_program_open(&input,1,originals,error,sizeof(error));
+    probe_seeded seeded={0,names,name_count};
+    if(!program || !sh_package_audio_program_seed(program,0,catalog,probe_seed_visit,&seeded,error,sizeof(error)))goto done;
+    for(size_t i=0;i<name_count;i++)
+        printf("affected %s: %d\n",names[i],sh_package_audio_program_affected(program,0,names[i]));
+    printf("seeded sounds=%zu\n",seeded.count);
+    ok=1;
+done:
+    if(!ok)fprintf(stderr,"seed probe: %s\n",*error ? error : "input unavailable");
+    if(stream)fclose(stream);
+    sh_package_audio_program_close(program);sh_resource_catalog_close(catalog);sh_audio_originals_close(originals);
+    free(file.body);return ok ? 0 : 1;
+}
+/* Read-only: collect the named sounds in a scope with one authored bank and
+ * report whether prepared graph semantics keep each root original, and the
+ * delivery/gameplay owners its captured records carry. */
+static int probe_root_bank(const char *base,const char *engine_path,const char *filename,
+    const char *const *names,size_t name_count)
+{
+    char error[1024]={0};int ok=0;FILE *stream=NULL;__int64 length=0;
+    sh_audio_originals *originals=NULL;sh_package_audio_program *program=NULL;
+    sh_compiled_resource file={0};sh_package_compilation scope={0};
+    stream=fopen(filename,"rb");if(!stream || _fseeki64(stream,0,SEEK_END) ||
+        (length=_ftelli64(stream))<0 || (uint64_t)length>SIZE_MAX || _fseeki64(stream,0,SEEK_SET))goto done;
+    file.body=malloc(length ? (size_t)length : 1);file.body_length=(size_t)length;
+    if(!file.body || fread(file.body,1,file.body_length,stream)!=file.body_length)goto done;
+    fclose(stream);stream=NULL;
+    file.engine_path=engine_path;file.baseline_known=1;file.owners.bits=file.gameplay_owners.bits=1;
+    scope.resources=&file;scope.resource_count=1;
+    originals=sh_audio_originals_open(base,L"English(US)",NULL);
+    if(!originals)goto done;
+    const sh_package_compilation *input=&scope;
+    program=sh_package_audio_program_open(&input,1,originals,error,sizeof(error));
+    if(!program)goto done;
+    for(size_t i=0;i<name_count;i++)
+        if(!sh_package_audio_program_collect(program,0,names[i],error,sizeof(error)))goto done;
+    if(!sh_package_audio_program_prepare(program,error,sizeof(error)))goto done;
+    for(size_t i=0;i<name_count;i++) {
+        sh_audio_graph_root root={0};const sh_package_owners *owners=NULL,*gameplay=NULL;
+        int rooted=sh_package_audio_program_root(program,0,names[i],&root,error,sizeof(error));
+        int owned=sh_package_audio_program_owners(program,0,names[i],&owners,&gameplay);
+        printf("%s: root=%d original=%d owners=%zu gameplay=%zu\n",names[i],rooted,rooted ? root.original : -1,
+            owned && owners ? sh_package_owners_count(owners) : 0,owned && gameplay ? sh_package_owners_count(gameplay) : 0);
+    }
+    {
+        sh_package_compilation output={0};probe_reservations ids={0};
+        if(sh_audio_originals_ids(originals,&ids.originals,&ids.original_count,error,sizeof(error))!=1 ||
+            !sh_package_audio_program_bind(program,&output,probe_reserve,&ids,error,sizeof(error)) ||
+            !sh_package_audio_program_loads(program,probe_load_visit,NULL,error,sizeof(error)) ||
+            !sh_package_audio_program_shadowed(program,probe_shadow_visit,NULL))goto done;
+    }
+    ok=1;
+done:
+    if(!ok)fprintf(stderr,"root probe: %s\n",*error ? error : "input unavailable");
+    if(stream)fclose(stream);
+    sh_package_audio_program_close(program);sh_audio_originals_close(originals);free(file.body);return ok ? 0 : 1;
+}
 int main(int argc, char **argv)
 {
     if (argc == 5 && !strcmp(argv[1], "--inspect-bank")) return probe_authored_bank(argv[2],argv[3],argv[4]);
+    if (argc >= 5 && !strcmp(argv[1], "--seed-bank"))
+        return probe_seed_bank(argv[2],argv[3],argv[4],(const char *const *)argv+5,(size_t)(argc-5));
+    if (argc >= 6 && !strcmp(argv[1], "--root-bank"))
+        return probe_root_bank(argv[2],argv[3],argv[4],(const char *const *)argv+5,(size_t)(argc-5));
     if (argc == 4 && !strcmp(argv[1], "--capture-originals")) return probe_capture(argv[2], argv[3], 0);
     if (argc == 4 && !strcmp(argv[1], "--inventory-originals")) return probe_capture(argv[2], argv[3], 1);
     if (argc == 4 && !strcmp(argv[1], "--roots-originals")) return probe_capture(argv[2], argv[3], 2);
@@ -1430,7 +1729,7 @@ int main(int argc, char **argv)
     CHECK(GetTempPathA(sizeof(temp),temp)>0);
     snprintf(root,sizeof(root),"%ssh-package-audio-%lu",temp,(unsigned long)GetCurrentProcessId());
     CHECK(CreateDirectoryA(root,NULL));
-    memory_index(); media_index(); bank_content_identity(); authored_and_map(); immutable_scope(); compact_event_scope(); typed_capture(); retained_program(); inventory_capture(); retry_program(); shared_program(); shared_native_baseline(); bus_program(); bus_baseline_program(); shared_modulator_program(); native_event_witness(); cleanup();
+    memory_index(); media_index(); bank_content_identity(); authored_and_map(); immutable_scope(); compact_event_scope(); typed_capture(); retained_program(); inventory_capture(); retry_program(); shared_program(); shared_native_baseline(); bus_program(); bus_baseline_program(); shared_modulator_program(); native_event_witness(); native_bank_precedence(); cleanup();
     if(failures) return 1;
     puts("package audio source indexes passed"); return 0;
 }

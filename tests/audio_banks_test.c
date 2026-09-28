@@ -544,6 +544,77 @@ static void test_source_closure(void)
     wanted[2]=1;CHECK(!sh_audio_bank_closure(view,3,&event,1,1,wanted,&report,error,sizeof(error)));
 }
 
+typedef struct closure_absent { uint32_t ids[8]; size_t count; } closure_absent;
+static int closure_absent_add(void *context, uint32_t id)
+{ closure_absent *out = context; if (out->count == 8) return 0; out->ids[out->count++] = id; return 1; }
+/* SnapMap's native bank set: registered banks are preferred providers. A
+ * registered installed original keeps the lookups SnapMap leaves unresolved;
+ * a bank the program supplies may still use a bank SnapMap never registers,
+ * and an event defined only there selects it (startup filtering is no ban). */
+static void test_native_closure(void)
+{
+    uint32_t event = 77, campaign = 78, node = 600, action = 50, next[] = {4};
+    sh_audio_bank banks[4] = {{0}};
+    const sh_audio_bank *view[] = {banks, banks + 1, banks + 2, banks + 3};
+    for (size_t i = 0; i < 4; i++) banks[i].id = (uint32_t)i + 1;
+    /* 0: registered native original with event 77 needing node 600.
+     * 1: registered bank also defining 77. 2: never registered, defines 600,
+     * event 78 and action 50. 3: registered bank defining node 600. */
+    uint32_t events01[] = {77}, events2[] = {78};
+    uint32_t objects2[] = {50, 600};
+    banks[0].events = events01; banks[0].event_count = 1; banks[0].required = &node; banks[0].required_count = 1;
+    banks[1].events = events01; banks[1].event_count = 1;
+    banks[2].events = events2; banks[2].event_count = 1; banks[2].objects = objects2; banks[2].object_count = 2;
+    unsigned char flags[4] = {SH_AUDIO_CLOSURE_REGISTERED | SH_AUDIO_CLOSURE_NATIVE, SH_AUDIO_CLOSURE_REGISTERED,
+        0, SH_AUDIO_CLOSURE_REGISTERED};
+    unsigned char selected[4] = {0}; char error[256]; sh_audio_bank_closure_report report; closure_absent absent = {0};
+    /* No registered provider: SnapMap leaves the native lookup unresolved. */
+    CHECK(sh_audio_bank_closure_native(view, flags, 4, &event, 1, 1, selected, &report,
+        closure_absent_add, &absent, error, sizeof(error)));
+    CHECK(selected[0] && selected[1] && !selected[2] && !selected[3]);
+    CHECK(report.native_absent == 1 && absent.count == 1 && absent.ids[0] == 600);
+    /* The old closure loads the campaign-only bank for the same lookup. */
+    memset(selected, 0, sizeof(selected));
+    CHECK(sh_audio_bank_closure(view, 4, &event, 1, 1, selected, &report, error, sizeof(error)));
+    CHECK(selected[2]);
+    /* A registered provider is preferred over one SnapMap never registers. */
+    banks[3].objects = &node; banks[3].object_count = 1;
+    memset(selected, 0, sizeof(selected)); absent.count = 0;
+    CHECK(sh_audio_bank_closure_native(view, flags, 4, &event, 1, 1, selected, &report,
+        closure_absent_add, &absent, error, sizeof(error)));
+    CHECK(selected[3] && !selected[2] && !absent.count && !report.native_absent);
+    /* A bank the program supplies (not native) may use the campaign-only provider. */
+    banks[3].object_count = 0; flags[0] = SH_AUDIO_CLOSURE_REGISTERED;
+    memset(selected, 0, sizeof(selected));
+    CHECK(sh_audio_bank_closure_native(view, flags, 4, &event, 1, 1, selected, &report,
+        closure_absent_add, &absent, error, sizeof(error)));
+    CHECK(selected[2] && !report.native_absent);
+    /* An event only a never-registered bank defines still selects that bank. */
+    memset(selected, 0, sizeof(selected));
+    CHECK(sh_audio_bank_closure_native(view, flags, 4, &campaign, 1, 1, selected, &report,
+        closure_absent_add, &absent, error, sizeof(error)));
+    CHECK(selected[2] && !selected[0] && !selected[1]);
+    /* Only registered copies are selected when one exists. */
+    banks[2].events = events01; memset(selected, 0, sizeof(selected));
+    CHECK(sh_audio_bank_closure_native(view, flags, 4, &event, 1, 1, selected, &report,
+        closure_absent_add, &absent, error, sizeof(error)));
+    CHECK(selected[0] && selected[1] && selected[2]); /* 2 is the program's provider of 600 */
+    flags[0] |= SH_AUDIO_CLOSURE_NATIVE; memset(selected, 0, sizeof(selected)); absent.count = 0;
+    CHECK(sh_audio_bank_closure_native(view, flags, 4, &event, 1, 1, selected, &report,
+        closure_absent_add, &absent, error, sizeof(error)));
+    CHECK(selected[0] && selected[1] && !selected[2]);
+    /* A native bank's explicit dependency on a never-registered bank stays native. */
+    banks[0].banks = next; banks[0].bank_count = 1; flags[3] = 0; memset(selected, 0, sizeof(selected)); absent.count = 0;
+    CHECK(sh_audio_bank_closure_native(view, flags, 4, &event, 1, 1, selected, &report,
+        closure_absent_add, &absent, error, sizeof(error)));
+    CHECK(!selected[3] && absent.count >= 1);
+    /* Absent everywhere remains an error. */
+    uint32_t nowhere = 999; banks[0].required = &nowhere; banks[0].banks = NULL; banks[0].bank_count = 0;
+    memset(selected, 0, sizeof(selected));
+    CHECK(!sh_audio_bank_closure_native(view, flags, 4, &event, 1, 1, selected, &report,
+        closure_absent_add, &absent, error, sizeof(error)) && strstr(error, "absent object 999"));
+    (void)action;
+}
 static void test_cross_bank_objects(void)
 {
     uint32_t event=77, action=50, node=600, absent=999;
@@ -578,7 +649,7 @@ int main(int argc,char **argv)
     test_identities(); test_name_aliases(); test_reader(); test_dependencies();
     test_streaming_source(); test_recovery(); test_transition_order(); test_content_recovery(); test_additive_ownership();
     test_source_closure();
-    test_cross_bank_objects();
+    test_native_closure(); test_cross_bank_objects();
     test_resident_media_closure();
     if(argc>1 && !strcmp(argv[1],"--sound-ids")) {
         for(int i=2;i<argc;i++) {

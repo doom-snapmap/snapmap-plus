@@ -719,6 +719,69 @@ int sh_package_runtime_test_legacy_bindings(const sh_package_compilation *compil
 { return pr_legacy_bindings(compiled, catalog, out); }
 #endif
 
+/* The typed resource values a legacy document names in its historical
+ * composition. Parent and class lookups are not values; keys name no
+ * resource; authored rows are already in the recipe. */
+typedef struct pr_document_walk {
+    sh_package_references *roots;
+    const sh_package_provenance *authored;
+} pr_document_walk;
+static int pr_document_lookup(void *context, const sh_package_provenance_site *site,
+    const char *family, const char *name, const char **replacement)
+{ (void)context; (void)site; (void)family; (void)name; *replacement = NULL; return 0; }
+static int pr_document_value(void *context, const sh_package_provenance_site *site,
+    const char *family, const char *name, const char **replacement)
+{
+    pr_document_walk *walk = context; (void)site; *replacement = NULL;
+    if (!strcmp(family, SH_PACKAGE_KEY_FAMILY)) return 0;
+    for (size_t i = 0; i < walk->authored->binding_count; i++)
+        if (!_stricmp(walk->authored->bindings[i].family, family) &&
+            !_stricmp(walk->authored->bindings[i].original, name)) return 0;
+    for (size_t i = 0; i < walk->roots->count; i++)
+        if (!strcmp(walk->roots->items[i].type, family) && !strcmp(walk->roots->items[i].name, name)) return 0;
+    return sh_package_references_add(walk->roots, family, name) ? 0 : -1;
+}
+static int pr_context_equal(const sh_package_provenance_context *a,
+    const sh_package_provenance_context *b);
+/* A legacy context changes stock identities it never authored: a changed bank
+ * changes the sound declarations naming its events, and a changed material,
+ * model or image changes the entities that reach it. Under the file
+ * replacement the map was authored with, those stock names meant the changed
+ * resources. The compiled inventory binds them in the map's own historical
+ * context; retain each changed one the document names, so that its site can
+ * select it. Authored rows are never replaced, an unchanged identity gains no
+ * row, another context's binding is never borrowed, and a row is not a use. */
+static int pr_historical_derived(sh_package_provenance *historical, const sh_package_provenance *linked,
+    const sh_package_references *roots)
+{
+    for (size_t r = 0; roots && r < roots->count; r++) {
+        const char *family = roots->items[r].type, *name = roots->items[r].name;
+        for (size_t i = 0; i < linked->binding_count; i++) {
+            const sh_package_provenance_binding *binding = linked->bindings + i;
+            if (_stricmp(binding->family, family) || _stricmp(binding->original, name) ||
+                !_stricmp(binding->name, binding->original)) continue;
+            for (size_t k = 0; k < binding->context_count; k++) {
+                size_t h, present = 0;
+                if (binding->contexts[k] >= linked->context_count) return 0;
+                for (h = 0; h < historical->context_count; h++)
+                    if (pr_context_equal(historical->contexts + h, linked->contexts + binding->contexts[k])) break;
+                if (h == historical->context_count) continue;
+                for (size_t j = 0; j < historical->binding_count && !present; j++)
+                    present = !_stricmp(historical->bindings[j].family, family) &&
+                        !_stricmp(historical->bindings[j].original, name);
+                if (!present && !sh_package_provenance_bind(historical, binding->family, binding->original,
+                    binding->original, &h, 1)) return 0;
+            }
+        }
+    }
+    return 1;
+}
+#ifdef SH_PACKAGE_RUNTIME_TESTING
+int sh_package_runtime_test_historical_derived(sh_package_provenance *historical,
+    const sh_package_provenance *linked, const sh_package_references *roots)
+{ return pr_historical_derived(historical, linked, roots); }
+#endif
+
 /* SnapMap itself serves this name from this exact file. */
 static int pr_snapmap_serves(void *context, const char *path, const char *type, const char *name)
 {
@@ -884,7 +947,8 @@ static pr_provider *pr_prepare_deliveries(const char *data_root, const char *sou
     const pr_provider *previous, int product_only, int authoring_increment, pr_inventory **inventory_out,
     int *composition_failed, const sh_package_provenance *contexts,
     const sh_package_bundle_binding *deliveries, size_t delivery_count, int use_deliveries,
-    const pr_provider *string_peer, char *out_error, size_t out_capacity)
+    const pr_provider *string_peer, const char *document, size_t document_length,
+    char *out_error, size_t out_capacity)
 {
     sh_package_sources *sources = NULL, *inventory_sources = NULL;
     sh_package_bundle **original_bundles = NULL;
@@ -915,6 +979,7 @@ static pr_provider *pr_prepare_deliveries(const char *data_root, const char *sou
     sh_package_library isolated = {0};
     int library_output = 0;
     sh_package_provenance historical = {0}, authoring_contexts = {0};
+    sh_package_references document_roots = {0};
     uintptr_t reflection = 0;
     pr_provider *provider = NULL;
     if (inventory_out) *inventory_out = NULL;
@@ -1095,6 +1160,29 @@ static pr_provider *pr_prepare_deliveries(const char *data_root, const char *sou
             snprintf(error, sizeof(error), "cannot retain the map's historical source context"); goto done;
         }
         historical.semantics = SH_PACKAGE_PROVENANCE_HISTORICAL;
+        if (document) {
+            sh_decl_registry_source document_registry = {0};
+            uintptr_t document_reflection = reflection;
+            pr_original_source document_originals = {baseline, baseline_context, native_assets};
+            int ready;
+#ifndef SH_PACKAGE_RUNTIME_TESTING
+            ready = sh_decl_server_registry_source(&document_registry);
+#else
+            ready = sh_package_runtime_test_source_inputs(&document_registry, &document_reflection, NULL, NULL);
+#endif
+            sh_package_source_reader *reader = ready ? sh_package_source_reader_open(compiled, catalog,
+                pr_original, &document_originals, document_registry, document_reflection, error, sizeof(error)) : NULL;
+            pr_document_walk walk = {&document_roots, &historical};
+            size_t walked = 0;
+            char *copy = reader ? sh_package_source_bind_map_sites_observed(reader, document, document_length,
+                pr_document_lookup, pr_document_value, &walk, &walked, NULL, error, sizeof(error)) : NULL;
+            sh_package_source_reader_close(reader);
+            if (!copy) {
+                if (!error[0]) snprintf(error, sizeof(error), "cannot read the map's typed resource values");
+                goto done;
+            }
+            free(copy);
+        }
         sh_package_compilation_free(compiled); compiled = NULL;
         contexts = &historical;
     }
@@ -1125,6 +1213,7 @@ static pr_provider *pr_prepare_deliveries(const char *data_root, const char *sou
             /* Audio compiles into one retained program per provider. Native
              * activation publishes that program; there is no old-path fallback. */
             native.audio = audio_originals;
+            if (contexts == &historical && document_roots.count) native.document_roots = &document_roots;
 #ifndef SH_PACKAGE_RUNTIME_TESTING
             /* One pending namespace includes the retained peer provider before
              * assigning this candidate's private string identities. */
@@ -1242,6 +1331,10 @@ static pr_provider *pr_prepare_deliveries(const char *data_root, const char *sou
         }
     }
     if (!compiled) { if (composition_failed) *composition_failed = 1; goto done; }
+    if (contexts == &historical && document_roots.count &&
+        !pr_historical_derived(&historical, &isolated.bindings, &document_roots)) {
+        snprintf(error, sizeof(error), "cannot retain the map's historical derived bindings"); goto done;
+    }
     if (!sh_package_sound_prepare(compiled, error, sizeof(error))) goto done;
 #ifndef SH_PACKAGE_RUNTIME_TESTING
     if (sh_package_sound_requires_binding(compiled) && !sh_package_sound_native_ready()) {
@@ -1322,7 +1415,7 @@ done:
     sh_package_native_assets_close(native_assets);
     sh_decl_native_schema_close(native_schema);
     sh_package_sources_free(inventory_sources); sh_package_owners_free(&conflicted);
-    sh_package_provenance_free(&historical);
+    sh_package_provenance_free(&historical); sh_package_references_free(&document_roots);
     sh_package_provenance_free(&authoring_contexts);
 #ifndef SH_PACKAGE_RUNTIME_TESTING
     sh_strids_reservation_free(strings);
@@ -1338,7 +1431,7 @@ static pr_provider *pr_prepare(const char *data_root, const char *source_root,
     const pr_provider *string_peer, char *error, size_t capacity)
 {
     return pr_prepare_deliveries(data_root, source_root, previous, product_only,
-        0, inventory_out, composition_failed, contexts, NULL, 0, 0, string_peer, error, capacity);
+        0, inventory_out, composition_failed, contexts, NULL, 0, 0, string_peer, NULL, 0, error, capacity);
 }
 
 static int pr_context_equal(const sh_package_provenance_context *a,
@@ -1809,6 +1902,13 @@ static int pr_resource_equal(const sh_package_compilation *a, const sh_compiled_
  * the prepared context catalog. An old spelling is authoritative here only
  * while every selected source has a live lease and every bound native file is
  * still served with those exact retained bytes. */
+/* Whether the provider publishes a resource under this exact native name. */
+static int pr_provider_names(const pr_provider *provider, const sh_package_provenance_binding *binding)
+{
+    for (size_t i = 0; i < provider->compiled->resource_count; i++)
+        if (sh_package_resource_native_matches(provider->compiled->resources + i, binding->family, binding->name)) return 1;
+    return 0;
+}
 static int pr_retained_use(void *context, const sh_package_provenance *saved,
     size_t index, const char **replacement)
 {
@@ -1828,6 +1928,10 @@ static int pr_retained_use(void *context, const sh_package_provenance *saved,
                 !pr_context_equal(required, lease->context.contexts) ||
                 !pr_lease_binding(lease, binding) ||
                 !pr_binding_context(&lease->provider->bindings, binding, required)) continue;
+            /* A binding to the native identity itself that the provider does not
+             * publish is served by SnapMap: nothing retained to certify here, so
+             * ordinary resolution decides whether it is still a use at all. */
+            if (!_stricmp(binding->name, binding->original) && !pr_provider_names(lease->provider, binding)) return 0;
             char error[512];
             if (pr_binding_served(lease->provider, current->compiled, binding, error, sizeof(error)) != 1) return -1;
             found = 1; break;
@@ -3020,7 +3124,7 @@ int sh_package_runtime_complete_occurrence_recovery(void *context)
 static sh_package_map_plan *pr_prepare_map(const char *data_root,
     const char *map_source_root, const sh_package_provenance *contexts,
     const sh_package_bundle_binding *deliveries, size_t delivery_count, int use_deliveries,
-    char *error, size_t capacity)
+    const char *document, size_t document_length, char *error, size_t capacity)
 {
     sh_package_map_plan *plan = NULL;
     char fallback[2048];
@@ -3037,7 +3141,8 @@ static sh_package_map_plan *pr_prepare_map(const char *data_root,
     plan = calloc(1, sizeof(*plan));
     if (!plan) { snprintf(error, capacity, "cannot allocate map preparation"); goto done; }
     plan->provider = pr_prepare_deliveries(data_root, map_source_root, g_map_provider,
-        0, 0, NULL, NULL, contexts, deliveries, delivery_count, use_deliveries, g_library_provider, error, capacity);
+        0, 0, NULL, NULL, contexts, deliveries, delivery_count, use_deliveries, g_library_provider,
+        document, document_length, error, capacity);
     if (!plan->provider) { free(plan); plan = NULL; }
 done:
     ReleaseSRWLockExclusive(&g_refresh_lock); return plan;
@@ -3045,12 +3150,21 @@ done:
 
 sh_package_map_plan *sh_package_runtime_prepare_map_with_bindings(const char *data_root,
     const char *map_source_root, const sh_package_provenance *contexts, char *error, size_t capacity)
-{ return pr_prepare_map(data_root, map_source_root, contexts, NULL, 0, 0, error, capacity); }
+{ return pr_prepare_map(data_root, map_source_root, contexts, NULL, 0, 0, NULL, 0, error, capacity); }
 
 sh_package_map_plan *sh_package_runtime_prepare_map_deliveries(const char *data_root,
     const char *map_source_root, const sh_package_provenance *contexts,
     const sh_package_bundle_binding *deliveries, size_t delivery_count, char *error, size_t capacity)
-{ return pr_prepare_map(data_root, map_source_root, contexts, deliveries, delivery_count, 1, error, capacity); }
+{ return pr_prepare_map(data_root, map_source_root, contexts, deliveries, delivery_count, 1, NULL, 0, error, capacity); }
+
+sh_package_map_plan *sh_package_runtime_prepare_map_document(const char *data_root,
+    const char *map_source_root, const sh_package_provenance *contexts,
+    const sh_package_bundle_binding *deliveries, size_t delivery_count,
+    const char *json, size_t length, char *error, size_t capacity)
+{
+    return pr_prepare_map(data_root, map_source_root, contexts, deliveries, delivery_count, 1,
+        contexts ? NULL : json, length, error, capacity);
+}
 
 sh_package_map_plan *sh_package_runtime_prepare_map(const char *data_root,
     const char *map_source_root, char *error, size_t capacity)
@@ -3240,7 +3354,7 @@ int sh_package_map_plan_prepare_inventory(sh_package_map_plan *plan,
     base = pr_retain(g_library_provider);
     int composition_failed = 0;
     checked = pr_prepare_deliveries(data_root, NULL, base, 0, 1,
-        &inventory, &composition_failed, NULL, NULL, 0, 0, plan->provider, error, capacity);
+        &inventory, &composition_failed, NULL, NULL, 0, 0, plan->provider, NULL, 0, error, capacity);
     if (!inventory || (!checked && !composition_failed)) {
         goto done;
     }

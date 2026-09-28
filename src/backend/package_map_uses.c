@@ -370,7 +370,20 @@ static int mu_choose(sh_package_map_uses *selection, const sh_package_provenance
             if (!mu_key_record_site(site, resolved, &moved, &owned)) return mu_fail(selection, "cannot record a rebound map key");
             record = &moved;
         }
-        int appended = observe ? mu_append(selection, &selection->saved, use->binding,
+        /* A saved or historical row can now resolve to the native identity it
+         * names (an authored exact copy after dedupe, or an edit SnapMap never
+         * runs). SnapMap then serves that value itself: unless the current
+         * provider still supplies that identity, the site is vanilla and is
+         * neither a use nor a delivery requirement. */
+        int vanilla = 0;
+        if (observe && !key && resolved &&
+            !_stricmp(resolved, selection->saved.bindings[use->binding].original)) {
+            int needed = selection->required(selection->required_context, family, resolved,
+                selection->failure, sizeof(selection->failure));
+            if (needed < 0) return mu_fail(selection, "saved map reference gameplay classification is unavailable");
+            vanilla = !needed;
+        }
+        int appended = observe && !vanilla ? mu_append(selection, &selection->saved, use->binding,
             use->contexts, use->context_count, record, resolved, use->kind == SH_PACKAGE_USE_HISTORICAL) : 1;
         free(owned);
         if (appended < 0) return -1;

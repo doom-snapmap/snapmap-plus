@@ -30,8 +30,8 @@ int sh_package_document_bind(const char *root, const sh_mpkg_context *sources,
     }
     size_t bundle_count = 0;
     const sh_package_bundle_binding *bundles = sh_mpkg_context_bundles(sources, &bundle_count);
-    plan = sh_package_runtime_prepare_map_deliveries(root, sh_mpkg_context_root(sources),
-        present ? &saved : NULL, bundles, bundle_count, error, capacity);
+    plan = sh_package_runtime_prepare_map_document(root, sh_mpkg_context_root(sources),
+        present ? &saved : NULL, bundles, bundle_count, *json, *length, error, capacity);
     if (!plan) goto done;
     bound = sh_package_map_plan_rebind(plan, present ? &saved : NULL,
         *json, *length, &bound_length, error, capacity);

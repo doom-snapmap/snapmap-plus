@@ -184,6 +184,61 @@ static void runtime_originals(void)
     }
     sh_package_runtime_test_dispose();sh_package_runtime_test_audio_originals(NULL,NULL);
 }
+static int rank_of(sh_audio_originals *originals,const char *relative,int authored,int authored_root,
+    sh_audio_native_rank *rank)
+{
+    char path[4096],error[256]={0};
+    snprintf(path,sizeof(path),"sound/soundbanks/pc/%s",relative);
+    int result=sh_audio_originals_registration(originals,path,authored,authored_root,rank,error,sizeof(error));
+    if(result<0)fprintf(stderr,"registration %s: %s\n",path,error);
+    return result;
+}
+/* SnapMap's sound init (VK FUN_1402b97d0, GL FUN_1402b87c0): Init.bnk, the
+ * prepared doom_initial.bnk, root names, then names only the language
+ * directory lists; "initial" and SnapMap-mode "_sp" names are skipped. Within
+ * a pass the order is the directory's own unsorted listing. */
+static void registration_ranks(void)
+{
+    static const char *files[]={"init.bnk","doom_initial.bnk","doom_items.bnk","ab.bnk","a_b.bnk","x_sp.bnk",
+        "my_initial.bnk","english/doom_vo.bnk","english/doom_items.bnk","english/init.bnk","french/f.bnk"};
+    char relative[512],pattern[4096];sh_audio_native_rank rank,items,ab,a_b;
+    for(size_t i=0;i<sizeof(files)/sizeof(*files);i++) {
+        snprintf(relative,sizeof(relative),"ranks/sound/soundbanks/pc/%s",files[i]);create(relative,files[i]);
+    }
+    sh_audio_originals *originals=open_originals("ranks",L"ENGLISH");if(!originals)return;
+    CHECK(rank_of(originals,"init.bnk",0,0,&rank)==1 && rank.phase==0);
+    CHECK(rank_of(originals,"doom_initial.bnk",0,0,&rank)==1 && rank.phase==1);
+    CHECK(rank_of(originals,"doom_items.bnk",0,0,&items)==1 && items.phase==2 && items.position!=SIZE_MAX);
+    /* A language file the root pass requests by name registers at that root position. */
+    CHECK(rank_of(originals,"english/doom_items.bnk",0,0,&rank)==1 && rank.phase==2 && rank.position==items.position);
+    CHECK(rank_of(originals,"english/doom_vo.bnk",0,0,&rank)==1 && rank.phase==3 && rank.position!=SIZE_MAX);
+    CHECK(rank_of(originals,"x_sp.bnk",0,0,&rank)==0);
+    CHECK(rank_of(originals,"my_initial.bnk",0,0,&rank)==0);
+    CHECK(rank_of(originals,"english/init.bnk",0,0,&rank)==0);
+    CHECK(rank_of(originals,"french/f.bnk",0,0,&rank)==0);
+    CHECK(rank_of(originals,"absent.bnk",0,0,&rank)==0);
+    /* Authored files rank as if installed; an unlisted name has no native position. */
+    CHECK(rank_of(originals,"doom_items.bnk",1,0,&rank)==1 && rank.phase==2 && rank.position==items.position);
+    CHECK(rank_of(originals,"new.bnk",1,0,&rank)==1 && rank.phase==2 && rank.position==SIZE_MAX);
+    CHECK(rank_of(originals,"new_sp.bnk",1,0,&rank)==0);
+    CHECK(rank_of(originals,"english/new.bnk",1,0,&rank)==1 && rank.phase==3);
+    CHECK(rank_of(originals,"english/new.bnk",1,1,&rank)==1 && rank.phase==2);
+    /* The listing order, not a name order ("ab" and "a_b" compare differently
+     * by lowercase and by uppercase), orders one pass. */
+    CHECK(rank_of(originals,"ab.bnk",0,0,&ab)==1 && rank_of(originals,"a_b.bnk",0,0,&a_b)==1);
+    snprintf(pattern,sizeof(pattern),"%s\\ranks\\sound\\soundbanks\\pc\\*",root);
+    WIN32_FIND_DATAA found;HANDLE search=FindFirstFileA(pattern,&found);int ab_first=-1;
+    CHECK(search!=INVALID_HANDLE_VALUE);
+    if(search!=INVALID_HANDLE_VALUE) {
+        do {
+            if(!_stricmp(found.cFileName,"ab.bnk")){ab_first=1;break;}
+            if(!_stricmp(found.cFileName,"a_b.bnk")){ab_first=0;break;}
+        } while(FindNextFileA(search,&found));
+        FindClose(search);
+    }
+    CHECK(ab_first>=0 && (ab.position<a_b.position)==(ab_first==1));
+    sh_audio_originals_close(originals);
+}
 int main(int argc,char **argv)
 {
     if(argc==3) {
@@ -324,7 +379,7 @@ int main(int argc,char **argv)
     CHECK(sh_audio_originals_identity(originals,"sound/soundbanks/pc/foo.bnk",&answer,error,sizeof(error))==-1 && strstr(error,"metadata"));
     sh_audio_originals_close(originals);
     originals=open_originals("absent",L"english");expect(originals,"foo.bnk",0,NULL);sh_audio_originals_close(originals);
-    bank_catalog();runtime_originals();
+    bank_catalog();runtime_originals();registration_ranks();
     originals=open_originals("base",L"english");expect(originals,"foo.bnk",1,"PACK");sh_audio_originals_close(originals);
     cleanup();if(failures)return 1;puts("installed audio original and runtime availability checks passed");return 0;
 }

@@ -616,6 +616,50 @@ int sh_package_audio_program_shared_origin(const sh_package_audio_program *p,
 }
 int sh_package_audio_program_contains(const sh_package_audio_program *p, size_t scope, const char *sound)
 { return pap_find(p, scope, sound) != NULL; }
+/* A shadowed copy is an edit only when the installed bank at the same path
+ * does not hold the same bytes for that event: the native baseline scope
+ * records its own shadowed copy of the same duplicate. */
+typedef struct pap_shadow { sh_audio_graph_shadow row; } pap_shadow;
+static int pap_shadow_order(const void *left, const void *right)
+{
+    const sh_audio_graph_shadow *a = &((const pap_shadow *)left)->row, *b = &((const pap_shadow *)right)->row;
+    if (a->event != b->event) return a->event < b->event ? -1 : 1;
+    int order = strcmp(a->bank, b->bank);
+    return order ? order : (a->scope > b->scope) - (a->scope < b->scope);
+}
+int sh_package_audio_program_shadowed(const sh_package_audio_program *p,
+    int (*visit)(void *, size_t, uint32_t, const char *, const char *, const char *), void *context)
+{
+    if (!p || !p->graph || !visit) return 0;
+    size_t count = sh_audio_link_graph_shadowed(p->graph), baseline = p->bus_baseline ? p->count : SIZE_MAX;
+    if (count > SIZE_MAX / sizeof(pap_shadow)) return 0;
+    pap_shadow *rows = malloc((count ? count : 1) * sizeof(*rows)); if (!rows) return 0;
+    int ok = 1;
+    for (size_t i = 0; ok && i < count; i++) ok = sh_audio_link_graph_shadow(p->graph, i, &rows[i].row);
+    if (ok && count > 1) qsort(rows, count, sizeof(*rows), pap_shadow_order);
+    for (size_t first = 0, end; ok && first < count; first = end) {
+        /* Rows of one event copy at one bank path are adjacent after sorting. */
+        for (end = first + 1; end < count && rows[end].row.event == rows[first].row.event &&
+            !strcmp(rows[end].row.bank, rows[first].row.bank); end++) {}
+        for (size_t i = first; ok && i < end; i++) {
+            const sh_audio_graph_shadow *row = &rows[i].row;
+            if (row->scope >= p->count) continue;
+            int same = 0;
+            for (size_t j = first; j < end && !same; j++) {
+                const sh_audio_graph_shadow *witness = &rows[j].row;
+                if (witness->scope != baseline) continue;
+                same = sh_audio_link_graph_same_bytes(p->graph, row->record, witness->record);
+                if (same < 0) ok = 0;
+            }
+            if (!ok || same) continue;
+            const char *sound = NULL;
+            for (size_t j = 0; j < p->scopes[row->scope].count && !sound; j++)
+                if (p->scopes[row->scope].sounds[j].event == row->event) sound = p->scopes[row->scope].sounds[j].name;
+            if (!visit(context, row->scope, row->event, sound, row->bank, row->first)) ok = 0;
+        }
+    }
+    free(rows); return ok;
+}
 size_t sh_package_audio_program_failed_scope(const sh_package_audio_program *p)
 { return p ? p->failed_scope : SIZE_MAX; }
 int sh_package_audio_program_prepare(sh_package_audio_program *p, char *error, size_t capacity)
@@ -880,6 +924,9 @@ int sh_package_audio_program_loads(const sh_package_audio_program *p,
         if(!bank || !binding || !leaf || !sh_audio_link_graph_bank_id(p->graph,s,bank->codec->metadata.id,&bound))
             return pap_fail(error,capacity,"audio program has not been bound",bank ? bank->path : NULL);
         leaf++;
+        /* An unreferenced projection without payload has no native effect. Its
+         * file stays published; preloading it would only hold an empty bank. */
+        if(sh_audio_link_graph_private_empty(p->graph,s,j))continue;
         /* A relocated bank is served under its decimal identity; the native
          * name loader would hash that stem. Named originals keep their name. */
         int by_id=bound!=bank->codec->metadata.id || (sh_audio_bank_numeric_identity(leaf,&numeric) && numeric==bound);

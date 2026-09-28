@@ -16,17 +16,19 @@ typedef struct ag_node {
     sh_audio_identity_domain domain;
     uint32_t authored;
     uint32_t value_mask;
-    unsigned symbol, required, external, original, original_references;
+    unsigned symbol, required, external, original, original_references, native_references;
     const char *required_path;
     size_t required_offset;
 } ag_node;
 typedef struct ag_slot { size_t scope, node; uint32_t id; unsigned domain; } ag_slot;
+typedef struct ag_shadow { size_t symbol, record; } ag_shadow;
 typedef struct ag_bank {
     const sh_audio_graph_bank *input;
     size_t scope, record;
     size_t *targets, *bus_nodes, *object_nodes, *shared_nodes;
     unsigned char *native_transport;
     sh_audio_bank_binding binding,private_binding;
+    size_t private_kept; /* payload the private projection keeps (records, media, chunks) */
 } ag_bank;
 struct sh_audio_link_graph {
     ag_node *nodes;
@@ -39,11 +41,14 @@ struct sh_audio_link_graph {
     sh_package_link_classes classes;
     unsigned char *originals;
     uint32_t *ids;
+    ag_shadow *shadows;
+    size_t shadow_count;
 };
 struct sh_audio_link_binding {
     sh_audio_link_graph *graph;
     uint32_t *ids;
     sh_audio_bank_binding *banks,*private_banks;
+    size_t *private_kept;
 };
 
 static int ag_fail(char *error, size_t capacity, const char *text)
@@ -82,7 +87,7 @@ static int ag_node_add(sh_audio_link_graph *g, const char *family, uint32_t id,
     if (g->count == SIZE_MAX || !ag_grow((void **)&g->nodes, &g->allocated, g->count + 1, sizeof(*g->nodes))) return 0;
     *index = g->count++; ag_node *n = &g->nodes[*index]; memset(n, 0, sizeof(*n));
     n->shape.family = family; n->scope = scope; n->authored = id;
-    n->original = n->original_references = 1;
+    n->original = n->original_references = n->native_references = 1;
     snprintf(n->path, sizeof(n->path), "%u", id); return 1;
 }
 static int ag_symbol(sh_audio_link_graph *g, size_t scope, sh_audio_identity_domain domain,
@@ -315,7 +320,9 @@ static int ag_bank_scan(sh_audio_link_graph *g, ag_bank *bank, char *error, size
         if (!ag_symbol(g, bank->scope, f->domain, f->value, &bank->targets[i]))
             return ag_fail(error, capacity, "cannot allocate scoped audio identity");
         ag_node *n = &g->nodes[bank->targets[i]];
-        if (!(f->flags & SH_AUDIO_ID_DEFINITION)) n->original_references &= !!input->original;
+        if (!(f->flags & SH_AUDIO_ID_DEFINITION)) {
+            n->original_references &= !!input->original; n->native_references &= !!input->native;
+        }
         if (!(f->flags & (SH_AUDIO_ID_DEFINITION | SH_AUDIO_ID_OPTIONAL)) && !ag_is_name(codec, f->offset) && !n->required) {
             n->required = 1; n->required_path = input->path; n->required_offset = f->offset;
         }
@@ -338,9 +345,22 @@ static int ag_bank_scan(sh_audio_link_graph *g, ag_bank *bank, char *error, size
         bank->object_nodes[i]=record;
         if (!ag_fields(g, bank, record, object->offset, object->first_span, object->span_count)) goto memory;
         if (!ag_bus_records(g,bank,object,error,capacity)) return 0;
-        for (size_t j = object->first_span; j < object->first_span + object->span_count; j++)
-            if ((codec->spans[j].flags & SH_AUDIO_ID_DEFINITION) && bank->targets[j] != SIZE_MAX &&
-                !ag_definition(g, bank->targets[j], record, error, capacity)) return 0;
+        for (size_t j = object->first_span; j < object->first_span + object->span_count; j++) {
+            if (!(codec->spans[j].flags & SH_AUDIO_ID_DEFINITION) || bank->targets[j] == SIZE_MAX) continue;
+            /* Event readers (VK 141d2f9b0, GL 141d48dd0) register an event only
+             * when none with that ID exists, so a later bank's copy never runs.
+             * Banks arrive in native registration order. Other kinds keep every
+             * definition: a Play action is reparsed when flag 0x20 is clear and
+             * sounds may reparse their source (R039, R134). */
+            if (object->kind == 4 && g->nodes[bank->targets[j]].shape.edge_count) {
+                if (g->shadow_count == SIZE_MAX / sizeof(*g->shadows)) goto memory;
+                ag_shadow *grown = realloc(g->shadows, (g->shadow_count + 1) * sizeof(*grown));
+                if (!grown) goto memory;
+                g->shadows = grown; g->shadows[g->shadow_count++] = (ag_shadow){bank->targets[j], record};
+                continue;
+            }
+            if (!ag_definition(g, bank->targets[j], record, error, capacity)) return 0;
+        }
     }
     for(size_t i=0;i<codec->bus_record_count;i++)if(bank->bus_nodes[i]==SIZE_MAX)
         return ag_fail(error,capacity,"audio bus record has no owning object");
@@ -379,7 +399,8 @@ void sh_audio_link_graph_close(sh_audio_link_graph *g)
         sh_audio_bank_binding_free(&g->banks[i].binding);sh_audio_bank_binding_free(&g->banks[i].private_binding);
     }
     sh_package_link_classes_free(&g->classes);
-    free(g->nodes); free(g->slots); free(g->banks); free(g->starts); free(g->ids); free(g->originals); free(g);
+    free(g->nodes); free(g->slots); free(g->banks); free(g->starts); free(g->ids); free(g->originals);
+    free(g->shadows); free(g);
 }
 static int ag_classify(sh_audio_link_graph *g, char *error, size_t capacity)
 {
@@ -472,7 +493,10 @@ sh_audio_link_graph *sh_audio_link_graph_open(const sh_audio_graph_scope *scopes
         }
     }
     for (size_t i = 0; i < g->count; i++) if (g->nodes[i].symbol && !g->nodes[i].shape.edge_count) {
-        if (g->nodes[i].required) {
+        size_t scope = g->nodes[i].scope;
+        int unresolved = g->nodes[i].native_references && scopes[scope].absent &&
+            scopes[scope].absent(scopes[scope].context, g->nodes[i].authored);
+        if (g->nodes[i].required && !unresolved) {
             if (error && capacity) snprintf(error, capacity, "audio scope %llu needs %s %u (%s, byte %zu)",
                 (unsigned long long)g->nodes[i].scope, g->nodes[i].shape.family, g->nodes[i].authored,
                 g->nodes[i].required_path ? g->nodes[i].required_path : "captured bank", g->nodes[i].required_offset);
@@ -502,6 +526,18 @@ int sh_audio_link_graph_event(const sh_audio_link_graph *g, size_t scope,
     out->node = index; out->original = g->originals[index];
     memcpy(out->identity, g->classes.identities[g->classes.nodes[index]], sizeof(out->identity)); return 1;
 }
+size_t sh_audio_link_graph_shadowed(const sh_audio_link_graph *g) { return g ? g->shadow_count : 0; }
+int sh_audio_link_graph_shadow(const sh_audio_link_graph *g, size_t index, sh_audio_graph_shadow *out)
+{
+    if (out) memset(out, 0, sizeof(*out));
+    if (!g || !out || index >= g->shadow_count) return 0;
+    const ag_node *symbol = g->nodes + g->shadows[index].symbol, *record = g->nodes + g->shadows[index].record;
+    if (!symbol->shape.edge_count) return 0;
+    out->scope = symbol->scope; out->event = symbol->authored; out->record = g->shadows[index].record;
+    out->bank = record->source_path; out->first = g->nodes[symbol->edges[0].target].source_path; return 1;
+}
+int sh_audio_link_graph_same_bytes(const sh_audio_link_graph *g, size_t left, size_t right)
+{ return !g || left >= g->count || right >= g->count ? -1 : ag_bytes_equal(g->nodes + left, g->nodes + right); }
 int sh_audio_link_graph_equal(const sh_audio_link_graph *g, size_t left, size_t right)
 { return g && left < g->count && right < g->count && g->classes.nodes[left] == g->classes.nodes[right]; }
 
@@ -743,15 +779,16 @@ sh_audio_link_binding *sh_audio_link_graph_prepare_bind(sh_audio_link_graph *g, 
     void *context, char *error, size_t capacity)
 {
     uint32_t *ids = NULL, *class_ids = NULL; sh_audio_bank_binding *bindings = NULL,*private_bindings=NULL;
-    ag_assigned *assigned = NULL; size_t assigned_count = 0;sh_audio_link_binding *result=NULL;
+    ag_assigned *assigned = NULL; size_t assigned_count = 0,*kept=NULL;sh_audio_link_binding *result=NULL;
     if (error && capacity) *error = 0;
     if (!g || !assign) {ag_fail(error, capacity, "audio binding needs an ID reservation transaction");return NULL;}
     ids = calloc(g->count ? g->count : 1, sizeof(*ids));
     class_ids = calloc(g->classes.count ? g->classes.count : 1, sizeof(*class_ids));
     bindings = calloc(g->bank_count ? g->bank_count : 1, sizeof(*bindings));
     private_bindings=calloc(g->bank_count ? g->bank_count : 1,sizeof(*private_bindings));
+    kept=calloc(g->bank_count ? g->bank_count : 1,sizeof(*kept));
     assigned = calloc(g->symbols ? g->symbols : 1, sizeof(*assigned));
-    if (!ids || !class_ids || !bindings || !private_bindings || !assigned) { ag_fail(error, capacity, "cannot allocate audio binding transaction"); goto done; }
+    if (!ids || !class_ids || !bindings || !private_bindings || !kept || !assigned) { ag_fail(error, capacity, "cannot allocate audio binding transaction"); goto done; }
     for (size_t i = 0; i < g->count; i++) if (g->nodes[i].symbol) {
         const ag_node *n = &g->nodes[i]; size_t cls = g->classes.nodes[i];
         if (!class_ids[cls]) {
@@ -785,15 +822,15 @@ sh_audio_link_binding *sh_audio_link_graph_prepare_bind(sh_audio_link_graph *g, 
         if(bank==SIZE_MAX)goto done;
         if(!g->originals[bank] &&
             !sh_audio_bank_binding_select(g->banks[i].input->source,g->banks[i].input->codec,
-                bindings+i,ag_keep_private,&resolver,private_bindings+i,error,capacity))goto done;
+                bindings+i,ag_keep_private,&resolver,private_bindings+i,kept+i,error,capacity))goto done;
     }
     result=calloc(1,sizeof(*result));if(!result){ag_fail(error,capacity,"cannot retain audio binding transaction");goto done;}
-    result->graph=g;result->ids=ids;result->banks=bindings;result->private_banks=private_bindings;
-    ids=NULL;bindings=NULL;private_bindings=NULL;
+    result->graph=g;result->ids=ids;result->banks=bindings;result->private_banks=private_bindings;result->private_kept=kept;
+    ids=NULL;bindings=NULL;private_bindings=NULL;kept=NULL;
 done:
     if (bindings) for (size_t i = 0; i < g->bank_count; i++) sh_audio_bank_binding_free(&bindings[i]);
     if(private_bindings)for(size_t i=0;i<g->bank_count;i++)sh_audio_bank_binding_free(private_bindings+i);
-    free(private_bindings);free(bindings); free(class_ids); free(ids); free(assigned); return result;
+    free(private_bindings);free(bindings); free(kept); free(class_ids); free(ids); free(assigned); return result;
 }
 void sh_audio_link_graph_cancel_bind(sh_audio_link_binding *binding)
 {
@@ -802,7 +839,7 @@ void sh_audio_link_graph_cancel_bind(sh_audio_link_binding *binding)
         sh_audio_bank_binding_free(binding->banks+i);
         sh_audio_bank_binding_free(binding->private_banks+i);
     }
-    free(binding->banks);free(binding->private_banks);free(binding->ids);free(binding);
+    free(binding->banks);free(binding->private_banks);free(binding->private_kept);free(binding->ids);free(binding);
 }
 void sh_audio_link_graph_commit_bind(sh_audio_link_binding *binding)
 {
@@ -812,6 +849,7 @@ void sh_audio_link_graph_commit_bind(sh_audio_link_binding *binding)
         memset(binding->banks+i,0,sizeof(*binding->banks));
         sh_audio_bank_binding_free(&g->banks[i].private_binding);g->banks[i].private_binding=binding->private_banks[i];
         memset(binding->private_banks+i,0,sizeof(*binding->private_banks));
+        g->banks[i].private_kept=binding->private_kept[i];
     }
     free(g->ids);g->ids=binding->ids;binding->ids=NULL;sh_audio_link_graph_cancel_bind(binding);
 }
@@ -831,6 +869,24 @@ const sh_audio_bank_binding *sh_audio_link_graph_private_bank(const sh_audio_lin
     const sh_audio_bank_binding *full=sh_audio_link_graph_bank(g,scope,bank);if(!full)return NULL;
     const sh_audio_bank_binding *private=&g->banks[g->starts[scope]+bank].private_binding;
     return private->input_length ? private : full;
+}
+int sh_audio_link_graph_private_empty(const sh_audio_link_graph *g,size_t scope,size_t bank)
+{
+    if(!sh_audio_link_graph_bank(g,scope,bank))return 0;
+    const ag_bank *input=g->banks+g->starts[scope]+bank;
+    if(!input->private_binding.input_length || input->private_kept)return 0;
+    /* A retained private action's bank locator still prepares and releases this
+     * scoped bank identity (R134/R135), even when every object it names resolves
+     * in another bank. Only object records carry such field edges; a bank source
+     * record's edge to its own identity is its definition, not a use. */
+    size_t symbol=ag_find(g,scope,SH_AUDIO_ID_BANK,input->input->codec->metadata.id);
+    if(symbol==SIZE_MAX)return 0;
+    for(size_t i=0;i<g->count;i++) {
+        const ag_node *n=g->nodes+i;
+        if(n->symbol || strcmp(n->shape.family,"audio-object-source"))continue;
+        for(size_t e=0;e<n->shape.edge_count;e++)if(n->edges[e].target==symbol)return 0;
+    }
+    return 1;
 }
 static int ag_bound_id(const sh_audio_link_graph *g, size_t scope, sh_audio_identity_domain domain, uint32_t authored, uint32_t *id)
 {

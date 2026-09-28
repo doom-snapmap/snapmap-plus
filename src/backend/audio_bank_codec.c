@@ -394,7 +394,7 @@ static int ac_range_order(const void *a,const void *b)
 }
 static int ac_select_media(sh_audio_bank_source source,const sh_audio_bank_codec *bank,
     int (*keep)(void *,sh_audio_identity_domain,uint32_t),void *context,
-    sh_audio_bank_binding *cuts,size_t *allocated)
+    sh_audio_bank_binding *cuts,size_t *allocated,size_t *kept)
 {
     const sh_audio_bank_chunk *index=NULL,*data=NULL;
     ac_media_row *rows=NULL;ac_media_range *ranges=NULL;size_t selected=0,used=0;int ok=0;
@@ -432,6 +432,7 @@ static int ac_select_media(sh_audio_bank_source source,const sh_audio_bank_codec
         if(end>data->length)end=data->length;
         ranges[used++]=(ac_media_range){row->offset&~(alignment-1),end,0};
     }
+    *kept=selected;
     if(selected==count){ok=1;goto done;}
     if(!selected) {
         ok=ac_edit(cuts,allocated,index->offset,(uint64_t)index->length+8,NULL,0) &&
@@ -473,9 +474,10 @@ done: free(rows);free(ranges);return ok;
 }
 int sh_audio_bank_binding_select(sh_audio_bank_source source,const sh_audio_bank_codec *bank,
     const sh_audio_bank_binding *binding,int (*keep)(void *,sh_audio_identity_domain,uint32_t),
-    void *context,sh_audio_bank_binding *out,char *error,size_t capacity)
+    void *context,sh_audio_bank_binding *out,size_t *kept,char *error,size_t capacity)
 {
     sh_audio_bank_binding cuts={0},projected={0};size_t cut_capacity=0,allocated=0,object_at=0;int ok=0;
+    size_t records=0,media=0;
     uint64_t length=0,cursor=0;unsigned char header[8];
     if(error && capacity)*error=0;
     if(!out || out==binding)return 0;memset(out,0,sizeof(*out));
@@ -491,6 +493,9 @@ int sh_audio_bank_binding_select(sh_audio_bank_source source,const sh_audio_bank
         uint64_t body=cursor+8,end=body+chunk->length;cursor=end;
         if(!strcmp(chunk->tag,"STMG") || !strcmp(chunk->tag,"ENVS") || !strcmp(chunk->tag,"PLAT")) {
             if(!ac_edit(&cuts,&cut_capacity,chunk->offset,(uint64_t)chunk->length+8,NULL,0))goto done;
+        } else if(strcmp(chunk->tag,"HIRC") && strcmp(chunk->tag,"BKHD") &&
+            strcmp(chunk->tag,"DIDX") && strcmp(chunk->tag,"DATA")) {
+            records++; /* any other retained chunk is bank-level payload */
         } else if(!strcmp(chunk->tag,"HIRC")) {
             if(chunk->length<4 || !ac_read(source,body,header,4))goto done;
             uint32_t count=ac_u32(header),seen=0,removed=0;uint64_t at=body+4,removed_bytes=0;
@@ -518,6 +523,7 @@ int sh_audio_bank_binding_select(sh_audio_bank_source source,const sh_audio_bank
                 }
             }
             if(seen!=count || at!=end)goto done;
+            records+=count-removed;
             if(removed) {
                 ac_put32(header,chunk->length-(uint32_t)removed_bytes);
                 if(!ac_edit(&cuts,&cut_capacity,chunk->offset+4,4,header,4))goto done;
@@ -527,7 +533,10 @@ int sh_audio_bank_binding_select(sh_audio_bank_source source,const sh_audio_bank
         }
     }
     if(cursor!=source.length || object_at!=bank->object_count)goto done;
-    if(keep && !ac_select_media(source,bank,keep,context,&cuts,&cut_capacity))goto done;
+    if(keep) {
+        if(!ac_select_media(source,bank,keep,context,&cuts,&cut_capacity,&media))goto done;
+    } else for(size_t c=0;c<bank->chunk_count;c++)
+        if(!strcmp(bank->chunks[c].tag,"DIDX"))media+=bank->chunks[c].length/12;
     if(cuts.count>1)qsort(cuts.edits,cuts.count,sizeof(*cuts.edits),ac_edit_compare);
     if(!ac_binding_length(&cuts,&length))goto done;
     size_t cut=0;
@@ -549,6 +558,7 @@ int sh_audio_bank_binding_select(sh_audio_bank_source source,const sh_audio_bank
     if(projected.count>1)qsort(projected.edits,projected.count,sizeof(*projected.edits),ac_edit_compare);
     if(!ac_binding_length(&projected,&projected.output_length))goto done;
     *out=projected;memset(&projected,0,sizeof(projected));ok=1;
+    if(kept)*kept=records+media;
 done:
     sh_audio_bank_binding_free(&cuts);sh_audio_bank_binding_free(&projected);
     if(!ok && error && capacity)snprintf(error,capacity,"cannot separate private audio from its shared policy");return ok;
@@ -556,7 +566,7 @@ done:
 int sh_audio_bank_binding_private(sh_audio_bank_source source,const sh_audio_bank_codec *bank,
     const sh_audio_bank_binding *binding,sh_audio_bank_binding *out,char *error,size_t capacity)
 {
-    return sh_audio_bank_binding_select(source,bank,binding,NULL,NULL,out,error,capacity);
+    return sh_audio_bank_binding_select(source,bank,binding,NULL,NULL,out,NULL,error,capacity);
 }
 typedef struct ac_window { sh_audio_bank_source source;uint64_t offset,length; } ac_window;
 static int ac_window_read(void *context,uint64_t at,void *out,size_t length)
