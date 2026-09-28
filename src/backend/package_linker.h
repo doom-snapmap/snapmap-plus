@@ -66,6 +66,11 @@ typedef struct sh_package_link_unit {
      * nor its changes enter a dependent's identity or original certification;
      * its own bytes and edges are identified and certified as usual. */
     int stable_name;
+    /* This compilation intentionally binds the shared original native slot.
+     * Different from a private copy of the same bytes: dependents must retain
+     * that distinction. The assignment adapter must keep this unit's name.
+     * Internal native policy, never package metadata. */
+    int fixed_name;
 } sh_package_link_unit;
 
 typedef int (*sh_package_link_reference)(void *context, const char *slot,
@@ -75,7 +80,10 @@ enum sh_package_link_registry_result {
     SH_PACKAGE_LINK_REGISTRY_ERROR = -1,
     SH_PACKAGE_LINK_REGISTRY_COLLISION = 0,
     SH_PACKAGE_LINK_REGISTRY_AVAILABLE = 1,
-    SH_PACKAGE_LINK_REGISTRY_REPLACE_SHARED = 2
+    SH_PACKAGE_LINK_REGISTRY_REPLACE_SHARED = 2,
+    /* Same name, no conflicting numeric identity or original reservation.
+     * Only the linker's retained exact binding proof can admit reuse. */
+    SH_PACKAGE_LINK_REGISTRY_OCCUPIED = 3
 };
 
 typedef struct sh_package_link_registry {
@@ -85,6 +93,9 @@ typedef struct sh_package_link_registry {
      * baseline/current-live registry that can still be reached by consumers.
      * Return AVAILABLE when free or certified to name this exact binding,
      * COLLISION for an occupied name/ID, ERROR for incomplete verification.
+     * OCCUPIED reports only a same-name occupant after every numeric collision
+     * and baseline reservation check. The linker must prove its retained exact
+     * binding before treating that result as available.
      * REPLACE_SHARED separately admits a changed binding at the same original
      * name of a verified shared native slot. Only its contribution adapter's
      * publication/rollback contract may authorize that result; it is neither
@@ -143,7 +154,20 @@ typedef struct sh_package_link_adapter {
         char ***names, char *error, size_t capacity);
     /* Optional; NULL captures every unit on every pass. */
     struct sh_package_link_reuse *reuse;
+    /* Process-lifetime exact binding proofs and native alias reservations.
+     * The caller serializes access. Successful links reserve identities even
+     * if later activation fails: native defaulted objects may still exist. */
+    struct sh_package_link_history *history;
 } sh_package_link_adapter;
+
+/* Owns small identity metadata and sealed, streamed proofs in an admitted
+ * private cache directory. Never pins editable authored files. Repeated equal
+ * compilations add neither proofs nor reservations. Close only after all native
+ * identities in this registry cease to exist (normally process teardown). */
+typedef struct sh_package_link_history sh_package_link_history;
+sh_package_link_history *sh_package_link_history_open(const char *directory);
+void sh_package_link_history_close(sh_package_link_history *history);
+size_t sh_package_link_history_count(const sh_package_link_history *history);
 
 /* Capture reuse across identity passes over one unit array. A unit's capture
  * (file identities, bindings, witnesses, implicit bindings) and the exact-byte
@@ -155,6 +179,11 @@ typedef struct sh_package_link_adapter {
  * resolve/bind behavior. */
 typedef struct sh_package_link_reuse sh_package_link_reuse;
 sh_package_link_reuse *sh_package_link_reuse_open(size_t count);
+/* Grow for appended units without discarding valid prefix captures. Existing
+ * unit indices and their source/binding contracts must remain unchanged;
+ * invalidate any changed or relocated owned sources first. Never shrinks.
+ * Failure leaves all captures and equality proofs intact. */
+int sh_package_link_reuse_reserve(sh_package_link_reuse *reuse, size_t count);
 void sh_package_link_reuse_invalidate(sh_package_link_reuse *reuse, size_t unit);
 void sh_package_link_reuse_close(sh_package_link_reuse *reuse);
 

@@ -81,6 +81,13 @@ void sh_audio_bank_binding_free(sh_audio_bank_binding *binding);
  * remain unchanged, and failure leaves out empty. No DATA payload is read. */
 int sh_audio_bank_binding_private(sh_audio_bank_source source,const sh_audio_bank_codec *bank,
     const sh_audio_bank_binding *binding,sh_audio_bank_binding *out,char *error,size_t capacity);
+/* Additionally omit definitions served by retained native banks. keep returns
+ * 1 to retain, 0 to omit, -1 on failure. Resident media is compacted in aligned
+ * ranges without decoding or reading DATA, including overlapping DIDX ranges.
+ * The caller must activate/retain the native providers before this projection. */
+int sh_audio_bank_binding_select(sh_audio_bank_source source,const sh_audio_bank_codec *bank,
+    const sh_audio_bank_binding *binding,int (*keep)(void *,sh_audio_identity_domain,uint32_t),
+    void *context,sh_audio_bank_binding *out,char *error,size_t capacity);
 /* Capture one cooked object's bound body, including its numeric definition ID.
  * Used for shared policy recipes whose dependencies have private bindings.
  * The caller owns the output; no whole-bank or media payload copy is made. */

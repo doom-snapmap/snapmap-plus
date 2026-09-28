@@ -3609,10 +3609,11 @@ static int ds_occurrence_metadata(char *error, size_t capacity)
 static int ds_occurrence_source_row(void *decl, sh_palette_entry_source *row)
 {
     void *entity = NULL; const char *name = NULL;
-    /* Palette lookup uses the entityDef accessor's name at +0x58, not
-     * the generic resource header name at +8. */
+    /* The resolved entityDef is an idResource: its name is at +8. The
+     * palette constructor copies that name into a separate editor defsub;
+     * +0x58 belongs to that defsub, not to this resource. */
     if (!decl || !row || !ds_safe_read((const unsigned char *)decl + DS_DECL_ENTITYDEF_OFFSET, &entity, sizeof(entity)) ||
-        !entity || !ds_safe_read((const unsigned char *)entity + 0x58, &name, sizeof(name)) || !name || !*name) return 0;
+        !entity || !ds_safe_read((const unsigned char *)entity + 8, &name, sizeof(name)) || !name || !*name) return 0;
     *row = (sh_palette_entry_source){name, decl}; return 1;
 }
 #ifdef SH_DECL_SERVER_TESTING
@@ -3724,7 +3725,7 @@ static int ds_occurrence_activate(void *context, int restoring,
                 !sh_resource_resident_drain_additions(resident, admission->existing, admission->existing_count, error, capacity) ||
                 (admission->audio && !ds_activate_audio_mode(admission->audio, error, capacity))) goto done;
             if (admission->palette_source_count &&
-                !(admission->selectors = sh_package_runtime_selectors_retain(error, capacity))) goto done;
+                !(admission->selectors = sh_package_runtime_selectors_retain("snapeditorentitydef", error, capacity))) goto done;
             if (admission->palette_source_count &&
                 (sh_palette_entries_prepare(admission->palette_sources, admission->palette_source_count,
                     ds_occurrence_owned, admission, &admission->palette, error, capacity) != 1 ||

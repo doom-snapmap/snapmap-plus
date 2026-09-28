@@ -374,7 +374,8 @@ sh_resource_resident *sh_resource_resident_begin(const sh_package_changes *chang
             (g_rr.mode() != 2 && g_rr.mode() != 3) || !sh_process_heap_enter(&g_rr.heap, &pass->heap)) goto done;
         phase = "registry snapshot";
         if (!rr_known_snapshot(pass)) goto done;
-        if (!changes->count && !changes->rebound_count && !g_rr_recovery) goto render_scope;
+        if (!changes->count && !changes->added_count && !changes->removed_count &&
+            !changes->rebound_count && !g_rr_recovery) goto render_scope;
         phase = "inventory";
         if (!rr_inventory(pass)) goto done;
         phase = "catalog identities";

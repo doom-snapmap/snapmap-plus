@@ -341,7 +341,8 @@ static void setup_entry(unsigned char *decl, unsigned char *entity, const char *
 {
     memset(decl, 0, 0x500); memset(entity, 0, 0x70);
     *(void **)(decl + 0x1c8) = entity;
-    *(const char **)(entity + 0x58) = name;
+    /* Native entityDef resource name; the constructed defsub uses +0x58. */
+    *(const char **)(entity + 8) = name;
 }
 static void bind_entries(uint8_t *module)
 {
@@ -420,7 +421,7 @@ static void test_retained_entries(uint8_t *module, int *failed_out)
     CHECK(sh_palette_entries_prepare(rows, 2, fake_admitted, &admitted, &b, error, sizeof(error)) == 0 && !b);
     CHECK(sh_palette_entries_test_find(palette, "private/a") == first && sh_palette_entries_test_count() == 1);
     g_invalid_entry = NULL;
-    *(const char **)(entity_b + 0x58) = "private/a";
+    *(const char **)(entity_b + 8) = "private/a";
     rows[1].entity_def_name = "private/a";
     CHECK(sh_palette_entries_prepare(rows + 1, 1, fake_admitted, &admitted, &b, error, sizeof(error)) == 0 && !b);
     CHECK(sh_palette_entries_end(&a, fake_admitted, &admitted, error, sizeof(error)) == 1);
@@ -635,6 +636,20 @@ static void test_authoring_snapshots(uint8_t *module, int *failed_out)
         CHECK(!memcmp(saved_rows, before.bodies.data, sizeof(saved_rows)));
         auth_destroy(auth_palette());
     }
+    /* Native picker transitions can expand the searchable body prefix before
+     * rebuilding category boundaries. Preserve that valid uncategorized tail. */
+    auth_bind(module, old_decl, 10);
+    auth_palette()->end = (unsigned char *)auth_palette()->bodies.data + 2 * 0x6f0;
+    test_native_palette with_tail = *auth_palette();
+    CHECK(sh_palette_entries_prepare(&source, 1, fake_admitted, &admitted, &batch, error, sizeof(error)) == 1);
+    CHECK(sh_palette_entries_prepare_authoring(batch, fake_admitted, &admitted, error, sizeof(error)) == 1);
+    CHECK(sh_palette_entries_publish(batch, fake_admitted, &admitted, error, sizeof(error)) == 1);
+    CHECK(auth_palette()->end == (unsigned char *)auth_palette()->bodies.data + 2 * 0x6f0);
+    CHECK(((void **)auth_palette()->groups.data)[1] == (unsigned char *)auth_palette()->bodies.data + 0x6f0);
+    CHECK(sh_palette_entries_end(&batch, fake_admitted, &admitted, error, sizeof(error)) == 1 && !batch);
+    CHECK(!memcmp(auth_palette(), &with_tail, sizeof(with_tail)));
+    auth_destroy(auth_palette());
+
     /* Accepted snapshots remain owned until a complete native replacement,
      * even when the caller has an otherwise valid retirement boundary. */
     auth_bind(module, old_decl, 3);
@@ -685,9 +700,14 @@ static void test_authoring_snapshots(uint8_t *module, int *failed_out)
     auth_palette()->end = (unsigned char *)before.end + 1;
     CHECK(sh_palette_entries_prepare_authoring(batch, fake_admitted, &admitted, error, sizeof(error)) == 0 && !g_auth_copies);
     auth_palette()->end = before.end;
-    *(const char **)(old_entity + 0x58) = "private/new";
+    ((void **)auth_palette()->groups.data)[1] = (unsigned char *)before.end + 0x6f0;
     CHECK(sh_palette_entries_prepare_authoring(batch, fake_admitted, &admitted, error, sizeof(error)) == 0 && !g_auth_copies);
-    *(const char **)(old_entity + 0x58) = "old/entry";
+    ((void **)auth_palette()->groups.data)[1] = (unsigned char *)before.end - 1;
+    CHECK(sh_palette_entries_prepare_authoring(batch, fake_admitted, &admitted, error, sizeof(error)) == 0 && !g_auth_copies);
+    ((void **)auth_palette()->groups.data)[1] = before.end;
+    *(const char **)(old_entity + 8) = "private/new";
+    CHECK(sh_palette_entries_prepare_authoring(batch, fake_admitted, &admitted, error, sizeof(error)) == 0 && !g_auth_copies);
+    *(const char **)(old_entity + 8) = "old/entry";
     CHECK(!memcmp(auth_palette(), &before, sizeof(before)));
     CHECK(sh_palette_entries_end(&batch, fake_admitted, &admitted, error, sizeof(error)) == 1 && !batch);
     auth_destroy(auth_palette());

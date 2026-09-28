@@ -16,6 +16,29 @@ static int pc_target_order(const void *a, const void *b)
 { return strcmp(((const sh_package_consumer_target *)a)->slot, ((const sh_package_consumer_target *)b)->slot); }
 static int pc_target_equal(const sh_package_consumer_target *a, const sh_package_consumer_target *b)
 { return !strcmp(a->slot, b->slot) && !strcmp(a->family, b->family) && !strcmp(a->name, b->name); }
+static unsigned char pc_native_char(unsigned char c)
+{ return c == '\\' ? '/' : c >= 'A' && c <= 'Z' ? c + ('a' - 'A') : c; }
+static int pc_native_equal(const char *canonical, const char *name)
+{
+    if ((*name == '/' || *name == '\\') && name[1] != '/' && name[1] != '\\') name++;
+    while (*canonical && *canonical == pc_native_char((unsigned char)*name)) { canonical++; name++; }
+    return !*canonical && !*name;
+}
+const char *sh_package_consumer_request(const sh_package_consumer *owner,
+    const char *family, const char *name)
+{
+    if (!owner || !family || !name) return NULL;
+    size_t n = strlen(family);
+    for (size_t i = 0; i < owner->count; i++) {
+        const sh_package_consumer_target *target = owner->targets + i;
+        if (strncmp(target->slot, "request/", 8) || !pc_native_equal(target->family, family)) continue;
+        const char *slot = target->slot + 8;
+        size_t at = 0;
+        while (at < n && slot[at] && slot[at] == pc_native_char((unsigned char)family[at])) at++;
+        if (at == n && slot[at] == '/' && pc_native_equal(slot + at + 1, name)) return target->name;
+    }
+    return NULL;
+}
 static int pc_owner_equal(const sh_package_consumer *a, const sh_package_consumer *b)
 {
     if (!a || !b) return a == b;

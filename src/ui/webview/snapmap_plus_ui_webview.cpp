@@ -26,6 +26,7 @@
 #include "config_message.h"
 #include "growing_text_buffer.h"
 #include "serialization_buffer.h"
+#include "prefab_scene.h"
 #include "theme_bootstrap.h"
 #include "report_scrub.h"   /* pure anonymization scrub + tail for the crash-report log attachment */
 #include "crash_pending.h"
@@ -915,6 +916,26 @@ static void poc_apply_sound_preview()
     __except (EXCEPTION_EXECUTE_HANDLER) { g_sound_preview_result = 0; }
 }
 
+/* Use the native text size boundary for both preview and placement. Embedded
+ * deliveries remain in the file; only renderable entities go to the WebView. */
+static bool poc_read_prefab_file(const char *path, std::string &body)
+{
+    body.clear();
+    FILE *fp = nullptr;
+    if (fopen_s(&fp, path, "rb") != 0 || !fp) return false;
+    __int64 sz = -1;
+    if (_fseeki64(fp, 0, SEEK_END) == 0) sz = _ftelli64(fp);
+    if (sz <= 0 || sz > INT_MAX || _fseeki64(fp, 0, SEEK_SET) != 0) {
+        fclose(fp); return false;
+    }
+    try { body.resize(static_cast<size_t>(sz)); }
+    catch (...) { fclose(fp); return false; }
+    bool complete = fread(&body[0], 1, body.size(), fp) == body.size();
+    if (fclose(fp) != 0) complete = false;
+    if (!complete || body.find('\0') != std::string::npos) { body.clear(); return false; }
+    return true;
+}
+
 static void poc_apply_load_prefab()
 {
     g_load_result = -1;
@@ -925,34 +946,23 @@ static void poc_apply_load_prefab()
         poc_log("load-prefab: ABORT (resolve_prefab_path failed)");
         return;
     }
-    FILE *fp = nullptr;
-    if (fopen_s(&fp, path, "rb") != 0 || !fp) { poc_log("load-prefab: ABORT (fopen failed)"); return; }
-    __int64 sz = -1;
-    if (_fseeki64(fp, 0, SEEK_END) == 0) sz = _ftelli64(fp);
-    if (sz <= 0 || sz > INT_MAX || _fseeki64(fp, 0, SEEK_SET) != 0) {
-        fclose(fp); poc_log("load-prefab: ABORT (invalid native text size)"); return;
-    }
     std::string body;
-    try { body.resize(static_cast<size_t>(sz)); }
-    catch (...) { fclose(fp); poc_log("load-prefab: ABORT (allocation failed)"); return; }
-    bool complete = fread(&body[0], 1, body.size(), fp) == body.size();
-    if (fclose(fp) != 0) complete = false;
-    if (!complete || body.find('\0') != std::string::npos) {
-        poc_log("load-prefab: ABORT (incomplete or NUL-containing file)"); return;
+    if (!poc_read_prefab_file(path, body)) {
+        poc_log("load-prefab: ABORT (could not read complete native text)"); return;
     }
 
     /* Paste uses selection as its old-to-new ID map. Clear it first; the backend
      * rechecks before placement because a pending manipulation may refuse clearing. */
     poc_clear_selection_seh();
 
-    /* kind=2 stages and requests the engine's native paste action on its main thread.
-     * Missing editor prerequisites can leave the prefab staged for manual paste. */
+    /* kind=2 queues authored-source preparation, optional installation and native
+     * paste on the editor thread. Queue acceptance is not a completed import. */
     /* Staged prefab storage must survive map-heap resets; the backend allocates it
      * in heap 0. Keep placement on the native action path rather than directly
      * invoking PasteInstantiate or synthesizing operating-system keystrokes. */
     sh_apply_item it; it.kind = 2; it.id = 0; it.text = body.c_str();
     g_load_result = poc_apply_edit_seh(&it, 1, "load-prefab");
-    char l[300]; _snprintf_s(l, sizeof l, _TRUNCATE, "load-prefab: name='%s' staged=%d (kind=2: stage + auto pick-up)",
+    char l[300]; _snprintf_s(l, sizeof l, _TRUNCATE, "load-prefab: name='%s' queued=%d (kind=2: prepare + native placement)",
                              g_load_prefab_name.c_str(), g_load_result);
     poc_log(l);
 }
@@ -1793,19 +1803,6 @@ static void poc_post_config_status()
     g_config_status_posted = true;
 }
 
-/* Count exact idSnapEntity keys without counting the idSnapEntityPrefab root. */
-static int poc_count_prefab_entities(const std::string &body)
-{
-    int entityCount = 0;
-    size_t pos = 0;
-    while ((pos = body.find("\"idSnapEntity\"", pos)) != std::string::npos) {
-        entityCount++;
-        pos += 14;
-    }
-    return entityCount;
-}
-/* Read a single prefab file (resolved via +0xc0) and push its scene plus aggregate entity count.
- * folder="" selects the prefab root. */
 /* Read a bounded auxiliary file; return false for missing, oversized, or unreadable data. */
 static bool poc_read_small_file(const char *path, std::string &body)
 {
@@ -1832,21 +1829,14 @@ static void poc_send_prefab_detail(const std::string &name, const std::string &f
     if (!name.empty()) {
         char path[1024];
         if (poc_prefab_file_path(folder, name, path, (int)sizeof path)) {
-            FILE *fp = nullptr;
-            if (fopen_s(&fp, path, "rb") == 0 && fp) {
-                fseek(fp, 0, SEEK_END); long sz = ftell(fp); fseek(fp, 0, SEEK_SET);
-                /* The scene is sent only for the selected prefab. Cap it independently of the tiny
-                 * metadata sidecar so a hand-dropped giant file cannot force a huge WebMessage allocation. */
-                if (sz > 0 && sz <= 8 * 1024 * 1024) {
-                    sceneBody.resize((size_t)sz);
-                    size_t got = fread(&sceneBody[0], 1, (size_t)sz, fp);
-                    sceneBody.resize(got);
-                    if (got == (size_t)sz) {
-                        entityCount = poc_count_prefab_entities(sceneBody);
-                        ok = true;
-                    }
+            std::string complete;
+            if (poc_read_prefab_file(path, complete)) {
+                char *scene = nullptr; size_t length = 0;
+                if (sh_prefab_scene(complete.data(), complete.size(), &scene, &length, &entityCount)) {
+                    try { sceneBody.assign(scene, length); ok = true; }
+                    catch (...) { entityCount = 0; }
+                    free(scene);
                 }
-                fclose(fp);
             }
         }
         char mp[1024];

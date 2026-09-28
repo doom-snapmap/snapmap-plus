@@ -384,8 +384,96 @@ static int ac_binding_length(const sh_audio_bank_binding *binding,uint64_t *resu
     }
     *result=length;return 1;
 }
-int sh_audio_bank_binding_private(sh_audio_bank_source source,const sh_audio_bank_codec *bank,
-    const sh_audio_bank_binding *binding,sh_audio_bank_binding *out,char *error,size_t capacity)
+typedef struct ac_media_range { uint64_t start,end,output; } ac_media_range;
+typedef struct ac_media_row { uint32_t id,offset,length; int keep; } ac_media_row;
+static int ac_range_order(const void *a,const void *b)
+{
+    const ac_media_range *left=a,*right=b;
+    if(left->start!=right->start)return left->start<right->start ? -1 : 1;
+    return left->end<right->end ? -1 : left->end>right->end;
+}
+static int ac_select_media(sh_audio_bank_source source,const sh_audio_bank_codec *bank,
+    int (*keep)(void *,sh_audio_identity_domain,uint32_t),void *context,
+    sh_audio_bank_binding *cuts,size_t *allocated)
+{
+    const sh_audio_bank_chunk *index=NULL,*data=NULL;
+    ac_media_row *rows=NULL;ac_media_range *ranges=NULL;size_t selected=0,used=0;int ok=0;
+    uint64_t alignment=1;
+    unsigned char bytes[12];
+    for(size_t c=0;c<bank->chunk_count;c++) {
+        if(!strcmp(bank->chunks[c].tag,"DIDX"))index=bank->chunks+c;
+        if(!strcmp(bank->chunks[c].tag,"DATA"))data=bank->chunks+c;
+    }
+    if(!index)return 1;
+    if(!data || index->length%12)return 0;
+    size_t count=index->length/12;
+    if(count>SIZE_MAX/sizeof(*rows) || count>SIZE_MAX/sizeof(*ranges))return 0;
+    rows=calloc(count ? count : 1,sizeof(*rows));ranges=calloc(count ? count : 1,sizeof(*ranges));
+    if(!rows || !ranges)goto done;
+    for(size_t i=0;i<count;i++) {
+        if(!ac_read(source,index->offset+8+i*12,bytes,12))goto done;
+        rows[i]=(ac_media_row){ac_u32(bytes),ac_u32(bytes+4),ac_u32(bytes+8),0};
+        ac_media_row *row=rows+i;
+        if(!row->id || row->offset>data->length || row->length>data->length-row->offset)goto done;
+        row->keep=keep(context,SH_AUDIO_ID_MEDIA,row->id);if(row->keep<0)goto done;
+        if(!row->keep)continue;
+        selected++;
+        /* Preserve every retained entry's existing power-of-two alignment;
+         * do not assume that all plug-in media uses one fixed alignment. */
+        if(row->offset) {
+            uint64_t required=(uint64_t)row->offset & (UINT64_C(0)-(uint64_t)row->offset);
+            if(required>alignment)alignment=required;
+        }
+    }
+    for(size_t i=0;i<count;i++) {
+        const ac_media_row *row=rows+i;if(!row->keep)continue;
+        if(!row->length && row->offset==data->length)continue;
+        uint64_t end=((uint64_t)row->offset+(row->length ? row->length : 1)+alignment-1)&~(alignment-1);
+        if(end>data->length)end=data->length;
+        ranges[used++]=(ac_media_range){row->offset&~(alignment-1),end,0};
+    }
+    if(selected==count){ok=1;goto done;}
+    if(!selected) {
+        ok=ac_edit(cuts,allocated,index->offset,(uint64_t)index->length+8,NULL,0) &&
+            ac_edit(cuts,allocated,data->offset,(uint64_t)data->length+8,NULL,0);
+        goto done;
+    }
+    if(used>1)qsort(ranges,used,sizeof(*ranges),ac_range_order);
+    size_t merged=0;
+    for(size_t i=0;i<used;i++) {
+        if(merged && ranges[i].start<=ranges[merged-1].end) {
+            if(ranges[i].end>ranges[merged-1].end)ranges[merged-1].end=ranges[i].end;
+        } else ranges[merged++]=ranges[i];
+    }
+    uint64_t cursor=0,output=0;
+    for(size_t i=0;i<merged;i++) {
+        ac_media_range *range=ranges+i;range->output=output;
+        if(range->start>cursor && !ac_edit(cuts,allocated,data->offset+8+cursor,range->start-cursor,NULL,0))goto done;
+        cursor=range->end;output+=range->end-range->start;
+    }
+    if(cursor<data->length && !ac_edit(cuts,allocated,data->offset+8+cursor,data->length-cursor,NULL,0))goto done;
+    ac_put32(bytes,(uint32_t)output);
+    if(!ac_edit(cuts,allocated,data->offset+4,4,bytes,4))goto done;
+    ac_put32(bytes,(uint32_t)(selected*12));
+    if(!ac_edit(cuts,allocated,index->offset+4,4,bytes,4))goto done;
+    for(size_t i=0;i<count;i++) {
+        ac_media_row *row=rows+i;uint64_t at=index->offset+8+i*12;
+        if(!row->keep){if(!ac_edit(cuts,allocated,at,12,NULL,0))goto done;continue;}
+        uint64_t offset=output;
+        if(row->length || row->offset!=data->length) {
+            size_t lo=0,hi=merged;
+            while(lo<hi){size_t mid=lo+(hi-lo)/2;if(ranges[mid].start<=row->offset)lo=mid+1;else hi=mid;}
+            if(!lo || (uint64_t)row->offset+row->length>ranges[lo-1].end)goto done;
+            offset=ranges[lo-1].output+row->offset-ranges[lo-1].start;
+        }
+        if(offset!=row->offset){ac_put32(bytes,(uint32_t)offset);if(!ac_edit(cuts,allocated,at+4,4,bytes,4))goto done;}
+    }
+    ok=1;
+done: free(rows);free(ranges);return ok;
+}
+int sh_audio_bank_binding_select(sh_audio_bank_source source,const sh_audio_bank_codec *bank,
+    const sh_audio_bank_binding *binding,int (*keep)(void *,sh_audio_identity_domain,uint32_t),
+    void *context,sh_audio_bank_binding *out,char *error,size_t capacity)
 {
     sh_audio_bank_binding cuts={0},projected={0};size_t cut_capacity=0,allocated=0,object_at=0;int ok=0;
     uint64_t length=0,cursor=0;unsigned char header[8];
@@ -411,7 +499,19 @@ int sh_audio_bank_binding_private(sh_audio_bank_source source,const sh_audio_ban
                 if(object->offset!=at+5 || !ac_read(source,at,header,5) || header[0]!=object->kind ||
                     ac_u32(header+1)!=object->length || object->offset>end || object->length>end-object->offset || seen==UINT32_MAX)goto done;
                 seen++;at=object->offset+object->length;
-                if(object->kind==8 || object->kind==20) {
+                int retain=1;
+                if(keep && object->kind!=8 && object->kind!=20) {
+                    int found=0;
+                    if(object->first_span>bank->span_count || object->span_count>bank->span_count-object->first_span)goto done;
+                    for(size_t f=object->first_span;f<object->first_span+object->span_count;f++) {
+                        const sh_audio_identity_span *field=bank->spans+f;
+                        if(field->offset==object->offset && (field->flags&SH_AUDIO_ID_DEFINITION)) {
+                            retain=keep(context,field->domain,field->value);found=1;break;
+                        }
+                    }
+                    if(!found || retain<0)goto done;
+                }
+                if(object->kind==8 || object->kind==20 || !retain) {
                     uint64_t bytes=(uint64_t)object->length+5;
                     if(!ac_edit(&cuts,&cut_capacity,object->offset-5,bytes,NULL,0))goto done;
                     removed++;removed_bytes+=bytes;
@@ -427,6 +527,7 @@ int sh_audio_bank_binding_private(sh_audio_bank_source source,const sh_audio_ban
         }
     }
     if(cursor!=source.length || object_at!=bank->object_count)goto done;
+    if(keep && !ac_select_media(source,bank,keep,context,&cuts,&cut_capacity))goto done;
     if(cuts.count>1)qsort(cuts.edits,cuts.count,sizeof(*cuts.edits),ac_edit_compare);
     if(!ac_binding_length(&cuts,&length))goto done;
     size_t cut=0;
@@ -451,6 +552,11 @@ int sh_audio_bank_binding_private(sh_audio_bank_source source,const sh_audio_ban
 done:
     sh_audio_bank_binding_free(&cuts);sh_audio_bank_binding_free(&projected);
     if(!ok && error && capacity)snprintf(error,capacity,"cannot separate private audio from its shared policy");return ok;
+}
+int sh_audio_bank_binding_private(sh_audio_bank_source source,const sh_audio_bank_codec *bank,
+    const sh_audio_bank_binding *binding,sh_audio_bank_binding *out,char *error,size_t capacity)
+{
+    return sh_audio_bank_binding_select(source,bank,binding,NULL,NULL,out,error,capacity);
 }
 typedef struct ac_window { sh_audio_bank_source source;uint64_t offset,length; } ac_window;
 static int ac_window_read(void *context,uint64_t at,void *out,size_t length)

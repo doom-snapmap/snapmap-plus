@@ -16,6 +16,8 @@ void sh_package_native_registry_close(sh_package_native_registry *registry);
  * This records a publication obligation, never equality to its old contents. */
 int sh_package_native_registry_share(sh_package_native_registry *registry,
     const char *family, const char *name);
+/* Same-name occupancy is distinct from a numeric collision. The linker alone
+ * may certify an occupied private name from its retained exact binding proof. */
 sh_package_link_registry sh_package_native_registry_adapter(sh_package_native_registry *registry);
 int sh_package_native_registry_validate(sh_package_native_registry *registry,
     char *error, size_t capacity);

@@ -279,9 +279,44 @@ static void corpus(const char *path)
     sh_audio_bank_binding_free(&private); sh_audio_bank_binding_free(&full);
     sh_audio_bank_codec_free(&bank); fclose(file);
 }
+static int selected_media(void *context,sh_audio_identity_domain domain,uint32_t id)
+{
+    if(context)return -1;
+    return domain==SH_AUDIO_ID_MEDIA && (id==901 || id==902);
+}
+static void test_selected_projection(void)
+{
+    bytes b={0},out={0};
+    chunk(&b,"BKHD",16);put(&b,113,4);put(&b,42,4);zeros(&b,8);
+    chunk(&b,"DIDX",48);
+    put(&b,900,4);put(&b,0,4);put(&b,4,4);
+    put(&b,902,4);put(&b,34,4);put(&b,2,4); /* Unsorted and overlapping kept ranges. */
+    put(&b,901,4);put(&b,32,4);put(&b,4,4);
+    put(&b,903,4);put(&b,64,4);put(&b,4,4);
+    chunk(&b,"DATA",80);b.media_at=b.length;b.media_length=80;
+    for(unsigned i=0;i<80;i++)put(&b,i,1);
+    chunk(&b,"HIRC",4);put(&b,0,4);
+    sh_audio_bank_source source={&b,b.length,read_memory};
+    sh_audio_bank_codec bank={0},parsed={0};sh_audio_bank_binding full={0},projected={0},bad={0};
+    char error[512];resolver ids={0,SIZE_MAX};
+    assert(sh_audio_bank_codec_read(source,&bank,error,sizeof(error))==1);
+    assert(sh_audio_bank_codec_bind(source,&bank,assign,&ids,&full,error,sizeof(error)));
+    assert(sh_audio_bank_binding_select(source,&bank,&full,selected_media,NULL,&projected,error,sizeof(error)));
+    /* Compilation above must not read media. Only final streaming reads it. */
+    source.read=read_copy;
+    assert(sh_audio_bank_binding_write(source,&projected,sink,&out,error,sizeof(error)));
+    assert(sh_audio_bank_codec_read((sh_audio_bank_source){&out,out.length,read_copy},&parsed,error,sizeof(error))==1);
+    assert(parsed.chunk_count==4 && parsed.chunks[1].length==24 && parsed.chunks[2].length==32);
+    assert(get32(out.data+32)==1902 && get32(out.data+36)==2 && get32(out.data+40)==2);
+    assert(get32(out.data+44)==1901 && get32(out.data+48)==0 && get32(out.data+52)==4);
+    assert(!memcmp(out.data+parsed.chunks[2].offset+8,b.data+b.media_at+32,32));
+    assert(!sh_audio_bank_binding_select(source,&bank,&full,selected_media,&ids,&bad,error,sizeof(error)) && !bad.edits);
+    sh_audio_bank_binding_free(&projected);sh_audio_bank_binding_free(&full);
+    sh_audio_bank_codec_free(&parsed);sh_audio_bank_codec_free(&bank);
+}
 int main(int argc, char **argv)
 {
-    test_structure(); test_binding(); test_private_projection(); test_large_removal();
+    test_structure(); test_binding(); test_private_projection(); test_large_removal(); test_selected_projection();
     if (argc == 2) {
         WIN32_FIND_DATAA entry; char search[4096], path[4096], localized[4096];
         snprintf(search, sizeof(search), "%s/*.bnk", argv[1]); HANDLE find = FindFirstFileA(search, &entry);

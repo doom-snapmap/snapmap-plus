@@ -41,6 +41,8 @@ typedef struct sh_package_library_native {
     /* The same peer's group codes (package_keys.h): an equal set keeps its
      * code, and no other set takes one of them. */
     const sh_package_key_groups *key_groups;
+    /* Shared process-lifetime native binding/alias reservations. */
+    sh_package_link_history *history;
 } sh_package_library_native;
 
 /* Build phases timed for the activation log. */

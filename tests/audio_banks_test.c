@@ -544,11 +544,41 @@ static void test_source_closure(void)
     wanted[2]=1;CHECK(!sh_audio_bank_closure(view,3,&event,1,1,wanted,&report,error,sizeof(error)));
 }
 
+static void test_cross_bank_objects(void)
+{
+    uint32_t event=77, action=50, node=600, absent=999;
+    sh_audio_bank banks[4]={{0}};
+    const sh_audio_bank *view[]={banks,banks+1,banks+2,banks+3};
+    for(size_t i=0;i<4;i++)banks[i].id=(uint32_t)i+1;
+    banks[0].events=&event;banks[0].event_count=1;
+    banks[0].required=&action;banks[0].required_count=1;
+    banks[1].objects=&action;banks[1].object_count=1;
+    banks[1].required=&node;banks[1].required_count=1;
+    banks[2].objects=&node;banks[2].object_count=1;
+    banks[3].objects=&action;banks[3].object_count=1;
+    unsigned char selected[4]={0};char error[256];sh_audio_bank_closure_report report;
+    CHECK(sh_audio_bank_closure(view,4,&event,1,1,selected,&report,error,sizeof(error)));
+    CHECK(selected[0] && selected[1] && selected[2] && !selected[3] && report.dependency_banks==2);
+    /* Keep an already selected supplier instead of loading an unused duplicate. */
+    memset(selected,0,sizeof(selected));selected[3]=1;
+    CHECK(sh_audio_bank_closure(view,4,&event,1,1,selected,&report,error,sizeof(error)));
+    CHECK(selected[0] && !selected[1] && !selected[2] && selected[3] && !report.dependency_banks);
+    banks[1].required=&absent;memset(selected,0,sizeof(selected));
+    CHECK(!sh_audio_bank_closure(view,4,&event,1,1,selected,&report,error,sizeof(error)));
+    CHECK(strstr(error,"bank 2 requires absent object 999"));
+    /* Optional references still do not nominate dormant providers. */
+    banks[0].required_count=0;banks[0].optional_count=1;
+    memset(selected,0,sizeof(selected));
+    CHECK(sh_audio_bank_closure(view,4,&event,1,1,selected,&report,error,sizeof(error)));
+    CHECK(selected[0] && !selected[1] && !selected[2] && !selected[3]);
+}
+
 int main(int argc,char **argv)
 {
     test_identities(); test_name_aliases(); test_reader(); test_dependencies();
     test_streaming_source(); test_recovery(); test_transition_order(); test_content_recovery(); test_additive_ownership();
     test_source_closure();
+    test_cross_bank_objects();
     test_resident_media_closure();
     if(argc>1 && !strcmp(argv[1],"--sound-ids")) {
         for(int i=2;i<argc;i++) {

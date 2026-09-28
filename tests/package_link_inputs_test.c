@@ -46,6 +46,14 @@ static void catalog_file(const char *relative)
 
 static void cooked_paths(void)
 {
+    char *atlas_path = sh_package_cooked_path("transsortatlas", "textures/fx/beam.tga");
+    assert(atlas_path && !strcmp(atlas_path, "generated/transsortatlas/textures/fx/beam.bimage"));
+    const char *atlas_family = NULL; char *atlas_name = NULL;
+    assert(sh_package_cooked_identity(atlas_path, &atlas_family, &atlas_name) == 1);
+    assert(!strcmp(atlas_family, "transsortatlas") && !strcmp(atlas_name, atlas_path));
+    char *atlas_roundtrip = sh_package_cooked_path(atlas_family, atlas_name);
+    assert(atlas_roundtrip && !strcmp(atlas_roundtrip, atlas_path));
+    free(atlas_path); free(atlas_name); free(atlas_roundtrip);
     static const char *particles[][2] = {
         {"models/particles/splash.lwo", "generated/models/particles/splash.pmodel"},
         {"models.v2/particles/splash.v2.obj", "generated/models.v2/particles/splash.v2.pmodel"},

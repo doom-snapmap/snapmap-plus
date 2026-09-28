@@ -125,11 +125,16 @@ size_t sh_package_audio_program_banks(const sh_package_audio_program *program, s
 size_t sh_package_audio_program_scopes(const sh_package_audio_program *program);
 const sh_audio_graph_bank *sh_package_audio_program_bank(const sh_package_audio_program *program,
     size_t scope, size_t index, const sh_audio_bank_binding **binding);
-/* Native activation plan for a bound program: every scope bank in native
- * registration order, deduplicated by the caller. numeric=1 loads the bound
+/* Native publication view: shared policy and certified native definitions are
+ * served separately. Authored/full bank views above remain unchanged. */
+const sh_audio_bank_binding *sh_package_audio_program_private_bank(
+    const sh_package_audio_program *program,size_t scope,size_t index);
+/* Native activation plan for a bound program: original witness providers first,
+ * then every authored scope in registration order, deduplicated by the caller.
+ * numeric=1 loads the bound
  * identity by file ID (relocated or decimally named banks); otherwise the
- * native name loader opens filename. The native baseline witness scope is not
- * an activation scope. Visit returns 0 to stop; the call then fails. */
+ * native name loader opens filename. Originals retain the native records omitted
+ * by private projections. Visit returns 0 to stop; the call then fails. */
 int sh_package_audio_program_loads(const sh_package_audio_program *program,
     int (*visit)(void *, uint32_t id, const char *filename, int numeric), void *context,
     char *error, size_t capacity);

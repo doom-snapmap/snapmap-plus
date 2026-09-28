@@ -42,6 +42,50 @@ static size_t mu_binding(const sh_package_provenance *value, const char *family,
         if (!_stricmp(value->bindings[i].family, family) && !_stricmp(value->bindings[i].name, name)) return i;
     return SIZE_MAX;
 }
+typedef struct mu_local {
+    const sh_package_provenance *library;
+    int (*native)(void *, const char *, const char *);
+    void *context;
+} mu_local;
+static int mu_local_resolve(void *context, const sh_package_provenance_site *site,
+    const char *family, const char *name, const char **replacement)
+{
+    mu_local *local = context;
+    const sh_package_provenance *library = local->library;
+    size_t chosen = SIZE_MAX, chosen_context = SIZE_MAX;
+    (void)site; *replacement = NULL;
+    if (!strcmp(family, SH_PACKAGE_KEY_FAMILY) || mu_binding(library, family, name) != SIZE_MAX) return 0;
+    for (size_t i = 0; i < library->binding_count; i++) {
+        const sh_package_provenance_binding *binding = library->bindings + i;
+        if (_stricmp(binding->family, family) || _stricmp(binding->original, name)) continue;
+        for (size_t c = 0; c < binding->context_count; c++) {
+            size_t index = binding->contexts[c];
+            if (index >= library->context_count) return -1;
+            int order = chosen == SIZE_MAX ? -1 : mu_context_order(library->contexts + index,
+                library->contexts + chosen_context);
+            if (order < 0 || (!order && strcmp(binding->name, library->bindings[chosen].name) < 0)) {
+                chosen = i; chosen_context = index;
+            }
+        }
+    }
+    if (chosen == SIZE_MAX) return 0;
+    int native = local->native(local->context, family, name);
+    if (native) return native < 0 ? -1 : 0;
+    *replacement = library->bindings[chosen].name; return 1;
+}
+char *sh_package_map_uses_bind_local(sh_package_source_reader *reader,
+    const char *json, size_t length, const sh_package_provenance *library,
+    int (*native)(void *, const char *, const char *), void *context,
+    size_t *output_length, char *error, size_t capacity)
+{
+    mu_local local = {library, native, context};
+    if (output_length) *output_length = 0;
+    if (!reader || !library || library->semantics != SH_PACKAGE_PROVENANCE_CATALOG || !native) {
+        mu_error(error, capacity, "local legacy binding requires an installed source catalog"); return NULL;
+    }
+    return sh_package_source_bind_map_sites_observed(reader, json, length,
+        mu_local_resolve, mu_local_resolve, &local, output_length, NULL, error, capacity);
+}
 static int mu_same_site(const sh_package_provenance_use *use, const sh_package_provenance_site *site)
 {
     return site && use->kind == site->kind && !strcmp(use->owner, site->owner) &&

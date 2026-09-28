@@ -2134,6 +2134,13 @@ static int pc_compile_resource(sh_package_compilation *out, sh_compiled_resource
     composing = 1;
     errno = 0;
     rules = pc_rules(resource->type, &rule_count);
+    /* A source entity may be an inheritance parent. Its list indices are native
+     * addresses until child state has been expanded, even when this parent has
+     * no inherit header itself. The library composes effective registrations
+     * later; do not compact its source slots or erase default-constructed rows. */
+    int native_entity_slots = environment->independent_sources &&
+        !strcmp(resource->type, "entitydef") && (distinct <= 1u || all_equal);
+    if (native_entity_slots) { rules = NULL; rule_count = 0; }
     /* Entity headers require normalization even without overlapping changes.
      * Other native families can also accept custom source dialects (particles
      * are one example); preserve their bytes when no composition is needed. */
@@ -2181,6 +2188,7 @@ static int pc_compile_resource(sh_package_compilation *out, sh_compiled_resource
         snprintf(detail, sizeof(detail), "native declaration family requires a verified composition adapter"); goto conflict;
     }
     rules = pc_rules(resource->type, &rule_count);
+    if (native_entity_slots) { rules = NULL; rule_count = 0; }
     /* A reader-proven absent identity is a new declaration. Its original is
      * empty state, so compatible additions compose without an author-supplied
      * baseline file. A missing reader never establishes absence. */
@@ -3229,15 +3237,19 @@ int sh_package_compilation_probe(const sh_package_compilation *compilation,
     resource = sh_package_compilation_find(compilation, key); free(key);
     if (!resource) return 0;
     if (resource->body) return 1;
-    if (!compilation->sources || resource->source >= compilation->sources->file_count) {
-        snprintf(error, capacity, "%s: compiled resource has no readable source", engine_path); return -1;
-    }
-    file = compilation->sources->files[resource->source];
-    if (resource->cache_path) file.absolute = resource->cache_path;
     if (resource->cache_file) {
         uint64_t size;
         stream = sh_package_file_open(resource->cache_file, &size, error, capacity);
-    } else stream = sh_package_source_open(&file, error, capacity);
+    } else {
+        if (!compilation->sources || !compilation->sources->files ||
+            resource->source >= compilation->sources->file_count ||
+            compilation->sources->files[resource->source].directory) {
+            snprintf(error, capacity, "%s: compiled resource has no readable source", engine_path); return -1;
+        }
+        file = compilation->sources->files[resource->source];
+        if (resource->cache_path) file.absolute = resource->cache_path;
+        stream = sh_package_source_open(&file, error, capacity);
+    }
     if (!stream) return -1;
     fclose(stream); return 1;
 }
@@ -3345,50 +3357,26 @@ static const sh_package_source_file *pc_change_source(const sh_package_compilati
     return file->directory ? NULL : file;
 }
 
-/* Exact in-memory comparison, captured strong content identities for two
- * opaque snapshots, and bounded streaming only when representations differ. */
+/* Generated sealed files and authored snapshots are both complete payloads.
+ * Compare their captured identities, or stream when representations differ. */
 static int pc_change_equal(const sh_package_compilation *before, const sh_compiled_resource *a,
     const sh_package_compilation *after, const sh_compiled_resource *b, char *error, size_t capacity)
 {
-    const sh_package_source_file *af = a->body ? NULL : pc_change_source(before, a);
-    const sh_package_source_file *bf = b->body ? NULL : pc_change_source(after, b);
-    if ((!a->body && !af) || (!b->body && !bf)) {
-        if (error && capacity) snprintf(error, capacity, "%s: invalid compiled source for resource comparison", a->engine_path);
-        return -1;
-    }
     if ((a->type == NULL) != (b->type == NULL) || (a->name == NULL) != (b->name == NULL) ||
         (a->type && strcmp(a->type, b->type)) || (a->name && strcmp(a->name, b->name))) return 0;
     /* Logical identity additions/removals are recorded separately. Choosing a
      * different primary alias cannot turn unchanged physical bytes into a
      * replacement that reconstructs existing native consumers. */
     if (a->sound_authored_event != b->sound_authored_event || a->sound_event != b->sound_event) return 0;
-    uint64_t alen = a->body ? a->body_length : af->length;
-    uint64_t blen = b->body ? b->body_length : bf->length;
-    if (alen != blen) return 0;
-    if (a->body && b->body) return !memcmp(a->body, b->body, a->body_length);
-    if (af && bf) return !memcmp(af->digest, bf->digest, sizeof(af->digest));
-    const sh_compiled_resource *opaque = af ? a : b;
-    const sh_compiled_resource *memory = af ? b : a;
-    sh_package_source_file file = *(af ? af : bf);
-    unsigned char chunk[65536];
-    size_t offset = 0;
-    int equal = 1;
-    if (opaque->cache_path) file.absolute = opaque->cache_path;
-    uint64_t opaque_length;
-    FILE *stream = opaque->cache_file ? sh_package_file_open(opaque->cache_file, &opaque_length, error, capacity) :
-        sh_package_source_open(&file, error, capacity);
-    if (!stream) return -1;
-    while (offset < memory->body_length) {
-        size_t amount = memory->body_length - offset;
-        if (amount > sizeof(chunk)) amount = sizeof(chunk);
-        if (fread(chunk, 1, amount, stream) != amount) {
-            if (error && capacity) snprintf(error, capacity, "%s: resource comparison read failed", opaque->engine_path);
-            equal = -1; break;
-        }
-        if (memcmp(memory->body + offset, chunk, amount)) { equal = 0; break; }
-        offset += amount;
+    if (a->body && b->body)
+        return a->body_length == b->body_length && !memcmp(a->body, b->body, a->body_length);
+    if (!a->body && !b->body) {
+        sh_package_file_identity left, right;
+        if (!sh_package_compilation_identity(before, a, &left, error, capacity) ||
+            !sh_package_compilation_identity(after, b, &right, error, capacity)) return -1;
+        return left.length == right.length && !memcmp(left.digest, right.digest, sizeof(left.digest));
     }
-    fclose(stream); return equal;
+    return pc_alias_equal(before, a, after, b, error, capacity);
 }
 
 static int pc_changes_valid(const sh_package_compilation *compiled)
@@ -3401,7 +3389,7 @@ static int pc_changes_valid(const sh_package_compilation *compiled)
         if (!r->engine_path || !*r->engine_path || !pc_sound_binding_valid(r) || !pc_native_valid(r) ||
             (r->type == NULL) != (r->name == NULL) || (r->type && (!*r->type || !*r->name)) ||
             (i && strcmp(compiled->resources[i - 1].engine_path, r->engine_path) >= 0) ||
-            (!r->body && !pc_change_source(compiled, r))) return 0;
+            (!r->body && !r->cache_file && !pc_change_source(compiled, r))) return 0;
     }
     return 1;
 }
@@ -3410,7 +3398,9 @@ int sh_package_compilation_changes(const sh_package_compilation *before,
     const sh_package_compilation *after, sh_package_changes *out, char *error, size_t capacity)
 {
     size_t ai = 0, bi = 0, allocated = 0;
-    if (error && capacity) error[0] = 0;
+    char fallback[512];
+    if (!error || !capacity) { error = fallback; capacity = sizeof(fallback); }
+    error[0] = 0;
     if (!out) return 0;
     sh_package_changes_free(out);
     if (!pc_changes_valid(before) || !pc_changes_valid(after)) {

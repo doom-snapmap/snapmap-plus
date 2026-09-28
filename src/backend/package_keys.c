@@ -169,6 +169,21 @@ static void pk_set_union(sh_package_key_set *into, const sh_package_key_set *fro
     for (size_t i = 0; i < sizeof(into->words) / sizeof(into->words[0]); i++) into->words[i] |= from->words[i];
 }
 
+int sh_package_key_groups_merge(sh_package_key_groups *destination, const sh_package_key_groups *source)
+{
+    if (!destination) return 0;
+    if (!source || source == destination) return 1;
+    for (size_t i = 1; i < SH_PACKAGE_KEY_PATTERNS; i++)
+        if (destination->defined[i] && source->defined[i] &&
+            !sh_package_key_set_equal(destination->members + i, source->members + i)) return 0;
+    for (size_t i = 1; i < SH_PACKAGE_KEY_PATTERNS; i++)
+        if (source->defined[i] && !destination->defined[i]) {
+            destination->defined[i] = 1; destination->members[i] = source->members[i]; destination->count++;
+        }
+    destination->historical |= source->historical;
+    return 1;
+}
+
 int sh_package_key_groups_define(sh_package_key_groups *groups, uint32_t code, const sh_package_key_set *members)
 {
     uint32_t pattern = (code & SH_PACKAGE_KEY_SINGLE) >> 19;

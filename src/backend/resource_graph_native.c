@@ -88,6 +88,10 @@ typedef struct rg_movie_frame {
     int failed;
 } rg_movie_frame;
 static __declspec(thread) rg_movie_frame *g_movie_frame;
+/* Native constructors can derive typed names from opaque fields rather than
+ * declaration reference sites. Retain the compiled owner's request bindings
+ * through the call; nested constructors always establish their own scope. */
+static __declspec(thread) sh_package_consumer_hold *g_request_hold;
 static rg_swf_construct_fn g_swf_construct;
 static volatile LONG g_movie_ready, g_movie_attempted;
 static rg_set_text_fn g_set_text;
@@ -191,6 +195,27 @@ static int rg_identity(void *resource, char type[128], char name[4096])
         if (!t || !n || !*t || !*n || strnlen(t, 128) >= 128 || strnlen(n, 4096) >= 4096) return 0;
         strcpy_s(type, 128, t); strcpy_s(name, 4096, n); return 1;
     } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+}
+static int rg_requests_begin(void *resource, sh_package_consumer_hold *hold)
+{
+    char type[128], name[4096];
+    g_request_hold = NULL;
+    /* Only material construction currently derives this request-slot ABI.
+     * Other constructors have their own plans and cannot inherit this one. */
+    if (!InterlockedCompareExchange(&g_ready, 0, 0) || !rg_identity(resource, type, name) ||
+        _stricmp(type, "material")) return 1;
+    int status = sh_package_runtime_consumer_acquire("material", name, hold);
+    if (status == 1) g_request_hold = hold;
+    return status >= 0;
+}
+static const char *rg_request_name(void *manager, const char *name)
+{
+    if (!g_request_hold || !g_request_hold->binding || !manager || !name) return name;
+    __try {
+        const char *family = *(const char **)((unsigned char *)manager + 8);
+        const char *bound = sh_package_consumer_request(g_request_hold->binding, family, name);
+        return bound ? bound : name;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return name; }
 }
 static void rg_returned(void *resource)
 {
@@ -499,6 +524,7 @@ static void rg_load_hook(void *resource)
     int tracked = 0, parsed = 0;
     rg_font_frame *font_parent = g_font_frame;
     rg_movie_frame *movie_parent = g_movie_frame;
+    sh_package_consumer_hold requests = {0}, *request_parent = g_request_hold;
     if (g_shader_state && !rg_fixed_capture(resource)) { g_shader_state->failed = 1; return; }
     if (InterlockedCompareExchange(&g_ready, 0, 0)) {
         int identified = rg_identity(resource, type, name);
@@ -507,6 +533,7 @@ static void rg_load_hook(void *resource)
     }
     __try {
         g_font_frame = NULL; g_movie_frame = NULL; /* Nested constructors never inherit a plan. */
+        if (!rg_requests_begin(resource, &requests)) __leave;
         g_load(resource);
         /* Both native materializers reject resource+0x18 errors unless the
          * caller permits a default. GenericLoad sets flag 0x04 on its fallback
@@ -516,6 +543,7 @@ static void rg_load_hook(void *resource)
         if (parsed) { sh_resource_resident_touch(resource); rg_shader_capture(resource); }
     } __finally {
         g_font_frame = font_parent; g_movie_frame = movie_parent;
+        g_request_hold = request_parent; sh_package_runtime_consumer_release(&requests);
         if (rg_fixed_finish(resource, parsed ? 0 : 1)) parsed = 0;
         if (tracked) {
             sh_package_shader_receipt_end(&receipt, parsed, rg_receipt_read, NULL);
@@ -532,7 +560,7 @@ static void *rg_lookup_hook(void *manager, const char *name)
 {
     int handled = 0; void *probe = rg_cook_lookup(manager, name, &handled);
     if (handled) return probe;
-    void *resource = g_lookup(manager, name);
+    void *resource = g_lookup(manager, rg_request_name(manager, name));
     sh_resource_resident_touch(resource);
     if (sh_resource_graph_recording()) rg_returned(resource);
     return resource;
@@ -557,6 +585,7 @@ static unsigned int rg_parse_hook(void *resource, unsigned char read_source, voi
     int tracked = 0, observing = InterlockedCompareExchange(&g_ready, 0, 0) != 0;
     rg_font_frame *font_parent = g_font_frame;
     rg_movie_frame *movie_parent = g_movie_frame;
+    sh_package_consumer_hold requests = {0}, *request_parent = g_request_hold;
     if (g_shader_state && !rg_fixed_capture(resource)) { g_shader_state->failed = 1; return 1; }
     if (observing) {
         char type[128], name[4096]; int identified = rg_identity(resource, type, name);
@@ -564,9 +593,14 @@ static unsigned int rg_parse_hook(void *resource, unsigned char read_source, voi
         sh_package_shader_receipt_begin(&receipt, (uintptr_t)resource, identified ? type : NULL, identified ? name : NULL);
         if (!read_source) rg_receipt_retained(resource);
     }
-    __try { g_font_frame = NULL; g_movie_frame = NULL; result = g_parse(resource, read_source, error_text); if (!result) rg_shader_capture(resource); }
+    __try {
+        g_font_frame = NULL; g_movie_frame = NULL;
+        if (!rg_requests_begin(resource, &requests)) __leave;
+        result = g_parse(resource, read_source, error_text); if (!result) rg_shader_capture(resource);
+    }
     __finally {
         g_font_frame = font_parent; g_movie_frame = movie_parent;
+        g_request_hold = request_parent; sh_package_runtime_consumer_release(&requests);
         int restored = rg_fixed_finish(resource, result);
         if (observing) sh_package_shader_receipt_end(&receipt, result == 0 && !restored, rg_receipt_read, NULL);
         if (tracked) sh_resource_graph_end(&frame, result == 0 && !restored);
@@ -590,6 +624,7 @@ static unsigned int rg_read_hook(void *resource, void *error_text)
     int restored = 0;
     rg_font_frame *font_parent = g_font_frame;
     rg_movie_frame *movie_parent = g_movie_frame;
+    sh_package_consumer_hold requests = {0}, *request_parent = g_request_hold;
     if (g_shader_state && !rg_fixed_capture(resource)) { g_shader_state->failed = 1; return 0; }
     if (observing) {
         char type[128], name[4096]; int source = rg_read_has_source(resource);
@@ -599,9 +634,14 @@ static unsigned int rg_read_hook(void *resource, void *error_text)
         sh_package_shader_receipt_begin(&receipt, source ? (uintptr_t)resource : 0,
             identified ? type : NULL, identified ? name : NULL);
     }
-    __try { g_font_frame = NULL; g_movie_frame = NULL; result = g_read(resource, error_text); if (!result) rg_shader_capture(resource); }
+    __try {
+        g_font_frame = NULL; g_movie_frame = NULL;
+        if (!rg_requests_begin(resource, &requests)) __leave;
+        result = g_read(resource, error_text); if (!result) rg_shader_capture(resource);
+    }
     __finally {
         g_font_frame = font_parent; g_movie_frame = movie_parent;
+        g_request_hold = request_parent; sh_package_runtime_consumer_release(&requests);
         restored = rg_fixed_finish(resource, result);
         if (observing) sh_package_shader_receipt_end(&receipt, result == 0 && !restored, rg_receipt_read, NULL);
         if (tracked) sh_resource_graph_end(&frame, result == 0 && !restored);
@@ -666,12 +706,13 @@ static unsigned int rg_font_read_hook(void *resource, void *error_text)
     if (!InterlockedCompareExchange(&g_ready, 0, 0)) return g_font_read(resource, error_text);
     rg_font_frame frame = {0}, *parent = g_font_frame;
     rg_movie_frame *movie_parent = g_movie_frame;
+    sh_package_consumer_hold *request_parent = g_request_hold;
     sh_resource_graph_frame graph; int tracked = 0, compiled = 0;
     unsigned int result = 1; char family[128], name[4096];
     /* Mask even an uncompiled nested font. It must never borrow its parent's
      * bindings. Provider holds and masks unwind through native SEH exceptions. */
     __try {
-        g_font_frame = NULL; g_movie_frame = NULL;
+        g_font_frame = NULL; g_movie_frame = NULL; g_request_hold = NULL;
         if (!rg_identity(resource, family, name) || _stricmp(family, "font")) {
             result = g_font_read(resource, error_text); __leave;
         }
@@ -687,7 +728,7 @@ static unsigned int rg_font_read_hook(void *resource, void *error_text)
         result = g_font_read(resource, error_text);
         if (frame.failed) result = 1;
     } __finally {
-        g_font_frame = parent; g_movie_frame = movie_parent;
+        g_font_frame = parent; g_movie_frame = movie_parent; g_request_hold = request_parent;
         if (tracked) sh_resource_graph_end(&graph, result == 0);
         sh_package_runtime_consumer_release(&frame.hold);
     }
@@ -756,10 +797,11 @@ static void *rg_swf_construct_hook(void *swf, const char *name, void *parent, un
     if (!InterlockedCompareExchange(&g_movie_ready, 0, 0)) return g_swf_construct(swf, name, parent, flags);
     rg_movie_frame frame = {0}, *movie_parent = g_movie_frame;
     rg_font_frame *font_parent = g_font_frame;
+    sh_package_consumer_hold *request_parent = g_request_hold;
     sh_package_movie_names names;
     void *result = NULL; int prepared = 0, compiled = 0;
     __try {
-        g_movie_frame = NULL; g_font_frame = NULL; /* Nested movies never inherit a plan. */
+        g_movie_frame = NULL; g_font_frame = NULL; g_request_hold = NULL; /* Nested movies never inherit a plan. */
         if (!name || sh_package_movie_names_for_consumer(name, strlen(name), &names) != 1 ||
             sh_package_runtime_consumer_acquire("file", names.movie, &frame.hold) != 1) {
             result = g_swf_construct(swf, name, parent, flags); __leave;
@@ -769,7 +811,7 @@ static void *rg_swf_construct_hook(void *swf, const char *name, void *parent, un
         if (prepared && frame.count) g_movie_frame = &frame;
         result = g_swf_construct(swf, name, parent, flags);
     } __finally {
-        g_movie_frame = movie_parent; g_font_frame = font_parent;
+        g_movie_frame = movie_parent; g_font_frame = font_parent; g_request_hold = request_parent;
         sh_package_runtime_consumer_release(&frame.hold);
     }
     /* A constructor cannot fail; an unbindable plan keeps the native requests. */
@@ -809,7 +851,7 @@ static void *rg_materialize_hook(void *manager, const char *name, unsigned char 
     if (handled) return probe;
     void *resource;
     if (!rg_font_route(manager, name, &resource) && !rg_movie_route(manager, name, &resource))
-        resource = g_materialize(manager, name, create_default, flags);
+        resource = g_materialize(manager, rg_request_name(manager, name), create_default, flags);
     sh_resource_resident_touch(resource);
     if (sh_resource_graph_recording()) rg_returned(resource);
     return resource;
@@ -838,6 +880,7 @@ static void rg_state_hook(void *type_info, void *entity, void *reader, unsigned 
     int tracked = 0, canonical = 0, parsed = 0, expanded = 0;
     rg_font_frame *font_parent = g_font_frame;
     rg_movie_frame *movie_parent = g_movie_frame;
+    sh_package_consumer_hold *request_parent = g_request_hold;
     if (InterlockedCompareExchange(&g_ready, 0, 0)) {
         canonical = initialize && rg_state_identity(entity, reader, type, name, &expanded);
         if (canonical) sh_resource_graph_begin_state(&frame, type, name, expanded);
@@ -845,12 +888,12 @@ static void rg_state_hook(void *type_info, void *entity, void *reader, unsigned 
         tracked = 1;
     }
     __try {
-        g_font_frame = NULL; g_movie_frame = NULL;
+        g_font_frame = NULL; g_movie_frame = NULL; g_request_hold = NULL;
         g_state(type_info, entity, reader, initialize);
         /* The native error getter reads lexer+0x1e0 in both renderers. */
         if (canonical) parsed = *(unsigned char *)((unsigned char *)reader + 0x1200) == 0;
     } __finally {
-        g_font_frame = font_parent; g_movie_frame = movie_parent;
+        g_font_frame = font_parent; g_movie_frame = movie_parent; g_request_hold = request_parent;
         if (tracked) sh_resource_graph_end(&frame, parsed);
     }
 }

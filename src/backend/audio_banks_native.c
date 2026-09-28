@@ -957,6 +957,10 @@ static int an_pbank_load(size_t index, uint32_t **loaded, size_t *loaded_count, 
     int result = b->numeric ? sh_audio_bank_commands_load(&g_commands, b->id) : an_named_load(b->filename, b->id);
     if (result == 69) return 1;
     if (result != 1) {
+        char line[512];
+        snprintf(line, sizeof(line), "audio programs: bank %u (%s, %s) load returned %d",
+            (unsigned)b->id, b->filename, b->numeric ? "file ID" : "name", result);
+        backend_log(line);
         if (result < 0) b->uncertain = 1;
         return an_fail(error, capacity, result < 0 ? "native audio bank %u load had uncertain effects" :
             "native audio bank %u could not be loaded", b->id);

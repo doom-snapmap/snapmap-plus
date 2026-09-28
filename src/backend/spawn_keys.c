@@ -10,6 +10,7 @@
 #include <windows.h>
 #include <xmmintrin.h>
 #include <string.h>
+#include <stdlib.h>
 #include "spawn_keys.h"
 #include "package_keys.h"
 #include "hook.h"
@@ -43,21 +44,71 @@ static float g_low, g_high;
 static void *g_select, *g_modifier, *g_filter;
 static volatile LONG g_active;
 
-/* The active generation's group codes (package_keys.h), double-buffered: a
- * publication writes the idle buffer once no replacement still reads it, then
- * switches. A replacement holds its buffer from entry to return. */
-static sh_package_key_groups g_groups[2];
+/* Immutable dispatch programs, held by two publication slots. Switching
+ * retains an already prepared program without allocating. Reusing a slot
+ * waits for its native readers before releasing that slot's old program. */
+struct sh_spawn_keys_program {
+    volatile LONG references;
+    sh_package_key_groups groups;
+    uint32_t *unmodified;
+    size_t unmodified_count;
+};
+static sh_spawn_keys_program *g_programs[2];
+static const sh_package_key_groups g_empty_groups;
 static volatile LONG g_group_index, g_group_readers[2];
 static const sh_package_key_groups *sk_groups_enter(LONG *held)
 {
     for (;;) {
         LONG index = InterlockedCompareExchange(&g_group_index, 0, 0) & 1;
         InterlockedIncrement(g_group_readers + index);
-        if ((InterlockedCompareExchange(&g_group_index, 0, 0) & 1) == index) { *held = index; return g_groups + index; }
+        if ((InterlockedCompareExchange(&g_group_index, 0, 0) & 1) == index) {
+            *held = index; return g_programs[index] ? &g_programs[index]->groups : &g_empty_groups;
+        }
         InterlockedDecrement(g_group_readers + index);
     }
 }
 static void sk_groups_leave(LONG held) { InterlockedDecrement(g_group_readers + held); }
+static int sk_type_order(const void *a, const void *b)
+{ uint32_t x = *(const uint32_t *)a, y = *(const uint32_t *)b; return x < y ? -1 : x > y; }
+sh_spawn_keys_program *sh_spawn_keys_program_create(const sh_package_key_groups *groups,
+    const uint32_t *unmodified_types, size_t count)
+{
+    if ((count && !unmodified_types) || count > SIZE_MAX / sizeof(*unmodified_types)) return NULL;
+    sh_spawn_keys_program *program = calloc(1, sizeof(*program));
+    if (!program) return NULL;
+    program->references = 1;
+    if (groups) program->groups = *groups;
+    if (count) {
+        program->unmodified = malloc(count * sizeof(*program->unmodified));
+        if (!program->unmodified) { free(program); return NULL; }
+        memcpy(program->unmodified, unmodified_types, count * sizeof(*program->unmodified));
+        qsort(program->unmodified, count, sizeof(*program->unmodified), sk_type_order);
+        for (size_t i = 0; i < count; i++)
+            if (!program->unmodified_count || program->unmodified[program->unmodified_count - 1] != program->unmodified[i])
+                program->unmodified[program->unmodified_count++] = program->unmodified[i];
+    }
+    return program;
+}
+void sh_spawn_keys_program_release(sh_spawn_keys_program *program)
+{
+    if (program && !InterlockedDecrement(&program->references)) { free(program->unmodified); free(program); }
+}
+void sh_spawn_keys_publish_program(sh_spawn_keys_program *program)
+{
+    LONG next = (InterlockedCompareExchange(&g_group_index, 0, 0) & 1) ^ 1;
+    if (program) InterlockedIncrement(&program->references);
+    while (InterlockedCompareExchange(g_group_readers + next, 0, 0)) SwitchToThread();
+    sh_spawn_keys_program *old = g_programs[next];
+    g_programs[next] = program;
+    InterlockedExchange(&g_group_index, next);
+    sh_spawn_keys_program_release(old);
+}
+static int sk_unmodified(LONG held, uint32_t type)
+{
+    const sh_spawn_keys_program *program = g_programs[held];
+    return program && program->unmodified_count && bsearch(&type, program->unmodified,
+        program->unmodified_count, sizeof(type), sk_type_order) != NULL;
+}
 
 static uint64_t sk_select(uint8_t *manager, uint32_t request, uint64_t unused3, uint64_t unused4)
 {
@@ -104,6 +155,7 @@ static void sk_modifier(uint8_t *conductor, uint8_t *ai, uint64_t modifiers)
     memcpy(&health, &modifiers, sizeof(health));
     memcpy(&damage, (const uint8_t *)&modifiers + sizeof(health), sizeof(damage));
     groups = sk_groups_enter(&held);
+    if (sk_unmodified(held, type)) { sk_groups_leave(held); return; }
     for (int i = 0; i < count && found < 0; i++)
         if (sh_package_key_modifier_matches(groups, type, *(const uint32_t *)(rows + (size_t)i * SK_MODIFIER_STRIDE + 8))) found = i;
     sk_groups_leave(held);
@@ -198,25 +250,11 @@ int sh_spawn_keys_active(void) { return InterlockedCompareExchange(&g_active, 0,
 
 int sh_spawn_keys_publish_groups(const sh_package_key_groups *library, const sh_package_key_groups *map)
 {
-    LONG next = (InterlockedCompareExchange(&g_group_index, 0, 0) & 1) ^ 1;
-    sh_package_key_groups *out = g_groups + next;
-    /* The two tables never give one code two different sets: a map compile
-     * reuses the library's code for an equal set and holds all its others. */
-    for (uint32_t pattern = 1; library && map && pattern < SH_PACKAGE_KEY_PATTERNS; pattern++)
-        if (library->defined[pattern] && map->defined[pattern] &&
-            !sh_package_key_set_equal(library->members + pattern, map->members + pattern)) return 0;
-    while (InterlockedCompareExchange(g_group_readers + next, 0, 0)) SwitchToThread();
-    memset(out, 0, sizeof(*out));
-    for (int source = 0; source < 2; source++) {
-        const sh_package_key_groups *table = source ? map : library;
-        /* A frozen legacy context's keys: only a map generation holds any. */
-        if (table) out->historical |= table->historical;
-        for (uint32_t pattern = 1; table && pattern < SH_PACKAGE_KEY_PATTERNS; pattern++)
-            if (table->defined[pattern] && !out->defined[pattern]) {
-                out->defined[pattern] = 1; out->members[pattern] = table->members[pattern]; out->count++;
-            }
-    }
-    InterlockedExchange(&g_group_index, next);
+    sh_spawn_keys_program *program = sh_spawn_keys_program_create(library, NULL, 0);
+    if (!program) return 0;
+    if (!sh_package_key_groups_merge(&program->groups, map)) { sh_spawn_keys_program_release(program); return 0; }
+    sh_spawn_keys_publish_program(program);
+    sh_spawn_keys_program_release(program);
     return 1;
 }
 
@@ -231,6 +269,11 @@ static LONG g_test_held = -1;
 const sh_package_key_groups *sh_spawn_keys_test_hold(void)
 { LONG held; const sh_package_key_groups *groups = sk_groups_enter(&held); g_test_held = held; return groups; }
 void sh_spawn_keys_test_release(void) { sk_groups_leave(g_test_held); g_test_held = -1; }
+int sh_spawn_keys_test_unmodified(uint32_t type)
+{
+    LONG held; sk_groups_enter(&held);
+    int result = sk_unmodified(held, type); sk_groups_leave(held); return result;
+}
 uint64_t sh_spawn_keys_test_select(void *manager, uint32_t request) { return sk_select(manager, request, 0, 0); }
 void sh_spawn_keys_test_modifier(void *conductor, void *ai, uint64_t modifiers) { sk_modifier(conductor, ai, modifiers); }
 int sh_spawn_keys_test_filter(void *filter, void *ai) { return sk_filter(filter, ai); }

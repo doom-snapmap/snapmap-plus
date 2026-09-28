@@ -98,6 +98,12 @@ int sh_package_runtime_occurrences_pending(void);
  * on a handle and retains its private source tree for later saving. Preparation
  * failures affect only the returned error, never the active runtime status. */
 typedef struct sh_package_map_plan sh_package_map_plan;
+/* Metadata-free historical documents only: translate custom public resource
+ * names using the installed authoring library. No source from the current map
+ * participates, no package is installed, and no provider/native object changes.
+ * Returns process-heap JSON; shipped/product names and prose stay untouched. */
+char *sh_package_runtime_rebind_local_document(const char *json, size_t length,
+    size_t *output_length, char *error, size_t capacity);
 enum {
     SH_PACKAGE_ADMISSION_FAILED = 0,
     SH_PACKAGE_ADMISSION_READY = 1,
@@ -149,11 +155,14 @@ int sh_package_runtime_complete_occurrence_recovery(void *context);
  * Does not acquire/resolve resources or accept author-supplied identities. */
 int sh_package_runtime_bind_occurrence_resources(const sh_package_map_plan *plan,
     sh_package_occurrence_snapshot *snapshot, char *error, size_t capacity);
-/* A native palette may borrow unused declarations and their dependencies from
- * the complete serving view. Retain that view before publishing native rows,
+/* Native selectors borrow roots in their caller-specified native family and
+ * the complete bound dependency closure of those roots. Retain the immutable
+ * serving view before publishing native rows,
  * including during the activation callback. This ownership keeps exact native
  * resources served across refresh/map departure without recording gameplay use
- * or promoting its requirements, HUD, or legacy strings. It is not a source
+ * or promoting its requirements, HUD, or legacy strings. Unrelated resources
+ * in that provider are not selector borrows. The family is a product-owned
+ * native contract, never an author setting. It is not a source
  * snapshot for portable documents; their occurrence leases remain separate.
  *
  * Release only after positive retirement of every native selector using this
@@ -166,7 +175,7 @@ int sh_package_runtime_bind_occurrence_resources(const sh_package_map_plan *plan
  * gameplay binding is never silently replaced to satisfy a different selector.
  */
 typedef struct sh_package_selector_hold sh_package_selector_hold;
-sh_package_selector_hold *sh_package_runtime_selectors_retain(char *error, size_t capacity);
+sh_package_selector_hold *sh_package_runtime_selectors_retain(const char *family, char *error, size_t capacity);
 void sh_package_runtime_selectors_release(sh_package_selector_hold *hold);
 sh_package_map_plan *sh_package_runtime_prepare_map(const char *data_root,
     const char *map_source_root, char *error, size_t capacity);
@@ -417,6 +426,10 @@ int sh_package_runtime_test_legacy_bindings(const sh_package_compilation *compil
     const sh_resource_catalog *catalog, sh_package_provenance *out);
 int sh_package_runtime_test_consumer_changes(const sh_package_consumers *before,
     const sh_package_consumers *after, sh_package_changes *changes);
+int sh_package_runtime_test_native_changes(const sh_package_compilation *before,
+    const sh_package_compilation *after, const sh_resource_catalog *catalog,
+    sh_package_consumers *old_consumers, sh_package_consumers *new_consumers,
+    sh_package_changes *changes, char *error, size_t capacity);
 #ifdef SH_PACKAGE_RUNTIME_NATIVE_TESTING
 struct sh_package_native_assets;
 struct sh_package_shader_preparation;
@@ -438,6 +451,7 @@ void sh_package_runtime_test_source_readers(sh_decl_registry_source registry, ui
 /* Link the installed library through those readers, as production does, so
  * owner isolation and unserved coverage run end to end. Off by default. */
 void sh_package_runtime_test_installed_links(int enabled);
+void sh_package_runtime_test_spawn_keys(int enabled);
 int sh_package_runtime_test_source_inputs(sh_decl_registry_source *registry, uintptr_t *reflection,
     sh_package_baseline_reader *baseline, void **baseline_context);
 /* 1 when the spawn-key group tables last published are the serving
@@ -445,6 +459,9 @@ int sh_package_runtime_test_source_inputs(sh_decl_registry_source *registry, uin
 int sh_package_runtime_test_key_groups_current(void);
 /* Give the serving providers these group tables (copies) and publish them. */
 void sh_package_runtime_test_key_tables(const sh_package_key_groups *library, const sh_package_key_groups *map);
+void sh_package_runtime_test_plan_key_table(sh_package_map_plan *plan, const sh_package_key_groups *table);
+int sh_package_runtime_test_unmodified_type(uint32_t type);
+void sh_package_runtime_test_serving_key_table(sh_package_key_groups *table);
 /* Offline fixture teardown only. No engine callbacks or native game reset. */
 void sh_package_runtime_test_dispose(void);
 #endif

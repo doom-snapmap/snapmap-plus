@@ -97,7 +97,7 @@ int main(void)
     setup(&f, "smp/collision/75a3");
     r = open_registry(&f, 0, error, sizeof(error)); assert(r);
     assert(check(r, "smp/collision/153f0", 0) == SH_PACKAGE_LINK_REGISTRY_COLLISION);
-    assert(check(r, "smp/collision/75a3", 0) == SH_PACKAGE_LINK_REGISTRY_COLLISION);
+    assert(check(r, "smp/collision/75a3", 0) == SH_PACKAGE_LINK_REGISTRY_OCCUPIED);
     assert(check(r, "smp/collision/75a3", 1) == SH_PACKAGE_LINK_REGISTRY_AVAILABLE);
     assert(sh_package_native_registry_share(r, "image", "smp/collision/75a3"));
     assert(check(r, "smp/collision/75a3", 0) == SH_PACKAGE_LINK_REGISTRY_REPLACE_SHARED);

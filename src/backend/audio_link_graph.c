@@ -25,6 +25,7 @@ typedef struct ag_bank {
     const sh_audio_graph_bank *input;
     size_t scope, record;
     size_t *targets, *bus_nodes, *object_nodes, *shared_nodes;
+    unsigned char *native_transport;
     sh_audio_bank_binding binding,private_binding;
 } ag_bank;
 struct sh_audio_link_graph {
@@ -187,6 +188,11 @@ static int ag_fields(sh_audio_link_graph *g, ag_bank *bank, size_t record,
 {
     const sh_audio_bank_codec *codec = bank->input->codec;
     for (size_t i = first; i < first + count; i++) if (bank->targets[i] != SIZE_MAX) {
+        /* A bank locator is not the sound's construction recipe. Native Play
+         * actions keep their original preparation/release bank. Private actions
+         * acquire the complete bank dependency after native witnesses resolve. */
+        if (codec->spans[i].domain == SH_AUDIO_ID_BANK &&
+            !(codec->spans[i].flags & SH_AUDIO_ID_DEFINITION)) continue;
         char slot[40]; snprintf(slot, sizeof(slot), "field/%020llu",
             (unsigned long long)(codec->spans[i].offset - base));
         if (!ag_edge(g, record, slot, bank->targets[i])) return 0;
@@ -293,12 +299,13 @@ static int ag_bank_scan(sh_audio_link_graph *g, ag_bank *bank, char *error, size
         codec->bus_record_count > SIZE_MAX / sizeof(*bank->bus_nodes))
         return ag_fail(error, capacity, "audio graph needs a checked bank inventory");
     bank->targets = malloc((codec->span_count ? codec->span_count : 1) * sizeof(*bank->targets));
+    bank->native_transport = calloc(codec->span_count ? codec->span_count : 1, 1);
     bank->bus_nodes = malloc((codec->bus_record_count ? codec->bus_record_count : 1) * sizeof(*bank->bus_nodes));
     if(codec->object_count>SIZE_MAX/sizeof(*bank->object_nodes) ||
         codec->shared_record_count>SIZE_MAX/sizeof(*bank->shared_nodes))return ag_fail(error,capacity,"audio object count overflows");
     bank->object_nodes=malloc((codec->object_count ? codec->object_count : 1)*sizeof(*bank->object_nodes));
     bank->shared_nodes=malloc((codec->shared_record_count ? codec->shared_record_count : 1)*sizeof(*bank->shared_nodes));
-    if (!bank->targets || !bank->bus_nodes || !bank->object_nodes || !bank->shared_nodes)
+    if (!bank->targets || !bank->native_transport || !bank->bus_nodes || !bank->object_nodes || !bank->shared_nodes)
         return ag_fail(error, capacity, "cannot allocate audio fields");
     for(size_t i=0;i<codec->bus_record_count;i++)bank->bus_nodes[i]=SIZE_MAX;
     for(size_t i=0;i<codec->shared_record_count;i++)bank->shared_nodes[i]=SIZE_MAX;
@@ -368,18 +375,71 @@ void sh_audio_link_graph_close(sh_audio_link_graph *g)
         free(g->nodes[i].edges);
     }
     if (g->banks) for (size_t i = 0; i < g->bank_count; i++) {
-        free(g->banks[i].targets);free(g->banks[i].bus_nodes);free(g->banks[i].object_nodes);free(g->banks[i].shared_nodes);
+        free(g->banks[i].targets);free(g->banks[i].native_transport);free(g->banks[i].bus_nodes);free(g->banks[i].object_nodes);free(g->banks[i].shared_nodes);
         sh_audio_bank_binding_free(&g->banks[i].binding);sh_audio_bank_binding_free(&g->banks[i].private_binding);
     }
     sh_package_link_classes_free(&g->classes);
     free(g->nodes); free(g->slots); free(g->banks); free(g->starts); free(g->ids); free(g->originals); free(g);
 }
+static int ag_classify(sh_audio_link_graph *g, char *error, size_t capacity)
+{
+    sh_package_link_node *shapes = NULL;
+    unsigned char *local = NULL, *classes = NULL;
+    int ok = 0;
+    sh_package_link_classes_free(&g->classes); free(g->originals); g->originals = NULL;
+    if (g->count > SIZE_MAX / sizeof(*shapes)) goto done;
+    shapes = calloc(g->count ? g->count : 1, sizeof(*shapes)); local = malloc(g->count ? g->count : 1);
+    g->originals = malloc(g->count ? g->count : 1); if (!shapes || !local || !g->originals) goto done;
+    for (size_t i = 0; i < g->count; i++) {
+        ag_node *n = &g->nodes[i]; n->shape.path = n->path; n->shape.edges = n->edges;
+        shapes[i] = n->shape; local[i] = (unsigned char)n->original;
+    }
+    if (!sh_package_link_identify_verified(shapes, g->count, ag_verify, g, &g->classes, error, capacity)) goto done;
+    classes = calloc(g->classes.count ? g->classes.count : 1, 1); if (!classes) goto done;
+    /* Exact checked classes may share a certified original witness. Bound
+     * dependency classes still distinguish different source environments. */
+    for (size_t i = 0; i < g->count; i++) classes[g->classes.nodes[i]] |= local[i];
+    for (size_t i = 0; i < g->count; i++) local[i] = classes[g->classes.nodes[i]];
+    ok = sh_package_link_originals(shapes, g->count, local, g->originals, error, capacity);
+done:
+    free(classes); free(local); free(shapes);
+    if (!ok && error && capacity && !*error) ag_fail(error, capacity, "cannot classify audio graph");
+    return ok;
+}
+static int ag_transport(sh_audio_link_graph *g, char *error, size_t capacity)
+{
+    int changed = 0;
+    for (size_t b = 0; b < g->bank_count; b++) {
+        ag_bank *bank = g->banks + b; const sh_audio_bank_codec *codec = bank->input->codec;
+        for (size_t o = 0; o < codec->object_count; o++) {
+            const sh_audio_bank_object *object = codec->objects + o;
+            if (object->kind != 3) continue;
+            size_t action = ag_find(g, bank->scope, SH_AUDIO_ID_ACTION, object->id);
+            if (action == SIZE_MAX) return ag_fail(error, capacity, "audio action has no scoped definition");
+            for (size_t f = object->first_span; f < object->first_span + object->span_count; f++) {
+                const sh_audio_identity_span *field = codec->spans + f;
+                if (field->domain != SH_AUDIO_ID_BANK || bank->targets[f] == SIZE_MAX) continue;
+                if (g->originals[action]) bank->native_transport[f] = 1;
+                else {
+                    char slot[40]; snprintf(slot, sizeof(slot), "field/%020llu",
+                        (unsigned long long)(field->offset - object->offset));
+                    if (!ag_edge(g, bank->object_nodes[o], slot, bank->targets[f]))
+                        return ag_fail(error, capacity, "cannot retain private audio preparation bank");
+                    changed = 1;
+                }
+            }
+        }
+    }
+    /* Private actions keep their scoped bank lifetime and cannot alias another
+     * action whose preparation bank has different contents. Native actions never
+     * get redirected to an unrelated edit in that same container. */
+    return !changed || ag_classify(g, error, capacity);
+}
 sh_audio_link_graph *sh_audio_link_graph_open(const sh_audio_graph_scope *scopes,
     size_t count, char *error, size_t capacity)
 {
     if (error && capacity) *error = 0;
-    sh_audio_link_graph *g = calloc(1, sizeof(*g)); sh_package_link_node *shapes = NULL;
-    unsigned char *local = NULL, *classes = NULL;
+    sh_audio_link_graph *g = calloc(1, sizeof(*g));
     if (!g) { ag_fail(error, capacity, "cannot allocate audio graph"); return NULL; }
     if ((count && !scopes) || count >= SIZE_MAX / sizeof(*g->starts)) goto invalid;
     g->scope_count = count; g->starts = calloc(count + 1, sizeof(*g->starts)); if (!g->starts) goto memory;
@@ -425,26 +485,11 @@ sh_audio_link_graph *sh_audio_link_graph_open(const sh_audio_graph_scope *scopes
         g->nodes[i].original = g->nodes[i].original_references;
         g->nodes[i].shape.semantics[0] = (unsigned char)g->nodes[i].original;
     }
-    if (g->count > SIZE_MAX / sizeof(*shapes)) goto memory;
-    shapes = calloc(g->count ? g->count : 1, sizeof(*shapes)); local = malloc(g->count ? g->count : 1);
-    g->originals = malloc(g->count ? g->count : 1); if (!shapes || !local || !g->originals) goto memory;
-    for (size_t i = 0; i < g->count; i++) {
-        ag_node *n = &g->nodes[i]; n->shape.path = n->path; n->shape.edges = n->edges;
-        shapes[i] = n->shape; local[i] = (unsigned char)n->original;
-    }
-    if (!sh_package_link_identify_verified(shapes, g->count, ag_verify, g, &g->classes, error, capacity)) goto fail;
-    classes = malloc(g->classes.count ? g->classes.count : 1); if (!classes) goto memory;
-    /* A checked exact class may reuse any certified original witness. An
-     * uncertified copy cannot revoke the original peer's certificate. Bound
-     * dependency classes already distinguish unequal source environments. */
-    memset(classes, 0, g->classes.count);
-    for (size_t i = 0; i < g->count; i++) classes[g->classes.nodes[i]] |= local[i];
-    for (size_t i = 0; i < g->count; i++) local[i] = classes[g->classes.nodes[i]];
-    if (!sh_package_link_originals(shapes, g->count, local, g->originals, error, capacity)) goto fail;
-    free(classes); free(local); free(shapes); return g;
+    if (!ag_classify(g, error, capacity) || !ag_transport(g, error, capacity)) goto fail;
+    return g;
 invalid: ag_fail(error, capacity, "invalid audio graph source scopes"); goto fail;
 memory: ag_fail(error, capacity, "cannot allocate audio graph");
-fail: free(classes); free(local); free(shapes); sh_audio_link_graph_close(g); return NULL;
+fail: sh_audio_link_graph_close(g); return NULL;
 }
 int sh_audio_link_graph_event(const sh_audio_link_graph *g, size_t scope,
     uint32_t event, sh_audio_graph_root *out, char *error, size_t capacity)
@@ -665,7 +710,7 @@ int sh_audio_link_graph_bank_sources(const sh_audio_link_graph *g, size_t scope,
     int (*visit)(void *, const char *, uint64_t, uint64_t), void *context, char *error, size_t capacity)
 { return ag_sources(g, scope, SH_AUDIO_ID_BANK, bank, visit, context, error, capacity); }
 
-typedef struct ag_resolver { const ag_bank *bank; const uint32_t *ids; } ag_resolver;
+typedef struct ag_resolver { const ag_bank *bank; const uint32_t *ids; const sh_audio_link_graph *graph; } ag_resolver;
 static int ag_resolve(void *context, const sh_audio_identity_span *field, uint32_t *id, char *error, size_t capacity)
 {
     const ag_resolver *r = context; const sh_audio_bank_codec *codec = r->bank->input->codec;
@@ -674,9 +719,20 @@ static int ag_resolve(void *context, const sh_audio_identity_span *field, uint32
     size_t first = (size_t)(field - codec->spans);
     if (first >= codec->span_count || r->bank->targets[first] == SIZE_MAX)
         return ag_fail(error, capacity, "audio relocation has no retained field binding");
+    if (r->bank->native_transport[first]) { *id = field->value; return 1; }
+    if (field->domain == SH_AUDIO_ID_BANK && ag_is_name(codec, field->offset)) {
+        size_t bank = ag_find(r->graph, r->bank->scope, SH_AUDIO_ID_BANK, codec->metadata.id);
+        if (bank != SIZE_MAX && r->graph->originals[bank]) { *id = field->value; return 1; }
+    }
     *id = r->ids[r->bank->targets[first]]; return *id != 0;
 }
 typedef struct ag_assigned { unsigned domain; uint32_t id; size_t binding,node; } ag_assigned;
+static int ag_keep_private(void *context,sh_audio_identity_domain domain,uint32_t id)
+{
+    const ag_resolver *r=context;
+    size_t node=ag_find(r->graph,r->bank->scope,domain,id);
+    return node==SIZE_MAX ? -1 : !r->graph->originals[node];
+}
 static int ag_assignment_order(const void *left, const void *right)
 {
     const ag_assigned *a = left, *b = right;
@@ -722,12 +778,14 @@ sh_audio_link_binding *sh_audio_link_graph_prepare_bind(sh_audio_link_graph *g, 
             g->nodes[assigned[i-1].node].shape.edge_count,g->nodes[assigned[i].node].shape.edge_count);goto done;
     }
     for (size_t i = 0; i < g->bank_count; i++) {
-        ag_resolver resolver = {&g->banks[i], ids};
+        ag_resolver resolver = {&g->banks[i], ids, g};
         if (!sh_audio_bank_codec_bind(g->banks[i].input->source, g->banks[i].input->codec,
             ag_resolve, &resolver, &bindings[i], error, capacity)) goto done;
-        if((!g->banks[i].input->original || bindings[i].count) &&
-            !sh_audio_bank_binding_private(g->banks[i].input->source,g->banks[i].input->codec,
-                bindings+i,private_bindings+i,error,capacity))goto done;
+        size_t bank=ag_find(g,g->banks[i].scope,SH_AUDIO_ID_BANK,g->banks[i].input->codec->metadata.id);
+        if(bank==SIZE_MAX)goto done;
+        if(!g->originals[bank] &&
+            !sh_audio_bank_binding_select(g->banks[i].input->source,g->banks[i].input->codec,
+                bindings+i,ag_keep_private,&resolver,private_bindings+i,error,capacity))goto done;
     }
     result=calloc(1,sizeof(*result));if(!result){ag_fail(error,capacity,"cannot retain audio binding transaction");goto done;}
     result->graph=g;result->ids=ids;result->banks=bindings;result->private_banks=private_bindings;

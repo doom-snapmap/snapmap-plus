@@ -274,24 +274,28 @@ static int pap_policy_bank(const sh_audio_bank_codec *codec)
 static int pap_bus_capture_baseline(sh_package_audio_program *p,const sh_audio_graph_scope *scopes,
     char *error,size_t capacity)
 {
-    int any=0;
-    for(size_t s=0;s<p->count;s++)for(size_t b=0;b<scopes[s].bank_count;b++)any|=pap_policy_bank(scopes[s].banks[b].codec);
+    int any=0,shared=0;
+    for(size_t s=0;s<p->count;s++)for(size_t b=0;b<scopes[s].bank_count;b++) {
+        any=1;shared|=pap_policy_bank(scopes[s].banks[b].codec);
+    }
     if(!any)return 1;
     const sh_audio_original_bank *banks=NULL;size_t count=0;uint32_t init=0;
     if(!sh_audio_bank_identity("init.bnk",&init) || sh_audio_originals_banks(p->originals,&banks,&count,error,capacity)!=1 ||
         count>SIZE_MAX/sizeof(uint32_t))return 0;
     uint32_t *roots=malloc((count ? count : 1)*sizeof(*roots));size_t used=0;if(!roots)return 0;
     for(size_t i=0;i<count;i++) {
-        int needed=banks[i].metadata.id==init;
+        int needed=shared && banks[i].metadata.id==init;
         for(size_t s=0;s<p->count && !needed;s++)for(size_t b=0;b<scopes[s].bank_count && !needed;b++)
-            needed=pap_policy_bank(scopes[s].banks[b].codec) && scopes[s].banks[b].codec->metadata.id==banks[i].metadata.id;
+            needed=scopes[s].banks[b].codec->metadata.id==banks[i].metadata.id ||
+                !strcmp(scopes[s].banks[b].path,banks[i].path);
         if(needed)roots[used++]=banks[i].metadata.id;
     }
     /* A separate scope prevents original definitions from filling holes in an
      * authored recipe. Its graph witnesses certify equality, not availability
      * from a peer. Capture follows the same typed closure as event selection.
-     * The engine loads Init independently of any event; newly named banks and
-     * edited shared controls are therefore compared with native Init too. */
+     * Compare every selected bank with its native counterpart: changing one
+     * event must not privatize unchanged records in that same container.
+     * Init also witnesses shared controls independently of event selection. */
     if(used)p->bus_baseline=sh_package_audio_capture_open_roots(&p->baseline_scope,p->originals,roots,used,error,capacity);
     if(!used || !p->bus_baseline){free(roots);return !used;}
     p->baseline_roots=roots;p->baseline_root_count=used;return 1;
@@ -844,11 +848,31 @@ const sh_audio_graph_bank *sh_package_audio_program_bank(const sh_package_audio_
     if (binding) *binding = sh_audio_link_graph_bank(p->graph, scope, index);
     return sh_package_audio_capture_input(p->scopes[scope].capture)->banks + index;
 }
+const sh_audio_bank_binding *sh_package_audio_program_private_bank(
+    const sh_package_audio_program *p,size_t scope,size_t index)
+{
+    return p && p->graph && index<sh_package_audio_program_banks(p,scope) ?
+        sh_audio_link_graph_private_bank(p->graph,scope,index) : NULL;
+}
 int sh_package_audio_program_loads(const sh_package_audio_program *p,
     int (*visit)(void *, uint32_t id, const char *filename, int numeric), void *context,
     char *error, size_t capacity)
 {
     if(!p || !p->graph || !visit)return pap_fail(error,capacity,"invalid audio activation plan request",NULL);
+    /* Private projections omit certified native objects/media. Retain their
+     * captured original providers, including the unedited counterpart of a
+     * modified container, before publishing the private records. This is the
+     * same program lease/rollback plan as every other bank, not a second loader. */
+    const sh_audio_graph_scope *baseline=p->bus_baseline ? sh_package_audio_capture_input(p->bus_baseline) : NULL;
+    for(size_t j=0;baseline && j<baseline->bank_count;j++) {
+        const sh_audio_graph_bank *bank=baseline->banks+j;uint32_t numeric=0;
+        const char *leaf=strrchr(bank->path,'/');
+        if(!leaf || !bank->original)return pap_fail(error,capacity,"invalid original audio provider",bank->path);
+        leaf++;
+        if(!visit(context,bank->codec->metadata.id,leaf,
+            sh_audio_bank_numeric_identity(leaf,&numeric) && numeric==bank->codec->metadata.id))
+            return pap_fail(error,capacity,"cannot retain original audio provider",bank->path);
+    }
     for(size_t s=0;s<p->count;s++)for(size_t j=0;j<sh_package_audio_program_banks(p,s);j++) {
         const sh_audio_bank_binding *binding=NULL;uint32_t bound=0,numeric=0;
         const sh_audio_graph_bank *bank=sh_package_audio_program_bank(p,s,j,&binding);
@@ -1043,7 +1067,7 @@ int sh_package_audio_program_materialize(const sh_package_audio_program *p,
             if (!binding || !sh_audio_link_graph_bank_id(p->graph, i, bank->codec->metadata.id, &bound)) {
                 pap_fail(error, capacity, "audio program has not been bound", bank->path); goto done;
             }
-            binding=sh_audio_link_graph_private_bank(p->graph,i,j);
+            binding=sh_package_audio_program_private_bank(p,i,j);
             if (!pap_output_file(&out, bank->path, bank->source, bank->original,
                 bank->codec->metadata.id, bound, binding)) goto done;
         }

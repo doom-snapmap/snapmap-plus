@@ -75,6 +75,9 @@ typedef struct sh_package_key_groups {
 int sh_package_key_groups_define(sh_package_key_groups *groups, uint32_t code, const sh_package_key_set *members);
 /* The group code the table gives exactly this set; 0 when none. */
 uint32_t sh_package_key_groups_find(const sh_package_key_groups *groups, const sh_package_key_set *members);
+/* Combine published dictionaries without reinterpreting any code. NULL is an
+ * empty dictionary. On disagreement leave destination unchanged. */
+int sh_package_key_groups_merge(sh_package_key_groups *destination, const sh_package_key_groups *source);
 /* The keys a value's private bits name (empty without private bits). */
 void sh_package_key_decode(const sh_package_key_groups *groups, uint32_t value, sh_package_key_set *out);
 /* The one code a serving generation gives a set: the key itself, a union of

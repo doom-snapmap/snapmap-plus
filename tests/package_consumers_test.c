@@ -8,6 +8,16 @@ static int keep(void *context, const char *family, const char *name)
 { (void)family; return context ? !strcmp(context, name) : -1; }
 int main(void)
 {
+    sh_package_consumer_target requests[] = {
+        {"request/transsortatlas/textures/fx/beam", "transsortatlas", "smp/atlas-red"},
+        {"request/image/textures/fx/beam", "image", "generated/image/smp/fallback.bimage"}
+    };
+    sh_package_consumer material = {"material", "smp/red", requests, 2};
+    assert(!strcmp(sh_package_consumer_request(&material, "transSortAtlas", "Textures\\FX\\Beam"), "smp/atlas-red"));
+    assert(!strcmp(sh_package_consumer_request(&material, "image", "/textures/fx/beam"), requests[1].name));
+    assert(!sh_package_consumer_request(&material, "transsortatlas", "textures/fx/other"));
+    assert(!sh_package_consumer_request(&material, "material", "textures/fx/beam"));
+    assert(!sh_package_consumer_request(NULL, "image", "textures/fx/beam"));
     char error[512], owner_name[] = "owner";
     sh_package_consumer_target slots[] = {{"second", "native", "cycle"}, {"first", "image", "red"}, {"first", "image", "red"}};
     sh_package_consumer_target reordered[] = {slots[1], slots[0]};

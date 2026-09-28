@@ -262,6 +262,13 @@ static int original(void *context, const char *path, unsigned char **body, size_
     else if (!strcmp(path, "generated/decls/renderparm/color.decl")) text = "{ Vec 0 }";
     else if (!strcmp(path, "generated/decls/renderparm/tex.decl")) text = "{ Tex2D textures/default/body }";
     else if (!strcmp(path, "generated/decls/renderparm/label.decl")) text = "{ String }";
+    else if (!strcmp(path, "generated/decls/renderparm/transsortmap.decl") ||
+             !strcmp(path, "generated/decls/renderparm/transatlasmap.decl")) text = "{ String default/path }";
+    else if (!strcmp(path, "generated/transsortatlas/textures/atlas/beam.bimage") ||
+             !strcmp(path, "generated/image/textures/atlas/beam.bimage")) {
+        text = "atlas fixture bytes";
+        *length = strlen(text); *body = (unsigned char *)_strdup(text); return *body ? 1 : -1;
+    }
     else if (!strcmp(path, "generated/decls/renderparm/stageprogram.decl")) text = "{ Program }";
     else if (!strcmp(path, "generated/decls/renderparm/landpagefile.decl")) text = "{ String }";
     else if (!strcmp(path, "generated/decls/renderparm/buffer.decl")) text = "{ StructuredBuffer writable_cs boss_t }";
@@ -301,6 +308,17 @@ static int has(const sh_package_references *paths, const char *name)
     return 0;
 }
 static unsigned observed;
+typedef struct atlas_requests { unsigned atlas, image, other; int reject; } atlas_requests;
+static int atlas_request(void *context, const char *slot, const char *family, const char *name)
+{
+    atlas_requests *requests = context;
+    assert(!strncmp(slot, "request/", 8));
+    if (!strcmp(name, "textures/atlas/beam")) {
+        if (!strcmp(family, "transsortatlas")) requests->atlas++;
+        else { assert(!strcmp(family, "image")); requests->image++; }
+    } else requests->other++;
+    return !requests->reject;
+}
 typedef struct bind_fixture { char output[1024]; size_t count; int replace; } bind_fixture;
 static int bind_reference(void *context, const char *slot, const char *family,
     const char *name, const char **replacement)
@@ -333,6 +351,28 @@ static void test_bind(fixture *f, sh_package_compilation *compiled, sh_decl_regi
     char error[1024]; unsigned char *out; size_t length;
     reader = sh_package_source_reader_open(compiled, NULL, original, f, registry,
         (uintptr_t)f->reflection, error, sizeof(error)); assert(reader);
+    {
+        const char *text = "{\n transSortMap textures/absent/old.tga\n"
+            " transSortMap \"Textures\\Atlas\\Beam.TGA\"\n label textures/not/a/resource.tga\n }";
+        atlas_requests requests = {0};
+        assert(sh_package_source_material_requests(reader, (sh_decl_source){text, strlen(text)},
+            0, atlas_request, &requests, error, sizeof(error)));
+        assert(requests.atlas == 1 && requests.image == 1 && !requests.other);
+        text = "{ transAtlasMap textures/absent/beam.tga\n }";
+        requests = (atlas_requests){0};
+        assert(sh_package_source_material_requests(reader, (sh_decl_source){text, strlen(text)},
+            0, atlas_request, &requests, error, sizeof(error)) && !requests.other);
+        assert(sh_package_source_material_requests(reader, (sh_decl_source){text, strlen(text)},
+            1, atlas_request, &requests, error, sizeof(error)) && requests.other == 2);
+        text = "{ label arbitrary path.tga\n }";
+        requests = (atlas_requests){0};
+        assert(sh_package_source_material_requests(reader, (sh_decl_source){text, strlen(text)},
+            1, atlas_request, &requests, error, sizeof(error)) && !requests.other && !requests.atlas && !requests.image);
+        text = "{ transAtlasMap textures/atlas/beam.tga\n }";
+        requests.reject = 1;
+        assert(!sh_package_source_material_requests(reader, (sh_decl_source){text, strlen(text)},
+            0, atlas_request, &requests, error, sizeof(error)));
+    }
     {
         const char *repeated = "{ class = \"Entity\"; \"Entity\" \"\" edit = {"
             " target = \"map-child\"; target = \"root\"; } }";
@@ -704,6 +744,66 @@ static int link_original(void *context, const char *path, unsigned char **body, 
     }
     int status = original(f->native, path, body, length);
     return status == 2 && !f->campaign ? 1 : status;
+}
+static int link_original_binding(void *context, size_t scope, const char *family, const char *name,
+    unsigned char semantics[32], char *error, size_t capacity);
+static void test_atlas_sources(fixture *native, sh_decl_registry_source registry)
+{
+    const char *material = "{ transAtlasMap \"textures/atlas/private.tga\"\n }";
+    sh_compiled_resource files[3][2] = {0}; sh_package_compilation compiled[3] = {0};
+    const sh_package_compilation *scopes[] = {compiled, compiled + 1, compiled + 2};
+    source_link_fixture f = {0}; f.native = native; f.certificate = 1;
+    sh_package_source_link_native admission = {0}; admission.context = &f; admission.semantics = link_original_binding;
+    sh_package_sources inventory = {0}; sh_package_link_output out = {0}; char error[1024];
+    for (size_t i = 0; i < 3; i++) {
+        files[i][0].engine_path = "generated/decls/material/atlas-fixture.decl";
+        files[i][0].type = "material"; files[i][0].name = "atlas-fixture";
+        files[i][0].body = (unsigned char *)material; files[i][0].body_length = strlen(material);
+        files[i][1].engine_path = "generated/transsortatlas/textures/atlas/private.bimage";
+        files[i][1].body = (unsigned char *)(i == 1 ? "green atlas" : "red atlas");
+        files[i][1].body_length = strlen((const char *)files[i][1].body);
+        files[i][0].source = files[i][1].source = SIZE_MAX;
+        compiled[i].resources = files[i]; compiled[i].resource_count = 2;
+    }
+    sh_package_source_link *source = sh_package_source_link_open(scopes, 3, NULL,
+        link_original, &f, registry, (uintptr_t)native->reflection, &admission, error, sizeof(error));
+    if (!source) fprintf(stderr, "atlas sources: %s\n", error);
+    assert(source); f.inputs = sh_package_source_link_inputs(source);
+    sh_package_link_adapter names = {(void *)f.inputs, NULL, NULL, sh_package_native_names_assign};
+    int ok = sh_package_source_link_compile(source, &inventory, &names, NULL, NULL, &out, error, sizeof(error));
+    if (!ok) fprintf(stderr, "atlas compile: %s\n", error);
+    assert(ok);
+    size_t material_class[3], atlas_class[3], image_class[3];
+    for (size_t i = 0; i < 3; i++) {
+        size_t root = sh_package_link_inputs_find(f.inputs, i, "material", "atlas-fixture");
+        size_t atlas = sh_package_link_inputs_find(f.inputs, i, "transsortatlas", "textures/atlas/private");
+        size_t image = sh_package_link_inputs_find(f.inputs, i, "image", "generated/transsortatlas/textures/atlas/private.bimage");
+        assert(root != SIZE_MAX && atlas != SIZE_MAX && f.inputs->units[root].implicit_count == 2);
+        assert(image != SIZE_MAX);
+        material_class[i] = out.classes.nodes[root]; atlas_class[i] = out.classes.nodes[atlas];
+        image_class[i] = out.classes.nodes[image];
+        assert(!memcmp(files[i][0].body, material, strlen(material)));
+    }
+    assert(material_class[0] == material_class[2] && material_class[0] != material_class[1]);
+    assert(atlas_class[0] == atlas_class[2] && atlas_class[0] != atlas_class[1]);
+    assert(image_class[0] == image_class[2] && image_class[0] != image_class[1]);
+    assert(out.implicit_count == 4); /* Two deduped materials, each atlas plus fallback image. */
+    for (size_t i = 0; i < out.compiled->resource_count; i++) {
+        const sh_compiled_resource *file = out.compiled->resources + i;
+        if (file->type && !strcmp(file->type, "material"))
+            assert(file->body_length == strlen(material) && !memcmp(file->body, material, strlen(material)));
+    }
+    for (size_t i = 0; i < out.implicit_count; i++) {
+        const sh_package_link_implicit_binding *request = out.implicit + i;
+        assert(!strncmp(request->slot, "request/", 8));
+        if (strstr(request->slot, "request/transsortatlas/"))
+            assert(request->target == (request->owner == material_class[0] ? atlas_class[0] : atlas_class[1]));
+        else {
+            assert(!strcmp(request->slot, "request/image/textures/atlas/private"));
+            assert(request->target == (request->owner == material_class[0] ? image_class[0] : image_class[1]));
+        }
+    }
+    sh_package_link_output_free(&out); sh_package_source_link_close(source);
 }
 /* Synthetic aliases exercise the production readers/linker, not live native
  * alias admission. Runtime ABI admission requires the engine adapter. */
@@ -3508,9 +3608,8 @@ static const char *inspector_key(const sh_package_compilation *compiled, const c
     return NULL;
 }
 /* The key a package's spawner requests beside IMP, by authored path. */
-static const char *spawner_key(const sh_package_compilation *compiled, const char *package)
+static uint32_t spawner_request(const sh_package_compilation *compiled, const char *package)
 {
-    static char value[64];
     char authored[256];
     snprintf(authored, sizeof(authored), "generated/decls/entitydef/%s_spawner.decl", package);
     for (size_t i = 0; i < compiled->resource_count; i++) {
@@ -3519,11 +3618,16 @@ static const char *spawner_key(const sh_package_compilation *compiled, const cha
         /* The spawner requests IMP with the key, as one number. */
         const char *at = strstr((const char *)file->body, "spawnType = \"");
         assert(at);
-        unsigned long requested = strtoul(at + strlen("spawnType = \""), NULL, 10);
-        assert(requested & 4ul);
-        snprintf(value, sizeof(value), "%lu", requested & ~4ul); return value;
+        return (uint32_t)strtoul(at + strlen("spawnType = \""), NULL, 10);
     }
-    return NULL;
+    assert(0); return 0;
+}
+static const char *spawner_key(const sh_package_compilation *compiled, const char *package)
+{
+    static char value[64];
+    uint32_t requested = spawner_request(compiled, package);
+    assert(requested & 4u);
+    snprintf(value, sizeof(value), "%u", requested & ~4u); return value;
 }
 /* One conductor list's row under one key: the named field's value, or NULL
  * (also NULL when two rows carry that key). */
@@ -3713,6 +3817,7 @@ static size_t conductor_rows(const sh_compiled_resource *conductor, const char *
     for (const sh_decl_node *item = list ? list->children : NULL; item; item = item->next) {
         if (!item->compound) continue;
         char type[96];
+        if (count >= capacity) fprintf(stderr, "conductor rows exceed fixture storage (%zu): %.4096s\n", capacity, conductor->body);
         assert(count < capacity);
         snprintf(type, sizeof(type), "%s", node_value(sh_decl_tree_member(item, "aiType")));
         snprintf(rows[count++], 96, "%s=%s", type, node_value(sh_decl_tree_member(item, field)));
@@ -3746,6 +3851,23 @@ static const char *authored_name(const sh_package_compilation *compiled, const c
     for (size_t i = 0; i < compiled->resource_count; i++) {
         const sh_compiled_resource *file = compiled->resources + i;
         if (!strcmp(file->original_path ? file->original_path : file->engine_path, authored)) return file->name;
+    }
+    return NULL;
+}
+static const char *scoped_entity_name(const sh_package_library *library, const sh_package_sources *sources,
+    const char *package, const char *original)
+{
+    for (size_t owner = 0; owner < sources->package_count; owner++) {
+        if (strcmp(sources->packages[owner].name, package)) continue;
+        const unsigned char *tree = sh_package_source_tree(sources, owner);
+        for (size_t i = 0; i < library->bindings.binding_count; i++) {
+            const sh_package_provenance_binding *binding = library->bindings.bindings + i;
+            if (strcmp(binding->family, "entitydef") || strcmp(binding->original, original)) continue;
+            for (size_t j = 0; j < binding->context_count; j++) {
+                const sh_package_provenance_context *context = library->bindings.contexts + binding->contexts[j];
+                if (context->tree_count == 1 && !memcmp(context->trees[0], tree, 32)) return binding->name;
+            }
+        }
     }
     return NULL;
 }
@@ -4153,14 +4275,31 @@ static void test_registration_mixed_lists(void)
         }
         assert(seen == 1);
     }
-    assert(count == 5 + 3);
+    /* Fire replaces imp's first registration with fire_imp. Its remaining
+     * imp therefore classifies as T4, not the stock IMP. Preserve those two
+     * remaining rows under a separate binding even though the AI file itself
+     * is unchanged; the other packages still share the native stock imp. */
+    const char *fire_imp = scoped_entity_name(&library, sources, "fire", "imp");
+    assert(fire_imp && strcmp(fire_imp, "imp"));
+    size_t fire_rows = 0;
+    for (size_t i = 0; i < count; i++) {
+        const char *equal = strchr(rows[i], '=');
+        if (!equal || strcmp(equal + 1, fire_imp)) continue;
+        uint32_t mask = (uint32_t)strtoul(rows[i], NULL, 10);
+        assert((mask & SH_PACKAGE_KEY_PRIVATE) && (mask & (4u | 16u | 64u)) == (fire_rows ? 64u : 16u));
+        fire_rows++;
+    }
+    assert(count == 5 + 3 + 2 && fire_rows == 2);
     /* Modifiers apply first-match: the stock rows keep their stock order and
      * each package modifier appears once. */
     char mods[16][96];
     size_t mod_count = conductor_rows(conductor, "globalAIMods", "healthMod", mods, 16);
     size_t imp = row_index(mods, mod_count, "IMP=stock-imp"), t3 = row_index(mods, mod_count, "T3=stock-t3"),
         t4 = row_index(mods, mod_count, "T4=stock-t4");
-    assert(mod_count == 3 + 2 && imp < t3 && t3 < t4 && t4 != SIZE_MAX);
+    /* Classification changes retain their native modifier even when that
+     * modifier's bytes match stock; it cannot fall through to a peer later. */
+    if (mod_count != 7) for (size_t r = 0; r < mod_count; r++) fprintf(stderr, "mixed modifier %s\n", mods[r]);
+    assert(mod_count == 7 && imp < t3 && t3 < t4 && t4 != SIZE_MAX);
     for (size_t i = 0; i < 2; i++) {
         size_t seen = 0;
         snprintf(row, sizeof(row), "=%s-mod", i ? "keys_boss" : "cyber_boss");
@@ -4205,13 +4344,45 @@ static size_t first_package(const sh_package_sources *sources, const char *name)
         if (!strcmp(sources->packages[i].name, name)) return i;
     return SIZE_MAX;
 }
-/* Two valid packages order a T5 and a T6 modifier row oppositely. An AI takes
- * the first modifier row meeting its type, so their order is observed only
- * through a registered type meeting both: with none, both orders are one
- * behavior and compose silently. Once the conductor registers AI typed T5 and
- * T6 together, the earlier package in stable source order keeps its order and
- * the other's is accounted. Nobody is excluded, and discovery order changes
- * nothing. */
+typedef struct key_row { uint32_t mask; char field[96]; } key_row;
+static size_t key_rows(fixture *, const sh_compiled_resource *, const char *, const char *, key_row *, size_t);
+static const sh_package_key_groups *g_key_groups;
+static const char *modifier_for(const key_row *, size_t, uint32_t);
+static uint32_t scoped_modifier(fixture *f, const sh_package_library *library, const sh_package_sources *sources,
+    const char *package, const char *original, const char *expected)
+{
+    const char *ai = scoped_entity_name(library, sources, package, original);
+    const sh_compiled_resource *conductor = named_resource(library->compiled, "entitydef", "conductor");
+    key_row rows[32], mods[32];
+    if (!ai || !conductor) {
+        fprintf(stderr, "modifier lookup %s/%s: ai=%s conductor=%p\n", package, original, ai ? ai : "(none)", (void *)conductor);
+        for (size_t i = 0; i < library->compiled->resource_count; i++) {
+            const sh_compiled_resource *r = library->compiled->resources + i;
+            if (r->type && !strcmp(r->type, "entitydef")) fprintf(stderr, "%s original=%s\n", r->name,
+                r->original_path ? r->original_path : r->engine_path);
+        }
+    }
+    assert(ai && conductor);
+    size_t count = key_rows(f, conductor, "aiTypeList", "entityDef", rows, 32);
+    size_t mod_count = key_rows(f, conductor, "globalAIMods", "healthMod", mods, 32);
+    g_key_groups = library->key_groups;
+    for (size_t r = 0; r < count; r++) if (!strcmp(rows[r].field, ai)) {
+        const char *actual = modifier_for(mods, mod_count, rows[r].mask);
+        if (!actual || strcmp(actual, expected)) fprintf(stderr, "%s %s: expected %s, got %s\n",
+            package, original, expected, actual ? actual : "no modifier");
+        if (!actual || strcmp(actual, expected)) {
+            fprintf(stderr, "selected %s type %u\n", ai, rows[r].mask);
+            for (size_t m = 0; m < mod_count; m++) fprintf(stderr, "modifier %u=%s\n", mods[m].mask, mods[m].field);
+            fprintf(stderr, "conductor %.*s\n", (int)conductor->body_length, conductor->body);
+        }
+        assert(actual && !strcmp(actual, expected));
+        return rows[r].mask;
+    }
+    assert(!"scoped AI has no registration"); return 0;
+}
+/* Opposite modifier orders are equivalent until an AI's first classification
+ * meets both rows. Then each package gets its own classification and native
+ * first modifier, independently of discovery order. */
 static void test_registration_modifier_order(void)
 {
     static const char *separate = "{ class = \"Entity\"; edit = { aiTypeList = { num = 1; "
@@ -4245,15 +4416,18 @@ static void test_registration_modifier_order(void)
         const sh_compiled_resource *conductor = named_resource(library.compiled, "entitydef", "conductor");
         size_t count = conductor ? conductor_rows(conductor, "globalAIMods", "healthMod", mods, 8) : 0;
         size_t five = row_index(mods, count, "T5=five"), six = row_index(mods, count, "T6=six");
-        assert(count == 3 && row_index(mods, count, "IMP=stock-imp") == 0 && five != SIZE_MAX && six != SIZE_MAX);
+        assert(row_index(mods, count, "IMP=stock-imp") != SIZE_MAX);
+        if (!(round & 1)) assert(five != SIZE_MAX && six != SIZE_MAX);
         const char *notes = library.coverage ? library.coverage : "";
         if (round & 1) {
-            int a_kept = strstr(notes, "so order-a's applies") != NULL;
-            if (!strstr(notes, "first global AI modifier for type 96")) fprintf(stderr, "modifier order notes: %s\n", notes);
-            assert(strstr(notes, a_kept ? "order-b: its first global AI modifier for type 96 differs from order-a's" :
-                "order-a: its first global AI modifier for type 96 differs from order-b's"));
-            assert(a_kept ? five < six : six < five);
-        } else assert(!strstr(notes, "global AI modifier"));
+            const char *a_package = round < 2 ? "order-a" : "zz-order-a";
+            uint32_t a = scoped_modifier(f, &library, sources, a_package, "t3", "five");
+            uint32_t b = scoped_modifier(f, &library, sources, "order-b", "t3", "six");
+            assert(count == 5 && a != b);
+            assert(strcmp(scoped_entity_name(&library, sources, a_package, "t3"),
+                scoped_entity_name(&library, sources, "order-b", "t3")) != 0);
+        } else assert(count == 3);
+        if (!(round & 1)) assert(!strstr(notes, "global AI modifier"));
         if (round < 2) memcpy(kept[round & 1], mods, sizeof(mods));
         else for (size_t r = 0; r < count; r++) assert(!strcmp(kept[round & 1][r], mods[r]));
         sh_package_library_free(&library); sh_package_sources_free(sources);
@@ -4266,8 +4440,8 @@ static void test_registration_modifier_order(void)
 /* Modifier winners beside every other kind of package. The stock conductor
  * registers IMP and T5 AI and has an IMP and a T5 modifier. clash-a and
  * clash-b each list a new row meeting T5 ahead of the stock T5 row, so each
- * changes which row a T5 AI takes: the earlier in stable source order keeps
- * its row first and the other's change is accounted. shade-a and shade-b
+ * changes which row a T5 AI takes: each gets a distinct classification with
+ * its own first modifier. Shared native rows still use stable ordering. shade-a and shade-b
  * order two rows meeting T5 oppositely behind the stock T5 row, which wins
  * either way, and calm-a and calm-b order rows no registered type meets: both
  * pairs compose silently. Three packages register private AI. A malformed
@@ -4345,17 +4519,18 @@ static void test_registration_first_match(void)
             assert(seen == 1);
         }
         const char *notes = library.coverage ? library.coverage : "";
-        int a_kept = strstr(notes, "so clash-a's applies") != NULL;
-        size_t winner = row_index(mods, mod_count, a_kept ? "T5 T6=six" : "T5 T7=seven"),
-            other = row_index(mods, mod_count, a_kept ? "T5 T7=seven" : "T5 T6=six"),
-            stock = row_index(mods, mod_count, "T5=stock-five");
-        if (!strstr(notes, "first global AI modifier for type 32")) fprintf(stderr, "first-match notes: %s\n", notes);
-        assert(strstr(notes, a_kept ? "clash-b: its first global AI modifier for type 32 differs from clash-a's" :
-            "clash-a: its first global AI modifier for type 32 differs from clash-b's"));
+        size_t stock = row_index(mods, mod_count, "T5=stock-five");
+        assert(!strstr(notes, "first global AI modifier"));
         assert(!strstr(notes, "shade-") && !strstr(notes, "calm-"));
-        assert(count == 5 && mod_count == 8 && row_index(mods, mod_count, "IMP=stock-imp") == 0);
-        assert(winner < other && winner < stock && winner < row_index(mods, mod_count, "T5 T9=nine") &&
-            winner < row_index(mods, mod_count, "T5 T10=ten") && row_index(mods, mod_count, "T11=eleven") != SIZE_MAX &&
+        uint32_t a_type = scoped_modifier(f, &library, sources, round ? "zz-clash-a" : "clash-a", "t3", "six");
+        uint32_t b_type = scoped_modifier(f, &library, sources, round ? "zy-clash-b" : "clash-b", "t3", "seven");
+        if (count != 7 || mod_count != 10) for (size_t r = 0; r < mod_count; r++) fprintf(stderr, "first-match row %s\n", mods[r]);
+        assert(count == 7 && mod_count == 10 && a_type != b_type && row_index(mods, mod_count, "IMP=stock-imp") != SIZE_MAX);
+        key_row native_mods[16];
+        size_t native_count = key_rows(f, conductor, "globalAIMods", "healthMod", native_mods, 16);
+        assert(!strcmp(modifier_for(native_mods, native_count, 32u), "stock-five"));
+        assert(stock < row_index(mods, mod_count, "T5 T9=nine") &&
+            stock < row_index(mods, mod_count, "T5 T10=ten") && row_index(mods, mod_count, "T11=eleven") != SIZE_MAX &&
             row_index(mods, mod_count, "T12=twelve") != SIZE_MAX);
         if (!round) { memcpy(kept, mods, sizeof(mods)); kept_count = mod_count; }
         else for (size_t r = 0; r < kept_count; r++) assert(!strcmp(kept[r], mods[r]));
@@ -4388,8 +4563,8 @@ static unsigned long first_bits(const char *row)
  * packages list imp under T8, T9 and T10 behind the stock IMP row in a cyclic
  * presentation order, so the composer drops layout preferences: each
  * definition's first registration must survive that. Then reg-c lists T7 first
- * as well: the earlier of reg-a and reg-c in stable source order keeps t3's
- * type and the other's change is accounted. Relocation gives each package's
+ * as well: reg-a and reg-c get distinct t3 definitions, each preserving its
+ * own first type. Relocation gives each package's
  * own rows a private key beside their named bits, so types compare by the
  * named bit. */
 static void test_registration_first_registration(void)
@@ -4430,31 +4605,31 @@ static void test_registration_first_registration(void)
             if (tail && !strcmp(tail, "=imp")) first_imp = r - 1;
         }
         const char *notes = library.coverage ? library.coverage : "";
-        assert(count == 7 && first_imp != SIZE_MAX && !strcmp(rows[first_imp], "IMP=imp") && first_t3 != SIZE_MAX);
-        if (!round) {
-            assert((first_bits(rows[first_t3]) & 0x1ff) == 64 && !strstr(notes, "first registration"));
-        } else {
-            int a_kept = strstr(notes, "so reg-a's applies") != NULL;
-            if (!strstr(notes, "first registration of t3")) fprintf(stderr, "first registration notes: %s\n", notes);
-            assert((first_bits(rows[first_t3]) & 0x1ff) == (a_kept ? 64ul : 128ul));
-            assert(strstr(notes, a_kept ? "reg-c: its first registration of t3 differs from reg-a's" :
-                "reg-a: its first registration of t3 differs from reg-c's"));
-            assert(!strstr(notes, "smp-contribution/"));
+        assert(first_imp != SIZE_MAX && !strcmp(rows[first_imp], "IMP=imp") && first_t3 != SIZE_MAX);
+        assert((first_bits(rows[first_t3]) & 0x1ff) == 32);
+        const char *a = scoped_entity_name(&library, sources, "reg-a", "t3");
+        const char *c = round ? scoped_entity_name(&library, sources, "reg-c", "t3") : NULL;
+        assert(a && strcmp(a, "t3") && (!round || (c && strcmp(c, "t3") && strcmp(a, c))));
+        for (size_t p = 0; p < (round ? 2u : 1u); p++) {
+            const char *name = p ? c : a;
+            size_t first = SIZE_MAX, seen = 0;
+            for (size_t r = 0; r < count; r++) {
+                const char *tail = strrchr(rows[r], '=');
+                if (tail && !strcmp(tail + 1, name)) { if (!seen) first = r; seen++; }
+            }
+            assert(seen == 2 && (first_bits(rows[first]) & 0x1ff) == (p ? 128u : 64u));
         }
+        assert(!strstr(notes, "first registration"));
         sh_package_library_free(&library); sh_package_sources_free(sources);
     }
     registration_conductor = NULL;
     cleanup(); assert(!failures);
     while (f->count) free(f->regions[--f->count].address);
 }
-/* Individually valid packages the product cannot compose together, against
- * a malformed one. Two packages order the same two encounters oppositely in a
- * whitelist inspector (a strict list) beside three adding their own. That is
- * product coverage, not evidence against either owner: the candidate fails
- * naming both, leaves nothing unserved and the caller keeps its previous
- * generation; an environment failure while naming them guesses nobody. A
- * malformed package is rejected on its own evidence and the joint gap stays;
- * once the user removes one of the two, everything else serves. */
+/* A whitelist is membership, not behavioral order. Opposing orders of the
+ * same encounters compose with three peers into one deduplicated union, and
+ * every healthy owner remains represented. A malformed peer is rejected on
+ * its own evidence; removing that peer leaves the whole healthy union. */
 static void test_editor_membership_order(fixture *f, sh_decl_registry_source registry)
 {
     static const char *const names[] = {"clash-a", "clash-b", "peer-1", "peer-2", "peer-3"};
@@ -4583,7 +4758,6 @@ static void test_registration_capacity(void)
 }
 
 /* The spawn-type bits of every row of one conductor list, with its field. */
-typedef struct key_row { uint32_t mask; char field[96]; } key_row;
 static size_t key_rows(fixture *f, const sh_compiled_resource *conductor, const char *list_name, const char *field,
     key_row *rows, size_t capacity)
 {
@@ -4603,7 +4777,6 @@ static size_t key_rows(fixture *f, const sh_compiled_resource *conductor, const 
     return count;
 }
 /* The group codes of the library under test (package_keys.h). */
-static const sh_package_key_groups *g_key_groups;
 /* The AI a request can select under the native private-key contract. */
 static size_t selected(const key_row *rows, size_t count, uint32_t request, const char *out[], size_t capacity)
 {
@@ -4716,7 +4889,7 @@ static void test_registration_private_variants(void)
             if (!strcmp(rows[i].field, ice_ai)) ice_type = rows[i].mask;
         }
         assert((fire_type & 4u) && (ice_type & 4u) && (fire_type & 131072u));
-        assert(mod_count == 3 && !strcmp(modifier_for(mods, mod_count, fire_type), "fire"));
+        assert(mod_count == 5 && !strcmp(modifier_for(mods, mod_count, fire_type), "fire"));
         assert(!strcmp(modifier_for(mods, mod_count, ice_type), "stock") && !strcmp(modifier_for(mods, mod_count, 4u | 131072u), "stock"));
         /* A filter choice classifies: IMP stays every imp, variants included. */
         const char *choice = inspector_key(library.compiled, "fire");
@@ -4843,6 +5016,241 @@ static void test_registration_stock_inspector(void)
  * one authored key each get their own: nine single-bit keys, then marked
  * multi-bit keys. Every package's own request selects exactly its AI beside
  * the stock row it names, its modifier row stays its own, and nothing shares. */
+static int registration_class_derives(void *context, const char *child, const char *parent)
+{ return sh_decl_native_schema_class_derives(context, child, parent); }
+static int discovered_registration_original(void *context, const char *path, unsigned char **body, size_t *length)
+{
+    const char *text = !strcmp(path, "generated/decls/entitydef/conductor.decl") ?
+        "{ inherit = \"conductor-parent\"; edit = { globalAIMods = { item[1] = { damageMod = \"2\"; } } } }" :
+        !strcmp(path, "generated/decls/entitydef/conductor-parent.decl") ?
+        "{ class = \"Entity\"; edit = { aiTypeList = { num = 3; item[1] = { aiType = \"524288\"; entityDef = \"inherited-ai\"; } } "
+        "globalAIMods = { num = 2; item[1] = { aiType = \"524288\"; healthMod = \"stock\"; } } } }" :
+        !strcmp(path, "generated/decls/entitydef/inherited-ai.decl") ? "{ class = \"Entity\"; edit = {} }" : NULL;
+    if (!text) return registration_original(context, path, body, length);
+    *length = strlen(text); *body = (unsigned char *)_strdup(text); return *body ? 1 : -1;
+}
+/* The conductor is found through a dependency; only its parent is supplied.
+ * Preparing explicit package files alone misses this inherited native table. */
+static void test_registration_discovered_inheritance(void)
+{
+    fixture storage; fixture *f = &storage; setup(f); conductor_reflection(f);
+    sh_decl_registry_source registry = {f, read_memory, (uintptr_t)f->registry, NULL};
+    source_link_fixture originals = {f};
+    sh_package_compile_environment env = {0}; sh_package_library_native native = {0};
+    char error[1024], path[256], text[1024];
+    registration_root("registration-discovered-inheritance");
+    env.baseline = discovered_registration_original; env.baseline_context = &originals;
+    native.private_keys = 1;
+    const char *names[] = {"red", "blue"};
+    for (size_t i = 0; i < 2; i++) {
+        snprintf(path, sizeof(path), "overrides/%s/package.json", names[i]);
+        snprintf(text, sizeof(text), "{\"id\":\"local.%s\",\"name\":\"%s\"}", names[i], names[i]); create(path, text);
+        snprintf(path, sizeof(path), "overrides/%s/assets/generated/decls/entitydef/conductor-parent.decl", names[i]);
+        snprintf(text, sizeof(text), "{ class = \"Entity\"; edit = { aiTypeList = { num = 3; "
+            "item[1] = { aiType = \"524288\"; entityDef = \"inherited-ai\"; } } "
+            "globalAIMods = { num = 2; item[1] = { aiType = \"524288\"; healthMod = \"%s\"; } } } }", names[i]);
+        create(path, text);
+        snprintf(path, sizeof(path), "overrides/%s/assets/generated/decls/entitydef/registration-user.decl", names[i]);
+        create(path, "{ class = \"Entity\"; edit = { target = \"conductor\"; } }");
+    }
+    for (int round = 0; round < 2; round++) {
+        if (round) rename_package("red", "zz-red");
+        sh_package_sources *sources = sh_package_sources_scan(root, error, sizeof(error)); assert(sources);
+        sh_package_library library = {0};
+        int ok = sh_package_library_compile(sources, &env, NULL, discovered_registration_original, &originals,
+            registry, (uintptr_t)f->reflection, &native, &library, error, sizeof(error));
+        if (!ok) fprintf(stderr, "discovered inherited registrations: %s\n", error);
+        assert(ok);
+        uint32_t masks[2] = {0};
+        g_key_groups = library.key_groups;
+        for (size_t color = 0; color < 2; color++) {
+            const char *package = color ? "blue" : round ? "zz-red" : "red";
+            const char *ai = scoped_entity_name(&library, sources, package, "inherited-ai");
+            const char *table_name = scoped_entity_name(&library, sources, package, "conductor");
+            const sh_compiled_resource *table = table_name ? named_resource(library.compiled, "entitydef", table_name) : NULL;
+            key_row rows[32], mods[32], damage[32];
+            assert(ai && table);
+            size_t count = key_rows(f, table, "aiTypeList", "entityDef", rows, 32);
+            size_t mod_count = key_rows(f, table, "globalAIMods", "healthMod", mods, 32);
+            size_t damage_count = key_rows(f, table, "globalAIMods", "damageMod", damage, 32);
+            for (size_t r = 0; r < count; r++) if (!strcmp(rows[r].field, ai)) masks[color] = rows[r].mask;
+            assert(masks[color]);
+            const char *health = modifier_for(mods, mod_count, masks[color]);
+            const char *multiplier = modifier_for(damage, damage_count, masks[color]);
+            if (!health || strcmp(health, names[color])) fprintf(stderr, "discovered %s health=%s damage=%s mask=%u table=%.*s\n",
+                package, health ? health : "absent", multiplier ? multiplier : "absent", masks[color], (int)table->body_length, table->body);
+            assert(health && !strcmp(health, names[color]));
+            assert(multiplier && !strcmp(multiplier, "2"));
+        }
+        assert(masks[0] != masks[1]);
+        sh_package_library_free(&library); sh_package_sources_free(sources);
+    }
+    rename_package("zz-red", "red");
+    cleanup(); assert(!failures);
+    while (f->count) free(f->regions[--f->count].address);
+}
+static void test_registration_inherited_lists(void)
+{
+    fixture storage; fixture *f = &storage; setup(f); conductor_reflection(f);
+    sh_decl_registry_source registry = {f, read_memory, (uintptr_t)f->registry, NULL};
+    source_link_fixture originals = {f};
+    sh_package_compile_environment env = {0};
+    sh_package_library_native native = {0};
+    char error[1024], path[256], text[1024];
+    registration_root("registration-inherited-lists");
+    env.baseline = registration_original; env.baseline_context = &originals;
+    native.private_keys = 1;
+    const char *names[] = {"red", "blue"};
+    for (size_t i = 0; i < 2; i++) {
+        snprintf(path, sizeof(path), "overrides/%s/package.json", names[i]);
+        snprintf(text, sizeof(text), "{\"id\":\"local.%s\",\"name\":\"%s\"}", names[i], names[i]); create(path, text);
+        snprintf(path, sizeof(path), "overrides/%s/assets/generated/decls/entitydef/conductor-parent.decl", names[i]);
+        create(path, "{ class = \"Entity\"; edit = { aiTypeList = { num = 3; "
+            "item[1] = { aiType = \"524288\"; entityDef = \"inherited-ai\"; } } "
+            "globalAIMods = { num = 2; item[1] = { aiType = \"524288\"; healthMod = \"parent\"; } } } }");
+        snprintf(path, sizeof(path), "overrides/%s/assets/generated/decls/entitydef/conductor.decl", names[i]);
+        snprintf(text, sizeof(text), "{ inherit = \"conductor-parent\"; edit = { globalAIMods = { "
+            "item[1] = { healthMod = \"%s\"; } } } }", names[i]); create(path, text);
+        snprintf(path, sizeof(path), "overrides/%s/assets/generated/decls/entitydef/inherited-ai.decl", names[i]);
+        create(path, "{ class = \"Entity\"; edit = { target = \"local-only\"; } }");
+    }
+    for (int round = 0; round < 2; round++) {
+        if (round) rename_package("red", "zz-red");
+        sh_package_sources *sources = sh_package_sources_scan(root, error, sizeof(error)); assert(sources);
+        sh_package_library library = {0};
+        if (!round) {
+            sh_decl_native_schema *schema = sh_decl_native_schema_open(
+                (sh_decl_native_source){f, read_memory, (uintptr_t)f->reflection},
+                (sh_decl_dependency_observer){0}, error, sizeof(error));
+            assert(schema);
+            for (int typed = 0; typed < 2; typed++) {
+                sh_package_scope scope = {0}; sh_package_compile_environment alone_env = env;
+                alone_env.independent_sources = 1;
+                alone_env.types = typed ? sh_decl_native_schema_view(schema) : NULL;
+                alone_env.class_derives = registration_class_derives; alone_env.type_context = schema;
+                assert(sh_package_scope_open(sources, 0, &scope, error, sizeof(error)));
+                sh_package_compilation *alone = sh_package_compile_with(&scope.sources, &alone_env, error, sizeof(error));
+                if (!alone) fprintf(stderr, "isolated native slots (typed %d): %s\n", typed, error);
+                assert(alone);
+                const sh_compiled_resource *raw = named_resource(alone, "entitydef", "conductor-parent");
+                assert(raw);
+                sh_decl_node *tree = sh_decl_tree_parse((sh_decl_source){(char *)raw->body, raw->body_length}, error, sizeof(error));
+                assert(tree);
+                const sh_decl_node *edit = sh_decl_tree_member(tree, "edit");
+                const sh_decl_node *rows = sh_decl_tree_member(edit, "globalAIMods");
+                assert(sh_decl_tree_member(rows, "item[1]") && !sh_decl_tree_member(rows, "item[0]"));
+                assert(!strcmp(sh_decl_tree_member(rows, "num")->value, "2"));
+                sh_decl_tree_free(tree);
+                sh_package_compilation_free(alone); sh_package_scope_close(&scope);
+            }
+            sh_decl_native_schema_close(schema);
+        }
+        int ok = sh_package_library_compile(sources, &env, NULL, registration_original, &originals, registry,
+            (uintptr_t)f->reflection, &native, &library, error, sizeof(error));
+        if (!ok) fprintf(stderr, "inherited registrations: %s\n", error);
+        assert(ok);
+        uint32_t red = scoped_modifier(f, &library, sources, round ? "zz-red" : "red", "inherited-ai", "red");
+        uint32_t blue = scoped_modifier(f, &library, sources, "blue", "inherited-ai", "blue");
+        assert(red != blue);
+        sh_package_library_free(&library); sh_package_sources_free(sources);
+    }
+    rename_package("zz-red", "red");
+    create("overrides/broken/package.json", "{\"id\":\"local.broken\",\"name\":\"broken\"}");
+    create("overrides/broken/assets/generated/decls/entitydef/broken.decl",
+        "{ inherit = \"conductor\"; edit = { aiTypeList = { num = 1; }");
+    sh_package_sources *sources = sh_package_sources_scan(root, error, sizeof(error)); assert(sources);
+    sh_package_library library = {0}; size_t invalid = SIZE_MAX, unserved = SIZE_MAX;
+    env.invalid_package = &invalid; env.unserved_package = &unserved;
+    int ok = sh_package_library_compile(sources, &env, NULL, registration_original, &originals, registry,
+        (uintptr_t)f->reflection, &native, &library, error, sizeof(error));
+    if (ok || invalid == SIZE_MAX) fprintf(stderr, "inherited malformed owner: invalid=%zu %s\n", invalid, error);
+    assert(!ok && invalid == first_package(sources, "broken") && unserved == SIZE_MAX);
+    sh_package_library_free(&library); sh_package_sources_free(sources);
+    create("overrides/broken/assets/generated/decls/entitydef/broken.decl",
+        "{ class = \"Entity\"; edit = { aiTypeList = { num = 1; item[1] = {} } } }");
+    sources = sh_package_sources_scan(root, error, sizeof(error)); assert(sources);
+    ok = sh_package_library_compile(sources, &env, NULL, registration_original, &originals, registry,
+        (uintptr_t)f->reflection, &native, &library, error, sizeof(error));
+    assert(!ok && invalid == first_package(sources, "broken") && unserved == SIZE_MAX);
+    sh_package_library_free(&library);
+    assert(sh_package_sources_remove(sources, invalid));
+    ok = sh_package_library_compile(sources, &env, NULL, registration_original, &originals, registry,
+        (uintptr_t)f->reflection, &native, &library, error, sizeof(error));
+    assert(ok && invalid == SIZE_MAX && unserved == SIZE_MAX);
+    scoped_modifier(f, &library, sources, "red", "inherited-ai", "red");
+    scoped_modifier(f, &library, sources, "blue", "inherited-ai", "blue");
+    sh_package_library_free(&library); sh_package_sources_free(sources);
+    create("overrides/broken/assets/generated/decls/entitydef/broken.decl",
+        "{ inherit = \"absent-registration-parent\"; edit = { } }");
+    sources = sh_package_sources_scan(root, error, sizeof(error)); assert(sources);
+    ok = sh_package_library_compile(sources, &env, NULL, registration_original, &originals, registry,
+        (uintptr_t)f->reflection, &native, &library, error, sizeof(error));
+    if (ok || unserved == SIZE_MAX) fprintf(stderr, "inherited missing owner: unserved=%zu %s\n", unserved, error);
+    assert(!ok && invalid == SIZE_MAX && unserved == first_package(sources, "broken"));
+    sh_package_library_free(&library);
+    assert(sh_package_sources_remove(sources, unserved));
+    ok = sh_package_library_compile(sources, &env, NULL, registration_original, &originals, registry,
+        (uintptr_t)f->reflection, &native, &library, error, sizeof(error));
+    assert(ok && invalid == SIZE_MAX && unserved == SIZE_MAX);
+    scoped_modifier(f, &library, sources, "red", "inherited-ai", "red");
+    scoped_modifier(f, &library, sources, "blue", "inherited-ai", "blue");
+    sh_package_library_free(&library); sh_package_sources_free(sources);
+    create("overrides/broken/assets/generated/decls/entitydef/broken.decl",
+        "{ inherit = \"parent-only\"; edit = { } }");
+    f->unreadable = "generated/decls/entitydef/parent-only.decl";
+    sources = sh_package_sources_scan(root, error, sizeof(error)); assert(sources);
+    ok = sh_package_library_compile(sources, &env, NULL, registration_original, &originals, registry,
+        (uintptr_t)f->reflection, &native, &library, error, sizeof(error));
+    assert(!ok && invalid == SIZE_MAX && unserved == SIZE_MAX);
+    f->unreadable = NULL;
+    sh_package_library_free(&library); sh_package_sources_free(sources);
+    cleanup(); assert(!failures);
+    while (f->count) free(f->regions[--f->count].address);
+}
+static void test_registration_named_modifier_scope(void)
+{
+    fixture storage; fixture *f = &storage; setup(f); conductor_reflection(f);
+    sh_decl_registry_source registry = {f, read_memory, (uintptr_t)f->registry, NULL};
+    source_link_fixture originals = {f};
+    sh_package_compile_environment env = {0}; sh_package_library_native native = {0};
+    char error[1024]; size_t unserved = SIZE_MAX, invalid = SIZE_MAX;
+    registration_root("registration-named-modifier-scope");
+    registration_conductor = "{ class = \"Entity\"; edit = { aiTypeList = { num = 1; "
+        "item[0] = { aiType = \"IMP\"; entityDef = \"imp\"; } } globalAIMods = { num = 1; "
+        "item[0] = { aiType = \"IMP\"; healthMod = \"stock\"; } } } }";
+    env.baseline = registration_original; env.baseline_context = &originals;
+    env.unserved_package = &unserved; env.invalid_package = &invalid; native.private_keys = 1;
+    for (size_t i = 0; i < 2; i++) {
+        const char *name = i ? "blue" : "red";
+        char path[256], text[1024];
+        snprintf(path, sizeof(path), "overrides/%s/package.json", name);
+        snprintf(text, sizeof(text), "{\"id\":\"local.%s\",\"name\":\"%s\"}", name, name); create(path, text);
+        snprintf(path, sizeof(path), "overrides/%s/assets/generated/decls/entitydef/conductor.decl", name);
+        snprintf(text, sizeof(text), "{ class = \"Entity\"; edit = { aiTypeList = { num = 2; "
+            "item[0] = { aiType = \"IMP\"; entityDef = \"imp\"; } "
+            "item[1] = { aiType = \"524292\"; entityDef = \"t3\"; } } globalAIMods = { num = 1; "
+            "item[0] = { aiType = \"IMP\"; healthMod = \"%s\"; } } } }", name); create(path, text);
+    }
+    for (int round = 0; round < 2; round++) {
+        if (round) rename_package("red", "zz-red");
+        sh_package_library library = {0};
+        sh_package_sources *sources = sh_package_sources_scan(root, error, sizeof(error)); assert(sources);
+        int ok = sh_package_library_compile(sources, &env, NULL, registration_original, &originals,
+            registry, (uintptr_t)f->reflection, &native, &library, error, sizeof(error));
+        if (!ok) fprintf(stderr, "named modifier scope: %s\n", error);
+        assert(ok && unserved == SIZE_MAX && invalid == SIZE_MAX);
+        uint32_t red = scoped_modifier(f, &library, sources, round ? "zz-red" : "red", "t3", "red");
+        uint32_t blue = scoped_modifier(f, &library, sources, "blue", "t3", "blue");
+        assert(red != blue);
+        const sh_compiled_resource *conductor = named_resource(library.compiled, "entitydef", "conductor");
+        key_row mods[32]; size_t count = key_rows(f, conductor, "globalAIMods", "healthMod", mods, 32);
+        assert(!strcmp(modifier_for(mods, count, 4u), "stock"));
+        sh_package_library_free(&library); sh_package_sources_free(sources);
+    }
+    rename_package("zz-red", "red");
+    registration_conductor = NULL; cleanup(); assert(!failures);
+    while (f->count) free(f->regions[--f->count].address);
+}
 static void test_registration_private_capacity(void)
 {
     fixture storage; fixture *f = &storage; setup(f); conductor_reflection(f);
@@ -4951,6 +5359,18 @@ static void historical_compile(fixture *f, const sh_package_provenance *keys, co
     assert(ok);
     sh_package_provenance_free(&contexts);
 }
+static uint32_t historical_key(const sh_package_library *library, uint32_t original)
+{
+    char key[16]; snprintf(key, sizeof(key), "%u", original);
+    for (size_t i = 0; i < library->bindings.binding_count; i++) {
+        const sh_package_provenance_binding *binding = library->bindings.bindings + i;
+        if (strcmp(binding->family, SH_PACKAGE_KEY_FAMILY) || strcmp(binding->original, key)) continue;
+        for (size_t c = 0; c < binding->context_count; c++)
+            if (library->bindings.contexts[binding->contexts[c]].mode == SH_PACKAGE_CONTEXT_COMPOSED)
+                return (uint32_t)strtoul(binding->name, NULL, 10);
+    }
+    assert(0); return 0;
+}
 static void test_registration_historical_keys(void)
 {
     fixture storage; fixture *f = &storage; setup(f); conductor_reflection(f);
@@ -4979,19 +5399,24 @@ static void test_registration_historical_keys(void)
     registration_package("zlegacy", "524288"); registration_package("amodern", "524288");
     const char *const modern[] = {"amodern"};
     historical_compile(f, NULL, "zlegacy", modern, 1, &sources, &first);
-    uint32_t kept = (uint32_t)strtoul(spawner_key(first.compiled, "zlegacy"), NULL, 10);
+    uint32_t kept = historical_key(&first, k19);
     uint32_t moved = (uint32_t)strtoul(spawner_key(first.compiled, "amodern"), NULL, 10);
-    assert(kept == k19 && moved != k19 && sh_package_key_private_valid(moved) && !(moved & k19));
-    assert(first.key_groups && first.key_groups->historical == k19);
+    assert(sh_package_key_private_valid(kept) && sh_package_key_private_valid(moved) && kept != moved);
+    uint32_t request = spawner_request(first.compiled, "zlegacy");
+    assert(sh_package_key_request_matches(first.key_groups, request, kept));
+    assert(sh_package_key_request_matches(first.key_groups, request, historical_key(&first, imp) | imp));
+    assert(!sh_package_key_request_matches(first.key_groups, request, moved));
+    assert(!first.key_groups || !first.key_groups->historical);
     /* The installed library, compiled natively, may give the bit to the modern
      * package: a map context holding it historically moves that pin. */
     pinned_compile(f, NULL, &installed, &library);
     assert(strtoul(spawner_key(library.compiled, "amodern"), NULL, 10) == k19);
     assert(!library.key_groups || !library.key_groups->historical);
     historical_compile(f, &library.bindings, "zlegacy", modern, 1, &more, &second);
-    kept = (uint32_t)strtoul(spawner_key(second.compiled, "zlegacy"), NULL, 10);
+    kept = historical_key(&second, k19);
     moved = (uint32_t)strtoul(spawner_key(second.compiled, "amodern"), NULL, 10);
-    assert(kept == k19 && moved != k19 && !(moved & k19) && second.key_groups && second.key_groups->historical == k19);
+    assert(kept != moved && moved == k19 && sh_package_key_private_valid(kept));
+    assert(!sh_package_key_request_matches(second.key_groups, spawner_request(second.compiled, "zlegacy"), moved));
     sh_package_library_free(&second); sh_package_sources_free(more);
     sh_package_library_free(&library); sh_package_sources_free(installed);
     sh_package_library_free(&first); sh_package_sources_free(sources);
@@ -5009,15 +5434,16 @@ static void test_registration_historical_keys(void)
             snprintf(names[i], sizeof(names[i]), "m%02d", i); list[i] = names[i]; registration_package(names[i], "524288");
         }
         historical_compile(f, NULL, "zlegacy", list, 10, &sources, &many);
-        assert((uint32_t)strtoul(spawner_key(many.compiled, "zlegacy"), NULL, 10) == k20);
+        uint32_t legacy = historical_key(&many, k20);
         int marks = 0;
         for (int i = 0; i < 10; i++) {
             uint32_t key = (uint32_t)strtoul(spawner_key(many.compiled, names[i]), NULL, 10);
-            assert(sh_package_key_private_valid(key) && !(key & k20) && sh_package_key_set_add(&seen, key));
+            assert(sh_package_key_private_valid(key) && key != legacy && sh_package_key_set_add(&seen, key));
+            assert(!sh_package_key_request_matches(many.key_groups, spawner_request(many.compiled, "zlegacy"), key));
             marks += (key & SH_PACKAGE_KEY_MARKER) != 0;
         }
-        assert(marks == 2 && sh_package_key_set_count(&seen) == 10);
-        assert(many.key_groups && many.key_groups->historical == k20);
+        assert(marks == 1 && sh_package_key_set_count(&seen) == 10);
+        assert(!many.key_groups || !many.key_groups->historical);
         sh_package_library_free(&many); sh_package_sources_free(sources);
         cleanup();
     }
@@ -5047,20 +5473,29 @@ static void test_registration_historical_conductor(void)
     assert(conductor && !strcmp(conductor->engine_path, "generated/decls/entitydef/conductor.decl"));
     size_t count = conductor_rows(conductor, "aiTypeList", "entityDef", rows, 16);
     size_t mod_count = conductor_rows(conductor, "globalAIMods", "healthMod", mods, 16);
-    snprintf(row, sizeof(row), "524288=%s", authored_name(legacy.compiled, "zlegacy_boss"));
-    assert(count == 2 && row_index(rows, count, "IMP=imp") != SIZE_MAX && row_index(rows, count, row) != SIZE_MAX);
-    assert(mod_count == 1 && row_index(mods, mod_count, "524288=zlegacy") != SIZE_MAX);
+    snprintf(row, sizeof(row), "%u=%s", historical_key(&legacy, 524288), authored_name(legacy.compiled, "zlegacy_boss"));
+    assert(count == 2 && row_index(rows, count, row) != SIZE_MAX);
+    /* This historical table omits the stock IMP modifier, so its imp's
+     * classification is private even though the AI file itself is stock. */
+    const char *legacy_imp = scoped_entity_name(&legacy, sources, "zlegacy", "imp");
+    if (!legacy_imp) for (size_t r = 0; r < count; r++) fprintf(stderr, "historical row %s\n", rows[r]);
+    assert(legacy_imp && strcmp(legacy_imp, "imp"));
+    snprintf(row, sizeof(row), "%u=%s", historical_key(&legacy, 4) | 4, legacy_imp);
+    assert(row_index(rows, count, row) != SIZE_MAX);
+    snprintf(row, sizeof(row), "%u=zlegacy", historical_key(&legacy, 524288));
+    assert(mod_count == 1 && row_index(mods, mod_count, row) != SIZE_MAX);
     const char *const modern[] = {"amodern"};
     historical_compile(f, NULL, "zlegacy", modern, 1, &more, &mixed);
     conductor = named_resource(mixed.compiled, "entitydef", "conductor");
     assert(conductor);
     count = conductor_rows(conductor, "aiTypeList", "entityDef", rows, 16);
     uint32_t moved = (uint32_t)strtoul(spawner_key(mixed.compiled, "amodern"), NULL, 10);
-    assert(moved != 524288u && !(moved & 524288u));
-    snprintf(row, sizeof(row), "524288=%s", authored_name(mixed.compiled, "zlegacy_boss"));
-    assert(row_index(rows, count, "IMP=imp") != SIZE_MAX && row_index(rows, count, row) != SIZE_MAX);
+    assert(moved != historical_key(&mixed, 524288));
+    snprintf(row, sizeof(row), "%u=%s", historical_key(&mixed, 524288), authored_name(mixed.compiled, "zlegacy_boss"));
+    assert(row_index(rows, count, row) != SIZE_MAX);
     snprintf(row, sizeof(row), "%u=%s", moved, authored_name(mixed.compiled, "amodern_boss"));
-    assert(row_index(rows, count, row) != SIZE_MAX && count == 3);
+    assert(row_index(rows, count, row) != SIZE_MAX);
+    assert(!sh_package_key_request_matches(mixed.key_groups, spawner_request(mixed.compiled, "zlegacy"), moved));
     /* A modern map's copy alone stays private: the installed library's
      * conductor serves its rows under the keys the library gave them. */
     {
@@ -6686,6 +7121,67 @@ static void test_preview_model(void)
     }
 }
 
+static int late_resource_available(void *context, const char *path, char *error, size_t capacity)
+{
+    (void)context; (void)error; (void)capacity;
+    assert(!strstr(path, "editor-only") && !strstr(path, "unused"));
+    return strcmp(path, "bound/payload.bin") != 0;
+}
+
+/* Native dispatch and companion readers add verified links which are not
+ * written as reflected declaration fields. Admission must follow those exact
+ * links, including cycles, without requiring unselected or editor-only files. */
+static void test_late_required_resources(fixture *f, sh_decl_registry_source registry)
+{
+    sh_compiled_resource resources[6] = {0};
+    sh_package_compilation compiled = {0};
+    sh_package_sources sources = {0};
+    sh_package_source_file files[2] = {0};
+    sh_package_references paths = {0};
+    sh_package_source_graph_report report;
+    sh_package_missing missing = {0};
+    char error[1024];
+    size_t inputs[] = {0, 1};
+    const char *names[] = {"bound/editor-only.bin", "bound/payload.bin", "bound/program.bin",
+        "bound/unused.bin", "generated/decls/entitydef/late-root.decl",
+        "generated/decls/snapeditorentitydef/editor-only.decl"};
+    char *root_edges[] = {(char *)names[2], (char *)names[5], (char *)names[2]};
+    char *program_edges[] = {(char *)names[1]};
+    char *payload_edges[] = {(char *)names[2]};
+    char *editor_edges[] = {(char *)names[0]};
+    const char *body = "{ class = \"Entity\"; edit = {} }";
+    const char *json = "{\"targetType\":\"idDeclEntityDef\",\"value\":\"late-root\"}";
+    for (size_t i = 0; i < 6; i++) resources[i].engine_path = names[i];
+    resources[4].type = "entitydef"; resources[4].name = "late-root";
+    resources[4].body = (unsigned char *)body; resources[4].body_length = strlen(body);
+    resources[4].bound_dependencies = root_edges; resources[4].bound_dependency_count = 3;
+    resources[2].bound_dependencies = program_edges; resources[2].bound_dependency_count = 1;
+    resources[1].bound_dependencies = payload_edges; resources[1].bound_dependency_count = 1;
+    resources[1].sources = inputs; resources[1].source_count = 2;
+    resources[5].type = "snapeditorentitydef";
+    resources[5].bound_dependencies = editor_edges; resources[5].bound_dependency_count = 1;
+    files[0].owner = 0; files[1].owner = 1;
+    sources.files = files; sources.file_count = 2; sources.package_count = 2;
+    compiled.resources = resources; compiled.resource_count = 6; compiled.sources = &sources;
+    assert(sh_package_source_graph(&compiled, NULL, original, f, registry, (uintptr_t)f->reflection,
+        json, strlen(json), &paths, &report, error, sizeof(error)));
+    assert(!paths.incomplete && !report.gaps);
+    assert(has(&paths, "bound/program.bin") && has(&paths, "bound/payload.bin"));
+    assert(!has(&paths, "editor-only") && !has(&paths, "unused"));
+    const char **required = calloc(paths.count, sizeof(*required)); assert(required);
+    for (size_t i = 0; i < paths.count; i++) required[i] = paths.items[i].name;
+    assert(sh_package_compilation_missing(&compiled, required, paths.count, late_resource_available,
+        NULL, &missing, error, sizeof(error)));
+    assert(missing.count == 1 && !strcmp(missing.paths[0], "bound/payload.bin") &&
+        sh_package_owners_count(&missing.packages) == 2);
+    free(required); sh_package_missing_free(&missing); sh_package_references_free(&paths);
+    /* A vanilla-only map does not acquire another installed root's closure. */
+    json = "{}";
+    assert(sh_package_source_graph(&compiled, NULL, original, f, registry, (uintptr_t)f->reflection,
+        json, strlen(json), &paths, &report, error, sizeof(error)));
+    assert(!paths.count && !paths.incomplete); sh_package_references_free(&paths);
+}
+
 int main(void)
 {
     fixture f;
@@ -6705,7 +7201,9 @@ int main(void)
     }
     setup(&f);
     sh_decl_registry_source registry = {&f, read_memory, (uintptr_t)f.registry, NULL};
+    test_late_required_resources(&f, registry);
     test_source_link(&f, registry);
+    test_atlas_sources(&f, registry);
     test_composed_stock_default(&f, registry);
     test_campaign_original_binding(&f, registry);
     test_implicit_source_link(&f, registry);
@@ -6719,6 +7217,9 @@ int main(void)
     test_registration_row_order();
     test_registration_mixed_lists();
     test_registration_modifier_order();
+    test_registration_named_modifier_scope();
+    test_registration_inherited_lists();
+    test_registration_discovered_inheritance();
     test_registration_first_match();
     test_registration_first_registration();
     test_registration_capacity();

@@ -148,6 +148,7 @@ static int pn_check(void *context, const char *family, const char *name,
         if (!_stricmp(r->shared[i].family, family) && !strcmp(r->shared[i].name, native.name)) { shared = 1; break; }
     if (!original_binding && shared == 1) result = SH_PACKAGE_LINK_REGISTRY_REPLACE_SHARED;
     else if (original_binding || (status == SH_NATIVE_RESOURCE_ID_FREE && !shared)) result = SH_PACKAGE_LINK_REGISTRY_AVAILABLE;
+    else if (!shared) result = SH_PACKAGE_LINK_REGISTRY_OCCUPIED;
     else result = SH_PACKAGE_LINK_REGISTRY_COLLISION;
 done:
     sh_native_resource_identity_clear(&native); return result;

@@ -755,6 +755,8 @@ static int sg_model(sg_walk *walk, const char *path, const char *family)
     free(body); return !walk->failed;
 }
 
+static int sg_material_request(void *context, const char *slot, const char *family, const char *name)
+{ (void)slot; sg_walk *walk = context; walk->report.references++; return sg_add(walk, family, name); }
 static int sg_material(sg_walk *walk, sh_decl_source source)
 {
     sh_decl_material material = {0}; char detail[1024];
@@ -763,6 +765,8 @@ static int sg_material(sg_walk *walk, sh_decl_source source)
         sg_gap(walk, "", "material", detail); return !walk->failed;
     }
     (void)sg_material_references(walk, material.references, material.reference_count);
+    if (!walk->failed && !sh_package_source_material_requests(walk, source, 0,
+        sg_material_request, walk, detail, sizeof(detail))) sg_gap(walk, "", "material", detail);
     sh_decl_material_free(&material); return !walk->failed;
 }
 
@@ -1042,7 +1046,7 @@ static int sg_inspect(sg_walk *walk, const char *type, const char *name)
         }
         /* Image generated-path spelling is a verified native rule. Other leaf
          * families require catalog or compiler identities; no guessed paths. */
-        if (ok && !known && !inspected && !strcmp(type, "image")) {
+        if (ok && !known && !inspected && (!strcmp(type, "image") || !strcmp(type, "transsortatlas"))) {
             char *image_path = sh_package_cooked_path(type, name);
             if (image_path) { inspected = sg_leaf_file(walk, image_path); free(image_path); }
             ok = !walk->failed;
@@ -1233,6 +1237,88 @@ done:
         snprintf(error, capacity, "material path parameter is unavailable or invalid: %s/%s",
             name ? name : "", parameter ? parameter : "");
     return out;
+}
+
+/* ParseRestOfLine joins token spellings with one space, without quotes; the
+ * material constructor then strips the final extension before either lookup.
+ * Ordinary String values remain opaque. Only these native ABI selectors have
+ * this resource meaning (paired idMaterial::Parse implementations). */
+static char *sg_material_request_name(sh_decl_source value, char *error, size_t capacity)
+{
+    sh_decl_tokens tokens = {0}; char *out = NULL, *canonical = NULL; size_t used = 0;
+    if (value.length == SIZE_MAX || !sh_decl_native_lex(value, &tokens, error, capacity)) goto done;
+    if (value.length > SIZE_MAX - tokens.count - 1 || !(out = malloc(value.length + tokens.count + 1))) goto done;
+    for (size_t i = 0; i < tokens.count; i++) {
+        const sh_decl_token *token = tokens.items + i;
+        size_t begin = token->begin, end = token->end;
+        if (token->kind == SH_DECL_TOKEN_STRING || token->kind == SH_DECL_TOKEN_LITERAL) { begin++; end--; }
+        if (used) out[used++] = ' ';
+        memcpy(out + used, value.text + begin, end - begin); used += end - begin;
+    }
+    out[used] = 0;
+    for (size_t i = used; i; ) {
+        char c = out[--i];
+        if (c == '/' || c == '\\') break;
+        if (c == '.') { out[i] = 0; break; }
+    }
+    canonical = sg_name(out);
+done:
+    free(out); sh_decl_tokens_free(&tokens); return canonical;
+}
+int sh_package_source_material_requests(sh_package_source_reader *reader,
+    sh_decl_source source, int observing,
+    int (*visit)(void *, const char *, const char *, const char *), void *context,
+    char *error, size_t capacity)
+{
+    sh_decl_material material = {0}; sh_decl_material_schema schema = {reader, sg_material_schema};
+    static const char *const selectors[] = {"transsortmap", "transatlasmap"};
+    static const char *const families[] = {"transsortatlas", "image"};
+    int ok = 0; char *old_error; size_t old_capacity;
+    if (!reader || !visit) return 0;
+    old_error = reader->error; old_capacity = reader->capacity;
+    reader->error = error; reader->capacity = capacity;
+    if (!sh_decl_material_read(source, &schema, &material, error, capacity)) goto done;
+    for (size_t p = 0; p < sizeof(selectors) / sizeof(*selectors); p++) {
+        const sh_decl_material_write *selected = NULL;
+        for (size_t i = 0; i < material.count; i++) {
+            const sh_decl_material_write *write = material.writes + i;
+            if (write->kind == 12 && write->name.length == strlen(selectors[p]) &&
+                !_strnicmp(write->name.text, selectors[p], write->name.length)) selected = write;
+        }
+        if (!selected) continue;
+        char *name = sg_material_request_name(selected->value, error, capacity);
+        if (!name) goto done;
+        if (!*name) { free(name); continue; } /* Native empty-name default. */
+        char *atlas_file = NULL;
+        for (size_t f = 0; f < sizeof(families) / sizeof(*families); f++) {
+            const char *family = families[f]; char *path = sh_package_cooked_path(family, name);
+            unsigned char *body = NULL; size_t length = 0;
+            int present = path ? sg_read_path(reader, path, &body, &length) : 0;
+            if (!f && present == 1) { atlas_file = path; path = NULL; }
+            free(path); free(body);
+            if (present < 0) { free(atlas_file); free(name); goto done; }
+            /* The atlas carrier is itself a native cooked image. If its owner
+             * supplies no separate fallback, the image manager can read that
+             * exact carrier by explicit .bimage name. A full atlas then still
+             * displays the authored texture through the native fallback. */
+            const char *target = !observing && f && present != 1 && atlas_file ? atlas_file : name;
+            if (!observing && present != 1 && target == name) continue;
+            size_t size = strlen(family) + strlen(name) + 10;
+            char *slot = malloc(size);
+            if (!slot) { free(atlas_file); free(name); goto done; }
+            snprintf(slot, size, "request/%s/%s", family, name);
+            int accepted = visit(context, slot, family, target);
+            free(slot);
+            if (!accepted) { free(atlas_file); free(name); goto done; }
+        }
+        free(atlas_file); free(name);
+    }
+    ok = 1;
+done:
+    reader->error = old_error; reader->capacity = old_capacity;
+    sh_decl_material_free(&material);
+    if (!ok && error && capacity && !*error) snprintf(error, capacity, "material constructor requests could not be captured");
+    return ok;
 }
 
 typedef struct sg_binding {
@@ -1931,6 +2017,70 @@ static int sg_key_site(void *context, const char *slot, sh_decl_value_type type,
 int sh_package_source_key_space(sh_package_source_reader *reader, sh_package_key_space *space)
 { return reader ? sh_package_key_space_read(reader->schema, space) : -1; }
 
+int sh_package_source_entity_fields(sh_package_source_reader *reader, const char *name,
+    const unsigned char *body, size_t length, const char *const *fields, size_t field_count,
+    unsigned char **output, size_t *output_length, char *error, size_t capacity)
+{
+    sh_decl_node *tree = NULL, *effective = NULL;
+    char *class_name = NULL, fallback[1024];
+    int status = -1, candidate = 0, changed = 0;
+    if (!error || !capacity) { error = fallback; capacity = sizeof(fallback); }
+    *error = 0;
+    if (output) *output = NULL;
+    if (output_length) *output_length = 0;
+    if (!reader || !name || !body || !fields || !output || !output_length) goto done;
+    reader->failed = 0; memset(&reader->report, 0, sizeof(reader->report));
+    reader->error = error; reader->capacity = capacity;
+    reader->current_type = "entitydef"; reader->current_name = name; sg_lists_free(reader);
+    tree = sh_decl_tree_parse((sh_decl_source){(const char *)body, length}, error, capacity);
+    if (!tree) goto done;
+    if (!sh_decl_tree_member(tree, "inherit")) { status = 0; goto done; }
+    sh_decl_entity_class_source parents = {reader, sg_read_parent, sg_derives};
+    class_name = sh_decl_entity_tree_class(tree, &parents, error, capacity);
+    if (!class_name) goto done;
+    const sh_decl_dependency_schema *schema = sh_decl_native_schema_view(reader->schema);
+    for (size_t i = 0; i < field_count; i++) {
+        sh_decl_value_type type;
+        int found = schema->field(schema->context, (sh_decl_value_type){class_name, ""}, fields[i], &type);
+        if (found < 0) goto done;
+        candidate |= found;
+    }
+    if (!candidate) { status = 0; goto done; }
+    effective = sh_decl_entity_expanded_state(tree, &parents, error, capacity);
+    if (!effective) goto done;
+    sh_decl_node *from = (sh_decl_node *)sh_decl_tree_member(effective, "edit");
+    sh_decl_node *into = (sh_decl_node *)sh_decl_tree_member(tree, "edit");
+    if (!from) { status = 0; goto done; }
+    if (!into) {
+        into = calloc(1, sizeof(*into));
+        if (into) into->key = _strdup("edit");
+        if (!into || !into->key) { sh_decl_tree_free(into); goto done; }
+        into->compound = into->assignment = 1; into->next = tree->children; tree->children = into;
+    }
+    for (size_t i = 0; i < field_count; i++) {
+        sh_decl_node **take = &from->children, **put = &into->children;
+        while (*take && strcmp((*take)->key, fields[i])) take = &(*take)->next;
+        if (!*take) continue;
+        while (*put && strcmp((*put)->key, fields[i])) put = &(*put)->next;
+        sh_decl_node *node = *take, *old = *put;
+        *take = node->next; node->next = old ? old->next : NULL; *put = node;
+        if (old) { old->next = NULL; sh_decl_tree_free(old); }
+        changed = 1;
+    }
+    if (!changed) { status = 0; goto done; }
+    *output = (unsigned char *)sh_decl_tree_write(tree, output_length);
+    if (*output) status = 1;
+done:
+    if (reader && reader->failed) status = -1;
+    if (status < 0) {
+        if (output) { free(*output); *output = NULL; }
+        if (output_length) *output_length = 0;
+        if (*error && reader && !reader->failed && !strstr(error, "allocation")) status = -2;
+        if (!*error) snprintf(error, capacity, "cannot prepare inherited entity fields");
+    }
+    free(class_name); sh_decl_tree_free(tree); sh_decl_tree_free(effective); return status;
+}
+
 int sh_package_source_bind_keys(sh_package_source_reader *reader,
     const char *family, const char *name, const unsigned char *body, size_t length,
     sh_package_key_site_resolver resolver, void *context, unsigned char **output,
@@ -2164,6 +2314,28 @@ void sh_package_source_reader_key_codes(sh_package_source_reader *reader, sh_pac
     reader->key_groups = groups; reader->other_key_groups = other;
     reader->key_taken = taken; reader->saved_keys = saved_keys;
 }
+static void sg_map_key_move(sg_map_binding *map, sh_package_key_move *move, uint32_t target)
+{
+    if (!sh_package_key_space_private(&map->key_space)) {
+        sh_package_key_move_to(move, 0, target); return;
+    }
+    sh_package_source_reader *reader = map->binding.reader;
+    const sh_package_key_groups *groups = reader->key_groups;
+    uint32_t pattern = (target & SH_PACKAGE_KEY_SINGLE) >> 19;
+    if ((target & SH_PACKAGE_KEY_MARKER) && (!groups || !groups->defined[pattern])) groups = reader->other_key_groups;
+    move->kind = SH_PACKAGE_KEY_REPLACE;
+    move->bits = target & ~SH_PACKAGE_KEY_PRIVATE;
+    sh_package_key_decode(groups, target, &move->keys);
+}
+static int sg_map_key_encode(void *context, const sh_package_key_set *members, uint32_t *code)
+{
+    sg_map_binding *map = context;
+    sh_package_source_reader *reader = map->binding.reader;
+    *code = sh_package_key_groups_code(reader->key_groups, reader->other_key_groups, reader->key_taken, members);
+    if (!*code && reader->error && reader->capacity)
+        snprintf(reader->error, reader->capacity, "map registration group could not be represented");
+    return *code != 0;
+}
 /* A map-authored multi-bit code no saved or current key binding names on its
  * own is a group of keys: the site's saved member keys (a loaded map) or, for
  * a value set in this session, the serving generation's definition. Each
@@ -2174,7 +2346,8 @@ static int sg_map_key_group(sg_map_binding *map, const char *slot, const sh_pack
     uint32_t marked, uint32_t *code)
 {
     sh_package_source_reader *reader = map->binding.reader;
-    uint32_t members[64];
+    uint32_t members[SH_PACKAGE_KEY_CODES];
+    uint32_t native_bits = 0;
     size_t count = 0;
     sh_package_key_set current;
     memset(&current, 0, sizeof(current));
@@ -2196,12 +2369,17 @@ static int sg_map_key_group(sg_map_binding *map, const char *slot, const sh_pack
         uint32_t target = members[i];
         int status = sg_map_key_bind(map, slot, location, members[i], &target);
         if (status < 0) return -1;
-        if (!sh_package_key_set_add(&current, status ? target : members[i])) return -1;
+        sh_package_key_move moved = {0};
+        sg_map_key_move(map, &moved, status ? target : members[i]);
+        native_bits |= moved.bits;
+        for (size_t w = 0; w < sizeof(current.words) / sizeof(current.words[0]); w++)
+            current.words[w] |= moved.keys.words[w];
     }
     if (!(*code = sh_package_key_groups_code(reader->key_groups, reader->other_key_groups, reader->key_taken, &current))) {
         snprintf(reader->error, reader->capacity, "a map value names a set of package AI keys no free group code can hold");
         return -1;
     }
+    *code |= native_bits;
     return 1;
 }
 /* A map-authored spawn-type value: each key it names on its own (a decimal
@@ -2228,18 +2406,20 @@ static int sg_map_key_site(sg_map_binding *map, const char *slot, const sh_packa
             while (!(marked >> low & 1u)) low++;
             for (unsigned bit = low + 1; bit < SH_PACKAGE_KEY_BITS; bit++)
                 if (marked >> bit & 1u) to[bit].kind = SH_PACKAGE_KEY_DROP;
-            sh_package_key_move_to(to + low, 0, target); moved = 1;
+            sg_map_key_move(map, to + low, target); moved = 1;
         }
         bits &= ~marked;
     }
     for (unsigned bit = 0; bit < SH_PACKAGE_KEY_BITS; bit++) {
         if (!(bits >> bit & 1u)) continue;
         if ((status = sg_map_key_bind(map, slot, location, 1u << bit, &target)) < 0) return -1;
-        if (status && target != 1u << bit) { sh_package_key_move_to(to + bit, 0, target); moved = 1; }
+        if (status && target != 1u << bit) { sg_map_key_move(map, to + bit, target); moved = 1; }
     }
     if (!moved) return 0;
     size_t out_length = 0; int failed = 0;
-    char *out = sh_package_key_relocate(&map->key_space, value, length, to, NULL, &out_length, &failed);
+    sh_package_key_encoder encoder = {sg_map_key_encode, map};
+    char *out = sh_package_key_relocate(&map->key_space, value, length, to,
+        sh_package_key_space_private(&map->key_space) ? &encoder : NULL, &out_length, &failed);
     if (failed) return -1;
     if (!out) return 0;
     free(map->key_replacement); map->key_replacement = out; *replacement = out; return 1;
@@ -2394,6 +2574,55 @@ char *sh_package_source_bind_map_sites_observed(sh_package_source_reader *reader
     sh_package_source_binding *result, char *error, size_t capacity)
 { return sg_bind_map(reader, json, length, NULL, lookup, observe, context, output_length, result, error, capacity); }
 
+/* Reflected text cannot name every native dependency. Registration dispatch,
+ * cooked companions and custom readers already contribute exact bound edges
+ * during compilation. Follow those edges from required roots as well; never
+ * rediscover their targets through another source scope or the live registry. */
+static int sg_bound_files(sg_walk *walk)
+{
+    const sh_package_compilation *compiled = walk->compiled;
+    size_t *queue = NULL, count = 0;
+    unsigned char *seen = NULL;
+    int ok = 0;
+    if (!compiled->resource_count) return 1;
+    if (compiled->resource_count > SIZE_MAX / sizeof(*queue) ||
+        !(queue = malloc(compiled->resource_count * sizeof(*queue))) ||
+        !(seen = calloc(compiled->resource_count, 1))) goto done;
+    for (size_t i = 0; i < walk->paths.count; i++) {
+        const sh_compiled_resource *resource;
+        if (i >= walk->required_capacity || !walk->required[i]) continue;
+        resource = sh_package_compilation_find(compiled, walk->paths.items[i].name);
+        if (!resource || (resource->type && sg_editor(resource->type)) ||
+            (resource->native_type && sg_editor(resource->native_type))) continue;
+        size_t index = (size_t)(resource - compiled->resources);
+        if (!seen[index]) { seen[index] = 1; queue[count++] = index; }
+    }
+    walk->native_origin = walk->native_leaf = 0;
+    for (size_t i = 0; i < count; i++) {
+        const sh_compiled_resource *resource = compiled->resources + queue[i];
+        if (resource->bound_dependency_count && !resource->bound_dependencies) goto done;
+        for (size_t j = 0; j < resource->bound_dependency_count; j++) {
+            const char *path = resource->bound_dependencies[j];
+            const sh_compiled_resource *target = sh_package_compilation_find(compiled, path);
+            /* Palette companionship retains native objects but is not a map
+             * gameplay requirement. A file also reached from gameplay still
+             * participates through that independent edge. */
+            if (target && ((target->type && sg_editor(target->type)) ||
+                (target->native_type && sg_editor(target->native_type)))) continue;
+            if (!sg_file(walk, path)) goto done;
+            if (target) {
+                size_t index = (size_t)(target - compiled->resources);
+                if (!seen[index]) { seen[index] = 1; queue[count++] = index; }
+            }
+        }
+    }
+    ok = 1;
+done:
+    free(queue); free(seen);
+    if (!ok) walk->failed = 1;
+    return ok;
+}
+
 int sh_package_source_graph_with_contracts(const sh_package_compilation *compiled,
     const sh_resource_catalog *catalog, sh_package_baseline_reader original,
     void *original_context, sh_decl_registry_source registry, uintptr_t reflection,
@@ -2444,6 +2673,7 @@ int sh_package_source_graph_with_contracts(const sh_package_compilation *compile
     }
     for (size_t i = 0; i < walk.deferred_path_count; i++)
         if (walk.candidate[walk.deferred_paths[i].identity]) walk.required[walk.deferred_paths[i].path] = 1;
+    if (!sg_bound_files(&walk)) goto done;
     {
         size_t kept = 0;
         for (size_t i = 0; i < walk.paths.count; i++) {

@@ -55,6 +55,7 @@ char *sh_package_cooked_path(const char *family, const char *name)
     char *canonical = sh_package_engine_path(name), *raw = NULL, *out = NULL;
     if (!family || !canonical) goto done;
     if (!strcmp(family, "image")) { out = li_generated_path(canonical, "generated/image/", ".bimage"); goto done; }
+    if (!strcmp(family, "transsortatlas")) { out = li_generated_path(canonical, "generated/transsortatlas/", ".bimage"); goto done; }
     if (!strcmp(family, "discreteanimation")) {
         out = li_generated_path(canonical, "generated/discreteanimation/", ".dmodel"); goto done;
     }
@@ -98,7 +99,8 @@ int sh_package_cooked_identity(const char *path, const char **family, char **nam
     size_t length = strlen(canonical);
     if (length > 7 && !strcmp(canonical + length - 7, ".bimage") &&
         canonical[length - 8] != '/') {
-        *family = "image"; *name = canonical; canonical = NULL;
+        *family = !strncmp(canonical, "generated/transsortatlas/", 25) ? "transsortatlas" : "image";
+        *name = canonical; canonical = NULL;
         result = 1; goto done;
     }
     if (length > 7 && !strcmp(canonical + length - 7, ".dmodel") && canonical[length - 8] != '/') {

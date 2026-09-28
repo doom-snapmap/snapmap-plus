@@ -26,6 +26,11 @@ const sh_package_consumer *sh_package_consumers_at(const sh_package_consumers *v
 const sh_package_consumer *sh_package_consumers_find(const sh_package_consumers *view,
     const char *family, const char *name);
 const sh_package_consumer_target *sh_package_consumer_find(const sh_package_consumer *owner, const char *slot);
+/* A constructor request slot is request/<family>/<original native name>.
+ * Match the manager's case-insensitive, slash-normalized identity without
+ * allocating or retaining engine pointers. The target stays in that manager. */
+const char *sh_package_consumer_request(const sh_package_consumer *owner,
+    const char *family, const char *name);
 /* Overlapping native owner identities must have the same COMPLETE target set;
  * this never appends peer bindings or supplies a missing slot from another map. */
 sh_package_consumers *sh_package_consumers_join(const sh_package_consumers *a,

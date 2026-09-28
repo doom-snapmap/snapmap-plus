@@ -582,6 +582,27 @@ static void run_keys(sh_package_source_reader *reader, sh_package_compilation *c
         assert(sh_package_key_set_add(&now, a2) && sh_package_key_set_add(&now, b2));
         assert(text && !strcmp(text, expected) && sh_package_key_groups_find(&client, &now) == g2);
         assert(back.use_count == 2 && client.count == 1 && beside.count == 1); free(text);
+        /* A saved union of ordinary bits can reopen as marked private keys.
+         * Their bitwise OR is a different key, not a representation of both. */
+        {
+            sh_package_provenance plain_pair = {0}, low_record = {0}, raised = {0};
+            size_t plain_context = isolated(&plain_pair, rows + 1);
+            assert(sh_package_provenance_bind(&plain_pair, SH_PACKAGE_KEY_FAMILY, "524288", "524288", &plain_context, 1));
+            assert(sh_package_provenance_bind(&plain_pair, SH_PACKAGE_KEY_FAMILY, "1048576", "1048576", &plain_context, 1));
+            char low[256];
+            snprintf(low, sizeof(low), "{\"entities\":[{\"uniqueId\":42,\"entityDef\":{\"targetType\":\"idDeclEntityDef\","
+                "\"inherit\":\"vanilla\",\"state\":{\"edit\":{\"spawnType\":\"1572864\"}}}}]}");
+            sh_package_source_reader_key_codes(reader, NULL, NULL, NULL, sh_package_map_uses_saved_keys);
+            text = sh_package_map_uses_select(reader, low, strlen(low), NULL, &plain_pair, rows, 3,
+                sh_mpkg_new_use_required, &requirements, &length, &low_record, &references, &inspection, error, sizeof(error));
+            assert(text && !strcmp(text, low) && low_record.use_count == 2); free(text);
+            sh_package_source_reader_key_codes(reader, &author, NULL, &author_taken, sh_package_map_uses_saved_keys);
+            text = sh_package_map_uses_select(reader, low, strlen(low), &low_record, &held, rows, 3,
+                sh_mpkg_new_use_required, &requirements, &length, &raised, &references, &inspection, error, sizeof(error));
+            if (!text || strcmp(text, valued)) fprintf(stderr, "low-to-marked group: %s\n", text ? text : error);
+            assert(text && !strcmp(text, valued) && raised.use_count == 2); free(text);
+            sh_package_provenance_free(&plain_pair); sh_package_provenance_free(&low_record); sh_package_provenance_free(&raised);
+        }
         sh_package_source_reader_key_codes(reader, &author, NULL, &author_taken, sh_package_map_uses_saved_keys);
         text = sh_package_map_uses_select(reader, expected, strlen(expected), &back, &held, rows, 3,
             sh_mpkg_new_use_required, &requirements, &length, &again, &references, &inspection, error, sizeof(error));
@@ -654,6 +675,55 @@ static void run_keys(sh_package_source_reader *reader, sh_package_compilation *c
     sh_package_provenance_free(&catalog); sh_package_provenance_free(&alone); sh_package_provenance_free(&saved);
     sh_package_provenance_free(&out); sh_package_provenance_free(&reopened); sh_package_references_free(&references);
 }
+static int local_native(void *context, const char *family, const char *name)
+{
+    assert(!strcmp(family, "entitydef"));
+    if (context) return -1;
+    return !strcmp(name, "root") || !strcmp(name, "vanilla");
+}
+static void run_local(sh_package_source_reader *reader, sh_package_bundle_binding rows[3])
+{
+    sh_package_provenance library = {0};
+    size_t contexts[3], length; char error[1024];
+    for (size_t i = 0; i < 3; i++) contexts[i] = isolated(&library, rows + i);
+    bind(&library, "root", "current-root", contexts, 2);
+    bind(&library, "value", "current-value", contexts, 2);
+    bind(&library, "vanilla", "vanilla-alternative", contexts + 2, 1);
+    const char *json = "{\"entities\":[{\"entityDef\":{\"targetType\":\"idDeclEntityDef\","
+        "\"inherit\":\"root\",\"state\":{\"edit\":{\"target\":\"value\",\"text\":\"value\x97\"}}}},"
+        "{\"entityDef\":{\"targetType\":\"idDeclEntityDef\",\"inherit\":\"vanilla\"}}],\"note\":\"value\x97\"}";
+    const char *expected = "{\"entities\":[{\"entityDef\":{\"targetType\":\"idDeclEntityDef\","
+        "\"inherit\":\"root\",\"state\":{\"edit\":{\"target\":\"current-value\",\"text\":\"value\x97\"}}}},"
+        "{\"entityDef\":{\"targetType\":\"idDeclEntityDef\",\"inherit\":\"vanilla\"}}],\"note\":\"value\x97\"}";
+    char *out = sh_package_map_uses_bind_local(reader, json, strlen(json), &library,
+        local_native, NULL, &length, error, sizeof(error));
+    if (!out) fprintf(stderr, "local bind: %s\n", error);
+    assert(out && length == strlen(expected) && !strcmp(out, expected)); free(out);
+    /* Ambiguous old names have a stable choice, independent of discovery order.
+     * Exact equal delivery owners already share one compiled name. */
+    bind(&library, "value", "new-root", contexts + 2, 1);
+    out = sh_package_map_uses_bind_local(reader, json, strlen(json), &library,
+        local_native, NULL, &length, error, sizeof(error));
+    assert(out);
+    sh_package_provenance_binding swap = library.bindings[1];
+    library.bindings[1] = library.bindings[3]; library.bindings[3] = swap;
+    char *again = sh_package_map_uses_bind_local(reader, json, strlen(json), &library,
+        local_native, NULL, &length, error, sizeof(error));
+    assert(again && !strcmp(out, again)); free(out); free(again);
+    out = sh_package_map_uses_bind_local(reader, json, strlen(json), &library,
+        local_native, &library, &length, error, sizeof(error));
+    assert(!out && !length);
+    /* Native strings alone never select an installed resource. */
+    json = "{\"note\":\"value\x97\",\"entities\":[]}";
+    out = sh_package_map_uses_bind_local(reader, json, strlen(json), &library,
+        local_native, &library, &length, error, sizeof(error));
+    assert(out && !strcmp(out, json)); free(out);
+    library.semantics = SH_PACKAGE_PROVENANCE_USES;
+    out = sh_package_map_uses_bind_local(reader, json, strlen(json), &library,
+        local_native, NULL, &length, error, sizeof(error));
+    assert(!out && !length);
+    sh_package_provenance_free(&library);
+}
 int main(void)
 {
     fixture f = {0}; sh_package_sources sources = {0}; sh_package_compilation compiled = {0};
@@ -680,6 +750,7 @@ int main(void)
         registry, (uintptr_t)f.reflection, error, sizeof(error));
     if (!reader) fprintf(stderr, "reader: %s\n", error);
     assert(reader);
+    run_local(reader, rows);
     run_keys(reader, &compiled, rows);
     run(reader, &compiled, rows, archives, lengths);
     sh_package_source_reader_close(reader);

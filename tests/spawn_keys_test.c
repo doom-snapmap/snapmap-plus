@@ -119,6 +119,22 @@ static void test_modifier(void)
     g_next_type = K20;
     sh_spawn_keys_test_modifier(conductor, ai, modifiers);
     assert(!g_health_ai && *(float *)(ai + 0x23d6c) == -1.0f);
+    /* A captured absence is different from a neutral modifier or an ordinary
+     * fallback. The exact classification includes named bits, not just its
+     * private key: two types sharing that key can have different policies. */
+    uint32_t absent[] = {IMP | K20, IMP | K20};
+    sh_spawn_keys_program *program = sh_spawn_keys_program_create(NULL, absent, 2);
+    assert(program); sh_spawn_keys_publish_program(program); sh_spawn_keys_program_release(program);
+    g_next_type = IMP | K20;
+    sh_spawn_keys_test_modifier(conductor, ai, modifiers);
+    assert(!g_health_ai && *(float *)(ai + 0x23d6c) == -1.0f);
+    g_next_type = T3 | K20;
+    sh_spawn_keys_test_modifier(conductor, ai, modifiers);
+    assert(g_health_ai == ai && *(float *)(ai + 0x23d6c) != -1.0f);
+    assert(sh_spawn_keys_publish_groups(NULL, NULL));
+    g_health_ai = NULL; g_next_type = IMP | K20;
+    sh_spawn_keys_test_modifier(conductor, ai, modifiers);
+    assert(g_health_ai == ai);
     free(packed); free(ai); free(conductor);
 }
 
@@ -190,6 +206,18 @@ static void test_groups(void)
     assert(manager && entries && sh_package_key_set_add(&ab, a) && sh_package_key_set_add(&ab, b));
     assert(sh_package_key_set_add(&bc, b) && sh_package_key_set_add(&bc, c));
     assert(sh_package_key_groups_define(&library, g, &ab) && sh_package_key_groups_define(&other, g, &bc));
+    {
+        sh_package_key_groups merged = {0}, before;
+        assert(sh_package_key_groups_merge(&merged, NULL));
+        assert(sh_package_key_groups_merge(&merged, &library));
+        assert(sh_package_key_groups_merge(&merged, &library) && merged.count == 1);
+        assert(sh_package_key_groups_merge(&merged, &merged));
+        /* A rejected merge must not partially add an earlier code. */
+        assert(sh_package_key_groups_define(&other, SH_PACKAGE_KEY_MARKER | (1u << 19), &bc));
+        before = merged;
+        assert(!sh_package_key_groups_merge(&merged, &other) && !memcmp(&merged, &before, sizeof(merged)));
+        other.defined[1] = 0; other.count--;
+    }
     for (int i = 0; i < 4; i++) memcpy(entries + i * 0x30, types + i, 4);
     memcpy(manager + 0x5908, &entries, sizeof(entries));
     *(int *)(manager + 0x5910) = 4;

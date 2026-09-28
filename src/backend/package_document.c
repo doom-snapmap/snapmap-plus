@@ -5,8 +5,8 @@
 #include "map_provenance.h"
 
 /* Both saved-map and retained-request routes compile the same authored context.
- * A metadata-free map keeps its historical composition; installed packages can
- * establish availability later, but cannot fill or reinterpret this context. */
+ * Only a document without delivery or ownership can resolve historical custom
+ * names from the local library. Saved authored contexts remain independent. */
 int sh_package_document_bind(const char *root, const sh_mpkg_context *sources,
     char **json, size_t *length, sh_package_map_plan **out, char *error, size_t capacity)
 {
@@ -22,6 +22,10 @@ int sh_package_document_bind(const char *root, const sh_mpkg_context *sources,
             snprintf(error, capacity, "The map's authored source bindings have no package delivery.");
             goto done;
         }
+        bound = sh_package_runtime_rebind_local_document(*json, *length,
+            &bound_length, error, capacity);
+        if (!bound) goto done;
+        HeapFree(GetProcessHeap(), 0, *json); *json = bound; *length = bound_length;
         ok = 1; goto done;
     }
     size_t bundle_count = 0;

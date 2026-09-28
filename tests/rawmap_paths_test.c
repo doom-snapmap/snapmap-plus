@@ -53,7 +53,9 @@ static int pf_editor_reload, pf_editor_frame, pf_editor_handoffs;
 static void *pf_native_editor;
 static int pf_reads, pf_loads, pf_parses, pf_ctors, pf_dtors, pf_closes, pf_plans, pf_frees;
 static int pf_activations, pf_restorations, pf_active, pf_order_error;
+static int retained_pending, retained_activations, retained_failure;
 static int pf_binding_plans, pf_rebinds, pf_legacy_rebinds, pf_rebind_fail;
+static int pf_local_rebinds;
 static int pf_coverage, pf_ready, pf_gate_calls, pf_availability_calls;
 static int pf_install_requests, pf_inventory_reads, pf_install_outcome, pf_cancellations, pf_commits, pf_aborts;
 static sh_mpkg_install_completion pf_completion;
@@ -68,6 +70,15 @@ int sh_decl_server_map_boundary_safe(void) { return pf_testing && pf_boundary; }
 int sh_decl_server_map_preparation_ready(void) { return pf_testing; }
 int sh_map_transition_ready(void) { return pf_testing; }
 int sh_map_transition_at_boundary(void) { return pf_transition; }
+int sh_package_runtime_occurrences_pending(void) { return retained_pending; }
+int sh_package_runtime_admission_ready(void) { return pf_testing && pf_ready; }
+int sh_decl_server_activate_occurrences(const sh_package_occurrence_snapshot *map)
+{
+    if (map || !pf_transition || !sh_rawmap_defers_install_commit()) pf_order_error++;
+    retained_activations++;
+    if (retained_failure) return 0;
+    retained_pending = 0; return 1;
+}
 void *sh_editor_transition_capture(const void *editor)
 { return pf_editor_reload && editor == (void *)3 ? (void *)17 : NULL; }
 int sh_editor_transition_frame_ready(void *editor, void *previous)
@@ -167,6 +178,16 @@ char *sh_package_map_plan_rebind(const sh_package_map_plan *plan, const sh_packa
         site = strstr(out, "\"value\":\"smp/saved\"");
         if (site) memcpy(site + strlen("\"value\":\""), "smp/bound", strlen("smp/bound"));
     }
+    return out;
+}
+char *sh_package_runtime_rebind_local_document(const char *json, size_t length,
+    size_t *out_length, char *error, size_t capacity)
+{
+    char *out;
+    pf_local_rebinds++; *out_length = 0;
+    if (pf_rebind_fail) { snprintf(error, capacity, "fixture local binding failure"); return NULL; }
+    out = HeapAlloc(GetProcessHeap(), 0, length + 1);
+    if (out) { memcpy(out, json, length + 1); *out_length = length; }
     return out;
 }
 void sh_package_map_plan_free(sh_package_map_plan *plan) { if (plan) pf_frees++; }
@@ -1112,6 +1133,7 @@ static void pf_reset(void)
     pf_reads = pf_loads = pf_parses = pf_ctors = pf_dtors = pf_closes = pf_plans = pf_frees = 0;
     pf_activations = pf_restorations = pf_order_error = 0; pf_parsed[0] = 0;
     pf_binding_plans = pf_rebinds = pf_legacy_rebinds = pf_rebind_fail = 0;
+    pf_local_rebinds = 0;
     occurrence_capture_failed = occurrence_attach_failed = occurrence_attaches = occurrence_captures = 0;
     pf_bundle_fail = pf_bundle_attaches = 0;
     pf_coverage = pf_ready = 1; pf_gate_calls = pf_availability_calls = 0;
@@ -1171,10 +1193,23 @@ static void saved_map_bindings_use_authored_context(void)
     CHECK(json && sh_package_document_bind("fixture-root", (sh_mpkg_context *)1,
         &json, &length, &plan, error, sizeof(error)));
     CHECK(plan && !memcmp(json, text, sizeof(text)) && pf_binding_plans == 2 && pf_rebinds == 2);
-    CHECK(pf_legacy_rebinds == 1);
+    CHECK(pf_legacy_rebinds == 1 && !pf_local_rebinds);
     prepared = embed_used_packages(json, length, &saved_length, &failed);
     CHECK(!prepared && !failed && !saved_length);
     sh_package_map_plan_free(plan); HeapFree(GetProcessHeap(), 0, json);
+    /* Bare historical custom names need a local-only compatibility pass.
+     * Failure must preserve the exact source, and native string bytes survive. */
+    pf_packages = 0; plan = NULL;
+    json = sh_map_provenance_strip(text, sizeof(text) - 1, &length, error, sizeof(error));
+    before = json; old_length = length; pf_rebind_fail = 1;
+    CHECK(!sh_package_document_bind("fixture-root", (sh_mpkg_context *)1,
+        &json, &length, &plan, error, sizeof(error)));
+    CHECK(json == before && length == old_length && !plan && pf_local_rebinds == 1);
+    pf_rebind_fail = 0;
+    CHECK(sh_package_document_bind("fixture-root", (sh_mpkg_context *)1,
+        &json, &length, &plan, error, sizeof(error)));
+    CHECK(!plan && pf_local_rebinds == 2 && length == sizeof(text) - 1 && !memcmp(json, text, sizeof(text)));
+    HeapFree(GetProcessHeap(), 0, json);
 done:
     sh_package_provenance_free(&value); pf_testing = pf_packages = 0;
 }
@@ -1845,6 +1880,41 @@ static void occurrence_failures_do_not_save_or_attach_partial_sources(void)
     clean_state();
 }
 
+static void native_transitions_publish_retained_sources(void)
+{
+    for (int fail = 0; fail < 2; fail++) {
+        pf_reset(); retained_pending = 0; retained_activations = 0; retained_failure = fail;
+        CHECK(!sh_rawmap_transition_pending((void *)1, (void *)2));
+        retained_pending = 1; pf_ready = 0;
+        CHECK(!sh_rawmap_transition_pending((void *)1, (void *)2));
+        pf_ready = 1;
+        CHECK(sh_rawmap_transition_pending((void *)1, (void *)2) == 1);
+        CHECK(!retained_activations && sh_rawmap_defers_install_commit());
+        CHECK(!sh_rawmap_transition_activate()); /* Before the verified purge. */
+        CHECK(!sh_rawmap_transition_commit());
+        pf_transition = 1;
+        CHECK(sh_rawmap_transition_activate() == !fail);
+        CHECK(retained_activations == 1 && retained_pending == fail);
+        CHECK(sh_rawmap_transition_commit() == !fail);
+        CHECK(!pf_commits && !pf_activations && !pf_restorations && !pf_order_error);
+        sh_rawmap_transition_finished(!fail);
+        CHECK(!sh_rawmap_defers_install_commit() && !g_preflight_busy);
+        pf_transition = 0;
+        /* Failed publication remains pending and can retry at the next load. */
+        if (fail) {
+            retained_failure = 0;
+            CHECK(sh_rawmap_transition_pending((void *)1, (void *)2) == 1);
+            pf_transition = 1;
+            CHECK(sh_rawmap_transition_activate() && sh_rawmap_transition_commit());
+            sh_rawmap_transition_finished(1);
+            pf_transition = 0;
+            CHECK(!retained_pending && retained_activations == 2);
+        }
+        CHECK(!sh_rawmap_transition_pending((void *)1, (void *)2));
+    }
+    retained_pending = retained_failure = 0;
+}
+
 int main(void)
 {
     char archive[MAX_PATH];
@@ -1882,6 +1952,7 @@ int main(void)
     saved_map_preflight_retains_checked_bytes();
     owned_map_requests_survive_consent();
     deferred_requests_publish_at_native_boundary();
+    native_transitions_publish_retained_sources();
     inspection_preserves_active_map_state();
     initial_published_reads();
     preflight_hook_publishes_helpers_before_detour();

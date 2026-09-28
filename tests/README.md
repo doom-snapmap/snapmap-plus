@@ -35,6 +35,16 @@ Checks native helpers, engine-interface contracts, frontend JavaScript and optio
   `audio_banks_test.c` also indexes a synthetic bank larger than 4 GiB while
   reading only its 53 bytes of metadata, and distinguishes malformed data from
   an IO failure. These are offline checks, not native bank activation proof.
+  Native-record witnesses also prove that an unrelated event edit retains native
+  actions and their preparation banks. Private projections omit native definitions
+  and compact selected media, including unsorted overlapping ranges, without
+  reading payloads during compilation. The load plan retains original providers
+  before their edited counterparts. `package_audio_test --inspect-bank <base>
+  <engine-path> <authored-bank>` reports the actual private output sizes and scoped
+  identity counts without loading banks or changing installed packages.
+- `package_compiler_test.c` compares and probes generated sealed files without
+  authored source rows, including additions/removals, equal and differing outputs,
+  stale source metadata and memory/file comparisons spanning multiple IO chunks.
 - `audio_packages_test.c` validates all three PCK tables, local language IDs,
   bounds and metadata-only reads above 4 GiB. An optional directory argument
   audits installed PCK metadata. `audio_originals_test.c` checks packed-before-
@@ -249,6 +259,13 @@ Checks native helpers, engine-interface contracts, frontend JavaScript and optio
   composition leave unrelated packages usable. Valid conflicting packages retain
   physical availability for authored maps; repaired sources rejoin on refresh.
   String tests include all incompatible pairs in inventories above 64 packages.
+- `package_map_uses_test.c` also checks metadata-free local name compatibility:
+  custom typed references bind, native names and legacy prose bytes stay exact,
+  and ambiguous old names select consistently under reordered source catalogs.
+  `package_runtime_context_test.c` verifies that this route uses the installed
+  library even while a different map supplies the same authored name.
+  `rawmap_paths_test.c` keeps saved deliveries outside that fallback and checks
+  failure atomicity before native loading.
 - `rawmap_paths_test.c` also drives saved-map preflight: retained JSON replaces a
   different second engine read, refusal prevents native loading, parse failures
   defer retirement until the browser, and held files retain cleanup ownership.

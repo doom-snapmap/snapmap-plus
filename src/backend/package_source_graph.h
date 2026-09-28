@@ -135,6 +135,15 @@ unsigned char *sh_package_source_shader_bind(sh_package_source_reader *reader,
  * or interpret arbitrary String values as resource references. Owned result. */
 char *sh_package_source_material_path(sh_package_source_reader *reader,
     const char *material, const char *parameter, char *error, size_t capacity);
+/* Material construction resolves the two native transparency String parameters
+ * as atlas names and may fall back to ordinary images of the same name. Capture
+ * both requests in this source scope without rewriting the authored String or
+ * coupling the two managers' generated filenames. Observers retain absent edges
+ * for reverse discovery; serving captures only supplied or SnapMap sources. */
+int sh_package_source_material_requests(sh_package_source_reader *reader,
+    sh_decl_source source, int observing,
+    int (*visit)(void *, const char *, const char *, const char *), void *context,
+    char *error, size_t capacity);
 
 /* A binding is identified by its verified field or native record slot, resource
  * family and manager name. Return 0 to keep, 1 with a borrowed replacement name,
@@ -221,6 +230,15 @@ int sh_package_source_bind_keys(sh_package_source_reader *reader,
 /* The key enum as this reader's reflection registers it (package_keys.h). */
 struct sh_package_key_space;
 int sh_package_source_key_space(sh_package_source_reader *reader, struct sh_package_key_space *space);
+/* Materialize selected inherited edit fields in this source's own envelope.
+ * Native schema membership filters unrelated entity classes. Parent reads use
+ * the reader's immutable scope; metadata and unrelated fields remain authored.
+ * Returns 1 with owned output, 0 if no inherited selected field exists, -2 for
+ * unavailable source semantics, or -1 on an operational failure. It does not
+ * invent constructor defaults or mutate input files. */
+int sh_package_source_entity_fields(sh_package_source_reader *reader, const char *name,
+    const unsigned char *body, size_t length, const char *const *fields, size_t field_count,
+    unsigned char **output, size_t *output_length, char *error, size_t capacity);
 
 /* Rebind typed map roots and inline entity state through the same native field
  * readers. The resolver maps saved identities to this candidate's names and

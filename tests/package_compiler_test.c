@@ -146,8 +146,66 @@ static void test_native_identity_changes(void)
     sh_package_changes_free(&changes); sh_package_changes_reverse(NULL);
 }
 
+static void test_cached_changes(void)
+{
+    /* Generated native files have sealed payloads, not authored source rows.
+     * Exercise all representation pairs and differences beyond one IO chunk. */
+    const size_t length = 131073;
+    unsigned char *body = malloc(length + 1);
+    char path[4096], error[1024];
+    sh_package_file *files[3] = {0};
+    sh_package_changes changes = {0};
+    sh_compiled_resource a = {0}, b = {0};
+    sh_package_compilation before = {0}, after = {0};
+    CHECK(body); if (!body) return;
+    memset(body, 'a', length); body[length] = 0;
+    for (size_t i = 0; i < 3; i++) {
+        char relative[64]; snprintf(relative, sizeof(relative), "sealed-comparison-%zu", i);
+        if (i == 2) body[length - 1] = 'b';
+        create(relative, (char *)body);
+        snprintf(path, sizeof(path), "%s/%s", root, relative);
+        files[i] = sh_package_file_pin(path, error, sizeof(error)); CHECK(files[i]);
+    }
+    body[length - 1] = 'a';
+    a.engine_path = b.engine_path = "sound/soundbanks/pc/100.bnk";
+    a.source = b.source = SIZE_MAX;
+    a.cache_file = files[0]; b.cache_file = files[1];
+    before.resources = &a; after.resources = &b; before.resource_count = after.resource_count = 1;
+    if (files[0] && files[1] && files[2]) {
+        CHECK(sh_package_compilation_changes(NULL, &before, &changes, error, sizeof(error)) && changes.count == 1);
+        CHECK(sh_package_compilation_changes(&before, NULL, &changes, error, sizeof(error)) && changes.count == 1);
+        CHECK(sh_package_compilation_changes(&before, &after, &changes, error, sizeof(error)) && !changes.count);
+        CHECK(sh_package_compilation_probe(&before, a.engine_path, error, sizeof(error)) == 1);
+        a.body = body; a.body_length = length;
+        CHECK(sh_package_compilation_changes(&before, &after, &changes, error, sizeof(error)) && !changes.count);
+        CHECK(sh_package_compilation_changes(&after, &before, &changes, NULL, 0) && !changes.count);
+        b.cache_file = files[2];
+        CHECK(sh_package_compilation_changes(&before, &after, &changes, error, sizeof(error)) && changes.count == 1);
+        a.body = NULL;
+        CHECK(sh_package_compilation_changes(&before, &after, &changes, error, sizeof(error)) && changes.count == 1);
+        /* Authored source metadata cannot override the generated payload. */
+        sh_package_source_file source = {0}; sh_package_sources sources = {0};
+        sh_package_file_identity identity;
+        CHECK(sh_package_bytes_identity(body, length, &identity));
+        sources.files = &source; sources.file_count = 1;
+        source.length = identity.length; memcpy(source.digest, identity.digest, sizeof(source.digest));
+        before.sources = after.sources = &sources; a.source = b.source = 0;
+        CHECK(sh_package_compilation_changes(&before, &after, &changes, error, sizeof(error)) && changes.count == 1);
+        CHECK(sh_package_compilation_probe(&before, a.engine_path, error, sizeof(error)) == 1);
+        b.cache_file = files[1];
+        CHECK(sh_package_compilation_changes(&before, &after, &changes, error, sizeof(error)) && !changes.count);
+        a.cache_file = NULL; before.sources = NULL;
+        CHECK(!sh_package_compilation_changes(&before, &after, &changes, error, sizeof(error)) && !changes.count);
+        CHECK(sh_package_compilation_probe(&before, a.engine_path, error, sizeof(error)) == -1);
+    }
+    sh_package_changes_free(&changes);
+    for (size_t i = 0; i < 3; i++) sh_package_file_release(files[i]);
+    free(body);
+}
+
 static void test_changes(const sh_package_compilation *compiled)
 {
+    test_cached_changes();
     test_native_identity_changes();
     sh_package_changes changes = {0};
     char error[1024];

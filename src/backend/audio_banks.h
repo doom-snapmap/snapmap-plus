@@ -89,7 +89,9 @@ typedef struct sh_audio_bank_closure_report {
  * selected contains caller-owned seed banks and receives the complete union.
  * A direct-use event requires membership; scanning available declarations may
  * allow unplayed/unbanked declarations by setting require_events to zero.
- * Resident media also selects the scoped bank carrying its DATA when present,
+ * Hard object references select their scoped defining bank; they need not be
+ * stored in the referring bank. Explicit preparation-bank targets still require
+ * membership in that named bank. Resident media selects the bank carrying DATA,
  * preferring an already selected provider. Remaining external-media lookup is
  * the caller's responsibility. Explicit bank dependencies and hard references are mandatory
  * in both modes. No allocation or native action occurs; discard the selection

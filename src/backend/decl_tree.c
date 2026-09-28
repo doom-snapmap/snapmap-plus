@@ -397,3 +397,19 @@ int sh_decl_tree_literal(const sh_decl_node *node, const char **text, size_t *le
     *text = value; *length = size;
     return 1;
 }
+
+int sh_decl_tree_list_count(const sh_decl_node *node, size_t *count)
+{
+    const char *value; size_t length, at = 0, number = 0;
+    if (!count || !sh_decl_tree_literal(node, &value, &length) || !length) return 0;
+    int negative = value[0] == '-';
+    if (negative) at++;
+    if (at == length) return 0;
+    size_t limit = negative ? 2147483648u : 2147483647u;
+    for (; at < length; at++) {
+        unsigned digit = (unsigned char)value[at] - '0';
+        if (digit > 9 || number > (limit - digit) / 10u) return 0;
+        number = number * 10u + digit;
+    }
+    *count = negative ? 0 : number; return 1;
+}

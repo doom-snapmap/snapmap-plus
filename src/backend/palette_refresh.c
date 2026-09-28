@@ -382,13 +382,19 @@ static void *pr_entries_palette(void)
     return (void *)(editor + PR_EDITOR_PALETTE_OFF);
 }
 
-/* The entityDef native name is read by the paired accessor at +0x58. */
+/* Native construction copies the entityDef resource's +8 name into an
+ * independently allocated editor defsub. The palette finder reads +0x58
+ * from that defsub; callers here hold the original resource instead. */
+static const char *pr_entries_decl_name(const void *decl)
+{
+    const uint8_t *entity = decl ? *(const uint8_t **)((const uint8_t *)decl + 0x1c8) : NULL;
+    return entity ? *(const char **)(entity + 8) : NULL;
+}
+
 static int pr_entries_identity(const sh_palette_entry_source *source)
 {
     __try {
-        const uint8_t *entity = source && source->snap_editor_entity ?
-            *(const uint8_t **)((const uint8_t *)source->snap_editor_entity + 0x1c8) : NULL;
-        const char *name = entity ? *(const char **)(entity + 0x58) : NULL;
+        const char *name = source ? pr_entries_decl_name(source->snap_editor_entity) : NULL;
         return source && source->entity_def_name && source->entity_def_name[0] && name &&
             !strcmp(name, source->entity_def_name);
     } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
@@ -438,7 +444,9 @@ static int pr_palette_valid(const pr_native_palette *p)
     if (!p->groups.count) return !p->labels.count;
     if (p->groups.count != p->labels.count + 1) return 0;
     void **groups = p->groups.data;
-    if ((uintptr_t)groups[0] != first || (uintptr_t)groups[p->groups.count - 1] != end) return 0;
+    /* Native reset expands end to all bodies before categories are rebuilt.
+     * The existing categories may still cover only a searchable prefix. */
+    if ((uintptr_t)groups[0] != first) return 0;
     for (int i = 1; i < p->groups.count; i++)
         if ((uintptr_t)groups[i] < (uintptr_t)groups[i-1] || (uintptr_t)groups[i] > end ||
             ((uintptr_t)groups[i] - first) % 0x6f0) return 0;
@@ -507,8 +515,7 @@ int sh_palette_entries_prepare_authoring(sh_palette_entries *batch,
                 void *decl = *(void **)((unsigned char *)current->bodies.data + (size_t)j * 0x6f0);
                 if (decl == batch->items[i]->decl) { found = 1; break; }
                 if (decl) {
-                    const unsigned char *entity = *(const unsigned char **)((unsigned char *)decl + 0x1c8);
-                    const char *name = entity ? *(const char **)(entity + 0x58) : NULL;
+                    const char *name = pr_entries_decl_name(decl);
                     if (name && !strcmp(name, batch->items[i]->name)) goto done;
                 }
             }

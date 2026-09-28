@@ -286,14 +286,15 @@ static void success_cases(void)
         CHECK(loads == (retired ? 1 : 2) && defaults == retired);
         CHECK(sh_resource_resident_end(pass, 1, error, sizeof(error))); check_restored();
     }
-    {
+    for (int physical = 0; physical < 2; physical++) {
         /* Equal path bytes rebound to a different native object must select
-         * both identities, including the old one's dependent cached object. */
+         * both identities, including the old one's dependent cached object,
+         * even when there is no physical file change at all. */
         reset(); expect_reconstructed = 7;
         sh_package_change row = {"compiled/shared.bin", SH_PACKAGE_RESOURCE_REPLACED,
             "model", "unrelated", "model", "body.lwo"};
         sh_package_native_identity added = {"model", "unrelated"}, removed = {"model", "body.lwo"};
-        sh_package_changes changes = {&row, 1};
+        sh_package_changes changes = {physical ? &row : NULL, physical};
         changes.added = &added; changes.added_count = 1;
         changes.removed = &removed; changes.removed_count = 1; changes.identities_complete = 1;
         sh_resource_resident *pass = sh_resource_resident_begin(&changes, 0, 0, error, sizeof(error));

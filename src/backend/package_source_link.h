@@ -64,6 +64,15 @@ typedef struct sh_package_source_link_native {
     /* Optional retained audio inventory for this exact scope list. Owns raw
      * bank/media source accounting and reverse sound nomination. */
     sh_package_audio_program *audio;
+    /* Prepare a single-file unit's effective native fields before dependency
+     * discovery. 0 keeps its source; 1 returns malloc-owned equivalent text;
+     * -2 denotes invalid authored state, -3 unavailable inherited meaning,
+     * -1 an operational failure. A rewrite
+     * must preserve native meaning, not introduce policy. Exact source bytes
+     * remain the original certificate witness and are never overwritten. */
+    int (*prepare)(void *context, sh_package_source_reader *reader,
+        const sh_package_link_unit *unit, unsigned char **body, size_t *length,
+        char *error, size_t capacity);
 } sh_package_source_link_native;
 
 /* Enumerate supplied units, complete their catalog permutations and walk the
@@ -140,10 +149,6 @@ sh_package_source_link *sh_package_source_link_open_attributed(
     const sh_package_source_link_native *native, const sh_package_source_root_plan *roots,
     sh_package_source_failure *failure, char *error, size_t capacity);
 void sh_package_source_link_close(sh_package_source_link *source);
-/* Supplied files the linker carries in their bundle but does not link, with an
- * accounted reason: transparency atlas entries are packed by the renderer once
- * at startup, and materials name them by string with precomputed coordinates. */
-int sh_package_source_link_ancillary(const char *path);
 /* Reverse discovery stops at stock sources beyond the registered readers
  * instead of refusing every package. scope SIZE_MAX names the stock unit whose
  * reader stopped; any other scope changed a stock root whose closure crosses

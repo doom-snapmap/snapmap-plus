@@ -198,6 +198,43 @@ static int ec_number(const char *text, size_t length, size_t *value)
     *value = result; return 1;
 }
 
+/* Shrinking a list discards inherited rows, but an explicit write outside the
+ * effective count is a native reader error. Check the incoming layer before
+ * overlay/pruning so it cannot silently turn that invalid write into a no-op. */
+static int ec_validate_layer(const sh_decl_node *target, const sh_decl_node *source)
+{
+    typedef struct frame { const sh_decl_node *target, *source; } frame;
+    frame *stack = NULL, current = {target, source};
+    size_t count = 0, capacity = 0;
+    int result = -1;
+    for (;;) {
+        const sh_decl_node *number = sh_decl_tree_member(current.source, "num");
+        if (!number) number = sh_decl_tree_member(current.target, "num");
+        size_t limit = 0;
+        if (number && !sh_decl_tree_list_count(number, &limit)) { result = -2; goto done; }
+        for (const sh_decl_node *child = current.source->children; child; child = child->next) {
+            size_t length = strlen(child->key), index;
+            if (number && length > 6 && !strncmp(child->key, "item[", 5) && child->key[length - 1] == ']' &&
+                (!ec_number(child->key + 5, length - 6, &index) || index >= limit)) {
+                result = -2; goto done;
+            }
+            if (!child->compound) continue;
+            if (count == capacity) {
+                size_t next = capacity ? capacity * 2 : 16;
+                frame *grown;
+                if (next < capacity || next > SIZE_MAX / sizeof(*stack) ||
+                    !(grown = realloc(stack, next * sizeof(*stack)))) goto done;
+                stack = grown; capacity = next;
+            }
+            stack[count++] = (frame){sh_decl_tree_member(current.target, child->key), child};
+        }
+        if (!count) { result = 1; break; }
+        current = stack[--count];
+    }
+done:
+    free(stack); return result;
+}
+
 static int ec_prune(sh_decl_node *root)
 {
     sh_decl_node **stack = NULL, *current = root;
@@ -206,8 +243,7 @@ static int ec_prune(sh_decl_node *root)
     for (;;) {
         const sh_decl_node *number = sh_decl_tree_member(current, "num");
         size_t limit = 0;
-        if (number && (number->compound || !number->value ||
-            !ec_number(number->value, strlen(number->value), &limit))) goto done;
+        if (number && !sh_decl_tree_list_count(number, &limit)) goto done;
         for (sh_decl_node **slot = &current->children; *slot;) {
             sh_decl_node *child = *slot;
             size_t index, length = strlen(child->key);
@@ -294,6 +330,11 @@ sh_decl_node *sh_decl_entity_expanded_state(const sh_decl_node *definition,
                 if (!node->compound) { snprintf(error, capacity, "edit: unsupported state shape"); goto done; }
                 slot = &node->next;
             }
+        }
+        int valid = ec_validate_layer(result, layer_root);
+        if (valid < 0) {
+            snprintf(error, capacity, valid == -2 ? "inherited state has an invalid list count or explicit index" :
+                "inherited state validation allocation failed"); goto done;
         }
         layers[i - 1].tree = NULL;
         if (!ec_overlay(result, layer_root) || !ec_prune(result)) {

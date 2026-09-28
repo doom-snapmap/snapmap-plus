@@ -93,7 +93,9 @@ static void test_expanded_state(void)
             "{ inherit = \"cycle/a\"; }", "{ inherit = \"unreadable\"; }",
             "{ inherit = \"missing\"; }", "{ inherit = \"state/base\"; expandInheritance = false; }",
             "{ inherit = \"state/base\"; edit = { nested = 1; } }",
-            "{ inherit = \"state/base\"; edit = { list = { num = -1; } } }",
+            "{ inherit = \"state/base\"; edit = { list = { num = -2147483649; } } }",
+            "{ inherit = \"state/base\"; edit = { list = { num = 1; item[1] = \"outside\"; } } }",
+            "{ inherit = \"state/base\"; edit = { list = { item[3] = \"outside\"; } } }",
             "{ inherit = \"state/base\"; edit = { Target = \"different-case\"; } }"
         };
         for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
@@ -102,6 +104,13 @@ static void test_expanded_state(void)
             assert(!expanded && *error); sh_decl_tree_free(input);
         }
     }
+    input = sh_decl_tree_parse(text("{ inherit = \"state/base\"; edit = { list = { num = -1; } } }"), NULL, 0);
+    expanded = sh_decl_entity_expanded_state(input, &source, error, sizeof(error));
+    assert(expanded);
+    list = sh_decl_tree_member(sh_decl_tree_member(expanded, "edit"), "list");
+    assert(sh_decl_tree_member(list, "num") && !sh_decl_tree_member(list, "item[0]") &&
+        !sh_decl_tree_member(list, "item[1]"));
+    sh_decl_tree_free(expanded); sh_decl_tree_free(input);
     input = sh_decl_tree_parse(text("{ inherit = \"deep/4096\"; edit = { target = \"last\"; } }"), NULL, 0);
     expanded = sh_decl_entity_expanded_state(input, &source, error, sizeof(error));
     assert(expanded && sh_decl_tree_member(sh_decl_tree_member(expanded, "edit"), "target"));

@@ -1077,6 +1077,12 @@ static struct {
 } g_pending_map;
 static int g_transition_previous_busy;
 static char g_transition_error[2048];
+/* Retained editor sources also need publication on ordinary native loads,
+ * including SaveAndPlay. They have no new delivery or installation transaction.
+ * Reuse the verified unload/purge boundary; never rebuild shared native tables
+ * while the editor or an old spawn request can still hold their storage. */
+static int g_retained_transition;
+static DWORD g_retained_transition_thread;
 
 static int preflight_abort_saved_load(void *editor)
 {
@@ -1431,6 +1437,15 @@ int sh_rawmap_transition_pending(void *manager, const void *parameters)
 {
     int matches = 0, valid = 0;
     (void)manager;
+    if (!g_pending_map.state) {
+        if (g_retained_transition) return -1;
+        if (!sh_package_runtime_occurrences_pending() || !sh_package_runtime_admission_ready() ||
+            !sh_decl_server_map_preparation_ready()) return 0;
+        g_retained_transition = 1; g_retained_transition_thread = GetCurrentThreadId();
+        g_transition_previous_busy = g_preflight_busy; g_preflight_busy = 1;
+        g_transition_error[0] = 0;
+        return 1;
+    }
     if (g_pending_map.state != 4 || !g_pending_map.loading.matches ||
         GetCurrentThreadId() != g_pending_map.thread) return 0;
     __try { matches = g_pending_map.loading.matches(g_pending_map.request.context, parameters); }
@@ -1449,6 +1464,17 @@ int sh_rawmap_transition_activate(void)
 {
     char *prepared = NULL;
     int ok = 0, failed;
+    if (g_retained_transition) {
+        if (g_retained_transition != 1 || GetCurrentThreadId() != g_retained_transition_thread ||
+            !sh_map_transition_at_boundary()) return 0;
+        if (!sh_decl_server_activate_occurrences(NULL)) {
+            sh_package_runtime_error(g_transition_error, sizeof(g_transition_error));
+            return 0;
+        }
+        g_retained_transition = 2;
+        backend_log("PACKAGES: retained editor resources activated at native map boundary");
+        return 1;
+    }
     if (g_pending_map.state != 5 || GetCurrentThreadId() != g_pending_map.thread ||
         !sh_map_transition_at_boundary()) return 0;
     __try {
@@ -1484,6 +1510,8 @@ done:;
 
 int sh_rawmap_transition_commit(void)
 {
+    if (g_retained_transition) return g_retained_transition == 2 &&
+        GetCurrentThreadId() == g_retained_transition_thread;
     if (g_pending_map.state != 5 || GetCurrentThreadId() != g_pending_map.thread) return 0;
     return sh_package_runtime_commit_map(g_pending_map.plan, sh_mpkg_activation_commit,
         g_transition_error, sizeof(g_transition_error));
@@ -1491,11 +1519,18 @@ int sh_rawmap_transition_commit(void)
 
 int sh_rawmap_defers_install_commit(void)
 {
-    return g_pending_map.state != 0 || sh_prefab_import_pending();
+    return g_pending_map.state != 0 || g_retained_transition != 0 || sh_prefab_import_pending();
 }
 
 void sh_rawmap_transition_finished(int loaded)
 {
+    if (g_retained_transition) {
+        if (GetCurrentThreadId() != g_retained_transition_thread) return;
+        g_retained_transition = 0; g_retained_transition_thread = 0;
+        g_preflight_busy = g_transition_previous_busy;
+        if (!loaded && g_transition_error[0]) sh_mpkg_report_error(g_transition_error);
+        return;
+    }
     if (g_pending_map.state != 5 || GetCurrentThreadId() != g_pending_map.thread) return;
     g_pending_map.state = 3;
     g_preflight_busy = g_transition_previous_busy;

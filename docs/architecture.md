@@ -62,6 +62,11 @@ Lexer source labels retain native casing for relative includes, while catalog
 and dependency keys normalize the virtual-root spelling. Preparation uses the
 native nonfatal diagnostic flag and rejects recorded parser errors through its
 recovery path instead of invoking an engine session error.
+Fresh map compilations retain the installed library's immutable native-input
+cache when there is no preceding map provider. Verified cooked outputs can then
+serve later maps without repeating preparation. This cache contains installed
+originals only; package source selection and map ownership remain independent,
+and shader ABI checks still verify current native identities.
 Source discovery collects explicitly retained program-preparation requests across
 the current dependency frontier before retrying. Waiting programs are neither
 reader coverage gaps nor usable units: no partial graph reaches certification
@@ -213,6 +218,10 @@ thread, then transfers the completed bytes to its caller. Existing bounded
 export slots return zero if the complete payload does not fit. The owned slot
 and prefab import queue have no fixed payload buffer; native signed string
 lengths and allocation overflow remain checked.
+The prefab list reads the same complete file for preview and placement. Preview
+projects only the top-level entities array through the native byte-preserving
+JSON reader; embedded deliveries never enter the WebView message. The full
+authored file remains the placement input, so bundle size does not disable import.
 
 ## Threads and edit results
 
@@ -371,6 +380,14 @@ editor extensions; imported authored differences cannot rewrite those live
 objects. Temporary imported palette entries extend name lookup only on a native
 miss and retain exact source ownership independently of staging or placed entities.
 
+Native selector retention starts from the resource family that the selector
+actually borrows, then follows its exact bound dependencies. The entity palette
+retains `snapeditorentitydef` roots and their closure; unrelated gameplay resources
+in the same compiled provider are not pinned by the palette. Multiple live
+selectors retain the union of their roots. A genuinely borrowed shared slot stays
+protected until native retirement, while a new map can publish unrelated authored
+gameplay values. This scope is an internal native contract, not package metadata.
+
 Dependency classification is not a native-original certificate. The local-library
 stage resolves `landPageFile` from scoped String defaults and ordered material
 writes, asks its native adapter for the actual page provider and resolved data
@@ -401,6 +418,19 @@ cooked image file remain distinct from an intrinsic image even when their
 basenames match. Other zero-file native families still
 require admission rules. Both compiler passes and material inspection share captured original
 bytes, absence and read failures; they cannot reread different defaults mid-build.
+
+Transparency atlas entries are ordinary typed resources backed by regions the
+renderer allocates and releases dynamically. Material construction reads
+`transSortMap` and `transAtlasMap` as strings, strips their final extension, and
+tries the atlas manager before the ordinary image fallback. The compiler captures
+both available requests in the material's source scope. Constructor request
+bindings route each manager to its compiled identity without rewriting those
+strings or sharing a peer package's selection. Nested loads and exceptions release
+their retained provider independently. Atlas images use their native generated
+path and the existing renderer publication boundary; no startup repacking or
+extra game reset is involved. When a package supplies only the atlas carrier,
+the ordinary-image fallback binds that same cooked image. Atlas capacity and
+compression remain native renderer constraints, not package author settings.
 
 Articulated-figure inspection and relocation share one native grammar reader.
 Settings bind the MD6 definition and clip material; custom body shapes bind a
@@ -550,6 +580,15 @@ availability checks. Recorded contexts compile strictly from the map's source
 inventory. Typed rebinding replaces only observed native resource string sites,
 including instance fields; prose, editor data and legacy text bytes stay exact.
 Failed reconstruction publishes neither a partial buffer nor a partial provider.
+Documents with neither delivery nor saved ownership also accept historical custom
+resource names from the installed library. The same typed reader translates these
+names to compiled identities before native loading; shipped SnapMap and built-in
+product names, registration bits and unrelated strings stay untouched. The active
+map never supplies these aliases. If several installed variants have an old name
+that did not record its owner, stable source-context order selects one; all variants
+remain selectable, and the next save retains the selected identity and complete
+source package. This compatibility route never fills missing recorded ownership
+or changes the authored values of a map that carries its packages.
 Native parsing strips binding carriers alongside package carriers.
 Deferred native cache selection receives that same compiled, stripped buffer
 through its activation callback. Captured metadata continues to identify the
@@ -685,8 +724,13 @@ editor eligibility and the emitted resource's delivery ownership. They do not
 change equivalence or mix bank/media file indices into a declaration's physical
 source list. Exact original SnapMap behavior does not acquire a package owner
 from an unrelated edit in its container; campaign-only activation keeps its
-delivery ownership. Native bank-reference edges still follow their captured
-construction recipe; ownership collection does not remove those dependencies.
+delivery ownership. Native Play actions keep their original bank locator after
+exact record and dependency comparison against a separately captured original
+scope. That locator controls preparation and release, not every unrelated sound
+in the container. Private actions retain their complete scoped bank dependency;
+they cannot alias actions with different preparation banks. A second
+classification pass adds those private transport edges without redirecting
+certified native actions. Witnesses never fill authored-scope definition holes.
 When this adapter is supplied, raw PC bank/media inputs belong to the audio
 program instead of the generic declaration/resource-manager seeder. It inspects
 effective bank metadata, nominates supplied banks and banks using supplied media,
@@ -701,14 +745,25 @@ inactive locales remain in the intact delivery bundle without current-language
 nomination. Source media lookup uses the numeric index and current locale, never
 a peer package. Malformed bank data rejects the candidate with its diagnostic.
 After numeric binding, the program materializer streams prepared banks and media
-into the same immutable resource cache used for ordinary package files. Numeric
-outputs preserve their native directory and locale; original availability paths,
+into the same immutable resource cache used for ordinary package files. Private
+banks omit certified native objects and resident media. Remaining media
+ranges are compacted with their alignment and overlaps preserved, and DIDX offsets
+are rewritten without decoding payloads. The activation plan retains the captured
+original providers before loading these projections, including the original
+counterparts of edited banks. Both use the same rollback and retirement machinery.
+Shared controls and bus definitions retain their separate policy publication.
+The complete authored bank remains available in the package and compiler view.
+Numeric outputs preserve their native directory and locale; original availability paths,
 delivery owners and exact sound/bank dependency edges stay with the compiled
 resources. Exact duplicate outputs merge their owners, while unchanged SnapMap
 originals stay native. The unpublished provider is replaced only after all files
 and dependencies are ready; failed preparation leaves it unchanged and complete
 cache objects remain reusable. Open streams retain their bytes independently of
-the old compilation. The retained graph also moves authored file inputs onto
+the old compilation. Resource comparison and availability probing use a generated
+file's sealed payload directly; it does not need an authored source-table row.
+When both representations exist, the sealed output supplies the effective content
+identity. Memory/file comparisons stream exact bytes without loading the whole
+file into memory. The retained graph also moves authored file inputs onto
 immutable cache snapshots, allowing package authors to edit their files while
 an earlier provider still serves its captured content. Cache publication is serialized separately from streaming,
 and a damaged cached occupant is preserved rather than rejecting valid input.
@@ -963,6 +1018,27 @@ or for changed pages to a captured private family and its identity; it never
 certifies either from a currently loaded, potentially modified material. Native
 rendering acceptance remains outstanding.
 
+Private identity reservations survive individual provider compilations. The
+linker keeps process-lifetime exact binding proofs in the existing sealed resource
+cache. Each compilation streams new proofs into one immutable file with bounded
+records; later comparisons share an independent reader per retained file. This
+avoids one file and handle for every resource. Proofs include original bytes,
+member identities, implicit witnesses, reader semantics
+and labelled dependency identities. The shared-original versus private native
+name contract is part of binding identity: equal editor declaration text reached
+through different contracts also gives its consumers distinct identities. This
+prevents a map-private selector from sharing an installed mutable editor slot.
+A matching fingerprint selects a streamed
+exact comparison; it never proves equality alone. Every matching graph node is
+checked, including cyclic dependencies. Equal repeated imports reuse their native
+names and add no proof or reservation. Different bindings retain separate names.
+Issued names and numeric IDs remain reserved even before materialization or after
+failed activation, because a defaulted native object can outlive its provider.
+The native registry separately checks stock reservations and numeric collisions;
+an exact binding proof does not waive either. A failed link commits no history.
+This cache is compiler-owned and does not alter authored delivery archives or
+introduce package descriptor fields.
+
 The linked provider retains each resource's assigned native manager identity
 separately from its declaration-registration identity. Cooked model, image and
 shader aliases therefore remain binary resources while still participating in
@@ -1069,26 +1145,43 @@ Encounter whitelists also compose as membership collections. Both native
 inspectors walk the encounter registry, filter by membership and store selected
 declaration names, so different whitelist orders and repeated entries do not
 create a conflict or change a saved selection.
-A conductor's AI registrations are presentation-ordered: the spawn manager
-picks uniformly among every row sharing a bit with a request, so copies that
-list stock rows in different orders compose. An AI's type is the key of the
-first row registering its definition, and the first global AI modifier whose
-mask meets that type applies. Composition preserves these first-match winners,
-not every pairwise order: rows already shadowed by a winner can appear in either
-order without changing behavior. A contribution's changed winner takes precedence
-over the stock choice. Different changes to the same shared winner resolve in
-stable source order, with a frozen map context first, and the decision is recorded
-against the authored source names. All valid rows remain available. Stock rows a copy
-omits are restored in stock order ahead of its own rows. When individually
-valid contributions cannot compose together, that is product coverage, not
-evidence against an owner: the compile names the contributions involved and
-leaves none unserved, so the candidate fails and the previous usable
-generation stays. A frozen legacy context's conductor copy composes into
-the stock-named conductor with its authored keys, and the stock rows it
-removed stay removed, so its requests keep their historical members. The
-engine resolves the conductor by name, so in a map document that composition
-keeps the stock name; a modern map's copy stays private and the installed
-library's conductor serves its rows.
+A conductor's spawn selection uses every row sharing a bit with a request;
+duplicate authored rows therefore carry selection weight. An AI's type comes
+from its first registration, and its first matching global modifier applies.
+The compiler captures this behavior before combining independent scopes. Changed
+classifications or modifiers give the AI a private binding even when its own
+declaration bytes match. Exact dedupe includes that captured behavior. Missing
+stock rows are restored for modern contributions; frozen historical contexts
+retain their recorded omissions.
+
+Requests retain their complete source registration table as a dependency. An
+individual AI retains its first classification and effective modifier, including
+an explicitly absent modifier. Private keys and group dictionaries travel with
+the compiled program and its occurrence leases. Active-provider composition
+projects retained rows into the engine's shared conductor, preserving each
+source's first-match behavior and maximum authored row multiplicity across equal
+tables. Copying an occurrence therefore retains the registry it needs after the
+source map closes. Native publication must complete before an activation succeeds;
+retaining bytes alone does not establish that existing consumers were updated.
+Additive editor admission distinguishes alias membership from resource changes.
+Native alias membership alone does not change
+what the engine reads: when every carrier is unchanged and the installed SnapMap
+catalog proves the exact name/path associations, learning or forgetting that
+stock membership does not rebuild its consumers. Private names, changed inputs
+and unverified associations retain activation work. Constructor differences are
+checked afterward and still rebuild an owner even with identical physical bytes.
+Identity-only additions/removals participate in native refresh without requiring
+a changed file row. Additive admission retains the existing-object lifetime guard.
+
+The immutable dispatch program is prepared after merging the incoming dependency
+closure. Group codes and classifications with no modifier
+are published together; recovery republishes the previous program. This metadata
+step does not reconstruct existing native registration tables in the active editor.
+The next ordinary native map load, including Play from the editor, publishes any
+pending retained-source composition after the engine's verified resource purge
+and before allocation of new consumers. It uses the same activation and recovery
+path as a prepared map load, preserves the current map's source bindings, and
+creates no installation transaction. No extra reload or process restart is used.
 For shared editor presentation, opposing valid cosmetic preferences resolve in
 a stable order. A private gameplay binding keeps its own edited presentation
 while accepting compatible collection contributions. Gameplay fields never use
@@ -1172,6 +1265,13 @@ unchanged. After the native provider releases a private context, filesystem
 locks defer deletion of that retired cache without preventing another map load.
 Failures to release a live provider or roll back an installation remain gates.
 
+The availability walk also follows the compiler's exact bound dependency graph.
+Native registration dispatch and cooked companions can introduce required files
+without a reflected text reference. Each reachable resource is expanded once,
+including cyclic links; palette companionship and unreachable package members
+do not create gameplay installation requirements. This uses the map's compiled
+bindings and never resolves those dependencies through a local variant.
+
 Save transport identifies each complete source tree independently of its descriptor
 ID. This prevents two different same-ID variants from replacing each other's shards;
 identical complete copies need only one payload. The existing shard grammar remains
@@ -1206,6 +1306,21 @@ same slot when the parent layout is consistent. They are not full collections
 with missing entries. Mixing complete layouts with unresolved inherited patches,
 or changing the parent while composing those patches, requires resolving that
 layout and is refused rather than guessing identities from numeric positions.
+
+Spawn registrations retain native positions in each isolated source, including
+parents without an `inherit` header. The compiler expands `aiTypeList` and
+`globalAIMods` through the captured parent scope before restoring stock rows or
+combining registrations. It constructs omitted native slots with zero masks and
+null definitions; omitted health and damage multipliers start at one. Non-positive
+native list counts clear the list. Shrinking removes inherited rows, but explicit
+writes outside the effective count remain malformed input. Preparation happens in
+owned trees, preserving authored package and embedded-map bytes. Invalid source
+shapes identify their package owner; allocation and original-read failures do not.
+Dependency discovery applies the same preparation to inherited stock declarations
+that a package references without supplying a copy. Their native key sites bind
+in that source scope too. Original certification still compares captured source
+bytes; preparing an equivalent effective tree does not by itself make vanilla
+content a package dependency.
 
 Grouped collection adapters separate stable member identity from presentation
 placement. All SnapMap editor property sheets use this contract: a property's
@@ -1298,6 +1413,46 @@ authoritative in Play and Edit; retirement restores the local view without
 rewriting its files. Saving retains incoming bundle provenance even when existing
 resources allowed installation to be skipped. Declared resource-loading permissions
 remain active for installed packages; unused gameplay presentation policy does not.
+
+**Native map representation before package delivery (planned).**
+
+This required compiler pass is not yet implemented generally. Existing inline
+entity edits do not create packages. Current gameplay ownership selects complete
+deliveries, but does not by itself prove that package serving is necessary.
+
+Before assigning final private bindings and delivery ownership, prefer equivalent
+native map data for each authored use. Extend the typed resource graph with native
+representation contracts: the supported carrier and reference site, native
+serialization and loading, effective inheritance, runtime scope and dependencies.
+Field type or valid declaration syntax alone is insufficient. In particular,
+an inline entity definition does not imply that its named resource references
+can carry private declaration bodies in a vanilla map.
+
+Use one type-aware structural-difference and dependency-graph algorithm. Derive
+capabilities from native reflection and serializers wherever possible, and reuse
+them across assets sharing a representation. Do not build a conversion table for
+individual weapons, demons or arbitrary scalar fields. A special semantic rewrite
+needs independent equivalence evidence. Distinguish a proven native limitation
+from missing compiler coverage for an existing native representation.
+
+Transform only a derived map and verified typed sites. Preserve authored packages,
+explicit instance values, independent variants, delayed consumers and ordinary
+map strings. Accept a conversion only when the complete required behavior can be
+reproduced by native map data and native SnapMap resources. Broader gameplay
+modifiers are not substitutes for a narrowly scoped resource edit.
+
+Recompute remaining gameplay dependencies after conversion. A fully native result
+has no package carrier or installation requirement. A mixed result still retains
+complete required authored bundles; this pass never produces partial installations.
+Fully native output retains the resulting content, not necessarily its original
+package grouping. Existing embedded maps retain their source ownership until a
+proven equivalent replacement commits. Unsupported conversion keeps the valid mod
+representation and authored behavior rather than dropping edits or rejecting a
+package. Track missing conversion coverage separately from invalid authored data.
+
+Cover native and mixed output, inheritance, nested references, distinct uses,
+save/reopen/copy/undo and isolation from installed local variants. Compatibility
+requires native behavior without package providers, not just successful parsing.
 
 Consent covers complete supplying bundles for missing resources. Preparation,
 publication, activation and native load form one transaction. Successful activation

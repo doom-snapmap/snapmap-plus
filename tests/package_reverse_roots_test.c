@@ -507,9 +507,8 @@ static void test_failure_attribution(fixture *f, const sh_package_compile_enviro
     if (!ok) fprintf(stderr, "fileless model: %s\n", error);
     assert(ok && invalid == SIZE_MAX && unserved == SIZE_MAX);
     sh_package_library_free(&out); sh_package_sources_free(fileless_sources);
-    /* A package's transparency atlas entries are carried in its bundle but not
-     * linked: the renderer packs its atlas at startup. The rest of the package
-     * compiles and each entry is accounted, new or replacing a SnapMap one. */
+    /* Transparency entries are native resources backed by dynamic atlas regions.
+     * New and changed entries receive private identities like other resources. */
     create("attribution/overrides/atlas/package.json", "{\"id\":\"atlas\",\"name\":\"Atlas\"}");
     create("attribution/overrides/atlas/assets/generated/transsortatlas/textures/fx/campaignglow.bimage", "package-atlas");
     sh_package_sources *atlas_sources = sh_package_sources_scan(path, error, sizeof(error)); assert(atlas_sources);
@@ -518,7 +517,15 @@ static void test_failure_attribution(fixture *f, const sh_package_compile_enviro
     ok = sh_package_library_compile(atlas_sources, &env, catalog, original, f, registry,
         (uintptr_t)f->reflection, native, &out, error, sizeof(error));
     if (!ok) fprintf(stderr, "atlas entry: %s\n", error);
-    assert(ok && out.coverage && strstr(out.coverage, "Atlas [atlas]: transparency atlas entry textures/fx/campaignglow"));
+    assert(ok && (!out.coverage || !strstr(out.coverage, "transparency atlas entry")));
+    size_t atlas_count = 0;
+    for (size_t i = 0; i < out.compiled->resource_count; i++) {
+        const sh_compiled_resource *resource = out.compiled->resources + i;
+        if (resource->native_type && !strcmp(resource->native_type, "transsortatlas")) {
+            assert(strstr(resource->engine_path, "generated/transsortatlas/smp/")); atlas_count++;
+        }
+    }
+    assert(atlas_count == 1);
     sh_package_library_free(&out); sh_package_sources_free(atlas_sources);
     create("attribution/overrides/atlas/assets/generated/transsortatlas/textures/fx/glow.bimage", "package-atlas");
     atlas_sources = sh_package_sources_scan(path, error, sizeof(error)); assert(atlas_sources);
@@ -528,8 +535,7 @@ static void test_failure_attribution(fixture *f, const sh_package_compile_enviro
         (uintptr_t)f->reflection, native, &out, error, sizeof(error));
     if (!ok) fprintf(stderr, "replaced atlas entry: %s\n", error);
     assert(ok && invalid == SIZE_MAX && unserved == SIZE_MAX &&
-        strstr(out.coverage, "transparency atlas entry textures/fx/glow") &&
-        strstr(out.coverage, "transparency atlas entry textures/fx/campaignglow"));
+        (!out.coverage || !strstr(out.coverage, "transparency atlas entry")));
     /* Nothing replaces the stock entry for other packages or vanilla maps. */
     assert(!sh_package_compilation_find(out.compiled, "generated/transsortatlas/textures/fx/glow.bimage"));
     sh_package_library_free(&out); sh_package_sources_free(atlas_sources);

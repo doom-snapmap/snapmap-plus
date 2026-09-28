@@ -30,6 +30,7 @@ typedef struct pl_work {
     unsigned char *originals;
     size_t count, unit, file, next_edge;
     int replay, failed;
+    sh_package_link_history *history;
     char *error;
     size_t capacity;
 } pl_work;
@@ -109,6 +110,7 @@ static void pl_clear(pl_work *w)
         free(u->names); free(u->paths); free(u->edges); free(u->files); free(u->witnesses); free(u->witness_order);
     }
     free(w->work); free(w->nodes); free(w->member_offsets); free(w->members); free(w->originals);
+    sh_package_link_history_close(w->history);
     sh_package_link_output_free(&w->output);
 }
 
@@ -159,6 +161,16 @@ sh_package_link_reuse *sh_package_link_reuse_open(size_t count)
         free(reuse); return NULL;
     }
     reuse->count = count; return reuse;
+}
+int sh_package_link_reuse_reserve(sh_package_link_reuse *reuse, size_t count)
+{
+    if (!reuse || count >= UINT32_MAX || count > SIZE_MAX / sizeof(*reuse->units)) return 0;
+    if (count <= reuse->count) return 1;
+    pl_reuse_unit *grown = calloc(count, sizeof(*grown));
+    if (!grown) return 0;
+    memcpy(grown, reuse->units, reuse->count * sizeof(*grown));
+    free(reuse->units); reuse->units = grown; reuse->count = count;
+    return 1;
 }
 void sh_package_link_reuse_invalidate(sh_package_link_reuse *reuse, size_t unit)
 {
@@ -389,6 +401,19 @@ static void pl_u64(unsigned char **cursor, uint64_t value)
     for (size_t i = 0; i < 8; i++) (*cursor)[i] = (unsigned char)(value >> (i * 8));
     *cursor += 8;
 }
+static int pl_semantics(pl_work *w, const sh_package_link_unit *source, sh_package_link_node *node)
+{
+    memcpy(node->semantics, source->semantics, 32);
+    if (source->fixed_name) {
+        static const char domain[] = "snapmap-plus/shared-native-name";
+        unsigned char bytes[sizeof(domain) + 32]; sh_package_file_identity identity;
+        memcpy(bytes, domain, sizeof(domain)); memcpy(bytes + sizeof(domain), source->semantics, 32);
+        if (!sh_package_bytes_identity(bytes, sizeof(bytes), &identity))
+            return pl_fail(w, "cannot identify native name binding contract");
+        memcpy(node->semantics, identity.digest, 32);
+    }
+    return 1;
+}
 
 /* Restore a valid earlier capture of this unit. Return 1 when restored, 0 to
  * capture afresh; an incomplete copy is discarded and captured afresh. */
@@ -458,7 +483,10 @@ static int pl_collect(pl_work *w)
         const sh_package_link_unit *source = &w->units[w->unit];
         pl_unit *u = &w->work[w->unit];
         sh_package_link_node *node = &w->nodes[w->unit];
-        if (pl_reuse_restore(w, source, u, node)) continue;
+        if (pl_reuse_restore(w, source, u, node)) {
+            if (!pl_semantics(w, source, node)) return 0;
+            continue;
+        }
         size_t manifest_size = 8, companions = 0, primary_members = 0;
         unsigned char *manifest, *cursor;
         sh_package_file_identity identity;
@@ -577,7 +605,8 @@ static int pl_collect(pl_work *w)
         int ok = sh_package_bytes_identity(manifest, manifest_size, &identity); free(manifest);
         if (!ok) return pl_fail(w, "cannot identify resource unit bytes");
         node->family = source->family; node->path = source->name;
-        memcpy(node->content, identity.digest, 32); memcpy(node->semantics, source->semantics, 32);
+        memcpy(node->content, identity.digest, 32);
+        if (!pl_semantics(w, source, node)) return 0;
         node->edges = u->edges; node->edge_count = u->edge_count;
         pl_reuse_store(w, source, u, node);
     }
@@ -834,6 +863,301 @@ static int pl_name_token(const unsigned char identity[32], size_t attempt, unsig
     memcpy(token, hashed.digest, 32); return 1;
 }
 
+/* Native managers outlive individual providers. Keep exact graph certificates
+ * and every private name/ID we issue for that same lifetime. Hashes only find
+ * candidates: every matching local record is streamed and compared, including
+ * all labelled dependency identities. Comparing every matching node certifies
+ * the complete reachable graph, including cycles, without recursive hashing. */
+typedef struct pl_history_node {
+    unsigned char identity[32];
+    sh_package_file *proof;
+    uint64_t offset, length; /* Bounded record in a shared immutable proof file. */
+} pl_history_node;
+typedef struct pl_history_claim {
+    char *family, *name;
+    uint32_t id;
+    size_t node;
+} pl_history_claim;
+struct sh_package_link_history {
+    char *directory;
+    pl_history_node *nodes;
+    pl_history_claim *claims;
+    size_t count, claim_count, capacity, claim_capacity;
+    size_t *index, *names, *ids, index_capacity, table_capacity;
+};
+sh_package_link_history *sh_package_link_history_open(const char *directory)
+{
+    sh_package_link_history *h = calloc(1, sizeof(*h));
+    if (!h || !directory || !*directory || !(h->directory = _strdup(directory))) {
+        sh_package_link_history_close(h); return NULL;
+    }
+    return h;
+}
+void sh_package_link_history_close(sh_package_link_history *h)
+{
+    if (!h) return;
+    for (size_t i = 0; i < h->count; i++) sh_package_file_release(h->nodes[i].proof);
+    for (size_t i = 0; i < h->claim_count; i++) { free(h->claims[i].family); free(h->claims[i].name); }
+    free(h->directory); free(h->nodes); free(h->claims);
+    free(h->index); free(h->names); free(h->ids); free(h);
+}
+size_t sh_package_link_history_count(const sh_package_link_history *h)
+{ return h ? h->count : 0; }
+static size_t pl_history_node_slot(const sh_package_link_history *h, const unsigned char identity[32])
+{
+    uint64_t hash = UINT64_C(14695981039346656037);
+    for (size_t i = 0; i < 32; i++) hash = (hash ^ identity[i]) * UINT64_C(1099511628211);
+    size_t slot = (size_t)hash & (h->index_capacity - 1);
+    while (h->index[slot] && memcmp(h->nodes[h->index[slot] - 1].identity, identity, 32))
+        slot = (slot + 1) & (h->index_capacity - 1);
+    return slot;
+}
+static size_t pl_history_claim_slot(const sh_package_link_history *h, const char *family,
+    const char *name, uint32_t id, int numeric)
+{
+    uint64_t hash = pl_name_hash(family, numeric ? "" : name);
+    if (numeric) hash = (hash ^ id) * UINT64_C(1099511628211);
+    size_t slot = (size_t)hash & (h->table_capacity - 1);
+    const size_t *table = numeric ? h->ids : h->names;
+    while (table[slot]) {
+        const pl_history_claim *c = h->claims + table[slot] - 1;
+        if (!strcmp(c->family, family) && (numeric ? c->id == id : !strcmp(c->name, name))) break;
+        slot = (slot + 1) & (h->table_capacity - 1);
+    }
+    return slot;
+}
+static int pl_history_claim_add(sh_package_link_history *h, const char *family,
+    const char *name, uint32_t id, size_t node)
+{
+    size_t named = pl_history_claim_slot(h, family, name, id, 0);
+    size_t numeric = pl_history_claim_slot(h, family, name, id, 1);
+    if (h->names[named]) {
+        const pl_history_claim *c = h->claims + h->names[named] - 1;
+        return c->node == node && c->id == id;
+    }
+    if (h->ids[numeric] || h->claim_count >= h->claim_capacity) return 0;
+    pl_history_claim c = {_strdup(family), _strdup(name), id, node};
+    if (!c.family || !c.name) { free(c.family); free(c.name); return 0; }
+    h->claims[h->claim_count++] = c;
+    h->names[named] = h->ids[numeric] = h->claim_count;
+    return 1;
+}
+static sh_package_link_history *pl_history_copy(const sh_package_link_history *old,
+    size_t nodes, size_t claims)
+{
+    sh_package_link_history *h = sh_package_link_history_open(old->directory);
+    if (!h || nodes > SIZE_MAX - old->count || claims > SIZE_MAX - old->claim_count) goto failed;
+    h->capacity = old->count + nodes; h->claim_capacity = old->claim_count + claims;
+    h->index_capacity = pl_table_capacity(h->capacity); h->table_capacity = pl_table_capacity(h->claim_capacity);
+    if (!h->index_capacity || !h->table_capacity) goto failed;
+    h->nodes = pl_alloc(h->capacity, sizeof(*h->nodes));
+    h->claims = pl_alloc(h->claim_capacity, sizeof(*h->claims));
+    h->index = pl_alloc(h->index_capacity, sizeof(*h->index));
+    h->names = pl_alloc(h->table_capacity, sizeof(*h->names));
+    h->ids = pl_alloc(h->table_capacity, sizeof(*h->ids));
+    if (!h->nodes || !h->claims || !h->index || !h->names || !h->ids) goto failed;
+    for (size_t i = 0; i < old->count; i++) {
+        h->nodes[i] = old->nodes[i]; h->nodes[i].proof = sh_package_file_retain(old->nodes[i].proof);
+        h->count++; h->index[pl_history_node_slot(h, h->nodes[i].identity)] = i + 1;
+    }
+    for (size_t i = 0; i < old->claim_count; i++) {
+        const pl_history_claim *c = old->claims + i;
+        if (!pl_history_claim_add(h, c->family, c->name, c->id, c->node)) goto failed;
+    }
+    return h;
+failed:
+    sh_package_link_history_close(h); return NULL;
+}
+typedef struct pl_proof_stream {
+    pl_work *w;
+    size_t unit;
+    uint64_t length;
+    int (*write)(void *, const void *, size_t);
+    void *sink;
+} pl_proof_stream;
+static int pl_proof_bytes(pl_proof_stream *s, const void *bytes, size_t length)
+{
+    if (length > UINT64_MAX - s->length) return 0;
+    s->length += length;
+    return !s->write || s->write(s->sink, bytes, length);
+}
+static int pl_proof_u64(pl_proof_stream *s, uint64_t value)
+{
+    unsigned char bytes[8], *p = bytes; pl_u64(&p, value);
+    return pl_proof_bytes(s, bytes, sizeof(bytes));
+}
+static int pl_proof_string(pl_proof_stream *s, const char *value)
+{
+    size_t length = strlen(value);
+    return pl_proof_u64(s, length) && pl_proof_bytes(s, value, length);
+}
+static int pl_proof_file(pl_proof_stream *s, const pl_file *file)
+{
+    if (!pl_proof_string(s, file->resource->engine_path) || !pl_proof_u64(s, file->identity.length)) return 0;
+    if (!s->write) {
+        if (file->identity.length > UINT64_MAX - s->length) return 0;
+        s->length += file->identity.length; return 1;
+    }
+    pl_input input = {0}; unsigned char bytes[65536]; int ok = 0;
+    if (!pl_input_open_resource(s->w, s->unit, file, &input)) goto done;
+    while (input.position < input.length) {
+        uint64_t left = input.length - input.position;
+        size_t n = left < sizeof(bytes) ? (size_t)left : sizeof(bytes);
+        if (!pl_input_read(&input, bytes, n) || !pl_proof_bytes(s, bytes, n)) goto done;
+    }
+    ok = !input.stream || (fgetc(input.stream) == EOF && !ferror(input.stream));
+done:
+    if (input.stream) fclose(input.stream);
+    return ok;
+}
+static int pl_proof_write(void *context, int (*write)(void *, const void *, size_t), void *sink,
+    char *error, size_t capacity)
+{
+    pl_proof_stream *s = context;
+    const sh_package_link_unit *u = s->w->units + s->unit;
+    const pl_unit *captured = s->w->work + s->unit;
+    sh_package_link_edge *edges = pl_alloc(captured->edge_count, sizeof(*edges));
+    size_t count = 0; int ok = 0;
+    (void)error; (void)capacity;
+    if (!edges) return 0;
+    s->length = 0; s->write = write; s->sink = sink;
+    if (!pl_proof_string(s, "native-binding-proof") || !pl_proof_string(s, u->family) ||
+        !pl_proof_string(s, u->name) || !pl_proof_bytes(s, u->semantics, 32) ||
+        !pl_proof_u64(s, u->fixed_name != 0) ||
+        !pl_proof_u64(s, u->file_count) || !pl_proof_u64(s, u->witness_count)) goto done;
+    for (size_t i = 0; i < u->file_count; i++) {
+        const pl_file *file = captured->files + i;
+        if (!pl_proof_string(s, file->family) || !pl_proof_string(s, file->name) || !pl_proof_file(s, file)) goto done;
+    }
+    for (size_t i = 0; i < u->witness_count; i++)
+        if (!pl_proof_string(s, captured->witness_order[i]->role) || !pl_proof_file(s, captured->witnesses + i)) goto done;
+    for (size_t i = 0; i < captured->edge_count; i++)
+        if (!s->w->units[captured->edges[i].target].stable_name) edges[count++] = captured->edges[i];
+    if (count > 1) qsort(edges, count, sizeof(*edges), pl_implicit_order);
+    if (!pl_proof_u64(s, count)) goto done;
+    for (size_t i = 0; i < count; i++) {
+        size_t target = s->w->output.classes.nodes[edges[i].target];
+        if (!pl_proof_string(s, edges[i].slot) ||
+            !pl_proof_bytes(s, s->w->output.classes.identities[target], 32)) goto done;
+    }
+    ok = 1;
+done:
+    free(edges); return ok;
+}
+typedef struct pl_proof_reader { FILE *stream; uint64_t remaining; } pl_proof_reader;
+typedef struct pl_proof_file_reader {
+    sh_package_file *file;
+    FILE *stream;
+    uint64_t length, position;
+} pl_proof_file_reader;
+static int pl_proof_compare(void *context, const void *bytes, size_t length)
+{
+    pl_proof_reader *reader = context;
+    unsigned char held[65536]; const unsigned char *p = bytes;
+    if (length > reader->remaining) return 0;
+    reader->remaining -= length;
+    while (length) {
+        size_t n = length < sizeof(held) ? length : sizeof(held);
+        if (fread(held, 1, n, reader->stream) != n || memcmp(held, p, n)) return 0;
+        p += n; length -= n;
+    }
+    return 1;
+}
+typedef struct pl_proof_batch {
+    pl_work *w;
+    size_t *units, count;
+} pl_proof_batch;
+static int pl_proof_batch_write(void *context, int (*write)(void *, const void *, size_t), void *sink,
+    char *error, size_t capacity)
+{
+    pl_proof_batch *batch = context;
+    for (size_t i = 0; i < batch->count; i++) {
+        pl_proof_stream proof = {batch->w, batch->units[i]};
+        if (!pl_proof_write(&proof, write, sink, error, capacity)) return 0;
+    }
+    return 1;
+}
+static int pl_history_prepare(pl_work *w)
+{
+    const sh_package_link_history *old = w->adapter->history;
+    if (!old) return 1;
+    size_t claims = w->output.classes.count;
+    for (size_t i = 0; i < w->output.classes.count; i++) {
+        size_t unit = w->output.classes.representatives[i];
+        if (w->units[unit].file_count > SIZE_MAX - claims) return pl_fail(w, "native reservations exceed addressable size");
+        claims += w->units[unit].file_count;
+    }
+    w->history = pl_history_copy(old, w->output.classes.count, claims);
+    if (!w->history) return pl_fail(w, "cannot retain native binding history");
+    sh_package_link_history *h = w->history;
+    pl_proof_batch batch = {w}; uint64_t total = 0; int ok = 0;
+    size_t reader_capacity = pl_table_capacity(old->count);
+    pl_proof_file_reader *readers = pl_alloc(reader_capacity, sizeof(*readers));
+    batch.units = pl_alloc(w->output.classes.count, sizeof(*batch.units));
+    if (!batch.units || !reader_capacity || !readers) {
+        pl_fail(w, "cannot retain native binding proof records"); goto done;
+    }
+    for (size_t i = 0; i < w->output.classes.count; i++) {
+        const unsigned char *identity = w->output.classes.identities[i];
+        size_t slot = pl_history_node_slot(h, identity), held = h->index[slot];
+        pl_proof_stream proof = {w, w->output.classes.representatives[i]};
+        if (!pl_proof_write(&proof, NULL, NULL, w->error, w->capacity)) {
+            pl_fail(w, "cannot measure native binding proof"); goto done;
+        }
+        if (held) {
+            const pl_history_node *node = h->nodes + held - 1;
+            if (!node->proof) { pl_fail(w, "distinct bindings share a native binding fingerprint"); goto done; }
+            size_t at = ((uintptr_t)node->proof >> 4) & (reader_capacity - 1);
+            while (readers[at].file && readers[at].file != node->proof) at = (at + 1) & (reader_capacity - 1);
+            pl_proof_file_reader *file = readers + at;
+            if (!file->file) {
+                file->file = node->proof;
+                file->stream = sh_package_file_open(node->proof, &file->length, w->error, w->capacity);
+            }
+            pl_proof_reader reader = {file->stream, node->length};
+            int equal = reader.stream && node->length == proof.length && node->offset <= INT64_MAX &&
+                node->offset <= file->length && node->length <= file->length - node->offset &&
+                (file->position == node->offset || !_fseeki64(reader.stream, (int64_t)node->offset, SEEK_SET)) &&
+                pl_proof_write(&proof, pl_proof_compare, &reader, w->error, w->capacity) &&
+                !reader.remaining && !ferror(reader.stream);
+            if (!equal) { pl_fail(w, "retained native binding fingerprint lacks matching exact source evidence"); goto done; }
+            file->position = node->offset + node->length;
+        } else {
+            if (proof.length > INT64_MAX - total) { pl_fail(w, "native binding proof exceeds stream addressability"); goto done; }
+            pl_history_node *node = h->nodes + h->count;
+            memcpy(node->identity, identity, 32); node->offset = total; node->length = proof.length;
+            total += proof.length; batch.units[batch.count++] = proof.unit;
+            h->index[slot] = ++h->count;
+        }
+    }
+    if (batch.count) {
+        char *path = NULL;
+        sh_package_file *file = sh_package_file_generate(h->directory, total, NULL,
+            pl_proof_batch_write, &batch, &path, w->error, w->capacity);
+        free(path);
+        if (!file) { pl_fail(w, "cannot retain exact native binding proof"); goto done; }
+        for (size_t i = old->count; i < h->count; i++) h->nodes[i].proof = sh_package_file_retain(file);
+        sh_package_file_release(file);
+    }
+    ok = 1;
+done:
+    for (size_t i = 0; readers && i < reader_capacity; i++) if (readers[i].stream) fclose(readers[i].stream);
+    free(readers);
+    free(batch.units); return ok;
+}
+/* 1 is an exact previously reserved name, 0 is free, -1 is a different binding
+ * or numeric identity. This covers issued but not yet materialized resources. */
+static int pl_history_identity(pl_work *w, const pl_native_identity *identity, size_t group)
+{
+    const sh_package_link_history *h = w->history;
+    if (!h) return 0;
+    size_t node = h->index[pl_history_node_slot(h, w->output.classes.identities[group])] - 1;
+    size_t named = h->names[pl_history_claim_slot(h, identity->family, identity->name, identity->id, 0)];
+    size_t numeric = h->ids[pl_history_claim_slot(h, identity->family, identity->name, identity->id, 1)];
+    if (!named && !numeric) return 0;
+    return named && named == numeric && h->claims[named - 1].node == node ? 1 : -1;
+}
+
 static int pl_assign_one(pl_work *w, pl_registry *registry, size_t group)
 {
     const sh_package_link_registry *native = w->adapter->registry;
@@ -856,7 +1180,7 @@ static int pl_assign_one(pl_work *w, pl_registry *registry, size_t group)
             !w->adapter->assign(w->adapter->context, index, token, w->originals[index],
                 files, count, &w->output.names[group], &unit->paths, w->error, w->capacity) ||
             !w->output.names[group] || !*w->output.names[group] || (count && !unit->paths) ||
-            (!count && strcmp(w->output.names[group], w->units[index].name))) {
+            ((!count || w->units[index].fixed_name) && strcmp(w->output.names[group], w->units[index].name))) {
             pl_fail(w, "native resource identity cannot be assigned safely"); goto done;
         }
         for (size_t i = 0; i < count; i++) if (!unit->paths[i] || !*unit->paths[i]) {
@@ -893,7 +1217,7 @@ static int pl_assign_one(pl_work *w, pl_registry *registry, size_t group)
                 int state = native->check(native->context, identity->family, identity->name,
                     classes->identities[group], w->originals[index], &identity->id, w->error, w->capacity);
                 if (state < SH_PACKAGE_LINK_REGISTRY_COLLISION ||
-                    state > SH_PACKAGE_LINK_REGISTRY_REPLACE_SHARED || !identity->id) {
+                    state > SH_PACKAGE_LINK_REGISTRY_OCCUPIED || !identity->id) {
                     pl_fail(w, "native resource registry verification is incomplete"); goto done;
                 }
                 if (state == SH_PACKAGE_LINK_REGISTRY_REPLACE_SHARED &&
@@ -901,7 +1225,9 @@ static int pl_assign_one(pl_work *w, pl_registry *registry, size_t group)
                     pl_fail(w, "native shared replacement requires a changed same-name binding"); goto done;
                 }
                 occupied = registry->ids[pl_name_slot(registry, identity, 1)];
-                if (state == SH_PACKAGE_LINK_REGISTRY_COLLISION && !collision++)
+                int retained = pl_history_identity(w, identity, group);
+                if ((state == SH_PACKAGE_LINK_REGISTRY_COLLISION || retained < 0 ||
+                    (state == SH_PACKAGE_LINK_REGISTRY_OCCUPIED && retained != 1)) && !collision++)
                     snprintf(cause, sizeof(cause), "the native registry holds %s %s differently", identity->family, identity->name);
                 if (occupied) {
                     const pl_native_identity *held = registry->identities + occupied - 1;
@@ -917,6 +1243,14 @@ static int pl_assign_one(pl_work *w, pl_registry *registry, size_t group)
                 snprintf(cause, sizeof(cause), "members share %s %s", identity->family, identity->name);
         }
         if (!collision) {
+            for (size_t i = 0; w->history && native && i < identity_count; i++) {
+                const pl_native_identity *identity = identities + i;
+                if (w->originals[index] || !strcmp(identity->name, identity->original_name)) continue;
+                size_t node = w->history->index[pl_history_node_slot(w->history, classes->identities[group])] - 1;
+                if (!pl_history_claim_add(w->history, identity->family, identity->name, identity->id, node)) {
+                    pl_fail(w, "cannot retain private native identity reservation"); goto done;
+                }
+            }
             for (size_t i = 0; i < identity_count; i++) {
                 size_t name_slot = pl_name_slot(registry, identities + i, 0);
                 if (registry->names[name_slot]) continue; /* Certified original shared by groups. */
@@ -1400,10 +1734,14 @@ int sh_package_link(const sh_package_sources *sources, const sh_package_link_uni
     sh_package_link_output_free(out);
     w.units = units; w.count = count; w.adapter = adapter; w.error = error; w.capacity = capacity;
     if (!sources || (count && !units) || !adapter || !adapter->resolve || !adapter->bind || !adapter->assign ||
-        (adapter->registry && !adapter->registry->check))
+        (adapter->registry && !adapter->registry->check) || (adapter->history && !adapter->registry))
         goto done;
-    if (!pl_identify(&w) || !pl_members(&w) || !pl_assign(&w) ||
+    if (!pl_identify(&w) || !pl_members(&w) || !pl_history_prepare(&w) || !pl_assign(&w) ||
         !pl_project(&w, sources, policy, canonical_path)) goto done;
+    if (w.history) {
+        sh_package_link_history previous = *adapter->history;
+        *adapter->history = *w.history; *w.history = previous;
+    }
     *out = w.output; memset(&w.output, 0, sizeof(w.output)); ok = 1;
 done:
     if (!ok && !*error) snprintf(error, capacity, "resource linker input is invalid or unavailable");

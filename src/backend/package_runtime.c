@@ -16,14 +16,16 @@
 #include "decl_md6_compose.h"
 #include "decl_block_compose.h"
 #include "package_keys.h"
+#include "package_spawn_registry.h"
 #include "package_material.h"
 #include "grid_room_asset.h"
 #include "resource_graph.h"
 #include "audio_originals.h"
 #include "audio_files_native.h"
 #include "package_library.h"
-#ifndef SH_PACKAGE_RUNTIME_TESTING
+#if !defined(SH_PACKAGE_RUNTIME_TESTING) || defined(SH_SPAWN_KEYS_TESTING)
 #include "spawn_keys.h"
+#define PR_NATIVE_SPAWN 1
 #endif
 #include "package_hud.h"
 #include "package_sound.h"
@@ -43,6 +45,9 @@
 
 static SRWLOCK g_lock = SRWLOCK_INIT;
 static SRWLOCK g_refresh_lock = SRWLOCK_INIT;
+/* Native private identities survive provider retirement and failed activation.
+ * Access is serialized with all provider compilation by g_refresh_lock. */
+static sh_package_link_history *g_link_history;
 /* Ownership changes are serialized by g_refresh_lock. Published pointers and
  * aliases change together under g_lock. A view borrows its catalog through a
  * retained library parent; every compilation/inventory remains independently
@@ -70,6 +75,11 @@ typedef struct pr_provider {
     sh_strids_reservation *strings;
     sh_audio_id_lease *audio_ids;
 #endif
+#ifdef PR_NATIVE_SPAWN
+    sh_spawn_keys_program *spawn_program;
+#endif
+    uint32_t *unmodified_types;
+    size_t unmodified_count;
     sh_package_provenance bindings;
     sh_package_provenance policy_uses; /* explicit active document, not resource supplier union */
     sh_package_provenance historical_bindings; /* Original names before private historical linking. */
@@ -97,6 +107,7 @@ struct sh_package_selector_hold {
     volatile LONG live;
     pr_provider *provider;
     struct sh_package_selector_hold *next;
+    char *family; /* Native selector roots, not every resource in the provider. */
 };
 static sh_package_selector_hold *g_selectors;
 static volatile LONG g_lease_generation, g_lease_published;
@@ -191,7 +202,11 @@ static void pr_release(pr_provider *provider)
     for (size_t i = 0; i < provider->audio_source_count; i++) pr_release(provider->audio_sources[i]);
     free(provider->audio_sources);
     pr_release(provider->parent); free(provider->data_root); free(provider->rejections);
-    free(provider->unserved); free(provider->coverage); free(provider->key_groups); free(provider);
+    free(provider->unserved); free(provider->coverage); free(provider->key_groups); free(provider->unmodified_types);
+#ifdef PR_NATIVE_SPAWN
+    sh_spawn_keys_program_release(provider->spawn_program);
+#endif
+    free(provider);
 }
 /* Precedence follows call order; one owner appears once. A view contributes
  * the owners it already retains, a root provider itself when it has audio. */
@@ -212,20 +227,45 @@ static int pr_audio_source_add(pr_provider *view, const pr_provider *source)
     return 1;
 }
 
-/* The spawn-key detours read the group codes of the providers now serving:
- * the installed library's and the active map's. */
+/* A serving view owns the complete dictionary, including native consumers
+ * whose source map has closed. Checking the union while preparing that view
+ * keeps resource and numeric-key publication in one activation transaction. */
+static int pr_key_groups_add(pr_provider *view, const pr_provider *source, char *error, size_t capacity)
+{
+    if (!source || !source->key_groups || view == source) return 1;
+    if (!view->key_groups && !(view->key_groups = calloc(1, sizeof(*view->key_groups)))) {
+        snprintf(error, capacity, "cannot retain registration key dictionary"); return 0;
+    }
+    if (!sh_package_key_groups_merge(view->key_groups, source->key_groups)) {
+        snprintf(error, capacity, "registration key dictionary changed while its consumers are retained"); return 0;
+    }
+    return 1;
+}
+static int pr_spawn_classifications(pr_provider *view, char *error, size_t capacity);
+static int pr_prepare_spawn_program(pr_provider *view, char *error, size_t capacity)
+{
+    if (!pr_spawn_classifications(view, error, capacity)) return 0;
+#ifdef PR_NATIVE_SPAWN
+    sh_spawn_keys_program *program = sh_spawn_keys_program_create(view->key_groups,
+        view->unmodified_types, view->unmodified_count);
+    if (!program) { snprintf(error, capacity, "cannot prepare native spawn dispatch metadata"); return 0; }
+    sh_spawn_keys_program_release(view->spawn_program); view->spawn_program = program;
+#else
+    (void)view; (void)error; (void)capacity;
+#endif
+    return 1;
+}
 #ifdef SH_PACKAGE_RUNTIME_TESTING
-static const void *g_test_key_groups[4];
+static const void *g_test_key_groups[2];
 #endif
 static void pr_publish_key_groups(void)
 {
-#ifndef SH_PACKAGE_RUNTIME_TESTING
-    if (!sh_spawn_keys_publish_groups(g_library_provider ? g_library_provider->key_groups : NULL,
-        g_map_provider ? g_map_provider->key_groups : NULL))
-        backend_log("SPAWN-KEYS: the map's group codes disagree with the library's; the previous codes stay");
-#else
-    g_test_key_groups[0] = g_library_provider; g_test_key_groups[1] = g_library_provider ? g_library_provider->key_groups : NULL;
-    g_test_key_groups[2] = g_map_provider; g_test_key_groups[3] = g_map_provider ? g_map_provider->key_groups : NULL;
+#ifdef PR_NATIVE_SPAWN
+    sh_spawn_keys_publish_program(g_current_provider ? g_current_provider->spawn_program : NULL);
+#endif
+#ifdef SH_PACKAGE_RUNTIME_TESTING
+    g_test_key_groups[0] = g_current_provider;
+    g_test_key_groups[1] = g_current_provider ? g_current_provider->key_groups : NULL;
 #endif
 }
 static void pr_publish(pr_provider *current, pr_provider *library, pr_provider *map)
@@ -536,7 +576,9 @@ static void *g_test_baseline_context;
 static sh_decl_registry_source g_test_source_registry;
 static uintptr_t g_test_source_reflection;
 static int g_test_installed_links;
+static int g_test_spawn_keys;
 void sh_package_runtime_test_installed_links(int enabled) { g_test_installed_links = enabled; }
+void sh_package_runtime_test_spawn_keys(int enabled) { g_test_spawn_keys = enabled; }
 static const char *g_test_audio_root;
 static const char *g_test_audio_bank_prefix;
 static const wchar_t *g_test_audio_language;
@@ -940,10 +982,16 @@ static pr_provider *pr_prepare_deliveries(const char *data_root, const char *sou
     if (catalog) { baseline = sh_resource_catalog_read_path; baseline_context = catalog; }
 #ifndef SH_PACKAGE_RUNTIME_TESTING
     if (catalog) {
-        native_assets = previous && previous->native_assets ?
-            sh_package_native_assets_retain(previous->native_assets) : sh_package_native_assets_open(doom_root);
+        /* These are immutable installed originals and witnessed source-cook
+         * products, never an authored provider's files. A fresh map has no
+         * previous map provider after leaving the browser: share the library's
+         * retained originals instead of cooking them again on every map load.
+         * Each shader ABI read still verifies the current native identity. */
+        const pr_provider *native_owner = previous && previous->native_assets ? previous : g_library_provider;
+        native_assets = native_owner && native_owner->native_assets ?
+            sh_package_native_assets_retain(native_owner->native_assets) : sh_package_native_assets_open(doom_root);
         if (!native_assets) goto done;
-        if (!previous || !previous->native_assets) {
+        if (!native_owner || !native_owner->native_assets) {
             if (!sh_package_native_assets_configure_consumers(native_assets,
                 sh_resource_graph_native_consumer_ready)) goto done;
             int renderer = sh_host_is_vulkan();
@@ -1063,12 +1111,14 @@ static pr_provider *pr_prepare_deliveries(const char *data_root, const char *sou
             sh_package_library_native native = sh_package_native_assets_adapter(native_assets);
 #ifndef SH_PACKAGE_RUNTIME_TESTING
             native.private_keys = sh_spawn_keys_active();
+#else
+            native.private_keys = g_test_spawn_keys;
 #endif
             /* Installed packages keep the registration keys the installed
              * library gave them: a map compile keys installed scopes as that
              * library does, and a library recompile keeps its live keys. */
             {
-                const pr_provider *keys = source_root ? string_peer : previous;
+                const pr_provider *keys = g_current_provider ? g_current_provider : source_root ? string_peer : previous;
                 native.keys = keys ? &keys->bindings : NULL;
                 native.key_groups = keys ? keys->key_groups : NULL;
             }
@@ -1089,6 +1139,14 @@ static pr_provider *pr_prepare_deliveries(const char *data_root, const char *sou
                 snprintf(error, sizeof(error), "native resource identities are unavailable at package compilation");
                 goto done;
             }
+            if (!g_link_history) {
+                char directory[32768];
+                if (!pr_cache_directory(data_root, directory, sizeof(directory)) ||
+                    !(g_link_history = sh_package_link_history_open(directory))) {
+                    snprintf(error, sizeof(error), "cannot retain native package identity history"); goto done;
+                }
+            }
+            native.history = g_link_history;
             if (!sh_decl_server_registry_source(&registry)) {
                 snprintf(error, sizeof(error), "native source registry is unavailable at package compilation");
                 goto done;
@@ -1387,15 +1445,33 @@ int sh_package_runtime_occurrences_pending(void)
     return InterlockedCompareExchange(&g_lease_generation, 0, 0) !=
         InterlockedCompareExchange(&g_lease_published, 0, 0);
 }
-sh_package_selector_hold *sh_package_runtime_selectors_retain(char *error, size_t capacity)
+static int pr_resource_family(const sh_compiled_resource *resource, const char *family)
+{
+    for (size_t i = 0; i < sh_package_resource_native_count(resource); i++) {
+        sh_package_native_identity identity = sh_package_resource_native_at(resource, i);
+        if (identity.type && !_stricmp(identity.type, family)) return 1;
+    }
+    return 0;
+}
+sh_package_selector_hold *sh_package_runtime_selectors_retain(const char *family, char *error, size_t capacity)
 {
     sh_package_selector_hold *hold = NULL;
     if (error && capacity) *error = 0;
+    if (!family || !*family) {
+        if (error && capacity) snprintf(error, capacity, "native selectors require their root resource family");
+        return NULL;
+    }
     if (!g_activation_callback) AcquireSRWLockExclusive(&g_refresh_lock);
     AcquireSRWLockShared(&g_lock);
     if (!g_current_provider || (!g_usable && !g_activation_callback)) goto done;
+    size_t root;
+    for (root = 0; root < g_current_provider->compiled->resource_count; root++)
+        if (pr_resource_family(g_current_provider->compiled->resources + root, family)) break;
+    if (root == g_current_provider->compiled->resource_count) goto done;
     hold = calloc(1, sizeof(*hold));
     if (!hold) goto done;
+    hold->family = _strdup(family);
+    if (!hold->family) { free(hold); hold = NULL; goto done; }
     hold->provider = pr_retain(g_current_provider); hold->live = 1;
     hold->next = g_selectors; g_selectors = hold;
     InterlockedIncrement(&g_lease_generation);
@@ -1428,7 +1504,7 @@ static void pr_collect_leases(void)
     while (*selector) {
         sh_package_selector_hold *hold = *selector;
         if (InterlockedCompareExchange(&hold->live, 0, 0)) { selector = &hold->next; continue; }
-        *selector = hold->next; pr_release(hold->provider); free(hold);
+        *selector = hold->next; pr_release(hold->provider); free(hold->family); free(hold);
     }
 }
 
@@ -1506,6 +1582,13 @@ typedef struct pr_retained_selection {
 } pr_retained_selection;
 enum { PR_RETAIN_OCCURRENCES, PR_RETAIN_AUTHORING, PR_RETAIN_SELECTORS };
 
+static int pr_selector_resource(const pr_provider *provider, const sh_compiled_resource *resource)
+{
+    for (const sh_package_selector_hold *hold = g_selectors; hold; hold = hold->next)
+        if (hold->provider == provider && InterlockedCompareExchange((volatile LONG *)&hold->live, 0, 0) &&
+            pr_resource_family(resource, hold->family)) return 1;
+    return 0;
+}
 static int pr_retained_select(const pr_provider *provider, const sh_package_provenance *selected, int mode,
     pr_retained_selection *out,
     char *error, size_t capacity)
@@ -1521,7 +1604,8 @@ static int pr_retained_select(const pr_provider *provider, const sh_package_prov
     for (size_t i = 0; i < provider->sources->package_count; i++)
         if ((mode != PR_RETAIN_OCCURRENCES || pr_lease_owner(provider, i, selected)) &&
             !sh_package_owners_add(&out->owners, i)) goto done;
-    for (size_t i = 0; i < count; i++) if (mode == PR_RETAIN_SELECTORS || (mode == PR_RETAIN_AUTHORING ?
+    for (size_t i = 0; i < count; i++) if (mode == PR_RETAIN_SELECTORS ?
+        pr_selector_resource(provider, provider->compiled->resources + i) : (mode == PR_RETAIN_AUTHORING ?
         sh_package_owners_count(&provider->compiled->resources[i].owners) != 0 :
         pr_lease_resource(provider, provider->compiled->resources + i, selected))) {
         out->resources[i] = 1; queue[tail++] = i;
@@ -1683,7 +1767,11 @@ static int pr_retained_bindings(pr_provider *view, const pr_provider *provider,
 {
     for (size_t b = 0; b < provider->bindings.binding_count; b++) {
         const sh_package_provenance_binding *binding = provider->bindings.bindings + b;
-        int served = pr_binding_served(provider, serving, binding, error, capacity);
+        /* Numeric bindings have no physical resource. Their immutable code
+         * dictionary is retained with this provider; the complete context
+         * bundle check below still controls which recipes can be captured. */
+        int served = !strcmp(binding->family, SH_PACKAGE_KEY_FAMILY) ? 1 :
+            pr_binding_served(provider, serving, binding, error, capacity);
         if (served < 0) return 0;
         if (!served) continue;
         for (size_t c = 0; c < binding->context_count; c++) {
@@ -1938,7 +2026,8 @@ static int pr_view_retained(pr_provider *view, const pr_provider *provider,
         next.semantics = view->bindings.semantics;
         sh_package_provenance_free(&view->bindings); view->bindings = next;
     }
-    if (!pr_retained_bindings(view, provider, compiled, bundles, sources->package_count, error, capacity)) goto done;
+    if (!pr_key_groups_add(view, provider, error, capacity) ||
+        !pr_retained_bindings(view, provider, compiled, bundles, sources->package_count, error, capacity)) goto done;
     sh_package_compilation_free(view->compiled); view->compiled = compiled; compiled = NULL;
     sh_package_sources_free(view->sources); view->sources = sources; sources = NULL;
     sh_package_sources_free(view->authored_sources); view->authored_sources = authored; authored = NULL;
@@ -1961,6 +2050,160 @@ done:
     return ok;
 }
 
+typedef struct pr_spawn_table {
+    const char *path;
+    const sh_compiled_resource **rows;
+    size_t count;
+    unsigned char *body;
+    size_t length;
+} pr_spawn_table;
+static int pr_unmodified_type(pr_provider *view, const sh_compiled_resource *resource, char *error, size_t capacity)
+{
+    size_t length = 0;
+    unsigned char *body = sh_package_compilation_read(view->compiled, resource, SIZE_MAX, &length, error, capacity);
+    sh_package_spawn_registry program = {0};
+    sh_package_key_space numeric = {0}; /* Lowered classifier rows have numeric keys. */
+    int status = body ? sh_package_spawn_registry_read((sh_decl_source){(char *)body, length}, &numeric,
+        &program, error, capacity) : -1;
+    free(body);
+    int ok = status == 1 && program.count == 1;
+    if (ok && !program.modifier_count && (program.rows[0].mask & SH_PACKAGE_KEY_PRIVATE)) {
+        uint32_t type = program.rows[0].mask;
+        size_t i;
+        for (i = 0; i < view->unmodified_count; i++) if (view->unmodified_types[i] == type) break;
+        if (i == view->unmodified_count) {
+            uint32_t *grown = i < SIZE_MAX / sizeof(*grown) - 1 ?
+                realloc(view->unmodified_types, (i + 1) * sizeof(*grown)) : NULL;
+            if (!grown) ok = 0;
+            else { view->unmodified_types = grown; view->unmodified_types[view->unmodified_count++] = type; }
+        }
+    }
+    sh_package_spawn_registry_free(&program);
+    if (!ok && error && capacity && !*error) snprintf(error, capacity, "cannot retain native classification modifier policy");
+    return ok;
+}
+
+static const sh_compiled_resource *pr_spawn_resource(pr_provider *view,
+    const sh_package_consumer_target *target, char *error, size_t capacity)
+{
+    if (strcmp(target->family, "entitydef")) return NULL;
+    size_t length = strlen(target->name) + sizeof("generated/decls/entitydef/.decl");
+    char *path = malloc(length);
+    if (!path) { snprintf(error, capacity, "cannot allocate spawn classification path"); return NULL; }
+    snprintf(path, length, "generated/decls/entitydef/%s.decl", target->name);
+    const sh_compiled_resource *resource = sh_package_compilation_find(view->compiled, path);
+    if (!resource || !resource->original_path) {
+        snprintf(error, capacity, "%s: retained spawn classification is unavailable", path); resource = NULL;
+    }
+    free(path); return resource;
+}
+
+/* Dispatch metadata follows the final retained dependency closure, even during
+ * editor-only additive admission where existing native tables stay untouched. */
+static int pr_spawn_classifications(pr_provider *view, char *error, size_t capacity)
+{
+    view->unmodified_count = 0;
+    for (size_t i = 0; i < sh_package_consumers_count(view->consumers); i++) {
+        const sh_package_consumer *owner = sh_package_consumers_at(view->consumers, i);
+        for (size_t j = 0; j < owner->count; j++) {
+            const sh_package_consumer_target *target = owner->targets + j;
+            if (strncmp(target->slot, "spawn.classifier:", 17)) continue;
+            const sh_compiled_resource *resource = pr_spawn_resource(view, target, error, capacity);
+            if (!resource || !pr_unmodified_type(view, resource, error, capacity)) return 0;
+        }
+    }
+    return 1;
+}
+
+/* Native spawn requests carry only a numeric key. Their captured private
+ * registry files stay in the ordinary retained dependency closure; publish
+ * those files' rows into the original conductor slot every active view serves.
+ * This projection never rewrites the immutable private files or source bundles. */
+static int pr_spawn_registrations(pr_provider *view, char *error, size_t capacity)
+{
+    pr_spawn_table *tables = NULL;
+    size_t count = 0;
+    sh_package_resource_projection *projections = NULL;
+    const sh_compiled_resource **inputs = NULL;
+    sh_package_compilation *compiled = NULL;
+    int ok = 0;
+    for (size_t i = 0; i < sh_package_consumers_count(view->consumers); i++) {
+        const sh_package_consumer *owner = sh_package_consumers_at(view->consumers, i);
+        for (size_t j = 0; j < owner->count; j++) {
+            const sh_package_consumer_target *target = owner->targets + j;
+            if (strncmp(target->slot, "spawn.registry:", 15) && strncmp(target->slot, "spawn.classifier:", 17)) continue;
+            const sh_compiled_resource *resource = pr_spawn_resource(view, target, error, capacity);
+            if (!resource) goto done;
+            size_t t;
+            for (t = 0; t < count; t++) if (!strcmp(tables[t].path, resource->original_path)) break;
+            if (t == count) {
+                if (count >= SIZE_MAX / sizeof(*tables) - 1) goto done;
+                pr_spawn_table *grown = realloc(tables, (count + 1) * sizeof(*grown));
+                if (!grown) goto done;
+                tables = grown; tables[count++] = (pr_spawn_table){resource->original_path};
+            }
+            pr_spawn_table *table = tables + t;
+            size_t r;
+            for (r = 1; r < table->count; r++) if (table->rows[r] == resource) break;
+            if (r < table->count) continue;
+            if (!table->count) {
+                table->rows = calloc(2, sizeof(*table->rows));
+                if (!table->rows) goto done;
+                table->rows[0] = sh_package_compilation_find(view->compiled, table->path);
+                if (!table->rows[0]) table->rows[0] = resource;
+                table->count = 1;
+            }
+            if (table->count >= SIZE_MAX / sizeof(*table->rows) - 1) goto done;
+            const sh_compiled_resource **grown = realloc(table->rows, (table->count + 1) * sizeof(*grown));
+            if (!grown) goto done;
+            table->rows = grown; table->rows[table->count++] = resource;
+        }
+    }
+    if (!count) { ok = 1; goto done; }
+    size_t maximum = view->compiled->resource_count + count;
+    if (maximum < count || maximum > SIZE_MAX / sizeof(*projections) || maximum > SIZE_MAX / sizeof(*inputs)) goto done;
+    projections = calloc(maximum, sizeof(*projections)); inputs = calloc(maximum, sizeof(*inputs));
+    if (!projections || !inputs) goto done;
+    size_t total = view->compiled->resource_count;
+    for (size_t i = 0; i < total; i++) {
+        const sh_compiled_resource *r = view->compiled->resources + i;
+        inputs[i] = r;
+        projections[i] = (sh_package_resource_projection){r->engine_path, inputs + i, 1,
+            NULL, 0, r->native_type, r->native_name};
+    }
+    for (size_t t = 0; t < count; t++) {
+        pr_spawn_table *table = tables + t;
+        sh_decl_source *texts = calloc(table->count, sizeof(*texts));
+        if (!texts) goto done;
+        int read = 1;
+        for (size_t r = 0; r < table->count; r++) {
+            texts[r].text = (char *)sh_package_compilation_read(view->compiled, table->rows[r], SIZE_MAX,
+                &texts[r].length, error, capacity);
+            if (!texts[r].text) { read = 0; break; }
+        }
+        if (read) table->body = (unsigned char *)sh_package_spawn_registry_compose(texts[0], texts + 1,
+            table->count - 1, view->key_groups, &table->length, error, capacity);
+        for (size_t r = 0; r < table->count; r++) free((char *)texts[r].text);
+        free(texts); if (!table->body) goto done;
+        const sh_compiled_resource *base = sh_package_compilation_find(view->compiled, table->path);
+        size_t at = base ? (size_t)(base - view->compiled->resources) : total++;
+        projections[at] = (sh_package_resource_projection){table->path, table->rows, table->count,
+            table->body, table->length};
+    }
+    compiled = sh_package_compilation_project(view->sources, projections, total, &view->compiled->policy,
+        view->compiled->canonical_path, error, capacity);
+    if (!compiled) goto done;
+    compiled->independent_sources = view->compiled->independent_sources;
+    compiled->map_overlay = view->compiled->map_overlay; compiled->map_owner_begin = view->compiled->map_owner_begin;
+    compiled->map_independent_sources = view->compiled->map_independent_sources;
+    sh_package_compilation_free(view->compiled); view->compiled = compiled; compiled = NULL; ok = 1;
+done:
+    for (size_t t = 0; t < count; t++) { free(tables[t].rows); free(tables[t].body); }
+    free(tables); free(projections); free(inputs); sh_package_compilation_free(compiled);
+    if (!ok && error && capacity && !*error) snprintf(error, capacity, "cannot retain native spawn registry bindings");
+    return ok;
+}
+
 static pr_provider *pr_view(pr_provider *library, const pr_provider *map,
     const sh_package_provenance *promoted, char *error, size_t capacity)
 {
@@ -1969,6 +2212,9 @@ static pr_provider *pr_view(pr_provider *library, const pr_provider *map,
     pr_provider *view = calloc(1, sizeof(*view));
     if (!view) return NULL;
     view->references = 1;
+    if (!pr_key_groups_add(view, library, error, capacity) || !pr_key_groups_add(view, map, error, capacity)) {
+        pr_release(view); return NULL;
+    }
     if (promoted && promoted->semantics == SH_PACKAGE_PROVENANCE_USES &&
         !sh_package_provenance_select_uses(promoted, NULL, NULL, &view->policy_uses)) { pr_release(view); return NULL; }
     empty.sources = &empty_sources; empty.canonical_path = library->compiled->canonical_path;
@@ -2020,6 +2266,9 @@ static pr_provider *pr_view(pr_provider *library, const pr_provider *map,
             pr_release(view); return NULL;
         }
     }
+    if (!pr_spawn_registrations(view, error, capacity) || !pr_prepare_spawn_program(view, error, capacity)) {
+        pr_release(view); return NULL;
+    }
 #ifndef SH_PACKAGE_RUNTIME_TESTING
     if (view->compiled->policy.localized_count) {
         view->strings = sh_strids_reservation_open(error, capacity);
@@ -2041,6 +2290,13 @@ static pr_provider *pr_clone_serving(pr_provider *base, char *error, size_t capa
     pr_provider *view = calloc(1, sizeof(*view));
     if (!view) return NULL;
     view->references = 1; view->parent = pr_retain(base);
+    if (!pr_key_groups_add(view, base, error, capacity)) goto failed;
+    if (base->unmodified_count) {
+        view->unmodified_types = malloc(base->unmodified_count * sizeof(*view->unmodified_types));
+        if (!view->unmodified_types) goto failed;
+        memcpy(view->unmodified_types, base->unmodified_types, base->unmodified_count * sizeof(*view->unmodified_types));
+        view->unmodified_count = base->unmodified_count;
+    }
     view->catalog = base->catalog; view->audio_originals = base->audio_originals;
     view->native_assets = base->native_assets;
     if (!pr_audio_source_add(view, base)) goto failed;
@@ -2073,6 +2329,7 @@ static pr_provider *pr_clone_serving(pr_provider *base, char *error, size_t capa
     if (base->virtual_materials && !(view->virtual_materials =
         sh_virtual_material_runtime_join(base->virtual_materials, NULL, error, capacity))) goto failed;
     if (base->consumers && !(view->consumers = sh_package_consumers_join(base->consumers, NULL, error, capacity))) goto failed;
+    if (!pr_prepare_spawn_program(view, error, capacity)) goto failed;
     free(rows); free(inputs); return view;
 failed:
     free(rows); free(inputs); pr_release(view); return NULL;
@@ -2182,6 +2439,40 @@ static int pr_identity_order(const void *a, const void *b)
     const sh_package_native_identity *x = a, *y = b;
     int order = strcmp(x->type, y->type); return order ? order : strcmp(x->name, y->name);
 }
+/* Alias membership is capture metadata, not an engine redirect. A stock name
+ * can become known through another scope's shared input without changing any
+ * byte it resolves. Omit that availability delta only when EVERY carrier is
+ * unchanged and the installed SnapMap catalog proves this exact name/path
+ * association. Keep private names, changed inputs and unknown associations.
+ * Constructor changes are checked separately after this classification. */
+static int pr_membership_changes(const sh_package_compilation *compiled,
+    const sh_resource_catalog *catalog, const sh_package_changes *changes,
+    sh_package_native_identity *identities, size_t *count)
+{
+    if (!*count || !catalog || !compiled) return 1;
+    unsigned char *state = calloc(*count, 1);
+    if (!state) return 0;
+    for (size_t i = 0; i < compiled->resource_count; i++) {
+        const sh_compiled_resource *resource = compiled->resources + i;
+        sh_package_change key = {resource->engine_path, 0};
+        int changed = changes->count && bsearch(&key, changes->items, changes->count,
+            sizeof(key), pr_change_order) != NULL;
+        for (size_t n = 0; n < sh_package_resource_native_count(resource); n++) {
+            sh_package_native_identity identity = sh_package_resource_native_at(resource, n);
+            sh_package_native_identity *found = bsearch(&identity, identities, *count,
+                sizeof(identity), pr_identity_order);
+            if (!found || state[found - identities] == 2) continue;
+            state[found - identities] = changed || !pr_snapmap_serves((void *)catalog,
+                resource->engine_path, identity.type, identity.name) ? 2 : 1;
+        }
+    }
+    size_t kept = 0;
+    for (size_t i = 0; i < *count; i++) {
+        if (state[i] == 1) { free(identities[i].type); free(identities[i].name); }
+        else identities[kept++] = identities[i];
+    }
+    free(state); *count = kept; return 1;
+}
 /* A native constructor can change without changing a cooked file. Keep the
  * complete logical identity set separate from file rows: several managers can
  * share one path, and verified engine-created owners may have no file at all. */
@@ -2239,6 +2530,10 @@ static int pr_native_changes(const pr_provider *before, const pr_provider *after
     const sh_package_compilation *compiled = after->compiled;
     int retry = before && !sh_virtual_material_runtime_healthy(before->virtual_materials);
     sh_package_change *grown;
+    if (!pr_membership_changes(before ? before->compiled : NULL, before ? before->catalog : NULL,
+            changes, changes->removed, &changes->removed_count) ||
+        !pr_membership_changes(after->compiled, after->catalog,
+            changes, changes->added, &changes->added_count)) goto failed;
     if (!pr_constructor_changes(before ? before->consumers : NULL, after->consumers, changes)) goto failed;
     for (size_t i = 0; i < compiled->resource_count; i++)
         if (pr_material_changed(before, after, &compiled->resources[i], changes, original_count, retry)) extra++;
@@ -2259,6 +2554,21 @@ failed:
     if (error && capacity) snprintf(error, capacity, "cannot prepare native resource binding changes");
     sh_package_changes_free(changes); return 0;
 }
+
+#ifdef SH_PACKAGE_RUNTIME_TESTING
+int sh_package_runtime_test_native_changes(const sh_package_compilation *before,
+    const sh_package_compilation *after, const sh_resource_catalog *catalog,
+    sh_package_consumers *old_consumers, sh_package_consumers *new_consumers,
+    sh_package_changes *changes, char *error, size_t capacity)
+{
+    pr_provider a = {0}, b = {0};
+    a.compiled = (sh_package_compilation *)before; a.consumers = old_consumers;
+    b.compiled = (sh_package_compilation *)after; b.consumers = new_consumers;
+    a.catalog = b.catalog = (sh_resource_catalog *)catalog;
+    return sh_package_compilation_changes(before, after, changes, error, capacity) &&
+        pr_native_changes(&a, &b, changes, error, capacity);
+}
+#endif
 
 static int pr_update(const char *data_root, int change_map, const char *map_source_root,
     const sh_package_map_plan *prepared, const sh_package_provenance *promotion,
@@ -2602,6 +2912,7 @@ int sh_package_runtime_admit_occurrences(sh_package_map_plan *plan,
         if (metadata_needed) result = SH_PACKAGE_ADMISSION_NEEDS_METADATA;
         goto done;
     }
+    if (!pr_prepare_spawn_program(candidate, error, capacity)) goto done;
     if (!pr_plan_occurrences(plan->provider, uses, candidate->compiled, error, capacity) ||
         !pr_plan_authoring_served(plan, candidate->compiled, error, capacity) ||
         !sh_package_compilation_changes(g_compiled, candidate->compiled, &changes, error, capacity) ||
@@ -2745,6 +3056,70 @@ sh_package_map_plan *sh_package_runtime_prepare_map(const char *data_root,
     const char *map_source_root, char *error, size_t capacity)
 { return sh_package_runtime_prepare_map_with_bindings(data_root, map_source_root, NULL, error, capacity); }
 
+typedef struct pr_local_binding {
+    const sh_resource_catalog *catalog;
+    pr_original_source originals;
+} pr_local_binding;
+static int pr_local_native(void *context, const char *family, const char *name)
+{
+    pr_local_binding *local = context;
+    const sh_resource_catalog_entry *const *entries = NULL;
+    size_t count = sh_resource_catalog_find(local->catalog, family, name, &entries);
+    for (size_t i = 0; i < count; i++) if (entries[i]->archive < 2) return 1;
+    size_t a = strlen(family), b = strlen(name), length = 0;
+    unsigned char *body = NULL; char *path;
+    if (a > SIZE_MAX - 23 || b > SIZE_MAX - a - 23) return -1;
+    path = malloc(a + b + 23); if (!path) return -1;
+    snprintf(path, a + b + 23, "generated/decls/%s/%s.decl", family, name);
+    int scope = pr_original(&local->originals, path, &body, &length);
+    free(path); free(body);
+    return scope < 0 ? -1 : scope == 1 || scope == 3;
+}
+char *sh_package_runtime_rebind_local_document(const char *json, size_t length,
+    size_t *output_length, char *error, size_t capacity)
+{
+    char *bound = NULL, *out = NULL; size_t bound_length = length;
+    sh_package_source_reader *reader = NULL;
+    sh_decl_registry_source registry = {0}; uintptr_t reflection = 0;
+    if (error && capacity) *error = 0;
+    if (output_length) *output_length = 0;
+    if (!json || !output_length || length == SIZE_MAX) return NULL;
+    AcquireSRWLockExclusive(&g_refresh_lock);
+    AcquireSRWLockShared(&g_lock);
+    const pr_provider *library = g_library_provider;
+    if (library && library->bindings.binding_count) {
+        pr_local_binding local = {library->catalog,
+            {library->catalog ? sh_resource_catalog_read_path : NULL, library->catalog, library->native_assets}};
+#ifndef SH_PACKAGE_RUNTIME_TESTING
+        sh_decl_native_source metadata = {NULL, pr_native_read, 0, g_native_scripts};
+        if (!sh_decl_server_registry_source(&registry) || sh_decl_native_source_ready(&metadata,
+            g_native_accessor, g_native_types, g_native_game_system) != 1) goto done;
+        reflection = metadata.reflection;
+#else
+        if (!sh_package_runtime_test_source_inputs(&registry, &reflection,
+            &local.originals.game, &local.originals.context)) goto done;
+#endif
+        reader = sh_package_source_reader_open(library->compiled, library->catalog,
+            pr_original, &local.originals, registry, reflection, error, capacity);
+        if (!reader) goto done;
+        bound = sh_package_map_uses_bind_local(reader, json, length, &library->bindings,
+            pr_local_native, &local, &bound_length, error, capacity);
+        if (!bound) goto done;
+    }
+    if (bound_length == SIZE_MAX) goto done;
+    out = HeapAlloc(GetProcessHeap(), 0, bound_length + 1);
+    if (out) {
+        memcpy(out, bound ? bound : json, bound_length); out[bound_length] = 0;
+        *output_length = bound_length;
+    }
+done:
+    sh_package_source_reader_close(reader); free(bound);
+    ReleaseSRWLockShared(&g_lock); ReleaseSRWLockExclusive(&g_refresh_lock);
+    if (!out && error && capacity && !*error)
+        snprintf(error, capacity, "local legacy resource names could not be prepared");
+    return out;
+}
+
 char *sh_package_map_plan_rebind(const sh_package_map_plan *plan, const sh_package_provenance *saved,
     const char *json, size_t length, size_t *output_length, char *error, size_t capacity)
 {
@@ -2885,6 +3260,7 @@ int sh_package_map_plan_prepare_inventory(sh_package_map_plan *plan,
         library = pr_clone_serving(base, error, capacity);
         if (!library || !pr_view_retained(library, checked, library->sources->package_count,
             NULL, NULL, PR_RETAIN_AUTHORING, &metadata_needed, error, capacity)) goto done;
+        if (!pr_prepare_spawn_program(library, error, capacity)) goto done;
     }
     pr_inventory_release(plan->inventory); plan->inventory = inventory; inventory = NULL;
     pr_release(plan->library); plan->library = library; library = NULL;
@@ -3687,36 +4063,69 @@ static void pr_key_context_open(pr_key_context *keys, pr_provider *owner)
 {
     memset(keys, 0, sizeof(*keys));
     keys->owner = owner;
-    keys->other = owner && owner != g_library_provider && g_library_provider ? g_library_provider->key_groups : NULL;
+    keys->other = owner && owner != g_current_provider && g_current_provider ? g_current_provider->key_groups : NULL;
     keys->scratch = owner ? calloc(1, sizeof(*keys->scratch)) : NULL;
     if (keys->scratch && owner->key_groups) *keys->scratch = *owner->key_groups;
-    pr_key_taken(g_library_provider, &keys->taken);
+    pr_key_taken(g_current_provider, &keys->taken);
     pr_key_taken(owner, &keys->taken);
 }
 /* Adopt new group codes a capture defined, and publish them (exclusive). */
-static void pr_key_context_close(pr_key_context *keys, int adopt)
+static int pr_key_context_close(pr_key_context *keys, int adopt)
 {
+    int ok = !adopt || !keys->owner || keys->scratch != NULL;
     if (adopt && keys->scratch && keys->owner &&
         keys->scratch->count > (keys->owner->key_groups ? keys->owner->key_groups->count : 0)) {
         AcquireSRWLockExclusive(&g_lock);
-        sh_package_key_groups *old = keys->owner->key_groups;
-        keys->owner->key_groups = keys->scratch; keys->scratch = old;
-        pr_publish_key_groups();
+        sh_package_key_groups *serving = NULL;
+#ifdef PR_NATIVE_SPAWN
+        sh_spawn_keys_program *program = NULL;
+#endif
+        int publish = keys->owner == g_current_provider ||
+            keys->owner == g_library_provider || keys->owner == g_map_provider;
+        if (publish && keys->owner != g_current_provider && g_current_provider) {
+            serving = calloc(1, sizeof(*serving));
+            if (serving && g_current_provider->key_groups) *serving = *g_current_provider->key_groups;
+            ok = serving && sh_package_key_groups_merge(serving, keys->scratch);
+        }
+#ifdef PR_NATIVE_SPAWN
+        if (ok && publish && g_current_provider) {
+            program = sh_spawn_keys_program_create(keys->owner == g_current_provider ? keys->scratch : serving,
+                g_current_provider->unmodified_types, g_current_provider->unmodified_count);
+            ok = program != NULL;
+        }
+#endif
+        /* Prepare both dictionaries before transferring either pointer. A
+         * failed allocation must not commit a code only one consumer knows. */
+        if (ok) {
+            sh_package_key_groups *old = keys->owner->key_groups;
+            keys->owner->key_groups = keys->scratch; keys->scratch = old;
+            if (serving) {
+                old = g_current_provider->key_groups;
+                g_current_provider->key_groups = serving; serving = old;
+            }
+#ifdef PR_NATIVE_SPAWN
+            if (program) {
+                sh_spawn_keys_program *old_program = g_current_provider->spawn_program;
+                g_current_provider->spawn_program = program; program = old_program;
+            }
+#endif
+            if (publish) pr_publish_key_groups();
+        }
+#ifdef PR_NATIVE_SPAWN
+        sh_spawn_keys_program_release(program);
+#endif
+        free(serving);
         ReleaseSRWLockExclusive(&g_lock);
     }
     free(keys->scratch); keys->scratch = NULL;
+    return ok;
 }
 
 void sh_package_runtime_key_decode(uint32_t value, sh_package_key_set *keys, uint32_t *historical)
 {
     AcquireSRWLockShared(&g_lock);
-    pr_provider *owner = g_map_provider ? g_map_provider : g_library_provider;
+    pr_provider *owner = g_current_provider;
     const sh_package_key_groups *groups = owner ? owner->key_groups : NULL;
-    const sh_package_key_groups *other = owner && owner != g_library_provider && g_library_provider ?
-        g_library_provider->key_groups : NULL;
-    uint32_t pattern = (value & SH_PACKAGE_KEY_SINGLE) >> 19;
-    if ((value & SH_PACKAGE_KEY_MARKER) && !(groups && groups->defined[pattern]) && other && other->defined[pattern])
-        groups = other;
     sh_package_key_decode(groups, value, keys);
     if (historical) *historical = owner && owner->key_groups ? owner->key_groups->historical : 0;
     ReleaseSRWLockShared(&g_lock);
@@ -3736,7 +4145,7 @@ int sh_package_runtime_key_code(const sh_package_key_set *keys, uint32_t *code)
         result = *code != 0;
     }
     ReleaseSRWLockShared(&g_lock);
-    pr_key_context_close(&context, result == 1);
+    if (!pr_key_context_close(&context, result == 1)) { *code = 0; result = -1; }
     ReleaseSRWLockExclusive(&g_refresh_lock);
     return result;
 }
@@ -3816,8 +4225,15 @@ char *sh_package_runtime_capture_document(const sh_package_map_plan *plan,
     size_t *delivery_count, char *error, size_t capacity)
 {
     char *out = NULL;
+    size_t pending_length = 0, pending_count = 0;
+    sh_package_occurrence_snapshot *pending_ownership = NULL;
+    sh_mpkg_used *pending_deliveries = NULL;
     if (error && capacity) *error = 0;
     if (output_length) *output_length = 0;
+    if (!ownership || !output_length || (!!deliveries != !!delivery_count)) {
+        if (error && capacity) snprintf(error, capacity, "map occurrence output is unavailable");
+        return NULL;
+    }
     if (!g_activation_callback) AcquireSRWLockExclusive(&g_refresh_lock);
     AcquireSRWLockShared(&g_lock);
     pr_key_context keys;
@@ -3828,23 +4244,64 @@ char *sh_package_runtime_capture_document(const sh_package_map_plan *plan,
     if (sh_decl_server_registry_source(&registry) && sh_decl_native_source_ready(&metadata,
         g_native_accessor, g_native_types, g_native_game_system) == 1)
         out = pr_capture_document(plan ? plan->provider : g_current_provider, registry, metadata.reflection, !plan,
-            saved, additional, additional_count, json, length, output_length, ownership,
-            deliveries, delivery_count, &keys, error, capacity);
+            saved, additional, additional_count, json, length, &pending_length, &pending_ownership,
+            deliveries ? &pending_deliveries : NULL, deliveries ? &pending_count : NULL, &keys, error, capacity);
 #else
     sh_decl_registry_source registry = {0}; uintptr_t reflection = 0;
     if (sh_package_runtime_test_source_inputs(&registry, &reflection, NULL, NULL))
         out = pr_capture_document(plan ? plan->provider : g_current_provider, registry, reflection, !plan,
-            saved, additional, additional_count, json, length, output_length, ownership,
-            deliveries, delivery_count, &keys, error, capacity);
+            saved, additional, additional_count, json, length, &pending_length, &pending_ownership,
+            deliveries ? &pending_deliveries : NULL, deliveries ? &pending_count : NULL, &keys, error, capacity);
 #endif
     ReleaseSRWLockShared(&g_lock);
-    pr_key_context_close(&keys, out != NULL);
+    if (!pr_key_context_close(&keys, out != NULL)) {
+        free(out); out = NULL;
+        if (error && capacity) snprintf(error, capacity, "map registration dictionary could not be published");
+    }
+    if (out) {
+        sh_package_occurrence_release(*ownership); *ownership = pending_ownership; pending_ownership = NULL;
+        if (deliveries) {
+            sh_mpkg_used_free(*deliveries); *deliveries = pending_deliveries; pending_deliveries = NULL;
+            *delivery_count = pending_count;
+        }
+        *output_length = pending_length;
+    }
+    sh_package_occurrence_release(pending_ownership); sh_mpkg_used_free(pending_deliveries);
     if (!g_activation_callback) ReleaseSRWLockExclusive(&g_refresh_lock);
     if (!out && error && capacity && !*error) snprintf(error, capacity, "native map occurrence reader is unavailable");
     return out;
 }
 
 #ifdef SH_PACKAGE_RUNTIME_TESTING
+int sh_package_runtime_test_unmodified_type(uint32_t type)
+{
+#ifdef PR_NATIVE_SPAWN
+    return sh_spawn_keys_test_unmodified(type);
+#else
+    int found = 0;
+    AcquireSRWLockShared(&g_lock);
+    for (size_t i = 0; g_current_provider && i < g_current_provider->unmodified_count; i++)
+        if (g_current_provider->unmodified_types[i] == type) { found = 1; break; }
+    ReleaseSRWLockShared(&g_lock); return found;
+#endif
+}
+void sh_package_runtime_test_plan_key_table(sh_package_map_plan *plan, const sh_package_key_groups *table)
+{
+    if (!plan || !plan->provider) abort();
+    free(plan->provider->key_groups); plan->provider->key_groups = NULL;
+    if (table) {
+        plan->provider->key_groups = malloc(sizeof(*table));
+        if (!plan->provider->key_groups) abort();
+        *plan->provider->key_groups = *table;
+    }
+}
+void sh_package_runtime_test_serving_key_table(sh_package_key_groups *table)
+{
+    AcquireSRWLockShared(&g_lock);
+    memset(table, 0, sizeof(*table));
+    if (g_current_provider && g_current_provider->key_groups) *table = *g_current_provider->key_groups;
+    ReleaseSRWLockShared(&g_lock);
+}
 void sh_package_runtime_test_key_tables(const sh_package_key_groups *library, const sh_package_key_groups *map)
 {
     AcquireSRWLockExclusive(&g_lock);
@@ -3854,15 +4311,32 @@ void sh_package_runtime_test_key_tables(const sh_package_key_groups *library, co
         free(owners[i]->key_groups); owners[i]->key_groups = NULL;
         if (tables[i] && (owners[i]->key_groups = malloc(sizeof(*tables[i])))) *owners[i]->key_groups = *tables[i];
     }
+    if (g_current_provider && g_current_provider != g_library_provider && g_current_provider != g_map_provider) {
+        char error[256] = "";
+        free(g_current_provider->key_groups); g_current_provider->key_groups = NULL;
+        if (!pr_key_groups_add(g_current_provider, g_library_provider, error, sizeof(error)) ||
+            !pr_key_groups_add(g_current_provider, g_map_provider, error, sizeof(error))) abort();
+    }
+    if (g_current_provider) {
+        char error[256];
+        if (!pr_prepare_spawn_program(g_current_provider, error, sizeof(error))) abort();
+    }
     pr_publish_key_groups();
     ReleaseSRWLockExclusive(&g_lock);
 }
 int sh_package_runtime_test_key_groups_current(void)
 {
     AcquireSRWLockShared(&g_lock);
-    int current = g_test_key_groups[0] == g_library_provider &&
-        g_test_key_groups[1] == (g_library_provider ? g_library_provider->key_groups : NULL) &&
-        g_test_key_groups[2] == g_map_provider && g_test_key_groups[3] == (g_map_provider ? g_map_provider->key_groups : NULL);
+    int current = g_test_key_groups[0] == g_current_provider &&
+        g_test_key_groups[1] == (g_current_provider ? g_current_provider->key_groups : NULL);
+#ifdef PR_NATIVE_SPAWN
+    sh_package_key_groups empty = {0};
+    const sh_package_key_groups *expected = g_current_provider && g_current_provider->key_groups ?
+        g_current_provider->key_groups : &empty;
+    const sh_package_key_groups *published = sh_spawn_keys_test_hold();
+    current = current && !memcmp(expected, published, sizeof(*expected));
+    sh_spawn_keys_test_release();
+#endif
     ReleaseSRWLockShared(&g_lock);
     return current;
 }
@@ -3886,6 +4360,7 @@ void sh_package_runtime_test_dispose(void)
     pr_release(current);pr_release(library);pr_release(map);pr_inventory_release(inventory);
     sh_package_provenance_free(&g_promoted);
     pr_collect_leases();
+    sh_package_link_history_close(g_link_history); g_link_history = NULL;
     ReleaseSRWLockExclusive(&g_refresh_lock);
 }
 #endif

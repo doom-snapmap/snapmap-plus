@@ -49,4 +49,8 @@ const sh_decl_node *sh_decl_tree_member(const sh_decl_node *parent, const char *
  * Expressions and multiple quoted tokens return zero. JSON has its own reader. */
 int sh_decl_tree_literal(const sh_decl_node *node, const char **text, size_t *length);
 
+/* Native idList sizes use a signed 32-bit count; non-positive sizes clear the
+ * list. Decode decimal scalar counts without changing authored spelling. */
+int sh_decl_tree_list_count(const sh_decl_node *node, size_t *count);
+
 #endif

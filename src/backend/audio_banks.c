@@ -601,6 +601,25 @@ int sh_audio_bank_closure(const sh_audio_bank *const *banks, size_t bank_count,
                     return 0;
                 }
             }
+            /* Native object lookups are shared across loaded banks. A compact
+             * publication can keep only a changed event while its unchanged
+             * action remains in an original bank. Resolve every hard reference
+             * in this already scoped inventory and retain its provider, including
+             * that provider's own dependencies. Prefer an existing supplier so
+             * dormant duplicate definitions do not become unnecessary loads. */
+            for (size_t r = 0; r < bank->required_count; r++) {
+                size_t provider = SIZE_MAX;
+                for (size_t i = 0; i < bank_count; i++) {
+                    if (!banks[i] || !ab_contains(banks[i]->objects, banks[i]->object_count, bank->required[r])) continue;
+                    if (provider == SIZE_MAX || selected[i]) provider = i;
+                    if (selected[i]) break;
+                }
+                if (provider == SIZE_MAX) {
+                    if (error && capacity) snprintf(error, capacity, "audio bank %u requires absent object %u", bank->id, bank->required[r]);
+                    return 0;
+                }
+                if (!selected[provider]) { selected[provider] = 1; changed = 1; result.dependency_banks++; }
+            }
             /* A resident source can reuse DATA carried by another bank even
              * without an explicit play-action bank edge. Prefer a selected
              * provider, otherwise retain the first scoped inventory provider.
@@ -624,10 +643,6 @@ int sh_audio_bank_closure(const sh_audio_bank *const *banks, size_t bank_count,
     }
     for (size_t b = 0; b < bank_count; b++) if (selected[b]) {
         const sh_audio_bank *bank = banks[b];
-        if (bank->required_count) {
-            if (error && capacity) snprintf(error, capacity, "audio bank %u requires absent object %u", bank->id, bank->required[0]);
-            return 0;
-        }
         for (size_t t = 0; t < bank->target_count; t++) {
             const sh_audio_bank_target *target = bank->targets + t; int found = 0;
             for (size_t i = 0; i < bank_count; i++) if (selected[i] && banks[i]->id == target->bank &&

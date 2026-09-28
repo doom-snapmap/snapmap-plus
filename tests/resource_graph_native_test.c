@@ -27,7 +27,8 @@ static sh_package_consumers *font_catalog;
 static int font_acquires, font_releases, font_holds, font_acquire_error;
 int sh_package_runtime_consumer_acquire(const char *family, const char *name, sh_package_consumer_hold *out)
 {
-    CHECK(!out->provider && !out->binding); font_acquires++;
+    CHECK(!out->provider && !out->binding);
+    if (strcmp(family, "material")) font_acquires++;
     if (font_acquire_error) return -1;
     out->binding = sh_package_consumers_find(font_catalog, family, name);
     if (!out->binding) return 0;
@@ -901,6 +902,69 @@ static void test_movie_construction(void)
     g_swf_construct = NULL; g_load = NULL;
     sh_resource_graph_test_reset();
 }
+static unsigned char request_materials[3][0x168], request_managers[3][16];
+static const char *request_expected;
+static int request_nested, request_throw;
+static void *request_lookup(void *manager, const char *name)
+{
+    CHECK(manager == request_managers[1] || manager == request_managers[2]);
+    CHECK(!strcmp(name, request_expected)); return NULL;
+}
+static void *request_materialize(void *manager, const char *name, unsigned char make_default, unsigned char flags)
+{ CHECK(make_default == 1 && flags == 7); return request_lookup(manager, name); }
+static unsigned int request_parse(void *resource, unsigned char read_source, void *error)
+{
+    CHECK(!read_source && !error);
+    const char *bound = resource == request_materials[0] ? "smp/red" :
+        resource == request_materials[1] ? "smp/green" : "textures/fx/beam";
+    request_expected = bound;
+    rg_lookup_hook(request_managers[1], "textures/fx/beam");
+    rg_materialize_hook(request_managers[1], "textures/fx/beam", 1, 7);
+    request_expected = "textures/fx/beam";
+    rg_materialize_hook(request_managers[2], "textures/fx/beam", 1, 7); /* Other manager. */
+    if (request_nested && resource == request_materials[0]) {
+        CHECK(!rg_parse_hook(request_materials[1], 0, NULL));
+        CHECK(!rg_parse_hook(request_materials[2], 0, NULL));
+        request_expected = bound;
+        rg_materialize_hook(request_managers[1], "textures/fx/beam", 1, 7);
+    }
+    if (request_throw) RaiseException(0xe0123456, 0, 0, NULL);
+    return 0;
+}
+static unsigned int request_read(void *resource, void *error)
+{ return request_parse(resource, 0, error); }
+static void request_load(void *resource) { CHECK(!request_parse(resource, 0, NULL)); }
+static void test_constructor_requests(void)
+{
+    char error[256]; int caught = 0;
+    sh_package_consumer_target targets[] = {
+        {"request/transsortatlas/textures/fx/beam", "transsortatlas", "smp/red"},
+        {"request/transsortatlas/textures/fx/beam", "transsortatlas", "smp/green"}
+    };
+    sh_package_consumer owners[] = {{"material", "red", targets, 1}, {"material", "green", targets + 1, 1}};
+    font_catalog = sh_package_consumers_create(owners, 2, error, sizeof(error)); CHECK(font_catalog);
+    font_acquires = font_releases = font_holds = font_acquire_error = 0;
+    put_pointer(request_managers[0], 8, "material");
+    put_pointer(request_managers[1], 8, "transsortatlas");
+    put_pointer(request_managers[2], 8, "image");
+    for (size_t i = 0; i < 3; i++) {
+        put_pointer(request_materials[i], 8, i == 0 ? "red" : i == 1 ? "green" : "vanilla");
+        put_pointer(request_materials[i], 0x10, request_managers[0]);
+    }
+    g_ready = 1; g_parse = request_parse; g_read = request_read; g_load = request_load;
+    g_lookup = request_lookup; g_materialize = request_materialize; request_nested = 1;
+    CHECK(!rg_parse_hook(request_materials[0], 0, NULL) && !g_request_hold && !font_holds);
+    CHECK(!rg_read_hook(request_materials[0], NULL) && !g_request_hold && !font_holds);
+    rg_load_hook(request_materials[0]); CHECK(!g_request_hold && !font_holds);
+    request_throw = 1; request_nested = 0;
+    __try { rg_parse_hook(request_materials[0], 0, NULL); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { caught = 1; }
+    CHECK(caught && !g_request_hold && !font_holds && font_releases == 7);
+    request_throw = 0;
+    sh_package_consumers_free(font_catalog); font_catalog = NULL;
+    g_parse = NULL; g_read = NULL; g_load = NULL; g_lookup = NULL; g_materialize = NULL;
+    sh_resource_graph_test_reset();
+}
 int main(void)
 {
     sh_resource_graph_frame outer, pause;
@@ -1028,6 +1092,7 @@ int main(void)
     test_isolated_program_cook();
     test_font_construction();
     test_movie_construction();
+    test_constructor_requests();
     if (failures) return 1;
     puts("canonical entity-state, direct source and production read capture checks passed"); return 0;
 }

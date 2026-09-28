@@ -298,6 +298,29 @@ static size_t typed_play_bank(unsigned char bytes[256], uint32_t event)
     put32(bytes + object + 9, 0x20001);
     length += 28; put32(bytes + 28, (uint32_t)(length - 32)); return length;
 }
+static void compact_event_scope(void)
+{
+    unsigned char native[256], compact[53], media[4]={1,2,3,4};
+    size_t length=typed_play_bank(native,17);char base[4096],error[1024];
+    binary("compact-scope/sound/soundbanks/pc/a.bnk",native,length);
+    binary("compact-scope/sound/soundbanks/pc/99.wem",media,sizeof(media));
+    snprintf(base,sizeof(base),"%s/compact-scope",root);
+    sh_audio_originals *originals=sh_audio_originals_open(base,L"English(US)",NULL);CHECK(originals);
+    bank_bytes(compact,123,99,0);put32(compact+28,21);put32(compact+37,12);
+    put32(compact+45,1);put32(compact+49,50);
+    sh_compiled_resource file={0};sh_package_compilation compiled={0};
+    file.engine_path="sound/soundbanks/pc/123.bnk";file.body=compact;file.body_length=sizeof(compact);
+    compiled.resources=&file;compiled.resource_count=1;
+    sh_package_audio_scope *scope=sh_package_audio_scope_open(&compiled,originals,error,sizeof(error));CHECK(scope);
+    if(scope) {
+        closure_paths paths={0};
+        CHECK(sh_package_audio_scope_event(scope,99,closure_path,&paths,error,sizeof(error)) && paths.count==3);
+        CHECK(closure_has(&paths,"pc/123.bnk",0) && closure_has(&paths,"pc/a.bnk",1) && closure_has(&paths,"pc/99.wem",1));
+        sh_package_audio_scope_close(scope);
+    }
+    sh_audio_originals_close(originals);
+}
+
 static void typed_capture(void)
 {
     unsigned char bank[256], original_media[4] = {1, 2, 3, 4}, changed_media[4] = {4, 3, 2, 1};
@@ -422,6 +445,11 @@ static void materialized_program(sh_package_audio_program *program, const sh_pac
     if (!ok) { sh_package_compilation_free(provider); return; }
     CHECK(provider != before && provider->resource_count == 4 && provider->owns_sources);
     CHECK(provider->map_overlay && provider->map_owner_begin == 1 && provider->independent_sources && provider->map_independent_sources);
+    sh_package_changes generated = {0};
+    CHECK(sh_package_compilation_changes(NULL, provider, &generated, error, sizeof(error)) &&
+        generated.count == provider->resource_count);
+    CHECK(sh_package_compilation_changes(provider, provider, &generated, error, sizeof(error)) && !generated.count);
+    sh_package_changes_free(&generated);
     const sh_compiled_resource *native = sh_package_compilation_find(provider, "generated/decls/sound/bound/first.decl");
     const sh_compiled_resource *variant = sh_package_compilation_find(provider, "generated/decls/sound/bound/second.decl");
     CHECK(native && !native->bound_dependency_count);
@@ -433,6 +461,7 @@ static void materialized_program(sh_package_audio_program *program, const sh_pac
         int kind = sh_package_audio_path_kind(r->engine_path);
         if (!kind) continue;
         CHECK(r->cache_file && r->cache_path && r->original_path && !r->body && r->source == SIZE_MAX);
+        CHECK(sh_package_compilation_probe(provider, r->engine_path, error, sizeof(error)) == 1);
         CHECK(strcmp(r->engine_path, r->original_path));
         uint64_t size; FILE *stream = sh_package_file_open(r->cache_file, &size, error, sizeof(error)); CHECK(stream);
         if (strstr(r->engine_path, ".bnk")) {
@@ -706,7 +735,8 @@ static void shared_materialization(sh_package_audio_program *program)
             if(file) {
                 sh_audio_bank_codec parsed={0};
                 CHECK(sh_audio_bank_codec_read((sh_audio_bank_source){file,length,shared_file_read},&parsed,error,sizeof(error))==1);
-                CHECK(!parsed.shared_chunks && parsed.object_count==1 && length==BANK_BYTES);
+                /* The event is already supplied by the retained native bank. */
+                CHECK(!parsed.shared_chunks && parsed.object_count==0 && length==36);
                 sh_audio_bank_codec_free(&parsed);fclose(file);
             }
         }
@@ -1282,8 +1312,116 @@ static void shared_modulator_program(void)
     }
     sh_package_audio_program_close(p);sh_audio_originals_close(originals);
 }
+typedef struct witness_loads { uint32_t ids[4]; size_t count; int refuse; } witness_loads;
+static int witness_load(void *context,uint32_t id,const char *filename,int numeric)
+{
+    witness_loads *plan=context;
+    CHECK(filename && !strcmp(filename,"a.bnk"));
+    CHECK(numeric==(id!=84696446));
+    if(plan->refuse)return 0;
+    CHECK(plan->count<4);if(plan->count==4)return 0;
+    plan->ids[plan->count++]=id;return 1;
+}
+static void native_event_witness(void)
+{
+    unsigned char native[BANK_BYTES + 13], changed[sizeof(native)];
+    uint32_t kept, removed, added; char base[4096], error[1024] = {0};
+    CHECK(sh_audio_event_identity("events/kept", &kept));
+    CHECK(sh_audio_event_identity("events/removed", &removed));
+    CHECK(sh_audio_event_identity("events/added", &added));
+    bank_bytes(native, 84696446, kept, 0);
+    memcpy(native + BANK_BYTES, native + 36, 13);
+    put32(native + BANK_BYTES + 5, removed);
+    put32(native + 28, 30); put32(native + 32, 2);
+    memcpy(changed, native, sizeof(native)); put32(changed + BANK_BYTES + 5, added);
+    binary("event-witness/sound/soundbanks/pc/a.bnk", native, sizeof(native));
+    snprintf(base, sizeof(base), "%s/event-witness", root);
+    sh_audio_originals *originals = sh_audio_originals_open(base, L"English(US)", NULL); CHECK(originals);
+    sh_compiled_resource file = {0}; sh_package_compilation scope = {0};
+    file.engine_path = "sound/soundbanks/pc/a.bnk"; file.body = changed; file.body_length = sizeof(changed);
+    file.baseline_known = 1; file.owners.bits = file.gameplay_owners.bits = 1;
+    scope.resources = &file; scope.resource_count = 1;
+    const sh_package_compilation *input = &scope;
+    sh_package_audio_program *p = sh_package_audio_program_open(&input, 1, originals, error, sizeof(error)); CHECK(p);
+    CHECK(sh_package_audio_program_collect(p, 0, "events/kept", error, sizeof(error)));
+    CHECK(sh_package_audio_program_collect(p, 0, "events/added", error, sizeof(error)));
+    int ready = sh_package_audio_program_prepare(p, error, sizeof(error));
+    if (!ready) fprintf(stderr, "event witness: %s\n", error); CHECK(ready);
+    if (ready) {
+        sh_audio_graph_root a, b; const sh_package_owners *owners, *gameplay;
+        CHECK(sh_package_audio_program_root(p, 0, "events/kept", &a, error, sizeof(error)) && a.original);
+        CHECK(sh_package_audio_program_root(p, 0, "events/added", &b, error, sizeof(error)) && !b.original);
+        CHECK(sh_package_audio_program_owners(p, 0, "events/kept", &owners, &gameplay) && !owners->bits && !gameplay->bits);
+        CHECK(sh_package_audio_program_owners(p, 0, "events/added", &owners, &gameplay) && owners->bits == 1 && gameplay->bits == 1);
+        CHECK(!sh_package_audio_program_root(p, 0, "events/removed", &a, error, sizeof(error)));
+        sh_package_compilation output={0};program_ids ids={0};ids.remaining=1000;
+        CHECK(sh_package_audio_program_bind(p,&output,program_assign,&ids,error,sizeof(error)));
+        witness_loads plan={0};
+        CHECK(sh_package_audio_program_loads(p,witness_load,&plan,error,sizeof(error)));
+        CHECK(plan.count==2 && plan.ids[0]==84696446 && plan.ids[1]!=84696446);
+        plan.refuse=1;
+        CHECK(!sh_package_audio_program_loads(p,witness_load,&plan,error,sizeof(error)) && *error);
+    }
+    sh_package_audio_program_close(p); sh_audio_originals_close(originals);
+}
+typedef struct probe_reservations {
+    const uint32_t *originals; size_t original_count, native_count[11], private_count[11];
+    uint32_t next;
+} probe_reservations;
+static int probe_number_order(const void *a, const void *b)
+{ uint32_t x=*(const uint32_t *)a,y=*(const uint32_t *)b; return x<y ? -1 : x>y; }
+static int probe_reserve(void *context, const sh_audio_link_graph *graph, size_t node,
+    sh_audio_identity_domain domain, uint32_t authored, const unsigned char binding[32],
+    int original, int absent, uint32_t *id, char *error, size_t capacity)
+{
+    probe_reservations *p=context; (void)graph; (void)node; (void)binding; (void)absent;
+    if(original) {p->native_count[domain]++;*id=authored;return 1;}
+    do {
+        if(!++p->next) {snprintf(error,capacity,"probe exhausted numeric IDs");return 0;}
+    } while(bsearch(&p->next,p->originals,p->original_count,sizeof(uint32_t),probe_number_order));
+    p->private_count[domain]++;*id=p->next;return 1;
+}
+static int probe_authored_bank(const char *base,const char *engine_path,const char *filename)
+{
+    char error[1024]={0};int ok=0;FILE *stream=NULL;__int64 length=0;
+    sh_audio_originals *originals=NULL;sh_package_audio_program *program=NULL;
+    sh_compiled_resource file={0};sh_package_compilation scope={0},output={0};
+    probe_reservations ids={0};
+    stream=fopen(filename,"rb");if(!stream || _fseeki64(stream,0,SEEK_END) ||
+        (length=_ftelli64(stream))<0 || (uint64_t)length>SIZE_MAX || _fseeki64(stream,0,SEEK_SET))goto done;
+    file.body=malloc(length ? (size_t)length : 1);file.body_length=(size_t)length;
+    if(!file.body || fread(file.body,1,file.body_length,stream)!=file.body_length)goto done;
+    fclose(stream);stream=NULL;
+    file.engine_path=engine_path;file.baseline_known=1;file.owners.bits=file.gameplay_owners.bits=1;
+    scope.resources=&file;scope.resource_count=1;
+    originals=sh_audio_originals_open(base,L"English(US)",NULL);
+    if(!originals || sh_audio_originals_ids(originals,&ids.originals,&ids.original_count,error,sizeof(error))!=1)goto done;
+    const sh_package_compilation *input=&scope;
+    program=sh_package_audio_program_open(&input,1,originals,error,sizeof(error));
+    if(!program || !sh_package_audio_program_prepare(program,error,sizeof(error)) ||
+        !sh_package_audio_program_bind(program,&output,probe_reserve,&ids,error,sizeof(error)))goto done;
+    size_t private_banks=0;uint64_t private_bytes=0;
+    for(size_t i=0;i<sh_package_audio_program_banks(program,0);i++) {
+        const sh_audio_bank_binding *binding=NULL;
+        const sh_audio_graph_bank *bank=sh_package_audio_program_bank(program,0,i,&binding);
+        binding=sh_package_audio_program_private_bank(program,0,i);
+        if(binding->count) {
+            private_banks++;private_bytes+=binding->output_length;
+            printf("private bank: %s, %llu bytes, %zu edits\n",bank->path,(unsigned long long)binding->output_length,binding->count);
+        }
+    }
+    printf("selected banks=%zu private banks=%zu private bytes=%llu\n",sh_package_audio_program_banks(program,0),
+        private_banks,(unsigned long long)private_bytes);
+    for(size_t i=0;i<11;i++)printf("domain=%zu native=%zu private=%zu\n",i,ids.native_count[i],ids.private_count[i]);
+    ok=1;
+done:
+    if(!ok)fprintf(stderr,"authored bank probe: %s\n",*error ? error : "input unavailable");
+    if(stream)fclose(stream);
+    sh_package_audio_program_close(program);sh_audio_originals_close(originals);free(file.body);return ok ? 0 : 1;
+}
 int main(int argc, char **argv)
 {
+    if (argc == 5 && !strcmp(argv[1], "--inspect-bank")) return probe_authored_bank(argv[2],argv[3],argv[4]);
     if (argc == 4 && !strcmp(argv[1], "--capture-originals")) return probe_capture(argv[2], argv[3], 0);
     if (argc == 4 && !strcmp(argv[1], "--inventory-originals")) return probe_capture(argv[2], argv[3], 1);
     if (argc == 4 && !strcmp(argv[1], "--roots-originals")) return probe_capture(argv[2], argv[3], 2);
@@ -1292,7 +1430,7 @@ int main(int argc, char **argv)
     CHECK(GetTempPathA(sizeof(temp),temp)>0);
     snprintf(root,sizeof(root),"%ssh-package-audio-%lu",temp,(unsigned long)GetCurrentProcessId());
     CHECK(CreateDirectoryA(root,NULL));
-    memory_index(); media_index(); bank_content_identity(); authored_and_map(); immutable_scope(); typed_capture(); retained_program(); inventory_capture(); retry_program(); shared_program(); shared_native_baseline(); bus_program(); bus_baseline_program(); shared_modulator_program(); cleanup();
+    memory_index(); media_index(); bank_content_identity(); authored_and_map(); immutable_scope(); compact_event_scope(); typed_capture(); retained_program(); inventory_capture(); retry_program(); shared_program(); shared_native_baseline(); bus_program(); bus_baseline_program(); shared_modulator_program(); native_event_witness(); cleanup();
     if(failures) return 1;
     puts("package audio source indexes passed"); return 0;
 }

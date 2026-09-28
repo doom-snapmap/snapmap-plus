@@ -40,6 +40,9 @@ typedef struct sl_unit {
     int nominated; /* Seeded as a stock root affected by its scope's changes. */
     int movie_captured; /* Constructor requests of a cooked movie were enumerated. */
     sh_package_link_file_identity *identities; /* Owned per-file identities (movie pairs). */
+    sh_compiled_resource prepared; /* Borrowed metadata; owns only body. */
+    const sh_compiled_resource *unprepared; /* Exact original certificate input. */
+    int preparation_checked;
 } sl_unit;
 typedef struct sl_original {
     sh_compiled_resource resource;
@@ -575,18 +578,15 @@ static size_t sl_font_stem(const char *path)
     }
     return 0;
 }
-int sh_package_source_link_ancillary(const char *path)
-{
-    return path && !strncmp(path, "generated/transsortatlas/", 25);
-}
 static const char *sl_deferred_binary_family(sh_package_source_link *s, const sh_compiled_resource *file)
 {
     const sh_resource_catalog_entry *const *rows = NULL;
     size_t n = strlen(file->engine_path);
-    if (file->type || n <= 7 || sh_package_source_link_ancillary(file->engine_path) ||
+    if (file->type || n <= 7 ||
         sh_resource_catalog_find_path(s->catalog, file->engine_path, &rows)) return NULL;
     if (sl_font_stem(file->engine_path)) return "font";
-    if (!strcmp(file->engine_path + n - 7, ".bimage")) return "image";
+    if (!strcmp(file->engine_path + n - 7, ".bimage"))
+        return !strncmp(file->engine_path, "generated/transsortatlas/", 25) ? "transsortatlas" : "image";
     if (!strcmp(file->engine_path + n - 7, ".dmodel")) return "discreteanimation";
     if (n >= 17 && !strncmp(file->engine_path, "generated/", 10) &&
         !strcmp(file->engine_path + n - 7, ".pmodel")) return "staticparticlemodel";
@@ -634,7 +634,6 @@ static int sl_seed_inputs(sh_package_source_link *s)
         for (size_t i = 0; ok && i < original->resource_count; i++) {
             const sh_compiled_resource *file = original->resources + i; char *name = NULL;
             if (s->native.audio && sh_package_audio_path_kind(file->engine_path)) continue;
-            if (sh_package_source_link_ancillary(file->engine_path)) continue;
             /* A cooked movie and its atlas are one constructor unit, whichever
              * member this scope supplies; the other resolves in scope then originals. */
             sh_package_movie_names movie;
@@ -1016,6 +1015,27 @@ static int sl_discover_unit_requests(sh_package_source_link *s, sl_unit *unit)
         if (s->observe && !s->failed && !s->preparing) s->reader_gap = 1;
         return 0;
     }
+    if (!unit->preparation_checked && s->native.prepare && unit->unit.file_count == 1) {
+        unsigned char *body = NULL; size_t length = 0;
+        int status = s->native.prepare(s->native.context, s->readers[unit->scope],
+            &unit->unit, &body, &length, s->error, s->error_capacity);
+        if (status < 0) {
+            free(body);
+            if (status == -2) s->malformed = s->reader_gap = 1;
+            else if (status == -3) s->reader_gap = 1;
+            else s->environment = 1;
+            return 0;
+        }
+        if (status == 1 && body) {
+            unit->unprepared = unit->unit.files[0];
+            unit->prepared = *unit->unprepared;
+            unit->prepared.body = body; unit->prepared.body_length = length;
+            ((const sh_compiled_resource **)unit->unit.files)[0] = &unit->prepared;
+        } else if (status || body) {
+            free(body); return sl_env_fail(s, "invalid prepared source contract", unit->unit.name);
+        }
+        unit->preparation_checked = 1;
+    }
     for (size_t j = 0; j < unit->unit.file_count; j++) {
         size_t length = 0, bound_length = 0;
         unsigned char *body = sh_package_compilation_read(unit->unit.compilation, unit->unit.files[j],
@@ -1024,6 +1044,12 @@ static int sl_discover_unit_requests(sh_package_source_link *s, sl_unit *unit)
         if (body) bound = sl_bind_member(s, unit, unit->unit.files[j],
             body, length, sl_reference, &walk, &bound_length, s->error, s->error_capacity);
         int ok = body && bound && length == bound_length && !memcmp(body, bound, length) && !s->failed;
+        if (ok && !strcmp(unit->unit.family, "material") &&
+            !strncmp(unit->unit.files[j]->engine_path, "generated/decls/material/", 24))
+            ok = sh_package_source_material_requests(s->readers[unit->scope],
+                (sh_decl_source){(const char *)body, length}, s->observe,
+                sl_implicit_reference, &walk, s->error, s->error_capacity);
+        if (!ok && body && bound && !s->failed) s->reader_gap = 1;
         if (!ok && body && !bound && !s->failed) s->reader_gap = 1;
         if (!body) s->environment = 1; /* An unreadable captured file blames no input. */
         free(body); free(bound);
@@ -1101,6 +1127,12 @@ static int sl_reverse_implicit(void *context, size_t scope, int observing, const
     sl_reverse_native *walk = context; (void)scope;
     return !walk->source->native.implicit || walk->source->native.implicit(walk->source->native.context,
         walk->baseline, observing, unit, visit, visit_context, error, capacity) == 1;
+}
+static int sl_reverse_prepare(void *context, sh_package_source_reader *reader,
+    const sh_package_link_unit *unit, unsigned char **body, size_t *length, char *error, size_t capacity)
+{
+    sl_reverse_native *walk = context;
+    return walk->source->native.prepare(walk->source->native.context, reader, unit, body, length, error, capacity);
 }
 static int sl_reverse_file_changed(sh_package_source_link *s, size_t scope, const char *path)
 {
@@ -1260,6 +1292,7 @@ static int sl_reverse_roots(sh_package_source_link *s, const sh_package_source_r
     base->error = s->error; base->error_capacity = s->error_capacity;
     base->native.context = &admission; base->native.admit = sl_reverse_admit;
     base->native.implicit = sl_reverse_implicit;
+    if (s->native.prepare) base->native.prepare = sl_reverse_prepare;
     base->native.shader = s->native.shader;
     base->readers[0] = sh_package_source_reader_open(&empty, s->catalog, sl_read_original, s,
         registry, reflection, s->error, s->error_capacity);
@@ -1479,6 +1512,7 @@ void sh_package_source_link_close(sh_package_source_link *s)
         free(unit->programs); free(unit->shader_files);
         if (unit->identities) for (size_t j = 0; j < unit->unit.file_count; j++) free((char *)unit->identities[j].name);
         free(unit->identities);
+        free(unit->prepared.body);
         free(unit->dependencies); free(unit);
     }
     for (size_t i = 0; i < s->original_count; i++) {
@@ -1596,7 +1630,8 @@ sh_package_source_link *sh_package_source_link_open_attributed(const sh_package_
             if (!original || original->status < 0) goto failed;
             if (original->status != 1 && original->status != 2) { original_bytes = 0; break; }
             campaign |= original->status == 2;
-            unsigned char *body = sh_package_compilation_read(unit->unit.compilation, unit->unit.files[j],
+            const sh_compiled_resource *certificate = unit->unprepared ? unit->unprepared : unit->unit.files[j];
+            unsigned char *body = sh_package_compilation_read(unit->unit.compilation, certificate,
                 SIZE_MAX, &length, error, capacity);
             if (!body) goto failed;
             original_bytes = original->resource.body_length == length && !memcmp(original->resource.body, body, length);

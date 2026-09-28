@@ -3777,10 +3777,13 @@ static void test_occurrence_admission(void)
     {
         unsigned char decl[0x1d0] = {0}, entity[0x60] = {0};
         *(void **)(decl + 0x1c8) = entity;
-        *(const char **)(entity + 8) = "resource/header-name";
-        *(const char **)(entity + 0x58) = "palette/entity-name";
-        CHECK(!strcmp(sh_decl_server_test_occurrence_source_name(decl), "palette/entity-name"));
-        *(const char **)(entity + 0x58) = NULL;
+        /* The materialized entityDef is a resource, not the editor body's
+         * independently allocated defsub. Its +0x58 is not a name. */
+        *(const char **)(entity + 8) = "palette/entity-name";
+        CHECK(sh_decl_server_test_occurrence_source_name(decl) &&
+            !strcmp(sh_decl_server_test_occurrence_source_name(decl), "palette/entity-name"));
+        *(const char **)(entity + 8) = NULL;
+        *(const char **)(entity + 0x58) = "unrelated-field";
         CHECK(!sh_decl_server_test_occurrence_source_name(decl));
     }
     for (int mode = 0; mode < 5; mode++) {

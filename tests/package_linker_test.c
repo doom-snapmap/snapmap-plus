@@ -102,7 +102,7 @@ static int assign(void *context, size_t unit, const unsigned char identity[32], 
     for (size_t i = 0; i < 32; i++) snprintf(hex + i * 2, 3, "%02x", identity[i]);
     if (!count) { *name = _strdup(f->units[unit].name); return *name != NULL; }
     *name = malloc(strlen(f->units[unit].name) + 70); assert(*name);
-    int native = f->original_paths || (f->native_originals && original_binding);
+    int native = f->original_paths || f->units[unit].fixed_name || (f->native_originals && original_binding);
     if (f->shared_name || native) sprintf(*name, "%s", f->units[unit].name);
     else sprintf(*name, "smp/%s/%s", f->collision ? "same" : hex, f->units[unit].name);
     *paths = calloc(count, sizeof(**paths)); assert(*paths);
@@ -154,6 +154,8 @@ typedef struct native_fixture {
     uint32_t occupied[2];
     size_t checks, collisions;
     int unavailable, invalid, constant, all_occupied, replace_shared;
+    const sh_package_link_output *resident;
+    const char *shared_original;
 } native_fixture;
 
 /* An injected ID space deliberately unrelated to the engine's algorithm. */
@@ -176,6 +178,9 @@ static int native_check(void *context, const char *family, const char *name,
     if (native->all_occupied || *id == native->occupied[0] || *id == native->occupied[1]) {
         native->collisions++; return 0;
     }
+    if (native->shared_original && !strcmp(name, native->shared_original)) return SH_PACKAGE_LINK_REGISTRY_REPLACE_SHARED;
+    if (native->resident) for (size_t i = 0; i < native->resident->classes.count; i++)
+        if (!strcmp(name, native->resident->names[i])) return SH_PACKAGE_LINK_REGISTRY_OCCUPIED;
     return native->replace_shared ? SH_PACKAGE_LINK_REGISTRY_REPLACE_SHARED : SH_PACKAGE_LINK_REGISTRY_AVAILABLE;
 }
 
@@ -234,6 +239,109 @@ static void native_collisions(const sh_package_sources *sources, fixture *f,
     memcpy(f->units, saved, sizeof(saved)); adapter->registry = NULL;
     for (size_t i = 0; i < f->count; i++) { free(initial[i]); free(stable[i]); }
     sh_package_link_output_free(&out);
+}
+
+static void repeated_native_bindings(const sh_package_sources *sources, const fixture *source,
+    const size_t entities[3], const size_t materials[3])
+{
+    fixture f = *source; native_fixture native = {0}; char error[1024], directory[MAX_PATH + 40];
+    sh_package_link_registry registry = {&native, native_check};
+    sh_package_link_adapter adapter = {&f, resolve, bind_file, assign, &registry};
+    sh_package_link_output first = {0}, next = {0};
+    snprintf(directory, sizeof(directory), "%s/package-cache", root);
+    assert(CreateDirectoryA(directory, NULL));
+    snprintf(directory, sizeof(directory), "%s/package-cache/resources", root);
+    assert(CreateDirectoryA(directory, NULL));
+    sh_package_link_history *history = sh_package_link_history_open(directory); assert(history);
+    adapter.history = history;
+    assert(sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &first, error, sizeof(error)));
+    assert(sh_package_link_history_count(history) == 4);
+    native.resident = &first;
+    /* An occupied name without exact retained evidence still branches safely. */
+    adapter.history = NULL;
+    assert(sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &next, error, sizeof(error)));
+    for (size_t i = 0; i < f.count; i++) assert(strcmp(first.names[first.classes.nodes[i]], next.names[next.classes.nodes[i]]));
+    adapter.history = history;
+    for (int pass = 0; pass < 12; pass++) {
+        assert(sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &next, error, sizeof(error)));
+        assert(sh_package_link_history_count(history) == 4 && next.compiled->resource_count == 4);
+        for (size_t i = 0; i < f.count; i++) assert(!strcmp(first.names[first.classes.nodes[i]], next.names[next.classes.nodes[i]]));
+    }
+    /* A changed dependency must branch both itself and its consumer. Failed
+     * replay leaves neither its proof nor its private identity reserved. */
+    f.units[materials[0]].semantics[0] ^= 1; f.omit_replay = 1; f.assigned = 0;
+    assert(!sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &next, error, sizeof(error)));
+    assert(sh_package_link_history_count(history) == 4);
+    f.omit_replay = 0;
+    assert(sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &next, error, sizeof(error)));
+    assert(sh_package_link_history_count(history) == 6);
+    assert(strcmp(first.names[first.classes.nodes[materials[0]]], next.names[next.classes.nodes[materials[0]]]));
+    assert(strcmp(first.names[first.classes.nodes[entities[0]]], next.names[next.classes.nodes[entities[0]]]));
+    assert(!strcmp(first.names[first.classes.nodes[entities[2]]], next.names[next.classes.nodes[entities[2]]]));
+    f.units[materials[0]].semantics[0] ^= 1;
+    native.unavailable = 1;
+    assert(!sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &next, error, sizeof(error)));
+    assert(sh_package_link_history_count(history) == 6);
+    native.unavailable = 0;
+    assert(sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &next, error, sizeof(error)));
+    for (size_t i = 0; i < f.count; i++) assert(!strcmp(first.names[first.classes.nodes[i]], next.names[next.classes.nodes[i]]));
+    /* Native numeric collisions cannot be waived by a matching proof. */
+    native.all_occupied = 1;
+    assert(!sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &next, error, sizeof(error)));
+    assert(sh_package_link_history_count(history) == 6);
+    sh_package_link_output_free(&first); sh_package_link_output_free(&next);
+    sh_package_link_history_close(history);
+
+    /* Reservations cover unmaterialized identities too, across compilations. */
+    history = sh_package_link_history_open(directory); assert(history); adapter.history = history;
+    memset(&native, 0, sizeof(native)); f = *source; f.count = 1;
+    f.units[0] = source->units[materials[0]];
+    adapter.history = NULL;
+    assert(sh_package_link(sources, f.units, 1, &adapter, NULL, NULL, &first, error, sizeof(error)));
+    char *one = _strdup(first.names[0]); assert(one);
+    f.units[0] = source->units[materials[1]];
+    assert(sh_package_link(sources, f.units, 1, &adapter, NULL, NULL, &next, error, sizeof(error)));
+    char *two = _strdup(next.names[0]); assert(two);
+    native.colliding[0] = one; native.colliding[1] = two; adapter.history = history;
+    f.units[0] = source->units[materials[0]];
+    assert(sh_package_link(sources, f.units, 1, &adapter, NULL, NULL, &first, error, sizeof(error)));
+    assert(!strcmp(first.names[0], one));
+    f.units[0] = source->units[materials[1]];
+    assert(sh_package_link(sources, f.units, 1, &adapter, NULL, NULL, &next, error, sizeof(error)));
+    assert(strcmp(next.names[0], two) && sh_package_link_history_count(history) == 2);
+    char *salted = _strdup(next.names[0]); assert(salted);
+    assert(sh_package_link(sources, f.units, 1, &adapter, NULL, NULL, &next, error, sizeof(error)));
+    assert(!strcmp(next.names[0], salted) && sh_package_link_history_count(history) == 2);
+    free(one); free(two); free(salted);
+    sh_package_link_output_free(&first); sh_package_link_output_free(&next); sh_package_link_history_close(history);
+
+    /* Cyclic source graphs retain the same complete binding on a second load. */
+    history = sh_package_link_history_open(directory); assert(history); adapter.history = history;
+    memset(&native, 0, sizeof(native)); f = *source; f.count = 2;
+    f.units[0] = source->units[entities[0]]; f.units[1] = source->units[materials[0]];
+    sh_package_link_edge back = {"native-owner", 0};
+    f.units[1].implicit = &back; f.units[1].implicit_count = 1;
+    assert(sh_package_link(sources, f.units, 2, &adapter, NULL, NULL, &first, error, sizeof(error)));
+    native.resident = &first;
+    assert(sh_package_link(sources, f.units, 2, &adapter, NULL, NULL, &next, error, sizeof(error)));
+    for (size_t i = 0; i < 2; i++) assert(!strcmp(first.names[first.classes.nodes[i]], next.names[next.classes.nodes[i]]));
+    assert(sh_package_link_history_count(history) == 2);
+    sh_package_link_output_free(&first); sh_package_link_output_free(&next); sh_package_link_history_close(history);
+
+    /* Equal bytes aimed at a shared editor slot and at a map-private copy
+     * have different binding contracts, including for their consumers. */
+    history = sh_package_link_history_open(directory); assert(history); adapter.history = history;
+    memset(&native, 0, sizeof(native)); f = *source; f.count = 2;
+    f.units[0] = source->units[entities[0]]; f.units[1] = source->units[materials[0]];
+    f.units[1].fixed_name = 1; native.shared_original = f.units[1].name;
+    assert(sh_package_link(sources, f.units, 2, &adapter, NULL, NULL, &first, error, sizeof(error)));
+    assert(!strcmp(first.names[first.classes.nodes[1]], f.units[1].name));
+    native.resident = &first; f.units[1].fixed_name = 0;
+    assert(sh_package_link(sources, f.units, 2, &adapter, NULL, NULL, &next, error, sizeof(error)));
+    assert(strcmp(first.names[first.classes.nodes[0]], next.names[next.classes.nodes[0]]));
+    assert(strcmp(first.names[first.classes.nodes[1]], next.names[next.classes.nodes[1]]));
+    assert(sh_package_link_history_count(history) == 4);
+    sh_package_link_output_free(&first); sh_package_link_output_free(&next); sh_package_link_history_close(history);
 }
 
 static void shared_replacement(const sh_package_sources *sources, const fixture *source,
@@ -804,6 +912,7 @@ int main(void)
     }
     f.count = 6;
     native_collisions(sources, &f, &adapter, entities, materials);
+    repeated_native_bindings(sources, &f, entities, materials);
     shared_replacement(sources, &f, materials);
     streamed_suppliers(sources);
     repeated_field_slots();
@@ -830,6 +939,34 @@ int main(void)
         assert(sh_package_link_identify_units(NULL, 0, &inspect, &captured, error, sizeof(error)));
         assert(!captured.node_count && !captured.count);
         sh_package_link_classes_free(&captured);
+    }
+    {
+        /* Appending resource units must preserve completed captures for the
+         * unchanged prefix, while new units and invalidated units are read. */
+        sh_package_link_classes prefix = {0}, grown = {0};
+        sh_package_link_reuse *reuse = sh_package_link_reuse_open(2);
+        sh_package_link_adapter inspect = {&f, resolve, bind_file};
+        inspect.reuse = reuse;
+        size_t bound = f.bound;
+        assert(reuse && sh_package_link_identify_units(f.units, 2, &inspect, &prefix, error, sizeof(error)));
+        assert(f.bound - bound == 2);
+        assert(sh_package_link_reuse_reserve(reuse, f.count));
+        bound = f.bound;
+        assert(sh_package_link_identify_units(f.units, f.count, &inspect, &grown, error, sizeof(error)));
+        assert(f.bound - bound == f.count - 2 && grown.count == out.classes.count);
+        for (size_t i = 0; i < f.count; i++)
+            assert(!memcmp(grown.identities[grown.nodes[i]], out.classes.identities[out.classes.nodes[i]], 32));
+        assert(sh_package_link_reuse_reserve(reuse, 1)); /* Reserving less never shrinks. */
+        assert(!sh_package_link_reuse_reserve(reuse, SIZE_MAX));
+        bound = f.bound;
+        assert(sh_package_link_identify_units(f.units, f.count, &inspect, &grown, error, sizeof(error)));
+        assert(f.bound == bound); /* A failed reservation retains every capture. */
+        sh_package_link_reuse_invalidate(reuse, materials[0]);
+        assert(sh_package_link_reuse_reserve(reuse, f.count + 16));
+        assert(sh_package_link_identify_units(f.units, f.count, &inspect, &grown, error, sizeof(error)));
+        assert(f.bound - bound == 1);
+        sh_package_link_reuse_close(reuse);
+        sh_package_link_classes_free(&prefix); sh_package_link_classes_free(&grown);
     }
     {
         /* Later passes reuse each valid unit's capture and exact-byte proofs:

@@ -6,6 +6,18 @@
 #include "package_bundle.h"
 
 typedef struct sh_package_map_uses sh_package_map_uses;
+/* Only for incoming documents with no package delivery or saved ownership.
+ * Resolve old public custom names against the installed library, never an
+ * active map. native returns 1 for a shipped/product identity, 0 for custom,
+ * negative on failure. Native names and registration bits remain untouched.
+ * If old names cannot distinguish variants, stable source context order picks
+ * one; every variant remains independently available in the library. Normal
+ * native capture records the selected private identity on the next save.
+ * Returns malloc-owned bytes; unrelated string bytes remain exact. */
+char *sh_package_map_uses_bind_local(sh_package_source_reader *reader,
+    const char *json, size_t length, const sh_package_provenance *library,
+    int (*native)(void *, const char *, const char *), void *context,
+    size_t *output_length, char *error, size_t capacity);
 /* Verified current gameplay/baseline classification for a NEW reference only:
  * 1 requires a source, 0 remains vanilla, negative is an inspection failure.
  * A same-name authored catalog row alone cannot establish this distinction. */

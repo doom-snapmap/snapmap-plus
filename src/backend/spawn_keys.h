@@ -19,6 +19,15 @@ int sh_spawn_keys_active(void);
  * installed library's and, while a map provider is active, the map's. 0 when
  * the two give one code different sets (nothing changes then). */
 int sh_spawn_keys_publish_groups(const sh_package_key_groups *library, const sh_package_key_groups *map);
+/* Prepared immutable dispatch metadata. Exact classifications with no authored
+ * modifier must not fall through to another provider's generic modifier.
+ * Creation allocates; publication retains the prepared program without allocation.
+ * Readers retain a publication slot until their native operation completes. */
+typedef struct sh_spawn_keys_program sh_spawn_keys_program;
+sh_spawn_keys_program *sh_spawn_keys_program_create(const sh_package_key_groups *groups,
+    const uint32_t *unmodified_types, size_t count);
+void sh_spawn_keys_program_release(sh_spawn_keys_program *program);
+void sh_spawn_keys_publish_program(sh_spawn_keys_program *program);
 
 #ifdef SH_SPAWN_KEYS_TESTING
 /* Exercise the replacements on synthetic engine state with test helpers. */
@@ -31,6 +40,7 @@ void sh_spawn_keys_test_bind(void **game_slot, sh_spawn_keys_type_fn type, sh_sp
 /* Hold the published groups as a replacement does, from entry to return. */
 const sh_package_key_groups *sh_spawn_keys_test_hold(void);
 void sh_spawn_keys_test_release(void);
+int sh_spawn_keys_test_unmodified(uint32_t type);
 uint64_t sh_spawn_keys_test_select(void *manager, uint32_t request);
 void sh_spawn_keys_test_modifier(void *conductor, void *ai, uint64_t modifiers);
 int sh_spawn_keys_test_filter(void *filter, void *ai);

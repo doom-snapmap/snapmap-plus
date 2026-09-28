@@ -49,6 +49,8 @@ size_t sh_package_link_inputs_find(const sh_package_link_inputs *inputs,
  * plus a replaced .pmodel suffix, with native long-basename partitioning.
  * Their inverse identity retains the path relative to generated/, including
  * the cooked suffix; their consumers likewise take precedence over that fallback.
+ * Transparency atlas entries use generated/transsortatlas/*.bimage, with the
+ * material's atlas and ordinary-image requests captured as separate identities.
  * Owned results; no filesystem/engine calls. */
 char *sh_package_cooked_path(const char *family, const char *name);
 int sh_package_cooked_identity(const char *path, const char **family, char **name);

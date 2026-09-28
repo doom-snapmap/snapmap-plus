@@ -297,6 +297,38 @@ static void originals_and_order(void)
 }
 static void set32(unsigned char *p, uint32_t value)
 { for (size_t i = 0; i < 4; i++) p[i] = (unsigned char)(value >> (i * 8)); }
+static void unrelated_native_event(void)
+{
+    fixture native, edited; make(&native, 42, 0, 111, 0); make(&edited, 42, 0, 111, 0);
+    native.input.original = 1;
+    size_t hirc = (size_t)edited.codec.chunks[3].offset;
+    assert(!strcmp(edited.codec.chunks[3].tag, "HIRC"));
+    put(&edited.bank, 4, 1); put(&edited.bank, 8, 4); put(&edited.bank, 51, 4); put(&edited.bank, 0, 4);
+    set32(edited.bank.data + hirc + 4, 108); set32(edited.bank.data + hirc + 8, 4);
+    sh_audio_bank_codec_free(&edited.codec); char error[512];
+    assert(sh_audio_bank_codec_read(source(&edited.bank), &edited.codec, error, sizeof(error)) == 1);
+    edited.input.source = source(&edited.bank);
+    sh_audio_graph_scope scopes[] = {scope(&native), scope(&edited)};
+    sh_audio_link_graph *g = sh_audio_link_graph_open(scopes, 2, error, sizeof(error)); assert(g);
+    assert(root(g, 0).original && root(g, 1).original);
+    allocator ids = {0}; ids.fail_after = SIZE_MAX;
+    assert(sh_audio_link_graph_bind(g, assign, &ids, error, sizeof(error)));
+    uint32_t bank, event; assert(sh_audio_link_graph_bank_id(g, 1, 42, &bank) && bank != 42);
+    assert(sh_audio_link_graph_event_id(g, 1, 50, &event) && event == 50);
+    bytes out = {0};
+    assert(sh_audio_bank_binding_write(source(&edited.bank), sh_audio_link_graph_bank(g, 1, 0),
+        write_bytes, &out, error, sizeof(error)));
+    /* A shared native action must keep the native preparation/release bank. */
+    assert(u32(out.data + edited.codec.objects[1].offset + 14) == 42);
+    out = (bytes){0}; sh_audio_bank_codec projected = {0};
+    assert(sh_audio_bank_binding_write(source(&edited.bank), sh_audio_link_graph_private_bank(g, 1, 0),
+        write_bytes, &out, error, sizeof(error)));
+    assert(sh_audio_bank_codec_read(source(&out), &projected, error, sizeof(error)) == 1);
+    assert(projected.object_count == 1 && projected.objects[0].kind == 4 && projected.objects[0].id != 51);
+    assert(projected.chunk_count == 2 && out.size == 49); /* Header plus new event; no duplicate native media. */
+    sh_audio_bank_codec_free(&projected);
+    sh_audio_link_graph_close(g); sh_audio_bank_codec_free(&native.codec); sh_audio_bank_codec_free(&edited.codec);
+}
 static void music_choice(fixture *f, int define_choice)
 {
     bytes body = {0}; bytes *bank = &f->bank; char error[512];
@@ -670,7 +702,7 @@ static void shared_switch_modulators(void)
 }
 int main(void)
 {
-    variants(0); variants(1); variants(2); absence_and_failure(); originals_and_order(); music_absence();
+    unrelated_native_event(); variants(0); variants(1); variants(2); absence_and_failure(); originals_and_order(); music_absence();
     source_ownership(); shared_projection_transaction(); bus_bindings();
     retained_reservations(); reservation_absence_and_originals(); reservation_growth();original_capture_closures();
     shared_switch_modulators();

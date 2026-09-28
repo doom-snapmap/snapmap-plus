@@ -11,6 +11,7 @@
 #include "hook.h"
 #include "map_provenance.h"
 #include "map_embed.h"
+#include "package_spawn_registry.h"
 
 static void *(*atlas_lookup)(void *, void *);
 static void *atlas_native_lookup(void *owner, void *material)
@@ -22,6 +23,7 @@ void *hook_prepare(void *target, void *detour, size_t stolen)
 }
 sh_patch_status hook_commit(void *trampoline)
 { CHECK(trampoline == atlas_native_lookup); return B2_PATCH_OK; }
+int hook_unpatch(void *trampoline) { (void)trampoline; CHECK(0); return 0; }
 
 static const char *health_path = "generated/decls/entitydef/ai/cyberdemon.decl";
 static const char *descriptor = "{\"id\":\"installed-bosses\",\"name\":\"Installed Bosses\",\"strings\":{\"en\":{\"label\":\"local\"}}}";
@@ -1527,6 +1529,82 @@ static void test_constructor_binding_changes(void)
     CHECK(changes.rebound_count == 4 && !strcmp(changes.rebound[0].name, "added"));
     sh_package_changes_free(&changes);
 }
+/* Discovering another stock consumer of unchanged shared bytes does not
+ * change what that consumer reads. Real edits and private identities still do. */
+static void test_native_membership_changes(void)
+{
+    char base[MAX_PATH], error[1024];
+    create("membership-catalog/snap_gameresources.resources", "");
+    create("membership-catalog/snap_gameresources.patch", "");
+    create("membership-catalog/gameresources.resources", "");
+    create("membership-catalog/gameresources.patch", "");
+    pindex_write("membership-catalog/snap_gameresources.pindex", "fixture", NULL);
+    pindex_write("membership-catalog/gameresources.pindex", "campaignonly", NULL);
+    snprintf(base, sizeof(base), "%s/membership-catalog", root);
+    sh_resource_catalog *catalog = sh_resource_catalog_open(base, error, sizeof(error));
+    CHECK(catalog); if (!catalog) return;
+    sh_compiled_resource a[2] = {0}, b[3] = {0};
+    a[0].engine_path = "decls/renderprogs/common.inc";
+    a[0].body = (unsigned char *)"same"; a[0].body_length = 4;
+    a[0].native_type = "renderprog"; a[0].native_name = "campaignonly";
+    b[0] = a[0];
+    sh_package_native_identity alias = {"renderprog", "fixture"};
+    b[0].native_aliases = &alias; b[0].native_alias_count = 1;
+    b[1].engine_path = "private/added.bin";
+    b[1].body = (unsigned char *)"new"; b[1].body_length = 3;
+    b[1].native_type = "model"; b[1].native_name = "private/added";
+    sh_package_compilation before = {0}, after = {0};
+    before.resources = a; before.resource_count = 1;
+    after.resources = b; after.resource_count = 2;
+    sh_package_changes changes = {0};
+#define MEMBERSHIP(old, next, cat, ca, cb) \
+    CHECK(sh_package_runtime_test_native_changes(old, next, cat, ca, cb, &changes, error, sizeof(error)))
+    MEMBERSHIP(&before, &after, catalog, NULL, NULL);
+    CHECK(changes.count == 1 && changes.added_count == 1 && !changes.removed_count && !changes.rebound_count);
+    CHECK(changes.added_count && !strcmp(changes.added[0].name, "private/added"));
+    sh_package_changes_reverse(&changes);
+    CHECK(changes.count == 1 && !changes.added_count && changes.removed_count == 1);
+    sh_package_changes_free(&changes);
+    MEMBERSHIP(&after, &before, catalog, NULL, NULL);
+    CHECK(changes.count == 1 && !changes.added_count && changes.removed_count == 1);
+    MEMBERSHIP(&before, &after, NULL, NULL, NULL);
+    CHECK(changes.added_count == 2); /* Unknown native availability is not a proof. */
+    b[0].body = (unsigned char *)"edit";
+    MEMBERSHIP(&before, &after, catalog, NULL, NULL);
+    CHECK(changes.count == 2 && changes.added_count == 2);
+    CHECK(!strcmp(changes.items[0].path, a[0].engine_path) && changes.items[0].kind == SH_PACKAGE_RESOURCE_REPLACED);
+    b[0].body = a[0].body;
+    /* One unverified carrier prevents a partial proof from suppressing work. */
+    a[1] = b[2] = a[0]; a[1].engine_path = b[2].engine_path = "unknown/shared.bin";
+    b[2].native_aliases = &alias; b[2].native_alias_count = 1;
+    before.resource_count = 2; after.resource_count = 3;
+    MEMBERSHIP(&before, &after, catalog, NULL, NULL);
+    CHECK(changes.count == 1 && changes.added_count == 2);
+    before.resource_count = 1; after.resource_count = 2;
+    /* Campaign-only names never acquire stock availability through an include. */
+    a[0].native_name = b[0].native_name = "fixture"; alias.name = "campaignonly";
+    MEMBERSHIP(&before, &after, catalog, NULL, NULL);
+    CHECK(changes.added_count == 2);
+    a[0].native_name = b[0].native_name = "campaignonly"; alias.name = "fixture";
+    /* A changed native constructor remains a change, even when every physical
+     * file is identical and the stock identity merely gained metadata. */
+    sh_package_consumer_target old_target = {"input", "image", "old"}, next_target = {"input", "image", "next"};
+    sh_package_consumer old_row = {"renderprog", "fixture", &old_target, 1};
+    sh_package_consumer next_row = {"renderprog", "fixture", &next_target, 1};
+    sh_package_consumers *old = sh_package_consumers_create(&old_row, 1, error, sizeof(error));
+    sh_package_consumers *next = sh_package_consumers_create(&next_row, 1, error, sizeof(error));
+    CHECK(old && next);
+    MEMBERSHIP(&before, &after, catalog, old, next);
+    CHECK(changes.added_count == 1 && changes.rebound_count == 1);
+    if (changes.rebound_count) CHECK(!strcmp(changes.rebound[0].name, "fixture"));
+    sh_package_changes_reverse(&changes); CHECK(changes.rebound_count == 1);
+    sh_package_changes_free(&changes);
+    MEMBERSHIP(&after, &before, catalog, next, old);
+    CHECK(changes.removed_count == 1 && changes.rebound_count == 1);
+    sh_package_consumers_free(old); sh_package_consumers_free(next);
+    sh_package_changes_free(&changes); sh_resource_catalog_close(catalog);
+#undef MEMBERSHIP
+}
 static void expect_consumer(const char *owner, const char *target)
 {
     sh_package_consumer_hold hold = {0};
@@ -1834,6 +1912,10 @@ static void test_retained_occurrence_resources(void)
     uintptr_t object = live.object;
     char *bound[2] = {0}; size_t lengths[2] = {0};
     lease_activation state = {alias, 0, 1};
+    sh_package_key_set retained_keys = {0}, decoded_keys = {0};
+    uint32_t retained_group = sh_package_key_private(12);
+    CHECK(sh_package_key_set_add(&retained_keys, sh_package_key_private(40)));
+    CHECK(sh_package_key_set_add(&retained_keys, sh_package_key_private(41)));
     create("lease-data/overrides", NULL);
     for (size_t i = 0; i < 2; i++) {
         char path[512];
@@ -1853,6 +1935,11 @@ static void test_retained_occurrence_resources(void)
     for (size_t i = 0; i < 2; i++) {
         plans[i] = sh_package_runtime_prepare_map(data, map[i], error, sizeof(error)); CHECK(plans[i]);
         if (!plans[i]) goto done;
+        if (!i) {
+            sh_package_key_groups groups = {0};
+            CHECK(sh_package_key_groups_define(&groups, retained_group, &retained_keys));
+            sh_package_runtime_test_plan_key_table(plans[i], &groups);
+        }
         const sh_compiled_resource *resource = historical_resource(sh_package_map_plan_compilation(plans[i]), historical_root);
         CHECK(resource && resource->original_path); if (!resource) goto done;
         if (!i) strcpy_s(alias, sizeof(alias), resource->engine_path); else CHECK(!strcmp(alias, resource->engine_path));
@@ -1884,6 +1971,9 @@ static void test_retained_occurrence_resources(void)
     state.before = state.after = 1;
     CHECK(sh_package_runtime_activate_map(data, NULL, (sh_package_activation_guard){0}, lease_activate, &state));
     expect_current(alias, "health = 10"); CHECK(!sh_package_runtime_has_map_provider());
+    sh_package_runtime_key_decode(retained_group, &decoded_keys, NULL);
+    CHECK(sh_package_key_set_equal(&retained_keys, &decoded_keys));
+    CHECK(sh_package_runtime_test_key_groups_current());
     policy = sh_package_runtime_policy("requirements", &length); CHECK(policy && !strstr(policy, "g_useResourceBlackList")); free(policy);
     exported = sh_package_occurrence_export(tracker, &clipboard, 1, NULL, error, sizeof(error)); CHECK(exported);
     size_t rows_count = 0; const sh_package_bundle_binding *rows = sh_package_occurrence_bundles(exported, &rows_count);
@@ -1917,6 +2007,9 @@ static void test_retained_occurrence_resources(void)
     state.fail = 0;
     CHECK(sh_package_runtime_activate_occurrences(NULL, (sh_package_activation_guard){0}, lease_activate, &state));
     CHECK(!sh_package_runtime_occurrences_pending() && state.removed == 2);
+    sh_package_runtime_key_decode(retained_group, &decoded_keys, NULL);
+    CHECK(!sh_package_key_set_equal(&retained_keys, &decoded_keys));
+    CHECK(sh_package_key_set_has(&decoded_keys, retained_group));
     const sh_package_compilation *current = sh_package_runtime_acquire();
     CHECK(current && !current->sources->package_count && !sh_package_compilation_find(current, alias)); sh_package_runtime_release();
 done:
@@ -1980,6 +2073,214 @@ static int lease_collection_baseline(void *context, const char *path, unsigned c
         text = "{ edit = { entityDef = \"cross/root\"; inputs = { num = 0; } } }";
     if (!text) return 0;
     *length = strlen(text); *body = (unsigned char *)_strdup(text); return *body ? 1 : -1;
+}
+/* A numeric spawn request resolves through a conductor registration, rather
+ * than naming the AI declaration directly. Retaining its file alone cannot
+ * prove that a copied occurrence still selects the same AI. */
+static void lease_registration_setup(admission_fixture *f)
+{
+    admission_setup(f);
+    void *container = *(void **)f->reflection;
+    void *records = admission_alloc(f, 9 * 0x38), *objects = admission_alloc(f, 9 * 16);
+    void *pointers = admission_alloc(f, 9 * 16), *element = admission_alloc(f, 0x48);
+    memcpy(records, *(void **)((char *)container + 0x20), 5 * 0x38);
+    memcpy(objects, *(void **)((char *)f->reflection + 0x88), 5 * 16);
+    memcpy(pointers, *(void **)((char *)f->reflection + 0xa0), 5 * 16);
+    admission_pointer(container, 0x20, records);
+    admission_pointer(f->reflection, 0x88, objects); admission_number(f->reflection, 0x90, 9);
+    admission_pointer(f->reflection, 0xa0, pointers); admission_number(f->reflection, 0xa8, 9);
+    admission_pointer(records, 5 * 0x38, admission_string(f, "SpawnInfo"));
+    admission_pointer(records, 5 * 0x38 + 8, admission_string(f, ""));
+    admission_pointer(records, 6 * 0x38, admission_string(f, "idList < SpawnInfo >"));
+    admission_pointer(records, 6 * 0x38 + 8, admission_string(f, ""));
+    admission_pointer(records, 7 * 0x38, admission_string(f, "float"));
+    admission_pointer(records, 7 * 0x38 + 8, admission_string(f, ""));
+    admission_pointer(records, 6 * 0x38 + 0x18, element);
+    admission_pointer(objects, 6 * 16 + 8, (void *)0x80);
+    admission_pointer(element, 0, admission_string(f, "SpawnInfo"));
+    admission_pointer(element, 8, admission_string(f, ""));
+    admission_pointer(element, 0x10, admission_string(f, "element")); admission_number(element, 0x1c, 8);
+    void *enums = admission_alloc(f, 2 * 0x18), *readers = admission_alloc(f, 2 * 16);
+    void *members = admission_alloc(f, 22 * 0x10);
+    admission_pointer(enums, 0, admission_string(f, "spawnAIType_t")); admission_pointer(enums, 0x10, members);
+    for (int i = 0; i < 21; i++) {
+        char name[16]; snprintf(name, sizeof(name), "T%d", i);
+        admission_pointer(members, i * 0x10, admission_string(f, i == 20 ? "ALL" : name));
+        admission_number(members, i * 0x10 + 8, i < 19 ? 1 << i : i == 19 ? 1 << 30 : -1);
+    }
+    admission_pointer(container, 0x10, enums);
+    admission_pointer(f->reflection, 0x58, readers); admission_number(f->reflection, 0x60, 2);
+    const char *types[] = {"int", "spawnAIType_t", "idList < SpawnInfo >", "idList < SpawnInfo >",
+        "spawnAIType_t", "idDeclEntityDef", "float"};
+    const char *names[] = {"health", "spawnType", "aiTypeList", "globalAIMods", "aiType", "entityDef", "healthMod"};
+    void *entity = admission_alloc(f, 5 * 0x48), *row = admission_alloc(f, 4 * 0x48);
+    admission_pointer(records, 0x38 + 0x20, entity); admission_pointer(records, 5 * 0x38 + 0x20, row);
+    for (size_t i = 0; i < 7; i++) {
+        char *field = i < 4 ? (char *)entity + i * 0x48 : (char *)row + (i - 4) * 0x48;
+        admission_pointer(field, 0, admission_string(f, types[i]));
+        admission_pointer(field, 8, admission_string(f, i == 5 ? "*" : ""));
+        admission_pointer(field, 0x10, admission_string(f, names[i])); admission_number(field, 0x1c, 8);
+    }
+}
+static int lease_registration_baseline(void *context, const char *path, unsigned char **body, size_t *length)
+{
+    (void)context; *body = NULL; *length = 0;
+    if (strcmp(path, "generated/decls/entitydef/conductor.decl")) return 0;
+    const char *text = "{ class = \"Entity\"; edit = { aiTypeList = { num = 0; } "
+        "globalAIMods = { num = 1; item[0] = { aiType = 4; healthMod = 2; } } } }";
+    *length = strlen(text); *body = (unsigned char *)_strdup(text); return *body ? 1 : -1;
+}
+static uint32_t lease_registration_request(const sh_compiled_resource *r)
+{
+    sh_decl_node *tree = sh_decl_tree_parse((sh_decl_source){(char *)r->body, r->body_length}, NULL, 0);
+    const sh_decl_node *edit = sh_decl_tree_member(tree, "edit");
+    const char *value = NULL; size_t length = 0; uint32_t key = 0;
+    CHECK(sh_decl_tree_literal(sh_decl_tree_member(edit, "spawnType"), &value, &length));
+    CHECK(sh_package_key_bits(NULL, value, length, &key));
+    sh_decl_tree_free(tree); return key;
+}
+typedef struct registration_activation {
+    uint32_t classification;
+    int calls, recoveries, fail;
+} registration_activation;
+static int registration_admit(void *context, int restoring, const sh_package_changes *changes,
+    char *error, size_t capacity)
+{
+    registration_activation *state = context;
+    CHECK(sh_package_runtime_test_key_groups_current());
+    CHECK(sh_package_runtime_test_unmodified_type(state->classification) == !restoring);
+    for (size_t i = 0; i < changes->count; i++)
+        CHECK(changes->items[i].kind == (restoring ? SH_PACKAGE_RESOURCE_REMOVED : SH_PACKAGE_RESOURCE_ADDED));
+    if (restoring) { state->recoveries++; return 1; }
+    state->calls++;
+    if (state->fail) { snprintf(error, capacity, "registration admission fixture failure"); return 0; }
+    return 1;
+}
+static void test_retained_registration_meaning(int additive)
+{
+    admission_fixture f; lease_registration_setup(&f);
+    sh_decl_registry_source registry = {&f, admission_read, (uintptr_t)f.registry, NULL};
+    char data[MAX_PATH], map[MAX_PATH], error[2048], request[1024] = "", ai[1024] = "";
+    sh_package_map_plan *plan = NULL;
+    sh_package_occurrence_snapshot *document = NULL;
+    uint32_t local_key = 0, map_key = 0;
+    char local_ai[1024] = "";
+    for (size_t i = 0; i < 2; i++) {
+        const char *directory = i ? "registration-map" : "registration-data";
+        char path[512];
+        snprintf(path, sizeof(path), "%s/overrides/variant/package.json", directory);
+        create(path, "{\"id\":\"variant\",\"name\":\"Variant\"}");
+        snprintf(path, sizeof(path), "%s/overrides/variant/assets/generated/decls/entitydef/unit.decl", directory);
+        create(path, i ? "{ class = \"Entity\"; edit = { health = 10; } }" :
+            "{ class = \"Entity\"; edit = { health = 12000; } }");
+        snprintf(path, sizeof(path), "%s/overrides/variant/assets/generated/decls/entitydef/request.decl", directory);
+        create(path, "{ class = \"Entity\"; edit = { spawnType = 524288; } }");
+        snprintf(path, sizeof(path), "%s/overrides/variant/assets/generated/decls/entitydef/conductor.decl", directory);
+        create(path, "{ class = \"Entity\"; edit = { aiTypeList = { num = 1; "
+            "item[0] = { aiType = 524292; entityDef = \"unit\"; } } } }");
+    }
+    snprintf(data, sizeof(data), "%s/registration-data", root); snprintf(map, sizeof(map), "%s/registration-map", root);
+    sh_package_runtime_test_dispose(); sh_package_runtime_test_baseline(lease_registration_baseline, NULL);
+    sh_package_runtime_test_source_readers(registry, (uintptr_t)f.reflection);
+    sh_package_runtime_test_installed_links(1);
+    sh_package_runtime_test_spawn_keys(1);
+    int refreshed = sh_package_runtime_refresh(data);
+    if (!refreshed) { sh_package_runtime_error(error, sizeof(error)); fprintf(stderr, "registration refresh: %s\n", error); }
+    CHECK(refreshed);
+    const sh_package_compilation *local = sh_package_runtime_acquire();
+    for (size_t i = 0; local && i < local->resource_count; i++) {
+        const sh_compiled_resource *r = local->resources + i;
+        if (r->body && strstr((char *)r->body, "spawnType =")) local_key = lease_registration_request(r);
+        if (r->body && strstr((char *)r->body, "health = 12000")) strcpy_s(local_ai, sizeof(local_ai), r->native_name);
+    }
+    sh_package_runtime_release(); CHECK(local_key && *local_ai);
+    plan = sh_package_runtime_prepare_map(data, map, error, sizeof(error));
+    if (!plan) fprintf(stderr, "registration map prepare: %s\n", error);
+    CHECK(plan); if (!plan) goto done;
+    const sh_package_compilation *compiled = sh_package_map_plan_compilation(plan);
+    for (size_t i = 0; i < compiled->resource_count; i++) {
+        const sh_compiled_resource *r = compiled->resources + i;
+        if (r->body && strstr((char *)r->body, "spawnType =")) {
+            strcpy_s(request, sizeof(request), r->native_name); map_key = lease_registration_request(r);
+        }
+        if (r->body && strstr((char *)r->body, "health = 10")) strcpy_s(ai, sizeof(ai), r->native_name);
+    }
+    CHECK(*request && *ai); if (!*request || !*ai) goto done;
+    char json[2048]; size_t length = 0;
+    snprintf(json, sizeof(json), "{\"entities\":[{\"targetType\":\"idDeclEntityDef\",\"inherit\":\"%s\"}]}", request);
+    char *bound = sh_package_runtime_capture_document(plan, NULL, NULL, 0, json, strlen(json),
+        &length, &document, NULL, NULL, error, sizeof(error));
+    if (!bound) fprintf(stderr, "registration capture: %s\n", error);
+    CHECK(bound && document); free(bound); if (!document) goto done;
+    if (additive) {
+        uint32_t classification = 0;
+        sh_package_key_space numeric = {0};
+        for (size_t i = 0; i < compiled->resource_count; i++) {
+            const sh_compiled_resource *r = compiled->resources + i;
+            if (!r->body || !strstr((char *)r->body, "aiTypeList")) continue;
+            sh_package_spawn_registry table = {0};
+            int read = sh_package_spawn_registry_read((sh_decl_source){(char *)r->body, r->body_length},
+                &numeric, &table, error, sizeof(error));
+            CHECK(read >= 0);
+            for (size_t row = 0; row < table.count; row++)
+                if (!strcmp(table.rows[row].entity, ai)) { classification = table.rows[row].mask; break; }
+            sh_package_spawn_registry_free(&table);
+            if (classification) break;
+        }
+        CHECK(classification);
+        registration_activation state = {classification, 0, 0, 1};
+        CHECK(sh_package_runtime_admit_occurrences(plan, document, (sh_package_activation_guard){0},
+            registration_admit, NULL, &state, error, sizeof(error)) == SH_PACKAGE_ADMISSION_FAILED);
+        CHECK(state.calls == 1 && state.recoveries == 1 && sh_package_runtime_ready());
+        CHECK(sh_package_runtime_test_key_groups_current() &&
+            !sh_package_runtime_test_unmodified_type(classification));
+        state.fail = 0;
+        int result = sh_package_runtime_admit_occurrences(plan, document, (sh_package_activation_guard){0},
+            registration_admit, NULL, &state, error, sizeof(error));
+        if (result != SH_PACKAGE_ADMISSION_READY) fprintf(stderr, "registration admission: %s\n", error);
+        CHECK(result == SH_PACKAGE_ADMISSION_READY && state.calls == 2 && state.recoveries == 1);
+        CHECK(sh_package_runtime_test_key_groups_current());
+        CHECK(sh_package_runtime_test_unmodified_type(classification));
+    } else CHECK(sh_package_runtime_activate_prepared_map(plan, (sh_package_activation_guard){0}, NULL, NULL));
+    sh_package_map_plan_free(plan); plan = NULL;
+    if (additive) {
+        /* The next native load publishes retained registrations without a map
+         * reopen, library rescan or replacement of the installed packages. */
+        int fail = 0;
+        CHECK(sh_package_runtime_occurrences_pending());
+        CHECK(sh_package_runtime_activate_occurrences(NULL, (sh_package_activation_guard){0}, startup_activation, &fail));
+        CHECK(!sh_package_runtime_occurrences_pending());
+    } else CHECK(sh_package_runtime_activate_map(data, NULL, (sh_package_activation_guard){0}, NULL, NULL));
+    const sh_package_compilation *current = sh_package_runtime_acquire();
+    const sh_compiled_resource *conductor = sh_package_compilation_find(current, "generated/decls/entitydef/conductor.decl");
+    CHECK(conductor && conductor->body && strstr((char *)conductor->body, ai));
+    sh_package_spawn_registry registrations = {0}; sh_package_key_space key_space = {0};
+    CHECK(conductor && sh_package_spawn_registry_read((sh_decl_source){(char *)conductor->body, conductor->body_length},
+        &key_space, &registrations, error, sizeof(error)) == 1);
+    sh_package_runtime_release();
+    sh_package_key_groups groups;
+    sh_package_runtime_test_serving_key_table(&groups);
+    size_t local_matches = 0, map_matches = 0;
+    CHECK(local_key != map_key && strcmp(local_ai, ai));
+    for (size_t i = 0; i < registrations.count; i++) {
+        const sh_package_spawn_row *row = registrations.rows + i;
+        if (sh_package_key_request_matches(&groups, map_key, row->mask)) {
+            map_matches++; CHECK(!strcmp(row->entity, ai));
+            CHECK(sh_package_runtime_test_unmodified_type(row->mask));
+        }
+        if (sh_package_key_request_matches(&groups, local_key, row->mask)) {
+            local_matches++; CHECK(!strcmp(row->entity, local_ai));
+            CHECK(!sh_package_runtime_test_unmodified_type(row->mask));
+        }
+    }
+    CHECK(map_matches == 1 && local_matches == 1);
+    sh_package_spawn_registry_free(&registrations);
+done:
+    sh_package_occurrence_release(document); sh_package_map_plan_free(plan);
+    sh_package_runtime_test_dispose(); sh_package_runtime_test_installed_links(0);
+    sh_package_runtime_test_spawn_keys(0);
+    sh_package_runtime_test_source_readers((sh_decl_registry_source){0}, 0); cleanup_resources(data);
+    while (f.count) free(f.regions[--f.count].address);
 }
 static void test_retained_bound_dependencies(void)
 {
@@ -2362,7 +2663,7 @@ static int installed_authoring_activate(void *context, int restoring,
     }
     state->calls++;
     CHECK(!state->selector);
-    state->selector = sh_package_runtime_selectors_retain(error, capacity); CHECK(state->selector);
+    state->selector = sh_package_runtime_selectors_retain("snapeditorentitydef", error, capacity); CHECK(state->selector);
     if (!state->selector) return 0;
     expect_current(state->imported_path, "health = 20");
     if (state->fail) { snprintf(error, capacity, "fixture authoring native failure"); return 0; }
@@ -2505,8 +2806,8 @@ static void test_selector_shared_retirement(void)
     snprintf(data, sizeof(data), "%s/selector-slot-data", root);
     sh_package_runtime_test_dispose(); sh_package_runtime_test_baseline(baseline, NULL);
     CHECK(sh_package_runtime_refresh(data));
-    first = sh_package_runtime_selectors_retain(error, sizeof(error));
-    second = sh_package_runtime_selectors_retain(error, sizeof(error));
+    first = sh_package_runtime_selectors_retain("entitydef", error, sizeof(error));
+    second = sh_package_runtime_selectors_retain("entitydef", error, sizeof(error));
     CHECK(first && second); if (!first || !second) goto done;
     create("selector-slot-data/overrides/current/package.json", "{\"id\":\"selector-slot\",\"name\":\"New slot\","
         "\"requirements\":{\"cvars\":{\"g_useResourceBlackList\":0}},\"strings\":{\"en\":{\"slot\":\"new\"}},"
@@ -2534,6 +2835,36 @@ static void test_selector_shared_retirement(void)
 done:
     sh_package_runtime_selectors_release(first); sh_package_runtime_selectors_release(second);
     sh_package_runtime_test_dispose(); cleanup_resources(data);
+}
+static void test_selector_unrelated_gameplay(void)
+{
+    char data[MAX_PATH], map_root[MAX_PATH], error[2048];
+    const char *palette = "generated/decls/snapeditorentitydef/palette/tool.decl";
+    sh_package_selector_hold *hold = NULL;
+    sh_package_map_plan *plan = NULL;
+    create("selector-scope-data/overrides/current/package.json", "{\"id\":\"selector-scope\",\"name\":\"Palette\"}");
+    create("selector-scope-data/overrides/current/assets/generated/decls/snapeditorentitydef/palette/tool.decl",
+        "{ edit = { displayName = \"Tool\"; } }");
+    create("selector-scope-data/overrides/current/assets/generated/decls/entitydef/ai/cyberdemon.decl",
+        "{ edit = { health = 10; } }");
+    create("selector-scope-map/overrides/authored/package.json", "{\"id\":\"authored\",\"name\":\"Authored\"}");
+    create("selector-scope-map/overrides/authored/assets/generated/decls/entitydef/ai/cyberdemon.decl",
+        "{ edit = { health = 30; } }");
+    snprintf(data, sizeof(data), "%s/selector-scope-data", root);
+    snprintf(map_root, sizeof(map_root), "%s/selector-scope-map", root);
+    sh_package_runtime_test_dispose(); sh_package_runtime_test_baseline(baseline, NULL);
+    CHECK(sh_package_runtime_refresh(data));
+    expect_current(health_path, "health = 10"); expect_current(palette, "Tool");
+    hold = sh_package_runtime_selectors_retain("snapeditorentitydef", error, sizeof(error)); CHECK(hold);
+    plan = sh_package_runtime_prepare_map(data, map_root, error, sizeof(error)); CHECK(plan);
+    if (!plan) fprintf(stderr, "selector map preparation: %s\n", error);
+    /* A palette borrows its templates and their dependency closure. A shared
+     * gameplay resource elsewhere in that provider is not a palette borrow. */
+    CHECK(plan && sh_package_runtime_activate_prepared_map(plan, (sh_package_activation_guard){0}, NULL, NULL));
+    expect_current(health_path, "health = 30"); expect_current(palette, "Tool");
+    expect_library("health = 10");
+    sh_package_runtime_selectors_release(hold); hold = NULL;
+    sh_package_map_plan_free(plan); sh_package_runtime_test_dispose(); cleanup_resources(data);
 }
 static void test_installed_authoring_admission(void)
 {
@@ -2702,6 +3033,53 @@ done:
 /* A package whose own content reaches a dependency SnapMap does not ship stays
  * installed but is not served; its healthy peer still compiles, and neither is
  * reported as a malformed package to skip. */
+static int local_document_baseline(void *context, const char *path, unsigned char **body, size_t *length)
+{
+    (void)context; *body = NULL; *length = 0;
+    if (strcmp(path, "generated/decls/entitydef/legacy/native.decl")) return 0;
+    *body = (unsigned char *)_strdup("{ class = \"Entity\"; edit = { health = 10; } }");
+    if (!*body) return -1;
+    *length = strlen((char *)*body); return 1;
+}
+static void test_local_document_binding(void)
+{
+    admission_fixture f; admission_setup(&f);
+    sh_decl_registry_source registry = {&f, admission_read, (uintptr_t)f.registry, NULL};
+    char data[MAX_PATH], map[MAX_PATH], error[2048]; size_t length, next_length;
+    snprintf(data, sizeof(data), "%s/local-document", root);
+    snprintf(map, sizeof(map), "%s/local-document-map", root);
+    create("local-document/overrides/local/package.json", "{\"id\":\"local\",\"name\":\"Local\"}");
+    create("local-document/overrides/local/assets/generated/decls/entitydef/legacy/custom.decl",
+        "{ class = \"Entity\"; edit = { health = 5; } }");
+    create("local-document/overrides/local/assets/generated/decls/entitydef/legacy/native.decl",
+        "{ class = \"Entity\"; edit = { health = 20; } }");
+    create("local-document-map/overrides/map/package.json", "{\"id\":\"map\",\"name\":\"Map\"}");
+    create("local-document-map/overrides/map/assets/generated/decls/entitydef/legacy/custom.decl",
+        "{ class = \"Entity\"; edit = { health = 42; } }");
+    sh_package_runtime_test_dispose(); sh_package_runtime_test_baseline(local_document_baseline, NULL);
+    sh_package_runtime_test_source_readers(registry, (uintptr_t)f.reflection);
+    sh_package_runtime_test_installed_links(1);
+    CHECK(sh_package_runtime_refresh(data));
+    const char *json = "{\"entities\":[{\"entityDef\":{\"targetType\":\"idDeclEntityDef\","
+        "\"inherit\":\"legacy/custom\"}},{\"entityDef\":{\"targetType\":\"idDeclEntityDef\","
+        "\"inherit\":\"legacy/native\"}}],\"note\":\"legacy/custom\x97\"}";
+    char *out = sh_package_runtime_rebind_local_document(json, strlen(json), &length, error, sizeof(error));
+    if (!out) fprintf(stderr, "local document: %s\n", error);
+    CHECK(out && strstr(out, "\"inherit\":\"smp/") && strstr(out, "\"inherit\":\"legacy/native\"") &&
+        strstr(out, "\"note\":\"legacy/custom\x97\"") && !strstr(out, "smpbind."));
+    sh_package_map_plan *plan = sh_package_runtime_prepare_map(data, map, error, sizeof(error));
+    CHECK(plan); int fail = 0;
+    CHECK(sh_package_runtime_activate_prepared_map(plan, (sh_package_activation_guard){0}, startup_activation, &fail));
+    char *again = sh_package_runtime_rebind_local_document(json, strlen(json), &next_length, error, sizeof(error));
+    CHECK(out && again && length == next_length && !memcmp(out, again, length + 1));
+    HeapFree(GetProcessHeap(), 0, out); HeapFree(GetProcessHeap(), 0, again);
+    sh_package_map_plan_free(plan);
+    sh_package_runtime_test_installed_links(0);
+    sh_package_runtime_test_source_readers((sh_decl_registry_source){0}, 0); sh_package_runtime_test_dispose();
+    sh_package_runtime_test_baseline(baseline, NULL);
+    for (size_t i = 0; i < f.count; i++) free(f.regions[i].address);
+    cleanup_resources(data); cleanup_resources(map);
+}
 static void test_unserved_coverage(void)
 {
     char data[MAX_PATH], *summary;
@@ -2774,6 +3152,7 @@ int main(int argc, char **argv)
     test_duplicate_editor_controls();
     test_audio_programs();
     test_local_isolation();
+    test_local_document_binding();
     test_unserved_coverage();
     test_map_usage_admission();
     test_legacy_include_bindings();
@@ -2887,13 +3266,17 @@ int main(int argc, char **argv)
     test_historical_private_preparation();
     test_constructor_provider_lifetimes();
     test_constructor_binding_changes();
+    test_native_membership_changes();
     test_retained_occurrence_resources();
     test_retained_bound_dependencies();
+    test_retained_registration_meaning(0);
+    test_retained_registration_meaning(1);
     test_additive_occurrence_admission();
     test_installed_authoring_admission();
     test_initial_installed_authoring();
     test_local_authoring_defect();
     test_selector_shared_retirement();
+    test_selector_unrelated_gameplay();
     test_failed_local_compilation_admission();
     cleanup(); if (failures) return 1;
     puts("package runtime map context tests passed"); return 0;

@@ -116,6 +116,7 @@ $tests = @(
     @{ name = "grid_room_native_test"; src = 'grid_room_native_test.c ..\src\backend\grid_room.c ..\src\backend\grid_room_decl.c ..\src\backend\config_json.c ..\src\backend\grid_room_edit.c ..\src\backend\patch.c ..\src\backend\hook.c'; arg = "" }
     @{ name = "grid_room_snap_test"; src = 'grid_room_snap_test.c ..\src\backend\grid_room.c ..\src\backend\patch.c ..\src\backend\hook.c'; arg = "" }
     @{ name = "spawn_keys_test"; src = 'spawn_keys_test.c ..\src\backend\spawn_keys.c ..\src\backend\package_keys.c ..\src\backend\decl_tree.c ..\src\backend\patch.c ..\src\backend\hook.c'; defs = '/DSH_SPAWN_KEYS_TESTING'; arg = "" }
+    @{ name = "package_spawn_registry_test"; src = 'package_spawn_registry_test.c ..\src\backend\package_spawn_registry.c ..\src\backend\package_keys.c ..\src\backend\decl_tree.c'; arg = "" }
     @{ name = "snap_type_cache_test"; src = 'snap_type_cache_test.c ..\src\backend\snap_type_cache.c ..\src\backend\patch.c ..\src\backend\hook.c'; defs = '/DSH_SNAP_TYPE_CACHE_TESTING'; arg = "" }
     @{ name = "key_inspector_test"; src = 'key_inspector_test.c ..\src\backend\key_inspector.c ..\src\backend\package_keys.c ..\src\backend\decl_tree.c ..\src\backend\patch.c ..\src\backend\hook.c'; defs = '/DSH_KEY_INSPECTOR_TESTING'; arg = "" }
     @{ name = "nav_heap_test"; src = 'nav_heap_test.c'; arg = "" }
@@ -185,6 +186,7 @@ $tests = @(
     @{ name = "strids_packages_test"; src = 'strids_packages_test.c ..\src\backend\perf.c ..\src\backend\strids.c ..\src\backend\packages.c ..\src\backend\overrides.c ..\src\backend\decl_text.c ..\src\backend\grid_room_asset.c ..\src\backend\grid_room_nav.c ..\src\backend\aas_edit.c ..\src\backend\grid_room.c ..\src\backend\grid_room_resources.c ..\src\backend\grid_room_decl.c ..\src\backend\config_json.c'; defs = '/DSH_STRIDS_TESTING /DSH_OVERRIDES_TESTING'; libs = 'shell32.lib'; arg = "" }
     @{ name = "config_message_test"; src = 'config_message_test.cpp ..\src\ui\webview\config_message.cpp'; cxx = $true; arg = "" }
     @{ name = "webview_json_test"; src = 'webview_json_test.cpp ..\src\ui\webview\webview_json.cpp'; cxx = $true; arg = "" }
+    @{ name = "prefab_scene_test"; src = 'prefab_scene_test.c ..\src\ui\webview\prefab_scene.c ..\src\backend\config_json.c'; arg = "" }
     @{ name = "crash_pending_test"; src = 'crash_pending_test.cpp'; cxx = $true; arg = "" }
     @{ name = "theme_bootstrap_test"; src = 'theme_bootstrap_test.cpp ..\src\ui\webview\theme_bootstrap.cpp'; cxx = $true; arg = "" }
     @{ name = "theme_contract_test"; src = 'theme_contract_test.c'; arg = (Join-Path $here '..\src\ui\webview\mockup.html') }
@@ -240,7 +242,7 @@ $compiledConsumers = @("package_runtime_context_test", "weapon_hud_test", "packa
 $compiledConsumers += @("audio_originals_test", "package_native_preparation_runtime_test")
 $tests += @{ name = "package_native_preparation_runtime_test"; src = 'package_native_preparation_runtime_test.c'; defs = '/DSH_PACKAGE_RUNTIME_NATIVE_TESTING'; arg = "" }
 $compilerSources = @("grid_room_asset.c", "grid_room_nav.c", "aas_edit.c", "grid_room.c", "grid_room_resources.c", "grid_room_decl.c", "package_runtime.c", "resource_graph.c", "package_usage.c", "package_source_graph.c", "decl_native_registry.c", "decl_dependencies.c", "decl_json_dependencies.c", "decl_graph.c", "decl_graph_compose.c", "decl_md6_compose.c", "decl_block_compose.c", "decl_native_lex.c", "md6_binary.c", "model_binary.c", "decl_graph_dependencies.c", "package_compiler.c", "decl_entity_class.c", "decl_native_schema.c", "decl_script_schema.c", "package_sources.c", "packages.c", "package_descriptor.c", "config_json.c", "decl_compose.c", "decl_tree.c", "decl_polymorphic.c", "decl_server_path.c", "decl_text.c", "resource_catalog.c", "raw_deflate.c")
-$compilerSources += @("decl_native_lex.c", "decl_material.c", "decl_material_compose.c", "package_material.c", "package_keys.c")
+$compilerSources += @("decl_native_lex.c", "decl_material.c", "decl_material_compose.c", "package_material.c", "package_keys.c", "package_spawn_registry.c")
 $compilerSources += @("audio_banks.c", "audio_packages.c", "audio_originals.c", "package_audio.c", "package_sound.c")
 $compilerSources += @("virtual_material_runtime.c", "virtual_material_native.c", "virtual_material.c", "package_virtual_material.c")
 $compilerSources += @("package_link_inputs.c", "package_library.c", "package_source_link.c", "package_linker.c", "package_link_graph.c", "package_link_identity.c", "package_provenance.c", "package_scope.c", "package_native_names.c")
@@ -304,9 +306,13 @@ $prefabSources = 'prefab_test.c ..\src\backend\prefab.c ..\src\backend\package_o
 $prefabSources += ($tests | Where-Object { $_.name -eq 'package_archive_test' }).src -replace '^package_archive_test.c ', ''
 $tests += @{ name = "prefab_test"; src = $prefabSources; arg = "" }
 foreach ($t in $tests) {
+    if ($t.name -eq 'package_runtime_context_test') {
+        $t.src += ' ..\src\backend\spawn_keys.c'
+        $t.defs += ' /DSH_SPAWN_KEYS_TESTING'
+    }
     if ('..\src\backend\package_library.c' -in ($t.src -split ' ') -or $t.name -in $compiledConsumers -or
         $t.name -in @('package_source_graph_test', 'package_shader_link_test')) { $t.src += ' ..\src\backend\package_consumers.c' }
-    if ('..\src\backend\package_source_graph.c' -in ($t.src -split ' ')) { $t.src += ' ..\src\backend\map_binding_sites.c ..\src\backend\package_shader.c ..\src\backend\package_keys.c' }
+    if ('..\src\backend\package_source_graph.c' -in ($t.src -split ' ')) { $t.src += ' ..\src\backend\map_binding_sites.c ..\src\backend\package_shader.c ..\src\backend\package_keys.c ..\src\backend\package_spawn_registry.c' }
     if ($t.name -in @("map_package_test", "package_archive_test", "package_scale_test")) { $t.src += ' ..\src\backend\package_bundle.c' }
     if ($t.name -eq "package_scale_test") { $t.src += ' ..\src\backend\package_provenance.c ..\src\backend\package_scope.c ..\src\backend\package_link_inputs.c' }
     if ($t.name -in @("package_linker_test", "package_source_graph_test", "package_shader_link_test")) { $t.src += ' ..\src\backend\package_link_inputs.c' }
