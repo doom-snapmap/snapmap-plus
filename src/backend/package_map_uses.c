@@ -343,9 +343,12 @@ static int mu_choose(sh_package_map_uses *selection, const sh_package_provenance
         const sh_package_provenance_use *use = selection->saved.uses + i;
         if (use->kind == SH_PACKAGE_USE_HISTORICAL || !mu_same_site(use, site)) continue;
         exact = 1;
-        int match = mu_saved_match(selection, i, family, name, &resolved);
+        /* A changed value is a fresh selection: its saved row's resolution
+         * must not replace the value now at the site. */
+        const char *candidate = NULL;
+        int match = mu_saved_match(selection, i, family, name, &candidate);
         if (match < 0) return -1;
-        if (match) saved_use = i;
+        if (match) { saved_use = i; resolved = candidate; }
         break;
     }
     if (!exact) for (size_t i = 0; i < selection->saved.use_count; i++) {

@@ -266,6 +266,13 @@ Checks native helpers, engine-interface contracts, frontend JavaScript and optio
   library even while a different map supplies the same authored name.
   `rawmap_paths_test.c` keeps saved deliveries outside that fallback and checks
   failure atomicity before native loading.
+- `package_native_inline_test.c` checks native map conversion: one inline layer
+  over the first native ancestor, replaced stock identities, dropped and hidden
+  values, and placement refusals. `decl_native_carrier_test.c` checks which values
+  the entity carrier reproduces; `package_editor_rows_test.c` checks which shipped
+  editor entry places a base. `package_runtime_context_test.c` drives save and
+  load conversion, native and mixed requirements, installed stock-named copies and
+  editor-entry provenance; `package_map_uses_test.c` keeps a converted value fresh.
 - `rawmap_paths_test.c` also drives saved-map preflight: retained JSON replaces a
   different second engine read, refusal prevents native loading, parse failures
   defer retirement until the browser, and held files retain cleanup ownership.

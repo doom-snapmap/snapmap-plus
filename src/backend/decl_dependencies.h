@@ -56,6 +56,10 @@ typedef struct sh_decl_dependency_schema {
         const char *class_name, size_t length, sh_decl_value_type *selected_type);
     int (*reference_site)(void *context, const char *path, sh_decl_value_type type,
         const char *name, size_t name_length, const sh_decl_reference_site *site);
+    /* Optional: every value whose type is verified to hold no resource
+     * reference (primitives, strings, enums, registered value readers), with
+     * its reflected type. Return 0 to abort the walk. */
+    int (*value)(void *context, const char *path, sh_decl_value_type type, const sh_decl_node *node);
 } sh_decl_dependency_schema;
 
 typedef struct sh_decl_dependency_result {

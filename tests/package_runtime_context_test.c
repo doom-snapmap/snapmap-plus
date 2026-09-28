@@ -6,7 +6,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include "package_runtime.h"
-#define PACKAGE_FIXTURE_ENTRIES 1024u
+#include "resource_graph.h"
+/* Every created directory level counts until the final cleanup; overflowing
+ * the table silently leaves later fixtures' files uncreated. */
+#define PACKAGE_FIXTURE_ENTRIES 2048u
 #include "package_fixture.h"
 #include "hook.h"
 #include "map_provenance.h"
@@ -2008,6 +2011,492 @@ static void test_historical_derived_recipe(void)
 static int native_identity_activate(void *context, int restoring, const sh_package_changes *changes,
     char *error, size_t capacity)
 { (void)context; (void)restoring; (void)changes; (void)error; (void)capacity; return 1; }
+/* R137 save/load path. A map use of a package entity definition is saved as
+ * native inline state when exact; another use whose value SnapMap's carrier
+ * cannot prove (a decimal for an int field) keeps its package, which then stays
+ * delivered whole (mixed map). With only convertible uses the map needs no
+ * package. Unused bundle members are no requirement: a stock-named edit is
+ * compiled under a private identity, so stock consumers never reach it and only
+ * bound map uses do. A shared setting keeps an otherwise unused delivery. The
+ * native base must be a SnapMap palette definition (a shipped editor entry
+ * resolves to it); package editor entries are covered by
+ * package_editor_rows_test. */
+#define INLINE_ENTITY(name) "{\"entityDef\":{\"className\":\"Entity\",\"inherit\":\"" name "\",\"name\":\"\"," \
+    "\"state\":{\"edit\":{}},\"targetType\":\"idDeclEntityDef\",\"~type\":\"idDeclEntityDef\",\"~version\":26}}"
+#define INLINE_VARIABLES "{\"variables\":{\"allocCount\":[0,0,0,0,0],\"string\":[]},\"entities\":["
+static const char *const inline_editor_rows[] = {"inlinestock/row_base", "inlinestock/base_row",
+    "inlinestock/child_row", "inlinestock/holder_row"};
+static int inline_baseline(void *context, const char *path, unsigned char **body, size_t *length)
+{
+    const char *text = !strcmp(path, "generated/decls/entitydef/inlinestock/base.decl") ?
+            "{ class = \"Entity\"; edit = { health = 1; target = \"\"; } }" :
+        !strcmp(path, "generated/decls/entitydef/inlinestock/holder.decl") ?
+            "{ class = \"Entity\"; edit = { health = 3; target = \"inlinestock/child\"; } }" :
+        !strcmp(path, "generated/decls/entitydef/inlinestock/child.decl") ?
+            "{ class = \"Entity\"; edit = { health = 1; } }" :
+        !strcmp(path, "generated/decls/entitydef/inlinestock/hidden.decl") ?
+            "{ class = \"Entity\"; edit = { health = 1; } }" :
+        /* Shipped editor entries: an abstract parent, and rows placing three of
+         * the stock definitions; inlinestock/hidden has none. */
+        !strcmp(path, "generated/decls/snapeditorentitydef/inlinestock/row_base.decl") ?
+            "{ edit = { previewImage = \"icons/stock\"; } }" :
+        !strcmp(path, "generated/decls/snapeditorentitydef/inlinestock/base_row.decl") ?
+            "{ inherit = \"inlinestock/row_base\"; edit = { entityDef = \"inlinestock/base\"; } }" :
+        !strcmp(path, "generated/decls/snapeditorentitydef/inlinestock/child_row.decl") ?
+            "{ inherit = \"inlinestock/row_base\"; edit = { entityDef = \"inlinestock/child\"; } }" :
+        !strcmp(path, "generated/decls/snapeditorentitydef/inlinestock/holder_row.decl") ?
+            "{ inherit = \"inlinestock/row_base\"; edit = { entityDef = \"inlinestock/holder\"; } }" : NULL;
+    (void)context; *body = NULL; *length = 0;
+    if (!text) return 0;
+    *length = strlen(text); *body = (unsigned char *)_strdup(text); return *body ? 1 : -1;
+}
+static void inline_graph(const char *name, const char *child)
+{
+    sh_resource_graph_frame frame;
+    sh_resource_graph_begin(&frame, "entitydef", name);
+    sh_resource_graph_end(&frame, 1);
+    sh_resource_graph_begin_state(&frame, "entitydef", name, 1);
+    if (child) sh_resource_graph_reference("entitydef", child);
+    sh_resource_graph_end(&frame, 1);
+}
+static int inline_save(const char *data, const char *map, const char *json, char **derived, size_t *count,
+    sh_package_occurrence_snapshot **ownership, char **report)
+{
+    char error[2048]; size_t bound_length = 0, derived_length = 0;
+    sh_mpkg_used *used = NULL; int result = -2;
+    sh_package_map_plan *plan = sh_package_runtime_prepare_map(data, map, error, sizeof(error));
+    if (!plan) { fprintf(stderr, "inline prepare: %s\n", error); return -2; }
+    char *bound = sh_package_map_plan_rebind(plan, NULL, json, strlen(json), &bound_length, error, sizeof(error));
+    if (!bound) fprintf(stderr, "inline rebind: %s\n", error);
+    if (bound) {
+        result = sh_package_runtime_native_document(plan, NULL, NULL, 0, bound, bound_length, derived,
+            &derived_length, ownership, &used, count, report, error, sizeof(error));
+        if (result < 0) fprintf(stderr, "inline save: %s\n", error);
+        HeapFree(GetProcessHeap(), 0, bound);
+    }
+    sh_mpkg_used_free(used); sh_package_map_plan_free(plan);
+    return result;
+}
+static void inline_reset(char **derived, char **report, sh_package_occurrence_snapshot **ownership, size_t *count)
+{
+    free(*derived); *derived = NULL; free(*report); *report = NULL;
+    sh_package_occurrence_release(*ownership); *ownership = NULL; *count = 99;
+}
+static void test_native_inline_save(void)
+{
+    admission_fixture f; admission_setup(&f);
+    sh_decl_registry_source registry = {&f, admission_read, (uintptr_t)f.registry, NULL};
+    char data[MAX_PATH], map[MAX_PATH], stock[MAX_PATH], keep[MAX_PATH], setting[MAX_PATH], rows[MAX_PATH], copy[MAX_PATH];
+    char *derived = NULL, *report = NULL;
+    size_t count = 99; sh_package_occurrence_snapshot *ownership = NULL;
+    const sh_package_provenance *saved;
+    create("inline-data/overrides", NULL);
+    create("inline-map/overrides/tough/package.json", "{\"id\":\"tough\",\"name\":\"Tough\"}");
+    create("inline-map/overrides/tough/assets/generated/decls/entitydef/inline/tough.decl",
+        "{ inherit = \"inlinestock/base\"; edit = { health = 40; } }");
+    create("inline-map/overrides/tough/assets/generated/decls/entitydef/inline/fraction.decl",
+        "{ inherit = \"inlinestock/base\"; edit = { health = 2.5; } }");
+    create("inline-stock/overrides/withstock/package.json", "{\"id\":\"withstock\",\"name\":\"With stock\"}");
+    create("inline-stock/overrides/withstock/assets/generated/decls/entitydef/inline/tough.decl",
+        "{ inherit = \"inlinestock/base\"; edit = { health = 40; } }");
+    create("inline-stock/overrides/withstock/assets/generated/decls/entitydef/inlinestock/child.decl",
+        "{ class = \"Entity\"; edit = { health = 9; } }");
+    create("inline-copy/overrides/copystock/package.json", "{\"id\":\"copystock\",\"name\":\"Copy stock\"}");
+    create("inline-copy/overrides/copystock/assets/generated/decls/entitydef/inline/tough.decl",
+        "{ inherit = \"inlinestock/base\"; edit = { health = 40; } }");
+    create("inline-copy/overrides/copystock/assets/generated/decls/entitydef/inlinestock/base.decl",
+        "{ class = \"Entity\"; editorVars { placeable = true; } edit = { health = 1; target = \"\"; } }");
+    create("inline-rows/overrides/rows/package.json", "{\"id\":\"rows\",\"name\":\"Rows\"}");
+    create("inline-rows/overrides/rows/assets/generated/decls/entitydef/inline/hidden.decl",
+        "{ inherit = \"inlinestock/hidden\"; edit = { health = 40; } }");
+    create("inline-keep/overrides/keepstock/package.json", "{\"id\":\"keepstock\",\"name\":\"Keep stock\"}");
+    create("inline-keep/overrides/keepstock/assets/generated/decls/entitydef/inline/tough.decl",
+        "{ inherit = \"inlinestock/base\"; edit = { health = 40; } }");
+    create("inline-keep/overrides/keepstock/assets/generated/decls/entitydef/inlinestock/child.decl",
+        "{ class = \"Entity\"; edit = { health = 9.5; } }");
+    create("inline-setting/overrides/withsetting/package.json", "{\"id\":\"withsetting\",\"name\":\"With setting\","
+        "\"requirements\":{\"cvars\":{\"g_useResourceBlackList\":0}}}");
+    create("inline-setting/overrides/withsetting/assets/generated/decls/entitydef/inline/tough.decl",
+        "{ inherit = \"inlinestock/base\"; edit = { health = 40; } }");
+    snprintf(data, sizeof(data), "%s/inline-data", root);
+    snprintf(map, sizeof(map), "%s/inline-map", root);
+    snprintf(stock, sizeof(stock), "%s/inline-stock", root);
+    snprintf(keep, sizeof(keep), "%s/inline-keep", root);
+    snprintf(setting, sizeof(setting), "%s/inline-setting", root);
+    snprintf(rows, sizeof(rows), "%s/inline-rows", root);
+    snprintf(copy, sizeof(copy), "%s/inline-copy", root);
+    sh_package_runtime_test_dispose(); sh_package_runtime_test_baseline(inline_baseline, NULL);
+    CHECK(sh_package_runtime_refresh(data));
+    sh_package_runtime_test_source_readers(registry, (uintptr_t)f.reflection);
+    sh_package_runtime_test_editor_rows(inline_editor_rows, sizeof(inline_editor_rows) / sizeof(*inline_editor_rows));
+
+    const char *mixed = INLINE_VARIABLES INLINE_ENTITY("inline/tough") "," INLINE_ENTITY("inline/fraction") "]}";
+    int result = inline_save(data, map, mixed, &derived, &count, &ownership, &report);
+    CHECK(result == 1 && derived && strstr(derived, "\"inherit\":\"inlinestock/base\"") &&
+        strstr(derived, "\"state\":{\"edit\":{\"health\":40}}") && count == 1);
+    CHECK(report && strstr(report, "-> native inlinestock/base") && strstr(report, "kept (product gap)"));
+    saved = ownership ? sh_package_occurrence_provenance(ownership) : NULL;
+    CHECK(saved && saved->use_count == 1 && saved->uses[0].owner && !strcmp(saved->uses[0].owner, "entity/1"));
+    inline_reset(&derived, &report, &ownership, &count);
+
+    const char *native = INLINE_VARIABLES INLINE_ENTITY("inline/tough") "]}";
+    result = inline_save(data, map, native, &derived, &count, &ownership, &report);
+    CHECK(result == 1 && derived && strstr(derived, "\"inherit\":\"inlinestock/base\"") && count == 0);
+    saved = ownership ? sh_package_occurrence_provenance(ownership) : NULL;
+    CHECK(saved && !saved->use_count);
+    inline_reset(&derived, &report, &ownership, &count);
+
+    /* The same delivery also edits a stock definition nothing in the map uses.
+     * That edit is private to bound uses, so it is demonstrably unreachable
+     * and no requirement, even before any dependency coverage is recorded. */
+    result = inline_save(data, stock, native, &derived, &count, &ownership, &report);
+    if (report && result != 1) fprintf(stderr, "%s", report);
+    CHECK(result == 1 && derived && strstr(derived, "\"inherit\":\"inlinestock/base\"") && count == 0);
+    CHECK(report && !strstr(report, "kept"));
+    inline_reset(&derived, &report, &ownership, &count);
+
+    /* A stock entity whose dependencies name that stock definition reaches the
+     * stock original with or without the package: still fully native. */
+    inline_graph("inlinestock/base", NULL);
+    inline_graph("inlinestock/child", NULL);
+    inline_graph("inlinestock/holder", "inlinestock/child");
+    const char *holder = INLINE_VARIABLES INLINE_ENTITY("inline/tough") "," INLINE_ENTITY("inlinestock/holder") "]}";
+    result = inline_save(data, stock, holder, &derived, &count, &ownership, &report);
+    if (report && result != 1) fprintf(stderr, "%s", report);
+    CHECK(result == 1 && derived && strstr(derived, "\"inherit\":\"inlinestock/holder\"") && count == 0);
+    inline_reset(&derived, &report, &ownership, &count);
+
+    /* A map use of the package's replacement of that stock definition becomes
+     * the stock identity plus one exact inline layer. */
+    const char *replaced = INLINE_VARIABLES INLINE_ENTITY("inline/tough") "," INLINE_ENTITY("inlinestock/child") "]}";
+    result = inline_save(data, stock, replaced, &derived, &count, &ownership, &report);
+    if (report && result != 1) fprintf(stderr, "%s", report);
+    CHECK(result == 1 && derived && count == 0 &&
+        strstr(derived, "\"inherit\":\"inlinestock/child\",\"name\":\"\",\"state\":{\"edit\":{\"health\":9}}"));
+    inline_reset(&derived, &report, &ownership, &count);
+
+    /* When another actual map use needs that edit and cannot convert, the
+     * delivery stays whole for it while the independent use still converts. */
+    result = inline_save(data, keep, replaced, &derived, &count, &ownership, &report);
+    if (report && result != 1) fprintf(stderr, "%s", report);
+    CHECK(result == 1 && derived && strstr(derived, "\"inherit\":\"inlinestock/base\"") && count == 1);
+    CHECK(report && strstr(report, "-> native inlinestock/base") && strstr(report, "kept (product gap)"));
+    saved = ownership ? sh_package_occurrence_provenance(ownership) : NULL;
+    CHECK(saved && saved->use_count == 1 && saved->uses[0].owner && !strcmp(saved->uses[0].owner, "entity/1"));
+    inline_reset(&derived, &report, &ownership, &count);
+
+    /* A shared setting keeps an otherwise unused delivery; whether the native
+     * map needs it is not modelled, so that is a product gap. */
+    result = inline_save(data, setting, native, &derived, &count, &ownership, &report);
+    if (report && result != 0) fprintf(stderr, "%s", report);
+    CHECK(result == 0 && !derived && count == 99 && !ownership);
+    CHECK(report && strstr(report, "kept (product gap): its package lifts SnapMap's resource blacklist"));
+    inline_reset(&derived, &report, &ownership, &count);
+
+    /* A base with no shipped editor entry would fail SnapMap's map validation:
+     * a native limit, and the use keeps its package. */
+    const char *hidden = INLINE_VARIABLES INLINE_ENTITY("inline/hidden") "]}";
+    result = inline_save(data, rows, hidden, &derived, &count, &ownership, &report);
+    if (report && result != 0) fprintf(stderr, "%s", report);
+    CHECK(result == 0 && !derived && report && strstr(report, "kept (native limit): 'inlinestock/hidden' has no SnapMap editor entry"));
+    inline_reset(&derived, &report, &ownership, &count);
+    /* A package copy of the stock base that adds only editor metadata leaves
+     * its content the native original's: the use still becomes native data. */
+    result = inline_save(data, copy, native, &derived, &count, &ownership, &report);
+    if (report && result != 1) fprintf(stderr, "%s", report);
+    CHECK(result == 1 && derived && strstr(derived, "\"inherit\":\"inlinestock/base\"") && count == 0);
+    inline_reset(&derived, &report, &ownership, &count);
+    /* Without the shipped roster, placement is unproven: nothing converts. */
+    sh_package_runtime_test_editor_rows(NULL, 0);
+    result = inline_save(data, map, native, &derived, &count, &ownership, &report);
+    CHECK(result == 0 && !derived && report && strstr(report, "kept (product gap): SnapMap's shipped editor entries could not be read"));
+    inline_reset(&derived, &report, &ownership, &count);
+
+    sh_package_runtime_test_source_readers((sh_decl_registry_source){0}, 0); sh_package_runtime_test_dispose();
+    sh_package_runtime_test_baseline(baseline, NULL);
+    for (size_t i = 0; i < f.count; i++) free(f.regions[i].address);
+    cleanup_resources(data); cleanup_resources(map); cleanup_resources(stock);
+    cleanup_resources(keep); cleanup_resources(setting); cleanup_resources(rows); cleanup_resources(copy);
+}
+
+/* R137 load path: the same conversion runs on the map-owned prepared document
+ * before availability decides on an installation. The local library lacks the
+ * map's package. A fully native equivalent then needs nothing installed; a
+ * mixed map still selects its complete package. Both a historical document
+ * (no recorded provenance) and a modern saved one take this route, and the
+ * map's retained delivery stays byte-identical. */
+static int inline_load_missing(sh_package_map_plan *plan, sh_decl_registry_source registry, uintptr_t reflection,
+    const char *json, size_t length, sh_package_missing *missing)
+{
+    sh_package_source_graph_report report = {0};
+    char error[1024];
+    sh_package_missing_free(missing); memset(missing, 0, sizeof(*missing));
+    int ok = sh_package_map_plan_usage_missing(plan, registry, reflection, json, length, missing,
+        &report, error, sizeof(error));
+    if (!ok) fprintf(stderr, "inline load availability: %s\n", error);
+    return ok;
+}
+static void test_native_inline_load(void)
+{
+    admission_fixture f; admission_setup(&f);
+    sh_decl_registry_source registry = {&f, admission_read, (uintptr_t)f.registry, NULL};
+    char data[MAX_PATH], map[MAX_PATH], error[2048];
+    unsigned char before[32] = {0};
+    sh_package_sources *sources = NULL;
+    sh_package_bundle_binding row = {0};
+    sh_package_missing missing = {0};
+    create("inline-load-data/overrides", NULL);
+    create("inline-load-map/overrides/tough/package.json", "{\"id\":\"tough-load\",\"name\":\"Tough load\"}");
+    create("inline-load-map/overrides/tough/assets/generated/decls/entitydef/inline/tough.decl",
+        "{ inherit = \"inlinestock/base\"; edit = { health = 40; } }");
+    create("inline-load-map/overrides/tough/assets/generated/decls/entitydef/inline/fraction.decl",
+        "{ inherit = \"inlinestock/base\"; edit = { health = 2.5; } }");
+    snprintf(data, sizeof(data), "%s/inline-load-data", root);
+    snprintf(map, sizeof(map), "%s/inline-load-map", root);
+    sh_package_runtime_test_dispose(); sh_package_runtime_test_baseline(inline_baseline, NULL);
+    CHECK(sh_package_runtime_refresh(data));
+    sources = sh_package_sources_scan(map, error, sizeof(error));
+    CHECK(sources && sources->package_count == 1); if (!sources || sources->package_count != 1) goto done;
+    strcpy_s(row.source_name, sizeof(row.source_name), sources->packages[0].name);
+    memcpy(row.compiler_tree, sources->fingerprints[0], 32);
+    row.original = sh_package_bundle_capture(sources, 0, data, error, sizeof(error)); CHECK(row.original);
+    if (!row.original || !sh_package_bundle_fingerprint(row.original)) goto done;
+    memcpy(before, sh_package_bundle_fingerprint(row.original), 32);
+    sh_package_runtime_test_source_readers(registry, (uintptr_t)f.reflection);
+    sh_package_runtime_test_editor_rows(inline_editor_rows, sizeof(inline_editor_rows) / sizeof(*inline_editor_rows));
+    for (int modern = 0; modern < 2; modern++) for (int mixed = 0; mixed < 2; mixed++) {
+        const char *json = mixed ?
+            INLINE_VARIABLES INLINE_ENTITY("inline/tough") "," INLINE_ENTITY("inline/fraction") "]}" :
+            INLINE_VARIABLES INLINE_ENTITY("inline/tough") "]}";
+        sh_package_provenance saved = {0};
+        sh_package_map_plan *plan = NULL;
+        char *bound = NULL, *document = NULL, *derived = NULL, *report = NULL;
+        size_t bound_length = 0, document_length = strlen(json), derived_length = 0, count = 99;
+        sh_package_occurrence_snapshot *ownership = NULL; sh_mpkg_used *used = NULL;
+        int present = 0;
+        if (modern) {
+            /* A modern saved map carries its bound names and recorded provenance. */
+            sh_package_map_plan *first = sh_package_runtime_prepare_map_document(data, map, NULL, &row, 1,
+                json, strlen(json), error, sizeof(error));
+            char *saved_map = first ? sh_package_map_plan_rebind(first, NULL, json, strlen(json),
+                &document_length, error, sizeof(error)) : NULL;
+            sh_package_map_plan_free(first);
+            CHECK(saved_map && sh_map_provenance_read(saved_map, document_length, &saved, &present, error, sizeof(error)) &&
+                present && saved.use_count == (mixed ? 2u : 1u));
+            if (!saved_map || !present) {
+                if (saved_map) HeapFree(GetProcessHeap(), 0, saved_map);
+                sh_package_provenance_free(&saved); continue;
+            }
+            document = malloc(document_length + 1);
+            if (document) { memcpy(document, saved_map, document_length); document[document_length] = 0; }
+            HeapFree(GetProcessHeap(), 0, saved_map);
+        } else document = _strdup(json);
+        CHECK(document); if (!document) { sh_package_provenance_free(&saved); continue; }
+        plan = sh_package_runtime_prepare_map_document(data, map, present ? &saved : NULL, &row, 1,
+            document, document_length, error, sizeof(error));
+        if (!plan) fprintf(stderr, "inline load prepare: %s\n", error);
+        CHECK(plan);
+        bound = plan ? sh_package_map_plan_rebind(plan, present ? &saved : NULL, document, document_length,
+            &bound_length, error, sizeof(error)) : NULL;
+        CHECK(bound);
+        if (bound) {
+            /* Without the conversion the used package is missing locally: the
+             * map would ask to install it. */
+            CHECK(inline_load_missing(plan, registry, (uintptr_t)f.reflection, bound, bound_length, &missing) &&
+                missing.count && sh_package_owners_count(&missing.packages) == 1);
+            int result = sh_package_runtime_native_document(plan, present ? &saved : NULL, NULL, 0, bound, bound_length,
+                &derived, &derived_length, &ownership, &used, &count, &report, error, sizeof(error));
+            if (result != 1) fprintf(stderr, "inline load route %d/%d: %d %s %s\n", modern, mixed, result, error,
+                report ? report : "");
+            int converted = result == 1 && derived && strstr(derived, "\"inherit\":\"inlinestock/base\"") &&
+                strstr(derived, "\"state\":{\"edit\":{\"health\":40}}") && count == (mixed ? 1u : 0u);
+            if (!converted) fprintf(stderr, "inline load route %d/%d: %zu deliveries\n%s\n%s\n", modern, mixed, count,
+                report ? report : "", derived ? derived : "");
+            CHECK(converted);
+            if (derived) {
+                CHECK(inline_load_missing(plan, registry, (uintptr_t)f.reflection, derived, derived_length, &missing));
+                /* Only the unconverted use's member is missing, and it selects
+                 * its whole package; a fully native map needs nothing. */
+                int expected = mixed ? missing.count == 1 && strstr(missing.paths[0], "inline/fraction.decl") &&
+                    sh_package_owners_count(&missing.packages) == 1 :
+                    !missing.count && !sh_package_owners_count(&missing.packages);
+                for (size_t m = 0; !expected && m < missing.count; m++)
+                    fprintf(stderr, "inline load route %d/%d missing %s\n", modern, mixed, missing.paths[m]);
+                CHECK(expected);
+            }
+            HeapFree(GetProcessHeap(), 0, bound);
+        }
+        CHECK(!memcmp(before, sh_package_bundle_fingerprint(row.original), 32));
+        free(derived); free(report); free(document);
+        sh_package_occurrence_release(ownership); sh_mpkg_used_free(used);
+        sh_package_map_plan_free(plan); sh_package_provenance_free(&saved);
+    }
+done:
+    sh_package_missing_free(&missing);
+    sh_package_bundle_release(row.original); sh_package_sources_free(sources);
+    sh_package_runtime_test_editor_rows(NULL, 0);
+    sh_package_runtime_test_source_readers((sh_decl_registry_source){0}, 0);
+    sh_package_runtime_test_dispose(); sh_package_runtime_test_baseline(baseline, NULL);
+    for (size_t i = 0; i < f.count; i++) free(f.regions[i].address);
+    cleanup_resources(data); cleanup_resources(map);
+}
+/* R137 save through the installed library, in its own process. The library
+ * links a package's stock parents under their stock names and serves them
+ * composed from the originals (the live 2d_speaker case: a canonical one-line
+ * entityDef with editorVars re-sorted, and the stock editor entry the package's
+ * own entry inherits). None of those copies is a package change, so map data
+ * inheriting the stock definition stays exact and a plain package editor entry
+ * still copies the shipped one. A package that does change that stock editor
+ * entry keeps its uses on the package route. */
+static void lease_collection_setup(admission_fixture *f);
+static const char *const library_editor_rows[] = {"inlinestock/row_base", "inlinestock/base_row"};
+static int library_baseline(void *context, const char *path, unsigned char **body, size_t *length)
+{
+    (void)context; *body = NULL; *length = 0;
+    const char *text = !strcmp(path, "generated/decls/entitydef/inlinestock/base.decl") ?
+            "{\n\tclass = \"Entity\";\n\teditorVars {\n\t\tplaceable = true;\n\t\tcolor = ( 1, 1, 1, 1 );\n\t}\n"
+            "\tedit = {\n\t\ttarget = \"\";\n\t\thealth = 1;\n\t}\n}\n" :
+        !strcmp(path, "generated/decls/snapeditorentitydef/inlinestock/row_base.decl") ?
+            "{\n\tedit = {\n\t\tinputs = {\n\t\t\tnum = 0;\n\t\t}\n\t}\n}\n" :
+        !strcmp(path, "generated/decls/snapeditorentitydef/inlinestock/base_row.decl") ?
+            "{\n\tinherit = \"inlinestock/row_base\";\n\tedit = {\n\t\tentityDef = \"inlinestock/base\";\n\t}\n}\n" : NULL;
+    if (!text) return 0;
+    *length = strlen(text); *body = (unsigned char *)_strdup(text); return *body ? 1 : -1;
+}
+static int library_convert(const char *label, char **report)
+{
+    char error[2048], *derived = NULL;
+    size_t bound_length = 0, derived_length = 0, count = 99;
+    sh_package_occurrence_snapshot *ownership = NULL; sh_mpkg_used *used = NULL;
+    const char *json = INLINE_VARIABLES INLINE_ENTITY("inline/tough") "]}";
+    char *bound = sh_package_runtime_rebind_local_document(json, strlen(json), &bound_length, error, sizeof(error));
+    if (!bound) fprintf(stderr, "inline library %s rebind: %s\n", label, error);
+    CHECK(bound != NULL);
+    int result = bound ? sh_package_runtime_native_document(NULL, NULL, NULL, 0, bound, bound_length, &derived,
+        &derived_length, &ownership, &used, &count, report, error, sizeof(error)) : -2;
+    fprintf(stderr, "inline library %s: result %d, %zu deliveries: %s\n%s", label, result, count, error,
+        *report ? *report : "");
+    int converted = result == 1 && derived && strstr(derived, "\"inherit\":\"inlinestock/base\"") && count == 0;
+    if (bound) HeapFree(GetProcessHeap(), 0, bound);
+    free(derived); sh_package_occurrence_release(ownership); sh_mpkg_used_free(used);
+    return result < 0 ? -1 : converted;
+}
+static int library_served(const char *path)
+{
+    unsigned char *served = NULL; size_t length = 0;
+    int shared = sh_package_runtime_read(path, &served, &length);
+    fprintf(stderr, "inline library: %s served under its name: %d (%zu bytes)%s%.*s\n", path, shared, length,
+        served ? ": " : "", served ? (int)length : 0, served ? (const char *)served : "");
+    free(served);
+    return shared;
+}
+static void test_native_inline_library(void)
+{
+    admission_fixture f; lease_collection_setup(&f);
+    sh_decl_registry_source registry = {&f, admission_read, (uintptr_t)f.registry, NULL};
+    char data[MAX_PATH], *report = NULL;
+    snprintf(data, sizeof(data), "%s/inline-library", root);
+    create("inline-library/overrides/tough/package.json", "{\"id\":\"library-tough\",\"name\":\"Library tough\"}");
+    create("inline-library/overrides/tough/assets/generated/decls/entitydef/inline/tough.decl",
+        "{ inherit = \"inlinestock/base\"; edit = { health = 40; } }");
+    /* The package's own editor entry: a plain copy of the stock entry. */
+    create("inline-library/overrides/tough/assets/generated/decls/snapeditorentitydef/inline/tough_row.decl",
+        "{ inherit = \"inlinestock/base_row\"; edit = { entityDef = \"inline/tough\"; } }");
+    sh_package_runtime_test_dispose(); sh_package_runtime_test_baseline(library_baseline, NULL);
+    sh_package_runtime_test_source_readers(registry, (uintptr_t)f.reflection);
+    sh_package_runtime_test_installed_links(1);
+    sh_package_runtime_test_editor_rows(library_editor_rows, sizeof(library_editor_rows) / sizeof(*library_editor_rows));
+    CHECK(sh_package_runtime_refresh(data));
+    CHECK(library_served("generated/decls/entitydef/inlinestock/base.decl") == 1);
+    /* The library serves stock editor entries under their own names through its
+     * baseline-palette reverse roots, which need the game catalog this fixture
+     * lacks; test_native_inline_placement_provenance covers that compiled shape. */
+    library_served("generated/decls/snapeditorentitydef/inlinestock/base_row.decl");
+    /* The unowned canonical entityDef copy obstructs nothing. */
+    CHECK(library_convert("unowned stock copies", &report) == 1);
+    free(report); report = NULL;
+    /* Another installed package changes the stock editor entry itself: the
+     * plain package entry no longer copies what SnapMap ships, so the use keeps
+     * its package (a product gap, never a silent native substitute). */
+    create("inline-library/overrides/rows/package.json", "{\"id\":\"library-rows\",\"name\":\"Library rows\"}");
+    create("inline-library/overrides/rows/assets/generated/decls/snapeditorentitydef/inlinestock/base_row.decl",
+        "{ inherit = \"inlinestock/row_base\"; edit = { entityDef = \"inlinestock/base\"; inputs = { num = 0; } } }");
+    CHECK(sh_package_runtime_refresh(data));
+    library_served("generated/decls/snapeditorentitydef/inlinestock/base_row.decl");
+    CHECK(library_convert("owned stock editor change", &report) == 0);
+    CHECK(report && strstr(report, "kept (product gap): its package's editor entry") && strstr(report, "not a plain copy"));
+    free(report); report = NULL;
+    sh_package_runtime_test_editor_rows(NULL, 0);
+    sh_package_runtime_test_installed_links(0);
+    sh_package_runtime_test_source_readers((sh_decl_registry_source){0}, 0); sh_package_runtime_test_dispose();
+    sh_package_runtime_test_baseline(baseline, NULL);
+    for (size_t i = 0; i < f.count; i++) free(f.regions[i].address);
+    cleanup_resources(data);
+}
+/* The compiled shape that failed live (r137c): after an install the library
+ * serves the stock editor entry a package entry inherits under its own name,
+ * as a composed copy (baseline known, not byte-original, no owner). That copy
+ * stands for the shipped entry, so the plain package entry still copies it.
+ * A package-owned change to that stock entry must keep the package route. */
+static sh_compiled_resource provenance_resource(const char *path, const char *body, const char *original,
+    int baseline, size_t owner)
+{
+    sh_compiled_resource out = {0};
+    out.engine_path = path; out.original_path = (char *)original; out.baseline_known = baseline;
+    out.body = (unsigned char *)body; out.body_length = strlen(body); out.source = SIZE_MAX;
+    if (owner != SIZE_MAX) { CHECK(sh_package_owners_add(&out.owners, owner)); CHECK(sh_package_owners_add(&out.gameplay_owners, owner)); }
+    return out;
+}
+static void test_native_inline_placement_provenance(void)
+{
+    sh_package_sources sources = {0};
+    sh_compiled_resource resources[3];
+    sh_package_compilation compiled = {0};
+    char reason[512]; int engine = 0;
+    /* Sorted by engine path, as compilations are. */
+    resources[0] = provenance_resource("generated/decls/entitydef/smp/tough.decl",
+        "{ inherit = \"inlinestock/base\"; edit = { health = 40; } }", "generated/decls/entitydef/inline/tough.decl", 0, 0);
+    resources[1] = provenance_resource("generated/decls/snapeditorentitydef/inlinestock/base_row.decl",
+        "{ inherit = \"inlinestock/row_base\"; edit = { entityDef = \"inlinestock/base\"; } }", NULL, 1, SIZE_MAX);
+    resources[2] = provenance_resource("generated/decls/snapeditorentitydef/smp/tough_row.decl",
+        "{ inherit = \"inlinestock/base_row\"; edit = { entityDef = \"smp/tough\"; } }",
+        "generated/decls/snapeditorentitydef/inline/tough_row.decl", 0, 0);
+    compiled.sources = &sources; compiled.resources = resources; compiled.resource_count = 3;
+    sh_package_runtime_test_dispose(); sh_package_runtime_test_baseline(inline_baseline, NULL);
+    sh_package_runtime_test_editor_rows(inline_editor_rows, sizeof(inline_editor_rows) / sizeof(*inline_editor_rows));
+    /* Unowned composed stock copy: the plain package entry places natively. */
+    int placed = sh_package_runtime_test_placement(&compiled, "smp/tough", "inlinestock/base", &engine, reason, sizeof(reason));
+    if (placed != 1) fprintf(stderr, "placement provenance (unowned copy): %d %s\n", placed, reason);
+    CHECK(placed == 1);
+    /* The same stock entry changed by a package (it has an owner): refused. */
+    CHECK(sh_package_owners_add(&resources[1].owners, 1));
+    placed = sh_package_runtime_test_placement(&compiled, "smp/tough", "inlinestock/base", &engine, reason, sizeof(reason));
+    if (placed != 0) fprintf(stderr, "placement provenance (owned change): %d %s\n", placed, reason);
+    CHECK(placed == 0 && !engine && strstr(reason, "smp/tough_row") && strstr(reason, "not a plain copy"));
+    for (size_t i = 0; i < 3; i++) { sh_package_owners_free(&resources[i].owners); sh_package_owners_free(&resources[i].gameplay_owners); }
+    sh_package_runtime_test_editor_rows(NULL, 0);
+    sh_package_runtime_test_dispose(); sh_package_runtime_test_baseline(baseline, NULL);
+}
+static void run_native_inline_library(void)
+{
+    char executable[MAX_PATH], command[MAX_PATH + 64];
+    STARTUPINFOA startup = {sizeof(startup)};
+    PROCESS_INFORMATION process = {0};
+    DWORD result = 1;
+    CHECK(GetModuleFileNameA(NULL, executable, sizeof(executable)));
+    snprintf(command, sizeof(command), "\"%s\" --native-inline-library", executable);
+    /* Share this process's output so the isolated case's diagnostics reach the log. */
+    fflush(stdout); fflush(stderr);
+    startup.dwFlags = STARTF_USESTDHANDLES;
+    startup.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+    startup.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
+    startup.hStdError = GetStdHandle(STD_ERROR_HANDLE);
+    CHECK(CreateProcessA(executable, command, NULL, NULL, TRUE, 0, NULL, NULL, &startup, &process));
+    if (!process.hProcess) return;
+    CHECK(WaitForSingleObject(process.hProcess, 120000) == WAIT_OBJECT_0);
+    CHECK(GetExitCodeProcess(process.hProcess, &result) && !result);
+    CloseHandle(process.hThread); CloseHandle(process.hProcess);
+}
 static void test_historical_native_identity_use(void)
 {
     const char *json = "{\"variables\":{\"allocCount\":[0,0,0,0,0],\"string\":[]},\"entities\":["
@@ -3345,6 +3834,9 @@ int main(int argc, char **argv)
     if (argc == 2 && !strcmp(argv[1], "--conflicting-startup")) {
         test_conflicting_startup(); cleanup(); return failures ? 1 : 0;
     }
+    if (argc == 2 && !strcmp(argv[1], "--native-inline-library")) {
+        test_native_inline_library(); cleanup(); return failures ? 1 : 0;
+    }
     run_conflicting_startup();
     test_duplicate_editor_controls();
     test_audio_programs();
@@ -3464,6 +3956,10 @@ int main(int argc, char **argv)
     test_historical_derived_identities();
     test_historical_derived_recipe();
     test_historical_native_identity_use();
+    test_native_inline_save();
+    test_native_inline_load();
+    run_native_inline_library();
+    test_native_inline_placement_provenance();
     test_constructor_provider_lifetimes();
     test_constructor_binding_changes();
     test_native_membership_changes();

@@ -220,6 +220,21 @@ char *sh_package_runtime_capture_document(const sh_package_map_plan *plan,
     size_t additional_count, const char *json, size_t length, size_t *output_length,
     sh_package_occurrence_snapshot **ownership, struct sh_mpkg_used **deliveries,
     size_t *delivery_count, char *error, size_t capacity);
+/* Save-time native map representation (R137). Captures the live document,
+ * derives one whose eligible package entity uses are native inline state
+ * (package_native_inline.h), and captures that derived document to a fixed
+ * point: a delivery the derived map would drop keeps its uses when it also
+ * changes stock gameplay definitions globally. Returns 1 with the derived
+ * document and its own ownership and complete deliveries; 0 when no use
+ * converts; -1 on failure. Outputs change only on 1. *report (initially NULL)
+ * receives malloc-owned per-site decisions whenever sites were examined. The
+ * live editor keeps its package binding; only saved bytes are derived. */
+int sh_package_runtime_native_document(const sh_package_map_plan *plan,
+    const sh_package_provenance *saved, const sh_package_bundle_binding *additional,
+    size_t additional_count, const char *json, size_t length,
+    char **derived, size_t *derived_length, sh_package_occurrence_snapshot **ownership,
+    struct sh_mpkg_used **deliveries, size_t *delivery_count, char **report,
+    char *error, size_t capacity);
 /* Atomically attach every original retained delivery to its exact source owner
  * and normalized compiler tree. The originals must match the identity already
  * bound at preparation; use prepare_map_deliveries for normalized imports.
@@ -458,6 +473,13 @@ void sh_package_runtime_test_baseline(sh_package_baseline_reader reader, void *c
  * This small-schema fixture omits baked product defaults during preparation.
  * Passing a zero source disables the seam and preserves older offline fixtures. */
 void sh_package_runtime_test_source_readers(sh_decl_registry_source registry, uintptr_t reflection);
+/* Shipped SnapMap editor declarations (names under snapeditorentitydef/) whose
+ * texts the test baseline supplies; NULL makes placement unavailable. */
+void sh_package_runtime_test_editor_rows(const char *const *names, size_t count);
+/* The converter's placement check over a caller-built compilation: 1 placed,
+ * 0 refused (reason; *engine for a native limit), -1 editor rows unreadable. */
+int sh_package_runtime_test_placement(const sh_package_compilation *compiled, const char *from, const char *base,
+    int *engine, char *reason, size_t capacity);
 /* Link the installed library through those readers, as production does, so
  * owner isolation and unserved coverage run end to end. Off by default. */
 void sh_package_runtime_test_installed_links(int enabled);

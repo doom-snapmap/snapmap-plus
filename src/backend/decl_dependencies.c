@@ -200,7 +200,9 @@ static int dd_run(dd_walk *walk)
         if (!item.type.name || !walk->schema->describe(walk->schema->context, item.type, &shape))
             shape.kind = SH_DECL_VALUE_UNKNOWN;
         switch (shape.kind) {
-        case SH_DECL_VALUE_IGNORE: break;
+        case SH_DECL_VALUE_IGNORE:
+            if (walk->schema->value && !walk->schema->value(walk->schema->context, item.path, item.type, item.node)) ok = 0;
+            break;
         case SH_DECL_VALUE_REFERENCE:
             ok = dd_reference(walk, item.node, item.path, item.type); break;
         case SH_DECL_VALUE_OBJECT:

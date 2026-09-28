@@ -31,6 +31,8 @@
 #include "package_sound.h"
 #include "package_native_assets.h"
 #include "package_map_uses.h"
+#include "package_native_inline.h"
+#include "package_editor_rows.h"
 #include "map_embed.h"
 #include "map_provenance.h"
 #ifndef SH_PACKAGE_RUNTIME_TESTING
@@ -591,6 +593,10 @@ void sh_package_runtime_test_baseline(sh_package_baseline_reader reader, void *c
 }
 void sh_package_runtime_test_source_readers(sh_decl_registry_source registry, uintptr_t reflection)
 { g_test_source_registry = registry; g_test_source_reflection = reflection; }
+static const char *const *g_test_editor_rows;
+static size_t g_test_editor_row_count;
+void sh_package_runtime_test_editor_rows(const char *const *names, size_t count)
+{ g_test_editor_rows = names; g_test_editor_row_count = count; }
 static sh_package_source_implicit g_test_constructor;
 static void *g_test_constructor_context;
 void sh_package_runtime_test_constructor_requests(sh_package_source_implicit capture, void *context)
@@ -4268,7 +4274,8 @@ static char *pr_capture_document(const pr_provider *provider,
     const sh_package_provenance *saved, const sh_package_bundle_binding *additional,
     size_t additional_count, const char *json, size_t length, size_t *output_length,
     sh_package_occurrence_snapshot **ownership, sh_mpkg_used **deliveries,
-    size_t *delivery_count, pr_key_context *keys, char *error, size_t capacity)
+    size_t *delivery_count, sh_package_references *closure, pr_key_context *keys,
+    char *error, size_t capacity)
 {
     sh_package_bundle_binding *rows = NULL;
     sh_package_source_reader *reader = NULL;
@@ -4320,6 +4327,7 @@ static char *pr_capture_document(const pr_provider *provider,
     }
     sh_package_occurrence_release(*ownership); *ownership = next; next = NULL;
     if (deliveries) { sh_mpkg_used_free(*deliveries); *deliveries = used; used = NULL; *delivery_count = count; }
+    if (closure && deliveries) { sh_package_references_free(closure); *closure = resources; memset(&resources, 0, sizeof(resources)); }
     *output_length = out_length;
 done:
     if (!output_length || !*output_length) {
@@ -4359,13 +4367,13 @@ char *sh_package_runtime_capture_document(const sh_package_map_plan *plan,
         g_native_accessor, g_native_types, g_native_game_system) == 1)
         out = pr_capture_document(plan ? plan->provider : g_current_provider, registry, metadata.reflection, !plan,
             saved, additional, additional_count, json, length, &pending_length, &pending_ownership,
-            deliveries ? &pending_deliveries : NULL, deliveries ? &pending_count : NULL, &keys, error, capacity);
+            deliveries ? &pending_deliveries : NULL, deliveries ? &pending_count : NULL, NULL, &keys, error, capacity);
 #else
     sh_decl_registry_source registry = {0}; uintptr_t reflection = 0;
     if (sh_package_runtime_test_source_inputs(&registry, &reflection, NULL, NULL))
         out = pr_capture_document(plan ? plan->provider : g_current_provider, registry, reflection, !plan,
             saved, additional, additional_count, json, length, &pending_length, &pending_ownership,
-            deliveries ? &pending_deliveries : NULL, deliveries ? &pending_count : NULL, &keys, error, capacity);
+            deliveries ? &pending_deliveries : NULL, deliveries ? &pending_count : NULL, NULL, &keys, error, capacity);
 #endif
     ReleaseSRWLockShared(&g_lock);
     if (!pr_key_context_close(&keys, out != NULL)) {
@@ -4384,6 +4392,580 @@ char *sh_package_runtime_capture_document(const sh_package_map_plan *plan,
     if (!g_activation_callback) ReleaseSRWLockExclusive(&g_refresh_lock);
     if (!out && error && capacity && !*error) snprintf(error, capacity, "native map occurrence reader is unavailable");
     return out;
+}
+
+/* ---- R137 save-time native representation ---- */
+
+/* SnapMap's entityDef carrier writes this state version (VK FUN_1409d1990 /
+ * GL FUN_1409d1150); other versions are upgraded natively before use. */
+#define PR_ENTITY_STATE_VERSION 26
+
+typedef struct pr_inline_kept {
+    unsigned char tree[32];
+    sh_decl_carrier_limit limit;
+    char reason[320];
+} pr_inline_kept;
+typedef struct pr_inline_view {
+    const pr_provider *provider;
+    pr_original_source originals;
+    sh_decl_native_schema *schema;
+    const sh_package_provenance *uses;
+    pr_inline_kept *kept;
+    size_t kept_count;
+    sh_editor_rows package_rows;
+    int package_rows_state; /* 0 unread, 1 ready, -1 unavailable */
+    char placement[320];
+} pr_inline_view;
+
+/* A copy the product serves under a native declaration's own name (the
+ * installed library links a package's stock dependency closure that way, as a
+ * canonical re-serialization) is that original for native representation only
+ * when it parses to the same members in the same order, with the one witnessed
+ * exception that the direct members of the editor-only editorVars block may be
+ * re-sorted. Anything else keeps the package route. 1 equal, 0 changed or not
+ * such a copy, -1 unavailable. */
+static int pr_stock_copy(const pr_original_source *originals, const sh_package_compilation *compiled,
+    const sh_compiled_resource *resource)
+{
+    unsigned char *served = NULL, *original = NULL;
+    size_t served_length = 0, original_length = 0;
+    char error[256];
+    int result = -1;
+    if (!resource->baseline_known || (resource->original_path && _stricmp(resource->original_path, resource->engine_path)))
+        return 0;
+    served = sh_package_compilation_read(compiled, resource, SIZE_MAX / 2, &served_length, error, sizeof(error));
+    int scope = served ? pr_original((void *)originals, resource->engine_path, &original, &original_length) : -1;
+    if (scope <= 0) { result = scope < 0 ? -1 : 0; goto done; }
+    sh_decl_node *left = sh_decl_tree_parse((sh_decl_source){(const char *)served, served_length}, error, sizeof(error));
+    sh_decl_node *right = left ? sh_decl_tree_parse((sh_decl_source){(const char *)original, original_length}, error, sizeof(error)) : NULL;
+    result = left && right ? sh_decl_tree_equal(left, right, "editorVars") : 0;
+    sh_decl_tree_free(left); sh_decl_tree_free(right);
+done:
+    free(served); free(original);
+    return result;
+}
+static int pr_inline_read(void *context, const char *name, sh_decl_source *text, int *served, char **replaces)
+{
+    pr_inline_view *view = context;
+    size_t length = strlen(name) + sizeof("generated/decls/entitydef/.decl");
+    char *path = malloc(length), error[256];
+    unsigned char *body = NULL; size_t size = 0;
+    if (!path) return -1;
+    snprintf(path, length, "generated/decls/entitydef/%s.decl", name);
+    const sh_compiled_resource *resource = sh_package_compilation_find(view->provider->compiled, path);
+    int native_copy = resource && !resource->native_original && !resource->restored_original ?
+        pr_stock_copy(&view->originals, view->provider->compiled, resource) : 0;
+    if (native_copy < 0) { free(path); return -1; }
+    if (resource && !resource->native_original && !resource->restored_original && !native_copy) {
+        const char *original = resource->original_path;
+        size_t original_length = original ? strlen(original) : 0;
+        if (replaces && resource->baseline_known && original_length > 31 &&
+            !strncmp(original, "generated/decls/entitydef/", 26) && !strcmp(original + original_length - 5, ".decl") &&
+            _stricmp(original, path)) {
+            if (!(*replaces = malloc(original_length - 30))) { free(path); return -1; }
+            memcpy(*replaces, original + 26, original_length - 31); (*replaces)[original_length - 31] = 0;
+        }
+        body = sh_package_compilation_read(view->provider->compiled, resource, SIZE_MAX / 2, &size, error, sizeof(error));
+        free(path);
+        if (!body) { if (replaces) { free(*replaces); *replaces = NULL; } return -1; }
+        *served = 1;
+    } else {
+        int scope = pr_original(&view->originals, path, &body, &size);
+        free(path);
+        if (scope < 0) { free(body); return -1; }
+        if (!scope) { free(body); return 0; }
+        *served = 0;
+    }
+    text->text = (const char *)body; text->length = size;
+    return 1;
+}
+static int pr_inline_derives(void *context, const char *class_name, const char *base_name)
+{
+    pr_inline_view *view = context;
+    return sh_decl_native_schema_class_derives(view->schema, class_name, base_name);
+}
+static const sh_package_provenance_use *pr_inline_site(const sh_package_provenance *uses, size_t entity)
+{
+    char owner[64];
+    snprintf(owner, sizeof(owner), "entity/%zu", entity);
+    for (size_t i = 0; uses && i < uses->use_count; i++) {
+        const sh_package_provenance_use *use = uses->uses + i;
+        if (use->owner && use->reference && !strcmp(use->owner, owner) &&
+            !strcmp(use->reference, "/k:entityDef/k:inherit")) return use;
+    }
+    return NULL;
+}
+/* Another typed site bound to the same definition may select entities by it
+ * (logic filters, targets). Other entities inheriting it are independent uses. */
+static int pr_inline_looked_up(void *context, size_t entity, const char *name)
+{
+    pr_inline_view *view = context;
+    const sh_package_provenance_use *site = pr_inline_site(view->uses, entity);
+    (void)name;
+    if (!site) return 0;
+    for (size_t i = 0; i < view->uses->use_count; i++) {
+        const sh_package_provenance_use *use = view->uses->uses + i;
+        if (use == site || use->binding != site->binding) continue;
+        if (use->owner && !strncmp(use->owner, "entity/", 7) && use->reference &&
+            !strcmp(use->reference, "/k:entityDef/k:inherit")) continue;
+        return 1;
+    }
+    return 0;
+}
+static const char *pr_inline_keep(void *context, size_t entity, const char *name, sh_decl_carrier_limit *limit)
+{
+    pr_inline_view *view = context;
+    const sh_package_provenance_use *site = pr_inline_site(view->uses, entity);
+    (void)name;
+    *limit = SH_DECL_CARRIER_GAP;
+    if (!site) return "this entity has no verified package use to replace";
+    for (size_t c = 0; c < site->context_count; c++) {
+        size_t index = site->contexts[c];
+        if (index >= view->uses->context_count) return "this use has no recorded source context";
+        const sh_package_provenance_context *source = view->uses->contexts + index;
+        for (size_t t = 0; t < source->tree_count; t++)
+            for (size_t k = 0; k < view->kept_count; k++)
+                if (!memcmp(source->trees[t], view->kept[k].tree, 32)) {
+                    *limit = view->kept[k].limit;
+                    return view->kept[k].reason;
+                }
+    }
+    return NULL;
+}
+
+/* ---- R137 native placement ----
+ * A converted entity must pass SnapMap's map validation: its native base needs
+ * a row among SnapMap's shipped editor declarations, and an editor row a
+ * package adds for its definition must add nothing (package_editor_rows.h). */
+#define PR_EDITOR_PREFIX "generated/decls/snapeditorentitydef/"
+static int pr_name_order(const void *a, const void *b)
+{ return strcmp(*(const char *const *)a, *(const char *const *)b); }
+/* Shipped rows, read once per catalog; guarded by g_editor_rows_lock. */
+static SRWLOCK g_editor_rows_lock = SRWLOCK_INIT;
+static sh_editor_rows g_editor_rows;
+static const void *g_editor_rows_key;
+static int g_editor_rows_state;
+static int pr_stock_rows(const pr_inline_view *view)
+{
+    const void *key = view->provider->catalog;
+    const char **names = NULL; char **owned = NULL; size_t name_count = 0;
+#ifdef SH_PACKAGE_RUNTIME_TESTING
+    key = g_test_editor_rows;
+#endif
+    if (g_editor_rows_state && g_editor_rows_key == key) return g_editor_rows_state;
+    sh_editor_rows_free(&g_editor_rows); g_editor_rows_key = key; g_editor_rows_state = -1;
+    if (!key) return -1;
+#ifdef SH_PACKAGE_RUNTIME_TESTING
+    names = (const char **)g_test_editor_rows; name_count = g_test_editor_row_count;
+#else
+    size_t total = sh_resource_catalog_count(view->provider->catalog);
+    if (!(owned = calloc(total ? total : 1, sizeof(*owned)))) return -1;
+    for (size_t i = 0; i < total; i++) {
+        const sh_resource_catalog_entry *entry = sh_resource_catalog_at(view->provider->catalog, i);
+        size_t length = entry && entry->path ? strlen(entry->path) : 0;
+        if (length <= sizeof(PR_EDITOR_PREFIX) + 4 || strncmp(entry->path, PR_EDITOR_PREFIX, sizeof(PR_EDITOR_PREFIX) - 1) ||
+            strcmp(entry->path + length - 5, ".decl")) continue;
+        size_t n = length - (sizeof(PR_EDITOR_PREFIX) - 1) - 5;
+        if (!(owned[name_count] = malloc(n + 1))) goto done;
+        memcpy(owned[name_count], entry->path + sizeof(PR_EDITOR_PREFIX) - 1, n); owned[name_count++][n] = 0;
+    }
+    if (name_count) qsort(owned, name_count, sizeof(*owned), pr_name_order);
+    names = (const char **)owned;
+#endif
+    for (size_t i = 0; i < name_count; i++) {
+        if (i && !strcmp(names[i], names[i - 1])) continue;
+        size_t length = strlen(names[i]) + sizeof(PR_EDITOR_PREFIX) + 5;
+        char *path = malloc(length);
+        unsigned char *body = NULL; size_t size = 0;
+        if (!path) goto done;
+        snprintf(path, length, PR_EDITOR_PREFIX "%s.decl", names[i]);
+        int scope = pr_original((void *)&view->originals, path, &body, &size);
+        free(path);
+        /* Only SnapMap's own archive supplies the shipped editor roster. */
+        if (scope < 0) g_editor_rows.unreadable++;
+        int added = scope == 1 ? sh_editor_rows_add_text(&g_editor_rows, names[i], (const char *)body, size) : 0;
+        free(body);
+        if (added < 0) goto done;
+    }
+    if (sh_editor_rows_finish(&g_editor_rows, NULL)) g_editor_rows_state = 1;
+done:
+    for (size_t i = 0; owned && i < name_count; i++) free(owned[i]);
+    free(owned);
+    if (g_editor_rows_state != 1) sh_editor_rows_free(&g_editor_rows);
+    return g_editor_rows_state;
+}
+/* Editor rows this map's packages serve, read once per conversion. */
+static int pr_package_rows(pr_inline_view *view)
+{
+    const sh_package_compilation *compiled = view->provider->compiled;
+    char error[256];
+    if (view->package_rows_state) return view->package_rows_state;
+    view->package_rows_state = -1;
+    for (size_t i = 0; i < compiled->resource_count; i++) {
+        const sh_compiled_resource *resource = compiled->resources + i;
+        size_t length = strlen(resource->engine_path), size = 0;
+        if (resource->native_original || resource->restored_original ||
+            strncmp(resource->engine_path, PR_EDITOR_PREFIX, sizeof(PR_EDITOR_PREFIX) - 1) ||
+            length <= sizeof(PR_EDITOR_PREFIX) + 4 || strcmp(resource->engine_path + length - 5, ".decl")) continue;
+        /* The installed library serves the stock editor entries its packages
+         * inherit under their own names, composed from the originals alone:
+         * no package owns a change to them. A plain package entry names such an
+         * entry, so in any context it presents exactly as that stock entry does;
+         * these copies stand for the shipped rows. A stock entry a package does
+         * change (an owner) stays a package row, refusing its plain copies. */
+        if (resource->baseline_known && !sh_package_owners_count(&resource->owners) &&
+            (!resource->original_path || !_stricmp(resource->original_path, resource->engine_path))) continue;
+        unsigned char *body = sh_package_compilation_read(compiled, resource, SIZE_MAX / 2, &size, error, sizeof(error));
+        if (!body) return -1;
+        size_t n = length - (sizeof(PR_EDITOR_PREFIX) - 1) - 5;
+        char *name = malloc(n + 1);
+        if (!name) { free(body); return -1; }
+        memcpy(name, resource->engine_path + sizeof(PR_EDITOR_PREFIX) - 1, n); name[n] = 0;
+        int added = sh_editor_rows_add_text(&view->package_rows, name, (const char *)body, size);
+        free(name); free(body);
+        if (added < 0) return -1;
+    }
+    return view->package_rows_state = sh_editor_rows_finish(&view->package_rows, &g_editor_rows) ? 1 : -1;
+}
+static const char *pr_inline_placement(void *context, const char *from, const char *base, sh_decl_carrier_limit *limit)
+{
+    pr_inline_view *view = context;
+    const char *reason = view->placement;
+    char authored[512] = "";
+    *limit = SH_DECL_CARRIER_GAP;
+    AcquireSRWLockExclusive(&g_editor_rows_lock);
+    if (pr_stock_rows(view) != 1) {
+        snprintf(view->placement, sizeof(view->placement),
+            "SnapMap's shipped editor entries could not be read to prove '%s' is placeable", base);
+        goto done;
+    }
+    /* The authored spelling of a served private definition. */
+    size_t length = strlen(from) + sizeof("generated/decls/entitydef/.decl");
+    char *path = malloc(length);
+    if (!path) { snprintf(view->placement, sizeof(view->placement), "placement could not be checked"); goto done; }
+    snprintf(path, length, "generated/decls/entitydef/%s.decl", from);
+    const sh_compiled_resource *served = sh_package_compilation_find(view->provider->compiled, path);
+    free(path);
+    const char *original = served ? served->original_path : NULL;
+    size_t n = original ? strlen(original) : 0;
+    if (n > 31 && !strncmp(original, "generated/decls/entitydef/", 26) && !strcmp(original + n - 5, ".decl") &&
+        n - 31 < sizeof(authored)) { memcpy(authored, original + 26, n - 31); authored[n - 31] = 0; }
+    if (pr_package_rows(view) != 1) {
+        snprintf(view->placement, sizeof(view->placement), "its package's editor entries could not be read");
+        goto done;
+    }
+    reason = sh_editor_rows_placement(&g_editor_rows, &view->package_rows, from, authored[0] ? authored : NULL,
+        base, limit, view->placement, sizeof(view->placement));
+done:
+    ReleaseSRWLockExclusive(&g_editor_rows_lock);
+    return reason;
+}
+#ifdef SH_PACKAGE_RUNTIME_TESTING
+int sh_package_runtime_test_placement(const sh_package_compilation *compiled, const char *from, const char *base,
+    int *engine, char *reason, size_t capacity)
+{
+    pr_provider provider; pr_inline_view view;
+    sh_decl_carrier_limit limit = SH_DECL_CARRIER_GAP;
+    memset(&provider, 0, sizeof(provider)); memset(&view, 0, sizeof(view));
+    provider.compiled = (sh_package_compilation *)compiled;
+    view.provider = &provider;
+    sh_package_runtime_test_source_inputs(NULL, NULL, &view.originals.game, &view.originals.context);
+    const char *why = pr_inline_placement(&view, from, base, &limit);
+    snprintf(reason, capacity, "%s", why ? why : "");
+    *engine = limit == SH_DECL_CARRIER_ENGINE;
+    sh_editor_rows_free(&view.package_rows);
+    return why ? (view.package_rows_state < 0 ? -1 : 0) : 1;
+}
+#endif
+
+/* Whether a delivery the derived map would no longer select still carries
+ * behavior the map needs. Unused bundle members are no requirement: package
+ * definitions, stock-named edits included, compile under private identities
+ * that only bound typed uses reach, and the recomputed selection keeps every
+ * such use. Spawn registrations are private rows that only the package's own
+ * bound requests select. What remains is shared state: a string the derived
+ * map still names, a stock definition changed under its stock name (historical
+ * composed contexts), cvar requirements, historical string keys and HUD
+ * settings for shared weapons. The map needing one of them is a native limit,
+ * since map data carries none of them. A shared effect whose consumers are not
+ * modelled is unproven: a product gap. Returns 1 to keep (limit/reason set). */
+static int pr_inline_published(const sh_compiled_resource *resource)
+{
+    const char *original = resource->original_path, *slash, *dot;
+    char type[64], name[512];
+    if (!original || !_stricmp(resource->engine_path, original)) return 1;
+    if (strncmp(original, "generated/decls/", 16)) return 0;
+    slash = strchr(original + 16, '/'); dot = strrchr(original, '.');
+    if (!slash || !dot || dot <= slash || (size_t)(slash - original - 16) >= sizeof(type) ||
+        (size_t)(dot - slash - 1) >= sizeof(name)) return 1;
+    memcpy(type, original + 16, (size_t)(slash - original - 16)); type[slash - original - 16] = 0;
+    memcpy(name, slash + 1, (size_t)(dot - slash - 1)); name[dot - slash - 1] = 0;
+    return sh_package_resource_native_matches(resource, type, name);
+}
+/* A weapon identity every map shares: unchanged stock, or changed under its
+ * stock name. Private linked weapons are reached only through package uses. */
+static int pr_inline_shared_weapon(const pr_provider *provider, const char *name)
+{
+    size_t length = strlen(name) + sizeof("generated/decls/weapon/.decl");
+    char *path = malloc(length);
+    if (!path) return -1;
+    snprintf(path, length, "generated/decls/weapon/%s.decl", name);
+    const sh_compiled_resource *resource = sh_package_compilation_find(provider->compiled, path);
+    free(path);
+    if (!resource) return strncmp(name, "smp/", 4) != 0;
+    return resource->baseline_known && pr_inline_published(resource);
+}
+static int pr_inline_mentions(const char *json, size_t length, const char *key)
+{
+    size_t n = strlen(key);
+    for (size_t i = 1; n && json && i + n < length; i++)
+        if (json[i - 1] == '"' && json[i + n] == '"' && !_strnicmp(json + i, key, n)) return 1;
+    return 0;
+}
+/* A string key of the package's policy that the derived map still names. */
+static int pr_inline_named_string(const sh_package_policy *policy, const char *json, size_t length,
+    char *key, size_t capacity)
+{
+    int found = 0;
+    for (size_t i = 0; !found && i < policy->strings.count; i++) {
+        const char *raw = policy->strings.members[i].value_json;
+        sh_json_object pairs = {0};
+        if (!sh_json_parse_object(raw, strlen(raw), 2, &pairs)) return -1;
+        for (size_t j = 0; !found && j < pairs.count; j++) {
+            int n = snprintf(key, capacity, "#str_%s", pairs.members[j].key);
+            found = n > 0 && (size_t)n < capacity && pr_inline_mentions(json, length, key);
+        }
+        sh_json_object_free(&pairs);
+    }
+    for (size_t i = 0; !found && i < policy->localized_count; i++)
+        if (pr_inline_mentions(json, length, policy->localized[i].key)) {
+            snprintf(key, capacity, "%s", policy->localized[i].key); found = 1;
+        }
+    return found;
+}
+static int pr_inline_requirement(const pr_provider *provider, const pr_original_source *originals, size_t package,
+    const sh_package_references *closure, const char *derived, size_t derived_length, pr_inline_kept *kept)
+{
+    sh_package_owners owners = {0};
+    sh_package_policy policy = {0};
+    char error[256], key[256];
+    const char *changed = NULL, *weapon = NULL;
+    int inspected = sh_package_owners_add(&owners, package) &&
+        sh_package_compilation_policy(provider->compiled, &owners, &policy, error, sizeof(error));
+    sh_package_owners_free(&owners);
+    kept->limit = SH_DECL_CARRIER_GAP;
+    if (!inspected) {
+        snprintf(kept->reason, sizeof(kept->reason), "its package's shared settings could not be inspected");
+        return 1;
+    }
+    int named = pr_inline_named_string(&policy, derived, derived_length, key, sizeof(key));
+    if (named) {
+        kept->limit = named < 0 ? SH_DECL_CARRIER_GAP : SH_DECL_CARRIER_ENGINE;
+        if (named < 0) snprintf(kept->reason, sizeof(kept->reason), "its package's strings could not be inspected");
+        else snprintf(kept->reason, sizeof(kept->reason),
+            "the map still names %s, a string its package supplies; map data cannot define strings", key);
+        sh_package_policy_free(&policy); return 1;
+    }
+    for (size_t i = 0; i < provider->compiled->resource_count; i++) {
+        const sh_compiled_resource *resource = provider->compiled->resources + i;
+        if (!resource->baseline_known || resource->native_original || resource->restored_original ||
+            !sh_package_owners_contains(&resource->gameplay_owners, package) || !pr_inline_published(resource)) continue;
+        int same = pr_stock_copy(originals, provider->compiled, resource);
+        if (same < 0) { sh_package_policy_free(&policy); return -1; }
+        if (same) continue;
+        const char *shown = resource->original_path ? resource->original_path : resource->engine_path;
+        for (size_t r = 0; closure && r < closure->count; r++)
+            if (closure->items[r].name && (!_stricmp(closure->items[r].name, resource->engine_path) ||
+                (resource->original_path && !_stricmp(closure->items[r].name, resource->original_path)))) {
+                kept->limit = SH_DECL_CARRIER_ENGINE;
+                snprintf(kept->reason, sizeof(kept->reason), "the map still reaches %s, which its package changes "
+                    "under the stock name; map data cannot change stock definitions", shown);
+                sh_package_policy_free(&policy); return 1;
+            }
+        if (!changed) changed = shown;
+    }
+    for (size_t i = 0; !weapon && i < policy.hud.count + policy.hud_binding_count; i++) {
+        const char *name = i < policy.hud.count ? policy.hud.members[i].key : policy.hud_bindings[i - policy.hud.count].name;
+        int shared = pr_inline_shared_weapon(provider, name);
+        if (shared < 0) { sh_package_policy_free(&policy); return -1; }
+        if (shared) weapon = name;
+    }
+    int keep = 1;
+    if (policy.requirements.count)
+        snprintf(kept->reason, sizeof(kept->reason),
+            "its package lifts SnapMap's resource blacklist, and whether the native map needs that is not modelled");
+    else if (policy.strings.count && sh_package_owners_contains(&provider->compiled->policy.legacy_string_owners, package))
+        snprintf(kept->reason, sizeof(kept->reason),
+            "its package's historical strings use shared keys whose other consumers are not modelled");
+    else if (weapon)
+        snprintf(kept->reason, sizeof(kept->reason),
+            "its package sets HUD presentation for the shared weapon %s, whose use is not modelled", weapon);
+    else if (changed)
+        snprintf(kept->reason, sizeof(kept->reason), closure && !closure->incomplete ?
+            "its package changes %s under the stock name, and consumers outside this map's references are not modelled" :
+            "its package changes %s under the stock name, and the map's dependency coverage is incomplete", changed);
+    else keep = 0;
+    sh_package_policy_free(&policy);
+    return keep;
+}
+
+static int pr_inline_add_kept(pr_inline_view *view, const unsigned char tree[32], const pr_inline_kept *kept)
+{
+    for (size_t i = 0; i < view->kept_count; i++) if (!memcmp(view->kept[i].tree, tree, 32)) return 1;
+    pr_inline_kept *grown = realloc(view->kept, (view->kept_count + 1) * sizeof(*grown));
+    if (!grown) return 0;
+    view->kept = grown; view->kept[view->kept_count] = *kept;
+    memcpy(view->kept[view->kept_count++].tree, tree, 32);
+    return 1;
+}
+
+static char *pr_inline_report(const sh_native_inline_report *report)
+{
+    size_t length = 1;
+    for (size_t i = 0; i < report->count; i++) length += 640;
+    char *text = malloc(length), *at = text;
+    if (!text) return NULL;
+    *at = 0;
+    for (size_t i = 0; i < report->count; i++) {
+        const sh_native_inline_site *site = report->sites + i;
+        int written = site->converted ?
+            snprintf(at, length - (size_t)(at - text), "entity %zu: %s -> native %s\n", site->entity, site->from, site->to) :
+            snprintf(at, length - (size_t)(at - text), "entity %zu: %s kept (%s): %s\n", site->entity, site->from,
+                site->limit == SH_DECL_CARRIER_ENGINE ? "native limit" : "product gap", site->reason);
+        if (written > 0) at += written;
+    }
+    return text;
+}
+
+static int pr_native_document(const pr_provider *provider, sh_decl_registry_source registry, uintptr_t reflection,
+    sh_decl_native_source metadata, int retain_native, const sh_package_provenance *saved,
+    const sh_package_bundle_binding *additional, size_t additional_count, const char *json, size_t length,
+    char **derived, size_t *derived_length, sh_package_occurrence_snapshot **ownership,
+    sh_mpkg_used **deliveries, size_t *delivery_count, pr_key_context *keys, char **report,
+    char *error, size_t capacity)
+{
+    pr_inline_view view = {0};
+    sh_package_occurrence_snapshot *live = NULL, *next = NULL;
+    sh_mpkg_used *live_used = NULL, *next_used = NULL;
+    size_t live_count = 0, next_count = 0, live_length = 0, next_length = 0;
+    char *live_json = NULL, *next_json = NULL, *output = NULL;
+    sh_native_inline_report sites = {0};
+    sh_package_references closure = {0};
+    int result = -1;
+    if (!provider || !provider->compiled) goto done;
+    live_json = pr_capture_document(provider, registry, reflection, retain_native, saved, additional, additional_count,
+        json, length, &live_length, &live, &live_used, &live_count, NULL, keys, error, capacity);
+    if (!live_json) goto done;
+    view.provider = provider; view.uses = sh_package_occurrence_provenance(live);
+    view.originals = (pr_original_source){provider->catalog ? sh_resource_catalog_read_path : NULL,
+        provider->catalog, provider->native_assets};
+#ifdef SH_PACKAGE_RUNTIME_TESTING
+    sh_package_runtime_test_source_inputs(NULL, NULL, &view.originals.game, &view.originals.context);
+#endif
+    metadata.reflection = reflection;
+    view.schema = sh_decl_native_schema_open(metadata, (sh_decl_dependency_observer){0}, error, capacity);
+    if (!view.schema) goto done;
+    sh_native_inline_source source = {&view, pr_inline_read, pr_inline_derives,
+        sh_decl_native_schema_view(view.schema), pr_inline_looked_up, pr_inline_keep, PR_ENTITY_STATE_VERSION,
+        pr_inline_placement};
+    for (int pass = 0; pass < 8; pass++) {
+        size_t converted = 0, output_length = 0;
+        sh_native_inline_report_free(&sites);
+        free(output); output = sh_native_inline_document(live_json, live_length, &source, &output_length, &sites, error, capacity);
+        if (!output) goto done;
+        for (size_t i = 0; i < sites.count; i++) converted += sites.sites[i].converted != 0;
+        if (!converted) { result = 0; goto done; }
+        sh_package_occurrence_release(next); next = NULL;
+        sh_mpkg_used_free(next_used); next_used = NULL; free(next_json);
+        sh_package_references_free(&closure);
+        next_json = pr_capture_document(provider, registry, reflection, retain_native, saved, additional, additional_count,
+            output, output_length, &next_length, &next, &next_used, &next_count, &closure, keys, error, capacity);
+        if (!next_json) goto done;
+        /* Recompute ownership: a delivery the derived map drops must not take
+         * behavior the map still needs with it; keep its uses and try again. */
+        size_t kept_before = view.kept_count;
+        for (size_t i = 0; i < live_count; i++) {
+            int present = 0;
+            for (size_t j = 0; j < next_count && !present; j++) present = !strcmp(live_used[i].id, next_used[j].id);
+            if (present) continue;
+            const unsigned char *tree = sh_package_bundle_fingerprint(live_used[i].bundle);
+            if (!tree) goto done;
+            size_t package = SIZE_MAX;
+            for (size_t p = 0; p < provider->bundle_count; p++) {
+                const unsigned char *candidate = sh_package_bundle_fingerprint(provider->bundles[p]);
+                if (candidate && !memcmp(candidate, tree, 32)) { package = p; break; }
+            }
+            pr_inline_kept kept = {{0}, SH_DECL_CARRIER_GAP, "a retained copy's delivery cannot be inspected here"};
+            int keep = package == SIZE_MAX ? 1 :
+                pr_inline_requirement(provider, &view.originals, package, &closure, next_json, next_length, &kept);
+            if (keep < 0 || (keep && !pr_inline_add_kept(&view, tree, &kept))) goto done;
+        }
+        if (view.kept_count == kept_before) {
+            *derived = next_json; next_json = NULL; *derived_length = next_length;
+            sh_package_occurrence_release(*ownership); *ownership = next; next = NULL;
+            sh_mpkg_used_free(*deliveries); *deliveries = next_used; next_used = NULL; *delivery_count = next_count;
+            result = 1; goto done;
+        }
+    }
+    if (error && capacity) snprintf(error, capacity, "native representation did not settle");
+done:
+    if (report && sites.count) { free(*report); *report = pr_inline_report(&sites); }
+    sh_native_inline_report_free(&sites);
+    if (view.schema) sh_decl_native_schema_close(view.schema);
+    sh_editor_rows_free(&view.package_rows);
+    free(view.kept); free(output); free(live_json); free(next_json); sh_package_references_free(&closure);
+    sh_package_occurrence_release(live); sh_package_occurrence_release(next);
+    sh_mpkg_used_free(live_used); sh_mpkg_used_free(next_used);
+    return result;
+}
+
+int sh_package_runtime_native_document(const sh_package_map_plan *plan,
+    const sh_package_provenance *saved, const sh_package_bundle_binding *additional,
+    size_t additional_count, const char *json, size_t length,
+    char **derived, size_t *derived_length, sh_package_occurrence_snapshot **ownership,
+    sh_mpkg_used **deliveries, size_t *delivery_count, char **report,
+    char *error, size_t capacity)
+{
+    int result = -1;
+    char *pending = NULL; size_t pending_length = 0, pending_count = 0;
+    sh_package_occurrence_snapshot *pending_ownership = NULL;
+    sh_mpkg_used *pending_deliveries = NULL;
+    if (error && capacity) *error = 0;
+    if (!derived || !derived_length || !ownership || !deliveries || !delivery_count || !json) return -1;
+    if (!g_activation_callback) AcquireSRWLockExclusive(&g_refresh_lock);
+    AcquireSRWLockShared(&g_lock);
+    pr_key_context keys;
+    pr_key_context_open(&keys, plan ? plan->provider : g_map_provider ? g_map_provider : g_library_provider);
+#ifndef SH_PACKAGE_RUNTIME_TESTING
+    sh_decl_registry_source registry = {0};
+    sh_decl_native_source metadata = {NULL, pr_native_read, 0, g_native_scripts};
+    if (sh_decl_server_registry_source(&registry) && sh_decl_native_source_ready(&metadata,
+        g_native_accessor, g_native_types, g_native_game_system) == 1)
+        result = pr_native_document(plan ? plan->provider : g_current_provider, registry, metadata.reflection, metadata,
+            !plan, saved, additional, additional_count, json, length, &pending, &pending_length,
+            &pending_ownership, &pending_deliveries, &pending_count, &keys, report, error, capacity);
+#else
+    sh_decl_registry_source registry = {0}; uintptr_t reflection = 0;
+    sh_decl_native_source metadata = {NULL, pr_native_read, 0, NULL};
+    if (sh_package_runtime_test_source_inputs(&registry, &reflection, NULL, NULL) && (metadata.scripts = registry.scripts, 1))
+        result = pr_native_document(plan ? plan->provider : g_current_provider, registry, reflection, metadata,
+            !plan, saved, additional, additional_count, json, length, &pending, &pending_length,
+            &pending_ownership, &pending_deliveries, &pending_count, &keys, report, error, capacity);
+#endif
+    ReleaseSRWLockShared(&g_lock);
+    if (!pr_key_context_close(&keys, result == 1)) {
+        if (result == 1 && error && capacity) snprintf(error, capacity, "map registration dictionary could not be published");
+        if (result == 1) result = -1;
+    }
+    if (result == 1) {
+        free(*derived); *derived = pending; pending = NULL; *derived_length = pending_length;
+        sh_package_occurrence_release(*ownership); *ownership = pending_ownership; pending_ownership = NULL;
+        sh_mpkg_used_free(*deliveries); *deliveries = pending_deliveries; pending_deliveries = NULL;
+        *delivery_count = pending_count;
+    }
+    free(pending); sh_package_occurrence_release(pending_ownership); sh_mpkg_used_free(pending_deliveries);
+    if (!g_activation_callback) ReleaseSRWLockExclusive(&g_refresh_lock);
+    return result;
 }
 
 #ifdef SH_PACKAGE_RUNTIME_TESTING

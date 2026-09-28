@@ -371,6 +371,19 @@ char *sh_package_runtime_capture_document(const sh_package_map_plan *plan, const
     if (deliveries) *deliveries = NULL; if (delivery_count) *delivery_count = 0;
     return out;
 }
+/* No fixture use has a native equivalent: saves keep their package routes. */
+int sh_package_runtime_native_document(const sh_package_map_plan *plan,
+    const sh_package_provenance *saved, const sh_package_bundle_binding *additional,
+    size_t additional_count, const char *json, size_t length,
+    char **derived, size_t *derived_length, sh_package_occurrence_snapshot **ownership,
+    sh_mpkg_used **deliveries, size_t *delivery_count, char **report,
+    char *error, size_t capacity)
+{
+    (void)plan; (void)saved; (void)additional; (void)additional_count; (void)json; (void)length;
+    (void)derived; (void)derived_length; (void)ownership; (void)deliveries; (void)delivery_count;
+    (void)report; (void)error; (void)capacity;
+    return 0;
+}
 
 int sh_overrides_get_root(char *out, size_t cap)
 { if (out && cap) strcpy_s(out, cap, pf_testing ? "fixture-root" : ""); return pf_testing; }

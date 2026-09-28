@@ -43,6 +43,14 @@ sh_decl_node *sh_decl_tree_parse_reflected_body(sh_decl_source source, int order
 char *sh_decl_tree_write(const sh_decl_node *root, size_t *length);
 void sh_decl_tree_free(sh_decl_node *node);
 const sh_decl_node *sh_decl_tree_member(const sh_decl_node *parent, const char *key);
+/* Structural equality under the native parser's in-order application:
+ * members compare in sequence (list counts, resets and repeated overlays apply
+ * in order), with keys, scalar spelling, resets, block kinds, `key = {` versus
+ * `key {` and type annotations exact. unordered (may be NULL) names one
+ * top-level block whose direct members may appear in any order, each still
+ * compared in sequence below it; use it only where reordering is proven
+ * harmless. 1 equal, 0 different, -1 on allocation failure. */
+int sh_decl_tree_equal(const sh_decl_node *a, const sh_decl_node *b, const char *unordered);
 
 /* Borrow one plain token or quoted string, without its quotes. Declaration
  * lexer flags disable escapes, so backslashes remain literal path bytes.

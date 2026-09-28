@@ -76,6 +76,9 @@ $tests = @(
     @{ name = "package_movie_test"; src = 'package_movie_test.c ..\src\backend\package_movie.c ..\src\backend\swf_binary.c ..\src\backend\package_consumers.c ..\src\backend\resource_rebind.c ..\src\backend\model_binary.c ..\src\backend\md6_binary.c'; arg = "" }
     @{ name = "decl_graph_test"; src = 'decl_graph_test.c ..\src\backend\decl_graph.c ..\src\backend\decl_tree.c'; arg = "" }
     @{ name = "decl_entity_class_test"; src = 'decl_entity_class_test.c ..\src\backend\decl_entity_class.c ..\src\backend\decl_tree.c'; arg = "" }
+    @{ name = "decl_native_carrier_test"; src = 'decl_native_carrier_test.c ..\src\backend\decl_native_carrier.c ..\src\backend\decl_tree.c ..\src\backend\config_json.c'; arg = "" }
+    @{ name = "package_native_inline_test"; src = 'package_native_inline_test.c ..\src\backend\package_native_inline.c ..\src\backend\decl_native_carrier.c ..\src\backend\decl_entity_class.c ..\src\backend\decl_dependencies.c ..\src\backend\decl_json_dependencies.c ..\src\backend\decl_polymorphic.c ..\src\backend\decl_tree.c ..\src\backend\config_json.c'; arg = "" }
+    @{ name = "package_editor_rows_test"; src = 'package_editor_rows_test.c ..\src\backend\package_editor_rows.c ..\src\backend\decl_tree.c'; arg = "" }
     @{ name = "decl_dependencies_test"; src = 'decl_dependencies_test.c ..\src\backend\decl_dependencies.c ..\src\backend\decl_json_dependencies.c ..\src\backend\config_json.c ..\src\backend\decl_tree.c ..\src\backend\decl_polymorphic.c'; arg = "" }
     @{ name = "decl_rebind_test"; src = 'decl_rebind_test.c ..\src\backend\decl_rebind.c ..\src\backend\decl_dependencies.c ..\src\backend\decl_json_dependencies.c ..\src\backend\config_json.c ..\src\backend\decl_tree.c ..\src\backend\decl_polymorphic.c'; arg = "" }
     @{ name = "decl_native_schema_test"; src = 'decl_native_schema_test.c ..\src\backend\decl_json_dependencies.c ..\src\backend\config_json.c ..\src\backend\decl_graph_compose.c ..\src\backend\decl_native_schema.c ..\src\backend\decl_script_schema.c ..\src\backend\decl_dependencies.c ..\src\backend\decl_tree.c ..\src\backend\decl_polymorphic.c ..\src\backend\decl_compose.c ..\src\backend\decl_graph.c ..\src\backend\decl_graph_dependencies.c'; arg = "" }
@@ -251,6 +254,7 @@ $compilerSources += "package_hud.c"
 $compilerSources += @("map_binding_sites.c", "package_bundle.c", "package_archive.c", "raw_deflate_encode.c", "package_shader.c", "package_strings.c")
 $compilerSources += @("package_occurrence.c", "map_provenance.c", "map_shards.c")
 $compilerSources += @("package_map_uses.c", "map_embed_uses.c")
+$compilerSources += @("decl_native_carrier.c", "package_native_inline.c", "package_editor_rows.c")
 $nativeAssetsSources = ($tests | Where-Object { $_.name -eq 'package_compiler_test' }).src -replace '^package_compiler_test.c ', 'package_native_assets_test.c '
 $nativeAssetsSources += ' ..\src\backend\package_native_assets.c ..\src\backend\package_shader.c ..\src\backend\audio_banks.c'
 $nativeAssetsSources += ' ..\src\backend\decl_native_registry.c ..\src\backend\decl_material.c ..\src\backend\decl_native_lex.c'

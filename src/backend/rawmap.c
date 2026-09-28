@@ -2029,7 +2029,7 @@ static char *embed_used_packages_owned(const char *json, size_t len,
     size_t *out_len, int *failed)
 {
     sh_mpkg_used *used = NULL;
-    sh_package_occurrence_snapshot *ownership = NULL;
+    sh_package_occurrence_snapshot *ownership = NULL, *saved_ownership = NULL;
     char root[MAX_PATH], error[SH_MPKG_ERR_CAP], message[SH_MPKG_ERR_CAP + 32];
     char *cur = NULL, *bound = NULL;
     size_t cur_len = len, count = 0, i, rows_count = 0, bound_length = 0;
@@ -2047,6 +2047,37 @@ static char *embed_used_packages_owned(const char *json, size_t len,
     }
     const char *native_json = json; size_t native_length = len;
     json = bound; len = cur_len = bound_length;
+    /* Save equivalent native map data where exact (R137). The editor keeps its
+     * live ownership; the saved file carries the derived document's own. */
+    {
+        char *report = NULL, *derived = NULL, inline_error[512] = "";
+        size_t derived_length = 0, derived_count = 0;
+        sh_package_occurrence_snapshot *derived_ownership = NULL;
+        sh_mpkg_used *derived_used = NULL;
+        int inlined = sh_package_runtime_native_document(NULL, sh_package_occurrence_provenance(previous),
+            rows, rows_count, bound, bound_length, &derived, &derived_length, &derived_ownership,
+            &derived_used, &derived_count, &report, inline_error, sizeof(inline_error));
+        for (char *line = report, *end; line && *line; line = end + 1) {
+            char entry[768];
+            end = strchr(line, '\n'); if (!end) end = line + strlen(line);
+            snprintf(entry, sizeof(entry), "MPKG: native map data: %.*s", (int)(end - line), line);
+            backend_log(entry);
+            if (!*end) break;
+        }
+        free(report);
+        if (inlined < 0 && inline_error[0]) {
+            char entry[640];
+            snprintf(entry, sizeof(entry), "MPKG: native map data unavailable; saving package routes (%s)", inline_error);
+            backend_log(entry);
+        }
+        if (inlined == 1) {
+            free(bound); bound = derived; derived = NULL;
+            json = bound; len = cur_len = derived_length;
+            sh_mpkg_used_free(used); used = derived_used; derived_used = NULL; count = derived_count;
+            sh_package_occurrence_release(saved_ownership); saved_ownership = derived_ownership; derived_ownership = NULL;
+        }
+        free(derived); sh_mpkg_used_free(derived_used); sh_package_occurrence_release(derived_ownership);
+    }
 
     for (i = 0; i < count; i++) {
         unsigned char *payload;
@@ -2081,7 +2112,8 @@ static char *embed_used_packages_owned(const char *json, size_t len,
 
     {
         size_t next_len = 0;
-        char *next = sh_map_provenance_write(cur ? cur : json, cur_len, sh_package_occurrence_provenance(ownership),
+        char *next = sh_map_provenance_write(cur ? cur : json, cur_len,
+            sh_package_occurrence_provenance(saved_ownership ? saved_ownership : ownership),
             &next_len, error, sizeof(error));
         if (!next) {
             snprintf(message, sizeof(message), "Map save failed: %s", error);
@@ -2097,7 +2129,8 @@ done:
     if (!*failed && ownership && selected) {
         sh_package_occurrence_release(*selected); *selected = ownership; ownership = NULL;
     }
-    sh_mpkg_used_free(used); sh_package_occurrence_release(ownership); free(bound);
+    sh_mpkg_used_free(used); sh_package_occurrence_release(ownership);
+    sh_package_occurrence_release(saved_ownership); free(bound);
     if (*failed) {
         if (cur) HeapFree(GetProcessHeap(), 0, cur);
         cur = NULL;

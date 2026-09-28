@@ -62,6 +62,46 @@ const sh_decl_node *sh_decl_tree_member(const sh_decl_node *parent, const char *
     return NULL;
 }
 
+int sh_decl_tree_equal(const sh_decl_node *a, const sh_decl_node *b, const char *unordered)
+{
+    typedef struct frame { const sh_decl_node *a, *b; int top, any_order; } frame;
+    frame *stack = malloc(16 * sizeof(*stack));
+    size_t count = 0, capacity = 16;
+    int equal = 1;
+    if (!stack) return -1;
+    stack[count++] = (frame){a, b, 1, 0};
+    while (count && equal) {
+        frame current = stack[--count];
+        const sh_decl_node *left, *right;
+        if (current.a->compound != current.b->compound || current.a->reset != current.b->reset ||
+            (!current.top && current.a->assignment != current.b->assignment) ||
+            strcmp(current.a->annotation ? current.a->annotation : "", current.b->annotation ? current.b->annotation : "")) {
+            equal = 0; break;
+        }
+        if (!current.a->compound) {
+            equal = !strcmp(current.a->value ? current.a->value : "", current.b->value ? current.b->value : "");
+            continue;
+        }
+        size_t lefts = 0, rights = 0;
+        for (left = current.a->children; left; left = left->next) lefts++;
+        for (right = current.b->children; right; right = right->next) rights++;
+        if (lefts != rights) { equal = 0; break; }
+        for (left = current.a->children, right = current.b->children; left && equal; left = left->next) {
+            /* Keys are unique within a parsed block, so a by-key match is exact. */
+            const sh_decl_node *other = current.any_order ? sh_decl_tree_member(current.b, left->key) : right;
+            if (!current.any_order) right = right->next;
+            if (!other || strcmp(left->key, other->key)) { equal = 0; break; }
+            if (count == capacity) {
+                frame *grown = capacity <= SIZE_MAX / 2 / sizeof(*stack) ? realloc(stack, capacity * 2 * sizeof(*stack)) : NULL;
+                if (!grown) { free(stack); return -1; }
+                stack = grown; capacity *= 2;
+            }
+            stack[count++] = (frame){left, other, 0, current.top && unordered && !strcmp(left->key, unordered)};
+        }
+    }
+    free(stack); return equal;
+}
+
 static void dt_space(dt_parser *p)
 {
     for (;;) {

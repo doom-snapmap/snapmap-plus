@@ -279,6 +279,14 @@ static void run(sh_package_source_reader *reader, sh_package_compilation *compil
     assert(!sh_package_map_uses_select(reader, repeated, strlen(repeated), &saved, &catalog, rows, 3,
         sh_mpkg_new_use_required, &requirements, &length, &out, &references, &inspection, error, sizeof(error)) && strstr(error, "saved source"));
     catalog.bindings[0].contexts[0] = held;
+    /* A value changed to a native name (as native map data conversion does) is
+     * a fresh selection too: its site's saved row must not restore the package
+     * name it used to bind. */
+    const char *native_value = "{\"entities\":[{\"entityDef\":{\"targetType\":\"idDeclEntityDef\",\"inherit\":\"vanilla\"}}]}";
+    text = sh_package_map_uses_select(reader, native_value, strlen(native_value), &saved, &catalog, rows, 3,
+        sh_mpkg_new_use_required, &requirements, &length, &out, &references, &inspection, error, sizeof(error));
+    if (!text) fprintf(stderr, "native value: %s\n", error);
+    assert(text && !strcmp(text, native_value) && !out.use_count); free(text);
 
     /* Newly authored deduped assets choose one source independent of catalog
      * insertion order or delivery-row order, without recording lookup parents. */

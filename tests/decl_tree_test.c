@@ -37,6 +37,59 @@ int main(void)
     sh_decl_tree_free(root);
     for (i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) assert(!parse(bad[i]));
     {
+        /* Structural equality follows the native parser's in-order application.
+         * Whitespace never matters; member order matters everywhere except the
+         * direct members of the one named block (the witnessed case: a linked
+         * copy re-sorts editorVars). */
+        const char *base = "{ class = \"Entity\"; editorVars { placeable = true; color = ( 1, 1, 1, 1 );"
+            " inner = { p = 1; q = 2; } } edit = { sound = \"s\"; list = { num = 1; item[0] = 2; } } }";
+        const char *variants[][2] = {
+            /* whitespace only */
+            {"{\n\tclass = \"Entity\";\n\teditorVars {\n\t\tplaceable = true;\n\t\tcolor = ( 1, 1, 1, 1 );\n"
+             "\t\tinner = { p = 1; q = 2; }\n\t}\n\tedit = {\n\t\tsound = \"s\";\n\t\tlist = { num = 1; item[0] = 2; }\n\t}\n}\n", "1"},
+            /* editorVars direct members re-sorted */
+            {"{ class = \"Entity\"; editorVars { color = ( 1, 1, 1, 1 ); inner = { p = 1; q = 2; } placeable = true; }"
+             " edit = { sound = \"s\"; list = { num = 1; item[0] = 2; } } }", "1"},
+            /* order-sensitive: a list count after its item */
+            {"{ class = \"Entity\"; editorVars { placeable = true; color = ( 1, 1, 1, 1 ); inner = { p = 1; q = 2; } }"
+             " edit = { sound = \"s\"; list = { item[0] = 2; num = 1; } } }", "0"},
+            /* order-sensitive: edit members swapped */
+            {"{ class = \"Entity\"; editorVars { placeable = true; color = ( 1, 1, 1, 1 ); inner = { p = 1; q = 2; } }"
+             " edit = { list = { num = 1; item[0] = 2; } sound = \"s\"; } }", "0"},
+            /* order-sensitive: top-level members swapped */
+            {"{ editorVars { placeable = true; color = ( 1, 1, 1, 1 ); inner = { p = 1; q = 2; } } class = \"Entity\";"
+             " edit = { sound = \"s\"; list = { num = 1; item[0] = 2; } } }", "0"},
+            /* only direct editorVars members are unordered, not nested blocks */
+            {"{ class = \"Entity\"; editorVars { placeable = true; color = ( 1, 1, 1, 1 ); inner = { q = 2; p = 1; } }"
+             " edit = { sound = \"s\"; list = { num = 1; item[0] = 2; } } }", "0"},
+            /* editorVars values, resets, block forms and annotations stay exact */
+            {"{ class = \"Entity\"; editorVars { placeable = false; color = ( 1, 1, 1, 1 ); inner = { p = 1; q = 2; } }"
+             " edit = { sound = \"s\"; list = { num = 1; item[0] = 2; } } }", "0"},
+            {"{ class = \"Entity\"; editorVars { placeable = true; color = ( 1, 1, 1, 1 ); inner = { p = 1; q = 2; } }"
+             " edit = { sound = \"s\"; list = ! { num = 1; item[0] = 2; } } }", "0"},
+            {"{ class = \"Entity\"; editorVars { placeable = true; color = ( 1, 1, 1, 1 ); inner = { p = 1; q = 2; } }"
+             " edit = { sound = \"s\"; list { num = 1; item[0] = 2; } } }", "0"},
+            {"{ class = \"Entity\"; editorVars { placeable = true; color = ( 1, 1, 1, 1 ); inner = { p = 1; q = 2; } }"
+             " edit = { idStr sound = \"s\"; list = { num = 1; item[0] = 2; } } }", "0"},
+            /* a missing or extra member */
+            {"{ class = \"Entity\"; edit = { sound = \"s\"; list = { num = 1; item[0] = 2; } } }", "0"},
+        };
+        sh_decl_node *a = parse(base);
+        assert(a);
+        for (i = 0; i < sizeof(variants) / sizeof(variants[0]); i++) {
+            sh_decl_node *b = parse(variants[i][0]);
+            int expected = variants[i][1][0] == '1';
+            if (!b) { fprintf(stderr, "variant %u does not parse\n", (unsigned)i); assert(b); }
+            if (sh_decl_tree_equal(a, b, "editorVars") != expected || sh_decl_tree_equal(b, a, "editorVars") != expected)
+                fprintf(stderr, "variant %u: expected %d\n", (unsigned)i, expected);
+            assert(sh_decl_tree_equal(a, b, "editorVars") == expected && sh_decl_tree_equal(b, a, "editorVars") == expected);
+            /* Without the named block every member order is significant. */
+            if (i == 1) assert(sh_decl_tree_equal(a, b, NULL) == 0);
+            sh_decl_tree_free(b);
+        }
+        sh_decl_tree_free(a);
+    }
+    {
         /* The native lexer reads item[ 0 ] as separate tokens (stock damage
          * declarations write list members that way): one index key. */
         root = parse("{ list = { num = 1; item[ 0 ] = \"a\"; item[\t1\t] = \"b\"; } }"); assert(root);

@@ -1414,11 +1414,19 @@ rewriting its files. Saving retains incoming bundle provenance even when existin
 resources allowed installation to be skipped. Declared resource-loading permissions
 remain active for installed packages; unused gameplay presentation policy does not.
 
-**Native map representation before package delivery (planned).**
+**Native map representation before package delivery (partly implemented).**
 
-This required compiler pass is not yet implemented generally. Existing inline
-entity edits do not create packages. Current gameplay ownership selects complete
-deliveries, but does not by itself prove that package serving is necessary.
+Existing inline entity edits do not create packages. Save and load now run one
+conversion (package_native_inline.c) on the map-owned document before bindings,
+availability and consent. It covers entity-definition uses: a map entity whose
+inheritance reaches a native SnapMap definition through package definitions
+becomes one inline layer over that native base when the expanded state is equal,
+the native carrier keeps every value (decl_native_carrier.c), lookup identity is
+unchanged and a shipped editor entry places the base (package_editor_rows.c).
+Each refusal is logged as a native limit or a product gap and keeps the package
+use. A fully native map then needs no installation; a mixed map still requests
+complete bundles. Delivery requirements follow actual uses and shared effects.
+Other representations remain planned.
 
 Before assigning final private bindings and delivery ownership, prefer equivalent
 native map data for each authored use. Extend the typed resource graph with native
