@@ -5251,8 +5251,14 @@ static int pr_package_rows(pr_inline_view *view)
 {
     const sh_package_compilation *compiled = view->provider->compiled;
     char error[256];
+    const char **context_copy = NULL, **shipped_name = NULL; /* private name -> shipped name */
+    size_t copies = 0;
+    int state = -1;
     if (view->package_rows_state) return view->package_rows_state;
     view->package_rows_state = -1;
+    context_copy = calloc(compiled->resource_count ? compiled->resource_count : 1, sizeof(*context_copy));
+    shipped_name = calloc(compiled->resource_count ? compiled->resource_count : 1, sizeof(*shipped_name));
+    if (!context_copy || !shipped_name) goto done;
     for (size_t i = 0; i < compiled->resource_count; i++) {
         const sh_compiled_resource *resource = compiled->resources + i;
         size_t length = strlen(resource->engine_path), size = 0;
@@ -5267,17 +5273,46 @@ static int pr_package_rows(pr_inline_view *view)
          * change (an owner) stays a package row, refusing its plain copies. */
         if (resource->baseline_known && !sh_package_owners_count(&resource->owners) &&
             (!resource->original_path || !_stricmp(resource->original_path, resource->engine_path))) continue;
+        /* The same unowned stock entry, linked privately for a package's own
+         * context (a shared editor declaration it references differs there):
+         * the converted entity is placed by the shipped entry itself, so the
+         * copy stands for it too. */
+        size_t original_length = resource->original_path ? strlen(resource->original_path) : 0;
+        if (resource->baseline_known && !sh_package_owners_count(&resource->owners) &&
+            original_length > sizeof(PR_EDITOR_PREFIX) + 4 &&
+            !_strnicmp(resource->original_path, PR_EDITOR_PREFIX, sizeof(PR_EDITOR_PREFIX) - 1) &&
+            !_stricmp(resource->original_path + original_length - 5, ".decl")) {
+            context_copy[copies] = resource->engine_path + sizeof(PR_EDITOR_PREFIX) - 1;
+            shipped_name[copies++] = resource->original_path + sizeof(PR_EDITOR_PREFIX) - 1;
+            continue;
+        }
         unsigned char *body = sh_package_compilation_read(compiled, resource, SIZE_MAX / 2, &size, error, sizeof(error));
-        if (!body) return -1;
+        if (!body) goto done;
         size_t n = length - (sizeof(PR_EDITOR_PREFIX) - 1) - 5;
         char *name = malloc(n + 1);
-        if (!name) { free(body); return -1; }
+        if (!name) { free(body); goto done; }
         memcpy(name, resource->engine_path + sizeof(PR_EDITOR_PREFIX) - 1, n); name[n] = 0;
         int added = sh_editor_rows_add_text(&view->package_rows, name, (const char *)body, size);
         free(name); free(body);
-        if (added < 0) return -1;
+        if (added < 0) goto done;
     }
-    return view->package_rows_state = sh_editor_rows_finish(&view->package_rows, &g_editor_rows) ? 1 : -1;
+    /* Package entries inheriting such a copy inherit the shipped entry. */
+    for (size_t i = 0; i < view->package_rows.count; i++) {
+        sh_editor_row *row = view->package_rows.items + i;
+        for (size_t c = 0; row->parent && c < copies; c++) {
+            size_t n = strlen(context_copy[c]) - 5, m = strlen(shipped_name[c]) - 5;
+            if (strlen(row->parent) != n || _strnicmp(row->parent, context_copy[c], n)) continue;
+            char *parent = malloc(m + 1);
+            if (!parent) goto done;
+            memcpy(parent, shipped_name[c], m); parent[m] = 0;
+            free(row->parent); row->parent = parent;
+            break;
+        }
+    }
+    state = view->package_rows_state = sh_editor_rows_finish(&view->package_rows, &g_editor_rows) ? 1 : -1;
+done:
+    free((void *)context_copy); free((void *)shipped_name);
+    return state;
 }
 static const char *pr_inline_placement(void *context, const char *from, const char *base, sh_decl_carrier_limit *limit)
 {

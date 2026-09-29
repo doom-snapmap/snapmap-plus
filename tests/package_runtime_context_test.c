@@ -2508,6 +2508,28 @@ static void test_native_inline_placement_provenance(void)
     if (placed != 0) fprintf(stderr, "placement provenance (owned change): %d %s\n", placed, reason);
     CHECK(placed == 0 && !engine && strstr(reason, "smp/tough_row") && strstr(reason, "not a plain copy"));
     for (size_t i = 0; i < 3; i++) { sh_package_owners_free(&resources[i].owners); sh_package_owners_free(&resources[i].gameplay_owners); }
+    /* The live shape (D8, 2026-09-29): the stock entry linked privately for the
+     * package's own context, because a shared editor declaration it references
+     * differs there. The unowned copy still stands for the shipped entry; the
+     * same copy owned by a package is a package change and is refused. */
+    sh_compiled_resource context[3];
+    context[0] = provenance_resource("generated/decls/entitydef/smp/tough.decl",
+        "{ inherit = \"inlinestock/base\"; edit = { health = 40; } }", "generated/decls/entitydef/inline/tough.decl", 0, 0);
+    context[1] = provenance_resource("generated/decls/snapeditorentitydef/smp/stock_context.decl",
+        "{ inherit = \"inlinestock/row_base\"; edit = { entityDef = \"inlinestock/base\"; } }",
+        "generated/decls/snapeditorentitydef/inlinestock/base_row.decl", 1, SIZE_MAX);
+    context[2] = provenance_resource("generated/decls/snapeditorentitydef/smp/tough_row.decl",
+        "{ inherit = \"smp/stock_context\"; edit = { entityDef = \"smp/tough\"; } }",
+        "generated/decls/snapeditorentitydef/inline/tough_row.decl", 0, 0);
+    compiled.resources = context; compiled.resource_count = 3;
+    placed = sh_package_runtime_test_placement(&compiled, "smp/tough", "inlinestock/base", &engine, reason, sizeof(reason));
+    if (placed != 1) fprintf(stderr, "placement provenance (unowned context copy): %d %s\n", placed, reason);
+    CHECK(placed == 1);
+    CHECK(sh_package_owners_add(&context[1].owners, 1));
+    placed = sh_package_runtime_test_placement(&compiled, "smp/tough", "inlinestock/base", &engine, reason, sizeof(reason));
+    if (placed != 0) fprintf(stderr, "placement provenance (owned context copy): %d %s\n", placed, reason);
+    CHECK(placed == 0 && !engine && strstr(reason, "not a plain copy"));
+    for (size_t i = 0; i < 3; i++) { sh_package_owners_free(&context[i].owners); sh_package_owners_free(&context[i].gameplay_owners); }
     sh_package_runtime_test_editor_rows(NULL, 0);
     sh_package_runtime_test_dispose(); sh_package_runtime_test_baseline(baseline, NULL);
 }
