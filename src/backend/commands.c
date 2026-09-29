@@ -869,6 +869,56 @@ static void h_sh_listres(idCmdArgs *a)
     free(buf.data);
 }
 
+/* List the editor's placeable palette: the catalog at editor+0x20660 that the
+ * toybox and the map validator both search (sorted 0x6F0-byte entity templates;
+ * +0 the editor definition, +0x150 the entityDef it places). Each line is
+ * "<editor definition> -> <entityDef>", then the count. Read-only and
+ * SEH-guarded; the optional filter matches either name. */
+#define PAL_EDITOR_OFF   0x20660
+#define PAL_ARRAY_OFF    0x10
+#define PAL_COUNT_OFF    0x18
+#define PAL_ENTRY_SIZE   0x6F0
+#define PAL_ENTRY_EDITOR 0x000
+#define PAL_ENTRY_DEF    0x150
+static void pal_copy_name(const void *decl, char *out, size_t capacity)
+{
+    const char *name = decl ? lr_decl_name(decl) : NULL;
+    out[0] = 0;
+    if (!name) { snprintf(out, capacity, "%s", decl ? "(unreadable)" : "(none)"); return; }
+    __try {
+        size_t i = 0;
+        for (; i + 1 < capacity && name[i]; i++) out[i] = name[i];
+        out[i] = 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { snprintf(out, capacity, "(unreadable)"); }
+}
+static void h_sh_palette(idCmdArgs *a)
+{
+    const char *filter = cmd_argv(a, 1);
+    uintptr_t editor = g_module_base ? glb_resolve(g_module_base, "editor_singleton", NULL) : 0;
+    void *array = NULL;
+    uint32_t count = 0, shown = 0;
+    if (!editor) { sh_printf("sh_palette: editor_singleton unresolved on this build.\n"); return; }
+    if (!lr_read_ptr((const void *)(editor + PAL_EDITOR_OFF + PAL_ARRAY_OFF), &array) ||
+        !lr_read_u32((const void *)(editor + PAL_EDITOR_OFF + PAL_COUNT_OFF), &count)) {
+        sh_printf("sh_palette: palette unreadable.\n"); return;
+    }
+    if (!array || count > LISTRES_COUNT_CAP) { sh_printf("sh_palette: no palette (%u entries).\n", count); return; }
+    for (uint32_t i = 0; i < count; i++) {
+        const uint8_t *entry = (const uint8_t *)array + (size_t)i * PAL_ENTRY_SIZE;
+        void *row = NULL, *def = NULL;
+        char row_name[256], def_name[256];
+        if (!lr_read_ptr(entry + PAL_ENTRY_EDITOR, &row) || !lr_read_ptr(entry + PAL_ENTRY_DEF, &def)) {
+            sh_printf("sh_palette: entry %u unreadable.\n", i); break;
+        }
+        pal_copy_name(row, row_name, sizeof(row_name));
+        pal_copy_name(def, def_name, sizeof(def_name));
+        if (filter && !strstr(row_name, filter) && !strstr(def_name, filter)) continue;
+        sh_printf("%s -> %s\n", row_name, def_name);
+        shown++;
+    }
+    sh_printf("sh_palette: %u entries, %u shown\n", count, shown);
+}
+
 /* List live idEntity subclasses, including decl-less types and idTarget_Command.
  * Fall back to the static snapshot when reflection is unavailable. */
 #define SH_ENTLIST_MAX  16384   /* Candidate capacity. */
@@ -1876,6 +1926,7 @@ static const cmd_entry CMD_TABLE[] = {
     { "sh_dialogpoll",       (void *)h_sh_dialogpoll, "read the answer to the dialog sh_dialogtest raised (diagnostic)" },
     { "sh_dialogdump",       (void *)h_sh_dialogdump, "print the engine dialog queue: id, button set and flag bytes (diagnostic)" },
     { "sh_listres",          (void *)h_sh_listres,  "<resource classname (ex:idMaterial)> <optional: filter> list all resources of a given type" },
+    { "sh_palette",          (void *)h_sh_palette,  "[filter] list the editor's placeable palette: each entry's editor definition and the entityDef it places (diagnostic)" },
     { "sh_declfamilies",     (void *)h_sh_declfamilies, "list every declaration family and the composition route it takes (diagnostic)" },
     { "sh_resread",          (void *)h_sh_resread,  "<engine path> [substring] print what the runtime currently serves for one resource path (diagnostic)" },
     { "sh_alginfo",          (void *)h_alginfo,     "Prints CPU dispatcher info for the engine-math (algo) override layer." },

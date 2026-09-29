@@ -51,6 +51,7 @@ Registered with the engine command system; run from the DOOM console.
 | `sh_dialogtest` | Raise DOOM's own modal carrying the given text (diagnostic for the engine dialog surface). |
 | `sh_dialogpoll` | Read the answer to the dialog `sh_dialogtest` raised. |
 | `sh_listres` | List all resources of a given class (optionally copy to clipboard). |
+| `sh_palette` | List the editor's placeable palette (the Toybox and map-validator catalog): each entry's editor definition and the entityDef it places, optionally filtered, then the count (diagnostic). |
 | `sh_type` | Print the members of an idTech class or the values of an enum (runtime introspection). Add `-v` to also show each field's byte offset and size. |
 | `sh_validclasses` | List the engine-valid classnames for a given inherit (the same enumerator that feeds the Classname dropdown). |
 | `sh_target_any` | Reveal / re-hide the campaign-only and normally-hidden placeable entity decls in the SnapMap editor palette. |
