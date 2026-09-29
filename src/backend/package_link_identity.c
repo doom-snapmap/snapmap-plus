@@ -232,9 +232,15 @@ int sh_package_link_identify_verified(const sh_package_link_node *nodes, size_t 
     sh_package_link_verify_equal verify, void *context,
     sh_package_link_classes *out, char *error, size_t capacity)
 {
+    return sh_package_link_identify_ordered(nodes, count, verify, context, NULL, out, error, capacity);
+}
+int sh_package_link_identify_ordered(const sh_package_link_node *nodes, size_t count,
+    sh_package_link_verify_equal verify, void *context, sh_package_link_order *order,
+    sh_package_link_classes *out, char *error, size_t capacity)
+{
     li_work work = {0};
     int ok = 0;
-    if (!sh_package_link_equivalence_verified(nodes, count, verify, context, out, error, capacity)) return 0;
+    if (!sh_package_link_equivalence_ordered(nodes, count, verify, context, order, out, error, capacity)) return 0;
     if (!li_prepare(&work, nodes, out)) goto done;
     li_components(&work);
     for (size_t i = work.component_count; i; i--) if (!li_component(&work, i - 1)) goto done;

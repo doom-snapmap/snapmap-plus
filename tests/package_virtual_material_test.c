@@ -100,8 +100,65 @@ static void private_pages(const char *material_text, int selectable)
     }
     sh_package_link_output_free(&linked); sh_package_virtual_material_close(m);
 }
+/* Many materials in several scopes: every lookup (cached, repeated bind,
+ * witnesses, the page-data check) finds exactly its own scoped row, and names
+ * still match only as stored. */
+enum { MANY = 300, MANY_SCOPES = 5 };
+static char many_table[MANY * 48 + 32];
+static int read_many(void *context, const char *path, unsigned char **body, size_t *length)
+{
+    originals *f = context;
+    f->reads++; *body = NULL; *length = 0;
+    if (strcmp(path, "virtualtextures/_vmtr.vmtr")) return 0;
+    *length = strlen(many_table); *body = (unsigned char *)_strdup(many_table); assert(*body);
+    return 1;
+}
+static int count_witness(void *context, const char *role, const sh_compiled_resource *file)
+{ (void)file; assert(!strcmp(role, "virtual-atlas/selected-row")); ++*(int *)context; return 1; }
+static void many_bindings(void)
+{
+    char error[1024], name[32]; unsigned char semantics[32], again[32]; int original, witnesses;
+    size_t at = (size_t)snprintf(many_table, sizeof(many_table), "26\n%d\n", MANY);
+    for (int i = 0; i < MANY; i++)
+        at += (size_t)snprintf(many_table + at, sizeof(many_table) - at, "%d 4 16 16 0 1 2 \"mat/%03d\"\n", i * 16, i);
+    originals f = {0}; sh_package_sources inventory = {0}; sh_package_compilation scopes[MANY_SCOPES] = {0};
+    const sh_package_compilation *views[MANY_SCOPES];
+    for (size_t s = 0; s < MANY_SCOPES; s++) { scopes[s].sources = &inventory; views[s] = scopes + s; }
+    sh_package_virtual_atlas atlas = {"_vmtr", "virtualtextures/_vmtr.pages", {1}, 1}, changed = atlas;
+    changed.content[0] = 2; changed.original = 0;
+    sh_package_virtual_materials *m = sh_package_virtual_material_open(views, MANY_SCOPES, read_many, &f); assert(m);
+    static unsigned char bound[MANY_SCOPES - 1][MANY][32];
+    for (size_t s = 0; s + 1 < MANY_SCOPES; s++) for (int i = 0; i < MANY; i++) {
+        snprintf(name, sizeof(name), "mat/%03d", i);
+        assert(sh_package_virtual_material_bind(m, s, name, &atlas, bound[s][i], &original, error, sizeof(error)) == 1 && original);
+    }
+    for (size_t s = 0; s + 1 < MANY_SCOPES; s++) for (int i = 0; i < MANY; i++) {
+        snprintf(name, sizeof(name), "mat/%03d", i);
+        assert(sh_package_virtual_material_cached(m, s, name, semantics, &original) && original &&
+            !memcmp(semantics, bound[s][i], 32));
+        assert(sh_package_virtual_material_bind(m, s, name, &atlas, again, &original, error, sizeof(error)) == 1 &&
+            !memcmp(again, bound[s][i], 32));
+        witnesses = 0; /* An unchanged stock row carries no selected-row witness. */
+        assert(sh_package_virtual_material_witnesses(m, s, name, count_witness, &witnesses, error, sizeof(error)) && !witnesses);
+        if (i) assert(memcmp(bound[s][i], bound[s][i - 1], 32)); /* each row its own semantics */
+        if (s) assert(!memcmp(bound[s][i], bound[0][i], 32));   /* the same row in every scope */
+    }
+    /* Only the stored spelling matches, as before; an unbound scope has nothing. */
+    assert(!sh_package_virtual_material_cached(m, 0, "MAT/000", semantics, &original));
+    assert(!sh_package_virtual_material_cached(m, MANY_SCOPES - 1, "mat/000", semantics, &original));
+    assert(!sh_package_virtual_material_witnesses(m, MANY_SCOPES - 1, "mat/000", count_witness, &witnesses, error, sizeof(error)));
+    /* A row of the same resolved atlas with other page data is refused after
+     * many agreeing rows, and a changed atlas for a bound row stays refused. */
+    assert(sh_package_virtual_material_bind(m, MANY_SCOPES - 1, "mat/007", &changed, semantics, &original, error, sizeof(error)) == -1 &&
+        strstr(error, "different page data"));
+    assert(sh_package_virtual_material_bind(m, 2, "mat/150", &changed, semantics, &original, error, sizeof(error)) == -1 &&
+        strstr(error, "changed its resolved atlas"));
+    assert(f.reads == 6);
+    sh_package_virtual_material_close(m);
+}
 int main(void)
 {
+    many_bindings();
     char error[1024], *path; unsigned char semantics[3][32]; int original;
     path = sh_package_virtual_material_path("VirtualTextures\\maps.v1\\one.pages", 5);
     assert(path && !strcmp(path, "virtualtextures/maps.v1/one_dlc5.vmtr")); free(path);

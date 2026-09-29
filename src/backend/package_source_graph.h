@@ -46,8 +46,10 @@ typedef struct sh_package_source_shader {
     void *context;
     /* Prove the exact source-bound parameter can retain the native/GPU slot.
      * source.text is NULL only after physical source absence was captured.
-     * Return 1 with verified kind (0..18) and native index (0..32767), 0 for
-     * missing/incompatible coverage, -1 on failed read. Same-name occupancy or
+     * Return 1 with verified kind (0..18) and native index (0..32767), 2 after
+     * retaining a native preparation request (the caller retries after it; the
+     * flag callback below answers 2 alike), 0 for missing/incompatible
+     * coverage, -1 on failed read. Same-name occupancy or
      * equal freshness hashes alone are insufficient. The adapter must retain
      * stable native kind/index, source/default/layout compatibility and lifetime
      * through publication/rollback; it must not use a peer's loaded defaults.
@@ -107,6 +109,21 @@ int sh_package_source_reader_shader(sh_package_source_reader *reader,
     const sh_package_source_shader *shader);
 int sh_package_source_reader_audio(sh_package_source_reader *reader,
     const sh_package_source_audio *audio);
+/* Optional observer of every scoped path a reader reads or checks while it
+ * binds, prepares or requests (the scope's own file, else the captured
+ * original), with whether the scope supplied it. Graph inspection
+ * (sh_package_source_graph*) is outside this contract. NULL removes it. */
+typedef void (*sh_package_source_lookup)(void *context, const char *path, int supplied);
+void sh_package_source_reader_lookups(sh_package_source_reader *reader,
+    sh_package_source_lookup lookup, void *context);
+/* SHA-256 of every native manager and reflected fact this reader's typed
+ * binding can consult, read afresh (sh_decl_native_registry_digest,
+ * sh_decl_native_schema_digest). Readers with equal digests bind the same
+ * bytes identically. 1 with the digest. */
+int sh_package_source_reader_native_digest(sh_package_source_reader *reader, unsigned char out[32]);
+/* 1 when the reader's last shader open or bind failed only because a native
+ * parameter or flag check retained a preparation request. */
+int sh_package_source_reader_preparing(const sh_package_source_reader *reader);
 typedef enum sh_package_source_shader_status {
     SH_PACKAGE_SOURCE_SHADER_ERROR = 0,
     SH_PACKAGE_SOURCE_SHADER_READY = 1,

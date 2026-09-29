@@ -55,6 +55,13 @@ sh_decl_native_schema *sh_decl_native_schema_open(sh_decl_native_source source,
     sh_decl_dependency_observer observer, char *error, size_t error_capacity);
 const sh_decl_dependency_schema *sh_decl_native_schema_view(sh_decl_native_schema *schema);
 void sh_decl_native_schema_close(sh_decl_native_schema *schema);
+/* Emit every reflected fact typed binding can read, loading each class
+ * first: class and enum names with their registered object and pointer
+ * readers, each class's super, element and fields, each enum's members.
+ * Schemas with equal emissions bind the same text identically. 1 when every
+ * emit succeeded; a class or enum that cannot be read is emitted as such. */
+int sh_decl_native_schema_digest(sh_decl_native_schema *schema,
+    int (*emit)(void *context, const void *bytes, size_t length), void *context);
 
 /* Exact native class spelling and reflected ancestry, without loading fields
  * or constructing objects. Returns 1 derives (including a known class itself),

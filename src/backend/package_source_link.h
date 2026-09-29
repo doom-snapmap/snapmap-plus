@@ -6,6 +6,7 @@
 
 typedef struct sh_package_source_link sh_package_source_link;
 typedef struct sh_package_audio_program sh_package_audio_program;
+typedef struct sh_package_source_memo sh_package_source_memo;
 typedef int (*sh_package_source_implicit)(void *context, size_t scope, int observing,
     const sh_package_link_unit *unit,
     int (*visit)(void *, const char *slot, const char *family, const char *name),
@@ -73,6 +74,9 @@ typedef struct sh_package_source_link_native {
     int (*prepare)(void *context, sh_package_source_reader *reader,
         const sh_package_link_unit *unit, unsigned char **body, size_t *length,
         char *error, size_t capacity);
+    /* Optional discovery recordings retained from earlier captures in this
+     * process (sh_package_source_memo_open), borrowed for this capture. */
+    sh_package_source_memo *memo;
 } sh_package_source_link_native;
 
 /* Enumerate supplied units, complete their catalog permutations and walk the
@@ -153,6 +157,24 @@ sh_package_source_link *sh_package_source_link_open_attributed(
     const sh_package_source_link_native *native, const sh_package_source_root_plan *roots,
     sh_package_source_failure *failure, char *error, size_t capacity);
 void sh_package_source_link_close(sh_package_source_link *source);
+/* Discovery recordings that outlive the capture that made them, for later
+ * captures in this process. A recording keeps a unit's preparation output and
+ * ordered reference and request sites, with every file and scoped path its
+ * reader read and how each resolved: supplied by the scope, or the capture's
+ * original with its status, and its content identity. A later capture replays
+ * it only after resolving every one of them afresh to the same content;
+ * replay still resolves each reference in its own scope and reruns file
+ * selection, material companions and constructor requests. The memo is keyed
+ * by what readers consult outside those paths, read afresh by every capture:
+ * the catalog rows (sh_resource_catalog_digest), the native managers and
+ * reflection (sh_package_source_reader_native_digest), the product's script
+ * capture and the preparation callback. A different key drops every
+ * recording. Readers of the native shader ABI (renderprog, renderprogflag)
+ * are never recorded. Portable data only (strings, identities, byte copies);
+ * never persisted. One capture borrows the memo at a time; a capture that
+ * finds it busy records only for itself. */
+sh_package_source_memo *sh_package_source_memo_open(void);
+void sh_package_source_memo_close(sh_package_source_memo *memo);
 /* Reverse discovery stops at stock sources beyond the registered readers
  * instead of refusing every package. scope SIZE_MAX names the stock unit whose
  * reader stopped; any other scope changed a stock root whose closure crosses
@@ -169,6 +191,19 @@ const sh_package_link_inputs *sh_package_source_link_inputs(const sh_package_sou
 /* Write "readers N ms, seeds N ms, ..." for the capture that opened source;
  * returns out. A diagnostic only. */
 const char *sh_package_source_link_phases(const sh_package_source_link *source, char *out, size_t capacity);
+/* Diagnostic counts of the capture, as one line: units discovered and
+ * replayed from another scope's discovery, file binds, original captures. */
+const char *sh_package_source_link_counters(const sh_package_source_link *source, char *out, size_t capacity);
+/* The payload identity of one file of source unit index, as
+ * sh_package_compilation_identity computes it for that unit's compilation;
+ * an unsupplied original's is computed once for every unit that binds it. */
+int sh_package_source_link_identity(sh_package_source_link *source, size_t index,
+    const sh_compiled_resource *file, sh_package_file_identity *out, char *error, size_t capacity);
+/* Tests and diagnostics: discovery replay of unchanged units is on by
+ * default; 0 binds every unit afresh (the same result, more slowly). */
+void sh_package_source_link_replay(int enabled);
+/* Diagnostics: 1 when input unit index was discovered by replay. */
+int sh_package_source_link_unit_replayed(const sh_package_source_link *source, size_t index);
 /* One byte per input unit: its complete captured dependency closure has no
  * gameplay contribution. Editor collection composition uses this eligibility;
  * an editor resource reaching private gameplay must follow that asset scope.
@@ -186,6 +221,9 @@ int sh_package_source_link_identify(sh_package_source_link *source,
     sh_package_link_classes *out, char *error, size_t capacity);
 int sh_package_source_link_resolve_unit(sh_package_source_link *source, size_t unit,
     const char *family, const char *name, size_t *target, char *error, size_t capacity);
+/* The frozen unit with this family and name in one input scope, if any. */
+int sh_package_source_link_find_unit(sh_package_source_link *source, size_t scope,
+    const char *family, const char *name, size_t *unit);
 unsigned char *sh_package_source_link_bind_unit(sh_package_source_link *source, size_t unit,
     const unsigned char *body, size_t length, sh_package_binding_resolver resolver,
     void *context, size_t *output_length, char *error, size_t capacity);
@@ -216,6 +254,13 @@ unsigned char *sh_package_source_link_bind_file(sh_package_source_link *source, 
     const sh_compiled_resource *file, const unsigned char *body, size_t length,
     sh_package_binding_resolver resolver, void *context, size_t *output_length,
     char *error, size_t capacity);
+/* The reference sites that discovery bound in one captured file of a unit,
+ * in bind order, as (slot, target unit) pairs: exactly the sites and frozen
+ * resolutions bind_file reports for that file, since discovery ran the same
+ * reader over the same bytes. 1 with the sites (possibly none), 0 when this
+ * link did not discover that file. Valid until the link closes. */
+int sh_package_source_link_sites(const sh_package_source_link *source, size_t unit,
+    const sh_compiled_resource *file, const sh_package_link_edge **sites, size_t *count);
 /* Enumerate a complete captured shader unit under a prospective root identity.
  * PERMUTATION entries are native renderprog identities, not provider paths.
  * The allocator must reserve/check every such ID along with the root before

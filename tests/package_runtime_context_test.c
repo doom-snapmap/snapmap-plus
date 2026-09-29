@@ -31,7 +31,25 @@ int hook_unpatch(void *trampoline) { (void)trampoline; CHECK(0); return 0; }
 static const char *health_path = "generated/decls/entitydef/ai/cyberdemon.decl";
 static const char *descriptor = "{\"id\":\"installed-bosses\",\"name\":\"Installed Bosses\",\"strings\":{\"en\":{\"label\":\"local\"}}}";
 static const char *original = "{ edit = { health = 25000; } }";
-void backend_log(const char *message) { (void)message; }
+/* Library compiles that left an unchanged judged package out without
+ * compiling it again (test_left_out_packages). */
+static unsigned left_out_reuses;
+/* Whole installed-library compiles, and refreshes that folded a published
+ * installation in as an increment (test_published_install_refresh). */
+static unsigned library_compiles, install_refreshes;
+/* Source captures that replayed recordings of earlier compiles (the memo). */
+static unsigned memo_replays;
+void backend_log(const char *message)
+{
+    const char *at;
+    size_t replayed = 0;
+    if (!message) return;
+    if (strstr(message, "replayed from earlier compiles") && (at = strstr(message, " ms; ")) &&
+        sscanf(at, " ms; %zu replayed", &replayed) == 1 && replayed) memo_replays++;
+    if (strstr(message, "left out as before")) left_out_reuses++;
+    if (strstr(message, "package library compile (installed library)")) library_compiles++;
+    if (strstr(message, "refresh for a published installation: added packages")) install_refreshes++;
+}
 
 static int baseline(void *context, const char *path, unsigned char **body, size_t *length)
 {
@@ -755,6 +773,14 @@ static int commit_inventory(char *error, size_t capacity)
     if (inventory_commit_failure == 2) RaiseException(0xe0422083, 0, 0, NULL);
     if (inventory_commit_failure) { snprintf(error, capacity, "install commit refused"); return 0; }
     return 1;
+}
+/* The MPKG commit: committed files become permanent library sources, which
+ * schedules a rescan unless the plan already carries their library
+ * (sh_mpkg_activation_commit). */
+static int commit_published(char *error, size_t capacity)
+{
+    if (!commit_inventory(error, capacity)) return 0;
+    sh_package_runtime_note_sources_changed(); return 1;
 }
 
 static void test_installed_inventory_is_not_active_composition(void)
@@ -3380,6 +3406,216 @@ static int initial_authoring_activate(void *context, int restoring,
     if (state->fail) { snprintf(error, capacity, "fixture first-map preparation failure"); return 0; }
     return 1;
 }
+/* An installation's additive increment serves what a full rescan of the same
+ * installed inventory serves, with one designed difference: a newly installed
+ * package's shared editor declaration keeps a private alias until the next
+ * rescan, because an increment never rewrites or adds to the open editor's
+ * shared objects (pl_document_shared); the rescan then composes it under its
+ * authored name. Snapshot of one library as rows sorted by engine path. */
+typedef struct library_row { char *path, *original; unsigned char *body; size_t length; } library_row;
+static int library_row_order(const void *a, const void *b)
+{ return strcmp(((const library_row *)a)->path, ((const library_row *)b)->path); }
+static library_row *library_snapshot(size_t *count)
+{
+    const sh_package_compilation *library = sh_package_runtime_library_acquire();
+    library_row *rows = library ? calloc(library->resource_count ? library->resource_count : 1, sizeof(*rows)) : NULL;
+    *count = 0;
+    for (size_t i = 0; rows && i < library->resource_count; i++) {
+        char error[256];
+        rows[i].path = _strdup(library->resources[i].engine_path);
+        rows[i].original = library->resources[i].original_path ? _strdup(library->resources[i].original_path) : NULL;
+        rows[i].body = sh_package_compilation_read(library, library->resources + i, SIZE_MAX,
+            &rows[i].length, error, sizeof(error));
+        CHECK(rows[i].path && rows[i].body);
+        (*count)++;
+    }
+    sh_package_runtime_release();
+    if (rows && *count > 1) qsort(rows, *count, sizeof(*rows), library_row_order);
+    return rows;
+}
+static void library_rows_free(library_row *rows, size_t count)
+{
+    for (size_t i = 0; rows && i < count; i++) { free(rows[i].path); free(rows[i].original); free(rows[i].body); }
+    free(rows);
+}
+/* 1 when the increment rows equal the rescan rows except for shared editor
+ * declarations the rescan serves under their authored path and the increment
+ * under a private alias of exactly that path; *aliases counts those. */
+static int library_rows_designed(const library_row *a, size_t an, const library_row *b, size_t bn, size_t *aliases)
+{
+    size_t i = 0, j = 0; int equal = 1;
+    *aliases = 0;
+    while (i < an || j < bn) {
+        int order = i == an ? 1 : j == bn ? -1 : strcmp(a[i].path, b[j].path);
+        if (order < 0) {
+            int alias = 0;
+            for (size_t k = 0; a[i].original && k < bn; k++)
+                if (!strcmp(b[k].path, a[i].original) && !b[k].original &&
+                    strstr(b[k].path, "generated/decls/snapeditor") == b[k].path) alias = 1;
+            if (!alias) { fprintf(stderr, "increment only: %s\n", a[i].path); equal = 0; }
+            i++; continue;
+        }
+        if (order > 0) {
+            int alias = 0;
+            for (size_t k = 0; k < an; k++) if (a[k].original && !strcmp(a[k].original, b[j].path)) alias = 1;
+            if (!alias || b[j].original || strstr(b[j].path, "generated/decls/snapeditor") != b[j].path) {
+                fprintf(stderr, "rescan only: %s\n", b[j].path); equal = 0;
+            } else (*aliases)++;
+            j++; continue;
+        }
+        if (a[i].length != b[j].length || memcmp(a[i].body, b[j].body, a[i].length)) {
+            fprintf(stderr, "different bytes: %s\n", a[i].path); equal = 0;
+        }
+        i++; j++;
+    }
+    return equal;
+}
+static void test_increment_designed_difference(void)
+{
+    const char *installed_descriptor = "{\"id\":\"already-installed\",\"name\":\"Already installed\"}";
+    const char *descriptor = "{\"id\":\"increment-map\",\"name\":\"Increment map\"}";
+    char data[MAX_PATH], source[MAX_PATH], error[2048];
+    admission_fixture f; lease_collection_setup(&f);
+    sh_decl_registry_source registry = {&f, admission_read, (uintptr_t)f.registry, NULL};
+    sh_package_map_plan *plan = NULL;
+    installed_authoring_activation state = {0};
+    library_row *incremented = NULL, *rescanned = NULL; size_t incremented_count = 0, rescanned_count = 0;
+    create("increment-data/overrides/installed-first/package.json", installed_descriptor);
+    create("increment-data/overrides/installed-first/assets/generated/decls/entitydef/first/thing.decl",
+        "{ class = \"Entity\"; edit = { health = 9; target = \"\"; } }");
+    authoring_bundle("increment-map/overrides/b", descriptor);
+    snprintf(data, sizeof(data), "%s/increment-data", root);
+    snprintf(source, sizeof(source), "%s/increment-map", root);
+    sh_package_runtime_test_dispose(); sh_package_runtime_test_baseline(lease_collection_baseline, NULL);
+    sh_package_runtime_test_source_readers(registry, (uintptr_t)f.reflection);
+    sh_package_runtime_test_installed_links(1);
+    CHECK(sh_package_runtime_refresh(data));
+    plan = sh_package_runtime_prepare_map(data, source, error, sizeof(error)); CHECK(plan);
+    if (!plan) goto done;
+    authoring_bundle("increment-data/overrides/installed", descriptor);
+    int prepared = sh_package_map_plan_prepare_inventory(plan, data, error, sizeof(error));
+    CHECK(prepared && !error[0]); if (!prepared) goto done;
+    state.library = sh_package_runtime_library_acquire(); sh_package_runtime_release();
+    CHECK(sh_package_runtime_activate_prepared_map(plan, (sh_package_activation_guard){0}, initial_authoring_activate, &state));
+    inventory_commit_calls = 0; inventory_commit_failure = 0;
+    CHECK(sh_package_runtime_commit_map(plan, commit_inventory, error, sizeof(error)));
+    sh_package_map_plan_free(plan); plan = NULL;
+    CHECK(sh_package_runtime_activate_prepared_map(NULL, (sh_package_activation_guard){0}, startup_activation,
+        &(int){0}));
+    const sh_package_compilation *library = sh_package_runtime_library_acquire();
+    CHECK(library != state.library); sh_package_runtime_release();
+    incremented = library_snapshot(&incremented_count);
+    CHECK(sh_package_runtime_refresh(data));
+    rescanned = library_snapshot(&rescanned_count);
+    size_t aliases = 0;
+    CHECK(incremented_count && library_rows_designed(incremented, incremented_count, rescanned, rescanned_count,
+        &aliases) && aliases == 1); /* cross/controls */
+done:
+    library_rows_free(incremented, incremented_count); library_rows_free(rescanned, rescanned_count);
+    sh_package_map_plan_free(plan);
+    sh_package_runtime_test_installed_links(0);
+    sh_package_runtime_test_source_readers((sh_decl_registry_source){0}, 0); sh_package_runtime_test_dispose();
+    sh_package_runtime_test_baseline(baseline, NULL);
+    for (size_t i = 0; i < f.count; i++) free(f.regions[i].address);
+    cleanup_resources(data);
+}
+/* A published installation that no map load continues (the MPKG gate) folds
+ * its packages in as a map-driven installation does: the refresh compiles only
+ * the added packages, serves the rest from the retained library and so serves
+ * exactly what the installation increment serves (one designed alias apart
+ * from a whole-library rescan). A new package failing on its own bytes is left
+ * out there too. A refresh that finds an installed package removed or changed
+ * compiles the whole library, and a refresh no installation asked for always
+ * does. */
+static void remove_created(const char *relative);
+/* The installed library's resource authored at original, which installed
+ * links may serve under a private name: its text contains wanted, or it is
+ * absent when wanted is NULL. */
+static void expect_library_text(const char *original, const char *wanted)
+{
+    const sh_package_compilation *library = sh_package_runtime_library_acquire();
+    const sh_compiled_resource *resource = historical_resource(library, original);
+    size_t length = 0; char error[256];
+    unsigned char *body = resource ? sh_package_compilation_read(library, resource, SIZE_MAX, &length, error, sizeof(error)) : NULL;
+    int ok = wanted ? body && strstr((const char *)body, wanted) != NULL : !resource;
+    if (!ok) fprintf(stderr, "library resource %s: wanted %s; got %s\n", original, wanted ? wanted : "(absent)",
+        body ? (const char *)body : resource ? "(unreadable)" : "(absent)");
+    CHECK(ok); free(body); sh_package_runtime_release();
+}
+static void test_published_install_refresh(void)
+{
+    const char *installed_descriptor = "{\"id\":\"already-installed\",\"name\":\"Already installed\"}";
+    const char *descriptor = "{\"id\":\"published-map\",\"name\":\"Published map\"}";
+    char data[MAX_PATH]; char *summary = NULL;
+    admission_fixture f; lease_collection_setup(&f);
+    sh_decl_registry_source registry = {&f, admission_read, (uintptr_t)f.registry, NULL};
+    library_row *published = NULL, *rescanned = NULL; size_t published_count = 0, rescanned_count = 0;
+    create("published-data/overrides/installed-first/package.json", installed_descriptor);
+    create("published-data/overrides/installed-first/assets/generated/decls/entitydef/first/thing.decl",
+        "{ class = \"Entity\"; edit = { health = 9; target = \"\"; } }");
+    snprintf(data, sizeof(data), "%s/published-data", root);
+    sh_package_runtime_test_dispose(); sh_package_runtime_test_baseline(lease_collection_baseline, NULL);
+    sh_package_runtime_test_source_readers(registry, (uintptr_t)f.reflection);
+    sh_package_runtime_test_installed_links(1);
+    library_compiles = install_refreshes = 0;
+    CHECK(sh_package_runtime_refresh(data) && library_compiles == 1);
+    const sh_package_compilation *first = sh_package_runtime_library_acquire(); sh_package_runtime_release();
+    /* Published through the gate: added packages only. */
+    authoring_bundle("published-data/overrides/installed", descriptor);
+    create("published-data/overrides/broken/package.json", "{\"id\":\"broken-published\",\"name\":\"Broken published\"}");
+    create("published-data/overrides/broken/assets/generated/decls/entitydef/broken.decl", "{ edit = { ");
+    library_compiles = install_refreshes = 0;
+    sh_package_runtime_note_install_published();
+    CHECK(sh_package_runtime_refresh(data) && install_refreshes == 1 && !library_compiles);
+    const sh_package_compilation *library = sh_package_runtime_library_acquire();
+    CHECK(library != first && historical_resource(library, authoring_unused));
+    CHECK(!historical_resource(library, "generated/decls/entitydef/broken.decl"));
+    sh_package_runtime_release();
+    expect_library_text("generated/decls/entitydef/first/thing.decl", "health = 9");
+    summary = sh_package_runtime_summary();
+    CHECK(summary && strstr(summary, "Skipped local package") && strstr(summary, "broken")); free(summary); summary = NULL;
+    published = library_snapshot(&published_count);
+    /* A refresh nobody asked to fold in compiles the whole library, replaying
+     * unchanged discovery recorded by the earlier compiles. */
+    library_compiles = install_refreshes = memo_replays = 0;
+    CHECK(sh_package_runtime_refresh(data) && library_compiles >= 1 && !install_refreshes && memo_replays);
+    rescanned = library_snapshot(&rescanned_count);
+    size_t aliases = 0;
+    CHECK(published_count && library_rows_designed(published, published_count, rescanned, rescanned_count,
+        &aliases) && aliases == 1);
+    /* A changed installed package needs the whole library even when asked. */
+    create("published-data/overrides/installed-first/assets/generated/decls/entitydef/first/thing.decl",
+        "{ class = \"Entity\"; edit = { health = 10; target = \"\"; } }");
+    library_compiles = install_refreshes = 0;
+    sh_package_runtime_note_install_published();
+    CHECK(sh_package_runtime_refresh(data) && library_compiles >= 1 && !install_refreshes);
+    expect_library_text("generated/decls/entitydef/first/thing.decl", "health = 10");
+    /* So does a removed one. */
+    remove_created("published-data/overrides/installed-first");
+    library_compiles = install_refreshes = 0;
+    sh_package_runtime_note_install_published();
+    CHECK(sh_package_runtime_refresh(data) && library_compiles >= 1 && !install_refreshes);
+    expect_library_text("generated/decls/entitydef/first/thing.decl", NULL);
+    /* After an edit and a removal, the library the memo helped compile is the
+     * one a fresh process compiles from the same files. */
+    library_rows_free(published, published_count); published = library_snapshot(&published_count);
+    sh_package_runtime_test_dispose(); sh_package_runtime_test_baseline(lease_collection_baseline, NULL);
+    sh_package_runtime_test_source_readers(registry, (uintptr_t)f.reflection);
+    memo_replays = 0;
+    CHECK(sh_package_runtime_refresh(data) && !memo_replays);
+    library_rows_free(rescanned, rescanned_count); rescanned = library_snapshot(&rescanned_count);
+    aliases = 0;
+    CHECK(published_count && library_rows_designed(published, published_count, rescanned, rescanned_count,
+        &aliases) && !aliases);
+    library_rows_free(published, published_count); library_rows_free(rescanned, rescanned_count);
+    published = rescanned = NULL;
+    free(summary);
+    sh_package_runtime_test_installed_links(0);
+    sh_package_runtime_test_source_readers((sh_decl_registry_source){0}, 0); sh_package_runtime_test_dispose();
+    sh_package_runtime_test_baseline(baseline, NULL);
+    for (size_t i = 0; i < f.count; i++) free(f.regions[i].address);
+    cleanup_resources(data);
+}
 static void test_initial_installed_authoring(void)
 {
     const char *descriptor = "{\"id\":\"first-installed\",\"name\":\"First installed\"}";
@@ -3430,9 +3666,13 @@ done:
     for (size_t i = 0; i < f.count; i++) free(f.regions[i].address);
     cleanup_resources(data);
 }
-/* A newly captured local package that fails authoring composition excludes
- * only itself. Map preparation succeeds with no message left behind: the load
- * continuation reads any message as a failure and cancels a finished load. */
+/* A newly installed package whose own source is malformed is left out of the
+ * installation increment exactly as the installed library leaves it out: its
+ * healthy peer is still served, map preparation succeeds with no message left
+ * behind (the load continuation reads any message as a failure and cancels a
+ * finished load), the commit folds the increment into the library, and no
+ * whole-library rescan is scheduled for the unchanged healthy library. The
+ * own-bytes decision is remembered: a later rescan leaves it out as before. */
 static void test_local_authoring_defect(void)
 {
     const char *descriptor = "{\"id\":\"defect-map\",\"name\":\"Defect map\"}";
@@ -3440,6 +3680,7 @@ static void test_local_authoring_defect(void)
     admission_fixture f; lease_collection_setup(&f);
     sh_decl_registry_source registry = {&f, admission_read, (uintptr_t)f.registry, NULL};
     sh_package_map_plan *plan = NULL;
+    installed_authoring_activation state = {0};
     char *summary = NULL;
     create("authoring-defect-data/overrides", NULL);
     authoring_bundle("authoring-defect-map/overrides/b", descriptor);
@@ -3452,17 +3693,225 @@ static void test_local_authoring_defect(void)
     if (!plan) goto done;
     create("authoring-defect-data/overrides/broken/package.json", "{\"id\":\"broken-local\",\"name\":\"Broken local\"}");
     create("authoring-defect-data/overrides/broken/assets/generated/decls/entitydef/broken.decl", "{ edit = { ");
+    authoring_bundle("authoring-defect-data/overrides/installed", descriptor);
     strcpy_s(error, sizeof(error), "stale");
     int prepared = sh_package_map_plan_prepare_inventory(plan, data, error, sizeof(error));
     if (!prepared || error[0]) fprintf(stderr, "local authoring defect: %d %s\n", prepared, error);
-    CHECK(prepared && !error[0]);
+    CHECK(prepared && !error[0]); if (!prepared) goto done;
     summary = sh_package_runtime_summary();
-    CHECK(summary && strstr(summary, "Local authoring composition unavailable"));
-    free(summary);
+    CHECK(summary && !strstr(summary, "Local authoring composition unavailable")); free(summary); summary = NULL;
+    state.library = sh_package_runtime_library_acquire(); sh_package_runtime_release();
+    CHECK(sh_package_runtime_activate_prepared_map(plan, (sh_package_activation_guard){0}, initial_authoring_activate, &state));
+    inventory_commit_calls = 0; inventory_commit_failure = 0;
+    CHECK(sh_package_runtime_commit_map(plan, commit_published, error, sizeof(error)) && inventory_commit_calls == 1);
+    const sh_package_compilation *library = sh_package_runtime_library_acquire();
+    CHECK(library != state.library && historical_resource(library, authoring_unused));
+    CHECK(!historical_resource(library, "generated/decls/entitydef/broken.decl"));
+    sh_package_runtime_release();
+    summary = sh_package_runtime_summary();
+    int reported = summary && strstr(summary, "Skipped local package") && strstr(summary, "broken") &&
+        !strstr(summary, "Local authoring composition unavailable");
+    if (!reported) fprintf(stderr, "authoring defect summary: %s\n", summary ? summary : "(none)");
+    CHECK(reported); free(summary); summary = NULL;
+    sh_package_map_plan_free(plan); plan = NULL;
+    /* Leaving the map rescans nothing: the committed library is kept. */
+    CHECK(sh_package_runtime_activate_prepared_map(NULL, (sh_package_activation_guard){0}, startup_activation, &(int){0}));
+    const sh_package_compilation *after = sh_package_runtime_library_acquire();
+    CHECK(after == library); sh_package_runtime_release();
+    left_out_reuses = 0;
+    CHECK(sh_package_runtime_refresh(data) && left_out_reuses == 1);
+    expect_current("generated/decls/entitydef/broken.decl", NULL);
 done:
+    free(summary);
     sh_package_map_plan_free(plan);
     sh_package_runtime_test_source_readers((sh_decl_registry_source){0}, 0); sh_package_runtime_test_dispose();
     sh_package_runtime_test_baseline(baseline, NULL);
+    for (size_t i = 0; i < f.count; i++) free(f.regions[i].address);
+    cleanup_resources(data);
+}
+/* Delete a fixture subtree made by create(), newest entry first, so the final
+ * cleanup no longer expects it. */
+static void remove_created(const char *relative)
+{
+    char prefix[4096];
+    snprintf(prefix, sizeof(prefix), "%s/%s", root, relative);
+    size_t n = strlen(prefix);
+    for (size_t i = created_count; i > 0; i--) {
+        if (strncmp(created[i - 1], prefix, n) || (created[i - 1][n] && created[i - 1][n] != '/')) continue;
+        wchar_t *wide = sh_package_source_wide_path(created[i - 1]); CHECK(wide);
+        if (wide) { CHECK(directories[i - 1] ? RemoveDirectoryW(wide) : DeleteFileW(wide)); free(wide); }
+        memmove(created + i - 1, created + i, (created_count - i) * sizeof(created[0]));
+        memmove(directories + i - 1, directories + i, (created_count - i) * sizeof(directories[0]));
+        created_count--;
+    }
+}
+/* A package the installed library rejected on its own bytes (a malformed
+ * declaration) stays out, with its report, while its files are unchanged: a
+ * rescan does not compile it again, and an installation's additive increment
+ * still extends the library instead of failing on it (which left every
+ * install to a full rebuild at the next map transition). A repaired, newly
+ * broken or removed tree is judged afresh. */
+static void test_left_out_packages(void)
+{
+    const char *descriptor = "{\"id\":\"left-out-map\",\"name\":\"Left out map\"}";
+    char data[MAX_PATH], source[MAX_PATH], error[2048], *summary = NULL;
+    admission_fixture f; lease_collection_setup(&f);
+    sh_decl_registry_source registry = {&f, admission_read, (uintptr_t)f.registry, NULL};
+    sh_package_map_plan *plan = NULL;
+    installed_authoring_activation state = {0};
+    create("left-out-data/overrides/broken/package.json", "{\"id\":\"broken-local\",\"name\":\"Broken local\"}");
+    create("left-out-data/overrides/broken/assets/generated/decls/entitydef/broken.decl", "{ edit = { ");
+    authoring_bundle("left-out-map/overrides/b", descriptor);
+    snprintf(data, sizeof(data), "%s/left-out-data", root);
+    snprintf(source, sizeof(source), "%s/left-out-map", root);
+    sh_package_runtime_test_dispose(); sh_package_runtime_test_baseline(lease_collection_baseline, NULL);
+    left_out_reuses = 0;
+    CHECK(sh_package_runtime_refresh(data) && !left_out_reuses);
+    summary = sh_package_runtime_summary();
+    CHECK(summary && strstr(summary, "Skipped local package") && strstr(summary, "malformed declaration"));
+    free(summary);
+    CHECK(sh_package_runtime_refresh(data) && left_out_reuses == 1);
+    summary = sh_package_runtime_summary();
+    CHECK(summary && strstr(summary, "Skipped local package") && strstr(summary, "malformed declaration"));
+    free(summary);
+    sh_package_runtime_test_source_readers(registry, (uintptr_t)f.reflection);
+    plan = sh_package_runtime_prepare_map(data, source, error, sizeof(error)); CHECK(plan);
+    if (!plan) goto done;
+    authoring_bundle("left-out-data/overrides/installed", descriptor);
+    int prepared = sh_package_map_plan_prepare_inventory(plan, data, error, sizeof(error));
+    CHECK(prepared && !error[0]); if (!prepared) goto done;
+    summary = sh_package_runtime_summary();
+    CHECK(summary && !strstr(summary, "Local authoring composition unavailable")); free(summary);
+    state.library = sh_package_runtime_library_acquire(); sh_package_runtime_release();
+    CHECK(sh_package_runtime_activate_prepared_map(plan, (sh_package_activation_guard){0}, initial_authoring_activate, &state));
+    inventory_commit_calls = 0; inventory_commit_failure = 0;
+    CHECK(sh_package_runtime_commit_map(plan, commit_inventory, error, sizeof(error)) && inventory_commit_calls == 1);
+    const sh_package_compilation *library = sh_package_runtime_library_acquire();
+    CHECK(library != state.library && historical_resource(library, authoring_unused));
+    CHECK(!historical_resource(library, "generated/decls/entitydef/broken.decl"));
+    sh_package_runtime_release();
+    summary = sh_package_runtime_summary();
+    int reported = summary && strstr(summary, "Installed library: 1 packages") &&
+        strstr(summary, "Skipped local package") && strstr(summary, "malformed declaration") &&
+        !strstr(summary, "Local authoring composition unavailable");
+    if (!reported) fprintf(stderr, "left-out summary: %s\n", summary ? summary : "(none)");
+    CHECK(reported); free(summary); summary = NULL;
+    sh_package_map_plan_free(plan); plan = NULL;
+    /* Its repaired tree is judged afresh and served. */
+    create("left-out-data/overrides/broken/assets/generated/decls/entitydef/broken.decl",
+        "{ class = \"Entity\"; edit = { health = 3; } }");
+    left_out_reuses = 0;
+    CHECK(sh_package_runtime_refresh(data) && !left_out_reuses);
+    expect_current("generated/decls/entitydef/broken.decl", "health = 3");
+    summary = sh_package_runtime_summary();
+    CHECK(summary && !strstr(summary, "Skipped local package")); free(summary); summary = NULL;
+    /* A new defect is a new tree: judged afresh, then remembered as itself. */
+    create("left-out-data/overrides/broken/assets/generated/decls/entitydef/broken.decl", "{ class = ");
+    left_out_reuses = 0;
+    CHECK(sh_package_runtime_refresh(data) && !left_out_reuses);
+    expect_current("generated/decls/entitydef/broken.decl", NULL);
+    CHECK(sh_package_runtime_refresh(data) && left_out_reuses == 1);
+    summary = sh_package_runtime_summary();
+    CHECK(summary && strstr(summary, "Skipped local package") && strstr(summary, "malformed declaration"));
+    free(summary); summary = NULL;
+    /* Removed from disk, it is neither left out nor reported. */
+    remove_created("left-out-data/overrides/broken");
+    left_out_reuses = 0;
+    CHECK(sh_package_runtime_refresh(data) && !left_out_reuses);
+    summary = sh_package_runtime_summary();
+    CHECK(summary && !strstr(summary, "Skipped local package") && strstr(summary, "Installed library: 1 packages"));
+done:
+    free(summary);
+    sh_package_map_plan_free(plan);
+    sh_package_runtime_test_source_readers((sh_decl_registry_source){0}, 0); sh_package_runtime_test_dispose();
+    sh_package_runtime_test_baseline(baseline, NULL);
+    for (size_t i = 0; i < f.count; i++) free(f.regions[i].address);
+    cleanup_resources(data);
+}
+/* An own-bytes decision outlives the process only for the same product and
+ * game images and the same tree: a later process leaves the package out without
+ * compiling it, with the same report, while a healthy peer is served. Another
+ * image, a changed tree or a missing, truncated or corrupt memo is judged
+ * afresh; nothing else is remembered. */
+static void memo_edit(const char *data, int truncate)
+{
+    char path[MAX_PATH]; FILE *file = NULL; long size = 0;
+    snprintf(path, sizeof(path), "%s/package-cache/own-bytes-exclusions-vk.txt", data);
+    CHECK(!fopen_s(&file, path, "r+b") && file); if (!file) return;
+    CHECK(!fseek(file, 0, SEEK_END)); size = ftell(file); CHECK(size > 8);
+    if (truncate) {
+        fclose(file);
+        HANDLE handle = CreateFileA(path, GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL); CHECK(handle != INVALID_HANDLE_VALUE);
+        LARGE_INTEGER at; at.QuadPart = size - 3; CHECK(SetFilePointerEx(handle, at, NULL, FILE_BEGIN) && SetEndOfFile(handle));
+        CloseHandle(handle); return;
+    }
+    int c; CHECK(!fseek(file, size - 2, SEEK_SET)); c = fgetc(file);
+    CHECK(!fseek(file, size - 2, SEEK_SET)); fputc(c == '0' ? '1' : '0', file); fclose(file);
+}
+static void memo_refresh(const char *data, unsigned expected_reuses, int broken_reported)
+{
+    char *summary;
+    sh_package_runtime_test_dispose(); sh_package_runtime_test_baseline(lease_collection_baseline, NULL);
+    left_out_reuses = 0;
+    CHECK(sh_package_runtime_refresh(data));
+    if (left_out_reuses != expected_reuses) fprintf(stderr, "session memo reuses %u, wanted %u\n", left_out_reuses, expected_reuses);
+    CHECK(left_out_reuses == expected_reuses);
+    expect_current("generated/decls/entitydef/memo_good.decl", "health = 2");
+    summary = sh_package_runtime_summary();
+    CHECK(summary && (broken_reported ? strstr(summary, "Skipped local package") && strstr(summary, "malformed declaration") :
+        !strstr(summary, "Skipped local package")));
+    free(summary);
+}
+static void test_left_out_across_processes(void)
+{
+    char data[MAX_PATH];
+    admission_fixture f; lease_collection_setup(&f);
+    create("memo-data/overrides/broken/package.json", "{\"id\":\"memo-broken\",\"name\":\"Memo broken\"}");
+    create("memo-data/overrides/broken/assets/generated/decls/entitydef/memo_broken.decl", "{ edit = { ");
+    create("memo-data/overrides/good/package.json", "{\"id\":\"memo-good\",\"name\":\"Memo good\"}");
+    create("memo-data/overrides/good/assets/generated/decls/entitydef/memo_good.decl",
+        "{ class = \"Entity\"; edit = { health = 2; } }");
+    snprintf(data, sizeof(data), "%s/memo-data", root);
+    sh_package_runtime_test_build_identity("game A\nproduct A\n");
+    memo_refresh(data, 0, 1);  /* judged, reported, remembered */
+    memo_refresh(data, 1, 1);  /* a later process: left out without compiling */
+    memo_refresh(data, 1, 1);  /* and again */
+    sh_package_runtime_test_build_identity("game A\nproduct B\n");
+    memo_refresh(data, 0, 1);  /* another product image: judged afresh */
+    sh_package_runtime_test_build_identity("game B\nproduct B\n");
+    memo_refresh(data, 0, 1);  /* another game image: judged afresh */
+    memo_refresh(data, 1, 1);
+    /* The other renderer's executable keeps its own memo: judged afresh there
+     * and remembered, and back on this one the package is still left out
+     * without compiling it. */
+    sh_package_runtime_test_image_slot("gl");
+    sh_package_runtime_test_build_identity("game G\nproduct B\n");
+    memo_refresh(data, 0, 1);
+    memo_refresh(data, 1, 1);
+    sh_package_runtime_test_image_slot("vk");
+    sh_package_runtime_test_build_identity("game B\nproduct B\n");
+    memo_refresh(data, 1, 1);
+    /* The unslotted memo of an earlier build is removed. */
+    {
+        char legacy[MAX_PATH]; FILE *file = NULL;
+        snprintf(legacy, sizeof(legacy), "%s/package-cache/own-bytes-exclusions.txt", data);
+        CHECK(!fopen_s(&file, legacy, "wb") && file); if (file) fclose(file);
+        memo_refresh(data, 1, 1);
+        CHECK(GetFileAttributesA(legacy) == INVALID_FILE_ATTRIBUTES);
+    }
+    memo_edit(data, 0);
+    memo_refresh(data, 0, 1);  /* corrupt memo: judged afresh, rewritten */
+    memo_refresh(data, 1, 1);
+    memo_edit(data, 1);
+    memo_refresh(data, 0, 1);  /* truncated memo: judged afresh */
+    /* A repaired tree is judged afresh and served; its old entry never applies. */
+    create("memo-data/overrides/broken/assets/generated/decls/entitydef/memo_broken.decl",
+        "{ class = \"Entity\"; edit = { health = 4; } }");
+    memo_refresh(data, 0, 0);
+    expect_current("generated/decls/entitydef/memo_broken.decl", "health = 4");
+    memo_refresh(data, 0, 0);
+    sh_package_runtime_test_build_identity("game test\nproduct test\n");
+    sh_package_runtime_test_dispose(); sh_package_runtime_test_baseline(baseline, NULL);
     for (size_t i = 0; i < f.count; i++) free(f.regions[i].address);
     cleanup_resources(data);
 }
@@ -3766,6 +4215,61 @@ static void test_local_document_binding(void)
     for (size_t i = 0; i < f.count; i++) free(f.regions[i].address);
     cleanup_resources(data); cleanup_resources(map);
 }
+/* A package left out as not served yet is judged again on every compile: its
+ * decision also reads stock coverage, which is not part of its own tree. When
+ * that changes (here the campaign-only dependency becomes a SnapMap original),
+ * the unchanged tree is served. Nothing about it is remembered. */
+static int served_baseline(void *context, const char *path, unsigned char **body, size_t *length)
+{
+    if (strcmp(path, health_path)) return baseline(context, path, body, length);
+    *body = (unsigned char *)_strdup("{ class = \"Entity\"; edit = { health = 25000; } }");
+    *length = *body ? strlen((const char *)*body) : 0;
+    return *body ? 1 : -1;
+}
+static void test_unserved_rejudged(void)
+{
+    char data[MAX_PATH], *summary = NULL;
+    admission_fixture f; admission_setup(&f);
+    sh_decl_registry_source registry = {&f, admission_read, (uintptr_t)f.registry, NULL};
+    snprintf(data, sizeof(data), "%s/unserved-again", root);
+    create("unserved-again/overrides/gap/package.json", "{\"id\":\"gap\",\"name\":\"Gap\"}");
+    create("unserved-again/overrides/gap/assets/generated/decls/entitydef/admission/gap.decl",
+        "{ class = \"Entity\"; edit = { target = \"ai/cyberdemon\"; } }");
+    sh_package_runtime_test_dispose(); sh_package_runtime_test_baseline(baseline, NULL);
+    sh_package_runtime_test_source_readers(registry, (uintptr_t)f.reflection);
+    sh_package_runtime_test_installed_links(1);
+    left_out_reuses = 0;
+    for (int pass = 0; pass < 2; pass++) {
+        CHECK(sh_package_runtime_refresh(data) && !left_out_reuses);
+        summary = sh_package_runtime_summary();
+        CHECK(summary && strstr(summary, "is not served yet (product coverage)")); free(summary);
+    }
+    sh_package_runtime_test_baseline(served_baseline, NULL);
+    CHECK(sh_package_runtime_refresh(data) && !left_out_reuses);
+    summary = sh_package_runtime_summary();
+    int served = summary && !strstr(summary, "is not served yet") && strstr(summary, "Installed library: 1 packages");
+    if (!served) fprintf(stderr, "rejudged summary: %s\n", summary ? summary : "(none)");
+    CHECK(served); free(summary);
+    const sh_package_compilation *library = sh_package_runtime_library_acquire();
+    int gap = 0;
+    for (size_t i = 0; library && i < library->resource_count; i++) {
+        char error[256]; size_t length = 0;
+        unsigned char *body = sh_package_compilation_read(library, library->resources + i, SIZE_MAX,
+            &length, error, sizeof(error));
+        unsigned char *text = body ? realloc(body, length + 1) : NULL;
+        if (!text) { free(body); continue; }
+        text[length] = 0;
+        gap += strstr((const char *)text, "target = \"ai/cyberdemon\"") != NULL;
+        free(text);
+    }
+    sh_package_runtime_release();
+    CHECK(gap == 1);
+    sh_package_runtime_test_installed_links(0);
+    sh_package_runtime_test_source_readers((sh_decl_registry_source){0}, 0); sh_package_runtime_test_dispose();
+    sh_package_runtime_test_baseline(baseline, NULL);
+    for (size_t i = 0; i < f.count; i++) free(f.regions[i].address);
+    cleanup_resources(data);
+}
 static void test_unserved_coverage(void)
 {
     char data[MAX_PATH], *summary;
@@ -3843,6 +4347,7 @@ int main(int argc, char **argv)
     test_local_isolation();
     test_local_document_binding();
     test_unserved_coverage();
+    test_unserved_rejudged();
     test_map_usage_admission();
     test_legacy_include_bindings();
     snprintf(map_a, sizeof(map_a), "%s\\map-a", root); snprintf(map_b, sizeof(map_b), "%s\\map-b", root);
@@ -3971,6 +4476,10 @@ int main(int argc, char **argv)
     test_installed_authoring_admission();
     test_initial_installed_authoring();
     test_local_authoring_defect();
+    test_published_install_refresh();
+    test_left_out_packages();
+    test_left_out_across_processes();
+    test_increment_designed_difference();
     test_selector_shared_retirement();
     test_selector_unrelated_gameplay();
     test_failed_local_compilation_admission();

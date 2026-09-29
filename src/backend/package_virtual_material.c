@@ -26,7 +26,75 @@ struct sh_package_virtual_materials {
     void *context;
     pv_table **tables; size_t table_count, table_capacity;
     pv_binding *bindings; size_t binding_count, binding_capacity;
+    /* Open addressing over binding index + 1: by scope and stored material
+     * name, and the first page-owning binding of each resolved atlas name. */
+    size_t *binding_slots, binding_slot_count;
+    size_t *atlas_slots, atlas_slot_count, atlas_count;
 };
+static uint64_t pv_hash(size_t scope, const char *text)
+{
+    uint64_t hash = UINT64_C(14695981039346656037) ^ (uint64_t)scope;
+    for (; *text; text++) { hash ^= (unsigned char)*text; hash *= UINT64_C(1099511628211); }
+    return hash;
+}
+/* Index + 1 of the binding of scope and material as stored, else 0: the row
+ * a scan for the first equal scope and name would find. */
+static size_t pv_binding_find(const sh_package_virtual_materials *m, size_t scope, const char *material)
+{
+    if (!m->binding_slot_count) return 0;
+    size_t at = (size_t)pv_hash(scope, material) & (m->binding_slot_count - 1);
+    for (; m->binding_slots[at]; at = (at + 1) & (m->binding_slot_count - 1)) {
+        const pv_binding *b = m->bindings + m->binding_slots[at] - 1;
+        if (b->scope == scope && !strcmp(b->material, material)) return m->binding_slots[at];
+    }
+    return 0;
+}
+/* Index + 1 of the first page-owning binding (a table row, no private pages)
+ * of this resolved atlas name, else 0. */
+static size_t pv_atlas_find(const sh_package_virtual_materials *m, const char *atlas)
+{
+    if (!m->atlas_slot_count) return 0;
+    size_t at = (size_t)pv_hash(0, atlas) & (m->atlas_slot_count - 1);
+    for (; m->atlas_slots[at]; at = (at + 1) & (m->atlas_slot_count - 1))
+        if (!strcmp(m->bindings[m->atlas_slots[at] - 1].atlas, atlas)) return m->atlas_slots[at];
+    return 0;
+}
+static void pv_index_insert(sh_package_virtual_materials *m, size_t i)
+{
+    const pv_binding *b = m->bindings + i;
+    size_t at = (size_t)pv_hash(b->scope, b->material) & (m->binding_slot_count - 1);
+    while (m->binding_slots[at]) at = (at + 1) & (m->binding_slot_count - 1);
+    m->binding_slots[at] = i + 1;
+    if (b->record && !b->page_source && !pv_atlas_find(m, b->atlas)) {
+        at = (size_t)pv_hash(0, b->atlas) & (m->atlas_slot_count - 1);
+        while (m->atlas_slots[at]) at = (at + 1) & (m->atlas_slot_count - 1);
+        m->atlas_slots[at] = i + 1; m->atlas_count++;
+    }
+}
+/* Index the binding just appended (index count - 1). A table past half full
+ * doubles, and both indexes are rebuilt from the rows in order. */
+static int pv_index(sh_package_virtual_materials *m)
+{
+    int rebuild = 0;
+    if (m->binding_count > m->binding_slot_count / 2) {
+        size_t next = m->binding_slot_count ? m->binding_slot_count * 2 : 256;
+        size_t *grown = next < SIZE_MAX / sizeof(*grown) ? calloc(next, sizeof(*grown)) : NULL;
+        if (!grown) return 0;
+        free(m->binding_slots); m->binding_slots = grown; m->binding_slot_count = next; rebuild = 1;
+    }
+    if (m->atlas_count + 1 > m->atlas_slot_count / 2) {
+        size_t next = m->atlas_slot_count ? m->atlas_slot_count * 2 : 16;
+        size_t *grown = next < SIZE_MAX / sizeof(*grown) ? calloc(next, sizeof(*grown)) : NULL;
+        if (!grown) return 0;
+        free(m->atlas_slots); m->atlas_slots = grown; m->atlas_slot_count = next; rebuild = 1;
+    }
+    if (!rebuild) { pv_index_insert(m, m->binding_count - 1); return 1; }
+    memset(m->binding_slots, 0, m->binding_slot_count * sizeof(*m->binding_slots));
+    memset(m->atlas_slots, 0, m->atlas_slot_count * sizeof(*m->atlas_slots));
+    m->atlas_count = 0;
+    for (size_t i = 0; i < m->binding_count; i++) pv_index_insert(m, i);
+    return 1;
+}
 static int pv_fail(char *error, size_t capacity, const char *reason, const char *name)
 {
     if (error && capacity) snprintf(error, capacity, "%s%s%s", reason, name ? ": " : "", name ? name : "");
@@ -121,7 +189,8 @@ void sh_package_virtual_material_close(sh_package_virtual_materials *m)
         sh_virtual_page_source_release(m->bindings[i].page_source);
         pv_row_input_free(m->bindings[i].row_input);
     }
-    free(m->tables); free(m->bindings); free(m->scopes); free(m);
+    free(m->tables); free(m->bindings); free(m->scopes);
+    free(m->binding_slots); free(m->atlas_slots); free(m);
 }
 static pv_table *pv_read(sh_package_virtual_materials *m, size_t scope,
     const char *path, char *error, size_t capacity)
@@ -242,9 +311,8 @@ int sh_package_virtual_material_bind(sh_package_virtual_materials *m, size_t sco
     b.page_kind = atlas->page_kind; b.page_mode = atlas->page_mode;
     if (b.page_source && (b.page_original || (b.page_kind != 1 && b.page_kind != 2) ||
         b.page_mode < 0 || b.page_mode > 2)) goto failed;
-    for (size_t i = 0; i < m->binding_count; i++) {
-        const pv_binding *old = m->bindings + i;
-        if (old->scope != scope || strcmp(old->material, b.material)) continue;
+    for (size_t found = pv_binding_find(m, scope, b.material); found; found = 0) {
+        const pv_binding *old = m->bindings + found - 1;
         if (strcmp(old->atlas, b.atlas) || strcmp(old->source, b.source) ||
             memcmp(old->pages, b.pages, 32) || old->page_original != b.page_original ||
             old->page_kind != b.page_kind || old->page_mode != b.page_mode ||
@@ -263,16 +331,22 @@ int sh_package_virtual_material_bind(sh_package_virtual_materials *m, size_t sco
     b.original = pv_row_equal(b.record, base) && b.slot == base_slot &&
         (!b.record || atlas->original) && !b.page_source;
     if ((!pv_row_equal(b.record, base) || b.slot != base_slot) && !pv_row_input(m, &b, error, capacity)) goto failed;
-    for (size_t i = 0; b.record && i < m->binding_count; i++) {
-        const pv_binding *old = m->bindings + i;
-        if (!old->page_source && !b.page_source && old->record &&
-            !strcmp(old->atlas, b.atlas) && memcmp(old->pages, b.pages, 32)) {
+    /* Every earlier page-owning row of this atlas carries the same pages (a
+     * row that disagreed was refused), so the first of them decides. */
+    for (size_t found = b.record && !b.page_source ? pv_atlas_find(m, b.atlas) : 0; found; found = 0) {
+        const pv_binding *old = m->bindings + found - 1;
+        if (memcmp(old->pages, b.pages, 32)) {
             pv_fail(error, capacity, "resolved native atlas name has different page data", b.atlas); goto failed;
         }
     }
     if (!pv_digest(&b) || !pv_grow((void **)&m->bindings, &m->binding_capacity, m->binding_count, sizeof(*m->bindings))) goto failed;
     memcpy(semantics, b.semantics, 32); *original = b.original;
-    m->bindings[m->binding_count++] = b; return b.record != NULL;
+    m->bindings[m->binding_count++] = b;
+    if (!pv_index(m)) {
+        /* Keep the row owned by the table and report an environment failure. */
+        pv_fail(error, capacity, "cannot index scoped virtual material", material); return -1;
+    }
+    return b.record != NULL;
 failed:
     free(b.material); free(b.atlas); free(b.source); sh_virtual_page_source_release(b.page_source);
     pv_row_input_free(b.row_input);
@@ -283,20 +357,17 @@ int sh_package_virtual_material_cached(const sh_package_virtual_materials *m, si
     const char *material, unsigned char semantics[32], int *original)
 {
     if (!m || !material || !semantics || !original) return 0;
-    for (size_t i = 0; i < m->binding_count; i++) if (m->bindings[i].scope == scope &&
-        !strcmp(m->bindings[i].material, material)) {
-        memcpy(semantics, m->bindings[i].semantics, 32); *original = m->bindings[i].original; return 1;
-    }
-    return 0;
+    size_t found = pv_binding_find(m, scope, material);
+    if (!found) return 0;
+    memcpy(semantics, m->bindings[found - 1].semantics, 32); *original = m->bindings[found - 1].original; return 1;
 }
 int sh_package_virtual_material_witnesses(sh_package_virtual_materials *m, size_t scope,
     const char *material, int (*visit)(void *, const char *, const sh_compiled_resource *),
     void *context, char *error, size_t capacity)
 {
     if (!m || !material || !visit) return 0;
-    for (size_t i = 0; i < m->binding_count; i++) {
-        const pv_binding *binding = m->bindings + i;
-        if (binding->scope != scope || strcmp(binding->material, material)) continue;
+    for (size_t found = pv_binding_find(m, scope, material); found; found = 0) {
+        const pv_binding *binding = m->bindings + found - 1;
         /* This witness is the decoded selected row, not the unrelated table's
          * full byte envelope. Its owners nominate changed rows during reverse
          * discovery without changing every other material in that table. */
@@ -486,8 +557,8 @@ sh_virtual_material_view *sh_package_virtual_material_prepare(sh_package_virtual
         if (!unit->family || !unit->name || inputs->scopes[i] >= m->count) goto failed;
         if (strcmp(unit->family, "material")) continue;
         const pv_binding *found = NULL;
-        for (size_t j = 0; j < m->binding_count; j++) if (m->bindings[j].scope == inputs->scopes[i] &&
-            !strcmp(m->bindings[j].material, unit->name)) { found = m->bindings + j; break; }
+        size_t index = pv_binding_find(m, inputs->scopes[i], unit->name);
+        if (index) found = m->bindings + index - 1;
         if (!found || linked->classes.nodes[i] >= linked->classes.count || memcmp(unit->semantics, found->semantics, 32)) {
             pv_fail(error, capacity, "linked material has no captured atlas binding", unit->name); goto failed;
         }

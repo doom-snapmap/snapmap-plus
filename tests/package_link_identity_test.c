@@ -97,8 +97,34 @@ static void verified_identity(void)
     assert(strstr(error, "exact verification") && !out.identities && !out.nodes && !out.count);
 }
 
+/* Identities over a remembered shape order equal those of a full sort, both
+ * while the order is reused and after a change forces a fresh sort. */
+static void ordered_identities(void)
+{
+    enum { N = 11 };
+    sh_package_link_edge edges[N][2] = {{{"next", 1}}, {{"next", 2}}, {{"next", 0}, {"leaf", 3}},
+        {{0}}, {{"next", 5}}, {{"next", 6}}, {{"leaf", 7}, {"next", 4}}, {{0}},
+        {{"next", 8}}, {{"next", 3}}, {{"next", 0}}};
+    sh_package_link_node graph[N];
+    sh_package_link_classes plain = {0}, ordered = {0};
+    sh_package_link_order order = {0};
+    char error[256];
+    for (size_t i = 0; i < N; i++) graph[i] = node(1, edges[i], 1);
+    graph[2].edge_count = graph[6].edge_count = 2;
+    graph[3] = graph[7] = node(2, NULL, 0);
+    graph[9].content[0] = 3; graph[10].content[0] = 4;
+    for (int round = 0; round < 3; round++) {
+        if (round == 2) graph[5].content[0] = 5; /* breaks the remembered order */
+        assert(sh_package_link_identify(graph, N, &plain, error, sizeof(error)));
+        assert(sh_package_link_identify_ordered(graph, N, NULL, NULL, &order, &ordered, error, sizeof(error)));
+        assert(order.count == N && plain.count == ordered.count);
+        for (size_t i = 0; i < N; i++) assert(!memcmp(identity(&plain, i), identity(&ordered, i), 32));
+    }
+    sh_package_link_order_free(&order);
+    sh_package_link_classes_free(&plain); sh_package_link_classes_free(&ordered);
+}
 int main(void)
 {
-    stable_contexts(); long_chain(); verified_identity();
+    stable_contexts(); long_chain(); verified_identity(); ordered_identities();
     puts("package link identity tests passed"); return 0;
 }

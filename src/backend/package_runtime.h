@@ -68,6 +68,13 @@ int sh_package_runtime_refresh_activated(const char *data_root, sh_package_activ
  * same transaction, so committed resources are not reported as removed and
  * retired. Idempotent, lock-free, and cleared only by a successful rescan. */
 void sh_package_runtime_note_sources_changed(void);
+/* A published installation that no map load continues (the MPKG gate) asks
+ * the next refresh to fold its packages in as an installation does: the
+ * added packages compile alone and the retained library serves the rest. A
+ * refresh that finds any installed package removed or changed, or whose
+ * increment does not complete, compiles the whole library instead. Other
+ * refreshes always compile the whole library. */
+void sh_package_runtime_note_install_published(void);
 /* Activate private, already validated map source trees under
  * <map_source_root>/overrides; NULL restores the retained local library.
  * Map data never changes or replaces library sources. The library is rescanned
@@ -496,6 +503,10 @@ int sh_package_runtime_test_unmodified_type(uint32_t type);
 void sh_package_runtime_test_serving_key_table(sh_package_key_groups *table);
 /* Offline fixture teardown only. No engine callbacks or native game reset. */
 void sh_package_runtime_test_dispose(void);
+/* The product and game image identity keying remembered decisions, and the
+ * renderer executable whose memo holds them ("vk" by default). */
+void sh_package_runtime_test_build_identity(const char *identity);
+void sh_package_runtime_test_image_slot(const char *slot);
 #endif
 
 #endif

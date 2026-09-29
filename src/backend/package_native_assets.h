@@ -18,6 +18,38 @@ typedef struct sh_package_shader_request {
  * retains this asset handle and its exact source expectations. Retry the same
  * immutable candidate after a successful run; no source rescanning is implied. */
 size_t sh_package_native_assets_shader_pending(sh_package_native_assets *assets);
+/* An installed-library compilation brackets itself (on, then off) so the
+ * stock shader objects it needed -- those it requested native preparation for
+ * and cooked programs it read -- become a later session's preparation hint.
+ * Turning recording on starts an empty record. */
+void sh_package_native_assets_shader_record(sh_package_native_assets *assets, int on);
+/* Queue native preparation of one stock shader object an earlier session
+ * needed, before any compilation reads it: the same check a compilation makes,
+ * so a ready or already cooked object queues nothing. 1 queued, 0 nothing
+ * queued, -1 no installed original (a stale name). A hint only: compilations
+ * still verify and request exactly as without it. */
+int sh_package_native_assets_shader_prewarm(sh_package_native_assets *assets, const char *family, const char *name);
+/* The recorded compilation's needs, sorted malloc-owned "family\tname\n" lines. */
+char *sh_package_native_assets_shader_needs(sh_package_native_assets *assets);
+/* OpenGL programs cooked here name further programs through program-typed
+ * parameters; a compilation reaches those only by reading the cooked output,
+ * one level per compilation. Queue the request a compilation would make for
+ * each named program that has an installed original and no cooked binary yet,
+ * and for each parameter and flag a cooked binary checks that now needs native
+ * preparation. Returns how many were queued; names are followed once. */
+size_t sh_package_native_assets_shader_follow(sh_package_native_assets *assets);
+/* Preparation hint text. format returns header, a body digest line and needs
+ * (malloc-owned). read returns the number of entries visited, or -1 without
+ * visiting any when the text belongs to another header (renderer, game,
+ * product build or installed inventory) or is truncated or corrupt. */
+char *sh_package_shader_hint_format(const char *header, const char *needs);
+/* The framing of both: format returns header + "body <digest> <length>" line +
+ * body (malloc-owned); body returns the body inside text, or NULL when the text
+ * belongs to another header or is truncated or corrupt. */
+char *sh_package_framed_format(const char *header, const char *body);
+const char *sh_package_framed_body(const char *text, size_t length, const char *header, size_t *body_length);
+int sh_package_shader_hint_read(const char *text, size_t length, const char *header,
+    int (*visit)(void *context, const char *family, const char *name), void *context);
 /* Bracket one compilation so its shader ABI checks share one native identity
  * snapshot instead of recapturing whole managers per parameter. Each check
  * still revalidates what it read. End revalidates the snapshot and returns 0,

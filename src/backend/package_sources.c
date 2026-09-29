@@ -12,6 +12,19 @@
 
 #pragma comment(lib, "bcrypt.lib")
 
+/* One SHA-256 provider for the process. Opening a provider per digest cost
+ * more than hashing the small inputs most identities cover; the handle may
+ * create hash objects on any thread and stays open until process exit. */
+static INIT_ONCE g_ps_sha256_once = INIT_ONCE_STATIC_INIT;
+static BCRYPT_ALG_HANDLE g_ps_sha256;
+static BOOL CALLBACK ps_sha256_open(PINIT_ONCE once, PVOID parameter, PVOID *context)
+{
+    (void)once; (void)parameter; (void)context;
+    return BCryptOpenAlgorithmProvider(&g_ps_sha256, BCRYPT_SHA256_ALGORITHM, NULL, 0) >= 0;
+}
+static BCRYPT_ALG_HANDLE ps_sha256(void)
+{ return InitOnceExecuteOnce(&g_ps_sha256_once, ps_sha256_open, NULL, NULL) ? g_ps_sha256 : NULL; }
+
 typedef struct ps_scan {
     sh_package_sources *out;
     size_t file_capacity, component_capacity;
@@ -220,7 +233,7 @@ static int ps_read_to(const char *path, unsigned char **bytes, size_t limit,
         body = (unsigned char *)malloc((size_t)size.QuadPart + 1u);
         if (!body) goto done;
     }
-    if (BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_SHA256_ALGORITHM, NULL, 0) < 0 ||
+    if (!(algorithm = ps_sha256()) ||
         BCryptCreateHash(algorithm, &hash, NULL, 0, NULL, 0, 0) < 0) goto done;
     for (;;) {
         DWORD got = 0;
@@ -246,7 +259,6 @@ static int ps_read_to(const char *path, unsigned char **bytes, size_t limit,
 done:
     free(body);
     if (hash) BCryptDestroyHash(hash);
-    if (algorithm) BCryptCloseAlgorithmProvider(algorithm, 0);
     if (file != INVALID_HANDLE_VALUE) CloseHandle(file);
     return ok;
 }
@@ -299,7 +311,7 @@ int sh_package_reader_identity(void *context, uint64_t offset, uint64_t length,
     int ok = 0;
     if (!out) return 0;
     memset(out, 0, sizeof(*out));
-    if (!read || length > UINT64_MAX - offset || BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_SHA256_ALGORITHM, NULL, 0) < 0 ||
+    if (!read || length > UINT64_MAX - offset || !(algorithm = ps_sha256()) ||
         BCryptCreateHash(algorithm, &hash, NULL, 0, NULL, 0, 0) < 0) goto done;
     while (position < length) {
         size_t amount = length - position > sizeof(bytes) ? sizeof(bytes) : (size_t)(length - position);
@@ -310,7 +322,6 @@ int sh_package_reader_identity(void *context, uint64_t offset, uint64_t length,
     out->length = length; ok = 1;
 done:
     if (hash) BCryptDestroyHash(hash);
-    if (algorithm) BCryptCloseAlgorithmProvider(algorithm, 0);
     if (!ok) memset(out, 0, sizeof(*out));
     return ok;
 }
@@ -369,7 +380,7 @@ int sh_package_file_get_identity(const sh_package_file *file, sh_package_file_id
         uint64_t length = 0, total = 0;
         FILE *stream = sh_package_file_open(file, &length, NULL, 0);
         unsigned char chunk[65536];
-        int ok = stream && BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_SHA256_ALGORITHM, NULL, 0) >= 0 &&
+        int ok = stream && (algorithm = ps_sha256()) != NULL &&
             BCryptCreateHash(algorithm, &hash, NULL, 0, NULL, 0, 0) >= 0;
         while (ok && total < length) {
             size_t amount = length - total < sizeof(chunk) ? (size_t)(length - total) : sizeof(chunk);
@@ -380,7 +391,6 @@ int sh_package_file_get_identity(const sh_package_file *file, sh_package_file_id
         if (ok && BCryptFinishHash(hash, mutable->digest, sizeof(mutable->digest), 0) >= 0)
             mutable->identity_ready = 1;
         if (hash) BCryptDestroyHash(hash);
-        if (algorithm) BCryptCloseAlgorithmProvider(algorithm, 0);
         if (stream) fclose(stream);
     }
     int ok = file->identity_ready;
@@ -483,7 +493,7 @@ sh_package_file *sh_package_file_generate(const char *directory, uint64_t length
         if (GetLastError() != ERROR_FILE_EXISTS && GetLastError() != ERROR_ALREADY_EXISTS) goto done;
         free(wide); wide = NULL; free(temporary); temporary = NULL;
     }
-    if (BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_SHA256_ALGORITHM, NULL, 0) < 0 ||
+    if (!(algorithm = ps_sha256()) ||
         BCryptCreateHash(algorithm, &output.hash, NULL, 0, NULL, 0, 0) < 0 ||
         !produce(context, ps_output_write, &output, error, capacity) || output.failed ||
         output.written != length || BCryptFinishHash(output.hash, source.digest, 32, 0) < 0 ||
@@ -536,7 +546,6 @@ done:
     if (locked) ReleaseSRWLockExclusive(&publication);
     if (output.file != INVALID_HANDLE_VALUE) CloseHandle(output.file);
     if (output.hash) BCryptDestroyHash(output.hash);
-    if (algorithm) BCryptCloseAlgorithmProvider(algorithm, 0);
     sh_package_file_release(staged);
     if (owned) DeleteFileW(wide); /* Only the exact CREATE_NEW file from this call. */
     free(temporary); free(destination); free(wide); free(target); free(folder);
@@ -883,7 +892,7 @@ static int ps_fingerprints(sh_package_sources *sources)
     BCRYPT_HASH_HANDLE hash = NULL;
     size_t i, owner;
     int ok = 0;
-    if (BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_SHA256_ALGORITHM, NULL, 0) < 0) return 0;
+    if (!(algorithm = ps_sha256())) return 0;
     sources->fingerprints = (unsigned char (*)[32])calloc(sources->package_count ? sources->package_count : 1u, 32u);
     if (!sources->fingerprints) goto done;
     for (owner = 0; owner < sources->package_count; owner++) {
@@ -902,7 +911,7 @@ static int ps_fingerprints(sh_package_sources *sources)
     ok = 1;
 done:
     if (hash) BCryptDestroyHash(hash);
-    BCryptCloseAlgorithmProvider(algorithm, 0); return ok;
+    return ok;
 }
 
 static sh_package_sources *ps_inventory(const char *data_root, const char *single_root,

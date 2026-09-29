@@ -110,6 +110,15 @@ typedef struct sh_package_compile_environment {
      * to SIZE_MAX on entry. Peer conflicts, missing native metadata and failed
      * originals never select a package to discard. Strict callers omit it. */
     size_t *invalid_package;
+    /* Optional, with invalid_package; reset to 0 on entry. Set to 1 only when
+     * that decision reads the package's own bytes alone in the product's
+     * grammar: its file identities, declaration text or contribution cannot
+     * be parsed, or its descriptor states settings this build does not
+     * support. The same bytes then get the same decision for as long as this
+     * process runs (product build, game data and native reflection are fixed).
+     * Decisions involving stock or peer composition, readers, coverage or
+     * native state stay 0: they are judged again on every compile. */
+    int *invalid_own_bytes;
     /* Optional local-library report, reset to SIZE_MAX on entry: an outer
      * package whose own supplied content reaches a unit the product cannot
      * link yet (missing product coverage, or a dependency SnapMap does not ship

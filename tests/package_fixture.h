@@ -100,6 +100,15 @@ static void cleanup_resources(const char *fixture_root)
             CHECK(RemoveDirectoryA(directory));
         }
         snprintf(directory, sizeof(directory), "%s/package-cache", fixture_root);
+        /* Derived-state files the runtime keeps beside the resources. */
+        {
+            static const char *const state[] = {"own-bytes-exclusions.txt", "own-bytes-exclusions-vk.txt",
+                "own-bytes-exclusions-gl.txt", "shader-preparation-vk.txt", "shader-preparation-gl.txt"};
+            for (size_t k = 0; k < sizeof(state) / sizeof(*state); k++) {
+                snprintf(path, sizeof(path), "%s/%s", directory, state[k]);
+                if (GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES) CHECK(DeleteFileA(path));
+            }
+        }
         if (GetFileAttributesA(directory) != INVALID_FILE_ATTRIBUTES) CHECK(RemoveDirectoryA(directory));
     }
  }

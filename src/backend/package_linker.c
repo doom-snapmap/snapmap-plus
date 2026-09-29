@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 typedef struct pl_file {
     const sh_compiled_resource *resource;
@@ -19,6 +20,9 @@ typedef struct pl_unit {
     size_t implicit_count, implicit_begin;
     char **paths;
     char **names;
+    /* Restored from the reuse cache: edges and implicit hold that cache's slot
+     * strings for this pass, and only the arrays belong to the unit. */
+    int borrowed;
 } pl_unit;
 typedef struct pl_work {
     const sh_package_link_unit *units;
@@ -29,6 +33,7 @@ typedef struct pl_work {
     size_t *member_offsets, *members;
     unsigned char *originals;
     size_t count, unit, file, next_edge;
+    size_t restored; /* Diagnostics: units this pass restored from the reuse cache. */
     int replay, failed;
     sh_package_link_history *history;
     char *error;
@@ -102,8 +107,10 @@ static void pl_clear(pl_work *w)
 {
     if (w->work) for (size_t i = 0; i < w->count; i++) {
         pl_unit *u = &w->work[i];
-        for (size_t j = 0; j < u->edge_count; j++) free((char *)u->edges[j].slot);
-        for (size_t j = 0; j < u->implicit_count; j++) free((char *)u->implicit[j].slot);
+        if (!u->borrowed) {
+            for (size_t j = 0; j < u->edge_count; j++) free((char *)u->edges[j].slot);
+            for (size_t j = 0; j < u->implicit_count; j++) free((char *)u->implicit[j].slot);
+        }
         free(u->implicit);
         if (u->paths) for (size_t j = 0; j < w->units[i].file_count; j++) free(u->paths[j]);
         if (u->names) for (size_t j = 0; j < w->units[i].file_count; j++) free(u->names[j]);
@@ -127,8 +134,15 @@ typedef struct pl_reuse_unit {
 struct sh_package_link_reuse {
     pl_reuse_unit *units;
     size_t count;
+    sh_package_link_order order; /* the last identify pass's shape order */
     uint64_t *proven; /* open addressing: (left + 1) << 32 | (right + 1), 0 empty */
     size_t proven_count, proven_capacity;
+    /* Diagnostics only: the identity passes that used this cache, and the
+     * final link's member, history, assignment and projection steps. */
+    struct { size_t units, restored; unsigned long long collect_us, partition_us; } passes[16];
+    size_t pass_count;
+    unsigned long long link_us[4];
+    int linked;
 };
 static sh_package_link_edge *pl_edges_copy(const sh_package_link_edge *edges, size_t count)
 {
@@ -181,6 +195,7 @@ void sh_package_link_reuse_close(sh_package_link_reuse *reuse)
 {
     if (!reuse) return;
     for (size_t i = 0; i < reuse->count; i++) pl_reuse_unit_clear(reuse->units + i);
+    sh_package_link_order_free(&reuse->order);
     free(reuse->units); free(reuse->proven); free(reuse);
 }
 static int pl_reuse_valid(const sh_package_link_reuse *reuse, size_t unit)
@@ -247,6 +262,10 @@ static char *pl_occurrence(const pl_unit *u, size_t begin, size_t end, char *key
 static int pl_edge_add(pl_work *w, char *key, size_t target)
 {
     pl_unit *u = &w->work[w->unit];
+    /* Edges are added only while capturing the current unit (pl_collect after
+     * pl_reuse_restore declined it); replay compares. A restored unit borrows
+     * the reuse cache's slot strings and is never extended. */
+    if (u->borrowed) { free(key); return pl_fail(w, "a restored resource binding cannot gain bindings"); }
     if (u->edge_count == u->edge_capacity) {
         size_t next = u->edge_capacity ? u->edge_capacity * 2 : 8;
         sh_package_link_edge *grown;
@@ -354,6 +373,46 @@ done:
     return ok;
 }
 
+/* A first identity capture of a stable unit needs no bytes: its sites come
+ * from discovery (adapter->sites) and its identity from the compilation's own
+ * record of the resource (captured digest, sealed file or retained body), the
+ * same bytes a read would return and verify. 1 captured, 0 not stable (bind
+ * the bytes), -1 failed. */
+/* A captured file's payload identity, from the adapter's shared cache when
+ * it keeps one (sh_package_link_adapter.identity). */
+static int pl_file_identity(pl_work *w, const sh_package_link_unit *source, const sh_compiled_resource *file,
+    sh_package_file_identity *out)
+{
+    return w->adapter->identity ? w->adapter->identity(w->adapter->context, w->unit, file, out, w->error, w->capacity) :
+        sh_package_compilation_identity(source->compilation, file, out, w->error, w->capacity);
+}
+static int pl_bind_stable(pl_work *w)
+{
+    const sh_package_link_unit *source = &w->units[w->unit];
+    pl_unit *u = &w->work[w->unit];
+    pl_file *file = &u->files[w->file];
+    const sh_package_link_edge *sites = NULL; size_t count = 0;
+    sh_package_file_identity identity;
+    if (w->replay || !w->adapter->sites) return 0;
+    int supplied = w->adapter->sites(w->adapter->context, w->unit, file->resource, &sites, &count);
+    if (supplied < 0) { pl_fail(w, "resource binding sites are unavailable"); return -1; }
+    if (!supplied) return 0;
+    if (!pl_file_identity(w, source, file->resource, &identity)) {
+        pl_fail(w, "resource identity is unavailable"); return -1;
+    }
+    file->identity = identity; file->edge_begin = u->edge_count;
+    for (size_t i = 0; i < count; i++) {
+        char *key = NULL;
+        if (!sites[i].slot || !*sites[i].slot || sites[i].target >= w->count ||
+            !(key = pl_slot(file->resource->engine_path, sites[i].slot)) ||
+            !(key = pl_occurrence(u, file->edge_begin, u->edge_count, key))) {
+            pl_fail(w, "resource binding did not resolve to its scoped native identity"); return -1;
+        }
+        if (!pl_edge_add(w, key, sites[i].target)) return -1;
+    }
+    file->edge_count = u->edge_count - file->edge_begin;
+    return 1;
+}
 static unsigned char *pl_bind(pl_work *w, size_t *length, int *unchanged)
 {
     const sh_package_link_unit *source = &w->units[w->unit];
@@ -372,6 +431,28 @@ static unsigned char *pl_bind(pl_work *w, size_t *length, int *unchanged)
         w->next_edge = file->edge_begin;
     } else {
         file->identity = identity; file->edge_begin = u->edge_count;
+        if (w->adapter->sites) {
+            /* Sites the caller already bound from these bytes, in bind order:
+             * record them exactly as pl_reference would, without the walk. */
+            const sh_package_link_edge *sites = NULL; size_t count = 0;
+            int supplied = w->adapter->sites(w->adapter->context, w->unit, file->resource, &sites, &count);
+            if (supplied < 0) { pl_fail(w, "resource binding sites are unavailable"); goto done; }
+            if (supplied) {
+                for (size_t i = 0; i < count; i++) {
+                    char *key = NULL;
+                    if (!sites[i].slot || !*sites[i].slot || sites[i].target >= w->count ||
+                        !(key = pl_slot(file->resource->engine_path, sites[i].slot)) ||
+                        !(key = pl_occurrence(u, file->edge_begin, u->edge_count, key))) {
+                        pl_fail(w, "resource binding did not resolve to its scoped native identity"); goto done;
+                    }
+                    if (!pl_edge_add(w, key, sites[i].target)) goto done;
+                }
+                file->edge_count = u->edge_count - file->edge_begin;
+                if (unchanged) *unchanged = 1;
+                *length = size; bound = body; body = NULL;
+                goto done;
+            }
+        }
     }
     bound = w->adapter->bind(w->adapter->context, w->unit, file->resource,
         body, size, pl_reference, w, length, w->error, w->capacity);
@@ -424,17 +505,23 @@ static int pl_reuse_restore(pl_work *w, const sh_package_link_unit *source, pl_u
     const pl_reuse_unit *c = reuse->units + w->unit;
     if (c->file_count != source->file_count || c->witness_count != source->witness_count) return 0;
     u->files = pl_alloc(c->file_count, sizeof(*u->files));
-    u->edges = pl_edges_copy(c->edges, c->edge_count);
-    u->implicit = pl_edges_copy(c->implicit, c->implicit_count);
+    u->edges = pl_alloc(c->edge_count, sizeof(*u->edges));
+    u->implicit = pl_alloc(c->implicit_count, sizeof(*u->implicit));
     if (c->witness_count) {
         u->witnesses = pl_alloc(c->witness_count, sizeof(*u->witnesses));
         u->witness_order = pl_alloc(c->witness_count, sizeof(*u->witness_order));
     }
     if (!u->files || !u->edges || !u->implicit || (c->witness_count && (!u->witnesses || !u->witness_order))) {
-        pl_edges_free(u->edges, c->edge_count); pl_edges_free(u->implicit, c->implicit_count);
+        free(u->edges); free(u->implicit);
         free(u->files); free(u->witnesses); free(u->witness_order);
         memset(u, 0, sizeof(*u)); return 0;
     }
+    /* The cache entry cannot change or be freed during this pass: only
+     * captured (not restored) units store, and invalidation waits for the
+     * next pass's refresh. */
+    if (c->edge_count) memcpy(u->edges, c->edges, c->edge_count * sizeof(*u->edges));
+    if (c->implicit_count) memcpy(u->implicit, c->implicit, c->implicit_count * sizeof(*u->implicit));
+    u->borrowed = 1;
     memcpy(u->files, c->files, c->file_count * sizeof(*u->files));
     if (c->witness_count) {
         memcpy(u->witnesses, c->witnesses, c->witness_count * sizeof(*u->witnesses));
@@ -485,6 +572,7 @@ static int pl_collect(pl_work *w)
         sh_package_link_node *node = &w->nodes[w->unit];
         if (pl_reuse_restore(w, source, u, node)) {
             if (!pl_semantics(w, source, node)) return 0;
+            w->restored++;
             continue;
         }
         size_t manifest_size = 8, companions = 0, primary_members = 0;
@@ -519,9 +607,13 @@ static int pl_collect(pl_work *w)
             unsigned char *body;
             if (w->file && !strcmp(path, u->files[w->file - 1].resource->engine_path))
                 return pl_fail(w, "resource unit repeats a physical file");
-            body = pl_bind(w, &length, NULL);
-            if (!body) return 0;
-            free(body);
+            int stable = pl_bind_stable(w);
+            if (stable < 0) return 0;
+            if (!stable) {
+                body = pl_bind(w, &length, NULL);
+                if (!body) return 0;
+                free(body);
+            }
             if (path_size > SIZE_MAX - 48 || manifest_size > SIZE_MAX - 48 - path_size ||
                 f->identity.length > UINT64_MAX - node->length)
                 return pl_fail(w, "resource unit identity exceeds addressable size");
@@ -559,7 +651,7 @@ static int pl_collect(pl_work *w)
                 if (i && !strcmp(witness->role, u->witness_order[i - 1]->role))
                     return pl_fail(w, "resource witness repeats a native role");
                 file->resource = witness->resource;
-                if (!sh_package_compilation_identity(source->compilation, file->resource, &file->identity, w->error, w->capacity))
+                if (!pl_file_identity(w, source, file->resource, &file->identity))
                     return pl_fail(w, "resource witness identity is unavailable");
                 int available = pl_input_open_resource(w, w->unit, file, &stream);
                 if (stream.stream) fclose(stream.stream);
@@ -1559,6 +1651,29 @@ static int pl_projection_equal(pl_work *w, const sh_package_sources *sources,
     return equal ? 1 : pl_fail(w, "logical resource aliases emit different bytes at one physical path");
 }
 typedef struct pl_project_alias { const char *path, *type, *name; } pl_project_alias;
+/* A stable unit (adapter contract) whose files are all held in memory binds
+ * immutable bytes through a resolution frozen for the whole link: replaying
+ * it could only repeat its capture. */
+static int pl_project_immutable(pl_work *w, size_t unit)
+{
+    if (!w->adapter->stable || !w->adapter->stable(w->adapter->context, unit)) return 0;
+    for (size_t f = 0; f < w->units[unit].file_count; f++)
+        if (!w->work[unit].files[f].resource->body) return 0;
+    return 1;
+}
+/* Such a unit projects to its own bytes when every reference site keeps its
+ * target's name: pl_reference rewrites a site only to a different name. */
+static int pl_project_unchanged(pl_work *w, size_t unit)
+{
+    const pl_unit *u = &w->work[unit];
+    if (!pl_project_immutable(w, unit)) return 0;
+    for (size_t f = 0; f < w->units[unit].file_count; f++)
+        for (size_t e = u->files[f].edge_begin; e < u->files[f].edge_begin + u->files[f].edge_count; e++) {
+            size_t target = u->edges[e].target;
+            if (strcmp(w->output.names[w->output.classes.nodes[target]], w->units[target].name)) return 0;
+        }
+    return 1;
+}
 static int pl_project(pl_work *w, const sh_package_sources *sources, const sh_package_policy *policy,
     char *(*canonical_path)(const char *))
 {
@@ -1581,6 +1696,7 @@ static int pl_project(pl_work *w, const sh_package_sources *sources, const sh_pa
         size_t members = end - start;
         w->unit = classes->representatives[c];
         pl_unit *u = &w->work[w->unit];
+        int itself = pl_project_unchanged(w, w->unit);
         for (w->file = 0; w->file < w->units[w->unit].file_count; w->file++) {
             sh_package_resource_projection *p = &projections[used++];
             int unchanged = 0;
@@ -1597,6 +1713,7 @@ static int pl_project(pl_work *w, const sh_package_sources *sources, const sh_pa
             p->engine_path = u->paths[w->file];
             p->native_type = u->files[w->file].family;
             p->native_name = u->names ? u->names[w->file] : w->output.names[c];
+            if (itself) continue; /* Unchanged: its inputs supply the bytes. */
             p->body = pl_bind(w, &p->length, &unchanged);
             if (!p->body) goto done;
             /* Unchanged opaque files keep their immutable source/cache handle;
@@ -1607,9 +1724,10 @@ static int pl_project(pl_work *w, const sh_package_sources *sources, const sh_pa
         }
     }
     /* Equivalent sources still have independent lifetimes. Do not let a
-     * changed duplicate or unstable scope hide behind its representative. */
+     * changed duplicate or unstable scope hide behind its representative;
+     * only an immutable stable unit cannot change. */
     for (w->unit = 0; w->unit < w->count; w->unit++)
-        if (classes->representatives[classes->nodes[w->unit]] != w->unit)
+        if (classes->representatives[classes->nodes[w->unit]] != w->unit && !pl_project_immutable(w, w->unit))
             for (w->file = 0; w->file < w->units[w->unit].file_count; w->file++) {
                 size_t length = 0;
                 unsigned char *body = pl_bind(w, &length, NULL);
@@ -1684,6 +1802,33 @@ done:
     free(projections); free(aliases); return ok;
 }
 
+static unsigned long long pl_now_us(void)
+{
+    struct timespec now;
+    return timespec_get(&now, TIME_UTC) ? (unsigned long long)now.tv_sec * 1000000u + (unsigned long long)now.tv_nsec / 1000u : 0;
+}
+const char *sh_package_link_reuse_counters(const sh_package_link_reuse *reuse, char *out, size_t capacity)
+{
+    size_t used = 0;
+    if (!out || !capacity) return out;
+    *out = 0;
+    if (!reuse) return out;
+    int n = snprintf(out, capacity, "%zu identity passes", reuse->pass_count);
+    for (size_t i = 0; n > 0 && (used += (size_t)n) < capacity && i < reuse->pass_count && i < 16; i++)
+        n = snprintf(out + used, capacity - used, "%s %zu units %zu restored, collect %llu ms, partition %llu ms",
+            i ? ";" : ":", reuse->passes[i].units, reuse->passes[i].restored,
+            reuse->passes[i].collect_us / 1000u, reuse->passes[i].partition_us / 1000u);
+    return out;
+}
+const char *sh_package_link_reuse_link_steps(const sh_package_link_reuse *reuse, char *out, size_t capacity)
+{
+    if (!out || !capacity) return out;
+    *out = 0;
+    if (reuse && reuse->linked)
+        snprintf(out, capacity, "link members %llu ms, history %llu ms, assignment %llu ms, projection %llu ms",
+            reuse->link_us[0] / 1000u, reuse->link_us[1] / 1000u, reuse->link_us[2] / 1000u, reuse->link_us[3] / 1000u);
+    return out;
+}
 static int pl_identify(pl_work *w)
 {
     if ((w->count && !w->units) || !w->adapter || !w->adapter->resolve || !w->adapter->bind)
@@ -1694,13 +1839,22 @@ static int pl_identify(pl_work *w)
         return pl_fail(w, "resource identity inputs contain an unnamed unit");
     w->work = pl_alloc(w->count, sizeof(*w->work));
     w->nodes = pl_alloc(w->count, sizeof(*w->nodes));
+    unsigned long long began = pl_now_us();
     if (!w->work || !w->nodes || !pl_collect(w)) return 0;
+    unsigned long long collected = pl_now_us();
     sh_package_link_edge *edges = NULL;
     sh_package_link_node *view = pl_stable_view(w, &edges);
     if (!view) return pl_fail(w, "cannot allocate resource identity view");
-    int ok = sh_package_link_identify_verified(view, w->count, pl_verify_equal, w,
-        &w->output.classes, w->error, w->capacity);
+    int ok = sh_package_link_identify_ordered(view, w->count, pl_verify_equal, w,
+        w->adapter->reuse ? &w->adapter->reuse->order : NULL, &w->output.classes, w->error, w->capacity);
     if (view != w->nodes) free(view);
+    sh_package_link_reuse *reuse = w->adapter->reuse;
+    if (reuse && reuse->pass_count < 16) {
+        reuse->passes[reuse->pass_count].units = w->count; reuse->passes[reuse->pass_count].restored = w->restored;
+        reuse->passes[reuse->pass_count].collect_us = collected - began;
+        reuse->passes[reuse->pass_count].partition_us = pl_now_us() - collected;
+    }
+    if (reuse) reuse->pass_count++;
     free(edges); return ok;
 }
 
@@ -1736,8 +1890,21 @@ int sh_package_link(const sh_package_sources *sources, const sh_package_link_uni
     if (!sources || (count && !units) || !adapter || !adapter->resolve || !adapter->bind || !adapter->assign ||
         (adapter->registry && !adapter->registry->check) || (adapter->history && !adapter->registry))
         goto done;
-    if (!pl_identify(&w) || !pl_members(&w) || !pl_history_prepare(&w) || !pl_assign(&w) ||
-        !pl_project(&w, sources, policy, canonical_path)) goto done;
+    unsigned long long steps[5];
+    if (!pl_identify(&w)) goto done;
+    steps[0] = pl_now_us();
+    if (!pl_members(&w)) goto done;
+    steps[1] = pl_now_us();
+    if (!pl_history_prepare(&w)) goto done;
+    steps[2] = pl_now_us();
+    if (!pl_assign(&w)) goto done;
+    steps[3] = pl_now_us();
+    if (!pl_project(&w, sources, policy, canonical_path)) goto done;
+    steps[4] = pl_now_us();
+    if (adapter->reuse) {
+        for (int i = 0; i < 4; i++) adapter->reuse->link_us[i] = steps[i + 1] - steps[i];
+        adapter->reuse->linked = 1;
+    }
     if (w.history) {
         sh_package_link_history previous = *adapter->history;
         *adapter->history = *w.history; *w.history = previous;

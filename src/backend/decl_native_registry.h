@@ -31,6 +31,12 @@ typedef struct sh_decl_reference {
 sh_decl_native_registry *sh_decl_native_registry_open(sh_decl_registry_source source,
     char *error, size_t error_capacity);
 void sh_decl_native_registry_close(sh_decl_native_registry *registry);
+/* Emit every manager fact source resolution reads from this registry: each
+ * manager's type and class names and its parent's index, in manager order.
+ * Loaded declaration objects are not included; source resolution reads none.
+ * 1 when every emit succeeded. */
+int sh_decl_native_registry_digest(const sh_decl_native_registry *registry,
+    int (*emit)(void *context, const void *bytes, size_t length), void *context);
 
 /* Resolve a serialized declaration type to its registered native class using
  * copied metadata only. Does not inspect or load declaration objects. Returns

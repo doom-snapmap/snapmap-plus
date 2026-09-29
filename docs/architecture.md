@@ -1491,6 +1491,33 @@ it unsuccessfully. Completion runs once after request cleanup. The caller cannot
 queue another reload while that request is outstanding. A synchronous zero
 return without an actual map parse is also a failed reload, not success.
 
+### Reuse between compiles
+
+A process compiles the installed library once when it starts. An installation
+admitted through a map's prompt or the legacy install gate extends that library
+in place: the new packages compile in isolated authoring contexts and publish
+with the unchanged library, so the next map transition does not rebuild it. A
+newly installed package that fails on its own bytes is left out the same way.
+Shared editor declarations a new package brings are served under private aliases
+until the next full scan; gameplay identities match a full scan's. A failed
+increment falls back to a full rescan at the next safe boundary.
+
+Within a process, the source facts a compile read (bindings and reader results
+per input) are kept and replayed by later compiles only after each input is
+validated afresh: original bytes are hashed again and the catalog, native
+registry and schema digests compared. Readers of native shader state are never
+replayed.
+
+A start prepares ahead the shader objects the previous start of the same
+renderer, product build, game image and installed inventory needed. A failing
+compile first collects every pending native preparation and every package that
+fails on its own bytes, so a first start needs at most one failed attempt.
+Packages rejected on their own bytes are remembered per renderer executable for
+the same product and game images and package tree, and later starts leave them
+out without compiling them. Hints and remembered exclusions live in
+`package-cache`; a mismatched, truncated or corrupt file is ignored and the
+compile decides afresh.
+
 `decl_server.h`, `overrides.h`, `resource_bridge.h`, `strids.h` and `map_package.h`
 define the detailed contracts.
 

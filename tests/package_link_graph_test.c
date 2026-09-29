@@ -233,8 +233,134 @@ static void positive_fingerprint_verification(void)
     sh_package_link_classes_free(&out);
 }
 
+/* A remembered shape order gives the same partition as a full
+ * sort: reused while it still sorts the nodes, replaced when a change breaks
+ * it, ignored when it is not a permutation of these nodes. */
+static void same_identities(const sh_package_link_classes *a, const sh_package_link_classes *b, size_t count)
+{
+    assert(a->count == b->count && a->node_count == count && b->node_count == count);
+    for (size_t i = 0; i < count; i++) {
+        for (size_t j = 0; j < count; j++) assert((a->nodes[i] == a->nodes[j]) == (b->nodes[i] == b->nodes[j]));
+    }
+}
+static void ordered_passes(void)
+{
+    sh_package_link_edge edges[] = {{"model", 1}, {"material", 2}, {"model", 4}, {"material", 5},
+        {"model", 7}, {"material", 8}};
+    sh_package_link_node graph[9];
+    sh_package_link_classes plain = {0}, ordered = {0};
+    sh_package_link_order order = {0};
+    char error[256];
+    for (size_t i = 0; i < 3; i++) {
+        graph[i * 3] = node("entityDef", "props/stone", 1, &edges[i * 2], 1);
+        graph[i * 3 + 1] = node("model", "models/stone", 2, &edges[i * 2 + 1], 1);
+        graph[i * 3 + 2] = node("material", "materials/stone", i == 1 ? 4 : 3, NULL, 0);
+    }
+    graph[8].content[0] = 5; /* materials 2, 5, 8 remembered in content order 3, 4, 5 */
+    assert(sh_package_link_equivalence(graph, 9, &plain, error, sizeof(error)));
+    assert(sh_package_link_equivalence_ordered(graph, 9, NULL, NULL, &order, &ordered, error, sizeof(error)));
+    assert(order.count == 9 && order.items);
+    same_identities(&plain, &ordered, 9);
+    /* Reused unchanged. */
+    size_t kept[9]; memcpy(kept, order.items, sizeof(kept));
+    assert(sh_package_link_equivalence_ordered(graph, 9, NULL, NULL, &order, &ordered, error, sizeof(error)));
+    same_identities(&plain, &ordered, 9);
+    assert(!memcmp(kept, order.items, sizeof(kept)));
+    /* A content change that breaks the remembered order: material 8 now equals
+     * material 2, with material 5 between them in the old order. Sorted afresh,
+     * so both pairs (materials 2/8 and their entities 0/6) share classes. */
+    graph[8].content[0] = 3;
+    assert(sh_package_link_equivalence(graph, 9, &plain, error, sizeof(error)));
+    assert(sh_package_link_equivalence_ordered(graph, 9, NULL, NULL, &order, &ordered, error, sizeof(error)));
+    same_identities(&plain, &ordered, 9);
+    assert(plain.nodes[2] == plain.nodes[8] && plain.nodes[0] == plain.nodes[6] && plain.nodes[2] != plain.nodes[5]);
+    /* Not a permutation of these nodes: ignored. */
+    for (size_t i = 0; i < 9; i++) order.items[i] = 0;
+    assert(sh_package_link_equivalence_ordered(graph, 9, NULL, NULL, &order, &ordered, error, sizeof(error)));
+    same_identities(&plain, &ordered, 9);
+    /* A hint for another node count is ignored and replaced. */
+    order.count = 4;
+    assert(sh_package_link_equivalence_ordered(graph, 9, NULL, NULL, &order, &ordered, error, sizeof(error)));
+    same_identities(&plain, &ordered, 9);
+    assert(order.count == 9);
+    sh_package_link_order_free(&order);
+    sh_package_link_classes_free(&plain); sh_package_link_classes_free(&ordered);
+}
+/* Reused orders over several passes, against an independent oracle: equal
+ * strings at distinct addresses, several families and paths, edges in any
+ * slot order (sorted only when not already sorted), and changes between
+ * passes that keep, break or shuffle the remembered order. Every pass must
+ * give exactly the classes an unordered partition gives. */
+static void randomized_ordered(void)
+{
+    enum { N = 40, EDGES = 3 };
+    static const char *const families[] = {"entitydef", "material", "model"};
+    static const char *const paths[] = {"a/x", "a/y", "b/x", "b/xy", "c"};
+    static const char *const slots[] = {"k:edit/k:model", "k:edit/k:target", "k:inherit", "k:edit/k:material"};
+    char names[N][2][16];
+    for (unsigned run = 0; run < 60; run++) {
+        sh_package_link_edge edges[N][EDGES];
+        sh_package_link_node graph[N];
+        sh_package_link_order order = {0};
+        char error[256];
+        for (size_t i = 0; i < N; i++) {
+            size_t count = next_random() % (EDGES + 1), first = next_random() % 4;
+            snprintf(names[i][0], sizeof(names[i][0]), "%s", families[next_random() % 3]);
+            snprintf(names[i][1], sizeof(names[i][1]), "%s", paths[next_random() % 5]);
+            graph[i] = node(names[i][0], names[i][1], (unsigned char)(next_random() % 2), edges[i], count);
+            for (size_t k = 0; k < count; k++)
+                edges[i][k] = (sh_package_link_edge){slots[(first + k) % 4], next_random() % N};
+        }
+        for (int pass = 0; pass < 5; pass++) {
+            sh_package_link_classes plain = {0}, ordered = {0};
+            unsigned char equal[N][N], previous[N][N];
+            int changed;
+            if (pass) {
+                /* Change contents, shuffle one node's slot order, retarget an edge. */
+                size_t a = next_random() % N, b = next_random() % N, c = next_random() % N;
+                graph[a].content[0] ^= (unsigned char)(pass & 1);
+                if (graph[b].edge_count > 1) {
+                    sh_package_link_edge swap = edges[b][0];
+                    edges[b][0] = edges[b][graph[b].edge_count - 1]; edges[b][graph[b].edge_count - 1] = swap;
+                }
+                if (graph[c].edge_count) edges[c][0].target = next_random() % N;
+            }
+            for (size_t i = 0; i < N; i++) for (size_t j = 0; j < N; j++) {
+                const sh_package_link_node *x = graph + i, *y = graph + j;
+                int same = shape_equal(x, y);
+                for (size_t k = 0; same && k < x->edge_count; k++) {
+                    size_t m = 0;
+                    while (m < y->edge_count && strcmp(x->edges[k].slot, y->edges[m].slot)) m++;
+                    same = m < y->edge_count;
+                }
+                equal[i][j] = (unsigned char)same;
+            }
+            do {
+                changed = 0; memcpy(previous, equal, sizeof(equal));
+                for (size_t i = 0; i < N; i++) for (size_t j = 0; j < N; j++) if (previous[i][j]) {
+                    for (size_t k = 0; k < graph[i].edge_count; k++) {
+                        size_t m = 0;
+                        while (strcmp(graph[i].edges[k].slot, graph[j].edges[m].slot)) m++;
+                        if (!previous[graph[i].edges[k].target][graph[j].edges[m].target]) { equal[i][j] = 0; changed = 1; break; }
+                    }
+                }
+            } while (changed);
+            assert(sh_package_link_equivalence(graph, N, &plain, error, sizeof(error)));
+            assert(sh_package_link_equivalence_ordered(graph, N, NULL, NULL, &order, &ordered, error, sizeof(error)));
+            for (size_t i = 0; i < N; i++) for (size_t j = 0; j < N; j++) {
+                assert((plain.nodes[i] == plain.nodes[j]) == equal[i][j]);
+                assert((ordered.nodes[i] == ordered.nodes[j]) == equal[i][j]);
+            }
+            assert(plain.count == ordered.count && order.count == N);
+            sh_package_link_classes_free(&plain); sh_package_link_classes_free(&ordered);
+        }
+        sh_package_link_order_free(&order);
+    }
+}
 int main(void)
 {
+    ordered_passes();
+    randomized_ordered();
     variants(); cycles(); edge_order_and_failures(); randomized(); deep_dependency_change(); original_cycles();
     positive_fingerprint_verification();
     puts("package_link_graph_test: PASS");

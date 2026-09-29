@@ -747,6 +747,51 @@ static int link_original(void *context, const char *path, unsigned char **body, 
 }
 static int link_original_binding(void *context, size_t scope, const char *family, const char *name,
     unsigned char semantics[32], char *error, size_t capacity);
+/* Discovery records each captured file's reference sites so the first
+ * identity capture need not walk it again. For every such file they must be
+ * exactly what bind_file reports: the same slots, in order, resolved to the
+ * same frozen units. */
+typedef struct site_record {
+    sh_package_source_link *source;
+    size_t unit, seen, count;
+    const sh_package_link_edge *expected;
+    int mismatch;
+} site_record;
+static int site_reference(void *context, const char *slot, const char *family, const char *name,
+    const char **replacement)
+{
+    site_record *r = context; size_t target = SIZE_MAX; char error[256];
+    *replacement = NULL;
+    if (!sh_package_source_link_resolve_unit(r->source, r->unit, family, name, &target, error, sizeof(error))) {
+        r->mismatch = 1; return -1;
+    }
+    if (r->seen >= r->count || strcmp(r->expected[r->seen].slot, slot) || r->expected[r->seen].target != target)
+        r->mismatch = 1;
+    r->seen++; return 0;
+}
+static void assert_discovered_sites(sh_package_source_link *source)
+{
+    const sh_package_link_inputs *inputs = sh_package_source_link_inputs(source);
+    size_t checked = 0;
+    for (size_t u = 0; u < inputs->count; u++) for (size_t f = 0; f < inputs->units[u].file_count; f++) {
+        const sh_compiled_resource *file = inputs->units[u].files[f];
+        const sh_package_link_edge *sites = NULL; size_t count = 0, length = 0, bound_length = 0;
+        char error[512];
+        if (!sh_package_source_link_sites(source, u, file, &sites, &count)) continue;
+        unsigned char *body = sh_package_compilation_read(inputs->units[u].compilation, file, SIZE_MAX,
+            &length, error, sizeof(error));
+        assert(body);
+        site_record r = {source, u, 0, count, sites, 0};
+        unsigned char *bound = sh_package_source_link_bind_file(source, u, file, body, length,
+            site_reference, &r, &bound_length, error, sizeof(error));
+        if (!bound || r.mismatch || r.seen != count)
+            fprintf(stderr, "discovered sites differ: %s/%s %s (%zu of %zu) %s\n", inputs->units[u].family,
+                inputs->units[u].name, file->engine_path, r.seen, count, bound ? "" : error);
+        assert(bound && !r.mismatch && r.seen == count);
+        free(body); free(bound); checked++;
+    }
+    assert(checked);
+}
 static void test_atlas_sources(fixture *native, sh_decl_registry_source registry)
 {
     const char *material = "{ transAtlasMap \"textures/atlas/private.tga\"\n }";
@@ -768,7 +813,7 @@ static void test_atlas_sources(fixture *native, sh_decl_registry_source registry
     sh_package_source_link *source = sh_package_source_link_open(scopes, 3, NULL,
         link_original, &f, registry, (uintptr_t)native->reflection, &admission, error, sizeof(error));
     if (!source) fprintf(stderr, "atlas sources: %s\n", error);
-    assert(source); f.inputs = sh_package_source_link_inputs(source);
+    assert(source); f.inputs = sh_package_source_link_inputs(source); assert_discovered_sites(source);
     sh_package_link_adapter names = {(void *)f.inputs, NULL, NULL, sh_package_native_names_assign};
     int ok = sh_package_source_link_compile(source, &inventory, &names, NULL, NULL, &out, error, sizeof(error));
     if (!ok) fprintf(stderr, "atlas compile: %s\n", error);
@@ -896,7 +941,7 @@ static void test_af_link(fixture *native, sh_decl_registry_source registry)
     source = sh_package_source_link_open(scopes, 3, NULL, link_original, &f,
         registry, (uintptr_t)native->reflection, &admission, error, sizeof(error));
     if (!source) fprintf(stderr, "AF source link: %s\n", error);
-    assert(source); f.inputs = sh_package_source_link_inputs(source);
+    assert(source); f.inputs = sh_package_source_link_inputs(source); assert_discovered_sites(source);
     for (size_t i = 0; i < 3; i++) {
         roots[i] = sh_package_link_inputs_find(f.inputs, i, "articulatedfigure", "figure");
         materials[i] = sh_package_link_inputs_find(f.inputs, i, "material", "body");
@@ -989,7 +1034,7 @@ static void test_breakable_link(fixture *native, sh_decl_registry_source registr
         source = sh_package_source_link_open(scopes, 3, NULL, link_original, &f,
             registry, (uintptr_t)native->reflection, &admission, error, sizeof(error));
         if (!source) fprintf(stderr, "breakable source link: %s\n", error);
-        assert(source); f.inputs = sh_package_source_link_inputs(source);
+        assert(source); f.inputs = sh_package_source_link_inputs(source); assert_discovered_sites(source);
         sh_package_link_adapter names = {(void *)f.inputs, NULL, NULL, sh_package_native_names_assign};
         for (size_t i = 0; i < 3; i++) {
             roots[i] = sh_package_link_inputs_find(f.inputs, i, "breakable", "part");
@@ -1032,7 +1077,7 @@ static void test_breakable_link(fixture *native, sh_decl_registry_source registr
         compiled[0].resources = files[0] + 1; compiled[0].resource_count = 2;
         source = sh_package_source_link_open(scopes, 1, NULL, link_original, &f,
             registry, (uintptr_t)native->reflection, &admission, error, sizeof(error));
-        assert(source); f.inputs = sh_package_source_link_inputs(source); names.context = (void *)f.inputs;
+        assert(source); f.inputs = sh_package_source_link_inputs(source); names.context = (void *)f.inputs; assert_discovered_sites(source);
         assert(sh_package_link_inputs_find(f.inputs, 0, "discreteanimation", physical) != SIZE_MAX);
         assert(sh_package_source_link_compile(source, &inventory, &names, NULL, NULL, &out, error, sizeof(error)));
         assert(out.classes.count == 3 && out.compiled->resource_count == 3);
@@ -1098,7 +1143,7 @@ static void test_particle_link(void)
         sh_package_source_link *source = sh_package_source_link_open(scopes, 3, NULL, link_original, &f,
             registry, (uintptr_t)native.reflection, &admission, error, sizeof(error));
         if (!source) fprintf(stderr, "particle source link: %s\n", error);
-        assert(source); f.inputs = sh_package_source_link_inputs(source);
+        assert(source); f.inputs = sh_package_source_link_inputs(source); assert_discovered_sites(source);
         sh_package_link_adapter adapter = {(void *)f.inputs, NULL, NULL, sh_package_native_names_assign};
         for (size_t i = 0; i < 3; i++) {
             roots[i] = sh_package_link_inputs_find(f.inputs, i, "entitydef", "particle-root");
@@ -1134,7 +1179,7 @@ static void test_particle_link(void)
         compiled[0].resources = files[0] + 1; compiled[0].resource_count = 1;
         source = sh_package_source_link_open(scopes, 1, NULL, link_original, &f,
             registry, (uintptr_t)native.reflection, &admission, error, sizeof(error));
-        assert(source); f.inputs = sh_package_source_link_inputs(source); adapter.context = (void *)f.inputs;
+        assert(source); f.inputs = sh_package_source_link_inputs(source); adapter.context = (void *)f.inputs; assert_discovered_sites(source);
         assert(sh_package_link_inputs_find(f.inputs, 0, "staticparticlemodel", physical + 10) != SIZE_MAX);
         assert(sh_package_source_link_compile(source, &inventory, &adapter, NULL, NULL, &out, error, sizeof(error)));
         assert(out.compiled->resource_count == 1);
@@ -1185,7 +1230,7 @@ static void test_animation_web_link(fixture *native, sh_decl_registry_source reg
         source = sh_package_source_link_open(scopes, 3, NULL, link_original, &f,
             registry, (uintptr_t)native->reflection, &admission, error, sizeof(error));
         if (!source) fprintf(stderr, "animation web source: %s\n", error);
-        assert(source); f.inputs = sh_package_source_link_inputs(source);
+        assert(source); f.inputs = sh_package_source_link_inputs(source); assert_discovered_sites(source);
         sh_package_link_adapter names = {(void *)f.inputs, NULL, NULL, sh_package_native_names_assign};
         for (size_t i = 0; i < 3; i++) {
             roots[i] = sh_package_link_inputs_find(f.inputs, i, "animweb", "composite");
@@ -1519,6 +1564,430 @@ static void test_implicit_source_link(fixture *native, sh_decl_registry_source r
     assert(!strcmp((const char *)files[0][1].body, root));
 }
 
+/* ---- Discovery replay ------------------------------------------------------
+ * Every scope rediscovers the stock units it reaches. A unit whose files are
+ * all unsupplied originals replays the reads of its first valid discovery when
+ * its scope supplies none of the paths that discovery looked up. Replay is an
+ * optimization only: with it off the same scopes give the same inputs, sites,
+ * payload identities, classes, names and outputs; native callbacks run for
+ * every unit either way, and each scope keeps its own bindings. */
+enum { REPLAY_PLAIN, REPLAY_ROOT, REPLAY_MOD, REPLAY_PARENT, REPLAY_LATE, REPLAY_SCOPES };
+typedef struct replay_calls { char entries[256][96]; size_t count; } replay_calls;
+static int replay_implicit(void *context, size_t scope, int observing, const sh_package_link_unit *unit,
+    int (*visit)(void *, const char *, const char *, const char *), void *visitor, char *error, size_t capacity)
+{
+    replay_calls *calls = context;
+    (void)observing; (void)visit; (void)visitor; (void)error; (void)capacity;
+    assert(calls->count < 256);
+    snprintf(calls->entries[calls->count++], sizeof(calls->entries[0]), "%zu %s %s", scope, unit->family, unit->name);
+    return 1;
+}
+/* The child's class, and so which of its fields are references, comes from
+ * its parent. Its target and modifier names are checked for a source in the
+ * scope (the modifier is absent from stock: the engine defaults it unless the
+ * scope supplies one). The beast's md6 parent resolves by name with no source
+ * lookup, so a scope changing that parent still replays the beast. */
+/* test_source_memo changes stock bytes behind the same reader callback: the
+ * child's own declaration, and the label render parameter a material reads. */
+static int g_replay_child_changed, g_replay_label_texture;
+static const char *replay_stock(const char *path)
+{
+    if (!strcmp(path, "generated/decls/entitydef/replay/child.decl"))
+        return g_replay_child_changed ?
+            "{ inherit = \"replay/parent\"; edit = { target = \"parent-only\"; modifier = \"replay/mod\"; "
+            "alternate = \"replay/other\"; } }" :
+            "{ inherit = \"replay/parent\"; edit = { target = \"root\"; modifier = \"replay/mod\"; "
+            "alternate = \"replay/other\"; } }";
+    if (g_replay_label_texture && !strcmp(path, "generated/decls/renderparm/label.decl"))
+        return "{ Tex2D textures/default/body }";
+    if (!strcmp(path, "generated/decls/entitydef/replay/parent.decl") ||
+        !strcmp(path, "generated/decls/entitydef/replay/other.decl") ||
+        !strcmp(path, "generated/decls/entitydef/root.decl")) return "{ class = \"Entity\"; edit = {} }";
+    if (!strcmp(path, "generated/decls/md6def/replay/beast.decl"))
+        return "{ init { inherit \"replay/base\" calcRefBoundsFromJoints 1 } }";
+    if (!strcmp(path, "generated/decls/md6def/replay/base.decl")) return "{ init { calcRefBoundsFromJoints 1 } }";
+    return NULL;
+}
+static int replay_original(void *context, const char *path, unsigned char **body, size_t *length)
+{
+    const char *text = replay_stock(path);
+    if (!text) return link_original(context, path, body, length);
+    ((source_link_fixture *)context)->reads++;
+    *length = strlen(text); *body = (unsigned char *)_strdup(text); return *body ? 1 : -1;
+}
+static int replay_owners_same(const sh_package_owners *a, const sh_package_owners *b)
+{
+    for (size_t i = 0; i < 256; i++) if (sh_package_owners_contains(a, i) != sh_package_owners_contains(b, i)) return 0;
+    return 1;
+}
+static int replay_path_order(const void *a, const void *b)
+{ return strcmp(((const sh_compiled_resource *)a)->engine_path, ((const sh_compiled_resource *)b)->engine_path); }
+typedef struct replay_run {
+    sh_package_source_link *source;
+    sh_package_link_output out;
+    replay_calls calls;
+    source_link_fixture link;
+} replay_run;
+static void replay_open_memo(fixture *native, sh_decl_registry_source registry, const sh_package_compilation *const *scopes,
+    sh_package_sources *inventory, int replay, sh_package_source_memo *memo, replay_run *run)
+{
+    char error[1024];
+    sh_package_source_link_native natives = {0};
+    memset(run, 0, sizeof(*run)); run->link.native = native;
+    natives.context = &run->calls; natives.implicit = replay_implicit; natives.memo = memo;
+    sh_package_source_link_replay(replay);
+    run->source = sh_package_source_link_open(scopes, REPLAY_SCOPES, NULL, replay_original, &run->link,
+        registry, (uintptr_t)native->reflection, &natives, error, sizeof(error));
+    sh_package_source_link_replay(1);
+    if (!run->source) fprintf(stderr, "replay source link (%s): %s\n", replay ? "on" : "off", error);
+    assert(run->source); run->link.inputs = sh_package_source_link_inputs(run->source);
+    sh_package_link_adapter adapter = {&run->link, NULL, NULL, link_assign};
+    int linked = sh_package_source_link_compile(run->source, inventory, &adapter, NULL, NULL, &run->out, error, sizeof(error));
+    if (!linked) fprintf(stderr, "replay source compile (%s): %s\n", replay ? "on" : "off", error);
+    assert(linked);
+}
+static void replay_open(fixture *native, sh_decl_registry_source registry, const sh_package_compilation *const *scopes,
+    sh_package_sources *inventory, int replay, replay_run *run)
+{ replay_open_memo(native, registry, scopes, inventory, replay, NULL, run); }
+static void replay_close(replay_run *run)
+{
+    sh_package_link_output_free(&run->out); sh_package_source_link_close(run->source); free(run);
+}
+/* Inputs (files, bytes, sites, identities, implicit requests, semantics,
+ * ownership), classes, names, outputs, native calls and original reads. */
+static void replay_same(const replay_run *a, const replay_run *b)
+{
+    const sh_package_link_inputs *x = a->link.inputs, *y = b->link.inputs;
+    assert(x->count == y->count);
+    for (size_t i = 0; i < x->count; i++) {
+        const sh_package_link_unit *u = x->units + i, *v = y->units + i;
+        assert(x->scopes[i] == y->scopes[i] && !strcmp(u->family, v->family) && !strcmp(u->name, v->name));
+        assert(u->file_count == v->file_count && u->original_binding == v->original_binding &&
+            !memcmp(u->semantics, v->semantics, 32) && u->witness_count == v->witness_count &&
+            u->implicit_count == v->implicit_count && u->stable_name == v->stable_name && u->fixed_name == v->fixed_name);
+        assert(replay_owners_same(u->implicit_owners, v->implicit_owners) &&
+            replay_owners_same(u->implicit_gameplay_owners, v->implicit_gameplay_owners));
+        for (size_t k = 0; k < u->implicit_count; k++)
+            assert(!strcmp(u->implicit[k].slot, v->implicit[k].slot) && u->implicit[k].target == v->implicit[k].target);
+        for (size_t j = 0; j < u->file_count; j++) {
+            const sh_compiled_resource *p = u->files[j], *q = v->files[j];
+            const sh_package_link_edge *ps = NULL, *qs = NULL; size_t pc = 0, qc = 0;
+            sh_package_file_identity pi, qi;
+            assert(!strcmp(p->engine_path, q->engine_path) && p->body_length == q->body_length &&
+                (!p->body_length || !memcmp(p->body, q->body, p->body_length)));
+            assert(sh_package_source_link_sites(a->source, i, p, &ps, &pc) == sh_package_source_link_sites(b->source, i, q, &qs, &qc));
+            assert(pc == qc);
+            for (size_t k = 0; k < pc; k++) assert(!strcmp(ps[k].slot, qs[k].slot) && ps[k].target == qs[k].target);
+            assert(sh_package_source_link_identity(a->source, i, p, &pi, NULL, 0) &&
+                sh_package_source_link_identity(b->source, i, q, &qi, NULL, 0) && !memcmp(&pi, &qi, sizeof(pi)));
+        }
+    }
+    const sh_package_link_output *m = &a->out, *n = &b->out;
+    assert(m->classes.count == n->classes.count && m->classes.node_count == n->classes.node_count);
+    assert(!memcmp(m->classes.nodes, n->classes.nodes, m->classes.node_count * sizeof(*m->classes.nodes)));
+    assert(!m->classes.identities == !n->classes.identities);
+    if (m->classes.identities) assert(!memcmp(m->classes.identities, n->classes.identities, m->classes.count * 32));
+    for (size_t i = 0; i < m->classes.count; i++) assert(!strcmp(m->names[i], n->names[i]));
+    assert(m->compiled->resource_count == n->compiled->resource_count && m->implicit_count == n->implicit_count);
+    for (size_t i = 0; i < m->compiled->resource_count; i++) {
+        const sh_compiled_resource *p = m->compiled->resources + i, *q = n->compiled->resources + i;
+        assert(!strcmp(p->engine_path, q->engine_path) && !strcmp(p->type ? p->type : "", q->type ? q->type : "") &&
+            !strcmp(p->name ? p->name : "", q->name ? q->name : ""));
+        assert(p->body_length == q->body_length && (!p->body_length || !memcmp(p->body, q->body, p->body_length)));
+        assert(p->bound_dependency_count == q->bound_dependency_count);
+        for (size_t k = 0; k < p->bound_dependency_count; k++) assert(!strcmp(p->bound_dependencies[k], q->bound_dependencies[k]));
+        assert(replay_owners_same(&p->owners, &q->owners) && replay_owners_same(&p->gameplay_owners, &q->gameplay_owners));
+        assert(p->native_original == q->native_original && p->baseline_known == q->baseline_known);
+    }
+    for (size_t i = 0; i < m->implicit_count; i++)
+        assert(m->implicit[i].owner == n->implicit[i].owner && m->implicit[i].target == n->implicit[i].target &&
+            !strcmp(m->implicit[i].slot, n->implicit[i].slot));
+    assert(a->calls.count == b->calls.count);
+    for (size_t i = 0; i < a->calls.count; i++) assert(!strcmp(a->calls.entries[i], b->calls.entries[i]));
+    assert(a->link.reads == b->link.reads);
+}
+/* 1 when one of unit's files binds scope's family/name. */
+static int replay_edge(const replay_run *run, size_t unit, size_t scope, const char *family, const char *name)
+{
+    const sh_package_link_unit *u = run->link.inputs->units + unit;
+    size_t target = sh_package_link_inputs_find(run->link.inputs, scope, family, name);
+    for (size_t j = 0; target != SIZE_MAX && j < u->file_count; j++) {
+        const sh_package_link_edge *sites = NULL; size_t count = 0;
+        if (!sh_package_source_link_sites(run->source, unit, u->files[j], &sites, &count)) continue;
+        for (size_t k = 0; k < count; k++) if (sites[k].target == target) return 1;
+    }
+    return 0;
+}
+static void replay_counts(const replay_run *run, size_t *replayed, size_t *recorded, size_t *declined)
+{
+    char counters[512]; size_t units = 0;
+    sh_package_source_link_counters(run->source, counters, sizeof(counters));
+    assert(sscanf(counters, "source link %zu units discovered, %zu replayed from another scope (%zu recorded, %zu declined)",
+        &units, replayed, recorded, declined) == 4 && units);
+}
+/* File binds of a capture, replays of an earlier capture's recordings, and
+ * what became of the memo ("kept", "renewed", "busy" or "unused"). */
+static void memo_counts(const replay_run *run, size_t *binds, size_t *retained, char memo[16])
+{
+    char counters[1024]; const char *at;
+    sh_package_source_link_counters(run->source, counters, sizeof(counters));
+    at = strstr(counters, "); ");
+    assert(at && sscanf(at, "); %zu file binds", binds) == 1);
+    at = strstr(counters, " ms; ");
+    assert(at && sscanf(at, " ms; %zu replayed from earlier compiles (memo %15[a-z])", retained, memo) == 2);
+}
+/* Separate captures sharing one memo (sh_package_source_memo), each checked
+ * against a capture of the same inputs without it (replay_same: inputs, bytes,
+ * sites, identities, classes, outputs, native calls, original reads). An
+ * unchanged capture rebinds nothing. An edited, added or removed supplied file
+ * rebinds only the readers that read it. A stock original, or a renderparm
+ * declaration a material reads, changing behind the same reader callback and
+ * the same (absent) catalog is read and bound afresh. Native reflection
+ * changing at the same addresses renews the memo, and so does changing back. */
+static void test_source_memo(fixture *native, sh_decl_registry_source registry)
+{
+    const char *seed = "{ class = \"Entity\"; edit = { target = \"replay/child\"; } }";
+    const char *figure = "{ init { inherit \"replay/beast\" } }";
+    const char *root = "{ class = \"Entity\"; edit = { target = \"parent-only\"; } }";
+    const char *base = "{ init { calcRefBoundsFromJoints 0 } }";
+    const char *modifier = "{ edit = { target = \"parent-only\"; } }";
+    const char *alternate = "{ class = \"AlternateEntity\"; edit = {} }";
+    const char *edited = "{ class = \"Entity\"; edit = {} }";
+    const char *skin = "{ tex image/snap label image/body\n}";
+    const char *extra = "{ class = \"Entity\"; edit = { target = \"parent-only\"; } }";
+    sh_package_sources inventory = {0};
+    sh_compiled_resource files[REPLAY_SCOPES][8];
+    sh_package_compilation compiled[REPLAY_SCOPES];
+    const sh_package_compilation *scopes[REPLAY_SCOPES];
+    sh_package_source_memo *memo = sh_package_source_memo_open();
+    assert(memo);
+    memset(compiled, 0, sizeof(compiled));
+    for (size_t i = 0; i < REPLAY_SCOPES; i++) {
+        size_t count = 0;
+        files[i][count++] = link_decl("replay/seed", "generated/decls/entitydef/replay/seed.decl", seed);
+        files[i][count] = link_decl("replay/figure", "generated/decls/md6def/replay/figure.decl", figure);
+        files[i][count++].type = "md6def";
+        if (i == REPLAY_ROOT) {
+            files[i][count++] = link_decl("root", "generated/decls/entitydef/root.decl", root);
+            files[i][count] = link_decl("replay/base", "generated/decls/md6def/replay/base.decl", base);
+            files[i][count++].type = "md6def";
+        }
+        if (i == REPLAY_MOD) {
+            files[i][count] = link_decl("replay/mod", "generated/decls/actormodifier/replay/mod.decl", modifier);
+            files[i][count++].type = "actormodifier";
+        }
+        if (i == REPLAY_PARENT)
+            files[i][count++] = link_decl("replay/parent", "generated/decls/entitydef/replay/parent.decl", alternate);
+        if (i == REPLAY_LATE) {
+            files[i][count] = link_decl("replay/skin", "generated/decls/material/replay/skin.decl", skin);
+            files[i][count++].type = "material";
+        }
+        qsort(files[i], count, sizeof(files[i][0]), replay_path_order);
+        compiled[i].resources = files[i]; compiled[i].resource_count = count; compiled[i].sources = &inventory;
+        scopes[i] = compiled + i;
+    }
+    /* AlternateEntity's alternate field: its reflected type decides whether a
+     * child of an alternate parent references replay/other. */
+    uintptr_t alternate_row = 0, alternate_type = 0;
+    {
+        uintptr_t container, records;
+        memcpy(&container, native->reflection, 8); memcpy(&records, (char *)container + 0x20, 8);
+        memcpy(&alternate_row, (char *)records + 18 * 0x38 + 0x20, 8);
+        memcpy(&alternate_type, (const char *)alternate_row, 8);
+        assert(!strcmp((const char *)alternate_type, "idDeclEntityDef"));
+    }
+    uintptr_t retyped = (uintptr_t)string(native, "idDeclActorModifier");
+    for (int step = 0; step < 11; step++) {
+        size_t binds = 0, retained = 0, unmemo = 0, unretained = 0; char state[16] = "", unstate[16] = "";
+        switch (step) {
+        case 2: memcpy((void *)alternate_row, &retyped, 8); break; /* Reflection, same addresses. */
+        case 3: memcpy((void *)alternate_row, &alternate_type, 8); break;
+        case 5: /* Edited: the changed parent's own scope rebinds its readers. */
+            for (size_t k = 0; k < compiled[REPLAY_PARENT].resource_count; k++)
+                if (!strcmp(files[REPLAY_PARENT][k].engine_path, "generated/decls/entitydef/replay/parent.decl"))
+                    files[REPLAY_PARENT][k].body = (unsigned char *)edited, files[REPLAY_PARENT][k].body_length = strlen(edited);
+            break;
+        case 6: /* Added: a new seed in one scope. */
+            files[REPLAY_LATE][compiled[REPLAY_LATE].resource_count++] =
+                link_decl("replay/extra", "generated/decls/entitydef/replay/extra.decl", extra);
+            qsort(files[REPLAY_LATE], compiled[REPLAY_LATE].resource_count, sizeof(files[0][0]), replay_path_order);
+            break;
+        case 7: /* Removed: the modifier its scope supplied. */
+            for (size_t k = 0; k < compiled[REPLAY_MOD].resource_count; k++)
+                if (!strcmp(files[REPLAY_MOD][k].engine_path, "generated/decls/actormodifier/replay/mod.decl")) {
+                    files[REPLAY_MOD][k] = files[REPLAY_MOD][--compiled[REPLAY_MOD].resource_count]; break;
+                }
+            qsort(files[REPLAY_MOD], compiled[REPLAY_MOD].resource_count, sizeof(files[0][0]), replay_path_order);
+            break;
+        case 8: g_replay_child_changed = 1; break; /* Stock bytes behind the same callback. */
+        case 9: g_replay_label_texture = 1; break; /* A render parameter a material reads. */
+        default: break;
+        }
+        replay_run *with = calloc(1, sizeof(*with)), *without = calloc(1, sizeof(*without));
+        assert(with && without);
+        replay_open_memo(native, registry, scopes, &inventory, 1, memo, with);
+        replay_open(native, registry, scopes, &inventory, 1, without);
+        replay_same(with, without);
+        memo_counts(with, &binds, &retained, state);
+        memo_counts(without, &unmemo, &unretained, unstate);
+        assert(!unretained && !strcmp(unstate, "unused"));
+        size_t child[REPLAY_SCOPES], skin_unit = sh_package_link_inputs_find(with->link.inputs, REPLAY_LATE, "material", "replay/skin");
+        for (size_t kind = 0; kind < REPLAY_SCOPES; kind++) {
+            child[kind] = sh_package_link_inputs_find(with->link.inputs, kind, "entitydef", "replay/child");
+            assert(child[kind] != SIZE_MAX);
+        }
+        assert(skin_unit != SIZE_MAX);
+        int other = replay_edge(with, child[REPLAY_PARENT], REPLAY_PARENT, "entitydef", "replay/other"), expected = 1;
+        switch (step) {
+        case 0: expected = !retained && binds <= unmemo && !strcmp(state, "kept") && other; break;
+        case 1: case 4: case 10: expected = !binds && retained && !strcmp(state, "kept"); break;
+        case 2: expected = !retained && binds <= unmemo && !strcmp(state, "renewed") && !other; break;
+        case 3: expected = !retained && binds <= unmemo && !strcmp(state, "renewed") && other; break;
+        case 5: expected = retained && binds && binds < unmemo && !other &&
+            !sh_package_source_link_unit_replayed(with->source, child[REPLAY_PARENT]) &&
+            sh_package_source_link_unit_replayed(with->source, child[REPLAY_PLAIN]); break;
+        case 6: {
+            size_t added = sh_package_link_inputs_find(with->link.inputs, REPLAY_LATE, "entitydef", "replay/extra");
+            expected = added != SIZE_MAX && !sh_package_source_link_unit_replayed(with->source, added) &&
+                sh_package_source_link_unit_replayed(with->source, child[REPLAY_LATE]) && binds && binds < unmemo;
+            break;
+        }
+        case 7: /* It now reads what a stock child reads, and may replay that recording. */
+            expected = !replay_edge(with, child[REPLAY_MOD], REPLAY_MOD, "actormodifier", "replay/mod") && binds < unmemo; break;
+        case 8: expected = !sh_package_source_link_unit_replayed(with->source, child[REPLAY_PLAIN]) &&
+            replay_edge(with, child[REPLAY_PLAIN], REPLAY_PLAIN, "entitydef", "parent-only"); break;
+        case 9: expected = !sh_package_source_link_unit_replayed(with->source, skin_unit) &&
+            replay_edge(with, skin_unit, REPLAY_LATE, "image", "image/body"); break;
+        }
+        if (!expected) fprintf(stderr, "source memo step %d: binds %zu of %zu, %zu from earlier compiles, memo %s, other %d\n",
+            step, binds, unmemo, retained, state, other);
+        assert(expected);
+        replay_close(with); replay_close(without);
+    }
+    g_replay_child_changed = g_replay_label_texture = 0;
+    sh_package_source_memo_close(memo);
+}
+static void test_source_link_replay(fixture *native, sh_decl_registry_source registry)
+{
+    const char *seed = "{ class = \"Entity\"; edit = { target = \"replay/child\"; } }";
+    const char *figure = "{ init { inherit \"replay/beast\" } }";
+    const char *root = "{ class = \"Entity\"; edit = { target = \"parent-only\"; } }";
+    const char *base = "{ init { calcRefBoundsFromJoints 0 } }";
+    const char *modifier = "{ edit = { target = \"parent-only\"; } }";
+    const char *alternate = "{ class = \"AlternateEntity\"; edit = {} }";
+    /* Discovery follows scope order: the first scope to reach a unit records
+     * it. An unchanged scope first, the reverse order, changed scopes first
+     * (a recording that consulted a path its own scope supplies is never kept),
+     * and last the scope with the changed md6 parent first. */
+    static const size_t orders[4][REPLAY_SCOPES] = {
+        {REPLAY_PLAIN, REPLAY_ROOT, REPLAY_MOD, REPLAY_PARENT, REPLAY_LATE},
+        {REPLAY_LATE, REPLAY_PARENT, REPLAY_MOD, REPLAY_ROOT, REPLAY_PLAIN},
+        {REPLAY_PARENT, REPLAY_MOD, REPLAY_PLAIN, REPLAY_ROOT, REPLAY_LATE},
+        {REPLAY_ROOT, REPLAY_PARENT, REPLAY_MOD, REPLAY_PLAIN, REPLAY_LATE},
+    };
+    /* Whose child replays, by scope kind (PLAIN ROOT MOD PARENT LATE): a
+     * scope supplying a path the recording looked up (root, modifier or
+     * parent) declines. In the last round the first scope supplies the
+     * alternate parent too, so only the last scope keeps a recording. */
+    static const int replayed[4][REPLAY_SCOPES] = {
+        {0, 0, 0, 0, 1}, {1, 0, 0, 0, 0}, {0, 0, 0, 0, 1}, {0, 0, 0, 0, 0},
+    };
+    static const size_t declines[4] = {3, 3, 1, 0};
+    sh_package_sources inventory = {0};
+    sh_compiled_resource files[REPLAY_SCOPES][5], changed_parent;
+    sh_package_compilation compiled[REPLAY_SCOPES];
+    memset(compiled, 0, sizeof(compiled));
+    for (size_t i = 0; i < REPLAY_SCOPES; i++) {
+        size_t count = 0;
+        files[i][count++] = link_decl("replay/seed", "generated/decls/entitydef/replay/seed.decl", seed);
+        files[i][count] = link_decl("replay/figure", "generated/decls/md6def/replay/figure.decl", figure);
+        files[i][count++].type = "md6def";
+        if (i == REPLAY_ROOT) {
+            files[i][count++] = link_decl("root", "generated/decls/entitydef/root.decl", root);
+            files[i][count] = link_decl("replay/base", "generated/decls/md6def/replay/base.decl", base);
+            files[i][count++].type = "md6def";
+        }
+        if (i == REPLAY_MOD) {
+            files[i][count] = link_decl("replay/mod", "generated/decls/actormodifier/replay/mod.decl", modifier);
+            files[i][count++].type = "actormodifier";
+        }
+        if (i == REPLAY_PARENT)
+            files[i][count++] = link_decl("replay/parent", "generated/decls/entitydef/replay/parent.decl", alternate);
+        qsort(files[i], count, sizeof(files[i][0]), replay_path_order);
+        compiled[i].resources = files[i]; compiled[i].resource_count = count; compiled[i].sources = &inventory;
+    }
+    changed_parent = link_decl("replay/parent", "generated/decls/entitydef/replay/parent.decl", alternate);
+    for (int round = 0; round < 4; round++) {
+        const size_t *order = orders[round];
+        const sh_package_compilation *scopes[REPLAY_SCOPES];
+        size_t scope_of[REPLAY_SCOPES], child[REPLAY_SCOPES], beast[REPLAY_SCOPES];
+        if (round == 3) {
+            /* A new link keeps no earlier recording: the first scope now also
+             * supplies the alternate parent. */
+            files[REPLAY_PLAIN][compiled[REPLAY_PLAIN].resource_count++] = changed_parent;
+            qsort(files[REPLAY_PLAIN], compiled[REPLAY_PLAIN].resource_count, sizeof(files[REPLAY_PLAIN][0]), replay_path_order);
+        }
+        for (size_t s = 0; s < REPLAY_SCOPES; s++) { scopes[s] = compiled + order[s]; scope_of[order[s]] = s; }
+        replay_run *on = calloc(1, sizeof(*on)), *off = calloc(1, sizeof(*off));
+        assert(on && off);
+        replay_open(native, registry, scopes, &inventory, 1, on);
+        replay_open(native, registry, scopes, &inventory, 0, off);
+        replay_same(on, off);
+        for (size_t kind = 0; kind < REPLAY_SCOPES; kind++) {
+            size_t scope = scope_of[kind], calls = 0;
+            int alternate_parent = kind == REPLAY_PARENT || (round == 3 && kind == REPLAY_PLAIN);
+            char call[96];
+            child[kind] = sh_package_link_inputs_find(on->link.inputs, scope, "entitydef", "replay/child");
+            beast[kind] = sh_package_link_inputs_find(on->link.inputs, scope, "md6def", "replay/beast");
+            assert(child[kind] != SIZE_MAX && beast[kind] != SIZE_MAX);
+            /* Each scope keeps its own bindings: its root, its supplied
+             * modifier, the fields its own parent's class makes references and
+             * its own md6 parent (stock or changed), replayed or not. */
+            assert(replay_edge(on, child[kind], scope, "entitydef", "root") == !alternate_parent);
+            assert(replay_edge(on, child[kind], scope, "entitydef", "replay/other") == alternate_parent);
+            assert(replay_edge(on, child[kind], scope, "actormodifier", "replay/mod") == (kind == REPLAY_MOD));
+            assert(replay_edge(on, beast[kind], scope, "md6def", "replay/base"));
+            /* ... and its own native callbacks. */
+            snprintf(call, sizeof(call), "%zu entitydef replay/child", scope);
+            for (size_t c = 0; c < on->calls.count; c++) calls += !strcmp(on->calls.entries[c], call);
+            snprintf(call, sizeof(call), "%zu md6def replay/beast", scope);
+            for (size_t c = 0; c < on->calls.count; c++) calls += !strcmp(on->calls.entries[c], call);
+            assert(calls == 2);
+            assert(!sh_package_source_link_unit_replayed(off->source, child[kind]) &&
+                !sh_package_source_link_unit_replayed(off->source, beast[kind]));
+            if (sh_package_source_link_unit_replayed(on->source, child[kind]) != replayed[round][kind])
+                fprintf(stderr, "replay round %d scope kind %zu: child replayed %d\n", round, kind, !replayed[round][kind]);
+            assert(sh_package_source_link_unit_replayed(on->source, child[kind]) == replayed[round][kind]);
+            /* The beast consults no scoped path: every later scope replays it. */
+            assert(sh_package_source_link_unit_replayed(on->source, beast[kind]) == (scope != 0));
+        }
+        /* Equal bodies with different bound dependencies stay variants. */
+        size_t stock = on->out.classes.nodes[child[REPLAY_LATE]], stock_beast = on->out.classes.nodes[beast[REPLAY_LATE]];
+        assert(on->out.classes.nodes[child[REPLAY_ROOT]] != stock && on->out.classes.nodes[child[REPLAY_MOD]] != stock &&
+            on->out.classes.nodes[child[REPLAY_PARENT]] != stock);
+        assert((on->out.classes.nodes[child[REPLAY_PLAIN]] == stock) == (round < 3));
+        assert(on->out.classes.nodes[beast[REPLAY_ROOT]] != stock_beast);
+        for (size_t kind = 0; kind < REPLAY_SCOPES; kind++)
+            if (kind != REPLAY_ROOT) assert(on->out.classes.nodes[beast[kind]] == stock_beast);
+        /* One payload identity per captured original, in every scope. */
+        const sh_package_link_unit *a = on->link.inputs->units + beast[REPLAY_ROOT], *b = on->link.inputs->units + beast[REPLAY_LATE];
+        sh_package_file_identity x, y, z;
+        assert(a->files[0] == b->files[0] && a->files[0]->body);
+        assert(sh_package_source_link_identity(on->source, beast[REPLAY_ROOT], a->files[0], &x, NULL, 0) &&
+            sh_package_source_link_identity(on->source, beast[REPLAY_LATE], b->files[0], &y, NULL, 0) &&
+            sh_package_bytes_identity(a->files[0]->body, a->files[0]->body_length, &z) &&
+            !memcmp(&x, &y, sizeof(x)) && !memcmp(&x, &z, sizeof(x)));
+        size_t replays, recorded, declined;
+        replay_counts(on, &replays, &recorded, &declined);
+        if (replays < 4 || recorded < 2 || declined < declines[round])
+            fprintf(stderr, "replay round %d: %zu replayed, %zu recorded, %zu declined\n", round, replays, recorded, declined);
+        assert(replays >= 4 && recorded >= 2 && declined >= declines[round]);
+        replay_counts(off, &replays, &recorded, &declined);
+        assert(!replays && !recorded && !declined);
+        replay_close(on); replay_close(off);
+    }
+}
+
 typedef struct unknown_bound { int calls; } unknown_bound;
 static int bound_unknown(void *context, const char *family, const char *name, int *exists)
 { (void)family; (void)name; (void)exists; ((unknown_bound *)context)->calls++; return 0; }
@@ -1708,7 +2177,7 @@ static void test_source_link(fixture *native, sh_decl_registry_source registry)
         compiled[1].resource_count = 1;
         source = sh_package_source_link_open(scopes, 2, NULL, link_original, &f,
             registry, (uintptr_t)native->reflection, &builtins.source, error, sizeof(error));
-        assert(source); f.inputs = sh_package_source_link_inputs(source);
+        assert(source); f.inputs = sh_package_source_link_inputs(source); assert_discovered_sites(source);
         image = sh_package_link_inputs_find(f.inputs, 0, "image", "_white");
         size_t peer = sh_package_link_inputs_find(f.inputs, 1, "image", "_white");
         assert(image != SIZE_MAX && peer != SIZE_MAX && !f.inputs->units[image].file_count);
@@ -1723,7 +2192,7 @@ static void test_source_link(fixture *native, sh_decl_registry_source registry)
             "{ class = \"Entity\"; edit = { image = \"_black\"; } }");
         source = sh_package_source_link_open(scopes, 2, NULL, link_original, &f,
             registry, (uintptr_t)native->reflection, &builtins.source, error, sizeof(error));
-        assert(source); f.inputs = sh_package_source_link_inputs(source); names.context = (void *)f.inputs;
+        assert(source); f.inputs = sh_package_source_link_inputs(source); names.context = (void *)f.inputs; assert_discovered_sites(source);
         image = sh_package_link_inputs_find(f.inputs, 0, "image", "_white");
         peer = sh_package_link_inputs_find(f.inputs, 1, "image", "_black");
         assert(image != SIZE_MAX && peer != SIZE_MAX);
@@ -1737,7 +2206,7 @@ static void test_source_link(fixture *native, sh_decl_registry_source registry)
         f.image_path = "generated/image/_white.bimage";
         source = sh_package_source_link_open(scopes, 1, NULL, link_original, &f,
             registry, (uintptr_t)native->reflection, &builtins.source, error, sizeof(error));
-        assert(source); f.inputs = sh_package_source_link_inputs(source); names.context = (void *)f.inputs;
+        assert(source); f.inputs = sh_package_source_link_inputs(source); names.context = (void *)f.inputs; assert_discovered_sites(source);
         image = sh_package_link_inputs_find(f.inputs, 0, "image", "_white");
         assert(!f.inputs->units[image].file_count);
         sh_package_source_link_close(source);
@@ -1745,7 +2214,7 @@ static void test_source_link(fixture *native, sh_decl_registry_source registry)
             "{ class = \"Entity\"; edit = { image = \"generated/image/_white.bimage\"; } }");
         source = sh_package_source_link_open(scopes, 1, NULL, link_original, &f,
             registry, (uintptr_t)native->reflection, &builtins.source, error, sizeof(error));
-        assert(source); f.inputs = sh_package_source_link_inputs(source); names.context = (void *)f.inputs;
+        assert(source); f.inputs = sh_package_source_link_inputs(source); names.context = (void *)f.inputs; assert_discovered_sites(source);
         image = sh_package_link_inputs_find(f.inputs, 0, "image", "generated/image/_white.bimage");
         assert(image != SIZE_MAX && f.inputs->units[image].file_count == 1);
         assert(sh_package_source_link_compile(source, &inventory, &names, NULL, NULL, &out, error, sizeof(error)));
@@ -1808,7 +2277,7 @@ static void test_source_link(fixture *native, sh_decl_registry_source registry)
         source = sh_package_source_link_open(scopes, 2, NULL, link_original, &f,
             registry, (uintptr_t)native->reflection, &admission, error, sizeof(error));
         if (!source) fprintf(stderr, "supplied image discovery: %s\n", error);
-        assert(source); f.inputs = sh_package_source_link_inputs(source);
+        assert(source); f.inputs = sh_package_source_link_inputs(source); assert_discovered_sites(source);
         assert(f.inputs->count == 4);
         sh_package_link_adapter names = {(void *)f.inputs, NULL, NULL, sh_package_native_names_assign};
         assert(sh_package_source_link_compile(source, &inventory, &names, NULL, NULL, &out, error, sizeof(error)));
@@ -1825,7 +2294,7 @@ static void test_source_link(fixture *native, sh_decl_registry_source registry)
     compiled[0].resources = files[0] + 1; compiled[0].resource_count = 1;
     source = sh_package_source_link_open(scopes, 1, NULL, link_original, &f,
         registry, (uintptr_t)native->reflection, &admission, error, sizeof(error));
-    assert(source); f.inputs = sh_package_source_link_inputs(source);
+    assert(source); f.inputs = sh_package_source_link_inputs(source); assert_discovered_sites(source);
     assert(f.inputs->count == 1 && !strcmp(f.inputs->units[0].family, "image"));
     assert(!strcmp(f.inputs->units[0].name, files[0][1].engine_path));
     sh_package_link_output_free(&out); sh_package_source_link_close(source);
@@ -1875,14 +2344,14 @@ static void test_source_link(fixture *native, sh_decl_registry_source registry)
     f.different_semantics = 1;
     source = sh_package_source_link_open(scopes, 3, NULL, link_original, &f,
         registry, (uintptr_t)native->reflection, &admission, error, sizeof(error));
-    assert(source); f.inputs = sh_package_source_link_inputs(source); native_names.context = (void *)f.inputs;
+    assert(source); f.inputs = sh_package_source_link_inputs(source); native_names.context = (void *)f.inputs; assert_discovered_sites(source);
     assert(sh_package_source_link_compile(source, &inventory, &native_names, NULL, NULL, &out, error, sizeof(error)));
     assert(out.classes.count == 4 && out.compiled->resource_count == 4);
     sh_package_link_output_free(&out); sh_package_source_link_close(source); f.different_semantics = 0;
     f.certificate = 0;
     source = sh_package_source_link_open(scopes, 3, NULL, link_original, &f,
         registry, (uintptr_t)native->reflection, &admission, error, sizeof(error));
-    assert(source); f.inputs = sh_package_source_link_inputs(source); native_names.context = (void *)f.inputs;
+    assert(source); f.inputs = sh_package_source_link_inputs(source); native_names.context = (void *)f.inputs; assert_discovered_sites(source);
     assert(!sh_package_source_link_compile(source, &inventory, &native_names, NULL, NULL, &out, error, sizeof(error)));
     assert(!out.compiled && strstr(error, "ABI identity"));
     sh_package_source_link_close(source);
@@ -2497,6 +2966,9 @@ static void test_library_hud(void)
         registry, (uintptr_t)f.reflection, NULL, &library, error, sizeof(error));
     if (!ok) fprintf(stderr, "HUD library: %s\n", error);
     assert(ok && library.compiled->policy.hud_bound);
+    /* Diagnostic repeated-work lines: parse census, source capture, identity passes. */
+    assert(strstr(library.repeated_work, "parses ") == library.repeated_work);
+    assert(strstr(library.repeated_work, "\nsource link ") && strstr(library.repeated_work, " identity passes: "));
     sh_json_object rows = {0}; const char *raw = sh_json_object_get(&library.compiled->policy.hud, "weapons");
     assert(raw && sh_json_parse_object(raw, strlen(raw), 3, &rows) && rows.count == 4);
     assert(!sh_json_object_get(&rows, "weapon/shared"));
@@ -2545,6 +3017,85 @@ static void test_library_hud(void)
     while (f.count) free(f.regions[--f.count].address);
 }
 
+/* Units the library's source capture replayed (its repeated-work line). */
+static size_t library_replays(const sh_package_library *library)
+{
+    const char *line = strstr(library->repeated_work, "units discovered, ");
+    size_t replays = SIZE_MAX;
+    if (!line || sscanf(line, "units discovered, %zu replayed", &replays) != 1) return SIZE_MAX;
+    return replays;
+}
+/* A library compiled with discovery replay equals the same compile without
+ * it: resources, payload identities, bound dependencies, ownership, native
+ * names, saved bindings and accounted diagnostics. */
+static void library_same(const sh_package_library *a, const sh_package_library *b)
+{
+    char error[512];
+    assert(!a->compiled == !b->compiled);
+    if (a->compiled) {
+        assert(a->compiled->resource_count == b->compiled->resource_count);
+        for (size_t i = 0; i < a->compiled->resource_count; i++) {
+            const sh_compiled_resource *p = a->compiled->resources + i, *q = b->compiled->resources + i;
+            sh_package_file_identity x, y;
+            assert(!strcmp(p->engine_path, q->engine_path));
+            assert(!strcmp(p->type ? p->type : "", q->type ? q->type : "") && !strcmp(p->name ? p->name : "", q->name ? q->name : ""));
+            assert(!strcmp(p->native_type ? p->native_type : "", q->native_type ? q->native_type : "") &&
+                !strcmp(p->native_name ? p->native_name : "", q->native_name ? q->native_name : ""));
+            assert(!strcmp(p->original_path ? p->original_path : "", q->original_path ? q->original_path : ""));
+            int identified = sh_package_compilation_identity(a->compiled, p, &x, error, sizeof(error));
+            assert(identified == sh_package_compilation_identity(b->compiled, q, &y, error, sizeof(error)));
+            if (identified) assert(!memcmp(&x, &y, sizeof(x)));
+            assert(replay_owners_same(&p->owners, &q->owners) && replay_owners_same(&p->gameplay_owners, &q->gameplay_owners));
+            assert(p->source_count == q->source_count && (!p->source_count || !memcmp(p->sources, q->sources, p->source_count * sizeof(*p->sources))));
+            assert(p->bound_dependency_count == q->bound_dependency_count);
+            for (size_t k = 0; k < p->bound_dependency_count; k++) assert(!strcmp(p->bound_dependencies[k], q->bound_dependencies[k]));
+            assert(p->native_original == q->native_original && p->baseline_known == q->baseline_known &&
+                p->restored_original == q->restored_original && p->generated == q->generated && p->composed == q->composed);
+        }
+    }
+    size_t x_length = 0, y_length = 0;
+    unsigned char *x = sh_package_provenance_encode(&a->bindings, &x_length, error, sizeof(error));
+    unsigned char *y = sh_package_provenance_encode(&b->bindings, &y_length, error, sizeof(error));
+    assert(x && y && x_length == y_length && !memcmp(x, y, x_length)); free(x); free(y);
+    assert(!a->coverage == !b->coverage && (!a->coverage || !strcmp(a->coverage, b->coverage)));
+}
+/* Compile again with the registration-key site memo off: the same library.
+ * Returns how many units the memo left unrewritten in the first. */
+static size_t library_key_memo_same(const sh_package_library *library, const sh_package_sources *sources,
+    const sh_package_compile_environment *env, sh_package_baseline_reader original, void *original_context,
+    sh_decl_registry_source registry, uintptr_t reflection, const sh_package_library_native *native)
+{
+    sh_package_library plain = {0}; char error[1024];
+    size_t scans = 0, reused = 0, kept = 0;
+    const char *line = strstr(library->repeated_work, "key sites: ");
+    if (line) assert(sscanf(line, "key sites: %zu scans, %zu reused, %zu units kept unbound", &scans, &reused, &kept) == 3);
+    sh_package_library_test_key_memo(0);
+    int ok = sh_package_library_compile(sources, env, NULL, original, original_context, registry, reflection,
+        native, &plain, error, sizeof(error));
+    sh_package_library_test_key_memo(1);
+    if (!ok) fprintf(stderr, "library without key memo: %s\n", error);
+    assert(ok && !strstr(plain.repeated_work, "key sites: "));
+    library_same(library, &plain); sh_package_library_free(&plain);
+    return kept;
+}
+/* Compile again with discovery replay off and compare with the replayed
+ * compile, which must have replayed at least minimum units. */
+static void library_replay_same(const sh_package_library *replayed, size_t minimum, const sh_package_sources *sources,
+    const sh_package_compile_environment *env, sh_package_baseline_reader original, void *original_context,
+    sh_decl_registry_source registry, uintptr_t reflection, const sh_package_library_native *native)
+{
+    sh_package_library plain = {0}; char error[1024];
+    size_t replays = library_replays(replayed);
+    if (replays == SIZE_MAX || replays < minimum) fprintf(stderr, "replayed units: %s\n", replayed->repeated_work);
+    assert(replays != SIZE_MAX && replays >= minimum);
+    sh_package_source_link_replay(0);
+    int ok = sh_package_library_compile(sources, env, NULL, original, original_context, registry, reflection,
+        native, &plain, error, sizeof(error));
+    sh_package_source_link_replay(1);
+    if (!ok) fprintf(stderr, "library without replay: %s\n", error);
+    assert(ok && library_replays(&plain) == 0);
+    library_same(replayed, &plain); sh_package_library_free(&plain);
+}
 static void test_library(fixture *f, sh_decl_registry_source registry)
 {
     const char *folders[] = {"red", "map-0123456789abcdef/green", "duplicate"};
@@ -2576,6 +3127,8 @@ static void test_library(fixture *f, sh_decl_registry_source registry)
         registry, (uintptr_t)f->reflection, NULL, &library, error, sizeof(error));
     if (!ok) fprintf(stderr, "library: %s\n", error);
     assert(ok && library.compiled && library.compiled->resource_count == 7);
+    /* Three scopes, one beneath an organizer folder, reach the same stock units. */
+    library_replay_same(&library, 1, sources, &env, library_original, &originals, registry, (uintptr_t)f->reflection, NULL);
     assert(library.bindings.context_count == 3 && library.bindings.binding_count == 4);
     assert(!sh_package_compilation_find(library.compiled, "generated/decls/entitydef/root.decl"));
     const sh_compiled_resource *controls = sh_package_compilation_find(library.compiled,
@@ -2688,6 +3241,159 @@ static void test_library(fixture *f, sh_decl_registry_source registry)
     sh_package_library_free(&library); sh_package_sources_free(sources); cleanup(); assert(!failures);
 }
 
+static void registration_root(const char *label);
+static const char *scoped_entity_name(const sh_package_library *library, const sh_package_sources *sources,
+    const char *package, const char *original);
+static const sh_compiled_resource *named_resource(const sh_package_compilation *compiled,
+    const char *family, const char *name);
+static int replay_library_original(void *context, const char *path, unsigned char **body, size_t *length)
+{
+    const char *text = replay_stock(path);
+    if (!text) return library_original(context, path, body, length);
+    *length = strlen(text); *body = (unsigned char *)_strdup(text); return *body ? 1 : -1;
+}
+/* The library level of the discovery replay contract (test_source_link_replay):
+ * packages beneath an organizer folder reach one stock child through their
+ * own roots, parents and modifiers, in both discovery orders. Replay and the
+ * editor composition memo are optimizations only: with either off the library
+ * is the same, including a package supplying a byte-identical copy of stock
+ * gameplay (the stock child's bound text, but a private editor binding). The
+ * final link reuses captured discovery sites, so this comparison, not a
+ * rebind, is what would expose a replay that ignored a changed dependency. */
+static void test_library_replay(fixture *f, sh_decl_registry_source registry)
+{
+    /* Packages are discovered in name order: an unchanged package first,
+     * the reverse, and changed packages first (their recordings consulted
+     * a path they supply and are never kept). */
+    static const char *const names[3][5] = {
+        {"a-plain", "b-copy", "c-parent", "d-mod", "e-late"},
+        {"z-plain", "y-copy", "x-parent", "w-mod", "v-late"},
+        {"c-plain", "d-copy", "a-parent", "b-mod", "e-late"},
+    };
+    source_link_fixture originals = {f};
+    char error[1024], path[256], text[256];
+    for (int round = 0; round < 3; round++) {
+        registration_root(round == 1 ? "library-replay-reversed" : round ? "library-replay-changed" : "library-replay");
+        for (size_t i = 0; i < 5; i++) {
+            snprintf(path, sizeof(path), "overrides/organizer/%s/package.json", names[round][i]);
+            snprintf(text, sizeof(text), "{\"id\":\"replay.%zu\",\"name\":\"%s\"}", i, names[round][i]); create(path, text);
+            snprintf(path, sizeof(path), "overrides/organizer/%s/assets/generated/decls/entitydef/replay/seed.decl", names[round][i]);
+            create(path, "{ class = \"Entity\"; edit = { target = \"replay/child\"; } }");
+        }
+        snprintf(path, sizeof(path), "overrides/organizer/%s/assets/generated/decls/entitydef/root.decl", names[round][1]);
+        create(path, replay_stock("generated/decls/entitydef/root.decl"));
+        snprintf(path, sizeof(path), "overrides/organizer/%s/assets/generated/decls/entitydef/replay/parent.decl", names[round][2]);
+        create(path, "{ class = \"AlternateEntity\"; edit = {} }");
+        snprintf(path, sizeof(path), "overrides/organizer/%s/assets/generated/decls/actormodifier/replay/mod.decl", names[round][3]);
+        create(path, "{ edit = { target = \"parent-only\"; } }");
+        sh_package_sources *sources = sh_package_sources_scan(root, error, sizeof(error)); assert(sources);
+        sh_package_compile_environment env = {0};
+        env.baseline = replay_library_original; env.baseline_context = &originals;
+        sh_package_library library = {0}, fresh = {0};
+        int ok = sh_package_library_compile(sources, &env, NULL, replay_library_original, &originals,
+            registry, (uintptr_t)f->reflection, NULL, &library, error, sizeof(error));
+        if (!ok) fprintf(stderr, "library replay: %s\n", error);
+        assert(ok);
+        library_replay_same(&library, 2, sources, &env, replay_library_original, &originals,
+            registry, (uintptr_t)f->reflection, NULL);
+        sh_package_library_test_editor_memo(0);
+        ok = sh_package_library_compile(sources, &env, NULL, replay_library_original, &originals,
+            registry, (uintptr_t)f->reflection, NULL, &fresh, error, sizeof(error));
+        sh_package_library_test_editor_memo(1);
+        if (!ok) fprintf(stderr, "library without editor memo: %s\n", error);
+        assert(ok); library_same(&library, &fresh); sh_package_library_free(&fresh);
+        /* Each package keeps its own child, as its own seed binds it: the
+         * stock ones share one; a changed parent or a supplied modifier makes
+         * another. */
+        char child[5][256];
+        for (size_t i = 0; i < 5; i++) {
+            const char *package = NULL, *value = NULL;
+            size_t n = strlen(names[round][i]);
+            for (size_t p = 0; p < sources->package_count; p++) {
+                const char *name = sources->packages[p].name; size_t m = strlen(name);
+                if (m >= n && !strcmp(name + m - n, names[round][i]) && (m == n || name[m - n - 1] == '/' || name[m - n - 1] == '\\'))
+                    package = name;
+            }
+            assert(package);
+            const char *seed = scoped_entity_name(&library, sources, package, "replay/seed");
+            const sh_compiled_resource *bound = seed ? named_resource(library.compiled, "entitydef", seed) : NULL;
+            sh_decl_node *tree = bound ? sh_decl_tree_parse((sh_decl_source){(char *)bound->body, bound->body_length}, NULL, 0) : NULL;
+            size_t length = 0;
+            assert(tree &&sh_decl_tree_literal(sh_decl_tree_member(sh_decl_tree_member(tree, "edit"), "target"), &value, &length) &&
+                length < sizeof(child[i]));
+            memcpy(child[i], value, length); child[i][length] = 0; sh_decl_tree_free(tree);
+        }
+        if (strcmp(child[0], child[4]) || !strcmp(child[0], child[2]) || !strcmp(child[0], child[3]))
+            fprintf(stderr, "library replay children: %s | %s | %s | %s | %s\n", child[0], child[1], child[2], child[3], child[4]);
+        assert(!strcmp(child[0], child[4]) && strcmp(child[0], child[2]) && strcmp(child[0], child[3]));
+        sh_package_library_free(&library); sh_package_sources_free(sources); cleanup(); assert(!failures);
+    }
+}
+
+/* Units the library's source capture replayed from earlier compiles. */
+static size_t library_retained(const sh_package_library *library)
+{
+    const char *line = strstr(library->repeated_work, " ms; ");
+    size_t retained = SIZE_MAX;
+    if (!line || sscanf(line, " ms; %zu replayed from earlier compiles", &retained) != 1) return SIZE_MAX;
+    return retained;
+}
+/* Separate library compiles sharing one memo (sh_package_source_memo): each
+ * equals the same compile without the memo (library_same: resources, payload
+ * identities, bound dependencies, ownership, native names, saved bindings,
+ * diagnostics), through contributions and the link, while unchanged packages
+ * replay their discovery from the earlier compiles: unchanged, an edited
+ * package, an added one and a removed one. */
+static void test_library_memo(fixture *f, sh_decl_registry_source registry)
+{
+    static const char *const names[6] = {"a-plain", "b-copy", "c-parent", "d-mod", "e-late", "f-added"};
+    source_link_fixture originals = {f};
+    char error[1024], path[256], text[256];
+    sh_package_source_memo *memo = sh_package_source_memo_open();
+    sh_package_library_native native = {0};
+    assert(memo); native.source.memo = memo;
+    registration_root("library-memo");
+    for (size_t i = 0; i < 5; i++) {
+        snprintf(path, sizeof(path), "overrides/organizer/%s/package.json", names[i]);
+        snprintf(text, sizeof(text), "{\"id\":\"memo.%zu\",\"name\":\"%s\"}", i, names[i]); create(path, text);
+        snprintf(path, sizeof(path), "overrides/organizer/%s/assets/generated/decls/entitydef/replay/seed.decl", names[i]);
+        create(path, "{ class = \"Entity\"; edit = { target = \"replay/child\"; } }");
+    }
+    create("overrides/organizer/b-copy/assets/generated/decls/entitydef/root.decl", replay_stock("generated/decls/entitydef/root.decl"));
+    create("overrides/organizer/c-parent/assets/generated/decls/entitydef/replay/parent.decl", "{ class = \"AlternateEntity\"; edit = {} }");
+    create("overrides/organizer/d-mod/assets/generated/decls/actormodifier/replay/mod.decl", "{ edit = { target = \"parent-only\"; } }");
+    for (int step = 0; step < 5; step++) {
+        if (step == 2) create("overrides/organizer/c-parent/assets/generated/decls/entitydef/replay/parent.decl",
+            "{ class = \"Entity\"; edit = { target = \"parent-only\"; } }");
+        if (step == 3) {
+            create("overrides/organizer/f-added/package.json", "{\"id\":\"memo.5\",\"name\":\"f-added\"}");
+            create("overrides/organizer/f-added/assets/generated/decls/entitydef/replay/seed.decl",
+                "{ class = \"Entity\"; edit = { target = \"root\"; } }");
+        }
+        sh_package_sources *sources = sh_package_sources_scan(root, error, sizeof(error)); assert(sources);
+        if (step == 4) for (size_t p = 0; p < sources->package_count; p++) if (strstr(sources->packages[p].name, "d-mod")) {
+            assert(sh_package_sources_remove(sources, p)); break;
+        }
+        sh_package_compile_environment env = {0};
+        env.baseline = replay_library_original; env.baseline_context = &originals;
+        sh_package_library with = {0}, without = {0};
+        int ok = sh_package_library_compile(sources, &env, NULL, replay_library_original, &originals,
+            registry, (uintptr_t)f->reflection, &native, &with, error, sizeof(error));
+        if (!ok) fprintf(stderr, "library memo step %d: %s\n", step, error);
+        assert(ok);
+        ok = sh_package_library_compile(sources, &env, NULL, replay_library_original, &originals,
+            registry, (uintptr_t)f->reflection, NULL, &without, error, sizeof(error));
+        assert(ok);
+        library_same(&with, &without);
+        size_t retained = library_retained(&with);
+        if (retained == SIZE_MAX || (step > 0) != (retained > 0) || library_retained(&without) != 0)
+            fprintf(stderr, "library memo step %d: %s\n", step, with.repeated_work);
+        assert(retained != SIZE_MAX && (step > 0) == (retained > 0) && library_retained(&without) == 0);
+        sh_package_library_free(&with); sh_package_library_free(&without); sh_package_sources_free(sources);
+    }
+    sh_package_source_memo_close(memo);
+    cleanup(); assert(!failures);
+}
 /* A stock parent editor definition with a complete property list, and a child
  * that patches one parent property by index (like demons/archvile_enc). */
 static const char *demo_parent_original = "{ edit = { target = \"parent-only\"; propertySheets = { num = 1; "
@@ -3229,6 +3935,39 @@ static void test_editor_parent_contracts(fixture *f, sh_decl_registry_source reg
     sh_package_library_test_contribution_read_failures(NULL, 0);
     assert(invalid == SIZE_MAX && unserved == SIZE_MAX && strstr(error, "unreadable") && !library.compiled);
     sh_package_library_free(&library); sh_package_sources_free(sources);
+    /* An installation increment compiles each new component alone, as an
+     * isolated context: the same inputs keep the same causes there. Round 0
+     * is the package's own unreadable declaration, 1 its uncovered member,
+     * 2 an unreadable source (environment: nobody). */
+    for (int round = 0; round < 3; round++) {
+        sh_package_provenance contexts = {0};
+        invalid = unserved = SIZE_MAX;
+        create("overrides/bad/assets/generated/decls/snapeditorentitydef/demo_child.decl",
+            round == 1 ? "{ inherit = \"demo_parent\"; edit = { target = \"parent-only\"; propertySheets = { bogus = 1; } } }" :
+            round == 2 ? demo_child_original :
+            "{ inherit = \"demo_parent\"; edit = { target = \"parent-only\"; propertySheets = { num = 1; } }");
+        sources = sh_package_sources_scan(root, error, sizeof(error)); assert(sources);
+        for (size_t i = 0; i < sources->component_count; i++) {
+            const sh_package_component *component = sources->components + i;
+            const unsigned char *tree = sh_package_source_tree(sources, component->owner);
+            assert(tree && sh_package_provenance_context_add(&contexts, SH_PACKAGE_CONTEXT_ISOLATED,
+                (const unsigned char (*)[32])tree, 1, component->relative) != SIZE_MAX);
+        }
+        if (round == 2) sh_package_library_test_contribution_read_failures("demo_parent", 1);
+        assert(!sh_package_library_compile_contexts(sources, &contexts, &env, NULL, contribution_original, &originals,
+            registry, (uintptr_t)f->reflection, NULL, &library, error, sizeof(error)));
+        sh_package_library_test_contribution_read_failures(NULL, 0);
+        size_t blamed = round == 1 ? unserved : invalid, other = round == 1 ? invalid : unserved;
+        int expected = round < 2 ? blamed < sources->package_count &&
+            !strcmp(sources->packages[blamed].name, "bad") && other == SIZE_MAX :
+            invalid == SIZE_MAX && unserved == SIZE_MAX;
+        if (!expected) fprintf(stderr, "isolated editor input %d: invalid=%zu unserved=%zu %s\n", round, invalid, unserved, error);
+        assert(expected && (round != 2 || strstr(error, "unreadable")));
+        sh_package_provenance_free(&contexts);
+        sh_package_library_free(&library); sh_package_sources_free(sources);
+    }
+    invalid = unserved = SIZE_MAX;
+    create("overrides/bad/assets/generated/decls/snapeditorentitydef/demo_child.decl", demo_child_original);
     /* Coverage: a parent chain the product cannot follow (circular) leaves
      * its contributing package unserved, not rejected. */
     create("overrides/cycle/package.json", "{\"id\":\"local.cycle\",\"name\":\"cycle\"}");
@@ -3956,6 +4695,8 @@ static void test_registration_variants(void)
             registry, (uintptr_t)f->reflection, NULL, &library, error, sizeof(error));
         if (!ok) fprintf(stderr, "registration variants %d: %s\n", round, error);
         assert(ok && unserved == SIZE_MAX && invalid == SIZE_MAX);
+        library_key_memo_same(&library, sources, &env, registration_original, &originals,
+            registry, (uintptr_t)f->reflection, NULL);
         const sh_compiled_resource *conductor = named_resource(library.compiled, "entitydef", "conductor");
         char rows[16][96], mods[16][96], row[160];
         assert(conductor);
@@ -4833,6 +5574,9 @@ static void test_registration_private_variants(void)
             registry, (uintptr_t)f->reflection, &native, &library, error, sizeof(error));
         if (!ok) fprintf(stderr, "registration private %d: %s\n", round, error);
         assert(ok && unserved == SIZE_MAX && invalid == SIZE_MAX);
+        /* Relocation reuses each class's scanned key sites; the same library without. */
+        assert(library_key_memo_same(&library, sources, &env, registration_original, &originals,
+            registry, (uintptr_t)f->reflection, &native) > 0);
         g_key_groups = library.key_groups;
         const sh_compiled_resource *conductor = named_resource(library.compiled, "entitydef", "conductor");
         key_row rows[16], mods[16];
@@ -4978,6 +5722,8 @@ static void test_registration_stock_inspector(void)
             registry, (uintptr_t)f->reflection, mode ? &native : NULL, &library, error, sizeof(error));
         if (!ok) fprintf(stderr, "stock inspector %d: %s\n", mode, error);
         assert(ok && unserved == SIZE_MAX && invalid == SIZE_MAX);
+        library_key_memo_same(&library, sources, &env, registration_original, &originals,
+            registry, (uintptr_t)f->reflection, mode ? &native : NULL);
         const sh_compiled_resource *inspector = named_resource(library.compiled, "snappropertyinspector_bitflag",
             "spawnaitypebitflaginspector");
         size_t served = 0;
@@ -5061,6 +5807,10 @@ static void test_registration_discovered_inheritance(void)
             registry, (uintptr_t)f->reflection, &native, &library, error, sizeof(error));
         if (!ok) fprintf(stderr, "discovered inherited registrations: %s\n", error);
         assert(ok);
+        /* Prepared registrations inherit each package's supplied parent: their
+         * discoveries decline replay, in either package order. */
+        library_replay_same(&library, 0, sources, &env, discovered_registration_original, &originals,
+            registry, (uintptr_t)f->reflection, &native);
         uint32_t masks[2] = {0};
         g_key_groups = library.key_groups;
         for (size_t color = 0; color < 2; color++) {
@@ -5320,6 +6070,8 @@ static void pinned_compile(fixture *f, const sh_package_provenance *keys, sh_pac
         registry, (uintptr_t)f->reflection, &native, library, error, sizeof(error));
     if (!ok) fprintf(stderr, "registration pinned: %s\n", error);
     assert(ok && unserved == SIZE_MAX && invalid == SIZE_MAX);
+    library_key_memo_same(library, *sources, &env, registration_original, &originals,
+        registry, (uintptr_t)f->reflection, &native);
 }
 static uint32_t variant_key(const sh_package_compilation *compiled, const char *package)
 { return (uint32_t)(strtoul(spawner_value(compiled, package), NULL, 10) & ~(8ul | 131072ul)); }
@@ -5804,6 +6556,9 @@ static void group_compile(fixture *f, const sh_package_provenance *keys, const s
         registry, (uintptr_t)f->reflection, &native, library, error, sizeof(error));
     if (!ok) fprintf(stderr, "registration groups: %s\n", error);
     assert(ok && unserved == SIZE_MAX && invalid == SIZE_MAX);
+    /* Group codes are defined in the same order with or without the memo. */
+    library_key_memo_same(library, *sources, &env, registration_original, &originals,
+        registry, (uintptr_t)f->reflection, &native);
     g_key_groups = library->key_groups;
 }
 static uint32_t group_value(const char *value) { return (uint32_t)strtoul(value, NULL, 10); }
@@ -7207,6 +7962,10 @@ int main(void)
     test_composed_stock_default(&f, registry);
     test_campaign_original_binding(&f, registry);
     test_implicit_source_link(&f, registry);
+    test_library_replay(&f, registry);
+    test_source_link_replay(&f, registry);
+    test_source_memo(&f, registry);
+    test_library_memo(&f, registry);
     test_font_source_link(&f, registry);
     test_font_library(&f, registry);
     test_movie_source_link();

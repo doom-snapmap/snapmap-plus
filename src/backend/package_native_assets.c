@@ -27,11 +27,68 @@ typedef struct na_shader_request {
     struct na_shader_request *next;
     sh_package_shader_request value;
 } na_shader_request;
+/* Set of "family\tname" keys (open addressing, power-of-two capacity). */
+typedef struct na_names { char **slots; size_t count, capacity; } na_names;
+static uint64_t na_names_hash(const char *family, const char *name)
+{
+    uint64_t hash = UINT64_C(14695981039346656037);
+    for (const char *p = family; *p; p++) { hash ^= (unsigned char)*p; hash *= UINT64_C(1099511628211); }
+    hash ^= '\t'; hash *= UINT64_C(1099511628211);
+    for (const char *p = name; *p; p++) { hash ^= (unsigned char)*p; hash *= UINT64_C(1099511628211); }
+    return hash;
+}
+static int na_names_key_equal(const char *key, const char *family, const char *name)
+{
+    size_t n = strlen(family);
+    return !strncmp(key, family, n) && key[n] == '\t' && !strcmp(key + n + 1, name);
+}
+static int na_names_contains(const na_names *set, const char *family, const char *name)
+{
+    if (!set->capacity) return 0;
+    for (size_t at = (size_t)na_names_hash(family, name) & (set->capacity - 1); set->slots[at];
+        at = (at + 1) & (set->capacity - 1))
+        if (na_names_key_equal(set->slots[at], family, name)) return 1;
+    return 0;
+}
+/* Best effort: this bookkeeping is a hint and never fails a check. */
+static void na_names_add(na_names *set, const char *family, const char *name)
+{
+    if (na_names_contains(set, family, name)) return;
+    if (set->count + 1 > set->capacity / 2) {
+        size_t capacity = set->capacity ? set->capacity * 2 : 64;
+        char **slots = capacity <= SIZE_MAX / sizeof(*slots) ? calloc(capacity, sizeof(*slots)) : NULL;
+        if (!slots) return;
+        for (size_t i = 0; i < set->capacity; i++) if (set->slots[i]) {
+            const char *key = set->slots[i], *tab = strchr(key, '\t');
+            uint64_t hash = UINT64_C(14695981039346656037);
+            for (const char *p = key; p < tab; p++) { hash ^= (unsigned char)*p; hash *= UINT64_C(1099511628211); }
+            hash ^= '\t'; hash *= UINT64_C(1099511628211);
+            for (const char *p = tab + 1; *p; p++) { hash ^= (unsigned char)*p; hash *= UINT64_C(1099511628211); }
+            size_t at = (size_t)hash & (capacity - 1);
+            while (slots[at]) at = (at + 1) & (capacity - 1);
+            slots[at] = set->slots[i];
+        }
+        free(set->slots); set->slots = slots; set->capacity = capacity;
+    }
+    size_t f = strlen(family), n = strlen(name);
+    char *key = malloc(f + n + 2);
+    if (!key) return;
+    memcpy(key, family, f); key[f] = '\t'; memcpy(key + f + 1, name, n + 1);
+    size_t at = (size_t)na_names_hash(family, name) & (set->capacity - 1);
+    while (set->slots[at]) at = (at + 1) & (set->capacity - 1);
+    set->slots[at] = key; set->count++;
+}
+static void na_names_free(na_names *set)
+{
+    for (size_t i = 0; i < set->capacity; i++) free(set->slots[i]);
+    free(set->slots); memset(set, 0, sizeof(*set));
+}
 typedef struct na_shader_file {
     struct na_shader_file *next;
     char *path;
     unsigned char *body;
     size_t length;
+    char *program; /* The requested program whose cooked binary this is, else NULL. */
 } na_shader_file;
 struct sh_package_shader_preparation {
     sh_package_native_assets *assets;
@@ -68,6 +125,15 @@ struct sh_package_native_assets {
      * check revalidates what it read; leaving the scope revalidates it all. */
     sh_native_resource_registry *shader_snapshot;
     int shader_scope, shader_scope_changed;
+    /* The stock shader objects the recorded compilation needed: those it
+     * requested preparation for and cooked programs it read (a later
+     * session's preparation hint, sh_package_native_assets_shader_needs). */
+    na_names shader_used;
+    /* Objects this instance's native preparation produced and verified. */
+    na_names shader_prepared;
+    /* Programs named by programs cooked here, not yet followed. */
+    na_names shader_follow;
+    int shader_recording, shader_prewarming;
     char error[1024];
 };
 static int na_error(sh_package_native_assets *a, const char *reason, const char *path)
@@ -103,9 +169,10 @@ void sh_package_native_assets_close(sh_package_native_assets *a)
         free((void *)request->value.source); free(request);
     }
     while (a->shader_files) { na_shader_file *file = a->shader_files; a->shader_files = file->next;
-        free(file->path); free(file->body); free(file); }
+        free(file->path); free(file->body); free(file->program); free(file); }
     sh_native_resource_registry_close(a->shader_snapshot);
     sh_resource_catalog_close(a->shader_catalog);
+    na_names_free(&a->shader_used); na_names_free(&a->shader_follow); na_names_free(&a->shader_prepared);
     free(a->files); free(a->root); free(a);
 }
 void sh_package_native_assets_shader_scope_begin(sh_package_native_assets *a)
@@ -213,17 +280,24 @@ int sh_package_native_assets_read(void *context, const char *path, unsigned char
 }
 int sh_package_native_assets_shader_read(void *context, const char *path, unsigned char **body, size_t *length)
 {
-    sh_package_native_assets *a = context; int result = 0;
+    sh_package_native_assets *a = context; int result = 0, recording;
     *body = NULL; *length = 0;
     if (!a || !path) return 0;
     AcquireSRWLockShared(&a->lock);
+    recording = a->shader_recording;
+    ReleaseSRWLockShared(&a->lock);
+    /* A recorded compilation's read of a cooked program is a use to keep. */
+    if (recording) AcquireSRWLockExclusive(&a->lock); else AcquireSRWLockShared(&a->lock);
     for (na_shader_file *file = a->shader_files; file; file = file->next) if (!strcmp(file->path, path)) {
         *body = malloc(file->length + 1);
         if (*body) { memcpy(*body, file->body, file->length); (*body)[file->length] = 0; *length = file->length; result = 1; }
         else result = -1;
+        if (result == 1 && recording && a->shader_recording && !a->shader_prewarming && file->program)
+            na_names_add(&a->shader_used, "renderprog", file->program);
         break;
     }
-    ReleaseSRWLockShared(&a->lock); return result;
+    if (recording) ReleaseSRWLockExclusive(&a->lock); else ReleaseSRWLockShared(&a->lock);
+    return result;
 }
 int sh_package_native_assets_shader_original_read(void *context, const char *path,
     unsigned char **body, size_t *length)
@@ -474,6 +548,7 @@ static int na_shader_index(int kind, uint32_t index)
 static int na_shader_request_add(sh_package_native_assets *a, const char *family,
     const char *name, sh_decl_source source, const sh_native_resource_identity *identity, na_shader_original *original)
 {
+    if (a->shader_recording && !a->shader_prewarming) na_names_add(&a->shader_used, family, name);
     for (na_shader_request *request = a->shader_requests; request; request = request->next)
         if (!strcmp(request->value.family, family) && !strcmp(request->value.name, name))
             return request->value.source_length == source.length &&
@@ -524,8 +599,10 @@ static int na_shader_fixed(sh_package_native_assets *a, const char *family, cons
     }
     if (identity_status == SH_NATIVE_RESOURCE_ID_FREE) {
         if (request_prepare && na_shader_registry_valid(a, registry, &identity, error, capacity) &&
-            na_shader_request_add(a, family, name, source, &identity, original))
+            na_shader_request_add(a, family, name, source, &identity, original)) {
             na_shader_error(error, capacity, "shader environment needs verified native source preparation", name);
+            ok = 2;
+        }
         goto done;
     }
     if (identity_status != SH_NATIVE_RESOURCE_ID_SAME_NAME || !identity.resource) goto done;
@@ -543,9 +620,10 @@ static int na_shader_fixed(sh_package_native_assets *a, const char *family, cons
         !a->shader_registry.read(a->shader_registry.context, text, native_text, trimmed + 1) || native_text[trimmed] ||
         memcmp(native_text, source.text, trimmed))) {
         if (request_prepare && na_shader_registry_valid(a, registry, &identity, error, capacity) &&
-            na_shader_request_add(a, family, name, source, &identity, original))
+            na_shader_request_add(a, family, name, source, &identity, original)) {
             na_shader_error(error, capacity, "shader environment needs verified native source preparation", name);
-        else na_shader_error(error, capacity, "native shader ABI needs exact retained text or a successful source receipt", name);
+            ok = 2;
+        } else na_shader_error(error, capacity, "native shader ABI needs exact retained text or a successful source receipt", name);
         goto done;
     }
     if (kind) {
@@ -566,6 +644,11 @@ static int na_shader_fixed(sh_package_native_assets *a, const char *family, cons
         na_shader_error(error, capacity, "native shader ABI changed during its snapshot", name); goto done;
     }
     ok = 1;
+    /* Ready because this session prepared it: a later session needs that
+     * preparation again, so a recorded compilation keeps it. A receipt alone
+     * does not show this; the engine's own loads produce receipts too. */
+    if (a->shader_recording && !a->shader_prewarming && na_names_contains(&a->shader_prepared, family, name))
+        na_names_add(&a->shader_used, family, name);
 done:
     if (!ok && error && capacity && !*error) na_shader_error(error, capacity, "shader ABI has no compatible ready native object", name);
     free(native_text); sh_native_resource_identity_clear(&identity); na_shader_registry_release(a, registry);
@@ -598,6 +681,176 @@ static int na_shader_program(void *context, const char *name, sh_decl_source sou
 done:
     sh_native_resource_identity_clear(&identity); sh_native_resource_registry_close(registry);
     ReleaseSRWLockExclusive(&a->lock); return queued ? 1 : 0;
+}
+void sh_package_native_assets_shader_record(sh_package_native_assets *a, int on)
+{
+    if (!a) return;
+    AcquireSRWLockExclusive(&a->lock);
+    if (on) na_names_free(&a->shader_used);
+    a->shader_recording = on != 0;
+    ReleaseSRWLockExclusive(&a->lock);
+}
+typedef struct na_binary_path { char path[512]; } na_binary_path;
+static int na_binary_path_visit(void *context, sh_package_shader_path_kind kind, const char *original, const char *linked)
+{
+    (void)linked;
+    if (kind == SH_PACKAGE_SHADER_BINARY) snprintf(((na_binary_path *)context)->path, sizeof(((na_binary_path *)context)->path), "%s", original);
+    return 1;
+}
+/* 1 when this program's cooked binary was captured here: a compilation then
+ * reads it and requests no preparation. */
+static int na_shader_captured(sh_package_native_assets *a, const char *name)
+{
+    na_binary_path binary = {{0}}; sh_package_shader_program empty = {0}; char error[256]; int found = 0;
+    if (sh_package_shader_paths(a->shader.renderer, name, name, &empty, na_binary_path_visit, &binary,
+        error, sizeof(error)) != SH_PACKAGE_SHADER_OK || !*binary.path) return 0;
+    AcquireSRWLockShared(&a->lock);
+    for (na_shader_file *file = a->shader_files; file && !found; file = file->next) found = !strcmp(file->path, binary.path);
+    ReleaseSRWLockShared(&a->lock); return found;
+}
+int sh_package_native_assets_shader_prewarm(sh_package_native_assets *a, const char *family, const char *name)
+{
+    char error[256]; int kind; uint32_t index; uint64_t mask; int ready;
+    if (!a || !family || !name || !*name || !a->shader_configured) return -1;
+    int program = !strcmp(family, "renderprog"), parameter = !strcmp(family, "renderparm");
+    if (!program && !parameter && strcmp(family, "renderprogflag")) return 0;
+    if (program && na_shader_captured(a, name)) return 0;
+    AcquireSRWLockExclusive(&a->lock);
+    na_shader_original *original = na_shader_source(a, family, name, error, sizeof(error));
+    size_t before = a->shader_request_count;
+    if (original) a->shader_prewarming = 1;
+    ReleaseSRWLockExclusive(&a->lock);
+    if (!original) return -1;
+    /* The same checks a compilation makes: a ready object queues nothing.
+     * Originals are never freed while the assets live. */
+    sh_decl_source source = {(const char *)original->body, original->length};
+    if (program) ready = a->shader.renderer == SH_PACKAGE_SHADER_OPENGL ?
+        na_shader_program(a, name, source, error, sizeof(error)) : 0;
+    else ready = na_shader_fixed(a, family, name, source, parameter ? &kind : NULL, parameter ? &index : NULL,
+        parameter ? NULL : &mask, 1, error, sizeof(error));
+    (void)ready;
+    AcquireSRWLockExclusive(&a->lock);
+    a->shader_prewarming = 0;
+    int queued = a->shader_request_count > before;
+    ReleaseSRWLockExclusive(&a->lock);
+    return queued;
+}
+static int na_names_order(const void *x, const void *y)
+{ return strcmp(*(const char *const *)x, *(const char *const *)y); }
+char *sh_package_native_assets_shader_needs(sh_package_native_assets *a)
+{
+    if (!a) return NULL;
+    AcquireSRWLockShared(&a->lock);
+    size_t length = 1, count = 0;
+    const char **keys = calloc(a->shader_used.count ? a->shader_used.count : 1, sizeof(*keys));
+    for (size_t i = 0; keys && i < a->shader_used.capacity; i++) if (a->shader_used.slots[i]) {
+        keys[count++] = a->shader_used.slots[i]; length += strlen(a->shader_used.slots[i]) + 1;
+    }
+    char *out = keys ? malloc(length) : NULL, *at = out;
+    if (out) {
+        qsort(keys, count, sizeof(*keys), na_names_order);
+        for (size_t i = 0; i < count; i++) { size_t n = strlen(keys[i]); memcpy(at, keys[i], n); at[n] = '\n'; at += n + 1; }
+        *at = 0;
+    }
+    ReleaseSRWLockShared(&a->lock);
+    free(keys); return out;
+}
+size_t sh_package_native_assets_shader_follow(sh_package_native_assets *a)
+{
+    char error[256];
+    if (!a || !a->shader_configured || a->shader.renderer != SH_PACKAGE_SHADER_OPENGL) return 0;
+    AcquireSRWLockExclusive(&a->lock);
+    na_names follow = a->shader_follow; memset(&a->shader_follow, 0, sizeof(a->shader_follow));
+    size_t before = a->shader_request_count;
+    ReleaseSRWLockExclusive(&a->lock);
+    for (size_t i = 0; i < follow.capacity; i++) if (follow.slots[i]) {
+        const char *name = strchr(follow.slots[i], '\t') + 1;
+        if (strncmp(follow.slots[i], "renderprog\t", 11)) {
+            /* A parameter or flag a cooked program checks: the same check
+             * and request a compilation makes on reaching it. */
+            char family[32]; size_t n = (size_t)(name - 1 - follow.slots[i]);
+            if (n < sizeof(family)) {
+                memcpy(family, follow.slots[i], n); family[n] = 0;
+                (void)sh_package_native_assets_shader_prewarm(a, family, name);
+            }
+            continue;
+        }
+        if (na_shader_captured(a, name)) continue;
+        AcquireSRWLockExclusive(&a->lock);
+        na_shader_original *original = na_shader_source(a, "renderprog", name, error, sizeof(error));
+        ReleaseSRWLockExclusive(&a->lock);
+        /* The request a compilation makes on reaching this program without a
+         * cooked binary; a name with no installed original is not followed. */
+        if (original) (void)na_shader_program(a, name,
+            (sh_decl_source){(const char *)original->body, original->length}, error, sizeof(error));
+    }
+    na_names_free(&follow);
+    AcquireSRWLockShared(&a->lock);
+    size_t queued = a->shader_request_count > before ? a->shader_request_count - before : 0;
+    ReleaseSRWLockShared(&a->lock);
+    return queued;
+}
+/* Hint text: the owner's exact header, a digest line for the body, then the
+ * body's "family\tname" lines. */
+static uint64_t na_hint_digest(const char *body, size_t length)
+{
+    uint64_t hash = UINT64_C(14695981039346656037);
+    for (size_t i = 0; i < length; i++) { hash ^= (unsigned char)body[i]; hash *= UINT64_C(1099511628211); }
+    return hash;
+}
+char *sh_package_framed_format(const char *header, const char *body)
+{
+    if (!header || !body) return NULL;
+    size_t h = strlen(header), n = strlen(body), capacity = h + n + 64;
+    char *out = malloc(capacity);
+    if (!out) return NULL;
+    int line = snprintf(out, capacity, "%sbody %016llx %zu\n", header,
+        (unsigned long long)na_hint_digest(body, n), n);
+    if (line < 0 || (size_t)line + n >= capacity) { free(out); return NULL; }
+    memcpy(out + line, body, n + 1); return out;
+}
+const char *sh_package_framed_body(const char *text, size_t length, const char *header, size_t *body_length)
+{
+    size_t h = header ? strlen(header) : 0;
+    if (body_length) *body_length = 0;
+    if (!text || !header || !body_length || length < h || memcmp(text, header, h)) return NULL;
+    const char *at = text + h, *end = text + length, *newline = memchr(at, '\n', (size_t)(end - at));
+    char line[80], canonical[80]; unsigned long long digest = 0; size_t declared = 0;
+    if (!newline || (size_t)(newline - at) >= sizeof(line)) return NULL;
+    memcpy(line, at, (size_t)(newline - at)); line[newline - at] = 0;
+    if (sscanf_s(line, "body %16llx %zu", &digest, &declared) != 2) return NULL;
+    snprintf(canonical, sizeof(canonical), "body %016llx %zu", digest, declared);
+    if (strcmp(canonical, line)) return NULL;
+    at = newline + 1;
+    if ((size_t)(end - at) != declared || na_hint_digest(at, declared) != digest) return NULL;
+    *body_length = declared; return at;
+}
+char *sh_package_shader_hint_format(const char *header, const char *needs)
+{ return sh_package_framed_format(header, needs); }
+int sh_package_shader_hint_read(const char *text, size_t length, const char *header,
+    int (*visit)(void *context, const char *family, const char *name), void *context)
+{
+    static const char *const families[] = {"renderprog", "renderparm", "renderprogflag"};
+    size_t declared = 0;
+    const char *at = visit ? sh_package_framed_body(text, length, header, &declared) : NULL, *end = at + declared;
+    if (!at) return -1;
+    /* Validate every line before any visit: a hint is used whole or not at all. */
+    int count = 0;
+    for (int pass = 0; pass < 2; pass++) for (const char *p = at; p < end; ) {
+        const char *stop = memchr(p, '\n', (size_t)(end - p)), *tab;
+        char family[32], name[256];
+        if (!stop || !(tab = memchr(p, '\t', (size_t)(stop - p))) || tab == p ||
+            (size_t)(tab - p) >= sizeof(family) || stop - tab - 1 <= 0 || (size_t)(stop - tab - 1) >= sizeof(name)) return -1;
+        memcpy(family, p, (size_t)(tab - p)); family[tab - p] = 0;
+        memcpy(name, tab + 1, (size_t)(stop - tab - 1)); name[stop - tab - 1] = 0;
+        int known = 0;
+        for (size_t f = 0; f < sizeof(families) / sizeof(*families); f++) known |= !strcmp(family, families[f]);
+        for (const char *c = name; *c; c++) if ((unsigned char)*c < 0x21 || (unsigned char)*c > 0x7e) known = 0;
+        if (!known) return -1;
+        if (pass) { if (!visit(context, family, name)) return -1; count++; }
+        p = stop + 1;
+    }
+    return count;
 }
 size_t sh_package_native_assets_shader_pending(sh_package_native_assets *a)
 {
@@ -666,11 +919,13 @@ typedef struct na_shader_collect {
     size_t binary_length, program_count;
     uint64_t ticket;
     char *error; size_t capacity;
+    const char *program; /* The requested program while its own paths are emitted. */
+    na_names follow;
 } na_shader_collect;
 static void na_shader_files_free(na_shader_file *files)
 {
     while (files) { na_shader_file *next = files->next;
-        free(files->path); free(files->body); free(files); files = next; }
+        free(files->path); free(files->body); free(files->program); free(files); files = next; }
 }
 void sh_package_shader_preparation_revoke(sh_package_shader_preparation *batch)
 {
@@ -679,14 +934,18 @@ void sh_package_shader_preparation_revoke(sh_package_shader_preparation *batch)
     na_shader_file *files = batch->assets->shader_files; batch->assets->shader_files = NULL;
     ReleaseSRWLockExclusive(&batch->assets->lock); na_shader_files_free(files);
 }
-static int na_shader_file_add(na_shader_collect *collect, const char *path, const void *body, size_t length)
+static int na_shader_file_add(na_shader_collect *collect, const char *path, const void *body, size_t length,
+    const char *program)
 {
     for (na_shader_file *file = collect->files; file; file = file->next) if (!strcmp(file->path, path))
         return file->length == length && !memcmp(file->body, body, length);
     na_shader_file *file = calloc(1, sizeof(*file));
-    if (file) { file->path = _strdup(path); file->body = malloc(length ? length : 1); }
-    if (!file || !file->path || !file->body) {
-        if (file) { free(file->path); free(file->body); free(file); } return 0;
+    if (file) {
+        file->path = _strdup(path); file->body = malloc(length ? length : 1);
+        file->program = program ? _strdup(program) : NULL;
+    }
+    if (!file || !file->path || !file->body || (program && !file->program)) {
+        if (file) { free(file->path); free(file->body); free(file->program); free(file); } return 0;
     }
     memcpy(file->body, body, length); file->length = length;
     file->next = collect->files; collect->files = file; return 1;
@@ -715,9 +974,9 @@ static int na_shader_collect_path(void *context, sh_package_shader_path_kind kin
 {
     na_shader_collect *collect = context; (void)linked;
     if (kind == SH_PACKAGE_SHADER_DECLARATION)
-        return na_shader_file_add(collect, path, collect->declaration, collect->declaration_length);
+        return na_shader_file_add(collect, path, collect->declaration, collect->declaration_length, NULL);
     if (kind == SH_PACKAGE_SHADER_BINARY)
-        return na_shader_file_add(collect, path, collect->binary, collect->binary_length);
+        return na_shader_file_add(collect, path, collect->binary, collect->binary_length, collect->program);
     if (kind == SH_PACKAGE_SHADER_PERMUTATION) return na_shader_collect_program(collect, path, NULL, 0);
     if (kind != SH_PACKAGE_SHADER_SOURCE_INCLUDE) return 0;
     sh_package_shader_input *input = collect->capture->inputs;
@@ -729,7 +988,7 @@ static int na_shader_collect_path(void *context, sh_package_shader_path_kind kin
         !memcmp(original, input->body, input->length);
     free(original);
     if (!ok) return na_shader_error(collect->error, collect->capacity, "native shader include differs from the immutable installed source", path);
-    return na_shader_file_add(collect, path, input->body, input->length);
+    return na_shader_file_add(collect, path, input->body, input->length, NULL);
 }
 static int na_shader_collect_program(na_shader_collect *collect, const char *name, const void *expected, size_t length)
 {
@@ -760,16 +1019,29 @@ static int na_shader_collect_program(na_shader_collect *collect, const char *nam
     memcpy(binary + 8, capture.metadata, capture.metadata_length);
     if (sh_package_shader_decode(binary, capture.metadata_length + 8, &schema, &program,
         collect->error, collect->capacity) != SH_PACKAGE_SHADER_OK) goto done;
+    /* Cooking decides which programs this one names (program-typed
+     * parameters), and which parameters and flags its binary checks; a
+     * compilation reaches them only through this output. */
+    for (size_t i = 0; i < program.reference_count; i++) {
+        const sh_package_shader_reference *ref = program.references + i;
+        if (!ref->name || !*ref->name) continue;
+        if (ref->kind == SH_PACKAGE_SHADER_RESOURCE && ref->family && !strcmp(ref->family, "renderprog") &&
+            strcmp(ref->name, name)) na_names_add(&collect->follow, "renderprog", ref->name);
+        else if (ref->kind == SH_PACKAGE_SHADER_PARAMETER) na_names_add(&collect->follow, "renderparm", ref->name);
+        else if (ref->kind == SH_PACKAGE_SHADER_FLAG) na_names_add(&collect->follow, "renderprogflag", ref->name);
+    }
     sh_package_shader_capture *saved_capture = collect->capture; unsigned char *saved_binary = collect->binary;
     size_t saved_length = collect->binary_length, saved_declaration_length = collect->declaration_length;
-    const void *saved_declaration = collect->declaration;
+    const void *saved_declaration = collect->declaration; const char *saved_program = collect->program;
     collect->capture = &capture; collect->binary = binary; collect->binary_length = capture.metadata_length + 8;
     collect->declaration = expected ? expected : capture.source;
     collect->declaration_length = expected ? length : capture.source_length;
+    collect->program = expected ? name : NULL;
     ok = sh_package_shader_paths(SH_PACKAGE_SHADER_OPENGL, name, name, &program, na_shader_collect_path,
         collect, collect->error, collect->capacity) == SH_PACKAGE_SHADER_OK;
     collect->capture = saved_capture; collect->binary = saved_binary; collect->binary_length = saved_length;
     collect->declaration = saved_declaration; collect->declaration_length = saved_declaration_length;
+    collect->program = saved_program;
 done:
     if (!ok && collect->error && collect->capacity && !*collect->error)
         na_shader_error(collect->error, collect->capacity, "native source cook lacks a coherent complete source certificate", name);
@@ -794,8 +1066,16 @@ static int na_shader_capture_unit(sh_package_native_assets *a, const sh_package_
             na_shader_file *file = collect.files; collect.files = file->next;
             file->next = a->shader_files; a->shader_files = file;
         }
+        for (size_t i = 0; ok && i < collect.follow.capacity; i++) if (collect.follow.slots[i]) {
+            const char *slot = collect.follow.slots[i], *tab = strchr(slot, '\t');
+            char family[32];
+            if (!tab || (size_t)(tab - slot) >= sizeof(family)) continue;
+            memcpy(family, slot, (size_t)(tab - slot)); family[tab - slot] = 0;
+            na_names_add(&a->shader_follow, family, tab + 1);
+        }
         ReleaseSRWLockExclusive(&a->lock);
     }
+    na_names_free(&collect.follow);
     na_shader_files_free(collect.files); sh_native_resource_registry_close(collect.registry); return ok;
 }
 int sh_package_shader_preparation_run(sh_package_shader_preparation *batch,
@@ -828,6 +1108,10 @@ int sh_package_shader_preparation_run(sh_package_shader_preparation *batch,
             (sh_decl_source){(const char *)value->source, value->source_length},
             parameter ? &kind : NULL, parameter ? &index : NULL, parameter ? NULL : &mask, 0, error, capacity)) goto failed;
     }
+    AcquireSRWLockExclusive(&batch->assets->lock);
+    for (na_shader_request *request = batch->requests; request; request = request->next)
+        na_names_add(&batch->assets->shader_prepared, request->value.family, request->value.name);
+    ReleaseSRWLockExclusive(&batch->assets->lock);
     return 1;
 failed:
     {

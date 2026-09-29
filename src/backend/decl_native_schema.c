@@ -633,6 +633,49 @@ int sh_decl_native_schema_enum_constants(sh_decl_native_schema *s, const char *e
     return members ? -1 : 1;
 }
 
+typedef struct dn_digest { int (*emit)(void *, const void *, size_t); void *context; int ok; } dn_digest;
+static void dn_put(dn_digest *d, const void *bytes, size_t length)
+{ if (d->ok && !d->emit(d->context, bytes, length)) d->ok = 0; }
+static void dn_put_word(dn_digest *d, uint64_t value) { dn_put(d, &value, sizeof(value)); }
+static void dn_put_text(dn_digest *d, const char *text)
+{
+    dn_put_word(d, text ? 1 : 0);
+    if (text) dn_put(d, text, strlen(text) + 1);
+}
+static int dn_digest_constant(void *context, const char *name, uint32_t value)
+{ dn_digest *d = context; dn_put_text(d, name); dn_put(d, &value, sizeof(value)); return d->ok; }
+int sh_decl_native_schema_digest(sh_decl_native_schema *s,
+    int (*emit)(void *context, const void *bytes, size_t length), void *context)
+{
+    dn_digest d = {emit, context, 1};
+    if (!s || !emit) return 0;
+    for (int enums = 0; enums < 2 && d.ok; enums++) {
+        const dn_index *index = enums ? &s->enums : &s->classes;
+        dn_put_word(&d, index->count);
+        for (size_t i = 0; i < index->capacity && d.ok; i++) {
+            dn_type *type = index->slots[i];
+            if (!type) continue;
+            dn_put_text(&d, type->name);
+            dn_put_word(&d, type->object_reader); dn_put_word(&d, type->pointer_reader);
+            if (enums) {
+                int status = sh_decl_native_schema_enum_constants(s, type->name, dn_digest_constant, &d);
+                dn_put_word(&d, (uint64_t)(int64_t)status);
+                continue;
+            }
+            if (!dn_load(s, type)) { dn_put_word(&d, 0); continue; }
+            size_t fields = 0;
+            for (const dn_field *field = type->fields; field; field = field->next) fields++;
+            dn_put_word(&d, 1); dn_put_text(&d, type->super);
+            dn_put_text(&d, type->element.name); dn_put_text(&d, type->element.ops);
+            dn_put_word(&d, fields);
+            for (const dn_field *field = type->fields; field; field = field->next) {
+                dn_put_text(&d, field->name); dn_put_text(&d, field->type.name); dn_put_text(&d, field->type.ops);
+                dn_put(&d, &field->size, sizeof(field->size));
+            }
+        }
+    }
+    return d.ok;
+}
 void sh_decl_native_schema_close(sh_decl_native_schema *s)
 {
     if (s) {

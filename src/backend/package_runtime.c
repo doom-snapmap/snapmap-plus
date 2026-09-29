@@ -50,6 +50,13 @@ static SRWLOCK g_refresh_lock = SRWLOCK_INIT;
 /* Native private identities survive provider retirement and failed activation.
  * Access is serialized with all provider compilation by g_refresh_lock. */
 static sh_package_link_history *g_link_history;
+/* An installed package a library rejected on its own bytes alone, with the
+ * exact source tree it read (see pr_exclusions_apply). */
+typedef struct pr_exclusion {
+    char *name;             /* sh_package.name */
+    unsigned char tree[32]; /* its source fingerprint when judged */
+    char *line;             /* the report line it produced */
+} pr_exclusion;
 /* Ownership changes are serialized by g_refresh_lock. Published pointers and
  * aliases change together under g_lock. A view borrows its catalog through a
  * retained library parent; every compilation/inventory remains independently
@@ -93,6 +100,8 @@ typedef struct pr_provider {
     char *rejections;
     char *unserved; /* Valid installed packages this build cannot link yet. */
     char *coverage; /* Accounted missing product coverage; packages still served. */
+    pr_exclusion *exclusions; /* Rejections decided on a package's own bytes alone. */
+    size_t exclusion_count;
     sh_package_key_groups *key_groups; /* Group codes its relocated values use. */
     volatile LONG references;
 } pr_provider;
@@ -169,11 +178,41 @@ void sh_package_runtime_note_sources_changed(void)
 {
     InterlockedExchange(&g_sources_changed, 1);
 }
+/* Discovery recordings later compiles of this process replay after exact
+ * validation (sh_package_source_memo). Compilations are serialized under
+ * g_refresh_lock; a capture that finds it borrowed records for itself. */
+static sh_package_source_memo *g_source_memo;
+/* Set when a published installation that no map load continues (the MPKG
+ * gate) requests the refresh that folds it into the library. */
+static volatile LONG g_install_published;
+void sh_package_runtime_note_install_published(void)
+{
+    InterlockedExchange(&g_install_published, 1);
+}
 
 static pr_provider *pr_retain(pr_provider *provider)
 {
     if (provider) InterlockedIncrement(&provider->references);
     return provider;
+}
+
+static void pr_exclusions_free(pr_exclusion *items, size_t count)
+{
+    for (size_t i = 0; items && i < count; i++) { free(items[i].name); free(items[i].line); }
+    free(items);
+}
+static int pr_exclusion_add(pr_exclusion **items, size_t *count, const char *name,
+    const unsigned char tree[32], const char *line)
+{
+    pr_exclusion *grown = *count < SIZE_MAX / sizeof(**items) - 1 ?
+        realloc(*items, (*count + 1) * sizeof(**items)) : NULL;
+    if (!grown) return 0;
+    *items = grown;
+    pr_exclusion *item = grown + *count;
+    item->name = _strdup(name); item->line = _strdup(line ? line : "");
+    if (!item->name || !item->line) { free(item->name); free(item->line); return 0; }
+    memcpy(item->tree, tree, 32); (*count)++;
+    return 1;
 }
 
 static void pr_release(pr_provider *provider)
@@ -205,6 +244,7 @@ static void pr_release(pr_provider *provider)
     free(provider->audio_sources);
     pr_release(provider->parent); free(provider->data_root); free(provider->rejections);
     free(provider->unserved); free(provider->coverage); free(provider->key_groups); free(provider->unmodified_types);
+    pr_exclusions_free(provider->exclusions, provider->exclusion_count);
 #ifdef PR_NATIVE_SPAWN
     sh_spawn_keys_program_release(provider->spawn_program);
 #endif
@@ -549,6 +589,79 @@ static int pr_cache_directory(const char *root, char *out, size_t capacity)
     return 1;
 }
 
+/* The same state path when package-cache already exists, creating nothing:
+ * reading or removing state never creates a cache. Ancestors are checked like
+ * pr_cache_directory (no redirected directory). 1 present, 0 absent/refused. */
+static int pr_cache_state_existing(const char *root, const char *name, char *out, size_t capacity)
+{
+    char cache[4096];
+    wchar_t *wide = sh_package_source_wide_path(root);
+    int ok = 1;
+    if (!wide) return 0;
+    for (size_t i = 7; ; i++) if (!wide[i] || wide[i] == L'\\') {
+        wchar_t saved = wide[i];
+        DWORD attributes;
+        wide[i] = 0; attributes = GetFileAttributesW(wide); wide[i] = saved;
+        if (attributes == INVALID_FILE_ATTRIBUTES || !(attributes & FILE_ATTRIBUTE_DIRECTORY) ||
+            (attributes & FILE_ATTRIBUTE_REPARSE_POINT)) { ok = 0; break; }
+        if (!saved) break;
+    }
+    free(wide);
+    if (!ok || snprintf(cache, sizeof(cache), "%s/package-cache", root) >= (int)sizeof(cache)) return 0;
+    wide = sh_package_source_wide_path(cache);
+    DWORD attributes = wide ? GetFileAttributesW(wide) : INVALID_FILE_ATTRIBUTES;
+    free(wide);
+    if (attributes == INVALID_FILE_ATTRIBUTES || !(attributes & FILE_ATTRIBUTE_DIRECTORY) ||
+        (attributes & FILE_ATTRIBUTE_REPARSE_POINT)) return 0;
+    int written = snprintf(out, capacity, "%s/%s", cache, name);
+    return written > 0 && (size_t)written < capacity;
+}
+/* Small derived-state files (remembered decisions, preparation hints) live in
+ * package-cache itself, beside the content-addressed resources directory. */
+static int pr_cache_state(const char *root, const char *name, char *out, size_t capacity)
+{
+    char directory[4096];
+    size_t n;
+    if (!pr_cache_directory(root, directory, sizeof(directory)) || (n = strlen(directory)) < 10 ||
+        strcmp(directory + n - 10, "/resources")) return 0;
+    directory[n - 10] = 0;
+    int written = snprintf(out, capacity, "%s/%s", directory, name);
+    return written > 0 && (size_t)written < capacity;
+}
+/* Whole-file state I/O with wide paths: the data root may be any Unicode path. */
+static char *pr_state_read(const char *path, size_t limit, size_t *length)
+{
+    wchar_t *wide = sh_package_source_wide_path(path);
+    FILE *file = NULL;
+    char *text = NULL;
+    *length = 0;
+    if (!wide) return NULL;
+    if (!_wfopen_s(&file, wide, L"rb") && file) {
+        size_t n = 0;
+        text = malloc(limit);
+        if (text) n = fread(text, 1, limit, file);
+        if (!text || n >= limit || ferror(file)) { free(text); text = NULL; }
+        else *length = n;
+        fclose(file);
+    }
+    free(wide); return text;
+}
+static int pr_state_write(const char *path, const char *text)
+{
+    char temporary[4400];
+    wchar_t *wide = NULL, *wide_temporary = NULL;
+    FILE *file = NULL;
+    int ok = 0;
+    if (snprintf(temporary, sizeof(temporary), "%s.tmp", path) >= (int)sizeof(temporary)) return 0;
+    wide = sh_package_source_wide_path(path); wide_temporary = sh_package_source_wide_path(temporary);
+    if (wide && wide_temporary && !_wfopen_s(&file, wide_temporary, L"wb") && file) {
+        size_t size = strlen(text);
+        ok = fwrite(text, 1, size, file) == size;
+        ok = fclose(file) == 0 && ok;
+        if (!ok || !MoveFileExW(wide_temporary, wide, MOVEFILE_REPLACE_EXISTING)) { DeleteFileW(wide_temporary); ok = 0; }
+    }
+    free(wide); free(wide_temporary); return ok;
+}
 static int pr_cache_resources(sh_package_compilation *compiled, const char *root,
                                char *error, size_t capacity)
 {
@@ -663,6 +776,213 @@ static int pr_unserved(char **report, const sh_package *package, const char *rea
         package->root, reason);
     backend_log(grown + used);
     return 1;
+}
+static int pr_report_line(char **report, const char *line)
+{
+    size_t used = *report ? strlen(*report) : 0, add = strlen(line) + 1;
+    char *grown;
+    if (used > SIZE_MAX - add || !(grown = realloc(*report, used + add))) return 0;
+    *report = grown; memcpy(grown + used, line, add);
+    backend_log(line);
+    return 1;
+}
+/* The library rejected these packages on their own bytes alone
+ * (sh_package_compile_environment.invalid_own_bytes): a file identity,
+ * declaration or contribution the product grammar cannot parse, or a
+ * descriptor setting this build does not support. Library scopes compile
+ * independently, so no peer, shared collection or map takes part in that
+ * decision; the product build, the game's archives and its reflection are
+ * fixed for the process, and failed reads or allocations never reject
+ * content. The same tree therefore gets the same decision: it is left out
+ * again with its report instead of being compiled a second time. Any change
+ * to its files, and every new process, judges it afresh. Decisions that also
+ * read stock composition, readers, coverage, native preparation or peers
+ * (not served, conflicts, composition failures) are never remembered. */
+static int pr_exclusions_apply(const pr_exclusion *remembered, size_t remembered_count, int earlier_process,
+    sh_package_sources *sources, sh_package_sources *inventory, pr_exclusion **out, size_t *out_count,
+    char **rejections)
+{
+    size_t reused = 0;
+    for (size_t j = 0; j < remembered_count; j++) {
+        const pr_exclusion *item = remembered + j;
+        size_t i = 0;
+        while (i < sources->package_count && (strcmp(sources->packages[i].name, item->name) ||
+            memcmp(sources->fingerprints[i], item->tree, 32))) i++;
+        if (i == sources->package_count) continue;
+        /* Invalid content establishes no installed availability. */
+        if (inventory) for (size_t k = 0; k < inventory->package_count; k++)
+            if (!strcmp(inventory->packages[k].name, item->name)) {
+                if (!sh_package_sources_remove(inventory, k)) return 0;
+                break;
+            }
+        if (!pr_report_line(rejections, item->line) ||
+            !pr_exclusion_add(out, out_count, item->name, item->tree, item->line) ||
+            !sh_package_sources_remove(sources, i)) return 0;
+        reused++;
+    }
+    if (reused) {
+        char line[200];
+        snprintf(line, sizeof(line), "package library: %zu unchanged package(s) left out as before%s, not compiled again",
+            reused, earlier_process ? " (remembered by an earlier process of this product and game build)" : "");
+        backend_log(line);
+    }
+    return 1;
+}
+#ifdef SH_PACKAGE_RUNTIME_TESTING
+static char g_test_build_identity[256] = "game test\nproduct test\n";
+void sh_package_runtime_test_build_identity(const char *identity)
+{ snprintf(g_test_build_identity, sizeof(g_test_build_identity), "%s", identity ? identity : ""); }
+static char g_test_image_slot[16] = "vk";
+void sh_package_runtime_test_image_slot(const char *slot)
+{ snprintf(g_test_image_slot, sizeof(g_test_image_slot), "%s", slot ? slot : ""); }
+#endif
+/* The images whose code makes these decisions: the game executable and this
+ * product module, by link timestamp and image size. */
+static int pr_build_identity(char *out, size_t capacity)
+{
+#ifdef SH_PACKAGE_RUNTIME_TESTING
+    int n = snprintf(out, capacity, "%s", g_test_build_identity);
+#else
+    HMODULE self = NULL;
+    const unsigned char *game = (const unsigned char *)GetModuleHandleW(NULL);
+    if (!game || !GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            (LPCWSTR)(void *)pr_build_identity, &self) || !self) return 0;
+    const unsigned char *product = (const unsigned char *)self;
+    const IMAGE_NT_HEADERS *g = (const IMAGE_NT_HEADERS *)(game + ((const IMAGE_DOS_HEADER *)game)->e_lfanew);
+    const IMAGE_NT_HEADERS *p = (const IMAGE_NT_HEADERS *)(product + ((const IMAGE_DOS_HEADER *)product)->e_lfanew);
+    int n = snprintf(out, capacity, "game %08lx %08lx\nproduct %08lx %08lx\n",
+        (unsigned long)g->FileHeader.TimeDateStamp, (unsigned long)g->OptionalHeader.SizeOfImage,
+        (unsigned long)p->FileHeader.TimeDateStamp, (unsigned long)p->OptionalHeader.SizeOfImage);
+#endif
+    return n > 0 && (size_t)n < capacity;
+}
+/* A player alternates between the two renderers' executables, so each keeps
+ * its own memo: a start on one never discards the other's decisions. An
+ * unknown renderer remembers nothing. */
+static int pr_exclusions_name(char *name, size_t capacity)
+{
+#ifdef SH_PACKAGE_RUNTIME_TESTING
+    const char *slot = g_test_image_slot;
+#else
+    int vulkan = sh_host_is_vulkan();
+    const char *slot = vulkan > 0 ? "vk" : vulkan == 0 ? "gl" : "";
+#endif
+    int n = snprintf(name, capacity, "own-bytes-exclusions-%s.txt", slot);
+    return *slot && n > 0 && (size_t)n < capacity;
+}
+/* Own-bytes decisions outlive the process for the same product and game
+ * images (pr_exclusions_apply): the same tree then reaches the same decision,
+ * so a later process leaves it out without compiling it again. A different
+ * image, a changed tree, or a missing, foreign, truncated or corrupt file is
+ * judged afresh. Only this memo's own list is stored; nothing else is. */
+static int pr_exclusions_file(const char *data_root, char *path, size_t path_capacity,
+    char *header, size_t header_capacity)
+{
+    char identity[256], name[64];
+    if (!pr_exclusions_name(name, sizeof(name)) || !pr_cache_state(data_root, name, path, path_capacity) ||
+        !pr_build_identity(identity, sizeof(identity))) return 0;
+    int m = snprintf(header, header_capacity, "snapmap-plus own-bytes exclusions v1\n%s", identity);
+    return m > 0 && (size_t)m < header_capacity;
+}
+static int pr_unhex(const char *text, size_t length, unsigned char *out)
+{
+    for (size_t i = 0; i < length / 2; i++) {
+        int hi = text[2 * i], lo = text[2 * i + 1];
+        hi = hi >= '0' && hi <= '9' ? hi - '0' : hi >= 'a' && hi <= 'f' ? hi - 'a' + 10 : -1;
+        lo = lo >= '0' && lo <= '9' ? lo - '0' : lo >= 'a' && lo <= 'f' ? lo - 'a' + 10 : -1;
+        if (hi < 0 || lo < 0) return 0;
+        out[i] = (unsigned char)(hi * 16 + lo);
+    }
+    return !(length % 2);
+}
+static void pr_exclusions_store(const char *data_root, const pr_exclusion *items, size_t count)
+{
+    char path[4352], header[320], name[64];
+    size_t length = 1;
+    wchar_t *wide;
+    /* The unslotted memo of earlier builds is never read again. */
+    if (pr_cache_state_existing(data_root, "own-bytes-exclusions.txt", path, sizeof(path)) &&
+        (wide = sh_package_source_wide_path(path)) != NULL) { DeleteFileW(wide); free(wide); }
+    if (!count) {
+        /* Nothing to remember: remove an old memo, and create no state. */
+        if (pr_exclusions_name(name, sizeof(name)) && pr_cache_state_existing(data_root, name, path, sizeof(path)) &&
+            (wide = sh_package_source_wide_path(path)) != NULL) { DeleteFileW(wide); free(wide); }
+        return;
+    }
+    for (size_t i = 0; i < count; i++) length += 2 * (strlen(items[i].name) + 32 + strlen(items[i].line)) + 3;
+    char *body = malloc(length), *at = body, *text = NULL;
+    if (!body || !pr_exclusions_file(data_root, path, sizeof(path), header, sizeof(header))) { free(body); return; }
+    for (size_t i = 0; i < count; i++) {
+        const unsigned char *fields[3] = {(const unsigned char *)items[i].name, items[i].tree,
+            (const unsigned char *)items[i].line};
+        size_t sizes[3] = {strlen(items[i].name), 32, strlen(items[i].line)};
+        for (int f = 0; f < 3; f++) {
+            for (size_t k = 0; k < sizes[f]; k++) { snprintf(at, 3, "%02x", fields[f][k]); at += 2; }
+            *at++ = f < 2 ? '\t' : '\n';
+        }
+    }
+    *at = 0;
+    text = sh_package_framed_format(header, body); free(body);
+    if (text) (void)pr_state_write(path, text);
+    free(text);
+}
+static void pr_exclusions_load(const char *data_root, pr_exclusion **items, size_t *count)
+{
+    char path[4352], header[320], cache[4096];
+    size_t length = 0, body_length = 0;
+    *items = NULL; *count = 0;
+    /* No package-cache yet: nothing was remembered (and none is created). */
+    char identity[256], name[64];
+    int m;
+    (void)cache;
+    if (!pr_exclusions_name(name, sizeof(name)) || !pr_cache_state_existing(data_root, name, path, sizeof(path)) ||
+        !pr_build_identity(identity, sizeof(identity)) ||
+        (m = snprintf(header, sizeof(header), "snapmap-plus own-bytes exclusions v1\n%s", identity)) <= 0 ||
+        (size_t)m >= sizeof(header)) return;
+    char *text = pr_state_read(path, 1 << 22, &length);
+    if (!text) return;
+    const char *body = sh_package_framed_body(text, length, header, &body_length), *end = body + body_length;
+    int ok = body != NULL;
+    for (const char *p = body; ok && p < end; ) {
+        const char *stop = memchr(p, '\n', (size_t)(end - p)), *tab1, *tab2;
+        ok = stop && (tab1 = memchr(p, '\t', (size_t)(stop - p))) && (tab2 = memchr(tab1 + 1, '\t', (size_t)(stop - tab1 - 1)));
+        if (!ok) break;
+        size_t n = (size_t)(tab1 - p), t = (size_t)(tab2 - tab1 - 1), l = (size_t)(stop - tab2 - 1);
+        char *name = malloc(n / 2 + 1), *line = malloc(l / 2 + 1);
+        unsigned char tree[32];
+        ok = name && line && n && n % 2 == 0 && t == 64 && l % 2 == 0 && pr_unhex(p, n, (unsigned char *)name) &&
+            pr_unhex(tab1 + 1, t, tree) && pr_unhex(tab2 + 1, l, (unsigned char *)line);
+        if (ok) {
+            name[n / 2] = 0; line[l / 2] = 0;
+            ok = strlen(name) == n / 2 && strlen(line) == l / 2 && pr_exclusion_add(items, count, name, tree, line);
+        }
+        free(name); free(line);
+        p = stop + 1;
+    }
+    free(text);
+    if (!ok) {
+        pr_exclusions_free(*items, *count); *items = NULL; *count = 0;
+        backend_log("package library: remembered own-bytes exclusions not used (another product or game build, "
+            "or an incomplete or corrupt record); packages are judged afresh");
+    }
+}
+/* Leave one invalid package out of this library compile: it establishes no
+ * installed availability, reports why, and is remembered when the decision
+ * read only its own bytes (pr_exclusions_apply). */
+static int pr_reject_invalid(sh_package_sources *sources, sh_package_sources *inventory, size_t package,
+    int own_bytes, char **rejections, pr_exclusion **exclusions, size_t *exclusion_count, const char *reason)
+{
+    if (package >= sources->package_count) return 0;
+    if (inventory) for (size_t i = 0; i < inventory->package_count; i++)
+        if (!strcmp(inventory->packages[i].name, sources->packages[package].name)) {
+            if (!sh_package_sources_remove(inventory, i)) return 0;
+            break;
+        }
+    size_t reported = *rejections ? strlen(*rejections) : 0;
+    return pr_rejected(rejections, &sources->packages[package], reason) &&
+        (!own_bytes || pr_exclusion_add(exclusions, exclusion_count, sources->packages[package].name,
+            sources->fingerprints[package], *rejections + reported)) &&
+        sh_package_sources_remove(sources, package);
 }
 
 /* A path without its own native identity, such as a shared shader include,
@@ -949,6 +1269,138 @@ int sh_package_runtime_test_prepare_native_sources(sh_package_native_assets *ass
 #endif
 #endif
 
+#ifndef SH_PACKAGE_RUNTIME_TESTING
+/* Cooked OpenGL programs name further programs (program-typed parameters)
+ * that a compilation reaches only by reading the cooked output, one level per
+ * full compile. Make now the requests the next compile would make on reaching
+ * them, so one restart consumes the whole reference closure. A failed
+ * follow-up drops captured output like any failed preparation: the compile
+ * then requests what it needs itself, so the caller forgets the completed
+ * task identities with it (0 returned) and follows nothing further. */
+static int pr_follow_native_sources(sh_package_native_assets *assets, uint64_t **tasks, size_t *task_count)
+{
+    uint64_t *followed = NULL;
+    size_t followed_count = 0, queued, total = 0;
+    int rounds = 0, ok = 1;
+    char error[1024] = "", line[1300];
+    while (rounds < 32 && (queued = sh_package_native_assets_shader_follow(assets)) != 0) {
+        rounds++; total += queued;
+        if (!pr_prepare_native_sources(assets, &followed, &followed_count, error, sizeof(error))) {
+            if (tasks && task_count) { free(*tasks); *tasks = NULL; *task_count = 0; }
+            ok = 0; break;
+        }
+    }
+    free(followed);
+    if (total) {
+        snprintf(line, sizeof(line), "shader preparation followed %zu program(s) named by cooked programs in %d round(s)%s%s",
+            total, rounds, ok ? "" : "; not prepared, the compile requests what it needs: ", ok ? "" : error);
+        backend_log(line);
+    }
+    return ok;
+}
+/* Installed inventory identity for the preparation hint: package names and
+ * source tree fingerprints, in name order. */
+static int pr_inventory_digest(const sh_package_sources *sources, unsigned char digest[32])
+{
+    size_t count = sources ? sources->package_count : 0, length = 0;
+    size_t *order = calloc(count ? count : 1, sizeof(*order));
+    unsigned char *buffer = NULL, *at;
+    sh_package_file_identity identity;
+    int ok = 0;
+    if (!order || (count && !sources->fingerprints)) goto done;
+    for (size_t i = 0; i < count; i++) {
+        size_t j = i;
+        while (j && strcmp(sources->packages[order[j - 1]].name, sources->packages[i].name) > 0) { order[j] = order[j - 1]; j--; }
+        order[j] = i; length += strlen(sources->packages[i].name) + 1 + 32;
+    }
+    if (!(buffer = malloc(length ? length : 1))) goto done;
+    at = buffer;
+    for (size_t i = 0; i < count; i++) {
+        size_t n = strlen(sources->packages[order[i]].name) + 1;
+        memcpy(at, sources->packages[order[i]].name, n); at += n;
+        memcpy(at, sources->fingerprints[order[i]], 32); at += 32;
+    }
+    ok = sh_package_bytes_identity(buffer, length, &identity);
+    if (ok) memcpy(digest, identity.digest, 32);
+done:
+    free(buffer); free(order); return ok;
+}
+/* Shader preparation hint: the stock shader objects the previous installed-
+ * library compile needed (sh_package_native_assets_shader_needs). It belongs to
+ * exactly one renderer, game image, product build and installed inventory; any
+ * other header, and any truncated or corrupt text, is not used. A used hint
+ * only prepares ahead of the first library compile of a session: the compile
+ * still verifies every object and requests what it needs exactly as without
+ * one, so a missing or rejected hint costs only the discovery it would save. */
+static int pr_shader_hint(const char *data_root, const unsigned char inventory[32],
+    char *path, size_t path_capacity, char *header, size_t header_capacity)
+{
+    char identity[65], build[256];
+    int vulkan = sh_host_is_vulkan();
+    if (vulkan < 0 || !pr_cache_state(data_root, vulkan ? "shader-preparation-vk.txt" : "shader-preparation-gl.txt",
+            path, path_capacity) || !pr_build_identity(build, sizeof(build))) return 0;
+    for (size_t i = 0; i < 32; i++) snprintf(identity + 2 * i, 3, "%02x", inventory[i]);
+    int n = 1;
+    int m = snprintf(header, header_capacity, "snapmap-plus shader preparation v2\nrenderer %s\n%sinventory %s\n",
+        vulkan ? "vulkan" : "opengl", build, identity);
+    return n > 0 && (size_t)n < path_capacity && m > 0 && (size_t)m < header_capacity;
+}
+typedef struct pr_prewarm_walk { sh_package_native_assets *assets; size_t listed, queued, stale; } pr_prewarm_walk;
+static int pr_prewarm_one(void *context, const char *family, const char *name)
+{
+    pr_prewarm_walk *walk = context;
+    int status = sh_package_native_assets_shader_prewarm(walk->assets, family, name);
+    walk->listed++;
+    if (status > 0) walk->queued++;
+    else if (status < 0) walk->stale++;
+    return 1;
+}
+static void pr_shader_prewarm(sh_package_native_assets *assets, const char *data_root, const unsigned char inventory[32])
+{
+    char path[4352], header[512], error[1024] = "", line[1400];
+    size_t length = 0;
+    pr_prewarm_walk walk = {assets, 0, 0, 0};
+    if (!pr_shader_hint(data_root, inventory, path, sizeof(path), header, sizeof(header))) return;
+    wchar_t *wide = sh_package_source_wide_path(path);
+    int present = wide && GetFileAttributesW(wide) != INVALID_FILE_ATTRIBUTES;
+    free(wide);
+    if (!present) {
+        backend_log("shader preparation: no hint yet for this renderer; the library compile discovers what it needs");
+        return;
+    }
+    char *text = pr_state_read(path, 1 << 20, &length);
+    int entries = text ? sh_package_shader_hint_read(text, length, header, pr_prewarm_one, &walk) : -1;
+    free(text);
+    if (entries < 0) {
+        backend_log("shader preparation hint not used: it belongs to another renderer, game, product build or "
+            "installed inventory, or is incomplete; the library compile discovers what it needs");
+        return;
+    }
+    uint64_t *tasks = NULL;
+    size_t task_count = 0;
+    int prepared = !walk.queued || pr_prepare_native_sources(assets, &tasks, &task_count, error, sizeof(error));
+    free(tasks);
+    if (prepared && walk.queued) prepared = pr_follow_native_sources(assets, NULL, NULL);
+    snprintf(line, sizeof(line), "shader preparation ahead of the first library compile: %zu of %zu hinted object(s) "
+        "queued, %zu without an installed original%s%s", walk.queued, walk.listed, walk.stale,
+        prepared ? "" : "; not prepared, the compile requests what it needs: ", prepared ? "" : error);
+    backend_log(line);
+}
+static void pr_shader_hint_write(sh_package_native_assets *assets, const char *data_root, const unsigned char inventory[32])
+{
+    char path[4352], header[512];
+    char *needs = sh_package_native_assets_shader_needs(assets), *text = NULL;
+    if (!needs || !pr_shader_hint(data_root, inventory, path, sizeof(path), header, sizeof(header)) ||
+        !(text = sh_package_shader_hint_format(header, needs))) { free(needs); free(text); return; }
+    (void)pr_state_write(path, text);
+    free(needs); free(text);
+}
+#endif
+
+/* authoring_increment: an installation's newly captured packages, or an
+ * installed-library refresh that must only add packages to previous (else
+ * *composition_failed is -1 and nothing is compiled). */
+enum { PR_INCREMENT_INSTALL = 1, PR_INCREMENT_REFRESH = 2 };
 static pr_provider *pr_prepare_deliveries(const char *data_root, const char *source_root,
     const pr_provider *previous, int product_only, int authoring_increment, pr_inventory **inventory_out,
     int *composition_failed, const sh_package_provenance *contexts,
@@ -974,13 +1426,19 @@ static pr_provider *pr_prepare_deliveries(const char *data_root, const char *sou
     sh_audio_id_lease *audio_ids = NULL;
     uint64_t *prepared_tasks = NULL;
     size_t prepared_task_count = 0;
+    int fresh_assets = 0, hint_ready = 0, following = 1;
+    unsigned char hint_inventory[32];
+    sh_package_native_assets *recording = NULL;
 #else
     (void)string_peer;
 #endif
     DWORD n;
     size_t default_index;
     char *slash, *rejections = NULL, *unserved = NULL;
+    pr_exclusion *exclusions = NULL;
+    size_t exclusion_count = 0;
     size_t invalid_package = SIZE_MAX, unserved_package = SIZE_MAX;
+    int invalid_own_bytes = 0;
     sh_package_owners conflicted = {0};
     sh_package_library isolated = {0};
     int library_output = 0;
@@ -1022,6 +1480,12 @@ static pr_provider *pr_prepare_deliveries(const char *data_root, const char *sou
         sh_package_sources_scan(source_root, error, sizeof(error)) :
         sh_package_sources_scan_local(data_root, pr_rejected, &rejections, error, sizeof(error));
     if (!sources) goto done;
+#ifndef SH_PACKAGE_RUNTIME_TESTING
+    /* The inventory as scanned, before anything is left out, identifies the
+     * shader preparation hint this compile reads and writes. */
+    if (!source_root && !product_only && !authoring_increment)
+        hint_ready = pr_inventory_digest(sources, hint_inventory);
+#endif
     if (use_deliveries) {
         if (!source_root || !(original_bundles = pr_match_bundles(sources, deliveries,
             delivery_count, error, sizeof(error)))) goto done;
@@ -1063,6 +1527,7 @@ static pr_provider *pr_prepare_deliveries(const char *data_root, const char *sou
             sh_package_native_assets_retain(native_owner->native_assets) : sh_package_native_assets_open(doom_root);
         if (!native_assets) goto done;
         if (!native_owner || !native_owner->native_assets) {
+            fresh_assets = 1;
             if (!sh_package_native_assets_configure_consumers(native_assets,
                 sh_resource_graph_native_consumer_ready)) goto done;
             int renderer = sh_host_is_vulkan();
@@ -1105,6 +1570,7 @@ static pr_provider *pr_prepare_deliveries(const char *data_root, const char *sou
 #endif
     if (!source_root && !product_only) {
         environment.invalid_package = &invalid_package;
+        environment.invalid_own_bytes = &invalid_own_bytes;
         environment.unserved_package = &unserved_package;
         environment.conflicted_packages = &conflicted;
     }
@@ -1113,11 +1579,42 @@ static pr_provider *pr_prepare_deliveries(const char *data_root, const char *sou
         inventory_sources = sh_package_sources_join(sources, &empty, error, sizeof(error));
         if (!inventory_sources) goto done;
     }
+    if (!source_root && !product_only && previous && previous->exclusion_count &&
+        !pr_exclusions_apply(previous->exclusions, previous->exclusion_count, 0, sources, inventory_sources,
+            &exclusions, &exclusion_count, &rejections)) {
+        snprintf(error, sizeof(error), "cannot retain packages left out for their own content"); goto done;
+    }
+    if (!source_root && !product_only && !authoring_increment && !previous) {
+        pr_exclusion *remembered = NULL;
+        size_t remembered_count = 0;
+        pr_exclusions_load(data_root, &remembered, &remembered_count);
+        int applied = !remembered_count || pr_exclusions_apply(remembered, remembered_count, 1, sources,
+            inventory_sources, &exclusions, &exclusion_count, &rejections);
+        pr_exclusions_free(remembered, remembered_count);
+        if (!applied) { snprintf(error, sizeof(error), "cannot retain packages left out for their own content"); goto done; }
+    }
+    int authoring_linked = 0;
     if (authoring_increment) {
         int linked_sources = reflection != 0;
 #ifdef SH_PACKAGE_RUNTIME_TESTING
         linked_sources = sh_package_runtime_test_source_inputs(NULL, &reflection, NULL, NULL);
 #endif
+        if (linked_sources && authoring_increment == PR_INCREMENT_REFRESH) {
+            /* A refresh reuses the retained library only when it merely adds
+             * packages: a removed or changed one needs the whole library. */
+            for (size_t j = 0; previous && j < previous->sources->package_count; j++) {
+                int kept = 0;
+                for (size_t i = 0; i < sources->package_count && !kept; i++)
+                    kept = !strcmp(sources->packages[i].name, previous->sources->packages[j].name) &&
+                        !memcmp(sources->fingerprints[i], previous->sources->fingerprints[j], 32);
+                if (!kept) {
+                    if (composition_failed) *composition_failed = -1;
+                    snprintf(error, sizeof(error), "installed package %s was removed or changed",
+                        previous->sources->packages[j].name);
+                    goto done;
+                }
+            }
+        }
         if (linked_sources) {
             /* Keep the complete captured inventory above. Only newly captured
              * local trees need authoring output; old immutable native bindings
@@ -1133,18 +1630,14 @@ static pr_provider *pr_prepare_deliveries(const char *data_root, const char *sou
                     }
                 if (present && !sh_package_sources_remove(sources, i - 1)) goto done;
             }
-            for (size_t i = 0; i < sources->component_count; i++) {
-                const sh_package_component *component = sources->components + i;
-                const unsigned char *tree = sh_package_source_tree(sources, component->owner);
-                if (!tree || sh_package_provenance_context_add(&authoring_contexts,
-                    SH_PACKAGE_CONTEXT_ISOLATED, (const unsigned char (*)[32])tree, 1,
-                    component->relative) == SIZE_MAX) goto done;
-            }
-            contexts = authoring_contexts.context_count ? &authoring_contexts : NULL;
+            authoring_linked = 1;
             environment.previous = NULL;
-            environment.invalid_package = NULL; environment.unserved_package = NULL;
+            /* Each new component compiles alone (an isolated context), so a
+             * failure of its own source or product coverage names its package,
+             * which is left out or not served as a whole-library compile would;
+             * healthy new peers continue. No installed owner takes part, so
+             * none can conflict. Environment failures still blame nobody. */
             environment.conflicted_packages = NULL;
-            if (!contexts) environment.builtin_count = 0;
         }
     }
     if (source_root && !contexts && sources->package_count
@@ -1192,7 +1685,26 @@ static pr_provider *pr_prepare_deliveries(const char *data_root, const char *sou
         sh_package_compilation_free(compiled); compiled = NULL;
         contexts = &historical;
     }
+#ifndef SH_PACKAGE_RUNTIME_TESTING
+    if (native_assets && hint_ready) {
+        if (fresh_assets) pr_shader_prewarm(native_assets, data_root, hint_inventory);
+        recording = native_assets; sh_package_native_assets_shader_record(recording, 1);
+    }
+#endif
     for (;;) {
+        if (authoring_linked) {
+            /* One isolated context per new component, again after any is left out. */
+            sh_package_provenance_free(&authoring_contexts);
+            for (size_t i = 0; i < sources->component_count; i++) {
+                const sh_package_component *component = sources->components + i;
+                const unsigned char *tree = sh_package_source_tree(sources, component->owner);
+                if (!tree || sh_package_provenance_context_add(&authoring_contexts,
+                    SH_PACKAGE_CONTEXT_ISOLATED, (const unsigned char (*)[32])tree, 1,
+                    component->relative) == SIZE_MAX) goto done;
+            }
+            contexts = authoring_contexts.context_count ? &authoring_contexts : NULL;
+            if (!contexts) environment.builtin_count = 0;
+        }
         if (contexts
 #ifndef SH_PACKAGE_RUNTIME_TESTING
             || (!source_root && !product_only && sources->component_count)
@@ -1203,6 +1715,8 @@ static pr_provider *pr_prepare_deliveries(const char *data_root, const char *sou
             sh_decl_registry_source registry = {0};
             pr_original_source originals = {baseline, baseline_context, native_assets};
             sh_package_library_native native = sh_package_native_assets_adapter(native_assets);
+            if (!g_source_memo) g_source_memo = sh_package_source_memo_open(); /* Optional. */
+            native.source.memo = g_source_memo;
 #ifndef SH_PACKAGE_RUNTIME_TESTING
             native.private_keys = sh_spawn_keys_active();
 #else
@@ -1265,6 +1779,7 @@ static pr_provider *pr_prepare_deliveries(const char *data_root, const char *sou
                 strcpy_s(error, sizeof(error), scope_error);
             }
             snprintf(line, sizeof(line), "package library compile (%s): %s in %llu ms%s%s",
+                authoring_increment == PR_INCREMENT_REFRESH ? "installed library increment" :
                 authoring_increment ? "local authoring" : contexts ? "map contexts" : "installed library",
                 linked ? "linked" : "failed",
                 (unsigned long long)(GetTickCount64() - started), linked ? "" : ": ", linked ? "" : error);
@@ -1277,6 +1792,13 @@ static pr_provider *pr_prepare_deliveries(const char *data_root, const char *sou
                 isolated.contribution_phases[0] ? " (contributions: " : "", isolated.contribution_phases,
                 isolated.contribution_phases[0] ? ")" : "");
             backend_log(line);
+            for (const char *at = isolated.repeated_work; *at;) {
+                const char *end = strchr(at, '\n');
+                size_t length = end ? (size_t)(end - at) : strlen(at);
+                snprintf(line, sizeof(line), "package library repeated work: %.*s", (int)length, at);
+                backend_log(line);
+                at += length + (end ? 1 : 0);
+            }
             /* Accounted coverage gaps help diagnose a later refusal too. */
             if (!linked && isolated.coverage) backend_log(isolated.coverage);
             if (linked) {
@@ -1289,8 +1811,17 @@ static pr_provider *pr_prepare_deliveries(const char *data_root, const char *sou
         if (sh_package_native_assets_shader_pending(native_assets)) {
             /* A missing native construction receipt is environmental work,
              * never malformed source or a conflict between package owners. */
+            char reason[sizeof(error)];
+            strcpy_s(reason, sizeof(reason), error);
             if (!pr_prepare_native_sources(native_assets, &prepared_tasks, &prepared_task_count,
                 error, sizeof(error))) goto done;
+            if (following) following = pr_follow_native_sources(native_assets, &prepared_tasks, &prepared_task_count);
+            /* A rejection read from the package's own bytes does not depend on
+             * native shader state: act on it now instead of compiling it again
+             * after the preparation. Other attributions are judged afresh. */
+            if (invalid_package != SIZE_MAX && invalid_own_bytes &&
+                !pr_reject_invalid(sources, inventory_sources, invalid_package, 1,
+                    &rejections, &exclusions, &exclusion_count, reason)) goto done;
             sh_package_library_free(&isolated);
             invalid_package = unserved_package = SIZE_MAX; sh_package_owners_free(&conflicted);
             error[0] = 0;
@@ -1306,17 +1837,11 @@ static pr_provider *pr_prepare_deliveries(const char *data_root, const char *sou
             continue;
         }
         if (invalid_package != SIZE_MAX) {
-            if (invalid_package >= sources->package_count) goto done;
             /* Invalid content cannot establish installed availability. Valid
              * peers that only disagree retain their physical inventory: a
              * map's authored policy may use these files without reinstalling. */
-            if (inventory_sources) for (size_t i = 0; i < inventory_sources->package_count; i++)
-                if (!strcmp(inventory_sources->packages[i].name, sources->packages[invalid_package].name)) {
-                    if (!sh_package_sources_remove(inventory_sources, i)) goto done;
-                    break;
-                }
-            if (!pr_rejected(&rejections, &sources->packages[invalid_package], error) ||
-                !sh_package_sources_remove(sources, invalid_package)) goto done;
+            if (!pr_reject_invalid(sources, inventory_sources, invalid_package, invalid_own_bytes,
+                &rejections, &exclusions, &exclusion_count, error)) goto done;
             continue;
         }
         if (!sh_package_owners_count(&conflicted)) break;
@@ -1395,6 +1920,12 @@ static pr_provider *pr_prepare_deliveries(const char *data_root, const char *sou
     provider->consumers = isolated.consumers; isolated.consumers = NULL;
     provider->audio = isolated.audio; isolated.audio = NULL;
     provider->audio_originals = audio_originals; audio_originals = NULL;
+#ifndef SH_PACKAGE_RUNTIME_TESTING
+    if (recording) {
+        sh_package_native_assets_shader_record(recording, 0); recording = NULL;
+        pr_shader_hint_write(native_assets, data_root, hint_inventory);
+    }
+#endif
     provider->native_assets = native_assets; native_assets = NULL;
 #ifndef SH_PACKAGE_RUNTIME_TESTING
     provider->strings = strings; strings = NULL;
@@ -1402,6 +1933,10 @@ static pr_provider *pr_prepare_deliveries(const char *data_root, const char *sou
 #endif
     provider->references = 1;
     provider->rejections = rejections; rejections = NULL;
+    if (!source_root && !product_only && !authoring_increment)
+        pr_exclusions_store(data_root, exclusions, exclusion_count);
+    provider->exclusions = exclusions; provider->exclusion_count = exclusion_count;
+    exclusions = NULL; exclusion_count = 0;
     provider->unserved = unserved; unserved = NULL;
     provider->coverage = isolated.coverage; isolated.coverage = NULL;
     if (provider->coverage) backend_log(provider->coverage);
@@ -1418,6 +1953,9 @@ done:
 #endif
     sh_package_library_free(&isolated);
     sh_audio_originals_close(audio_originals);
+#ifndef SH_PACKAGE_RUNTIME_TESTING
+    if (recording) sh_package_native_assets_shader_record(recording, 0);
+#endif
     sh_package_native_assets_close(native_assets);
     sh_decl_native_schema_close(native_schema);
     sh_package_sources_free(inventory_sources); sh_package_owners_free(&conflicted);
@@ -1427,7 +1965,7 @@ done:
     sh_strids_reservation_free(strings);
     free(prepared_tasks);
 #endif
-    free(rejections); free(unserved);
+    free(rejections); free(unserved); pr_exclusions_free(exclusions, exclusion_count);
     return provider;
 }
 
@@ -2392,6 +2930,69 @@ static pr_provider *pr_view(pr_provider *library, const pr_provider *map,
 /* Clone the published view directly. Rebuilding library+map here could retire
  * a released clipboard lease or reinterpret current shared metadata while the
  * editor still owns native consumers. Additive admission changes neither. */
+/* A library an additive increment extends reports what a rescan of the same
+ * sources would: the increment's own scan with the packages it left out again,
+ * and the accounted coverage of everything the result serves. */
+static int pr_carry_report(pr_provider *library, const pr_provider *base, const pr_provider *increment)
+{
+    size_t a = base->coverage ? strlen(base->coverage) : 0, b = increment->coverage ? strlen(increment->coverage) : 0;
+    if ((increment->rejections && !(library->rejections = _strdup(increment->rejections))) ||
+        (increment->unserved && !(library->unserved = _strdup(increment->unserved)))) return 0;
+    if (a || b) {
+        if (a > SIZE_MAX - b - 1 || !(library->coverage = malloc(a + b + 1))) return 0;
+        if (a) memcpy(library->coverage, base->coverage, a);
+        if (b) memcpy(library->coverage + a, increment->coverage, b);
+        library->coverage[a + b] = 0;
+    }
+    for (size_t i = 0; i < increment->exclusion_count; i++) {
+        const pr_exclusion *item = increment->exclusions + i;
+        if (!pr_exclusion_add(&library->exclusions, &library->exclusion_count, item->name, item->tree,
+            item->line)) return 0;
+    }
+    return 1;
+}
+
+static pr_provider *pr_clone_serving(pr_provider *base, char *error, size_t capacity);
+/* base extended by an increment's newly compiled packages; every unchanged
+ * package is served from base itself (sh_package_map_plan_prepare_inventory,
+ * pr_refresh_increment). The own-bytes memo then holds the library's complete
+ * list, so a package an increment left out stays out at the next start. */
+static pr_provider *pr_increment_view(pr_provider *base, const pr_provider *increment,
+    char *error, size_t capacity)
+{
+    int metadata_needed = 0;
+    pr_provider *library = pr_clone_serving(base, error, capacity);
+    if (!library || !pr_view_retained(library, increment, library->sources->package_count,
+        NULL, NULL, PR_RETAIN_AUTHORING, &metadata_needed, error, capacity) ||
+        !pr_prepare_spawn_program(library, error, capacity)) { pr_release(library); return NULL; }
+    if (!pr_carry_report(library, base, increment)) {
+        if (error && capacity) snprintf(error, capacity, "cannot retain the installed library report");
+        pr_release(library); return NULL;
+    }
+    if (library->data_root) pr_exclusions_store(library->data_root, library->exclusions, library->exclusion_count);
+    return library;
+}
+/* An installed-library refresh (a rearm, or the rescan after a committed
+ * installation) whose scan only adds packages to base: compile the added
+ * packages alone and serve the rest from base, as an installation does.
+ * 1 with the new library and inventory; 0 when a package was removed or
+ * changed or the increment did not complete (an environment failure, or a
+ * meaning the additive view cannot admit), and the caller compiles the whole
+ * library, which judges and attributes every failure itself. */
+static int pr_refresh_increment(pr_provider *base, const pr_provider *string_peer,
+    pr_provider **library, pr_inventory **inventory, char *error, size_t capacity)
+{
+    int composition_failed = 0;
+    *library = NULL; *inventory = NULL;
+    if (!base || !base->data_root) return 0;
+    pr_provider *added = pr_prepare_deliveries(base->data_root, NULL, base, 0, PR_INCREMENT_REFRESH, inventory,
+        &composition_failed, NULL, NULL, 0, 0, string_peer, NULL, 0, error, capacity);
+    if (added) *library = pr_increment_view(base, added, error, capacity);
+    pr_release(added);
+    if (*library) return 1;
+    pr_inventory_release(*inventory); *inventory = NULL;
+    return 0;
+}
 static pr_provider *pr_clone_serving(pr_provider *base, char *error, size_t capacity)
 {
     sh_package_sources empty = {0};
@@ -2751,8 +3352,21 @@ static int pr_update(const char *data_root, int change_map, const char *map_sour
         }
     } else {
         library_rescanned = 1;
-        library = pr_prepare(data_root, NULL, g_library_provider, 0, &inventory,
-            &composition_failed, NULL, g_map_provider, error, sizeof(error));
+        int installed = InterlockedExchange(&g_install_published, 0) != 0;
+        if (installed && g_library_provider && pr_refresh_increment(g_library_provider, g_map_provider,
+                &library, &inventory, error, sizeof(error)))
+            backend_log("package library refresh for a published installation: added packages compiled alone, "
+                "unchanged packages served from the retained library");
+        else {
+            if (installed && g_library_provider) {
+                snprintf(line, sizeof(line), "package library refresh for a published installation compiles the whole library: %.400s",
+                    error[0] ? error : "the increment did not complete");
+                backend_log(line);
+            }
+            error[0] = 0;
+            library = pr_prepare(data_root, NULL, g_library_provider, 0, &inventory,
+                &composition_failed, NULL, g_map_provider, error, sizeof(error));
+        }
         if (!library) {
             if (!composition_failed || !inventory) goto done;
             strcpy_s(source_error, sizeof(source_error), error);
@@ -3348,7 +3962,7 @@ int sh_package_map_plan_prepare_inventory(sh_package_map_plan *plan,
 {
     pr_inventory *inventory = NULL;
     pr_provider *checked = NULL, *library = NULL, *base = NULL;
-    int ok = 0, metadata_needed = 0;
+    int ok = 0;
     if (!plan || !data_root || !*data_root) {
         if (error && capacity) snprintf(error, capacity, "installed inventory requires a prepared map and data root");
         return 0;
@@ -3359,7 +3973,7 @@ int sh_package_map_plan_prepare_inventory(sh_package_map_plan *plan,
     }
     base = pr_retain(g_library_provider);
     int composition_failed = 0;
-    checked = pr_prepare_deliveries(data_root, NULL, base, 0, 1,
+    checked = pr_prepare_deliveries(data_root, NULL, base, 0, PR_INCREMENT_INSTALL,
         &inventory, &composition_failed, NULL, NULL, 0, 0, plan->provider, NULL, 0, error, capacity);
     if (!inventory || (!checked && !composition_failed)) {
         goto done;
@@ -3376,12 +3990,7 @@ int sh_package_map_plan_prepare_inventory(sh_package_map_plan *plan,
     if (g_library_provider != base) {
         if (error && capacity) snprintf(error, capacity, "the installed library changed during source preparation"); goto done;
     }
-    if (checked) {
-        library = pr_clone_serving(base, error, capacity);
-        if (!library || !pr_view_retained(library, checked, library->sources->package_count,
-            NULL, NULL, PR_RETAIN_AUTHORING, &metadata_needed, error, capacity)) goto done;
-        if (!pr_prepare_spawn_program(library, error, capacity)) goto done;
-    }
+    if (checked && !(library = pr_increment_view(base, checked, error, capacity))) goto done;
     pr_inventory_release(plan->inventory); plan->inventory = inventory; inventory = NULL;
     pr_release(plan->library); plan->library = library; library = NULL;
     pr_release(plan->library_base); plan->library_base = base; base = NULL;
@@ -5057,6 +5666,7 @@ void sh_package_runtime_test_dispose(void)
     sh_package_provenance_free(&g_promoted);
     pr_collect_leases();
     sh_package_link_history_close(g_link_history); g_link_history = NULL;
+    sh_package_source_memo_close(g_source_memo); g_source_memo = NULL;
     ReleaseSRWLockExclusive(&g_refresh_lock);
 }
 #endif

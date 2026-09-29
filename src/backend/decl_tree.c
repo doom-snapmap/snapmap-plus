@@ -295,11 +295,29 @@ static int dt_push(dt_parser *p, sh_decl_node *node)
     return 1;
 }
 
+static __declspec(thread) sh_decl_tree_census *g_dt_census;
+int sh_decl_tree_census_open(void)
+{
+    if (g_dt_census) return 0;
+    g_dt_census = (sh_decl_tree_census *)calloc(1, sizeof(*g_dt_census));
+    return g_dt_census != NULL;
+}
+void sh_decl_tree_census_read(sh_decl_tree_census *out)
+{
+    if (!out) return;
+    if (g_dt_census) *out = *g_dt_census; else memset(out, 0, sizeof(*out));
+}
+void sh_decl_tree_census_close(void)
+{
+    free(g_dt_census); g_dt_census = NULL;
+}
+
 static sh_decl_node *dt_parse(sh_decl_source source, int unique_fields, int open_body,
     char *error, size_t error_capacity)
 {
     dt_parser p = {0};
     sh_decl_node *root = NULL;
+    if (g_dt_census && source.text) { g_dt_census->parses++; g_dt_census->bytes += source.length; }
     if (error && error_capacity) error[0] = 0;
     p.text = source.text; p.length = source.length; p.error = error; p.error_capacity = error_capacity;
     if (!source.text || !source.length || memchr(source.text, 0, source.length)) {

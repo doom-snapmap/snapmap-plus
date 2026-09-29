@@ -61,8 +61,9 @@ static void enqueue(void)
     sh_package_shader_receipt_invalidate((uintptr_t)fixture.object);
     sh_package_library_native native = sh_package_native_assets_adapter(fixture.assets);
     const sh_package_source_shader *shader = native.source.shader;
-    CHECK(shader && !shader->parameter(shader->context, "tex", (sh_decl_source){parameter, strlen(parameter)},
-        &kind, &index, error, sizeof(error)));
+    /* 2: a preparation request was retained; the caller retries after it. */
+    CHECK(shader && shader->parameter(shader->context, "tex", (sh_decl_source){parameter, strlen(parameter)},
+        &kind, &index, error, sizeof(error)) == 2);
     CHECK(strstr(error, "environment needs") && sh_package_native_assets_shader_pending(fixture.assets) == 1);
 }
 static int prepare_one(void *context, const sh_package_shader_request *request, char *error, size_t capacity)

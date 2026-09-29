@@ -158,6 +158,25 @@ typedef struct sh_package_link_adapter {
      * The caller serializes access. Successful links reserve identities even
      * if later activation fails: native defaulted objects may still exist. */
     struct sh_package_link_history *history;
+    /* Optional: 1 when bind is a deterministic function of the unit's bytes
+     * and a resolution frozen for the whole link. Projection then need not
+     * replay a unit whose files are all held in memory: its bytes cannot
+     * change, and with every target keeping its name it projects to itself.
+     * NULL replays every unit. */
+    int (*stable)(void *context, size_t unit);
+    /* Optional: the reference sites bind would report for one file of a
+     * unit, in order, as (slot, target unit) pairs, when the caller already
+     * bound those bytes with the same reader and resolution. A capture then
+     * reads and identifies the file without binding it again; projection
+     * still replays with bind. 1 supplied, 0 bind instead, -1 failure. */
+    int (*sites)(void *context, size_t unit, const sh_compiled_resource *file,
+        const sh_package_link_edge **sites, size_t *count);
+    /* Optional: the payload identity of one file (or witness) of a unit,
+     * exactly as sh_package_compilation_identity computes it for the unit's
+     * compilation, from a cache the caller keeps for resources many units
+     * share. NULL computes it for every captured unit. */
+    int (*identity)(void *context, size_t unit, const sh_compiled_resource *file,
+        sh_package_file_identity *out, char *error, size_t capacity);
 } sh_package_link_adapter;
 
 /* Owns small identity metadata and sealed, streamed proofs in an admitted
@@ -186,6 +205,11 @@ sh_package_link_reuse *sh_package_link_reuse_open(size_t count);
 int sh_package_link_reuse_reserve(sh_package_link_reuse *reuse, size_t count);
 void sh_package_link_reuse_invalidate(sh_package_link_reuse *reuse, size_t unit);
 void sh_package_link_reuse_close(sh_package_link_reuse *reuse);
+/* Diagnostic totals of the identity passes that used this cache, as one line:
+ * units, units restored from it, and collect and partition time per pass. */
+const char *sh_package_link_reuse_counters(const sh_package_link_reuse *reuse, char *out, size_t capacity);
+/* Diagnostic durations of the final link's steps that used this cache, or "". */
+const char *sh_package_link_reuse_link_steps(const sh_package_link_reuse *reuse, char *out, size_t capacity);
 
 typedef struct sh_package_link_implicit_binding {
     size_t owner, target; /* Equivalence-class indices in this output. */

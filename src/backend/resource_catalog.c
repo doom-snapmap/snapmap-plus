@@ -6,6 +6,8 @@
 #include <limits.h>
 #include "resource_catalog.h"
 #include "raw_deflate.h"
+#include <bcrypt.h>
+#pragma comment(lib, "bcrypt.lib")
 
 #define RC_INDEX_LIMIT (64u * 1024u * 1024u)
 #define RC_ROW_LIMIT 1000000u
@@ -19,7 +21,10 @@ struct sh_resource_catalog {
     HANDLE archives[4];
     uint64_t archive_sizes[4];
     SRWLOCK archive_lock;
+    unsigned char digest[32]; /* sh_resource_catalog_digest */
 };
+static int rc_hash(BCRYPT_HASH_HANDLE hash, const void *bytes, size_t length)
+{ return length <= ULONG_MAX && BCryptHashData(hash, (PUCHAR)bytes, (ULONG)length, 0) >= 0; }
 
 static uint32_t rc_be32(const unsigned char *p)
 {
@@ -135,19 +140,26 @@ sh_resource_catalog *sh_resource_catalog_open(const char *doom_base, char *error
 {
     static const char *const stems[] = {"snap_gameresources", "gameresources"};
     sh_resource_catalog *catalog = (sh_resource_catalog *)calloc(1, sizeof(*catalog));
+    BCRYPT_ALG_HANDLE algorithm = NULL;
+    BCRYPT_HASH_HANDLE hash = NULL;
     char path[4096];
     size_t i;
     if (error && error_capacity) error[0] = 0;
     if (!catalog || !doom_base || !doom_base[0]) goto bad;
     for (i = 0; i < 4; i++) catalog->archives[i] = INVALID_HANDLE_VALUE;
     InitializeSRWLock(&catalog->archive_lock);
+    if (BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_SHA256_ALGORITHM, NULL, 0) < 0 ||
+        BCryptCreateHash(algorithm, &hash, NULL, 0, NULL, 0, 0) < 0) goto bad;
     for (i = 0; i < 2; i++) {
         size_t length = 0;
         unsigned char *bytes;
+        uint64_t size;
         if (snprintf(path, sizeof(path), "%s/%s.pindex", doom_base, stems[i]) >= sizeof(path)) goto bad;
         bytes = rc_read_file(path, &length);
         if (!bytes) goto bad;
-        if (!rc_parse(catalog, bytes, length, (unsigned)i * 2u)) { free(bytes); goto bad; }
+        size = length;
+        if (!rc_hash(hash, &size, sizeof(size)) || !rc_hash(hash, bytes, length) ||
+            !rc_parse(catalog, bytes, length, (unsigned)i * 2u)) { free(bytes); goto bad; }
         free(bytes);
     }
     for (i = 0; i < 4; i++) {
@@ -161,7 +173,11 @@ sh_resource_catalog *sh_resource_catalog_open(const char *doom_base, char *error
             (info.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) ||
             !GetFileSizeEx(catalog->archives[i], &size) || size.QuadPart < 0) goto bad;
         catalog->archive_sizes[i] = (uint64_t)size.QuadPart;
+        if (!rc_hash(hash, &catalog->archive_sizes[i], sizeof(catalog->archive_sizes[i]))) goto bad;
     }
+    if (BCryptFinishHash(hash, catalog->digest, sizeof(catalog->digest), 0) < 0) goto bad;
+    BCryptDestroyHash(hash); hash = NULL;
+    BCryptCloseAlgorithmProvider(algorithm, 0); algorithm = NULL;
     catalog->paths = (sh_resource_catalog_entry **)calloc(catalog->count ? catalog->count : 1u, sizeof(*catalog->paths));
     catalog->identities = (sh_resource_catalog_entry **)calloc(catalog->count ? catalog->count : 1u, sizeof(*catalog->identities));
     catalog->legacy_paths = (sh_resource_catalog_entry **)calloc(catalog->count ? catalog->count : 1u, sizeof(*catalog->legacy_paths));
@@ -178,8 +194,15 @@ sh_resource_catalog *sh_resource_catalog_open(const char *doom_base, char *error
     qsort(catalog->legacy_paths, catalog->count, sizeof(*catalog->legacy_paths), rc_legacy_path_cmp);
     return catalog;
 bad:
+    if (hash) BCryptDestroyHash(hash);
+    if (algorithm) BCryptCloseAlgorithmProvider(algorithm, 0);
     if (error && error_capacity) snprintf(error, error_capacity, "installed resource catalog or archive validation failed under %s", doom_base ? doom_base : "(null)");
     sh_resource_catalog_close(catalog); return NULL;
+}
+int sh_resource_catalog_digest(const sh_resource_catalog *catalog, unsigned char out[32])
+{
+    if (!catalog || !out) return 0;
+    memcpy(out, catalog->digest, sizeof(catalog->digest)); return 1;
 }
 
 void sh_resource_catalog_close(sh_resource_catalog *catalog)

@@ -25,6 +25,10 @@ struct sh_decl_native_registry {
     size_t count;
     uintptr_t array;
     int linked, identity_failed;
+    /* Manager indices ordered by case-insensitive type and class name, then
+     * index (dr_range); fixed with the manager list at open. Linked
+     * registries read no class names. */
+    size_t *by_type, *by_class;
 };
 struct sh_native_resource_registry { sh_decl_native_registry view; };
 
@@ -73,6 +77,52 @@ static char *dr_member_string(sh_decl_native_registry *r, uintptr_t address, siz
 }
 static unsigned char dr_lower(unsigned char c)
 { return c >= 'A' && c <= 'Z' ? (unsigned char)(c + ('a' - 'A')) : c; }
+static int dr_icmp(const char *a, const char *b)
+{
+    while (*a && dr_lower((unsigned char)*a) == dr_lower((unsigned char)*b)) { a++; b++; }
+    return (int)dr_lower((unsigned char)*a) - (int)dr_lower((unsigned char)*b);
+}
+typedef struct dr_order { const sh_decl_native_registry *r; int by_class; } dr_order;
+static const char *dr_key(const sh_decl_native_registry *r, size_t i, int by_class)
+{ return by_class ? r->managers[i].class_name : r->managers[i].type; }
+static int dr_index_order(void *context, const void *left, const void *right)
+{
+    const dr_order *o = context;
+    size_t a = *(const size_t *)left, b = *(const size_t *)right;
+    int order = dr_icmp(dr_key(o->r, a, o->by_class), dr_key(o->r, b, o->by_class));
+    return order ? order : a < b ? -1 : a > b;
+}
+/* Lookups by name are case-insensitive over a fixed manager list; order it
+ * once so each lookup is a binary search rather than a scan. */
+static int dr_index(sh_decl_native_registry *r)
+{
+    for (int by_class = 0; by_class < 2 && !(by_class && r->linked); by_class++) {
+        size_t *index = malloc((r->count ? r->count : 1) * sizeof(*index));
+        dr_order order = {r, by_class};
+        if (!index) return 0;
+        for (size_t i = 0; i < r->count; i++) index[i] = i;
+        if (r->count > 1) qsort_s(index, r->count, sizeof(*index), dr_index_order, &order);
+        if (by_class) r->by_class = index; else r->by_type = index;
+    }
+    return 1;
+}
+/* The managers whose type (or class name) equals key, case-insensitively:
+ * index[begin, *end) in registry order. */
+static size_t dr_range(const sh_decl_native_registry *r, int by_class, const char *key, size_t *end)
+{
+    const size_t *index = by_class ? r->by_class : r->by_type;
+    size_t low = 0, high = r->count, begin;
+    while (low < high) {
+        size_t mid = low + (high - low) / 2;
+        if (dr_icmp(dr_key(r, index[mid], by_class), key) < 0) low = mid + 1; else high = mid;
+    }
+    begin = low; high = r->count;
+    while (low < high) {
+        size_t mid = low + (high - low) / 2;
+        if (dr_icmp(dr_key(r, index[mid], by_class), key) <= 0) low = mid + 1; else high = mid;
+    }
+    *end = low; return begin;
+}
 static int dr_equal(const char *a, const char *b)
 {
     while (*a && dr_lower((unsigned char)*a) == dr_lower((unsigned char)*b)) { a++; b++; }
@@ -205,12 +255,28 @@ sh_decl_native_registry *sh_decl_native_registry_open(sh_decl_registry_source so
     }
     if (!dr_read(r, source.registry, 8, &after_array, sizeof(after_array)) ||
         !dr_read(r, source.registry, 0x10, &after_count, sizeof(after_count)) ||
-        array != after_array || count != after_count) goto failed;
+        array != after_array || count != after_count || !dr_index(r)) goto failed;
     return r;
 failed:
     if (error && error_capacity) snprintf(error, error_capacity,
         "Native declaration registry is unavailable, changing or malformed");
     sh_decl_native_registry_close(r); return NULL;
+}
+int sh_decl_native_registry_digest(const sh_decl_native_registry *r,
+    int (*emit)(void *context, const void *bytes, size_t length), void *context)
+{
+    uint64_t count;
+    if (!r || !emit) return 0;
+    count = r->count;
+    if (!emit(context, &count, sizeof(count))) return 0;
+    for (size_t i = 0; i < r->count; i++) {
+        const dr_manager *m = &r->managers[i];
+        const char *type = m->type ? m->type : "", *class_name = m->class_name ? m->class_name : "";
+        uint64_t parent = m->parent == SIZE_MAX ? UINT64_MAX : (uint64_t)m->parent;
+        if (!emit(context, type, strlen(type) + 1) || !emit(context, class_name, strlen(class_name) + 1) ||
+            !emit(context, &parent, sizeof(parent))) return 0;
+    }
+    return 1;
 }
 void sh_decl_native_registry_close(sh_decl_native_registry *r)
 {
@@ -221,21 +287,19 @@ void sh_decl_native_registry_close(sh_decl_native_registry *r)
         for (j = 0; j < m->count; j++) free(m->entries[j].name);
         free(m->entries); free(m->ids); free(m->type); free(m->class_name);
     }
-    free(r->managers); free(r);
+    free(r->managers); free(r->by_type); free(r->by_class); free(r);
 }
 int sh_decl_native_registry_type_class(sh_decl_native_registry *r,
     const char *type, const char **class_name)
 {
     size_t i;
-    const char *found = NULL;
+    size_t end;
     if (!class_name) return -1;
     *class_name = NULL;
     if (!r || !type || !*type) return -1;
-    for (i = 0; i < r->count; i++) if (dr_equal(r->managers[i].type, type)) {
-        if (found) return -1;
-        found = r->managers[i].class_name;
-    }
-    *class_name = found; return found != NULL;
+    i = dr_range(r, 0, type, &end);
+    if (end - i > 1) return -1;
+    *class_name = i < end ? r->managers[r->by_type[i]].class_name : NULL; return *class_name != NULL;
 }
 
 int sh_decl_native_registry_class_type(sh_decl_native_registry *r,
@@ -244,9 +308,8 @@ int sh_decl_native_registry_class_type(sh_decl_native_registry *r,
     if (!type) return -1;
     *type = NULL;
     if (!r || !class_name || !*class_name) return -1;
-    for (size_t i = 0; i < r->count; i++) if (dr_equal(r->managers[i].class_name, class_name)) {
-        *type = r->managers[i].type; return 1;
-    }
+    size_t end, i = dr_range(r, 1, class_name, &end);
+    if (i < end) { *type = r->managers[r->by_class[i]].type; return 1; }
     return 0;
 }
 
@@ -282,8 +345,9 @@ static int dr_resolve(sh_decl_native_registry *r,
     canonical = dr_name(name);
     if (!canonical) return -1;
     if (!*canonical) { free(canonical); return -1; }
-    for (i = 0; i < r->count; i++) if (dr_equal(r->managers[i].class_name, class_name)) {
-        manager = i; break;
+    {
+        size_t end, first = dr_range(r, 1, class_name, &end);
+        if (first < end) manager = r->by_class[first];
     }
     if (manager != SIZE_MAX) result = source_only ?
         dr_lookup_source(r, manager, canonical, &chosen, &resource) :
@@ -315,10 +379,8 @@ int sh_decl_native_registry_source_candidates(sh_decl_native_registry *r,
     if (!*name) return 1;
     char *canonical = dr_name(name);
     if (!canonical || !*canonical) { free(canonical); return 0; }
-    size_t manager = SIZE_MAX;
-    for (size_t i = 0; i < r->count; i++) if (dr_equal(r->managers[i].class_name, class_name)) {
-        manager = i; break;
-    }
+    size_t manager = SIZE_MAX, end, first = dr_range(r, 1, class_name, &end);
+    if (first < end) manager = r->by_class[first];
     int ok = 1;
     if (manager != SIZE_MAX) ok = candidate(context, r->managers[manager].type, canonical);
     for (size_t i = 0; ok && i < r->count; i++)
@@ -500,11 +562,10 @@ int sh_decl_native_registry_identity(sh_decl_native_registry *r,
     if (out) memset(out, 0, sizeof(*out));
     if (!r || r->identity_failed || !family || !*family || !name || !out)
         return dr_identity_error(r, error, capacity, "native resource identity snapshot is unavailable");
-    for (size_t i = 0; i < r->count; i++) if (dr_equal(family, r->managers[i].type)) {
-        if (manager) return dr_identity_error(r, error, capacity, "native resource family is ambiguous");
-        manager = r->managers + i;
-    }
-    if (!manager) return SH_NATIVE_RESOURCE_ID_UNREGISTERED;
+    size_t end, first = dr_range(r, 0, family, &end);
+    if (end - first > 1) return dr_identity_error(r, error, capacity, "native resource family is ambiguous");
+    if (first == end) return SH_NATIVE_RESOURCE_ID_UNREGISTERED;
+    manager = r->managers + r->by_type[first];
     if (!dr_capture_ids(r, manager) || !dr_identity_header(r, manager))
         return dr_identity_error(r, error, capacity, "native resource IDs are inconsistent, changing or unreadable");
     if (!(result.name = sh_native_resource_name(name)) || !sh_native_resource_id(manager->type, result.name, &result.id)) {
@@ -592,7 +653,7 @@ sh_native_resource_registry *sh_native_resource_registry_open(sh_native_resource
             &manager->next_address, sizeof(manager->next_address))) goto failed;
         address = manager->next_address;
     }
-    if (!dr_identity_metadata(r)) goto failed;
+    if (!dr_identity_metadata(r) || !dr_index(r)) goto failed;
     return out;
 failed:
     if (error && capacity) snprintf(error, capacity, "native resource manager list is unavailable, changing or malformed");

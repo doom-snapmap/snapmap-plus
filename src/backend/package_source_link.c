@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <intrin.h>
 
 typedef struct sl_shader_program {
     char *name;
@@ -22,6 +23,8 @@ typedef struct sl_shader_file {
     sh_package_shader_path_kind kind;
 } sl_shader_file;
 typedef struct sl_implicit { char *slot; struct sl_unit *target; } sl_implicit;
+/* One reference site discovery bound, in bind order (see sl_reference). */
+typedef struct sl_site { const sh_compiled_resource *file; char *slot; struct sl_unit *target; } sl_site;
 typedef struct sl_unit {
     sh_package_link_unit unit;
     size_t scope, index, capacity;
@@ -39,15 +42,62 @@ typedef struct sl_unit {
     char *seed; /* Why a unit without a same-scope parent entered the capture. */
     int nominated; /* Seeded as a stock root affected by its scope's changes. */
     int movie_captured; /* Constructor requests of a cooked movie were enumerated. */
+    int replayed; /* Discovery replayed another scope's recorded reads (sl_replay_apply). */
+    /* Created by seeding (the scope's supplied files), and its witness count
+     * then: reverse nomination reads seeded units only, as seeded. */
+    int seeded;
+    size_t seeded_witnesses;
     sh_package_link_file_identity *identities; /* Owned per-file identities (movie pairs). */
     sh_compiled_resource prepared; /* Borrowed metadata; owns only body. */
     const sh_compiled_resource *unprepared; /* Exact original certificate input. */
     int preparation_checked;
+    /* Sites each discovered file bound, and those files; after freezing,
+     * the same sites as (slot, unit index) edges (sh_package_source_link_sites). */
+    sl_site *sites;
+    size_t site_count, site_capacity;
+    const sh_compiled_resource **discovered;
+    size_t discovered_count;
+    sh_package_link_edge *site_edges;
 } sl_unit;
 typedef struct sl_original {
     sh_compiled_resource resource;
     int status;
+    int identified; /* identity holds the payload identity of resource.body */
+    sh_package_file_identity identity;
 } sl_original;
+/* One recorded discovery a later discovery may replay (sl_replay_*): the
+ * reads a scope's reader made to prepare, bind and request a unit, and what
+ * they read. Each file, and each scoped path the reader consulted, keeps how
+ * it resolved: supplied by the scope (state -1) or the capture's original
+ * (its status; 0 is absent), with its content identity when a memo keeps the
+ * recording. valid is cleared when recording ran out of memory. */
+typedef struct sl_replay_ref { char *slot, *family, *name; int request; } sl_replay_ref;
+typedef struct sl_replay_input { char *path; int state; sh_package_file_identity identity; } sl_replay_input;
+typedef struct sl_replay {
+    struct sl_replay *next; /* other recordings of this family and name */
+    char *family, *name;
+    unsigned long long capture; /* the capture that recorded it, and its scope */
+    size_t scope;
+    sl_replay_input *files;
+    size_t file_count;
+    unsigned char *prepared; /* the native preparation output, when prepared */
+    size_t prepared_length;
+    int was_prepared, valid;
+    sl_replay_input *lookups; /* every scoped path consulted */
+    size_t lookup_count, lookup_capacity;
+    sl_replay_ref *refs; /* per file: its sites, then its requests, in call order */
+    size_t ref_count, ref_capacity;
+    size_t *file_refs; /* refs of file j end at file_refs[j] */
+} sl_replay;
+/* Recordings by family and name (open addressing over list heads). */
+typedef struct sl_store { sl_replay **slots; size_t count, capacity, records; } sl_store;
+struct sh_package_source_memo {
+    volatile long busy; /* borrowed by one capture */
+    int keyed;
+    unsigned char key[32]; /* sl_memo_key of the captures that recorded */
+    unsigned long long captures;
+    sl_store store;
+};
 struct sh_package_source_link {
     const sh_package_compilation **scopes;
     sh_package_source_reader **readers;
@@ -73,6 +123,10 @@ struct sh_package_source_link {
     char preparation_reason[1024]; /* First deferred request in this frontier. */
     int malformed; /* That reader could not parse the text in the native grammar. */
     int environment; /* A failure came from I/O, allocation or configuration. */
+    /* sl_defer_failure: the first failure a scope alone answers for, kept
+     * while the other scopes continue, and the scopes withdrawn for one. */
+    struct { const sl_unit *unit; int malformed, reader_gap; char error[1024]; } deferred;
+    unsigned char *withdrawn;
     sl_unit *discovering; /* Unit whose readers are requesting new units. */
     const sl_unit *failed_unit; /* Unit whose strict discovery failed, if known. */
     size_t failed_scope; /* Input scope whose supplied files failed seeding. */
@@ -80,7 +134,23 @@ struct sh_package_source_link {
     char **player_hands; /* Names of animation webs a player's handsAnimWeb names. */
     size_t player_hand_count;
     unsigned long long phase_ms[9]; /* Wall-clock capture phases, see sl_phase_names. */
+    /* Discovery replay: the discovery being recorded, and the recordings:
+     * this capture's own, or those of a borrowed memo. */
+    sl_replay *recording;
+    sl_store own, *store;
+    sh_package_source_memo *memo;
+    unsigned long long capture;
+    /* Diagnostics only (sh_package_source_link_counters). */
+    struct {
+        size_t units, binds, original_binds, originals, replayed, recorded, declined, reverse_units;
+        size_t retained; /* replays of an earlier capture's recording */
+        int memo; /* 0 none, 1 kept, 2 renewed for a different key, 3 busy */
+        unsigned long long original_bytes;
+        unsigned long long select_us, read_us, construct_us; /* discovery sub-phases */
+    } census;
 };
+static int g_sl_replay = 1;
+void sh_package_source_link_replay(int enabled) { g_sl_replay = enabled != 0; }
 static const char *const sl_phase_names[9] = {
     "readers", "seeds", "reverse roots", "discovery", "shaders", "audio", "certification", "owners", "inputs"
 };
@@ -88,6 +158,11 @@ static unsigned long long sl_now_ms(void)
 {
     struct timespec now;
     return timespec_get(&now, TIME_UTC) ? (unsigned long long)now.tv_sec * 1000u + (unsigned long long)now.tv_nsec / 1000000u : 0;
+}
+static unsigned long long sl_now_us(void)
+{
+    struct timespec now;
+    return timespec_get(&now, TIME_UTC) ? (unsigned long long)now.tv_sec * 1000000u + (unsigned long long)now.tv_nsec / 1000u : 0;
 }
 static void sl_phase(sh_package_source_link *s, int phase, unsigned long long *mark)
 {
@@ -227,6 +302,8 @@ static sl_original *sl_original_get(sh_package_source_link *s, const char *path)
     if (!file->resource.engine_path) { free(file); goto bad; }
     file->status = s->original ? s->original(s->original_context, path,
         &file->resource.body, &file->resource.body_length) : 0;
+    s->census.originals++;
+    if (file->status > 0 && file->resource.body) s->census.original_bytes += file->resource.body_length;
     s->originals[s->original_count++] = file; s->original_slots[at] = file;
     if (file->status < 0 || file->status > 3 || (file->status && !file->resource.body) ||
         file->resource.body_length == SIZE_MAX) {
@@ -239,6 +316,18 @@ static sl_original *sl_original_get(sh_package_source_link *s, const char *path)
     return file;
 bad:
     sl_env_fail(s, "cannot allocate original resource snapshot", path); return NULL;
+}
+/* The captured original of path, without capturing one. */
+static sl_original *sl_original_peek(const sh_package_source_link *s, const char *path)
+{
+    if (!s->original_slot_count || !path) return NULL;
+    size_t at = (size_t)sl_hash_text(0, path) & (s->original_slot_count - 1);
+    while (s->original_slots[at]) {
+        sl_original *file = s->original_slots[at];
+        if (!strcmp(file->resource.engine_path, path)) return file;
+        at = (at + 1) & (s->original_slot_count - 1);
+    }
+    return NULL;
 }
 static int sl_read_original(void *context, const char *path, unsigned char **body, size_t *length)
 {
@@ -803,7 +892,27 @@ static int sl_shader_accounted(sh_package_source_link *s)
     }
     return 1;
 }
-typedef struct sl_discover { sh_package_source_link *source; sl_unit *unit; } sl_discover;
+/* file: the captured file being bound, whose sites are recorded; NULL otherwise. */
+typedef struct sl_discover {
+    sh_package_source_link *source; sl_unit *unit; const sh_compiled_resource *file;
+    sl_replay *record; /* discovery replay: collects this walk's requests in order */
+} sl_discover;
+/* Record one resolved request of the discovery being recorded. */
+static void sl_replay_ref_add(sl_replay *r, const char *slot, const char *family, const char *name, int request)
+{
+    if (!r || !r->valid) return;
+    if (r->ref_count == r->ref_capacity) {
+        size_t next = r->ref_capacity ? r->ref_capacity * 2 : 16;
+        sl_replay_ref *grown = next < SIZE_MAX / sizeof(*grown) ? realloc(r->refs, next * sizeof(*grown)) : NULL;
+        if (!grown) { r->valid = 0; return; }
+        r->refs = grown; r->ref_capacity = next;
+    }
+    sl_replay_ref ref = {_strdup(slot), _strdup(family), _strdup(name), request};
+    if (!ref.slot || !ref.family || !ref.name) {
+        free(ref.slot); free(ref.family); free(ref.name); r->valid = 0; return;
+    }
+    r->refs[r->ref_count++] = ref;
+}
 static int sl_player_hands_add(sh_package_source_link *s, const char *name)
 {
     for (size_t i = 0; i < s->player_hand_count; i++) if (!strcmp(s->player_hands[i], name)) return 1;
@@ -818,12 +927,24 @@ static int sl_reference(void *context, const char *slot, const char *family, con
     sl_discover *walk = context;
     sl_unit *unit = walk->unit;
     sl_unit *target = sl_find(walk->source, unit->scope, family, name, 1);
-    (void)slot; *replacement = NULL;
+    *replacement = NULL;
     if (!target) return -1;
     if (!sl_grow((void ***)&unit->dependencies, &unit->dependency_capacity, unit->dependency_count)) {
         sl_env_fail(walk->source, "cannot retain scoped dependency", name); return -1;
     }
     unit->dependencies[unit->dependency_count++] = target;
+    if (walk->file) {
+        char *copy = slot ? _strdup(slot) : NULL;
+        if (copy && unit->site_count == unit->site_capacity) {
+            size_t next = unit->site_capacity ? unit->site_capacity * 2 : 8;
+            sl_site *grown = next < SIZE_MAX / sizeof(*grown) ? realloc(unit->sites, next * sizeof(*grown)) : NULL;
+            if (grown) { unit->sites = grown; unit->site_capacity = next; }
+            else { free(copy); copy = NULL; }
+        }
+        if (!copy) { sl_env_fail(walk->source, "cannot retain a bound reference site", name); return -1; }
+        unit->sites[unit->site_count++] = (sl_site){walk->file, copy, target};
+    }
+    if (walk->record) sl_replay_ref_add(walk->record, slot, family, name, 0);
     return 0;
 }
 static int sl_implicit_reference(void *context, const char *slot, const char *family, const char *name)
@@ -832,9 +953,12 @@ static int sl_implicit_reference(void *context, const char *slot, const char *fa
     if (!slot || !*slot) return sl_fail(walk->source, "implicit native request has no semantic slot", name);
     sl_unit *target = sl_find(walk->source, unit->scope, family, name, 1);
     if (!target) return 0;
-    for (size_t i = 0; i < unit->implicit_count; i++) if (!strcmp(unit->implicit[i].slot, slot))
-        return unit->implicit[i].target == target ? 1 :
-            sl_fail(walk->source, "implicit native slot has contradictory targets", slot);
+    for (size_t i = 0; i < unit->implicit_count; i++) if (!strcmp(unit->implicit[i].slot, slot)) {
+        if (unit->implicit[i].target != target)
+            return sl_fail(walk->source, "implicit native slot has contradictory targets", slot);
+        if (walk->record) sl_replay_ref_add(walk->record, slot, family, name, 1);
+        return 1;
+    }
     if (unit->implicit_count >= SIZE_MAX / sizeof(*unit->implicit))
         return sl_env_fail(walk->source, "too many implicit native requests", name);
     char *copy = _strdup(slot);
@@ -845,6 +969,7 @@ static int sl_implicit_reference(void *context, const char *slot, const char *fa
     if (!sl_grow((void ***)&unit->dependencies, &unit->dependency_capacity, unit->dependency_count))
         return sl_env_fail(walk->source, "cannot retain implicit native dependency", name);
     unit->dependencies[unit->dependency_count++] = target;
+    if (walk->record) sl_replay_ref_add(walk->record, slot, family, name, 1);
     return 1;
 }
 static int sl_font_material(void *context, const char *slot, const char *material, int optional)
@@ -1009,12 +1134,269 @@ static int sl_discover_unit(sh_package_source_link *s, sl_unit *unit)
     int ok = sl_discover_unit_requests(s, unit);
     s->discovering = previous; return ok;
 }
-static int sl_discover_unit_requests(sh_package_source_link *s, sl_unit *unit)
+/* ---- Discovery replay ---------------------------------------------------
+ * Every package scope rediscovers the stock units its content reaches, most
+ * of them unchanged, and a later compile rediscovers every unit again. A
+ * reader's discovery of a unit depends only on the unit's files and on the
+ * paths it looks up (sh_package_source_reader_lookups: the scope's file,
+ * else the one captured original), beyond what the memo key covers. So the
+ * reads one discovery made (its native preparation output, reference sites
+ * and material requests, in order) are exactly the reads another discovery
+ * of the same family and name would make when every one of those files and
+ * paths resolves to the same content. Replay then resolves each recorded
+ * request in its own scope, as a fresh bind would, and still runs everything
+ * scope-dependent itself: file selection, material companions and native
+ * constructor requests. Within one capture an unsupplied path is the same
+ * captured original everywhere; across captures its identity is compared. */
+static void sl_replay_free(sl_replay *r)
 {
-    if (!sl_files(s, unit)) {
-        if (s->observe && !s->failed && !s->preparing) s->reader_gap = 1;
-        return 0;
+    if (!r) return;
+    for (size_t i = 0; r->files && i < r->file_count; i++) free(r->files[i].path);
+    for (size_t i = 0; i < r->lookup_count; i++) free(r->lookups[i].path);
+    for (size_t i = 0; i < r->ref_count; i++) { free(r->refs[i].slot); free(r->refs[i].family); free(r->refs[i].name); }
+    free(r->lookups); free(r->refs); free(r->file_refs); free(r->files); free(r->prepared);
+    free(r->family); free(r->name); free(r);
+}
+static void sl_lookup(void *context, const char *path, int supplied)
+{
+    sh_package_source_link *s = context; sl_replay *r = s->recording;
+    if (!r || !r->valid) return;
+    if (!path) { r->valid = 0; return; }
+    for (size_t i = 0; i < r->lookup_count; i++) if (!strcmp(r->lookups[i].path, path)) return;
+    if (r->lookup_count == r->lookup_capacity) {
+        size_t next = r->lookup_capacity ? r->lookup_capacity * 2 : 8;
+        sl_replay_input *grown = next < SIZE_MAX / sizeof(*grown) ? realloc(r->lookups, next * sizeof(*grown)) : NULL;
+        if (!grown) { r->valid = 0; return; }
+        r->lookups = grown; r->lookup_capacity = next;
     }
+    sl_replay_input *input = r->lookups + r->lookup_count;
+    memset(input, 0, sizeof(*input));
+    if (!(input->path = _strdup(path))) { r->valid = 0; return; }
+    input->state = supplied ? -1 : 0; r->lookup_count++;
+}
+static void sl_store_clear(sl_store *store)
+{
+    for (size_t i = 0; i < store->capacity; i++)
+        for (sl_replay *r = store->slots[i], *next; r; r = next) { next = r->next; sl_replay_free(r); }
+    free(store->slots); memset(store, 0, sizeof(*store));
+}
+static size_t sl_store_slot(sl_replay *const *slots, size_t capacity, const char *family, const char *name)
+{
+    size_t at = (size_t)sl_hash_text(sl_hash_text(UINT64_C(14695981039346656037), family), name) & (capacity - 1);
+    while (slots[at] && (strcmp(slots[at]->family, family) || strcmp(slots[at]->name, name))) at = (at + 1) & (capacity - 1);
+    return at;
+}
+static sl_replay *sl_store_find(const sl_store *store, const sl_unit *unit)
+{
+    return store && store->capacity ? store->slots[sl_store_slot(store->slots, store->capacity,
+        unit->unit.family, unit->unit.name)] : NULL;
+}
+/* Recordings retained per family and name, newest first; and in all. */
+#define SL_REPLAY_VARIANTS 8u
+#define SL_REPLAY_RECORDS 262144u
+static void sl_store_add(sh_package_source_link *s, sl_replay *r)
+{
+    sl_store *store = s->store;
+    if (store->records >= SL_REPLAY_RECORDS) { sl_replay_free(r); return; } /* Replay is optional. */
+    if (store->count + 1 > store->capacity / 2) {
+        size_t capacity = store->capacity ? store->capacity * 2 : 1024;
+        sl_replay **slots = capacity < SIZE_MAX / sizeof(*slots) ? calloc(capacity, sizeof(*slots)) : NULL;
+        if (!slots) { sl_replay_free(r); return; }
+        for (size_t i = 0; i < store->capacity; i++) if (store->slots[i])
+            slots[sl_store_slot(slots, capacity, store->slots[i]->family, store->slots[i]->name)] = store->slots[i];
+        free(store->slots); store->slots = slots; store->capacity = capacity;
+    }
+    size_t at = sl_store_slot(store->slots, store->capacity, r->family, r->name), kept = 1;
+    if (!store->slots[at]) store->count++;
+    r->next = store->slots[at]; store->slots[at] = r; store->records++; s->census.recorded++;
+    for (sl_replay *p = r; p->next;) {
+        if (++kept <= SL_REPLAY_VARIANTS) { p = p->next; continue; }
+        sl_replay *drop = p->next; p->next = drop->next; sl_replay_free(drop); store->records--;
+    }
+}
+/* file when the unit's scope compilation supplies it (one of its resources). */
+static const sh_compiled_resource *sl_supplied_file(const sh_package_source_link *s, size_t scope,
+    const sh_compiled_resource *file)
+{
+    const sh_package_compilation *compiled = s->scopes[scope];
+    uintptr_t at = (uintptr_t)file, first = (uintptr_t)compiled->resources;
+    return compiled->resource_count && at >= first &&
+        at < first + compiled->resource_count * sizeof(*compiled->resources) ? file : NULL;
+}
+static int sl_original_identify(sh_package_source_link *s, sl_original *original, sh_package_file_identity *out)
+{
+    if (!original->identified) {
+        if (!sh_package_bytes_identity(original->resource.body, original->resource.body_length, &original->identity))
+            return sl_env_fail(s, "cannot identify captured original", original->resource.engine_path);
+        original->identified = 1;
+    }
+    *out = original->identity; return 1;
+}
+/* How path resolves for a reader of scope in this capture: supplied is the
+ * scope's own file, else the captured original (captured now if needed, as
+ * the reader itself would). 0 when that original cannot be captured. */
+static int sl_input_resolve(sh_package_source_link *s, size_t scope, const char *path,
+    const sh_compiled_resource *supplied, int identify, sl_replay_input *out)
+{
+    memset(&out->identity, 0, sizeof(out->identity));
+    if (supplied) {
+        out->state = -1;
+        return !identify || sh_package_compilation_identity(s->scopes[scope], supplied, &out->identity, NULL, 0);
+    }
+    sl_original *original = sl_original_get(s, path);
+    if (!original || original->status < 0) return 0;
+    out->state = original->status;
+    return !identify || !original->status || sl_original_identify(s, original, &out->identity);
+}
+/* A recorded file or path resolves the same way now. This capture's own
+ * recordings read the same captured originals, so only supplied content is
+ * compared; an earlier capture's are compared in full. */
+static int sl_input_same(sh_package_source_link *s, size_t scope, const sl_replay_input *input,
+    const sh_compiled_resource *supplied, int same_capture)
+{
+    sl_replay_input now;
+    if ((input->state == -1) != (supplied != NULL)) return 0;
+    if (same_capture && !supplied) return 1;
+    if (!sl_input_resolve(s, scope, input->path, supplied, 1, &now)) return 0;
+    return now.state == input->state && now.identity.length == input->identity.length &&
+        !memcmp(now.identity.digest, input->identity.digest, sizeof(now.identity.digest));
+}
+/* A unit whose every file is its scope's own or a captured original. Shader
+ * programs and flags (native shader ABI), fonts and cooked movies keep their
+ * own capture paths. */
+static int sl_replay_eligible(const sh_package_source_link *s, const sl_unit *unit)
+{
+    if (!g_sl_replay || s->observe || !s->store || !unit->unit.file_count || unit->preparation_checked ||
+        !strcmp(unit->unit.family, "renderprog") || !strcmp(unit->unit.family, "renderprogflag") ||
+        !strcmp(unit->unit.family, "font") || sh_package_movie_owner(unit->unit.family, unit->unit.name)) return 0;
+    for (size_t i = 0; i < unit->unit.file_count; i++) {
+        const sh_compiled_resource *file = unit->unit.files[i];
+        const sl_original *original = file ? sl_original_peek(s, file->engine_path) : NULL;
+        if (!file || (!sl_supplied_file(s, unit->scope, file) && (!original || &original->resource != file))) return 0;
+    }
+    return 1;
+}
+static sl_replay *sl_replay_open(sh_package_source_link *s, const sl_unit *unit)
+{
+    sl_replay *r = calloc(1, sizeof(*r));
+    if (!r) return NULL;
+    r->family = _strdup(unit->unit.family); r->name = _strdup(unit->unit.name);
+    r->scope = unit->scope; r->capture = s->capture;
+    r->files = calloc(unit->unit.file_count, sizeof(*r->files));
+    r->file_refs = calloc(unit->unit.file_count, sizeof(*r->file_refs));
+    if (!r->family || !r->name || !r->files || !r->file_refs) { sl_replay_free(r); return NULL; }
+    r->file_count = unit->unit.file_count;
+    for (size_t i = 0; i < r->file_count; i++) {
+        const sh_compiled_resource *file = unit->unit.files[i];
+        if (!(r->files[i].path = _strdup(file->engine_path))) { sl_replay_free(r); return NULL; }
+        r->files[i].state = sl_supplied_file(s, unit->scope, file) ? -1 : sl_original_peek(s, file->engine_path)->status;
+    }
+    r->valid = 1;
+    return r;
+}
+/* Finish a recording: how every consulted path resolved, and each input's
+ * content identity when a memo will keep it for later captures. */
+static int sl_replay_complete(sh_package_source_link *s, sl_replay *r)
+{
+    const sh_package_compilation *scope = s->scopes[r->scope];
+    int identify = s->memo != NULL;
+    /* Without a memo, recordings serve other scopes of this capture only:
+     * one that read supplied content is not kept. */
+    for (size_t i = 0; !identify && r->valid && i < r->file_count; i++) if (r->files[i].state == -1) r->valid = 0;
+    for (size_t i = 0; !identify && r->valid && i < r->lookup_count; i++) if (r->lookups[i].state == -1) r->valid = 0;
+    for (size_t i = 0; r->valid && i < r->file_count; i++) {
+        sl_replay_input *input = r->files + i;
+        const sh_compiled_resource *supplied = input->state == -1 ? sh_package_compilation_find(scope, input->path) : NULL;
+        if ((input->state == -1 && !supplied) || !sl_input_resolve(s, r->scope, input->path, supplied, identify, input)) r->valid = 0;
+    }
+    for (size_t i = 0; r->valid && i < r->lookup_count; i++) {
+        sl_replay_input *input = r->lookups + i;
+        const sh_compiled_resource *supplied = input->state == -1 ? sh_package_compilation_find(scope, input->path) : NULL;
+        if ((input->state == -1 && !supplied) || !sl_input_resolve(s, r->scope, input->path, supplied, identify, input)) r->valid = 0;
+    }
+    return r->valid;
+}
+/* The same files, and every recorded path resolving to the same content. */
+static int sl_replay_applies(sh_package_source_link *s, const sl_unit *unit, const sl_replay *r)
+{
+    const sh_package_compilation *scope = s->scopes[unit->scope];
+    int same_capture = r->capture == s->capture;
+    if (!r->valid || r->file_count != unit->unit.file_count || (same_capture && r->scope == unit->scope)) return 0;
+    for (size_t i = 0; i < r->file_count; i++) {
+        const sh_compiled_resource *file = unit->unit.files[i];
+        if (strcmp(file->engine_path, r->files[i].path) ||
+            !sl_input_same(s, unit->scope, r->files + i, sl_supplied_file(s, unit->scope, file), same_capture)) return 0;
+    }
+    for (size_t i = 0; i < r->lookup_count; i++)
+        if (!sl_input_same(s, unit->scope, r->lookups + i,
+            sh_package_compilation_find(scope, r->lookups[i].path), same_capture)) return 0;
+    return 1;
+}
+/* What a memo's recordings depend on besides the paths they validate: the
+ * catalog rows readers consult directly, the native managers and reflection
+ * they bind through (read afresh), the product's script capture (immutable,
+ * owned by the product) and the preparation callback whose output a
+ * recording keeps. */
+static int sl_memo_key(sh_package_source_link *s, sh_decl_registry_source registry, unsigned char key[32])
+{
+    struct { char magic[32]; unsigned char catalog[32], native[32]; uint64_t scripts, prepare; } material;
+    sh_package_file_identity identity;
+    memset(&material, 0, sizeof(material));
+    memcpy(material.magic, "snapmap-plus source memo 1", 26);
+    if ((s->catalog && !sh_resource_catalog_digest(s->catalog, material.catalog)) ||
+        !s->scope_count || !sh_package_source_reader_native_digest(s->readers[0], material.native)) return 0;
+    material.scripts = (uint64_t)(uintptr_t)registry.scripts;
+    material.prepare = (uint64_t)(uintptr_t)s->native.prepare;
+    if (!sh_package_bytes_identity(&material, sizeof(material), &identity)) return 0;
+    memcpy(key, identity.digest, 32); return 1;
+}
+sh_package_source_memo *sh_package_source_memo_open(void)
+{
+    return calloc(1, sizeof(sh_package_source_memo));
+}
+void sh_package_source_memo_close(sh_package_source_memo *memo)
+{
+    if (!memo) return;
+    sl_store_clear(&memo->store); free(memo);
+}
+static int sl_discovered_add(sh_package_source_link *s, sl_unit *unit, const sh_compiled_resource *file)
+{
+    const sh_compiled_resource **grown = unit->discovered_count < SIZE_MAX / sizeof(*grown) - 1 ?
+        realloc((void *)unit->discovered, (unit->discovered_count + 1) * sizeof(*grown)) : NULL;
+    if (!grown) return sl_env_fail(s, "cannot retain a discovered file", unit->unit.name);
+    unit->discovered = grown; unit->discovered[unit->discovered_count++] = file; return 1;
+}
+static int sl_replay_apply(sh_package_source_link *s, sl_unit *unit, const sl_replay *r)
+{
+    if (s->native.prepare && unit->unit.file_count == 1) {
+        if (r->was_prepared) {
+            unsigned char *body = malloc(r->prepared_length + 1);
+            if (!body) return sl_env_fail(s, "cannot copy a prepared source", unit->unit.name);
+            memcpy(body, r->prepared, r->prepared_length); body[r->prepared_length] = 0;
+            unit->unprepared = unit->unit.files[0];
+            unit->prepared = *unit->unprepared;
+            unit->prepared.body = body; unit->prepared.body_length = r->prepared_length;
+            ((const sh_compiled_resource **)unit->unit.files)[0] = &unit->prepared;
+        }
+        unit->preparation_checked = 1;
+    }
+    size_t at = 0;
+    for (size_t j = 0; j < unit->unit.file_count; j++) {
+        sl_discover walk = {s, unit, unit->unit.files[j], NULL};
+        for (; at < r->file_refs[j]; at++) {
+            const sl_replay_ref *ref = r->refs + at;
+            const char *replacement = NULL;
+            if (ref->request ? sl_implicit_reference(&walk, ref->slot, ref->family, ref->name) != 1 :
+                sl_reference(&walk, ref->slot, ref->family, ref->name, &replacement) != 0) return 0;
+        }
+        if (!sl_discovered_add(s, unit, walk.file)) return 0;
+    }
+    return !s->failed;
+}
+/* Prepare, bind and request every file of a unit: the reads of its
+ * discovery. record, when set, collects them for replay. */
+static int sl_discover_files(sh_package_source_link *s, sl_unit *unit, sl_replay *record)
+{
     if (!unit->preparation_checked && s->native.prepare && unit->unit.file_count == 1) {
         unsigned char *body = NULL; size_t length = 0;
         int status = s->native.prepare(s->native.context, s->readers[unit->scope],
@@ -1027,6 +1409,12 @@ static int sl_discover_unit_requests(sh_package_source_link *s, sl_unit *unit)
             return 0;
         }
         if (status == 1 && body) {
+            if (record && record->valid) {
+                if ((record->prepared = malloc(length + 1))) {
+                    memcpy(record->prepared, body, length); record->prepared[length] = 0;
+                    record->prepared_length = length; record->was_prepared = 1;
+                } else record->valid = 0;
+            }
             unit->unprepared = unit->unit.files[0];
             unit->prepared = *unit->unprepared;
             unit->prepared.body = body; unit->prepared.body_length = length;
@@ -1038,12 +1426,22 @@ static int sl_discover_unit_requests(sh_package_source_link *s, sl_unit *unit)
     }
     for (size_t j = 0; j < unit->unit.file_count; j++) {
         size_t length = 0, bound_length = 0;
+        /* Diagnostics: an unsupplied original has no input source files. */
+        int original = !unit->unit.files[j]->sources && unit->unit.files[j]->source == SIZE_MAX;
         unsigned char *body = sh_package_compilation_read(unit->unit.compilation, unit->unit.files[j],
             SIZE_MAX, &length, s->error, s->error_capacity), *bound = NULL;
-        sl_discover walk = {s, unit};
+        /* Linking binds this file with the same reader over the same bytes:
+         * keep its sites for the first identity capture (observation none). */
+        sl_discover walk = {s, unit, s->observe ? NULL : unit->unit.files[j], record};
         if (body) bound = sl_bind_member(s, unit, unit->unit.files[j],
             body, length, sl_reference, &walk, &bound_length, s->error, s->error_capacity);
+        if (body && !bound && !s->failed && sh_package_source_reader_preparing(s->readers[unit->scope])) {
+            /* A shader parameter or flag awaits native preparation. */
+            free(body); if (record) record->valid = 0;
+            return sl_defer_preparation(s);
+        }
         int ok = body && bound && length == bound_length && !memcmp(body, bound, length) && !s->failed;
+        if (ok && walk.file && !sl_discovered_add(s, unit, walk.file)) { free(body); free(bound); return 0; }
         if (ok && !strcmp(unit->unit.family, "material") &&
             !strncmp(unit->unit.files[j]->engine_path, "generated/decls/material/", 24))
             ok = sh_package_source_material_requests(s->readers[unit->scope],
@@ -1053,13 +1451,54 @@ static int sl_discover_unit_requests(sh_package_source_link *s, sl_unit *unit)
         if (!ok && body && !bound && !s->failed) s->reader_gap = 1;
         if (!body) s->environment = 1; /* An unreadable captured file blames no input. */
         free(body); free(bound);
+        s->census.binds++;
+        if (original) s->census.original_binds++;
         if (!ok) return 0;
+        if (record) record->file_refs[j] = record->ref_count;
     }
+    return 1;
+}
+static int sl_discover_unit_requests(sh_package_source_link *s, sl_unit *unit)
+{
+    unsigned long long began = sl_now_us(), selected, read;
+    if (!sl_files(s, unit)) {
+        if (s->observe && !s->failed && !s->preparing) s->reader_gap = 1;
+        return 0;
+    }
+    selected = sl_now_us(); s->census.select_us += selected - began;
+    sl_replay *record = NULL;
+    if (sl_replay_eligible(s, unit)) {
+        int known = 0;
+        for (const sl_replay *r = sl_store_find(s->store, unit); r; r = r->next) {
+            if (!r->valid) continue;
+            known = 1;
+            if (!sl_replay_applies(s, unit, r)) {
+                if (s->failed) return 0; /* A read that failed while validating. */
+                continue;
+            }
+            if (!sl_replay_apply(s, unit, r)) return 0;
+            unit->replayed = 1; s->census.replayed++;
+            if (r->capture != s->capture) s->census.retained++;
+            goto constructed;
+        }
+        if (known) s->census.declined++;
+        record = sl_replay_open(s, unit); /* NULL: optional, bind without recording */
+    }
+    s->recording = record;
+    int ok = sl_discover_files(s, unit, record);
+    s->recording = NULL;
+    if (record && ok && record->valid && sl_replay_complete(s, record)) sl_store_add(s, record);
+    else sl_replay_free(record);
+    if (s->failed) return 0;
+    if (!ok) return 0;
+constructed:
+    read = sl_now_us(); s->census.read_us += read - selected;
     if (!strcmp(unit->unit.family, "font") && !sl_font_capture(s, unit)) return 0;
     sl_discover walk = {s, unit};
     if (s->native.implicit && s->native.implicit(s->native.context, unit->scope, s->observe,
         &unit->unit, sl_implicit_reference, &walk, s->error, s->error_capacity) != 1)
         return sl_fail(s, "native constructor dependencies could not be captured", unit->unit.name);
+    s->census.construct_us += sl_now_us() - read;
     return !s->failed;
 }
 /* These are the proven terminal families of the source reader. Reverse
@@ -1143,10 +1582,14 @@ static int sl_reverse_changed(sh_package_source_link *s, size_t scope, const sl_
 {
     if (!strcmp(unit->unit.family, "sound") &&
         sh_package_audio_program_affected(s->native.audio, scope, unit->unit.name)) return 1;
+    /* What this scope supplies under that identity: a seeded unit as seeded.
+     * Seed discovery runs first (sl_discover_through) and may already have
+     * added stock dependencies and material companions; neither is supplied. */
     const sl_unit *supplied = sl_find(s, scope, unit->unit.family, unit->unit.name, 0);
+    if (supplied && !supplied->seeded) supplied = NULL;
     for (size_t i = 0; supplied && i < supplied->unit.file_count; i++)
         if (sh_package_owners_count(&supplied->unit.files[i]->gameplay_owners)) return 1;
-    for (size_t i = 0; supplied && i < supplied->unit.witness_count; i++)
+    for (size_t i = 0; supplied && i < supplied->seeded_witnesses; i++)
         if (sh_package_owners_count(&supplied->unit.witnesses[i].resource->gameplay_owners)) return 1;
     /* Catalog aliases need not spell the same logical name as a typed field.
      * The inspected unit's physical members still select exactly its source. */
@@ -1389,6 +1832,7 @@ done:
         s->failed = 1;
     }
     free(nodes); free(edges); free(local); free(unchanged); free(complete); free(seen); free(stack);
+    if (base) s->census.reverse_units = base->count;
     sh_package_source_link_close(base); return ok;
 }
 static int sl_unit_order(const void *a, const void *b)
@@ -1501,9 +1945,73 @@ static void sl_attribute(const sh_package_source_link *s, sh_package_source_fail
     } else failure->kind = SH_PACKAGE_SOURCE_FAILURE_PRODUCT;
 }
 
+/* Discover every unit from *inspected on, including those it requests. A
+ * unit waiting for native preparation is left for a fresh pass; any other
+ * failure stops the capture with that unit (sl_attribute). */
+/* A failure its scope alone answers for (SOURCE or COVERAGE, sl_attribute):
+ * keep the first, withdraw that scope from this capture and let the other
+ * scopes continue, so the same attempt also meets every other scope's
+ * failures and preparation requests. sl_phase_complete reports it. 0 when
+ * the failure is not such (it stops the capture now). */
+static int sl_defer_failure(sh_package_source_link *s)
+{
+    sh_package_source_failure failure;
+    if (s->environment) return 0;
+    sl_attribute(s, &failure);
+    if ((failure.kind != SH_PACKAGE_SOURCE_FAILURE_SOURCE && failure.kind != SH_PACKAGE_SOURCE_FAILURE_COVERAGE) ||
+        failure.scope >= s->scope_count) return 0;
+    if (!s->withdrawn && !(s->withdrawn = calloc(s->scope_count, 1))) return 0;
+    if (!s->deferred.unit) {
+        s->deferred.unit = s->failed_unit; s->deferred.malformed = s->malformed; s->deferred.reader_gap = s->reader_gap;
+        snprintf(s->deferred.error, sizeof(s->deferred.error), "%s", s->error && *s->error ? s->error : "");
+    }
+    s->withdrawn[failure.scope] = 1;
+    s->failed = 0; s->failed_unit = NULL;
+    if (s->error && s->error_capacity) *s->error = 0;
+    return 1;
+}
+/* End of a discovery phase: report a kept failure (as it was attributed), or
+ * fail for the preparation requests retained so far. */
+static int sl_phase_complete(sh_package_source_link *s)
+{
+    if (s->deferred.unit) {
+        s->failed = 1; s->failed_unit = s->deferred.unit;
+        s->malformed = s->deferred.malformed; s->reader_gap = s->deferred.reader_gap;
+        if (s->error && s->error_capacity) snprintf(s->error, s->error_capacity, "%s", s->deferred.error);
+        return 0;
+    }
+    if (*s->preparation_reason) return sl_env_fail(s, s->preparation_reason, NULL);
+    return 1;
+}
+/* Discover every unit from *inspected on, including those it requests. A
+ * unit waiting for native preparation is left for a fresh pass; a failure its
+ * scope alone answers for withdraws that scope (sl_defer_failure); any other
+ * failure stops the capture with that unit (sl_attribute), though a failure
+ * kept earlier is reported before a later one that is not environmental. */
+static int sl_discover_through(sh_package_source_link *s, size_t *inspected)
+{
+    for (; *inspected < s->count; (*inspected)++) {
+        sl_unit *unit = s->units[*inspected];
+        if (s->withdrawn && s->withdrawn[unit->scope]) continue;
+        s->reader_gap = s->malformed = s->preparing = 0;
+        int discovered = sl_discover_unit(s, unit);
+        s->census.units++;
+        if (discovered) {
+            if (unit->unit.file_count > 1) qsort((void *)unit->unit.files, unit->unit.file_count, sizeof(*unit->unit.files), sl_file_order);
+            if (sl_movie_identities(s, unit)) continue;
+        } else if (s->preparing) continue;
+        s->failed_unit = unit;
+        if (sl_defer_failure(s)) continue;
+        if (s->deferred.unit && !s->environment) return sl_phase_complete(s);
+        return 0;
+    }
+    return 1;
+}
 void sh_package_source_link_close(sh_package_source_link *s)
 {
     if (!s) return;
+    sl_store_clear(&s->own);
+    if (s->memo) _InterlockedExchange(&s->memo->busy, 0);
     for (size_t i = 0; s->readers && i < s->scope_count; i++) sh_package_source_reader_close(s->readers[i]);
     for (size_t i = 0; i < s->count; i++) {
         sl_unit *unit = s->units[i];
@@ -1520,6 +2028,8 @@ void sh_package_source_link_close(sh_package_source_link *s)
         if (unit->identities) for (size_t j = 0; j < unit->unit.file_count; j++) free((char *)unit->identities[j].name);
         free(unit->identities);
         free(unit->prepared.body);
+        for (size_t j = 0; j < unit->site_count; j++) free(unit->sites[j].slot);
+        free(unit->sites); free((void *)unit->discovered); free(unit->site_edges);
         free(unit->dependencies); free(unit);
     }
     for (size_t i = 0; i < s->original_count; i++) {
@@ -1532,6 +2042,7 @@ void sh_package_source_link_close(sh_package_source_link *s)
     free(s->reverse_gaps);
     for (size_t i = 0; i < s->player_hand_count; i++) free(s->player_hands[i]);
     free(s->player_hands);
+    free(s->withdrawn);
     free(s->originals); free(s->original_slots); free(s->units); free(s->unit_slots);
     free(s->inputs.units); free(s->inputs.scopes); free(s->readers); free(s->scopes); free(s->shared); free(s);
 }
@@ -1585,31 +2096,62 @@ sh_package_source_link *sh_package_source_link_open_attributed(const sh_package_
         s->readers[i] = sh_package_source_reader_open(scopes[i], catalog, sl_read_original, s,
             registry, reflection, error, capacity);
         if (!s->readers[i]) { s->environment = 1; goto failed; }
+        sh_package_source_reader_lookups(s->readers[i], sl_lookup, s);
         if (s->native.shader && !sh_package_source_reader_shader(s->readers[i], s->native.shader)) {
             s->environment = 1; goto failed;
         }
     }
+    s->store = &s->own; s->capture = 1;
+    if (s->native.memo && g_sl_replay && count) {
+        sh_package_source_memo *memo = s->native.memo;
+        unsigned char key[32];
+        if (_InterlockedCompareExchange(&memo->busy, 1, 0)) s->census.memo = 3;
+        else if (!sl_memo_key(s, registry, key)) {
+            /* A capture that cannot establish the key records only for itself. */
+            _InterlockedExchange(&memo->busy, 0);
+            if (s->error && s->error_capacity) *s->error = 0;
+        } else {
+            s->census.memo = 1;
+            if (!memo->keyed || memcmp(memo->key, key, sizeof(key))) {
+                if (memo->keyed) s->census.memo = 2;
+                sl_store_clear(&memo->store); memcpy(memo->key, key, sizeof(key)); memo->keyed = 1;
+            }
+            s->memo = memo; s->store = &memo->store; s->capture = ++memo->captures;
+        }
+    }
     sl_phase(s, 0, &mark);
     if (!sl_seed_inputs(s)) goto failed;
+    for (size_t i = 0; i < s->count; i++) { s->units[i]->seeded = 1; s->units[i]->seeded_witnesses = s->units[i]->unit.witness_count; }
     sl_phase(s, 1, &mark);
     if (!sl_player_contract(s)) { s->environment = 1; goto failed; }
+    /* Supplied content first: a supplied file its reader cannot read, or a
+     * lookup that needs native preparation, fails here instead of after the
+     * whole stock reverse discovery. The closure captured is the same. */
+    size_t inspected = 0;
+    if (!sl_discover_through(s, &inspected)) goto failed;
+    if (s->deferred.unit || *s->preparation_reason) {
+        /* This attempt fails. When native preparation is pending anyway, first
+         * let the stock observation queue what it needs too, so one
+         * preparation round serves the next attempt; its own outcome is not
+         * what this attempt reports. With nothing to prepare, a failure stops
+         * here, before any stock root is read. */
+        if (*s->preparation_reason) {
+            char kept[1024];
+            snprintf(kept, sizeof(kept), "%s", s->error ? s->error : "");
+            (void)sl_reverse_roots(s, root_plan, registry, reflection);
+            s->failed = 0; s->environment = 0;
+            if (s->error && s->error_capacity) snprintf(s->error, s->error_capacity, "%s", kept);
+            sl_phase(s, 2, &mark);
+        }
+        (void)sl_phase_complete(s); goto failed;
+    }
+    sl_phase(s, 3, &mark);
     /* Stock reverse discovery refuses only for I/O, allocation or setup. */
     if (!sl_reverse_roots(s, root_plan, registry, reflection)) { s->environment = 1; goto failed; }
     sl_phase(s, 2, &mark);
-    size_t inspected = 0;
     for (int pass = 0; pass < 2; pass++) {
         if (pass && !sl_seed_orphan_binaries(s)) goto failed;
-        for (; inspected < s->count; inspected++) {
-            sl_unit *unit = s->units[inspected];
-            s->reader_gap = s->malformed = s->preparing = 0;
-            if (!sl_discover_unit(s, unit)) {
-                if (s->preparing) continue;
-                s->failed_unit = unit; goto failed;
-            }
-            if (unit->unit.file_count > 1) qsort((void *)unit->unit.files, unit->unit.file_count, sizeof(*unit->unit.files), sl_file_order);
-            if (!sl_movie_identities(s, unit)) { s->failed_unit = unit; goto failed; }
-        }
-        if (*s->preparation_reason) { sl_env_fail(s, s->preparation_reason, NULL); goto failed; }
+        if (!sl_discover_through(s, &inspected) || !sl_phase_complete(s)) goto failed;
     }
     sl_phase(s, 3, &mark);
     if (!sl_shader_accounted(s)) goto failed;
@@ -1638,6 +2180,8 @@ sh_package_source_link *sh_package_source_link_open_attributed(const sh_package_
             if (original->status != 1 && original->status != 2) { original_bytes = 0; break; }
             campaign |= original->status == 2;
             const sh_compiled_resource *certificate = unit->unprepared ? unit->unprepared : unit->unit.files[j];
+            /* The captured original itself: its own bytes, nothing to compare. */
+            if (certificate == &original->resource) continue;
             unsigned char *body = sh_package_compilation_read(unit->unit.compilation, certificate,
                 SIZE_MAX, &length, error, capacity);
             if (!body) goto failed;
@@ -1678,6 +2222,12 @@ sh_package_source_link *sh_package_source_link_open_attributed(const sh_package_
     for (size_t i = 0; i < s->count; i++) s->units[i]->index = i;
     for (size_t i = 0; i < s->count; i++) {
         sl_unit *unit = s->units[i];
+        if (unit->site_count) {
+            if (unit->site_count > SIZE_MAX / sizeof(*unit->site_edges) ||
+                !(unit->site_edges = calloc(unit->site_count, sizeof(*unit->site_edges)))) goto failed;
+            for (size_t j = 0; j < unit->site_count; j++)
+                unit->site_edges[j] = (sh_package_link_edge){unit->sites[j].slot, unit->sites[j].target->index};
+        }
         if (unit->implicit_count) {
             if (unit->implicit_count > SIZE_MAX / sizeof(sh_package_link_edge)) goto failed;
             sh_package_link_edge *edges = calloc(unit->implicit_count, sizeof(*edges));
@@ -1715,6 +2265,45 @@ sh_package_source_link *sh_package_source_link_open(const sh_package_compilation
 }
 const sh_package_link_inputs *sh_package_source_link_inputs(const sh_package_source_link *source)
 { return source ? &source->inputs : NULL; }
+const char *sh_package_source_link_counters(const sh_package_source_link *s, char *out, size_t capacity)
+{
+    if (!out || !capacity) return out;
+    *out = 0;
+    if (s) snprintf(out, capacity, "source link %zu units discovered, %zu replayed from another scope "
+        "(%zu recorded, %zu declined); %zu file binds, %zu of unsupplied originals; %zu originals captured "
+        "(%llu MB); reverse base %zu units; discovery: file selection %llu ms, reads %llu ms, "
+        "constructor requests %llu ms; %zu replayed from earlier compiles (memo %s)", s->census.units,
+        s->census.replayed, s->census.recorded,
+        s->census.declined, s->census.binds, s->census.original_binds, s->census.originals,
+        s->census.original_bytes >> 20, s->census.reverse_units, s->census.select_us / 1000u,
+        s->census.read_us / 1000u, s->census.construct_us / 1000u, s->census.retained,
+        s->census.memo == 1 ? "kept" : s->census.memo == 2 ? "renewed" : s->census.memo == 3 ? "busy" : "unused");
+    return out;
+}
+int sh_package_source_link_unit_replayed(const sh_package_source_link *s, size_t index)
+{ return s && s->frozen && index < s->count && s->units[index]->replayed; }
+int sh_package_source_link_identity(sh_package_source_link *s, size_t index,
+    const sh_compiled_resource *file, sh_package_file_identity *out, char *error, size_t capacity)
+{
+    sl_original *original = s && file ? sl_original_peek(s, file->engine_path) : NULL;
+    if (original && &original->resource == file && original->resource.body) {
+        if (!original->identified) {
+            if (!sh_package_bytes_identity(original->resource.body, original->resource.body_length, &original->identity)) {
+                if (out) memset(out, 0, sizeof(*out));
+                if (error && capacity) snprintf(error, capacity, "cannot identify captured original: %s", file->engine_path);
+                return 0;
+            }
+            original->identified = 1;
+        }
+        *out = original->identity; return 1;
+    }
+    if (!s || index >= s->count) {
+        if (out) memset(out, 0, sizeof(*out));
+        if (error && capacity) snprintf(error, capacity, "resource identity has no source unit");
+        return 0;
+    }
+    return sh_package_compilation_identity(s->units[index]->unit.compilation, file, out, error, capacity);
+}
 const char *sh_package_source_link_phases(const sh_package_source_link *source, char *out, size_t capacity)
 {
     size_t used = 0;
@@ -1730,6 +2319,30 @@ const char *sh_package_source_link_phases(const sh_package_source_link *source, 
 const unsigned char *sh_package_source_link_shared(const sh_package_source_link *source)
 { return source && source->frozen ? source->shared : NULL; }
 typedef struct sl_compile { sh_package_source_link *source; const sh_package_link_adapter *native; } sl_compile;
+int sh_package_source_link_sites(const sh_package_source_link *s, size_t index,
+    const sh_compiled_resource *file, const sh_package_link_edge **sites, size_t *count)
+{
+    size_t k = 0, begin = 0, end;
+    if (sites) *sites = NULL;
+    if (count) *count = 0;
+    if (!s || !s->frozen || index >= s->count || !file || !sites || !count) return 0;
+    const sl_unit *unit = s->units[index];
+    while (k < unit->discovered_count && unit->discovered[k] != file) k++;
+    if (k == unit->discovered_count) return 0;
+    /* A file's sites were recorded contiguously while it was bound. */
+    while (begin < unit->site_count && unit->sites[begin].file != file) begin++;
+    for (end = begin; end < unit->site_count && unit->sites[end].file == file; end++);
+    *sites = end > begin ? unit->site_edges + begin : NULL; *count = end - begin;
+    return 1;
+}
+int sh_package_source_link_find_unit(sh_package_source_link *s, size_t scope,
+    const char *family, const char *name, size_t *unit)
+{
+    sl_unit *found = s && s->frozen && scope < s->scope_count && family && *family && name && *name ?
+        sl_find(s, scope, family, name, 0) : NULL;
+    if (unit) *unit = found ? found->index : SIZE_MAX;
+    return found != NULL;
+}
 int sh_package_source_link_resolve_unit(sh_package_source_link *s, size_t unit,
     const char *family, const char *name, size_t *target, char *error, size_t capacity)
 {

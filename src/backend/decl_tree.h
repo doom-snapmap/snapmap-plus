@@ -38,6 +38,17 @@ sh_decl_node *sh_decl_tree_parse_ordered(sh_decl_source source, char *error, siz
 sh_decl_node *sh_decl_tree_parse_reflected_body(sh_decl_source source, int ordered,
     char *error, size_t error_capacity);
 
+/* Diagnostic parse census of the calling thread: parses and text bytes.
+ * Never used for decisions. open returns 0 when this thread already has one
+ * (the caller then only reads it) or allocation fails; read yields zeros
+ * without a census. */
+typedef struct sh_decl_tree_census {
+    unsigned long long parses, bytes;
+} sh_decl_tree_census;
+int sh_decl_tree_census_open(void);
+void sh_decl_tree_census_read(sh_decl_tree_census *out);
+void sh_decl_tree_census_close(void);
+
 /* Serialize an owned tree without recursion or an application payload cap.
  * Scalar spelling and sibling order are retained. The result is malloc-owned. */
 char *sh_decl_tree_write(const sh_decl_node *root, size_t *length);

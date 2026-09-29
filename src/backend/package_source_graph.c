@@ -59,6 +59,7 @@ typedef struct sh_package_source_reader {
     void *bound_context;
     sh_package_source_shader shader;
     int shader_configured;
+    int preparing; /* The last read retained a native preparation request (sh_package_source_reader_preparing). */
     sg_shader_abi *shader_parameters;
     sh_package_source_admission admission;
     int native_origin; /* Inspecting an unchanged SnapMap original declaration. */
@@ -77,6 +78,8 @@ typedef struct sh_package_source_reader {
     size_t required_capacity;
     struct sg_deferred_path { size_t path, identity; } *deferred_paths;
     size_t deferred_path_count, deferred_path_capacity;
+    sh_package_source_lookup lookup; /* sh_package_source_reader_lookups */
+    void *lookup_context;
 } sg_walk;
 
 static int sg_editor(const char *type)
@@ -260,6 +263,7 @@ static int sg_read_path(sg_walk *walk, const char *path, unsigned char **body, s
 {
     const sh_compiled_resource *resource = sh_package_compilation_find(walk->compiled, path);
     *body = NULL; *length = 0;
+    if (walk->lookup) walk->lookup(walk->lookup_context, path, resource != NULL);
     if (resource) {
         *body = sh_package_compilation_read(walk->compiled, resource, (size_t)PTRDIFF_MAX,
             length, walk->error, walk->capacity);
@@ -501,9 +505,10 @@ static int sg_shader_parameter(void *context, const char *name, int *kind)
     if (supplied < 0 || (supplied && !body)) goto done;
     if (supplied && !sh_decl_material_parameter_kind((sh_decl_source){(const char *)body, length},
         &source_kind, walk->error, walk->capacity)) goto done;
-    if (walk->shader.parameter(walk->shader.context, canonical,
-        (sh_decl_source){(const char *)body, length}, &actual_kind, &index, walk->error, walk->capacity) != 1 ||
-        actual_kind < 0 || actual_kind > 18 || index > 32767 ||
+    int answer = walk->shader.parameter(walk->shader.context, canonical,
+        (sh_decl_source){(const char *)body, length}, &actual_kind, &index, walk->error, walk->capacity);
+    if (answer == 2) walk->preparing = 1;
+    if (answer != 1 || actual_kind < 0 || actual_kind > 18 || index > 32767 ||
         (supplied && source_kind != actual_kind)) goto done;
     for (sg_shader_abi *item = walk->shader_parameters; item; item = item->next) {
         if (strcmp(item->family, "renderparm") || strcmp(item->name, canonical)) continue;
@@ -532,8 +537,11 @@ static int sg_shader_flag(sg_walk *walk, const char *name)
     int supplied = -1, ok = 0;
     if (!path || !canonical || !walk->shader_configured || !walk->shader.flag) goto done;
     supplied = sg_read_path(walk, path, &body, &length);
-    if (supplied < 0 || (supplied && !body) || walk->shader.flag(walk->shader.context, canonical,
-        (sh_decl_source){(const char *)body, length}, &mask, walk->error, walk->capacity) != 1) goto done;
+    if (supplied < 0 || (supplied && !body)) goto done;
+    int answer = walk->shader.flag(walk->shader.context, canonical,
+        (sh_decl_source){(const char *)body, length}, &mask, walk->error, walk->capacity);
+    if (answer == 2) walk->preparing = 1;
+    if (answer != 1) goto done;
     for (sg_shader_abi *item = walk->shader_parameters; item; item = item->next) {
         if (strcmp(item->family, "renderprogflag") || strcmp(item->name, canonical)) continue;
         if (item->mask != mask || item->supplied != (supplied != 0) || item->length != length ||
@@ -577,7 +585,7 @@ sh_package_source_shader_status sh_package_source_shader_open(sh_package_source_
     if (program) memset(program, 0, sizeof(*program));
     if (!reader || !name || !declaration || !declaration_length || !binary || !binary_length || !program) return 0;
     old_error = reader->error; old_capacity = reader->capacity;
-    reader->error = error; reader->capacity = capacity;
+    reader->error = error; reader->capacity = capacity; reader->preparing = 0;
     if (!reader->shader_configured) { sg_shader_error(reader, "shader renderer contract is unavailable", name); goto done; }
     if (sh_package_shader_paths(reader->shader.renderer, name, name, &empty,
         sg_shader_first_paths, &paths, error, capacity) != SH_PACKAGE_SHADER_OK) goto done;
@@ -602,6 +610,8 @@ sh_package_source_shader_status sh_package_source_shader_open(sh_package_source_
     }
     ok = SH_PACKAGE_SOURCE_SHADER_READY;
 done:
+    /* A parameter or flag awaiting native preparation: retry after it. */
+    if (ok == SH_PACKAGE_SOURCE_SHADER_ERROR && reader->preparing) ok = SH_PACKAGE_SOURCE_SHADER_PREPARING;
     if (ok != SH_PACKAGE_SOURCE_SHADER_READY) {
         free(*declaration); free(*binary); *declaration = *binary = NULL; *declaration_length = *binary_length = 0;
         sh_package_shader_program_clear(program);
@@ -688,7 +698,10 @@ static int sg_leaf_file(sg_walk *walk, const char *path)
     size_t length = 0;
     int status;
     if (!sg_file(walk, path)) return 0;
-    if (sh_package_compilation_find(walk->compiled, path)) return 1;
+    if (sh_package_compilation_find(walk->compiled, path)) {
+        if (walk->lookup) walk->lookup(walk->lookup_context, path, 1);
+        return 1;
+    }
     status = sg_read_path(walk, path, &body, &length);
     free(body);
     if (status <= 0) sg_gap(walk, "", walk->current_type,
@@ -851,7 +864,10 @@ static int sg_sound(sg_walk *walk, const char *name)
 static int sg_available(sg_walk *walk, const char *path)
 {
     unsigned char *body = NULL; size_t length = 0;
-    if (sh_package_compilation_find(walk->compiled, path)) return 1;
+    if (sh_package_compilation_find(walk->compiled, path)) {
+        if (walk->lookup) walk->lookup(walk->lookup_context, path, 1);
+        return 1;
+    }
     int status = sg_read_path(walk, path, &body, &length);
     free(body); return status > 0 ? 1 : status;
 }
@@ -1177,6 +1193,40 @@ sh_package_source_reader *sh_package_source_reader_open(const sh_package_compila
     if (walk->registry && walk->schema) return walk;
 failed:
     sh_package_source_reader_close(walk); return NULL;
+}
+
+void sh_package_source_reader_lookups(sh_package_source_reader *reader,
+    sh_package_source_lookup lookup, void *context)
+{
+    if (reader) { reader->lookup = lookup; reader->lookup_context = lookup ? context : NULL; }
+}
+int sh_package_source_reader_preparing(const sh_package_source_reader *reader)
+{ return reader && reader->preparing; }
+typedef struct sg_digest { unsigned char *bytes; size_t length, capacity; int failed; } sg_digest;
+static int sg_digest_emit(void *context, const void *bytes, size_t length)
+{
+    sg_digest *d = context;
+    if (d->failed || length > SIZE_MAX - d->length) { d->failed = 1; return 0; }
+    if (d->length + length > d->capacity) {
+        size_t next = d->capacity ? d->capacity : 65536;
+        while (next < d->length + length) {
+            if (next > SIZE_MAX / 2) { d->failed = 1; return 0; }
+            next *= 2;
+        }
+        unsigned char *grown = realloc(d->bytes, next);
+        if (!grown) { d->failed = 1; return 0; }
+        d->bytes = grown; d->capacity = next;
+    }
+    memcpy(d->bytes + d->length, bytes, length); d->length += length; return 1;
+}
+int sh_package_source_reader_native_digest(sh_package_source_reader *reader, unsigned char out[32])
+{
+    sg_digest d = {0}; sh_package_file_identity identity; int ok = 0;
+    if (!reader || !out) return 0;
+    if (sh_decl_native_registry_digest(reader->registry, sg_digest_emit, &d) &&
+        sh_decl_native_schema_digest(reader->schema, sg_digest_emit, &d) && !d.failed &&
+        sh_package_bytes_identity(d.bytes, d.length, &identity)) { memcpy(out, identity.digest, 32); ok = 1; }
+    free(d.bytes); return ok;
 }
 
 void sh_package_source_reader_close(sh_package_source_reader *reader)
@@ -1732,6 +1782,7 @@ static unsigned char *sg_bind_source(sh_package_source_reader *reader,
     char *class_name = NULL, fallback[1024];
     size_t changed = 0, out_length = 0;
     if (!error || !capacity) { error = fallback; capacity = sizeof(fallback); }
+    if (reader) reader->preparing = 0;
     error[0] = 0;
     if (output_length) *output_length = 0;
     if (result) memset(result, 0, sizeof(*result));

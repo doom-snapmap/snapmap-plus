@@ -36,6 +36,10 @@ void sh_decl_server_request_rearm(void)
 
 static int g_source_notices;
 void sh_package_runtime_note_sources_changed(void) { g_source_notices++; }
+/* A gate installation (no continuing map load) asks its refresh to fold the
+ * published packages in as an installation does. */
+static int g_install_notices;
+void sh_package_runtime_note_install_published(void) { g_install_notices++; }
 
 static int g_failed;
 
@@ -455,9 +459,10 @@ static void test_batch_install(const char *root)
     sh_mpkg_test_reset(); sh_mpkg_boot_capture(client);
     sh_mpkg_test_set_consent_mode(SH_MPKG_CONSENT_ACCEPT);
     sh_mpkg_test_set_publish(batch_publish);
-    g_registration_ready = g_rearm_requests = batch_publish_calls = 0;
+    g_registration_ready = g_rearm_requests = batch_publish_calls = g_install_notices = 0;
     CHECK(!sh_mpkg_gate(map, length));
-    CHECK(batch_publish_calls == 1 && sh_mpkg_test_session_installed_count() == 2 && g_rearm_requests == 1);
+    CHECK(batch_publish_calls == 1 && sh_mpkg_test_session_installed_count() == 2 && g_rearm_requests == 1 &&
+        g_install_notices == 1);
     CHECK(installed_package(client, "batch-00", first)); CHECK(installed_package(client, "batch-01", second));
     check_batch_package(first, 0); check_batch_package(second, 1);
     CHECK(!sh_mpkg_gate(map, length));
@@ -470,20 +475,20 @@ static void test_batch_install(const char *root)
     sh_mpkg_test_reset(); sh_mpkg_boot_capture(client);
     sh_mpkg_test_set_consent_mode(SH_MPKG_CONSENT_ACCEPT);
     sh_mpkg_test_set_prepare(batch_edit_prepare); sh_mpkg_test_set_publish(batch_publish);
-    g_rearm_requests = batch_publish_calls = 0;
+    g_rearm_requests = batch_publish_calls = g_install_notices = 0;
     CHECK(!sh_mpkg_gate(map, length));
-    CHECK(installed_count(client) == 0 && !batch_publish_calls && !g_rearm_requests);
+    CHECK(installed_count(client) == 0 && !batch_publish_calls && !g_rearm_requests && !g_install_notices);
 
     /* A failed commit installs none, discards temporary files and allows retry. */
     sh_mpkg_test_reset(); sh_mpkg_boot_capture(client);
     sh_mpkg_test_set_consent_mode(SH_MPKG_CONSENT_ACCEPT); sh_mpkg_test_set_publish(batch_publish);
-    g_rearm_requests = batch_publish_calls = 0; batch_fail = 1;
+    g_rearm_requests = batch_publish_calls = g_install_notices = 0; batch_fail = 1;
     CHECK(!sh_mpkg_gate(map, length));
-    CHECK(batch_publish_calls == 1 && !g_rearm_requests && !sh_mpkg_test_session_installed_count());
+    CHECK(batch_publish_calls == 1 && !g_rearm_requests && !g_install_notices && !sh_mpkg_test_session_installed_count());
     CHECK(installed_count(client) == 0 && !dir_exists(batch_staging) && !dir_exists(batch_destination));
     batch_fail = 0;
     CHECK(!sh_mpkg_gate(map, length));
-    CHECK(installed_count(client) == 2 && g_rearm_requests == 1);
+    CHECK(installed_count(client) == 2 && g_rearm_requests == 1 && g_install_notices == 1);
     sh_mpkg_report_error("specific activation failure");
     CHECK(sh_mpkg_activation_cancel());
     CHECK(installed_count(client) == 0 && !sh_mpkg_test_session_installed_count());

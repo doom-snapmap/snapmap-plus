@@ -57,6 +57,18 @@ int sh_package_link_equivalence_verified(const sh_package_link_node *nodes, size
     sh_package_link_verify_equal verify, void *context,
     sh_package_link_classes *out, char *error, size_t capacity);
 void sh_package_link_classes_free(sh_package_link_classes *classes);
+/* An earlier call's shape order over the same node indices. When it still
+ * sorts the current nodes (one linear check), it replaces the full sort; the
+ * call writes back its own order. The result is the same partition either way:
+ * only the arbitrary order of equal shapes may differ. items is malloc-owned. */
+typedef struct sh_package_link_order { size_t *items; size_t count; } sh_package_link_order;
+int sh_package_link_equivalence_ordered(const sh_package_link_node *nodes, size_t count,
+    sh_package_link_verify_equal verify, void *context, sh_package_link_order *order,
+    sh_package_link_classes *out, char *error, size_t capacity);
+int sh_package_link_identify_ordered(const sh_package_link_node *nodes, size_t count,
+    sh_package_link_verify_equal verify, void *context, sh_package_link_order *order,
+    sh_package_link_classes *out, char *error, size_t capacity);
+void sh_package_link_order_free(sh_package_link_order *order);
 
 /* Also derive content-addressed identities over the resolved quotient graph.
  * Dependencies are hashed before their parents; a cyclic component gets one

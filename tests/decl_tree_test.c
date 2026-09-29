@@ -225,6 +225,23 @@ int main(void)
     for (i = 0; i < 140000; i++) cursor += sprintf(cursor, "x%zu=0;", i);
     *cursor++ = '}'; *cursor = 0;
     root = parse(text); assert(root); sh_decl_tree_free(root); free(text);
+
+    /* The diagnostic parse census counts this thread's parses and their
+     * text, failed parses included; a nested open only reads it. */
+    {
+        sh_decl_tree_census census;
+        sh_decl_tree_census_read(&census); assert(!census.parses);
+        assert(sh_decl_tree_census_open());
+        assert(!sh_decl_tree_census_open());
+        root = parse("{ a = 1; }"); assert(root); sh_decl_tree_free(root);
+        root = parse("{ a = 2; }"); assert(root); sh_decl_tree_free(root);
+        assert(!parse("{ a = 1; a = 2; }"));
+        sh_decl_tree_census_read(&census);
+        assert(census.parses == 3 && census.bytes == 10 + 10 + 17);
+        sh_decl_tree_census_close();
+        sh_decl_tree_census_read(&census); assert(!census.parses && !census.bytes);
+        sh_decl_tree_census_close();
+    }
     puts("decl_tree_test: PASS");
     return 0;
 }

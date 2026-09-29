@@ -127,7 +127,7 @@ static void lg_enqueue(lg_work *work, size_t group)
 }
 
 static int lg_prepare(lg_work *work, const sh_package_link_node *nodes, size_t count,
-    sh_package_link_verify_equal verify, void *context, char *error, size_t capacity)
+    sh_package_link_verify_equal verify, void *context, sh_package_link_order *order, char *error, size_t capacity)
 {
     size_t i, j, edge_count = 0, at = 0, *cursor = NULL;
     if ((count && !nodes) || count == SIZE_MAX)
@@ -161,18 +161,22 @@ static int lg_prepare(lg_work *work, const sh_package_link_node *nodes, size_t c
     for (i = 0; i < count; i++) {
         lg_item *item = &work->items[i];
         const sh_package_link_node *node = &nodes[i];
+        int order = -1;
         *item = (lg_item){node, work->edges + at, work->targets + at, i};
         if (node->edge_count) memcpy(item->edges, node->edges, node->edge_count * sizeof(*item->edges));
-        if (node->edge_count > 1) qsort(item->edges, node->edge_count, sizeof(*item->edges), lg_edge_order);
-        for (j = 0; j < node->edge_count; j++) {
-            if (j && !strcmp(item->edges[j - 1].slot, item->edges[j].slot)) {
+        /* Slots already strictly in order are exactly what sorting would give
+         * and repeat none; otherwise sort and check as before. */
+        for (j = 1; order < 0 && j < node->edge_count; j++) order = strcmp(item->edges[j - 1].slot, item->edges[j].slot);
+        if (order >= 0) {
+            qsort(item->edges, node->edge_count, sizeof(*item->edges), lg_edge_order);
+            for (j = 1; j < node->edge_count; j++) if (!strcmp(item->edges[j - 1].slot, item->edges[j].slot)) {
                 free(cursor);
                 if (error && capacity) snprintf(error, capacity, "resource graph repeats binding slot %s in %s %s",
                     item->edges[j].slot, node->family, node->path);
                 return 0;
             }
-            work->offsets[item->edges[j].target + 1]++;
         }
+        for (j = 0; j < node->edge_count; j++) work->offsets[item->edges[j].target + 1]++;
         at += node->edge_count;
     }
     for (i = 0; i < count; i++) {
@@ -181,21 +185,57 @@ static int lg_prepare(lg_work *work, const sh_package_link_node *nodes, size_t c
     for (i = 0; i < count; i++) for (j = 0; j < nodes[i].edge_count; j++)
         work->incoming[cursor[nodes[i].edges[j].target]++] = i;
     free(cursor);
-    if (count > 1) qsort(work->items, count, sizeof(*work->items), lg_shape_order);
+    int sorted = 0;
+    /* equal[i]: items i - 1 and i have one shape (known when an earlier order
+     * was reused; otherwise grouping compares). */
+    unsigned char *equal = NULL;
+    if (order && order->items && order->count == count && count > 1) {
+        /* Place items in the earlier order when it is a permutation, then
+         * keep it only if every adjacent pair is still in shape order. */
+        lg_item *placed = lg_allocate(count, sizeof(*placed));
+        unsigned char *seen = lg_allocate(count, 1);
+        equal = lg_allocate(count, 1);
+        if (placed && seen && equal) {
+            sorted = 1;
+            for (i = 0; sorted && i < count; i++) {
+                size_t index = order->items[i];
+                if (index >= count || seen[index]) sorted = 0;
+                else { seen[index] = 1; placed[i] = work->items[index]; }
+            }
+            for (i = 1; sorted && i < count; i++) {
+                int cmp = lg_shape_order(&placed[i - 1], &placed[i]);
+                if (cmp > 0) sorted = 0; else equal[i] = !cmp;
+            }
+            if (sorted) memcpy(work->items, placed, count * sizeof(*placed));
+        }
+        free(placed); free(seen);
+        if (!sorted) { free(equal); equal = NULL; }
+    }
+    if (count > 1 && !sorted) qsort(work->items, count, sizeof(*work->items), lg_shape_order);
+    if (order) {
+        size_t *items = order->count == count && order->items ? order->items :
+            lg_allocate(count, sizeof(*items));
+        if (items) {
+            for (i = 0; i < count; i++) items[i] = work->items[i].index;
+            if (items != order->items) { free(order->items); order->items = items; }
+            order->count = count;
+        } else { free(order->items); order->items = NULL; order->count = 0; }
+    }
     for (i = 0; i < count;) {
         size_t end = i + 1, group = work->group_count++;
-        while (end < count && !lg_shape_order(&work->items[i], &work->items[end])) end++;
+        /* Shape equality is transitive: a run of equal neighbours is a group. */
+        while (end < count && (equal ? equal[end] : !lg_shape_order(&work->items[i], &work->items[end]))) end++;
         if (verify) for (j = i + 1; j < end; j++)
             if (!verify(context, work->items[i].index, work->items[j].index, error, capacity)) {
                 if (error && capacity && !*error)
                     lg_fail(error, capacity, "resource fingerprint match failed exact verification");
-                return 0;
+                free(equal); return 0;
             }
         work->groups[group] = (lg_group){i, end - i, 0};
         for (j = i; j < end; j++) work->classes[work->items[j].index] = group;
         lg_enqueue(work, group); i = end;
     }
-    return 1;
+    free(equal); return 1;
 }
 
 static void lg_refine(lg_work *work, size_t group)
@@ -241,8 +281,18 @@ void sh_package_link_classes_free(sh_package_link_classes *classes)
     if (classes) { free(classes->nodes); free(classes->representatives); free(classes->identities); memset(classes, 0, sizeof(*classes)); }
 }
 
+void sh_package_link_order_free(sh_package_link_order *order)
+{
+    if (order) { free(order->items); order->items = NULL; order->count = 0; }
+}
 int sh_package_link_equivalence_verified(const sh_package_link_node *nodes, size_t count,
     sh_package_link_verify_equal verify, void *context,
+    sh_package_link_classes *out, char *error, size_t capacity)
+{
+    return sh_package_link_equivalence_ordered(nodes, count, verify, context, NULL, out, error, capacity);
+}
+int sh_package_link_equivalence_ordered(const sh_package_link_node *nodes, size_t count,
+    sh_package_link_verify_equal verify, void *context, sh_package_link_order *order,
     sh_package_link_classes *out, char *error, size_t capacity)
 {
     lg_work work = {0};
@@ -251,7 +301,7 @@ int sh_package_link_equivalence_verified(const sh_package_link_node *nodes, size
     if (error && capacity) error[0] = 0;
     if (!out) return lg_fail(error, capacity, "resource graph needs an output");
     sh_package_link_classes_free(out);
-    if (!lg_prepare(&work, nodes, count, verify, context, error, capacity)) goto done;
+    if (!lg_prepare(&work, nodes, count, verify, context, order, error, capacity)) goto done;
     while (work.queue_count) {
         size_t group = work.queue[work.queue_begin];
         work.queue_begin = (work.queue_begin + 1) % work.count; work.queue_count--;

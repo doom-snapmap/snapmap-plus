@@ -79,6 +79,9 @@ typedef struct sh_package_library {
     unsigned long long phase_ms[SH_PACKAGE_LIBRARY_PHASES];
     char source_phases[256]; /* The source capture's own phases, when it opened. */
     char contribution_phases[256]; /* The contribution phase's own steps, when it ran. */
+    /* Diagnostic repeated-work lines of the last compile, '\n'-separated:
+     * parse census by phase, source capture repeats, identity passes. */
+    char repeated_work[2560];
 } sh_package_library;
 
 /* Write "scopes N ms, native N ms, ..." for the last compile; returns out. */
@@ -122,5 +125,11 @@ void sh_package_library_test_contribution_read_failures(const char *name, long c
 /* Fail the next count compositions that isolate a combination gap's
  * participant as an environment failure (allocation) would. */
 void sh_package_library_test_probe_failures(long count);
+/* 0 composes every editor contribution member afresh instead of reusing the
+ * body of an earlier member with the same exact input (the same result). */
+void sh_package_library_test_editor_memo(int enabled);
+/* 0 rewrites the registration keys of every declaration afresh instead of
+ * reusing each binding class's scanned key sites (the same result). */
+void sh_package_library_test_key_memo(int enabled);
 #endif
 #endif

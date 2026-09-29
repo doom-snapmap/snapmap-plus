@@ -9,6 +9,7 @@
 #include "decl_block_compose.h"
 #include "package_movie.h"
 #include "swf_binary.h"
+#include "decl_tree.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -97,6 +98,11 @@ typedef struct pl_build {
     int key_space_read, private_keys;
     /* Wall-clock milliseconds of the contribution phase's steps (PL_STEP_*). */
     unsigned long long step_ms[9];
+    /* Diagnostic parse census (decl_tree.h) per library phase and step. */
+    int census_owned;
+    /* Diagnostics: key-site scans made and reused, units left unrewritten. */
+    size_t key_scans, key_scan_hits, key_skipped;
+    sh_decl_tree_census census_mark, census_phase[SH_PACKAGE_LIBRARY_PHASES], census_step[9];
 } pl_build;
 enum {
     PL_STEP_COVERAGE, PL_STEP_LOCALIZE, PL_STEP_TOKENS, PL_STEP_KEYS, PL_STEP_EDITOR,
@@ -275,17 +281,27 @@ static unsigned long long pl_now_ms(void)
     struct timespec now;
     return timespec_get(&now, TIME_UTC) ? (unsigned long long)now.tv_sec * 1000u + (unsigned long long)now.tv_nsec / 1000000u : 0;
 }
+/* Charge the parses since the last mark to into and restart the mark. */
+static void pl_census(pl_build *b, sh_decl_tree_census *into)
+{
+    sh_decl_tree_census now;
+    sh_decl_tree_census_read(&now);
+    into->parses += now.parses - b->census_mark.parses; into->bytes += now.bytes - b->census_mark.bytes;
+    b->census_mark = now;
+}
 /* Charge the time since *mark to phase and restart the mark. */
-static void pl_phase(sh_package_library *out, int phase, unsigned long long *mark)
+static void pl_phase(pl_build *b, sh_package_library *out, int phase, unsigned long long *mark)
 {
     unsigned long long now = pl_now_ms();
     out->phase_ms[phase] += now >= *mark ? now - *mark : 0; *mark = now;
+    pl_census(b, b->census_phase + phase);
 }
 /* The same for one step of the contribution phase. */
 static void pl_step(pl_build *b, int step, unsigned long long *mark)
 {
     unsigned long long now = pl_now_ms();
     b->step_ms[step] += now >= *mark ? now - *mark : 0; *mark = now;
+    pl_census(b, b->census_step + step);
 }
 static void pl_steps(const pl_build *b, char *out, size_t capacity)
 {
@@ -582,6 +598,16 @@ static int pl_assign(void *context, size_t index, const unsigned char identity[3
 }
 
 typedef struct pl_contribution_edge { char *slot; size_t target; } pl_contribution_edge;
+/* The registration-key sites one binding class reports (pl_key_scan_of): each
+ * site's slot and value, in the reader's order. */
+typedef struct pl_key_site { char *slot, *value; size_t length; } pl_key_site;
+typedef struct pl_key_scan {
+    unsigned char identity[32];
+    int token_text; /* scanned the token text (relocation), else the captured bytes (spawn capture) */
+    int status;     /* sh_package_source_link_bind_keys status of the scan */
+    pl_key_site *sites;
+    size_t count;
+} pl_key_scan;
 typedef struct pl_contribution_unit {
     sh_package_compilation *owned;
     const sh_compiled_resource *file;
@@ -607,7 +633,16 @@ struct pl_contributions {
     /* Identity captures of untouched units, shared by every pass of this
      * build: the contribution phases and the final link bind them alike. */
     sh_package_link_reuse *reuse;
+    /* Registration-key site scans by class identity and text (open addressing). */
+    pl_key_scan **key_scans;
+    size_t key_scan_count, key_scan_capacity;
 };
+static void pl_key_scan_free(pl_key_scan *scan)
+{
+    if (!scan) return;
+    for (size_t i = 0; i < scan->count; i++) { free(scan->sites[i].slot); free(scan->sites[i].value); }
+    free(scan->sites); free(scan);
+}
 
 static void pl_contribution_unit_free(pl_contribution_unit *unit)
 {
@@ -652,6 +687,8 @@ static void pl_contributions_close(pl_contributions *c)
     }
     pl_tokens_free(c); sh_package_link_classes_free(&c->classes);
     sh_package_link_reuse_close(c->reuse);
+    for (size_t i = 0; i < c->key_scan_capacity; i++) pl_key_scan_free(c->key_scans[i]);
+    free(c->key_scans);
     free(c->origins); free(c->scopes); free(c->implicit); free(c->witnesses);
     free(c->units); free(c->inputs.units); free(c->shared); free(c->global); free(c);
 }
@@ -775,6 +812,34 @@ static unsigned char *pl_bound_bind(void *context, size_t unit, const sh_compile
     return sh_package_source_link_bind_derived(c->source, c->origins[unit], body, length,
         pl_bound_reference, &walk, pl_derived_exists, &walk, output_length, error, capacity);
 }
+/* A unit the contributions did not compose binds through the source reader's
+ * frozen scoped resolution alone; a composed unit binds through its captured
+ * slots and the current tokens (pl_bound_bind). */
+static int pl_bound_stable(void *context, size_t unit)
+{
+    const pl_contributions *c = context;
+    return unit < c->inputs.count && !c->units[unit].owned;
+}
+/* Such a unit's files were bound by discovery with that same reader and
+ * resolution; their sites seed its first identity capture. */
+static int pl_bound_sites(void *context, size_t unit, const sh_compiled_resource *file,
+    const sh_package_link_edge **sites, size_t *count)
+{
+    const pl_contributions *c = context;
+    if (!pl_bound_stable(context, unit)) return 0;
+    return sh_package_source_link_sites(c->source, c->origins[unit], file, sites, count);
+}
+/* An untouched unit's files are the source capture's; its unsupplied
+ * originals are identified once for all the scopes that bind them. A composed
+ * unit identifies its own files. */
+static int pl_bound_identity(void *context, size_t unit, const sh_compiled_resource *file,
+    sh_package_file_identity *out, char *error, size_t capacity)
+{
+    const pl_contributions *c = context;
+    if (unit < c->inputs.count && !c->units[unit].owned)
+        return sh_package_source_link_identity(c->source, c->origins[unit], file, out, error, capacity);
+    return sh_package_compilation_identity(c->inputs.units[unit].compilation, file, out, error, capacity);
+}
 static int pl_bound_assign(void *context, size_t unit, const unsigned char identity[32], int original_binding,
     const sh_compiled_resource *const *files, size_t count, char **name, char ***paths,
     char *error, size_t capacity)
@@ -799,7 +864,7 @@ static int pl_tokens(pl_contributions *c, char *error, size_t capacity)
     pl_tokens_free(c);
     pl_reuse_refresh(c);
     sh_package_link_adapter adapter = {c, pl_bound_resolve, pl_bound_bind};
-    adapter.reuse = c->reuse;
+    adapter.reuse = c->reuse; adapter.sites = pl_bound_sites; adapter.identity = pl_bound_identity;
     if (!sh_package_link_identify_units(c->inputs.units, c->inputs.count, &adapter, &c->classes, error, capacity)) return 0;
     c->tokens = calloc(c->classes.count ? c->classes.count : 1, sizeof(*c->tokens));
     c->token_order = calloc(c->classes.count ? c->classes.count : 1, sizeof(*c->token_order));
@@ -1190,6 +1255,7 @@ static int pl_edges_same(pl_contributions *c, size_t unit, const pl_contribution
 
 /* The package supplying a member's own authored bytes; SIZE_MAX for stock,
  * product content and byte-identical copies of an installed original. */
+static size_t pl_scope_owner(const pl_build *b, const sh_package_sources *sources, size_t scope);
 static size_t pl_member_owner(const pl_build *b, const sh_package_sources *sources, size_t unit)
 {
     const sh_package_link_unit *value = sh_package_source_link_inputs(b->contributions->source)->units + unit;
@@ -1197,8 +1263,7 @@ static size_t pl_member_owner(const pl_build *b, const sh_package_sources *sourc
     int authored = 0;
     for (size_t f = 0; f < value->file_count; f++)
         if (value->files[f]->source_count && !value->files[f]->native_original) authored = 1;
-    if (!authored || scope >= b->authored_count || scope >= sources->component_count) return SIZE_MAX;
-    return sources->components[scope].owner;
+    return authored ? pl_scope_owner(b, sources, scope) : SIZE_MAX;
 }
 
 /* A group the product cannot compose names its declaration. A package's own
@@ -1236,6 +1301,10 @@ typedef struct pl_collection_probe {
 #ifdef SH_PACKAGE_LIBRARY_TESTING
 static long g_probe_failures;
 void sh_package_library_test_probe_failures(long count) { g_probe_failures = count; }
+static int g_editor_memo = 1;
+void sh_package_library_test_editor_memo(int enabled) { g_editor_memo = enabled != 0; }
+static int g_key_memo = 1;
+void sh_package_library_test_key_memo(int enabled) { g_key_memo = enabled != 0; }
 #endif
 static int pl_collection_composes(void *context, const sh_decl_source *parts, size_t count)
 {
@@ -1405,6 +1474,11 @@ static int pl_same_declaration(sh_decl_source left, sh_decl_source right)
     return same;
 }
 
+#ifdef SH_PACKAGE_LIBRARY_TESTING
+static int pl_editor_memo(void) { return g_editor_memo; }
+#else
+static int pl_editor_memo(void) { return 1; }
+#endif
 /* One declaration's editor contributions. Members naming the reference
  * member's parent compose into one shared surface; a member whose author gave
  * it another parent is that author's own variant and is only rebased. Every
@@ -1422,11 +1496,17 @@ static int pl_contribution_group(pl_build *b, const sh_package_sources *sources,
     char **parents = calloc(count, sizeof(*parents));
     unsigned char *included = calloc(count, 1), *rebased = calloc(count, 1);
     size_t *part_member = calloc(count + 1, sizeof(*part_member));
+    /* Per distinct member input: its composed body, binding and unchanged
+     * check (composed[i] set only for the first member with that input). */
+    char **composed = calloc(count, sizeof(*composed));
+    size_t *composed_length = calloc(count, sizeof(*composed_length));
+    signed char *composed_private = calloc(count, 1), *same_known = calloc(count, 1), *same_value = calloc(count, 1);
     sh_decl_source base = {"{}", 2};
     size_t source_count = 0, base_member = SIZE_MAX, reference, culprit = SIZE_MAX;
     int ok = 0, kind = SH_PACKAGE_EDITOR_FAILURE_ENVIRONMENT, any_rebased = 0;
     pl_chain published = {0}, authored_base = {0};
-    if (!texts || !parts || !peers || !pending || !parents || !included || !rebased || !part_member) {
+    if (!texts || !parts || !peers || !pending || !parents || !included || !rebased || !part_member ||
+        !composed || !composed_length || !composed_private || !same_known || !same_value) {
         snprintf(error, capacity, "editor contribution allocation failed"); goto failed;
     }
     for (size_t i = 0; i < count; i++) {
@@ -1498,11 +1578,19 @@ static int pl_contribution_group(pl_build *b, const sh_package_sources *sources,
         part_member[source_count] = base_member; parts[source_count++] = base;
     }
     for (size_t i = 0; i < count && source_count; i++) {
-        size_t unit = members[i], length = 0, peer_count = 0;
+        size_t unit = members[i], length = 0, peer_count = 0, prior = SIZE_MAX;
         sh_package_editor_failure failure;
         if (!included[i]) continue;
-        char *body = sh_package_editor_contributions_report(input->family, base, parts, source_count,
-            texts[i], !sh_package_source_link_shared(c->source)[unit], &length, &failure, error, capacity);
+        /* The body is a function of the shared baseline and parts and of this
+         * member's exact text and binding: repeats reuse the first result. */
+        signed char private_binding = !sh_package_source_link_shared(c->source)[unit];
+        for (size_t k = 0; pl_editor_memo() && k < i && prior == SIZE_MAX; k++)
+            if (composed[k] && composed_private[k] == private_binding && texts[k].length == texts[i].length &&
+                !memcmp(texts[k].text, texts[i].text, texts[i].length)) prior = k;
+        const char *body = prior != SIZE_MAX ? composed[prior] : NULL;
+        if (body) length = composed_length[prior];
+        else body = composed[i] = sh_package_editor_contributions_report(input->family, base, parts, source_count,
+            texts[i], private_binding, &length, &failure, error, capacity);
         if (!body) {
             kind = failure.kind;
             if (kind == SH_PACKAGE_EDITOR_FAILURE_SOURCE && failure.source < source_count)
@@ -1518,15 +1606,18 @@ static int pl_contribution_group(pl_build *b, const sh_package_sources *sources,
         /* A member the union leaves as it was keeps its exact bytes, and with
          * them its native identity, whatever else the group holds: only a
          * recomposed spelling would differ. */
+        if (prior == SIZE_MAX) { composed_length[i] = length; composed_private[i] = private_binding; }
         if (!rebased[i]) {
-            int same = pl_same_declaration(texts[i], (sh_decl_source){body, length});
-            if (same < 0) { free(body); snprintf(error, capacity, "editor contribution allocation failed"); goto failed; }
-            if (same) { free(body); continue; }
+            int same = prior != SIZE_MAX && same_known[prior] ? same_value[prior] :
+                pl_same_declaration(texts[i], (sh_decl_source){body, length});
+            if (same < 0) { snprintf(error, capacity, "editor contribution allocation failed"); goto failed; }
+            if (prior == SIZE_MAX) { same_known[i] = 1; same_value[i] = (signed char)same; }
+            if (same) continue;
         }
         for (size_t j = 0; j < count; j++) if (j != i && included[j] && c->inputs.scopes[members[j]] != b->count - 1)
             peers[peer_count++] = c->inputs.units[members[j]].files[0];
-        int staged = pl_contribution_stage(b, sources, unit, body, length, peers, peer_count, pending + i, error, capacity);
-        free(body); if (!staged) goto failed;
+        if (!pl_contribution_stage(b, sources, unit, body, length, peers, peer_count, pending + i, error, capacity))
+            goto failed;
     }
     /* A member with another parent is its author's own variant: only rebased. */
     for (size_t i = 0; i < count; i++) if (!included[i] && rebased[i] &&
@@ -1554,8 +1645,10 @@ done:
     if (texts) for (size_t i = 0; i < count; i++) free((char *)texts[i].text);
     if (pending) for (size_t i = 0; i < count; i++) pl_contribution_unit_free(pending + i);
     if (parents) for (size_t i = 0; i < count; i++) free(parents[i]);
+    if (composed) for (size_t i = 0; i < count; i++) free(composed[i]);
     pl_chain_free(&published); pl_chain_free(&authored_base);
     free(texts); free(parts); free((void *)peers); free(pending); free(parents); free(included); free(rebased); free(part_member);
+    free(composed); free(composed_length); free(composed_private); free(same_known); free(same_value);
     return ok;
 }
 
@@ -1812,10 +1905,12 @@ static size_t pl_key_base(const pl_build *b, size_t unit)
 {
     const pl_contributions *c = b->contributions;
     const sh_package_link_unit *input = c->inputs.units + unit;
-    for (size_t j = 0; j < c->inputs.count; j++)
-        if (c->inputs.scopes[j] == b->count - 1 && !strcmp(c->inputs.units[j].family, input->family) &&
-            !strcmp(c->inputs.units[j].name, input->name)) return j;
-    return SIZE_MAX;
+    size_t found = SIZE_MAX;
+    /* Compiler clones follow the source link's frozen units, and a clone
+     * keeps its original's scope and name: the first match is the original,
+     * which the link's own index finds. */
+    return sh_package_source_link_find_unit(c->source, b->count - 1, input->family, input->name, &found) ?
+        found : SIZE_MAX;
 }
 
 /* A registration table is a dependency even though a request carries only a
@@ -1910,6 +2005,84 @@ static size_t pl_spawn_clone(pl_build *b, const sh_package_sources *sources, siz
     copy->compilation = c->units[clone].owned; copy->files = &c->units[clone].file;
     c->dirty = 1; return clone;
 }
+#ifdef SH_PACKAGE_LIBRARY_TESTING
+static int pl_key_memo(void) { return g_key_memo; }
+#else
+static int pl_key_memo(void) { return 1; }
+#endif
+typedef struct pl_key_recording { pl_key_scan *scan; size_t capacity; int failed; } pl_key_recording;
+static int pl_key_record(void *context, const char *slot, const char *value, size_t length, const char **replacement)
+{
+    pl_key_recording *r = context;
+    (void)replacement;
+    if (r->scan->count == r->capacity) {
+        size_t next = r->capacity ? r->capacity * 2 : 4;
+        pl_key_site *grown = next < SIZE_MAX / sizeof(*grown) ? realloc(r->scan->sites, next * sizeof(*grown)) : NULL;
+        if (!grown) { r->failed = 1; return -1; }
+        r->scan->sites = grown; r->capacity = next;
+    }
+    pl_key_site site = {slot ? _strdup(slot) : NULL, length < SIZE_MAX ? malloc(length + 1) : NULL, length};
+    if ((slot && !site.slot) || !site.value) { free(site.slot); free(site.value); r->failed = 1; return -1; }
+    if (length) memcpy(site.value, value, length);
+    site.value[length] = 0;
+    r->scan->sites[r->scan->count++] = site; return 0;
+}
+static size_t pl_key_scan_slot(pl_key_scan *const *slots, size_t capacity, const unsigned char identity[32], int token_text)
+{
+    uint64_t hash; memcpy(&hash, identity, sizeof(hash));
+    size_t at = (size_t)(hash ^ (uint64_t)token_text) & (capacity - 1);
+    while (slots[at] && (slots[at]->token_text != token_text || memcmp(slots[at]->identity, identity, 32)))
+        at = (at + 1) & (capacity - 1);
+    return at;
+}
+static int pl_key_scan_store(pl_contributions *c, pl_key_scan *scan)
+{
+    if (c->key_scan_count + 1 > c->key_scan_capacity / 2) {
+        size_t capacity = c->key_scan_capacity ? c->key_scan_capacity * 2 : 1024;
+        pl_key_scan **slots = capacity < SIZE_MAX / sizeof(*slots) ? calloc(capacity, sizeof(*slots)) : NULL;
+        if (!slots) return 0;
+        for (size_t i = 0; i < c->key_scan_capacity; i++) if (c->key_scans[i])
+            slots[pl_key_scan_slot(slots, capacity, c->key_scans[i]->identity, c->key_scans[i]->token_text)] = c->key_scans[i];
+        free(c->key_scans); c->key_scans = slots; c->key_scan_capacity = capacity;
+    }
+    c->key_scans[pl_key_scan_slot(c->key_scans, c->key_scan_capacity, scan->identity, scan->token_text)] = scan;
+    c->key_scan_count++; return 1;
+}
+/* The registration-key sites of an untouched unit's token text (token_text)
+ * or captured bytes, scanned once for its whole binding class. Units of one
+ * class have the same bytes and the same bound target classes, hence the same
+ * token text, and parents of the same class name (composition never changes
+ * class or inherit fields), so the reader reports the same sites in the same
+ * order for each. NULL when there is no reusable scan (a composed unit, or a
+ * scan that failed or could not be recorded): the caller binds the unit itself
+ * exactly as without the memo, and reports any failure the same way. */
+static const pl_key_scan *pl_key_scan_of(pl_build *b, size_t unit, int token_text)
+{
+    pl_contributions *c = b->contributions;
+    char error[512];
+    if (!pl_key_memo() || unit >= c->inputs.count || c->units[unit].owned || unit >= c->classes.node_count ||
+        !c->classes.identities) return NULL;
+    const unsigned char *identity = c->classes.identities[c->classes.nodes[unit]];
+    if (c->key_scan_capacity) {
+        pl_key_scan *found = c->key_scans[pl_key_scan_slot(c->key_scans, c->key_scan_capacity, identity, token_text)];
+        if (found) { b->key_scan_hits++; return found; }
+    }
+    pl_key_scan *scan = calloc(1, sizeof(*scan));
+    if (!scan) return NULL;
+    memcpy(scan->identity, identity, 32); scan->token_text = token_text;
+    const sh_package_link_unit *input = c->inputs.units + unit;
+    size_t length = 0, output_length = 0;
+    unsigned char *output = NULL;
+    unsigned char *body = token_text ? (unsigned char *)pl_token_text(c, unit, &length, error, sizeof(error)) :
+        sh_package_compilation_read(input->compilation, input->files[0], SIZE_MAX, &length, error, sizeof(error));
+    pl_key_recording recording = {scan, 0, 0};
+    scan->status = body ? sh_package_source_link_bind_keys(c->source, c->origins[unit], body, length,
+        pl_key_record, &recording, &output, &output_length, error, sizeof(error)) : -1;
+    free(body); free(output);
+    if (scan->status < 0 || recording.failed || !pl_key_scan_store(c, scan)) { pl_key_scan_free(scan); return NULL; }
+    b->key_scans++;
+    return scan;
+}
 static int pl_spawn_capture(pl_build *b, const sh_package_sources *sources, char *error, size_t capacity)
 {
     pl_contributions *c = b->contributions;
@@ -1992,13 +2165,17 @@ static int pl_spawn_capture(pl_build *b, const sh_package_sources *sources, char
                 for (size_t unit = 0; ok && unit < original_count; unit++) {
                     const sh_package_link_unit *owner = c->inputs.units + unit;
                     if (unit == i || c->inputs.scopes[unit] != scope || !pl_key_declaration(owner)) continue;
-                    size_t n = 0, output_length = 0; unsigned char *output = NULL;
-                    unsigned char *text = sh_package_compilation_read(owner->compilation, owner->files[0],
-                        SIZE_MAX, &n, error, capacity);
-                    int uses = 0;
-                    int status = text ? sh_package_source_link_bind_keys(c->source, unit, text, n,
-                        pl_spawn_site, &uses, &output, &output_length, error, capacity) : -1;
-                    free(text); free(output);
+                    int uses = 0, status;
+                    const pl_key_scan *scan = pl_key_scan_of(b, unit, 0);
+                    if (scan) { status = scan->status; uses = scan->count != 0; }
+                    else {
+                        size_t n = 0, output_length = 0; unsigned char *output = NULL;
+                        unsigned char *text = sh_package_compilation_read(owner->compilation, owner->files[0],
+                            SIZE_MAX, &n, error, capacity);
+                        status = text ? sh_package_source_link_bind_keys(c->source, unit, text, n,
+                            pl_spawn_site, &uses, &output, &output_length, error, capacity) : -1;
+                        free(text); free(output);
+                    }
                     ok = status >= 0 && (!uses || pl_spawn_edge(c, unit, slot, clone));
                 }
                 free(slot);
@@ -2140,10 +2317,25 @@ static int pl_key_same(const pl_keys *keys, size_t first, size_t first_end, size
     }
     return i == first_end && j == second_end;
 }
+/* The package whose component a scope compiles: a library scope, or an
+ * ISOLATED context (one tree, one component; an installation increment
+ * compiles each new component so). Composed and document contexts combine
+ * trees and name no single owner. */
 static size_t pl_scope_owner(const pl_build *b, const sh_package_sources *sources, size_t scope)
 {
-    if (b->contexts || scope >= b->authored_count || b->views[scope].component >= sources->component_count) return SIZE_MAX;
+    if (scope >= b->authored_count || b->views[scope].component >= sources->component_count) return SIZE_MAX;
+    if (b->contexts && (scope >= b->contexts->context_count ||
+        b->contexts->contexts[scope].mode != SH_PACKAGE_CONTEXT_ISOLATED ||
+        b->contexts->contexts[scope].tree_count != 1)) return SIZE_MAX;
     return sources->components[b->views[scope].component].owner;
+}
+/* Failures may name owners: the installed library, or contexts that are all
+ * isolated components (an installation increment). */
+static int pl_attributable(const sh_package_provenance *contexts)
+{
+    for (size_t i = 0; contexts && i < contexts->context_count; i++)
+        if (contexts->contexts[i].mode != SH_PACKAGE_CONTEXT_ISOLATED || contexts->contexts[i].tree_count != 1) return 0;
+    return 1;
 }
 /* Free keys: private keys in allocation order under the contract, otherwise
  * the lowest unnamed bit. 0 when none is left. A peer's multi-bit keys are
@@ -2444,6 +2636,23 @@ static int pl_key_relocate_scope(pl_build *b, const sh_package_sources *sources,
         if (private_keys && conductors[i]) split = 1;
         if (!moves && !split) continue;
         if (split && (base = pl_key_base(b, i)) == SIZE_MAX) split = 0;
+        /* An untouched unit none of whose key sites this scope's moves change
+         * keeps its text: the full rewrite below would return the same bytes.
+         * The same resolver sees each site in the same order, so key groups
+         * are defined as before. Splits and bitflag inspectors rewrite more. */
+        if (!split && strcmp(unit->family, "snappropertyinspector_bitflag")) {
+            const pl_key_scan *scan = pl_key_scan_of(b, i, 1);
+            if (scan) {
+                int moved = 0;
+                for (size_t k = 0; k < scan->count && !moved; k++) {
+                    const char *replacement = NULL;
+                    moved = pl_key_rewrite(&edit, scan->sites[k].slot, scan->sites[k].value, scan->sites[k].length,
+                        &replacement) != 0;
+                }
+                free(edit.owned); edit.owned = NULL;
+                if (!moved) { b->key_skipped++; continue; }
+            }
+        }
         char *text = pl_token_text(c, i, &length, error, capacity), *inspected = NULL, *divided = NULL;
         if (!text) return 0;
         int status = sh_package_source_link_bind_keys(b->reader, c->origins[i], (const unsigned char *)text, length,
@@ -3941,6 +4150,56 @@ static int pl_registration_sources(pl_build *b, const sh_package_sources *source
     return 1;
 }
 
+/* Diagnostic lines of repeated work (sh_package_library.repeated_work). */
+static void pl_repeated_work(pl_build *b, sh_package_library *out)
+{
+    static const char *const phases[SH_PACKAGE_LIBRARY_PHASES] = {
+        "scopes", "native", "source link", "contributions other", "identities", "link", "outputs", "audio"
+    };
+    static const char *const steps[9] = {
+        "coverage", "localize", "tokens", "keys", "editor", "registration", "hands", "shared", "document"
+    };
+    char *text = out->repeated_work; size_t capacity = sizeof(out->repeated_work), used = 0;
+    int n;
+    *text = 0;
+#define PL_WROTE(n) (used += (n) < 0 ? 0 : (size_t)(n) < capacity - used ? (size_t)(n) : capacity - used - 1)
+    if (b->census_owned) {
+        sh_decl_tree_census total;
+        sh_decl_tree_census_read(&total);
+        n = snprintf(text, capacity, "parses %llu (%llu MB):", total.parses, total.bytes >> 20);
+        PL_WROTE(n);
+        for (int i = 0; i < SH_PACKAGE_LIBRARY_PHASES + 9; i++) {
+            const sh_decl_tree_census *c = i < SH_PACKAGE_LIBRARY_PHASES ? b->census_phase + i :
+                b->census_step + (i - SH_PACKAGE_LIBRARY_PHASES);
+            if (!c->parses) continue;
+            n = snprintf(text + used, capacity - used, " %s %llu,",
+                i < SH_PACKAGE_LIBRARY_PHASES ? phases[i] : steps[i - SH_PACKAGE_LIBRARY_PHASES], c->parses);
+            PL_WROTE(n);
+        }
+    }
+    if (b->reader) {
+        char line[512];
+        n = snprintf(text + used, capacity - used, "%s%s", used ? "\n" : "",
+            sh_package_source_link_counters(b->reader, line, sizeof(line)));
+        PL_WROTE(n);
+    }
+    if (b->key_scans || b->key_scan_hits || b->key_skipped) {
+        n = snprintf(text + used, capacity - used, "%skey sites: %zu scans, %zu reused, %zu units kept unbound",
+            used ? "\n" : "", b->key_scans, b->key_scan_hits, b->key_skipped);
+        PL_WROTE(n);
+    }
+    if (b->contributions && b->contributions->reuse) {
+        char line[1024];
+        n = snprintf(text + used, capacity - used, "%s%s", used ? "\n" : "",
+            sh_package_link_reuse_counters(b->contributions->reuse, line, sizeof(line)));
+        PL_WROTE(n);
+        if (*sh_package_link_reuse_link_steps(b->contributions->reuse, line, sizeof(line))) {
+            n = snprintf(text + used, capacity - used, "\n%s", line);
+            PL_WROTE(n);
+        }
+    }
+#undef PL_WROTE
+}
 static int pl_compile(const sh_package_sources *sources, const sh_package_provenance *contexts,
     const sh_package_compile_environment *environment, const sh_resource_catalog *catalog,
     sh_package_baseline_reader original, void *original_context,
@@ -3953,6 +4212,7 @@ static int pl_compile(const sh_package_sources *sources, const sh_package_proven
     sh_package_source_link_native source_native = {&b, pl_admit, pl_semantics,
         native ? native->source.shader : NULL, pl_material_companions, pl_material_seeds, pl_implicit, pl_source_owners};
     if (native && native->private_keys) source_native.prepare = pl_prepare_discovered;
+    source_native.memo = native ? native->source.memo : NULL;
     sh_package_compile_environment env;
     char fallback[1024]; int ok = 0;
     unsigned long long mark = pl_now_ms();
@@ -3961,6 +4221,7 @@ static int pl_compile(const sh_package_sources *sources, const sh_package_proven
     if (!out) return 0;
     sh_package_library_free(out);
     if (environment && environment->invalid_package) *environment->invalid_package = SIZE_MAX;
+    if (environment && environment->invalid_own_bytes) *environment->invalid_own_bytes = 0;
     if (environment && environment->unserved_package) *environment->unserved_package = SIZE_MAX;
     if (environment && environment->conflicted_packages) sh_package_owners_free(environment->conflicted_packages);
     if (!sources || !environment || (contexts && !contexts->context_count)) goto done;
@@ -3968,6 +4229,8 @@ static int pl_compile(const sh_package_sources *sources, const sh_package_proven
         out->compiled = sh_package_compile_with(sources, environment, error, capacity);
         return out->compiled != NULL;
     }
+    b.census_owned = sh_decl_tree_census_open();
+    sh_decl_tree_census_read(&b.census_mark);
     b.count = contexts ? contexts->context_count : sources->component_count; b.authored_count = b.count; b.native = native;
     b.contexts = contexts;
     env = *environment; env.previous = NULL; env.independent_sources = 1;
@@ -4018,7 +4281,7 @@ static int pl_compile(const sh_package_sources *sources, const sh_package_proven
         if (!prepared) goto done;
         sh_package_policy_free(&b.shared->policy); b.shared->policy = policy;
     }
-    pl_phase(out, SH_PACKAGE_LIBRARY_PHASE_SCOPES, &mark);
+    pl_phase(&b, out, SH_PACKAGE_LIBRARY_PHASE_SCOPES, &mark);
     if (!pl_product_scope(&b, sources, error, capacity)) goto done;
     if (!pl_registration_inheritance(&b, sources, 0, catalog, original, original_context,
         registry, reflection, error, capacity)) goto done;
@@ -4028,12 +4291,12 @@ static int pl_compile(const sh_package_sources *sources, const sh_package_proven
         env.baseline ? env.baseline : original, env.baseline ? env.baseline_context : original_context,
         registry, reflection, error, capacity)) goto done;
     if (!pl_registration_sources(&b, sources, error, capacity)) {
-        if (!contexts && b.contribution_invalid != SIZE_MAX && environment->invalid_package)
+        if (pl_attributable(contexts) && b.contribution_invalid != SIZE_MAX && environment->invalid_package)
             *environment->invalid_package = b.contribution_invalid;
         goto done;
     }
     if (!pl_native_open(&b, catalog, original, original_context, registry, reflection, error, capacity)) goto done;
-    pl_phase(out, SH_PACKAGE_LIBRARY_PHASE_NATIVE, &mark);
+    pl_phase(&b, out, SH_PACKAGE_LIBRARY_PHASE_NATIVE, &mark);
     source_native.audio = b.audio;
     unsigned char *discover = calloc(b.count ? b.count : 1, 1);
     if (!discover) goto done;
@@ -4048,7 +4311,7 @@ static int pl_compile(const sh_package_sources *sources, const sh_package_proven
         b.count, catalog, original, original_context, registry, reflection, &source_native,
         &root_plan, &failure, error, capacity);
     free(discover);
-    pl_phase(out, SH_PACKAGE_LIBRARY_PHASE_SOURCE_LINK, &mark);
+    pl_phase(&b, out, SH_PACKAGE_LIBRARY_PHASE_SOURCE_LINK, &mark);
     if (b.reader) sh_package_source_link_phases(b.reader, out->source_phases, sizeof(out->source_phases));
     if (!b.reader) {
         /* Only content a local component supplied makes it responsible: its own
@@ -4061,10 +4324,14 @@ static int pl_compile(const sh_package_sources *sources, const sh_package_proven
         if (failure.chain[0] && used < capacity)
             snprintf(error + used, capacity - used, " (via %s%s)", failure.chain,
                 failure.kind == SH_PACKAGE_SOURCE_FAILURE_PRODUCT ? "; reached only from product and stock content" : "");
-        if (!contexts && failure.scope < b.authored_count && failure.scope < sources->component_count) {
-            size_t owner = sources->components[failure.scope].owner;
-            if (failure.kind == SH_PACKAGE_SOURCE_FAILURE_SOURCE && environment->invalid_package)
+        size_t owner = pl_attributable(contexts) ? pl_scope_owner(&b, sources, failure.scope) : SIZE_MAX;
+        if (owner != SIZE_MAX) {
+            if (failure.kind == SH_PACKAGE_SOURCE_FAILURE_SOURCE && environment->invalid_package) {
+                /* Its own supplied file, which the reader could not parse in
+                 * the native grammar (sl_attribute): its bytes alone. */
                 *environment->invalid_package = owner;
+                if (environment->invalid_own_bytes) *environment->invalid_own_bytes = 1;
+            }
             else if (failure.kind == SH_PACKAGE_SOURCE_FAILURE_COVERAGE && environment->unserved_package)
                 *environment->unserved_package = owner;
         }
@@ -4078,9 +4345,9 @@ static int pl_compile(const sh_package_sources *sources, const sh_package_proven
     int opened = pl_contributions_open(&b, sources, error, capacity);
     pl_steps(&b, out->contribution_phases, sizeof(out->contribution_phases));
     if (!opened) {
-        if (!contexts && b.contribution_invalid != SIZE_MAX && environment->invalid_package)
+        if (pl_attributable(contexts) && b.contribution_invalid != SIZE_MAX && environment->invalid_package)
             *environment->invalid_package = b.contribution_invalid;
-        else if (!contexts && b.contribution_owner != SIZE_MAX && environment->unserved_package)
+        else if (pl_attributable(contexts) && b.contribution_owner != SIZE_MAX && environment->unserved_package)
             *environment->unserved_package = b.contribution_owner;
         goto done;
     }
@@ -4094,7 +4361,7 @@ static int pl_compile(const sh_package_sources *sources, const sh_package_proven
     if (contexts && !pl_document_shared(&b, original, original_context, error, capacity)) goto done;
     pl_step(&b, PL_STEP_DOCUMENT, &step_mark);
     pl_steps(&b, out->contribution_phases, sizeof(out->contribution_phases));
-    pl_phase(out, SH_PACKAGE_LIBRARY_PHASE_CONTRIBUTIONS, &mark);
+    pl_phase(&b, out, SH_PACKAGE_LIBRARY_PHASE_CONTRIBUTIONS, &mark);
     /* Authored documents carry their own selector/inspector behavior. Changed
      * editor units receive ordinary bound aliases just like their gameplay
      * dependencies, so importing them never rewrites the open editor's shared
@@ -4118,15 +4385,16 @@ static int pl_compile(const sh_package_sources *sources, const sh_package_proven
         }
         identity_adapter = sh_package_native_registry_adapter(b.identities);
     }
-    pl_phase(out, SH_PACKAGE_LIBRARY_PHASE_IDENTITIES, &mark);
+    pl_phase(&b, out, SH_PACKAGE_LIBRARY_PHASE_IDENTITIES, &mark);
     sh_package_link_adapter adapter = {b.contributions, pl_bound_resolve, pl_bound_bind, pl_bound_assign,
         b.identities ? &identity_adapter : NULL, pl_bound_assign_members, b.contributions->reuse};
     adapter.history = b.identities && native ? native->history : NULL;
+    adapter.stable = pl_bound_stable; adapter.sites = pl_bound_sites; adapter.identity = pl_bound_identity;
     pl_reuse_refresh(b.contributions);
     if (!sh_package_link(sources, assignment.inputs->units, assignment.inputs->count, &adapter, &b.shared->policy,
         environment->canonical_path, &b.linked, error, capacity) ||
         (b.identities && !sh_package_native_registry_validate(b.identities, error, capacity))) goto done;
-    pl_phase(out, SH_PACKAGE_LIBRARY_PHASE_LINK, &mark);
+    pl_phase(&b, out, SH_PACKAGE_LIBRARY_PHASE_LINK, &mark);
     if (!pl_provenance(&b, sources, &out->bindings) || !pl_key_provenance(&b, sources, &out->bindings, error, capacity) ||
         !pl_hud(&b, error, capacity) ||
         !sh_package_sound_prepare(b.linked.compiled, error, capacity) ||
@@ -4136,7 +4404,7 @@ static int pl_compile(const sh_package_sources *sources, const sh_package_proven
             &b.linked, error, capacity);
         if (!out->virtual_materials) goto done;
     }
-    pl_phase(out, SH_PACKAGE_LIBRARY_PHASE_OUTPUTS, &mark);
+    pl_phase(&b, out, SH_PACKAGE_LIBRARY_PHASE_OUTPUTS, &mark);
     if (b.audio) {
         if (!sh_package_audio_program_prepare(b.audio, error, capacity)) goto done;
         for (size_t i = 0; i < assignment.inputs->count; i++) {
@@ -4158,29 +4426,33 @@ static int pl_compile(const sh_package_sources *sources, const sh_package_proven
         }
         out->audio = b.audio; b.audio = NULL;
     }
-    pl_phase(out, SH_PACKAGE_LIBRARY_PHASE_AUDIO, &mark);
+    pl_phase(&b, out, SH_PACKAGE_LIBRARY_PHASE_AUDIO, &mark);
     out->key_groups = b.key_groups; b.key_groups = NULL;
     out->compiled = b.linked.compiled; b.linked.compiled = NULL;
     out->compiled->independent_sources = 1; ok = 1;
 done:
-    if (!ok && !contexts && environment) {
+    if (!ok && pl_attributable(contexts) && environment) {
         if (environment->invalid_package && b.contribution_invalid != SIZE_MAX)
             *environment->invalid_package = b.contribution_invalid;
         else if (environment->unserved_package && b.contribution_owner != SIZE_MAX)
             *environment->unserved_package = b.contribution_owner;
     }
+    if (out) pl_repeated_work(&b, out);
+    if (b.census_owned) sh_decl_tree_census_close();
     pl_close(&b);
     if (!ok) {
         /* Accounted coverage and phase timings survive a later failure as
          * diagnostics only. */
         char *coverage = out->coverage; out->coverage = NULL;
         unsigned long long phases[SH_PACKAGE_LIBRARY_PHASES]; char source_phases[sizeof(out->source_phases)];
-        char contribution_phases[sizeof(out->contribution_phases)];
+        char contribution_phases[sizeof(out->contribution_phases)], repeated_work[sizeof(out->repeated_work)];
         memcpy(phases, out->phase_ms, sizeof(phases)); memcpy(source_phases, out->source_phases, sizeof(source_phases));
         memcpy(contribution_phases, out->contribution_phases, sizeof(contribution_phases));
+        memcpy(repeated_work, out->repeated_work, sizeof(repeated_work));
         sh_package_library_free(out); out->coverage = coverage;
         memcpy(out->phase_ms, phases, sizeof(phases)); memcpy(out->source_phases, source_phases, sizeof(source_phases));
         memcpy(out->contribution_phases, contribution_phases, sizeof(contribution_phases));
+        memcpy(out->repeated_work, repeated_work, sizeof(repeated_work));
         if (!*error) snprintf(error, capacity, "scoped package library could not be prepared");
     }
     return ok;

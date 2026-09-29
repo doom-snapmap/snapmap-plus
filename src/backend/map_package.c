@@ -1374,7 +1374,7 @@ static int mpkg_install_batch(mpkg_staged *head, char *err, size_t err_cap)
         backend_log(line);
     }
     backend_log("MPKG: complete package set prepared; awaiting runtime activation before installation commits");
-    if (!head->completion) sh_decl_server_request_rearm();
+    if (!head->completion) { sh_package_runtime_note_install_published(); sh_decl_server_request_rearm(); }
 done:
     if (!success && prepared) {
         char restore_error[SH_MPKG_ERR_CAP] = "";

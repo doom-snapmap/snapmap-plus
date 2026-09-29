@@ -21,6 +21,8 @@ typedef struct fixture {
     void *registry, *reflection;
     int missing_unrelated, absent_target, implicit_root, reader_gap, absent_program, hands;
     int prepare_programs, preparation_calls, program_read_failure;
+    int queued_second; /* preparations requested for program "second" */
+    int palette_reads; /* stock palette entries read (reverse-root discovery) */
 } fixture;
 static void *allocate(fixture *f, size_t length)
 {
@@ -114,6 +116,7 @@ static int original(void *context, const char *path, unsigned char **body, size_
 {
     fixture *f = context; bytes b = {0}; const char *value = NULL;
     *body = NULL; *length = 0;
+    if (!strncmp(path, "generated/decls/snapeditorentitydef/", 36)) f->palette_reads++;
     if (!strcmp(path, "generated/decls/snapeditorentitydef/rock.decl"))
         value = "{ edit = { entityDef = \"props/rock\"; category = \"Props\"; displayName = \"Rock\"; } }";
     else if (!strcmp(path, "generated/decls/snapeditorentitydef/unrelated.decl")) {
@@ -469,10 +472,15 @@ static void test_failure_attribution(fixture *f, const sh_package_compile_enviro
     sources = sh_package_sources_scan(path, error, sizeof(error)); assert(sources);
     assert(sh_package_sources_remove(sources, owner(sources, "Broken")));
     assert(sh_package_sources_remove(sources, owner(sources, "Unsupported")));
+    f->palette_reads = 0;
     assert(!sh_package_library_compile(sources, &env, catalog, original, f, registry,
         (uintptr_t)f->reflection, native, &out, error, sizeof(error)));
     if (invalid != owner(sources, "Malformed") || unserved != SIZE_MAX) fprintf(stderr, "malformed owner: %s\n", error);
     assert(invalid == owner(sources, "Malformed") && unserved == SIZE_MAX);
+    /* Supplied content is discovered first: its malformed file stops the
+     * attempt before any stock palette entry is read for reverse roots. */
+    if (f->palette_reads) fprintf(stderr, "palette reads before the malformed failure: %d\n", f->palette_reads);
+    assert(!f->palette_reads);
     sh_package_library_free(&out);
     assert(sh_package_sources_remove(sources, invalid));
     int ok = sh_package_library_compile(sources, &env, catalog, original, f, registry,
@@ -697,6 +705,7 @@ static int queue_original_program(void *context, const char *name, sh_decl_sourc
 {
     fixture *f=context;assert(!strcmp(name,"first") || !strcmp(name,"second"));
     assert(source.length==3 && !memcmp(source.text,"{ }",3));f->preparation_calls++;
+    if(!strcmp(name,"second"))f->queued_second++;
     snprintf(error,capacity,"queued original %s",name);return 1;
 }
 static void reverse_preparation_frontier(fixture *f, const sh_resource_catalog *catalog)
@@ -721,6 +730,54 @@ static void reverse_preparation_frontier(fixture *f, const sh_resource_catalog *
     assert(f->preparation_calls==1 && failure.kind==SH_PACKAGE_SOURCE_FAILURE_ENVIRONMENT && !strstr(error,"queued original"));
     f->prepare_programs=f->program_read_failure=0;sh_package_owners_free(&file.gameplay_owners);
 }
+/* An attempt whose supplied content already waits for native preparation
+ * fails, but first lets the stock observation queue what it needs too
+ * (program "second" is reached only from the stock palette), so one
+ * preparation round serves the next attempt. The attempt still reports its
+ * own failure: the pending preparation, or a malformed scope, attributed to
+ * it. A failure with nothing to prepare stops before any stock root is read. */
+static void reverse_preparation_after_failure(fixture *f, const sh_resource_catalog *catalog)
+{
+    char error[1024];size_t supplied=0;
+    sh_compiled_resource files[2]={0},bad={0};
+    files[0].engine_path="generated/decls/entitydef/props/rock.decl";files[0].type="entitydef";files[0].name="props/rock";
+    files[0].body=(unsigned char *)"{ class = \"Entity\"; edit = { program = \"first\"; } }";
+    files[0].body_length=strlen((const char *)files[0].body);
+    files[1].engine_path="generated/image/textures/rock.bimage";files[1].type="image";files[1].name="textures/rock";
+    files[1].body=(unsigned char *)"changed";files[1].body_length=7;
+    for(int i=0;i<2;i++){files[i].source=SIZE_MAX;assert(sh_package_owners_add(&files[i].gameplay_owners,0));}
+    /* The native reflected reader expects ';' after a scalar. */
+    bad.engine_path="generated/decls/entitydef/props/malformed.decl";bad.type="entitydef";bad.name="props/malformed";
+    bad.body=(unsigned char *)"{ class = \"Entity\"; edit = { model = \"models/rock.lwo\"\r\n target = \"props/rock\"; } }";
+    bad.body_length=strlen((const char *)bad.body);bad.source=SIZE_MAX;bad.sources=&supplied;bad.source_count=1;
+    sh_package_compilation pending={0},image={0},malformed={0},empty={0};
+    pending.resources=files;pending.resource_count=2;image.resources=files+1;image.resource_count=1;
+    malformed.resources=&bad;malformed.resource_count=1;
+    sh_package_source_shader shader={SH_PACKAGE_SHADER_OPENGL,f,NULL,NULL,queue_original_program};
+    sh_package_source_link_native native={0};native.shader=&shader;
+    sh_decl_registry_source registry={f,read_memory,(uintptr_t)f->registry};
+    unsigned char discover[]={1,0,0};
+    f->prepare_programs=1;
+    for(int round=0;round<3;round++) {
+        /* 0: pending preparation; 1: pending and a malformed peer; 2: malformed only. */
+        const sh_package_compilation *scopes[]={round==2 ? &image : &pending,&malformed,&empty};
+        size_t count=round ? 3 : 2;
+        if(!round)scopes[1]=&empty;
+        sh_package_source_root_plan plan={discover,count-1,NULL};sh_package_source_failure failure={0};
+        f->queued_second=f->palette_reads=f->preparation_calls=0;
+        assert(!sh_package_source_link_open_attributed(scopes,count,catalog,original,f,registry,(uintptr_t)f->reflection,
+            &native,&plan,&failure,error,sizeof(error)));
+        int reported=!round ? failure.kind==SH_PACKAGE_SOURCE_FAILURE_ENVIRONMENT && strstr(error,"queued original first") :
+            failure.kind==SH_PACKAGE_SOURCE_FAILURE_SOURCE && failure.scope==1 && strstr(failure.chain,"props/malformed");
+        int observed=round<2 ? f->queued_second && f->palette_reads : !f->palette_reads && !f->preparation_calls;
+        if(!reported || !observed)
+            fprintf(stderr,"after failure round %d: kind %d scope %zu second %d palette %d calls %d: %s\n",round,
+                (int)failure.kind,failure.scope,f->queued_second,f->palette_reads,f->preparation_calls,error);
+        assert(reported && observed);
+    }
+    f->prepare_programs=0;
+    for(int i=0;i<2;i++)sh_package_owners_free(&files[i].gameplay_owners);
+}
 int main(void)
 {
     char temporary[MAX_PATH], path[4096], error[1024]; fixture f = {0}; setup(&f);
@@ -733,6 +790,7 @@ int main(void)
     snprintf(path, sizeof(path), "%s/base", root);
     sh_resource_catalog *catalog = sh_resource_catalog_open(path, error, sizeof(error)); assert(catalog);
     reverse_preparation_frontier(&f,catalog);
+    reverse_preparation_after_failure(&f,catalog);
     const char *image = "generated/image/textures/rock.bimage";
     package("a", "Red", image, "red-image"); package("b", "Green", image, "green-image");
     package("c", "Red Copy", image, "red-image"); package("d", "Original", image, "stock-image");

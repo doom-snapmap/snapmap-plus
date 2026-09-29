@@ -226,6 +226,19 @@ static void test_type_class(void)
     r = open_registry(&f, 1); assert(r);
     assert(sh_decl_native_registry_type_class(r, "weapon", &name) == -1 && !name);
     cleanup(&f, r);
+    /* Class lookups take the first manager in registry order, whatever the
+     * spelling of a later one (the indexed lookup keeps that order). */
+    setup(&f);
+    ptr(f.managers[3], 0x10, str(&f, "IDDECLWEAPON"));
+    r = open_registry(&f, 1); assert(r);
+    assert(sh_decl_native_registry_class_type(r, "iddeclweapon", &name) == 1 && !strcmp(name, "weapon"));
+    cleanup(&f, r);
+    setup(&f);
+    ptr(f.managers[0], 0x10, str(&f, "idDeclRenamed"));
+    ptr(f.managers[3], 0x10, str(&f, "IDDECLWEAPON"));
+    r = open_registry(&f, 1); assert(r);
+    assert(sh_decl_native_registry_class_type(r, "idDeclWeapon", &name) == 1 && !strcmp(name, "unrelated"));
+    cleanup(&f, r);
 }
 
 static void test_candidate_sources(void)

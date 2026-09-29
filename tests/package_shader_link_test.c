@@ -30,11 +30,13 @@ static const char declaration[] = "{ parms { tex \"textures/source\" } hlsl_vp {
 static const char parameter[] = "{ Tex2D textures/source }";
 static const char flag_source[] = "{ fixed_flag_fixture }";
 static const char vertex[] = "#version 450\nvoid main(){}";
+/* The program a cooked binary names in its header record ("" names none). */
+static const char *program_reference = "";
 static bytes program(int permutations)
 {
     bytes b = {0};
     be(&b,0xb68800ad); be(&b,sh_package_shader_declaration_checksum((const unsigned char *)declaration,strlen(declaration)));
-    zeros(&b,4); str(&b,""); zeros(&b,9); be(&b,1);
+    zeros(&b,4); str(&b,program_reference); zeros(&b,9); be(&b,1);
     zeros(&b,2); str(&b,"tex"); str(&b,"textures/source");
     for (unsigned i=0;i<21;i++) { be(&b,i ? 0 : 1); if (!i) str(&b,"tex"); }
     be(&b,1); str(&b,"decls/renderprogs/common.inc"); be(&b,123);
@@ -56,6 +58,8 @@ typedef struct fixture {
     sh_compiled_resource files[20];
     int deny, kind, index, mutate, calls, admit_calls, absent, read_failure, flag_deny, flag_mutate, flag_calls;
     int campaign, stale, include_status;
+    int prepare, prepare_asked; /* 1: abi, 2: flag_abi retains a preparation request (answers 2). */
+    const char *extra_path, *extra_body; /* An installed original outside the scope. */
 } fixture;
 static unsigned char *memory(fixture *f, size_t length)
 {
@@ -124,6 +128,11 @@ static void clear(fixture *f)
 static int abi(void *context,const char *name,sh_decl_source source,int *kind,uint32_t *index,char *error,size_t capacity)
 {
     fixture *f=context; (void)error;(void)capacity; f->calls++;
+    if(f->prepare==1 && !strcmp(name,"tex")) {
+        f->prepare_asked++;
+        snprintf(error,capacity,"shader environment needs verified native source preparation: %s",name);
+        return 2;
+    }
     if(f->deny || strcmp(name,"tex") || !source.text || source.length!=strlen(parameter) || memcmp(source.text,parameter,source.length))return 0;
     *kind=f->kind;*index=(uint32_t)(f->index+(f->mutate ? f->calls : 0));return 1;
 }
@@ -132,6 +141,10 @@ static int original(void *context,const char *path,unsigned char **body,size_t *
     fixture *f=context; *body=NULL;*length=0;
     if(f->read_failure)return -1;
     if(f->absent)return 0;
+    if(f->extra_path && !strcmp(path,f->extra_path)) {
+        *length=strlen(f->extra_body);*body=malloc(*length+1);assert(*body);memcpy(*body,f->extra_body,*length+1);
+        return f->campaign ? 2 : 1;
+    }
     const sh_compiled_resource *file=sh_package_compilation_find(&f->compiled,path);
     if(!file)return 0;
     *body=malloc(file->body_length+1);assert(*body);memcpy(*body,file->body,file->body_length+1);*length=file->body_length;
@@ -142,6 +155,11 @@ static int original(void *context,const char *path,unsigned char **body,size_t *
 static int flag_abi(void *context,const char *name,sh_decl_source source,uint64_t *mask,char *error,size_t capacity)
 {
     fixture *f=context; (void)error; (void)capacity; f->flag_calls++;
+    if(f->prepare==2 && !strcmp(name,"feature")) {
+        f->prepare_asked++;
+        snprintf(error,capacity,"shader environment needs verified native source preparation: %s",name);
+        return 2;
+    }
     if(f->flag_deny || strcmp(name,"feature") || !source.text || source.length!=strlen(flag_source) ||
         memcmp(source.text,flag_source,source.length))return 0;
     *mask=UINT64_C(1)<<32;if(f->flag_mutate)*mask+=(uint64_t)f->flag_calls;return 1;
@@ -157,6 +175,80 @@ static sh_package_source_link *open_link(fixture *f,sh_package_shader_renderer r
     sh_package_source_link_native native={f,admit,semantics,&shader};
     return sh_package_source_link_open(&scope,1,NULL,original,f,
         (sh_decl_registry_source){f,read_memory,f->registry,NULL},f->reflection,&native,error,512);
+}
+static sh_package_source_link *open_link_memo(fixture *f,sh_package_shader_renderer renderer,
+    sh_package_source_memo *memo,char *error)
+{
+    const sh_package_compilation *scope=&f->compiled;
+    sh_package_source_shader shader={renderer,f,abi,flag_abi};
+    sh_package_source_link_native native={f,admit,semantics,&shader};
+    native.memo=memo;
+    return sh_package_source_link_open(&scope,1,NULL,original,f,
+        (sh_decl_registry_source){f,read_memory,f->registry,NULL},f->reflection,&native,error,512);
+}
+/* Readers of the native shader ABI (renderprog, renderprogflag) consult live
+ * native objects and receipts, so separate captures sharing a memo never
+ * replay them: each capture asks the adapter exactly as a capture without the
+ * memo does, including after its answer changed at the same adapter, while
+ * the renderparm declaration they read replays from the memo. */
+static void memo_shader_contract(sh_package_shader_renderer renderer)
+{
+    fixture f; char error[512];
+    setup(&f,0);
+    sh_package_source_memo *memo=sh_package_source_memo_open(); assert(memo);
+    for(int capture=0;capture<3;capture++) {
+        if(capture==2) f.index=18; /* Another native answer at the same adapter. */
+        int calls=f.calls,flags=f.flag_calls;
+        sh_package_source_link *plain=open_link_memo(&f,renderer,NULL,error);
+        if(!plain) fprintf(stderr,"memo shader plain capture %d: %s\n",capture,error);
+        assert(plain);
+        int plain_calls=f.calls-calls,plain_flags=f.flag_calls-flags;
+        calls=f.calls; flags=f.flag_calls;
+        sh_package_source_link *with=open_link_memo(&f,renderer,memo,error);
+        if(!with) fprintf(stderr,"memo shader capture %d: %s\n",capture,error);
+        assert(with);
+        assert(plain_calls && plain_flags && f.calls-calls==plain_calls && f.flag_calls-flags==plain_flags);
+        const sh_package_link_inputs *inputs=sh_package_source_link_inputs(with);
+        size_t program=sh_package_link_inputs_find(inputs,0,"renderprog","fixture");
+        size_t flag=sh_package_link_inputs_find(inputs,0,"renderprogflag","feature");
+        size_t parameter=sh_package_link_inputs_find(inputs,0,"renderparm","tex");
+        assert(program!=SIZE_MAX && flag!=SIZE_MAX && parameter!=SIZE_MAX);
+        assert(!sh_package_source_link_unit_replayed(with,program) && !sh_package_source_link_unit_replayed(with,flag));
+        assert(sh_package_source_link_unit_replayed(with,parameter)==(capture>0));
+        sh_package_source_link_close(plain); sh_package_source_link_close(with);
+    }
+    sh_package_source_memo_close(memo); clear(&f);
+}
+/* One capture meets every scope's problem (a first start): a program whose
+ * parameter awaits native preparation is deferred once the adapter retains
+ * its request, and discovery continues; a scope whose own declaration is
+ * malformed (here unreadable by its native grammar) is withdrawn and
+ * reported, attributed to it, when the supplied phase ends. Either scope order asks for the preparation in that capture. */
+static void first_start_contract(void)
+{
+    for(int round=0;round<4;round++) {
+        int order=round&1; fixture f; char error[512];
+        setup(&f,0); f.prepare=1+(round>>1); /* A parameter, then a flag. */
+        size_t source_index=0;
+        sh_compiled_resource bad={0};
+        bad.engine_path="generated/decls/renderparm/broken.decl"; bad.type="renderparm"; bad.name="broken";
+        bad.body=(unsigned char *)"{ Tex2D"; bad.body_length=7; bad.source=SIZE_MAX;
+        bad.sources=&source_index; bad.source_count=1; /* Supplied by its package. */
+        sh_package_compilation broken={0}; broken.resources=&bad; broken.resource_count=1;
+        const sh_package_compilation *scopes[2];
+        scopes[order]=&broken; scopes[!order]=&f.compiled;
+        sh_package_source_shader shader={SH_PACKAGE_SHADER_VULKAN,&f,abi,flag_abi};
+        sh_package_source_link_native native={&f,admit,semantics,&shader};
+        sh_package_source_failure failure;
+        sh_package_source_link *s=sh_package_source_link_open_attributed(scopes,2,NULL,original,&f,
+            (sh_decl_registry_source){&f,read_memory,f.registry,NULL},f.reflection,&native,NULL,&failure,error,sizeof(error));
+        int attributed=failure.kind==SH_PACKAGE_SOURCE_FAILURE_SOURCE || failure.kind==SH_PACKAGE_SOURCE_FAILURE_COVERAGE;
+        if(s || !attributed || failure.scope!=(size_t)order || !f.prepare_asked)
+            fprintf(stderr,"first start round %d: kind %d scope %zu asked %d: %s\n",round,(int)failure.kind,failure.scope,f.prepare_asked,error);
+        assert(!s && attributed && failure.scope==(size_t)order && f.prepare_asked);
+        assert(strstr(failure.chain,"broken"));
+        clear(&f);
+    }
 }
 typedef struct binding { int change, parameter; size_t calls; } binding;
 static int bind_fixture(void *context,const char *slot,const char *family,const char *name,const char **replacement)
@@ -372,9 +464,10 @@ static void preparation_contract(void)
     prepare_context c={&f,assets,object,0,0,0,0};uint64_t task_id=0;
     for(int mode=0;mode<4;mode++) {
         sh_package_shader_receipt_invalidate((uintptr_t)object);
-        assert(!shader->parameter(shader->context,"tex",source,&kind,&index,error,sizeof(error)));
+        /* 2: the request is retained, once, however often it is asked. */
+        assert(shader->parameter(shader->context,"tex",source,&kind,&index,error,sizeof(error))==2);
         assert(strstr(error,"environment needs") && sh_package_native_assets_shader_pending(assets)==1);
-        assert(!shader->parameter(shader->context,"tex",source,&kind,&index,error,sizeof(error)));
+        assert(shader->parameter(shader->context,"tex",source,&kind,&index,error,sizeof(error))==2);
         assert(sh_package_native_assets_shader_pending(assets)==1);
         sh_package_shader_preparation *batch=sh_package_native_assets_shader_take(assets);assert(batch);
         assert(!sh_package_native_assets_shader_pending(assets) && sh_package_shader_preparation_count(batch)==1);
@@ -608,6 +701,196 @@ static void source_only_opengl(int cold)
     assert(*(uint32_t *)(program_manager+0x28)==(cold?0u:2u));
     sh_package_source_link_close(link);sh_package_native_assets_close(c.assets);clear(&f);
 }
+/* A cooked program names another program only in its cooked output. The
+ * follow-up makes exactly the request a compilation makes on reaching that
+ * output, once per name; a stale name or an already cooked program queues
+ * nothing. A recorded compilation keeps what it requested and read. */
+/* The parameters and flags a freshly cooked program checks join the same
+ * follow-up: one that now needs native preparation is requested in that
+ * round (as a compilation reaching it would), not by the next compilation. */
+static void follow_parameters_contract(void)
+{
+    fixture f;setup(&f,1);char error[512];
+    remove_file(&f,"generated/renderprogs/fixture_pc.bin");
+    remove_file(&f,"generated/renderprogs/permutations/fixture_0000000000000001_pc.bin");
+    remove_file(&f,permutation_name);
+    unsigned char *head=memory(&f,8),*manager=memory(&f,0x30),*flag_manager=memory(&f,0x30),*program_manager=memory(&f,0x30);
+    ptr(head,0,manager);ptr(manager,0x18,flag_manager);ptr(flag_manager,0x18,program_manager);
+    unsigned char *tex=native_object(&f,manager,"renderParm","tex",parameter,1,0x410);
+    unsigned char *feature=native_object(&f,flag_manager,"renderProgFlag","feature",flag_source,0,0);
+    cook_context c={0};c.fixture=&f;
+    c.programs[0]=native_object(&f,program_manager,"renderProg","fixture",declaration,0,0);
+    c.programs[1]=native_object(&f,program_manager,"renderProg",permutation_name,declaration,0,0);
+    unsigned char *array=memory(&f,16);ptr(array,0,c.programs[0]);ptr(array,8,c.programs[1]);ptr(program_manager,0x20,array);num(program_manager,0x28,2);
+    c.assets=sh_package_native_assets_open("C:/shader-follow-parameter-fixture");assert(c.assets);
+    assert(sh_package_native_assets_configure_shader(c.assets,SH_PACKAGE_SHADER_OPENGL,
+        (sh_native_resource_registry_source){&f,read_memory,(uintptr_t)head},original,&f,error,sizeof(error)));
+    assert(!open_cooked_link(&c,error) && sh_package_native_assets_shader_pending(c.assets)==1);
+    sh_package_shader_preparation *batch=sh_package_native_assets_shader_take(c.assets);assert(batch);
+    int prepared=sh_package_shader_preparation_run(batch,prepare_program,recover_program,&c,error,sizeof(error));
+    if(prepared!=1)fprintf(stderr,"follow parameter cook: %s\n",error);assert(prepared==1);
+    sh_package_shader_preparation_free(batch);
+    /* The cooked program checks tex and feature, whose native texts are now retired. */
+    sh_package_shader_receipt_invalidate((uintptr_t)tex);memset(tex+0x38,0,16);
+    sh_package_shader_receipt_invalidate((uintptr_t)feature);memset(feature+0x38,0,16);
+    size_t followed=sh_package_native_assets_shader_follow(c.assets);
+    size_t pending=sh_package_native_assets_shader_pending(c.assets);
+    if(followed!=2 || pending!=2)fprintf(stderr,"follow parameters: followed %zu pending %zu\n",followed,pending);
+    assert(followed==2 && pending==2);
+    batch=sh_package_native_assets_shader_take(c.assets);assert(batch && sh_package_shader_preparation_count(batch)==2);
+    int parm=0,flag=0;
+    for(size_t i=0;i<2;i++) {
+        const sh_package_shader_request *request=sh_package_shader_preparation_request(batch,i);
+        assert(request);
+        if(!strcmp(request->family,"renderparm") && !strcmp(request->name,"tex"))parm++;
+        if(!strcmp(request->family,"renderprogflag") && !strcmp(request->name,"feature"))flag++;
+    }
+    assert(parm==1 && flag==1);
+    sh_package_shader_preparation_free(batch);
+    assert(!sh_package_native_assets_shader_follow(c.assets));
+    sh_package_native_assets_close(c.assets);clear(&f);
+}
+static void follow_contract(const char *reference,size_t queued,int links)
+{
+    fixture f;setup(&f,1);char error[512];
+    remove_file(&f,"generated/renderprogs/fixture_pc.bin");
+    remove_file(&f,"generated/renderprogs/permutations/fixture_0000000000000001_pc.bin");
+    remove_file(&f,permutation_name);
+    f.extra_path="generated/decls/renderprog/other.decl";f.extra_body=declaration;
+    unsigned char *head=memory(&f,8),*manager=memory(&f,0x30),*flag_manager=memory(&f,0x30),*program_manager=memory(&f,0x30);
+    ptr(head,0,manager);ptr(manager,0x18,flag_manager);ptr(flag_manager,0x18,program_manager);
+    (void)native_object(&f,manager,"renderParm","tex",parameter,1,0x410);
+    (void)native_object(&f,flag_manager,"renderProgFlag","feature",flag_source,0,0);
+    cook_context c={0};c.fixture=&f;
+    c.programs[0]=native_object(&f,program_manager,"renderProg","fixture",declaration,0,0);
+    c.programs[1]=native_object(&f,program_manager,"renderProg",permutation_name,declaration,0,0);
+    unsigned char *array=memory(&f,16);ptr(array,0,c.programs[0]);ptr(array,8,c.programs[1]);ptr(program_manager,0x20,array);num(program_manager,0x28,2);
+    c.assets=sh_package_native_assets_open("C:/shader-follow-fixture");assert(c.assets);
+    assert(sh_package_native_assets_configure_shader(c.assets,SH_PACKAGE_SHADER_OPENGL,
+        (sh_native_resource_registry_source){&f,read_memory,(uintptr_t)head},original,&f,error,sizeof(error)));
+    assert(!sh_package_native_assets_shader_follow(c.assets));
+    assert(!open_cooked_link(&c,error) && sh_package_native_assets_shader_pending(c.assets)==1);
+    program_reference=reference;
+    sh_package_shader_preparation *batch=sh_package_native_assets_shader_take(c.assets);assert(batch);
+    int prepared=sh_package_shader_preparation_run(batch,prepare_program,recover_program,&c,error,sizeof(error));
+    if(prepared!=1)fprintf(stderr,"follow cook: %s\n",error);assert(prepared==1);
+    sh_package_shader_preparation_free(batch);program_reference="";
+    sh_package_native_assets_shader_record(c.assets,1);
+    assert(sh_package_native_assets_shader_follow(c.assets)==queued);
+    assert(sh_package_native_assets_shader_pending(c.assets)==queued);
+    assert(!sh_package_native_assets_shader_follow(c.assets));
+    uint64_t task=0;
+    if(queued) {
+        batch=sh_package_native_assets_shader_take(c.assets);assert(batch);
+        const sh_package_shader_request *request=sh_package_shader_preparation_request(batch,0);
+        assert(request && !strcmp(request->family,"renderprog") && !strcmp(request->name,reference));
+        assert(request->source_length==strlen(declaration) && !memcmp(request->source,declaration,request->source_length));
+        task=request->task_id;assert(task);sh_package_shader_preparation_free(batch);
+    }
+    sh_package_source_link *link=open_cooked_link(&c,error);
+    if(queued) {
+        assert(!link && sh_package_native_assets_shader_pending(c.assets)==1);
+        batch=sh_package_native_assets_shader_take(c.assets);assert(batch);
+        const sh_package_shader_request *request=sh_package_shader_preparation_request(batch,0);
+        assert(request && !strcmp(request->name,reference) && request->task_id==task);
+        sh_package_shader_preparation_free(batch);
+    } else {
+        /* An already cooked program links; a stale name stays the compile's
+         * own refusal. Neither is a preparation request. */
+        if(links && !link)fprintf(stderr,"follow link: %s\n",error);
+        assert(links ? link!=NULL : link==NULL);sh_package_source_link_close(link);
+        assert(!sh_package_native_assets_shader_pending(c.assets));
+    }
+    char *needs=sh_package_native_assets_shader_needs(c.assets);assert(needs);
+    assert(!strcmp(needs,queued ? "renderprog\tfixture\nrenderprog\tother\n" : "renderprog\tfixture\n"));free(needs);
+    sh_package_native_assets_shader_record(c.assets,1);
+    needs=sh_package_native_assets_shader_needs(c.assets);assert(needs && !*needs);free(needs);
+    sh_package_native_assets_shader_record(c.assets,0);
+    sh_package_native_assets_close(c.assets);clear(&f);
+}
+/* Prewarming makes the check a compilation makes: a stale name, an
+ * unprepared family or a ready object queues nothing, and a prewarm is never
+ * itself recorded as a compilation's need. */
+static void prewarm_contract(void)
+{
+    fixture f;setup(&f,0);char error[512];
+    unsigned char *head=memory(&f,8),*manager=memory(&f,0x30);ptr(head,0,manager);
+    unsigned char *object=native_object(&f,manager,"renderParm","tex",parameter,1,0x410);
+    memset(object+0x38,0,16);
+    sh_package_native_assets *assets=sh_package_native_assets_open("C:/shader-prewarm-fixture");assert(assets);
+    assert(sh_package_native_assets_shader_prewarm(assets,"renderparm","tex")==-1); /* not configured */
+    sh_native_resource_registry_source registry={&f,read_memory,(uintptr_t)head};
+    assert(sh_package_native_assets_configure_shader(assets,SH_PACKAGE_SHADER_OPENGL,registry,original,&f,error,sizeof(error)));
+    sh_package_library_native adapter=sh_package_native_assets_adapter(assets);
+    const sh_package_source_shader *shader=adapter.source.shader;int kind;uint32_t index;
+    sh_decl_source source={parameter,strlen(parameter)};
+    sh_package_shader_receipt_invalidate((uintptr_t)object);
+    assert(sh_package_native_assets_shader_prewarm(assets,"renderparm","missing")==-1);
+    assert(sh_package_native_assets_shader_prewarm(assets,"image","tex")==0);
+    assert(!sh_package_native_assets_shader_pending(assets));
+    sh_package_native_assets_shader_record(assets,1);
+    assert(sh_package_native_assets_shader_prewarm(assets,"renderparm","tex")==1);
+    assert(sh_package_native_assets_shader_pending(assets)==1);
+    char *needs=sh_package_native_assets_shader_needs(assets);assert(needs && !*needs);free(needs);
+    assert(shader->parameter(shader->context,"tex",source,&kind,&index,error,sizeof(error))==2);
+    assert(strstr(error,"environment needs") && sh_package_native_assets_shader_pending(assets)==1);
+    needs=sh_package_native_assets_shader_needs(assets);assert(needs && !strcmp(needs,"renderparm\ttex\n"));free(needs);
+    prepare_context c={&f,assets,object,0,0,0,0};
+    sh_package_shader_preparation *batch=sh_package_native_assets_shader_take(assets);assert(batch);
+    assert(sh_package_shader_preparation_run(batch,prepare_shader,recover_shader,&c,error,sizeof(error))==1);
+    sh_package_shader_preparation_free(batch);
+    assert(sh_package_native_assets_shader_prewarm(assets,"renderparm","tex")==0);
+    assert(!sh_package_native_assets_shader_pending(assets));
+    /* A later recorded compilation finding it ready only through that
+     * preparation's receipt still needs the preparation next session. */
+    sh_package_native_assets_shader_record(assets,1);
+    needs=sh_package_native_assets_shader_needs(assets);assert(needs && !*needs);free(needs);
+    assert(shader->parameter(shader->context,"tex",source,&kind,&index,error,sizeof(error)) && kind==1 && index==0x410);
+    needs=sh_package_native_assets_shader_needs(assets);assert(needs && !strcmp(needs,"renderparm\ttex\n"));free(needs);
+    sh_package_native_assets_shader_record(assets,0);
+    sh_package_native_assets_close(assets);clear(&f);
+}
+/* Preparation hint text belongs to exactly one header (renderer, game,
+ * product build, installed inventory) and is used whole or not at all:
+ * absent, foreign, truncated, extended or corrupt text visits nothing. */
+typedef struct hint_seen { int count; char entries[8][96]; } hint_seen;
+static int hint_visit(void *context,const char *family,const char *name)
+{ hint_seen *h=context;assert(h->count<8);snprintf(h->entries[h->count++],96,"%s\t%s",family,name);return 1; }
+static int hint_count(const char *text,size_t length,const char *header,hint_seen *seen)
+{ memset(seen,0,sizeof(*seen));return sh_package_shader_hint_read(text,length,header,hint_visit,seen); }
+static void hint_contract(void)
+{
+    const char *header="snapmap-plus shader preparation v2\nrenderer opengl\ngame 1 2\nproduct 3 4\ninventory aa\n";
+    const char *others[]={
+        "snapmap-plus shader preparation v2\nrenderer vulkan\ngame 1 2\nproduct 3 4\ninventory aa\n",
+        "snapmap-plus shader preparation v2\nrenderer opengl\ngame 1 5\nproduct 3 4\ninventory aa\n",
+        "snapmap-plus shader preparation v2\nrenderer opengl\ngame 1 2\nproduct 3 6\ninventory aa\n",
+        "snapmap-plus shader preparation v2\nrenderer opengl\ngame 1 2\nproduct 3 4\ninventory ab\n",
+        "snapmap-plus shader preparation v1\nrenderer opengl\ngame 1 2\nproduct 3 4\ninventory aa\n"};
+    hint_seen seen;
+    char *text=sh_package_shader_hint_format(header,"renderparm\ttex\nrenderprog\tfixture\n");assert(text);
+    size_t length=strlen(text);
+    assert(hint_count(text,length,header,&seen)==2 && seen.count==2);
+    assert(!strcmp(seen.entries[0],"renderparm\ttex") && !strcmp(seen.entries[1],"renderprog\tfixture"));
+    assert(hint_count(NULL,0,header,&seen)==-1 && !seen.count);
+    assert(hint_count("",0,header,&seen)==-1 && !seen.count);
+    for(size_t i=0;i<sizeof(others)/sizeof(*others);i++)assert(hint_count(text,length,others[i],&seen)==-1 && !seen.count);
+    for(size_t cut=1;cut<=length;cut++)assert(hint_count(text,length-cut,header,&seen)==-1 && !seen.count);
+    char *extended=malloc(length+2);assert(extended);memcpy(extended,text,length);memcpy(extended+length,"x\n",2);
+    assert(hint_count(extended,length+2,header,&seen)==-1 && !seen.count);free(extended);
+    for(size_t at=strlen(header);at<length;at++) {
+        text[at]^=0x20;assert(hint_count(text,length,header,&seen)==-1 && !seen.count);text[at]^=0x20;
+    }
+    free(text);
+    const char *malformed[]={"renderprog\tbad name\n","texture\tx\n","renderprog\n","renderprog\tx","\tx\n","renderprog\t\n",
+        "renderparm\ttex\nrenderprog\tbad\x01\n"};
+    for(size_t i=0;i<sizeof(malformed)/sizeof(*malformed);i++) {
+        text=sh_package_shader_hint_format(header,malformed[i]);assert(text);
+        assert(hint_count(text,strlen(text),header,&seen)==-1 && !seen.count);free(text);
+    }
+    text=sh_package_shader_hint_format(header,"");assert(text);
+    assert(hint_count(text,strlen(text),header,&seen)==0 && !seen.count);free(text);
+}
 static void native_contract(void)
 {
     fixture f;setup(&f,0);char error[512];
@@ -622,7 +905,12 @@ static void native_contract(void)
     sh_package_library_native adapter=sh_package_native_assets_adapter(assets);assert(adapter.source.shader);
     const sh_package_source_shader *shader=adapter.source.shader;int kind=-1;uint32_t index=0;uint64_t mask=0;
     sh_decl_source source={parameter,strlen(parameter)};
+    /* Checks of objects this session never prepared are not a recorded
+     * compilation's needs, whether ready natively or through a load receipt. */
+    sh_package_native_assets_shader_record(assets,1);
     assert(shader->parameter(shader->context,"tex",source,&kind,&index,error,sizeof(error))==1 && kind==1 && index==0x410);
+    char *needs=sh_package_native_assets_shader_needs(assets);assert(needs && !*needs);free(needs);
+    sh_package_native_assets_shader_record(assets,0);
     assert(shader->flag(shader->context,"feature",(sh_decl_source){flag_source,strlen(flag_source)},&mask,error,sizeof(error))==1 && mask==flag_mask);
     assert(!shader->parameter(shader->context,"tex",(sh_decl_source){NULL,0},&kind,&index,error,sizeof(error)));
     assert(!shader->parameter(shader->context,"tex",(sh_decl_source){"{ Tex2D changed }",17},&kind,&index,error,sizeof(error)));
@@ -631,19 +919,25 @@ static void native_contract(void)
     num(parameter_object,0x68,0x410);num(parameter_object,0x6c,0);assert(!shader->parameter(shader->context,"tex",source,&kind,&index,error,sizeof(error)));
     num(parameter_object,0x6c,1);parameter_object[0x2c]=4;assert(!shader->parameter(shader->context,"tex",source,&kind,&index,error,sizeof(error)));
     parameter_object[0x2c]=0;uintptr_t text=0;memcpy(&text,parameter_object+0x38,8);((char *)text)[2]='X';
-    assert(!shader->parameter(shader->context,"tex",source,&kind,&index,error,sizeof(error)));((char *)text)[2]='T';
+    /* Different retained text: a preparation request is retained (2). */
+    assert(shader->parameter(shader->context,"tex",source,&kind,&index,error,sizeof(error))==2);((char *)text)[2]='T';
     assert(shader->parameter(shader->context,"tex",source,&kind,&index,error,sizeof(error))==1);
     sh_package_shader_receipt_frame receipt;
     sh_package_shader_receipt_begin(&receipt,(uintptr_t)parameter_object,"renderparm","tex");
     sh_package_shader_receipt_bytes("generated/decls/renderparm/tex.decl",source.length,0,source.text,source.length);
     memset(parameter_object+0x38,0,16); /* Exact input was consumed, then retired. */
     sh_package_shader_receipt_end(&receipt,1,read_memory,&f);
+    sh_package_native_assets_shader_record(assets,1);
     assert(shader->parameter(shader->context,"tex",source,&kind,&index,error,sizeof(error))==1);
-    parameter_object[0x58]^=1;assert(!shader->parameter(shader->context,"tex",source,&kind,&index,error,sizeof(error)));parameter_object[0x58]^=1;
+    needs=sh_package_native_assets_shader_needs(assets);assert(needs && !*needs);free(needs);
+    sh_package_native_assets_shader_record(assets,0);
+    /* A receipt that no longer matches, with the native text retired: a request is retained (2). */
+    parameter_object[0x58]^=1;assert(shader->parameter(shader->context,"tex",source,&kind,&index,error,sizeof(error))==2);parameter_object[0x58]^=1;
     sh_package_shader_receipt_invalidate((uintptr_t)parameter_object);
-    assert(!shader->parameter(shader->context,"tex",source,&kind,&index,error,sizeof(error)));
+    /* No receipt and retired native text: a preparation request is retained (2). */
+    assert(shader->parameter(shader->context,"tex",source,&kind,&index,error,sizeof(error))==2);
     assert(!sh_package_native_assets_configure_shader(assets,SH_PACKAGE_SHADER_OPENGL,registry,original,&f,error,sizeof(error)));
     sh_package_native_assets_close(assets);clear(&f);
 }
 int main(void)
-{ complete_and_bind(SH_PACKAGE_SHADER_VULKAN);complete_and_bind(SH_PACKAGE_SHADER_OPENGL);include_fanout_snapmap_only();unshipped_program();reject_incomplete();native_contract();preparation_contract();shader_scope_contract();inactive_permutations(SH_PACKAGE_SHADER_OPENGL);inactive_permutations(SH_PACKAGE_SHADER_VULKAN);preparation_frontier();source_only_opengl(0);source_only_opengl(1);puts("package_shader_link_test: PASS");return 0; }
+{ complete_and_bind(SH_PACKAGE_SHADER_VULKAN);complete_and_bind(SH_PACKAGE_SHADER_OPENGL);include_fanout_snapmap_only();unshipped_program();reject_incomplete();native_contract();preparation_contract();shader_scope_contract();inactive_permutations(SH_PACKAGE_SHADER_OPENGL);inactive_permutations(SH_PACKAGE_SHADER_VULKAN);preparation_frontier();source_only_opengl(0);source_only_opengl(1);follow_contract("other",1,0);follow_contract("missing",0,0);follow_contract("fixture",0,1);follow_parameters_contract();prewarm_contract();hint_contract();memo_shader_contract(SH_PACKAGE_SHADER_VULKAN);memo_shader_contract(SH_PACKAGE_SHADER_OPENGL);first_start_contract();puts("package_shader_link_test: PASS");return 0; }

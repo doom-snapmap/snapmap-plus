@@ -119,6 +119,8 @@ static int assign(void *context, size_t unit, const unsigned char identity[32], 
     }
     return 1;
 }
+/* Every fixture unit binds through the fixed resolve() over immutable bytes. */
+static int stable_units(void *context, size_t unit) { (void)context; (void)unit; return 1; }
 static int available(void *context, const char *path, char *error, size_t capacity)
 {
     (void)error; (void)capacity;
@@ -1009,6 +1011,37 @@ int main(void)
         assert(f.bound - bound == 1 && again.count == 4);
         sh_package_link_reuse_close(reuse);
         sh_package_link_classes_free(&first); sh_package_link_classes_free(&again);
+    }
+    {
+        /* A stable adapter lets projection skip replaying units held in
+         * memory: a class whose targets all keep their names (the materials)
+         * projects its own bytes, duplicates are not replayed, and classes
+         * with renamed references (the entities) still replay. The linked
+         * output is identical. */
+        sh_package_link_output plain = {0}, skipped = {0};
+        size_t bound = f.bound;
+        assert(sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &plain, error, sizeof(error)));
+        size_t replayed = f.bound - bound;
+        adapter.stable = stable_units; bound = f.bound;
+        assert(sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &skipped, error, sizeof(error)));
+        adapter.stable = NULL;
+        /* Identify binds all six units; projection replays the two entity
+         * classes only, instead of four classes and two duplicates. */
+        assert(replayed == 12 && f.bound - bound == 8);
+        assert(plain.classes.count == skipped.classes.count &&
+            plain.compiled->resource_count == skipped.compiled->resource_count);
+        for (size_t i = 0; i < f.count; i++)
+            assert(!strcmp(plain.names[plain.classes.nodes[i]], skipped.names[skipped.classes.nodes[i]]));
+        for (size_t i = 0; i < plain.compiled->resource_count; i++) {
+            const sh_compiled_resource *a = plain.compiled->resources + i, *b = skipped.compiled->resources + i;
+            size_t alen = 0, blen = 0;
+            unsigned char *x = sh_package_compilation_read(plain.compiled, a, SIZE_MAX, &alen, error, sizeof(error));
+            unsigned char *y = sh_package_compilation_read(skipped.compiled, b, SIZE_MAX, &blen, error, sizeof(error));
+            assert(!strcmp(a->engine_path, b->engine_path) && x && y && alen == blen && !memcmp(x, y, alen));
+            assert(a->source_count == b->source_count && a->native_original == b->native_original);
+            free(x); free(y);
+        }
+        sh_package_link_output_free(&plain); sh_package_link_output_free(&skipped);
     }
     {
         const char map[] = "{\"variables\":{\"allocCount\":[0,0,0,0,0],\"string\":[]}}";

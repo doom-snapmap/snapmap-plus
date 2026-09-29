@@ -3714,8 +3714,9 @@ static void test_shader_preparation_lifetime(void)
             shader_original, NULL, error, sizeof(error)));
         sh_package_library_native native = sh_package_native_assets_adapter(assets);
         const sh_package_source_shader *shader = native.source.shader;
-        CHECK(!shader->parameter(shader->context, "tex", (sh_decl_source){g_shader_source, strlen(g_shader_source)},
-            &kind, &index, error, sizeof(error)));
+        /* 2: the preparation request is retained for the batch below. */
+        CHECK(shader->parameter(shader->context, "tex", (sh_decl_source){g_shader_source, strlen(g_shader_source)},
+            &kind, &index, error, sizeof(error)) == 2);
         sh_package_shader_preparation *batch = sh_package_native_assets_shader_take(assets);
         CHECK(batch && sh_package_shader_preparation_count(batch) == 1);
         int result = sh_decl_server_test_prepare_shaders(batch, shader_find, error, sizeof(error));

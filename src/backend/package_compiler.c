@@ -2046,8 +2046,10 @@ static int pc_compile_resource(sh_package_compilation *out, sh_compiled_resource
     classes.inputs = inputs; classes.source_input_count = source_input_count;
     int invalid_identity = 0;
     if (!pc_identity(resource, &invalid_identity, error, error_capacity)) {
-        if (invalid_identity && environment->invalid_package && resource->source_count)
+        if (invalid_identity && environment->invalid_package && resource->source_count) {
             *environment->invalid_package = files[resource->sources[0]].owner;
+            if (environment->invalid_own_bytes) *environment->invalid_own_bytes = 1;
+        }
         goto done;
     }
     if (!resource->type) return pc_compile_opaque(out, resource, environment, builtin, error, error_capacity);
@@ -2092,6 +2094,7 @@ static int pc_compile_resource(sh_package_compilation *out, sh_compiled_resource
         if (resource->type && !sh_decl_text_well_formed(bodies[i], lengths[i])) {
             cause.first = i; cause.second = SIZE_MAX;
             if (environment->invalid_package) *environment->invalid_package = file->owner;
+            if (environment->invalid_own_bytes) *environment->invalid_own_bytes = 1;
             snprintf(detail, sizeof(detail), "malformed declaration in %s", file->relative); goto conflict;
         }
         texts[i].text = (const char *)bodies[i]; texts[i].length = lengths[i];
@@ -2200,8 +2203,10 @@ static int pc_compile_resource(sh_package_compilation *out, sh_compiled_resource
         /* A contribution that cannot be parsed on its own is that package's
          * defect. Conflicts, missing parents and adapters stay unattributed. */
         if (environment->invalid_package && cause.first < resource->source_count &&
-            cause.second == SIZE_MAX && pc_unparseable(texts[cause.first]))
+            cause.second == SIZE_MAX && pc_unparseable(texts[cause.first])) {
             *environment->invalid_package = files[resource->sources[cause.first]].owner;
+            if (environment->invalid_own_bytes) *environment->invalid_own_bytes = 1;
+        }
         goto conflict;
     }
     resource->composed = distinct > 1 && !all_equal;
@@ -2453,6 +2458,7 @@ sh_package_compilation *sh_package_compile_with(const sh_package_sources *source
     error[0] = 0;
     build.error = error; build.error_capacity = error_capacity;
     if (environment && environment->invalid_package) *environment->invalid_package = SIZE_MAX;
+    if (environment && environment->invalid_own_bytes) *environment->invalid_own_bytes = 0;
     if (environment && environment->unserved_package) *environment->unserved_package = SIZE_MAX;
     if (environment && environment->conflicted_packages) sh_package_owners_free(environment->conflicted_packages);
     if (!sources || !environment ||
@@ -2497,7 +2503,11 @@ sh_package_compilation *sh_package_compile_with(const sh_package_sources *source
         if (!valid && errno == ENOMEM) allocation = 1;
         sh_package_owners_free(&owner); sh_package_policy_free(&policy);
         if (!valid) {
-            if (error[0] && !allocation) *environment->invalid_package = i;
+            /* Its descriptor alone, read against this build's settings. */
+            if (error[0] && !allocation) {
+                *environment->invalid_package = i;
+                if (environment->invalid_own_bytes) *environment->invalid_own_bytes = 1;
+            }
             goto bad;
         }
     }

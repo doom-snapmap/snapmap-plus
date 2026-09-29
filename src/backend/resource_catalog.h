@@ -20,6 +20,10 @@ sh_resource_catalog *sh_resource_catalog_open(const char *doom_base,
                                               char *error, size_t error_capacity);
 void sh_resource_catalog_close(sh_resource_catalog *catalog);
 size_t sh_resource_catalog_count(const sh_resource_catalog *catalog);
+/* SHA-256 of the index bytes this catalog was read from and its archive
+ * sizes: every row it can report. It says nothing about archive payload
+ * bytes, which a reader must validate itself. 1 with the digest. */
+int sh_resource_catalog_digest(const sh_resource_catalog *catalog, unsigned char out[32]);
 const sh_resource_catalog_entry *sh_resource_catalog_at(const sh_resource_catalog *catalog, size_t index);
 
 /* Compatible with the package compiler's baseline-reader callback. Return 1
