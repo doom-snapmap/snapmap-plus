@@ -39,14 +39,22 @@ static unsigned left_out_reuses;
 static unsigned library_compiles, install_refreshes;
 /* Source captures that replayed recordings of earlier compiles (the memo). */
 static unsigned memo_replays;
+/* Packages a library compile left out as remembered by an earlier process. */
+static unsigned left_out_packages;
+/* "Skipped local package" reports (rejected on their own content). */
+static unsigned skipped_packages;
 void backend_log(const char *message)
 {
     const char *at;
     size_t replayed = 0;
+    unsigned left = 0;
     if (!message) return;
+    if ((at = strstr(message, "package library: ")) && strstr(message, "remembered by an earlier process") &&
+        sscanf(at, "package library: %u unchanged package(s) left out", &left) == 1) left_out_packages += left;
     if (strstr(message, "replayed from earlier compiles") && (at = strstr(message, " ms; ")) &&
         sscanf(at, " ms; %zu replayed", &replayed) == 1 && replayed) memo_replays++;
     if (strstr(message, "left out as before")) left_out_reuses++;
+    if (strstr(message, "Skipped local package")) skipped_packages++;
     if (strstr(message, "package library compile (installed library)")) library_compiles++;
     if (strstr(message, "refresh for a published installation: added packages")) install_refreshes++;
 }
@@ -3862,6 +3870,94 @@ static void memo_refresh(const char *data, unsigned expected_reuses, int broken_
         !strstr(summary, "Skipped local package")));
     free(summary);
 }
+/* Independent packages that fail on their own content are left out together:
+ * one failed installed-library compile finds every one of them, in whichever
+ * order discovery meets them, and the next compile links with the healthy
+ * peer; a later process leaves all of them out without compiling. Two kinds:
+ * text the declaration parser rejects in its isolated scope, and a scalar the
+ * native grammar rejects during source discovery. */
+static int together_environment_baseline(void *context, const char *path, unsigned char **body, size_t *length)
+{
+    if (!strcmp(path, "generated/decls/entitydef/together/env_parent.decl")) { *body = NULL; *length = 0; return -1; }
+    return lease_collection_baseline(context, path, body, length);
+}
+static void test_malformed_owners_together(void)
+{
+    static const char *const bad[2] = {"{ edit = { ",
+        "{ class = \"Entity\"; edit = { health = 3\r\n target = \"\"; } }"};
+    admission_fixture f; lease_collection_setup(&f);
+    sh_decl_registry_source registry = {&f, admission_read, (uintptr_t)f.registry, NULL};
+    for (int kind = 0; kind < 2; kind++) for (int order = 0; order < 2; order++) {
+        char data[MAX_PATH], path[MAX_PATH], *summary = NULL;
+        const char *one = order ? "z-one" : "a-one", *two = order ? "a-two" : "z-two";
+        const char *folders[3] = {one, "m-good", two};
+        const char *names[3] = {"one", "good", "two"};
+        for (int p = 0; p < 3; p++) {
+            snprintf(path, sizeof(path), "together-%d-%d/overrides/%s/package.json", kind, order, folders[p]);
+            char descriptor_text[128];
+            snprintf(descriptor_text, sizeof(descriptor_text), "{\"id\":\"together-%s\",\"name\":\"Together %s\"}",
+                names[p], names[p]);
+            create(path, descriptor_text);
+            snprintf(path, sizeof(path), "together-%d-%d/overrides/%s/assets/generated/decls/entitydef/together/%s.decl",
+                kind, order, folders[p], names[p]);
+            create(path, p == 1 ? "{ class = \"Entity\"; edit = { health = 2; target = \"\"; } }" : bad[kind]);
+        }
+        snprintf(data, sizeof(data), "%s/together-%d-%d", root, kind, order);
+        sh_package_runtime_test_dispose(); sh_package_runtime_test_baseline(lease_collection_baseline, NULL);
+        sh_package_runtime_test_source_readers(registry, (uintptr_t)f.reflection);
+        sh_package_runtime_test_installed_links(1);
+        library_compiles = left_out_packages = 0;
+        CHECK(sh_package_runtime_refresh(data));
+        if (library_compiles != 2)
+            fprintf(stderr, "malformed owners kind %d order %d: %u installed-library compiles\n", kind, order, library_compiles);
+        CHECK(library_compiles == 2); /* One failed pass finds both, then the link. */
+        expect_library_text("generated/decls/entitydef/together/good.decl", "health = 2");
+        expect_library_text("generated/decls/entitydef/together/one.decl", NULL);
+        expect_library_text("generated/decls/entitydef/together/two.decl", NULL);
+        summary = sh_package_runtime_summary();
+        int both = summary && strstr(summary, one) && strstr(summary, two) && !strstr(summary, "m-good:");
+        if (!both) fprintf(stderr, "malformed owners summary: %s\n", summary ? summary : "(none)");
+        CHECK(both);
+        free(summary);
+        /* A later process of the same build leaves both out without compiling them. */
+        sh_package_runtime_test_dispose(); sh_package_runtime_test_baseline(lease_collection_baseline, NULL);
+        library_compiles = left_out_packages = 0;
+        CHECK(sh_package_runtime_refresh(data));
+        if (library_compiles != 1 || left_out_packages != 2)
+            fprintf(stderr, "malformed owners kind %d order %d later: %u compiles, %u left out\n",
+                kind, order, library_compiles, left_out_packages);
+        CHECK(library_compiles == 1 && left_out_packages == 2);
+        expect_library_text("generated/decls/entitydef/together/good.decl", "health = 2");
+        sh_package_runtime_test_dispose(); /* Close retained bundle streams before removing them. */
+        cleanup_resources(data);
+    }
+    /* A capture that withdraws a malformed package and then meets an
+     * environmental failure (an unreadable original) blames nobody: no
+     * package is skipped or remembered, and the refresh keeps no new library. */
+    {
+        char data[MAX_PATH];
+        create("together-env/overrides/a-one/package.json", "{\"id\":\"together-one\",\"name\":\"Together one\"}");
+        create("together-env/overrides/a-one/assets/generated/decls/entitydef/together/one.decl", bad[1]);
+        create("together-env/overrides/m-env/package.json", "{\"id\":\"together-env\",\"name\":\"Together env\"}");
+        create("together-env/overrides/m-env/assets/generated/decls/entitydef/together/env.decl",
+            "{ inherit = \"together/env_parent\"; edit = { health = 4; } }");
+        create("together-env/overrides/z-two/package.json", "{\"id\":\"together-two\",\"name\":\"Together two\"}");
+        create("together-env/overrides/z-two/assets/generated/decls/entitydef/together/two.decl", bad[1]);
+        snprintf(data, sizeof(data), "%s/together-env", root);
+        sh_package_runtime_test_dispose(); sh_package_runtime_test_baseline(together_environment_baseline, NULL);
+        skipped_packages = 0;
+        int refreshed = sh_package_runtime_refresh(data);
+        if (refreshed || skipped_packages)
+            fprintf(stderr, "environment after withdrawals: refreshed %d, %u skipped\n", refreshed, skipped_packages);
+        CHECK(!refreshed && !skipped_packages);
+        sh_package_runtime_test_dispose();
+        cleanup_resources(data);
+    }
+    sh_package_runtime_test_source_readers((sh_decl_registry_source){0}, 0);
+    sh_package_runtime_test_installed_links(0);
+    sh_package_runtime_test_dispose(); sh_package_runtime_test_baseline(baseline, NULL);
+    for (size_t i = 0; i < f.count; i++) free(f.regions[i].address);
+}
 static void test_left_out_across_processes(void)
 {
     char data[MAX_PATH];
@@ -4479,6 +4575,7 @@ int main(int argc, char **argv)
     test_published_install_refresh();
     test_left_out_packages();
     test_left_out_across_processes();
+    test_malformed_owners_together();
     test_increment_designed_difference();
     test_selector_shared_retirement();
     test_selector_unrelated_gameplay();

@@ -1953,6 +1953,26 @@ static void sl_attribute(const sh_package_source_link *s, sh_package_source_fail
  * scopes continue, so the same attempt also meets every other scope's
  * failures and preparation requests. sl_phase_complete reports it. 0 when
  * the failure is not such (it stops the capture now). */
+static int sl_withdrawal_add(sh_package_source_withdrawals *w, const sh_package_source_failure *failure,
+    const char *reason)
+{
+    if (w->count == w->capacity) {
+        size_t capacity = w->capacity ? w->capacity * 2 : 4;
+        sh_package_source_withdrawal *grown = realloc(w->items, capacity * sizeof(*grown));
+        if (!grown) return 0;
+        w->items = grown; w->capacity = capacity;
+    }
+    sh_package_source_withdrawal *item = w->items + w->count++;
+    item->failure = *failure;
+    snprintf(item->reason, sizeof(item->reason), "%s", reason ? reason : "");
+    return 1;
+}
+void sh_package_source_withdrawals_free(sh_package_source_withdrawals *withdrawals)
+{
+    if (!withdrawals) return;
+    free(withdrawals->items);
+    withdrawals->items = NULL; withdrawals->count = withdrawals->capacity = 0;
+}
 static int sl_defer_failure(sh_package_source_link *s)
 {
     sh_package_source_failure failure;
@@ -1961,6 +1981,10 @@ static int sl_defer_failure(sh_package_source_link *s)
     if ((failure.kind != SH_PACKAGE_SOURCE_FAILURE_SOURCE && failure.kind != SH_PACKAGE_SOURCE_FAILURE_COVERAGE) ||
         failure.scope >= s->scope_count) return 0;
     if (!s->withdrawn && !(s->withdrawn = calloc(s->scope_count, 1))) return 0;
+    /* Every withdrawal is kept for the caller, not only the first: each
+     * independent scope that fails on its own is reported by this one capture. */
+    if (s->native.withdrawals && !sl_withdrawal_add(s->native.withdrawals, &failure,
+            s->error && *s->error ? s->error : NULL)) return 0;
     if (!s->deferred.unit) {
         s->deferred.unit = s->failed_unit; s->deferred.malformed = s->malformed; s->deferred.reader_gap = s->reader_gap;
         snprintf(s->deferred.error, sizeof(s->deferred.error), "%s", s->error && *s->error ? s->error : "");
@@ -2153,6 +2177,7 @@ sh_package_source_link *sh_package_source_link_open_attributed(const sh_package_
         if (pass && !sl_seed_orphan_binaries(s)) goto failed;
         if (!sl_discover_through(s, &inspected) || !sl_phase_complete(s)) goto failed;
     }
+    s->native.withdrawals = NULL; /* Borrowed for discovery only. */
     sl_phase(s, 3, &mark);
     if (!sl_shader_accounted(s)) goto failed;
     sl_phase(s, 4, &mark);

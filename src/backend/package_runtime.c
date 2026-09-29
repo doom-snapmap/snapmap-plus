@@ -985,6 +985,52 @@ static int pr_reject_invalid(sh_package_sources *sources, sh_package_sources *in
         sh_package_sources_remove(sources, package);
 }
 
+/* Leave out, in one step, every package one failed compile found responsible
+ * on its own: the reported one and the further withdrawals of the same capture
+ * (sh_package_compile_environment.more_rejections). Invalid packages lose
+ * installed availability and are remembered when their own bytes decided it;
+ * packages this build cannot serve yet stay available. own_bytes_only applies
+ * only own-byte rejections (the others are judged again after native
+ * preparation). Removal runs from the highest index so indices stay valid. */
+typedef struct pr_leave { size_t package; int invalid, own_bytes; const char *reason; } pr_leave;
+static int pr_leave_order(const void *a, const void *b)
+{
+    const pr_leave *x = a, *y = b;
+    if (x->package != y->package) return x->package < y->package ? 1 : -1;
+    return y->invalid - x->invalid;
+}
+static int pr_leave_out(sh_package_sources *sources, sh_package_sources *inventory,
+    size_t invalid_package, int invalid_own_bytes, size_t unserved_package, const char *reason,
+    const sh_package_rejections *more, int own_bytes_only, char **rejections, char **unserved,
+    pr_exclusion **exclusions, size_t *exclusion_count)
+{
+    size_t count = 0;
+    pr_leave *leave = calloc(2 + (more ? more->count : 0), sizeof(*leave));
+    if (!leave) return 0;
+    if (invalid_package != SIZE_MAX && (!own_bytes_only || invalid_own_bytes))
+        leave[count++] = (pr_leave){invalid_package, 1, invalid_own_bytes, reason};
+    if (unserved_package != SIZE_MAX && !own_bytes_only)
+        leave[count++] = (pr_leave){unserved_package, 0, 0, reason};
+    for (size_t i = 0; more && i < more->count; i++) {
+        const sh_package_rejection *r = more->items + i;
+        if (own_bytes_only && !r->own_bytes) continue;
+        leave[count++] = (pr_leave){r->package, r->own_bytes, r->own_bytes, r->reason};
+    }
+    qsort(leave, count, sizeof(*leave), pr_leave_order);
+    int ok = 1;
+    for (size_t i = 0; ok && i < count; i++) {
+        if (i && leave[i].package == leave[i - 1].package) continue;
+        if (leave[i].package >= sources->package_count) { ok = 0; break; }
+        ok = leave[i].invalid ?
+            pr_reject_invalid(sources, inventory, leave[i].package, leave[i].own_bytes, rejections,
+                exclusions, exclusion_count, leave[i].reason) :
+            pr_unserved(unserved, &sources->packages[leave[i].package], leave[i].reason) &&
+                sh_package_sources_remove(sources, leave[i].package);
+    }
+    free(leave);
+    return ok;
+}
+
 /* A path without its own native identity, such as a shared shader include,
  * names every program catalogued beneath it. Campaign-only programs are not
  * SnapMap resources: the source link never captures them through a shared
@@ -1439,6 +1485,7 @@ static pr_provider *pr_prepare_deliveries(const char *data_root, const char *sou
     size_t exclusion_count = 0;
     size_t invalid_package = SIZE_MAX, unserved_package = SIZE_MAX;
     int invalid_own_bytes = 0;
+    sh_package_rejections more_rejections = {0};
     sh_package_owners conflicted = {0};
     sh_package_library isolated = {0};
     int library_output = 0;
@@ -1572,6 +1619,7 @@ static pr_provider *pr_prepare_deliveries(const char *data_root, const char *sou
         environment.invalid_package = &invalid_package;
         environment.invalid_own_bytes = &invalid_own_bytes;
         environment.unserved_package = &unserved_package;
+        environment.more_rejections = &more_rejections;
         environment.conflicted_packages = &conflicted;
     }
     if (inventory_out) {
@@ -1819,29 +1867,23 @@ static pr_provider *pr_prepare_deliveries(const char *data_root, const char *sou
             /* A rejection read from the package's own bytes does not depend on
              * native shader state: act on it now instead of compiling it again
              * after the preparation. Other attributions are judged afresh. */
-            if (invalid_package != SIZE_MAX && invalid_own_bytes &&
-                !pr_reject_invalid(sources, inventory_sources, invalid_package, 1,
-                    &rejections, &exclusions, &exclusion_count, reason)) goto done;
+            if (!pr_leave_out(sources, inventory_sources, invalid_package, invalid_own_bytes, SIZE_MAX, reason,
+                    &more_rejections, 1, &rejections, &unserved, &exclusions, &exclusion_count)) goto done;
             sh_package_library_free(&isolated);
             invalid_package = unserved_package = SIZE_MAX; sh_package_owners_free(&conflicted);
             error[0] = 0;
             continue;
         }
 #endif
-        if (unserved_package != SIZE_MAX) {
-            if (unserved_package >= sources->package_count) goto done;
-            /* Its files are valid and stay available to map installation;
-             * healthy peers compile without it. */
-            if (!pr_unserved(&unserved, &sources->packages[unserved_package], error) ||
-                !sh_package_sources_remove(sources, unserved_package)) goto done;
-            continue;
-        }
-        if (invalid_package != SIZE_MAX) {
-            /* Invalid content cannot establish installed availability. Valid
-             * peers that only disagree retain their physical inventory: a
-             * map's authored policy may use these files without reinstalling. */
-            if (!pr_reject_invalid(sources, inventory_sources, invalid_package, invalid_own_bytes,
-                &rejections, &exclusions, &exclusion_count, error)) goto done;
+        if (unserved_package != SIZE_MAX || invalid_package != SIZE_MAX) {
+            /* An unserved package's files are valid and stay available to map
+             * installation; invalid content cannot establish installed
+             * availability. Valid peers that only disagree retain their
+             * physical inventory: a map's authored policy may use these files
+             * without reinstalling. Every independent package the capture
+             * withdrew goes in this same step. */
+            if (!pr_leave_out(sources, inventory_sources, invalid_package, invalid_own_bytes, unserved_package,
+                    error, &more_rejections, 0, &rejections, &unserved, &exclusions, &exclusion_count)) goto done;
             continue;
         }
         if (!sh_package_owners_count(&conflicted)) break;
@@ -1966,6 +2008,7 @@ done:
     free(prepared_tasks);
 #endif
     free(rejections); free(unserved); pr_exclusions_free(exclusions, exclusion_count);
+    sh_package_rejections_free(&more_rejections);
     return provider;
 }
 

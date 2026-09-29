@@ -250,6 +250,47 @@ static void first_start_contract(void)
         clear(&f);
     }
 }
+/* Two independent malformed scopes around a healthy one whose parameter
+ * awaits native preparation: one capture withdraws both, in discovery order,
+ * keeps discovering the healthy scope and requests its preparation. The
+ * reported failure is the first withdrawal; the collector holds both. */
+static void malformed_scopes_contract(void)
+{
+    for(int order=0;order<2;order++) {
+        fixture f; char error[512];
+        setup(&f,0); f.prepare=1;
+        size_t source_index=0;
+        sh_compiled_resource bad[2]={{0},{0}};
+        const char *names[2]={"broken_one","broken_two"};
+        const char *paths[2]={"generated/decls/renderparm/broken_one.decl","generated/decls/renderparm/broken_two.decl"};
+        sh_package_compilation broken[2]={{0},{0}};
+        for(int i=0;i<2;i++) {
+            bad[i].engine_path=paths[i]; bad[i].type="renderparm"; bad[i].name=names[i];
+            bad[i].body=(unsigned char *)"{ Tex2D"; bad[i].body_length=7; bad[i].source=SIZE_MAX;
+            bad[i].sources=&source_index; bad[i].source_count=1;
+            broken[i].resources=bad+i; broken[i].resource_count=1;
+        }
+        const sh_package_compilation *scopes[3]={&broken[order],&f.compiled,&broken[!order]};
+        sh_package_source_shader shader={SH_PACKAGE_SHADER_VULKAN,&f,abi,flag_abi};
+        sh_package_source_withdrawals withdrawn={0};
+        sh_package_source_link_native native={&f,admit,semantics,&shader};
+        native.withdrawals=&withdrawn;
+        sh_package_source_failure failure;
+        sh_package_source_link *s=sh_package_source_link_open_attributed(scopes,3,NULL,original,&f,
+            (sh_decl_registry_source){&f,read_memory,f.registry,NULL},f.reflection,&native,NULL,&failure,error,sizeof(error));
+        int typed=withdrawn.count==2 && withdrawn.items[0].failure.scope==0 && withdrawn.items[1].failure.scope==2;
+        for(size_t i=0;typed && i<2;i++)
+            typed=(withdrawn.items[i].failure.kind==SH_PACKAGE_SOURCE_FAILURE_SOURCE ||
+                withdrawn.items[i].failure.kind==SH_PACKAGE_SOURCE_FAILURE_COVERAGE) &&
+                strstr(withdrawn.items[i].failure.chain,names[i ? !order : order]) && withdrawn.items[i].reason[0];
+        if(s || failure.scope!=0 || !typed || !f.prepare_asked)
+            fprintf(stderr,"malformed scopes order %d: scope %zu withdrawn %zu asked %d: %s\n",
+                order,failure.scope,withdrawn.count,f.prepare_asked,error);
+        assert(!s && failure.scope==0 && typed && f.prepare_asked);
+        sh_package_source_withdrawals_free(&withdrawn);
+        clear(&f);
+    }
+}
 typedef struct binding { int change, parameter; size_t calls; } binding;
 static int bind_fixture(void *context,const char *slot,const char *family,const char *name,const char **replacement)
 {
@@ -940,4 +981,4 @@ static void native_contract(void)
     sh_package_native_assets_close(assets);clear(&f);
 }
 int main(void)
-{ complete_and_bind(SH_PACKAGE_SHADER_VULKAN);complete_and_bind(SH_PACKAGE_SHADER_OPENGL);include_fanout_snapmap_only();unshipped_program();reject_incomplete();native_contract();preparation_contract();shader_scope_contract();inactive_permutations(SH_PACKAGE_SHADER_OPENGL);inactive_permutations(SH_PACKAGE_SHADER_VULKAN);preparation_frontier();source_only_opengl(0);source_only_opengl(1);follow_contract("other",1,0);follow_contract("missing",0,0);follow_contract("fixture",0,1);follow_parameters_contract();prewarm_contract();hint_contract();memo_shader_contract(SH_PACKAGE_SHADER_VULKAN);memo_shader_contract(SH_PACKAGE_SHADER_OPENGL);first_start_contract();puts("package_shader_link_test: PASS");return 0; }
+{ complete_and_bind(SH_PACKAGE_SHADER_VULKAN);complete_and_bind(SH_PACKAGE_SHADER_OPENGL);include_fanout_snapmap_only();unshipped_program();reject_incomplete();native_contract();preparation_contract();shader_scope_contract();inactive_permutations(SH_PACKAGE_SHADER_OPENGL);inactive_permutations(SH_PACKAGE_SHADER_VULKAN);preparation_frontier();source_only_opengl(0);source_only_opengl(1);follow_contract("other",1,0);follow_contract("missing",0,0);follow_contract("fixture",0,1);follow_parameters_contract();prewarm_contract();hint_contract();memo_shader_contract(SH_PACKAGE_SHADER_VULKAN);memo_shader_contract(SH_PACKAGE_SHADER_OPENGL);first_start_contract();malformed_scopes_contract();puts("package_shader_link_test: PASS");return 0; }

@@ -77,6 +77,9 @@ typedef struct sh_package_source_link_native {
     /* Optional discovery recordings retained from earlier captures in this
      * process (sh_package_source_memo_open), borrowed for this capture. */
     sh_package_source_memo *memo;
+    /* Optional collector of every scope this capture withdraws
+     * (sh_package_source_withdrawals below), borrowed for this capture. */
+    struct sh_package_source_withdrawals *withdrawals;
 } sh_package_source_link_native;
 
 /* Enumerate supplied units, complete their catalog permutations and walk the
@@ -150,6 +153,21 @@ typedef struct sh_package_source_failure {
     char family[64], name[256];
     char chain[512]; /* "family name <- requester <- ... <- seed". */
 } sh_package_source_failure;
+/* Every scope a capture withdrew for a failure that scope alone answers for
+ * (SOURCE or COVERAGE), in discovery order, with the reader's reason. The
+ * failure an attributed open reports is the first of them; the others were
+ * found in the same capture after it. Recording never changes the capture's
+ * outcome. Caller-owned: start zeroed, free with
+ * sh_package_source_withdrawals_free. */
+typedef struct sh_package_source_withdrawal {
+    sh_package_source_failure failure;
+    char reason[1024];
+} sh_package_source_withdrawal;
+typedef struct sh_package_source_withdrawals {
+    sh_package_source_withdrawal *items;
+    size_t count, capacity;
+} sh_package_source_withdrawals;
+void sh_package_source_withdrawals_free(sh_package_source_withdrawals *withdrawals);
 sh_package_source_link *sh_package_source_link_open_attributed(
     const sh_package_compilation *const *scopes, size_t count,
     const sh_resource_catalog *catalog, sh_package_baseline_reader original,

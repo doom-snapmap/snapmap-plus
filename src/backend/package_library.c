@@ -2337,6 +2337,40 @@ static int pl_attributable(const sh_package_provenance *contexts)
         if (contexts->contexts[i].mode != SH_PACKAGE_CONTEXT_ISOLATED || contexts->contexts[i].tree_count != 1) return 0;
     return 1;
 }
+void sh_package_rejections_free(sh_package_rejections *rejections)
+{
+    if (!rejections) return;
+    free(rejections->items);
+    rejections->items = NULL; rejections->count = rejections->capacity = 0;
+}
+/* Owners of the withdrawals other than the reported one (first_owner), each
+ * once, with its typed attribution: SOURCE is malformed in its own bytes,
+ * COVERAGE is content this build cannot serve yet. 0 only on allocation
+ * failure. */
+static int pl_more_rejections(const pl_build *b, const sh_package_sources *sources, size_t first_owner,
+    const sh_package_source_withdrawals *withdrawals, sh_package_rejections *out)
+{
+    if (!out || !withdrawals) return 1;
+    for (size_t i = 0; i < withdrawals->count; i++) {
+        const sh_package_source_withdrawal *w = withdrawals->items + i;
+        size_t owner = pl_scope_owner(b, sources, w->failure.scope);
+        int seen = owner == SIZE_MAX || owner == first_owner;
+        for (size_t j = 0; !seen && j < out->count; j++) seen = out->items[j].package == owner;
+        if (seen) continue;
+        if (out->count == out->capacity) {
+            size_t capacity = out->capacity ? out->capacity * 2 : 4;
+            sh_package_rejection *grown = realloc(out->items, capacity * sizeof(*grown));
+            if (!grown) return 0;
+            out->items = grown; out->capacity = capacity;
+        }
+        sh_package_rejection *r = out->items + out->count++;
+        r->package = owner;
+        r->own_bytes = w->failure.kind == SH_PACKAGE_SOURCE_FAILURE_SOURCE;
+        snprintf(r->reason, sizeof(r->reason), "%s%s%s%s", w->reason, w->failure.chain[0] ? " (via " : "",
+            w->failure.chain, w->failure.chain[0] ? ")" : "");
+    }
+    return 1;
+}
 /* Free keys: private keys in allocation order under the contract, otherwise
  * the lowest unnamed bit. 0 when none is left. A peer's multi-bit keys are
  * held in held[]; no key touches a historical bit. */
@@ -4223,6 +4257,7 @@ static int pl_compile(const sh_package_sources *sources, const sh_package_proven
     if (environment && environment->invalid_package) *environment->invalid_package = SIZE_MAX;
     if (environment && environment->invalid_own_bytes) *environment->invalid_own_bytes = 0;
     if (environment && environment->unserved_package) *environment->unserved_package = SIZE_MAX;
+    if (environment && environment->more_rejections) environment->more_rejections->count = 0;
     if (environment && environment->conflicted_packages) sh_package_owners_free(environment->conflicted_packages);
     if (!sources || !environment || (contexts && !contexts->context_count)) goto done;
     if (!contexts && !sources->component_count) {
@@ -4242,6 +4277,12 @@ static int pl_compile(const sh_package_sources *sources, const sh_package_proven
     if (b.count > SIZE_MAX / sizeof(*b.views) - 2 || b.count > SIZE_MAX / sizeof(*b.scopes) - 2) goto done;
     b.views = calloc(b.count + 2, sizeof(*b.views)); b.scopes = calloc(b.count + 2, sizeof(*b.scopes));
     if (!b.views || !b.scopes) goto done;
+    /* Packages whose own bytes fail in their isolated scope: every one of this
+     * pass is collected (the first reported, the others as more_rejections)
+     * before the compile fails, rather than one compile at a time. */
+    size_t own_first = SIZE_MAX;
+    char own_reason[1024] = "";
+    int collect_own = pl_attributable(contexts) && environment->invalid_package && environment->more_rejections;
     for (size_t i = 0; i < b.count; i++) {
         if (!(contexts ? sh_package_provenance_scope(contexts, i, sources, b.views + i, error, capacity) :
             sh_package_scope_open(sources, i, b.views + i, error, capacity))) goto done;
@@ -4257,9 +4298,55 @@ static int pl_compile(const sh_package_sources *sources, const sh_package_proven
                     builtins[scoped.builtin_count++] = env.builtins[j];
             scoped.builtins = builtins;
         }
+        size_t scope_invalid = SIZE_MAX; int scope_own = 0;
+        if (collect_own) { scoped.invalid_package = &scope_invalid; scoped.invalid_own_bytes = &scope_own; }
         b.scopes[i] = sh_package_compile_with(&b.views[i].sources, &scoped, error, capacity);
         free(builtins);
-        if (!b.scopes[i]) goto done;
+        if (!b.scopes[i] && collect_own && scope_invalid != SIZE_MAX && scope_own &&
+            scope_invalid < sources->package_count) {
+            if (own_first == SIZE_MAX) {
+                own_first = scope_invalid; snprintf(own_reason, sizeof(own_reason), "%s", error);
+            } else if (scope_invalid != own_first) {
+                sh_package_rejections *more = environment->more_rejections;
+                int seen = 0;
+                for (size_t j = 0; j < more->count; j++) seen |= more->items[j].package == scope_invalid;
+                if (!seen) {
+                    if (more->count == more->capacity) {
+                        size_t grown_capacity = more->capacity ? more->capacity * 2 : 4;
+                        sh_package_rejection *grown = realloc(more->items, grown_capacity * sizeof(*grown));
+                        if (!grown) { snprintf(error, capacity, "cannot account further invalid packages"); goto done; }
+                        more->items = grown; more->capacity = grown_capacity;
+                    }
+                    sh_package_rejection *r = more->items + more->count++;
+                    r->package = scope_invalid; r->own_bytes = 1;
+                    snprintf(r->reason, sizeof(r->reason), "%s", error);
+                }
+            }
+            error[0] = 0;
+            continue;
+        }
+        if (!b.scopes[i]) {
+            /* Not a decision on its own bytes: stop now, as before. Own-byte
+             * packages already found this pass are still reported together;
+             * this failure is judged again on the next compile. */
+            if (own_first == SIZE_MAX) {
+                if (collect_own) {
+                    *environment->invalid_package = scope_invalid;
+                    if (environment->invalid_own_bytes) *environment->invalid_own_bytes = scope_own;
+                }
+            } else {
+                *environment->invalid_package = own_first;
+                if (environment->invalid_own_bytes) *environment->invalid_own_bytes = 1;
+                snprintf(error, capacity, "%s", own_reason);
+            }
+            goto done;
+        }
+    }
+    if (own_first != SIZE_MAX) {
+        *environment->invalid_package = own_first;
+        if (environment->invalid_own_bytes) *environment->invalid_own_bytes = 1;
+        snprintf(error, capacity, "%s", own_reason);
+        goto done;
     }
     if (!pl_shared_sources(&b, sources, error, capacity)) goto done;
     b.shared = sh_package_compile_with(&b.shared_view.sources, &env, error, capacity);
@@ -4307,9 +4394,12 @@ static int pl_compile(const sh_package_sources *sources, const sh_package_proven
     sh_package_source_root_plan root_plan = {discover, b.count - 1, contexts,
         contexts && native ? native->document_roots : NULL};
     sh_package_source_failure failure;
+    sh_package_source_withdrawals withdrawals = {0};
+    source_native.withdrawals = &withdrawals;
     b.reader = sh_package_source_link_open_attributed((const sh_package_compilation *const *)b.scopes,
         b.count, catalog, original, original_context, registry, reflection, &source_native,
         &root_plan, &failure, error, capacity);
+    source_native.withdrawals = NULL;
     free(discover);
     pl_phase(&b, out, SH_PACKAGE_LIBRARY_PHASE_SOURCE_LINK, &mark);
     if (b.reader) sh_package_source_link_phases(b.reader, out->source_phases, sizeof(out->source_phases));
@@ -4325,18 +4415,35 @@ static int pl_compile(const sh_package_sources *sources, const sh_package_proven
             snprintf(error + used, capacity - used, " (via %s%s)", failure.chain,
                 failure.kind == SH_PACKAGE_SOURCE_FAILURE_PRODUCT ? "; reached only from product and stock content" : "");
         size_t owner = pl_attributable(contexts) ? pl_scope_owner(&b, sources, failure.scope) : SIZE_MAX;
+        int reported = 0;
         if (owner != SIZE_MAX) {
             if (failure.kind == SH_PACKAGE_SOURCE_FAILURE_SOURCE && environment->invalid_package) {
                 /* Its own supplied file, which the reader could not parse in
                  * the native grammar (sl_attribute): its bytes alone. */
                 *environment->invalid_package = owner;
                 if (environment->invalid_own_bytes) *environment->invalid_own_bytes = 1;
+                reported = 1;
             }
-            else if (failure.kind == SH_PACKAGE_SOURCE_FAILURE_COVERAGE && environment->unserved_package)
+            else if (failure.kind == SH_PACKAGE_SOURCE_FAILURE_COVERAGE && environment->unserved_package) {
                 *environment->unserved_package = owner;
+                reported = 1;
+            }
         }
+        /* The same capture withdrew further scopes that fail on their own
+         * content and kept discovering the rest: report their owners too, so
+         * they are left out together rather than found one compile at a time.
+         * Only when this failure is itself such a withdrawal: a capture ending
+         * in an environmental or product failure blames nobody. */
+        if (reported && !pl_more_rejections(&b, sources, owner, &withdrawals, environment->more_rejections)) {
+            snprintf(error, capacity, "cannot account further withdrawn packages");
+            if (environment->invalid_package) *environment->invalid_package = SIZE_MAX;
+            if (environment->unserved_package) *environment->unserved_package = SIZE_MAX;
+            if (environment->invalid_own_bytes) *environment->invalid_own_bytes = 0;
+        }
+        sh_package_source_withdrawals_free(&withdrawals);
         goto done;
     }
+    sh_package_source_withdrawals_free(&withdrawals);
     unsigned long long step_mark = pl_now_ms();
     if (!pl_coverage(&b, sources, &out->coverage)) {
         snprintf(error, capacity, "cannot account package coverage"); goto done;

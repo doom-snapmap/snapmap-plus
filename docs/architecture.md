@@ -1510,8 +1510,12 @@ replayed.
 
 A start prepares ahead the shader objects the previous start of the same
 renderer, product build, game image and installed inventory needed. A failing
-compile first collects every pending native preparation and every package that
-fails on its own bytes, so a first start needs at most one failed attempt.
+compile first collects every pending native preparation and every package whose
+own content fails in its isolated scope or during source discovery, and leaves
+all of those packages out together, so they cost one failed attempt. An
+environmental or composition failure is never counted against a package. A
+package whose contribution (strings, keys, registrations, editor rows) fails is
+still left out one compile at a time.
 Packages rejected on their own bytes are remembered per renderer executable for
 the same product and game images and package tree, and later starts leave them
 out without compiling them. Hints and remembered exclusions live in
