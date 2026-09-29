@@ -871,20 +871,22 @@ static void h_sh_listres(idCmdArgs *a)
 
 /* List the editor's placeable palette: the catalog at editor+0x20660 that the
  * toybox and the map validator both search (sorted 0x6F0-byte entity templates;
- * +0 the editor definition, +0x150 the entityDef it places). Each line is
- * "<editor definition> -> <entityDef>", then the count. Read-only and
- * SEH-guarded; the optional filter matches either name. */
-#define PAL_EDITOR_OFF   0x20660
-#define PAL_ARRAY_OFF    0x10
-#define PAL_COUNT_OFF    0x18
-#define PAL_ENTRY_SIZE   0x6F0
-#define PAL_ENTRY_EDITOR 0x000
-#define PAL_ENTRY_DEF    0x150
-static void pal_copy_name(const void *decl, char *out, size_t capacity)
+ * +0 the editor definition; +0x150 the template's own 0x168-byte declaration,
+ * whose +0x58 is the entityDef name the palette is sorted and searched by).
+ * Each line is "<editor definition> -> <entityDef>", then the count. Read-only
+ * and SEH-guarded; the optional filter matches either name. Layout verified on
+ * both images (builders, entry constructors, lookups and name getters). */
+#define PAL_EDITOR_OFF    0x20660
+#define PAL_ARRAY_OFF     0x10
+#define PAL_COUNT_OFF     0x18
+#define PAL_ENTRY_SIZE    0x6F0
+#define PAL_ENTRY_EDITOR  0x000
+#define PAL_ENTRY_DEF     0x150
+#define PAL_TEMPLATE_NAME 0x58
+static void pal_copy_text(const char *name, int present, char *out, size_t capacity)
 {
-    const char *name = decl ? lr_decl_name(decl) : NULL;
     out[0] = 0;
-    if (!name) { snprintf(out, capacity, "%s", decl ? "(unreadable)" : "(none)"); return; }
+    if (!name) { snprintf(out, capacity, "%s", present ? "(unreadable)" : "(none)"); return; }
     __try {
         size_t i = 0;
         for (; i + 1 < capacity && name[i]; i++) out[i] = name[i];
@@ -910,8 +912,10 @@ static void h_sh_palette(idCmdArgs *a)
         if (!lr_read_ptr(entry + PAL_ENTRY_EDITOR, &row) || !lr_read_ptr(entry + PAL_ENTRY_DEF, &def)) {
             sh_printf("sh_palette: entry %u unreadable.\n", i); break;
         }
-        pal_copy_name(row, row_name, sizeof(row_name));
-        pal_copy_name(def, def_name, sizeof(def_name));
+        void *placed = NULL;
+        pal_copy_text(row ? lr_decl_name(row) : NULL, row != NULL, row_name, sizeof(row_name));
+        if (def && !lr_read_ptr((const uint8_t *)def + PAL_TEMPLATE_NAME, &placed)) placed = NULL;
+        pal_copy_text((const char *)placed, def != NULL, def_name, sizeof(def_name));
         if (filter && !strstr(row_name, filter) && !strstr(def_name, filter)) continue;
         sh_printf("%s -> %s\n", row_name, def_name);
         shown++;
