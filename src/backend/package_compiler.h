@@ -128,10 +128,13 @@ typedef struct sh_package_compile_environment {
     size_t *unserved_package;
     /* Optional, with invalid_package and unserved_package: further outer
      * packages the same failed compile found responsible on their own content
-     * after the first (sh_package_source_withdrawals), each with its typed
-     * attribution and reason, so a caller can leave them out together instead
-     * of discovering them one compile at a time. Reset on entry. Never holds
-     * environmental, product, peer or composition-dependent failures. */
+     * after the first (isolated scopes, sh_package_source_withdrawals, and
+     * contributions judged apart from every package reported before them),
+     * each with its typed attribution and reason, so a caller can leave them
+     * out together instead of discovering them one compile at a time. Reset on
+     * entry. Never holds environmental, product or cross-package composition
+     * failures, and nobody is reported when the environment fails after an
+     * owner was found. */
     struct sh_package_rejections *more_rejections;
     /* Optional local-library isolation report, reset on entry. A malformed
      * owner is reported above; an unresolved peer resource marks its changing
@@ -147,7 +150,8 @@ typedef struct sh_package_compile_environment {
 /* One further responsible package of a failed compile (more_rejections). */
 typedef struct sh_package_rejection {
     size_t package;   /* index in the compiled sources */
-    int own_bytes;    /* 1: malformed in its own bytes (invalid, remembered); 0: not served here */
+    int invalid;      /* 1: malformed (loses installed availability); 0: not served here */
+    int own_bytes;    /* with invalid: decided by its own bytes alone (remembered, see invalid_own_bytes) */
     char reason[1280];
 } sh_package_rejection;
 typedef struct sh_package_rejections {

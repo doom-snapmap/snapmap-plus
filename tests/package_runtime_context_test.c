@@ -5213,6 +5213,70 @@ static void test_malformed_owners_together(void)
     sh_package_runtime_test_dispose(); sh_package_runtime_test_baseline(baseline, NULL);
     for (size_t i = 0; i < f.count; i++) free(f.regions[i].address);
 }
+/* Packages whose own editor contributions cannot compose are left out
+ * together: two restating the shipped base row with a control that has no
+ * identity (each malformed on its own) beside a peer changing the same row
+ * cost exactly one failed installed-library compile, in either discovery
+ * order; the retry replays the unchanged packages' discovery and serves the
+ * peer's change, and both are reported with their own reasons. Their
+ * judgement read the shipped row too, so nothing is remembered: a later
+ * process judges them afresh, again in one failed compile. */
+static void test_contribution_owners_runtime(void)
+{
+    admission_fixture f; d8r_setup(&f);
+    sh_decl_registry_source registry = {&f, admission_read, (uintptr_t)f.registry, NULL};
+    static const char *const labels[2] = {"displayNameTag = \"#str_one\";", "descriptionTag = \"#str_two\";"};
+    for (int order = 0; order < 2; order++) {
+        char data[MAX_PATH], prefix[MAX_PATH], text[1024];
+        const char *folders[2] = {order ? "z-one" : "a-one", order ? "a-two" : "z-two"};
+        for (int p = 0; p < 2; p++) {
+            snprintf(prefix, sizeof(prefix), "owners-runtime-%d/overrides/%s", order, folders[p]);
+            snprintf(text, sizeof(text), "{\"id\":\"owners-%s\",\"name\":\"Owners %s\"}", folders[p] + 2, folders[p] + 2);
+            d8c_file(prefix, "package.json", text);
+            snprintf(text, sizeof(text), "{ edit = { propertySheets = { num = 1; item[0] = { properties = { num = 3; "
+                "item[0] = { path = \"displayName\"; displayNameTag = \"#str_name\"; descriptionTag = \"#str_name_desc\"; "
+                "inspector = \"d8rows/name_inspector\"; } item[1] = { path = \"actionDelay\"; displayNameTag = \"#str_delay\"; "
+                "descriptionTag = \"#str_delay_desc\"; } item[2] = { %s } } } } } }", labels[p]);
+            d8c_file(prefix, "assets/generated/decls/snapeditorentitydef/d8rows/input_base.decl", text);
+        }
+        snprintf(prefix, sizeof(prefix), "owners-runtime-%d/overrides/m-good", order);
+        d8c_file(prefix, "package.json", "{\"id\":\"owners-good\",\"name\":\"Owners good\"}");
+        d8c_file(prefix, "assets/generated/decls/snapeditorentitydef/d8rows/input_base.decl",
+            "{ edit = { propertySheets = { num = 1; item[0] = { properties = { num = 2; "
+            "item[0] = { path = \"displayName\"; displayNameTag = \"#str_name\"; descriptionTag = \"#str_name_desc\"; "
+            "inspector = \"d8rows/name_inspector\"; } item[1] = { path = \"actionDelay\"; displayNameTag = \"#str_delay\"; "
+            "descriptionTag = \"#str_good\"; } } } } } }");
+        snprintf(data, sizeof(data), "%s/owners-runtime-%d", root, order);
+        for (int process = 0; process < 2; process++) {
+            char *summary = NULL;
+            sh_package_runtime_test_dispose(); sh_package_runtime_test_baseline(d8r_baseline, NULL);
+            sh_package_runtime_test_source_readers(registry, (uintptr_t)f.reflection);
+            sh_package_runtime_test_installed_links(1);
+            library_compiles = memo_replays = skipped_packages = left_out_packages = 0;
+            CHECK(sh_package_runtime_refresh(data));
+            summary = sh_package_runtime_summary();
+            /* Both are decided by editor composition (not by their scopes or
+             * discovery): a control composition cannot place. */
+            const char *reason = summary ? strstr(summary, "no valid index or semantic identity") : NULL;
+            int together = library_compiles == 2 && memo_replays >= 1 && skipped_packages == 2 && !left_out_packages &&
+                summary && strstr(summary, folders[0]) && strstr(summary, folders[1]) && !strstr(summary, "m-good:") &&
+                reason && strstr(reason + 1, "no valid index or semantic identity");
+            if (!together)
+                fprintf(stderr, "contribution owners order %d process %d: %u compiles, %u replays, %u skipped, %u left out; %s\n",
+                    order, process, library_compiles, memo_replays, skipped_packages, left_out_packages,
+                    summary ? summary : "(none)");
+            CHECK(together);
+            free(summary);
+            expect_library_text(d8r_base, "#str_good");
+        }
+        sh_package_runtime_test_dispose();
+        cleanup_resources(data);
+    }
+    sh_package_runtime_test_source_readers((sh_decl_registry_source){0}, 0);
+    sh_package_runtime_test_installed_links(0);
+    sh_package_runtime_test_dispose(); sh_package_runtime_test_baseline(baseline, NULL);
+    for (size_t i = 0; i < f.count; i++) free(f.regions[i].address);
+}
 static void test_left_out_across_processes(void)
 {
     char data[MAX_PATH];
@@ -5849,6 +5913,7 @@ int main(int argc, char **argv)
     test_left_out_packages();
     test_left_out_across_processes();
     test_malformed_owners_together();
+    test_contribution_owners_runtime();
     test_increment_designed_difference();
     test_increment_editor_composition();
     test_increment_stock_rows();

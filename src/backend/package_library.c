@@ -83,8 +83,23 @@ typedef struct pl_build {
     const sh_package_provenance *contexts;
     sh_package_native_registry *identities;
     pl_contributions *contributions;
-    size_t contribution_owner;   /* package left unserved by a composition gap */
-    size_t contribution_invalid; /* package whose own editor source is invalid */
+    /* Packages whose own contribution failed (pl_contribution_blame), in the
+     * order found: the first is reported as invalid_package or
+     * unserved_package, the others as more_rejections. Batched only when the
+     * caller accepts more_rejections (collect_contributions); otherwise the
+     * first ends the compile. withdrawn[scope] marks every scope of a package
+     * found so; unit_state[unit] records how each editor or registration
+     * group member was judged (PL_UNIT_*, pl_group_judge). */
+    sh_package_rejections contribution_rejections;
+    unsigned char *withdrawn, *unit_state;
+    size_t unit_state_count;
+    int collect_contributions;
+    /* 1 while the last failure of the stage is a judged one (a finding, a gap
+     * blaming nobody, or the end of a stage that found packages); only then are
+     * the findings reported. It is cleared whenever the stage goes on after a
+     * finding, so an environmental or otherwise unjudged failure blames
+     * nobody. */
+    int contribution_verdict;
     /* Each package's registration keys: the bit it authored and the bit it
      * holds in this library (see pl_key_phase). */
     struct pl_key_binding { size_t scope; unsigned original; uint32_t current; } *keys;
@@ -251,6 +266,8 @@ static void pl_close(pl_build *b)
     free(b->key_notes); b->key_notes = NULL;
     free(b->key_groups); b->key_groups = NULL;
     free((void *)b->stock_reasons); b->stock_reasons = NULL; b->stock_reason_count = 0;
+    sh_package_rejections_free(&b->contribution_rejections);
+    free(b->withdrawn); b->withdrawn = NULL; free(b->unit_state); b->unit_state = NULL; b->unit_state_count = 0;
     sh_package_native_registry_close(b->identities);
     pl_contributions_close(b->contributions);
     sh_package_source_link_close(b->reader);
@@ -1058,10 +1075,20 @@ static int pl_bound_assign_members(void *context, size_t unit, const char *name,
         files, paths, count, names, error, capacity);
 }
 
+#ifdef SH_PACKAGE_LIBRARY_TESTING
+static long g_token_failures, g_rejudge_failures;
+void sh_package_library_test_token_failures(long count) { g_token_failures = count; }
+void sh_package_library_test_rejudge_failures(long count) { g_rejudge_failures = count; }
+#endif
 static int pl_tokens(pl_contributions *c, char *error, size_t capacity)
 {
     pl_names captured = {0}, issued = {0};
     int ok = 0;
+#ifdef SH_PACKAGE_LIBRARY_TESTING
+    if (g_token_failures > 0 && c->build && c->build->contribution_rejections.count && g_token_failures--) {
+        snprintf(error, capacity, "contribution tokens could not be rebound"); return 0;
+    }
+#endif
     if (!c->dirty) return 1;
     pl_tokens_free(c);
     pl_reuse_refresh(c);
@@ -1482,6 +1509,44 @@ static size_t pl_member_owner(const pl_build *b, const sh_package_sources *sourc
     return authored ? pl_scope_owner(b, sources, scope) : SIZE_MAX;
 }
 
+/* A package whose own contribution failed, with the reason (error): invalid
+ * when it is malformed in its own context, otherwise content this build cannot
+ * serve yet. Its scopes are withdrawn from later judgements, and its first
+ * finding stands. 1 when the compile goes on to find others, 0 when this
+ * finding ends it. */
+static int pl_contribution_blame(pl_build *b, const sh_package_sources *sources, size_t owner, int invalid,
+    char *error, size_t capacity)
+{
+    sh_package_rejections *found = &b->contribution_rejections;
+    b->contribution_verdict = 1;
+    for (size_t i = 0; i < found->count; i++) if (found->items[i].package == owner) return b->collect_contributions;
+    if (found->count == found->capacity) {
+        size_t grown_capacity = found->capacity ? found->capacity * 2 : 4;
+        sh_package_rejection *grown = realloc(found->items, grown_capacity * sizeof(*grown));
+        if (!grown) {
+            snprintf(error, capacity, "cannot account further rejected packages");
+            b->contribution_verdict = 0; return 0;
+        }
+        found->items = grown; found->capacity = grown_capacity;
+    }
+    sh_package_rejection *r = found->items + found->count++;
+    memset(r, 0, sizeof(*r));
+    r->package = owner; r->invalid = invalid;
+    snprintf(r->reason, sizeof(r->reason), "%s", error);
+    for (size_t scope = 0; b->withdrawn && scope < b->authored_count; scope++)
+        if (pl_scope_owner(b, sources, scope) == owner) b->withdrawn[scope] = 1;
+    return b->collect_contributions;
+}
+
+/* The end of a stage that found packages: they fail this compile together,
+ * reported with the first finding's reason. 1 when none was found. */
+static int pl_contribution_found(pl_build *b, char *error, size_t capacity)
+{
+    if (!b->contribution_rejections.count) return 1;
+    snprintf(error, capacity, "%s", b->contribution_rejections.items[0].reason);
+    b->contribution_verdict = 1; return 0;
+}
+
 /* A group the product cannot compose names its declaration. A package's own
  * invalid source rejects that package. A gap in one member's own content
  * leaves its package unserved for this candidate. A gap only in combining
@@ -1489,18 +1554,98 @@ static size_t pl_member_owner(const pl_build *b, const sh_package_sources *sourc
  * any owner: its participants are named (pl_joint_participants) and nobody is
  * excluded, so the candidate fails and the previous usable generation stays.
  * Stock or product content alone blames nobody, and environment failures never
- * judge content. */
-static void pl_contribution_failure(pl_build *b, const sh_package_sources *sources,
+ * judge content. 1 when the owner was found and the compile goes on finding
+ * others (pl_contribution_blame), 0 when this failure ends it. */
+static int pl_contribution_failure(pl_build *b, const sh_package_sources *sources,
     const sh_package_link_unit *input, int kind, size_t culprit, char *error, size_t capacity)
 {
     char reason[768];
     size_t owner;
     snprintf(reason, sizeof(reason), "%s", error);
     snprintf(error, capacity, "%s %s: %s", input->family, input->name, reason);
-    if (kind == SH_PACKAGE_EDITOR_FAILURE_ENVIRONMENT || culprit == SIZE_MAX ||
-        (owner = pl_member_owner(b, sources, culprit)) == SIZE_MAX) return;
-    if (kind == SH_PACKAGE_EDITOR_FAILURE_SOURCE) b->contribution_invalid = owner;
-    else b->contribution_owner = owner;
+    if (kind == SH_PACKAGE_EDITOR_FAILURE_ENVIRONMENT) { b->contribution_verdict = 0; return 0; }
+    if (culprit == SIZE_MAX || (owner = pl_member_owner(b, sources, culprit)) == SIZE_MAX) {
+        b->contribution_verdict = 1; return 0;
+    }
+    return pl_contribution_blame(b, sources, owner, kind == SH_PACKAGE_EDITOR_FAILURE_SOURCE, error, capacity);
+}
+
+/* How a group member was judged: composed (its content entered its group's
+ * output), excluded (its package was found before the group composed),
+ * withheld (its group was left for the next compile). */
+enum { PL_UNIT_OPEN, PL_UNIT_COMPOSED, PL_UNIT_EXCLUDED, PL_UNIT_WITHHELD };
+typedef struct pl_group { size_t first, count, parent; } pl_group;
+typedef int (*pl_group_compose)(pl_build *b, const sh_package_sources *sources,
+    const size_t *members, size_t count, char *error, size_t capacity);
+static void pl_units_mark(pl_build *b, const size_t *units, size_t count, unsigned char state)
+{
+    for (size_t k = 0; k < count; k++) if (units[k] < b->unit_state_count) b->unit_state[units[k]] = state;
+}
+/* Whether these units' current content depends on a found package: a group
+ * that was left aside, or (composed_taints) a composition a package found
+ * since took part in. */
+static int pl_units_aside(const pl_build *b, const size_t *units, size_t count, int composed_taints)
+{
+    if (!b->contribution_rejections.count) return 0;
+    for (size_t k = 0; k < count; k++) {
+        unsigned char state = units[k] < b->unit_state_count ? b->unit_state[units[k]] : PL_UNIT_OPEN;
+        if (state == PL_UNIT_WITHHELD || (composed_taints && state == PL_UNIT_COMPOSED &&
+            b->withdrawn && b->withdrawn[b->contributions->inputs.scopes[units[k]]])) return 1;
+    }
+    return 0;
+}
+/* A group, or a parent it rebases onto, holding such content. */
+static int pl_group_aside(const pl_build *b, const pl_group *groups, size_t group_count, size_t g, const size_t *order)
+{
+    for (size_t at = g, steps = 0; at != SIZE_MAX && steps <= group_count; at = groups[at].parent, steps++)
+        if (pl_units_aside(b, order + groups[at].first, groups[at].count, 1)) return 1;
+    return 0;
+}
+/* Judge one editor (groups) or registration group apart from every package
+ * found so far. Members of a found package are left out before composing, and
+ * a composition that finds a package is judged again without it, so several
+ * packages' independent defects in one group are all found while its valid
+ * members stay unblamed. A group whose inputs another found package's content
+ * shaped is left aside for the next compile instead of being judged here: an
+ * editor group rebasing onto a parent composed with that content, or one of
+ * whose members a left-aside group holds. Registration lists read no editor
+ * field a phase-2 composition wrote, so a registration group is left aside
+ * only for a left-aside member. 1 composed or left aside, 0 failed. */
+static int pl_group_judge(pl_build *b, const sh_package_sources *sources, const pl_group *groups,
+    size_t group_count, size_t g, const size_t *order, const size_t *units, size_t count,
+    pl_group_compose compose, char *error, size_t capacity)
+{
+    const pl_contributions *c = b->contributions;
+    size_t *kept = malloc((count ? count : 1) * sizeof(*kept));
+    int result = 1;
+    if (!kept) {
+        snprintf(error, capacity, "editor contribution allocation failed");
+        b->contribution_verdict = 0; return 0;
+    }
+    for (;;) {
+        size_t n = 0, found = b->contribution_rejections.count;
+        if (groups ? pl_group_aside(b, groups, group_count, g, order) : pl_units_aside(b, units, count, 0)) {
+            pl_units_mark(b, units, count, PL_UNIT_WITHHELD); b->contribution_verdict = 0; break;
+        }
+        for (size_t k = 0; k < count; k++) {
+            if (b->withdrawn && b->withdrawn[c->inputs.scopes[units[k]]]) pl_units_mark(b, units + k, 1, PL_UNIT_EXCLUDED);
+            else kept[n++] = units[k];
+        }
+        if (!n) break;
+        int composed = compose(b, sources, kept, n, error, capacity);
+        if (composed > 0) { pl_units_mark(b, kept, n, PL_UNIT_COMPOSED); break; }
+        if (!composed) { result = 0; break; }
+        /* A package found: the others are judged afresh without it. */
+        b->contribution_verdict = 0;
+        if (b->contribution_rejections.count == found) { pl_units_mark(b, units, count, PL_UNIT_WITHHELD); break; }
+#ifdef SH_PACKAGE_LIBRARY_TESTING
+        if (g_rejudge_failures > 0 && g_rejudge_failures--) {
+            snprintf(error, capacity, "editor contribution allocation failed");
+            result = 0; break;
+        }
+#endif
+    }
+    free(kept); return result;
 }
 
 /* Whether contributions compose: 1 yes, 0 no, -1 environment. */
@@ -1730,7 +1875,9 @@ static int pl_editor_memo(void) { return 1; }
  * member's parent compose into one shared surface; a member whose author gave
  * it another parent is that author's own variant and is only rebased. Every
  * member's inherited sparse lists are first rebased from the parent layout
- * its author saw onto the published parent's, parents composing first. */
+ * its author saw onto the published parent's, parents composing first.
+ * 1 composed; 0 failed, ending the compile; -1 failed with its owner found
+ * while the compile goes on finding others (pl_contribution_failure). */
 static int pl_contribution_group(pl_build *b, const sh_package_sources *sources,
     const size_t *members, size_t count, char *error, size_t capacity)
 {
@@ -1956,7 +2103,7 @@ static int pl_contribution_group(pl_build *b, const sh_package_sources *sources,
     ok = 1;
     goto done;
 failed:
-    pl_contribution_failure(b, sources, input, kind, culprit, error, capacity);
+    ok = pl_contribution_failure(b, sources, input, kind, culprit, error, capacity) ? -1 : 0;
 done:
     if (texts) for (size_t i = 0; i < count; i++) free((char *)texts[i].text);
     if (pending) for (size_t i = 0; i < count; i++) pl_contribution_unit_free(pending + i);
@@ -2682,11 +2829,37 @@ static int pl_more_rejections(const pl_build *b, const sh_package_sources *sourc
         }
         sh_package_rejection *r = out->items + out->count++;
         r->package = owner;
-        r->own_bytes = w->failure.kind == SH_PACKAGE_SOURCE_FAILURE_SOURCE;
+        r->invalid = r->own_bytes = w->failure.kind == SH_PACKAGE_SOURCE_FAILURE_SOURCE;
         snprintf(r->reason, sizeof(r->reason), "%s%s%s%s", w->reason, w->failure.chain[0] ? " (via " : "",
             w->failure.chain, w->failure.chain[0] ? ")" : "");
     }
     return 1;
+}
+/* The packages the contribution stage found (pl_contribution_blame), when a
+ * judged failure ended it: the first as invalid_package or unserved_package,
+ * with its reason as the compile's error, the others as more_rejections. None
+ * is remembered as decided by its own bytes: each judgement read stock or
+ * composed content too. An environmental or unjudged failure blames nobody. */
+static void pl_contribution_report(const pl_build *b, const sh_package_compile_environment *environment,
+    char *error, size_t capacity)
+{
+    const sh_package_rejections *found = &b->contribution_rejections;
+    if (!found->count || !b->contribution_verdict) return;
+    const sh_package_rejection *first = found->items;
+    size_t *slot = first->invalid ? environment->invalid_package : environment->unserved_package;
+    sh_package_rejections *more = environment->more_rejections;
+    if (!slot) return;
+    for (size_t i = 1; more && i < found->count; i++) {
+        if (more->count == more->capacity) {
+            size_t grown_capacity = more->capacity ? more->capacity * 2 : 4;
+            sh_package_rejection *grown = realloc(more->items, grown_capacity * sizeof(*grown));
+            if (!grown) { more->count = 0; snprintf(error, capacity, "cannot account further rejected packages"); return; }
+            more->items = grown; more->capacity = grown_capacity;
+        }
+        more->items[more->count++] = found->items[i];
+    }
+    *slot = first->package;
+    snprintf(error, capacity, "%s", first->reason);
 }
 /* Free keys: private keys in allocation order under the contract, otherwise
  * the lowest unnamed bit. 0 when none is left. A peer's multi-bit keys are
@@ -3011,9 +3184,12 @@ static int pl_key_relocate_scope(pl_build *b, const sh_package_sources *sources,
         free(edit.owned);
         if (status < 0) {
             /* A key site the readers cannot walk in this package's own
-             * declaration leaves that package unserved; peers still compile. */
-            if (!strstr(error, "allocation")) b->contribution_owner = pl_scope_owner(b, sources, scope);
+             * declaration leaves that package unserved; peers still compile.
+             * Keys are allocated across every package at once, so this ends
+             * the compile: packages failing later are found by the next one. */
             if (!*error) snprintf(error, capacity, "registration key sites could not be rewritten");
+            size_t owner = strstr(error, "allocation") ? SIZE_MAX : pl_scope_owner(b, sources, scope);
+            if (owner != SIZE_MAX) pl_contribution_blame(b, sources, owner, 0, error, capacity);
             free(text); return 0;
         }
         const char *current = status == 1 ? (const char *)out : text;
@@ -3710,7 +3886,8 @@ done:
  * their first-match winners (pl_first_open). A frozen legacy
  * context's copy joins with its authored keys and without restored stock rows
  * (they stay removed, as in its whole-file conductor); the result keeps the
- * stock name in a map document too, where the engine still finds it by name. */
+ * stock name in a map document too, where the engine still finds it by name.
+ * Returns as pl_contribution_group. */
 static int pl_registration_group(pl_build *b, const sh_package_sources *sources,
     const size_t *members, size_t count, char *error, size_t capacity)
 {
@@ -3783,7 +3960,7 @@ static int pl_registration_group(pl_build *b, const sh_package_sources *sources,
     ok = 1;
     goto done;
 failed:
-    pl_contribution_failure(b, sources, input, kind, culprit, error, capacity);
+    ok = pl_contribution_failure(b, sources, input, kind, culprit, error, capacity) ? -1 : 0;
 done:
     if (texts) for (size_t i = 0; i < count; i++) free((char *)texts[i].text);
     if (pending) for (size_t i = 0; i < count; i++) pl_contribution_unit_free(pending + i);
@@ -3813,7 +3990,8 @@ static int pl_registration_phase(pl_build *b, const sh_package_sources *sources,
                     candidate = !memcmp(body + at, "aiTypeList", 10) || (at + 12 <= length && !memcmp(body + at, "globalAIMods", 12));
                 free(body);
             }
-        if (candidate && !pl_registration_group(b, sources, order + i, end - i, error, capacity)) return 0;
+        if (candidate && !pl_group_judge(b, sources, NULL, 0, SIZE_MAX, NULL, order + i, end - i,
+            pl_registration_group, error, capacity)) return 0;
         i = end;
     }
     return 1;
@@ -4002,7 +4180,6 @@ static int pl_unit_name_order(void *context, const void *left, const void *right
     if (!order) order = strcmp(a->name, b->name);
     return order ? order : (*(const size_t *)left < *(const size_t *)right ? -1 : 1);
 }
-typedef struct pl_group { size_t first, count, parent; } pl_group;
 /* Compose one phase's groups (runs of equal family and name in order), each
  * after the group of the parent it names, so a child rebases onto its
  * published parent. A cycle cannot order; the chain reader refuses it. */
@@ -4067,7 +4244,8 @@ static int pl_contribution_phase(pl_build *b, const sh_package_sources *sources,
             depth--;
             if (state[top] == 2) continue;
             state[top] = 2;
-            if (!pl_contribution_group(b, sources, order + groups[top].first, groups[top].count, error, capacity)) goto done;
+            if (!pl_group_judge(b, sources, groups, group_count, top, order, order + groups[top].first,
+                groups[top].count, pl_contribution_group, error, capacity)) goto done;
         }
     }
     ok = 1;
@@ -4211,6 +4389,10 @@ static int pl_contributions_open(pl_build *b, const sh_package_sources *sources,
     if (!pl_spawn_capture(b, sources, error, capacity) || !pl_tokens(c, error, capacity)) goto bad;
     if (!pl_key_phase(b, sources, error, capacity)) goto bad;
     pl_step(b, PL_STEP_KEYS, &mark);
+    b->unit_state_count = c->inputs.count;
+    if (!(b->unit_state = calloc(b->unit_state_count ? b->unit_state_count : 1, 1))) {
+        snprintf(error, capacity, "editor contribution allocation failed"); goto bad;
+    }
     for (int phase = 1; phase <= 3; phase++) {
         if (!pl_tokens(c, error, capacity)) goto bad;
         pl_step(b, PL_STEP_TOKENS, &mark);
@@ -4221,6 +4403,7 @@ static int pl_contributions_open(pl_build *b, const sh_package_sources *sources,
     pl_step(b, PL_STEP_TOKENS, &mark);
     if (!pl_registration_phase(b, sources, registrations, registration_count, error, capacity)) goto bad;
     pl_step(b, PL_STEP_REGISTRATION, &mark);
+    if (!pl_contribution_found(b, error, capacity)) goto bad;
     if (!pl_tokens(c, error, capacity)) goto bad;
     pl_step(b, PL_STEP_TOKENS, &mark);
     if (!pl_hands_phase(b, sources, error, capacity)) goto bad;
@@ -4477,7 +4660,7 @@ static int pl_registration_inheritance(pl_build *b, const sh_package_sources *so
         sh_package_resource_projection *projections = calloc(count ? count : 1, sizeof(*projections));
         const sh_compiled_resource **inputs = calloc(count ? count : 1, sizeof(*inputs));
         unsigned char **owned = calloc(count ? count : 1, sizeof(*owned));
-        int ok = projections && inputs && owned, changed = 0;
+        int ok = projections && inputs && owned, changed = 0, found = 0;
         for (size_t i = 0; ok && i < count; i++) {
             const sh_compiled_resource *r = source->resources + i;
             inputs[i] = r; projections[i] = (sh_package_resource_projection){r->engine_path, inputs + i, 1,
@@ -4493,10 +4676,13 @@ static int pl_registration_inheritance(pl_build *b, const sh_package_sources *so
             int status = pl_registration_prepare(reader, r->name, body, length, owned + i,
                 &projections[i].length, error, capacity);
             ok = status >= 0;
-            if (status == -3 && r->source_count && scope < b->authored_count)
-                b->contribution_owner = pl_scope_owner(b, sources, scope);
-            if (status == -2 && r->source_count && scope < b->authored_count)
-                b->contribution_invalid = pl_scope_owner(b, sources, scope);
+            /* A package's own input (-2 malformed, -3 not covered) decides
+             * for that package alone; stock and product input blames nobody. */
+            if (status == -2 || status == -3) {
+                size_t owner = r->source_count ? pl_scope_owner(b, sources, scope) : SIZE_MAX;
+                if (owner == SIZE_MAX) b->contribution_verdict = 1;
+                else found = pl_contribution_blame(b, sources, owner, status == -2, error, capacity);
+            }
             if (status == 1) { projections[i].body = owned[i]; changed = 1; }
             free(body);
         }
@@ -4506,7 +4692,12 @@ static int pl_registration_inheritance(pl_build *b, const sh_package_sources *so
         if (ok && changed) ok = next != NULL;
         if (owned) for (size_t i = 0; i < count; i++) free(owned[i]);
         free(owned); free(inputs); free(projections);
-        if (!ok) { sh_package_compilation_free(next); return 0; }
+        if (!ok) {
+            sh_package_compilation_free(next);
+            /* Each scope is prepared on its own: the next one is judged apart. */
+            if (found) { b->contribution_verdict = 0; continue; }
+            return 0;
+        }
         if (next) {
             next->independent_sources = source->independent_sources;
             next->map_overlay = source->map_overlay; next->map_owner_begin = source->map_owner_begin;
@@ -4514,7 +4705,7 @@ static int pl_registration_inheritance(pl_build *b, const sh_package_sources *so
             b->scopes[scope] = next; sh_package_compilation_free(source);
         }
     }
-    return 1;
+    return pl_contribution_found(b, error, capacity);
 }
 
 /* Modern registration contributions extend the native table. Materialize
@@ -4532,7 +4723,7 @@ static int pl_registration_sources(pl_build *b, const sh_package_sources *source
         sh_package_resource_projection *projections = calloc(count ? count : 1, sizeof(*projections));
         const sh_compiled_resource **inputs = calloc(count ? count : 1, sizeof(*inputs));
         unsigned char **owned = calloc(count ? count : 1, sizeof(*owned));
-        int ok = projections && inputs && owned, changed = 0;
+        int ok = projections && inputs && owned, changed = 0, found = 0;
         for (size_t i = 0; ok && i < count; i++) {
             const sh_compiled_resource *r = source->resources + i;
             inputs[i] = r; projections[i] = (sh_package_resource_projection){r->engine_path, inputs + i, 1,
@@ -4547,7 +4738,8 @@ static int pl_registration_sources(pl_build *b, const sh_package_sources *source
             sh_decl_node *original = sh_decl_tree_parse((sh_decl_source){(char *)base->body, base->body_length}, error, capacity);
             sh_decl_node *edit = (sh_decl_node *)sh_decl_tree_member(tree, "edit");
             int restored = 0;
-            if (!tree && body && !strstr(error, "allocation")) b->contribution_invalid = pl_scope_owner(b, sources, scope);
+            size_t owner = !tree && body && !strstr(error, "allocation") ? pl_scope_owner(b, sources, scope) : SIZE_MAX;
+            if (owner != SIZE_MAX) found = pl_contribution_blame(b, sources, owner, 1, error, capacity);
             if (tree && !edit) {
                 edit = calloc(1, sizeof(*edit));
                 if (edit) edit->key = _strdup("edit");
@@ -4579,7 +4771,11 @@ static int pl_registration_sources(pl_build *b, const sh_package_sources *source
         if (ok && changed) ok = next != NULL;
         if (owned) for (size_t i = 0; i < count; i++) free(owned[i]);
         free(owned); free(inputs); free(projections);
-        if (!ok) { sh_package_compilation_free(next); return 0; }
+        if (!ok) {
+            sh_package_compilation_free(next);
+            if (found) { b->contribution_verdict = 0; continue; }
+            return 0;
+        }
         if (next) {
             next->independent_sources = source->independent_sources;
             next->map_overlay = source->map_overlay; next->map_owner_begin = source->map_owner_begin;
@@ -4587,7 +4783,7 @@ static int pl_registration_sources(pl_build *b, const sh_package_sources *source
             b->scopes[scope] = next; sh_package_compilation_free(source);
         }
     }
-    return 1;
+    return pl_contribution_found(b, error, capacity);
 }
 
 /* Diagnostics: stock units no package supplies (every file an unsupplied
@@ -4686,7 +4882,6 @@ static int pl_compile(const sh_package_sources *sources, const sh_package_proven
     char *error, size_t capacity)
 {
     pl_build b = {0};
-    b.contribution_owner = b.contribution_invalid = SIZE_MAX;
     sh_package_source_link_native source_native = {&b, pl_admit, pl_semantics,
         native ? native->source.shader : NULL, pl_material_companions, pl_material_seeds, pl_implicit, pl_source_owners};
     if (native && native->private_keys) source_native.prepare = pl_prepare_discovered;
@@ -4720,7 +4915,10 @@ static int pl_compile(const sh_package_sources *sources, const sh_package_proven
     original = pl_read_original; original_context = b.originals + original_slot;
     if (b.count > SIZE_MAX / sizeof(*b.views) - 2 || b.count > SIZE_MAX / sizeof(*b.scopes) - 2) goto done;
     b.views = calloc(b.count + 2, sizeof(*b.views)); b.scopes = calloc(b.count + 2, sizeof(*b.scopes));
-    if (!b.views || !b.scopes) goto done;
+    b.withdrawn = calloc(b.count + 2, 1);
+    if (!b.views || !b.scopes || !b.withdrawn) goto done;
+    b.collect_contributions = pl_attributable(contexts) && environment->invalid_package &&
+        environment->unserved_package && environment->more_rejections;
     /* Packages whose own bytes fail in their isolated scope: every one of this
      * pass is collected (the first reported, the others as more_rejections)
      * before the compile fails, rather than one compile at a time. */
@@ -4762,7 +4960,7 @@ static int pl_compile(const sh_package_sources *sources, const sh_package_proven
                         more->items = grown; more->capacity = grown_capacity;
                     }
                     sh_package_rejection *r = more->items + more->count++;
-                    r->package = scope_invalid; r->own_bytes = 1;
+                    r->package = scope_invalid; r->invalid = r->own_bytes = 1;
                     snprintf(r->reason, sizeof(r->reason), "%s", error);
                 }
             }
@@ -4821,11 +5019,7 @@ static int pl_compile(const sh_package_sources *sources, const sh_package_proven
     if (!pl_registration_inheritance(&b, sources, b.count - 1, catalog,
         env.baseline ? env.baseline : original, env.baseline ? env.baseline_context : original_context,
         registry, reflection, error, capacity)) goto done;
-    if (!pl_registration_sources(&b, sources, error, capacity)) {
-        if (pl_attributable(contexts) && b.contribution_invalid != SIZE_MAX && environment->invalid_package)
-            *environment->invalid_package = b.contribution_invalid;
-        goto done;
-    }
+    if (!pl_registration_sources(&b, sources, error, capacity)) goto done;
     if (!pl_native_open(&b, catalog, original, original_context, registry, reflection, error, capacity)) goto done;
     pl_phase(&b, out, SH_PACKAGE_LIBRARY_PHASE_NATIVE, &mark);
     source_native.audio = b.audio;
@@ -4895,13 +5089,7 @@ static int pl_compile(const sh_package_sources *sources, const sh_package_proven
     pl_step(&b, PL_STEP_COVERAGE, &step_mark);
     int opened = pl_contributions_open(&b, sources, error, capacity);
     pl_steps(&b, out->contribution_phases, sizeof(out->contribution_phases));
-    if (!opened) {
-        if (pl_attributable(contexts) && b.contribution_invalid != SIZE_MAX && environment->invalid_package)
-            *environment->invalid_package = b.contribution_invalid;
-        else if (pl_attributable(contexts) && b.contribution_owner != SIZE_MAX && environment->unserved_package)
-            *environment->unserved_package = b.contribution_owner;
-        goto done;
-    }
+    if (!opened) goto done;
     if (b.key_notes) {
         size_t used = out->coverage ? strlen(out->coverage) : 0, add = strlen(b.key_notes);
         char *grown = realloc(out->coverage, used + add + 1);
@@ -4992,12 +5180,7 @@ static int pl_compile(const sh_package_sources *sources, const sh_package_proven
     out->compiled = b.linked.compiled; b.linked.compiled = NULL;
     out->compiled->independent_sources = 1; ok = 1;
 done:
-    if (!ok && pl_attributable(contexts) && environment) {
-        if (environment->invalid_package && b.contribution_invalid != SIZE_MAX)
-            *environment->invalid_package = b.contribution_invalid;
-        else if (environment->unserved_package && b.contribution_owner != SIZE_MAX)
-            *environment->unserved_package = b.contribution_owner;
-    }
+    if (!ok && pl_attributable(contexts) && environment) pl_contribution_report(&b, environment, error, capacity);
     if (out) pl_repeated_work(&b, out);
     if (out && b.contributions && b.contributions->notes) {
         free(out->link_diagnostics); out->link_diagnostics = b.contributions->notes; b.contributions->notes = NULL;

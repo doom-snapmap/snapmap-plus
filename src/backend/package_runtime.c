@@ -1024,8 +1024,8 @@ static int pr_leave_out(sh_package_sources *sources, sh_package_sources *invento
         leave[count++] = (pr_leave){unserved_package, 0, 0, reason};
     for (size_t i = 0; more && i < more->count; i++) {
         const sh_package_rejection *r = more->items + i;
-        if (own_bytes_only && !r->own_bytes) continue;
-        leave[count++] = (pr_leave){r->package, r->own_bytes, r->own_bytes, r->reason};
+        if (own_bytes_only && !(r->invalid && r->own_bytes)) continue;
+        leave[count++] = (pr_leave){r->package, r->invalid, r->invalid && r->own_bytes, r->reason};
     }
     qsort(leave, count, sizeof(*leave), pr_leave_order);
     int ok = 1;

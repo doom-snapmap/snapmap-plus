@@ -144,5 +144,11 @@ void sh_package_library_test_editor_memo(int enabled);
 /* 0 rewrites the registration keys of every declaration afresh instead of
  * reusing each binding class's scanned key sites (the same result). */
 void sh_package_library_test_key_memo(int enabled);
+/* Fail the next count re-judgements of a group that found a package as an
+ * allocation failure would. */
+void sh_package_library_test_rejudge_failures(long count);
+/* Fail the next count token rebinds after a package was found, as a failure
+ * no judgement classifies. */
+void sh_package_library_test_token_failures(long count);
 #endif
 #endif

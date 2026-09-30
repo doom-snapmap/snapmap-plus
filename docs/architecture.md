@@ -1558,11 +1558,21 @@ replayed.
 A start prepares ahead the shader objects the previous start of the same
 renderer, product build, game image and installed inventory needed. A failing
 compile first collects every pending native preparation and every package whose
-own content fails in its isolated scope or during source discovery, and leaves
-all of those packages out together, so they cost one failed attempt. An
-environmental or composition failure is never counted against a package. A
-package whose contribution (strings, keys, registrations, editor rows) fails is
-still left out one compile at a time.
+own content fails in its isolated scope, during source discovery or in its
+contributions, and leaves all of those packages out together, so they cost one
+failed attempt. Registration input prepared before discovery is judged scope by
+scope. Editor rows and registration lists are judged group by group, apart from
+the packages already found: a found package's members are left out before a
+group composes, and a group that finds one is judged again without it, so
+several packages' independent defects in one declaration are found together
+while its valid contributors stay unblamed. A group whose parent composed the
+content of a package found later is left for the next compile rather than
+judged against that content, and a registration-key site failure ends the
+compile, since keys are allocated across all packages at once. An
+environmental or composition failure is never counted against a package, and an
+environmental or otherwise unjudged failure after a package was found blames
+nobody. Contribution findings read stock or composed content too, so none is
+remembered as decided by a package's own bytes.
 Packages rejected on their own bytes are remembered per renderer executable for
 the same product and game images and package tree, and later starts leave them
 out without compiling them. Hints and remembered exclusions live in

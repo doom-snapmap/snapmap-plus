@@ -7953,6 +7953,431 @@ static void test_late_required_resources(fixture *f, sh_decl_registry_source reg
     assert(!paths.count && !paths.incomplete); sh_package_references_free(&paths);
 }
 
+/* Packages failing on their own editor or registration contributions are
+ * found together (sh_package_compile_environment.more_rejections): one failed
+ * compile names each with its type and reason, whatever order discovery meets
+ * them in, and the compile without them links as if they had never been
+ * installed, replaying the earlier compiles' discovery. Stock editor rows and
+ * the conductor serve both kinds; stages_original reads either. */
+static const char *owners_stock_row = "{ inherit = \"demo_parent\"; edit = { target = \"parent-only\"; "
+    "propertySheets = { num = 1; item[0] = { properties = { num = 2; item[0] = { path = \"health\"; type = \"float\"; } "
+    "item[1] = { path = \"speed\"; type = \"float\"; } } } } } }";
+static const char *owners_stock_standalone = "{ edit = { target = \"parent-only\"; "
+    "propertySheets = { num = 1; item[0] = { properties = { num = 2; item[0] = { path = \"health\"; type = \"float\"; } "
+    "item[1] = { path = \"speed\"; type = \"float\"; } } } } } }";
+/* e_child: a stock child of demo_parent with its own inputs. */
+static const char *owners_stock_inputs = "{ inherit = \"demo_parent\"; edit = { target = \"parent-only\"; "
+    "inputs = { num = 1; item[0] = \"parent-only\"; } } }";
+static int stages_original(void *context, const char *path, unsigned char **body, size_t *length)
+{
+    /* c_stock: a stock child of demo_parent restating the whole list;
+     * d_row: a stock row with no parent. */
+    const char *stock = !strcmp(path, "generated/decls/snapeditorentitydef/c_stock.decl") ? owners_stock_row :
+        !strcmp(path, "generated/decls/snapeditorentitydef/e_child.decl") ? owners_stock_inputs :
+        !strcmp(path, "generated/decls/snapeditorentitydef/d_row.decl") ? owners_stock_standalone : NULL;
+    if (stock) { *length = strlen(stock); *body = (unsigned char *)_strdup(stock); return *body ? 1 : -1; }
+    return strstr(path, "snapeditorentitydef/demo_") || strstr(path, "whitelistencounterdecl/") ?
+        contribution_original(context, path, body, length) : registration_original(context, path, body, length);
+}
+/* demo_parent restated with one control that has no identity (no path): the
+ * native reader takes it, composition cannot place it (invalid). */
+static void owners_nameless_parent(const char *folder, const char *type)
+{
+    char path[512], text[768];
+    snprintf(path, sizeof(path), "overrides/%s/assets/generated/decls/snapeditorentitydef/demo_parent.decl", folder);
+    snprintf(text, sizeof(text), "{ edit = { target = \"parent-only\"; propertySheets = { num = 1; item[0] = { properties = { num = 3; "
+        "item[0] = { path = \"health\"; type = \"float\"; } item[1] = { path = \"speed\"; type = \"float\"; } "
+        "item[2] = { type = \"%s\"; } } } } } }", type);
+    create(path, text);
+}
+static const char *owners_layout = "{ edit = { target = \"parent-only\"; propertySheets = { num = 1; item[0] = { properties = { num = 3; "
+    "item[0] = { path = \"armor\"; type = \"float\"; } item[1] = { path = \"health\"; type = \"float\"; } "
+    "item[2] = { path = \"speed\"; type = \"float\"; } } } } } }";
+/* demo_child describing health instead of speed (its authored patch replaces
+ * the stock child's). */
+static const char *owners_label = "{ inherit = \"demo_parent\"; edit = { target = \"parent-only\"; "
+    "propertySheets = { item[0] = { properties = { item[0] = { descriptionTag = \"#str_health\"; } } } } } }";
+static void owners_package(const char *folder)
+{
+    char path[512], text[256];
+    snprintf(path, sizeof(path), "overrides/%s/package.json", folder);
+    snprintf(text, sizeof(text), "{\"id\":\"local.%s\",\"name\":\"%s\"}", folder, folder); create(path, text);
+}
+static void owners_file(const char *folder, const char *relative, const char *text)
+{
+    char path[512];
+    snprintf(path, sizeof(path), "overrides/%s/assets/generated/decls/%s", folder, relative); create(path, text);
+}
+typedef struct owners_run {
+    int ok, own;
+    size_t invalid, unserved;
+    sh_package_rejections more;
+    sh_package_library library;
+    char error[1024];
+} owners_run;
+static void owners_compile(fixture *f, sh_decl_registry_source registry, const sh_package_sources *sources,
+    sh_package_source_memo *memo, int collect, owners_run *run)
+{
+    source_link_fixture originals = {f};
+    sh_package_compile_environment env = {0};
+    sh_package_library_native native = {0};
+    native.private_keys = 1; native.source.memo = memo;
+    run->invalid = run->unserved = SIZE_MAX; run->own = 0;
+    env.baseline = stages_original; env.baseline_context = &originals;
+    env.invalid_package = &run->invalid; env.unserved_package = &run->unserved; env.invalid_own_bytes = &run->own;
+    if (collect) env.more_rejections = &run->more;
+    run->ok = sh_package_library_compile(sources, &env, NULL, stages_original, &originals,
+        registry, (uintptr_t)f->reflection, &native, &run->library, run->error, sizeof(run->error));
+}
+static void owners_done(owners_run *run)
+{ sh_package_library_free(&run->library); sh_package_rejections_free(&run->more); }
+/* The typed findings of one failed compile, as "name:kind" in finding order
+ * (kind i invalid, u not served), the first from invalid/unserved. */
+static void owners_found(const sh_package_sources *sources, const owners_run *run, char *out, size_t capacity)
+{
+    size_t used = 0; out[0] = 0;
+    size_t first = run->invalid != SIZE_MAX ? run->invalid : run->unserved;
+    if (first != SIZE_MAX) used += snprintf(out + used, capacity - used, "%s:%c", sources->packages[first].name,
+        run->invalid != SIZE_MAX ? 'i' : 'u');
+    for (size_t i = 0; i < run->more.count && used < capacity; i++) {
+        const sh_package_rejection *r = run->more.items + i;
+        used += snprintf(out + used, capacity - used, " %s:%c%s", sources->packages[r->package].name,
+            r->invalid ? 'i' : 'u', r->own_bytes ? "!" : "");
+    }
+}
+/* Remove every package named by a failed compile. */
+static void owners_leave(sh_package_sources *sources, const owners_run *run)
+{
+    size_t names[16], count = 0;
+    if (run->invalid != SIZE_MAX) names[count++] = run->invalid;
+    if (run->unserved != SIZE_MAX) names[count++] = run->unserved;
+    for (size_t i = 0; i < run->more.count && count < 16; i++) names[count++] = run->more.items[i].package;
+    for (size_t a = 0; a < count; a++) for (size_t b = a + 1; b < count; b++)
+        if (names[b] > names[a]) { size_t t = names[a]; names[a] = names[b]; names[b] = t; }
+    for (size_t a = 0; a < count; a++) assert(sh_package_sources_remove(sources, names[a]));
+}
+/* 1 when the findings are exactly the expected "name:kind" tokens, in any
+ * order: each expected token is consumed by one finding, so a repeated
+ * finding cannot stand in for a missing owner. */
+static int owners_same_set(const char *found, const char *const *expected, size_t count)
+{
+    unsigned char used[16] = {0};
+    size_t tokens = 0;
+    assert(count <= sizeof(used));
+    for (const char *at = found; *at;) {
+        while (*at == ' ') at++;
+        if (!*at) break;
+        const char *end = strchr(at, ' '); size_t length = end ? (size_t)(end - at) : strlen(at), i;
+        for (i = 0; i < count; i++)
+            if (!used[i] && strlen(expected[i]) == length && !strncmp(expected[i], at, length)) break;
+        if (i == count) return 0;
+        used[i] = 1; tokens++; at += length;
+    }
+    return tokens == count;
+}
+/* Consumes one failed compile's findings against the allowed "name:kind"
+ * tokens: each may be found once over all compiles (seen). The number of
+ * findings, or -1 for a finding outside them or found again. */
+static int owners_consume(const char *found, const char *const *allowed, size_t count, unsigned char *seen)
+{
+    int consumed = 0;
+    for (const char *at = found; *at;) {
+        while (*at == ' ') at++;
+        if (!*at) break;
+        const char *end = strchr(at, ' '); size_t length = end ? (size_t)(end - at) : strlen(at), i;
+        for (i = 0; i < count; i++)
+            if (!seen[i] && strlen(allowed[i]) == length && !strncmp(allowed[i], at, length)) break;
+        if (i == count) return -1;
+        seen[i] = 1; consumed++; at += length;
+    }
+    return consumed;
+}
+static void test_contribution_owners_together(void)
+{
+    fixture storage; fixture *f = &storage; setup(f); conductor_reflection(f);
+    sh_decl_registry_source registry = {f, read_memory, (uintptr_t)f->registry, NULL};
+    char found[512];
+    /* 1. One declaration, two packages' independent defects, and valid peers
+     * contributing to it and to its child: one compile finds both and blames
+     * no peer; without them the library links as a healthy-only compile, and
+     * the unchanged peers replay their discovery. */
+    for (int order = 0; order < 2; order++) {
+        const char *one = order ? "z-one" : "a-one", *two = order ? "a-two" : "z-two";
+        const char *expected[2];
+        char want[2][32];
+        sh_package_source_memo *memo = sh_package_source_memo_open(); assert(memo);
+        registration_root("owners-group");
+        owners_package(one); owners_nameless_parent(one, "float");
+        owners_package(two); owners_nameless_parent(two, "int");
+        owners_package("m-layout"); owners_file("m-layout", "snapeditorentitydef/demo_parent.decl", owners_layout);
+        owners_package("m-label"); owners_file("m-label", "snapeditorentitydef/demo_child.decl", owners_label);
+        sh_package_sources *sources = sh_package_sources_scan(root, found, sizeof(found)); assert(sources);
+        owners_run run = {0}, healthy = {0}, cold = {0};
+        owners_compile(f, registry, sources, memo, 1, &run);
+        owners_found(sources, &run, found, sizeof(found));
+        snprintf(want[0], sizeof(want[0]), "%s:i", one); snprintf(want[1], sizeof(want[1]), "%s:i", two);
+        expected[0] = want[0]; expected[1] = want[1];
+        if (run.ok || run.own || !owners_same_set(found, expected, 2) || !strstr(run.error, "demo_parent"))
+            fprintf(stderr, "owners in one group %d: ok=%d own=%d found=%s %s\n", order, run.ok, run.own, found, run.error);
+        assert(!run.ok && !run.own && owners_same_set(found, expected, 2) && strstr(run.error, "demo_parent"));
+        owners_leave(sources, &run); owners_done(&run);
+        owners_compile(f, registry, sources, memo, 1, &healthy);
+        if (!healthy.ok) fprintf(stderr, "owners in one group %d without them: %s\n", order, healthy.error);
+        assert(healthy.ok && healthy.invalid == SIZE_MAX && healthy.unserved == SIZE_MAX && !healthy.more.count);
+        owners_compile(f, registry, sources, NULL, 1, &cold);
+        assert(cold.ok);
+        library_same(&healthy.library, &cold.library);
+        size_t retained = library_retained(&healthy.library);
+        if (!retained || retained == SIZE_MAX) fprintf(stderr, "owners in one group %d replay: %s\n", order, healthy.library.repeated_work);
+        assert(retained && retained != SIZE_MAX);
+        {
+            /* The peers' controls where they placed them: the shared parent
+             * leads with m-layout's armor, and m-label's description stays on
+             * health at its slot of that layout, under the one parent. */
+            const sh_compiled_resource *parent = named_resource(healthy.library.compiled, "snapeditorentitydef", "demo_parent");
+            const sh_compiled_resource *child = named_resource(healthy.library.compiled, "snapeditorentitydef", "demo_child");
+            char layout[256];
+            assert(parent && child && property_count(parent, NULL) == 3 && property_count(parent, "armor") == 1);
+            child_layout(healthy.library.compiled, layout, sizeof(layout));
+            sh_decl_node *tree = sh_decl_tree_parse((sh_decl_source){(char *)child->body, child->body_length}, NULL, 0);
+            const sh_decl_node *inherit = tree ? sh_decl_tree_member(tree, "inherit") : NULL;
+            int placed = !strcmp(layout, "armor,health=#str_health,speed") && inherit &&
+                !strcmp(node_value(inherit), parent->name);
+            if (!placed) fprintf(stderr, "owners in one group %d child: %s %.*s\n", order, layout,
+                (int)child->body_length, (char *)child->body);
+            sh_decl_tree_free(tree);
+            assert(placed);
+        }
+        owners_done(&healthy); owners_done(&cold);
+        sh_package_sources_free(sources); sh_package_source_memo_close(memo); cleanup(); assert(!failures);
+    }
+    /* 2. Contribution stages together: a parent-chain gap (not served), an
+     * editor row that cannot compose and a registration list with two rows
+     * for one AI (invalid): one compile, each with its own type. */
+    for (int order = 0; order < 2; order++) {
+        const char *rows = order ? "z-rows" : "a-rows", *regs = order ? "a-regs" : "z-regs";
+        const char *cycle = order ? "b-cycle" : "y-cycle";
+        const char *expected[3];
+        char want[3][32];
+        registration_root("owners-stages");
+        owners_package(rows); owners_nameless_parent(rows, "float");
+        owners_package(cycle);
+        owners_file(cycle, "snapeditorentitydef/demo_parent.decl", "{ inherit = \"demo_child\"; edit = { target = \"parent-only\"; } }");
+        owners_package(regs);
+        owners_file(regs, "entitydef/conductor.decl", "{ class = \"Entity\"; edit = { globalAIMods = { num = 2; "
+            "item[0] = { aiType = \"T5\"; healthMod = \"a\"; } item[1] = { aiType = \"T5\"; healthMod = \"b\"; } } } }");
+        owners_package("m-label"); owners_file("m-label", "snapeditorentitydef/demo_child.decl", owners_label);
+        sh_package_sources *sources = sh_package_sources_scan(root, found, sizeof(found)); assert(sources);
+        owners_run run = {0}, healthy = {0};
+        owners_compile(f, registry, sources, NULL, 1, &run);
+        owners_found(sources, &run, found, sizeof(found));
+        snprintf(want[0], sizeof(want[0]), "%s:i", rows); snprintf(want[1], sizeof(want[1]), "%s:u", cycle);
+        snprintf(want[2], sizeof(want[2]), "%s:i", regs);
+        expected[0] = want[0]; expected[1] = want[1]; expected[2] = want[2];
+        if (run.ok || run.own || !owners_same_set(found, expected, 3))
+            fprintf(stderr, "owners across stages %d: ok=%d own=%d found=%s %s\n", order, run.ok, run.own, found, run.error);
+        assert(!run.ok && !run.own && owners_same_set(found, expected, 3));
+        owners_leave(sources, &run); owners_done(&run);
+        owners_compile(f, registry, sources, NULL, 1, &healthy);
+        if (!healthy.ok) fprintf(stderr, "owners across stages %d without them: %s\n", order, healthy.error);
+        assert(healthy.ok && !healthy.more.count);
+        owners_done(&healthy);
+        sh_package_sources_free(sources); cleanup(); assert(!failures);
+    }
+    /* 3. A group rebasing onto a parent that composed a found package's
+     * content is left for the next compile rather than judged against that
+     * content. one restates demo_parent with its own layout (armor first),
+     * ships c_stock unchanged (a child composing demo_parent early) and a
+     * d_row that cannot compose; two gives e_child, a later child of
+     * demo_parent, a parent chain that loops back to it (not served); m-peer
+     * adds an input to e_child. Scope: two's loop is its own defect whatever
+     * the parent, so this pins conservative withholding and its bounds, not a
+     * false blame avoided: every finding is one (invalid) or two (not served),
+     * each once; one is found by the first compile; m-peer is never blamed;
+     * at most one failed compile per bad owner, and the library then serves
+     * m-peer's input. */
+    for (int order = 0; order < 2; order++) {
+        const char *one = order ? "z-one" : "a-one", *two = order ? "a-two" : "z-two";
+        char want[2][32]; const char *allowed[2] = {want[0], want[1]};
+        unsigned char seen[2] = {0};
+        int compiles = 0, linked = 0;
+        registration_root("owners-dependent");
+        owners_package(one); owners_file(one, "snapeditorentitydef/demo_parent.decl", owners_layout);
+        owners_file(one, "snapeditorentitydef/c_stock.decl", owners_stock_row);
+        owners_file(one, "snapeditorentitydef/d_row.decl", "{ edit = { target = \"parent-only\"; "
+            "propertySheets = { num = 1; item[0] = { properties = { num = 3; item[0] = { path = \"health\"; type = \"float\"; } "
+            "item[1] = { path = \"speed\"; type = \"float\"; } item[2] = { type = \"float\"; } } } } } }");
+        owners_package(two);
+        owners_file(two, "snapeditorentitydef/e_child.decl", "{ inherit = \"f_loop\"; edit = { target = \"parent-only\"; } }");
+        owners_file(two, "snapeditorentitydef/f_loop.decl", "{ inherit = \"e_child\"; edit = { target = \"parent-only\"; } }");
+        owners_package("m-peer"); owners_file("m-peer", "snapeditorentitydef/e_child.decl", "{ inherit = \"demo_parent\"; "
+            "edit = { target = \"parent-only\"; inputs = { num = 2; item[0] = \"parent-only\"; item[1] = \"modifier-child\"; } } }");
+        sh_package_sources *sources = sh_package_sources_scan(root, found, sizeof(found)); assert(sources);
+        snprintf(want[0], sizeof(want[0]), "%s:i", one); snprintf(want[1], sizeof(want[1]), "%s:u", two);
+        while (!linked && compiles < 3) {
+            owners_run run = {0};
+            owners_compile(f, registry, sources, NULL, 1, &run);
+            owners_found(sources, &run, found, sizeof(found));
+            compiles++;
+            int right;
+            if (run.ok) {
+                /* m-peer's added input is served. */
+                const sh_compiled_resource *peer = named_resource(run.library.compiled, "snapeditorentitydef", "e_child");
+                sh_decl_node *tree = peer ? sh_decl_tree_parse((sh_decl_source){(char *)peer->body, peer->body_length}, NULL, 0) : NULL;
+                const sh_decl_node *inputs = sh_decl_tree_member(sh_decl_tree_member(tree, "edit"), "inputs");
+                right = inputs && sh_decl_tree_member(inputs, "num") && !strcmp(node_value(sh_decl_tree_member(inputs, "num")), "2");
+                if (!right && peer) fprintf(stderr, "dependent group %d peer: %.*s\n", order, (int)peer->body_length, (char *)peer->body);
+                sh_decl_tree_free(tree);
+                linked = 1;
+            } else {
+                int consumed = owners_consume(found, allowed, 2, seen);
+                right = consumed > 0 && (compiles > 1 || seen[0]);
+            }
+            if (!right) fprintf(stderr, "dependent group %d compile %d: ok=%d found=%s %s\n", order, compiles, run.ok, found, run.error);
+            assert(right);
+            owners_leave(sources, &run); owners_done(&run);
+        }
+        assert(linked && seen[0] && seen[1] && compiles <= 3);
+        sh_package_sources_free(sources); cleanup(); assert(!failures);
+    }
+    /* 5. Registration input prepared before discovery, scope by scope: two
+     * spawn lists with an invalid row (invalid) and an inherited registration
+     * whose parent is absent (not served), beside a valid registration, are
+     * found in one compile. */
+    for (int order = 0; order < 2; order++) {
+        const char *first = order ? "z-first" : "a-first", *second = order ? "a-second" : "z-second";
+        const char *absent = order ? "b-absent" : "y-absent";
+        const char *expected[3];
+        char want[3][32];
+        registration_root("owners-prepared");
+        owners_package(first);
+        owners_file(first, "entitydef/conductor.decl", "{ class = \"Entity\"; edit = { aiTypeList = { num = 1; item[1] = {} } } }");
+        owners_package(second);
+        owners_file(second, "entitydef/conductor.decl", "{ class = \"Entity\"; edit = { aiTypeList = { num = 2; "
+            "item[0] = { aiType = \"IMP\"; entityDef = \"imp\"; } item[1] = 5; } } }");
+        owners_package(absent);
+        owners_file(absent, "entitydef/absent_child.decl", "{ inherit = \"absent-registration-parent\"; edit = { } }");
+        registration_package("m-valid", "524288");
+        sh_package_sources *sources = sh_package_sources_scan(root, found, sizeof(found)); assert(sources);
+        owners_run run = {0}, healthy = {0};
+        owners_compile(f, registry, sources, NULL, 1, &run);
+        owners_found(sources, &run, found, sizeof(found));
+        snprintf(want[0], sizeof(want[0]), "%s:i", first); snprintf(want[1], sizeof(want[1]), "%s:i", second);
+        snprintf(want[2], sizeof(want[2]), "%s:u", absent);
+        expected[0] = want[0]; expected[1] = want[1]; expected[2] = want[2];
+        if (run.ok || run.own || !owners_same_set(found, expected, 3))
+            fprintf(stderr, "prepared registrations %d: ok=%d own=%d found=%s %s\n", order, run.ok, run.own, found, run.error);
+        assert(!run.ok && !run.own && owners_same_set(found, expected, 3));
+        owners_leave(sources, &run); owners_done(&run);
+        owners_compile(f, registry, sources, NULL, 1, &healthy);
+        if (!healthy.ok) fprintf(stderr, "prepared registrations %d without them: %s\n", order, healthy.error);
+        assert(healthy.ok && !healthy.more.count && spawner_key(healthy.library.compiled, "m-valid"));
+        owners_done(&healthy);
+        sh_package_sources_free(sources); cleanup(); assert(!failures);
+    }
+    /* 6. Why a dependent group is withheld rather than judged. With one's
+     * layout (armor first) composed into demo_parent, m-label's and z-label's
+     * patches of demo_child (a label on health; a nameless control, which
+     * native inheritance merges by index) form a layout gap that does not
+     * exist against the stock parent. Judged here, that gap would end the
+     * compile before three's registration defect is reached, although one and
+     * three are independent: withheld, both are found by one compile, the
+     * two patches are never blamed, and the compile without one and three
+     * links with both patches. */
+    for (int order = 0; order < 2; order++) {
+        const char *one = order ? "z-one" : "a-one", *three = order ? "a-three" : "z-three";
+        const char *expected[2];
+        char want[2][32];
+        registration_root("owners-withheld-gap");
+        owners_package(one); owners_file(one, "snapeditorentitydef/demo_parent.decl", owners_layout);
+        owners_file(one, "snapeditorentitydef/c_stock.decl", owners_stock_row);
+        owners_file(one, "snapeditorentitydef/d_row.decl", "{ edit = { target = \"parent-only\"; "
+            "propertySheets = { num = 1; item[0] = { properties = { num = 3; item[0] = { path = \"health\"; type = \"float\"; } "
+            "item[1] = { path = \"speed\"; type = \"float\"; } item[2] = { type = \"float\"; } } } } } }");
+        owners_package("m-label"); owners_file("m-label", "snapeditorentitydef/demo_child.decl", owners_label);
+        owners_package("m-nameless"); owners_file("m-nameless", "snapeditorentitydef/demo_child.decl", "{ inherit = \"demo_parent\"; "
+            "edit = { target = \"parent-only\"; propertySheets = { item[0] = { properties = { num = 3; item[2] = { type = \"float\"; } } } } } }");
+        owners_package(three);
+        owners_file(three, "entitydef/conductor.decl", "{ class = \"Entity\"; edit = { globalAIMods = { num = 2; "
+            "item[0] = { aiType = \"T5\"; healthMod = \"a\"; } item[1] = { aiType = \"T5\"; healthMod = \"b\"; } } } }");
+        sh_package_sources *sources = sh_package_sources_scan(root, found, sizeof(found)); assert(sources);
+        owners_run run = {0}, healthy = {0};
+        owners_compile(f, registry, sources, NULL, 1, &run);
+        owners_found(sources, &run, found, sizeof(found));
+        snprintf(want[0], sizeof(want[0]), "%s:i", one); snprintf(want[1], sizeof(want[1]), "%s:i", three);
+        expected[0] = want[0]; expected[1] = want[1];
+        if (run.ok || !owners_same_set(found, expected, 2))
+            fprintf(stderr, "withheld gap %d: ok=%d found=%s %s\n", order, run.ok, found, run.error);
+        assert(!run.ok && owners_same_set(found, expected, 2));
+        owners_leave(sources, &run); owners_done(&run);
+        owners_compile(f, registry, sources, NULL, 1, &healthy);
+        if (!healthy.ok) fprintf(stderr, "withheld gap %d without them: %s\n", order, healthy.error);
+        assert(healthy.ok && !healthy.more.count);
+        {
+            /* Both sparse patches, by slot of the stock layout: m-label's
+             * description on health (slot 0), m-nameless's control at slot 2. */
+            const sh_compiled_resource *child = named_resource(healthy.library.compiled, "snapeditorentitydef", "demo_child");
+            sh_decl_node *tree = child ? sh_decl_tree_parse((sh_decl_source){(char *)child->body, child->body_length}, NULL, 0) : NULL;
+            const sh_decl_node *properties = sh_decl_tree_member(sh_decl_tree_member(sh_decl_tree_member(
+                sh_decl_tree_member(tree, "edit"), "propertySheets"), "item[0]"), "properties");
+            const sh_decl_node *health = sh_decl_tree_member(properties, "item[0]");
+            const sh_decl_node *added = sh_decl_tree_member(properties, "item[2]");
+            const sh_decl_node *tag = sh_decl_tree_member(health, "descriptionTag");
+            int placed = tag && !strcmp(node_value(tag), "#str_health") && added && !sh_decl_tree_member(added, "path") &&
+                sh_decl_tree_member(added, "type") && !strcmp(node_value(sh_decl_tree_member(added, "type")), "float");
+            if (!placed && child) fprintf(stderr, "withheld gap %d child: %.*s\n", order, (int)child->body_length, (char *)child->body);
+            sh_decl_tree_free(tree);
+            assert(placed);
+        }
+        owners_done(&healthy);
+        /* The gap itself, with one's layout and nothing found: the current
+         * refusal blames nobody. Whether a nameless sparse control is malformed
+         * or a valid patch this composition does not cover yet is not settled
+         * here; this pins today's behavior for the batching cases above. */
+        sh_package_sources_free(sources);
+        owners_file(one, "snapeditorentitydef/d_row.decl", owners_stock_standalone);
+        sources = sh_package_sources_scan(root, found, sizeof(found)); assert(sources);
+        assert(sh_package_sources_remove(sources, first_package(sources, three)));
+        {
+            owners_run gap = {0};
+            owners_compile(f, registry, sources, NULL, 1, &gap);
+            owners_found(sources, &gap, found, sizeof(found));
+            int blamed_nobody = !gap.ok && !found[0] && !gap.more.count && strstr(gap.error, "demo_child") &&
+                strstr(gap.error, "consistent parent layout");
+            if (!blamed_nobody) fprintf(stderr, "withheld gap %d control: ok=%d found=%s %s\n", order, gap.ok, found, gap.error);
+            assert(blamed_nobody);
+            owners_done(&gap);
+        }
+        sh_package_sources_free(sources); cleanup(); assert(!failures);
+    }
+    /* 4. The environment failing after a package was found blames nobody:
+     * the second judgement of a group that found one fails as an allocation
+     * would, a later group's source is unreadable, or a later step fails
+     * without any judgement. No package is reported. A caller without
+     * more_rejections still gets exactly the first finding. */
+    for (int fault = 0; fault < 4; fault++) {
+        registration_root("owners-environment");
+        owners_package("a-one"); owners_nameless_parent("a-one", "float");
+        owners_package("z-two"); owners_nameless_parent("z-two", "int");
+        owners_package("m-label"); owners_file("m-label", "snapeditorentitydef/demo_child.decl", owners_label);
+        sh_package_sources *sources = sh_package_sources_scan(root, found, sizeof(found)); assert(sources);
+        owners_run run = {0};
+        if (fault == 0) sh_package_library_test_rejudge_failures(1);
+        if (fault == 1) sh_package_library_test_contribution_read_failures("demo_child", 1);
+        if (fault == 2) sh_package_library_test_token_failures(1);
+        owners_compile(f, registry, sources, NULL, fault != 3, &run);
+        sh_package_library_test_rejudge_failures(0); sh_package_library_test_contribution_read_failures(NULL, 0);
+        sh_package_library_test_token_failures(0);
+        owners_found(sources, &run, found, sizeof(found));
+        int expected = fault == 3 ? !run.ok && run.invalid == first_package(sources, "a-one") && run.unserved == SIZE_MAX :
+            !run.ok && run.invalid == SIZE_MAX && run.unserved == SIZE_MAX && !run.more.count && !run.own;
+        if (!expected) fprintf(stderr, "owners then environment %d: ok=%d found=%s %s\n", fault, run.ok, found, run.error);
+        assert(expected);
+        owners_done(&run);
+        sh_package_sources_free(sources); cleanup(); assert(!failures);
+    }
+    for (size_t i = 0; i < f->count; i++) free(f->regions[i].address);
+}
 int main(void)
 {
     fixture f;
@@ -8027,6 +8452,7 @@ int main(void)
     test_editor_membership_order(&f, registry);
     test_unchanged_editor_copies(&f, registry);
     test_editor_rebase_scopes(&f, registry);
+    test_contribution_owners_together();
     test_native_original_gaps(&f, registry);
     test_material_path(&f, registry);
     test_library_atlas(&f, registry);
