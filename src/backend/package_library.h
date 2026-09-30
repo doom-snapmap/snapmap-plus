@@ -48,6 +48,15 @@ typedef struct sh_package_library_native {
      * an entity reaching a changed material or model); nothing else is
      * discovered, and only the document's sites select any of them. */
     const sh_package_references *document_roots;
+    /* SnapMap's shipped editor entries (names and parents; package_editor_rows.h),
+     * read only when a package leaves a stock entry's inherited controls at
+     * other slots: every stock descendant of that entry is then rebased onto
+     * it. 1 with every entry read and *rows set; 0 unavailable or -1 when an
+     * entry could not be read, either of which fails that compile as an
+     * environment failure (no partial descendant closure is served). NULL
+     * (offline tools) reads none. */
+    int (*editor_rows)(void *context, const struct sh_editor_rows **rows);
+    void *editor_rows_context;
 } sh_package_library_native;
 
 /* Build phases timed for the activation log. */
@@ -81,7 +90,11 @@ typedef struct sh_package_library {
     char contribution_phases[256]; /* The contribution phase's own steps, when it ran. */
     /* Diagnostic repeated-work lines of the last compile, '\n'-separated:
      * parse census by phase, source capture repeats, identity passes. */
-    char repeated_work[2560];
+    char repeated_work[6144];
+    /* Owned developer report of a refused native identity (newline-separated
+     * lines naming both claimants), NULL when none; like coverage it survives
+     * a failed compile, as a diagnostic only. */
+    char *link_diagnostics;
 } sh_package_library;
 
 /* Write "scopes N ms, native N ms, ..." for the last compile; returns out. */

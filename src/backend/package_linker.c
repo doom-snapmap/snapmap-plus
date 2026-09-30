@@ -1250,6 +1250,126 @@ static int pl_history_identity(pl_work *w, const pl_native_identity *identity, s
     return named && named == numeric && h->claims[named - 1].node == node ? 1 : -1;
 }
 
+/* Developer report of a refused native identity (adapter note, bounded): both
+ * claimants with their classes, certification, assigned names, payload
+ * identities and bound dependencies, the dependencies that differ between
+ * them marked. It changes nothing the link decides. */
+static void pl_hex8(const unsigned char *bytes, char out[17])
+{ for (size_t i = 0; i < 8; i++) snprintf(out + i * 2, 3, "%02x", bytes[i]); }
+static void pl_collision_unit(pl_work *w, size_t u, const char *role, char *line, size_t capacity)
+{
+    const sh_package_link_adapter *a = w->adapter;
+    const sh_package_link_classes *classes = &w->output.classes;
+    const sh_package_link_unit *unit = w->units + u;
+    size_t group = classes->nodes[u];
+    char meta[640] = "", content[17], semantics[17], identity[17];
+    if (a->describe) a->describe(a->context, u, meta, sizeof(meta));
+    pl_hex8(classes->identities[group], identity);
+    pl_hex8(w->nodes[u].content, content); pl_hex8(w->nodes[u].semantics, semantics);
+    snprintf(line, capacity, "collision %s: unit %zu %s %s: linker class %zu (%s..., %zu members), fixed %d, "
+        "stable %d, original bytes %d, certified original %d, assigned %s; content %s... semantics %s...",
+        role, u, unit->family, unit->name, group, identity, w->member_offsets[group + 1] - w->member_offsets[group],
+        unit->fixed_name, unit->stable_name, unit->original_binding, w->originals ? w->originals[u] : -1,
+        w->output.names && w->output.names[group] ? w->output.names[group] : "(none yet)", content, semantics);
+    a->note(a->context, line);
+    if (*meta) { snprintf(line, capacity, "collision %s source: %s", role, meta); a->note(a->context, line); }
+    for (size_t f = 0; f < unit->file_count && f < 4; f++) {
+        const pl_file *file = w->work[u].files + f;
+        char digest[17]; pl_hex8(file->identity.digest, digest);
+        snprintf(line, capacity, "collision %s file %s: %llu bytes, identity %s..., path %s", role,
+            file->resource->engine_path ? file->resource->engine_path : "(none)",
+            (unsigned long long)file->identity.length, digest,
+            w->work[u].paths && w->work[u].paths[f] ? w->work[u].paths[f] : "(unassigned)");
+        a->note(a->context, line);
+    }
+    size_t used = 0, header;
+    int n = snprintf(line, capacity, "collision %s edges (%zu):", role, w->work[u].edge_count);
+    header = used = n > 0 ? (size_t)n : 0;
+    for (size_t e = 0; e < w->work[u].edge_count && e < 48 && used < capacity; e++) {
+        const sh_package_link_edge *edge = w->work[u].edges + e;
+        size_t t = edge->target;
+        if (t >= w->count) continue;
+        n = snprintf(line + used, capacity - used, " [%s -> %zu %s %s class %zu%s%s%s]",
+            edge->slot ? edge->slot : "?", t, w->units[t].family, w->units[t].name, classes->nodes[t],
+            w->units[t].stable_name ? " stable" : "", w->units[t].fixed_name ? " fixed" : "",
+            w->originals && w->originals[t] ? " original" : "");
+        if (n < 0 || (size_t)n >= capacity - used) {
+            line[used] = 0;
+            if (used == header) continue; /* An entry longer than a line is skipped. */
+            a->note(a->context, line);
+            n = snprintf(line, capacity, "collision %s edges (cont.):", role);
+            header = used = n > 0 ? (size_t)n : 0; e--; continue;
+        }
+        used += (size_t)n;
+    }
+    a->note(a->context, line);
+}
+/* One pair: both units, the dependencies that differ between them, the first
+ * differing payload bytes; then, two levels down, the first differing
+ * dependency pairs themselves, so the report reaches the root difference. */
+static void pl_collision_pair(pl_work *w, size_t index, size_t other, int depth, char *line, size_t capacity)
+{
+    const sh_package_link_adapter *a = w->adapter;
+    const sh_package_link_classes *classes = &w->output.classes;
+    char role_x[32], role_y[32];
+    snprintf(role_x, sizeof(role_x), depth ? "claimant dep%d" : "claimant", depth);
+    snprintf(role_y, sizeof(role_y), depth ? "holder dep%d" : "holder", depth);
+    pl_collision_unit(w, index, role_x, line, capacity);
+    if (other >= w->count) { a->note(a->context, "collision holder: none recorded"); return; }
+    pl_collision_unit(w, other, role_y, line, capacity);
+    /* The bound dependencies that differ: the same slot reaching another class. */
+    const pl_unit *x = w->work + index, *y = w->work + other;
+    size_t shown = 0, used = 0, next[2][2], found = 0, wanted = depth ? 1 : 2;
+    int n = snprintf(line, capacity, "collision %s differs (%zu vs %zu edges):", role_x, x->edge_count, y->edge_count);
+    used = n > 0 ? (size_t)n : 0;
+    for (size_t e = 0; e < x->edge_count && e < y->edge_count && shown < 24; e++) {
+        const sh_package_link_edge *p = x->edges + e, *q = y->edges + e;
+        int same_slot = p->slot && q->slot && !strcmp(p->slot, q->slot);
+        int valid = p->target < w->count && q->target < w->count;
+        if (same_slot && valid && classes->nodes[p->target] == classes->nodes[q->target]) continue;
+        if (valid && found < wanted && p->target != index && q->target != other) {
+            next[found][0] = p->target; next[found][1] = q->target; found++;
+        }
+        n = snprintf(line + used, capacity - used, " [%s: %zu %s class %zu%s | %s: %zu %s class %zu%s]",
+            p->slot ? p->slot : "?", p->target, p->target < w->count ? w->units[p->target].name : "?",
+            p->target < w->count ? classes->nodes[p->target] : SIZE_MAX,
+            p->target < w->count && w->units[p->target].stable_name ? " stable" : "",
+            q->slot ? q->slot : "?", q->target, q->target < w->count ? w->units[q->target].name : "?",
+            q->target < w->count ? classes->nodes[q->target] : SIZE_MAX,
+            q->target < w->count && w->units[q->target].stable_name ? " stable" : "");
+        if (n < 0 || (size_t)n >= capacity - used) { line[used] = 0; break; }
+        used += (size_t)n; shown++;
+    }
+    a->note(a->context, line);
+    /* The payloads where both are held in memory: the first differing byte. */
+    if (w->units[index].file_count && w->units[other].file_count) {
+        const sh_compiled_resource *p = w->work[index].files[0].resource, *q = w->work[other].files[0].resource;
+        if (p->body && q->body) {
+            size_t at = 0, shorter = p->body_length < q->body_length ? p->body_length : q->body_length;
+            while (at < shorter && p->body[at] == q->body[at]) at++;
+            char mine[97], theirs[97];
+            size_t from = at > 32 ? at - 32 : 0;
+            for (size_t k = 0; k < 96; k++) {
+                unsigned char c1 = from + k < p->body_length ? p->body[from + k] : ' ';
+                unsigned char c2 = from + k < q->body_length ? q->body[from + k] : ' ';
+                mine[k] = c1 >= 32 && c1 < 127 ? (char)c1 : '.'; theirs[k] = c2 >= 32 && c2 < 127 ? (char)c2 : '.';
+            }
+            mine[96] = theirs[96] = 0;
+            snprintf(line, capacity, "collision %s payloads: %zu vs %zu bytes, %s at %zu: [%s] vs [%s]", role_x,
+                p->body_length, q->body_length, at == shorter && p->body_length == q->body_length ? "equal" :
+                "first difference", at, mine, theirs);
+            a->note(a->context, line);
+        }
+    }
+    for (size_t k = 0; depth < 2 && k < found; k++) pl_collision_pair(w, next[k][0], next[k][1], depth + 1, line, capacity);
+}
+static void pl_collision_note(pl_work *w, size_t index, size_t other)
+{
+    char line[960]; /* One developer-log line each. */
+    if (!w->adapter->note || index >= w->count) return;
+    pl_collision_pair(w, index, other, 0, line, sizeof(line));
+}
+
 static int pl_assign_one(pl_work *w, pl_registry *registry, size_t group)
 {
     const sh_package_link_registry *native = w->adapter->registry;
@@ -1262,11 +1382,12 @@ static int pl_assign_one(pl_work *w, pl_registry *registry, size_t group)
     if (!files || !identities) { pl_fail(w, "cannot allocate native path assignment"); goto done; }
     for (size_t i = 0; i < count; i++) files[i] = unit->files[i].resource;
     char cause[384] = "";
+    size_t holder = SIZE_MAX; /* Diagnostics: the unit holding the first collision. */
     for (size_t attempt = 0; attempt < 1024; attempt++) {
         unsigned char token[32];
         size_t identity_count = 0;
         int collision = 0;
-        cause[0] = 0;
+        cause[0] = 0; holder = SIZE_MAX;
         *w->error = 0;
         if (!pl_name_token(classes->identities[group], attempt, token) ||
             !w->adapter->assign(w->adapter->context, index, token, w->originals[index],
@@ -1289,8 +1410,11 @@ static int pl_assign_one(pl_work *w, pl_registry *registry, size_t group)
                     equal = pl_original_file_equal(w, index, i, other, file);
                     if (equal < 0) goto done;
                 }
-                if (!equal && !collision++) snprintf(cause, sizeof(cause), "path %s is already bound by %s %s",
-                    unit->paths[i], w->units[other].family, w->units[other].name);
+                if (!equal && !collision++) {
+                    snprintf(cause, sizeof(cause), "path %s is already bound by %s %s",
+                        unit->paths[i], w->units[other].family, w->units[other].name);
+                    holder = other;
+                }
             }
             for (size_t j = 0; j < i; j++) if (!strcmp(unit->paths[i], unit->paths[j]) && !collision++)
                 snprintf(cause, sizeof(cause), "path %s is assigned twice", unit->paths[i]);
@@ -1302,8 +1426,11 @@ static int pl_assign_one(pl_work *w, pl_registry *registry, size_t group)
                 const pl_native_identity *held = registry->identities + occupied - 1;
                 int shared = pl_same_original(w, identity, held);
                 if (shared < 0) goto done;
-                if (!shared && !collision++) snprintf(cause, sizeof(cause), "%s %s is already held by %s %s",
-                    identity->family, identity->name, w->units[held->unit].family, w->units[held->unit].name);
+                if (!shared && !collision++) {
+                    snprintf(cause, sizeof(cause), "%s %s is already held by %s %s",
+                        identity->family, identity->name, w->units[held->unit].family, w->units[held->unit].name);
+                    holder = held->unit;
+                }
             }
             if (native) {
                 int state = native->check(native->context, identity->family, identity->name,
@@ -1325,8 +1452,11 @@ static int pl_assign_one(pl_work *w, pl_registry *registry, size_t group)
                     const pl_native_identity *held = registry->identities + occupied - 1;
                     int shared = pl_same_original(w, identity, held);
                     if (shared < 0) goto done;
-                    if (!shared && !collision++) snprintf(cause, sizeof(cause), "native id of %s %s is already held by %s %s",
-                        identity->family, identity->name, w->units[held->unit].family, w->units[held->unit].name);
+                    if (!shared && !collision++) {
+                        snprintf(cause, sizeof(cause), "native id of %s %s is already held by %s %s",
+                            identity->family, identity->name, w->units[held->unit].family, w->units[held->unit].name);
+                        holder = held->unit;
+                    }
                 }
             }
             /* Candidates in this group are not in the shared index yet. */
@@ -1361,6 +1491,7 @@ static int pl_assign_one(pl_work *w, pl_registry *registry, size_t group)
         if (w->originals[index] || !count) {
             snprintf(w->error, w->capacity, "certified original resource has a native identity collision: %s %s: %s",
                 w->units[index].family, w->units[index].name, cause);
+            pl_collision_note(w, index, holder);
             w->failed = 1; goto done;
         }
         pl_assignment_clear(w, group);
@@ -1368,6 +1499,7 @@ static int pl_assign_one(pl_work *w, pl_registry *registry, size_t group)
     if (!ok) {
         snprintf(w->error, w->capacity, "native identity collision allocation exhausted: %s %s: %s",
             w->units[index].family, w->units[index].name, cause);
+        pl_collision_note(w, index, holder);
         w->failed = 1;
     }
 done:

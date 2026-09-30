@@ -533,6 +533,15 @@ typedef struct pr_original_source {
     void *context;
     sh_package_native_assets *native_assets;
 } pr_original_source;
+/* One compile's shipped editor entries, read on the library's first request
+ * (sh_package_library_native.editor_rows); state 0 unread, 1 read, 2 none. */
+typedef struct pr_compile_rows {
+    const sh_resource_catalog *catalog;
+    const pr_original_source *originals;
+    sh_editor_rows rows;
+    int state;
+} pr_compile_rows;
+static int pr_compile_rows_read(void *context, const struct sh_editor_rows **rows);
 
 static int pr_original(void *context, const char *path, unsigned char **body, size_t *length)
 {
@@ -708,8 +717,10 @@ void sh_package_runtime_test_source_readers(sh_decl_registry_source registry, ui
 { g_test_source_registry = registry; g_test_source_reflection = reflection; }
 static const char *const *g_test_editor_rows;
 static size_t g_test_editor_row_count;
+static int g_test_editor_rows_unavailable;
 void sh_package_runtime_test_editor_rows(const char *const *names, size_t count)
 { g_test_editor_rows = names; g_test_editor_row_count = count; }
+void sh_package_runtime_test_editor_rows_unavailable(int unavailable) { g_test_editor_rows_unavailable = unavailable; }
 static sh_package_source_implicit g_test_constructor;
 static void *g_test_constructor_context;
 void sh_package_runtime_test_constructor_requests(sh_package_source_implicit capture, void *context)
@@ -1763,6 +1774,8 @@ static pr_provider *pr_prepare_deliveries(const char *data_root, const char *sou
             sh_decl_registry_source registry = {0};
             pr_original_source originals = {baseline, baseline_context, native_assets};
             sh_package_library_native native = sh_package_native_assets_adapter(native_assets);
+            pr_compile_rows shipped = {catalog, &originals};
+            native.editor_rows = pr_compile_rows_read; native.editor_rows_context = &shipped;
             if (!g_source_memo) g_source_memo = sh_package_source_memo_open(); /* Optional. */
             native.source.memo = g_source_memo;
 #ifndef SH_PACKAGE_RUNTIME_TESTING
@@ -1821,6 +1834,7 @@ static pr_provider *pr_prepare_deliveries(const char *data_root, const char *sou
                 catalog, pr_original, &originals, registry, reflection, &native, &isolated, error, sizeof(error)) :
                 sh_package_library_compile(sources, &environment, catalog, pr_original, &originals,
                     registry, reflection, &native, &isolated, error, sizeof(error));
+            sh_editor_rows_free(&shipped.rows);
             if (!sh_package_native_assets_shader_scope_end(native_assets, scope_error, sizeof(scope_error)) && linked) {
                 /* Native identities changed under this candidate: environmental. */
                 sh_package_library_free(&isolated); linked = 0;
@@ -1849,6 +1863,14 @@ static pr_provider *pr_prepare_deliveries(const char *data_root, const char *sou
             }
             /* Accounted coverage gaps help diagnose a later refusal too. */
             if (!linked && isolated.coverage) backend_log(isolated.coverage);
+            /* A refused native identity names both of its claimants. */
+            for (const char *at = isolated.link_diagnostics; at && *at;) {
+                const char *end = strchr(at, '\n');
+                size_t length = end ? (size_t)(end - at) : strlen(at);
+                snprintf(line, sizeof(line), "package library diagnostic: %.*s", (int)length, at);
+                backend_log(line);
+                at += length + (end ? 1 : 0);
+            }
             if (linked) {
                 compiled = isolated.compiled; isolated.compiled = NULL; library_output = 1;
             }
@@ -5072,10 +5094,14 @@ typedef struct pr_inline_view {
 /* A copy the product serves under a native declaration's own name (the
  * installed library links a package's stock dependency closure that way, as a
  * canonical re-serialization) is that original for native representation only
- * when it parses to the same members in the same order, with the one witnessed
- * exception that the direct members of the editor-only editorVars block may be
- * re-sorted. Anything else keeps the package route. 1 equal, 0 changed or not
- * such a copy, -1 unavailable. */
+ * when it parses to the same members in the same order, except where editor
+ * composition moves members of its family's one block without changing them:
+ * an entity definition's editorVars may be re-sorted, and an editor entry's
+ * or composed inspector's collection fields may move to the tail of edit
+ * (sh_package_editor_reordered_blocks, the rule the library uses to keep an
+ * unchanged declaration's bytes). Other families compare strictly in order.
+ * Anything else keeps the package route. 1 equal, 0 changed or not such a
+ * copy, -1 unavailable. */
 static int pr_stock_copy(const pr_original_source *originals, const sh_package_compilation *compiled,
     const sh_compiled_resource *resource)
 {
@@ -5090,7 +5116,7 @@ static int pr_stock_copy(const pr_original_source *originals, const sh_package_c
     if (scope <= 0) { result = scope < 0 ? -1 : 0; goto done; }
     sh_decl_node *left = sh_decl_tree_parse((sh_decl_source){(const char *)served, served_length}, error, sizeof(error));
     sh_decl_node *right = left ? sh_decl_tree_parse((sh_decl_source){(const char *)original, original_length}, error, sizeof(error)) : NULL;
-    result = left && right ? sh_decl_tree_equal(left, right, "editorVars") : 0;
+    result = left && right ? sh_decl_tree_equal(left, right, sh_package_editor_reordered_blocks(resource->type)) : 0;
     sh_decl_tree_free(left); sh_decl_tree_free(right);
 done:
     free(served); free(original);
@@ -5197,23 +5223,25 @@ static SRWLOCK g_editor_rows_lock = SRWLOCK_INIT;
 static sh_editor_rows g_editor_rows;
 static const void *g_editor_rows_key;
 static int g_editor_rows_state;
-static int pr_stock_rows(const pr_inline_view *view)
+/* SnapMap's shipped editor entries in catalog (under test, the fixture's
+ * names) read into rows: 1, 0 when there is no catalog, -1 on failure. */
+static int pr_read_shipped_rows(const sh_resource_catalog *catalog, const pr_original_source *originals,
+    sh_editor_rows *rows)
 {
-    const void *key = view->provider->catalog;
     const char **names = NULL; char **owned = NULL; size_t name_count = 0;
+    int state = -1;
 #ifdef SH_PACKAGE_RUNTIME_TESTING
-    key = g_test_editor_rows;
-#endif
-    if (g_editor_rows_state && g_editor_rows_key == key) return g_editor_rows_state;
-    sh_editor_rows_free(&g_editor_rows); g_editor_rows_key = key; g_editor_rows_state = -1;
-    if (!key) return -1;
-#ifdef SH_PACKAGE_RUNTIME_TESTING
-    names = (const char **)g_test_editor_rows; name_count = g_test_editor_row_count;
+    /* A fixture that lists no shipped entries ships none; the unavailable
+     * switch stands in for a compile without the game's catalog. */
+    (void)catalog;
+    if (g_test_editor_rows_unavailable) return 0;
+    names = (const char **)g_test_editor_rows; name_count = g_test_editor_rows ? g_test_editor_row_count : 0;
 #else
-    size_t total = sh_resource_catalog_count(view->provider->catalog);
+    if (!catalog) return 0;
+    size_t total = sh_resource_catalog_count(catalog);
     if (!(owned = calloc(total ? total : 1, sizeof(*owned)))) return -1;
     for (size_t i = 0; i < total; i++) {
-        const sh_resource_catalog_entry *entry = sh_resource_catalog_at(view->provider->catalog, i);
+        const sh_resource_catalog_entry *entry = sh_resource_catalog_at(catalog, i);
         size_t length = entry && entry->path ? strlen(entry->path) : 0;
         if (length <= sizeof(PR_EDITOR_PREFIX) + 4 || strncmp(entry->path, PR_EDITOR_PREFIX, sizeof(PR_EDITOR_PREFIX) - 1) ||
             strcmp(entry->path + length - 5, ".decl")) continue;
@@ -5231,20 +5259,48 @@ static int pr_stock_rows(const pr_inline_view *view)
         unsigned char *body = NULL; size_t size = 0;
         if (!path) goto done;
         snprintf(path, length, PR_EDITOR_PREFIX "%s.decl", names[i]);
-        int scope = pr_original((void *)&view->originals, path, &body, &size);
+        int scope = pr_original((void *)originals, path, &body, &size);
         free(path);
         /* Only SnapMap's own archive supplies the shipped editor roster. */
-        if (scope < 0) g_editor_rows.unreadable++;
-        int added = scope == 1 ? sh_editor_rows_add_text(&g_editor_rows, names[i], (const char *)body, size) : 0;
+        if (scope < 0) rows->unreadable++;
+        int added = scope == 1 ? sh_editor_rows_add_text(rows, names[i], (const char *)body, size) : 0;
         free(body);
         if (added < 0) goto done;
     }
-    if (sh_editor_rows_finish(&g_editor_rows, NULL)) g_editor_rows_state = 1;
+    if (sh_editor_rows_finish(rows, NULL)) state = 1;
 done:
     for (size_t i = 0; owned && i < name_count; i++) free(owned[i]);
     free(owned);
-    if (g_editor_rows_state != 1) sh_editor_rows_free(&g_editor_rows);
-    return g_editor_rows_state;
+    if (state != 1) sh_editor_rows_free(rows);
+    return state;
+}
+/* The shipped rows for placement, read once per catalog (g_editor_rows_lock). */
+static int pr_shipped_rows(const sh_resource_catalog *catalog, const pr_original_source *originals)
+{
+    const void *key = catalog;
+#ifdef SH_PACKAGE_RUNTIME_TESTING
+    key = g_test_editor_rows;
+#endif
+    if (g_editor_rows_state && g_editor_rows_key == key) return g_editor_rows_state;
+    sh_editor_rows_free(&g_editor_rows); g_editor_rows_key = key; g_editor_rows_state = -1;
+    if (!key) return -1;
+    return g_editor_rows_state = pr_read_shipped_rows(catalog, originals, &g_editor_rows) == 1 ? 1 : -1;
+}
+static int pr_stock_rows(const pr_inline_view *view)
+{ return pr_shipped_rows(view->provider->catalog, &view->originals); }
+static int pr_compile_rows_read(void *context, const struct sh_editor_rows **rows)
+{
+    pr_compile_rows *compile = context;
+    if (!compile->state) {
+        int read = pr_read_shipped_rows(compile->catalog, compile->originals, &compile->rows);
+        /* A descendant closure needs every shipped entry: one the archive holds
+         * but that cannot be read or parsed fails the roster (an absent or
+         * campaign-only name is simply not a SnapMap entry). */
+        if (read == 1 && compile->rows.unreadable) { sh_editor_rows_free(&compile->rows); read = -1; }
+        compile->state = read == 1 ? 1 : read == 0 ? 2 : -1;
+    }
+    *rows = compile->state == 1 ? &compile->rows : NULL;
+    return compile->state == 1 ? 1 : compile->state == 2 ? 0 : -1;
 }
 /* Editor rows this map's packages serve, read once per conversion. */
 static int pr_package_rows(pr_inline_view *view)

@@ -782,6 +782,31 @@ static void test_editor_rebase(void)
     CHECK(result == 1 && out); if (out) rebased_layout(out, "propertySheets", 0, layout, sizeof(layout));
     CHECK(out && !strcmp(layout, "displayName,actionDelay=#str_delay"));
     free(out);
+    /* A control rebound to another inspector at its own slot still takes the
+     * child's patch natively: nothing to restate. */
+    out = rebase_one("{ inherit = \"p\"; edit = { propertySheets = { item[0] = { properties = { num = 3; "
+        "item[2] = { path = \"volume\"; } } } } } }",
+        SHEET("num = 2; item[0] = { path = \"name\"; inspector = \"stock\"; } item[1] = { path = \"delay\"; }"),
+        SHEET("num = 2; item[0] = { path = \"name\"; inspector = \"private\"; } item[1] = { path = \"delay\"; }"),
+        0, &result, &kind);
+    CHECK(result == 0 && !out); free(out);
+    /* Controls sharing a path are told apart by their binding. Swapped, the
+     * child's patch would land on the other one natively, so it is rebased to
+     * follow its control; one of them rebound in place keeps both slots. */
+    out = rebase_one("{ inherit = \"p\"; edit = { propertySheets = { item[0] = { properties = { "
+        "item[0] = { descriptionTag = \"#str_x\"; } } } } } }",
+        SHEET("num = 2; item[0] = { path = \"m\"; inspector = \"x\"; } item[1] = { path = \"m\"; inspector = \"y\"; }"),
+        SHEET("num = 2; item[0] = { path = \"m\"; inspector = \"y\"; } item[1] = { path = \"m\"; inspector = \"x\"; }"),
+        0, &result, &kind);
+    CHECK(result == 1 && out); if (out) rebased_layout(out, "propertySheets", 0, layout, sizeof(layout));
+    CHECK(out && !strcmp(layout, "m,m=#str_x"));
+    free(out);
+    out = rebase_one("{ inherit = \"p\"; edit = { propertySheets = { item[0] = { properties = { "
+        "item[0] = { descriptionTag = \"#str_x\"; } } } } } }",
+        SHEET("num = 2; item[0] = { path = \"m\"; inspector = \"x\"; } item[1] = { path = \"m\"; inspector = \"y\"; }"),
+        SHEET("num = 2; item[0] = { path = \"m\"; inspector = \"z\"; } item[1] = { path = \"m\"; inspector = \"y\"; }"),
+        0, &result, &kind);
+    CHECK(result == 0 && !out); free(out);
     /* A control inserted first: the patch follows speed, not its old slot. */
     out = rebase_one("{ inherit = \"p\"; edit = { propertySheets = { item[0] = { properties = { "
         "item[1] = { descriptionTag = \"#str_child\"; } } } } } }",

@@ -758,7 +758,17 @@ static void h_sh_resread(idCmdArgs *a)
         free(body); return;
     }
     sh_printf("sh_resread: %s -- %zu byte(s) served\n", path, length);
-    if (match && *match) {
+    if (match && !strcmp(match, "*")) {
+        /* The whole body in numbered 400-byte pieces (control bytes shown as
+         * '.'), for declarations written on one line. Bounded to 64 KiB. */
+        for (size_t at = 0; at < length && at < 65536; at += 400) {
+            char piece[401];
+            size_t n = length - at < 400 ? length - at : 400;
+            for (size_t k = 0; k < n; k++) piece[k] = body[at + k] >= 32 && body[at + k] < 127 ? (char)body[at + k] : '.';
+            piece[n] = 0;
+            sh_printf("  %05zu %s\n", at, piece);
+        }
+    } else if (match && *match) {
         size_t begin = 0;
         for (size_t i = 0; i <= length; i++) {
             if (i != length && body[i] != '\n') continue;
@@ -1932,7 +1942,7 @@ static const cmd_entry CMD_TABLE[] = {
     { "sh_listres",          (void *)h_sh_listres,  "<resource classname (ex:idMaterial)> <optional: filter> list all resources of a given type" },
     { "sh_palette",          (void *)h_sh_palette,  "[filter] list the editor's placeable palette: each entry's editor definition and the entityDef it places (diagnostic)" },
     { "sh_declfamilies",     (void *)h_sh_declfamilies, "list every declaration family and the composition route it takes (diagnostic)" },
-    { "sh_resread",          (void *)h_sh_resread,  "<engine path> [substring] print what the runtime currently serves for one resource path (diagnostic)" },
+    { "sh_resread",          (void *)h_sh_resread,  "<engine path> [substring|*] print what the runtime currently serves for one resource path; * prints the whole body (diagnostic)" },
     { "sh_alginfo",          (void *)h_alginfo,     "Prints CPU dispatcher info for the engine-math (algo) override layer." },
     { "sh_debugrender",      (void *)h_sh_debugrender,"Internal renderer-test mutators -- not for normal use" },
     { "cs_dontuse",          (void *)h_cs_dontuse,  "Overrides some calculations in the engine to be more precise, just for shiggles. probably degrades performance and breaks stuff." },

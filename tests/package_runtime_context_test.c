@@ -9,7 +9,7 @@
 #include "resource_graph.h"
 /* Every created directory level counts until the final cleanup; overflowing
  * the table silently leaves later fixtures' files uncreated. */
-#define PACKAGE_FIXTURE_ENTRIES 2048u
+#define PACKAGE_FIXTURE_ENTRIES 4096u
 #include "package_fixture.h"
 #include "hook.h"
 #include "map_provenance.h"
@@ -57,6 +57,7 @@ void backend_log(const char *message)
     if (strstr(message, "Skipped local package")) skipped_packages++;
     if (strstr(message, "package library compile (installed library)")) library_compiles++;
     if (strstr(message, "refresh for a published installation: added packages")) install_refreshes++;
+    if (getenv("SH_CONTEXT_TEST_LOG")) fprintf(stderr, "log: %s\n", message);
 }
 
 static int baseline(void *context, const char *path, unsigned char **body, size_t *length)
@@ -2441,12 +2442,14 @@ static void test_native_inline_library(void)
     sh_package_runtime_test_installed_links(1);
     sh_package_runtime_test_editor_rows(library_editor_rows, sizeof(library_editor_rows) / sizeof(*library_editor_rows));
     CHECK(sh_package_runtime_refresh(data));
-    CHECK(library_served("generated/decls/entitydef/inlinestock/base.decl") == 1);
+    /* An unchanged stock definition stays native: composition only re-sorts
+     * its editorVars, which is the same block, so no canonical copy is served. */
+    CHECK(library_served("generated/decls/entitydef/inlinestock/base.decl") == 0);
     /* The library serves stock editor entries under their own names through its
      * baseline-palette reverse roots, which need the game catalog this fixture
      * lacks; test_native_inline_placement_provenance covers that compiled shape. */
     library_served("generated/decls/snapeditorentitydef/inlinestock/base_row.decl");
-    /* The unowned canonical entityDef copy obstructs nothing. */
+    /* The package use converts to native map data over the stock definition. */
     CHECK(library_convert("unowned stock copies", &report) == 1);
     free(report); report = NULL;
     /* Another installed package changes the stock editor entry itself: the
@@ -3549,6 +3552,1236 @@ done:
     for (size_t i = 0; i < f.count; i++) free(f.regions[i].address);
     cleanup_resources(data);
 }
+/* D8 counterexample (OpenGL, 2026-09-30): a package whose editor row inherits
+ * a stock row and whose entity inherits a stock definition, installed while
+ * the library already composes an editor-only extension of that definition
+ * (a local editor package). The stock definition is a shared declaration the
+ * engine serves once, under its native name, with whatever payload the shared
+ * publication selects; a consumer binds that named contract in every context.
+ * So a full scan, the installation increment over the published library and
+ * the identical package in the map's own context bind the consumer alike, and
+ * a different shared composition does not change it. A real gameplay change
+ * to the parent is a private variant and still distinguishes its consumers,
+ * even with the same authored bytes. Shipped files are pretty-printed, so
+ * their bytes differ from any compiler re-serialization. */
+static const char *d8c_stock_def = "generated/decls/entitydef/d8stock/speaker.decl";
+static const char *d8c_stock_row = "generated/decls/snapeditorentitydef/d8stock/speaker_row.decl";
+static const char *d8c_probe_def = "generated/decls/entitydef/d8probe/speaker.decl";
+static const char *d8c_probe_row = "generated/decls/snapeditorentitydef/d8probe/speaker.decl";
+static int d8c_baseline(void *context, const char *path, unsigned char **body, size_t *length)
+{
+    /* The shipped definition states its editorVars out of key order, as the
+     * game's files do; editor composition writes that block sorted. */
+    const char *text = !strcmp(path, d8c_stock_def) ?
+            "{\n\tclass = \"Entity\";\n\teditorVars {\n\t\trotatable = false;\n\t\tplaceable = false;\n"
+            "\t\tcolor = ( 1, 1, 1, 1 );\n\t}\n\tedit = {\n\t\thealth = 1;\n\t\ttarget = \"\";\n\t}\n}\n" :
+        /* The shipped entry states its collection before its other fields;
+         * editor composition moves collection fields to the tail of edit. */
+        !strcmp(path, d8c_stock_row) ?
+            "{\n\tedit = {\n\t\tinputs = {\n\t\t\tnum = 0;\n\t\t}\n\t\tentityDef = \"d8stock/speaker\";\n\t}\n}\n" : NULL;
+    (void)context; *body = NULL; *length = 0;
+    if (!text) return 0;
+    *length = strlen(text); *body = (unsigned char *)_strdup(text); return *body ? 1 : -1;
+}
+static void d8c_file(const char *prefix, const char *relative, const char *body)
+{
+    char path[1024];
+    snprintf(path, sizeof(path), "%s/%s", prefix, relative); create(path, body);
+}
+static void d8c_probe(const char *prefix)
+{
+    d8c_file(prefix, "package.json", "{\"id\":\"d8-probe\",\"name\":\"D8 probe\"}");
+    d8c_file(prefix, "assets/generated/decls/entitydef/d8probe/speaker.decl",
+        "{ inherit = \"d8stock/speaker\"; edit = { health = 7; } }");
+    d8c_file(prefix, "assets/generated/decls/snapeditorentitydef/d8probe/speaker.decl",
+        "{ inherit = \"d8stock/speaker_row\"; edit = { entityDef = \"d8probe/speaker\"; } }");
+}
+/* An editor-only extension of the stock definition (variant 1 or 2). */
+static void d8c_local_editor(const char *prefix, int variant)
+{
+    d8c_file(prefix, "package.json", "{\"id\":\"d8-local-editor\",\"name\":\"D8 local editor\"}");
+    d8c_file(prefix, "assets/generated/decls/entitydef/d8stock/speaker.decl", variant == 1 ?
+        "{ class = \"Entity\"; editorVars = { localEditorExtension = true; } edit = { health = 1; target = \"\"; } }" :
+        "{ class = \"Entity\"; editorVars = { otherEditorExtension = 3; } edit = { health = 1; target = \"\"; } }");
+}
+/* A real gameplay change to the stock parent, with a consumer whose authored
+ * path and bytes equal the probe's definition. */
+static void d8c_gameplay(const char *prefix)
+{
+    d8c_file(prefix, "package.json", "{\"id\":\"d8-gameplay\",\"name\":\"D8 gameplay\"}");
+    d8c_file(prefix, "assets/generated/decls/entitydef/d8stock/speaker.decl",
+        "{ class = \"Entity\"; edit = { health = 5; target = \"\"; } }");
+    d8c_file(prefix, "assets/generated/decls/entitydef/d8probe/speaker.decl",
+        "{ inherit = \"d8stock/speaker\"; edit = { health = 7; } }");
+}
+static const library_row *d8c_original(const library_row *rows, size_t count, const char *original)
+{
+    for (size_t i = 0; i < count; i++) if (rows[i].original && !strcmp(rows[i].original, original)) return rows + i;
+    return NULL;
+}
+static size_t d8c_originals(const library_row *rows, size_t count, const char *original)
+{
+    size_t found = 0;
+    for (size_t i = 0; i < count; i++) if (rows[i].original && !strcmp(rows[i].original, original)) found++;
+    return found;
+}
+/* Exposure: editor rows served as private copies of a stock row no package
+ * authors (visible palette duplicates). Internal aliases of definitions a
+ * package owns are not counted. */
+static size_t d8c_stock_row_copies(const char *label, const library_row *rows, size_t count)
+{
+    size_t copies = 0;
+    for (size_t i = 0; i < count; i++)
+        if (rows[i].original && !strcmp(rows[i].original, d8c_stock_row) && strcmp(rows[i].original, rows[i].path)) {
+            fprintf(stderr, "%s: private copy %s of stock row %s\n", label, rows[i].path, rows[i].original); copies++;
+        }
+    return copies;
+}
+static void d8c_dump(const char *label, const library_row *rows, size_t count)
+{
+    for (size_t i = 0; i < count; i++)
+        fprintf(stderr, "%s: %s (%s): %.*s\n", label, rows[i].path, rows[i].original ? rows[i].original : "-",
+            (int)(rows[i].length < 200 ? rows[i].length : 200), (const char *)rows[i].body);
+}
+static library_row *d8c_compilation_rows(const sh_package_compilation *compiled, size_t *count)
+{
+    char error[512];
+    library_row *rows = calloc(compiled && compiled->resource_count ? compiled->resource_count : 1, sizeof(*rows));
+    *count = 0;
+    for (size_t i = 0; rows && compiled && i < compiled->resource_count; i++) {
+        rows[i].path = _strdup(compiled->resources[i].engine_path);
+        rows[i].original = compiled->resources[i].original_path ? _strdup(compiled->resources[i].original_path) : NULL;
+        rows[i].body = sh_package_compilation_read(compiled, compiled->resources + i, SIZE_MAX,
+            &rows[i].length, error, sizeof(error));
+        (*count)++;
+    }
+    return rows;
+}
+static int d8c_activate(void *context, int restoring, const sh_package_changes *changes, char *error, size_t capacity)
+{
+    (void)changes; (void)error; (void)capacity;
+    if (!restoring) (*(int *)context)++;
+    return 1;
+}
+/* One full scan of a fixture library: the probe plus the selected peers. */
+static library_row *d8c_scan(const char *name, int local_variant, int gameplay, admission_fixture *f, size_t *count)
+{
+    char data[MAX_PATH], prefix[MAX_PATH];
+    sh_decl_registry_source registry = {f, admission_read, (uintptr_t)f->registry, NULL};
+    snprintf(prefix, sizeof(prefix), "%s/overrides/probe", name); d8c_probe(prefix);
+    if (local_variant) { snprintf(prefix, sizeof(prefix), "%s/overrides/local-editor", name); d8c_local_editor(prefix, local_variant); }
+    if (gameplay) { snprintf(prefix, sizeof(prefix), "%s/overrides/gameplay", name); d8c_gameplay(prefix); }
+    snprintf(data, sizeof(data), "%s/%s", root, name);
+    sh_package_runtime_test_dispose(); sh_package_runtime_test_baseline(d8c_baseline, NULL);
+    sh_package_runtime_test_source_readers(registry, (uintptr_t)f->reflection);
+    sh_package_runtime_test_installed_links(1);
+    CHECK(sh_package_runtime_refresh(data));
+    library_row *rows = library_snapshot(count);
+    sh_package_runtime_test_dispose(); cleanup_resources(data);
+    return rows;
+}
+static void test_increment_editor_composition(void)
+{
+    char data[MAX_PATH], source[MAX_PATH], error[2048];
+    admission_fixture f; lease_collection_setup(&f);
+    sh_decl_registry_source registry = {&f, admission_read, (uintptr_t)f.registry, NULL};
+    sh_package_map_plan *plan = NULL;
+    library_row *full = NULL, *other = NULL, *plain = NULL, *variant = NULL;
+    library_row *incremented = NULL, *rescanned = NULL, *mapped = NULL;
+    size_t full_count = 0, other_count = 0, plain_count = 0, variant_count = 0;
+    size_t incremented_count = 0, rescanned_count = 0, mapped_count = 0;
+    int activations = 0;
+    snprintf(data, sizeof(data), "%s/d8c-data", root);
+    /* Full scans: the local extension, a different one, none, and none plus a
+     * real gameplay variant of the parent. */
+    full = d8c_scan("d8c-full", 1, 0, &f, &full_count);
+    other = d8c_scan("d8c-other", 2, 0, &f, &other_count);
+    plain = d8c_scan("d8c-plain", 0, 0, &f, &plain_count);
+    variant = d8c_scan("d8c-variant", 0, 1, &f, &variant_count);
+    const library_row *row = d8c_original(full, full_count, d8c_probe_row);
+    const library_row *def = d8c_original(full, full_count, d8c_probe_def);
+    CHECK(row && def && !d8c_stock_row_copies("full scan", full, full_count));
+    if (!row || !def) goto done;
+    CHECK(strstr((const char *)row->body, "\"d8stock/speaker_row\"") != NULL);
+    CHECK(strstr((const char *)def->body, "\"d8stock/speaker\"") != NULL);
+    /* The shared composition selects the parent's payload, not the consumer. */
+    const library_row *peers[2] = {d8c_original(other, other_count, d8c_probe_def),
+        d8c_original(plain, plain_count, d8c_probe_def)};
+    CHECK(peers[0] && peers[1] && !strcmp(peers[0]->path, def->path) && !strcmp(peers[1]->path, def->path));
+    /* Same authored path and bytes over a real gameplay parent variant: two
+     * bindings, and the probe's own consumer is unaffected. */
+    CHECK(d8c_originals(variant, variant_count, d8c_probe_def) == 2);
+    int kept = 0, different = 0;
+    for (size_t i = 0; i < variant_count; i++) {
+        if (!variant[i].original || strcmp(variant[i].original, d8c_probe_def)) continue;
+        if (!strcmp(variant[i].path, def->path)) kept++; else different++;
+    }
+    CHECK(kept == 1 && different == 1);
+    /* The same pair reached by installing the probe from a map over a library
+     * that already publishes the local extension. */
+    d8c_local_editor("d8c-data/overrides/local-editor", 1);
+    d8c_probe("d8c-map/overrides/probe");
+    snprintf(data, sizeof(data), "%s/d8c-data", root);
+    snprintf(source, sizeof(source), "%s/d8c-map", root);
+    sh_package_runtime_test_dispose(); sh_package_runtime_test_baseline(d8c_baseline, NULL);
+    sh_package_runtime_test_source_readers(registry, (uintptr_t)f.reflection);
+    sh_package_runtime_test_installed_links(1);
+    CHECK(sh_package_runtime_refresh(data));
+    expect_current(d8c_stock_def, "localEditorExtension");
+    plan = sh_package_runtime_prepare_map(data, source, error, sizeof(error)); CHECK(plan);
+    if (!plan) { fprintf(stderr, "d8 map: %s\n", error); goto done; }
+    mapped = d8c_compilation_rows(sh_package_map_plan_compilation(plan), &mapped_count);
+    d8c_probe("d8c-data/overrides/probe");
+    int prepared = sh_package_map_plan_prepare_inventory(plan, data, error, sizeof(error));
+    if (!prepared || error[0]) fprintf(stderr, "d8 inventory: %s\n", error);
+    CHECK(prepared && !error[0]); if (!prepared) goto done;
+    CHECK(sh_package_runtime_activate_prepared_map(plan, (sh_package_activation_guard){0}, d8c_activate, &activations));
+    CHECK(sh_package_runtime_commit_map(plan, commit_inventory, error, sizeof(error)));
+    sh_package_map_plan_free(plan); plan = NULL;
+    CHECK(sh_package_runtime_activate_prepared_map(NULL, (sh_package_activation_guard){0}, startup_activation,
+        &(int){0}));
+    incremented = library_snapshot(&incremented_count);
+    CHECK(sh_package_runtime_refresh(data));
+    rescanned = library_snapshot(&rescanned_count);
+    size_t aliases = 0;
+    int designed = library_rows_designed(incremented, incremented_count, rescanned, rescanned_count, &aliases);
+    size_t copies = d8c_stock_row_copies("increment", incremented, incremented_count);
+    const library_row *installed[2] = {d8c_original(incremented, incremented_count, d8c_probe_row),
+        d8c_original(incremented, incremented_count, d8c_probe_def)};
+    const library_row *authored[2] = {d8c_original(mapped, mapped_count, d8c_probe_row),
+        d8c_original(mapped, mapped_count, d8c_probe_def)};
+    int bound = installed[0] && installed[1] && !strcmp(installed[0]->path, row->path) &&
+        !strcmp(installed[1]->path, def->path);
+    int identical = authored[0] && authored[1] && !strcmp(authored[0]->path, row->path) &&
+        !strcmp(authored[1]->path, def->path);
+    if (!designed || aliases || copies || !bound || !identical) {
+        d8c_dump("increment", incremented, incremented_count); d8c_dump("rescan", rescanned, rescanned_count);
+        d8c_dump("full", full, full_count); d8c_dump("map", mapped, mapped_count);
+    }
+    /* The increment serves what the rescan serves; the installed probe and the
+     * identical probe in the map's own context are one binding. */
+    CHECK(designed && !aliases && !copies && bound && identical);
+done:
+    library_rows_free(full, full_count); library_rows_free(other, other_count);
+    library_rows_free(plain, plain_count); library_rows_free(variant, variant_count);
+    library_rows_free(incremented, incremented_count);
+    library_rows_free(rescanned, rescanned_count); library_rows_free(mapped, mapped_count);
+    sh_package_map_plan_free(plan);
+    sh_package_runtime_test_installed_links(0);
+    sh_package_runtime_test_source_readers((sh_decl_registry_source){0}, 0); sh_package_runtime_test_dispose();
+    sh_package_runtime_test_baseline(baseline, NULL);
+    for (size_t i = 0; i < f.count; i++) free(f.regions[i].address);
+    cleanup_resources(data);
+}
+/* D8 stock rows (OpenGL, 2026-09-30, candidate d8-contract-8): the live shapes
+ * of the stock editor rows a probe reaches. A speaker row states a complete
+ * property list and names an action row among its inputs; the action row
+ * inherits a base row and states only its own property as a sparse list. A
+ * local editor package overrides the base row and privately overrides its
+ * name inspector, so the library serves the base row bound to that inspector;
+ * the children's controls stay at their slots. Installing the probe compiles
+ * it alone, where no package contributes to those stock rows at all. Shipped
+ * files state property fields in their own order (path first) and a list
+ * count before its items; composing over nothing would respell them. */
+static const char *d8r_inspector = "generated/decls/snappropertyinspector_text/d8rows/name_inspector.decl";
+static const char *d8r_base = "generated/decls/snapeditorentitydef/d8rows/input_base.decl";
+static const char *d8r_play = "generated/decls/snapeditorentitydef/d8rows/play.decl";
+static const char *d8r_row = "generated/decls/snapeditorentitydef/d8rows/speaker_row.decl";
+static const char *d8r_probe_row = "generated/decls/snapeditorentitydef/d8probe/speaker.decl";
+static const char *d8r_probe_def = "generated/decls/entitydef/d8probe/speaker.decl";
+static const char *const d8r_base_text =
+    "{\n\tedit = {\n\t\tpropertySheets = {\n\t\t\tnum = 1;\n\t\t\titem[0] = {\n\t\t\t\tproperties = {\n"
+    "\t\t\t\t\tnum = 2;\n\t\t\t\t\titem[0] = {\n\t\t\t\t\t\tpath = \"displayName\";\n"
+    "\t\t\t\t\t\tdisplayNameTag = \"#str_name\";\n\t\t\t\t\t\tdescriptionTag = \"#str_name_desc\";\n"
+    "\t\t\t\t\t\tinspector = \"d8rows/name_inspector\";\n\t\t\t\t\t}\n\t\t\t\t\titem[1] = {\n"
+    "\t\t\t\t\t\tpath = \"actionDelay\";\n\t\t\t\t\t\tdisplayNameTag = \"#str_delay\";\n"
+    "\t\t\t\t\t\tdescriptionTag = \"#str_delay_desc\";\n\t\t\t\t\t}\n\t\t\t\t}\n\t\t\t}\n\t\t}\n\t}\n}\n";
+static int d8r_baseline(void *context, const char *path, unsigned char **body, size_t *length)
+{
+    const char *text =
+        !strcmp(path, "generated/decls/entitydef/d8rows/speaker.decl") ?
+            "{\n\tclass = \"Entity\";\n\tedit = {\n\t\thealth = 1;\n\t\ttarget = \"\";\n\t}\n}\n" :
+        !strcmp(path, "generated/decls/entitydef/d8rows/play_action.decl") ?
+            "{\n\tclass = \"Entity\";\n\tedit = {\n\t\thealth = 0;\n\t\ttarget = \"\";\n\t}\n}\n" :
+        !strcmp(path, d8r_inspector) ?
+            "{\n\tedit = {\n\t\tplaceholderText = \"#str_enter\";\n\t\tmaxCharLength = 20;\n\t}\n}\n" :
+        !strcmp(path, d8r_base) ? d8r_base_text :
+        !strcmp(path, d8r_play) ?
+            "{\n\tinherit = \"d8rows/input_base\";\n\tedit = {\n\t\tentityDef = \"d8rows/play_action\";\n"
+            "\t\tpropertySheets = {\n\t\t\titem[0] = {\n\t\t\t\tproperties = {\n\t\t\t\t\tnum = 3;\n"
+            "\t\t\t\t\titem[2] = {\n\t\t\t\t\t\tpath = \"volume\";\n\t\t\t\t\t\tdisplayNameTag = \"#str_volume\";\n"
+            "\t\t\t\t\t\tdescriptionTag = \"#str_volume_desc\";\n\t\t\t\t\t}\n\t\t\t\t}\n\t\t\t}\n\t\t}\n\t}\n}\n" :
+        !strcmp(path, "generated/decls/snapeditorentitydef/d8rows/play_loud.decl") ?
+            "{\n\tinherit = \"d8rows/play\";\n\tedit = {\n\t\tpropertySheets = {\n\t\t\titem[0] = {\n"
+            "\t\t\t\tproperties = {\n\t\t\t\t\tnum = 4;\n\t\t\t\t\titem[3] = {\n"
+            "\t\t\t\t\t\tpath = \"loudness\";\n\t\t\t\t\t}\n\t\t\t\t}\n\t\t\t}\n\t\t}\n\t}\n}\n" :
+        !strcmp(path, "generated/decls/snapeditorentitydef/d8rows/extra_base.decl") ?
+            "{ edit = { propertySheets = { num = 1; item[0] = { properties = { num = 1; "
+            "item[0] = { path = \"hint\"; } } } } } }" :
+        !strcmp(path, "generated/decls/snapeditorentitydef/d8rows/envparent.decl") ?
+            "{ edit = { propertySheets = { num = 1; item[0] = { properties = { num = 1; "
+            "item[0] = { path = \"envbase\"; } } } } } }" :
+        !strcmp(path, "generated/decls/snapeditorentitydef/d8rows/envchild.decl") ?
+            "{ inherit = \"d8rows/envparent\"; edit = { propertySheets = { item[0] = { properties = { num = 2; "
+            "item[1] = { path = \"envown\"; } } } } } }" :
+        !strcmp(path, "generated/decls/snappropertyinspector_text/d8rows/x_picker.decl") ?
+            "{\n\tedit = {\n\t\tplaceholderText = \"#str_pick\";\n\t\tallowedTypes = {\n\t\t\tnum = 1;\n"
+            "\t\t\titem[0] = \"d8rows/z_dest\";\n\t\t}\n\t}\n}\n" :
+        !strcmp(path, "generated/decls/snappropertyinspector_text/d8rows/y_picker.decl") ?
+            "{\n\tedit = {\n\t\tplaceholderText = \"#str_pick\";\n\t\tallowedTypes = {\n\t\t\tnum = 1;\n"
+            "\t\t\titem[0] = \"d8rows/a_dest\";\n\t\t}\n\t}\n}\n" :
+        /* Destination rows a picker allows, each showing the name inspector. */
+        (!strcmp(path, "generated/decls/snapeditorentitydef/d8rows/z_dest.decl") ||
+         !strcmp(path, "generated/decls/snapeditorentitydef/d8rows/a_dest.decl")) ?
+            "{\n\tedit = {\n\t\tentityDef = \"d8rows/speaker\";\n\t\tpropertySheets = {\n\t\t\tnum = 1;\n"
+            "\t\t\titem[0] = {\n\t\t\t\tproperties = {\n\t\t\t\t\tnum = 1;\n\t\t\t\t\titem[0] = {\n"
+            "\t\t\t\t\t\tpath = \"displayName\";\n\t\t\t\t\t\tinspector = \"d8rows/name_inspector\";\n"
+            "\t\t\t\t\t}\n\t\t\t\t}\n\t\t\t}\n\t\t}\n\t}\n}\n" :
+        /* Stock children of the base row patching one sparse slot with a
+         * picker inspector, as the shipped action rows do. */
+        !strcmp(path, "generated/decls/snapeditorentitydef/d8rows/z_caller.decl") ?
+            "{\n\tinherit = \"d8rows/input_base\";\n\tedit = {\n\t\tentityDef = \"d8rows/speaker\";\n"
+            "\t\tpropertySheets = {\n\t\t\titem[0] = {\n\t\t\t\tproperties = {\n\t\t\t\t\tnum = 3;\n"
+            "\t\t\t\t\titem[2] = {\n\t\t\t\t\t\tpath = \"target\";\n\t\t\t\t\t\tinspector = \"d8rows/y_picker\";\n"
+            "\t\t\t\t\t}\n\t\t\t\t}\n\t\t\t}\n\t\t}\n\t}\n}\n" :
+        !strcmp(path, "generated/decls/snapeditorentitydef/d8rows/a_caller.decl") ?
+            "{\n\tinherit = \"d8rows/input_base\";\n\tedit = {\n\t\tentityDef = \"d8rows/speaker\";\n"
+            "\t\tpropertySheets = {\n\t\t\titem[0] = {\n\t\t\t\tproperties = {\n\t\t\t\t\tnum = 3;\n"
+            "\t\t\t\t\titem[2] = {\n\t\t\t\t\t\tpath = \"target\";\n\t\t\t\t\t\tinspector = \"d8rows/x_picker\";\n"
+            "\t\t\t\t\t}\n\t\t\t\t}\n\t\t\t}\n\t\t}\n\t}\n}\n" :
+        !strcmp(path, "generated/decls/snapeditorentitydef/d8rows/caller_host.decl") ?
+            "{\n\tedit = {\n\t\tentityDef = \"d8rows/speaker\";\n\t\tinputs = {\n\t\t\tnum = 2;\n"
+            "\t\t\titem[0] = \"d8rows/a_caller\";\n\t\t\titem[1] = \"d8rows/z_caller\";\n\t\t}\n\t}\n}\n" :
+        !strcmp(path, "generated/decls/snapeditorentitydef/d8rows/tinted.decl") ?
+            "{\n\tedit = {\n\t\tdisplayNameColor = {\n\t\t\tr = 1;\n\t\t}\n\t\tentityDef = \"d8rows/speaker\";\n\t}\n}\n" :
+        !strcmp(path, d8r_row) ?
+            "{\n\tedit = {\n\t\tentityDef = \"d8rows/speaker\";\n\t\tpropertySheets = {\n\t\t\tnum = 1;\n"
+            "\t\t\titem[0] = {\n\t\t\t\tproperties = {\n\t\t\t\t\tnum = 1;\n\t\t\t\t\titem[0] = {\n"
+            "\t\t\t\t\t\tpath = \"displayName\";\n\t\t\t\t\t\tdisplayNameTag = \"#str_name\";\n"
+            "\t\t\t\t\t\tdescriptionTag = \"#str_name_desc\";\n\t\t\t\t\t\tinspector = \"d8rows/name_inspector\";\n"
+            "\t\t\t\t\t}\n\t\t\t\t}\n\t\t\t}\n\t\t}\n\t\tinputs = {\n\t\t\tnum = 1;\n\t\t\titem[0] = \"d8rows/play\";\n"
+            "\t\t}\n\t}\n}\n" : NULL;
+    (void)context; *body = NULL; *length = 0;
+    if (!text) return 0;
+    *length = strlen(text); *body = (unsigned char *)_strdup(text); return *body ? 1 : -1;
+}
+/* Native metadata for the rows above: an editor entry's inputs name editor
+ * entries, its property sheets hold properties whose inspector is a text
+ * inspector declaration. */
+static void d8r_setup(admission_fixture *f)
+{
+    const char *classes[] = {"idDeclEntityDef", "Entity", "idDeclTypeInfo", "int", "idDeclSnapEditorEntity",
+        "idList < EditorRefs >", "idDeclTypeInfoGraph", "idStr", "idList < EditorSheet >", "EditorSheet",
+        "idList < EditorProperty >", "EditorProperty", "idDeclSnapPropertyInspector_Text", "idColor", "float"};
+    const char *types[] = {"entityDef", "snapEditorEntityDef", "snapPropertyInspector_Text"};
+    const size_t indices[] = {0, 4, 12}, count = sizeof(classes) / sizeof(*classes);
+    memset(f, 0, sizeof(*f));
+    f->registry = admission_alloc(f, 0x18);
+    void *managers = admission_alloc(f, 3 * 8);
+    admission_pointer(f->registry, 8, managers); admission_number(f->registry, 0x10, 3);
+    for (size_t i = 0; i < 3; i++) {
+        void *manager = admission_alloc(f, 0x90); admission_pointer(managers, i * 8, manager);
+        admission_pointer(manager, 8, admission_string(f, types[i]));
+        admission_pointer(manager, 0x10, admission_string(f, classes[indices[i]]));
+    }
+    f->reflection = admission_alloc(f, 0xb0);
+    void *container = admission_alloc(f, 0x30), *records = admission_alloc(f, (count + 1) * 0x38);
+    void *objects = admission_alloc(f, (count + 1) * 16), *pointers = admission_alloc(f, (count + 1) * 16);
+    char *parent = admission_string(f, "idDeclTypeInfo"), *none = admission_string(f, "");
+    admission_pointer(f->reflection, 0, container); admission_pointer(container, 0x20, records);
+    admission_pointer(f->reflection, 0x88, objects); admission_number(f->reflection, 0x90, (int)count + 1);
+    admission_pointer(f->reflection, 0xa0, pointers); admission_number(f->reflection, 0xa8, (int)count + 1);
+    for (size_t i = 0; i < count; i++) {
+        admission_pointer(records, i * 0x38, admission_string(f, classes[i]));
+        admission_pointer(records, i * 0x38 + 8, i == 4 || i == 6 || i == 12 ? parent : none);
+    }
+    /* Declaration references, the graph reader, strings and lists. */
+    admission_pointer(pointers, 8, (void *)0x10); admission_pointer(pointers, 4 * 16 + 8, (void *)0x10);
+    admission_pointer(pointers, 12 * 16 + 8, (void *)0x10);
+    admission_pointer(objects, 6 * 16 + 8, (void *)0x30); admission_pointer(objects, 7 * 16 + 8, (void *)0x70);
+    const size_t lists[] = {5, 8, 10}, elements[] = {4, 9, 11};
+    for (size_t i = 0; i < 3; i++) {
+        void *element = admission_alloc(f, 0x48);
+        admission_pointer(objects, lists[i] * 16 + 8, (void *)0x80);
+        admission_pointer(records, lists[i] * 0x38 + 0x18, element);
+        admission_pointer(element, 0, admission_string(f, classes[elements[i]]));
+        admission_pointer(element, 8, i ? none : admission_string(f, "*"));
+        admission_pointer(element, 0x10, admission_string(f, "element")); admission_number(element, 0x1c, 8);
+    }
+    static const struct { size_t record, count; const char *types[6], *ops[6], *names[6]; } rows[] = {
+        {1, 2, {"idDeclEntityDef", "int"}, {"*", ""}, {"target", "health"}},
+        {4, 5, {"idList < EditorRefs >", "idDeclEntityDef", "idList < EditorSheet >", "idColor", "idStr"},
+            {"", "*", "", "", ""}, {"inputs", "entityDef", "propertySheets", "displayNameColor", "placementFlags"}},
+        {13, 4, {"float", "float", "float", "float"}, {"", "", "", ""}, {"r", "g", "b", "a"}},
+        {9, 1, {"idList < EditorProperty >"}, {""}, {"properties"}},
+        {11, 4, {"idStr", "idStr", "idStr", "idDeclSnapPropertyInspector_Text"}, {"", "", "", "*"},
+            {"path", "displayNameTag", "descriptionTag", "inspector"}},
+        {12, 3, {"idStr", "int", "idList < EditorRefs >"}, {"", "", ""}, {"placeholderText", "maxCharLength", "allowedTypes"}},
+    };
+    for (size_t r = 0; r < sizeof(rows) / sizeof(*rows); r++) {
+        void *table = admission_alloc(f, (rows[r].count + 1) * 0x48);
+        admission_pointer(records, rows[r].record * 0x38 + 0x20, table);
+        for (size_t i = 0; i < rows[r].count; i++) {
+            admission_pointer(table, i * 0x48, admission_string(f, rows[r].types[i]));
+            admission_pointer(table, i * 0x48 + 8, *rows[r].ops[i] ? admission_string(f, rows[r].ops[i]) : none);
+            admission_pointer(table, i * 0x48 + 0x10, admission_string(f, rows[r].names[i]));
+            admission_number(table, i * 0x48 + 0x1c, 8);
+        }
+    }
+}
+static void d8r_probe(const char *prefix)
+{
+    d8c_file(prefix, "package.json", "{\"id\":\"d8-probe\",\"name\":\"D8 probe\"}");
+    d8c_file(prefix, "assets/generated/decls/entitydef/d8probe/speaker.decl",
+        "{ inherit = \"d8rows/speaker\"; edit = { health = 7; } }");
+    d8c_file(prefix, "assets/generated/decls/snapeditorentitydef/d8probe/speaker.decl",
+        "{ inherit = \"d8rows/speaker_row\"; edit = { entityDef = \"d8probe/speaker\"; } }");
+}
+/* The installed local editor package: a whole-file override of the name
+ * inspector and its own copy of the base row (kind 1, as installed), a base
+ * row with a control inserted first (kind 2), the base row reparented onto
+ * another stock row (kind 3: its author's own variant, which the shared base
+ * row does not take, so its children keep inheriting the shipped one), or the
+ * base row with only its display colour changed (kind 4, presentation: the
+ * shared row carries it) or with its placement changed (kind 5, behaviour: its
+ * author's own variant). Kinds 4 and 5 also author a row whose inputs reach
+ * the action row, so that row is bound in the package's own scope. */
+static void d8r_local_editor(const char *prefix, int kind)
+{
+    d8c_file(prefix, "package.json", "{\"id\":\"d8-local-editor\",\"name\":\"D8 local editor\"}");
+    if (kind == 10) {
+        d8c_file(prefix, "assets/generated/decls/snapeditorentitydef/d8rows/a_caller.decl",
+            "{\n\tinherit = \"d8rows/input_base\";\n\tedit = {\n\t\tentityDef = \"d8rows/speaker\";\n"
+            "\t\tpropertySheets = {\n\t\t\titem[0] = {\n\t\t\t\tproperties = {\n\t\t\t\t\tnum = 3;\n"
+            "\t\t\t\t\titem[2] = {\n\t\t\t\t\t\tpath = \"target\";\n\t\t\t\t\t\tinspector = \"d8rows/y_picker\";\n"
+            "\t\t\t\t\t}\n\t\t\t\t}\n\t\t\t}\n\t\t}\n\t}\n}\n");
+        return;
+    }
+    if (kind == 7 || kind == 8 || kind == 9) {
+        if (kind == 9) {
+            unsigned char *copy = NULL; size_t copy_length = 0;
+            if (d8r_baseline(NULL, "generated/decls/snapeditorentitydef/d8rows/a_caller.decl", &copy, &copy_length) == 1)
+                d8c_file(prefix, "assets/generated/decls/snapeditorentitydef/d8rows/a_caller.decl", (const char *)copy);
+            free(copy);
+        }
+        if (kind == 8)
+            d8c_file(prefix, "assets/generated/decls/snapeditorentitydef/d8rows/a_caller.decl",
+                "{ inherit = \"d8rows/input_base\"; edit = { placementFlags = \"SNAP_ENTITY_PLACE_FLOOR\"; "
+                "entityDef = \"d8rows/speaker\"; propertySheets = { item[0] = { properties = { num = 3; "
+                "item[2] = { path = \"target\"; inspector = \"d8rows/x_picker\"; } } } } } }");
+        d8c_file(prefix, "assets/generated/decls/snappropertyinspector_text/d8rows/name_inspector.decl",
+            "{ edit = { placeholderText = \"#str_enter\"; maxCharLength = 666; } }");
+        d8c_file(prefix, "assets/generated/decls/snapeditorentitydef/d8rows/caller_host.decl",
+            "{\n\tedit = {\n\t\tplacementFlags = \"SNAP_ENTITY_PLACE_FLOOR\";\n\t\tentityDef = \"d8rows/speaker\";\n"
+            "\t\tinputs = {\n\t\t\tnum = 2;\n\t\t\titem[0] = \"d8rows/a_caller\";\n\t\t\titem[1] = \"d8rows/z_caller\";\n"
+            "\t\t}\n\t}\n}\n");
+        return;
+    }
+    if (kind == 4 || kind == 5) {
+        char text[2048];
+        const char *edit = strstr(d8r_base_text, "edit = {");
+        snprintf(text, sizeof(text), "{\n\tedit = {\n\t\t%s\n%s", kind == 4 ?
+            "displayNameColor = {\n\t\t\tr = 0;\n\t\t\tg = 1;\n\t\t\tb = 0;\n\t\t}" :
+            "placementFlags = \"SNAP_ENTITY_PLACE_FLOOR\";", edit ? edit + strlen("edit = {") + 1 : "");
+        d8c_file(prefix, "assets/generated/decls/snapeditorentitydef/d8rows/input_base.decl", text);
+        d8c_file(prefix, "assets/generated/decls/snapeditorentitydef/d8editor/actions.decl",
+            "{ edit = { entityDef = \"d8rows/speaker\"; inputs = { num = 1; item[0] = \"d8rows/play\"; } } }");
+        return;
+    }
+    if (kind == 3) {
+        d8c_file(prefix, "assets/generated/decls/snapeditorentitydef/d8rows/input_base.decl",
+            "{ inherit = \"d8rows/extra_base\"; edit = { propertySheets = { item[0] = { properties = { num = 3; "
+            "item[1] = { path = \"displayName\"; displayNameTag = \"#str_name\"; descriptionTag = \"#str_name_desc\"; "
+            "inspector = \"d8rows/name_inspector\"; } "
+            "item[2] = { path = \"actionDelay\"; displayNameTag = \"#str_delay\"; descriptionTag = \"#str_delay_desc\"; } "
+            "} } } } }");
+        return;
+    }
+    if (kind == 2) {
+        d8c_file(prefix, "assets/generated/decls/snapeditorentitydef/d8rows/input_base.decl",
+            "{ edit = { propertySheets = { num = 1; item[0] = { properties = { num = 3; "
+            "item[0] = { path = \"comment\"; displayNameTag = \"#str_comment\"; } "
+            "item[1] = { path = \"displayName\"; displayNameTag = \"#str_name\"; descriptionTag = \"#str_name_desc\"; "
+            "inspector = \"d8rows/name_inspector\"; } "
+            "item[2] = { path = \"actionDelay\"; displayNameTag = \"#str_delay\"; descriptionTag = \"#str_delay_desc\"; } "
+            "} } } } }");
+        return;
+    }
+    d8c_file(prefix, "assets/generated/decls/snappropertyinspector_text/d8rows/name_inspector.decl",
+        "{ edit = { placeholderText = \"#str_enter\"; maxCharLength = 666; } }");
+    d8c_file(prefix, "assets/generated/decls/snapeditorentitydef/d8rows/input_base.decl", d8r_base_text);
+}
+/* A real gameplay change to the speaker definition: the stock speaker row
+ * reaches it unchanged, so that package's row is a downstream-only variant. */
+static void d8r_gameplay(const char *prefix)
+{
+    d8c_file(prefix, "package.json", "{\"id\":\"d8-gameplay\",\"name\":\"D8 gameplay\"}");
+    d8c_file(prefix, "assets/generated/decls/entitydef/d8rows/speaker.decl",
+        "{ class = \"Entity\"; edit = { health = 5; target = \"\"; } }");
+    d8c_file(prefix, "assets/generated/decls/snapeditorentitydef/d8gameplay/speaker.decl",
+        "{ inherit = \"d8rows/speaker_row\"; edit = { } }");
+}
+/* Served private copies of one stock declaration (its original path). */
+static size_t d8r_copies(const char *label, const library_row *rows, size_t count, const char *stock)
+{
+    size_t copies = 0;
+    for (size_t i = 0; i < count; i++)
+        if (rows[i].original && !strcmp(rows[i].original, stock) && strcmp(rows[i].path, stock)) {
+            fprintf(stderr, "%s: private copy %s of %s: %.*s\n", label, rows[i].path, stock,
+                (int)(rows[i].length < 400 ? rows[i].length : 400), (const char *)rows[i].body);
+            copies++;
+        }
+    return copies;
+}
+static const library_row *d8r_path(const library_row *rows, size_t count, const char *path)
+{
+    for (size_t i = 0; i < count; i++) if (!strcmp(rows[i].path, path)) return rows + i;
+    return NULL;
+}
+/* The effective first property page of an editor entry as the engine's
+ * inherited parse builds it from what a library serves (the shipped text where
+ * it serves none): the parent's list, then each num resizing it and each
+ * item[k] merging field by field into slot k. Written as path[:inspector]|... */
+typedef struct d8r_control { char path[64], inspector[96]; } d8r_control;
+static int d8r_controls(const library_row *rows, size_t count, const char *name, d8r_control *list, size_t *n,
+    unsigned depth)
+{
+    char path[256];
+    unsigned char *body = NULL; size_t length = 0;
+    snprintf(path, sizeof(path), "generated/decls/snapeditorentitydef/%s.decl", name);
+    const library_row *served = d8r_path(rows, count, path);
+    if (served) { body = (unsigned char *)_strdup((const char *)served->body); length = served->length; }
+    else if (d8r_baseline(NULL, path, &body, &length) != 1) return 0;
+    sh_decl_node *tree = body ? sh_decl_tree_parse((sh_decl_source){(const char *)body, length}, NULL, 0) : NULL;
+    free(body);
+    if (!tree || depth > 8) { sh_decl_tree_free(tree); return 0; }
+    const char *text; size_t text_length; char parent[128];
+    int ok = 1;
+    *n = 0;
+    if (sh_decl_tree_literal(sh_decl_tree_member(tree, "inherit"), &text, &text_length) && text_length < sizeof(parent)) {
+        memcpy(parent, text, text_length); parent[text_length] = 0;
+        ok = d8r_controls(rows, count, parent, list, n, depth + 1);
+    }
+    const sh_decl_node *edit = sh_decl_tree_member(tree, "edit");
+    const sh_decl_node *sheets = edit ? sh_decl_tree_member(edit, "propertySheets") : NULL;
+    const sh_decl_node *page = sheets ? sh_decl_tree_member(sheets, "item[0]") : NULL;
+    const sh_decl_node *properties = page ? sh_decl_tree_member(page, "properties") : NULL;
+    for (const sh_decl_node *entry = properties ? properties->children : NULL; ok && entry; entry = entry->next) {
+        size_t target = 0, index = 0;
+        if (!strcmp(entry->key, "num")) {
+            ok = sh_decl_tree_literal(entry, &text, &text_length) && sscanf(text, "%zu", &target) == 1 && target < 32;
+            while (ok && *n < target) memset(list + (*n)++, 0, sizeof(*list));
+            if (ok) *n = target;
+            continue;
+        }
+        ok = sscanf(entry->key, "item[%zu]", &index) == 1 && index < 32;
+        while (ok && *n <= index) memset(list + (*n)++, 0, sizeof(*list));
+        for (const sh_decl_node *field = ok ? entry->children : NULL; field; field = field->next) {
+            char *slot = !strcmp(field->key, "path") ? list[index].path :
+                !strcmp(field->key, "inspector") ? list[index].inspector : NULL;
+            size_t capacity = !strcmp(field->key, "path") ? sizeof(list[index].path) : sizeof(list[index].inspector);
+            if (slot && sh_decl_tree_literal(field, &text, &text_length) && text_length < capacity) {
+                memcpy(slot, text, text_length); slot[text_length] = 0;
+            }
+        }
+    }
+    sh_decl_tree_free(tree); return ok;
+}
+static void d8r_effective(const library_row *rows, size_t count, const char *name, char *out, size_t capacity)
+{
+    d8r_control list[32]; size_t n = 0;
+    *out = 0;
+    if (!d8r_controls(rows, count, name, list, &n, 0)) { snprintf(out, capacity, "(unreadable)"); return; }
+    for (size_t i = 0; i < n; i++) {
+        size_t used = strlen(out);
+        snprintf(out + used, capacity - used, "%s%s%s%s", i ? "|" : "", list[i].path,
+            *list[i].inspector ? ":" : "", list[i].inspector);
+    }
+}
+static library_row *d8r_scan(const char *name, int probe, int local_editor, int gameplay, admission_fixture *f,
+    size_t *count)
+{
+    char data[MAX_PATH], prefix[MAX_PATH];
+    sh_decl_registry_source registry = {f, admission_read, (uintptr_t)f->registry, NULL};
+    if (probe) { snprintf(prefix, sizeof(prefix), "%s/overrides/probe", name); d8r_probe(prefix); }
+    if (local_editor) {
+        snprintf(prefix, sizeof(prefix), "%s/overrides/local-editor", name); d8r_local_editor(prefix, local_editor);
+    }
+    if (gameplay) { snprintf(prefix, sizeof(prefix), "%s/overrides/gameplay", name); d8r_gameplay(prefix); }
+    snprintf(data, sizeof(data), "%s/%s", root, name);
+    sh_package_runtime_test_dispose(); sh_package_runtime_test_baseline(d8r_baseline, NULL);
+    sh_package_runtime_test_source_readers(registry, (uintptr_t)f->reflection);
+    sh_package_runtime_test_installed_links(1);
+    CHECK(sh_package_runtime_refresh(data));
+    library_row *rows = library_snapshot(count);
+    sh_package_runtime_test_dispose(); cleanup_resources(data);
+    return rows;
+}
+static void test_increment_stock_rows(void)
+{
+    const char *stock[] = {d8r_base, d8r_play, d8r_row};
+    char data[MAX_PATH], source[MAX_PATH], error[2048];
+    static const char *const shipped[] = {"d8rows/extra_base", "d8rows/input_base", "d8rows/play",
+        "d8rows/play_loud", "d8rows/speaker_row"};
+    admission_fixture f; d8r_setup(&f);
+    sh_decl_registry_source registry = {&f, admission_read, (uintptr_t)f.registry, NULL};
+    sh_package_map_plan *plan = NULL;
+    sh_package_runtime_test_editor_rows(shipped, sizeof(shipped) / sizeof(*shipped));
+    library_row *full = NULL, *moved = NULL, *variant = NULL, *incremented = NULL, *rescanned = NULL, *mapped = NULL;
+    size_t full_count = 0, moved_count = 0, variant_count = 0, incremented_count = 0, rescanned_count = 0;
+    size_t mapped_count = 0;
+    int activations = 0;
+    /* The library: the local editor package and the probe, scanned whole. The
+     * package's byte-faithful copy of the base row is not an edit to it: that
+     * scope binds the base row to its private inspector as its own variant,
+     * while the shipped base row and its children keep their native text,
+     * whose controls stay at the slots their authors saw. */
+    full = d8r_scan("d8r-full", 1, 1, 0, &f, &full_count);
+    size_t full_copies = 0, base_copies = d8r_copies("full scan", full, full_count, d8r_base);
+    for (size_t s = 1; s < 3; s++) full_copies += d8r_copies("full scan", full, full_count, stock[s]);
+    const library_row *own_base = NULL;
+    for (size_t i = 0; i < full_count; i++)
+        if (full[i].original && !strcmp(full[i].original, d8r_base) && strcmp(full[i].path, d8r_base)) own_base = full + i;
+    const library_row *row = d8c_original(full, full_count, d8r_probe_row);
+    const library_row *def = d8c_original(full, full_count, d8r_probe_def);
+    CHECK(!full_copies && base_copies == 1 && own_base && row && def && !d8r_path(full, full_count, d8r_base));
+    if (!own_base || !row || !def) { d8c_dump("full", full, full_count); goto done; }
+    CHECK(strstr((const char *)own_base->body, "inspector = \"smp/") != NULL);
+    CHECK(!d8r_path(full, full_count, d8r_play) && !d8r_path(full, full_count, d8r_row));
+    CHECK(strstr((const char *)row->body, "\"d8rows/speaker_row\"") != NULL);
+    /* A real inherited change: with a control inserted before them, the child's
+     * patch no longer lands on its intended control natively, so the child is
+     * served restated under its own name, its control after the parent's. */
+    moved = d8r_scan("d8r-moved", 1, 2, 0, &f, &moved_count);
+    const library_row *restated = d8r_path(moved, moved_count, d8r_play);
+    const char *comment = restated ? strstr((const char *)restated->body, "\"comment\"") : NULL;
+    CHECK(restated && comment && strstr(comment, "\"actionDelay\"") && strstr(strstr(comment, "\"actionDelay\""), "\"volume\""));
+    char layout[512];
+    d8r_effective(moved, moved_count, "d8rows/play_loud", layout, sizeof(layout));
+    if (strcmp(layout, "comment|displayName:d8rows/name_inspector|actionDelay|volume|loudness"))
+        fprintf(stderr, "d8r moved: play_loud %s\n", layout);
+    CHECK(!strcmp(layout, "comment|displayName:d8rows/name_inspector|actionDelay|volume|loudness"));
+    CHECK(!d8r_copies("moved", moved, moved_count, d8r_play) && !d8r_copies("moved", moved, moved_count, d8r_row));
+    /* Downstream-only: a gameplay variant of the speaker definition gives the
+     * unchanged stock row a second binding, which stays distinct. */
+    variant = d8r_scan("d8r-variant", 1, 0, 1, &f, &variant_count);
+    CHECK(d8r_copies("gameplay variant", variant, variant_count, d8r_row) == 1);
+    CHECK(d8r_copies("gameplay variant", variant, variant_count, d8r_play) == 0);
+    /* The probe installed from a map over a library holding only the local
+     * editor, so the action row is first reached by the incoming package: with
+     * the base row bound to the private inspector (kind 1) its controls stay
+     * inherited; with a control inserted before them (kind 2) it needs a real
+     * layout rebase. Either way its effective controls keep their order and
+     * values, the base row's binding survives, and the increment binds what
+     * the rescan and the map's own context bind. */
+    for (int kind = 1; kind <= 5; kind++) {
+        char label[32], effective[3][512], inspector[128] = "d8rows/name_inspector", expected[512], loud[2][512];
+        snprintf(label, sizeof(label), "d8r-data-%d", kind); snprintf(data, sizeof(data), "%s/%s", root, label);
+        snprintf(source, sizeof(source), "%s/overrides/local-editor", label); d8r_local_editor(source, kind);
+        snprintf(source, sizeof(source), "d8r-map-%d/overrides/probe", kind); d8r_probe(source);
+        snprintf(source, sizeof(source), "%s/d8r-map-%d", root, kind);
+        sh_package_runtime_test_dispose(); sh_package_runtime_test_baseline(d8r_baseline, NULL);
+        sh_package_runtime_test_source_readers(registry, (uintptr_t)f.reflection);
+        sh_package_runtime_test_installed_links(1);
+        CHECK(sh_package_runtime_refresh(data));
+        /* Before the probe: no package reaches the action row, yet its native
+         * patches already land where their author meant them. */
+        library_row *initial = NULL; size_t initial_count = 0;
+        initial = library_snapshot(&initial_count);
+        CHECK(!d8c_original(initial, initial_count, d8r_probe_row));
+        d8r_effective(initial, initial_count, "d8rows/play", effective[0], sizeof(effective[0]));
+        int initially_served = d8r_path(initial, initial_count, d8r_play) != NULL;
+        if (initially_served != (kind == 2)) d8c_dump("initial", initial, initial_count);
+        library_rows_free(initial, initial_count);
+        plan = sh_package_runtime_prepare_map(data, source, error, sizeof(error)); CHECK(plan);
+        if (!plan) { fprintf(stderr, "d8r map %d: %s\n", kind, error); goto done; }
+        mapped = d8c_compilation_rows(sh_package_map_plan_compilation(plan), &mapped_count);
+        snprintf(source, sizeof(source), "%s/overrides/probe", label); d8r_probe(source);
+        int prepared = sh_package_map_plan_prepare_inventory(plan, data, error, sizeof(error));
+        if (!prepared || error[0]) fprintf(stderr, "d8r inventory %d: %s\n", kind, error);
+        CHECK(prepared && !error[0]); if (!prepared) goto done;
+        CHECK(sh_package_runtime_activate_prepared_map(plan, (sh_package_activation_guard){0}, d8c_activate, &activations));
+        CHECK(sh_package_runtime_commit_map(plan, commit_inventory, error, sizeof(error)));
+        sh_package_map_plan_free(plan); plan = NULL;
+        CHECK(sh_package_runtime_activate_prepared_map(NULL, (sh_package_activation_guard){0}, startup_activation,
+            &(int){0}));
+        incremented = library_snapshot(&incremented_count);
+        CHECK(sh_package_runtime_refresh(data));
+        rescanned = library_snapshot(&rescanned_count);
+        size_t aliases = 0, copies = 0;
+        int designed = library_rows_designed(incremented, incremented_count, rescanned, rescanned_count, &aliases);
+        /* No copy of a stock row no package authors; the base row reparented by
+         * the local editor (kind 3) is its author's own variant. */
+        size_t played = d8r_copies("increment", incremented, incremented_count, d8r_play);
+        copies += d8r_copies("increment", incremented, incremented_count, d8r_row);
+        copies += d8r_copies("increment", incremented, incremented_count,
+            "generated/decls/snapeditorentitydef/d8rows/play_loud.decl");
+        size_t variants = d8r_copies("increment", incremented, incremented_count, d8r_base);
+        /* A behavioural base row is its author's own variant, and the action
+         * row that package's scope reaches follows it; presentation alone
+         * composes into the shared row, which then carries it. */
+        const library_row *shared_base = d8r_path(rescanned, rescanned_count, d8r_base);
+        int presented = kind != 4 || (shared_base && strstr((const char *)shared_base->body, "displayNameColor"));
+        int behaviour = played == (kind == 5) && variants == (kind == 1 || kind == 3 || kind == 5);
+        const library_row *installed = d8c_original(incremented, incremented_count, d8r_probe_row);
+        const library_row *again = d8c_original(rescanned, rescanned_count, d8r_probe_row);
+        const library_row *authored = d8c_original(mapped, mapped_count, d8r_probe_row);
+        int bound = installed && again && authored && !strcmp(installed->path, again->path) &&
+            !strcmp(authored->path, again->path) && d8c_originals(incremented, incremented_count, d8r_probe_row) == 1;
+        /* The local editor's faithful copy of the base row (kind 1) binds its
+         * private inspector as that scope's own variant; the shipped base row
+         * the probe's children inherit keeps the shipped inspector. */
+        if (kind == 1) {
+            const library_row *own = NULL;
+            for (size_t i = 0; i < rescanned_count; i++)
+                if (rescanned[i].original && !strcmp(rescanned[i].original, d8r_base) && strcmp(rescanned[i].path, d8r_base))
+                    own = rescanned + i;
+            CHECK(own && strstr((const char *)own->body, "inspector = \"smp/") && !d8r_path(rescanned, rescanned_count, d8r_base));
+        }
+        snprintf(expected, sizeof(expected), "%sdisplayName:%s|actionDelay|volume", kind == 2 ? "comment|" : "", inspector);
+        if (strcmp(effective[0], expected) || initially_served != (kind == 2))
+            fprintf(stderr, "d8r kind %d: initial play %s (served %d), expected %s\n", kind, effective[0],
+                initially_served, expected);
+        CHECK(!strcmp(effective[0], expected) && initially_served == (kind == 2));
+        d8r_effective(incremented, incremented_count, "d8rows/play_loud", loud[0], sizeof(loud[0]));
+        d8r_effective(rescanned, rescanned_count, "d8rows/play_loud", loud[1], sizeof(loud[1]));
+        if (strncmp(loud[0], expected, strlen(expected)) || strcmp(loud[0] + strlen(expected), "|loudness") ||
+            strcmp(loud[0], loud[1]))
+            fprintf(stderr, "d8r kind %d: play_loud increment %s, rescan %s\n", kind, loud[0], loud[1]);
+        CHECK(!strncmp(loud[0], expected, strlen(expected)) && !strcmp(loud[0] + strlen(expected), "|loudness") &&
+            !strcmp(loud[0], loud[1]));
+        d8r_effective(incremented, incremented_count, "d8rows/play", effective[0], sizeof(effective[0]));
+        d8r_effective(rescanned, rescanned_count, "d8rows/play", effective[1], sizeof(effective[1]));
+        d8r_effective(rescanned, rescanned_count, "d8rows/input_base", effective[2], sizeof(effective[2]));
+        /* Same layout: inherited; a real layout change: served rebased. */
+        int served = d8r_path(incremented, incremented_count, d8r_play) != NULL;
+        int rebased = d8r_path(rescanned, rescanned_count, d8r_play) != NULL;
+        int right = !strcmp(effective[0], expected) && !strcmp(effective[1], expected) &&
+            served == (kind == 2) && rebased == (kind == 2);
+        if (!designed || aliases || copies || !behaviour || !presented || !bound || !right) {
+            fprintf(stderr, "d8r kind %d: play increment %s, rescan %s, expected %s; base %s; served %d/%d\n", kind,
+                effective[0], effective[1], expected, effective[2], served, rebased);
+            d8c_dump("increment", incremented, incremented_count); d8c_dump("rescan", rescanned, rescanned_count);
+            d8c_dump("map", mapped, mapped_count);
+        }
+        CHECK(designed && !aliases && !copies && behaviour && presented && bound && right);
+        library_rows_free(incremented, incremented_count); incremented = NULL; incremented_count = 0;
+        library_rows_free(rescanned, rescanned_count); rescanned = NULL; rescanned_count = 0;
+        library_rows_free(mapped, mapped_count); mapped = NULL; mapped_count = 0;
+        sh_package_runtime_test_dispose(); cleanup_resources(data);
+        snprintf(data, sizeof(data), "%s/d8r-map-%d", root, kind); cleanup_resources(data);
+    }
+done:
+    library_rows_free(full, full_count); library_rows_free(moved, moved_count);
+    library_rows_free(variant, variant_count);
+    library_rows_free(incremented, incremented_count); library_rows_free(rescanned, rescanned_count);
+    library_rows_free(mapped, mapped_count);
+    sh_package_map_plan_free(plan);
+    sh_package_runtime_test_editor_rows(NULL, 0);
+    sh_package_runtime_test_installed_links(0);
+    sh_package_runtime_test_source_readers((sh_decl_registry_source){0}, 0); sh_package_runtime_test_dispose();
+    sh_package_runtime_test_baseline(baseline, NULL);
+    for (size_t i = 0; i < f.count; i++) free(f.regions[i].address);
+    cleanup_resources(data);
+}
+/* Row-level presentation composes into the shared editor entry only where
+ * every package difference is a presentation field (displayNameColor). Opposing
+ * colours resolve to the first authored position, whichever package discovery
+ * meets first; a member that also changes behaviour stays its author's own
+ * variant with its own colour, which the shared entry does not take; a member
+ * that omits a shipped colour cannot be represented as shared presentation and
+ * stays a variant, the shared entry keeping the shipped colour. */
+static const char *d8p_edit_text(const char *extra)
+{
+    static char text[2048];
+    const char *edit = strstr(d8r_base_text, "edit = {");
+    snprintf(text, sizeof(text), "{\n\tedit = {\n\t\t%s\n%s", extra, edit + strlen("edit = {") + 1);
+    return text;
+}
+static void d8p_package(const char *root_name, const char *folder, const char *path, const char *text)
+{
+    char prefix[MAX_PATH], descriptor[256];
+    snprintf(prefix, sizeof(prefix), "%s/overrides/%s", root_name, folder);
+    snprintf(descriptor, sizeof(descriptor), "{\"id\":\"d8p-%s\",\"name\":\"D8 presentation %s\"}", folder, folder);
+    d8c_file(prefix, "package.json", descriptor);
+    d8c_file(prefix, path, text);
+}
+static library_row *d8p_scan(const char *name, admission_fixture *f, size_t *count)
+{
+    char data[MAX_PATH];
+    sh_decl_registry_source registry = {f, admission_read, (uintptr_t)f->registry, NULL};
+    snprintf(data, sizeof(data), "%s/%s", root, name);
+    sh_package_runtime_test_dispose(); sh_package_runtime_test_baseline(d8r_baseline, NULL);
+    sh_package_runtime_test_source_readers(registry, (uintptr_t)f->reflection);
+    sh_package_runtime_test_installed_links(1);
+    CHECK(sh_package_runtime_refresh(data));
+    library_row *rows = library_snapshot(count);
+    sh_package_runtime_test_dispose(); cleanup_resources(data);
+    return rows;
+}
+/* The live set_bounce_pad_destination shape: a stock child of the base row
+ * patches one sparse slot with a picker inspector whose allowed entry shows
+ * an inspector a package overrides (bounce_pad_dest_picker names
+ * bounce_pad_destination, which shows display_name_inspector); the package's
+ * own stock row reaches the child, so the baseline scope reaches it too. No
+ * package authors the child, the picker or the entry, so nothing composes
+ * into them: the package's scope binds its picker (and the entry and child)
+ * as its own variants, and every scope binding what the shipped rows bind
+ * shares them. Before, the package scope's copy of the child contributed its
+ * binding to the shipped one, which then was staged alone and collided with
+ * the package scope's certified copy (the refused boot). A second package
+ * changing the speaker the rows place is a gameplay-bound scope: it binds
+ * its own variants beside the first (two valid variants, not incompatible
+ * edits). Checked with the caller composing before (a_caller) and after
+ * (z_caller) the entry its picker allows, in both package discovery orders,
+ * and across an installation increment, a full rescan and a map's own
+ * context; the package's placement changes stay its own variants. */
+static const char *const d8t_callers[] = {"generated/decls/snapeditorentitydef/d8rows/a_caller.decl",
+    "generated/decls/snapeditorentitydef/d8rows/z_caller.decl"};
+static const char *d8t_host_row = "generated/decls/snapeditorentitydef/d8host/host.decl";
+static const char *d8t_caller_host = "generated/decls/snapeditorentitydef/d8rows/caller_host.decl";
+/* A second package whose own row reaches both callers; with gameplay it also
+ * changes the speaker definition the rows place, in its own scope. */
+static const char *const d8t_bundle[] = {"snapeditorentitydef/d8rows/a_caller", "snapeditorentitydef/d8rows/z_caller",
+    "snappropertyinspector_text/d8rows/x_picker", "snappropertyinspector_text/d8rows/y_picker",
+    "snapeditorentitydef/d8rows/a_dest", "snapeditorentitydef/d8rows/z_dest"};
+static void d8t_host(const char *prefix, int gameplay);
+/* The host package, optionally bundling byte-faithful copies of the shipped
+ * callers, pickers and destinations instead of reaching them as stock. */
+static void d8t_host_bundle(const char *prefix, int gameplay, int bundle)
+{
+    if (bundle)
+        for (size_t i = 0; i < sizeof(d8t_bundle) / sizeof(*d8t_bundle); i++) {
+            char path[256], relative[300];
+            unsigned char *copy = NULL; size_t copy_length = 0;
+            snprintf(path, sizeof(path), "generated/decls/%s.decl", d8t_bundle[i]);
+            snprintf(relative, sizeof(relative), "assets/%s", path);
+            if (d8r_baseline(NULL, path, &copy, &copy_length) == 1) d8c_file(prefix, relative, (const char *)copy);
+            free(copy);
+        }
+    d8t_host(prefix, gameplay);
+}
+static void d8t_host(const char *prefix, int gameplay)
+{
+    d8c_file(prefix, "package.json", "{\"id\":\"d8-host\",\"name\":\"D8 host\"}");
+    d8c_file(prefix, "assets/generated/decls/snapeditorentitydef/d8host/host.decl",
+        "{ edit = { entityDef = \"d8rows/speaker\"; inputs = { num = 2; item[0] = \"d8rows/a_caller\"; "
+        "item[1] = \"d8rows/z_caller\"; } } }");
+    if (gameplay)
+        d8c_file(prefix, "assets/generated/decls/entitydef/d8rows/speaker.decl",
+            "{ class = \"Entity\"; edit = { health = 5; target = \"\"; } }");
+}
+static library_row *d8t_scan(const char *name, const char *editor, int kind, const char *host, int gameplay,
+    int bundle, admission_fixture *f, size_t *count)
+{
+    char prefix[MAX_PATH];
+    snprintf(prefix, sizeof(prefix), "%s/overrides/%s", name, editor); d8r_local_editor(prefix, kind);
+    if (host) { snprintf(prefix, sizeof(prefix), "%s/overrides/%s", name, host); d8t_host_bundle(prefix, gameplay, bundle); }
+    return d8p_scan(name, f, count);
+}
+/* The private copies of one stock row in a library, joined by '|' in order. */
+static void d8t_copy_paths(const library_row *rows, size_t count, const char *stock, char *out, size_t capacity)
+{
+    *out = 0;
+    for (size_t i = 0; i < count; i++)
+        if (rows[i].original && !strcmp(rows[i].original, stock) && strcmp(rows[i].path, stock)) {
+            size_t used = strlen(out);
+            snprintf(out + used, capacity - used, "%s%s", used ? "|" : "", rows[i].path);
+        }
+}
+static void test_picker_topology(void)
+{
+    static const struct { const char *name, *editor, *host; } layouts[] = {
+        {"d8t-alone", "local-editor", NULL}, {"d8t-order-0", "a-editor", "z-host"},
+        {"d8t-order-1", "z-editor", "a-host"}};
+    char data[MAX_PATH], source[MAX_PATH], error[2048], paths[2][2][1024];
+    admission_fixture f; d8r_setup(&f);
+    library_row *rows = NULL, *incremented = NULL, *rescanned = NULL, *mapped = NULL;
+    size_t count = 0, incremented_count = 0, rescanned_count = 0, mapped_count = 0;
+    sh_package_map_plan *plan = NULL;
+    int activations = 0;
+    /* The shipped rows stay shipped (nothing composes into them); the package
+     * scope's binding makes one variant of each caller, the same one in every
+     * layout and discovery order; the host scope shares the shipped callers;
+     * the package's placement change to its host row stays its own variant. */
+    for (size_t l = 0; l < sizeof(layouts) / sizeof(*layouts); l++) {
+        rows = d8t_scan(layouts[l].name, layouts[l].editor, 7, layouts[l].host, 0, 0, &f, &count);
+        int right = d8r_copies(layouts[l].name, rows, count, d8t_caller_host) == 1;
+        for (size_t k = 0; k < 2; k++) {
+            char mine[1024];
+            d8t_copy_paths(rows, count, d8t_callers[k], mine, sizeof(mine));
+            right = right && !d8r_path(rows, count, d8t_callers[k]) &&
+                d8r_copies(layouts[l].name, rows, count, d8t_callers[k]) == 1;
+            if (!l) strcpy_s(paths[0][k], sizeof(paths[0][k]), mine);
+            else right = right && !strcmp(mine, paths[0][k]);
+        }
+        if (!right) d8c_dump(layouts[l].name, rows, count);
+        CHECK(right);
+        library_rows_free(rows, count); rows = NULL;
+    }
+    /* A caller the package supplies with its own placement stays its own
+     * variant; like any supplied row, its scope's bindings (its picker)
+     * compose into the shipped entry, which does not take the placement. */
+    rows = d8t_scan("d8t-placed", "local-editor", 8, NULL, 0, 0, &f, &count);
+    {
+        const library_row *shared = d8r_path(rows, count, d8t_callers[0]);
+        int right = d8r_copies("d8t-placed", rows, count, d8t_callers[0]) == 1 &&
+            d8r_copies("d8t-placed", rows, count, d8t_callers[1]) == 1 && shared &&
+            !strstr((const char *)shared->body, "placementFlags");
+        if (!right) d8c_dump("d8t-placed", rows, count);
+        CHECK(right);
+    }
+    library_rows_free(rows, count); rows = NULL;
+    /* A byte-faithful copy of a caller the package bundles is the shipped
+     * caller as its scope reaches it: the same bound variant, under the same
+     * private name, as when that scope reaches the stock file (kind 7). */
+    rows = d8t_scan("d8t-copied", "local-editor", 9, NULL, 0, 0, &f, &count);
+    {
+        char mine[1024];
+        d8t_copy_paths(rows, count, d8t_callers[0], mine, sizeof(mine));
+        int right = !strcmp(mine, paths[0][0]) && !d8r_path(rows, count, d8t_callers[0]);
+        if (!right) { fprintf(stderr, "d8t-copied: %s, reached %s\n", mine, paths[0][0]); d8c_dump("d8t-copied", rows, count); }
+        CHECK(right);
+    }
+    library_rows_free(rows, count); rows = NULL;
+    /* A caller the package supplies with its own picker choice is an edit to
+     * the shipped caller: the shipped entry takes it, and the supplied copy,
+     * whose own composition already states it, stages the same output, so
+     * the declaration stays one entry (no copy of it). */
+    rows = d8t_scan("d8t-rebound", "local-editor", 10, NULL, 0, 0, &f, &count);
+    {
+        const library_row *shared = d8r_path(rows, count, d8t_callers[0]);
+        int right = !d8r_copies("d8t-rebound", rows, count, d8t_callers[0]) && shared &&
+            strstr((const char *)shared->body, "d8rows/y_picker") != NULL;
+        if (!right) d8c_dump("d8t-rebound", rows, count);
+        CHECK(right);
+    }
+    library_rows_free(rows, count); rows = NULL;
+    /* A scope binding a gameplay variant of what the rows place binds its own
+     * callers beside the package's: two valid variants, and the shipped rows
+     * stay shipped (the refused compile this pins said "incompatible edits"). */
+    for (int bundle = 0; bundle < 2; bundle++) {
+        const char *name = bundle ? "d8t-gameplay-bundled" : "d8t-gameplay";
+        rows = d8t_scan(name, "local-editor", 7, "host", 1, bundle, &f, &count);
+        int right = count > 0;
+        for (size_t k = 0; k < 2; k++) {
+            char mine[1024];
+            d8t_copy_paths(rows, count, d8t_callers[k], mine, sizeof(mine));
+            right = right && d8r_copies(name, rows, count, d8t_callers[k]) == 2 && !d8r_path(rows, count, d8t_callers[k]);
+            if (!bundle) strcpy_s(paths[1][k], sizeof(paths[1][k]), mine);
+            else right = right && !strcmp(mine, paths[1][k]);
+        }
+        if (!right) d8c_dump(name, rows, count);
+        CHECK(right);
+        library_rows_free(rows, count); rows = NULL;
+    }
+    /* The host package installed from a map over a library holding only the
+     * local editor binds what a full rescan and the map's own context bind. */
+    {
+        sh_decl_registry_source registry = {&f, admission_read, (uintptr_t)f.registry, NULL};
+        snprintf(source, sizeof(source), "d8t-data/overrides/local-editor"); d8r_local_editor(source, 7);
+        snprintf(source, sizeof(source), "d8t-map/overrides/host"); d8t_host(source, 0);
+        snprintf(data, sizeof(data), "%s/d8t-data", root); snprintf(source, sizeof(source), "%s/d8t-map", root);
+        sh_package_runtime_test_dispose(); sh_package_runtime_test_baseline(d8r_baseline, NULL);
+        sh_package_runtime_test_source_readers(registry, (uintptr_t)f.reflection);
+        sh_package_runtime_test_installed_links(1);
+        CHECK(sh_package_runtime_refresh(data));
+        plan = sh_package_runtime_prepare_map(data, source, error, sizeof(error)); CHECK(plan);
+        if (!plan) { fprintf(stderr, "d8t map: %s\n", error); goto done; }
+        mapped = d8c_compilation_rows(sh_package_map_plan_compilation(plan), &mapped_count);
+        d8t_host("d8t-data/overrides/host", 0);
+        int prepared = sh_package_map_plan_prepare_inventory(plan, data, error, sizeof(error));
+        if (!prepared || error[0]) fprintf(stderr, "d8t inventory: %s\n", error);
+        CHECK(prepared && !error[0]); if (!prepared) goto done;
+        CHECK(sh_package_runtime_activate_prepared_map(plan, (sh_package_activation_guard){0}, d8c_activate, &activations));
+        CHECK(sh_package_runtime_commit_map(plan, commit_inventory, error, sizeof(error)));
+        sh_package_map_plan_free(plan); plan = NULL;
+        CHECK(sh_package_runtime_activate_prepared_map(NULL, (sh_package_activation_guard){0}, startup_activation,
+            &(int){0}));
+        incremented = library_snapshot(&incremented_count);
+        CHECK(sh_package_runtime_refresh(data));
+        rescanned = library_snapshot(&rescanned_count);
+        size_t aliases = 0;
+        int designed = library_rows_designed(incremented, incremented_count, rescanned, rescanned_count, &aliases);
+        const library_row *installed = d8c_original(incremented, incremented_count, d8t_host_row);
+        const library_row *again = d8r_path(rescanned, rescanned_count, d8t_host_row);
+        const library_row *authored = d8c_original(mapped, mapped_count, d8t_host_row);
+        /* The host's own editor row is a new shared declaration: the
+         * increment and the map context alias it alike until the full scan
+         * names it (the one designed alias). */
+        int bound = installed && again && authored && !strcmp(installed->path, authored->path) && aliases == 1;
+        int callers = 1;
+        for (size_t k = 0; k < 2; k++) {
+            d8t_copy_paths(incremented, incremented_count, d8t_callers[k], paths[0][k], sizeof(paths[0][k]));
+            d8t_copy_paths(rescanned, rescanned_count, d8t_callers[k], paths[1][k], sizeof(paths[1][k]));
+            callers = callers && !strcmp(paths[0][k], paths[1][k]) && !strchr(paths[0][k], '|') && *paths[0][k] &&
+                !d8c_original(mapped, mapped_count, d8t_callers[k]);
+        }
+        if (!designed || !bound || !callers) {
+            fprintf(stderr, "d8t increment: designed %d, aliases %zu, bound %d, callers %d\n", designed, aliases,
+                bound, callers);
+            d8c_dump("increment", incremented, incremented_count); d8c_dump("rescan", rescanned, rescanned_count);
+            d8c_dump("map", mapped, mapped_count);
+        }
+        CHECK(designed && bound && callers);
+    }
+done:
+    sh_package_map_plan_free(plan);
+    library_rows_free(incremented, incremented_count); library_rows_free(rescanned, rescanned_count);
+    library_rows_free(mapped, mapped_count);
+    sh_package_runtime_test_dispose();
+    snprintf(data, sizeof(data), "%s/d8t-data", root); cleanup_resources(data);
+    snprintf(data, sizeof(data), "%s/d8t-map", root); cleanup_resources(data);
+    sh_package_runtime_test_installed_links(0);
+    sh_package_runtime_test_source_readers((sh_decl_registry_source){0}, 0);
+    sh_package_runtime_test_baseline(baseline, NULL);
+    for (size_t i = 0; i < f.count; i++) free(f.regions[i].address);
+}
+static void test_editor_presentation(void)
+{
+    const char *base_path = "assets/generated/decls/snapeditorentitydef/d8rows/input_base.decl";
+    const char *green = "displayNameColor = {\n\t\t\tr = 0;\n\t\t\tg = 1;\n\t\t}";
+    const char *red = "displayNameColor = {\n\t\t\tr = 1;\n\t\t\tg = 0;\n\t\t}";
+    admission_fixture f; d8r_setup(&f);
+    library_row *rows; size_t count;
+    /* Opposing colours, in both discovery orders: the earlier one wins. */
+    for (int reversed = 0; reversed < 2; reversed++) {
+        char name[32]; snprintf(name, sizeof(name), "d8p-opposing-%d", reversed);
+        d8p_package(name, reversed ? "z-green" : "a-green", base_path, d8p_edit_text(green));
+        d8p_package(name, reversed ? "a-red" : "z-red", base_path, d8p_edit_text(red));
+        rows = d8p_scan(name, &f, &count);
+        const library_row *shared = d8r_path(rows, count, d8r_base);
+        const char *wanted = reversed ? "r = 1;" : "g = 1;";
+        int right = shared && strstr((const char *)shared->body, wanted) && !d8r_copies(name, rows, count, d8r_base);
+        if (!right) d8c_dump(name, rows, count);
+        CHECK(right);
+        library_rows_free(rows, count);
+    }
+    /* A presentation-only member beside one that also changes placement. */
+    {
+        const char *name = "d8p-mixed";
+        char mixed[256];
+        snprintf(mixed, sizeof(mixed), "%s\n\t\tplacementFlags = \"SNAP_ENTITY_PLACE_FLOOR\";", red);
+        d8p_package(name, "a-green", base_path, d8p_edit_text(green));
+        d8p_package(name, "m-mixed", base_path, d8p_edit_text(mixed));
+        rows = d8p_scan(name, &f, &count);
+        const library_row *shared = d8r_path(rows, count, d8r_base), *variant = NULL;
+        for (size_t i = 0; i < count; i++)
+            if (rows[i].original && !strcmp(rows[i].original, d8r_base) && strcmp(rows[i].path, d8r_base)) variant = rows + i;
+        int right = shared && strstr((const char *)shared->body, "g = 1;") && !strstr((const char *)shared->body, "placementFlags") &&
+            variant && strstr((const char *)variant->body, "r = 1;") && strstr((const char *)variant->body, "placementFlags");
+        if (!right) d8c_dump(name, rows, count);
+        CHECK(right);
+        library_rows_free(rows, count);
+    }
+    /* A member omitting the shipped colour stays its own variant, without a
+     * colour, alone or beside a peer whose colour the shared entry takes. */
+    for (int peer = 0; peer < 2; peer++) {
+        char name[32]; snprintf(name, sizeof(name), "d8p-absent-%d", peer);
+        const char *tinted_path = "assets/generated/decls/snapeditorentitydef/d8rows/tinted.decl";
+        const char *tinted = "generated/decls/snapeditorentitydef/d8rows/tinted.decl";
+        d8p_package(name, "a-plain", tinted_path, "{\n\tedit = {\n\t\tentityDef = \"d8rows/speaker\";\n\t}\n}\n");
+        if (peer)
+            d8p_package(name, "z-green", tinted_path, "{\n\tedit = {\n\t\tdisplayNameColor = {\n\t\t\tr = 0;\n"
+                "\t\t\tg = 1;\n\t\t}\n\t\tentityDef = \"d8rows/speaker\";\n\t}\n}\n");
+        rows = d8p_scan(name, &f, &count);
+        const library_row *shared = d8r_path(rows, count, tinted), *own = NULL;
+        for (size_t i = 0; i < count; i++)
+            if (rows[i].original && !strcmp(rows[i].original, tinted) && strcmp(rows[i].path, tinted)) own = rows + i;
+        int colour = peer ? shared && strstr((const char *)shared->body, "g = 1;") :
+            !shared || strstr((const char *)shared->body, "r = 1;");
+        int right = colour && d8r_copies(name, rows, count, tinted) == 1 && own &&
+            !strstr((const char *)own->body, "displayNameColor");
+        if (!right) d8c_dump(name, rows, count);
+        CHECK(right);
+        library_rows_free(rows, count);
+    }
+    sh_package_runtime_test_installed_links(0);
+    sh_package_runtime_test_source_readers((sh_decl_registry_source){0}, 0);
+    sh_package_runtime_test_baseline(baseline, NULL);
+    for (size_t i = 0; i < f.count; i++) free(f.regions[i].address);
+}
+/* The layout prepass keeps the owner contract (F1/A1): a package whose relaid
+ * editor collection cannot be read is left out by the phase that attributes it
+ * (not served as a coverage gap, or skipped on its own malformed content) and
+ * reported as itself, while its healthy peers' relays are found and served; a
+ * stock parent the prepass cannot read is an environment failure that leaves
+ * out and remembers nobody. */
+static int d8r_unreadable_parent(void *context, const char *path, unsigned char **body, size_t *length)
+{
+    if (!strcmp(path, "generated/decls/snapeditorentitydef/d8rows/envparent.decl")) { *body = NULL; *length = 0; return -1; }
+    return d8r_baseline(context, path, body, length);
+}
+static void test_relay_owners(void)
+{
+    static const char *const shipped[] = {"d8rows/envchild", "d8rows/envparent", "d8rows/input_base", "d8rows/play",
+        "d8rows/play_loud", "d8rows/speaker_row"};
+    /* Collections the prepass cannot read: shapes the readers do not support
+     * yet (the package is not served, as a coverage gap) and one they reject
+     * as malformed (the package is skipped on its own content). */
+    static const struct { const char *text; int malformed; } defects[] = {
+        {"{ edit = { propertySheets = { num = 1; item[0] = { properties = { bogus = 1; } } } } }", 0},
+        {"{ edit = { propertySheets = { num = 1; item[0] = { properties = 5; } } } }", 0},
+        {"{ edit = { propertySheets = 7; } }", 0},
+        {"{ edit = { propertySheets = { num = 1; item[0] = { properties = { num = 1; item[0] = 5; } } } } }", 0},
+        {"{ edit = { propertySheets = { num = 1; item[0] = { properties = { num = 1; item[0] = { path = { x = 1; } } } } } } }", 1},
+    };
+    char data[MAX_PATH], effective[512], *summary = NULL;
+    admission_fixture f; d8r_setup(&f);
+    sh_decl_registry_source registry = {&f, admission_read, (uintptr_t)f.registry, NULL};
+    sh_package_runtime_test_editor_rows(shipped, sizeof(shipped) / sizeof(*shipped));
+    for (size_t d = 0; d < sizeof(defects) / sizeof(*defects); d++) {
+    char folder[64];
+    snprintf(folder, sizeof(folder), "d8o-data-%zu", d);
+    snprintf(data, sizeof(data), "%s/overrides/a-bad/package.json", folder);
+    create(data, "{\"id\":\"d8-bad-editor\",\"name\":\"D8 bad editor\"}");
+    snprintf(data, sizeof(data), "%s/overrides/a-bad/assets/generated/decls/snapeditorentitydef/d8rows/input_base.decl", folder);
+    create(data, defects[d].text);
+    snprintf(data, sizeof(data), "%s/overrides/m-local-editor", folder); d8r_local_editor(data, 2);
+    snprintf(data, sizeof(data), "%s/overrides/z-probe", folder); d8r_probe(data);
+    snprintf(data, sizeof(data), "%s/%s", root, folder);
+    for (int process = 0; process < 2; process++) {
+        library_row *rows = NULL; size_t count = 0;
+        sh_package_runtime_test_dispose(); sh_package_runtime_test_baseline(d8r_baseline, NULL);
+        sh_package_runtime_test_source_readers(registry, (uintptr_t)f.reflection);
+        sh_package_runtime_test_installed_links(1);
+        skipped_packages = left_out_packages = 0;
+        int refreshed = sh_package_runtime_refresh(data);
+        rows = refreshed ? library_snapshot(&count) : NULL;
+        d8r_effective(rows, count, "d8rows/play", effective, sizeof(effective));
+        summary = sh_package_runtime_summary();
+        /* Every problem line names the bad package only. */
+        int reported = 0, blamed_peer = 0;
+        for (const char *line = summary; line && *line;) {
+            const char *end = strchr(line, '\n');
+            size_t length = end ? (size_t)(end - line) : strlen(line);
+            char text[1024];
+            snprintf(text, sizeof(text), "%.*s", (int)(length < sizeof(text) - 1 ? length : sizeof(text) - 1), line);
+            if (strstr(text, defects[d].malformed ? "Skipped local package" : "is not served yet")) {
+                reported |= strstr(text, "a-bad") != NULL;
+                blamed_peer |= strstr(text, "m-local-editor") || strstr(text, "z-probe");
+            }
+            line = end ? end + 1 : NULL;
+        }
+        int remembered = defects[d].malformed ? skipped_packages + left_out_packages == 1 :
+            !skipped_packages && !left_out_packages;
+        reported = reported && !blamed_peer;
+        if (!refreshed || !reported || !remembered || strcmp(effective, "comment|displayName:d8rows/name_inspector|actionDelay|volume")) {
+            fprintf(stderr, "d8r owners %d: refreshed %d, play %s, left out %u, summary %s\n", process, refreshed,
+                effective, left_out_packages, summary ? summary : "(none)");
+            d8c_dump("owners", rows, count);
+        }
+        CHECK(refreshed && reported && remembered &&
+            !strcmp(effective, "comment|displayName:d8rows/name_inspector|actionDelay|volume") &&
+            d8r_path(rows, count, d8r_play) && d8c_original(rows, count, d8r_probe_row));
+        free(summary); summary = NULL; library_rows_free(rows, count);
+    }
+    sh_package_runtime_test_dispose(); cleanup_resources(data);
+    }
+    /* The same relay whose stock parent cannot be read: nobody is blamed. */
+    create("d8o-env/overrides/m-env/package.json", "{\"id\":\"d8-env-editor\",\"name\":\"D8 env editor\"}");
+    create("d8o-env/overrides/m-env/assets/generated/decls/snapeditorentitydef/d8rows/envchild.decl",
+        "{ inherit = \"d8rows/envparent\"; edit = { propertySheets = { item[0] = { properties = { num = 3; "
+        "item[1] = { path = \"inserted\"; } item[2] = { path = \"envown\"; } } } } } }");
+    snprintf(data, sizeof(data), "%s/d8o-env", root);
+    sh_package_runtime_test_dispose(); sh_package_runtime_test_baseline(d8r_unreadable_parent, NULL);
+    sh_package_runtime_test_source_readers(registry, (uintptr_t)f.reflection);
+    sh_package_runtime_test_installed_links(1);
+    skipped_packages = left_out_packages = 0;
+    int refreshed = sh_package_runtime_refresh(data);
+    if (refreshed || skipped_packages) fprintf(stderr, "d8r owners env: refreshed %d, %u skipped\n", refreshed, skipped_packages);
+    CHECK(!refreshed && !skipped_packages);
+    /* Readable again, the package is served: nothing was remembered against it. */
+    sh_package_runtime_test_dispose(); sh_package_runtime_test_baseline(d8r_baseline, NULL);
+    sh_package_runtime_test_source_readers(registry, (uintptr_t)f.reflection);
+    sh_package_runtime_test_installed_links(1);
+    skipped_packages = left_out_packages = 0;
+    refreshed = sh_package_runtime_refresh(data);
+    CHECK(refreshed && !skipped_packages && !left_out_packages);
+    sh_package_runtime_test_dispose(); cleanup_resources(data);
+    sh_package_runtime_test_editor_rows(NULL, 0);
+    sh_package_runtime_test_installed_links(0);
+    sh_package_runtime_test_source_readers((sh_decl_registry_source){0}, 0);
+    sh_package_runtime_test_baseline(baseline, NULL);
+    for (size_t i = 0; i < f.count; i++) free(f.regions[i].address);
+}
+/* The shipped roster a positional relay needs is complete or the compile
+ * fails as an environment failure: an entry the archive holds but cannot read
+ * serves no partial descendant closure and blames or remembers no package, and
+ * the next compile after recovery serves the whole closure. An absent or
+ * campaign-only name is not an entry; a missing roster only matters when a
+ * package moves a stock entry's inherited controls. */
+static int d8r_roster_reader(void *context, const char *path, unsigned char **body, size_t *length)
+{
+    if (context && !strcmp(path, "generated/decls/snapeditorentitydef/d8rows/play_loud.decl")) {
+        *body = NULL; *length = 0; return -1;
+    }
+    if (!strcmp(path, "generated/decls/snapeditorentitydef/d8rows/campaign_row.decl")) {
+        static const char text[] = "{ inherit = \"d8rows/play\"; edit = { } }";
+        *length = sizeof(text) - 1; *body = (unsigned char *)_strdup(text); return *body ? 2 : -1;
+    }
+    return d8r_baseline(context, path, body, length);
+}
+static int d8r_roster_refresh(const char *data, admission_fixture *f, sh_package_baseline_reader reader, void *context,
+    library_row **rows, size_t *count)
+{
+    sh_decl_registry_source registry = {f, admission_read, (uintptr_t)f->registry, NULL};
+    sh_package_runtime_test_dispose(); sh_package_runtime_test_baseline(reader, context);
+    sh_package_runtime_test_source_readers(registry, (uintptr_t)f->reflection);
+    sh_package_runtime_test_installed_links(1);
+    skipped_packages = left_out_packages = 0;
+    int refreshed = sh_package_runtime_refresh(data);
+    *rows = NULL; *count = 0;
+    if (refreshed) *rows = library_snapshot(count);
+    return refreshed;
+}
+static void test_relay_roster(void)
+{
+    static const char *const shipped[] = {"d8rows/absent_row", "d8rows/campaign_row", "d8rows/input_base",
+        "d8rows/play", "d8rows/play_loud", "d8rows/speaker_row"};
+    const char *loud = "comment|displayName:d8rows/name_inspector|actionDelay|volume|loudness";
+    char data[MAX_PATH], effective[512];
+    library_row *rows = NULL; size_t count = 0;
+    admission_fixture f; d8r_setup(&f);
+    d8r_local_editor("d8q-moved/overrides/m-local-editor", 2); d8r_probe("d8q-moved/overrides/z-probe");
+    d8r_local_editor("d8q-bound/overrides/m-local-editor", 1); d8r_probe("d8q-bound/overrides/z-probe");
+    snprintf(data, sizeof(data), "%s/d8q-moved", root);
+    sh_package_runtime_test_editor_rows(shipped, sizeof(shipped) / sizeof(*shipped));
+    /* A shipped child the archive holds but cannot read: nothing is served. */
+    int refreshed = d8r_roster_refresh(data, &f, d8r_roster_reader, (void *)1, &rows, &count);
+    if (refreshed || skipped_packages || left_out_packages)
+        fprintf(stderr, "d8r roster unreadable: refreshed %d, %u skipped, %u left out\n", refreshed, skipped_packages,
+            left_out_packages);
+    CHECK(!refreshed && !skipped_packages && !left_out_packages);
+    library_rows_free(rows, count);
+    /* Recovered: the whole closure, the absent and campaign names aside. */
+    refreshed = d8r_roster_refresh(data, &f, d8r_roster_reader, NULL, &rows, &count);
+    d8r_effective(rows, count, "d8rows/play_loud", effective, sizeof(effective));
+    if (!refreshed || skipped_packages || left_out_packages || strcmp(effective, loud))
+        fprintf(stderr, "d8r roster recovered: refreshed %d, %u skipped, %u left out, play_loud %s\n", refreshed,
+            skipped_packages, left_out_packages, effective);
+    CHECK(refreshed && !skipped_packages && !left_out_packages && !strcmp(effective, loud) &&
+        d8r_path(rows, count, "generated/decls/snapeditorentitydef/d8rows/play_loud.decl") &&
+        !d8r_path(rows, count, "generated/decls/snapeditorentitydef/d8rows/campaign_row.decl"));
+    library_rows_free(rows, count);
+    /* No roster at all: a positional relay cannot be served without it... */
+    sh_package_runtime_test_editor_rows_unavailable(1);
+    refreshed = d8r_roster_refresh(data, &f, d8r_baseline, NULL, &rows, &count);
+    CHECK(!refreshed && !skipped_packages && !left_out_packages);
+    library_rows_free(rows, count);
+    sh_package_runtime_test_dispose(); cleanup_resources(data);
+    /* ...while a relay that keeps every control at its slot never reads it. */
+    snprintf(data, sizeof(data), "%s/d8q-bound", root);
+    refreshed = d8r_roster_refresh(data, &f, d8r_baseline, NULL, &rows, &count);
+    CHECK(refreshed && !skipped_packages);
+    library_rows_free(rows, count);
+    sh_package_runtime_test_dispose(); cleanup_resources(data);
+    sh_package_runtime_test_editor_rows_unavailable(0); sh_package_runtime_test_editor_rows(NULL, 0);
+    sh_package_runtime_test_installed_links(0);
+    sh_package_runtime_test_source_readers((sh_decl_registry_source){0}, 0);
+    sh_package_runtime_test_baseline(baseline, NULL);
+    for (size_t i = 0; i < f.count; i++) free(f.regions[i].address);
+}
 /* A published installation that no map load continues (the MPKG gate) folds
  * its packages in as a map-driven installation does: the refresh compiles only
  * the added packages, serves the rest from the retained library and so serves
@@ -4459,6 +5692,24 @@ int main(int argc, char **argv)
     if (argc == 2 && !strcmp(argv[1], "--native-inline-library")) {
         test_native_inline_library(); cleanup(); return failures ? 1 : 0;
     }
+    if (argc == 2 && !strcmp(argv[1], "--increment-composition")) {
+        test_increment_editor_composition(); cleanup(); return failures ? 1 : 0;
+    }
+    if (argc == 2 && !strcmp(argv[1], "--increment-stock-rows")) {
+        test_increment_stock_rows(); cleanup(); return failures ? 1 : 0;
+    }
+    if (argc == 2 && !strcmp(argv[1], "--relay-owners")) {
+        test_relay_owners(); cleanup(); return failures ? 1 : 0;
+    }
+    if (argc == 2 && !strcmp(argv[1], "--picker-topology")) {
+        test_picker_topology(); cleanup(); return failures ? 1 : 0;
+    }
+    if (argc == 2 && !strcmp(argv[1], "--editor-presentation")) {
+        test_editor_presentation(); cleanup(); return failures ? 1 : 0;
+    }
+    if (argc == 2 && !strcmp(argv[1], "--relay-roster")) {
+        test_relay_roster(); cleanup(); return failures ? 1 : 0;
+    }
     run_conflicting_startup();
     test_duplicate_editor_controls();
     test_audio_programs();
@@ -4599,6 +5850,12 @@ int main(int argc, char **argv)
     test_left_out_across_processes();
     test_malformed_owners_together();
     test_increment_designed_difference();
+    test_increment_editor_composition();
+    test_increment_stock_rows();
+    test_relay_owners();
+    test_relay_roster();
+    test_editor_presentation();
+    test_picker_topology();
     test_selector_shared_retirement();
     test_selector_unrelated_gameplay();
     test_failed_local_compilation_admission();

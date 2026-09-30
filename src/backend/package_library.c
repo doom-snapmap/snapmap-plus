@@ -10,6 +10,7 @@
 #include "package_movie.h"
 #include "swf_binary.h"
 #include "decl_tree.h"
+#include "package_editor_rows.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -98,6 +99,11 @@ typedef struct pl_build {
     int key_space_read, private_keys;
     /* Wall-clock milliseconds of the contribution phase's steps (PL_STEP_*). */
     unsigned long long step_ms[9];
+    /* Diagnostics: why an unowned stock unit a scope only references lost its
+     * original name (document step reasons per unit, then the accounted line). */
+    const char **stock_reasons;
+    size_t stock_reason_count, private_stock;
+    char private_stock_notes[3072];
     /* Diagnostic parse census (decl_tree.h) per library phase and step. */
     int census_owned;
     /* Diagnostics: key-site scans made and reused, units left unrewritten. */
@@ -244,6 +250,7 @@ static void pl_close(pl_build *b)
     free(b->keys); b->keys = NULL; b->key_count = 0;
     free(b->key_notes); b->key_notes = NULL;
     free(b->key_groups); b->key_groups = NULL;
+    free((void *)b->stock_reasons); b->stock_reasons = NULL; b->stock_reason_count = 0;
     sh_package_native_registry_close(b->identities);
     pl_contributions_close(b->contributions);
     sh_package_source_link_close(b->reader);
@@ -340,7 +347,7 @@ void sh_package_library_free(sh_package_library *library)
     sh_virtual_material_runtime_retire(&library->virtual_materials);
     sh_package_consumers_free(library->consumers);
     free(library->key_groups);
-    free(library->coverage);
+    free(library->coverage); free(library->link_diagnostics);
     sh_package_provenance_free(&library->bindings); memset(library, 0, sizeof(*library));
 }
 
@@ -485,29 +492,154 @@ done:
     free(projections); free(members); return ok;
 }
 
+static int pl_inherit_name(sh_decl_source text, char **out);
+#define PL_EDITOR_PREFIX "generated/decls/snapeditorentitydef/"
+static const sh_editor_row *pl_editor_row(const sh_editor_rows *rows, const char *name)
+{
+    for (size_t low = 0, high = rows->count; low < high;) {
+        size_t middle = low + (high - low) / 2;
+        int order = strcmp(rows->items[middle].name, name);
+        if (!order) return rows->items + middle;
+        if (order < 0) low = middle + 1; else high = middle;
+    }
+    return NULL;
+}
+/* 1 when some package's own text for a stock editor entry leaves an inherited
+ * control at another slot than the shipped entry does (a control inserted,
+ * removed or moved, or another parent), 0 when none does, -1 on failure. */
+static int pl_moves_controls(pl_build *b, const char *path, const unsigned char *stock, size_t stock_length,
+    sh_package_baseline_reader original, void *context, char *error, size_t capacity)
+{
+    sh_decl_source parents[32], shipped = {(const char *)stock, stock_length};
+    size_t parent_count = 0;
+    char *parent = NULL, *authored_parent = NULL;
+    int moves = 0;
+    if (!pl_inherit_name(shipped, &parent)) return 0;
+    while (parent && parent_count < 32) {
+        size_t length = strlen(parent) + sizeof(PL_EDITOR_PREFIX) + 5;
+        char *parent_path = malloc(length);
+        unsigned char *body = NULL; size_t size = 0;
+        int status = -1;
+        if (parent_path) {
+            snprintf(parent_path, length, PL_EDITOR_PREFIX "%s.decl", parent);
+            status = original(context, parent_path, &body, &size);
+        }
+        free(parent_path); free(parent); parent = NULL;
+        if (status < 0) { free(body); moves = -1; goto done; }
+        if (status != 1 && status != 3) { free(body); break; }
+        parents[parent_count++] = (sh_decl_source){(const char *)body, size};
+        if (!pl_inherit_name(parents[parent_count - 1], &parent)) break;
+    }
+    free(parent); parent = NULL;
+    if (!pl_inherit_name(shipped, &parent)) goto done;
+    for (size_t scope = 0; scope < b->count && !moves; scope++) {
+        const sh_compiled_resource *file = sh_package_compilation_find(b->scopes[scope], path);
+        size_t length = 0;
+        /* A frozen legacy context composes only its AI registrations. */
+        if (b->contexts && scope < b->authored_count && b->contexts->contexts[scope].mode == SH_PACKAGE_CONTEXT_COMPOSED)
+            continue;
+        if (!file || !file->source_count || file->native_original) continue;
+        unsigned char *body = sh_package_compilation_read(b->scopes[scope], file, SIZE_MAX, &length, error, capacity);
+        if (!body) { moves = -1; break; }
+        sh_decl_source text = {(const char *)body, length};
+        if (!pl_inherit_name(text, &authored_parent)) moves = 0;
+        else if ((parent == NULL) != (authored_parent == NULL) || (parent && strcmp(parent, authored_parent))) moves = 1;
+        else moves = sh_package_editor_moves_controls("snapeditorentitydef", text, shipped, parents, parent_count);
+        /* A malformed collection decides nothing here: the phase that reads it
+         * as its owner's content leaves that package out, and a healthy peer's
+         * relay is still found. */
+        if (moves == -2) moves = 0;
+        free(authored_parent); authored_parent = NULL; free(body);
+    }
+done:
+    for (size_t i = 0; i < parent_count; i++) free((char *)parents[i].text);
+    free(parent); free(authored_parent);
+    if (moves < 0 && !*error) snprintf(error, capacity, "cannot compare an editor entry's layout: %s", path);
+    return moves;
+}
+
+/* The names of the stock editor entries whose inherited controls some
+ * package's own text moves (pl_moves_controls), each once. 0 on failure. */
+static int pl_editor_relays(pl_build *b, sh_package_baseline_reader original, void *context,
+    char ***out, size_t *count, char *error, size_t capacity)
+{
+    size_t prefix = sizeof(PL_EDITOR_PREFIX) - 1;
+    *out = NULL; *count = 0;
+    if (!original) return 1;
+    for (size_t scope = 0; scope < b->count; scope++) {
+        if (b->contexts && scope < b->authored_count && b->contexts->contexts[scope].mode == SH_PACKAGE_CONTEXT_COMPOSED)
+            continue;
+        for (size_t i = 0; i < b->scopes[scope]->resource_count; i++) {
+            const sh_compiled_resource *file = b->scopes[scope]->resources + i;
+            const char *path = file->engine_path;
+            size_t n = path ? strlen(path) : 0, seen = 0;
+            if (!file->source_count || file->native_original || !file->type || strcmp(file->type, "snapeditorentitydef") ||
+                n < prefix + 6 || strncmp(path, PL_EDITOR_PREFIX, prefix) || strcmp(path + n - 5, ".decl")) continue;
+            for (size_t r = 0; r < *count && !seen; r++)
+                seen = strlen((*out)[r]) == n - prefix - 5 && !strncmp((*out)[r], path + prefix, n - prefix - 5);
+            if (seen) continue;
+            unsigned char *stock = NULL; size_t length = 0;
+            int status = original(context, path, &stock, &length);
+            if (status < 0) { free(stock); return 0; }
+            int moves = status == 1 || status == 3 ?
+                pl_moves_controls(b, path, stock, length, original, context, error, capacity) : 0;
+            free(stock);
+            if (moves < 0) return 0;
+            if (!moves) continue;
+            char **grown = realloc(*out, (*count + 1) * sizeof(*grown));
+            char *name = grown ? malloc(n - prefix - 4) : NULL;
+            if (grown) *out = grown;
+            if (!name) { snprintf(error, capacity, "editor layout allocation failed"); return 0; }
+            memcpy(name, path + prefix, n - prefix - 5); name[n - prefix - 5] = 0;
+            (*out)[(*count)++] = name;
+        }
+    }
+    return 1;
+}
+
 /* Baseline references must bind in an original-only context. Resolving a stock
  * inspector through a package which replaces it would misclassify additions as
  * unchanged. Product defaults have their own contribution scope. Seed only known
  * original editor identities; source_link
- * captures their closure from the verified original reader, never another pack. */
+ * captures their closure from the verified original reader, never another pack.
+ * A stock editor entry whose inherited controls a package moves also seeds its
+ * stock descendants: their shipped patches address its slots, so each needs a
+ * rebase onto the published entry in every library, whether a package reaches
+ * it or not (an installation cannot restate a shipped entry later). */
 static int pl_baseline_scope(pl_build *b, const sh_package_sources *sources,
     sh_package_baseline_reader original, void *context, char *error, size_t capacity)
 {
     sh_package_resource_projection *projections = NULL;
     sh_compiled_resource *seeds = NULL;
     const sh_compiled_resource **members = NULL;
-    size_t maximum = b->shared->resource_count, count = 0, hand_count = 0;
-    char **hands = NULL;
+    size_t maximum = b->shared->resource_count, count = 0, hand_count = 0, owned_count = 0, relay_count = 0;
+    char **hands = NULL, **owned = NULL, **relays = NULL;
+    const sh_editor_rows *rows = NULL;
     int ok = 0;
     for (size_t i = 0; i < b->count; i++) {
         if (b->scopes[i]->resource_count > SIZE_MAX - maximum) return 0;
         maximum += b->scopes[i]->resource_count;
     }
+    /* The stock editor entries some package relays, and then the shipped roster. */
+    if (!pl_editor_relays(b, original, context, &relays, &relay_count, error, capacity)) goto done;
+    if (relay_count && b->native && b->native->editor_rows) {
+        /* The stock descendants are required, never partial: a roster that is
+         * unavailable or missing an entry fails this compile, blaming nobody. */
+        int read = b->native->editor_rows(b->native->editor_rows_context, &rows);
+        if (read <= 0 || !rows) {
+            snprintf(error, capacity, "SnapMap's shipped editor entries %s, and a package moves the inherited "
+                "controls of %s", read < 0 ? "could not all be read" : "are unavailable", relays[0]);
+            rows = NULL; goto done;
+        }
+    }
+    if (rows && rows->count > SIZE_MAX - maximum) goto done;
+    if (rows) maximum += rows->count;
     if (maximum > SIZE_MAX / sizeof(*seeds) || maximum > SIZE_MAX / sizeof(*projections)) return 0;
     projections = calloc(maximum ? maximum : 1, sizeof(*projections));
     members = calloc(maximum ? maximum : 1, sizeof(*members));
     seeds = calloc(maximum ? maximum : 1, sizeof(*seeds));
     if (!projections || !members || !seeds) goto done;
+    if (rows && !(owned = calloc(rows->count + 1, sizeof(*owned)))) goto done;
     /* The player hands web composes against its stock original whenever a
      * package supplies it, even alone: a package copy aligns before serving. */
     for (size_t scope = 0; scope < b->count && !hands; scope++)
@@ -556,6 +688,32 @@ static int pl_baseline_scope(pl_build *b, const sh_package_sources *sources,
             count++;
         }
     }
+    /* Stock descendants of the entries whose inherited controls a package moves. */
+    for (size_t i = 0; rows && i < rows->count; i++) {
+        int descends = 0;
+        const sh_editor_row *up = rows->items + i;
+        for (unsigned depth = 0; !descends && up && up->parent && depth < 32; depth++) {
+            for (size_t r = 0; r < relay_count && !descends; r++) descends = !strcmp(relays[r], up->parent);
+            up = pl_editor_row(rows, up->parent);
+        }
+        if (!descends) continue;
+        size_t length = strlen(rows->items[i].name) + sizeof(PL_EDITOR_PREFIX) + 5, prior;
+        char *path = malloc(length);
+        if (!path) goto done;
+        snprintf(path, length, PL_EDITOR_PREFIX "%s.decl", rows->items[i].name);
+        for (prior = 0; prior < count; prior++) if (!strcmp(projections[prior].engine_path, path)) break;
+        if (prior < count) { free(path); continue; }
+        owned[owned_count++] = path;
+        sh_compiled_resource *seed = seeds + count;
+        int status = original ? original(context, path, &seed->body, &seed->body_length) : 0;
+        if (status < 0 || (status && !seed->body)) goto done;
+        if (status != 1 && status != 3) { free(seed->body); memset(seed, 0, sizeof(*seed)); continue; }
+        seed->engine_path = path; seed->source = SIZE_MAX;
+        seed->baseline_known = status; seed->native_original = status == 1;
+        members[count] = seed;
+        projections[count] = (sh_package_resource_projection){path, members + count, 1};
+        count++;
+    }
     b->scopes[b->count] = sh_package_compilation_project(sources, projections, count, NULL,
         b->shared->canonical_path, error, capacity);
     if (!b->scopes[b->count]) goto done;
@@ -563,7 +721,9 @@ static int pl_baseline_scope(pl_build *b, const sh_package_sources *sources,
 done:
     if (seeds) for (size_t i = 0; i < maximum; i++) free(seeds[i].body);
     for (size_t h = 0; h < hand_count; h++) free(hands[h]);
-    free(hands); free(seeds); free(projections); free(members); return ok;
+    for (size_t i = 0; i < owned_count; i++) free(owned[i]);
+    for (size_t i = 0; i < relay_count; i++) free(relays[i]);
+    free(owned); free(relays); free(hands); free(seeds); free(projections); free(members); return ok;
 }
 
 typedef struct pl_assignment {
@@ -636,6 +796,13 @@ struct pl_contributions {
     /* Registration-key site scans by class identity and text (open addressing). */
     pl_key_scan **key_scans;
     size_t key_scan_count, key_scan_capacity;
+    /* Developer diagnostics: each unit's shared-name certification (1 named
+     * by the one-class rule, 2 denied by pl_shared_certify), the build for
+     * scope labels, and the bounded report of a refused native identity. */
+    unsigned char *certification;
+    struct pl_build *build;
+    char *notes;
+    size_t notes_used, note_count;
 };
 static void pl_key_scan_free(pl_key_scan *scan)
 {
@@ -690,6 +857,7 @@ static void pl_contributions_close(pl_contributions *c)
     for (size_t i = 0; i < c->key_scan_capacity; i++) pl_key_scan_free(c->key_scans[i]);
     free(c->key_scans);
     free(c->origins); free(c->scopes); free(c->implicit); free(c->witnesses);
+    free(c->certification); free(c->notes);
     free(c->units); free(c->inputs.units); free(c->shared); free(c->global); free(c);
 }
 /* A composed or localized unit binds through the current tokens, so only
@@ -847,6 +1015,40 @@ static int pl_bound_assign(void *context, size_t unit, const unsigned char ident
     pl_contributions *c = context;
     return pl_assign(c->assignment, unit, identity, original_binding, files, count, name, paths, error, capacity);
 }
+/* Developer diagnostics for a refused native identity: this build's own facts
+ * about one unit (its scope and owner, composition and certification state). */
+static void pl_bound_describe(void *context, size_t unit, char *out, size_t capacity)
+{
+    const pl_contributions *c = context;
+    const pl_build *b = c->build;
+    if (!b || unit >= c->inputs.count) { snprintf(out, capacity, "unit outside the contributions"); return; }
+    size_t scope = c->inputs.scopes[unit], origin = c->origins[unit];
+    const char *label = "(unlabelled)";
+    if (scope == b->count - 1) label = "baseline";
+    else if (scope < b->authored_count && b->views[scope].component < b->views[scope].sources.component_count) {
+        const char *root = b->views[scope].sources.components[b->views[scope].component].root;
+        size_t n = root ? strlen(root) : 0;
+        label = root ? (n > 72 ? root + n - 72 : root) : label;
+    } else if (scope >= b->authored_count) label = "context";
+    const sh_package_link_inputs *captured = sh_package_source_link_inputs(c->source);
+    snprintf(out, capacity, "scope %zu (%s) of %zu, origin %zu, contribution class %zu, shared %d, global %d, "
+        "certification %d, composed %d, captured original bytes %d, gameplay-free %d, files %zu",
+        scope, label, b->count, origin, unit < c->classes.node_count ? c->classes.nodes[unit] : SIZE_MAX,
+        c->shared[unit], c->global[unit], c->certification ? c->certification[unit] : -1,
+        c->units[unit].owned != NULL, origin < captured->count ? captured->units[origin].original_binding : -1,
+        origin < captured->count ? sh_package_source_link_shared(c->source)[origin] : -1,
+        c->inputs.units[unit].file_count);
+}
+static void pl_bound_note(void *context, const char *line)
+{
+    pl_contributions *c = context;
+    size_t length = strlen(line);
+    if (c->note_count >= 256 || c->notes_used + length + 2 > 256 * 1024) return;
+    char *grown = realloc(c->notes, c->notes_used + length + 2);
+    if (!grown) return;
+    c->notes = grown; memcpy(c->notes + c->notes_used, line, length);
+    c->notes_used += length; c->notes[c->notes_used++] = '\n'; c->notes[c->notes_used] = 0; c->note_count++;
+}
 static int pl_bound_assign_members(void *context, size_t unit, const char *name,
     const sh_compiled_resource *const *files, const char *const *paths, size_t count,
     char ***names, char *error, size_t capacity)
@@ -983,6 +1185,20 @@ static int pl_document_shared(pl_build *b, sh_package_baseline_reader original,
         nodes[i].edges = walk.edges; nodes[i].edge_count = walk.count;
     }
     if (!sh_package_link_originals(nodes, count, local, retained, error, capacity)) goto done;
+    if (!b->stock_reasons) {
+        b->stock_reasons = calloc(count ? count : 1, sizeof(*b->stock_reasons));
+        b->stock_reason_count = b->stock_reasons ? count : 0;
+    }
+    for (size_t i = 0; b->stock_reasons && i < count && i < b->stock_reason_count; i++) {
+        if (!c->shared[i] || retained[i]) continue;
+        if (!local[i]) { b->stock_reasons[i] = "its source differs from the original"; continue; }
+        b->stock_reasons[i] = "it reaches a unit that keeps no original name";
+        for (size_t e = 0; e < nodes[i].edge_count; e++) {
+            size_t t = nodes[i].edges[e].target;
+            if (t < count && !retained[t]) { b->stock_reasons[i] = local[t] ?
+                "it reaches a unit that keeps no original name" : "it reaches a changed unit"; break; }
+        }
+    }
     for (size_t i = 0; i < count; i++) c->shared[i] &= retained[i];
     ok = 1;
 done:
@@ -1462,16 +1678,47 @@ void sh_package_library_test_contribution_read_failures(const char *name, long c
 { g_contribution_read_name = name; g_contribution_read_failures = count; }
 #endif
 
-/* 1 when two declaration texts state the same tree (spelling aside), 0 when
- * they differ or one does not parse, -1 on allocation failure. */
-static int pl_same_declaration(sh_decl_source left, sh_decl_source right)
+/* 1 when two declaration texts of one family state the same tree (spelling
+ * aside), 0 when they differ or one does not parse, -1 on allocation failure.
+ * Composition writes an entity's editorVars block with its direct members
+ * sorted and moves an editor entry's collection fields to the tail of edit,
+ * while shipped declarations state them in any order: the same uniquely keyed
+ * members either way, so an unchanged stock declaration keeps its exact bytes
+ * and native name (sh_package_editor_reordered_blocks selects the block). */
+static int pl_same_declaration(const char *family, sh_decl_source left, sh_decl_source right)
 {
     sh_decl_node *a = sh_decl_tree_parse(left, NULL, 0), *z = sh_decl_tree_parse(right, NULL, 0);
     size_t a_length = 0, z_length = 0;
+    int same = a && z ? sh_decl_tree_equal(a, z, sh_package_editor_reordered_blocks(family)) : 0;
+    if (same) { sh_decl_tree_free(a); sh_decl_tree_free(z); return same; }
     char *x = a ? sh_decl_tree_write(a, &a_length) : NULL, *y = z ? sh_decl_tree_write(z, &z_length) : NULL;
-    int same = x && y ? a_length == z_length && !memcmp(x, y, a_length) : (a && !x) || (z && !y) ? -1 : 0;
+    same = x && y ? a_length == z_length && !memcmp(x, y, a_length) : (a && !x) || (z && !y) ? -1 : 0;
     free(x); free(y); sh_decl_tree_free(a); sh_decl_tree_free(z);
     return same;
+}
+
+/* 1 when a member is an explicit contribution: text a package supplied, or
+ * the product's own built-in (the product scope), whose content differs from
+ * the shipped member's (the captured texts, spelling aside). A byte- or
+ * tree-faithful copy a package bundles is the shipped declaration as that
+ * scope reached it, like one it did not supply. Without a shipped member
+ * every supplied text contributes. -1 on allocation failure. */
+static int pl_contributes(const pl_contributions *c, const char *family, size_t unit, size_t shipped)
+{
+    const sh_package_link_inputs *captured = sh_package_source_link_inputs(c->source);
+    const sh_package_link_unit *value = captured->units + unit;
+    const pl_build *b = c->build;
+    int supplied = b && b->shared && b->shared->resource_count && b->authored_count < b->count - 1 &&
+        c->inputs.scopes[unit] == b->authored_count;
+    for (size_t f = 0; f < value->file_count; f++) if (value->files[f]->source_count) supplied = 1;
+    if (!supplied) return 0;
+    if (shipped == SIZE_MAX || value->file_count != 1 || captured->units[shipped].file_count != 1) return 1;
+    const sh_compiled_resource *mine = value->files[0], *stock = captured->units[shipped].files[0];
+    if (mine->native_original) return 0;
+    if (!mine->body || !stock->body) return 1;
+    int same = pl_same_declaration(family, (sh_decl_source){(const char *)mine->body, mine->body_length},
+        (sh_decl_source){(const char *)stock->body, stock->body_length});
+    return same < 0 ? -1 : !same;
 }
 
 #ifdef SH_PACKAGE_LIBRARY_TESTING
@@ -1501,12 +1748,14 @@ static int pl_contribution_group(pl_build *b, const sh_package_sources *sources,
     char **composed = calloc(count, sizeof(*composed));
     size_t *composed_length = calloc(count, sizeof(*composed_length));
     signed char *composed_private = calloc(count, 1), *same_known = calloc(count, 1), *same_value = calloc(count, 1);
-    sh_decl_source base = {"{}", 2};
+    sh_decl_source base = {"{}", 2}, *targets = calloc(count, sizeof(*targets)), *outputs = calloc(count, sizeof(*outputs));
+    unsigned char *presented = NULL, *like_base = NULL;
+    char *shared_text = NULL; size_t shared_length = 0;
     size_t source_count = 0, base_member = SIZE_MAX, reference, culprit = SIZE_MAX;
     int ok = 0, kind = SH_PACKAGE_EDITOR_FAILURE_ENVIRONMENT, any_rebased = 0;
     pl_chain published = {0}, authored_base = {0};
     if (!texts || !parts || !peers || !pending || !parents || !included || !rebased || !part_member ||
-        !composed || !composed_length || !composed_private || !same_known || !same_value) {
+        !composed || !composed_length || !composed_private || !same_known || !same_value || !targets || !outputs) {
         snprintf(error, capacity, "editor contribution allocation failed"); goto failed;
     }
     for (size_t i = 0; i < count; i++) {
@@ -1533,10 +1782,16 @@ static int pl_contribution_group(pl_build *b, const sh_package_sources *sources,
     }
     reference = base_member != SIZE_MAX ? base_member : 0;
     for (size_t i = 0; i < count; i++) included[i] = phase == 2 || pl_same_parent(parents[i], parents[reference]);
+    /* Only a package's own text contributes. Without a baseline member no
+     * package authors this declaration: each member is the stock declaration a
+     * scope reached, and there is nothing to compose onto it (composing it over
+     * an empty baseline would only respell it). */
+    int contributed = base_member != SIZE_MAX;
+    for (size_t i = 0; !contributed && i < count; i++) contributed = !pl_stock_authored(c, members[i]);
     /* Rebase inherited collections: first only where the published parent's
      * layout differs, then, if any member changed, every member of the shared
      * surface, so all of them state complete lists. */
-    for (int pass = 0; phase != 2 && pass < 2 && (pass == 0 || any_rebased); pass++)
+    for (int pass = 0; phase != 2 && pass < 2 && (pass == 0 || (any_rebased && contributed)); pass++)
         for (size_t i = 0; i < count; i++) {
             pl_chain own_published = {0}, own_authored = {0};
             const pl_chain *authored = &own_authored, *target = included[i] ? &published : &own_published;
@@ -1569,35 +1824,71 @@ static int pl_contribution_group(pl_build *b, const sh_package_sources *sources,
                 rebased[i] = 1; if (included[i]) any_rebased = 1;
             }
         }
-    for (size_t i = 0; i < count; i++) if (included[i]) {
+    /* Only a package's own change contributes (pl_contributes). A stock member
+     * a scope merely reaches, or a faithful copy a package bundles, takes the
+     * composed entry where its scope binds what the shipped member binds;
+     * where that scope's graph binds a dependency otherwise (a picker whose
+     * allowed entry shows an overridden inspector, a gameplay variant it
+     * places) it is a distinct variant of the entry, never an edit to it: two
+     * scopes binding one stock control differently are two valid variants,
+     * not a contradiction. */
+    like_base = calloc(count, 1);
+    if (!like_base) { snprintf(error, capacity, "editor contribution allocation failed"); goto failed; }
+    for (size_t i = 0; i < count; i++) if (included[i] && contributed) {
         if (i == base_member) base = texts[i];
-        else { part_member[source_count] = i; parts[source_count++] = texts[i]; }
+        else {
+            int own_change = pl_contributes(c, input->family, members[i], base_member != SIZE_MAX ? members[base_member] : SIZE_MAX);
+            if (own_change < 0) { snprintf(error, capacity, "editor contribution allocation failed"); goto failed; }
+            if (own_change) { part_member[source_count] = i; parts[source_count++] = texts[i]; continue; }
+            like_base[i] = base_member != SIZE_MAX && texts[i].length == texts[base_member].length &&
+                !memcmp(texts[i].text, texts[base_member].text, texts[i].length);
+        }
     }
     /* A stock child of a relaid parent republishes its rebased lists. */
     if (!source_count && base_member != SIZE_MAX && rebased[base_member]) {
         part_member[source_count] = base_member; parts[source_count++] = base;
     }
+    /* Presentation a package's own entry changes (fields the native editor
+     * reads for display only) composes into the shared entry: the shipped
+     * member and every part differing from it only in presentation compose
+     * onto that shared text and so bind one entry; a part with any other
+     * difference stays its author's own variant. */
+    if (source_count && base_member != SIZE_MAX) {
+        if (!(presented = calloc(source_count, 1))) { snprintf(error, capacity, "editor contribution allocation failed"); goto failed; }
+        if (sh_package_editor_presentation(input->family, base, parts, source_count, presented,
+                &shared_text, &shared_length) < 0) {
+            snprintf(error, capacity, "editor contribution allocation failed"); goto failed;
+        }
+    }
     for (size_t i = 0; i < count && source_count; i++) {
         size_t unit = members[i], length = 0, peer_count = 0, prior = SIZE_MAX;
         sh_package_editor_failure failure;
         if (!included[i]) continue;
+        sh_decl_source target = texts[i];
+        if (shared_text) {
+            int shares = i == base_member || like_base[i];
+            for (size_t k = 0; k < source_count && !shares; k++) shares = part_member[k] == i && presented[k];
+            if (shares) target = (sh_decl_source){shared_text, shared_length};
+        }
+        targets[i] = target;
         /* The body is a function of the shared baseline and parts and of this
-         * member's exact text and binding: repeats reuse the first result. */
+         * member's target text and binding: repeats reuse the first result. */
         signed char private_binding = !sh_package_source_link_shared(c->source)[unit];
         for (size_t k = 0; pl_editor_memo() && k < i && prior == SIZE_MAX; k++)
-            if (composed[k] && composed_private[k] == private_binding && texts[k].length == texts[i].length &&
+            if (composed[k] && composed_private[k] == private_binding && targets[k].length == target.length &&
+                !memcmp(targets[k].text, target.text, target.length) && texts[k].length == texts[i].length &&
                 !memcmp(texts[k].text, texts[i].text, texts[i].length)) prior = k;
         const char *body = prior != SIZE_MAX ? composed[prior] : NULL;
         if (body) length = composed_length[prior];
         else body = composed[i] = sh_package_editor_contributions_report(input->family, base, parts, source_count,
-            texts[i], private_binding, &length, &failure, error, capacity);
+            target, private_binding, &length, &failure, error, capacity);
         if (!body) {
             kind = failure.kind;
             if (kind == SH_PACKAGE_EDITOR_FAILURE_SOURCE && failure.source < source_count)
                 culprit = members[part_member[failure.source]];
             else if (kind == SH_PACKAGE_EDITOR_FAILURE_COVERAGE) {
                 pl_collection_probe probe = {input->family, 0, !sh_package_source_link_shared(c->source)[unit],
-                    base, texts[i]};
+                    base, target};
                 pl_joint_participants(b, sources, members, part_member, parts, source_count,
                     pl_collection_composes, &probe, error, capacity);
             }
@@ -1607,9 +1898,13 @@ static int pl_contribution_group(pl_build *b, const sh_package_sources *sources,
          * them its native identity, whatever else the group holds: only a
          * recomposed spelling would differ. */
         if (prior == SIZE_MAX) { composed_length[i] = length; composed_private[i] = private_binding; }
-        if (!rebased[i]) {
+        outputs[i] = (sh_decl_source){body, length};
+        /* A member composing onto the shared presentation stages the shared
+         * text even when its own states the same, so every such member binds
+         * the one entry; others keep their exact bytes when left as they were. */
+        if (!rebased[i] && target.text == texts[i].text) {
             int same = prior != SIZE_MAX && same_known[prior] ? same_value[prior] :
-                pl_same_declaration(texts[i], (sh_decl_source){body, length});
+                pl_same_declaration(input->family, texts[i], (sh_decl_source){body, length});
             if (same < 0) { snprintf(error, capacity, "editor contribution allocation failed"); goto failed; }
             if (prior == SIZE_MAX) { same_known[i] = 1; same_value[i] = (signed char)same; }
             if (same) continue;
@@ -1619,10 +1914,31 @@ static int pl_contribution_group(pl_build *b, const sh_package_sources *sources,
         if (!pl_contribution_stage(b, sources, unit, body, length, peers, peer_count, pending + i, error, capacity))
             goto failed;
     }
-    /* A member with another parent is its author's own variant: only rebased. */
-    for (size_t i = 0; i < count; i++) if (!included[i] && rebased[i] &&
+    /* A member with another parent is its author's own variant, and a stock
+     * member nothing contributes to is itself: either is only rebased. */
+    for (size_t i = 0; i < count; i++) if ((!included[i] || !contributed || !source_count) && rebased[i] &&
+        !pending[i].owned &&
         !pl_contribution_stage(b, sources, members[i], texts[i].text, texts[i].length, NULL, 0, pending + i, error, capacity))
         goto failed;
+    /* A member whose composition yields exactly the shared member's output
+     * binds that one entry. When the baseline member stages its output, every
+     * such member stages it too, even one whose own text already stated the
+     * same: its scope bound some dependency another way when composition ran
+     * (a class that later compositions merge), so keeping its captured bytes
+     * would leave one declaration as two entries with equal trees and equal
+     * final bindings. Each keeps its own owners; members whose output differs
+     * keep their own composition or bytes. */
+    if (base_member != SIZE_MAX && included[base_member] && pending[base_member].owned && outputs[base_member].text)
+        for (size_t i = 0; i < count; i++) {
+            size_t peer_count = 0;
+            if (i == base_member || !included[i] || pending[i].owned || !outputs[i].text ||
+                outputs[i].length != outputs[base_member].length ||
+                memcmp(outputs[i].text, outputs[base_member].text, outputs[i].length)) continue;
+            for (size_t j = 0; j < count; j++) if (j != i && included[j] && c->inputs.scopes[members[j]] != b->count - 1)
+                peers[peer_count++] = c->inputs.units[members[j]].files[0];
+            if (!pl_contribution_stage(b, sources, members[i], outputs[i].text, outputs[i].length, peers, peer_count,
+                    pending + i, error, capacity)) goto failed;
+        }
     /* Commit the phase together: no later supplier observes a partly composed
      * peer, and failure leaves the previous captured graph intact. */
     for (size_t i = 0; i < count; i++) {
@@ -1649,6 +1965,7 @@ done:
     pl_chain_free(&published); pl_chain_free(&authored_base);
     free(texts); free(parts); free((void *)peers); free(pending); free(parents); free(included); free(rebased); free(part_member);
     free(composed); free(composed_length); free(composed_private); free(same_known); free(same_value);
+    free(targets); free(outputs); free(presented); free(like_base); free(shared_text);
     return ok;
 }
 
@@ -3758,14 +4075,92 @@ done:
     free(groups); free(stack); free(state); return ok;
 }
 
+/* The sites one unit binds, as reachability edges: discovery's own for a unit
+ * the contributions left untouched, a replay of its binding otherwise. */
+static int pl_certify_edges(pl_contributions *c, size_t i, pl_original_walk *walk, char *error, size_t capacity)
+{
+    const sh_package_link_unit *unit = c->inputs.units + i;
+    for (size_t f = 0; f < unit->file_count; f++) {
+        const sh_compiled_resource *file = unit->files[f];
+        const sh_package_link_edge *sites = NULL;
+        size_t n = 0, length = 0, bound_length = 0;
+        if (pl_bound_sites(c, i, file, &sites, &n)) {
+            for (size_t k = 0; k < n; k++) if (!pl_original_edge(walk, sites[k].target)) goto failed;
+            continue;
+        }
+        unsigned char *body = sh_package_compilation_read(unit->compilation, file, SIZE_MAX, &length, error, capacity);
+        if (!body) return 0;
+        unsigned char *bound = pl_bound_bind(c, i, file, body, length, pl_original_reference, walk,
+            &bound_length, error, capacity);
+        free(body);
+        if (!bound) return 0;
+        free(bound);
+    }
+    for (size_t j = 0; j < unit->implicit_count; j++) if (!pl_original_edge(walk, unit->implicit[j].target)) goto failed;
+    return 1;
+failed:
+    snprintf(error, capacity, "cannot certify the shared name of %s", unit->name); return 0;
+}
+/* A shipped declaration no package authors keeps one class under its native
+ * name only while that class binds nothing private. The native editor lists
+ * every shipped entry and later contexts reach it by that name, so a class
+ * reaching a package's own variant (a base row whose placement that package
+ * changed, say) would publish the variant to all of them, and would lose the
+ * name as soon as another context reached the shipped binding: the rescan
+ * binds it as its scope's own, and so does this library. Composed entries
+ * (those with a baseline member), package names and the player hands web
+ * keep their names; the walk is the linker's original certification over
+ * those fixed names. fallback marks the classes the one-class rule named. */
+static int pl_shared_certify(pl_build *b, unsigned char *fallback, char *error, size_t capacity)
+{
+    pl_contributions *c = b->contributions;
+    size_t count = c->inputs.count, pending = 0;
+    for (size_t i = 0; i < count; i++) pending += fallback[i];
+    if (!pending) return 1;
+    sh_package_link_node *nodes = calloc(count, sizeof(*nodes));
+    unsigned char *local = calloc(count, 1), *retained = calloc(count, 1), *seen = calloc(count, 1);
+    unsigned char *denied = calloc(c->classes.count ? c->classes.count : 1, 1);
+    size_t *queue = calloc(count, sizeof(*queue));
+    int ok = 0;
+    if (!nodes || !local || !retained || !seen || !denied || !queue) {
+        snprintf(error, capacity, "cannot certify shared declarations"); goto done;
+    }
+    /* Only the named classes' closures decide; other units keep no edges. */
+    pending = 0;
+    for (size_t i = 0; i < count; i++) if (fallback[i]) { seen[i] = 1; queue[pending++] = i; }
+    for (size_t at = 0; at < pending; at++) {
+        size_t i = queue[at];
+        const sh_package_link_unit *unit = c->inputs.units + i;
+        int fixed = (c->shared[i] && pl_shared_declaration(unit->family) && !fallback[i]) || c->global[i];
+        local[i] = fixed || fallback[i] || unit->original_binding == 1;
+        if (!local[i] || fixed) continue;
+        pl_original_walk walk = {c};
+        if (!pl_certify_edges(c, i, &walk, error, capacity)) { free(walk.edges); goto done; }
+        nodes[i].edges = walk.edges; nodes[i].edge_count = walk.count;
+        for (size_t e = 0; e < walk.count; e++)
+            if (!seen[walk.edges[e].target]) { seen[walk.edges[e].target] = 1; queue[pending++] = walk.edges[e].target; }
+    }
+    if (!sh_package_link_originals(nodes, count, local, retained, error, capacity)) goto done;
+    /* Equal classes take one certification: any member reaching a private
+     * unit keeps the whole class its scopes' own. */
+    for (size_t i = 0; i < count; i++) if (fallback[i] && !retained[i]) denied[c->classes.nodes[i]] = 1;
+    for (size_t i = 0; i < count; i++) if (fallback[i] && denied[c->classes.nodes[i]]) {
+        c->shared[i] = 0; fallback[i] |= 2;
+    }
+    ok = 1;
+done:
+    for (size_t i = 0; nodes && i < count; i++) free((void *)nodes[i].edges);
+    free(nodes); free(local); free(retained); free(seen); free(denied); free(queue); return ok;
+}
+
 static int pl_contributions_open(pl_build *b, const sh_package_sources *sources, char *error, size_t capacity)
 {
     pl_contributions *c = calloc(1, sizeof(*c));
     const sh_package_link_inputs *original = sh_package_source_link_inputs(b->reader);
     size_t *members = NULL, *registrations = NULL, eligible = 0, registration_count;
-    unsigned char *done = NULL;
+    unsigned char *done = NULL, *named = NULL;
     if (!c) return 0;
-    b->contributions = c; c->source = b->reader; c->inputs.count = original->count;
+    b->contributions = c; c->source = b->reader; c->inputs.count = original->count; c->build = b;
     c->dirty = 1;
     c->pending_unit = c->pending_target = SIZE_MAX;
     if (original->count > SIZE_MAX / 2 / sizeof(*c->inputs.units)) goto bad;
@@ -3835,10 +4230,14 @@ static int pl_contributions_open(pl_build *b, const sh_package_sources *sources,
     /* Keep a verified baseline selector/bank slot. Other bound variants get
      * private native identities; historical contexts are never overwritten by
      * the modern field union. With no baseline, only one equal shared class can
-     * occupy the authored name. Registry allocation still verifies native IDs.
+     * occupy the authored name, a shipped name only while that class binds
+     * nothing private (pl_shared_certify). Registry allocation still verifies
+     * native IDs.
      * Units sharing a family and name are visited as one run of the sorted
      * index, in unit order. */
     size_t named_count = 0;
+    named = calloc(c->inputs.count ? c->inputs.count : 1, 1);
+    if (!named) goto bad;
     for (size_t i = 0; i < original->count; i++)
         if (pl_shared_declaration(c->inputs.units[i].family)) registrations[named_count++] = i;
     qsort_s(registrations, named_count, sizeof(*registrations), pl_unit_name_order, c->inputs.units);
@@ -3854,13 +4253,20 @@ static int pl_contributions_open(pl_build *b, const sh_package_sources *sources,
             if (original->scopes[j] == b->count - 1) selected = binding;
             if (sh_package_source_link_shared(b->reader)[j]) eligible = 1;
         }
-        if (selected == SIZE_MAX && equal && eligible) selected = first;
-        for (size_t k = start; k < end; k++) c->shared[registrations[k]] = c->classes.nodes[registrations[k]] == selected;
+        int fallback = selected == SIZE_MAX && equal && eligible;
+        if (fallback) selected = first;
+        for (size_t k = start; k < end; k++) {
+            size_t j = registrations[k];
+            c->shared[j] = c->classes.nodes[j] == selected;
+            if (fallback && c->shared[j] && c->inputs.units[j].original_binding) named[j] = 1;
+        }
     }
+    if (!pl_shared_certify(b, named, error, capacity)) goto bad;
+    c->certification = named; named = NULL;
     pl_step(b, PL_STEP_SHARED, &mark);
-    pl_tokens_free(c); free(members); free(registrations); free(done); return 1;
+    pl_tokens_free(c); free(members); free(registrations); free(done); free(named); return 1;
 bad:
-    free(members); free(registrations); free(done); return 0;
+    free(members); free(registrations); free(done); free(named); return 0;
 }
 
 /* Registration keys are bound like typed identities: the bit a package
@@ -4184,6 +4590,39 @@ static int pl_registration_sources(pl_build *b, const sh_package_sources *source
     return 1;
 }
 
+/* Diagnostics: stock units no package supplies (every file an unsupplied
+ * original) that a scope's binding serves under a private name, with the
+ * first few reasons. Accounting only; it never changes a binding. */
+static void pl_private_stock(pl_build *b)
+{
+    const sh_package_link_inputs *inputs = b->contributions ? &b->contributions->inputs : NULL;
+    const unsigned char *eligible = b->reader ? sh_package_source_link_shared(b->reader) : NULL;
+    size_t used = 0, shown = 0;
+    b->private_stock = 0; b->private_stock_notes[0] = 0;
+    for (int pass = 0; pass < 2; pass++)
+    for (size_t i = 0; inputs && i < inputs->count; i++) {
+        const sh_package_link_unit *unit = inputs->units + i;
+        const char *name = b->linked.names ? b->linked.names[b->linked.classes.nodes[i]] : NULL;
+        int supplied = 0;
+        if (!unit->file_count || !name || !strcmp(name, unit->name)) continue;
+        for (size_t f = 0; f < unit->file_count; f++) if (unit->files[f]->source_count) supplied = 1;
+        if (supplied || (!unit->original_binding) != !pass) continue;
+        b->private_stock++;
+        if (shown >= 6 || used >= sizeof(b->private_stock_notes) - 1) continue;
+        const char *note = !unit->original_binding && b->reader && b->contributions->origins ?
+            sh_package_source_link_original_note(b->reader, b->contributions->origins[i]) : "";
+        const char *reason = !unit->original_binding ? (*note ? note : "its own binding is not certified original") :
+            i < b->stock_reason_count && b->stock_reasons[i] ? b->stock_reasons[i] :
+            eligible && !eligible[i] ? "its scope binds it with gameplay it reaches" :
+            "a dependency keeps no original name";
+        int n = snprintf(b->private_stock_notes + used, sizeof(b->private_stock_notes) - used,
+            "\nprivate stock copy: %s %s in scope %zu: %s", unit->family, unit->name,
+            inputs->scopes[i], reason);
+        if (n > 0) used += (size_t)n < sizeof(b->private_stock_notes) - used ? (size_t)n :
+            sizeof(b->private_stock_notes) - used - 1;
+        shown++;
+    }
+}
 /* Diagnostic lines of repeated work (sh_package_library.repeated_work). */
 static void pl_repeated_work(pl_build *b, sh_package_library *out)
 {
@@ -4215,6 +4654,11 @@ static void pl_repeated_work(pl_build *b, sh_package_library *out)
         char line[512];
         n = snprintf(text + used, capacity - used, "%s%s", used ? "\n" : "",
             sh_package_source_link_counters(b->reader, line, sizeof(line)));
+        PL_WROTE(n);
+    }
+    if (b->private_stock) {
+        n = snprintf(text + used, capacity - used, "%sprivate stock copies: %zu%s", used ? "\n" : "",
+            b->private_stock, b->private_stock_notes);
         PL_WROTE(n);
     }
     if (b->key_scans || b->key_scan_hits || b->key_skipped) {
@@ -4480,6 +4924,14 @@ static int pl_compile(const sh_package_sources *sources, const sh_package_proven
     for (size_t i = 0; i < assignment.inputs->count; i++) {
         sh_package_link_unit *unit = b.contributions->inputs.units + i;
         unit->fixed_name = (assignment.shared[i] && pl_shared_declaration(unit->family)) || assignment.global[i];
+        /* A shared declaration bound under its one native name is a contract
+         * every consumer reaches by that name; the shared publication selects
+         * its composed payload. Like the player hands web, neither that payload
+         * nor its per-scope content enters a consumer's identity, so a full
+         * scan, an installation increment and a map's own context bind one
+         * consumer alike. Its own bytes and edges are identified as usual, and
+         * a private copy of the same bytes remains an ordinary edge. */
+        if (assignment.shared[i] && pl_shared_declaration(unit->family)) unit->stable_name = 1;
     }
     sh_package_link_registry identity_adapter = {0};
     if (native && native->identities.head_slot) {
@@ -4497,10 +4949,12 @@ static int pl_compile(const sh_package_sources *sources, const sh_package_proven
         b.identities ? &identity_adapter : NULL, pl_bound_assign_members, b.contributions->reuse};
     adapter.history = b.identities && native ? native->history : NULL;
     adapter.stable = pl_bound_stable; adapter.sites = pl_bound_sites; adapter.identity = pl_bound_identity;
+    adapter.describe = pl_bound_describe; adapter.note = pl_bound_note;
     pl_reuse_refresh(b.contributions);
     if (!sh_package_link(sources, assignment.inputs->units, assignment.inputs->count, &adapter, &b.shared->policy,
         environment->canonical_path, &b.linked, error, capacity) ||
         (b.identities && !sh_package_native_registry_validate(b.identities, error, capacity))) goto done;
+    pl_private_stock(&b);
     pl_phase(&b, out, SH_PACKAGE_LIBRARY_PHASE_LINK, &mark);
     if (!pl_provenance(&b, sources, &out->bindings) || !pl_key_provenance(&b, sources, &out->bindings, error, capacity) ||
         !pl_hud(&b, error, capacity) ||
@@ -4545,18 +4999,22 @@ done:
             *environment->unserved_package = b.contribution_owner;
     }
     if (out) pl_repeated_work(&b, out);
+    if (out && b.contributions && b.contributions->notes) {
+        free(out->link_diagnostics); out->link_diagnostics = b.contributions->notes; b.contributions->notes = NULL;
+    }
     if (b.census_owned) sh_decl_tree_census_close();
     pl_close(&b);
     if (!ok) {
         /* Accounted coverage and phase timings survive a later failure as
          * diagnostics only. */
-        char *coverage = out->coverage; out->coverage = NULL;
+        char *coverage = out->coverage, *link_diagnostics = out->link_diagnostics;
+        out->coverage = NULL; out->link_diagnostics = NULL;
         unsigned long long phases[SH_PACKAGE_LIBRARY_PHASES]; char source_phases[sizeof(out->source_phases)];
         char contribution_phases[sizeof(out->contribution_phases)], repeated_work[sizeof(out->repeated_work)];
         memcpy(phases, out->phase_ms, sizeof(phases)); memcpy(source_phases, out->source_phases, sizeof(source_phases));
         memcpy(contribution_phases, out->contribution_phases, sizeof(contribution_phases));
         memcpy(repeated_work, out->repeated_work, sizeof(repeated_work));
-        sh_package_library_free(out); out->coverage = coverage;
+        sh_package_library_free(out); out->coverage = coverage; out->link_diagnostics = link_diagnostics;
         memcpy(out->phase_ms, phases, sizeof(phases)); memcpy(out->source_phases, source_phases, sizeof(source_phases));
         memcpy(out->contribution_phases, contribution_phases, sizeof(contribution_phases));
         memcpy(out->repeated_work, repeated_work, sizeof(repeated_work));

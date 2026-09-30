@@ -1332,6 +1332,48 @@ The reusable adapter is registered by the product for known formats, never by an
 author switch or a specific resource filename. Sources and embedded delivery
 bundles stay intact.
 
+Only a package's own text contributes to an editor declaration. A stock entry no
+package authors has nothing to compose: every scope that reaches it keeps its
+captured bytes, and with them its native name while it binds nothing private. A
+scope that reaches it through its own variant of a dependency (a base entry whose
+placement that package changed, say) binds it as that scope's own in every
+library, even when no other scope reaches it: the native editor lists every
+shipped entry, and a later context reaching the shipped binding would otherwise
+take the name back. An installation compiled alone therefore binds the same
+entries a whole-library scan does. A package's own text means a change it
+states: a copy it bundles byte for byte, or stating the same tree, is the
+shipped declaration as that scope reached it and contributes nothing. Where a
+scope's graph binds a stock entry's dependency differently (a picker whose
+allowed entry shows an inspector that scope overrides, a gameplay variant the
+entry places), that scope's copy is a distinct variant of the entry, never an
+edit to it: two scopes binding one stock control differently are two valid
+variants, not incompatible edits. A member whose composition yields exactly
+the shipped member's composed output stages that output with it, so one
+declaration stays one entry even when its scope bound a dependency another way
+while composition ran. A child's sparse patches are
+restated onto its published parent only when native slot merging would place one
+on another control; a parent control rebound in place (for example to a
+package's private inspector) stays inherited. When a package's own text moves a
+stock entry's inherited controls, every stock descendant of that entry, read from
+SnapMap's shipped editor entries, is rebased onto it and served under its own
+name in every library, reached or not: an installation cannot restate a shipped
+entry later, and later packages bind it by name. That check leaves unreadable
+package content to the phase that attributes its owner; unreadable stock
+originals, a shipped entry that exists but cannot be read, or no shipped entries
+at all fail that compile as an environment failure, never a partial closure.
+
+A package's own text for a stock editor entry composes into the shared entry
+field by field only where the native editor is observed to read that field for
+display alone. Today that is the label colour `displayNameColor`, whose only
+observed reader builds the editor's name labels; every other field counts as
+behavior until shown the same way. An entry whose differences from the shipped
+one are all such presentation binds the shared entry, which carries them; when
+packages set one field differently, the package earlier in the library's package
+order wins. Any other difference keeps that package's entry
+its own variant, with its own presentation, and the shared entry does not take
+it; so does omitting a presentation field the shipped entry states, which this
+composition cannot represent as a shared value.
+
 Package inventories and resource ownership grow with the installed set. There
 is no fixed package-count quota in discovery, compilation, saved-map selection,
 or installation. Duplicate resources keep every contributing package as an
@@ -1499,8 +1541,13 @@ in place: the new packages compile in isolated authoring contexts and publish
 with the unchanged library, so the next map transition does not rebuild it. A
 newly installed package that fails on its own bytes is left out the same way.
 Shared editor declarations a new package brings are served under private aliases
-until the next full scan; gameplay identities match a full scan's. A failed
-increment falls back to a full rescan at the next safe boundary.
+until the next full scan. A shared declaration served under its native name is a
+named contract: the shared publication selects its composed payload, so that
+payload never enters a consumer's identity. An increment, a full scan and a map's
+own context therefore bind the same consumer to one identity, whatever the local
+editor extensions, while a private variant of the parent (a real gameplay change)
+stays an ordinary dependency. A failed increment falls back to a full rescan at
+the next safe boundary.
 
 Within a process, the source facts a compile read (bindings and reader results
 per input) are kept and replayed by later compiles only after each input is

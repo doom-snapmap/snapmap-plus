@@ -62,6 +62,18 @@ const sh_decl_node *sh_decl_tree_member(const sh_decl_node *parent, const char *
     return NULL;
 }
 
+/* 1 when key is one of the '|'-separated names in list. */
+static int dt_listed(const char *key, const char *list)
+{
+    size_t length = strlen(key);
+    for (const char *at = list; at && *at;) {
+        const char *end = strchr(at, '|');
+        size_t n = end ? (size_t)(end - at) : strlen(at);
+        if (n == length && !strncmp(at, key, n)) return 1;
+        at = end ? end + 1 : NULL;
+    }
+    return 0;
+}
 int sh_decl_tree_equal(const sh_decl_node *a, const sh_decl_node *b, const char *unordered)
 {
     typedef struct frame { const sh_decl_node *a, *b; int top, any_order; } frame;
@@ -96,7 +108,7 @@ int sh_decl_tree_equal(const sh_decl_node *a, const sh_decl_node *b, const char 
                 if (!grown) { free(stack); return -1; }
                 stack = grown; capacity *= 2;
             }
-            stack[count++] = (frame){left, other, 0, current.top && unordered && !strcmp(left->key, unordered)};
+            stack[count++] = (frame){left, other, 0, current.top && unordered && dt_listed(left->key, unordered)};
         }
     }
     free(stack); return equal;

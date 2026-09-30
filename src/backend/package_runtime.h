@@ -481,8 +481,12 @@ void sh_package_runtime_test_baseline(sh_package_baseline_reader reader, void *c
  * Passing a zero source disables the seam and preserves older offline fixtures. */
 void sh_package_runtime_test_source_readers(sh_decl_registry_source registry, uintptr_t reflection);
 /* Shipped SnapMap editor declarations (names under snapeditorentitydef/) whose
- * texts the test baseline supplies; NULL makes placement unavailable. */
+ * texts the test baseline supplies; NULL makes placement unavailable, while a
+ * library compile then reads a fixture that ships no editor entries. */
 void sh_package_runtime_test_editor_rows(const char *const *names, size_t count);
+/* Make the shipped editor entries unavailable to library compiles, as a live
+ * compile without the game's catalog would find them (0 restores them). */
+void sh_package_runtime_test_editor_rows_unavailable(int unavailable);
 /* The converter's placement check over a caller-built compilation: 1 placed,
  * 0 refused (reason; *engine for a native limit), -1 editor rows unreadable. */
 int sh_package_runtime_test_placement(const sh_package_compilation *compiled, const char *from, const char *base,

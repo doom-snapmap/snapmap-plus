@@ -229,6 +229,8 @@ int sh_package_source_link_unit_replayed(const sh_package_source_link *source, s
  * This is NOT native-original certification or a map-embedding decision: native
  * implicit state and actual map usage remain separate. Borrowed until close. */
 const unsigned char *sh_package_source_link_shared(const sh_package_source_link *source);
+/* Diagnostics: why the unit's own binding is not certified original, or "". */
+const char *sh_package_source_link_original_note(const sh_package_source_link *source, size_t index);
 /* Assignment-free binding view for shared collection composition. These use
  * exactly the frozen source snapshot and unit indices returned by inputs().
  * bind_unit may inspect a derived body, but its inherited class/schema lookup

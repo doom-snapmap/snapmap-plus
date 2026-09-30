@@ -3520,6 +3520,12 @@ static void test_contribution_projection(void)
         free(out);
     }
     assert(!sh_package_editor_contribution_phase("snapeditorentitybank"));
+    /* Only the block editor composition itself moves may compare unordered. */
+    assert(!strcmp(sh_package_editor_reordered_blocks("entitydef"), "editorVars"));
+    assert(!strcmp(sh_package_editor_reordered_blocks("snapeditorentitydef"), "edit"));
+    assert(!strcmp(sh_package_editor_reordered_blocks("snappropertyinspector_bitflag"), "edit"));
+    assert(!sh_package_editor_reordered_blocks("snappropertyinspector_text"));
+    assert(!sh_package_editor_reordered_blocks("material"));
     {
         const char *original = "{ class = \"Entity\"; editorVars = { color = (1,1,1,1); flags = { first = 0; second = 0; label = \"base\"; } } edit = { target = \"base\"; } }";
         const char *red = "{ class = \"Entity\"; editorVars = { color = (1,0,0,1); flags = { first = 1; second = 0; label = \"red\"; } } edit = { target = \"red\"; } }";
@@ -3674,9 +3680,19 @@ static void test_bound_contributions(fixture *f, sh_decl_registry_source registr
     assert(named_resource(library.compiled, "snapeditorentitydef", "mixed"));
     assert(named_resource(library.compiled, "entitydef", "root"));
     {
-        const sh_compiled_resource *rebound = named_resource(library.compiled, "snapeditorentitydef", "rebound");
-        assert(rebound && property_count(rebound, NULL) == 1);
-        sh_decl_node *tree = sh_decl_tree_parse((sh_decl_source){(char *)rebound->body, rebound->body_length}, NULL, 0);
+        /* Red bundles a byte-faithful copy of the shipped selector and changes
+         * the behavior inspector it shows: that copy is not an edit to the
+         * shipped selector (which keeps the shipped inspector), but red's
+         * scope binds its own variant of it, showing red's inspector. */
+        const sh_compiled_resource *shipped = named_resource(library.compiled, "snapeditorentitydef", "rebound"), *own = NULL;
+        for (size_t i = 0; i < library.compiled->resource_count; i++) {
+            const sh_compiled_resource *file = library.compiled->resources + i;
+            if (file->original_path && !strcmp(file->original_path, "generated/decls/snapeditorentitydef/rebound.decl") &&
+                strcmp(file->name, "rebound")) own = file;
+        }
+        assert(!shipped || strstr((char *)shipped->body, "\"behavior\""));
+        assert(own && property_count(own, NULL) == 1);
+        sh_decl_node *tree = sh_decl_tree_parse((sh_decl_source){(char *)own->body, own->body_length}, NULL, 0);
         const sh_decl_node *item = sh_decl_tree_member(sh_decl_tree_member(sh_decl_tree_member(sh_decl_tree_member(
             sh_decl_tree_member(sh_decl_tree_member(tree, "edit"), "propertySheets"), "item[0]"), "properties"), "item[0]"), "inspector");
         const char *name = node_value(item);

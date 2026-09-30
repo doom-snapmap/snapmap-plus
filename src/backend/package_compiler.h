@@ -285,6 +285,12 @@ void sh_package_compilation_free(sh_package_compilation *compilation);
  * target-specific edits on disagreement. Shared editor-only slots choose one
  * deterministic presentation. It is not an author setting or embedding flag. */
 int sh_package_editor_contribution_phase(const char *type);
+/* The top-level blocks, as sh_decl_tree_equal's unordered list, whose direct
+ * members editor composition moves without changing them: an entity
+ * definition's editorVars (written sorted) or, for editor entries and the
+ * composed inspector lists, edit (the collection fields move to its tail).
+ * NULL for families editor composition does not rewrite: they stay ordered. */
+const char *sh_package_editor_reordered_blocks(const char *type);
 char *sh_package_editor_contributions(const char *type, sh_decl_source baseline,
     const sh_decl_source *sources, size_t count, sh_decl_source target, int private_binding,
     size_t *length, char *error, size_t capacity);
@@ -333,6 +339,24 @@ int sh_package_editor_rebase(const char *type, sh_decl_source child,
     const sh_decl_source *authored, size_t authored_count,
     const sh_decl_source *published, size_t published_count, int force,
     char **out, size_t *length, sh_package_editor_failure *failure, char *error, size_t capacity);
+/* 1 when authored, read over the parent texts (nearest first), leaves some
+ * inherited editor list's controls at other slots than original does (the
+ * layout test the rebase uses), so the children of that declaration would
+ * need a rebase onto it; 0 when every list keeps its layout; -2 when a text
+ * does not read as an editor declaration (a content defect, left to the
+ * phase that attributes it); -1 on allocation failure. */
+int sh_package_editor_moves_controls(const char *type, sh_decl_source authored, sh_decl_source original,
+    const sh_decl_source *parents, size_t parent_count);
+/* Presentation a package's own editor entry changes, for the shared entry of
+ * type. parts are the package texts composing onto base (the shipped entry, as
+ * bound for composition). presentation[i] is set when part i differs from base,
+ * outside the editor collections, only in fields the native editor reads for
+ * display (read with the ordered declaration codec; unknown fields count as
+ * behaviour). Returns 1 with *shared (malloc-owned) = base carrying those
+ * fields, the first authored position winning opposing values; 0 when no part
+ * changes presentation; -1 on allocation failure. */
+int sh_package_editor_presentation(const char *type, sh_decl_source base, const sh_decl_source *parts,
+    size_t count, unsigned char *presentation, char **shared, size_t *length);
 /* Final source-preserving projection after the linker has proved equivalence
  * and rebound every selected dependency. Inputs use this inventory's original
  * indices (including borrowed component views). Each projection is one served

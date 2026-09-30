@@ -186,6 +186,17 @@ static int native_check(void *context, const char *family, const char *name,
     return native->replace_shared ? SH_PACKAGE_LINK_REGISTRY_REPLACE_SHARED : SH_PACKAGE_LINK_REGISTRY_AVAILABLE;
 }
 
+/* The developer report of a refused native identity: every line it notes. */
+static char collision_notes[16384];
+static void collision_note(void *context, const char *line)
+{
+    size_t used = strlen(collision_notes);
+    (void)context;
+    if (used + strlen(line) + 2 < sizeof(collision_notes)) { strcat(collision_notes, line); strcat(collision_notes, "\n"); }
+}
+static void collision_describe(void *context, size_t unit, char *out, size_t capacity)
+{ (void)context; snprintf(out, capacity, "fixture unit %zu", unit); }
+
 static void native_collisions(const sh_package_sources *sources, fixture *f,
     sh_package_link_adapter *adapter, const size_t entities[3], const size_t materials[3])
 {
@@ -923,6 +934,27 @@ int main(void)
     assert(out.classes.count == 4 && out.compiled->resource_count == 4 && out.compiled->duplicate_count == 2);
     assert(out.classes.nodes[entities[0]] == out.classes.nodes[entities[2]]);
     assert(out.classes.nodes[entities[0]] != out.classes.nodes[entities[1]]);
+    /* Two unequal classes that both keep one native name refuse the link, and
+     * the report names both claimants: their classes, certification, sources,
+     * payloads and the bound dependencies that differ. */
+    {
+        sh_package_link_unit saved[12];
+        memcpy(saved, f.units, sizeof(saved));
+        f.units[entities[0]].fixed_name = 1; f.units[entities[1]].fixed_name = 1;
+        adapter.note = collision_note; adapter.describe = collision_describe; collision_notes[0] = 0;
+        assert(!sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &out, error, sizeof(error)));
+        if (!strstr(error, "exhausted") || getenv("SH_LINKER_TEST_NOTES"))
+            fprintf(stderr, "collision refusal: %s\nnotes:\n%s", error, collision_notes);
+        assert(strstr(error, "exhausted") && strstr(error, "props/rock") && !out.compiled);
+        assert(strstr(collision_notes, "collision claimant: unit ") && strstr(collision_notes, "collision holder: unit "));
+        assert(strstr(collision_notes, "collision claimant source: fixture unit ") &&
+            strstr(collision_notes, "collision holder source: fixture unit "));
+        assert(strstr(collision_notes, "collision claimant differs (") && strstr(collision_notes, "materials/stone") &&
+            strstr(collision_notes, "collision claimant file ") && strstr(collision_notes, "collision holder edges ("));
+        adapter.note = NULL; adapter.describe = NULL;
+        memcpy(f.units, saved, sizeof(saved));
+        assert(sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &out, error, sizeof(error)));
+    }
     {
         sh_package_link_classes captured = {0};
         sh_package_link_adapter inspect = {&f, resolve, bind_file};

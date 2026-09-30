@@ -16,21 +16,41 @@ static int er_literal(const sh_decl_node *node, char **out)
     return 1;
 }
 
+/* The last of parent's members named key: the native reader applies a
+ * repeated field in order, so the last one is effective. */
+static const sh_decl_node *er_last(const sh_decl_node *parent, const char *key)
+{
+    const sh_decl_node *found = NULL;
+    for (const sh_decl_node *m = parent ? parent->children : NULL; m; m = m->next)
+        if (m->key && !strcmp(m->key, key)) found = m;
+    return found;
+}
+
 int sh_editor_rows_add_text(sh_editor_rows *rows, const char *name, const char *text, size_t length)
 {
     char error[256];
     sh_editor_row row = {0};
-    sh_decl_node *tree = sh_decl_tree_parse((sh_decl_source){text, length}, error, sizeof(error));
+    /* Shipped entries may repeat a field (fx/ambient_embers states fxInfo
+     * twice), which the native reader applies in order; only text that does
+     * not parse at all is unreadable. */
+    sh_decl_node *tree = sh_decl_tree_parse_ordered((sh_decl_source){text, length}, error, sizeof(error));
     if (!tree) { rows->unreadable++; return 0; }
-    const sh_decl_node *edit = sh_decl_tree_member(tree, "edit");
-    const sh_decl_node *def = edit && edit->compound ? sh_decl_tree_member(edit, "entityDef") : NULL;
+    const sh_decl_node *def = NULL;
+    int edits = 0;
+    for (const sh_decl_node *m = tree->children; m; m = m->next)
+        if (m->key && !strcmp(m->key, "edit") && m->compound) {
+            const sh_decl_node *stated = er_last(m, "entityDef");
+            edits++;
+            if (stated) def = stated;
+        }
     int ok = (row.name = _strdup(name)) != NULL &&
-        er_literal(sh_decl_tree_member(tree, "inherit"), &row.parent) >= 0 &&
+        er_literal(er_last(tree, "inherit"), &row.parent) >= 0 &&
         er_literal(def, &row.entity_def) >= 0;
-    int plain = ok && row.parent && row.entity_def;
+    int plain = ok && row.parent && row.entity_def && edits == 1;
     for (const sh_decl_node *m = tree->children; plain && m; m = m->next)
         plain = m->key && (!strcmp(m->key, "inherit") || !strcmp(m->key, "edit"));
-    for (const sh_decl_node *m = plain ? edit->children : NULL; plain && m; m = m->next)
+    const sh_decl_node *edit = plain ? er_last(tree, "edit") : NULL;
+    for (const sh_decl_node *m = edit ? edit->children : NULL; plain && m; m = m->next)
         plain = m->key && !strcmp(m->key, "entityDef");
     row.plain = plain;
     sh_decl_tree_free(tree);

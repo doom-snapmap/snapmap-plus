@@ -677,6 +677,15 @@ int sh_package_editor_contribution_phase(const char *type)
     return !_stricmp(type, "snapeditorentitydef") ? 3 : 0;
 }
 
+const char *sh_package_editor_reordered_blocks(const char *type)
+{
+    switch (sh_package_editor_contribution_phase(type)) {
+    case 2: return "editorVars";
+    case 1: case 3: return "edit";
+    default: return NULL;
+    }
+}
+
 /* Registration lists are entity state fields: rows keyed by a native value
  * (aiType) that each link to a bound declaration. */
 static int pc_registration_field(const char *key)
@@ -1408,23 +1417,40 @@ static int pe_effective(pe_context *p, sh_decl_node *const *chain, size_t count,
 done:
     sh_decl_tree_free(list); return ok;
 }
-static int pe_same_layout(const pe_list *a, const pe_list *b, const char *key, const char *members)
+/* Native inheritance merges a child's item k into its parent's slot k, so a
+ * child needs no restatement when the pairing a rebase would use (pe_map) puts
+ * every authored control at its own slot: each patch then lands on its
+ * intended control even where the published control's binding changed. *same
+ * is 1 then; 0 when a control moved, was added or removed, or a slot is empty. */
+static int pe_same_layout(pe_context *p, const pe_list *a, const pe_list *b, const char *key, int *same)
 {
-    if (a->count != b->count) return 0;
-    for (size_t i = 0; i < a->count; i++) {
-        if (!members) { if (!pe_same(a->items[i], b->items[i], key, 1)) return 0; continue; }
-        const sh_decl_node *x = sh_decl_tree_member(a->items[i], members), *y = sh_decl_tree_member(b->items[i], members);
-        size_t n = 0, m = 0, k;
-        for (const sh_decl_node *c = x ? x->children : NULL; c; c = c->next) if (pe_index(c->key, &k) && k + 1 > n) n = k + 1;
-        for (const sh_decl_node *c = y ? y->children : NULL; c; c = c->next) if (pe_index(c->key, &k) && k + 1 > m) m = k + 1;
-        if (n != m) return 0;
-        for (k = 0; k < n; k++) {
-            char slot[32]; snprintf(slot, sizeof(slot), "item[%zu]", k);
-            const sh_decl_node *l = sh_decl_tree_member(x, slot), *r = sh_decl_tree_member(y, slot);
-            if (!l || !r || !pe_same(l, r, key, 1)) return 0;
-        }
+    size_t *map;
+    int ok;
+    *same = 0;
+    if (a->count != b->count) return 1;
+    if (!(map = calloc(a->count + 1, sizeof(*map)))) return pe_oom(p);
+    ok = pe_map(p, a, b, key, map);
+    if (ok) { *same = 1; for (size_t i = 0; i < a->count; i++) if (map[i] != i) *same = 0; }
+    free(map); return ok;
+}
+
+/* *same for one rule's effective lists; property sheets must also keep the
+ * same pages holding as many slots. 0 on failure (p->kind set). */
+static int pe_rule_same(pe_context *p, const sh_decl_collection_rule *rule, const char *key,
+    const pe_list *authored, const pe_list *published, int *same)
+{
+    pe_sheets x = {0}, y = {0};
+    int ok = 1;
+    *same = 0;
+    if (!rule->group_items) return pe_same_layout(p, authored, published, key, same);
+    if (!pe_sheets_open(p, authored, rule->group_items, &x) || !pe_sheets_open(p, published, rule->group_items, &y))
+        ok = !p->kind;
+    else {
+        int paged = authored->count == published->count;
+        for (size_t s = 0; paged && s <= authored->count; s++) paged = x.first[s] == y.first[s];
+        if (paged) ok = pe_same_layout(p, &x.controls, &y.controls, key, same);
     }
-    return 1;
+    pe_sheets_free(&x); pe_sheets_free(&y); return ok;
 }
 
 int sh_package_editor_rebase(const char *type, sh_decl_source child,
@@ -1472,22 +1498,15 @@ int sh_package_editor_rebase(const char *type, sh_decl_source child,
             if (p.kind == SH_PACKAGE_EDITOR_FAILURE_SOURCE) p.kind = SH_PACKAGE_EDITOR_FAILURE_COVERAGE;
             pe_list_free(&authored_list); pe_list_free(&published_list); goto done;
         }
-        if (rule->group_items) {
-            pe_sheets x = {0}, y = {0};
-            int same = pe_sheets_open(&p, &authored_list, rule->group_items, &x) &&
-                pe_sheets_open(&p, &published_list, rule->group_items, &y);
-            if (!same && p.kind) { pe_sheets_free(&x); pe_sheets_free(&y); pe_list_free(&authored_list); pe_list_free(&published_list); goto done; }
-            same = same && pe_same_layout(&authored_list, &published_list, key, rule->group_items);
-            pe_sheets_free(&x); pe_sheets_free(&y);
-            rebase = force || !same;
-            if (rebase && !pe_rebase_sheets(&p, &authored_list, list, &published_list, rule->group_items, key, &rebased)) {
-                pe_list_free(&authored_list); pe_list_free(&published_list); goto done;
-            }
-        } else {
-            rebase = force || !pe_same_layout(&authored_list, &published_list, key, NULL);
-            if (rebase && !pe_rebase_flat(&p, &authored_list, list, &published_list, key, &rebased)) {
-                pe_list_free(&authored_list); pe_list_free(&published_list); goto done;
-            }
+        int same = 0;
+        if (!pe_rule_same(&p, rule, key, &authored_list, &published_list, &same)) {
+            pe_list_free(&authored_list); pe_list_free(&published_list); goto done;
+        }
+        rebase = force || !same;
+        if (rebase && (rule->group_items ?
+                !pe_rebase_sheets(&p, &authored_list, list, &published_list, rule->group_items, key, &rebased) :
+                !pe_rebase_flat(&p, &authored_list, list, &published_list, key, &rebased))) {
+            pe_list_free(&authored_list); pe_list_free(&published_list); goto done;
         }
         pe_list_free(&authored_list); pe_list_free(&published_list);
         if (!rebase) continue;
@@ -1519,6 +1538,150 @@ done:
     for (size_t i = 0; a && i < authored_count; i++) sh_decl_tree_free(a[i]);
     for (size_t i = 0; b && i < published_count; i++) sh_decl_tree_free(b[i]);
     free(a); free(b); return result;
+}
+
+int sh_package_editor_moves_controls(const char *type, sh_decl_source authored, sh_decl_source original,
+    const sh_decl_source *parents, size_t parent_count)
+{
+    pe_context p = {0, NULL, 0};
+    size_t rule_count = 0;
+    const sh_decl_collection_rule *rules = pc_editor_rules(type, &rule_count);
+    /* Two chains sharing the parents: under the authored text, under the original. */
+    sh_decl_node **mine = calloc(parent_count + 1, sizeof(*mine)), **stock = calloc(parent_count + 1, sizeof(*stock));
+    int result = -1;
+    errno = 0;
+    if (!mine || !stock) goto done;
+    /* Text that does not read as an editor declaration is its owner's defect,
+     * judged where the owner is attributed (-2), never an environment failure. */
+    if (!(mine[0] = sh_decl_tree_parse(authored, NULL, 0)) || !(stock[0] = sh_decl_tree_parse(original, NULL, 0))) {
+        result = errno == ENOMEM ? -1 : -2; goto done;
+    }
+    for (size_t i = 0; i < parent_count; i++) if (!(mine[i + 1] = stock[i + 1] = sh_decl_tree_parse(parents[i], NULL, 0))) {
+        result = errno == ENOMEM ? -1 : -2; goto done;
+    }
+    result = 0;
+    for (size_t r = 0; rules && r < rule_count && !result; r++) {
+        const sh_decl_collection_rule *rule = rules + r;
+        const char *key = rule->group_items ? rule->group_identity : rule->item_key;
+        pe_list before = {0}, after = {0};
+        int same = 0;
+        if (strstr(rule->path, "[*]")) continue;
+        if (!pe_effective(&p, stock, parent_count + 1, rule->path, &before) ||
+            !pe_effective(&p, mine, parent_count + 1, rule->path, &after) ||
+            !pe_rule_same(&p, rule, key, &before, &after, &same))
+            result = p.kind == SH_PACKAGE_EDITOR_FAILURE_ENVIRONMENT ? -1 : -2;
+        else if (!same) result = 1;
+        pe_list_free(&before); pe_list_free(&after);
+    }
+done:
+    if (mine) { sh_decl_tree_free(mine[0]); for (size_t i = 1; i <= parent_count; i++) sh_decl_tree_free(mine[i]); }
+    if (stock) sh_decl_tree_free(stock[0]);
+    free(mine); free(stock); return result;
+}
+
+/* Editor entry fields the native editor is observed to read for display only,
+ * per family. displayNameColor: the reader observed across toybox preview,
+ * placement, cancel and selection (a hardware read watch on OpenGL) is the
+ * editor overlay's label builder, which copies it into a label record's text
+ * colour beside the projected position and display text, drawn by the overlay
+ * pass (FUN_1405dd7c0 via FUN_1405de610; package-architecture-v2 D8 evidence).
+ * That is the observed consumer, not a proof that no other reader exists. Every
+ * other field counts as behaviour until shown the same way. */
+static const char *const pc_entry_presentation[] = {"displayNameColor", NULL};
+static const char *const *pc_presentation_fields(const char *type)
+{ return sh_package_editor_contribution_phase(type) == 3 ? pc_entry_presentation : NULL; }
+static int pc_presentation_field(const char *type, const char *key)
+{
+    const char *const *fields = pc_presentation_fields(type);
+    for (size_t i = 0; fields && fields[i]; i++) if (!strcmp(fields[i], key)) return 1;
+    return 0;
+}
+/* Ordered-codec equality of two members (sh_decl_tree_equal), their assignment
+ * form included. */
+static int pc_same_member(const sh_decl_node *a, const sh_decl_node *b)
+{
+    if (!a || !b) return !a && !b;
+    if (a->assignment != b->assignment) return 0;
+    return sh_decl_tree_equal(a, b, NULL);
+}
+/* 1 when part differs from stock, outside the editor collections, only by
+ * stating presentation fields (changed or added); 0 when anything else differs,
+ * including a shipped presentation field the part omits (an omission or reset
+ * this composition cannot yet represent, so that part stays its own variant);
+ * -1 on allocation failure. */
+static int pc_presentation_only(const char *type, const sh_decl_node *stock, const sh_decl_node *part)
+{
+    const sh_decl_node *a = sh_decl_tree_member(stock, "edit"), *b = sh_decl_tree_member(part, "edit");
+    for (int pass = 0; pass < 2; pass++)
+        for (const sh_decl_node *m = (pass ? part : stock)->children; m; m = m->next) {
+            if (!strcmp(m->key, "edit")) continue;
+            int same = pc_same_member(sh_decl_tree_member(stock, m->key), sh_decl_tree_member(part, m->key));
+            if (same <= 0) return same;
+        }
+    if (!a || !b) return !a && !b;
+    if (!a->compound || !b->compound || a->assignment != b->assignment || a->reset != b->reset) return 0;
+    for (int pass = 0; pass < 2; pass++)
+        for (const sh_decl_node *m = (pass ? b : a)->children; m; m = m->next) {
+            if (pc_editor_field(type, m->key)) continue;
+            if (pc_presentation_field(type, m->key)) {
+                if (!pass && !sh_decl_tree_member(b, m->key)) return 0;
+                continue;
+            }
+            int same = pc_same_member(sh_decl_tree_member(a, m->key), sh_decl_tree_member(b, m->key));
+            if (same <= 0) return same;
+        }
+    return 1;
+}
+int sh_package_editor_presentation(const char *type, sh_decl_source base, const sh_decl_source *parts,
+    size_t count, unsigned char *presentation, char **shared, size_t *length)
+{
+    pe_context p = {0, NULL, 0};
+    const char *const *fields = pc_presentation_fields(type);
+    sh_decl_node *stock = NULL, *original = NULL, **mine = NULL;
+    int result = -1, changed = 0;
+    *shared = NULL; *length = 0;
+    memset(presentation, 0, count);
+    if (!fields || !count) return 0;
+    errno = 0;
+    if (!(stock = sh_decl_tree_parse(base, NULL, 0))) return errno == ENOMEM ? -1 : 0;
+    errno = 0;
+    if (!(original = sh_decl_tree_parse(base, NULL, 0)) || !(mine = calloc(count, sizeof(*mine)))) goto done;
+    for (size_t i = 0; i < count; i++) {
+        errno = 0;
+        if (!(mine[i] = sh_decl_tree_parse(parts[i], NULL, 0))) {
+            if (errno == ENOMEM) goto done;
+            continue; /* Unreadable here: the composer reports it as its owner's. */
+        }
+        int only = pc_presentation_only(type, stock, mine[i]);
+        if (only < 0) goto done;
+        presentation[i] = (unsigned char)only;
+    }
+    /* Each field takes the first authored position that changes it from the
+     * shipped entry; later opposing values give way. */
+    sh_decl_node *edit = (sh_decl_node *)sh_decl_tree_member(stock, "edit");
+    const sh_decl_node *shipped = sh_decl_tree_member(original, "edit");
+    for (size_t f = 0; edit && fields[f]; f++)
+        for (size_t i = 0; i < count; i++) {
+            const sh_decl_node *theirs = presentation[i] ? sh_decl_tree_member(sh_decl_tree_member(mine[i], "edit"), fields[f]) : NULL;
+            int same = theirs ? pc_same_member(sh_decl_tree_member(shipped, fields[f]), theirs) : 1;
+            if (same < 0) goto done;
+            if (same) continue;
+            sh_decl_node **slot = &edit->children, *copy;
+            while (*slot && strcmp((*slot)->key, fields[f])) slot = &(*slot)->next;
+            if (!(copy = pe_clone(&p, theirs, 1))) goto done;
+            if (*slot) { copy->next = (*slot)->next; (*slot)->next = NULL; sh_decl_tree_free(*slot); *slot = copy; }
+            else pe_append(edit, copy);
+            changed = 1;
+            break;
+        }
+    result = 0;
+    if (changed) {
+        if (!(*shared = sh_decl_tree_write(stock, length))) { result = -1; goto done; }
+        result = 1;
+    }
+done:
+    for (size_t i = 0; mine && i < count; i++) sh_decl_tree_free(mine[i]);
+    free(mine); sh_decl_tree_free(original); sh_decl_tree_free(stock); return result;
 }
 
 /* Allocation and read failures are transaction failures, as in resource

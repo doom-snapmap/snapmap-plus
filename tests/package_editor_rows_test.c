@@ -23,10 +23,18 @@ int main(void)
     add(&shipped, "audio/speaker", "{ inherit = \"logic_base\"; edit = { entityDef = \"stock/speaker\"; } }");
     add(&shipped, "prop/crate", "{ inherit = \"logic_base\"; edit = { entityDef = \"stock/crate\"; } }");
     add(&shipped, "audio/speaker_alt", "{ inherit = \"audio/speaker\"; edit = { previewImage = \"icons/alt\"; } }");
+    /* A shipped entry repeating fields (fx/ambient_embers states fxInfo twice)
+     * reads as the native reader applies it: the last occurrence counts. */
+    add(&shipped, "fx/embers", "{ inherit = \"logic_base\"; edit = { fxInfo = { fxDecl = \"a\"; } entityDef = \"stock/old\"; "
+        "fxInfo = { fxDecl = \"a\"; } } edit = { entityDef = \"stock/embers\"; } }");
+    CHECK(shipped.unreadable == 0);
     CHECK(sh_editor_rows_add_text(&shipped, "broken", "{ edit = {", 10) == 0 && shipped.unreadable == 1);
     shipped.unreadable = 0; /* the unreadable path is exercised separately below */
     CHECK(sh_editor_rows_finish(&shipped, NULL));
-    CHECK(shipped.placeable_count == 3); /* speaker twice (own and inherited), crate */
+    CHECK(shipped.placeable_count == 4); /* speaker twice (own and inherited), crate, embers */
+    for (size_t i = 0; i < shipped.count; i++) if (!strcmp(shipped.items[i].name, "fx/embers"))
+        CHECK(!strcmp(shipped.items[i].parent, "logic_base") && !strcmp(shipped.items[i].entity_def, "stock/embers") &&
+            !shipped.items[i].plain);
 
     /* A base some shipped row places is admitted, with or without package rows. */
     CHECK(!sh_editor_rows_placement(&shipped, NULL, "smp/p0", NULL, "stock/speaker", &limit, reason, sizeof(reason)));

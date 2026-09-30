@@ -50,6 +50,8 @@ typedef struct sl_unit {
     sh_package_link_file_identity *identities; /* Owned per-file identities (movie pairs). */
     sh_compiled_resource prepared; /* Borrowed metadata; owns only body. */
     const sh_compiled_resource *unprepared; /* Exact original certificate input. */
+    /* Diagnostics: why this unit's own binding is not certified original. */
+    char *original_note;
     int preparation_checked;
     /* Sites each discovered file bound, and those files; after freezing,
      * the same sites as (slot, unit index) edges (sh_package_source_link_sites). */
@@ -340,6 +342,11 @@ static int sl_read_original(void *context, const char *path, unsigned char **bod
     if (!*body) { sl_env_fail(s, "cannot copy captured original", path); return -1; }
     memcpy(*body, file->resource.body, file->resource.body_length); (*body)[file->resource.body_length] = 0;
     *length = file->resource.body_length; return file->status;
+}
+/* Diagnostics only: keep the first reason a unit's binding is not original. */
+static void sl_note_original(sl_unit *unit, const char *note)
+{
+    if (!unit->original_note) unit->original_note = _strdup(note);
 }
 static int sl_member(sh_package_source_link *s, sl_unit *unit, const sh_compiled_resource *file)
 {
@@ -2039,7 +2046,7 @@ void sh_package_source_link_close(sh_package_source_link *s)
     for (size_t i = 0; s->readers && i < s->scope_count; i++) sh_package_source_reader_close(s->readers[i]);
     for (size_t i = 0; i < s->count; i++) {
         sl_unit *unit = s->units[i];
-        free(unit->seed);
+        free(unit->seed); free(unit->original_note);
         free((char *)unit->unit.family); free((char *)unit->unit.name); free((void *)unit->unit.files);
         for (size_t w = 0; w < unit->unit.witness_count; w++) free((char *)unit->unit.witnesses[w].role);
         free((void *)unit->unit.witnesses);
@@ -2197,12 +2204,18 @@ sh_package_source_link *sh_package_source_link_open_attributed(const sh_package_
         int original_bytes = s->native.semantics(s->native.context, unit->scope, unit->unit.family,
             unit->unit.name, unit->unit.semantics, error, capacity);
         if (original_bytes < 0 || original_bytes > 1) { s->failed_unit = unit; goto failed; }
+        if (!original_bytes) sl_note_original(unit, "native semantics are not original");
         int campaign = 0, certified = original_bytes;
         for (size_t j = 0; original_bytes && j < unit->unit.file_count; j++) {
             sl_original *original = sl_original_get(s, unit->unit.files[j]->engine_path);
             size_t length = 0;
             if (!original || original->status < 0) goto failed;
-            if (original->status != 1 && original->status != 2) { original_bytes = 0; break; }
+            if (original->status != 1 && original->status != 2) {
+                char note[400];
+                snprintf(note, sizeof(note), "original %s has status %d", unit->unit.files[j]->engine_path, original->status);
+                sl_note_original(unit, note);
+                original_bytes = 0; break;
+            }
             campaign |= original->status == 2;
             const sh_compiled_resource *certificate = unit->unprepared ? unit->unprepared : unit->unit.files[j];
             /* The captured original itself: its own bytes, nothing to compare. */
@@ -2211,6 +2224,26 @@ sh_package_source_link *sh_package_source_link_open_attributed(const sh_package_
                 SIZE_MAX, &length, error, capacity);
             if (!body) goto failed;
             original_bytes = original->resource.body_length == length && !memcmp(original->resource.body, body, length);
+            if (!original_bytes && !unit->original_note) {
+                /* The first differing offset and a sanitized window of both sides. */
+                size_t at = 0, shorter = length < original->resource.body_length ? length : original->resource.body_length;
+                while (at < shorter && body[at] == original->resource.body[at]) at++;
+                char mine[49], theirs[49], note[512];
+                size_t from = at > 16 ? at - 16 : 0;
+                for (size_t k = 0; k < 48; k++) {
+                    unsigned char a = from + k < length ? body[from + k] : ' ';
+                    unsigned char o = from + k < original->resource.body_length ? original->resource.body[from + k] : ' ';
+                    mine[k] = a >= 32 && a < 127 ? (char)a : '.'; theirs[k] = o >= 32 && o < 127 ? (char)o : '.';
+                }
+                mine[48] = theirs[48] = 0;
+                snprintf(note, sizeof(note), "%s differs from its captured original (%zu vs %zu bytes, %s%s%s, %u sources, "
+                    "first at %zu: [%s] vs [%s])", unit->unit.files[j]->engine_path, length, original->resource.body_length,
+                    unit->unprepared ? "prepared" : "as bound", certificate->engine_path &&
+                    strcmp(certificate->engine_path, unit->unit.files[j]->engine_path) ? " from " : "",
+                    certificate->engine_path && strcmp(certificate->engine_path, unit->unit.files[j]->engine_path) ?
+                    certificate->engine_path : "", (unsigned)certificate->source_count, at, mine, theirs);
+                sl_note_original(unit, note);
+            }
             free(body);
         }
         /* Campaign-only bytes a scope supplies keep their native name (the
@@ -2343,6 +2376,11 @@ const char *sh_package_source_link_phases(const sh_package_source_link *source, 
 }
 const unsigned char *sh_package_source_link_shared(const sh_package_source_link *source)
 { return source && source->frozen ? source->shared : NULL; }
+const char *sh_package_source_link_original_note(const sh_package_source_link *source, size_t index)
+{
+    if (!source || index >= source->count || !source->units[index] || !source->units[index]->original_note) return "";
+    return source->units[index]->original_note;
+}
 typedef struct sl_compile { sh_package_source_link *source; const sh_package_link_adapter *native; } sl_compile;
 int sh_package_source_link_sites(const sh_package_source_link *s, size_t index,
     const sh_compiled_resource *file, const sh_package_link_edge **sites, size_t *count)

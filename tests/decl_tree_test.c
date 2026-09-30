@@ -85,6 +85,10 @@ int main(void)
             assert(sh_decl_tree_equal(a, b, "editorVars") == expected && sh_decl_tree_equal(b, a, "editorVars") == expected);
             /* Without the named block every member order is significant. */
             if (i == 1) assert(sh_decl_tree_equal(a, b, NULL) == 0);
+            /* Naming edit too frees only its direct members' order (the editor
+             * composition moves its collection fields to the tail of edit). */
+            int listed = i == 3 ? 1 : expected;
+            assert(sh_decl_tree_equal(a, b, "editorVars|edit") == listed && sh_decl_tree_equal(b, a, "editorVars|edit") == listed);
             sh_decl_tree_free(b);
         }
         sh_decl_tree_free(a);

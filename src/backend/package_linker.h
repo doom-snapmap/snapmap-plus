@@ -177,6 +177,13 @@ typedef struct sh_package_link_adapter {
      * share. NULL computes it for every captured unit. */
     int (*identity)(void *context, size_t unit, const sh_compiled_resource *file,
         sh_package_file_identity *out, char *error, size_t capacity);
+    /* Optional developer diagnostics for a refused native identity: describe
+     * writes the caller's own metadata for one unit (scope, owner, composition
+     * state) into out; note receives each bounded report line naming both
+     * claimants, their classes, certification, names, payloads and bound
+     * dependencies. Neither changes what the link decides. */
+    void (*describe)(void *context, size_t unit, char *out, size_t capacity);
+    void (*note)(void *context, const char *line);
 } sh_package_link_adapter;
 
 /* Owns small identity metadata and sealed, streamed proofs in an admitted
