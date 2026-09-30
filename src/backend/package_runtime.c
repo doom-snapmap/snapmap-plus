@@ -35,12 +35,12 @@
 #include "package_editor_rows.h"
 #include "map_embed.h"
 #include "map_provenance.h"
+#include "strids.h"
 #ifndef SH_PACKAGE_RUNTIME_TESTING
 #include "decl_server.h"
 #include "resource_graph_native.h"
 #include "engine_globals.h"
 #include "host_image.h"
-#include "strids.h"
 #include "package_sound_native.h"
 #include "audio_banks_native.h"
 #endif
@@ -721,6 +721,9 @@ static int g_test_editor_rows_unavailable;
 void sh_package_runtime_test_editor_rows(const char *const *names, size_t count)
 { g_test_editor_rows = names; g_test_editor_row_count = count; }
 void sh_package_runtime_test_editor_rows_unavailable(int unavailable) { g_test_editor_rows_unavailable = unavailable; }
+static sh_package_string_reservations g_test_strings;
+void sh_package_runtime_test_strings(const sh_package_string_reservations *strings)
+{ if (strings) g_test_strings = *strings; else memset(&g_test_strings, 0, sizeof(g_test_strings)); }
 static sh_package_source_implicit g_test_constructor;
 static void *g_test_constructor_context;
 void sh_package_runtime_test_constructor_requests(sh_package_source_implicit capture, void *context)
@@ -1826,6 +1829,7 @@ static pr_provider *pr_prepare_deliveries(const char *data_root, const char *sou
                 snprintf(error, sizeof(error), "native map bindings require registered source readers"); goto done;
             }
             native.source.implicit = g_test_constructor ? pr_test_constructor : NULL;
+            native.strings = g_test_strings;
 #endif
             ULONGLONG started = GetTickCount64();
             char scope_error[512], line[1280];
@@ -4602,7 +4606,7 @@ int sh_package_runtime_read(const char *engine_path, unsigned char **body, size_
     AcquireSRWLockShared(&g_lock);
     resource = sh_package_compilation_find(g_compiled, engine_path);
     if (resource) {
-        *body = sh_package_compilation_read(g_compiled, resource, (size_t)PTRDIFF_MAX,
+        *body = sh_package_compilation_read_served(g_compiled, resource, (size_t)PTRDIFF_MAX,
                                             length, error, sizeof(error));
         result = *body ? 1 : -1;
         if (result > 0 && resource->generated) {
@@ -4814,7 +4818,7 @@ int sh_package_runtime_read_decl_alias(const char *alias, unsigned char **body, 
     AcquireSRWLockShared(&g_lock);
     resource = g_compiled ? sh_package_compilation_find(g_compiled, path) : NULL;
     if (resource && resource->type) {
-        *body = sh_package_compilation_read(g_compiled, resource, (size_t)INT_MAX, length, error, sizeof(error));
+        *body = sh_package_compilation_read_served(g_compiled, resource, (size_t)INT_MAX, length, error, sizeof(error));
         result = *body ? 1 : -1;
     }
     /* Removed SnapMap originals are explicit restoration entries in the
@@ -5288,6 +5292,107 @@ static int pr_shipped_rows(const sh_resource_catalog *catalog, const pr_original
 }
 static int pr_stock_rows(const pr_inline_view *view)
 { return pr_shipped_rows(view->provider->catalog, &view->originals); }
+
+/* ---- Toybox roster for label qualification (strids.h, sh_strids_palette) ---
+ * Every editor entry that is a toybox tile, as the current provider serves it:
+ * every served editor declaration (package, legacy public and product rows,
+ * and packages' own versions of shipped entries), then every shipped entry the
+ * provider does not serve. Each resolves its inherited fields through the
+ * served entries first and the shipped ones after, so an untouched shipped
+ * child of a changed parent shows the parent's served label. Rows read as
+ * served, so an aliased row names the label alias its presented text selects
+ * (with a map overlay or an installed increment, the one of the resource it
+ * serves); label presentation is all this reads, and conversion keeps reading
+ * authored bodies. The entries are copies owned here until the next call; the
+ * string refresh reads them while it runs (dllmain.c binds this to strids). */
+typedef struct pr_roster { sh_strids_palette_entry *entries; char **strings; size_t count, string_count; } pr_roster;
+static pr_roster g_roster;
+static void pr_roster_free(void)
+{
+    for (size_t i = 0; i < g_roster.string_count; i++) free(g_roster.strings[i]);
+    free(g_roster.strings); free(g_roster.entries); memset(&g_roster, 0, sizeof(g_roster));
+}
+static const char *pr_roster_copy(const char *value, size_t capacity)
+{
+    char *copy = _strdup(value);
+    if (!copy || g_roster.string_count >= capacity) { free(copy); return NULL; }
+    g_roster.strings[g_roster.string_count++] = copy;
+    return copy;
+}
+/* The roster of one compilation (g_roster); the caller keeps it alive. */
+static int pr_palette_of(const sh_package_compilation *compiled, const sh_resource_catalog *catalog,
+    const pr_original_source *originals, const sh_strids_palette_entry **entries, size_t *count)
+{
+    sh_editor_rows served = {0};
+    int state = 0;
+    *entries = NULL; *count = 0;
+    pr_roster_free();
+    AcquireSRWLockExclusive(&g_editor_rows_lock);
+    if (pr_shipped_rows(catalog, originals) != 1) goto done; /* Not yet readable: base labels. */
+    state = -1;
+    for (size_t i = 0; compiled && i < compiled->resource_count; i++) {
+        const sh_compiled_resource *resource = compiled->resources + i;
+        size_t length = strlen(resource->engine_path), size = 0;
+        char error[256];
+        if (length <= sizeof(PR_EDITOR_PREFIX) + 4 || !resource->type ||
+            strncmp(resource->engine_path, PR_EDITOR_PREFIX, sizeof(PR_EDITOR_PREFIX) - 1) ||
+            strcmp(resource->engine_path + length - 5, ".decl")) continue;
+        size_t n = length - (sizeof(PR_EDITOR_PREFIX) - 1) - 5;
+        char *name = malloc(n + 1);
+        if (!name) goto done;
+        memcpy(name, resource->engine_path + sizeof(PR_EDITOR_PREFIX) - 1, n); name[n] = 0;
+        unsigned char *body = sh_package_compilation_read_served(compiled, resource, SIZE_MAX / 2, &size, error, sizeof(error));
+        int added = body ? sh_editor_rows_add_text(&served, name, (const char *)body, size) : -1;
+        free(name); free(body);
+        if (added < 0) goto done;
+    }
+    if (!sh_editor_rows_finish(&served, &g_editor_rows)) goto done;
+    size_t total = served.count + g_editor_rows.count, strings = total * 4;
+    if (!(g_roster.entries = calloc(total ? total : 1, sizeof(*g_roster.entries))) ||
+        !(g_roster.strings = calloc(strings ? strings : 1, sizeof(*g_roster.strings)))) goto done;
+    for (size_t i = 0; i < total; i++) {
+        const sh_editor_row *row = i < served.count ? served.items + i : g_editor_rows.items + (i - served.count);
+        if (i >= served.count && sh_editor_rows_find(&served, row->name)) continue; /* Served above. */
+        const char *entity = sh_editor_rows_effective(&served, &g_editor_rows, row, SH_EDITOR_ROW_ENTITY_DEF);
+        const char *label = sh_editor_rows_effective(&served, &g_editor_rows, row, SH_EDITOR_ROW_LABEL);
+        const char *category = sh_editor_rows_effective(&served, &g_editor_rows, row, SH_EDITOR_ROW_CATEGORY);
+        const char *meta = sh_editor_rows_effective(&served, &g_editor_rows, row, SH_EDITOR_ROW_META);
+        if (!entity || !*entity || !label || !category || !meta) continue;
+        sh_strids_palette_entry *entry = g_roster.entries + g_roster.count;
+        if (!(entry->row = pr_roster_copy(row->name, strings)) || !(entry->label = pr_roster_copy(label, strings)) ||
+            !(entry->category = pr_roster_copy(category, strings)) || !(entry->meta = pr_roster_copy(meta, strings))) goto done;
+        g_roster.count++;
+    }
+    state = 1;
+done:
+    ReleaseSRWLockExclusive(&g_editor_rows_lock);
+    sh_editor_rows_free(&served);
+    if (state != 1) pr_roster_free();
+    else { *entries = g_roster.entries; *count = g_roster.count; }
+    return state;
+}
+int sh_package_runtime_palette(void *context, const sh_strids_palette_entry **entries, size_t *count)
+{
+    (void)context;
+    AcquireSRWLockShared(&g_lock);
+    pr_original_source originals = {g_catalog ? sh_resource_catalog_read_path : NULL, (void *)g_catalog,
+        g_current_provider ? g_current_provider->native_assets : NULL};
+#ifdef SH_PACKAGE_RUNTIME_TESTING
+    sh_package_runtime_test_source_inputs(NULL, NULL, &originals.game, &originals.context);
+#endif
+    int state = pr_palette_of(g_compiled, g_catalog, &originals, entries, count);
+    ReleaseSRWLockShared(&g_lock);
+    return state;
+}
+#ifdef SH_PACKAGE_RUNTIME_TESTING
+int sh_package_runtime_test_palette_of(const sh_package_compilation *compiled,
+    const struct sh_strids_palette_entry **entries, size_t *count)
+{
+    pr_original_source originals = {NULL, NULL, NULL};
+    sh_package_runtime_test_source_inputs(NULL, NULL, &originals.game, &originals.context);
+    return pr_palette_of(compiled, NULL, &originals, entries, count);
+}
+#endif
 static int pr_compile_rows_read(void *context, const struct sh_editor_rows **rows)
 {
     pr_compile_rows *compile = context;

@@ -5,14 +5,17 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* 1 copied, 0 absent or empty, -1 allocation. */
+/* 1 copied, 0 absent, -1 allocation. A stated empty literal is kept as ""
+ * and stays distinct from an absent member: it is the row's own value, so it
+ * does not inherit what a parent states. */
 static int er_literal(const sh_decl_node *node, char **out)
 {
     const char *text; size_t length;
     *out = NULL;
-    if (!node || node->compound || !sh_decl_tree_literal(node, &text, &length) || !length) return 0;
+    if (!node || node->compound || !sh_decl_tree_literal(node, &text, &length)) return 0;
     if (!(*out = malloc(length + 1))) return -1;
-    memcpy(*out, text, length); (*out)[length] = 0;
+    if (length) memcpy(*out, text, length);
+    (*out)[length] = 0;
     return 1;
 }
 
@@ -35,18 +38,21 @@ int sh_editor_rows_add_text(sh_editor_rows *rows, const char *name, const char *
      * not parse at all is unreadable. */
     sh_decl_node *tree = sh_decl_tree_parse_ordered((sh_decl_source){text, length}, error, sizeof(error));
     if (!tree) { rows->unreadable++; return 0; }
-    const sh_decl_node *def = NULL;
+    const sh_decl_node *def = NULL, *label = NULL, *category = NULL, *meta = NULL, *stated;
     int edits = 0;
     for (const sh_decl_node *m = tree->children; m; m = m->next)
         if (m->key && !strcmp(m->key, "edit") && m->compound) {
-            const sh_decl_node *stated = er_last(m, "entityDef");
             edits++;
-            if (stated) def = stated;
+            if ((stated = er_last(m, "entityDef")) != NULL) def = stated;
+            if ((stated = er_last(m, "displayNameTag")) != NULL) label = stated;
+            if ((stated = er_last(m, "categoryNameTag")) != NULL) category = stated;
+            if ((stated = er_last(m, "metaCategoryNameTag")) != NULL) meta = stated;
         }
     int ok = (row.name = _strdup(name)) != NULL &&
         er_literal(er_last(tree, "inherit"), &row.parent) >= 0 &&
-        er_literal(def, &row.entity_def) >= 0;
-    int plain = ok && row.parent && row.entity_def && edits == 1;
+        er_literal(def, &row.entity_def) >= 0 && er_literal(label, &row.label) >= 0 &&
+        er_literal(category, &row.category) >= 0 && er_literal(meta, &row.meta) >= 0;
+    int plain = ok && row.parent && *row.parent && row.entity_def && *row.entity_def && edits == 1;
     for (const sh_decl_node *m = tree->children; plain && m; m = m->next)
         plain = m->key && (!strcmp(m->key, "inherit") || !strcmp(m->key, "edit"));
     const sh_decl_node *edit = plain ? er_last(tree, "edit") : NULL;
@@ -55,7 +61,10 @@ int sh_editor_rows_add_text(sh_editor_rows *rows, const char *name, const char *
     row.plain = plain;
     sh_decl_tree_free(tree);
     sh_editor_row *grown = ok ? realloc(rows->items, (rows->count + 1) * sizeof(*grown)) : NULL;
-    if (!grown) { free(row.name); free(row.parent); free(row.entity_def); return -1; }
+    if (!grown) {
+        free(row.name); free(row.parent); free(row.entity_def); free(row.label); free(row.category); free(row.meta);
+        return -1;
+    }
     rows->items = grown; rows->items[rows->count++] = row;
     return 1;
 }
@@ -68,6 +77,19 @@ static const sh_editor_row *er_find(const sh_editor_rows *rows, const char *name
 {
     sh_editor_row key = {(char *)name, NULL, NULL, 0};
     return rows && rows->count && name ? bsearch(&key, rows->items, rows->count, sizeof(key), er_row_order) : NULL;
+}
+const sh_editor_row *sh_editor_rows_find(const sh_editor_rows *rows, const char *name) { return er_find(rows, name); }
+const char *sh_editor_rows_effective(const sh_editor_rows *rows, const sh_editor_rows *fallback,
+    const sh_editor_row *row, int field)
+{
+    for (int depth = 0; row && depth < 64; depth++) {
+        const char *value = field == SH_EDITOR_ROW_ENTITY_DEF ? row->entity_def : field == SH_EDITOR_ROW_LABEL ?
+            row->label : field == SH_EDITOR_ROW_CATEGORY ? row->category : row->meta;
+        if (value) return value;
+        const sh_editor_row *parent = er_find(rows, row->parent);
+        row = parent ? parent : er_find(fallback, row->parent);
+    }
+    return NULL;
 }
 /* The entityDef a row resolves to through its parents. */
 static const char *er_resolve(const sh_editor_rows *rows, const sh_editor_rows *fallback, const sh_editor_row *row)
@@ -88,7 +110,7 @@ int sh_editor_rows_finish(sh_editor_rows *rows, const sh_editor_rows *fallback)
     if (!rows->placeable) return 0;
     for (size_t i = 0; i < rows->count; i++) {
         const char *resolved = er_resolve(rows, fallback, rows->items + i);
-        if (resolved) rows->placeable[rows->placeable_count++] = resolved;
+        if (resolved && *resolved) rows->placeable[rows->placeable_count++] = resolved;
     }
     if (rows->placeable_count) qsort(rows->placeable, rows->placeable_count, sizeof(*rows->placeable), er_name_order);
     return 1;
@@ -99,6 +121,7 @@ void sh_editor_rows_free(sh_editor_rows *rows)
     if (!rows) return;
     for (size_t i = 0; i < rows->count; i++) {
         free(rows->items[i].name); free(rows->items[i].parent); free(rows->items[i].entity_def);
+        free(rows->items[i].label); free(rows->items[i].category); free(rows->items[i].meta);
     }
     free(rows->items); free((void *)rows->placeable); memset(rows, 0, sizeof(*rows));
 }

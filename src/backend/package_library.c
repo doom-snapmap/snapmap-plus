@@ -119,6 +119,8 @@ typedef struct pl_build {
     const char **stock_reasons;
     size_t stock_reason_count, private_stock;
     char private_stock_notes[3072];
+    /* Global string keys admitted to the native reservation (pl_reserve_string_globals). */
+    int string_globals_reserved;
     /* Diagnostic parse census (decl_tree.h) per library phase and step. */
     int census_owned;
     /* Diagnostics: key-site scans made and reused, units left unrewritten. */
@@ -1303,7 +1305,6 @@ typedef struct pl_localization {
     sh_package_strings *strings;
     char *error;
     size_t error_capacity;
-    int globals_reserved;
 } pl_localization;
 
 static int pl_string_bind(void *context, const char *slot, const char *key,
@@ -1338,30 +1339,37 @@ static int pl_string_bind(void *context, const char *slot, const char *key,
     p->sites[p->count++] = (pl_string_site){path, {p->component, saved}, p->unit}; return 0;
 }
 
+/* Admit the policy's historical/global string keys into this compilation's
+ * native reservation once, before any private key is allocated. */
+static int pl_reserve_string_globals(pl_build *b)
+{
+    const sh_package_string_reservations *native = &b->native->strings;
+    if (b->string_globals_reserved) return 1;
+    const sh_json_object *strings = &b->shared->policy.strings;
+    if (strings->count && !native->reserve_global) return 0;
+    for (size_t i = 0; i < strings->count; i++) {
+        const char *raw = strings->members[i].value_json; sh_json_object pairs = {0};
+        if (!sh_json_parse_object(raw, strlen(raw), 2, &pairs)) return 0;
+        int ok = 1;
+        for (size_t j = 0; ok && j < pairs.count; j++) {
+            const char *id = pairs.members[j].key; size_t length = strlen(id);
+            char *global = length <= SIZE_MAX - 6 ? malloc(length + 6) : NULL;
+            if (global) {
+                memcpy(global, "#str_", 5); memcpy(global + 5, id, length + 1);
+                ok = native->reserve_global(native->context, global) == 1;
+            } else ok = 0;
+            free(global);
+        }
+        sh_json_object_free(&pairs); if (!ok) return 0;
+    }
+    b->string_globals_reserved = 1;
+    return 1;
+}
 static int pl_string_reserve(void *context, const char *key, const unsigned char identity[32], const char *mapping)
 {
     pl_localization *p = context;
     const sh_package_string_reservations *native = &p->build->native->strings;
-    if (!p->globals_reserved) {
-        const sh_json_object *strings = &p->build->shared->policy.strings;
-        if (strings->count && !native->reserve_global) return -1;
-        for (size_t i = 0; i < strings->count; i++) {
-            const char *raw = strings->members[i].value_json; sh_json_object pairs = {0};
-            if (!sh_json_parse_object(raw, strlen(raw), 2, &pairs)) return -1;
-            int ok = 1;
-            for (size_t j = 0; ok && j < pairs.count; j++) {
-                const char *id = pairs.members[j].key; size_t length = strlen(id);
-                char *global = length <= SIZE_MAX - 6 ? malloc(length + 6) : NULL;
-                if (global) {
-                    memcpy(global, "#str_", 5); memcpy(global + 5, id, length + 1);
-                    ok = native->reserve_global(native->context, global) == 1;
-                } else ok = 0;
-                free(global);
-            }
-            sh_json_object_free(&pairs); if (!ok) return -1;
-        }
-        p->globals_reserved = 1;
-    }
+    if (!pl_reserve_string_globals(p->build)) return -1;
     int result = native->reserve(native->context, key, identity, mapping);
     if (result == 1 && !sh_package_policy_localization(&p->build->shared->policy, key, mapping,
         NULL, p->error, p->error_capacity)) return -1;
@@ -1687,14 +1695,19 @@ static int pl_collection_composes(void *context, const sh_decl_source *parts, si
     return failure.kind == SH_PACKAGE_EDITOR_FAILURE_ENVIRONMENT ? -1 : 0;
 }
 
-/* 1 with the inherit literal of a contribution text (NULL when absent). */
+/* 1 with the inherit literal of a contribution text (NULL when absent). A
+ * shipped row may repeat a field (fx/ambient_embers states fxInfo twice), which
+ * the native reader applies in order, so the text is read in order and the
+ * last inherit is effective, as for the served roster (package_editor_rows.c). */
 static int pl_inherit_name(sh_decl_source text, char **out)
 {
-    sh_decl_node *tree = sh_decl_tree_parse(text, NULL, 0);
+    sh_decl_node *tree = sh_decl_tree_parse_ordered(text, NULL, 0);
+    const sh_decl_node *inherit = NULL;
     const char *value; size_t length;
     *out = NULL;
     if (!tree) return 0;
-    if (sh_decl_tree_literal(sh_decl_tree_member(tree, "inherit"), &value, &length)) {
+    for (const sh_decl_node *m = tree->children; m; m = m->next) if (m->key && !strcmp(m->key, "inherit")) inherit = m;
+    if (inherit && sh_decl_tree_literal(inherit, &value, &length)) {
         if (!(*out = malloc(length + 1))) { sh_decl_tree_free(tree); return 0; }
         memcpy(*out, value, length); (*out)[length] = 0;
     }
@@ -4874,6 +4887,269 @@ static void pl_repeated_work(pl_build *b, sh_package_library *out)
     }
 #undef PL_WROTE
 }
+/* ---- Toybox label aliases (display-only source qualifiers) ----------------
+ * README: "When different variants have identical labels, add a display-only
+ * source qualifier." Whether two tiles look alike depends on the language the
+ * player selected and on every other tile, so the decision belongs to string
+ * publication (strids.h, sh_strids_palette). Here, after identities are
+ * assigned, each placeable editor row a package supplies under a private name
+ * gets its own label alias: a private string whose mapping keeps the row's
+ * effective displayNameTag as its base (native key, or the authored locales of
+ * a localized key) and adds the row's published name, effective category and
+ * meta-category keys and its sources (package name and id, component, authored
+ * row). Only the served text's displayNameTag changes, to that alias: row and
+ * entityDef identities, bindings, categories, images and saved references are
+ * assigned before this and stay as they are. Exact copies share one published
+ * row and so one alias naming all their sources; stock and product rows keep
+ * their own labels. Without a native string reservation nothing is aliased. */
+#define PL_LABEL_DEPTH 32u
+typedef struct pl_label_source { const char *name, *id, *component, *row; } pl_label_source;
+typedef struct pl_label_row { const char *published; size_t unit, owner; } pl_label_row;
+static int pl_label_row_order(const void *a, const void *b)
+{
+    const pl_label_row *x = a, *y = b;
+    int order = strcmp(x->published, y->published);
+    return order ? order : x->unit < y->unit ? -1 : x->unit > y->unit;
+}
+static int pl_label_source_order(const void *a, const void *b)
+{
+    const pl_label_source *x = a, *y = b;
+    int order = strcmp(x->id, y->id);
+    if (!order) order = strcmp(x->component, y->component);
+    if (!order) order = strcmp(x->row, y->row);
+    return order ? order : strcmp(x->name, y->name);
+}
+/* A JSON string literal for raw UTF-8 bytes; malloc-owned. */
+static char *pl_json_quote(const char *raw)
+{
+    size_t length = strlen(raw), used = 0;
+    char *out = length <= (SIZE_MAX - 3) / 6 ? malloc(length * 6 + 3) : NULL;
+    if (!out) return NULL;
+    out[used++] = '"';
+    for (const unsigned char *p = (const unsigned char *)raw; *p; p++) {
+        if (*p == '"' || *p == '\\') { out[used++] = '\\'; out[used++] = (char)*p; }
+        else if (*p < 0x20) used += (size_t)snprintf(out + used, 7, "\\u%04x", *p);
+        else out[used++] = (char)*p;
+    }
+    out[used++] = '"'; out[used] = 0;
+    return out;
+}
+/* The published row's effective toybox fields through its parents, nearest
+ * first: compiled rows of this library (their authored bodies), then SnapMap's
+ * shipped declarations. Each is projected as the served roster projects rows
+ * (sh_editor_rows_add_text): an ordered parse, since shipped rows may repeat a
+ * field, and the last-written member effective. A parent that does not read
+ * ends the chain. Owned copies (NULL when unset); 1 read, 0 on failure. */
+static int pl_label_fields(pl_build *b, sh_package_baseline_reader original, void *original_context,
+    const sh_compiled_resource *row, char **fields)
+{
+    sh_editor_rows chain = {0};
+    char error[256];
+    int ok = 0;
+    for (int f = 0; f < 4; f++) fields[f] = NULL;
+    size_t length = 0;
+    unsigned char *text = sh_package_compilation_read(b->linked.compiled, row, SIZE_MAX / 2, &length, error, sizeof(error));
+    int added = text ? sh_editor_rows_add_text(&chain, "", (const char *)text, length) : 0;
+    free(text);
+    if (added < 0) goto done;
+    while (chain.count && chain.count < PL_LABEL_DEPTH) {
+        const char *parent = chain.items[chain.count - 1].parent;
+        if (!parent) break;
+        size_t size = strlen(parent) + sizeof(PL_EDITOR_PREFIX) + 5;
+        char *path = malloc(size);
+        if (!path) goto done;
+        snprintf(path, size, PL_EDITOR_PREFIX "%s.decl", parent);
+        const sh_compiled_resource *compiled = sh_package_compilation_find(b->linked.compiled, path);
+        unsigned char *body = NULL; size_t body_length = 0;
+        int status = compiled ? ((body = sh_package_compilation_read(b->linked.compiled, compiled, SIZE_MAX / 2,
+            &body_length, error, sizeof(error))) != NULL) : original ? original(original_context, path, &body, &body_length) : 0;
+        free(path);
+        if (status < 0) { free(body); goto done; }
+        size_t before = chain.count;
+        added = status > 0 ? sh_editor_rows_add_text(&chain, parent, (const char *)body, body_length) : 0;
+        free(body);
+        if (added < 0) goto done;
+        if (chain.count == before) break;
+    }
+    for (size_t i = 0; i < chain.count; i++) {
+        const sh_editor_row *item = chain.items + i;
+        const char *values[4] = {item->label, item->category, item->meta, item->entity_def};
+        for (int f = 0; f < 4; f++)
+            if (!fields[f] && values[f] && !(fields[f] = _strdup(values[f]))) goto done;
+    }
+    ok = 1;
+done:
+    if (!ok) for (int f = 0; f < 4; f++) { free(fields[f]); fields[f] = NULL; }
+    sh_editor_rows_free(&chain);
+    return ok;
+}
+/* Serve the alias as the row's displayNameTag (its presented text); the body,
+ * which every semantic reader uses, and every other member stay as they are. */
+static int pl_label_decorate(sh_compiled_resource *row, const char *key)
+{
+    sh_decl_node *tree = sh_decl_tree_parse((sh_decl_source){(const char *)row->body, row->body_length}, NULL, 0);
+    size_t length = 0, quoted_length = strlen(key) + 3;
+    char *quoted = malloc(quoted_length), *text = NULL;
+    int ok = 0;
+    if (!tree || !quoted) goto done;
+    snprintf(quoted, quoted_length, "\"%s\"", key);
+    sh_decl_node *edit = (sh_decl_node *)sh_decl_tree_member(tree, "edit"), *member;
+    if (!edit || !edit->compound) goto done;
+    member = (sh_decl_node *)sh_decl_tree_member(edit, "displayNameTag");
+    if (member) {
+        if (member->compound) goto done;
+        free(member->value); member->value = quoted; quoted = NULL;
+    } else {
+        if (!(member = calloc(1, sizeof(*member))) || !(member->key = _strdup("displayNameTag"))) {
+            if (member) free(member);
+            goto done;
+        }
+        member->value = quoted; quoted = NULL; member->assignment = 1;
+        sh_decl_node **tail = &edit->children;
+        while (*tail) tail = &(*tail)->next;
+        *tail = member;
+    }
+    if (!(text = sh_decl_tree_write(tree, &length))) goto done;
+    free(row->presented); row->presented = (unsigned char *)text; row->presented_length = length; ok = 1;
+done:
+    free(quoted); sh_decl_tree_free(tree); return ok;
+}
+static int pl_label_aliases(pl_build *b, const sh_package_sources *sources,
+    sh_package_baseline_reader original, void *original_context, char *error, size_t capacity)
+{
+    const sh_package_string_reservations *native = b->native ? &b->native->strings : NULL;
+    const sh_package_link_inputs *inputs = sh_package_source_link_inputs(b->contributions->source);
+    pl_label_row *rows = NULL;
+    size_t count = 0;
+    int ok = 0;
+    if (!native || !native->reserve || !native->max_attempts || !b->linked.compiled) return 1;
+    if (!(rows = calloc(b->contributions->inputs.count ? b->contributions->inputs.count : 1, sizeof(*rows)))) goto failed;
+    for (size_t i = 0; i < b->contributions->inputs.count; i++) {
+        const sh_package_link_unit *unit = b->contributions->inputs.units + i;
+        size_t scope = b->contributions->inputs.scopes[i];
+        if (strcmp(unit->family, "snapeditorentitydef") || unit->file_count != 1 || !pl_modern(b, scope)) continue;
+        const char *published = b->linked.names[b->linked.classes.nodes[i]];
+        size_t owner = pl_member_owner(b, sources, i);
+        if (!published || !strcmp(published, unit->name) || owner == SIZE_MAX) continue;
+        rows[count++] = (pl_label_row){published, i, owner};
+    }
+    qsort(rows, count, sizeof(*rows), pl_label_row_order);
+    for (size_t start = 0, end; start < count; start = end) {
+        for (end = start; end < count && !strcmp(rows[end].published, rows[start].published); end++) {}
+        size_t size = strlen(rows[start].published) + sizeof(PL_EDITOR_PREFIX) + 5;
+        char *path = malloc(size), *label = NULL, *category = NULL, *meta = NULL, *entity = NULL;
+        pl_label_source *found = calloc(end - start, sizeof(*found));
+        sh_json_object canonical = {0}, label_object = {0}, list = {0};
+        sh_package_owners owners = {0};
+        char *base_native = NULL, *base_locales = NULL, *serialized = NULL, *label_json = NULL, *list_json = NULL;
+        char *quoted_row = NULL, *quoted_category = NULL, *quoted_meta = NULL, key[128];
+        int step = 0;
+        if (!path || !found) goto group_done;
+        snprintf(path, size, PL_EDITOR_PREFIX "%s.decl", rows[start].published);
+        sh_compiled_resource *row = (sh_compiled_resource *)sh_package_compilation_find(b->linked.compiled, path);
+        if (!row || !row->body) { step = 1; goto group_done; }
+        {
+            char *fields[4];
+            if (!pl_label_fields(b, original, original_context, row, fields)) goto group_done;
+            label = fields[0]; category = fields[1]; meta = fields[2]; entity = fields[3];
+        }
+        /* Not a placeable tile, or a label, category or entity its author left
+         * empty (stated "", not inherited): nothing to alias. */
+        if (!label || !category || !meta || !entity || !*label || !*category || !*meta || !*entity) {
+            step = 1; goto group_done;
+        }
+        /* The base: an authored localized key keeps its mapping's native key and
+         * locales; any other key (or literal) is its own native fallback. */
+        for (size_t i = 0; i < b->linked.compiled->policy.localized_count && !base_native; i++) {
+            const sh_package_localized_string *value = b->linked.compiled->policy.localized + i;
+            sh_json_object mapping = {0};
+            if (_stricmp(value->key, label)) continue;
+            if (!sh_json_parse_object(value->mapping, strlen(value->mapping), 4, &mapping)) goto group_done;
+            const char *n = sh_json_object_get(&mapping, "native"), *l = sh_json_object_get(&mapping, "locales");
+            if (n && l) { base_native = _strdup(n); base_locales = _strdup(l); }
+            sh_json_object_free(&mapping);
+            if (!base_native || !base_locales) goto group_done;
+        }
+        if (!base_native && (!(base_native = pl_json_quote(label)) || !(base_locales = _strdup("{}")))) goto group_done;
+        /* Sources: every package unit this published row stands for. */
+        size_t sources_found = 0;
+        for (size_t r = start; r < end; r++) {
+            const sh_package_link_unit *authored = inputs->units + rows[r].unit;
+            const sh_compiled_resource *file = authored->file_count ? authored->files[0] : NULL;
+            size_t component = file && file->source_count && file->sources[0] < sources->file_count ?
+                sources->files[file->sources[0]].component : SIZE_MAX;
+            const sh_package_component *root_component = NULL;
+            for (size_t c = 0; c < sources->component_count; c++)
+                if (sources->components[c].owner == rows[r].owner && !*sources->components[c].relative) {
+                    root_component = sources->components + c; break;
+                }
+            if (!root_component || component >= sources->component_count) { step = 1; goto group_done; }
+            found[sources_found++] = (pl_label_source){root_component->descriptor.name, root_component->descriptor.id,
+                sources->components[component].relative, b->contributions->inputs.units[rows[r].unit].name};
+            if (!sh_package_owners_add(&owners, rows[r].owner)) goto group_done;
+        }
+        qsort(found, sources_found, sizeof(*found), pl_label_source_order);
+        for (size_t s = 0, n = 0; s < sources_found; s++) {
+            if (s && !pl_label_source_order(found + s, found + s - 1)) continue;
+            char index[24], *name = pl_json_quote(found[s].name), *id = pl_json_quote(found[s].id);
+            char *component = pl_json_quote(found[s].component), *authored = pl_json_quote(found[s].row), *entry_json = NULL;
+            sh_json_object entry = {0};
+            int added = name && id && component && authored &&
+                sh_json_object_set(&entry, "name", name, 1) && sh_json_object_set(&entry, "id", id, 1) &&
+                sh_json_object_set(&entry, "component", component, 1) && sh_json_object_set(&entry, "row", authored, 1) &&
+                (entry_json = sh_json_serialize_object(&entry, 0, NULL)) != NULL;
+            snprintf(index, sizeof(index), "%zu", n++);
+            added = added && sh_json_object_set(&list, index, entry_json, 8);
+            free(name); free(id); free(component); free(authored); free(entry_json); sh_json_object_free(&entry);
+            if (!added) goto group_done;
+        }
+        if (!(quoted_row = pl_json_quote(rows[start].published)) || !(quoted_category = pl_json_quote(category)) ||
+            !(quoted_meta = pl_json_quote(meta)) || !(list_json = sh_json_serialize_object(&list, 0, NULL)) ||
+            !sh_json_object_set(&label_object, "row", quoted_row, 1) ||
+            !sh_json_object_set(&label_object, "category", quoted_category, 1) ||
+            !sh_json_object_set(&label_object, "meta", quoted_meta, 1) ||
+            !sh_json_object_set(&label_object, "sources", list_json, 8) ||
+            !(label_json = sh_json_serialize_object(&label_object, 0, NULL)) ||
+            !sh_json_object_set(&canonical, "native", base_native, 1) ||
+            !sh_json_object_set(&canonical, "locales", base_locales, 8) ||
+            !sh_json_object_set(&canonical, "label", label_json, 8) ||
+            !(serialized = sh_json_serialize_object(&canonical, 0, NULL))) goto group_done;
+        {
+            static const char hex[] = "0123456789abcdef";
+            sh_package_file_identity identity; char token[65];
+            if (!sh_package_bytes_identity(serialized, strlen(serialized), &identity)) goto group_done;
+            for (size_t j = 0; j < 32; j++) {
+                token[j * 2u] = hex[identity.digest[j] >> 4]; token[j * 2u + 1u] = hex[identity.digest[j] & 15];
+            }
+            token[64] = 0;
+            if (!pl_reserve_string_globals(b)) goto group_done;
+            int reserved = 0;
+            for (size_t attempt = 0; attempt < native->max_attempts && reserved != 1; attempt++) {
+                if (!attempt) snprintf(key, sizeof(key), "#str_smp_loc_%s", token);
+                else snprintf(key, sizeof(key), "#str_smp_loc_%s_%zu", token, attempt);
+                reserved = native->reserve(native->context, key, identity.digest, serialized);
+                if (reserved < 0) goto group_done;
+            }
+            if (reserved != 1) { snprintf(error, capacity, "native string ID collision attempts exhausted for a toybox label"); goto group_done; }
+            if (!sh_package_policy_localization(&b->linked.compiled->policy, key, serialized, &owners, error, capacity) ||
+                !pl_label_decorate(row, key)) goto group_done;
+        }
+        step = 1;
+group_done:
+        free(path); free(label); free(category); free(meta); free(entity); free(found);
+        free(base_native); free(base_locales); free(serialized); free(label_json); free(list_json);
+        free(quoted_row); free(quoted_category); free(quoted_meta);
+        sh_json_object_free(&canonical); sh_json_object_free(&label_object); sh_json_object_free(&list);
+        sh_package_owners_free(&owners);
+        if (!step) goto failed;
+    }
+    ok = 1;
+failed:
+    free(rows);
+    if (!ok && !*error) snprintf(error, capacity, "cannot publish toybox label aliases");
+    return ok;
+}
+
 static int pl_compile(const sh_package_sources *sources, const sh_package_provenance *contexts,
     const sh_package_compile_environment *environment, const sh_resource_catalog *catalog,
     sh_package_baseline_reader original, void *original_context,
@@ -5143,6 +5419,7 @@ static int pl_compile(const sh_package_sources *sources, const sh_package_proven
         environment->canonical_path, &b.linked, error, capacity) ||
         (b.identities && !sh_package_native_registry_validate(b.identities, error, capacity))) goto done;
     pl_private_stock(&b);
+    if (!pl_label_aliases(&b, sources, original, original_context, error, capacity)) goto done;
     pl_phase(&b, out, SH_PACKAGE_LIBRARY_PHASE_LINK, &mark);
     if (!pl_provenance(&b, sources, &out->bindings) || !pl_key_provenance(&b, sources, &out->bindings, error, capacity) ||
         !pl_hud(&b, error, capacity) ||

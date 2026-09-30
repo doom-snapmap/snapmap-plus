@@ -76,6 +76,41 @@ int main(void)
     CHECK(why && limit == SH_DECL_CARRIER_GAP && strstr(why, "could not be read"));
     CHECK(!sh_editor_rows_placement(&unread, NULL, "smp/p0", NULL, "stock/speaker", &limit, reason, sizeof(reason)));
 
+    /* Explicit clearing versus inheritance: a child stating an empty label or
+     * category keeps its own empty value; one omitting them inherits. An empty
+     * inherit or entityDef names no parent and places nothing. */
+    {
+        sh_editor_rows toybox = {0};
+        add(&toybox, "tile/parent", "{ edit = { entityDef = \"stock/speaker\"; displayNameTag = \"#str_p\"; "
+            "categoryNameTag = \"#str_c\"; metaCategoryNameTag = \"#str_m\"; } }");
+        add(&toybox, "tile/cleared", "{ inherit = \"tile/parent\"; edit = { displayNameTag = \"\"; categoryNameTag = \"\"; } }");
+        add(&toybox, "tile/inherits", "{ inherit = \"tile/parent\"; edit = { entityDef = \"stock/crate\"; } }");
+        add(&toybox, "tile/unplaced", "{ inherit = \"tile/parent\"; edit = { entityDef = \"\"; } }");
+        add(&toybox, "tile/orphan", "{ inherit = \"\"; edit = { entityDef = \"stock/speaker\"; } }");
+        CHECK(sh_editor_rows_finish(&toybox, NULL));
+        const sh_editor_row *cleared = sh_editor_rows_find(&toybox, "tile/cleared");
+        const sh_editor_row *inherits = sh_editor_rows_find(&toybox, "tile/inherits");
+        const sh_editor_row *unplaced = sh_editor_rows_find(&toybox, "tile/unplaced");
+        const sh_editor_row *orphan = sh_editor_rows_find(&toybox, "tile/orphan");
+        CHECK(cleared && inherits && unplaced && orphan);
+        if (cleared && inherits && unplaced && orphan) {
+            const char *v;
+            CHECK((v = sh_editor_rows_effective(&toybox, NULL, cleared, SH_EDITOR_ROW_LABEL)) && !*v);
+            CHECK((v = sh_editor_rows_effective(&toybox, NULL, cleared, SH_EDITOR_ROW_CATEGORY)) && !*v);
+            CHECK((v = sh_editor_rows_effective(&toybox, NULL, cleared, SH_EDITOR_ROW_META)) && !strcmp(v, "#str_m"));
+            CHECK((v = sh_editor_rows_effective(&toybox, NULL, cleared, SH_EDITOR_ROW_ENTITY_DEF)) && !strcmp(v, "stock/speaker"));
+            CHECK((v = sh_editor_rows_effective(&toybox, NULL, inherits, SH_EDITOR_ROW_LABEL)) && !strcmp(v, "#str_p"));
+            CHECK((v = sh_editor_rows_effective(&toybox, NULL, inherits, SH_EDITOR_ROW_CATEGORY)) && !strcmp(v, "#str_c"));
+            CHECK((v = sh_editor_rows_effective(&toybox, NULL, unplaced, SH_EDITOR_ROW_ENTITY_DEF)) && !*v);
+            CHECK(!unplaced->plain && !orphan->plain && orphan->parent && !*orphan->parent);
+            CHECK((v = sh_editor_rows_effective(&toybox, NULL, orphan, SH_EDITOR_ROW_LABEL)) == NULL);
+        }
+        /* speaker (parent, cleared, orphan) and crate; the empty entityDef places nothing. */
+        CHECK(toybox.placeable_count == 4);
+        for (size_t i = 0; i < toybox.placeable_count; i++) CHECK(*toybox.placeable[i]);
+        sh_editor_rows_free(&toybox);
+    }
+
     sh_editor_rows_free(&shipped); sh_editor_rows_free(&package); sh_editor_rows_free(&unread);
     if (failures) { fprintf(stderr, "%d editor row check(s) failed\n", failures); return 1; }
     puts("editor row placement checks passed");

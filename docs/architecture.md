@@ -1353,7 +1353,13 @@ declaration stays one entry even when its scope bound a dependency another way
 while composition ran. A child's sparse patches are
 restated onto its published parent only when native slot merging would place one
 on another control; a parent control rebound in place (for example to a
-package's private inspector) stays inherited. When a package's own text moves a
+package's private inspector) stays inherited. Parents are read as the native
+reader applies them: shipped rows may repeat a field (`fx/ambient_embers`
+states `fxInfo` twice), so parent names and editor collections are read in
+order. A child stating no collection has nothing to rebase. A parent stating a
+collection the rebase reads more than once is not composed: the product reports
+a coverage failure rather than guessing how the native reader applies a
+repeated list. When a package's own text moves a
 stock entry's inherited controls, every stock descendant of that entry, read from
 SnapMap's shipped editor entries, is rebased onto it and served under its own
 name in every library, reached or not: an installation cannot restate a shipped
@@ -1442,6 +1448,36 @@ Refresh includes existing shadows and string changes, not only new declaration
 names. Reader synchronization keeps old snapshots valid until readers release
 them. Success includes materialization, required visibility and palette refresh;
 registration alone is insufficient to authorize loading a package-dependent map.
+
+Toybox labels carry display-only source qualifiers. After identities are
+assigned, the library gives each placeable editor row a modern package supplies
+under a private name a label alias: a private string whose mapping keeps the
+row's effective `displayNameTag` as its base (native key or authored locales)
+and records the published row, its category keys and its sources (package name
+and id, component, authored row). Exact copies are one published row whose
+alias names every source. The alias changes only the text served for that row
+(`sh_compiled_resource.presented`); the authored body, which authoring, native
+conversion, identity, bindings and saved references read, stays byte-identical,
+so a plain package row still converts to native map data without a carrier.
+The row's parents are read as the served roster reads rows
+(`package_editor_rows.c`): in order, since shipped rows may repeat a field, with
+the last-written member effective. Without a native string reservation nothing
+is aliased.
+
+Whether a label needs a qualifier is decided at string publication, because it
+depends on the selected language and every other tile. The runtime lists the
+visible toybox as the current provider serves it: every served editor row, read
+as served so an aliased row names the alias its resource selects, then every
+shipped row it does not serve, each resolving inherited fields through the
+served rows first. Each visible row counts once, and rows showing one alias are
+one candidate. Rows whose visible meta-category, category and label texts match
+in the selected language collide when they show more than one key; each
+colliding alias gains the first qualifier that tells the group's aliases apart:
+package names, then ids, components, authored rows, and finally an ordinal by
+published row name. An alias no visible row selects, such as the one a map
+overlay or installed increment replaced, keeps its base text for lookup and is
+no tile. Without a readable shipped roster aliases keep their base labels; a
+roster failure refuses the string refresh.
 
 The registered installed-resource inventory determines whether a map needs an
 installation. IDs, grouping, fingerprints and different local values are not

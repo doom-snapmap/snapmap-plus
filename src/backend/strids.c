@@ -346,6 +346,13 @@ void sh_strids_set_localization(const sh_strids_localization *localization)
     else memset(&g_localization, 0, sizeof(g_localization));
 }
 
+static sh_strids_palette g_palette;
+void sh_strids_set_palette(const sh_strids_palette *palette)
+{
+    if (palette) g_palette = *palette;
+    else memset(&g_palette, 0, sizeof(g_palette));
+}
+
 static int strids_native_language(char out[48])
 {
     const unsigned char *cvar = sh_engine_cvar_find(g_native_cvars, "sys_lang");
@@ -857,6 +864,303 @@ static void inject_pairs(const char *buf, size_t length, int owner)
 
 typedef struct strids_localized_row { unsigned char *text; size_t length; } strids_localized_row;
 
+/* ---- Toybox labels (sh_strids_palette) -----------------------------------
+ * Display-only: an alias's text changes, never a row, key or binding. */
+typedef struct strids_text { char *key, *text; } strids_text;
+typedef struct strids_visible {
+    const sh_json_object *keys;         /* private key -> mapping */
+    const strids_localized_row *rows;   /* their selected base texts */
+    sh_json_object user, english;       /* user document and global package English pairs */
+    strids_text *cache;
+    size_t count, capacity;
+} strids_visible;
+typedef struct strids_source { char *name, *id, *component, *row; } strids_source;
+/* A label mapping (keys member): its sources, and whether a group already
+ * fixed its qualified text (one key has one text). */
+typedef struct strids_label_alias {
+    int labelled, fixed;
+    strids_source *sources;
+    size_t source_count;
+    char *qualifier;
+} strids_label_alias;
+/* A visible toybox row: its texts, and the label mapping its served text
+ * selects (SIZE_MAX for a row showing its own key). */
+typedef struct strids_label_entry {
+    const char *row;                      /* borrowed from the roster */
+    const char *meta, *category, *label; /* visible texts, borrowed from the cache */
+    size_t alias;
+} strids_label_entry;
+
+static const char *strids_pair(const sh_json_object *pairs, const char *id)
+{
+    for (size_t i = 0; i < pairs->count; i++)
+        if (!_stricmp(pairs->members[i].key, id)) return pairs->members[i].value_json;
+    return NULL;
+}
+static char *strids_decoded(const char *json)
+{
+    size_t n = json ? strlen(json) : 0, length = 0;
+    char *out = json ? malloc(n + 1) : NULL;
+    if (out && (!sh_json_decode_string(json, n, out, n + 1, &length) || strlen(out) != length)) { free(out); out = NULL; }
+    return out;
+}
+/* The text a key shows after this refresh: a private key its selected base
+ * text; otherwise the user's, a global package's English, the baked default,
+ * then the native original under the selected language, in the injector's
+ * precedence. A key without the #str_ prefix is a literal and shows itself.
+ * Borrowed from the cache; NULL when unresolved or on allocation failure. */
+static const char *strids_visible_text(strids_visible *v, const char *key)
+{
+    size_t index;
+    char *text = NULL;
+    if (!key) return NULL;
+    for (size_t i = 0; i < v->count; i++) if (!strcmp(v->cache[i].key, key)) return v->cache[i].text;
+    for (index = 0; index < v->keys->count; index++) if (!_stricmp(v->keys->members[index].key, key)) break;
+    if (index < v->keys->count) text = _strdup(v->rows[index].text ? (const char *)v->rows[index].text : "");
+    else if (_strnicmp(key, "#str_", 5)) text = _strdup(key);
+    else {
+        const char *raw = strids_pair(&v->user, key + 5);
+        if (!raw) raw = strids_pair(&v->english, key + 5);
+        if (raw) text = strids_decoded(raw);
+        for (size_t b = 0; !raw && !text && b < B1_STRIDS_BAKED_COUNT; b++)
+            if (!_stricmp(g_strids_baked[b].id, key + 5)) text = _strdup(g_strids_baked[b].text);
+        if (!raw && !text && g_localization.original) {
+            unsigned char *native = NULL; size_t length = 0; char error[256] = "";
+            if (g_localization.original(g_localization.context, key, &native, &length, error, sizeof(error)) == 1 &&
+                (!length || (native && !memchr(native, 0, length))) && (text = malloc(length + 1))) {
+                if (length) memcpy(text, native, length);
+                text[length] = 0;
+            }
+            free(native);
+        }
+    }
+    char *copy = text ? _strdup(key) : NULL;
+    if (!copy || !strids_reserve((void **)&v->cache, &v->capacity, v->count + 1, sizeof(*v->cache))) {
+        free(text); free(copy); return NULL;
+    }
+    v->cache[v->count++] = (strids_text){copy, text};
+    return text;
+}
+
+static void strids_sources_free(strids_source *sources, size_t count)
+{
+    for (size_t i = 0; sources && i < count; i++) {
+        free(sources[i].name); free(sources[i].id); free(sources[i].component); free(sources[i].row);
+    }
+    free(sources);
+}
+/* The "sources" object of a label: {"0": {"name", "id", "component", "row"}, ...}. */
+static int strids_label_sources(const char *raw, strids_source **out, size_t *count)
+{
+    sh_json_object list = {0};
+    *out = NULL; *count = 0;
+    if (!raw || !sh_json_parse_object(raw, strlen(raw), 3, &list) || !list.count) { sh_json_object_free(&list); return 0; }
+    size_t total = list.count;
+    strids_source *sources = calloc(total, sizeof(*sources));
+    int ok = sources != NULL;
+    for (size_t i = 0; ok && i < total; i++) {
+        sh_json_object source = {0};
+        const char *value = list.members[i].value_json;
+        ok = sh_json_parse_object(value, strlen(value), 2, &source) &&
+            (sources[i].name = strids_decoded(sh_json_object_get(&source, "name"))) != NULL &&
+            (sources[i].id = strids_decoded(sh_json_object_get(&source, "id"))) != NULL &&
+            (sources[i].component = strids_decoded(sh_json_object_get(&source, "component"))) != NULL &&
+            (sources[i].row = strids_decoded(sh_json_object_get(&source, "row"))) != NULL;
+        sh_json_object_free(&source);
+    }
+    sh_json_object_free(&list);
+    if (!ok) { strids_sources_free(sources, total); return 0; }
+    *out = sources; *count = total; return 1;
+}
+static int strids_string_order(const void *a, const void *b)
+{ return strcmp(*(const char *const *)a, *(const char *const *)b); }
+/* One source's description at a level: 0 its package name; 1 with the package
+ * id; 2 with its component; 3 with its authored row. Suppliers of one exact
+ * row are listed once each, in sorted order, joined by " + ". */
+static char *strids_qualifier(const strids_source *sources, size_t count, int level)
+{
+    char **parts = calloc(count ? count : 1, sizeof(*parts)), *out = NULL;
+    size_t total = 1, used = 0, unique = 0;
+    if (!parts) return NULL;
+    for (size_t i = 0; i < count; i++) {
+        const strids_source *s = sources + i;
+        size_t n = strlen(s->name) + strlen(s->id) + strlen(s->component) + strlen(s->row) + 16;
+        if (!(parts[i] = malloc(n))) goto done;
+        if (level == 0) snprintf(parts[i], n, "%s", s->name);
+        else if (level == 1) snprintf(parts[i], n, "%s [%s]", s->name, s->id);
+        else if (level == 2) snprintf(parts[i], n, *s->component ? "%s [%s], %s" : "%s [%s]", s->name, s->id, s->component);
+        else if (*s->component) snprintf(parts[i], n, "%s [%s], %s, %s", s->name, s->id, s->component, s->row);
+        else snprintf(parts[i], n, "%s [%s], %s", s->name, s->id, s->row);
+    }
+    qsort(parts, count, sizeof(*parts), strids_string_order);
+    for (size_t i = 0; i < count; i++) if (!i || strcmp(parts[i], parts[i - 1])) total += strlen(parts[i]) + 3;
+    if (!(out = malloc(total))) goto done;
+    out[0] = 0;
+    for (size_t i = 0; i < count; i++) {
+        if (i && !strcmp(parts[i], parts[i - 1])) continue;
+        used += (size_t)snprintf(out + used, total - used, "%s%s", unique++ ? " + " : "", parts[i]);
+    }
+done:
+    for (size_t i = 0; i < count; i++) free(parts[i]);
+    free(parts); return out;
+}
+static int strids_entry_order(const void *left, const void *right)
+{
+    const strids_label_entry *a = left, *b = right;
+    int order = strcmp(a->meta, b->meta);
+    if (!order) order = strcmp(a->category, b->category);
+    if (!order) order = strcmp(a->label, b->label);
+    return order ? order : strcmp(a->row, b->row);
+}
+/* Qualify colliding aliases in place: rows[i] becomes "<base> (<qualifier>)".
+ * The candidates are the toybox's visible rows (sh_strids_palette), each once,
+ * with the label its served text selects; an aliased row selects its alias
+ * key. A label mapping no visible row selects (a map overlay or an installed
+ * increment keeps the one it replaced alive) keeps its base text and is no
+ * tile. Rows showing one alias are one candidate, since one key has one text;
+ * a group's aliases are qualified when another key shows the same texts.
+ * 1 done (or nothing to do), 0 failure. */
+static int strids_label_qualify(const sh_json_object *strings, const sh_json_object *keys,
+    strids_localized_row *rows)
+{
+    strids_visible visible = {keys, rows};
+    strids_label_entry *entries = NULL;
+    strids_label_alias *aliases = NULL;
+    size_t count = 0, capacity = 0, labelled = 0, listed = 0, qualified = 0;
+    const sh_strids_palette_entry *palette = NULL;
+    const char *english = sh_json_object_get(strings, "en");
+    int ok = 0, state;
+    if (!keys->count) return 1;
+    if (!(aliases = calloc(keys->count, sizeof(*aliases)))) goto done;
+    /* Every label mapping must read, selected or not. */
+    for (size_t i = 0; i < keys->count; i++) {
+        sh_json_object mapping = {0}, label = {0};
+        const char *value = keys->members[i].value_json, *raw = NULL;
+        char *row = NULL, *category = NULL, *meta = NULL;
+        int valid = 1;
+        if (sh_json_parse_object(value, strlen(value), 4, &mapping) && (raw = sh_json_object_get(&mapping, "label")) != NULL)
+            valid = aliases[i].labelled = sh_json_parse_object(raw, strlen(raw), 3, &label) &&
+                (row = strids_decoded(sh_json_object_get(&label, "row"))) != NULL &&
+                (category = strids_decoded(sh_json_object_get(&label, "category"))) != NULL &&
+                (meta = strids_decoded(sh_json_object_get(&label, "meta"))) != NULL &&
+                strids_label_sources(sh_json_object_get(&label, "sources"), &aliases[i].sources, &aliases[i].source_count);
+        labelled += aliases[i].labelled != 0;
+        free(row); free(category); free(meta);
+        sh_json_object_free(&label); sh_json_object_free(&mapping);
+        if (!valid) goto done;
+    }
+    if (!labelled || !g_palette.entries) { ok = 1; goto done; }
+    state = g_palette.entries(g_palette.context, &palette, &listed);
+    if (state == 0) { ok = 1; goto done; } /* No shipped roster yet: aliases keep their base labels. */
+    if (state != 1 || (listed && !palette)) goto done;
+    {
+        /* The user document is read as the injector reads it; one it cannot
+         * use supplies no text here either. */
+        size_t length = 0;
+        char *document = read_source_file(&length);
+        if (document && !sh_json_parse_object(document, length, 4, &visible.user)) sh_json_object_free(&visible.user);
+        if (document) HeapFree(GetProcessHeap(), 0, document);
+        if (english && !sh_json_parse_object(english, strlen(english), 2, &visible.english)) goto done;
+    }
+    for (size_t i = 0; i < listed; i++) {
+        const sh_strids_palette_entry *item = palette + i;
+        size_t alias = SIZE_MAX;
+        if (!item->row || !item->label || !item->category || !item->meta) goto done;
+        for (size_t k = 0; k < keys->count && alias == SIZE_MAX; k++)
+            if (aliases[k].labelled && !_stricmp(keys->members[k].key, item->label)) alias = k;
+        strids_label_entry entry = {item->row, strids_visible_text(&visible, item->meta),
+            strids_visible_text(&visible, item->category), strids_visible_text(&visible, item->label), alias};
+        if (!entry.meta || !entry.category || !entry.label ||
+            !strids_reserve((void **)&entries, &capacity, count + 1, sizeof(*entries))) goto done;
+        entries[count++] = entry;
+    }
+    qsort(entries, count, sizeof(*entries), strids_entry_order);
+    for (size_t start = 0, end; start < count; start = end) {
+        size_t candidates = 0, members = 0, *leads = NULL;
+        for (end = start; end < count && !strcmp(entries[end].meta, entries[start].meta) &&
+            !strcmp(entries[end].category, entries[start].category) &&
+            !strcmp(entries[end].label, entries[start].label); end++) {}
+        /* One candidate per row (a roster lists each once) and per alias;
+         * leads holds each alias's first row, which is its lowest row name. */
+        if (!(leads = calloc(end - start, sizeof(*leads)))) goto done;
+        for (size_t i = start; i < end; i++) {
+            if (i > start && !strcmp(entries[i].row, entries[i - 1].row)) continue;
+            size_t seen = 0;
+            for (size_t j = 0; j < members && entries[i].alias != SIZE_MAX; j++)
+                if (entries[leads[j]].alias == entries[i].alias) seen = 1;
+            if (seen) continue;
+            candidates++;
+            if (entries[i].alias != SIZE_MAX) leads[members++] = i;
+        }
+        int level, distinct = 0;
+        size_t open = 0;
+        for (size_t j = 0; j < members; j++) open += !aliases[entries[leads[j]].alias].fixed;
+        /* Qualify only against another key showing the same texts; an alias an
+         * earlier group already qualified keeps that text. */
+        if (candidates < 2 || !open) { free(leads); continue; }
+        for (level = 0; level < 4 && !distinct; level++) {
+            for (size_t j = 0; j < members; j++) {
+                strids_label_alias *alias = aliases + entries[leads[j]].alias;
+                if (alias->fixed) continue;
+                free(alias->qualifier);
+                if (!(alias->qualifier = strids_qualifier(alias->sources, alias->source_count, level))) { free(leads); goto done; }
+            }
+            distinct = 1;
+            for (size_t a = 0; a < members && distinct; a++) for (size_t b = a + 1; b < members && distinct; b++) {
+                const strids_label_alias *x = aliases + entries[leads[a]].alias, *y = aliases + entries[leads[b]].alias;
+                if (!x->fixed && !y->fixed && !strcmp(x->qualifier, y->qualifier)) distinct = 0;
+            }
+        }
+        for (size_t j = 0; j < members; j++) {
+            strids_label_alias *alias = aliases + entries[leads[j]].alias;
+            if (alias->fixed) continue;
+            strids_localized_row *target = rows + entries[leads[j]].alias;
+            const char *base = entries[leads[j]].label;
+            size_t n = strlen(base) + strlen(alias->qualifier) + 32, ordinal = 0, peers = 0;
+            /* Leads are ordered by published row name within the group, so the
+             * last resort, an ordinal among aliases whose descriptions still
+             * match, is independent of discovery order. */
+            for (size_t k = 0; !distinct && k < members; k++) {
+                const strids_label_alias *other = aliases + entries[leads[k]].alias;
+                if (!other->fixed && !strcmp(other->qualifier, alias->qualifier)) {
+                    peers++;
+                    if (k <= j) ordinal++;
+                }
+            }
+            char *text = malloc(n);
+            if (!text) { free(leads); goto done; }
+            if (peers > 1) snprintf(text, n, "%s (%s #%zu)", base, alias->qualifier, ordinal);
+            else snprintf(text, n, "%s (%s)", base, alias->qualifier);
+            free(target->text); target->text = (unsigned char *)text; target->length = strlen(text);
+            qualified++;
+            {
+                char line[768];
+                snprintf(line, sizeof(line), "B1: toybox label %s (%s): %s", entries[leads[j]].row,
+                    keys->members[entries[leads[j]].alias].key, text);
+                backend_log(line);
+            }
+        }
+        for (size_t j = 0; j < members; j++) aliases[entries[leads[j]].alias].fixed = 1;
+        free(leads);
+    }
+    {
+        char line[192];
+        snprintf(line, sizeof(line), "B1: toybox labels: %zu label alias(es), %zu visible row(s), %zu qualified",
+            labelled, count, qualified);
+        backend_log(line);
+    }
+    ok = 1;
+done:
+    for (size_t i = 0; aliases && i < keys->count; i++) {
+        strids_sources_free(aliases[i].sources, aliases[i].source_count); free(aliases[i].qualifier);
+    }
+    free(aliases); free(entries);
+    for (size_t i = 0; i < visible.count; i++) { free(visible.cache[i].key); free(visible.cache[i].text); }
+    free(visible.cache); sh_json_object_free(&visible.user); sh_json_object_free(&visible.english);
+    if (!ok) backend_log("B1: toybox labels could not be qualified; the refresh is refused");
+    return ok;
+}
+
 /* Prepare every active-language value before inserting an alias. In particular,
  * a missing authored locale materializes the original native lookup result at
  * the private key; leaving that alias absent would change fallback behavior. */
@@ -880,7 +1184,8 @@ static int strids_localized_prepare(const sh_json_object *strings,
         const char *raw_locales, *native, *text = NULL;
         char *native_key = NULL; size_t native_length = 0;
         int ready = sh_json_parse_object(key->value_json, strlen(key->value_json), 4, &mapping) &&
-            mapping.count == 2 && (raw_locales = sh_json_object_get(&mapping, "locales")) &&
+            (mapping.count == 2 || (mapping.count == 3 && sh_json_object_get(&mapping, "label"))) &&
+            (raw_locales = sh_json_object_get(&mapping, "locales")) &&
             (native = sh_json_object_get(&mapping, "native")) &&
             sh_json_parse_object(raw_locales, strlen(raw_locales), 2, &locales) &&
             strids_reserve_mapping(reservation, key->key, NULL, key->value_json) == 1;
@@ -895,8 +1200,12 @@ static int strids_localized_prepare(const sh_json_object *strings,
         } else if (ready) {
             native_key = malloc(strlen(native) + 1);
             ready = native_key && sh_json_decode_string(native, strlen(native), native_key,
-                strlen(native) + 1, &native_length) && strlen(native_key) == native_length &&
-                g_localization.original &&
+                strlen(native) + 1, &native_length) && strlen(native_key) == native_length;
+            /* A label alias's literal base (no #str_ prefix) shows itself. */
+            if (ready && _strnicmp(native_key, "#str_", 5) && sh_json_object_get(&mapping, "label")) {
+                ready = (rows[i].text = (unsigned char *)_strdup(native_key)) != NULL;
+                rows[i].length = native_length;
+            } else ready = ready && g_localization.original &&
                 g_localization.original(g_localization.context, native_key, &rows[i].text, &rows[i].length,
                     error, sizeof(error)) == 1;
             if (ready) {
@@ -912,6 +1221,8 @@ static int strids_localized_prepare(const sh_json_object *strings,
         free(native_key); sh_json_object_free(&mapping); sh_json_object_free(&locales);
         if (!ready || rows[i].length > INT_MAX) goto done;
     }
+    if (!strids_label_qualify(strings, keys, rows)) { snprintf(error, sizeof(error), "B1: toybox labels could not be prepared"); goto done; }
+    for (size_t i = 0; i < keys->count; i++) if (rows[i].length > INT_MAX) goto done;
     ok = 1;
 done:
     sh_strids_reservation_free(reservation);

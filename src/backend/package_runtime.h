@@ -354,6 +354,13 @@ void sh_package_runtime_error(char *out, size_t capacity);
  * callbacks while holding a snapshot; copy data before entering native code. */
 const sh_package_compilation *sh_package_runtime_acquire(void);
 void sh_package_runtime_release(void);
+/* The toybox roster the string refresh qualifies package labels against
+ * (strids.h sh_strids_palette.entries): every tile as the current provider
+ * serves it, resolved through the served editor entries first. 1 with the
+ * entries (owned here until the next call), 0 while the shipped entries are
+ * not readable (base labels), -1 on failure. */
+struct sh_strids_palette_entry;
+int sh_package_runtime_palette(void *context, const struct sh_strids_palette_entry **entries, size_t *count);
 /* Valid only while the shared compilation is acquired. */
 const sh_resource_catalog *sh_package_runtime_catalog(void);
 const sh_package_provenance *sh_package_runtime_bindings(void);
@@ -487,6 +494,13 @@ void sh_package_runtime_test_editor_rows(const char *const *names, size_t count)
 /* Make the shipped editor entries unavailable to library compiles, as a live
  * compile without the game's catalog would find them (0 restores them). */
 void sh_package_runtime_test_editor_rows_unavailable(int unavailable);
+/* Native string reservations for linked library compiles (NULL: none), as the
+ * live compile takes from the dictionary; toybox label aliases need them. */
+struct sh_package_string_reservations;
+void sh_package_runtime_test_strings(const struct sh_package_string_reservations *strings);
+/* The toybox roster (sh_package_runtime_palette) of a caller's compilation. */
+int sh_package_runtime_test_palette_of(const sh_package_compilation *compiled,
+    const struct sh_strids_palette_entry **entries, size_t *count);
 /* The converter's placement check over a caller-built compilation: 1 placed,
  * 0 refused (reason; *engine for a native limit), -1 editor rows unreadable. */
 int sh_package_runtime_test_placement(const sh_package_compilation *compiled, const char *from, const char *base,

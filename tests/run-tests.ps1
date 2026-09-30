@@ -348,7 +348,7 @@ foreach ($t in $tests) {
     }
     if ('..\src\backend\package_library.c' -in ($t.src -split ' ')) {
         foreach ($source in @('package_audio_program.c', 'package_audio_capture.c', 'audio_link_graph.c', 'audio_id_reservations.c',
-            'audio_bank_codec.c', 'audio_hirc.c', 'audio_shared_policy.c', 'audio_bus_policy.c')) {
+            'audio_bank_codec.c', 'audio_hirc.c', 'audio_shared_policy.c', 'audio_bus_policy.c', 'package_editor_rows.c')) {
             $relative = '..\src\backend\' + $source
             if ($relative -notin ($t.src -split ' ')) { $t.src += ' ' + $relative }
         }
@@ -420,6 +420,10 @@ foreach ($t in $tests) {
 $localizationSources = ($tests | Where-Object { $_.name -eq 'package_source_graph_test' }).src -replace '^package_source_graph_test.c ', 'package_localization_test.c '
 $localizationSources += ' ..\src\backend\strids.c'
 $tests += @{ name = "package_localization_test"; src = $localizationSources; defs = '/DSH_RESOURCE_GRAPH_TESTING /DSH_STRIDS_TESTING'; libs = 'shell32.lib'; arg = "" }
+
+$labelSources = ($tests | Where-Object { $_.name -eq 'package_source_graph_test' }).src -replace '^package_source_graph_test.c ', 'strids_labels_test.c '
+$labelSources += ' ..\src\backend\strids.c'
+$tests += @{ name = "strids_labels_test"; src = $labelSources; defs = '/DSH_RESOURCE_GRAPH_TESTING /DSH_STRIDS_TESTING'; libs = 'shell32.lib'; arg = "" }
 
 $reverseRootSources = ($tests | Where-Object { $_.name -eq 'package_source_graph_test' }).src -replace '^package_source_graph_test.c ', 'package_reverse_roots_test.c '
 $tests += @{ name = "package_reverse_roots_test"; src = $reverseRootSources; defs = '/DSH_RESOURCE_GRAPH_TESTING'; arg = "" }

@@ -50,6 +50,34 @@ typedef struct sh_strids_localization {
 /* Bind before publishing scoped strings; callback state outlives every rearm.
  * A language/dictionary change requires rearm at the admitted native boundary. */
 void sh_strids_set_localization(const sh_strids_localization *localization);
+
+/* Toybox labels: display-only source qualifiers. A package's placeable editor
+ * row serves its displayNameTag as a private alias whose mapping adds a
+ * "label" member to its base "native" key and authored "locales":
+ *   {"row", "category", "meta": its published row and effective keys,
+ *    "sources": {"0": {"name", "id", "component", "row"}, ...}}
+ * (package_library.c). At each refresh an alias shows its base label in the
+ * selected language, native fallback included. The callback lists every
+ * visible toybox row once, by published row name, with the effective keys its
+ * served text selects: an aliased row names its alias, and a key without the
+ * #str_ prefix is a literal label. Rows whose visible meta category, category
+ * and label texts all match in that language collide when they show more than
+ * one key; each colliding alias gains " (<qualifier>)", the first of these
+ * that tells the group's aliases apart: package names, then with ids,
+ * components, authored row names, and finally an ordinal by published row
+ * name. Other keys keep their labels, and so does an alias no listed row
+ * selects (one an overlay or increment replaced, kept for lookup). Entries are
+ * borrowed until the refresh returns. Return 1 when listed, 0 when the shipped
+ * roster is unavailable (aliases keep their base labels), -1 on failure (the
+ * refresh fails). */
+typedef struct sh_strids_palette_entry {
+    const char *row, *label, *category, *meta;
+} sh_strids_palette_entry;
+typedef struct sh_strids_palette {
+    void *context;
+    int (*entries)(void *context, const sh_strids_palette_entry **entries, size_t *count);
+} sh_strids_palette;
+void sh_strids_set_palette(const sh_strids_palette *palette);
 /* Production adapter for the verified single native language table. The
  * resolved cvar-system pointer slot is borrowed; no native setter is called.
  * Known language names accept the documented descriptor locale aliases, with

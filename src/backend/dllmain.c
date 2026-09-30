@@ -328,6 +328,10 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
         void *strids_hash  = (void *)sig_addr_by_name(results, db, "StridsHash");
         void *idstr_ctor   = (void *)sig_addr_by_name(results, db, "IdStrAssign");
         sh_strids_bind_native_localization((const void *)glb_resolve(g_doom_base, "cvar_system_slot", NULL));
+        {
+            static const sh_strids_palette palette = {NULL, sh_package_runtime_palette};
+            sh_strids_set_palette(&palette);
+        }
         sh_strids_install(sort_body, sort_clean, strids_lea, strids_ins, strids_hash, idstr_ctor);
 
         /* Replace resource-provider open-by-name slot +0xF8 after validating the audited

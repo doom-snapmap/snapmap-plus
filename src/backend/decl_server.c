@@ -932,9 +932,10 @@ static int ds_capture_snapshot_locked(const sh_package_compilation *compiled)
         size_t length;
         const unsigned char *body;
         if (!resource->type) continue;
-        if (!resource->body || resource->body_length > PTRDIFF_MAX ||
-            resource->body_length > SIZE_MAX - g_total_bytes) goto done;
-        body = resource->body; length = resource->body_length;
+        /* The engine registers what is served: a presented text when there is one. */
+        body = resource->presented ? resource->presented : resource->body;
+        length = resource->presented ? resource->presented_length : resource->body_length;
+        if (!body || length > PTRDIFF_MAX || length > SIZE_MAX - g_total_bytes) goto done;
         if (length >= 3 && body[0] == 0xef && body[1] == 0xbb && body[2] == 0xbf) { body += 3; length -= 3; }
         if (!ds_native_body(resource->type, body, length)) {
             ds_log("REFUSED", resource->engine_path, "compiled declaration is not one valid native body"); goto done;

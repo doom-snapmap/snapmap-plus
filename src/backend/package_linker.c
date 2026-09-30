@@ -1733,10 +1733,14 @@ static int pl_editor_companions(pl_work *w)
                 const pl_file *file = unit->files + f;
                 const sh_compiled_resource *bound = sh_package_compilation_find(w->output.compiled, unit->paths[f]);
                 if (!bound || !bound->body) return pl_fail(w, "editor companion has no bound declaration body");
-                sh_decl_node *tree = sh_decl_tree_parse((sh_decl_source){(char *)bound->body, bound->body_length}, w->error, w->capacity);
+                /* Read in order: a shipped row may repeat a field, as
+                 * fx/ambient_embers states fxInfo twice (package_editor_rows.c). */
+                sh_decl_node *tree = sh_decl_tree_parse_ordered((sh_decl_source){(char *)bound->body, bound->body_length},
+                    w->error, w->capacity);
                 if (!tree) return 0;
-                const sh_decl_node *edit = sh_decl_tree_member(tree, "edit");
-                direct |= sh_decl_tree_member(edit, "entityDef") != NULL || sh_decl_tree_member(tree, "edit.entityDef") != NULL;
+                for (const sh_decl_node *m = tree->children; m; m = m->next)
+                    if (m->key && (!strcmp(m->key, "edit.entityDef") ||
+                        (!strcmp(m->key, "edit") && sh_decl_tree_member(m, "entityDef")))) direct = 1;
                 sh_decl_tree_free(tree);
                 for (size_t e = file->edge_begin; e < file->edge_begin + file->edge_count; e++) {
                     const sh_package_link_edge *edge = unit->edges + e;

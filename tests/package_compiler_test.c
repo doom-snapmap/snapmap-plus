@@ -773,6 +773,30 @@ static void test_editor_rebase(void)
     CHECK(out && !strcmp(layout, "displayName,actionDelay,comment=#str_comment,modType,modValue"));
     CHECK(out && strstr(out, "inherit = \"input_base\""));
     free(out);
+    /* Parents are read in order, as the native reader applies them: a shipped
+     * row repeating another field (fx/ambient_embers states fxInfo twice) still
+     * rebases, and a child stating no collection never reads its parents. A
+     * parent stating a collection the rebase reads twice is not composed (a
+     * coverage refusal, not a finding that the source is malformed): the native
+     * reader's ordered semantics for a repeated list are not established here. */
+    {
+        const char *fx = "{ edit = { fxInfo = { rate = 1; } fxInfo = { rate = 2; } ";
+        char repeated_stock[512], repeated_added[512];
+        snprintf(repeated_stock, sizeof(repeated_stock), "%s%s", fx, stock + strlen("{ edit = { "));
+        snprintf(repeated_added, sizeof(repeated_added), "%s%s", fx, added + strlen("{ edit = { "));
+        out = rebase_one("{ inherit = \"embers\"; edit = { propertySheets = { num = 1; item[0] = { properties = { num = 4; "
+            "item[2] = { path = \"modType\"; } item[3] = { path = \"modValue\"; } } } } } }", repeated_stock, repeated_added,
+            0, &result, &kind);
+        CHECK(result == 1 && out); if (out) rebased_layout(out, "propertySheets", 0, layout, sizeof(layout));
+        CHECK(out && !strcmp(layout, "displayName,actionDelay,comment=#str_comment,modType,modValue"));
+        free(out);
+        const char *twice = "{ edit = { propertySheets = { num = 1; } propertySheets = { num = 2; } } }";
+        out = rebase_one("{ inherit = \"embers\"; edit = { entityDef = \"embers_def\"; } }", twice, twice, 1, &result, &kind);
+        CHECK(result == 0 && !out); free(out);
+        out = rebase_one("{ inherit = \"embers\"; edit = { propertySheets = { item[0] = { properties = { "
+            "item[1] = { descriptionTag = \"#str_delay\"; } } } } } }", twice, stock, 0, &result, &kind);
+        CHECK(result < 0 && !out && kind == SH_PACKAGE_EDITOR_FAILURE_COVERAGE); free(out);
+    }
     /* Equal layouts are left to native inheritance unless forced. */
     out = rebase_one("{ inherit = \"input_base\"; edit = { propertySheets = { item[0] = { properties = { "
         "item[1] = { descriptionTag = \"#str_delay\"; } } } } } }", stock, stock, 0, &result, &kind);

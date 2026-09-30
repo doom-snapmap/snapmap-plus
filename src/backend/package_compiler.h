@@ -174,6 +174,11 @@ typedef struct sh_compiled_resource {
     int restored_original;       /* owns engine_path; no authored source or owners */
     unsigned char *body;          /* owned native text or composed result */
     size_t body_length;
+    /* Display-only text the engine is served instead of body, or NULL (a
+     * toybox label alias, package_library.c). Authoring, conversion, identity
+     * and every other semantic decision read body; only serving reads this. */
+    unsigned char *presented;
+    size_t presented_length;
     size_t source;                /* effective opaque/unchanged source file */
     char *cache_path;             /* runtime-owned immutable opaque snapshot */
     int generated;               /* product producer participates in this result */
@@ -242,7 +247,9 @@ typedef struct sh_package_policy {
 /* Retain an already-reserved complete mapping and its delivery ownership.
  * Also populate policy.strings for every authored locale. Duplicate keys must
  * have exactly equal mappings; a hash/name match alone does not prove equality.
- * A failed candidate policy must be discarded. No native mutation occurs. */
+ * A toybox label alias carries a third "label" member (strids.h) and may have
+ * no authored locale. A failed candidate policy must be discarded. No native
+ * mutation occurs. */
 int sh_package_policy_localization(sh_package_policy *policy, const char *key,
     const char *mapping, const sh_package_owners *owners, char *error, size_t capacity);
 
@@ -494,6 +501,12 @@ int sh_package_compilation_payload_missing(const sh_package_compilation *map,
 /* A malloc-owned stream snapshot. An input changed after discovery fails;
  * callers must not silently fall through to a different package or vanilla. */
 unsigned char *sh_package_compilation_read(const sh_package_compilation *compilation,
+                                            const sh_compiled_resource *resource,
+                                            size_t limit, size_t *length,
+                                            char *error, size_t error_capacity);
+/* The bytes the engine is served: the resource's presented text when it has
+ * one, otherwise exactly what sh_package_compilation_read returns. */
+unsigned char *sh_package_compilation_read_served(const sh_package_compilation *compilation,
                                             const sh_compiled_resource *resource,
                                             size_t limit, size_t *length,
                                             char *error, size_t error_capacity);

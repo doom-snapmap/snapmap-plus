@@ -3828,6 +3828,180 @@ static void test_inherited_editor_parent(fixture *f, sh_decl_registry_source reg
     cleanup(); assert(!failures);
 }
 
+/* Toybox label aliases (package_library.c, strids.h): the same library
+ * compiled without and with a native string reservation publishes the same
+ * resources, names, bodies and bindings; only the text served for each
+ * placeable package row differs, by its displayNameTag alone, to an alias
+ * whose mapping keeps the row's effective base label and names its published
+ * row, category keys and sources. Exact copies from two packages are one row
+ * whose alias names both. */
+static const char *label_stock_row = "{ edit = { displayNameTag = \"#str_speaker\"; categoryNameTag = \"#str_cat_audio\"; "
+    "metaCategoryNameTag = \"#str_meta_toybox\"; entityDef = \"speaker_def\"; } }";
+/* A valid shipped row repeating fields, as fx/ambient_embers repeats fxInfo:
+ * the native reader applies them in order, so the last label is effective. */
+static const char *label_repeated_row = "{ edit = { displayNameTag = \"#str_first\"; fxInfo = { rate = 1; } "
+    "fxInfo = { rate = 2; } displayNameTag = \"#str_embers\"; categoryNameTag = \"#str_cat_audio\"; "
+    "metaCategoryNameTag = \"#str_meta_toybox\"; entityDef = \"speaker_def\"; } }";
+static int label_original(void *context, const char *path, unsigned char **body, size_t *length)
+{
+    const char *text = !strcmp(path, "generated/decls/snapeditorentitydef/audio/2d_speaker.decl") ? label_stock_row :
+        !strcmp(path, "generated/decls/snapeditorentitydef/fx/embers.decl") ? label_repeated_row :
+        !strcmp(path, "generated/decls/entitydef/speaker_def.decl") ? "{ class = \"Entity\"; edit = { } }" : NULL;
+    if (!text) return contribution_original(context, path, body, length);
+    *length = strlen(text); *body = (unsigned char *)_strdup(text); return *body ? 1 : -1;
+}
+static size_t label_reservations;
+static int label_reserve(void *context, const char *key, const unsigned char identity[32], const char *mapping)
+{ (void)context; (void)identity; (void)mapping; assert(!strncmp(key, "#str_smp_loc_", 13)); label_reservations++; return 1; }
+static int label_reserve_global(void *context, const char *key) { (void)context; (void)key; return 1; }
+static void label_package(const char *folder, const char *id, const char *name, const char *row, const char *def,
+    const char *row_text)
+{
+    char path[512], text[512];
+    snprintf(path, sizeof(path), "overrides/%s/package.json", folder);
+    snprintf(text, sizeof(text), "{\"id\":\"%s\",\"name\":\"%s\"}", id, name); create(path, text);
+    snprintf(path, sizeof(path), "overrides/%s/assets/generated/decls/snapeditorentitydef/%s.decl", folder, row);
+    create(path, row_text);
+    snprintf(path, sizeof(path), "overrides/%s/assets/generated/decls/entitydef/%s.decl", folder, def);
+    create(path, "{ inherit = \"speaker_def\"; edit = { } }");
+}
+/* A row's text without its displayNameTag, and that tag. */
+static char *label_without_tag(const unsigned char *text, size_t text_length, char **tag)
+{
+    sh_decl_node *tree = sh_decl_tree_parse((sh_decl_source){(const char *)text, text_length}, NULL, 0);
+    size_t length = 0; char *out;
+    assert(tree);
+    *tag = NULL;
+    sh_decl_node *edit = (sh_decl_node *)sh_decl_tree_member(tree, "edit");
+    for (sh_decl_node **slot = edit ? &edit->children : NULL; slot && *slot; slot = &(*slot)->next)
+        if (!strcmp((*slot)->key, "displayNameTag")) {
+            sh_decl_node *gone = *slot; *slot = gone->next; gone->next = NULL;
+            *tag = _strdup(node_value(gone)); sh_decl_tree_free(gone); break;
+        }
+    out = sh_decl_tree_write(tree, &length); sh_decl_tree_free(tree); return out;
+}
+static void test_toybox_label_aliases(fixture *f, sh_decl_registry_source registry)
+{
+    char temporary[MAX_PATH], error[1024];
+    source_link_fixture originals = {f};
+    sh_package_compile_environment env = {0};
+    sh_package_library plain = {0}, labelled = {0};
+    void *records = *(void **)((char *)*(void **)f->reflection + 0x20);
+    {
+        const char *t[] = {"idDeclEntityDef", "idDeclEntityDef", "idDeclEntityDef", "idList < EditorSheet >",
+            "idList < EntityRefs >", "idList < EntityRefs >", "idDeclEntityDef", "idStr", "idStr", "idStr"};
+        const char *o[] = {"*", "*", "*", "", "", "", "*", "", "", ""};
+        const char *n[] = {"target", "first", "second", "propertySheets", "inputs", "outputs", "entityDef",
+            "displayNameTag", "categoryNameTag", "metaCategoryNameTag"};
+        fields(f, (char *)records + 6 * 0x38, 10, t, o, n);
+    }
+    assert(GetTempPathA(sizeof(temporary), temporary));
+    snprintf(root, sizeof(root), "%ssmp-labels-%lu-%llu", temporary, GetCurrentProcessId(), GetTickCount64());
+    assert(CreateDirectoryA(root, NULL));
+    const char *probe = "{ inherit = \"audio/2d_speaker\"; edit = { entityDef = \"%s\"; } }";
+    char text[256];
+    snprintf(text, sizeof(text), probe, "probe/p7/def");
+    label_package("p7", "acceptance.perf.probe2-7", "Perf probe2 7", "probe/p7/row", "probe/p7/def", text);
+    snprintf(text, sizeof(text), probe, "probe/p8/def");
+    label_package("p8", "acceptance.perf.probe2-8", "Perf probe2 8", "probe/p8/row", "probe/p8/def", text);
+    snprintf(text, sizeof(text), probe, "copy/def");
+    label_package("copy-a", "local.copy-a", "Copy A", "copy/row", "copy/def", text);
+    label_package("copy-b", "local.copy-b", "Copy B", "copy/row", "copy/def", text);
+    label_package("lamp", "local.lamp", "Lamps", "lamp/row", "lamp/def", "{ edit = { displayNameTag = \"Lamp\"; "
+        "categoryNameTag = \"#str_cat_light\"; metaCategoryNameTag = \"#str_meta_toybox\"; entityDef = \"lamp/def\"; } }");
+    label_package("hidden", "local.hidden", "Hidden", "hidden/row", "hidden/def", "{ edit = { entityDef = \"hidden/def\"; } }");
+    label_package("embers", "local.embers", "Embers", "embers/row", "embers/def",
+        "{ inherit = \"fx/embers\"; edit = { entityDef = \"embers/def\"; } }");
+    /* An explicitly empty label is its author's own value, not the stock
+     * row's inherited one: nothing to alias. */
+    label_package("clear", "local.clear", "Clear", "clear/row", "clear/def",
+        "{ inherit = \"audio/2d_speaker\"; edit = { entityDef = \"clear/def\"; displayNameTag = \"\"; } }");
+    sh_package_sources *sources = sh_package_sources_scan(root, error, sizeof(error)); assert(sources);
+    env.baseline = label_original; env.baseline_context = &originals;
+    sh_package_library_native none = {0}, reserving = {0};
+    reserving.strings = (sh_package_string_reservations){label_reserve, NULL, 4, label_reserve_global};
+    int ok = sh_package_library_compile(sources, &env, NULL, label_original, &originals, registry,
+        (uintptr_t)f->reflection, &none, &plain, error, sizeof(error));
+    if (!ok) fprintf(stderr, "labels without reservation: %s\n", error);
+    assert(ok && !plain.compiled->policy.localized_count);
+    label_reservations = 0;
+    ok = sh_package_library_compile(sources, &env, NULL, label_original, &originals, registry,
+        (uintptr_t)f->reflection, &reserving, &labelled, error, sizeof(error));
+    if (!ok) fprintf(stderr, "labels with reservation: %s\n", error);
+    assert(ok);
+    /* Same resources, names and bodies; only served texts carry aliases. */
+    assert(plain.compiled->resource_count == labelled.compiled->resource_count);
+    size_t aliased = 0, copies = 0;
+    for (size_t i = 0; i < plain.compiled->resource_count; i++) {
+        const sh_compiled_resource *a = plain.compiled->resources + i, *b = labelled.compiled->resources + i;
+        assert(!strcmp(a->engine_path, b->engine_path));
+        assert((!a->name && !b->name) || (a->name && b->name && !strcmp(a->name, b->name)));
+        assert(a->body_length == b->body_length && !memcmp(a->body, b->body, a->body_length));
+        assert(!a->presented);
+        const char *authored = a->original_path ? a->original_path : a->engine_path;
+        if (strstr(authored, "hidden/row") || strstr(authored, "clear/row")) assert(!b->presented);
+        if (!b->presented) continue;
+        assert(b->type && !strcmp(b->type, "snapeditorentitydef"));
+        size_t served_length = 0;
+        unsigned char *served = sh_package_compilation_read_served(labelled.compiled, b, SIZE_MAX, &served_length,
+            error, sizeof(error));
+        assert(served && served_length == b->presented_length && !memcmp(served, b->presented, served_length));
+        free(served);
+        char *before_tag = NULL, *after_tag = NULL;
+        char *before = label_without_tag(b->body, b->body_length, &before_tag);
+        char *after = label_without_tag(b->presented, b->presented_length, &after_tag);
+        assert(before && after && !strcmp(before, after));
+        assert(after_tag && !strncmp(after_tag, "#str_smp_loc_", 13));
+        {
+            aliased++;
+            const sh_package_localized_string *entry = NULL;
+            for (size_t k = 0; k < labelled.compiled->policy.localized_count; k++)
+                if (!strcmp(labelled.compiled->policy.localized[k].key, after_tag)) entry = labelled.compiled->policy.localized + k;
+            assert(entry);
+            sh_json_object mapping = {0}, label = {0}, list = {0};
+            assert(sh_json_parse_object(entry->mapping, strlen(entry->mapping), 8, &mapping));
+            const char *raw = sh_json_object_get(&mapping, "label");
+            assert(raw && sh_json_parse_object(raw, strlen(raw), 8, &label));
+            char row[160], native[64], category[64]; size_t length;
+            assert(sh_json_decode_string(sh_json_object_get(&label, "row"), strlen(sh_json_object_get(&label, "row")), row, sizeof(row), &length));
+            assert(!strcmp(row, b->name));
+            raw = sh_json_object_get(&mapping, "native");
+            assert(sh_json_decode_string(raw, strlen(raw), native, sizeof(native), &length));
+            raw = sh_json_object_get(&label, "category");
+            assert(sh_json_decode_string(raw, strlen(raw), category, sizeof(category), &length));
+            raw = sh_json_object_get(&label, "sources");
+            assert(raw && sh_json_parse_object(raw, strlen(raw), 8, &list));
+            if (strstr(authored, "lamp/row")) assert(!strcmp(native, "Lamp") && !strcmp(category, "#str_cat_light"));
+            else if (strstr(authored, "embers/row")) assert(!strcmp(native, "#str_embers") && !strcmp(category, "#str_cat_audio"));
+            else assert(!strcmp(native, "#str_speaker") && !strcmp(category, "#str_cat_audio"));
+            if (strstr(authored, "copy/row")) {
+                copies++;
+                assert(list.count == 2 && strstr(raw, "Copy A") && strstr(raw, "Copy B") &&
+                    strstr(raw, "local.copy-a") && strstr(raw, "local.copy-b"));
+            } else assert(list.count == 1);
+            sh_json_object_free(&mapping); sh_json_object_free(&label); sh_json_object_free(&list);
+        }
+        free(before); free(after); free(before_tag); free(after_tag);
+    }
+    if (aliased != 5 || copies != 1) fprintf(stderr, "label aliases: aliased=%zu copies=%zu\n", aliased, copies);
+    assert(aliased == 5 && copies == 1 && label_reservations == 5);
+    /* Saved bindings from either compile name the same published identities. */
+    size_t plain_length = 0, labelled_length = 0;
+    unsigned char *plain_bindings = sh_package_provenance_encode(&plain.bindings, &plain_length, error, sizeof(error));
+    unsigned char *labelled_bindings = sh_package_provenance_encode(&labelled.bindings, &labelled_length, error, sizeof(error));
+    assert(plain_bindings && labelled_bindings && plain_length == labelled_length &&
+        !memcmp(plain_bindings, labelled_bindings, plain_length));
+    free(plain_bindings); free(labelled_bindings);
+    sh_package_library_free(&plain); sh_package_library_free(&labelled); sh_package_sources_free(sources);
+    {
+        const char *t[] = {"idDeclEntityDef", "idDeclEntityDef", "idDeclEntityDef", "idList < EditorSheet >",
+            "idList < EntityRefs >", "idList < EntityRefs >"};
+        const char *o[] = {"*", "*", "*", "", "", ""}, *n[] = {"target", "first", "second", "propertySheets", "inputs", "outputs"};
+        fields(f, (char *)records + 6 * 0x38, 6, t, o, n);
+    }
+    cleanup(); assert(!failures);
+}
+
 /* A package relaying a parent's controls (armor first) leaves each sparse
  * child patch on its intended control, for the stock child and a peer's
  * unchanged stock copy alike; failures keep their cause: one package's own
@@ -8456,6 +8630,7 @@ int main(void)
     test_native_original_gaps(&f, registry);
     test_material_path(&f, registry);
     test_library_atlas(&f, registry);
+    test_toybox_label_aliases(&f, registry);
     {
         sh_decl_native_registry *r = sh_decl_native_registry_open(registry, error, sizeof(error));
         sh_decl_native_schema *s = sh_decl_native_schema_open(

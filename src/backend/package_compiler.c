@@ -433,8 +433,8 @@ void sh_package_policy_free(sh_package_policy *policy)
 int sh_package_policy_localization(sh_package_policy *policy, const char *key,
     const char *mapping, const sh_package_owners *owners, char *error, size_t capacity)
 {
-    sh_json_object root = {0}, locales = {0};
-    const char *native, *translations;
+    sh_json_object root = {0}, locales = {0}, label_members = {0};
+    const char *native, *translations, *label = NULL;
     sh_package_localized_string value = {0};
     int ok = 0;
     if (!policy || !key || strncmp(key, "#str_", 5) || !key[5] || !mapping) goto done;
@@ -442,15 +442,21 @@ int sh_package_policy_localization(sh_package_policy *policy, const char *key,
         if (strcmp(policy->localized[i].mapping, mapping)) goto done;
         return !owners || sh_package_owners_union(&policy->localized[i].owners, owners);
     }
-    if (!sh_json_parse_object(mapping, strlen(mapping), 4, &root) || root.count != 2 ||
+    /* A toybox label alias (strids.h) adds "label" and may have no authored
+     * locale: its base is then a native key shown through native fallback. */
+    if (!sh_json_parse_object(mapping, strlen(mapping), 4, &root) ||
+        (root.count != 2 && !(root.count == 3 && (label = sh_json_object_get(&root, "label")))) ||
+        (label && (!sh_json_parse_object(label, strlen(label), 3, &label_members) ||
+            !sh_json_object_get(&label_members, "row") || !sh_json_object_get(&label_members, "sources"))) ||
         !(native = sh_json_object_get(&root, "native")) ||
         !(translations = sh_json_object_get(&root, "locales")) ||
-        !sh_json_parse_object(translations, strlen(translations), 2, &locales) || !locales.count) goto done;
+        !sh_json_parse_object(translations, strlen(translations), 2, &locales) || (!locales.count && !label)) goto done;
     {
         size_t n = strlen(native), length = 0;
         char *decoded = malloc(n + 1);
+        /* A label alias's base may be a literal label, its own fallback. */
         ok = decoded && sh_json_decode_string(native, n, decoded, n + 1, &length) &&
-            strlen(decoded) == length && length > 5 && !_strnicmp(decoded, "#str_", 5);
+            strlen(decoded) == length && (label ? length > 0 : length > 5 && !_strnicmp(decoded, "#str_", 5));
         free(decoded); if (!ok) goto done; ok = 0;
     }
     for (size_t i = 0; i < locales.count; i++) {
@@ -480,7 +486,7 @@ int sh_package_policy_localization(sh_package_policy *policy, const char *key,
     policy->localized = grown; policy->localized[policy->localized_count++] = value;
     memset(&value, 0, sizeof(value)); ok = 1;
 done:
-    sh_json_object_free(&root); sh_json_object_free(&locales);
+    sh_json_object_free(&root); sh_json_object_free(&locales); sh_json_object_free(&label_members);
     free(value.key); free(value.mapping); sh_package_owners_free(&value.owners);
     if (!ok && error && capacity) snprintf(error, capacity, "invalid or conflicting bound string mapping");
     return ok;
@@ -1402,6 +1408,37 @@ static sh_decl_node *pe_at(sh_decl_node *root, const char *path)
     }
     return node;
 }
+/* 1 when no compound under node states a field twice. */
+static int pe_unique(const sh_decl_node *node)
+{
+    for (const sh_decl_node *m = node && node->compound ? node->children : NULL; m; m = m->next) {
+        for (const sh_decl_node *n = m->next; n; n = n->next)
+            if (m->key && n->key && !strcmp(m->key, n->key)) return 0;
+        if (!pe_unique(m)) return 0;
+    }
+    return 1;
+}
+/* 1 when every field along path, and the list it names, is stated once. A
+ * parent read in order (sh_decl_tree_parse_ordered) may repeat other fields
+ * (fx/ambient_embers states fxInfo twice); those are no part of this list. */
+static int pe_path_unique(const sh_decl_node *root, const char *path)
+{
+    char segment[128];
+    const sh_decl_node *node = root;
+    while (node && *path) {
+        const char *dot = strchr(path, '.');
+        size_t length = dot ? (size_t)(dot - path) : strlen(path), seen = 0;
+        const sh_decl_node *next = NULL;
+        if (length >= sizeof(segment)) return 0;
+        memcpy(segment, path, length); segment[length] = 0;
+        for (const sh_decl_node *m = node->compound ? node->children : NULL; m; m = m->next)
+            if (m->key && !strcmp(m->key, segment) && !seen++) next = m;
+        if (seen > 1) return 0;
+        node = next;
+        path += length + (dot ? 1 : 0);
+    }
+    return pe_unique(node);
+}
 /* The effective list at path over a parent chain (nearest parent first). */
 static int pe_effective(pe_context *p, sh_decl_node *const *chain, size_t count, const char *path, pe_list *out)
 {
@@ -1477,13 +1514,28 @@ int sh_package_editor_rebase(const char *type, sh_decl_source child,
     if (!(tree = sh_decl_tree_parse(child, error, capacity))) {
         p.kind = errno == ENOMEM ? SH_PACKAGE_EDITOR_FAILURE_ENVIRONMENT : SH_PACKAGE_EDITOR_FAILURE_SOURCE; goto done;
     }
-    /* Parents are stock, product or other packages' sources: they never
-     * make this contribution malformed. */
-    for (size_t i = 0; i < authored_count; i++) if (!(a[i] = sh_decl_tree_parse(authored[i], error, capacity))) {
-        p.kind = errno == ENOMEM ? SH_PACKAGE_EDITOR_FAILURE_ENVIRONMENT : SH_PACKAGE_EDITOR_FAILURE_COVERAGE; goto done;
+    /* A child stating none of the collections has nothing to rebase, whatever
+     * its parents state. */
+    {
+        int states = 0;
+        for (size_t r = 0; r < rule_count && !states; r++)
+            states = !strstr(rules[r].path, "[*]") && pe_at(tree, rules[r].path) != NULL;
+        if (!states) { result = 0; goto done; }
     }
-    for (size_t i = 0; i < published_count; i++) if (!(b[i] = sh_decl_tree_parse(published[i], error, capacity))) {
-        p.kind = errno == ENOMEM ? SH_PACKAGE_EDITOR_FAILURE_ENVIRONMENT : SH_PACKAGE_EDITOR_FAILURE_COVERAGE; goto done;
+    /* Parents are stock, product or other packages' sources: they never make
+     * this contribution malformed. They are read in order, as the native reader
+     * applies them; a collection this reads must be stated once. */
+    for (size_t i = 0; i < authored_count + published_count; i++) {
+        sh_decl_source text = i < authored_count ? authored[i] : published[i - authored_count];
+        sh_decl_node **slot = i < authored_count ? a + i : b + (i - authored_count);
+        if (!(*slot = sh_decl_tree_parse_ordered(text, error, capacity))) {
+            p.kind = errno == ENOMEM ? SH_PACKAGE_EDITOR_FAILURE_ENVIRONMENT : SH_PACKAGE_EDITOR_FAILURE_COVERAGE; goto done;
+        }
+        for (size_t r = 0; r < rule_count; r++)
+            if (!strstr(rules[r].path, "[*]") && pe_at(tree, rules[r].path) && !pe_path_unique(*slot, rules[r].path)) {
+                pe_fail(&p, SH_PACKAGE_EDITOR_FAILURE_COVERAGE, "an inherited editor declaration states a collection more than once");
+                goto done;
+            }
     }
     for (size_t r = 0; r < rule_count; r++) {
         const sh_decl_collection_rule *rule = rules + r;
@@ -2843,7 +2895,7 @@ static void pc_resource_free(sh_compiled_resource *resource)
     size_t i;
     if (resource->restored_original || resource->owns_engine_path) free((void *)resource->engine_path);
     sh_package_owners_free(&resource->owners); sh_package_owners_free(&resource->gameplay_owners);
-    free(resource->body); free(resource->sources); free(resource->type);
+    free(resource->body); free(resource->presented); free(resource->sources); free(resource->type);
     free(resource->name); free(resource->cache_path); free(resource->original_path);
     pc_native_free(resource);
     sh_package_file_release(resource->cache_file);
@@ -2915,6 +2967,12 @@ static int pc_copy_resource(sh_compiled_resource *to, const sh_compiled_resource
         memcpy(to->body, from->body, from->body_length); to->body[from->body_length] = 0;
         to->body_length = from->body_length;
     } else if (from->body_length) return 0;
+    if (from->presented) {
+        to->presented = malloc(from->presented_length + 1u);
+        if (!to->presented) return 0;
+        memcpy(to->presented, from->presented, from->presented_length); to->presented[from->presented_length] = 0;
+        to->presented_length = from->presented_length;
+    }
     if (from->source_count) {
         to->sources = malloc(from->source_count * sizeof(*to->sources));
         if (!to->sources) return 0;
@@ -3372,6 +3430,22 @@ unsigned char *sh_package_compilation_read(const sh_package_compilation *compila
     *length = resource->body_length; return out;
 }
 
+unsigned char *sh_package_compilation_read_served(const sh_package_compilation *compilation,
+                                            const sh_compiled_resource *resource,
+                                            size_t limit, size_t *length,
+                                            char *error, size_t error_capacity)
+{
+    unsigned char *out;
+    if (!resource || !resource->presented)
+        return sh_package_compilation_read(compilation, resource, limit, length, error, error_capacity);
+    if (length) *length = 0;
+    if (!compilation || !length || resource->presented_length > limit) return NULL;
+    out = (unsigned char *)malloc(resource->presented_length + 1u);
+    if (!out) return NULL;
+    memcpy(out, resource->presented, resource->presented_length); out[resource->presented_length] = 0;
+    *length = resource->presented_length; return out;
+}
+
 int sh_package_compilation_identity(const sh_package_compilation *compilation,
     const sh_compiled_resource *resource, sh_package_file_identity *out,
     char *error, size_t capacity)
@@ -3541,6 +3615,9 @@ static int pc_change_equal(const sh_package_compilation *before, const sh_compil
      * different primary alias cannot turn unchanged physical bytes into a
      * replacement that reconstructs existing native consumers. */
     if (a->sound_authored_event != b->sound_authored_event || a->sound_event != b->sound_event) return 0;
+    /* A changed presentation is served differently even over equal bytes. */
+    if ((a->presented == NULL) != (b->presented == NULL) || (a->presented &&
+        (a->presented_length != b->presented_length || memcmp(a->presented, b->presented, a->presented_length)))) return 0;
     if (a->body && b->body)
         return a->body_length == b->body_length && !memcmp(a->body, b->body, a->body_length);
     if (!a->body && !b->body) {

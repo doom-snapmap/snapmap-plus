@@ -15,6 +15,11 @@
 typedef struct sh_editor_row {
     char *name, *parent, *entity_def;
     int plain; /* only an inherit and edit = { entityDef } */
+    /* Its own toybox presentation keys (displayNameTag, categoryNameTag,
+     * metaCategoryNameTag), NULL when not stated; see sh_editor_rows_effective.
+     * A stated empty literal is "" here and in parent/entity_def: the row's
+     * own value, never a fall-through to its parent. */
+    char *label, *category, *meta;
 } sh_editor_row;
 typedef struct sh_editor_rows {
     sh_editor_row *items;
@@ -29,6 +34,13 @@ int sh_editor_rows_add_text(sh_editor_rows *rows, const char *name, const char *
 /* Sort and resolve; parents absent from rows resolve in fallback (may be NULL). */
 int sh_editor_rows_finish(sh_editor_rows *rows, const sh_editor_rows *fallback);
 void sh_editor_rows_free(sh_editor_rows *rows);
+/* A row's value of one of its fields through its parents (absent parents
+ * resolve in fallback, which may be NULL), or NULL. The nearest row stating
+ * the field decides, even when it states "". */
+enum { SH_EDITOR_ROW_ENTITY_DEF, SH_EDITOR_ROW_LABEL, SH_EDITOR_ROW_CATEGORY, SH_EDITOR_ROW_META };
+const char *sh_editor_rows_effective(const sh_editor_rows *rows, const sh_editor_rows *fallback,
+    const sh_editor_row *row, int field);
+const sh_editor_row *sh_editor_rows_find(const sh_editor_rows *rows, const char *name);
 
 /* NULL when base is placed by a shipped row and every package row placing
  * from (or its authored spelling, may be NULL) only copies a shipped row that

@@ -15,6 +15,7 @@
 #include "map_provenance.h"
 #include "map_embed.h"
 #include "package_spawn_registry.h"
+#include "strids.h"
 
 static void *(*atlas_lookup)(void *, void *);
 static void *atlas_native_lookup(void *owner, void *material)
@@ -2536,6 +2537,50 @@ static void test_native_inline_placement_provenance(void)
     sh_package_runtime_test_editor_rows(NULL, 0);
     sh_package_runtime_test_dispose(); sh_package_runtime_test_baseline(baseline, NULL);
 }
+/* A toybox label alias is presentation only (package_library.c): the served
+ * text of a plain package entry gains a generated displayNameTag, but native
+ * conversion reads the authored body, so the entity still places natively and
+ * saves carrier-free. The control puts the same generated member into the body
+ * itself, the path this separation prevents: the entry is no longer a plain
+ * copy and conversion is refused. */
+static void test_native_inline_placement_label_alias(void)
+{
+    sh_package_sources sources = {0};
+    sh_compiled_resource resources[3];
+    sh_package_compilation compiled = {0};
+    char reason[512]; int engine = 0;
+    const char *plain = "{ inherit = \"inlinestock/base_row\"; edit = { entityDef = \"smp/tough\"; } }";
+    const char *decorated = "{ inherit = \"inlinestock/base_row\"; edit = { entityDef = \"smp/tough\"; "
+        "displayNameTag = \"#str_smp_loc_0123\"; } }";
+    resources[0] = provenance_resource("generated/decls/entitydef/smp/tough.decl",
+        "{ inherit = \"inlinestock/base\"; edit = { health = 40; } }", "generated/decls/entitydef/inline/tough.decl", 0, 0);
+    resources[1] = provenance_resource("generated/decls/snapeditorentitydef/inlinestock/base_row.decl",
+        "{ inherit = \"inlinestock/row_base\"; edit = { entityDef = \"inlinestock/base\"; } }", NULL, 1, SIZE_MAX);
+    resources[2] = provenance_resource("generated/decls/snapeditorentitydef/smp/tough_row.decl", plain,
+        "generated/decls/snapeditorentitydef/inline/tough_row.decl", 0, 0);
+    resources[2].presented = (unsigned char *)decorated; resources[2].presented_length = strlen(decorated);
+    compiled.sources = &sources; compiled.resources = resources; compiled.resource_count = 3;
+    sh_package_runtime_test_dispose(); sh_package_runtime_test_baseline(inline_baseline, NULL);
+    sh_package_runtime_test_editor_rows(inline_editor_rows, sizeof(inline_editor_rows) / sizeof(*inline_editor_rows));
+    int placed = sh_package_runtime_test_placement(&compiled, "smp/tough", "inlinestock/base", &engine, reason, sizeof(reason));
+    if (placed != 1) fprintf(stderr, "placement with a label alias: %d %s\n", placed, reason);
+    CHECK(placed == 1);
+    /* Serving reads the presentation; every other reader the authored body. */
+    size_t length = 0; char error[256] = "";
+    unsigned char *served = sh_package_compilation_read_served(&compiled, resources + 2, SIZE_MAX, &length, error, sizeof(error));
+    CHECK(served && length == strlen(decorated) && !memcmp(served, decorated, length)); free(served);
+    unsigned char *authored = sh_package_compilation_read(&compiled, resources + 2, SIZE_MAX, &length, error, sizeof(error));
+    CHECK(authored && length == strlen(plain) && !memcmp(authored, plain, length)); free(authored);
+    /* Control: the generated member in the body itself is refused. */
+    resources[2].presented = NULL; resources[2].presented_length = 0;
+    resources[2].body = (unsigned char *)decorated; resources[2].body_length = strlen(decorated);
+    placed = sh_package_runtime_test_placement(&compiled, "smp/tough", "inlinestock/base", &engine, reason, sizeof(reason));
+    CHECK(placed == 0 && !engine && strstr(reason, "not a plain copy"));
+    for (size_t i = 0; i < 3; i++) { sh_package_owners_free(&resources[i].owners); sh_package_owners_free(&resources[i].gameplay_owners); }
+    sh_package_runtime_test_editor_rows(NULL, 0);
+    sh_package_runtime_test_dispose(); sh_package_runtime_test_baseline(baseline, NULL);
+}
+
 static void run_native_inline_library(void)
 {
     char executable[MAX_PATH], command[MAX_PATH + 64];
@@ -4782,6 +4827,394 @@ static void test_relay_roster(void)
     sh_package_runtime_test_baseline(baseline, NULL);
     for (size_t i = 0; i < f.count; i++) free(f.regions[i].address);
 }
+/* The production toybox roster (sh_package_runtime_palette) over real library
+ * compiles: every served editor entry, then the shipped ones not served, each
+ * resolving its inherited fields through the served entries first. A package
+ * changes the shipped parent's category. Served in place (an unlinked
+ * compile), the untouched shipped child shows the served category too; linked
+ * as installed packages are, the change is its author's own private variant,
+ * a tile of its own, and the shipped parent and child keep theirs. Either way
+ * the new public entry the package adds is a peer under its own name and an
+ * entry without a category is no tile. Without a shipped roster the aliases
+ * keep their base labels. */
+static const char *const roster_editor_rows[] = {"rost/child", "rost/cleared", "rost/hidden", "rost/parent"};
+static int roster_baseline(void *context, const char *path, unsigned char **body, size_t *length)
+{
+    const char *text = !strcmp(path, "generated/decls/snapeditorentitydef/rost/parent.decl") ?
+            "{ edit = { entityDef = \"d8rows/speaker\"; displayNameTag = \"#str_parent\"; "
+            "categoryNameTag = \"#str_cat\"; metaCategoryNameTag = \"#str_meta\"; } }" :
+        !strcmp(path, "generated/decls/snapeditorentitydef/rost/child.decl") ?
+            "{ inherit = \"rost/parent\"; edit = { entityDef = \"d8rows/play_action\"; } }" :
+        /* A shipped child stating an empty label: its own value, not the parent's. */
+        !strcmp(path, "generated/decls/snapeditorentitydef/rost/cleared.decl") ?
+            "{ inherit = \"rost/parent\"; edit = { entityDef = \"d8rows/speaker\"; displayNameTag = \"\"; } }" :
+        !strcmp(path, "generated/decls/snapeditorentitydef/rost/hidden.decl") ?
+            "{ edit = { entityDef = \"d8rows/speaker\"; displayNameTag = \"#str_hidden\"; } }" : NULL;
+    if (!text) return d8r_baseline(context, path, body, length);
+    *length = strlen(text); *body = (unsigned char *)_strdup(text); return *body ? 1 : -1;
+}
+/* d8r_setup with the editor entry's toybox label fields. */
+static void roster_setup(admission_fixture *f)
+{
+    static const char *const types[] = {"idList < EditorRefs >", "idDeclEntityDef", "idList < EditorSheet >", "idColor",
+        "idStr", "idStr", "idStr", "idStr"};
+    static const char *const names[] = {"inputs", "entityDef", "propertySheets", "displayNameColor", "placementFlags",
+        "displayNameTag", "categoryNameTag", "metaCategoryNameTag"};
+    d8r_setup(f);
+    void *container = *(void **)f->reflection, *records = *(void **)((char *)container + 0x20);
+    char *none = admission_string(f, "");
+    void *table = admission_alloc(f, 9 * 0x48);
+    admission_pointer(records, 4 * 0x38 + 0x20, table);
+    for (size_t i = 0; i < 8; i++) {
+        admission_pointer(table, i * 0x48, admission_string(f, types[i]));
+        admission_pointer(table, i * 0x48 + 8, i == 1 ? admission_string(f, "*") : none);
+        admission_pointer(table, i * 0x48 + 0x10, admission_string(f, names[i]));
+        admission_number(table, i * 0x48 + 0x1c, 8);
+    }
+}
+static const sh_strids_palette_entry *roster_find(const sh_strids_palette_entry *entries, size_t count, const char *row)
+{
+    const sh_strids_palette_entry *found = NULL;
+    for (size_t i = 0; i < count; i++) if (!strcmp(entries[i].row, row)) { CHECK(!found); found = entries + i; }
+    return found;
+}
+static void test_palette_roster(void)
+{
+    char data[MAX_PATH];
+    admission_fixture f; roster_setup(&f);
+    sh_decl_registry_source registry = {&f, admission_read, (uintptr_t)f.registry, NULL};
+    create("roster-data/overrides/changer/package.json", "{\"id\":\"local.changer\",\"name\":\"Changer\"}");
+    create("roster-data/overrides/changer/assets/generated/decls/snapeditorentitydef/rost/parent.decl",
+        "{ edit = { entityDef = \"d8rows/speaker\"; displayNameTag = \"#str_parent\"; "
+        "categoryNameTag = \"#str_cat_new\"; metaCategoryNameTag = \"#str_meta\"; } }");
+    create("roster-data/overrides/changer/assets/generated/decls/snapeditorentitydef/rost/newrow.decl",
+        "{ edit = { entityDef = \"d8rows/speaker\"; displayNameTag = \"#str_new\"; "
+        "categoryNameTag = \"#str_cat\"; metaCategoryNameTag = \"#str_meta\"; } }");
+    snprintf(data, sizeof(data), "%s/roster-data", root);
+    for (int linked = 0; linked < 2; linked++) {
+        sh_package_runtime_test_dispose(); sh_package_runtime_test_baseline(roster_baseline, NULL);
+        sh_package_runtime_test_source_readers(registry, (uintptr_t)f.reflection);
+        sh_package_runtime_test_installed_links(linked);
+        sh_package_runtime_test_editor_rows(roster_editor_rows, sizeof(roster_editor_rows) / sizeof(*roster_editor_rows));
+        skipped_packages = left_out_packages = 0;
+        CHECK(sh_package_runtime_refresh(data) && !skipped_packages && !left_out_packages);
+        const sh_strids_palette_entry *entries = NULL; size_t count = 0;
+        CHECK(sh_package_runtime_palette(NULL, &entries, &count) == 1);
+        const sh_strids_palette_entry *parent = roster_find(entries, count, "rost/parent");
+        const sh_strids_palette_entry *child = roster_find(entries, count, "rost/child");
+        const sh_strids_palette_entry *added = roster_find(entries, count, "rost/newrow"), *variant = NULL;
+        const sh_strids_palette_entry *cleared = roster_find(entries, count, "rost/cleared");
+        size_t variants = 0;
+        for (size_t i = 0; i < count; i++)
+            if (!strncmp(entries[i].row, "smp/", 4)) { variants++; variant = entries + i; }
+        const char *category = linked ? "#str_cat" : "#str_cat_new";
+        int right = parent && !strcmp(parent->category, category) && !strcmp(parent->label, "#str_parent") &&
+            child && !strcmp(child->category, category) && !strcmp(child->label, "#str_parent") &&
+            !strcmp(child->meta, "#str_meta") &&
+            cleared && !*cleared->label && !strcmp(cleared->category, category) &&
+            added && !strcmp(added->label, "#str_new") && !strcmp(added->category, "#str_cat") &&
+            !roster_find(entries, count, "rost/hidden") &&
+            variants == (size_t)linked && (!linked || (!strcmp(variant->category, "#str_cat_new") &&
+            !strcmp(variant->label, "#str_parent") && !strcmp(variant->meta, "#str_meta")));
+        if (!right)
+            for (size_t i = 0; i < count; i++)
+                fprintf(stderr, "roster %d: %s label %s category %s meta %s\n", linked, entries[i].row, entries[i].label,
+                    entries[i].category, entries[i].meta);
+        CHECK(right);
+        sh_package_runtime_test_editor_rows(NULL, 0);
+        CHECK(sh_package_runtime_palette(NULL, &entries, &count) == 0 && !count);
+    }
+    sh_package_runtime_test_dispose(); cleanup_resources(data);
+    sh_package_runtime_test_installed_links(0);
+    sh_package_runtime_test_source_readers((sh_decl_registry_source){0}, 0);
+    sh_package_runtime_test_baseline(baseline, NULL);
+    for (size_t i = 0; i < f.count; i++) free(f.regions[i].address);
+}
+/* Toybox label aliases through the real linked library compile and native
+ * conversion. The same installed package (a plain editor entry for its own
+ * definition, copying a shipped tile) compiles without and with a native
+ * string reservation: with it, the entry's served text carries its label
+ * alias and its authored body does not change, and a map use of the
+ * definition converts to the same native data, carrier-free, with the same
+ * report. The regression this separation fixed is reproduced by serving the
+ * alias from the body itself: the entry stops being a plain copy and the use
+ * keeps its package. */
+static int label_conversion_reserve(void *context, const char *key, const unsigned char identity[32], const char *mapping)
+{ (void)identity; (void)mapping; if (strncmp(key, "#str_smp_loc_", 13)) return 0; (*(size_t *)context)++; return 1; }
+static int label_conversion_global(void *context, const char *key) { (void)context; (void)key; return 1; }
+static int label_conversion_convert(const char *label, char **derived, char **report)
+{
+    char error[2048];
+    size_t bound_length = 0, derived_length = 0, count = 99;
+    sh_package_occurrence_snapshot *ownership = NULL; sh_mpkg_used *used = NULL;
+    const char *json = INLINE_VARIABLES INLINE_ENTITY("conv/tough") "]}";
+    *derived = NULL; *report = NULL;
+    char *bound = sh_package_runtime_rebind_local_document(json, strlen(json), &bound_length, error, sizeof(error));
+    if (!bound) fprintf(stderr, "label conversion %s rebind: %s\n", label, error);
+    CHECK(bound != NULL);
+    int result = bound ? sh_package_runtime_native_document(NULL, NULL, NULL, 0, bound, bound_length, derived,
+        &derived_length, &ownership, &used, &count, report, error, sizeof(error)) : -2;
+    int converted = result == 1 && *derived && strstr(*derived, "\"inherit\":\"d8rows/speaker\"") &&
+        strstr(*derived, "\"health\":40") && count == 0;
+    if (!converted) fprintf(stderr, "label conversion %s: result %d, %zu deliveries: %s\n%s", label, result, count, error,
+        *report ? *report : "");
+    if (bound) HeapFree(GetProcessHeap(), 0, bound);
+    sh_package_occurrence_release(ownership); sh_mpkg_used_free(used);
+    return result < 0 ? -1 : converted;
+}
+/* The library's compiled row for the package entry, found by its authored path. */
+static sh_compiled_resource *label_conversion_row(const sh_package_compilation *library)
+{
+    const char *authored = "generated/decls/snapeditorentitydef/conv/tough_row.decl";
+    for (size_t i = 0; library && i < library->resource_count; i++) {
+        const sh_compiled_resource *resource = library->resources + i;
+        const char *path = resource->original_path ? resource->original_path : resource->engine_path;
+        if (!strcmp(path, authored)) return (sh_compiled_resource *)resource;
+    }
+    return NULL;
+}
+static void test_label_alias_conversion(void)
+{
+    char data[MAX_PATH];
+    admission_fixture f; roster_setup(&f);
+    sh_decl_registry_source registry = {&f, admission_read, (uintptr_t)f.registry, NULL};
+    size_t reserved = 0;
+    sh_package_string_reservations strings = {label_conversion_reserve, &reserved, 4, label_conversion_global};
+    create("conversion-data/overrides/tough/package.json", "{\"id\":\"local.tough\",\"name\":\"Tough\"}");
+    create("conversion-data/overrides/tough/assets/generated/decls/entitydef/conv/tough.decl",
+        "{ inherit = \"d8rows/speaker\"; edit = { health = 40; } }");
+    create("conversion-data/overrides/tough/assets/generated/decls/snapeditorentitydef/conv/tough_row.decl",
+        "{ inherit = \"rost/parent\"; edit = { entityDef = \"conv/tough\"; } }");
+    snprintf(data, sizeof(data), "%s/conversion-data", root);
+    char *derived[2] = {NULL, NULL}, *report[2] = {NULL, NULL}, *body = NULL;
+    size_t body_length = 0;
+    for (int labelled = 0; labelled < 2; labelled++) {
+        sh_package_runtime_test_dispose(); sh_package_runtime_test_baseline(roster_baseline, NULL);
+        sh_package_runtime_test_source_readers(registry, (uintptr_t)f.reflection);
+        sh_package_runtime_test_installed_links(1);
+        sh_package_runtime_test_editor_rows(roster_editor_rows, sizeof(roster_editor_rows) / sizeof(*roster_editor_rows));
+        sh_package_runtime_test_strings(labelled ? &strings : NULL);
+        CHECK(sh_package_runtime_refresh(data));
+        const sh_package_compilation *library = sh_package_runtime_library_acquire();
+        const sh_compiled_resource *row = label_conversion_row(library);
+        CHECK(row && row->body);
+        if (row && !labelled) {
+            CHECK(!row->presented);
+            body = malloc(row->body_length); body_length = row->body_length;
+            if (body) memcpy(body, row->body, body_length);
+        }
+        if (row && labelled) {
+            CHECK(body && row->body_length == body_length && !memcmp(row->body, body, body_length));
+            CHECK(row->presented && strstr((const char *)row->presented, "displayNameTag = \"#str_smp_loc_"));
+        }
+        sh_package_runtime_release();
+        CHECK(label_conversion_convert(labelled ? "labelled" : "plain", derived + labelled, report + labelled) == 1);
+    }
+    CHECK(reserved >= 1);
+    CHECK(derived[0] && derived[1] && !strcmp(derived[0], derived[1]));
+    CHECK(report[0] && report[1] && !strcmp(report[0], report[1]));
+    /* The pre-fix shape: the alias served from the body itself, in the
+     * compilation the conversion reads. */
+    {
+        sh_compiled_resource *row = label_conversion_row(sh_package_runtime_acquire());
+        unsigned char *authored = row ? row->body : NULL; size_t authored_length = row ? row->body_length : 0;
+        if (row && row->presented) { row->body = row->presented; row->body_length = row->presented_length; }
+        sh_package_runtime_release();
+        char *refused = NULL, *refusal = NULL;
+        int kept = label_conversion_convert("decorated body", &refused, &refusal);
+        if (kept != 0 || !refusal || !strstr(refusal, "not a plain copy"))
+            fprintf(stderr, "decorated body: row %s (%s), result %d\n%s\n%s\n", row ? row->engine_path : "(none)",
+                row && row->presented ? "presented" : "no presentation", kept, refused ? refused : "", refusal ? refusal : "");
+        CHECK(kept == 0);
+        CHECK(refusal && strstr(refusal, "not a plain copy"));
+        free(refused); free(refusal);
+        row = label_conversion_row(sh_package_runtime_acquire());
+        if (row && authored) { row->body = authored; row->body_length = authored_length; }
+        sh_package_runtime_release();
+    }
+    for (int i = 0; i < 2; i++) { free(derived[i]); free(report[i]); }
+    free(body);
+    sh_package_runtime_test_strings(NULL);
+    sh_package_runtime_test_editor_rows(NULL, 0);
+    sh_package_runtime_test_dispose(); cleanup_resources(data);
+    sh_package_runtime_test_installed_links(0);
+    sh_package_runtime_test_source_readers((sh_decl_registry_source){0}, 0);
+    sh_package_runtime_test_baseline(baseline, NULL);
+    for (size_t i = 0; i < f.count; i++) free(f.regions[i].address);
+}
+/* Label mappings naming one toybox row. An installed package adding an exact
+ * copy of another installed package's entry recompiles the library (an
+ * increment does not fold such a copy in), and the one published row's alias
+ * names both sources; the served roster lists the row once, naming that alias.
+ * With two compilations serving one row (a map overlay over the installed
+ * library), the overlay serves the map's resource and keeps both mappings: the
+ * roster names the map's alias, and the library's stays only for lookup
+ * (strids_labels_test decides the texts of that shape). */
+#define PR_TEST_EDITOR_PREFIX "generated/decls/snapeditorentitydef/"
+static size_t label_mappings_for(const sh_package_compilation *compiled, const char *row, const char *selected,
+    char *sources, size_t capacity)
+{
+    size_t found = 0;
+    if (sources && capacity) *sources = 0;
+    for (size_t i = 0; compiled && i < compiled->policy.localized_count; i++) {
+        const sh_package_localized_string *value = compiled->policy.localized + i;
+        sh_json_object mapping = {0}, label = {0};
+        const char *raw;
+        char name[256]; size_t length = 0;
+        if (sh_json_parse_object(value->mapping, strlen(value->mapping), 4, &mapping) &&
+            (raw = sh_json_object_get(&mapping, "label")) != NULL &&
+            sh_json_parse_object(raw, strlen(raw), 3, &label) && (raw = sh_json_object_get(&label, "row")) != NULL &&
+            sh_json_decode_string(raw, strlen(raw), name, sizeof(name), &length) && !strcmp(name, row)) {
+            found++;
+            raw = sh_json_object_get(&label, "sources");
+            if (selected && sources && raw && !_stricmp(value->key, selected)) snprintf(sources, capacity, "%s", raw);
+        }
+        sh_json_object_free(&label); sh_json_object_free(&mapping);
+    }
+    return found;
+}
+/* The served row authored at conv/tough_row: its published name and the alias
+ * its presented text selects. */
+static const sh_compiled_resource *label_served_row(const sh_package_compilation *compiled, char *name, size_t name_capacity,
+    char *selected, size_t selected_capacity, size_t *rows)
+{
+    const sh_compiled_resource *served = label_conversion_row(compiled);
+    *name = 0; *selected = 0; *rows = 0;
+    for (size_t i = 0; compiled && i < compiled->resource_count; i++) {
+        const sh_compiled_resource *resource = compiled->resources + i;
+        const char *path = resource->original_path ? resource->original_path : resource->engine_path;
+        if (!strcmp(path, "generated/decls/snapeditorentitydef/conv/tough_row.decl")) (*rows)++;
+    }
+    if (served && strlen(served->engine_path) > sizeof(PR_TEST_EDITOR_PREFIX) + 4) {
+        size_t n = strlen(served->engine_path) - (sizeof(PR_TEST_EDITOR_PREFIX) - 1) - 5;
+        if (n < name_capacity) { memcpy(name, served->engine_path + sizeof(PR_TEST_EDITOR_PREFIX) - 1, n); name[n] = 0; }
+    }
+    const char *tag = served && served->presented ? strstr((const char *)served->presented, "#str_smp_loc_") : NULL;
+    if (tag) {
+        size_t n = strcspn(tag, "\"");
+        if (n < selected_capacity) { memcpy(selected, tag, n); selected[n] = 0; }
+    }
+    return served;
+}
+static void test_label_alias_exact_install(void)
+{
+    char data[MAX_PATH], name[256], selected[128], first[128], sources[1024];
+    admission_fixture f; roster_setup(&f);
+    sh_decl_registry_source registry = {&f, admission_read, (uintptr_t)f.registry, NULL};
+    size_t reserved = 0, rows = 0;
+    sh_package_string_reservations strings = {label_conversion_reserve, &reserved, 4, label_conversion_global};
+    const char *row = "{ inherit = \"rost/parent\"; edit = { entityDef = \"conv/tough\"; } }";
+    const char *def = "{ inherit = \"d8rows/speaker\"; edit = { health = 40; } }";
+    create("exact-data/overrides/first/package.json", "{\"id\":\"local.first\",\"name\":\"First\"}");
+    create("exact-data/overrides/first/assets/generated/decls/entitydef/conv/tough.decl", def);
+    create("exact-data/overrides/first/assets/generated/decls/snapeditorentitydef/conv/tough_row.decl", row);
+    snprintf(data, sizeof(data), "%s/exact-data", root);
+    sh_package_runtime_test_dispose(); sh_package_runtime_test_baseline(roster_baseline, NULL);
+    sh_package_runtime_test_source_readers(registry, (uintptr_t)f.reflection);
+    sh_package_runtime_test_installed_links(1);
+    sh_package_runtime_test_editor_rows(roster_editor_rows, sizeof(roster_editor_rows) / sizeof(*roster_editor_rows));
+    sh_package_runtime_test_strings(&strings);
+    CHECK(sh_package_runtime_refresh(data));
+    label_served_row(sh_package_runtime_acquire(), name, sizeof(name), first, sizeof(first), &rows);
+    sh_package_runtime_release();
+    CHECK(rows == 1 && *first);
+    create("exact-data/overrides/second/package.json", "{\"id\":\"local.second\",\"name\":\"Second\"}");
+    create("exact-data/overrides/second/assets/generated/decls/entitydef/conv/tough.decl", def);
+    create("exact-data/overrides/second/assets/generated/decls/snapeditorentitydef/conv/tough_row.decl", row);
+    library_compiles = install_refreshes = 0;
+    sh_package_runtime_note_install_published();
+    CHECK(sh_package_runtime_refresh(data));
+    CHECK(library_compiles >= 1 && !install_refreshes);
+    const sh_package_compilation *current = sh_package_runtime_acquire();
+    const sh_compiled_resource *served = label_served_row(current, name, sizeof(name), selected, sizeof(selected), &rows);
+    size_t mappings = label_mappings_for(current, name, selected, sources, sizeof(sources));
+    sh_package_runtime_release();
+    const sh_strids_palette_entry *entries = NULL; size_t count = 0;
+    CHECK(sh_package_runtime_palette(NULL, &entries, &count) == 1);
+    const sh_strids_palette_entry *listed = *name ? roster_find(entries, count, name) : NULL;
+    int right = rows == 1 && served && *selected && strcmp(selected, first) && mappings == 1 &&
+        strstr(sources, "local.first") && strstr(sources, "local.second") && listed && !_stricmp(listed->label, selected);
+    if (!right) fprintf(stderr, "exact install: %zu row(s) %s, %zu mapping(s), selected %s (was %s), sources %s, roster %s\n",
+        rows, name, mappings, selected, first, sources, listed ? listed->label : "(absent)");
+    CHECK(right);
+    sh_package_runtime_test_strings(NULL);
+    sh_package_runtime_test_editor_rows(NULL, 0);
+    sh_package_runtime_test_dispose(); cleanup_resources(data);
+    sh_package_runtime_test_installed_links(0);
+    sh_package_runtime_test_source_readers((sh_decl_registry_source){0}, 0);
+    sh_package_runtime_test_baseline(baseline, NULL);
+    for (size_t i = 0; i < f.count; i++) free(f.regions[i].address);
+}
+static void label_overlay_row(sh_compiled_resource *row, const char *path, const char *body, const char *presented)
+{
+    memset(row, 0, sizeof(*row));
+    row->engine_path = path; row->type = "snapeditorentitydef"; row->name = "smp/dup"; row->source = SIZE_MAX;
+    row->body = (unsigned char *)body; row->body_length = strlen(body);
+    row->presented = (unsigned char *)presented; row->presented_length = strlen(presented);
+}
+static void label_overlay_mapping(sh_package_policy *policy, const char *key, const char *name, const char *id)
+{
+    char mapping[1024], error[256] = "";
+    snprintf(mapping, sizeof(mapping), "{\"native\":\"#str_parent\",\"locales\":{},\"label\":{\"row\":\"smp/dup\","
+        "\"category\":\"#str_cat\",\"meta\":\"#str_meta\",\"sources\":{\"0\":{\"name\":\"%s\",\"id\":\"%s\","
+        "\"component\":\"\",\"row\":\"chime/row\"}}}}", name, id);
+    int ok = sh_package_policy_localization(policy, key, mapping, NULL, error, sizeof(error));
+    if (!ok) fprintf(stderr, "overlay mapping %s: %s\n", key, error);
+    CHECK(ok);
+}
+static void test_label_alias_overlay(void)
+{
+    char error[512] = "", map_root[MAX_PATH];
+    const char *path = "generated/decls/snapeditorentitydef/smp/dup.decl";
+    const char *body = "{ inherit = \"rost/parent\"; edit = { entityDef = \"d8rows/speaker\"; } }";
+    const char *local_text = "{ inherit = \"rost/parent\"; edit = { entityDef = \"d8rows/speaker\"; "
+        "displayNameTag = \"#str_smp_loc_local\"; } }";
+    const char *map_text = "{ inherit = \"rost/parent\"; edit = { entityDef = \"d8rows/speaker\"; "
+        "displayNameTag = \"#str_smp_loc_map\"; } }";
+    char local_root[MAX_PATH];
+    create("overlay-local/overrides", NULL);
+    create("overlay-map/overrides/mapped/package.json", "{\"id\":\"map.chimes\",\"name\":\"Map chimes\"}");
+    create("overlay-map/overrides/mapped/assets/generated/decls/entitydef/chime/def.decl", "{ class = \"Entity\"; }");
+    snprintf(local_root, sizeof(local_root), "%s/overlay-local", root);
+    snprintf(map_root, sizeof(map_root), "%s/overlay-map", root);
+    sh_package_sources *local_sources = sh_package_sources_scan(local_root, error, sizeof(error));
+    sh_package_sources *map_sources = sh_package_sources_scan(map_root, error, sizeof(error));
+    CHECK(local_sources && !local_sources->package_count && map_sources && map_sources->package_count == 1);
+    sh_compiled_resource local_row, map_row;
+    sh_package_compilation local = {0}, map = {0};
+    label_overlay_row(&local_row, path, body, local_text);
+    label_overlay_row(&map_row, path, body, map_text);
+    CHECK(sh_package_owners_add(&map_row.owners, 0));
+    local.sources = local_sources; local.resources = &local_row; local.resource_count = 1;
+    map.sources = map_sources; map.resources = &map_row; map.resource_count = 1;
+    label_overlay_mapping(&local.policy, "#str_smp_loc_local", "Local chimes", "local.chimes");
+    label_overlay_mapping(&map.policy, "#str_smp_loc_map", "Map chimes", "map.chimes");
+    sh_package_compilation *overlay = local_sources && map_sources ?
+        sh_package_compilation_overlay(&local, &map, error, sizeof(error)) : NULL;
+    if (!overlay) fprintf(stderr, "label overlay: %s\n", error);
+    CHECK(overlay != NULL);
+    if (overlay) {
+        const sh_compiled_resource *served = sh_package_compilation_find(overlay, path);
+        size_t length = 0;
+        unsigned char *text = served ? sh_package_compilation_read_served(overlay, served, SIZE_MAX, &length, error, sizeof(error)) : NULL;
+        CHECK(overlay->resource_count == 1 && text && strstr((const char *)text, "#str_smp_loc_map"));
+        free(text);
+        CHECK(label_mappings_for(overlay, "smp/dup", NULL, NULL, 0) == 2);
+        sh_package_runtime_test_dispose(); sh_package_runtime_test_baseline(roster_baseline, NULL);
+        sh_package_runtime_test_editor_rows(roster_editor_rows, sizeof(roster_editor_rows) / sizeof(*roster_editor_rows));
+        const sh_strids_palette_entry *entries = NULL; size_t count = 0;
+        CHECK(sh_package_runtime_test_palette_of(overlay, &entries, &count) == 1);
+        const sh_strids_palette_entry *listed = roster_find(entries, count, "smp/dup");
+        CHECK(listed && !strcmp(listed->label, "#str_smp_loc_map") && !strcmp(listed->category, "#str_cat"));
+        sh_package_runtime_test_editor_rows(NULL, 0);
+        sh_package_runtime_test_dispose(); sh_package_runtime_test_baseline(baseline, NULL);
+        sh_package_compilation_free(overlay);
+    }
+    sh_package_owners_free(&map_row.owners);
+    sh_package_policy_free(&local.policy); sh_package_policy_free(&map.policy);
+    sh_package_sources_free(local_sources); sh_package_sources_free(map_sources);
+    cleanup_resources(local_root); cleanup_resources(map_root);
+}
 /* A published installation that no map load continues (the MPKG gate) folds
  * its packages in as a map-driven installation does: the refresh compiles only
  * the added packages, serves the rest from the retained library and so serves
@@ -5898,6 +6331,7 @@ int main(int argc, char **argv)
     test_native_inline_load();
     run_native_inline_library();
     test_native_inline_placement_provenance();
+    test_native_inline_placement_label_alias();
     test_constructor_provider_lifetimes();
     test_constructor_binding_changes();
     test_native_membership_changes();
@@ -5919,6 +6353,10 @@ int main(int argc, char **argv)
     test_increment_stock_rows();
     test_relay_owners();
     test_relay_roster();
+    test_palette_roster();
+    test_label_alias_conversion();
+    test_label_alias_exact_install();
+    test_label_alias_overlay();
     test_editor_presentation();
     test_picker_topology();
     test_selector_shared_retirement();
