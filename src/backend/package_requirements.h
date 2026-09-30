@@ -36,6 +36,10 @@ int sh_package_requirements_rearm(const char *data_root, void *execute_command_b
  * requirement snapshot exists and the engine has reached RUNNING. */
 void sh_package_requirements_poll(void);
 
+/* One sentence for sh_packages: whether the admitted package settings are in
+ * force (applied and read back natively), waiting, or refused and why. */
+void sh_package_requirements_describe(char *out, size_t capacity);
+
 #ifdef SH_PACKAGE_REQUIREMENTS_TESTING
 void sh_package_requirements_test_reset(void);
 void sh_package_requirements_test_set_load_state(volatile int *state);

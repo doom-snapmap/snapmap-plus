@@ -28,6 +28,7 @@
 #include "perf.h"
 #include "apply_engine.h"
 #include "package_runtime.h"
+#include "package_requirements.h"
 #include "resource_graph.h"
 #include "resource_graph_native.h"
 
@@ -1901,6 +1902,11 @@ static void h_sh_packages(idCmdArgs *a)
             line += length; if (*line == '\n') line++;
         }
         free(text);
+    }
+    if (!operation || strcmp(operation, "dependencies")) {
+        char settings[384];
+        sh_package_requirements_describe(settings, sizeof(settings));
+        sh_printf("%s\n", settings);
     }
 }
 static void h_sh_perf(idCmdArgs *a)

@@ -1,6 +1,7 @@
 #include <limits.h>
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -4538,37 +4539,99 @@ int sh_package_runtime_audio_packaged_banks(sh_audio_originals_bank_visit visit,
     return result;
 }
 
+/* A growable summary: each line is sized from what it prints, so no package,
+ * component or diagnostic count can truncate it. failed is sticky. */
+typedef struct pr_summary { char *text; size_t length, capacity; int failed; } pr_summary;
+static void pr_summary_put(pr_summary *s, const char *format, ...)
+{
+    va_list args;
+    int needed;
+    if (s->failed) return;
+    va_start(args, format); needed = vsnprintf(NULL, 0, format, args); va_end(args);
+    if (needed < 0) { s->failed = 1; return; }
+    if ((size_t)needed >= s->capacity - s->length) {
+        size_t next = s->capacity ? s->capacity : 4096;
+        while ((size_t)needed >= next - s->length) {
+            if (next > SIZE_MAX / 2) { s->failed = 1; return; }
+            next *= 2;
+        }
+        char *grown = (char *)realloc(s->text, next);
+        if (!grown) { s->failed = 1; return; }
+        s->text = grown; s->capacity = next;
+    }
+    va_start(args, format); vsnprintf(s->text + s->length, s->capacity - s->length, format, args); va_end(args);
+    s->length += (size_t)needed;
+}
+/* The game settings the active compilation requires (policy requirements):
+ * each composed value, then every component requesting it with its own value
+ * (a package's nested components may ask differently from its root). Called
+ * with g_lock held. */
+static void pr_summary_settings(pr_summary *s)
+{
+    sh_json_object cvars = {0};
+    const char *raw = sh_json_object_get(&g_compiled->policy.requirements, "cvars");
+    if (!raw || !sh_json_parse_object(raw, strlen(raw), 2, &cvars) || !cvars.count) {
+        pr_summary_put(s, "Effective settings: no package requires a game setting.\n");
+        sh_json_object_free(&cvars); return;
+    }
+    pr_summary_put(s, "Effective settings required by packages:\n");
+    for (size_t c = 0; c < cvars.count; c++) {
+        size_t listed = 0;
+        pr_summary_put(s, "  %s = %s; requested by", cvars.members[c].key, cvars.members[c].value_json);
+        for (size_t i = 0; i < g_sources->package_count; i++) {
+            const sh_package_descriptor *root = NULL;
+            for (size_t j = 0; j < g_sources->component_count && !root; j++)
+                if (g_sources->components[j].owner == i && !g_sources->components[j].relative[0])
+                    root = &g_sources->components[j].descriptor;
+            for (size_t j = 0; j < g_sources->component_count; j++) {
+                const sh_package_component *component = g_sources->components + j;
+                sh_json_object requirements = {0}, own = {0};
+                const char *section, *value;
+                if (component->owner != i) continue;
+                if ((section = sh_json_object_get(&component->descriptor.fields, "requirements")) &&
+                    sh_json_parse_object(section, strlen(section), 3, &requirements) &&
+                    (section = sh_json_object_get(&requirements, "cvars")) &&
+                    sh_json_parse_object(section, strlen(section), 2, &own) &&
+                    (value = sh_json_object_get(&own, cvars.members[c].key)) != NULL) {
+                    if (component->relative[0])
+                        pr_summary_put(s, "%s %s [%s] component %s (%s)", listed++ ? "," : "",
+                            root ? root->name : "Package", root ? root->id : "?", component->relative, value);
+                    else
+                        pr_summary_put(s, "%s %s [%s] (%s)", listed++ ? "," : "", root ? root->name : "Package",
+                            root ? root->id : "?", value);
+                }
+                sh_json_object_free(&own); sh_json_object_free(&requirements);
+            }
+        }
+        if (!listed) pr_summary_put(s, " the active map's packages");
+        pr_summary_put(s, "\n");
+    }
+    sh_json_object_free(&cvars);
+}
 char *sh_package_runtime_summary(void)
 {
-    size_t i, j, length = 0, capacity;
-    char *text;
+    pr_summary s = {0};
+    size_t i, j;
     AcquireSRWLockShared(&g_lock);
     const char *rejections = g_library_provider ? g_library_provider->rejections : NULL;
     const char *coverage = g_library_provider ? g_library_provider->coverage : NULL;
     const char *unserved = g_library_provider ? g_library_provider->unserved : NULL;
-    capacity = 4096 + (g_sources ? g_sources->package_count : 0) * 1024 +
-        (rejections ? strlen(rejections) : 0) + (coverage ? strlen(coverage) : 0) +
-        (unserved ? strlen(unserved) : 0);
-    text = (char *)calloc(capacity, 1);
-    if (!text) goto done;
-    length += (size_t)snprintf(text + length, capacity - length, "Installed library: %zu packages.\n",
-        g_inventory ? g_inventory->sources->package_count : 0);
-    if (rejections) length += (size_t)snprintf(text + length, capacity - length, "%s%s", rejections,
+    pr_summary_put(&s, "Installed library: %zu packages.\n", g_inventory ? g_inventory->sources->package_count : 0);
+    if (rejections) pr_summary_put(&s, "%s%s", rejections,
         "Skipped packages stay unchanged on disk. Packages made for earlier Snapmap+ releases can be "
         "converted: close DOOM and run snapmap-plus migrate-overrides.\n");
-    if (unserved) length += (size_t)snprintf(text + length, capacity - length, "%s%s", unserved,
+    if (unserved) pr_summary_put(&s, "%s%s", unserved,
         "Packages not served yet stay installed and unchanged; they need a Snapmap+ update, not an edit.\n");
-    if (coverage) length += (size_t)snprintf(text + length, capacity - length, "%s", coverage);
-    if (g_authoring_error[0]) length += (size_t)snprintf(text + length, capacity - length,
+    if (coverage) pr_summary_put(&s, "%s", coverage);
+    if (g_authoring_error[0]) pr_summary_put(&s,
         "Local authoring composition unavailable: %s\nIndependent map packages can still compile.\n", g_authoring_error);
-    if (!g_ready) length += (size_t)snprintf(text + length, capacity - length,
-        "Packages could not compile: %s\n%s", g_error[0] ? g_error : "compiler has not initialized",
+    if (!g_ready) pr_summary_put(&s, "Packages could not compile: %s\n%s",
+        g_error[0] ? g_error : "compiler has not initialized",
         g_compiled ? "The last successful compilation remains active.\n" : "");
     if (!g_sources || !g_compiled || !g_sources->package_count) {
-        snprintf(text + length, capacity - length, "No packages in the active compilation.\n"); goto done;
+        pr_summary_put(&s, "No packages in the active compilation.\n"); goto done;
     }
-    length += (size_t)snprintf(text + length, capacity - length,
-        "%zu packages; %zu native resources; %zu identical duplicates; %zu composed declarations.\n",
+    pr_summary_put(&s, "%zu packages; %zu native resources; %zu identical duplicates; %zu composed declarations.\n",
         g_sources->package_count, g_compiled->resource_count, g_compiled->duplicate_count, g_compiled->composed_count);
     for (i = 0; i < g_sources->package_count; i++) {
         const sh_package_descriptor *descriptor = NULL;
@@ -4583,14 +4646,16 @@ char *sh_package_runtime_summary(void)
         }
         for (j = 0; j < g_compiled->resource_count; j++)
             gameplay += sh_package_owners_contains(&g_compiled->resources[j].gameplay_owners, i);
-        length += (size_t)snprintf(text + length, capacity - length,
-            "%s [%s]\n  %zu files, %llu bytes, %zu components; %s\n  %s\n",
+        pr_summary_put(&s, "%s [%s]\n  %zu files, %llu bytes, %zu components; %s\n  %s\n",
             descriptor ? descriptor->name : "Package", descriptor ? descriptor->id : "?",
             files, (unsigned long long)bytes, components, gameplay ? "contains gameplay resources" : "editor support",
             g_sources->packages[i].root);
     }
+    pr_summary_settings(&s);
 done:
-    ReleaseSRWLockShared(&g_lock); return text;
+    ReleaseSRWLockShared(&g_lock);
+    if (s.failed) { free(s.text); return NULL; }
+    return s.text;
 }
 
 void sh_package_runtime_release(void) { ReleaseSRWLockShared(&g_lock); }

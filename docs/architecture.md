@@ -1194,7 +1194,11 @@ original failures are not content-isolation decisions: they preserve the previou
 provider. Startup package identities and map installation planning use the same
 separation of inventory and effective compilation; a map-carried bundle is still read with
 the strict all-or-nothing scanner. Skipped folders and reasons appear in
-`sh_packages`, never as silent omissions.
+`sh_packages`, never as silent omissions. It also lists every game setting the
+active compilation requires, with each root or nested component that asks for
+it and its own value, and says whether those settings are in force (applied and
+read back), waiting, or refused; a refused update reports the earlier settings
+it left as last applied, or a rollback still owed.
 
 Map admission and save failures carry the first diagnostic back to the native
 notice and backend log. JSON validation includes a byte offset and rejection
