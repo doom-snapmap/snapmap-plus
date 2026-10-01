@@ -3831,6 +3831,21 @@ static int pr_plan_library_current(const sh_package_map_plan *plan, char *error,
     return 0;
 }
 
+/* Admission compares a served resource with the installed output as
+ * pr_resource_equal does (declaration identity, sound events, body bytes or
+ * the sealed/cached payload identity), except presented text, which is
+ * display-only by contract (package_compiler.h): only the library's toybox
+ * label alias writes it. The library aliases an installed row; a map's own
+ * historical context, which composes the map's packages together, does not,
+ * and while the map is active its resource is served over the library's at
+ * that name. The installed alias is served once the map is left. */
+static int pr_output_equal(const sh_package_compilation *serving, const sh_compiled_resource *current,
+    const sh_package_compilation *authored, const sh_compiled_resource *resource, char *error, size_t capacity)
+{
+    sh_compiled_resource a = *current, b = *resource;
+    a.presented = b.presented = NULL; a.presented_length = b.presented_length = 0;
+    return pr_resource_equal(serving, &a, authored, &b, error, capacity);
+}
 static int pr_plan_authoring_served(const sh_package_map_plan *plan,
     const sh_package_compilation *serving, char *error, size_t capacity)
 {
@@ -3840,10 +3855,11 @@ static int pr_plan_authoring_served(const sh_package_map_plan *plan,
     for (size_t i = 0; i < plan->authoring->compiled->resource_count; i++) if (selection.resources[i]) {
         const sh_compiled_resource *resource = plan->authoring->compiled->resources + i;
         const sh_compiled_resource *current = sh_package_compilation_find(serving, resource->engine_path);
-        int equal = current ? pr_resource_equal(serving, current, plan->authoring->compiled,
+        int equal = current ? pr_output_equal(serving, current, plan->authoring->compiled,
             resource, error, capacity) : 0;
         if (equal != 1 && (equal < 0 || !pr_original_editor_slot(current, resource))) {
-            if (!*error) snprintf(error, capacity, "%s: installed authoring output is not admitted", resource->engine_path);
+            if (!*error) snprintf(error, capacity, "%s: installed authoring output is not admitted (%s)",
+                resource->engine_path, current ? "served with different content" : "not served");
             goto done;
         }
     }

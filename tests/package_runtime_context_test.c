@@ -5556,6 +5556,151 @@ static void test_label_alias_overlay(void)
     sh_package_sources_free(local_sources); sh_package_sources_free(map_sources);
     cleanup_resources(local_root); cleanup_resources(map_root);
 }
+/* A map's own package installed through its prompt (the MPKG route) whose
+ * placeable editor row gains a label alias. The map context composes the map's
+ * packages in one historical context, where no row is aliased; the
+ * installation compiles the same package alone, where its row is. Both publish
+ * the row under one name with the same authored body, and while the map stays
+ * active its own resource is served: only the row's presentation differs from
+ * the installed output. The installation is admitted and commits, and the
+ * library serves the alias once the map is left. */
+static int label_install_activations, label_install_recoveries;
+static int label_install_activate(void *context, int restoring, const sh_package_changes *changes,
+    char *error, size_t capacity)
+{
+    (void)context; (void)changes; (void)error; (void)capacity;
+    if (restoring) label_install_recoveries++; else label_install_activations++;
+    return 1;
+}
+/* One commit attempt over a tampered served view: refused before the
+ * installation's own transaction, naming what is not served as installed. */
+static void label_install_refused(sh_package_map_plan *plan, const char *label, const char *path, const char *reason)
+{
+    char error[2048] = "";
+    inventory_commit_calls = 0; inventory_commit_failure = 0;
+    int committed = sh_package_runtime_commit_map(plan, commit_inventory, error, sizeof(error));
+    int right = !committed && !inventory_commit_calls && strstr(error, path) && strstr(error, reason);
+    if (!right) fprintf(stderr, "label map install, %s: committed %d: %s\n", label, committed, error);
+    CHECK(right);
+}
+static void label_install_package(const char *prefix)
+{
+    char path[1024];
+    snprintf(path, sizeof(path), "%s/package.json", prefix);
+    create(path, "{\"id\":\"acceptance.tough\",\"name\":\"Tough\"}");
+    snprintf(path, sizeof(path), "%s/assets/generated/decls/entitydef/conv/tough.decl", prefix);
+    create(path, "{ inherit = \"d8rows/speaker\"; edit = { health = 40; } }");
+    snprintf(path, sizeof(path), "%s/assets/generated/decls/snapeditorentitydef/conv/tough_row.decl", prefix);
+    create(path, "{ inherit = \"rost/parent\"; edit = { entityDef = \"conv/tough\"; } }");
+}
+static void test_label_alias_map_install(void)
+{
+    char data[MAX_PATH], map_root[MAX_PATH], error[2048] = "";
+    char map_name[256] = "", name[256], selected[128], alias[128] = "";
+    unsigned char *map_body = NULL; size_t map_length = 0, rows = 0, reserved = 0;
+    admission_fixture f; roster_setup(&f);
+    sh_decl_registry_source registry = {&f, admission_read, (uintptr_t)f.registry, NULL};
+    sh_package_string_reservations strings = {label_conversion_reserve, &reserved, 4, label_conversion_global};
+    sh_package_map_plan *plan = NULL;
+    const sh_compiled_resource *served;
+    create("labelmap-data/overrides", NULL);
+    label_install_package("labelmap-map/overrides/tough");
+    snprintf(data, sizeof(data), "%s/labelmap-data", root);
+    snprintf(map_root, sizeof(map_root), "%s/labelmap-map", root);
+    sh_package_runtime_test_dispose(); sh_package_runtime_test_baseline(roster_baseline, NULL);
+    sh_package_runtime_test_source_readers(registry, (uintptr_t)f.reflection);
+    sh_package_runtime_test_installed_links(1);
+    sh_package_runtime_test_editor_rows(roster_editor_rows, sizeof(roster_editor_rows) / sizeof(*roster_editor_rows));
+    sh_package_runtime_test_strings(&strings);
+    CHECK(sh_package_runtime_refresh(data));
+    plan = sh_package_runtime_prepare_map(data, map_root, error, sizeof(error));
+    if (!plan) fprintf(stderr, "label map install: prepare: %s\n", error);
+    CHECK(plan); if (!plan) goto done;
+    /* The map's own row: published privately, not aliased. */
+    served = label_served_row(sh_package_map_plan_compilation(plan), map_name, sizeof(map_name), selected,
+        sizeof(selected), &rows);
+    CHECK(served && served->body && !served->presented && rows == 1 && *map_name);
+    if (!served || !served->body) goto done;
+    map_body = malloc(served->body_length); map_length = served->body_length;
+    if (map_body) memcpy(map_body, served->body, map_length);
+    label_install_package("labelmap-data/overrides/map-label/tough");
+    int prepared = sh_package_map_plan_prepare_inventory(plan, data, error, sizeof(error));
+    if (!prepared || error[0]) fprintf(stderr, "label map install: inventory: %s\n", error);
+    CHECK(prepared && !error[0]); if (!prepared) goto done;
+    int activated = sh_package_runtime_activate_prepared_map(plan, (sh_package_activation_guard){0},
+        label_install_activate, NULL);
+    if (!activated) { sh_package_runtime_error(error, sizeof(error)); fprintf(stderr, "label map install: activation: %s\n", error); }
+    CHECK(activated && label_install_activations == 1 && !label_install_recoveries);
+    if (!activated) goto done;
+    /* While the map is active its own row is served under the same name. */
+    served = label_served_row(sh_package_runtime_acquire(), name, sizeof(name), selected, sizeof(selected), &rows);
+    CHECK(served && !served->presented && rows == 1 && !strcmp(name, map_name));
+    sh_package_runtime_release();
+    /* Only that presentation may differ. A changed body on the served row, a
+     * changed definition the row places, or a row the view does not serve is
+     * not the installed output, and the commit refuses it before its own
+     * transaction. Each is tampered in place, as the conversion case does. */
+    {
+        const sh_package_compilation *current = sh_package_runtime_acquire();
+        sh_compiled_resource *row = (sh_compiled_resource *)label_served_row(current, name, sizeof(name), selected,
+            sizeof(selected), &rows);
+        sh_compiled_resource *def = (sh_compiled_resource *)historical_resource(current,
+            "generated/decls/entitydef/conv/tough.decl");
+        sh_package_runtime_release();
+        CHECK(row && row->body && def && def->body);
+        if (row && row->body && def && def->body) {
+            static const char changed_row[] = "{ inherit = \"rost/parent\"; edit = { entityDef = \"d8rows/speaker\"; } }";
+            unsigned char *body = row->body; size_t length = row->body_length;
+            row->body = (unsigned char *)changed_row; row->body_length = sizeof(changed_row) - 1;
+            label_install_refused(plan, "changed row body", row->engine_path, "served with different content");
+            row->body = body; row->body_length = length;
+            body = def->body; length = def->body_length;
+            char *changed = malloc(length + 1), *health = NULL;
+            if (changed) { memcpy(changed, body, length); changed[length] = 0; health = strstr(changed, "health = 40"); }
+            CHECK(health);
+            if (health) {
+                health[10] = '1'; def->body = (unsigned char *)changed;
+                label_install_refused(plan, "changed definition", def->engine_path, "served with different content");
+                def->body = body;
+            }
+            free(changed);
+            const char *path = row->engine_path;
+            char *elsewhere = _strdup(path);
+            CHECK(elsewhere);
+            if (elsewhere) {
+                elsewhere[strlen(elsewhere) - 1] = 'x'; row->engine_path = elsewhere;
+                label_install_refused(plan, "row not served", path, "(not served)");
+                row->engine_path = path;
+            }
+            free(elsewhere);
+        }
+    }
+    inventory_commit_calls = 0; inventory_commit_failure = 0;
+    int committed = sh_package_runtime_commit_map(plan, commit_inventory, error, sizeof(error));
+    if (!committed) fprintf(stderr, "label map install: commit: %s\n", error);
+    CHECK(committed && inventory_commit_calls == 1);
+    sh_package_map_plan_free(plan); plan = NULL;
+    /* The installed library row: the same name and body, with its alias. */
+    served = label_served_row(sh_package_runtime_library_acquire(), name, sizeof(name), alias, sizeof(alias), &rows);
+    CHECK(served && served->body && rows == 1 && !strcmp(name, map_name) && *alias && map_body &&
+        served->body_length == map_length && !memcmp(served->body, map_body, map_length));
+    sh_package_runtime_release();
+    /* Leaving the map serves the installed row, alias and all. */
+    CHECK(sh_package_runtime_activate_prepared_map(NULL, (sh_package_activation_guard){0}, startup_activation,
+        &(int){0}));
+    served = label_served_row(sh_package_runtime_acquire(), name, sizeof(name), selected, sizeof(selected), &rows);
+    CHECK(served && served->presented && rows == 1 && !strcmp(name, map_name) && !strcmp(selected, alias));
+    sh_package_runtime_release();
+done:
+    free(map_body); sh_package_map_plan_free(plan);
+    sh_package_runtime_test_strings(NULL);
+    sh_package_runtime_test_editor_rows(NULL, 0);
+    sh_package_runtime_test_dispose(); cleanup_resources(data); cleanup_resources(map_root);
+    sh_package_runtime_test_installed_links(0);
+    sh_package_runtime_test_source_readers((sh_decl_registry_source){0}, 0);
+    sh_package_runtime_test_baseline(baseline, NULL);
+    for (size_t i = 0; i < f.count; i++) free(f.regions[i].address);
+}
 /* A published installation that no map load continues (the MPKG gate) folds
  * its packages in as a map-driven installation does: the refresh compiles only
  * the added packages, serves the rest from the retained library and so serves
@@ -6698,6 +6843,7 @@ int main(int argc, char **argv)
     test_label_alias_conversion();
     test_label_alias_exact_install();
     test_label_alias_overlay();
+    test_label_alias_map_install();
     test_editor_presentation();
     test_picker_topology();
     test_selector_shared_retirement();

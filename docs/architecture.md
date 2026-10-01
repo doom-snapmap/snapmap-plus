@@ -1466,7 +1466,11 @@ so a plain package row still converts to native map data without a carrier.
 The row's parents are read as the served roster reads rows
 (`package_editor_rows.c`): in order, since shipped rows may repeat a field, with
 the last-written member effective. Without a native string reservation nothing
-is aliased.
+is aliased. A map's historical context composes its packages together and
+aliases none of their rows, so installing a map's own package from its prompt
+serves the map's unaliased row over the installed one while the map stays
+active. Installation admission therefore compares served resources without
+this display-only text; the installed alias is served once the map is left.
 
 Whether a label needs a qualifier is decided at string publication, because it
 depends on the selected language and every other tile. The runtime lists the
