@@ -379,6 +379,40 @@ int sh_package_editor_frame_slots(const char *type, sh_decl_source text, sh_decl
  * states). 1 with malloc-owned *out, 0 when the text carries none, -1 on
  * failure. */
 int sh_package_editor_strip_slots(const char *type, const char *space, sh_decl_source text, char **out, size_t *length);
+/* A rebased restatement (complete lists: a count and every slot) is read
+ * natively onto its published parents' lists slot by slot, each restated
+ * control keeping any field of the previous occupant it does not name (B3
+ * evidence). Where that would leave a field or header the restatement does
+ * not state, insert before the list (or a page's control list) a statement of
+ * the same list holding only a count of at least 1 that drops that slot and
+ * the ones after it, so the restatement regrows them default-constructed; a
+ * count below 1, which strands what the dropped elements own, is never
+ * inserted. published is the parent chain, nearest first. 1 with
+ * malloc-owned *out, proven to read as stated; 0 when every complete list
+ * already reads as stated (a sparse statement is its author's native patch,
+ * read as written); -1 on allocation failure; -3 when this encoding cannot
+ * prove one: an open product gap (a first slot that would need a count below
+ * 1, a reset marker or a member stated more than once, which are not modelled
+ * yet, or a parent this model does not read), never a judgement of the
+ * input. */
+int sh_package_editor_native_restatement(const char *type, sh_decl_source text,
+    const sh_decl_source *published, size_t published_count, char **out, size_t *length);
+/* 1 when a declaration states some member more than once (natively read
+ * again, in order), 0 when not or when it does not read at all, -1 on
+ * allocation failure. */
+int sh_package_editor_repeats(sh_decl_source text);
+/* The native form of a declaration stating some member more than once: one
+ * statement per member writing what its statements write, each written field
+ * with the value the native reader leaves over parents (the chain its author
+ * saw, nearest first), proven to read the same over them. 1 with malloc-owned
+ * *out; 0 when no member is stated more than once; -1 on allocation failure;
+ * -2 when the text does not read, or its own fields change between a value
+ * and a block over its parents; -3 when no single statement reads the same (a
+ * slot dropped by one count and grown again by a later one below the
+ * inherited count, differing headers, a reset marker) or a parent does not
+ * read. */
+int sh_package_editor_native_form(sh_decl_source text, const sh_decl_source *parents, size_t parent_count,
+    char **out, size_t *length);
 /* 1 when authored, read over the parent texts (nearest first), leaves some
  * inherited editor list's controls at other slots than original does (the
  * layout test the rebase uses), so the children of that declaration would

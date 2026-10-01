@@ -3408,6 +3408,10 @@ static const char *rebound_selector = "{ edit = { propertySheets = { num = 1; it
 static const char *demo_anon_original = "{ inherit = \"demo_parent\"; edit = { target = \"parent-only\"; "
     "propertySheets = { item[0] = { properties = { num = 4; item[2] = { type = \"float\"; } "
     "item[3] = { type = \"float\"; } } } } } }";
+/* A stock child binding its parent's second control to another field by a
+ * sparse patch of slot 1 (like volume/spawn_inhibit_cylinder). */
+static const char *demo_rekey_original = "{ inherit = \"demo_parent\"; edit = { target = \"parent-only\"; "
+    "propertySheets = { item[0] = { properties = { item[1] = { path = \"scale\"; } } } } } }";
 static int contribution_original(void *context, const char *path, unsigned char **body, size_t *length)
 {
     const char *text = NULL;
@@ -3432,6 +3436,11 @@ static int contribution_original(void *context, const char *path, unsigned char 
         text = "{ inherit = \"demo_parent\"; edit = { target = \"parent-only\"; } }";
     else if (!strcmp(path, "generated/decls/snapeditorentitydef/demo_anon.decl"))
         text = demo_anon_original;
+    else if (!strcmp(path, "generated/decls/snapeditorentitydef/demo_rekey.decl"))
+        text = demo_rekey_original;
+    else if (!strcmp(path, "generated/decls/snapeditorentitydef/demo_zero.decl"))
+        text = "{ inherit = \"demo_parent\"; edit = { target = \"parent-only\"; propertySheets = { item[0] = { "
+            "properties = { num = 0; } } } } }";
     if (!text) return library_original(context, path, body, length);
     *length = strlen(text); *body = (unsigned char *)_strdup(text); return *body ? 1 : -1;
 }
@@ -8688,6 +8697,193 @@ static void test_contribution_anonymous_controls(void)
     }
     for (size_t i = 0; i < f->count; i++) free(f->regions[i].address);
 }
+/* Page 0's controls as the native reader leaves them after reading texts in
+ * order (the farthest parent first), independent of the compiler (B3
+ * evidence F2-F6, F10, resize workers): a statement's first count applies
+ * before its items, below 1 only zeroing the count, otherwise keeping the
+ * first min(old, new) slots with the rest empty; an item past the count is
+ * skipped; an item writes only the scalar fields it names. Each control's
+ * fields sorted ("key=value" joined by ','), controls joined by ';'. */
+typedef struct native_control { char keys[12][64], values[12][160]; int count; } native_control;
+static int native_count_of(const sh_decl_node *list, int *count)
+{
+    for (const sh_decl_node *child = list->children; child; child = child->next)
+        if (!strcmp(child->key, "num")) { *count = atoi(child->value ? child->value : "0"); return 1; }
+    return 0;
+}
+static void native_controls(const char *const *texts, size_t text_count, char *out, size_t capacity)
+{
+    native_control *controls = calloc(32, sizeof(*controls));
+    int pages = 0, count = 0;
+    assert(controls);
+    for (size_t t = 0; t < text_count; t++) {
+        sh_decl_node *tree = sh_decl_tree_parse_ordered((sh_decl_source){texts[t], strlen(texts[t])}, NULL, 0);
+        assert(tree);
+        for (const sh_decl_node *edit = tree->children; edit; edit = edit->next) {
+            if (strcmp(edit->key, "edit") || !edit->compound) continue;
+            for (const sh_decl_node *sheet = edit->children; sheet; sheet = sheet->next) {
+                int n, index;
+                if (strcmp(sheet->key, "propertySheets") || !sheet->compound) continue;
+                if (native_count_of(sheet, &n)) {
+                    if (n < 1) pages = 0;
+                    else { if (!pages) { memset(controls, 0, 32 * sizeof(*controls)); count = 0; } pages = n; }
+                }
+                for (const sh_decl_node *page = sheet->children; page; page = page->next) {
+                    if (sscanf_s(page->key, "item[%d]", &index) != 1 || index != 0 || index >= pages || !page->compound) continue;
+                    for (const sh_decl_node *list = page->children; list; list = list->next) {
+                        int slots, j;
+                        if (strcmp(list->key, "properties") || !list->compound) continue;
+                        if (native_count_of(list, &slots)) {
+                            if (slots < 1) count = 0;
+                            else {
+                                assert(slots <= 32);
+                                for (int fresh = count; fresh < slots; fresh++) memset(controls + fresh, 0, sizeof(*controls));
+                                count = slots;
+                            }
+                        }
+                        for (const sh_decl_node *item = list->children; item; item = item->next) {
+                            if (sscanf_s(item->key, "item[%d]", &j) != 1 || j < 0 || j >= count || !item->compound) continue;
+                            for (const sh_decl_node *field = item->children; field; field = field->next) {
+                                native_control *c = controls + j;
+                                int at = 0;
+                                if (field->compound) continue;
+                                while (at < c->count && strcmp(c->keys[at], field->key)) at++;
+                                if (at == c->count) { assert(c->count < 12); c->count++; }
+                                snprintf(c->keys[at], sizeof(c->keys[at]), "%s", field->key);
+                                snprintf(c->values[at], sizeof(c->values[at]), "%s", node_value(field));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        sh_decl_tree_free(tree);
+    }
+    out[0] = 0;
+    for (int j = 0; j < count; j++) {
+        native_control *c = controls + j;
+        for (int a = 0; a < c->count; a++) for (int b = a + 1; b < c->count; b++)
+            if (strcmp(c->keys[b], c->keys[a]) < 0) {
+                char key[64], value[160];
+                memcpy(key, c->keys[a], sizeof(key)); memcpy(c->keys[a], c->keys[b], sizeof(key)); memcpy(c->keys[b], key, sizeof(key));
+                memcpy(value, c->values[a], sizeof(value)); memcpy(c->values[a], c->values[b], sizeof(value));
+                memcpy(c->values[b], value, sizeof(value));
+            }
+        if (j) strcat_s(out, capacity, ";");
+        for (int a = 0; a < c->count; a++) {
+            if (a) strcat_s(out, capacity, ",");
+            strcat_s(out, capacity, c->keys[a]); strcat_s(out, capacity, "="); strcat_s(out, capacity, c->values[a]);
+        }
+    }
+    free(controls);
+}
+static char *served_text(const owners_run *run, const char *name)
+{
+    const sh_compiled_resource *file = named_resource(run->library.compiled, "snapeditorentitydef", name);
+    char *text = file ? malloc(file->body_length + 1) : NULL;
+    if (text) { memcpy(text, file->body, file->body_length); text[file->body_length] = 0; }
+    return text;
+}
+/* The live b3-1-vk inherited-child shape: unrelated packages append controls
+ * without a path to a parent (one a label, one a description) and edit its
+ * second control's description, while a stock child re-keys that control by
+ * a sparse patch of slot 1. Admitted in both orders, the served child, read
+ * natively over the served parent, is exactly what the child's own sparse
+ * text reads there: the edited control keeps its slot and the peer's label,
+ * the additions follow it, and no slot keeps a previous occupant's field.
+ * A package member stating edit and its list more than once composes as its
+ * native form (nobody blamed). A stock child emptying its controls against a
+ * peer's addition is an open product gap: reported, nobody excluded. */
+static void test_contribution_inherited_rekey(void)
+{
+    fixture storage; fixture *f = &storage; setup(f); conductor_reflection(f);
+    sh_decl_registry_source registry = {f, read_memory, (uintptr_t)f->registry, NULL};
+    char found[512], parent_read[2][512], child_read[2][512], stock_read[512];
+    const char *whole = "{ edit = { target = \"parent-only\"; propertySheets = { num = 1; item[0] = { properties = { "
+        "num = %s; item[0] = { path = \"health\"; type = \"float\"; } item[1] = { path = \"speed\"; type = \"float\";%s } "
+        "%s } } } } }";
+    char label_only[512], description_only[512], relabel[512];
+    snprintf(label_only, sizeof(label_only), whole, "3", "", "item[2] = { displayNameTag = \"#str_size\"; }");
+    snprintf(description_only, sizeof(description_only), whole, "3", "", "item[2] = { descriptionTag = \"#str_size_desc\"; }");
+    snprintf(relabel, sizeof(relabel), whole, "2", " descriptionTag = \"#str_label\";", "");
+    for (int order = 0; order < 2; order++) {
+        const char *one = order ? "z-one" : "a-one", *two = order ? "y-two" : "b-two", *label = order ? "x-label" : "c-label";
+        registration_root("inherited-rekey");
+        owners_package(one); owners_file(one, "snapeditorentitydef/demo_parent.decl", label_only);
+        owners_package(two); owners_file(two, "snapeditorentitydef/demo_parent.decl", description_only);
+        owners_package(label); owners_file(label, "snapeditorentitydef/demo_parent.decl", relabel);
+        owners_package("m-copy"); owners_file("m-copy", "snapeditorentitydef/demo_rekey.decl", demo_rekey_original);
+        sh_package_sources *sources = sh_package_sources_scan(root, found, sizeof(found)); assert(sources);
+        owners_run run = {0};
+        owners_compile(f, registry, sources, NULL, 1, &run);
+        owners_found(sources, &run, found, sizeof(found));
+        if (!run.ok || found[0]) fprintf(stderr, "inherited rekey %d: ok=%d found=%s %s\n", order, run.ok, found, run.error);
+        assert(run.ok && !found[0]);
+        char *parent = served_text(&run, "demo_parent"), *child = served_text(&run, "demo_rekey");
+        assert(parent && child);
+        const char *served[2] = {parent, child}, *stock[2] = {parent, demo_rekey_original}, *alone[1] = {parent};
+        native_controls(alone, 1, parent_read[order], sizeof(parent_read[0]));
+        native_controls(served, 2, child_read[order], sizeof(child_read[0]));
+        native_controls(stock, 2, stock_read, sizeof(stock_read));
+        if (strcmp(child_read[order], stock_read))
+            fprintf(stderr, "inherited rekey %d: served %s\nstock reads %s\nchild %s\n", order, child_read[order], stock_read, child);
+        assert(!strcmp(child_read[order], stock_read));
+        assert(!strncmp(child_read[order], "path=health,type=float;descriptionTag=#str_label,path=scale,type=float;", 70));
+        assert(strstr(child_read[order], ";displayNameTag=#str_size") && strstr(child_read[order], ";descriptionTag=#str_size_desc"));
+        free(parent); free(child);
+        owners_done(&run); sh_package_sources_free(sources); cleanup(); assert(!failures);
+    }
+    assert(!strcmp(parent_read[0], parent_read[1]) && !strcmp(child_read[0], child_read[1]));
+    /* Repeated statements: a package restating demo_child with edit and its
+     * list stated twice, over a relaid parent, composes as its native form. */
+    {
+        const char *repeated = "{ inherit = \"demo_parent\"; edit = { target = \"parent-only\"; propertySheets = { item[0] = { "
+            "properties = { item[0] = { descriptionTag = \"#str_h1\"; } } } } } edit = { propertySheets = { item[0] = { "
+            "properties = { item[0] = { descriptionTag = \"#str_h2\"; } item[1] = { descriptionTag = \"#str_s\"; } } } } } }";
+        registration_root("inherited-repeated");
+        owners_package("m-relay"); owners_file("m-relay", "snapeditorentitydef/demo_parent.decl", owners_layout);
+        owners_package("r-repeat"); owners_file("r-repeat", "snapeditorentitydef/demo_child.decl", repeated);
+        sh_package_sources *sources = sh_package_sources_scan(root, found, sizeof(found)); assert(sources);
+        owners_run run = {0};
+        owners_compile(f, registry, sources, NULL, 1, &run);
+        owners_found(sources, &run, found, sizeof(found));
+        if (!run.ok || found[0]) fprintf(stderr, "inherited repeated: ok=%d found=%s %s\n", run.ok, found, run.error);
+        assert(run.ok && !found[0]);
+        char *parent = served_text(&run, "demo_parent"), *child = served_text(&run, "demo_child");
+        assert(parent && child);
+        const char *served[2] = {parent, child};
+        native_controls(served, 2, child_read[0], sizeof(child_read[0]));
+        if (strcmp(child_read[0], "path=armor,type=float;descriptionTag=#str_h2,path=health,type=float;"
+                "descriptionTag=#str_s,path=speed,type=float"))
+            fprintf(stderr, "inherited repeated: %s\n%s\n", child_read[0], child);
+        assert(!strcmp(child_read[0], "path=armor,type=float;descriptionTag=#str_h2,path=health,type=float;"
+            "descriptionTag=#str_s,path=speed,type=float"));
+        free(parent); free(child);
+        owners_done(&run); sh_package_sources_free(sources); cleanup(); assert(!failures);
+    }
+    /* A stock child emptying its controls and a peer's addition: the composed
+     * child keeps the addition (a removal never erases a peer's addition),
+     * which this encoding cannot serve without a stranding count. The
+     * candidate reports the gap and excludes nobody. */
+    {
+        char added[512];
+        snprintf(added, sizeof(added), whole, "3", "", "item[2] = { displayNameTag = \"#str_size\"; }");
+        registration_root("inherited-zero");
+        owners_package("a-add"); owners_file("a-add", "snapeditorentitydef/demo_parent.decl", added);
+        owners_package("m-copy"); owners_file("m-copy", "snapeditorentitydef/demo_zero.decl",
+            "{ inherit = \"demo_parent\"; edit = { target = \"parent-only\"; propertySheets = { item[0] = { "
+            "properties = { num = 0; } } } } }");
+        sh_package_sources *sources = sh_package_sources_scan(root, found, sizeof(found)); assert(sources);
+        owners_run run = {0};
+        owners_compile(f, registry, sources, NULL, 1, &run);
+        if (run.ok || run.invalid != SIZE_MAX || run.unserved != SIZE_MAX || run.more.count || !strstr(run.error, "proven"))
+            fprintf(stderr, "inherited zero: ok=%d invalid=%zu unserved=%zu more=%zu %s\n", run.ok, run.invalid, run.unserved,
+                run.more.count, run.error);
+        assert(!run.ok && run.invalid == SIZE_MAX && run.unserved == SIZE_MAX && !run.more.count && strstr(run.error, "proven"));
+        owners_done(&run); sh_package_sources_free(sources); cleanup(); assert(!failures);
+    }
+    for (size_t i = 0; i < f->count; i++) free(f->regions[i].address);
+}
 static void test_contribution_owners_together(void)
 {
     fixture storage; fixture *f = &storage; setup(f); conductor_reflection(f);
@@ -9124,6 +9320,7 @@ int main(void)
     test_editor_rebase_scopes(&f, registry);
     test_contribution_owners_together();
     test_contribution_anonymous_controls();
+    test_contribution_inherited_rekey();
     test_contribution_stale_reference();
     test_native_original_gaps(&f, registry);
     test_material_path(&f, registry);

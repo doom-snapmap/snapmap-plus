@@ -1791,6 +1791,28 @@ static void pl_chain_free(pl_chain *chain)
 /* Parent texts, nearest first: published follows the bound (possibly composed)
  * parents; otherwise the original parents the unit's author saw. */
 static int pl_parent_chain(pl_contributions *c, size_t unit, sh_decl_source own, int published,
+    pl_chain *out, int *kind, char *error, size_t capacity);
+/* A rebased restatement is read natively over its published parents slot by
+ * slot; where a restated control would keep a field of the slot's previous
+ * occupant, it is respelled to cut the list first
+ * (sh_package_editor_native_restatement). *text is replaced when respelled.
+ * 1 done, 0 failed (*kind and error set). */
+static int pl_native_restatement(const char *family, sh_decl_source *text, const pl_chain *published,
+    int *kind, char *error, size_t capacity)
+{
+    char *exact = NULL; size_t exact_length = 0;
+    int encoded = sh_package_editor_native_restatement(family, *text, published->texts, published->count,
+        &exact, &exact_length);
+    if (encoded == -1) { *kind = SH_PACKAGE_EDITOR_FAILURE_ENVIRONMENT; snprintf(error, capacity, "editor contribution allocation failed"); return 0; }
+    if (encoded < 0) {
+        *kind = SH_PACKAGE_EDITOR_FAILURE_COVERAGE;
+        snprintf(error, capacity, "a restated editor list could not be proven to read natively as it states");
+        return 0;
+    }
+    if (encoded) { free((char *)text->text); *text = (sh_decl_source){exact, exact_length}; }
+    return 1;
+}
+static int pl_parent_chain(pl_contributions *c, size_t unit, sh_decl_source own, int published,
     pl_chain *out, int *kind, char *error, size_t capacity)
 {
     const char *family = c->inputs.units[unit].family;
@@ -2012,6 +2034,36 @@ static int pl_contribution_group(pl_build *b, const sh_package_sources *sources,
             snprintf(error, capacity, "editor definition text cannot be read"); goto failed;
         }
     }
+    /* A member stating a field, block or list more than once is read again,
+     * in order, as the native reader reads it (B3 evidence F2, F10): it
+     * composes as its native form, one statement per member that reads the
+     * same over the parents its author saw. One with no such form is a gap in
+     * this model, never its author's defect; one whose own fields change
+     * between a value and a block over its parents is its own text's. */
+    for (size_t i = 0; phase != 2 && i < count; i++) {
+        pl_chain authored_chain = {0};
+        char *form = NULL; size_t form_length = 0;
+        int repeats = sh_package_editor_repeats(texts[i]), formed;
+        if (repeats < 0) { snprintf(error, capacity, "editor contribution allocation failed"); goto failed; }
+        if (!repeats) continue;
+        if (parents[i] && !pl_parent_chain(c, members[i], texts[i], 0, &authored_chain, &kind, error, capacity)) {
+            culprit = members[i]; goto failed;
+        }
+        formed = sh_package_editor_native_form(texts[i], authored_chain.texts, authored_chain.count, &form, &form_length);
+        pl_chain_free(&authored_chain);
+        if (formed == -1) { kind = SH_PACKAGE_EDITOR_FAILURE_ENVIRONMENT; snprintf(error, capacity, "editor contribution allocation failed"); goto failed; }
+        if (formed == -2) {
+            kind = SH_PACKAGE_EDITOR_FAILURE_SOURCE; culprit = members[i];
+            snprintf(error, capacity, "the declaration's own fields change between a value and a block over its parents");
+            goto failed;
+        }
+        if (formed < 0) {
+            kind = SH_PACKAGE_EDITOR_FAILURE_COVERAGE;
+            snprintf(error, capacity, "a member stated more than once reads natively as no single statement does");
+            goto failed;
+        }
+        if (formed) { free((char *)texts[i].text); texts[i] = (sh_decl_source){form, form_length}; }
+    }
 #ifdef SH_PACKAGE_LIBRARY_TESTING
     if ((culprit = pl_test_defect(b, sources, members, count)) != SIZE_MAX) {
         kind = SH_PACKAGE_EDITOR_FAILURE_SOURCE; snprintf(error, capacity, "test contribution defect"); goto failed;
@@ -2180,6 +2232,14 @@ rebase:
                 if (dropped < 0) { snprintf(error, capacity, "editor contribution allocation failed"); goto failed; }
                 if (dropped) { free(composed[i]); body = composed[i] = plain; length = plain_length; }
             }
+            if (body && any_rebased && published.count) {
+                sh_decl_source restated = {body, length};
+                if (!pl_native_restatement(input->family, &restated, &published, &kind, error, capacity)) {
+                    if (restated.text != body) free((char *)restated.text);
+                    goto failed;
+                }
+                body = composed[i] = (char *)restated.text; length = restated.length;
+            }
         }
         if (!body) {
             kind = failure.kind;
@@ -2221,6 +2281,17 @@ rebase:
         int dropped = sh_package_editor_strip_slots(input->family, space, texts[i], &plain, &plain_length);
         if (dropped < 0) { snprintf(error, capacity, "editor contribution allocation failed"); goto failed; }
         if (dropped) { free((char *)texts[i].text); texts[i] = (sh_decl_source){plain, plain_length}; }
+        {
+            pl_chain own = {0};
+            const pl_chain *chain = included[i] ? &published : &own;
+            int restated;
+            if (!included[i] && !pl_parent_chain(c, members[i], texts[i], 1, &own, &kind, error, capacity)) {
+                culprit = members[i]; goto failed;
+            }
+            restated = !chain->count || pl_native_restatement(input->family, texts + i, chain, &kind, error, capacity);
+            pl_chain_free(&own);
+            if (!restated) goto failed;
+        }
         if (!pl_contribution_stage(b, sources, members[i], texts[i].text, texts[i].length, NULL, 0, pending + i, error, capacity))
             goto failed;
     }
@@ -5253,15 +5324,19 @@ done:
  * which every semantic reader uses, and every other member stay as they are. */
 static int pl_label_decorate(sh_compiled_resource *row, const char *key)
 {
-    sh_decl_node *tree = sh_decl_tree_parse((sh_decl_source){(const char *)row->body, row->body_length}, NULL, 0);
+    /* Ordered: a served row may state a list twice (a native restatement),
+     * and the native reader lets the last edit block and the last label win. */
+    sh_decl_node *tree = sh_decl_tree_parse_ordered((sh_decl_source){(const char *)row->body, row->body_length}, NULL, 0);
     size_t length = 0, quoted_length = strlen(key) + 3;
     char *quoted = malloc(quoted_length), *text = NULL;
     int ok = 0;
     if (!tree || !quoted) goto done;
     snprintf(quoted, quoted_length, "\"%s\"", key);
-    sh_decl_node *edit = (sh_decl_node *)sh_decl_tree_member(tree, "edit"), *member;
+    sh_decl_node *edit = NULL, *member = NULL;
+    for (sh_decl_node *field = tree->children; field; field = field->next) if (!strcmp(field->key, "edit")) edit = field;
     if (!edit || !edit->compound) goto done;
-    member = (sh_decl_node *)sh_decl_tree_member(edit, "displayNameTag");
+    for (sh_decl_node *field = edit->children; field; field = field->next)
+        if (!strcmp(field->key, "displayNameTag")) member = field;
     if (member) {
         if (member->compound) goto done;
         free(member->value); member->value = quoted; quoted = NULL;
