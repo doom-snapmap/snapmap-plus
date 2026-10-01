@@ -5603,6 +5603,10 @@ static void test_label_alias_map_install(void)
     sh_package_string_reservations strings = {label_conversion_reserve, &reserved, 4, label_conversion_global};
     sh_package_map_plan *plan = NULL;
     const sh_compiled_resource *served;
+    sh_package_occurrence_snapshot *document = NULL, *world = NULL;
+    sh_package_occurrence_tracker *tracker = sh_package_occurrence_tracker_create();
+    sh_package_occurrence_key live = {1, 0x1000}, clipboard = {2, 0x2000};
+    uintptr_t object = live.object;
     create("labelmap-data/overrides", NULL);
     label_install_package("labelmap-map/overrides/tough");
     snprintf(data, sizeof(data), "%s/labelmap-data", root);
@@ -5679,20 +5683,67 @@ static void test_label_alias_map_install(void)
     int committed = sh_package_runtime_commit_map(plan, commit_inventory, error, sizeof(error));
     if (!committed) fprintf(stderr, "label map install: commit: %s\n", error);
     CHECK(committed && inventory_commit_calls == 1);
-    sh_package_map_plan_free(plan); plan = NULL;
     /* The installed library row: the same name and body, with its alias. */
     served = label_served_row(sh_package_runtime_library_acquire(), name, sizeof(name), alias, sizeof(alias), &rows);
     CHECK(served && served->body && rows == 1 && !strcmp(name, map_name) && *alias && map_body &&
         served->body_length == map_length && !memcmp(served->body, map_body, map_length));
     sh_package_runtime_release();
-    /* Leaving the map serves the installed row, alias and all. */
-    CHECK(sh_package_runtime_activate_prepared_map(NULL, (sh_package_activation_guard){0}, startup_activation,
-        &(int){0}));
+    /* The editor's copy of the map's use stays on the clipboard after its live
+     * occurrence is gone. Its lease retains the map's historical context, the
+     * unaliased row included, when the map is left. */
+    {
+        const char *json = "{\"variables\":{\"allocCount\":[0,0,0,0,0],\"string\":[]},"
+            "\"entities\":[{\"targetType\":\"idDeclEntityDef\",\"inherit\":\"conv/tough\"}]}";
+        size_t n = 0, captured_length = 0;
+        char *rebound = sh_package_map_plan_rebind(plan, NULL, json, strlen(json), &n, error, sizeof(error));
+        char *captured = rebound ? sh_package_runtime_capture_document(plan, NULL, NULL, 0, rebound, n,
+            &captured_length, &document, NULL, NULL, error, sizeof(error)) : NULL;
+        if (!captured) fprintf(stderr, "label map install: capture: %s\n", error);
+        CHECK(captured && document);
+        if (rebound) HeapFree(GetProcessHeap(), 0, rebound);
+        free(captured);
+        if (!document) goto done;
+    }
+    CHECK(sh_package_occurrence_attach_snapshot(tracker, live.namespace_id, &object, 1, document, &world,
+        error, sizeof(error)));
+    CHECK(sh_package_occurrence_copy(tracker, clipboard, live));
+    sh_package_occurrence_erase_namespace(tracker, live.namespace_id);
+    sh_package_occurrence_release(document); document = NULL;
+    sh_package_occurrence_release(world); world = NULL;
+    /* A retained row whose meaning differs, not only its label alias, still
+     * cannot be served under the installed one. */
+    {
+        static const char changed_row[] = "{ inherit = \"rost/parent\"; edit = { entityDef = \"d8rows/speaker\"; } }";
+        sh_compiled_resource *row = (sh_compiled_resource *)label_served_row(sh_package_map_plan_compilation(plan),
+            name, sizeof(name), selected, sizeof(selected), &rows);
+        CHECK(row && row->body);
+        if (row && row->body) {
+            unsigned char *body = row->body; size_t length = row->body_length;
+            row->body = (unsigned char *)changed_row; row->body_length = sizeof(changed_row) - 1;
+            int refused = !sh_package_runtime_activate_prepared_map(NULL, (sh_package_activation_guard){0},
+                startup_activation, &(int){0});
+            sh_package_runtime_error(error, sizeof(error));
+            int right = refused && strstr(error, row->engine_path) && strstr(error, "different meaning");
+            if (!right) fprintf(stderr, "label map install: changed retained row: refused %d: %s\n", refused, error);
+            CHECK(right);
+            row->body = body; row->body_length = length;
+        }
+    }
+    sh_package_map_plan_free(plan); plan = NULL;
+    /* Leaving the map serves the installed row, alias and all, the retained
+     * use included. */
+    int left = sh_package_runtime_activate_prepared_map(NULL, (sh_package_activation_guard){0}, startup_activation,
+        &(int){0});
+    if (!left) { sh_package_runtime_error(error, sizeof(error)); fprintf(stderr, "label map install: leave: %s\n", error); }
+    CHECK(left && !sh_package_runtime_has_map_provider());
     served = label_served_row(sh_package_runtime_acquire(), name, sizeof(name), selected, sizeof(selected), &rows);
     CHECK(served && served->presented && rows == 1 && !strcmp(name, map_name) && !strcmp(selected, alias));
     sh_package_runtime_release();
+    sh_package_occurrence_erase(tracker, clipboard);
 done:
     free(map_body); sh_package_map_plan_free(plan);
+    sh_package_occurrence_release(world); sh_package_occurrence_release(document);
+    sh_package_occurrence_tracker_free(tracker);
     sh_package_runtime_test_strings(NULL);
     sh_package_runtime_test_editor_rows(NULL, 0);
     sh_package_runtime_test_dispose(); cleanup_resources(data); cleanup_resources(map_root);

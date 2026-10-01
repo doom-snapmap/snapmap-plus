@@ -1469,8 +1469,11 @@ the last-written member effective. Without a native string reservation nothing
 is aliased. A map's historical context composes its packages together and
 aliases none of their rows, so installing a map's own package from its prompt
 serves the map's unaliased row over the installed one while the map stays
-active. Installation admission therefore compares served resources without
-this display-only text; the installed alias is served once the map is left.
+active. Installation admission and retained occurrences (a clipboard copy of
+the map's use, for example) therefore compare served resources without this
+display-only text: the installed alias is served once the map is left, and the
+change of served text is still published. An increment and a palette selector
+still treat a different alias as a different resource.
 
 Whether a label needs a qualifier is decided at string publication, because it
 depends on the selected language and every other tile. The runtime lists the

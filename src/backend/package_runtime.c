@@ -2677,6 +2677,21 @@ static int pr_resource_equal(const sh_package_compilation *a, const sh_compiled_
     int ok = sh_package_compilation_changes(&av, &bv, &changes, error, capacity);
     int equal = ok && !changes.count; sh_package_changes_free(&changes); return ok ? equal : -1;
 }
+/* One output whatever its presented text: compared as pr_resource_equal does
+ * (declaration identity, sound events, body bytes or the sealed/cached payload
+ * identity), but presented text is display-only by contract
+ * (package_compiler.h), written only by the library's toybox label alias. The
+ * library aliases an installed row; a map's own historical context, which
+ * composes the map's packages together, does not. Installation admission and
+ * retained occurrences compare that way; whichever copy the view serves keeps
+ * its own text, and publication still reports the text it changes. */
+static int pr_output_equal(const sh_package_compilation *a, const sh_compiled_resource *ar,
+    const sh_package_compilation *b, const sh_compiled_resource *br, char *error, size_t capacity)
+{
+    sh_compiled_resource left = *ar, right = *br;
+    left.presented = right.presented = NULL; left.presented_length = right.presented_length = 0;
+    return pr_resource_equal(a, &left, b, &right, error, capacity);
+}
 /* Active native capture only. Portable map rebinding still resolves through
  * the prepared context catalog. An old spelling is authoritative here only
  * while every selected source has a live lease and every bound native file is
@@ -2802,7 +2817,13 @@ static int pr_view_retained(pr_provider *view, const pr_provider *provider,
         const sh_compiled_resource *existing = sh_package_compilation_find(view->compiled, resource->engine_path);
         size_t at = existing ? (size_t)(existing - view->compiled->resources) : count;
         if (existing) {
-            int equal = pr_resource_equal(view->compiled, existing, provider->compiled, resource, error, capacity);
+            /* A retained occurrence keeps its meaning under the copy the view
+             * already serves, label alias or not. An increment still sees a
+             * changed alias (an exact copy recompiles the library) and a
+             * selector still borrows its old text. */
+            int equal = mode == PR_RETAIN_OCCURRENCES ?
+                pr_output_equal(view->compiled, existing, provider->compiled, resource, error, capacity) :
+                pr_resource_equal(view->compiled, existing, provider->compiled, resource, error, capacity);
             if (equal < 0) goto done;
             if (!equal) {
                 if (mode == PR_RETAIN_SELECTORS) {
@@ -3831,21 +3852,8 @@ static int pr_plan_library_current(const sh_package_map_plan *plan, char *error,
     return 0;
 }
 
-/* Admission compares a served resource with the installed output as
- * pr_resource_equal does (declaration identity, sound events, body bytes or
- * the sealed/cached payload identity), except presented text, which is
- * display-only by contract (package_compiler.h): only the library's toybox
- * label alias writes it. The library aliases an installed row; a map's own
- * historical context, which composes the map's packages together, does not,
- * and while the map is active its resource is served over the library's at
- * that name. The installed alias is served once the map is left. */
-static int pr_output_equal(const sh_package_compilation *serving, const sh_compiled_resource *current,
-    const sh_package_compilation *authored, const sh_compiled_resource *resource, char *error, size_t capacity)
-{
-    sh_compiled_resource a = *current, b = *resource;
-    a.presented = b.presented = NULL; a.presented_length = b.presented_length = 0;
-    return pr_resource_equal(serving, &a, authored, &b, error, capacity);
-}
+/* While a map is active its resource is served over the library's at the
+ * same name, so the installed row's alias is served once the map is left. */
 static int pr_plan_authoring_served(const sh_package_map_plan *plan,
     const sh_package_compilation *serving, char *error, size_t capacity)
 {
