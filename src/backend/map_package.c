@@ -1617,6 +1617,9 @@ int sh_mpkg_activation_ready(void)
     mpkg_lock();
     g_last_refusal[0] = 0; captured = g_boot_captured == 1; installing = g_install.active;
     mpkg_unlock();
+    if (sh_package_runtime_serving_disabled()) {
+        mpkg_set_refusal("package serving is disabled for this launch (sh_user_overrides 0)"); return 0;
+    }
     if (!captured || installing ||
         InterlockedCompareExchange(&g_consent_state, 0, 0) != MPKG_CONSENT_IDLE) {
         mpkg_set_refusal("package startup, consent or installation is still pending"); return 0;
@@ -1838,7 +1841,14 @@ int sh_mpkg_gate(const char *json, size_t len)
     size_t count;
     if (!json || !len || !sh_shard_find(json, len, MPKG_HEADER_MAGIC, MPKG_MAGIC_LEN)) return 1;
     count = mpkg_scan_internal(json, len, &decls);
-    if (count == SIZE_MAX || count > SIZE_MAX / sizeof(*installed) ||
+    if (count && count != SIZE_MAX && sh_package_runtime_serving_disabled()) {
+        /* Nothing is served this launch (sh_user_overrides 0): a map that
+         * declares packages is refused as such and never offered an install. */
+        static const char reason[] =
+            "this map uses packages, and package serving is disabled for this launch (sh_user_overrides 0)";
+        mpkg_set_refusal(reason);
+        sh_mpkg_report_error(reason);
+    } else if (count == SIZE_MAX || count > SIZE_MAX / sizeof(*installed) ||
         (count && !(installed = (int *)calloc(count, sizeof(*installed))))) {
         mpkg_set_refusal("cannot allocate the complete map package inventory");
     } else result = !count || mpkg_gate_declared(json, len, decls, count, installed);

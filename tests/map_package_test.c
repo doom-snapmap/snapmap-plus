@@ -24,6 +24,9 @@ const sh_package_compilation *sh_package_runtime_library_acquire(void) { return 
 void sh_package_runtime_release(void) {}
 int sh_package_runtime_ready(void) { return g_compile_ready; }
 int sh_package_runtime_admission_ready(void) { return g_compile_ready && g_registration_ready; }
+/* sh_user_overrides off for this launch: nothing is served. */
+static int g_serving_disabled;
+int sh_package_runtime_serving_disabled(void) { return g_serving_disabled; }
 int sh_decl_server_registration_succeeded(void)
 {
     return g_registration_ready;
@@ -931,6 +934,43 @@ static void test_consent_retirement(const char *root, const char *overrides)
     g_dialog_idle = 0;
 }
 
+/* With user packages off for this launch (sh_user_overrides 0) a map that
+ * declares packages is refused as such, whether its package is missing or
+ * already installed: no installation is offered, staged or published, and the
+ * player is told the reason, not a failed compile. Readiness reports the same
+ * reason. A map declaring nothing passes. */
+static void test_serving_disabled_gate(const char *root, const char *overrides)
+{
+    static const char vanilla[] = "{\"variables\":{\"string\":[]}}";
+    char package[MAX_PATH];
+    join(package, sizeof package, overrides, FIX_PKG_ID);
+    for (int installed = 0; installed <= 1; installed++) {
+        if (installed) {
+            /* Installed by an earlier launch with packages on. */
+            sh_mpkg_test_reset(); sh_mpkg_boot_capture(root);
+            g_dialog_idle = 1; g_dialog_asks = g_rearm_requests = 0;
+            g_dialog_answer = SH_ENGINE_DIALOG_PENDING;
+            CHECK(!sh_mpkg_gate(fix_map_happy, fix_map_happy_len)); sh_mpkg_consent_poll();
+            g_dialog_answer = SH_ENGINE_DIALOG_ACCEPTED; sh_mpkg_consent_poll();
+            CHECK(g_rearm_requests == 1 && installed_package(root, FIX_PKG_ID, package));
+            complete_install();
+        }
+        sh_mpkg_test_reset(); sh_mpkg_boot_capture(root);
+        g_serving_disabled = 1; g_dialog_idle = 1; g_dialog_asks = g_rearm_requests = 0;
+        g_dialog_answer = SH_ENGINE_DIALOG_PENDING; g_dialog_text[0] = 0;
+        CHECK(!sh_mpkg_gate(fix_map_happy, fix_map_happy_len));
+        CHECK(strstr(sh_mpkg_test_last_refusal(), "serving is disabled") != NULL);
+        for (int i = 0; i < 5; i++) sh_mpkg_consent_poll();
+        CHECK(g_dialog_asks == 1 && strstr(g_dialog_text, "serving is disabled") && !strstr(g_dialog_text, "Install"));
+        CHECK(!g_rearm_requests && !sh_mpkg_test_session_installed_count());
+        CHECK(!!dir_exists(package) == installed);
+        CHECK(!sh_mpkg_activation_ready() && strstr(sh_mpkg_test_last_refusal(), "serving is disabled"));
+        CHECK(sh_mpkg_gate(vanilla, sizeof(vanilla) - 1));
+        g_serving_disabled = 0;
+    }
+    remove_tree(package); g_dialog_idle = 0;
+}
+
 static void test_private_map_context(const char *root)
 {
     char error[512], folder[MAX_PATH], package[MAX_PATH], id[SH_PACKAGE_ID_CAP];
@@ -1414,6 +1454,7 @@ int main(int argc, char **argv)
     test_delivered_variants(root);
     test_refreshed_author_sources(root);
     test_consent_retirement(root, overrides);
+    test_serving_disabled_gate(root, overrides);
 
     /* ---- scan: the no-shard fast path ---------------------------------- */
     n = sh_mpkg_scan("{\"variables\":{\"string\":[]}}", 27, decls, 16);

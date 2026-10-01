@@ -23,7 +23,13 @@ int sh_rawmap_defers_install_commit(void) { return map_pending || sh_prefab_impo
 int sh_overrides_get_root(char *out, size_t capacity) { return strcpy_s(out, capacity, "test-root") == 0; }
 sh_mpkg_context *sh_mpkg_context_open(const char *root, const char *json, size_t length, char *error, size_t capacity)
 { (void)error; (void)capacity; assert(!strcmp(root, "test-root") && length == strlen(json)); return (void *)&source_object; }
-void sh_mpkg_context_retire(sh_mpkg_context **context) { assert(*context == (void *)&source_object); source_releases++; *context = NULL; }
+void sh_mpkg_context_retire(sh_mpkg_context **context)
+{ if (!*context) return; assert(*context == (void *)&source_object); source_releases++; *context = NULL; }
+/* sh_user_overrides off for this launch; carried package content in the prefab. */
+static int serving_off, scan_packages, carrier_bindings, carrier_deliveries;
+int sh_package_runtime_serving_disabled(void) { return serving_off; }
+size_t sh_mpkg_scan(const char *json, size_t length, sh_mpkg_decl *out, size_t capacity)
+{ (void)json; (void)length; (void)out; (void)capacity; return (size_t)scan_packages; }
 int sh_package_document_bind(const char *root, const sh_mpkg_context *sources, char **json, size_t *length,
     sh_package_map_plan **plan, char *error, size_t capacity)
 {
@@ -34,15 +40,20 @@ int sh_package_document_bind(const char *root, const sh_mpkg_context *sources, c
 }
 void sh_package_map_plan_free(sh_package_map_plan *plan) { if (plan) { assert(plan == (void *)&plan_object); plan_releases++; } }
 int sh_prefab_carrier_read(const char *json, size_t length, sh_prefab_carrier *out, char *error, size_t capacity)
-{ (void)error; (void)capacity; out->native_json = _strdup(json); out->native_length = length; return out->native_json != NULL; }
+{
+    (void)error; (void)capacity;
+    out->bindings_present = carrier_bindings != 0; out->bindings.binding_count = carrier_bindings > 0;
+    out->deliveries_present = carrier_deliveries;
+    out->native_json = _strdup(json); out->native_length = length; return out->native_json != NULL;
+}
 void sh_prefab_carrier_free(sh_prefab_carrier *value) { free(value->native_json); memset(value, 0, sizeof(*value)); }
 char *sh_package_runtime_capture_document(const sh_package_map_plan *plan, const sh_package_provenance *saved,
     const sh_package_bundle_binding *additional, size_t count, const char *json, size_t length,
     size_t *output_length, sh_package_occurrence_snapshot **ownership, struct sh_mpkg_used **deliveries,
     size_t *delivery_count, char *error, size_t capacity)
 {
-    (void)saved; (void)additional; (void)count; (void)deliveries; (void)delivery_count; (void)error; (void)capacity;
-    assert(plan == (with_plan ? (void *)&plan_object : NULL)); captures++;
+    (void)additional; (void)count; (void)deliveries; (void)delivery_count; (void)error; (void)capacity;
+    assert(plan == (with_plan ? (void *)&plan_object : NULL) && (!serving_off || !saved)); captures++;
     if (!capture_ok) return NULL;
     *ownership = (void *)&owner_object; *output_length = length; event('C'); return _strdup(json);
 }
@@ -83,10 +94,12 @@ int sh_mpkg_activation_commit(char *error, size_t capacity)
 void sh_mpkg_report_error(const char *message) { assert(message && *message); reports++; }
 int sh_package_map_plan_prepare_inventory(sh_package_map_plan *plan, const char *root, char *error, size_t capacity)
 { (void)error; (void)capacity; assert(plan == (void *)&plan_object && !strcmp(root, "test-root")); inventories++; event('I'); return inventory_ok; }
+static const char *expected_native;
 int sh_apply_prefab_stage_prepare(void *editor, const char *json, const sh_package_occurrence_snapshot *ownership,
     int place, sh_apply_prefab_stage **out, char *error, size_t capacity)
 {
     (void)error; (void)capacity; assert(editor == &editor_object && json && ownership == (void *)&owner_object && place == expected_place);
+    assert(!expected_native || !strcmp(json, expected_native));
     preparations++; event('P'); if (prepare_status) *out = (void *)&stage_object; return prepare_status;
 }
 int sh_apply_prefab_stage_finalize(sh_apply_prefab_stage **stage, int (*commit)(char *, size_t), char *error, size_t capacity)
@@ -126,6 +139,7 @@ static void reset(void)
     prepare_status = finalize_status = abort_status = 1; missing_resources = 0; sync_answer = 99;
     prompts = cancels = commits = inventories = captures = preparations = finalizations = aborts = reports = 0;
     source_releases = plan_releases = owner_releases = logs = maintenance = 0; events[0] = 0;
+    serving_off = scan_packages = carrier_bindings = carrier_deliveries = 0; expected_native = NULL;
 }
 static void request(void) { assert(sh_prefab_import_request(&editor_object, "{}", 2, 1)); assert(sh_prefab_import_pending()); }
 static void poll(void) { sh_prefab_import_poll(&editor_object); }
@@ -193,5 +207,48 @@ int main(void)
     reset(); assert(!sh_prefab_import_request(&editor_object, "\0", 1, 1));
     assert(!sh_prefab_import_request(&other_map, "{}", 2, 1));
     poll(); assert(maintenance == 1);
+    /* User packages off for this launch: a prefab without package content (an
+     * empty ownership envelope included) is placed natively, captured whole,
+     * staged and finalized, with no binding, admission, readiness or install.
+     * Carried bindings, deliveries or package shards are refused with the reason
+     * and nothing is captured or staged. A failed native stage is rolled back
+     * before the request ends, again on later polls until the rollback finishes. */
+    for (int envelope = 0; envelope <= 1; envelope++) {
+        reset(); serving_off = 1; with_plan = 0; ready = 0; carrier_bindings = envelope ? -1 : 0;
+        request(); poll();
+        assert(!g_import && !strcmp(events, "CPF") && logs == 1 && !reports && !source_releases);
+        assert(captures == 1 && owner_releases == 1 && !prompts && !inventories && !commits && !cancels);
+    }
+    {
+        /* The native document is staged byte for byte, strings included. */
+        static const char text[] = "{\"name\":\"caf\xc3\xa9 \\\"q\\\" \\\\ end\"}";
+        reset(); serving_off = 1; with_plan = 0; expected_native = text;
+        assert(sh_prefab_import_request(&editor_object, text, sizeof(text) - 1, 1)); poll();
+        assert(!g_import && !strcmp(events, "CPF") && preparations == 1 && !reports);
+    }
+    for (int carried = 0; carried < 3; carried++) {
+        reset(); serving_off = 1; with_plan = 0;
+        if (carried == 0) carrier_bindings = 1; else if (carried == 1) carrier_deliveries = 1; else scan_packages = 1;
+        request(); poll();
+        assert(!g_import && !events[0] && reports == 1 && !captures && !preparations && !prompts);
+    }
+    /* A deferred rollback (0) and a quarantined one (-1) keep the stage and
+     * sources, report once, retry quietly, refuse new imports with the reason,
+     * and clean up normally once the rollback completes. */
+    for (int quarantine = 0; quarantine <= 1; quarantine++) {
+        reset(); serving_off = 1; with_plan = 0;
+        finalize_status = quarantine ? -1 : 0; abort_status = quarantine ? -1 : 0;
+        request(); poll();
+        assert(g_import && g_import->stage && aborts == 1 && !logs && reports == 1 && !owner_releases);
+        for (int i = 0; i < 5; i++) poll();
+        assert(g_import && g_import->stage && aborts == 6 && reports == 1 && !owner_releases);
+        assert(!sh_prefab_import_request(&editor_object, "{}", 2, 1) && reports == 2);
+        abort_status = 1; poll();
+        assert(!g_import && aborts == 7 && reports == 2 && owner_releases == 1 && !commits);
+        request(); assert(g_import); poll(); assert(!g_import);
+    }
+    /* Serving expected but not ready still refuses through the ordinary route. */
+    reset(); ready = 0; request(); poll();
+    assert(!g_import && reports == 1 && !preparations && !strcmp(events, "BCU"));
     puts("prefab import transaction tests passed"); return 0;
 }

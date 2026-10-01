@@ -1580,9 +1580,14 @@ their native routes; published reads keep their inspection scope. A native
 document that carries no package ownership is its own capture, byte for byte,
 with empty ownership and no package policy. A document that names package uses
 or carries deliveries keeps its provenance and is refused rather than run
-without its packages, and the legacy delivery gate still applies. Serving that
-is expected but unavailable, such as a compiler that is not ready or a missing
-provider, still refuses as before.
+without its packages; the delivery gate refuses a map that declares packages
+for the same stated reason and offers no installation. A portable prefab
+without package content is placed natively, without binding or admission, and
+one that carries packages is refused. A native placement whose rollback is
+deferred or quarantined keeps its stage and sources, is reported once and
+blocks further imports until it is released. Serving that is expected but
+unavailable, such as a compiler that is not ready or a missing provider, still
+refuses as before.
 
 The editor reload control observes its exact retained saved-load request by
 editor identity and save ID. A deferred installation leaves the control pending

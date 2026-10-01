@@ -17,6 +17,7 @@ const sh_package_compilation *sh_package_runtime_library_acquire(void) { CHECK(0
 void sh_package_runtime_release(void) { CHECK(0); }
 int sh_package_runtime_ready(void) { CHECK(0); return 0; }
 int sh_package_runtime_admission_ready(void) { CHECK(0); return 0; }
+int sh_package_runtime_serving_disabled(void) { return 0; }
 void sh_package_runtime_note_sources_changed(void) { CHECK(0); }
 void sh_package_runtime_note_install_published(void) { CHECK(0); }
 int sh_decl_server_registration_succeeded(void) { CHECK(0); return 0; }
