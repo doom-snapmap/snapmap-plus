@@ -24,6 +24,9 @@ typedef struct pl_unit {
      * strings for this pass, and only the arrays belong to the unit. */
     int borrowed;
 } pl_unit;
+/* pl_occurrence's counts over one file's edges [occ_begin, occ_end) of
+ * occ_unit: entries of an older generation are empty. */
+typedef struct pl_occ_entry { const char *key; size_t length, count, generation; uint64_t hash; } pl_occ_entry;
 typedef struct pl_work {
     const sh_package_link_unit *units;
     const sh_package_link_adapter *adapter;
@@ -39,6 +42,9 @@ typedef struct pl_work {
     sh_package_link_history *history;
     char *error;
     size_t capacity;
+    const struct pl_unit *occ_unit;
+    size_t occ_begin, occ_end, occ_used, occ_capacity, occ_generation;
+    pl_occ_entry *occ;
 } pl_work;
 typedef struct pl_assignment {
     const char *family, *name;
@@ -119,6 +125,7 @@ static void pl_clear(pl_work *w)
         free(u->names); free(u->paths); free(u->edges); free(u->files); free(u->witnesses); free(u->witness_order);
     }
     free(w->work); free(w->nodes); free(w->member_offsets); free(w->members); free(w->originals); free(w->effective);
+    free(w->occ);
     sh_package_link_history_close(w->history);
     sh_package_link_output_free(&w->output);
 }
@@ -251,14 +258,71 @@ static char *pl_slot(const char *path, const char *slot)
     return out;
 }
 
+static uint64_t pl_occ_hash(const char *key, size_t length)
+{
+    uint64_t hash = UINT64_C(14695981039346656037);
+    for (size_t i = 0; i < length; i++) { hash ^= (unsigned char)key[i]; hash *= UINT64_C(1099511628211); }
+    return hash;
+}
+/* The live entry for key, else the empty slot where it belongs. */
+static size_t pl_occ_find(const pl_work *w, const char *key, size_t length, uint64_t hash)
+{
+    size_t mask = w->occ_capacity - 1, at = (size_t)hash & mask;
+    while (w->occ[at].generation == w->occ_generation && (w->occ[at].hash != hash ||
+        w->occ[at].length != length || memcmp(w->occ[at].key, key, length))) at = (at + 1) & mask;
+    return at;
+}
+static int pl_occ_add(pl_work *w, const char *key, size_t length)
+{
+    if (w->occ_used + 1 > w->occ_capacity / 2) {
+        size_t capacity = w->occ_capacity ? w->occ_capacity * 2 : 256, previous = w->occ_capacity;
+        pl_occ_entry *old = w->occ, *grown = capacity <= SIZE_MAX / 2 / sizeof(*grown) ? pl_alloc(capacity, sizeof(*grown)) : NULL;
+        if (!grown) return 0;
+        w->occ = grown; w->occ_capacity = capacity;
+        for (size_t i = 0; i < previous; i++) if (old[i].generation == w->occ_generation)
+            w->occ[pl_occ_find(w, old[i].key, old[i].length, old[i].hash)] = old[i];
+        free(old);
+    }
+    uint64_t hash = pl_occ_hash(key, length);
+    size_t at = pl_occ_find(w, key, length, hash);
+    if (w->occ[at].generation == w->occ_generation) w->occ[at].count++;
+    else { w->occ[at] = (pl_occ_entry){key, length, 1, w->occ_generation, hash}; w->occ_used++; }
+    return 1;
+}
+/* A stored slot counts as a repeat of itself and of each prefix that ends
+ * just before a '#', exactly the keys the scan in pl_occurrence matches. */
+static int pl_occ_slot(pl_work *w, const char *slot)
+{
+    size_t n = strlen(slot);
+    if (!pl_occ_add(w, slot, n)) return 0;
+    for (size_t j = 0; j < n; j++) if (slot[j] == '#' && !pl_occ_add(w, slot, j)) return 0;
+    return 1;
+}
 /* A file can assign one field more than once; the native reflected reader
  * resolves each assignment (loading its target) and keeps the last. Number the
- * repeats so every binding keeps a unique, replayable slot. Owns key. */
-static char *pl_occurrence(const pl_unit *u, size_t begin, size_t end, char *key)
+ * repeats so every binding keeps a unique, replayable slot. Owns key. A file
+ * with many bindings counts them in a table kept while its edges grow, rather
+ * than scanning them all for each new one. */
+#define PL_OCCURRENCE_TABLE 32u
+static char *pl_occurrence(pl_work *w, const pl_unit *u, size_t begin, size_t end, char *key)
 {
     size_t seen = 0, n = strlen(key);
-    for (size_t i = begin; i < end; i++)
-        if (!strncmp(u->edges[i].slot, key, n) && (!u->edges[i].slot[n] || u->edges[i].slot[n] == '#')) seen++;
+    int counted = 0;
+    if (end - begin >= PL_OCCURRENCE_TABLE) {
+        if (w->occ_unit != u || w->occ_begin != begin || w->occ_end > end) {
+            w->occ_generation++; w->occ_used = 0;
+            w->occ_unit = u; w->occ_begin = w->occ_end = begin;
+        }
+        counted = 1;
+        for (; counted && w->occ_end < end; w->occ_end++) counted = pl_occ_slot(w, u->edges[w->occ_end].slot);
+        if (counted) {
+            size_t at = pl_occ_find(w, key, n, pl_occ_hash(key, n));
+            seen = w->occ[at].generation == w->occ_generation ? w->occ[at].count : 0;
+        } else w->occ_unit = NULL; /* out of memory: scan instead */
+    }
+    if (!counted)
+        for (size_t i = begin; i < end; i++)
+            if (!strncmp(u->edges[i].slot, key, n) && (!u->edges[i].slot[n] || u->edges[i].slot[n] == '#')) seen++;
     if (!seen) return key;
     char *out = n <= SIZE_MAX - 24 ? malloc(n + 24) : NULL;
     if (out) snprintf(out, n + 24, "%s#%zu", key, seen + 1);
@@ -297,7 +361,7 @@ static int pl_reference(void *context, const char *slot, const char *family,
         !w->adapter->resolve(w->adapter->context, w->unit, family, name, &target, w->error, w->capacity) ||
         target >= w->count || strcmp(w->units[target].family, family) || strcmp(w->units[target].name, name) ||
         !(key = pl_slot(file->resource->engine_path, slot)) ||
-        !(key = pl_occurrence(u, file->edge_begin, w->replay ? w->next_edge : u->edge_count, key))) {
+        !(key = pl_occurrence(w, u, file->edge_begin, w->replay ? w->next_edge : u->edge_count, key))) {
         pl_fail(w, "resource binding did not resolve to its scoped native identity"); return -1;
     }
     if (w->replay) {
@@ -474,7 +538,7 @@ static int pl_bind_stable(pl_work *w)
         char *key = NULL;
         if (!sites[i].slot || !*sites[i].slot || sites[i].target >= w->count ||
             !(key = pl_slot(file->resource->engine_path, sites[i].slot)) ||
-            !(key = pl_occurrence(u, file->edge_begin, u->edge_count, key))) {
+            !(key = pl_occurrence(w, u, file->edge_begin, u->edge_count, key))) {
             pl_fail(w, "resource binding did not resolve to its scoped native identity"); return -1;
         }
         if (!pl_edge_add(w, key, sites[i].target)) return -1;
@@ -511,7 +575,7 @@ static unsigned char *pl_bind(pl_work *w, size_t *length, int *unchanged)
                     char *key = NULL;
                     if (!sites[i].slot || !*sites[i].slot || sites[i].target >= w->count ||
                         !(key = pl_slot(file->resource->engine_path, sites[i].slot)) ||
-                        !(key = pl_occurrence(u, file->edge_begin, u->edge_count, key))) {
+                        !(key = pl_occurrence(w, u, file->edge_begin, u->edge_count, key))) {
                         pl_fail(w, "resource binding did not resolve to its scoped native identity"); goto done;
                     }
                     if (!pl_edge_add(w, key, sites[i].target)) goto done;
@@ -2053,6 +2117,15 @@ const char *sh_package_link_reuse_counters(const sh_package_link_reuse *reuse, c
             reuse->verify_bytes >> 20, reuse->verify_us / 1000u);
     return out;
 }
+#ifdef SH_PACKAGE_LINKER_TESTING
+size_t sh_package_link_reuse_test_slots(const sh_package_link_reuse *reuse, size_t unit,
+    const char **slots, size_t capacity)
+{
+    if (!reuse || unit >= reuse->count || !reuse->units[unit].captured) return 0;
+    for (size_t i = 0; i < reuse->units[unit].edge_count && i < capacity; i++) slots[i] = reuse->units[unit].edges[i].slot;
+    return reuse->units[unit].edge_count;
+}
+#endif
 const char *sh_package_link_reuse_link_steps(const sh_package_link_reuse *reuse, char *out, size_t capacity)
 {
     if (!out || !capacity) return out;

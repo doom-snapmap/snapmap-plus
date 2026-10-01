@@ -227,6 +227,12 @@ void sh_package_link_reuse_close(sh_package_link_reuse *reuse);
 const char *sh_package_link_reuse_counters(const sh_package_link_reuse *reuse, char *out, size_t capacity);
 /* Diagnostic durations of the final link's steps that used this cache, or "". */
 const char *sh_package_link_reuse_link_steps(const sh_package_link_reuse *reuse, char *out, size_t capacity);
+#ifdef SH_PACKAGE_LINKER_TESTING
+/* Tests: the binding slots this cache keeps for a captured unit, in capture
+ * order (up to capacity); returns how many it keeps, 0 if none. */
+size_t sh_package_link_reuse_test_slots(const sh_package_link_reuse *reuse, size_t unit,
+    const char **slots, size_t capacity);
+#endif
 
 typedef struct sh_package_link_implicit_binding {
     size_t owner, target; /* Equivalence-class indices in this output. */

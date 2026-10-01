@@ -26,15 +26,26 @@ static int field(void *context, sh_decl_value_type type, const char *name, sh_de
 }
 static const sh_decl_dependency_schema schema = {NULL, describe, field};
 
+/* Many bindings of one file, in bind order: the slots and targets binding
+ * reports, and the same as caller-supplied sites (target unit indices). */
+typedef struct plan_ref { const char *slot, *target; } plan_ref;
+typedef struct slot_plan {
+    const sh_compiled_resource *file;
+    const plan_ref *refs;
+    const sh_package_link_edge *sites;
+    size_t count;
+} slot_plan;
 typedef struct fixture {
-    sh_package_link_unit units[12];
+    sh_package_link_unit units[32];
     size_t count, assigned, bound;
     int unresolved, collision, changed_source, omit_replay, bad_inspection, abort_bind, shared_name;
     int original_paths, alias_rewrite;
     int member_fault, repeat_slot, native_originals;
-    int original_bindings[12];
+    int original_bindings[32];
     unsigned char *mutate_witness;
     sh_package_link_edge *mutate_implicit;
+    const slot_plan *plans;
+    size_t plan_count;
 } fixture;
 typedef struct bridge { sh_package_link_reference reference; void *context; } bridge;
 static int decl_reference(void *context, const char *slot, sh_decl_value_type type,
@@ -67,6 +78,15 @@ static unsigned char *bind_file(void *context, size_t unit, const sh_compiled_re
     unsigned char *result;
     (void)file; (void)error; (void)capacity; f->bound++;
     if (f->abort_bind) return NULL;
+    for (size_t p = 0; p < f->plan_count; p++) if (f->plans[p].file == file) {
+        for (size_t k = 0; k < f->plans[p].count; k++) {
+            const char *replacement = NULL;
+            if (reference(reference_context, f->plans[p].refs[k].slot, "material", f->plans[p].refs[k].target,
+                &replacement) < 0) return NULL;
+        }
+        result = malloc(length + 1); assert(result);
+        memcpy(result, body, length); result[length] = 0; *output_length = length; return result;
+    }
     if (f->repeat_slot && !strcmp(f->units[unit].family, "entitydef")) {
         /* Two assignments of one field in one file, as the native reader sees them. */
         for (int k = 0; k < 2; k++) {
@@ -522,6 +542,160 @@ static void foreign_suppliers(void)
         sh_package_link_output_free(&out);
     }
     for (size_t s = 0; s < 2; s++) sh_package_sources_free(sources[s]);
+}
+
+/* Files with more bindings than the scan threshold count repeated fields in a
+ * table. Each file numbers its own repeats exactly as the scan does, also for
+ * fields spelled with their own '#', whether bound, supplied as sites or
+ * replayed; a unit's second file and a second unit start their own counts. */
+static void expected_slots(const char *path, const plan_ref *refs, size_t count, char (*out)[192])
+{
+    for (size_t k = 0; k < count; k++) {
+        char key[192];
+        size_t seen = 0, n;
+        snprintf(key, sizeof(key), "%zu:%s%s", strlen(path), path, refs[k].slot);
+        n = strlen(key);
+        for (size_t i = 0; i < k; i++) if (!strncmp(out[i], key, n) && (!out[i][n] || out[i][n] == '#')) seen++;
+        if (seen) snprintf(out[k], 192, "%s#%zu", key, seen + 1);
+        else strcpy_s(out[k], 192, key);
+    }
+}
+static int plan_sites(void *context, size_t unit, const sh_compiled_resource *file,
+    const sh_package_link_edge **sites, size_t *count)
+{
+    const fixture *f = context;
+    (void)unit;
+    for (size_t p = 0; p < f->plan_count; p++) if (f->plans[p].file == file) {
+        *sites = f->plans[p].sites; *count = f->plans[p].count; return 1;
+    }
+    return 0;
+}
+static void many_repeated_slots(const sh_package_sources *sources)
+{
+    enum { A = 40, B = 36 };
+    static const char *const fields[] = {"edit.a", "edit.c", "edit.c#2", "edit.b", "edit.c", "edit.a#x", "edit.b#"};
+    static const char *const stones[] = {"materials/m0", "materials/m1", "materials/m2"};
+    static const char *const colors[] = {"{ color {1,0,0,1} }", "{ color {0,1,0,1} }", "{ color {0,0,1,1} }"};
+    static const char *const stone_paths[] = {"generated/decls/material/materials/m0.decl",
+        "generated/decls/material/materials/m1.decl", "generated/decls/material/materials/m2.decl"};
+    static const char *const paths[] = {"generated/decls/entitydef/props/many_a.decl",
+        "generated/decls/entitydef/props/many_b.decl"};
+    static plan_ref refs[2][2][A];
+    static sh_package_link_edge sites[2][2][A];
+    static char expected[A + B][192];
+    sh_compiled_resource entity[2][2] = {{{0}}}, stone[2][3] = {{{0}}};
+    const sh_compiled_resource *entity_files[2][2], *stone_files[2][3];
+    sh_package_compilation scopes[2] = {{0}};
+    slot_plan plans[4];
+    fixture f = {0};
+    char error[1024], *bound_names[8] = {0};
+    const char *got[A + B + 8];
+    for (size_t s = 0; s < 2; s++) {
+        scopes[s].sources = sources;
+        for (size_t j = 0; j < 3; j++) {
+            stone[s][j].engine_path = stone_paths[j]; stone[s][j].type = "material"; stone[s][j].name = stones[j];
+            stone[s][j].source = SIZE_MAX;
+            stone[s][j].body = (unsigned char *)colors[j]; stone[s][j].body_length = strlen(colors[j]);
+            stone_files[s][j] = &stone[s][j];
+            f.units[s * 4 + 1 + j] = (sh_package_link_unit){"material", stones[j], scopes + s, stone_files[s] + j, 1};
+        }
+        for (size_t file = 0; file < 2; file++) {
+            entity[s][file].engine_path = paths[file]; entity[s][file].source = SIZE_MAX;
+            entity[s][file].body = (unsigned char *)"{ }"; entity[s][file].body_length = 3;
+            entity_files[s][file] = &entity[s][file];
+            for (size_t k = 0; k < (file ? B : A); k++) {
+                refs[s][file][k] = (plan_ref){fields[(k + file * 3) % 7], stones[(k + file) % 3]};
+                sites[s][file][k] = (sh_package_link_edge){fields[(k + file * 3) % 7], s * 4 + 1 + (k + file) % 3};
+            }
+            plans[s * 2 + file] = (slot_plan){&entity[s][file], refs[s][file], sites[s][file], file ? B : A};
+        }
+        f.units[s * 4] = (sh_package_link_unit){"entitydef", "props/many", scopes + s, entity_files[s], 2};
+    }
+    f.count = 8; f.plans = plans; f.plan_count = 4;
+    expected_slots(paths[0], refs[0][0], A, expected);
+    expected_slots(paths[1], refs[0][1], B, expected + A);
+    sh_package_link_adapter adapter = {&f, resolve, bind_file, assign};
+    sh_package_link_output out = {0};
+    /* Bound, then supplied as sites; both replayed by the final link. */
+    for (int sited = 0; sited < 3; sited++) {
+        if (sited == 2) {
+            /* A late repeat in the second unit's first file binds another stone. */
+            refs[1][0][A - 3].target = stones[(A - 3 + 1) % 3];
+            sites[1][0][A - 3].target = 4 + 1 + (A - 3 + 1) % 3;
+        }
+        adapter.sites = sited == 1 ? plan_sites : NULL;
+        adapter.reuse = sh_package_link_reuse_open(f.count); assert(adapter.reuse);
+        int ok = sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &out, error, sizeof(error));
+        if (!ok) fprintf(stderr, "many repeated slots: %s\n", error);
+        assert(ok);
+        for (size_t s = 0; s < 2; s++) {
+            size_t n = sh_package_link_reuse_test_slots(adapter.reuse, s * 4, got, sizeof(got) / sizeof(*got));
+            assert(n == A + B);
+            for (size_t i = 0; i < n; i++) {
+                if (strcmp(got[i], expected[i])) fprintf(stderr, "slot %zu of unit %zu: %s, expected %s\n", i, s * 4, got[i], expected[i]);
+                assert(!strcmp(got[i], expected[i]));
+            }
+        }
+        if (sited < 2) assert(out.classes.nodes[0] == out.classes.nodes[4]);
+        else assert(out.classes.nodes[0] != out.classes.nodes[4] &&
+            strcmp(out.names[out.classes.nodes[0]], out.names[out.classes.nodes[4]]));
+        for (size_t u = 0; u < f.count; u++) {
+            if (!sited) { bound_names[u] = _strdup(out.names[out.classes.nodes[u]]); assert(bound_names[u]); }
+            else if (sited == 1) assert(!strcmp(bound_names[u], out.names[out.classes.nodes[u]]));
+        }
+        sh_package_link_reuse_close(adapter.reuse); adapter.reuse = NULL;
+        sh_package_link_output_free(&out);
+    }
+    for (size_t u = 0; u < 8; u++) free(bound_names[u]);
+}
+
+/* Names after a repaired order: with a reuse cache, renaming one of many units
+ * between links moves it from the front to the back of the remembered shape
+ * order, which is repaired rather than sorted again; every unit keeps the
+ * class and name a fresh link gives. */
+static void repaired_order_names(const sh_package_sources *sources)
+{
+    enum { S = 3, M = 8 };
+    static char names[S * M][32], paths[S * M][80], bodies[S * M][40];
+    sh_compiled_resource parts[S * M] = {{0}};
+    const sh_compiled_resource *files[S * M];
+    sh_package_compilation scopes[S] = {{0}};
+    fixture f = {0};
+    sh_package_link_adapter adapter = {&f, resolve, bind_file, assign};
+    sh_package_link_output reused = {0}, fresh = {0};
+    char error[1024];
+    for (size_t s = 0; s < S; s++) {
+        scopes[s].sources = sources;
+        for (size_t i = 0; i < M; i++) {
+            size_t u = s * M + i;
+            snprintf(names[u], sizeof(names[u]), "materials/r%zu", i);
+            snprintf(paths[u], sizeof(paths[u]), "generated/decls/material/%s.decl", names[u]);
+            snprintf(bodies[u], sizeof(bodies[u]), "{ color {%zu,0,0,1} }", i);
+            parts[u].engine_path = paths[u]; parts[u].type = "material"; parts[u].name = names[u];
+            parts[u].source = SIZE_MAX; parts[u].body = (unsigned char *)bodies[u]; parts[u].body_length = strlen(bodies[u]);
+            files[u] = parts + u;
+            f.units[u] = (sh_package_link_unit){"material", names[u], scopes + s, files + u, 1};
+        }
+    }
+    f.count = S * M;
+    adapter.reuse = sh_package_link_reuse_open(f.count); assert(adapter.reuse);
+    assert(sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &reused, error, sizeof(error)));
+    /* Scope 2's r0 sorts first among the materials; renamed, it sorts last. */
+    size_t moved = 2 * M;
+    snprintf(names[moved], sizeof(names[moved]), "materials/zz");
+    snprintf(paths[moved], sizeof(paths[moved]), "generated/decls/material/materials/zz.decl");
+    sh_package_link_reuse_invalidate(adapter.reuse, moved);
+    assert(sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &reused, error, sizeof(error)));
+    sh_package_link_reuse_close(adapter.reuse); adapter.reuse = NULL;
+    assert(sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &fresh, error, sizeof(error)));
+    assert(reused.classes.count == fresh.classes.count);
+    for (size_t u = 0; u < f.count; u++) {
+        for (size_t v = 0; v < f.count; v++)
+            assert((reused.classes.nodes[u] == reused.classes.nodes[v]) == (fresh.classes.nodes[u] == fresh.classes.nodes[v]));
+        assert(!strcmp(reused.names[reused.classes.nodes[u]], fresh.names[fresh.classes.nodes[u]]));
+    }
+    assert(reused.classes.nodes[0] == reused.classes.nodes[M] && reused.classes.nodes[M] != reused.classes.nodes[moved]);
+    sh_package_link_output_free(&reused); sh_package_link_output_free(&fresh);
 }
 
 static void original_aliases(const sh_package_sources *sources)
@@ -1206,6 +1380,8 @@ int main(void)
     streamed_suppliers(sources);
     shared_member_variants(sources);
     foreign_suppliers();
+    many_repeated_slots(sources);
+    repaired_order_names(sources);
     repeated_field_slots();
     campaign_originals(sources);
     assert(sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &out, error, sizeof(error)));
