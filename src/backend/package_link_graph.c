@@ -126,6 +126,44 @@ static void lg_enqueue(lg_work *work, size_t group)
     }
 }
 
+/* Restore shape order to an earlier order in which some shapes changed: drop
+ * both items of every descent below the kept prefix (a monotone stack), sort
+ * the few dropped items and merge them back by binary search. The result is
+ * in shape order like a full sort; only the arbitrary order of equal shapes
+ * may differ. 0, with items untouched, when too many moved or memory ran out:
+ * the caller sorts everything. */
+static int lg_repair(lg_item *items, const lg_item *placed, size_t count)
+{
+    size_t *kept = lg_allocate(count, sizeof(*kept)), top = 0, dropped = 0, i, r, k = 0, at = 0;
+    unsigned char *drop = lg_allocate(count, 1);
+    lg_item *moved = NULL;
+    int ok = 0;
+    if (!kept || !drop) goto done;
+    for (i = 0; i < count; i++) {
+        if (top && lg_shape_order(&placed[kept[top - 1]], &placed[i]) > 0) {
+            drop[kept[--top]] = 1; drop[i] = 1; dropped += 2;
+            if (dropped > count / 8) goto done;
+        } else kept[top++] = i;
+    }
+    if (!(moved = lg_allocate(dropped, sizeof(*moved)))) goto done;
+    for (i = 0, r = 0; i < count; i++) if (drop[i]) moved[r++] = placed[i];
+    if (dropped > 1) qsort(moved, dropped, sizeof(*moved), lg_shape_order);
+    for (r = 0; r < dropped; r++) {
+        size_t lo = k, hi = top;
+        while (lo < hi) {
+            size_t mid = lo + (hi - lo) / 2;
+            if (lg_shape_order(&placed[kept[mid]], &moved[r]) <= 0) lo = mid + 1; else hi = mid;
+        }
+        while (k < lo) items[at++] = placed[kept[k++]];
+        items[at++] = moved[r];
+    }
+    while (k < top) items[at++] = placed[kept[k++]];
+    ok = 1;
+done:
+    free(kept); free(drop); free(moved);
+    return ok;
+}
+
 static int lg_prepare(lg_work *work, const sh_package_link_node *nodes, size_t count,
     sh_package_link_verify_equal verify, void *context, sh_package_link_order *order, char *error, size_t capacity)
 {
@@ -185,33 +223,36 @@ static int lg_prepare(lg_work *work, const sh_package_link_node *nodes, size_t c
     for (i = 0; i < count; i++) for (j = 0; j < nodes[i].edge_count; j++)
         work->incoming[cursor[nodes[i].edges[j].target]++] = i;
     free(cursor);
-    int sorted = 0;
+    int sorted = 0, repaired = 0;
     /* equal[i]: items i - 1 and i have one shape (known when an earlier order
-     * was reused; otherwise grouping compares). */
+     * was reused unchanged; otherwise grouping compares). */
     unsigned char *equal = NULL;
     if (order && order->items && order->count == count && count > 1) {
         /* Place items in the earlier order when it is a permutation, then
-         * keep it only if every adjacent pair is still in shape order. */
+         * keep it if every adjacent pair is still in shape order, or repair
+         * it when a few shapes moved. */
         lg_item *placed = lg_allocate(count, sizeof(*placed));
         unsigned char *seen = lg_allocate(count, 1);
         equal = lg_allocate(count, 1);
         if (placed && seen && equal) {
-            sorted = 1;
-            for (i = 0; sorted && i < count; i++) {
+            int permutation = 1;
+            for (i = 0; permutation && i < count; i++) {
                 size_t index = order->items[i];
-                if (index >= count || seen[index]) sorted = 0;
+                if (index >= count || seen[index]) permutation = 0;
                 else { seen[index] = 1; placed[i] = work->items[index]; }
             }
+            sorted = permutation;
             for (i = 1; sorted && i < count; i++) {
                 int cmp = lg_shape_order(&placed[i - 1], &placed[i]);
                 if (cmp > 0) sorted = 0; else equal[i] = !cmp;
             }
             if (sorted) memcpy(work->items, placed, count * sizeof(*placed));
+            else if (permutation) repaired = lg_repair(work->items, placed, count);
         }
         free(placed); free(seen);
         if (!sorted) { free(equal); equal = NULL; }
     }
-    if (count > 1 && !sorted) qsort(work->items, count, sizeof(*work->items), lg_shape_order);
+    if (count > 1 && !sorted && !repaired) qsort(work->items, count, sizeof(*work->items), lg_shape_order);
     if (order) {
         size_t *items = order->count == count && order->items ? order->items :
             lg_allocate(count, sizeof(*items));

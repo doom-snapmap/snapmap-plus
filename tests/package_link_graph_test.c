@@ -357,10 +357,57 @@ static void randomized_ordered(void)
         sh_package_link_order_free(&order);
     }
 }
+/* A remembered order in which a few shapes moved is repaired, not sorted
+ * again: the first and last remembered items trade ends and a middle item
+ * joins another tie. An unchanged pass keeps the order it was given, and an
+ * order in which many shapes moved falls back to a full sort. Every pass gives
+ * exactly the classes of an unordered partition. */
+static void repaired_orders(void)
+{
+    enum { N = 96 };
+    static const char *const families[] = {"entitydef", "material", "model"};
+    static const char *const paths[] = {"a/x", "a/y", "b/z"};
+    sh_package_link_edge edges[N];
+    sh_package_link_node graph[N];
+    sh_package_link_order order = {0};
+    char error[256];
+    for (size_t i = 0; i < N; i++) {
+        /* Nine shapes of about ten nodes each; a third bind one target. */
+        graph[i] = node(families[i % 3], paths[(i / 3) % 3], (unsigned char)(i % 2), NULL, 0);
+        if (i % 3 == 0) {
+            edges[i] = (sh_package_link_edge){"k:edit/k:model", (i * 7 + 1) % N};
+            graph[i].edges = edges + i; graph[i].edge_count = 1;
+        }
+    }
+    for (int pass = 0; pass < 6; pass++) {
+        sh_package_link_classes plain = {0}, ordered = {0};
+        size_t kept[N];
+        unsigned char seen[N] = {0};
+        if (pass == 1 || pass == 3) {
+            size_t first = order.items[0], last = order.items[N - 1], middle = order.items[N / 2];
+            size_t twin = (middle + 3) % N; /* the same edge shape as middle */
+            graph[first].family = "zz-last"; graph[last].family = "aa-first";
+            graph[middle].family = graph[twin].family; graph[middle].path = graph[twin].path;
+            graph[middle].content[0] = graph[twin].content[0];
+        }
+        if (pass == 5) for (size_t i = 0; i < N; i += 2) graph[i].content[0] ^= 2; /* many moved */
+        if (pass) memcpy(kept, order.items, sizeof(kept));
+        assert(sh_package_link_equivalence(graph, N, &plain, error, sizeof(error)));
+        assert(sh_package_link_equivalence_ordered(graph, N, NULL, NULL, &order, &ordered, error, sizeof(error)));
+        same_identities(&plain, &ordered, N);
+        assert(order.count == N);
+        for (size_t i = 0; i < N; i++) { assert(order.items[i] < N && !seen[order.items[i]]); seen[order.items[i]] = 1; }
+        if (pass == 2 || pass == 4) assert(!memcmp(kept, order.items, sizeof(kept)));
+        if (pass == 1 || pass == 3) assert(memcmp(kept, order.items, sizeof(kept)));
+        sh_package_link_classes_free(&plain); sh_package_link_classes_free(&ordered);
+    }
+    sh_package_link_order_free(&order);
+}
 int main(void)
 {
     ordered_passes();
     randomized_ordered();
+    repaired_orders();
     variants(); cycles(); edge_order_and_failures(); randomized(); deep_dependency_change(); original_cycles();
     positive_fingerprint_verification();
     puts("package_link_graph_test: PASS");
