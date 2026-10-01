@@ -5775,6 +5775,147 @@ static void expect_library_text(const char *original, const char *wanted)
         body ? (const char *)body : resource ? "(unreadable)" : "(absent)");
     CHECK(ok); free(body); sh_package_runtime_release();
 }
+/* A refresh the installed-package watcher asked for reuses the library already
+ * served while a fresh scan of the installed packages is the one it was
+ * prepared from. An installation's own folder is no change: committed through
+ * its map's prompt (the committed library already holds it) or rolled back (a
+ * prepared folder that came and went). A changed package, or one the scan
+ * cannot accept, compiles the whole library, and so does every refresh the
+ * watcher did not ask for. */
+static void watched_refresh(const char *data)
+{
+    sh_package_runtime_note_watched_change(1);
+    CHECK(sh_package_runtime_refresh(data));
+    sh_package_runtime_note_watched_change(0);
+}
+static void test_watched_refresh(void)
+{
+    const char *descriptor = "{\"id\":\"watched-map\",\"name\":\"Watched map\"}";
+    char data[MAX_PATH], source[MAX_PATH], error[2048];
+    admission_fixture f; lease_collection_setup(&f);
+    sh_decl_registry_source registry = {&f, admission_read, (uintptr_t)f.registry, NULL};
+    sh_package_map_plan *plan = NULL;
+    installed_authoring_activation state = {0};
+    const sh_package_compilation *library = NULL, *served = NULL;
+    create("watched-data/overrides/installed-first/package.json", "{\"id\":\"installed-first\",\"name\":\"Installed first\"}");
+    create("watched-data/overrides/installed-first/assets/generated/decls/entitydef/first/thing.decl",
+        "{ class = \"Entity\"; edit = { health = 9; target = \"\"; } }");
+    authoring_bundle("watched-map/overrides/b", descriptor);
+    snprintf(data, sizeof(data), "%s/watched-data", root);
+    snprintf(source, sizeof(source), "%s/watched-map", root);
+    sh_package_runtime_test_dispose(); sh_package_runtime_test_baseline(lease_collection_baseline, NULL);
+    sh_package_runtime_test_source_readers(registry, (uintptr_t)f.reflection);
+    sh_package_runtime_test_installed_links(1);
+    CHECK(sh_package_runtime_refresh(data));
+    library = sh_package_runtime_library_acquire(); sh_package_runtime_release();
+    /* Nothing changed. */
+    library_compiles = 0;
+    watched_refresh(data);
+    served = sh_package_runtime_library_acquire(); sh_package_runtime_release();
+    CHECK(!library_compiles && served == library);
+    /* Committed through its map's prompt. */
+    plan = sh_package_runtime_prepare_map(data, source, error, sizeof(error)); CHECK(plan);
+    if (!plan) goto done;
+    authoring_bundle("watched-data/overrides/installed", descriptor);
+    int prepared = sh_package_map_plan_prepare_inventory(plan, data, error, sizeof(error));
+    CHECK(prepared && !error[0]); if (!prepared) goto done;
+    state.library = library;
+    CHECK(sh_package_runtime_activate_prepared_map(plan, (sh_package_activation_guard){0}, initial_authoring_activate, &state));
+    inventory_commit_calls = 0; inventory_commit_failure = 0;
+    CHECK(sh_package_runtime_commit_map(plan, commit_inventory, error, sizeof(error)));
+    sh_package_map_plan_free(plan); plan = NULL;
+    CHECK(sh_package_runtime_activate_prepared_map(NULL, (sh_package_activation_guard){0}, startup_activation, &(int){0}));
+    library = sh_package_runtime_library_acquire(); sh_package_runtime_release();
+    CHECK(library != state.library && historical_resource(library, authoring_unused));
+    library_compiles = 0;
+    watched_refresh(data);
+    served = sh_package_runtime_library_acquire(); sh_package_runtime_release();
+    CHECK(!library_compiles && served == library);
+    expect_library_text(authoring_unused, "health = 40");
+    /* Rolled back: the prepared folder came and went. */
+    create("watched-data/overrides/rolled/package.json", "{\"id\":\"rolled\",\"name\":\"Rolled\"}");
+    create("watched-data/overrides/rolled/assets/generated/decls/entitydef/rolled/thing.decl",
+        "{ class = \"Entity\"; edit = { health = 3; target = \"\"; } }");
+    remove_created("watched-data/overrides/rolled");
+    library_compiles = 0;
+    watched_refresh(data);
+    served = sh_package_runtime_library_acquire(); sh_package_runtime_release();
+    CHECK(!library_compiles && served == library);
+    /* A changed package compiles the whole library. */
+    create("watched-data/overrides/installed-first/assets/generated/decls/entitydef/first/thing.decl",
+        "{ class = \"Entity\"; edit = { health = 11; target = \"\"; } }");
+    library_compiles = 0;
+    watched_refresh(data);
+    CHECK(library_compiles >= 1);
+    expect_library_text("generated/decls/entitydef/first/thing.decl", "health = 11");
+    /* So does a package the scan cannot accept: its diagnosis is new. */
+    create("watched-data/overrides/broken/package.json", "{");
+    library_compiles = 0;
+    watched_refresh(data);
+    CHECK(library_compiles >= 1);
+    remove_created("watched-data/overrides/broken");
+    /* The watcher did not ask: compiled, unchanged or not. */
+    library_compiles = 0;
+    CHECK(sh_package_runtime_refresh(data));
+    CHECK(library_compiles >= 1);
+done:
+    inventory_commit_failure = 0;
+    sh_package_map_plan_free(plan);
+    sh_package_runtime_test_installed_links(0);
+    sh_package_runtime_test_source_readers((sh_decl_registry_source){0}, 0); sh_package_runtime_test_dispose();
+    sh_package_runtime_test_baseline(baseline, NULL);
+    for (size_t i = 0; i < f.count; i++) free(f.regions[i].address);
+    cleanup_resources(data); cleanup_resources(source);
+}
+/* An installation that serves its base for every package it does not compile
+ * describes its result only when it kept every base package: one removed
+ * while the installation was prepared is still served by the committed
+ * library, so the watcher's next refresh compiles and drops it. */
+static void test_watched_refresh_after_removal(void)
+{
+    const char *descriptor = "{\"id\":\"watched-map\",\"name\":\"Watched map\"}";
+    const char *first = "generated/decls/entitydef/first/thing.decl";
+    char data[MAX_PATH], source[MAX_PATH], error[2048];
+    admission_fixture f; lease_collection_setup(&f);
+    sh_decl_registry_source registry = {&f, admission_read, (uintptr_t)f.registry, NULL};
+    sh_package_map_plan *plan = NULL;
+    installed_authoring_activation state = {0};
+    create("removal-data/overrides/installed-first/package.json", "{\"id\":\"installed-first\",\"name\":\"Installed first\"}");
+    create("removal-data/overrides/installed-first/assets/generated/decls/entitydef/first/thing.decl",
+        "{ class = \"Entity\"; edit = { health = 9; target = \"\"; } }");
+    authoring_bundle("removal-map/overrides/b", descriptor);
+    snprintf(data, sizeof(data), "%s/removal-data", root);
+    snprintf(source, sizeof(source), "%s/removal-map", root);
+    sh_package_runtime_test_dispose(); sh_package_runtime_test_baseline(lease_collection_baseline, NULL);
+    sh_package_runtime_test_source_readers(registry, (uintptr_t)f.reflection);
+    sh_package_runtime_test_installed_links(1);
+    CHECK(sh_package_runtime_refresh(data));
+    expect_library_text(first, "health = 9");
+    plan = sh_package_runtime_prepare_map(data, source, error, sizeof(error)); CHECK(plan);
+    if (!plan) goto done;
+    authoring_bundle("removal-data/overrides/installed", descriptor);
+    remove_created("removal-data/overrides/installed-first");
+    int prepared = sh_package_map_plan_prepare_inventory(plan, data, error, sizeof(error));
+    CHECK(prepared && !error[0]); if (!prepared) goto done;
+    state.library = sh_package_runtime_library_acquire(); sh_package_runtime_release();
+    CHECK(sh_package_runtime_activate_prepared_map(plan, (sh_package_activation_guard){0}, initial_authoring_activate, &state));
+    inventory_commit_calls = 0; inventory_commit_failure = 0;
+    CHECK(sh_package_runtime_commit_map(plan, commit_inventory, error, sizeof(error)));
+    sh_package_map_plan_free(plan); plan = NULL;
+    CHECK(sh_package_runtime_activate_prepared_map(NULL, (sh_package_activation_guard){0}, startup_activation, &(int){0}));
+    expect_library_text(first, "health = 9");
+    library_compiles = 0;
+    watched_refresh(data);
+    CHECK(library_compiles >= 1);
+    expect_library_text(first, NULL);
+done:
+    sh_package_map_plan_free(plan);
+    sh_package_runtime_test_installed_links(0);
+    sh_package_runtime_test_source_readers((sh_decl_registry_source){0}, 0); sh_package_runtime_test_dispose();
+    sh_package_runtime_test_baseline(baseline, NULL);
+    for (size_t i = 0; i < f.count; i++) free(f.regions[i].address);
+    cleanup_resources(data); cleanup_resources(source);
+}
 static void test_published_install_refresh(void)
 {
     const char *installed_descriptor = "{\"id\":\"already-installed\",\"name\":\"Already installed\"}";
@@ -6895,6 +7036,8 @@ int main(int argc, char **argv)
     test_label_alias_exact_install();
     test_label_alias_overlay();
     test_label_alias_map_install();
+    test_watched_refresh();
+    test_watched_refresh_after_removal();
     test_editor_presentation();
     test_picker_topology();
     test_selector_shared_retirement();

@@ -114,6 +114,8 @@ void sh_decl_server_test_inventory_timing(unsigned long quiet_ms, unsigned long 
     unsigned long request_ms);
 long sh_decl_server_test_inventory_opens(void);
 long sh_decl_server_test_inventory_requests(void);
+/* Request a pass of the installed-package watcher's kind. */
+void sh_decl_server_test_request_watched(void);
 void sh_decl_server_test_inventory_fail_opens(long count);
 /* Close the watch as if its handle failed; it may reopen at once. */
 void sh_decl_server_test_inventory_drop(void);

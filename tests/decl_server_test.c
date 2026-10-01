@@ -19,7 +19,16 @@ int sh_editor_transition_frame_ready(void *editor, void *map)
 void sh_nav_bake_source_update_begin(void) { }
 void sh_nav_bake_source_update_end(int committed) { (void)committed; }
 static int g_defer_install_commit;
-int sh_rawmap_defers_install_commit(void) { return g_defer_install_commit; }
+/* Counts this predicate's calls down when positive; the call that reaches zero
+ * returns g_defer_hook's answer instead, so a state change can begin between
+ * the poll's check and the re-arm command's own. */
+static int g_defer_countdown;
+static int (*g_defer_hook)(void);
+int sh_rawmap_defers_install_commit(void)
+{
+    if (g_defer_countdown > 0 && --g_defer_countdown == 0 && g_defer_hook) return g_defer_hook();
+    return g_defer_install_commit;
+}
 #include "package_runtime.h"
 #include "resource_resident.h"
 #include "resource_graph_native.h"
@@ -177,6 +186,9 @@ int sh_palette_entries_end(sh_palette_entries **batch, sh_palette_entries_admitt
     *batch = NULL; return 1;
 }
 static int g_scan_calls, g_scan_fail;
+/* Whether the last pass was the installed-package watcher's (it may reuse an
+ * unchanged library); -1 before any pass is observed. */
+static int g_scan_watched = -1;
 static int g_table_published;
 static int g_table_merges;
 static char g_fixture_root[MAX_PATH];
@@ -189,6 +201,11 @@ static unsigned char g_boundary_common[0xf577];
 static void *g_boundary_shell_slot = g_boundary_shell;
 static void *g_boundary_common_slot = g_boundary_common;
 static DWORD g_boundary_thread;
+/* g_defer_hook answers at the re-arm command's own deferral check: an
+ * installation starts deferring there, or the browser stops being a safe
+ * boundary (the poll found it safe a moment before). */
+static int defer_begins(void) { return 1; }
+static int boundary_closes(void) { g_boundary_thread = 0; return 0; }
 static int g_boundary_unknown;
 static void *g_boundary_resource_head;
 static void heap_observe_native(int palette);
@@ -508,6 +525,7 @@ static const char *g_scan_correct_path;
 unsigned long sh_overrides_rescan_packages_activated(sh_package_activation_fn activate, void *context)
 {
     g_scan_calls++;
+    g_scan_watched = sh_package_runtime_test_watched_change();
     if (g_scan_correct_path) {
         inventory_write(g_scan_correct_path, "corrected during the pass");
         g_scan_correct_path = NULL; g_scan_fail = 0;
@@ -3580,6 +3598,33 @@ static void test_empty_launch_and_runtime_results(void)
         inventory_until_pass(scans);
         inventory_settle();
         CHECK(g_scan_calls == scans + 1 && sh_decl_server_registration_succeeded());
+        /* 10. The watcher's pass, and only it, lets the runtime reuse an
+         * unchanged library; a forced request upgrades a pending watched one,
+         * and a programmatic pass is forced. The note never outlives a pass. */
+        scans = g_scan_calls; g_scan_watched = -1;
+        inventory_write(marker, "watched pass");
+        inventory_until_pass(scans);
+        CHECK(g_scan_calls == scans + 1 && g_scan_watched == 1 && !sh_package_runtime_test_watched_change());
+        inventory_settle();
+        scans = g_scan_calls; g_scan_watched = -1;
+        sh_decl_server_test_request_watched(); sh_decl_server_request_rearm();
+        inventory_until_pass(scans);
+        CHECK(g_scan_calls == scans + 1 && g_scan_watched == 0);
+        scans = g_scan_calls; g_scan_watched = -1;
+        sh_decl_server_test_request_watched();
+        inventory_until_pass(scans);
+        CHECK(g_scan_calls == scans + 1 && g_scan_watched == 1 && !sh_package_runtime_test_watched_change());
+        scans = g_scan_calls; g_scan_watched = -1;
+        CHECK(sh_decl_server_rearm() == 1 && g_scan_calls == scans + 1 && g_scan_watched == 0);
+        inventory_settle();
+        /* A watched pass whose scan fails before any refresh leaves no note. */
+        scans = g_scan_calls; g_scan_watched = -1; g_scan_fail = 1;
+        inventory_write(marker, "watched failure");
+        inventory_until_pass(scans);
+        CHECK(g_scan_calls == scans + 1 && g_scan_watched == 1 && !sh_package_runtime_test_watched_change());
+        g_scan_fail = 0;
+        CHECK(sh_decl_server_rearm() == 1);
+        inventory_settle();
         /* Restore the fixture inventory for the rest of the suite. */
         CHECK(inventory_remove_tree(left));
         CHECK(DeleteFileA(marker));
@@ -3596,6 +3641,36 @@ static void test_empty_launch_and_runtime_results(void)
         g_defer_install_commit = 0;
         sh_decl_server_rearm_poll();
         CHECK(g_install_commit_calls == commits + 1);
+    }
+    {
+        /* A watched request waits out an installation's deferral at the poll
+         * and is still the watcher's pass when it runs. */
+        int scans = g_scan_calls;
+        g_defer_install_commit = 1; g_scan_watched = -1;
+        sh_decl_server_test_request_watched();
+        sh_decl_server_rearm_poll();
+        CHECK(g_scan_calls == scans);
+        g_defer_install_commit = 0;
+        sh_decl_server_rearm_poll();
+        CHECK(g_scan_calls == scans + 1 && g_scan_watched == 1 && !sh_package_runtime_test_watched_change());
+    }
+    {
+        /* Deferrals that begin after the poll took a watched request, at the
+         * re-arm command's own checks, request it again as the watcher's: an
+         * installation starting to defer, and the browser ceasing to be a
+         * safe boundary. */
+        int (*hooks[2])(void) = {defer_begins, boundary_closes};
+        for (int i = 0; i < 2; i++) {
+            int scans = g_scan_calls;
+            g_scan_watched = -1;
+            sh_decl_server_test_request_watched();
+            g_defer_hook = hooks[i]; g_defer_countdown = 2;
+            sh_decl_server_rearm_poll();
+            CHECK(g_scan_calls == scans && !g_defer_countdown);
+            g_defer_hook = NULL; g_boundary_thread = GetCurrentThreadId();
+            sh_decl_server_rearm_poll();
+            CHECK(g_scan_calls == scans + 1 && g_scan_watched == 1 && !sh_package_runtime_test_watched_change());
+        }
     }
     for (int failure = 1; failure <= 2; failure++) {
         const sh_package_compilation *before = sh_package_runtime_acquire(), *after;

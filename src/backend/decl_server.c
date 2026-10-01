@@ -2821,11 +2821,14 @@ static void ds_rearm_published(void)
 }
 
 static void ds_rearm_transaction(void);
+/* The kind of the pass being run and a request of a kind (DS_AUTO_*, below). */
+static LONG g_rearm_kind;
+static void ds_request_rearm(LONG kind);
 
 static void __cdecl ds_rearm_command(void)
 {
     if (sh_rawmap_defers_install_commit()) {
-        sh_decl_server_request_rearm(); return;
+        ds_request_rearm(g_rearm_kind); return;
     }
     if (!InterlockedCompareExchange(&g_runtime_ready, 0, 0) ||
         !sh_user_overrides_enabled_for_launch()) {
@@ -2835,7 +2838,7 @@ static void __cdecl ds_rearm_command(void)
     }
     if (!ds_runtime_boundary_safe()) {
         backend_log("decl-server RE-ARM deferred: return to the settled SnapMap browser before refreshing packages");
-        sh_decl_server_request_rearm();
+        ds_request_rearm(g_rearm_kind);
         return;
     }
     if (!sh_mpkg_startup_ready()) {
@@ -2999,16 +3002,28 @@ static int ds_res_promote_delta(unsigned char level)
  */
 enum {
     DS_AUTO_IDLE = 0,
-    DS_AUTO_RUN          /* run the whole pass on the next tick */
+    DS_AUTO_RUN,         /* run the whole pass on the next tick */
+    DS_AUTO_WATCHED      /* the installed-package watcher's pass: an unchanged
+                          * installed inventory reuses the served library */
 };
 static volatile LONG g_auto_state;
+/* The kind of the pass being run; a console or programmatic pass is RUN. */
+static LONG g_rearm_kind = DS_AUTO_RUN;
 
+/* Request a pass of this kind; a RUN request upgrades a pending WATCHED one. */
+static void ds_request_rearm(LONG kind)
+{
+    LONG previous = InterlockedCompareExchange(&g_auto_state, kind, DS_AUTO_IDLE);
+    if (previous == DS_AUTO_WATCHED && kind == DS_AUTO_RUN)
+        InterlockedCompareExchange(&g_auto_state, DS_AUTO_RUN, DS_AUTO_WATCHED);
+    if (previous == DS_AUTO_IDLE)
+        backend_log("decl-server: runtime re-arm REQUESTED (installed packages changed); "
+                    "the engine tick will register it");
+}
 /* Request refresh from any thread; the engine Frame services it at the browser. */
 void sh_decl_server_request_rearm(void)
 {
-    if (InterlockedCompareExchange(&g_auto_state, DS_AUTO_RUN, DS_AUTO_IDLE) == DS_AUTO_IDLE)
-        backend_log("decl-server: runtime re-arm REQUESTED (installed packages changed); "
-                    "the engine tick will register it");
+    ds_request_rearm(DS_AUTO_RUN);
 }
 
 /* Installed-package changes outside an installation. An installation requests
@@ -3208,7 +3223,7 @@ static void ds_inventory_poll(LONG state)
     }
     if (g_inventory_generation == g_attempt_generation || now - g_inventory_event_at < g_inventory_quiet_ms) return;
     if (state != DS_STATE_DONE && state != DS_STATE_FAILED) return;
-    if (InterlockedCompareExchange(&g_auto_state, 0, 0) == DS_AUTO_RUN || now < g_inventory_request_at) return;
+    if (InterlockedCompareExchange(&g_auto_state, 0, 0) != DS_AUTO_IDLE || now < g_inventory_request_at) return;
     if (!g_inventory_request_backoff) g_inventory_request_backoff = g_inventory_request_ms;
     g_inventory_request_at = now + g_inventory_request_backoff;
     g_inventory_request_backoff = g_inventory_request_backoff * 2 > DS_INVENTORY_REQUEST_CAP ?
@@ -3217,7 +3232,7 @@ static void ds_inventory_poll(LONG state)
     g_inventory_requests++;
 #endif
     backend_log("decl-server: installed packages changed since the last preparation; preparing them again at the browser");
-    sh_decl_server_request_rearm();
+    ds_request_rearm(DS_AUTO_WATCHED);
 }
 #ifdef SH_DECL_SERVER_TESTING
 void sh_decl_server_test_inventory_timing(unsigned long quiet_ms, unsigned long backoff_ms, unsigned long identity_ms,
@@ -3228,6 +3243,7 @@ void sh_decl_server_test_inventory_timing(unsigned long quiet_ms, unsigned long 
 }
 long sh_decl_server_test_inventory_opens(void) { return g_inventory_opens; }
 long sh_decl_server_test_inventory_requests(void) { return g_inventory_requests; }
+void sh_decl_server_test_request_watched(void) { ds_request_rearm(DS_AUTO_WATCHED); }
 void sh_decl_server_test_inventory_fail_opens(long count) { g_inventory_fail_opens = count; }
 void sh_decl_server_test_inventory_drop(void) { ds_inventory_lost(GetTickCount64()); g_inventory_reopen_at = 0; }
 #endif
@@ -3257,7 +3273,7 @@ void sh_decl_server_rearm_poll(void)
     LONG state = InterlockedCompareExchange(&g_state, 0, 0);
     if (sh_rawmap_defers_install_commit()) return;
     ds_inventory_poll(state);
-    if (InterlockedCompareExchange(&g_auto_state, 0, 0) != DS_AUTO_RUN) {
+    if (InterlockedCompareExchange(&g_auto_state, 0, 0) == DS_AUTO_IDLE) {
         /* Object destructors only release leases. Native cleanup happens here
          * after confirmed map departure, using the ordinary recovery contract.
          * An active map's promoted policy is never cleared by an idle tick. */
@@ -3274,9 +3290,11 @@ void sh_decl_server_rearm_poll(void)
     }
     if (state != DS_STATE_DONE && state != DS_STATE_FAILED) return;
     if (!ds_runtime_boundary_safe()) return;
-    if (InterlockedCompareExchange(&g_auto_state, DS_AUTO_IDLE, DS_AUTO_RUN) != DS_AUTO_RUN)
-        return;
+    LONG kind = InterlockedExchange(&g_auto_state, DS_AUTO_IDLE);
+    if (kind == DS_AUTO_IDLE) return;
+    g_rearm_kind = kind;
     ds_rearm_command();
+    g_rearm_kind = DS_AUTO_RUN;
     if (sh_decl_server_registration_succeeded())
         backend_log("decl-server: runtime re-arm COMPLETE -- declarations, palette, strings and lifetimes refreshed");
 }
@@ -3683,7 +3701,10 @@ static void ds_rearm_transaction(void)
     }
     InterlockedExchange(&g_registration_succeeded, 0);
     ds_inventory_attempt();
-    if (sh_overrides_rescan_packages_activated(ds_activate_provider, NULL) == SH_OVERRIDES_RESCAN_FAILED) {
+    sh_package_runtime_note_watched_change(g_rearm_kind == DS_AUTO_WATCHED);
+    int rescanned = sh_overrides_rescan_packages_activated(ds_activate_provider, NULL);
+    sh_package_runtime_note_watched_change(0);
+    if (rescanned == SH_OVERRIDES_RESCAN_FAILED) {
         /* Recovery may have succeeded; it must not admit the failed install. */
         InterlockedExchange(&g_registration_succeeded, 0);
         InterlockedExchange(&g_state, DS_STATE_FAILED);

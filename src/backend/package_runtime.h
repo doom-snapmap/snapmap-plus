@@ -73,8 +73,16 @@ void sh_package_runtime_note_sources_changed(void);
  * added packages compile alone and the retained library serves the rest. A
  * refresh that finds any installed package removed or changed, or whose
  * increment does not complete, compiles the whole library instead. Other
- * refreshes always compile the whole library. */
+ * refreshes compile the whole library, except one the installed-package
+ * watcher asked for (below). */
 void sh_package_runtime_note_install_published(void);
+/* Around a refresh the installed-package watcher asked for (1 before, 0
+ * after): that refresh reuses the library already served when a fresh scan of
+ * the installed packages (accepted packages' names and source trees, and the
+ * scan's own rejections) is the one that library was prepared from, so an
+ * installation's own folder, committed or rolled back, is no change. The note
+ * is consumed by that refresh and never outlives the call. */
+void sh_package_runtime_note_watched_change(int watched);
 /* Activate private, already validated map source trees under
  * <map_source_root>/overrides; NULL restores the retained local library.
  * Map data never changes or replaces library sources. The library is rescanned
@@ -520,6 +528,9 @@ int sh_package_runtime_test_source_inputs(sh_decl_registry_source *registry, uin
 /* 1 when the spawn-key group tables last published are the serving
  * providers' (the installed library's and the active map's). */
 int sh_package_runtime_test_key_groups_current(void);
+/* Whether the refresh in progress is the one the installed-package watcher
+ * asked for (sh_package_runtime_note_watched_change). */
+int sh_package_runtime_test_watched_change(void);
 /* Give the serving providers these group tables (copies) and publish them. */
 void sh_package_runtime_test_key_tables(const sh_package_key_groups *library, const sh_package_key_groups *map);
 void sh_package_runtime_test_plan_key_table(sh_package_map_plan *plan, const sh_package_key_groups *table);

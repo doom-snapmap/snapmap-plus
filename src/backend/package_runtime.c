@@ -106,6 +106,9 @@ typedef struct pr_provider {
     char *coverage; /* Accounted missing product coverage; packages still served. */
     pr_exclusion *exclusions; /* Rejections decided on a package's own bytes alone. */
     size_t exclusion_count;
+    /* The installed scan it was prepared from (pr_scan_identity). */
+    unsigned char scan_identity[32];
+    int scan_known;
     sh_package_key_groups *key_groups; /* Group codes its relocated values use. */
     volatile LONG references;
 } pr_provider;
@@ -192,6 +195,12 @@ static volatile LONG g_install_published;
 void sh_package_runtime_note_install_published(void)
 {
     InterlockedExchange(&g_install_published, 1);
+}
+/* Set around the refresh the installed-package watcher requested. */
+static volatile LONG g_watched_change;
+void sh_package_runtime_note_watched_change(int watched)
+{
+    InterlockedExchange(&g_watched_change, watched != 0);
 }
 
 static pr_provider *pr_retain(pr_provider *provider)
@@ -851,16 +860,28 @@ static int pr_activate(sh_package_activation_fn activate, void *context, int res
     return result;
 }
 
-static int pr_rejected(void *context, const sh_package *package, const char *reason)
+/* The scan's rejection report line; NULL when it cannot grow. */
+static const char *pr_rejection_line(char **report, const sh_package *package, const char *reason)
 {
-    char **report = context;
     size_t used = *report ? strlen(*report) : 0;
     size_t add = strlen(package->root) + strlen(reason) + 96;
     char *grown;
-    if (used > SIZE_MAX - add || !(grown = realloc(*report, used + add))) return 0;
+    if (used > SIZE_MAX - add || !(grown = realloc(*report, used + add))) return NULL;
     *report = grown;
     snprintf(grown + used, add, "Skipped local package %s: %s\n", package->root, reason);
-    backend_log(grown + used);
+    return grown + used;
+}
+/* The same report without logging: a scan whose result only identifies the
+ * installed packages (pr_scan_unchanged). */
+static int pr_quiet_rejected(void *context, const sh_package *package, const char *reason)
+{
+    return pr_rejection_line(context, package, reason) != NULL;
+}
+static int pr_rejected(void *context, const sh_package *package, const char *reason)
+{
+    const char *line = pr_rejection_line(context, package, reason);
+    if (!line) return 0;
+    backend_log(line);
     return 1;
 }
 /* Missing product coverage is not an author error: the delivery remains
@@ -1415,6 +1436,62 @@ int sh_package_runtime_test_prepare_native_sources(sh_package_native_assets *ass
 #endif
 #endif
 
+/* Installed inventory identity for the preparation hint: package names and
+ * source tree fingerprints, in name order. */
+static int pr_inventory_digest(const sh_package_sources *sources, unsigned char digest[32])
+{
+    size_t count = sources ? sources->package_count : 0, length = 0;
+    size_t *order = calloc(count ? count : 1, sizeof(*order));
+    unsigned char *buffer = NULL, *at;
+    sh_package_file_identity identity;
+    int ok = 0;
+    if (!order || (count && !sources->fingerprints)) goto done;
+    for (size_t i = 0; i < count; i++) {
+        size_t j = i;
+        while (j && strcmp(sources->packages[order[j - 1]].name, sources->packages[i].name) > 0) { order[j] = order[j - 1]; j--; }
+        order[j] = i; length += strlen(sources->packages[i].name) + 1 + 32;
+    }
+    if (!(buffer = malloc(length ? length : 1))) goto done;
+    at = buffer;
+    for (size_t i = 0; i < count; i++) {
+        size_t n = strlen(sources->packages[order[i]].name) + 1;
+        memcpy(at, sources->packages[order[i]].name, n); at += n;
+        memcpy(at, sources->fingerprints[order[i]], 32); at += 32;
+    }
+    ok = sh_package_bytes_identity(buffer, length, &identity);
+    if (ok) memcpy(digest, identity.digest, 32);
+done:
+    free(buffer); free(order); return ok;
+}
+/* The installed scan a library is prepared from: its accepted packages'
+ * names and source trees (pr_inventory_digest) and the scan's own
+ * rejections as reported. A refresh the installed-package watcher asked for
+ * reuses the served library while a fresh scan has the same identity. */
+static int pr_scan_identity(const sh_package_sources *sources, const char *rejections, unsigned char out[32])
+{
+    unsigned char inventory[32], *buffer;
+    size_t text = rejections ? strlen(rejections) : 0;
+    sh_package_file_identity identity;
+    int ok;
+    if (!pr_inventory_digest(sources, inventory) || text > SIZE_MAX - 32 || !(buffer = malloc(32 + text))) return 0;
+    memcpy(buffer, inventory, 32);
+    if (text) memcpy(buffer + 32, rejections, text);
+    ok = sh_package_bytes_identity(buffer, 32 + text, &identity);
+    if (ok) memcpy(out, identity.digest, 32);
+    free(buffer); return ok;
+}
+/* Whether a fresh scan of data_root is the one library was prepared from. */
+static int pr_scan_unchanged(const pr_provider *library, const char *data_root)
+{
+    char error[512], *rejections = NULL;
+    unsigned char identity[32];
+    sh_package_sources *sources;
+    int same;
+    if (!library || !library->scan_known || !data_root) return 0;
+    sources = sh_package_sources_scan_local(data_root, pr_quiet_rejected, &rejections, error, sizeof(error));
+    same = sources && pr_scan_identity(sources, rejections, identity) && !memcmp(identity, library->scan_identity, 32);
+    sh_package_sources_free(sources); free(rejections); return same;
+}
 #ifndef SH_PACKAGE_RUNTIME_TESTING
 /* Cooked OpenGL programs name further programs (program-typed parameters)
  * that a compilation reaches only by reading the cooked output, one level per
@@ -1443,33 +1520,6 @@ static int pr_follow_native_sources(sh_package_native_assets *assets, uint64_t *
         backend_log(line);
     }
     return ok;
-}
-/* Installed inventory identity for the preparation hint: package names and
- * source tree fingerprints, in name order. */
-static int pr_inventory_digest(const sh_package_sources *sources, unsigned char digest[32])
-{
-    size_t count = sources ? sources->package_count : 0, length = 0;
-    size_t *order = calloc(count ? count : 1, sizeof(*order));
-    unsigned char *buffer = NULL, *at;
-    sh_package_file_identity identity;
-    int ok = 0;
-    if (!order || (count && !sources->fingerprints)) goto done;
-    for (size_t i = 0; i < count; i++) {
-        size_t j = i;
-        while (j && strcmp(sources->packages[order[j - 1]].name, sources->packages[i].name) > 0) { order[j] = order[j - 1]; j--; }
-        order[j] = i; length += strlen(sources->packages[i].name) + 1 + 32;
-    }
-    if (!(buffer = malloc(length ? length : 1))) goto done;
-    at = buffer;
-    for (size_t i = 0; i < count; i++) {
-        size_t n = strlen(sources->packages[order[i]].name) + 1;
-        memcpy(at, sources->packages[order[i]].name, n); at += n;
-        memcpy(at, sources->fingerprints[order[i]], 32); at += 32;
-    }
-    ok = sh_package_bytes_identity(buffer, length, &identity);
-    if (ok) memcpy(digest, identity.digest, 32);
-done:
-    free(buffer); free(order); return ok;
 }
 /* Shader preparation hint: the stock shader objects the previous installed-
  * library compile needed (sh_package_native_assets_shader_needs). It belongs to
@@ -1638,6 +1688,8 @@ static pr_provider *pr_prepare_deliveries(const char *data_root, const char *sou
 #else
     (void)string_peer;
 #endif
+    unsigned char scan_identity[32];
+    int scan_known = 0;
     DWORD n;
     size_t default_index;
     char *slash, *rejections = NULL, *unserved = NULL;
@@ -1687,6 +1739,17 @@ static pr_provider *pr_prepare_deliveries(const char *data_root, const char *sou
         sh_package_sources_scan(source_root, error, sizeof(error)) :
         sh_package_sources_scan_local(data_root, pr_rejected, &rejections, error, sizeof(error));
     if (!sources) goto done;
+    /* Before any compile-time rejection joins the report. An increment serves
+     * its base for every package it does not compile, so its scan describes
+     * the result only when it kept every base package unchanged. */
+    if (!source_root && !product_only) scan_known = pr_scan_identity(sources, rejections, scan_identity);
+    for (size_t j = 0; scan_known && authoring_increment && previous && j < previous->sources->package_count; j++) {
+        int kept = 0;
+        for (size_t i = 0; i < sources->package_count && !kept; i++)
+            kept = !strcmp(sources->packages[i].name, previous->sources->packages[j].name) &&
+                !memcmp(sources->fingerprints[i], previous->sources->fingerprints[j], 32);
+        scan_known = kept;
+    }
 #ifndef SH_PACKAGE_RUNTIME_TESTING
     /* The inventory as scanned, before anything is left out, identifies the
      * shader preparation hint this compile reads and writes. */
@@ -2148,6 +2211,7 @@ static pr_provider *pr_prepare_deliveries(const char *data_root, const char *sou
     provider->audio_ids = audio_ids; audio_ids = NULL;
 #endif
     provider->references = 1;
+    if (scan_known) { memcpy(provider->scan_identity, scan_identity, 32); provider->scan_known = 1; }
     provider->rejections = rejections; rejections = NULL;
     if (!source_root && !product_only && !authoring_increment)
         pr_exclusions_store(data_root, exclusions, exclusion_count);
@@ -3255,6 +3319,8 @@ static pr_provider *pr_increment_view(pr_provider *base, const pr_provider *incr
         pr_release(library); return NULL;
     }
     if (library->data_root) pr_exclusions_store(library->data_root, library->exclusions, library->exclusion_count);
+    /* The increment's scan saw base and the added packages together. */
+    memcpy(library->scan_identity, increment->scan_identity, 32); library->scan_known = increment->scan_known;
     return library;
 }
 /* An installed-library refresh (a rearm, or the rescan after a committed
@@ -3639,7 +3705,14 @@ static int pr_update(const char *data_root, int change_map, const char *map_sour
     } else {
         library_rescanned = 1;
         int installed = InterlockedExchange(&g_install_published, 0) != 0;
-        if (installed && g_library_provider && pr_refresh_increment(g_library_provider, g_map_provider,
+        int watched = InterlockedExchange(&g_watched_change, 0) != 0;
+        if (watched && !installed && !g_authoring_error[0] && pr_scan_unchanged(g_library_provider, data_root)) {
+            /* An installation's own folder (committed into the served
+             * library, or removed by a rollback) is no change to compile. */
+            library = pr_retain(g_library_provider);
+            backend_log("package library refresh: the installed packages are the ones the served library "
+                "was prepared from; nothing to compile");
+        } else if (installed && g_library_provider && pr_refresh_increment(g_library_provider, g_map_provider,
                 &library, &inventory, error, sizeof(error)))
             backend_log("package library refresh for a published installation: added packages compiled alone, "
                 "unchanged packages served from the retained library");
@@ -6162,6 +6235,10 @@ void sh_package_runtime_test_key_tables(const sh_package_key_groups *library, co
     }
     pr_publish_key_groups();
     ReleaseSRWLockExclusive(&g_lock);
+}
+int sh_package_runtime_test_watched_change(void)
+{
+    return InterlockedCompareExchange(&g_watched_change, 0, 0) != 0;
 }
 int sh_package_runtime_test_key_groups_current(void)
 {

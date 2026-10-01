@@ -1596,6 +1596,16 @@ editor extensions, while a private variant of the parent (a real gameplay change
 stays an ordinary dependency. A failed increment falls back to a full rescan at
 the next safe boundary.
 
+The installed-package watcher requests a refresh when the overrides tree
+changes, which includes a map prompt's own installation and its rollback. Only
+that request may reuse the served library: it scans the installed packages
+again, and when the accepted packages' names and source trees and the scan's
+rejections are the ones the library was prepared from, nothing compiles. An
+increment records that identity only when it kept every package of its base, so
+a package removed while an installation was prepared is still compiled out.
+Console, programmatic and forced rescans always compile, and a forced request
+upgrades a pending watched one.
+
 Within a process, the source facts a compile read (bindings and reader results
 per input) are kept and replayed by later compiles only after each input is
 validated afresh: original bytes are hashed again and the catalog, native
