@@ -481,10 +481,6 @@ int sh_package_compilation_restore_missing(sh_package_compilation *current,
     void *context, char *error, size_t error_capacity);
 const sh_compiled_resource *sh_package_compilation_find(const sh_package_compilation *compilation,
                                                         const char *engine_path);
-/* sh_package_compilation_find given the key it computes: the compilation's
- * own canonicalization of a path (its result, not its input). NULL key: none. */
-const sh_compiled_resource *sh_package_compilation_find_canonical(const sh_package_compilation *compilation,
-                                                                  const char *key);
 /* Add compiler-generated declaration text (no authored source or owners) at
  * the declaration's path, keeping the provider sorted. baseline_known 3 marks
  * a product built-in the baseline reader also serves, so a later provider

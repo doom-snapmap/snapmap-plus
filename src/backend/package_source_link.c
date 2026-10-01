@@ -172,58 +172,7 @@ struct sh_package_source_link {
         unsigned long long original_us, identify_us; /* capturing and hashing originals */
         unsigned long long companion_us; /* within select_us: material companion requests */
     } census;
-    /* Canonical keys by (canonicalizer, path) for this capture (sl_canonical). */
-    struct sl_canonical *canonicals;
-    size_t canonical_count, canonical_capacity;
 };
-/* The canonicalizers are pure, and one path is canonicalized again for every
- * scope and every replayed recording that consults it: keep each result (NULL
- * for an unusable path) for the capture. */
-typedef char *(*sl_canonicalizer)(const char *path);
-typedef struct sl_canonical { sl_canonicalizer canonical; char *path, *key; uint64_t hash; } sl_canonical;
-static uint64_t sl_hash_text(uint64_t hash, const char *text);
-static sl_canonicalizer sl_canonicalizer_of(const sh_package_compilation *scope)
-{ return scope && scope->canonical_path ? scope->canonical_path : sh_package_engine_path; }
-/* path's key by scope's canonicalizer, as sh_package_compilation_find computes
- * it. *owned is set (and must be freed) only when the memo could not grow. */
-static const char *sl_canonical_key(sh_package_source_link *s, const sh_package_compilation *scope,
-    const char *path, char **owned)
-{
-    sl_canonicalizer canonical = sl_canonicalizer_of(scope);
-    uint64_t hash = sl_hash_text(UINT64_C(14695981039346656037) ^ (uint64_t)(uintptr_t)canonical, path);
-    size_t at;
-    *owned = NULL;
-    if (s->canonical_count + 1 > s->canonical_capacity / 2) {
-        size_t capacity = s->canonical_capacity ? s->canonical_capacity * 2 : 4096;
-        sl_canonical *grown = capacity <= SIZE_MAX / 2 / sizeof(*grown) ? calloc(capacity, sizeof(*grown)) : NULL;
-        if (!grown) return *owned = canonical(path);
-        for (size_t i = 0; i < s->canonical_capacity; i++) if (s->canonicals[i].path) {
-            at = (size_t)s->canonicals[i].hash & (capacity - 1);
-            while (grown[at].path) at = (at + 1) & (capacity - 1);
-            grown[at] = s->canonicals[i];
-        }
-        free(s->canonicals); s->canonicals = grown; s->canonical_capacity = capacity;
-    }
-    at = (size_t)hash & (s->canonical_capacity - 1);
-    while (s->canonicals[at].path) {
-        const sl_canonical *entry = s->canonicals + at;
-        if (entry->hash == hash && entry->canonical == canonical && !strcmp(entry->path, path)) return entry->key;
-        at = (at + 1) & (s->canonical_capacity - 1);
-    }
-    char *copy = _strdup(path), *key = canonical(path);
-    if (!copy) { free(copy); return *owned = key; }
-    s->canonicals[at] = (sl_canonical){canonical, copy, key, hash}; s->canonical_count++;
-    return key;
-}
-/* sh_package_compilation_find(scope, path), through the memo. */
-static const sh_compiled_resource *sl_scope_find(sh_package_source_link *s, const sh_package_compilation *scope,
-    const char *path)
-{
-    char *owned = NULL;
-    const sh_compiled_resource *found = sh_package_compilation_find_canonical(scope,
-        sl_canonical_key(s, scope, path, &owned));
-    free(owned); return found;
-}
 static int g_sl_replay = 1;
 void sh_package_source_link_replay(int enabled) { g_sl_replay = enabled != 0; }
 static int g_sl_fsm = 1;
@@ -440,13 +389,12 @@ static int sl_source_file(sh_package_source_link *s, size_t scope_index,
     const char *path, int optional, const sh_compiled_resource **out)
 {
     const sh_package_compilation *scope = s->scopes[scope_index];
-    char *owned = NULL;
-    const char *key = sl_canonical_key(s, scope, path, &owned);
+    char *key = scope->canonical_path ? scope->canonical_path(path) : sh_package_engine_path(path);
     const sh_compiled_resource *file;
     int result = -1;
     *out = NULL;
     if (!key) { sl_fail(s, "invalid native dependency path", path); return -1; }
-    file = sl_scope_find(s, scope, key);
+    file = sh_package_compilation_find(scope, key);
     if (file) { *out = file; result = 1; }
     else {
         sl_original *original = sl_original_get(s, key);
@@ -458,7 +406,7 @@ static int sl_source_file(sh_package_source_link *s, size_t scope_index,
         } else if (original && original->status > 0) { *out = &original->resource; result = 1; }
         else if (original && !original->status) result = 0;
     }
-    free(owned); return result;
+    free(key); return result;
 }
 /* 1 supplied, 0 proven absent, -1 failed. No peer compilation is consulted. */
 static int sl_path(sh_package_source_link *s, sl_unit *unit, const char *path)
@@ -1422,7 +1370,7 @@ static int sl_replay_applies(sh_package_source_link *s, const sl_unit *unit, con
     }
     for (size_t i = 0; i < r->lookup_count; i++)
         if (!sl_input_same(s, unit->scope, r->lookups + i,
-            sl_scope_find(s, scope, r->lookups[i].path), same_capture)) return 0;
+            sh_package_compilation_find(scope, r->lookups[i].path), same_capture)) return 0;
     return 1;
 }
 /* What a memo's recordings depend on besides the paths they validate: the
@@ -2291,8 +2239,6 @@ void sh_package_source_link_close(sh_package_source_link *s)
 {
     if (!s) return;
     sl_store_clear(&s->own);
-    for (size_t i = 0; i < s->canonical_capacity; i++) { free(s->canonicals[i].path); free(s->canonicals[i].key); }
-    free(s->canonicals);
     if (s->memo) _InterlockedExchange(&s->memo->busy, 0);
     for (size_t i = 0; s->readers && i < s->scope_count; i++) sh_package_source_reader_close(s->readers[i]);
     for (size_t i = 0; i < s->count; i++) {
