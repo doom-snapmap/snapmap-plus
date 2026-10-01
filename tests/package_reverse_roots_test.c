@@ -7,6 +7,10 @@
 #include <string.h>
 #include "package_library.h"
 #include "package_native_assets.h"
+#include "package_audio_program.h"
+#include "audio_banks.h"
+#include "audio_originals.h"
+#include "package_usage.h"
 #include "package_fixture.h"
 #include "../src/backend/virtual_material_runtime.c"
 
@@ -182,12 +186,18 @@ static void binary_file(const char *relative, const unsigned char *body, size_t 
     char path[4096]; create(relative, ""); snprintf(path, sizeof(path), "%s/%s", root, relative);
     FILE *file = fopen(path, "wb"); assert(file); assert(fwrite(body, 1, length, file) == length); assert(!fclose(file));
 }
-static void catalog_file(const char *relative, int campaign, int images)
+static void catalog_file(const char *relative, int campaign, int images, int alias)
 {
     bytes b = {0}; unsigned char head[0x20] = {5, 'S', 'E', 'R'}, tail[21] = {0};
-    unsigned count = campaign ? 2u : images ? 6u : 2u;
+    unsigned count = (campaign ? 2u : images ? 6u : 2u) + (alias ? 1u : 0u);
     raw(&b, head, sizeof(head)); be(&b, count);
     for (unsigned i = 0; i < count; i++) {
+        if (alias && i == count - 1) {
+            /* A second row for the stock rock image, at a path no original
+             * holds: only the catalog names it. */
+            be(&b, i); string(&b, "image"); string(&b, "textures/rock");
+            string(&b, "generated/image/textures/rock_catalog_alias.bimage"); raw(&b, tail, sizeof(tail)); continue;
+        }
         if (i == 5) {
             /* SnapMap registers this model with no data. */
             be(&b, i); string(&b, "model"); string(&b, "models/fileless.lwo");
@@ -778,6 +788,183 @@ static void reverse_canonicalizer_scopes(fixture *f, const sh_resource_catalog *
     sh_package_source_link_close(s);
     for (int i = 0; i < 4; i++) sh_package_owners_free(&files[i].gameplay_owners);
 }
+/* Indexed and per-unit reverse decisions for one direct capture; returns
+ * whether the capture opened. The oracle (reverse_oracle_checked) also counts
+ * them; here the decisions this capture added must exist and all agree. */
+static int reverse_decisions_agree(fixture *f, const sh_package_compilation *const *scopes, size_t count,
+    const sh_resource_catalog *catalog, const sh_package_source_root_plan *plan, sh_package_source_link_native *native,
+    const char *label)
+{
+    char error[1024]; size_t before = 0, checked = 0, mismatches = 0;
+    sh_decl_registry_source registry = {f, read_memory, (uintptr_t)f->registry};
+    sh_package_source_link_test_reverse(&before, &mismatches);
+    assert(!mismatches);
+    sh_package_source_link *s = sh_package_source_link_open_roots(scopes, count, catalog, original, f, registry,
+        (uintptr_t)f->reflection, native, plan, error, sizeof(error));
+    sh_package_source_link_test_reverse(&checked, &mismatches);
+    if (checked <= before || mismatches) fprintf(stderr, "%s: %zu decisions, %zu mismatched (%s)\n", label,
+        checked - before, mismatches, s ? "opened" : error);
+    assert(checked > before && !mismatches);
+    sh_package_source_link_close(s);
+    return s != NULL;
+}
+/* A change reached only through a catalog row: the stock rock image has a
+ * second catalog row at a path no original holds, and scope 0 supplies a
+ * gameplay-owned file exactly there (the baseline supplies it unowned, so the
+ * nominated root still binds there). No file, cooked path or seeded identity
+ * ties scope 0's file to the stock image. */
+static void reverse_catalog_alias(fixture *f)
+{
+    char path[4096], error[1024];
+    catalog_file("alias/snap_gameresources.pindex", 0, 1, 1); catalog_file("alias/gameresources.pindex", 1, 1, 0);
+    create("alias/snap_gameresources.resources", ""); create("alias/snap_gameresources.patch", "");
+    create("alias/gameresources.resources", ""); create("alias/gameresources.patch", "");
+    snprintf(path, sizeof(path), "%s/alias", root);
+    sh_resource_catalog *catalog = sh_resource_catalog_open(path, error, sizeof(error)); assert(catalog);
+    sh_compiled_resource files[3] = {0};
+    const char *paths[] = {"generated/image/textures/rock_catalog_alias.bimage",
+        "generated/image/textures/unrelated_quiet.bimage", "generated/image/textures/rock_catalog_alias.bimage"};
+    const char *names[] = {"textures/rock_catalog_alias", "textures/unrelated_quiet", "textures/rock_catalog_alias"};
+    sh_package_compilation compiled[3] = {{0}};
+    for (int i = 0; i < 3; i++) {
+        files[i].engine_path = paths[i]; files[i].type = "image"; files[i].name = names[i];
+        files[i].body = (unsigned char *)"changed"; files[i].body_length = 7; files[i].source = SIZE_MAX;
+        if (i < 2) assert(sh_package_owners_add(&files[i].gameplay_owners, 0));
+        compiled[i].resources = files + i; compiled[i].resource_count = 1;
+    }
+    const sh_package_compilation *scopes[] = {compiled, compiled + 1, compiled + 2};
+    unsigned char discover[] = {1, 1, 0};
+    sh_package_source_root_plan plan = {discover, 2, NULL};
+    sh_package_source_link_native native = {0};
+    assert(reverse_decisions_agree(f, scopes, 3, catalog, &plan, &native, "catalog alias"));
+    for (int i = 0; i < 2; i++) sh_package_owners_free(&files[i].gameplay_owners);
+    sh_resource_catalog_close(catalog);
+}
+/* One Wwise bank (v113 shape) with one event and no actions. */
+#define REVERSE_BANK_BYTES 49
+static void reverse_put32(unsigned char *p, uint32_t v)
+{ p[0] = (unsigned char)v; p[1] = (unsigned char)(v >> 8); p[2] = (unsigned char)(v >> 16); p[3] = (unsigned char)(v >> 24); }
+static void reverse_bank(unsigned char *bytes, uint32_t id, uint32_t event)
+{
+    memset(bytes, 0, REVERSE_BANK_BYTES); memcpy(bytes, "BKHD", 4); reverse_put32(bytes + 4, 16); reverse_put32(bytes + 8, 113);
+    reverse_put32(bytes + 12, id);
+    memcpy(bytes + 24, "HIRC", 4); reverse_put32(bytes + 28, 17); reverse_put32(bytes + 32, 1);
+    bytes[36] = 4; reverse_put32(bytes + 37, 8); reverse_put32(bytes + 41, event);
+}
+/* A change reached only through audio: the stock root is the sound
+ * sounds/noisy (a legacy document's candidate), and scope 0 supplies a bank
+ * whose event is that sound's, with no file or seeded unit at any of its
+ * paths. Whether the nominated sound then binds is not this case's question. */
+static void reverse_audio_only(fixture *f, const sh_resource_catalog *catalog)
+{
+    unsigned char bank[REVERSE_BANK_BYTES]; uint32_t event = 0, id = 2166136261u; char error[1024];
+    assert(sh_audio_event_identity("sounds/noisy", &event));
+    for (const char *c = "noisy"; *c; c++) { id *= 16777619u; id ^= (unsigned char)*c; } /* the bank file's name */
+    reverse_bank(bank, id, event);
+    sh_compiled_resource files[2] = {0};
+    files[0].engine_path = "sound/soundbanks/pc/noisy.bnk"; files[0].body = bank; files[0].body_length = sizeof(bank);
+    files[0].source = SIZE_MAX;
+    files[1].engine_path = "generated/image/textures/unrelated_quiet.bimage"; files[1].type = "image";
+    files[1].name = "textures/unrelated_quiet"; files[1].body = (unsigned char *)"changed"; files[1].body_length = 7;
+    files[1].source = SIZE_MAX; assert(sh_package_owners_add(&files[1].gameplay_owners, 0));
+    sh_package_compilation compiled[3] = {{0}};
+    compiled[0].resources = files; compiled[0].resource_count = 1;
+    compiled[1].resources = files + 1; compiled[1].resource_count = 1;
+    const sh_package_compilation *scopes[] = {compiled, compiled + 1, compiled + 2};
+    sh_package_references candidates = {0};
+    assert(sh_package_references_add(&candidates, "sound", "sounds/noisy"));
+    unsigned char discover[] = {1, 1, 0};
+    sh_package_source_root_plan plan = {discover, 2, NULL, &candidates};
+    /* No installed banks: the scope's bank is all the inventory there is. */
+    char base[4096]; create("audio-empty/sound/soundbanks/pc/none.txt", "");
+    snprintf(base, sizeof(base), "%s/audio-empty", root);
+    sh_audio_originals *originals = sh_audio_originals_open(base, L"English(US)", NULL); assert(originals);
+    sh_package_audio_program *audio = sh_package_audio_program_open(scopes, 3, originals, error, sizeof(error));
+    assert(audio);
+    sh_package_source_link_native native = {0}; native.audio = audio;
+    (void)reverse_decisions_agree(f, scopes, 3, catalog, &plan, &native, "audio only");
+    sh_package_audio_program_close(audio); sh_audio_originals_close(originals); sh_package_references_free(&candidates);
+    sh_package_owners_free(&files[1].gameplay_owners);
+}
+/* Nine discovering scopes with nine different canonicalizers: the ninth has
+ * no index table and takes the per-unit scan, and it is the one that supplies
+ * the stock rock image. Each canonicalizer counts its calls so none is folded
+ * into another. */
+static volatile long canonical_calls[9];
+#define REVERSE_CANONICAL(n) static char *reverse_canonical_##n(const char *path) \
+    { canonical_calls[n]++; return sh_package_engine_path(path); }
+REVERSE_CANONICAL(0) REVERSE_CANONICAL(1) REVERSE_CANONICAL(2) REVERSE_CANONICAL(3) REVERSE_CANONICAL(4)
+REVERSE_CANONICAL(5) REVERSE_CANONICAL(6) REVERSE_CANONICAL(7) REVERSE_CANONICAL(8)
+static void reverse_canonicalizer_fallback(fixture *f, const sh_resource_catalog *catalog)
+{
+    char *(*const canonical[9])(const char *) = {reverse_canonical_0, reverse_canonical_1, reverse_canonical_2,
+        reverse_canonical_3, reverse_canonical_4, reverse_canonical_5, reverse_canonical_6, reverse_canonical_7,
+        reverse_canonical_8};
+    sh_compiled_resource files[9] = {0};
+    sh_package_compilation compiled[10] = {{0}};
+    const sh_package_compilation *scopes[10];
+    unsigned char discover[10];
+    for (int i = 0; i < 9; i++) {
+        files[i].engine_path = i == 8 ? "generated/image/textures/rock.bimage" : "generated/image/textures/unrelated_quiet.bimage";
+        files[i].type = "image"; files[i].name = i == 8 ? "textures/rock" : "textures/unrelated_quiet";
+        files[i].body = (unsigned char *)"changed"; files[i].body_length = 7; files[i].source = SIZE_MAX;
+        assert(sh_package_owners_add(&files[i].gameplay_owners, 0));
+        compiled[i].resources = files + i; compiled[i].resource_count = 1; compiled[i].canonical_path = canonical[i];
+        scopes[i] = compiled + i; discover[i] = 1;
+    }
+    scopes[9] = compiled + 9; discover[9] = 0;
+    sh_package_source_root_plan plan = {discover, 9, NULL};
+    sh_package_source_link_native native = {0};
+    assert(reverse_decisions_agree(f, scopes, 10, catalog, &plan, &native, "canonicalizer fallback"));
+    assert(canonical_calls[8]);
+    for (int i = 0; i < 9; i++) sh_package_owners_free(&files[i].gameplay_owners);
+}
+/* A change reached only through a seeded witness: scope 0's page family
+ * seeds the stock material generic/rock (material_seeds) and its companion is
+ * a gameplay-owned page file (material_companions), while the material's own
+ * declaration is the unowned stock one. No candidate path of any base unit is
+ * the page file, so only the seeded supply's witnesses tie it to the stock
+ * material. (Base units themselves never carry witnesses: the reverse base
+ * link has no companion adapter.) */
+typedef struct seeded_witness_native { const sh_compiled_resource *page; size_t seeds, companions; } seeded_witness_native;
+static int seeded_witness_seeds(void *context, size_t scope, int (*visit)(void *, const char *), void *visit_context,
+    char *error, size_t capacity)
+{
+    seeded_witness_native *n = context; (void)error; (void)capacity;
+    if (scope) return 1;
+    n->seeds++; return visit(visit_context, "generic/rock");
+}
+static int seeded_witness_companions(void *context, size_t scope, const char *material,
+    int (*visit)(void *, const char *, const sh_compiled_resource *), void *visit_context, char *error, size_t capacity)
+{
+    seeded_witness_native *n = context; (void)error; (void)capacity;
+    if (scope || strcmp(material, "generic/rock")) return 1;
+    n->companions++; return visit(visit_context, "page", n->page);
+}
+static void reverse_seeded_witness(fixture *f, const sh_resource_catalog *catalog)
+{
+    sh_compiled_resource files[2] = {0};
+    /* The companion is an image of its own, which no base unit names. */
+    files[0].engine_path = "generated/image/textures/rock_page.bimage"; files[0].type = "image";
+    files[0].name = "textures/rock_page"; files[0].body = (unsigned char *)"page"; files[0].body_length = 4;
+    files[0].source = SIZE_MAX; assert(sh_package_owners_add(&files[0].gameplay_owners, 0));
+    files[1].engine_path = "generated/image/textures/unrelated_quiet.bimage"; files[1].type = "image";
+    files[1].name = "textures/unrelated_quiet"; files[1].body = (unsigned char *)"changed"; files[1].body_length = 7;
+    files[1].source = SIZE_MAX; assert(sh_package_owners_add(&files[1].gameplay_owners, 0));
+    sh_package_compilation compiled[3] = {{0}};
+    compiled[0].resources = files; compiled[0].resource_count = 1;
+    compiled[1].resources = files + 1; compiled[1].resource_count = 1;
+    const sh_package_compilation *scopes[] = {compiled, compiled + 1, compiled + 2};
+    unsigned char discover[] = {1, 1, 0};
+    sh_package_source_root_plan plan = {discover, 2, NULL};
+    seeded_witness_native adapter = {files, 0, 0};
+    sh_package_source_link_native native = {0};
+    native.context = &adapter; native.material_seeds = seeded_witness_seeds;
+    native.material_companions = seeded_witness_companions;
+    (void)reverse_decisions_agree(f, scopes, 3, catalog, &plan, &native, "seeded witness");
+    assert(adapter.seeds && adapter.companions);
+    for (int i = 0; i < 2; i++) sh_package_owners_free(&files[i].gameplay_owners);
+}
 /* An attempt whose supplied content already waits for native preparation
  * fails, but first lets the stock observation queue what it needs too
  * (program "second" is reached only from the stock palette), so one
@@ -845,7 +1032,7 @@ int main(void)
     assert(GetTempPathA(sizeof(temporary), temporary));
     snprintf(root, sizeof(root), "%ssmp-reverse-roots-%lu-%llu", temporary, GetCurrentProcessId(), GetTickCount64());
     assert(CreateDirectoryA(root, NULL));
-    catalog_file("base/snap_gameresources.pindex", 0, 1); catalog_file("base/gameresources.pindex", 1, 1);
+    catalog_file("base/snap_gameresources.pindex", 0, 1, 0); catalog_file("base/gameresources.pindex", 1, 1, 0);
     create("base/snap_gameresources.resources", ""); create("base/snap_gameresources.patch", "");
     create("base/gameresources.resources", ""); create("base/gameresources.patch", "");
     snprintf(path, sizeof(path), "%s/base", root);
@@ -853,6 +1040,10 @@ int main(void)
     reverse_preparation_frontier(&f,catalog);
     reverse_preparation_after_failure(&f,catalog);
     reverse_canonicalizer_scopes(&f,catalog);
+    reverse_canonicalizer_fallback(&f,catalog);
+    reverse_audio_only(&f,catalog);
+    reverse_catalog_alias(&f);
+    reverse_seeded_witness(&f,catalog);
     const char *image = "generated/image/textures/rock.bimage";
     package("a", "Red", image, "red-image"); package("b", "Green", image, "green-image");
     package("c", "Red Copy", image, "red-image"); package("d", "Original", image, "stock-image");
@@ -938,8 +1129,8 @@ int main(void)
     sh_package_library_free(&recorded); sh_package_provenance_free(&historical);
     /* A typed original image and a native explicit-path spelling can serve
      * one exact physical file. Neither spelling supplies another source's data. */
-    catalog_file("catalogless/snap_gameresources.pindex", 0, 0);
-    catalog_file("catalogless/gameresources.pindex", 1, 0);
+    catalog_file("catalogless/snap_gameresources.pindex", 0, 0, 0);
+    catalog_file("catalogless/gameresources.pindex", 1, 0, 0);
     create("catalogless/snap_gameresources.resources", ""); create("catalogless/snap_gameresources.patch", "");
     create("catalogless/gameresources.resources", ""); create("catalogless/gameresources.patch", "");
     snprintf(path, sizeof(path), "%s/catalogless", root);
