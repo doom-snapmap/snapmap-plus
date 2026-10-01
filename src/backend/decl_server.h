@@ -43,7 +43,11 @@ int sh_decl_server_rearm(void);
  */
 void sh_decl_server_request_rearm(void);
 
-/* Advance a requested re-arm. Call from the engine tick (main thread). No-op when idle. */
+/* Advance a requested re-arm. Call from the engine tick (main thread). No-op when idle.
+ * It also notices installed packages changed outside an installation (a
+ * corrected package that failed the preparation or was left out of a served
+ * library) and requests a re-arm once the change has settled and differs from
+ * what the last preparation read, so it is served in the same process. */
 void sh_decl_server_rearm_poll(void);
 /* Main-thread map preflight admits settled SnapMap map information, browser,
  * tile browser and lobby menus with no active editor or native loading. */
@@ -100,6 +104,19 @@ struct sh_package_compilation;
 int sh_decl_server_test_capture(const struct sh_package_compilation *compiled,
                                  size_t *count, size_t *bytes);
 void sh_decl_server_test_fail_mark_allocation(int fail);
+/* Installed-package change tracking: settle time before a changed inventory is
+ * prepared again, first reopen interval of a lost watch, how often the watched
+ * directory's identity is checked, and the first interval before an unanswered
+ * request is repeated (2000, 1000, 5000 and 2000 ms outside tests); counts of
+ * watch opens and of re-arms requested for changes; force the next opens to
+ * fail. */
+void sh_decl_server_test_inventory_timing(unsigned long quiet_ms, unsigned long backoff_ms, unsigned long identity_ms,
+    unsigned long request_ms);
+long sh_decl_server_test_inventory_opens(void);
+long sh_decl_server_test_inventory_requests(void);
+void sh_decl_server_test_inventory_fail_opens(long count);
+/* Close the watch as if its handle failed; it may reopen at once. */
+void sh_decl_server_test_inventory_drop(void);
 void sh_decl_server_test_occurrence_ready(void *editor);
 
 typedef struct sh_decl_server_test_find_api {

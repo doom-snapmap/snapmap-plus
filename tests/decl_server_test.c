@@ -412,21 +412,83 @@ static int runtime_original(void *context, const char *path, unsigned char **bod
     *length = strlen("{ original = 1; }");
     return *body ? 1 : -1;
 }
+/* Replace a file's contents, as an author's editor would. */
+static void inventory_write(const char *path, const char *text)
+{
+    HANDLE file = CreateFileA(path, GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    DWORD written = 0;
+    CHECK(file != INVALID_HANDLE_VALUE);
+    if (file == INVALID_HANDLE_VALUE) return;
+    CHECK(WriteFile(file, text, (DWORD)strlen(text), &written, NULL) && written == strlen(text));
+    CloseHandle(file);
+}
+/* Write text unless the file already holds it: a preparation reads the
+ * installed packages and never rewrites them, so the fixture keeps their
+ * write times as production would. */
+static void fixture_put(const char *path, const char *text)
+{
+    FILE *file = NULL;
+    char current[4096];
+    size_t length = strlen(text), read = 0;
+    if (!fopen_s(&file, path, "rb") && file) {
+        read = fread(current, 1, sizeof(current), file); fclose(file); file = NULL;
+        if (read == length && !memcmp(current, text, length)) return;
+    }
+    inventory_write(path, text);
+}
 static void runtime_fixture_write(void)
 {
-    char path[MAX_PATH]; FILE *file = NULL;
+    char path[MAX_PATH];
     for (size_t i = 0; i < sizeof(runtime_dirs)/sizeof(runtime_dirs[0]); i++) {
         snprintf(path, sizeof path, "%s/%s", g_fixture_root, runtime_dirs[i]);
         CHECK(CreateDirectoryA(path, NULL) || GetLastError() == ERROR_ALREADY_EXISTS);
     }
     snprintf(path, sizeof path, "%s/overrides/fixture/package.json", g_fixture_root);
-    CHECK(!fopen_s(&file, path, "wb") && file);
-    if (file) { fputs("{\"id\":\"fixture\",\"name\":\"Fixture\"}", file); fclose(file); }
+    fixture_put(path, "{\"id\":\"fixture\",\"name\":\"Fixture\"}");
     snprintf(path, sizeof path, "%s/overrides/fixture/assets/generated/decls/material/rt/alpha.decl", g_fixture_root);
-    if (g_linked_fixture) {
-        CHECK(!fopen_s(&file, path, "wb") && file);
-        if (file) { fputs(g_linked_body, file); fclose(file); }
-    } else if (GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES) CHECK(DeleteFileA(path));
+    if (g_linked_fixture) fixture_put(path, g_linked_body);
+    else if (GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES) CHECK(DeleteFileA(path));
+}
+/* The settle time the inventory tests use; production waits 2000 ms. */
+#define INVENTORY_QUIET_MS 300u
+static void inventory_poll_for(ULONGLONG ms)
+{
+    for (ULONGLONG start = GetTickCount64(); GetTickCount64() - start < ms;) { sh_decl_server_rearm_poll(); Sleep(5); }
+}
+/* Poll until a pass starts after scans, for at most 10 s (a pass runs inside
+ * one poll). */
+static void inventory_until_pass(int scans)
+{
+    for (ULONGLONG start = GetTickCount64(); g_scan_calls == scans && GetTickCount64() - start < 10000;) {
+        sh_decl_server_rearm_poll(); Sleep(5);
+    }
+}
+/* Poll until no pass has started for five settle times. */
+static void inventory_settle(void)
+{
+    ULONGLONG start = GetTickCount64(), last = start;
+    for (int before = g_scan_calls; GetTickCount64() - last < INVENTORY_QUIET_MS * 5 && GetTickCount64() - start < 30000;) {
+        sh_decl_server_rearm_poll(); Sleep(5);
+        if (g_scan_calls != before) { before = g_scan_calls; last = GetTickCount64(); }
+    }
+}
+static int inventory_remove_tree(const char *path)
+{
+    char pattern[MAX_PATH], child[MAX_PATH];
+    WIN32_FIND_DATAA found;
+    HANDLE search;
+    _snprintf_s(pattern, sizeof(pattern), _TRUNCATE, "%s\\*", path);
+    search = FindFirstFileA(pattern, &found);
+    if (search != INVALID_HANDLE_VALUE) {
+        do {
+            if (!strcmp(found.cFileName, ".") || !strcmp(found.cFileName, "..")) continue;
+            _snprintf_s(child, sizeof(child), _TRUNCATE, "%s\\%s", path, found.cFileName);
+            if (found.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) { if (!inventory_remove_tree(child)) { FindClose(search); return 0; } }
+            else if (!DeleteFileA(child)) { FindClose(search); return 0; }
+        } while (FindNextFileA(search, &found));
+        FindClose(search);
+    }
+    return RemoveDirectoryA(path) != 0;
 }
 static void runtime_fixture(void)
 {
@@ -440,9 +502,17 @@ unsigned long sh_overrides_rescan_packages(void)
     runtime_fixture(); return 1;
 }
 
+/* When set, the author corrects the package while this pass reads it: the pass
+ * still fails, and the file changes after its inventory was taken. */
+static const char *g_scan_correct_path;
 unsigned long sh_overrides_rescan_packages_activated(sh_package_activation_fn activate, void *context)
 {
     g_scan_calls++;
+    if (g_scan_correct_path) {
+        inventory_write(g_scan_correct_path, "corrected during the pass");
+        g_scan_correct_path = NULL; g_scan_fail = 0;
+        return SH_OVERRIDES_RESCAN_FAILED;
+    }
     if (g_scan_fail) return SH_OVERRIDES_RESCAN_FAILED;
     runtime_fixture_write();
     return sh_package_runtime_refresh_activated(g_fixture_root, (sh_package_activation_guard){0},
@@ -3337,6 +3407,187 @@ static void test_empty_launch_and_runtime_results(void)
         CHECK(sh_decl_server_rearm() == 1);
     }
     {
+        /* Installed packages changed outside an installation are prepared again
+         * in this process at the browser, once per change: after a failed
+         * preparation and in a served library that left an owner out, for a
+         * change made after or during a pass or before the watch could open,
+         * across the watched directory being replaced or removed, for an edit
+         * in place that keeps the size and write time, and for a request the
+         * server could not take at first. An unchanged inventory, served or
+         * failed, is never prepared again, and a lost watch reopens, and an
+         * unanswered request repeats, at a growing interval, not per frame.
+         * Each wait outlasts the settle time several times before passes are
+         * counted. */
+        char overrides[MAX_PATH], marker[MAX_PATH], moved[MAX_PATH], left[MAX_PATH], path[MAX_PATH];
+        const sh_package_compilation *served;
+        size_t packages;
+        long opens, requests;
+        int scans;
+        _snprintf_s(overrides, sizeof(overrides), _TRUNCATE, "%s\\overrides", g_fixture_root);
+        _snprintf_s(marker, sizeof(marker), _TRUNCATE, "%s\\overrides\\fixture\\corrected.txt", g_fixture_root);
+        _snprintf_s(moved, sizeof(moved), _TRUNCATE, "%s\\overrides-moved", g_fixture_root);
+        _snprintf_s(left, sizeof(left), _TRUNCATE, "%s\\overrides\\left", g_fixture_root);
+        sh_decl_server_test_inventory_timing(INVENTORY_QUIET_MS, 20, 0, 20);
+        /* Start with the watch open and nothing pending: earlier tests may
+         * have closed it, and its reopening would count as one change. */
+        sh_decl_server_test_inventory_drop();
+        CHECK(sh_decl_server_rearm() == 1);
+        inventory_settle();
+        /* 1. The whole preparation failed; an unchanged inventory waits. */
+        g_scan_fail = 1;
+        CHECK(sh_decl_server_rearm() == 0);
+        scans = g_scan_calls;
+        inventory_settle();
+        CHECK(g_scan_calls == scans && !sh_decl_server_registration_succeeded());
+        /* Corrected afterwards: one pass at the browser serves it. */
+        g_scan_fail = 0; inventory_write(marker, "corrected");
+        inventory_settle();
+        CHECK(g_scan_calls == scans + 1 && sh_decl_server_registration_succeeded() && sh_package_runtime_ready());
+        /* 2. Corrected while the failing pass read the inventory. */
+        g_scan_fail = 1; g_scan_correct_path = marker;
+        CHECK(sh_decl_server_rearm() == 0);
+        scans = g_scan_calls;
+        inventory_settle();
+        CHECK(g_scan_calls == scans + 1 && sh_decl_server_registration_succeeded());
+        /* 3. A retry that fails again waits for the next change. */
+        g_scan_fail = 1;
+        CHECK(sh_decl_server_rearm() == 0);
+        scans = g_scan_calls;
+        inventory_write(marker, "still broken");
+        inventory_settle();
+        CHECK(g_scan_calls == scans + 1 && !sh_decl_server_registration_succeeded());
+        /* 4. No watch when the pass began (its handle failed and reopening
+         * still fails), and the correction comes before any watch exists: the
+         * reopened watch counts as a change and the inventory is retried. */
+        sh_decl_server_test_inventory_drop();
+        sh_decl_server_test_inventory_fail_opens(2);
+        CHECK(sh_decl_server_rearm() == 0);
+        scans = g_scan_calls;
+        g_scan_fail = 0; inventory_write(marker, "corrected before the watch");
+        inventory_settle();
+        CHECK(g_scan_calls == scans + 1 && sh_decl_server_registration_succeeded());
+        /* 5. Replaced: the old handle watches the moved tree; the identity
+         * check finds the new directory and its inventory is served. */
+        g_scan_fail = 1;
+        CHECK(sh_decl_server_rearm() == 0);
+        scans = g_scan_calls;
+        CHECK(MoveFileA(overrides, moved));
+        CHECK(CreateDirectoryA(overrides, NULL));
+        runtime_fixture_write();
+        inventory_write(marker, "replaced");
+        g_scan_fail = 0;
+        inventory_settle();
+        CHECK(g_scan_calls == scans + 1 && sh_decl_server_registration_succeeded());
+        CHECK(inventory_remove_tree(moved));
+        /* 6. Removed, then recreated: reopening backs off instead of trying
+         * every frame, and the recreated inventory is served. */
+        g_scan_fail = 1;
+        CHECK(sh_decl_server_rearm() == 0);
+        scans = g_scan_calls;
+        CHECK(MoveFileA(overrides, moved));
+        opens = sh_decl_server_test_inventory_opens();
+        inventory_poll_for(1000);
+        opens = sh_decl_server_test_inventory_opens() - opens;
+        if (opens < 2 || opens > 6) fprintf(stderr, "removed watch: %ld reopen attempt(s) in 1 s\n", opens);
+        CHECK(opens >= 2 && opens <= 6);
+        g_scan_fail = 0;
+        CHECK(MoveFileA(moved, overrides));
+        inventory_write(marker, "recreated");
+        inventory_until_pass(scans);
+        inventory_settle();
+        CHECK(g_scan_calls == scans + 1 && sh_decl_server_registration_succeeded());
+        /* 7. Served with an owner left out (one of its declarations does not
+         * read); correcting it serves it in this process. */
+        CHECK(CreateDirectoryA(left, NULL));
+        _snprintf_s(path, sizeof(path), _TRUNCATE, "%s\\package.json", left);
+        inventory_write(path, "{\"id\":\"left\",\"name\":\"Left\"}");
+        const char *levels[] = {"assets", "assets\\generated", "assets\\generated\\decls",
+            "assets\\generated\\decls\\snapeditorentitydef"};
+        for (size_t i = 0; i < sizeof(levels) / sizeof(levels[0]); i++) {
+            _snprintf_s(path, sizeof(path), _TRUNCATE, "%s\\%s", left, levels[i]);
+            CHECK(CreateDirectoryA(path, NULL) || GetLastError() == ERROR_ALREADY_EXISTS);
+        }
+        _snprintf_s(path, sizeof(path), _TRUNCATE, "%s\\assets\\left.bin", left);
+        inventory_write(path, "independent resource");
+        _snprintf_s(path, sizeof(path), _TRUNCATE, "%s\\assets\\generated\\decls\\snapeditorentitydef\\bad.decl", left);
+        inventory_write(path, "{} }");
+        scans = g_scan_calls;
+        inventory_settle();
+        CHECK(g_scan_calls == scans + 1 && sh_decl_server_registration_succeeded());
+        {
+            char *summary = sh_package_runtime_summary();
+            if (!summary || !strstr(summary, "Skipped local package")) fprintf(stderr, "left out owner: %s\n", summary ? summary : "");
+            CHECK(summary && strstr(summary, "Skipped local package"));
+            free(summary);
+        }
+        served = sh_package_runtime_acquire(); packages = served ? served->sources->package_count : 0;
+        sh_package_runtime_release();
+        scans = g_scan_calls;
+        CHECK(DeleteFileA(path));
+        inventory_settle();
+        CHECK(g_scan_calls == scans + 1 && sh_decl_server_registration_succeeded());
+        served = sh_package_runtime_acquire();
+        if (!served || served->sources->package_count != packages + 1) {
+            char *summary = sh_package_runtime_summary();
+            fprintf(stderr, "corrected owner: %zu package(s) served, %zu before: %s\n",
+                served ? served->sources->package_count : 0, packages, summary ? summary : "");
+            free(summary);
+        }
+        CHECK(served && served->sources->package_count == packages + 1);
+        sh_package_runtime_release();
+        /* 8. An edit in place that keeps the size and restores the write time
+         * is a change: the notification decides, not the file's metadata, and
+         * the pass serves the new bytes. */
+        {
+            WIN32_FILE_ATTRIBUTE_DATA after;
+            unsigned char *body = NULL;
+            size_t length = 0;
+            FILETIME written;
+            DWORD count = 0;
+            HANDLE file;
+            _snprintf_s(path, sizeof(path), _TRUNCATE, "%s\\assets\\left.bin", left);
+            CHECK(sh_package_runtime_read("left.bin", &body, &length) == 1 && length == 20 &&
+                !memcmp(body, "independent resource", 20));
+            free(body); body = NULL;
+            file = CreateFileA(path, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+            CHECK(file != INVALID_HANDLE_VALUE);
+            scans = g_scan_calls;
+            if (file != INVALID_HANDLE_VALUE) {
+                CHECK(GetFileTime(file, NULL, NULL, &written));
+                CHECK(WriteFile(file, "INDEPENDENT RESOURCE", 20, &count, NULL) && count == 20);
+                CHECK(SetFileTime(file, NULL, NULL, &written) && FlushFileBuffers(file));
+                CloseHandle(file);
+                CHECK(GetFileAttributesExA(path, GetFileExInfoStandard, &after) && after.nFileSizeLow == 20 &&
+                    !after.nFileSizeHigh && !CompareFileTime(&after.ftLastWriteTime, &written));
+            }
+            inventory_settle();
+            CHECK(g_scan_calls == scans + 1 && sh_decl_server_registration_succeeded());
+            CHECK(sh_package_runtime_read("left.bin", &body, &length) == 1 && length == 20 &&
+                !memcmp(body, "INDEPENDENT RESOURCE", 20));
+            free(body);
+        }
+        /* 9. A request the server cannot take yet (overrides unavailable for
+         * this launch) is repeated at a growing interval, not lost and not per
+         * frame, and the change is prepared once it can be. */
+        g_user_enabled = 0;
+        scans = g_scan_calls; requests = sh_decl_server_test_inventory_requests();
+        inventory_write(marker, "while unavailable");
+        inventory_poll_for(2500);
+        requests = sh_decl_server_test_inventory_requests() - requests;
+        if (requests < 3 || requests > 10) fprintf(stderr, "unanswered request: repeated %ld time(s) in 2.5 s\n", requests);
+        CHECK(g_scan_calls == scans && requests >= 3 && requests <= 10);
+        g_user_enabled = 1;
+        inventory_until_pass(scans);
+        inventory_settle();
+        CHECK(g_scan_calls == scans + 1 && sh_decl_server_registration_succeeded());
+        /* Restore the fixture inventory for the rest of the suite. */
+        CHECK(inventory_remove_tree(left));
+        CHECK(DeleteFileA(marker));
+        inventory_settle();
+        CHECK(sh_decl_server_rearm() == 1);
+        sh_decl_server_test_inventory_timing(2000, 1000, 5000, 2000);
+    }
+    {
         int commits = g_install_commit_calls;
         g_defer_install_commit = 1;
         CHECK(sh_decl_server_rearm() == 0);
@@ -3466,6 +3717,23 @@ static void test_empty_launch_and_runtime_results(void)
         snprintf(path, sizeof path, "%s/overrides/fixture/package.json", g_fixture_root); CHECK(DeleteFileA(path));
         for (size_t i = sizeof(runtime_dirs)/sizeof(runtime_dirs[0]); i; i--) {
             snprintf(path, sizeof path, "%s/%s", g_fixture_root, runtime_dirs[i - 1]); CHECK(RemoveDirectoryA(path));
+        }
+        /* The served owner of the inventory steps leaves its asset in the
+         * content-addressed resource cache: remove those files and that exact
+         * directory. */
+        {
+            char pattern[MAX_PATH], file[MAX_PATH]; WIN32_FIND_DATAA found; HANDLE search;
+            snprintf(pattern, sizeof pattern, "%s/package-cache/resources/*", g_fixture_root);
+            search = FindFirstFileA(pattern, &found);
+            if (search != INVALID_HANDLE_VALUE) {
+                do if (!(found.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
+                    snprintf(file, sizeof file, "%s/package-cache/resources/%s", g_fixture_root, found.cFileName);
+                    CHECK(DeleteFileA(file));
+                } while (FindNextFileA(search, &found));
+                FindClose(search);
+            }
+            snprintf(path, sizeof path, "%s/package-cache/resources", g_fixture_root);
+            CHECK(RemoveDirectoryA(path) || GetLastError() == ERROR_PATH_NOT_FOUND || GetLastError() == ERROR_FILE_NOT_FOUND);
         }
         /* The bundle cache leaves these known empty children under this
          * fixture root. Remove only those exact directories, never recurse. */

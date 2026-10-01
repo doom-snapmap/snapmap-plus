@@ -10,6 +10,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
+#include <stddef.h>
 #include <stdint.h>
 #include <limits.h>
 #include <stdio.h>
@@ -28,6 +29,7 @@
 #include "decl_server_path.h"
 #include "decl_text.h"
 #include "overrides.h"
+#include "package_sources.h"
 #include "palette_refresh.h"
 #include "engine_dialog.h"
 #include "decl_visibility.h"
@@ -3005,9 +3007,230 @@ static volatile LONG g_auto_state;
 void sh_decl_server_request_rearm(void)
 {
     if (InterlockedCompareExchange(&g_auto_state, DS_AUTO_RUN, DS_AUTO_IDLE) == DS_AUTO_IDLE)
-        backend_log("decl-server: runtime re-arm REQUESTED (a package was installed mid-session); "
+        backend_log("decl-server: runtime re-arm REQUESTED (installed packages changed); "
                     "the engine tick will register it");
 }
+
+/* Installed-package changes outside an installation. An installation requests
+ * its own pass. Anything else that changes the installed packages (an author
+ * correcting a package that failed the whole preparation or was left out of a
+ * served library, a package added or removed by hand) is found here, so it is
+ * served without a restart or a console command. A recursive directory-change
+ * read on <root>\overrides, opened by the first preparation and kept open
+ * across passes, advances a change generation for every batch of reports that
+ * names a change; each preparation records the generation it starts from. A
+ * generation newer than the last preparation's, once settled and while the
+ * server is idle (served or failed), requests one re-arm, which waits for the
+ * settled browser. The generation is consumed only when a preparation starts,
+ * so a refused or deferred request is repeated at a growing interval instead
+ * of being lost, a change made during a pass is prepared once more, and an
+ * inventory nobody changed is never prepared again. Reports decide, not file
+ * metadata: an edit that keeps the size and restores the write time is still a
+ * change. A directory reported modified is not one: NTFS reports a directory's
+ * own times when a handle to it next closes, which a preparation's reading
+ * does after an entry in it changed, and that entry's change is reported by
+ * name. Reports lost to a full buffer count as a change. No traversal is made,
+ * at startup, per frame or per change.
+ * Losing the watch (a failed read, the directory removed, or replaced, which
+ * leaves the handle on the moved directory and is found by checking the
+ * directory's volume and file index every few seconds; creation times can
+ * tunnel across a quick delete and recreate) reopens it no more often than a
+ * doubling interval. A reopened watch counts as one change, since changes may
+ * have been missed while nothing watched, at most once per preparation. */
+typedef struct ds_identity { DWORD volume, high, low; } ds_identity;
+#define DS_INVENTORY_FILTER (FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_DIR_NAME | \
+    FILE_NOTIFY_CHANGE_SIZE | FILE_NOTIFY_CHANGE_LAST_WRITE)
+static HANDLE g_inventory_watch = INVALID_HANDLE_VALUE;
+static OVERLAPPED g_inventory_read;
+/* 64 KiB, the most a network share accepts, DWORD-aligned as reports require. */
+static DWORD g_inventory_reports[16384];
+static wchar_t *g_inventory_root;
+static ds_identity g_inventory_identity;
+static int g_inventory_started, g_inventory_loss_counted;
+static ULONGLONG g_inventory_generation, g_attempt_generation;
+static ULONGLONG g_inventory_event_at, g_inventory_reopen_at, g_inventory_checked_at, g_inventory_backoff;
+static ULONGLONG g_inventory_request_at, g_inventory_request_backoff;
+static ULONGLONG g_inventory_quiet_ms = 2000, g_inventory_backoff_ms = 1000, g_inventory_identity_ms = 5000;
+static ULONGLONG g_inventory_request_ms = 2000;
+#define DS_INVENTORY_BACKOFF_CAP 30000u
+#define DS_INVENTORY_REQUEST_CAP 60000u
+#ifdef SH_DECL_SERVER_TESTING
+static long g_inventory_opens, g_inventory_fail_opens, g_inventory_requests;
+#endif
+
+/* "\\?\<root>\overrides", malloc-owned; NULL without a usable root. */
+static wchar_t *ds_inventory_path(void)
+{
+    char root[MAX_PATH + 16];
+    size_t length;
+    if (!sh_overrides_get_root(root, MAX_PATH) || !root[0]) return NULL;
+    length = strlen(root);
+    if (length && (root[length - 1] == '\\' || root[length - 1] == '/')) root[--length] = 0;
+    if (strcat_s(root, sizeof(root), "\\overrides")) return NULL;
+    return sh_package_source_wide_path(root);
+}
+static void ds_inventory_lost(ULONGLONG now)
+{
+    if (g_inventory_watch != INVALID_HANDLE_VALUE) {
+        DWORD ignored;
+        /* The read must finish before its buffer is used again. */
+        if (!HasOverlappedIoCompleted(&g_inventory_read) && CancelIoEx(g_inventory_watch, &g_inventory_read))
+            GetOverlappedResult(g_inventory_watch, &g_inventory_read, &ignored, TRUE);
+        CloseHandle(g_inventory_watch);
+    }
+    g_inventory_watch = INVALID_HANDLE_VALUE;
+    free(g_inventory_root); g_inventory_root = NULL;
+    if (!g_inventory_backoff) g_inventory_backoff = g_inventory_backoff_ms;
+    g_inventory_reopen_at = now + g_inventory_backoff;
+    g_inventory_backoff = g_inventory_backoff * 2 > DS_INVENTORY_BACKOFF_CAP ? DS_INVENTORY_BACKOFF_CAP : g_inventory_backoff * 2;
+}
+/* A directory's volume and file index. */
+static int ds_inventory_identify(HANDLE directory, ds_identity *identity)
+{
+    BY_HANDLE_FILE_INFORMATION info;
+    if (!GetFileInformationByHandle(directory, &info) || !(info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) return 0;
+    identity->volume = info.dwVolumeSerialNumber; identity->high = info.nFileIndexHigh; identity->low = info.nFileIndexLow;
+    return 1;
+}
+/* Pending until the read completes, which also sets its event. */
+static int ds_inventory_issue(void)
+{
+    HANDLE event = g_inventory_read.hEvent;
+    memset(&g_inventory_read, 0, sizeof(g_inventory_read));
+    g_inventory_read.hEvent = event; g_inventory_read.Internal = (ULONG_PTR)STATUS_PENDING; ResetEvent(event);
+    return ReadDirectoryChangesW(g_inventory_watch, g_inventory_reports, sizeof(g_inventory_reports), TRUE,
+        DS_INVENTORY_FILTER, NULL, &g_inventory_read, NULL) != 0;
+}
+static int ds_inventory_completed(void)
+{
+    return WaitForSingleObject(g_inventory_read.hEvent, 0) == WAIT_OBJECT_0;
+}
+static int ds_inventory_open(ULONGLONG now)
+{
+    wchar_t *path = ds_inventory_path();
+#ifdef SH_DECL_SERVER_TESTING
+    g_inventory_opens++;
+    if (g_inventory_fail_opens > 0) { g_inventory_fail_opens--; free(path); ds_inventory_lost(now); return 0; }
+#endif
+    if (!g_inventory_read.hEvent) g_inventory_read.hEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
+    g_inventory_root = path;
+    if (path && g_inventory_read.hEvent)
+        g_inventory_watch = CreateFileW(path, FILE_LIST_DIRECTORY, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED, NULL);
+    if (g_inventory_watch == INVALID_HANDLE_VALUE || !ds_inventory_identify(g_inventory_watch, &g_inventory_identity) ||
+        !ds_inventory_issue()) {
+        ds_inventory_lost(now); return 0;
+    }
+    g_inventory_checked_at = now; g_inventory_backoff = 0;
+    return 1;
+}
+static int ds_inventory_same_directory(void)
+{
+    ds_identity identity;
+    HANDLE directory = CreateFileW(g_inventory_root, FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE |
+        FILE_SHARE_DELETE, NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    int same;
+    if (directory == INVALID_HANDLE_VALUE) return 0;
+    same = ds_inventory_identify(directory, &identity) && identity.volume == g_inventory_identity.volume &&
+        identity.high == g_inventory_identity.high && identity.low == g_inventory_identity.low;
+    CloseHandle(directory); return same;
+}
+/* Whether a report is of a directory being modified, which is not a change. */
+static int ds_inventory_directory_modified(const FILE_NOTIFY_INFORMATION *report)
+{
+    size_t root = wcslen(g_inventory_root), name = report->FileNameLength / sizeof(WCHAR);
+    wchar_t *path;
+    DWORD attributes;
+    if (report->Action != FILE_ACTION_MODIFIED || !name) return 0;
+    if (!(path = (wchar_t *)malloc((root + name + 2) * sizeof(wchar_t)))) return 0;
+    memcpy(path, g_inventory_root, root * sizeof(wchar_t)); path[root] = L'\\';
+    memcpy(path + root + 1, report->FileName, name * sizeof(wchar_t)); path[root + 1 + name] = 0;
+    attributes = GetFileAttributesW(path);
+    free(path);
+    return attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY);
+}
+/* Collect a completed read and issue the next: 1 when its reports name a
+ * change (or were lost to a full buffer), 0 when they do not, -1 when the watch
+ * is lost. */
+static int ds_inventory_collect(void)
+{
+    const size_t header = offsetof(FILE_NOTIFY_INFORMATION, FileName);
+    DWORD bytes = 0;
+    int changed = 0;
+    if (!GetOverlappedResult(g_inventory_watch, &g_inventory_read, &bytes, FALSE)) {
+        if (GetLastError() != ERROR_NOTIFY_ENUM_DIR) return -1;
+        changed = 1;
+    } else if (!bytes || bytes > sizeof(g_inventory_reports)) {
+        changed = 1;
+    } else {
+        for (size_t at = 0; !changed;) {
+            const FILE_NOTIFY_INFORMATION *report = (const FILE_NOTIFY_INFORMATION *)((const unsigned char *)g_inventory_reports + at);
+            if (bytes - at < header || report->FileNameLength > bytes - at - header ||
+                !ds_inventory_directory_modified(report)) changed = 1;
+            else if (!report->NextEntryOffset) break;
+            else if (report->NextEntryOffset > bytes - at || (report->NextEntryOffset & 3)) changed = 1;
+            else at += report->NextEntryOffset;
+        }
+    }
+    return ds_inventory_issue() ? changed : -1;
+}
+/* A preparation is starting and reads the installed packages after this
+ * point, so changes already reported are ones it reads: they are consumed here
+ * (a bounded number of reads, so a stream of changes cannot hold the pass
+ * back) and only later reports count after it. */
+static void ds_inventory_attempt(void)
+{
+    ULONGLONG now = GetTickCount64();
+    g_inventory_started = 1;
+    if (g_inventory_watch == INVALID_HANDLE_VALUE && now >= g_inventory_reopen_at) ds_inventory_open(now);
+    for (int i = 0; i < 16 && g_inventory_watch != INVALID_HANDLE_VALUE && ds_inventory_completed(); i++)
+        if (ds_inventory_collect() < 0) ds_inventory_lost(now);
+    g_attempt_generation = g_inventory_generation;
+    g_inventory_loss_counted = 0; g_inventory_request_backoff = 0; g_inventory_request_at = 0;
+}
+static void ds_inventory_poll(LONG state)
+{
+    ULONGLONG now;
+    if (!g_inventory_started) return;
+    now = GetTickCount64();
+    if (g_inventory_watch == INVALID_HANDLE_VALUE) {
+        if (now >= g_inventory_reopen_at && ds_inventory_open(now) && !g_inventory_loss_counted) {
+            g_inventory_loss_counted = 1; g_inventory_generation++; g_inventory_event_at = now;
+        }
+    } else if (ds_inventory_completed()) {
+        int changed = ds_inventory_collect();
+        if (changed < 0) ds_inventory_lost(now);
+        else if (changed) { g_inventory_generation++; g_inventory_event_at = now; }
+        return;
+    } else if (now - g_inventory_checked_at >= g_inventory_identity_ms) {
+        g_inventory_checked_at = now;
+        if (!ds_inventory_same_directory()) { ds_inventory_lost(now); return; }
+    }
+    if (g_inventory_generation == g_attempt_generation || now - g_inventory_event_at < g_inventory_quiet_ms) return;
+    if (state != DS_STATE_DONE && state != DS_STATE_FAILED) return;
+    if (InterlockedCompareExchange(&g_auto_state, 0, 0) == DS_AUTO_RUN || now < g_inventory_request_at) return;
+    if (!g_inventory_request_backoff) g_inventory_request_backoff = g_inventory_request_ms;
+    g_inventory_request_at = now + g_inventory_request_backoff;
+    g_inventory_request_backoff = g_inventory_request_backoff * 2 > DS_INVENTORY_REQUEST_CAP ?
+        DS_INVENTORY_REQUEST_CAP : g_inventory_request_backoff * 2;
+#ifdef SH_DECL_SERVER_TESTING
+    g_inventory_requests++;
+#endif
+    backend_log("decl-server: installed packages changed since the last preparation; preparing them again at the browser");
+    sh_decl_server_request_rearm();
+}
+#ifdef SH_DECL_SERVER_TESTING
+void sh_decl_server_test_inventory_timing(unsigned long quiet_ms, unsigned long backoff_ms, unsigned long identity_ms,
+    unsigned long request_ms)
+{
+    g_inventory_quiet_ms = quiet_ms; g_inventory_backoff_ms = backoff_ms; g_inventory_identity_ms = identity_ms;
+    g_inventory_request_ms = request_ms; g_inventory_backoff = 0; g_inventory_request_backoff = 0;
+}
+long sh_decl_server_test_inventory_opens(void) { return g_inventory_opens; }
+long sh_decl_server_test_inventory_requests(void) { return g_inventory_requests; }
+void sh_decl_server_test_inventory_fail_opens(long count) { g_inventory_fail_opens = count; }
+void sh_decl_server_test_inventory_drop(void) { ds_inventory_lost(GetTickCount64()); g_inventory_reopen_at = 0; }
+#endif
 
 /* Drive pending rearm on the engine main thread; requirement application
  * drains synchronously.
@@ -3033,6 +3256,7 @@ void sh_decl_server_rearm_poll(void)
     if (!ds_occurrence_maintenance()) return;
     LONG state = InterlockedCompareExchange(&g_state, 0, 0);
     if (sh_rawmap_defers_install_commit()) return;
+    ds_inventory_poll(state);
     if (InterlockedCompareExchange(&g_auto_state, 0, 0) != DS_AUTO_RUN) {
         /* Object destructors only release leases. Native cleanup happens here
          * after confirmed map departure, using the ordinary recovery contract.
@@ -3439,6 +3663,7 @@ static void ds_publish_before_boot_promotion(void)
     /* Both native startup paths complete game-reader registration before
      * reaching promotion. Keep the previous provider through boot activation
      * too, without moving compilation ahead of native reader registration. */
+    if (sh_mpkg_startup_ready()) ds_inventory_attempt();
     if (!sh_mpkg_startup_ready() ||
         sh_overrides_rescan_packages_activated(ds_activate_provider, (void *)1) == SH_OVERRIDES_RESCAN_FAILED) {
         InterlockedExchange(&g_registration_succeeded, 0);
@@ -3457,6 +3682,7 @@ static void ds_rearm_transaction(void)
         return;
     }
     InterlockedExchange(&g_registration_succeeded, 0);
+    ds_inventory_attempt();
     if (sh_overrides_rescan_packages_activated(ds_activate_provider, NULL) == SH_OVERRIDES_RESCAN_FAILED) {
         /* Recovery may have succeeded; it must not admit the failed install. */
         InterlockedExchange(&g_registration_succeeded, 0);

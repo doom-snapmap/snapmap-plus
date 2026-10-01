@@ -29,6 +29,7 @@
 #include "apply_engine.h"
 #include "package_runtime.h"
 #include "package_requirements.h"
+#include "decl_server.h"
 #include "resource_graph.h"
 #include "resource_graph_native.h"
 
@@ -1871,6 +1872,11 @@ static void h_sh_packages(idCmdArgs *a)
 {
     char *text = NULL;
     const char *operation = cmd_argv(a, 1);
+    if (operation && !strcmp(operation, "rescan")) {
+        sh_decl_server_request_rearm();
+        sh_printf("Package rescan requested: it runs at the settled SnapMap browser and judges every installed package again.\n");
+        return;
+    }
     if (operation && !strcmp(operation, "dependencies")) {
         const char *type = cmd_argv(a, 2), *name = cmd_argv(a, 3);
         size_t nodes, complete, edges;
@@ -1925,7 +1931,7 @@ static void h_sh_perf(idCmdArgs *a)
 }
 
 static const cmd_entry CMD_TABLE[] = {
-    { "sh_packages",          (void *)h_sh_packages, "Show installed package sources and compiler results. 'sh_packages dependencies [type name]' inspects observed native dependencies." },
+    { "sh_packages",          (void *)h_sh_packages, "Show installed package sources and compiler results. 'sh_packages dependencies [type name]' inspects observed native dependencies; 'sh_packages rescan' judges the installed packages again at the browser." },
     { "sh_perf",              (void *)h_sh_perf,     "Where frame time goes inside snapmap-plus. 'sh_perf reset' starts the counting again." },
     { "sh_rawmaps",           (void *)h_sh_rawmaps,   "Raw JSON map files: state, paths, load, save. Run with no arguments to see what is set, or 'sh_rawmaps help' (or '?') for every verb." },
     { "sh_rawmaps_on",       (void *)h_rawmaps_on,  "(legacy) Same as 'sh_rawmaps on'. Kept because older guides use it." },
