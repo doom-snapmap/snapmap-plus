@@ -1520,9 +1520,11 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "40 57 48 83 EC 60 48 C7 44 24 20 FE FF FF FF 48 89 5C 24 78 48 89 B4 24 80 00 00 00 48 8B 05 ?? ?? ?? ?? "
       "48 33 C4 48 89 44 24 58 48 8B F1 44 8B 41 38 8B 79 3C F7 D7 41 23 F8 83 79 28 00 7E 29 48 8B 41 20 8B 51 28", 0x5cf600 },
     /* AI FSM web builder (fsm_web.c): its only call site, the decl-0 and per-index
-     * aifsmmanager list lookups inside it, and its never-written cache gate.
-     * Independently matched on Vulkan/OpenGL: builder 0x108BFB0/0x107DB20,
-     * call 0x650868/0x6506A8, lookups 0x108C03E/0x107DBAE and 0x108C1B9/0x107DD29.
+     * aifsmmanager list lookups inside it, the decl-0 lookup of its cache replay
+     * (called at builder+0x74), and its cache gate (the integer value of cvar
+     * ai_fsm_allowCache, default 1). Independently matched on Vulkan/OpenGL:
+     * builder 0x108BFB0/0x107DB20, call 0x650868/0x6506A8, lookups 0x108C03E/
+     * 0x107DBAE and 0x108C1B9/0x107DD29, replay lookup 0x108BA29/0x107D599.
      * No pinned-image RVA fallback. */
     { "FsmWebBuilder",
       "48 89 4C 24 08 55 56 57 41 54 41 55 41 56 41 57 48 8D AC 24 E0 FB FF FF 48 81 EC 20 05 00 00 "
@@ -1535,5 +1537,7 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "66 0F 1F 44 00 00 8B D6 48 8D 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? 4C 8B F8", 0 },
     { "FsmWebCacheFlag",
       "48 89 45 A0 83 3D ?? ?? ?? ?? 00 40 0F 95 C7", 0 },
+    { "FsmWebReplayFirstCall",
+      "4C 8B FA 4C 8B F1 33 D2 48 8D 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? 4C 8B E8 48 89 45 FF 48 85 C0", 0 },
     { NULL, NULL, 0 }   /* terminator */
 };

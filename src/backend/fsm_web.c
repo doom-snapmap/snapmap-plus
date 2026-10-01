@@ -24,6 +24,8 @@
 #define FW_DECL_CONFIG_COUNT 0xc0
 #define FW_BEHAVIOR_CONFIG 0x558      /* the builder receives behavior+0x558 (both renderers' caller) */
 #define FW_BUILDER_BYTES 0xBD0u
+#define FW_REPLAY_CALL 0x74           /* the builder calls its cache replay here (both renderers) */
+#define FW_REPLAY_BYTES 0x100u        /* the replay's decl-0 lookup lies in its first bytes */
 
 typedef void *(*fw_get_fn)(void *list, int index);
 typedef uintptr_t (*fw_builder_fn)(void *manager, void *config);
@@ -71,7 +73,7 @@ static fw_builder_fn g_builder;
 static void *g_list;
 static int g_installed;
 static void *g_relay;
-static sh_patch_handle g_patches[3];
+static sh_patch_handle g_patches[4];
 static volatile LONG g_warned_refused;
 static __declspec(thread) fw_frame *t_current;
 
@@ -433,7 +435,7 @@ static fw_state *fw_pin(int *refused)
     if (!fresh) {
         if (!InterlockedExchange(&g_warned_refused, 1))
             fw_logf("fsm-web: state-machine webs could not be resolved for the current list (%s); "
-                    "AI builds get no graphs until it resolves", g_list ? why : "no list");
+                    "AI state-machine builds are refused until it resolves", g_list ? why : "no list");
         fw_state_release(state);
         *refused = 1;
         return NULL;
@@ -465,6 +467,11 @@ static uintptr_t fw_build(void *manager, void *config)
     uintptr_t result = 0;
     void *private_config = NULL, *argument = config;
     frame.state = fw_pin(&frame.refused);
+    /* The native builder records the configuration in its cache before it
+     * reads the list (ai_fsm_allowCache), so a build that could only fail is
+     * not started: a failed build would leave that configuration cached empty
+     * for the rest of the game session. The caller reports the AI uninitialized. */
+    if (frame.refused) return 0;
     if (frame.state) {
         const fw_spec *spec = frame.state->spec;
         const char *behavior = config ? fw_name((unsigned char *)config - FW_BEHAVIOR_CONFIG) : NULL;
@@ -560,6 +567,11 @@ static int fw_redirect(uintptr_t call, const char *name, void *stub, sh_patch_ha
     return code_patch_sig(&site, expected, replacement, sizeof(replacement), handle) == B2_PATCH_OK;
 }
 
+static int fw_refuse(const char *why)
+{
+    fw_logf("fsm-web REFUSED: %s; package state-machine variants stay unbound", why);
+    return 0;
+}
 int sh_fsm_web_install(const uint8_t *module, const sig_result *results, size_t count)
 {
     const sig_result *builder = fw_signature(results, count, "FsmWebBuilder");
@@ -567,48 +579,69 @@ int sh_fsm_web_install(const uint8_t *module, const sig_result *results, size_t 
     const sig_result *first = fw_signature(results, count, "FsmWebDeclFirstCall");
     const sig_result *at = fw_signature(results, count, "FsmWebDeclAtCall");
     const sig_result *gate = fw_signature(results, count, "FsmWebCacheFlag");
-    uintptr_t build_call, first_call, at_call, get, list, flag;
+    const sig_result *replay_site = fw_signature(results, count, "FsmWebReplayFirstCall");
+    uintptr_t build_call, first_call, at_call, replay_call, replay, get, list, flag;
     int32_t displacement;
+    const char *why = NULL;
     (void)module;
     if (g_installed) return 1;
-    if (!builder || !call || !first || !at || !gate) goto refused;
-    build_call = call->addr + 21; first_call = first->addr + 16; at_call = at->addr + 15;
+    if (!builder || !call || !first || !at || !gate || !replay_site) {
+        why = "a builder, lookup or cache signature did not resolve uniquely"; goto refused;
+    }
+    build_call = call->addr + 21; first_call = first->addr + 16; at_call = at->addr + 15; replay_call = replay_site->addr + 15;
     get = fw_call_target(first_call);
     list = fw_lea_target(first->addr + 9);
-    if (fw_call_target(build_call) != builder->addr || !get || fw_call_target(at_call) != get ||
-        !list || fw_lea_target(at->addr + 8) != list) goto refused;
+    replay = fw_call_target(builder->addr + FW_REPLAY_CALL);
+    if (fw_call_target(build_call) != builder->addr) { why = "the call site does not call the builder"; goto refused; }
+    if (!get || fw_call_target(at_call) != get || fw_call_target(replay_call) != get) {
+        why = "the builder's list lookups call different functions"; goto refused;
+    }
+    if (!list || fw_lea_target(at->addr + 8) != list || fw_lea_target(replay_site->addr + 8) != list) {
+        why = "the builder's list lookups name different lists"; goto refused;
+    }
     if (first_call < builder->addr || first_call >= builder->addr + FW_BUILDER_BYTES ||
         at_call < builder->addr || at_call >= builder->addr + FW_BUILDER_BYTES ||
-        gate->addr < builder->addr || gate->addr >= builder->addr + FW_BUILDER_BYTES) goto refused;
-    /* The builder's layer-cache replay (Vulkan 0x108B9F0) bypasses the list; it
-     * runs only while this gate is nonzero, and nothing in the build writes it. */
-    if (((const unsigned char *)gate->addr)[4] != 0x83 || ((const unsigned char *)gate->addr)[5] != 0x3d) goto refused;
+        gate->addr < builder->addr || gate->addr >= builder->addr + FW_BUILDER_BYTES) {
+        why = "a lookup or the cache gate lies outside the builder"; goto refused;
+    }
+    /* With ai_fsm_allowCache set, the builder replays the web it cached for a
+     * configuration (Vulkan 0x108B9F0, OpenGL 0x107D560; keyed by the interned
+     * configuration value, reset with the game object and by
+     * ai_reloadBehaviorFSMs). The replay reads list entry 0 again for the mask,
+     * so that lookup is the view's too; a private configuration keys its own
+     * cache entry, and native caching is otherwise left as it is. */
+    if (!replay || replay_call < replay || replay_call >= replay + FW_REPLAY_BYTES) {
+        why = "the cache replay's lookup is not in the builder's replay"; goto refused;
+    }
+    if (((const unsigned char *)gate->addr)[4] != 0x83 || ((const unsigned char *)gate->addr)[5] != 0x3d) {
+        why = "the cache gate is not the builder's comparison"; goto refused;
+    }
     memcpy(&displacement, (const void *)(gate->addr + 6), sizeof(displacement));
     flag = gate->addr + 4 + 7 + (intptr_t)displacement;
-    if (*(const volatile int32_t *)flag != 0) goto refused;
     g_get = (fw_get_fn)get; g_builder = (fw_builder_fn)builder->addr; g_list = (void *)list;
     g_relay = fw_relay(builder->addr);
-    if (!g_relay) goto refused;
+    if (!g_relay) { why = "no relay could be placed near the builder"; goto refused; }
     /* Inner lookups first: without a build frame they pass straight through. */
     if (!fw_redirect(first_call, "FsmWebDeclFirstCall", (unsigned char *)g_relay + 16, &g_patches[0]) ||
         !fw_redirect(at_call, "FsmWebDeclAtCall", (unsigned char *)g_relay + 16, &g_patches[1]) ||
-        !fw_redirect(build_call, "FsmWebBuildCall", g_relay, &g_patches[2])) goto rollback;
+        !fw_redirect(replay_call, "FsmWebReplayFirstCall", (unsigned char *)g_relay + 16, &g_patches[2]) ||
+        !fw_redirect(build_call, "FsmWebBuildCall", g_relay, &g_patches[3])) goto rollback;
     g_installed = 1;
-    fw_logf("fsm-web installed: state-machine builds resolve per configuration (builder %p, list %p)",
-            (void *)builder->addr, (void *)list);
+    fw_logf("fsm-web installed: state-machine builds resolve per configuration (builder %p, list %p, "
+            "cache replay %p; ai_fsm_allowCache %d)", (void *)builder->addr, (void *)list, (void *)replay,
+            *(const volatile int32_t *)flag);
     return 1;
 rollback:
-    for (int i = 2; i >= 0; i--)
+    for (int i = 3; i >= 0; i--)
         if (g_patches[i].live && code_unpatch(&g_patches[i]) != B2_PATCH_OK) {
             backend_log("fsm-web rollback incomplete; relay retained for the outstanding patch");
             return 0;
         }
     VirtualFree(g_relay, 0, MEM_RELEASE); g_relay = NULL;
+    why = "a call site could not be redirected";
 refused:
     g_get = NULL; g_builder = NULL; g_list = NULL;
-    backend_log("fsm-web REFUSED: verified builder call, list lookups or cache gate unavailable; "
-                "package state-machine variants stay unbound");
-    return 0;
+    return fw_refuse(why);
 }
 
 #ifdef SH_FSM_WEB_TESTING
@@ -621,7 +654,7 @@ long sh_fsm_web_test_live(void) { return g_live; }
 void *sh_fsm_web_test_relay(int resolver) { return g_relay ? (unsigned char *)g_relay + (resolver ? 16 : 0) : NULL; }
 int sh_fsm_web_test_uninstall(void)
 {
-    for (int i = 2; i >= 0; i--)
+    for (int i = 3; i >= 0; i--)
         if (g_patches[i].live && code_unpatch(&g_patches[i]) != B2_PATCH_OK) return 0;
     if (g_relay) VirtualFree(g_relay, 0, MEM_RELEASE);
     g_relay = NULL; g_installed = 0; g_get = NULL; g_builder = NULL; g_list = NULL;

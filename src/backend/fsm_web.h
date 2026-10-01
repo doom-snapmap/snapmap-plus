@@ -24,8 +24,17 @@
  * and count, and the issued set) and pinned per build. A table that does not
  * resolve completely is refused and the previous bindings stay. When the list
  * or the issued set changes, the next build resolves the current bindings
- * again; if that fails, builds get no graphs (the engine reports the AI as
- * uninitialized) rather than a mixed web. */
+ * again; if that fails, the build is refused before the native builder runs
+ * (the engine reports the AI as uninitialized) rather than given a mixed web.
+ *
+ * With ai_fsm_allowCache set (its default), the builder keeps each web it built
+ * per interned configuration value for the life of the game object (reset at
+ * map shutdown and by ai_reloadBehaviorFSMs) and replays it, reading list entry
+ * 0 again for the configuration mask. The hook leaves that cache on and
+ * redirects the replay's lookup too: a private configuration keys its own entry,
+ * and its name is derived from issued names that are never reused. A refused
+ * build never reaches the builder, which records the configuration before it
+ * reads the list. */
 
 /* The declaration name the product serves as the placeholder whenever anything
  * has been issued, independent of which packages are active. */

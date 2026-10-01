@@ -101,7 +101,7 @@ static void *owner(const char *name)
  * resolver returns in native order (entry 0 first, then every index); it can
  * nest, raise or republish. */
 static const char *g_seen[MAX_DECLS + 1];
-static int g_seen_count;
+static int g_seen_count, g_builder_calls;
 static void *g_arg_seen;
 static const char *g_config_seen;
 static enum { PLAIN, NEST_NATIVE, RAISE, REPUBLISH, DEEP } g_mode;
@@ -119,6 +119,7 @@ static uintptr_t fake_builder(void *manager, void *config)
 {
     const char *head, *received = config ? *(const char *const *)config : NULL;
     (void)manager;
+    g_builder_calls++;
     if (g_mode == DEEP) {
         /* Alternate bound and native builds at every level; each level must see
          * its own view before and after its nested build. */
@@ -265,8 +266,10 @@ static void test_activation_refusals(void)
     decl_set(4, "smp/not_the_placeholder", 0, 1);
     list_generation(9);
     CHECK(!sh_fsm_web_publish(&t));
-    /* Refused, and already issued: no build may see them unfiltered. */
-    CHECK(build("behaviors/native") == 7 && g_seen_count == 10 && !g_seen[0] && !g_seen[6]);
+    /* Refused, and already issued: no build may see them unfiltered, and none
+     * enters the native builder (whose cache would keep the failed configuration). */
+    g_builder_calls = 0;
+    CHECK(build("behaviors/native") == 0 && g_seen_count == 0 && !g_builder_calls);
     /* A placeholder whose graph carries any layer bit could meet some configuration. */
     decl_set(4, SH_FSM_WEB_PLACEHOLDER, 0x20000000u, 1);
     CHECK(!sh_fsm_web_publish(&t));
@@ -372,7 +375,6 @@ static void test_generations(void)
     sh_fsm_web_table t = table_ab(0);
     const char *const grown[] = {"states/alertcycle", "states/behaviors", "states/cyberdemon_hell", "states/impcombat",
         SH_FSM_WEB_PLACEHOLDER, "smp/variant_a", "smp/alert_ab", "smp/variant_b", "smp/extra_a", "states/zombiecombat", "smp/variant_a2"};
-    const char *const refused[] = {NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL};
     fresh();
     CHECK(sh_fsm_web_publish(&t));
     long live = sh_fsm_web_test_live();
@@ -385,11 +387,11 @@ static void test_generations(void)
     CHECK(!strcmp(g_seen[11], "smp/variant_a2"));
     CHECK(sh_fsm_web_test_live() == live);   /* the old resolution was replaced, not leaked */
     /* A generation that cannot be resolved (the placeholder is gone while
-     * hidden entries remain) gives builds no graphs at all. */
+     * hidden entries remain) refuses builds before the native builder runs. */
     decl_set(4, "smp/gone", 0, 1);
     list_generation(11);
-    CHECK(build("behaviors/native") == 7 && seen_is(refused, 12));
-    CHECK(build("behaviors/a") == 7 && seen_is(refused, 12));
+    g_builder_calls = 0;
+    CHECK(build("behaviors/native") == 0 && build("behaviors/a") == 0 && !g_builder_calls && !g_seen_count);
     /* Once the list resolves again, builds recover. */
     decl_set(4, SH_FSM_WEB_PLACEHOLDER, 0, 1);
     list_generation(11);
@@ -455,18 +457,19 @@ static void put_rel(unsigned char *at, uintptr_t base, uintptr_t target)
 
 static void test_install(void)
 {
-    sig_result results[5] = {
+    sig_result results[6] = {
         {"FsmWebBuilder", SIG_OK, 0, 0}, {"FsmWebBuildCall", SIG_OK, 0, 0},
-        {"FsmWebDeclFirstCall", SIG_OK, 0, 0}, {"FsmWebDeclAtCall", SIG_OK, 0, 0}, {"FsmWebCacheFlag", SIG_OK, 0, 0}};
+        {"FsmWebDeclFirstCall", SIG_OK, 0, 0}, {"FsmWebDeclAtCall", SIG_OK, 0, 0}, {"FsmWebCacheFlag", SIG_OK, 0, 0},
+        {"FsmWebReplayFirstCall", SIG_OK, 0, 0}};
     unsigned char *code = VirtualAlloc(NULL, 0x3000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-    unsigned char *builder, *caller, *first, *at, *gate, *get, *list, *flag;
+    unsigned char *builder, *caller, *first, *at, *gate, *get, *list, *flag, *replay, *site;
     unsigned char before[0x3000];
     CHECK(code != NULL);
     if (!code) return;
     fresh();
     memset(code, 0xcc, 0x3000);
     builder = code + 0x1000; caller = code + 0x100; get = code + 0x2800;
-    list = code + 0x2900; flag = code + 0x2a00;
+    list = code + 0x2900; flag = code + 0x2a00; replay = code + 0x2400; site = replay + 0x20;
     gate = builder + 0x4b; first = builder + 0x7e; at = builder + 0x1fa;
     put(builder, "48 89 4C 24 08 55 56 57 41 54 41 55 41 56 41 57");
     put(caller, "48 8B 93 20 C1 00 00 48 81 C2 58 05 00 00 48 8D 8B B8 23 01 00 E8");
@@ -476,33 +479,61 @@ static void test_install(void)
     put(at, "66 0F 1F 44 00 00 8B D6 48 8D 0D"); put_rel(at + 11, (uintptr_t)at + 15, (uintptr_t)list);
     put(at + 15, "E8"); put_rel(at + 16, (uintptr_t)at + 20, (uintptr_t)get); put(at + 20, "4C 8B F8");
     put(gate, "48 89 45 A0 83 3D"); put_rel(gate + 6, (uintptr_t)gate + 11, (uintptr_t)flag); put(gate + 10, "00 40 0F 95 C7");
+    /* The cache replay the builder calls, and its own lookup of list entry 0. */
+    put(builder + 0x74, "E8"); put_rel(builder + 0x75, (uintptr_t)builder + 0x79, (uintptr_t)replay);
+    put(site, "4C 8B FA 4C 8B F1 33 D2 48 8D 0D"); put_rel(site + 11, (uintptr_t)site + 15, (uintptr_t)list);
+    put(site + 15, "E8"); put_rel(site + 16, (uintptr_t)site + 20, (uintptr_t)get);
+    put(site + 20, "4C 8B E8 48 89 45 FF 48 85 C0");
     memset(flag, 0, 8);
     results[0].addr = (uintptr_t)builder; results[1].addr = (uintptr_t)caller;
     results[2].addr = (uintptr_t)first; results[3].addr = (uintptr_t)at; results[4].addr = (uintptr_t)gate;
+    results[5].addr = (uintptr_t)site;
     /* Refusals leave every byte unchanged. */
-    flag[0] = 1; memcpy(before, code, sizeof(before));
+    memcpy(before, code, sizeof(before));
     CHECK(!sh_fsm_web_install(NULL, results, 5) && !memcmp(before, code, sizeof(before)));
-    flag[0] = 0; memcpy(before, code, sizeof(before));
     results[3].addr++;
-    CHECK(!sh_fsm_web_install(NULL, results, 5) && !memcmp(before, code, sizeof(before)));
+    CHECK(!sh_fsm_web_install(NULL, results, 6) && !memcmp(before, code, sizeof(before)));
     results[3].addr--;
     put_rel(first + 17, (uintptr_t)first + 21, (uintptr_t)get + 16); memcpy(before, code, sizeof(before));
-    CHECK(!sh_fsm_web_install(NULL, results, 5) && !memcmp(before, code, sizeof(before)));
+    CHECK(!sh_fsm_web_install(NULL, results, 6) && !memcmp(before, code, sizeof(before)));
     put_rel(first + 17, (uintptr_t)first + 21, (uintptr_t)get); memcpy(before, code, sizeof(before));
     results[1].status = SIG_AMBIGUOUS;
-    CHECK(!sh_fsm_web_install(NULL, results, 5) && !memcmp(before, code, sizeof(before)));
+    CHECK(!sh_fsm_web_install(NULL, results, 6) && !memcmp(before, code, sizeof(before)));
     results[1].status = SIG_OK;
-    /* Positive: only the three call operands change, each to a relay. */
-    CHECK(sh_fsm_web_install(NULL, results, 5) && sh_fsm_web_installed());
+    /* The replay's lookup must call the same resolver on the same list, and lie
+     * in the replay the builder calls. */
+    put_rel(site + 16, (uintptr_t)site + 20, (uintptr_t)get + 16); memcpy(before, code, sizeof(before));
+    CHECK(!sh_fsm_web_install(NULL, results, 6) && !memcmp(before, code, sizeof(before)));
+    put_rel(site + 16, (uintptr_t)site + 20, (uintptr_t)get);
+    put_rel(site + 11, (uintptr_t)site + 15, (uintptr_t)list + 8); memcpy(before, code, sizeof(before));
+    CHECK(!sh_fsm_web_install(NULL, results, 6) && !memcmp(before, code, sizeof(before)));
+    put_rel(site + 11, (uintptr_t)site + 15, (uintptr_t)list);
+    put_rel(builder + 0x75, (uintptr_t)builder + 0x79, (uintptr_t)site + 16); memcpy(before, code, sizeof(before));
+    CHECK(!sh_fsm_web_install(NULL, results, 6) && !memcmp(before, code, sizeof(before)));
+    put_rel(builder + 0x75, (uintptr_t)builder + 0x79, (uintptr_t)site - 0x100); memcpy(before, code, sizeof(before));
+    CHECK(!sh_fsm_web_install(NULL, results, 6) && !memcmp(before, code, sizeof(before)));
+    put_rel(builder + 0x75, (uintptr_t)builder + 0x79, (uintptr_t)replay);
+    builder[0x74] = 0x90; memcpy(before, code, sizeof(before));
+    CHECK(!sh_fsm_web_install(NULL, results, 6) && !memcmp(before, code, sizeof(before)));
+    builder[0x74] = 0xe8;
+    gate[5] = 0x3e; memcpy(before, code, sizeof(before));
+    CHECK(!sh_fsm_web_install(NULL, results, 6) && !memcmp(before, code, sizeof(before)));
+    gate[5] = 0x3d;
+    /* Positive with ai_fsm_allowCache set (its default): native caching stays
+     * on, and only the four call operands change, each to a relay. */
+    flag[0] = 1; memcpy(before, code, sizeof(before));
+    CHECK(sh_fsm_web_install(NULL, results, 6) && sh_fsm_web_installed());
     {
         size_t changed = 0;
         int32_t d;
         unsigned char *relay_build = sh_fsm_web_test_relay(0), *relay_resolve = sh_fsm_web_test_relay(1);
         for (size_t i = 0; i < sizeof(before); i++) changed += before[i] != code[i];
-        CHECK(changed >= 3 && changed <= 12);
+        CHECK(changed >= 4 && changed <= 16 && flag[0] == 1);
         memcpy(&d, caller + 22, 4); CHECK(caller + 26 + d == relay_build);
         memcpy(&d, first + 17, 4); CHECK(first + 21 + d == relay_resolve);
         memcpy(&d, at + 16, 4); CHECK(at + 20 + d == relay_resolve);
+        memcpy(&d, site + 16, 4); CHECK(site + 20 + d == relay_resolve);
+        memcpy(&d, builder + 0x75, 4); CHECK(builder + 0x79 + d == replay);
         /* Execute the relays: the build wrapper and the list resolver keep the
          * native argument registers and return value. */
         sh_fsm_web_test_bind(fake_get, relay_builder, g_list);
