@@ -625,15 +625,21 @@ void sh_mpkg_boot_capture(const char *data_root)
 {
     sh_package_sources *sources;
     size_t i;
-    char error[512] = "";
+    char error[512] = "", line[320];
+    LARGE_INTEGER frequency, began, recovered, scanned;
+    unsigned long long bytes = 0;
+    size_t files = 0;
     if (!data_root || !data_root[0]) return;
+    QueryPerformanceFrequency(&frequency); QueryPerformanceCounter(&began);
     mpkg_lock();
     if (g_boot_captured == 1) { mpkg_unlock(); return; }
     strncpy_s(g_data_root, sizeof(g_data_root), data_root, _TRUNCATE);
     if (!mpkg_recover_interrupted(data_root, error, sizeof(error))) {
         g_boot_captured = -1; mpkg_unlock(); sh_mpkg_report_error(error); return;
     }
+    QueryPerformanceCounter(&recovered);
     sources = sh_package_sources_scan_local(data_root, mpkg_local_rejected, NULL, error, sizeof(error));
+    QueryPerformanceCounter(&scanned);
     if (!sources) {
         g_boot_captured = -1; mpkg_unlock(); backend_log(error); return;
     }
@@ -653,8 +659,16 @@ void sh_mpkg_boot_capture(const char *data_root)
         strcpy_s(entry->root, sizeof(entry->root), sources->packages[i].root);
         memcpy(entry->fingerprint, sources->fingerprints[i], 32); g_boot_count++;
     }
+    for (i = 0; i < sources->file_count; i++)
+        if (!sources->files[i].directory) { files++; bytes += sources->files[i].length; }
+    _snprintf_s(line, sizeof(line), _TRUNCATE,
+        "MPKG: exact authored package identities captured; no installation sidecars "
+        "(recovery %.0f ms, scan %.0f ms: %zu packages, %zu files, %.1f MB read and hashed)",
+        (double)(recovered.QuadPart - began.QuadPart) * 1000.0 / (double)frequency.QuadPart,
+        (double)(scanned.QuadPart - recovered.QuadPart) * 1000.0 / (double)frequency.QuadPart,
+        sources->package_count, files, (double)bytes / 1048576.0);
     sh_package_sources_free(sources); g_boot_captured = 1; mpkg_unlock();
-    backend_log("MPKG: exact authored package identities captured; no installation sidecars");
+    backend_log(line);
 }
 
 int sh_mpkg_startup_ready(void)

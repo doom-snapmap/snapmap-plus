@@ -1547,6 +1547,66 @@ static void pr_shader_hint_write(sh_package_native_assets *assets, const char *d
  * installed-library refresh that must only add packages to previous (else
  * *composition_failed is -1 and nothing is compiled). */
 enum { PR_INCREMENT_INSTALL = 1, PR_INCREMENT_REFRESH = 2 };
+/* Diagnostic identity of the published library: each published resource's
+ * engine path, declaration and manager identities (aliases included), original
+ * path and served payload identity (presented text where it has one), in
+ * engine-path order. Equal inventories under equal product semantics give an
+ * equal digest, so a performance change must leave it unchanged. 0 when a
+ * payload has no captured identity or memory runs out. */
+static int pr_digest_order(void *context, const void *left, const void *right)
+{
+    const sh_package_compilation *compiled = context;
+    const sh_compiled_resource *a = compiled->resources + *(const size_t *)left;
+    const sh_compiled_resource *b = compiled->resources + *(const size_t *)right;
+    return strcmp(a->engine_path ? a->engine_path : "", b->engine_path ? b->engine_path : "");
+}
+static int pr_digest_append(unsigned char **buffer, size_t *used, size_t *capacity, const void *data, size_t length)
+{
+    if (length > SIZE_MAX - *used) return 0;
+    if (*used + length > *capacity) {
+        size_t next = *capacity ? *capacity : 65536;
+        while (next < *used + length) { if (next > SIZE_MAX / 2) return 0; next *= 2; }
+        unsigned char *grown = realloc(*buffer, next);
+        if (!grown) return 0;
+        *buffer = grown; *capacity = next;
+    }
+    memcpy(*buffer + *used, data, length); *used += length; return 1;
+}
+static int pr_digest_text(unsigned char **buffer, size_t *used, size_t *capacity, const char *text)
+{
+    const char *value = text ? text : "";
+    return pr_digest_append(buffer, used, capacity, value, strlen(value) + 1);
+}
+static int pr_library_digest(const sh_package_compilation *compiled, char hex[65])
+{
+    size_t *order = calloc(compiled->resource_count ? compiled->resource_count : 1, sizeof(*order));
+    unsigned char *buffer = NULL;
+    size_t used = 0, capacity = 0;
+    sh_package_file_identity identity;
+    int ok = order != NULL;
+    hex[0] = 0;
+    for (size_t i = 0; ok && i < compiled->resource_count; i++) order[i] = i;
+    if (ok && compiled->resource_count > 1)
+        qsort_s(order, compiled->resource_count, sizeof(*order), pr_digest_order, (void *)compiled);
+    for (size_t k = 0; ok && k < compiled->resource_count; k++) {
+        const sh_compiled_resource *r = compiled->resources + order[k];
+        ok = pr_digest_text(&buffer, &used, &capacity, r->engine_path) &&
+            pr_digest_text(&buffer, &used, &capacity, r->type) && pr_digest_text(&buffer, &used, &capacity, r->name) &&
+            pr_digest_text(&buffer, &used, &capacity, r->native_type) &&
+            pr_digest_text(&buffer, &used, &capacity, r->native_name) &&
+            pr_digest_text(&buffer, &used, &capacity, r->original_path);
+        for (size_t a = 0; ok && a < r->native_alias_count; a++)
+            ok = pr_digest_text(&buffer, &used, &capacity, r->native_aliases[a].type) &&
+                pr_digest_text(&buffer, &used, &capacity, r->native_aliases[a].name);
+        if (ok && r->presented) ok = sh_package_bytes_identity(r->presented, r->presented_length, &identity);
+        else if (ok) ok = sh_package_compilation_identity(compiled, r, &identity, NULL, 0);
+        if (ok) ok = pr_digest_append(&buffer, &used, &capacity, &identity, sizeof(identity));
+    }
+    if (ok) ok = sh_package_bytes_identity(buffer ? buffer : (const unsigned char *)"", used, &identity);
+    if (ok) for (int b = 0; b < 32; b++) snprintf(hex + 2 * b, 3, "%02x", identity.digest[b]);
+    free(order); free(buffer);
+    return ok;
+}
 static pr_provider *pr_prepare_deliveries(const char *data_root, const char *source_root,
     const pr_provider *previous, int product_only, int authoring_increment, pr_inventory **inventory_out,
     int *composition_failed, const sh_package_provenance *contexts,
@@ -2046,9 +2106,10 @@ static pr_provider *pr_prepare_deliveries(const char *data_root, const char *sou
     if (library_output) {
         size_t native = sh_package_compilation_prune_native(compiled,
             catalog ? pr_snapmap_serves : NULL, (void *)catalog);
-        char line[160];
-        snprintf(line, sizeof(line), "package library: %zu published resources; %zu unchanged SnapMap resources stay native",
-            compiled->resource_count, native);
+        char line[256], digest[65];
+        if (!pr_library_digest(compiled, digest)) strcpy_s(digest, sizeof(digest), "unavailable");
+        snprintf(line, sizeof(line), "package library: %zu published resources; %zu unchanged SnapMap resources stay native; "
+            "published digest %s", compiled->resource_count, native, digest);
         backend_log(line);
     }
     if (!pr_cache_resources(compiled, data_root, error, sizeof(error))) goto done;
