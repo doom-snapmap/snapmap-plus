@@ -8266,6 +8266,169 @@ static int owners_consume(const char *found, const char *const *allowed, size_t 
     }
     return consumed;
 }
+/* Each compiled whitelist named list: every entry either names a compiled
+ * entity declaration or is the authored spelling own-enc left as an engine
+ * default (a scope without own-enc); suppliers counts the distinct compiled
+ * own-enc declarations the lists bind. */
+static int stale_whitelists_bound(const sh_package_compilation *compiled, size_t *lists, size_t *suppliers)
+{
+    const sh_compiled_resource *seen[8];
+    size_t seen_count = 0;
+    int bound = 1;
+    *lists = 0;
+    for (size_t r = 0; r < compiled->resource_count; r++) {
+        const sh_compiled_resource *file = compiled->resources + r;
+        const char *authored = file->original_path ? file->original_path : file->engine_path;
+        if (!authored || !strstr(authored, "snappropertyinspector_whitelistencounterdecl/list.decl")) continue;
+        (*lists)++;
+        sh_decl_node *tree = sh_decl_tree_parse((sh_decl_source){(char *)file->body, file->body_length}, NULL, 0);
+        const sh_decl_node *items = tree ? sh_decl_tree_member(sh_decl_tree_member(tree, "edit"), "validEncounters") : NULL;
+        if (!items) bound = 0;
+        for (const sh_decl_node *item = items ? items->children : NULL; item; item = item->next) {
+            if (!strcmp(item->key, "num")) continue;
+            const char *value = node_value(item);
+            const sh_compiled_resource *target = named_resource(compiled, "entitydef", value);
+            if (!target) {
+                if (strcmp(value, "own-enc")) { bound = 0; fprintf(stderr, "stale whitelist entry unbound: %s\n", value); }
+                continue;
+            }
+            if (!strstr(target->original_path ? target->original_path : target->engine_path, "own-enc")) continue;
+            size_t k;
+            for (k = 0; k < seen_count && seen[k] != target; k++) {}
+            if (k == seen_count && seen_count < 8) seen[seen_count++] = target;
+        }
+        sh_decl_tree_free(tree);
+    }
+    *suppliers = seen_count;
+    return bound && *lists;
+}
+/* The 2026-10-01 OpenGL inventory: three packages ship byte-identical encounter
+ * whitelists naming one encounter that only one of them supplies (the variant
+ * fixtures had dropped it from their own scopes). In those two scopes the name
+ * is an engine default, as authored text may leave it; the shared composition
+ * reaches every scope, where the engine reads the entry by name. Nobody is
+ * malformed: the library links with all three served, every whitelist entry
+ * bound. Before the fix the supplier's scope met the default entry without a
+ * captured binding and the whole inventory was refused, unattributed. A
+ * provably malformed owner beside them is still found alone, and the compile
+ * without it serves the rest. */
+static void test_contribution_stale_reference(void)
+{
+    fixture storage; fixture *f = &storage; setup(f); conductor_reflection(f);
+    sh_decl_registry_source registry = {f, read_memory, (uintptr_t)f->registry, NULL};
+    const char *list = "{ edit = { mode = \"shared\"; validEncounters = { num = 1; item[0] = \"own-enc\"; } } }";
+    char found[512];
+    for (int order = 0; order < 2; order++) {
+        const char *supplier = order ? "z-supplier" : "a-supplier";
+        const char *one = order ? "a-stale" : "y-stale", *two = order ? "b-stale" : "z-stale";
+        const char *broken = order ? "a-broken" : "z-broken";
+        const char *expected[1];
+        char want[1][32];
+        size_t lists = 0;
+        registration_root("stale-reference");
+        owners_package(supplier);
+        owners_file(supplier, "entitydef/own-enc.decl", "{ class = \"Entity\"; edit = { target = \"parent-only\"; } }");
+        owners_file(supplier, "snappropertyinspector_whitelistencounterdecl/list.decl", list);
+        owners_package(one); owners_file(one, "snappropertyinspector_whitelistencounterdecl/list.decl", list);
+        owners_package(two); owners_file(two, "snappropertyinspector_whitelistencounterdecl/list.decl", list);
+        sh_package_sources *sources = sh_package_sources_scan(root, found, sizeof(found)); assert(sources);
+        owners_run run = {0}, isolated = {0}, healthy = {0};
+        owners_compile(f, registry, sources, NULL, 1, &run);
+        owners_found(sources, &run, found, sizeof(found));
+        if (!run.ok || found[0]) fprintf(stderr, "stale reference %d: ok=%d found=%s %s\n", order, run.ok, found, run.error);
+        assert(run.ok && run.invalid == SIZE_MAX && run.unserved == SIZE_MAX && !run.more.count);
+        assert(sources->package_count == 3);
+        size_t suppliers = 0;
+        int bound = stale_whitelists_bound(run.library.compiled, &lists, &suppliers);
+        if (!bound || suppliers != 1)
+            fprintf(stderr, "stale reference %d: %zu whitelist(s), %zu supplier(s) bound\n", order, lists, suppliers);
+        assert(bound && suppliers == 1);
+        owners_done(&run);
+        sh_package_sources_free(sources);
+        /* An owner whose own whitelist does not read is found alone. */
+        owners_package(broken);
+        owners_file(broken, "snappropertyinspector_whitelistencounterdecl/list.decl",
+            "{ edit = { mode = \"shared\"; validEncounters = { num = 1; }");
+        sources = sh_package_sources_scan(root, found, sizeof(found)); assert(sources);
+        owners_compile(f, registry, sources, NULL, 1, &isolated);
+        owners_found(sources, &isolated, found, sizeof(found));
+        snprintf(want[0], sizeof(want[0]), "%s:i", broken); expected[0] = want[0];
+        if (isolated.ok || !owners_same_set(found, expected, 1))
+            fprintf(stderr, "stale reference %d with a broken owner: ok=%d found=%s %s\n", order, isolated.ok, found, isolated.error);
+        assert(!isolated.ok && owners_same_set(found, expected, 1));
+        owners_leave(sources, &isolated); owners_done(&isolated);
+        owners_compile(f, registry, sources, NULL, 1, &healthy);
+        if (!healthy.ok) fprintf(stderr, "stale reference %d without the broken owner: %s\n", order, healthy.error);
+        assert(healthy.ok && healthy.invalid == SIZE_MAX && !healthy.more.count && sources->package_count == 3);
+        assert(stale_whitelists_bound(healthy.library.compiled, &lists, &suppliers) && suppliers == 1);
+        owners_done(&healthy);
+        sh_package_sources_free(sources); cleanup(); assert(!failures);
+    }
+    /* Two suppliers ship different own-enc declarations, and a stale owner's
+     * whitelist names own-enc too. Contributions run before identities, so the
+     * two suppliers' entries share the authored spelling in composed text: the
+     * stale owner's default entry must not take either of them. */
+    for (int order = 0; order < 2; order++) {
+        const char *first = order ? "z-first" : "a-first", *second = order ? "a-second" : "z-second";
+        const char *stale = order ? "m-stale" : "b-stale";
+        registration_root("stale-overlap");
+        owners_package(first);
+        owners_file(first, "entitydef/own-enc.decl", "{ class = \"Entity\"; edit = { target = \"parent-only\"; } }");
+        owners_file(first, "snappropertyinspector_whitelistencounterdecl/list.decl", list);
+        owners_package(second);
+        owners_file(second, "entitydef/own-enc.decl", "{ class = \"Entity\"; edit = { target = \"modifier-child\"; } }");
+        owners_file(second, "snappropertyinspector_whitelistencounterdecl/list.decl", list);
+        owners_package(stale); owners_file(stale, "snappropertyinspector_whitelistencounterdecl/list.decl", list);
+        sh_package_sources *sources = sh_package_sources_scan(root, found, sizeof(found)); assert(sources);
+        owners_run run = {0};
+        owners_compile(f, registry, sources, NULL, 1, &run);
+        owners_found(sources, &run, found, sizeof(found));
+        if (!run.ok || found[0]) fprintf(stderr, "stale overlap %d: ok=%d found=%s %s\n", order, run.ok, found, run.error);
+        assert(run.ok && !found[0]);
+        /* Each supplier's own-enc is its own declaration. */
+        const char *parent_only = NULL, *modifier_child = NULL;
+        for (size_t r = 0; r < run.library.compiled->resource_count; r++) {
+            const sh_compiled_resource *file = run.library.compiled->resources + r;
+            const char *authored = file->original_path ? file->original_path : file->engine_path;
+            if (!authored || !strstr(authored, "entitydef/own-enc.decl")) continue;
+            if (strstr((const char *)file->body, "parent-only")) parent_only = file->name;
+            else if (strstr((const char *)file->body, "modifier-child")) modifier_child = file->name;
+        }
+        assert(parent_only && modifier_child && strcmp(parent_only, modifier_child));
+        /* One whitelist per scope. Each supplier's entry keeps its own
+         * declaration everywhere; the stale entry is the supplier's own in each
+         * supplier's scope and an engine default in the stale owner's. */
+        int shapes[3] = {0, 0, 0}; /* {default,first,second}, {first x2,second}, {first,second x2} */
+        size_t lists = 0;
+        for (size_t r = 0; r < run.library.compiled->resource_count; r++) {
+            const sh_compiled_resource *file = run.library.compiled->resources + r;
+            const char *authored = file->original_path ? file->original_path : file->engine_path;
+            if (!authored || !strstr(authored, "whitelistencounterdecl/list.decl")) continue;
+            lists++;
+            sh_decl_node *tree = sh_decl_tree_parse((sh_decl_source){(char *)file->body, file->body_length}, NULL, 0);
+            const sh_decl_node *items = tree ? sh_decl_tree_member(sh_decl_tree_member(tree, "edit"), "validEncounters") : NULL;
+            int raw = 0, a = 0, z = 0, other = 0;
+            for (const sh_decl_node *item = items ? items->children : NULL; item; item = item->next) {
+                if (!strcmp(item->key, "num")) continue;
+                const char *value = node_value(item);
+                if (!strcmp(value, "own-enc")) raw++;
+                else if (!strcmp(value, parent_only)) a++;
+                else if (!strcmp(value, modifier_child)) z++;
+                else other++;
+            }
+            sh_decl_tree_free(tree);
+            if (!other && raw == 1 && a == 1 && z == 1) shapes[0]++;
+            else if (!other && !raw && a == 2 && z == 1) shapes[1]++;
+            else if (!other && !raw && a == 1 && z == 2) shapes[2]++;
+            else fprintf(stderr, "stale overlap %d: whitelist %s has default %d, parent-only %d, modifier-child %d, other %d\n",
+                order, file->name, raw, a, z, other);
+        }
+        assert(lists == 3 && shapes[0] == 1 && shapes[1] == 1 && shapes[2] == 1);
+        owners_done(&run);
+        sh_package_sources_free(sources); cleanup(); assert(!failures);
+    }
+}
+
 static void test_contribution_owners_together(void)
 {
     fixture storage; fixture *f = &storage; setup(f); conductor_reflection(f);
@@ -8627,6 +8790,7 @@ int main(void)
     test_unchanged_editor_copies(&f, registry);
     test_editor_rebase_scopes(&f, registry);
     test_contribution_owners_together();
+    test_contribution_stale_reference();
     test_native_original_gaps(&f, registry);
     test_material_path(&f, registry);
     test_library_atlas(&f, registry);

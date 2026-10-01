@@ -935,6 +935,22 @@ static int pl_bound_target(pl_contributions *c, size_t unit, const char *slot,
     return sh_package_source_link_resolve_unit(c->source, c->origins[unit], family, name, target, error, capacity);
 }
 
+/* A composed unit's slot with no captured edge holds an entry its restore left
+ * as authored because this unit's own scope supplies no such declaration
+ * (pl_restore_reference): the engine defaults it by name in this scope, with no
+ * binding. Another slot of the same text may spell the same name for a
+ * declaration of another owner's scope; that capture says nothing about this
+ * entry, since contributions run before identities give owners' variants
+ * distinct names. 1 for such a default slot, 0 otherwise (bind strictly). */
+static int pl_default_slot(pl_contributions *c, size_t unit, const char *slot, const char *family, const char *name)
+{
+    const pl_contribution_unit *bound = c->units + unit;
+    size_t ignored; char error[256];
+    if (!bound->owned) return 0;
+    for (size_t i = 0; i < bound->count; i++) if (!strcmp(bound->edges[i].slot, slot)) return 0;
+    return !sh_package_source_link_resolve_unit(c->source, c->origins[unit], family, name, &ignored, error, sizeof(error));
+}
+
 typedef struct pl_contribution_walk {
     pl_contributions *graph;
     size_t unit;
@@ -972,6 +988,7 @@ static int pl_bound_reference(void *context, const char *slot, const char *famil
     pl_contribution_walk *walk = context;
     pl_contributions *c = walk->graph;
     size_t target;
+    if (pl_default_slot(c, walk->unit, slot, family, name)) return 0;
     if (!pl_bound_target(c, walk->unit, slot, family, name, &target, walk->error, walk->capacity)) return -1;
     c->pending_unit = walk->unit; c->pending_target = target;
     int result = walk->reference(walk->context, slot, family, c->inputs.units[target].name, replacement);
@@ -1251,6 +1268,7 @@ static int pl_token_reference(void *context, const char *slot, const char *famil
 {
     pl_contribution_walk *walk = context;
     size_t target;
+    if (pl_default_slot(walk->graph, walk->unit, slot, family, name)) return 0;
     if (!pl_bound_target(walk->graph, walk->unit, slot, family, name, &target, walk->error, walk->capacity)) return -1;
     if (pl_lexical_inherit(walk->graph, walk->unit, slot)) return 0;
     *replacement = walk->graph->tokens[walk->graph->classes.nodes[target]]; return 1;
@@ -1277,11 +1295,24 @@ static int pl_restore_reference(void *context, const char *slot, const char *fam
     size_t token = pl_token_find(c, name);
     size_t target = token != SIZE_MAX ? c->classes.representatives[token] : SIZE_MAX;
     if (target == SIZE_MAX) {
-        /* Only a deliberately un-tokenized inherited header remains lexical. */
-        if ((!pl_lexical_inherit(c, walk->unit, slot) &&
-            !(c->origins[walk->unit] != walk->unit && !c->units[walk->unit].owned)) ||
-            !pl_bound_target(c, walk->unit, slot, family, name, &target, walk->error, walk->capacity)) {
-            snprintf(walk->error, walk->capacity, "editor contribution contains an uncaptured reference: %s", slot); return -1;
+        /* Tokenizing a member (pl_contribution_group) captures every reference
+         * its own scope supplies; one its scope lacks stays as authored for the
+         * engine's default by name (sg_bind_typed), as stock text does. Such an
+         * entry in a shared composition reaches every member's scope. Where
+         * this scope supplies the name the engine reads it as that declaration,
+         * so it binds as this scope binds the name; where it does not, it stays
+         * a default here too (pl_default_slot), whatever another slot spelled
+         * the same way captured. An inherited header stays lexical; a clone
+         * keeps its original binding. */
+        if (pl_lexical_inherit(c, walk->unit, slot) ||
+            (c->origins[walk->unit] != walk->unit && !c->units[walk->unit].owned)) {
+            if (!pl_bound_target(c, walk->unit, slot, family, name, &target, walk->error, walk->capacity)) {
+                snprintf(walk->error, walk->capacity, "editor contribution contains an uncaptured reference: %s", slot); return -1;
+            }
+        } else {
+            char ignored[256];
+            if (!sh_package_source_link_resolve_unit(c->source, c->origins[walk->unit], family, name,
+                    &target, ignored, sizeof(ignored))) return 0;
         }
     }
     const sh_package_link_unit *value = c->inputs.units + target;
@@ -1385,6 +1416,7 @@ static int pl_string_capture_reference(void *context, const char *slot, const ch
 {
     pl_contribution_walk *walk = context; size_t target;
     (void)replacement;
+    if (pl_default_slot(walk->graph, walk->unit, slot, family, name)) return 0;
     return pl_bound_target(walk->graph, walk->unit, slot, family, name, &target,
         walk->error, walk->capacity) && pl_capture_edge(walk->capture, slot, target) ? 0 : -1;
 }
