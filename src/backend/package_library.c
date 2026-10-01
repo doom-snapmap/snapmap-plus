@@ -5197,7 +5197,7 @@ static void pl_repeated_work(pl_build *b, sh_package_library *out)
         }
     }
     if (b->reader) {
-        char line[512];
+        char line[1024];
         n = snprintf(text + used, capacity - used, "%s%s", used ? "\n" : "",
             sh_package_source_link_counters(b->reader, line, sizeof(line)));
         PL_WROTE(n);
@@ -5213,7 +5213,7 @@ static void pl_repeated_work(pl_build *b, sh_package_library *out)
         PL_WROTE(n);
     }
     if (b->contributions && b->contributions->reuse) {
-        char line[1024];
+        char line[2048];
         n = snprintf(text + used, capacity - used, "%s%s", used ? "\n" : "",
             sh_package_link_reuse_counters(b->contributions->reuse, line, sizeof(line)));
         PL_WROTE(n);

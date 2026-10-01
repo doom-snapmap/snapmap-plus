@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 typedef struct li_node {
     sh_package_link_node source;
@@ -240,11 +241,16 @@ int sh_package_link_identify_ordered(const sh_package_link_node *nodes, size_t c
 {
     li_work work = {0};
     int ok = 0;
+    struct timespec now;
+    unsigned long long began;
     if (!sh_package_link_equivalence_ordered(nodes, count, verify, context, order, out, error, capacity)) return 0;
+    began = timespec_get(&now, TIME_UTC) ? (unsigned long long)now.tv_sec * 1000000u + (unsigned long long)now.tv_nsec / 1000u : 0;
     if (!li_prepare(&work, nodes, out)) goto done;
     li_components(&work);
     for (size_t i = work.component_count; i; i--) if (!li_component(&work, i - 1)) goto done;
     out->identities = work.identities; work.identities = NULL; ok = 1;
+    if (timespec_get(&now, TIME_UTC))
+        out->identity_us = (unsigned long long)now.tv_sec * 1000000u + (unsigned long long)now.tv_nsec / 1000u - began;
 done:
     li_free(&work);
     if (!ok) { sh_package_link_classes_free(out); li_fail(error, capacity, "resource binding identity could not be constructed"); }

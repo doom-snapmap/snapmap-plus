@@ -148,7 +148,10 @@ struct sh_package_link_reuse {
     size_t proven_count, proven_capacity;
     /* Diagnostics only: the identity passes that used this cache, and the
      * final link's member, history, assignment and projection steps. */
-    struct { size_t units, restored; unsigned long long collect_us, partition_us; } passes[16];
+    struct {
+        size_t units, restored, classes;
+        unsigned long long collect_us, partition_us, view_us, shapes_us, refine_us, identity_us;
+    } passes[16];
     size_t pass_count;
     /* Exact verification of equal fingerprints: pairs compared, members held
      * as one captured object by both units, bytes compared, time. */
@@ -2112,9 +2115,15 @@ const char *sh_package_link_reuse_counters(const sh_package_link_reuse *reuse, c
             i ? ";" : ":", reuse->passes[i].units, reuse->passes[i].restored,
             reuse->passes[i].collect_us / 1000u, reuse->passes[i].partition_us / 1000u);
     if (n > 0 && used < capacity)
-        snprintf(out + used, capacity - used, "; exact verification: %llu pairs, %llu shared members, "
+        n = snprintf(out + used, capacity - used, "; exact verification: %llu pairs, %llu shared members, "
             "%llu MB compared, %llu ms", reuse->verify_pairs, reuse->verify_shared,
             reuse->verify_bytes >> 20, reuse->verify_us / 1000u);
+    /* Each pass's partition, on its own line. */
+    for (size_t i = 0; n > 0 && (used += (size_t)n) < capacity && i < reuse->pass_count && i < 16; i++)
+        n = snprintf(out + used, capacity - used, "%s %zu: view %llu, shapes %llu, refine %llu, identities %llu ms, "
+            "%zu classes", i ? ";" : "\nidentity partitions by pass:", i + 1, reuse->passes[i].view_us / 1000u,
+            reuse->passes[i].shapes_us / 1000u, reuse->passes[i].refine_us / 1000u,
+            reuse->passes[i].identity_us / 1000u, reuse->passes[i].classes);
     return out;
 }
 #ifdef SH_PACKAGE_LINKER_TESTING
@@ -2150,6 +2159,7 @@ static int pl_identify(pl_work *w)
     unsigned long long collected = pl_now_us();
     sh_package_link_edge *edges = NULL;
     sh_package_link_node *view = pl_stable_view(w, &edges);
+    unsigned long long viewed = pl_now_us();
     if (!view) return pl_fail(w, "cannot allocate resource identity view");
     int ok = sh_package_link_identify_ordered(view, w->count, pl_verify_equal, w,
         w->adapter->reuse ? &w->adapter->reuse->order : NULL, &w->output.classes, w->error, w->capacity);
@@ -2159,6 +2169,11 @@ static int pl_identify(pl_work *w)
         reuse->passes[reuse->pass_count].units = w->count; reuse->passes[reuse->pass_count].restored = w->restored;
         reuse->passes[reuse->pass_count].collect_us = collected - began;
         reuse->passes[reuse->pass_count].partition_us = pl_now_us() - collected;
+        reuse->passes[reuse->pass_count].view_us = viewed - collected;
+        reuse->passes[reuse->pass_count].classes = ok ? w->output.classes.count : 0;
+        reuse->passes[reuse->pass_count].shapes_us = ok ? w->output.classes.shapes_us : 0;
+        reuse->passes[reuse->pass_count].refine_us = ok ? w->output.classes.refine_us : 0;
+        reuse->passes[reuse->pass_count].identity_us = ok ? w->output.classes.identity_us : 0;
     }
     if (reuse) reuse->pass_count++;
     free(edges); return ok;

@@ -166,6 +166,11 @@ struct sh_package_source_link {
         int memo; /* 0 none, 1 kept, 2 renewed for a different key, 3 busy */
         unsigned long long original_bytes;
         unsigned long long select_us, read_us, construct_us; /* discovery sub-phases */
+        size_t replay_tries; /* recorded reads validated against a scope */
+        unsigned long long applies_us, apply_us; /* within read_us: replay validation, application */
+        unsigned long long fresh_us; /* within read_us: reads of units not replayed */
+        unsigned long long original_us, identify_us; /* capturing and hashing originals */
+        unsigned long long companion_us; /* within select_us: material companion requests */
     } census;
 };
 static int g_sl_replay = 1;
@@ -321,8 +326,10 @@ static sl_original *sl_original_get(sh_package_source_link *s, const char *path)
     if (!file) goto bad;
     file->resource.engine_path = _strdup(path); file->resource.source = SIZE_MAX;
     if (!file->resource.engine_path) { free(file); goto bad; }
+    unsigned long long reading = sl_now_us();
     file->status = s->original ? s->original(s->original_context, path,
         &file->resource.body, &file->resource.body_length) : 0;
+    s->census.original_us += sl_now_us() - reading;
     s->census.originals++;
     if (file->status > 0 && file->resource.body) s->census.original_bytes += file->resource.body_length;
     s->originals[s->original_count++] = file; s->original_slots[at] = file;
@@ -602,8 +609,10 @@ static int sl_files(sh_package_source_link *s, sl_unit *unit)
 companions:
     if (unit->unit.file_count && !unit->material_members && !strcmp(unit->unit.family, "material") && s->native.material_companions) {
         sl_material_members walk = {s, unit};
+        unsigned long long asking = sl_now_us();
         int ok = s->native.material_companions(s->native.context, unit->scope, unit->unit.name,
             sl_material_member, &walk, s->error, s->error_capacity);
+        s->census.companion_us += sl_now_us() - asking;
         if (ok) unit->material_members = 1;
         return ok;
     }
@@ -1256,9 +1265,11 @@ static const sh_compiled_resource *sl_supplied_file(const sh_package_source_link
 static int sl_original_identify(sh_package_source_link *s, sl_original *original, sh_package_file_identity *out)
 {
     if (!original->identified) {
+        unsigned long long hashing = sl_now_us();
         if (!sh_package_bytes_identity(original->resource.body, original->resource.body_length, &original->identity))
             return sl_env_fail(s, "cannot identify captured original", original->resource.engine_path);
         original->identified = 1;
+        s->census.identify_us += sl_now_us() - hashing;
     }
     *out = original->identity; return 1;
 }
@@ -1655,12 +1666,18 @@ static int sl_discover_unit_requests(sh_package_source_link *s, sl_unit *unit)
         int known = 0;
         for (const sl_replay *r = sl_store_find(s->store, unit); r; r = r->next) {
             if (!r->valid) continue;
-            known = 1;
-            if (!sl_replay_applies(s, unit, r)) {
+            known = 1; s->census.replay_tries++;
+            unsigned long long checking = sl_now_us();
+            int applies = sl_replay_applies(s, unit, r);
+            unsigned long long applying = sl_now_us();
+            s->census.applies_us += applying - checking;
+            if (!applies) {
                 if (s->failed) return 0; /* A read that failed while validating. */
                 continue;
             }
-            if (!sl_replay_apply(s, unit, r)) return 0;
+            int applied = sl_replay_apply(s, unit, r);
+            s->census.apply_us += sl_now_us() - applying;
+            if (!applied) return 0;
             unit->replayed = 1; s->census.replayed++;
             if (r->capture != s->capture) s->census.retained++;
             goto constructed;
@@ -1669,7 +1686,9 @@ static int sl_discover_unit_requests(sh_package_source_link *s, sl_unit *unit)
         record = sl_replay_open(s, unit); /* NULL: optional, bind without recording */
     }
     s->recording = record;
+    unsigned long long fresh = sl_now_us();
     int ok = sl_discover_files(s, unit, record);
+    s->census.fresh_us += sl_now_us() - fresh;
     s->recording = NULL;
     if (record && ok && record->valid && sl_replay_complete(s, record)) sl_store_add(s, record);
     else sl_replay_free(record);
@@ -2517,7 +2536,8 @@ const char *sh_package_source_link_counters(const sh_package_source_link *s, cha
 {
     if (!out || !capacity) return out;
     *out = 0;
-    if (s) snprintf(out, capacity, "source link %zu units discovered, %zu replayed from another scope "
+    if (!s) return out;
+    int n = snprintf(out, capacity, "source link %zu units discovered, %zu replayed from another scope "
         "(%zu recorded, %zu declined); %zu file binds, %zu of unsupplied originals; %zu originals captured "
         "(%llu MB); reverse base %zu units; discovery: file selection %llu ms, reads %llu ms, "
         "constructor requests %llu ms; %zu replayed from earlier compiles (memo %s)", s->census.units,
@@ -2526,6 +2546,14 @@ const char *sh_package_source_link_counters(const sh_package_source_link *s, cha
         s->census.original_bytes >> 20, s->census.reverse_units, s->census.select_us / 1000u,
         s->census.read_us / 1000u, s->census.construct_us / 1000u, s->census.retained,
         s->census.memo == 1 ? "kept" : s->census.memo == 2 ? "renewed" : s->census.memo == 3 ? "busy" : "unused");
+    /* The discovery sub-phases, on a line of their own. */
+    if (n > 0 && (size_t)n < capacity)
+        snprintf(out + n, capacity - (size_t)n, "\nsource link detail: material companions %llu ms within file "
+            "selection; within reads, replay validation %llu ms over %zu recordings, replay application %llu ms, "
+            "fresh reads %llu ms; originals captured in %llu ms and hashed in %llu ms",
+            s->census.companion_us / 1000u, s->census.applies_us / 1000u, s->census.replay_tries,
+            s->census.apply_us / 1000u, s->census.fresh_us / 1000u, s->census.original_us / 1000u,
+            s->census.identify_us / 1000u);
     return out;
 }
 int sh_package_source_link_unit_replayed(const sh_package_source_link *s, size_t index)

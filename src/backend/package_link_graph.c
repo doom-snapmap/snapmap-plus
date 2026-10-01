@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 typedef struct lg_item {
     const sh_package_link_node *source;
@@ -21,6 +22,11 @@ typedef struct lg_work {
 } lg_work;
 
 static int lg_size(size_t a, size_t b) { return a < b ? -1 : a > b; }
+static unsigned long long lg_now_us(void)
+{
+    struct timespec now;
+    return timespec_get(&now, TIME_UTC) ? (unsigned long long)now.tv_sec * 1000000u + (unsigned long long)now.tv_nsec / 1000u : 0;
+}
 
 static int lg_edge_order(const void *left, const void *right)
 {
@@ -342,7 +348,9 @@ int sh_package_link_equivalence_ordered(const sh_package_link_node *nodes, size_
     if (error && capacity) error[0] = 0;
     if (!out) return lg_fail(error, capacity, "resource graph needs an output");
     sh_package_link_classes_free(out);
+    unsigned long long began = lg_now_us(), shaped;
     if (!lg_prepare(&work, nodes, count, verify, context, order, error, capacity)) goto done;
+    shaped = lg_now_us();
     while (work.queue_count) {
         size_t group = work.queue[work.queue_begin];
         work.queue_begin = (work.queue_begin + 1) % work.count; work.queue_count--;
@@ -353,6 +361,7 @@ int sh_package_link_equivalence_ordered(const sh_package_link_node *nodes, size_
     for (i = 0; i < work.group_count; i++) out->representatives[i] = work.items[work.groups[i].start].index;
     out->nodes = work.classes; work.classes = NULL;
     out->node_count = count; out->count = work.group_count; out->examined = work.examined;
+    out->shapes_us = shaped - began; out->refine_us = lg_now_us() - shaped;
     ok = 1;
 done:
     lg_free(&work);

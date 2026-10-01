@@ -25,6 +25,9 @@ typedef struct sh_package_link_classes {
     unsigned char (*identities)[32]; /* stable binding identities, when requested */
     size_t node_count, count;
     size_t examined;              /* nodes examined during dependency refinement */
+    /* Diagnostics: microseconds placing and certifying shapes, refining
+     * dependencies and (when requested) hashing the quotient graph. */
+    unsigned long long shapes_us, refine_us, identity_us;
 } sh_package_link_classes;
 
 /* Certify a positive fingerprint match against retained exact source data and
