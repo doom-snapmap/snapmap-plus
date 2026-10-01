@@ -437,7 +437,7 @@ $labelSources += ' ..\src\backend\strids.c'
 $tests += @{ name = "strids_labels_test"; src = $labelSources; defs = '/DSH_RESOURCE_GRAPH_TESTING /DSH_STRIDS_TESTING'; libs = 'shell32.lib'; arg = "" }
 
 $reverseRootSources = ($tests | Where-Object { $_.name -eq 'package_source_graph_test' }).src -replace '^package_source_graph_test.c ', 'package_reverse_roots_test.c '
-$tests += @{ name = "package_reverse_roots_test"; src = $reverseRootSources; defs = '/DSH_RESOURCE_GRAPH_TESTING'; arg = "" }
+$tests += @{ name = "package_reverse_roots_test"; src = $reverseRootSources; defs = '/DSH_RESOURCE_GRAPH_TESTING /DSH_PACKAGE_SOURCE_LINK_TESTING'; arg = "" }
 $fsmLinkSources = $reverseRootSources -replace '^package_reverse_roots_test.c ', 'package_fsm_link_test.c '
 $tests += @{ name = "package_fsm_link_test"; src = $fsmLinkSources; defs = '/DSH_RESOURCE_GRAPH_TESTING'; arg = "" }
 

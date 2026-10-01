@@ -309,4 +309,9 @@ int sh_package_source_link_compile(sh_package_source_link *source,
     const sh_package_sources *inventory, const sh_package_link_adapter *native,
     const sh_package_policy *policy, char *(*canonical_path)(const char *),
     sh_package_link_output *out, char *error, size_t capacity);
+#ifdef SH_PACKAGE_SOURCE_LINK_TESTING
+/* Tests: base-unit reverse-change decisions compared with the per-unit check,
+ * and how many differed. */
+void sh_package_source_link_test_reverse(size_t *checked, size_t *mismatches);
+#endif
 #endif

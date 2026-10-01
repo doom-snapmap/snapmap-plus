@@ -1894,11 +1894,165 @@ static int sl_player_contract(sh_package_source_link *s)
     free(names);
     return failed ? sl_env_fail(s, "cannot read the stock player hands web", "mp/modes/coop/game_challenge") : 1;
 }
+/* Which base units a discovered scope changes, exactly as sl_reverse_changed
+ * decides, from what the scope itself supplies: gameplay-owned files, found
+ * through the key a lookup of each base unit's candidate path computes (one
+ * table per canonicalizer); seeded units with gameplay owners, by identity;
+ * affected audio events, for sound units only. Player hands webs never change.
+ * Built once per capture: checking every base unit's paths again for every
+ * scope repeated the same lookups scope after scope. */
+typedef char *(*sl_canonicalizer)(const char *path);
+typedef struct sl_reverse_key { char *key; size_t unit; } sl_reverse_key;
+#define SL_REVERSE_CANONICALIZERS 8u
+typedef struct sl_reverse_index {
+    sl_canonicalizer canonical[SL_REVERSE_CANONICALIZERS];
+    sl_reverse_key *keys[SL_REVERSE_CANONICALIZERS];
+    size_t key_count[SL_REVERSE_CANONICALIZERS], key_capacity[SL_REVERSE_CANONICALIZERS], sets;
+    size_t *sounds, sound_count, *hands, hand_count;
+    size_t **seeded, *seeded_count; /* per scope: base units its seeded supplies change */
+} sl_reverse_index;
+static sl_canonicalizer sl_canonicalizer_of(const sh_package_compilation *scope)
+{ return scope->canonical_path ? scope->canonical_path : sh_package_engine_path; }
+static int sl_reverse_key_order(const void *left, const void *right)
+{ return strcmp(((const sl_reverse_key *)left)->key, ((const sl_reverse_key *)right)->key); }
+static int sl_reverse_key_add(sl_reverse_index *index, size_t set, sl_canonicalizer canonical, const char *path, size_t unit)
+{
+    if (!path || !*path) return 1;
+    char *key = canonical(path);
+    if (!key) return 1; /* no lookup can find an unusable path */
+    if (index->key_count[set] == index->key_capacity[set]) {
+        size_t next = index->key_capacity[set] ? index->key_capacity[set] * 2 : 1024;
+        sl_reverse_key *grown = next <= SIZE_MAX / sizeof(*grown) ? realloc(index->keys[set], next * sizeof(*grown)) : NULL;
+        if (!grown) { free(key); return 0; }
+        index->keys[set] = grown; index->key_capacity[set] = next;
+    }
+    index->keys[set][index->key_count[set]++] = (sl_reverse_key){key, unit};
+    return 1;
+}
+static size_t sl_reverse_set(const sl_reverse_index *index, sl_canonicalizer canonical)
+{
+    for (size_t i = 0; i < index->sets; i++) if (index->canonical[i] == canonical) return i;
+    return SIZE_MAX;
+}
+static void sl_reverse_index_close(sl_reverse_index *index, size_t scopes)
+{
+    for (size_t set = 0; set < index->sets; set++) {
+        for (size_t i = 0; i < index->key_count[set]; i++) free(index->keys[set][i].key);
+        free(index->keys[set]);
+    }
+    for (size_t i = 0; index->seeded && i < scopes; i++) free(index->seeded[i]);
+    free(index->seeded); free(index->seeded_count); free(index->sounds); free(index->hands);
+}
+static int sl_reverse_index_open(sh_package_source_link *s, sh_package_source_link *base,
+    const sh_package_source_root_plan *plan, sl_reverse_index *index)
+{
+    memset(index, 0, sizeof(*index));
+    for (size_t scope = 0; scope < s->scope_count; scope++) if (plan->discover[scope]) {
+        sl_canonicalizer canonical = sl_canonicalizer_of(s->scopes[scope]);
+        if (sl_reverse_set(index, canonical) == SIZE_MAX && index->sets < SL_REVERSE_CANONICALIZERS)
+            index->canonical[index->sets++] = canonical;
+    }
+    index->sounds = malloc((base->count ? base->count : 1) * sizeof(*index->sounds));
+    index->hands = malloc((base->count ? base->count : 1) * sizeof(*index->hands));
+    index->seeded = calloc(s->scope_count ? s->scope_count : 1, sizeof(*index->seeded));
+    index->seeded_count = calloc(s->scope_count ? s->scope_count : 1, sizeof(*index->seeded_count));
+    if (!index->sounds || !index->hands || !index->seeded || !index->seeded_count) return 0;
+    for (size_t i = 0; i < base->count; i++) {
+        const sl_unit *unit = base->units[i];
+        if (!strcmp(unit->unit.family, "animweb") && sh_package_source_link_player_hands(s, unit->unit.name))
+            index->hands[index->hand_count++] = i;
+        if (!strcmp(unit->unit.family, "sound")) index->sounds[index->sound_count++] = i;
+        const sh_resource_catalog_entry *const *rows = NULL;
+        size_t count = sh_resource_catalog_find(s->catalog, unit->unit.family, unit->unit.name, &rows);
+        char *cooked = sh_package_cooked_path(unit->unit.family, unit->unit.name);
+        int ok = 1;
+        for (size_t set = 0; ok && set < index->sets; set++) {
+            for (size_t f = 0; ok && f < unit->unit.file_count; f++)
+                ok = sl_reverse_key_add(index, set, index->canonical[set], unit->unit.files[f]->engine_path, i);
+            for (size_t w = 0; ok && w < unit->unit.witness_count; w++)
+                ok = sl_reverse_key_add(index, set, index->canonical[set], unit->unit.witnesses[w].resource->engine_path, i);
+            for (size_t r = 0; ok && r < count; r++) ok = sl_reverse_key_add(index, set, index->canonical[set], rows[r]->path, i);
+            if (ok) ok = sl_reverse_key_add(index, set, index->canonical[set], cooked, i);
+        }
+        free(cooked);
+        if (!ok) return 0;
+    }
+    for (size_t set = 0; set < index->sets; set++)
+        if (index->key_count[set] > 1) qsort(index->keys[set], index->key_count[set], sizeof(*index->keys[set]), sl_reverse_key_order);
+    /* Seeded supplies with gameplay owners, as sl_reverse_changed reads them. */
+    for (size_t i = 0; i < s->count; i++) {
+        const sl_unit *supplied = s->units[i];
+        int owned = 0;
+        if (!supplied->seeded || supplied->scope >= s->scope_count || !plan->discover[supplied->scope]) continue;
+        for (size_t f = 0; !owned && f < supplied->unit.file_count; f++)
+            owned = sh_package_owners_count(&supplied->unit.files[f]->gameplay_owners) != 0;
+        for (size_t w = 0; !owned && w < supplied->seeded_witnesses; w++)
+            owned = sh_package_owners_count(&supplied->unit.witnesses[w].resource->gameplay_owners) != 0;
+        const sl_unit *changed = owned ? sl_find(base, 0, supplied->unit.family, supplied->unit.name, 0) : NULL;
+        if (!changed) continue;
+        size_t scope = supplied->scope, n = index->seeded_count[scope];
+        size_t *grown = n < SIZE_MAX / sizeof(*grown) - 1 ? realloc(index->seeded[scope], (n + 1) * sizeof(*grown)) : NULL;
+        if (!grown) return 0;
+        index->seeded[scope] = grown; grown[n] = changed->index; index->seeded_count[scope] = n + 1;
+    }
+    return 1;
+}
+#ifdef SH_PACKAGE_SOURCE_LINK_TESTING
+static size_t g_sl_reverse_checked, g_sl_reverse_mismatches;
+void sh_package_source_link_test_reverse(size_t *checked, size_t *mismatches)
+{ *checked = g_sl_reverse_checked; *mismatches = g_sl_reverse_mismatches; }
+#endif
+/* local[i] = 0 for each base unit scope changes; returns how many. */
+static size_t sl_reverse_scope_changes(sh_package_source_link *s, sh_package_source_link *base,
+    const sl_reverse_index *index, size_t scope, unsigned char *local)
+{
+    size_t set = sl_reverse_set(index, sl_canonicalizer_of(s->scopes[scope])), changed = 0;
+    memset(local, 1, base->count);
+    if (set == SIZE_MAX) {
+        for (size_t i = 0; i < base->count; i++) {
+            const sl_unit *unit = base->units[i];
+            if (!strcmp(unit->unit.family, "animweb") && sh_package_source_link_player_hands(s, unit->unit.name)) continue;
+            if (sl_reverse_changed(s, scope, unit)) local[i] = 0;
+        }
+    } else {
+        const sh_package_compilation *compiled = s->scopes[scope];
+        const sl_reverse_key *keys = index->keys[set];
+        size_t count = index->key_count[set];
+        for (size_t r = 0; r < compiled->resource_count; r++) {
+            const sh_compiled_resource *file = compiled->resources + r;
+            if (!file->engine_path || !sh_package_owners_count(&file->gameplay_owners)) continue;
+            size_t low = 0, high = count;
+            while (low < high) {
+                size_t mid = low + (high - low) / 2;
+                if (strcmp(keys[mid].key, file->engine_path) < 0) low = mid + 1; else high = mid;
+            }
+            for (; low < count && !strcmp(keys[low].key, file->engine_path); low++) local[keys[low].unit] = 0;
+        }
+        for (size_t i = 0; i < index->seeded_count[scope]; i++) local[index->seeded[scope][i]] = 0;
+        for (size_t i = 0; i < index->sound_count; i++)
+            if (sh_package_audio_program_affected(s->native.audio, scope, base->units[index->sounds[i]]->unit.name))
+                local[index->sounds[i]] = 0;
+        for (size_t i = 0; i < index->hand_count; i++) local[index->hands[i]] = 1;
+    }
+#ifdef SH_PACKAGE_SOURCE_LINK_TESTING
+    /* Tests: the index decides exactly what checking every base unit decides. */
+    for (size_t i = 0; i < base->count; i++) {
+        const sl_unit *unit = base->units[i];
+        int hands = !strcmp(unit->unit.family, "animweb") && sh_package_source_link_player_hands(s, unit->unit.name);
+        int unchanged = hands || !sl_reverse_changed(s, scope, unit);
+        g_sl_reverse_checked++;
+        if (unchanged != (local[i] != 0)) g_sl_reverse_mismatches++;
+    }
+#endif
+    for (size_t i = 0; i < base->count; i++) changed += !local[i];
+    return changed;
+}
 static int sl_reverse_roots(sh_package_source_link *s, const sh_package_source_root_plan *plan,
     sh_decl_registry_source registry, uintptr_t reflection)
 {
     snprintf(s->seed_note, sizeof(s->seed_note), "reverse root discovery");
     sh_package_source_link *base = NULL;
+    sl_reverse_index index = {0};
     sh_package_link_node *nodes = NULL;
     sh_package_link_edge *edges = NULL;
     unsigned char *local = NULL, *unchanged = NULL, *complete = NULL, *seen = NULL;
@@ -1998,15 +2152,14 @@ static int sl_reverse_roots(sh_package_source_link *s, const sh_package_source_r
     }
     /* A root is completely observed only when no reachable unit stopped early. */
     if (!sh_package_link_originals(nodes, base->count, local, complete, s->error, s->error_capacity)) goto done;
+    if (!sl_reverse_index_open(s, base, plan, &index)) {
+        sl_env_fail(s, "cannot index reverse dependency changes", NULL); goto done;
+    }
     for (size_t scope = 0; scope < s->scope_count; scope++) if (plan->discover[scope]) {
-        memset(local, 1, base->count);
         /* A player hands web changes globally (the library composes it under
-         * its stock name), so reaching it gives a stock root no variant. */
-        for (size_t i = 0; i < base->count; i++) {
-            const sl_unit *unit = base->units[i];
-            if (!strcmp(unit->unit.family, "animweb") && sh_package_source_link_player_hands(s, unit->unit.name)) continue;
-            if (sl_reverse_changed(s, scope, unit)) local[i] = 0;
-        }
+         * its stock name), so reaching it gives a stock root no variant. A scope
+         * that changes no base unit reaches no root. */
+        if (!sl_reverse_scope_changes(s, base, &index, scope, local)) continue;
         /* Reverse propagation is candidate discovery only. Final scoped graph
          * equality/certification still decides whether a private root exists. */
         if (!sh_package_link_originals(nodes, base->count, local, unchanged, s->error, s->error_capacity)) goto done;
@@ -2035,6 +2188,7 @@ done:
             "baseline palette reverse dependency coverage is incomplete: %s", detail);
         s->failed = 1;
     }
+    sl_reverse_index_close(&index, s->scope_count);
     free(nodes); free(edges); free(local); free(unchanged); free(complete); free(seen); free(stack);
     if (base) s->census.reverse_units = base->count;
     sh_package_source_link_close(base); return ok;

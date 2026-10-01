@@ -730,6 +730,54 @@ static void reverse_preparation_frontier(fixture *f, const sh_resource_catalog *
     assert(f->preparation_calls==1 && failure.kind==SH_PACKAGE_SOURCE_FAILURE_ENVIRONMENT && !strstr(error,"queued original"));
     f->prepare_programs=f->program_read_failure=0;sh_package_owners_free(&file.gameplay_owners);
 }
+/* Reverse changes through each scope's own canonicalizer: scope 0 supplies the
+ * stock rock image, scope 1 an aliased copy its canonicalizer maps the stock
+ * path to, scope 2 an unrelated gameplay file that changes no base unit, and
+ * scope 3 the stock image's identity stored at another path, which only its
+ * seeded unit (not any candidate path) ties to the stock unit. The indexed
+ * decision is compared with the per-unit check for every scope
+ * (reverse_oracle_checked), so a key built with the wrong canonicalizer, a
+ * missed seeded supply, or a change missed or invented for the quiet scope is
+ * a mismatch. */
+static char *alias_rock_image(const char *path)
+{
+    char *key = sh_package_engine_path(path);
+    if (key && !strcmp(key, "generated/image/textures/rock.bimage")) {
+        free(key); key = _strdup("generated/image/textures/aliased_rock.bimage");
+    }
+    return key;
+}
+static void reverse_canonicalizer_scopes(fixture *f, const sh_resource_catalog *catalog)
+{
+    char error[1024]; size_t checked = 0, mismatches = 0, before = 0;
+    sh_compiled_resource files[4] = {0};
+    const char *paths[] = {"generated/image/textures/rock.bimage", "generated/image/textures/aliased_rock.bimage",
+        "generated/image/textures/unrelated_quiet.bimage", "generated/image/textures/seeded_elsewhere.bimage"};
+    const char *names[] = {"textures/rock", "textures/aliased_rock", "textures/unrelated_quiet", "textures/rock"};
+    sh_package_compilation scopes_data[5] = {{0}};
+    for (int i = 0; i < 4; i++) {
+        files[i].engine_path = paths[i]; files[i].type = "image"; files[i].name = names[i];
+        files[i].body = (unsigned char *)"changed"; files[i].body_length = 7; files[i].source = SIZE_MAX;
+        assert(sh_package_owners_add(&files[i].gameplay_owners, 0));
+        scopes_data[i].resources = files + i; scopes_data[i].resource_count = 1;
+    }
+    scopes_data[1].canonical_path = alias_rock_image;
+    const sh_package_compilation *scopes[] = {scopes_data, scopes_data + 1, scopes_data + 2, scopes_data + 3,
+        scopes_data + 4};
+    unsigned char discover[] = {1, 1, 1, 1, 0};
+    sh_package_source_root_plan plan = {discover, 4, NULL};
+    sh_package_source_link_native native = {0};
+    sh_decl_registry_source registry = {f, read_memory, (uintptr_t)f->registry};
+    sh_package_source_link_test_reverse(&before, &mismatches);
+    sh_package_source_link *s = sh_package_source_link_open_roots(scopes, 5, catalog, original, f, registry,
+        (uintptr_t)f->reflection, &native, &plan, error, sizeof(error));
+    if (!s) fprintf(stderr, "reverse canonicalizer scopes: %s\n", error);
+    assert(s);
+    sh_package_source_link_test_reverse(&checked, &mismatches);
+    assert(checked > before && !mismatches);
+    sh_package_source_link_close(s);
+    for (int i = 0; i < 4; i++) sh_package_owners_free(&files[i].gameplay_owners);
+}
 /* An attempt whose supplied content already waits for native preparation
  * fails, but first lets the stock observation queue what it needs too
  * (program "second" is reached only from the stock palette), so one
@@ -778,8 +826,21 @@ static void reverse_preparation_after_failure(fixture *f, const sh_resource_cata
     f->prepare_programs=0;
     for(int i=0;i<2;i++)sh_package_owners_free(&files[i].gameplay_owners);
 }
+/* Every scope's indexed reverse-change decision matched the per-unit check.
+ * Checked at exit, after every scenario above has run. */
+static void reverse_oracle_checked(void)
+{
+    size_t checked = 0, mismatches = 0;
+    sh_package_source_link_test_reverse(&checked, &mismatches);
+    if (!checked || mismatches) {
+        fprintf(stderr, "reverse change oracle: %zu checked, %zu mismatched\n", checked, mismatches);
+        _exit(3);
+    }
+    printf("reverse change oracle: %zu decisions checked, 0 mismatched\n", checked);
+}
 int main(void)
 {
+    atexit(reverse_oracle_checked);
     char temporary[MAX_PATH], path[4096], error[1024]; fixture f = {0}; setup(&f);
     assert(GetTempPathA(sizeof(temporary), temporary));
     snprintf(root, sizeof(root), "%ssmp-reverse-roots-%lu-%llu", temporary, GetCurrentProcessId(), GetTickCount64());
@@ -791,6 +852,7 @@ int main(void)
     sh_resource_catalog *catalog = sh_resource_catalog_open(path, error, sizeof(error)); assert(catalog);
     reverse_preparation_frontier(&f,catalog);
     reverse_preparation_after_failure(&f,catalog);
+    reverse_canonicalizer_scopes(&f,catalog);
     const char *image = "generated/image/textures/rock.bimage";
     package("a", "Red", image, "red-image"); package("b", "Green", image, "green-image");
     package("c", "Red Copy", image, "red-image"); package("d", "Original", image, "stock-image");
