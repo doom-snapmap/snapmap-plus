@@ -418,6 +418,15 @@ int sh_package_compilation_restore_missing(sh_package_compilation *current,
     void *context, char *error, size_t error_capacity);
 const sh_compiled_resource *sh_package_compilation_find(const sh_package_compilation *compilation,
                                                         const char *engine_path);
+/* Add compiler-generated declaration text (no authored source or owners) at
+ * the declaration's path, keeping the provider sorted. baseline_known 3 marks
+ * a product built-in the baseline reader also serves, so a later provider
+ * without it restores it (sh_package_compilation_restore_missing); 0 a
+ * provider-local declaration. A resource already at that path must carry
+ * exactly these bytes and is kept. 1, or 0 with a reason. */
+int sh_package_compilation_add_declaration(sh_package_compilation *compilation, const char *type,
+    const char *name, const unsigned char *body, size_t length, int baseline_known,
+    char *error, size_t error_capacity);
 /* Resource availability, independent of package ID and map/local byte
  * differences: 1 readable from this provider, 0 absent, -1 invalid/unreadable.
  * Opaque data is verified through its immutable cache or source handle without

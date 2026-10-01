@@ -7,6 +7,7 @@
 #include "package_consumers.h"
 #include "package_audio_program.h"
 #include "package_keys.h"
+#include "package_fsm.h"
 
 typedef struct sh_package_library_native {
     sh_package_source_link_native source;
@@ -75,6 +76,9 @@ typedef struct sh_package_library {
     sh_virtual_material_view *virtual_materials;
     /* Immutable constructor requests, retained with this provider's files. */
     sh_package_consumers *consumers;
+    /* AI state-machine webs this provider binds and the state-machine
+     * declarations it owns (package_fsm.h); NULL when nothing binds or is owned. */
+    sh_package_fsm_webs *fsm_webs;
     sh_package_audio_program *audio;
     /* Owned group codes the relocated values use (NULL when none): the spawn
      * key detours need them to read those values; publish with the provider. */

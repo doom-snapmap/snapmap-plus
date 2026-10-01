@@ -32,6 +32,7 @@ typedef struct pl_work {
     sh_package_link_node *nodes;
     size_t *member_offsets, *members;
     unsigned char *originals;
+    unsigned char *effective; /* certified originals deciding conditional bindings */
     size_t count, unit, file, next_edge;
     size_t restored; /* Diagnostics: units this pass restored from the reuse cache. */
     int replay, failed;
@@ -84,6 +85,7 @@ static int pl_witness_order(const void *a, const void *b)
     return order ? order : strcmp(x->resource->engine_path, y->resource->engine_path);
 }
 static int pl_input_open_resource(pl_work *w, size_t unit, const pl_file *captured, pl_input *out);
+static sh_package_link_node *pl_stable_view(pl_work *w, sh_package_link_edge **storage);
 static int pl_assignment_order(const void *a, const void *b)
 {
     const pl_assignment *x = a, *y = b;
@@ -116,7 +118,7 @@ static void pl_clear(pl_work *w)
         if (u->names) for (size_t j = 0; j < w->units[i].file_count; j++) free(u->names[j]);
         free(u->names); free(u->paths); free(u->edges); free(u->files); free(u->witnesses); free(u->witness_order);
     }
-    free(w->work); free(w->nodes); free(w->member_offsets); free(w->members); free(w->originals);
+    free(w->work); free(w->nodes); free(w->member_offsets); free(w->members); free(w->originals); free(w->effective);
     sh_package_link_history_close(w->history);
     sh_package_link_output_free(&w->output);
 }
@@ -319,29 +321,49 @@ static void pl_implicit_free(sh_package_link_edge *edges, size_t count)
     for (size_t i = 0; i < count; i++) free((char *)edges[i].slot);
     free(edges);
 }
+/* A conditional binding is absent once its target is certified original
+ * (pl_conditional); until then it is read like any implicit binding. */
+static int pl_conditional_slot(const sh_package_link_unit *source, const char *slot)
+{
+    for (size_t i = 0; i < source->conditional_count; i++)
+        if (!strcmp(source->conditional[i].slot, slot)) return 1;
+    return 0;
+}
 static int pl_implicit_read(pl_work *w)
 {
     const sh_package_link_unit *source = w->units + w->unit;
     pl_unit *unit = w->work + w->unit;
     sh_package_link_edge *edges = NULL;
-    size_t kept = 0;
+    size_t total = 0, read = 0, kept = 0;
     int ok = 0;
-    if (source->implicit_count && !source->implicit)
+    if ((source->implicit_count && !source->implicit) || (source->conditional_count && !source->conditional))
         return pl_fail(w, "implicit resource bindings are missing");
-    if (source->implicit_count) {
-        edges = pl_alloc(source->implicit_count, sizeof(*edges));
+    if (source->implicit_count > SIZE_MAX / sizeof(*edges) - source->conditional_count)
+        return pl_fail(w, "too many implicit resource bindings");
+    total = source->implicit_count + source->conditional_count;
+    if (total) {
+        edges = pl_alloc(total, sizeof(*edges));
         if (!edges) return pl_fail(w, "cannot capture implicit resource bindings");
     }
-    for (size_t i = 0; i < source->implicit_count; i++) {
-        const sh_package_link_edge *edge = source->implicit + i;
+    for (size_t i = 0; i < total; i++) {
+        int conditional = i >= source->implicit_count;
+        const sh_package_link_edge *edge = conditional ? source->conditional + (i - source->implicit_count) :
+            source->implicit + i;
         if (!edge->slot || !*edge->slot || edge->target >= w->count) {
             pl_fail(w, "implicit resource binding has an invalid slot or target"); goto done;
         }
-        edges[i].slot = _strdup(edge->slot); edges[i].target = edge->target;
-        if (!edges[i].slot) { pl_fail(w, "cannot capture implicit resource binding slot"); goto done; }
+        if (conditional) {
+            for (size_t j = 0; j < source->implicit_count; j++)
+                if (source->implicit[j].slot && !strcmp(source->implicit[j].slot, edge->slot)) {
+                    pl_fail(w, "a resource binding slot is both conditional and implicit"); goto done;
+                }
+            if (w->effective && w->effective[edge->target]) continue;
+        }
+        edges[read].slot = _strdup(edge->slot); edges[read].target = edge->target;
+        if (!edges[read++].slot) { pl_fail(w, "cannot capture implicit resource binding slot"); goto done; }
     }
-    if (source->implicit_count > 1) qsort(edges, source->implicit_count, sizeof(*edges), pl_implicit_order);
-    for (size_t i = 0; i < source->implicit_count; i++) {
+    if (read > 1) qsort(edges, read, sizeof(*edges), pl_implicit_order);
+    for (size_t i = 0; i < read; i++) {
         if (kept && !strcmp(edges[kept - 1].slot, edges[i].slot)) {
             if (edges[kept - 1].target != edges[i].target) {
                 pl_fail(w, "implicit resource slot has contradictory captured targets"); goto done;
@@ -369,8 +391,52 @@ static int pl_implicit_read(pl_work *w)
     }
     ok = 1;
 done:
-    if (edges) pl_implicit_free(edges, source->implicit_count);
+    if (edges) pl_implicit_free(edges, total);
     return ok;
+}
+
+/* Remove the conditional bindings whose targets are certified original.
+ * Certification over the complete graph, these bindings included, equals
+ * certification over the bindings that remain: an original target reaches
+ * nothing uncertified, so no binding to one changes any unit's certification.
+ * Unit-level, from each unit's own original binding, over the graph pl_assign
+ * certifies (stable names excluded). Replay (pl_implicit_read) removes the
+ * same bindings; captures stay complete in the reuse cache. */
+static int pl_conditional(pl_work *w)
+{
+    size_t conditional = 0;
+    for (size_t i = 0; i < w->count; i++) conditional |= w->units[i].conditional_count;
+    if (!conditional) return 1;
+    unsigned char *local = pl_alloc(w->count, 1);
+    sh_package_link_edge *storage = NULL;
+    sh_package_link_node *view = NULL;
+    w->effective = pl_alloc(w->count, 1);
+    if (local && w->effective) view = pl_stable_view(w, &storage);
+    if (!view) { free(local); return pl_fail(w, "cannot certify conditional resource bindings"); }
+    for (size_t i = 0; i < w->count; i++) local[i] = w->units[i].original_binding == 1;
+    int ok = sh_package_link_originals(view, w->count, local, w->effective, w->error, w->capacity);
+    if (view != w->nodes) free(view);
+    free(storage); free(local);
+    if (!ok) return 0;
+    for (size_t i = 0; i < w->count; i++) {
+        const sh_package_link_unit *source = w->units + i;
+        pl_unit *u = w->work + i;
+        size_t kept = 0;
+        if (!source->conditional_count) continue;
+        if (u->implicit_begin > u->edge_count || u->edge_count - u->implicit_begin != u->implicit_count)
+            return pl_fail(w, "implicit resource bindings are not the unit's last bindings");
+        for (size_t k = 0; k < u->implicit_count; k++) {
+            sh_package_link_edge *edge = u->implicit + k, *bound = u->edges + u->implicit_begin + k;
+            if (w->effective[edge->target] && pl_conditional_slot(source, edge->slot)) {
+                if (!u->borrowed) { free((char *)edge->slot); free((char *)bound->slot); }
+                continue;
+            }
+            u->implicit[kept] = *edge; u->edges[u->implicit_begin + kept] = *bound; kept++;
+        }
+        u->edge_count = u->implicit_begin + kept; u->implicit_count = kept;
+        w->nodes[i].edges = u->edges; w->nodes[i].edge_count = u->edge_count;
+    }
+    return 1;
 }
 
 /* A first identity capture of a stable unit needs no bytes: its sites come
@@ -1976,7 +2042,7 @@ static int pl_identify(pl_work *w)
     w->work = pl_alloc(w->count, sizeof(*w->work));
     w->nodes = pl_alloc(w->count, sizeof(*w->nodes));
     unsigned long long began = pl_now_us();
-    if (!w->work || !w->nodes || !pl_collect(w)) return 0;
+    if (!w->work || !w->nodes || !pl_collect(w) || !pl_conditional(w)) return 0;
     unsigned long long collected = pl_now_us();
     sh_package_link_edge *edges = NULL;
     sh_package_link_node *view = pl_stable_view(w, &edges);

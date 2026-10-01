@@ -220,6 +220,9 @@ int sh_package_source_link_identity(sh_package_source_link *source, size_t index
 /* Tests and diagnostics: discovery replay of unchanged units is on by
  * default; 0 binds every unit afresh (the same result, more slowly). */
 void sh_package_source_link_replay(int enabled);
+/* Tests only: 0 captures as before AI state-machine selection (no behavior
+ * edges), reproducing the identities a pre-selection build recorded. */
+void sh_package_source_link_fsm(int enabled);
 /* Diagnostics: 1 when input unit index was discovered by replay. */
 int sh_package_source_link_unit_replayed(const sh_package_source_link *source, size_t index);
 /* One byte per input unit: its complete captured dependency closure has no
@@ -244,6 +247,11 @@ int sh_package_source_link_resolve_unit(sh_package_source_link *source, size_t u
 /* The frozen unit with this family and name in one input scope, if any. */
 int sh_package_source_link_find_unit(sh_package_source_link *source, size_t scope,
     const char *family, const char *name, size_t *unit);
+/* The layer configuration a frozen aibehavior unit names (its expanded
+ * edit.aiFSMManagerDeclLayersConfig), or NULL: none, or not a behavior. */
+const char *sh_package_source_link_fsm_config(const sh_package_source_link *source, size_t unit);
+/* 1 when the catalog lists this SnapMap state-machine declaration. */
+int sh_package_source_link_fsm_stock(const sh_package_source_link *source, const char *name);
 unsigned char *sh_package_source_link_bind_unit(sh_package_source_link *source, size_t unit,
     const unsigned char *body, size_t length, sh_package_binding_resolver resolver,
     void *context, size_t *output_length, char *error, size_t capacity);

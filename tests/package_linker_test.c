@@ -690,6 +690,149 @@ static void coupled_members(const sh_package_sources *sources)
     sh_package_link_classes_free(&classes); sh_package_link_output_free(&out);
 }
 
+/* Conditional bindings: a behavior's layer configuration selects state-machine
+ * declarations (fsm_web.h). Two scopes, each with a behavior b, state machines
+ * f and g it selects, and a dependency d that f reaches. */
+typedef struct conditional_case {
+    fixture f; sh_package_compilation scopes[2];
+    sh_compiled_resource parts[8]; const sh_compiled_resource *files[8];
+    sh_package_link_edge selects[2][2], uses[2][1];
+} conditional_case;
+static void conditional_setup(conditional_case *c, const sh_package_sources *sources)
+{
+    static const char *const families[] = {"aibehavior", "aifsmmanager", "aifsmmanager", "dep"};
+    static const char *const names[] = {"b", "f", "g", "d"};
+    static const char *const bodies[] = {"behavior", "fsm f", "fsm g", "dependency"};
+    memset(c, 0, sizeof(*c));
+    for (size_t s = 0; s < 2; s++) {
+        c->scopes[s].sources = sources;
+        for (size_t k = 0; k < 4; k++) {
+            size_t i = s * 4 + k;
+            c->parts[i].engine_path = k == 0 ? "generated/decls/aibehavior/b.decl" : k == 1 ?
+                "generated/decls/aifsmmanager/f.decl" : k == 2 ? "generated/decls/aifsmmanager/g.decl" : "dep/d.bin";
+            c->parts[i].body = (unsigned char *)bodies[k]; c->parts[i].body_length = strlen(bodies[k]);
+            c->parts[i].source = SIZE_MAX; c->files[i] = c->parts + i;
+            c->f.units[i] = (sh_package_link_unit){families[k], names[k], c->scopes + s, c->files + i, 1};
+            c->f.units[i].original_binding = 1;
+        }
+        c->selects[s][0] = (sh_package_link_edge){"fsm/f", s * 4 + 1};
+        c->selects[s][1] = (sh_package_link_edge){"fsm/g", s * 4 + 2};
+        c->uses[s][0] = (sh_package_link_edge){"uses", s * 4 + 3};
+        c->f.units[s * 4].conditional = c->selects[s]; c->f.units[s * 4].conditional_count = 2;
+        c->f.units[s * 4 + 1].implicit = c->uses[s]; c->f.units[s * 4 + 1].implicit_count = 1;
+    }
+    c->f.count = 8; c->f.native_originals = 1;
+}
+static void conditional_change(conditional_case *c, size_t unit, const char *body)
+{
+    c->parts[unit].body = (unsigned char *)body; c->parts[unit].body_length = strlen(body);
+    c->f.units[unit].original_binding = 0;
+}
+static size_t conditional_class(const sh_package_link_output *out, size_t unit) { return out->classes.nodes[unit]; }
+static const char *conditional_name(const sh_package_link_output *out, size_t unit)
+{ return out->names[out->classes.nodes[unit]]; }
+static int conditional_binds(const sh_package_link_output *out, size_t owner, size_t target)
+{
+    int found = 0;
+    for (size_t i = 0; i < out->implicit_count; i++)
+        found += out->implicit[i].owner == out->classes.nodes[owner] && out->implicit[i].target == out->classes.nodes[target];
+    return found;
+}
+static int conditional_depends(const sh_package_link_output *out, const char *owner, const char *target)
+{
+    for (size_t i = 0; i < out->compiled->resource_count; i++) {
+        const sh_compiled_resource *r = out->compiled->resources + i;
+        if (!r->native_name || strcmp(r->native_name, owner)) continue;
+        for (size_t j = 0; j < r->bound_dependency_count; j++) {
+            const sh_compiled_resource *t = sh_package_compilation_find(out->compiled, r->bound_dependencies[j]);
+            if (t && t->native_name && !strcmp(t->native_name, target)) return 1;
+        }
+    }
+    return 0;
+}
+static void conditional_bindings(const sh_package_sources *sources)
+{
+    conditional_case c;
+    sh_package_link_output out = {0}, plain = {0};
+    sh_package_link_adapter adapter;
+    unsigned char unchanged[32];
+    char error[512];
+    char *name_a = NULL;
+    /* Unchanged targets: the edges vanish. Identities and names are exactly
+     * those of the same graph without them, and both scopes dedupe natively. */
+    conditional_setup(&c, sources);
+    adapter = (sh_package_link_adapter){&c.f, resolve, bind_file, assign};
+    assert(sh_package_link(sources, c.f.units, c.f.count, &adapter, NULL, NULL, &out, error, sizeof(error)));
+    assert(conditional_class(&out, 0) == conditional_class(&out, 4) && !strcmp(conditional_name(&out, 0), "b"));
+    assert(c.f.original_bindings[out.classes.representatives[conditional_class(&out, 0)]] == 1);
+    assert(!conditional_binds(&out, 0, 1) && !conditional_binds(&out, 0, 2) && out.implicit_count == 1);
+    memcpy(unchanged, out.classes.identities[conditional_class(&out, 0)], 32);
+    c.f.units[0].conditional_count = c.f.units[4].conditional_count = 0;
+    assert(sh_package_link(sources, c.f.units, c.f.count, &adapter, NULL, NULL, &plain, error, sizeof(error)));
+    assert(!memcmp(unchanged, plain.classes.identities[conditional_class(&plain, 0)], 32));
+    sh_package_link_output_free(&plain);
+    /* A direct edit in scope 1 splits only its behavior and binds only the
+     * changed declaration; scope 0 keeps the native identity and name. */
+    conditional_setup(&c, sources);
+    adapter.context = &c.f;
+    conditional_change(&c, 5, "fsm f, changed");
+    assert(sh_package_link(sources, c.f.units, c.f.count, &adapter, NULL, NULL, &out, error, sizeof(error)));
+    assert(conditional_class(&out, 0) != conditional_class(&out, 4));
+    assert(!strcmp(conditional_name(&out, 0), "b") && strcmp(conditional_name(&out, 4), "b"));
+    assert(!memcmp(unchanged, out.classes.identities[conditional_class(&out, 0)], 32));
+    assert(!c.f.original_bindings[out.classes.representatives[conditional_class(&out, 4)]]);
+    assert(conditional_binds(&out, 4, 5) == 1 && !conditional_binds(&out, 4, 6) && !conditional_binds(&out, 0, 1));
+    assert(conditional_depends(&out, conditional_name(&out, 4), conditional_name(&out, 5)));
+    /* Downstream only: f keeps its native bytes but reaches a changed d. */
+    conditional_setup(&c, sources);
+    adapter.context = &c.f;
+    conditional_change(&c, 7, "dependency, changed");
+    assert(sh_package_link(sources, c.f.units, c.f.count, &adapter, NULL, NULL, &out, error, sizeof(error)));
+    assert(conditional_class(&out, 0) != conditional_class(&out, 4) && strcmp(conditional_name(&out, 4), "b"));
+    assert(conditional_binds(&out, 4, 5) == 1 && !conditional_binds(&out, 4, 6));
+    assert(!memcmp(unchanged, out.classes.identities[conditional_class(&out, 0)], 32));
+    /* Exact duplicates in both scopes dedupe to one private behavior. */
+    conditional_setup(&c, sources);
+    adapter.context = &c.f;
+    conditional_change(&c, 1, "fsm f, changed"); conditional_change(&c, 5, "fsm f, changed");
+    assert(sh_package_link(sources, c.f.units, c.f.count, &adapter, NULL, NULL, &out, error, sizeof(error)));
+    assert(conditional_class(&out, 0) == conditional_class(&out, 4) && strcmp(conditional_name(&out, 0), "b"));
+    name_a = _strdup(conditional_name(&out, 0)); assert(name_a);
+    /* Differing graphs stay apart, whichever scope comes first. */
+    conditional_change(&c, 5, "fsm f, other");
+    assert(sh_package_link(sources, c.f.units, c.f.count, &adapter, NULL, NULL, &out, error, sizeof(error)));
+    assert(conditional_class(&out, 0) != conditional_class(&out, 4));
+    assert(!strcmp(conditional_name(&out, 0), name_a) && strcmp(conditional_name(&out, 4), name_a));
+    assert(strcmp(conditional_name(&out, 4), "b"));
+    free(name_a);
+    /* The reuse cache keeps complete captures: certification is decided again
+     * in each pass, so a later change still binds its dependents. */
+    conditional_setup(&c, sources);
+    adapter.context = &c.f;
+    adapter.reuse = sh_package_link_reuse_open(c.f.count); assert(adapter.reuse);
+    assert(sh_package_link(sources, c.f.units, c.f.count, &adapter, NULL, NULL, &out, error, sizeof(error)));
+    assert(conditional_class(&out, 0) == conditional_class(&out, 4) && !conditional_binds(&out, 4, 5));
+    c.f.units[6].original_binding = 0;   /* g is scope 1's campaign-only or refused original now */
+    assert(sh_package_link(sources, c.f.units, c.f.count, &adapter, NULL, NULL, &out, error, sizeof(error)));
+    assert(conditional_class(&out, 0) != conditional_class(&out, 4) && conditional_binds(&out, 4, 6) == 1);
+    assert(!conditional_binds(&out, 4, 5));
+    c.f.units[6].original_binding = 1;
+    assert(sh_package_link(sources, c.f.units, c.f.count, &adapter, NULL, NULL, &out, error, sizeof(error)));
+    assert(conditional_class(&out, 0) == conditional_class(&out, 4) && !strcmp(conditional_name(&out, 4), "b"));
+    sh_package_link_reuse_close(adapter.reuse); adapter.reuse = NULL;
+    /* A slot is conditional or implicit, never both. */
+    conditional_setup(&c, sources);
+    adapter.context = &c.f;
+    sh_package_link_edge twice[] = {{"fsm/f", 1}};
+    c.f.units[0].implicit = twice; c.f.units[0].implicit_count = 1;
+    assert(!sh_package_link(sources, c.f.units, c.f.count, &adapter, NULL, NULL, &out, error, sizeof(error)));
+    assert(strstr(error, "both conditional and implicit"));
+    c.f.units[0].implicit = NULL; c.f.units[0].implicit_count = 0;
+    c.f.units[0].conditional = NULL;
+    assert(!sh_package_link(sources, c.f.units, c.f.count, &adapter, NULL, NULL, &out, error, sizeof(error)));
+    sh_package_link_output_free(&out);
+}
+
 static void implicit_bindings(const sh_package_sources *sources)
 {
     fixture f = {0}; sh_package_compilation scope = {0}; scope.sources = sources;
@@ -1217,6 +1360,7 @@ int main(void)
     implicit_ownership(sources);
     coupled_members(sources);
     implicit_bindings(sources);
+    conditional_bindings(sources);
     sh_package_link_inputs_free(&discovered);
     for (size_t i = 0; i < 3; i++) { sh_package_compilation_free(scopes[i]); sh_package_scope_close(&views[i]); }
     for (size_t i = 0; i < sources->file_count; i++) if (!sources->files[i].directory) assert(sh_package_source_verify(&sources->files[i]));

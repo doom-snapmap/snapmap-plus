@@ -30,6 +30,7 @@
 #endif
 #include "package_hud.h"
 #include "package_sound.h"
+#include "fsm_web.h"
 #include "package_native_assets.h"
 #include "package_map_uses.h"
 #include "package_native_inline.h"
@@ -75,6 +76,8 @@ typedef struct pr_provider {
     sh_package_native_assets *native_assets;
     sh_virtual_material_view *virtual_materials;
     sh_package_consumers *consumers;
+    /* AI state-machine webs it binds and declarations it owns (package_fsm.h). */
+    sh_package_fsm_webs *fsm_webs;
     sh_package_audio_program *audio;
     /* Views retain every root provider whose audio program they serve: the
      * current map, the library and retained occurrence/selector owners. The
@@ -228,6 +231,7 @@ static void pr_release(pr_provider *provider)
     sh_package_compilation_free(provider->compiled);
     sh_package_audio_program_close(provider->audio);
     sh_package_consumers_free(provider->consumers);
+    sh_package_fsm_webs_free(provider->fsm_webs);
     sh_package_provenance_free(&provider->bindings);
     sh_package_provenance_free(&provider->policy_uses);
     sh_package_provenance_free(&provider->historical_bindings);
@@ -544,6 +548,25 @@ typedef struct pr_compile_rows {
 } pr_compile_rows;
 static int pr_compile_rows_read(void *context, const struct sh_editor_rows **rows);
 
+/* The state-machine placeholder (fsm_web.h, package_fsm.h): a product
+ * built-in derived from the installed stock declaration, so a provider that
+ * lacks it restores it (sh_package_compilation_restore_missing). */
+static int pr_fsm_placeholder_read(sh_package_baseline_reader game, void *context,
+    unsigned char **body, size_t *length)
+{
+    unsigned char *stock = NULL;
+    size_t stock_length = 0;
+    char error[256];
+    *body = NULL; *length = 0;
+    int status = game ? game(context, "generated/decls/aifsmmanager/" SH_PACKAGE_FSM_PLACEHOLDER_SOURCE ".decl",
+        &stock, &stock_length) : 0;
+    if (status != 1) { free(stock); return status < 0 ? -1 : 0; }
+    *body = (unsigned char *)sh_package_fsm_placeholder((sh_decl_source){(const char *)stock, stock_length},
+        length, error, sizeof(error));
+    free(stock);
+    return *body ? 3 : -1;
+}
+
 static int pr_original(void *context, const char *path, unsigned char **body, size_t *length)
 {
     pr_original_source *source = (pr_original_source *)context;
@@ -557,6 +580,8 @@ static int pr_original(void *context, const char *path, unsigned char **body, si
     free(*body); *body = NULL; *length = 0;
     scope = sh_package_native_assets_read(source->native_assets, path, body, length);
     if (scope) return scope;
+    if (!_stricmp(path, "generated/decls/aifsmmanager/" SH_PACKAGE_FSM_PLACEHOLDER ".decl"))
+        return pr_fsm_placeholder_read(source->game, source->context, body, length);
     for (i = 0; i < sizeof(g_ov_baked_decls) / sizeof(g_ov_baked_decls[0]); i++) {
         const ov_baked_decl_t *value = &g_ov_baked_decls[i];
         if (_stricmp(path, value->name)) continue;
@@ -746,6 +771,66 @@ int sh_package_runtime_test_source_inputs(sh_decl_registry_source *registry, uin
     return g_test_source_registry.read && g_test_source_registry.registry && g_test_source_reflection;
 }
 #endif
+
+/* AI state-machine webs (fsm_web.h). Without the hook the engine would merge
+ * every served private state machine into each web its layers meet, so a view
+ * with any is refused. Its product declarations are issued before they are
+ * registered, and its table is published once they are; a refused table is an
+ * activation failure. Every recovery publishes the restored view's table again
+ * (issued names stay excluded), and only a recovery that did so is usable. */
+typedef struct pr_fsm_hook {
+    int (*installed)(void);
+    int (*issue)(const char *const *names, size_t count);
+    int (*publish)(const sh_fsm_web_table *table);
+} pr_fsm_hook;
+#ifndef SH_PACKAGE_RUNTIME_TESTING
+static const pr_fsm_hook g_fsm = {sh_fsm_web_installed, sh_fsm_web_issue, sh_fsm_web_publish};
+#else
+static pr_fsm_hook g_fsm; /* None: a compiler fixture without the native hook. */
+void sh_package_runtime_test_fsm_hook(int (*installed)(void),
+    int (*issue)(const char *const *names, size_t count), int (*publish)(const sh_fsm_web_table *table))
+{ g_fsm = (pr_fsm_hook){installed, issue, publish}; }
+#endif
+static int pr_fsm_content(const pr_provider *view)
+{ return view && view->fsm_webs && (view->fsm_webs->count || view->fsm_webs->owned_count); }
+static int pr_fsm_issue(const pr_provider *view, char *error, size_t capacity)
+{
+    const sh_package_fsm_webs *webs = view ? view->fsm_webs : NULL;
+    if (!pr_fsm_content(view) || !g_fsm.installed) return 1;
+    if (!g_fsm.installed()) {
+        snprintf(error, capacity, "package AI state machines need the state-machine web hook, which is not installed for this game build");
+        return 0;
+    }
+    if (!g_fsm.issue((const char *const *)webs->owned, webs->owned_count)) {
+        snprintf(error, capacity, "cannot record package AI state machines"); return 0;
+    }
+    return 1;
+}
+static int pr_fsm_bind(const pr_provider *view, char *error, size_t capacity)
+{
+    const sh_package_fsm_webs *webs = view ? view->fsm_webs : NULL;
+    sh_fsm_web_binding *bindings = NULL;
+    sh_fsm_web_table table = {0};
+    int ok;
+    if (!g_fsm.installed) return 1;
+    if (!g_fsm.installed()) return !pr_fsm_content(view);
+    if (pr_fsm_content(view)) {
+        if (!(bindings = calloc(webs->count ? webs->count : 1, sizeof(*bindings)))) {
+            snprintf(error, capacity, "cannot bind package AI state machines"); return 0;
+        }
+        for (size_t i = 0; i < webs->count; i++) {
+            const sh_package_fsm_web *web = webs->webs + i;
+            bindings[i] = (sh_fsm_web_binding){web->config, (const char *const *)web->behaviors, web->behavior_count,
+                (const char *const *)web->from, (const char *const *)web->to, web->count,
+                (const char *const *)web->extra, web->extra_count};
+        }
+        table = (sh_fsm_web_table){bindings, webs->count, (const char *const *)webs->owned, webs->owned_count};
+    }
+    ok = g_fsm.publish(pr_fsm_content(view) ? &table : NULL);
+    free(bindings);
+    if (!ok) snprintf(error, capacity, "package AI state-machine webs do not resolve against the registered declarations (backend log)");
+    return ok;
+}
 
 static int pr_activate(sh_package_activation_fn activate, void *context, int restoring,
     const sh_package_changes *changes, char *error, size_t capacity)
@@ -1987,6 +2072,7 @@ static pr_provider *pr_prepare_deliveries(const char *data_root, const char *sou
     provider->historical_bindings = historical; memset(&historical, 0, sizeof(historical));
     provider->virtual_materials = isolated.virtual_materials; isolated.virtual_materials = NULL;
     provider->consumers = isolated.consumers; isolated.consumers = NULL;
+    provider->fsm_webs = isolated.fsm_webs; isolated.fsm_webs = NULL;
     provider->audio = isolated.audio; isolated.audio = NULL;
     provider->audio_originals = audio_originals; audio_originals = NULL;
 #ifndef SH_PACKAGE_RUNTIME_TESTING
@@ -2361,6 +2447,24 @@ static int pr_lease_consumer(void *context, const char *family, const char *name
         if (selection->resources[i] && sh_package_resource_native_matches(compiled->resources + i, family, name)) return 1;
     return 0;
 }
+static int pr_lease_behavior(void *context, const char *name) { return pr_lease_consumer(context, "aibehavior", name); }
+/* A retained behavior keeps its web's generated first declaration and the
+ * placeholder: neither is a bound dependency of authored content. */
+static void pr_lease_fsm_declarations(pr_retained_selection *selection)
+{
+    const pr_provider *provider = selection->provider;
+    const sh_package_fsm_webs *webs = provider->fsm_webs;
+    for (size_t w = 0; webs && w < webs->count; w++) {
+        int used = 0;
+        for (size_t k = 0; k < webs->webs[w].behavior_count && !used; k++) used = pr_lease_behavior(selection, webs->webs[w].behaviors[k]);
+        for (size_t i = 0; used && i < provider->compiled->resource_count; i++) {
+            const sh_compiled_resource *resource = provider->compiled->resources + i;
+            if (sh_package_resource_native_matches(resource, "aifsmmanager", webs->webs[w].to[0]) ||
+                sh_package_resource_native_matches(resource, "aifsmmanager", SH_PACKAGE_FSM_PLACEHOLDER))
+                selection->resources[i] = 1;
+        }
+    }
+}
 static int pr_retained_policy_sources(sh_package_sources *sources, const sh_package_sources *authored,
     size_t retained_begin, const sh_package_provenance *promoted, const sh_package_provenance *admitted)
 {
@@ -2577,6 +2681,7 @@ static int pr_view_retained(pr_provider *view, const pr_provider *provider,
     sh_package_bundle **bundles = NULL;
     sh_virtual_material_view *filtered = NULL, *materials = NULL;
     sh_package_consumers *selected_consumers = NULL, *consumers = NULL;
+    sh_package_fsm_webs *selected_webs = NULL, *webs = NULL;
     pr_retained_selection selected = {0};
     size_t *owners = NULL, *files = NULL;
     size_t old_owners = view->sources->package_count, old_files = view->sources->file_count;
@@ -2586,6 +2691,7 @@ static int pr_view_retained(pr_provider *view, const pr_provider *provider,
         provider->sources->package_count > SIZE_MAX / sizeof(*owners) ||
         provider->sources->file_count > SIZE_MAX / sizeof(*files)) goto done;
     if (!pr_retained_select(provider, admitted, mode, &selected, error, capacity)) goto done;
+    pr_lease_fsm_declarations(&selected);
     owners = malloc((provider->sources->package_count ? provider->sources->package_count : 1) * sizeof(*owners));
     files = malloc((provider->sources->file_count ? provider->sources->file_count : 1) * sizeof(*files));
     extra = sh_package_sources_join(originals, &empty, error, capacity);
@@ -2729,6 +2835,11 @@ static int pr_view_retained(pr_provider *view, const pr_provider *provider,
         selected_consumers = sh_package_consumers_filter(provider->consumers, pr_lease_consumer, &selected, error, capacity);
         if (!selected_consumers || !(consumers = sh_package_consumers_join(view->consumers, selected_consumers, error, capacity))) goto done;
     }
+    if (provider->fsm_webs) {
+        /* The view's own webs keep their behaviors (map before local). */
+        selected_webs = sh_package_fsm_webs_filter(provider->fsm_webs, pr_lease_behavior, &selected, error, capacity);
+        if (!selected_webs || !(webs = sh_package_fsm_webs_join(view->fsm_webs, selected_webs, error, capacity))) goto done;
+    }
     if (provider->virtual_materials) {
         filtered = sh_virtual_material_runtime_filter(provider->virtual_materials, pr_lease_material,
             &selected, error, capacity);
@@ -2753,6 +2864,7 @@ static int pr_view_retained(pr_provider *view, const pr_provider *provider,
     free(view->bundles); view->bundles = bundles; bundles = NULL; view->bundle_count = view->sources->package_count;
     if (materials) { sh_virtual_material_runtime_retire(&view->virtual_materials); view->virtual_materials = materials; materials = NULL; }
     if (consumers) { sh_package_consumers_free(view->consumers); view->consumers = consumers; consumers = NULL; }
+    if (webs) { sh_package_fsm_webs_free(view->fsm_webs); view->fsm_webs = webs; webs = NULL; }
     ok = 1;
 done:
     if (remapped) for (size_t i = 0; i < provider->compiled->resource_count; i++) {
@@ -2761,6 +2873,7 @@ done:
     if (bundles) { for (size_t i = 0; sources && i < sources->package_count; i++) sh_package_bundle_release(bundles[i]); free(bundles); }
     sh_virtual_material_runtime_retire(&filtered); sh_virtual_material_runtime_retire(&materials);
     sh_package_consumers_free(selected_consumers); sh_package_consumers_free(consumers);
+    sh_package_fsm_webs_free(selected_webs); sh_package_fsm_webs_free(webs);
     sh_package_compilation_free(compiled); sh_package_sources_free(sources); sh_package_sources_free(authored);
     sh_package_sources_free(extra); free(owners); free(files); free(projections); free(inputs); free(remapped);
     free(selected.resources); sh_package_owners_free(&selected.owners);
@@ -2954,6 +3067,26 @@ static pr_provider *pr_view(pr_provider *library, const pr_provider *map,
     }
     if ((library->consumers || (map && map->consumers)) && !(view->consumers =
         sh_package_consumers_join(library->consumers, map ? map->consumers : NULL, error, capacity))) { pr_release(view); return NULL; }
+    if ((library->fsm_webs || (map && map->fsm_webs)) && !(view->fsm_webs =
+        sh_package_fsm_webs_join(map ? map->fsm_webs : NULL, library->fsm_webs, error, capacity))) { pr_release(view); return NULL; }
+#ifndef SH_PACKAGE_RUNTIME_TESTING
+    /* Served from the first view on, whatever the packages bind: an issued
+     * declaration stays excluded for the life of the process, and its
+     * exclusion needs the placeholder registered and non-selecting. */
+    if (library->catalog) {
+        unsigned char *placeholder = NULL;
+        size_t length = 0;
+        int status = pr_fsm_placeholder_read(sh_resource_catalog_read_path, library->catalog, &placeholder, &length);
+        int added = status == 3 && sh_package_compilation_add_declaration(view->compiled, "aifsmmanager",
+            SH_PACKAGE_FSM_PLACEHOLDER, placeholder, length, 3, error, capacity);
+        free(placeholder);
+        /* Without its installed source no web can bind (pr_fsm_bind refuses
+         * views that have any); views without webs still serve. */
+        if (!added && status == 3) { pr_release(view); return NULL; }
+        if (!added) backend_log("AI state-machine placeholder unavailable: " SH_PACKAGE_FSM_PLACEHOLDER_SOURCE
+            " could not be read; package state-machine webs cannot bind");
+    }
+#endif
     if (library->virtual_materials || (map && map->virtual_materials)) {
         view->virtual_materials = sh_virtual_material_runtime_join(library->virtual_materials,
             map ? map->virtual_materials : NULL, error, capacity);
@@ -3110,6 +3243,7 @@ static pr_provider *pr_clone_serving(pr_provider *base, char *error, size_t capa
     if (base->virtual_materials && !(view->virtual_materials =
         sh_virtual_material_runtime_join(base->virtual_materials, NULL, error, capacity))) goto failed;
     if (base->consumers && !(view->consumers = sh_package_consumers_join(base->consumers, NULL, error, capacity))) goto failed;
+    if (base->fsm_webs && !(view->fsm_webs = sh_package_fsm_webs_join(base->fsm_webs, NULL, error, capacity))) goto failed;
     if (!pr_prepare_spawn_program(view, error, capacity)) goto failed;
     free(rows); free(inputs); return view;
 failed:
@@ -3483,6 +3617,7 @@ static int pr_update(const char *data_root, int change_map, const char *map_sour
      * boundary. The publisher checks again before any private alias mutation. */
     if (current->strings && !sh_strids_reservation_validate(current->strings, error, sizeof(error))) goto done;
 #endif
+    if (activate && !pr_fsm_issue(current, error, sizeof(error))) goto done;
     AcquireSRWLockExclusive(&g_lock);
     if (promotion_generation != g_promotion_generation) {
         snprintf(error, sizeof(error), "map occurrence policy changed during provider preparation; retry at the next activation boundary");
@@ -3514,7 +3649,8 @@ static int pr_update(const char *data_root, int change_map, const char *map_sour
     g_activating = activate != NULL; g_usable = 0; g_ready = !g_activating; g_error[0] = 0;
     ReleaseSRWLockExclusive(&g_lock);
     if (guarded) { guard.end(1); guarded = 0; }
-    if (activate && !pr_activate(activate, context, 0, &changes, error, sizeof(error))) {
+    if (activate && (!pr_activate(activate, context, 0, &changes, error, sizeof(error)) ||
+        !pr_fsm_bind(current, error, sizeof(error)))) {
         char recovery_error[1024] = "";
         int recovered;
         if (!error[0]) strcpy_s(error, sizeof(error), "package activation did not complete");
@@ -3532,7 +3668,8 @@ static int pr_update(const char *data_root, int change_map, const char *map_sour
         ReleaseSRWLockExclusive(&g_lock);
         if (guarded) { guard.end(1); guarded = 0; }
         sh_package_changes_reverse(&changes);
-        recovered = pr_activate(activate, context, 1, &changes, recovery_error, sizeof(recovery_error));
+        recovered = pr_activate(activate, context, 1, &changes, recovery_error, sizeof(recovery_error)) &&
+            pr_fsm_bind(old_current, recovery_error, sizeof(recovery_error));
         AcquireSRWLockExclusive(&g_lock); g_usable = recovered && old_usable; ReleaseSRWLockExclusive(&g_lock);
         if (!recovered) {
             char activation_error[sizeof(error)];
@@ -3729,6 +3866,7 @@ int sh_package_runtime_admit_occurrences(sh_package_map_plan *plan,
 #ifndef SH_PACKAGE_RUNTIME_TESTING
     if (candidate->strings && !sh_strids_reservation_validate(candidate->strings, error, capacity)) goto done;
 #endif
+    if (!pr_fsm_issue(candidate, error, capacity)) goto done;
     AcquireSRWLockExclusive(&g_lock);
     previous = g_current_provider; old_ready = g_ready; old_usable = g_usable;
     if (!sh_virtual_material_runtime_publish(candidate->virtual_materials, &previous_materials, error, capacity)) {
@@ -3738,7 +3876,7 @@ int sh_package_runtime_admit_occurrences(sh_package_map_plan *plan,
     g_activating = 1; g_ready = g_usable = 0;
     ReleaseSRWLockExclusive(&g_lock);
     if (guarded) { guard.end(1); guarded = 0; }
-    int native_ready = pr_activate(activate, context, 0, &changes, error, capacity);
+    int native_ready = pr_activate(activate, context, 0, &changes, error, capacity) && pr_fsm_bind(candidate, error, capacity);
     if (native_ready && finalize) {
         __try { native_ready = finalize(context, error, capacity) == 1; }
         __except (EXCEPTION_EXECUTE_HANDLER) {
@@ -3756,7 +3894,8 @@ int sh_package_runtime_admit_occurrences(sh_package_map_plan *plan,
         ReleaseSRWLockExclusive(&g_lock);
         if (guarded) { guard.end(1); guarded = 0; }
         sh_package_changes_reverse(&changes);
-        int recovered = pr_activate(activate, context, 1, &changes, recovery_error, sizeof(recovery_error));
+        int recovered = pr_activate(activate, context, 1, &changes, recovery_error, sizeof(recovery_error)) &&
+            pr_fsm_bind(previous, recovery_error, sizeof(recovery_error));
         AcquireSRWLockExclusive(&g_lock);
         g_activating = 0; g_ready = recovered && old_ready; g_usable = recovered && old_usable;
         if (!recovered) {
@@ -3803,9 +3942,15 @@ int sh_package_runtime_complete_occurrence_recovery(void *context)
     AcquireSRWLockExclusive(&g_lock);
     if (g_occurrence_recovery_provider && context == g_occurrence_recovery_context &&
         g_current_provider == g_occurrence_recovery_provider && !g_activating && !g_native_preparing) {
-        retained = g_occurrence_recovery_provider; g_occurrence_recovery_provider = NULL;
-        g_occurrence_recovery_context = NULL;
-        g_ready = g_occurrence_recovery_ready; g_usable = g_occurrence_recovery_usable; g_error[0] = 0;
+        char error[1024] = "";
+        /* The restored provider's state-machine table binds again first. */
+        if (!pr_fsm_bind(g_occurrence_recovery_provider, error, sizeof(error))) {
+            snprintf(g_error, sizeof(g_error), "occurrence recovery could not restore AI state-machine webs: %s", error);
+        } else {
+            retained = g_occurrence_recovery_provider; g_occurrence_recovery_provider = NULL;
+            g_occurrence_recovery_context = NULL;
+            g_ready = g_occurrence_recovery_ready; g_usable = g_occurrence_recovery_usable; g_error[0] = 0;
+        }
     }
     ReleaseSRWLockExclusive(&g_lock);
     pr_release(retained); ReleaseSRWLockExclusive(&g_refresh_lock); return retained != NULL;

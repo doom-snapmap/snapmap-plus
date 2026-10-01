@@ -483,6 +483,12 @@ int sh_package_runtime_test_prepare_native_sources(struct sh_package_native_asse
 void sh_package_runtime_test_audio_originals(const char *root, const wchar_t *language);
 void sh_package_runtime_test_empty_catalog(void);
 void sh_package_runtime_test_baseline(sh_package_baseline_reader reader, void *context);
+/* The AI state-machine web hook activation issues to and publishes through
+ * (fsm_web.h): a fixture passes the real sh_fsm_web_* entry points (or its own);
+ * all NULL restores a compiler fixture without the hook. */
+struct sh_fsm_web_table;
+void sh_package_runtime_test_fsm_hook(int (*installed)(void),
+    int (*issue)(const char *const *names, size_t count), int (*publish)(const struct sh_fsm_web_table *table));
 /* Opt-in real context linking/capture against immutable synthetic native readers.
  * This small-schema fixture omits baked product defaults during preparation.
  * Passing a zero source disables the seam and preserves older offline fixtures. */

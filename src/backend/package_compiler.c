@@ -3378,6 +3378,54 @@ done:
     return ok;
 }
 
+int sh_package_compilation_add_declaration(sh_package_compilation *compilation, const char *type,
+    const char *name, const unsigned char *body, size_t length, int baseline_known,
+    char *error, size_t error_capacity)
+{
+    char fallback[256], *path = NULL, *key = NULL;
+    sh_compiled_resource resource = {0}, *grown;
+    const sh_compiled_resource *existing;
+    int ok = 0;
+    if (!error || !error_capacity) { error = fallback; error_capacity = sizeof(fallback); }
+    error[0] = 0;
+    if (!compilation || !type || !*type || !name || !*name || !body || length == SIZE_MAX) {
+        snprintf(error, error_capacity, "generated declaration is incomplete"); return 0;
+    }
+    size_t size = strlen(type) + strlen(name) + 32;
+    if (!(path = malloc(size))) goto allocation;
+    snprintf(path, size, "generated/decls/%s/%s.decl", type, name);
+    key = compilation->canonical_path ? compilation->canonical_path(path) : sh_package_engine_path(path);
+    if (!key) goto allocation;
+    existing = sh_package_compilation_find(compilation, key);
+    if (existing) {
+        size_t current = 0;
+        unsigned char *bytes = sh_package_compilation_read(compilation, existing, SIZE_MAX, &current, error, error_capacity);
+        ok = bytes && current == length && !memcmp(bytes, body, length);
+        free(bytes);
+        if (!ok && !error[0]) snprintf(error, error_capacity, "%s: a different resource holds the generated declaration's path", key);
+        goto done;
+    }
+    resource.engine_path = key; resource.owns_engine_path = 1; key = NULL;
+    resource.source = SIZE_MAX; resource.baseline_known = baseline_known;
+    resource.type = _strdup(type); resource.name = _strdup(name);
+    resource.native_type = _strdup(type); resource.native_name = _strdup(name);
+    resource.body = malloc(length + 1);
+    if (!resource.type || !resource.name || !resource.native_type || !resource.native_name || !resource.body) goto allocation;
+    memcpy(resource.body, body, length); resource.body[length] = 0; resource.body_length = length;
+    if (compilation->resource_count >= SIZE_MAX / sizeof(*grown) - 1 ||
+        !(grown = realloc(compilation->resources, (compilation->resource_count + 1) * sizeof(*grown)))) goto allocation;
+    compilation->resources = grown;
+    grown[compilation->resource_count++] = resource; memset(&resource, 0, sizeof(resource));
+    qsort(compilation->resources, compilation->resource_count, sizeof(*compilation->resources), pc_resource_compare);
+    ok = 1; goto done;
+allocation:
+    snprintf(error, error_capacity, "cannot allocate generated declaration");
+done:
+    pc_resource_free(&resource);
+    free(path); free(key);
+    return ok;
+}
+
 void sh_package_compilation_free(sh_package_compilation *compilation)
 {
     size_t i;

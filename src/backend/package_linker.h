@@ -55,6 +55,16 @@ typedef struct sh_package_link_unit {
      * lifetime retention. Runtime adapters still own native consumer binding. */
     const sh_package_link_edge *implicit;
     size_t implicit_count;
+    /* Consumer dependencies that bind only a changed target: the state-machine
+     * declarations a behavior's layer configuration selects, which every AI
+     * of that behavior builds from (fsm_web.h). Each is exactly an implicit
+     * binding while its target is not certified original over the complete
+     * graph (its own bytes and everything it reaches, these edges included),
+     * and absent otherwise, so an unchanged target leaves its dependent's
+     * identity and name as they were without it. Implicit slot rules; a slot
+     * never appears in both lists. */
+    const sh_package_link_edge *conditional;
+    size_t conditional_count;
     /* Ownership of implicit source records whose exact behavior is already
      * represented by semantics/edges. These sets affect delivery and shared
      * editor eligibility, never equality or alias assignment. They do not add

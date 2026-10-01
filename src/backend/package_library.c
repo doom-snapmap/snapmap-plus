@@ -365,6 +365,7 @@ void sh_package_library_free(sh_package_library *library)
     sh_package_compilation_free(library->compiled);
     sh_virtual_material_runtime_retire(&library->virtual_materials);
     sh_package_consumers_free(library->consumers);
+    sh_package_fsm_webs_free(library->fsm_webs);
     free(library->key_groups);
     free(library->coverage); free(library->link_diagnostics);
     sh_package_provenance_free(&library->bindings); memset(library, 0, sizeof(*library));
@@ -1211,6 +1212,9 @@ static int pl_document_shared(pl_build *b, sh_package_baseline_reader original,
         }
         for (size_t j = 0; j < unit->implicit_count; j++)
             if (!pl_original_edge(&walk, unit->implicit[j].target)) { free(walk.edges); goto done; }
+        /* Every conditional binding: one to a retained unit changes nothing. */
+        for (size_t j = 0; j < unit->conditional_count; j++)
+            if (!pl_original_edge(&walk, unit->conditional[j].target)) { free(walk.edges); goto done; }
         nodes[i].edges = walk.edges; nodes[i].edge_count = walk.count;
     }
     if (!sh_package_link_originals(nodes, count, local, retained, error, capacity)) goto done;
@@ -4288,6 +4292,7 @@ static int pl_certify_edges(pl_contributions *c, size_t i, pl_original_walk *wal
         free(bound);
     }
     for (size_t j = 0; j < unit->implicit_count; j++) if (!pl_original_edge(walk, unit->implicit[j].target)) goto failed;
+    for (size_t j = 0; j < unit->conditional_count; j++) if (!pl_original_edge(walk, unit->conditional[j].target)) goto failed;
     return 1;
 failed:
     snprintf(error, capacity, "cannot certify the shared name of %s", unit->name); return 0;
@@ -4612,6 +4617,120 @@ done:
     free(owners); free(targets);
     if (!*out && error && capacity && !*error) snprintf(error, capacity, "cannot retain compiled native consumer bindings");
     return *out != NULL;
+}
+
+/* AI state-machine webs (fsm_web.h, package_fsm.h). A linked behavior keeps
+ * conditional state-machine bindings only to declarations that changed in its
+ * scope; each such behavior builds a private web: its scope's first
+ * declaration (generated, with a private configuration copying the one it
+ * names), the changed stock declarations' linked replacements and the
+ * declarations its scope adds. Every product state-machine declaration of
+ * this link is owned, so no other web meets it; the generated declarations
+ * and the placeholder are added to the provider. */
+static const sh_compiled_resource *pl_fsm_declaration(const sh_package_compilation *compiled, const char *name)
+{
+    for (size_t i = 0; i < compiled->resource_count; i++)
+        if (sh_package_resource_native_matches(compiled->resources + i, "aifsmmanager", name)) return compiled->resources + i;
+    return NULL;
+}
+static char *pl_fsm_original(sh_package_baseline_reader original, void *context, const char *name, size_t *length)
+{
+    unsigned char *body = NULL;
+    size_t size = strlen(name) + 40;
+    char *path = malloc(size);
+    if (!path) return NULL;
+    snprintf(path, size, "generated/decls/aifsmmanager/%s.decl", name);
+    int status = original ? original(context, path, &body, length) : 0;
+    free(path);
+    if (status != 1) { free(body); return NULL; }
+    return (char *)body;
+}
+static int pl_fsm_webs(pl_build *b, sh_package_baseline_reader original, void *original_context,
+    sh_package_fsm_webs **out, char *error, size_t capacity)
+{
+    pl_contributions *c = b->contributions;
+    const sh_package_link_output *linked = &b->linked;
+    const sh_package_link_inputs *inputs = &c->inputs;
+    sh_package_fsm_bound *bound = NULL;
+    const char **owned = NULL, **pairs = NULL;
+    char **firsts = NULL;
+    size_t bound_count = 0, owned_count = 0, classes = linked->classes.count;
+    int ok = 0;
+    *out = NULL;
+    bound = calloc(classes ? classes : 1, sizeof(*bound));
+    owned = calloc(classes ? classes : 1, sizeof(*owned));
+    firsts = calloc(classes ? classes : 1, sizeof(*firsts));
+    /* from, to and extra per bound behavior, carved from one array. */
+    pairs = calloc(3 * (linked->implicit_count + 1), sizeof(*pairs));
+    if (!bound || !owned || !firsts || !pairs) { snprintf(error, capacity, "cannot allocate state-machine webs"); goto done; }
+    for (size_t k = 0; k < classes; k++) {
+        const sh_package_link_unit *unit = inputs->units + linked->classes.representatives[k];
+        if (!strcmp(unit->family, "aifsmmanager") && strcmp(linked->names[k], unit->name)) owned[owned_count++] = linked->names[k];
+    }
+    for (size_t i = 0, used = 0; i < linked->implicit_count;) {
+        size_t owner = linked->implicit[i].owner, end = i, first_target = SIZE_MAX, n = 0, extras = 0;
+        const sh_package_link_unit *unit = inputs->units + linked->classes.representatives[owner];
+        while (end < linked->implicit_count && linked->implicit[end].owner == owner) end++;
+        const char **from = pairs + used, **to = from + (end - i), **extra = to + (end - i);
+        for (size_t j = i; j < end; j++) {
+            const sh_package_link_implicit_binding *binding = linked->implicit + j;
+            if (strncmp(binding->slot, "fsm:", 4) || strcmp(unit->family, "aibehavior")) continue;
+            const char *name = binding->slot + 4, *target = linked->names[binding->target];
+            if (!strcmp(name, SH_PACKAGE_FSM_FIRST)) first_target = binding->target;
+            /* The first declaration is always replaced (its generated copy carries the configuration). */
+            if (!strcmp(name, SH_PACKAGE_FSM_FIRST) || sh_package_source_link_fsm_stock(c->source, name)) {
+                from[n] = name; to[n++] = target;
+            } else extra[extras++] = target;
+        }
+        used += 3 * (end - i); i = end;
+        if (!n && !extras) continue;
+        sh_package_fsm_bound *entry = bound + bound_count;
+        size_t origin = c->origins[linked->classes.representatives[owner]];
+        entry->behavior = linked->names[owner];
+        entry->config = sh_package_source_link_fsm_config(c->source, origin);
+        if (!entry->config) {
+            snprintf(error, capacity, "behavior %s binds state machines without a layer configuration", unit->name); goto done;
+        }
+        /* Its scope's first declaration as linked: the private copy when it
+         * changed there, else the installed original. */
+        size_t length = 0;
+        if (first_target != SIZE_MAX) {
+            const sh_compiled_resource *first = pl_fsm_declaration(linked->compiled, linked->names[first_target]);
+            firsts[bound_count] = first ? (char *)sh_package_compilation_read(linked->compiled, first, SIZE_MAX,
+                &length, error, capacity) : NULL;
+        } else firsts[bound_count] = pl_fsm_original(original, original_context, SH_PACKAGE_FSM_FIRST, &length);
+        if (!firsts[bound_count]) {
+            if (!*error) snprintf(error, capacity, "%s is unavailable for behavior %s", SH_PACKAGE_FSM_FIRST, unit->name);
+            goto done;
+        }
+        entry->first = (sh_decl_source){firsts[bound_count], length};
+        entry->from = from; entry->to = to; entry->count = n; entry->extra = extra; entry->extra_count = extras;
+        bound_count++;
+    }
+    *out = sh_package_fsm_webs_build(bound, bound_count, owned, owned_count, error, capacity);
+    if (!*out) goto done;
+    if (!(*out)->count && !(*out)->owned_count) { sh_package_fsm_webs_free(*out); *out = NULL; ok = 1; goto done; }
+    for (size_t i = 0; i < (*out)->generated_count; i++) {
+        const sh_package_fsm_declaration *generated = (*out)->generated + i;
+        if (!sh_package_compilation_add_declaration(linked->compiled, "aifsmmanager", generated->name,
+            (const unsigned char *)generated->text, generated->length, 0, error, capacity)) goto done;
+    }
+    if ((*out)->owned_count) {
+        size_t stock_length = 0, length = 0;
+        char *stock = pl_fsm_original(original, original_context, SH_PACKAGE_FSM_PLACEHOLDER_SOURCE, &stock_length);
+        char *placeholder = stock ? sh_package_fsm_placeholder((sh_decl_source){stock, stock_length}, &length, error, capacity) : NULL;
+        int added = placeholder && sh_package_compilation_add_declaration(linked->compiled, "aifsmmanager",
+            SH_PACKAGE_FSM_PLACEHOLDER, (const unsigned char *)placeholder, length, 3, error, capacity);
+        if (!stock && !*error) snprintf(error, capacity, "%s is unavailable for the state-machine placeholder", SH_PACKAGE_FSM_PLACEHOLDER_SOURCE);
+        free(stock); free(placeholder);
+        if (!added) goto done;
+    }
+    ok = 1;
+done:
+    for (size_t i = 0; firsts && i < (classes ? classes : 1); i++) free(firsts[i]);
+    free(firsts); free(bound); free((void *)owned); free((void *)pairs);
+    if (!ok) { sh_package_fsm_webs_free(*out); *out = NULL; }
+    return ok;
 }
 
 /* Project native registration meaning without changing the authored source.
@@ -5424,7 +5543,8 @@ static int pl_compile(const sh_package_sources *sources, const sh_package_proven
     if (!pl_provenance(&b, sources, &out->bindings) || !pl_key_provenance(&b, sources, &out->bindings, error, capacity) ||
         !pl_hud(&b, error, capacity) ||
         !sh_package_sound_prepare(b.linked.compiled, error, capacity) ||
-        !pl_consumers(assignment.inputs, &b.linked, &out->consumers, error, capacity)) goto done;
+        !pl_consumers(assignment.inputs, &b.linked, &out->consumers, error, capacity) ||
+        !pl_fsm_webs(&b, original, original_context, &out->fsm_webs, error, capacity)) goto done;
     if (b.materials) {
         out->virtual_materials = sh_package_virtual_material_prepare(b.materials, assignment.inputs,
             &b.linked, error, capacity);

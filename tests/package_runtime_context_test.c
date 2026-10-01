@@ -12,6 +12,9 @@
 #define PACKAGE_FIXTURE_ENTRIES 4096u
 #include "package_fixture.h"
 #include "hook.h"
+#include "fsm_web.h"
+#include "package_fsm.h"
+#include "decl_graph.h"
 #include "map_provenance.h"
 #include "map_embed.h"
 #include "package_spawn_registry.h"
@@ -3393,6 +3396,344 @@ done:
     cleanup_resources(data);
 }
 
+/* ---- AI state-machine webs through admission ------------------------------
+ * The real hook API (fsm_web.c) over a modeled engine list: activation issues
+ * a candidate's product state machines, registers them, publishes its table;
+ * a failed or raised finalization and every recovery bind the previous table
+ * again, the candidate's names staying excluded. Install never runs here. */
+sh_patch_status code_unpatch(sh_patch_handle *handle) { (void)handle; CHECK(0); return B2_PATCH_FAIL_NOTLIVE; }
+sh_patch_status code_patch_sig(const sig_result *r, const uint8_t *expect, const uint8_t *new_bytes,
+    size_t len, sh_patch_handle *out_handle)
+{ (void)r; (void)expect; (void)new_bytes; (void)len; (void)out_handle; CHECK(0); return B2_PATCH_REFUSED_BADARG; }
+
+#define FSM_ENGINE_DECLS 24
+typedef struct fsm_engine_config { const char *name; uint32_t mask, pad; } fsm_engine_config;
+typedef struct fsm_engine_decl {
+    unsigned char bytes[0xd0];
+    char name[200];
+    unsigned char graphs[8][0x40];
+    void *graph_pointers[8];
+    char config_names[8][64];
+    fsm_engine_config configs[8];
+} fsm_engine_decl;
+static fsm_engine_decl g_fsm_engine[FSM_ENGINE_DECLS];
+static int g_fsm_engine_count;
+static unsigned char g_fsm_engine_list[0x40];
+static uintptr_t g_fsm_engine_generation = 0x7000;
+static const char *g_fsm_view[FSM_ENGINE_DECLS];
+static int g_fsm_view_count;
+static const char *g_fsm_view_config;
+static int fsm_engine_installed(void) { return 1; }
+static void *fsm_engine_get(void *list, int index)
+{ return list == g_fsm_engine_list && index >= 0 && index < g_fsm_engine_count ? &g_fsm_engine[index] : NULL; }
+static void fsm_engine_generation(void)
+{
+    int count = g_fsm_engine_count, capacity = FSM_ENGINE_DECLS;
+    g_fsm_engine_generation += 0x100;
+    memcpy(g_fsm_engine_list + 0x20, &g_fsm_engine_generation, 8);
+    memcpy(g_fsm_engine_list + 0x28, &count, 4); memcpy(g_fsm_engine_list + 0x2c, &capacity, 4);
+}
+/* Register (or reload) one declaration as the engine parses it: its graph
+ * masks and the configuration names its table interns. Lists never shrink. */
+static void fsm_engine_register(const char *name, const char *text, size_t length)
+{
+    fsm_engine_decl *d = NULL;
+    char error[256];
+    for (int i = 0; i < g_fsm_engine_count && !d; i++) if (!strcmp(g_fsm_engine[i].name, name)) d = g_fsm_engine + i;
+    if (!d) { CHECK(g_fsm_engine_count < FSM_ENGINE_DECLS); if (g_fsm_engine_count >= FSM_ENGINE_DECLS) return; d = g_fsm_engine + g_fsm_engine_count++; }
+    memset(d, 0, sizeof(*d)); strcpy_s(d->name, sizeof(d->name), name);
+    const char *name_pointer = d->name; void **graphs = d->graph_pointers; fsm_engine_config *configs = d->configs;
+    int graph_count = 0, config_count = 0;
+    sh_decl_graph *graph = sh_decl_graph_open((sh_decl_source){text, length}, error, sizeof(error)); CHECK(graph);
+    for (size_t i = 0; graph && i < sh_decl_graph_count(graph) && graph_count < 8; i++) {
+        const sh_decl_graph_record *record = sh_decl_graph_at(graph, i);
+        if (record->kind != SH_DECL_GRAPH_SUBGRAPH) continue;
+        memcpy(d->graphs[graph_count] + 0x38, &record->layers, 4);
+        d->graph_pointers[graph_count] = d->graphs[graph_count]; graph_count++;
+    }
+    sh_decl_graph_close(graph);
+    sh_decl_node *tree = sh_decl_tree_parse_ordered((sh_decl_source){text, length}, error, sizeof(error));
+    const sh_decl_node *edit = tree ? sh_decl_tree_member(tree, "edit") : NULL;
+    const sh_decl_node *table = edit ? sh_decl_tree_member(edit, "layersConfigs") : NULL;
+    for (const sh_decl_node *item = table ? table->children : NULL; item && config_count < 8; item = item->next) {
+        strcpy_s(d->config_names[config_count], sizeof(d->config_names[0]), item->key);
+        d->configs[config_count].name = d->config_names[config_count]; config_count++;
+    }
+    sh_decl_tree_free(tree);
+    memcpy(d->bytes + 0x08, &name_pointer, 8);
+    memcpy(d->bytes + 0x68, &graphs, 8); memcpy(d->bytes + 0x70, &graph_count, 4);
+    memcpy(d->bytes + 0xb8, &configs, 8); memcpy(d->bytes + 0xc0, &config_count, 4);
+}
+/* Native activation registers every state machine the published provider serves. */
+static void fsm_engine_register_served(void)
+{
+    const sh_package_compilation *current = sh_package_runtime_acquire();
+    char error[512];
+    for (size_t i = 0; current && i < current->resource_count; i++) {
+        const sh_compiled_resource *r = current->resources + i;
+        if (!r->native_type || strcmp(r->native_type, "aifsmmanager") || !r->native_name) continue;
+        size_t length = 0;
+        unsigned char *body = sh_package_compilation_read(current, r, SIZE_MAX, &length, error, sizeof(error)); CHECK(body);
+        if (body) fsm_engine_register(r->native_name, (const char *)body, length);
+        free(body);
+    }
+    sh_package_runtime_release();
+    fsm_engine_generation();
+}
+static uintptr_t fsm_engine_builder(void *manager, void *config)
+{
+    (void)manager;
+    g_fsm_view_config = config ? *(const char *const *)config : NULL;
+    g_fsm_view_count = 0;
+    for (int i = 0; i < g_fsm_engine_count; i++) {
+        unsigned char *decl = sh_fsm_web_test_decl_at(g_fsm_engine_list, i);
+        const char *name = NULL;
+        if (decl) memcpy(&name, decl + 0x08, 8);
+        g_fsm_view[g_fsm_view_count++] = name;
+    }
+    return 1;
+}
+/* One AI spawn of a behavior (its name at +8, its configuration at +0x558). */
+static void fsm_spawn(const char *behavior, const char *config)
+{
+    static unsigned char object[0x600];
+    memset(object, 0, sizeof(object));
+    memcpy(object + 0x08, &behavior, 8); memcpy(object + 0x558, &config, 8);
+    CHECK(sh_fsm_web_test_build(NULL, object + 0x558) == 1);
+}
+static int fsm_view_has(const char *name)
+{
+    for (int i = 0; i < g_fsm_view_count; i++) if (g_fsm_view[i] && !strcmp(g_fsm_view[i], name)) return 1;
+    return 0;
+}
+typedef struct fsm_admission {
+    char behavior[200], machine[200];
+    int calls, recoveries, finalizations, finalize_fail, recovery_fail, bound_in_finalize;
+} fsm_admission;
+static void fsm_served_names(fsm_admission *state)
+{
+    const sh_package_compilation *current = sh_package_runtime_acquire();
+    for (size_t i = 0; current && i < current->resource_count; i++) {
+        const sh_compiled_resource *r = current->resources + i;
+        if (!r->native_type || !r->native_name || strncmp(r->native_name, "smp/", 4)) continue;
+        if (!strcmp(r->native_type, "aibehavior")) strcpy_s(state->behavior, sizeof(state->behavior), r->native_name);
+        if (!strcmp(r->native_type, "aifsmmanager") && strncmp(r->native_name, SH_PACKAGE_FSM_FIRST_PREFIX,
+            strlen(SH_PACKAGE_FSM_FIRST_PREFIX)) && strcmp(r->native_name, SH_PACKAGE_FSM_PLACEHOLDER))
+            strcpy_s(state->machine, sizeof(state->machine), r->native_name);
+    }
+    sh_package_runtime_release();
+}
+/* The candidate's web: its generated first declaration (with the private
+ * configuration) and its private state machine. */
+static int fsm_bound_view(void)
+{
+    return g_fsm_view_count && g_fsm_view[0] && !strncmp(g_fsm_view[0], SH_PACKAGE_FSM_FIRST_PREFIX,
+        strlen(SH_PACKAGE_FSM_FIRST_PREFIX)) && g_fsm_view_config && !strncmp(g_fsm_view_config, "smp_", 4);
+}
+/* The native web: stock first declaration, the behavior's own configuration,
+ * every issued product state machine read as the placeholder. */
+static int fsm_native_view(const char *machine)
+{
+    return g_fsm_view_count && g_fsm_view[0] && !strcmp(g_fsm_view[0], "states/alertcycle") &&
+        g_fsm_view_config && !strcmp(g_fsm_view_config, "cyberdemon_hell") && (!*machine || !fsm_view_has(machine)) &&
+        fsm_view_has(SH_PACKAGE_FSM_PLACEHOLDER);
+}
+static int fsm_admission_activate(void *context, int restoring, const sh_package_changes *changes,
+    char *error, size_t capacity)
+{
+    fsm_admission *state = context;
+    (void)changes; (void)error; (void)capacity;
+    if (restoring) {
+        state->recoveries++;
+        if (state->recovery_fail) { snprintf(error, capacity, "fixture state-machine recovery"); return 0; }
+        return 1;
+    }
+    state->calls++;
+    fsm_engine_register_served();
+    fsm_served_names(state);
+    return 1;
+}
+static int fsm_admission_finalize(void *context, char *error, size_t capacity)
+{
+    fsm_admission *state = context;
+    state->finalizations++;
+    /* The candidate's table is live: the private behavior builds its web. */
+    fsm_spawn(state->behavior, "cyberdemon_hell");
+    state->bound_in_finalize += fsm_bound_view() && fsm_view_has(state->machine);
+    if (state->finalize_fail == 2) RaiseException(0xe0350001, 0, 0, NULL);
+    if (state->finalize_fail) { snprintf(error, capacity, "fixture state-machine install failure"); return 0; }
+    return 1;
+}
+/* Registry and reflection with AI behaviors, state-machine graphs and the
+ * entity field naming a behavior, beside the admission fixture's entity. */
+static void fsm_admission_setup(admission_fixture *f)
+{
+    enum { FA_ENTITY, FA_ENTITY_CLASS, FA_OPAQUE, FA_TYPEINFO, FA_INT, FA_BEHAVIOR, FA_STR, FA_GRAPH, FA_MACHINE, FA_GRAPH_FSM, FA_SUBGRAPH, FA_COUNT };
+    const char *classes[FA_COUNT] = {"idDeclEntityDef", "Entity", "OpaqueStringReader", "idDeclTypeInfo", "int",
+        "idDeclAIBehavior", "idStr", "idDeclTypeInfoGraph", "idDeclAIFSMManager", "idAIFSMGraphFSM", "idTypeInfoSubGraph"};
+    const char *parents[FA_COUNT] = {"", "", "", "", "", "idDeclTypeInfo", "", "idDeclTypeInfo", "idDeclTypeInfoGraph",
+        "idTypeInfoSubGraph", ""};
+    const char *managers_types[3] = {"entityDef", "aiBehavior", "aiFSMManager"};
+    const int managers_classes[3] = {FA_ENTITY, FA_BEHAVIOR, FA_MACHINE};
+    void *managers, *container, *records, *objects, *pointers;
+    memset(f, 0, sizeof(*f));
+    f->registry = admission_alloc(f, 0x18); managers = admission_alloc(f, 3 * 8);
+    admission_pointer(f->registry, 8, managers); admission_number(f->registry, 0x10, 3);
+    for (int i = 0; i < 3; i++) {
+        void *manager = admission_alloc(f, 0x90); admission_pointer(managers, i * 8, manager);
+        admission_pointer(manager, 8, admission_string(f, managers_types[i]));
+        admission_pointer(manager, 0x10, admission_string(f, classes[managers_classes[i]]));
+    }
+    f->reflection = admission_alloc(f, 0xb0); container = admission_alloc(f, 0x30);
+    records = admission_alloc(f, (FA_COUNT + 1) * 0x38); objects = admission_alloc(f, (FA_COUNT + 1) * 16);
+    pointers = admission_alloc(f, (FA_COUNT + 1) * 16);
+    admission_pointer(f->reflection, 0, container); admission_pointer(container, 0x20, records);
+    admission_pointer(f->reflection, 0x88, objects); admission_number(f->reflection, 0x90, FA_COUNT + 1);
+    admission_pointer(f->reflection, 0xa0, pointers); admission_number(f->reflection, 0xa8, FA_COUNT + 1);
+    for (int i = 0; i < FA_COUNT; i++) {
+        admission_pointer(records, i * 0x38, admission_string(f, classes[i]));
+        admission_pointer(records, i * 0x38 + 8, admission_string(f, parents[i]));
+    }
+    admission_pointer(pointers, FA_ENTITY * 16 + 8, (void *)0x10);
+    admission_pointer(pointers, FA_BEHAVIOR * 16 + 8, (void *)0x10); admission_pointer(pointers, FA_MACHINE * 16 + 8, (void *)0x10);
+    admission_pointer(objects, FA_OPAQUE * 16 + 8, (void *)0x20); admission_pointer(objects, FA_STR * 16 + 8, (void *)0x70);
+    admission_pointer(objects, FA_GRAPH * 16 + 8, (void *)0x30); admission_pointer(objects, FA_MACHINE * 16 + 8, (void *)0x30);
+    struct { int record; const char *type, *ops, *name; } rows[] = {
+        {FA_ENTITY_CLASS, "idDeclEntityDef", "*", "target"}, {FA_ENTITY_CLASS, "OpaqueStringReader", "", "custom"},
+        {FA_ENTITY_CLASS, "int", "", "health"}, {FA_ENTITY_CLASS, "idDeclAIBehavior", "*", "behavior"},
+        {FA_BEHAVIOR, "idStr", "", "aiFSMManagerDeclLayersConfig"}, {FA_GRAPH_FSM, "idStr", "", "name"}};
+    for (int record = 0; record < FA_COUNT; record++) {
+        size_t count = 0;
+        for (size_t r = 0; r < sizeof(rows) / sizeof(rows[0]); r++) count += rows[r].record == record;
+        if (!count) continue;
+        void *fields = admission_alloc(f, (count + 1) * 0x48); size_t at = 0;
+        admission_pointer(records, record * 0x38 + 0x20, fields);
+        for (size_t r = 0; r < sizeof(rows) / sizeof(rows[0]); r++) if (rows[r].record == record) {
+            admission_pointer(fields, at * 0x48, admission_string(f, rows[r].type));
+            admission_pointer(fields, at * 0x48 + 8, admission_string(f, rows[r].ops));
+            admission_pointer(fields, at * 0x48 + 0x10, admission_string(f, rows[r].name));
+            admission_number(fields, at * 0x48 + 0x1c, 8); at++;
+        }
+    }
+}
+#define FSM_LAYERS "layers = { layer = \"common\"; layer = \"imp_combat\"; layer = \"cyberdemon_hell\"; }"
+#define FSM_GRAPH(name, layer) "subGraphs = { subGraph = { object = { className = \"idAIFSMGraphFSM\"; " \
+    "object = { name = \"" name "\"; } } layers = { " layer " } nodes = { } links = { } } }"
+static const char fsm_alertcycle[] = "{ edit = { " FSM_LAYERS " layersConfigs = { common = { layer = \"common\"; } "
+    "cyberdemon_hell = { layer = \"common\"; layer = \"cyberdemon_hell\"; } } " FSM_GRAPH("FSM_alertCycle", "layer = \"common\";") " } }";
+static const char fsm_generic[] = "{ edit = { " FSM_LAYERS " " FSM_GRAPH("FSM_generic", "layer = \"common\";") " } }";
+static const char fsm_hell[] = "{ edit = { " FSM_LAYERS " " FSM_GRAPH("FSM_hell_fixed", "layer = \"cyberdemon_hell\";") " } }";
+static int fsm_baseline(void *context, const char *path, unsigned char **body, size_t *length)
+{
+    const char *text = !strcmp(path, "generated/decls/aifsmmanager/states/alertcycle.decl") ? fsm_alertcycle :
+        !strcmp(path, "generated/decls/aifsmmanager/states/behavior_generic.decl") ? fsm_generic :
+        !strcmp(path, "generated/decls/aibehavior/fsm/boss.decl") ?
+            "{ edit = { aiFSMManagerDeclLayersConfig = \"cyberdemon_hell\"; } }" : NULL;
+    if (!text) return historical_baseline(context, path, body, length);
+    *length = strlen(text); *body = (unsigned char *)_strdup(text); return *body ? 1 : -1;
+}
+static void test_fsm_admission(void)
+{
+    const char *json = "{\"variables\":{\"allocCount\":[0,0,0,0,0],\"string\":[]},"
+        "\"entities\":[{\"targetType\":\"idDeclEntityDef\",\"inherit\":\"fsmtest/root\"}]}";
+    char data[MAX_PATH], paths[2][MAX_PATH], error[2048];
+    admission_fixture f; fsm_admission_setup(&f);
+    sh_decl_registry_source registry = {&f, admission_read, (uintptr_t)f.registry, NULL};
+    sh_package_map_plan *plans[2] = {0}; sh_package_occurrence_snapshot *documents[2] = {0};
+    char *bound[2] = {0}; size_t lengths[2] = {0};
+    fsm_admission state = {0};
+    create("fsm-data/overrides", NULL);
+    create("fsm-map/overrides/a/package.json", "{\"id\":\"fsm-map\",\"name\":\"FSM Map\"}");
+    create("fsm-map/overrides/a/assets/generated/decls/entitydef/fsmtest/root.decl",
+        "{ class = \"Entity\"; edit = { health = 10; target = \"\"; } }");
+    create("fsm-prefab/overrides/b/package.json", "{\"id\":\"fsm-prefab\",\"name\":\"FSM Prefab\"}");
+    create("fsm-prefab/overrides/b/assets/generated/decls/entitydef/fsmtest/root.decl",
+        "{ class = \"Entity\"; edit = { health = 20; target = \"\"; behavior = \"fsm/boss\"; } }");
+    create("fsm-prefab/overrides/b/assets/generated/decls/aifsmmanager/states/cyberdemon_hell.decl", fsm_hell);
+    snprintf(data, sizeof(data), "%s/fsm-data", root);
+    snprintf(paths[0], sizeof(paths[0]), "%s/fsm-map", root);
+    snprintf(paths[1], sizeof(paths[1]), "%s/fsm-prefab", root);
+    sh_package_runtime_test_dispose(); sh_package_runtime_test_baseline(fsm_baseline, NULL);
+    CHECK(sh_package_runtime_refresh(data));
+    sh_package_runtime_test_source_readers(registry, (uintptr_t)f.reflection);
+    for (size_t i = 0; i < 2; i++) {
+        plans[i] = sh_package_runtime_prepare_map(data, paths[i], error, sizeof(error));
+        if (!plans[i]) fprintf(stderr, "fsm admission plan %zu: %s\n", i, error);
+        CHECK(plans[i]); if (!plans[i]) goto done;
+        size_t length = 0; char *rebound = sh_package_map_plan_rebind(plans[i], NULL, json, strlen(json), &length, error, sizeof(error)); CHECK(rebound);
+        if (rebound) {
+            bound[i] = sh_package_runtime_capture_document(plans[i], NULL, NULL, 0, rebound, length,
+                lengths + i, documents + i, NULL, NULL, error, sizeof(error)); HeapFree(GetProcessHeap(), 0, rebound);
+        }
+        CHECK(bound[i] && documents[i]); if (!documents[i]) goto done;
+        if (!i) {
+            CHECK(sh_package_runtime_activate_prepared_map(plans[0], (sh_package_activation_guard){0}, NULL, NULL));
+            CHECK(sh_package_runtime_select_map_occurrences(bound[0], lengths[0], NULL, documents[0], error, sizeof(error)));
+        }
+    }
+    /* The modeled engine: stock state machines registered, the hook bridged. */
+    sh_fsm_web_test_reset(); g_fsm_engine_count = 0;
+    sh_fsm_web_test_bind(fsm_engine_get, fsm_engine_builder, g_fsm_engine_list);
+    fsm_engine_register("states/alertcycle", fsm_alertcycle, strlen(fsm_alertcycle)); fsm_engine_generation();
+    sh_package_runtime_test_fsm_hook(fsm_engine_installed, sh_fsm_web_issue,
+        (int (*)(const struct sh_fsm_web_table *))sh_fsm_web_publish);
+    /* Publication succeeds, then finalization fails or raises: the previous
+     * table (none) binds again, behaviors select native webs, and the
+     * candidate's state machines stay excluded from every web. */
+    for (int failure = 1; failure <= 2; failure++) {
+        state.finalize_fail = failure;
+        CHECK(sh_package_runtime_admit_occurrences(plans[1], documents[1], (sh_package_activation_guard){0},
+            fsm_admission_activate, fsm_admission_finalize, &state, error, sizeof(error)) == SH_PACKAGE_ADMISSION_FAILED);
+        CHECK(state.calls == failure && state.recoveries == failure && state.finalizations == failure);
+        CHECK(state.bound_in_finalize == failure && *state.behavior && *state.machine);
+        CHECK(sh_package_runtime_admission_ready() && sh_package_runtime_ready());
+        fsm_spawn(state.behavior, "cyberdemon_hell");
+        CHECK(fsm_native_view(state.machine));
+        fsm_spawn("fsm/boss", "cyberdemon_hell");
+        CHECK(fsm_native_view(state.machine));
+    }
+    /* A recovery that cannot complete natively is not usable; completing it
+     * binds the previous table first and refuses while that cannot resolve. */
+    state.finalize_fail = state.recovery_fail = 1;
+    CHECK(sh_package_runtime_admit_occurrences(plans[1], documents[1], (sh_package_activation_guard){0},
+        fsm_admission_activate, fsm_admission_finalize, &state, error, sizeof(error)) == SH_PACKAGE_ADMISSION_FAILED);
+    CHECK(!sh_package_runtime_ready() && !sh_package_runtime_admission_ready());
+    {
+        fsm_engine_decl *placeholder = NULL;
+        for (int i = 0; i < g_fsm_engine_count; i++) if (!strcmp(g_fsm_engine[i].name, SH_PACKAGE_FSM_PLACEHOLDER)) placeholder = g_fsm_engine + i;
+        CHECK(placeholder != NULL);
+        if (placeholder) {
+            const char *renamed = "smp/not_a_placeholder", *restored = placeholder->name;
+            memcpy(placeholder->bytes + 0x08, &renamed, 8); fsm_engine_generation();
+            CHECK(!sh_package_runtime_complete_occurrence_recovery(&state));
+            CHECK(!sh_package_runtime_ready() && !sh_package_runtime_admission_ready());
+            memcpy(placeholder->bytes + 0x08, &restored, 8); fsm_engine_generation();
+        }
+    }
+    state.recovery_fail = 0;
+    CHECK(sh_package_runtime_complete_occurrence_recovery(&state));
+    CHECK(sh_package_runtime_ready() && sh_package_runtime_admission_ready());
+    fsm_spawn(state.behavior, "cyberdemon_hell"); CHECK(fsm_native_view(state.machine));
+    /* The retry succeeds; later spawns select the candidate's web for its
+     * behavior and the native web for every other one. */
+    state.finalize_fail = 0;
+    int admitted = sh_package_runtime_admit_occurrences(plans[1], documents[1], (sh_package_activation_guard){0},
+        fsm_admission_activate, fsm_admission_finalize, &state, error, sizeof(error));
+    if (admitted != SH_PACKAGE_ADMISSION_READY) fprintf(stderr, "fsm admission: %s\n", error);
+    CHECK(admitted == SH_PACKAGE_ADMISSION_READY && sh_package_runtime_ready());
+    fsm_spawn(state.behavior, "cyberdemon_hell");
+    CHECK(fsm_bound_view() && fsm_view_has(state.machine));
+    fsm_spawn("fsm/boss", "cyberdemon_hell");
+    CHECK(fsm_native_view(state.machine));
+done:
+    sh_package_runtime_test_fsm_hook(NULL, NULL, NULL); sh_fsm_web_test_reset();
+    for (size_t i = 0; i < 2; i++) { sh_package_occurrence_release(documents[i]); sh_package_map_plan_free(plans[i]); free(bound[i]); }
+    sh_package_runtime_test_source_readers((sh_decl_registry_source){0}, 0); sh_package_runtime_test_dispose();
+    sh_package_runtime_test_baseline(baseline, NULL);
+    for (size_t i = 0; i < f.count; i++) free(f.regions[i].address);
+    cleanup_resources(data);
+}
+
 static const char *authoring_unused = "generated/decls/entitydef/cross/unused.decl";
 static const char *authoring_selector = "generated/decls/snapeditorentitydef/cross/sibling.decl";
 static void authoring_bundle(const char *prefix, const char *descriptor)
@@ -6340,6 +6681,7 @@ int main(int argc, char **argv)
     test_retained_registration_meaning(0);
     test_retained_registration_meaning(1);
     test_additive_occurrence_admission();
+    test_fsm_admission();
     test_installed_authoring_admission();
     test_initial_installed_authoring();
     test_local_authoring_defect();

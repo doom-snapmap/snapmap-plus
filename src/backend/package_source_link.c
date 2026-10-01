@@ -5,6 +5,7 @@
 #include "package_font.h"
 #include "package_movie.h"
 #include "package_audio_program.h"
+#include "package_fsm.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -22,7 +23,8 @@ typedef struct sl_shader_file {
     size_t program;
     sh_package_shader_path_kind kind;
 } sl_shader_file;
-typedef struct sl_implicit { char *slot; struct sl_unit *target; } sl_implicit;
+/* conditional: a state-machine selection (sh_package_link_unit.conditional). */
+typedef struct sl_implicit { char *slot; struct sl_unit *target; int conditional; } sl_implicit;
 /* One reference site discovery bound, in bind order (see sl_reference). */
 typedef struct sl_site { const sh_compiled_resource *file; char *slot; struct sl_unit *target; } sl_site;
 typedef struct sl_unit {
@@ -37,6 +39,8 @@ typedef struct sl_unit {
     int material_members;
     sl_implicit *implicit;
     size_t implicit_count;
+    sh_package_link_edge *implicit_edges; /* unit.implicit, then unit.conditional; owned */
+    char *fsm_config; /* The layer configuration an aibehavior names (sl_fsm_edges). */
     size_t reverse_gap; /* Observation only: 1 + index of its accounted reader gap. */
     struct sl_unit *parent; /* Unit whose discovery first requested it; NULL for seeds. */
     char *seed; /* Why a unit without a same-scope parent entered the capture. */
@@ -61,6 +65,12 @@ typedef struct sl_unit {
     size_t discovered_count;
     sh_package_link_edge *site_edges;
 } sl_unit;
+typedef struct sl_fsm_mask {
+    const sh_compiled_resource *file; /* the declaration's source in some scope */
+    char *config; /* NULL: the union of its graph masks; else this configuration's */
+    uint32_t mask;
+    int status; /* 1 found, 0 absent (no graphs, or no such configuration) */
+} sl_fsm_mask;
 typedef struct sl_original {
     sh_compiled_resource resource;
     int status;
@@ -135,6 +145,13 @@ struct sh_package_source_link {
     char seed_note[320]; /* Current seeding site, copied into units it creates. */
     char **player_hands; /* Names of animation webs a player's handsAnimWeb names. */
     size_t player_hand_count;
+    /* AI state machines (sl_fsm_edges): the catalog's SnapMap declaration
+     * names, and masks by the exact source file each scope resolves. */
+    char **fsm_names;
+    size_t fsm_name_count;
+    int fsm_names_ready;
+    struct sl_fsm_mask *fsm_masks;
+    size_t fsm_mask_count, fsm_mask_capacity;
     unsigned long long phase_ms[9]; /* Wall-clock capture phases, see sl_phase_names. */
     /* Discovery replay: the discovery being recorded, and the recordings:
      * this capture's own, or those of a borrowed memo. */
@@ -153,6 +170,8 @@ struct sh_package_source_link {
 };
 static int g_sl_replay = 1;
 void sh_package_source_link_replay(int enabled) { g_sl_replay = enabled != 0; }
+static int g_sl_fsm = 1;
+void sh_package_source_link_fsm(int enabled) { g_sl_fsm = enabled != 0; }
 static const char *const sl_phase_names[9] = {
     "readers", "seeds", "reverse roots", "discovery", "shaders", "audio", "certification", "owners", "inputs"
 };
@@ -954,14 +973,14 @@ static int sl_reference(void *context, const char *slot, const char *family, con
     if (walk->record) sl_replay_ref_add(walk->record, slot, family, name, 0);
     return 0;
 }
-static int sl_implicit_reference(void *context, const char *slot, const char *family, const char *name)
+static int sl_implicit_add(sl_discover *walk, const char *slot, const char *family, const char *name, int conditional)
 {
-    sl_discover *walk = context; sl_unit *unit = walk->unit;
+    sl_unit *unit = walk->unit;
     if (!slot || !*slot) return sl_fail(walk->source, "implicit native request has no semantic slot", name);
     sl_unit *target = sl_find(walk->source, unit->scope, family, name, 1);
     if (!target) return 0;
     for (size_t i = 0; i < unit->implicit_count; i++) if (!strcmp(unit->implicit[i].slot, slot)) {
-        if (unit->implicit[i].target != target)
+        if (unit->implicit[i].target != target || unit->implicit[i].conditional != conditional)
             return sl_fail(walk->source, "implicit native slot has contradictory targets", slot);
         if (walk->record) sl_replay_ref_add(walk->record, slot, family, name, 1);
         return 1;
@@ -972,12 +991,16 @@ static int sl_implicit_reference(void *context, const char *slot, const char *fa
     sl_implicit *grown = copy ? realloc(unit->implicit, (unit->implicit_count + 1) * sizeof(*grown)) : NULL;
     if (!grown) { free(copy); return sl_env_fail(walk->source, "cannot retain implicit native request", name); }
     unit->implicit = grown;
-    unit->implicit[unit->implicit_count++] = (sl_implicit){copy, target};
+    unit->implicit[unit->implicit_count++] = (sl_implicit){copy, target, conditional};
     if (!sl_grow((void ***)&unit->dependencies, &unit->dependency_capacity, unit->dependency_count))
         return sl_env_fail(walk->source, "cannot retain implicit native dependency", name);
     unit->dependencies[unit->dependency_count++] = target;
     if (walk->record) sl_replay_ref_add(walk->record, slot, family, name, 1);
     return 1;
+}
+static int sl_implicit_reference(void *context, const char *slot, const char *family, const char *name)
+{
+    return sl_implicit_add(context, slot, family, name, 0);
 }
 static int sl_font_material(void *context, const char *slot, const char *material, int optional)
 {
@@ -1465,6 +1488,160 @@ static int sl_discover_files(sh_package_source_link *s, sl_unit *unit, sl_replay
     }
     return 1;
 }
+/* ---- AI state-machine webs -------------------------------------------------
+ * Each AI builds its state-machine web at spawn from every aifsmmanager
+ * declaration whose graph layers meet the configuration its behavior names
+ * (edit.aiFSMManagerDeclLayersConfig), and reads that configuration from the
+ * first declaration, states/alertcycle, whether or not its own graphs are
+ * selected (fsm_web.h; Vulkan 0x108BFB0, OpenGL 0x107DB20). A behavior that
+ * names a configuration therefore depends on states/alertcycle, and on every
+ * declaration the configuration selects in its scope. Both are conditional
+ * (sh_package_link_unit): they bind a behavior only to a changed declaration,
+ * so an unchanged web leaves its identity as it was. */
+static int sl_fsm_catalog(sh_package_source_link *s)
+{
+    if (s->fsm_names_ready) return 1;
+    for (size_t i = 0; s->catalog && i < sh_resource_catalog_count(s->catalog); i++) {
+        const sh_resource_catalog_entry *row = sh_resource_catalog_at(s->catalog, i);
+        int seen = 0;
+        if (row->archive >= 2 || strcmp(row->type, "aifsmmanager") || !*row->name) continue;
+        for (size_t k = 0; k < s->fsm_name_count && !seen; k++) seen = !strcmp(s->fsm_names[k], row->name);
+        if (seen) continue;
+        char **grown = realloc(s->fsm_names, (s->fsm_name_count + 1) * sizeof(*grown));
+        if (!grown) return sl_env_fail(s, "cannot list state-machine declarations", row->name);
+        s->fsm_names = grown;
+        if (!(s->fsm_names[s->fsm_name_count] = _strdup(row->name)))
+            return sl_env_fail(s, "cannot list state-machine declarations", row->name);
+        s->fsm_name_count++;
+    }
+    s->fsm_names_ready = 1; return 1;
+}
+static int sl_fsm_listed(const sh_package_source_link *s, const char *name)
+{
+    for (size_t i = 0; i < s->fsm_name_count; i++) if (!strcmp(s->fsm_names[i], name)) return 1;
+    return 0;
+}
+/* The declaration source a scope resolves (its own file, else the captured
+ * original): 1 with the file and, when text is given, malloc-owned bytes;
+ * 0 absent; -1 failed (reported). */
+static int sl_fsm_source(sh_package_source_link *s, size_t scope, const char *family, const char *name,
+    const sh_compiled_resource **file, char **text, size_t *length)
+{
+    char *path = sl_decl_path(family, name);
+    if (!path) { sl_env_fail(s, "cannot construct declaration path", name); return -1; }
+    int status = sl_source_file(s, scope, path, 1, file);
+    free(path);
+    if (status != 1 || !text) return status;
+    *text = (char *)sh_package_compilation_read(s->scopes[scope], *file, SIZE_MAX, length, s->error, s->error_capacity);
+    if (!*text) { sl_env_fail(s, "cannot read declaration source", name); return -1; }
+    return 1;
+}
+/* The mask of one state-machine declaration's graphs (config NULL), or of one
+ * configuration in it, as its scope resolves it. 1 found, 0 absent (no such
+ * declaration or configuration, or no graphs), -1 failed (reported). */
+static int sl_fsm_layers(sh_package_source_link *s, size_t scope, const char *name, const char *config, uint32_t *mask)
+{
+    const sh_compiled_resource *file = NULL;
+    char *text = NULL, error[256] = "";
+    size_t length = 0;
+    *mask = 0;
+    int status = sl_fsm_source(s, scope, "aifsmmanager", name, &file, NULL, NULL);
+    if (status != 1) return status;
+    for (size_t i = 0; i < s->fsm_mask_count; i++) {
+        const sl_fsm_mask *known = s->fsm_masks + i;
+        if (known->file == file && !known->config == !config && (!config || !strcmp(known->config, config))) {
+            *mask = known->mask; return known->status;
+        }
+    }
+    if (sl_fsm_source(s, scope, "aifsmmanager", name, &file, &text, &length) != 1) return -1;
+    status = config ? sh_package_fsm_config_mask((sh_decl_source){text, length}, config, mask, error, sizeof(error)) :
+        sh_package_fsm_graph_mask((sh_decl_source){text, length}, mask, error, sizeof(error));
+    free(text);
+    if (status < 0) {
+        char reason[400];
+        snprintf(reason, sizeof(reason), "state-machine %s cannot be read (%s)", config ? "layer configuration" : "graphs", error);
+        sl_gap_fail(s, reason, name); return -1;
+    }
+    if (s->fsm_mask_count == s->fsm_mask_capacity) {
+        size_t next = s->fsm_mask_capacity ? s->fsm_mask_capacity * 2 : 64;
+        sl_fsm_mask *grown = next < SIZE_MAX / sizeof(*grown) ? realloc(s->fsm_masks, next * sizeof(*grown)) : NULL;
+        if (!grown) { sl_env_fail(s, "cannot retain state-machine layers", name); return -1; }
+        s->fsm_masks = grown; s->fsm_mask_capacity = next;
+    }
+    sl_fsm_mask known = {file, config ? _strdup(config) : NULL, *mask, status};
+    if (config && !known.config) { sl_env_fail(s, "cannot retain state-machine layers", name); return -1; }
+    s->fsm_masks[s->fsm_mask_count++] = known;
+    return status;
+}
+typedef struct sl_fsm_parents { sh_package_source_link *source; size_t scope; } sl_fsm_parents;
+static int sl_fsm_parent(void *context, const char *name, sh_decl_source *out)
+{
+    sl_fsm_parents *parents = context;
+    const sh_compiled_resource *file = NULL;
+    char *text = NULL; size_t length = 0;
+    int status = sl_fsm_source(parents->source, parents->scope, "aibehavior", name, &file, &text, &length);
+    if (status == 1) { out->text = text; out->length = length; }
+    return status;
+}
+typedef struct sl_fsm_walk { sh_package_source_link *source; sl_discover *discover; } sl_fsm_walk;
+static int sl_fsm_exists(void *context, const char *declaration)
+{
+    sl_fsm_walk *walk = context;
+    const sh_compiled_resource *file = NULL;
+    return sl_fsm_source(walk->source, walk->discover->unit->scope, "aifsmmanager", declaration, &file, NULL, NULL);
+}
+static int sl_fsm_mask_of(void *context, const char *declaration, const char *config, uint32_t *mask)
+{
+    sl_fsm_walk *walk = context;
+    return sl_fsm_layers(walk->source, walk->discover->unit->scope, declaration, config, mask);
+}
+static int sl_fsm_visit(void *context, const char *name)
+{
+    sl_fsm_walk *walk = context;
+    char slot[600];
+    snprintf(slot, sizeof(slot), "fsm:%s", name);
+    return sl_implicit_add(walk->discover, slot, "aifsmmanager", name, 1) == 1;
+}
+static int sl_fsm_edges(sh_package_source_link *s, sl_unit *unit)
+{
+    const sh_package_compilation *scope = s->scopes[unit->scope];
+    sl_fsm_parents parents = {s, unit->scope};
+    sh_decl_entity_class_source source = {&parents, sl_fsm_parent, NULL};
+    sl_discover discover = {s, unit};
+    sl_fsm_walk walk = {s, &discover};
+    sh_package_fsm_layers layers = {&walk, sl_fsm_exists, sl_fsm_mask_of};
+    const char **names = NULL;
+    char *config = NULL, error[512] = "";
+    size_t length = 0, count = 0;
+    int status, ok;
+    if (!g_sl_fsm || strcmp(unit->unit.family, "aibehavior") || !unit->unit.file_count) return 1;
+    unsigned char *body = sh_package_compilation_read(unit->unit.compilation, unit->unit.files[0], SIZE_MAX, &length,
+        s->error, s->error_capacity);
+    if (!body) return sl_env_fail(s, "cannot read behavior declaration", unit->unit.name);
+    status = sh_package_fsm_behavior_config((sh_decl_source){(char *)body, length}, &source, &config, error, sizeof(error));
+    free(body);
+    if (s->failed) { free(config); return 0; }
+    if (status < 0) {
+        char reason[640];
+        snprintf(reason, sizeof(reason), "behavior layer configuration cannot be resolved (%s)", error);
+        return sl_gap_fail(s, reason, unit->unit.name);
+    }
+    if (!status) return 1;
+    /* Candidates: the catalog's declarations, then the ones this scope adds. */
+    if (!sl_fsm_catalog(s) || !(names = calloc(s->fsm_name_count + scope->resource_count + 1, sizeof(*names)))) {
+        free(config); return s->failed ? 0 : sl_env_fail(s, "cannot list state-machine declarations", unit->unit.name);
+    }
+    for (size_t i = 0; i < s->fsm_name_count; i++) names[count++] = s->fsm_names[i];
+    for (size_t i = 0; i < scope->resource_count; i++) {
+        const sh_compiled_resource *file = scope->resources + i;
+        if (file->type && !strcmp(file->type, "aifsmmanager") && file->name && *file->name && !sl_fsm_listed(s, file->name))
+            names[count++] = file->name;
+    }
+    ok = sh_package_fsm_select(config, &layers, names, count, sl_fsm_visit, &walk);
+    free((void *)names);
+    if (ok) { free(unit->fsm_config); unit->fsm_config = config; } else free(config);
+    return ok && !s->failed;
+}
 static int sl_discover_unit_requests(sh_package_source_link *s, sl_unit *unit)
 {
     unsigned long long began = sl_now_us(), selected, read;
@@ -1505,6 +1682,7 @@ constructed:
     if (s->native.implicit && s->native.implicit(s->native.context, unit->scope, s->observe,
         &unit->unit, sl_implicit_reference, &walk, s->error, s->error_capacity) != 1)
         return sl_fail(s, "native constructor dependencies could not be captured", unit->unit.name);
+    if (!sl_fsm_edges(s, unit)) return 0;
     s->census.construct_us += sl_now_us() - read;
     return !s->failed;
 }
@@ -2051,7 +2229,7 @@ void sh_package_source_link_close(sh_package_source_link *s)
         for (size_t w = 0; w < unit->unit.witness_count; w++) free((char *)unit->unit.witnesses[w].role);
         free((void *)unit->unit.witnesses);
         for (size_t j = 0; j < unit->implicit_count; j++) free(unit->implicit[j].slot);
-        free(unit->implicit); free((void *)unit->unit.implicit);
+        free(unit->implicit); free(unit->implicit_edges); free(unit->fsm_config);
         for (size_t p = 0; p < unit->program_count; p++) {
             free(unit->programs[p].name); sh_package_shader_program_clear(&unit->programs[p].decoded);
         }
@@ -2073,6 +2251,10 @@ void sh_package_source_link_close(sh_package_source_link *s)
     free(s->reverse_gaps);
     for (size_t i = 0; i < s->player_hand_count; i++) free(s->player_hands[i]);
     free(s->player_hands);
+    for (size_t i = 0; i < s->fsm_name_count; i++) free(s->fsm_names[i]);
+    free(s->fsm_names);
+    for (size_t i = 0; i < s->fsm_mask_count; i++) free(s->fsm_masks[i].config);
+    free(s->fsm_masks);
     free(s->withdrawn);
     free(s->originals); free(s->original_slots); free(s->units); free(s->unit_slots);
     free(s->inputs.units); free(s->inputs.scopes); free(s->readers); free(s->scopes); free(s->shared); free(s);
@@ -2290,9 +2472,17 @@ sh_package_source_link *sh_package_source_link_open_attributed(const sh_package_
             if (unit->implicit_count > SIZE_MAX / sizeof(sh_package_link_edge)) goto failed;
             sh_package_link_edge *edges = calloc(unit->implicit_count, sizeof(*edges));
             if (!edges) goto failed;
-            unit->unit.implicit = edges; unit->unit.implicit_count = unit->implicit_count;
-            for (size_t j = 0; j < unit->implicit_count; j++)
-                edges[j] = (sh_package_link_edge){unit->implicit[j].slot, unit->implicit[j].target->index};
+            size_t plain = 0, conditional = unit->implicit_count;
+            /* Implicit first, conditional last, in one allocation. */
+            for (size_t j = 0; j < unit->implicit_count; j++) {
+                sh_package_link_edge edge = {unit->implicit[j].slot, unit->implicit[j].target->index};
+                if (unit->implicit[j].conditional) edges[--conditional] = edge;
+                else edges[plain++] = edge;
+            }
+            unit->implicit_edges = edges;
+            unit->unit.implicit = plain ? edges : NULL; unit->unit.implicit_count = plain;
+            unit->unit.conditional = plain < unit->implicit_count ? edges + plain : NULL;
+            unit->unit.conditional_count = unit->implicit_count - plain;
         }
         s->inputs.units[i] = unit->unit; s->inputs.scopes[i] = unit->scope;
     }
@@ -2397,6 +2587,14 @@ int sh_package_source_link_sites(const sh_package_source_link *s, size_t index,
     for (end = begin; end < unit->site_count && unit->sites[end].file == file; end++);
     *sites = end > begin ? unit->site_edges + begin : NULL; *count = end - begin;
     return 1;
+}
+const char *sh_package_source_link_fsm_config(const sh_package_source_link *s, size_t unit)
+{
+    return s && s->frozen && unit < s->count ? s->units[unit]->fsm_config : NULL;
+}
+int sh_package_source_link_fsm_stock(const sh_package_source_link *s, const char *name)
+{
+    return s && name && s->fsm_names_ready && sl_fsm_listed(s, name);
 }
 int sh_package_source_link_find_unit(sh_package_source_link *s, size_t scope,
     const char *family, const char *name, size_t *unit)

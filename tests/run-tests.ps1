@@ -147,6 +147,8 @@ $tests = @(
     @{ name = "weapon_hud_test"; src = 'weapon_hud_test.c ..\src\backend\weapon_hud.c ..\src\backend\packages.c ..\src\backend\config_json.c ..\src\backend\patch.c ..\src\backend\hook.c'; defs = '/DSH_WEAPON_HUD_TESTING /DSH_PACKAGES_TESTING /DSH_PATCH_TESTING'; arg = "" }
     @{ name = "shield_format_test"; src = 'shield_format_test.c ..\src\fault_shield\fault_record.c ..\src\common\log_rotate.c'; arg = "" }
     @{ name = "hook_test";          src = 'hook_test.c ..\src\backend\hook.c ..\src\backend\patch.c'; defs = '/DSH_PATCH_TESTING';                       arg = "" }
+    @{ name = "fsm_web_test";       src = 'fsm_web_test.c ..\src\backend\fsm_web.c ..\src\backend\patch.c ..\src\backend\hook.c'; defs = '/DSH_FSM_WEB_TESTING /DSH_PATCH_TESTING'; arg = "" }
+    @{ name = "package_fsm_test";   src = 'package_fsm_test.c ..\src\backend\package_fsm.c ..\src\backend\decl_graph.c ..\src\backend\decl_tree.c ..\src\backend\decl_entity_class.c'; arg = "" }
     @{ name = "crash_record_test";  src = 'crash_record_test.c ..\src\fault_shield\crash_record_format.c'; arg = "" }
     @{ name = "report_scrub_test";  src = 'report_scrub_test.c';                                     arg = "" }
     @{ name = "dumpmap_path_test";  src = 'dumpmap_path_test.c';                                     arg = "" }
@@ -313,6 +315,9 @@ foreach ($t in $tests) {
     if ($t.name -eq 'package_runtime_context_test') {
         $t.src += ' ..\src\backend\spawn_keys.c'
         $t.defs += ' /DSH_SPAWN_KEYS_TESTING'
+        # Activation and recovery bridge the real state-machine web hook API.
+        $t.src += ' ..\src\backend\fsm_web.c'
+        $t.defs += ' /DSH_FSM_WEB_TESTING'
     }
     if ('..\src\backend\package_library.c' -in ($t.src -split ' ') -or $t.name -in $compiledConsumers -or
         $t.name -in @('package_source_graph_test', 'package_shader_link_test')) { $t.src += ' ..\src\backend\package_consumers.c' }
@@ -364,6 +369,12 @@ foreach ($t in $tests) {
     if ('..\src\backend\package_source_link.c' -in ($t.src -split ' ') -and
         '..\src\backend\package_font.c' -notin ($t.src -split ' ')) {
         $t.src += ' ..\src\backend\package_font.c'
+    }
+    # Behavior state-machine discovery reads layer masks wherever the source link is compiled.
+    if ('..\src\backend\package_source_link.c' -in ($t.src -split ' ') -and
+        '..\src\backend\package_fsm.c' -notin ($t.src -split ' ')) {
+        $t.src += ' ..\src\backend\package_fsm.c'
+        if ('..\src\backend\decl_graph.c' -notin ($t.src -split ' ')) { $t.src += ' ..\src\backend\decl_graph.c' }
     }
     # Movie identities are derived wherever native references, source graphs,
     # source links or the native adapter are compiled.
@@ -427,6 +438,8 @@ $tests += @{ name = "strids_labels_test"; src = $labelSources; defs = '/DSH_RESO
 
 $reverseRootSources = ($tests | Where-Object { $_.name -eq 'package_source_graph_test' }).src -replace '^package_source_graph_test.c ', 'package_reverse_roots_test.c '
 $tests += @{ name = "package_reverse_roots_test"; src = $reverseRootSources; defs = '/DSH_RESOURCE_GRAPH_TESTING'; arg = "" }
+$fsmLinkSources = $reverseRootSources -replace '^package_reverse_roots_test.c ', 'package_fsm_link_test.c '
+$tests += @{ name = "package_fsm_link_test"; src = $fsmLinkSources; defs = '/DSH_RESOURCE_GRAPH_TESTING'; arg = "" }
 
 $mapUsesSources = ($tests | Where-Object { $_.name -eq 'package_source_graph_test' }).src -replace '^package_source_graph_test.c ', 'package_map_uses_test.c '
 $mapUsesSources += ' ..\src\backend\package_map_uses.c ..\src\backend\map_embed.c ..\src\backend\package_bundle.c ..\src\backend\package_archive.c ..\src\backend\raw_deflate_encode.c'

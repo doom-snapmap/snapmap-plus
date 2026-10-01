@@ -36,6 +36,7 @@
 #include "key_inspector.h"
 #include "package_requirements.h"
 #include "weapon_hud.h"
+#include "fsm_web.h"
 #include "navmesh.h"
 #include "nav_bake.h"
 #include "nav_play.h"
@@ -419,6 +420,9 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
                                                 sh_user_overrides_enabled_for_launch());
                 sh_weapon_hud_install(override_root, g_doom_base, results, db,
                                       sh_user_overrides_enabled_for_launch());
+                /* Package state-machine variants bind per layer configuration; the
+                 * package runtime publishes each activation's substitutions. */
+                sh_fsm_web_install(g_doom_base, results, db);
             } else
                 backend_log("package-requirements REFUSED: effective override root unavailable");
         }
