@@ -1647,7 +1647,10 @@ static int preflight_load(void *editor, const void *save_name)
     unsigned long generation = sh_rawmap_load_generation();
     if (!g_preflight_orig) return 1;
     if (!g_preflight_busy && g_pending_map.state && !preflight_pending_discard()) return 0;
-    if (g_preflight_busy || (!previous_map && !sh_decl_server_map_boundary_safe()))
+    /* With user packages off for this launch nothing is prepared: the native
+     * load runs, and its capture refuses a document that uses packages. */
+    if (g_preflight_busy || sh_package_runtime_serving_disabled() ||
+        (!previous_map && !sh_decl_server_map_boundary_safe()))
         return g_preflight_orig(editor, save_name);
     if (!previous_map) sh_rawmap_map_context_poll();
     if (!previous_map && g_map_context) {

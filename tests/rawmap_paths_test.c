@@ -61,7 +61,7 @@ static int pf_install_requests, pf_inventory_reads, pf_install_outcome, pf_cance
 static sh_mpkg_install_completion pf_completion;
 static void *pf_completion_context;
 static char pf_parsed[256];
-static const char *pf_source_json;
+static const char *pf_source_json, *pf_engine_json;
 static char package_last_error[1024];
 void sh_mpkg_report_error(const char *line)
 { if (line && *line) { package_errors++; snprintf(package_last_error, sizeof(package_last_error), "%s", line); } }
@@ -357,14 +357,23 @@ const sh_package_provenance *sh_package_occurrence_provenance(const sh_package_o
 { return value ? &empty_occurrences : NULL; }
 const sh_package_bundle_binding *sh_package_occurrence_bundles(const sh_package_occurrence_snapshot *value, size_t *count)
 { (void)value; if (count) *count = 0; return NULL; }
+static int pf_serving_disabled, occurrence_saved_bindings, occurrence_saved_contexts;
+int sh_package_runtime_serving_disabled(void) { return pf_serving_disabled; }
 char *sh_package_runtime_capture_document(const sh_package_map_plan *plan, const sh_package_provenance *saved,
     const sh_package_bundle_binding *additional, size_t additional_count, const char *json, size_t length,
     size_t *output_length, sh_package_occurrence_snapshot **ownership, sh_mpkg_used **deliveries,
     size_t *delivery_count, char *error, size_t capacity)
 {
-    (void)plan; (void)saved; (void)additional; (void)additional_count;
+    (void)plan; (void)additional; (void)additional_count;
     occurrence_captures++; if (output_length) *output_length = 0;
+    occurrence_saved_bindings = saved ? (int)saved->binding_count : -1;
+    occurrence_saved_contexts = saved ? (int)saved->context_count : -1;
     if (occurrence_capture_failed) { if (error && capacity) snprintf(error, capacity, "occurrence fixture failed"); return NULL; }
+    /* The runtime's contract with serving off: carried ownership is refused. */
+    if (pf_serving_disabled && saved && (saved->use_count || saved->binding_count || saved->context_count)) {
+        if (error && capacity) snprintf(error, capacity, "fixture: this map uses packages, and package serving is disabled");
+        return NULL;
+    }
     char *out = malloc(length + 1); if (!out) return NULL;
     memcpy(out, json, length); out[length] = 0; *output_length = length;
     *ownership = (sh_package_occurrence_snapshot *)1;
@@ -1112,7 +1121,7 @@ static int pf_loader(void *editor, const void *name)
     CHECK(editor == (void *)3); pf_loads++;
     pf_boundary = 0; /* Native initialization starts only here. */
     if (pf_fail == 12) return 0; /* Canceled before parsing the retained map. */
-    return sh_deser_detour("{\"from\":\"second engine read\"}", (void *)2) ? 0 : 9;
+    return sh_deser_detour(pf_engine_json ? pf_engine_json : "{\"from\":\"second engine read\"}", (void *)2) ? 0 : 9;
 }
 static int pf_abort(void *editor)
 {
@@ -1161,7 +1170,7 @@ static void pf_reset(void)
     pf_coverage = pf_ready = 1; pf_gate_calls = pf_availability_calls = 0;
     pf_install_requests = pf_inventory_reads = pf_cancellations = pf_commits = pf_aborts = 0;
     pf_install_outcome = 2; pf_completion = NULL; pf_completion_context = NULL;
-    pf_source_json = NULL;
+    pf_source_json = pf_engine_json = NULL; pf_serving_disabled = 0;
 }
 static void saved_map_bindings_use_authored_context(void)
 {
@@ -1902,6 +1911,79 @@ static void occurrence_failures_do_not_save_or_attach_partial_sources(void)
     clean_state();
 }
 
+/* With user packages off for this launch (sh_user_overrides 0) nothing is
+ * prepared. An ordinary load and an editor reload enter the native loader at
+ * once: no saved-source read, plan, activation, availability check or editor
+ * handoff, and the engine's own document reaches the native parser and capture
+ * whole. A document carrying package bindings keeps them through capture,
+ * which refuses it, so the load fails instead of running without its packages;
+ * a legacy delivery is still refused by its gate. With serving expected but
+ * not ready, saved loads, vanilla or carried, are still refused before native
+ * loading. */
+static void serving_disabled_loads_natively(void)
+{
+    const char text[] = "{\"variables\":{\"allocCount\":[0,0,0,0,0],\"string\":[]},"
+        "\"actor\":{\"targetType\":\"idDeclEntityDef\",\"value\":\"smp/saved\"},"
+        "\"message\":\"smp/saved \x97 prose\"}";
+    unsigned char name[IDSTR_SIZE] = {0}, tree[1][32] = {{7}};
+    sh_package_provenance bindings = {0};
+    size_t context = sh_package_provenance_context_add(&bindings, SH_PACKAGE_CONTEXT_ISOLATED, tree, 1, "");
+    char source[MAX_PATH], error[256], *carried = NULL, *before = NULL;
+    size_t length = 0;
+    int errors;
+    *(const char **)(name + 0x10) = "0123456789ABCDEF0123";
+    clean_state(); sh_rawmap_swap_arm(0); InterlockedExchange(&g_swap_oneshot, 0);
+    CHECK(temp_path("rawmap_disabled_source.json", source, sizeof(source)));
+    sh_rawmap_swap_set_source(source);
+    g_preflight_orig = pf_loader; g_saved_map_text = pf_reader;
+    g_preflight_abort = pf_abort;
+    g_idstr_ctor = pf_ctor; g_idstr_dtor = pf_dtor; g_deser_orig = pf_parser;
+    play_prepare_fail = play_select_fail = play_hud_fail = 0;
+    for (int reload = 0; reload <= 1; reload++) {
+        pf_reset(); pf_serving_disabled = 1; occurrence_world = NULL;
+        if (reload) { pf_editor_reload = 1; pf_boundary = 0; }
+        CHECK(preflight_load((void *)3, name) == 0);
+        CHECK(pf_loads == 1 && pf_parses == 1 && !strcmp(pf_parsed, "{\"from\":\"second engine read\"}"));
+        CHECK(!pf_reads && !pf_ctors && !pf_plans && !pf_binding_plans && !pf_local_rebinds && !pf_activations);
+        CHECK(!pf_availability_calls && !pf_install_requests && !pf_editor_handoffs && !pf_commits);
+        CHECK(pf_gate_calls == 1 && occurrence_captures == 1 && occurrence_saved_bindings == -1);
+        CHECK(occurrence_attaches == 1 && occurrence_world == (sh_package_occurrence_snapshot *)2);
+        CHECK(!g_preflight_busy && !g_pending_map.state && !g_map_context && !pf_order_error);
+    }
+    CHECK(context != SIZE_MAX &&
+        sh_package_provenance_bind(&bindings, "entitydef", "actors/example", "smp/saved", &context, 1));
+    carried = sh_map_provenance_write(text, sizeof(text) - 1, &bindings, &length, error, sizeof(error));
+    CHECK(carried != NULL); if (!carried) goto done;
+    before = _strdup(carried); CHECK(before != NULL); if (!before) goto done;
+    pf_reset(); pf_serving_disabled = 1; pf_engine_json = carried;
+    occurrence_world = (sh_package_occurrence_snapshot *)7; errors = package_errors;
+    CHECK(preflight_load((void *)3, name) == 9);
+    CHECK(pf_loads == 1 && pf_parses == 1 && !pf_reads && !pf_plans && !pf_binding_plans && !pf_rebinds);
+    CHECK(!pf_activations && !pf_availability_calls && !pf_install_requests && !g_pending_map.state);
+    CHECK(strstr(pf_parsed, "\"value\":\"smp/saved\"") && strstr(pf_parsed, "smp/saved \x97 prose"));
+    CHECK(!strstr(pf_parsed, "smpbind."));
+    CHECK(occurrence_captures == 1 && occurrence_saved_bindings == 1 && occurrence_saved_contexts == 1);
+    CHECK(!occurrence_attaches && occurrence_world == (sh_package_occurrence_snapshot *)7);
+    CHECK(package_errors == errors + 1 && strstr(package_last_error, "serving is disabled"));
+    CHECK(!strcmp(carried, before) && strstr(carried, "smpbind.") && !pf_order_error);
+    pf_reset(); pf_serving_disabled = 1; pf_gate = 0; occurrence_world = NULL;
+    CHECK(preflight_load((void *)3, name) == 9);
+    CHECK(pf_loads == 1 && pf_gate_calls == 1 && !pf_parses && !occurrence_captures && !pf_reads);
+    for (int carrying = 0; carrying <= 1; carrying++) {
+        pf_reset(); pf_ready = 0; pf_packages = carrying; pf_source_json = carrying ? carried : NULL;
+        CHECK(preflight_load((void *)3, name) == 0);
+        CHECK(pf_reads == 1 && !pf_loads && !pf_parses && !pf_activations && !g_pending_map.state);
+        CHECK(pf_availability_calls == carrying && pf_rebinds == carrying && pf_closes == 1 && !pf_order_error);
+    }
+done:
+    pf_reset(); pf_testing = 0; occurrence_world = NULL;
+    g_preflight_orig = NULL; g_saved_map_text = NULL; g_deser_orig = NULL;
+    g_preflight_abort = preflight_abort_saved_load;
+    g_idstr_ctor = NULL; g_idstr_dtor = NULL; clean_state();
+    free(before); if (carried) HeapFree(GetProcessHeap(), 0, carried);
+    sh_package_provenance_free(&bindings);
+}
+
 static void native_transitions_publish_retained_sources(void)
 {
     for (int fail = 0; fail < 2; fail++) {
@@ -1979,6 +2061,7 @@ int main(void)
     initial_published_reads();
     preflight_hook_publishes_helpers_before_detour();
     occurrence_failures_do_not_save_or_attach_partial_sources();
+    serving_disabled_loads_natively();
 
     DeleteFileA(archive);
     printf("\n%s -- %d checks, %d failed\n", g_failed ? "FAILED" : "ok", g_checks, g_failed);

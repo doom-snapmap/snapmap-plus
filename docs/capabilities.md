@@ -72,7 +72,7 @@ Registered with the engine command system; run from the DOOM console.
 | `cs_start_render_logging` | Set up the render-logging hook. |
 | `sh_disable_devmode` | Turn developer features off while keeping Bethesda.net connectivity. |
 | `sh_reenable_devmode` | Turn developer features back on. |
-| `sh_user_overrides [0\|1]` | On a successful save, persist whether user file shadows and user new-decl registration run on the next DOOM launch. `0` disables and `1` enables both user mechanisms; restart DOOM to apply either value. If saving fails, the console says so, this launch stays unchanged, and no next-launch change is guaranteed. With no argument, reports this launch's state and either the saved next-launch state or a volatile value not confirmed saved. Built-in defaults and DOOM's packaged resources remain available. |
+| `sh_user_overrides [0\|1]` | On a successful save, persist whether user file shadows and user new-decl registration run on the next DOOM launch. `0` disables and `1` enables both user mechanisms; restart DOOM to apply either value. If saving fails, the console says so, this launch stays unchanged, and no next-launch change is guaranteed. With no argument, reports this launch's state and either the saved next-launch state or a volatile value not confirmed saved. Built-in defaults and DOOM's packaged resources remain available. While off, maps that use no package content load natively; a map that uses packages is refused, keeping its package data, until they are on again. |
 | `noClip` / `infiniteHealth` / `noPlayerDeath` / `noPlayerKill` / `noTarget` | The five player-cheat toggles for the local player: no-collision flight, infinite health, can't die, can't be killed, enemies ignore you. |
 
 ## Cvars

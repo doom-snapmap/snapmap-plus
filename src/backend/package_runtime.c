@@ -202,6 +202,15 @@ void sh_package_runtime_note_watched_change(int watched)
 {
     InterlockedExchange(&g_watched_change, watched != 0);
 }
+static volatile LONG g_serving_disabled;
+void sh_package_runtime_set_serving_disabled(int disabled)
+{
+    InterlockedExchange(&g_serving_disabled, disabled != 0);
+}
+int sh_package_runtime_serving_disabled(void)
+{
+    return InterlockedCompareExchange(&g_serving_disabled, 0, 0) != 0;
+}
 
 static pr_provider *pr_retain(pr_provider *provider)
 {
@@ -5401,6 +5410,29 @@ char *sh_package_runtime_capture_document(const sh_package_map_plan *plan,
     if (!ownership || !output_length || (!!deliveries != !!delivery_count)) {
         if (error && capacity) snprintf(error, capacity, "map occurrence output is unavailable");
         return NULL;
+    }
+    if (sh_package_runtime_serving_disabled()) {
+        /* No user package is served this launch (sh_user_overrides 0): a
+         * native document owns no package content and is its own capture.
+         * One that names package uses or carries deliveries cannot run
+         * without its packages and is refused, its provenance untouched. */
+        sh_package_occurrence_snapshot *empty = NULL;
+        if (plan || additional_count || (saved && (saved->use_count || saved->binding_count || saved->context_count))) {
+            if (error && capacity) snprintf(error, capacity,
+                "this map uses packages, and package serving is disabled for this launch (sh_user_overrides 0)");
+            return NULL;
+        }
+        if (!json || length == SIZE_MAX || !(out = malloc(length + 1)) ||
+            !(empty = sh_package_occurrence_prepare_document(NULL, NULL, 0, error, capacity))) {
+            free(out);
+            if (error && capacity && !*error) snprintf(error, capacity, "map occurrence output could not be allocated");
+            return NULL;
+        }
+        memcpy(out, json, length); out[length] = 0;
+        sh_package_occurrence_release(*ownership); *ownership = empty;
+        if (deliveries) { sh_mpkg_used_free(*deliveries); *deliveries = NULL; *delivery_count = 0; }
+        *output_length = length;
+        return out;
     }
     if (!g_activation_callback) AcquireSRWLockExclusive(&g_refresh_lock);
     AcquireSRWLockShared(&g_lock);

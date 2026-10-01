@@ -25,6 +25,8 @@ int sh_decl_server_map_boundary_safe(void) { return boundary && thread_id == Get
 int sh_decl_server_map_preparation_ready(void) { return boundary && thread_id == GetCurrentThreadId(); }
 int sh_decl_server_map_browser_present(void)
 { return *(int *)(manager + 8) == 63 && *(int *)(manager + 12) == 63; }
+static int serving_disabled;
+int sh_package_runtime_serving_disabled(void) { return serving_disabled; }
 int sh_map_render_capture(void *snapshot, sh_map_render *settings)
 { assert(snapshot && settings); memset(settings, 0, sizeof(*settings)); return 1; }
 void sh_map_render_select(const sh_map_render *settings) { assert(settings); }
@@ -136,7 +138,10 @@ static unsigned char original_lobby(void *self, unsigned char option)
 static void original_direct(void *self, const void *input, void *snapshot)
 { assert(self == manager && input && snapshot); calls[PUB_DIRECT]++; }
 static void original_ready(void *self, void *download, const void *input, void *snapshot)
-{ assert(self == manager && input && snapshot); if (g_pub_ready) assert(!download); calls[PUB_READY]++; }
+{
+    assert(self == manager && input && snapshot);
+    assert(download == (g_pub_ready && !serving_disabled ? NULL : (void *)9)); calls[PUB_READY]++;
+}
 static void original_complete(void *download)
 {
     assert(download == (void *)9);
@@ -203,7 +208,7 @@ static void reset(void)
     call_callbacks[3] = original_ready; call_callbacks[4] = original_read; call_callbacks[5] = original_complete;
     memcpy(g_pub_original, call_callbacks, sizeof(g_pub_original));
     boundary = g_pub_ready = 1; g_pub_delegating = inspection = read_action = throws_read = 0;
-    mode = errors = prepared = decoded = hidden = 0;
+    mode = errors = prepared = decoded = hidden = serving_disabled = 0;
 }
 static void grouped_installation(void)
 {
@@ -314,6 +319,34 @@ int main(void)
     }
     reset(); g_pub_ready = 0; pub_offline(manager, metadata, (void *)1);
     assert(calls[0] == 1 && !prepared);
-    puts("map_published_test: readers, four retained launch routes, cancellation, cleanup and hook-group failure passed");
+    /* With user packages off for this launch (sh_user_overrides 0) each
+     * launch route runs its native original with its own arguments: nothing is
+     * captured, prepared, hidden or reported, and published reads keep their
+     * inspection scope. Serving that is expected but whose compiler is not
+     * ready still refuses each prepared route without the original. */
+    for (int kind = 0; kind < 4; kind++) {
+        int before;
+        reset(); serving_disabled = 1; before = allocated;
+        if (kind == PUB_OFFLINE) { read_action = 1; assert(pub_read((void *)1, "id", "revision", (void *)2, (void *)3) == (void *)10); }
+        if (kind == PUB_LOBBY) assert(pub_lobby(manager, 1));
+        if (kind == PUB_DIRECT) { read_action = 2; pub_complete((void *)9); }
+        if (kind == PUB_READY) pub_ready(manager, (void *)9, metadata, (void *)1);
+        assert(calls[kind] == 1 && !prepared && !retained.context && allocated == before && !decoded);
+        assert(!errors && !hidden && !inspection && !read_scope && !g_pub_delegating);
+        reset(); boundary = 0; before = allocated;
+        if (kind == PUB_OFFLINE) pub_offline(manager, metadata, (void *)1);
+        if (kind == PUB_LOBBY) assert(!pub_lobby(manager, 1));
+        if (kind == PUB_DIRECT) pub_direct(manager, metadata, (void *)1);
+        if (kind == PUB_READY) pub_ready(manager, (void *)9, metadata, (void *)1);
+        assert(!calls[kind] && !prepared && !retained.context && errors == 1);
+        assert(allocated == before + 1 && allocated == released && hidden == (kind == PUB_READY));
+    }
+    /* The switch is read at each launch: with serving on again it prepares. */
+    reset(); serving_disabled = 1; pub_offline(manager, metadata, (void *)1);
+    assert(calls[0] == 1 && !prepared);
+    serving_disabled = 0; pub_offline(manager, metadata, (void *)1);
+    assert(prepared == 1 && calls[0] == 1 && retained.context);
+    assert(finish(1) && calls[0] == 2 && allocated == released);
+    puts("map_published_test: readers, four retained launch routes, cancellation, cleanup, hook-group failure and serving-off native launches passed");
     return 0;
 }

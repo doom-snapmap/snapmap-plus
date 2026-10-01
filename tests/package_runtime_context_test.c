@@ -5916,6 +5916,62 @@ done:
     for (size_t i = 0; i < f.count; i++) free(f.regions[i].address);
     cleanup_resources(data); cleanup_resources(source);
 }
+/* With user packages off for this launch (sh_user_overrides 0) a native map
+ * document owns no package content: its capture is the document itself, byte
+ * for byte (ordinary strings included), with empty ownership, and the map's
+ * policy selects nothing. A document naming package uses, or carrying
+ * deliveries, keeps its provenance and is refused rather than run without its
+ * packages. While serving is expected, a missing provider still refuses. */
+static void test_serving_disabled_documents(void)
+{
+    static const unsigned char tree[1][32] = {{7}};
+    const char *vanilla = "{\"variables\":{\"allocCount\":[0,0,0,0,1],\"string\":[{\"info\":"
+        "{\"name\":\"Ordinary \\u00e9 text\",\"~type\":\"snapVarInfo_t\"},\"initialValue\":\"keep \\\"this\\\" exactly\"}]},"
+        "\"entities\":[{\"targetType\":\"idDeclEntityDef\",\"inherit\":\"snapmaps/audio/2d_speaker\"}]}";
+    size_t length = strlen(vanilla), captured_length = 0, delivery_count = 99, rows = 99, policy_length = 0;
+    char error[1024] = "";
+    sh_package_occurrence_snapshot *ownership = NULL;
+    sh_mpkg_used *deliveries = NULL;
+    sh_package_provenance uses = {0};
+    sh_package_bundle_binding row = {0};
+    sh_package_runtime_test_dispose(); sh_package_runtime_test_baseline(baseline, NULL);
+    sh_package_runtime_test_source_readers((sh_decl_registry_source){0}, 0);
+    sh_package_runtime_set_serving_disabled(0);
+    char *captured = sh_package_runtime_capture_document(NULL, NULL, NULL, 0, vanilla, length, &captured_length,
+        &ownership, NULL, NULL, error, sizeof(error));
+    CHECK(!captured && strstr(error, "unavailable") && !ownership);
+    sh_package_runtime_set_serving_disabled(1);
+    captured = sh_package_runtime_capture_document(NULL, NULL, NULL, 0, vanilla, length, &captured_length,
+        &ownership, &deliveries, &delivery_count, error, sizeof(error));
+    if (!captured) fprintf(stderr, "serving disabled capture: %s\n", error);
+    CHECK(captured && captured_length == length && !memcmp(captured, vanilla, length) && ownership &&
+        !deliveries && !delivery_count);
+    const sh_package_provenance *owned = sh_package_occurrence_provenance(ownership);
+    CHECK(!sh_package_occurrence_bundles(ownership, &rows) && !rows && (!owned || !owned->use_count));
+    int selected = captured && sh_package_runtime_select_map_occurrences(captured, captured_length, NULL, ownership,
+        error, sizeof(error));
+    if (!selected) fprintf(stderr, "serving disabled policy: %s\n", error);
+    CHECK(selected);
+    char *policy = sh_package_runtime_active_policy("requirements", &policy_length);
+    CHECK(!policy || !strstr(policy, "g_use")); free(policy);
+    free(captured);
+    size_t context = sh_package_provenance_context_add(&uses, SH_PACKAGE_CONTEXT_ISOLATED, tree, 1, "");
+    sh_package_provenance_site site = {SH_PACKAGE_USE_OBJECT, "entity/0", "/k:inherit"};
+    CHECK(context != SIZE_MAX && sh_package_provenance_bind(&uses, "entitydef", "cross/root", "smp/root", &context, 1) &&
+        sh_package_provenance_use_set(&uses, &site, 0, &context, 1));
+    error[0] = 0;
+    captured = sh_package_runtime_capture_document(NULL, &uses, NULL, 0, vanilla, length, &captured_length,
+        &ownership, NULL, NULL, error, sizeof(error));
+    CHECK(!captured && strstr(error, "disabled") && uses.use_count == 1 && uses.binding_count == 1);
+    strcpy_s(row.source_name, sizeof(row.source_name), "carried");
+    error[0] = 0;
+    captured = sh_package_runtime_capture_document(NULL, NULL, &row, 1, vanilla, length, &captured_length,
+        &ownership, NULL, NULL, error, sizeof(error));
+    CHECK(!captured && strstr(error, "disabled"));
+    sh_package_runtime_set_serving_disabled(0);
+    sh_package_occurrence_release(ownership); sh_package_provenance_free(&uses);
+    sh_package_runtime_test_dispose();
+}
 static void test_published_install_refresh(void)
 {
     const char *installed_descriptor = "{\"id\":\"already-installed\",\"name\":\"Already installed\"}";
@@ -7038,6 +7094,7 @@ int main(int argc, char **argv)
     test_label_alias_map_install();
     test_watched_refresh();
     test_watched_refresh_after_removal();
+    test_serving_disabled_documents();
     test_editor_presentation();
     test_picker_topology();
     test_selector_shared_retirement();

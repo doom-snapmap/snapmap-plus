@@ -83,6 +83,12 @@ void sh_package_runtime_note_install_published(void);
  * installation's own folder, committed or rolled back, is no change. The note
  * is consumed by that refresh and never outlives the call. */
 void sh_package_runtime_note_watched_change(int watched);
+/* sh_user_overrides off for this launch: no user package is served, so a
+ * native document carries no package ownership of its own. A document that
+ * names package uses is refused rather than run without its packages. Set
+ * once at startup, before any map loads. */
+void sh_package_runtime_set_serving_disabled(int disabled);
+int sh_package_runtime_serving_disabled(void);
 /* Activate private, already validated map source trees under
  * <map_source_root>/overrides; NULL restores the retained local library.
  * Map data never changes or replaces library sources. The library is rescanned

@@ -8,6 +8,7 @@
 #include "rawmap.h"
 #include "map_package.h"
 #include "decl_server.h"
+#include "package_runtime.h"
 #include "engine_globals.h"
 #include "backend_log.h"
 #include "hook.h"
@@ -311,14 +312,17 @@ done:;
     return accepted;
 }
 
+/* A launch is prepared only when user packages are served this launch;
+ * otherwise it runs natively, as without Snapmap+. */
+static int pub_prepares(void) { return g_pub_ready && !sh_package_runtime_serving_disabled(); }
 static void pub_offline(void *manager, const void *metadata, void *snapshot)
 {
-    if (!g_pub_ready || pub_same_launch(manager, metadata)) { ((pub_launch_fn)g_pub_original[PUB_OFFLINE])(manager, metadata, snapshot); return; }
+    if (!pub_prepares() || pub_same_launch(manager, metadata)) { ((pub_launch_fn)g_pub_original[PUB_OFFLINE])(manager, metadata, snapshot); return; }
     (void)pub_prepare(PUB_OFFLINE, manager, metadata, snapshot, 0);
 }
 static unsigned char pub_lobby(void *manager, unsigned char option)
 {
-    if (!g_pub_ready) return ((pub_lobby_fn)g_pub_original[PUB_LOBBY])(manager, option);
+    if (!pub_prepares()) return ((pub_lobby_fn)g_pub_original[PUB_LOBBY])(manager, option);
     __try {
         void *history = pub_history();
         if (history && pub_same_launch(manager, (unsigned char *)history + 8))
@@ -329,12 +333,12 @@ static unsigned char pub_lobby(void *manager, unsigned char option)
 }
 static void pub_direct(void *manager, const void *metadata, void *snapshot)
 {
-    if (!g_pub_ready || pub_same_launch(manager, metadata)) { ((pub_launch_fn)g_pub_original[PUB_DIRECT])(manager, metadata, snapshot); return; }
+    if (!pub_prepares() || pub_same_launch(manager, metadata)) { ((pub_launch_fn)g_pub_original[PUB_DIRECT])(manager, metadata, snapshot); return; }
     (void)pub_prepare(PUB_DIRECT, manager, metadata, snapshot, 0);
 }
 static void pub_ready(void *manager, void *download, const void *metadata, void *snapshot)
 {
-    if (!g_pub_ready || pub_same_launch(manager, metadata)) { ((pub_ready_fn)g_pub_original[PUB_READY])(manager, download, metadata, snapshot); return; }
+    if (!pub_prepares() || pub_same_launch(manager, metadata)) { ((pub_ready_fn)g_pub_original[PUB_READY])(manager, download, metadata, snapshot); return; }
     if (!pub_manager_current(manager)) return;
     __try {
         void *progress = *(void **)((unsigned char *)manager + 0xa38);

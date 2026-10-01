@@ -142,6 +142,9 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
     ensure_user_dirs();
     sh_config_init(); /* nonfatal: the service retains defaults and status flags on failure */
     sh_user_overrides_capture_launch_state();
+    /* User packages off for this launch: native map documents carry no package
+     * ownership, and package-bearing ones are refused at capture. */
+    sh_package_runtime_set_serving_disabled(!sh_user_overrides_enabled_for_launch());
 
     /* These scratch-only checks do not depend on engine symbol resolution. */
     sh_patch_selftest();

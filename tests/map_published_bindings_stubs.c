@@ -10,6 +10,7 @@ const sh_resource_catalog *sh_package_runtime_catalog(void) { assert(0); return 
 int sh_package_runtime_serves_native_identity(const char *type, const char *name)
 { (void)type; (void)name; assert(0); return 0; }
 int sh_decl_server_map_boundary_safe(void) { assert(0); return 0; }
+int sh_package_runtime_serving_disabled(void) { assert(0); return 0; }
 int sh_decl_server_map_preparation_ready(void) { assert(0); return 0; }
 int sh_decl_server_map_browser_present(void) { assert(0); return 0; }
 int sh_map_render_capture(void *snapshot, sh_map_render *settings)

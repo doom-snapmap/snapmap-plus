@@ -1573,6 +1573,17 @@ native parse failure, exception, canceled load or commit refusal cancels the
 owned editor load and retires its map context at the normal safe boundary.
 Availability skips installation; it does not skip completion or recovery checks.
 
+With user packages off for a launch (`sh_user_overrides 0`, read once at
+startup) no user package is served and no map is prepared. Saved loads, editor
+reloads and the offline, lobby, direct and join launches of published maps run
+their native routes; published reads keep their inspection scope. A native
+document that carries no package ownership is its own capture, byte for byte,
+with empty ownership and no package policy. A document that names package uses
+or carries deliveries keeps its provenance and is refused rather than run
+without its packages, and the legacy delivery gate still applies. Serving that
+is expected but unavailable, such as a compiler that is not ready or a missing
+provider, still refuses as before.
+
 The editor reload control observes its exact retained saved-load request by
 editor identity and save ID. A deferred installation leaves the control pending
 until native loading and commit complete, and cancellation or failure completes
