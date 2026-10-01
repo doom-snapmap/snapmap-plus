@@ -393,13 +393,17 @@ static int ni_site(const sh_native_inline_source *source, const char *json, cons
     ni_marks marks = {0};
     ni_walker walker = {0};
     sh_decl_node *instance = NULL, *merged = NULL, *reference = NULL, *expanded_ref = NULL, *expanded_cand = NULL;
-    char *base = NULL, *state_json = NULL, *replaces = NULL, error[512] = "";
+    char *base = NULL, *state_json = NULL, *replaces = NULL, *materialized = NULL, error[512] = "";
     int folded = 0;
     const char *state = sh_json_object_get(definition, "state"), *version = sh_json_object_get(definition, "~version");
     const char *class_json = sh_json_object_get(definition, "className");
     int result = -1;
     (void)json; (void)span;
-    if (!state || !version || !class_json) { ni_refuse(site, SH_DECL_CARRIER_GAP, "entity value lacks state, className or ~version%s", NULL); result = 0; goto done; }
+    /* The native value reader needs state; className is optional (the class
+     * then inherits) and an absent ~version is version 0, which its upgrade
+     * routine rewrites on load (VK FUN_1409c6160, GL FUN_1409c59b0; D7). */
+    if (!state) { ni_refuse(site, SH_DECL_CARRIER_GAP, "entity value lacks state%s", NULL); result = 0; goto done; }
+    if (!version) version = "0";
     if (atoi(version) != source->version || strspn(version, "0123456789") != strlen(version)) {
         ni_refuse(site, SH_DECL_CARRIER_GAP, "entity state version %s is upgraded natively on load", version); result = 0; goto done;
     }
@@ -443,7 +447,14 @@ static int ni_site(const sh_native_inline_source *source, const char *json, cons
         }
         name = ni_literal(tree, "inherit");
         if (!name && replaces) { name = replaces; replaces = NULL; folded = 1; }
-        if (!name) { ni_refuse(site, SH_DECL_CARRIER_GAP, "'%s' inherits no native definition; rebuilding it inline over a native base is not modelled", layers[layer_count - 1].name); result = 0; goto done; }
+        /* A chain ending in a served definition that inherits nothing folds
+         * over an empty inherit, which the native reader accepts without a
+         * lookup (VK FUN_1417ae380, GL 1417a0e60; D7 N4/U3). */
+        if (!name || !*name) {
+            free(name);
+            if (!(base = _strdup(""))) goto done;
+            break;
+        }
     }
     /* The converted entity must itself pass SnapMap's map validation. */
     if (source->placement) {
@@ -507,12 +518,35 @@ static int ni_site(const sh_native_inline_source *source, const char *json, cons
             result = 0; goto done;
         }
     }
-    /* Typed walk of the converted layer under the instance's class. */
+    /* Typed walk of the converted layer under the instance's class: its own
+     * className, or without one the class its chain gives (the native default).
+     * Converting replaces that chain, and expanded edit state does not carry
+     * the class: a value without className whose new base gives another class
+     * (a served layer selected one, or the chain has no native ancestor, so
+     * the base gives none) states the original class as className, which the
+     * native value reader reads (D7). Checked by deriving the converted
+     * value's class again. */
     {
         char class_name[256]; size_t class_length = 0;
-        if (!sh_native_json_decode_string(class_json, strlen(class_json), class_name, sizeof(class_name), &class_length) ||
-            class_length >= sizeof(class_name) || strlen(class_name) != class_length) {
-            ni_refuse(site, SH_DECL_CARRIER_GAP, "className is not a plain class name%s", NULL); result = 0; goto done;
+        if (class_json) {
+            if (!sh_native_json_decode_string(class_json, strlen(class_json), class_name, sizeof(class_name), &class_length) ||
+                class_length >= sizeof(class_name) || strlen(class_name) != class_length) {
+                ni_refuse(site, SH_DECL_CARRIER_GAP, "className is not a plain class name%s", NULL); result = 0; goto done;
+            }
+        } else {
+            ni_class_view view = {source};
+            sh_decl_entity_class_source classes = {&view, ni_class_read, ni_class_derives};
+            char *inherited = sh_decl_entity_tree_class(reference, &classes, error, sizeof(error)), *converted = NULL;
+            if (!inherited) { ni_refuse(site, SH_DECL_CARRIER_GAP, "the inherited class is not modelled: %s", error); result = 0; goto done; }
+            if (strlen(inherited) >= sizeof(class_name)) { free(inherited); ni_refuse(site, SH_DECL_CARRIER_GAP, "class name too long%s", NULL); result = 0; goto done; }
+            snprintf(class_name, sizeof(class_name), "%s", inherited);
+            if (*base) {
+                char ignored[256];
+                converted = sh_decl_entity_tree_class(merged, &classes, ignored, sizeof(ignored));
+            }
+            if (!converted || strcmp(converted, inherited)) materialized = inherited;
+            else free(inherited);
+            free(converted);
         }
         walker.inner = source->schema;
         sh_decl_dependency_schema schema = {&walker, ni_describe, ni_field, ni_reference, ni_walk_gap, ni_dynamic, NULL, ni_value};
@@ -539,10 +573,15 @@ static int ni_site(const sh_native_inline_source *source, const char *json, cons
             ni_refuse(site, refusal.limit, "%s", error); result = 0; goto done;
         }
     }
-    /* The entity value with inherit and state replaced; other members exact. */
+    /* The entity value with inherit and state replaced and, where the class
+     * would change, className stated first, as native values state it; other
+     * members exact. */
     {
         ni_text out = {0};
         int ok = ni_append(&out, "{", 1);
+        if (ok && materialized)
+            ok = ni_json_string(&out, "className") && ni_append(&out, ":", 1) && ni_json_string(&out, materialized) &&
+                (!definition->count || ni_append(&out, ",", 1));
         for (size_t i = 0; ok && i < definition->count; i++) {
             const sh_json_member *member = definition->members + i;
             if (i && !ni_append(&out, ",", 1)) { ok = 0; break; }
@@ -563,7 +602,7 @@ static int ni_site(const sh_native_inline_source *source, const char *json, cons
     result = 1;
 done:
     for (size_t i = 0; i < layer_count; i++) { free(layers[i].name); sh_decl_tree_free(layers[i].tree); }
-    free(layers); free(base); free(state_json); free(replaces);
+    free(layers); free(base); free(state_json); free(replaces); free(materialized);
     ni_marks_free(&marks); ni_walker_free(&walker);
     sh_decl_tree_free(instance); sh_decl_tree_free(merged); sh_decl_tree_free(reference);
     sh_decl_tree_free(expanded_ref); sh_decl_tree_free(expanded_cand);

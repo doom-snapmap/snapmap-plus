@@ -28,6 +28,12 @@ static const fixture_decl decls[] = {
     /* A native base with no SnapMap editor entry. */
     {"snapmaps/props/hidden", "{ class = \"idProp\"; edit = { health = 10; } }", 0},
     {"pkg/hidden", "{ inherit = \"snapmaps/props/hidden\"; edit = { health = 5; } }", 1},
+    /* Package chains with no native ancestor: a served root and its child. */
+    {"pkg/root", "{ class = \"idProp\"; edit = { health = 4; model = \"md6/root\"; } }", 1},
+    {"pkg/rootchild", "{ inherit = \"pkg/root\"; edit = { speed = 3; } }", 1},
+    {"pkg/rootkept", "{ class = \"idProp\"; edit = { health = 6; } }", 1},
+    /* A served child selecting another reflected class than its stock base. */
+    {"pkg/variant", "{ inherit = \"snapmaps/props/base\"; class = \"idPropVariant\"; edit = { health = 7; } }", 1},
 };
 
 static int fixture_read(void *context, const char *name, sh_decl_source *text, int *served, char **replaces)
@@ -43,7 +49,11 @@ static int fixture_read(void *context, const char *name, sh_decl_source *text, i
     return 0;
 }
 static int fixture_derives(void *context, const char *class_name, const char *base_name)
-{ (void)context; return !strcmp(class_name, "idProp") && !strcmp(base_name, "idProp") ? 1 : 0; }
+{
+    (void)context;
+    if (!strcmp(base_name, "idProp")) return !strcmp(class_name, "idProp") || !strcmp(class_name, "idPropVariant");
+    return !strcmp(class_name, "idPropVariant") && !strcmp(base_name, "idPropVariant");
+}
 static int fixture_looked_up(void *context, size_t entity, const char *name)
 { (void)context; (void)entity; return !strcmp(name, "pkg/lookedup"); }
 static const char *fixture_keep(void *context, size_t entity, const char *name, sh_decl_carrier_limit *limit)
@@ -53,7 +63,10 @@ static const char *fixture_keep(void *context, size_t entity, const char *name, 
 }
 static const char *fixture_placement(void *context, const char *from, const char *base, sh_decl_carrier_limit *limit)
 {
-    (void)context; (void)from; *limit = SH_DECL_CARRIER_ENGINE;
+    (void)context; *limit = SH_DECL_CARRIER_ENGINE;
+    /* A placeable package root: the empty base (a class-only definition) of
+     * pkg/rootchild is admitted, pkg/rootkept's is not. */
+    if (!*base && !strcmp(from, "pkg/rootchild")) return NULL;
     return strcmp(base, "snapmaps/props/base") ? "no SnapMap editor entry" : NULL;
 }
 
@@ -61,7 +74,7 @@ static const char *fixture_placement(void *context, const char *from, const char
 static int schema_describe(void *context, sh_decl_value_type type, sh_decl_value_shape *shape)
 {
     (void)context;
-    if (!strcmp(type.name, "idProp")) { shape->kind = SH_DECL_VALUE_OBJECT; return 1; }
+    if (!strcmp(type.name, "idProp") || !strcmp(type.name, "idPropVariant")) { shape->kind = SH_DECL_VALUE_OBJECT; return 1; }
     if (!strcmp(type.name, "idList<int>")) {
         shape->kind = SH_DECL_VALUE_COLLECTION; shape->element = (sh_decl_value_type){"int", ""};
         shape->item_key = "item"; shape->count_key = "num"; return 1;
@@ -74,7 +87,7 @@ static int schema_describe(void *context, sh_decl_value_type type, sh_decl_value
 static int schema_field(void *context, sh_decl_value_type object, const char *key, sh_decl_value_type *field)
 {
     (void)context;
-    if (strcmp(object.name, "idProp")) return -1;
+    if (strcmp(object.name, "idProp") && strcmp(object.name, "idPropVariant")) return -1;
     if (!strcmp(key, "health")) { *field = (sh_decl_value_type){"int", ""}; return 1; }
     if (!strcmp(key, "speed")) { *field = (sh_decl_value_type){"float", ""}; return 1; }
     if (!strcmp(key, "model")) { *field = (sh_decl_value_type){"idStr", ""}; return 1; }
@@ -84,6 +97,12 @@ static int schema_field(void *context, sh_decl_value_type object, const char *ke
 static int schema_reference(void *context, const char *path, sh_decl_value_type type, const char *name, size_t length)
 { (void)context; (void)path; (void)type; (void)name; (void)length; return 1; }
 
+#define ENTITY_BARE(inherit, state) \
+    "{\"entityDef\":{\"inherit\":\"" inherit "\",\"name\":\"\",\"state\":" state \
+    ",\"targetType\":\"idDeclEntityDef\",\"~type\":\"idDeclEntityDef\"},\"uniqueId\":1}"
+#define ENTITY_NO_CLASS(inherit, state, version) \
+    "{\"entityDef\":{\"inherit\":\"" inherit "\",\"name\":\"\",\"state\":" state \
+    ",\"targetType\":\"idDeclEntityDef\",\"~type\":\"idDeclEntityDef\",\"~version\":" version "},\"uniqueId\":1}"
 #define ENTITY(inherit, state, version) \
     "{\"entityDef\":{\"className\":\"idProp\",\"inherit\":\"" inherit "\",\"name\":\"\",\"state\":" state \
     ",\"targetType\":\"idDeclEntityDef\",\"~type\":\"idDeclEntityDef\",\"~version\":" version "},\"uniqueId\":1}"
@@ -114,7 +133,14 @@ int main(void)
         ENTITY("pkg/stock_changed", "{\"edit\":{}}", "26") ","
         ENTITY("smp/replaced", "{\"edit\":{}}", "26") ","
         ENTITY("smp/dropped", "{\"edit\":{}}", "26") ","
-        ENTITY("pkg/hidden", "{\"edit\":{}}", "26")
+        ENTITY("pkg/hidden", "{\"edit\":{}}", "26") ","
+        ENTITY_NO_CLASS("pkg/prop", "{\"edit\":{\"health\":42}}", "26") ","
+        ENTITY_BARE("pkg/prop", "{\"edit\":{}}") ","
+        ENTITY("pkg/rootchild", "{\"edit\":{\"health\":8}}", "26") ","
+        ENTITY("pkg/rootkept", "{\"edit\":{}}", "26") ","
+        ENTITY_NO_CLASS("pkg/rootchild", "{\"edit\":{\"health\":8}}", "26") ","
+        ENTITY_NO_CLASS("pkg/variant", "{\"edit\":{}}", "26") ","
+        ENTITY("pkg/variant", "{\"edit\":{}}", "26")
         "],\"version\":7,\"note\":\"ordinary \\\"string\\\" bytes stay exact\"}";
     sh_native_inline_report report = {0};
     size_t length = 0; char error[512];
@@ -168,7 +194,45 @@ int main(void)
      * editor entry would make the converted map unloadable. */
     site = site_for(&report, 14);
     CHECK(site && !site->converted && site->limit == SH_DECL_CARRIER_ENGINE && strstr(site->reason, "editor entry"));
-    CHECK(report.count == 14);
+    /* D7: the native value reader needs only state. Without className the class
+     * inherits along the chain, so the use converts and keeps no className;
+     * without ~version the state is version 0, which the native upgrade
+     * rewrites on load (not modelled), so that use keeps its package. */
+    site = site_for(&report, 15);
+    CHECK(site && site->converted && !strcmp(site->to, "snapmaps/props/base"));
+    CHECK(strstr(out, "{\"entityDef\":{\"inherit\":\"snapmaps/props/base\",\"name\":\"\",\"state\":{\"edit\":"
+        "{\"health\":42,\"speed\":0.349999994,\"model\":\"md6/custom\"}}") != NULL);
+    site = site_for(&report, 16);
+    CHECK(site && !site->converted && site->limit == SH_DECL_CARRIER_GAP && strstr(site->reason, "version 0"));
+    /* D7: a chain with no native ancestor folds over an empty inherit, which
+     * the native reader accepts without a lookup; SnapMap placement then
+     * judges that base like any other (admitted here for pkg/rootchild, not
+     * for pkg/rootkept). */
+    site = site_for(&report, 17);
+    CHECK(site && site->converted && !strcmp(site->to, ""));
+    CHECK(strstr(out, "\"inherit\":\"\",\"name\":\"\",\"state\":{\"edit\":{\"health\":8,\"model\":\"md6/root\",\"speed\":3}}")
+        != NULL);
+    site = site_for(&report, 18);
+    CHECK(site && !site->converted && site->limit == SH_DECL_CARRIER_ENGINE && strstr(site->reason, "editor entry"));
+    /* D7 class identity: without className, the converted value states the
+     * class its original chain gave whenever the new base would give another:
+     * the empty base gives none (a package root's class), and a served child
+     * selecting another reflected class than its stock base keeps it. A value
+     * stating className keeps its own. */
+    site = site_for(&report, 19);
+    CHECK(site && site->converted && !strcmp(site->to, ""));
+    CHECK(strstr(out, "{\"entityDef\":{\"className\":\"idProp\",\"inherit\":\"\",\"name\":\"\",\"state\":{\"edit\":"
+        "{\"health\":8,\"model\":\"md6/root\",\"speed\":3}}") != NULL);
+    site = site_for(&report, 20);
+    CHECK(site && site->converted && !strcmp(site->to, "snapmaps/props/base"));
+    CHECK(strstr(out, "{\"entityDef\":{\"className\":\"idPropVariant\",\"inherit\":\"snapmaps/props/base\"") != NULL);
+    site = site_for(&report, 21);
+    CHECK(site && site->converted && !strcmp(site->to, "snapmaps/props/base"));
+    /* The value without className whose base gives the same class (site 15)
+     * states none. */
+    CHECK(strstr(out, "{\"entityDef\":{\"inherit\":\"snapmaps/props/base\",\"name\":\"\",\"state\":{\"edit\":"
+        "{\"health\":42,") != NULL);
+    CHECK(report.count == 21);
     /* Bytes outside converted entity values are exact. */
     CHECK(strstr(out, "],\"version\":7,\"note\":\"ordinary \\\"string\\\" bytes stay exact\"}") != NULL);
     CHECK(!strncmp(out, "{\"entities\":[{\"entityDef\":", 26));
