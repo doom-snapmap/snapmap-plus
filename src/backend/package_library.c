@@ -1865,6 +1865,28 @@ static int pl_contribution_stage(pl_build *b, const sh_package_sources *sources,
 }
 
 #ifdef SH_PACKAGE_LIBRARY_TESTING
+static const char *g_contribution_defects[8];
+static size_t g_contribution_defect_count;
+void sh_package_library_test_contribution_defects(const char *const *packages, size_t count)
+{
+    g_contribution_defect_count = packages && count < 8 ? count : packages ? 8 : 0;
+    for (size_t i = 0; i < g_contribution_defect_count; i++) g_contribution_defects[i] = packages[i];
+}
+/* The first member owned by a package named defective ("package", or
+ * "package:declaration" for that declaration only), or SIZE_MAX. */
+static size_t pl_test_defect(pl_build *b, const sh_package_sources *sources, const size_t *members, size_t count)
+{
+    for (size_t i = 0; i < count; i++) {
+        size_t owner = pl_member_owner(b, sources, members[i]);
+        for (size_t d = 0; owner != SIZE_MAX && d < g_contribution_defect_count; d++) {
+            const char *name = g_contribution_defects[d], *colon = strchr(name, ':');
+            size_t length = colon ? (size_t)(colon - name) : strlen(name);
+            if (strlen(sources->packages[owner].name) == length && !strncmp(sources->packages[owner].name, name, length) &&
+                (!colon || !strcmp(b->contributions->inputs.units[members[i]].name, colon + 1))) return members[i];
+        }
+    }
+    return SIZE_MAX;
+}
 static long g_contribution_read_failures;
 static const char *g_contribution_read_name;
 /* Make the next editor contribution reads fail like an unreadable source. */
@@ -1927,6 +1949,14 @@ static int pl_editor_memo(void) { return 1; }
  * its author saw onto the published parent's, parents composing first.
  * 1 composed; 0 failed, ending the compile; -1 failed with its owner found
  * while the compile goes on finding others (pl_contribution_failure). */
+/* Whether text states needle anywhere. */
+static int pl_states(sh_decl_source text, const char *needle)
+{
+    size_t n = strlen(needle);
+    for (size_t at = 0; text.text && at + n <= text.length; at++)
+        if (text.text[at] == *needle && !memcmp(text.text + at, needle, n)) return 1;
+    return 0;
+}
 static int pl_contribution_group(pl_build *b, const sh_package_sources *sources,
     const size_t *members, size_t count, char *error, size_t capacity)
 {
@@ -1950,8 +1980,14 @@ static int pl_contribution_group(pl_build *b, const sh_package_sources *sources,
     size_t source_count = 0, base_member = SIZE_MAX, reference, culprit = SIZE_MAX;
     int ok = 0, kind = SH_PACKAGE_EDITOR_FAILURE_ENVIRONMENT, any_rebased = 0;
     pl_chain published = {0}, authored_base = {0};
+    /* Each member's text before its rebase, and the namespace the rebase's
+     * identities for controls without one live in (sh_package_editor_slots). */
+    sh_decl_source *unrebased = calloc(count, sizeof(*unrebased));
+    char space[48] = "";
+    unsigned space_serial = 0;
     if (!texts || !parts || !peers || !pending || !parents || !included || !rebased || !part_member ||
-        !composed || !composed_length || !composed_private || !same_known || !same_value || !targets || !outputs) {
+        !composed || !composed_length || !composed_private || !same_known || !same_value || !targets || !outputs ||
+        !unrebased) {
         snprintf(error, capacity, "editor contribution allocation failed"); goto failed;
     }
     for (size_t i = 0; i < count; i++) {
@@ -1976,6 +2012,11 @@ static int pl_contribution_group(pl_build *b, const sh_package_sources *sources,
             snprintf(error, capacity, "editor definition text cannot be read"); goto failed;
         }
     }
+#ifdef SH_PACKAGE_LIBRARY_TESTING
+    if ((culprit = pl_test_defect(b, sources, members, count)) != SIZE_MAX) {
+        kind = SH_PACKAGE_EDITOR_FAILURE_SOURCE; snprintf(error, capacity, "test contribution defect"); goto failed;
+    }
+#endif
     reference = base_member != SIZE_MAX ? base_member : 0;
     for (size_t i = 0; i < count; i++) included[i] = phase == 2 || pl_same_parent(parents[i], parents[reference]);
     /* Only a package's own text contributes. Without a baseline member no
@@ -1986,8 +2027,24 @@ static int pl_contribution_group(pl_build *b, const sh_package_sources *sources,
     for (size_t i = 0; !contributed && i < count; i++) contributed = !pl_stock_authored(c, members[i]);
     /* Rebase inherited collections: first only where the published parent's
      * layout differs, then, if any member changed, every member of the shared
-     * surface, so all of them state complete lists. */
-    for (int pass = 0; phase != 2 && pass < 2 && (pass == 0 || (any_rebased && contributed)); pass++)
+     * surface, so all of them state complete lists. The rebase gives a control
+     * without an identity field one under a namespace no member states, and
+     * checks its parent texts too; when one states it (-2), every member
+     * returns to its unrebased text and the rebase starts again under the
+     * next namespace. */
+    /* A control without an identity field composes only by the identity a
+     * rebase gives it, so when a member appends one (in its author's frame)
+     * every member of a contributed group is rebased into the published frame,
+     * even where no parent layout moved; pages the published parent lacks are
+     * never stated. */
+    int pathless = 0;
+rebase:
+    for (int taken = 1; taken; space_serial++) {
+        snprintf(space, sizeof(space), "#snapmap-plus-slot-%u:", space_serial);
+        taken = 0;
+        for (size_t i = 0; i < count && !taken; i++) taken = pl_states(texts[i], space);
+    }
+    for (int pass = 0; phase != 2 && pass < 2 && (pass == 0 || ((any_rebased || pathless) && contributed)); pass++)
         for (size_t i = 0; i < count; i++) {
             pl_chain own_published = {0}, own_authored = {0};
             const pl_chain *authored = &own_authored, *target = included[i] ? &published : &own_published;
@@ -2011,15 +2068,52 @@ static int pl_contribution_group(pl_build *b, const sh_package_sources *sources,
             } else if (!pl_parent_chain(c, members[i], texts[i], 0, &own_authored, &kind, error, capacity)) {
                 pl_chain_free(&own_published); culprit = members[i]; goto failed;
             }
+            sh_package_editor_slots slots = {space, base_member == SIZE_MAX ? (sh_decl_source){NULL, 0} :
+                unrebased[base_member].text ? unrebased[base_member] : texts[base_member], 0};
             result = sh_package_editor_rebase(input->family, texts[i], authored->texts, authored->count,
-                target->texts, target->count, pass, &out, &out_length, &failure, error, capacity);
+                target->texts, target->count, pass, &slots, &out, &out_length, &failure, error, capacity);
+            if (slots.appends && included[i]) pathless = 1;
             pl_chain_free(&own_published); pl_chain_free(&own_authored);
+            if (result == -2) {
+                for (size_t k = 0; k < count; k++) if (unrebased[k].text) {
+                    free((char *)texts[k].text); texts[k] = unrebased[k]; unrebased[k] = (sh_decl_source){NULL, 0};
+                }
+                memset(rebased, 0, count); any_rebased = 0; pathless = 0;
+                goto rebase;
+            }
             if (result < 0) { kind = failure.kind; culprit = members[i]; goto failed; }
             if (result) {
-                free((char *)texts[i].text); texts[i] = (sh_decl_source){out, out_length};
+                if (unrebased[i].text) free((char *)texts[i].text);
+                else unrebased[i] = texts[i];
+                texts[i] = (sh_decl_source){out, out_length};
                 rebased[i] = 1; if (included[i]) any_rebased = 1;
             }
         }
+    /* Complete lists composed without a rebase (a declaration restated whole)
+     * give their controls without an identity field one relative to the
+     * shipped declaration's, under the same namespace, every member against
+     * the shipped text as written. */
+    int framed = 0;
+    if (phase != 2 && !any_rebased && contributed) {
+        sh_decl_source shipped = base_member != SIZE_MAX ? texts[base_member] : (sh_decl_source){"{}", 2};
+        sh_decl_source *framed_texts = calloc(count, sizeof(*framed_texts));
+        if (!framed_texts) { snprintf(error, capacity, "editor contribution allocation failed"); goto failed; }
+        for (size_t i = 0; i < count; i++) if (included[i]) {
+            char *out = NULL; size_t out_length = 0;
+            int given = sh_package_editor_frame_slots(input->family, texts[i], shipped, space, &out, &out_length);
+            if (given < 0) {
+                for (size_t k = 0; k < count; k++) free((char *)framed_texts[k].text);
+                free(framed_texts);
+                if (given == -2) { snprintf(error, capacity, "editor slot namespace occurs in a member"); goto failed; }
+                snprintf(error, capacity, "editor contribution allocation failed"); goto failed;
+            }
+            if (given) framed_texts[i] = (sh_decl_source){out, out_length};
+        }
+        for (size_t i = 0; i < count; i++) if (framed_texts[i].text) {
+            free((char *)texts[i].text); texts[i] = framed_texts[i]; framed = 1;
+        }
+        free(framed_texts);
+    }
     /* Only a package's own change contributes (pl_contributes). A stock member
      * a scope merely reaches, or a faithful copy a package bundles, takes the
      * composed entry where its scope binds what the shipped member binds;
@@ -2076,8 +2170,17 @@ static int pl_contribution_group(pl_build *b, const sh_package_sources *sources,
                 !memcmp(texts[k].text, texts[i].text, texts[i].length)) prior = k;
         const char *body = prior != SIZE_MAX ? composed[prior] : NULL;
         if (body) length = composed_length[prior];
-        else body = composed[i] = sh_package_editor_contributions_report(input->family, base, parts, source_count,
-            target, private_binding, &length, &failure, error, capacity);
+        else {
+            body = composed[i] = sh_package_editor_contributions_report(input->family, base, parts, source_count,
+                target, private_binding, &length, &failure, error, capacity);
+            if (body && (any_rebased || framed)) {
+                char *plain = NULL; size_t plain_length = 0;
+                int dropped = sh_package_editor_strip_slots(input->family, space, (sh_decl_source){body, length},
+                    &plain, &plain_length);
+                if (dropped < 0) { snprintf(error, capacity, "editor contribution allocation failed"); goto failed; }
+                if (dropped) { free(composed[i]); body = composed[i] = plain; length = plain_length; }
+            }
+        }
         if (!body) {
             kind = failure.kind;
             if (kind == SH_PACKAGE_EDITOR_FAILURE_SOURCE && failure.source < source_count)
@@ -2113,9 +2216,14 @@ static int pl_contribution_group(pl_build *b, const sh_package_sources *sources,
     /* A member with another parent is its author's own variant, and a stock
      * member nothing contributes to is itself: either is only rebased. */
     for (size_t i = 0; i < count; i++) if ((!included[i] || !contributed || !source_count) && rebased[i] &&
-        !pending[i].owned &&
-        !pl_contribution_stage(b, sources, members[i], texts[i].text, texts[i].length, NULL, 0, pending + i, error, capacity))
-        goto failed;
+        !pending[i].owned) {
+        char *plain = NULL; size_t plain_length = 0;
+        int dropped = sh_package_editor_strip_slots(input->family, space, texts[i], &plain, &plain_length);
+        if (dropped < 0) { snprintf(error, capacity, "editor contribution allocation failed"); goto failed; }
+        if (dropped) { free((char *)texts[i].text); texts[i] = (sh_decl_source){plain, plain_length}; }
+        if (!pl_contribution_stage(b, sources, members[i], texts[i].text, texts[i].length, NULL, 0, pending + i, error, capacity))
+            goto failed;
+    }
     /* A member whose composition yields exactly the shared member's output
      * binds that one entry. When the baseline member stages its output, every
      * such member stages it too, even one whose own text already stated the
@@ -2155,6 +2263,8 @@ failed:
     ok = pl_contribution_failure(b, sources, input, kind, culprit, error, capacity) ? -1 : 0;
 done:
     if (texts) for (size_t i = 0; i < count; i++) free((char *)texts[i].text);
+    if (unrebased) for (size_t i = 0; i < count; i++) free((char *)unrebased[i].text);
+    free(unrebased);
     if (pending) for (size_t i = 0; i < count; i++) pl_contribution_unit_free(pending + i);
     if (parents) for (size_t i = 0; i < count; i++) free(parents[i]);
     if (composed) for (size_t i = 0; i < count; i++) free(composed[i]);
@@ -3962,6 +4072,11 @@ static int pl_registration_group(pl_build *b, const sh_package_sources *sources,
         if (!(texts[i].text = pl_token_text(c, members[i], &texts[i].length, error, capacity))) goto failed;
         if (sh_package_registration_lists(texts[i])) stated = 1;
     }
+#ifdef SH_PACKAGE_LIBRARY_TESTING
+    if ((culprit = pl_test_defect(b, sources, members, count)) != SIZE_MAX) {
+        kind = SH_PACKAGE_EDITOR_FAILURE_SOURCE; snprintf(error, capacity, "test contribution defect"); goto failed;
+    }
+#endif
     if (stated && !pl_modifier_precedence(b, sources, members, count, texts, error, capacity)) goto failed;
     for (size_t i = 0; i < count; i++) {
         if (c->inputs.scopes[members[i]] == b->count - 1) { base = texts[i]; base_index = i; }

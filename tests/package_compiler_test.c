@@ -734,9 +734,9 @@ static void rebased_layout(const char *text, const char *list, int page, char *o
         snprintf(slot, sizeof(slot), "item[%d]", k);
         if (!(item = sh_decl_tree_member(items, slot))) break;
         value = page >= 0 ? sh_decl_tree_member(item, "path") : item;
-        if (!sh_decl_tree_literal(value, &spelling, &length)) { strcat_s(out, capacity, "?"); continue; }
         if (*out) strcat_s(out, capacity, ",");
-        strncat_s(out, capacity, spelling, length);
+        if (!sh_decl_tree_literal(value, &spelling, &length)) strcat_s(out, capacity, "?");
+        else strncat_s(out, capacity, spelling, length);
         const sh_decl_node *label = page >= 0 ? sh_decl_tree_member(item, "descriptionTag") : NULL;
         if (label && sh_decl_tree_literal(label, &spelling, &length)) {
             strcat_s(out, capacity, "=");
@@ -746,15 +746,39 @@ static void rebased_layout(const char *text, const char *list, int page, char *o
     sh_decl_tree_free(tree);
 }
 #define SHEET(paths) "{ edit = { propertySheets = { num = 1; item[0] = { properties = { " paths " } } } } }"
-static char *rebase_one(const char *child, const char *authored, const char *published, int force, int *result, int *kind)
+static char *rebase_with(const char *child, const char *authored, const char *published, int force,
+    sh_package_editor_slots *slots, int *result, int *kind)
 {
     sh_decl_source a = {authored, strlen(authored)}, b = {published, strlen(published)};
     sh_package_editor_failure failure; char error[512], *out = NULL; size_t length = 0;
     *result = sh_package_editor_rebase("snapeditorentitydef", (sh_decl_source){child, strlen(child)},
-        &a, 1, &b, 1, force, &out, &length, &failure, error, sizeof(error));
+        &a, 1, &b, 1, force, slots, &out, &length, &failure, error, sizeof(error));
     *kind = failure.kind;
-    if (*result < 0) fprintf(stderr, "rebase: %s\n", error);
+    if (*result == -1) fprintf(stderr, "rebase: %s\n", error);
     return out;
+}
+static char *rebase_one(const char *child, const char *authored, const char *published, int force, int *result, int *kind)
+{ return rebase_with(child, authored, published, force, NULL, result, kind); }
+/* The identity a rebase gave the n-th control (from 0) of the first page, or
+ * "" when it has none; stripped is the layout after dropping them under space. */
+static void slot_identity(const char *text, int n, char *out, size_t capacity)
+{
+    char layout[1024], *at = layout, *end;
+    *out = 0;
+    rebased_layout(text, "propertySheets", 0, layout, sizeof(layout));
+    for (int k = 0; k < n && at; k++) if ((at = strchr(at, ','))) at++;
+    if (!at) return;
+    if ((end = strchr(at, ','))) *end = 0;
+    if ((end = strchr(at, '='))) *end = 0;
+    snprintf(out, capacity, "%s", at);
+}
+static int stripped_layout(const char *text, const char *space, char *layout, size_t capacity)
+{
+    char *plain = NULL; size_t length = 0;
+    int result = sh_package_editor_strip_slots("snapeditorentitydef", space, (sh_decl_source){text, strlen(text)},
+        &plain, &length);
+    if (result == 1) rebased_layout(plain, "propertySheets", 0, layout, capacity);
+    free(plain); return result;
 }
 /* A child's sparse list addresses its parent's controls by position. When the
  * published parent's layout differs from its author's, each patch still lands
@@ -776,9 +800,7 @@ static void test_editor_rebase(void)
     /* Parents are read in order, as the native reader applies them: a shipped
      * row repeating another field (fx/ambient_embers states fxInfo twice) still
      * rebases, and a child stating no collection never reads its parents. A
-     * parent stating a collection the rebase reads twice is not composed (a
-     * coverage refusal, not a finding that the source is malformed): the native
-     * reader's ordered semantics for a repeated list are not established here. */
+     * parent stating a collection twice is read twice, in order (pe_apply). */
     {
         const char *fx = "{ edit = { fxInfo = { rate = 1; } fxInfo = { rate = 2; } ";
         char repeated_stock[512], repeated_added[512];
@@ -793,9 +815,180 @@ static void test_editor_rebase(void)
         const char *twice = "{ edit = { propertySheets = { num = 1; } propertySheets = { num = 2; } } }";
         out = rebase_one("{ inherit = \"embers\"; edit = { entityDef = \"embers_def\"; } }", twice, twice, 1, &result, &kind);
         CHECK(result == 0 && !out); free(out);
-        out = rebase_one("{ inherit = \"embers\"; edit = { propertySheets = { item[0] = { properties = { "
-            "item[1] = { descriptionTag = \"#str_delay\"; } } } } } }", twice, stock, 0, &result, &kind);
-        CHECK(result < 0 && !out && kind == SH_PACKAGE_EDITOR_FAILURE_COVERAGE); free(out);
+        /* The second statement extends the first: a, b, then c at slot 2. The
+         * child's patch of b follows it past the published insertion of x. */
+        out = rebase_one("{ inherit = \"p\"; edit = { propertySheets = { item[0] = { properties = { "
+            "item[1] = { descriptionTag = \"#str_b\"; } } } } } }",
+            "{ edit = { propertySheets = { num = 1; item[0] = { properties = { num = 2; item[0] = { path = \"a\"; } "
+            "item[1] = { path = \"b\"; } } } } propertySheets = { item[0] = { properties = { num = 3; "
+            "item[2] = { path = \"c\"; } } } } } }",
+            SHEET("num = 4; item[0] = { path = \"a\"; } item[1] = { path = \"x\"; } item[2] = { path = \"b\"; } "
+                "item[3] = { path = \"c\"; }"), 0, &result, &kind);
+        CHECK(result == 1 && out); if (out) rebased_layout(out, "propertySheets", 0, layout, sizeof(layout));
+        CHECK(out && !strcmp(layout, "a,x,b=#str_b,c"));
+        free(out);
+        /* A block met for the first time inside a parent's first statement is
+         * read as the native reader reads it, not copied as written: its
+         * repeated properties blocks both apply, the first num of each before
+         * its items, an item past that count is skipped (a later resize leaves
+         * its slot empty), and a repeated scalar keeps its last value. The
+         * authored parent therefore lays out exactly as this published one, and
+         * the child needs no rebase. */
+        out = rebase_one("{ inherit = \"p\"; edit = { propertySheets = { item[0] = { properties = { "
+            "item[1] = { descriptionTag = \"#str_b\"; } } } } } }",
+            "{ edit = { propertySheets = { num = 1; item[0] = { properties = { num = 1; "
+            "item[0] = { path = \"a\"; type = \"float\"; type = \"int\"; } item[2] = { path = \"ghost\"; } } "
+            "properties = { num = 3; item[1] = { path = \"b\"; } } } } } }",
+            SHEET("num = 3; item[0] = { path = \"a\"; type = \"int\"; } item[1] = { path = \"b\"; } item[2] = { }"),
+            0, &result, &kind);
+        CHECK(result == 0 && !out); free(out);
+        /* The repeated scalar's last value is what the child's author saw: a
+         * child moving a with type "int" changes nothing of a, so a keeps the
+         * published parent's own type (forced: the layouts agree). */
+        out = rebase_one("{ inherit = \"p\"; edit = { propertySheets = { item[0] = { properties = { num = 2; "
+            "item[0] = { path = \"z\"; } item[1] = { path = \"a\"; type = \"int\"; } } } } } }",
+            "{ edit = { propertySheets = { num = 1; item[0] = { properties = { num = 1; "
+            "item[0] = { path = \"a\"; type = \"float\"; type = \"int\"; } } } } } }",
+            SHEET("num = 1; item[0] = { path = \"a\"; type = \"bool\"; }"), 1, &result, &kind);
+        CHECK(result == 1 && out);
+        {
+            sh_decl_node *tree = out ? sh_decl_tree_parse((sh_decl_source){out, strlen(out)}, NULL, 0) : NULL;
+            const sh_decl_node *properties = sh_decl_tree_member(sh_decl_tree_member(sh_decl_tree_member(
+                sh_decl_tree_member(tree, "edit"), "propertySheets"), "item[0]"), "properties");
+            const sh_decl_node *a = NULL;
+            const char *type = NULL; size_t type_length = 0;
+            for (const sh_decl_node *item = properties ? properties->children : NULL; item; item = item->next) {
+                const char *path; size_t length;
+                if (sh_decl_tree_literal(sh_decl_tree_member(item, "path"), &path, &length) && length == 1 && *path == 'a') a = item;
+            }
+            CHECK(a && sh_decl_tree_literal(sh_decl_tree_member(a, "type"), &type, &type_length) &&
+                type_length == 4 && !memcmp(type, "bool", 4));
+            sh_decl_tree_free(tree);
+        }
+        free(out);
+        /* Only a block's first num counts: x and y stay, as without the second. */
+        out = rebase_one("{ inherit = \"p\"; edit = { inputs = { num = 3; item[2] = \"z\"; } } }",
+            "{ edit = { inputs = { num = 2; item[0] = \"x\"; item[1] = \"y\"; num = 1; } } }",
+            "{ edit = { inputs = { num = 3; item[0] = \"x\"; item[1] = \"y\"; item[2] = \"w\"; } } }", 0, &result, &kind);
+        CHECK(result == 1 && out); if (out) rebased_layout(out, "inputs", -1, layout, sizeof(layout));
+        CHECK(out && !strcmp(layout, "x,y,w,z"));
+        free(out);
+        /* An item past the count is skipped when read, so growing the list later
+         * gives an empty slot, not that item: the authored parent differs from
+         * the published one, which states q there. */
+        out = rebase_one("{ inherit = \"p\"; edit = { inputs = { item[1] = \"Y\"; } } }",
+            "{ edit = { inputs = { num = 2; item[0] = \"x\"; item[1] = \"y\"; } inputs = { item[2] = \"q\"; } "
+            "inputs = { num = 3; } } }",
+            "{ edit = { inputs = { num = 3; item[0] = \"x\"; item[1] = \"y\"; item[2] = \"q\"; } } }", 0, &result, &kind);
+        CHECK(result == 1 && out); free(out);
+        out = rebase_one("{ inherit = \"p\"; edit = { inputs = { item[1] = \"Y\"; } } }",
+            "{ edit = { inputs = { num = 2; item[0] = \"x\"; item[1] = \"y\"; } inputs = { num = 3; item[2] = \"q\"; } } }",
+            "{ edit = { inputs = { num = 3; item[0] = \"x\"; item[1] = \"y\"; item[2] = \"q\"; } } }", 0, &result, &kind);
+        CHECK(result == 0 && !out); free(out);
+    }
+    /* A control without a path, which the native reader places by slot alone,
+     * has no identity a composition can union, so a rebase for composition
+     * (slots) gives it one by where it came from, under the caller's
+     * namespace: a published control its published slot (equal ones paired by
+     * content, then order, so an edit lands on the slot its author edited and
+     * their number is kept); the shipped declaration's own such control its
+     * native slot; any other own control its content, equal ones paired by
+     * occurrence. Dropping them afterwards touches nothing else. */
+    {
+        sh_package_editor_slots slots = {"#t-0:", {NULL, 0}};
+        const char *stock_sheet = SHEET("num = 2; item[0] = { path = \"a\"; } item[1] = { type = \"float\"; }");
+        const char *relaid = SHEET("num = 3; item[0] = { path = \"x\"; } item[1] = { path = \"a\"; } "
+            "item[2] = { type = \"float\"; }");
+        const char *child = "{ inherit = \"p\"; edit = { propertySheets = { item[0] = { properties = { num = 3; "
+            "item[1] = { descriptionTag = \"#str_n\"; } item[2] = { type = \"int\"; } } } } } }";
+        char first[160], second[160], third[160];
+        out = rebase_with(child, stock_sheet, relaid, 0, &slots, &result, &kind);
+        CHECK(result == 1 && out); if (out) rebased_layout(out, "propertySheets", 0, layout, sizeof(layout));
+        CHECK(out && !strncmp(layout, "x,a,#t-0:p2=#str_n,#t-0:c", 25) && strlen(layout) > 3 &&
+            !strcmp(layout + strlen(layout) - 2, "#0"));
+        CHECK(out && stripped_layout(out, "#t-0:", layout, sizeof(layout)) == 1 && !strcmp(layout, "x,a,?=#str_n,?"));
+        CHECK(out && stripped_layout(out, "#t-1:", layout, sizeof(layout)) == 0);
+        free(out);
+        /* The unchanged layout stays sparse; without slots nothing is given. */
+        out = rebase_with(child, stock_sheet, stock_sheet, 0, &slots, &result, &kind);
+        CHECK(result == 0 && !out); free(out);
+        out = rebase_one(child, stock_sheet, relaid, 0, &result, &kind);
+        CHECK(result == 1 && out); if (out) rebased_layout(out, "propertySheets", 0, layout, sizeof(layout));
+        CHECK(out && !strcmp(layout, "x,a,?=#str_n,?")); free(out);
+        /* Repeated equal published controls keep their number, and the edit of
+         * the second stays on the second. */
+        out = rebase_with("{ inherit = \"p\"; edit = { propertySheets = { item[0] = { properties = { "
+            "item[1] = { descriptionTag = \"#str_second\"; } } } } } }",
+            SHEET("num = 2; item[0] = { type = \"float\"; } item[1] = { type = \"float\"; }"),
+            SHEET("num = 3; item[0] = { path = \"x\"; } item[1] = { type = \"float\"; } item[2] = { type = \"float\"; }"),
+            0, &slots, &result, &kind);
+        CHECK(result == 1 && out); if (out) rebased_layout(out, "propertySheets", 0, layout, sizeof(layout));
+        CHECK(out && !strcmp(layout, "x,#t-0:p1,#t-0:p2=#str_second")); free(out);
+        /* Own controls: different ones differ, an exact duplicate in another
+         * child is the same, a child's repeated equal ones are counted. */
+        out = rebase_with(child, stock_sheet, relaid, 0, &slots, &result, &kind);
+        if (out) slot_identity(out, 3, first, sizeof(first)); free(out);
+        out = rebase_with("{ inherit = \"p\"; edit = { propertySheets = { item[0] = { properties = { num = 3; "
+            "item[2] = { type = \"int\"; } } } } } }", stock_sheet, relaid, 0, &slots, &result, &kind);
+        if (out) slot_identity(out, 3, second, sizeof(second)); free(out);
+        out = rebase_with("{ inherit = \"p\"; edit = { propertySheets = { item[0] = { properties = { num = 3; "
+            "item[2] = { type = \"bool\"; } } } } } }", stock_sheet, relaid, 0, &slots, &result, &kind);
+        if (out) slot_identity(out, 3, third, sizeof(third)); free(out);
+        CHECK(!strncmp(first, "#t-0:c", 6) && !strcmp(first, second) && strcmp(first, third) && !strncmp(third, "#t-0:c", 6));
+        out = rebase_with("{ inherit = \"p\"; edit = { propertySheets = { item[0] = { properties = { num = 4; "
+            "item[2] = { type = \"int\"; } item[3] = { type = \"int\"; } } } } } }", stock_sheet, relaid, 0, &slots,
+            &result, &kind);
+        if (out) { slot_identity(out, 3, second, sizeof(second)); slot_identity(out, 4, third, sizeof(third)); }
+        CHECK(out && !strcmp(first, second) && !strncmp(third, first, strlen(first) - 1) &&
+            !strcmp(third + strlen(third) - 2, "#1"));
+        free(out);
+        /* The shipped declaration's own equal controls are its native slots in
+         * every copy, edited or not; a further own one has its content. */
+        {
+            const char *shipped = "{ inherit = \"p\"; edit = { propertySheets = { item[0] = { properties = { num = 4; "
+                "item[2] = { type = \"float\"; } item[3] = { type = \"float\"; } } } } } }";
+            sh_package_editor_slots shared = {"#t-0:", {shipped, strlen(shipped)}};
+            const char *two = SHEET("num = 2; item[0] = { path = \"a\"; } item[1] = { path = \"b\"; }");
+            const char *relaid_two = SHEET("num = 3; item[0] = { path = \"x\"; } item[1] = { path = \"a\"; } "
+                "item[2] = { path = \"b\"; }");
+            out = rebase_with("{ inherit = \"p\"; edit = { propertySheets = { item[0] = { properties = { num = 5; "
+                "item[2] = { type = \"float\"; } item[3] = { type = \"float\"; descriptionTag = \"#str_second\"; } "
+                "item[4] = { type = \"float\"; } } } } } }", two, relaid_two, 0, &shared, &result, &kind);
+            CHECK(result == 1 && out); if (out) rebased_layout(out, "propertySheets", 0, layout, sizeof(layout));
+            CHECK(out && !strncmp(layout, "x,a,b,#t-0:s0.2,#t-0:s0.3=#str_second,#t-0:c", 44) &&
+                !strcmp(layout + strlen(layout) - 2, "#0"));
+            free(out);
+        }
+        /* A rebase for composition reports when the child appends, in its
+         * author's frame, an own control without a path; a sparse patch's item
+         * addressing an inherited control is not one. */
+        {
+            sh_package_editor_slots probe = {"#t-0:", {NULL, 0}, 0};
+            out = rebase_with("{ inherit = \"p\"; edit = { propertySheets = { item[0] = { properties = { "
+                "item[1] = { descriptionTag = \"#str_n\"; } } } } } }", stock_sheet, stock_sheet, 0, &probe, &result, &kind);
+            CHECK(result == 0 && !out && !probe.appends); free(out);
+            out = rebase_with("{ inherit = \"p\"; edit = { propertySheets = { item[0] = { properties = { num = 3; "
+                "item[2] = { type = \"int\"; } } } } } }", stock_sheet, stock_sheet, 0, &probe, &result, &kind);
+            CHECK(result == 0 && !out && probe.appends); free(out);
+        }
+        /* The namespace is the caller's: an input stating it is refused for that
+         * namespace only (-2, choose another); an authored value that merely
+         * looks like an identity is neither refused nor dropped. */
+        out = rebase_with("{ inherit = \"p\"; edit = { propertySheets = { item[0] = { properties = { num = 3; "
+            "item[2] = { path = \"#t-0:p0\"; } } } } } }", stock_sheet, relaid, 0, &slots, &result, &kind);
+        CHECK(result == -2 && !out); free(out);
+        out = rebase_with(child, stock_sheet, SHEET("num = 3; item[0] = { path = \"#t-0:x\"; } item[1] = { path = \"a\"; } "
+            "item[2] = { type = \"float\"; }"), 0, &slots, &result, &kind);
+        CHECK(result == -2 && !out); free(out);
+        {
+            sh_package_editor_slots other = {"#t-1:", {NULL, 0}};
+            out = rebase_with("{ inherit = \"p\"; edit = { propertySheets = { item[0] = { properties = { num = 4; "
+                "item[2] = { path = \"#t-0:p0\"; } item[3] = { type = \"int\"; } } } } } }", stock_sheet, relaid, 0,
+                &other, &result, &kind);
+            CHECK(result == 1 && out);
+            CHECK(out && stripped_layout(out, "#t-1:", layout, sizeof(layout)) == 1 && !strcmp(layout, "x,a,?,#t-0:p0,?"));
+            free(out);
+        }
     }
     /* Equal layouts are left to native inheritance unless forced. */
     out = rebase_one("{ inherit = \"input_base\"; edit = { propertySheets = { item[0] = { properties = { "

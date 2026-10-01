@@ -172,7 +172,8 @@ static int dc_rules_valid(dc_context *context)
     if (context->rule_count && !context->rules) return dc_fail(context, NULL, "invalid collection adapter");
     for (size_t i = 0; i < context->rule_count; i++) {
         const sh_decl_collection_rule *rule = context->rules + i;
-        if (!rule->path || (rule->flags & ~(SH_DECL_COLLECTION_PRESENTATION_ORDER | SH_DECL_COLLECTION_DISTINCT_BEHAVIOR)) ||
+        if (!rule->path || (rule->flags & ~(SH_DECL_COLLECTION_PRESENTATION_ORDER | SH_DECL_COLLECTION_DISTINCT_BEHAVIOR |
+                SH_DECL_COLLECTION_FIRST_MATCH)) ||
             (rule->flags && rule->item_key && !*rule->item_key && !rule->group_items))
             return dc_fail(context, rule->path, "invalid collection adapter flags for fixed or unknown semantics");
     }
@@ -495,6 +496,8 @@ static int dc_normalize_list(dc_node *list, const sh_decl_collection_rule *rule,
         }
         if (!rule->group_items) for (j = 0; j < i; j++) {
             if (dc_same_item(items[i].node, items[j].node, rule)) {
+                /* Unreachable natively: the earlier row matches first. */
+                if (rule->flags & SH_DECL_COLLECTION_FIRST_MATCH) break;
                 int duplicate = dc_duplicate_member(items[j].node, items[i].node, rule, context);
                 if (duplicate != 1) {
                     free(items); return duplicate < 0 ? 0 :

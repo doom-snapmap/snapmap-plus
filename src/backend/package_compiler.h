@@ -344,12 +344,41 @@ int sh_package_registration_lists(sh_decl_source text);
  * list when force is set, is restated as a complete list: the child's
  * effective controls in its own order, each inherited one as published plus
  * the child's changes, the published parent's additions after their
- * predecessors, and the child's removals kept. Returns 1 with malloc-owned
- * *out, 0 when nothing changes, -1 on failure (failure->kind). */
+ * predecessors, and the child's removals kept. With slots, a restated control
+ * without its identity field (the native reader places it by slot alone)
+ * carries an identity under slots->space from where it came from (the
+ * published slot; for the shipped declaration's own such control, which every
+ * package's copy restates or edits at one native slot, that slot; otherwise
+ * its content, equal ones paired by occurrence), so restatements of one
+ * declaration compose; sh_package_editor_strip_slots drops it afterwards.
+ * slots->appends is set when the child appends, in its author's frame, an own
+ * such control (whether or not this call rebases): composing it needs every
+ * restatement of the declaration rebased (force).
+ * Returns 1 with malloc-owned *out, 0 when nothing changes, -1 on failure
+ * (failure->kind), -2 when an input states slots->space (choose another). */
+typedef struct sh_package_editor_slots {
+    const char *space;      /* a prefix no input of the composition states */
+    sh_decl_source shared;  /* the shipped declaration the child replaces; empty: none */
+    int appends;            /* out: an own control without an identity field */
+} sh_package_editor_slots;
 int sh_package_editor_rebase(const char *type, sh_decl_source child,
     const sh_decl_source *authored, size_t authored_count,
-    const sh_decl_source *published, size_t published_count, int force,
+    const sh_decl_source *published, size_t published_count, int force, sh_package_editor_slots *slots,
     char **out, size_t *length, sh_package_editor_failure *failure, char *error, size_t capacity);
+/* Complete lists composed without a rebase (a declaration restated whole):
+ * give their controls without an identity field (the native reader places them
+ * by slot alone) an identity under space relative to shipped, the shipped
+ * declaration: paired with one of its such controls (equal content first,
+ * then in order), that control's slot; otherwise the content, equal ones
+ * paired by occurrence. 1 with malloc-owned *out, 0 when none is given, -2
+ * when text or shipped states space, -1 on failure. */
+int sh_package_editor_frame_slots(const char *type, sh_decl_source text, sh_decl_source shipped, const char *space,
+    char **out, size_t *length);
+/* Drop the identities a rebase gave under space to controls without one; an
+ * authored value is never under space (the rebase refuses a space an input
+ * states). 1 with malloc-owned *out, 0 when the text carries none, -1 on
+ * failure. */
+int sh_package_editor_strip_slots(const char *type, const char *space, sh_decl_source text, char **out, size_t *length);
 /* 1 when authored, read over the parent texts (nearest first), leaves some
  * inherited editor list's controls at other slots than original does (the
  * layout test the rebase uses), so the children of that declaration would

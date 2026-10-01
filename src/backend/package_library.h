@@ -154,5 +154,10 @@ void sh_package_library_test_rejudge_failures(long count);
 /* Fail the next count token rebinds after a package was found, as a failure
  * no judgement classifies. */
 void sh_package_library_test_token_failures(long count);
+/* Judge the contributions of the named packages (up to 8; NULL or 0 clears;
+ * "package:declaration" names one declaration only) malformed where their
+ * editor or registration group composes, as an invalid source found at that
+ * phase would be. */
+void sh_package_library_test_contribution_defects(const char *const *packages, size_t count);
 #endif
 #endif

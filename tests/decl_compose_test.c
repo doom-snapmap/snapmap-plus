@@ -1007,8 +1007,28 @@ static void large_text(void)
     free(result); free(text);
 }
 
+/* A first-match list (the conductor's modifiers): a later row sharing an
+ * earlier row's identity is never reached natively, so it is dropped rather
+ * than refused, and the earlier row stays exactly as authored; identities that
+ * differ are kept in order. Without the flag the same list is refused. */
+static void first_match_rows(void)
+{
+    const sh_decl_collection_rule first[] = {{"mods", "aiType", NULL, NULL, NULL, SH_DECL_COLLECTION_FIRST_MATCH}};
+    const sh_decl_collection_rule plain[] = {{"mods", "aiType"}};
+    const char *text = "{ mods = { num = 3; item[0] = { aiType = \"T5\"; healthMod = \"a\"; } "
+        "item[1] = { aiType = \"T6\"; healthMod = \"c\"; } item[2] = { aiType = \"T5\"; healthMod = \"b\"; } } }";
+    char error[512], *out = NULL;
+    size_t length = 0;
+    CHECK(sh_decl_normalize_collections(view(text), first, 1, &out, &length, error, sizeof(error)));
+    CHECK(out && strstr(out, "num = 2;") && strstr(out, "\"a\"") && strstr(out, "\"c\"") && !strstr(out, "\"b\""));
+    CHECK(out && strstr(out, "\"a\"") < strstr(out, "\"c\""));
+    free(out); out = NULL;
+    CHECK(!sh_decl_normalize_collections(view(text), plain, 1, &out, &length, error, sizeof(error)));
+    CHECK(!out && strstr(error, "same collection identity"));
+}
 int main(int argc, char **argv)
 {
+    first_match_rows();
     grouped_collections();
     presentation_duplicates();
     presentation_ordering(); control_behavior_identity();

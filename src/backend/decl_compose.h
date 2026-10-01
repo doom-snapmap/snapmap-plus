@@ -19,7 +19,12 @@ enum {
     /* One primary key may expose several editing functions. Identity includes
      * every non-presentation field and native block operation. Callers bind
      * resource references before composition; raw names do not prove equality. */
-    SH_DECL_COLLECTION_DISTINCT_BEHAVIOR = 2u
+    SH_DECL_COLLECTION_DISTINCT_BEHAVIOR = 2u,
+    /* The native consumer applies the first row matching an identity (the
+     * conductor's modifiers). A later row of one list sharing an earlier row's
+     * identity is never reached; it is dropped rather than refused, which
+     * leaves the native result unchanged. */
+    SH_DECL_COLLECTION_FIRST_MATCH = 4u
 };
 
 /* These rules are supplied by verified engine-family adapters, never package

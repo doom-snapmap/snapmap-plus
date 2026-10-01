@@ -5987,14 +5987,14 @@ static void test_malformed_owners_together(void)
     sh_package_runtime_test_dispose(); sh_package_runtime_test_baseline(baseline, NULL);
     for (size_t i = 0; i < f.count; i++) free(f.regions[i].address);
 }
-/* Packages whose own editor contributions cannot compose are left out
- * together: two restating the shipped base row with a control that has no
- * identity (each malformed on its own) beside a peer changing the same row
- * cost exactly one failed installed-library compile, in either discovery
- * order; the retry replays the unchanged packages' discovery and serves the
- * peer's change, and both are reported with their own reasons. Their
- * judgement read the shipped row too, so nothing is remembered: a later
- * process judges them afresh, again in one failed compile. */
+/* Two packages restating the shipped base row whole, each with one more
+ * control that has no path and only a label (the shapes of the historical F1
+ * live owners f1-bad-one/two; native valid: the reader places it by slot), beside
+ * a peer changing the same row, are admitted together in either discovery
+ * order and in a later process: one installed-library compile each time,
+ * nothing left out, and the served row carries both added controls (different
+ * content, so two) and the peer's change. Unserved packages being judged
+ * afresh in a later process is test_unserved_rejudged. */
 static void test_contribution_owners_runtime(void)
 {
     admission_fixture f; d8r_setup(&f);
@@ -6029,12 +6029,9 @@ static void test_contribution_owners_runtime(void)
             library_compiles = memo_replays = skipped_packages = left_out_packages = 0;
             CHECK(sh_package_runtime_refresh(data));
             summary = sh_package_runtime_summary();
-            /* Both are decided by editor composition (not by their scopes or
-             * discovery): a control composition cannot place. */
-            const char *reason = summary ? strstr(summary, "no valid index or semantic identity") : NULL;
-            int together = library_compiles == 2 && memo_replays >= 1 && skipped_packages == 2 && !left_out_packages &&
-                summary && strstr(summary, folders[0]) && strstr(summary, folders[1]) && !strstr(summary, "m-good:") &&
-                reason && strstr(reason + 1, "no valid index or semantic identity");
+            int together = library_compiles == 1 && !skipped_packages && !left_out_packages &&
+                summary && strstr(summary, folders[0]) && strstr(summary, folders[1]) && strstr(summary, "m-good") &&
+                !strstr(summary, "Skipped");
             if (!together)
                 fprintf(stderr, "contribution owners order %d process %d: %u compiles, %u replays, %u skipped, %u left out; %s\n",
                     order, process, library_compiles, memo_replays, skipped_packages, left_out_packages,
@@ -6042,6 +6039,8 @@ static void test_contribution_owners_runtime(void)
             CHECK(together);
             free(summary);
             expect_library_text(d8r_base, "#str_good");
+            expect_library_text(d8r_base, "#str_one");
+            expect_library_text(d8r_base, "#str_two");
         }
         sh_package_runtime_test_dispose();
         cleanup_resources(data);
