@@ -649,6 +649,74 @@ static void many_repeated_slots(const sh_package_sources *sources)
     for (size_t u = 0; u < 8; u++) free(bound_names[u]);
 }
 
+/* One file of exactly 33 bindings, in the only unit with that many: capture
+ * leaves the repeat table at its 33rd binding, the unit then reads the reuse
+ * cache's shared slot texts, and the final link's replay reaches that binding
+ * again with no other table use in between. Slots, names and a different last
+ * target hold without a reuse cache, with one, and with caller-supplied sites. */
+static void occurrence_table_replay(const sh_package_sources *sources)
+{
+    enum { R = 33 };
+    static const char *const fields[] = {"edit.a", "edit.c", "edit.c#2", "edit.b", "edit.c", "edit.a#x", "edit.b#"};
+    static const char *const stones[] = {"materials/m0", "materials/m1", "materials/m2"};
+    static const char *const colors[] = {"{ color {1,0,0,1} }", "{ color {0,1,0,1} }", "{ color {0,0,1,1} }"};
+    static const char *const stone_paths[] = {"generated/decls/material/materials/m0.decl",
+        "generated/decls/material/materials/m1.decl", "generated/decls/material/materials/m2.decl"};
+    static const char path[] = "generated/decls/entitydef/props/single.decl";
+    static plan_ref refs[R];
+    static sh_package_link_edge sites[R];
+    static char expected[R][192];
+    sh_compiled_resource entity = {0}, stone[3] = {{0}};
+    const sh_compiled_resource *entity_files[1] = {&entity}, *stone_files[3];
+    sh_package_compilation scope = {0};
+    slot_plan plan;
+    fixture f = {0};
+    char error[1024], *names[3] = {0};
+    const char *got[R + 8];
+    scope.sources = sources;
+    for (size_t j = 0; j < 3; j++) {
+        stone[j].engine_path = stone_paths[j]; stone[j].type = "material"; stone[j].name = stones[j];
+        stone[j].source = SIZE_MAX; stone[j].body = (unsigned char *)colors[j]; stone[j].body_length = strlen(colors[j]);
+        stone_files[j] = stone + j;
+        f.units[1 + j] = (sh_package_link_unit){"material", stones[j], &scope, stone_files + j, 1};
+    }
+    entity.engine_path = path; entity.source = SIZE_MAX; entity.body = (unsigned char *)"{ }"; entity.body_length = 3;
+    f.units[0] = (sh_package_link_unit){"entitydef", "props/single", &scope, entity_files, 1};
+    for (size_t k = 0; k < R; k++) {
+        refs[k] = (plan_ref){fields[k % 7], stones[k % 3]};
+        sites[k] = (sh_package_link_edge){fields[k % 7], 1 + k % 3};
+    }
+    plan = (slot_plan){&entity, refs, sites, R};
+    f.count = 4; f.plans = &plan; f.plan_count = 1;
+    expected_slots(path, refs, R, expected);
+    sh_package_link_adapter adapter = {&f, resolve, bind_file, assign};
+    sh_package_link_output out = {0};
+    /* Without a cache; bound into one; supplied as sites into one; then the
+     * last binding names another stone. */
+    for (int run = 0; run < 4; run++) {
+        if (run == 3) { refs[R - 1].target = stones[R % 3]; sites[R - 1].target = 1 + R % 3; }
+        adapter.sites = run == 2 ? plan_sites : NULL;
+        adapter.reuse = run ? sh_package_link_reuse_open(f.count) : NULL;
+        assert(!run || adapter.reuse);
+        int ok = sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &out, error, sizeof(error));
+        if (!ok) fprintf(stderr, "occurrence table replay: %s\n", error);
+        assert(ok);
+        if (adapter.reuse) {
+            size_t n = sh_package_link_reuse_test_slots(adapter.reuse, 0, got, sizeof(got) / sizeof(*got));
+            assert(n == R);
+            for (size_t i = 0; i < n; i++) assert(!strcmp(got[i], expected[i]));
+        }
+        const char *name = out.names[out.classes.nodes[0]];
+        if (run < 3) {
+            names[run] = _strdup(name); assert(names[run]);
+            assert(!run || !strcmp(names[run], names[0]));
+        } else assert(strcmp(name, names[0]));
+        sh_package_link_reuse_close(adapter.reuse); adapter.reuse = NULL;
+        sh_package_link_output_free(&out);
+    }
+    for (size_t i = 0; i < 3; i++) free(names[i]);
+}
+
 /* Names after a repaired order: with a reuse cache, renaming one of many units
  * between links moves it from the front to the back of the remembered shape
  * order, which is repaired rather than sorted again; every unit keeps the
@@ -1381,6 +1449,7 @@ int main(void)
     shared_member_variants(sources);
     foreign_suppliers();
     many_repeated_slots(sources);
+    occurrence_table_replay(sources);
     repaired_order_names(sources);
     repeated_field_slots();
     campaign_originals(sources);

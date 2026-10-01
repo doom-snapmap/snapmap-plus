@@ -20,8 +20,8 @@ typedef struct pl_unit {
     size_t implicit_count, implicit_begin;
     char **paths;
     char **names;
-    /* Restored from the reuse cache: edges and implicit hold that cache's slot
-     * strings for this pass, and only the arrays belong to the unit. */
+    /* Restored from, or captured into, the reuse cache: edges and implicit hold
+     * that cache's slot strings, and only the arrays belong to the unit. */
     int borrowed;
 } pl_unit;
 /* pl_occurrence's counts over one file's edges [occ_begin, occ_end) of
@@ -158,28 +158,47 @@ struct sh_package_link_reuse {
     unsigned long long verify_pairs, verify_shared, verify_bytes, verify_us;
     unsigned long long link_us[4];
     int linked;
+    /* One copy of each distinct slot text of the kept edges (open addressing,
+     * owned here until close): units reading them share the pointers. */
+    char **texts;
+    size_t text_count, text_capacity;
 };
-static sh_package_link_edge *pl_edges_copy(const sh_package_link_edge *edges, size_t count)
+static uint64_t pl_occ_hash(const char *key, size_t length);
+static const char *pl_reuse_text(sh_package_link_reuse *reuse, const char *text)
+{
+    if (reuse->text_count + 1 > reuse->text_capacity / 2) {
+        size_t capacity = reuse->text_capacity ? reuse->text_capacity * 2 : 4096;
+        char **grown = capacity <= SIZE_MAX / 2 / sizeof(*grown) ? calloc(capacity, sizeof(*grown)) : NULL;
+        if (!grown) return NULL;
+        for (size_t i = 0; i < reuse->text_capacity; i++) if (reuse->texts[i]) {
+            size_t at = (size_t)pl_occ_hash(reuse->texts[i], strlen(reuse->texts[i])) & (capacity - 1);
+            while (grown[at]) at = (at + 1) & (capacity - 1);
+            grown[at] = reuse->texts[i];
+        }
+        free(reuse->texts); reuse->texts = grown; reuse->text_capacity = capacity;
+    }
+    size_t at = (size_t)pl_occ_hash(text, strlen(text)) & (reuse->text_capacity - 1);
+    while (reuse->texts[at] && strcmp(reuse->texts[at], text)) at = (at + 1) & (reuse->text_capacity - 1);
+    if (!reuse->texts[at]) {
+        if (!(reuse->texts[at] = _strdup(text))) return NULL;
+        reuse->text_count++;
+    }
+    return reuse->texts[at];
+}
+/* Kept edges read the cache's shared slot texts; only the array is owned. */
+static sh_package_link_edge *pl_edges_copy(sh_package_link_reuse *reuse, const sh_package_link_edge *edges, size_t count)
 {
     sh_package_link_edge *out = pl_alloc(count, sizeof(*out));
     for (size_t i = 0; out && i < count; i++) {
         out[i].target = edges[i].target;
-        if (!(out[i].slot = _strdup(edges[i].slot))) {
-            while (i) free((char *)out[--i].slot);
-            free(out); out = NULL;
-        }
+        if (!(out[i].slot = pl_reuse_text(reuse, edges[i].slot))) { free(out); out = NULL; }
     }
     return out;
-}
-static void pl_edges_free(sh_package_link_edge *edges, size_t count)
-{
-    for (size_t i = 0; edges && i < count; i++) free((char *)edges[i].slot);
-    free(edges);
 }
 static void pl_reuse_unit_clear(pl_reuse_unit *u)
 {
     int invalid = u->invalid;
-    pl_edges_free(u->edges, u->edge_count); pl_edges_free(u->implicit, u->implicit_count);
+    free(u->edges); free(u->implicit);
     free(u->files); free(u->witnesses); free(u->witness_order);
     memset(u, 0, sizeof(*u)); u->invalid = invalid;
 }
@@ -210,8 +229,9 @@ void sh_package_link_reuse_close(sh_package_link_reuse *reuse)
 {
     if (!reuse) return;
     for (size_t i = 0; i < reuse->count; i++) pl_reuse_unit_clear(reuse->units + i);
+    for (size_t i = 0; i < reuse->text_capacity; i++) free(reuse->texts[i]);
     sh_package_link_order_free(&reuse->order);
-    free(reuse->units); free(reuse->proven); free(reuse);
+    free(reuse->texts); free(reuse->units); free(reuse->proven); free(reuse);
 }
 static int pl_reuse_valid(const sh_package_link_reuse *reuse, size_t unit)
 { return reuse && unit < reuse->count && reuse->units[unit].captured && !reuse->units[unit].invalid; }
@@ -670,16 +690,17 @@ static int pl_reuse_restore(pl_work *w, const sh_package_link_unit *source, pl_u
     node->edges = u->edges; node->edge_count = u->edge_count;
     return 1;
 }
-/* Keep this unit's completed capture for later passes, unless invalidated. */
-static void pl_reuse_store(pl_work *w, const sh_package_link_unit *source, const pl_unit *u,
+/* Keep this unit's completed capture for later passes, unless invalidated.
+ * The unit then reads the cache's shared slot texts, like a restored unit. */
+static void pl_reuse_store(pl_work *w, const sh_package_link_unit *source, pl_unit *u,
     const sh_package_link_node *node)
 {
     sh_package_link_reuse *reuse = w->adapter->reuse;
     pl_reuse_unit next = {0};
     if (!reuse || w->unit >= reuse->count || reuse->units[w->unit].invalid) return;
     next.files = pl_alloc(source->file_count, sizeof(*next.files));
-    next.edges = pl_edges_copy(u->edges, u->edge_count);
-    next.implicit = pl_edges_copy(u->implicit, u->implicit_count);
+    next.edges = pl_edges_copy(reuse, u->edges, u->edge_count);
+    next.implicit = pl_edges_copy(reuse, u->implicit, u->implicit_count);
     if (source->witness_count) {
         next.witnesses = pl_alloc(source->witness_count, sizeof(*next.witnesses));
         next.witness_order = pl_alloc(source->witness_count, sizeof(*next.witness_order));
@@ -698,6 +719,13 @@ static void pl_reuse_store(pl_work *w, const sh_package_link_unit *source, const
     next.implicit_begin = u->implicit_begin; next.length = node->length;
     memcpy(next.content, node->content, 32); next.captured = 1;
     pl_reuse_unit_clear(reuse->units + w->unit); reuse->units[w->unit] = next;
+    /* pl_occurrence's table points at the slot strings freed here. */
+    if (w->occ_unit == u) w->occ_unit = NULL;
+    for (size_t i = 0; i < u->edge_count; i++) { free((char *)u->edges[i].slot); u->edges[i].slot = next.edges[i].slot; }
+    for (size_t i = 0; i < u->implicit_count; i++) {
+        free((char *)u->implicit[i].slot); u->implicit[i].slot = next.implicit[i].slot;
+    }
+    u->borrowed = 1;
 }
 
 static int pl_collect(pl_work *w)
