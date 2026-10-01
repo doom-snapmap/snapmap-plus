@@ -416,6 +416,114 @@ static void streamed_suppliers(const sh_package_sources *sources)
     sh_package_link_output_free(&out); free(body); sh_package_file_release(resources[1].cache_file);
 }
 
+/* One captured member shared by two units whose bound dependencies differ
+ * still makes two logical variants: both rocks hold the same captured object
+ * and reach exact verification, but one binds a red stone and the other a
+ * green one. With equal stones they are one variant. */
+static void shared_member_variants(const sh_package_sources *sources)
+{
+    static const char rock_text[] = "{ edit = { material = \"materials/stone\"; health = 10; } }";
+    static const char *colors[] = {"{ color {1,0,0,1} }", "{ color {0,1,0,1} }"};
+    sh_compiled_resource rock = {0}, stones[2] = {{0}};
+    rock.engine_path = "generated/decls/entitydef/props/rock.decl"; rock.type = "entitydef";
+    rock.name = "props/rock"; rock.source = SIZE_MAX;
+    rock.body = (unsigned char *)rock_text; rock.body_length = strlen(rock_text);
+    sh_package_compilation scopes[2] = {{0}};
+    for (size_t s = 0; s < 2; s++) {
+        stones[s].engine_path = "generated/decls/material/materials/stone.decl"; stones[s].type = "material";
+        stones[s].name = "materials/stone"; stones[s].source = SIZE_MAX;
+        stones[s].body = (unsigned char *)colors[s]; stones[s].body_length = strlen(colors[s]);
+        scopes[s].sources = sources;
+    }
+    const sh_compiled_resource *files[] = {&rock, stones, stones + 1};
+    fixture f = {0}; f.count = 4;
+    for (size_t s = 0; s < 2; s++) {
+        f.units[s * 2] = (sh_package_link_unit){"entitydef", "props/rock", scopes + s, files, 1};
+        f.units[s * 2 + 1] = (sh_package_link_unit){"material", "materials/stone", scopes + s, files + 1 + s, 1};
+    }
+    sh_package_link_adapter adapter = {&f, resolve, bind_file, assign};
+    sh_package_link_output out = {0};
+    char error[1024], counters[1024];
+    for (int equal = 0; equal < 2; equal++) {
+        unsigned long long pairs = 0, shared = 0;
+        if (equal) { stones[1].body = (unsigned char *)colors[0]; stones[1].body_length = strlen(colors[0]); }
+        adapter.reuse = sh_package_link_reuse_open(f.count); assert(adapter.reuse);
+        int ok = sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &out, error, sizeof(error));
+        if (!ok) fprintf(stderr, "shared member variants: %s\n", error);
+        const char *at = strstr(sh_package_link_reuse_counters(adapter.reuse, counters, sizeof(counters)),
+            "exact verification: ");
+        assert(ok && at && sscanf(at, "exact verification: %llu pairs, %llu shared members", &pairs, &shared) == 2);
+        /* The rocks always reach exact verification through the shared
+         * object; equal stones are compared as two objects. */
+        assert(shared == 1 && pairs == (equal ? 2u : 1u));
+        if (equal) assert(out.classes.nodes[0] == out.classes.nodes[2] && out.classes.nodes[1] == out.classes.nodes[3]);
+        else assert(out.classes.nodes[0] != out.classes.nodes[2] && out.classes.nodes[1] != out.classes.nodes[3] &&
+            strcmp(out.names[out.classes.nodes[0]], out.names[out.classes.nodes[2]]));
+        sh_package_link_reuse_close(adapter.reuse); adapter.reuse = NULL;
+        sh_package_link_output_free(&out);
+    }
+}
+
+/* A descriptor without its own bytes is read through each unit's compilation,
+ * so in two compilations it is two suppliers: under a forced fingerprint
+ * collision exact verification still compares their bytes. Within one
+ * compilation it is one supplier and certifies without a second read. */
+static const sh_package_compilation *claimed_supplier;
+static int claimed_identity(void *context, size_t unit, const sh_compiled_resource *file,
+    sh_package_file_identity *out, char *error, size_t capacity)
+{
+    (void)context; (void)unit;
+    return sh_package_compilation_identity(claimed_supplier, file, out, error, capacity);
+}
+static int no_sites(void *context, size_t unit, const sh_compiled_resource *file,
+    const sh_package_link_edge **sites, size_t *count)
+{
+    (void)context; (void)unit; (void)file; *sites = NULL; *count = 0; return 1;
+}
+static void foreign_suppliers(void)
+{
+    const char *bodies[] = {"AAAA", "BBBB"};
+    char base[MAX_PATH + 32], relative[128], error[1024], counters[1024];
+    sh_package_sources *sources[2];
+    sh_package_compilation compilations[2] = {{0}};
+    size_t index[2] = {SIZE_MAX, SIZE_MAX};
+    for (size_t s = 0; s < 2; s++) {
+        snprintf(relative, sizeof(relative), "suppliers/%c/overrides/p/package.json", 'a' + (int)s);
+        create(relative, "{\"id\":\"p\",\"name\":\"P\"}");
+        snprintf(relative, sizeof(relative), "suppliers/%c/overrides/p/x.bin", 'a' + (int)s);
+        create(relative, bodies[s]);
+        snprintf(base, sizeof(base), "%s/suppliers/%c", root, 'a' + (int)s);
+        sources[s] = sh_package_sources_scan(base, error, sizeof(error)); assert(sources[s]);
+        for (size_t i = 0; i < sources[s]->file_count; i++)
+            if (!strcmp(sources[s]->files[i].relative, "x.bin")) index[s] = i;
+        compilations[s].sources = sources[s];
+    }
+    assert(index[0] != SIZE_MAX && index[0] == index[1]);
+    sh_compiled_resource resource = {0};
+    resource.engine_path = "shader/x.bin"; resource.source = index[0];
+    const sh_compiled_resource *files[] = {&resource};
+    fixture f = {0}; f.count = 2;
+    sh_package_link_adapter adapter = {&f, resolve, bind_file, assign};
+    adapter.sites = no_sites; adapter.identity = claimed_identity;
+    sh_package_link_output out = {0};
+    claimed_supplier = compilations;
+    for (int same = 0; same < 2; same++) {
+        unsigned long long pairs = 0, shared = 0;
+        for (size_t i = 0; i < 2; i++)
+            f.units[i] = (sh_package_link_unit){"renderprog", "shared", compilations + (same ? 0 : i), files, 1};
+        adapter.reuse = sh_package_link_reuse_open(2); assert(adapter.reuse);
+        int ok = sh_package_link(sources[0], f.units, 2, &adapter, NULL, NULL, &out, error, sizeof(error));
+        const char *at = strstr(sh_package_link_reuse_counters(adapter.reuse, counters, sizeof(counters)),
+            "exact verification: ");
+        assert(at && sscanf(at, "exact verification: %llu pairs, %llu shared members", &pairs, &shared) == 2);
+        if (same) assert(ok && out.classes.count == 1 && pairs >= 1 && shared >= 1);
+        else assert(!ok && strstr(error, "exact supplier bytes differ") && pairs == 1 && !shared);
+        sh_package_link_reuse_close(adapter.reuse); adapter.reuse = NULL;
+        sh_package_link_output_free(&out);
+    }
+    for (size_t s = 0; s < 2; s++) sh_package_sources_free(sources[s]);
+}
+
 static void original_aliases(const sh_package_sources *sources)
 {
     sh_compiled_resource resources[2] = {0};
@@ -820,6 +928,31 @@ static void conditional_bindings(const sh_package_sources *sources)
     assert(sh_package_link(sources, c.f.units, c.f.count, &adapter, NULL, NULL, &out, error, sizeof(error)));
     assert(conditional_class(&out, 0) == conditional_class(&out, 4) && !strcmp(conditional_name(&out, 4), "b"));
     sh_package_link_reuse_close(adapter.reuse); adapter.reuse = NULL;
+    /* Scopes holding their members as the same captured objects certify them
+     * without reading those bytes twice, with the classes and names a byte
+     * comparison of separate objects gives. */
+    {
+        size_t compared[8]; char *compared_names[8], counters[1024];
+        unsigned long long pairs = 0, shared = 0;
+        conditional_setup(&c, sources);
+        adapter.context = &c.f;
+        assert(sh_package_link(sources, c.f.units, c.f.count, &adapter, NULL, NULL, &out, error, sizeof(error)));
+        for (size_t i = 0; i < 8; i++) {
+            compared[i] = conditional_class(&out, i);
+            compared_names[i] = _strdup(conditional_name(&out, i)); assert(compared_names[i]);
+        }
+        for (size_t i = 4; i < 8; i++) c.files[i] = c.parts + i - 4;
+        adapter.reuse = sh_package_link_reuse_open(c.f.count); assert(adapter.reuse);
+        assert(sh_package_link(sources, c.f.units, c.f.count, &adapter, NULL, NULL, &out, error, sizeof(error)));
+        for (size_t i = 0; i < 8; i++)
+            assert(conditional_class(&out, i) == compared[i] && !strcmp(conditional_name(&out, i), compared_names[i]));
+        const char *at = strstr(sh_package_link_reuse_counters(adapter.reuse, counters, sizeof(counters)),
+            "exact verification: ");
+        assert(at && sscanf(at, "exact verification: %llu pairs, %llu shared members", &pairs, &shared) == 2);
+        assert(pairs && shared);
+        sh_package_link_reuse_close(adapter.reuse); adapter.reuse = NULL;
+        for (size_t i = 0; i < 8; i++) free(compared_names[i]);
+    }
     /* A slot is conditional or implicit, never both. */
     conditional_setup(&c, sources);
     adapter.context = &c.f;
@@ -1071,6 +1204,8 @@ int main(void)
     repeated_native_bindings(sources, &f, entities, materials);
     shared_replacement(sources, &f, materials);
     streamed_suppliers(sources);
+    shared_member_variants(sources);
+    foreign_suppliers();
     repeated_field_slots();
     campaign_originals(sources);
     assert(sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &out, error, sizeof(error)));

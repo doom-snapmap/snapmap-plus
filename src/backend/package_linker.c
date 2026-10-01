@@ -143,6 +143,9 @@ struct sh_package_link_reuse {
      * final link's member, history, assignment and projection steps. */
     struct { size_t units, restored; unsigned long long collect_us, partition_us; } passes[16];
     size_t pass_count;
+    /* Exact verification of equal fingerprints: pairs compared, members held
+     * as one captured object by both units, bytes compared, time. */
+    unsigned long long verify_pairs, verify_shared, verify_bytes, verify_us;
     unsigned long long link_us[4];
     int linked;
 };
@@ -828,15 +831,26 @@ done:
     return equal;
 }
 
+static unsigned long long pl_now_us(void);
+static int pl_verify_members(pl_work *w, size_t left, size_t right);
 /* Fingerprints select comparison candidates; only exact bytes certify sharing.
  * Streams retain their independent positions and hold the immutable source
  * handles throughout the comparison. No whole opaque file is allocated here. */
 static int pl_verify_equal(void *context, size_t left, size_t right, char *error, size_t capacity)
 {
     pl_work *w = context;
-    unsigned char a[16384], b[16384];
+    sh_package_link_reuse *reuse = w->adapter->reuse;
     (void)error; (void)capacity;
-    if (pl_reuse_proven(w->adapter->reuse, left, right)) return 1;
+    if (pl_reuse_proven(reuse, left, right)) return 1;
+    unsigned long long began = reuse ? pl_now_us() : 0;
+    int ok = pl_verify_members(w, left, right);
+    if (reuse) { reuse->verify_pairs++; reuse->verify_us += pl_now_us() - began; }
+    return ok;
+}
+static int pl_verify_members(pl_work *w, size_t left, size_t right)
+{
+    unsigned char a[16384], b[16384];
+    sh_package_link_reuse *reuse = w->adapter->reuse;
     if (w->units[left].file_count != w->units[right].file_count ||
         w->units[left].witness_count != w->units[right].witness_count)
         return pl_fail(w, "resource fingerprint collision: physical file sets differ");
@@ -854,6 +868,18 @@ static int pl_verify_equal(void *context, size_t left, size_t right, char *error
             return pl_fail(w, "resource fingerprint collision: physical paths differ");
         if (!witness && (strcmp(x->family, y->family) || strcmp(x->name, y->name)))
             return pl_fail(w, "resource fingerprint collision: native member identities differ");
+        /* Both units hold this member as one captured resource object with
+         * one captured identity, read through the same supplier: comparing
+         * it with itself is reflexive, so only its availability and captured
+         * length are checked. */
+        if (x->resource == y->resource && x->identity.length == y->identity.length &&
+            !memcmp(x->identity.digest, y->identity.digest, sizeof(x->identity.digest)) &&
+            (x->resource->body || x->resource->cache_file ||
+             w->units[left].compilation == w->units[right].compilation)) {
+            if (!pl_input_open_resource(w, left, x, &first)) goto done;
+            if (reuse) reuse->verify_shared++;
+            ok = 1; goto done;
+        }
         if (!pl_input_open_resource(w, left, x, &first) || !pl_input_open_resource(w, right, y, &second)) goto done;
         if (first.length != second.length) {
             pl_fail(w, "resource fingerprint collision: exact supplier lengths differ"); goto done;
@@ -867,6 +893,7 @@ static int pl_verify_equal(void *context, size_t left, size_t right, char *error
             if (memcmp(a, b, chunk)) {
                 pl_fail(w, "resource fingerprint collision: exact supplier bytes differ"); goto done;
             }
+            if (reuse) reuse->verify_bytes += chunk;
         }
         if ((first.stream && (fgetc(first.stream) != EOF || ferror(first.stream))) ||
             (second.stream && (fgetc(second.stream) != EOF || ferror(second.stream)))) {
@@ -878,7 +905,7 @@ done:
         if (second.stream) fclose(second.stream);
         if (!ok) return 0;
     }
-    pl_reuse_prove(w->adapter->reuse, left, right);
+    pl_reuse_prove(reuse, left, right);
     return 1;
 }
 
@@ -2020,6 +2047,10 @@ const char *sh_package_link_reuse_counters(const sh_package_link_reuse *reuse, c
         n = snprintf(out + used, capacity - used, "%s %zu units %zu restored, collect %llu ms, partition %llu ms",
             i ? ";" : ":", reuse->passes[i].units, reuse->passes[i].restored,
             reuse->passes[i].collect_us / 1000u, reuse->passes[i].partition_us / 1000u);
+    if (n > 0 && used < capacity)
+        snprintf(out + used, capacity - used, "; exact verification: %llu pairs, %llu shared members, "
+            "%llu MB compared, %llu ms", reuse->verify_pairs, reuse->verify_shared,
+            reuse->verify_bytes >> 20, reuse->verify_us / 1000u);
     return out;
 }
 const char *sh_package_link_reuse_link_steps(const sh_package_link_reuse *reuse, char *out, size_t capacity)
