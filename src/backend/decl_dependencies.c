@@ -211,6 +211,9 @@ static int dd_run(dd_walk *walk)
         case SH_DECL_VALUE_POLYMORPHIC: {
             sh_decl_polymorphic_state state;
             const char *reason;
+            /* Skipped by the native reader: whatever the destination held came
+             * from earlier text or a parent, whose own walk reports it. */
+            if (shape.null_keeps && sh_decl_polymorphic_unchanged(item.node)) break;
             if (sh_decl_polymorphic_read(item.node, shape.element, walk->schema, &state, &reason) != 1)
                 dd_gap(walk, item.path, item.type, reason);
             else if (state.object) ok = dd_push(walk, state.object, state.type, item.path, "object");

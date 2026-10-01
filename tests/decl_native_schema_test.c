@@ -336,6 +336,7 @@ static void polymorphic_types(fixture *f)
     assert(native && schema->dynamic_type);
     assert(schema->describe(schema->context, wrapper, &shape));
     assert(shape.kind == SH_DECL_VALUE_POLYMORPHIC && !strcmp(shape.element.name, "Base") && !*shape.element.ops);
+    assert(shape.null_keeps);
     assert(schema->dynamic_type(schema->context, shape.element, "Entity suffix", 6, &selected) == 1);
     assert(!strcmp(selected.name, "Entity") && !*selected.ops);
     assert(schema->dynamic_type(schema->context, shape.element, "Base", 4, &selected) == 1);

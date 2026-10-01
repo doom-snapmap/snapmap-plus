@@ -352,7 +352,9 @@ static int dn_describe(void *context, sh_decl_value_type value, sh_decl_value_sh
         else if (s->polymorphic_reader && type->object_reader == s->polymorphic_reader) {
             if (!dn_load(s, type) || !type->element.name || !*type->element.name ||
                 !type->element.ops || *type->element.ops || !dn_find(&s->classes, type->element.name)) return 0;
-            shape->kind = SH_DECL_VALUE_POLYMORPHIC; shape->element = type->element;
+            /* This reader leaves the destination unchanged for NULL forms
+             * (decl_polymorphic.h, sh_decl_polymorphic_unchanged). */
+            shape->kind = SH_DECL_VALUE_POLYMORPHIC; shape->element = type->element; shape->null_keeps = 1;
         }
         else if (type->object_reader && (type->object_reader == s->list_reader || type->object_reader == s->static_list_reader)) {
             if (!dn_load(s, type) || !type->element.name || !*type->element.name) return 0;

@@ -23,6 +23,7 @@ typedef struct sh_decl_value_shape {
     const char *count_key;      /* e.g. num; NULL for a fixed array */
     size_t count;
     int count_known;
+    int null_keeps;             /* polymorphic: the reader skips NULL forms without touching the destination */
 } sh_decl_value_shape;
 
 /* A verified reference location, borrowed for the duration of the walk. A
