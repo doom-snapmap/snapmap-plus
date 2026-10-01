@@ -34,17 +34,20 @@ static int lg_edge_order(const void *left, const void *right)
     return strcmp(a->slot, b->slot);
 }
 
+/* Equal pointers are equal strings: shared (interned) slots and names skip
+ * the character comparison; the order is strcmp's either way. */
+static int lg_text_order(const char *a, const char *b) { return a == b ? 0 : strcmp(a, b); }
 static int lg_shape_order(const void *left, const void *right)
 {
     const lg_item *a = left, *b = right;
-    int cmp = strcmp(a->source->family, b->source->family);
+    int cmp = lg_text_order(a->source->family, b->source->family);
     size_t i;
-    if (!cmp) cmp = strcmp(a->source->path, b->source->path);
+    if (!cmp) cmp = lg_text_order(a->source->path, b->source->path);
     if (!cmp) cmp = a->source->length < b->source->length ? -1 : a->source->length > b->source->length;
     if (!cmp) cmp = memcmp(a->source->content, b->source->content, 32);
     if (!cmp) cmp = memcmp(a->source->semantics, b->source->semantics, 32);
     if (!cmp) cmp = lg_size(a->source->edge_count, b->source->edge_count);
-    for (i = 0; !cmp && i < a->source->edge_count; i++) cmp = strcmp(a->edges[i].slot, b->edges[i].slot);
+    for (i = 0; !cmp && i < a->source->edge_count; i++) cmp = lg_text_order(a->edges[i].slot, b->edges[i].slot);
     return cmp;
 }
 
@@ -132,24 +135,38 @@ static void lg_enqueue(lg_work *work, size_t group)
     }
 }
 
-/* Restore shape order to an earlier order in which some shapes changed: drop
- * both items of every descent below the kept prefix (a monotone stack), sort
+/* Put an earlier order (placed, a permutation) back in shape order: keep a
+ * monotone prefix, dropping both items of every descent below it, then sort
  * the few dropped items and merge them back by binary search. The result is
  * in shape order like a full sort; only the arbitrary order of equal shapes
- * may differ. 0, with items untouched, when too many moved or memory ran out:
- * the caller sorts everything. */
-static int lg_repair(lg_item *items, const lg_item *placed, size_t count)
+ * may differ. equal[i] (i > 0) records whether items i - 1 and i have one
+ * shape, reusing the comparison already made wherever two kept items stay
+ * adjacent. 2: already in order; 1: repaired; 0, with items untouched, when
+ * too many moved or memory ran out, and the caller sorts everything. */
+static void lg_emit(const lg_item *items, size_t at, size_t from, size_t previous,
+    const unsigned char *same, unsigned char *equal)
 {
-    size_t *kept = lg_allocate(count, sizeof(*kept)), top = 0, dropped = 0, i, r, k = 0, at = 0;
-    unsigned char *drop = lg_allocate(count, 1);
+    if (at) equal[at] = (unsigned char)(from != SIZE_MAX && previous != SIZE_MAX && from == previous + 1 ?
+        same[from] : !lg_shape_order(&items[at - 1], &items[at]));
+}
+static int lg_repair(lg_item *items, const lg_item *placed, size_t count, unsigned char *equal)
+{
+    size_t *kept = lg_allocate(count, sizeof(*kept)), top = 0, dropped = 0, i, r, k = 0, at = 0, previous = SIZE_MAX;
+    unsigned char *drop = lg_allocate(count, 1), *same = lg_allocate(count, 1); /* same[t]: kept t - 1 and t */
     lg_item *moved = NULL;
-    int ok = 0;
-    if (!kept || !drop) goto done;
+    int status = 0;
+    if (!kept || !drop || !same) goto done;
     for (i = 0; i < count; i++) {
-        if (top && lg_shape_order(&placed[kept[top - 1]], &placed[i]) > 0) {
+        int cmp = top ? lg_shape_order(&placed[kept[top - 1]], &placed[i]) : -1;
+        if (cmp > 0) {
             drop[kept[--top]] = 1; drop[i] = 1; dropped += 2;
             if (dropped > count / 8) goto done;
-        } else kept[top++] = i;
+        } else { same[top] = (unsigned char)!cmp; kept[top++] = i; }
+    }
+    if (!dropped) {
+        memcpy(items, placed, count * sizeof(*placed));
+        for (i = 1; i < count; i++) equal[i] = same[i];
+        status = 2; goto done;
     }
     if (!(moved = lg_allocate(dropped, sizeof(*moved)))) goto done;
     for (i = 0, r = 0; i < count; i++) if (drop[i]) moved[r++] = placed[i];
@@ -160,14 +177,18 @@ static int lg_repair(lg_item *items, const lg_item *placed, size_t count)
             size_t mid = lo + (hi - lo) / 2;
             if (lg_shape_order(&placed[kept[mid]], &moved[r]) <= 0) lo = mid + 1; else hi = mid;
         }
-        while (k < lo) items[at++] = placed[kept[k++]];
-        items[at++] = moved[r];
+        for (; k < lo; k++, at++) {
+            items[at] = placed[kept[k]]; lg_emit(items, at, k, previous, same, equal); previous = k;
+        }
+        items[at] = moved[r]; lg_emit(items, at, SIZE_MAX, previous, same, equal); previous = SIZE_MAX; at++;
     }
-    while (k < top) items[at++] = placed[kept[k++]];
-    ok = 1;
+    for (; k < top; k++, at++) {
+        items[at] = placed[kept[k]]; lg_emit(items, at, k, previous, same, equal); previous = k;
+    }
+    status = 1;
 done:
-    free(kept); free(drop); free(moved);
-    return ok;
+    free(kept); free(drop); free(same); free(moved);
+    return status;
 }
 
 static int lg_prepare(lg_work *work, const sh_package_link_node *nodes, size_t count,
@@ -229,14 +250,13 @@ static int lg_prepare(lg_work *work, const sh_package_link_node *nodes, size_t c
     for (i = 0; i < count; i++) for (j = 0; j < nodes[i].edge_count; j++)
         work->incoming[cursor[nodes[i].edges[j].target]++] = i;
     free(cursor);
-    int sorted = 0, repaired = 0;
+    int ordered = 0;
     /* equal[i]: items i - 1 and i have one shape (known when an earlier order
-     * was reused unchanged; otherwise grouping compares). */
+     * was reused or repaired; otherwise grouping compares). */
     unsigned char *equal = NULL;
     if (order && order->items && order->count == count && count > 1) {
-        /* Place items in the earlier order when it is a permutation, then
-         * keep it if every adjacent pair is still in shape order, or repair
-         * it when a few shapes moved. */
+        /* Place items in the earlier order when it is a permutation, then keep
+         * it as it is, or repair it when a few shapes moved. */
         lg_item *placed = lg_allocate(count, sizeof(*placed));
         unsigned char *seen = lg_allocate(count, 1);
         equal = lg_allocate(count, 1);
@@ -247,18 +267,12 @@ static int lg_prepare(lg_work *work, const sh_package_link_node *nodes, size_t c
                 if (index >= count || seen[index]) permutation = 0;
                 else { seen[index] = 1; placed[i] = work->items[index]; }
             }
-            sorted = permutation;
-            for (i = 1; sorted && i < count; i++) {
-                int cmp = lg_shape_order(&placed[i - 1], &placed[i]);
-                if (cmp > 0) sorted = 0; else equal[i] = !cmp;
-            }
-            if (sorted) memcpy(work->items, placed, count * sizeof(*placed));
-            else if (permutation) repaired = lg_repair(work->items, placed, count);
+            if (permutation) ordered = lg_repair(work->items, placed, count, equal) != 0;
         }
         free(placed); free(seen);
-        if (!sorted) { free(equal); equal = NULL; }
+        if (!ordered) { free(equal); equal = NULL; }
     }
-    if (count > 1 && !sorted && !repaired) qsort(work->items, count, sizeof(*work->items), lg_shape_order);
+    if (count > 1 && !ordered) qsort(work->items, count, sizeof(*work->items), lg_shape_order);
     if (order) {
         size_t *items = order->count == count && order->items ? order->items :
             lg_allocate(count, sizeof(*items));
