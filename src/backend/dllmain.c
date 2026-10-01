@@ -297,8 +297,8 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
 
         /* Guard stale event-wire lists and interactables whose subsystem is absent.
          * Their implementations define the engine-layout checks and recovery limits. */
-        sh_evwire_guard_install(g_doom_base);
-        sh_interactable_guard_install(g_doom_base);
+        sh_evwire_guard_install(g_doom_base, results, db);
+        sh_interactable_guard_install(g_doom_base, results, db);
         sh_serialized_entities_guard_install(results, db);
 
         void *get_decls = (void *)sig_addr_by_name(results, db, "GetDeclsOfType");
