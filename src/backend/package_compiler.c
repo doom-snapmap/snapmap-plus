@@ -4341,21 +4341,27 @@ void sh_package_compilation_free(sh_package_compilation *compilation)
     free(compilation->resources); free(compilation);
 }
 
-const sh_compiled_resource *sh_package_compilation_find(const sh_package_compilation *compilation,
-                                                        const char *engine_path)
+const sh_compiled_resource *sh_package_compilation_find_canonical(const sh_package_compilation *compilation,
+                                                                  const char *key)
 {
     size_t low = 0, high;
-    const sh_compiled_resource *found = NULL;
-    char *key = compilation && compilation->canonical_path ? compilation->canonical_path(engine_path) :
-        sh_package_engine_path(engine_path);
-    if (!compilation || !key) { free(key); return NULL; }
+    if (!compilation || !key) return NULL;
     high = compilation->resource_count;
     while (low < high) {
         size_t mid = low + (high - low) / 2u;
         int compare = strcmp(key, compilation->resources[mid].engine_path);
-        if (!compare) { found = &compilation->resources[mid]; break; }
+        if (!compare) return &compilation->resources[mid];
         if (compare < 0) high = mid; else low = mid + 1u;
     }
+    return NULL;
+}
+const sh_compiled_resource *sh_package_compilation_find(const sh_package_compilation *compilation,
+                                                        const char *engine_path)
+{
+    const sh_compiled_resource *found;
+    char *key = compilation && compilation->canonical_path ? compilation->canonical_path(engine_path) :
+        sh_package_engine_path(engine_path);
+    found = sh_package_compilation_find_canonical(compilation, key);
     free(key); return found;
 }
 

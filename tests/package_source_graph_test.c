@@ -850,6 +850,52 @@ static void test_atlas_sources(fixture *native, sh_decl_registry_source registry
     }
     sh_package_link_output_free(&out); sh_package_source_link_close(source);
 }
+/* Discovery keeps each path's canonical key per scope canonicalizer for the
+ * capture: a scope whose canonicalizer aliases the atlas image selects its own
+ * aliased supply, and the other scope its plain one, whichever comes first. */
+static char *aliased_atlas(const char *path)
+{
+    char *key = sh_package_engine_path(path);
+    if (key && !strcmp(key, "generated/transsortatlas/textures/atlas/private.bimage")) {
+        free(key); key = _strdup("generated/transsortatlas/textures/atlas/aliased.bimage");
+    }
+    return key;
+}
+static void test_canonicalizer_scopes(fixture *native, sh_decl_registry_source registry)
+{
+    const char *material = "{ transAtlasMap \"textures/atlas/private.tga\"\n }";
+    for (size_t aliased = 0; aliased < 2; aliased++) {
+        sh_compiled_resource files[2][2] = {0}; sh_package_compilation compiled[2] = {0};
+        const sh_package_compilation *scopes[] = {compiled, compiled + 1};
+        source_link_fixture f = {0}; f.native = native; f.certificate = 1;
+        sh_package_source_link_native admission = {0}; admission.context = &f; admission.semantics = link_original_binding;
+        char error[1024];
+        for (size_t i = 0; i < 2; i++) {
+            files[i][0].engine_path = "generated/decls/material/atlas-fixture.decl";
+            files[i][0].type = "material"; files[i][0].name = "atlas-fixture";
+            files[i][0].body = (unsigned char *)material; files[i][0].body_length = strlen(material);
+            files[i][1].engine_path = i == aliased ? "generated/transsortatlas/textures/atlas/aliased.bimage" :
+                "generated/transsortatlas/textures/atlas/private.bimage";
+            files[i][1].body = (unsigned char *)"red atlas"; files[i][1].body_length = 9;
+            files[i][0].source = files[i][1].source = SIZE_MAX;
+            compiled[i].resources = files[i]; compiled[i].resource_count = 2;
+        }
+        compiled[aliased].canonical_path = aliased_atlas;
+        sh_package_source_link *source = sh_package_source_link_open(scopes, 2, NULL,
+            link_original, &f, registry, (uintptr_t)native->reflection, &admission, error, sizeof(error));
+        if (!source) fprintf(stderr, "canonicalizer scopes: %s\n", error);
+        assert(source);
+        f.inputs = sh_package_source_link_inputs(source);
+        for (size_t i = 0; i < 2; i++) {
+            int selected = 0;
+            for (size_t u = 0; u < f.inputs->count; u++) if (f.inputs->scopes[u] == i)
+                for (size_t k = 0; k < f.inputs->units[u].file_count; k++)
+                    selected |= f.inputs->units[u].files[k] == &files[i][1];
+            assert(selected);
+        }
+        sh_package_source_link_close(source);
+    }
+}
 /* Synthetic aliases exercise the production readers/linker, not live native
  * alias admission. Runtime ABI admission requires the engine adapter. */
 static int link_assign(void *context, size_t index, const unsigned char identity[32], int original_binding,
@@ -9266,6 +9312,7 @@ int main(void)
     test_late_required_resources(&f, registry);
     test_source_link(&f, registry);
     test_atlas_sources(&f, registry);
+    test_canonicalizer_scopes(&f, registry);
     test_composed_stock_default(&f, registry);
     test_campaign_original_binding(&f, registry);
     test_implicit_source_link(&f, registry);
