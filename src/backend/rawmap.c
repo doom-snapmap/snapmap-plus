@@ -234,7 +234,7 @@ static int mpkg_gate_guarded(const char *json)
         if (len == 0) return 1;
         return sh_mpkg_gate(json, len);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
-        sh_mpkg_report_error("Map load failed: package verification could not finish. Check the package diagnostic and try again.");
+        sh_mpkg_report_error(SH_MPKG_PROBLEM_OPEN, "Map load failed: package verification could not finish. Check the package diagnostic and try again.");
         return 0;
     }
 }
@@ -465,7 +465,7 @@ static int select_map_policy_owned(const char *json, size_t length,
         strcpy_s(error, sizeof(error), "map package policy selection raised an exception");
     }
     sh_package_references_free(&references);
-    if (!ok) sh_mpkg_report_error(error[0] ? error : "The map's package policy could not be activated.");
+    if (!ok) sh_mpkg_report_error(SH_MPKG_PROBLEM_CONTENT, error[0] ? error : "The map's package policy could not be activated.");
     return ok;
 }
 
@@ -515,10 +515,14 @@ static int attach_loaded_occurrences(const char *carried, const char *native_jso
     bound = sh_package_runtime_capture_document(NULL, present ? &saved : NULL, NULL, 0,
         native_json, length, &bound_length, &ownership, NULL, NULL, error, sizeof(error));
     if (!bound || bound_length != length || memcmp(bound, native_json, length)) goto done;
+    /* Capture rebuilds ownership; the map's recorded exact rows return by owner. */
+    if (present && ownership && !sh_package_occurrence_carry_rows(ownership, &saved)) {
+        snprintf(error, sizeof(error), "The map's recorded exact editor rows could not be restored."); goto done;
+    }
     ok = sh_package_editor_attach(SH_PACKAGE_EDITOR_MAP, map, ownership, error, sizeof(error)) &&
         select_map_policy_owned(native_json, length, ownership);
 done:
-    if (!ok) sh_mpkg_report_error(error[0] ? error : "Map source ownership could not be attached before native construction.");
+    if (!ok) sh_mpkg_report_error(SH_MPKG_PROBLEM_OPEN, error[0] ? error : "Map source ownership could not be attached before native construction.");
     free(bound); sh_package_occurrence_release(ownership); sh_package_provenance_free(&saved); return ok;
 }
 
@@ -1369,7 +1373,7 @@ done:;
         if (!result) result = 1;
         sh_rawmap_map_context_poll();
     }
-    if (error[0]) sh_mpkg_report_error(error);
+    if (error[0]) sh_mpkg_report_error(SH_MPKG_PROBLEM_OPEN, error);
     return result;
 }
 
@@ -1421,7 +1425,7 @@ void sh_rawmap_pending_map_poll(void)
         }
         g_preflight_busy = 0;
         if (g_pending_map.state == 3) preflight_pending_discard();
-        if (error[0]) sh_mpkg_report_error(error);
+        if (error[0]) sh_mpkg_report_error(SH_MPKG_PROBLEM_OPEN, error);
         return;
     }
     if (!sh_decl_server_map_boundary_safe()) {
@@ -1469,6 +1473,8 @@ int sh_rawmap_transition_activate(void)
             !sh_map_transition_at_boundary()) return 0;
         if (!sh_decl_server_activate_occurrences(NULL)) {
             sh_package_runtime_error(g_transition_error, sizeof(g_transition_error));
+            if (!g_transition_error[0]) strcpy_s(g_transition_error, sizeof(g_transition_error),
+                "The map's packages could not activate. The map load was canceled.");
             return 0;
         }
         g_retained_transition = 2;
@@ -1528,14 +1534,14 @@ void sh_rawmap_transition_finished(int loaded)
         if (GetCurrentThreadId() != g_retained_transition_thread) return;
         g_retained_transition = 0; g_retained_transition_thread = 0;
         g_preflight_busy = g_transition_previous_busy;
-        if (!loaded && g_transition_error[0]) sh_mpkg_report_error(g_transition_error);
+        if (!loaded && g_transition_error[0]) sh_mpkg_report_error(SH_MPKG_PROBLEM_OPEN, g_transition_error);
         return;
     }
     if (g_pending_map.state != 5 || GetCurrentThreadId() != g_pending_map.thread) return;
     g_pending_map.state = 3;
     g_preflight_busy = g_transition_previous_busy;
     if (!g_preflight_busy) preflight_pending_discard();
-    if (!loaded) sh_mpkg_report_error(g_transition_error[0] ? g_transition_error :
+    if (!loaded) sh_mpkg_report_error(SH_MPKG_PROBLEM_OPEN, g_transition_error[0] ? g_transition_error :
         "The map load did not complete. Its pending installation was canceled.");
 }
 
@@ -1617,7 +1623,7 @@ done:;
     sh_package_map_plan_free(plan); sh_package_missing_free(&missing);
     sh_mpkg_context_retire(&sources);
     g_preflight_busy = 0;
-    if (accepted && error[0]) sh_mpkg_report_error(error);
+    if (accepted && error[0]) sh_mpkg_report_error(SH_MPKG_PROBLEM_OPEN, error);
     return accepted;
 }
 int sh_rawmap_preflight_request(const char *json, size_t length,
@@ -1654,7 +1660,7 @@ static int preflight_load(void *editor, const void *save_name)
         return g_preflight_orig(editor, save_name);
     if (!previous_map) sh_rawmap_map_context_poll();
     if (!previous_map && g_map_context) {
-        sh_mpkg_report_error("The previous map's resources could not be retired. Check the package log."); return 0;
+        sh_mpkg_report_error(SH_MPKG_PROBLEM_OPEN, "The previous map's resources could not be retired. Check the package log."); return 0;
     }
     g_preflight_busy = 1;
     __try {
@@ -1723,7 +1729,7 @@ done:;
     sh_package_missing_free(&missing);
     sh_mpkg_context_retire(&sources);
     g_preflight_busy = 0;
-    if (error[0]) sh_mpkg_report_error(error);
+    if (error[0]) sh_mpkg_report_error(SH_MPKG_PROBLEM_OPEN, error);
     if (enter && !error[0]) result = preflight_enter_ready();
     return result;
 }
@@ -1814,7 +1820,7 @@ static int capture_save_ownership(const void *map, const void *out_idstr, void *
     if (!next) goto failed;
     sh_package_occurrence_release(*ownership); *ownership = next; return 1;
 failed:
-    sh_mpkg_report_error(error[0] ? error : "Map source ownership could not be read before saving."); return 0;
+    sh_mpkg_report_error(SH_MPKG_PROBLEM_SAVE, error[0] ? error : "Map source ownership could not be read before saving."); return 0;
 }
 
 /* Serialize `map` and write it to the rawmap destination. MAIN THREAD ONLY -- it reads engine state
@@ -2046,7 +2052,7 @@ static char *embed_used_packages_owned(const char *json, size_t len,
     if (!bound) {
         *failed = 1;
         snprintf(message, sizeof(message), "Map save failed: %s", error);
-        sh_mpkg_report_error(message); goto done;
+        sh_mpkg_report_error(SH_MPKG_PROBLEM_SAVE, message); goto done;
     }
     const char *native_json = json; size_t native_length = len;
     json = bound; len = cur_len = bound_length;
@@ -2095,7 +2101,7 @@ static char *embed_used_packages_owned(const char *json, size_t len,
             _snprintf_s(line, sizeof line, _TRUNCATE,
                         "MPKG: package '%s' could NOT be packed for this save (%s); the map is "
                         "not saved", label, err);
-            sh_mpkg_report_error(line);
+            sh_mpkg_report_error(SH_MPKG_PROBLEM_SAVE, line);
             *failed = 1; goto done;
         }
         next = sh_mpkg_embed(cur ? cur : json, cur_len, used[i].id,
@@ -2105,7 +2111,7 @@ static char *embed_used_packages_owned(const char *json, size_t len,
             _snprintf_s(line, sizeof line, _TRUNCATE,
                         "MPKG: package '%s' could NOT be embedded in this save (%s); the map is "
                         "not saved", label, err);
-            sh_mpkg_report_error(line);
+            sh_mpkg_report_error(SH_MPKG_PROBLEM_SAVE, line);
             *failed = 1; goto done;
         }
         if (cur) HeapFree(GetProcessHeap(), 0, cur);
@@ -2114,13 +2120,19 @@ static char *embed_used_packages_owned(const char *json, size_t len,
     }
 
     {
+        /* Exact editor rows ride only on uses still owned after native
+         * conversion; a converted or editor-only object stays carrier-free. */
         size_t next_len = 0;
+        sh_package_occurrence_snapshot *final = saved_ownership ? saved_ownership : ownership;
+        if (final && !sh_package_occurrence_carry_document_rows(final, previous)) {
+            sh_mpkg_report_error(SH_MPKG_PROBLEM_SAVE, "Map save failed: exact editor rows could not be recorded.");
+            *failed = 1; goto done;
+        }
         char *next = sh_map_provenance_write(cur ? cur : json, cur_len,
-            sh_package_occurrence_provenance(saved_ownership ? saved_ownership : ownership),
-            &next_len, error, sizeof(error));
+            sh_package_occurrence_provenance(final), &next_len, error, sizeof(error));
         if (!next) {
             snprintf(message, sizeof(message), "Map save failed: %s", error);
-            sh_mpkg_report_error(message); *failed = 1; goto done;
+            sh_mpkg_report_error(SH_MPKG_PROBLEM_SAVE, message); *failed = 1; goto done;
         }
         if (cur) HeapFree(GetProcessHeap(), 0, cur);
         cur = next; cur_len = next_len;
@@ -2199,7 +2211,7 @@ static int activate_play_map(void *snapshot)
     const char *data = NULL;
     int initialized = 0, length = 0, ok = 0, reported = 0;
     if (!snapshot || !g_ser_orig || !g_map_to_json || !g_idstr_ctor || !g_idstr_dtor) {
-        sh_mpkg_report_error("Play could not read the current map's package requirements.");
+        sh_mpkg_report_error(SH_MPKG_PROBLEM_PLAY, "Play could not read the current map's package requirements.");
         return 0;
     }
     __try {
@@ -2227,7 +2239,7 @@ static int activate_play_map(void *snapshot)
         ok = bound && bound_length == (size_t)length && !memcmp(bound, json, bound_length);
         if (ok) { ok = select_map_policy_owned(json, (size_t)length, selected); reported = !ok; }
     }
-    if (!ok && !reported) sh_mpkg_report_error(error[0] ? error : "Play could not read the current map's package requirements.");
+    if (!ok && !reported) sh_mpkg_report_error(SH_MPKG_PROBLEM_PLAY, error[0] ? error : "Play could not read the current map's package requirements.");
     sh_package_occurrence_release(ownership); sh_package_occurrence_release(selected);
     free(bound); free(json);
     return ok;
@@ -2294,7 +2306,7 @@ static int mpkg_embed_on_save(void *out_idstr, const sh_package_occurrence_snaps
     if (!body) return 1;
     if (!replace_out_idstr(out_idstr, body, body_len)) {
         HeapFree(GetProcessHeap(), 0, body);
-        sh_mpkg_report_error("Map save failed: the complete package payload could not be written to the saved map."); return 0;
+        sh_mpkg_report_error(SH_MPKG_PROBLEM_SAVE, "Map save failed: the complete package payload could not be written to the saved map."); return 0;
     }
     HeapFree(GetProcessHeap(), 0, body); return 1;
 }

@@ -19,6 +19,7 @@
 #include "package_keys.h"
 #include "package_spawn_registry.h"
 #include "package_material.h"
+#include "package_movie.h"
 #include "grid_room_asset.h"
 #include "resource_graph.h"
 #include "audio_originals.h"
@@ -45,6 +46,7 @@
 #include "host_image.h"
 #include "package_sound_native.h"
 #include "audio_banks_native.h"
+#include "native_decl_eval.h"
 #endif
 
 static SRWLOCK g_lock = SRWLOCK_INIT;
@@ -59,11 +61,88 @@ typedef struct pr_exclusion {
     unsigned char tree[32]; /* its source fingerprint when judged */
     char *line;             /* the report line it produced */
 } pr_exclusion;
+typedef struct pr_movie_record pr_movie_record;
 /* Ownership changes are serialized by g_refresh_lock. Published pointers and
  * aliases change together under g_lock. A view borrows its catalog through a
  * retained library parent; every compilation/inventory remains independently
  * owned. Readers hold g_lock, not an untracked provider pointer. */
+/* An unchanged original an increment's link bound and then left native
+ * (pr_prune_native): its path, exact bytes and the identities bound to it. */
+typedef struct pr_native_witness {
+    char *path;
+    sh_package_file_identity identity;
+    int identified; /* 0: bytes unavailable here, so never composed */
+    sh_package_native_identity *names;
+    size_t name_count;
+} pr_native_witness;
+static void pr_native_witnesses_free(pr_native_witness *witnesses, size_t count)
+{
+    for (size_t i = 0; witnesses && i < count; i++) {
+        free(witnesses[i].path);
+        for (size_t n = 0; n < witnesses[i].name_count; n++) {
+            free((void *)witnesses[i].names[n].type); free((void *)witnesses[i].names[n].name);
+        }
+        free(witnesses[i].names);
+    }
+    free(witnesses);
+}
+/* An authored input of a row a library left native (pr_prune_native): the
+ * compiled bytes equal the installed SnapMap original, so the game serves them
+ * itself. Path and file identity let sh_package_runtime_inputs account each
+ * such input after its row is gone. Sorted by path, length, then digest. */
+typedef struct pr_unchanged {
+    char *path;
+    uint64_t length;
+    unsigned char digest[32];
+} pr_unchanged;
+static void pr_unchanged_free(pr_unchanged *rows, size_t count)
+{
+    for (size_t i = 0; rows && i < count; i++) free(rows[i].path);
+    free(rows);
+}
+static int pr_unchanged_order(const void *a, const void *b)
+{
+    const pr_unchanged *x = a, *y = b;
+    int order = strcmp(x->path, y->path);
+    if (order) return order;
+    if (x->length != y->length) return x->length < y->length ? -1 : 1;
+    return memcmp(x->digest, y->digest, 32);
+}
+/* An authored shader input the library's source link accounted without
+ * publishing it (sh_package_unpublished_shader), keyed by its package's inventoried
+ * tree and exact file so a view that joins packages keeps it without index
+ * remapping. A dormant pair keeps the binary its checksum matched: a file of
+ * the same package, or the installed original at that path (pair_original).
+ * Sorted by owner, relative path, length, then digest. */
+typedef struct pr_shader_input {
+    unsigned char owner[32];
+    char *relative;
+    uint64_t length;
+    unsigned char digest[32];
+    int reason, renderer;
+    char *pair;
+    int pair_original;
+    uint64_t pair_length;
+    unsigned char pair_digest[32];
+    uint32_t checksum;
+} pr_shader_input;
+static void pr_shader_inputs_free(pr_shader_input *rows, size_t count)
+{
+    for (size_t i = 0; rows && i < count; i++) { free(rows[i].relative); free(rows[i].pair); }
+    free(rows);
+}
+static int pr_shader_input_order(const void *a, const void *b)
+{
+    const pr_shader_input *x = a, *y = b;
+    int order = memcmp(x->owner, y->owner, 32);
+    if (order) return order;
+    if ((order = strcmp(x->relative, y->relative)) != 0) return order;
+    if (x->length != y->length) return x->length < y->length ? -1 : 1;
+    return memcmp(x->digest, y->digest, 32);
+}
 typedef struct pr_provider {
+    pr_native_witness *native_witnesses; /* An increment's (pr_increment_view). */
+    size_t native_witness_count;
     sh_package_sources *sources;
     /* Original metadata for retained serving-only owners. Never author paths
      * to reread: resources and complete bundles already own immutable bytes. */
@@ -93,6 +172,8 @@ typedef struct pr_provider {
 #endif
     uint32_t *unmodified_types;
     size_t unmodified_count;
+    uint32_t *exact_modifier_types;
+    size_t exact_modifier_count;
     sh_package_provenance bindings;
     sh_package_provenance policy_uses; /* explicit active document, not resource supplier union */
     sh_package_provenance historical_bindings; /* Original names before private historical linking. */
@@ -106,10 +187,19 @@ typedef struct pr_provider {
     char *coverage; /* Accounted missing product coverage; packages still served. */
     pr_exclusion *exclusions; /* Rejections decided on a package's own bytes alone. */
     size_t exclusion_count;
+    pr_unchanged *unchanged; /* Authored inputs of rows left native; views keep their bases'. */
+    size_t unchanged_count;
+    int unchanged_lost;      /* The records could not be retained (accounting only). */
+    pr_shader_input *shader_inputs; /* Unpublished shader inputs its link accounted; views keep their bases'. */
+    size_t shader_input_count;
+    int shader_inputs_lost;  /* Some could not be retained (accounting only). */
     /* The installed scan it was prepared from (pr_scan_identity). */
     unsigned char scan_identity[32];
     int scan_known;
     sh_package_key_groups *key_groups; /* Group codes its relocated values use. */
+    pr_movie_record *movies; /* Immutable plans, reserved before publication. */
+    size_t movie_count;
+    struct pr_provider *movie_next; /* One registry reference per provider. */
     volatile LONG references;
 } pr_provider;
 typedef struct pr_occurrence_lease {
@@ -126,7 +216,16 @@ struct sh_package_selector_hold {
     pr_provider *provider;
     struct sh_package_selector_hold *next;
     char *family; /* Native selector roots, not every resource in the provider. */
+    char *name; /* NULL for family selectors; otherwise one exact native owner. */
+    int pooled; /* Embedded movie node; never freed by generic lease cleanup. */
 };
+struct pr_movie_record {
+    sh_package_selector_hold selector;
+    const sh_package_consumer *binding;
+    size_t instances, frames; /* Protected by g_lease_lock. */
+};
+static pr_provider *g_movie_providers;
+static volatile LONG g_movie_births; /* Only pooled 0 -> live transitions. */
 static sh_package_selector_hold *g_selectors;
 static volatile LONG g_lease_generation, g_lease_published;
 static sh_package_provenance g_promoted;
@@ -134,6 +233,11 @@ static LONG g_promotion_generation; /* protected by g_lock */
 typedef struct pr_inventory_entry { char *path; size_t source; } pr_inventory_entry;
 typedef struct pr_inventory {
     sh_package_sources *sources;
+    /* Units the scan found that invalid content removed from availability,
+     * with their scanned files, so every discovered input stays accountable.
+     * NULL when none were left out or they could not be retained. */
+    sh_package_sources *left_out;
+    int left_out_lost;
     pr_inventory_entry *entries;
     size_t count, references;
 } pr_inventory;
@@ -144,6 +248,8 @@ struct sh_package_map_plan {
     pr_inventory *inventory;
     pr_provider *library, *library_base, *authoring;
     int occurrences_admitted, inventory_committed;
+    /* The installation's library is the whole link (pr_installation_whole). */
+    int library_whole;
 };
 static int pr_plan_library_current(const sh_package_map_plan *plan, char *error, size_t capacity);
 static int pr_plan_authoring_served(const sh_package_map_plan *plan,
@@ -165,6 +271,16 @@ static int g_occurrence_recovery_ready, g_occurrence_recovery_usable;
 /* Native activation runs with this thread owning the refresh lock. Editor
  * callbacks may inspect the published candidate without reacquiring it. */
 static __declspec(thread) unsigned g_activation_callback;
+/* g_refresh_lock serializes this slot. The owning thread is retained across
+ * a refused admission; a different thread cannot consume native storage. */
+static struct {
+    sh_package_activation_finish_fn finish;
+    void *context;
+    DWORD thread;
+    int running, accepted;
+} g_activation_finish;
+static int g_activation_damaged;
+static void *g_activation_diagnostic_context;
 static char g_error[2048];
 static char g_authoring_error[2048];
 static char *g_map_json;
@@ -237,16 +353,51 @@ static int pr_exclusion_add(pr_exclusion **items, size_t *count, const char *nam
     return 1;
 }
 
+#ifdef SH_PACKAGE_RUNTIME_TESTING
+static volatile LONG g_test_audio_roots, g_test_providers;
+static pr_provider *g_test_live[4096]; /* every allocated provider, for owned-byte accounting */
+static SRWLOCK g_test_live_lock = SRWLOCK_INIT;
+#endif
+static pr_provider *pr_provider_new(void)
+{
+    pr_provider *provider = calloc(1, sizeof(*provider));
+#ifdef SH_PACKAGE_RUNTIME_TESTING
+    if (provider) {
+        InterlockedIncrement(&g_test_providers);
+        AcquireSRWLockExclusive(&g_test_live_lock);
+        for (size_t i = 0; i < sizeof(g_test_live) / sizeof(*g_test_live); i++)
+            if (!g_test_live[i]) { g_test_live[i] = provider; break; }
+        ReleaseSRWLockExclusive(&g_test_live_lock);
+    }
+#endif
+    return provider;
+}
+static void pr_provider_free(pr_provider *provider)
+{
+#ifdef SH_PACKAGE_RUNTIME_TESTING
+    if (provider) {
+        InterlockedDecrement(&g_test_providers);
+        AcquireSRWLockExclusive(&g_test_live_lock);
+        for (size_t i = 0; i < sizeof(g_test_live) / sizeof(*g_test_live); i++)
+            if (g_test_live[i] == provider) { g_test_live[i] = NULL; break; }
+        ReleaseSRWLockExclusive(&g_test_live_lock);
+    }
+#endif
+    free(provider);
+}
 static void pr_release(pr_provider *provider)
 {
     if (!provider || InterlockedDecrement(&provider->references)) return;
 #ifndef SH_PACKAGE_RUNTIME_TESTING
     sh_strids_reservation_free(provider->strings);
     sh_audio_id_lease_release(provider->audio_ids);
+#else
+    if (provider->audio) InterlockedDecrement(&g_test_audio_roots);
 #endif
     if (!sh_virtual_material_runtime_retire(&provider->virtual_materials))
         backend_log("package provider released an active virtual material view");
     sh_package_compilation_free(provider->compiled);
+    pr_native_witnesses_free(provider->native_witnesses, provider->native_witness_count);
     sh_package_audio_program_close(provider->audio);
     sh_package_consumers_free(provider->consumers);
     sh_package_fsm_webs_free(provider->fsm_webs);
@@ -267,11 +418,15 @@ static void pr_release(pr_provider *provider)
     free(provider->audio_sources);
     pr_release(provider->parent); free(provider->data_root); free(provider->rejections);
     free(provider->unserved); free(provider->coverage); free(provider->key_groups); free(provider->unmodified_types);
+    free(provider->exact_modifier_types);
+    free(provider->movies);
     pr_exclusions_free(provider->exclusions, provider->exclusion_count);
+    pr_unchanged_free(provider->unchanged, provider->unchanged_count);
+    pr_shader_inputs_free(provider->shader_inputs, provider->shader_input_count);
 #ifdef PR_NATIVE_SPAWN
     sh_spawn_keys_program_release(provider->spawn_program);
 #endif
-    free(provider);
+    pr_provider_free(provider);
 }
 /* Precedence follows call order; one owner appears once. A view contributes
  * the owners it already retains, a root provider itself when it has audio. */
@@ -306,13 +461,40 @@ static int pr_key_groups_add(pr_provider *view, const pr_provider *source, char 
     }
     return 1;
 }
-static int pr_spawn_classifications(pr_provider *view, char *error, size_t capacity);
-static int pr_prepare_spawn_program(pr_provider *view, char *error, size_t capacity)
+/* A prepared map owns its dispatch codes before it is published. Installation
+ * beside the live provider must reserve both catalogs; neither resource-view
+ * precedence nor the current map's visibility can discard those reservations. */
+static int pr_key_bindings_add(pr_provider *view, const pr_provider *source, char *error, size_t capacity)
 {
-    if (!pr_spawn_classifications(view, error, capacity)) return 0;
+    if (!source) return 1;
+    for (size_t i = 0; i < source->bindings.binding_count; i++) {
+        const sh_package_provenance_binding *binding = source->bindings.bindings + i;
+        if (strcmp(binding->family, SH_PACKAGE_KEY_FAMILY)) continue;
+        for (size_t c = 0; c < binding->context_count; c++) {
+            if (binding->contexts[c] >= source->bindings.context_count) {
+                snprintf(error, capacity, "registration key reservation has no source context"); return 0;
+            }
+            const sh_package_provenance_context *context = source->bindings.contexts + binding->contexts[c];
+            size_t at = sh_package_provenance_context_add(&view->bindings, context->mode,
+                context->trees, context->tree_count, context->component);
+            if (at == SIZE_MAX || !sh_package_provenance_bind(&view->bindings, binding->family,
+                binding->original, binding->name, &at, 1)) {
+                snprintf(error, capacity, "cannot reserve registration key %s as %s beside the live provider",
+                    binding->original, binding->name); return 0;
+            }
+        }
+    }
+    return pr_key_groups_add(view, source, error, capacity);
+}
+static int pr_spawn_classifications(pr_provider *view, int exact_types, char *error, size_t capacity);
+static int pr_spawn_registrations(pr_provider *view, char *error, size_t capacity);
+static int pr_prepare_spawn_program(pr_provider *view, int registrations, char *error, size_t capacity)
+{
+    if ((registrations && !pr_spawn_registrations(view, error, capacity)) ||
+        !pr_spawn_classifications(view, registrations, error, capacity)) return 0;
 #ifdef PR_NATIVE_SPAWN
-    sh_spawn_keys_program *program = sh_spawn_keys_program_create(view->key_groups,
-        view->unmodified_types, view->unmodified_count);
+    sh_spawn_keys_program *program = sh_spawn_keys_program_create_exact(view->key_groups,
+        view->unmodified_types, view->unmodified_count, view->exact_modifier_types, view->exact_modifier_count);
     if (!program) { snprintf(error, capacity, "cannot prepare native spawn dispatch metadata"); return 0; }
     sh_spawn_keys_program_release(view->spawn_program); view->spawn_program = program;
 #else
@@ -344,7 +526,7 @@ static void pr_publish(pr_provider *current, pr_provider *library, pr_provider *
 
 int sh_package_runtime_consumer_acquire(const char *family, const char *name, sh_package_consumer_hold *out)
 {
-    if (!out || out->provider || out->binding || !family || !*family || !name || !*name) return -1;
+    if (!out || out->provider || out->binding || out->lifetime || !family || !*family || !name || !*name) return -1;
     AcquireSRWLockShared(&g_lock);
     const sh_package_consumer *binding = sh_package_consumers_find(
         g_current_provider ? g_current_provider->consumers : NULL, family, name);
@@ -355,6 +537,7 @@ void sh_package_runtime_consumer_release(sh_package_consumer_hold *hold)
 {
     if (!hold) return;
     pr_provider *provider = hold->provider;
+    sh_package_runtime_selectors_release(hold->lifetime);
     memset(hold, 0, sizeof(*hold)); pr_release(provider);
 }
 
@@ -488,7 +671,26 @@ static void pr_inventory_release(pr_inventory *inventory)
 {
     if (!inventory || --inventory->references) return;
     for (size_t i = 0; i < inventory->count; i++) free(inventory->entries[i].path);
-    free(inventory->entries); sh_package_sources_free(inventory->sources); free(inventory);
+    free(inventory->entries); sh_package_sources_free(inventory->sources);
+    sh_package_sources_free(inventory->left_out); free(inventory);
+}
+/* Units invalid content removes from availability, kept for accounting only.
+ * A failed copy marks the evidence lost; it never fails the compilation. */
+typedef struct pr_left_out { sh_package_sources *units; int lost; } pr_left_out;
+static void pr_left_out_keep(pr_left_out *left, const sh_package_sources *inventory, size_t package)
+{
+    sh_package_sources empty = {0}, *unit, *joined = NULL;
+    char error[256];
+    if (!left || left->lost) return;
+    if ((unit = sh_package_sources_join(inventory, &empty, error, sizeof(error))) != NULL) {
+        int ok = 1;
+        for (size_t i = unit->package_count; ok && i; i--)
+            if (i - 1 != package) ok = sh_package_sources_remove(unit, i - 1);
+        if (ok) joined = sh_package_sources_join(left->units ? left->units : &empty, unit, error, sizeof(error));
+        sh_package_sources_free(unit);
+    }
+    if (!joined) { left->lost = 1; return; }
+    sh_package_sources_free(left->units); left->units = joined;
 }
 
 static int pr_inventory_compare(const void *a, const void *b)
@@ -739,6 +941,8 @@ static int pr_cache_resources(sh_package_compilation *compiled, const char *root
 /* Explicit empty-original catalog for filesystem/compiler integration tests.
  * Production always reads the installed game's catalog. */
 static int g_test_empty_catalog;
+/* One more original every installation increment binds (sh_package_runtime_test_install_witness). */
+static const sh_compiled_resource *g_test_install_witness;
 static sh_package_baseline_reader g_test_baseline;
 static void *g_test_baseline_context;
 static sh_decl_registry_source g_test_source_registry;
@@ -746,6 +950,42 @@ static uintptr_t g_test_source_reflection;
 static int g_test_installed_links;
 static int g_test_spawn_keys;
 void sh_package_runtime_test_installed_links(int enabled) { g_test_installed_links = enabled; }
+/* Without bound native readers, compose block declaration families as the
+ * native composer does (pr_compose_custom); other families stay unadapted. */
+static int g_test_block_compose;
+void sh_package_runtime_test_block_compose(int enabled) { g_test_block_compose = enabled; }
+/* An installation's whole link (pr_installation_whole) clones the whole compile
+ * without the rows declared at path that package owns: a whole compile lacking
+ * that declaration while other rows keep equal bytes. Off when path is NULL. */
+static const char *g_test_whole_omit_path, *g_test_whole_omit_package;
+static int g_test_clone_omit;
+void sh_package_runtime_test_whole_omit(const char *path, const char *package)
+{
+    g_test_whole_omit_path = path; g_test_whole_omit_package = package;
+}
+static int pr_test_omitted(const sh_package_compilation *compiled, const sh_compiled_resource *row)
+{
+    if (!g_test_clone_omit || !g_test_whole_omit_path || !g_test_whole_omit_package ||
+        strcmp(row->original_path ? row->original_path : row->engine_path, g_test_whole_omit_path)) return 0;
+    for (size_t p = 0; p < compiled->sources->package_count; p++)
+        if (sh_package_owners_contains(&row->owners, p) &&
+            !strcmp(sh_package_source_identity(compiled->sources, p), g_test_whole_omit_package)) return 1;
+    return 0;
+}
+static int pr_test_block_compose(void *context, const char *type, sh_decl_source baseline,
+    const sh_decl_source *sources, size_t count, char **body, size_t *length,
+    char *error, size_t capacity, sh_decl_conflict *conflict, const sh_package_source_view *source_view)
+{
+    (void)context; (void)source_view; *body = NULL; *length = 0;
+    if (!sh_decl_block_family(type)) return 0;
+    *body = sh_decl_block_compose(type, baseline, sources, count, length, error, capacity, conflict);
+    return *body ? 1 : -1;
+}
+/* The renderer contract installed-library links use; none when < 0. */
+static sh_package_source_shader g_test_shader = {(sh_package_shader_renderer)-1, NULL, NULL, NULL, NULL};
+void sh_package_runtime_test_shader_renderer(int renderer) { g_test_shader.renderer = (sh_package_shader_renderer)renderer; }
+static long g_test_shader_input_failures;
+void sh_package_runtime_test_shader_input_failures(long count) { g_test_shader_input_failures = count; }
 void sh_package_runtime_test_spawn_keys(int enabled) { g_test_spawn_keys = enabled; }
 static const char *g_test_audio_root;
 static const char *g_test_audio_bank_prefix;
@@ -778,6 +1018,16 @@ static int pr_test_constructor(void *context, size_t scope, int observing, const
     (void)context;
     return !g_test_constructor || g_test_constructor(g_test_constructor_context,
         scope, observing, unit, visit, visitor, error, capacity) == 1;
+}
+static sh_package_runtime_test_atlas_fn g_test_atlas;
+static void *g_test_atlas_context;
+void sh_package_runtime_test_atlas(sh_package_runtime_test_atlas_fn atlas, void *context)
+{ g_test_atlas = atlas; g_test_atlas_context = context; }
+static int pr_test_atlas(void *context, size_t scope, const sh_package_compilation *compiled,
+    const char *material, const char *page_file, sh_package_virtual_atlas *out, char *error, size_t capacity)
+{
+    (void)context;
+    return g_test_atlas(g_test_atlas_context, scope, compiled, material, page_file, out, error, capacity);
 }
 int sh_package_runtime_test_source_inputs(sh_decl_registry_source *registry, uintptr_t *reflection,
     sh_package_baseline_reader *baseline, void **baseline_context)
@@ -844,16 +1094,70 @@ static int pr_fsm_bind(const pr_provider *view, char *error, size_t capacity)
         }
         table = (sh_fsm_web_table){bindings, webs->count, (const char *const *)webs->owned, webs->owned_count};
     }
-    ok = g_fsm.publish(pr_fsm_content(view) ? &table : NULL);
+    __try { ok = g_fsm.publish(pr_fsm_content(view) ? &table : NULL); }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        free(bindings);
+        snprintf(error,capacity,"package AI state-machine publication raised exception 0x%08lx",(unsigned long)GetExceptionCode());
+        return 0;
+    }
     free(bindings);
     if (!ok) snprintf(error, capacity, "package AI state-machine webs do not resolve against the registered declarations (backend log)");
     return ok;
 }
 
+int sh_package_runtime_defer_activation_finish(sh_package_activation_finish_fn finish, void *context)
+{
+    if (g_activation_callback != 1 || !finish || !context || g_activation_finish.finish ||
+        g_activation_finish.running || g_activation_damaged) return 0;
+    g_activation_finish.finish = finish; g_activation_finish.context = context;
+    g_activation_finish.thread = GetCurrentThreadId(); return 1;
+}
+static int pr_activation_finish(int accepted, int *committed, char *error, size_t capacity)
+{
+    int result = 0;
+    *committed = 0;
+    if (g_activation_damaged) {
+        snprintf(error,capacity,"native activation storage was damaged; cleanup cannot be replayed"); return -1;
+    }
+    if (!g_activation_finish.finish) { *committed = accepted != 0; return 1; }
+    if (g_activation_finish.running || g_activation_finish.thread != GetCurrentThreadId()) {
+        snprintf(error,capacity,"native activation storage requires its owning thread and admission"); return 0;
+    }
+    int preflight=accepted==2;
+    if (!preflight) accepted = accepted || g_activation_finish.accepted;
+    g_activation_finish.running = 1;
+    g_activation_callback++;
+    __try {
+        __try { result = g_activation_finish.finish(g_activation_finish.context,accepted,committed,error,capacity); }
+        __except (EXCEPTION_EXECUTE_HANDLER) {
+            snprintf(error,capacity,"native activation storage cleanup raised exception 0x%08lx; cleanup cannot be replayed",
+                (unsigned long)GetExceptionCode()); result = -1;
+            g_activation_diagnostic_context = g_activation_finish.context;
+        }
+    }
+    __finally { g_activation_callback--; }
+    g_activation_finish.running = 0;
+    if (preflight) {
+        *committed=0;
+        if (result<0) { g_activation_damaged=1; g_activation_diagnostic_context=g_activation_finish.context; }
+        return result;
+    }
+    if (*committed && result == 0) g_activation_finish.accepted = 1;
+    if (result) {
+        if (result < 0) g_activation_damaged = 1;
+        memset(&g_activation_finish,0,sizeof(g_activation_finish));
+    }
+    return result;
+}
+static int pr_activation_recover(sh_package_activation_fn activate, void *context,
+    const sh_package_changes *changes, const pr_provider *previous, char *error, size_t capacity);
 static int pr_activate(sh_package_activation_fn activate, void *context, int restoring,
     const sh_package_changes *changes, char *error, size_t capacity)
 {
     int result = 0;
+    if (g_activation_finish.finish || g_activation_damaged || g_activation_callback) {
+        snprintf(error,capacity,"previous native activation storage has not finished"); return 0;
+    }
     g_activation_callback++;
     __try {
         __try {
@@ -867,6 +1171,18 @@ static int pr_activate(sh_package_activation_fn activate, void *context, int res
     }
     __finally { g_activation_callback--; }
     return result;
+}
+static int pr_activation_recover(sh_package_activation_fn activate, void *context,
+    const sh_package_changes *changes, const pr_provider *previous, char *error, size_t capacity)
+{
+    int ready = pr_activate(activate,context,1,changes,error,capacity) && pr_fsm_bind(previous,error,capacity);
+    int committed = 0;
+    int finished = pr_activation_finish(ready,&committed,error,capacity);
+    if (!ready || !committed) {
+        if (finished == 0) pr_activation_finish(0,&committed,error,capacity);
+        return 0;
+    }
+    return finished == 1;
 }
 
 /* The scan's rejection report line; NULL when it cannot grow. */
@@ -930,7 +1246,7 @@ static int pr_report_line(char **report, const char *line)
  * (not served, conflicts, composition failures) are never remembered. */
 static int pr_exclusions_apply(const pr_exclusion *remembered, size_t remembered_count, int earlier_process,
     sh_package_sources *sources, sh_package_sources *inventory, pr_exclusion **out, size_t *out_count,
-    char **rejections)
+    char **rejections, pr_left_out *left)
 {
     size_t reused = 0;
     for (size_t j = 0; j < remembered_count; j++) {
@@ -942,6 +1258,7 @@ static int pr_exclusions_apply(const pr_exclusion *remembered, size_t remembered
         /* Invalid content establishes no installed availability. */
         if (inventory) for (size_t k = 0; k < inventory->package_count; k++)
             if (!strcmp(inventory->packages[k].name, item->name)) {
+                pr_left_out_keep(left, inventory, k);
                 if (!sh_package_sources_remove(inventory, k)) return 0;
                 break;
             }
@@ -1100,11 +1417,13 @@ static void pr_exclusions_load(const char *data_root, pr_exclusion **items, size
  * installed availability, reports why, and is remembered when the decision
  * read only its own bytes (pr_exclusions_apply). */
 static int pr_reject_invalid(sh_package_sources *sources, sh_package_sources *inventory, size_t package,
-    int own_bytes, char **rejections, pr_exclusion **exclusions, size_t *exclusion_count, const char *reason)
+    int own_bytes, char **rejections, pr_exclusion **exclusions, size_t *exclusion_count, const char *reason,
+    pr_left_out *left)
 {
     if (package >= sources->package_count) return 0;
     if (inventory) for (size_t i = 0; i < inventory->package_count; i++)
         if (!strcmp(inventory->packages[i].name, sources->packages[package].name)) {
+            pr_left_out_keep(left, inventory, i);
             if (!sh_package_sources_remove(inventory, i)) return 0;
             break;
         }
@@ -1132,7 +1451,7 @@ static int pr_leave_order(const void *a, const void *b)
 static int pr_leave_out(sh_package_sources *sources, sh_package_sources *inventory,
     size_t invalid_package, int invalid_own_bytes, size_t unserved_package, const char *reason,
     const sh_package_rejections *more, int own_bytes_only, char **rejections, char **unserved,
-    pr_exclusion **exclusions, size_t *exclusion_count)
+    pr_exclusion **exclusions, size_t *exclusion_count, pr_left_out *left)
 {
     size_t count = 0;
     pr_leave *leave = calloc(2 + (more ? more->count : 0), sizeof(*leave));
@@ -1153,7 +1472,7 @@ static int pr_leave_out(sh_package_sources *sources, sh_package_sources *invento
         if (leave[i].package >= sources->package_count) { ok = 0; break; }
         ok = leave[i].invalid ?
             pr_reject_invalid(sources, inventory, leave[i].package, leave[i].own_bytes, rejections,
-                exclusions, exclusion_count, leave[i].reason) :
+                exclusions, exclusion_count, leave[i].reason, left) :
             pr_unserved(unserved, &sources->packages[leave[i].package], leave[i].reason) &&
                 sh_package_sources_remove(sources, leave[i].package);
     }
@@ -1366,8 +1685,12 @@ failed:
 #if !defined(SH_PACKAGE_RUNTIME_TESTING) || defined(SH_PACKAGE_RUNTIME_NATIVE_TESTING)
 /* Resume the same immutable source inventory after explicit native source
  * construction. No compiler callback may construct an engine resource. */
-static int pr_prepare_native_sources(sh_package_native_assets *assets,
-    uint64_t **completed, size_t *completed_count, char *error, size_t capacity)
+/* families, when not NULL, receives the batch's renderparm, renderprogflag
+ * and renderprog request counts, first its first queued reason and names a
+ * bounded list of the requested names in queue order (diagnostics). */
+static int pr_prepare_native_batch(sh_package_native_assets *assets,
+    uint64_t **completed, size_t *completed_count, size_t families[3], char first[384],
+    char *names, size_t names_capacity, char *error, size_t capacity)
 {
     sh_package_shader_preparation *batch = sh_package_native_assets_shader_take(assets);
     pr_provider *current = NULL, *library = NULL, *map = NULL;
@@ -1375,6 +1698,23 @@ static int pr_prepare_native_sources(sh_package_native_assets *assets,
     uint64_t *grown;
     LONG promotion_generation = 0;
     int result = 0, recovered = 1;
+    if (first) snprintf(first, 384, "%s", *sh_package_shader_preparation_first_need(batch) ?
+        sh_package_shader_preparation_first_need(batch) : "none recorded");
+    if (names && names_capacity) {
+        size_t used = 0, listed = 0;
+        *names = 0;
+        /* The batch lists its newest request first. */
+        for (size_t i = count; i-- > 0;) {
+            const sh_package_shader_request *request = sh_package_shader_preparation_request(batch, i);
+            int n;
+            /* Keep room for the omitted count. */
+            if (!request || used + strlen(request->name) + 24 >= names_capacity) break;
+            n = snprintf(names + used, names_capacity - used, "%s%s", listed ? " " : "", request->name);
+            if (n <= 0) break;
+            used += (size_t)n; listed++;
+        }
+        if (listed < count) snprintf(names + used, names_capacity - used, "%s(+%zu more)", listed ? " " : "", count - listed);
+    }
     if (!batch || !count ||
 #ifdef SH_PACKAGE_RUNTIME_NATIVE_TESTING
         !sh_package_runtime_test_native_ready()
@@ -1385,6 +1725,7 @@ static int pr_prepare_native_sources(sh_package_native_assets *assets,
     for (size_t i = 0; i < count; i++) {
         const sh_package_shader_request *request = sh_package_shader_preparation_request(batch, i);
         if (!request) goto done;
+        if (families) families[!strcmp(request->family, "renderparm") ? 0 : !strcmp(request->family, "renderprogflag") ? 1 : 2]++;
         for (size_t j = 0; j < *completed_count; j++) if ((*completed)[j] == request->task_id) {
             snprintf(error, capacity, "native shader source evidence changed during the same compilation: %s", request->name);
             goto done;
@@ -1431,6 +1772,9 @@ done:
         snprintf(error, capacity, "native shader source preparation is unavailable at this boundary");
     return result;
 }
+static int pr_prepare_native_sources(sh_package_native_assets *assets,
+    uint64_t **completed, size_t *completed_count, char *error, size_t capacity)
+{ return pr_prepare_native_batch(assets, completed, completed_count, NULL, NULL, NULL, 0, error, capacity); }
 #ifdef SH_PACKAGE_RUNTIME_NATIVE_TESTING
 int sh_package_runtime_test_prepare_native_sources(sh_package_native_assets *assets,
     uint64_t **completed, size_t *completed_count, char *error, size_t capacity)
@@ -1531,24 +1875,24 @@ static int pr_follow_native_sources(sh_package_native_assets *assets, uint64_t *
     return ok;
 }
 /* Shader preparation hint: the stock shader objects the previous installed-
- * library compile needed (sh_package_native_assets_shader_needs). It belongs to
- * exactly one renderer, game image, product build and installed inventory; any
- * other header, and any truncated or corrupt text, is not used. A used hint
- * only prepares ahead of the first library compile of a session: the compile
- * still verifies every object and requests what it needs exactly as without
- * one, so a missing or rejected hint costs only the discovery it would save. */
+ * library compile needed (sh_package_native_assets_shader_needs). It names
+ * objects only and belongs to one renderer, game image and preparation
+ * contract (sh_package_shader_hint_header), not to a product build or an
+ * installed inventory: unchanged needs survive those and changed needs are
+ * discovered. Any other header, and any truncated or corrupt text, is not
+ * used. A used hint only prepares ahead of the first library compile of a
+ * session: the compile still verifies every object and requests what it needs
+ * exactly as without one, so a missing or rejected hint costs only the
+ * discovery it would save. */
 static int pr_shader_hint(const char *data_root, const unsigned char inventory[32],
     char *path, size_t path_capacity, char *header, size_t header_capacity)
 {
-    char identity[65], build[256];
+    char build[256];
     int vulkan = sh_host_is_vulkan();
-    if (vulkan < 0 || !pr_cache_state(data_root, vulkan ? "shader-preparation-vk.txt" : "shader-preparation-gl.txt",
-            path, path_capacity) || !pr_build_identity(build, sizeof(build))) return 0;
-    for (size_t i = 0; i < 32; i++) snprintf(identity + 2 * i, 3, "%02x", inventory[i]);
-    int n = 1;
-    int m = snprintf(header, header_capacity, "snapmap-plus shader preparation v2\nrenderer %s\n%sinventory %s\n",
-        vulkan ? "vulkan" : "opengl", build, identity);
-    return n > 0 && (size_t)n < path_capacity && m > 0 && (size_t)m < header_capacity;
+    (void)inventory;
+    return vulkan >= 0 && pr_cache_state(data_root, vulkan ? "shader-preparation-vk.txt" : "shader-preparation-gl.txt",
+            path, path_capacity) && pr_build_identity(build, sizeof(build)) &&
+        sh_package_shader_hint_header(header, header_capacity, vulkan, build);
 }
 typedef struct pr_prewarm_walk { sh_package_native_assets *assets; size_t listed, queued, stale; } pr_prewarm_walk;
 static int pr_prewarm_one(void *context, const char *family, const char *name)
@@ -1577,8 +1921,8 @@ static void pr_shader_prewarm(sh_package_native_assets *assets, const char *data
     int entries = text ? sh_package_shader_hint_read(text, length, header, pr_prewarm_one, &walk) : -1;
     free(text);
     if (entries < 0) {
-        backend_log("shader preparation hint not used: it belongs to another renderer, game, product build or "
-            "installed inventory, or is incomplete; the library compile discovers what it needs");
+        backend_log("shader preparation hint not used: it belongs to another renderer, game or preparation "
+            "contract, or is incomplete; the library compile discovers what it needs");
         return;
     }
     uint64_t *tasks = NULL;
@@ -1666,6 +2010,202 @@ static int pr_library_digest(const sh_package_compilation *compiled, char hex[65
     free(order); free(buffer);
     return ok;
 }
+/* An unchanged SnapMap movie stays native only when that is its whole captured
+ * behavior: a valid plan of its own identities (sh_package_movie_plan_native)
+ * whose requested resources all stay native too. Its binding then routes
+ * nothing and needs no lifetime record, so it goes with the movie. Any other
+ * captured movie stays published with its binding, so its localization,
+ * changed closure and lifetime record remain. Movies are decided after every
+ * other resource, against what then stays served. */
+typedef struct pr_native_movies {
+    const sh_package_consumers *consumers;
+    const sh_package_compilation *compiled;
+    unsigned char *native; /* per consumer: its movie stays native */
+    size_t published;
+} pr_native_movies;
+static const sh_package_consumer *pr_movie_captured(const pr_native_movies *movies,
+    const sh_compiled_resource *resource, size_t *index)
+{
+    const sh_package_consumer *first = sh_package_consumers_at(movies->consumers, 0);
+    for (size_t n = 0; first && n < sh_package_resource_native_count(resource); n++) {
+        sh_package_native_identity identity = sh_package_resource_native_at(resource, n);
+        if (!identity.type || !identity.name || !sh_package_movie_owner(identity.type, identity.name)) continue;
+        const sh_package_consumer *owner = sh_package_consumers_find(movies->consumers, identity.type, identity.name);
+        if (owner) { *index = (size_t)(owner - first); return owner; }
+    }
+    return NULL;
+}
+static int pr_movie_deferred(void *context, const sh_compiled_resource *resource)
+{
+    size_t index;
+    return pr_movie_captured(context, resource, &index) != NULL;
+}
+static int pr_movie_published(void *context, const sh_compiled_resource *resource)
+{
+    pr_native_movies *movies = context;
+    size_t index;
+    const sh_package_consumer *owner = pr_movie_captured(movies, resource, &index);
+    if (!owner) return 0;
+    int published = sh_package_consumers_at(movies->consumers, index) != owner ||
+        !sh_package_movie_plan_valid(owner) || !sh_package_movie_plan_native(owner);
+    for (size_t t = 0; !published && t < owner->count; t++)
+        for (size_t i = 0; !published && i < movies->compiled->resource_count; i++)
+            published = sh_package_resource_native_matches(movies->compiled->resources + i,
+                owner->targets[t].family, owner->targets[t].name);
+    if (published) movies->published++;
+    else movies->native[index] = 1;
+    return published;
+}
+/* An increment links its new scopes alone. A unit there that binds an original
+ * the retained library serves through another package's equal copy is linked,
+ * in the whole library, as one more physical alias of that served row
+ * (sl_path members, pl_project same-path union). Alone, the original row stays
+ * native and is pruned. Keep exactly those rows' paths, bytes and identities
+ * so the view can compose them (pr_native_witnesses_compose). */
+static int pr_native_witnesses_capture(const sh_package_compilation *compiled,
+    pr_native_witness **out, size_t *count, char *error, size_t capacity)
+{
+    *out = NULL; *count = 0;
+    pr_native_witness *witnesses = calloc(compiled->resource_count ? compiled->resource_count : 1, sizeof(*witnesses));
+    if (!witnesses) { snprintf(error, capacity, "cannot retain unchanged original witnesses"); return 0; }
+    for (size_t i = 0; i < compiled->resource_count; i++) {
+        const sh_compiled_resource *r = compiled->resources + i;
+        size_t names = sh_package_resource_native_count(r);
+        if (!r->native_original || r->baseline_known != 1 || r->original_path || r->restored_original ||
+            r->composed || r->source_count || r->source != SIZE_MAX || r->type || !names) continue;
+        pr_native_witness *w = witnesses + (*count)++;
+        w->path = _strdup(r->engine_path);
+        w->names = calloc(names, sizeof(*w->names));
+        if (!w->path || !w->names) goto failed;
+        w->identified = sh_package_compilation_identity(compiled, r, &w->identity, NULL, 0);
+        for (size_t n = 0; n < names; n++) {
+            sh_package_native_identity identity = sh_package_resource_native_at(r, n);
+            w->names[n].type = _strdup(identity.type); w->names[n].name = _strdup(identity.name);
+            w->name_count++;
+            if (!w->names[n].type || !w->names[n].name) goto failed;
+        }
+    }
+    *out = witnesses; return 1;
+failed:
+    pr_native_witnesses_free(witnesses, *count); *count = 0;
+    if (!*error) snprintf(error, capacity, "cannot retain unchanged original witnesses");
+    return 0;
+}
+/* Rows still compiled after pruning serve themselves; only pruned ones witness. */
+static void pr_native_witnesses_pruned(const sh_package_compilation *compiled, pr_native_witness *witnesses, size_t *count)
+{
+    size_t kept = 0;
+    for (size_t i = 0; i < *count; i++) {
+        if (sh_package_compilation_find(compiled, witnesses[i].path)) {
+            free(witnesses[i].path);
+            for (size_t n = 0; n < witnesses[i].name_count; n++) {
+                free((void *)witnesses[i].names[n].type); free((void *)witnesses[i].names[n].name);
+            }
+            free(witnesses[i].names); continue;
+        }
+        witnesses[kept++] = witnesses[i];
+    }
+    *count = kept;
+}
+/* Before pruning: every authored input of a row that may be left native.
+ * After pruning, pr_unchanged_pruned keeps only the rows actually left. */
+static int pr_unchanged_capture(const sh_package_compilation *compiled, pr_unchanged **out, size_t *count)
+{
+    size_t total = 0;
+    *out = NULL; *count = 0;
+    for (size_t i = 0; i < compiled->resource_count; i++) {
+        const sh_compiled_resource *r = compiled->resources + i;
+        if (r->native_original && r->baseline_known == 1) total += r->source_count;
+    }
+    if (!total) return 1;
+    if (!(*out = calloc(total, sizeof(**out)))) return 0;
+    for (size_t i = 0; i < compiled->resource_count; i++) {
+        const sh_compiled_resource *r = compiled->resources + i;
+        if (!r->native_original || r->baseline_known != 1) continue;
+        for (size_t s = 0; s < r->source_count; s++) {
+            const sh_package_source_file *file = compiled->sources->files + r->sources[s];
+            pr_unchanged *row = *out + *count;
+            if (!(row->path = _strdup(r->engine_path))) return 0;
+            row->length = file->length; memcpy(row->digest, file->digest, 32);
+            (*count)++;
+        }
+    }
+    return 1;
+}
+static void pr_unchanged_pruned(const sh_package_compilation *compiled, pr_unchanged *rows, size_t *count)
+{
+    size_t kept = 0;
+    for (size_t i = 0; i < *count; i++) {
+        if (sh_package_compilation_find(compiled, rows[i].path)) { free(rows[i].path); continue; }
+        rows[kept++] = rows[i];
+    }
+    *count = kept;
+    qsort(rows, kept, sizeof(*rows), pr_unchanged_order);
+}
+/* A linked library's unpublished shader inputs by package tree and exact file.
+ * Accounting only: 0 when they could not all be retained. */
+static int pr_shader_inputs_capture(const sh_package_sources *sources, const sh_package_library *library,
+    pr_shader_input **out, size_t *count)
+{
+    *out = NULL; *count = 0;
+    if (!library->shader_input_count) return 1;
+#ifdef SH_PACKAGE_RUNTIME_TESTING
+    if (g_test_shader_input_failures > 0 && g_test_shader_input_failures--) return 0;
+#endif
+    if (!sources->fingerprints || !(*out = calloc(library->shader_input_count, sizeof(**out)))) return 0;
+    for (size_t i = 0; i < library->shader_input_count; i++) {
+        const sh_package_unpublished_shader *input = library->shader_inputs + i;
+        if (input->file >= sources->file_count) return 0;
+        const sh_package_source_file *file = sources->files + input->file;
+        pr_shader_input *row = *out + *count;
+        memcpy(row->owner, sources->fingerprints[file->owner], 32);
+        row->length = file->length; memcpy(row->digest, file->digest, 32);
+        row->reason = input->reason; row->renderer = input->renderer; row->checksum = input->checksum;
+        if (!(row->relative = _strdup(file->relative))) return 0;
+        (*count)++;
+        if (input->pair < sources->file_count) {
+            const sh_package_source_file *pair = sources->files + input->pair;
+            row->pair_length = pair->length; memcpy(row->pair_digest, pair->digest, 32);
+            if (!(row->pair = _strdup(pair->relative))) return 0;
+        } else if (input->pair_path) {
+            row->pair_original = 1;
+            if (!(row->pair = _strdup(input->pair_path))) return 0;
+        }
+    }
+    qsort(*out, *count, sizeof(**out), pr_shader_input_order);
+    return 1;
+}
+/* The number of unchanged resources left native, or SIZE_MAX on failure.
+ * movies[0] counts captured movies left native, movies[1] those kept. */
+static size_t pr_prune_native(sh_package_compilation *compiled, sh_package_native_served served,
+    void *served_context, sh_package_consumers **consumers, size_t movies[2], char *error, size_t capacity)
+{
+    pr_native_movies decided = {*consumers, compiled, NULL, 0};
+    size_t count = sh_package_consumers_count(*consumers), kept = 0, dropped;
+    sh_package_consumer *rows = calloc(count ? count : 1, sizeof(*rows));
+    decided.native = calloc(count ? count : 1, 1);
+    movies[0] = movies[1] = 0;
+    if (!rows || !decided.native) {
+        free(rows); free(decided.native);
+        snprintf(error, capacity, "cannot retain compiled native consumer bindings"); return SIZE_MAX;
+    }
+    dropped = sh_package_compilation_prune_native_except(compiled, served, served_context,
+        pr_movie_deferred, &decided);
+    dropped += sh_package_compilation_prune_native_except(compiled, served, served_context,
+        pr_movie_published, &decided);
+    for (size_t i = 0; i < count; i++) {
+        if (decided.native[i]) movies[0]++;
+        else rows[kept++] = *sh_package_consumers_at(*consumers, i);
+    }
+    movies[1] = decided.published;
+    if (movies[0]) {
+        sh_package_consumers *next = kept ? sh_package_consumers_create(rows, kept, error, capacity) : NULL;
+        if (kept && !next) dropped = SIZE_MAX;
+        else { sh_package_consumers_free(*consumers); *consumers = next; }
+    }
+    free(rows); free(decided.native);
+    return dropped;
+}
 static pr_provider *pr_prepare_deliveries(const char *data_root, const char *source_root,
     const pr_provider *previous, int product_only, int authoring_increment, pr_inventory **inventory_out,
     int *composition_failed, const sh_package_provenance *contexts,
@@ -1673,7 +2213,12 @@ static pr_provider *pr_prepare_deliveries(const char *data_root, const char *sou
     const pr_provider *string_peer, const char *document, size_t document_length,
     char *out_error, size_t out_capacity)
 {
+    pr_native_witness *witnesses = NULL; size_t witness_count = 0;
+    pr_unchanged *unchanged = NULL; size_t unchanged_count = 0;
+    pr_shader_input *shader_inputs = NULL; size_t shader_input_count = 0;
     sh_package_sources *sources = NULL, *inventory_sources = NULL;
+    pr_left_out left_out = {0};
+    int unchanged_lost = 0, shader_inputs_lost = 0;
     sh_package_bundle **original_bundles = NULL;
     sh_package_compilation *compiled = NULL;
     sh_resource_catalog *catalog = NULL;
@@ -1692,6 +2237,7 @@ static pr_provider *pr_prepare_deliveries(const char *data_root, const char *sou
     uint64_t *prepared_tasks = NULL;
     size_t prepared_task_count = 0;
     int fresh_assets = 0, hint_ready = 0, following = 1;
+    unsigned preparation_rounds = 0;
     unsigned char hint_inventory[32];
     sh_package_native_assets *recording = NULL;
 #else
@@ -1711,6 +2257,8 @@ static pr_provider *pr_prepare_deliveries(const char *data_root, const char *sou
     sh_package_library isolated = {0};
     int library_output = 0;
     sh_package_provenance historical = {0}, authoring_contexts = {0};
+    pr_provider key_peer = {0};
+    int key_peer_ready = 0;
     sh_package_references document_roots = {0};
     uintptr_t reflection = 0;
     pr_provider *provider = NULL;
@@ -1744,6 +2292,9 @@ static pr_provider *pr_prepare_deliveries(const char *data_root, const char *sou
         environment.declaration_state = pr_declaration_state;
         environment.compose_custom = pr_compose_custom;
     }
+#ifdef SH_PACKAGE_RUNTIME_TESTING
+    if (!environment.compose_custom && g_test_block_compose) environment.compose_custom = pr_test_block_compose;
+#endif
     sources = product_only ? calloc(1, sizeof(*sources)) : source_root ?
         sh_package_sources_scan(source_root, error, sizeof(error)) :
         sh_package_sources_scan_local(data_root, pr_rejected, &rejections, error, sizeof(error));
@@ -1861,7 +2412,7 @@ static pr_provider *pr_prepare_deliveries(const char *data_root, const char *sou
     }
     if (!source_root && !product_only && previous && previous->exclusion_count &&
         !pr_exclusions_apply(previous->exclusions, previous->exclusion_count, 0, sources, inventory_sources,
-            &exclusions, &exclusion_count, &rejections)) {
+            &exclusions, &exclusion_count, &rejections, &left_out)) {
         snprintf(error, sizeof(error), "cannot retain packages left out for their own content"); goto done;
     }
     if (!source_root && !product_only && !authoring_increment && !previous) {
@@ -1869,7 +2420,7 @@ static pr_provider *pr_prepare_deliveries(const char *data_root, const char *sou
         size_t remembered_count = 0;
         pr_exclusions_load(data_root, &remembered, &remembered_count);
         int applied = !remembered_count || pr_exclusions_apply(remembered, remembered_count, 1, sources,
-            inventory_sources, &exclusions, &exclusion_count, &rejections);
+            inventory_sources, &exclusions, &exclusion_count, &rejections, &left_out);
         pr_exclusions_free(remembered, remembered_count);
         if (!applied) { snprintf(error, sizeof(error), "cannot retain packages left out for their own content"); goto done; }
     }
@@ -1929,7 +2480,7 @@ static pr_provider *pr_prepare_deliveries(const char *data_root, const char *sou
         /* Prior providers contain private linked/restoration entries. They are
          * not part of this carrier's original historical composition. */
         old_environment.previous = NULL;
-        compiled = sh_package_compile_with(sources, &old_environment, error, sizeof(error));
+        compiled = sh_package_library_compile_composed(sources, &old_environment, error, sizeof(error));
         if (!compiled) { if (composition_failed) *composition_failed = 1; goto done; }
         if (!pr_legacy_bindings(compiled, catalog, &historical) ||
             (!historical.context_count && sh_package_provenance_context_add(&historical,
@@ -2009,6 +2560,14 @@ static pr_provider *pr_prepare_deliveries(const char *data_root, const char *sou
              * library does, and a library recompile keeps its live keys. */
             {
                 const pr_provider *keys = g_current_provider ? g_current_provider : source_root ? string_peer : previous;
+                if (keys && string_peer && keys != string_peer) {
+                    if (!key_peer_ready) {
+                        if (!pr_key_bindings_add(&key_peer, keys, error, sizeof(error)) ||
+                            !pr_key_bindings_add(&key_peer, string_peer, error, sizeof(error))) goto done;
+                        key_peer_ready = 1;
+                    }
+                    keys = &key_peer;
+                }
                 native.keys = keys ? &keys->bindings : NULL;
                 native.key_groups = keys ? keys->key_groups : NULL;
             }
@@ -2048,6 +2607,8 @@ static pr_provider *pr_prepare_deliveries(const char *data_root, const char *sou
             }
             native.source.implicit = g_test_constructor ? pr_test_constructor : NULL;
             native.strings = g_test_strings;
+            if (g_test_atlas) native.atlas = pr_test_atlas;
+            if ((int)g_test_shader.renderer >= 0) native.source.shader = &g_test_shader;
 #endif
             ULONGLONG started = GetTickCount64();
             char scope_error[512], line[1280];
@@ -2103,16 +2664,30 @@ static pr_provider *pr_prepare_deliveries(const char *data_root, const char *sou
         if (sh_package_native_assets_shader_pending(native_assets)) {
             /* A missing native construction receipt is environmental work,
              * never malformed source or a conflict between package owners. */
-            char reason[sizeof(error)];
+            char reason[sizeof(error)], first[384], names[880];
+            size_t families[3] = {0};
             strcpy_s(reason, sizeof(reason), error);
-            if (!pr_prepare_native_sources(native_assets, &prepared_tasks, &prepared_task_count,
-                error, sizeof(error))) goto done;
+            if (!pr_prepare_native_batch(native_assets, &prepared_tasks, &prepared_task_count, families,
+                first, names, sizeof(names), error, sizeof(error))) goto done;
+            {
+                /* The attempt's reported reason can belong to another owner
+                 * (a malformed package isolated in the same capture); the
+                 * batch's own first need names the native state prepared. */
+                char line[1024];
+                snprintf(line, sizeof(line), "package library compile: native preparation round %u prepared %zu "
+                    "renderparm, %zu renderprogflag and %zu renderprog request(s); first need: %.330s; attempt reason: %.300s",
+                    ++preparation_rounds, families[0], families[1], families[2], first, reason);
+                backend_log(line);
+                snprintf(line, sizeof(line), "package library compile: native preparation round %u requested: %s",
+                    preparation_rounds, names);
+                backend_log(line);
+            }
             if (following) following = pr_follow_native_sources(native_assets, &prepared_tasks, &prepared_task_count);
             /* A rejection read from the package's own bytes does not depend on
              * native shader state: act on it now instead of compiling it again
              * after the preparation. Other attributions are judged afresh. */
             if (!pr_leave_out(sources, inventory_sources, invalid_package, invalid_own_bytes, SIZE_MAX, reason,
-                    &more_rejections, 1, &rejections, &unserved, &exclusions, &exclusion_count)) goto done;
+                    &more_rejections, 1, &rejections, &unserved, &exclusions, &exclusion_count, &left_out)) goto done;
             sh_package_library_free(&isolated);
             invalid_package = unserved_package = SIZE_MAX; sh_package_owners_free(&conflicted);
             error[0] = 0;
@@ -2127,7 +2702,7 @@ static pr_provider *pr_prepare_deliveries(const char *data_root, const char *sou
              * without reinstalling. Every independent package the capture
              * withdrew goes in this same step. */
             if (!pr_leave_out(sources, inventory_sources, invalid_package, invalid_own_bytes, unserved_package,
-                    error, &more_rejections, 0, &rejections, &unserved, &exclusions, &exclusion_count)) goto done;
+                    error, &more_rejections, 0, &rejections, &unserved, &exclusions, &exclusion_count, &left_out)) goto done;
             continue;
         }
         if (!sh_package_owners_count(&conflicted)) break;
@@ -2146,6 +2721,9 @@ static pr_provider *pr_prepare_deliveries(const char *data_root, const char *sou
             strcpy_s(error, sizeof(error), inventory_error[0] ? inventory_error : "cannot retain the installed package inventory");
             goto done;
         }
+        /* Accounting only: lost evidence is reported, never a reason to refuse. */
+        (*inventory_out)->left_out = left_out.units; left_out.units = NULL;
+        (*inventory_out)->left_out_lost = left_out.lost;
     }
     if (!compiled) { if (composition_failed) *composition_failed = 1; goto done; }
     if (contexts == &historical && document_roots.count &&
@@ -2176,21 +2754,56 @@ static pr_provider *pr_prepare_deliveries(const char *data_root, const char *sou
     /* A linked library holds every scope's complete closure; its unchanged
      * SnapMap originals stay native rather than being published again. */
     if (library_output) {
-        size_t native = sh_package_compilation_prune_native(compiled,
-            catalog ? pr_snapmap_serves : NULL, (void *)catalog);
+        /* An installation increment is pruned like a refresh, so it keeps the
+         * same witnesses; its view composes them before activation. */
+        if (authoring_increment && !pr_native_witnesses_capture(compiled, &witnesses, &witness_count,
+            error, sizeof(error))) goto done;
+        /* Accounting only: without the records the report says so; the
+         * library itself is unaffected. */
+        if (!pr_unchanged_capture(compiled, &unchanged, &unchanged_count)) {
+            pr_unchanged_free(unchanged, unchanged_count); unchanged = NULL; unchanged_count = 0;
+            unchanged_lost = 1;
+        }
+        shader_inputs_lost = isolated.shader_inputs_lost;
+        if (!pr_shader_inputs_capture(sources, &isolated, &shader_inputs, &shader_input_count)) {
+            pr_shader_inputs_free(shader_inputs, shader_input_count); shader_inputs = NULL; shader_input_count = 0;
+            shader_inputs_lost = 1;
+        }
+        size_t movies[2], native = pr_prune_native(compiled, catalog ? pr_snapmap_serves : NULL,
+            (void *)catalog, &isolated.consumers, movies, error, sizeof(error));
+        if (native == SIZE_MAX) goto done;
+        pr_native_witnesses_pruned(compiled, witnesses, &witness_count);
+        pr_unchanged_pruned(compiled, unchanged, &unchanged_count);
+#ifdef SH_PACKAGE_RUNTIME_TESTING
+        if (authoring_increment == PR_INCREMENT_INSTALL && g_test_install_witness) {
+            sh_package_compilation one = {0};
+            pr_native_witness *extra = NULL, *grown = NULL; size_t extra_count = 0;
+            one.resources = (sh_compiled_resource *)g_test_install_witness; one.resource_count = 1;
+            if (pr_native_witnesses_capture(&one, &extra, &extra_count, error, sizeof(error)))
+                grown = realloc(witnesses, (witness_count + extra_count + 1) * sizeof(*witnesses));
+            if (!grown) { pr_native_witnesses_free(extra, extra_count); goto done; }
+            memcpy(grown + witness_count, extra, extra_count * sizeof(*extra));
+            witnesses = grown; witness_count += extra_count; free(extra);
+        }
+#endif
         char line[256], digest[65];
         if (!pr_library_digest(compiled, digest)) strcpy_s(digest, sizeof(digest), "unavailable");
         snprintf(line, sizeof(line), "package library: %zu published resources; %zu unchanged SnapMap resources stay native; "
             "published digest %s", compiled->resource_count, native, digest);
         backend_log(line);
+        if (movies[0] || movies[1]) {
+            snprintf(line, sizeof(line), "package library: %zu unchanged SnapMap movies stay native with their stock "
+                "requests; %zu stay published for their captured bindings", movies[0], movies[1]);
+            backend_log(line);
+        }
     }
     if (!pr_cache_resources(compiled, data_root, error, sizeof(error))) goto done;
-    provider = calloc(1, sizeof(*provider));
+    provider = pr_provider_new();
     if (!provider) goto done;
     /* Remember where this compilation was scanned from so the library can be
      * recompiled later without the caller supplying the root again. */
     if (data_root && !source_root && !(provider->data_root = _strdup(data_root))) {
-        free(provider); provider = NULL; goto done;
+        pr_provider_free(provider); provider = NULL; goto done;
     }
     provider->references = 1;
     if (use_deliveries) {
@@ -2200,6 +2813,8 @@ static pr_provider *pr_prepare_deliveries(const char *data_root, const char *sou
         pr_release(provider); provider = NULL; goto done;
     }
     provider->sources = sources; provider->compiled = compiled; provider->catalog = catalog;
+    provider->native_witnesses = witnesses; provider->native_witness_count = witness_count;
+    witnesses = NULL; witness_count = 0;
     provider->bindings = isolated.bindings; memset(&isolated.bindings, 0, sizeof(isolated.bindings));
     provider->key_groups = isolated.key_groups; isolated.key_groups = NULL;
     provider->historical_bindings = historical; memset(&historical, 0, sizeof(historical));
@@ -2207,6 +2822,9 @@ static pr_provider *pr_prepare_deliveries(const char *data_root, const char *sou
     provider->consumers = isolated.consumers; isolated.consumers = NULL;
     provider->fsm_webs = isolated.fsm_webs; isolated.fsm_webs = NULL;
     provider->audio = isolated.audio; isolated.audio = NULL;
+#ifdef SH_PACKAGE_RUNTIME_TESTING
+    if (provider->audio) InterlockedIncrement(&g_test_audio_roots);
+#endif
     provider->audio_originals = audio_originals; audio_originals = NULL;
 #ifndef SH_PACKAGE_RUNTIME_TESTING
     if (recording) {
@@ -2226,11 +2844,20 @@ static pr_provider *pr_prepare_deliveries(const char *data_root, const char *sou
         pr_exclusions_store(data_root, exclusions, exclusion_count);
     provider->exclusions = exclusions; provider->exclusion_count = exclusion_count;
     exclusions = NULL; exclusion_count = 0;
+    provider->unchanged = unchanged; provider->unchanged_count = unchanged_count;
+    provider->unchanged_lost = unchanged_lost;
+    unchanged = NULL; unchanged_count = 0;
+    provider->shader_inputs = shader_inputs; provider->shader_input_count = shader_input_count;
+    provider->shader_inputs_lost = shader_inputs_lost;
+    shader_inputs = NULL; shader_input_count = 0;
     provider->unserved = unserved; unserved = NULL;
     provider->coverage = isolated.coverage; isolated.coverage = NULL;
     if (provider->coverage) backend_log(provider->coverage);
     sources = NULL; compiled = NULL; catalog = NULL;
 done:
+    pr_native_witnesses_free(witnesses, witness_count);
+    pr_unchanged_free(unchanged, unchanged_count); sh_package_sources_free(left_out.units);
+    pr_shader_inputs_free(shader_inputs, shader_input_count);
     if (!provider) snprintf(out_error, out_capacity, "%s", error[0] ? error : "package compilation could not be prepared");
     if (original_bundles) {
         for (size_t i = 0; i < delivery_count; i++) sh_package_bundle_release(original_bundles[i]);
@@ -2250,6 +2877,7 @@ done:
     sh_package_sources_free(inventory_sources); sh_package_owners_free(&conflicted);
     sh_package_provenance_free(&historical); sh_package_references_free(&document_roots);
     sh_package_provenance_free(&authoring_contexts);
+    sh_package_provenance_free(&key_peer.bindings); free(key_peer.key_groups);
 #ifndef SH_PACKAGE_RUNTIME_TESTING
     sh_strids_reservation_free(strings);
     free(prepared_tasks);
@@ -2305,6 +2933,23 @@ static int pr_lease_binding(const pr_occurrence_lease *lease,
     return !strcmp(lease->family, binding->family) && !strcmp(lease->original, binding->original) &&
         !strcmp(lease->name, binding->name);
 }
+/* The root that supplies one binding in one context. A composite view retains
+ * every audio root it serves, including roots it retained through earlier
+ * leases, so a lease bound to the view would keep all of them for as long as
+ * this occurrence lives. The first root in the view's precedence whose own
+ * bindings hold the pair owns its resources and audio. A pair whose root serves
+ * no audio is not among them: the lease keeps the view, which holds the pair's
+ * complete closure, and later views take from it only the audio roots of what
+ * they keep (pr_audio_retained_add). */
+static const pr_provider *pr_lease_root(const pr_provider *owner,
+    const sh_package_provenance_binding *binding, const sh_package_provenance_context *context)
+{
+    for (size_t i = 0; i < owner->audio_source_count; i++) {
+        const pr_provider *root = owner->audio_sources[i];
+        if (root != owner && pr_binding_context(&root->bindings, binding, context)) return root;
+    }
+    return owner;
+}
 /* Called with a stable provider under g_refresh_lock. Preparation, not a native
  * copy/destructor callback. A snapshot attaches every exact selected pair. */
 static int pr_capture_leases(const pr_provider *provider, sh_package_occurrence_snapshot *snapshot,
@@ -2333,6 +2978,7 @@ static int pr_capture_leases(const pr_provider *provider, sh_package_occurrence_
                     }
             }
             if (!owner) goto unlock;
+            owner = pr_lease_root(owner, binding, context);
             for (lease = g_leases; lease; lease = lease->next)
                 if (lease->provider == owner && pr_context_equal(context, lease->context.contexts) &&
                     pr_lease_binding(lease, binding)) break;
@@ -2379,6 +3025,345 @@ static int pr_resource_family(const sh_compiled_resource *resource, const char *
         if (identity.type && !_stricmp(identity.type, family)) return 1;
     }
     return 0;
+}
+#ifdef SH_PACKAGE_RUNTIME_TESTING
+static unsigned g_consumer_allocation_fault;
+void sh_package_runtime_test_consumer_allocation_fault(unsigned at)
+{ g_consumer_allocation_fault = at; }
+#endif
+static void *pr_consumer_allocate(size_t bytes)
+{
+#ifdef SH_PACKAGE_RUNTIME_TESTING
+    if (g_consumer_allocation_fault && !--g_consumer_allocation_fault) return NULL;
+#endif
+    return calloc(1, bytes);
+}
+static char *pr_consumer_copy(const char *text)
+{
+    size_t bytes = strlen(text) + 1;
+    char *copy = pr_consumer_allocate(bytes);
+    if (copy) memcpy(copy, text, bytes);
+    return copy;
+}
+static const sh_compiled_resource *pr_movie_resource(const pr_provider *provider,
+    const char *family, const char *name)
+{
+    for (size_t i = 0; provider && provider->compiled && i < provider->compiled->resource_count; i++)
+        if (sh_package_resource_native_matches(provider->compiled->resources + i, family, name))
+            return provider->compiled->resources + i;
+    return NULL;
+}
+static const char *pr_movie_string(const pr_provider *provider, const char *name)
+{
+    for (size_t i = 0; i < provider->compiled->policy.localized_count; i++)
+        if (!strcmp(provider->compiled->policy.localized[i].key, name))
+            return provider->compiled->policy.localized[i].mapping;
+    return NULL;
+}
+static int pr_output_equal(const sh_package_compilation *a, const sh_compiled_resource *ar,
+    const sh_package_compilation *b, const sh_compiled_resource *br, char *error, size_t capacity);
+static int pr_movie_plan_equal(const pr_provider *a, const sh_package_consumer *x,
+    const pr_provider *b, const sh_package_consumer *y)
+{
+    const sh_compiled_resource *ar = pr_movie_resource(a, x->family, x->name);
+    const sh_compiled_resource *br = pr_movie_resource(b, y->family, y->name);
+    char error[256] = "";
+    if (strcmp(x->family, y->family) || strcmp(x->name, y->name) || x->count != y->count ||
+        !ar || !br || pr_output_equal(a->compiled, ar, b->compiled, br, error, sizeof(error)) != 1) return 0;
+    for (size_t i = 0; i < x->count; i++) {
+        const sh_package_consumer_target *xt = x->targets + i;
+        const sh_package_consumer_target *yt = sh_package_consumer_find(y, xt->slot);
+        if (!yt || strcmp(xt->family, yt->family) || strcmp(xt->name, yt->name)) return 0;
+        if (!strcmp(xt->family, "string")) {
+            const char *as = pr_movie_string(a, xt->name), *bs = pr_movie_string(b, yt->name);
+            if (!as || !bs || strcmp(as, bs)) return 0;
+        }
+    }
+    return 1;
+}
+/* A refused movie record names its consumer plan and every compiled resource
+ * that carries the movie's path, so the refusal's cause is visible in the log. */
+static void pr_movie_refusal_log(const pr_provider *provider, const char *movie)
+{
+    char line[1024];
+    for (size_t i = 0; i < sh_package_consumers_count(provider->consumers); i++) {
+        const sh_package_consumer *owner = sh_package_consumers_at(provider->consumers, i);
+        if (strcmp(owner->name, movie)) continue;
+        snprintf(line, sizeof(line), "movie %s: consumer %zu (%s) has %zu target(s)", movie, i, owner->family, owner->count);
+        backend_log(line);
+        for (size_t t = 0; t < owner->count && t < 64; t++) {
+            snprintf(line, sizeof(line), "movie %s: target %zu: %s -> %s %s", movie, t,
+                owner->targets[t].slot, owner->targets[t].family, owner->targets[t].name);
+            backend_log(line);
+        }
+    }
+    for (size_t i = 0; provider->compiled && i < provider->compiled->resource_count; i++) {
+        const sh_compiled_resource *r = provider->compiled->resources + i;
+        int carries = (r->engine_path && !_stricmp(r->engine_path, movie)) ||
+            (r->original_path && !_stricmp(r->original_path, movie));
+        for (size_t n = 0; !carries && n < sh_package_resource_native_count(r); n++) {
+            sh_package_native_identity identity = sh_package_resource_native_at(r, n);
+            carries = identity.name && !_stricmp(identity.name, movie);
+        }
+        if (!carries) continue;
+        snprintf(line, sizeof(line), "movie %s: compiled resource %s (original %s, native_original %d, restored %d)",
+            movie, r->engine_path ? r->engine_path : "-", r->original_path ? r->original_path : "-",
+            r->native_original, r->restored_original);
+        backend_log(line);
+    }
+}
+/* g_refresh_lock owns registry birth/collection. Only immutable plan checks and
+ * allocation happen here, before guard/native publication begins. Callbacks
+ * never append nodes and cannot introduce an unprepared plan. */
+static int pr_movie_prepare(pr_provider *provider, char *error, size_t capacity)
+{
+    size_t count = 0, at = 0;
+    const char *movie = NULL, *reason = NULL, *detail = NULL;
+    if (provider->movies) return 1;
+    for (size_t i = 0; i < sh_package_consumers_count(provider->consumers); i++) {
+        const sh_package_consumer *owner = sh_package_consumers_at(provider->consumers, i);
+        if (!sh_package_movie_owner(owner->family, owner->name)) continue;
+        movie = owner->name;
+        if (!sh_package_movie_plan_valid(owner)) { reason = "its consumer plan is not a valid movie plan"; goto invalid; }
+        if (!pr_movie_resource(provider, owner->family, owner->name)) { reason = "no compiled resource serves it"; goto invalid; }
+        for (size_t t = 0; t < owner->count; t++)
+            if (!strcmp(owner->targets[t].family, "string") && !pr_movie_string(provider, owner->targets[t].name)) {
+                reason = "a string it requests has no localized mapping:"; detail = owner->targets[t].name; goto invalid;
+            }
+        /* Published catalog joins already reject different complete plans.
+         * Retired registry owners also remain authoritative while borrowed. */
+        for (const pr_provider *p = g_movie_providers; p; p = p->movie_next)
+            for (size_t m = 0; m < p->movie_count; m++)
+                if (!strcmp(p->movies[m].binding->name, owner->name) &&
+                    !pr_movie_plan_equal(provider, owner, p, p->movies[m].binding)) {
+                    reason = "a retained movie of that name has a different plan"; goto invalid;
+                }
+        count++;
+    }
+    if (!count) return 1;
+    if (count > SIZE_MAX / sizeof(*provider->movies)) goto allocation;
+    pr_movie_record *records = pr_consumer_allocate(count * sizeof(*records));
+    if (!records) goto allocation;
+    for (size_t i = 0; i < sh_package_consumers_count(provider->consumers); i++) {
+        const sh_package_consumer *owner = sh_package_consumers_at(provider->consumers, i);
+        if (!sh_package_movie_owner(owner->family, owner->name)) continue;
+        pr_movie_record *record = records + at++;
+        record->binding = owner; record->selector.provider = provider;
+        record->selector.family = (char *)owner->family; record->selector.name = (char *)owner->name;
+        record->selector.pooled = 1;
+    }
+    provider->movies = records; provider->movie_count = count;
+    AcquireSRWLockExclusive(&g_lease_lock);
+    for (size_t i = 0; i < count; i++) {
+        records[i].selector.next = g_selectors; g_selectors = &records[i].selector;
+    }
+    provider->movie_next = g_movie_providers; g_movie_providers = pr_retain(provider);
+    ReleaseSRWLockExclusive(&g_lease_lock);
+    return 1;
+invalid:
+    snprintf(error, capacity, "movie %s: %s%s%s", movie, reason, detail ? " " : "", detail ? detail : "");
+    pr_movie_refusal_log(provider, movie);
+    return 0;
+allocation:
+    snprintf(error, capacity, "cannot reserve immutable movie lifetime records"); return 0;
+}
+/* With refresh exclusive, remove registry-only providers whose last entered
+ * frame and instance have ended. Never release an owner under the callback
+ * lock: parent/audio destruction may run other lifetime boundaries. */
+static void pr_collect_movies(void)
+{
+    for (;;) {
+        pr_provider *retired = NULL;
+        AcquireSRWLockExclusive(&g_lease_lock);
+        for (pr_provider **slot = &g_movie_providers; *slot; slot = &(*slot)->movie_next) {
+            pr_provider *provider = *slot;
+            if (InterlockedCompareExchange(&provider->references, 0, 0) != 1) continue;
+            size_t i;
+            for (i = 0; i < provider->movie_count; i++)
+                if (provider->movies[i].instances || provider->movies[i].frames) break;
+            if (i != provider->movie_count) continue;
+            *slot = provider->movie_next; provider->movie_next = NULL;
+            for (sh_package_selector_hold **node = &g_selectors; *node; ) {
+                if ((*node)->pooled && (*node)->provider == provider) *node = (*node)->next;
+                else node = &(*node)->next;
+            }
+            retired = provider; break;
+        }
+        ReleaseSRWLockExclusive(&g_lease_lock);
+        if (!retired) break;
+        pr_release(retired); /* May make a parent registry-only; repeat. */
+    }
+}
+static pr_movie_record *pr_movie_token(const sh_package_movie_hold *hold)
+{
+    if (!hold || !hold->token || !hold->binding) return NULL;
+    for (pr_provider *p = g_movie_providers; p; p = p->movie_next)
+        for (size_t i = 0; i < p->movie_count; i++)
+            if (hold->token == p->movies + i && hold->binding == p->movies[i].binding) return p->movies + i;
+    return NULL;
+}
+static void pr_movie_live(pr_movie_record *record)
+{
+    LONG live = record->instances || record->frames;
+    LONG previous = InterlockedExchange(&record->selector.live, live);
+    if (previous != live) {
+        InterlockedIncrement(&g_lease_generation);
+        if (!previous && live) InterlockedIncrement(&g_movie_births);
+    }
+}
+int sh_package_runtime_movie_begin(const char *name, sh_package_movie_hold *out)
+{
+    pr_movie_record *record = NULL;
+    int result = -1;
+    if (!name || !*name || !out || out->token || out->binding) return -1;
+    AcquireSRWLockShared(&g_lock);
+    const sh_package_consumer *binding = sh_package_consumers_find(
+        g_current_provider ? g_current_provider->consumers : NULL, "file", name);
+    int owned = binding || pr_movie_resource(g_current_provider, "file", name);
+    AcquireSRWLockExclusive(&g_lease_lock);
+    /* Entered old owners remain exact even while their serving generation
+     * changes or is absent. All same-name plans were compared before publish. */
+    for (pr_provider *p = g_movie_providers; p; p = p->movie_next)
+        for (size_t i = 0; i < p->movie_count; i++)
+            if ((p->movies[i].instances || p->movies[i].frames) &&
+                !strcmp(p->movies[i].binding->name, name)) record = p->movies + i;
+    if (!binding) {
+        if (record) goto enter;
+        result = owned ? -1 : 0;
+        /* A live private movie can never become an inherited stock frame. */
+        for (pr_provider *p = g_movie_providers; !result && p; p = p->movie_next)
+            for (size_t i = 0; i < p->movie_count; i++)
+                if (!strcmp(p->movies[i].binding->name, name)) { result = -1; break; }
+        goto done;
+    }
+    if (!sh_package_movie_owner(binding->family, binding->name)) goto done;
+    if (!record)
+        for (size_t i = 0; i < g_current_provider->movie_count; i++)
+            if (g_current_provider->movies[i].binding == binding) { record = g_current_provider->movies + i; break; }
+enter:
+    if (!record || record->instances == SIZE_MAX || record->frames == SIZE_MAX) goto done;
+    record->instances++; record->frames++; pr_movie_live(record);
+    out->binding = record->binding; out->token = record; result = 1;
+done:
+    ReleaseSRWLockExclusive(&g_lease_lock); ReleaseSRWLockShared(&g_lock); return result;
+}
+int sh_package_runtime_movie_borrow(const char *name, sh_package_movie_hold *out)
+{
+    int result = 0;
+    if (!name || !*name || !out || out->token || out->binding) return -1;
+    AcquireSRWLockShared(&g_lock);
+    int owned = pr_movie_resource(g_current_provider, "file", name) != NULL ||
+        sh_package_consumers_find(g_current_provider ? g_current_provider->consumers : NULL, "file", name) != NULL;
+    AcquireSRWLockExclusive(&g_lease_lock);
+    for (pr_provider *p = g_movie_providers; p; p = p->movie_next) {
+        for (size_t i = 0; i < p->movie_count; i++) {
+            pr_movie_record *record = p->movies + i;
+            if (strcmp(record->binding->name, name)) continue;
+            result = -1;
+            if (!record->instances || record->frames == SIZE_MAX) continue;
+            record->frames++; pr_movie_live(record);
+            out->binding = record->binding; out->token = record; result = 1; goto done;
+        }
+    }
+    if (owned) result = -1;
+done:
+    ReleaseSRWLockExclusive(&g_lease_lock); ReleaseSRWLockShared(&g_lock); return result;
+}
+void sh_package_runtime_movie_end_instance(const sh_package_movie_hold *hold)
+{
+    AcquireSRWLockExclusive(&g_lease_lock);
+    pr_movie_record *record = pr_movie_token(hold);
+    if (record && record->frames && record->instances) { record->instances--; pr_movie_live(record); }
+    ReleaseSRWLockExclusive(&g_lease_lock);
+}
+void sh_package_runtime_movie_release(sh_package_movie_hold *hold)
+{
+    if (!hold) return;
+    AcquireSRWLockExclusive(&g_lease_lock);
+    pr_movie_record *record = pr_movie_token(hold);
+    if (record && record->frames) { record->frames--; pr_movie_live(record); }
+    memset(hold, 0, sizeof(*hold));
+    ReleaseSRWLockExclusive(&g_lease_lock);
+}
+#ifdef SH_PACKAGE_RUNTIME_TESTING
+unsigned sh_package_runtime_test_consumer_allocation_remaining(void)
+{ return g_consumer_allocation_fault; }
+size_t sh_package_runtime_test_movie_records(size_t *providers, size_t *live)
+{
+    size_t count = 0, roots = 0, active = 0;
+    AcquireSRWLockShared(&g_refresh_lock); AcquireSRWLockExclusive(&g_lease_lock);
+    for (const pr_provider *p = g_movie_providers; p; p = p->movie_next) {
+        roots++; count += p->movie_count;
+        for (size_t i = 0; i < p->movie_count; i++) active += !!(p->movies[i].instances || p->movies[i].frames);
+    }
+    ReleaseSRWLockExclusive(&g_lease_lock); ReleaseSRWLockShared(&g_refresh_lock);
+    if (providers) *providers = roots;
+    if (live) *live = active;
+    return count;
+}
+size_t sh_package_runtime_test_audio_roots(void)
+{ return (size_t)InterlockedCompareExchange(&g_test_audio_roots, 0, 0); }
+size_t sh_package_runtime_test_providers(void)
+{ return (size_t)InterlockedCompareExchange(&g_test_providers, 0, 0); }
+size_t sh_package_runtime_test_library_depth(void)
+{
+    size_t depth = 0;
+    AcquireSRWLockShared(&g_lock);
+    for (const pr_provider *p = g_library_provider; p && depth < 4096; p = p->parent) depth++;
+    ReleaseSRWLockShared(&g_lock);
+    return depth;
+}
+size_t sh_package_runtime_test_owned_bytes(void)
+{
+    size_t bytes = 0;
+    AcquireSRWLockShared(&g_test_live_lock);
+    for (size_t i = 0; i < sizeof(g_test_live) / sizeof(*g_test_live); i++) {
+        const sh_package_compilation *compiled = g_test_live[i] ? g_test_live[i]->compiled : NULL;
+        for (size_t r = 0; compiled && r < compiled->resource_count; r++)
+            if (compiled->resources[r].body) bytes += compiled->resources[r].body_length;
+    }
+    ReleaseSRWLockShared(&g_test_live_lock);
+    return bytes;
+}
+#endif
+int sh_package_runtime_consumer_retain(const char *family, const char *name,
+    sh_package_consumer_hold *out, char *error, size_t capacity)
+{
+    sh_package_selector_hold *hold = NULL;
+    int result = -1;
+    if (error && capacity) *error = 0;
+    if (!out || out->provider || out->binding || out->lifetime ||
+        !family || !*family || !name || !*name) {
+        if (error && capacity) snprintf(error, capacity, "invalid native consumer lifetime request");
+        return -1;
+    }
+    /* The serving generation and its retention obligation must be captured
+     * together. A metadata acquire followed by a selector acquire can straddle
+     * publication and retain another movie's scope. */
+    if (!g_activation_callback) AcquireSRWLockExclusive(&g_refresh_lock);
+    AcquireSRWLockShared(&g_lock);
+    const sh_package_consumer *binding = sh_package_consumers_find(
+        g_current_provider ? g_current_provider->consumers : NULL, family, name);
+    if (!binding) { result = 0; goto done; }
+    if ((!g_usable && !g_activation_callback) || !g_current_provider->compiled) goto done;
+    size_t root;
+    for (root = 0; root < g_current_provider->compiled->resource_count; root++)
+        if (sh_package_resource_native_matches(g_current_provider->compiled->resources + root,
+            binding->family, binding->name)) break;
+    if (root == g_current_provider->compiled->resource_count) goto done;
+    hold = pr_consumer_allocate(sizeof(*hold));
+    if (!hold) goto done;
+    hold->family = pr_consumer_copy(binding->family); hold->name = pr_consumer_copy(binding->name);
+    if (!hold->family || !hold->name) { free(hold->family); free(hold->name); free(hold); hold = NULL; goto done; }
+    hold->provider = pr_retain(g_current_provider); hold->live = 1;
+    hold->next = g_selectors; g_selectors = hold;
+    out->provider = pr_retain(g_current_provider); out->binding = binding; out->lifetime = hold;
+    InterlockedIncrement(&g_lease_generation); result = 1;
+done:
+    ReleaseSRWLockShared(&g_lock);
+    if (!g_activation_callback) ReleaseSRWLockExclusive(&g_refresh_lock);
+    if (result < 0 && error && capacity) snprintf(error, capacity, "cannot retain native consumer resource lifetime");
+    return result;
 }
 sh_package_selector_hold *sh_package_runtime_selectors_retain(const char *family, char *error, size_t capacity)
 {
@@ -2430,9 +3415,10 @@ static void pr_collect_leases(void)
     sh_package_selector_hold **selector = &g_selectors;
     while (*selector) {
         sh_package_selector_hold *hold = *selector;
-        if (InterlockedCompareExchange(&hold->live, 0, 0)) { selector = &hold->next; continue; }
-        *selector = hold->next; pr_release(hold->provider); free(hold->family); free(hold);
+        if (hold->pooled || InterlockedCompareExchange(&hold->live, 0, 0)) { selector = &hold->next; continue; }
+        *selector = hold->next; pr_release(hold->provider); free(hold->family); free(hold->name); free(hold);
     }
+    pr_collect_movies();
 }
 
 static int pr_lease_context_live(const pr_provider *provider, const sh_package_provenance_context *context,
@@ -2506,14 +3492,71 @@ typedef struct pr_retained_selection {
     const pr_provider *provider;
     unsigned char *resources;
     sh_package_owners owners;
+    sh_package_owners suppliers; /* only the packages that supply selected resources */
 } pr_retained_selection;
-enum { PR_RETAIN_OCCURRENCES, PR_RETAIN_AUTHORING, PR_RETAIN_SELECTORS };
+static void pr_retained_free(pr_retained_selection *selection)
+{
+    free(selection->resources); selection->resources = NULL;
+    sh_package_owners_free(&selection->owners); sh_package_owners_free(&selection->suppliers);
+}
+enum { PR_RETAIN_OCCURRENCES, PR_RETAIN_AUTHORING, PR_RETAIN_SELECTORS,
+    PR_RETAIN_MOVIE_ROLLBACK };
+
+/* Reserve every prospective movie root before forward visibility. Counts may
+ * rise during activation; rejection must not allocate to keep that new owner. */
+static int pr_reserved_movie_resource(const pr_provider *provider, const sh_compiled_resource *resource)
+{
+    for (size_t i = 0; i < provider->movie_count; i++)
+        if (sh_package_resource_native_matches(resource, provider->movies[i].binding->family,
+            provider->movies[i].binding->name)) return 1;
+    /* Dynamic ActionScript requests can be consumer-plan edges rather than
+     * direct physical movie dependencies. Keep their exact resource closures. */
+    for (size_t i = 0; i < provider->movie_count; i++) {
+        const sh_package_consumer *movie = provider->movies[i].binding;
+        for (size_t t = 0; t < movie->count; t++)
+            if (strcmp(movie->targets[t].family, "string") &&
+                sh_package_resource_native_matches(resource, movie->targets[t].family,
+                    movie->targets[t].name)) return 1;
+    }
+    return 0;
+}
 
 static int pr_selector_resource(const pr_provider *provider, const sh_compiled_resource *resource)
 {
     for (const sh_package_selector_hold *hold = g_selectors; hold; hold = hold->next)
         if (hold->provider == provider && InterlockedCompareExchange((volatile LONG *)&hold->live, 0, 0) &&
-            pr_resource_family(resource, hold->family)) return 1;
+            (hold->name ? sh_package_resource_native_matches(resource, hold->family, hold->name) :
+                pr_resource_family(resource, hold->family))) return 1;
+    return 0;
+}
+static int pr_selector_all_owners(const pr_provider *provider)
+{
+    /* Preserve existing family-selector provenance. Named consumers retain only
+     * owners reached by the exact selected resources and bound dependencies. */
+    for (const sh_package_selector_hold *hold = g_selectors; hold; hold = hold->next)
+        if (hold->provider == provider && !hold->name &&
+            InterlockedCompareExchange((volatile LONG *)&hold->live, 0, 0)) return 1;
+    return 0;
+}
+static int pr_selector_movie_only(const pr_provider *provider)
+{
+    int found = 0;
+    for (const sh_package_selector_hold *hold = g_selectors; hold; hold = hold->next) {
+        if (hold->provider != provider || !InterlockedCompareExchange((volatile LONG *)&hold->live, 0, 0)) continue;
+        if (!hold->name || !sh_package_movie_owner(hold->family, hold->name)) return 0;
+        found = 1;
+    }
+    return found;
+}
+static int pr_consumer_string(const sh_package_consumers *consumers, const char *key)
+{
+    for (size_t i = 0; i < sh_package_consumers_count(consumers); i++) {
+        const sh_package_consumer *consumer = sh_package_consumers_at(consumers, i);
+        for (size_t t = 0; t < consumer->count; t++) {
+            const sh_package_consumer_target *target = consumer->targets + t;
+            if (!strcmp(target->family, "string") && !strcmp(target->name, key)) return 1;
+        }
+    }
     return 0;
 }
 static int pr_retained_select(const pr_provider *provider, const sh_package_provenance *selected, int mode,
@@ -2528,10 +3571,13 @@ static int pr_retained_select(const pr_provider *provider, const sh_package_prov
     out->resources = calloc(count ? count : 1, 1);
     queue = malloc((count ? count : 1) * sizeof(*queue));
     if (!out->resources || !queue) goto done;
+    int all_owners = mode == PR_RETAIN_AUTHORING ||
+        (mode == PR_RETAIN_SELECTORS && pr_selector_all_owners(provider));
     for (size_t i = 0; i < provider->sources->package_count; i++)
-        if ((mode != PR_RETAIN_OCCURRENCES || pr_lease_owner(provider, i, selected)) &&
+        if ((all_owners || (mode == PR_RETAIN_OCCURRENCES && pr_lease_owner(provider, i, selected))) &&
             !sh_package_owners_add(&out->owners, i)) goto done;
-    for (size_t i = 0; i < count; i++) if (mode == PR_RETAIN_SELECTORS ?
+    for (size_t i = 0; i < count; i++) if (mode == PR_RETAIN_MOVIE_ROLLBACK ?
+        pr_reserved_movie_resource(provider, provider->compiled->resources + i) : mode == PR_RETAIN_SELECTORS ?
         pr_selector_resource(provider, provider->compiled->resources + i) : (mode == PR_RETAIN_AUTHORING ?
         sh_package_owners_count(&provider->compiled->resources[i].owners) != 0 :
         pr_lease_resource(provider, provider->compiled->resources + i, selected))) {
@@ -2539,12 +3585,12 @@ static int pr_retained_select(const pr_provider *provider, const sh_package_prov
     }
     while (head < tail) {
         const sh_compiled_resource *resource = provider->compiled->resources + queue[head++];
-        if (!sh_package_owners_union(&out->owners, &resource->owners) ||
-            !sh_package_owners_union(&out->owners, &resource->gameplay_owners)) goto done;
+        if (!sh_package_owners_union(&out->suppliers, &resource->owners) ||
+            !sh_package_owners_union(&out->suppliers, &resource->gameplay_owners)) goto done;
         if (resource->source != SIZE_MAX && (resource->source >= provider->sources->file_count ||
-            !sh_package_owners_add(&out->owners, provider->sources->files[resource->source].owner))) goto done;
+            !sh_package_owners_add(&out->suppliers, provider->sources->files[resource->source].owner))) goto done;
         for (size_t f = 0; f < resource->source_count; f++)
-            if (resource->sources[f] >= provider->sources->file_count || !sh_package_owners_add(&out->owners,
+            if (resource->sources[f] >= provider->sources->file_count || !sh_package_owners_add(&out->suppliers,
                 provider->sources->files[resource->sources[f]].owner)) goto done;
         for (size_t d = 0; d < resource->bound_dependency_count; d++) {
             const sh_compiled_resource *target = sh_package_compilation_find(provider->compiled, resource->bound_dependencies[d]);
@@ -2556,10 +3602,10 @@ static int pr_retained_select(const pr_provider *provider, const sh_package_prov
             if (!out->resources[index]) { out->resources[index] = 1; queue[tail++] = index; }
         }
     }
-    ok = 1;
+    ok = sh_package_owners_union(&out->owners, &out->suppliers);
 done:
     free(queue);
-    if (!ok) { free(out->resources); out->resources = NULL; sh_package_owners_free(&out->owners); }
+    if (!ok) pr_retained_free(out);
     return ok;
 }
 static int pr_lease_material(void *context, const char *name)
@@ -2634,6 +3680,23 @@ static int pr_original_editor_slot(const sh_compiled_resource *current,
         !sh_package_owners_count(&original->gameplay_owners) &&
         (!strcmp(original->type, "entitydef") || !strncmp(original->type, "snapeditor", 10) ||
             !strncmp(original->type, "snappropertyinspector", 21));
+}
+
+/* Whether every authored file of an increment row repeats the bytes of a file
+ * the view's row already lists; the whole compile lists such shared copies
+ * among that row's sources. */
+static int pr_shared_files(const sh_compiled_resource *existing, const sh_package_sources *view_sources,
+    const sh_compiled_resource *resource, const sh_package_sources *sources)
+{
+    if (!resource->source_count) return 0;
+    for (size_t f = 0; f < resource->source_count; f++) {
+        const sh_package_source_file *file = sources->files + resource->sources[f];
+        size_t k = 0;
+        while (k < existing->source_count && (view_sources->files[existing->sources[k]].length != file->length ||
+            memcmp(view_sources->files[existing->sources[k]].digest, file->digest, 32))) k++;
+        if (k == existing->source_count) return 0;
+    }
+    return 1;
 }
 
 /* The immutable origin catalog supplies the context. Served byte equality and
@@ -2753,11 +3816,13 @@ static int pr_resource_equal(const sh_package_compilation *a, const sh_compiled_
 /* One output whatever its presented text: compared as pr_resource_equal does
  * (declaration identity, sound events, body bytes or the sealed/cached payload
  * identity), but presented text is display-only by contract
- * (package_compiler.h), written only by the library's toybox label alias. The
- * library aliases an installed row; a map's own historical context, which
- * composes the map's packages together, does not. Installation admission and
- * retained occurrences compare that way; whichever copy the view serves keeps
- * its own text, and publication still reports the text it changes. */
+ * (package_compiler.h), written only by the toybox label alias. The library
+ * aliases an installed row from its owning package; a map's own historical
+ * context, which composes the map's packages together, aliases it from the
+ * package files its source list names, so the two aliases may differ.
+ * Installation admission and retained occurrences compare that way; whichever
+ * copy the view serves keeps its own text, and publication still reports the
+ * text it changes. */
 static int pr_output_equal(const sh_package_compilation *a, const sh_compiled_resource *ar,
     const sh_package_compilation *b, const sh_compiled_resource *br, char *error, size_t capacity)
 {
@@ -2814,6 +3879,64 @@ static int pr_remap_owners(sh_package_owners *out, const sh_package_owners *owne
         sh_package_owners_contains(owners, i) && !sh_package_owners_add(out, map[i])) return 0;
     return 1;
 }
+/* Whether two source sets name the same package: its exact tree and inventoried bytes. */
+static int pr_same_package(const sh_package_sources *a, size_t ap, const sh_package_sources *b, size_t bp)
+{
+    const unsigned char *at = sh_package_source_tree(a, ap), *bt = sh_package_source_tree(b, bp);
+    return at && bt && !memcmp(at, bt, 32) && !memcmp(a->fingerprints[ap], b->fingerprints[bp], 32);
+}
+/* An authored row whose whole-link meaning its own lineage decides. A designed
+ * private editor alias stays the installation's own (pr_plan_authoring_served). */
+static int pr_lineage_bound(const sh_compiled_resource *resource)
+{
+    return resource->source_count && !(resource->original_path &&
+        !strncmp(resource->original_path, "generated/decls/snapeditor", 26));
+}
+/* Whether row compiles resource's own declaration: declared at the same
+ * original path, listing each authored file of it (the same package's file at
+ * the same relative path with the same bytes), and compiled with each of its
+ * owners. Equal bytes from another path or package are another declaration,
+ * whose compiled bindings may differ even where its output bytes are equal. */
+static int pr_lineage_row(const sh_compiled_resource *row, const sh_package_sources *row_sources,
+    const sh_compiled_resource *resource, const sh_package_sources *sources)
+{
+    if (strcmp(row->original_path ? row->original_path : row->engine_path,
+        resource->original_path ? resource->original_path : resource->engine_path)) return 0;
+    for (size_t f = 0; f < resource->source_count; f++) {
+        const sh_package_source_file *file = sources->files + resource->sources[f];
+        size_t k = 0;
+        for (; k < row->source_count; k++) {
+            const sh_package_source_file *listed = row_sources->files + row->sources[k];
+            if (listed->length == file->length && !memcmp(listed->digest, file->digest, 32) &&
+                !strcmp(listed->relative, file->relative) &&
+                pr_same_package(row_sources, listed->owner, sources, file->owner)) break;
+        }
+        if (k == row->source_count) return 0;
+    }
+    for (size_t p = 0; p < sources->package_count; p++) if (sh_package_owners_contains(&resource->owners, p)) {
+        size_t q = 0;
+        while (q < row_sources->package_count && !(sh_package_owners_contains(&row->owners, q) &&
+            pr_same_package(row_sources, q, sources, p))) q++;
+        if (q == row_sources->package_count) return 0;
+    }
+    return 1;
+}
+/* The view row that compiles resource's own lineage (pr_lineage_row),
+ * preferring the one at its path: the whole link's composition of the same
+ * files (a shared web, or a weapon naming its own copy there). */
+static const sh_compiled_resource *pr_composing_row(const sh_package_compilation *view,
+    const sh_compiled_resource *existing, const sh_compiled_resource *resource, const sh_package_sources *sources)
+{
+    if (!pr_lineage_bound(resource)) return NULL;
+    if (existing && pr_lineage_row(existing, view->sources, resource, sources)) return existing;
+    for (size_t i = 0; i < view->resource_count; i++)
+        if (view->resources + i != existing && pr_lineage_row(view->resources + i, view->sources, resource, sources))
+            return view->resources + i;
+    return NULL;
+}
+static int pr_view_retained_link(pr_provider *view, const pr_provider *provider,
+    size_t retained_begin, const sh_package_provenance *promoted, const sh_package_provenance *admitted,
+    int mode, int *metadata_needed, int whole, int *recompose, char *error, size_t capacity);
 /* Add one provider's live contexts using owned bytes/handles only. A complete
  * source is copied once per exact original+compiler tree in the resulting view;
  * equal resources keep independent occurrence provenance and source ownership. */
@@ -2821,11 +3944,26 @@ static int pr_view_retained(pr_provider *view, const pr_provider *provider,
     size_t retained_begin, const sh_package_provenance *promoted,
     const sh_package_provenance *admitted, int mode, int *metadata_needed, char *error, size_t capacity)
 {
+    return pr_view_retained_link(view, provider, retained_begin, promoted, admitted, mode, metadata_needed,
+        0, NULL, error, capacity);
+}
+/* An installation's authoring increment links its added packages alone. A path
+ * the served library composes from other packages (the player hands web every
+ * weapon subweb joins) has no additive meaning there: with recompose, the
+ * increment stops and asks for the whole link instead of refusing. Over that
+ * whole library (whole), the whole compile serves every authored file, so a
+ * row it composes from the same files supersedes the increment's partial one
+ * and joins its sources. Other modes and callers keep the retained guard. */
+static int pr_view_retained_link(pr_provider *view, const pr_provider *provider,
+    size_t retained_begin, const sh_package_provenance *promoted, const sh_package_provenance *admitted,
+    int mode, int *metadata_needed, int whole, int *recompose, char *error, size_t capacity)
+{
     const sh_package_sources *originals = provider->authored_sources ? provider->authored_sources : provider->sources;
     sh_package_sources empty = {0}, *extra = NULL, *sources = NULL, *authored = NULL;
     sh_package_compilation *compiled = NULL;
     sh_package_resource_projection *projections = NULL;
     sh_compiled_resource *remapped = NULL;
+    size_t *joined = NULL, joined_count = 0;
     const sh_compiled_resource **inputs = NULL;
     sh_package_bundle **bundles = NULL;
     sh_virtual_material_view *filtered = NULL, *materials = NULL;
@@ -2840,7 +3978,7 @@ static int pr_view_retained(pr_provider *view, const pr_provider *provider,
         provider->sources->package_count > SIZE_MAX / sizeof(*owners) ||
         provider->sources->file_count > SIZE_MAX / sizeof(*files)) goto done;
     if (!pr_retained_select(provider, admitted, mode, &selected, error, capacity)) goto done;
-    pr_lease_fsm_declarations(&selected);
+    if (mode != PR_RETAIN_MOVIE_ROLLBACK) pr_lease_fsm_declarations(&selected);
     owners = malloc((provider->sources->package_count ? provider->sources->package_count : 1) * sizeof(*owners));
     files = malloc((provider->sources->file_count ? provider->sources->file_count : 1) * sizeof(*files));
     extra = sh_package_sources_join(originals, &empty, error, capacity);
@@ -2877,7 +4015,8 @@ static int pr_view_retained(pr_provider *view, const pr_provider *provider,
     projections = calloc(maximum ? maximum : 1, sizeof(*projections));
     inputs = calloc(maximum ? maximum * 2 : 1, sizeof(*inputs));
     remapped = calloc(provider->compiled->resource_count ? provider->compiled->resource_count : 1, sizeof(*remapped));
-    if (!projections || !inputs || !remapped) goto done;
+    joined = calloc(provider->compiled->resource_count ? provider->compiled->resource_count * 2 : 1, sizeof(*joined));
+    if (!projections || !inputs || !remapped || !joined) goto done;
     for (size_t i = 0; i < view->compiled->resource_count; i++) {
         const sh_compiled_resource *resource = view->compiled->resources + i;
         inputs[count * 2] = resource;
@@ -2886,15 +4025,65 @@ static int pr_view_retained(pr_provider *view, const pr_provider *provider,
     }
     for (size_t i = 0; i < provider->compiled->resource_count; i++) {
         const sh_compiled_resource *resource = provider->compiled->resources + i;
-        if (!selected.resources[i]) continue;
+        int sources_only = 0;
+        if (!selected.resources[i]) {
+            /* An added authored copy equal to its original changes nothing, so
+             * authoring does not select it. When the view already serves an
+             * equal row at that path, the whole compile lists this file among
+             * that row's sources: join its sources (and the owners it was
+             * compiled with), never its bytes. Other modes keep their own
+             * owner selection; a different or absent row joins nothing. */
+            if (mode != PR_RETAIN_AUTHORING || !resource->source_count) continue;
+            sources_only = 1;
+        }
         const sh_compiled_resource *existing = sh_package_compilation_find(view->compiled, resource->engine_path);
+        if (sources_only) {
+            int equal = existing ? pr_resource_equal(view->compiled, existing, provider->compiled, resource,
+                error, capacity) : 0;
+            if (equal < 0) goto done;
+            /* A copy compiled under a private alias, or a recomposed row (a
+             * spawn conductor), still joins the row serving its declared path
+             * when its authored files repeat bytes that row already lists. */
+            if (!equal && !existing && resource->original_path)
+                existing = sh_package_compilation_find(view->compiled, resource->original_path);
+            if (!equal && existing && pr_shared_files(existing, view->compiled->sources, resource, provider->sources))
+                equal = 1;
+            if (!equal) { error[0] = 0; continue; }
+            /* Only its file indices join, after projection: the view row keeps
+             * its bytes, identities, owners and dependencies, and any number
+             * of copies may join one row. */
+            joined[joined_count * 2] = i; joined[joined_count * 2 + 1] = (size_t)(existing - view->compiled->resources);
+            joined_count++;
+            continue;
+        }
+        if (whole && mode == PR_RETAIN_AUTHORING && pr_lineage_bound(resource)) {
+            /* Equal bytes at the path may be another owner's declaration;
+             * only the row of its own lineage serves it. Without one, the
+             * increment's bindings name its own composition, not the whole
+             * library's, so they never stand in. A verified original editor
+             * slot keeps its ordinary handling below. */
+            int equal = existing ? pr_resource_equal(view->compiled, existing, provider->compiled, resource,
+                error, capacity) : 0;
+            if (equal < 0) goto done;
+            const sh_compiled_resource *composing = pr_composing_row(view->compiled, existing, resource, provider->sources);
+            error[0] = 0;
+            if (composing && (composing != existing || !equal)) {
+                joined[joined_count * 2] = i; joined[joined_count * 2 + 1] = (size_t)(composing - view->compiled->resources);
+                joined_count++;
+                continue;
+            }
+            if (!composing && !pr_original_editor_slot(existing, resource)) {
+                snprintf(error, capacity, "%s: the whole library composes no row from its authored files",
+                    resource->engine_path); goto done;
+            }
+        }
         size_t at = existing ? (size_t)(existing - view->compiled->resources) : count;
         if (existing) {
             /* A retained occurrence keeps its meaning under the copy the view
              * already serves, label alias or not. An increment still sees a
              * changed alias (an exact copy recompiles the library) and a
              * selector still borrows its old text. */
-            int equal = mode == PR_RETAIN_OCCURRENCES ?
+            int equal = mode == PR_RETAIN_OCCURRENCES || mode == PR_RETAIN_MOVIE_ROLLBACK ?
                 pr_output_equal(view->compiled, existing, provider->compiled, resource, error, capacity) :
                 pr_resource_equal(view->compiled, existing, provider->compiled, resource, error, capacity);
             if (equal < 0) goto done;
@@ -2923,6 +4112,11 @@ static int pr_view_retained(pr_provider *view, const pr_provider *provider,
                         snprintf(error, capacity, "%s: shared editor metadata requires additive native admission", resource->engine_path);
                         goto done;
                     }
+                    if (recompose && existing->source_count) {
+                        *recompose = 1;
+                        snprintf(error, capacity, "%s: the served library composes it with other packages", resource->engine_path);
+                        goto done;
+                    }
                     snprintf(error, capacity, "%s: retained native identity has a different meaning; isolate the source context before activation",
                         resource->engine_path); goto done;
                 }
@@ -2933,7 +4127,8 @@ static int pr_view_retained(pr_provider *view, const pr_provider *provider,
         copy->sources = NULL; copy->source_count = 0;
         copy->source = resource->source != SIZE_MAX ? files[resource->source] : SIZE_MAX;
         if (!pr_remap_owners(&copy->owners, &resource->owners, owners, provider->sources->package_count) ||
-            !pr_remap_owners(&copy->gameplay_owners, &resource->gameplay_owners, owners, provider->sources->package_count)) goto done;
+            (mode != PR_RETAIN_MOVIE_ROLLBACK && !pr_remap_owners(&copy->gameplay_owners,
+                &resource->gameplay_owners, owners, provider->sources->package_count))) goto done;
         if (resource->source_count && !(copy->sources = malloc(resource->source_count * sizeof(*copy->sources)))) goto done;
         for (size_t f = 0; f < resource->source_count; f++) if (files[resource->sources[f]] != SIZE_MAX)
             copy->sources[copy->source_count++] = files[resource->sources[f]];
@@ -2946,6 +4141,19 @@ static int pr_view_retained(pr_provider *view, const pr_provider *provider,
     compiled = sh_package_compilation_project(sources, projections, count, &view->compiled->policy,
         view->compiled->canonical_path, error, capacity);
     if (!compiled) goto done;
+    for (size_t j = 0; j < joined_count; j++) {
+        const sh_compiled_resource *resource = provider->compiled->resources + joined[j * 2];
+        sh_compiled_resource *row = (sh_compiled_resource *)sh_package_compilation_find(compiled,
+            view->compiled->resources[joined[j * 2 + 1]].engine_path);
+        size_t *grown = row ? realloc(row->sources, (row->source_count + resource->source_count) * sizeof(*grown)) : NULL;
+        if (!grown) { snprintf(error, capacity, "%s: could not join an equal authored copy", resource->engine_path); goto done; }
+        row->sources = grown;
+        for (size_t f = 0; f < resource->source_count; f++) {
+            size_t file = files[resource->sources[f]], k = 0;
+            while (file != SIZE_MAX && k < row->source_count && row->sources[k] != file) k++;
+            if (file != SIZE_MAX && k == row->source_count) row->sources[row->source_count++] = file;
+        }
+    }
     compiled->independent_sources = view->compiled->independent_sources;
     compiled->map_overlay = view->compiled->map_overlay ||
         (mode == PR_RETAIN_OCCURRENCES && sources->package_count > retained_begin);
@@ -2953,16 +4161,27 @@ static int pr_view_retained(pr_provider *view, const pr_provider *provider,
         view->compiled->map_overlay ? view->compiled->map_owner_begin : retained_begin;
     compiled->map_independent_sources = mode != PR_RETAIN_OCCURRENCES ? view->compiled->map_independent_sources :
         view->compiled->map_overlay ? view->compiled->map_independent_sources : 1;
+    if (provider->consumers) {
+        selected_consumers = sh_package_consumers_filter(provider->consumers, pr_lease_consumer, &selected, error, capacity);
+        if (!selected_consumers) goto done;
+    }
+    int movie_strings = mode == PR_RETAIN_MOVIE_ROLLBACK ||
+        (mode == PR_RETAIN_SELECTORS && pr_selector_movie_only(provider));
     for (size_t i = 0; i < provider->compiled->policy.localized_count; i++) {
         const sh_package_localized_string *row = provider->compiled->policy.localized + i;
+        /* A movie's exact namespace is part of its immutable binding plan.
+         * Delivery ownership alone would also keep unrelated sibling rows. */
+        if (movie_strings && !pr_consumer_string(selected_consumers, row->key)) continue;
         sh_package_owners selected = {0};
         int copied = pr_remap_owners(&selected, &row->owners, owners, provider->sources->package_count);
         if (copied && sh_package_owners_count(&selected)) copied = sh_package_policy_localization(
             &compiled->policy, row->key, row->mapping, &selected, error, capacity);
         sh_package_owners_free(&selected); if (!copied) goto done;
     }
-    if (mode != PR_RETAIN_SELECTORS && provider->compiled->policy.hud_bound) compiled->policy.hud_bound = 1;
-    for (size_t i = 0; mode != PR_RETAIN_SELECTORS && i < provider->compiled->policy.hud_binding_count; i++) {
+    if (mode != PR_RETAIN_SELECTORS && mode != PR_RETAIN_MOVIE_ROLLBACK &&
+        provider->compiled->policy.hud_bound) compiled->policy.hud_bound = 1;
+    for (size_t i = 0; mode != PR_RETAIN_SELECTORS && mode != PR_RETAIN_MOVIE_ROLLBACK &&
+        i < provider->compiled->policy.hud_binding_count; i++) {
         const sh_package_hud_binding *row = provider->compiled->policy.hud_bindings + i;
         sh_package_owners selected = {0};
         int copied = pr_remap_owners(&selected, &row->owners, owners, provider->sources->package_count);
@@ -2971,26 +4190,30 @@ static int pr_view_retained(pr_provider *view, const pr_provider *provider,
         sh_package_owners_free(&selected); if (!copied) goto done;
     }
     for (size_t i = 0; i < provider->sources->package_count; i++)
-        if (owners[i] != SIZE_MAX && (mode == PR_RETAIN_AUTHORING || pr_promoted_owner(sources, owners[i], promoted) ||
+        if (mode != PR_RETAIN_MOVIE_ROLLBACK && owners[i] != SIZE_MAX &&
+            (mode == PR_RETAIN_AUTHORING || pr_promoted_owner(sources, owners[i], promoted) ||
             pr_promoted_owner(sources, owners[i], admitted)) &&
             sh_package_owners_contains(&provider->compiled->policy.legacy_string_owners, i) &&
             !sh_package_owners_add(&compiled->policy.legacy_string_owners, owners[i])) goto done;
-    sh_package_policy policy = {0}; sh_package_owners all = {0};
-    for (size_t i = 0; i < sources->package_count; i++) if (!sh_package_owners_add(&all, i)) {
-        sh_package_owners_free(&all); goto done;
+    /* Keep the previous exact policy plus the referenced private movie keys;
+     * rollback is serving retention, not another authoring-policy decision. */
+    if (mode != PR_RETAIN_MOVIE_ROLLBACK) {
+        sh_package_policy policy = {0}; sh_package_owners all = {0};
+        for (size_t i = 0; i < sources->package_count; i++) if (!sh_package_owners_add(&all, i)) {
+            sh_package_owners_free(&all); goto done;
+        }
+        int policy_ok = sh_package_compilation_policy(compiled, &all, &policy, error, capacity);
+        sh_package_owners_free(&all); if (!policy_ok) goto done;
+        sh_package_policy_free(&compiled->policy); compiled->policy = policy;
     }
-    int policy_ok = sh_package_compilation_policy(compiled, &all, &policy, error, capacity);
-    sh_package_owners_free(&all); if (!policy_ok) goto done;
-    sh_package_policy_free(&compiled->policy); compiled->policy = policy;
     bundles = calloc(sources->package_count ? sources->package_count : 1, sizeof(*bundles)); if (!bundles) goto done;
     for (size_t i = 0; i < old_owners; i++) bundles[i] = sh_package_bundle_retain(view->bundles[i]);
     for (size_t i = 0; i < provider->sources->package_count; i++) if (owners[i] != SIZE_MAX && owners[i] >= old_owners)
         bundles[owners[i]] = sh_package_bundle_retain(provider->bundles[i]);
     if (provider->consumers) {
-        selected_consumers = sh_package_consumers_filter(provider->consumers, pr_lease_consumer, &selected, error, capacity);
         if (!selected_consumers || !(consumers = sh_package_consumers_join(view->consumers, selected_consumers, error, capacity))) goto done;
     }
-    if (provider->fsm_webs) {
+    if (mode != PR_RETAIN_MOVIE_ROLLBACK && provider->fsm_webs) {
         /* The view's own webs keep their behaviors (map before local). */
         selected_webs = sh_package_fsm_webs_filter(provider->fsm_webs, pr_lease_behavior, &selected, error, capacity);
         if (!selected_webs || !(webs = sh_package_fsm_webs_join(view->fsm_webs, selected_webs, error, capacity))) goto done;
@@ -3010,8 +4233,8 @@ static int pr_view_retained(pr_provider *view, const pr_provider *provider,
         next.semantics = view->bindings.semantics;
         sh_package_provenance_free(&view->bindings); view->bindings = next;
     }
-    if (!pr_key_groups_add(view, provider, error, capacity) ||
-        !pr_retained_bindings(view, provider, compiled, bundles, sources->package_count, error, capacity)) goto done;
+    if (mode != PR_RETAIN_MOVIE_ROLLBACK && (!pr_key_groups_add(view, provider, error, capacity) ||
+        !pr_retained_bindings(view, provider, compiled, bundles, sources->package_count, error, capacity))) goto done;
     sh_package_compilation_free(view->compiled); view->compiled = compiled; compiled = NULL;
     sh_package_sources_free(view->sources); view->sources = sources; sources = NULL;
     sh_package_sources_free(view->authored_sources); view->authored_sources = authored; authored = NULL;
@@ -3030,8 +4253,8 @@ done:
     sh_package_consumers_free(selected_consumers); sh_package_consumers_free(consumers);
     sh_package_fsm_webs_free(selected_webs); sh_package_fsm_webs_free(webs);
     sh_package_compilation_free(compiled); sh_package_sources_free(sources); sh_package_sources_free(authored);
-    sh_package_sources_free(extra); free(owners); free(files); free(projections); free(inputs); free(remapped);
-    free(selected.resources); sh_package_owners_free(&selected.owners);
+    sh_package_sources_free(extra); free(owners); free(files); free(projections); free(inputs); free(remapped); free(joined);
+    pr_retained_free(&selected);
     if (!ok && error && capacity && !*error) snprintf(error, capacity, "cannot preserve immutable occurrence resource contexts");
     return ok;
 }
@@ -3039,11 +4262,13 @@ done:
 typedef struct pr_spawn_table {
     const char *path;
     const sh_compiled_resource **rows;
+    unsigned char *classifiers;
     size_t count;
     unsigned char *body;
     size_t length;
 } pr_spawn_table;
-static int pr_unmodified_type(pr_provider *view, const sh_compiled_resource *resource, char *error, size_t capacity)
+static int pr_unmodified_type(pr_provider *view, const sh_compiled_resource *resource, int exact_types,
+    char *error, size_t capacity)
 {
     size_t length = 0;
     unsigned char *body = sh_package_compilation_read(view->compiled, resource, SIZE_MAX, &length, error, capacity);
@@ -3062,6 +4287,25 @@ static int pr_unmodified_type(pr_provider *view, const sh_compiled_resource *res
                 realloc(view->unmodified_types, (i + 1) * sizeof(*grown)) : NULL;
             if (!grown) ok = 0;
             else { view->unmodified_types = grown; view->unmodified_types[view->unmodified_count++] = type; }
+        }
+    }
+    if (ok && program.modifier_count) {
+        uint32_t type = program.rows[0].mask, keys = type & SH_PACKAGE_KEY_PRIVATE;
+        int owned = keys && !(type & SH_PACKAGE_KEY_COMPOSITE) &&
+            !(view->key_groups && !(keys & ~view->key_groups->historical));
+        if (owned) {
+            size_t modifier;
+            for (modifier = 0; modifier < program.modifier_count; modifier++)
+                if (sh_package_key_modifier_matches(view->key_groups, type, program.modifiers[modifier].mask)) break;
+            ok = modifier < program.modifier_count;
+            size_t i;
+            for (i = 0; i < view->exact_modifier_count; i++) if (view->exact_modifier_types[i] == type) break;
+            if (ok && exact_types && i == view->exact_modifier_count) {
+                uint32_t *grown = i < SIZE_MAX / sizeof(*grown) - 1 ?
+                    realloc(view->exact_modifier_types, (i + 1) * sizeof(*grown)) : NULL;
+                if (!grown) ok = 0;
+                else { view->exact_modifier_types = grown; view->exact_modifier_types[view->exact_modifier_count++] = type; }
+            }
         }
     }
     sh_package_spawn_registry_free(&program);
@@ -3086,16 +4330,17 @@ static const sh_compiled_resource *pr_spawn_resource(pr_provider *view,
 
 /* Dispatch metadata follows the final retained dependency closure, even during
  * editor-only additive admission where existing native tables stay untouched. */
-static int pr_spawn_classifications(pr_provider *view, char *error, size_t capacity)
+static int pr_spawn_classifications(pr_provider *view, int exact_types, char *error, size_t capacity)
 {
     view->unmodified_count = 0;
+    if (exact_types) view->exact_modifier_count = 0;
     for (size_t i = 0; i < sh_package_consumers_count(view->consumers); i++) {
         const sh_package_consumer *owner = sh_package_consumers_at(view->consumers, i);
         for (size_t j = 0; j < owner->count; j++) {
             const sh_package_consumer_target *target = owner->targets + j;
             if (strncmp(target->slot, "spawn.classifier:", 17)) continue;
             const sh_compiled_resource *resource = pr_spawn_resource(view, target, error, capacity);
-            if (!resource || !pr_unmodified_type(view, resource, error, capacity)) return 0;
+            if (!resource || !pr_unmodified_type(view, resource, exact_types, error, capacity)) return 0;
         }
     }
     return 1;
@@ -3129,12 +4374,14 @@ static int pr_spawn_registrations(pr_provider *view, char *error, size_t capacit
                 tables = grown; tables[count++] = (pr_spawn_table){resource->original_path};
             }
             pr_spawn_table *table = tables + t;
+            int classifier = !strncmp(target->slot, "spawn.classifier:", 17);
             size_t r;
             for (r = 1; r < table->count; r++) if (table->rows[r] == resource) break;
-            if (r < table->count) continue;
+            if (r < table->count) { table->classifiers[r] |= (unsigned char)classifier; continue; }
             if (!table->count) {
                 table->rows = calloc(2, sizeof(*table->rows));
-                if (!table->rows) goto done;
+                table->classifiers = calloc(2, sizeof(*table->classifiers));
+                if (!table->rows || !table->classifiers) goto done;
                 table->rows[0] = sh_package_compilation_find(view->compiled, table->path);
                 if (!table->rows[0]) table->rows[0] = resource;
                 table->count = 1;
@@ -3142,7 +4389,11 @@ static int pr_spawn_registrations(pr_provider *view, char *error, size_t capacit
             if (table->count >= SIZE_MAX / sizeof(*table->rows) - 1) goto done;
             const sh_compiled_resource **grown = realloc(table->rows, (table->count + 1) * sizeof(*grown));
             if (!grown) goto done;
-            table->rows = grown; table->rows[table->count++] = resource;
+            table->rows = grown;
+            unsigned char *flags = realloc(table->classifiers, (table->count + 1) * sizeof(*flags));
+            if (!flags) goto done;
+            table->classifiers = flags; table->classifiers[table->count] = (unsigned char)classifier;
+            table->rows[table->count++] = resource;
         }
     }
     if (!count) { ok = 1; goto done; }
@@ -3167,8 +4418,8 @@ static int pr_spawn_registrations(pr_provider *view, char *error, size_t capacit
                 &texts[r].length, error, capacity);
             if (!texts[r].text) { read = 0; break; }
         }
-        if (read) table->body = (unsigned char *)sh_package_spawn_registry_compose(texts[0], texts + 1,
-            table->count - 1, view->key_groups, &table->length, error, capacity);
+        if (read) table->body = (unsigned char *)sh_package_spawn_registry_compose_classified(texts[0], texts + 1,
+            table->classifiers + 1, table->count - 1, view->key_groups, &table->length, error, capacity);
         for (size_t r = 0; r < table->count; r++) free((char *)texts[r].text);
         free(texts); if (!table->body) goto done;
         const sh_compiled_resource *base = sh_package_compilation_find(view->compiled, table->path);
@@ -3184,9 +4435,52 @@ static int pr_spawn_registrations(pr_provider *view, char *error, size_t capacit
     compiled->map_independent_sources = view->compiled->map_independent_sources;
     sh_package_compilation_free(view->compiled); view->compiled = compiled; compiled = NULL; ok = 1;
 done:
-    for (size_t t = 0; t < count; t++) { free(tables[t].rows); free(tables[t].body); }
+    for (size_t t = 0; t < count; t++) {
+        free(tables[t].rows); free(tables[t].classifiers); free(tables[t].body);
+    }
     free(tables); free(projections); free(inputs); sh_package_compilation_free(compiled);
     if (!ok && error && capacity && !*error) snprintf(error, capacity, "cannot retain native spawn registry bindings");
+    return ok;
+}
+
+/* Only the audio roots that serve what a view keeps from a retained provider.
+ * A root serves all of its own content. A composite view also retains every
+ * root it was composed from, including roots kept for consumers that may since
+ * have released; taking all of them would keep each earlier map's program for as
+ * long as any later occurrence, selector or movie lives, and pass it on to every
+ * view built meanwhile. Each package that supplies a kept resource belongs to the
+ * first root, in the provider's precedence, with the same source tree and
+ * fingerprint. */
+static int pr_audio_retained_add(pr_provider *view, const pr_provider *provider, int mode,
+    char *error, size_t capacity)
+{
+    pr_retained_selection selected = {0};
+    unsigned char *used = NULL;
+    int ok = 0;
+    if (provider->audio || !provider->audio_source_count) return pr_audio_source_add(view, provider);
+    if (!pr_retained_select(provider, NULL, mode, &selected, error, capacity)) return 0;
+    used = calloc(provider->audio_source_count, 1);
+    if (!used) goto done;
+    for (size_t p = 0; p < provider->sources->package_count; p++) {
+        const unsigned char *tree = sh_package_source_tree(provider->sources, p);
+        if (!tree || !sh_package_owners_contains(&selected.suppliers, p)) continue;
+        for (size_t r = 0; r < provider->audio_source_count; r++) {
+            const sh_package_sources *sources = provider->audio_sources[r]->sources;
+            size_t j;
+            for (j = 0; j < sources->package_count; j++) {
+                const unsigned char *candidate = sh_package_source_tree(sources, j);
+                if (candidate && !memcmp(tree, candidate, 32) &&
+                    !memcmp(provider->sources->fingerprints[p], sources->fingerprints[j], 32)) break;
+            }
+            if (j < sources->package_count) { used[r] = 1; break; }
+        }
+    }
+    for (size_t r = 0; r < provider->audio_source_count; r++)
+        if (used[r] && !pr_audio_source_add(view, provider->audio_sources[r])) goto done;
+    ok = 1;
+done:
+    if (!ok && error && capacity && !*error) snprintf(error, capacity, "cannot retain active audio programs");
+    free(used); pr_retained_free(&selected);
     return ok;
 }
 
@@ -3195,7 +4489,7 @@ static pr_provider *pr_view(pr_provider *library, const pr_provider *map,
 {
     sh_package_sources empty_sources = {0};
     sh_package_compilation empty = {0};
-    pr_provider *view = calloc(1, sizeof(*view));
+    pr_provider *view = pr_provider_new();
     if (!view) return NULL;
     view->references = 1;
     if (!pr_key_groups_add(view, library, error, capacity) || !pr_key_groups_add(view, map, error, capacity)) {
@@ -3255,7 +4549,8 @@ static pr_provider *pr_view(pr_provider *library, const pr_provider *map,
             if (previous->provider == lease->provider && InterlockedCompareExchange((volatile LONG *)&previous->references, 0, 0) > 0) break;
         if (previous != lease) continue;
         if (!pr_view_retained(view, lease->provider, retained_begin, promoted, NULL,
-            PR_RETAIN_OCCURRENCES, NULL, error, capacity) || !pr_audio_source_add(view, lease->provider)) {
+            PR_RETAIN_OCCURRENCES, NULL, error, capacity) ||
+            !pr_audio_retained_add(view, lease->provider, PR_RETAIN_OCCURRENCES, error, capacity)) {
             if (!*error) snprintf(error, capacity, "cannot retain active audio programs");
             pr_release(view); return NULL;
         }
@@ -3267,12 +4562,13 @@ static pr_provider *pr_view(pr_provider *library, const pr_provider *map,
             if (prior->provider == hold->provider && InterlockedCompareExchange((volatile LONG *)&prior->live, 0, 0)) break;
         if (prior != hold) continue;
         if (!pr_view_retained(view, hold->provider, retained_begin, promoted, NULL,
-            PR_RETAIN_SELECTORS, NULL, error, capacity) || !pr_audio_source_add(view, hold->provider)) {
+            PR_RETAIN_SELECTORS, NULL, error, capacity) ||
+            !pr_audio_retained_add(view, hold->provider, PR_RETAIN_SELECTORS, error, capacity)) {
             if (!*error) snprintf(error, capacity, "cannot retain active audio programs");
             pr_release(view); return NULL;
         }
     }
-    if (!pr_spawn_registrations(view, error, capacity) || !pr_prepare_spawn_program(view, error, capacity)) {
+    if (!pr_prepare_spawn_program(view, 1, error, capacity)) {
         pr_release(view); return NULL;
     }
 #ifndef SH_PACKAGE_RUNTIME_TESTING
@@ -3307,22 +4603,182 @@ static int pr_carry_report(pr_provider *library, const pr_provider *base, const 
         if (!pr_exclusion_add(&library->exclusions, &library->exclusion_count, item->name, item->tree,
             item->line)) return 0;
     }
+    /* Both left their own equal-to-original rows native; the view serves neither.
+     * Accounting only: a failed copy is reported by the view, not refused. */
+    size_t unchanged = base->unchanged_count + increment->unchanged_count;
+    library->unchanged_lost = base->unchanged_lost || increment->unchanged_lost;
+    if (unchanged && !(library->unchanged = calloc(unchanged, sizeof(*library->unchanged))))
+        library->unchanged_lost = 1;
+    else if (unchanged) {
+        for (int pass = 0; pass < 2; pass++) {
+            const pr_provider *from = pass ? increment : base;
+            for (size_t i = 0; i < from->unchanged_count; i++) {
+                pr_unchanged *row = library->unchanged + library->unchanged_count;
+                *row = from->unchanged[i];
+                if (!(row->path = _strdup(from->unchanged[i].path))) { library->unchanged_lost = 1; break; }
+                library->unchanged_count++;
+            }
+        }
+        qsort(library->unchanged, library->unchanged_count, sizeof(*library->unchanged), pr_unchanged_order);
+    }
+    /* Each keeps the shader accounting of the packages it linked; records are
+     * keyed by package tree, so the joined sources need no remapping. */
+    size_t shaders = base->shader_input_count + increment->shader_input_count;
+    library->shader_inputs_lost = base->shader_inputs_lost || increment->shader_inputs_lost;
+    if (shaders && !(library->shader_inputs = calloc(shaders, sizeof(*library->shader_inputs))))
+        library->shader_inputs_lost = 1;
+    else if (shaders) {
+        for (int pass = 0; pass < 2; pass++) {
+            const pr_provider *from = pass ? increment : base;
+            for (size_t i = 0; i < from->shader_input_count; i++) {
+                pr_shader_input *row = library->shader_inputs + library->shader_input_count;
+                *row = from->shader_inputs[i]; row->relative = row->pair = NULL;
+                if (!(row->relative = _strdup(from->shader_inputs[i].relative)) ||
+                    (from->shader_inputs[i].pair && !(row->pair = _strdup(from->shader_inputs[i].pair)))) {
+                    free(row->relative); library->shader_inputs_lost = 1; break;
+                }
+                library->shader_input_count++;
+            }
+        }
+        qsort(library->shader_inputs, library->shader_input_count, sizeof(*library->shader_inputs),
+            pr_shader_input_order);
+    }
     return 1;
 }
 
+/* Whether every line of text is also a line of known. */
+static int pr_lines_within(const char *text, const char *known)
+{
+    for (const char *line = text; line && *line; ) {
+        const char *end = strchr(line, '\n');
+        size_t length = end ? (size_t)(end - line) : strlen(line);
+        int found = 0;
+        for (const char *at = known; at && *at && !found; ) {
+            const char *stop = strchr(at, '\n');
+            size_t n = stop ? (size_t)(stop - at) : strlen(at);
+            found = n == length && !memcmp(at, line, length);
+            at = stop ? stop + 1 : NULL;
+        }
+        if (!found) return 0;
+        line = end ? end + 1 : NULL;
+    }
+    return 1;
+}
+/* An increment that compiled no package adds nothing to serve. Unless its scan
+ * reports something base does not, base itself is the prepared library: a copy
+ * would only keep the whole of base alive as its parent, one more at every such
+ * load, and a removed package stays served until the watched refresh compiles
+ * it out either way, since base's scan no longer matches. */
+static int pr_increment_adds_nothing(const pr_provider *base, const pr_provider *increment)
+{
+    if (increment->sources->package_count) return 0;
+    if (increment->scan_known && base->scan_known && !memcmp(increment->scan_identity, base->scan_identity, 32)) return 1;
+    for (size_t i = 0; i < increment->exclusion_count; i++) {
+        size_t j;
+        for (j = 0; j < base->exclusion_count; j++)
+            if (!strcmp(increment->exclusions[i].name, base->exclusions[j].name) &&
+                !memcmp(increment->exclusions[i].tree, base->exclusions[j].tree, 32)) break;
+        if (j == base->exclusion_count) return 0;
+    }
+    return pr_lines_within(increment->rejections, base->rejections) &&
+        pr_lines_within(increment->unserved, base->unserved) && pr_lines_within(increment->coverage, base->coverage);
+}
 static pr_provider *pr_clone_serving(pr_provider *base, char *error, size_t capacity);
+static int pr_native_name_order(const void *a, const void *b)
+{
+    const sh_package_native_identity *x = a, *y = b;
+    int order = strcmp(x->type, y->type);
+    return order ? order : strcmp(x->name, y->name);
+}
+/* Compose each witness exactly as the whole link would (pl_project): its
+ * identities join the row served at its path when the bytes are equal, in
+ * projection order, the first one primary. Different bytes, a typed row, or a
+ * served row whose identities are not in that order are not an additive union
+ * the view can prove; the caller then compiles the whole library. */
+static int pr_native_witnesses_compose(sh_package_compilation *compiled, const pr_provider *increment,
+    int *refused, char *error, size_t capacity)
+{
+    size_t joined_rows = 0, joined_names = 0;
+    for (size_t w = 0; w < increment->native_witness_count; w++) {
+        const pr_native_witness *witness = increment->native_witnesses + w;
+        sh_compiled_resource *row = (sh_compiled_resource *)sh_package_compilation_find(compiled, witness->path);
+        if (!row) continue; /* Left native by the whole library too. */
+        size_t missing = 0, names = sh_package_resource_native_count(row);
+        for (size_t n = 0; n < witness->name_count; n++)
+            if (!sh_package_resource_native_matches(row, witness->names[n].type, witness->names[n].name)) missing++;
+        if (!missing) continue;
+        sh_package_file_identity served;
+        if (!sh_package_compilation_identity(compiled, row, &served, error, capacity)) return 0;
+        if (row->type || !witness->identified || served.length != witness->identity.length ||
+            memcmp(served.digest, witness->identity.digest, sizeof(served.digest))) {
+            snprintf(error, capacity, "%s: an added package binds an original the library serves differently",
+                witness->path);
+            if (refused) *refused = 1;
+            return 0;
+        }
+        sh_package_native_identity *all = calloc(names + missing, sizeof(*all));
+        if (!all) return 0;
+        for (size_t n = 0; n < names; n++) all[n] = sh_package_resource_native_at(row, n);
+        for (size_t n = 1; n < names; n++) if (pr_native_name_order(all + n - 1, all + n) >= 0) {
+            free(all); snprintf(error, capacity, "%s: served identities are not in link order", witness->path);
+            if (refused) *refused = 1;
+            return 0;
+        }
+        size_t total = names;
+        char line[512]; int used = snprintf(line, sizeof(line), "package library increment: %.200s joins", witness->path);
+        for (size_t n = 0; n < witness->name_count; n++)
+            if (!sh_package_resource_native_matches(row, witness->names[n].type, witness->names[n].name)) {
+                if (used > 0 && (size_t)used < sizeof(line))
+                    used += snprintf(line + used, sizeof(line) - used, " %s %s", witness->names[n].type, witness->names[n].name);
+                all[total++] = witness->names[n];
+            }
+        backend_log(line);
+        joined_rows++; joined_names += total - names;
+        qsort(all, total, sizeof(*all), pr_native_name_order);
+        sh_compiled_resource rebuilt = {0};
+        int ok = 1;
+        for (size_t n = 0; ok && n < total; n++) ok = sh_package_resource_native_add(&rebuilt, all[n].type, all[n].name);
+        free(all);
+        if (!ok) {
+            free(rebuilt.native_type); free(rebuilt.native_name);
+            for (size_t n = 0; n < rebuilt.native_alias_count; n++) {
+                free((void *)rebuilt.native_aliases[n].type); free((void *)rebuilt.native_aliases[n].name);
+            }
+            free(rebuilt.native_aliases); return 0;
+        }
+        free(row->native_type); free(row->native_name);
+        for (size_t n = 0; n < row->native_alias_count; n++) {
+            free((void *)row->native_aliases[n].type); free((void *)row->native_aliases[n].name);
+        }
+        free(row->native_aliases);
+        row->native_type = rebuilt.native_type; row->native_name = rebuilt.native_name;
+        row->native_aliases = rebuilt.native_aliases; row->native_alias_count = rebuilt.native_alias_count;
+    }
+    if (increment->native_witness_count) {
+        char line[256];
+        snprintf(line, sizeof(line), "package library increment: %zu unchanged originals bound by added packages; "
+            "%zu native identities joined to %zu served rows", increment->native_witness_count, joined_names, joined_rows);
+        backend_log(line);
+    }
+    return 1;
+}
 /* base extended by an increment's newly compiled packages; every unchanged
  * package is served from base itself (sh_package_map_plan_prepare_inventory,
  * pr_refresh_increment). The own-bytes memo then holds the library's complete
  * list, so a package an increment left out stays out at the next start. */
-static pr_provider *pr_increment_view(pr_provider *base, const pr_provider *increment,
+static pr_provider *pr_increment_view(pr_provider *base, const pr_provider *increment, int *refused,
     char *error, size_t capacity)
 {
     int metadata_needed = 0;
     pr_provider *library = pr_clone_serving(base, error, capacity);
-    if (!library || !pr_view_retained(library, increment, library->sources->package_count,
-        NULL, NULL, PR_RETAIN_AUTHORING, &metadata_needed, error, capacity) ||
-        !pr_prepare_spawn_program(library, error, capacity)) { pr_release(library); return NULL; }
+    /* A library serves its compiled rows, as the whole compile does: every
+     * serving view built over it publishes the spawn registrations into the
+     * conductor slot (pr_spawn_registrations). Publishing them here as well
+     * would compose them twice and drop the composed row's native identity. */
+    if (!library || !pr_view_retained_link(library, increment, library->sources->package_count,
+        NULL, NULL, PR_RETAIN_AUTHORING, &metadata_needed, 0, refused, error, capacity) ||
+        !pr_native_witnesses_compose(library->compiled, increment, refused, error, capacity) ||
+        !pr_prepare_spawn_program(library, 0, error, capacity)) { pr_release(library); return NULL; }
     if (!pr_carry_report(library, base, increment)) {
         if (error && capacity) snprintf(error, capacity, "cannot retain the installed library report");
         pr_release(library); return NULL;
@@ -3332,14 +4788,76 @@ static pr_provider *pr_increment_view(pr_provider *base, const pr_provider *incr
     memcpy(library->scan_identity, increment->scan_identity, 32); library->scan_known = increment->scan_known;
     return library;
 }
-/* An installed-library refresh (a rearm, or the rescan after a committed
- * installation) whose scan only adds packages to base: compile the added
- * packages alone and serve the rest from base, as an installation does.
+/* An installation whose view refused a witness (pr_native_witnesses_compose):
+ * the whole library, which links every original its packages bind, with the
+ * installation's own authoring rows retained over it as pr_increment_view
+ * retains them. Its designed private editor aliases stay served for the open
+ * map (pr_plan_authoring_served); every other row is the whole compile's, and
+ * an authoring row the whole library serves with another meaning refuses. */
+static pr_provider *pr_installation_whole(pr_provider *whole, const pr_provider *increment,
+    char *error, size_t capacity)
+{
+    int metadata_needed = 0;
+#ifdef SH_PACKAGE_RUNTIME_TESTING
+    g_test_clone_omit = 1;
+#endif
+    pr_provider *library = pr_clone_serving(whole, error, capacity);
+#ifdef SH_PACKAGE_RUNTIME_TESTING
+    g_test_clone_omit = 0;
+#endif
+    if (!library || !pr_view_retained_link(library, increment, library->sources->package_count,
+        NULL, NULL, PR_RETAIN_AUTHORING, &metadata_needed, 1, NULL, error, capacity) ||
+        !pr_prepare_spawn_program(library, 0, error, capacity)) { pr_release(library); return NULL; }
+    /* The whole compile already reports the complete scan, added packages included. */
+    pr_provider reported = {0};
+    if (!pr_carry_report(library, &reported, whole)) {
+        if (error && capacity) snprintf(error, capacity, "cannot retain the installed library report");
+        pr_release(library); return NULL;
+    }
+    memcpy(library->scan_identity, whole->scan_identity, 32); library->scan_known = whole->scan_known;
+    return library;
+}
+/* An installed-library refresh (a rearm, the rescan after a committed
+ * installation, or a watched change, then exact) whose scan only adds packages
+ * to base: compile the added packages alone and serve the rest from base, as
+ * an installation does.
  * 1 with the new library and inventory; 0 when a package was removed or
  * changed or the increment did not complete (an environment failure, or a
  * meaning the additive view cannot admit), and the caller compiles the whole
  * library, which judges and attributes every failure itself. */
-static int pr_refresh_increment(pr_provider *base, const pr_provider *string_peer,
+#ifdef SH_PACKAGE_RUNTIME_TESTING
+static int g_test_exact_increment = 1;
+void sh_package_runtime_test_exact_increment(int enabled) { g_test_exact_increment = enabled; }
+void sh_package_runtime_test_install_witness(const sh_compiled_resource *original) { g_test_install_witness = original; }
+#endif
+/* An exact increment serves only what compiling the whole library would: the
+ * watched refresh at the browser has no open editor to protect. It refuses an
+ * increment whose compile names a diagnosis base lacks (the whole library
+ * judges and attributes it) or serves an added shared editor declaration under
+ * a private alias, the installation's designed difference
+ * (test_increment_designed_difference). Base's own packages are already proven
+ * unchanged by name and fingerprint; peer scopes never supply each other. */
+static int pr_increment_exact(const pr_provider *base, const pr_provider *added, char *error, size_t capacity)
+{
+#ifdef SH_PACKAGE_RUNTIME_TESTING
+    if (!g_test_exact_increment) return 1;
+#endif
+    if (!pr_lines_within(added->rejections, base->rejections) || !pr_lines_within(added->unserved, base->unserved)) {
+        snprintf(error, capacity, "the increment reports a package diagnosis the served library does not");
+        return 0;
+    }
+    /* The rows an authoring view retains from the increment (pr_retained_select). */
+    for (size_t i = 0; added->compiled && i < added->compiled->resource_count; i++) {
+        const sh_compiled_resource *resource = added->compiled->resources + i;
+        const char *original = resource->original_path;
+        if (sh_package_owners_count(&resource->owners) && original && !strncmp(original, "generated/decls/snapeditor", 26)) {
+            snprintf(error, capacity, "an added shared editor declaration would keep a private alias: %.300s", original);
+            return 0;
+        }
+    }
+    return 1;
+}
+static int pr_refresh_increment(pr_provider *base, const pr_provider *string_peer, int exact,
     pr_provider **library, pr_inventory **inventory, char *error, size_t capacity)
 {
     int composition_failed = 0;
@@ -3347,7 +4865,8 @@ static int pr_refresh_increment(pr_provider *base, const pr_provider *string_pee
     if (!base || !base->data_root) return 0;
     pr_provider *added = pr_prepare_deliveries(base->data_root, NULL, base, 0, PR_INCREMENT_REFRESH, inventory,
         &composition_failed, NULL, NULL, 0, 0, string_peer, NULL, 0, error, capacity);
-    if (added) *library = pr_increment_view(base, added, error, capacity);
+    if (added && exact && !pr_increment_exact(base, added, error, capacity)) { pr_release(added); added = NULL; }
+    if (added) *library = pr_increment_view(base, added, NULL, error, capacity);
     pr_release(added);
     if (*library) return 1;
     pr_inventory_release(*inventory); *inventory = NULL;
@@ -3358,7 +4877,7 @@ static pr_provider *pr_clone_serving(pr_provider *base, char *error, size_t capa
     sh_package_sources empty = {0};
     sh_package_resource_projection *rows = NULL;
     const sh_compiled_resource **inputs = NULL;
-    pr_provider *view = calloc(1, sizeof(*view));
+    pr_provider *view = pr_provider_new();
     if (!view) return NULL;
     view->references = 1; view->parent = pr_retain(base);
     if (!pr_key_groups_add(view, base, error, capacity)) goto failed;
@@ -3367,6 +4886,13 @@ static pr_provider *pr_clone_serving(pr_provider *base, char *error, size_t capa
         if (!view->unmodified_types) goto failed;
         memcpy(view->unmodified_types, base->unmodified_types, base->unmodified_count * sizeof(*view->unmodified_types));
         view->unmodified_count = base->unmodified_count;
+    }
+    if (base->exact_modifier_count) {
+        view->exact_modifier_types = malloc(base->exact_modifier_count * sizeof(*view->exact_modifier_types));
+        if (!view->exact_modifier_types) goto failed;
+        memcpy(view->exact_modifier_types, base->exact_modifier_types,
+            base->exact_modifier_count * sizeof(*view->exact_modifier_types));
+        view->exact_modifier_count = base->exact_modifier_count;
     }
     view->catalog = base->catalog; view->audio_originals = base->audio_originals;
     view->native_assets = base->native_assets;
@@ -3382,12 +4908,18 @@ static pr_provider *pr_clone_serving(pr_provider *base, char *error, size_t capa
     if (count > SIZE_MAX / sizeof(*rows) || count > SIZE_MAX / sizeof(*inputs)) goto failed;
     rows = calloc(count ? count : 1, sizeof(*rows)); inputs = calloc(count ? count : 1, sizeof(*inputs));
     if (!rows || !inputs) goto failed;
+    size_t projected = 0;
     for (size_t i = 0; i < count; i++) {
-        const sh_compiled_resource *r = base->compiled->resources + i; inputs[i] = r;
-        rows[i] = (sh_package_resource_projection){r->engine_path, inputs + i, 1,
+        const sh_compiled_resource *r = base->compiled->resources + i;
+#ifdef SH_PACKAGE_RUNTIME_TESTING
+        if (pr_test_omitted(base->compiled, r)) continue;
+#endif
+        inputs[projected] = r;
+        rows[projected] = (sh_package_resource_projection){r->engine_path, inputs + projected, 1,
             NULL, 0, r->native_type, r->native_name};
+        projected++;
     }
-    view->compiled = sh_package_compilation_project(view->sources, rows, count,
+    view->compiled = sh_package_compilation_project(view->sources, rows, projected,
         &base->compiled->policy, base->compiled->canonical_path, error, capacity);
     if (!view->compiled || !pr_view_bundles(view, base, NULL, error, capacity) ||
         !sh_package_provenance_overlay(&base->bindings, NULL, &view->bindings)) goto failed;
@@ -3401,7 +4933,7 @@ static pr_provider *pr_clone_serving(pr_provider *base, char *error, size_t capa
         sh_virtual_material_runtime_join(base->virtual_materials, NULL, error, capacity))) goto failed;
     if (base->consumers && !(view->consumers = sh_package_consumers_join(base->consumers, NULL, error, capacity))) goto failed;
     if (base->fsm_webs && !(view->fsm_webs = sh_package_fsm_webs_join(base->fsm_webs, NULL, error, capacity))) goto failed;
-    if (!pr_prepare_spawn_program(view, error, capacity)) goto failed;
+    if (!pr_prepare_spawn_program(view, 0, error, capacity)) goto failed;
     free(rows); free(inputs); return view;
 failed:
     free(rows); free(inputs); pr_release(view); return NULL;
@@ -3578,6 +5110,9 @@ static int pr_constructor_changes(const sh_package_consumers *before, const sh_p
 int sh_package_runtime_test_consumer_changes(const sh_package_consumers *before,
     const sh_package_consumers *after, sh_package_changes *changes)
 { return pr_constructor_changes(before, after, changes); }
+size_t sh_package_runtime_test_prune_native(sh_package_compilation *compiled, sh_package_consumers **consumers,
+    size_t movies[2], char *error, size_t capacity)
+{ return pr_prune_native(compiled, NULL, NULL, consumers, movies, error, capacity); }
 #endif
 static int pr_material_changed(const pr_provider *before, const pr_provider *after,
     const sh_compiled_resource *resource, const sh_package_changes *changes, size_t original_count,
@@ -3595,12 +5130,13 @@ static int pr_material_changed(const pr_provider *before, const pr_provider *aft
 /* A material can have identical source bytes while acquiring/removing a private
  * native atlas binding. Include that native reconstruction in the same resource
  * diff, otherwise an already-loaded object would retain its previous mapping. */
-static int pr_native_changes(const pr_provider *before, const pr_provider *after,
-    sh_package_changes *changes, char *error, size_t capacity)
+static int pr_native_changes_retry(const pr_provider *before, const pr_provider *after,
+    sh_package_changes *changes, int force_material_retry, char *error, size_t capacity)
 {
     size_t extra = 0, original_count = changes->count;
     const sh_package_compilation *compiled = after->compiled;
-    int retry = before && !sh_virtual_material_runtime_healthy(before->virtual_materials);
+    int retry = force_material_retry ||
+        (before && !sh_virtual_material_runtime_healthy(before->virtual_materials));
     sh_package_change *grown;
     if (!pr_membership_changes(before ? before->compiled : NULL, before ? before->catalog : NULL,
             changes, changes->removed, &changes->removed_count) ||
@@ -3627,6 +5163,10 @@ failed:
     sh_package_changes_free(changes); return 0;
 }
 
+static int pr_native_changes(const pr_provider *before, const pr_provider *after,
+    sh_package_changes *changes, char *error, size_t capacity)
+{ return pr_native_changes_retry(before, after, changes, 0, error, capacity); }
+
 #ifdef SH_PACKAGE_RUNTIME_TESTING
 int sh_package_runtime_test_native_changes(const sh_package_compilation *before,
     const sh_package_compilation *after, const sh_resource_catalog *catalog,
@@ -3642,16 +5182,70 @@ int sh_package_runtime_test_native_changes(const sh_package_compilation *before,
 }
 #endif
 
+/* A rejection keeps previous authoring authority and a conservative serving
+ * superset of every movie that may begin while the candidate is visible. All
+ * fallible storage, policy, native diff and inactive VT reservation work is
+ * complete before forward publication. No native instance is ended here. */
+static int pr_movie_rollback_prepare(pr_provider *previous, pr_provider *candidate,
+    pr_provider **out, sh_package_changes *changes, char *error, size_t capacity)
+{
+    pr_provider *view = NULL;
+    sh_package_sources empty = {0};
+    *out = NULL;
+    if (!candidate->movie_count) return 1;
+    if (previous) view = pr_clone_serving(previous, error, capacity);
+    else {
+        view = pr_provider_new();
+        if (view) {
+            view->references = 1; view->parent = pr_retain(candidate);
+            view->catalog = candidate->catalog; view->audio_originals = candidate->audio_originals;
+            view->native_assets = candidate->native_assets;
+            view->sources = sh_package_sources_join(&empty, &empty, error, capacity);
+            if (view->sources) view->compiled = sh_package_compilation_project(view->sources, NULL, 0,
+                NULL, candidate->compiled->canonical_path, error, capacity);
+            if (!view->compiled) { pr_release(view); view = NULL; }
+        }
+    }
+    if (!view || !pr_view_retained(view, candidate, view->sources->package_count, NULL, NULL,
+            PR_RETAIN_MOVIE_ROLLBACK, NULL, error, capacity) ||
+        !pr_audio_source_add(view, candidate) || !pr_movie_prepare(view, error, capacity) ||
+        !sh_package_compilation_changes(candidate->compiled, view->compiled, changes, error, capacity) ||
+        /* Activation may fault a material after this diff is prepared. Reserve
+         * its reconstruction now; an identical binding is not a success fence. */
+        !pr_native_changes_retry(candidate, view, changes, 1, error, capacity)) goto failed;
+#ifndef SH_PACKAGE_RUNTIME_TESTING
+    if (view->compiled->policy.localized_count) {
+        view->strings = sh_strids_reservation_open(error, capacity);
+        if (!view->strings || !sh_strids_reservation_policy(view->strings,
+            &view->compiled->policy, error, capacity)) goto failed;
+    }
+#endif
+    if (!sh_virtual_material_runtime_reserve(view->virtual_materials, error, capacity)) goto failed;
+    *out = view; return 1;
+failed:
+    if (view) (void)sh_virtual_material_runtime_release(&view->virtual_materials);
+    pr_release(view); sh_package_changes_free(changes); return 0;
+}
+
+static void pr_movie_rollback_dispose(pr_provider **view)
+{
+    if (!*view) return;
+    /* An unused reservation has never owned a native row; remove it now,
+     * rather than leave an idle registry entry until a render collection. */
+    (void)sh_virtual_material_runtime_release(&(*view)->virtual_materials);
+    pr_release(*view); *view = NULL;
+}
+
 static int pr_update(const char *data_root, int change_map, const char *map_source_root,
     const sh_package_map_plan *prepared, const sh_package_provenance *promotion,
     sh_package_activation_guard guard, sh_package_activation_fn activate, void *context)
 {
-    pr_provider *library = NULL, *map = NULL, *current = NULL;
+    pr_provider *library = NULL, *map = NULL, *current = NULL, *movie_rollback = NULL;
     pr_provider *old_library, *old_map, *old_current;
     pr_inventory *inventory = NULL, *old_inventory = NULL;
     sh_package_policy selected = {0}, old_selected;
     sh_package_provenance promoted = {0};
-    sh_package_changes changes = {0};
+    sh_package_changes changes = {0}, rollback_changes = {0};
     sh_virtual_material_view *previous_virtual_materials = NULL;
     char *retired_map_json = NULL;
     size_t retired_map_length = 0;
@@ -3660,8 +5254,12 @@ static int pr_update(const char *data_root, int change_map, const char *map_sour
     char error[2048] = "", line[512];
     char source_error[2048] = "";
     int ok = 0, guarded = 0, composition_failed = 0, old_usable = 0, library_rescanned = 0;
-    LONG lease_generation, promotion_generation;
+    LONG lease_generation, promotion_generation, movie_births;
     AcquireSRWLockExclusive(&g_refresh_lock);
+    {
+        int committed = 0;
+        if (pr_activation_finish(0,&committed,error,sizeof(error)) != 1) { g_usable = 0; goto done; }
+    }
     if (g_native_preparing || g_occurrence_recovery_provider) {
         /* A concurrent/reentrant refresh cannot replace this immutable retry
          * or mark its still-valid provider failed. The owning preparation
@@ -3721,13 +5319,20 @@ static int pr_update(const char *data_root, int change_map, const char *map_sour
             library = pr_retain(g_library_provider);
             backend_log("package library refresh: the installed packages are the ones the served library "
                 "was prepared from; nothing to compile");
-        } else if (installed && g_library_provider && pr_refresh_increment(g_library_provider, g_map_provider,
-                &library, &inventory, error, sizeof(error)))
-            backend_log("package library refresh for a published installation: added packages compiled alone, "
-                "unchanged packages served from the retained library");
-        else {
-            if (installed && g_library_provider) {
-                snprintf(line, sizeof(line), "package library refresh for a published installation compiles the whole library: %.400s",
+        } else if ((installed || (watched && !g_authoring_error[0])) && g_library_provider &&
+                pr_refresh_increment(g_library_provider, g_map_provider, !installed,
+                &library, &inventory, error, sizeof(error))) {
+            /* An exact increment publishes the whole library's digest. */
+            char digest[65];
+            if (!pr_library_digest(library->compiled, digest)) strcpy_s(digest, sizeof(digest), "unavailable");
+            snprintf(line, sizeof(line), "package library refresh for %s: added packages compiled alone, unchanged "
+                "packages served from the retained library; %zu resources, published digest %s",
+                installed ? "a published installation" : "watched packages", library->compiled->resource_count, digest);
+            backend_log(line);
+        } else {
+            if ((installed || (watched && !g_authoring_error[0])) && g_library_provider) {
+                snprintf(line, sizeof(line), "package library refresh for %s compiles the whole library: %.400s",
+                    installed ? "a published installation" : "watched packages",
                     error[0] ? error : "the increment did not complete");
                 backend_log(line);
             }
@@ -3761,6 +5366,9 @@ static int pr_update(const char *data_root, int change_map, const char *map_sour
     /* Prepared installed authoring may serve during native map admission, but
      * the persistent library/inventory remain old until commit_map finishes
      * its disk transaction. The view retains this prospective library itself. */
+rebuild_view:
+    movie_births = InterlockedCompareExchange(&g_movie_births, 0, 0);
+    lease_generation = InterlockedCompareExchange(&g_lease_generation, 0, 0);
     current = pr_view(prepared && prepared->library && !prepared->inventory_committed ? prepared->library : library,
         map, &promoted, error, sizeof(error));
     if (!current) goto done;
@@ -3775,14 +5383,29 @@ static int pr_update(const char *data_root, int change_map, const char *map_sour
     if (activate && !sh_package_compilation_changes(g_compiled, current->compiled,
         &changes, error, sizeof(error))) goto done;
     if (activate && !pr_native_changes(g_current_provider, current, &changes, error, sizeof(error))) goto done;
+    if (!pr_movie_prepare(current, error, sizeof(error))) goto done;
+    if (activate && !pr_movie_rollback_prepare(g_current_provider, current, &movie_rollback,
+        &rollback_changes, error, sizeof(error))) goto done;
     if (guard.begin) { guard.begin(); guarded = 1; }
 #ifndef SH_PACKAGE_RUNTIME_TESTING
     /* Validate the complete effective policy under the admitted activation
      * boundary. The publisher checks again before any private alias mutation. */
     if (current->strings && !sh_strids_reservation_validate(current->strings, error, sizeof(error))) goto done;
+    if (movie_rollback && movie_rollback->strings &&
+        !sh_strids_reservation_validate(movie_rollback->strings, error, sizeof(error))) goto done;
 #endif
-    if (activate && !pr_fsm_issue(current, error, sizeof(error))) goto done;
     AcquireSRWLockExclusive(&g_lock);
+    if (movie_births != InterlockedCompareExchange(&g_movie_births, 0, 0)) {
+        /* begin takes g_lock shared. An old movie that became live after
+         * selection must be projected before any native retirement occurs.
+         * Reuse the prepared source artifacts; never rescan the disk here. */
+        ReleaseSRWLockExclusive(&g_lock);
+        if (guarded) { guard.end(0); guarded = 0; }
+        pr_movie_rollback_dispose(&movie_rollback); sh_package_changes_free(&rollback_changes);
+        pr_release(current); current = NULL; pr_collect_movies();
+        sh_package_changes_free(&changes); sh_package_policy_free(&selected);
+        error[0] = 0; goto rebuild_view;
+    }
     if (promotion_generation != g_promotion_generation) {
         snprintf(error, sizeof(error), "map occurrence policy changed during provider preparation; retry at the next activation boundary");
         ReleaseSRWLockExclusive(&g_lock); goto done;
@@ -3798,6 +5421,9 @@ static int pr_update(const char *data_root, int change_map, const char *map_sour
     }
     old_current = g_current_provider; old_library = g_library_provider; old_map = g_map_provider;
     old_usable = g_usable;
+    if (activate && !pr_fsm_issue(current, error, sizeof(error))) {
+        ReleaseSRWLockExclusive(&g_lock); goto done;
+    }
     if (!sh_virtual_material_runtime_publish(current->virtual_materials,
         &previous_virtual_materials, error, sizeof(error))) {
         ReleaseSRWLockExclusive(&g_lock); goto done;
@@ -3813,27 +5439,42 @@ static int pr_update(const char *data_root, int change_map, const char *map_sour
     g_activating = activate != NULL; g_usable = 0; g_ready = !g_activating; g_error[0] = 0;
     ReleaseSRWLockExclusive(&g_lock);
     if (guarded) { guard.end(1); guarded = 0; }
-    if (activate && (!pr_activate(activate, context, 0, &changes, error, sizeof(error)) ||
-        !pr_fsm_bind(current, error, sizeof(error)))) {
+    int candidate_ready = !activate || (pr_activate(activate, context, 0, &changes, error, sizeof(error)) &&
+        pr_fsm_bind(current, error, sizeof(error)));
+    int committed = 0;
+    if (candidate_ready && g_activation_finish.finish)
+        candidate_ready=pr_activation_finish(2,&committed,error,sizeof(error))==1;
+    int finish_result = pr_activation_finish(candidate_ready,&committed,error,sizeof(error));
+    int cleanup_failed = finish_result != 1;
+    if (!candidate_ready || !committed) {
         char recovery_error[1024] = "";
-        int recovered;
+        int recovered, rejected = finish_result;
+        if (rejected == 0) rejected = pr_activation_finish(0,&committed,recovery_error,sizeof(recovery_error));
         if (!error[0]) strcpy_s(error, sizeof(error), "package activation did not complete");
         if (guard.begin) { guard.begin(); guarded = 1; }
         AcquireSRWLockExclusive(&g_lock);
-        sh_virtual_material_runtime_restore(previous_virtual_materials);
+        pr_provider *restored = movie_rollback ? movie_rollback : old_current;
+        sh_virtual_material_runtime_restore(movie_rollback ? movie_rollback->virtual_materials : previous_virtual_materials);
         selected = g_map_policy; g_map_policy = old_selected;
         if (change_map == 1 && !map) {
             g_map_json = retired_map_json; g_map_length = retired_map_length;
             g_map_references = retired_references;
             retired_map_json = NULL; memset(&retired_references, 0, sizeof(retired_references));
         }
-        pr_publish(old_current, old_library, old_map);
+        pr_publish(restored, old_library, old_map);
+        if (movie_rollback) {
+            movie_rollback = NULL;
+            /* Narrow the conservative movie superset at the next boundary. */
+            InterlockedIncrement(&g_lease_generation);
+        }
         if (inventory) g_inventory = old_inventory;
         ReleaseSRWLockExclusive(&g_lock);
         if (guarded) { guard.end(1); guarded = 0; }
-        sh_package_changes_reverse(&changes);
-        recovered = pr_activate(activate, context, 1, &changes, recovery_error, sizeof(recovery_error)) &&
-            pr_fsm_bind(old_current, recovery_error, sizeof(recovery_error));
+        if (restored != old_current) pr_release(old_current);
+        if (restored == old_current) sh_package_changes_reverse(&changes);
+        recovered = rejected == 1 && activate && pr_activation_recover(activate,context,
+            restored == old_current ? &changes : &rollback_changes,
+            restored,recovery_error,sizeof(recovery_error));
         AcquireSRWLockExclusive(&g_lock); g_usable = recovered && old_usable; ReleaseSRWLockExclusive(&g_lock);
         if (!recovered) {
             char activation_error[sizeof(error)];
@@ -3846,9 +5487,9 @@ static int pr_update(const char *data_root, int change_map, const char *map_sour
         goto done;
     }
     AcquireSRWLockExclusive(&g_lock);
-    g_activating = 0; g_ready = 1; g_usable = activate != NULL;
+    g_activating = 0; g_ready = !cleanup_failed; g_usable = activate != NULL && !cleanup_failed;
 #ifdef SH_PACKAGE_RUNTIME_TESTING
-    if (!g_native_bound) g_usable = 1; /* Pure filesystem/compiler host. */
+    if (!g_native_bound && !cleanup_failed) g_usable = 1; /* Pure filesystem/compiler host. */
 #endif
     if (!change_map) strcpy_s(g_authoring_error, sizeof(g_authoring_error), source_error);
     sh_package_provenance_free(&g_promoted); g_promoted = promoted; memset(&promoted, 0, sizeof(promoted));
@@ -3889,6 +5530,7 @@ static int pr_update(const char *data_root, int change_map, const char *map_sour
     pr_release(old_current); pr_release(old_library); pr_release(old_map);
     InterlockedExchange(&g_lease_published, lease_generation); pr_collect_leases();
     sh_package_policy_free(&old_selected); ok = 1;
+    if (cleanup_failed) ok = 0; /* Candidate ownership already latched: keep it. */
     if (source_error[0]) { strcpy_s(error, sizeof(error), source_error); ok = 0; }
 done:
     if (guarded) guard.end(0);
@@ -3898,11 +5540,13 @@ done:
         strcpy_s(g_error, sizeof(g_error), error); g_activating = 0; g_ready = 0;
         ReleaseSRWLockExclusive(&g_lock); backend_log(error);
     }
+    pr_movie_rollback_dispose(&movie_rollback); sh_package_changes_free(&rollback_changes);
     pr_release(current); pr_release(library); pr_release(map); sh_package_policy_free(&selected);
     pr_inventory_release(inventory);
     free(retired_map_json); sh_package_references_free(&retired_references);
     sh_package_changes_free(&changes);
     sh_package_provenance_free(&promoted);
+    pr_collect_movies(); /* Also collect idle owners after failed preparation. */
     ReleaseSRWLockExclusive(&g_refresh_lock); return ok;
 }
 
@@ -3945,6 +5589,15 @@ static int pr_plan_authoring_served(const sh_package_map_plan *plan,
     for (size_t i = 0; i < plan->authoring->compiled->resource_count; i++) if (selection.resources[i]) {
         const sh_compiled_resource *resource = plan->authoring->compiled->resources + i;
         const sh_compiled_resource *current = sh_package_compilation_find(serving, resource->engine_path);
+        /* A whole-linked installation serves each authored declaration from
+         * the whole composition of its own lineage; equal output bytes of
+         * another owner's row do not certify it (pr_view_retained_link). */
+        if (plan->library_whole && pr_lineage_bound(resource) && !pr_original_editor_slot(current, resource)) {
+            if (pr_composing_row(serving, current, resource, plan->authoring->sources)) continue;
+            snprintf(error, capacity, "%s: installed authoring output is not admitted (no served row composes its authored files)",
+                resource->engine_path);
+            goto done;
+        }
         int equal = current ? pr_output_equal(serving, current, plan->authoring->compiled,
             resource, error, capacity) : 0;
         if (equal != 1 && (equal < 0 || !pr_original_editor_slot(current, resource))) {
@@ -3955,7 +5608,7 @@ static int pr_plan_authoring_served(const sh_package_map_plan *plan,
     }
     ok = 1;
 done:
-    free(selection.resources); sh_package_owners_free(&selection.owners); return ok;
+    pr_retained_free(&selection); return ok;
 }
 
 /* All fallible compilation/native/disk work precedes this pointer commit.
@@ -3980,15 +5633,20 @@ int sh_package_runtime_admit_occurrences(sh_package_map_plan *plan,
     sh_package_activation_fn activate, sh_package_occurrence_finalize_fn finalize,
     void *context, char *error, size_t capacity)
 {
-    pr_provider *candidate = NULL, *previous = NULL, *old_library = NULL;
+    pr_provider *candidate = NULL, *previous = NULL, *old_library = NULL, *movie_rollback = NULL;
     pr_inventory *old_inventory = NULL;
-    sh_package_changes changes = {0};
+    sh_package_changes changes = {0}, rollback_changes = {0};
     sh_virtual_material_view *previous_materials = NULL;
     const sh_package_provenance *uses = sh_package_occurrence_provenance(document);
     char fallback[2048]; int result = 0, guarded = 0, metadata_needed = 0, old_ready = 0, old_usable = 0;
+    LONG movie_births;
     if (!error || !capacity) { error = fallback; capacity = sizeof(fallback); }
     *error = 0;
     AcquireSRWLockExclusive(&g_refresh_lock);
+    {
+        int committed = 0;
+        if (pr_activation_finish(0,&committed,error,capacity) != 1) goto done;
+    }
     if (!plan || !activate || !g_current_provider || !g_usable || g_activating || g_native_preparing ||
         (!!guard.begin != !!guard.end)) {
         snprintf(error, capacity, "additive source admission requires a stable provider and complete native activation boundary"); goto done;
@@ -3999,6 +5657,8 @@ int sh_package_runtime_admit_occurrences(sh_package_map_plan *plan,
         goto done;
     }
     if (!pr_plan_occurrences(plan->provider, uses, NULL, error, capacity)) goto done;
+rebuild_candidate:
+    movie_births = InterlockedCompareExchange(&g_movie_births, 0, 0);
     candidate = pr_clone_serving(g_current_provider, error, capacity);
     if (candidate && !plan->inventory_committed && plan->authoring && !pr_view_retained(candidate, plan->authoring,
         candidate->sources->package_count, NULL, NULL, PR_RETAIN_AUTHORING, &metadata_needed, error, capacity)) {
@@ -4010,7 +5670,10 @@ int sh_package_runtime_admit_occurrences(sh_package_map_plan *plan,
         if (metadata_needed) result = SH_PACKAGE_ADMISSION_NEEDS_METADATA;
         goto done;
     }
-    if (!pr_prepare_spawn_program(candidate, error, capacity)) goto done;
+    /* Existing exact policies still describe the unchanged native conductor.
+     * New exact policies wait for the next native-load view to project it;
+     * captured absence metadata remains authoritative during authoring. */
+    if (!pr_prepare_spawn_program(candidate, 0, error, capacity)) goto done;
     if (!pr_plan_occurrences(plan->provider, uses, candidate->compiled, error, capacity) ||
         !pr_plan_authoring_served(plan, candidate->compiled, error, capacity) ||
         !sh_package_compilation_changes(g_compiled, candidate->compiled, &changes, error, capacity) ||
@@ -4029,12 +5692,27 @@ int sh_package_runtime_admit_occurrences(sh_package_map_plan *plan,
             &candidate->compiled->policy, error, capacity)) goto done;
     }
 #endif
+    if (!pr_movie_prepare(candidate, error, capacity)) goto done;
+    if (!pr_movie_rollback_prepare(g_current_provider, candidate, &movie_rollback,
+        &rollback_changes, error, capacity)) goto done;
     if (guard.begin) { guard.begin(); guarded = 1; }
 #ifndef SH_PACKAGE_RUNTIME_TESTING
     if (candidate->strings && !sh_strids_reservation_validate(candidate->strings, error, capacity)) goto done;
+    if (movie_rollback && movie_rollback->strings &&
+        !sh_strids_reservation_validate(movie_rollback->strings, error, capacity)) goto done;
 #endif
-    if (!pr_fsm_issue(candidate, error, capacity)) goto done;
     AcquireSRWLockExclusive(&g_lock);
+    if (movie_births != InterlockedCompareExchange(&g_movie_births, 0, 0)) {
+        ReleaseSRWLockExclusive(&g_lock);
+        if (guarded) { guard.end(0); guarded = 0; }
+        pr_movie_rollback_dispose(&movie_rollback); sh_package_changes_free(&rollback_changes);
+        pr_release(candidate); candidate = NULL; pr_collect_movies();
+        sh_package_changes_free(&changes); metadata_needed = 0; result = 0; *error = 0;
+        goto rebuild_candidate;
+    }
+    if (!pr_fsm_issue(candidate, error, capacity)) {
+        ReleaseSRWLockExclusive(&g_lock); goto done;
+    }
     previous = g_current_provider; old_ready = g_ready; old_usable = g_usable;
     if (!sh_virtual_material_runtime_publish(candidate->virtual_materials, &previous_materials, error, capacity)) {
         ReleaseSRWLockExclusive(&g_lock); goto done;
@@ -4044,6 +5722,9 @@ int sh_package_runtime_admit_occurrences(sh_package_map_plan *plan,
     ReleaseSRWLockExclusive(&g_lock);
     if (guarded) { guard.end(1); guarded = 0; }
     int native_ready = pr_activate(activate, context, 0, &changes, error, capacity) && pr_fsm_bind(candidate, error, capacity);
+    if (native_ready && g_activation_finish.finish) {
+        int preflight=0; native_ready=pr_activation_finish(2,&preflight,error,capacity)==1;
+    }
     if (native_ready && finalize) {
         __try { native_ready = finalize(context, error, capacity) == 1; }
         __except (EXCEPTION_EXECUTE_HANDLER) {
@@ -4051,22 +5732,41 @@ int sh_package_runtime_admit_occurrences(sh_package_map_plan *plan,
             snprintf(error, capacity, "occurrence installation finalization raised exception 0x%08lx", (unsigned long)GetExceptionCode());
         }
     }
-    if (!native_ready) {
+    /* A successful disk finalizer cannot be undone by an allocator-scope
+     * refusal during finish. Retain this accepted decision for owed cleanup. */
+    if (native_ready && finalize && g_activation_finish.finish) g_activation_finish.accepted = 1;
+    int committed = 0, finish_result = pr_activation_finish(native_ready,&committed,error,capacity);
+    int cleanup_failed = finish_result != 1;
+    if (native_ready && finalize && !committed) {
+        cleanup_failed = 1; committed = 1;
+        if (finish_result == 1) g_activation_damaged = 1;
+        if (!*error) snprintf(error,capacity,"committed occurrence storage could not finish; native use is disabled");
+    }
+    if (!native_ready || !committed) {
         char recovery_error[1024] = "";
+        int rejected = finish_result;
+        if (rejected == 0) rejected = pr_activation_finish(0,&committed,recovery_error,sizeof(recovery_error));
         if (!*error) snprintf(error, capacity, "additive native preparation did not complete");
         if (guard.begin) { guard.begin(); guarded = 1; }
         AcquireSRWLockExclusive(&g_lock);
-        sh_virtual_material_runtime_restore(previous_materials);
-        pr_publish(previous, g_library_provider, g_map_provider);
+        pr_provider *restored = movie_rollback ? movie_rollback : previous;
+        sh_virtual_material_runtime_restore(movie_rollback ? movie_rollback->virtual_materials : previous_materials);
+        pr_publish(restored, g_library_provider, g_map_provider);
+        if (movie_rollback) {
+            movie_rollback = NULL;
+            InterlockedIncrement(&g_lease_generation);
+        }
         ReleaseSRWLockExclusive(&g_lock);
         if (guarded) { guard.end(1); guarded = 0; }
-        sh_package_changes_reverse(&changes);
-        int recovered = pr_activate(activate, context, 1, &changes, recovery_error, sizeof(recovery_error)) &&
-            pr_fsm_bind(previous, recovery_error, sizeof(recovery_error));
+        if (restored != previous) pr_release(previous);
+        if (restored == previous) sh_package_changes_reverse(&changes);
+        int recovered = rejected == 1 && pr_activation_recover(activate,context,
+            restored == previous ? &changes : &rollback_changes,
+            restored,recovery_error,sizeof(recovery_error));
         AcquireSRWLockExclusive(&g_lock);
         g_activating = 0; g_ready = recovered && old_ready; g_usable = recovered && old_usable;
         if (!recovered) {
-            g_occurrence_recovery_provider = pr_retain(previous);
+            g_occurrence_recovery_provider = pr_retain(restored);
             g_occurrence_recovery_context = context;
             g_occurrence_recovery_ready = old_ready;
             g_occurrence_recovery_usable = old_usable;
@@ -4078,7 +5778,8 @@ int sh_package_runtime_admit_occurrences(sh_package_map_plan *plan,
         ReleaseSRWLockExclusive(&g_lock); previous = NULL; goto done;
     }
     AcquireSRWLockExclusive(&g_lock);
-    g_activating = 0; g_ready = old_ready; g_usable = old_usable;
+    g_activating = 0; g_ready = old_ready && !cleanup_failed; g_usable = old_usable && !cleanup_failed;
+    if (cleanup_failed) { snprintf(g_error,sizeof(g_error),"%s",error); backend_log(error); }
     plan->occurrences_admitted = 1;
     if (finalize) pr_commit_inventory_locked(plan, &old_library, &old_inventory);
     ReleaseSRWLockExclusive(&g_lock);
@@ -4087,10 +5788,15 @@ int sh_package_runtime_admit_occurrences(sh_package_map_plan *plan,
 #endif
     candidate = NULL; pr_release(previous); previous = NULL;
     pr_inventory_release(old_inventory); pr_release(old_library);
+    /* The finalizer and owning-storage latch have committed. Returning a
+     * rollback result would make callers undo a committed installation. The
+     * runtime remains unusable and exposes the cleanup fault above. */
     result = SH_PACKAGE_ADMISSION_READY;
 done:
     if (guarded) guard.end(0);
+    pr_movie_rollback_dispose(&movie_rollback); sh_package_changes_free(&rollback_changes);
     pr_release(candidate); sh_package_changes_free(&changes);
+    pr_collect_movies();
     if (!result && !*error) snprintf(error, capacity, "additive source admission could not be prepared");
     ReleaseSRWLockExclusive(&g_refresh_lock); return result;
 }
@@ -4106,6 +5812,13 @@ int sh_package_runtime_complete_occurrence_recovery(void *context)
 {
     pr_provider *retained = NULL;
     AcquireSRWLockExclusive(&g_refresh_lock);
+    {
+        char error[1024]; int committed = 0;
+        if (pr_activation_finish(0,&committed,error,sizeof(error)) != 1) {
+            AcquireSRWLockExclusive(&g_lock); snprintf(g_error,sizeof(g_error),"%s",error);
+            ReleaseSRWLockExclusive(&g_lock); ReleaseSRWLockExclusive(&g_refresh_lock); return 0;
+        }
+    }
     AcquireSRWLockExclusive(&g_lock);
     if (g_occurrence_recovery_provider && context == g_occurrence_recovery_context &&
         g_current_provider == g_occurrence_recovery_provider && !g_activating && !g_native_preparing) {
@@ -4247,6 +5960,11 @@ char *sh_package_map_plan_rebind(const sh_package_map_plan *plan, const sh_packa
         (plan->provider->historical_bindings.context_count ? &plan->provider->historical_bindings : NULL);
     bound = sh_package_runtime_capture_document(plan, recipe, NULL, 0, json, length,
         &bound_length, &ownership, NULL, NULL, error, capacity);
+    /* Rebinding renames suppliers, never an owner's recorded exact row. */
+    if (bound && saved && ownership && !sh_package_occurrence_carry_rows(ownership, saved)) {
+        if (error && capacity) snprintf(error, capacity, "map exact editor rows could not be carried");
+        free(bound); bound = NULL;
+    }
     /* Save the newly bound names together with the newly selected actual sites.
      * Retaining an old-name envelope would misclassify those same sites as edits
      * when attaching the native document after parsing. */
@@ -4372,12 +6090,39 @@ int sh_package_map_plan_prepare_inventory(sh_package_map_plan *plan,
     if (g_library_provider != base) {
         if (error && capacity) snprintf(error, capacity, "the installed library changed during source preparation"); goto done;
     }
-    if (checked && !(library = pr_increment_view(base, checked, error, capacity))) goto done;
+    /* A load whose installed packages add nothing to serve or report keeps the
+     * library itself as the prepared library (pr_increment_adds_nothing). */
+    int refused = 0;
+    if (checked && pr_increment_adds_nothing(base, checked)) library = pr_retain(base);
+    else if (checked && !(library = pr_increment_view(base, checked, &refused, error, capacity))) {
+        if (!refused || !error || !capacity) goto done;
+        /* An added package binds an original the additive view cannot join as
+         * the whole link does (pr_native_witnesses_compose). That is no defect
+         * of the map: compile the whole library inside this installation,
+         * before native activation or commit, rather than serve less or fail
+         * the load. A failure here keeps the served library and cancels. */
+        char line[700];
+        snprintf(line, sizeof(line), "package library for an installation compiles the whole library: %.500s", error);
+        backend_log(line);
+        error[0] = 0;
+        pr_provider *whole = pr_prepare(data_root, NULL, base, 0, NULL, NULL, NULL, plan->provider, error, capacity);
+        if (!whole) goto done;
+        library = pr_installation_whole(whole, checked, error, capacity);
+        pr_release(whole);
+        if (!library) goto done;
+    }
+    if (library && library != base) {
+        char line[256], digest[65];
+        if (!pr_library_digest(library->compiled, digest)) strcpy_s(digest, sizeof(digest), "unavailable");
+        snprintf(line, sizeof(line), "package library prepared for an installation (%s): %zu resources, published digest %s",
+            refused ? "whole" : "increment", library->compiled->resource_count, digest);
+        backend_log(line);
+    }
     pr_inventory_release(plan->inventory); plan->inventory = inventory; inventory = NULL;
     pr_release(plan->library); plan->library = library; library = NULL;
     pr_release(plan->library_base); plan->library_base = base; base = NULL;
     pr_release(plan->authoring); plan->authoring = checked; checked = NULL;
-    plan->inventory_committed = 0;
+    plan->inventory_committed = 0; plan->library_whole = refused;
     ok = 1;
 done:
     pr_inventory_release(inventory); pr_release(checked); pr_release(library); pr_release(base);
@@ -4782,6 +6527,19 @@ int sh_package_runtime_audio_programs(sh_package_runtime_audio **rows, size_t *c
     *rows = out; *count = used; return 1;
 }
 void sh_package_runtime_audio_release(void *owner) { pr_release(owner); }
+int sh_package_runtime_audio_file(void *owner, const char *engine_path,
+    sh_package_file **file)
+{
+    const pr_provider *provider = owner;
+    const sh_compiled_resource *resource;
+    if (file) *file = NULL;
+    if (!provider || !engine_path || !file) return -1;
+    resource = sh_package_compilation_find(provider->compiled, engine_path);
+    if (!resource) return 0;
+    if (resource->body || !resource->cache_file) return -1;
+    *file = sh_package_file_retain(resource->cache_file);
+    return *file ? 1 : -1;
+}
 int sh_package_runtime_audio_baseline(sh_audio_shared_policy *out, char *error, size_t capacity)
 {
     int result;
@@ -4920,6 +6678,7 @@ static void pr_summary_settings(pr_summary *s)
     }
     sh_json_object_free(&cvars);
 }
+static int pi_summary_line(pr_summary *s);
 char *sh_package_runtime_summary(void)
 {
     pr_summary s = {0};
@@ -4929,9 +6688,19 @@ char *sh_package_runtime_summary(void)
     const char *coverage = g_library_provider ? g_library_provider->coverage : NULL;
     const char *unserved = g_library_provider ? g_library_provider->unserved : NULL;
     pr_summary_put(&s, "Installed library: %zu packages.\n", g_inventory ? g_inventory->sources->package_count : 0);
-    if (rejections) pr_summary_put(&s, "%s%s", rejections,
-        "Skipped packages stay unchanged on disk. Packages made for earlier Snapmap+ releases can be "
-        "converted: close DOOM and run snapmap-plus migrate-overrides.\n");
+    /* Conversion helps only an earlier-release package: a descriptor without a
+     * usable id (installer overrides_plan.go legacyDesc) or resources outside
+     * assets/ (pi_classify, PI_LEGACY). Malformed content, unusable names and
+     * peer disagreements are not that, so they get no conversion advice. */
+    if (rejections) {
+        pr_summary_put(&s, "%s%s", rejections,
+            "Skipped packages stay unchanged on disk; each reason names what to fix, and other packages are "
+            "unaffected. 'sh_packages inputs <package>' lists their files.\n");
+        if (strstr(rejections, "package.json is missing its required id") || strstr(rejections, "package.json id must be"))
+            pr_summary_put(&s, "A package.json without a usable id is an earlier-release descriptor this library does "
+                "not serve. Map deliveries are converted automatically; for a local authoring folder the optional "
+                "developer tool snapmap-plus migrate-overrides converts it.\n");
+    }
     if (unserved) pr_summary_put(&s, "%s%s", unserved,
         "Packages not served yet stay installed and unchanged; they need a Snapmap+ update, not an edit.\n");
     if (coverage) pr_summary_put(&s, "%s", coverage);
@@ -4940,6 +6709,7 @@ char *sh_package_runtime_summary(void)
     if (!g_ready) pr_summary_put(&s, "Packages could not compile: %s\n%s",
         g_error[0] ? g_error : "compiler has not initialized",
         g_compiled ? "The last successful compilation remains active.\n" : "");
+    pi_summary_line(&s);
     if (!g_sources || !g_compiled || !g_sources->package_count) {
         pr_summary_put(&s, "No packages in the active compilation.\n"); goto done;
     }
@@ -4970,6 +6740,663 @@ done:
     return s.text;
 }
 
+/* Per-input accounting (sh_packages inputs). Every unit the installed scan
+ * discovered, and each of its files and folders, gets one disposition from the
+ * served library's own records: compiled rows (every input index, duplicates
+ * included), generated inputs, rows left native as unchanged originals, and
+ * the library's left-out and not-served reports. An input none of them
+ * explains is reported as unaccounted; it is never dismissed as ancillary. */
+enum {
+    PI_SERVED, PI_SHARED, PI_COMPOSED, PI_OVERLAP, PI_GENERATED, PI_UNCHANGED, PI_SHADER,
+    PI_DESCRIPTOR, PI_FOLDER, PI_AUTHOR, PI_LEGACY,
+    PI_MALFORMED, PI_LEFT_OUT, PI_UNSERVED, PI_UNACCOUNTED, PI_KINDS
+};
+static const char *const g_pi_kinds[PI_KINDS] = {
+    "served", "shared copy", "composed", "overlap resolved", "generated input (unproved)", "unchanged original",
+    "inactive shader", "descriptor", "folder", "author data", "outside assets",
+    "malformed unit", "left out", "not served yet", "unaccounted"
+};
+#define PI_PAGE 250u
+#define PI_LISTED 40u
+typedef struct pi_key { size_t owner; const char *relative; size_t length, index; } pi_key;
+static int pi_key_order(const void *a, const void *b)
+{
+    const pi_key *x = a, *y = b;
+    size_t n = x->length < y->length ? x->length : y->length;
+    int order;
+    if (x->owner != y->owner) return x->owner < y->owner ? -1 : 1;
+    if ((order = strncmp(x->relative, y->relative, n)) != 0) return order;
+    return x->length < y->length ? -1 : x->length > y->length;
+}
+typedef struct pi_generated { const char *path; size_t row; } pi_generated;
+static int pi_generated_order(const void *a, const void *b)
+{
+    const pi_generated *x = a, *y = b;
+    int order = strcmp(x->path, y->path);
+    return order ? order : x->row < y->row ? -1 : x->row > y->row;
+}
+typedef struct pi_unit {
+    const sh_package_sources *sources; /* the inventory, or its left-out units */
+    size_t owner, served;              /* served: owner in the library, or SIZE_MAX */
+    int status;                        /* PI_SERVED, or the kind all its files share */
+    const char *reason;                /* the library's report line, through '\n' */
+    size_t counts[PI_KINDS], files, folders, empty, components;
+} pi_unit;
+typedef struct pi_report {
+    const pr_provider *library;
+    const pr_inventory *inventory;
+    const sh_package_compilation *compiled;
+    const sh_package_sources *served;
+    const sh_resource_catalog *catalog;
+    size_t *row_start, *rows;  /* served file -> compiled rows listing it */
+    pi_key *served_files;      /* by owner and exact relative path */
+    pi_key *parents[2];        /* folders holding inventory / left-out entries */
+    size_t parent_count[2];
+    pi_generated *generated;
+    size_t generated_count;
+    pi_unit *units;
+    size_t unit_count;
+    int failed;
+} pi_report;
+/* The report line naming exactly this package root, or NULL. */
+static const char *pi_line(const char *text, const char *prefix, const char *root, const char *after)
+{
+    size_t p = strlen(prefix), r = strlen(root), a = strlen(after);
+    for (const char *line = text; line && *line; ) {
+        const char *end = strchr(line, '\n');
+        if (!strncmp(line, prefix, p) && !strncmp(line + p, root, r) && !strncmp(line + p + r, after, a))
+            return line;
+        line = end ? end + 1 : NULL;
+    }
+    return NULL;
+}
+static const sh_package_descriptor *pi_descriptor(const sh_package_sources *sources, size_t owner)
+{
+    for (size_t j = 0; j < sources->component_count; j++)
+        if (sources->components[j].owner == owner && !sources->components[j].relative[0])
+            return &sources->components[j].descriptor;
+    return NULL;
+}
+static void pi_free(pi_report *report)
+{
+    free(report->row_start); free(report->rows); free(report->served_files);
+    free(report->parents[0]); free(report->parents[1]); free(report->generated); free(report->units);
+}
+static int pi_parents(const sh_package_sources *sources, pi_key **out, size_t *count)
+{
+    *out = NULL; *count = 0;
+    if (!sources || !sources->file_count) return 1;
+    if (!(*out = calloc(sources->file_count, sizeof(**out)))) return 0;
+    for (size_t i = 0; i < sources->file_count; i++) {
+        const char *slash = strrchr(sources->files[i].relative, '/');
+        if (slash) (*out)[(*count)++] = (pi_key){sources->files[i].owner, sources->files[i].relative,
+            (size_t)(slash - sources->files[i].relative), i};
+    }
+    qsort(*out, *count, sizeof(**out), pi_key_order);
+    return 1;
+}
+static void pi_unit_add(pi_report *report, const sh_package_sources *sources, size_t owner)
+{
+    pi_unit *unit = report->units + report->unit_count++;
+    const pr_provider *library = report->library;
+    memset(unit, 0, sizeof(*unit));
+    unit->sources = sources; unit->owner = owner; unit->served = SIZE_MAX;
+    const char *root = sources->packages[owner].root;
+    if (sources != report->inventory->sources) {
+        unit->status = PI_MALFORMED;
+        unit->reason = pi_line(library->rejections, "Skipped local package ", root, ": ");
+    } else {
+        for (size_t j = 0; j < report->served->package_count && unit->served == SIZE_MAX; j++)
+            if (!strcmp(report->served->packages[j].name, sources->packages[owner].name) &&
+                !memcmp(report->served->fingerprints[j], sources->fingerprints[owner], 32)) unit->served = j;
+        if (unit->served != SIZE_MAX) unit->status = PI_SERVED;
+        else if ((unit->reason = pi_line(library->unserved, "Local package ", root, " is not served yet")))
+            unit->status = PI_UNSERVED;
+        else if ((unit->reason = pi_line(library->rejections, "Skipped local package ", root, ": ")))
+            unit->status = PI_LEFT_OUT;
+        else unit->status = PI_UNACCOUNTED;
+    }
+    for (size_t j = 0; j < sources->component_count; j++) unit->components += sources->components[j].owner == owner;
+}
+/* Called with g_lock held. An empty report means no library is served. */
+static int pi_build(pi_report *report)
+{
+    const pr_provider *library = g_library_provider;
+    memset(report, 0, sizeof(*report));
+    if (!library || !library->compiled || !library->sources || !g_inventory) return 1;
+    report->library = library; report->inventory = g_inventory;
+    report->compiled = library->compiled; report->served = library->sources;
+    report->catalog = library->catalog ? library->catalog : library->parent ? library->parent->catalog : NULL;
+    const sh_package_compilation *compiled = report->compiled;
+    const sh_package_sources *served = report->served, *left = g_inventory->left_out;
+    size_t files = served->file_count, total = 0, *cursor = NULL;
+    for (size_t r = 0; r < compiled->resource_count; r++) {
+        if (compiled->resources[r].source_count > SIZE_MAX - total) return 0;
+        total += compiled->resources[r].source_count;
+        if (compiled->resources[r].generated && compiled->resources[r].generated_input_count > SIZE_MAX - report->generated_count) return 0;
+        if (compiled->resources[r].generated) report->generated_count += compiled->resources[r].generated_input_count;
+    }
+    report->row_start = calloc(files + 1, sizeof(*report->row_start));
+    report->rows = calloc(total ? total : 1, sizeof(*report->rows));
+    report->served_files = calloc(files ? files : 1, sizeof(*report->served_files));
+    report->generated = calloc(report->generated_count ? report->generated_count : 1, sizeof(*report->generated));
+    report->units = calloc(g_inventory->sources->package_count + (left ? left->package_count : 0) + 1,
+        sizeof(*report->units));
+    cursor = calloc(files ? files : 1, sizeof(*cursor));
+    if (!report->row_start || !report->rows || !report->served_files || !report->generated || !report->units ||
+        !cursor || !pi_parents(g_inventory->sources, &report->parents[0], &report->parent_count[0]) ||
+        !pi_parents(left, &report->parents[1], &report->parent_count[1])) { free(cursor); return 0; }
+    for (size_t r = 0; r < compiled->resource_count; r++)
+        for (size_t s = 0; s < compiled->resources[r].source_count; s++)
+            if (compiled->resources[r].sources[s] < files) report->row_start[compiled->resources[r].sources[s] + 1]++;
+    for (size_t f = 0; f < files; f++) {
+        report->row_start[f + 1] += report->row_start[f];
+        cursor[f] = report->row_start[f];
+        report->served_files[f] = (pi_key){served->files[f].owner, served->files[f].relative,
+            strlen(served->files[f].relative), f};
+    }
+    for (size_t r = 0; r < compiled->resource_count; r++) {
+        const sh_compiled_resource *resource = compiled->resources + r;
+        for (size_t s = 0; s < resource->source_count; s++)
+            if (resource->sources[s] < files) report->rows[cursor[resource->sources[s]]++] = r;
+    }
+    free(cursor);
+    qsort(report->served_files, files, sizeof(*report->served_files), pi_key_order);
+    size_t generated = 0;
+    for (size_t r = 0; r < compiled->resource_count; r++)
+        for (size_t g = 0; compiled->resources[r].generated && g < compiled->resources[r].generated_input_count; g++)
+            report->generated[generated++] = (pi_generated){compiled->resources[r].generated_inputs[g], r};
+    qsort(report->generated, generated, sizeof(*report->generated), pi_generated_order);
+    for (size_t i = 0; i < g_inventory->sources->package_count; i++) pi_unit_add(report, g_inventory->sources, i);
+    for (size_t i = 0; left && i < left->package_count; i++) pi_unit_add(report, left, i);
+    return 1;
+}
+static void pi_row(pr_summary *s, const sh_compiled_resource *r)
+{
+    size_t names = sh_package_resource_native_count(r);
+    pr_summary_put(s, " %s", r->engine_path);
+    if (r->native_type && r->native_name) pr_summary_put(s, " as %s %s", r->native_type, r->native_name);
+    else if (r->type && r->name) pr_summary_put(s, " as %s %s", r->type, r->name);
+    if (names > 1) pr_summary_put(s, " +%zu names", names - 1);
+    if (r->original_path) pr_summary_put(s, " (private alias of %s)", r->original_path);
+    if (r->composed) pr_summary_put(s, " (composed)");
+    if (r->generated) pr_summary_put(s, " (generated)");
+    if (r->presented) pr_summary_put(s, " (label presented)");
+}
+/* Whether this file may be attributed to a generated row. Row owners span all
+ * of a generated row's inputs (pc_dependency), so this is not per-input proof
+ * and the report labels it unproved; it only excludes what is disproved. The
+ * row names the file's
+ * package, and no other package it names has different bytes at that path. */
+static int pi_generated_attributable(const pi_report *report, const pi_unit *unit, const sh_package_source_file *file,
+    const char *canonical, size_t row)
+{
+    const sh_compiled_resource *r = report->compiled->resources + row;
+    if (!sh_package_owners_contains(&r->owners, unit->served)) return 0;
+    for (size_t k = 0; k < report->served->file_count; k++) {
+        const sh_package_source_file *peer = report->served->files + k;
+        char *path;
+        int same;
+        if (peer->directory || !peer->engine_path || peer->owner == unit->served ||
+            !sh_package_owners_contains(&r->owners, peer->owner) ||
+            (peer->length == file->length && !memcmp(peer->digest, file->digest, 32))) continue;
+        path = pr_canonical(peer->engine_path);
+        same = path && !strcmp(path, canonical);
+        free(path);
+        if (same) return 0;
+    }
+    return 1;
+}
+#ifdef SH_PACKAGE_RUNTIME_TESTING
+int sh_package_runtime_test_generated_attributable(const sh_package_sources *served, const sh_compiled_resource *row,
+    size_t file)
+{
+    sh_package_compilation compiled = {0};
+    pi_report report = {0};
+    pi_unit unit = {0};
+    char *canonical = pr_canonical(served->files[file].engine_path);
+    compiled.resources = (sh_compiled_resource *)row; compiled.resource_count = 1;
+    report.served = served; report.compiled = &compiled; unit.served = served->files[file].owner;
+    int proved = canonical && pi_generated_attributable(&report, &unit, served->files + file, canonical, 0);
+    free(canonical);
+    return proved;
+}
+#endif
+static const char *pi_renderer(int renderer)
+{
+    return renderer == SH_PACKAGE_SHADER_VULKAN ? "Vulkan library" : renderer == SH_PACKAGE_SHADER_OPENGL ?
+        "OpenGL library" : "no renderer contract";
+}
+/* The source link's own reason an unpublished shader input needs no row. */
+static void pi_shader_detail(pr_summary *detail, const pr_shader_input *shader)
+{
+    const char *other = shader->renderer == SH_PACKAGE_SHADER_VULKAN ? "OpenGL" : "Vulkan";
+    switch (shader->reason) {
+    case SH_PACKAGE_SHADER_UNPUBLISHED_OTHER_RENDERER:
+        pr_summary_put(detail, "%s renderer artifact; the %s publishes only its own renderer's shaders (source link)",
+            other, pi_renderer(shader->renderer));
+        break;
+    case SH_PACKAGE_SHADER_UNPUBLISHED_DRIVER_CACHE:
+        pr_summary_put(detail, "shader driver cache/debug file; no renderer publishes it (source link, %s)",
+            pi_renderer(shader->renderer));
+        break;
+    case SH_PACKAGE_SHADER_UNPUBLISHED_STOCK_INCLUDE:
+        pr_summary_put(detail, "equals the installed SnapMap include and no selected program reads it; kept, not "
+            "published (source link, %s)", pi_renderer(shader->renderer));
+        break;
+    case SH_PACKAGE_SHADER_UNPUBLISHED_DORMANT_PAIR:
+        if (shader->pair_original)
+            pr_summary_put(detail, "dormant %s permutation declaration: checksum %08x matches the installed original %s "
+                "(source link); the %s publishes neither", other, shader->checksum, shader->pair,
+                pi_renderer(shader->renderer));
+        else
+            pr_summary_put(detail, "dormant %s permutation declaration: checksum %08x matches %s | %llu bytes "
+                "%02x%02x%02x%02x (source link); the %s publishes neither", other, shader->checksum, shader->pair,
+                (unsigned long long)shader->pair_length, shader->pair_digest[0], shader->pair_digest[1],
+                shader->pair_digest[2], shader->pair_digest[3], pi_renderer(shader->renderer));
+        break;
+    default:
+        pr_summary_put(detail, "accounted by the source link (reason %d, %s)", shader->reason, pi_renderer(shader->renderer));
+    }
+}
+/* One entry's disposition; detail, when not NULL, receives its evidence. */
+static int pi_classify(const pi_report *report, const pi_unit *unit, size_t index, pr_summary *detail)
+{
+    const sh_package_source_file *file = unit->sources->files + index;
+    const sh_package_component *component = unit->sources->components + file->component;
+    if (unit->status != PI_SERVED) {
+        if (detail) pr_summary_put(detail, "with its whole unit (see the unit's reason)");
+        return unit->status;
+    }
+    if (file->directory) {
+        int set = unit->sources == report->inventory->sources ? 0 : 1;
+        pi_key key = {file->owner, file->relative, strlen(file->relative), 0};
+        int held = report->parent_count[set] && bsearch(&key, report->parents[set], report->parent_count[set],
+            sizeof(key), pi_key_order) != NULL;
+        if (detail) pr_summary_put(detail, held ? "authored folder, kept with the package" :
+            "empty authored folder, kept with the package");
+        return PI_FOLDER;
+    }
+    if (!file->engine_path) {
+        const char *local = file->relative + strlen(component->relative);
+        if (*local == '/') local++;
+        if (!_stricmp(local, "package.json")) {
+            if (detail) pr_summary_put(detail, "%s %s [%s]", component->relative[0] ? "nested component" : "package",
+                component->descriptor.name, component->descriptor.id);
+            return PI_DESCRIPTOR;
+        }
+        char *canonical = report->catalog ? pr_canonical(local) : NULL;
+        const sh_resource_catalog_entry *const *entries = NULL;
+        size_t known = canonical ? sh_resource_catalog_find_path(report->catalog, canonical, &entries) : 0;
+        free(canonical);
+        if (known) {
+            if (detail) pr_summary_put(detail, "names game resource %s outside assets/, an earlier-release placement "
+                "this library does not serve (unsupported legacy layout). Map deliveries are converted automatically; "
+                "for a local authoring folder the optional developer tool snapmap-plus migrate-overrides converts it", local);
+            return PI_LEGACY;
+        }
+        if (detail) pr_summary_put(detail, "outside assets/ and not a game resource path; kept with the package");
+        return PI_AUTHOR;
+    }
+    pi_key key = {unit->served, file->relative, strlen(file->relative), 0};
+    const pi_key *found = report->served->file_count ? bsearch(&key, report->served_files,
+        report->served->file_count, sizeof(key), pi_key_order) : NULL;
+    if (!found) {
+        if (detail) pr_summary_put(detail, "the served library holds no copy of this file");
+        return PI_UNACCOUNTED;
+    }
+    size_t served = found->index, best = SIZE_MAX, effective = SIZE_MAX;
+    int kind = PI_KINDS;
+    for (size_t at = report->row_start[served]; at < report->row_start[served + 1]; at++) {
+        const sh_compiled_resource *r = report->compiled->resources + report->rows[at];
+        size_t source = r->source != SIZE_MAX ? r->source : r->sources[0];
+        const sh_package_source_file *other = source < report->served->file_count ? report->served->files + source : NULL;
+        int k = r->composed ? PI_COMPOSED : source == served ? PI_SERVED :
+            other && other->length == file->length && !memcmp(other->digest, file->digest, 32) ? PI_SHARED : PI_OVERLAP;
+        if (k < kind) { kind = k; best = report->rows[at]; effective = source; }
+    }
+    char *canonical = pr_canonical(file->engine_path);
+    size_t first = 0, last = 0, unproved = 0;
+    if (canonical && report->generated_count) {
+        pi_generated probe = {canonical, 0};
+        size_t low = 0, high = report->generated_count;
+        while (low < high) {
+            size_t middle = low + (high - low) / 2;
+            if (strcmp(report->generated[middle].path, canonical) < 0) low = middle + 1; else high = middle;
+        }
+        first = last = low;
+        while (last < report->generated_count && !strcmp(report->generated[last].path, probe.path)) last++;
+    }
+    /* A generated row names input paths, not files. A same-path file of a
+     * package the row does not name is not its input; and when the row names
+     * several packages whose files at that path differ, which bytes it read
+     * cannot be proved here, so nothing is attributed. */
+    size_t readers = 0, reader[3] = {0};
+    for (size_t g = first; g < last; g++) {
+        if (pi_generated_attributable(report, unit, file, canonical, report->generated[g].row)) {
+            if (readers < 3) reader[readers] = report->generated[g].row;
+            readers++;
+        } else if (kind == PI_KINDS && !unproved) unproved = report->generated[g].row + 1;
+    }
+    if (kind == PI_KINDS && readers) kind = PI_GENERATED;
+    const pr_unchanged *unchanged = NULL;
+    if (kind == PI_KINDS && canonical && report->library->unchanged_count) {
+        pr_unchanged probe = {canonical, file->length, {0}};
+        memcpy(probe.digest, file->digest, 32);
+        unchanged = bsearch(&probe, report->library->unchanged, report->library->unchanged_count,
+            sizeof(probe), pr_unchanged_order);
+        if (unchanged) kind = PI_UNCHANGED;
+    }
+    /* Only the link's record for this package's exact file explains it; a
+     * shader-like path alone never does. */
+    const pr_shader_input *shader = NULL;
+    if (kind == PI_KINDS && report->library->shader_input_count && report->served->fingerprints) {
+        pr_shader_input probe = {{0}};
+        memcpy(probe.owner, report->served->fingerprints[unit->served], 32);
+        probe.relative = (char *)file->relative; probe.length = file->length; memcpy(probe.digest, file->digest, 32);
+        shader = bsearch(&probe, report->library->shader_inputs, report->library->shader_input_count,
+            sizeof(probe), pr_shader_input_order);
+        if (shader) kind = PI_SHADER;
+    }
+    if (kind == PI_KINDS) kind = PI_UNACCOUNTED;
+    if (detail) {
+        size_t start = detail->length, rows = report->row_start[served + 1] - report->row_start[served], shown = 0;
+        if (kind == PI_SHARED || kind == PI_OVERLAP) {
+            const sh_package_source_file *other = report->served->files + effective;
+            const sh_package_descriptor *owner = pi_descriptor(report->served, other->owner);
+            pr_summary_put(detail, "%s %s [%s] %s", kind == PI_SHARED ? "same bytes as" : "different bytes; served from",
+                owner ? owner->name : report->served->packages[other->owner].name, owner ? owner->id : "?", other->relative);
+        } else if (kind == PI_UNCHANGED) {
+            pr_summary_put(detail, "equals the installed SnapMap original at %s; the game serves it", canonical);
+        } else if (kind == PI_SHADER) {
+            pi_shader_detail(detail, shader);
+            if (unproved) pr_summary_put(detail, "; generated row %s also reads this path, but which package's bytes it "
+                "read is not recorded", report->compiled->resources[unproved - 1].engine_path);
+        } else if (kind == PI_UNACCOUNTED && unproved) {
+            pr_summary_put(detail, "generated row %s reads this path, but which package's bytes it read cannot be "
+                "proved (missing product coverage)", report->compiled->resources[unproved - 1].engine_path);
+        } else if (kind == PI_UNACCOUNTED) {
+            pr_summary_put(detail, "no served row, generated use or unchanged-original record%s%s (missing product coverage)",
+                report->library->unchanged_lost ? "; unchanged-original records were not retained" : "",
+                report->library->shader_inputs_lost ? "; shader accounting records were not retained" : "");
+        }
+        if (best != SIZE_MAX) {
+            pr_summary_put(detail, "%srow", detail->length > start ? "; " : "");
+            pi_row(detail, report->compiled->resources + best); shown++;
+            for (size_t at = report->row_start[served]; at < report->row_start[served + 1] && shown < 3; at++)
+                if (report->rows[at] != best) {
+                    pr_summary_put(detail, ";"); pi_row(detail, report->compiled->resources + report->rows[at]); shown++;
+                }
+            if (rows > shown) pr_summary_put(detail, "; %zu more rows", rows - shown);
+        }
+        for (size_t g = 0; g < readers && g < 3; g++) {
+            pr_summary_put(detail, "%spath read by generated", detail->length > start ? "; " : "");
+            pi_row(detail, report->compiled->resources + reader[g]);
+        }
+        if (readers > 3) pr_summary_put(detail, "; %zu more generated rows", readers - 3);
+        if (readers) pr_summary_put(detail, "; which package's file a generated row read is not recorded (its owners "
+            "span all its inputs), so this attribution is unproved");
+        if (rows > 3 || readers > 3 || (best != SIZE_MAX &&
+            sh_package_resource_native_count(report->compiled->resources + best) > 1))
+            pr_summary_put(detail, "; 'sh_packages exposures' lists all");
+    }
+    free(canonical);
+    return kind;
+}
+static void pi_count(pi_report *report)
+{
+    for (size_t u = 0; u < report->unit_count; u++) {
+        pi_unit *unit = report->units + u;
+        for (size_t i = 0; i < unit->sources->file_count; i++) {
+            const sh_package_source_file *file = unit->sources->files + i;
+            if (file->owner != unit->owner) continue;
+            int kind = pi_classify(report, unit, i, NULL);
+            unit->counts[kind]++;
+            if (file->directory) {
+                int set = unit->sources == report->inventory->sources ? 0 : 1;
+                pi_key key = {file->owner, file->relative, strlen(file->relative), 0};
+                unit->folders++;
+                unit->empty += !report->parent_count[set] || !bsearch(&key, report->parents[set],
+                    report->parent_count[set], sizeof(key), pi_key_order);
+            } else unit->files++;
+        }
+    }
+}
+static void pi_counts(pr_summary *s, const size_t *counts)
+{
+    int listed = 0;
+    for (int k = 0; k < PI_KINDS; k++)
+        if (counts[k]) pr_summary_put(s, "%s%s %zu", listed++ ? ", " : "", g_pi_kinds[k], counts[k]);
+    if (!listed) pr_summary_put(s, "no entries");
+}
+static void pi_unit_line(pr_summary *s, const pi_unit *unit)
+{
+    const sh_package_descriptor *descriptor = pi_descriptor(unit->sources, unit->owner);
+    pr_summary_put(s, "%s [%s] (%s): %s; %zu files, %zu folders (%zu empty), %zu components: ",
+        descriptor ? descriptor->name : "Package", descriptor ? descriptor->id : "?", unit->sources->packages[unit->owner].name,
+        unit->status == PI_SERVED ? "served library" : g_pi_kinds[unit->status], unit->files, unit->folders,
+        unit->empty, unit->components);
+    pi_counts(s, unit->counts);
+    pr_summary_put(s, "\n");
+    if (unit->reason) pr_summary_put(s, "  %.*s\n", (int)strcspn(unit->reason, "\n"), unit->reason);
+    else if (unit->status == PI_MALFORMED) pr_summary_put(s, "  Left out for invalid content; its report line is not retained.\n");
+    else if (unit->status == PI_UNACCOUNTED)
+        pr_summary_put(s, "  Installed, but the served library neither serves it nor records why (missing product coverage).\n");
+}
+static void pi_entry(pr_summary *s, const pi_report *report, const pi_unit *unit, size_t index, size_t row, int named)
+{
+    const sh_package_source_file *file = unit->sources->files + index;
+    pr_summary_put(s, "  %zu. ", row);
+    if (named) pr_summary_put(s, "%s/", unit->sources->packages[unit->owner].name);
+    if (file->directory) pr_summary_put(s, "%s/ | ", file->relative);
+    else pr_summary_put(s, "%s | %llu bytes %02x%02x%02x%02x | ", file->relative, (unsigned long long)file->length,
+        file->digest[0], file->digest[1], file->digest[2], file->digest[3]);
+    pr_summary detail = {0};
+    int kind = pi_classify(report, unit, index, &detail);
+    if (detail.failed) s->failed = 1;
+    pr_summary_put(s, "%s: %s\n", g_pi_kinds[kind], detail.text ? detail.text : "");
+    free(detail.text);
+}
+/* Whether some unit is the package a report line names. */
+static int pi_line_has_unit(const pi_report *report, const char *line, size_t length)
+{
+    static const char prefix[] = "Skipped local package ";
+    const char *root = line + sizeof(prefix) - 1, *end;
+    if (length < sizeof(prefix) - 1 || strncmp(line, prefix, sizeof(prefix) - 1)) return 0;
+    for (end = root; end + 1 < line + length && (end[0] != ':' || end[1] != ' '); end++);
+    for (size_t u = 0; u < report->unit_count; u++) {
+        const char *unit = report->units[u].sources->packages[report->units[u].owner].root;
+        if (strlen(unit) == (size_t)(end - root) && !strncmp(unit, root, (size_t)(end - root))) return 1;
+    }
+    return 0;
+}
+char *sh_package_runtime_inputs(const char *query, size_t first)
+{
+    pr_summary s = {0};
+    pi_report report;
+    AcquireSRWLockShared(&g_lock);
+    if (!pi_build(&report)) { pr_summary_put(&s, "Input accounting is unavailable: out of memory.\n"); goto done; }
+    if (!report.library) {
+        pr_summary_put(&s, "No installed library is served yet%s%s.\n", g_error[0] ? ": " : "", g_error);
+        goto done;
+    }
+    pi_count(&report);
+    size_t totals[PI_KINDS] = {0}, files = 0, folders = 0, empty = 0, components = 0;
+    for (size_t u = 0; u < report.unit_count; u++) {
+        for (int k = 0; k < PI_KINDS; k++) totals[k] += report.units[u].counts[k];
+        files += report.units[u].files; folders += report.units[u].folders;
+        empty += report.units[u].empty; components += report.units[u].components;
+    }
+    if (!query || !*query) {
+        size_t attention = 0, listed = 0;
+        pr_summary_put(&s, "Installed inputs: %zu files and %zu folders (%zu empty) in %zu delivery units with %zu "
+            "components; the served library compiles %zu units.\n", files, folders, empty, report.unit_count, components,
+            report.served->package_count);
+        pr_summary_put(&s, "Dispositions: "); pi_counts(&s, totals); pr_summary_put(&s, ".\n");
+        for (size_t u = 0; u < report.unit_count; u++) {
+            pi_unit_line(&s, report.units + u);
+            attention += report.units[u].counts[PI_UNACCOUNTED] + report.units[u].counts[PI_LEGACY];
+        }
+        if (report.library->unchanged_lost)
+            pr_summary_put(&s, "Unchanged-original records were not retained; inputs they explain show as unaccounted.\n");
+        if (report.library->shader_inputs_lost)
+            pr_summary_put(&s, "Shader accounting records were not retained; inputs they explain show as unaccounted.\n");
+        if (report.inventory->left_out_lost)
+            pr_summary_put(&s, "The files of units left out for invalid content could not be retained for this report.\n");
+        for (const char *line = report.library->rejections; line && *line; ) {
+            const char *end = strchr(line, '\n');
+            size_t length = end ? (size_t)(end - line) : strlen(line);
+            if (!pi_line_has_unit(&report, line, length))
+                pr_summary_put(&s, "Unit rejected before its files were inventoried: %.*s\n", (int)length, line);
+            line = end ? end + 1 : NULL;
+        }
+        if (attention) pr_summary_put(&s, "Inputs needing attention (%zu):\n", attention);
+        for (size_t u = 0; u < report.unit_count && listed < PI_LISTED; u++) {
+            const pi_unit *unit = report.units + u;
+            if (unit->status != PI_SERVED || !(unit->counts[PI_UNACCOUNTED] + unit->counts[PI_LEGACY])) continue;
+            for (size_t i = 0; i < unit->sources->file_count && listed < PI_LISTED; i++) {
+                if (unit->sources->files[i].owner != unit->owner) continue;
+                int kind = pi_classify(&report, unit, i, NULL);
+                if (kind == PI_UNACCOUNTED || kind == PI_LEGACY) pi_entry(&s, &report, unit, i, ++listed, 1);
+            }
+        }
+        if (attention > listed) pr_summary_put(&s, "  %zu more; list a package to see them.\n", attention - listed);
+        if (report.library->coverage) pr_summary_put(&s, "Coverage notes (packages still served):\n%s", report.library->coverage);
+        pr_summary_put(&s, "'sh_packages inputs <package id or folder> [first row]' lists every input with its exposures; "
+            "'sh_packages inputs <path>' finds a path in every package.\n");
+        goto done;
+    }
+    size_t row = 0, shown = 0, matched = 0;
+    if (!first) first = 1;
+    for (size_t u = 0; u < report.unit_count; u++) {
+        const pi_unit *unit = report.units + u;
+        const sh_package_descriptor *descriptor = pi_descriptor(unit->sources, unit->owner);
+        if (_stricmp(unit->sources->packages[unit->owner].name, query) && (!descriptor || _stricmp(descriptor->id, query)))
+            continue;
+        matched++;
+        pi_unit_line(&s, unit);
+        for (size_t i = 0; i < unit->sources->file_count; i++) {
+            if (unit->sources->files[i].owner != unit->owner) continue;
+            if (++row < first || shown >= PI_PAGE) continue;
+            pi_entry(&s, &report, unit, i, row, 0); shown++;
+        }
+    }
+    if (!matched) {
+        for (size_t u = 0; u < report.unit_count; u++) {
+            const pi_unit *unit = report.units + u;
+            for (size_t i = 0; i < unit->sources->file_count; i++) {
+                const sh_package_source_file *file = unit->sources->files + i;
+                if (file->owner != unit->owner || (_stricmp(file->relative, query) &&
+                    (!file->engine_path || _stricmp(file->engine_path, query)))) continue;
+                if (++row < first || shown >= PI_PAGE) continue;
+                pi_entry(&s, &report, unit, i, row, 1); shown++;
+            }
+        }
+        if (!row) pr_summary_put(&s, "No installed package or input matches %s.\n", query);
+    }
+    if (row) {
+        pr_summary_put(&s, "Rows %zu-%zu of %zu.", shown ? first : 0, shown ? first + shown - 1 : 0, row);
+        if (shown && first + shown <= row) pr_summary_put(&s, " Next: sh_packages inputs %s %zu", query, first + shown);
+        pr_summary_put(&s, "\n");
+    }
+done:
+    pi_free(&report);
+    ReleaseSRWLockShared(&g_lock);
+    if (s.failed) { free(s.text); return NULL; }
+    return s.text;
+}
+/* Whether entry index of unit is listed by query (sh_package_runtime_inputs). */
+static int pi_matches(const pi_unit *unit, size_t index, const char *query, int by_unit)
+{
+    const sh_package_source_file *file = unit->sources->files + index;
+    if (by_unit) return 1;
+    return !_stricmp(file->relative, query) || (file->engine_path && !_stricmp(file->engine_path, query));
+}
+static int pi_unit_matches(const pi_unit *unit, const char *query)
+{
+    const sh_package_descriptor *descriptor = pi_descriptor(unit->sources, unit->owner);
+    return !_stricmp(unit->sources->packages[unit->owner].name, query) || (descriptor && !_stricmp(descriptor->id, query));
+}
+static void pi_exposure(pr_summary *s, const sh_compiled_resource *r, const char *role, size_t *line, size_t first)
+{
+    size_t names = sh_package_resource_native_count(r);
+    if (++*line >= first && *line < first + PI_PAGE) {
+        pr_summary_put(s, "  %zu. %s", *line, role); pi_row(s, r); pr_summary_put(s, "\n");
+    }
+    for (size_t n = 0; n < names; n++) {
+        sh_package_native_identity identity = sh_package_resource_native_at(r, n);
+        if (++*line >= first && *line < first + PI_PAGE)
+            pr_summary_put(s, "  %zu.   identity %s %s\n", *line, identity.type ? identity.type : "?", identity.name ? identity.name : "?");
+    }
+}
+char *sh_package_runtime_input_exposures(const char *query, size_t entry, size_t first)
+{
+    pr_summary s = {0};
+    pi_report report;
+    size_t row = 0, line = 0;
+    int by_unit = 0, found = 0;
+    if (!first) first = 1;
+    AcquireSRWLockShared(&g_lock);
+    if (!pi_build(&report)) { pr_summary_put(&s, "Input accounting is unavailable: out of memory.\n"); goto done; }
+    if (!report.library || !query || !*query) { pr_summary_put(&s, "No installed library is served yet, or no query.\n"); goto done; }
+    for (size_t u = 0; u < report.unit_count && !by_unit; u++) by_unit = pi_unit_matches(report.units + u, query);
+    for (size_t u = 0; u < report.unit_count && !found; u++) {
+        const pi_unit *unit = report.units + u;
+        if (by_unit && !pi_unit_matches(unit, query)) continue;
+        for (size_t i = 0; i < unit->sources->file_count && !found; i++) {
+            const sh_package_source_file *file = unit->sources->files + i;
+            if (file->owner != unit->owner || !pi_matches(unit, i, query, by_unit) || ++row != entry) continue;
+            found = 1;
+            pi_entry(&s, &report, unit, i, row, !by_unit);
+            if (unit->status != PI_SERVED || file->directory || !file->engine_path) break;
+            pi_key key = {unit->served, file->relative, strlen(file->relative), 0};
+            const pi_key *served = report.served->file_count ? bsearch(&key, report.served_files,
+                report.served->file_count, sizeof(key), pi_key_order) : NULL;
+            if (served) for (size_t at = report.row_start[served->index]; at < report.row_start[served->index + 1]; at++)
+                pi_exposure(&s, report.compiled->resources + report.rows[at], "row", &line, first);
+            char *canonical = pr_canonical(file->engine_path);
+            for (size_t g = 0; canonical && g < report.generated_count; g++)
+                if (!strcmp(report.generated[g].path, canonical) &&
+                    pi_generated_attributable(&report, unit, file, canonical, report.generated[g].row))
+                    pi_exposure(&s, report.compiled->resources + report.generated[g].row, "read by generated", &line, first);
+            free(canonical);
+        }
+    }
+    if (!found) pr_summary_put(&s, "No entry %zu matches %s.\n", entry, query);
+    else {
+        size_t last = line < first ? 0 : line < first + PI_PAGE - 1 ? line : first + PI_PAGE - 1;
+        pr_summary_put(&s, "Exposure lines %zu-%zu of %zu.", last ? first : 0, last, line);
+        if (last && last < line) pr_summary_put(&s, " Next: sh_packages exposures %s %zu %zu", query, entry, last + 1);
+        pr_summary_put(&s, "\n");
+    }
+done:
+    pi_free(&report);
+    ReleaseSRWLockShared(&g_lock);
+    if (s.failed) { free(s.text); return NULL; }
+    return s.text;
+}
+/* Disposition totals for the summary, or 0 when no library is served. */
+static int pi_summary_line(pr_summary *s)
+{
+    pi_report report;
+    int ok = pi_build(&report);
+    if (ok && report.library) {
+        size_t totals[PI_KINDS] = {0}, files = 0, folders = 0;
+        pi_count(&report);
+        for (size_t u = 0; u < report.unit_count; u++) {
+            for (int k = 0; k < PI_KINDS; k++) totals[k] += report.units[u].counts[k];
+            files += report.units[u].files; folders += report.units[u].folders;
+        }
+        pr_summary_put(s, "Inputs: %zu files and %zu folders in %zu units: ", files, folders, report.unit_count);
+        pi_counts(s, totals);
+        pr_summary_put(s, ". 'sh_packages inputs' accounts for each.\n");
+        if (totals[PI_LEGACY]) pr_summary_put(s, "%zu files name game resources outside assets/, an earlier-release "
+            "placement this library does not serve (unsupported legacy layout); 'sh_packages inputs' names them.\n",
+            totals[PI_LEGACY]);
+    } else if (!ok) pr_summary_put(s, "Input accounting is unavailable: out of memory.\n");
+    pi_free(&report);
+    return ok;
+}
 void sh_package_runtime_release(void) { ReleaseSRWLockShared(&g_lock); }
 
 int sh_package_runtime_read(const char *engine_path, unsigned char **body, size_t *length)
@@ -5264,8 +7691,9 @@ static int pr_key_context_close(pr_key_context *keys, int adopt)
         }
 #ifdef PR_NATIVE_SPAWN
         if (ok && publish && g_current_provider) {
-            program = sh_spawn_keys_program_create(keys->owner == g_current_provider ? keys->scratch : serving,
-                g_current_provider->unmodified_types, g_current_provider->unmodified_count);
+            program = sh_spawn_keys_program_create_exact(keys->owner == g_current_provider ? keys->scratch : serving,
+                g_current_provider->unmodified_types, g_current_provider->unmodified_count,
+                g_current_provider->exact_modifier_types, g_current_provider->exact_modifier_count);
             ok = program != NULL;
         }
 #endif
@@ -5694,7 +8122,9 @@ static int pr_stock_rows(const pr_inline_view *view)
 { return pr_shipped_rows(view->provider->catalog, &view->originals); }
 
 /* ---- Toybox roster for label qualification (strids.h, sh_strids_palette) ---
- * Every editor entry that is a toybox tile, as the current provider serves it:
+ * Every editor entry that is a toybox tile or a logic selector (an Add Logic
+ * input or output, which states no meta category: its meta is the empty text), as
+ * the current provider serves it:
  * every served editor declaration (package, legacy public and product rows,
  * and packages' own versions of shipped entries), then every shipped entry the
  * provider does not serve. Each resolves its inherited fields through the
@@ -5757,7 +8187,8 @@ static int pr_palette_of(const sh_package_compilation *compiled, const sh_resour
         const char *label = sh_editor_rows_effective(&served, &g_editor_rows, row, SH_EDITOR_ROW_LABEL);
         const char *category = sh_editor_rows_effective(&served, &g_editor_rows, row, SH_EDITOR_ROW_CATEGORY);
         const char *meta = sh_editor_rows_effective(&served, &g_editor_rows, row, SH_EDITOR_ROW_META);
-        if (!entity || !*entity || !label || !category || !meta) continue;
+        if (!entity || !*entity || !label || !category) continue;
+        if (!meta) meta = ""; /* a selector row states no meta category */
         sh_strids_palette_entry *entry = g_roster.entries + g_roster.count;
         if (!(entry->row = pr_roster_copy(row->name, strings)) || !(entry->label = pr_roster_copy(label, strings)) ||
             !(entry->category = pr_roster_copy(category, strings)) || !(entry->meta = pr_roster_copy(meta, strings))) goto done;
@@ -5874,6 +8305,158 @@ static int pr_package_rows(pr_inline_view *view)
 done:
     free((void *)context_copy); free((void *)shipped_name);
     return state;
+}
+/* Native state comparison of the actual definitions (R-191, M60). A private
+ * definition's Parse resolves its inherit through the engine's global name
+ * lookup (VK 0x17ae9d0 stores the parent at +0x160), so per definition: a name
+ * the document serves must be served by the engine now with the same compiled
+ * source; a name the document leaves original must be original in the engine
+ * too (no provider serves a changed copy under that stock name). The target
+ * chain's document-only definitions are prepared privately with their authored
+ * text instead of being looked up; the candidate chain is stock only. */
+#ifdef SH_PACKAGE_RUNTIME_TESTING
+static sh_package_runtime_native_compare g_test_native_compare;
+void sh_package_runtime_test_native_compare(sh_package_runtime_native_compare compare)
+{ g_test_native_compare = compare; }
+#endif
+typedef struct pr_eval_chain {
+    sh_native_eval_layer *layers;
+    size_t count;
+    int engine_mismatch; /* the engine answers a stock name with a changed copy */
+    char detail[200];
+} pr_eval_chain;
+static void pr_eval_chain_free(pr_eval_chain *chain)
+{
+    for (size_t i = 0; i < chain->count; i++) { free((char *)chain->layers[i].name); free((char *)chain->layers[i].text); }
+    free(chain->layers); chain->layers = NULL; chain->count = 0;
+}
+/* 1 when the engine serves exactly this compiled source under its path,
+ * 0 not, -1 unreadable. */
+static int pr_eval_served_same(const pr_provider *document, const pr_provider *serving, const char *path)
+{
+    const sh_compiled_resource *mine = sh_package_compilation_find(document->compiled, path), *theirs;
+    unsigned char *a = NULL, *b = NULL; size_t na = 0, nb = 0; char error[160];
+    if (!serving || !serving->compiled || !mine) return 0;
+    if (serving == document) return 1;
+    theirs = sh_package_compilation_find(serving->compiled, path);
+    if (!theirs || theirs->native_original || theirs->restored_original) return 0;
+    a = sh_package_compilation_read(document->compiled, mine, SIZE_MAX / 2, &na, error, sizeof(error));
+    b = a ? sh_package_compilation_read(serving->compiled, theirs, SIZE_MAX / 2, &nb, error, sizeof(error)) : NULL;
+    int same = !a || !b ? -1 : na == nb && !memcmp(a, b, na);
+    free(a); free(b);
+    return same;
+}
+/* Walk the inherit names the engine follows from name. A definition the
+ * document serves holds its name only where the engine serves the same
+ * source; otherwise prepare collects it (nearest first) for a private
+ * evaluation, and stock_only refuses it. A name the document leaves original
+ * must be original in the engine. 1 holds, 0 not (chain->detail set),
+ * -1 unavailable. */
+static int pr_eval_chain_walk(pr_inline_view *view, const pr_provider *serving, const char *name,
+    int prepare, int stock_only, pr_eval_chain *chain)
+{
+    pr_inline_view engine;
+    char *current = name && *name ? _strdup(name) : NULL;
+    int result = !name ? -1 : !*name ? 1 : current ? 1 : -1;
+    memset(&engine, 0, sizeof(engine));
+    engine.provider = serving; engine.originals = view->originals;
+    for (int depth = 0; current && result == 1; depth++) {
+        sh_decl_source text = {0};
+        int served = 0, found = depth < 64 ? pr_inline_read(view, current, &text, &served, NULL) : -1;
+        if (found != 1) {
+            if (!found) snprintf(chain->detail, sizeof(chain->detail), "'%s' is not available", current);
+            result = found < 0 ? -1 : 0; break;
+        }
+        if (served && stock_only) {
+            snprintf(chain->detail, sizeof(chain->detail),
+                "the native base's chain reaches '%s', which is not the unchanged stock original", current);
+            result = 0;
+        } else if (served) {
+            size_t length = strlen(current) + sizeof("generated/decls/entitydef/.decl");
+            char *path = malloc(length);
+            int same = path ? (snprintf(path, length, "generated/decls/entitydef/%s.decl", current),
+                pr_eval_served_same(view->provider, serving, path)) : -1;
+            free(path);
+            if (same < 0) result = -1;
+            else if (!same && !prepare) {
+                snprintf(chain->detail, sizeof(chain->detail), "the engine does not serve '%s' with this document's source", current);
+                result = 0;
+            } else if (!same) {
+                sh_native_eval_layer *grown = realloc(chain->layers, (chain->count + 1) * sizeof(*grown));
+                char *copy = malloc(text.length + 1), *label = _strdup(current);
+                if (grown) chain->layers = grown;
+                if (!grown || !copy || !label) { free(copy); free(label); result = -1; }
+                else {
+                    memcpy(copy, text.text, text.length); copy[text.length] = 0;
+                    chain->layers[chain->count++] = (sh_native_eval_layer){label, copy};
+                }
+            }
+        } else if (serving) {
+            /* The document's original must also be the engine's: the serving
+             * provider may not answer this stock name with a changed copy. */
+            sh_decl_source served_text = {0};
+            int engine_served = 0, in_engine = pr_inline_read(&engine, current, &served_text, &engine_served, NULL);
+            free((void *)served_text.text);
+            if (in_engine < 0) result = -1;
+            else if (in_engine == 1 && engine_served) {
+                snprintf(chain->detail, sizeof(chain->detail), "the engine serves a changed copy of stock '%s'", current);
+                chain->engine_mismatch = 1; result = 0;
+            }
+        }
+        char error[160];
+        sh_decl_node *tree = result == 1 ? sh_decl_tree_parse(text, error, sizeof(error)) : NULL;
+        free((void *)text.text); free(current); current = NULL;
+        if (result != 1) break;
+        if (!tree) { result = -1; break; }
+        const sh_decl_node *inherit = sh_decl_tree_member(tree, "inherit");
+        const char *literal; size_t n;
+        if (inherit && sh_decl_tree_literal(inherit, &literal, &n) && n) {
+            if ((current = malloc(n + 1))) { memcpy(current, literal, n); current[n] = 0; }
+            else result = -1;
+        }
+        sh_decl_tree_free(tree);
+    }
+    free(current);
+    return result;
+}
+static sh_native_eval_status pr_inline_evaluate(void *context, size_t entity, const char *from, const char *base,
+    const sh_decl_node *target, const sh_decl_node *candidate, char *detail, size_t capacity)
+{
+    pr_inline_view *view = context;
+    pr_eval_chain chain = {0}, stock = {0};
+    char *left = NULL, *right = NULL;
+    size_t length = 0;
+    sh_native_eval_status status = SH_NATIVE_EVAL_FAILED;
+    const pr_provider *serving = g_usable ? g_current_provider : NULL;
+    (void)entity;
+    /* The candidate inherits base by name: stock original in the document
+     * and in the engine. */
+    int held = pr_eval_chain_walk(view, serving, base, 0, 1, &stock);
+    if (held <= 0) {
+        snprintf(detail, capacity, "%s", held < 0 ? "the stock chain is unreadable" : stock.detail);
+        status = held < 0 || stock.engine_mismatch ? SH_NATIVE_EVAL_UNAVAILABLE : SH_NATIVE_EVAL_UNSUPPORTED;
+        goto done;
+    }
+    /* The target inherits from: what the engine does not serve with the
+     * document's source is prepared privately. */
+    held = pr_eval_chain_walk(view, serving, from, 1, 0, &chain);
+    if (held <= 0) {
+        snprintf(detail, capacity, "%s", held < 0 ? "the definition chain is unreadable" : chain.detail);
+        status = SH_NATIVE_EVAL_UNAVAILABLE;
+        goto done;
+    }
+    if ((left = sh_decl_tree_write(target, &length)) && (right = sh_decl_tree_write(candidate, &length))) {
+#ifdef SH_PACKAGE_RUNTIME_TESTING
+        status = g_test_native_compare ? g_test_native_compare(chain.layers, chain.count, left, right, detail, capacity) :
+            SH_NATIVE_EVAL_UNAVAILABLE;
+#else
+        status = sh_native_decl_eval_compare(chain.layers, chain.count, left, right, detail, capacity);
+#endif
+    }
+done:
+    free(left); free(right);
+    pr_eval_chain_free(&chain); pr_eval_chain_free(&stock);
+    return status;
 }
 static const char *pr_inline_placement(void *context, const char *from, const char *base, sh_decl_carrier_limit *limit)
 {
@@ -6115,7 +8698,7 @@ static int pr_native_document(const pr_provider *provider, sh_decl_registry_sour
     if (!view.schema) goto done;
     sh_native_inline_source source = {&view, pr_inline_read, pr_inline_derives,
         sh_decl_native_schema_view(view.schema), pr_inline_looked_up, pr_inline_keep, PR_ENTITY_STATE_VERSION,
-        pr_inline_placement};
+        pr_inline_placement, pr_inline_evaluate};
     for (int pass = 0; pass < 8; pass++) {
         size_t converted = 0, output_length = 0;
         sh_native_inline_report_free(&sites);
@@ -6217,6 +8800,18 @@ int sh_package_runtime_native_document(const sh_package_map_plan *plan,
 }
 
 #ifdef SH_PACKAGE_RUNTIME_TESTING
+int sh_package_runtime_test_exact_type(uint32_t type)
+{
+#ifdef PR_NATIVE_SPAWN
+    return sh_spawn_keys_test_exact(type);
+#else
+    int found = 0;
+    AcquireSRWLockShared(&g_lock);
+    for (size_t i = 0; g_current_provider && i < g_current_provider->exact_modifier_count; i++)
+        if (g_current_provider->exact_modifier_types[i] == type) { found = 1; break; }
+    ReleaseSRWLockShared(&g_lock); return found;
+#endif
+}
 int sh_package_runtime_test_unmodified_type(uint32_t type)
 {
 #ifdef PR_NATIVE_SPAWN
@@ -6238,6 +8833,11 @@ void sh_package_runtime_test_plan_key_table(sh_package_map_plan *plan, const sh_
         if (!plan->provider->key_groups) abort();
         *plan->provider->key_groups = *table;
     }
+}
+const sh_package_provenance *sh_package_runtime_test_plan_bindings(const sh_package_map_plan *plan, int installed)
+{
+    const pr_provider *provider = plan ? installed ? plan->authoring : plan->provider : NULL;
+    return provider ? &provider->bindings : NULL;
 }
 void sh_package_runtime_test_serving_key_table(sh_package_key_groups *table)
 {
@@ -6263,7 +8863,7 @@ void sh_package_runtime_test_key_tables(const sh_package_key_groups *library, co
     }
     if (g_current_provider) {
         char error[256];
-        if (!pr_prepare_spawn_program(g_current_provider, error, sizeof(error))) abort();
+        if (!pr_prepare_spawn_program(g_current_provider, 0, error, sizeof(error))) abort();
     }
     pr_publish_key_groups();
     ReleaseSRWLockExclusive(&g_lock);
@@ -6288,11 +8888,37 @@ int sh_package_runtime_test_key_groups_current(void)
     ReleaseSRWLockShared(&g_lock);
     return current;
 }
+/* Compose one unchanged original row an increment left native into a served
+ * library compilation, as pr_increment_view does (test_increment_native_witness). */
+int sh_package_runtime_test_witness_compose(sh_package_compilation *served, const sh_compiled_resource *original,
+    char *error, size_t capacity)
+{
+    pr_provider increment = {0};
+    sh_package_compilation one = {0}; one.resources = (sh_compiled_resource *)original; one.resource_count = 1;
+    int ok = pr_native_witnesses_capture(&one, &increment.native_witnesses, &increment.native_witness_count, error, capacity) &&
+        increment.native_witness_count == 1 && pr_native_witnesses_compose(served, &increment, NULL, error, capacity);
+    pr_native_witnesses_free(increment.native_witnesses, increment.native_witness_count); return ok;
+}
+int sh_package_runtime_test_library_digest(char digest[65])
+{
+    AcquireSRWLockShared(&g_refresh_lock);
+    int ok = g_library_provider && pr_library_digest(g_library_provider->compiled, digest);
+    ReleaseSRWLockShared(&g_refresh_lock); return ok;
+}
 void sh_package_runtime_test_dispose(void)
 {
     pr_provider *current, *library, *map;
     pr_inventory *inventory;
     AcquireSRWLockExclusive(&g_refresh_lock);
+    {
+        char error[1024]; int committed = 0;
+        if (g_activation_finish.finish) pr_activation_finish(0,&committed,error,sizeof(error));
+        /* Fixture teardown resets its intentional damaged-cleanup seam. This
+         * is never a production recovery or native destructor retry. */
+        if (!g_activation_finish.finish) {
+            g_activation_damaged = 0; g_activation_diagnostic_context = NULL;
+        }
+    }
     AcquireSRWLockExclusive(&g_lock);
     current=g_current_provider; library=g_library_provider; map=g_map_provider;
     inventory=g_inventory; g_inventory=NULL;

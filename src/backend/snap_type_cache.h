@@ -14,6 +14,18 @@ int sh_snap_type_cache_install(const sig_result *results, size_t count, const ui
 /* 1 once the replacements are installed. */
 int sh_snap_type_cache_active(void);
 
+/* The temporary-entity route Build verified: the game-access slot and the
+ * context constructor, default arguments, reset and destructor it uses
+ * around game +0x448/+0x378/+0x470. 1 with *out filled once installed. */
+typedef struct sh_snap_entity_route {
+    void **game_access;
+    void (*context_ctor)(void *context, int zero);
+    void (*context_args)(void *args, int a, int b);
+    void (*context_reset)(void *context);
+    void (*context_dtor)(void *context);
+} sh_snap_entity_route;
+int sh_snap_type_cache_entity_route(sh_snap_entity_route *out);
+
 #ifdef SH_SNAP_TYPE_CACHE_TESTING
 /* Native layout and callees, supplied by tests with synthetic engine state. */
 typedef struct sh_snap_type_cache_native {

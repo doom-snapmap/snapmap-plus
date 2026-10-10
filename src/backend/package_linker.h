@@ -223,11 +223,35 @@ int sh_package_link_reuse_reserve(sh_package_link_reuse *reuse, size_t count);
 void sh_package_link_reuse_invalidate(sh_package_link_reuse *reuse, size_t unit);
 void sh_package_link_reuse_close(sh_package_link_reuse *reuse);
 /* Diagnostic totals of the identity passes that used this cache, as one line:
- * units, units restored from it, and collect and partition time per pass. */
+ * units, units restored from it, and collect, partition and clear time per pass. */
 const char *sh_package_link_reuse_counters(const sh_package_link_reuse *reuse, char *out, size_t capacity);
 /* Diagnostic durations of the final link's steps that used this cache, or "". */
 const char *sh_package_link_reuse_link_steps(const sh_package_link_reuse *reuse, char *out, size_t capacity);
+/* Diagnostic meters of each identity pass on one line (or ""): units captured afresh and,
+ * for units the cache never keeps (sticky-invalid), how many recaptures reproduced their
+ * previous capture; and what the conditional-binding certification walked and removed.
+ * Truncates to capacity; never changes a result. */
+const char *sh_package_link_reuse_detail(const sh_package_link_reuse *reuse, char *out, size_t capacity);
 #ifdef SH_PACKAGE_LINKER_TESTING
+/* Tests: restore by copying a capture's arrays instead of borrowing them
+ * (copy 1), and fail the n-th next copy-on-write of borrowed bindings
+ * (fail_unshare 0 never). Counts are restores that borrowed and the binding
+ * arrays copied before conditional bindings were removed. */
+void sh_package_link_reuse_test_mode(sh_package_link_reuse *reuse, int copy, size_t fail_unshare);
+void sh_package_link_reuse_test_counts(const sh_package_link_reuse *reuse,
+    unsigned long long *borrowed, unsigned long long *unshared);
+/* Tests: one identity pass's meters (0 when the pass does not exist), and failing the
+ * allocation of the recapture meter's table (nothing else may change). */
+typedef struct sh_package_link_pass_meters {
+    size_t fresh, again_first, again_same, again_changed;
+    size_t cond_units, cond_edges, cond_removed, cond_nonlocal, cond_certified, cond_walk_edges, cond_compares;
+    unsigned long long cond_digest;
+} sh_package_link_pass_meters;
+int sh_package_link_reuse_test_meters(const sh_package_link_reuse *reuse, size_t pass, sh_package_link_pass_meters *out);
+void sh_package_link_reuse_test_fail_meters(sh_package_link_reuse *reuse, int fail);
+/* Tests: compare binding slots one by one instead of searching a sorted index,
+ * as when the index cannot be allocated (only cond_compares may change). */
+void sh_package_link_reuse_test_fail_index(sh_package_link_reuse *reuse, int fail);
 /* Tests: the binding slots this cache keeps for a captured unit, in capture
  * order (up to capacity); returns how many it keeps, 0 if none. */
 size_t sh_package_link_reuse_test_slots(const sh_package_link_reuse *reuse, size_t unit,

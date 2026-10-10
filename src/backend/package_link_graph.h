@@ -28,6 +28,9 @@ typedef struct sh_package_link_classes {
     /* Diagnostics: microseconds placing and certifying shapes, refining
      * dependencies and (when requested) hashing the quotient graph. */
     unsigned long long shapes_us, refine_us, identity_us;
+    /* Diagnostics: nodes whose retained preparation was reused unchanged, and
+     * the bytes that preparation holds and uses after this call. */
+    size_t reused, retained_held, retained_live;
 } sh_package_link_classes;
 
 /* Certify a positive fingerprint match against retained exact source data and
@@ -63,8 +66,29 @@ void sh_package_link_classes_free(sh_package_link_classes *classes);
 /* An earlier call's shape order over the same node indices. When it still
  * sorts the current nodes (one linear check), it replaces the full sort; the
  * call writes back its own order. The result is the same partition either way:
- * only the arbitrary order of equal shapes may differ. items is malloc-owned. */
-typedef struct sh_package_link_order { size_t *items; size_t count; } sh_package_link_order;
+ * only the arbitrary order of equal shapes may differ. items is malloc-owned.
+ *
+ * The order also retains that call's preparation: exact owned copies of every
+ * node's shape and sorted bindings. A later call over the evolving graph of the
+ * same operation re-prepares only nodes whose input differs from that copy by
+ * exact comparison (texts by content; no pointer, generation or digest is
+ * trusted across calls), and its order, groups, verification calls and
+ * partition are the ones the unretained preparation produces from the same
+ * earlier order. Appended, removed, reordered or edited nodes are compared like
+ * any other. Any failed call (input rejected, memory exhausted at any step,
+ * identity construction failed) discards the retained copy; when memory runs
+ * out while retaining, the call prepares without retaining instead. Replaced
+ * shapes and texts are bounded by rebuilding: a call starts over when the
+ * bytes held exceed twice those the previous call used plus a fixed slack
+ * (8 MB). Freed by sh_package_link_order_free, or the copy alone by
+ * sh_package_link_order_discard; owners keep one order per operation, never
+ * across opens. unretained (tests) keeps the original preparation path. */
+struct sh_package_link_prepared;
+typedef struct sh_package_link_order {
+    size_t *items; size_t count;
+    struct sh_package_link_prepared *prepared;
+    int unretained;
+} sh_package_link_order;
 int sh_package_link_equivalence_ordered(const sh_package_link_node *nodes, size_t count,
     sh_package_link_verify_equal verify, void *context, sh_package_link_order *order,
     sh_package_link_classes *out, char *error, size_t capacity);
@@ -72,6 +96,13 @@ int sh_package_link_identify_ordered(const sh_package_link_node *nodes, size_t c
     sh_package_link_verify_equal verify, void *context, sh_package_link_order *order,
     sh_package_link_classes *out, char *error, size_t capacity);
 void sh_package_link_order_free(sh_package_link_order *order);
+void sh_package_link_order_discard(sh_package_link_order *order);
+#ifdef SH_PACKAGE_LINK_GRAPH_TESTING
+/* Refuse the nth next allocation of this module (0 never); count them. */
+void sh_package_link_graph_test_refuse(size_t nth);
+size_t sh_package_link_graph_test_allocations(void);
+int sh_package_link_graph_test_refused(void); /* identity allocations count too */
+#endif
 
 /* Also derive content-addressed identities over the resolved quotient graph.
  * Dependencies are hashed before their parents; a cyclic component gets one

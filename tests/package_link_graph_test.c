@@ -403,8 +403,199 @@ static void repaired_orders(void)
     }
     sh_package_link_order_free(&order);
 }
+/* Retained preparation against the unretained path over one evolving graph:
+ * every call's status, error, verification calls, order, classes and
+ * representatives agree, while unchanged nodes are reused, and only nodes whose
+ * shape differs by exact comparison are prepared again. */
+enum { RN = 600, RS = 6 };
+static sh_package_link_node retained_graph[RN + 16];
+static sh_package_link_edge retained_edges[RN + 16][6];
+static char retained_paths[RN + 16][48];
+static const char *retained_slots[] = {"a", "b", "c", "d", "e", "f", "g", "h"};
+static size_t retained_calls[2], retained_side;
+static int retained_verify(void *context, size_t left, size_t right, char *error, size_t capacity)
+{
+    (void)context; (void)left; (void)right; (void)error; (void)capacity;
+    retained_calls[retained_side]++; return 1;
+}
+static void retained_node(size_t i, size_t count, unsigned char salt)
+{
+    size_t cls = i / RS, k, edges = cls % 5;
+    snprintf(retained_paths[i], sizeof(retained_paths[i]), "decls/f%zu/r%04zu.decl", cls % 3, cls);
+    retained_graph[i] = node(cls % 2 ? "model" : "entityDef", retained_paths[i], (unsigned char)(cls * 7 + salt), retained_edges[i], edges);
+    for (k = 0; k < edges; k++) retained_edges[i][k] = (sh_package_link_edge){retained_slots[k],
+        (((cls * 13 + k * 5 + 1) % (RN / RS)) * RS + i % RS) % count};
+}
+static void retained_step(sh_package_link_order *kept, sh_package_link_order *fresh, size_t count,
+    int expect_ok, size_t expect_reused)
+{
+    sh_package_link_classes a = {0}, b = {0};
+    char ea[256] = "", eb[256] = "";
+    retained_calls[0] = retained_calls[1] = 0;
+    retained_side = 0;
+    int ra = sh_package_link_equivalence_ordered(retained_graph, count, retained_verify, NULL, kept, &a, ea, sizeof(ea));
+    retained_side = 1;
+    int rb = sh_package_link_equivalence_ordered(retained_graph, count, retained_verify, NULL, fresh, &b, eb, sizeof(eb));
+    assert(ra == expect_ok && rb == expect_ok && !strcmp(ea, eb));
+    assert(retained_calls[0] == retained_calls[1] && kept->count == fresh->count);
+    assert(!kept->count || !memcmp(kept->items, fresh->items, kept->count * sizeof(*kept->items)));
+    assert(!fresh->prepared && (ra ? kept->prepared != NULL : kept->prepared == NULL));
+    if (ra) {
+        assert(a.count == b.count && !memcmp(a.nodes, b.nodes, count * sizeof(*a.nodes)));
+        assert(!memcmp(a.representatives, b.representatives, a.count * sizeof(*a.representatives)));
+        assert(a.reused == expect_reused && b.reused == 0);
+    }
+    sh_package_link_classes_free(&a); sh_package_link_classes_free(&b);
+}
+static void retained_preparation(void)
+{
+    sh_package_link_order kept = {0}, fresh = {0};
+    size_t i, count = RN, changed;
+    char moved[48];
+    fresh.unretained = 1;
+    for (i = 0; i < count; i++) retained_node(i, count, 0);
+    retained_step(&kept, &fresh, count, 1, 0);
+    retained_step(&kept, &fresh, count, 1, count);           /* unchanged: all reused */
+    for (i = 3, changed = 0; i < count; i += 97, changed++) retained_graph[i].content[1] ^= 1;
+    retained_step(&kept, &fresh, count, 1, count - changed); /* edited content */
+    for (i = 5, changed = 0; i < count; i += 89) if (retained_graph[i].edge_count) {
+        retained_edges[i][0].target = (retained_edges[i][0].target + RS) % count; changed++;
+    }
+    retained_step(&kept, &fresh, count, 1, count - changed); /* changed bound edges */
+    for (i = 7, changed = 0; i < count; i += 61) if (retained_graph[i].edge_count > 1) {
+        sh_package_link_edge t = retained_edges[i][0]; retained_edges[i][0] = retained_edges[i][1]; retained_edges[i][1] = t; changed++;
+    }
+    retained_step(&kept, &fresh, count, 1, count - changed); /* reordered input bindings */
+    retained_step(&kept, &fresh, count, 1, count);
+    /* Same text at a new address is unchanged; text edited in place is not. */
+    memcpy(moved, retained_paths[11], sizeof(moved)); retained_graph[11].path = moved;
+    retained_step(&kept, &fresh, count, 1, count);
+    retained_paths[13][0] = 'D';
+    retained_step(&kept, &fresh, count, 1, count - 1);
+    retained_graph[11].path = retained_paths[11];
+    /* Appended, then removed nodes. */
+    for (i = count; i < count + 9; i++) retained_node(i, count + 9, 1);
+    retained_step(&kept, &fresh, count + 9, 1, count);
+    for (i = 0, changed = 0; i < count - RS; i++) {
+        int edited = 0;
+        for (size_t k = 0; k < retained_graph[i].edge_count; k++) if (retained_edges[i][k].target >= count - RS) {
+            retained_edges[i][k].target %= count - RS; edited = 1;
+        }
+        changed += (size_t)edited;
+    }
+    assert(changed);
+    retained_step(&kept, &fresh, count - RS, 1, count - RS - changed);
+    retained_step(&kept, &fresh, count - RS, 1, count - RS);
+    /* A rejected graph discards the retained copy; the next call starts over. */
+    retained_edges[17][1].slot = retained_edges[17][0].slot;
+    assert(retained_graph[17].edge_count > 1);
+    retained_step(&kept, &fresh, count - RS, 0, 0);
+    retained_edges[17][1].slot = "z";
+    retained_step(&kept, &fresh, count - RS, 1, 0);
+    retained_edges[19][0].target = count;
+    retained_step(&kept, &fresh, count - RS, 0, 0);
+    retained_edges[19][0].target = 0;
+    retained_step(&kept, &fresh, count - RS, 1, 0);
+    retained_step(&kept, &fresh, count - RS, 1, count - RS);
+    sh_package_link_order_free(&kept); sh_package_link_order_free(&fresh);
+    assert(!kept.prepared && !kept.items);
+}
+/* Retained bytes stay bounded by the current preparation: zero-binding nodes
+ * whose texts change every call, and a large graph shrinking to a few nodes,
+ * rebuild instead of accumulating replaced texts and arrays. */
+static char churn_text[RN][20480];
+static void retained_bounds(void)
+{
+    {   /* Short unique paths: the interning table, not text bytes, dominates. */
+        sh_package_link_order order = {0};
+        sh_package_link_classes out = {0};
+        char error[256];
+        size_t i, round, peak = 0, rebuilt = 0, previous = 0;
+        for (round = 0; round < 1200; round++) {
+            for (i = 0; i < RN; i++) {
+                snprintf(churn_text[i], 8, "%06zu", round * RN + i);
+                retained_graph[i] = node("model", churn_text[i], 1, NULL, 0);
+            }
+            assert(sh_package_link_equivalence_ordered(retained_graph, RN, NULL, NULL, &order, &out, error, sizeof(error)));
+            if (out.retained_held < previous) rebuilt++;
+            previous = out.retained_held;
+            if (out.retained_held > peak) peak = out.retained_held;
+        }
+        assert(rebuilt >= 2 && peak < ((size_t)32 << 20)); /* one call may double the table */
+        sh_package_link_classes_free(&out); sh_package_link_order_free(&order);
+    }
+    sh_package_link_order order = {0};
+    sh_package_link_classes out = {0};
+    char error[256];
+    size_t i, round, peak = 0, rebuilt = 0, previous = 0;
+    for (round = 0; round < 300; round++) {
+        for (i = 0; i < RN; i++) {
+            memset(churn_text[i], 'a' + (int)(i % 26), 200);
+            snprintf(churn_text[i] + 200, 40, "/%zu/%zu", round, i);
+            retained_graph[i] = node("model", churn_text[i], 1, NULL, 0);
+        }
+        assert(sh_package_link_equivalence_ordered(retained_graph, RN, NULL, NULL, &order, &out, error, sizeof(error)));
+        assert(out.reused == 0 && out.retained_held && out.retained_live);
+        if (out.retained_held < previous) rebuilt++;
+        previous = out.retained_held;
+        if (out.retained_held > peak) peak = out.retained_held;
+    }
+    /* 300 rounds replace ~40 MB of texts; held stays within 2 x live + 8 MB plus one call. */
+    assert(rebuilt && peak < ((size_t)16 << 20));
+    for (i = 0; i < RN; i++) {
+        memset(churn_text[i], 'b', 20000); churn_text[i][20000] = 0;
+        snprintf(churn_text[i] + 19990, 10, "%zu", i);
+        retained_graph[i] = node("model", churn_text[i], 1, NULL, 0);
+    }
+    for (round = 0; round < 8; round++)
+        assert(sh_package_link_equivalence_ordered(retained_graph, RN, NULL, NULL, &order, &out, error, sizeof(error)));
+    size_t large = out.retained_held;
+    assert(sh_package_link_equivalence_ordered(retained_graph, 4, NULL, NULL, &order, &out, error, sizeof(error)));
+    assert(sh_package_link_equivalence_ordered(retained_graph, 4, NULL, NULL, &order, &out, error, sizeof(error)));
+    assert(out.reused == 0 && out.retained_held < large); /* shrunk: rebuilt */
+    assert(sh_package_link_equivalence_ordered(retained_graph, 4, NULL, NULL, &order, &out, error, sizeof(error)));
+    assert(out.reused == 4);
+    sh_package_link_classes_free(&out); sh_package_link_order_free(&order);
+}
+/* Every allocation of a retained call refused in turn: the call either
+ * succeeds exactly like the unretained path or fails and discards the
+ * retained copy (including the final output allocation); the next call
+ * recovers. */
+static void retained_allocation_failures(void)
+{
+    size_t i, k, total, failed = 0, fallback = 0;
+    for (i = 0; i < RN; i++) retained_node(i, RN, 0);
+    sh_package_link_order fresh = {0};
+    sh_package_link_classes want = {0};
+    char error[256];
+    fresh.unretained = 1;
+    assert(sh_package_link_equivalence_ordered(retained_graph, RN, NULL, NULL, &fresh, &want, error, sizeof(error)));
+    for (k = 1;; k++) {
+        sh_package_link_order kept = {0};
+        sh_package_link_classes got = {0};
+        assert(sh_package_link_equivalence_ordered(retained_graph, RN, NULL, NULL, &kept, &got, error, sizeof(error)));
+        retained_graph[3].content[2] ^= 1; /* one changed node: both paths of the call */
+        sh_package_link_graph_test_refuse(k);
+        int ok = sh_package_link_equivalence_ordered(retained_graph, RN, NULL, NULL, &kept, &got, error, sizeof(error));
+        total = sh_package_link_graph_test_allocations();
+        sh_package_link_graph_test_refuse(0);
+        retained_graph[3].content[2] ^= 1;
+        if (k > total) { assert(ok && kept.prepared); sh_package_link_classes_free(&got); sh_package_link_order_free(&kept); break; }
+        if (!ok) { failed++; assert(!kept.prepared && !got.nodes && *error); }
+        else if (!kept.prepared) fallback++;
+        assert(sh_package_link_equivalence_ordered(retained_graph, RN, NULL, NULL, &kept, &got, error, sizeof(error)));
+        assert(got.count == want.count);
+        for (i = 0; i < RN; i++) for (size_t j = 0; j < RN; j++) assert((got.nodes[i] == got.nodes[j]) == (want.nodes[i] == want.nodes[j]));
+        sh_package_link_classes_free(&got); sh_package_link_order_free(&kept);
+    }
+    assert(failed && fallback); /* output allocation failed the call; retaining fell back */
+    sh_package_link_classes_free(&want); sh_package_link_order_free(&fresh);
+}
 int main(void)
 {
+    retained_preparation();
+    retained_bounds();
+    retained_allocation_failures();
     ordered_passes();
     randomized_ordered();
     repaired_orders();

@@ -893,17 +893,31 @@ static int ae_extract_field(const char *text, const char *field, char *buf, size
     return 0;
 }
 
+/* Name the stage at which an entity edit did not apply. Every refusal below
+ * returns 0 to the caller's applied count; without the stage, a 0/N result
+ * cannot distinguish a missing entity from a parse or commit fault. */
+static int ae_apply_refused(int id, const char *stage, unsigned long code)
+{
+    char l[200];
+    _snprintf_s(l, sizeof l, _TRUNCATE, "C2 apply id=%d: not applied at %s (code=0x%08lx tid=%lu main=%d)",
+                id, stage, code, GetCurrentThreadId(), ae_on_main_thread());
+    backend_log(l);
+    return 0;
+}
+
 /* Deserialize patched text into a temporary entity, then commit source,
  * class, and inherit to the live defsub. */
 static int ae_apply_one(int id, const char *patched_text)
 {
-    if (!ae_deserialize_bound() || !ae_commit_bound() || !patched_text) return 0;
+    if (!ae_deserialize_bound() || !ae_commit_bound() || !patched_text)
+        return ae_apply_refused(id, "binding", 0);
     void *array = NULL; uint32_t count = 0;
-    if (!ae_entity_array(&array, &count)) return 0;
+    if (!ae_entity_array(&array, &count)) return ae_apply_refused(id, "entity-array", 0);
     void *ent = ae_entity_ptr(array, count, id);
-    if (!ent) return 0;
+    if (!ent) return ae_apply_refused(id, "entity-lookup", count);
     void *defsub = NULL;
-    if (!ae_read_ptr((const uint8_t *)ent + ENT_DEFSUB_OFF, &defsub) || defsub == NULL) return 0;
+    if (!ae_read_ptr((const uint8_t *)ent + ENT_DEFSUB_OFF, &defsub) || defsub == NULL)
+        return ae_apply_refused(id, "defsub", 0);
 
     /* Commit the existing defsub in place; the optional COW helper is not invoked. */
     (void)g_deshare;
@@ -915,7 +929,7 @@ static int ae_apply_one(int id, const char *patched_text)
         int hc = ae_extract_field(patched_text, "class",   newcls, sizeof newcls);
         int hi = ae_extract_field(patched_text, "inherit", newinh, sizeof newinh);
         if ((hc || hi) && !sh_iface_class_inherit_ok(id, hc ? newcls : NULL, hi ? newinh : NULL))
-            return 0;
+            return ae_apply_refused(id, "class-inherit", 0);
     }
 
 
@@ -923,10 +937,14 @@ static int ae_apply_one(int id, const char *patched_text)
     uint8_t tmpDef[TEMP_DEF_SIZE];
     memset(tmpDef, 0, sizeof tmpDef);   /* Clear scratch before construction so untouched fields are deterministic. */
     int def_ctored = 0, applied = 0;
+    const char *stage = "construct";
+    unsigned long fault = 0;
     __try {
         g_def_ctor(tmpDef); def_ctored = 1;
 
+        stage = "deserialize";
         if (ae_deserialize_to_obj(patched_text, tmpDef, "idSnapEntity")) {
+            stage = "commit";
 
             void *srcPtr = *(void * const *)(tmpDef + TDEF_SOURCE_OFF);
             void *clsPtr = *(void * const *)(tmpDef + TDEF_CLASS_OFF);
@@ -965,10 +983,11 @@ static int ae_apply_one(int id, const char *patched_text)
 
             applied = 1;
         }
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    } __except (fault = GetExceptionCode(), EXCEPTION_EXECUTE_HANDLER) {
         applied = 0;
     }
     if (def_ctored) { __try { g_def_dtor(tmpDef); } __except (EXCEPTION_EXECUTE_HANDLER) {} }
+    if (!applied) ae_apply_refused(id, stage, fault);
 
     /* Record thread identity and classify the rebuilt source allocation once.
      * The rebuild may reuse an existing buffer. Off-main or unknown identity
@@ -2362,7 +2381,7 @@ static char *ae_prefab_export_body(int selection, size_t *length)
         bound = sh_package_runtime_capture_document(NULL, sh_package_occurrence_provenance(previous),
             rows, row_count, json, json_length, &bound_length, &ownership,
             &used, &used_count, error, sizeof(error));
-        if (!bound) goto done;
+        if (!bound || (ownership && !sh_package_occurrence_carry_document_rows(ownership, previous))) goto done;
         out = sh_prefab_carrier_write(bound, bound_length, ownership, length, error, sizeof(error));
         ok = out != NULL;
 done:;

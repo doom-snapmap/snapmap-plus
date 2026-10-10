@@ -146,6 +146,14 @@ typedef int (*sh_package_file_producer)(void *context,
 sh_package_file *sh_package_file_generate(const char *directory, uint64_t length,
     const unsigned char *expected, sh_package_file_producer produce, void *context,
     char **path, char *error, size_t capacity);
+/* Stream exact process-private evidence (retained native binding proofs) into
+ * a temporary file in an admitted directory. It is never published or
+ * content-addressed, so no digest is computed and nothing outlives its users:
+ * the one pinning handle denies every other writer, renamer and deleter while
+ * referenced, and the system deletes the file with its last reference, also
+ * after a crash. Only complete output of exactly length bytes is returned. */
+sh_package_file *sh_package_file_private(const char *directory, uint64_t length,
+    sh_package_file_producer produce, void *context, char *error, size_t capacity);
 sh_package_file *sh_package_source_cache(const sh_package_source_file *source,
     const char *directory, char **path, char *error, size_t capacity);
 sh_package_file *sh_package_file_retain(sh_package_file *file);

@@ -403,9 +403,169 @@ static void typed_sites(void)
     CHECK(strcmp(copy.uses[0].reference, copy.uses[1].reference));
     sh_package_provenance_free(&value); sh_package_provenance_free(&read); sh_package_provenance_free(&copy);
 }
+static const char row_a[] = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+static const char row_b[] = "ffeeddccbbaa99887766554433221100ffeeddccbbaa99887766554433221100";
+static unsigned char *row_body(const unsigned char *plain, size_t length, const char *row, size_t *out)
+{
+    /* A one-use SMPBIND1 body ends with that use; SMPBIND2 appends its row. */
+    size_t n = row ? strlen(row) : 0; unsigned char *body = malloc(length + 4 + n);
+    if (!body) return NULL;
+    memcpy(body, plain, length); body[7] = 2;
+    for (unsigned i = 0; i < 4; i++) body[length + i] = (unsigned char)(n >> (i * 8));
+    memcpy(body + length + 4, row, n); *out = length + 4 + n; return body;
+}
+static unsigned char *find_bytes(unsigned char *body, size_t length, const char *text, size_t skip)
+{
+    size_t n = strlen(text);
+    for (size_t i = 0; i + n <= length; i++) if (!memcmp(body + i, text, n) && !skip--) return body + i;
+    return NULL;
+}
+void sh_package_provenance_test_alloc_fail_after(long count);
+/* A carry prepares every copy before committing: an allocation failure after
+ * an earlier owner was prepared leaves the destination exactly unchanged. */
+static void carry_rollback(void)
+{
+    sh_package_provenance from = {0}, to = {0};
+    unsigned char tree[32] = {3}, *before, *after; size_t before_length = 0, after_length = 0;
+    char owner[16], error[256]; const char *row = NULL;
+    for (int pass = 0; pass < 2; pass++) {
+        sh_package_provenance *value = pass ? &to : &from;
+        size_t context = sh_package_provenance_context_add(value, SH_PACKAGE_CONTEXT_ISOLATED, &tree, 1, "");
+        CHECK(sh_package_provenance_bind(value, "entitydef", "actor", "smp/actor", &context, 1));
+        for (int i = 0; i < 3; i++) {
+            sh_package_provenance_site root = {SH_PACKAGE_USE_OBJECT, owner, "entityDef"};
+            sh_package_provenance_site child = {SH_PACKAGE_USE_OBJECT, owner, "inherit"};
+            snprintf(owner, sizeof(owner), "entity/%d", i);
+            CHECK(sh_package_provenance_use_set(value, &root, 0, &context, 1));
+            CHECK(sh_package_provenance_use_set(value, &child, 0, &context, 1));
+            if (!pass) CHECK(sh_package_provenance_row_set(value, owner, i == 1 ? row_b : row_a) == 2);
+        }
+    }
+    before = sh_package_provenance_encode(&to, &before_length, error, sizeof(error));
+    CHECK(before && !memcmp(before, "SMPBIND\1", 8));
+    for (long fail = 0; fail < 6; fail++) { /* fail 3: owner 0 and half of owner 1 were prepared */
+        sh_package_provenance_test_alloc_fail_after(fail);
+        CHECK(!sh_package_provenance_rows_carry(&from, &to));
+        sh_package_provenance_test_alloc_fail_after(-1);
+        after = sh_package_provenance_encode(&to, &after_length, error, sizeof(error));
+        CHECK(after && after_length == before_length && !memcmp(after, before, before_length)); free(after);
+        for (int i = 0; i < 3; i++) {
+            snprintf(owner, sizeof(owner), "entity/%d", i);
+            CHECK(sh_package_provenance_row_get(&to, owner, &row) == 0);
+        }
+    }
+    CHECK(sh_package_provenance_rows_carry(&from, &to));
+    for (int i = 0; i < 3; i++) {
+        snprintf(owner, sizeof(owner), "entity/%d", i);
+        CHECK(sh_package_provenance_row_get(&to, owner, &row) == 1 && !strcmp(row, i == 1 ? row_b : row_a));
+    }
+    free(before); sh_package_provenance_free(&from); sh_package_provenance_free(&to);
+}
+static void exact_rows(void)
+{
+    sh_package_provenance value = {0}, read = {0}, copy = {0}, rebuilt = {0}, view = {0}, single = {0};
+    unsigned char trees[2][32] = {{1}, {2}}, *plain, *body, *again, *crafted, *at;
+    size_t contexts[2], plain_length, length, n, crafted_length; char error[256]; const char *row = NULL;
+    for (size_t i = 0; i < 2; i++) contexts[i] = sh_package_provenance_context_add(&value,
+        SH_PACKAGE_CONTEXT_ISOLATED, trees + i, 1, "");
+    CHECK(sh_package_provenance_bind(&value, "entitydef", "actor", "smp/equal", contexts, 2));
+    sh_package_provenance_site root = {SH_PACKAGE_USE_OBJECT, "entity/0", "entityDef"};
+    sh_package_provenance_site child = {SH_PACKAGE_USE_OBJECT, "entity/0", "edit.spawnEntity"};
+    sh_package_provenance_site peer = {SH_PACKAGE_USE_OBJECT, "entity/1", "entityDef"};
+    sh_package_provenance_site world = {SH_PACKAGE_USE_WORLD, "entity/0", "entityDef"};
+    CHECK(sh_package_provenance_use_set(&value, &root, 0, contexts, 1));
+    CHECK(sh_package_provenance_use_set(&value, &child, 0, contexts + 1, 1));
+    CHECK(sh_package_provenance_use_set(&value, &peer, 0, contexts + 1, 1));
+    CHECK(sh_package_provenance_use_set(&value, &world, 0, contexts, 1));
+    /* A map without a recorded row keeps SMPBIND1 bytes. */
+    plain = sh_package_provenance_encode(&value, &plain_length, error, sizeof(error));
+    CHECK(plain && !memcmp(plain, "SMPBIND\1", 8));
+    CHECK(sh_package_provenance_row_get(&value, "entity/0", &row) == 0 && !row);
+    CHECK(sh_package_provenance_row_set(&value, "entity/0", "00112233445566778899AABBCCDDEEFF00112233445566778899aabbccddeeff") == -1);
+    CHECK(sh_package_provenance_row_set(&value, "entity/0", "0011") == -1);
+    CHECK(sh_package_provenance_row_set(&value, "entity/9", row_a) == 0); /* never creates ownership */
+    CHECK(sh_package_provenance_row_set(&value, "entity/0", row_a) == 2); /* both object uses, not the world use */
+    CHECK(sh_package_provenance_row_get(&value, "entity/0", &row) == 1 && !strcmp(row, row_a));
+    CHECK(sh_package_provenance_row_get(&value, "entity/1", &row) == 0);
+    for (size_t i = 0; i < value.use_count; i++) if (value.uses[i].kind == SH_PACKAGE_USE_WORLD) CHECK(!value.uses[i].row);
+    CHECK(sh_package_provenance_use_set(&value, &root, 0, contexts + 1, 1)); /* replacement keeps the owner's row */
+    CHECK(sh_package_provenance_row_get(&value, "entity/0", &row) == 1 && !strcmp(row, row_a));
+    CHECK(sh_package_provenance_use_set(&value, &root, 0, contexts, 1));
+    body = sh_package_provenance_encode(&value, &length, error, sizeof(error));
+    CHECK(body && !memcmp(body, "SMPBIND\2", 8));
+    CHECK(sh_package_provenance_decode(body, length, &read, error, sizeof(error)));
+    CHECK(read.use_count == 4 && sh_package_provenance_row_get(&read, "entity/0", &row) == 1 && !strcmp(row, row_a));
+    CHECK(sh_package_provenance_row_get(&read, "entity/1", &row) == 0);
+    again = sh_package_provenance_encode(&read, &n, error, sizeof(error));
+    CHECK(again && n == length && !memcmp(again, body, n)); free(again);
+    for (size_t i = 0; i < length; i++) CHECK(!sh_package_provenance_decode(body, i, &copy, error, sizeof(error)));
+    /* Copy and overlay carry the row with the owner's remapped uses. */
+    pick moved = {"entity/0", "entity/7", 1, 0};
+    CHECK(sh_package_provenance_select_uses(&read, select_occurrence, &moved, &copy));
+    CHECK(copy.use_count == 2 && sh_package_provenance_row_get(&copy, "entity/7", &row) == 1 && !strcmp(row, row_a));
+    CHECK(sh_package_provenance_overlay(NULL, &read, &view));
+    CHECK(sh_package_provenance_row_get(&view, "entity/0", &row) == 1 && !strcmp(row, row_a));
+    CHECK(sh_package_provenance_row_get(&view, "entity/1", &row) == 0);
+    sh_package_provenance_free(&view);
+    CHECK(sh_package_provenance_row_set(&copy, "entity/7", row_b) == 2);
+    CHECK(sh_package_provenance_overlay(&copy, &read, &view)); /* distinct owners combine */
+    CHECK(sh_package_provenance_row_get(&view, "entity/7", &row) == 1 && !strcmp(row, row_b));
+    CHECK(sh_package_provenance_row_get(&view, "entity/0", &row) == 1 && !strcmp(row, row_a));
+    sh_package_provenance_free(&view);
+    CHECK(sh_package_provenance_select_uses(&read, NULL, NULL, &single));
+    CHECK(sh_package_provenance_row_set(&single, "entity/0", row_b) == 2);
+    CHECK(!sh_package_provenance_overlay(&read, &single, &view)); /* one owner, two choices */
+    sh_package_provenance_free(&single);
+    /* A rebuilt document regains rows by owner token; absent owners drop theirs. */
+    for (size_t i = 0; i < 2; i++) sh_package_provenance_context_add(&rebuilt, SH_PACKAGE_CONTEXT_ISOLATED, trees + i, 1, "");
+    CHECK(sh_package_provenance_bind(&rebuilt, "entitydef", "actor", "smp/equal", contexts, 2));
+    CHECK(sh_package_provenance_use_set(&rebuilt, &root, 0, contexts + 1, 1));
+    CHECK(sh_package_provenance_use_set(&rebuilt, &peer, 0, contexts, 1));
+    CHECK(sh_package_provenance_rows_carry(&read, &rebuilt));
+    CHECK(sh_package_provenance_row_get(&rebuilt, "entity/0", &row) == 1 && !strcmp(row, row_a));
+    CHECK(sh_package_provenance_row_get(&rebuilt, "entity/1", &row) == 0);
+    CHECK(sh_package_provenance_rows_carry(&copy, &rebuilt)); /* entity/7 is absent: nothing to carry */
+    CHECK(sh_package_provenance_row_set(&rebuilt, "entity/0", row_b) == 1);
+    CHECK(!sh_package_provenance_rows_carry(&read, &rebuilt)); /* a recorded choice is never replaced */
+    CHECK(sh_package_provenance_row_get(&rebuilt, "entity/0", &row) == 1 && !strcmp(row, row_b));
+    /* Clearing every row restores the exact SMPBIND1 bytes. */
+    CHECK(sh_package_provenance_row_set(&value, "entity/0", NULL) == 2);
+    again = sh_package_provenance_encode(&value, &n, error, sizeof(error));
+    CHECK(again && n == plain_length && !memcmp(again, plain, n)); free(again);
+    /* Malformed optional metadata refuses the whole payload. */
+    at = find_bytes(body, length, row_a, 0); CHECK(at); if (at) at[0] = 'A';
+    CHECK(!sh_package_provenance_decode(body, length, &copy, error, sizeof(error)));
+    if (at) at[0] = row_a[0];
+    at = find_bytes(body, length, row_a, 1); CHECK(at); if (at) memcpy(at, row_b, 64);
+    CHECK(!sh_package_provenance_decode(body, length, &copy, error, sizeof(error))); /* one owner, two choices */
+    free(plain); free(body);
+    sh_package_provenance_site sites[2] = {{SH_PACKAGE_USE_OBJECT, "entity/0", "entityDef"}, {SH_PACKAGE_USE_WORLD, "entity/0", "entityDef"}};
+    for (size_t s = 0; s < 2; s++) {
+        sh_package_provenance_free(&single);
+        sh_package_provenance_context_add(&single, SH_PACKAGE_CONTEXT_ISOLATED, trees, 1, "");
+        CHECK(sh_package_provenance_bind(&single, "entitydef", "actor", "smp/equal", contexts, 1));
+        CHECK(sh_package_provenance_use_set(&single, sites + s, 0, contexts, 1));
+        plain = sh_package_provenance_encode(&single, &plain_length, error, sizeof(error));
+        CHECK(plain && !memcmp(plain, "SMPBIND\1", 8));
+        crafted = row_body(plain, plain_length, row_a, &crafted_length);
+        CHECK(crafted && !!sh_package_provenance_decode(crafted, crafted_length, &copy, error, sizeof(error)) == !s);
+        if (!s) CHECK(sh_package_provenance_row_get(&copy, "entity/0", &row) == 1 && !strcmp(row, row_a));
+        free(crafted);
+        crafted = row_body(plain, plain_length, "", &crafted_length); /* SMPBIND2 stating no row */
+        CHECK(crafted && !sh_package_provenance_decode(crafted, crafted_length, &copy, error, sizeof(error)));
+        free(crafted);
+        crafted = row_body(plain, plain_length, "0011", &crafted_length);
+        CHECK(crafted && !sh_package_provenance_decode(crafted, crafted_length, &copy, error, sizeof(error)));
+        free(crafted); free(plain);
+    }
+    sh_package_provenance_free(&value); sh_package_provenance_free(&read); sh_package_provenance_free(&copy);
+    sh_package_provenance_free(&rebuilt); sh_package_provenance_free(&single);
+}
 
 int main(void)
 {
     roundtrip(); invalid(); scopes(); providers(); per_use(); historical_uses(); invalid_uses(); typed_sites();
+    exact_rows();
+    carry_rollback();
     printf("package_provenance_test: %s\n", failed ? "FAILED" : "PASS"); return failed ? 1 : 0;
 }

@@ -13,6 +13,7 @@
 #include "virtual_material_runtime.h"
 #include "hook.h"
 #include "package_fixture.h"
+#include "package_link_inputs.h"
 
 /* These paths must use the supplied immutable reader and delivery rows. */
 const sh_package_compilation *sh_package_runtime_acquire(void) { assert(0); return NULL; }
@@ -764,6 +765,251 @@ static void run_native_identity(sh_package_source_reader *reader, sh_package_com
     sh_package_provenance_free(&catalog); sh_package_provenance_free(&saved); sh_package_provenance_free(&out);
     sh_package_references_free(&references);
 }
+/* A cooked md6Anim header naming its skeleton. */
+static size_t cooked_anim(unsigned char *out, const char *skeleton)
+{
+    size_t n = strlen(skeleton);
+    memcpy(out, "\x26\x02\x41\x4d", 4); memset(out + 4, 0, 8);
+    out[12] = (unsigned char)n; out[13] = (unsigned char)(n >> 8); out[14] = 0; out[15] = 0;
+    memcpy(out + 16, skeleton, n); memset(out + 16 + n, 0, 32); return 16 + n + 32;
+}
+/* The event argument classes: idImage's generic resource pointer reader also
+ * reads idMD6Anim, and Entity gains an idEventCallInfo field. */
+static void event_setup(fixture *f)
+{
+    static const char *added[] = {"idImage", "idMD6Anim", "idEventCallInfo"};
+    setup(f);
+    void *container = *(void **)f->reflection, *old = *(void **)((char *)container + 0x20);
+    void *records = allocation(f, 7 * 0x38), *objects = allocation(f, 7 * 16), *pointers = allocation(f, 7 * 16);
+    void *fields = allocation(f, 5 * 0x48);
+    memcpy(records, old, 3 * 0x38);
+    memcpy(objects, *(void **)((char *)f->reflection + 0x88), 3 * 16);
+    memcpy(pointers, *(void **)((char *)f->reflection + 0xa0), 3 * 16);
+    memcpy(fields, *(void **)((char *)old + 0x38 + 0x20), 3 * 0x48);
+    for (size_t i = 0; i < 3; i++) {
+        pointer(records, (3 + i) * 0x38, string(f, added[i])); pointer(records, (3 + i) * 0x38 + 8, string(f, ""));
+    }
+    pointer(pointers, 3 * 16 + 8, (void *)0x40); pointer(pointers, 4 * 16 + 8, (void *)0x40);
+    pointer(objects, 5 * 16 + 8, (void *)0xa0);
+    pointer(fields, 3 * 0x48, string(f, added[2])); pointer(fields, 3 * 0x48 + 8, string(f, ""));
+    pointer(fields, 3 * 0x48 + 0x10, string(f, "eventCall")); number(fields, 3 * 0x48 + 0x1c, 8);
+    pointer(records, 0x38 + 0x20, fields); pointer(container, 0x20, records);
+    pointer(f->reflection, 0x88, objects); number(f->reflection, 0x90, 7);
+    pointer(f->reflection, 0xa0, pointers); number(f->reflection, 0xa8, 7);
+}
+/* One compiled scope supplying a declaration and a cooked clip. */
+typedef struct event_scope {
+    sh_compiled_resource files[2]; unsigned char cooked[128]; sh_package_sources sources;
+    sh_package_compilation compiled; sh_mpkg_use_requirements requirements; sh_package_source_reader *reader;
+    size_t clip;
+} event_scope;
+static void event_scope_open(event_scope *s, fixture *f, const char *decl, const char *path, const char *clip)
+{
+    char error[1024];
+    memset(s, 0, sizeof(*s));
+    sh_compiled_resource anim = {0};
+    anim.engine_path = sh_package_cooked_path("anim", clip); assert(anim.engine_path);
+    anim.type = anim.native_type = "anim"; anim.name = anim.native_name = (char *)clip;
+    anim.body = s->cooked; anim.body_length = cooked_anim(s->cooked, "md6/m21/m21.md6skl");
+    anim.source = SIZE_MAX; anim.gameplay_owners.bits = 7;
+    /* Compilations are sorted by engine path. */
+    s->clip = strcmp(anim.engine_path, path) < 0 ? 0 : 1;
+    s->files[s->clip] = anim; s->files[!s->clip] = declaration(decl, path, "{ class = \"Entity\"; edit = {} }");
+    s->compiled.sources = &s->sources; s->compiled.resources = s->files; s->compiled.resource_count = 2;
+    s->requirements.compiled = &s->compiled;
+    sh_decl_registry_source registry = {f, read_memory, (uintptr_t)f->registry, NULL};
+    s->reader = sh_package_source_reader_open(&s->compiled, NULL, baseline, NULL, registry,
+        (uintptr_t)f->reflection, error, sizeof(error));
+    if (!s->reader) fprintf(stderr, "event reader: %s\n", error);
+    assert(s->reader);
+}
+/* Rows whose mask bit is set supply both resources under these current names. */
+static void event_catalog(sh_package_provenance *catalog, const sh_package_bundle_binding *rows, size_t count,
+    unsigned decl_mask, unsigned clip_mask, const char *decl, const char *clip)
+{
+    size_t contexts[3], d[3], c[3], dn = 0, cn = 0;
+    sh_package_provenance_free(catalog); memset(catalog, 0, sizeof(*catalog));
+    for (size_t i = 0; i < count; i++) {
+        contexts[i] = isolated(catalog, rows + i);
+        if (decl_mask >> i & 1) d[dn++] = contexts[i];
+        if (clip_mask >> i & 1) c[cn++] = contexts[i];
+    }
+    if (dn) bind(catalog, "m21-decl", decl, d, dn);
+    if (cn) assert(sh_package_provenance_bind(catalog, "anim", "md6/m21/clip.md6anim", clip, c, cn));
+}
+/* The original row (0-2) whose exact bundle a use's single context names. */
+static size_t event_row(const sh_package_provenance *value, const char *family, const sh_package_bundle_binding rows[3])
+{
+    const sh_package_provenance_use *found = NULL;
+    for (size_t i = 0; i < value->use_count; i++)
+        if (!strcmp(value->bindings[value->uses[i].binding].family, family)) { assert(!found); found = value->uses + i; }
+    assert(found && found->context_count == 1);
+    const sh_package_provenance_context *context = value->contexts + found->contexts[0];
+    assert(context->tree_count == 1);
+    for (size_t i = 0; i < 3; i++)
+        if (!memcmp(context->trees[0], sh_package_bundle_fingerprint(rows[i].original), 32)) return i;
+    return SIZE_MAX;
+}
+/* Each delivery repacks to its exact original authored archive bytes. */
+static void event_deliveries(const sh_mpkg_used *deliveries, size_t count, const sh_package_bundle_binding *set,
+    const sh_package_bundle_binding rows[3], unsigned char *archives[3], const size_t lengths[3], unsigned expected)
+{
+    unsigned seen = 0; char error[512];
+    for (size_t i = 0; i < count; i++) {
+        size_t original = 3, n;
+        for (size_t r = 0; r < 3; r++)
+            if (!memcmp(sh_package_bundle_fingerprint(deliveries[i].bundle), sh_package_bundle_fingerprint(rows[r].original), 32))
+                original = r;
+        assert(original < 3 && !(seen >> original & 1)); seen |= 1u << original;
+        int listed = 0;
+        for (size_t r = 0; r < 3; r++) listed |= deliveries[i].bundle == set[r].original;
+        unsigned char *bytes = sh_mpkg_pack_used(deliveries + i, &n, error, sizeof(error));
+        assert(listed && bytes && n == lengths[original] && !memcmp(bytes, archives[original], n));
+        HeapFree(GetProcessHeap(), 0, bytes);
+    }
+    assert(seen == expected);
+}
+static int event_native(void *context, const char *family, const char *name)
+{ (void)context; return !strcmp(family, "entitydef") && !strcmp(name, "vanilla"); }
+static const char event_map[] = "{\"entities\":[{\"uniqueId\":7,\"entityDef\":{\"targetType\":\"idDeclEntityDef\","
+    "\"inherit\":\"vanilla\",\"state\":{\"edit\":{\"eventCall\":{\"eventDef\":\"playAnim\",\"args\":{\"num\":4,"
+    "\"item[0]\":{\"decl\":{\"entityDef\":\"%s\"}},\"item[1]\":{\"md6Anim\":\"%s\"},"
+    "\"item[2]\":{\"decl\":{\"entityDef\":\"absent/decl\"}},\"item[3]\":{\"md6Anim\":\"md6/m21/absent.md6anim\"}}}}}}}]}";
+
+/* The map's own eventCall decl and md6Anim arguments through the real typed
+ * source graph and map-use selection: capture of exact suppliers, the encoded
+ * saved document, a reload whose equal-ID, equal-name competing suppliers are
+ * reordered and recompiled under new names, intact original delivery bytes, an
+ * admitted embedded copy replacing a removed installed package, a truly
+ * missing source with preserved outputs, and recovery. Unbound arguments the
+ * engine defaults are never captured uses. */
+static void run_events(sh_package_bundle_binding rows[3], unsigned char *archives[3], const size_t lengths[3])
+{
+    fixture f = {0}; event_scope author, reload;
+    const char *clip = "md6/m21/current-clip.md6anim", *moved_clip = "md6/m21/moved-clip.md6anim";
+    char authored[1024], expected[1024], unbound[1024], error[1024];
+    sh_package_provenance catalog = {0}, none = {0}, captured = {0}, saved = {0}, out = {0}, fresh = {0};
+    sh_package_references references = {0}, resources = {0};
+    sh_package_source_binding inspection; size_t length; sh_mpkg_used *deliveries = NULL;
+    event_setup(&f);
+    event_scope_open(&author, &f, "current-decl", "generated/decls/entitydef/current-decl.decl", clip);
+    event_scope_open(&reload, &f, "moved-decl", "generated/decls/entitydef/moved-decl.decl", moved_clip);
+    snprintf(authored, sizeof(authored), event_map, "current-decl", clip);
+    snprintf(expected, sizeof(expected), event_map, "moved-decl", moved_clip);
+    snprintf(unbound, sizeof(unbound), event_map, "absent/other", "md6/m21/other.md6anim");
+
+    /* Authoring: row 1 alone supplies the declaration and row 0 alone the clip. */
+    event_catalog(&catalog, rows, 3, 2, 1, "current-decl", clip);
+    char *text = sh_package_map_uses_select(author.reader, authored, strlen(authored), &none, &catalog, rows, 3,
+        sh_mpkg_new_use_required, &author.requirements, &length, &captured, &references, &inspection, error, sizeof(error));
+    if (!text) fprintf(stderr, "event capture: %s\n", error);
+    assert(text && !strcmp(text, authored) && !inspection.changed); free(text);
+    for (size_t i = 0; i < captured.use_count; i++)
+        fprintf(stderr, "event use: %s %s -> %s at %s\n", captured.bindings[captured.uses[i].binding].family,
+            captured.bindings[captured.uses[i].binding].original, captured.bindings[captured.uses[i].binding].name,
+            captured.uses[i].reference);
+    assert(captured.use_count == 2 && event_row(&captured, "entitydef", rows) == 1 && event_row(&captured, "anim", rows) == 0);
+    for (size_t i = 0; i < 2; i++) assert(strstr(captured.uses[i].reference, "eventCall"));
+    /* Saving writes the canonical encoding; reloading decodes it. */
+    unsigned char *encoded = sh_package_provenance_encode(&captured, &length, error, sizeof(error));
+    assert(encoded && sh_package_provenance_decode(encoded, length, &saved, error, sizeof(error)) && saved.use_count == 2);
+    free(encoded);
+
+    /* Reload: every row now supplies both resources under new compiled names,
+     * in reverse order. A fresh selection picks one supplier for both, so the
+     * distinct saved suppliers below come only from the saved sites. */
+    sh_package_bundle_binding reordered[3] = {rows[2], rows[1], rows[0]};
+    event_catalog(&catalog, reordered, 3, 7, 7, "moved-decl", moved_clip);
+    text = sh_package_map_uses_select(reload.reader, expected, strlen(expected), &none, &catalog, reordered, 3,
+        sh_mpkg_new_use_required, &reload.requirements, &length, &fresh, &references, &inspection, error, sizeof(error));
+    assert(text && fresh.use_count == 2 && event_row(&fresh, "entitydef", rows) == event_row(&fresh, "anim", rows)); free(text);
+    text = sh_package_map_uses_select(reload.reader, authored, strlen(authored), &saved, &catalog, reordered, 3,
+        sh_mpkg_new_use_required, &reload.requirements, &length, &out, &references, &inspection, error, sizeof(error));
+    if (!text) fprintf(stderr, "event reload: %s\n", error);
+    assert(text && length == strlen(expected) && !strcmp(text, expected) && inspection.changed == 2);
+    assert(out.use_count == 2 && event_row(&out, "entitydef", rows) == 1 && event_row(&out, "anim", rows) == 0);
+    size_t count = sh_mpkg_used_packages_for_uses(&reload.compiled, NULL, text, length, &references, &out,
+        reordered, 3, &deliveries, &resources, error, sizeof(error));
+    if (count == SIZE_MAX) fprintf(stderr, "event deliveries: %s\n", error);
+    assert(count == 2); event_deliveries(deliveries, count, reordered, rows, archives, lengths, 3);
+    sh_mpkg_used_free(deliveries); deliveries = NULL; free(text);
+
+    /* The installed package of row 1 is removed while the map's embedded copy
+     * of that exact authored bundle is admitted: the map stays usable. */
+    sh_package_bundle_binding admitted[3] = {rows[2], {0}, rows[0]};
+    snprintf(admitted[1].source_name, sizeof(admitted[1].source_name), "embedded");
+    admitted[1].original = sh_package_bundle_from_archive(archives[1], lengths[1], root, error, sizeof(error));
+    if (!admitted[1].original) fprintf(stderr, "embedded bundle: %s\n", error);
+    assert(admitted[1].original && admitted[1].original != rows[1].original && !memcmp(
+        sh_package_bundle_fingerprint(admitted[1].original), sh_package_bundle_fingerprint(rows[1].original), 32));
+    memcpy(admitted[1].compiler_tree, sh_package_bundle_fingerprint(admitted[1].original), 32);
+    event_catalog(&catalog, admitted, 3, 7, 7, "moved-decl", moved_clip);
+    text = sh_package_map_uses_select(reload.reader, authored, strlen(authored), &saved, &catalog, admitted, 3,
+        sh_mpkg_new_use_required, &reload.requirements, &length, &out, &references, &inspection, error, sizeof(error));
+    if (!text) fprintf(stderr, "event embedded: %s\n", error);
+    assert(text && !strcmp(text, expected) && event_row(&out, "entitydef", rows) == 1 && event_row(&out, "anim", rows) == 0);
+    count = sh_mpkg_used_packages_for_uses(&reload.compiled, NULL, text, length, &references, &out,
+        admitted, 3, &deliveries, &resources, error, sizeof(error));
+    assert(count == 2); event_deliveries(deliveries, count, admitted, rows, archives, lengths, 3);
+    sh_mpkg_used_free(deliveries); deliveries = NULL; free(text);
+
+    /* Truly missing: one use's exact source is in no admitted route while the
+     * other rows still supply the same names. The declaration's row 1 and the
+     * clip's row 0 are each removed alone, so the declaration branch and the
+     * separate md6Anim default branch must both refuse. No supplier is
+     * substituted and the previous outputs survive. A stale catalog naming the
+     * removed row fails delivery. */
+    for (int gone = 1; gone >= 0; gone--) {
+        sh_package_bundle_binding missing[2] = {rows[2], rows[1 - gone]};
+        const char *use = gone ? "entitydef m21-decl" : "anim md6/m21/clip.md6anim";
+        for (int stale = 0; stale < 2; stale++) {
+            if (stale) event_catalog(&catalog, reordered, 3, 7, 7, "moved-decl", moved_clip);
+            else event_catalog(&catalog, missing, 2, 3, 3, "moved-decl", moved_clip);
+            text = sh_package_map_uses_select(reload.reader, authored, strlen(authored), &saved, &catalog, missing, 2,
+                sh_mpkg_new_use_required, &reload.requirements, &length, &out, &references, &inspection, error, sizeof(error));
+            fprintf(stderr, "event missing row %d %d: %s\n", gone, stale, error);
+            assert(!text && !length && (stale ? !!strstr(error, "no exact retained original delivery") :
+                !!strstr(error, "cannot resolve its saved source context") && !!strstr(error, use)));
+            assert(out.use_count == 2 && event_row(&out, "entitydef", rows) == 1 && event_row(&out, "anim", rows) == 0);
+        }
+        /* The exact source returns: the same map recovers unchanged. */
+        text = sh_package_map_uses_select(reload.reader, authored, strlen(authored), &saved, &catalog, reordered, 3,
+            sh_mpkg_new_use_required, &reload.requirements, &length, &out, &references, &inspection, error, sizeof(error));
+        assert(text && !strcmp(text, expected) && event_row(&out, "entitydef", rows) == 1 && event_row(&out, "anim", rows) == 0);
+        free(text);
+    }
+
+    /* Arguments no source supplies stay engine defaults with no source rows
+     * at all, distinct from the captured required uses above. */
+    event_catalog(&catalog, rows, 0, 0, 0, "", "");
+    text = sh_package_map_uses_select(reload.reader, unbound, strlen(unbound), &none, &catalog, NULL, 0,
+        sh_mpkg_new_use_required, &reload.requirements, &length, &fresh, &references, &inspection, error, sizeof(error));
+    if (!text) fprintf(stderr, "event unbound: %s\n", error);
+    assert(text && !strcmp(text, unbound) && !fresh.use_count && !inspection.changed); free(text);
+
+    /* A plain map naming the authored originals binds through the installed
+     * library only while it has bindings (the runtime's rebind predicate). */
+    char plain[1024]; snprintf(plain, sizeof(plain), event_map, "m21-decl", "md6/m21/clip.md6anim");
+    event_catalog(&catalog, rows, 3, 2, 1, "current-decl", clip);
+    text = sh_package_map_uses_bind_local(author.reader, plain, strlen(plain), &catalog,
+        event_native, NULL, &length, error, sizeof(error));
+    if (!text) fprintf(stderr, "event local: %s\n", error);
+    fprintf(stderr, "event local: %s\n", text ? text : "(none)");
+    assert(text && !strcmp(text, authored)); free(text);
+    event_catalog(&catalog, rows, 0, 0, 0, "", "");
+    text = sh_package_map_uses_bind_local(author.reader, plain, strlen(plain), &catalog,
+        event_native, NULL, &length, error, sizeof(error));
+    assert(text && !strcmp(text, plain)); free(text);
+
+    sh_package_bundle_release(admitted[1].original);
+    sh_package_provenance_free(&catalog); sh_package_provenance_free(&captured); sh_package_provenance_free(&saved);
+    sh_package_provenance_free(&out); sh_package_provenance_free(&fresh);
+    sh_package_references_free(&references); sh_package_references_free(&resources);
+    sh_package_source_reader_close(author.reader); sh_package_source_reader_close(reload.reader);
+    free(author.files[author.clip].engine_path); free(reload.files[reload.clip].engine_path);
+    while (f.count) free(f.regions[--f.count].address);
+}
+
 int main(void)
 {
     fixture f = {0}; sh_package_sources sources = {0}; sh_package_compilation compiled = {0};
@@ -793,6 +1039,8 @@ int main(void)
     run_local(reader, rows);
     run_keys(reader, &compiled, rows);
     run_native_identity(reader, &compiled, rows);
+    /* Before run(), which releases the rows. */
+    run_events(rows, archives, lengths);
     run(reader, &compiled, rows, archives, lengths);
     sh_package_source_reader_close(reader);
     while (f.count) free(f.regions[--f.count].address);

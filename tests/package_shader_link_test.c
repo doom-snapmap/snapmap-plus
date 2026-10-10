@@ -309,6 +309,20 @@ static int paths(void *context,sh_package_shader_path_kind kind,const char *old,
     if(kind==SH_PACKAGE_SHADER_SOURCE_INCLUDE)assert(!strcmp(old,linked));
     return 1;
 }
+/* The link's accounting of an unpublished input at path: its reason, or 0. */
+static int unpublished(const sh_package_source_link *s,const char *path,const char **pair,uint32_t *checksum)
+{
+    const sh_package_shader_unpublished *records=NULL;int lost=1;
+    size_t count=sh_package_source_link_shader_unpublished(s,&records,&lost);assert(!lost);
+    for(size_t i=0;i<count;i++)if(!strcmp(records[i].file->engine_path,path)) {
+        if(pair)*pair=records[i].pair ? records[i].pair->engine_path : NULL;
+        if(checksum)*checksum=records[i].checksum;
+        return (int)records[i].reason;
+    }
+    return 0;
+}
+static size_t unpublished_count(const sh_package_source_link *s)
+{ int lost=0;size_t n=sh_package_source_link_shader_unpublished(s,NULL,&lost);assert(!lost);return n; }
 static void complete_and_bind(sh_package_shader_renderer renderer)
 {
     fixture f;setup(&f,1);char error[512];
@@ -316,6 +330,20 @@ static void complete_and_bind(sh_package_shader_renderer renderer)
     const sh_package_link_inputs *inputs=sh_package_source_link_inputs(s);
     size_t unit=sh_package_link_inputs_find(inputs,0,"renderprog","fixture");assert(unit!=SIZE_MAX && inputs->count==4);
     const sh_package_link_unit *u=inputs->units+unit;assert(u->file_count==(renderer==SH_PACKAGE_SHADER_VULKAN ? 7u : 5u));
+    /* Only the other renderer's files are unpublished, each with that reason;
+     * every linked member (both renderers' declarations, includes) has none. */
+    static const char *const vulkan_only[]={"generated/renderprogs/fixture_pc_vulkan.bin","generated/spirv/fixture.vspv",
+        "generated/renderprogs/permutations/fixture_0000000000000001_pc_vulkan.bin",
+        "generated/spirv/generated/renderprogs/permutations/fixture_0000000000000001.vspv"};
+    static const char *const opengl_only[]={"generated/renderprogs/fixture_pc.bin",
+        "generated/renderprogs/permutations/fixture_0000000000000001_pc.bin"};
+    const char *const *other=renderer==SH_PACKAGE_SHADER_VULKAN ? opengl_only : vulkan_only;
+    size_t others=renderer==SH_PACKAGE_SHADER_VULKAN ? 2u : 4u;
+    assert(unpublished_count(s)==others);
+    for(size_t i=0;i<others;i++)assert(unpublished(s,other[i],NULL,NULL)==SH_PACKAGE_SHADER_UNPUBLISHED_OTHER_RENDERER);
+    for(size_t i=0;i<u->file_count;i++)assert(!unpublished(s,u->files[i]->engine_path,NULL,NULL));
+    {const sh_package_shader_unpublished *records=NULL;sh_package_source_link_shader_unpublished(s,&records,NULL);
+     assert(records[0].renderer==(int)renderer && !records[0].pair && records[0].scope==0);}
     path_check p={0};assert(sh_package_source_link_shader_paths(s,unit,"private/fixture",paths,&p,error,sizeof(error)));
     assert(p.permutation==1 && p.decl==2 && p.bin==2 && p.stage==(renderer==SH_PACKAGE_SHADER_VULKAN ? 2 : 0));
     unsigned char *changed_decl=NULL,*changed_bin=NULL;size_t decl_length=0,bin_length=0;
@@ -598,7 +626,30 @@ static void inactive_permutations(sh_package_shader_renderer renderer)
     size_t owner=sh_package_link_inputs_find(inputs,0,"renderprog","fixture");assert(owner!=SIZE_MAX);
     for(size_t i=0;i<inputs->units[owner].file_count;i++)
         assert(!strstr(inputs->units[owner].files[i]->engine_path,"permutations/"));
+    /* The dormant declaration keeps the binary and checksum the link verified. */
+    const char *other_binary=renderer==SH_PACKAGE_SHADER_OPENGL ?
+        "generated/renderprogs/permutations/fixture_0000000000000001_pc_vulkan.bin" :
+        "generated/renderprogs/permutations/fixture_0000000000000001_pc.bin";
+    const char *pair=NULL;uint32_t checksum=0;
+    assert(unpublished(link,permutation_name,&pair,&checksum)==SH_PACKAGE_SHADER_UNPUBLISHED_DORMANT_PAIR);
+    assert(pair && !strcmp(pair,other_binary));
+    {const sh_compiled_resource *d=sh_package_compilation_find(&f.compiled,permutation_name);
+     assert(d && checksum==sh_package_shader_declaration_checksum(d->body,d->body_length));}
     sh_package_source_link_close(link);
+    /* A lost record leaves the link usable and says so. */
+    sh_package_source_link_test_unpublished_failures(1);
+    link=open_link(&f,renderer,error);assert(link);
+    {int lost=0;assert(!sh_package_source_link_shader_unpublished(link,NULL,&lost) && lost);}
+    sh_package_source_link_close(link);sh_package_source_link_test_unpublished_failures(0);
+    /* Without its other-renderer binary the declaration has no verified owner. */
+    sh_compiled_resource saved=*(sh_compiled_resource *)sh_package_compilation_find(&f.compiled,other_binary);
+    saved.engine_path=_strdup(saved.engine_path);saved.body=malloc(saved.body_length+1);assert(saved.engine_path && saved.body);
+    memcpy(saved.body,sh_package_compilation_find(&f.compiled,other_binary)->body,saved.body_length);
+    remove_file(&f,other_binary);
+    assert(!open_link(&f,renderer,error) && strstr(error,"companion owner"));
+    add(&f,saved.engine_path,NULL,NULL,saved.body,saved.body_length);free((char *)saved.engine_path);free(saved.body);
+    qsort(f.files,f.compiled.resource_count,sizeof(*f.files),order);
+    link=open_link(&f,renderer,error);assert(link);sh_package_source_link_close(link);
     sh_compiled_resource *permutation=(sh_compiled_resource *)sh_package_compilation_find(&f.compiled,permutation_name);
     assert(permutation);permutation->body[2]^=1;
     assert(!open_link(&f,renderer,error) && strstr(error,"companion owner"));
@@ -787,8 +838,22 @@ static void follow_parameters_contract(void)
         if(!strcmp(request->family,"renderprogflag") && !strcmp(request->name,"feature"))flag++;
     }
     assert(parm==1 && flag==1);
+    /* The batch keeps its first queued need with that object's own native
+     * state; the second request's reason does not replace it. */
+    {
+        const char *first=sh_package_shader_preparation_first_need(batch);
+        const sh_package_shader_request *oldest=sh_package_shader_preparation_request(batch,1);
+        char key[64];snprintf(key,sizeof(key),"preparation: %s (",oldest->name);
+        if(!strstr(first,key) || !strstr(first,"source receipt; native text absent"))
+            fprintf(stderr,"first need: %s\n",first);
+        assert(strstr(first,key) && strstr(first,"source receipt; native text absent"));
+        assert(!strstr(first,!strcmp(oldest->name,"tex") ? "preparation: feature (" : "preparation: tex ("));
+    }
     sh_package_shader_preparation_free(batch);
     assert(!sh_package_native_assets_shader_follow(c.assets));
+    /* Taking the queue clears it: no later batch reports a stale need. */
+    batch=sh_package_native_assets_shader_take(c.assets);assert(!batch);
+    assert(!*sh_package_shader_preparation_first_need(NULL));
     sh_package_native_assets_close(c.assets);clear(&f);
 }
 static void follow_contract(const char *reference,size_t queued,int links)
@@ -892,7 +957,7 @@ static void prewarm_contract(void)
     sh_package_native_assets_close(assets);clear(&f);
 }
 /* Preparation hint text belongs to exactly one header (renderer, game,
- * product build, installed inventory) and is used whole or not at all:
+ * contract revision) and is used whole or not at all:
  * absent, foreign, truncated, extended or corrupt text visits nothing. */
 typedef struct hint_seen { int count; char entries[8][96]; } hint_seen;
 static int hint_visit(void *context,const char *family,const char *name)
@@ -901,13 +966,23 @@ static int hint_count(const char *text,size_t length,const char *header,hint_see
 { memset(seen,0,sizeof(*seen));return sh_package_shader_hint_read(text,length,header,hint_visit,seen); }
 static void hint_contract(void)
 {
-    const char *header="snapmap-plus shader preparation v2\nrenderer opengl\ngame 1 2\nproduct 3 4\ninventory aa\n";
-    const char *others[]={
-        "snapmap-plus shader preparation v2\nrenderer vulkan\ngame 1 2\nproduct 3 4\ninventory aa\n",
-        "snapmap-plus shader preparation v2\nrenderer opengl\ngame 1 5\nproduct 3 4\ninventory aa\n",
-        "snapmap-plus shader preparation v2\nrenderer opengl\ngame 1 2\nproduct 3 6\ninventory aa\n",
-        "snapmap-plus shader preparation v2\nrenderer opengl\ngame 1 2\nproduct 3 4\ninventory ab\n",
-        "snapmap-plus shader preparation v1\nrenderer opengl\ngame 1 2\nproduct 3 4\ninventory aa\n"};
+    /* A hint belongs to its renderer, game image and contract revision. The
+     * product build and installed inventory do not change what a name means:
+     * a hint written under one is used under another (its names are re-read
+     * from current originals), while another renderer, game or revision, and
+     * the v2 layout that also named product and inventory, reject it whole. */
+    char header[256],same[256],other[3][256];
+    assert(sh_package_shader_hint_header(header,sizeof(header),0,"game 1 2\nproduct 3 4\n"));
+    assert(!strcmp(header,"snapmap-plus shader preparation v3\nrenderer opengl\ngame 1 2\n"));
+    assert(sh_package_shader_hint_header(same,sizeof(same),0,"game 1 2\nproduct 3 6\n") && !strcmp(same,header));
+    assert(sh_package_shader_hint_header(other[0],sizeof(other[0]),1,"game 1 2\nproduct 3 4\n"));
+    assert(sh_package_shader_hint_header(other[1],sizeof(other[1]),0,"game 1 5\nproduct 3 4\n"));
+    assert(!sh_package_shader_hint_header(other[2],sizeof(other[2]),0,"product 3 4\n"));
+    assert(!sh_package_shader_hint_header(other[2],sizeof(other[2]),0,"game 1 2"));
+    assert(!sh_package_shader_hint_header(other[2],20,0,"game 1 2\nproduct 3 4\n"));
+    const char *others[]={other[0],other[1],
+        "snapmap-plus shader preparation v2\nrenderer opengl\ngame 1 2\nproduct 3 4\ninventory aa\n",
+        "snapmap-plus shader preparation v4\nrenderer opengl\ngame 1 2\n"};
     hint_seen seen;
     char *text=sh_package_shader_hint_format(header,"renderparm\ttex\nrenderprog\tfixture\n");assert(text);
     size_t length=strlen(text);
@@ -916,6 +991,10 @@ static void hint_contract(void)
     assert(hint_count(NULL,0,header,&seen)==-1 && !seen.count);
     assert(hint_count("",0,header,&seen)==-1 && !seen.count);
     for(size_t i=0;i<sizeof(others)/sizeof(*others);i++)assert(hint_count(text,length,others[i],&seen)==-1 && !seen.count);
+    {   /* A hint written under the v2 layout is not read as v3. */
+        char *v2=sh_package_shader_hint_format(others[2],"renderparm\ttex\n");assert(v2);
+        assert(hint_count(v2,strlen(v2),header,&seen)==-1 && !seen.count);free(v2);
+    }
     for(size_t cut=1;cut<=length;cut++)assert(hint_count(text,length-cut,header,&seen)==-1 && !seen.count);
     char *extended=malloc(length+2);assert(extended);memcpy(extended,text,length);memcpy(extended+length,"x\n",2);
     assert(hint_count(extended,length+2,header,&seen)==-1 && !seen.count);free(extended);
@@ -980,5 +1059,131 @@ static void native_contract(void)
     assert(!sh_package_native_assets_configure_shader(assets,SH_PACKAGE_SHADER_OPENGL,registry,original,&f,error,sizeof(error)));
     sh_package_native_assets_close(assets);clear(&f);
 }
+/* An unread include equal to the SnapMap original is kept as a stock include;
+ * a changed unread include has no owner and fails the link. */
+static void stock_include_record(void)
+{
+    fixture f;setup(&f,0);char error[512];
+    add(&f,"decls/renderprogs/unused.inc",NULL,NULL,"// stock\n",9);
+    qsort(f.files,f.compiled.resource_count,sizeof(*f.files),order);
+    sh_package_source_link *s=open_link(&f,SH_PACKAGE_SHADER_VULKAN,error);if(!s)fprintf(stderr,"%s\n",error);assert(s);
+    assert(unpublished(s,"decls/renderprogs/unused.inc",NULL,NULL)==SH_PACKAGE_SHADER_UNPUBLISHED_STOCK_INCLUDE);
+    assert(!unpublished(s,"decls/renderprogs/common.inc",NULL,NULL));
+    sh_package_source_link_close(s);
+    f.extra_path="decls/renderprogs/unused.inc";f.extra_body="// installed\n";
+    assert(!open_link(&f,SH_PACKAGE_SHADER_VULKAN,error) && strstr(error,"companion owner"));
+    clear(&f);
+}
+/* One open queues every parameter awaiting native preparation, in the
+ * parameter block and in stage lists, so one preparation round serves them
+ * instead of one complete library compile each. A declared kind frames the
+ * record only while needs are collected: nothing is returned or cached until
+ * every native check passes, and an undeclared kind stops the collection. */
+typedef struct need_fixture { const char *pending, *hard, *mismatch; int asked[4]; } need_fixture;
+static const char *const need_names[4]={"tex","second","third","fourth"};
+static int need_listed(const char *list,const char *name)
+{ char key[32]; snprintf(key,sizeof(key),",%s,",name); return list && strstr(list,key)!=NULL; }
+static int need_abi(void *context,const char *name,sh_decl_source source,int *kind,uint32_t *index,char *error,size_t capacity)
+{
+    need_fixture *n=context; int i=0; (void)source;
+    while(i<4 && strcmp(name,need_names[i])) i++;
+    if(i==4) return 0;
+    n->asked[i]++;
+    if(need_listed(n->pending,name)) { snprintf(error,capacity,"shader environment needs verified native source preparation: %s",name); return 2; }
+    if(need_listed(n->hard,name)) { snprintf(error,capacity,"native shader parameter kind/index is incompatible: %s",name); return 0; }
+    *kind=(i==0 || i==2) ? 1 : 0;
+    if(need_listed(n->mismatch,name)) *kind=!*kind;
+    *index=(uint32_t)(40+i); return 1;
+}
+static int need_flag(void *context,const char *name,sh_decl_source source,uint64_t *mask,char *error,size_t capacity)
+{ (void)context;(void)source;(void)error;(void)capacity; if(strcmp(name,"feature"))return 0; *mask=UINT64_C(1)<<32; return 1; }
+static bytes need_program(void)
+{
+    bytes b={0};
+    be(&b,0xb68800ad); be(&b,sh_package_shader_declaration_checksum((const unsigned char *)declaration,strlen(declaration)));
+    zeros(&b,4); str(&b,""); zeros(&b,9); be(&b,3);
+    zeros(&b,2); str(&b,"tex"); str(&b,"textures/source");
+    zeros(&b,2); str(&b,"second"); zeros(&b,16);
+    zeros(&b,2); str(&b,"third"); str(&b,"textures/source");
+    for (unsigned i=0;i<21;i++) { be(&b,i ? 0 : 2); if (!i) { str(&b,"tex"); str(&b,"fourth"); } }
+    be(&b,1); str(&b,"decls/renderprogs/common.inc"); be(&b,123);
+    be(&b,1); str(&b,"feature"); zeros(&b,8); be(&b,0);
+    zeros(&b,192); zeros(&b,10); str(&b,vertex); zeros(&b,10); str(&b,""); zeros(&b,10); str(&b,""); zeros(&b,36);
+    return b;
+}
+static void need_setup(fixture *f,int second_declared)
+{
+    setup(f,0); bytes binary=need_program();
+    remove_file(f,"generated/renderprogs/fixture_pc_vulkan.bin"); remove_file(f,"generated/renderprogs/fixture_pc.bin");
+    add(f,"generated/renderprogs/fixture_pc_vulkan.bin",NULL,NULL,binary.data,binary.length);
+    add(f,"generated/renderprogs/fixture_pc.bin",NULL,NULL,binary.data,binary.length);
+    if(second_declared) add(f,"generated/decls/renderparm/second.decl","renderparm","second","{ Vec 0 }",9);
+    add(f,"generated/decls/renderparm/third.decl","renderparm","third",parameter,strlen(parameter));
+    add(f,"generated/decls/renderparm/fourth.decl","renderparm","fourth","{ Vec 0 }",9);
+    qsort(f->files,f->compiled.resource_count,sizeof(*f->files),order);
+}
+static int need_open(sh_package_shader_renderer renderer,int second_declared,need_fixture *n,char *error,size_t capacity)
+{
+    fixture f; need_setup(&f,second_declared);
+    sh_decl_registry_source registry={&f,read_memory,f.registry,NULL};
+    sh_package_source_reader *reader=sh_package_source_reader_open(&f.compiled,NULL,original,&f,registry,f.reflection,error,capacity);
+    sh_package_source_shader shader={renderer,n,need_abi,need_flag};
+    assert(reader && sh_package_source_reader_shader(reader,&shader));
+    unsigned char *decl=NULL,*binary=NULL; size_t dl=0,bl=0; sh_package_shader_program decoded={0};
+    int status=sh_package_source_shader_open(reader,"fixture",&decl,&dl,&binary,&bl,&decoded,error,capacity);
+    if(status==SH_PACKAGE_SOURCE_SHADER_READY) assert(decl && binary && decoded.reference_count);
+    else assert(!decl && !binary && !dl && !bl && !decoded.reference_count);
+    free(decl); free(binary); sh_package_shader_program_clear(&decoded);
+    sh_package_source_reader_close(reader); clear(&f); return status;
+}
+static void need_collection_contract(sh_package_shader_renderer renderer)
+{
+    char error[512]; need_fixture n;
+    n=(need_fixture){NULL,NULL,NULL,{0}};
+    assert(need_open(renderer,1,&n,error,sizeof(error))==SH_PACKAGE_SOURCE_SHADER_READY);
+    assert(n.asked[0] && n.asked[1] && n.asked[2] && n.asked[3]);
+    /* Three missing parameters (two in the block, one in a stage list) join one round. */
+    n=(need_fixture){",tex,third,fourth,",NULL,NULL,{0}};
+    int status=need_open(renderer,1,&n,error,sizeof(error));
+    if(status!=SH_PACKAGE_SOURCE_SHADER_PREPARING || !n.asked[2] || !n.asked[3])
+        fprintf(stderr,"need collection %d: status %d asked %d %d %d %d: %s\n",(int)renderer,status,n.asked[0],n.asked[1],n.asked[2],n.asked[3],error);
+    assert(status==SH_PACKAGE_SOURCE_SHADER_PREPARING && n.asked[0] && n.asked[1] && n.asked[2] && n.asked[3]);
+    assert(strstr(error,"preparation: tex") && !strstr(error,"schema lookup failed"));
+    n=(need_fixture){",fourth,",NULL,NULL,{0}};
+    assert(need_open(renderer,1,&n,error,sizeof(error))==SH_PACKAGE_SOURCE_SHADER_PREPARING && strstr(error,"preparation: fourth"));
+    /* An ordinary refusal keeps the callback's own reason and is not preparation. */
+    n=(need_fixture){NULL,",second,",NULL,{0}};
+    assert(need_open(renderer,1,&n,error,sizeof(error))==SH_PACKAGE_SOURCE_SHADER_ERROR);
+    assert(strstr(error,"incompatible: second") && !strstr(error,"schema lookup failed") && !n.asked[2]);
+    /* Preparation first: a refusal after a pending need stops collection there. */
+    n=(need_fixture){",tex,",",second,",NULL,{0}};
+    assert(need_open(renderer,1,&n,error,sizeof(error))==SH_PACKAGE_SOURCE_SHADER_PREPARING);
+    assert(strstr(error,"preparation: tex") && n.asked[1] && !n.asked[2]);
+    /* After preparation the native kind must still equal the declared one. */
+    n=(need_fixture){NULL,NULL,",third,",{0}};
+    assert(need_open(renderer,1,&n,error,sizeof(error))==SH_PACKAGE_SOURCE_SHADER_ERROR);
+    /* No declared kind: the record cannot be framed, so nothing later is asked. */
+    n=(need_fixture){",second,",NULL,NULL,{0}};
+    assert(need_open(renderer,0,&n,error,sizeof(error))==SH_PACKAGE_SOURCE_SHADER_PREPARING);
+    assert(strstr(error,"preparation: second") && !n.asked[2] && !n.asked[3]);
+    /* One link attempt defers on the whole collected frontier; once prepared it links. */
+    fixture f; need_setup(&f,1); n=(need_fixture){",tex,third,fourth,",NULL,NULL,{0}};
+    sh_package_source_shader shader={renderer,&n,need_abi,need_flag};
+    sh_package_source_link_native native={&f,admit,semantics,&shader};
+    const sh_package_compilation *scope=&f.compiled; sh_package_source_failure failure={0};
+    sh_decl_registry_source registry={&f,read_memory,f.registry,NULL};
+    assert(!sh_package_source_link_open_attributed(&scope,1,NULL,original,&f,registry,f.reflection,
+        &native,NULL,&failure,error,sizeof(error)));
+    if(failure.kind!=SH_PACKAGE_SOURCE_FAILURE_ENVIRONMENT || !strstr(error,"preparation: tex") || !n.asked[2] || !n.asked[3])
+        fprintf(stderr,"need link attempt %d: kind %d asked %d %d: %s\n",(int)renderer,(int)failure.kind,n.asked[2],n.asked[3],error);
+    assert(failure.kind==SH_PACKAGE_SOURCE_FAILURE_ENVIRONMENT && strstr(error,"preparation: tex"));
+    assert(n.asked[2] && n.asked[3]);
+    n=(need_fixture){NULL,NULL,NULL,{0}};
+    sh_package_source_link *link=sh_package_source_link_open_attributed(&scope,1,NULL,original,&f,registry,f.reflection,
+        &native,NULL,&failure,error,sizeof(error));
+    if(!link) fprintf(stderr,"need link %d: %s\n",(int)renderer,error);
+    assert(link); sh_package_source_link_close(link); clear(&f);
+}
+
 int main(void)
-{ complete_and_bind(SH_PACKAGE_SHADER_VULKAN);complete_and_bind(SH_PACKAGE_SHADER_OPENGL);include_fanout_snapmap_only();unshipped_program();reject_incomplete();native_contract();preparation_contract();shader_scope_contract();inactive_permutations(SH_PACKAGE_SHADER_OPENGL);inactive_permutations(SH_PACKAGE_SHADER_VULKAN);preparation_frontier();source_only_opengl(0);source_only_opengl(1);follow_contract("other",1,0);follow_contract("missing",0,0);follow_contract("fixture",0,1);follow_parameters_contract();prewarm_contract();hint_contract();memo_shader_contract(SH_PACKAGE_SHADER_VULKAN);memo_shader_contract(SH_PACKAGE_SHADER_OPENGL);first_start_contract();malformed_scopes_contract();puts("package_shader_link_test: PASS");return 0; }
+{ stock_include_record(); complete_and_bind(SH_PACKAGE_SHADER_VULKAN);complete_and_bind(SH_PACKAGE_SHADER_OPENGL);include_fanout_snapmap_only();unshipped_program();reject_incomplete();native_contract();preparation_contract();shader_scope_contract();inactive_permutations(SH_PACKAGE_SHADER_OPENGL);inactive_permutations(SH_PACKAGE_SHADER_VULKAN);preparation_frontier();source_only_opengl(0);source_only_opengl(1);follow_contract("other",1,0);follow_contract("missing",0,0);follow_contract("fixture",0,1);follow_parameters_contract();prewarm_contract();hint_contract();memo_shader_contract(SH_PACKAGE_SHADER_VULKAN);memo_shader_contract(SH_PACKAGE_SHADER_OPENGL);first_start_contract();malformed_scopes_contract();need_collection_contract(SH_PACKAGE_SHADER_VULKAN);need_collection_contract(SH_PACKAGE_SHADER_OPENGL);puts("package_shader_link_test: PASS");return 0; }

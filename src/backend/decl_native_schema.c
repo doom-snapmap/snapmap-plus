@@ -1,5 +1,6 @@
 #include "decl_native_schema.h"
 #include "resource_types.h"
+#include "decl_native_registry.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -34,6 +35,8 @@ struct sh_decl_native_schema {
     uintptr_t polymorphic_reader;
     uintptr_t script_reader;
     uintptr_t movie_file_reader;
+    uintptr_t event_call_reader;
+    sh_decl_native_registry *registry;
     const dn_type *preview_model;
 };
 
@@ -303,10 +306,48 @@ static int dn_script_describe(sh_decl_native_schema *s, const char *name, sh_dec
 static int dn_preview_model(const sh_decl_native_schema *s, const dn_type *type)
 { return type && type == s->preview_model && s->string_reader && type->object_reader == s->string_reader; }
 
+/* The event decl argument reader (Vulkan 0x1409caa70 / OpenGL 0x1409ca230)
+ * finds its declaration manager by type name, then the name with makeDefault.
+ * Bind it as that class's typed pointer only when the class selects the same
+ * manager and is read by the verified declaration pointer reader. */
+static int dn_event_decl(sh_decl_native_schema *s, const char *family, sh_decl_value_shape *shape)
+{
+    const char *class_name = NULL, *selected = NULL;
+    if (!s->registry || !family || !*family ||
+        sh_decl_native_registry_type_class(s->registry, family, &class_name) != 1 ||
+        sh_decl_native_registry_class_type(s->registry, class_name, &selected) != 1 ||
+        !selected || _stricmp(selected, family) ||
+        sh_decl_native_schema_reader(s, (sh_decl_value_type){class_name, "*"}) != SH_DECL_READER_DECL) return 0;
+    shape->kind = SH_DECL_VALUE_REFERENCE; shape->element = (sh_decl_value_type){class_name, SH_DECL_EVENT_DECL_USE_OPS};
+    return 1;
+}
+
+/* The event md6Anim argument reader (same functions) finds the name in the
+ * animation resource list, then loads it with makeDefault. Bind it as
+ * idMD6Anim's typed resource pointer only when that class is read by the
+ * verified generic resource pointer reader, whose family table names "anim".
+ * The element keeps the use's ops, so the reference reader can report that
+ * this use, unlike a reflected idMD6Anim field, defaults an absent clip. */
+static int dn_event_anim(sh_decl_native_schema *s, const char *class_name, sh_decl_value_shape *shape)
+{
+    if (!class_name || strcmp(class_name, SH_DECL_EVENT_ANIM_TYPE) ||
+        sh_decl_native_schema_reader(s, (sh_decl_value_type){class_name, "*"}) != SH_DECL_READER_IMAGE) return 0;
+    shape->kind = SH_DECL_VALUE_REFERENCE;
+    shape->element = (sh_decl_value_type){class_name, SH_DECL_EVENT_ANIM_OPS};
+    return 1;
+}
+
 static int dn_describe(void *context, sh_decl_value_type value, sh_decl_value_shape *shape)
 {
     sh_decl_native_schema *s = (sh_decl_native_schema *)context;
-    dn_type *type = dn_find(&s->classes, value.name);
+    dn_type *type;
+    if (value.ops && !strcmp(value.ops, SH_DECL_EVENT_DECL_OPS)) return dn_event_decl(s, value.name, shape);
+    if (value.ops && !strcmp(value.ops, SH_DECL_EVENT_ANIM_OPS)) return dn_event_anim(s, value.name, shape);
+    if (value.ops && !strcmp(value.ops, SH_DECL_EVENT_DECL_USE_OPS)) {
+        if (sh_decl_native_schema_reader(s, value) != SH_DECL_READER_DECL) return 0;
+        shape->kind = SH_DECL_VALUE_REFERENCE; shape->element = value; return 1;
+    }
+    type = dn_find(&s->classes, value.name);
     const char *ops = value.ops ? value.ops : "";
     int array = dn_array(s, value, shape);
     size_t i;
@@ -349,6 +390,8 @@ static int dn_describe(void *context, sh_decl_value_type value, sh_decl_value_sh
                 !type->element.ops || *type->element.ops) return 0;
             shape->kind = SH_DECL_VALUE_IGNORE;
         }
+        else if (s->event_call_reader && type->object_reader == s->event_call_reader)
+            shape->kind = SH_DECL_VALUE_EVENT_CALL;
         else if (s->polymorphic_reader && type->object_reader == s->polymorphic_reader) {
             if (!dn_load(s, type) || !type->element.name || !*type->element.name ||
                 !type->element.ops || *type->element.ops || !dn_find(&s->classes, type->element.name)) return 0;
@@ -514,6 +557,10 @@ sh_decl_native_schema *sh_decl_native_schema_open(sh_decl_native_source source,
      * a temporary movie). Only its registered reader establishes the contract. */
     type = dn_find(&s->classes, "idSWFFile");
     if (type) s->movie_file_reader = type->object_reader;
+    /* idEventCallInfo's registered reader (Vulkan 0x1409cbaa0 / OpenGL
+     * 0x1409cb260): the event name, then counted typed arguments. */
+    type = dn_find(&s->classes, "idEventCallInfo");
+    if (type) s->event_call_reader = type->object_reader;
     /* SnapMap preview-model fields share idStr's reader, so only the declared
      * type identifies them. The editor's entity preview and interact models
      * (Vulkan 0x140d33770 / OpenGL 0x140d32e30) and attachments (0x140d31a20 /
@@ -535,6 +582,9 @@ failed:
 
 const sh_decl_dependency_schema *sh_decl_native_schema_view(sh_decl_native_schema *s)
 { return s ? &s->schema : NULL; }
+
+void sh_decl_native_schema_attach_registry(sh_decl_native_schema *s, sh_decl_native_registry *registry)
+{ if (s) s->registry = registry; }
 
 int sh_decl_native_schema_class_derives(sh_decl_native_schema *s,
     const char *class_name, const char *base_name)
@@ -607,6 +657,16 @@ sh_decl_reference_reader sh_decl_native_schema_reader(sh_decl_native_schema *s,
         return type && s->movie_file_reader && type->object_reader == s->movie_file_reader ?
             SH_DECL_READER_MOVIE : SH_DECL_READER_UNKNOWN;
     }
+    if (!strcmp(value.ops, SH_DECL_EVENT_ANIM_OPS)) {
+        /* An event md6Anim use (dn_event_anim) reads with its class's pointer reader. */
+        if (strcmp(value.name, SH_DECL_EVENT_ANIM_TYPE)) return SH_DECL_READER_UNKNOWN;
+        return sh_decl_native_schema_reader(s, (sh_decl_value_type){value.name, "*"}) == SH_DECL_READER_IMAGE ?
+            SH_DECL_READER_IMAGE : SH_DECL_READER_UNKNOWN;
+    }
+    if (!strcmp(value.ops, SH_DECL_EVENT_DECL_USE_OPS))
+        /* An event decl use (dn_event_decl) reads with its class's declaration pointer reader. */
+        return sh_decl_native_schema_reader(s, (sh_decl_value_type){value.name, "*"}) == SH_DECL_READER_DECL ?
+            SH_DECL_READER_DECL : SH_DECL_READER_UNKNOWN;
     if (strcmp(value.ops, "*")) return SH_DECL_READER_UNKNOWN;
     type = dn_find(&s->classes, value.name);
     if (type && type->pointer_reader) for (i = 0; i < sizeof(s->references) / sizeof(s->references[0]); i++)

@@ -6,6 +6,7 @@
 
 static const unsigned char pp_magic[8] = {'S','M','P','B','I','N','D',0};
 static const unsigned char pp_use_magic[8] = {'S','M','P','B','I','N','D',1};
+static const unsigned char pp_row_magic[8] = {'S','M','P','B','I','N','D',2};
 typedef struct pp_buffer { unsigned char *body; size_t length, capacity; int failed; } pp_buffer;
 typedef struct pp_cursor { const unsigned char *body; size_t length, at; int failed; } pp_cursor;
 typedef struct pp_context { const sh_package_provenance_context *value; size_t index; } pp_context;
@@ -78,7 +79,112 @@ static void pp_binding_free(sh_package_provenance_binding *binding)
     memset(binding, 0, sizeof(*binding));
 }
 static void pp_use_free(sh_package_provenance_use *use)
-{ free(use->owner); free(use->reference); free(use->contexts); memset(use, 0, sizeof(*use)); }
+{ free(use->owner); free(use->reference); free(use->contexts); free(use->row); memset(use, 0, sizeof(*use)); }
+static int pp_row_valid(const char *row)
+{
+    size_t i = 0;
+    if (!row) return 0;
+    for (; row[i] && i < 64; i++) if (!((row[i] >= '0' && row[i] <= '9') || (row[i] >= 'a' && row[i] <= 'f'))) return 0;
+    return i == 64 && !row[i];
+}
+int sh_package_provenance_row_valid(const char *row) { return pp_row_valid(row); }
+/* -1 when owner's OBJECT uses disagree, 0 no OBJECT use, 1 uses without a row,
+ * 2 uses with *row. */
+static int pp_owner_row(const sh_package_provenance *value, const char *owner, const char **row)
+{
+    int state = 0; const char *found = NULL;
+    if (row) *row = NULL;
+    if (value && owner) for (size_t i = 0; i < value->use_count; i++) {
+        const sh_package_provenance_use *use = value->uses + i;
+        if (use->kind != SH_PACKAGE_USE_OBJECT || strcmp(use->owner, owner)) continue;
+        if (!state) { state = use->row ? 2 : 1; found = use->row; }
+        else if ((state == 2) != !!use->row || (use->row && strcmp(use->row, found))) return -1;
+    }
+    if (row) *row = found;
+    return state;
+}
+int sh_package_provenance_row_set(sh_package_provenance *value, const char *owner, const char *row)
+{
+    size_t count = 0, at = 0; char **copies;
+    if (!value || !owner || (row && !pp_row_valid(row))) return -1;
+    for (size_t i = 0; i < value->use_count; i++)
+        if (value->uses[i].kind == SH_PACKAGE_USE_OBJECT && !strcmp(value->uses[i].owner, owner)) count++;
+    if (!count) return 0;
+    if (!(copies = calloc(count, sizeof(*copies)))) return -1;
+    for (size_t i = 0; row && i < count; i++) if (!(copies[i] = _strdup(row))) {
+        for (size_t j = 0; j < i; j++) free(copies[j]);
+        free(copies); return -1;
+    }
+    for (size_t i = 0; i < value->use_count; i++) {
+        sh_package_provenance_use *use = value->uses + i;
+        if (use->kind != SH_PACKAGE_USE_OBJECT || strcmp(use->owner, owner)) continue;
+        free(use->row); use->row = copies[at++];
+    }
+    free(copies); return (int)(count > INT_MAX ? INT_MAX : count);
+}
+int sh_package_provenance_row_get(const sh_package_provenance *value, const char *owner, const char **row)
+{
+    int state = pp_owner_row(value, owner, row);
+    return state < 0 ? -1 : state == 2;
+}
+static int pp_use_owner_order(const void *a, const void *b)
+{
+    return strcmp((*(const sh_package_provenance_use *const *)a)->owner,
+        (*(const sh_package_provenance_use *const *)b)->owner);
+}
+/* OBJECT uses grouped by owner; 0 on memory failure or disagreeing rows. */
+static int pp_owner_uses(const sh_package_provenance *value, const sh_package_provenance_use ***out, size_t *count)
+{
+    size_t n = 0;
+    *out = NULL; *count = 0;
+    if (!value || !value->use_count) return 1;
+    if (!value->uses || !(*out = malloc(value->use_count * sizeof(**out)))) return 0;
+    for (size_t i = 0; i < value->use_count; i++)
+        if (value->uses[i].kind == SH_PACKAGE_USE_OBJECT) (*out)[n++] = value->uses + i;
+    qsort((void *)*out, n, sizeof(**out), pp_use_owner_order);
+    for (size_t i = 1; i < n; i++) {
+        const sh_package_provenance_use *a = (*out)[i - 1], *b = (*out)[i];
+        if (!strcmp(a->owner, b->owner) && (!a->row != !b->row || (a->row && strcmp(a->row, b->row)))) {
+            free((void *)*out); *out = NULL; return 0;
+        }
+    }
+    *count = n; return 1;
+}
+#ifdef SH_PACKAGE_PROVENANCE_TESTING
+static long pp_fail_after = -1;
+void sh_package_provenance_test_alloc_fail_after(long count) { pp_fail_after = count; }
+static char *pp_row_dup(const char *row)
+{ if (!pp_fail_after) return NULL; if (pp_fail_after > 0) pp_fail_after--; return _strdup(row); }
+#else
+#define pp_row_dup _strdup
+#endif
+int sh_package_provenance_rows_carry(const sh_package_provenance *from, sh_package_provenance *to)
+{
+    const sh_package_provenance_use **source = NULL, **target = NULL;
+    sh_package_provenance_use **gain = NULL; char **copies = NULL;
+    size_t sources = 0, targets = 0, made = 0, gained = 0; int ok = 0;
+    if (!to || !pp_owner_uses(from, &source, &sources) || !pp_owner_uses(to, &target, &targets)) goto done;
+    if (targets && (!(gain = malloc(targets * sizeof(*gain))) || !(copies = malloc(targets * sizeof(*copies))))) goto done;
+    /* Every check and copy precedes the commit, so a conflict or an
+     * allocation failure for any owner leaves to unchanged. */
+    for (size_t i = 0, at = 0, end; i < targets; i = end) {
+        const char *row = NULL;
+        for (end = i + 1; end < targets && !strcmp(target[end]->owner, target[i]->owner); end++) {}
+        while (at < sources && strcmp(source[at]->owner, target[i]->owner) < 0) at++;
+        if (at < sources && !strcmp(source[at]->owner, target[i]->owner)) row = source[at]->row;
+        if (!row) continue;
+        if (target[i]->row) { if (strcmp(target[i]->row, row)) goto done; continue; }
+        for (size_t k = i; k < end; k++) {
+            if (!(copies[made] = pp_row_dup(row))) goto done;
+            gain[made++] = (sh_package_provenance_use *)target[k];
+        }
+    }
+    for (; gained < made; gained++) gain[gained]->row = copies[gained];
+    ok = 1;
+done:
+    while (made > gained) free(copies[--made]);
+    free(gain); free(copies); free((void *)source); free((void *)target); return ok;
+}
 void sh_package_provenance_free(sh_package_provenance *value)
 {
     if (!value) return;
@@ -200,6 +306,10 @@ int sh_package_provenance_use_set(sh_package_provenance *out,
     for (size_t i = 0; i < count; i++) if (!unique || value.contexts[unique - 1] != value.contexts[i])
         value.contexts[unique++] = value.contexts[i];
     value.context_count = unique;
+    if (site->kind == SH_PACKAGE_USE_OBJECT) {
+        const char *row = NULL;
+        if (pp_owner_row(out, site->owner, &row) == 2 && !(value.row = _strdup(row))) goto failed;
+    }
     existing = pp_find_use(out, site, binding, value.contexts, unique);
     if (existing) { pp_use_free(existing); *existing = value; }
     else {
@@ -249,7 +359,14 @@ static int pp_append_use(sh_package_provenance *out, const sh_package_provenance
     for (size_t i = 0; i < use->context_count; i++) if (!count || mapped[count - 1] != mapped[i]) mapped[count++] = mapped[i];
     existing = pp_find_use(out, site, binding, mapped, count);
     if (existing && (existing->binding != binding || !pp_same_contexts(existing, mapped, count))) goto done;
-    ok = sh_package_provenance_use_set(out, site, binding, mapped, count);
+    /* The owner's recorded row travels with its uses; two different recorded
+     * rows for one owner conflict rather than one replacing the other. */
+    if (use->row) {
+        const char *have = NULL; int state = pp_owner_row(out, site->owner, &have);
+        if (site->kind != SH_PACKAGE_USE_OBJECT || state < 0 || (state == 2 && strcmp(have, use->row))) goto done;
+    }
+    ok = sh_package_provenance_use_set(out, site, binding, mapped, count) &&
+        (!use->row || sh_package_provenance_row_set(out, site->owner, use->row) > 0);
 done:
     free(mapped); return ok;
 }
@@ -559,6 +676,7 @@ unsigned char *sh_package_provenance_encode(const sh_package_provenance *value,
     pp_buffer body = {0}; pp_context *contexts = NULL; pp_binding *bindings = NULL; pp_use *uses = NULL;
     size_t *indices = NULL, *mapped = NULL, *binding_indices = NULL, *binding_mapped = NULL, use_count = 0;
     sh_package_provenance checked = {0}, selected = {0};
+    int rows = 0;
     if (length) *length = 0;
     if (error && capacity) error[0] = 0;
     if (!value || value->semantics > SH_PACKAGE_PROVENANCE_USES ||
@@ -610,8 +728,10 @@ unsigned char *sh_package_provenance_encode(const sh_package_provenance *value,
             size_t *keys = malloc(entry->context_count * sizeof(*keys));
             if (!keys) goto failed;
             for (size_t j = 0; j < entry->context_count; j++) keys[j] = indices[entry->contexts[j]];
-            int ok = sh_package_provenance_use_set(&checked, &site, binding_indices[entry->binding], keys, entry->context_count);
+            int ok = sh_package_provenance_use_set(&checked, &site, binding_indices[entry->binding], keys, entry->context_count) &&
+                (!entry->row || sh_package_provenance_row_set(&checked, entry->owner, entry->row) > 0);
             free(keys); if (!ok) goto failed;
+            if (entry->row) rows = 1;
         }
         uses = calloc(checked.use_count ? checked.use_count : 1, sizeof(*uses));
         if (!uses) goto failed;
@@ -625,7 +745,7 @@ unsigned char *sh_package_provenance_encode(const sh_package_provenance *value,
         }
         qsort(uses, use_count, sizeof(*uses), pp_use_order);
     }
-    pp_put(&body, value->semantics == SH_PACKAGE_PROVENANCE_USES ? pp_use_magic : pp_magic, sizeof(pp_magic));
+    pp_put(&body, value->semantics != SH_PACKAGE_PROVENANCE_USES ? pp_magic : rows ? pp_row_magic : pp_use_magic, sizeof(pp_magic));
     pp_number(&body, checked.context_count);
     for (size_t i = 0; i < checked.context_count; i++) {
         const sh_package_provenance_context *entry = contexts[i].value;
@@ -648,6 +768,7 @@ unsigned char *sh_package_provenance_encode(const sh_package_provenance *value,
             pp_number(&body, entry->kind); pp_string(&body, entry->owner); pp_string(&body, entry->reference);
             pp_number(&body, uses[i].binding); pp_number(&body, entry->context_count);
             for (size_t j = 0; j < entry->context_count; j++) pp_number(&body, uses[i].contexts[j]);
+            if (rows) pp_string(&body, entry->row);
         }
     }
     if (body.failed) goto failed;
@@ -684,12 +805,13 @@ int sh_package_provenance_decode(const unsigned char *body, size_t length,
 {
     sh_package_provenance decoded = {0}; pp_cursor in = {body, length, sizeof(pp_magic), 0};
     size_t count, context_count = 0, binding_count = 0, *indices = NULL, *binding_indices = NULL;
-    int per_use = 0;
+    int per_use = 0, rows = 0, recorded = 0;
     if (error && capacity) error[0] = 0;
     if (!out) return 0;
     sh_package_provenance_free(out);
     if (!body || length < sizeof(pp_magic) || length > INT_MAX) goto failed;
     if (!memcmp(body, pp_use_magic, sizeof(pp_magic))) per_use = 1;
+    else if (!memcmp(body, pp_row_magic, sizeof(pp_magic))) per_use = rows = 1;
     else if (memcmp(body, pp_magic, sizeof(pp_magic))) goto failed;
     context_count = pp_read_number(&in);
     /* Every context occupies at least two counts, one tree and a string count.
@@ -740,7 +862,7 @@ int sh_package_provenance_decode(const unsigned char *body, size_t length,
             unsigned kind = (unsigned)pp_read_number(&in);
             char *owner = pp_read_string(&in), *reference = pp_read_string(&in);
             size_t binding = pp_read_number(&in), n = pp_read_number(&in), *keys = NULL, unique = 0;
-            int ok = 0;
+            char *row = NULL; int ok = 0;
             if (!in.failed && binding < binding_count && n && n <= (length - in.at) / 4)
                 keys = malloc(n * sizeof(*keys));
             if (keys) {
@@ -750,6 +872,15 @@ int sh_package_provenance_decode(const unsigned char *body, size_t length,
                     if (index >= context_count) { ok = 0; break; }
                     keys[j] = indices[index];
                 }
+                /* An empty row records no choice; a present one is exact
+                 * lowercase identity on an object use, never repaired. */
+                if (ok && rows) {
+                    row = pp_read_string(&in);
+                    if (!row) ok = 0;
+                    else if (!*row) { free(row); row = NULL; }
+                    else if (kind != SH_PACKAGE_USE_OBJECT || !pp_row_valid(row)) ok = 0;
+                    else recorded = 1;
+                }
                 if (ok) {
                     qsort(keys, n, sizeof(*keys), pp_index_order);
                     for (size_t j = 0; j < n; j++) if (!unique || keys[unique - 1] != keys[j]) keys[unique++] = keys[j];
@@ -758,12 +889,23 @@ int sh_package_provenance_decode(const unsigned char *body, size_t length,
                         pp_find_use(&decoded, &site, binding_indices[binding], keys, unique) : NULL;
                     if (existing && (existing->binding != binding_indices[binding] || !pp_same_contexts(existing, keys, unique))) ok = 0;
                     else ok = sh_package_provenance_use_set(&decoded, &site, binding_indices[binding], keys, unique);
+                    if (ok && rows) {
+                        sh_package_provenance_use *use = pp_find_use(&decoded, &site, binding_indices[binding], keys, unique);
+                        if (!use) ok = 0;
+                        else { free(use->row); use->row = row; row = NULL; }
+                    }
                 }
             }
-            free(owner); free(reference); free(keys); if (!ok) goto failed;
+            free(owner); free(reference); free(keys); free(row); if (!ok) goto failed;
         }
     }
-    if (in.failed || in.at != length) goto failed;
+    if (in.failed || in.at != length || (rows && !recorded)) goto failed;
+    if (rows) {
+        /* One owner's object uses record one choice or none. */
+        const sh_package_provenance_use **owners = NULL; size_t owner_count = 0;
+        if (!pp_owner_uses(&decoded, &owners, &owner_count)) goto failed;
+        free((void *)owners);
+    }
     if (per_use) {
         sh_package_provenance selected = {0};
         if (!sh_package_provenance_select_uses(&decoded, NULL, NULL, &selected)) goto failed;

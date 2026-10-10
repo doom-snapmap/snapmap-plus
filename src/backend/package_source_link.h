@@ -90,6 +90,10 @@ typedef struct sh_package_source_link_native {
  * once per path and shared as immutable bytes; package bytes are not changed.
  * Campaign-only dependencies absent from the authored scope are not silently
  * imported into a bundle. Unsupported/absent readers fail the whole candidate.
+ * Movies additionally bind the finite supplied/reverse-affected sound/material
+ * namespace in their scope, independent of ActionScript literal spellings.
+ * Conditional edges retain changed complete bindings; certified baseline
+ * targets keep native lookup. Movie string bindings join in package_library.
  * Font units capture their available 48/64_df/12 glyph forms and exact material
  * request slots. Optional materials use only this scope and SnapMap originals;
  * confirmed absence is retained by omitting that slot from the complete plan.
@@ -166,6 +170,11 @@ typedef struct sh_package_source_withdrawal {
 typedef struct sh_package_source_withdrawals {
     sh_package_source_withdrawal *items;
     size_t count, capacity;
+    /* Admission: the supplied seed units this capture judged before it
+     * stopped, when a failure among them ended it ahead of the stock closure
+     * they request (that closure would only be discovered again by the next
+     * capture); 0 when the capture went on past its seeds. */
+    size_t admission_units;
 } sh_package_source_withdrawals;
 void sh_package_source_withdrawals_free(sh_package_source_withdrawals *withdrawals);
 sh_package_source_link *sh_package_source_link_open_attributed(
@@ -204,6 +213,33 @@ typedef struct sh_package_reverse_gap {
 } sh_package_reverse_gap;
 size_t sh_package_source_link_reverse_gaps(const sh_package_source_link *source,
     const sh_package_reverse_gap **gaps);
+/* Why the link accounted an authored shader input without publishing it for
+ * the renderer it served. These are the only shader inputs it accepts without
+ * a linked owner; anything else fails the link. */
+typedef enum sh_package_shader_unpublished_reason {
+    SH_PACKAGE_SHADER_UNPUBLISHED_OTHER_RENDERER = 1, /* the other renderer's binary or SPIR-V */
+    SH_PACKAGE_SHADER_UNPUBLISHED_DRIVER_CACHE,       /* generated/glsl or glslbinaries */
+    SH_PACKAGE_SHADER_UNPUBLISHED_STOCK_INCLUDE,      /* equals the SnapMap include; no program read it */
+    SH_PACKAGE_SHADER_UNPUBLISHED_DORMANT_PAIR        /* checksum matches its other-renderer binary */
+} sh_package_shader_unpublished_reason;
+/* One accounted input in its scope. pair and checksum are the verified binary
+ * of a dormant pair, otherwise NULL and 0. renderer is the served
+ * sh_package_shader_renderer, or -1 when the link had no shader contract. */
+typedef struct sh_package_shader_unpublished {
+    size_t scope;
+    const sh_compiled_resource *file, *pair;
+    sh_package_shader_unpublished_reason reason;
+    int renderer;
+    uint32_t checksum;
+} sh_package_shader_unpublished;
+/* Borrowed until close. Records are diagnostics: when one could not be kept,
+ * *lost is set and the link is otherwise unaffected. */
+size_t sh_package_source_link_shader_unpublished(const sh_package_source_link *source,
+    const sh_package_shader_unpublished **records, int *lost);
+#ifdef SH_PACKAGE_SOURCE_LINK_TESTING
+/* Fail the next count record allocations as an exhausted heap would. */
+void sh_package_source_link_test_unpublished_failures(long count);
+#endif
 /* Borrowed, captured source units, sorted by scope/family/name. */
 const sh_package_link_inputs *sh_package_source_link_inputs(const sh_package_source_link *source);
 /* Write "readers N ms, seeds N ms, ..." for the capture that opened source;
@@ -220,6 +256,23 @@ int sh_package_source_link_identity(sh_package_source_link *source, size_t index
 /* Tests and diagnostics: discovery replay of unchanged units is on by
  * default; 0 binds every unit afresh (the same result, more slowly). */
 void sh_package_source_link_replay(int enabled);
+/* Capture-local supplied lookups and payload identities only. Canonicalizer
+ * calls and original/native validation still run. 0 is the diagnostic oracle. */
+void sh_package_source_link_lookup_memo(int enabled);
+typedef struct sh_package_source_lookup_counters {
+    size_t lookups, searches, lookup_hits;
+    size_t identities, identity_computations, body_hashes, identity_hits;
+    size_t entries, bytes, peak_bytes, limit;
+    size_t original_captures;
+    unsigned long long original_bytes, original_capture_us;
+    unsigned long long replay_validation_us, replay_validation_without_capture_us;
+} sh_package_source_lookup_counters;
+void sh_package_source_link_lookup_counters(const sh_package_source_link *source,
+    sh_package_source_lookup_counters *out);
+#ifdef SH_PACKAGE_LIBRARY_TESTING
+/* Optional-storage failure/budget and exact-key collision oracles. */
+void sh_package_source_link_test_lookup(size_t limit, long allocation_failures, int collisions);
+#endif
 /* Tests only: 0 captures as before AI state-machine selection (no behavior
  * edges), reproducing the identities a pre-selection build recorded. */
 void sh_package_source_link_fsm(int enabled);

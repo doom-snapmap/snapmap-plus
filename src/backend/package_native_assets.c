@@ -95,6 +95,7 @@ struct sh_package_shader_preparation {
     na_shader_request *requests;
     size_t count;
     int ran;
+    char first_need[384];
 };
 struct sh_package_native_assets {
     char *root;
@@ -119,6 +120,10 @@ struct sh_package_native_assets {
     int (*consumers_ready)(const char *family);
     na_shader_request *shader_requests;
     size_t shader_request_count;
+    /* The queue's first request reason with its native state, kept where it
+     * is recorded because later checks reuse the caller's buffer; diagnostics
+     * only, moved into the batch that takes the queue. */
+    char shader_first_need[384];
     uint64_t next_shader_task;
     na_shader_file *shader_files;
     /* One compilation's shader ABI checks share this identity snapshot. Each
@@ -518,6 +523,19 @@ static int na_semantics(void *context, size_t scope, const char *family, const c
 
 static int na_shader_error(char *error, size_t capacity, const char *reason, const char *name)
 { if (error && capacity) snprintf(error, capacity, "%s: %s", reason, name); return 0; }
+/* Append the native state that requires preparation to its request reason;
+ * diagnostics only. */
+static void na_shader_pending_state(char *error, size_t capacity, const char *state)
+{
+    size_t used = error && capacity ? strlen(error) : 0;
+    if (used && used + 4 < capacity) snprintf(error + used, capacity - used, " (%s)", state);
+}
+/* Keep the queue's first request reason (caller holds the lock). */
+static void na_shader_note_need(sh_package_native_assets *a, const char *reason)
+{
+    if (!a->shader_first_need[0] && reason && *reason)
+        snprintf(a->shader_first_need, sizeof(a->shader_first_need), "%s", reason);
+}
 static na_shader_original *na_shader_source(sh_package_native_assets *a, const char *family,
     const char *name, char *error, size_t capacity)
 {
@@ -601,6 +619,8 @@ static int na_shader_fixed(sh_package_native_assets *a, const char *family, cons
         if (request_prepare && na_shader_registry_valid(a, registry, &identity, error, capacity) &&
             na_shader_request_add(a, family, name, source, &identity, original)) {
             na_shader_error(error, capacity, "shader environment needs verified native source preparation", name);
+            na_shader_pending_state(error, capacity, "no native object");
+            na_shader_note_need(a, error);
             ok = 2;
         }
         goto done;
@@ -621,7 +641,16 @@ static int na_shader_fixed(sh_package_native_assets *a, const char *family, cons
         memcmp(native_text, source.text, trimmed))) {
         if (request_prepare && na_shader_registry_valid(a, registry, &identity, error, capacity) &&
             na_shader_request_add(a, family, name, source, &identity, original)) {
+            char state[192], refusal[96];
             na_shader_error(error, capacity, "shader environment needs verified native source preparation", name);
+            sh_package_shader_receipt_refusal(identity.resource, family, name, source.text, source.length,
+                before, bytes, refusal, sizeof(refusal));
+            if (!text) snprintf(state, sizeof(state), "%s; native text absent", refusal);
+            else if (length < 0 || (size_t)length != trimmed)
+                snprintf(state, sizeof(state), "%s; native text has %d bytes, source %zu", refusal, (int)length, trimmed);
+            else snprintf(state, sizeof(state), "%s; native text differs or is unreadable", refusal);
+            na_shader_pending_state(error, capacity, state);
+            na_shader_note_need(a, error);
             ok = 2;
         } else na_shader_error(error, capacity, "native shader ABI needs exact retained text or a successful source receipt", name);
         goto done;
@@ -678,6 +707,7 @@ static int na_shader_program(void *context, const char *name, sh_decl_source sou
         queued = na_shader_request_add(a, "renderprog", name, source, &identity, original);
     na_shader_error(error, capacity, queued ? "shader environment needs verified native source cooking" :
         "source-only shader has no stable native preparation identity", name);
+    if (queued) na_shader_note_need(a, error);
 done:
     sh_native_resource_identity_clear(&identity); sh_native_resource_registry_close(registry);
     ReleaseSRWLockExclusive(&a->lock); return queued ? 1 : 0;
@@ -825,6 +855,25 @@ const char *sh_package_framed_body(const char *text, size_t length, const char *
     if ((size_t)(end - at) != declared || na_hint_digest(at, declared) != digest) return NULL;
     *body_length = declared; return at;
 }
+/* A hint names objects only. Their authority stays native and current:
+ * prewarming reads each name's installed original and makes the compile's own
+ * identity and ABI checks (a name without an installed original is skipped),
+ * and the needs a compile records exclude prewarming and replace the previous
+ * ones (sh_package_native_assets_shader_record), so a name the current compile
+ * does not need is warmed for at most one session and leaves the next hint.
+ * The header keeps what decides those checks: the renderer, the game image
+ * (build_identity's "game" line; any "product" line and after is not part of
+ * it) and this contract's revision, raised whenever the meaning of a name or
+ * of its preparation changes. */
+int sh_package_shader_hint_header(char *out, size_t capacity, int vulkan, const char *build_identity)
+{
+    const char *product = build_identity ? strstr(build_identity, "product ") : NULL;
+    size_t game = build_identity ? (product ? (size_t)(product - build_identity) : strlen(build_identity)) : 0;
+    if (!out || !capacity || !game || game > 200) return 0;
+    int n = snprintf(out, capacity, "snapmap-plus shader preparation v3\nrenderer %s\n%.*s",
+        vulkan ? "vulkan" : "opengl", (int)game, build_identity);
+    return n > 0 && (size_t)n < capacity && out[n - 1] == '\n';
+}
 char *sh_package_shader_hint_format(const char *header, const char *needs)
 { return sh_package_framed_format(header, needs); }
 int sh_package_shader_hint_read(const char *text, size_t length, const char *header,
@@ -863,13 +912,16 @@ sh_package_shader_preparation *sh_package_native_assets_shader_take(sh_package_n
     sh_package_shader_preparation *batch = calloc(1, sizeof(*batch)); if (!batch) return NULL;
     AcquireSRWLockExclusive(&a->lock);
     batch->requests = a->shader_requests; batch->count = a->shader_request_count;
-    a->shader_requests = NULL; a->shader_request_count = 0;
+    memcpy(batch->first_need, a->shader_first_need, sizeof(batch->first_need));
+    a->shader_requests = NULL; a->shader_request_count = 0; a->shader_first_need[0] = 0;
     ReleaseSRWLockExclusive(&a->lock);
     if (!batch->count) { free(batch); return NULL; }
     batch->assets = sh_package_native_assets_retain(a); return batch;
 }
 size_t sh_package_shader_preparation_count(const sh_package_shader_preparation *batch)
 { return batch ? batch->count : 0; }
+const char *sh_package_shader_preparation_first_need(const sh_package_shader_preparation *batch)
+{ return batch ? batch->first_need : ""; }
 sh_package_native_assets *sh_package_shader_preparation_assets(const sh_package_shader_preparation *batch)
 { return batch ? batch->assets : NULL; }
 const sh_package_shader_request *sh_package_shader_preparation_request(const sh_package_shader_preparation *batch, size_t index)

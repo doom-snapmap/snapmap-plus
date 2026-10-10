@@ -127,9 +127,11 @@ static void transition_unload(void *common, unsigned char force, unsigned char f
 {
     transition_unload_from(common, force, full, _ReturnAddress());
 }
-static __declspec(noreturn) void transition_abort(void)
+/* Each owned cancellation names its site; the callbacks may add a reason. */
+static __declspec(noreturn) void transition_abort(const char *site)
 {
     ULONG_PTR token = (ULONG_PTR)&g_trans;
+    backend_log(site);
     g_trans.cancel = 1;
     RaiseException(TRANS_CANCEL_EXCEPTION, EXCEPTION_NONCONTINUABLE, 1, &token);
     __assume(0);
@@ -151,7 +153,7 @@ static unsigned char transition_allocate_from(void *manager, void *out,
     if (!g_trans_ready || !g_trans_thread || *g_trans_thread != GetCurrentThreadId() ||
         !g_trans.parameters || g_trans.phase == TRANS_FINISHING)
         return ((transition_alloc_fn)g_trans_original[TRANS_ALLOC])(manager, out, parameters, extra);
-    if (g_trans.phase != TRANS_IDLE) transition_abort();
+    if (g_trans.phase != TRANS_IDLE) transition_abort("MPKG: map handoff canceled: native allocation re-entered an owned handoff");
     if (parameters != g_trans.parameters || extra != g_trans.extra ||
         out != (uint8_t *)g_trans_common + 0x1298 ||
         caller != (const uint8_t *)g_trans_sites[TRANS_FINALIZE] + 0x1ea)
@@ -159,7 +161,7 @@ static unsigned char transition_allocate_from(void *manager, void *out,
     pending = g_trans_callbacks.pending(manager, parameters);
     if (!pending) return ((transition_alloc_fn)g_trans_original[TRANS_ALLOC])(manager, out, parameters, extra);
     g_trans.admitted = 1;
-    if (pending < 0) transition_abort();
+    if (pending < 0) transition_abort("MPKG: map handoff canceled: the owned request refused this allocation");
     /* No allocation-frame local has been constructed at this point. Perform
      * the already requested unload once, then publish before new consumers. */
     *g_trans_pending_resource = NULL;
@@ -187,7 +189,7 @@ static unsigned char transition_allocate_from(void *manager, void *out,
     } else backend_log("MPKG: native map unload did not complete its resource purge; allocation refused");
     /* Never return false to FinalizeMapChange: it turns that into a fatal
      * error. Unwind only our token to the outer owner and use native bailout. */
-    if (!loaded) transition_abort();
+    if (!loaded) transition_abort("MPKG: map handoff canceled: activation or native allocation did not complete");
     g_trans.allocated = 1;
     return 1;
 }
@@ -202,7 +204,7 @@ static void transition_finalize(void *common, const void *parameters, void *extr
         common != g_trans_common || g_trans.phase == TRANS_FINISHING) {
         ((transition_finalize_fn)g_trans_original[TRANS_FINALIZE])(common, parameters, extra); return;
     }
-    if (g_trans.parameters) transition_abort();
+    if (g_trans.parameters) transition_abort("MPKG: map handoff canceled: map finalization re-entered before completion");
     g_trans.parameters = parameters; g_trans.extra = extra;
     __try {
         __try {
@@ -213,7 +215,7 @@ static void transition_finalize(void *common, const void *parameters, void *extr
                 __except (EXCEPTION_EXECUTE_HANDLER) {
                     backend_log("MPKG: completing the map installation raised an exception");
                 }
-                if (!committed) transition_abort();
+                if (!committed) transition_abort("MPKG: map handoff canceled: completion was refused");
             }
             completed = g_trans.allocated;
         } __except (transition_cancel_filter(GetExceptionInformation())) {

@@ -138,6 +138,57 @@ static void test_modifier(void)
     free(packed); free(ai); free(conductor);
 }
 
+/* The three classification sets overlap pairwise. Every broad predicate meets
+ * every type, so no broad-row permutation can reproduce their 2/3/4 winners. */
+static void test_exact_modifier(void)
+{
+    uint32_t types[] = {K19 | K20 | IMP, K20 | (1u << 21) | T3, K19 | (1u << 21) | 16u};
+    uint32_t absent = IMP | (1u << 22), neutral = IMP | (1u << 23), historical = IMP | (1u << 24);
+    uint32_t exact[] = {types[2], types[0], neutral, types[1], types[0]};
+    const uint32_t masks[] = {types[0], types[1], types[2], types[0], IMP, neutral, 1u << 24};
+    const float health[] = {2, 3, 4, 99, 9, 1, 7};
+    sh_package_key_groups groups = {0}; groups.historical = 1u << 24;
+    uint8_t *conductor = calloc(1, 0x2220), *ai = calloc(1, 0x23d70), *packed = calloc(7, 12);
+    uint64_t modifiers; float encounter_health = 5, encounter_damage = 2, damage = 1;
+    assert(conductor && ai && packed);
+    for (size_t i = 0; i < 7; i++) {
+        memcpy(packed + i * 12, health + i, 4); memcpy(packed + i * 12 + 4, &damage, 4);
+        memcpy(packed + i * 12 + 8, masks + i, 4);
+    }
+    memcpy(conductor + 0x2210, &packed, sizeof(packed)); *(int *)(conductor + 0x2218) = 7;
+    memcpy(&modifiers, &encounter_health, 4); memcpy((uint8_t *)&modifiers + 4, &encounter_damage, 4);
+    sh_spawn_keys_program *program = sh_spawn_keys_program_create_exact(&groups, &absent, 1, exact, 5);
+    assert(program); memset(exact, 0, sizeof(exact));
+    sh_spawn_keys_publish_program(program);
+    sh_spawn_keys_program_release(program);
+    for (size_t i = 0; i < 3; i++) {
+        g_next_type = types[i]; g_health_ai = NULL;
+        sh_spawn_keys_test_modifier(conductor, ai, modifiers);
+        assert(g_health_ai == ai && g_health_value == 5.0f * health[i] && *(float *)(ai + 0x23d6c) == 2);
+    }
+    g_next_type = absent; g_health_ai = NULL; *(float *)(ai + 0x23d6c) = -1;
+    sh_spawn_keys_test_modifier(conductor, ai, modifiers);
+    assert(!g_health_ai && *(float *)(ai + 0x23d6c) == -1);
+    g_next_type = neutral;
+    sh_spawn_keys_test_modifier(conductor, ai, modifiers);
+    assert(g_health_ai == ai && g_health_value == 5 && *(float *)(ai + 0x23d6c) == 2);
+    /* Stock and frozen historical types still take their first intersection;
+     * complete type equality applies only to the immutable exact-type list. */
+    g_next_type = IMP;
+    sh_spawn_keys_test_modifier(conductor, ai, modifiers);
+    assert(g_health_value == 45);
+    g_next_type = historical;
+    sh_spawn_keys_test_modifier(conductor, ai, modifiers);
+    assert(g_health_value == 45);
+    /* A later program clears the prior exact and absence metadata. */
+    assert(sh_spawn_keys_publish_groups(NULL, &groups));
+    g_next_type = types[1];
+    sh_spawn_keys_test_modifier(conductor, ai, modifiers);
+    assert(g_health_value == 10);
+    assert(sh_spawn_keys_publish_groups(NULL, NULL));
+    free(packed); free(ai); free(conductor);
+}
+
 static void test_filter(void)
 {
     uint8_t *filter = calloc(1, 0xcb0), *owner = calloc(1, 0x100), *table = calloc(1, 0x50);
@@ -363,6 +414,7 @@ int main(void)
     sh_spawn_keys_test_bind(&g_game_slot, test_type, test_health, test_resolve, test_ai_type, 0.01f, 10.0f);
     test_select();
     test_modifier();
+    test_exact_modifier();
     test_filter();
     test_groups();
     test_historical();

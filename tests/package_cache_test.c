@@ -204,11 +204,63 @@ static void test_changed_source(void)
     if(cached)remember(cached); check_stream(file,"after!",6); sh_package_file_release(file); free(cached);
     author=fopen(path,"rb"); CHECK(author); if(author) { char bytes[6]; CHECK(fread(bytes,1,6,author)==6 && !memcmp(bytes,"after!",6)); fclose(author); }
 }
+/* Retained exact evidence (native binding proofs) stays private: complete
+ * bytes are readable through independent streams, nothing is published under a
+ * content name, no other handle may change or remove it while referenced, and
+ * it disappears with its last reference. Incomplete output leaves nothing. */
+static char *private_file(void)
+{
+    char pattern[MAX_PATH]; WIN32_FIND_DATAA data; char *found=NULL;
+    snprintf(pattern,sizeof(pattern),"%s/.private.*",root);
+    HANDLE find=FindFirstFileA(pattern,&data);
+    if(find!=INVALID_HANDLE_VALUE) {
+        found=malloc(MAX_PATH*2); if(found)snprintf(found,MAX_PATH*2,"%s/%s",root,data.cFileName);
+        CHECK(!FindNextFileA(find,&data)); FindClose(find);
+    }
+    return found;
+}
+static void test_private(void)
+{
+    unsigned char data[300001]; char error[256];
+    for(size_t i=0;i<sizeof(data);i++)data[i]=(unsigned char)(i*13+5);
+    content input={data,sizeof(data),0};
+    size_t before=files();
+    sh_package_file *a=sh_package_file_private(root,sizeof(data),produce,&input,error,sizeof(error));
+    CHECK(a && !error[0] && files()==before+1); check_stream(a,data,sizeof(data));
+    char *path=private_file(); CHECK(path!=NULL);
+    if(path) {
+        HANDLE writer=CreateFileA(path,GENERIC_WRITE,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,NULL,OPEN_EXISTING,0,NULL);
+        CHECK(writer==INVALID_HANDLE_VALUE && GetLastError()==ERROR_SHARING_VIOLATION);
+        if(writer!=INVALID_HANDLE_VALUE)CloseHandle(writer);
+        CHECK(!DeleteFileA(path));
+    }
+    uint64_t n=0; FILE *reader=sh_package_file_open(a,&n,error,sizeof(error)); CHECK(reader && n==sizeof(data));
+    sh_package_file *b=sh_package_file_retain(a); CHECK(b==a);
+    CHECK(sh_package_file_equal(a,b)==1);
+    sh_package_file_identity identity, expected;
+    CHECK(sh_package_file_get_identity(a,&identity) && sh_package_bytes_identity(data,sizeof(data),&expected) &&
+        identity.length==sizeof(data) && !memcmp(identity.digest,expected.digest,32));
+    sh_package_file_release(b); sh_package_file_release(a);
+    if(reader) { CHECK(fgetc(reader)==data[0]); fclose(reader); }
+    CHECK(files()==before && !private_file());
+    free(path);
+    /* Interrupted, ignored-failure, short and long output all leave nothing. */
+    input.failure=1;
+    CHECK(!sh_package_file_private(root,sizeof(data),produce,&input,error,sizeof(error)) && strstr(error,"interrupted") && files()==before);
+    input.failure=2;
+    CHECK(!sh_package_file_private(root,1,produce,&input,error,sizeof(error)) && files()==before);
+    input.failure=0;
+    CHECK(!sh_package_file_private(root,sizeof(data)+1,produce,&input,error,sizeof(error)) && files()==before);
+    CHECK(!sh_package_file_private(root,sizeof(data)-1,produce,&input,error,sizeof(error)) && files()==before);
+    char missing[MAX_PATH]; snprintf(missing,sizeof(missing),"%s/absent",root);
+    CHECK(!sh_package_file_private(missing,sizeof(data),produce,&input,error,sizeof(error)) && error[0]);
+}
+
 int main(void)
 {
     char temp[MAX_PATH]; CHECK(GetTempPathA(sizeof(temp),temp));
     CHECK(GetTempFileNameA(temp,"pcm",0,root)); CHECK(DeleteFileA(root)); CHECK(CreateDirectoryA(root,NULL));
-    test_cache(); test_bound_bank(); test_simultaneous(); test_changed_source();
+    test_cache(); test_private(); test_bound_bank(); test_simultaneous(); test_changed_source();
     CHECK(files()==path_count);
     for(size_t i=0;i<path_count;i++) {
         CHECK(!strncmp(paths[i],root,strlen(root)) && paths[i][strlen(root)]=='/');

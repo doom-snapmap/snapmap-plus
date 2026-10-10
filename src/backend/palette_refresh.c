@@ -123,13 +123,26 @@ static volatile LONG g_entries_installed, g_entries_busy, g_entries_faulted;
 /* R033: all five paired direct consumers use only the returned template's
  * declaration. Preserve native authority and its exact end sentinel. The
  * admission owner quiesces those consumers before final template release. */
+static void *volatile g_steer;
+void sh_palette_refresh_steer(sh_palette_steer_fn steer) { InterlockedExchangePointer(&g_steer, (void *)steer); }
+static void *volatile g_rows_retired;
+void sh_palette_refresh_rows_retired(void (*retired)(void)) { InterlockedExchangePointer(&g_rows_retired, (void *)retired); }
+static void pr_rows_retired(void)
+{
+    void (*retired)(void) = (void (*)(void))g_rows_retired;
+    if (retired) retired();
+}
 static void *pr_find_entity(void *palette, const char *name)
 {
     void *result = g_find_original ? g_find_original(palette, name) : NULL;
     void *end = NULL;
     __try { if (palette) end = *(void **)((unsigned char *)palette + 0x28); }
     __except (EXCEPTION_EXECUTE_HANDLER) { return result; }
-    if (result != end || !name) return result;
+    if (result != end && name) {
+        sh_palette_steer_fn steer = (sh_palette_steer_fn)g_steer;
+        return steer ? (void *)steer(palette, name, result, NULL) : result;
+    }
+    if (!name) return result;
     AcquireSRWLockShared(&g_entries_lock);
     for (pr_entry *entry = g_entries; entry; entry = entry->next) {
         if (entry->published && entry->palette == palette && !entry->quarantined &&
@@ -457,6 +470,15 @@ static int pr_palette_valid(const pr_native_palette *p)
     }
     return 1;
 }
+/* The live editor palette embedded in the editor singleton. Its storage lasts
+ * for the process and native rebuilds replace only its rows, so callers read it
+ * afresh for each use instead of keeping a pointer seen elsewhere; NULL while
+ * the editor or its palette layout is not intact. */
+void *sh_palette_refresh_editor_palette(void)
+{
+    void *palette = pr_entries_palette();
+    return palette && pr_palette_valid(palette) ? palette : NULL;
+}
 static int pr_authoring_fault(sh_palette_entries *batch, char *error, size_t capacity)
 {
     batch->quarantined = 1; InterlockedExchange(&g_entries_faulted, 1);
@@ -753,6 +775,7 @@ int sh_palette_entries_publish(sh_palette_entries *batch,
     ReleaseSRWLockExclusive(&g_entries_lock);
     result = 1;
 done:
+    pr_rows_retired(); /* published or partly failed: no stored row pointer survives */
     InterlockedExchange(&g_entries_busy, 0);
     if (!result && error && capacity && !*error)
         pr_entries_error(error, capacity, "palette template publication changed native identity");
@@ -786,6 +809,7 @@ int sh_palette_entries_end(sh_palette_entries **owned,
         result = pr_entries_dispose(batch, error, capacity);
         if (result != 1) InterlockedExchange(&batch->refs, 1);
     }
+    pr_rows_retired();
     if (result == 1) *owned = NULL;
     InterlockedExchange(&g_entries_busy, 0);
     return result;
@@ -842,7 +866,10 @@ int sh_palette_refresh_after_decl_registration(void)
         return 0;
     }
 
-    /* Keep PENDING through the native call so reentry cannot replace its array. */
+    /* Keep PENDING through the native call so reentry cannot replace its array.
+     * Retire stored row pointers first: a build that faults part way may
+     * already have freed rows. */
+    pr_rows_retired();
     __try {
 #ifdef SH_PALETTE_REFRESH_TESTING
         InterlockedIncrement(&g_test_call_count);
@@ -869,6 +896,7 @@ int sh_palette_refresh_after_decl_registration(void)
             InterlockedCompareExchange(&g_template_forwarded, 0, 0), g_forward_all);
         backend_log(line);
     }
+    pr_rows_retired();
     return 1;
 }
 

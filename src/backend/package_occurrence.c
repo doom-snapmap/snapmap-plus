@@ -18,6 +18,8 @@ struct sh_package_occurrence_snapshot {
     size_t bundle_count;
     po_resource *resources;
     size_t resource_count;
+    char **rows; /* document only: entity/N's exact editor row, NULL none */
+    size_t row_count;
 };
 typedef struct po_entry {
     sh_package_occurrence_key key;
@@ -98,6 +100,11 @@ static int po_copy_resources(sh_package_occurrence_snapshot *out, const sh_packa
     return 1;
 }
 
+static void po_table_free(sh_package_occurrence_snapshot *snapshot)
+{
+    for (size_t i = 0; i < snapshot->row_count; i++) free(snapshot->rows[i]);
+    free(snapshot->rows); snapshot->rows = NULL; snapshot->row_count = 0;
+}
 sh_package_occurrence_snapshot *sh_package_occurrence_retain(sh_package_occurrence_snapshot *snapshot)
 { if (snapshot) InterlockedIncrement(&snapshot->references); return snapshot; }
 void sh_package_occurrence_release(sh_package_occurrence_snapshot *snapshot)
@@ -106,7 +113,7 @@ void sh_package_occurrence_release(sh_package_occurrence_snapshot *snapshot)
     sh_package_provenance_free(&snapshot->value);
     for (size_t i = 0; i < snapshot->bundle_count; i++) sh_package_bundle_release(snapshot->bundles[i].original);
     for (size_t i = 0; i < snapshot->resource_count; i++) po_resource_free(snapshot->resources + i);
-    free(snapshot->resources); free(snapshot->bundles); free(snapshot);
+    po_table_free(snapshot); free(snapshot->resources); free(snapshot->bundles); free(snapshot);
 }
 const sh_package_provenance *sh_package_occurrence_provenance(const sh_package_occurrence_snapshot *snapshot)
 { return snapshot ? &snapshot->value : NULL; }
@@ -362,22 +369,26 @@ void sh_package_occurrence_erase_namespace(sh_package_occurrence_tracker *tracke
     ReleaseSRWLockExclusive(&tracker->lock);
 }
 
+int sh_package_occurrence_owner_index(const char *owner, size_t count, size_t *index)
+{
+    size_t value = 0; const char *at; char canonical[48];
+    if (!owner || strncmp(owner, "entity/", 7)) return 0;
+    at = owner + 7; if (!*at) return 0;
+    for (; *at; at++) {
+        if (*at < '0' || *at > '9' || value > (SIZE_MAX - (size_t)(*at - '0')) / 10u) return 0;
+        value = value * 10u + (size_t)(*at - '0');
+    }
+    snprintf(canonical, sizeof(canonical), "entity/%zu", value);
+    if (value >= count || strcmp(canonical, owner)) return 0;
+    if (index) *index = value;
+    return 1;
+}
 static int po_document_owners(const sh_package_provenance *document, size_t count)
 {
     if (!document) return 1;
-    for (size_t i = 0; i < document->use_count; i++) {
-        const sh_package_provenance_use *use = document->uses + i;
-        size_t value = 0; const char *at; char canonical[48];
-        if (use->kind != SH_PACKAGE_USE_OBJECT) continue;
-        if (!use->owner || strncmp(use->owner, "entity/", 7)) return 0;
-        at = use->owner + 7; if (!*at) return 0;
-        for (; *at; at++) {
-            if (*at < '0' || *at > '9' || value > (SIZE_MAX - (size_t)(*at - '0')) / 10u) return 0;
-            value = value * 10u + (size_t)(*at - '0');
-        }
-        snprintf(canonical, sizeof(canonical), "entity/%zu", value);
-        if (value >= count || strcmp(canonical, use->owner)) return 0;
-    }
+    for (size_t i = 0; i < document->use_count; i++)
+        if (document->uses[i].kind == SH_PACKAGE_USE_OBJECT &&
+            !sh_package_occurrence_owner_index(document->uses[i].owner, count, NULL)) return 0;
     return 1;
 }
 static int po_attach_document(sh_package_occurrence_tracker *tracker,
@@ -493,4 +504,57 @@ failed:
     if (snapshots) for (size_t i = 0; i < count; i++) sh_package_occurrence_release(snapshots[i]);
     free(snapshots); sh_package_occurrence_release(out);
     po_error(error, capacity, "cannot export exact object and world ownership"); return NULL;
+}
+
+static int po_rows_owned(const sh_package_occurrence_snapshot *document)
+{ return document && document->kind == 3 && document->references == 1; }
+/* Stamp OBJECT uses of entity/N from rows[N]. replace: every use takes its
+ * owner's entry; otherwise only owners without a row gain one and a different
+ * recorded row fails. Nothing changes on failure. */
+static int po_stamp(sh_package_provenance *value, const char *const *rows, size_t count, int replace)
+{
+    char **copies = NULL; int ok = 0;
+    if (value->use_count && !(copies = calloc(value->use_count, sizeof(*copies)))) return 0;
+    for (size_t i = 0; i < value->use_count; i++) {
+        const sh_package_provenance_use *use = value->uses + i; const char *row = NULL; size_t at;
+        if (use->kind != SH_PACKAGE_USE_OBJECT) continue;
+        if (!sh_package_occurrence_owner_index(use->owner, SIZE_MAX, &at)) goto done;
+        if (at < count) row = rows[at];
+        if (!replace && use->row) { if (row && strcmp(use->row, row)) goto done; row = use->row; }
+        if (row && (!sh_package_provenance_row_valid(row) || !(copies[i] = _strdup(row)))) goto done;
+    }
+    for (size_t i = 0; i < value->use_count; i++)
+        if (value->uses[i].kind == SH_PACKAGE_USE_OBJECT) {
+            free(value->uses[i].row); value->uses[i].row = copies[i]; copies[i] = NULL;
+        }
+    ok = 1;
+done:
+    if (copies) for (size_t i = 0; i < value->use_count; i++) free(copies[i]);
+    free(copies); return ok;
+}
+int sh_package_occurrence_document_rows(sh_package_occurrence_snapshot *document,
+    const char *const *rows, size_t count)
+{
+    char **table = NULL; int ok = 0;
+    if (!po_rows_owned(document) || (count && !rows)) return 0;
+    if (count && !(table = calloc(count, sizeof(*table)))) return 0;
+    for (size_t i = 0; i < count; i++)
+        if (rows[i] && (!sh_package_provenance_row_valid(rows[i]) || !(table[i] = _strdup(rows[i])))) goto done;
+    if (!po_stamp(&document->value, rows, count, 1)) goto done;
+    po_table_free(document); document->rows = table; document->row_count = count; table = NULL; ok = 1;
+done:
+    if (table) { for (size_t i = 0; i < count; i++) free(table[i]); free(table); }
+    return ok;
+}
+const char *sh_package_occurrence_document_row(const sh_package_occurrence_snapshot *document, size_t index)
+{ return document && document->rows && index < document->row_count ? document->rows[index] : NULL; }
+int sh_package_occurrence_carry_rows(sh_package_occurrence_snapshot *document, const sh_package_provenance *from)
+{ return po_rows_owned(document) && (!from || sh_package_provenance_rows_carry(from, &document->value)); }
+int sh_package_occurrence_carry_document_rows(sh_package_occurrence_snapshot *document,
+    const sh_package_occurrence_snapshot *from)
+{
+    if (!po_rows_owned(document)) return 0;
+    if (!from) return 1;
+    if (!from->rows) return sh_package_provenance_rows_carry(&from->value, &document->value);
+    return po_stamp(&document->value, (const char *const *)from->rows, from->row_count, 0);
 }

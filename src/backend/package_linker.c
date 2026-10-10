@@ -21,9 +21,21 @@ typedef struct pl_unit {
     char **paths;
     char **names;
     /* Restored from, or captured into, the reuse cache: edges and implicit hold
-     * that cache's slot strings, and only the arrays belong to the unit. */
+     * that cache's slot strings. The arrays belong to the unit unless shared. */
     int borrowed;
+    /* Arrays of a restored unit that are the cache entry's own (PL_SHARED_*):
+     * read-only for this pass and never freed here. */
+    unsigned shared;
 } pl_unit;
+enum { PL_SHARED_FILES = 1, PL_SHARED_BINDINGS = 2 };
+static unsigned long long pl_now_us(void);
+/* Meters only (diagnostics, never a result): one FNV-1a step over bytes. */
+static uint64_t pl_fnv(uint64_t hash, const void *bytes, size_t length)
+{
+    const unsigned char *p = bytes;
+    for (size_t i = 0; i < length; i++) { hash ^= p[i]; hash *= UINT64_C(1099511628211); }
+    return hash;
+}
 /* pl_occurrence's counts over one file's edges [occ_begin, occ_end) of
  * occ_unit: entries of an older generation are empty. */
 typedef struct pl_occ_entry { const char *key; size_t length, count, generation; uint64_t hash; } pl_occ_entry;
@@ -38,6 +50,12 @@ typedef struct pl_work {
     unsigned char *effective; /* certified originals deciding conditional bindings */
     size_t count, unit, file, next_edge;
     size_t restored; /* Diagnostics: units this pass restored from the reuse cache. */
+    /* Meters (diagnostics only): units captured afresh, how many sticky-invalid
+     * recaptures reproduced their previous capture, and pl_conditional's work. */
+    size_t fresh, again_first, again_same, again_changed;
+    size_t cond_units, cond_edges, cond_removed, cond_nonlocal, cond_certified, cond_walk_edges, cond_compares;
+    uint64_t cond_digest;
+    unsigned long long fresh_us, cond_us, cond_view_us, cond_walk_us, cond_filter_us, alloc_us;
     int replay, failed;
     sh_package_link_history *history;
     char *error;
@@ -45,6 +63,9 @@ typedef struct pl_work {
     const struct pl_unit *occ_unit;
     size_t occ_begin, occ_end, occ_used, occ_capacity, occ_generation;
     pl_occ_entry *occ;
+    /* pl_slot_index scratch: one unit's slot names sorted, reused unit to unit. */
+    const char **slot_index;
+    size_t slot_capacity;
 } pl_work;
 typedef struct pl_assignment {
     const char *family, *name;
@@ -119,13 +140,14 @@ static void pl_clear(pl_work *w)
             for (size_t j = 0; j < u->edge_count; j++) free((char *)u->edges[j].slot);
             for (size_t j = 0; j < u->implicit_count; j++) free((char *)u->implicit[j].slot);
         }
-        free(u->implicit);
         if (u->paths) for (size_t j = 0; j < w->units[i].file_count; j++) free(u->paths[j]);
         if (u->names) for (size_t j = 0; j < w->units[i].file_count; j++) free(u->names[j]);
-        free(u->names); free(u->paths); free(u->edges); free(u->files); free(u->witnesses); free(u->witness_order);
+        free(u->names); free(u->paths);
+        if (!(u->shared & PL_SHARED_BINDINGS)) { free(u->edges); free(u->implicit); }
+        if (!(u->shared & PL_SHARED_FILES)) { free(u->files); free(u->witnesses); free(u->witness_order); }
     }
     free(w->work); free(w->nodes); free(w->member_offsets); free(w->members); free(w->originals); free(w->effective);
-    free(w->occ);
+    free(w->occ); free(w->slot_index);
     sh_package_link_history_close(w->history);
     sh_package_link_output_free(&w->output);
 }
@@ -149,10 +171,28 @@ struct sh_package_link_reuse {
     /* Diagnostics only: the identity passes that used this cache, and the
      * final link's member, history, assignment and projection steps. */
     struct {
-        size_t units, restored, classes;
-        unsigned long long collect_us, partition_us, view_us, shapes_us, refine_us, identity_us;
+        size_t units, restored, classes, reused;
+        unsigned long long collect_us, partition_us, view_us, shapes_us, refine_us, identity_us, clear_us;
+        size_t fresh, again_first, again_same, again_changed;
+        size_t cond_units, cond_edges, cond_removed, cond_nonlocal, cond_certified, cond_walk_edges, cond_compares;
+        uint64_t cond_digest;
+        unsigned long long fresh_us, cond_us, cond_view_us, cond_walk_us, cond_filter_us, alloc_us;
     } passes[16];
     size_t pass_count;
+    /* Restores that borrowed an entry's arrays, and the binding arrays
+     * pl_conditional then copied before editing them. */
+    unsigned long long borrowed_restores, unshared;
+    /* Tests only (sh_package_link_reuse_test_mode): restore by copying the
+     * entry's arrays, and fail the n-th next copy-on-write (0 never). */
+    int copy_restore;
+    size_t fail_unshare;
+    /* Meters only (pl_meter_again): each sticky-invalid unit's last fresh capture
+     * folded to one word (0 not seen). Tests may fail its allocation. */
+    int fail_meter;
+    /* Tests only: pl_slot_index declines, so slot membership is searched linearly. */
+    int fail_index;
+    uint64_t *fp;
+    size_t fp_count;
     /* Exact verification of equal fingerprints: pairs compared, members held
      * as one captured object by both units, bytes compared, time. */
     unsigned long long verify_pairs, verify_shared, verify_bytes, verify_us;
@@ -231,7 +271,7 @@ void sh_package_link_reuse_close(sh_package_link_reuse *reuse)
     for (size_t i = 0; i < reuse->count; i++) pl_reuse_unit_clear(reuse->units + i);
     for (size_t i = 0; i < reuse->text_capacity; i++) free(reuse->texts[i]);
     sh_package_link_order_free(&reuse->order);
-    free(reuse->texts); free(reuse->units); free(reuse->proven); free(reuse);
+    free(reuse->texts); free(reuse->units); free(reuse->proven); free(reuse->fp); free(reuse);
 }
 static int pl_reuse_valid(const sh_package_link_reuse *reuse, size_t unit)
 { return reuse && unit < reuse->count && reuse->units[unit].captured && !reuse->units[unit].invalid; }
@@ -411,12 +451,48 @@ static void pl_implicit_free(sh_package_link_edge *edges, size_t count)
     for (size_t i = 0; i < count; i++) free((char *)edges[i].slot);
     free(edges);
 }
-/* A conditional binding is absent once its target is certified original
- * (pl_conditional); until then it is read like any implicit binding. */
-static int pl_conditional_slot(const sh_package_link_unit *source, const char *slot)
+static int pl_slot_order(const void *a, const void *b)
+{ return strcmp(*(const char *const *)a, *(const char *const *)b); }
+/* One unit's binding slot names sorted for pl_slot_member, in the work's
+ * scratch (valid until the next call). NULL when there are none, the scratch
+ * cannot grow, a slot is missing or tests decline; callers then compare
+ * linearly, with the same answers. */
+static const char **pl_slot_index(pl_work *w, const sh_package_link_edge *edges, size_t count)
 {
+    const sh_package_link_reuse *reuse = w->adapter ? w->adapter->reuse : NULL;
+    if (!count || (reuse && reuse->fail_index)) return NULL;
+    if (count > w->slot_capacity) {
+        const char **grown = count <= SIZE_MAX / sizeof(*grown) ? realloc(w->slot_index, count * sizeof(*grown)) : NULL;
+        if (!grown) return NULL;
+        w->slot_index = grown; w->slot_capacity = count;
+    }
+    for (size_t i = 0; i < count; i++) if (!(w->slot_index[i] = edges[i].slot)) return NULL;
+    if (count > 1) qsort(w->slot_index, count, sizeof(*w->slot_index), pl_slot_order);
+    return w->slot_index;
+}
+/* Whether slot is in a sorted index, adding the comparisons made to *compares. */
+static int pl_slot_member(const char *const *index, size_t count, const char *slot, size_t *compares)
+{
+    size_t low = 0, high = count;
+    while (low < high) {
+        size_t middle = low + (high - low) / 2;
+        int order = strcmp(slot, index[middle]);
+        ++*compares;
+        if (!order) return 1;
+        if (order < 0) high = middle; else low = middle + 1;
+    }
+    return 0;
+}
+/* A conditional binding is absent once its target is certified original
+ * (pl_conditional); until then it is read like any implicit binding. Whether
+ * slot is one of the unit's conditional slots: searched in index (its
+ * conditional slots, pl_slot_index) or, without one, compared one by one. */
+static int pl_conditional_slot(pl_work *w, const sh_package_link_unit *source, const char *const *index, const char *slot)
+{
+    if (index) return pl_slot_member(index, source->conditional_count, slot, &w->cond_compares);
     for (size_t i = 0; i < source->conditional_count; i++)
-        if (!strcmp(source->conditional[i].slot, slot)) return 1;
+        if (!strcmp(source->conditional[i].slot, slot)) { w->cond_compares += i + 1; return 1; }
+    w->cond_compares += source->conditional_count; /* meter: slot comparisons made */
     return 0;
 }
 static int pl_implicit_read(pl_work *w)
@@ -424,7 +500,8 @@ static int pl_implicit_read(pl_work *w)
     const sh_package_link_unit *source = w->units + w->unit;
     pl_unit *unit = w->work + w->unit;
     sh_package_link_edge *edges = NULL;
-    size_t total = 0, read = 0, kept = 0;
+    const char **implicit = NULL;
+    size_t total = 0, read = 0, kept = 0, compares = 0;
     int ok = 0;
     if ((source->implicit_count && !source->implicit) || (source->conditional_count && !source->conditional))
         return pl_fail(w, "implicit resource bindings are missing");
@@ -443,7 +520,12 @@ static int pl_implicit_read(pl_work *w)
             pl_fail(w, "implicit resource binding has an invalid slot or target"); goto done;
         }
         if (conditional) {
-            for (size_t j = 0; j < source->implicit_count; j++)
+            /* Every implicit slot is checked by now; index them once per unit. */
+            if (i == source->implicit_count) implicit = pl_slot_index(w, source->implicit, source->implicit_count);
+            if (implicit ? pl_slot_member(implicit, source->implicit_count, edge->slot, &compares) : 0) {
+                pl_fail(w, "a resource binding slot is both conditional and implicit"); goto done;
+            }
+            if (!implicit) for (size_t j = 0; j < source->implicit_count; j++)
                 if (source->implicit[j].slot && !strcmp(source->implicit[j].slot, edge->slot)) {
                     pl_fail(w, "a resource binding slot is both conditional and implicit"); goto done;
                 }
@@ -485,6 +567,25 @@ done:
     return ok;
 }
 
+/* Give a restored unit its own binding arrays before they are edited; the
+ * cache entry keeps the complete capture. On failure nothing changes. */
+static int pl_unshare(pl_work *w, pl_unit *u)
+{
+    sh_package_link_reuse *reuse = w->adapter->reuse;
+    sh_package_link_edge *edges = NULL, *implicit = NULL;
+    if (!(reuse && reuse->fail_unshare && !--reuse->fail_unshare)) {
+        edges = pl_alloc(u->edge_count, sizeof(*edges));
+        implicit = pl_alloc(u->implicit_count, sizeof(*implicit));
+    }
+    if (!edges || !implicit) { free(edges); free(implicit); return 0; }
+    if (u->edge_count) memcpy(edges, u->edges, u->edge_count * sizeof(*edges));
+    if (u->implicit_count) memcpy(implicit, u->implicit, u->implicit_count * sizeof(*implicit));
+    u->edges = edges; u->implicit = implicit; u->edge_capacity = u->edge_count;
+    u->shared &= ~(unsigned)PL_SHARED_BINDINGS;
+    if (reuse) reuse->unshared++;
+    return 1;
+}
+
 /* Remove the conditional bindings whose targets are certified original.
  * Certification over the complete graph, these bindings included, equals
  * certification over the bindings that remain: an original target reaches
@@ -495,19 +596,39 @@ done:
 static int pl_conditional(pl_work *w)
 {
     size_t conditional = 0;
-    for (size_t i = 0; i < w->count; i++) conditional |= w->units[i].conditional_count;
+    unsigned long long began = pl_now_us(), mark;
+    for (size_t i = 0; i < w->count; i++) {
+        conditional |= w->units[i].conditional_count;
+        if (w->units[i].conditional_count) { w->cond_units++; w->cond_edges += w->units[i].conditional_count; }
+    }
     if (!conditional) return 1;
     unsigned char *local = pl_alloc(w->count, 1);
     sh_package_link_edge *storage = NULL;
     sh_package_link_node *view = NULL;
     w->effective = pl_alloc(w->count, 1);
+    mark = pl_now_us();
     if (local && w->effective) view = pl_stable_view(w, &storage);
+    w->cond_view_us = pl_now_us() - mark;
     if (!view) { free(local); return pl_fail(w, "cannot certify conditional resource bindings"); }
-    for (size_t i = 0; i < w->count; i++) local[i] = w->units[i].original_binding == 1;
+    for (size_t i = 0; i < w->count; i++) {
+        local[i] = w->units[i].original_binding == 1;
+        w->cond_nonlocal += !local[i]; w->cond_walk_edges += view[i].edge_count;
+    }
+    mark = pl_now_us();
     int ok = sh_package_link_originals(view, w->count, local, w->effective, w->error, w->capacity);
+    w->cond_walk_us = pl_now_us() - mark;
     if (view != w->nodes) free(view);
     free(storage); free(local);
     if (!ok) return 0;
+    {   /* Meter: the whole certification result as one word, comparable between passes. */
+        uint64_t digest = UINT64_C(14695981039346656037);
+        for (size_t i = 0; i < w->count; i++) {
+            w->cond_certified += w->effective[i];
+            digest = (digest ^ w->effective[i]) * UINT64_C(1099511628211);
+        }
+        w->cond_digest = digest;
+    }
+    mark = pl_now_us();
     for (size_t i = 0; i < w->count; i++) {
         const sh_package_link_unit *source = w->units + i;
         pl_unit *u = w->work + i;
@@ -515,10 +636,18 @@ static int pl_conditional(pl_work *w)
         if (!source->conditional_count) continue;
         if (u->implicit_begin > u->edge_count || u->edge_count - u->implicit_begin != u->implicit_count)
             return pl_fail(w, "implicit resource bindings are not the unit's last bindings");
+        const char *const *index = pl_slot_index(w, source->conditional, source->conditional_count);
+        size_t removed = 0;
+        for (size_t k = 0; k < u->implicit_count && !removed; k++)
+            removed = w->effective[u->implicit[k].target] && pl_conditional_slot(w, source, index, u->implicit[k].slot);
+        if (!removed) continue;
+        if ((u->shared & PL_SHARED_BINDINGS) && !pl_unshare(w, u))
+            return pl_fail(w, "cannot copy conditional resource bindings");
         for (size_t k = 0; k < u->implicit_count; k++) {
             sh_package_link_edge *edge = u->implicit + k, *bound = u->edges + u->implicit_begin + k;
-            if (w->effective[edge->target] && pl_conditional_slot(source, edge->slot)) {
+            if (w->effective[edge->target] && pl_conditional_slot(w, source, index, edge->slot)) {
                 if (!u->borrowed) { free((char *)edge->slot); free((char *)bound->slot); }
+                w->cond_removed++;
                 continue;
             }
             u->implicit[kept] = *edge; u->edges[u->implicit_begin + kept] = *bound; kept++;
@@ -526,6 +655,7 @@ static int pl_conditional(pl_work *w)
         u->edge_count = u->implicit_begin + kept; u->implicit_count = kept;
         w->nodes[i].edges = u->edges; w->nodes[i].edge_count = u->edge_count;
     }
+    w->cond_filter_us = pl_now_us() - mark; w->cond_us = pl_now_us() - began;
     return 1;
 }
 
@@ -638,6 +768,40 @@ static void pl_u64(unsigned char **cursor, uint64_t value)
     for (size_t i = 0; i < 8; i++) (*cursor)[i] = (unsigned char)(value >> (i * 8));
     *cursor += 8;
 }
+/* Meter: a sticky-invalid unit is captured afresh on every pass. Fold what that capture
+ * holds into one word and compare it with the unit's previous capture, so the pass detail
+ * can say how many recaptures reproduced the same facts and how many found a change. Never
+ * changes a result; an allocation failure only skips the meter. */
+static uint64_t pl_capture_fp(const pl_unit *u, const sh_package_link_node *node)
+{
+    uint64_t h = UINT64_C(14695981039346656037);
+    h = pl_fnv(h, &node->length, sizeof(node->length)); h = pl_fnv(h, node->content, 32);
+    h = pl_fnv(h, &u->edge_count, sizeof(u->edge_count));
+    for (size_t i = 0; i < u->edge_count; i++) {
+        h = pl_fnv(h, u->edges[i].slot, strlen(u->edges[i].slot) + 1);
+        h = pl_fnv(h, &u->edges[i].target, sizeof(u->edges[i].target));
+    }
+    h = pl_fnv(h, &u->implicit_count, sizeof(u->implicit_count));
+    for (size_t i = 0; i < u->implicit_count; i++) {
+        h = pl_fnv(h, u->implicit[i].slot, strlen(u->implicit[i].slot) + 1);
+        h = pl_fnv(h, &u->implicit[i].target, sizeof(u->implicit[i].target));
+    }
+    return h | 1;
+}
+static void pl_meter_again(pl_work *w, const pl_unit *u, const sh_package_link_node *node)
+{
+    sh_package_link_reuse *reuse = w->adapter->reuse;
+    if (!reuse || w->unit >= reuse->count || !reuse->units[w->unit].invalid) return;
+    if (reuse->fp_count < reuse->count) {
+        uint64_t *grown = reuse->fail_meter ? NULL : calloc(reuse->count, sizeof(*grown));
+        if (!grown) return;
+        if (reuse->fp_count) memcpy(grown, reuse->fp, reuse->fp_count * sizeof(*grown));
+        free(reuse->fp); reuse->fp = grown; reuse->fp_count = reuse->count;
+    }
+    uint64_t fp = pl_capture_fp(u, node), *seen = reuse->fp + w->unit;
+    if (!*seen) w->again_first++; else if (*seen == fp) w->again_same++; else w->again_changed++;
+    *seen = fp;
+}
 static int pl_semantics(pl_work *w, const sh_package_link_unit *source, sh_package_link_node *node)
 {
     memcpy(node->semantics, source->semantics, 32);
@@ -653,36 +817,44 @@ static int pl_semantics(pl_work *w, const sh_package_link_unit *source, sh_packa
 }
 
 /* Restore a valid earlier capture of this unit. Return 1 when restored, 0 to
- * capture afresh; an incomplete copy is discarded and captured afresh. */
+ * capture afresh; an incomplete copy is discarded and captured afresh. The
+ * unit borrows the entry's arrays: nothing writes them during this pass
+ * (pl_conditional copies first), and the entry outlives it, since only
+ * captured (not restored) units store and invalidation, growth and close
+ * wait for the pass to end. */
 static int pl_reuse_restore(pl_work *w, const sh_package_link_unit *source, pl_unit *u, sh_package_link_node *node)
 {
-    const sh_package_link_reuse *reuse = w->adapter->reuse;
+    sh_package_link_reuse *reuse = w->adapter->reuse;
     if (!pl_reuse_valid(reuse, w->unit)) return 0;
     const pl_reuse_unit *c = reuse->units + w->unit;
     if (c->file_count != source->file_count || c->witness_count != source->witness_count) return 0;
-    u->files = pl_alloc(c->file_count, sizeof(*u->files));
-    u->edges = pl_alloc(c->edge_count, sizeof(*u->edges));
-    u->implicit = pl_alloc(c->implicit_count, sizeof(*u->implicit));
-    if (c->witness_count) {
-        u->witnesses = pl_alloc(c->witness_count, sizeof(*u->witnesses));
-        u->witness_order = pl_alloc(c->witness_count, sizeof(*u->witness_order));
+    if (reuse->copy_restore) {
+        u->files = pl_alloc(c->file_count, sizeof(*u->files));
+        u->edges = pl_alloc(c->edge_count, sizeof(*u->edges));
+        u->implicit = pl_alloc(c->implicit_count, sizeof(*u->implicit));
+        if (c->witness_count) {
+            u->witnesses = pl_alloc(c->witness_count, sizeof(*u->witnesses));
+            u->witness_order = pl_alloc(c->witness_count, sizeof(*u->witness_order));
+        }
+        if (!u->files || !u->edges || !u->implicit || (c->witness_count && (!u->witnesses || !u->witness_order))) {
+            free(u->edges); free(u->implicit);
+            free(u->files); free(u->witnesses); free(u->witness_order);
+            memset(u, 0, sizeof(*u)); return 0;
+        }
+        if (c->edge_count) memcpy(u->edges, c->edges, c->edge_count * sizeof(*u->edges));
+        if (c->implicit_count) memcpy(u->implicit, c->implicit, c->implicit_count * sizeof(*u->implicit));
+        memcpy(u->files, c->files, c->file_count * sizeof(*u->files));
+        if (c->witness_count) {
+            memcpy(u->witnesses, c->witnesses, c->witness_count * sizeof(*u->witnesses));
+            memcpy((void *)u->witness_order, c->witness_order, c->witness_count * sizeof(*u->witness_order));
+        }
+    } else {
+        u->files = c->files; u->witnesses = c->witnesses; u->witness_order = c->witness_order;
+        u->edges = c->edges; u->implicit = c->implicit;
+        u->shared = PL_SHARED_FILES | PL_SHARED_BINDINGS;
+        reuse->borrowed_restores++;
     }
-    if (!u->files || !u->edges || !u->implicit || (c->witness_count && (!u->witnesses || !u->witness_order))) {
-        free(u->edges); free(u->implicit);
-        free(u->files); free(u->witnesses); free(u->witness_order);
-        memset(u, 0, sizeof(*u)); return 0;
-    }
-    /* The cache entry cannot change or be freed during this pass: only
-     * captured (not restored) units store, and invalidation waits for the
-     * next pass's refresh. */
-    if (c->edge_count) memcpy(u->edges, c->edges, c->edge_count * sizeof(*u->edges));
-    if (c->implicit_count) memcpy(u->implicit, c->implicit, c->implicit_count * sizeof(*u->implicit));
     u->borrowed = 1;
-    memcpy(u->files, c->files, c->file_count * sizeof(*u->files));
-    if (c->witness_count) {
-        memcpy(u->witnesses, c->witnesses, c->witness_count * sizeof(*u->witnesses));
-        memcpy((void *)u->witness_order, c->witness_order, c->witness_count * sizeof(*u->witness_order));
-    }
     u->edge_count = u->edge_capacity = c->edge_count;
     u->implicit_count = c->implicit_count; u->implicit_begin = c->implicit_begin;
     node->family = source->family; node->path = source->name; node->length = c->length;
@@ -739,6 +911,7 @@ static int pl_collect(pl_work *w)
             w->restored++;
             continue;
         }
+        unsigned long long fresh_began = pl_now_us();
         size_t manifest_size = 8, companions = 0, primary_members = 0;
         unsigned char *manifest, *cursor;
         sh_package_file_identity identity;
@@ -865,6 +1038,8 @@ static int pl_collect(pl_work *w)
         if (!pl_semantics(w, source, node)) return 0;
         node->edges = u->edges; node->edge_count = u->edge_count;
         pl_reuse_store(w, source, u, node);
+        w->fresh++; w->fresh_us += pl_now_us() - fresh_began;
+        pl_meter_again(w, u, node);
     }
     return 1;
 }
@@ -1411,10 +1586,11 @@ static int pl_history_prepare(pl_work *w)
         }
     }
     if (batch.count) {
-        char *path = NULL;
-        sh_package_file *file = sh_package_file_generate(h->directory, total, NULL,
-            pl_proof_batch_write, &batch, &path, w->error, w->capacity);
-        free(path);
+        /* Proofs are evidence for this history only, compared byte for byte:
+         * never published to the content-addressed cache, hashed, read back
+         * or kept after the history releases them. */
+        sh_package_file *file = sh_package_file_private(h->directory, total,
+            pl_proof_batch_write, &batch, w->error, w->capacity);
         if (!file) { pl_fail(w, "cannot retain exact native binding proof"); goto done; }
         for (size_t i = old->count; i < h->count; i++) h->nodes[i].proof = sh_package_file_retain(file);
         sh_package_file_release(file);
@@ -2139,9 +2315,9 @@ const char *sh_package_link_reuse_counters(const sh_package_link_reuse *reuse, c
     if (!reuse) return out;
     int n = snprintf(out, capacity, "%zu identity passes", reuse->pass_count);
     for (size_t i = 0; n > 0 && (used += (size_t)n) < capacity && i < reuse->pass_count && i < 16; i++)
-        n = snprintf(out + used, capacity - used, "%s %zu units %zu restored, collect %llu ms, partition %llu ms",
+        n = snprintf(out + used, capacity - used, "%s %zu units %zu restored, collect %llu ms, partition %llu ms, clear %llu ms",
             i ? ";" : ":", reuse->passes[i].units, reuse->passes[i].restored,
-            reuse->passes[i].collect_us / 1000u, reuse->passes[i].partition_us / 1000u);
+            reuse->passes[i].collect_us / 1000u, reuse->passes[i].partition_us / 1000u, reuse->passes[i].clear_us / 1000u);
     if (n > 0 && used < capacity)
         n = snprintf(out + used, capacity - used, "; exact verification: %llu pairs, %llu shared members, "
             "%llu MB compared, %llu ms", reuse->verify_pairs, reuse->verify_shared,
@@ -2149,12 +2325,69 @@ const char *sh_package_link_reuse_counters(const sh_package_link_reuse *reuse, c
     /* Each pass's partition, on its own line. */
     for (size_t i = 0; n > 0 && (used += (size_t)n) < capacity && i < reuse->pass_count && i < 16; i++)
         n = snprintf(out + used, capacity - used, "%s %zu: view %llu, shapes %llu, refine %llu, identities %llu ms, "
-            "%zu classes", i ? ";" : "\nidentity partitions by pass:", i + 1, reuse->passes[i].view_us / 1000u,
+            "%zu classes, %zu shapes reused", i ? ";" : "\nidentity partitions by pass:", i + 1, reuse->passes[i].view_us / 1000u,
             reuse->passes[i].shapes_us / 1000u, reuse->passes[i].refine_us / 1000u,
-            reuse->passes[i].identity_us / 1000u, reuse->passes[i].classes);
+            reuse->passes[i].identity_us / 1000u, reuse->passes[i].classes, reuse->passes[i].reused);
     return out;
 }
+/* Each pass's meters on one line: what it captured afresh (and whether sticky-invalid
+ * recaptures reproduced their previous capture), and what pl_conditional's
+ * certification walked, removed and produced. */
+#define PL_TENTHS(us) (us) / 1000u, (us) % 1000u / 100u
+const char *sh_package_link_reuse_detail(const sh_package_link_reuse *reuse, char *out, size_t capacity)
+{
+    size_t used = 0;
+    if (!out || !capacity) return out;
+    *out = 0;
+    for (size_t i = 0; reuse && i < reuse->pass_count && i < 16; i++) {
+#define PL_PASS reuse->passes[i]
+        int n = snprintf(out + used, capacity - used,
+            "%s %zu: fresh %zu in %llu.%llu ms, again %zu first %zu same %zu changed, conditional %llu.%llu ms "
+            "(%zu units %zu bindings %zu removed %zu slot compares, view %llu.%llu, walk %llu.%llu over %zu edges %zu not original "
+            "%zu certified digest %08llx, filter %llu.%llu), alloc %llu.%llu ms",
+            i ? ";" : "identity pass detail by pass:", i + 1, PL_PASS.fresh, PL_TENTHS(PL_PASS.fresh_us),
+            PL_PASS.again_first, PL_PASS.again_same, PL_PASS.again_changed, PL_TENTHS(PL_PASS.cond_us),
+            PL_PASS.cond_units, PL_PASS.cond_edges, PL_PASS.cond_removed, PL_PASS.cond_compares, PL_TENTHS(PL_PASS.cond_view_us),
+            PL_TENTHS(PL_PASS.cond_walk_us), PL_PASS.cond_walk_edges, PL_PASS.cond_nonlocal, PL_PASS.cond_certified,
+            (unsigned long long)(PL_PASS.cond_digest & 0xffffffffu), PL_TENTHS(PL_PASS.cond_filter_us),
+            PL_TENTHS(PL_PASS.alloc_us));
+#undef PL_PASS
+        if (n < 0 || (size_t)n >= capacity - used) { out[used] = 0; break; }
+        used += (size_t)n;
+    }
+    return out;
+}
+#undef PL_TENTHS
 #ifdef SH_PACKAGE_LINKER_TESTING
+void sh_package_link_reuse_test_mode(sh_package_link_reuse *reuse, int copy, size_t fail_unshare)
+{
+    if (reuse) { reuse->copy_restore = copy; reuse->fail_unshare = fail_unshare; }
+}
+void sh_package_link_reuse_test_counts(const sh_package_link_reuse *reuse,
+    unsigned long long *borrowed, unsigned long long *unshared)
+{
+    *borrowed = reuse ? reuse->borrowed_restores : 0; *unshared = reuse ? reuse->unshared : 0;
+}
+int sh_package_link_reuse_test_meters(const sh_package_link_reuse *reuse, size_t pass, sh_package_link_pass_meters *out)
+{
+    if (!reuse || !out || pass >= reuse->pass_count || pass >= 16) return 0;
+    out->fresh = reuse->passes[pass].fresh; out->again_first = reuse->passes[pass].again_first;
+    out->again_same = reuse->passes[pass].again_same; out->again_changed = reuse->passes[pass].again_changed;
+    out->cond_units = reuse->passes[pass].cond_units; out->cond_edges = reuse->passes[pass].cond_edges;
+    out->cond_removed = reuse->passes[pass].cond_removed; out->cond_nonlocal = reuse->passes[pass].cond_nonlocal;
+    out->cond_certified = reuse->passes[pass].cond_certified; out->cond_walk_edges = reuse->passes[pass].cond_walk_edges;
+    out->cond_compares = reuse->passes[pass].cond_compares;
+    out->cond_digest = reuse->passes[pass].cond_digest;
+    return 1;
+}
+void sh_package_link_reuse_test_fail_meters(sh_package_link_reuse *reuse, int fail)
+{
+    if (reuse) reuse->fail_meter = fail;
+}
+void sh_package_link_reuse_test_fail_index(sh_package_link_reuse *reuse, int fail)
+{
+    if (reuse) reuse->fail_index = fail;
+}
 size_t sh_package_link_reuse_test_slots(const sh_package_link_reuse *reuse, size_t unit,
     const char **slots, size_t capacity)
 {
@@ -2172,8 +2405,17 @@ const char *sh_package_link_reuse_link_steps(const sh_package_link_reuse *reuse,
             reuse->link_us[0] / 1000u, reuse->link_us[1] / 1000u, reuse->link_us[2] / 1000u, reuse->link_us[3] / 1000u);
     return out;
 }
+/* Free the pass's work, timing it as part of the pass this call recorded. */
+static void pl_clear_timed(pl_work *w, size_t pass)
+{
+    sh_package_link_reuse *reuse = w->adapter ? w->adapter->reuse : NULL;
+    unsigned long long began = pl_now_us();
+    pl_clear(w);
+    if (reuse && reuse->pass_count == pass + 1 && pass < 16) reuse->passes[pass].clear_us = pl_now_us() - began;
+}
 static int pl_identify(pl_work *w)
 {
+    unsigned long long entered = pl_now_us();
     if ((w->count && !w->units) || !w->adapter || !w->adapter->resolve || !w->adapter->bind)
         return pl_fail(w, "resource identity inputs require resolved source readers");
     /* Check every identity before a resolver can reference a later unit. */
@@ -2183,6 +2425,7 @@ static int pl_identify(pl_work *w)
     w->work = pl_alloc(w->count, sizeof(*w->work));
     w->nodes = pl_alloc(w->count, sizeof(*w->nodes));
     unsigned long long began = pl_now_us();
+    w->alloc_us = began - entered;
     if (!w->work || !w->nodes || !pl_collect(w) || !pl_conditional(w)) return 0;
     unsigned long long collected = pl_now_us();
     sh_package_link_edge *edges = NULL;
@@ -2199,9 +2442,17 @@ static int pl_identify(pl_work *w)
         reuse->passes[reuse->pass_count].partition_us = pl_now_us() - collected;
         reuse->passes[reuse->pass_count].view_us = viewed - collected;
         reuse->passes[reuse->pass_count].classes = ok ? w->output.classes.count : 0;
+        reuse->passes[reuse->pass_count].reused = ok ? w->output.classes.reused : 0;
         reuse->passes[reuse->pass_count].shapes_us = ok ? w->output.classes.shapes_us : 0;
         reuse->passes[reuse->pass_count].refine_us = ok ? w->output.classes.refine_us : 0;
         reuse->passes[reuse->pass_count].identity_us = ok ? w->output.classes.identity_us : 0;
+#define PL_METER(field) reuse->passes[reuse->pass_count].field = w->field
+        PL_METER(fresh); PL_METER(again_first); PL_METER(again_same); PL_METER(again_changed);
+        PL_METER(cond_units); PL_METER(cond_edges); PL_METER(cond_removed); PL_METER(cond_nonlocal);
+        PL_METER(cond_certified); PL_METER(cond_walk_edges); PL_METER(cond_compares); PL_METER(cond_digest);
+        PL_METER(fresh_us); PL_METER(cond_us); PL_METER(cond_view_us); PL_METER(cond_walk_us);
+        PL_METER(cond_filter_us); PL_METER(alloc_us);
+#undef PL_METER
     }
     if (reuse) reuse->pass_count++;
     free(edges); return ok;
@@ -2217,11 +2468,12 @@ int sh_package_link_identify_units(const sh_package_link_unit *units, size_t cou
     if (!out) { snprintf(error, capacity, "resource identity output is required"); return 0; }
     sh_package_link_classes_free(out);
     w.units = units; w.count = count; w.adapter = adapter; w.error = error; w.capacity = capacity;
+    size_t pass = adapter && adapter->reuse ? adapter->reuse->pass_count : 0;
     if (pl_identify(&w)) {
         *out = w.output.classes; memset(&w.output.classes, 0, sizeof(w.output.classes)); ok = 1;
     }
     if (!ok && !*error) snprintf(error, capacity, "resource identities could not be captured");
-    pl_clear(&w); return ok;
+    pl_clear_timed(&w, pass); return ok;
 }
 
 int sh_package_link(const sh_package_sources *sources, const sh_package_link_unit *units,
@@ -2231,6 +2483,7 @@ int sh_package_link(const sh_package_sources *sources, const sh_package_link_uni
     char fallback[1024];
     pl_work w = {0};
     int ok = 0;
+    size_t pass = SIZE_MAX;
     if (!error || !capacity) { error = fallback; capacity = sizeof(fallback); }
     error[0] = 0;
     if (!out) { snprintf(error, capacity, "linked provider output is required"); return 0; }
@@ -2240,6 +2493,7 @@ int sh_package_link(const sh_package_sources *sources, const sh_package_link_uni
         (adapter->registry && !adapter->registry->check) || (adapter->history && !adapter->registry))
         goto done;
     unsigned long long steps[5];
+    pass = adapter->reuse ? adapter->reuse->pass_count : 0;
     if (!pl_identify(&w)) goto done;
     steps[0] = pl_now_us();
     if (!pl_members(&w)) goto done;
@@ -2261,7 +2515,7 @@ int sh_package_link(const sh_package_sources *sources, const sh_package_link_uni
     *out = w.output; memset(&w.output, 0, sizeof(w.output)); ok = 1;
 done:
     if (!ok && !*error) snprintf(error, capacity, "resource linker input is invalid or unavailable");
-    pl_clear(&w); return ok;
+    pl_clear_timed(&w, pass); return ok;
 }
 
 int sh_package_link_provenance(const sh_package_link_output *linked,

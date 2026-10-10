@@ -80,7 +80,7 @@ static void gap(void *context, const char *path, sh_decl_value_type value, const
 static void setup(fixture *f)
 {
     unsigned char *container, *record, *fields, *element, *enums, *enum_readers;
-    size_t count = 52;
+    size_t count = 55;
     memset(f, 0, sizeof(*f));
     f->reflect = (unsigned char *)allocate(f, 0xc0);
     container = (unsigned char *)allocate(f, 0x30);
@@ -99,7 +99,7 @@ static void setup(fixture *f)
     fields = (unsigned char *)allocate(f, 2 * 0x48); pointer(record, 0x20, fields);
     field(f, fields, 0, "target", "idDeclEntityDef", "*", 8);
     record = type(f, 6, "Entity", "Base", 0, 0);
-    fields = (unsigned char *)allocate(f, 28 * 0x48); pointer(record, 0x20, fields);
+    fields = (unsigned char *)allocate(f, 29 * 0x48); pointer(record, 0x20, fields);
     field(f, fields, 0, "inventory", "idList < Ref , TAG >", "", 24);
     field(f, fields, 1, "name", "idStr", "", 24);
     field(f, fields, 2, "custom", "OpaqueAtom", "", 8);
@@ -127,6 +127,7 @@ static void setup(fixture *f)
     field(f, fields, 24, "targetActor", "idManagedClassPtr < idAI2 >", "", 24);
     field(f, fields, 25, "activateOnArrival", "idList < ManagedRefs >", "", 24);
     field(f, fields, 26, "staticData", "idStaticParticleModelData", "*", 8);
+    field(f, fields, 27, "eventCall", "idEventCallInfo", "", 40);
     record = type(f, 7, "idList < Ref , TAG >", "", 0x50, 0);
     element = (unsigned char *)allocate(f, 0x48); pointer(record, 0x18, element);
     field(f, element, 0, "element", "idDeclInventory", "*", 8);
@@ -187,6 +188,10 @@ static void setup(fixture *f)
     field(f, element, 0, "element", "idManagedClassPtr < idEntity >", "", 24);
     type(f, 50, "idStaticParticleModelData", "", 0, 0x110);
     type(f, 51, "OtherParticleData", "", 0, 0x111);
+    type(f, 52, "idEventCallInfo", "", 0x120, 0);
+    /* idMD6Anim shares the generic resource pointer reader registered by idImage. */
+    type(f, 53, "idImage", "", 0, 0x130);
+    type(f, 54, "idMD6Anim", "", 0, 0x130);
     enums = (unsigned char *)allocate(f, 2 * 0x18);
     enum_readers = (unsigned char *)allocate(f, 2 * 16);
     pointer(enums, 0, text(f, "Mode")); pointer(container, 0x10, enums);
@@ -604,6 +609,40 @@ int main(void)
         json = "{\"inventory\":{\"slot[0]\":\"weapon/ref\"}}";
         assert(!sh_decl_json_state_dependencies(json, strlen(json), (sh_decl_value_type){"Entity", ""},
             sh_decl_native_schema_view(native), &result) && result.gaps == 1);
+        /* idEventCallInfo's registered reader selects the event-call shape: the
+         * authored no-argument timeline call is complete, while a decl argument
+         * stays a gap until an attached registry proves its manager. */
+        json = "{\"eventCall\":{\"\\neventHandle_t eventDef\":\"disable\",\"args\":{\"\\nnum\":0}}}";
+        assert(sh_decl_json_state_dependencies(json, strlen(json), (sh_decl_value_type){"Entity", ""},
+            sh_decl_native_schema_view(native), &result) && !result.gaps && !result.references);
+        json = "{\"eventCall\":{\"eventDef\":\"startSoundShader\",\"args\":{\"num\":1,"
+            "\"item[0]\":{\"decl\":{\"sound\":\"play_noise_hat\"}}}}}";
+        assert(!sh_decl_json_state_dependencies(json, strlen(json), (sh_decl_value_type){"Entity", ""},
+            sh_decl_native_schema_view(native), &result) && result.gaps == 1 && !result.references);
+        /* An md6Anim argument binds through the attached registry only because
+         * idMD6Anim is read by the generic resource pointer reader; the entity
+         * and string arguments beside it stay plain values. */
+        {
+            sh_decl_value_shape anim = {0};
+            assert(sh_decl_native_schema_view(native)->describe(native,
+                (sh_decl_value_type){SH_DECL_EVENT_ANIM_TYPE, SH_DECL_EVENT_ANIM_OPS}, &anim) &&
+                anim.kind == SH_DECL_VALUE_REFERENCE && !strcmp(anim.element.name, "idMD6Anim") &&
+                !strcmp(anim.element.ops, SH_DECL_EVENT_ANIM_OPS));
+            /* The element keeps the use (its reader defaults an absent clip);
+             * it reads with the same pointer reader as a reflected field. */
+            assert(sh_decl_native_schema_reader(native, anim.element) == SH_DECL_READER_IMAGE);
+            assert(sh_decl_native_schema_reader(native, (sh_decl_value_type){"idMD6Anim", "*"}) == SH_DECL_READER_IMAGE);
+            assert(sh_decl_native_schema_reader(native,
+                (sh_decl_value_type){"idImage", SH_DECL_EVENT_ANIM_OPS}) == SH_DECL_READER_UNKNOWN);
+            memset(&anim, 0, sizeof(anim));
+            assert(!sh_decl_native_schema_view(native)->describe(native,
+                (sh_decl_value_type){"idImage", SH_DECL_EVENT_ANIM_OPS}, &anim));
+        }
+        json = "{\"eventCall\":{\"eventDef\":\"playAnim\",\"args\":{\"num\":3,"
+            "\"item[0]\":{\"entity\":\"0_room/snapmaps/func/snap_lift_63\"},"
+            "\"item[1]\":{\"md6Anim\":\"models/snap/lift.md6\"},\"item[2]\":{\"string\":\"models/plain.md6\"}}}}";
+        assert(sh_decl_json_state_dependencies(json, strlen(json), (sh_decl_value_type){"Entity", ""},
+            sh_decl_native_schema_view(native), &result) && !result.gaps && result.references == 1);
         sh_decl_native_schema_close(native);
     }
     assert(inspect(&f, "{ edit = { duration = 1.25; } }", &result) && !result.references);

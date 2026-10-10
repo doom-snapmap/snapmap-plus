@@ -670,6 +670,11 @@ catalog alongside file serving. A synchronous consumer can hold its exact snapsh
 across publication; that hold preserves the plan, while ordinary occurrence leases
 preserve the served files. Copy/undo retention filters the catalog by live roots and
 keeps its transitive closure, including source-free intermediate consumers.
+Each occurrence lease is held by the root provider whose own bindings serve its
+pair, or by the view it was copied from when no root with an audio program does.
+A view built beside live leases, selectors and movies takes from each only the
+audio programs of the roots that serve what it keeps, so a map's program retires
+once nothing kept is its own.
 
 Captured binding changes for surviving identities join native reconstruction even
 when their physical bytes are unchanged. The diff lists these identities separately
@@ -1152,7 +1157,10 @@ The compiler captures this behavior before combining independent scopes. Changed
 classifications or modifiers give the AI a private binding even when its own
 declaration bytes match. Exact dedupe includes that captured behavior. Missing
 stock rows are restored for modern contributions; frozen historical contexts
-retain their recorded omissions.
+retain their recorded omissions. Restoration compares each complete spawn mask
+through the reflected enum. Numeric and symbolic spellings of the same mask
+retain the authored row and its order; an omitted or distinct mask can still
+restore a stock row.
 
 Requests retain their complete source registration table as a dependency. An
 individual AI retains its first classification and effective modifier, including
@@ -1160,9 +1168,17 @@ an explicitly absent modifier. Private keys and group dictionaries travel with
 the compiled program and its occurrence leases. Active-provider composition
 projects retained rows into the engine's shared conductor, preserving each
 source's first-match behavior and maximum authored row multiplicity across equal
-tables. Copying an occurrence therefore retains the registry it needs after the
-source map closes. Native publication must complete before an activation succeeds;
+tables. Each captured private modifier becomes a leading row for its complete
+classification type. The dispatch program matches those types by equality, so
+overlapping private groups can retain different modifiers without requiring a
+shared ordering of broad masks. Stock and frozen historical types retain their
+intersection rules. Copying an occurrence therefore retains the registry it needs
+after the source map closes. Native publication must complete before an activation succeeds;
 retaining bytes alone does not establish that existing consumers were updated.
+An unpublished prepared map already reserves its numeric keys and group codes.
+An installed authoring increment reserves that catalog together with the live
+provider's complete catalog before allocation, keeping both source contexts
+without applying the serving view's binding precedence.
 Additive editor admission distinguishes alias membership from resource changes.
 Native alias membership alone does not change
 what the engine reads: when every carrier is unchanged and the installed SnapMap
@@ -1174,9 +1190,11 @@ Identity-only additions/removals participate in native refresh without requiring
 a changed file row. Additive admission retains the existing-object lifetime guard.
 
 The immutable dispatch program is prepared after merging the incoming dependency
-closure. Group codes and classifications with no modifier
-are published together; recovery republishes the previous program. This metadata
-step does not reconstruct existing native registration tables in the active editor.
+closure. Group codes, classifications with no modifier and classifications using
+exact modifier rows are published together; recovery republishes the previous
+program. Additive editor admission preserves the existing exact classifications
+and native registration tables. A new exact classification is published only
+when its corresponding conductor row is prepared for native activation.
 The next ordinary native map load, including Play from the editor, publishes any
 pending retained-source composition after the engine's verified resource purge
 and before allocation of new consumers. It uses the same activation and recovery
@@ -1200,8 +1218,13 @@ it and its own value, and says whether those settings are in force (applied and
 read back), waiting, or refused; a refused update reports the earlier settings
 it left as last applied, or a rollback still owed.
 
-Map admission and save failures carry the first diagnostic back to the native
-notice and backend log. JSON validation includes a byte offset and rejection
+Map admission, installation, play, prefab and save failures keep the full
+diagnostic in the backend log. Native notices describe the failed operation
+briefly, without parser details, private paths or generated identities. A failed
+save tells the author to keep the map open; the notice does not claim recovery
+or preservation that its caller has not established. Reporting does not bypass
+validation, rollback or the gate against incomplete saves.
+JSON validation includes a byte offset and rejection
 reason; preparation distinguishes inline dependency traversal from ownership
 selection, and HUD activation has its own diagnostic. Embedded archive identity
 errors include the supplying package ID. These diagnostics report where the
@@ -1305,11 +1328,12 @@ index-referenced collections never undergo this renumbering.
 
 Native inherited declarations can instead contain sparse slot patches with no
 count or member identity in the child (for example, only `item[4].descriptionTag`).
-These retain their inherited indices and compose independent field edits at the
-same slot when the parent layout is consistent. They are not full collections
-with missing entries. Mixing complete layouts with unresolved inherited patches,
-or changing the parent while composing those patches, requires resolving that
-layout and is refused rather than guessing identities from numeric positions.
+The compiler first evaluates these patches in their authored parent's layout,
+then maps their effective controls onto the composed parent. Counts, repeated
+assignments, shrink/regrowth and omitted fields follow the native reader and
+constructor defaults. They are not full collections with missing entries.
+Pathless controls retain internal slot/content identities; authors do not need
+to add artificial paths. Distinct bound actions remain separate controls.
 
 Spawn registrations retain native positions in each isolated source, including
 parents without an `inherit` header. The compiler expands `aiTypeList` and
@@ -1360,10 +1384,8 @@ on another control; a parent control rebound in place (for example to a
 package's private inspector) stays inherited. Parents are read as the native
 reader applies them: shipped rows may repeat a field (`fx/ambient_embers`
 states `fxInfo` twice), so parent names and editor collections are read in
-order. A child stating no collection has nothing to rebase. A parent stating a
-collection the rebase reads more than once is not composed: the product reports
-a coverage failure rather than guessing how the native reader applies a
-repeated list. When a package's own text moves a
+order, including repeated count and slot assignments. A child stating no
+collection has nothing to rebase. When a package's own text moves a
 stock entry's inherited controls, every stock descendant of that entry, read from
 SnapMap's shipped editor entries, is rebased onto it and served under its own
 name in every library, reached or not: an installation cannot restate a shipped
@@ -1371,6 +1393,16 @@ entry later, and later packages bind it by name. That check leaves unreadable
 package content to the phase that attributes its owner; unreadable stock
 originals, a shipped entry that exists but cannot be read, or no shipped entries
 at all fail that compile as an environment failure, never a partial closure.
+
+Reparsing shared editor declarations uses an owning-storage transaction. Native
+constructors supply fresh strings, lists and scalar defaults while the previous
+payload remains retained. The existing resource identity survives. Activation
+keeps its heap and resident ownership through the material, state-machine and
+installation outcome; acceptance retires old storage and rejection restores it
+before recovering consumers. Admission is checked before disk commit. Once a
+commit succeeds, later cleanup failure cannot request the opposite disk/provider
+decision or replay an interrupted destructor. Such a failure disables native use
+and retains diagnostic ownership rather than publishing a partially ready view.
 
 A package's own text for a stock editor entry composes into the shared entry
 field by field only where the native editor is observed to read that field for

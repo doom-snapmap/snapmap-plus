@@ -38,6 +38,11 @@ int sh_audio_id_lease_ready(sh_audio_id_lease *lease, char *error, size_t capaci
  * no allocation/native call/fallible commit. Never call after partial failure. */
 void sh_audio_id_lease_activate(sh_audio_id_lease *lease);
 int sh_audio_id_lease_active(const sh_audio_id_lease *lease);
+/* Read an immutable lease's own claims, including equal claims shared with
+ * another lease. Excludes installed originals and reserved absences. Caller
+ * must retain the lease; no pool/peer traversal or native lookup occurs. */
+int sh_audio_id_lease_private(const sh_audio_id_lease *lease,
+    sh_audio_identity_domain domain, uint32_t id);
 /* Visit private identities that no other live lease claims: the IDs whose
  * native objects must be gone before this lease may release. Originals and
  * reserved absences never name a private native object. visit returns 0 to

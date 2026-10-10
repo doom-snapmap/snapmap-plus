@@ -2,6 +2,7 @@
 #include <windows.h>
 #include <stdio.h>
 #include <string.h>
+#define SH_RESOURCE_EDITOR_TESTING
 #include "../src/backend/resource_graph_native.c"
 
 static int failures, calls, throw_error;
@@ -40,12 +41,71 @@ void sh_package_runtime_consumer_release(sh_package_consumer_hold *hold)
     memset(hold, 0, sizeof(*hold));
 }
 
+/* Prepublication records are fixed fixtures: the actual APIs allocate no
+ * memory on constructor/Call/destructor entry. Tokens survive pointer reuse. */
+typedef struct fake_movie_record { const sh_package_consumer *binding; unsigned instances, frames; } fake_movie_record;
+static fake_movie_record movie_records[4];
+static int movie_begins, movie_borrows, movie_ends, movie_frame_releases;
+static fake_movie_record *movie_record_for(const char *name)
+{
+    for (size_t i = 0; i < 4; i++) if (movie_records[i].binding && !strcmp(movie_records[i].binding->name, name)) return movie_records + i;
+    return NULL;
+}
+static void movie_records_prepare(void)
+{
+    memset(movie_records, 0, sizeof(movie_records));
+    for (size_t i = 0; i < sh_package_consumers_count(font_catalog); i++) {
+        CHECK(i < 4); if (i >= 4) break;
+        movie_records[i].binding = sh_package_consumers_at(font_catalog, i);
+        CHECK(sh_package_movie_plan_valid(movie_records[i].binding));
+    }
+}
+int sh_package_runtime_movie_begin(const char *name, sh_package_movie_hold *out)
+{
+    CHECK(!out->binding && !out->token); movie_begins++;
+    fake_movie_record *record = movie_record_for(name); if (!record) return 0;
+    if (!record->instances && !record->frames) { font_holds++; font_acquires++; }
+    record->instances++; record->frames++; out->binding = record->binding; out->token = record; return 1;
+}
+int sh_package_runtime_movie_borrow(const char *name, sh_package_movie_hold *out)
+{
+    CHECK(!out->binding && !out->token); movie_borrows++;
+    fake_movie_record *record = movie_record_for(name); if (!record || !record->instances) return 0;
+    record->frames++; out->binding = record->binding; out->token = record; return 1;
+}
+void sh_package_runtime_movie_end_instance(const sh_package_movie_hold *hold)
+{
+    fake_movie_record *record = hold->token; CHECK(record && record->instances);
+    if (record && record->instances) { record->instances--; movie_ends++; }
+}
+void sh_package_runtime_movie_release(sh_package_movie_hold *hold)
+{
+    fake_movie_record *record = hold->token;
+    if (record) {
+        CHECK(record->frames); record->frames--; movie_frame_releases++;
+        if (!record->frames && !record->instances) { font_holds--; font_releases++; }
+    }
+    memset(hold, 0, sizeof(*hold));
+}
 /* This suite executes the production callback against native-shaped memory.
  * Actual detour instructions are checked separately against both game images. */
+static int movie_install_fake, movie_hook_prepares, movie_hook_commits, movie_hook_removes;
+static int movie_hook_prepare_fault, movie_hook_commit_fault, movie_hook_remove_fault;
 void *hook_prepare(void *target, void *detour, size_t stolen)
-{ (void)target; (void)detour; (void)stolen; return NULL; }
+{
+    (void)detour; (void)stolen;
+    if (!movie_install_fake) return NULL;
+    movie_hook_prepares++;
+    return movie_hook_prepares == movie_hook_prepare_fault ? NULL : target;
+}
 sh_patch_status hook_commit(void *trampoline)
-{ (void)trampoline; return B2_PATCH_OK; }
+{
+    (void)trampoline; if (!movie_install_fake) return B2_PATCH_OK; movie_hook_commits++;
+    CHECK(g_swf_construct && g_swf_destroy && g_swf_precache_sound && g_swf_precache_material && g_swf_play_sound && g_swf_local_string && g_dictionary_index);
+    return movie_hook_commits == movie_hook_commit_fault ? (sh_patch_status)1 : B2_PATCH_OK;
+}
+int hook_unpatch(void *trampoline)
+{ (void)trampoline; movie_hook_removes++; return movie_hook_removes != movie_hook_remove_fault; }
 void backend_log(const char *message) { (void)message; }
 
 static void put_pointer(unsigned char *buffer, size_t offset, const void *value)
@@ -803,7 +863,7 @@ static void *movie_materialize(void *owner, const char *name, unsigned char crea
     CHECK(!flags);
     if (owner == movie_font_manager) {
         if (!strcmp(name, "smp/font1")) {
-            CHECK(!g_movie_frame && !create_default); movie_prepares++;
+            CHECK(g_movie_frame && create_default); movie_prepares++;
             movie_fonts[0][0x2c] = movie_prepare_failure ? 4 : 0;
             return movie_fonts[0];
         }
@@ -818,6 +878,7 @@ static void *movie_materialize(void *owner, const char *name, unsigned char crea
 static void *movie_optional(void *owner, const char *name, unsigned char create_default)
 {
     CHECK(owner == movie_material_manager && name); (void)create_default;
+    if (!strcmp(name, "smp/mat1")) { movie_prepares++; return movie_materials[0]; }
     movie_native_materials++; return movie_materials[2];
 }
 static void movie_nested_load(void *resource)
@@ -829,6 +890,8 @@ static void movie_nested_load(void *resource)
 static void *movie_construct(void *swf, const char *name, void *parent, unsigned char flags)
 {
     CHECK(swf == movie_swf && !parent && flags == 3); movie_constructs++;
+    static sh_package_movie_names names;
+    put_pointer(movie_swf, 0, name && sh_package_movie_names_for_consumer(name, strlen(name), &names) == 1 ? names.movie : "");
     if (!movie_expect_frame) {
         CHECK(!g_movie_frame);
         CHECK(rg_materialize_hook(movie_font_manager, "TT Supermolot", 1, 0) == movie_fonts[2]);
@@ -848,6 +911,7 @@ static void *movie_construct(void *swf, const char *name, void *parent, unsigned
     if (movie_throw) RaiseException(0xe0123457, 0, 0, NULL);
     return swf;
 }
+static void movie_destroy(void *swf) { CHECK(swf == movie_swf); }
 static void test_movie_construction(void)
 {
     char error[256];
@@ -857,6 +921,7 @@ static void test_movie_construction(void)
         {"movie/material/_white", "material", "_white"}};
     sh_package_consumer owner = {"file", "generated/swf/hud/panel.bswf", targets, 3};
     font_catalog = sh_package_consumers_create(&owner, 1, error, sizeof(error)); CHECK(font_catalog);
+    movie_records_prepare();
     memset(movie_font_manager, 0, sizeof(movie_font_manager)); memset(movie_material_manager, 0, sizeof(movie_material_manager));
     put_pointer(movie_font_manager, 8, "font"); put_pointer(movie_font_manager, 0x18, movie_material_manager);
     put_pointer(movie_material_manager, 8, "material"); movie_head = movie_font_manager; g_resource_head = &movie_head;
@@ -864,25 +929,25 @@ static void test_movie_construction(void)
         put_pointer(movie_fonts[i], 0x10, movie_font_manager); put_pointer(movie_materials[i], 0x10, movie_material_manager);
     }
     g_ready = 1; g_materialize = movie_materialize; g_optional_material = movie_optional;
-    g_swf_construct = movie_construct; g_load = movie_nested_load;
+    g_swf_construct = movie_construct; g_swf_destroy = movie_destroy; g_load = movie_nested_load;
     CHECK(!sh_resource_graph_native_consumer_ready("file"));
     g_movie_ready = 1;
     CHECK(sh_resource_graph_native_consumer_ready("file"));
     font_acquires = font_releases = font_holds = 0;
     movie_expect_frame = 1; movie_nested = 1;
     CHECK(rg_swf_construct_hook(movie_swf, "hud/panel", NULL, 3) == movie_swf);
-    CHECK(movie_constructs == 1 && movie_prepares == 2 && !font_holds && font_releases == 1 && !g_movie_frame);
+    CHECK(movie_constructs == 1 && movie_prepares == 2 && font_holds == 1 && !font_releases && !g_movie_frame);
+    rg_swf_destroy_hook(movie_swf);
+    CHECK(!font_holds && font_releases == 1);
     movie_nested = 0;
     /* Uncompiled or ambiguous movies keep native construction without a plan. */
     movie_expect_frame = 0;
     CHECK(rg_swf_construct_hook(movie_swf, "swf/other.swf", NULL, 3) == movie_swf && !font_holds);
     CHECK(rg_swf_construct_hook(movie_swf, "swf/a.bimage/b.swf", NULL, 3) == movie_swf && !font_holds);
     CHECK(rg_swf_construct_hook(movie_swf, NULL, NULL, 3) == movie_swf && movie_constructs == 4);
-    /* A constructor cannot fail: an unpreparable plan keeps native lookups. */
-    movie_prepare_failure = 1; movie_prepares = 0;
-    CHECK(rg_swf_construct_hook(movie_swf, "swf/hud/panel.swf", NULL, 3) == movie_swf);
-    CHECK(movie_prepares == 1 && !font_holds && !g_movie_frame);
-    movie_prepare_failure = 0;
+    /* Contradictory metadata is rejected before publication, not substituted
+     * by native requests during construction. No adapter entry allocates. */
+    targets[0].family = "image"; CHECK(!sh_package_movie_plan_valid(&owner)); targets[0].family = "font";
     /* Native exceptions unwind the held plan and restore the outer frame. */
     movie_expect_frame = 1; movie_throw = 1;
     {
@@ -901,6 +966,203 @@ static void test_movie_construction(void)
     sh_package_consumers_free(font_catalog); font_catalog = NULL;
     g_swf_construct = NULL; g_load = NULL;
     sh_resource_graph_test_reset();
+}
+static unsigned char late_movies[3][0x40], late_callbacks[3][0xc8], late_sound_manager[16], late_material_manager[16];
+static char late_filenames[3][256];
+static int late_ctor_throw, late_ctor_dtor, late_ctor_reuse, late_dtor_reenter, late_dtor_throw, late_destroys, late_index_calls;
+static unsigned char late_dictionary, late_other_dictionary;
+typedef struct late_parameters { const char *sound, *key; int mode, disabled; } late_parameters;
+static void *late_construct(void *swf, const char *name, void *parent, unsigned char flags)
+{
+    sh_package_movie_names names; CHECK(!parent && flags == 3);
+    size_t index = swf == late_movies[0] ? 0 : 1;
+    CHECK(sh_package_movie_names_for_consumer(name, strlen(name), &names) == 1);
+    strcpy_s(late_filenames[index], sizeof(late_filenames[index]), names.movie);
+    put_pointer(swf, 0, late_filenames[index]);
+    CHECK(g_movie_frame && g_request_hold && !g_movie_string_hold);
+    if (late_ctor_reuse) {
+        int reuse = late_ctor_reuse;
+        late_ctor_reuse = 0;
+        rg_movie_lifetime_frame *old = g_movie_constructors;
+        fake_movie_record *record = old->hold->token;
+        int ended = movie_ends;
+        CHECK(old->instance == old && !old->ended && record->instances == 1 && record->frames == 1);
+        rg_swf_destroy_hook(swf);
+        CHECK(old->ended && movie_ends == ended + 1 && !record->instances && record->frames == 1);
+        CHECK(rg_swf_construct_hook(swf, name, parent, flags) == swf);
+        CHECK(g_movie_constructors == old && g_movie_lifetimes == old && old->ended &&
+            record->instances == 1 && record->frames == 1 && movie_ends == ended + 1);
+        rg_swf_destroy_hook(swf);
+        CHECK(old->ended && movie_ends == ended + 2 && !record->instances && record->frames == 1);
+        if (reuse == 2) RaiseException(0xe0123460, 0, 0, NULL);
+    }
+    if (late_ctor_dtor) rg_swf_destroy_hook(swf);
+    if (late_ctor_throw) RaiseException(0xe0123460, 0, 0, NULL);
+    return swf;
+}
+static void late_destroy(void *swf)
+{
+    (void)swf; late_destroys++;
+    if (late_dtor_reenter) {
+        late_dtor_reenter = 0;
+        rg_movie_lifetime_frame *entered = g_movie_destructors;
+        int ended = movie_ends;
+        rg_swf_destroy_hook(swf);
+        CHECK(g_movie_destructors == entered && g_movie_lifetimes == entered &&
+            entered->instance->ended && movie_ends == ended + 1);
+    }
+    if (late_dtor_throw) RaiseException(0xe0123461, 0, 0, NULL);
+}
+static int late_index(void *dictionary, const char *key)
+{
+    late_index_calls++;
+    if (dictionary == &late_dictionary && !strcmp(key, "#str_private_a")) return 1;
+    if (dictionary == &late_dictionary && !strcmp(key, "#str_private_b")) return 2;
+    if (!strcmp(key, "#str_key")) return 3;
+    return -1;
+}
+static void *late_call(void *callback, void *out, void *object, void *parameters)
+{
+    late_parameters *p = parameters; CHECK(object == (void *)91 && out);
+    sh_package_consumer_hold *entered = g_request_hold;
+    if (entered) {
+        int a = !strcmp(entered->binding->name, "generated/swf/latea.bswf");
+        CHECK(!strcmp(rg_request_name(late_sound_manager, p->sound), a ? "private/sound_a" : "private/sound_b"));
+        CHECK(!strcmp(rg_request_name(late_material_manager, "computed_fx"), a ? "private/fx_a" : "private/fx_b"));
+    } else CHECK(!strcmp(rg_request_name(late_sound_manager, p->sound), p->sound));
+    if (p->mode == 1 || p->mode == 2) {
+        late_parameters nested = {p->sound, p->key, 0, 0}; unsigned char result[16] = {0};
+        CHECK(rg_swf_local_string_hook(late_callbacks[p->mode], result, object, &nested) == result);
+        CHECK(g_request_hold == entered);
+        CHECK(*(const char **)result && !strcmp(*(const char **)result, p->mode == 1 ? "text_b" : "stock_text"));
+    }
+    if (p->mode == 3) {
+        void *swf = *(void **)((unsigned char *)callback + 0xc0);
+        void *old_token = movie_records[0].binding && !strcmp(movie_records[0].binding->name, "generated/swf/latea.bswf") ? movie_records : movie_records + 1;
+        rg_swf_destroy_hook(swf);
+        CHECK(((fake_movie_record *)old_token)->instances == 0 && ((fake_movie_record *)old_token)->frames == 1);
+        CHECK(rg_swf_construct_hook(swf, "lateb", NULL, 3) == swf);
+        CHECK(g_request_hold == entered && font_holds == 2); /* A frame and reused B instance. */
+    }
+    if (p->mode == 5) RaiseException(0xe0123462, 0, 0, NULL);
+    const char *text = p->key;
+    if (!p->disabled) {
+        int index = rg_dictionary_index_hook(p->mode == 6 ? &late_other_dictionary : &late_dictionary, p->key);
+        if (index == 1) text = "text_a";
+        else if (index == 2) text = "text_b";
+        else if (index == 3) text = "stock_text";
+    }
+    *(const char **)out = text; return out;
+}
+static void test_movie_late_callbacks(void)
+{
+    char error[256], computed[64]; strcpy_s(computed, sizeof(computed), "computed_"); strcat_s(computed, sizeof(computed), "beep");
+    sh_package_consumer_target a[] = {{"request/sound/computed_beep", "sound", "private/sound_a"},
+        {"request/material/computed_fx", "material", "private/fx_a"},
+        {"movie/string/#str_key", "string", "#str_private_a"}, {"movie/string/#str_missing", "string", "#str_private_missing"}};
+    sh_package_consumer_target b[] = {{"request/sound/computed_beep", "sound", "private/sound_b"},
+        {"request/material/computed_fx", "material", "private/fx_b"},
+        {"movie/string/#str_key", "string", "#str_private_b"}};
+    sh_package_consumer owners[] = {{"file", "generated/swf/latea.bswf", a, 4}, {"file", "generated/swf/lateb.bswf", b, 3}};
+    font_catalog = sh_package_consumers_create(owners, 2, error, sizeof(error)); CHECK(font_catalog); movie_records_prepare();
+    put_pointer(late_sound_manager, 8, "sound"); put_pointer(late_material_manager, 8, "material");
+    for (size_t i = 0; i < 3; i++) put_pointer(late_callbacks[i], 0xc0, late_movies[i]);
+    strcpy_s(late_filenames[2], sizeof(late_filenames[2]), "generated/swf/stock.bswf"); put_pointer(late_movies[2], 0, late_filenames[2]);
+    g_ready = g_movie_ready = 1; g_swf_construct = late_construct; g_swf_destroy = late_destroy;
+    g_swf_precache_sound = g_swf_precache_material = g_swf_play_sound = g_swf_local_string = late_call;
+    g_dictionary_index = late_index; g_movie_dictionary = &late_dictionary;
+    font_holds = font_releases = font_acquires = 0;
+    CHECK(rg_swf_construct_hook(late_movies[0], "latea", NULL, 3) == late_movies[0]);
+    CHECK(rg_swf_construct_hook(late_movies[1], "lateb", NULL, 3) == late_movies[1] && font_holds == 2);
+    late_parameters p = {computed, "#str_key", 0, 0}; unsigned char out[16] = {0};
+    CHECK(rg_swf_precache_sound_hook(late_callbacks[0], out, (void *)91, &p) == out && !strcmp(*(const char **)out, "stock_text"));
+    CHECK(rg_swf_precache_material_hook(late_callbacks[0], out, (void *)91, &p) == out);
+    CHECK(rg_swf_play_sound_hook(late_callbacks[0], out, (void *)91, &p) == out);
+    CHECK(rg_swf_local_string_hook(late_callbacks[0], out, (void *)91, &p) == out && !strcmp(*(const char **)out, "text_a"));
+    for (p.mode = 1; p.mode <= 2; p.mode++) {
+        CHECK(rg_swf_local_string_hook(late_callbacks[0], out, (void *)91, &p) == out && !strcmp(*(const char **)out, "text_a"));
+        CHECK(!g_request_hold && !g_movie_frame && !g_movie_string_hold);
+    }
+    p.mode = 0; p.key = "#str_missing";
+    CHECK(rg_swf_local_string_hook(late_callbacks[0], out, (void *)91, &p) == out && *(const char **)out == p.key);
+    p.disabled = 1; int indexed = late_index_calls;
+    CHECK(rg_swf_local_string_hook(late_callbacks[0], out, (void *)91, &p) == out && *(const char **)out == p.key && late_index_calls == indexed);
+    p.disabled = 0; p.key = "#str_key"; p.mode = 6;
+    CHECK(rg_swf_local_string_hook(late_callbacks[0], out, (void *)91, &p) == out && !strcmp(*(const char **)out, "stock_text"));
+    p.mode = 5; int caught = 0;
+    __try { rg_swf_local_string_hook(late_callbacks[0], out, (void *)91, &p); }
+    __except (GetExceptionCode() == 0xe0123462 ? EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH) { caught = 1; }
+    CHECK(caught && font_holds == 2 && !g_request_hold && !g_movie_frame && !g_movie_string_hold);
+    rg_swf_destroy_hook(late_movies[1]); CHECK(font_holds == 1);
+    p.mode = 3;
+    CHECK(rg_swf_local_string_hook(late_callbacks[0], out, (void *)91, &p) == out && !strcmp(*(const char **)out, "text_a"));
+    CHECK(font_holds == 1); /* A frame retired; same pointer now owns B. */
+    rg_swf_destroy_hook(late_movies[0]); CHECK(!font_holds);
+    late_ctor_throw = late_ctor_dtor = 1; caught = 0; int ended = movie_ends;
+    __try { rg_swf_construct_hook(late_movies[0], "latea", NULL, 3); }
+    __except (GetExceptionCode() == 0xe0123460 ? EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH) { caught = 1; }
+    CHECK(caught && movie_ends == ended + 1 && !font_holds && !g_movie_constructors && !g_movie_destructors);
+    late_ctor_throw = late_ctor_dtor = 0;
+    CHECK(rg_swf_construct_hook(late_movies[0], "latea", NULL, 3) == late_movies[0]);
+    late_dtor_throw = 1; caught = 0; ended = movie_ends;
+    __try { rg_swf_destroy_hook(late_movies[0]); }
+    __except (GetExceptionCode() == 0xe0123461 ? EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH) { caught = 1; }
+    CHECK(caught && movie_ends == ended && font_holds == 1 && !g_movie_destructors);
+    late_dtor_throw = 0; rg_swf_destroy_hook(late_movies[0]); CHECK(!font_holds);
+    /* Same pointer AND same pooled filename token: the ended outer ctor stays
+     * entered while a new incarnation is constructed and destroyed. */
+    ended = movie_ends; int released = movie_frame_releases;
+    late_ctor_reuse = 1;
+    CHECK(rg_swf_construct_hook(late_movies[0], "latea", NULL, 3) == late_movies[0]);
+    CHECK(!late_ctor_reuse && movie_ends == ended + 2 && movie_frame_releases == released + 4 &&
+        !font_holds && !g_movie_constructors && !g_movie_destructors && !g_movie_lifetimes);
+    ended = movie_ends; released = movie_frame_releases; caught = 0;
+    late_ctor_reuse = 2;
+    __try { rg_swf_construct_hook(late_movies[0], "latea", NULL, 3); }
+    __except (GetExceptionCode() == 0xe0123460 ? EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH) { caught = 1; }
+    CHECK(caught && !late_ctor_reuse && movie_ends == ended + 2 && movie_frame_releases == released + 4 &&
+        !font_holds && !g_movie_constructors && !g_movie_destructors && !g_movie_lifetimes);
+    /* Reentered destruction still shares the current incarnation's marker. */
+    CHECK(rg_swf_construct_hook(late_movies[0], "latea", NULL, 3) == late_movies[0]);
+    ended = movie_ends; released = movie_frame_releases; late_dtor_reenter = 1;
+    rg_swf_destroy_hook(late_movies[0]);
+    CHECK(!late_dtor_reenter && movie_ends == ended + 1 && movie_frame_releases == released + 2 &&
+        !font_holds && !g_movie_constructors && !g_movie_destructors && !g_movie_lifetimes);
+    CHECK(sh_resource_graph_native_signature("SwfConstruct") && sh_resource_graph_native_signature("LocalStringDictionaryIndex"));
+    g_movie_ready = 0; sh_package_consumers_free(font_catalog); font_catalog = NULL;
+}
+static void test_movie_hook_rollback(void)
+{
+    static unsigned char targets[7][0x80]; sig_result results[7] = {0};
+    for (size_t i = 0; i < 7; i++) { results[i].name = g_movie_required[i]; results[i].status = SIG_OK; results[i].addr = (uintptr_t)targets[i]; }
+    targets[5][0x59] = 0x48; targets[5][0x5a] = 0x8d; targets[5][0x5b] = 0x0d; targets[5][0x60] = 0xe8;
+    int32_t displacement = (int32_t)((intptr_t)&late_dictionary - (intptr_t)(targets[5] + 0x60));
+    memcpy(targets[5] + 0x5c, &displacement, sizeof(displacement));
+    CHECK(rg_movie_dictionary_for(targets[5]) == &late_dictionary);
+    targets[5][0x59] = 0; CHECK(!rg_movie_dictionary_for(targets[5])); targets[5][0x59] = 0x48;
+    movie_install_fake = 1; g_ready = 1;
+    g_swf_construct = NULL; g_swf_destroy = NULL;
+    g_swf_precache_sound = g_swf_precache_material = g_swf_play_sound = g_swf_local_string = NULL;
+    g_dictionary_index = NULL;
+    for (int pass = 0; pass < 3; pass++) {
+        g_movie_ready = g_movie_attempted = 0;
+        movie_hook_prepares = movie_hook_commits = movie_hook_removes = 0;
+        movie_hook_prepare_fault = pass == 0 ? 4 : 0;
+        movie_hook_commit_fault = pass ? 4 : 0; movie_hook_remove_fault = pass == 2 ? 1 : 0;
+        rg_movie_install(results, 7);
+        CHECK(!g_movie_ready && g_movie_attempted);
+        CHECK(movie_hook_removes == (pass ? 7 : 3));
+        CHECK(!g_swf_construct && !g_swf_destroy && !g_swf_precache_sound && !g_swf_precache_material && !g_swf_play_sound && !g_swf_local_string);
+        CHECK((g_dictionary_index != NULL) == (pass == 2));
+        g_dictionary_index = NULL; /* Fake removal recovery; no executable patch exists. */
+    }
+    movie_hook_prepare_fault = movie_hook_commit_fault = movie_hook_remove_fault = 0;
+    g_movie_ready = g_movie_attempted = 0; movie_hook_prepares = movie_hook_commits = movie_hook_removes = 0;
+    results[4].status = SIG_NOT_FOUND; rg_movie_install(results, 7); CHECK(!movie_hook_prepares && !g_movie_ready);
+    results[4].status = SIG_OK; rg_movie_install(results, 7); CHECK(g_movie_ready && movie_hook_commits == 7 && !movie_hook_removes);
+    g_movie_ready = 0; movie_install_fake = 0;
+    g_swf_construct = NULL; g_swf_destroy = NULL; g_swf_precache_sound = g_swf_precache_material = g_swf_play_sound = g_swf_local_string = NULL;
+    g_dictionary_index = NULL; g_movie_dictionary = NULL;
 }
 static unsigned char request_materials[3][0x168], request_managers[3][16];
 static const char *request_expected;
@@ -965,6 +1227,562 @@ static void test_constructor_requests(void)
     g_parse = NULL; g_read = NULL; g_load = NULL; g_lookup = NULL; g_materialize = NULL;
     sh_resource_graph_test_reset();
 }
+/* Independent paired-layout fixture. Its destructor walks capacity, even at
+ * logical zero, and never destroys a referenced declaration. The allocation
+ * ledger catches stranded nested storage, borrowed frees and double cleanup. */
+typedef struct editor_case {
+    const char *family; size_t size;
+    unsigned strings,lists; size_t string[9],list[8];
+} editor_case;
+static const editor_case editor_cases[] = {
+    {"snapeditorentitydef",0x4a0,9,8,{0xa8,0xd8,0x108,0x138,0x168,0x198,0x1e0,0x240,0x2c0},
+        {0x2a8,0x3b0,0x410,0x428,0x440,0x458,0x470,0x488}},
+    {"snappropertyinspector_bitflag",0xb0,1,1,{0x68},{0x98}},
+    {"snappropertyinspector_blockingvolumerendermodel",0xf8,2,1,{0x88,0xb8},{0x68}},
+    {"snappropertyinspector_whitelistencounterdecl",0x80,0,1,{0},{0x68}},
+    {"snappropertyinspector_whitelistencounterdecllist",0x80,0,1,{0},{0x68}}
+};
+static const editor_case *editor_kind;
+static struct { void *p; int live,borrowed; } editor_blocks[1024];
+static unsigned editor_blocks_count, editor_ctor_calls, editor_dtor_calls;
+static int editor_admission = 1, editor_no_info, editor_ctor_fault, editor_dtor_fault;
+static void *editor_vtable[3], *editor_info_vtable[6];
+static void **editor_info_object = editor_info_vtable;
+static void *editor_alloc(size_t bytes, int borrowed)
+{
+    void *p = calloc(1,bytes); CHECK(p && editor_blocks_count < 1024);
+    if (p && editor_blocks_count < 1024) {
+        editor_blocks[editor_blocks_count].p=p; editor_blocks[editor_blocks_count].live=1;
+        editor_blocks[editor_blocks_count++].borrowed=borrowed;
+    }
+    return p;
+}
+static void editor_free(void *p)
+{
+    if (!p) return;
+    for (unsigned i=0;i<editor_blocks_count;i++) if (editor_blocks[i].p==p && editor_blocks[i].live) {
+        CHECK(!editor_blocks[i].borrowed); editor_blocks[i].live=0; free(p); return;
+    }
+    CHECK(0); /* Neither an unknown pointer nor an already freed one is owned. */
+}
+static unsigned editor_live(void)
+{ unsigned n=0; for (unsigned i=0;i<editor_blocks_count;i++) n+=editor_blocks[i].live; return n; }
+static void editor_string_init(unsigned char *s)
+{
+    /* Paired native idStr constructors: baseBuffer@28, capacity20. */
+    uint32_t flags=0x80000014u;
+    memset(s,0,0x30); put_pointer(s,0x10,s+0x1c); memcpy(s+0x18,&flags,4);
+}
+static void editor_string_fill(unsigned char *s, int borrowed)
+{
+    char *p=editor_alloc(48,borrowed); if (p) strcpy(p,"owned-or-borrowed-path");
+    put_pointer(s,0x10,p); uint32_t flags=borrowed?0:0x40000030u;
+    memcpy(s+0x18,&flags,4); int length=22; memcpy(s+8,&length,4);
+}
+static void editor_string_clear(unsigned char *s)
+{
+    void *p; uint32_t flags; memcpy(&p,s+0x10,8); memcpy(&flags,s+0x18,4);
+    if (p && (flags&0x40000000u)) editor_free(p);
+    memset(s+0x10,0,8); memset(s+8,0,4); flags&=0xc0000000u; memcpy(s+0x18,&flags,4);
+}
+static void editor_list_fill(unsigned char *list,size_t stride,int borrowed)
+{
+    put_pointer(list,0,editor_alloc(2*stride,borrowed)); int zero=0,two=2;
+    memcpy(list+8,&zero,4); memcpy(list+12,&two,4); list[0x13]=borrowed?1:0;
+}
+static void editor_fill(unsigned char *live, int borrowed)
+{
+    for (unsigned i=0;i<editor_kind->strings;i++) {
+        unsigned char *s=live+editor_kind->string[i];
+        if (i==1) { int length=6; strcpy((char *)s+0x1c,"inline");
+            put_pointer(s,0x10,s+0x1c); memcpy(s+8,&length,4); }
+        else editor_string_fill(s,borrowed);
+    }
+    for (unsigned i=0;i<editor_kind->lists;i++) {
+        size_t at=editor_kind->list[i],stride=8;
+        if (at==0x3b0) stride=0x20;
+        if (!strcmp(editor_kind->family,"snappropertyinspector_bitflag")) stride=0x38;
+        if (!strcmp(editor_kind->family,"snappropertyinspector_blockingvolumerendermodel")) stride=0x40;
+        unsigned char *list=live+at; editor_list_fill(list,stride,borrowed);
+        unsigned char *rows=*(unsigned char **)list;
+        if (at==0x3b0) for (unsigned j=0;j<2;j++) {
+            unsigned char *nested=rows+j*0x20+8; editor_list_fill(nested,0x40,borrowed);
+            unsigned char *controls=*(unsigned char **)nested;
+            for (unsigned k=0;k<2;k++) {
+                editor_string_init(controls+k*0x40); editor_string_fill(controls+k*0x40,borrowed);
+                put_pointer(controls+k*0x40,0x38,(void *)0x12345678);
+            }
+        }
+        if (stride==0x38) for (unsigned j=0;j<2;j++) {
+            editor_string_init(rows+j*stride); editor_string_fill(rows+j*stride,borrowed);
+        }
+    }
+}
+static void editor_list_clear(unsigned char *list,size_t at)
+{
+    unsigned char *rows=*(unsigned char **)list; int capacity; memcpy(&capacity,list+12,4);
+    if (list[0x13]==0 || list[0x13]==3 || list[0x13]==4) {
+        if (rows && at==0x3b0) for (int j=0;j<capacity;j++) {
+            unsigned char *nested=rows+j*0x20+8,*controls=*(unsigned char **)nested; int slots;
+            memcpy(&slots,nested+12,4);
+            if (nested[0x13]==0 || nested[0x13]==3 || nested[0x13]==4) {
+                for (int k=0;controls && k<slots;k++) editor_string_clear(controls+k*0x40);
+                editor_free(controls);
+            }
+        }
+        if (rows && !strcmp(editor_kind->family,"snappropertyinspector_bitflag"))
+            for (int j=0;j<capacity;j++) editor_string_clear(rows+j*0x38);
+        editor_free(rows); memset(list,0,0x10);
+    }
+}
+static void editor_destroy(void *object,unsigned flags)
+{
+    unsigned char *live=object; CHECK(flags==0); editor_dtor_calls++;
+    for (unsigned i=0;i<editor_kind->lists;i++) {
+        editor_list_clear(live+editor_kind->list[i],editor_kind->list[i]);
+        if (editor_dtor_fault) { editor_dtor_fault=0; RaiseException(0xe0410010,0,0,NULL); }
+    }
+    for (unsigned i=0;i<editor_kind->strings;i++) editor_string_clear(live+editor_kind->string[i]);
+}
+static void editor_construct(void *info,void *object)
+{
+    unsigned char *live=object; (void)info; editor_ctor_calls++;
+    memset(live,0,editor_kind->size); put_pointer(live,0,editor_vtable);
+    for (unsigned i=0;i<editor_kind->strings;i++) editor_string_init(live+editor_kind->string[i]);
+    for (unsigned i=0;i<editor_kind->lists;i++) { uint32_t ctrl=0x50000; memcpy(live+editor_kind->list[i]+16,&ctrl,4); }
+    if (!strcmp(editor_kind->family,"snapeditorentitydef")) {
+        uint64_t enum_default=3,external=0; put_pointer(live,0x68,(void *)(uintptr_t)enum_default);
+        put_pointer(live,0x228,(void *)(uintptr_t)external); live[0x300]=1; live[0x388]=1;
+        uint32_t tag=100; memcpy(live+0x9c,&tag,4);
+    }
+    if (editor_ctor_fault) { editor_ctor_fault=0; RaiseException(0xe0410011,0,0,NULL); }
+}
+static void *editor_info(void *object)
+{ (void)object; return editor_no_info?NULL:&editor_info_object; }
+static int editor_admitted(void *context) { return context==&editor_admission && editor_admission; }
+static void editor_attach(unsigned char *live,unsigned char owner[16])
+{
+    put_pointer(owner,8,editor_kind->family); put_pointer(live,8,"collection-fixture");
+    put_pointer(live,0x10,owner); live[0x20]=4; live[0x34]=0xa5;
+    put_pointer(live,0x38,(void *)0x334455); put_pointer(live,0x58,(void *)0x556677); live[0x60]=1;
+}
+static void editor_quarantine_dispose(void)
+{
+    /* Only the synthetic fixture disposes ledger blocks and wrapper memory
+     * directly. It never retries the interrupted native destructor. */
+    while (g_editor_quarantine) {
+        sh_resource_editor_state *s=g_editor_quarantine; g_editor_quarantine=s->quarantine_next;
+        while (s->values) { rg_editor_value *v=s->values; s->values=v->next; free(v->scratch); free(v); }
+        free(s);
+    }
+    g_editor_damaged=0;
+}
+static void test_editor_storage_scope(void)
+{
+    char error[256]; int committed = 0, caught = 0;
+    memset(definition, 0, sizeof(definition)); memset(manager, 0, sizeof(manager));
+    put_pointer(manager, 8, "entitydef"); put_pointer(definition, 8, "native-default-probe");
+    put_pointer(definition, 0x10, manager);
+    g_ready = 0; g_parse = fake_parse; g_read = fake_read;
+    expected_resource = definition; parse_result = read_result = 1;
+    read_delegates = read_noop = throw_error = 0;
+    sh_resource_editor_state *state = sh_resource_graph_native_editor_state_begin(
+        editor_admitted, &editor_admission, error, sizeof(error));
+    CHECK(state);
+    /* Native default/probe failures outside the five owning families retain
+     * their native result. They must not suppress subsequent editor parsing. */
+    CHECK(rg_parse_hook(definition, 7, (void *)19) == 1);
+    CHECK(sh_resource_graph_native_editor_state_ok(state) && !state->values);
+    CHECK(rg_read_hook(definition, (void *)19) == 1);
+    CHECK(sh_resource_graph_native_editor_state_ok(state) && !state->values);
+    read_delegates = 1;
+    CHECK(rg_read_hook(definition, (void *)19) == 1);
+    CHECK(sh_resource_graph_native_editor_state_ok(state) && !state->values);
+    throw_error = 1;
+    __try { rg_parse_hook(definition, 7, (void *)19); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { caught = 1; }
+    CHECK(caught && sh_resource_graph_native_editor_state_ok(state) && !state->values);
+    throw_error = read_delegates = 0; parse_result = read_result = 0;
+    CHECK(sh_resource_graph_native_editor_state_end(&state, 1, &committed, error, sizeof(error)) == 1);
+    CHECK(!state && committed);
+}
+static void test_editor_storage(void)
+{
+    char error[256]; int committed=0;
+    editor_vtable[0]=editor_destroy; editor_vtable[2]=editor_info; editor_info_vtable[5]=editor_construct;
+    for (unsigned family=0;family<5;family++) {
+        editor_kind=editor_cases+family;
+        for (int borrowed=0;borrowed<2;borrowed++) for (int accept=0;accept<2;accept++) {
+            unsigned char live[0x4a0],original_bytes[0x4a0],owner[16]={0};
+            editor_construct(NULL,live); editor_attach(live,owner); editor_fill(live,borrowed);
+            if (!family) { live[0x300]=0; live[0x68]=7; put_pointer(live,0x228,(void *)0xabc);
+                live[0x3d1]=0xfd; live[0x3d2]=0x9b; }
+            if (family==2) { live[0x80]=1; put_pointer(live,0xe8,(void *)0xabc); }
+            memcpy(original_bytes,live,editor_kind->size);
+            unsigned old_blocks=editor_live();
+            sh_resource_editor_state *state=sh_resource_graph_native_editor_state_begin(editor_admitted,&editor_admission,error,sizeof(error));
+            CHECK(state && rg_editor_read_begin(live));
+            CHECK(!*(void **)(live+editor_kind->list[0]) && !*(void **)(live+0x58) && !live[0x60]);
+            CHECK(live[0x20]==4 && live[0x34]==original_bytes[0x34] &&
+                *(void **)(live+0x38)==(void *)0x334455);
+            if (!family) CHECK(live[0x300]==1 && live[0x68]==3 && !*(void **)(live+0x228) &&
+                live[0x3d1]==0xc0 && live[0x3d2]==0x9b);
+            if (family==2) CHECK(!live[0x80] && !*(void **)(live+0xe8));
+            editor_fill(live,0); unsigned after_first=editor_live();
+            /* Nested Read->Parse must not reset the same logical read. */
+            void *first=*(void **)(live+editor_kind->list[0]);
+            CHECK(rg_editor_read_begin(live) && *(void **)(live+editor_kind->list[0])==first);
+            rg_editor_read_end(live); rg_editor_read_end(live);
+            /* A second read gets ctor defaults and retains intermediate owners. */
+            CHECK(rg_editor_read_begin(live) && !*(void **)(live+editor_kind->list[0]));
+            CHECK(editor_live()==after_first); editor_fill(live,0); rg_editor_read_end(live);
+            /* A second reconstruction also resets the candidate, not the saved original. */
+            CHECK(rg_editor_prepare(live,1) && !*(void **)(live+editor_kind->list[0])); editor_fill(live,0);
+            if (!family) { live[0x300]=0; live[0x68]=9; put_pointer(live,0x228,(void *)0xdef); }
+            editor_admission=0;
+            CHECK(sh_resource_graph_native_editor_state_end(&state,accept,&committed,error,sizeof(error))==0 && state && !committed);
+            editor_admission=1;
+            CHECK(sh_resource_graph_native_editor_state_end(&state,accept,&committed,error,sizeof(error))==1 && !state && committed==accept);
+            if (!accept) CHECK(!memcmp(live,original_bytes,editor_kind->size) && editor_live()==old_blocks);
+            else CHECK(editor_live()==old_blocks+(borrowed?old_blocks:0));
+            editor_destroy(live,0);
+            /* Borrowed callers own every nested slot and remain untouched. */
+            for (unsigned i=0;i<editor_blocks_count;i++) if (editor_blocks[i].live) {
+                CHECK(editor_blocks[i].borrowed); free(editor_blocks[i].p); editor_blocks[i].live=0;
+            }
+            CHECK(!editor_live()); editor_blocks_count=0;
+        }
+    }
+    editor_kind=editor_cases;
+    for (unsigned fail=1;fail<=3;fail++) {
+        unsigned char live[0x4a0],saved[0x4a0],owner[16]={0}; editor_construct(NULL,live); editor_attach(live,owner);
+        memcpy(saved,live,sizeof(live));
+        sh_resource_editor_state *state=sh_resource_graph_native_editor_state_begin(editor_admitted,&editor_admission,error,sizeof(error));
+        if (fail<3) g_editor_allocation_fault=fail; else editor_no_info=1;
+        CHECK(!rg_editor_prepare(live,0)); g_editor_allocation_fault=0; editor_no_info=0;
+        CHECK(!memcmp(live,saved,sizeof(live)));
+        CHECK(sh_resource_graph_native_editor_state_end(&state,1,&committed,error,sizeof(error))==1 && !state && !committed);
+    }
+    for (int fault=0;fault<2;fault++) {
+        unsigned char live[0x4a0],saved[0x4a0],owner[16]={0}; editor_construct(NULL,live); editor_attach(live,owner);
+        editor_fill(live,0); memcpy(saved,live,sizeof(live));
+        sh_resource_editor_state *state=sh_resource_graph_native_editor_state_begin(editor_admitted,&editor_admission,error,sizeof(error));
+        if (!fault) { editor_ctor_fault=1; CHECK(!rg_editor_prepare(live,0)); }
+        else { CHECK(rg_editor_prepare(live,0)); editor_fill(live,0); editor_dtor_fault=1; }
+        unsigned dtors=editor_dtor_calls;
+        CHECK(sh_resource_graph_native_editor_state_end(&state,fault,&committed,error,sizeof(error))==-1 && !state && committed==fault);
+        CHECK(editor_dtor_calls==dtors+(fault?1:0));
+        if (!fault) CHECK(!memcmp(live,saved,sizeof(live)));
+        CHECK(!sh_resource_graph_native_editor_state_begin(editor_admitted,&editor_admission,error,sizeof(error)));
+        CHECK(sh_resource_graph_native_editor_state_end(&state,0,&committed,error,sizeof(error))==1);
+        CHECK(editor_dtor_calls==dtors+(fault?1:0));
+        editor_quarantine_dispose();
+        for (unsigned i=0;i<editor_blocks_count;i++) if (editor_blocks[i].live) { free(editor_blocks[i].p); editor_blocks[i].live=0; }
+        editor_blocks_count=0;
+    }
+    CHECK(!g_editor_state && !editor_live());
+}
+
+static unsigned editor_header_reads;
+static unsigned editor_header_result;
+static int editor_header_noop;
+static unsigned int editor_header_read(void *resource,void *error)
+{
+    unsigned char *live=resource; (void)error; editor_header_reads++;
+    if (editor_header_noop || live[0x48]) return 0;
+    /* Native successful Read does not clear a stale DEFAULTED bit. */
+    CHECK((live[0x2c]&0x0c)==0);
+    editor_fill(live,0);
+    if (editor_header_result) live[0x2c]|=4;
+    return editor_header_result;
+}
+static void editor_header_load(void *resource)
+{
+    unsigned char *live=resource;
+    put_pointer(live,0x18,NULL); live[0x24]|=1;
+    if (!rg_read_hook(resource,NULL)) live[0x2c]&=0xfcu;
+    else live[0x2c]|=4;
+}
+static void test_editor_reconstruct_header(void)
+{
+    char error[256]; int committed=0;
+    rg_read_fn previous_read=g_read; rg_load_fn previous_load=g_load;
+    LONG previous_ready=g_ready;
+    g_ready=0; g_read=editor_header_read; g_load=editor_header_load;
+    editor_header_reads=editor_header_result=0; editor_header_noop=0;
+    editor_vtable[0]=editor_destroy; editor_vtable[2]=editor_info;
+    editor_info_vtable[5]=editor_construct;
+    /* Every admitted family shares the same idResource constructor header. */
+    for (unsigned family=0;family<5;family++) for (unsigned initial=0;initial<3;initial++)
+        for (int mode=0;mode<3;mode++) {
+        unsigned char live[0x4a0],saved[0x4a0],owner[16]={0};
+        unsigned char old_low=initial==0?0:initial==1?4:15;
+        editor_kind=editor_cases+family;
+        editor_construct(NULL,live); editor_attach(live,owner); editor_fill(live,0);
+        live[0x24]=0x81; live[0x28]=4; live[0x2c]=0xa0|old_low;
+        memcpy(saved,live,editor_kind->size);
+        sh_resource_editor_state *state=sh_resource_graph_native_editor_state_begin(
+            editor_admitted,&editor_admission,error,sizeof(error));
+        CHECK(state);
+        unsigned reads=editor_header_reads,dtors=editor_dtor_calls;
+        for (unsigned repeat=0;repeat<2+(mode==2);repeat++) {
+            if (repeat) live[0x2c]|=15; /* Candidate can itself be defaulted. */
+            rg_reconstruct_hook(live);
+            CHECK(sh_resource_graph_native_editor_state_ok(state));
+            CHECK(live[0x2c]==0xa0);
+            CHECK(!memcmp(live,saved,0x2c) && !memcmp(live+0x2d,saved+0x2d,0x2b));
+            live[0x2c]|=1; /* Exercise bit0 IN_PROGRESS at Read entry. */
+            editor_header_result=mode==2 && repeat==2;
+            rg_load_hook(live);
+            CHECK((live[0x2c]&0x0f)==(editor_header_result?4:0));
+            CHECK(sh_resource_graph_native_editor_state_ok(state)==!editor_header_result);
+        }
+        CHECK(editor_header_reads==reads+2+(mode==2));
+        unsigned snapshots=0;
+        for (rg_editor_value *v=state?state->values:NULL;v;v=v->next) snapshots++;
+        CHECK(snapshots==2+(mode==2));
+        /* Unowned high bits may change while this transaction is active. */
+        live[0x2c]=(live[0x2c]&15)|0xd0;
+        int accept=mode!=0,expect_commit=mode==1;
+        CHECK(sh_resource_graph_native_editor_state_end(&state,accept,&committed,error,sizeof(error))==1);
+        CHECK(!state && committed==expect_commit && editor_dtor_calls==dtors+snapshots);
+        CHECK(live[0x2c]==(0xd0|(expect_commit?0:old_low)));
+        if (!expect_commit) {
+            saved[0x2c]=0xd0|old_low;
+            CHECK(!memcmp(live,saved,editor_kind->size));
+        } else CHECK(!memcmp(live,saved,0x2c) && !memcmp(live+0x2d,saved+0x2d,0x2b));
+        editor_destroy(live,0); CHECK(!editor_live()); editor_blocks_count=0;
+        editor_header_result=0;
+    }
+    /* Unchanged outside scope, implicit/no-source and unrelated families do
+     * not acquire header-reset or owning-payload rollback obligations. */
+    editor_kind=editor_cases;
+    for (unsigned control=0;control<3;control++) {
+        unsigned char live[0x4a0],saved[0x4a0],owner[16]={0};
+        editor_construct(NULL,live); editor_attach(live,owner); live[0x2c]=0xaf;
+        if (control==1) live[0x48]=1;
+        if (control==2) put_pointer(owner,8,"entitydef");
+        memcpy(saved,live,editor_kind->size);
+        sh_resource_editor_state *state=control?sh_resource_graph_native_editor_state_begin(
+            editor_admitted,&editor_admission,error,sizeof(error)):NULL;
+        editor_header_noop=1;
+        CHECK(!rg_read_hook(live,NULL) && !memcmp(live,saved,editor_kind->size));
+        if (state) {
+            CHECK(sh_resource_graph_native_editor_state_ok(state) && !state->values);
+            CHECK(sh_resource_graph_native_editor_state_end(&state,1,&committed,error,sizeof(error))==1 && committed);
+        }
+        editor_header_noop=0; editor_destroy(live,0); CHECK(!editor_live());
+    }
+    /* Preparation cannot clear the live flags before allocation/constructor
+     * success. Partial scratch construction remains quarantined, not retried. */
+    for (unsigned fault=0;fault<4;fault++) {
+        unsigned char live[0x4a0],saved[0x4a0],owner[16]={0};
+        editor_construct(NULL,live); editor_attach(live,owner); live[0x2c]=0xaf;
+        memcpy(saved,live,editor_kind->size);
+        sh_resource_editor_state *state=sh_resource_graph_native_editor_state_begin(
+            editor_admitted,&editor_admission,error,sizeof(error));
+        CHECK(state);
+        if (fault<2) g_editor_allocation_fault=fault+1;
+        else if (fault==2) editor_no_info=1;
+        else editor_ctor_fault=1;
+        rg_reconstruct_hook(live);
+        g_editor_allocation_fault=0; editor_no_info=0;
+        CHECK(!sh_resource_graph_native_editor_state_ok(state) && !memcmp(live,saved,editor_kind->size));
+        int ended=sh_resource_graph_native_editor_state_end(&state,1,&committed,error,sizeof(error));
+        CHECK(ended==(fault==3?-1:1) && !state && !committed);
+        if (fault==3) editor_quarantine_dispose();
+        CHECK(!memcmp(live,saved,editor_kind->size));
+        editor_destroy(live,0); CHECK(!editor_live());
+    }
+    CHECK(!g_editor_state && !g_editor_damaged && !editor_live());
+    g_read=previous_read; g_load=previous_load; g_ready=previous_ready;
+}
+
+static unsigned char editor_direct_incoming;
+static unsigned editor_direct_calls;
+static unsigned int editor_direct_native(void *resource)
+{
+    unsigned char *live=resource;
+    /* Direct native readers must receive their caller's state, including
+     * bit0 IN_PROGRESS; owning-payload preparation is not reconstruction. */
+    CHECK(live[0x2c]==editor_direct_incoming);
+    editor_direct_calls++; editor_fill(live,0);
+    live[0x2c]&=0xf0; /* Synthetic native completion consumes its low bits. */
+    return 0;
+}
+static unsigned int editor_direct_read(void *resource,void *error)
+{ CHECK(!error); return editor_direct_native(resource); }
+static unsigned int editor_direct_parse(void *resource,unsigned char source,void *error)
+{ CHECK(!source && !error); return editor_direct_native(resource); }
+static void test_editor_header_reset_scope(void)
+{
+    char error[256]; int committed=0;
+    rg_read_fn previous_read=g_read; rg_parse_fn previous_parse=g_parse;
+    LONG previous_ready=g_ready;
+    g_ready=0; g_read=editor_direct_read; g_parse=editor_direct_parse;
+    editor_vtable[0]=editor_destroy; editor_vtable[2]=editor_info;
+    editor_info_vtable[5]=editor_construct;
+    for (unsigned family=0;family<5;family++) for (unsigned parse=0;parse<2;parse++)
+        for (unsigned mixed=0;mixed<2;mixed++) for (int accept=0;accept<2;accept++) {
+        unsigned char live[0x4a0],saved[0x4a0],owner[16]={0};
+        editor_kind=editor_cases+family;
+        editor_construct(NULL,live); editor_attach(live,owner); editor_fill(live,0);
+        live[0x2c]=0xa1; memcpy(saved,live,editor_kind->size);
+        sh_resource_editor_state *state=sh_resource_graph_native_editor_state_begin(
+            editor_admitted,&editor_admission,error,sizeof(error));
+        CHECK(state); unsigned calls_before=editor_direct_calls;
+        rg_editor_value *original=NULL;
+        for (unsigned repeat=0;repeat<3;repeat++) {
+            editor_direct_incoming=0xa0|(1u<<repeat); live[0x2c]=editor_direct_incoming;
+            if (parse) CHECK(!rg_parse_hook(live,0,NULL));
+            else CHECK(!rg_read_hook(live,NULL));
+            CHECK(live[0x2c]==0xa0 && sh_resource_graph_native_editor_state_ok(state));
+            if (!repeat) original=rg_editor_find(live);
+            CHECK(original && rg_editor_find(live)==original);
+        }
+        if (mixed) {
+            /* The original payload was captured at direct-read entry, but
+             * its untouched transient flags are not the later reset snapshot. */
+            live[0x2c]=0xb6; rg_reconstruct_hook(live);
+            CHECK(live[0x2c]==0xb0 && rg_editor_find(live)==original);
+            live[0x2c]=0xe9; rg_reconstruct_hook(live);
+            CHECK(live[0x2c]==0xe0 && rg_editor_find(live)==original);
+            editor_direct_incoming=0xe1; live[0x2c]=editor_direct_incoming;
+            if (parse) CHECK(!rg_parse_hook(live,0,NULL));
+            else CHECK(!rg_read_hook(live,NULL));
+            CHECK(live[0x2c]==0xe0);
+        }
+        CHECK(editor_direct_calls==calls_before+3+mixed);
+        /* Native completion and an independent high-state change remain
+         * authoritative when this adapter never reset the low state. */
+        live[0x2c]=0xd0;
+        unsigned snapshots=0,dtors=editor_dtor_calls;
+        for (rg_editor_value *v=state?state->values:NULL;v;v=v->next) snapshots++;
+        CHECK(snapshots==3+2*mixed);
+        CHECK(sh_resource_graph_native_editor_state_end(&state,accept,&committed,error,sizeof(error))==1);
+        CHECK(!state && committed==accept && editor_dtor_calls==dtors+snapshots);
+        CHECK(live[0x2c]==(0xd0|(!accept && mixed?6:0)));
+        if (!accept) {
+            saved[0x2c]=0xd0|(mixed?6:0);
+            CHECK(!memcmp(live,saved,editor_kind->size));
+        }
+        editor_destroy(live,0); CHECK(!editor_live()); editor_blocks_count=0;
+    }
+    g_read=previous_read; g_parse=previous_parse; g_ready=previous_ready;
+    CHECK(!g_editor_state && !editor_live());
+}
+
+/* A rejected transaction whose header this adapter never reset leaves the
+ * native caller's completed low state alone, including nonzero bits. */
+static void test_editor_header_untouched_rejection(void)
+{
+    char error[256]; int committed=0;
+    rg_read_fn previous_read=g_read; rg_parse_fn previous_parse=g_parse;
+    LONG previous_ready=g_ready;
+    g_ready=0; g_read=editor_direct_read; g_parse=editor_direct_parse;
+    editor_vtable[0]=editor_destroy; editor_vtable[2]=editor_info;
+    editor_info_vtable[5]=editor_construct;
+    for (unsigned family=0;family<5;family++) for (unsigned parse=0;parse<2;parse++) {
+        unsigned char live[0x4a0],saved[0x4a0],owner[16]={0};
+        editor_kind=editor_cases+family;
+        editor_construct(NULL,live); editor_attach(live,owner); editor_fill(live,0);
+        live[0x2c]=0xa1; memcpy(saved,live,editor_kind->size);
+        sh_resource_editor_state *state=sh_resource_graph_native_editor_state_begin(
+            editor_admitted,&editor_admission,error,sizeof(error));
+        CHECK(state);
+        editor_direct_incoming=0xa1;
+        if (parse) CHECK(!rg_parse_hook(live,0,NULL));
+        else CHECK(!rg_read_hook(live,NULL));
+        live[0x2c]=0xd4; /* The caller completed with a low bit of its own. */
+        CHECK(sh_resource_graph_native_editor_state_end(&state,0,&committed,error,sizeof(error))==1);
+        CHECK(!state && !committed && live[0x2c]==0xd4);
+        saved[0x2c]=0xd4; CHECK(!memcmp(live,saved,editor_kind->size));
+        editor_destroy(live,0); CHECK(!editor_live()); editor_blocks_count=0;
+    }
+    g_read=previous_read; g_parse=previous_parse; g_ready=previous_ready;
+    CHECK(!g_editor_state && !editor_live());
+}
+
+static void editor_set_inline(unsigned char *s,const char *text)
+{
+    int length=(int)strlen(text); CHECK(length<20);
+    editor_string_init(s); memcpy(s+0x1c,text,(size_t)length+1); memcpy(s+8,&length,4);
+}
+static void editor_check_inline(unsigned char *s,const char *text)
+{
+    void *data; int length; uint32_t flags;
+    memcpy(&data,s+0x10,8); memcpy(&length,s+8,4); memcpy(&flags,s+0x18,4);
+    CHECK(data==s+0x1c && length==(int)strlen(text) && flags==0x80000014u);
+    CHECK(!memcmp(s+0x1c,text,strlen(text)+1));
+}
+static void test_editor_native_inline_storage(void)
+{
+    char error[256]; int committed;
+    /* The expected offset is the paired constructor's byte28, independently
+     * of the adapter. Exercise every transferred string, including hide path. */
+    for (unsigned family=0;family<3;family++) for (int accept=0;accept<2;accept++) {
+        unsigned char live[0x4a0],saved[0x4a0],owner[16]={0};
+        editor_kind=editor_cases+family;
+        editor_construct(NULL,live); editor_attach(live,owner);
+        for (unsigned i=0;i<editor_kind->strings;i++)
+            editor_set_inline(live+editor_kind->string[i],"original.path");
+        memcpy(saved,live,editor_kind->size);
+        sh_resource_editor_state *state=sh_resource_graph_native_editor_state_begin(
+            editor_admitted,&editor_admission,error,sizeof(error));
+        CHECK(state && rg_editor_read_begin(live));
+        rg_editor_value *original=rg_editor_find(live); CHECK(original);
+        for (unsigned i=0;i<editor_kind->strings;i++) {
+            size_t at=editor_kind->string[i];
+            editor_check_inline(live+at,"");
+            if (original) editor_check_inline((unsigned char *)original->scratch+at,"original.path");
+            editor_set_inline(live+at,"first.path");
+        }
+        rg_editor_read_end(live);
+        CHECK(rg_editor_read_begin(live));
+        /* The second parse resets its live strings and retains both prior
+         * payloads at their own inline addresses until the decision. */
+        rg_editor_value *intermediate=state?state->values:NULL;
+        CHECK(intermediate && intermediate!=original);
+        for (unsigned i=0;i<editor_kind->strings;i++) {
+            size_t at=editor_kind->string[i];
+            editor_check_inline(live+at,"");
+            if (original) editor_check_inline((unsigned char *)original->scratch+at,"original.path");
+            if (intermediate) editor_check_inline((unsigned char *)intermediate->scratch+at,"first.path");
+            editor_set_inline(live+at,"candidate.path");
+        }
+        rg_editor_read_end(live);
+        CHECK(sh_resource_graph_native_editor_state_end(&state,accept,&committed,error,sizeof(error))==1 &&
+            !state && committed==accept);
+        for (unsigned i=0;i<editor_kind->strings;i++)
+            editor_check_inline(live+editor_kind->string[i],accept?"candidate.path":"original.path");
+        if (!accept) CHECK(!memcmp(live,saved,editor_kind->size));
+        editor_destroy(live,0); CHECK(!editor_live());
+    }
+    /* Native short/empty assignment may retain an external owned capacity.
+     * Length alone must never reclassify that allocation as inline/borrowed. */
+    editor_kind=editor_cases;
+    for (int accept=0;accept<2;accept++) {
+        unsigned char live[0x4a0],saved[0x4a0],owner[16]={0};
+        editor_construct(NULL,live); editor_attach(live,owner);
+        unsigned char *hide=live+0xd8; editor_string_fill(hide,0);
+        char *old=*(char **)(hide+0x10); old[0]=0; memset(hide+8,0,4);
+        memcpy(saved,live,sizeof(live));
+        sh_resource_editor_state *state=sh_resource_graph_native_editor_state_begin(
+            editor_admitted,&editor_admission,error,sizeof(error));
+        CHECK(state && rg_editor_read_begin(live)); editor_check_inline(hide,"");
+        editor_string_fill(hide,0); char *candidate=*(char **)(hide+0x10);
+        strcpy(candidate,"short.path"); int length=10; memcpy(hide+8,&length,4);
+        candidate[0]=0; memset(hide+8,0,4); rg_editor_read_end(live);
+        CHECK(sh_resource_graph_native_editor_state_end(&state,accept,&committed,error,sizeof(error))==1 &&
+            !state && committed==accept);
+        CHECK(*(char **)(hide+0x10)==(accept?candidate:old) && !*(int *)(hide+8) &&
+            *(uint32_t *)(hide+0x18)==0x40000030u && !(*(char **)(hide+0x10))[0]);
+        CHECK(editor_live()==1);
+        if (!accept) CHECK(!memcmp(live,saved,sizeof(live)));
+        editor_destroy(live,0); CHECK(!editor_live()); editor_blocks_count=0;
+    }
+}
+
 int main(void)
 {
     sh_resource_graph_frame outer, pause;
@@ -1092,7 +1910,15 @@ int main(void)
     test_isolated_program_cook();
     test_font_construction();
     test_movie_construction();
+    test_movie_late_callbacks();
+    test_movie_hook_rollback();
     test_constructor_requests();
+    test_editor_storage_scope();
+    test_editor_storage();
+    test_editor_reconstruct_header();
+    test_editor_header_reset_scope();
+    test_editor_header_untouched_rejection();
+    test_editor_native_inline_storage();
     if (failures) return 1;
     puts("canonical entity-state, direct source and production read capture checks passed"); return 0;
 }

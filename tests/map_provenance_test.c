@@ -163,8 +163,35 @@ static void uses(void)
     sh_package_provenance_free(&catalog); sh_package_provenance_free(&selected);
     sh_package_provenance_free(&read); sh_package_provenance_free(&empty);
 }
+static void rows(void)
+{
+    /* The exact editor row is optional per-use data inside the same carrier;
+     * the old-map bytes stay those of a map without rows. */
+    static const char row[] = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+    sh_package_provenance value = {0}, read = {0};
+    unsigned char trees[1][32] = {{1}}; size_t key; const char *found = NULL;
+    char error[256], *plain, *encoded, *resaved; size_t plain_length, length, n; int present;
+    key = sh_package_provenance_context_add(&value, SH_PACKAGE_CONTEXT_ISOLATED, trees, 1, "");
+    CHECK(sh_package_provenance_bind(&value, "entitydef", "actor", "smp/actor", &key, 1));
+    sh_package_provenance_site a = {SH_PACKAGE_USE_OBJECT, "entity/3", "entityDef"};
+    CHECK(sh_package_provenance_use_set(&value, &a, 0, &key, 1));
+    plain = sh_map_provenance_write(MAP, sizeof(MAP) - 1, &value, &plain_length, error, sizeof(error));
+    CHECK(plain && sh_map_provenance_read(plain, plain_length, &read, &present, error, sizeof(error)) && present);
+    CHECK(sh_package_provenance_row_get(&read, "entity/3", &found) == 0);
+    CHECK(sh_package_provenance_row_set(&value, "entity/3", row) == 1);
+    encoded = sh_map_provenance_write(MAP, sizeof(MAP) - 1, &value, &length, error, sizeof(error));
+    CHECK(encoded && sh_map_provenance_read(encoded, length, &read, &present, error, sizeof(error)) && present);
+    CHECK(sh_package_provenance_row_get(&read, "entity/3", &found) == 1 && !strcmp(found, row));
+    resaved = sh_map_provenance_write(encoded, length, &read, &n, error, sizeof(error));
+    CHECK(resaved && n == length && !memcmp(resaved, encoded, n)); HeapFree(GetProcessHeap(), 0, resaved);
+    CHECK(sh_package_provenance_row_set(&read, "entity/3", NULL) == 1);
+    resaved = sh_map_provenance_write(encoded, length, &read, &n, error, sizeof(error));
+    CHECK(resaved && n == plain_length && !memcmp(resaved, plain, n)); HeapFree(GetProcessHeap(), 0, resaved);
+    HeapFree(GetProcessHeap(), 0, plain); HeapFree(GetProcessHeap(), 0, encoded);
+    sh_package_provenance_free(&value); sh_package_provenance_free(&read);
+}
 
 int main(void)
 {
-    ordinary(); chunks(); uses(); printf("map_provenance_test: %s\n", failed ? "FAILED" : "PASS"); return failed ? 1 : 0;
+    ordinary(); chunks(); uses(); rows(); printf("map_provenance_test: %s\n", failed ? "FAILED" : "PASS"); return failed ? 1 : 0;
 }

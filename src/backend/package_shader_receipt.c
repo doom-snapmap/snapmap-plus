@@ -374,6 +374,19 @@ void sh_package_shader_receipt_end(sh_package_shader_receipt_frame *frame,
 }
 void sh_package_shader_cook_end(sh_package_shader_receipt_frame *frame, int parsed)
 { sh_package_shader_receipt_end(frame, parsed, NULL, NULL); }
+/* +0x24..0x47 hold retired text and lifetime fields. A renderparm's creator
+ * (+0x74, parmCreator_t) is engine ownership, not source: both renderers'
+ * constructors default it to 0 and their declaration parse never writes it,
+ * while the first idParmBlock parse claims temp1..temp128 as expression
+ * temporaries (creator 2) after their declarations load. Reparsing keeps it. */
+static size_t sr_header_differs(const sr_entry *entry, const unsigned char *header, size_t length)
+{
+    int parameter = length == 0x90 && sr_equal(entry->family, "renderparm");
+    size_t at = 0;
+    while (at < length && ((at >= 0x24 && at < 0x48) || (parameter && at >= 0x74 && at < 0x78) ||
+        entry->header[at] == header[at])) at++;
+    return at;
+}
 int sh_package_shader_receipt_matches(uintptr_t resource, const char *family,
     const char *name, const void *source, size_t length,
     const unsigned char *header, size_t header_length)
@@ -386,8 +399,32 @@ int sh_package_shader_receipt_matches(uintptr_t resource, const char *family,
         ((const char *)source)[length - 1] == '\r' || ((const char *)source)[length - 1] == '\n')) length--;
     if (entry && entry->body && entry->length == length && entry->header_length == header_length &&
         sr_equal(entry->family, family) && sr_equal(entry->name, name) && !memcmp(entry->body, source, length) &&
-        !memcmp(entry->header, header, 0x24) && !memcmp(entry->header + 0x48, header + 0x48, header_length - 0x48)) same = 1;
+        sr_header_differs(entry, header, header_length) == header_length) same = 1;
     ReleaseSRWLockShared(&sr_lock); return same;
+}
+char *sh_package_shader_receipt_refusal(uintptr_t resource, const char *family,
+    const char *name, const void *source, size_t length,
+    const unsigned char *header, size_t header_length, char *out, size_t capacity)
+{
+    if (!out || !capacity) return out;
+    snprintf(out, capacity, "receipt check has no complete arguments");
+    if (!resource || !source || !header || header_length < 0x60 || header_length > 0x90) return out;
+    AcquireSRWLockShared(&sr_lock);
+    sr_entry *entry = sr_find(resource);
+    if (entry && entry->retained) while (length && (((const char *)source)[length - 1] == ' ' ||
+        ((const char *)source)[length - 1] == '\r' || ((const char *)source)[length - 1] == '\n')) length--;
+    if (!entry) snprintf(out, capacity, "no source receipt");
+    else if (!entry->body) snprintf(out, capacity, "no completed source receipt");
+    else if (!sr_equal(entry->family, family) || !sr_equal(entry->name, name)) snprintf(out, capacity, "receipt names another object");
+    else if (entry->length != length) snprintf(out, capacity, "receipt source has %zu bytes, source %zu", entry->length, length);
+    else if (memcmp(entry->body, source, length)) snprintf(out, capacity, "receipt source text differs");
+    else if (entry->header_length != header_length) snprintf(out, capacity, "receipt header has %zu bytes", entry->header_length);
+    else {
+        size_t at = sr_header_differs(entry, header, header_length);
+        if (at < header_length) snprintf(out, capacity, "receipt header differs at +0x%zx", at);
+        else snprintf(out, capacity, "receipt matches");
+    }
+    ReleaseSRWLockShared(&sr_lock); return out;
 }
 void sh_package_shader_capture_clear(sh_package_shader_capture *capture)
 {

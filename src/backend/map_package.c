@@ -587,10 +587,22 @@ static BOOL CALLBACK mpkg_lock_init(PINIT_ONCE once, PVOID param, PVOID *ctx)
 static void mpkg_lock(void)   { InitOnceExecuteOnce(&g_mpkg_lock_once, mpkg_lock_init, NULL, NULL); EnterCriticalSection(&g_mpkg_lock); }
 static void mpkg_unlock(void) { LeaveCriticalSection(&g_mpkg_lock); }
 
-void sh_mpkg_report_error(const char *message)
+void sh_mpkg_report_error(sh_mpkg_problem problem, const char *diagnostic)
 {
-    if (!message || !*message) return;
-    backend_log(message);
+    const char *message;
+    if (!diagnostic || !*diagnostic) return;
+    backend_log(diagnostic);
+    switch (problem) {
+    case SH_MPKG_PROBLEM_OPEN: message = "This map couldn't be opened."; break;
+    case SH_MPKG_PROBLEM_SAVE:
+        message = "Your changes couldn't be saved. Keep the map open and try saving again."; break;
+    case SH_MPKG_PROBLEM_PLAY: message = "Play couldn't start."; break;
+    case SH_MPKG_PROBLEM_INSTALL: message = "The extra content couldn't be installed."; break;
+    case SH_MPKG_PROBLEM_PREFAB: message = "This prefab couldn't be added."; break;
+    case SH_MPKG_PROBLEM_MODS_DISABLED:
+        message = "This map needs mods, which are disabled for this launch."; break;
+    default: message = "SnapMap couldn't prepare this content."; break;
+    }
     mpkg_lock();
     strncpy_s(g_notice, sizeof(g_notice), message, _TRUNCATE); g_notice_revision++;
     mpkg_unlock();
@@ -635,7 +647,7 @@ void sh_mpkg_boot_capture(const char *data_root)
     if (g_boot_captured == 1) { mpkg_unlock(); return; }
     strncpy_s(g_data_root, sizeof(g_data_root), data_root, _TRUNCATE);
     if (!mpkg_recover_interrupted(data_root, error, sizeof(error))) {
-        g_boot_captured = -1; mpkg_unlock(); sh_mpkg_report_error(error); return;
+        g_boot_captured = -1; mpkg_unlock(); sh_mpkg_report_error(SH_MPKG_PROBLEM_CONTENT, error); return;
     }
     QueryPerformanceCounter(&recovered);
     sources = sh_package_sources_scan_local(data_root, mpkg_local_rejected, NULL, error, sizeof(error));
@@ -1258,7 +1270,7 @@ int sh_mpkg_activation_cancel(void)
     g_install.failed = 1;
     if (g_install.working[0] && !mpkg_cancel_working(g_data_root, g_install.working,
         strrchr(g_install.working, '\\') + 1, error, sizeof(error))) {
-        mpkg_unlock(); sh_mpkg_report_error(error); return 0;
+        mpkg_unlock(); sh_mpkg_report_error(SH_MPKG_PROBLEM_CONTENT, error); return 0;
     }
     for (i = 0; i < g_session_count; i++) if (g_session[i].outcome == 4) g_session[i].outcome = 3;
     mutex = g_install.mutex; memset(&g_install, 0, sizeof(g_install));
@@ -1446,7 +1458,7 @@ static void mpkg_decide_staged(mpkg_staged *head, int accepted)
         outcome = mpkg_install_batch(head, error, sizeof(error)) ? 1 : -1;
         if (outcome < 0) {
             _snprintf_s(line, sizeof(line), _TRUNCATE, "MPKG: package set installation FAILED: %s", error);
-            sh_mpkg_report_error(line);
+            sh_mpkg_report_error(SH_MPKG_PROBLEM_INSTALL, line);
             mpkg_retry_staged(head);
         }
     } else {
@@ -1828,7 +1840,7 @@ static int mpkg_gate_declared(const char *json, size_t len,
             }
         }
         if (!complete) {
-            sh_mpkg_report_error(err); mpkg_retry_staged(head); mpkg_staged_free(head);
+            sh_mpkg_report_error(SH_MPKG_PROBLEM_OPEN, err); mpkg_retry_staged(head); mpkg_staged_free(head);
         } else if (head) mpkg_request_consent(head);   /* takes ownership of the chain */
     }
     return 0;
@@ -1847,7 +1859,7 @@ int sh_mpkg_gate(const char *json, size_t len)
         static const char reason[] =
             "this map uses packages, and package serving is disabled for this launch (sh_user_overrides 0)";
         mpkg_set_refusal(reason);
-        sh_mpkg_report_error(reason);
+        sh_mpkg_report_error(SH_MPKG_PROBLEM_MODS_DISABLED, reason);
     } else if (count == SIZE_MAX || count > SIZE_MAX / sizeof(*installed) ||
         (count && !(installed = (int *)calloc(count, sizeof(*installed))))) {
         mpkg_set_refusal("cannot allocate the complete map package inventory");

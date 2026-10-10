@@ -521,6 +521,14 @@ static void retained_reservations(void)
     assert(sh_audio_id_lease_ready(la, error, sizeof(error)));
     assert(sh_audio_link_graph_bind(gb, sh_audio_id_reserve, lb, error, sizeof(error)));
     assert(sh_audio_link_graph_event_id(gb, 0, 50, &ib) && ib == ia);
+    uint32_t media_a, media_b;
+    assert(sh_audio_link_graph_media_id(ga, 0, 900, &media_a));
+    assert(sh_audio_link_graph_media_id(gb, 0, 900, &media_b) && media_a == media_b);
+    assert(sh_audio_id_lease_private(la, SH_AUDIO_ID_MEDIA, media_a));
+    assert(sh_audio_id_lease_private(lb, SH_AUDIO_ID_MEDIA, media_b)); /* Shared is still owned. */
+    assert(!sh_audio_id_lease_private(lb, SH_AUDIO_ID_BANK, media_b));
+    assert(!sh_audio_id_lease_private(lb, SH_AUDIO_ID_MEDIA, 900));
+    assert(!sh_audio_id_lease_private(NULL, SH_AUDIO_ID_MEDIA, media_b));
     assert(sh_audio_id_lease_ready(lb, error, sizeof(error)));
     native.original = 1;
     assert(!sh_audio_id_lease_ready(la, error, sizeof(error)));
@@ -542,6 +550,7 @@ static void retained_reservations(void)
      * equivalent provider still owns the same identities. */
     sh_audio_id_lease_activate(lb);
     sh_audio_id_lease_release(la); sh_audio_link_graph_close(ga); ga = NULL;
+    assert(sh_audio_id_lease_private(lb, SH_AUDIO_ID_MEDIA, media_b));
     assert(sh_audio_id_lease_ready(lb, error, sizeof(error)));
     native.fail = 1; assert(!sh_audio_id_lease_ready(lb, error, sizeof(error)));
     native.fail = 0; assert(sh_audio_id_lease_ready(lb, error, sizeof(error)));
@@ -565,6 +574,8 @@ static void reservation_absence_and_originals(void)
     absence_lease capture = {sh_audio_id_lease_begin(pool), 0}; assert(capture.lease);
     assert(sh_audio_link_graph_bind(graph, reserve_absence, &capture, error, sizeof(error)) && capture.absent);
     assert(sh_audio_id_lease_ready(capture.lease, error, sizeof(error))); sh_audio_id_lease_activate(capture.lease);
+    for (int domain = 0; domain <= SH_AUDIO_ID_BANK; domain++)
+        assert(!sh_audio_id_lease_private(capture.lease, (sh_audio_identity_domain)domain, capture.absent));
     native.busy = capture.absent;
     assert(!sh_audio_id_lease_ready(capture.lease, error, sizeof(error)));
     native.busy = 0; sh_audio_id_lease_release(capture.lease); sh_audio_link_graph_close(graph);
@@ -574,6 +585,7 @@ static void reservation_absence_and_originals(void)
     assert(sh_audio_link_graph_bind(graph, sh_audio_id_reserve, lease, error, sizeof(error)));
     uint32_t event; assert(sh_audio_link_graph_event_id(graph, 0, 50, &event) && event == 50);
     assert(sh_audio_id_lease_ready(lease, error, sizeof(error)) && !sh_audio_link_graph_bank(graph, 0, 0)->count);
+    assert(!sh_audio_id_lease_private(lease, SH_AUDIO_ID_MEDIA, 900));
     sh_audio_id_lease_release(lease); assert(sh_audio_id_pool_close(pool));
     sh_audio_link_graph_close(graph); sh_audio_bank_codec_free(&f.codec);
 }

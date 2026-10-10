@@ -33,6 +33,7 @@
 #include "grid_room_snap.h"
 #include "spawn_keys.h"
 #include "snap_type_cache.h"
+#include "native_decl_eval.h"
 #include "key_inspector.h"
 #include "package_requirements.h"
 #include "weapon_hud.h"
@@ -61,6 +62,7 @@
 #include "user_overrides.h"
 #include "package_runtime.h"
 #include "package_editor.h"
+#include "package_role.h"
 #include "resource_graph_native.h"
 #include "virtual_material_runtime.h"
 #include "virtual_texture_provider.h"
@@ -393,6 +395,7 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
         /* Editor entities read their defaults from a type cache built once;
          * complete it for entity types published afterwards. */
         sh_snap_type_cache_install(results, db, g_doom_base);
+        sh_native_decl_eval_install(results, db, g_doom_base);
 
         /* The AI filter's choices can name package keys, which the stock
          * bit-flag inspector cannot offer or write. */
@@ -435,9 +438,12 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
 
         /* Bind apply dependencies before publishing their interface slots. */
         sh_apply_engine_install(results, db, g_doom_base, cmdsys);
-        sh_package_editor_bind_native();
+        sh_package_editor_bind_native(); sh_palette_refresh_steer(sh_package_editor_row_steer);
+        sh_palette_refresh_rows_retired(sh_package_editor_rows_retire);
+        sh_decl_server_rows_retired(sh_package_editor_rows_retire);
         if (!sh_package_editor_install(results, db, g_doom_base))
             backend_log("package editor ownership hooks could not be installed");
+        sh_package_role_install(results, db, g_doom_base);
         if(grid_installed&&!sh_grid_editor_install(results,db,sh_grid_native_read,sh_grid_native_apply))
             backend_log("GRID: native dimension properties unavailable on this build");
         if(!sh_map_render_install(results,db,g_doom_base)||!sh_map_render_editor_install(results,db))

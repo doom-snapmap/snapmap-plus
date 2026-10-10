@@ -1,4 +1,5 @@
 #include <assert.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -10,6 +11,9 @@
 #include "map_provenance.h"
 #include "decl_rebind.h"
 #include "package_fixture.h"
+#include <windows.h>
+#include <psapi.h>
+#pragma comment(lib, "psapi.lib")
 
 static int describe(void *context, sh_decl_value_type type, sh_decl_value_shape *out)
 {
@@ -274,6 +278,17 @@ static void native_collisions(const sh_package_sources *sources, fixture *f,
     sh_package_link_output_free(&out);
 }
 
+/* Entries in a directory: all of them, or only private evidence files. */
+static size_t directory_entries(const char *directory, int private_only)
+{
+    char pattern[MAX_PATH + 64]; WIN32_FIND_DATAA data; size_t count = 0;
+    snprintf(pattern, sizeof(pattern), "%s/%s", directory, private_only ? ".private.*" : "*");
+    HANDLE find = FindFirstFileA(pattern, &data);
+    if (find == INVALID_HANDLE_VALUE) return 0;
+    do { if (strcmp(data.cFileName, ".") && strcmp(data.cFileName, "..")) count++; } while (FindNextFileA(find, &data));
+    FindClose(find); return count;
+}
+
 static void repeated_native_bindings(const sh_package_sources *sources, const fixture *source,
     const size_t entities[3], const size_t materials[3])
 {
@@ -289,6 +304,8 @@ static void repeated_native_bindings(const sh_package_sources *sources, const fi
     adapter.history = history;
     assert(sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &first, error, sizeof(error)));
     assert(sh_package_link_history_count(history) == 4);
+    /* Proofs are private evidence: nothing is published to the cache. */
+    assert(directory_entries(directory, 1) == 1 && directory_entries(directory, 0) == 1);
     native.resident = &first;
     /* An occupied name without exact retained evidence still branches safely. */
     adapter.history = NULL;
@@ -323,7 +340,9 @@ static void repeated_native_bindings(const sh_package_sources *sources, const fi
     assert(!sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &next, error, sizeof(error)));
     assert(sh_package_link_history_count(history) == 6);
     sh_package_link_output_free(&first); sh_package_link_output_free(&next);
+    assert(directory_entries(directory, 0) == directory_entries(directory, 1));
     sh_package_link_history_close(history);
+    assert(directory_entries(directory, 0) == 0);
 
     /* Reservations cover unmaterialized identities too, across compilations. */
     history = sh_package_link_history_open(directory); assert(history); adapter.history = history;
@@ -833,43 +852,87 @@ static void implicit_ownership(const sh_package_sources *sources)
     sh_package_owners_free(&invalid); sh_package_link_output_free(&out);
 }
 
+/* Witness bytes and roles join a unit's exact identity in any order: without a
+ * reuse cache, with one that copies a restored capture's witness arrays, and
+ * with one that borrows them. Restored units keep their witnesses through
+ * replay, which still rejects bytes changed during linking; an owner that
+ * changes a unit's witnesses invalidates it first, as the cache requires. */
 static void exact_witnesses(const sh_package_sources *sources)
 {
-    fixture f = {0}; sh_package_link_output out = {0}; char error[512];
-    sh_package_compilation scope = {0}; scope.sources = sources;
-    unsigned char a[32771] = {0}, b[32771] = {0};
-    sh_compiled_resource physical = {0}, pages[4] = {0};
-    physical.engine_path = "generated/model/main.bmodel";
-    physical.body = (unsigned char *)"main"; physical.body_length = 4; physical.source = SIZE_MAX;
-    for (size_t i = 0; i < 4; i++) {
-        pages[i].engine_path = i % 2 ? "virtualtextures/a_sq2.mega2" : "virtualtextures/a_sq1.mega2";
-        pages[i].body = i < 2 ? a : b; pages[i].body_length = sizeof(a); pages[i].source = SIZE_MAX;
+    static unsigned char a[32771], b[32771];
+    unsigned char key[32] = {0};
+    for (int mode = 0; mode < 3; mode++) {   /* uncached, cache copying, cache borrowing */
+        fixture f = {0}; sh_package_link_output out = {0}; char error[512];
+        sh_package_compilation scope = {0}; scope.sources = sources;
+        sh_compiled_resource physical = {0}, pages[4] = {0};
+        unsigned long long borrowed = 0, unshared = 0;
+        memset(a, 0, sizeof(a)); memset(b, 0, sizeof(b));
+        physical.engine_path = "generated/model/main.bmodel";
+        physical.body = (unsigned char *)"main"; physical.body_length = 4; physical.source = SIZE_MAX;
+        for (size_t i = 0; i < 4; i++) {
+            pages[i].engine_path = i % 2 ? "virtualtextures/a_sq2.mega2" : "virtualtextures/a_sq1.mega2";
+            pages[i].body = i < 2 ? a : b; pages[i].body_length = sizeof(a); pages[i].source = SIZE_MAX;
+        }
+        sh_package_link_witness witnesses[] = {{"sq1", pages}, {"sq2", pages + 1},
+            {"sq2", pages + 3}, {"sq1", pages + 2}};
+        const sh_compiled_resource *file = &physical;
+        f.units[0] = (sh_package_link_unit){"model", "main", &scope, &file, 1};
+        f.units[1] = f.units[0]; f.count = 2;
+        f.units[0].witnesses = witnesses; f.units[0].witness_count = 2;
+        f.units[1].witnesses = witnesses + 2; f.units[1].witness_count = 2;
+        sh_package_link_adapter adapter = {&f, resolve, bind_file, assign};
+        if (mode) {
+            adapter.reuse = sh_package_link_reuse_open(f.count); assert(adapter.reuse);
+            sh_package_link_reuse_test_mode(adapter.reuse, mode == 1, 0);
+        }
+        assert(sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &out, error, sizeof(error)));
+        assert(out.classes.count == 1 && out.compiled->resource_count == 1 && f.bound == 4);
+        assert(!strstr(out.compiled->resources[0].engine_path, "virtualtextures"));
+        if (!mode) memcpy(key, out.classes.identities[0], 32);
+        assert(!memcmp(key, out.classes.identities[0], 32));
+        if (mode) {
+            /* Both units restore their captures, witness arrays included. */
+            f.assigned = 0;
+            assert(sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &out, error, sizeof(error)));
+            assert(out.classes.count == 1 && !memcmp(key, out.classes.identities[0], 32));
+            sh_package_link_reuse_test_counts(adapter.reuse, &borrowed, &unshared);
+            assert(mode == 1 ? !borrowed : borrowed == 2);
+            /* Replay reads the restored witnesses and still rejects bytes
+             * changed during linking; once restored they match again. */
+            f.assigned = 0; f.mutate_witness = a;
+            assert(!sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &out, error, sizeof(error)));
+            assert(strstr(error, "witness bytes changed") && !out.compiled);
+            *a = 0; f.mutate_witness = NULL; f.assigned = 0;
+            assert(sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &out, error, sizeof(error)));
+            assert(out.classes.count == 1 && !memcmp(key, out.classes.identities[0], 32));
+            sh_package_link_reuse_test_counts(adapter.reuse, &borrowed, &unshared);
+            assert(mode == 1 ? !borrowed : borrowed == 6);
+        }
+        sh_package_link_witness swap = witnesses[0]; witnesses[0] = witnesses[1]; witnesses[1] = swap;
+        if (mode) sh_package_link_reuse_invalidate(adapter.reuse, 0);
+        f.assigned = f.bound = 0;
+        assert(sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &out, error, sizeof(error)));
+        assert(out.classes.count == 1 && !memcmp(key, out.classes.identities[0], 32));
+        b[sizeof(b) - 1] = 1; f.assigned = 0;
+        if (mode) sh_package_link_reuse_invalidate(adapter.reuse, 1);
+        assert(sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &out, error, sizeof(error)));
+        assert(out.classes.count == 2 && out.compiled->resource_count == 2);
+        b[sizeof(b) - 1] = 0; f.assigned = 0;
+        if (mode) {
+            sh_package_link_reuse_invalidate(adapter.reuse, 1);
+            assert(sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &out, error, sizeof(error)));
+            assert(out.classes.count == 1 && !memcmp(key, out.classes.identities[0], 32));
+            f.assigned = 0;
+        }
+        f.mutate_witness = a;
+        assert(!sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &out, error, sizeof(error)));
+        assert(strstr(error, "witness bytes changed") && !out.compiled);
+        *a = 0; f.mutate_witness = NULL; witnesses[1].role = witnesses[0].role;
+        if (mode) sh_package_link_reuse_invalidate(adapter.reuse, 0);
+        assert(!sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &out, error, sizeof(error)));
+        assert(strstr(error, "repeats a native role")); sh_package_link_output_free(&out);
+        sh_package_link_reuse_close(adapter.reuse);
     }
-    sh_package_link_witness witnesses[] = {{"sq1", pages}, {"sq2", pages + 1},
-        {"sq2", pages + 3}, {"sq1", pages + 2}};
-    const sh_compiled_resource *file = &physical;
-    f.units[0] = (sh_package_link_unit){"model", "main", &scope, &file, 1};
-    f.units[1] = f.units[0]; f.count = 2;
-    f.units[0].witnesses = witnesses; f.units[0].witness_count = 2;
-    f.units[1].witnesses = witnesses + 2; f.units[1].witness_count = 2;
-    sh_package_link_adapter adapter = {&f, resolve, bind_file, assign};
-    assert(sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &out, error, sizeof(error)));
-    assert(out.classes.count == 1 && out.compiled->resource_count == 1 && f.bound == 4);
-    assert(!strstr(out.compiled->resources[0].engine_path, "virtualtextures"));
-    unsigned char key[32]; memcpy(key, out.classes.identities[0], 32);
-    sh_package_link_witness swap = witnesses[0]; witnesses[0] = witnesses[1]; witnesses[1] = swap;
-    f.assigned = f.bound = 0;
-    assert(sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &out, error, sizeof(error)));
-    assert(out.classes.count == 1 && !memcmp(key, out.classes.identities[0], 32));
-    b[sizeof(b) - 1] = 1; f.assigned = 0;
-    assert(sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &out, error, sizeof(error)));
-    assert(out.classes.count == 2 && out.compiled->resource_count == 2);
-    b[sizeof(b) - 1] = 0; f.assigned = 0; f.mutate_witness = a;
-    assert(!sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &out, error, sizeof(error)));
-    assert(strstr(error, "witness bytes changed") && !out.compiled);
-    *a = 0; f.mutate_witness = NULL; witnesses[1].role = witnesses[0].role;
-    assert(!sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &out, error, sizeof(error)));
-    assert(strstr(error, "repeats a native role")); sh_package_link_output_free(&out);
 }
 static int assign_native_pair(void *context, size_t unit, const unsigned char token[32], int original,
     const sh_compiled_resource *const *files, size_t count, char **name, char ***paths, char *error, size_t capacity)
@@ -1202,10 +1265,325 @@ static void conditional_bindings(const sh_package_sources *sources)
     c.f.units[0].implicit = twice; c.f.units[0].implicit_count = 1;
     assert(!sh_package_link(sources, c.f.units, c.f.count, &adapter, NULL, NULL, &out, error, sizeof(error)));
     assert(strstr(error, "both conditional and implicit"));
+    /* Found among several implicit slots, in either search: sorted index or one by one. */
+    sh_package_link_edge among[] = {{"zeta", 3}, {"fsm/g", 2}, {"alpha", 3}};
+    sh_package_link_edge apart[2][2] = {{{"zeta", 3}, {"alpha", 3}}, {{"zeta", 7}, {"alpha", 7}}};
+    for (int linear = 0; linear < 2; linear++) {
+        adapter.reuse = sh_package_link_reuse_open(c.f.count); assert(adapter.reuse);
+        sh_package_link_reuse_test_fail_index(adapter.reuse, linear);
+        c.f.units[0].implicit = among; c.f.units[0].implicit_count = 3; error[0] = 0;
+        assert(!sh_package_link(sources, c.f.units, c.f.count, &adapter, NULL, NULL, &out, error, sizeof(error)));
+        assert(strstr(error, "both conditional and implicit"));
+        sh_package_link_output_free(&out); sh_package_link_reuse_close(adapter.reuse);
+        adapter.reuse = sh_package_link_reuse_open(c.f.count); assert(adapter.reuse);
+        sh_package_link_reuse_test_fail_index(adapter.reuse, linear);
+        /* Both behaviors stay equal, so one certified name serves both. */
+        for (size_t s = 0; s < 2; s++) { c.f.units[s * 4].implicit = apart[s]; c.f.units[s * 4].implicit_count = 2; }
+        error[0] = 0;
+        int linked = sh_package_link(sources, c.f.units, c.f.count, &adapter, NULL, NULL, &out, error, sizeof(error));
+        if (!linked) fprintf(stderr, "conditional apart: %s\n", error);
+        assert(linked && !strstr(error, "both conditional and implicit"));
+        sh_package_link_output_free(&out); sh_package_link_reuse_close(adapter.reuse); adapter.reuse = NULL;
+        c.f.units[4].implicit = NULL; c.f.units[4].implicit_count = 0;
+    }
     c.f.units[0].implicit = NULL; c.f.units[0].implicit_count = 0;
     c.f.units[0].conditional = NULL;
     assert(!sh_package_link(sources, c.f.units, c.f.count, &adapter, NULL, NULL, &out, error, sizeof(error)));
     sh_package_link_output_free(&out);
+}
+
+/* Restored units borrow the reuse cache's arrays instead of copying them.
+ * Every pass and link must read the same either way: across conditional
+ * decisions that remove a binding and then keep it, invalidation, cache
+ * growth, a failed copy-on-write and a reopened cache. A link's text holds
+ * its partition and identity per member, names, certification, compiled
+ * resources with their bound dependencies, implicit bindings and provenance. */
+typedef struct borrow_text { char *data; size_t used, capacity; } borrow_text;
+static void borrow_add(borrow_text *t, const char *format, ...)
+{
+    va_list args;
+    for (;;) {
+        int n;
+        va_start(args, format);
+        n = t->data ? vsnprintf(t->data + t->used, t->capacity - t->used, format, args) : -1;
+        va_end(args);
+        if (n >= 0 && (size_t)n < t->capacity - t->used) { t->used += (size_t)n; return; }
+        t->capacity = t->capacity ? t->capacity * 2 : 4096;
+        t->data = realloc(t->data, t->capacity); assert(t->data);
+        if (!t->used) t->data[0] = 0;
+    }
+}
+static void borrow_hex(char out[65], const unsigned char *bytes)
+{ for (size_t i = 0; i < 32; i++) snprintf(out + i * 2, 3, "%02x", bytes[i]); }
+static char *borrow_classes_text(const sh_package_link_classes *classes, size_t count, int ok, const char *error)
+{
+    borrow_text t = {0};
+    char id[65];
+    if (!ok) { borrow_add(&t, "failed: %s\n", error); return t.data; }
+    borrow_add(&t, "%zu classes\n", classes->count);
+    for (size_t u = 0; u < count; u++) {
+        size_t first = u;
+        for (size_t v = 0; v < u; v++) if (classes->nodes[v] == classes->nodes[u]) { first = v; break; }
+        borrow_hex(id, classes->identities[classes->nodes[u]]);
+        borrow_add(&t, "unit %zu with %zu: %s\n", u, first, id);
+    }
+    return t.data;
+}
+static char *borrow_link_text(const sh_package_link_output *out, const conditional_case *c, int ok, const char *error,
+    const sh_package_provenance *contexts, const size_t *unit_contexts)
+{
+    borrow_text t = {0};
+    sh_package_provenance saved = {0};
+    size_t roots[8];
+    char id[65], problem[256];
+    if (!ok) { borrow_add(&t, "failed: %s\n", error); return t.data; }
+    borrow_add(&t, "%zu classes\n", out->classes.count);
+    for (size_t u = 0; u < c->f.count; u++) {
+        size_t node = out->classes.nodes[u], first = u;
+        for (size_t v = 0; v < u; v++) if (out->classes.nodes[v] == node) { first = v; break; }
+        borrow_hex(id, out->classes.identities[node]);
+        /* Certification is the class's, assigned through its representative;
+         * which member represents a class is not compared. */
+        borrow_add(&t, "unit %zu with %zu: %s %s original %d\n", u, first, id, out->names[node],
+            c->f.original_bindings[out->classes.representatives[node]]);
+    }
+    borrow_add(&t, "%zu resources, %zu duplicates\n", out->compiled->resource_count, out->compiled->duplicate_count);
+    for (size_t i = 0; i < out->compiled->resource_count; i++) {
+        const sh_compiled_resource *r = out->compiled->resources + i;
+        sh_package_file_identity identity;
+        size_t length = 0;
+        unsigned char *body = sh_package_compilation_read(out->compiled, r, SIZE_MAX, &length, problem, sizeof(problem));
+        assert(body && sh_package_bytes_identity(body, length, &identity));
+        free(body); borrow_hex(id, identity.digest);
+        borrow_add(&t, "%s %s %s original %d sources %zu body %s\n", r->engine_path, r->native_type ? r->native_type : "-",
+            r->native_name ? r->native_name : "-", r->native_original, r->source_count, id);
+        for (size_t j = 0; j < r->bound_dependency_count; j++) borrow_add(&t, "  needs %s\n", r->bound_dependencies[j]);
+    }
+    for (size_t i = 0; i < out->implicit_count; i++)
+        borrow_add(&t, "implicit %s -> %s at %s\n", out->names[out->implicit[i].owner],
+            out->names[out->implicit[i].target], out->implicit[i].slot);
+    for (size_t i = 0; i < c->f.count; i++) roots[i] = i;
+    ok = sh_package_link_provenance(out, c->f.units, c->f.count, contexts, unit_contexts, roots, c->f.count,
+        &saved, problem, sizeof(problem));
+    assert(ok);
+    borrow_add(&t, "provenance %d: %zu bindings, %zu contexts\n", ok, saved.binding_count, saved.context_count);
+    for (size_t i = 0; i < saved.binding_count; i++) {
+        const sh_package_provenance_binding *b = saved.bindings + i;
+        borrow_add(&t, "  %s %s %s:", b->family, b->original, b->name);
+        for (size_t j = 0; j < b->context_count; j++) borrow_add(&t, " %zu", b->contexts[j]);
+        borrow_add(&t, "\n");
+    }
+    sh_package_provenance_free(&saved);
+    return t.data;
+}
+typedef struct borrow_run {
+    char *texts[16];
+    size_t steps;
+    unsigned long long borrowed, unshared;
+} borrow_run;
+static void borrow_counts(borrow_run *run, const sh_package_link_reuse *reuse)
+{
+    unsigned long long borrowed, unshared;
+    sh_package_link_reuse_test_counts(reuse, &borrowed, &unshared);
+    run->borrowed += borrowed; run->unshared += unshared;
+}
+static void borrow_scenario(const sh_package_sources *sources, int copy, borrow_run *run)
+{
+    conditional_case c;
+    sh_package_link_output out = {0};
+    sh_package_link_classes classes = {0};
+    sh_package_link_adapter adapter;
+    sh_package_provenance contexts = {0};
+    unsigned char trees[2][32] = {{0}};
+    size_t unit_contexts[8], bound;
+    char error[512];
+    conditional_setup(&c, sources);
+    adapter = (sh_package_link_adapter){&c.f, resolve, bind_file, assign};
+    trees[1][0] = 1;
+    for (size_t s = 0; s < 2; s++) {
+        size_t context = sh_package_provenance_context_add(&contexts, SH_PACKAGE_CONTEXT_ISOLATED,
+            (const unsigned char (*)[32])trees + s, 1, s ? "scope1" : "scope0");
+        assert(context != SIZE_MAX);
+        for (size_t k = 0; k < 4; k++) unit_contexts[s * 4 + k] = context;
+    }
+    adapter.reuse = sh_package_link_reuse_open(c.f.count); assert(adapter.reuse);
+    sh_package_link_reuse_test_mode(adapter.reuse, copy, 0);
+#define BORROW_LINK() do { \
+        int ok_ = sh_package_link(sources, c.f.units, c.f.count, &adapter, NULL, NULL, &out, error, sizeof(error)); \
+        if (!ok_) fprintf(stderr, "step %zu link failed: %s\n", run->steps, error); \
+        assert(ok_ && run->steps < 16); \
+        run->texts[run->steps++] = borrow_link_text(&out, &c, ok_, error, &contexts, unit_contexts); \
+    } while (0)
+    /* Capture, then restore every unit. */
+    for (int pass = 0; pass < 2; pass++) {
+        int ok = sh_package_link_identify_units(c.f.units, c.f.count, &adapter, &classes, error, sizeof(error));
+        assert(ok);
+        run->texts[run->steps++] = borrow_classes_text(&classes, c.f.count, ok, error);
+    }
+    BORROW_LINK();
+    /* g in scope 1 is no longer certified original, so the behavior keeps its
+     * selection of g; then g is original again and the selection goes, read
+     * from the complete capture the cache still holds. */
+    c.f.units[6].original_binding = 0; BORROW_LINK();
+    c.f.units[6].original_binding = 1; BORROW_LINK();
+    /* f in scope 1 changes: invalidated and captured afresh. */
+    conditional_change(&c, 5, "fsm f, changed"); sh_package_link_reuse_invalidate(adapter.reuse, 5); BORROW_LINK();
+    /* Growth keeps every capture. */
+    assert(sh_package_link_reuse_reserve(adapter.reuse, c.f.count + 8)); BORROW_LINK();
+    /* A failed copy-on-write fails only its own pass; the cache stays whole,
+     * so the next link restores and binds exactly as the copy mode does. */
+    if (!copy) {
+        unsigned long long before, after, unused;
+        sh_package_link_reuse_test_counts(adapter.reuse, &before, &unused);
+        sh_package_link_reuse_test_mode(adapter.reuse, 0, 1);
+        assert(!sh_package_link(sources, c.f.units, c.f.count, &adapter, NULL, NULL, &out, error, sizeof(error)));
+        assert(strstr(error, "cannot copy conditional resource bindings") && !out.compiled);
+        sh_package_link_reuse_test_counts(adapter.reuse, &after, &unused);
+        assert(after > before);
+        sh_package_link_reuse_test_mode(adapter.reuse, 0, 0);
+    }
+    bound = c.f.bound; BORROW_LINK();
+    {
+        borrow_text t = {0};
+        borrow_add(&t, "bound %zu\n", c.f.bound - bound);
+        run->texts[run->steps++] = t.data;
+    }
+    /* A reopened cache captures everything again, then restores it. */
+    borrow_counts(run, adapter.reuse);
+    sh_package_link_reuse_close(adapter.reuse);
+    adapter.reuse = sh_package_link_reuse_open(c.f.count); assert(adapter.reuse);
+    sh_package_link_reuse_test_mode(adapter.reuse, copy, 0);
+    BORROW_LINK(); BORROW_LINK();
+#undef BORROW_LINK
+    borrow_counts(run, adapter.reuse);
+    sh_package_link_reuse_close(adapter.reuse);
+    sh_package_link_output_free(&out); sh_package_link_classes_free(&classes);
+    sh_package_provenance_free(&contexts);
+}
+static void borrowed_restore_equivalence(const sh_package_sources *sources)
+{
+    borrow_run copied = {0}, borrowed = {0};
+    borrow_scenario(sources, 1, &copied);
+    borrow_scenario(sources, 0, &borrowed);
+    assert(copied.steps == borrowed.steps && copied.steps == 11);
+    for (size_t i = 0; i < copied.steps; i++) {
+        if (strcmp(copied.texts[i], borrowed.texts[i]))
+            fprintf(stderr, "step %zu differs\n--- copy\n%s--- borrow\n%s", i, copied.texts[i], borrowed.texts[i]);
+        assert(!strcmp(copied.texts[i], borrowed.texts[i]));
+    }
+    /* The scenario exercises what it claims: removing the selection changed
+     * the link, keeping it again restored it, and only borrowing borrowed. */
+    if (!strcmp(borrowed.texts[2], borrowed.texts[3]) || strcmp(borrowed.texts[2], borrowed.texts[4]))
+        fprintf(stderr, "--- before\n%s--- without g original\n%s--- g original again\n%s",
+            borrowed.texts[2], borrowed.texts[3], borrowed.texts[4]);
+    assert(strcmp(borrowed.texts[2], borrowed.texts[3]) && !strcmp(borrowed.texts[2], borrowed.texts[4]));
+    assert(!strstr(borrowed.texts[0], "failed") && strstr(borrowed.texts[2], "provenance 1"));
+    assert(!copied.borrowed && !copied.unshared && borrowed.borrowed && borrowed.unshared);
+    for (size_t i = 0; i < copied.steps; i++) { free(copied.texts[i]); free(borrowed.texts[i]); }
+}
+
+/* Host screening for restore by reference, outside the suite:
+ *   package_linker_test --restore-bench <units> <copy|borrow> [passes]
+ * A synthetic graph of one-file units with one to four bindings each is
+ * identified once to fill the reuse cache, then again restoring every unit.
+ * Prints each pass's wall time and peak private bytes, the cache's per-pass
+ * collect, partition and clear times, and the restore counts. */
+typedef struct restore_bench { sh_package_link_edge *sites; size_t *begin; } restore_bench;
+static int bench_resolve(void *context, size_t unit, const char *family, const char *name,
+    size_t *target, char *error, size_t capacity)
+{
+    (void)context; (void)unit; (void)family; (void)error; (void)capacity;
+    *target = (size_t)strtoull(name + 1, NULL, 10); return 1;
+}
+static unsigned char *bench_bind(void *context, size_t unit, const sh_compiled_resource *file,
+    const unsigned char *body, size_t length, sh_package_link_reference reference, void *reference_context,
+    size_t *output_length, char *error, size_t capacity)
+{
+    (void)context; (void)unit; (void)file; (void)body; (void)length; (void)reference; (void)reference_context;
+    (void)output_length; snprintf(error, capacity, "benchmark units bind through sites"); return NULL;
+}
+static int bench_sites(void *context, size_t unit, const sh_compiled_resource *file,
+    const sh_package_link_edge **sites, size_t *count)
+{
+    restore_bench *b = context; (void)file;
+    *sites = b->sites + b->begin[unit]; *count = b->begin[unit + 1] - b->begin[unit]; return 1;
+}
+static volatile LONG bench_sampling;
+static volatile SIZE_T bench_peak;
+static SIZE_T bench_private(void)
+{
+    PROCESS_MEMORY_COUNTERS_EX counters;
+    return GetProcessMemoryInfo(GetCurrentProcess(), (PROCESS_MEMORY_COUNTERS *)&counters, sizeof(counters)) ?
+        counters.PrivateUsage : 0;
+}
+static DWORD WINAPI bench_sampler(LPVOID unused)
+{
+    (void)unused;
+    while (InterlockedCompareExchange(&bench_sampling, 1, 1)) {
+        SIZE_T now = bench_private();
+        if (now > bench_peak) bench_peak = now;
+        Sleep(1);
+    }
+    return 0;
+}
+static int restore_benchmark(size_t count, int copy, int passes)
+{
+    static const char *const slots[] = {"edit.a", "edit.b", "edit.c", "edit.d"};
+    restore_bench b = {0};
+    sh_package_sources none = {0};
+    sh_package_compilation scope = {0};
+    sh_package_link_adapter adapter = {&b, bench_resolve, bench_bind};
+    sh_package_link_classes classes = {0};
+    sh_compiled_resource *parts = calloc(count, sizeof(*parts));
+    const sh_compiled_resource **files = calloc(count, sizeof(*files));
+    sh_package_link_unit *units = calloc(count, sizeof(*units));
+    char *strings = malloc(count * 64), error[1024], counters[8192];
+    LARGE_INTEGER frequency, began, ended;
+    unsigned long long borrowed = 0, unshared = 0;
+    HANDLE sampler;
+    if (count < 2 || passes < 2) { fprintf(stderr, "need at least 2 units and 2 passes\n"); return 2; }
+    b.begin = calloc(count + 1, sizeof(*b.begin)); b.sites = calloc(count * 4, sizeof(*b.sites));
+    assert(parts && files && units && strings && b.begin && b.sites);
+    scope.sources = &none;
+    for (size_t i = 0; i < count; i++) {
+        char *name = strings + i * 64, *path = name + 16;
+        size_t edges = 1 + (size_t)((i * 2654435761u) >> 7) % 4;
+        snprintf(name, 16, "u%zu", i); snprintf(path, 48, "bench/u%zu.decl", i);
+        parts[i].engine_path = path; parts[i].body = (unsigned char *)name;
+        parts[i].body_length = strlen(name); parts[i].source = SIZE_MAX; files[i] = parts + i;
+        units[i] = (sh_package_link_unit){"bench", name, &scope, files + i, 1};
+        b.begin[i + 1] = b.begin[i] + edges;
+        for (size_t k = 0; k < edges; k++)
+            b.sites[b.begin[i] + k] = (sh_package_link_edge){slots[k], (i * 31 + k * 7 + 1) % count};
+    }
+    adapter.sites = bench_sites;
+    adapter.reuse = sh_package_link_reuse_open(count); assert(adapter.reuse);
+    sh_package_link_reuse_test_mode(adapter.reuse, copy, 0);
+    QueryPerformanceFrequency(&frequency);
+    InterlockedExchange(&bench_sampling, 1);
+    sampler = CreateThread(NULL, 0, bench_sampler, NULL, 0, NULL); assert(sampler);
+    printf("restore benchmark: %zu units, %zu bindings, %s\n", count, b.begin[count], copy ? "copy" : "borrow");
+    for (int pass = 0; pass < passes; pass++) {
+        SIZE_T start = bench_private();
+        int ok;
+        bench_peak = start;
+        QueryPerformanceCounter(&began);
+        ok = sh_package_link_identify_units(units, count, &adapter, &classes, error, sizeof(error));
+        QueryPerformanceCounter(&ended);
+        if (bench_private() > bench_peak) bench_peak = bench_private();
+        printf("pass %d: %s, %.1f ms, %zu classes, private %.1f MB at start, peak %.1f MB\n", pass + 1,
+            ok ? "ok" : error, (double)(ended.QuadPart - began.QuadPart) * 1000.0 / (double)frequency.QuadPart,
+            classes.count, (double)start / 1048576.0, (double)bench_peak / 1048576.0);
+        if (!ok) return 1;
+    }
+    InterlockedExchange(&bench_sampling, 0);
+    WaitForSingleObject(sampler, INFINITE); CloseHandle(sampler);
+    sh_package_link_reuse_test_counts(adapter.reuse, &borrowed, &unshared);
+    printf("%s\nborrowed restores %llu, copied for conditional bindings %llu\n",
+        sh_package_link_reuse_counters(adapter.reuse, counters, sizeof(counters)), borrowed, unshared);
+    sh_package_link_reuse_close(adapter.reuse); sh_package_link_classes_free(&classes);
+    free(parts); free((void *)files); free(units); free(strings); free(b.begin); free(b.sites);
+    return 0;
 }
 
 static void implicit_bindings(const sh_package_sources *sources)
@@ -1398,7 +1776,110 @@ static void repeated_field_slots(void)
     sh_package_link_output_free(&out); sh_package_link_inputs_free(&discovered); sh_package_sources_free(sources);
 }
 
-int main(void)
+/* Pass meters (F4 instrumentation): what each identity pass captured afresh, whether sticky-invalid
+ * recaptures reproduced their previous capture, and what the conditional certification did, on the
+ * conditional fixture (two scopes; behavior 0/4 selects f and g, f reaches d). The meters must not
+ * change any result: the last pass equals an uncached pass, and a failed meter allocation changes
+ * nothing but the meter. */
+static void pass_meters(const sh_package_sources *sources)
+{
+    conditional_case c;
+    sh_package_link_reuse *reuse;
+    sh_package_link_classes classes = {0}, plain_classes = {0};
+    sh_package_link_adapter inspect, plain;
+    sh_package_link_pass_meters m[5], none;
+    size_t bound[5] = {0};
+    char error[512], full[4096], tiny[16];
+    conditional_setup(&c, sources);
+    inspect = (sh_package_link_adapter){&c.f, resolve, bind_file};
+    plain = inspect;
+    reuse = sh_package_link_reuse_open(c.f.count); assert(reuse);
+    inspect.reuse = reuse;
+#define METER_PASS(n) do { bound[n] = c.f.bound; \
+        assert(sh_package_link_identify_units(c.f.units, c.f.count, &inspect, &classes, error, sizeof(error))); \
+        bound[n] = c.f.bound - bound[n]; } while (0)
+    METER_PASS(0);                                  /* everything captured afresh */
+    METER_PASS(1);                                  /* everything restored; nothing changed */
+    conditional_change(&c, 5, "fsm f, changed"); sh_package_link_reuse_invalidate(reuse, 5);
+    METER_PASS(2);                                  /* f of scope 1 recaptured: first sticky-invalid capture */
+    METER_PASS(3);                                  /* recaptured again from identical bytes */
+    conditional_change(&c, 5, "fsm f, other");
+    METER_PASS(4);                                  /* recaptured from different bytes */
+#undef METER_PASS
+    for (size_t p = 0; p < 5; p++) assert(sh_package_link_reuse_test_meters(reuse, p, m + p));
+    assert(!sh_package_link_reuse_test_meters(reuse, 5, &none));
+    /* Work counters against the fixture's own bind count (one bind per fresh capture). */
+    for (size_t p = 0; p < 5; p++) assert(m[p].fresh == bound[p] && m[p].fresh == (p == 0 ? 8u : p == 1 ? 0u : 1u));
+    assert(!m[0].again_first && !m[0].again_same && !m[0].again_changed);
+    assert(m[2].again_first == 1 && !m[2].again_same && !m[2].again_changed);
+    assert(!m[3].again_first && m[3].again_same == 1 && !m[3].again_changed);
+    assert(!m[4].again_first && !m[4].again_same && m[4].again_changed == 1);
+    /* Conditional certification: two behaviors, four selections, six bindings in the complete capture.
+     * Slot comparisons search each behavior's two sorted selections: fsm/f takes 2, fsm/g 1. A behavior
+     * with both selections removed searches 3 times (fsm/f found, then both removed); one keeping its
+     * uncertified fsm/f searches only fsm/g, twice. */
+    for (size_t p = 0; p < 5; p++)
+        assert(m[p].cond_units == 2 && m[p].cond_edges == 4 && m[p].cond_walk_edges == 6 && m[p].cond_compares == (p < 2 ? 10u : 7u));
+    assert(m[0].cond_nonlocal == 0 && m[0].cond_certified == 8 && m[0].cond_removed == 4);
+    assert(m[1].cond_nonlocal == 0 && m[1].cond_certified == 8 && m[1].cond_removed == 4);
+    assert(m[0].cond_digest == m[1].cond_digest);
+    for (size_t p = 2; p < 5; p++) assert(m[p].cond_nonlocal == 1 && m[p].cond_certified == 6 && m[p].cond_removed == 3);
+    assert(m[2].cond_digest != m[1].cond_digest && m[3].cond_digest == m[2].cond_digest);
+    /* The detail line carries every pass and truncates safely. */
+    assert(*sh_package_link_reuse_detail(reuse, full, sizeof(full)) && strstr(full, "identity pass detail by pass: 1: fresh 8 "));
+    assert(strstr(full, "; 5: fresh 1 ") && !strstr(full, "; 6: "));
+    assert(strlen(sh_package_link_reuse_detail(reuse, tiny, sizeof(tiny))) < sizeof(tiny));
+    assert(!*sh_package_link_reuse_detail(NULL, full, sizeof(full)));
+    /* Uncached oracle: the same partition and identities without any cache. */
+    assert(sh_package_link_identify_units(c.f.units, c.f.count, &plain, &plain_classes, error, sizeof(error)));
+    assert(plain_classes.count == classes.count);
+    for (size_t u = 0; u < c.f.count; u++) {
+        assert(!memcmp(classes.identities[classes.nodes[u]], plain_classes.identities[plain_classes.nodes[u]], 32));
+        for (size_t v = 0; v < c.f.count; v++)
+            assert((classes.nodes[u] == classes.nodes[v]) == (plain_classes.nodes[u] == plain_classes.nodes[v]));
+    }
+    /* Without the sorted slot index (as when it cannot be allocated): the same partition and identities,
+     * captured and restored, the slots compared one by one (4 per behavior: 1 + 1 + 2, or 2 + 2). */
+    {
+        sh_package_link_reuse *linear = sh_package_link_reuse_open(c.f.count);
+        sh_package_link_adapter one_by_one = inspect;
+        sh_package_link_classes linear_classes = {0};
+        sh_package_link_pass_meters lm[2];
+        assert(linear); one_by_one.reuse = linear; sh_package_link_reuse_test_fail_index(linear, 1);
+        for (size_t p = 0; p < 2; p++) {
+            assert(sh_package_link_identify_units(c.f.units, c.f.count, &one_by_one, &linear_classes, error, sizeof(error)));
+            assert(sh_package_link_reuse_test_meters(linear, p, lm + p));
+            assert(lm[p].cond_compares == 8 && lm[p].cond_removed == m[4].cond_removed && lm[p].cond_digest == m[4].cond_digest);
+            assert(linear_classes.count == plain_classes.count);
+            for (size_t u = 0; u < c.f.count; u++) {
+                assert(!memcmp(linear_classes.identities[linear_classes.nodes[u]], plain_classes.identities[plain_classes.nodes[u]], 32));
+                for (size_t v = 0; v < c.f.count; v++)
+                    assert((linear_classes.nodes[u] == linear_classes.nodes[v]) == (plain_classes.nodes[u] == plain_classes.nodes[v]));
+            }
+        }
+        assert(lm[1].fresh == 0);
+        sh_package_link_reuse_close(linear); sh_package_link_classes_free(&linear_classes);
+    }
+    sh_package_link_reuse_close(reuse);
+    /* A meter table that cannot be allocated: results unchanged, the recapture meter silent. */
+    conditional_setup(&c, sources);
+    inspect = (sh_package_link_adapter){&c.f, resolve, bind_file}; plain = inspect;
+    reuse = sh_package_link_reuse_open(c.f.count); assert(reuse);
+    inspect.reuse = reuse; sh_package_link_reuse_test_fail_meters(reuse, 1);
+    assert(sh_package_link_identify_units(c.f.units, c.f.count, &inspect, &classes, error, sizeof(error)));
+    conditional_change(&c, 5, "fsm f, changed"); sh_package_link_reuse_invalidate(reuse, 5);
+    assert(sh_package_link_identify_units(c.f.units, c.f.count, &inspect, &classes, error, sizeof(error)));
+    assert(sh_package_link_reuse_test_meters(reuse, 1, m + 1));
+    assert(m[1].fresh == 1 && !m[1].again_first && !m[1].again_same && !m[1].again_changed && m[1].cond_certified == 6);
+    assert(sh_package_link_identify_units(c.f.units, c.f.count, &plain, &plain_classes, error, sizeof(error)));
+    assert(plain_classes.count == classes.count);
+    for (size_t u = 0; u < c.f.count; u++)
+        assert(!memcmp(classes.identities[classes.nodes[u]], plain_classes.identities[plain_classes.nodes[u]], 32));
+    sh_package_link_reuse_close(reuse);
+    sh_package_link_classes_free(&classes); sh_package_link_classes_free(&plain_classes);
+}
+
+int main(int argc, char **argv)
 {
     const char *folders[] = {"mars", "green", "duplicate"};
     const char *entity = "{ edit = { material = \"materials/stone\"; health = 10; } }";
@@ -1413,6 +1894,9 @@ int main(void)
     sh_package_link_adapter adapter = {&f, resolve, bind_file, assign};
     char temporary[MAX_PATH], relative[256], error[1024];
     size_t entities[3], materials[3];
+    if (argc >= 3 && !strcmp(argv[1], "--restore-bench"))
+        return restore_benchmark((size_t)strtoull(argv[2], NULL, 10), argc > 3 && !strcmp(argv[3], "copy"),
+            argc > 4 ? atoi(argv[4]) : 4);
     assert(GetTempPathA(sizeof(temporary), temporary));
     snprintf(root, sizeof(root), "%ssmp-linker-%lu-%llu", temporary, GetCurrentProcessId(), GetTickCount64());
     assert(CreateDirectoryA(root, NULL));
@@ -1741,6 +2225,8 @@ int main(void)
     coupled_members(sources);
     implicit_bindings(sources);
     conditional_bindings(sources);
+    borrowed_restore_equivalence(sources);
+    pass_meters(sources);
     sh_package_link_inputs_free(&discovered);
     for (size_t i = 0; i < 3; i++) { sh_package_compilation_free(scopes[i]); sh_package_scope_close(&views[i]); }
     for (size_t i = 0; i < sources->file_count; i++) if (!sources->files[i].directory) assert(sh_package_source_verify(&sources->files[i]));

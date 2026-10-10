@@ -386,6 +386,15 @@ int sh_snap_type_cache_install(const sig_result *r, size_t n, const uint8_t *bas
 
 int sh_snap_type_cache_active(void) { return InterlockedCompareExchange(&g_active, 0, 0) != 0; }
 
+int sh_snap_type_cache_entity_route(sh_snap_entity_route *out)
+{
+    if (!out || !sh_snap_type_cache_active() || !g.game_access) return 0;
+    out->game_access = g.game_access;
+    out->context_ctor = g.builder_ctor; out->context_args = g.builder_args;
+    out->context_reset = g.builder_reset; out->context_dtor = g.builder_dtor;
+    return 1;
+}
+
 #ifdef SH_SNAP_TYPE_CACHE_TESTING
 void sh_snap_type_cache_test_bind(const sh_snap_type_cache_native *n)
 {

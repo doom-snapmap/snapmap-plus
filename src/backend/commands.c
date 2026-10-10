@@ -1896,6 +1896,19 @@ static void h_sh_packages(idCmdArgs *a)
                 sh_printf("Listing shows %zu of %zu visits; traversal checked every recorded edge.\n", report.shown, report.edges);
             text = report.text;
         }
+    } else if (operation && !strcmp(operation, "inputs")) {
+        const char *query = cmd_argv(a, 2), *first = cmd_argv(a, 3);
+        text = sh_package_runtime_inputs(query, first ? (size_t)strtoull(first, NULL, 10) : 1);
+        if (!text) sh_printf("Input accounting is unavailable: out of memory.\n");
+    } else if (operation && !strcmp(operation, "exposures")) {
+        const char *query = cmd_argv(a, 2), *entry = cmd_argv(a, 3), *first = cmd_argv(a, 4);
+        if (!query || !entry) {
+            sh_printf("Usage: sh_packages exposures <package id, folder or path> <row> [first line]\n");
+            return;
+        }
+        text = sh_package_runtime_input_exposures(query, (size_t)strtoull(entry, NULL, 10),
+            first ? (size_t)strtoull(first, NULL, 10) : 1);
+        if (!text) sh_printf("Input accounting is unavailable: out of memory.\n");
     } else text = sh_package_runtime_summary();
     if (text) {
         const char *line = text;
@@ -1931,7 +1944,7 @@ static void h_sh_perf(idCmdArgs *a)
 }
 
 static const cmd_entry CMD_TABLE[] = {
-    { "sh_packages",          (void *)h_sh_packages, "Show installed package sources and compiler results. 'sh_packages dependencies [type name]' inspects observed native dependencies; 'sh_packages rescan' judges the installed packages again at the browser." },
+    { "sh_packages",          (void *)h_sh_packages, "Show installed package sources and compiler results. 'sh_packages inputs [package or path] [first row]' accounts for every installed file and 'sh_packages exposures <package or path> <row>' lists all of one entry's exposures; 'sh_packages dependencies [type name]' inspects observed native dependencies; 'sh_packages rescan' judges the installed packages again at the browser." },
     { "sh_perf",              (void *)h_sh_perf,     "Where frame time goes inside snapmap-plus. 'sh_perf reset' starts the counting again." },
     { "sh_rawmaps",           (void *)h_sh_rawmaps,   "Raw JSON map files: state, paths, load, save. Run with no arguments to see what is set, or 'sh_rawmaps help' (or '?') for every verb." },
     { "sh_rawmaps_on",       (void *)h_rawmaps_on,  "(legacy) Same as 'sh_rawmaps on'. Kept because older guides use it." },

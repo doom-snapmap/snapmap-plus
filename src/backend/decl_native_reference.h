@@ -9,11 +9,17 @@ typedef struct sh_decl_native_reference {
     sh_decl_reference resource;
     sh_model_reference model;
     int movie; /* resource is a cooked UI movie file; bind writes its constructor name. */
+    /* The use's loader creates a defaulted object when the resource has no
+     * data (an event md6Anim argument); whether it needs a source is the
+     * caller's availability question. A reflected field leaves this 0. */
+    int make_default;
 } sh_decl_native_reference;
 
 /* 1 resource, 0 native runtime/null identity, 2 declaration with no source in
  * this scope (the engine supplies null or its constant default by name; not a
- * source dependency), -1 unavailable. Only the verified
+ * source dependency), -1 unavailable. An event md6Anim use
+ * ({SH_DECL_EVENT_ANIM_TYPE, SH_DECL_EVENT_ANIM_OPS}) returns its anim
+ * resource as 1 with make_default set. Only the verified
  * pointer reader selects semantics: image names do not use declaration search,
  * and a model field can dispatch to several different resource managers.
  * The registry must describe the prospective source scope. Initialize output

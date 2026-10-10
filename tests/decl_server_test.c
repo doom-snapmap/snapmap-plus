@@ -223,6 +223,11 @@ int sh_palette_refresh_after_decl_registration(void)
 }
 
 static int g_failed;
+static int g_editor_live, g_editor_ready_refuse, g_editor_end_refuse, g_editor_after_commit_refuse;
+static int g_editor_end_calls, g_editor_end_throw, g_editor_after_commit_throw;
+static int g_editor_begins, g_editor_accepts, g_editor_rejects;
+static int (*g_editor_admitted)(void *);
+static void *g_editor_context;
 
 #define CHECK(expr) do {                                                        \
     if (!(expr)) {                                                              \
@@ -231,6 +236,33 @@ static int g_failed;
     }                                                                           \
 } while (0)
 
+sh_resource_editor_state *sh_resource_graph_native_editor_state_begin(
+    int (*admitted)(void *),void *context,char *error,size_t capacity)
+{
+    (void)error; (void)capacity; CHECK(!g_editor_live && admitted(context));
+    g_editor_admitted=admitted; g_editor_context=context; g_editor_live=1; g_editor_begins++;
+    return (sh_resource_editor_state *)2;
+}
+int sh_resource_graph_native_editor_state_ok(sh_resource_editor_state *state)
+{ return state==(sh_resource_editor_state *)2 && g_editor_live && g_editor_admitted(g_editor_context); }
+int sh_resource_graph_native_editor_state_ready(sh_resource_editor_state *state)
+{
+    if (g_editor_ready_refuse) { g_editor_ready_refuse--; return 0; }
+    return sh_resource_graph_native_editor_state_ok(state);
+}
+int sh_resource_graph_native_editor_state_end(sh_resource_editor_state **owned,
+    int accepted,int *committed,char *error,size_t capacity)
+{
+    (void)error; (void)capacity; *committed=0; g_editor_end_calls++;
+    if (!*owned) { *committed=accepted; return 1; }
+    CHECK(*owned==(sh_resource_editor_state *)2 && g_editor_live && g_editor_admitted(g_editor_context));
+    if (g_editor_end_throw) {
+        g_editor_end_throw=0; RaiseException(0xe0410012,0,0,NULL);
+    }
+    if (g_editor_end_refuse) { g_editor_end_refuse--; return 0; }
+    if (accepted) g_editor_accepts++; else g_editor_rejects++;
+    *committed=accepted; *owned=NULL; g_editor_live=0; g_editor_context=NULL; return 1;
+}
 /* Model the allocator scope stack independently of resource-level promotion. */
 static struct {
     unsigned char prefix[0x44];
@@ -252,13 +284,15 @@ void sh_mpkg_boot_capture(const char *root)
 int sh_mpkg_activation_commit(char *error, size_t capacity)
 {
     g_install_commit_calls++;
-    if (g_heap_check_native) CHECK(g_heap_local.depth == 1);
+    if (g_heap_check_native) CHECK(g_heap_local.depth == 2 && g_editor_live);
     if (g_install_commit_fail) {
         int failure = g_install_commit_fail;
         g_install_commit_fail = 0;
         if (failure == 2) RaiseException(0xe04d504d, 0, 0, NULL);
         snprintf(error, capacity, "fixture installation commit failure"); return 0;
     }
+    if (g_editor_after_commit_refuse) { g_editor_after_commit_refuse=0; g_editor_end_refuse=1; }
+    if (g_editor_after_commit_throw) { g_editor_after_commit_throw=0; g_editor_end_throw=1; }
     return 1;
 }
 int sh_mpkg_activation_cancel(void)
@@ -309,8 +343,9 @@ static int g_log_count;
 void backend_log(const char *message)
 {
     g_log_count++;
-    strcpy_s(g_last_log, sizeof(g_last_log), message ? message : "");
-    if (message && strstr(message, "FAILED:")) strcpy_s(g_last_failure, sizeof(g_last_failure), message);
+    /* Truncate: a long product log line must not fast-fail the fixture. */
+    strncpy_s(g_last_log, sizeof(g_last_log), message ? message : "", _TRUNCATE);
+    if (message && strstr(message, "FAILED:")) strncpy_s(g_last_failure, sizeof(g_last_failure), message, _TRUNCATE);
 }
 
 /* Record optional post-palette operations without letting them fail registration. */
@@ -328,6 +363,7 @@ int sh_decl_visibility_install(const unsigned char *module_base,
 
 /* Exercise hook ownership without modifying executable memory. */
 int sh_decl_visibility_source_exists(const char *path) { (void)path; return -1; }
+int sh_decl_visibility_native_exists(const char *path) { (void)path; return -1; }
 static void *g_hook_owned;
 static void (*g_hook_detour)(void);
 static int g_hook_prepare_fail = 1;
@@ -3357,6 +3393,28 @@ static void test_empty_launch_and_runtime_results(void)
     g_boundary_common_slot = g_boundary_common;
     sh_decl_server_rearm_poll();
     CHECK(sh_decl_server_registration_succeeded() == 1 && g_string_refreshes == 2);
+    /* An installed-package request waits for the browser, as after a consent
+     * install committed in the editor. A map-boundary activation completing
+     * meanwhile reports its own outcome; the deferred pass still runs after. */
+    {
+        const LONG kinds[] = {0, 1};
+        for (size_t k = 0; k < sizeof(kinds) / sizeof(kinds[0]); k++) {
+            int refreshes = g_string_refreshes;
+            if (kinds[k]) sh_decl_server_request_rearm(); else sh_decl_server_test_request_watched();
+            CHECK(!sh_decl_server_registration_succeeded());
+            CHECK(sh_decl_server_activate_occurrences(NULL) == 1);
+            CHECK(g_string_refreshes == refreshes + 1 && !sh_decl_server_registration_succeeded());
+            sh_decl_server_rearm_poll();
+            CHECK(sh_decl_server_registration_succeeded() == 1);
+        }
+        /* A pending request never masks a failed activation. */
+        g_runtime_dependencies_ok = 0;
+        sh_decl_server_test_request_watched();
+        CHECK(sh_decl_server_activate_occurrences(NULL) == 0);
+        g_runtime_dependencies_ok = 1;
+        sh_decl_server_rearm_poll();
+        CHECK(sh_decl_server_registration_succeeded() == 1);
+    }
     {
         const sh_package_compilation *before = sh_package_runtime_acquire(), *after;
         int scans = g_scan_calls, refreshes = g_string_refreshes, retries = g_startup_retries;
@@ -3418,11 +3476,38 @@ static void test_empty_launch_and_runtime_results(void)
             int begins = g_resident_begin_calls, ends = g_resident_end_calls;
             if (failure) g_resident_fail_drain = 1; else g_resident_fail_begin = 1;
             CHECK(sh_decl_server_rearm() == 0);
-            CHECK(g_resident_begin_calls == begins + 2 && g_resident_end_calls == ends + 2);
+            /* Failed Begin owns no resident handle. Only recovery ends one;
+             * a failed drain still ends both admitted resident passes. */
+            CHECK(g_resident_begin_calls == begins + 2 && g_resident_end_calls == ends + (failure ? 2 : 1));
             CHECK(g_install_commit_calls == commits && sh_package_runtime_admission_ready());
             after = sh_package_runtime_acquire(); CHECK(after == before); sh_package_runtime_release();
         }
         CHECK(sh_decl_server_rearm() == 1);
+    }
+    {
+        /* A failed read-only storage preflight cannot reach disk commit. */
+        const sh_package_compilation *before=sh_package_runtime_acquire(),*after;
+        sh_package_runtime_release(); int commits=g_install_commit_calls,rejects=g_editor_rejects;
+        g_editor_ready_refuse=1;
+        CHECK(!sh_decl_server_rearm());
+        after=sh_package_runtime_acquire(); CHECK(after==before); sh_package_runtime_release();
+        CHECK(g_install_commit_calls==commits && g_editor_rejects==rejects+1 && !g_editor_live);
+        CHECK(sh_decl_server_rearm());
+        /* Simulate identity/admission refusal after the irreversible commit.
+         * The candidate remains served; NEXT refresh closes accepted storage
+         * before new work, without repeating the previous disk commit. */
+        before=sh_package_runtime_acquire(); sh_package_runtime_release();
+        commits=g_install_commit_calls; rejects=g_editor_rejects; int accepts=g_editor_accepts;
+        int cancels=g_install_cancel_calls;
+        g_editor_after_commit_refuse=1;
+        CHECK(!sh_decl_server_rearm());
+        after=sh_package_runtime_acquire(); CHECK(after!=before); sh_package_runtime_release();
+        CHECK(g_install_commit_calls==commits+1 && g_editor_accepts==accepts &&
+            g_editor_rejects==rejects && g_editor_live && !sh_package_runtime_admission_ready());
+        CHECK(g_install_cancel_calls==cancels);
+        CHECK(sh_decl_server_rearm());
+        CHECK(g_install_commit_calls==commits+2 && g_editor_accepts==accepts+2 &&
+            g_editor_rejects==rejects && !g_editor_live && g_install_cancel_calls==cancels);
     }
     {
         /* Installed packages changed outside an installation are prepared again
@@ -3780,6 +3865,33 @@ static void test_empty_launch_and_runtime_results(void)
         g_boundary_resource_head = NULL;
         g_linked_fixture = 0;
     }
+    {
+        /* End raises after successful disk commit, before writing committed.
+         * Keep the new provider, disable readiness and retain the damaged
+         * native context without cancellation or End/destructor replay. */
+        const sh_package_compilation *before=sh_package_runtime_acquire(),*after;
+        sh_package_runtime_release();
+        int commits=g_install_commit_calls,cancels=g_install_cancel_calls;
+        int ends=g_editor_end_calls,accepts=g_editor_accepts,rejects=g_editor_rejects;
+        g_boundary_resource_head=g_rt_builtin_node;
+        g_editor_after_commit_throw=1;
+        CHECK(!sh_decl_server_rearm());
+        after=sh_package_runtime_acquire(); CHECK(after!=before); sh_package_runtime_release();
+        CHECK(g_install_commit_calls==commits+1 && g_install_cancel_calls==cancels &&
+            g_editor_end_calls==ends+1 && g_editor_live &&
+            g_editor_accepts==accepts && g_editor_rejects==rejects);
+        CHECK(!sh_package_runtime_ready() && !sh_package_runtime_admission_ready());
+        CHECK(!sh_decl_server_rearm());
+        sh_decl_server_request_rearm(); sh_decl_server_rearm_poll();
+        after=sh_package_runtime_acquire(); CHECK(after!=before); sh_package_runtime_release();
+        CHECK(g_install_commit_calls==commits+1 && g_install_cancel_calls==cancels &&
+            g_editor_end_calls==ends+1 && g_editor_accepts==accepts && g_editor_rejects==rejects);
+        /* Fixture-owned sentinels and wrappers are discarded directly, after
+         * asserting the production damage path cannot replay native cleanup. */
+        sh_decl_server_test_reset_install();
+        g_editor_live=g_shader_resident_live=0; g_editor_context=NULL;
+        sh_package_runtime_test_dispose(); heap_fixture_reset();
+    }
     test_boot_hook_recovery(results, sizeof(results)/sizeof(results[0]), base, &registry);
     g_rt_builtin_count = 0;
     sh_decl_server_test_reset_install();
@@ -3885,6 +3997,563 @@ done:
     CHECK(RemoveDirectoryA(root));
 }
 
+/* Editor-row publication lineage: the linker's exact binding per row, fixed
+ * identities, dependency variants, equal-resource sharing, product names never
+ * native, positive native proof, bounded records and generation lifetime. */
+typedef struct rl_decl { void *vtable; const char *name; } rl_decl;
+static rl_decl rl_a = {0, "pkg/row_a"}, rl_v = {0, "pkg/row_v"}, rl_a2 = {0, "pkg/row_a"},
+    rl_l = {0, "pkg/row_l"}, rl_d = {0, "pkg/row_d"}, rl_native = {0, "native/row"}, rl_stale = {0, "native/row"},
+    rl_p = {0, "public/row"};
+static rl_decl *rl_live[8]; static int rl_sources = 1, rl_retired;
+static char rl_manager;
+static void *rl_peek(void *manager, const char *name, unsigned char make_default)
+{
+    (void)manager; (void)make_default;
+    for (int i = 0; i < 8; i++) if (rl_live[i] && !strcmp(rl_live[i]->name, name)) return rl_live[i];
+    return NULL;
+}
+static void *rl_source(void *manager, const char *name) { (void)manager; (void)name; return rl_sources ? &rl_manager : NULL; }
+/* Production mode's native resource index. */
+static int rl_index = 1; static char rl_index_path[200];
+static int rl_probe(const char *path) { snprintf(rl_index_path, sizeof(rl_index_path), "%s", path); return rl_index; }
+static void rl_retire(void) { rl_retired++; }
+static void rl_resource(sh_compiled_resource *resource, const char *name, const char *engine, const char *original, const char *body)
+{
+    memset(resource, 0, sizeof(*resource));
+    resource->type = "snapEditorEntityDef"; resource->name = (char *)name; resource->engine_path = (char *)engine;
+    resource->original_path = (char *)original; resource->body = (unsigned char *)body; resource->body_length = strlen(body);
+    CHECK(sh_package_owners_add(&resource->owners, 0));
+}
+static void test_row_lineage(void)
+{
+    static unsigned char fingerprints[2][32], originals[2][32], tree_a[1][32], tree_b[1][32], tree_ad[2][32];
+    static char longpath[1500];
+    sh_package_sources sources = {0}; sh_package_compilation compiled = {0};
+    sh_compiled_resource resources[3];
+    sh_package_provenance bindings = {0}, supply = {0};
+    char ia[80], iv[80], name[80];
+    size_t ca, cb, cad, many[40], records;
+    const char *authored = "decls/snapeditorentitydef/start.decl";
+    memset(fingerprints[0], 0x11, 32); memset(fingerprints[1], 0x22, 32);
+    memset(originals[0], 0xa1, 32); memset(originals[1], 0xb2, 32);
+    memset(tree_a, 0xa1, sizeof(tree_a)); memset(tree_b, 0xb2, sizeof(tree_b));
+    memset(tree_ad[0], 0xa1, 32); memset(tree_ad[1], 0xd4, 32);
+    sources.package_count = 2; sources.fingerprints = fingerprints; sources.original_fingerprints = originals;
+    /* Linker bindings: row_a is one resource equal in contexts A and B (shared
+     * registration); row_v is the same authored path and tree linked in
+     * another dependency context. */
+    ca = sh_package_provenance_context_add(&bindings, SH_PACKAGE_CONTEXT_ISOLATED, (const unsigned char (*)[32])tree_a, 1, "pkg/a");
+    cb = sh_package_provenance_context_add(&bindings, SH_PACKAGE_CONTEXT_ISOLATED, (const unsigned char (*)[32])tree_b, 1, "pkg/b");
+    cad = sh_package_provenance_context_add(&bindings, SH_PACKAGE_CONTEXT_COMPOSED, (const unsigned char (*)[32])tree_ad, 2, NULL);
+    CHECK(ca != SIZE_MAX && cb != SIZE_MAX && cad != SIZE_MAX);
+    CHECK(sh_package_provenance_bind(&bindings, "snapeditorentitydef", authored, "pkg/row_a", &ca, 1) &&
+          sh_package_provenance_bind(&bindings, "snapeditorentitydef", authored, "pkg/row_a", &cb, 1) &&
+          sh_package_provenance_bind(&bindings, "snapeditorentitydef", authored, "pkg/row_v", &cad, 1));
+    rl_resource(resources + 0, "pkg/row_a", "generated/decls/snapeditorentitydef/pkg/row_a.decl", authored, "{ a }");
+    rl_resource(resources + 1, "pkg/row_v", "generated/decls/snapeditorentitydef/pkg/row_v.decl", authored, "{ v }");
+    compiled.sources = &sources; compiled.resources = resources; compiled.resource_count = 2;
+    sh_decl_server_test_rows_reset(); sh_decl_server_test_rows_bindings(&bindings); sh_decl_server_rows_retired(rl_retire);
+    sh_decl_server_test_set_reconstruct(NULL, (sh_decl_server_test_find_decl_fn)rl_peek);
+    sh_decl_server_test_rows_manager(&rl_manager, rl_source);
+    memset(rl_live, 0, sizeof(rl_live)); rl_live[0] = &rl_a; rl_live[1] = &rl_v; rl_live[2] = &rl_native;
+    /* Positive native proof only before and outside product publication. */
+    CHECK(sh_decl_server_row_class(&rl_native, NULL, 0) == 0);
+    CHECK(sh_decl_server_row_class(&rl_stale, NULL, 0) == -1);   /* not the live entry */
+    rl_sources = 0; CHECK(sh_decl_server_row_class(&rl_native, NULL, 0) == -1); rl_sources = 1;
+    /* Production mode has no source records for stock rows: the proof is the
+     * native resource index for the row's own path, and only a positive one. */
+    rl_sources = 0; sh_decl_server_test_rows_production(rl_probe);
+    CHECK(sh_decl_server_row_class(&rl_native, NULL, 0) == 0 &&
+          !strcmp(rl_index_path, "generated/decls/snapeditorentitydef/native/row.decl"));
+    CHECK(sh_decl_server_row_class(&rl_stale, NULL, 0) == -1);
+    rl_index = 0; CHECK(sh_decl_server_row_class(&rl_native, NULL, 0) == -1);
+    rl_index = -1; rl_sources = 1; CHECK(sh_decl_server_row_class(&rl_native, NULL, 0) == -1);
+    rl_index = 1; sh_decl_server_test_rows_production(NULL);
+    rl_retired = 0; CHECK(sh_decl_server_test_rows_record(&compiled, 1) && rl_retired == 1);
+    /* A published row is never native, whatever the index says. */
+    sh_decl_server_test_rows_production(rl_probe);
+    CHECK(sh_decl_server_row_class(&rl_a, NULL, 0) == 1 && sh_decl_server_row_class(&rl_v, NULL, 0) == 1);
+    sh_decl_server_test_rows_production(NULL);
+    /* Fixed-size exact identities; the dependency variant is distinct. */
+    CHECK(sh_decl_server_row_class(&rl_a, ia, sizeof(ia)) == 1 && strlen(ia) == 64);
+    CHECK(sh_decl_server_row_class(&rl_v, iv, sizeof(iv)) == 1 && strlen(iv) == 64 && strcmp(ia, iv));
+    CHECK(sh_decl_server_row_class(&rl_a, name, 64) == -1);       /* never a truncated identity */
+    CHECK(sh_decl_server_row_resolve(ia) == &rl_a && sh_decl_server_row_resolve(iv) == &rl_v);
+    /* Equal-resource sharing: one binding carrying both linked contexts. */
+    CHECK(sh_decl_server_row_supply(&rl_a, &supply) == 1 && supply.binding_count == 1 &&
+          supply.bindings[0].context_count == 2 && !strcmp(supply.bindings[0].original, authored));
+    sh_package_provenance_free(&supply); memset(&supply, 0, sizeof(supply));
+    CHECK(sh_decl_server_row_supply(&rl_v, &supply) == 1 && supply.bindings[0].context_count == 1 &&
+          supply.contexts[supply.bindings[0].contexts[0]].mode == SH_PACKAGE_CONTEXT_COMPOSED);
+    sh_package_provenance_free(&supply); memset(&supply, 0, sizeof(supply));
+    CHECK(sh_decl_server_row_supply(&rl_native, &supply) == 0 && !supply.binding_count);
+    CHECK(sh_decl_server_row_class(&rl_native, NULL, 0) == 0);
+    /* Only the wrong variant available: the identity never resolves to it. */
+    rl_live[0] = NULL; CHECK(!sh_decl_server_row_resolve(ia) && sh_decl_server_row_resolve(iv) == &rl_v);
+    /* A reused address carries only its new meaning (here a live native row). */
+    rl_live[0] = &rl_a; rl_a.name = "pkg/row_x";
+    CHECK(sh_decl_server_row_class(&rl_a, name, sizeof(name)) == 0 && sh_decl_server_row_supply(&rl_a, &supply) == 0);
+    rl_a.name = "pkg/row_a";
+    /* A reused name at a new unrecorded object: never native, never resolved. */
+    rl_live[0] = &rl_a2;
+    CHECK(sh_decl_server_row_class(&rl_a2, NULL, 0) == -1 && !sh_decl_server_row_resolve(ia));
+    CHECK(sh_decl_server_test_rows_record(&compiled, 1));          /* republished at the new address */
+    CHECK(sh_decl_server_row_class(&rl_a2, name, sizeof(name)) == 1 && !strcmp(name, ia));
+    CHECK(sh_decl_server_row_resolve(ia) == &rl_a2 && sh_decl_server_row_class(&rl_a, NULL, 0) == -1);
+    /* Repeated retirement and republication: one record per name. */
+    records = sh_decl_server_test_rows_count(); CHECK(records == 2);
+    for (int i = 0; i < 50; i++) CHECK(sh_decl_server_test_rows_record(&compiled, i & 1));
+    CHECK(sh_decl_server_test_rows_count() == records && sh_decl_server_row_resolve(ia) == &rl_a2);
+    /* A registration that fails over existing names: their meaning ends first. */
+    rl_retired = 0; CHECK(sh_decl_server_test_rows_record(&compiled, 0) && rl_retired == 1);
+    CHECK(sh_decl_server_row_class(&rl_a2, NULL, 0) == -1 && !sh_decl_server_row_resolve(ia) && !sh_decl_server_row_resolve(iv));
+    CHECK(sh_decl_server_row_supply(&rl_a2, &supply) == 0);
+    CHECK(sh_decl_server_test_rows_record(&compiled, 1) && sh_decl_server_row_resolve(ia) == &rl_a2);
+    /* A valid row beyond the earlier capacity: long path, forty linked contexts. */
+    memset(longpath, 'p', sizeof(longpath) - 1);
+    for (int i = 0; i < 40; i++) {
+        unsigned char tree[1][32]; char component[16];
+        memset(tree, i + 1, sizeof(tree)); snprintf(component, sizeof(component), "pkg/m%d", i);
+        many[i] = sh_package_provenance_context_add(&bindings, SH_PACKAGE_CONTEXT_ISOLATED, (const unsigned char (*)[32])tree, 1, component);
+        CHECK(many[i] != SIZE_MAX);
+    }
+    CHECK(sh_package_provenance_bind(&bindings, "snapeditorentitydef", longpath, "pkg/row_l", many, 40));
+    rl_resource(resources + 2, "pkg/row_l", "generated/decls/snapeditorentitydef/pkg/row_l.decl", longpath, "{ l }");
+    compiled.resources = resources + 2; compiled.resource_count = 1; rl_live[3] = &rl_l;
+    CHECK(sh_decl_server_test_rows_record(&compiled, 1));
+    CHECK(sh_decl_server_row_class(&rl_l, name, sizeof(name)) == 1 && strlen(name) == 64 && sh_decl_server_row_resolve(name) == &rl_l);
+    CHECK(sh_decl_server_row_supply(&rl_l, &supply) == 1 && supply.bindings[0].context_count == 40);
+    sh_package_provenance_free(&supply); memset(&supply, 0, sizeof(supply));
+    sh_package_owners_free(&resources[2].owners);
+    /* Changed bytes served at an installed SnapMap original's own path occupy
+     * that native slot (2), still an exact publication; the same scope under a
+     * private name (the linker's original_path) is an alias, a publication (1);
+     * a campaign original or an added path is only a publication (1); exact
+     * original bytes are native (0). */
+    CHECK(sh_package_provenance_bind(&bindings, "snapeditorentitydef", authored, "public/row", &ca, 1));
+    rl_resource(resources + 2, "public/row", authored, NULL, "{ p }");
+    resources[2].baseline_known = 1; rl_live[5] = &rl_p; CHECK(sh_decl_server_test_rows_record(&compiled, 1));
+    CHECK(sh_decl_server_row_class(&rl_p, name, sizeof(name)) == 2 && strlen(name) == 64 && sh_decl_server_row_resolve(name) == &rl_p);
+    CHECK(sh_decl_server_row_supply(&rl_p, &supply) == 1 && supply.binding_count == 1);
+    sh_package_provenance_free(&supply); memset(&supply, 0, sizeof(supply));
+    sh_package_owners_free(&resources[2].owners);
+    rl_resource(resources + 2, "public/row", "generated/decls/snapeditorentitydef/public/row.decl", authored, "{ p }");
+    resources[2].baseline_known = 1; CHECK(sh_decl_server_test_rows_record(&compiled, 1));
+    CHECK(sh_decl_server_row_class(&rl_p, name, sizeof(name)) == 1 && strlen(name) == 64 && sh_decl_server_row_resolve(name) == &rl_p);
+    resources[2].baseline_known = 2; CHECK(sh_decl_server_test_rows_record(&compiled, 1));
+    CHECK(sh_decl_server_row_class(&rl_p, NULL, 0) == 1);
+    resources[2].baseline_known = 0; CHECK(sh_decl_server_test_rows_record(&compiled, 1));
+    CHECK(sh_decl_server_row_class(&rl_p, NULL, 0) == 1);
+    resources[2].baseline_known = 1; resources[2].native_original = 1; CHECK(sh_decl_server_test_rows_record(&compiled, 1));
+    CHECK(sh_decl_server_row_class(&rl_p, NULL, 0) == 0 && !sh_decl_server_row_resolve(name));
+    sh_package_owners_free(&resources[2].owners);
+    /* Two current publications of one exact identity: ambiguous. */
+    CHECK(sh_package_provenance_bind(&bindings, "snapeditorentitydef", authored, "pkg/row_d", &ca, 1));
+    rl_resource(resources + 2, "pkg/row_d", "generated/decls/snapeditorentitydef/pkg/row_d.decl", authored, "{ a }");
+    rl_live[4] = &rl_d; compiled.resources = resources; compiled.resource_count = 3;
+    CHECK(sh_decl_server_test_rows_record(&compiled, 1));
+    CHECK(sh_decl_server_row_class(&rl_d, name, sizeof(name)) == 1 && !strcmp(name, ia) && !sh_decl_server_row_resolve(ia));
+    /* A full compilation that no longer holds a name retires it, never
+     * current, though the engine keeps its declaration allocated; an additive
+     * pass retires nothing it does not compile. */
+    compiled.resources = resources + 2; compiled.resource_count = 1; CHECK(sh_decl_server_test_rows_record(&compiled, 1));
+    CHECK(sh_decl_server_row_resolve(ia) == &rl_d && sh_decl_server_row_class(&rl_a2, NULL, 0) == -1 &&
+          !sh_decl_server_row_named(&rl_a2, ia) && !sh_decl_server_row_exact(&rl_a2, name, sizeof(name)));
+    compiled.resources = resources; compiled.resource_count = 3;
+    CHECK(sh_decl_server_test_rows_record(&compiled, 1) && !sh_decl_server_row_resolve(ia));
+    sh_decl_server_test_set_additive(1); compiled.resources = resources + 2; compiled.resource_count = 1;
+    CHECK(sh_decl_server_test_rows_record(&compiled, 1) && !sh_decl_server_row_resolve(ia) && sh_decl_server_row_class(&rl_a2, NULL, 0) == 1);
+    sh_decl_server_test_set_additive(0);
+    sh_package_owners_free(&resources[0].owners); sh_package_owners_free(&resources[1].owners);
+    sh_package_owners_free(&resources[2].owners);
+    sh_decl_server_rows_retired(NULL); sh_decl_server_test_rows_bindings(NULL);
+    sh_decl_server_test_rows_manager(NULL, NULL); sh_decl_server_test_set_reconstruct(NULL, NULL);
+    sh_decl_server_test_rows_reset(); sh_package_provenance_free(&bindings);
+}
+/* The original-slot pair as production emits it (VK s1, 2026-10-07: rows
+ * player/start and smp/093d..., both scope 1). The installed editor package
+ * restates a stock role row; the real library links that restatement in the
+ * package's own scope under a private name and the linker records the
+ * authored path as its original_path. The alias carries the original's scope
+ * (1) by copy, so scope alone cannot say which row occupies the native slot:
+ * only a resource served at its original's path does. The alias below is the
+ * library's own output; the slot control is that same emitted resource served
+ * at its authored path, as the shared publication serves player/start. */
+static const char *slot_row = "generated/decls/snapeditorentitydef/player/start.decl";
+static const char *slot_def = "generated/decls/entitydef/player/coop/player_start.decl";
+static int slot_baseline(void *context, const char *path, unsigned char **body, size_t *length)
+{
+    const char *text = !strcmp(path, slot_row) ?
+            "{\n\tedit = {\n\t\tentityDef = \"player/coop/player_start\";\n\t\tplacementFlags = \"SNAP_ENTITY_PLACE_FLOOR\";\n"
+            "\t\tcollisionFlags = \"SNAP_ENTITY_ECF_SOLID\";\n\t\tinputs = {\n\t\t\tnum = 0;\n\t\t}\n\t}\n}\n" :
+        !strcmp(path, slot_def) ? "{\n\tclass = \"Entity\";\n\tedit = {\n\t\thealth = 100;\n\t}\n}\n" : NULL;
+    (void)context; *body = NULL; *length = 0;
+    if (!text) return 0;
+    *length = strlen(text); *body = (unsigned char *)_strdup(text); return *body ? 1 : -1;
+}
+/* Native registrations for the two typed families the pair reaches (the
+ * runtime context test's collection fixture): the library's source readers
+ * walk these, never a loaded declaration. */
+typedef struct slot_region { void *address; size_t length; } slot_region;
+typedef struct slot_fixture { slot_region regions[64]; size_t count; void *registry, *reflection; } slot_fixture;
+static void *slot_alloc(slot_fixture *f, size_t length)
+{
+    void *p = calloc(1, length); CHECK(p && f->count < 64);
+    if (p && f->count < 64) f->regions[f->count++] = (slot_region){p, length};
+    return p;
+}
+static void slot_pointer(void *p, size_t at, const void *value)
+{ uintptr_t address = (uintptr_t)value; memcpy((char *)p + at, &address, 8); }
+static void slot_number(void *p, size_t at, int value) { memcpy((char *)p + at, &value, 4); }
+static char *slot_string(slot_fixture *f, const char *text)
+{ char *copy = slot_alloc(f, strlen(text) + 1); if (copy) strcpy(copy, text); return copy; }
+static int slot_read(void *context, uintptr_t address, void *out, size_t length)
+{
+    slot_fixture *f = context;
+    for (size_t i = 0; i < f->count; i++) {
+        uintptr_t start = (uintptr_t)f->regions[i].address;
+        if (address >= start && address - start <= f->regions[i].length &&
+            length <= f->regions[i].length - (size_t)(address - start)) {
+            memcpy(out, (void *)address, length); return 1;
+        }
+    }
+    return 0;
+}
+static void slot_reflection(slot_fixture *f)
+{
+    const char *classes[] = {"idDeclEntityDef", "Entity", "idDeclTypeInfo", "int",
+        "idDeclSnapEditorEntity", "idList < EntityRefs >", "idDeclTypeInfoGraph"};
+    const char *types[] = {"entityDef", "snapEditorEntityDef"};
+    const size_t indices[] = {0, 4};
+    memset(f, 0, sizeof(*f));
+    f->registry = slot_alloc(f, 0x18);
+    void *managers = slot_alloc(f, 16);
+    slot_pointer(f->registry, 8, managers); slot_number(f->registry, 0x10, 2);
+    for (size_t i = 0; i < 2; i++) {
+        void *manager = slot_alloc(f, 0x90); slot_pointer(managers, i * 8, manager);
+        slot_pointer(manager, 8, slot_string(f, types[i]));
+        slot_pointer(manager, 0x10, slot_string(f, classes[indices[i]]));
+    }
+    f->reflection = slot_alloc(f, 0xb0);
+    void *container = slot_alloc(f, 0x30), *records = slot_alloc(f, 8 * 0x38);
+    void *objects = slot_alloc(f, 8 * 16), *pointers = slot_alloc(f, 8 * 16);
+    slot_pointer(f->reflection, 0, container); slot_pointer(container, 0x20, records);
+    slot_pointer(f->reflection, 0x88, objects); slot_number(f->reflection, 0x90, 8);
+    slot_pointer(f->reflection, 0xa0, pointers); slot_number(f->reflection, 0xa8, 8);
+    for (size_t i = 0; i < 7; i++) {
+        slot_pointer(records, i * 0x38, slot_string(f, classes[i]));
+        slot_pointer(records, i * 0x38 + 8, slot_string(f, i == 4 || i == 6 ? "idDeclTypeInfo" : ""));
+    }
+    slot_pointer(pointers, 8, (void *)0x10); slot_pointer(pointers, 4 * 16 + 8, (void *)0x10);
+    slot_pointer(objects, 5 * 16 + 8, (void *)0x80);
+    slot_pointer(objects, 6 * 16 + 8, (void *)0x30);
+    void *entity = slot_alloc(f, 3 * 0x48), *editor = slot_alloc(f, 3 * 0x48);
+    void *element = slot_alloc(f, 0x48);
+    slot_pointer(records, 0x38 + 0x20, entity); slot_pointer(records, 4 * 0x38 + 0x20, editor);
+    slot_pointer(records, 5 * 0x38 + 0x18, element);
+    void *rows[] = {entity, (char *)entity + 0x48, editor, element, (char *)editor + 0x48};
+    const char *field_types[] = {"idDeclEntityDef", "int", "idList < EntityRefs >", "idDeclEntityDef", "idDeclEntityDef"};
+    const char *operators[] = {"*", "", "", "*", "*"}, *names[] = {"target", "health", "inputs", "element", "entityDef"};
+    for (size_t i = 0; i < 5; i++) {
+        slot_pointer(rows[i], 0, slot_string(f, field_types[i]));
+        slot_pointer(rows[i], 8, slot_string(f, operators[i]));
+        slot_pointer(rows[i], 0x10, slot_string(f, names[i])); slot_number(rows[i], 0x1c, 8);
+    }
+}
+static void slot_file(const char *root, const char *relative, const char *text)
+{
+    char path[MAX_PATH], *slash;
+    snprintf(path, sizeof(path), "%s/%s", root, relative);
+    for (slash = path + strlen(root) + 1; (slash = strchr(slash, '/')) != NULL; slash++) {
+        *slash = 0; CreateDirectoryA(path, NULL); *slash = '/';
+    }
+    inventory_write(path, text);
+}
+static void test_row_slot_production(void)
+{
+    char root[MAX_PATH], temp[MAX_PATH];
+    const sh_package_compilation *compiled = NULL;
+    const sh_compiled_resource *alias = NULL;
+    sh_compiled_resource pair[2];
+    sh_package_compilation shaped = {0};
+    rl_decl public_row = {0, "player/start"}, private_row = {0, NULL};
+    char alias_identity[80] = "";
+    size_t aliases = 0, at_path = 0;
+    slot_fixture fixture;
+    sh_decl_registry_source registry;
+    GetTempPathA(sizeof(temp), temp);
+    snprintf(root, sizeof(root), "%sdecl-server-slot-%lu", temp, GetCurrentProcessId());
+    CreateDirectoryA(root, NULL);
+    slot_file(root, "overrides/editor/package.json", "{\"id\":\"local.editor\",\"name\":\"editor\"}");
+    slot_file(root, "overrides/editor/assets/generated/decls/snapeditorentitydef/player/start.decl",
+        "{\n\tedit = {\n\t\tentityDef = \"player/coop/player_start\";\n\t\tplacementFlags = \"SNAP_ENTITY_PLACE_AIR_UNALIGNED\";\n"
+        "\t\tinputs = {\n\t\t\tnum = 0;\n\t\t}\n\t}\n}\n");
+    slot_reflection(&fixture);
+    registry = (sh_decl_registry_source){&fixture, slot_read, (uintptr_t)fixture.registry, NULL};
+    sh_package_runtime_test_dispose(); sh_package_runtime_test_baseline(slot_baseline, NULL);
+    sh_package_runtime_test_source_readers(registry, (uintptr_t)fixture.reflection);
+    sh_package_runtime_test_installed_links(1);
+    if (!sh_package_runtime_refresh(root)) {
+        char error[1024]; sh_package_runtime_error(error, sizeof(error));
+        fprintf(stderr, "slot pair library: %s\n", error); CHECK(0);
+    }
+    compiled = sh_package_runtime_acquire();
+    for (size_t i = 0; compiled && i < compiled->resource_count; i++) {
+        const sh_compiled_resource *r = compiled->resources + i;
+        if (!r->type || _stricmp(r->type, "snapeditorentitydef")) continue;
+        fprintf(stderr, "slot pair emitted: %s original=%s scope=%d native=%d restored=%d\n", r->engine_path,
+            r->original_path ? r->original_path : "-", r->baseline_known, r->native_original, r->restored_original);
+        if (!strcmp(r->engine_path, slot_row)) at_path++;
+        else if (r->original_path && !strcmp(r->original_path, slot_row)) { alias = r; aliases++; }
+    }
+    /* The library's own alias: private name, linker-recorded original path,
+     * the original's scope, not a native original. */
+    CHECK(alias && aliases == 1 && !at_path);
+    if (!alias) goto done;
+    CHECK(alias->baseline_known == 1 && !alias->native_original && !alias->restored_original &&
+          strcmp(alias->engine_path, alias->original_path));
+    pair[0] = *alias; pair[1] = *alias;
+    pair[1].engine_path = (char *)slot_row; pair[1].original_path = NULL; pair[1].name = "player/start";
+    shaped.resources = pair; shaped.resource_count = 2;
+    private_row.name = alias->name;
+    rl_live[6] = &public_row; rl_live[7] = &private_row;
+    sh_decl_server_test_rows_reset(); sh_decl_server_test_rows_bindings(sh_package_runtime_bindings());
+    sh_decl_server_test_set_reconstruct(NULL, (sh_decl_server_test_find_decl_fn)rl_peek);
+    sh_decl_server_test_rows_manager(&rl_manager, rl_source);
+    CHECK(sh_decl_server_test_rows_record(&shaped, 1));
+    /* Served at its original's path: the native slot. The alias: an ordinary
+     * publication with its own portable identity. */
+    {
+        int served = sh_decl_server_row_class(&public_row, NULL, 0);
+        int linked = sh_decl_server_row_class(&private_row, alias_identity, sizeof(alias_identity));
+        fprintf(stderr, "slot pair classes: served-at-path %d, private alias %d (%s)\n", served, linked, alias_identity);
+        CHECK(served == 2);
+        CHECK(linked == 1 && strlen(alias_identity) == 64 && sh_decl_server_row_resolve(alias_identity) == &private_row);
+    }
+done:
+    if (compiled) sh_package_runtime_release();
+    rl_live[6] = rl_live[7] = NULL;
+    sh_decl_server_test_rows_bindings(NULL); sh_decl_server_test_rows_manager(NULL, NULL);
+    sh_decl_server_test_set_reconstruct(NULL, NULL); sh_decl_server_test_rows_reset();
+    sh_package_runtime_test_installed_links(0); sh_package_runtime_test_dispose();
+    sh_package_runtime_test_source_readers((sh_decl_registry_source){0}, 0);
+    sh_package_runtime_test_baseline(runtime_original, NULL);
+    for (size_t i = 0; i < fixture.count; i++) free(fixture.regions[i].address);
+    CHECK(inventory_remove_tree(root));
+}
+/* Portable row identity (VK->GL s1, 2026-10-07: one authored cyberdemon row
+ * linked its changed entityDef as smp/78864d54... on Vulkan and smp/9d2ff008...
+ * on OpenGL, so OpenGL never resolved the Vulkan record). One authored row
+ * compiled three ways: over another stock unit its changed entityDef reaches
+ * (no rename: unchanged stock enters by native name), and with another changed
+ * entityDef, which the linker renames and the row's linked bytes with it. The
+ * authored row keeps one identity; the changed dependency is a different
+ * supplier (its trees), never the same choice. */
+static int g_port_stock, g_port_variant;
+static int port_baseline(void *context, const char *path, unsigned char **body, size_t *length)
+{
+    const char *text;
+    if (strcmp(path, "generated/decls/entitydef/player/coop/base.decl")) return slot_baseline(context, path, body, length);
+    text = g_port_stock ? "{\n\tclass = \"Entity\";\n\tedit = {\n\t\thealth = 2;\n\t}\n}\n" :
+        "{\n\tclass = \"Entity\";\n\tedit = {\n\t\thealth = 1;\n\t}\n}\n";
+    *length = strlen(text); *body = (unsigned char *)_strdup(text); return *body ? 1 : -1;
+}
+static int port_compile(int stock, int variant, char identity[80], char entity[160], unsigned char trees[32])
+{
+    char root[MAX_PATH], temp[MAX_PATH];
+    const sh_package_compilation *compiled = NULL;
+    const sh_compiled_resource *row = NULL;
+    sh_package_compilation shaped = {0};
+    sh_package_provenance supply = {0};
+    rl_decl private_row = {0, NULL};
+    slot_fixture fixture;
+    sh_decl_registry_source registry;
+    int ok = 0, rows = 0;
+    *identity = *entity = 0; memset(trees, 0, 32);
+    g_port_stock = stock; g_port_variant = variant;
+    GetTempPathA(sizeof(temp), temp);
+    snprintf(root, sizeof(root), "%sdecl-server-port-%lu-%d%d", temp, GetCurrentProcessId(), stock, variant);
+    CreateDirectoryA(root, NULL);
+    slot_file(root, "overrides/editor/package.json", "{\"id\":\"local.editor\",\"name\":\"editor\"}");
+    slot_file(root, "overrides/editor/assets/generated/decls/entitydef/player/coop/player_start.decl", variant ?
+        "{\n\tclass = \"Entity\";\n\tedit = {\n\t\ttarget = \"player/coop/base\";\n\t\thealth = 151;\n\t}\n}\n" :
+        "{\n\tclass = \"Entity\";\n\tedit = {\n\t\ttarget = \"player/coop/base\";\n\t\thealth = 150;\n\t}\n}\n");
+    slot_file(root, "overrides/editor/assets/generated/decls/snapeditorentitydef/player/start.decl",
+        "{\n\tedit = {\n\t\tentityDef = \"player/coop/player_start\";\n\t\tplacementFlags = \"SNAP_ENTITY_PLACE_AIR_UNALIGNED\";\n"
+        "\t\tinputs = {\n\t\t\tnum = 0;\n\t\t}\n\t}\n}\n");
+    slot_reflection(&fixture);
+    registry = (sh_decl_registry_source){&fixture, slot_read, (uintptr_t)fixture.registry, NULL};
+    sh_package_runtime_test_dispose(); sh_package_runtime_test_baseline(port_baseline, NULL);
+    sh_package_runtime_test_source_readers(registry, (uintptr_t)fixture.reflection);
+    sh_package_runtime_test_installed_links(1);
+    if (!sh_package_runtime_refresh(root)) {
+        char error[1024]; sh_package_runtime_error(error, sizeof(error));
+        fprintf(stderr, "portable row library: %s\n", error); goto done;
+    }
+    compiled = sh_package_runtime_acquire();
+    for (size_t i = 0; compiled && i < compiled->resource_count; i++) {
+        const sh_compiled_resource *r = compiled->resources + i;
+        if (!r->type || !r->original_path) continue;
+        if (!_stricmp(r->type, "snapeditorentitydef") && !strcmp(r->original_path, slot_row)) { row = r; rows++; }
+        else if (!_stricmp(r->type, "entitydef") && !strcmp(r->original_path, slot_def) && r->name)
+            snprintf(entity, 160, "%s", r->name);
+    }
+    if (!row || rows != 1 || !*entity) { fprintf(stderr, "portable row: emitted %d rows, entity '%s'\n", rows, entity); goto done; }
+    shaped.sources = compiled->sources; shaped.resources = (sh_compiled_resource *)row; shaped.resource_count = 1;
+    private_row.name = row->name; rl_live[7] = &private_row;
+    sh_decl_server_test_rows_reset(); sh_decl_server_test_rows_bindings(sh_package_runtime_bindings());
+    sh_decl_server_test_set_reconstruct(NULL, (sh_decl_server_test_find_decl_fn)rl_peek);
+    sh_decl_server_test_rows_manager(&rl_manager, rl_source);
+    if (sh_decl_server_test_rows_record(&shaped, 1) &&
+        sh_decl_server_row_class(&private_row, identity, 80) == 1 &&
+        sh_decl_server_row_supply(&private_row, &supply) == 1 && supply.binding_count == 1 &&
+        supply.bindings[0].context_count == 1 && supply.contexts[supply.bindings[0].contexts[0]].tree_count == 1) {
+        memcpy(trees, supply.contexts[supply.bindings[0].contexts[0]].trees[0], 32);
+        ok = sh_decl_server_row_resolve(identity) == &private_row;
+    }
+    fprintf(stderr, "portable row stock=%d variant=%d: row %s entity %s identity %s\n",
+        stock, variant, row->name, entity, identity);
+done:
+    sh_package_provenance_free(&supply);
+    if (compiled) sh_package_runtime_release();
+    rl_live[7] = NULL;
+    sh_decl_server_test_rows_bindings(NULL); sh_decl_server_test_rows_manager(NULL, NULL);
+    sh_decl_server_test_set_reconstruct(NULL, NULL); sh_decl_server_test_rows_reset();
+    sh_package_runtime_test_installed_links(0); sh_package_runtime_test_dispose();
+    sh_package_runtime_test_source_readers((sh_decl_registry_source){0}, 0);
+    sh_package_runtime_test_baseline(runtime_original, NULL);
+    for (size_t i = 0; i < fixture.count; i++) free(fixture.regions[i].address);
+    CHECK(inventory_remove_tree(root));
+    return ok;
+}
+/* A context of supply naming tree (an owner's selected supplier). */
+static int supplied_by(const sh_package_provenance *supply, const unsigned char tree[32])
+{
+    for (size_t b = 0; b < supply->binding_count; b++)
+        for (size_t c = 0; c < supply->bindings[b].context_count; c++) {
+            const sh_package_provenance_context *context = supply->contexts + supply->bindings[b].contexts[c];
+            for (size_t t = 0; t < context->tree_count; t++) if (!memcmp(context->trees[t], tree, 32)) return 1;
+        }
+    return 0;
+}
+/* One library, three packages publishing the same authored row. A and C are
+ * byte-equal with equal dependencies; B changes only a dependency (the entity
+ * its entityDef targets), so the linker keeps B's row as a separate variant.
+ * The row's identity cannot tell them apart; only the supplier does. */
+static void test_row_supplier_variants(void)
+{
+    static const char *const names[3] = {"a", "b", "c"};
+    char root[MAX_PATH], temp[MAX_PATH], identity[2][80] = {{0}};
+    const sh_package_compilation *compiled = NULL;
+    sh_compiled_resource rows[2];
+    sh_package_compilation shaped = {0};
+    sh_package_provenance supply[2] = {{0}};
+    rl_decl live[2] = {{0, NULL}, {0, NULL}};
+    slot_fixture fixture;
+    sh_decl_registry_source registry;
+    size_t found = 0, shared, variant;
+    g_port_stock = g_port_variant = 0;
+    GetTempPathA(sizeof(temp), temp);
+    snprintf(root, sizeof(root), "%sdecl-server-variants-%lu", temp, GetCurrentProcessId());
+    CreateDirectoryA(root, NULL);
+    for (int p = 0; p < 3; p++) {
+        char path[MAX_PATH], text[256];
+        snprintf(path, sizeof(path), "overrides/%s/package.json", names[p]);
+        snprintf(text, sizeof(text), "{\"id\":\"local.%s\",\"name\":\"%s\"}", names[p], names[p]);
+        slot_file(root, path, text);
+        snprintf(path, sizeof(path), "overrides/%s/assets/%s", names[p], slot_def);
+        slot_file(root, path, "{\n\tclass = \"Entity\";\n\tedit = {\n\t\ttarget = \"player/coop/base\";\n\t\thealth = 150;\n\t}\n}\n");
+        if (p == 1) {
+            snprintf(path, sizeof(path), "overrides/%s/assets/generated/decls/entitydef/player/coop/base.decl", names[p]);
+            slot_file(root, path, "{\n\tclass = \"Entity\";\n\tedit = {\n\t\thealth = 7;\n\t}\n}\n");
+        }
+        snprintf(path, sizeof(path), "overrides/%s/assets/%s", names[p], slot_row);
+        slot_file(root, path, "{\n\tedit = {\n\t\tentityDef = \"player/coop/player_start\";\n"
+            "\t\tplacementFlags = \"SNAP_ENTITY_PLACE_AIR_UNALIGNED\";\n\t\tinputs = {\n\t\t\tnum = 0;\n\t\t}\n\t}\n}\n");
+    }
+    slot_reflection(&fixture);
+    registry = (sh_decl_registry_source){&fixture, slot_read, (uintptr_t)fixture.registry, NULL};
+    sh_package_runtime_test_dispose(); sh_package_runtime_test_baseline(port_baseline, NULL);
+    sh_package_runtime_test_source_readers(registry, (uintptr_t)fixture.reflection);
+    sh_package_runtime_test_installed_links(1);
+    if (!sh_package_runtime_refresh(root)) {
+        char error[1024]; sh_package_runtime_error(error, sizeof(error));
+        fprintf(stderr, "row variants library: %s\n", error); CHECK(0); goto done;
+    }
+    compiled = sh_package_runtime_acquire();
+    for (size_t i = 0; compiled && i < compiled->resource_count; i++) {
+        const sh_compiled_resource *r = compiled->resources + i;
+        if (r->type && r->original_path && !_stricmp(r->type, "snapeditorentitydef") &&
+            !strcmp(r->original_path, slot_row) && found++ < 2) rows[found - 1] = *r;
+    }
+    CHECK(found == 2); if (found != 2) goto done;
+    shaped.sources = compiled->sources; shaped.resources = rows; shaped.resource_count = 2;
+    live[0].name = rows[0].name; live[1].name = rows[1].name; rl_live[6] = &live[0]; rl_live[7] = &live[1];
+    sh_decl_server_test_rows_reset(); sh_decl_server_test_rows_bindings(sh_package_runtime_bindings());
+    sh_decl_server_test_set_reconstruct(NULL, (sh_decl_server_test_find_decl_fn)rl_peek);
+    sh_decl_server_test_rows_manager(&rl_manager, rl_source);
+    CHECK(sh_decl_server_test_rows_record(&shaped, 2));
+    for (int i = 0; i < 2; i++) {
+        CHECK(sh_decl_server_row_class(&live[i], identity[i], sizeof(identity[i])) > 0);
+        CHECK(sh_decl_server_row_supply(&live[i], &supply[i]) == 1 && supply[i].binding_count == 1);
+    }
+    fprintf(stderr, "row variants: %s %s / %s %s\n", rows[0].name, identity[0], rows[1].name, identity[1]);
+    /* The linker kept two publications whose linked bodies differ; the authored
+     * row is one identity, so no name alone tells them apart. */
+    CHECK(strcmp(rows[0].name, rows[1].name) && strlen(identity[0]) == 64 && !strcmp(identity[0], identity[1]));
+    CHECK(!sh_decl_server_row_resolve(identity[0]));
+    shared = supply[0].binding_count == 1 && supply[0].bindings[0].context_count == 2 ? 0 : 1; variant = 1 - shared;
+    CHECK(supply[shared].binding_count == 1 && supply[shared].bindings[0].context_count == 2);
+    CHECK(supply[variant].binding_count == 1 && supply[variant].bindings[0].context_count == 1);
+    if (supply[shared].binding_count == 1 && supply[shared].bindings[0].context_count == 2 &&
+        supply[variant].binding_count == 1 && supply[variant].bindings[0].context_count == 1) {
+        const sh_package_provenance_context *a = supply[shared].contexts + supply[shared].bindings[0].contexts[0];
+        const sh_package_provenance_context *c = supply[shared].contexts + supply[shared].bindings[0].contexts[1];
+        const sh_package_provenance_context *b = supply[variant].contexts + supply[variant].bindings[0].contexts[0];
+        CHECK(a->tree_count == 1 && b->tree_count == 1 && c->tree_count == 1);
+        /* Equal resources: one decl, two owners whose selected suppliers stay distinct. */
+        CHECK(memcmp(a->trees[0], c->trees[0], 32));
+        CHECK(supplied_by(&supply[shared], a->trees[0]) && supplied_by(&supply[shared], c->trees[0]));
+        /* The exact supplier supplies its own variant and only it. */
+        CHECK(supplied_by(&supply[variant], b->trees[0]) && !supplied_by(&supply[shared], b->trees[0]));
+        CHECK(!supplied_by(&supply[variant], a->trees[0]) && !supplied_by(&supply[variant], c->trees[0]));
+        /* Wrong variant only: with B's publication gone the identity resolves
+         * uniquely to the A/C row, which B's selected supplier does not supply. */
+        rl_live[6 + (int)variant] = NULL;
+        CHECK(sh_decl_server_row_resolve(identity[0]) == &live[shared]);
+        CHECK(!supplied_by(&supply[shared], b->trees[0]));
+    }
+done:
+    for (int i = 0; i < 2; i++) sh_package_provenance_free(&supply[i]);
+    if (compiled) sh_package_runtime_release();
+    rl_live[6] = rl_live[7] = NULL;
+    sh_decl_server_test_rows_bindings(NULL); sh_decl_server_test_rows_manager(NULL, NULL);
+    sh_decl_server_test_set_reconstruct(NULL, NULL); sh_decl_server_test_rows_reset();
+    sh_package_runtime_test_installed_links(0); sh_package_runtime_test_dispose();
+    sh_package_runtime_test_source_readers((sh_decl_registry_source){0}, 0);
+    sh_package_runtime_test_baseline(runtime_original, NULL);
+    for (size_t i = 0; i < fixture.count; i++) free(fixture.regions[i].address);
+    CHECK(inventory_remove_tree(root));
+}
+static void test_row_portable_identity(void)
+{
+    char first[80], stock[80], variant[80], first_entity[160], stock_entity[160], variant_entity[160];
+    unsigned char first_trees[32], stock_trees[32], variant_trees[32];
+    CHECK(port_compile(0, 0, first, first_entity, first_trees));
+    CHECK(port_compile(1, 0, stock, stock_entity, stock_trees));
+    CHECK(port_compile(0, 1, variant, variant_entity, variant_trees));
+    /* An unchanged stock unit's bytes rename nothing. */
+    CHECK(strlen(first) == 64 && !strcmp(first, stock) && !strcmp(first_entity, stock_entity));
+    CHECK(!memcmp(first_trees, stock_trees, 32));
+    /* Premise: the linker renamed the changed entityDef the row names. */
+    CHECK(*first_entity && *variant_entity && strcmp(first_entity, variant_entity));
+    /* The authored row is the same bytes at the same original: one portable
+     * identity, whatever its dependencies were privately named. */
+    CHECK(strlen(variant) == 64 && !strcmp(first, variant));
+    /* The changed dependency is another supplier, never the same choice: the
+     * owner's selected context distinguishes it (package_editor). */
+    CHECK(memcmp(first_trees, variant_trees, 32));
+}
 static void test_many_candidates(void)
 {
     const size_t total = 4097;
@@ -4351,6 +5020,10 @@ int main(void)
     test_empty_launch_and_runtime_results();
     test_large_snapshot();
     test_many_candidates();
+    test_row_lineage();
+    test_row_slot_production();
+    test_row_portable_identity();
+    test_row_supplier_variants();
     test_many_runtime_marks();
     test_shader_preparation_lifetime();
     test_occurrence_admission();

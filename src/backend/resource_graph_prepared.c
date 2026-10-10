@@ -42,6 +42,7 @@ sh_resource_graph_preparation *sh_resource_graph_prepare_open(sh_decl_registry_s
     p->registry = sh_decl_native_registry_open(source, NULL, 0);
     p->schema = sh_decl_native_schema_open(metadata, observer, NULL, 0);
     if (!p->registry || !p->schema) { sh_resource_graph_prepare_close(p); return NULL; }
+    sh_decl_native_schema_attach_registry(p->schema, p->registry);
     return p;
 }
 int sh_resource_graph_prepare_entity(sh_resource_graph_preparation *p,

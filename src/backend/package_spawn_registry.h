@@ -70,8 +70,18 @@ int sh_package_spawn_registry_code(const sh_package_spawn_registry *registry,
 
 /* Publish retained private tables into the engine's shared table. Private
  * identities/keys are already resolved. Preserve each table's row order and
- * multiplicity, sharing exact repeated rows across tables. Other fields come
+ * multiplicity, sharing exact repeated rows across tables. Each private AI's
+ * selected modifier is projected to a leading exact-type row; publish those
+ * classifier types with the spawn dispatch program. Broad rows and stock/
+ * historical matching remain available to other types. Other fields come
  * from base. Result is owned; inputs are unchanged. */
 char *sh_package_spawn_registry_compose(sh_decl_source base, const sh_decl_source *tables,
     size_t count, const sh_package_key_groups *groups, size_t *length, char *error, size_t capacity);
+/* Runtime classifier capsules carry the captured first match; composed whole
+ * registries may also contain restored stock rows or foreign broad modifiers.
+ * A nonzero classifiers[i] makes that table's captured policy authoritative.
+ * NULL treats every input as an authored source (the compose wrapper above). */
+char *sh_package_spawn_registry_compose_classified(sh_decl_source base, const sh_decl_source *tables,
+    const unsigned char *classifiers, size_t count, const sh_package_key_groups *groups,
+    size_t *length, char *error, size_t capacity);
 #endif

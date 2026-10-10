@@ -87,6 +87,10 @@ int sh_decl_native_reference_read(sh_decl_native_schema *schema,
                 if (!*copy) result = -1;
                 else { out->resource.type = family; out->resource.name = copy; copy = NULL; }
             }
+            /* The event argument reader finds the clip in the animation list,
+             * then loads it with makeDefault (Vulkan 0x1409caa70 / OpenGL
+             * 0x1409ca230); a reflected idMD6Anim field does not. */
+            if (result == 1 && type.ops && !strcmp(type.ops, SH_DECL_EVENT_ANIM_OPS)) out->make_default = 1;
         } else result = -1;
     }
     free(copy);

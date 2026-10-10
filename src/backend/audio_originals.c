@@ -17,6 +17,7 @@ typedef struct ao_file {
     int packed;
 } ao_file;
 typedef struct ao_answer { char *path; sh_package_original_identity original; } ao_answer;
+typedef struct ao_located { char *path; ao_file *file; uint64_t offset,length; } ao_located;
 struct sh_audio_originals {
     char *root, *language;
     /* "sound/soundbanks/pc/" plus the engine's configured bank prefix. The
@@ -27,6 +28,9 @@ struct sh_audio_originals {
     size_t count;
     ao_answer *answers;
     size_t answer_count;
+    /* Successful read locations, open-addressed by exact engine path. */
+    ao_located *located;
+    size_t located_count,located_capacity;
     SRWLOCK lock;
     int scanned, scan_failed;
     char **bank_names;
@@ -71,6 +75,8 @@ void sh_audio_originals_close(sh_audio_originals *originals)
     if(!originals)return;
     for(size_t i=0;i<originals->count;i++)ao_file_free(originals->files[i]);
     for(size_t i=0;i<originals->answer_count;i++)free(originals->answers[i].path);
+    for(size_t i=0;i<originals->located_capacity;i++)free(originals->located[i].path);
+    free(originals->located);
     for(size_t i=0;i<originals->bank_name_count;i++)free(originals->bank_names[i]);
     for(size_t i=0;i<originals->listed_count;i++)free(originals->listed[i]);
     free(originals->listed);
@@ -471,6 +477,41 @@ done:
     free(root_path);free(canonical);return result;
 }
 
+#ifdef SH_AUDIO_ORIGINALS_TESTING
+int sh_audio_originals_test_refuse_locations;
+size_t sh_audio_originals_test_located(const sh_audio_originals *originals){return originals->located_count;}
+#define AO_LOCATED_ROWS(count) (sh_audio_originals_test_refuse_locations ? NULL : calloc((count),sizeof(ao_located)))
+#else
+#define AO_LOCATED_ROWS(count) calloc((count),sizeof(ao_located))
+#endif
+static size_t ao_located_slot(const ao_located *rows,size_t capacity,const char *path)
+{
+    uint32_t hash=2166136261u;
+    for(const unsigned char *at=(const unsigned char *)path;*at;at++)hash=(hash^*at)*16777619u;
+    size_t slot=hash&(capacity-1);
+    while(rows[slot].path && strcmp(rows[slot].path,path))slot=(slot+1)&(capacity-1);
+    return slot;
+}
+/* A located original stays this exact path's answer until close: packages are
+ * indexed once by the scan and held without write sharing, a loose file stays
+ * open without write or delete sharing, and packages answer before loose
+ * files. Absence, failure and ambiguity are never kept, so an absent path is
+ * probed again and a newly created file is found. Keeping is only a saving;
+ * when memory is refused the path is located again on the next request. */
+static int ao_located_keep(sh_audio_originals *originals,char *path,const ao_span *span)
+{
+    if(originals->located_count>=originals->located_capacity/2) {
+        size_t capacity=originals->located_capacity ? originals->located_capacity*2 : 256;
+        ao_located *rows=capacity>originals->located_capacity ? AO_LOCATED_ROWS(capacity) : NULL;
+        if(!rows)return 0;
+        for(size_t i=0;i<originals->located_capacity;i++)if(originals->located[i].path)
+            rows[ao_located_slot(rows,capacity,originals->located[i].path)]=originals->located[i];
+        free(originals->located);originals->located=rows;originals->located_capacity=capacity;
+    }
+    originals->located[ao_located_slot(originals->located,originals->located_capacity,path)]=
+        (ao_located){path,span->file,span->offset,span->length};
+    originals->located_count++;return 1;
+}
 int sh_audio_originals_read(void *context,const char *path,uint64_t offset,void *out,size_t span,
     uint64_t *length,char *error,size_t capacity)
 {
@@ -490,6 +531,10 @@ int sh_audio_originals_read(void *context,const char *path,uint64_t offset,void 
     AcquireSRWLockExclusive(&originals->lock);
     if(!originals->scanned) { originals->scanned=1;originals->scan_failed=ao_scan(originals,"",1)!=1; }
     if(originals->scan_failed){result=ao_fail(error,capacity,"installed audio package metadata is unreadable or invalid");goto done;}
+    if(originals->located_count) {
+        const ao_located *known=originals->located+ao_located_slot(originals->located,originals->located_capacity,canonical);
+        if(known->path){located.file=known->file;located.offset=known->offset;located.length=known->length;goto found;}
+    }
     present=ao_packed(originals,relative,name,extension,&identity,&located,0);
     if(present<0){result=ao_fail(error,capacity,"installed packed audio is unreadable or ambiguous");goto done;}
     if(!present) {
@@ -498,6 +543,8 @@ int sh_audio_originals_read(void *context,const char *path,uint64_t offset,void 
         if(present){located.file=file;located.offset=0;located.length=file->length;}
     }
     if(!present)goto done;
+    if(ao_located_keep(originals,canonical,&located))canonical=NULL;
+found:
     if(length)*length=located.length;
     if(offset>located.length || span>located.length-offset) {
         result=ao_fail(error,capacity,"installed audio original read is out of range");goto done;

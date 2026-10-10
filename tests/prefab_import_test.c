@@ -59,6 +59,15 @@ char *sh_package_runtime_capture_document(const sh_package_map_plan *plan, const
 }
 void sh_package_occurrence_release(sh_package_occurrence_snapshot *ownership)
 { if (ownership) { assert(ownership == (void *)&owner_object); owner_releases++; } }
+/* Exact-row carries record the captures before them and the carrier bindings
+ * they received; refusal is the fail-closed path. */
+static int carries, carry_captures, carry_bindings_seen, carry_failed;
+int sh_package_occurrence_carry_rows(sh_package_occurrence_snapshot *ownership, const sh_package_provenance *from)
+{
+    assert(ownership == (void *)&owner_object && from);
+    carries++; carry_captures = captures; carry_bindings_seen = (int)from->binding_count; event('R');
+    return !carry_failed;
+}
 void *sh_typeinfo_get_reflect(void) { return &owner_object; }
 int sh_decl_server_registry_source(sh_decl_registry_source *source) { memset(source, 0, sizeof(*source)); return 1; }
 int sh_package_map_plan_usage_missing(const sh_package_map_plan *plan, sh_decl_registry_source registry,
@@ -91,7 +100,7 @@ int sh_mpkg_activation_ready(void) { return ready; }
 int sh_mpkg_activation_cancel(void) { cancels++; event('X'); return cancel_ok; }
 int sh_mpkg_activation_commit(char *error, size_t capacity)
 { (void)error; (void)capacity; commits++; event('K'); return commit_ok; }
-void sh_mpkg_report_error(const char *message) { assert(message && *message); reports++; }
+void sh_mpkg_report_error(sh_mpkg_problem problem, const char *message) { (void)problem; assert(message && *message); reports++; }
 int sh_package_map_plan_prepare_inventory(sh_package_map_plan *plan, const char *root, char *error, size_t capacity)
 { (void)error; (void)capacity; assert(plan == (void *)&plan_object && !strcmp(root, "test-root")); inventories++; event('I'); return inventory_ok; }
 static const char *expected_native;
@@ -140,6 +149,7 @@ static void reset(void)
     prompts = cancels = commits = inventories = captures = preparations = finalizations = aborts = reports = 0;
     source_releases = plan_releases = owner_releases = logs = maintenance = 0; events[0] = 0;
     serving_off = scan_packages = carrier_bindings = carrier_deliveries = 0; expected_native = NULL;
+    carries = carry_captures = carry_bindings_seen = carry_failed = 0;
 }
 static void request(void) { assert(sh_prefab_import_request(&editor_object, "{}", 2, 1)); assert(sh_prefab_import_pending()); }
 static void poll(void) { sh_prefab_import_poll(&editor_object); }
@@ -157,7 +167,16 @@ int main(void)
     assert(!strcmp(events, "BCUDPF") && owner_releases == 1 && plan_releases == 1 && source_releases == 1);
 
     reset(); with_plan = 0; request(); poll();
-    assert(!strcmp(events, "BCDPF") && !prompts && !inventories && !plan_releases && logs == 1);
+    assert(!strcmp(events, "BCDPF") && !prompts && !inventories && !plan_releases && logs == 1 && !carries);
+
+    /* A carrier's exact editor rows reach the captured ownership before usage
+     * is checked or anything is staged; a refused carry stages nothing. */
+    reset(); carrier_bindings = 1; request(); poll();
+    assert(!g_import && !strcmp(events, "BCRUDPF") && logs == 1 && !reports);
+    assert(carries == 1 && carry_captures == 1 && carry_bindings_seen == 1 && owner_releases == 1);
+    reset(); carrier_bindings = 1; carry_failed = 1; request(); poll();
+    assert(!g_import && !strcmp(events, "BCR") && reports == 1 && carries == 1 && !preparations);
+    assert(!prompts && !commits && owner_releases == 1);
 
     reset(); expected_place = 0;
     assert(sh_prefab_import_request(&editor_object, "{}", 2, 0)); poll();

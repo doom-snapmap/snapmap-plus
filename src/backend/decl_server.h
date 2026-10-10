@@ -97,6 +97,38 @@ int sh_decl_server_prepare_shaders(struct sh_package_shader_preparation *batch,
  * while the returned source callback enters the native source probe. */
 int sh_decl_server_registry_source(sh_decl_registry_source *source);
 
+/* Exact editor-row publication lineage for a live snapeditorentitydef decl.
+ * row_class: 1 product publication (name, at least 65 bytes, receives its
+ * portable identity: 64 hex digits naming the authored row, the provider
+ * binding's original and the exact source files compiled for it; equal on
+ * every renderer and for every dependency variant of that row), 2 a product
+ * publication whose changed bytes occupy an installed SnapMap original's path,
+ * its native slot (identity, resolve and supply as 1), 0 positively native
+ * original, -1 unknown or unidentified.
+ * row_resolve: the one current product publication carrying an identity (the
+ * portable one, or the registered-bytes identity earlier maps recorded);
+ * NULL for none or several. It is not supplier authority: a variant shares
+ * the portable identity and differs only in its supply.
+ * row_named: 1 when decl's current product publication carries name as its
+ * portable identity or as the registered-bytes identity earlier maps recorded
+ * (that decl's own record, never a search), else 0. Like resolve, it is not
+ * supplier authority.
+ * row_supply: copies the publication's exact binding (original and every
+ * linked supplying context) into out, owned by the caller; 1 copied, 0 none.
+ * row_exact: writes the registered-bytes identity of decl's current product
+ * publication (every dependency's private name included, so a dependency
+ * variant differs) as 64 hex digits; 1 written, 0 none. row_resolve and
+ * row_named accept it. It names this provider's spelling and is never saved.
+ * rows_retired: called before a pass registers anything, so stored editor
+ * row pointers retire before any object can be freed or replaced. */
+struct sh_package_provenance;
+int sh_decl_server_row_class(const void *decl, char *name, size_t capacity);
+const void *sh_decl_server_row_resolve(const char *name);
+int sh_decl_server_row_named(const void *decl, const char *name);
+int sh_decl_server_row_supply(const void *decl, struct sh_package_provenance *out);
+int sh_decl_server_row_exact(const void *decl, char *name, size_t capacity);
+void sh_decl_server_rows_retired(void (*retired)(void));
+
 #ifdef SH_DECL_SERVER_TESTING
 #include <windows.h>
 
@@ -259,6 +291,15 @@ int sh_decl_server_test_scan_and_materialize_missing(
     int *registered, int *materialized, int *failure_phase);
 void sh_decl_server_test_reset_install(void);
 const char *sh_decl_server_test_occurrence_source_name(void *decl);
+/* Editor-row lineage as one pass records it (every candidate registered). */
+int sh_decl_server_test_rows_record(const struct sh_package_compilation *compiled, int published);
+void sh_decl_server_test_rows_manager(void *manager, void *(*source_find)(void *manager, const char *name));
+void sh_decl_server_test_rows_bindings(const struct sh_package_provenance *bindings);
+/* NULL: development source mode (source records); else production mode, whose
+ * native provenance is this resource-index probe (1, 0, -1). */
+void sh_decl_server_test_rows_production(int (*native_exists)(const char *path));
+size_t sh_decl_server_test_rows_count(void);
+void sh_decl_server_test_rows_reset(void);
 int sh_decl_server_test_palette_hold(void *batch);
 int sh_decl_server_test_palette_maintenance(void);
 size_t sh_decl_server_test_palette_holds(void);

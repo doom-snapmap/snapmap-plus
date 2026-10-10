@@ -300,6 +300,9 @@ struct sh_package_file {
     volatile LONG references;
     SRWLOCK identity_lock;
     int identity_ready;
+    /* Process-private evidence (sh_package_file_private): the pinning handle
+     * itself holds write access, so readers must share it. */
+    int exclusive;
 };
 
 int sh_package_reader_identity(void *context, uint64_t offset, uint64_t length,
@@ -553,6 +556,83 @@ done:
     return file;
 }
 
+/* Private evidence is written in large spans: producers emit many small
+ * fields, and each would otherwise be its own system call. */
+typedef struct ps_private_output {
+    HANDLE file;
+    uint64_t length, written;
+    unsigned char *buffer;
+    size_t used;
+    int failed;
+} ps_private_output;
+#define PS_PRIVATE_SPAN (1u << 20)
+static int ps_private_flush(ps_private_output *out)
+{
+    size_t at = 0;
+    while (!out->failed && at < out->used) {
+        DWORD span = out->used - at > PS_PRIVATE_SPAN ? PS_PRIVATE_SPAN : (DWORD)(out->used - at), written = 0;
+        if (!WriteFile(out->file, out->buffer + at, span, &written, NULL) || written != span) out->failed = 1;
+        else at += span;
+    }
+    out->used = 0;
+    return !out->failed;
+}
+static int ps_private_write(void *context, const void *bytes, size_t length)
+{
+    ps_private_output *out = context;
+    const unsigned char *at = bytes;
+    if (out->failed) return 0;
+    if ((length && !bytes) || length > out->length - out->written) { out->failed = 1; return 0; }
+    out->written += length;
+    while (length) {
+        size_t n = PS_PRIVATE_SPAN - out->used < length ? PS_PRIVATE_SPAN - out->used : length;
+        memcpy(out->buffer + out->used, at, n);
+        out->used += n; at += n; length -= n;
+        if (out->used == PS_PRIVATE_SPAN && !ps_private_flush(out)) return 0;
+    }
+    return 1;
+}
+sh_package_file *sh_package_file_private(const char *directory, uint64_t length,
+    sh_package_file_producer produce, void *context, char *error, size_t capacity)
+{
+    static LONG serial;
+    ps_private_output output = {INVALID_HANDLE_VALUE, length, 0, NULL, 0, 0};
+    sh_package_file *file = NULL;
+    char leaf[160], *temporary = NULL;
+    wchar_t *wide = NULL, *folder = NULL;
+    DWORD attributes;
+    if (error && capacity) *error = 0;
+    if (!directory || !produce || !(folder = sh_package_source_wide_path(directory))) goto done;
+    attributes = GetFileAttributesW(folder);
+    if (attributes == INVALID_FILE_ATTRIBUTES || !(attributes & FILE_ATTRIBUTE_DIRECTORY) ||
+        attributes & FILE_ATTRIBUTE_REPARSE_POINT) goto done;
+    if (!(output.buffer = malloc(PS_PRIVATE_SPAN))) goto done;
+    for (;;) {
+        snprintf(leaf, sizeof(leaf), ".private.%lu.%llu.%lu", GetCurrentProcessId(),
+            (unsigned long long)GetTickCount64(), (unsigned long)InterlockedIncrement(&serial));
+        temporary = ps_join(directory, leaf);
+        wide = temporary ? sh_package_source_wide_path(temporary) : NULL;
+        if (!wide) goto done;
+        /* No other handle may write, rename or delete it while referenced;
+         * the system removes it with the last handle, even after a crash. */
+        output.file = CreateFileW(wide, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_NEW,
+            FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_DELETE_ON_CLOSE, NULL);
+        if (output.file != INVALID_HANDLE_VALUE) break;
+        if (GetLastError() != ERROR_FILE_EXISTS && GetLastError() != ERROR_ALREADY_EXISTS) goto done;
+        free(wide); wide = NULL; free(temporary); temporary = NULL;
+    }
+    if (!produce(context, ps_private_write, &output, error, capacity) || !ps_private_flush(&output) ||
+        output.failed || output.written != length || !(file = calloc(1, sizeof(*file)))) goto done;
+    file->handle = output.file; output.file = INVALID_HANDLE_VALUE;
+    file->length = length; file->references = 1; file->exclusive = 1;
+    InitializeSRWLock(&file->identity_lock);
+done:
+    if (output.file != INVALID_HANDLE_VALUE) CloseHandle(output.file); /* deletes the partial file */
+    free(output.buffer); free(temporary); free(wide); free(folder);
+    if (!file && error && capacity && !*error) ps_error(error, capacity, "cannot retain private resource evidence");
+    return file;
+}
+
 static int ps_cache_source(void *context, int (*write)(void *, const void *, size_t),
     void *sink, char *error, size_t capacity)
 {
@@ -609,7 +689,8 @@ FILE *sh_package_file_open(const sh_package_file *file, uint64_t *length,
     if (!file || !length) { ps_error(error, capacity, "missing sealed resource"); return NULL; }
     /* DuplicateHandle alone shares a file position. ReOpenFile retains the
      * same protected file identity while giving CRT readers independent seeks. */
-    handle = ReOpenFile(file->handle, GENERIC_READ, FILE_SHARE_READ, FILE_FLAG_SEQUENTIAL_SCAN);
+    handle = ReOpenFile(file->handle, GENERIC_READ, file->exclusive ?
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE : FILE_SHARE_READ, FILE_FLAG_SEQUENTIAL_SCAN);
     if (handle != INVALID_HANDLE_VALUE) {
         descriptor = _open_osfhandle((intptr_t)handle, _O_RDONLY | _O_BINARY);
         if (descriptor != -1) {

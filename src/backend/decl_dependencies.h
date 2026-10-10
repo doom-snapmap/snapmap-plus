@@ -13,8 +13,40 @@ typedef enum sh_decl_value_kind {
     SH_DECL_VALUE_REFERENCE,    /* a verified native resource-reader contract */
     SH_DECL_VALUE_COLLECTION,   /* a verified native collection-reader contract */
     SH_DECL_VALUE_POLYMORPHIC,  /* native className/object wrapper; element is its base class */
-    SH_DECL_VALUE_SCRIPT       /* object selector followed by script-module fields */
+    SH_DECL_VALUE_SCRIPT,      /* object selector followed by script-module fields */
+    SH_DECL_VALUE_EVENT_CALL   /* idEventCallInfo: event name, then counted typed arguments */
 } sh_decl_value_kind;
+
+/* An event-call decl argument names its declaration type, which the native
+ * argument reader looks up among the declaration managers before finding the
+ * name with makeDefault. Walkers describe {type, SH_DECL_EVENT_DECL_OPS}; a
+ * schema that can prove the manager answers REFERENCE with element set to the
+ * typed declaration pointer it binds. Any other answer leaves the argument a
+ * gap. This internal spelling never becomes a resource or authored name. */
+#define SH_DECL_EVENT_DECL_OPS "@event-decl"
+/* The element of a proven event decl argument, {class, SH_DECL_EVENT_DECL_USE_OPS},
+ * is read by the class's declaration pointer reader like a reflected field,
+ * but keeps the use distinct: a name with no source is the engine's default
+ * for this use wherever it is authored, including a map's own eventCall. */
+#define SH_DECL_EVENT_DECL_USE_OPS "@event-decl-use"
+/* An event-call md6Anim argument names an animation, which the native
+ * argument reader finds in the animation resource list and otherwise loads
+ * with makeDefault. Walkers describe {"idMD6Anim", SH_DECL_EVENT_ANIM_OPS};
+ * a schema that proves that list answers REFERENCE with element
+ * {"idMD6Anim", SH_DECL_EVENT_ANIM_OPS}, read by the typed resource pointer it
+ * binds, so consumers keep the use's makeDefault distinct from a reflected
+ * idMD6Anim field. Any other answer leaves the argument a gap. */
+#define SH_DECL_EVENT_ANIM_OPS "@event-md6anim"
+#define SH_DECL_EVENT_ANIM_TYPE "idMD6Anim"
+
+/* The native event-call writer may annotate a member with its type, as in
+ * "
+eventHandle_t eventDef" or "
+num"; return the member's bare name. */
+const char *sh_decl_event_member(const char *key);
+/* An event argument's reader key: 0 reads no resource, 1 decl, 2 md6Anim. */
+int sh_decl_event_argument_kind(const char *key);
+
 
 typedef struct sh_decl_value_shape {
     sh_decl_value_kind kind;

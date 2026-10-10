@@ -149,6 +149,34 @@ static void test_rebind(void)
     assert(sh_package_shader_rebind(b.data,b.length,&kinds,linked,original,NULL,NULL,&out,&size,&changed,error,sizeof(error)) == SH_PACKAGE_SHADER_UNSUPPORTED);
     assert(!out && !size && !changed);
 }
+/* A parameter awaiting native preparation (schema answer 2 with its declared
+ * kind) frames the record for need collection only: decode reports PENDING,
+ * and rebind returns it without resolving, relocating or yielding output. */
+typedef struct pending_schema { const char *name; int kind; } pending_schema;
+static int pending_kind(void *context, const char *name, int *kind)
+{
+    const pending_schema *p = context;
+    if (!strcmp(name, p->name)) { *kind = p->kind; return 2; }
+    return schema(NULL, name, kind);
+}
+static void test_pending_rebind(void)
+{
+    bytes b = fixture(), retained = b; char error[256];
+    sh_package_shader_source original = {declaration,sizeof(declaration)-1};
+    sh_package_shader_source linked = {linked_declaration,sizeof(linked_declaration)-1};
+    pending_schema pending = {"diffuse", 1}; sh_package_shader_schema waiting = {&pending, pending_kind};
+    sh_package_shader_program p = {0};
+    assert(sh_package_shader_decode(b.data,b.length,&waiting,&p,error,sizeof(error)) == SH_PACKAGE_SHADER_PENDING);
+    assert(p.reference_count && find_reference(&p,"diffuse") != SIZE_MAX); sh_package_shader_program_clear(&p);
+    unsigned char *out = NULL; size_t size = 7, changed = 7; relocation state = {-1,0};
+    assert(sh_package_shader_rebind(b.data,b.length,&waiting,original,linked,relocate,&state,&out,&size,&changed,error,sizeof(error)) == SH_PACKAGE_SHADER_PENDING);
+    assert(!out && !size && !changed && !state.calls && !memcmp(&b,&retained,sizeof(b)));
+    /* A pending answer whose declared kind is unusable cannot frame the record. */
+    pending.kind = 19;
+    assert(sh_package_shader_decode(b.data,b.length,&waiting,&p,error,sizeof(error)) == SH_PACKAGE_SHADER_ERROR && !p.reference_count);
+    assert(sh_package_shader_rebind(b.data,b.length,&waiting,original,linked,relocate,&state,&out,&size,&changed,error,sizeof(error)) == SH_PACKAGE_SHADER_ERROR);
+    assert(!out && !size && !changed && !state.calls);
+}
 static bytes module(void)
 {
     bytes b = {0}; be(&b,4); be(&b,sh_package_shader_checksum((const unsigned char *)vertex,strlen(vertex)));
@@ -223,7 +251,7 @@ static void test_paths(void)
 }
 int main(void)
 {
-    test_checksums();test_decode();test_rebind();test_modules();test_paths();
+    test_checksums();test_decode();test_rebind();test_pending_rebind();test_modules();test_paths();
     fixture_include = "/decls/renderprogs/global.inc";
     test_decode();test_rebind();test_paths();
     fixture_include = "\\Decls\\Renderprogs\\Global.inc";

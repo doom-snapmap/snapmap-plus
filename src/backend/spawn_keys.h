@@ -26,6 +26,13 @@ int sh_spawn_keys_publish_groups(const sh_package_key_groups *library, const sh_
 typedef struct sh_spawn_keys_program sh_spawn_keys_program;
 sh_spawn_keys_program *sh_spawn_keys_program_create(const sh_package_key_groups *groups,
     const uint32_t *unmodified_types, size_t count);
+/* Composed private modifier rows carry their complete classification type.
+ * Equality dispatch preserves that type's selected native-parsed row even
+ * when its private key set overlaps another type's set. Other types continue
+ * to use native/private intersection. Input arrays are copied. */
+sh_spawn_keys_program *sh_spawn_keys_program_create_exact(const sh_package_key_groups *groups,
+    const uint32_t *unmodified_types, size_t unmodified_count,
+    const uint32_t *exact_types, size_t exact_count);
 void sh_spawn_keys_program_release(sh_spawn_keys_program *program);
 void sh_spawn_keys_publish_program(sh_spawn_keys_program *program);
 
@@ -41,6 +48,7 @@ void sh_spawn_keys_test_bind(void **game_slot, sh_spawn_keys_type_fn type, sh_sp
 const sh_package_key_groups *sh_spawn_keys_test_hold(void);
 void sh_spawn_keys_test_release(void);
 int sh_spawn_keys_test_unmodified(uint32_t type);
+int sh_spawn_keys_test_exact(uint32_t type);
 uint64_t sh_spawn_keys_test_select(void *manager, uint32_t request);
 void sh_spawn_keys_test_modifier(void *conductor, void *ai, uint64_t modifiers);
 int sh_spawn_keys_test_filter(void *filter, void *ai);

@@ -95,4 +95,9 @@ int sh_audio_banks_native_programs_add(sh_audio_bank_addition *addition,
  * failure/uncertain state (reported in error). Never unloads a bank in use. */
 int sh_audio_banks_native_programs_retire(char *error, size_t capacity);
 size_t sh_audio_banks_native_programs_count(void);
+/* After the current provider did not claim an audio file, resolve only a
+ * private MEDIA identity owned by a still-retained program (active or retiring).
+ * Exact provider/path lookup prevents rebinding to a different map. 1 opens,
+ * 0 does not own the path, -1 means owned bytes are unavailable. No native call. */
+int sh_audio_banks_native_open_media(const char *path, FILE **stream, uint64_t *length);
 #endif

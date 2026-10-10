@@ -123,8 +123,32 @@ static void ordered_identities(void)
     sh_package_link_order_free(&order);
     sh_package_link_classes_free(&plain); sh_package_link_classes_free(&ordered);
 }
+/* An identity failure after a retained partition discards the retained copy. */
+static void identity_failure_discards(void)
+{
+    sh_package_link_edge edges[] = {{"model", 1}};
+    sh_package_link_node nodes[2] = {{0}};
+    sh_package_link_order order = {0};
+    sh_package_link_classes out = {0};
+    char error[256];
+    size_t k, total, failed = 0;
+    nodes[0].family = "entityDef"; nodes[0].path = "a"; nodes[0].edges = edges; nodes[0].edge_count = 1;
+    nodes[1].family = "model"; nodes[1].path = "b";
+    for (k = 1;; k++) {
+        assert(sh_package_link_identify_ordered(nodes, 2, NULL, NULL, &order, &out, error, sizeof(error)) && order.prepared);
+        sh_package_link_graph_test_refuse(k);
+        int ok = sh_package_link_identify_ordered(nodes, 2, NULL, NULL, &order, &out, error, sizeof(error));
+        total = sh_package_link_graph_test_allocations();
+        sh_package_link_graph_test_refuse(0);
+        if (k > total) { assert(ok); break; }
+        if (!ok) { failed++; assert(!order.prepared && !out.identities); }
+    }
+    assert(failed);
+    sh_package_link_classes_free(&out); sh_package_link_order_free(&order);
+}
 int main(void)
 {
+    identity_failure_discards();
     stable_contexts(); long_chain(); verified_identity(); ordered_identities();
     puts("package link identity tests passed"); return 0;
 }

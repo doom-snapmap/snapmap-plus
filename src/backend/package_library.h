@@ -67,6 +67,17 @@ enum {
     SH_PACKAGE_LIBRARY_PHASE_OUTPUTS, SH_PACKAGE_LIBRARY_PHASE_AUDIO, SH_PACKAGE_LIBRARY_PHASES
 };
 
+/* An authored shader input the source link accounted without publishing it
+ * (sh_package_shader_unpublished): file indexes the compiled sources. A dormant
+ * pair also names the binary whose checksum matched: pair indexes the sources,
+ * or is SIZE_MAX when pair_path is the installed SnapMap original. */
+typedef struct sh_package_unpublished_shader {
+    size_t file, pair;
+    char *pair_path;
+    int reason, renderer;   /* sh_package_shader_unpublished_reason; served renderer or -1 */
+    uint32_t checksum;
+} sh_package_unpublished_shader;
+
 typedef struct sh_package_library {
     sh_package_compilation *compiled;
     /* Complete local binding index. A map selects only the bindings it uses
@@ -94,11 +105,17 @@ typedef struct sh_package_library {
     char contribution_phases[256]; /* The contribution phase's own steps, when it ran. */
     /* Diagnostic repeated-work lines of the last compile, '\n'-separated:
      * parse census by phase, source capture repeats, identity passes. */
-    char repeated_work[6144];
+    char repeated_work[8192];
     /* Owned developer report of a refused native identity (newline-separated
      * lines naming both claimants), NULL when none; like coverage it survives
      * a failed compile, as a diagnostic only. */
     char *link_diagnostics;
+    /* Owned per-input shader accounting of a linked library. Diagnostics only:
+     * shader_inputs_lost reports records that could not be kept, never a
+     * reason to refuse the library. */
+    sh_package_unpublished_shader *shader_inputs;
+    size_t shader_input_count;
+    int shader_inputs_lost;
 } sh_package_library;
 
 /* Write "scopes N ms, native N ms, ..." for the last compile; returns out. */
@@ -135,6 +152,12 @@ int sh_package_library_compile_contexts(const sh_package_sources *sources,
     void *original_context, sh_decl_registry_source registry, uintptr_t reflection,
     const sh_package_library_native *native, sh_package_library *out,
     char *error, size_t capacity);
+/* Compile every package of sources as one composed scope, as a map without
+ * recorded contexts composes its carried packages: their copies of the stock
+ * player hands web align there package by package, as in a composed context.
+ * Without a baseline reader no stock contract is known and none aligns. */
+sh_package_compilation *sh_package_library_compile_composed(const sh_package_sources *sources,
+    const sh_package_compile_environment *environment, char *error, size_t capacity);
 #ifdef SH_PACKAGE_LIBRARY_TESTING
 /* Fail the next count editor contribution reads of one declaration name
  * (any name when NULL) as an unreadable source would. */

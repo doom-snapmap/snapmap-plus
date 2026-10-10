@@ -52,10 +52,30 @@ int sh_package_movie_material_sites(void *reader_context,
  * keeps its native default behavior. No allocation or native call occurs. */
 int sh_package_movie_route(const sh_package_consumer *owner, const char *family,
     const char *request, const char **replacement);
+/* Late calls use the immutable scope namespace, including computed names.
+ * Resource slots are the existing request/sound and request/material slots.
+ * Localized keys use movie/string/<native key>, with package_strings' ASCII
+ * case folding only: slashes/backslashes and all other bytes stay distinct.
+ * This owned slot is for compiler capture; NULL is an allocation failure. */
+char *sh_package_movie_string_slot(const char *key);
+/* No allocation/native calls. 0 keeps the exact native fallback, 1 borrows a
+ * private dictionary key, -1 denotes a contradictory string binding. */
+int sh_package_movie_string_route(const sh_package_consumer *owner,
+    const char *key, const char **replacement);
 /* Native manager spelling of a looked-up name: ASCII uppercase folds, back-
  * slashes become slashes and one leading slash is dropped. 0 when empty,
  * NUL-bearing or longer than capacity; other bytes are retained exactly. */
 int sh_package_movie_native_name(const char *text, size_t length, char *out, size_t capacity);
 /* Owners are movie file identities: family "file" and a generated/swf path. */
 int sh_package_movie_owner(const char *family, const char *name);
+/* Pure no-allocation prepublication validation. Accept every constructor and
+ * late namespace row, canonical owner/request identities and equal repeats;
+ * reject unsupported, empty, cross-family or contradictory rows. This checks
+ * metadata only; provider preparation proves the complete physical closure. */
+int sh_package_movie_plan_valid(const sh_package_consumer *owner);
+/* Whether a valid plan is the stock movie's own lookup: every row requests
+ * its own identity, a font, material or late sound/material under the exact
+ * requested canonical name, so routing changes nothing. Localized rows and
+ * redirects never are. Whether those targets changed is the caller's. */
+int sh_package_movie_plan_native(const sh_package_consumer *owner);
 #endif

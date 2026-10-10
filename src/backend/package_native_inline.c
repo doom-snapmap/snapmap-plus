@@ -4,6 +4,9 @@
 #include "decl_entity_class.h"
 
 #include <stdint.h>
+#include <errno.h>
+#include <locale.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -27,11 +30,11 @@ static int ni_append(ni_text *t, const char *bytes, size_t length)
     return 1;
 }
 static int ni_append_text(ni_text *t, const char *text) { return ni_append(t, text, strlen(text)); }
-static int ni_json_string(ni_text *t, const char *bytes)
+static int ni_json_string_n(ni_text *t, const char *bytes, size_t length)
 {
     if (!ni_append(t, "\"", 1)) return 0;
-    for (; *bytes; bytes++) {
-        unsigned char c = (unsigned char)*bytes;
+    for (size_t i = 0; i < length; i++) {
+        unsigned char c = (unsigned char)bytes[i];
         if (c < 0x20) {
             char escape[8]; snprintf(escape, sizeof(escape), "\\u%04x", c);
             if (!ni_append_text(t, escape)) return 0;
@@ -42,6 +45,476 @@ static int ni_json_string(ni_text *t, const char *bytes)
     }
     return ni_append(t, "\"", 1);
 }
+static int ni_json_string(ni_text *t, const char *bytes) { return ni_json_string_n(t, bytes, strlen(bytes)); }
+
+/* ---- native entity version upgrades ---- */
+/* The native reader upgrades a copied value before choosing its inherit.
+ * These are the complete finite selectors for entity carrier version 26.
+ * They are not field-name heuristics or package-specific conversions. */
+typedef enum ni_v_kind {
+    NI_V_CLASS, NI_V_IDENTITY, NI_V_INHERIT, NI_V_MILLISECONDS,
+    NI_V_STRING, NI_V_NESTED, NI_V_COLOR, NI_V_REMOVE, NI_V_BOOL
+} ni_v_kind;
+typedef struct ni_v_op {
+    int before;
+    ni_v_kind kind;
+    const char *inherit, *field, *a, *b, *c;
+} ni_v_op;
+static const ni_v_op ni_v_operations[] = {
+    {15, NI_V_CLASS, "snapmaps/moveable_props/battery", "idProp", NULL, NULL, NULL},
+    {15, NI_V_CLASS, "snapmaps/moveable_props/boot", "idProp", NULL, NULL, NULL},
+    {15, NI_V_IDENTITY, "prop/moveable/bottle_b_lg_02_max", "snapmaps/moveable_props/bottle_b_lg_02_max", "idProp", NULL, NULL},
+    {15, NI_V_IDENTITY, "prop/moveable/bottle_b_lg_max", "snapmaps/moveable_props/bottle_b_lg_max", "idProp", NULL, NULL},
+    {15, NI_V_IDENTITY, "prop/moveable/bottle_c_lg_02_max", "snapmaps/moveable_props/bottle_c_lg_02_max", "idProp", NULL, NULL},
+    {15, NI_V_IDENTITY, "prop/moveable/bottle_c_lg_max", "snapmaps/moveable_props/bottle_c_lg_max", "idProp", NULL, NULL},
+    {15, NI_V_CLASS, "snapmaps/moveable_props/box01", "idProp", NULL, NULL, NULL},
+    {15, NI_V_CLASS, "snapmaps/moveable_props/box02", "idProp", NULL, NULL, NULL},
+    {15, NI_V_IDENTITY, "prop/moveable/bucket", "snapmaps/moveable_props/bucket", "idProp", NULL, NULL},
+    {15, NI_V_IDENTITY, "prop/moveable/can_beer", "snapmaps/moveable_props/can_beer", "idProp", NULL, NULL},
+    {15, NI_V_IDENTITY, "prop/moveable/can_soda", "snapmaps/moveable_props/can_soda", "idProp", NULL, NULL},
+    {15, NI_V_IDENTITY, "prop/moveable/can_tea_max", "snapmaps/moveable_props/can_tea_max", "idProp", NULL, NULL},
+    {15, NI_V_CLASS, "snapmaps/moveable_props/cannister01", "idProp", NULL, NULL, NULL},
+    {15, NI_V_CLASS, "snapmaps/moveable_props/cart01", "idProp", NULL, NULL, NULL},
+    {15, NI_V_CLASS, "snapmaps/moveable_props/cart02", "idProp", NULL, NULL, NULL},
+    {15, NI_V_CLASS, "snapmaps/moveable_props/cleaning_bot", "idProp", NULL, NULL, NULL},
+    {15, NI_V_CLASS, "snapmaps/moveable_props/computer01", "idProp", NULL, NULL, NULL},
+    {15, NI_V_CLASS, "snapmaps/moveable_props/computer02", "idProp", NULL, NULL, NULL},
+    {15, NI_V_CLASS, "snapmaps/moveable_props/computer03", "idProp", NULL, NULL, NULL},
+    {15, NI_V_CLASS, "snapmaps/moveable_props/computer04", "idProp", NULL, NULL, NULL},
+    {15, NI_V_CLASS, "snapmaps/moveable_props/dolly", "idProp", NULL, NULL, NULL},
+    {15, NI_V_CLASS, "snapmaps/moveable_props/drill", "idProp", NULL, NULL, NULL},
+    {15, NI_V_IDENTITY, "prop/moveable/fileholder", "snapmaps/moveable_props/fileholder", "idProp", NULL, NULL},
+    {15, NI_V_CLASS, "snapmaps/moveable_props/food_tray", "idProp", NULL, NULL, NULL},
+    {15, NI_V_CLASS, "snapmaps/moveable_props/fuel_can", "idProp", NULL, NULL, NULL},
+    {15, NI_V_CLASS, "snapmaps/moveable_props/glove", "idProp", NULL, NULL, NULL},
+    {15, NI_V_CLASS, "snapmaps/moveable_props/hammer", "idProp", NULL, NULL, NULL},
+    {15, NI_V_CLASS, "snapmaps/moveable_props/hard_hat", "idProp", NULL, NULL, NULL},
+    {15, NI_V_CLASS, "snapmaps/moveable_props/mop_bucket", "idProp", NULL, NULL, NULL},
+    {15, NI_V_IDENTITY, "prop/moveable/noodles", "snapmaps/moveable_props/noodles", "idProp", NULL, NULL},
+    {15, NI_V_IDENTITY, "prop/moveable/noodles2", "snapmaps/moveable_props/noodles2", "idProp", NULL, NULL},
+    {15, NI_V_IDENTITY, "prop/moveable/noodles2_open", "snapmaps/moveable_props/noodles2_open", "idProp", NULL, NULL},
+    {15, NI_V_IDENTITY, "prop/moveable/noodles_open", "snapmaps/moveable_props/noodles_open", "idProp", NULL, NULL},
+    {15, NI_V_IDENTITY, "prop/moveable/office_mouse", "snapmaps/moveable_props/office_mouse", "idProp", NULL, NULL},
+    {15, NI_V_CLASS, "snapmaps/moveable_props/plasma_crate", "idProp", NULL, NULL, NULL},
+    {15, NI_V_IDENTITY, "prop/moveable/bottle_a_lg_02_max", "snapmaps/moveable_props/bottle_a_lg_02_max", "idProp", NULL, NULL},
+    {15, NI_V_IDENTITY, "prop/moveable/chip_container", "snapmaps/moveable_props/chip_container", "idProp", NULL, NULL},
+    {15, NI_V_CLASS, "snapmaps/moveable_props/printer", "idProp", NULL, NULL, NULL},
+    {15, NI_V_CLASS, "snapmaps/moveable_props/screwdriver", "idProp", NULL, NULL, NULL},
+    {15, NI_V_IDENTITY, "prop/moveable/tin_small", "snapmaps/moveable_props/tin_small", "idProp", NULL, NULL},
+    {15, NI_V_CLASS, "snapmaps/moveable_props/trashcan", "idProp", NULL, NULL, NULL},
+    {15, NI_V_CLASS, "snapmaps/moveable_props/wet_floor_sign", "idProp", NULL, NULL, NULL},
+    {15, NI_V_CLASS, "snapmaps/moveable_props/wrench", "idProp", NULL, NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/event/survive", "eventDurationMS", "eventDuration", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/capture_point/demon_signal", "animationTimeMS", "animationTime", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/damageable_props/default", "fxFadeOutMS", "fxFadeOutTime", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/damageable_props/default", "autoRespawnTimeMS", "autoRespawnTime", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/damageable_props/boxes01", "fxFadeOutMS", "fxFadeOutTime", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/damageable_props/boxes01", "autoRespawnTimeMS", "autoRespawnTime", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/damageable_props/boxes02", "fxFadeOutMS", "fxFadeOutTime", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/damageable_props/boxes02", "autoRespawnTimeMS", "autoRespawnTime", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/damageable_props/boxes03", "fxFadeOutMS", "fxFadeOutTime", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/damageable_props/boxes03", "autoRespawnTimeMS", "autoRespawnTime", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/hazards/laser", "damageInterval", "damageInterval", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/logic/repeater", "delayBetweenRepeats", "delayBetweenRepeats", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/explodeable_props/coop_spawner_explodable_barrel", "initalSpawnDelayMS", "initialSpawnDelay", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/explodeable_props/coop_spawner_explodable_barrel_plasma", "initalSpawnDelayMS", "initialSpawnDelay", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/explodeable_props/coop_spawner_explodable_barrel_radiation", "initalSpawnDelayMS", "initialSpawnDelay", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/explodeable_props/coop_spawner_explodable_barrel_sticky", "initalSpawnDelayMS", "initialSpawnDelay", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/explodeable_props/coop_spawner_explodable_barrel_uac", "initalSpawnDelayMS", "initialSpawnDelay", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/pickups/coop_pickup_spawner_ammo_box", "initalSpawnDelayMS", "initialSpawnDelay", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/pickups/coop_pickup_spawner_ammo_small", "initalSpawnDelayMS", "initialSpawnDelay", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/pickups/coop_pickup_spawner_armor_10", "initalSpawnDelayMS", "initialSpawnDelay", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/pickups/coop_pickup_spawner_armor_shield", "initalSpawnDelayMS", "initialSpawnDelay", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/pickups/coop_pickup_spawner_armor_suit", "initalSpawnDelayMS", "initialSpawnDelay", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/pickups/coop_pickup_spawner_become_demon", "initalSpawnDelayMS", "initialSpawnDelay", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/pickups/coop_pickup_spawner_health_10", "initalSpawnDelayMS", "initialSpawnDelay", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/pickups/coop_pickup_spawner_health_25", "initalSpawnDelayMS", "initialSpawnDelay", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/pickups/coop_pickup_spawner_health_50", "initalSpawnDelayMS", "initialSpawnDelay", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/pickups/coop_pickup_spawner_powerup_haste", "initalSpawnDelayMS", "initialSpawnDelay", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/pickups/coop_pickup_spawner_powerup_invisibility", "initalSpawnDelayMS", "initialSpawnDelay", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/pickups/coop_pickup_spawner_powerup_quad_damage", "initalSpawnDelayMS", "initialSpawnDelay", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/pickups/coop_pickup_spawner_powerup_regeneration", "initalSpawnDelayMS", "initialSpawnDelay", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/pickups/coop_pickup_spawner_supercharge", "initalSpawnDelayMS", "initialSpawnDelay", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/pickups/pickup_backpack", "initalSpawnDelayMS", "initialSpawnDelay", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/pickups/weapons/coop_pickup_spawner_weapon_bfg", "initalSpawnDelayMS", "initialSpawnDelay", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/pickups/weapons/coop_pickup_spawner_weapon_chaingun_mp_base", "initalSpawnDelayMS", "initialSpawnDelay", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/pickups/weapons/coop_pickup_spawner_weapon_chaingun_mp_gatling", "initalSpawnDelayMS", "initialSpawnDelay", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/pickups/weapons/coop_pickup_spawner_weapon_combat_shotgun_mp_base", "initalSpawnDelayMS", "initialSpawnDelay", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/pickups/weapons/coop_pickup_spawner_weapon_combat_shotgun_mp_rocket", "initalSpawnDelayMS", "initialSpawnDelay", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/pickups/weapons/coop_pickup_spawner_weapon_combat_shotgun_sp_burst", "initalSpawnDelayMS", "initialSpawnDelay", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/pickups/weapons/coop_pickup_spawner_weapon_flare_rifle_mp_burn", "initalSpawnDelayMS", "initialSpawnDelay", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/pickups/weapons/coop_pickup_spawner_weapon_gauss_rifle_mp_base", "initalSpawnDelayMS", "initialSpawnDelay", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/pickups/weapons/coop_pickup_spawner_weapon_gauss_rifle_sp_charged_sniper", "initalSpawnDelayMS", "initialSpawnDelay", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/pickups/weapons/coop_pickup_spawner_weapon_heavy_assault_rifle_mp_base", "initalSpawnDelayMS", "initialSpawnDelay", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/pickups/weapons/coop_pickup_spawner_weapon_heavy_assault_rifle_mp_zoom", "initalSpawnDelayMS", "initialSpawnDelay", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/pickups/weapons/coop_pickup_spawner_weapon_heavy_assault_rifle_sp_detonate", "initalSpawnDelayMS", "initialSpawnDelay", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/pickups/weapons/coop_pickup_spawner_weapon_lighting_gun_mp_chain", "initalSpawnDelayMS", "initialSpawnDelay", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/pickups/weapons/coop_pickup_spawner_weapon_plasma_rifle_mp_base", "initalSpawnDelayMS", "initialSpawnDelay", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/pickups/weapons/coop_pickup_spawner_weapon_plasma_rifle_mp_field", "initalSpawnDelayMS", "initialSpawnDelay", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/pickups/weapons/coop_pickup_spawner_weapon_plasma_rifle_sp_stun", "initalSpawnDelayMS", "initialSpawnDelay", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/pickups/weapons/coop_pickup_spawner_weapon_repeater", "initalSpawnDelayMS", "initialSpawnDelay", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/pickups/weapons/coop_pickup_spawner_weapon_rocket_launcher_mp_base", "initalSpawnDelayMS", "initialSpawnDelay", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/pickups/weapons/coop_pickup_spawner_weapon_rocket_launcher_mp_detonate", "initalSpawnDelayMS", "initialSpawnDelay", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/pickups/weapons/coop_pickup_spawner_weapon_super_shotgun", "initalSpawnDelayMS", "initialSpawnDelay", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/pickups/weapons/coop_pickup_spawner_weapon_vortex_rifle_mp_charge", "initalSpawnDelayMS", "initialSpawnDelay", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/spawners/spawn_ammo", "initalSpawnDelayMS", "initialSpawnDelay", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/spawners/spawn_armor", "initalSpawnDelayMS", "initialSpawnDelay", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/spawners/spawn_backpack", "initalSpawnDelayMS", "initialSpawnDelay", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/spawners/spawn_droppable", "initalSpawnDelayMS", "initialSpawnDelay", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/spawners/spawn_health", "initalSpawnDelayMS", "initialSpawnDelay", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/spawners/spawn_powerup", "initalSpawnDelayMS", "initialSpawnDelay", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/spawners/spawn_weapon", "initalSpawnDelayMS", "initialSpawnDelay", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/explodeable_props/coop_spawner_explodable_barrel", "respawnDelayMS", "respawnDelay", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/explodeable_props/coop_spawner_explodable_barrel_plasma", "respawnDelayMS", "respawnDelay", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/explodeable_props/coop_spawner_explodable_barrel_radiation", "respawnDelayMS", "respawnDelay", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/explodeable_props/coop_spawner_explodable_barrel_sticky", "respawnDelayMS", "respawnDelay", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/explodeable_props/coop_spawner_explodable_barrel_uac", "respawnDelayMS", "respawnDelay", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/pickups/coop_pickup_spawner_ammo_box", "respawnDelayMS", "respawnDelay", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/pickups/coop_pickup_spawner_ammo_small", "respawnDelayMS", "respawnDelay", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/pickups/coop_pickup_spawner_armor_10", "respawnDelayMS", "respawnDelay", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/pickups/coop_pickup_spawner_armor_shield", "respawnDelayMS", "respawnDelay", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/pickups/coop_pickup_spawner_armor_suit", "respawnDelayMS", "respawnDelay", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/pickups/coop_pickup_spawner_become_demon", "respawnDelayMS", "respawnDelay", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/pickups/coop_pickup_spawner_health_10", "respawnDelayMS", "respawnDelay", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/pickups/coop_pickup_spawner_health_25", "respawnDelayMS", "respawnDelay", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/pickups/coop_pickup_spawner_health_50", "respawnDelayMS", "respawnDelay", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/pickups/coop_pickup_spawner_powerup_haste", "respawnDelayMS", "respawnDelay", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/pickups/coop_pickup_spawner_powerup_invisibility", "respawnDelayMS", "respawnDelay", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/pickups/coop_pickup_spawner_powerup_quad_damage", "respawnDelayMS", "respawnDelay", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/pickups/coop_pickup_spawner_powerup_regeneration", "respawnDelayMS", "respawnDelay", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/pickups/coop_pickup_spawner_supercharge", "respawnDelayMS", "respawnDelay", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/pickups/pickup_backpack", "respawnDelayMS", "respawnDelay", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/pickups/weapons/coop_pickup_spawner_weapon_bfg", "respawnDelayMS", "respawnDelay", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/pickups/weapons/coop_pickup_spawner_weapon_chaingun_mp_base", "respawnDelayMS", "respawnDelay", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/pickups/weapons/coop_pickup_spawner_weapon_chaingun_mp_gatling", "respawnDelayMS", "respawnDelay", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/pickups/weapons/coop_pickup_spawner_weapon_combat_shotgun_mp_base", "respawnDelayMS", "respawnDelay", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/pickups/weapons/coop_pickup_spawner_weapon_combat_shotgun_mp_rocket", "respawnDelayMS", "respawnDelay", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/pickups/weapons/coop_pickup_spawner_weapon_combat_shotgun_sp_burst", "respawnDelayMS", "respawnDelay", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/pickups/weapons/coop_pickup_spawner_weapon_flare_rifle_mp_burn", "respawnDelayMS", "respawnDelay", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/pickups/weapons/coop_pickup_spawner_weapon_gauss_rifle_mp_base", "respawnDelayMS", "respawnDelay", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/pickups/weapons/coop_pickup_spawner_weapon_gauss_rifle_sp_charged_sniper", "respawnDelayMS", "respawnDelay", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/pickups/weapons/coop_pickup_spawner_weapon_heavy_assault_rifle_mp_base", "respawnDelayMS", "respawnDelay", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/pickups/weapons/coop_pickup_spawner_weapon_heavy_assault_rifle_mp_zoom", "respawnDelayMS", "respawnDelay", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/pickups/weapons/coop_pickup_spawner_weapon_heavy_assault_rifle_sp_detonate", "respawnDelayMS", "respawnDelay", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/pickups/weapons/coop_pickup_spawner_weapon_lighting_gun_mp_chain", "respawnDelayMS", "respawnDelay", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/pickups/weapons/coop_pickup_spawner_weapon_plasma_rifle_mp_base", "respawnDelayMS", "respawnDelay", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/pickups/weapons/coop_pickup_spawner_weapon_plasma_rifle_mp_field", "respawnDelayMS", "respawnDelay", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/pickups/weapons/coop_pickup_spawner_weapon_plasma_rifle_sp_stun", "respawnDelayMS", "respawnDelay", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/pickups/weapons/coop_pickup_spawner_weapon_repeater", "respawnDelayMS", "respawnDelay", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/pickups/weapons/coop_pickup_spawner_weapon_rocket_launcher_mp_base", "respawnDelayMS", "respawnDelay", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/pickups/weapons/coop_pickup_spawner_weapon_rocket_launcher_mp_detonate", "respawnDelayMS", "respawnDelay", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/pickups/weapons/coop_pickup_spawner_weapon_super_shotgun", "respawnDelayMS", "respawnDelay", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/pickups/weapons/coop_pickup_spawner_weapon_vortex_rifle_mp_charge", "respawnDelayMS", "respawnDelay", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/spawners/spawn_ammo", "respawnDelayMS", "respawnDelay", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/spawners/spawn_armor", "respawnDelayMS", "respawnDelay", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/spawners/spawn_backpack", "respawnDelayMS", "respawnDelay", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/spawners/spawn_droppable", "respawnDelayMS", "respawnDelay", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/spawners/spawn_health", "respawnDelayMS", "respawnDelay", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/spawners/spawn_powerup", "respawnDelayMS", "respawnDelay", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/spawners/spawn_weapon", "respawnDelayMS", "respawnDelay", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/message/message", "messageDuration", "messageDuration", NULL, NULL},
+    {16, NI_V_MILLISECONDS, "snapmaps/logic/delay", "timerDurationMS", "timerDuration", NULL, NULL},
+    {17, NI_V_STRING, "snapmaps/action/player/give_droppable", "droppableDecl", "power_core/power_core_normal", "flag/flag_blue", NULL},
+    {17, NI_V_STRING, "snapmaps/action/player/take_droppable", "droppableDecl", "power_core/power_core_normal", "flag/flag_blue", NULL},
+    {18, NI_V_NESTED, "snapmaps/settings/hud_settings", "topLeft", "type", "SNAP_HUD_TOP_LEADERBOARD", "SNAP_HUD_GAME_PAR_TIME"},
+    {18, NI_V_NESTED, "snapmaps/settings/hud_settings", "topRight", "type", "SNAP_HUD_TOP_LEADERBOARD", "SNAP_HUD_GAME_PAR_TIME"},
+    {18, NI_V_NESTED, "snapmaps/settings/hud_settings", "bottom", "type", "SNAP_HUD_TOP_LEADERBOARD", "SNAP_HUD_GAME_PAR_TIME"},
+    {19, NI_V_INHERIT, "snapmaps/event/survive", "snapmaps/event/survive_deprecated", NULL, NULL, NULL},
+    {20, NI_V_REMOVE, "snapmaps/spawners/spawn_armor", "spawnOnStart", NULL, NULL, NULL},
+    {20, NI_V_REMOVE, "snapmaps/spawners/spawn_backpack", "spawnOnStart", NULL, NULL, NULL},
+    {20, NI_V_REMOVE, "snapmaps/spawners/spawn_droppable", "spawnOnStart", NULL, NULL, NULL},
+    {20, NI_V_REMOVE, "snapmaps/spawners/spawn_health", "spawnOnStart", NULL, NULL, NULL},
+    {20, NI_V_REMOVE, "snapmaps/spawners/spawn_powerup", "spawnOnStart", NULL, NULL, NULL},
+    {20, NI_V_REMOVE, "snapmaps/spawners/spawn_weapon", "spawnOnStart", NULL, NULL, NULL},
+    {20, NI_V_REMOVE, "snapmaps/spawners/spawn_ammo", "spawnOnStart", NULL, NULL, NULL},
+    {21, NI_V_CLASS, "snapmaps/visblockers/industrial/cap_01", "idSnapMapCapEntity", NULL, NULL, NULL},
+    {22, NI_V_COLOR, "snapmaps/spawners/spawn_backpack", "colorParam", NULL, NULL, NULL},
+    {24, NI_V_STRING, "snapmaps/message/codex_message", "image", "textures/guis/codex_images/uac_personnel/vega", "textures/guis/snapmaps/codex_images/vega", NULL},
+    {25, NI_V_BOOL, "snapmaps/volume/blocking", "isVisible", "false", NULL, NULL},
+    {26, NI_V_BOOL, "snapmaps/volume/blocking", "isNetworkStatic", "false", NULL, NULL},
+};
+
+#ifdef SH_NATIVE_INLINE_TESTING
+static long ni_v_fail_after = -1;
+void sh_native_inline_test_version_alloc_fail_after(long count) { ni_v_fail_after = count; }
+#endif
+static void *ni_v_alloc(size_t size)
+{
+#ifdef SH_NATIVE_INLINE_TESTING
+    if (ni_v_fail_after == 0) return NULL;
+    if (ni_v_fail_after > 0) ni_v_fail_after--;
+#endif
+    return malloc(size);
+}
+static char *ni_v_copy(const char *value, size_t length)
+{
+    if (length == SIZE_MAX) return NULL;
+    char *copy = ni_v_alloc(length + 1);
+    if (copy) { memcpy(copy, value, length); copy[length] = 0; }
+    return copy;
+}
+/* Values here have already passed native JSON validation. Using the strict
+ * settings setter would reject unchanged native byte strings. */
+static int ni_v_set_n(sh_json_object *object, const char *key, size_t length, const char *value)
+{
+    char *copy = ni_v_copy(value, strlen(value));
+    if (!copy) return 0;
+    for (size_t i = 0; i < object->count; i++) {
+        sh_json_member *member = object->members + i;
+        if (member->key_length == length && !memcmp(member->key, key, length)) {
+            free(member->value_json); member->value_json = copy; return 1;
+        }
+    }
+    char *name = ni_v_copy(key, length);
+    if (!name) { free(copy); return 0; }
+    if (object->count == object->capacity) {
+        size_t next = object->capacity ? object->capacity * 2 : 8;
+        if (next < object->capacity || next > SIZE_MAX / sizeof(*object->members)) {
+            free(name); free(copy); return 0;
+        }
+        sh_json_member *grown = ni_v_alloc(next * sizeof(*grown));
+        if (!grown) { free(name); free(copy); return 0; }
+        if (object->count) memcpy(grown, object->members, object->count * sizeof(*grown));
+        free(object->members); object->members = grown; object->capacity = next;
+    }
+    object->members[object->count++] = (sh_json_member){name, length, copy};
+    return 1;
+}
+static int ni_v_set(sh_json_object *object, const char *key, const char *value)
+{ return ni_v_set_n(object, key, strlen(key), value); }
+static void ni_v_remove(sh_json_object *object, const char *key)
+{
+    size_t length = strlen(key);
+    for (size_t i = 0; i < object->count; i++) {
+        sh_json_member *member = object->members + i;
+        if (member->key_length != length || memcmp(member->key, key, length)) continue;
+        free(member->key); free(member->value_json);
+        memmove(member, member + 1, (object->count - i - 1) * sizeof(*member));
+        object->count--; return;
+    }
+}
+static int ni_v_clone(const sh_json_object *source, sh_json_object *copy)
+{
+    for (size_t i = 0; i < source->count; i++) {
+        const sh_json_member *member = source->members + i;
+        if (!ni_v_set_n(copy, member->key, member->key_length, member->value_json)) return 0;
+    }
+    return 1;
+}
+static char *ni_v_serialize(const sh_json_object *object)
+{
+    ni_text out = {0};
+    if (!ni_append(&out, "{", 1)) goto fail;
+    for (size_t i = 0; i < object->count; i++) {
+        const sh_json_member *member = object->members + i;
+        if ((i && !ni_append(&out, ",", 1)) || !ni_json_string_n(&out, member->key, member->key_length) ||
+            !ni_append(&out, ":", 1) || !ni_append_text(&out, member->value_json)) goto fail;
+    }
+    if (!ni_append(&out, "}", 1)) goto fail;
+    return out.data;
+fail:
+    free(out.data); return NULL;
+}
+static int ni_v_string(const char *json, char **out)
+{
+    size_t length = json ? strlen(json) : 0, decoded = 0;
+    *out = NULL;
+    if (!length || json[0] != '"') return 0;
+    char *value = ni_v_alloc(length + 1);
+    if (!value) return -1;
+    if (!sh_native_json_decode_string(json, length, value, length + 1, &decoded) || strlen(value) != decoded) {
+        free(value); return 0;
+    }
+    *out = value; return 1;
+}
+static int ni_v_set_string(sh_json_object *object, const char *key, const char *value)
+{
+    ni_text json = {0};
+    int ok = ni_json_string(&json, value) && ni_v_set(object, key, json.data);
+    free(json.data); return ok;
+}
+/* Json::Value's non-erroring asInt/asDouble domains. Integers and reals have
+ * different native range checks; strings are never number coercions. */
+static int ni_v_number(const char *json, int as_int, double *number)
+{
+    if (!json || !strcmp(json, "null") || !strcmp(json, "false")) { *number = 0; return 1; }
+    if (!strcmp(json, "true")) { *number = 1; return 1; }
+    if ((*json != '-' && (*json < '0' || *json > '9'))) return 0;
+    char *end = NULL;
+    int real = strpbrk(json, ".eE") != NULL;
+    errno = 0;
+    if (!real) {
+        if (*json == '-') {
+            int64_t value = _strtoi64(json, &end, 10);
+            if (errno || !end || *end || (as_int && (value < -2147483647LL || value > 2147483646LL))) return 0;
+            *number = (double)value;
+        } else {
+            uint64_t value = _strtoui64(json, &end, 10);
+            if (errno || !end || *end || (as_int && value >= 2147483647ULL)) return 0;
+            *number = (double)value;
+        }
+        return 1;
+    }
+    _locale_t locale = _create_locale(LC_NUMERIC, "C");
+    if (!locale) return -1;
+    errno = 0;
+    double value = _strtod_l(json, &end, locale);
+    int conversion_error = errno;
+    _free_locale(locale);
+    if (conversion_error || !end || *end || !_finite(value) ||
+        (as_int && (value < -2147483648.0 || value > 2147483647.0))) return 0;
+    *number = as_int ? (double)(int32_t)value : value;
+    return 1;
+}
+/* A selected helper's non-object state is outside the proven mutation domain.
+ * It retains the original package route rather than guessing native asserts. */
+static int ni_v_object(const char *json, sh_json_object *object)
+{
+    if (!json || json[0] != '{') return 0;
+    return sh_native_json_parse_object(json, strlen(json), 64, object) ? 1 : -1;
+}
+static int ni_v_edit_op(sh_json_object *definition, const ni_v_op *op)
+{
+    sh_json_object state = {0}, edit = {0}, outer = {0}, inner = {0};
+    char *text = NULL, *value = NULL;
+    double number = 0;
+    int result = ni_v_object(sh_json_object_get(definition, "state"), &state), changed = 0;
+    if (result != 1) goto done;
+    result = ni_v_object(sh_json_object_get(&state, "edit"), &edit);
+    if (result != 1) goto done;
+    const char *old = sh_json_object_get(&edit, op->field);
+    result = 1;
+    switch (op->kind) {
+    case NI_V_REMOVE:
+        if (old) { ni_v_remove(&edit, op->field); changed = 1; }
+        break;
+    case NI_V_BOOL:
+        if (old) ni_v_remove(&edit, op->field);
+        else if (!ni_v_set(&edit, op->field, op->a)) { result = -1; goto done; }
+        changed = 1; break;
+    case NI_V_STRING:
+        if (!old) {
+            if (!ni_v_set_string(&edit, op->field, op->a)) { result = -1; goto done; }
+            changed = 1;
+        } else {
+            result = ni_v_string(old, &value);
+            if (result != 1) goto done;
+            if (!strcmp(value, op->b)) { ni_v_remove(&edit, op->field); changed = 1; }
+        }
+        break;
+    case NI_V_MILLISECONDS:
+        if (!old) break;
+        result = ni_v_number(old, 1, &number);
+        if (result != 1) goto done;
+        {
+            char wrapped[64]; snprintf(wrapped, sizeof(wrapped), "{\"milliseconds\":%d}", (int32_t)number);
+            ni_v_remove(&edit, op->field);
+            if (!ni_v_set(&edit, op->a, wrapped)) { result = -1; goto done; }
+        }
+        changed = 1; break;
+    case NI_V_NESTED:
+        if (!old) break;
+        result = ni_v_object(old, &outer);
+        if (result != 1) goto done;
+        old = sh_json_object_get(&outer, op->a);
+        if (!old) break;
+        result = ni_v_string(old, &value);
+        if (result != 1) goto done;
+        if (!strcmp(value, op->b)) {
+            if (!ni_v_set_string(&outer, op->a, op->c) || !(text = ni_v_serialize(&outer)) ||
+                !ni_v_set(&edit, op->field, text)) { result = -1; goto done; }
+            free(text); text = NULL; changed = 1;
+        }
+        break;
+    case NI_V_COLOR:
+        if (!old) break;
+        result = ni_v_object(old, &outer);
+        if (result != 1) goto done;
+        old = sh_json_object_get(&outer, "constantValue");
+        if (!old) break;
+        result = ni_v_object(old, &inner);
+        if (result != 1) goto done;
+        old = sh_json_object_get(&inner, "a");
+        if (!old) break;
+        result = ni_v_number(old, 0, &number);
+        if (result != 1) goto done;
+        if (number <= 0) {
+            const char *keys[] = {"r", "g", "b", "a"};
+            for (size_t i = 0; i < 4; i++)
+                if (!ni_v_set(&inner, keys[i], "0")) { result = -1; goto done; }
+            if (!(text = ni_v_serialize(&inner)) || !ni_v_set(&outer, "constantValue", text)) { result = -1; goto done; }
+            free(text); text = NULL;
+            if (!(text = ni_v_serialize(&outer)) || !ni_v_set(&edit, op->field, text)) { result = -1; goto done; }
+            free(text); text = NULL; changed = 1;
+        }
+        break;
+    default: result = 0; goto done;
+    }
+    if (changed) {
+        if (!(text = ni_v_serialize(&edit)) || !ni_v_set(&state, "edit", text)) { result = -1; goto done; }
+        free(text); text = NULL;
+        if (!(text = ni_v_serialize(&state)) || !ni_v_set(definition, "state", text)) { result = -1; goto done; }
+    }
+done:
+    free(text); free(value);
+    sh_json_object_free(&state); sh_json_object_free(&edit);
+    sh_json_object_free(&outer); sh_json_object_free(&inner);
+    return result;
+}
+/* Exact derived copy: 1; retain original route: 0; allocation failure: -1.
+ * This does not stamp the version. Only accepted inheritance conversion does. */
+static int ni_v_upgrade(const sh_json_object *original, int target, sh_json_object *copy)
+{
+    double version_number = 0;
+    int result = ni_v_number(sh_json_object_get(original, "~version"), 1, &version_number);
+    if (result != 1) return result;
+    if (target != 26 || version_number < 0 || version_number > 26) return 0;
+    int version = (int)version_number;
+    if (!ni_v_clone(original, copy)) return -1;
+    if (version == target) return 1;
+    char *inherit = NULL;
+    result = ni_v_string(sh_json_object_get(copy, "inherit"), &inherit);
+    if (result != 1) return result;
+    for (size_t i = 0; i < sizeof(ni_v_operations) / sizeof(*ni_v_operations); i++) {
+        const ni_v_op *op = ni_v_operations + i;
+        if (version >= op->before || strcmp(inherit, op->inherit)) continue;
+        switch (op->kind) {
+        case NI_V_CLASS:
+            if (!ni_v_set_string(copy, "className", op->field)) { result = -1; goto done; }
+            break;
+        case NI_V_IDENTITY:
+            if (!ni_v_set_string(copy, "inherit", op->field) || !ni_v_set_string(copy, "className", op->a)) { result = -1; goto done; }
+            free(inherit); inherit = NULL;
+            result = ni_v_string(sh_json_object_get(copy, "inherit"), &inherit);
+            if (result != 1) goto done;
+            break;
+        case NI_V_INHERIT:
+            if (!ni_v_set_string(copy, "inherit", op->field)) { result = -1; goto done; }
+            free(inherit); inherit = NULL;
+            result = ni_v_string(sh_json_object_get(copy, "inherit"), &inherit);
+            if (result != 1) goto done;
+            break;
+        default:
+            result = ni_v_edit_op(copy, op);
+            if (result != 1) goto done;
+            break;
+        }
+    }
+done:
+    free(inherit); return result;
+}
+#ifdef SH_NATIVE_INLINE_TESTING
+int sh_native_inline_test_version_copy(const char *json, int target, char **copy)
+{
+    sh_json_object original = {0}, derived = {0};
+    *copy = NULL;
+    if (!sh_native_json_parse_object(json, strlen(json), 64, &original)) return -1;
+    int result = ni_v_upgrade(&original, target, &derived);
+    if (result == 1 && !(*copy = ni_v_serialize(&derived))) result = -1;
+    sh_json_object_free(&original); sh_json_object_free(&derived);
+    return result;
+}
+#endif
 
 /* ---- entities[i].entityDef object spans ---- */
 typedef struct ni_span { size_t entity, offset, length; } ni_span;
@@ -366,6 +839,26 @@ static void ni_refuse(sh_native_inline_site *site, sh_decl_carrier_limit limit, 
     snprintf(site->reason, sizeof(site->reason), format, detail ? detail : "");
 }
 
+/* The source-tree model does not evaluate native defaults, new list slots,
+ * resets or custom readers, so its doubt is never a native limit. Only the
+ * native evaluator may accept such a candidate; otherwise the package stays
+ * (GAP) with the evaluator's outcome. 1 accepts, 0 refused. */
+static int ni_native_verdict(const sh_native_inline_source *source, sh_native_inline_site *site, const char *base,
+    const sh_decl_node *target, const sh_decl_node *candidate, const char *model)
+{
+    char detail[160] = "", reason[240];
+    sh_native_eval_status status = SH_NATIVE_EVAL_UNAVAILABLE;
+    if (source->evaluate)
+        status = source->evaluate(source->context, site->entity, site->from, base, target, candidate, detail, sizeof(detail));
+    if (status == SH_NATIVE_EVAL_EQUAL) return 1;
+    const char *outcome = status == SH_NATIVE_EVAL_UNEQUAL ? "native evaluation found a different state" :
+        status == SH_NATIVE_EVAL_UNSUPPORTED ? "native evaluation does not cover a value" :
+        status == SH_NATIVE_EVAL_FAILED ? "native evaluation failed" : "native evaluation is unavailable";
+    snprintf(reason, sizeof(reason), "%s (%s)%s%s", model, outcome, detail[0] ? ": " : "", detail);
+    ni_refuse(site, SH_DECL_CARRIER_GAP, "%s", reason);
+    return 0;
+}
+
 static int ni_member_allowed(const sh_decl_node *member, const char **reason)
 {
     if (!strcmp(member->key, "inherit") || !strcmp(member->key, "class") ||
@@ -393,20 +886,17 @@ static int ni_site(const sh_native_inline_source *source, const char *json, cons
     ni_marks marks = {0};
     ni_walker walker = {0};
     sh_decl_node *instance = NULL, *merged = NULL, *reference = NULL, *expanded_ref = NULL, *expanded_cand = NULL;
+    int model_equal = 1;
     char *base = NULL, *state_json = NULL, *replaces = NULL, *materialized = NULL, error[512] = "";
     int folded = 0;
-    const char *state = sh_json_object_get(definition, "state"), *version = sh_json_object_get(definition, "~version");
+    const char *state = sh_json_object_get(definition, "state");
     const char *class_json = sh_json_object_get(definition, "className");
     int result = -1;
     (void)json; (void)span;
-    /* The native value reader needs state; className is optional (the class
-     * then inherits) and an absent ~version is version 0, which its upgrade
-     * routine rewrites on load (VK FUN_1409c6160, GL FUN_1409c59b0; D7). */
+    /* The outer loop has applied the original native version policy before
+     * choosing this inherit. The value reader needs state; className inherits
+     * when omitted. Accepted output stamps the current version only below. */
     if (!state) { ni_refuse(site, SH_DECL_CARRIER_GAP, "entity value lacks state%s", NULL); result = 0; goto done; }
-    if (!version) version = "0";
-    if (atoi(version) != source->version || strspn(version, "0123456789") != strlen(version)) {
-        ni_refuse(site, SH_DECL_CARRIER_GAP, "entity state version %s is upgraded natively on load", version); result = 0; goto done;
-    }
     int looked = source->looked_up ? source->looked_up(source->context, site->entity, inherit) : 0;
     if (looked < 0) goto done;
     if (looked) {
@@ -503,7 +993,11 @@ static int ni_site(const sh_native_inline_source *source, const char *json, cons
         expanded_ref = sh_decl_entity_expanded_state(reference, &classes, error, sizeof(error));
         if (!expanded_ref) { ni_refuse(site, SH_DECL_CARRIER_GAP, "chain state is not modelled: %s", error); result = 0; goto done; }
         expanded_cand = sh_decl_entity_expanded_state(merged, &classes, error, sizeof(error));
-        if (!expanded_cand) { ni_refuse(site, SH_DECL_CARRIER_ENGINE, "one inline layer cannot express this chain: %s", error); result = 0; goto done; }
+        if (!expanded_cand) {
+            /* A failed source expansion is product coverage, not a native limit. */
+            ni_refuse(site, SH_DECL_CARRIER_GAP, "the inline layer is not modelled: %s", error);
+            result = 0; goto done;
+        }
         int equal = ni_equal(expanded_ref, expanded_cand);
         if (equal < 0) goto done;
         if (!equal && folded) {
@@ -513,10 +1007,9 @@ static int ni_site(const sh_native_inline_source *source, const char *json, cons
                 "replacement; restoring omitted stock values is not modelled", base);
             result = 0; goto done;
         }
-        if (!equal) {
-            ni_refuse(site, SH_DECL_CARRIER_ENGINE, "SnapMap's single inline state layer changes this chain's inherited lists or resets%s", NULL);
-            result = 0; goto done;
-        }
+        /* Inequality here is a source-model doubt (inherited lists, resets,
+         * defaults); the native verdict below decides. */
+        model_equal = equal;
     }
     /* Typed walk of the converted layer under the instance's class: its own
      * className, or without one the class its chain gives (the native default).
@@ -579,23 +1072,30 @@ static int ni_site(const sh_native_inline_source *source, const char *json, cons
     {
         ni_text out = {0};
         int ok = ni_append(&out, "{", 1);
+        size_t emitted = 0;
         if (ok && materialized)
-            ok = ni_json_string(&out, "className") && ni_append(&out, ":", 1) && ni_json_string(&out, materialized) &&
-                (!definition->count || ni_append(&out, ",", 1));
+            ok = ni_json_string(&out, "className") && ni_append(&out, ":", 1) && ni_json_string(&out, materialized);
+        if (materialized) emitted++;
         for (size_t i = 0; ok && i < definition->count; i++) {
             const sh_json_member *member = definition->members + i;
-            if (i && !ni_append(&out, ",", 1)) { ok = 0; break; }
-            char *key = malloc(member->key_length + 1);
-            if (!key) { ok = 0; break; }
-            memcpy(key, member->key, member->key_length); key[member->key_length] = 0;
-            ok = ni_json_string(&out, key) && ni_append(&out, ":", 1);
-            if (ok && !strcmp(key, "inherit")) ok = ni_json_string(&out, base);
-            else if (ok && !strcmp(key, "state")) ok = ni_append_text(&out, state_json);
+            if (emitted++ && !ni_append(&out, ",", 1)) { ok = 0; break; }
+            const char *key = member->key;
+            ok = ni_json_string_n(&out, key, member->key_length) && ni_append(&out, ":", 1);
+            if (ok && member->key_length == 7 && !memcmp(key, "inherit", 7)) ok = ni_json_string(&out, base);
+            else if (ok && member->key_length == 5 && !memcmp(key, "state", 5)) ok = ni_append_text(&out, state_json);
+            else if (ok && member->key_length == 8 && !memcmp(key, "~version", 8)) ok = ni_append_text(&out, "26");
             else if (ok) ok = ni_append_text(&out, member->value_json);
-            free(key);
         }
+        if (ok && !sh_json_object_get(definition, "~version"))
+            ok = (!emitted || ni_append(&out, ",", 1)) && ni_append_text(&out, "\"~version\":26");
         if (!ok || !ni_append(&out, "}", 1)) { free(out.data); goto done; }
         *replacement = out.data;
+    }
+    /* Source-tree agreement only pre-filters. The native evaluator is the
+     * accepting authority; without its EQUAL the complete package stays. */
+    if (!ni_native_verdict(source, site, base, reference, merged, model_equal ? "the source model agrees" :
+            "the source model of one inline layer differs from this chain's inherited lists or resets")) {
+        free(*replacement); *replacement = NULL; result = 0; goto done;
     }
     site->converted = 1; site->limit = SH_DECL_CARRIER_EXACT; site->reason[0] = 0;
     if (!(site->to = _strdup(base))) { free(*replacement); *replacement = NULL; goto done; }
@@ -641,31 +1141,39 @@ char *sh_native_inline_document(const char *json, size_t length,
     sites.sites = calloc(scan.count ? scan.count : 1, sizeof(*sites.sites));
     if (!replacements || !sites.sites) goto done;
     for (size_t i = 0; i < scan.count; i++) {
-        sh_json_object definition = {0};
+        sh_json_object original = {0}, normalized = {0};
+        const sh_json_object *definition;
         char inherit[512]; size_t inherit_length = 0;
         const ni_span *span = scan.spans + i;
-        if (!sh_native_json_parse_object(json + span->offset, span->length, 64, &definition)) goto done;
-        const char *value = sh_json_object_get(&definition, "inherit");
+        if (!sh_native_json_parse_object(json + span->offset, span->length, 64, &original)) goto done;
+        int upgraded = ni_v_upgrade(&original, source->version, &normalized);
+        /* Refused normalization must look up the original identity and keep its
+         * complete package use. No partial derived state is ever published. */
+        definition = upgraded == 1 ? &normalized : &original;
+        const char *value = sh_json_object_get(definition, "inherit");
         sh_decl_source text = {0}; int served = 0, read = 0;
         if (value && sh_native_json_decode_string(value, strlen(value), inherit, sizeof(inherit), &inherit_length) &&
             inherit_length < sizeof(inherit) && strlen(inherit) == inherit_length && inherit_length)
             read = source->read(source->context, inherit, &text, &served, NULL);
         free((char *)text.text);
-        if (read < 0) { sh_json_object_free(&definition); goto done; }
+        if (read < 0) { sh_json_object_free(&original); sh_json_object_free(&normalized); goto done; }
         if (read && served) {
             sh_native_inline_site *site = sites.sites + sites.count++;
             sh_decl_carrier_limit limit = SH_DECL_CARRIER_GAP;
             site->entity = span->entity;
             const char *kept = source->keep ? source->keep(source->context, span->entity, inherit, &limit) : NULL;
-            if (!(site->from = _strdup(inherit))) { sh_json_object_free(&definition); goto done; }
-            if (kept) ni_refuse(site, limit, "%s", kept);
-            else if (ni_site(source, json, span, inherit, &definition, site, &replacements[i]) < 0) {
-                sh_json_object_free(&definition);
+            if (!(site->from = _strdup(inherit))) {
+                sh_json_object_free(&original); sh_json_object_free(&normalized); goto done;
+            }
+            if (upgraded != 1) ni_refuse(site, SH_DECL_CARRIER_GAP, "native entity-version conversion is unavailable%s", NULL);
+            else if (kept) ni_refuse(site, limit, "%s", kept);
+            else if (ni_site(source, json, span, inherit, definition, site, &replacements[i]) < 0) {
+                sh_json_object_free(&original); sh_json_object_free(&normalized);
                 if (error && capacity) snprintf(error, capacity, "native representation of entity %zu failed", span->entity);
                 goto done;
             }
         }
-        sh_json_object_free(&definition);
+        sh_json_object_free(&original); sh_json_object_free(&normalized);
     }
     size_t at = 0;
     for (size_t i = 0; i < scan.count; i++) {

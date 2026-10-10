@@ -75,7 +75,12 @@ static int dc_decimal_float(const char *value, char *carrier, size_t capacity,
     char *end = NULL, saved[64];
     double parsed = strtod(value, &end);
     float authored = (float)parsed, loaded, resaved;
-    if (!end || *end || !isfinite(authored))
+    /* The native lexer includes an empty lowercase exponent. Its CRT reader
+     * rewinds that exponent and keeps the mantissa (paired source readers
+     * 141ea72f0/141ec0760). strtod leaves end at the same exponent. */
+    int empty_exponent = end && end[0] == 'e' && (!end[1] ||
+        ((end[1] == '+' || end[1] == '-') && !end[2]));
+    if (!end || (*end && !empty_exponent) || !isfinite(authored))
         return dc_refuse(refusal, SH_DECL_CARRIER_GAP, "float spelling has no proven native value");
     if (authored != 0.0f && fabsf(authored) < FLT_MIN)
         return dc_refuse(refusal, SH_DECL_CARRIER_ENGINE, "SnapMap stores this denormal float as zero");
@@ -99,6 +104,7 @@ int sh_decl_carrier_scalar(const char *value, const char *field_type, char **jso
     sh_decl_carrier_refusal *refusal)
 {
     size_t length = value ? strlen(value) : 0, i, at, digits = 0, dots = 0;
+    int exponent = 0;
     dc_text out = {0};
     if (refusal) { refusal->limit = SH_DECL_CARRIER_EXACT; refusal->reason = NULL; }
     if (!json) return -1;
@@ -123,20 +129,30 @@ int sh_decl_carrier_scalar(const char *value, const char *field_type, char **jso
         *json = _strdup(!strcmp(value, "NULL") ? "null" : value);
         return *json ? 1 : -1;
     }
-    /* The native writer's number grammar: optional '-', digits, at most one '.'. */
+    /* ReadNumber (VK 141a0c920 / GL 1419feb50) classifies a decimal
+     * mantissa followed by lowercase 'e' and an optional sign as float.
+     * Leading zero without an immediate dot instead selects its octal path. */
     at = value[0] == '-';
+    if (value[at] == '0' && length - at > 1 && value[at + 1] != '.')
+        return dc_refuse(refusal, SH_DECL_CARRIER_GAP, "octal spelling needs its native integer conversion");
     for (i = at; i < length; i++) {
         if (value[i] == '.') dots++;
         else if (value[i] >= '0' && value[i] <= '9') digits++;
+        else if (value[i] == 'e') { exponent = 1; break; }
         else return dc_refuse(refusal, SH_DECL_CARRIER_GAP,
             "spelling outside the carrier's number grammar needs a proven equivalent for its reader");
     }
     if (!digits || dots > 1)
         return dc_refuse(refusal, SH_DECL_CARRIER_GAP, "number spelling has no proven native value");
-    if (!dots) {
+    if (exponent) {
+        i++;
+        if (value[i] == '+' || value[i] == '-') i++;
+        for (; i < length && value[i] >= '0' && value[i] <= '9'; i++) {}
+        if (i != length)
+            return dc_refuse(refusal, SH_DECL_CARRIER_GAP, "float exponent is not one complete number");
+    }
+    if (!dots && !exponent) {
         int64_t magnitude = 0;
-        if (value[at] == '0' && length - at > 1)
-            return dc_refuse(refusal, SH_DECL_CARRIER_GAP, "octal spelling needs its native integer conversion");
         if (at && length == 2 && value[1] == '0')
             return dc_refuse(refusal, SH_DECL_CARRIER_GAP, "negative zero loads back as zero");
         for (i = at; i < length; i++) {
@@ -150,9 +166,9 @@ int sh_decl_carrier_scalar(const char *value, const char *field_type, char **jso
         return *json ? 1 : -1;
     }
     if (!field_type)
-        return dc_refuse(refusal, SH_DECL_CARRIER_GAP, "decimal value of a field whose native reader is unknown");
+        return dc_refuse(refusal, SH_DECL_CARRIER_GAP, "float spelling of a field whose native reader is unknown");
     if (strcmp(field_type, "float"))
-        return dc_refuse(refusal, SH_DECL_CARRIER_GAP, "decimal value of a non-float field needs its native reader");
+        return dc_refuse(refusal, SH_DECL_CARRIER_GAP, "float spelling of a non-float field needs its native reader");
     char carrier[80];
     if (!dc_decimal_float(value, carrier, sizeof(carrier), refusal)) return 0;
     /* Keep the JSON a real (JsonCpp reads a spelling without '.' as an

@@ -146,6 +146,7 @@ int main(void)
     pointer(owner, 0x130, provider); pointer(provider, 0x1a0, "_VMTR"); integer(provider, 0x2fc, 256);
     a = sh_virtual_material_runtime_prepare(bindings, 3, error, sizeof(error));
     assert(a && a->count == 2 && !*error);
+    assert(!sh_virtual_material_runtime_reserve(a, error, sizeof(error)) && !g_vmr_views && !g_vmr_active);
     assert(!sh_virtual_material_runtime_publish(a, &previous, error, sizeof(error)));
     assert(previous == (void *)0x1111 && !g_vmr_active);
     assert(sh_virtual_material_runtime_install(&signature, 1) && prepared == 1 && committed == 1);
@@ -163,6 +164,19 @@ int main(void)
     assert(vmr_lookup_hook(owner, material[3]) == (void *)0x5678 && calls == 2);
     assert(sh_virtual_material_runtime_status(error, sizeof(error)) && !logs);
 
+    /* Reservation validates and registers without exposing new lookup. An
+     * unused prepublication fallback must be removable immediately. */
+    b = sh_virtual_material_runtime_prepare(bindings, 3, error, sizeof(error)); assert(b);
+    assert(sh_virtual_material_runtime_reserve(b, error, sizeof(error)) && g_vmr_active == a);
+    assert(b->published && !b->retired && g_vmr_views == b && parse_material(0) == red);
+    assert(sh_virtual_material_runtime_release(&b) && !b && g_vmr_active == a && g_vmr_views == a);
+    b = sh_virtual_material_runtime_prepare(bindings, 3, error, sizeof(error)); assert(b);
+    assert(sh_virtual_material_runtime_reserve(b, error, sizeof(error)) && g_vmr_active == a);
+    sh_virtual_material_runtime_restore(b);
+    assert(g_vmr_active == b && parse_material(0) == red);
+    sh_virtual_material_runtime_restore(a);
+    assert(sh_virtual_material_runtime_release(&b) && !b && g_vmr_active == a);
+
     /* Same meanings in a new snapshot borrow existing rows and preserve rollback. */
     b = sh_virtual_material_runtime_prepare(bindings, 3, error, sizeof(error)); assert(b);
     assert(sh_virtual_material_runtime_publish(b, &previous, error, sizeof(error)) && previous == a);
@@ -177,6 +191,7 @@ int main(void)
     changed.x++; bindings[0].record = &changed;
     assert(!sh_virtual_material_runtime_prepare(bindings, 3, error, sizeof(error)) && *error);
     bad = sh_virtual_material_runtime_prepare(bindings, 1, error, sizeof(error)); assert(bad);
+    assert(!sh_virtual_material_runtime_reserve(bad, error, sizeof(error)) && g_vmr_active == a && !bad->published);
     previous = (void *)0x2222;
     assert(!sh_virtual_material_runtime_publish(bad, &previous, error, sizeof(error)) && *error);
     assert(previous == (void *)0x2222 && g_vmr_active == a && parse_material(0) == red);

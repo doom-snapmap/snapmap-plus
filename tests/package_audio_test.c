@@ -289,6 +289,98 @@ static void immutable_scope(void)
     sh_audio_originals_close(originals);
 }
 
+static int refuse_path(void *context, const char *path, int original)
+{ (void)context; (void)path; (void)original; return 0; }
+typedef struct last_path { char path[256]; int original; } last_path;
+static int keep_last_path(void *context, const char *path, int original)
+{ last_path *out=context; snprintf(out->path,sizeof(out->path),"%s",path); out->original=original; return 1; }
+/* Put a deleted fixture file back so the fixture's own cleanup finds it. */
+static void recreate(const char *path)
+{
+    HANDLE file=CreateFileA(path,GENERIC_WRITE,0,NULL,CREATE_NEW,0,NULL);
+    CHECK(file!=INVALID_HANDLE_VALUE);if(file!=INVALID_HANDLE_VALUE)CloseHandle(file);
+}
+static int media_at(sh_package_audio_scope *scope,uint32_t id,const char *path,int original)
+{
+    last_path last={0};char error[1024];
+    return sh_package_audio_scope_media(scope,id,keep_last_path,&last,error,sizeof(error))==1 &&
+        !strcmp(last.path,path) && last.original==original;
+}
+/* Every request resolves in the native order: localized candidate, localized
+ * original, root candidate, root original. Only the originals owner keeps where
+ * an exact path was found, so a higher-priority file created later still wins
+ * and absence is probed again. The visitor runs on every request and its
+ * refusal is that request's answer; it never changes the located source. */
+static void scope_media_answers(void)
+{
+    unsigned char media[4]={5,6,7,8};
+    char base[4096],path[4096],error[1024];
+    static const char *authored[]={"sound/soundbanks/pc/80.wem","sound/soundbanks/pc/english(us)/79.wem","sound/soundbanks/pc/81.wem"};
+    static const char *held[]={"77.wem","english(us)/77.wem","english(us)/80.wem","78.wem"};
+    static const uint32_t ids[]={77,78,79,80,81,90};
+    sh_compiled_resource files[3];sh_package_compilation compiled={0},changed={0};
+    binary("media-scope/sound/soundbanks/pc/77.wem",media,sizeof(media));
+    snprintf(base,sizeof(base),"%s/media-scope",root);
+    sh_audio_originals *originals=sh_audio_originals_open(base,L"English(US)",NULL);CHECK(originals);
+    memset(files,0,sizeof(files));
+    for(size_t i=0;i<3;i++){files[i].engine_path=authored[i];files[i].body=media;files[i].body_length=sizeof(media);}
+    compiled.resources=files;compiled.resource_count=3;changed.resources=files;changed.resource_count=2;
+    sh_package_audio_scope *scope=sh_package_audio_scope_open(&compiled,originals,error,sizeof(error));CHECK(scope);
+    if(scope) {
+        CHECK(sh_package_audio_scope_media(scope,77,refuse_path,NULL,error,sizeof(error))==-1);
+        CHECK(media_at(scope,77,"sound/soundbanks/pc/77.wem",1));
+        CHECK(sh_package_audio_scope_media(scope,77,refuse_path,NULL,error,sizeof(error))==-1);
+        CHECK(media_at(scope,77,"sound/soundbanks/pc/77.wem",1));
+        /* A located root original does not hide a localized one created later. */
+        binary("media-scope/sound/soundbanks/pc/english(us)/77.wem",media,sizeof(media));
+        CHECK(media_at(scope,77,"sound/soundbanks/pc/english(us)/77.wem",1));
+        /* Nor does an answered root candidate hide a new localized original. */
+        CHECK(media_at(scope,80,"sound/soundbanks/pc/80.wem",0));
+        binary("media-scope/sound/soundbanks/pc/english(us)/80.wem",media,sizeof(media));
+        CHECK(media_at(scope,80,"sound/soundbanks/pc/english(us)/80.wem",1));
+        binary("media-scope/sound/soundbanks/pc/english(us)/79.wem",media,sizeof(media));
+        CHECK(media_at(scope,79,"sound/soundbanks/pc/english(us)/79.wem",0));
+        CHECK(media_at(scope,81,"sound/soundbanks/pc/81.wem",0));
+        CHECK(!media_at(scope,78,"sound/soundbanks/pc/78.wem",1));
+        binary("media-scope/sound/soundbanks/pc/78.wem",media,sizeof(media));
+        CHECK(media_at(scope,78,"sound/soundbanks/pc/78.wem",1));
+        /* A reused owner visits exactly what a fresh owner visits. */
+        for(size_t i=0;i<sizeof(ids)/sizeof(*ids);i++) {
+            last_path warm={0},cold={0};int warm_result,cold_result=-2;
+            warm_result=sh_package_audio_scope_media(scope,ids[i],keep_last_path,&warm,error,sizeof(error));
+            sh_audio_originals *fresh=sh_audio_originals_open(base,L"English(US)",NULL);
+            sh_package_audio_scope *other=fresh ? sh_package_audio_scope_open(&compiled,fresh,error,sizeof(error)) : NULL;
+            if(other)cold_result=sh_package_audio_scope_media(other,ids[i],keep_last_path,&cold,error,sizeof(error));
+            CHECK(other && warm_result==cold_result && !strcmp(warm.path,cold.path) && warm.original==cold.original);
+            sh_package_audio_scope_close(other);sh_audio_originals_close(fresh);
+        }
+        /* Located originals stay open without delete sharing until close. */
+        snprintf(path,sizeof(path),"%s/sound/soundbanks/pc/77.wem",base);CHECK(!DeleteFileA(path));
+        sh_package_audio_scope_close(scope);
+    }
+    /* A later scope over a changed candidate answers from that candidate only. */
+    scope=sh_package_audio_scope_open(&changed,originals,error,sizeof(error));CHECK(scope);
+    if(scope) {
+        CHECK(sh_package_audio_scope_media(scope,81,refuse_path,NULL,error,sizeof(error))==0);
+        CHECK(media_at(scope,80,"sound/soundbanks/pc/english(us)/80.wem",1));
+        sh_package_audio_scope_close(scope);
+    }
+    sh_audio_originals_close(originals);
+    for(size_t i=0;i<sizeof(held)/sizeof(*held);i++) {
+        snprintf(path,sizeof(path),"%s/sound/soundbanks/pc/%s",base,held[i]);CHECK(DeleteFileA(path));
+    }
+    originals=sh_audio_originals_open(base,L"English(US)",NULL);CHECK(originals);
+    scope=originals ? sh_package_audio_scope_open(&compiled,originals,error,sizeof(error)) : NULL;CHECK(scope);
+    if(scope) {
+        CHECK(sh_package_audio_scope_media(scope,77,refuse_path,NULL,error,sizeof(error))==0);
+        sh_package_audio_scope_close(scope);
+    }
+    sh_audio_originals_close(originals);
+    for(size_t i=0;i<sizeof(held)/sizeof(*held);i++) {
+        snprintf(path,sizeof(path),"%s/sound/soundbanks/pc/%s",base,held[i]);recreate(path);
+    }
+}
+
 static size_t typed_play_bank(unsigned char bytes[256], uint32_t event)
 {
     memset(bytes, 0, 256);
@@ -1729,7 +1821,7 @@ int main(int argc, char **argv)
     CHECK(GetTempPathA(sizeof(temp),temp)>0);
     snprintf(root,sizeof(root),"%ssh-package-audio-%lu",temp,(unsigned long)GetCurrentProcessId());
     CHECK(CreateDirectoryA(root,NULL));
-    memory_index(); media_index(); bank_content_identity(); authored_and_map(); immutable_scope(); compact_event_scope(); typed_capture(); retained_program(); inventory_capture(); retry_program(); shared_program(); shared_native_baseline(); bus_program(); bus_baseline_program(); shared_modulator_program(); native_event_witness(); native_bank_precedence(); cleanup();
+    memory_index(); media_index(); bank_content_identity(); authored_and_map(); immutable_scope(); scope_media_answers(); compact_event_scope(); typed_capture(); retained_program(); inventory_capture(); retry_program(); shared_program(); shared_native_baseline(); bus_program(); bus_baseline_program(); shared_modulator_program(); native_event_witness(); native_bank_precedence(); cleanup();
     if(failures) return 1;
     puts("package audio source indexes passed"); return 0;
 }

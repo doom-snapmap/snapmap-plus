@@ -29,6 +29,10 @@ int sh_decl_visibility_uninstall(void);
  * 0 absent, -1 unavailable or faulting. */
 int sh_decl_visibility_source_exists(const char *path);
 
+/* The native resource index alone, as sh_decl_visibility_source_exists but
+ * never a published declaration: positive native provenance. */
+int sh_decl_visibility_native_exists(const char *path);
+
 #ifdef SH_DECL_VISIBILITY_TESTING
 /* Map an engine probe path to the published-table key, without consulting the
  * table. Returns 1 and fills `key` when the path is inside the engine's decl

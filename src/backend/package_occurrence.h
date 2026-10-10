@@ -121,4 +121,25 @@ sh_package_occurrence_snapshot *sh_package_occurrence_export(sh_package_occurren
     const sh_package_occurrence_key *order, size_t count, const sh_package_occurrence_snapshot *world,
     char *error, size_t capacity);
 
+/* Exact editor rows of a document (see sh_package_provenance_use.row). Owner
+ * tokens are canonical "entity/N" with N < count; owner_index returns 1 with N.
+ * Mutators accept only a uniquely owned document snapshot (prepare/export
+ * result, before it is shared) and change nothing on failure.
+ * document_rows: rows[N] is entity/N's recorded choice (NULL none). It replaces
+ * the document's row table and the row of every OBJECT use. The table also
+ * keeps the choice of an object without ownership yet, so a later capture that
+ * gives it ownership can carry it; a row itself never creates ownership.
+ * document_row borrows table entry N (NULL none or no table).
+ * carry_rows / carry_document_rows: a rebuilt document regains each owner's
+ * row by owner token from saved provenance, or from a document's table (else
+ * its use rows). Owners absent from document drop theirs; a different row
+ * already recorded fails (never replaced). Returns 1 ok, 0 otherwise. */
+int sh_package_occurrence_owner_index(const char *owner, size_t count, size_t *index);
+int sh_package_occurrence_document_rows(sh_package_occurrence_snapshot *document,
+    const char *const *rows, size_t count);
+const char *sh_package_occurrence_document_row(const sh_package_occurrence_snapshot *document, size_t index);
+int sh_package_occurrence_carry_rows(sh_package_occurrence_snapshot *document, const sh_package_provenance *from);
+int sh_package_occurrence_carry_document_rows(sh_package_occurrence_snapshot *document,
+    const sh_package_occurrence_snapshot *from);
+
 #endif

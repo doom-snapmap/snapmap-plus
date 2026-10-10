@@ -15,9 +15,11 @@
 #include "package_consumers.h"
 #include "package_keys.h"
 
+typedef struct sh_package_selector_hold sh_package_selector_hold;
 typedef struct sh_package_consumer_hold {
     const sh_package_consumer *binding;
     void *provider;
+    sh_package_selector_hold *lifetime;
 } sh_package_consumer_hold;
 /* Capture the currently served owner's immutable constructor plan, including
  * during activation/recovery. Return 1 with a retained snapshot, 0 for an owner
@@ -27,7 +29,36 @@ typedef struct sh_package_consumer_hold {
  * in the active view: the native consumer still needs its ordinary lifetime
  * lease. Release after the synchronous constructor/consumer request completes. */
 int sh_package_runtime_consumer_acquire(const char *family, const char *name, sh_package_consumer_hold *out);
+/* Atomically capture that same plan and retain this exact native owner and its
+ * bound resource closure in subsequent serving views. No siblings, gameplay
+ * use or global policy are promoted. Call before native construction publishes
+ * the owner, outside an acquired runtime view; activation callbacks may call
+ * it. Return 0 only for an owner outside the catalog, -1 for failure (out stays
+ * empty). Release only after native destruction and outstanding consumers have
+ * positively retired. A failed teardown must keep the hold. */
+int sh_package_runtime_consumer_retain(const char *family, const char *name,
+    sh_package_consumer_hold *out, char *error, size_t capacity);
 void sh_package_runtime_consumer_release(sh_package_consumer_hold *hold);
+/* Movie plans and serving-root records are allocated/validated before provider
+ * publication. These operations only borrow stable records and change counts;
+ * they allocate nothing and enter no native code. Canonical names are the
+ * engine-owned .bswf filename. Do not copy an entered hold. */
+typedef struct sh_package_movie_hold {
+    const sh_package_consumer *binding;
+    void *token;
+} sh_package_movie_hold;
+/* Constructor: one instance plus one entered frame. 0 is an unowned stock
+ * movie; 1 borrows the exact plan; -1 is an invalid API/bookkeeping invariant.
+ * Resource admission fails before publication, never in this constructor path.
+ * Failure never changes out. No refresh lock is acquired. */
+int sh_package_runtime_movie_begin(const char *name, sh_package_movie_hold *out);
+/* Callback/destructor: one entered frame for an already-live instance. */
+int sh_package_runtime_movie_borrow(const char *name, sh_package_movie_hold *out);
+/* End the instance only after successful destruction or completed constructor
+ * unwind. The adapter pairs a constructor's unwind destructor exactly once. */
+void sh_package_runtime_movie_end_instance(const sh_package_movie_hold *hold);
+/* Release the entered frame; the plan stays until all instances/frames finish. */
+void sh_package_runtime_movie_release(sh_package_movie_hold *hold);
 int sh_package_runtime_legacy_read(void *context, const char *type,
     const char *name, const char *path, unsigned char **body, size_t *length,
     char *error, size_t capacity);
@@ -59,6 +90,20 @@ int sh_package_runtime_refresh_guarded(const char *data_root, sh_package_activat
  * it does not certify native cache readiness or complete dependency coverage. */
 typedef int (*sh_package_activation_fn)(void *context, int restoring,
     const sh_package_changes *changes, char *error, size_t capacity);
+/* One owning-storage finish per serialized activation callback. Register while
+ * the callback is running, with an owned context that survives its return and
+ * exceptions. Reject runs before previous-provider consumer recovery; accept
+ * runs after material status, FSM binding and any occurrence finalizer.
+ * accepted=2 is a read-only preflight before an irreversible disk finalizer;
+ * return readiness without consuming context or setting *committed.
+ * Return 1 when consumed, 0 when admission/restoration is still owed, -1 for
+ * damaged native storage whose cleanup must never be replayed. Set *committed
+ * before irreversible accepted cleanup. A cleanup failure after that latch
+ * keeps the candidate provider and disables native use; it cannot roll back
+ * storage already freed. Duplicate, stale and recursive registration refuse. */
+typedef int (*sh_package_activation_finish_fn)(void *context, int accepted,
+    int *committed, char *error, size_t capacity);
+int sh_package_runtime_defer_activation_finish(sh_package_activation_finish_fn finish, void *context);
 int sh_package_runtime_refresh_activated(const char *data_root, sh_package_activation_guard guard,
     sh_package_activation_fn activate, void *context);
 /* Record that the package tree gained or lost sources outside a refresh: a
@@ -195,7 +240,6 @@ int sh_package_runtime_bind_occurrence_resources(const sh_package_map_plan *plan
  * the current library bytes and retires unused private aliases. A map's explicit
  * gameplay binding is never silently replaced to satisfy a different selector.
  */
-typedef struct sh_package_selector_hold sh_package_selector_hold;
 sh_package_selector_hold *sh_package_runtime_selectors_retain(const char *family, char *error, size_t capacity);
 void sh_package_runtime_selectors_release(sh_package_selector_hold *hold);
 sh_package_map_plan *sh_package_runtime_prepare_map(const char *data_root,
@@ -399,6 +443,11 @@ typedef struct sh_package_runtime_audio {
 int sh_package_runtime_audio_programs(sh_package_runtime_audio **rows, size_t *count,
     char *error, size_t capacity);
 void sh_package_runtime_audio_release(void *owner);
+/* Retain only this audio provider's exact sealed opaque file. Caller holds
+ * its owner throughout this allocation-free lookup, then releases the returned
+ * file after opening/reading it. No OS open or current-provider/global lookup. */
+int sh_package_runtime_audio_file(void *owner, const char *engine_path,
+    sh_package_file **file);
 /* Native Init shared controls from the published provider's installed originals. */
 int sh_package_runtime_audio_baseline(sh_audio_shared_policy *out, char *error, size_t capacity);
 /* Installed audio identity used to mirror native localized-before-root bank
@@ -467,11 +516,44 @@ int sh_package_runtime_select_map_occurrences(const char *json, size_t length,
 char *sh_package_runtime_active_policy(const char *section, size_t *length);
 /* Human-readable inventory, malloc-owned. Show after releasing the snapshot. */
 char *sh_package_runtime_summary(void);
+/* Per-input accounting of the installed library, malloc-owned. Without a query:
+ * every discovered unit with its disposition totals and the inputs needing
+ * attention. A package id or folder lists each of its files and folders with
+ * its disposition and exposures; any other query matches an authored or engine
+ * path in every package. Listings page from row first (1-based), 250 rows at
+ * a time. Reads retained compiler records only; scans and hashes nothing. */
+char *sh_package_runtime_inputs(const char *query, size_t first);
+/* Every exposure of one listed entry (its row number under the same query):
+ * each compiled row naming the file and each generated row proved to read it,
+ * one line per row and per native identity, 250 lines from first. */
+char *sh_package_runtime_input_exposures(const char *query, size_t entry, size_t first);
 
 #ifdef SH_PACKAGE_RUNTIME_TESTING
+/* One-based fault in exact-consumer hold/identity allocation; zero disables. */
+void sh_package_runtime_test_consumer_allocation_fault(unsigned at);
+/* Remaining fault countdown and reserved/live record counts. These expose no
+ * native state and allocate nothing; fixture teardown must reach zero. */
+unsigned sh_package_runtime_test_consumer_allocation_remaining(void);
+size_t sh_package_runtime_test_movie_records(size_t *providers, size_t *live);
+/* Root providers with an audio program still allocated, whoever holds them; a
+ * root's compilation, sources and pins are released with it. */
+size_t sh_package_runtime_test_audio_roots(void);
+/* Every provider still allocated: roots, views and library clones. */
+size_t sh_package_runtime_test_providers(void);
+/* Body bytes held in memory by the compilations of every allocated provider. */
+size_t sh_package_runtime_test_owned_bytes(void);
+/* Providers in the published library's parent ancestry, the library included. */
+size_t sh_package_runtime_test_library_depth(void);
 #include "package_source_link.h"
 /* Capture-only adapter for the synthetic native reader fixtures. */
 void sh_package_runtime_test_constructor_requests(sh_package_source_implicit capture, void *context);
+#include "package_virtual_material.h"
+/* A synthetic original page provider, with the same complete atlas contract
+ * the production native adapter supplies. NULL restores the normal adapter. */
+typedef int (*sh_package_runtime_test_atlas_fn)(void *context, size_t scope,
+    const sh_package_compilation *compiled, const char *material, const char *page_file,
+    sh_package_virtual_atlas *out, char *error, size_t capacity);
+void sh_package_runtime_test_atlas(sh_package_runtime_test_atlas_fn atlas, void *context);
 /* The historical bindings a map without recorded provenance receives. */
 int sh_package_runtime_test_legacy_bindings(const sh_package_compilation *compiled,
     const sh_resource_catalog *catalog, sh_package_provenance *out);
@@ -479,6 +561,10 @@ int sh_package_runtime_test_historical_derived(sh_package_provenance *historical
     const sh_package_provenance *linked, const sh_package_references *roots);
 int sh_package_runtime_test_consumer_changes(const sh_package_consumers *before,
     const sh_package_consumers *after, sh_package_changes *changes);
+/* The installed library's native pruning over a caller-built compilation and
+ * its captured consumers, without a catalog (single-name files only). */
+size_t sh_package_runtime_test_prune_native(sh_package_compilation *compiled, sh_package_consumers **consumers,
+    size_t movies[2], char *error, size_t capacity);
 int sh_package_runtime_test_native_changes(const sh_package_compilation *before,
     const sh_package_compilation *after, const sh_resource_catalog *catalog,
     sh_package_consumers *old_consumers, sh_package_consumers *new_consumers,
@@ -528,7 +614,36 @@ int sh_package_runtime_test_placement(const sh_package_compilation *compiled, co
 /* Link the installed library through those readers, as production does, so
  * owner isolation and unserved coverage run end to end. Off by default. */
 void sh_package_runtime_test_installed_links(int enabled);
+/* Compose block declaration families without bound native readers. Off by default. */
+void sh_package_runtime_test_block_compose(int enabled);
+/* An installation's whole link omits the whole compile's rows declared at path
+ * that package owns (both borrowed until reset); none when path is NULL. */
+void sh_package_runtime_test_whole_omit(const char *path, const char *package);
+/* Link installed libraries under this sh_package_shader_renderer contract
+ * (no shader adapter callbacks); none when renderer < 0. */
+void sh_package_runtime_test_shader_renderer(int renderer);
+/* Fail the next count shader accounting captures as an exhausted heap would. */
+void sh_package_runtime_test_shader_input_failures(long count);
+/* 0 lets a watched refresh serve any increment, bypassing pr_increment_exact. */
+void sh_package_runtime_test_exact_increment(int enabled);
+/* An original every later installation increment also binds, captured as its
+ * pruned-original witnesses are (NULL: none). */
+void sh_package_runtime_test_install_witness(const sh_compiled_resource *original);
+/* Generated-input attribution (sh_package_runtime_inputs) for one row and served file. */
+int sh_package_runtime_test_generated_attributable(const sh_package_sources *served, const sh_compiled_resource *row,
+    size_t file);
+/* The served library's published digest (pr_library_digest); 0 without one. */
+int sh_package_runtime_test_library_digest(char digest[65]);
 void sh_package_runtime_test_spawn_keys(int enabled);
+int sh_package_runtime_test_witness_compose(sh_package_compilation *served, const sh_compiled_resource *original,
+    char *error, size_t capacity);
+#include "package_native_inline.h"
+/* Native state comparison of two definition texts, supplied by tests in
+ * place of the engine evaluator (plumbing only). layers are the target
+ * chain's privately prepared definitions, as sh_native_decl_eval_compare. */
+typedef sh_native_eval_status (*sh_package_runtime_native_compare)(const sh_native_eval_layer *layers,
+    size_t layer_count, const char *target, const char *candidate, char *detail, size_t capacity);
+void sh_package_runtime_test_native_compare(sh_package_runtime_native_compare compare);
 int sh_package_runtime_test_source_inputs(sh_decl_registry_source *registry, uintptr_t *reflection,
     sh_package_baseline_reader *baseline, void **baseline_context);
 /* 1 when the spawn-key group tables last published are the serving
@@ -540,7 +655,10 @@ int sh_package_runtime_test_watched_change(void);
 /* Give the serving providers these group tables (copies) and publish them. */
 void sh_package_runtime_test_key_tables(const sh_package_key_groups *library, const sh_package_key_groups *map);
 void sh_package_runtime_test_plan_key_table(sh_package_map_plan *plan, const sh_package_key_groups *table);
+/* Unpublished map/installed candidate catalogs for namespace lifecycle checks. */
+const sh_package_provenance *sh_package_runtime_test_plan_bindings(const sh_package_map_plan *plan, int installed);
 int sh_package_runtime_test_unmodified_type(uint32_t type);
+int sh_package_runtime_test_exact_type(uint32_t type);
 void sh_package_runtime_test_serving_key_table(sh_package_key_groups *table);
 /* Offline fixture teardown only. No engine callbacks or native game reset. */
 void sh_package_runtime_test_dispose(void);

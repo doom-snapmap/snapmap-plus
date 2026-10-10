@@ -54,6 +54,12 @@ typedef struct sh_decl_dependency_observer {
 sh_decl_native_schema *sh_decl_native_schema_open(sh_decl_native_source source,
     sh_decl_dependency_observer observer, char *error, size_t error_capacity);
 const sh_decl_dependency_schema *sh_decl_native_schema_view(sh_decl_native_schema *schema);
+/* Borrow the declaration registry read from the same image, which proves the
+ * manager an event-call decl argument names. Without one those arguments stay
+ * gaps. The registry must outlive every walk of this schema. */
+struct sh_decl_native_registry;
+void sh_decl_native_schema_attach_registry(sh_decl_native_schema *schema,
+    struct sh_decl_native_registry *registry);
 void sh_decl_native_schema_close(sh_decl_native_schema *schema);
 /* Emit every reflected fact typed binding can read, loading each class
  * first: class and enum names with their registered object and pointer

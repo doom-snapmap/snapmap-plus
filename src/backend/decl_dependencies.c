@@ -190,6 +190,149 @@ static int dd_children(dd_walk *walk, const dd_pending *item, const sh_decl_valu
     return 1;
 }
 
+const char *sh_decl_event_member(const char *key)
+{
+    const char *space;
+    if (!key) return "";
+    if (*key == '\n') key++;
+    else if (key[0] == '\\' && key[1] == 'n') key += 2;
+    else return key;
+    space = strrchr(key, ' ');
+    return space ? space + 1 : key;
+}
+
+/* idEventCallInfo's argument reader (Vulkan 0x1409caa70, OpenGL 0x1409ca230)
+ * selects its reader from the item's key. Only decl and md6Anim resolve a
+ * resource; every other key reads numbers, strings, a map entity's name,
+ * joint or alias names, or an enum constant of the event's signature. The
+ * comparison here ignores case so a differently spelled resource key can
+ * only add an edge or a gap, never hide one. */
+int sh_decl_event_argument_kind(const char *key)
+{
+    key = sh_decl_event_member(key);
+    return !_stricmp(key, "decl") ? 1 : !_stricmp(key, "md6Anim") ? 2 : 0;
+}
+
+/* decl = { <declaration type> = "<name>"; } or decl = NULL. The schema proves
+ * which manager the type names; an unproven type stays a gap. */
+static int dd_event_decl(dd_walk *walk, const sh_decl_node *node, const char *path, sh_decl_value_type type)
+{
+    const sh_decl_node *member = node->compound ? node->children : NULL;
+    sh_decl_value_shape shape = {0};
+    const char *name;
+    size_t length;
+    if (!node->compound) {
+        if (sh_decl_reference_literal(node, &name, &length) && !length) return 1;
+        return dd_gap(walk, path, type, "event decl argument is not a native declaration block");
+    }
+    if (!member || member->next || member->compound)
+        return dd_gap(walk, path, type, "event decl argument must name exactly one declaration type");
+    if (!sh_decl_reference_literal(member, &name, &length))
+        return dd_gap(walk, path, type, "event decl argument name requires a native syntax adapter");
+    if (!length) return 1;
+    if (!walk->schema->describe(walk->schema->context,
+            (sh_decl_value_type){member->key, SH_DECL_EVENT_DECL_OPS}, &shape) ||
+        (shape.kind != SH_DECL_VALUE_IGNORE && (shape.kind != SH_DECL_VALUE_REFERENCE || !shape.element.name)))
+        return dd_gap(walk, path, type, "event decl argument type has no verified declaration manager");
+    if (shape.kind == SH_DECL_VALUE_IGNORE) return 1;
+    if (!walk->schema->reference(walk->schema->context, path, shape.element, name, length)) return 0;
+    if (walk->schema->reference_site) {
+        sh_decl_reference_site site = {member, NULL, 0};
+        if (!walk->schema->reference_site(walk->schema->context, path, shape.element, name, length, &site)) return 0;
+    }
+    walk->result->references++;
+    return 1;
+}
+
+/* md6Anim = "<name>": the native reader reads a string, not a pointer, so the
+ * name is kept exactly (NULL is not special); only an empty name reads none. */
+static int dd_event_anim(dd_walk *walk, const sh_decl_node *node, const char *path, sh_decl_value_type type)
+{
+    sh_decl_value_shape shape = {0};
+    const char *name;
+    size_t length;
+    if (node->compound || !sh_decl_tree_literal(node, &name, &length))
+        return dd_gap(walk, path, type, "md6Anim event argument is not a literal animation name");
+    if (!length) return 1;
+    if (!walk->schema->describe(walk->schema->context,
+            (sh_decl_value_type){SH_DECL_EVENT_ANIM_TYPE, SH_DECL_EVENT_ANIM_OPS}, &shape) ||
+        shape.kind != SH_DECL_VALUE_REFERENCE || !shape.element.name)
+        return dd_gap(walk, path, type, "md6Anim event argument has no verified animation resource reader");
+    if (!walk->schema->reference(walk->schema->context, path, shape.element, name, length)) return 0;
+    if (walk->schema->reference_site) {
+        sh_decl_reference_site site = {node, NULL, 0};
+        if (!walk->schema->reference_site(walk->schema->context, path, shape.element, name, length, &site)) return 0;
+    }
+    walk->result->references++;
+    return 1;
+}
+
+static int dd_event_call(dd_walk *walk, const dd_pending *item)
+{
+    const sh_decl_node *child, *args = NULL, *argument;
+    size_t extent = 0; /* an unstated count reads no arguments */
+    if (!item->node->compound) return dd_gap(walk, item->path, item->type, "expected a state block");
+    for (child = item->node->children; child; child = child->next) {
+        const char *name = sh_decl_event_member(child->key);
+        if (!strcmp(name, "eventDef")) continue; /* an event name, never a resource */
+        if (strcmp(name, "args") || args) {
+            char *path = dd_path(item->path, child->key);
+            if (!path) return 0;
+            dd_gap(walk, path, item->type, strcmp(name, "args") ?
+                "event call member is not read by the native reader" : "repeated event arguments");
+            free(path); continue;
+        }
+        args = child;
+    }
+    if (!args) return 1;
+    if (!args->compound) {
+        const char *name; size_t length;
+        if (sh_decl_reference_literal(args, &name, &length) && !length) return 1;
+        return dd_gap(walk, item->path, item->type, "event arguments are not a native argument block");
+    }
+    {
+        dd_pending block = {args, item->type, item->path};
+        if (!dd_unique_fields(walk, &block)) return 0;
+    }
+    for (argument = args->children; argument; argument = argument->next)
+        if (!strcmp(sh_decl_event_member(argument->key), "num")) {
+            if (argument->compound || !argument->value ||
+                !dd_unsigned(argument->value, strlen(argument->value), &extent))
+                return dd_gap(walk, item->path, item->type, "unsupported event argument count");
+        }
+    for (argument = args->children; argument; argument = argument->next) {
+        const char *key = sh_decl_event_member(argument->key), *reason = NULL;
+        const sh_decl_node *reader = NULL;
+        size_t index = 0, readers = 0;
+        int ok = 1, kind = 0;
+        char *path;
+        if (!strcmp(key, "num")) continue;
+        if (!dd_index(key, "item", &index)) reason = "unsupported event argument member";
+        else if (index >= extent) reason = "event argument index exceeds its stated count";
+        else if (argument->compound) for (child = argument->children; child; child = child->next) {
+            int selected = sh_decl_event_argument_kind(child->key);
+            readers++;
+            if (selected) { kind = selected; reader = child; }
+        }
+        if (!reason && argument->compound && kind && readers > 1) reason = "event argument has more than one reader key";
+        if (!reason && !argument->compound) {
+            const char *name; size_t length;
+            if (!sh_decl_reference_literal(argument, &name, &length) || length)
+                reason = "event argument is not a native argument block";
+        }
+        path = dd_path(item->path, "args");
+        if (path) { char *at = dd_path(path, argument->key); free(path); path = at; }
+        if (path && reader && !reason) { char *at = dd_path(path, reader->key); free(path); path = at; }
+        if (!path) return 0;
+        if (reason) dd_gap(walk, path, item->type, reason);
+        else if (reader) ok = kind == 2 ? dd_event_anim(walk, reader, path, item->type) :
+            dd_event_decl(walk, reader, path, item->type);
+        free(path);
+        if (!ok) return 0;
+    }
+    return 1;
+}
+
 static int dd_run(dd_walk *walk)
 {
     while (walk->count) {
@@ -234,6 +377,8 @@ static int dd_run(dd_walk *walk)
             }
             break;
         }
+        case SH_DECL_VALUE_EVENT_CALL:
+            ok = dd_event_call(walk, &item); break;
         default:
             dd_gap(walk, item.path, item.type, "type requires a verified native reader adapter"); break;
         }

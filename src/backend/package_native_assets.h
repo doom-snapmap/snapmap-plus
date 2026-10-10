@@ -42,6 +42,9 @@ size_t sh_package_native_assets_shader_follow(sh_package_native_assets *assets);
  * (malloc-owned). read returns the number of entries visited, or -1 without
  * visiting any when the text belongs to another header (renderer, game,
  * product build or installed inventory) or is truncated or corrupt. */
+/* The header a shader preparation hint belongs to: renderer, game image (the
+ * "game" line of build_identity) and contract revision. 0 if it cannot be formed. */
+int sh_package_shader_hint_header(char *out, size_t capacity, int vulkan, const char *build_identity);
 char *sh_package_shader_hint_format(const char *header, const char *needs);
 /* The framing of both: format returns header + "body <digest> <length>" line +
  * body (malloc-owned); body returns the body inside text, or NULL when the text
@@ -60,6 +63,9 @@ int sh_package_native_assets_shader_scope_end(sh_package_native_assets *assets, 
 sh_package_shader_preparation *sh_package_native_assets_shader_take(sh_package_native_assets *assets);
 size_t sh_package_shader_preparation_count(const sh_package_shader_preparation *batch);
 const sh_package_shader_request *sh_package_shader_preparation_request(const sh_package_shader_preparation *batch, size_t index);
+/* Diagnostics only: the reason and native receipt/text state recorded when
+ * this batch's first request was queued, "" when none was. Never evidence. */
+const char *sh_package_shader_preparation_first_need(const sh_package_shader_preparation *batch);
 /* Borrowed retained handle: use retain() if the retry outlives the batch. Keep
  * it across retries so task_id stays stable. Seeing a previously successful
  * task again indicates changed native evidence, not monotonic preparation. */

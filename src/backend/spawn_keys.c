@@ -52,6 +52,8 @@ struct sh_spawn_keys_program {
     sh_package_key_groups groups;
     uint32_t *unmodified;
     size_t unmodified_count;
+    uint32_t *exact;
+    size_t exact_count;
 };
 static sh_spawn_keys_program *g_programs[2];
 static const sh_package_key_groups g_empty_groups;
@@ -70,28 +72,39 @@ static const sh_package_key_groups *sk_groups_enter(LONG *held)
 static void sk_groups_leave(LONG held) { InterlockedDecrement(g_group_readers + held); }
 static int sk_type_order(const void *a, const void *b)
 { uint32_t x = *(const uint32_t *)a, y = *(const uint32_t *)b; return x < y ? -1 : x > y; }
-sh_spawn_keys_program *sh_spawn_keys_program_create(const sh_package_key_groups *groups,
-    const uint32_t *unmodified_types, size_t count)
+static int sk_copy_types(const uint32_t *input, size_t count, uint32_t **output, size_t *unique)
 {
-    if ((count && !unmodified_types) || count > SIZE_MAX / sizeof(*unmodified_types)) return NULL;
+    if ((count && !input) || count > SIZE_MAX / sizeof(*input)) return 0;
+    if (!count) return 1;
+    *output = malloc(count * sizeof(**output));
+    if (!*output) return 0;
+    memcpy(*output, input, count * sizeof(**output));
+    qsort(*output, count, sizeof(**output), sk_type_order);
+    for (size_t i = 0; i < count; i++)
+        if (!*unique || (*output)[*unique - 1] != (*output)[i]) (*output)[(*unique)++] = (*output)[i];
+    return 1;
+}
+sh_spawn_keys_program *sh_spawn_keys_program_create_exact(const sh_package_key_groups *groups,
+    const uint32_t *unmodified_types, size_t unmodified_count, const uint32_t *exact_types, size_t exact_count)
+{
     sh_spawn_keys_program *program = calloc(1, sizeof(*program));
     if (!program) return NULL;
     program->references = 1;
     if (groups) program->groups = *groups;
-    if (count) {
-        program->unmodified = malloc(count * sizeof(*program->unmodified));
-        if (!program->unmodified) { free(program); return NULL; }
-        memcpy(program->unmodified, unmodified_types, count * sizeof(*program->unmodified));
-        qsort(program->unmodified, count, sizeof(*program->unmodified), sk_type_order);
-        for (size_t i = 0; i < count; i++)
-            if (!program->unmodified_count || program->unmodified[program->unmodified_count - 1] != program->unmodified[i])
-                program->unmodified[program->unmodified_count++] = program->unmodified[i];
+    if (!sk_copy_types(unmodified_types, unmodified_count, &program->unmodified, &program->unmodified_count) ||
+        !sk_copy_types(exact_types, exact_count, &program->exact, &program->exact_count)) {
+        sh_spawn_keys_program_release(program); return NULL;
     }
     return program;
 }
+sh_spawn_keys_program *sh_spawn_keys_program_create(const sh_package_key_groups *groups,
+    const uint32_t *unmodified_types, size_t count)
+{ return sh_spawn_keys_program_create_exact(groups, unmodified_types, count, NULL, 0); }
 void sh_spawn_keys_program_release(sh_spawn_keys_program *program)
 {
-    if (program && !InterlockedDecrement(&program->references)) { free(program->unmodified); free(program); }
+    if (program && !InterlockedDecrement(&program->references)) {
+        free(program->unmodified); free(program->exact); free(program);
+    }
 }
 void sh_spawn_keys_publish_program(sh_spawn_keys_program *program)
 {
@@ -108,6 +121,12 @@ static int sk_unmodified(LONG held, uint32_t type)
     const sh_spawn_keys_program *program = g_programs[held];
     return program && program->unmodified_count && bsearch(&type, program->unmodified,
         program->unmodified_count, sizeof(type), sk_type_order) != NULL;
+}
+static int sk_exact(LONG held, uint32_t type)
+{
+    const sh_spawn_keys_program *program = g_programs[held];
+    return program && program->exact_count && bsearch(&type, program->exact,
+        program->exact_count, sizeof(type), sk_type_order) != NULL;
 }
 
 static uint64_t sk_select(uint8_t *manager, uint32_t request, uint64_t unused3, uint64_t unused4)
@@ -156,8 +175,10 @@ static void sk_modifier(uint8_t *conductor, uint8_t *ai, uint64_t modifiers)
     memcpy(&damage, (const uint8_t *)&modifiers + sizeof(health), sizeof(damage));
     groups = sk_groups_enter(&held);
     if (sk_unmodified(held, type)) { sk_groups_leave(held); return; }
+    int exact = sk_exact(held, type);
     for (int i = 0; i < count && found < 0; i++)
-        if (sh_package_key_modifier_matches(groups, type, *(const uint32_t *)(rows + (size_t)i * SK_MODIFIER_STRIDE + 8))) found = i;
+        if (exact ? type == *(const uint32_t *)(rows + (size_t)i * SK_MODIFIER_STRIDE + 8) :
+            sh_package_key_modifier_matches(groups, type, *(const uint32_t *)(rows + (size_t)i * SK_MODIFIER_STRIDE + 8))) found = i;
     sk_groups_leave(held);
     if (found < 0) return;
     const float *row = (const float *)(rows + (size_t)found * SK_MODIFIER_STRIDE);
@@ -275,6 +296,11 @@ int sh_spawn_keys_test_unmodified(uint32_t type)
     int result = sk_unmodified(held, type); sk_groups_leave(held); return result;
 }
 uint64_t sh_spawn_keys_test_select(void *manager, uint32_t request) { return sk_select(manager, request, 0, 0); }
+int sh_spawn_keys_test_exact(uint32_t type)
+{
+    LONG held; sk_groups_enter(&held);
+    int result = sk_exact(held, type); sk_groups_leave(held); return result;
+}
 void sh_spawn_keys_test_modifier(void *conductor, void *ai, uint64_t modifiers) { sk_modifier(conductor, ai, modifiers); }
 int sh_spawn_keys_test_filter(void *filter, void *ai) { return sk_filter(filter, ai); }
 #endif

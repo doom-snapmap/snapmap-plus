@@ -33,6 +33,12 @@ typedef struct sh_package_provenance_use {
     char *owner, *reference; /* document-local owner token and verified typed site */
     size_t binding;
     size_t *contexts, context_count; /* only this occurrence's selected suppliers */
+    /* Optional exact editor row of the owner (OBJECT uses only): 64 lowercase
+     * hex digits of a published row's portable identity, NULL when the map
+     * records no choice. Every OBJECT use of one owner carries the same value.
+     * A recorded choice stays recorded while unresolved; it is never part of
+     * the use's key or supplier selection. */
+    char *row;
 } sh_package_provenance_use;
 
 typedef struct sh_package_provenance {
@@ -75,6 +81,18 @@ int sh_package_provenance_select_uses(const sh_package_provenance *index,
     int (*selected)(void *, const sh_package_provenance_use *, sh_package_provenance_site *),
     void *context, sh_package_provenance *out);
 void sh_package_provenance_free(sh_package_provenance *value);
+/* Exact editor row of one document owner. row_set stamps (or with NULL
+ * clears) every OBJECT use of owner and returns how many it stamped; an owner
+ * without OBJECT uses gains nothing, so a row never creates ownership. -1 for
+ * a malformed row. row_get: 1 with borrowed *row, 0 none, -1 when the owner's
+ * uses disagree. rows_carry stamps each owner of to that from records, by
+ * owner token; owners absent from to drop their row. 1 ok, 0 conflict/memory
+ * (to keeps every row it had). */
+int sh_package_provenance_row_set(sh_package_provenance *value, const char *owner, const char *row);
+int sh_package_provenance_row_get(const sh_package_provenance *value, const char *owner, const char **row);
+int sh_package_provenance_rows_carry(const sh_package_provenance *from, sh_package_provenance *to);
+/* 1 when row is a well-formed exact row: 64 lowercase hex digits. */
+int sh_package_provenance_row_valid(const char *row);
 
 /* Provider overlay: matching map names replace possible catalog suppliers.
  * Recorded actual/historical uses remain independently owned; conflicting use
@@ -124,6 +142,8 @@ int sh_package_provenance_scope(const sh_package_provenance *value, size_t conte
 /* Canonical, length-delimited internal payload. The shared map-shard envelope
  * supplies transport/checksum. No host paths, author IDs or resource bytes are
  * stored here. Encoding is independent of insertion order and duplicate owners.
+ * SMPBIND2 is SMPBIND1 with each use's optional exact row; it is written only
+ * when some use records one, so documents without rows keep SMPBIND1 bytes.
  * SMPBIND0 is read as HISTORICAL aggregate ownership, without inventing sites;
  * its composed context means the original historical composition contract,
  * not permission to apply new rules. No absent native recipe is reconstructed

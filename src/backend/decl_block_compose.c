@@ -1231,12 +1231,15 @@ static int aw_relocate(aw_state *st, size_t s, const aw_block *x, const char *to
     return 1;
 }
 /* The stock subweb as this contribution sees it: the original block with the
- * contribution's glue edges placed in the same nodes. */
-static char *aw_stock_with_glue(const aw_state *st, size_t s, const aw_block *x, const aw_block *stock, size_t *length)
+ * contribution's glue edges placed in the same nodes, plus `e`'s edits to
+ * the stock text (consumed). */
+static char *aw_stock_with_glue(const aw_state *st, size_t s, const aw_block *x, const aw_block *stock,
+    aw_edits *edits, size_t *length)
 {
     const aw_web *w = st->webs + s, *base = st->base;
-    aw_edits e = {0};
+    aw_edits e = *edits;
     const char *node = NULL; size_t node_length = 0, node_close = 0;
+    memset(edits, 0, sizeof(*edits));
     char *out;
     for (size_t i = x->open + 1; i < x->close; i++) {
         if (aw_is(w, i, "node") && aw_word(w, i + 1) && aw_is(w, i + 2, "{")) {
@@ -1333,6 +1336,283 @@ static int aw_relocated_name(const aw_state *st, const char *name, size_t length
     return 0;
 }
 
+/* Switch routes between subwebs no single web defines together. A weapon
+ * switch is one cross-subweb edge: the held weapon's exit node (bringdown)
+ * names the next weapon's entry state (bringup, bringup_intro), and the hands
+ * animator searches the web for that route ("could not find path from state
+ * ... through state ..."). Each author wrote routes among the subwebs of
+ * their own copy only, so owner copies of one name, a stock subweb and a copy
+ * of it, or two packages' new weapons have none to each other. A route is
+ * derived only from what the authors wrote: every web writing either end
+ * takes part (aw_agreed), and where their writing does not determine one
+ * edge family, none is derived. */
+typedef struct aw_link { size_t block, node, edges_close, edge, state, dest; } aw_link;
+/* One block under its final name. Rank puts the stock web first, then the
+ * contributions in order, so each name lists its writers in one fixed order. */
+typedef struct aw_writer { const char *name; size_t length, rank, web, block; } aw_writer;
+typedef struct aw_graph {
+    aw_link **links; size_t *link_count;          /* per contribution, then the stock web */
+    aw_writer *writers; size_t writer_count;      /* every block, by final name */
+} aw_graph;
+
+static const aw_web *aw_web_of(const aw_state *st, size_t s) { return s == st->count ? st->base : st->webs + s; }
+/* Value token after a depth-0 key of the braced body at `open`. */
+static size_t aw_value(const aw_web *w, size_t open, const char *key)
+{
+    for (size_t k = open + 1; k < w->tokens.items[open].close;) {
+        if (aw_is(w, k, key) && aw_word(w, k + 1)) return k + 1;
+        k = aw_skip(w, k);
+    }
+    return SIZE_MAX;
+}
+static int aw_links(const aw_web *w, aw_link **out, size_t *count)
+{
+    size_t capacity = 0;
+    *out = NULL; *count = 0;
+    for (size_t b = 0; b < w->subweb_count; b++) {
+        const aw_block *x = w->subwebs + b;
+        for (size_t i = x->open + 1; i < x->close;) {
+            if (!aw_is(w, i, "node") || !aw_word(w, i + 1) || !aw_is(w, i + 2, "{")) { i = aw_skip(w, i); continue; }
+            size_t node_close = w->tokens.items[i + 2].close, edges = aw_find(w, i + 2, node_close, "edges");
+            for (size_t k = edges == SIZE_MAX ? SIZE_MAX : edges + 2,
+                 close = edges == SIZE_MAX ? 0 : w->tokens.items[edges + 1].close; k < close;) {
+                if (!aw_is(w, k, "edge") || !aw_is(w, k + 1, "{")) { k = aw_skip(w, k); continue; }
+                size_t state = aw_value(w, k + 1, "toState"), dest = aw_value(w, k + 1, "toSubWeb");
+                if (state != SIZE_MAX && dest != SIZE_MAX && !aw_names(w, dest, x->name, x->name_length)) {
+                    if (*count == capacity) {
+                        aw_link *grown = realloc(*out, (capacity = capacity ? capacity * 2 : 64) * sizeof(*grown));
+                        if (!grown) return 0;
+                        *out = grown;
+                    }
+                    (*out)[(*count)++] = (aw_link){b, i + 1, close, k, state, dest};
+                }
+                k = w->tokens.items[k + 1].close + 1;
+            }
+            i = node_close + 1;
+        }
+    }
+    return 1;
+}
+static int aw_spells(const aw_web *a, size_t i, const aw_web *b, size_t j)
+{
+    size_t n, m; const char *x = aw_text(a, i, &n), *y = aw_text(b, j, &m);
+    aw_unquote(&x, &n); aw_unquote(&y, &m);
+    return n == m && !memcmp(x, y, n);
+}
+/* Link l of web w has the role (node, state) of link r of web rw. */
+static int aw_role(const aw_web *w, const aw_link *l, const aw_web *rw, const aw_link *r)
+{ return aw_spells(w, l->node, rw, r->node) && aw_spells(w, l->state, rw, r->state); }
+/* Edges of webs a and b say the same but for their destination subweb: the
+ * whole payload (state, weights, flags, blend parameters), token by token. */
+static int aw_edges_same(const aw_web *a, size_t x, const aw_web *b, size_t y)
+{
+    size_t i = x + 1, j = y + 1, ia = a->tokens.items[x + 1].close, jb = b->tokens.items[y + 1].close;
+    for (; i <= ia && j <= jb; i++, j++)
+        if (!aw_is(a, i - 1, "toSubWeb") && !aw_token_same(a, i, b, j)) return 0;
+    return i > ia && j > jb;
+}
+static int aw_spelled(const char *a, size_t n, const char *b, size_t m) { return n == m && !memcmp(a, b, n); }
+/* First of block `block`'s links: aw_links lists them together, in block order. */
+static size_t aw_first(const aw_link *l, size_t n, size_t block)
+{
+    size_t lo = 0, hi = n;
+    while (lo < hi) { size_t mid = lo + (hi - lo) / 2; if (l[mid].block < block) lo = mid + 1; else hi = mid; }
+    return lo;
+}
+/* An edge family: every edge of one block with role r (of web rw) into one
+ * subweb, in written order. Repeated edges are native records of their own
+ * (occurrence ids), each with its own weight, flags and blend, so a family is
+ * compared and copied whole. aw_next is its next edge at or after link i, or n. */
+typedef struct aw_family { const aw_web *w; const aw_link *l; size_t n, block; const char *dest; size_t length; } aw_family;
+static size_t aw_next(const aw_family *f, size_t i, const aw_web *rw, const aw_link *r)
+{
+    size_t first = aw_first(f->l, f->n, f->block);
+    for (i = i > first ? i : first; i < f->n && f->l[i].block == f->block; i++)
+        if (aw_role(f->w, f->l + i, rw, r) && aw_names(f->w, f->l[i].dest, f->dest, f->length)) return i;
+    return f->n;
+}
+/* Families f and g say the same but for their destination: as many edges,
+ * each with its counterpart's whole payload, in order. */
+static int aw_family_same(const aw_family *f, const aw_family *g, const aw_web *rw, const aw_link *r)
+{
+    size_t i = aw_next(f, 0, rw, r), j = aw_next(g, 0, rw, r);
+    for (; i < f->n && j < g->n; i = aw_next(f, i + 1, rw, r), j = aw_next(g, j + 1, rw, r))
+        if (!aw_edges_same(f->w, f->l[i].edge, g->w, g->l[j].edge)) return 0;
+    return i == f->n && j == g->n;
+}
+/* Source p of web b exits with role r exactly as source u of web a does: the
+ * same edge family into each subweb both webs name, apart from the pair being
+ * linked (from, to) and p itself, with at least one such exit. */
+static int aw_mirrors(const aw_web *a, const aw_link *al, size_t an, size_t u, const aw_web *b, const aw_link *bl,
+    size_t bn, size_t p, const aw_web *rw, const aw_link *r, const char *from, size_t from_length, const char *to, size_t to_length)
+{
+    const aw_block *pb = b->subwebs + p;
+    size_t shared = 0;
+    for (size_t i = aw_first(al, an, u); i < an && al[i].block == u; i++) {
+        if (!aw_role(a, al + i, rw, r)) continue;
+        size_t n; const char *d = aw_text(a, al[i].dest, &n); aw_unquote(&d, &n);
+        aw_family mine = {a, al, an, u, d, n}, theirs = {b, bl, bn, p, d, n};
+        if (aw_spelled(d, n, from, from_length) || aw_spelled(d, n, to, to_length) ||
+            aw_spelled(d, n, pb->name, pb->name_length) || !aw_block_named(b->subwebs, b->subweb_count, d, n) ||
+            aw_next(&mine, 0, rw, r) != i) continue;   /* each family once, at its first edge */
+        if (!aw_family_same(&mine, &theirs, rw, r)) return 0;
+        shared++;
+    }
+    for (size_t i = aw_first(bl, bn, p); i < bn && bl[i].block == p; i++) {
+        if (!aw_role(b, bl + i, rw, r)) continue;
+        size_t n; const char *d = aw_text(b, bl[i].dest, &n); aw_unquote(&d, &n);
+        aw_family mine = {a, al, an, u, d, n};
+        if (aw_spelled(d, n, from, from_length) || aw_spelled(d, n, to, to_length) ||
+            !aw_block_named(a->subwebs, a->subweb_count, d, n)) continue;
+        if (aw_next(&mine, 0, rw, r) == an) return 0;
+    }
+    return shared > 0;
+}
+enum { AW_SILENT, AW_AGREED, AW_BLOCKED };
+/* What one writer of each end says about the route with role r from source
+ * u (web w) into subweb v (web dw). Each author's own routes between the
+ * pair's original names decide first, then every source of dw that mirrors
+ * u's exits with this role: an omission by any of them blocks the route, and
+ * every family they wrote must be one (*out; given `agreed`, that one). No
+ * mirror says nothing. A difference blocks, so no edge, condition or blend is
+ * chosen for an author. */
+static int aw_derived(const aw_web *w, const aw_link *l, size_t n, size_t u, const aw_web *dw, const aw_link *dl,
+    size_t dn, size_t v, const aw_web *rw, const aw_link *r, const aw_family *agreed, aw_family *out)
+{
+    const aw_block *ub = w->subwebs + u, *vb = dw->subwebs + v, *theirs;
+    aw_family written[2];
+    size_t count = 0;
+    out->w = NULL;
+    if (!aw_spelled(ub->name, ub->name_length, vb->name, vb->name_length)) {
+        if (aw_block_named(w->subwebs, w->subweb_count, vb->name, vb->name_length))
+            written[count++] = (aw_family){w, l, n, u, vb->name, vb->name_length};
+        if ((theirs = aw_block_named(dw->subwebs, dw->subweb_count, ub->name, ub->name_length)))
+            written[count++] = (aw_family){dw, dl, dn, (size_t)(theirs - dw->subwebs), vb->name, vb->name_length};
+    }
+    for (size_t k = 0; k < count; k++)
+        if (aw_next(written + k, 0, rw, r) == written[k].n) return AW_BLOCKED;
+    for (size_t p = 0; p < dw->subweb_count; p++) {
+        if (p == v || !aw_mirrors(w, l, n, u, dw, dl, dn, p, rw, r, ub->name, ub->name_length, vb->name, vb->name_length)) continue;
+        aw_family in = {dw, dl, dn, p, vb->name, vb->name_length};
+        if (out->w ? !aw_family_same(out, &in, rw, r) : aw_next(&in, 0, rw, r) == dn) return AW_BLOCKED;
+        if (!out->w) *out = in;
+    }
+    const aw_family *decided = agreed ? agreed : out->w ? out : NULL;
+    for (size_t k = 0; k < count && decided; k++)
+        if (!aw_family_same(written + k, decided, rw, r)) return AW_BLOCKED;
+    if (agreed && out->w && !aw_family_same(out, agreed, rw, r)) return AW_BLOCKED;
+    return out->w ? AW_AGREED : AW_SILENT;
+}
+/* The family of the route with role r between two final names, given each
+ * end's writers (ws, wn and ds, dn): every pair of writers takes part, none
+ * may block and all that speak agree, so no discovery order picks an
+ * authority. The first agreeing pair, in writer order, supplies the text. */
+static int aw_agreed(const aw_state *st, const aw_graph *g, const aw_writer *ws, size_t wn, const aw_writer *ds, size_t dn,
+    const aw_web *rw, const aw_link *r, aw_family *out)
+{
+    size_t pairs = wn * dn, first;
+    for (first = 0; first < pairs; first++) {
+        const aw_writer *x = ws + first / dn, *y = ds + first % dn;
+        int said = aw_derived(aw_web_of(st, x->web), g->links[x->web], g->link_count[x->web], x->block,
+            aw_web_of(st, y->web), g->links[y->web], g->link_count[y->web], y->block, rw, r, NULL, out);
+        if (said == AW_BLOCKED) return 0;
+        if (said == AW_AGREED) break;
+    }
+    for (size_t k = 0; k < pairs && first < pairs; k++) {
+        const aw_writer *x = ws + k / dn, *y = ds + k % dn;
+        aw_family f;
+        if (k != first && aw_derived(aw_web_of(st, x->web), g->links[x->web], g->link_count[x->web], x->block,
+            aw_web_of(st, y->web), g->links[y->web], g->link_count[y->web], y->block, rw, r, out, &f) == AW_BLOCKED) return 0;
+    }
+    return first < pairs;
+}
+/* Final name of contribution s's block b: its copy's name when it moved. */
+static const char *aw_final(const aw_state *st, size_t s, size_t b, size_t *length)
+{
+    const aw_block *x = st->webs[s].subwebs + b;
+    for (size_t m = 0; m < st->move_count; m++)
+        if (st->moves[m].source == s && strlen(st->moves[m].from) == x->name_length &&
+            !memcmp(st->moves[m].from, x->name, x->name_length)) { *length = strlen(st->moves[m].to); return st->moves[m].to; }
+    *length = x->name_length; return x->name;
+}
+static int aw_writer_order(const void *left, const void *right)
+{
+    const aw_writer *a = left, *b = right;
+    int c = memcmp(a->name, b->name, a->length < b->length ? a->length : b->length);
+    if (c || a->length != b->length) return c ? c : a->length < b->length ? -1 : 1;
+    if (a->rank != b->rank) return a->rank < b->rank ? -1 : 1;
+    return (a->block > b->block) - (a->block < b->block);
+}
+static void aw_graph_free(aw_graph *g, size_t webs)
+{
+    if (g->links) for (size_t s = 0; s < webs; s++) free(g->links[s]);
+    free(g->links); free(g->link_count); free(g->writers);
+    memset(g, 0, sizeof(*g));
+}
+static int aw_graph_build(const aw_state *st, aw_graph *g)
+{
+    size_t total = st->base->subweb_count;
+    memset(g, 0, sizeof(*g));
+    for (size_t s = 0; s < st->count; s++) total += st->webs[s].subweb_count;
+    g->links = calloc(st->count + 1, sizeof(*g->links)); g->link_count = calloc(st->count + 1, sizeof(*g->link_count));
+    g->writers = calloc(total ? total : 1, sizeof(*g->writers));
+    if (!g->links || !g->link_count || !g->writers) return 0;
+    for (size_t s = 0; s <= st->count; s++) {
+        const aw_web *w = aw_web_of(st, s);
+        if (!aw_links(w, g->links + s, g->link_count + s)) return 0;
+        for (size_t b = 0; b < w->subweb_count; b++) {
+            aw_writer *x = g->writers + g->writer_count++;
+            x->web = s; x->block = b; x->rank = s == st->count ? 0 : s + 1;
+            if (s == st->count) { x->name = w->subwebs[b].name; x->length = w->subwebs[b].name_length; }
+            else x->name = aw_final(st, s, b, &x->length);
+        }
+    }
+    if (g->writer_count) qsort(g->writers, g->writer_count, sizeof(*g->writers), aw_writer_order);
+    return 1;
+}
+/* Derived switch edges out of block u of web s (the stock web at st->count),
+ * whose final name is `name`, as edits to that web's text. */
+static int aw_switch_edits(const aw_state *st, const aw_graph *g, size_t s, size_t u, const char *name, size_t length,
+    aw_edits *out)
+{
+    const aw_web *w = aw_web_of(st, s);
+    const aw_link *l = g->links[s];
+    const aw_writer *ws = NULL;
+    size_t n = g->link_count[s], wn = 0;
+    for (size_t k = 0; k < g->writer_count; k++)
+        if (aw_spelled(g->writers[k].name, g->writers[k].length, name, length) && !wn++) ws = g->writers + k;
+    for (size_t v = 0, dn; v < g->writer_count; v += dn) {
+        const aw_writer *ds = g->writers + v;
+        for (dn = 1; v + dn < g->writer_count && aw_spelled(ds[dn].name, ds[dn].length, ds->name, ds->length); dn++) {}
+        int together = aw_spelled(ds->name, ds->length, name, length);
+        for (size_t k = 0; k < wn * dn && !together; k++) together = ws[k / dn].web == ds[k % dn].web;
+        if (together) continue;
+        char quoted[512];
+        snprintf(quoted, sizeof(quoted), "\"%.*s\"", (int)ds->length, ds->name);
+        for (size_t i = aw_first(l, n, u); i < n && l[i].block == u; i++) {
+            int seen = 0;   /* each (node, state) role once */
+            for (size_t j = aw_first(l, n, u); j < i && !seen; j++) seen = aw_role(w, l + j, w, l + i);
+            aw_family entered = {w, l, n, u, ds->name, ds->length}, t;
+            if (seen || aw_next(&entered, 0, w, l + i) < n || !aw_agreed(st, g, ws, wn, ds, dn, w, l + i, &t)) continue;
+            for (size_t e = aw_next(&t, 0, w, l + i); e < t.n; e = aw_next(&t, e + 1, w, l + i)) {
+                const aw_web *dw = t.w; const aw_link *edge = t.l + e;
+                aw_edits twin = {0};
+                size_t text_length = 0; char *text = NULL;
+                if (!aw_add_edit(&twin, dw->tokens.items[edge->dest].begin, dw->tokens.items[edge->dest].end, quoted, strlen(quoted)) ||
+                    !(text = aw_apply(dw->tokens.source.text, dw->tokens.items[edge->edge].begin,
+                        dw->tokens.items[dw->tokens.items[edge->edge + 1].close].end, &twin, &text_length))) {
+                    aw_edits_free(&twin); return 0;
+                }
+                aw_edits_free(&twin);
+                int ok = aw_insert(out, w, l[i].edges_close, text, text_length);
+                free(text);
+                if (!ok) return 0;
+            }
+        }
+    }
+    return 1;
+}
+
 int sh_decl_animweb_prepare(sh_decl_source baseline, sh_decl_source *sources, size_t count,
     char **owned, sh_decl_animweb_move **moves, size_t *move_count, char *error, size_t capacity)
 {
@@ -1342,6 +1622,8 @@ int sh_decl_animweb_prepare(sh_decl_source baseline, sh_decl_source *sources, si
         "showBlendEq", "showTransition", "showWeakRefs"};
     aw_web base;
     aw_state st = {0};
+    aw_graph graph = {0};
+    size_t *restores = NULL, restore_count = 0;
     size_t merged_capacity = 0, *model_length = NULL, *label_length = NULL;
     const char **model_text = NULL, **label_text = NULL;
     int ok = 0;
@@ -1480,13 +1762,11 @@ int sh_decl_animweb_prepare(sh_decl_source baseline, sh_decl_source *sources, si
             }
             if (!aw_relocate(&st, s, x, name, hash)) { aw_fail(error, capacity, "allocation failed"); goto done; }
             if (stock) {
-                /* The stock subweb keeps its place; the copy follows it. */
-                size_t length = 0;
-                char *restored = aw_stock_with_glue(&st, s, x, stock, &length);
-                if (!restored || !aw_insert_before(st.edits + s, w, x->key, restored, length)) {
-                    free(restored); aw_fail(error, capacity, "allocation failed"); goto done;
-                }
-                free(restored);
+                /* The stock subweb keeps its place; the copy follows it once
+                 * every copy's name, and so every switch route, is known. */
+                size_t *grown = realloc(restores, (restore_count + 1) * 2 * sizeof(*grown));
+                if (!grown) { aw_fail(error, capacity, "allocation failed"); goto done; }
+                restores = grown; restores[restore_count * 2] = s; restores[restore_count * 2 + 1] = b; restore_count++;
             }
         }
         /* A contribution never deletes a stock subweb or state for the others. */
@@ -1502,6 +1782,25 @@ int sh_decl_animweb_prepare(sh_decl_source baseline, sh_decl_source *sources, si
             if (!aw_restore(st.edits + s, w, w->states, w->state_count, w->states_close,
                 &base, base.states, base.state_count, b)) { aw_fail(error, capacity, "allocation failed"); goto done; }
         }
+    }
+    if (!aw_graph_build(&st, &graph)) { aw_fail(error, capacity, "allocation failed"); goto done; }
+    for (size_t s = 0; s < count; s++)
+        for (size_t b = 0; b < st.webs[s].subweb_count; b++) {
+            size_t n; const char *name = aw_final(&st, s, b, &n);
+            if (!aw_switch_edits(&st, &graph, s, b, name, n, st.edits + s)) { aw_fail(error, capacity, "allocation failed"); goto done; }
+        }
+    for (size_t r = 0; r < restore_count; r++) {
+        size_t s = restores[r * 2], length = 0;
+        const aw_block *x = st.webs[s].subwebs + restores[r * 2 + 1];
+        const aw_block *stock = aw_block_named(base.subwebs, base.subweb_count, x->name, x->name_length);
+        aw_edits routes = {0};
+        char *restored = NULL;
+        if (!aw_switch_edits(&st, &graph, count, (size_t)(stock - base.subwebs), stock->name, stock->name_length, &routes) ||
+            !(restored = aw_stock_with_glue(&st, s, x, stock, &routes, &length)) ||
+            !aw_insert_before(st.edits + s, st.webs + s, x->key, restored, length)) {
+            aw_edits_free(&routes); free(restored); aw_fail(error, capacity, "allocation failed"); goto done;
+        }
+        free(restored);
     }
     for (size_t s = 0; s < count; s++) {
         if (!st.edits[s].count) continue;
@@ -1525,6 +1824,7 @@ models_done:
     free((void *)model_text); free((void *)label_text); free(model_length); free(label_length);
 done:
     if (!ok) for (size_t i = 0; i < count; i++) { free(owned[i]); owned[i] = NULL; }
+    aw_graph_free(&graph, count + 1); free(restores);
     for (size_t m = 0; m < st.move_count; m++) { free(st.moves[m].from); free(st.moves[m].to); }
     free(st.moves);
     if (st.webs) for (size_t s = 0; s < count; s++) aw_free(st.webs + s);

@@ -97,11 +97,19 @@ int sh_package_shader_cook_copy(int renderer, const char *name,
 /* The caller supplies a current stable native header and separately verifies
  * registry membership, native ID and readiness. Exact source plus immutable
  * identity/default/ABI fields must match one successful observed construction.
- * Text/length/checksum retirement and lifetime promotion are allowed; changes
- * to default value, native kind/index, flag mask or source record are not. */
+ * Text/length/checksum retirement, lifetime promotion and a renderparm's
+ * engine-owned creator claim (+0x74) are allowed; changes to default value,
+ * native kind/index, data type, flag mask or source record are not. */
 int sh_package_shader_receipt_matches(uintptr_t resource, const char *family,
     const char *name, const void *source, size_t length,
     const unsigned char *header, size_t header_length);
+
+/* Diagnostics only: why sh_package_shader_receipt_matches refuses the same
+ * arguments, written to out ("no source receipt", "receipt header differs at
+ * +0x68", ...). Never evidence of readiness. Returns out. */
+char *sh_package_shader_receipt_refusal(uintptr_t resource, const char *family,
+    const char *name, const void *source, size_t length,
+    const unsigned char *header, size_t header_length, char *out, size_t capacity);
 
 #ifdef SH_PACKAGE_SHADER_RECEIPT_TESTING
 void sh_package_shader_receipt_test_reset(void);

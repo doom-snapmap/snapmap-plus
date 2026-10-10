@@ -15,6 +15,24 @@
 #include "decl_dependencies.h"
 #include "decl_native_carrier.h"
 
+/* Outcome of native value evaluation. Source-tree inequality is not native
+ * inequivalence, so these never classify a site as an ENGINE limit. */
+typedef enum sh_native_eval_status {
+    SH_NATIVE_EVAL_UNAVAILABLE = 0, /* no evaluator, or it declined to run */
+    SH_NATIVE_EVAL_EQUAL,           /* native states are equal within its coverage */
+    SH_NATIVE_EVAL_UNEQUAL,         /* this candidate changes native state */
+    SH_NATIVE_EVAL_UNSUPPORTED,     /* a value lies outside the recovered native coverage */
+    SH_NATIVE_EVAL_FAILED           /* native parse, read or write failed */
+} sh_native_eval_status;
+
+/* One definition of a target's inheritance chain that the engine cannot
+ * resolve by name with the document's source: its authored text, prepared
+ * for a private evaluation. Chains list them nearest to the instance first. */
+typedef struct sh_native_eval_layer {
+    const char *name;
+    const char *text;
+} sh_native_eval_layer;
+
 typedef struct sh_native_inline_source {
     void *context;
     /* Effective entityDef text in this map's authored context. Returns 1 with
@@ -37,8 +55,9 @@ typedef struct sh_native_inline_source {
      * package still does, such as a global stock change), or NULL to allow
      * conversion. May be NULL. */
     const char *(*keep)(void *context, size_t entity, const char *name, sh_decl_carrier_limit *limit);
-    /* The entity carrier's current `~version`; other versions are upgraded by
-     * the native reader first, so their state is left alone. */
+    /* Current native entity carrier version. Supported original versions are
+     * upgraded on a derived copy before source lookup and inheritance folding;
+     * only an accepted equivalent result is emitted at this version. */
     int version;
     /* Native placement. SnapMap's map validator admits an entity only when its
      * inherit names the entityDef of a palette row (a snapEditorEntityDef).
@@ -47,6 +66,13 @@ typedef struct sh_native_inline_source {
      * of it; otherwise a reason (valid until the next call) with *limit. May
      * be NULL only where no map validation applies. */
     const char *(*placement)(void *context, const char *from, const char *base, sh_decl_carrier_limit *limit);
+    /* Native value evaluation of every conversion: compare the native state
+     * of the target definition (inherit P plus the instance values) with the
+     * candidate (inherit base plus the folded layer and the instance). Only
+     * EQUAL converts; every other status keeps the package as a GAP with a
+     * distinct reason. NULL means no native evaluator is bound. */
+    sh_native_eval_status (*evaluate)(void *context, size_t entity, const char *from, const char *base,
+        const sh_decl_node *target, const sh_decl_node *candidate, char *detail, size_t capacity);
 } sh_native_inline_source;
 
 typedef struct sh_native_inline_site {
@@ -71,5 +97,12 @@ void sh_native_inline_report_free(sh_native_inline_report *report);
 char *sh_native_inline_document(const char *json, size_t length,
     const sh_native_inline_source *source, size_t *output_length,
     sh_native_inline_report *report, char *error, size_t capacity);
+
+#ifdef SH_NATIVE_INLINE_TESTING
+/* Test the original-version policy without stamping an accepted version or
+ * converting inheritance. Return 1/copy, 0/coverage, or -1/allocation failure. */
+int sh_native_inline_test_version_copy(const char *json, int target, char **copy);
+void sh_native_inline_test_version_alloc_fail_after(long count);
+#endif
 
 #endif

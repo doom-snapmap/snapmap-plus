@@ -461,6 +461,16 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "48 8D 05 ?? ?? ?? ?? 49 89 43 E8 4D 8D 4B 08 4C 8B C7 "
       "48 B8 5D A8 39 09 C4 85 9A 93 4C 2B 41 10 48 8B 49 10",
       0x54AB50u },
+    { "SnapPaletteFindDecl", /* Row by declaration pointer, first match or the end row; identical bytes
+                              * in both renderers (R-155b). Role default-marker seam. */
+      "48 8B 41 10 48 63 49 18 4C 69 C1 F0 06 00 00 4C 03 C0 49 3B C0 74 10 "
+      "48 39 10 74 0B 48 05 F0 06 00 00 49 3B C0 75 F0 C3",
+      0x54AB20u },
+    { "SnapMapHasEntityDecl", /* bool(map, decl): entity rows at map+0xc0, count +0xc8, row at +8;
+                               * identical bytes in both renderers (R-155b). Role identity seam. */
+      "48 8B 81 C0 00 00 00 48 63 89 C8 00 00 00 4C 8D 04 C8 49 3B C0 74 12 "
+      "48 8B 08 48 39 51 08 74 0C 48 83 C0 08 49 3B C0 75 EE 32 C0 C3 B0 01 C3",
+      0x5A4A00u },
     { "SnapPaletteEntryConstruct", /* Native 0x6f0-byte template from snapEditorEntity. */
       "48 89 4C 24 08 57 48 83 EC 30 48 C7 44 24 20 FE FF FF FF "
       "48 89 5C 24 50 48 89 74 24 58 48 8B DA 48 8B F9 48 89 11 "
@@ -635,6 +645,38 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 85 40 80 00 00 "
       "4C 8B F2 48 8B D9 C7 41 48 FF FF FF FF 48 8B 79 40",
       0x1819C30u },
+    { "SwfPrecacheSound", /* Paired VK/GL ABI and whole stolen prefix: 15 bytes.
+                         * VK 0x288bf0 / GL 0x2881c0. Include the lookup and
+                         * resource-name result, beyond the shared conversion
+                         * prologue. Evidence: E2 source-graph-fix-20261004. */
+      "40 57 48 83 EC 70 48 C7 44 24 28 FE FF FF FF 48 89 9C 24 80 00 00 00 "
+      "48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 44 24 60 48 8B FA C7 44 24 20 00 00 00 00 "
+      "48 8D 54 24 30 49 8B 09 E8 ?? ?? ?? ?? 90 48 8B 50 10 48 85 D2 75 04 "
+      "33 DB EB 12 41 B0 01 48 8D 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? 48 8B D8 "
+      "48 8D 4C 24 30 E8 ?? ?? ?? ?? 48 8B 53 08 C7 07 00 00 00 00 "
+      "48 8D 4C 24 30 E8 ?? ?? ?? ?? 90 48 8B D0 48 8B CF E8 ?? ?? ?? ?? "
+      "90 48 8D 4C 24 30 E8 ?? ?? ?? ?? 48 8B C7",
+      0x288BF0u },
+    { "SwfPrecacheFontFXMaterial", /* Paired VK/GL ABI and whole stolen prefix: 15 bytes.
+                         * Source evidence: E2 native-adapter-20261004. */
+      "40 57 48 83 EC 70 48 C7 44 24 28 FE FF FF FF 48 89 9C 24 90 00 00 00 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 44 24 60 48 8B FA 48 8B D9 C7 44 24 20 00 00 00 00 48 8D 54 24 30 49 8B 09 E8 ?? ?? ??",
+      0x288B50u },
+    { "SwfPlaySound", /* Paired VK/GL ABI and whole stolen prefix: 20 bytes.
+                         * Source evidence: E2 native-adapter-20261004. */
+      "40 55 56 57 48 81 EC 80 00 00 00 48 C7 44 24 40 FE FF FF FF 48 89 9C 24 B0 00 00 00 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 44 24 78 49 8B F9 48 8B DA 48 8B E9 C7 44 24 30 00 00 00 00 41 83 79 08",
+      0x2889A0u },
+    { "SwfGetLocalString", /* Paired VK/GL ABI and whole stolen prefix: 19 bytes.
+                         * Source evidence: E2 native-adapter-20261004. */
+      "48 8B C4 57 48 81 EC A0 00 00 00 48 C7 40 80 FE FF FF FF 48 89 58 08 48 89 70 18 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 84 24 98 00 00 00 48 8B DA 33 F6 89 74 24 20 41 39 71 08 75 0B 89 32 48 89",
+      0x288780u },
+    { "SwfDestroy", /* Paired VK/GL ABI and whole stolen prefix: 15 bytes.
+                         * Source evidence: E2 native-adapter-20261004. */
+      "40 57 48 83 EC 30 48 C7 44 24 20 FE FF FF FF 48 89 5C 24 40 48 89 6C 24 48 48 89 74 24 50 48 8B D9 48 8B 0D ?? ?? ?? ?? 48 85 C9 74 2A 48 8B 01 FF 90 28 02 00 00 90 48 85 C0 74 1B 48 8B 10 48",
+      0x287580u },
+    { "LocalStringDictionaryIndex", /* Paired VK/GL ABI and whole stolen prefix: 15 bytes.
+                         * Source evidence: E2 native-adapter-20261004. */
+      "41 56 48 83 EC 50 48 C7 44 24 20 FE FF FF FF 48 89 5C 24 68 48 89 74 24 70 48 89 7C 24 78 48 8B F2 4C 8B F1 BB C5 9D 1C 81 0F B6 02 84 C0 74 2A 48 8B FA 0F B6 C8 E8 ?? ?? ?? ?? 0F BE C8 33 CB",
+      0x1A29E70u },
     { "SwfConstruct", /* idSWF*(swf, name, parent, flags): UI movie constructor.
                         * Resolves dictionary fonts and fixed GUI materials before
                         * returning. First 20 bytes (seven pushes, frame LEA) are
@@ -1511,6 +1553,15 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
     { "SnapTypeCacheFind",
       "48 89 5C 24 08 57 48 83 EC 20 48 8B FA 48 8B D9 E8 ?? ?? ?? ?? 3B 03 75 1C 48 8B 17 48 8D 0D ?? ?? ?? ?? "
       "E8 ?? ?? ?? ?? 33 C0 48 8B 5C 24 30 48 83 C4 20 5F C3 48 98 48 8D 04 C0 48 8D 80 DD 05 00 00 48 8D 04 C3", 0x5f2ff0 },
+    /* Private entityDef definition and context written text (native_decl_eval.c;
+     * R-191): constructor GL 0x179f6d0 and written-text
+     * getter GL 0x1a17cf0. */
+    { "DeclEntityDefCtor",
+      "48 89 4C 24 08 57 48 83 EC 30 48 C7 44 24 20 FE FF FF FF 48 89 5C "
+      "24 48 48 8B D9 E8 ?? ?? ?? ?? 90 48 8D 05 ?? ?? ?? ?? 48 89 03 48 8B 05", 0x17acbf0 },
+    { "ContextWrittenText",
+      "48 8B 81 18 10 00 00 48 85 C0 75 "
+      "08 48 8D 05 ?? ?? ?? ?? C3 48 8B 80 68", 0x1a25930 },
     /* Model<idSnapBitFlagInspector> build and apply (key_inspector.c). */
     { "BitFlagInspectorBuild",
       "40 55 56 57 41 54 41 55 41 56 41 57 48 81 EC 90 00 00 00 48 C7 44 24 50 FE FF FF FF 48 89 9C 24 E0 00 00 00 "

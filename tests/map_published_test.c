@@ -20,7 +20,7 @@ static const char rebound_json[] = "compiled source with scoped aliases";
 static void *call_callbacks[PUB_HOOKS];
 
 void backend_log(const char *text) { (void)text; }
-void sh_mpkg_report_error(const char *text) { assert(text && *text); errors++; }
+void sh_mpkg_report_error(sh_mpkg_problem problem, const char *text) { (void)problem; assert(text && *text); errors++; }
 int sh_decl_server_map_boundary_safe(void) { return boundary && thread_id == GetCurrentThreadId(); }
 int sh_decl_server_map_preparation_ready(void) { return boundary && thread_id == GetCurrentThreadId(); }
 int sh_decl_server_map_browser_present(void)

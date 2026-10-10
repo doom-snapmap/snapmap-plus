@@ -43,7 +43,7 @@ $tests = @(
     @{ name = "package_legacy_test"; src = 'package_legacy_test.c ..\src\backend\resource_catalog.c ..\src\backend\package_legacy.c ..\src\backend\package_migration.c ..\src\backend\decl_server_path.c ..\src\backend\package_archive.c ..\src\backend\raw_deflate_encode.c ..\src\backend\raw_deflate.c ..\src\backend\package_sources.c ..\src\backend\packages.c ..\src\backend\package_descriptor.c ..\src\backend\config_json.c'; arg = "" }
     @{ name = "package_migration_test"; src = 'package_migration_test.c ..\src\backend\package_migration.c ..\src\backend\decl_server_path.c ..\src\backend\package_descriptor.c ..\src\backend\config_json.c ..\src\backend\package_sources.c ..\src\backend\packages.c'; arg = "" }
     @{ name = "package_owners_test"; src = 'package_owners_test.c'; arg = "" }
-    @{ name = "package_link_graph_test"; src = 'package_link_graph_test.c ..\src\backend\package_link_graph.c'; arg = "" }
+    @{ name = "package_link_graph_test"; src = 'package_link_graph_test.c ..\src\backend\package_link_graph.c'; arg = ""; defs = '/DSH_PACKAGE_LINK_GRAPH_TESTING' }
     @{ name = "package_consumers_test"; src = 'package_consumers_test.c ..\src\backend\package_consumers.c'; arg = "" }
     @{ name = "package_font_test"; src = 'package_font_test.c ..\src\backend\package_font.c ..\src\backend\font_binary.c ..\src\backend\package_consumers.c'; arg = "" }
     @{ name = "package_link_pipeline_test"; src = 'package_link_pipeline_test.c ..\src\backend\package_scope.c ..\src\backend\package_compiler.c ..\src\backend\package_hud.c ..\src\backend\decl_entity_class.c ..\src\backend\package_link_graph.c ..\src\backend\package_link_identity.c ..\src\backend\decl_rebind.c ..\src\backend\decl_dependencies.c ..\src\backend\decl_json_dependencies.c ..\src\backend\package_sources.c ..\src\backend\packages.c ..\src\backend\package_descriptor.c ..\src\backend\config_json.c ..\src\backend\decl_compose.c ..\src\backend\decl_tree.c ..\src\backend\decl_polymorphic.c ..\src\backend\decl_server_path.c ..\src\backend\decl_text.c ..\src\backend\resource_catalog.c ..\src\backend\raw_deflate.c'; arg = "" }
@@ -55,9 +55,9 @@ $tests = @(
     @{ name = "virtual_texture_provider_test"; src = 'virtual_texture_provider_test.c ..\src\backend\virtual_texture_provider.c'; defs = '/DSH_VT_PROVIDER_TESTING'; arg = "" }
     @{ name = "package_virtual_pages_test"; src = 'package_virtual_pages_test.c ..\src\backend\package_virtual_pages.c ..\src\backend\package_sources.c ..\src\backend\packages.c ..\src\backend\package_descriptor.c ..\src\backend\config_json.c'; arg = "" }
     @{ name = "decl_native_rebind_test"; src = 'decl_native_rebind_test.c ..\src\backend\decl_native_rebind.c ..\src\backend\resource_rebind.c ..\src\backend\model_binary.c ..\src\backend\md6_binary.c ..\src\backend\decl_material.c ..\src\backend\decl_native_lex.c ..\src\backend\decl_md6_compose.c ..\src\backend\decl_compose.c ..\src\backend\decl_tree.c ..\src\backend\decl_polymorphic.c'; arg = "" }
-    @{ name = "package_link_identity_test"; src = 'package_link_identity_test.c ..\src\backend\package_link_graph.c ..\src\backend\package_link_identity.c ..\src\backend\package_sources.c ..\src\backend\packages.c ..\src\backend\package_descriptor.c ..\src\backend\config_json.c'; arg = "" }
+    @{ name = "package_link_identity_test"; src = 'package_link_identity_test.c ..\src\backend\package_link_graph.c ..\src\backend\package_link_identity.c ..\src\backend\package_sources.c ..\src\backend\packages.c ..\src\backend\package_descriptor.c ..\src\backend\config_json.c'; arg = ""; defs = '/DSH_PACKAGE_LINK_GRAPH_TESTING' }
     @{ name = "map_provenance_test"; src = 'map_provenance_test.c ..\src\backend\map_provenance.c ..\src\backend\map_shards.c ..\src\backend\package_provenance.c ..\src\backend\package_scope.c'; arg = "" }
-    @{ name = "package_provenance_test"; src = 'package_provenance_test.c ..\src\backend\package_provenance.c ..\src\backend\package_scope.c'; arg = "" }
+    @{ name = "package_provenance_test"; src = 'package_provenance_test.c ..\src\backend\package_provenance.c ..\src\backend\package_scope.c'; defs = '/DSH_PACKAGE_PROVENANCE_TESTING'; arg = "" }
     @{ name = "package_scope_test"; src = 'package_scope_test.c ..\src\backend\package_scope.c ..\src\backend\package_compiler.c ..\src\backend\package_hud.c ..\src\backend\decl_entity_class.c ..\src\backend\package_sources.c ..\src\backend\packages.c ..\src\backend\package_descriptor.c ..\src\backend\config_json.c ..\src\backend\decl_compose.c ..\src\backend\decl_tree.c ..\src\backend\decl_polymorphic.c ..\src\backend\decl_server_path.c ..\src\backend\decl_text.c ..\src\backend\resource_catalog.c ..\src\backend\raw_deflate.c'; arg = "" }
     @{ name = "decl_tree_test"; src = 'decl_tree_test.c ..\src\backend\decl_tree.c'; arg = "" }
     @{ name = "decl_script_native_test"; src = 'decl_script_native_test.c ..\src\backend\decl_script_native.c ..\src\backend\decl_script_schema.c ..\src\backend\package_sources.c ..\src\backend\packages.c ..\src\backend\package_descriptor.c ..\src\backend\config_json.c'; defs = '/DSH_DECL_SCRIPT_NATIVE_TESTING'; arg = "" }
@@ -77,11 +77,11 @@ $tests = @(
     @{ name = "decl_graph_test"; src = 'decl_graph_test.c ..\src\backend\decl_graph.c ..\src\backend\decl_tree.c'; arg = "" }
     @{ name = "decl_entity_class_test"; src = 'decl_entity_class_test.c ..\src\backend\decl_entity_class.c ..\src\backend\decl_tree.c'; arg = "" }
     @{ name = "decl_native_carrier_test"; src = 'decl_native_carrier_test.c ..\src\backend\decl_native_carrier.c ..\src\backend\decl_tree.c ..\src\backend\config_json.c'; arg = "" }
-    @{ name = "package_native_inline_test"; src = 'package_native_inline_test.c ..\src\backend\package_native_inline.c ..\src\backend\decl_native_carrier.c ..\src\backend\decl_entity_class.c ..\src\backend\decl_dependencies.c ..\src\backend\decl_json_dependencies.c ..\src\backend\decl_polymorphic.c ..\src\backend\decl_tree.c ..\src\backend\config_json.c'; arg = "" }
+    @{ name = "package_native_inline_test"; src = 'package_native_inline_test.c ..\src\backend\package_native_inline.c ..\src\backend\decl_native_carrier.c ..\src\backend\decl_entity_class.c ..\src\backend\decl_dependencies.c ..\src\backend\decl_json_dependencies.c ..\src\backend\decl_polymorphic.c ..\src\backend\decl_tree.c ..\src\backend\config_json.c'; defs = '/DSH_NATIVE_INLINE_TESTING'; arg = "" }
     @{ name = "package_editor_rows_test"; src = 'package_editor_rows_test.c ..\src\backend\package_editor_rows.c ..\src\backend\decl_tree.c'; arg = "" }
     @{ name = "decl_dependencies_test"; src = 'decl_dependencies_test.c ..\src\backend\decl_dependencies.c ..\src\backend\decl_json_dependencies.c ..\src\backend\config_json.c ..\src\backend\decl_tree.c ..\src\backend\decl_polymorphic.c'; arg = "" }
     @{ name = "decl_rebind_test"; src = 'decl_rebind_test.c ..\src\backend\decl_rebind.c ..\src\backend\decl_dependencies.c ..\src\backend\decl_json_dependencies.c ..\src\backend\config_json.c ..\src\backend\decl_tree.c ..\src\backend\decl_polymorphic.c'; arg = "" }
-    @{ name = "decl_native_schema_test"; src = 'decl_native_schema_test.c ..\src\backend\decl_json_dependencies.c ..\src\backend\config_json.c ..\src\backend\decl_graph_compose.c ..\src\backend\decl_native_schema.c ..\src\backend\decl_script_schema.c ..\src\backend\decl_dependencies.c ..\src\backend\decl_tree.c ..\src\backend\decl_polymorphic.c ..\src\backend\decl_compose.c ..\src\backend\decl_graph.c ..\src\backend\decl_graph_dependencies.c'; arg = "" }
+    @{ name = "decl_native_schema_test"; src = 'decl_native_schema_test.c ..\src\backend\decl_json_dependencies.c ..\src\backend\config_json.c ..\src\backend\decl_graph_compose.c ..\src\backend\decl_native_schema.c ..\src\backend\decl_native_registry.c ..\src\backend\native_resource_id.c ..\src\backend\decl_script_schema.c ..\src\backend\decl_dependencies.c ..\src\backend\decl_tree.c ..\src\backend\decl_polymorphic.c ..\src\backend\decl_compose.c ..\src\backend\decl_graph.c ..\src\backend\decl_graph_dependencies.c'; arg = "" }
     @{ name = "decl_native_registry_test"; src = 'decl_native_registry_test.c ..\src\backend\decl_native_registry.c'; arg = "" }
     @{ name = "native_resource_id_test"; src = 'native_resource_id_test.c ..\src\backend\native_resource_id.c'; arg = "" }
     @{ name = "package_native_registry_test"; src = 'package_native_registry_test.c ..\src\backend\package_native_registry.c ..\src\backend\decl_native_registry.c'; arg = "" }
@@ -169,12 +169,14 @@ $tests = @(
     @{ name = "decl_text_order_test"; src = 'decl_text_order_test.c ..\src\backend\decl_text.c'; arg = "" }
     @{ name = "overrides_internal_test"; src = 'overrides_internal_test.c ..\src\backend\perf.c ..\src\backend\overrides.c ..\src\backend\packages.c ..\src\backend\decl_text.c ..\src\backend\grid_room_asset.c ..\src\backend\grid_room_nav.c ..\src\backend\aas_edit.c ..\src\backend\grid_room.c ..\src\backend\grid_room_resources.c ..\src\backend\grid_room_decl.c ..\src\backend\config_json.c'; defs = '/DSH_OVERRIDES_TESTING'; libs = 'shell32.lib'; arg = "" }
     @{ name = "decl_server_contract_test"; src = 'decl_server_contract_test.c'; arg = (Join-Path $here '..') }
+    @{ name = "package_role_test"; src = 'package_role_test.c ..\src\backend\package_role.c ..\src\backend\signatures.c ..\src\backend\host_image.c'; defs = '/DSH_PACKAGE_ROLE_TESTING'; arg = "" }
     @{ name = "palette_refresh_test"; src = 'palette_refresh_test.c ..\src\backend\palette_refresh.c'; defs = '/DSH_PALETTE_REFRESH_TESTING'; arg = "" }
     @{ name = "process_heap_scope_test"; src = 'process_heap_scope_test.c'; arg = "" }
     @{ name = "render_scope_test"; src = 'render_scope_test.c'; arg = "" }
     @{ name = "engine_dialog_test"; src = 'engine_dialog_test.c ..\src\backend\engine_dialog.c'; defs = '/DSH_ENGINE_DIALOG_TESTING'; arg = "" }
     @{ name = "palette_refresh_contract_test"; src = 'palette_refresh_contract_test.c'; arg = (Join-Path $here '..') }
     @{ name = "resource_catalog_test"; src = 'resource_catalog_test.c ..\src\backend\resource_catalog.c ..\src\backend\raw_deflate.c'; defs = '/DSH_RAW_DEFLATE_TESTING'; arg = "" }
+    @{ name = "raw_deflate_test"; src = 'raw_deflate_test.c ..\src\backend\raw_deflate.c ..\src\backend\raw_deflate_encode.c ..\src\backend\resource_catalog.c'; defs = '/DSH_RAW_DEFLATE_TESTING'; arg = "" }
     @{ name = "packages_test"; src = 'packages_test.c ..\src\backend\packages.c'; defs = '/DSH_PACKAGES_TESTING'; arg = "" }
     @{ name = "map_package_test"; src = 'map_package_test.c ..\src\backend\map_package.c ..\src\backend\decl_server_path.c ..\src\backend\package_migration.c ..\src\backend\package_legacy.c ..\src\backend\map_shards.c ..\src\backend\packages.c ..\src\backend\raw_deflate.c ..\src\backend\raw_deflate_encode.c ..\src\backend\package_archive.c ..\src\backend\package_sources.c ..\src\backend\package_descriptor.c ..\src\backend\config_json.c'; defs = '/DSH_MAP_PACKAGE_TESTING'; arg = "" }
     @{ name = "navmesh_test"; src = 'navmesh_test.c ..\src\backend\navmesh.c ..\src\backend\map_shards.c'; defs = '/DSH_NAVMESH_TESTING'; arg = "" }
@@ -207,7 +209,7 @@ $tests = @(
     @{ name = "audio_bank_codec_test"; src = 'audio_bank_codec_test.c ..\src\backend\audio_bank_codec.c ..\src\backend\audio_hirc.c ..\src\backend\audio_banks.c'; arg = "" }
     @{ name = "audio_link_graph_test"; src = 'audio_link_graph_test.c ..\src\backend\audio_id_reservations.c ..\src\backend\audio_link_graph.c ..\src\backend\audio_bank_codec.c ..\src\backend\audio_hirc.c ..\src\backend\audio_banks.c ..\src\backend\package_link_graph.c ..\src\backend\package_link_identity.c ..\src\backend\package_sources.c ..\src\backend\packages.c ..\src\backend\package_descriptor.c ..\src\backend\config_json.c'; arg = "" }
     @{ name = "audio_packages_test"; src = 'audio_packages_test.c ..\src\backend\audio_packages.c'; arg = "" }
-    @{ name = "audio_originals_test"; src = 'audio_originals_test.c'; arg = "" }
+    @{ name = "audio_originals_test"; src = 'audio_originals_test.c'; defs = '/DSH_AUDIO_ORIGINALS_TESTING'; arg = "" }
     @{ name = "audio_bank_commands_test"; src = 'audio_bank_commands_test.c'; arg = "" }
     @{ name = "audio_bank_gate_test"; src = 'audio_bank_gate_test.c ..\src\backend\hook.c ..\src\backend\patch.c'; arg = "" }
     @{ name = "audio_parameter_native_test"; src = 'audio_parameter_native_test.c ..\src\backend\audio_shared_policy.c ..\src\backend\audio_hirc.c'; arg = "" }
@@ -228,22 +230,26 @@ if ($Doom) {
     if (-not (Test-Path $Doom)) { throw "-Doom path not found: $Doom" }
     $da = (Resolve-Path $Doom).Path
     $tests += @{ name = "sig_test";     src = 'sig_test.c ..\src\backend\signatures.c ..\src\backend\host_image.c';     arg = $da }
+    $tests += @{ name = "package_role_image_test"; src = 'package_role_test.c ..\src\backend\package_role.c ..\src\backend\signatures.c ..\src\backend\host_image.c'; defs = '/DSH_PACKAGE_ROLE_TESTING'; arg = @($da, "vk") }
     $tests += @{ name = "host_renderer_test"; src = 'host_renderer_test.c ..\src\backend\host_image.c'; defs = '/DSH_HOST_IMAGE_TESTING'; arg = @($da, "1") }
     $tests += @{ name = "cvar_unlock_image_test"; src = 'cvar_unlock_test.c ..\src\backend\cvar_unlock.c ..\src\backend\patch.c ..\src\backend\hook.c'; defs = '/DSH_PATCH_TESTING'; arg = $da }
     $tests += @{ name = "hooktol_test"; src = 'hooktol_test.c ..\src\backend\signatures.c ..\src\backend\host_image.c'; defs = '/DSH_HOST_IMAGE_TESTING'; arg = $da }
-    $tests += @{ name = "globals_test"; src = 'globals_test.c ..\src\backend\audio_bank_commands.c ..\src\backend\audio_limits_native.c ..\src\backend\audio_environment_native.c ..\src\backend\audio_state_native.c ..\src\backend\audio_parameter_native.c ..\src\backend\audio_subscription_native.c ..\src\backend\audio_switch_native.c ..\src\backend\audio_bus_native.c ..\src\backend\audio_bank_gate.c map_published_bindings_stubs.c ..\src\backend\virtual_texture_provider.c ..\src\backend\resource_resident.c ..\src\backend\resource_catalog.c ..\src\backend\resource_graph.c ..\src\backend\raw_deflate.c ..\src\backend\map_source.c ..\src\backend\map_native.c ..\src\backend\map_session_json.c ..\src\backend\config_json.c ..\src\backend\map_published.c ..\src\backend\map_transition.c ..\src\backend\editor_transition.c ..\src\backend\decl_native_schema.c ..\src\backend\decl_script_schema.c ..\src\backend\engine_globals.c ..\src\backend\signatures.c ..\src\backend\host_image.c ..\src\backend\backend_log.c ..\src\backend\perf.c ..\src\common\log_rotate.c'; arg = $da }
+    $tests += @{ name = "globals_test"; src = 'globals_test.c ..\src\backend\audio_bank_commands.c ..\src\backend\audio_limits_native.c ..\src\backend\audio_environment_native.c ..\src\backend\audio_state_native.c ..\src\backend\audio_parameter_native.c ..\src\backend\audio_subscription_native.c ..\src\backend\audio_switch_native.c ..\src\backend\audio_bus_native.c ..\src\backend\audio_bank_gate.c map_published_bindings_stubs.c ..\src\backend\virtual_texture_provider.c ..\src\backend\resource_resident.c ..\src\backend\resource_catalog.c ..\src\backend\resource_graph.c ..\src\backend\raw_deflate.c ..\src\backend\map_source.c ..\src\backend\map_native.c ..\src\backend\map_session_json.c ..\src\backend\config_json.c ..\src\backend\map_published.c ..\src\backend\map_transition.c ..\src\backend\editor_transition.c ..\src\backend\decl_native_schema.c ..\src\backend\decl_native_registry.c ..\src\backend\native_resource_id.c ..\src\backend\decl_script_schema.c ..\src\backend\engine_globals.c ..\src\backend\signatures.c ..\src\backend\host_image.c ..\src\backend\backend_log.c ..\src\backend\perf.c ..\src\common\log_rotate.c'; arg = $da }
 }
 # Check the second executable without requiring the pinned image's addresses.
 if ($DoomAlt) {
     if (-not (Test-Path $DoomAlt)) { throw "-DoomAlt path not found: $DoomAlt" }
     $alt = (Resolve-Path $DoomAlt).Path
     $tests += @{ name = "sig_test_alt"; src = 'sig_test.c ..\src\backend\signatures.c ..\src\backend\host_image.c'; arg = @($alt, "portable") }
+    $tests += @{ name = "package_role_image_test_alt"; src = 'package_role_test.c ..\src\backend\package_role.c ..\src\backend\signatures.c ..\src\backend\host_image.c'; defs = '/DSH_PACKAGE_ROLE_TESTING'; arg = @($alt, "gl") }
     $tests += @{ name = "host_renderer_test_alt"; src = 'host_renderer_test.c ..\src\backend\host_image.c'; defs = '/DSH_HOST_IMAGE_TESTING'; arg = @($alt, "0") }
     $tests += @{ name = "cvar_unlock_image_test_alt"; src = 'cvar_unlock_test.c ..\src\backend\cvar_unlock.c ..\src\backend\patch.c ..\src\backend\hook.c'; defs = '/DSH_PATCH_TESTING'; arg = $alt }
-    $tests += @{ name = "globals_test_alt"; src = 'globals_test.c ..\src\backend\audio_bank_commands.c ..\src\backend\audio_limits_native.c ..\src\backend\audio_environment_native.c ..\src\backend\audio_state_native.c ..\src\backend\audio_parameter_native.c ..\src\backend\audio_subscription_native.c ..\src\backend\audio_switch_native.c ..\src\backend\audio_bus_native.c ..\src\backend\audio_bank_gate.c map_published_bindings_stubs.c ..\src\backend\virtual_texture_provider.c ..\src\backend\resource_resident.c ..\src\backend\resource_catalog.c ..\src\backend\resource_graph.c ..\src\backend\raw_deflate.c ..\src\backend\map_source.c ..\src\backend\map_native.c ..\src\backend\map_session_json.c ..\src\backend\config_json.c ..\src\backend\map_published.c ..\src\backend\map_transition.c ..\src\backend\editor_transition.c ..\src\backend\decl_native_schema.c ..\src\backend\decl_script_schema.c ..\src\backend\engine_globals.c ..\src\backend\signatures.c ..\src\backend\host_image.c ..\src\backend\backend_log.c ..\src\backend\perf.c ..\src\common\log_rotate.c'; arg = @($alt, "portable") }
+    $tests += @{ name = "globals_test_alt"; src = 'globals_test.c ..\src\backend\audio_bank_commands.c ..\src\backend\audio_limits_native.c ..\src\backend\audio_environment_native.c ..\src\backend\audio_state_native.c ..\src\backend\audio_parameter_native.c ..\src\backend\audio_subscription_native.c ..\src\backend\audio_switch_native.c ..\src\backend\audio_bus_native.c ..\src\backend\audio_bank_gate.c map_published_bindings_stubs.c ..\src\backend\virtual_texture_provider.c ..\src\backend\resource_resident.c ..\src\backend\resource_catalog.c ..\src\backend\resource_graph.c ..\src\backend\raw_deflate.c ..\src\backend\map_source.c ..\src\backend\map_native.c ..\src\backend\map_session_json.c ..\src\backend\config_json.c ..\src\backend\map_published.c ..\src\backend\map_transition.c ..\src\backend\editor_transition.c ..\src\backend\decl_native_schema.c ..\src\backend\decl_native_registry.c ..\src\backend\native_resource_id.c ..\src\backend\decl_script_schema.c ..\src\backend\engine_globals.c ..\src\backend\signatures.c ..\src\backend\host_image.c ..\src\backend\backend_log.c ..\src\backend\perf.c ..\src\common\log_rotate.c'; arg = @($alt, "portable") }
 }
 
-$compiledConsumers = @("package_runtime_context_test", "weapon_hud_test", "package_requirements_test", "strids_packages_test", "override_packages_test", "overrides_internal_test", "decl_server_test")
+# The real decl_server row lineage bound to the editor's steer.
+$tests += @{ name = "package_editor_native_rows_test"; src = (($tests | Where-Object { $_.name -eq 'decl_server_test' }).src -replace '^decl_server_test.c ', 'package_editor_native_rows_test.c '); defs = '/DSH_DECL_SERVER_TESTING'; arg = "" }
+$compiledConsumers = @("package_runtime_context_test", "weapon_hud_test", "package_requirements_test", "strids_packages_test", "override_packages_test", "overrides_internal_test", "decl_server_test", "package_editor_native_rows_test")
 $compiledConsumers += @("audio_originals_test", "package_native_preparation_runtime_test")
 $tests += @{ name = "package_native_preparation_runtime_test"; src = 'package_native_preparation_runtime_test.c'; defs = '/DSH_PACKAGE_RUNTIME_NATIVE_TESTING'; arg = "" }
 $compilerSources = @("grid_room_asset.c", "grid_room_nav.c", "aas_edit.c", "grid_room.c", "grid_room_resources.c", "grid_room_decl.c", "package_runtime.c", "resource_graph.c", "package_usage.c", "package_source_graph.c", "decl_native_registry.c", "decl_dependencies.c", "decl_json_dependencies.c", "decl_graph.c", "decl_graph_compose.c", "decl_md6_compose.c", "decl_block_compose.c", "decl_native_lex.c", "md6_binary.c", "model_binary.c", "decl_graph_dependencies.c", "package_compiler.c", "decl_entity_class.c", "decl_native_schema.c", "decl_script_schema.c", "package_sources.c", "packages.c", "package_descriptor.c", "config_json.c", "decl_compose.c", "decl_tree.c", "decl_polymorphic.c", "decl_server_path.c", "decl_text.c", "resource_catalog.c", "raw_deflate.c")
@@ -303,7 +309,7 @@ $tests += @{ name = "package_sound_native_test"; src = 'package_sound_native_tes
 $opaqueSources = ($tests | Where-Object { $_.name -eq 'package_compiler_test' }).src -replace '^package_compiler_test.c ', 'package_opaque_test.c '
 $tests += @{ name = "package_opaque_test"; src = $opaqueSources; arg = "" }
 $shaderLinkSources = ($tests | Where-Object { $_.name -eq 'package_source_graph_test' }).src -replace '^package_source_graph_test.c ', 'package_shader_link_test.c '
-$tests += @{ name = "package_shader_link_test"; src = $shaderLinkSources; defs = '/DSH_RESOURCE_GRAPH_TESTING'; arg = "" }
+$tests += @{ name = "package_shader_link_test"; src = $shaderLinkSources; defs = '/DSH_RESOURCE_GRAPH_TESTING /DSH_PACKAGE_SOURCE_LINK_TESTING'; arg = "" }
 $tests += @{ name = "package_shader_receipt_test"; src = 'package_shader_receipt_test.c ..\src\backend\package_shader_receipt.c'; defs = '/DSH_PACKAGE_SHADER_RECEIPT_TESTING'; arg = "" }
 $occurrenceSources = ($tests | Where-Object { $_.name -eq 'package_bundle_test' }).src -replace '^package_bundle_test.c ', 'package_occurrence_test.c ..\src\backend\package_occurrence.c ..\src\backend\package_provenance.c ..\src\backend\package_scope.c '
 $tests += @{ name = "package_occurrence_test"; src = $occurrenceSources; arg = "" }
@@ -318,6 +324,11 @@ foreach ($t in $tests) {
         # Activation and recovery bridge the real state-machine web hook API.
         $t.src += ' ..\src\backend\fsm_web.c'
         $t.defs += ' /DSH_FSM_WEB_TESTING'
+        # The label base fixture serves text through the real string injector (the runtime
+        # tests otherwise replace its reservations with the test seam).
+        $t.src += ' ..\src\backend\strids.c'
+        $t.defs += ' /DSH_STRIDS_TESTING'
+        $t.libs = 'shell32.lib'
     }
     if ('..\src\backend\package_library.c' -in ($t.src -split ' ') -or $t.name -in $compiledConsumers -or
         $t.name -in @('package_source_graph_test', 'package_shader_link_test')) { $t.src += ' ..\src\backend\package_consumers.c' }
@@ -333,7 +344,7 @@ foreach ($t in $tests) {
     }
     if ($t.name -in @("package_source_graph_test", "package_shader_link_test")) { $t.src += ' ..\src\backend\decl_material.c ..\src\backend\decl_md6_compose.c ..\src\backend\md6_binary.c ..\src\backend\model_binary.c ..\src\backend\decl_native_lex.c ..\src\backend\audio_banks.c ..\src\backend\package_audio.c ..\src\backend\audio_originals.c ..\src\backend\audio_packages.c' }
     if ($t.name -in $compiledConsumers) {
-        if ($t.name -notin @("package_runtime_context_test", "strids_packages_test", "decl_server_test") -and
+        if ($t.name -notin @("package_runtime_context_test", "strids_packages_test", "decl_server_test", "package_editor_native_rows_test") -and
             '..\src\backend\hook.c' -notin ($t.src -split ' ')) {
             $t.src += ' native_lookup_unavailable_stubs.c'
         }

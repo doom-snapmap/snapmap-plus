@@ -18,6 +18,14 @@ int sh_palette_refresh_install(const sig_result *results, size_t count,
  * Returns 1 on completion. Refusal or exception is terminal for this process.
  */
 int sh_palette_refresh_after_decl_registration(void);
+/* Exact editor rows: a found native result may be steered among rows of an
+ * equal key while an editor construction is in progress on the calling
+ * thread (sh_package_editor_row_steer). A miss is never steered. */
+typedef const void *(*sh_palette_steer_fn)(void *palette, const char *name, const void *found, int *outcome);
+void sh_palette_refresh_steer(sh_palette_steer_fn steer);
+/* Called after every completed rebuild, authoring publication and batch end:
+ * row pointers recorded before it are never compared again. */
+void sh_palette_refresh_rows_retired(void (*retired)(void));
 
 typedef struct sh_palette_entries sh_palette_entries;
 typedef struct sh_palette_entry_source {
@@ -44,6 +52,8 @@ typedef int (*sh_palette_entries_admitted_fn)(void *context);
  * the caller's handle for a later admitted retry. No arbitrary-thread teardown.
  */
 int sh_palette_entries_ready(void);
+/* The live editor palette (editor singleton), validated now; NULL otherwise. */
+void *sh_palette_refresh_editor_palette(void);
 int sh_palette_entries_prepare(const sh_palette_entry_source *sources, size_t count,
     sh_palette_entries_admitted_fn admitted, void *context, sh_palette_entries **out,
     char *error, size_t capacity);

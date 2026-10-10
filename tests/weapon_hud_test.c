@@ -171,7 +171,9 @@ int main(void)
     CHECK(sh_weapon_hud_test_count() == 0);
     {
         char *summary = sh_package_runtime_summary();
-        CHECK(summary && strstr(summary, "Skipped local package") && strstr(summary, "migrate-overrides"));
+        /* Invalid JSON is not an earlier-release layout; conversion cannot fix it. */
+        CHECK(summary && strstr(summary, "Skipped local package") && strstr(summary, "names what to fix") &&
+            !strstr(summary, "migrate-overrides"));
         free(summary);
     }
     write_text(marker, descriptor);

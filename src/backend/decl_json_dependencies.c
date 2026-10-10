@@ -225,6 +225,186 @@ static int dj_fixed_array(dj_walk *walk, const char *json, size_t length,
     return sh_native_json_visit_objects_filtered(json, length, 128, dj_fixed_members, dj_shallow, &array);
 }
 
+/* idEventCallInfo, as declaration text spells it (decl_dependencies.c):
+ * {"eventDef":"name","args":{"num":1,"item[0]":{"decl":{"sound":"x"}}}},
+ * where the writer may annotate eventDef and num with their types. */
+typedef struct dj_event {
+    dj_walk *walk;
+    sh_decl_value_type type;
+    const char *path;
+    size_t extent;
+} dj_event;
+
+static void dj_trim(const char **json, size_t *length)
+{
+    while (*length && strchr(" \r\n\t", **json)) { (*json)++; (*length)--; }
+    while (*length && strchr(" \r\n\t", (*json)[*length - 1])) (*length)--;
+}
+
+static int dj_null(const char *json, size_t length)
+{ return length == 4 && !memcmp(json, "null", 4); }
+
+static int dj_event_decl_member(void *context, const sh_json_field_span *fields, size_t count, unsigned depth)
+{
+    dj_event *event = context;
+    dj_walk *walk = event->walk;
+    sh_decl_value_shape shape = {0};
+    const char *json;
+    size_t length, decoded = 0;
+    char *name;
+    int ok = 1;
+    (void)depth;
+    if (count != 1)
+        return dj_gap(walk, event->path, event->type, "event decl argument must name exactly one declaration type");
+    json = fields[0].value; length = fields[0].value_length; dj_trim(&json, &length);
+    if (length < 2 || json[0] != '"')
+        return dj_gap(walk, event->path, event->type, "event decl argument name is not a literal name");
+    if (!(name = (char *)malloc(length + 1))) return 0;
+    if (!sh_native_json_decode_string(json, length, name, length + 1, &decoded) || strlen(name) != decoded)
+        ok = dj_gap(walk, event->path, event->type, "event decl argument name is not a literal name");
+    else if (!decoded || (decoded == 4 && !memcmp(name, "NULL", 4))) ok = 1;
+    else if (!walk->schema->describe(walk->schema->context,
+            (sh_decl_value_type){fields[0].key, SH_DECL_EVENT_DECL_OPS}, &shape) ||
+        (shape.kind != SH_DECL_VALUE_IGNORE && (shape.kind != SH_DECL_VALUE_REFERENCE || !shape.element.name)))
+        ok = dj_gap(walk, event->path, event->type, "event decl argument type has no verified declaration manager");
+    else if (shape.kind == SH_DECL_VALUE_REFERENCE) {
+        ok = walk->schema->reference(walk->schema->context, event->path, shape.element, name, decoded);
+        if (ok && walk->schema->reference_site) {
+            sh_decl_reference_site site = {NULL, json, length};
+            ok = walk->schema->reference_site(walk->schema->context, event->path, shape.element, name, decoded, &site);
+        }
+        if (ok) walk->result->references++;
+    }
+    free(name); return ok;
+}
+
+/* md6Anim: a JSON string naming one animation resource, kept exactly. */
+static int dj_event_anim(dj_event *event, const char *json, size_t length)
+{
+    dj_walk *walk = event->walk;
+    sh_decl_value_shape shape = {0};
+    size_t decoded = 0;
+    char *name;
+    int ok;
+    if (length < 2 || json[0] != '"')
+        return dj_gap(walk, event->path, event->type, "md6Anim event argument is not a literal animation name");
+    if (!(name = (char *)malloc(length + 1))) return 0;
+    if (!sh_native_json_decode_string(json, length, name, length + 1, &decoded) || strlen(name) != decoded)
+        ok = dj_gap(walk, event->path, event->type, "md6Anim event argument is not a literal animation name");
+    else if (!decoded) ok = 1;
+    else if (!walk->schema->describe(walk->schema->context,
+            (sh_decl_value_type){SH_DECL_EVENT_ANIM_TYPE, SH_DECL_EVENT_ANIM_OPS}, &shape) ||
+        shape.kind != SH_DECL_VALUE_REFERENCE || !shape.element.name)
+        ok = dj_gap(walk, event->path, event->type, "md6Anim event argument has no verified animation resource reader");
+    else {
+        ok = walk->schema->reference(walk->schema->context, event->path, shape.element, name, decoded);
+        if (ok && walk->schema->reference_site) {
+            sh_decl_reference_site site = {NULL, json, length};
+            ok = walk->schema->reference_site(walk->schema->context, event->path, shape.element, name, decoded, &site);
+        }
+        if (ok) walk->result->references++;
+    }
+    free(name); return ok;
+}
+
+/* One argument: its single key selects the native reader. */
+static int dj_event_argument(void *context, const sh_json_field_span *fields, size_t count, unsigned depth)
+{
+    dj_event *event = context, decl = *event;
+    const sh_json_field_span *reader = NULL;
+    const char *json;
+    size_t i, length;
+    char *path;
+    int ok, kind = 0;
+    (void)depth;
+    for (i = 0; i < count; i++) {
+        int selected = sh_decl_event_argument_kind(fields[i].key);
+        if (selected) { kind = selected; reader = fields + i; }
+    }
+    if (!reader) return 1;
+    if (count > 1) return dj_gap(event->walk, event->path, event->type, "event argument has more than one reader key");
+    json = reader->value; length = reader->value_length; dj_trim(&json, &length);
+    if (!(path = dj_path(event->path, reader->key))) return 0;
+    decl.path = path;
+    if (kind == 2) ok = dj_event_anim(&decl, json, length);
+    else if (dj_null(json, length) || (length == 6 && !memcmp(json, "\"NULL\"", 6))) ok = 1;
+    else if (length >= 2 && json[0] == '{' && json[length - 1] == '}')
+        ok = sh_native_json_visit_objects_filtered(json, length, 128, dj_event_decl_member, dj_shallow, &decl);
+    else ok = dj_gap(event->walk, path, event->type, "event decl argument is not a native declaration block");
+    free(path); return ok;
+}
+
+static int dj_event_arguments(void *context, const sh_json_field_span *fields, size_t count, unsigned depth)
+{
+    dj_event *event = context;
+    size_t i;
+    (void)depth;
+    for (i = 0; i < count; i++) if (!strcmp(sh_decl_event_member(fields[i].key), "num")) {
+        size_t at, value = 0;
+        int valid = fields[i].value_length > 0;
+        for (at = 0; valid && at < fields[i].value_length; at++) {
+            unsigned digit = (unsigned char)fields[i].value[at] - (unsigned)'0';
+            if (digit > 9 || value > (SIZE_MAX - 1 - digit) / 10) valid = 0;
+            else value = value * 10 + digit;
+        }
+        if (!valid) return dj_gap(event->walk, event->path, event->type, "unsupported event argument count");
+        event->extent = value;
+    }
+    for (i = 0; i < count; i++) {
+        const char *key = sh_decl_event_member(fields[i].key), *reason = NULL, *json = fields[i].value;
+        size_t length = strlen(key), at, index = 0, value_length = fields[i].value_length;
+        dj_event item = *event;
+        char *path;
+        int ok = 1;
+        if (!strcmp(key, "num")) continue;
+        if (length < 7 || memcmp(key, "item[", 5) || key[length - 1] != ']') reason = "unsupported event argument member";
+        for (at = 5; !reason && at < length - 1; at++) {
+            unsigned digit = (unsigned char)key[at] - (unsigned)'0';
+            if (digit > 9 || index > (SIZE_MAX - digit) / 10) reason = "unsupported event argument member";
+            else index = index * 10 + digit;
+        }
+        if (!reason && index >= event->extent) reason = "event argument index exceeds its stated count";
+        dj_trim(&json, &value_length);
+        if (!reason && !dj_null(json, value_length) &&
+            (value_length < 2 || json[0] != '{' || json[value_length - 1] != '}'))
+            reason = "event argument is not a native argument block";
+        if (!(path = dj_path(event->path, fields[i].key))) return 0;
+        item.path = path;
+        if (reason) dj_gap(event->walk, path, event->type, reason);
+        else if (!dj_null(json, value_length))
+            ok = sh_native_json_visit_objects_filtered(json, value_length, 128, dj_event_argument, dj_shallow, &item);
+        free(path);
+        if (!ok) return 0;
+    }
+    return 1;
+}
+
+static int dj_event_members(void *context, const sh_json_field_span *fields, size_t count, unsigned depth)
+{
+    dj_event *event = context;
+    size_t i, args = 0;
+    (void)depth;
+    for (i = 0; i < count; i++) {
+        const char *name = sh_decl_event_member(fields[i].key), *json = fields[i].value;
+        size_t length = fields[i].value_length;
+        dj_event block = *event;
+        char *path;
+        int ok = 1;
+        if (!strcmp(fields[i].key, "~type") || !strcmp(fields[i].key, "~version") || !strcmp(name, "eventDef")) continue;
+        if (!(path = dj_path(event->path, "args"))) return 0;
+        dj_trim(&json, &length);
+        block.path = path; block.extent = 0;
+        if (strcmp(name, "args")) dj_gap(event->walk, event->path, event->type, "event call member is not read by the native reader");
+        else if (args++) dj_gap(event->walk, path, event->type, "repeated event arguments");
+        else if (length >= 2 && json[0] == '{' && json[length - 1] == '}')
+            ok = sh_native_json_visit_objects_filtered(json, length, 128, dj_event_arguments, dj_shallow, &block);
+        else if (!dj_null(json, length)) dj_gap(event->walk, path, event->type, "event arguments are not a native argument block");
+        free(path);
+        if (!ok) return 0;
+    }
+    return 1;
+}
+
 static int dj_value(dj_walk *walk, const char *json, size_t length,
                     sh_decl_value_type type, const char *path, unsigned depth)
 {
@@ -268,6 +448,12 @@ static int dj_value(dj_walk *walk, const char *json, size_t length,
         if (length < 2 || json[0] != '{' || json[length - 1] != '}')
             return dj_gap(walk, path, type, "script object state is not a JSON object or class name");
         return sh_native_json_visit_objects_filtered(json, length, 128, dj_script_fields, dj_shallow, &object);
+    }
+    if (shape.kind == SH_DECL_VALUE_EVENT_CALL) {
+        dj_event event = {walk, type, path, SIZE_MAX};
+        if (length < 2 || json[0] != '{' || json[length - 1] != '}')
+            return dj_gap(walk, path, type, "event call state is not a JSON object");
+        return sh_native_json_visit_objects_filtered(json, length, 128, dj_event_members, dj_shallow, &event);
     }
     if (shape.kind != SH_DECL_VALUE_OBJECT)
         return dj_gap(walk, path, type, "type requires a verified native reader adapter");

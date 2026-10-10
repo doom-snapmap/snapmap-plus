@@ -178,9 +178,61 @@ static void isolated_cook_witness(void)
     sh_package_shader_cook_end(&outer,1);
     assert(!sh_package_shader_cook_copy(0,"no_admission",source,strlen(source),&capture));
 }
+static const char *refusal(const char *family, const char *name, const char *body, size_t header_length)
+{
+    static char out[96];
+    sh_package_shader_receipt_refusal((uintptr_t)object, family, name, body, strlen(body),
+        object, header_length, out, sizeof(out));
+    /* The diagnostic and the decision must never disagree. */
+    assert(sh_package_shader_receipt_matches((uintptr_t)object, family, name, body, strlen(body),
+        object, header_length) == !strcmp(out, "receipt matches"));
+    return out;
+}
+static void parameter_creator_claim(void)
+{
+    /* idDeclRenderParm::creator (+0x74) is written after the declaration
+     * parse by the engine's first parmBlock parse (creator 2 on temp1..128).
+     * Only those four bytes of a renderparm receipt may drift. */
+    static const size_t compared[] = {0x00, 0x23, 0x48, 0x58, 0x67, 0x68, 0x6c, 0x70, 0x73, 0x78, 0x7c, 0x80, 0x88, 0x8c, 0x8d, 0x8f};
+    sh_package_shader_receipt_frame frame; char text[64];
+    memset(object, 0, sizeof(object)); object[0x68] = 19; object[0x70] = 4;
+    sh_package_shader_receipt_invalidate((uintptr_t)object);
+    object[0x74] = 2; assert(!strcmp(refusal("renderparm", "tex", source, 0x90), "no completed source receipt"));
+    object[0x74] = 0; begin(&frame); bytes(0, strlen(source) - 1);
+    sh_package_shader_receipt_end(&frame, 1, read_memory, NULL);
+    object[0x74] = 2; assert(!strcmp(refusal("renderparm", "tex", source, 0x90), "no completed source receipt"));
+    object[0x74] = 0; begin(&frame); bytes(0, strlen(source));
+    sh_package_shader_receipt_end(&frame, 1, read_memory, NULL);
+    object[0x74] = 2; assert(!strcmp(refusal("renderparm", "tex", source, 0x90), "receipt matches"));
+    memset(object + 0x74, 0xff, 4); assert(matches(source, strlen(source)));
+    for (size_t i = 0; i < sizeof(compared) / sizeof(compared[0]); i++) {
+        object[compared[i]] ^= 0x10; snprintf(text, sizeof(text), "receipt header differs at +0x%zx", compared[i]);
+        assert(!strcmp(refusal("renderparm", "tex", source, 0x90), text)); object[compared[i]] ^= 0x10;
+    }
+    char changed[sizeof(source)]; memcpy(changed, source, sizeof(source)); changed[3] ^= 1;
+    assert(!strcmp(refusal("renderparm", "tex", changed, 0x90), "receipt source text differs"));
+    assert(!strcmp(refusal("renderparm", "other", source, 0x90), "receipt names another object"));
+    assert(!strcmp(refusal("renderparm", "tex", source, 0x78), "receipt header has 144 bytes"));
+    /* A preparation after the claim observes it; reconstruction or another
+     * mutation invalidates the proof regardless of the claim. */
+    begin(&frame); bytes(0, strlen(source)); sh_package_shader_receipt_end(&frame, 1, read_memory, NULL);
+    object[0x74] = 0; assert(matches(source, strlen(source)));
+    sh_package_shader_receipt_invalidate((uintptr_t)object);
+    assert(!strcmp(refusal("renderparm", "tex", source, 0x90), "no completed source receipt"));
+    /* Other families keep +0x74: a program header there is compiled ABI. */
+    memset(object, 0, sizeof(object));
+    sh_package_shader_receipt_program_scope(1);
+    sh_package_shader_receipt_begin(&frame, (uintptr_t)object, "renderProg", "unit");
+    sh_package_shader_receipt_retained(source, strlen(source) - 2);
+    sh_package_shader_receipt_end(&frame, 1, read_memory, NULL);
+    sh_package_shader_receipt_program_scope(0);
+    assert(!strcmp(refusal("renderprog", "unit", source, 0x78), "receipt matches"));
+    object[0x74] = 2; assert(!strcmp(refusal("renderprog", "unit", source, 0x78), "receipt header differs at +0x74"));
+    sh_package_shader_receipt_invalidate((uintptr_t)object);
+}
 int main(void)
 {
     exact_and_retired(); rejected_reads(); nesting_and_retained(); setter_and_stream_agreement();
-    program_witness(); isolated_cook_witness();
+    program_witness(); isolated_cook_witness(); parameter_creator_claim();
     sh_package_shader_receipt_test_reset(); puts("package_shader_receipt_test: PASS"); return 0;
 }

@@ -101,6 +101,24 @@ static size_t occurrences(const char *out, const char *needle)
     return count;
 }
 
+/* Edges in subweb `from`'s block of out that enter subweb `to`. */
+static size_t routes(const char *out, const char *from, const char *to)
+{
+    char head[160], edge[160];
+    snprintf(head, sizeof(head), "subWeb \"%s\" {", from);
+    snprintf(edge, sizeof(edge), "toSubWeb \"%s\"", to);
+    const char *at = out ? strstr(out, head) : NULL, *end;
+    if (!at) return SIZE_MAX;
+    int depth = 0;
+    for (end = strchr(at, '{'); *end; end++) {
+        if (*end == '{') depth++;
+        else if (*end == '}' && --depth == 0) break;
+    }
+    size_t count = 0;
+    for (const char *p = at; (p = strstr(p, edge)) && p < end; p += strlen(edge)) count++;
+    return count;
+}
+
 #define AW_STOCK \
     "{ props { editPos ( 1 2 3 ) modelInfos { \"hands\" \"\" } }\n" \
     "states { state \"up\" { } state \"down\" { } }\n" \
@@ -145,8 +163,15 @@ static void test_hands_web(void)
         holds("hands disjoint", out, "\"sp\" \"\"", 1);
         holds("hands disjoint", out, "\"plasma\" \"\"", 1);
         holds("hands disjoint", out, "editPos ( 1 2 3 )", 1);
-        if (out && occurrences(out, "toSubWeb \"sp_pistol\"") != 2) report("hands disjoint", "sp_pistol glue edges");
-        if (out && occurrences(out, "toSubWeb \"plasma\"") != 2) report("hands disjoint", "plasma glue edges");
+        /* Each package wrote its weapon's switches among its own copy's
+         * subwebs; the two new weapons also switch to each other, while the
+         * restriction both wrote (neither leaves for the stock pistol) stays. */
+        if (out && occurrences(out, "toSubWeb \"sp_pistol\"") != 3) report("hands disjoint", "sp_pistol glue edges");
+        if (out && occurrences(out, "toSubWeb \"plasma\"") != 3) report("hands disjoint", "plasma glue edges");
+        if (routes(out, "sp_pistol", "plasma") != 1 || routes(out, "plasma", "sp_pistol") != 1)
+            report("hands disjoint", "the new weapons need one switch to each other");
+        if (routes(out, "sp_pistol", "pistol") || routes(out, "plasma", "pistol"))
+            report("hands disjoint", "a restriction both authors wrote must stay");
         /* plasma's model is third in the union; its node follows it. */
         const char *plasma = out ? strstr(out, "subWeb \"plasma\"") : NULL;
         if (!plasma || !strstr(plasma, "modelIndex 2") || strstr(out, "subWeb \"sp_pistol\"") > plasma) {
@@ -179,13 +204,15 @@ static void test_hands_web(void)
             snprintf(block, sizeof(block), "subWeb \"%s\"", moves[0].to);
             snprintf(edge, sizeof(edge), "toSubWeb \"%s\"", moves[0].to);
             holds("hands variants", out, block, 1);
-            if (out && occurrences(out, edge) != 2) report("hands variants", "the moved copy needs its entering twins");
+            if (out && occurrences(out, edge) != 3) report("hands variants", "the moved copy needs its entering twins");
+            if (routes(out, "sp_pistol", moves[0].to) != 1 || routes(out, moves[0].to, "sp_pistol") != 1)
+                report("hands variants", "owner copies need one switch to each other");
             const char *mine = out ? strstr(out, block) : NULL, *first = out ? strstr(out, "subWeb \"sp_pistol\"") : NULL;
             if (!mine || !first || !strstr(mine, "sp2_up") || strstr(first, "sp_up") == NULL ||
                 (strstr(first, "sp2_up") && strstr(first, "sp2_up") < mine && first < mine))
                 report("hands variants", "each copy must keep its own animation");
         }
-        if (out && occurrences(out, "toSubWeb \"sp_pistol\"") != 2) report("hands variants", "original glue edges");
+        if (out && occurrences(out, "toSubWeb \"sp_pistol\"") != 3) report("hands variants", "original glue edges");
         sh_decl_animweb_moves_free(moves, move_count); moves = NULL; move_count = 0; free(out);
     }
     /* Two later weapons with one equal version share one copy of it. */
@@ -227,6 +254,207 @@ static void test_hands_web(void)
             report("hands stock change", "stock subwebs must keep their order");
         sh_decl_animweb_moves_free(moves, move_count); moves = NULL; move_count = 0; free(out);
     }
+    /* M47's three owners of one weapon subweb: the kept one and two copies
+     * each switch to the other two, in every discovery order; exact copies
+     * still share one. */
+    {
+        const char *a = AW_WEAPON("( 9 9 9 )", "sp", "sp_pistol", "sp_up"),
+            *b = AW_WEAPON("( 9 9 9 )", "sp2", "sp_pistol", "sp2_up"),
+            *c = AW_WEAPON("( 9 9 9 )", "sp3", "sp_pistol", "sp3_up");
+        const char *orders[][4] = {{a, b, c, b}, {c, a, b, a}, {b, c, a, c}};
+        for (size_t o = 0; o < 3; o++) {
+            char *out = hands("hands owner switches", AW_STOCK, orders[o], 4, &moves, &move_count);
+            const char *names[3] = {"sp_pistol", NULL, NULL};
+            size_t named = 1;
+            for (size_t m = 0; m < move_count && out; m++) {
+                int known = 0;
+                for (size_t k = 1; k < named; k++) known |= !strcmp(names[k], moves[m].to);
+                if (!known && named < 3) names[named++] = moves[m].to;
+            }
+            if (!out || move_count != 3 || named != 3) report("hands owner switches", "two copies, the duplicate sharing one");
+            else for (size_t i = 0; i < 3; i++) {
+                if (routes(out, names[i], names[i]) != 0) report("hands owner switches", "a copy must not enter itself");
+                if (routes(out, names[i], "pistol") != 0) report("hands owner switches", "a written restriction must stay");
+                if (routes(out, "rifle", names[i]) != 1 || routes(out, "pistol", names[i]) != 1)
+                    report("hands owner switches", "every stock weapon enters every copy once");
+                for (size_t j = 0; j < 3; j++)
+                    if (i != j && routes(out, names[i], names[j]) != 1) {
+                        char detail[256];
+                        snprintf(detail, sizeof(detail), "order %zu: no single switch from %s to %s", o, names[i], names[j]);
+                        report("hands owner switches", detail);
+                    }
+            }
+            sh_decl_animweb_moves_free(moves, move_count); moves = NULL; move_count = 0; free(out);
+        }
+    }
+    /* A weapon changing a universal stock weapon: the restored stock subweb
+     * and the owner's copy switch to each other. */
+    {
+        #define AW_THREE(rifle_anim) \
+            "{ props { editPos ( 1 2 3 ) modelInfos { \"hands\" \"\" } }\n" \
+            "subWebs {\n" \
+            "subWeb \"rifle\" { node \"down\" { edges {\n" \
+            "edge { toState \"up\" toSubWeb \"pistol\" } edge { toState \"up\" toSubWeb \"shotgun\" } } }\n" \
+            "node \"up\" { blendTrees { tree { modelIndex 0 anims { alias { name \"" rifle_anim "\" } } } } } }\n" \
+            "subWeb \"pistol\" { node \"down\" { edges {\n" \
+            "edge { toState \"up\" toSubWeb \"rifle\" } edge { toState \"up\" toSubWeb \"shotgun\" } } }\n" \
+            "node \"up\" { blendTrees { tree { modelIndex 0 anims { alias { name \"pistol_up\" } } } } } }\n" \
+            "subWeb \"shotgun\" { node \"down\" { edges {\n" \
+            "edge { toState \"up\" toSubWeb \"rifle\" } edge { toState \"up\" toSubWeb \"pistol\" } } }\n" \
+            "node \"up\" { blendTrees { tree { modelIndex 0 anims { alias { name \"shotgun_up\" } } } } } } } }"
+        const char *texts[] = {AW_THREE("rifle_fast")};
+        char *out = hands("hands stock copy switches", AW_THREE("rifle_up"), texts, 1, &moves, &move_count);
+        if (move_count != 1 || !moves || strcmp(moves[0].from, "rifle")) report("hands stock copy switches", "the changed rifle must move");
+        else {
+            if (routes(out, "rifle", moves[0].to) != 1 || routes(out, moves[0].to, "rifle") != 1)
+                report("hands stock copy switches", "stock and copy need one switch to each other");
+            if (routes(out, "pistol", moves[0].to) != 1 || routes(out, "shotgun", moves[0].to) != 1)
+                report("hands stock copy switches", "every stock weapon enters the copy");
+        }
+        sh_decl_animweb_moves_free(moves, move_count); moves = NULL; move_count = 0; free(out);
+        #undef AW_THREE
+    }
+    /* Three universal stock weapons; a package's weapon "sp" and its entering
+     * edges come in through the extra arguments. */
+    #define AW_TRIO(pistol_anim, into_rifle, into_pistol, into_shotgun, more) \
+        "{ props { editPos ( 1 2 3 ) modelInfos { \"hands\" \"\" } }\n" \
+        "subWebs {\n" \
+        "subWeb \"rifle\" { node \"down\" { edges {\n" \
+        "edge { toState \"up\" toSubWeb \"pistol\" } edge { toState \"up\" toSubWeb \"shotgun\" } " into_rifle " } }\n" \
+        "node \"up\" { blendTrees { tree { modelIndex 0 anims { alias { name \"rifle_up\" } } } } } }\n" \
+        "subWeb \"pistol\" { node \"down\" { edges {\n" \
+        "edge { toState \"up\" toSubWeb \"rifle\" } edge { toState \"up\" toSubWeb \"shotgun\" } " into_pistol " } }\n" \
+        "node \"up\" { blendTrees { tree { modelIndex 0 anims { alias { name \"" pistol_anim "\" } } } } } }\n" \
+        "subWeb \"shotgun\" { node \"down\" { edges {\n" \
+        "edge { toState \"up\" toSubWeb \"rifle\" } edge { toState \"up\" toSubWeb \"pistol\" } " into_shotgun " } }\n" \
+        "node \"up\" { blendTrees { tree { modelIndex 0 anims { alias { name \"shotgun_up\" } } } } } }\n" \
+        more "} }"
+    #define AW_SP(anim, exits) \
+        "subWeb \"sp\" { node \"down\" { edges { " exits " } }\n" \
+        "node \"up\" { blendTrees { tree { modelIndex 0 anims { alias { name \"" anim "\" } } } } } }\n"
+    #define AW_INTO_SP(parms) "edge { toState \"up\" toSubWeb \"sp\" " parms " }"
+    /* A source's omission survives another package's copy of the omitted
+     * weapon: "sp" leaves for rifle and shotgun but never the pistol, and no
+     * contribution writes "sp" with the changed pistol's copy, so universal
+     * rifle and shotgun do not authorize a route from "sp" to it. */
+    {
+        const char *texts[] = {
+            AW_TRIO("pistol_up", AW_INTO_SP(""), AW_INTO_SP(""), AW_INTO_SP(""),
+                AW_SP("sp_up", "edge { toState \"up\" toSubWeb \"rifle\" } edge { toState \"up\" toSubWeb \"shotgun\" }")),
+            AW_TRIO("pistol_fast", "", "", "", "")};
+        char *out = hands("hands omitted destination copy", AW_TRIO("pistol_up", "", "", "", ""), texts, 2, &moves, &move_count);
+        if (move_count != 1 || !moves || moves[0].source != 1 || strcmp(moves[0].from, "pistol"))
+            report("hands omitted destination copy", "the changed pistol must move");
+        else {
+            if (routes(out, "sp", moves[0].to) != 0) report("hands omitted destination copy", "an omitted destination's copy gained a route");
+            if (routes(out, "sp", "pistol") != 0) report("hands omitted destination copy", "the written omission must stay");
+            if (routes(out, "rifle", moves[0].to) != 1) report("hands omitted destination copy", "stock rifle enters the copy");
+        }
+        sh_decl_animweb_moves_free(moves, move_count); moves = NULL; move_count = 0; free(out);
+    }
+    /* Sources that leave exactly as the other owner's "sp" does enter "sp"
+     * with different blends (3, 3, 9): no edge is chosen for its author. */
+    {
+        #define AW_PAYLOAD_OWNER(anim) \
+            AW_TRIO("pistol_up", AW_INTO_SP("blendParms { duration 3 }"), AW_INTO_SP("blendParms { duration 3 }"), \
+                AW_INTO_SP("blendParms { duration 9 }"), AW_SP(anim, "edge { toState \"up\" toSubWeb \"rifle\" } " \
+                "edge { toState \"up\" toSubWeb \"pistol\" } edge { toState \"up\" toSubWeb \"shotgun\" }"))
+        const char *texts[] = {AW_PAYLOAD_OWNER("sp_up"), AW_PAYLOAD_OWNER("sp2_up")};
+        char *out = hands("hands differing payload", AW_TRIO("pistol_up", "", "", "", ""), texts, 2, &moves, &move_count);
+        if (!out || move_count != 1 || !moves || strcmp(moves[0].from, "sp")) report("hands differing payload", "the second owner's copy");
+        else {
+            if (routes(out, "sp", moves[0].to) != 0 || routes(out, moves[0].to, "sp") != 0)
+                report("hands differing payload", "unequal entering edges must not yield a route");
+            if (routes(out, "shotgun", moves[0].to) != 1) report("hands differing payload", "stock shotgun enters the copy");
+        }
+        sh_decl_animweb_moves_free(moves, move_count); moves = NULL; move_count = 0; free(out);
+        #undef AW_PAYLOAD_OWNER
+    }
+    #define AW_EXITS "edge { toState \"up\" toSubWeb \"rifle\" } edge { toState \"up\" toSubWeb \"pistol\" } " \
+        "edge { toState \"up\" toSubWeb \"shotgun\" }"
+    /* A new weapon leaving with `exits` and entering "sp" with `into`. */
+    #define AW_PLASMA(exits, into) "subWeb \"plasma\" { node \"down\" { edges { " exits " " into " } }\n" \
+        "node \"up\" { blendTrees { tree { modelIndex 0 anims { alias { name \"plasma_up\" } } } } } }\n"
+    /* A mirror's omission vetoes:the second owner's shotgun leaves exactly
+     * as either "sp" does but never enters its own "sp", so the first owner's
+     * "sp" gains no route into that copy; the first web's sources all enter
+     * its "sp", so the route back is derived. */
+    {
+        const char *texts[] = {
+            AW_TRIO("pistol_up", AW_INTO_SP(""), AW_INTO_SP(""), AW_INTO_SP(""), AW_SP("sp_up", AW_EXITS)),
+            AW_TRIO("pistol_up", AW_INTO_SP(""), AW_INTO_SP(""), "", AW_SP("sp2_up", AW_EXITS))};
+        char *out = hands("hands mirror omission", AW_TRIO("pistol_up", "", "", "", ""), texts, 2, &moves, &move_count);
+        if (!out || move_count != 1 || !moves || strcmp(moves[0].from, "sp")) report("hands mirror omission", "the second owner's copy");
+        else {
+            if (routes(out, "sp", moves[0].to) != 0) report("hands mirror omission", "a mirror's omission must veto the route");
+            if (routes(out, moves[0].to, "sp") != 1) report("hands mirror omission", "the unanimous route back must stay");
+        }
+        sh_decl_animweb_moves_free(moves, move_count); moves = NULL; move_count = 0; free(out);
+    }
+    /* Repeated edges into one subweb are a family of weighted alternatives:
+     * an agreed family is copied whole and in order, a mirror whose family
+     * differs only in a later alternative derives nothing, and a source that
+     * leaves with another family (one more alternative) is no mirror. */
+    {
+        #define AW_PAIR(second) AW_INTO_SP("weightScale 1") " " AW_INTO_SP(second)
+        #define AW_TWICE(to) "edge { toState \"up\" toSubWeb \"" to "\" } edge { toState \"up\" toSubWeb \"" to "\" weightScale 2 } "
+        static const char *cases[][2] = {
+            {AW_TRIO("pistol_up", AW_PAIR("weightScale 3"), AW_PAIR("weightScale 3"), AW_PAIR("weightScale 3"), AW_SP("sp_up", AW_EXITS)),
+             AW_TRIO("pistol_up", AW_PAIR("weightScale 3"), AW_PAIR("weightScale 3"), AW_PAIR("weightScale 3"), AW_SP("sp2_up", AW_EXITS))},
+            {AW_TRIO("pistol_up", AW_PAIR("weightScale 3"), AW_PAIR("weightScale 3"), AW_PAIR("weightScale 3"), AW_SP("sp_up", AW_EXITS)),
+             AW_TRIO("pistol_up", AW_PAIR("weightScale 3"), AW_PAIR("weightScale 3"), AW_PAIR("weightScale 3"),
+                AW_SP("sp2_up", AW_EXITS) AW_PLASMA(AW_EXITS, AW_PAIR("weightScale 5")))},
+            {AW_TRIO("pistol_up", AW_INTO_SP(""), AW_INTO_SP(""), AW_INTO_SP(""), AW_SP("sp_up", AW_EXITS)),
+             AW_TRIO("pistol_up", AW_INTO_SP(""), AW_INTO_SP(""), AW_INTO_SP(""), AW_SP("sp2_up", AW_EXITS)
+                AW_PLASMA(AW_TWICE("rifle") AW_TWICE("pistol") AW_TWICE("shotgun"), AW_INTO_SP("weightScale 7")))}};
+        static const size_t forward[] = {2, 0, 1}, back[] = {2, 2, 1};
+        static const char *names[] = {"hands edge family", "hands edge family later alternative", "hands exit family"};
+        for (size_t c = 0; c < 3; c++) {
+            char *out = hands(names[c], AW_TRIO("pistol_up", "", "", "", ""), cases[c], 2, &moves, &move_count);
+            if (!out || move_count != 1 || !moves || strcmp(moves[0].from, "sp")) report(names[c], "the second owner's copy");
+            else {
+                if (routes(out, "sp", moves[0].to) != forward[c]) report(names[c], "route into the copy");
+                if (routes(out, moves[0].to, "sp") != back[c]) report(names[c], "route back from the copy");
+                const char *sp = strstr(out, "subWeb \"sp\" {"), *one = sp ? strstr(sp, "weightScale 1") : NULL,
+                    *three = sp ? strstr(sp, "weightScale 3") : NULL;
+                if (c == 0 && (!one || !three || one > three)) report(names[c], "the copied family must keep its order");
+            }
+            sh_decl_animweb_moves_free(moves, move_count); moves = NULL; move_count = 0; free(out);
+        }
+        #undef AW_TWICE
+        #undef AW_PAIR
+    }
+    /* Every writer of a name speaks for it, in any discovery order: two
+     * packages write one "sp", and in one of them a "plasma" leaving exactly
+     * as the third owner's copy does enters "sp" with another blend, so the
+     * copy gains no route to "sp"; with an equal blend it gains one. */
+    {
+        #define AW_OWNER(anim, more) AW_TRIO("pistol_up", AW_INTO_SP("blendParms { duration 3 }"), \
+            AW_INTO_SP("blendParms { duration 3 }"), AW_INTO_SP("blendParms { duration 3 }"), AW_SP(anim, AW_EXITS) more)
+        static const char *x = AW_OWNER("sp_up", ""), *y = AW_OWNER("sp2_up", ""),
+            *plasma[] = {AW_OWNER("sp_up", AW_PLASMA(AW_EXITS, AW_INTO_SP("blendParms { duration 9 }"))),
+                AW_OWNER("sp_up", AW_PLASMA(AW_EXITS, AW_INTO_SP("blendParms { duration 3 }")))};
+        for (size_t equal = 0; equal < 2; equal++)
+            for (size_t o = 0; o < 2; o++) {
+                const char *texts[] = {o ? plasma[equal] : x, o ? x : plasma[equal], y};
+                char detail[160];
+                char *out = hands("hands writer authority", AW_TRIO("pistol_up", "", "", "", ""), texts, 3, &moves, &move_count);
+                if (!out || move_count != 1 || !moves || moves[0].source != 2) report("hands writer authority", "the third owner's copy");
+                else {
+                    snprintf(detail, sizeof(detail), "%s blend, order %zu: route back to the shared name", equal ? "equal" : "differing", o);
+                    if (routes(out, moves[0].to, "sp") != equal) report("hands writer authority", detail);
+                    snprintf(detail, sizeof(detail), "%s blend, order %zu: both writers' route into the copy", equal ? "equal" : "differing", o);
+                    if (routes(out, "sp", moves[0].to) != 1) report("hands writer authority", detail);
+                }
+                sh_decl_animweb_moves_free(moves, move_count); moves = NULL; move_count = 0; free(out);
+            }
+        #undef AW_OWNER
+    }
+    #undef AW_PLASMA
+    #undef AW_EXITS
+    #undef AW_INTO_SP
+    #undef AW_SP
+    #undef AW_TRIO
 }
 
 int main(void)

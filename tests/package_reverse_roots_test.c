@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "package_library.h"
+#include "decl_block_compose.h"
 #include "package_native_assets.h"
 #include "package_audio_program.h"
 #include "audio_banks.h"
@@ -573,6 +574,61 @@ static void test_failure_attribution(fixture *f, const sh_package_compile_enviro
     sh_package_library_free(&out); sh_package_sources_free(sources);
 }
 
+/* The runtime's registered-reader route for block-grammar families
+ * (package_runtime.c pr_compose_custom): the player hands web composes by
+ * native records and refuses two different changes to one record. */
+static int block_compose(void *context, const char *type, sh_decl_source baseline,
+    const sh_decl_source *sources, size_t count, char **body, size_t *length,
+    char *error, size_t capacity, sh_decl_conflict *conflict, const sh_package_source_view *view)
+{
+    (void)context; (void)view;
+    *body = NULL; *length = 0;
+    if (!sh_decl_block_family(type)) return 0;
+    *body = sh_decl_block_compose(type, baseline, sources, count, length, error, capacity, conflict);
+    return *body ? 1 : -1;
+}
+static char *read_text(const char *relative, size_t *length)
+{
+    char path[4096]; snprintf(path, sizeof(path), "%s/%s", root, relative);
+    FILE *file = fopen(path, "rb"); assert(file);
+    assert(!fseek(file, 0, SEEK_END)); long size = ftell(file); assert(size >= 0); rewind(file);
+    char *text = malloc((size_t)size + 1); assert(text);
+    assert(fread(text, 1, (size_t)size, file) == (size_t)size); assert(!fclose(file));
+    text[size] = 0; *length = (size_t)size; return text;
+}
+/* An alignment moving one package's subweb to two names, as a failing
+ * sh_decl_animweb_prepare caller would see it: every copy is rewritten. */
+static int prepare_twice(sh_decl_source baseline, sh_decl_source *sources, size_t count, char **owned,
+    struct sh_decl_animweb_move **moves, size_t *move_count, char *error, size_t capacity)
+{
+    (void)baseline; (void)error; (void)capacity;
+    for (size_t k = 0; k < count; k++) {
+        assert((owned[k] = _strdup("{ rewritten }")));
+        sources[k] = (sh_decl_source){owned[k], strlen(owned[k])};
+    }
+    sh_decl_animweb_move *twice = calloc(2, sizeof(*twice)); assert(twice);
+    twice[0] = (sh_decl_animweb_move){0, _strdup("sp_pistol"), _strdup("sp_pistol_a")};
+    twice[1] = (sh_decl_animweb_move){0, _strdup("sp_pistol"), _strdup("sp_pistol_b")};
+    assert(twice[0].from && twice[0].to && twice[1].from && twice[1].to);
+    *moves = twice; *move_count = 2; return 1;
+}
+/* The quoted value of a weapon field. */
+static void field_value(const char *text, const char *field, char *out, size_t capacity)
+{
+    char key[128]; snprintf(key, sizeof(key), "%s = \"", field);
+    const char *at = strstr(text, key); assert(at); at += strlen(key);
+    size_t n = strcspn(at, "\""); assert(n < capacity); memcpy(out, at, n); out[n] = 0;
+}
+/* 1 when the web has subweb `name` and its block holds needle. */
+static int subweb_holds(const char *web, const char *name, const char *needle)
+{
+    char block[160]; snprintf(block, sizeof(block), "subWeb \"%s\" {", name);
+    const char *mine = strstr(web, block);
+    if (!mine) return 0;
+    const char *end = strstr(mine + 1, "subWeb \""), *found = strstr(mine, needle);
+    return found && (!end || found < end);
+}
+
 /* The player the engine spawns for co-op (the rules entity's playerSpawnDef,
  * default player/mp) names in handsAnimWeb the one web the hands animator
  * resolves every weapon's subweb in. A package changing that web (adding its
@@ -595,7 +651,8 @@ static void test_player_hands(fixture *f, const sh_package_compile_environment *
      * pistol stays for everyone and the weapon owns its changed copy. */
     package("weapon", "Weapon", "generated/decls/animweb/hands.decl",
         "{ props { modelInfos { \"hands.md6\" \"\" } } states { } subWebs { subWeb \"pistol\" { "
-        "node \"own\" { props { } blendTrees { } edges { } } } subWeb \"sp_pistol\" { } } }");
+        "node \"own\" { props { } blendTrees { } edges { } } } subWeb \"sp_pistol\" { node \"idle\" { props { } "
+        "blendTrees { tree { modelIndex 0 blendEq \"none\" anims { alias { name \"first_idle\" } } } } edges { } } } } }");
     sh_package_sources *sources = sh_package_sources_scan(root, error, sizeof(error)); assert(sources);
     for (int hands = 1; hands <= 3; hands++) {
         f->hands = hands;
@@ -640,7 +697,8 @@ static void test_player_hands(fixture *f, const sh_package_compile_environment *
         "{ edit = { subweb_normal = \"sp_pistol\"; handsHitReactionSubweb = \"pistol\"; } }");
     package("weapon3", "Weapon Three", "generated/decls/animweb/hands.decl",
         "{ props { modelInfos { \"hands.md6\" \"\" } } states { } subWebs { subWeb \"pistol\" { } "
-        "subWeb \"sp_pistol\" { node \"third\" { props { } blendTrees { } edges { } } } } }");
+        "subWeb \"sp_pistol\" { node \"idle\" { props { } blendTrees { tree { modelIndex 0 blendEq \"none\" anims { alias { name \"third_idle\" } } } } edges { } } "
+        "node \"third\" { props { } blendTrees { } edges { } } } } }");
     create("overrides/weapon3/assets/generated/decls/weapon/third.decl",
         "{ edit = { subweb_normal = \"sp_pistol\"; handsHitReactionSubweb = \"sp_pistol\"; } }");
     /* Reversing discovery order (renamed folders, same trees) keeps the same
@@ -706,6 +764,224 @@ static void test_player_hands(fixture *f, const sh_package_compile_environment *
         assert(MoveFileA(from, to));
         snprintf(from, sizeof(from), "%s\\overrides\\aa-weapon3", root); snprintf(to, sizeof(to), "%s\\overrides\\weapon3", root);
         assert(MoveFileA(from, to));
+    }
+    /* A map's historical context composing the contesting packages in one
+     * scope keeps every one of them too. The scope composes their copies by
+     * the runtime's custom block route, so each package's copy aligns against
+     * the stock web there, and each package's weapons then name the subweb
+     * copies carrying that package's own records, in any discovery or context
+     * order. Each weapon's package comes from its provenance, never from the
+     * generated subweb names, and no source byte changes. A fourth package
+     * carrying an exact copy of the third's web shares its subweb. */
+    {
+        {
+            size_t length = 0;
+            char *copy = read_text("overrides/weapon3/assets/generated/decls/animweb/hands.decl", &length);
+            package("weapon4", "Weapon Four", "generated/decls/animweb/hands.decl", copy); free(copy);
+            create("overrides/weapon4/assets/generated/decls/weapon/fourth.decl",
+                "{ edit = { subweb_normal = \"sp_pistol\"; handsHitReactionSubweb = \"sp_pistol\"; } }");
+        }
+        static const char *const inputs[] = {
+            "overrides/weapon/assets/generated/decls/animweb/hands.decl",
+            "overrides/weapon2/assets/generated/decls/animweb/hands.decl",
+            "overrides/weapon3/assets/generated/decls/animweb/hands.decl",
+            "overrides/weapon/assets/generated/decls/weapon/first.decl",
+            "overrides/weapon3/assets/generated/decls/weapon/third.decl",
+            "overrides/weapon4/assets/generated/decls/animweb/hands.decl",
+            "overrides/weapon4/assets/generated/decls/weapon/fourth.decl"};
+        enum { INPUTS = sizeof(inputs) / sizeof(inputs[0]) };
+        char *before[INPUTS]; size_t before_length[INPUTS];
+        for (size_t i = 0; i < INPUTS; i++) before[i] = read_text(inputs[i], before_length + i);
+        /* Each contesting copy alone is valid for the production composer;
+         * together they are the native same-record collision. */
+        {
+            unsigned char *stock = NULL; size_t stock_length = 0;
+            assert(original(f, "generated/decls/animweb/hands.decl", &stock, &stock_length) > 0 && stock);
+            sh_decl_source stock_web = {(const char *)stock, stock_length};
+            sh_decl_source both[2] = {{before[0], before_length[0]}, {before[2], before_length[2]}};
+            sh_decl_conflict conflict = {SIZE_MAX, SIZE_MAX, 0, 0};
+            size_t length = 0;
+            for (size_t i = 0; i < 2; i++) {
+                char *alone = sh_decl_block_compose("animweb", stock_web, both + i, 1, &length, error, sizeof(error), &conflict);
+                if (!alone) fprintf(stderr, "player hands copy %zu alone: %s\n", i, error);
+                assert(alone); free(alone);
+            }
+            char *together = sh_decl_block_compose("animweb", stock_web, both, 2, &length, error, sizeof(error), &conflict);
+            fprintf(stderr, "player hands copies together: %s\n", together ? "composed" : error);
+            assert(!together && conflict.first == 0 && conflict.second == 1);
+            free(stock);
+        }
+        /* Opening a map without recorded contexts first composes all of its
+         * carried packages as one scope (package_runtime.c historical carrier).
+         * A plain whole compile meets the native collision; the composed
+         * library entry aligns each package's copy, and each package's weapons
+         * name the copy holding that package's own nodes. */
+        {
+            sources = sh_package_sources_scan(root, error, sizeof(error)); assert(sources);
+            /* The map carries just the four weapon packages. */
+            size_t carried[4] = {owner(sources, "Weapon"), owner(sources, "Weapon Two"),
+                owner(sources, "Weapon Three"), owner(sources, "Weapon Four")};
+            for (size_t i = sources->package_count; i; i--)
+                if (i - 1 != carried[0] && i - 1 != carried[1] && i - 1 != carried[2] && i - 1 != carried[3])
+                    assert(sh_package_sources_remove(sources, i - 1));
+            assert(sources->package_count == 4);
+            sh_package_compile_environment whole = env;
+            whole.compose_custom = block_compose; whole.baseline = original; whole.baseline_context = f;
+            sh_package_compilation *plain = sh_package_compile_with(sources, &whole, error, sizeof(error));
+            fprintf(stderr, "player hands whole map, plain compile: %s\n", plain ? "composed" : error);
+            assert(!plain && strstr(error, "incompatible edits"));
+            sh_package_compilation *aligned = sh_package_library_compile_composed(sources, &whole, error, sizeof(error));
+            if (!aligned) fprintf(stderr, "player hands whole map, composed entry: %s\n", error);
+            assert(aligned);
+            const sh_compiled_resource *whole_web = NULL;
+            for (size_t i = 0; i < aligned->resource_count; i++)
+                if (aligned->resources[i].engine_path && !strcmp(aligned->resources[i].engine_path, "generated/decls/animweb/hands.decl"))
+                    whole_web = aligned->resources + i;
+            assert(whole_web);
+            size_t web_length = 0;
+            unsigned char *raw = sh_package_compilation_read(aligned, whole_web, SIZE_MAX, &web_length, error, sizeof(error));
+            assert(raw); char *served = realloc(raw, web_length + 1); assert(served); served[web_length] = 0;
+            size_t first_owner = owner(sources, "Weapon"), third_owner = owner(sources, "Weapon Three"),
+                fourth_owner = owner(sources, "Weapon Four"), weapons = 0;
+            char third_normal[128] = "";
+            for (size_t i = 0; i < aligned->resource_count; i++) {
+                const sh_compiled_resource *r = aligned->resources + i;
+                if (!r->type || strcmp(r->type, "weapon")) continue;
+                size_t source = r->source != SIZE_MAX ? r->source : r->source_count ? r->sources[0] : SIZE_MAX;
+                assert(source < aligned->sources->file_count);
+                size_t who = aligned->sources->files[source].owner;
+                char text[512], normal[128]; size_t length = 0;
+                unsigned char *body = sh_package_compilation_read(aligned, r, SIZE_MAX, &length, error, sizeof(error));
+                assert(body && length < sizeof(text)); memcpy(text, body, length); text[length] = 0; free(body);
+                field_value(text, "subweb_normal", normal, sizeof(normal));
+                assert(subweb_holds(served, normal, "subWeb"));
+                if (who == first_owner)
+                    assert(subweb_holds(served, normal, "\"first_idle\"") && !subweb_holds(served, normal, "\"third_idle\""));
+                else {
+                    assert(who == third_owner || who == fourth_owner);
+                    assert(subweb_holds(served, normal, "\"third_idle\"") && !subweb_holds(served, normal, "\"first_idle\""));
+                    /* The exact copies of two packages share one subweb. */
+                    if (third_normal[0]) assert(!strcmp(third_normal, normal));
+                    else snprintf(third_normal, sizeof(third_normal), "%s", normal);
+                }
+                weapons++;
+            }
+            fprintf(stderr, "player hands whole map, composed entry: %zu weapons on their own copies\n", weapons);
+            assert(weapons == 3 && third_normal[0]);
+            free(served); sh_package_compilation_free(aligned); sh_package_sources_free(sources);
+        }
+        int kept_by_third = -1;
+        char *first_web = NULL; size_t first_web_length = 0;
+        for (int round = 0; round < 3; round++) {
+            /* Round 1 reverses discovery (renamed folders, same trees); round 2
+             * also reverses the context's tree order. */
+            if (round == 1) {
+                char from[MAX_PATH], to[MAX_PATH];
+                snprintf(from, sizeof(from), "%s\\overrides\\weapon", root); snprintf(to, sizeof(to), "%s\\overrides\\zz-weapon", root);
+                assert(MoveFileA(from, to));
+                snprintf(from, sizeof(from), "%s\\overrides\\weapon3", root); snprintf(to, sizeof(to), "%s\\overrides\\aa-weapon3", root);
+                assert(MoveFileA(from, to));
+            }
+            sources = sh_package_sources_scan(root, error, sizeof(error)); assert(sources);
+            const char *names[4] = {"Weapon", "Weapon Two", "Weapon Three", "Weapon Four"};
+            size_t owners[4];
+            unsigned char trees[4][32];
+            for (size_t i = 0; i < 4; i++) {
+                owners[i] = owner(sources, names[i]);
+                memcpy(trees[round == 2 ? 3 - i : i], sh_package_source_tree(sources, owners[i]), 32);
+            }
+            sh_package_provenance historical = {0}; historical.semantics = SH_PACKAGE_PROVENANCE_HISTORICAL;
+            assert(sh_package_provenance_context_add(&historical, SH_PACKAGE_CONTEXT_COMPOSED,
+                (const unsigned char (*)[32])trees, 4, NULL) != SIZE_MAX);
+            sh_package_compile_environment composed_env = env;
+            composed_env.compose_custom = block_compose;
+            ok = sh_package_library_compile_contexts(sources, &historical, &composed_env, catalog, original, f, registry,
+                (uintptr_t)f->reflection, native, &library, error, sizeof(error));
+            if (!ok) fprintf(stderr, "player hands composed context %d: %s\n", round, error);
+            assert(ok);
+            web = resource(&library, "animweb", "hands");
+            assert(web);
+            size_t length_of_web = 0;
+            unsigned char *raw = sh_package_compilation_read(library.compiled, web, SIZE_MAX, &length_of_web, error, sizeof(error));
+            assert(raw); char *served = realloc(raw, length_of_web + 1); assert(served); served[length_of_web] = 0;
+            /* The stock pistol stays for everyone and the disjoint addition joins. */
+            assert(strstr(served, "subWeb \"plasma\" {"));
+            assert(strstr(served, "subWeb \"pistol\" {") && !subweb_holds(served, "pistol", "node \"own\""));
+            size_t weapons = 0, seen[4] = {0};
+            char shared[2][128] = {"", ""};
+            for (size_t i = 0; i < library.compiled->resource_count; i++) {
+                const sh_compiled_resource *r = library.compiled->resources + i;
+                if (!r->native_type || strcmp(r->native_type, "weapon")) continue;
+                const sh_package_sources *supplied = library.compiled->sources;
+                size_t source = r->source != SIZE_MAX ? r->source : r->source_count ? r->sources[0] : SIZE_MAX;
+                assert(supplied && source < supplied->file_count);
+                size_t who = 4;
+                for (size_t k = 0; k < 4; k++) if (supplied->files[source].owner == owners[k]) who = k;
+                if (who == 4) fprintf(stderr, "weapon %s supplied by package %zu\n", r->engine_path, supplied->files[source].owner);
+                assert(who == 0 || who == 2 || who == 3); seen[who]++;
+                char text[512], normal[128], hit[128]; size_t length = 0;
+                unsigned char *body = sh_package_compilation_read(library.compiled, r, SIZE_MAX, &length, error, sizeof(error));
+                assert(body && length < sizeof(text)); memcpy(text, body, length); text[length] = 0; free(body);
+                field_value(text, "subweb_normal", normal, sizeof(normal));
+                field_value(text, "handsHitReactionSubweb", hit, sizeof(hit));
+                /* Each weapon names subwebs the served web has, holding its own
+                 * package's nodes and none of the other's. */
+                assert(subweb_holds(served, normal, "subWeb") && subweb_holds(served, hit, "subWeb"));
+                if (who >= 2) {
+                    assert(subweb_holds(served, normal, "node \"third\"") && subweb_holds(served, normal, "\"third_idle\"") &&
+                        !subweb_holds(served, normal, "\"first_idle\"") && !strcmp(hit, normal));
+                    snprintf(shared[who - 2], sizeof(shared[0]), "%s", normal);
+                } else {
+                    assert(subweb_holds(served, normal, "\"first_idle\"") && !subweb_holds(served, normal, "\"third_idle\"") &&
+                        !subweb_holds(served, normal, "node \"third\"") && strcmp(normal, hit));
+                    assert(subweb_holds(served, hit, "node \"own\""));
+                }
+                if (!strcmp(normal, "sp_pistol")) {
+                    if (kept_by_third < 0) kept_by_third = who >= 2;
+                    else assert(kept_by_third == (who >= 2));
+                }
+                weapons++;
+            }
+            assert(weapons == 3 && seen[0] == 1 && seen[2] == 1 && seen[3] == 1 && kept_by_third >= 0);
+            assert(!strcmp(shared[0], shared[1]));
+            /* The same packages compose the same web in every order. */
+            if (!first_web) { first_web = served; first_web_length = length_of_web; served = NULL; }
+            else assert(length_of_web == first_web_length && !memcmp(served, first_web, first_web_length));
+            free(served); sh_package_library_free(&library); sh_package_provenance_free(&historical);
+            sh_package_sources_free(sources);
+        }
+        free(first_web);
+        {
+            char from[MAX_PATH], to[MAX_PATH];
+            snprintf(from, sizeof(from), "%s\\overrides\\zz-weapon", root); snprintf(to, sizeof(to), "%s\\overrides\\weapon", root);
+            assert(MoveFileA(from, to));
+            snprintf(from, sizeof(from), "%s\\overrides\\aa-weapon3", root); snprintf(to, sizeof(to), "%s\\overrides\\weapon3", root);
+            assert(MoveFileA(from, to));
+        }
+        /* A failed alignment refuses the web with its packages named and
+         * blames no package's own bytes; nothing it rewrote reaches the
+         * conflict path (the copies are published only after every move is
+         * recorded). */
+        {
+            static const char *const webs[] = {"hands"};
+            sh_package_hands_adapter twice = {webs, 1, prepare_twice, sh_decl_animweb_moves_free,
+                sh_decl_weapon_subweb_rename};
+            sh_package_compile_environment direct = env;
+            size_t invalid = 0;
+            direct.compose_custom = block_compose; direct.player_hands = &twice; direct.independent_sources = 0;
+            direct.invalid_package = &invalid;
+            sources = sh_package_sources_scan(root, error, sizeof(error)); assert(sources);
+            sh_package_compilation *compiled = sh_package_compile_with(sources, &direct, error, sizeof(error));
+            fprintf(stderr, "player hands failed alignment: %s\n", compiled ? "compiled" : error);
+            assert(!compiled && invalid == SIZE_MAX && strstr(error, "hands.decl") &&
+                strstr(error, "two copies of subweb sp_pistol"));
+            sh_package_sources_free(sources);
+        }
+        for (size_t i = 0; i < INPUTS; i++) {
+            size_t length = 0; char *after = read_text(inputs[i], &length);
+            assert(length == before_length[i] && !memcmp(after, before[i], length));
+            free(after); free(before[i]);
+        }
     }
     f->hands = 0;
     assert(MoveFileA(held, home));

@@ -61,7 +61,7 @@ static int pi_discard(pi_request *request)
                 snprintf(message, sizeof(message), "%s Its native data is retained: %s.",
                     request->error[0] ? request->error : "The prefab could not be placed.",
                     detail[0] ? detail : "cleanup is pending");
-                sh_mpkg_report_error(message); request->reported = 1;
+                sh_mpkg_report_error(SH_MPKG_PROBLEM_PREFAB, message); request->reported = 1;
             }
             return 0;
         }
@@ -76,7 +76,7 @@ static int pi_discard(pi_request *request)
      * import never owns the install service's unrelated global transaction. */
     if (request->installed && !sh_mpkg_activation_cancel()) return 0;
     request->installed = 0;
-    if (request->error[0] && !request->reported) sh_mpkg_report_error(request->error);
+    if (request->error[0] && !request->reported) sh_mpkg_report_error(SH_MPKG_PROBLEM_PREFAB, request->error);
     sh_package_occurrence_release(request->ownership);
     sh_package_map_plan_free(request->plan);
     sh_mpkg_context_retire(&request->sources);
@@ -91,7 +91,7 @@ int sh_prefab_import_request(void *editor, const char *json, size_t length, int 
     pi_request *request;
     if (g_import && g_import->reported) {
         /* A retained native placement still holds its stage and sources. */
-        sh_mpkg_report_error("An earlier prefab placement still holds its native data; prefabs cannot be imported until it is released.");
+        sh_mpkg_report_error(SH_MPKG_PROBLEM_PREFAB, "An earlier prefab placement still holds its native data; prefabs cannot be imported until it is released.");
         return 0;
     }
     if (!editor || !json || !length || length > INT_MAX || memchr(json, 0, length) ||
@@ -159,6 +159,10 @@ static int pi_prepare(pi_request *request)
         carrier.native_json, carrier.native_length, &request->native_length,
         &request->ownership, NULL, NULL, request->error, sizeof(request->error));
     if (!request->native || !request->ownership) goto done;
+    if (carrier.bindings_present && !sh_package_occurrence_carry_rows(request->ownership, &carrier.bindings)) {
+        strcpy_s(request->error, sizeof(request->error), "the prefab's recorded exact editor rows could not be restored");
+        goto done;
+    }
     if (request->plan) {
         uintptr_t reflection = (uintptr_t)sh_typeinfo_get_reflect();
         if (!reflection || !sh_decl_server_registry_source(&registry) ||

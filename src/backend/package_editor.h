@@ -37,4 +37,49 @@ void sh_package_editor_clear_world(void);
  * when that load rolls back. Returned handle is owned; restore borrows. */
 sh_package_occurrence_snapshot *sh_package_editor_world(void);
 void sh_package_editor_restore_world(sh_package_occurrence_snapshot *world);
+/* Exact editor rows (R-155, R-155b). Rows sharing an entityDef are equal to
+ * the engine's by-name lookup, whose tie order follows an unstable re-sort, so
+ * array order is never authored identity. A body's row (its first qword) is
+ * recorded per object only when the product published it, and steers the
+ * lookup by declaration identity during construction; an unrecorded tie takes
+ * its single native-original row, or without one its single row in a native
+ * SnapMap slot, built but never captured as authored; an added row never wins
+ * by order. The choice never selects suppliers; snapshot
+ * exports each flat's named record as its owner's optional exact row, and
+ * attach restores recorded rows as flat records before any construction.
+ * Engine access is injected: palette view, row key (NULL when unreadable, as a
+ * null holder is during Play) and row class (1 published, writing its stable
+ * name; 2 published in a native SnapMap slot, likewise; 0 native-original;
+ * -1 unknown). resolve maps a published name to the
+ * live row after the palette generation is retired. */
+typedef struct sh_package_editor_rows_api {
+    int (*view)(void *context, void *palette, const unsigned char **entries, size_t *count, size_t *stride);
+    const char *(*key)(void *context, const void *entry);
+    int (*classify)(void *context, const void *decl, char *name, size_t capacity);
+    const void *(*resolve)(void *context, const char *name);
+    /* 1 when decl's publication lineage is a map-authoritative supplying
+     * context of owner (the object's occurrence snapshot). */
+    int (*supplied)(void *context, const void *owner, const void *decl);
+    void *context;
+    /* 1 when decl's publication carries name as an identity of its own (the
+     * portable one, or an earlier map's); NULL compares classify's name. */
+    int (*named)(void *context, const void *decl, const char *name);
+    /* Writes decl's exact publication identity (its registered bytes, so a
+     * dependency variant differs); 1 written. A captured choice keeps it in
+     * this process only: never saved, it is the authority by which a retired
+     * choice re-resolves (with the owner's supplier when owned), so a variant
+     * sharing the portable identity is never substituted. NULL: none kept. */
+    int (*exact)(void *context, const void *decl, char *name, size_t capacity);
+} sh_package_editor_rows_api;
+/* Outcomes up to NATIVE_DEFAULT are authoritative; NATIVE_DEFAULT applies only
+ * to unowned objects without a record. The rest retain the choice unresolved. */
+enum { SH_ROW_ENGINE, SH_ROW_RECORDED, SH_ROW_DERIVED, SH_ROW_NATIVE_DEFAULT, SH_ROW_UNAVAILABLE,
+    SH_ROW_OWNED_NONE, SH_ROW_OWNED_AMBIGUOUS, SH_ROW_AMBIGUOUS, SH_ROW_UNREADABLE };
+void sh_package_editor_bind_rows(const sh_package_editor_rows_api *api);
+/* Native palette or decl generation retired (callers quiesce first): stored
+ * row pointers are never compared again; names re-resolve on next use. */
+void sh_package_editor_rows_retire(void);
+/* The by-name lookup's result steered for the construction in progress on
+ * this thread; outcome may be NULL. Pure over the bound view; no cap on ties. */
+const void *sh_package_editor_row_steer(void *palette, const char *name, const void *engine, int *outcome);
 #endif

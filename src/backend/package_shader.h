@@ -11,7 +11,11 @@ typedef enum sh_package_shader_renderer {
 typedef enum sh_package_shader_status {
     SH_PACKAGE_SHADER_ERROR = -1,
     SH_PACKAGE_SHADER_UNSUPPORTED = 0,
-    SH_PACKAGE_SHADER_OK = 1
+    SH_PACKAGE_SHADER_OK = 1,
+    /* Framed with declared kinds for parameters whose native preparation is
+     * pending (schema answer 2): collects the program's other needs only. It is
+     * never a verified program and must not be bound, certified or published. */
+    SH_PACKAGE_SHADER_PENDING = 2
 } sh_package_shader_status;
 typedef enum sh_package_shader_reference_kind {
     SH_PACKAGE_SHADER_RESOURCE,
@@ -43,6 +47,9 @@ typedef struct sh_package_shader_schema {
     void *context;
     /* Used only where the native kind determines a value record's width/type.
      * 1 resolves a source-bound native kind (0..18), 0 lacks coverage, -1 aborts.
+     * 2 means native preparation is pending and *kind is the kind declared by the
+     * physically supplied installed declaration: parsing evidence that frames the
+     * rest of the record so further needs are collected, never native proof.
      * Do not infer a kind from a spelling or another package's loaded object. */
     int (*parameter_kind)(void *context, const char *name, int *kind);
 } sh_package_shader_schema;

@@ -239,6 +239,59 @@ static void registration_ranks(void)
     CHECK(ab_first>=0 && (ab.position<a_b.position)==(ab_first==1));
     sh_audio_originals_close(originals);
 }
+/* Put a deleted fixture file back so the fixture's own cleanup finds it. */
+static void recreate(const char *path)
+{
+    HANDLE file=CreateFileA(path,GENERIC_WRITE,0,NULL,CREATE_NEW,0,NULL);
+    CHECK(file!=INVALID_HANDLE_VALUE);if(file!=INVALID_HANDLE_VALUE)CloseHandle(file);
+}
+extern int sh_audio_originals_test_refuse_locations;
+size_t sh_audio_originals_test_located(const sh_audio_originals *originals);
+/* Only located answers are kept, by exact path. Refused memory only loses the
+ * saving, absence and ambiguity are asked again, and close releases files. */
+static void located_answers(void)
+{
+    char path[4096],name[64],body[64],error[256];size_t before,partial=0;
+    packed("located/sound/soundbanks/pc/a.pck",1,99,0,"PACKED");
+    packed("located/sound/soundbanks/pc/b.pck",1,99,0,"PACKED");
+    create("located/sound/soundbanks/pc/loose.wem","LOOSE");
+    sh_audio_originals *originals=open_originals("located",L"english");
+    for(int refuse=1;refuse>=0;refuse--) for(int repeat=0;repeat<2;repeat++) {
+        sh_audio_originals_test_refuse_locations=refuse;
+        expect_read(originals,"99.wem",1,"PACKED");expect_read(originals,"loose.wem",1,"LOOSE");
+        expect_read(originals,"late.wem",0,NULL);expect_read(originals,"english/late.wem",0,NULL);
+        CHECK(sh_audio_originals_test_located(originals)==(refuse ? 0u : 2u));
+    }
+    create("located/sound/soundbanks/pc/late.wem","LATE");
+    expect_read(originals,"late.wem",1,"LATE");CHECK(sh_audio_originals_test_located(originals)==3);
+    before=sh_audio_originals_test_located(originals);
+    for(unsigned i=0;i<200;i++) {
+        snprintf(name,sizeof(name),"located/sound/soundbanks/pc/grow/%u.wem",i);
+        snprintf(body,sizeof(body),"G%u",i);create(name,body);
+    }
+    for(int pass=0;pass<2;pass++) {
+        for(unsigned i=0;i<200;i++) {
+            sh_audio_originals_test_refuse_locations=!pass && (i&1);
+            snprintf(name,sizeof(name),"grow/%u.wem",i);snprintf(body,sizeof(body),"G%u",i);
+            expect_read(originals,name,1,body);
+        }
+        if(!pass)partial=sh_audio_originals_test_located(originals);
+    }
+    sh_audio_originals_test_refuse_locations=0;
+    CHECK(partial<before+200 && sh_audio_originals_test_located(originals)==before+200);
+    expect_read(originals,"99.wem",1,"PACKED");expect_read(originals,"loose.wem",1,"LOOSE");
+    snprintf(path,sizeof(path),"%s/located/sound/soundbanks/pc/loose.wem",root);CHECK(!DeleteFileA(path));
+    sh_audio_originals_close(originals);
+    CHECK(DeleteFileA(path));
+    originals=open_originals("located",L"english");
+    expect_read(originals,"loose.wem",0,NULL);expect_read(originals,"99.wem",1,"PACKED");
+    sh_audio_originals_close(originals);recreate(path);
+    originals=open_originals("conflict",L"english");
+    for(int repeat=0;repeat<2;repeat++)
+        CHECK(sh_audio_originals_read(originals,"sound/soundbanks/pc/foo.bnk",0,NULL,0,NULL,error,sizeof(error))==-1 && strstr(error,"ambiguous"));
+    CHECK(sh_audio_originals_test_located(originals)==0);
+    sh_audio_originals_close(originals);
+}
 int main(int argc,char **argv)
 {
     if(argc==3) {
@@ -379,7 +432,7 @@ int main(int argc,char **argv)
     CHECK(sh_audio_originals_identity(originals,"sound/soundbanks/pc/foo.bnk",&answer,error,sizeof(error))==-1 && strstr(error,"metadata"));
     sh_audio_originals_close(originals);
     originals=open_originals("absent",L"english");expect(originals,"foo.bnk",0,NULL);sh_audio_originals_close(originals);
-    bank_catalog();runtime_originals();registration_ranks();
+    bank_catalog();runtime_originals();registration_ranks();located_answers();
     originals=open_originals("base",L"english");expect(originals,"foo.bnk",1,"PACK");sh_audio_originals_close(originals);
     cleanup();if(failures)return 1;puts("installed audio original and runtime availability checks passed");return 0;
 }

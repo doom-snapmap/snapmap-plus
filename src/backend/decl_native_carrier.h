@@ -39,9 +39,10 @@ typedef void (*sh_decl_carrier_leaf_info)(void *context, const sh_decl_node *lea
 /* One authored scalar spelling. Returns 1 with the malloc-owned JSON value
  * text that loads back to a value the field's native reader parses exactly
  * like the authored spelling, and survives native save/load unchanged; 0 when
- * not carriable (refusal filled); -1 on allocation failure. Only a decimal
- * spelling depends on field_type: SnapMap rewrites it through `%1.10f`, which
- * is exact only for float fields and only for values proven to round trip.
+ * not carriable (refusal filled); -1 on allocation failure. A decimal or
+ * lowercase-exponent spelling depends on field_type: SnapMap rewrites it
+ * through `%1.10f`, which is exact only for float fields and only for values
+ * proven to round trip.
  * Every other accepted spelling loads back byte-identical, whatever its type. */
 int sh_decl_carrier_scalar(const char *value, const char *field_type, char **json,
     sh_decl_carrier_refusal *refusal);

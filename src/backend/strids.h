@@ -58,7 +58,8 @@ void sh_strids_set_localization(const sh_strids_localization *localization);
  *    "sources": {"0": {"name", "id", "component", "row"}, ...}}
  * (package_library.c). At each refresh an alias shows its base label in the
  * selected language, native fallback included. The callback lists every
- * visible toybox row once, by published row name, with the effective keys its
+ * visible toybox row or logic selector (an Add Logic input or output, whose meta
+ * category is the empty text) once, by published row name, with the effective keys its
  * served text selects: an aliased row names its alias, and a key without the
  * #str_ prefix is a literal label. Rows whose visible meta category, category
  * and label texts all match in that language collide when they show more than

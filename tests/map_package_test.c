@@ -306,6 +306,35 @@ int sh_engine_dialog_ask(unsigned gdm_id, unsigned button_set, const char *text)
 int sh_engine_dialog_poll(int ticket) { CHECK(ticket == 1); return g_dialog_answer; }
 void sh_engine_dialog_release(int ticket) { (void)ticket; }
 
+static void test_player_notices(void)
+{
+    char diagnostic[768], save_notice[256];
+    sh_mpkg_test_reset();
+    memset(diagnostic, 'x', sizeof(diagnostic) - 1);
+    memcpy(diagnostic, "private/path: parser offset 812; ", 32);
+    diagnostic[sizeof(diagnostic) - 1] = 0;
+    g_log[0] = 0; g_dialog_asks = 0; g_dialog_idle = 0;
+    g_dialog_answer = SH_ENGINE_DIALOG_PENDING; g_dialog_raise_fails = 0;
+    sh_mpkg_report_error(SH_MPKG_PROBLEM_SAVE, diagnostic);
+    CHECK(strstr(g_log, diagnostic) != NULL);
+    sh_mpkg_consent_poll(); CHECK(g_dialog_asks == 0);
+    g_dialog_idle = 1;
+    sh_mpkg_consent_poll(); CHECK(g_dialog_asks == 1);
+    CHECK(strlen(g_dialog_text) < 128 && strstr(g_dialog_text, "saved"));
+    CHECK(!strstr(g_dialog_text, "private/path") && !strstr(g_dialog_text, "812"));
+    strcpy_s(save_notice, sizeof(save_notice), g_dialog_text);
+    sh_mpkg_consent_poll(); CHECK(g_dialog_asks == 1);
+    g_dialog_answer = SH_ENGINE_DIALOG_ACCEPTED; sh_mpkg_consent_poll();
+    sh_mpkg_report_error(SH_MPKG_PROBLEM_OPEN, diagnostic);
+    sh_mpkg_consent_poll(); CHECK(g_dialog_asks == 2);
+    CHECK(strcmp(g_dialog_text, save_notice) && strstr(g_dialog_text, "opened"));
+    CHECK(!strstr(g_dialog_text, "parser") && strlen(g_dialog_text) < 128);
+    sh_mpkg_consent_poll();
+    sh_mpkg_report_error(SH_MPKG_PROBLEM_OPEN, "");
+    sh_mpkg_consent_poll(); CHECK(g_dialog_asks == 2);
+    sh_mpkg_test_reset(); g_dialog_idle = 0;
+}
+
 static unsigned char batch_fingerprints[129][32];
 static int batch_publish_calls, batch_fail, batch_interrupt;
 static char batch_staging[MAX_PATH], batch_destination[MAX_PATH];
@@ -492,12 +521,14 @@ static void test_batch_install(const char *root)
     batch_fail = 0;
     CHECK(!sh_mpkg_gate(map, length));
     CHECK(installed_count(client) == 2 && g_rearm_requests == 1 && g_install_notices == 1);
-    sh_mpkg_report_error("specific activation failure");
+    g_log[0] = 0;
+    sh_mpkg_report_error(SH_MPKG_PROBLEM_INSTALL, "specific activation failure");
     CHECK(sh_mpkg_activation_cancel());
     CHECK(installed_count(client) == 0 && !sh_mpkg_test_session_installed_count());
     g_dialog_idle = 1; g_dialog_asks = 0; g_dialog_answer = SH_ENGINE_DIALOG_PENDING;
     sh_mpkg_consent_poll();
-    CHECK(g_dialog_asks == 1 && !strcmp(g_dialog_text, "specific activation failure"));
+    CHECK(g_dialog_asks == 1 && strstr(g_dialog_text, "couldn't be installed"));
+    CHECK(!strstr(g_dialog_text, "specific activation failure") && strstr(g_log, "specific activation failure"));
     g_dialog_answer = SH_ENGINE_DIALOG_ACCEPTED; sh_mpkg_consent_poll();
     g_dialog_idle = 0;
     CHECK(!sh_mpkg_gate(map, length));
@@ -961,7 +992,8 @@ static void test_serving_disabled_gate(const char *root, const char *overrides)
         CHECK(!sh_mpkg_gate(fix_map_happy, fix_map_happy_len));
         CHECK(strstr(sh_mpkg_test_last_refusal(), "serving is disabled") != NULL);
         for (int i = 0; i < 5; i++) sh_mpkg_consent_poll();
-        CHECK(g_dialog_asks == 1 && strstr(g_dialog_text, "serving is disabled") && !strstr(g_dialog_text, "Install"));
+        CHECK(g_dialog_asks == 1 && strstr(g_dialog_text, "mods") && strstr(g_dialog_text, "disabled") &&
+            !strstr(g_dialog_text, "sh_user_overrides") && !strstr(g_dialog_text, "Install"));
         CHECK(!g_rearm_requests && !sh_mpkg_test_session_installed_count());
         CHECK(!!dir_exists(package) == installed);
         CHECK(!sh_mpkg_activation_ready() && strstr(sh_mpkg_test_last_refusal(), "serving is disabled"));
@@ -1443,6 +1475,7 @@ int main(int argc, char **argv)
                 temp, (unsigned long)pid);
     remove_tree(root);
     CHECK(make_dir(root));
+    test_player_notices();
     test_legacy_map_context(root);
     test_legacy_delivery_roundtrip(root);
     join(overrides, sizeof overrides, root, "overrides");

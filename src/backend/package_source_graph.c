@@ -60,6 +60,7 @@ typedef struct sh_package_source_reader {
     sh_package_source_shader shader;
     int shader_configured;
     int preparing; /* The last read retained a native preparation request (sh_package_source_reader_preparing). */
+    char preparation[512]; /* The first such request's reason in the current shader open. */
     sg_shader_abi *shader_parameters;
     sh_package_source_admission admission;
     int native_origin; /* Inspecting an unchanged SnapMap original declaration. */
@@ -360,6 +361,43 @@ static int sg_native_default(const sg_walk *walk)
 { return walk->current_type && strcmp(walk->current_type, "map"); }
 static int sg_composition_token(const char *name, size_t length)
 { return name && length >= 17 && !memcmp(name, "smp-contribution/", 17); }
+/* An event decl argument (SH_DECL_EVENT_DECL_USE_OPS) whose declaration has no
+ * source is the engine's default for that use, in a map as in a package: the
+ * argument reader finds the name in its type's manager with makeDefault. A
+ * reflected field of a map keeps the map's own strictness. */
+static int sg_event_decl(sh_decl_value_type type)
+{ return type.ops && !strcmp(type.ops, SH_DECL_EVENT_DECL_USE_OPS); }
+
+/* A use whose loader defaults an absent resource (reference.make_default: an
+ * event md6Anim argument finds its clip in the animation list, then loads it
+ * with makeDefault and only warns). Like an alias clip
+ * (sg_native_default_target), a clip that neither this scope nor SnapMap
+ * ships, including one only the campaign archive carries, is an engine object
+ * named by the use: declaration text keeps it with no edge. A supplied or
+ * shipped clip binds to its supplier. A composition token binds strictly; a
+ * captured identity binds, and one whose source is gone is refused, as for a
+ * declaration (bound_absent). A map's own use defaults the same way in the
+ * dependency walk (discovery), as the native reader does when the map loads; the
+ * map binding walk leaves it to its per-site resolver, which holds captured
+ * supplier authority. 1 defaults, 0 binds, -1 refused (walk->failed when the
+ * lookup itself failed). */
+static int sg_default_use(sg_walk *walk, const char *family, const char *name, int discovery)
+{
+    unsigned char *body = NULL; size_t length = 0;
+    char *canonical, *path = NULL; int status = 0, exists = -1;
+    if ((!discovery && !sg_native_default(walk)) || sg_composition_token(name, strlen(name))) return 0;
+    if (!(canonical = sg_name(family))) { walk->failed = 1; return -1; }
+    if (walk->bound_exists) status = walk->bound_exists(walk->bound_context, canonical, name, &exists);
+    if (!status) path = sh_package_cooked_path(canonical, name);
+    free(canonical);
+    if (status < 0 || (status && exists != 0 && exists != 1)) { walk->failed = 1; return -1; }
+    if (status) return exists ? 0 : -1;
+    if (!path) return 0;
+    status = sg_read_path(walk, path, &body, &length);
+    free(body); free(path);
+    if (status < 0) { walk->failed = 1; return -1; }
+    return status == 0 || status == 2;
+}
 
 static int sg_reference(void *context, const char *field, sh_decl_value_type type,
     const char *name, size_t length)
@@ -369,7 +407,12 @@ static int sg_reference(void *context, const char *field, sh_decl_value_type typ
     int status, ok = 1;
     walk->report.references++;
     status = sh_decl_native_reference_read(walk->schema, walk->registry, type, name, length, &reference);
-    if (status == 2) status = sg_native_default(walk) ? 0 : -1;
+    if (status == 2) status = sg_native_default(walk) ||
+        (sg_event_decl(type) && !sg_composition_token(name, length)) ? 0 : -1;
+    if (status == 1 && reference.make_default) {
+        int defaulted = sg_default_use(walk, reference.resource.type, reference.resource.name, 1);
+        if (defaulted) status = defaulted > 0 ? 0 : -1;
+    }
     if (status == 1) ok = sg_add(walk, reference.resource.type, reference.resource.name);
     else if (status < 0) sg_gap(walk, field, type.name, "reference identity is unavailable");
     sh_decl_native_reference_clear(&reference); return ok;
@@ -493,6 +536,15 @@ static void sg_shader_clear(sg_walk *walk)
         free(item->name); free(item->source); free(item);
     }
 }
+/* Keep the first pending need's own reason: later checks reuse the buffer. */
+static void sg_shader_pending(sg_walk *walk)
+{
+    walk->preparing = 1;
+    if (!*walk->preparation && walk->error && *walk->error)
+        snprintf(walk->preparation, sizeof(walk->preparation), "%s", walk->error);
+}
+/* 1 ready, 2 pending native preparation with the supplied declaration's kind
+ * (sh_package_shader_schema), -1 otherwise. */
 static int sg_shader_parameter(void *context, const char *name, int *kind)
 {
     sg_walk *walk = context;
@@ -507,7 +559,12 @@ static int sg_shader_parameter(void *context, const char *name, int *kind)
         &source_kind, walk->error, walk->capacity)) goto done;
     int answer = walk->shader.parameter(walk->shader.context, canonical,
         (sh_decl_source){(const char *)body, length}, &actual_kind, &index, walk->error, walk->capacity);
-    if (answer == 2) walk->preparing = 1;
+    if (answer == 2) {
+        /* Nothing is cached: the retry after preparation repeats every check. */
+        sg_shader_pending(walk);
+        if (supplied && source_kind >= 0 && source_kind <= 18) { *kind = source_kind; ok = 2; }
+        goto done;
+    }
     if (answer != 1 || actual_kind < 0 || actual_kind > 18 || index > 32767 ||
         (supplied && source_kind != actual_kind)) goto done;
     for (sg_shader_abi *item = walk->shader_parameters; item; item = item->next) {
@@ -528,7 +585,7 @@ static int sg_shader_parameter(void *context, const char *name, int *kind)
 done:
     free(path); free(canonical); free(body);
     if (!ok) sg_shader_error(walk, "shader parameter needs a compatible fixed native ABI", name);
-    return ok ? 1 : -1;
+    return ok == 2 ? 2 : ok ? 1 : -1;
 }
 static int sg_shader_flag(sg_walk *walk, const char *name)
 {
@@ -540,7 +597,7 @@ static int sg_shader_flag(sg_walk *walk, const char *name)
     if (supplied < 0 || (supplied && !body)) goto done;
     int answer = walk->shader.flag(walk->shader.context, canonical,
         (sh_decl_source){(const char *)body, length}, &mask, walk->error, walk->capacity);
-    if (answer == 2) walk->preparing = 1;
+    if (answer == 2) sg_shader_pending(walk);
     if (answer != 1) goto done;
     for (sg_shader_abi *item = walk->shader_parameters; item; item = item->next) {
         if (strcmp(item->family, "renderprogflag") || strcmp(item->name, canonical)) continue;
@@ -585,7 +642,7 @@ sh_package_source_shader_status sh_package_source_shader_open(sh_package_source_
     if (program) memset(program, 0, sizeof(*program));
     if (!reader || !name || !declaration || !declaration_length || !binary || !binary_length || !program) return 0;
     old_error = reader->error; old_capacity = reader->capacity;
-    reader->error = error; reader->capacity = capacity; reader->preparing = 0;
+    reader->error = error; reader->capacity = capacity; reader->preparing = 0; *reader->preparation = 0;
     if (!reader->shader_configured) { sg_shader_error(reader, "shader renderer contract is unavailable", name); goto done; }
     if (sh_package_shader_paths(reader->shader.renderer, name, name, &empty,
         sg_shader_first_paths, &paths, error, capacity) != SH_PACKAGE_SHADER_OK) goto done;
@@ -599,19 +656,30 @@ sh_package_source_shader_status sh_package_source_shader_open(sh_package_source_
     if (declaration_status <= 0 || binary_status <= 0) {
         sg_shader_error(reader, "shader declaration or renderer binary is absent", name); goto done;
     }
-    if (sh_package_shader_decode(*binary, *binary_length, &schema, program, error, capacity) != SH_PACKAGE_SHADER_OK) goto done;
+    int decoded = sh_package_shader_decode(*binary, *binary_length, &schema, program, error, capacity);
+    if (decoded != SH_PACKAGE_SHADER_OK && decoded != SH_PACKAGE_SHADER_PENDING) goto done;
     if (program->declaration_checksum != sh_package_shader_declaration_checksum(*declaration, *declaration_length)) {
         sg_shader_error(reader, "shader binary does not match its scoped declaration", name); goto done;
     }
+    /* Every pending parameter or flag joins one preparation round instead of
+     * costing a complete library compile each; any other failure stops. */
     for (size_t i = 0; i < program->reference_count; i++) {
-        const sh_package_shader_reference *ref = program->references + i; int kind = -1;
-        if (ref->kind == SH_PACKAGE_SHADER_PARAMETER && sg_shader_parameter(reader, ref->name, &kind) != 1) goto done;
-        if (ref->kind == SH_PACKAGE_SHADER_FLAG && !sg_shader_flag(reader, ref->name)) goto done;
+        const sh_package_shader_reference *ref = program->references + i; int kind = -1, was = reader->preparing;
+        reader->preparing = 0;
+        int ready = ref->kind == SH_PACKAGE_SHADER_PARAMETER ? sg_shader_parameter(reader, ref->name, &kind) == 1 :
+            ref->kind == SH_PACKAGE_SHADER_FLAG ? sg_shader_flag(reader, ref->name) : 1;
+        int pending = reader->preparing; reader->preparing |= was;
+        if (!ready && !pending) goto done;
     }
-    ok = SH_PACKAGE_SOURCE_SHADER_READY;
+    if (decoded == SH_PACKAGE_SHADER_OK && !reader->preparing) ok = SH_PACKAGE_SOURCE_SHADER_READY;
 done:
-    /* A parameter or flag awaiting native preparation: retry after it. */
-    if (ok == SH_PACKAGE_SOURCE_SHADER_ERROR && reader->preparing) ok = SH_PACKAGE_SOURCE_SHADER_PREPARING;
+    /* A parameter or flag awaiting native preparation: retry after it. The
+     * first need's own reason names it; a decode framed by declared kinds is
+     * discarded below with everything else. */
+    if (ok == SH_PACKAGE_SOURCE_SHADER_ERROR && reader->preparing) {
+        ok = SH_PACKAGE_SOURCE_SHADER_PREPARING;
+        if (*reader->preparation && error && capacity) snprintf(error, capacity, "%s", reader->preparation);
+    }
     if (ok != SH_PACKAGE_SOURCE_SHADER_READY) {
         free(*declaration); free(*binary); *declaration = *binary = NULL; *declaration_length = *binary_length = 0;
         sh_package_shader_program_clear(program);
@@ -1190,7 +1258,10 @@ sh_package_source_reader *sh_package_source_reader_open(const sh_package_compila
     walk->schema = sh_decl_native_schema_open(
         (sh_decl_native_source){walk, sg_native_read, reflection, registry.scripts},
         (sh_decl_dependency_observer){walk, sg_reference, sg_field_gap}, error, capacity);
-    if (walk->registry && walk->schema) return walk;
+    if (walk->registry && walk->schema) {
+        sh_decl_native_schema_attach_registry(walk->schema, walk->registry);
+        return walk;
+    }
 failed:
     sh_package_source_reader_close(walk); return NULL;
 }
@@ -1394,6 +1465,33 @@ static int sg_bind_candidate(void *context, const char *family, const char *name
     free(canonical); return ok;
 }
 
+/* A map's event decl argument with no source in scope (sg_event_decl) goes to
+ * the map's per-site resolver under its declaration family, as an event clip
+ * does (sg_default_use): a new or unchanged use keeps its authored text as the
+ * engine's default, a captured supplier binds, and a captured use whose
+ * supplier is gone is refused. 1 replaced, 0 unchanged, -1 refused. */
+static int sg_bind_event_decl(sg_binding *binding, const char *slot, sh_decl_value_type type,
+    const char *name, size_t length, const char **replacement)
+{
+    const char *family = NULL, *target = NULL;
+    char *canonical = NULL, *copy = NULL;
+    int result = -1;
+    if (sh_decl_native_registry_class_type(binding->reader->registry, type.name, &family) > 0 && family &&
+        (canonical = sg_name(family)) && (copy = malloc(length + 1))) {
+        memcpy(copy, name, length); copy[length] = 0;
+        binding->references++;
+        result = binding->resolver(binding->context, slot, canonical, copy, &target);
+        if (result == 1) {
+            free(binding->replacement);
+            binding->replacement = target && *target ? _strdup(target) : NULL;
+            if (!binding->replacement) result = -1;
+            else *replacement = binding->replacement;
+        }
+    }
+    free(copy); free(canonical);
+    return result;
+}
+
 static int sg_bind_typed(void *context, const char *slot, sh_decl_value_type type,
     const char *name, size_t length, const char **replacement)
 {
@@ -1417,9 +1515,16 @@ static int sg_bind_typed(void *context, const char *slot, sh_decl_value_type typ
         type, name, length, &reference);
     /* Authored declaration text keeps an engine-defaulted absent declaration
      * unchanged, with no binding edge, like its stock counterpart. */
-    if (result == 2) result = sg_native_default(binding->reader) && !binding->reader->bound_absent &&
+    int event_decl = result == 2 && !sg_native_default(binding->reader) && sg_event_decl(type) &&
+        !binding->reader->bound_absent && !sg_composition_token(name, length);
+    if (event_decl) result = sg_bind_event_decl(binding, slot, type, name, length, replacement);
+    else if (result == 2) result = sg_native_default(binding->reader) && !binding->reader->bound_absent &&
         !sg_composition_token(name, length) ? 0 : -1;
-    if (result == 1) {
+    if (result == 1 && reference.make_default) {
+        int defaulted = sg_default_use(binding->reader, reference.resource.type, reference.resource.name, 0);
+        if (defaulted) result = defaulted > 0 ? 0 : -1;
+    }
+    if (result == 1 && !event_decl) {
         /* Native registry labels retain mixed case (entityDef, for example).
          * Source-unit identities use the same canonical family as the source
          * graph queue and catalog; do not create a second manager identity. */
@@ -2706,6 +2811,7 @@ int sh_package_source_graph_with_contracts(const sh_package_compilation *compile
     walk.registry = sh_decl_native_registry_open(candidate, error, capacity);
     walk.schema = sh_decl_native_schema_open(metadata, observer, error, capacity);
     if (!walk.registry || !walk.schema) goto done;
+    sh_decl_native_schema_attach_registry(walk.schema, walk.registry);
     if (!sh_package_map_references(json, length, sg_add, &walk) ||
         !sh_package_map_states(json, length, sg_inline, &walk)) goto done;
     for (size_t i = 0; i < walk.queue.count; i++) {

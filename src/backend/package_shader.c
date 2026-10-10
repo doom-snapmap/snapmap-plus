@@ -73,6 +73,8 @@ typedef struct ps_reader {
     sh_package_shader_program program;
     int status;
     const char *reason;
+    int pending;          /* A parameter awaits native preparation (schema answer 2). */
+    int schema_reported;  /* The schema callback wrote its own reason. */
 } ps_reader;
 static int ps_fail(ps_reader *r, int status, const char *reason)
 { if (r->status == SH_PACKAGE_SHADER_OK) { r->status = status; r->reason = reason; } return 0; }
@@ -150,7 +152,12 @@ static int ps_parameter(ps_reader *r, int *kind)
     if (!r->schema || !r->schema->parameter_kind)
         return ps_fail(r, SH_PACKAGE_SHADER_UNSUPPORTED, "source-bound shader parameter kinds are unavailable");
     int status = r->schema->parameter_kind(r->schema->context, ref->name, kind);
-    if (status < 0) return ps_fail(r, SH_PACKAGE_SHADER_ERROR, "shader parameter schema lookup failed");
+    /* The declared kind frames the remaining record only to collect the
+     * program's other needs in the same preparation round; see PENDING. */
+    if (status == 2 && *kind >= 0 && *kind <= 18) { r->pending = r->schema_reported = 1; return 1; }
+    if (status < 0 || status == 2) {
+        r->schema_reported = 1; return ps_fail(r, SH_PACKAGE_SHADER_ERROR, "shader parameter schema lookup failed");
+    }
     if (!status || *kind < 0 || *kind > 18)
         return ps_fail(r, SH_PACKAGE_SHADER_UNSUPPORTED, "shader parameter has no verified native kind");
     return 1;
@@ -259,9 +266,11 @@ int sh_package_shader_decode(const unsigned char *body, size_t length,
     r.body = body; r.length = length; r.schema = schema; r.status = SH_PACKAGE_SHADER_OK;
     if (!ps_decode(&r)) {
         sh_package_shader_program_clear(&r.program);
+        /* Keep the callback's own reason: it names the parameter and its state. */
+        if (r.schema_reported && error && capacity && *error) return r.status;
         return ps_error(error, capacity, r.status, r.reason ? r.reason : "shader decode failed");
     }
-    *out = r.program; return SH_PACKAGE_SHADER_OK;
+    *out = r.program; return r.pending ? SH_PACKAGE_SHADER_PENDING : SH_PACKAGE_SHADER_OK;
 }
 
 int sh_package_shader_rebind(const unsigned char *body, size_t length,
@@ -280,7 +289,8 @@ int sh_package_shader_rebind(const unsigned char *body, size_t length,
     if (!output || !output_length || !changed || !original_decl.body || !linked_decl.body)
         return ps_error(error, capacity, status, "invalid shader relocation input");
     status = sh_package_shader_decode(body, length, schema, &program, error, capacity);
-    if (status != SH_PACKAGE_SHADER_OK) return status;
+    /* PENDING keeps a program framed by declared kinds: release it, relocate nothing. */
+    if (status != SH_PACKAGE_SHADER_OK) goto done;
     if (program.declaration_checksum != sh_package_shader_declaration_checksum(original_decl.body, original_decl.length)) {
         status = ps_error(error, capacity, SH_PACKAGE_SHADER_UNSUPPORTED, "cooked shader does not match its source declaration"); goto done;
     }

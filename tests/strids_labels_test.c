@@ -84,6 +84,9 @@ static const char *native_text(const char *key)
     if (!strcmp(key, "#str_cat_fx")) return fr ? "Effets" : "FX";
     if (!strcmp(key, "#str_meta_toybox")) return fr ? "Jouets" : "Toybox";
     if (!strcmp(key, "#str_bell")) return fr ? "Cloche" : "Bell";
+    if (!strcmp(key, "#str_hide")) return fr ? "Cacher" : "Hide";
+    if (!strcmp(key, "#str_fire")) return fr ? "Feu" : "Fire";
+    if (!strcmp(key, "#str_cat_actions")) return "Actions";
     if (!strcmp(key, "#str_same") || !strcmp(key, "#str_lamp_unused")) return "";
     return NULL;
 }
@@ -91,6 +94,8 @@ static int native_original(void *context, const char *key, unsigned char **body,
     char *error, size_t capacity)
 {
     (void)context; (void)error; (void)capacity;
+    /* Fallback-contract case (root 2317): a shipped selector label key with no native row: like strids_native_original, success with empty text. */
+    if (!strcmp(key, "#str_unresolved_selector")) { *length = 0; *body = malloc(1); assert(*body); return 1; }
     const char *text = native_text(key);
     if (!text) { fprintf(stderr, "unexpected native lookup %s\n", key); assert(0); }
     *length = strlen(text); *body = malloc(*length + 1); assert(*body); memcpy(*body, text, *length); return 1;
@@ -168,6 +173,28 @@ static const alias_spec aliases[] = {
 #define ALIASES (sizeof(aliases) / sizeof(*aliases))
 static char alias_keys[ALIASES][96];
 
+/* Logic selectors (Add Logic inputs and outputs) state no meta category: their roster
+ * meta is the empty text. They are peers of each other and of shipped selectors, never
+ * of a toybox tile showing the same text. */
+typedef struct selector_spec { const char *tag, *native, *row, *category, *sources; } selector_spec;
+static const selector_spec selectors[] = {
+    /* Two private variants of one input beside a shipped input of the same text: the first
+     * supplied by two packages with the same bytes, each qualified by its package names. */
+    {"hideA", "#str_hide", "smp/hideA", "#str_cat_actions",
+        "{\"0\":{\"name\":\"B3 witness three\",\"id\":\"disposable.b3w-three\",\"component\":\"\",\"row\":\"action/b3w/pulse\"},"
+        "\"1\":{\"name\":\"B3 witness one\",\"id\":\"disposable.b3w-one\",\"component\":\"\",\"row\":\"action/b3w/pulse\"}}"},
+    {"hideB", "#str_hide", "smp/hideB", "#str_cat_actions",
+        "{\"0\":{\"name\":\"B3 witness two\",\"id\":\"disposable.b3w-two\",\"component\":\"\",\"row\":\"action/b3w/pulse\"}}"},
+    /* No peer: unqualified. */
+    {"fire", "#str_fire", "smp/fire", "#str_cat_actions",
+        "{\"0\":{\"name\":\"Fire pack\",\"id\":\"local.fire\",\"component\":\"\",\"row\":\"action/fire\"}}"},
+    /* The text of a toybox alias in the same category: another meta, so no collision. */
+    {"speakerSel", "#str_speaker", "smp/speakerSel", "#str_cat_audio",
+        "{\"0\":{\"name\":\"Audio logic\",\"id\":\"local.audio-logic\",\"component\":\"\",\"row\":\"action/speak\"}}"},
+};
+#define SELECTORS (sizeof(selectors) / sizeof(*selectors))
+static char selector_keys[SELECTORS][96];
+
 static void roster_add(const char *row, const char *label, const char *category, const char *meta)
 {
     assert(roster_count < sizeof(roster) / sizeof(*roster));
@@ -202,10 +229,24 @@ static void build(sh_package_compilation *compiled, int reverse)
                 roster_add(stock->row, stock->label, stock->category, stock->meta);
             }
     }
+    for (size_t n = 0; n < SELECTORS; n++) {
+        size_t i = reverse ? SELECTORS - 1 - n : n;
+        const selector_spec *s = selectors + i;
+        snprintf(selector_keys[i], sizeof(selector_keys[i]), "#str_smp_loc_%064zx", (size_t)(0x2000 + i));
+        snprintf(mapping, sizeof(mapping), "{\"native\":\"%s\",\"locales\":{},\"label\":{\"row\":\"%s\","
+            "\"category\":\"%s\",\"meta\":\"\",\"sources\":%s}}", s->native, s->row, s->category, s->sources);
+        char error[256] = "";
+        int ok = sh_package_policy_localization(&compiled->policy, selector_keys[i], mapping, NULL, error, sizeof(error));
+        if (!ok) fprintf(stderr, "selector %s: %s\n", s->tag, error);
+        assert(ok);
+        roster_add(s->row, selector_keys[i], s->category, "");
+    }
+    roster_add("action/utils/hide", "#str_hide", "#str_cat_actions", ""); /* a shipped selector of the same text */
 }
 static const char *text_of(const char *tag)
 {
     for (size_t i = 0; i < ALIASES; i++) if (!strcmp(aliases[i].tag, tag)) return value_of(alias_keys[i]);
+    for (size_t i = 0; i < SELECTORS; i++) if (!strcmp(selectors[i].tag, tag)) return value_of(selector_keys[i]);
     assert(0); return NULL;
 }
 static int same(const char *tag, const char *expected)
@@ -254,6 +295,8 @@ int main(void)
         {"o1", "Organ (Twin [twin.id], organ #1)"}, {"o2", "Organ (Twin [twin.id], organ #2)"},
         {"dupA", "Chime"}, {"dupB", "Chime"}, {"bellA", "Bell"}, {"bellB", "Bell (Map bells)"},
         {"ghost", "Harp"}, {"harp", "Harp"}, {"gong", "Gong"}, {"tam", "Tam (Tams)"},
+        {"hideA", "Hide (B3 witness one + B3 witness three)"}, {"hideB", "Hide (B3 witness two)"},
+        {"fire", "Fire"}, {"speakerSel", "Speaker"},
     };
     const char *french[][2] = {
         /* In French "#str_other" reads "Autre" and F has its own text: they leave the group. */
@@ -263,6 +306,8 @@ int main(void)
         {"e1", "Echo (Speakers [acme.speakers])"}, {"o2", "Organ (Twin [twin.id], organ #2)"},
         {"dupA", "Chime"}, {"dupB", "Chime"}, {"bellA", "Cloche"}, {"bellB", "Cloche (Map bells)"},
         {"ghost", "Harp"}, {"harp", "Harp"}, {"gong", "Gong"}, {"tam", "Tam (Tams)"},
+        {"hideA", "Cacher (B3 witness one + B3 witness three)"}, {"hideB", "Cacher (B3 witness two)"},
+        {"fire", "Feu"}, {"speakerSel", "Haut-parleur"},
     };
     for (int order = 0; order < 2; order++) {
         sh_package_compilation compiled;
@@ -283,8 +328,17 @@ int main(void)
         /* A failing roster refuses the refresh and leaves the published text. */
         roster_state = -1; g_log[0] = 0; assert(!sh_strids_rearm()); assert(strstr(g_log, "toybox labels"));
         roster_state = 1; assert(sh_strids_rearm()); assert(same("p7", "Speaker (Perf probe2 7)"));
+        /* Fallback contract (root 2317, before deploying Part 1): one listed shipped selector row whose native
+         * label cannot be resolved must not refuse the whole refresh; valid unrelated rows stay qualified and
+         * native text is unchanged. */
+        roster_add("selector/unresolved", "#str_unresolved_selector", "#str_cat_actions", "");
+        g_log[0] = 0;
+        if (!sh_strids_rearm()) { fprintf(stderr, "FALLBACK-CONTRACT refusal: %s\n", g_log); assert(!"unresolved selector label refused the refresh"); }
+        assert(same("p7", "Speaker (Perf probe2 7)") && same("x", "Speaker (Alpha + Beta)"));
+        roster_count--; assert(sh_strids_rearm()); assert(same("p7", "Speaker (Perf probe2 7)"));
         published = NULL; assert(sh_strids_rearm());
         for (size_t i = 0; i < ALIASES; i++) assert(!value_of(alias_keys[i]));
+        for (size_t i = 0; i < SELECTORS; i++) assert(!value_of(selector_keys[i]));
         sh_package_policy_free(&compiled.policy);
     }
     sh_strids_set_palette(NULL); sh_strids_set_localization(NULL);

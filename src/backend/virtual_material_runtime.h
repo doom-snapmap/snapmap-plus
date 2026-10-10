@@ -50,7 +50,12 @@ int sh_virtual_material_runtime_seal(sh_virtual_material_view *view,
  * The caller retains every published handle until release succeeds. */
 int sh_virtual_material_runtime_publish(sh_virtual_material_view *candidate,
     sh_virtual_material_view **previous, char *error, size_t capacity);
-/* Restore the retained previous handle from publish, under the same serialized
+/* Reserve a rollback view without changing active lookup. Validation/registry
+ * ownership match publish. The caller keeps the handle, then restores it under
+ * the publication barrier or releases it on prepublication cancellation. */
+int sh_virtual_material_runtime_reserve(sh_virtual_material_view *candidate,
+    char *error, size_t capacity);
+/* Restore a retained previous or reserved handle, under the same serialized
  * transaction/barrier. No allocation, validation or native calls can obstruct
  * rollback. The transaction must not retire either handle before this call. */
 void sh_virtual_material_runtime_restore(sh_virtual_material_view *previous);

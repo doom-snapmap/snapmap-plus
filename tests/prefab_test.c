@@ -64,6 +64,7 @@ static void add_use(sh_package_provenance *uses, const sh_package_bundle_binding
     sh_package_provenance_site site = {SH_PACKAGE_USE_OBJECT, owner, "entityDef/inherit"};
     CHECK(sh_package_provenance_use_set(uses, &site, 0, &context, 1));
 }
+static const char exact_row[] = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
 static void exact_carriers(void)
 {
     char error[512], key[SH_PACKAGE_BUNDLE_KEY_CAP];
@@ -85,6 +86,10 @@ static void exact_carriers(void)
     document = sh_package_occurrence_prepare_document(&uses, rows, 3, error, sizeof(error)); CHECK(document);
     empty = sh_package_occurrence_prepare_document(NULL, NULL, 0, error, sizeof(error)); CHECK(empty);
     if (!document || !empty) goto done;
+    /* An exact editor row reaches the prepared document the way a save carries
+     * it, then rides the carrier on its own owner only. */
+    CHECK(sh_package_provenance_row_set(&uses, "entity/0", exact_row) == 1);
+    CHECK(sh_package_occurrence_carry_rows(document, &uses));
     /* No editable source or caller archive handle survives this point. */
     for (size_t i = 0; i < 3; i++) { sh_package_bundle_release(rows[i].original); rows[i].original = NULL; }
     encoded = sh_prefab_carrier_write(native, sizeof(native)-1, document, &length, error, sizeof(error)); CHECK(encoded);
@@ -105,6 +110,10 @@ static void exact_carriers(void)
     }
     CHECK(read.bindings.context_count == 2 && read.bindings.binding_count == 1);
     CHECK(read.bindings.uses[0].contexts[0] != read.bindings.uses[1].contexts[0]);
+    const char *carried_row = NULL;
+    CHECK(sh_package_provenance_row_get(&read.bindings, "entity/0", &carried_row) == 1 &&
+        !strcmp(carried_row, exact_row));
+    CHECK(sh_package_provenance_row_get(&read.bindings, "entity/1", &carried_row) == 0);
     again = sh_prefab_carrier_write(encoded, length, document, &again_length, error, sizeof(error));
     CHECK(again && again_length == length && !memcmp(again, encoded, length));
     plain = sh_prefab_carrier_write(encoded, length, empty, &again_length, error, sizeof(error));
@@ -116,6 +125,8 @@ static void exact_carriers(void)
         char *header = strstr(corrupt, "smpbind."); CHECK(header); if (header) header[8] = 'x';
         CHECK(!sh_prefab_carrier_read(corrupt, length, &read, error, sizeof(error)));
         CHECK(read.native_json == before && read.bindings.use_count == 2); free(corrupt);
+        CHECK(sh_package_provenance_row_get(&read.bindings, "entity/0", &carried_row) == 1 &&
+            !strcmp(carried_row, exact_row));
     }
 done:
     sh_package_occurrence_release(document); sh_package_occurrence_release(empty);

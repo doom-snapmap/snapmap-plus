@@ -1,6 +1,7 @@
 /* Compile complete packages against verified originals, retaining all owners. */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -180,8 +181,10 @@ static void sweep_format(sweep_control *control, char *out, size_t capacity)
             memcpy(value, control->value[a], sizeof(value)); memcpy(control->value[a], control->value[b], sizeof(value));
             memcpy(control->value[b], value, sizeof(value));
         }
+    int emitted = 0;
     for (int f = 0; f < control->count; f++) {
-        if (f) strcat_s(out, capacity, ",");
+        if (!control->value[f][0] || (!strcmp(control->key[f], "inspector") && !strcmp(control->value[f], "NULL"))) continue;
+        if (emitted++) strcat_s(out, capacity, ",");
         strcat_s(out, capacity, control->key[f]); strcat_s(out, capacity, "="); strcat_s(out, capacity, control->value[f]);
     }
 }
@@ -238,6 +241,7 @@ static void editor_sweep(const char *base)
         char name[512], *child = NULL, *chain_text[32] = {0}, *published_first = NULL, *served = NULL, *out = NULL, *exact = NULL;
         size_t child_length = 0, chain_length[32] = {0}, depth = 0, path_length;
         sweep_sheets *stock = NULL, *read = NULL;
+        sweep_control parent_own;
         sh_decl_source authored[32], published[32];
         int result = 0, kind = 0, encoded = 0, mismatch = 0;
         int seen = 0;
@@ -291,6 +295,7 @@ static void editor_sweep(const char *base)
         }
         memset(stock, 0, sizeof(*stock));
         for (size_t i = depth; i > 0; i--) sweep_read(stock, chain_text[i - 1], chain_length[i - 1]);
+        parent_own = stock->pages[0].own;
         sweep_read(stock, child, child_length);
         for (size_t i = 0; i < depth; i++) {
             authored[i] = (sh_decl_source){chain_text[i], chain_length[i]};
@@ -327,27 +332,40 @@ static void editor_sweep(const char *base)
         sweep_read(read, published_first, strlen(published_first));
         sweep_read(read, served, served == child ? child_length : strlen(served));
         if (stock->overflow || read->overflow) { overflow++; printf("OVERFLOW %s\n", name); goto next; }
-        if (stock->count != read->count) {
-            mismatch = 1; printf("MISMATCH %s: %d pages read, %d stock\n", name, read->count, stock->count);
-        }
-        for (int t = 0; !mismatch && t < stock->count; t++) {
-            char *want = sweep_page_set(stock, t, t ? NULL : "displayNameTag=#sweep_added");
-            char *got = sweep_page_set(read, t, NULL);
-            if (strcmp(want, got)) {
-                mismatch = 1;
-                printf("MISMATCH %s page %d\n  want %s\n  got  %s\n", name, t, want, got);
+        /* A child that states a zero page count removes every inherited page, but
+         * a peer's addition to the parent survives it (a removal never erases a
+         * peer's addition): page 0 then holds that control alone, under the
+         * parent's own page fields, with no control of the stock reading. */
+        {
+            int emptied = !stock->count, want_pages = emptied ? 1 : stock->count;
+            if (want_pages != read->count) {
+                mismatch = 1; printf("MISMATCH %s: %d pages read, %d expected\n", name, read->count, want_pages);
             }
-            free(want); free(got);
+            for (int t = 0; !mismatch && t < want_pages; t++) {
+                char *want, *got = sweep_page_set(read, t, NULL);
+                if (emptied) {
+                    sweep_sheets *only = calloc(1, sizeof(*only));
+                    CHECK(only);
+                    only->count = 1; only->pages[0].own = parent_own;
+                    want = sweep_page_set(only, 0, "displayNameTag=#sweep_added");
+                    free(only);
+                } else want = sweep_page_set(stock, t, t ? NULL : "displayNameTag=#sweep_added");
+                if (strcmp(want, got)) {
+                    mismatch = 1;
+                    printf("MISMATCH %s page %d\n  want %s\n  got  %s\n", name, t, want, got);
+                }
+                free(want); free(got);
+            }
         }
         if (mismatch) mismatched++;
 next:
         free(child); free(published_first); free(out); free(exact); free(stock); free(read);
         for (size_t i = 0; i < depth; i++) free(chain_text[i]);
     }
-    printf("editor sweep: %zu children, %zu rebased (%zu restated with a cut), %zu unchanged, %zu gaps, %zu failed, "
+    printf("editor sweep: %zu children, %zu rebased (%zu restated with explicit defaults), %zu unchanged, %zu gaps, %zu failed, "
         "%zu mismatched, %zu skipped (no page under the parent), %zu over reader limits\n",
         children, rebased, restated, unchanged, gaps, failed, mismatched, skipped, overflow);
-    CHECK(!failed && !mismatched);
+    CHECK(!failed && !mismatched && !gaps);
     for (size_t k = 0; k < done_count; k++) free(done[k]);
     free(done);
     sh_resource_catalog_close(catalog);
@@ -696,6 +714,48 @@ static void test_prune_native_names(void)
         CHECK(sh_package_compilation_find(compiled, paths[1]) != NULL);
         sh_package_compilation_free(compiled);
     }
+}
+
+/* keep is asked only about resources the prune would drop, while the whole
+ * table is still intact (the first resource is dropped before the last is
+ * asked about), and keeps the ones it names published. */
+typedef struct prune_keep_probe { const sh_package_compilation *compiled; size_t asked; } prune_keep_probe;
+static int prune_keep(void *context, const sh_compiled_resource *resource)
+{
+    prune_keep_probe *probe = context;
+    probe->asked++;
+    CHECK(probe->compiled->resource_count == 3 && resource->native_original);
+    CHECK(!strcmp(probe->compiled->resources[0].engine_path, "generated/decls/material/a_stock.decl"));
+    return !strcmp(resource->engine_path, "generated/decls/material/z_kept.decl");
+}
+static void test_prune_native_keep(void)
+{
+    static const char *const paths[] = {"generated/decls/material/a_stock.decl",
+        "generated/decls/material/changed.decl", "generated/decls/material/z_kept.decl"};
+    sh_package_compilation *compiled = calloc(1, sizeof(*compiled));
+    CHECK(compiled); if (!compiled) return;
+    compiled->resources = calloc(3, sizeof(*compiled->resources)); compiled->resource_count = 3;
+    CHECK(compiled->resources); if (!compiled->resources) { free(compiled); return; }
+    for (size_t i = 0; i < 3; i++) {
+        sh_compiled_resource *r = compiled->resources + i;
+        r->engine_path = _strdup(paths[i]); r->owns_engine_path = 1; r->source = SIZE_MAX;
+        r->native_original = 1; r->baseline_known = 1;
+    }
+    sh_compiled_resource *changed = compiled->resources + 1;
+    changed->native_original = 0;
+    changed->bound_dependencies = calloc(2, sizeof(char *)); changed->bound_dependency_count = 2;
+    changed->bound_dependencies[0] = _strdup("generated/decls/material/a_stock.decl");
+    changed->bound_dependencies[1] = _strdup("generated/decls/material/z_kept.decl");
+    prune_keep_probe probe = {compiled, 0};
+    CHECK(sh_package_compilation_prune_native_except(compiled, NULL, NULL, prune_keep, &probe) == 1);
+    CHECK(probe.asked == 2 && compiled->resource_count == 2);
+    CHECK(sh_package_compilation_find(compiled, "generated/decls/material/z_kept.decl"));
+    CHECK(!sh_package_compilation_find(compiled, "generated/decls/material/a_stock.decl"));
+    changed = compiled->resources;
+    CHECK(!strcmp(changed->engine_path, "generated/decls/material/changed.decl") &&
+        changed->bound_dependency_count == 1 &&
+        !strcmp(changed->bound_dependencies[0], "generated/decls/material/z_kept.decl"));
+    sh_package_compilation_free(compiled);
 }
 
 static void test_restoration(const sh_package_compilation *previous)
@@ -1077,12 +1137,14 @@ typedef struct native_field { char key[64], value[160]; } native_field;
 typedef struct native_control { native_field fields[NATIVE_FIELDS]; int count; } native_control;
 typedef struct native_page { native_control own, controls[NATIVE_SLOTS]; int count; } native_page;
 typedef struct native_sheets { native_page pages[NATIVE_PAGES]; int count; } native_sheets;
-static void native_write(native_control *control, const sh_decl_node *item)
+static void native_write(native_control *control, const sh_decl_node *item, int page)
 {
     for (const sh_decl_node *field = item->children; field; field = field->next) {
         const char *text; size_t length;
         int at = 0;
-        if (field->compound || !strcmp(field->key, "num")) continue;
+        if (field->compound || (page ? strcmp(field->key, "titleTag") && strcmp(field->key, "descriptionTag") :
+            strcmp(field->key, "path") && strcmp(field->key, "displayNameTag") && strcmp(field->key, "descriptionTag") &&
+            strcmp(field->key, "inspector"))) continue;
         while (at < control->count && strcmp(control->fields[at].key, field->key)) at++;
         if (at == control->count) {
             CHECK(control->count < NATIVE_FIELDS);
@@ -1102,9 +1164,35 @@ static int native_count(const sh_decl_node *list, int *count)
         if (!strcmp(child->key, "num")) { *count = atoi(child->value ? child->value : "0"); return 1; }
     return 0;
 }
+/* A list element's header is [type [ops]] name[n] =, with any name: the array
+ * reader (Vulkan FUN_141a202d0 over FUN_141a24c70 / FUN_141a25b90, OpenGL
+ * FUN_141a17030 / FUN_141a17f50) reads the numeric index and only reports a
+ * differing name, type or ops as a warning, then reads the element at n. The
+ * decl codec keeps the type and ops tokens apart as an annotation. */
 static int native_index(const char *key, int *index)
 {
-    return sscanf_s(key, "item[%d]", index) == 1;
+    const char *open = strchr(key, '[');
+    const char *number, *close = strrchr(key, ']');
+    uint32_t bits = 0; unsigned base = 10;
+    if (!open || open == key) return 0;
+    for (const char *c = key; c < open; c++) if (!isalnum((unsigned char)*c) && *c != '_') return 0;
+    if (!close || close[1]) return 0;
+    number = open + 1;
+    if (number[0] == '0' && (number[1] == 'x' || number[1] == 'X')) { base = 16; number += 2; }
+    else if (number[0] == '0' && (number[1] == 'b' || number[1] == 'B')) { base = 2; number += 2; }
+    else if (memchr(number,'.',close-number) || memchr(number,'e',close-number) || memchr(number,'E',close-number)) {
+        char *end; float value = (float)strtod(number,&end);
+        if (end != close || value < 0 || value >= 2147483648.0f) return 0;
+        *index = (int)value; return 1;
+    } else if (number[0] == '0') base = 8;
+    if (number == close) return 0;
+    for (; number < close; number++) {
+        unsigned c = (unsigned char)*number;
+        unsigned digit = c >= '0' && c <= '9' ? c-'0' : c >= 'a' && c <= 'f' ? c-'a'+10 : c >= 'A' && c <= 'F' ? c-'A'+10 : 16;
+        if (digit >= base) return 0;
+        bits = bits * base + digit;
+    }
+    *index = (int32_t)bits; return 1;
 }
 static void native_read(native_sheets *sheets, const char *text)
 {
@@ -1128,7 +1216,7 @@ static void native_read(native_sheets *sheets, const char *text)
                 native_page *page;
                 if (!native_index(item->key, &t) || t < 0 || t >= sheets->count || !item->compound) continue;
                 page = sheets->pages + t;
-                native_write(&page->own, item);
+                native_write(&page->own, item, 1);
                 for (const sh_decl_node *list = item->children; list; list = list->next) {
                     int slots, j;
                     if (strcmp(list->key, "properties") || !list->compound) continue;
@@ -1143,7 +1231,7 @@ static void native_read(native_sheets *sheets, const char *text)
                     }
                     for (const sh_decl_node *control = list->children; control; control = control->next)
                         if (native_index(control->key, &j) && j >= 0 && j < page->count && control->compound)
-                            native_write(page->controls + j, control);
+                            native_write(page->controls + j, control, 0);
                 }
             }
         }
@@ -1155,8 +1243,12 @@ static int native_field_order(const void *a, const void *b)
 static void native_format(native_control *control, char *out, size_t capacity)
 {
     qsort(control->fields, control->count, sizeof(control->fields[0]), native_field_order);
+    int emitted = 0;
     for (int f = 0; f < control->count; f++) {
-        strcat_s(out, capacity, f ? "," : "");
+        /* Empty path/tag IDs and a NULL inspector are constructor state. */
+        if (!control->fields[f].value[0] || (!strcmp(control->fields[f].key, "inspector") &&
+            !strcmp(control->fields[f].value, "NULL"))) continue;
+        strcat_s(out, capacity, emitted++ ? "," : "");
         strcat_s(out, capacity, control->fields[f].key); strcat_s(out, capacity, "=");
         strcat_s(out, capacity, control->fields[f].value);
     }
@@ -1179,6 +1271,53 @@ static void native_page_text(const char *const *texts, size_t count, int page, c
     }
     free(sheets);
 }
+/* State within an admitted owning-storage pass: parent copying precedes a
+ * child that states inherit. Parent omission itself never proves native storage
+ * fresh; the separate lifetime adapter supplies that guarantee. */
+static void served_page_text(const char *parent, const char *served, int page, char *out, size_t capacity)
+{
+    const char *texts[2] = {parent, served};
+    if (strstr(served, "inherit")) native_page_text(texts, 2, page, out, capacity);
+    else native_page_text(texts + 1, 1, page, out, capacity);
+}
+/* A flat scalar list (inputs, outputs) after reading texts in order, values
+ * joined by ','. A statement's first count applies before its items; below 1
+ * it only zeroes the count. */
+static void native_flat_text(const char *const *texts, size_t count, const char *list, char *out, size_t capacity)
+{
+    char values[32][128] = {{0}};
+    int n = 0;
+    out[0] = 0;
+    for (size_t i = 0; i < count; i++) {
+        sh_decl_node *tree = sh_decl_tree_parse_ordered((sh_decl_source){texts[i], strlen(texts[i])}, NULL, 0);
+        CHECK(tree);
+        for (const sh_decl_node *edit = tree ? tree->children : NULL; edit; edit = edit->next) {
+            if (strcmp(edit->key, "edit") || !edit->compound) continue;
+            for (const sh_decl_node *statement = edit->children; statement; statement = statement->next) {
+                int total, k;
+                if (strcmp(statement->key, list) || !statement->compound) continue;
+                if (native_count(statement, &total)) {
+                    if (total < 1) n = 0;
+                    else {
+                        for (int fresh = n; fresh < total && fresh < 32; fresh++) values[fresh][0] = 0;
+                        n = total < 32 ? total : 32;
+                    }
+                }
+                for (const sh_decl_node *item = statement->children; item; item = item->next) {
+                    const char *text; size_t length;
+                    if (native_index(item->key, &k) && k >= 0 && k < n && !item->compound &&
+                        sh_decl_tree_literal(item, &text, &length))
+                        snprintf(values[k], sizeof(values[k]), "%.*s", (int)length, text);
+                }
+            }
+        }
+        sh_decl_tree_free(tree);
+    }
+    for (int k = 0; k < n; k++) {
+        if (k) strcat_s(out, capacity, ",");
+        strcat_s(out, capacity, values[k]);
+    }
+}
 static int restate(const char *text, const char *published, char **out)
 {
     sh_decl_source parent = {published, strlen(published)};
@@ -1197,7 +1336,7 @@ static int restate(const char *text, const char *published, char **out)
  * either order of the additions, with no field of a previous occupant left
  * under any slot. A trim the child states stays, the parent's later addition
  * survives it, and where a restated control would keep the dropped control's
- * fields the list is cut first (a native count) and regrown. */
+ * fields the complete row writes the native constructor defaults. */
 static void test_editor_native_restatement(void)
 {
     char want[1024], got[1024], plain[1024];
@@ -1242,7 +1381,7 @@ static void test_editor_native_restatement(void)
             native_page_text(served, 2, 0, got, sizeof(got));
             if (strcmp(got, want)) fprintf(stderr, "rebased cylinder %d: %s\n%s\n", order, got, out);
             CHECK(!strcmp(got, want));
-            CHECK(restate(out, composed[order], &exact) == 0 && !exact);
+            CHECK(restate(out, composed[order], &exact) >= 0);
             free(exact);
         }
         free(out);
@@ -1263,9 +1402,8 @@ static void test_editor_native_restatement(void)
     }
     /* A trim over a parent with a later addition: the child keeps a and b, the
      * addition z survives, and z must not keep c's description. The rebased
-     * list alone would leave it there; the restatement cuts the list before
-     * slot 2 so z is read onto a fresh slot. Without such a field to keep,
-     * nothing is cut (the existing trim case). */
+     * list alone would leave it there; the restatement clears the missing
+     * constructor fields explicitly while retaining the peer's row. */
     {
         const char *stock = SHEET("num = 3; item[0] = { path = \"a\"; } item[1] = { path = \"b\"; } "
             "item[2] = { path = \"c\"; descriptionTag = \"#c\"; }");
@@ -1284,7 +1422,7 @@ static void test_editor_native_restatement(void)
                 native_page_text(served, 2, 0, got, sizeof(got));
                 if (strcmp(got, "|path=a;path=b;path=z")) fprintf(stderr, "restated trim: %s\n%s\n", got, exact);
                 CHECK(!strcmp(got, "|path=a;path=b;path=z"));
-                CHECK(strstr(exact, "properties = { num = 2; } properties = { num = 3; ") != NULL);
+                CHECK(strstr(exact, "descriptionTag = \"\";") && !strstr(exact, "} properties = {"));
             }
             free(exact);
         }
@@ -1299,16 +1437,15 @@ static void test_editor_native_restatement(void)
             const char *served[2] = {published_plain, out};
             native_page_text(served, 2, 0, got, sizeof(got));
             CHECK(!strcmp(got, "|path=a;path=b;path=z"));
-            CHECK(restate(out, published_plain, &exact) == 0 && !exact);
+            CHECK(restate(out, published_plain, &exact) >= 0);
             free(exact);
         }
         free(out);
         /* A list the child empties (a count below 1, negative included) does
          * not erase a peer's addition: the composed child keeps z alone, read
-         * with none of the dropped control's fields. Serving that exactly needs
-         * slot 0 read fresh, which this encoding gives only with a count below
-         * 1 (stranding what the dropped elements own): an open product gap,
-         * reported (-3), never served stale or stranding. */
+         * with none of the dropped control's fields. That needs slot 0 read
+         * fresh (B3 first-slot case): it is served exactly, never stale and
+         * never refused, in whichever form the correction chooses. */
         for (int negative = 0; negative < 2; negative++) {
             const char *published_zero = SHEET("num = 2; item[0] = { path = \"c\"; descriptionTag = \"#c\"; } item[1] = { path = \"z\"; }");
             out = rebase_one(negative ?
@@ -1321,30 +1458,38 @@ static void test_editor_native_restatement(void)
                 const char *alone[1] = {out};
                 native_page_text(alone, 1, 0, stated, sizeof(stated));
                 CHECK(!strcmp(stated, "|path=z"));
-                CHECK(restate(out, published_zero, &exact) == -3 && !exact);
+                CHECK(restate(out, published_zero, &exact) == 1 && exact);
+                if (exact) {
+                    served_page_text(published_zero, exact, 0, stated, sizeof(stated));
+                    if (strcmp(stated, "|path=z")) fprintf(stderr, "first slot (negative %d): %s\n%s\n", negative, stated, exact);
+                    CHECK(!strcmp(stated, "|path=z"));
+                }
                 free(exact);
             }
             free(out);
         }
         /* A parent relaid so that the control the child drops comes first: the
-         * kept controls would need slot 0 read fresh, which only a count below
-         * 1 gives. No native statement serves that; it is refused, not
-         * respelled with stale fields or a stranding count. */
+         * kept controls need slot 0 read fresh (B3 first-slot case), served
+         * exactly rather than refused or respelled with stale fields. */
         out = rebase_one("{ inherit = \"p\"; edit = { propertySheets = { item[0] = { properties = { num = 2; } } } } }",
             SHEET("num = 3; item[0] = { path = \"a\"; } item[1] = { path = \"b\"; } item[2] = { path = \"c\"; descriptionTag = \"#c\"; }"),
             SHEET("num = 3; item[0] = { path = \"c\"; descriptionTag = \"#c\"; } item[1] = { path = \"a\"; } item[2] = { path = \"b\"; }"),
             0, &result, &kind);
         CHECK(result == 1 && out);
         if (out) {
-            CHECK(restate(out, SHEET("num = 3; item[0] = { path = \"c\"; descriptionTag = \"#c\"; } item[1] = { path = \"a\"; } "
-                "item[2] = { path = \"b\"; }"), &exact) == -3 && !exact);
+            const char *relaid = SHEET("num = 3; item[0] = { path = \"c\"; descriptionTag = \"#c\"; } item[1] = { path = \"a\"; } "
+                "item[2] = { path = \"b\"; }");
+            CHECK(restate(out, relaid, &exact) == 1 && exact);
+            if (exact) {
+                served_page_text(relaid, exact, 0, got, sizeof(got));
+                if (strcmp(got, "|path=a;path=b")) fprintf(stderr, "relaid first slot: %s\n%s\n", got, exact);
+                CHECK(!strcmp(got, "|path=a;path=b"));
+            }
             free(exact);
         }
         free(out);
-        /* Headers: a restated control whose block operation or annotation
-         * differs from the slot's previous occupant is read onto a fresh slot
-         * (cut before it), so it keeps the header it is stated with; a reset
-         * marker is not modelled and nothing is proven. */
+        /* Missing assignment is malformed; warning-only annotations and the
+         * normal inherited reader's consumed reset marker do not alter state. */
         {
             const char *published_h = SHEET("num = 2; item[0] = { path = \"a\"; } item[1] = { path = \"b\"; }");
             const char *operation = "{ inherit = \"p\"; edit = { propertySheets = { num = 1; item[0] = { properties = { num = 2; "
@@ -1353,23 +1498,24 @@ static void test_editor_native_restatement(void)
                 "item[0] = { path = \"a\"; } item[1] = { idStr path = \"b\"; } } } } } }";
             const char *marked = "{ inherit = \"p\"; edit = { propertySheets = { num = 1; item[0] = { properties = { num = 2; "
                 "item[0] = { path = \"a\"; } item[1] = ! { path = \"b\"; } } } } } }";
-            CHECK(restate(operation, published_h, &exact) == 1 && exact &&
-                strstr(exact, "properties = { num = 1; } properties = { num = 2; "));
+            CHECK(restate(operation, published_h, &exact) == -3 && !exact);
             free(exact);
-            CHECK(restate(annotated, published_h, &exact) == 1 && exact &&
-                strstr(exact, "properties = { num = 1; } properties = { num = 2; ") && strstr(exact, "idStr path"));
+            CHECK(restate(annotated, published_h, &exact) == 1 && exact && !strstr(exact, "idStr path"));
             free(exact);
-            CHECK(restate(marked, published_h, &exact) == -3 && !exact);
+            CHECK(restate(marked, published_h, &exact) >= 0);
+            served_page_text(published_h, exact ? exact : marked, 0, got, sizeof(got));
+            if (strcmp(got, "|path=a;path=b")) fprintf(stderr, "marked restatement: %s\n", got);
+            CHECK(!strcmp(got, "|path=a;path=b"));
             free(exact);
             /* The same header as the occupant: nothing to cut. */
             CHECK(restate("{ inherit = \"p\"; edit = { propertySheets = { num = 1; item[0] = { properties = { num = 2; "
-                "item[0] = { path = \"a\"; } item[1] = { path = \"b\"; } } } } } }", published_h, &exact) == 0 && !exact);
+                "item[0] = { path = \"a\"; } item[1] = { path = \"b\"; } } } } } }", published_h, &exact) >= 0);
             free(exact);
             /* A restatement stating a member twice is not one this proof
              * covers: refused, never passed as already exact. */
             CHECK(restate("{ inherit = \"p\"; edit = { propertySheets = { num = 1; item[0] = { properties = { num = 2; "
                 "item[0] = { path = \"a\"; } item[1] = { path = \"b\"; } } } } propertySheets = { num = 1; } } }", published_h,
-                &exact) == -3 && !exact);
+                &exact) == 1 && exact);
             free(exact);
             /* A parent this model does not read is no proof either. */
             CHECK(restate("{ inherit = \"p\"; edit = { propertySheets = { num = 1; item[0] = { properties = { num = 1; "
@@ -1377,17 +1523,16 @@ static void test_editor_native_restatement(void)
             free(exact);
         }
     }
-    /* A page whose own fields would keep the previous page's (its label): the
-     * pages are cut before it and regrown, so the page is read fresh. */
+    /* A page's omitted title must clear the previous occupant's native title. */
     {
         const char *published = "{ edit = { propertySheets = { num = 2; item[0] = { properties = { num = 1; "
-            "item[0] = { path = \"a\"; } } } item[1] = { label = \"#B\"; properties = { num = 1; item[0] = { path = \"b\"; } } } "
+            "item[0] = { path = \"a\"; } } } item[1] = { titleTag = \"#B\"; properties = { num = 1; item[0] = { path = \"b\"; } } } "
             "} } }";
         const char *text = "{ inherit = \"p\"; edit = { propertySheets = { num = 2; item[0] = { properties = { num = 1; "
             "item[0] = { path = \"a\"; } } } item[1] = { properties = { num = 1; item[0] = { path = \"z\"; } } } } } }";
         const char *raw[2] = {published, text};
         native_page_text(raw, 2, 1, plain, sizeof(plain));
-        CHECK(!strcmp(plain, "label=#B|path=z"));
+        CHECK(!strcmp(plain, "titleTag=#B|path=z"));
         CHECK(restate(text, published, &exact) == 1 && exact);
         if (exact) {
             const char *served[2] = {published, exact};
@@ -1395,18 +1540,18 @@ static void test_editor_native_restatement(void)
             CHECK(!strcmp(got, "|path=z"));
             native_page_text(served, 2, 0, got, sizeof(got));
             CHECK(!strcmp(got, "|path=a"));
-            CHECK(strstr(exact, "propertySheets = { num = 1; } propertySheets = { num = 2; ") != NULL);
+            CHECK(strstr(exact, "titleTag = \"\";") && !strstr(exact, "} propertySheets = {"));
         }
         free(exact);
-        /* A sparse statement is the author's native patch, and a declaration
-         * without parents has nothing under it: neither is respelled. */
+        /* Sparse statements remain author patches. Complete desired rows receive
+         * defaults even without a parent: old native storage may still exist. */
         CHECK(restate("{ inherit = \"p\"; edit = { propertySheets = { item[0] = { properties = { item[0] = { path = \"z\"; } } } } } }",
             published, &exact) == 0 && !exact);
         free(exact);
         {
             size_t length = 0;
             CHECK(sh_package_editor_native_restatement("snapeditorentitydef", (sh_decl_source){text, strlen(text)}, NULL, 0,
-                &exact, &length) == 0 && !exact);
+                &exact, &length) == 1 && exact); free(exact);
         }
     }
 }
@@ -1422,8 +1567,8 @@ static int native_form(const char *text, const char *parent, char **out)
  * again, in order) has a native form: one statement per member writing what
  * its statements write, with the values the native reader leaves, which reads
  * the same over the parents. A slot dropped by one count and grown again by a
- * later one below the inherited count has none (refused, -3); a declaration
- * without repeats is left as written (0). */
+ * later one below the inherited count is explicitly cleared to constructor
+ * state; a declaration without repeats or aliases is left as written (0). */
 static void test_editor_native_form(void)
 {
     char want[1024], got[1024];
@@ -1449,10 +1594,11 @@ static void test_editor_native_form(void)
         sh_decl_tree_free(tree);
     }
     free(out); out = NULL;
-    /* Dropped then regrown below the inherited count: slot 1 is read fresh
-     * natively (no path), which no single statement over the parent gives. */
+    /* Dropped then regrown below the inherited count: slot 1's constructor
+     * state is represented by explicit defaults over the previous occupant. */
     CHECK(native_form("{ inherit = \"p\"; edit = { propertySheets = { item[0] = { properties = { num = 1; } } } } "
-        "edit = { propertySheets = { item[0] = { properties = { num = 2; } } } } }", parent, &out) == -3 && !out);
+        "edit = { propertySheets = { item[0] = { properties = { num = 2; } } } } }", parent, &out) == 1 && out);
+    if (out) { const char *texts[2] = {parent,out}; native_page_text(texts,2,0,got,sizeof(got)); CHECK(!strcmp(got,"|descriptionTag=#a,path=a;")); }
     free(out); out = NULL;
     /* Regrown past the inherited count only: fresh slots are new natively too. */
     CHECK(native_form("{ inherit = \"p\"; edit = { propertySheets = { item[0] = { properties = { num = 3; } } } } "
@@ -1520,7 +1666,7 @@ static void test_editor_frame_bound(void)
      * and lands on the second; an index past the shipped frame is skipped. */
     {
         const char *shipped = "{ inherit = \"p\"; edit = { propertySheets = { item[0] = { properties = { num = 4; "
-            "item[2] = { type = \"float\"; } item[3] = { type = \"float\"; } } } } } }";
+            "item[2] = { inspector = \"float\"; } item[3] = { inspector = \"float\"; } } } } } }";
         sh_package_editor_slots slots = {"#t-0:", {shipped, strlen(shipped)}, 0};
         out = rebase_with("{ inherit = \"p\"; edit = { propertySheets = { item[0] = { properties = { "
             "item[3] = { descriptionTag = \"#str_second\"; } } } } } }", parent, parent, 1, &slots, &result, &kind);
@@ -1532,9 +1678,9 @@ static void test_editor_frame_bound(void)
             if (plain) {
                 const char *served[2] = {parent, plain};
                 native_page_text(served, 2, 0, got, sizeof(got));
-                if (strcmp(got, "|path=a;path=b;type=float;descriptionTag=#str_second,type=float"))
+                if (strcmp(got, "|path=a;path=b;inspector=float;descriptionTag=#str_second,inspector=float"))
                     fprintf(stderr, "shipped frame: %s\n%s\n", got, plain);
-                CHECK(!strcmp(got, "|path=a;path=b;type=float;descriptionTag=#str_second,type=float"));
+                CHECK(!strcmp(got, "|path=a;path=b;inspector=float;descriptionTag=#str_second,inspector=float"));
             }
             free(plain);
         }
@@ -1545,6 +1691,513 @@ static void test_editor_frame_bound(void)
         CHECK(result == 1 && out && !strstr(out, "#str_far"));
         free(out);
     }
+}
+
+/* ---- B3 semantics (package-architecture-v2, work/b3-semantics-20261001) ----
+ * Gap 1: a first slot that must be read fresh. The stock child
+ * weapons/no_weapon states a zero count for its inherited property sheets,
+ * inputs and outputs; a peer's addition to the parent must survive it, alone,
+ * with none of the previous occupant's fields. Natively only slot 0 itself is
+ * out of reach of a positive count: the list hook keeps min(old, new) elements
+ * of a list resized by a count of at least 1, so slot 0 is never regrown by
+ * one (Vulkan FUN_1409cd610, FUN_141421750). The tests below read the served
+ * child with the independent native model (no field of an old occupant, no
+ * refusal) and do not depend on how a correction spells it; the encoding
+ * test further down does. */
+static void test_editor_first_slot(void)
+{
+    char got[1024], expected[1024];
+    char *out = NULL, *exact = NULL;
+    int result, kind;
+    /* The stock shape: a weapon-like parent with one page of controls that
+     * each carry a path, labels and an inspector, two inputs and an output;
+     * its child states a zero count for sheets, outputs and inputs; a peer
+     * package adds a label-only control and an input to the parent. */
+    const char *weapon = "{ edit = { propertySheets = { num = 1; item[0] = { properties = { num = 3; "
+        "item[0] = { path = \"filter\"; displayNameTag = \"#f\"; descriptionTag = \"#f_desc\"; inspector = \"picker\"; } "
+        "item[1] = { path = \"respawnDelay\"; displayNameTag = \"#r\"; descriptionTag = \"#r_desc\"; inspector = \"time\"; } "
+        "item[2] = { path = \"enableThinkComponent\"; displayNameTag = \"#e\"; descriptionTag = \"#e_desc\"; inspector = \"bob\"; } "
+        "} } } outputs = { num = 1; item[0] = \"listener/on_used\"; } "
+        "inputs = { num = 2; item[0] = \"action/respawn\"; item[1] = \"action/remove\"; } } }";
+    const char *published = "{ edit = { propertySheets = { num = 1; item[0] = { properties = { num = 4; "
+        "item[0] = { path = \"filter\"; displayNameTag = \"#f\"; descriptionTag = \"#f_desc\"; inspector = \"picker\"; } "
+        "item[1] = { path = \"respawnDelay\"; displayNameTag = \"#r\"; descriptionTag = \"#r_desc\"; inspector = \"time\"; } "
+        "item[2] = { path = \"enableThinkComponent\"; displayNameTag = \"#e\"; descriptionTag = \"#e_desc\"; inspector = \"bob\"; } "
+        "item[3] = { displayNameTag = \"#peer\"; } } } } outputs = { num = 1; item[0] = \"listener/on_used\"; } "
+        "inputs = { num = 3; item[0] = \"action/respawn\"; item[1] = \"action/remove\"; item[2] = \"action/peer\"; } } }";
+    const char *no_weapon = "{ inherit = \"p\"; edit = { propertySheets = { num = 0; } outputs = { num = 0; } inputs = { num = 0; } } }";
+    out = rebase_one(no_weapon, weapon, published, 0, &result, &kind);
+    CHECK(result == 1 && out);
+    if (out) {
+        const char *text, *chain[2];
+        size_t from;
+        CHECK(restate(out, published, &exact) >= 0);
+        text = exact ? exact : out;
+        chain[0] = published; chain[1] = text;
+        from = strstr(text, "inherit") ? 0 : 1;
+        /* The peer's control alone, none of filter's path, labels or inspector. */
+        served_page_text(published, text, 0, got, sizeof(got));
+        if (strcmp(got, "|displayNameTag=#peer")) fprintf(stderr, "no_weapon sheets: %s\n%s\n", got, text);
+        CHECK(!strcmp(got, "|displayNameTag=#peer"));
+        native_flat_text(chain + from, 2 - from, "inputs", got, sizeof(got));
+        CHECK(!strcmp(got, "action/peer"));
+        native_flat_text(chain + from, 2 - from, "outputs", got, sizeof(got));
+        CHECK(!strcmp(got, ""));
+    }
+    free(exact); exact = NULL; free(out); out = NULL;
+    /* Without a peer the stock child is left exactly as written. */
+    out = rebase_one(no_weapon, weapon, weapon, 0, &result, &kind);
+    CHECK(result == 0 && !out);
+    free(out); out = NULL;
+    /* The first slot of a first page whose own fields would persist: the page
+     * keeps its label natively unless it is read fresh. */
+    {
+        const char *labelled = "{ edit = { propertySheets = { num = 1; item[0] = { titleTag = \"#A\"; properties = { num = 1; "
+            "item[0] = { path = \"a\"; } } } } } }";
+        const char *text = "{ inherit = \"p\"; edit = { propertySheets = { num = 1; item[0] = { properties = { num = 1; "
+            "item[0] = { path = \"z\"; } } } } } }";
+        const char *raw[2] = {labelled, text};
+        native_page_text(raw, 2, 0, got, sizeof(got));
+        CHECK(!strcmp(got, "titleTag=#A|path=z"));          /* what the text reads as written */
+        CHECK(restate(text, labelled, &exact) == 1 && exact);
+        if (exact) {
+            served_page_text(labelled, exact, 0, got, sizeof(got));
+            if (strcmp(got, "|path=z")) fprintf(stderr, "first page: %s\n%s\n", got, exact);
+            CHECK(!strcmp(got, "|path=z"));
+        }
+        free(exact); exact = NULL;
+    }
+    /* The same first slot when a later page also needs a fresh read. */
+    {
+        const char *two = "{ edit = { propertySheets = { num = 2; item[0] = { properties = { num = 2; "
+            "item[0] = { path = \"a\"; inspector = \"ia\"; } item[1] = { path = \"b\"; } } } "
+            "item[1] = { titleTag = \"#B\"; properties = { num = 1; item[0] = { path = \"c\"; } } } } } }";
+        const char *text = "{ inherit = \"p\"; edit = { propertySheets = { num = 2; item[0] = { properties = { num = 2; "
+            "item[0] = { path = \"x\"; } item[1] = { path = \"b\"; } } } "
+            "item[1] = { properties = { num = 1; item[0] = { path = \"y\"; } } } } } }";
+        CHECK(restate(text, two, &exact) == 1 && exact);
+        if (exact) {
+            served_page_text(two, exact, 0, got, sizeof(got));
+            snprintf(expected, sizeof(expected), "|path=x;path=b");
+            if (strcmp(got, expected)) fprintf(stderr, "two pages, first: %s\n%s\n", got, exact);
+            CHECK(!strcmp(got, expected));
+            served_page_text(two, exact, 1, got, sizeof(got));
+            if (strcmp(got, "|path=y")) fprintf(stderr, "two pages, second: %s\n%s\n", got, exact);
+            CHECK(!strcmp(got, "|path=y"));
+        }
+        free(exact); exact = NULL;
+    }
+    /* Guard: a positive count still serves everything it can (the dropped
+     * elements are destroyed, nothing strands), so a trim over a later
+     * addition states no count below 1. */
+    out = rebase_one("{ inherit = \"p\"; edit = { propertySheets = { item[0] = { properties = { num = 2; } } } } }",
+        SHEET("num = 3; item[0] = { path = \"a\"; } item[1] = { path = \"b\"; } item[2] = { path = \"c\"; descriptionTag = \"#c\"; }"),
+        SHEET("num = 4; item[0] = { path = \"a\"; } item[1] = { path = \"b\"; } item[2] = { path = \"c\"; descriptionTag = \"#c\"; } "
+            "item[3] = { path = \"z\"; }"), 0, &result, &kind);
+    CHECK(result == 1 && out);
+    if (out) {
+        CHECK(restate(out, SHEET("num = 4; item[0] = { path = \"a\"; } item[1] = { path = \"b\"; } "
+            "item[2] = { path = \"c\"; descriptionTag = \"#c\"; } item[3] = { path = \"z\"; }"), &exact) == 1 && exact);
+        CHECK(exact && !strstr(exact, "num = 0;") && strstr(exact, "num = 3;"));
+    }
+    free(exact); exact = NULL; free(out);
+}
+
+/* First-slot restatement explicitly clears every previous occupant field.
+ * Physical ownership is handled by the admitted native storage transaction;
+ * the compiler never emits a temporary zero/regrowth statement. */
+static void test_editor_first_slot_encoding(void)
+{
+    char *out = NULL, *exact = NULL;
+    int result, kind;
+    const char *published = SHEET("num = 3; item[0] = { path = \"c\"; descriptionTag = \"#c\"; } item[1] = { path = \"d\"; } "
+        "item[2] = { path = \"z\"; }");
+    out = rebase_one("{ inherit = \"p\"; edit = { propertySheets = { item[0] = { properties = { num = 0; } } } } }",
+        SHEET("num = 2; item[0] = { path = \"c\"; descriptionTag = \"#c\"; } item[1] = { path = \"d\"; }"), published, 0, &result, &kind);
+    CHECK(result == 1 && out);
+    if (out) {
+        CHECK(restate(out, published, &exact) == 1 && exact);
+        if (exact) {
+            CHECK(strstr(exact, "path = \"z\";") != NULL);
+            CHECK(strstr(exact, "descriptionTag = \"\";") != NULL);
+            CHECK(strstr(exact, "inspector = NULL;") != NULL);
+            CHECK(strstr(exact, "properties = { num = 0; } properties") == NULL);
+            CHECK(!strstr(exact, "propertySheets = { num = 0; }"));
+        }
+    }
+    free(exact); free(out);
+}
+static void test_editor_family_normalization(void)
+{
+    char *out = NULL; size_t length = 0;
+    const char *type = "snappropertyinspector_whitelistencounterdecl";
+    const char *source = "{ edit = { validEncounters = { num = 2; "
+        "alias[ 0x0 ] = \"first\"; alias[01] = \"second\"; other[ 0b1 ] = \"last\"; } } }";
+    CHECK(sh_package_editor_native_form_type(type, (sh_decl_source){source,strlen(source)},
+        NULL,0,&out,&length) == 1 && out);
+    CHECK(out && strstr(out,"item[0] = \"first\";") && strstr(out,"item[1] = \"last\";") &&
+        !strstr(out,"second"));
+    free(out); out = NULL;
+    source = "{ edit = { validEncounters = { num = 2; alias[0x100000000] = \"zero\"; "
+        "other[4294967297] = \"one\"; last[1.9e+0] = \"float-one\"; } } }";
+    CHECK(sh_package_editor_native_form_type(type,(sh_decl_source){source,strlen(source)},NULL,0,&out,&length) == 1 && out);
+    CHECK(out && strstr(out,"item[0] = \"zero\";") && strstr(out,"item[1] = \"float-one\";") && !strstr(out,"\"one\";"));
+    free(out); out = NULL;
+    /* Ordinary reflected objects have ordinary repeated-member semantics:
+     * num does not truncate an indexed key outside an admitted collection. */
+    source = "{ edit = { other = { num = 1; alias[9] = { value = 3; } num = 2; } } }";
+    CHECK(sh_package_editor_native_form_type(type,(sh_decl_source){source,strlen(source)},
+        NULL,0,&out,&length) == 1 && out);
+    CHECK(out && strstr(out,"num = 2;") && strstr(out,"alias[9]"));
+    free(out); out = NULL;
+    {
+        char error[512]; sh_decl_source input = {source,strlen(source)};
+        out = sh_package_editor_contributions(type,input,&input,1,input,0,&length,error,sizeof(error));
+        CHECK(out && strstr(out,"num = 2;") && strstr(out,"alias[9]")); free(out); out = NULL;
+    }
+    /* Native bare radix tokens retain integer0. Digitless lower-e exponents
+     * retain the mantissa; consumed suffixes do not enter token conversion. */
+    source = "{ edit = { validEncounters = { num = 2; alias[0b] = \"binary-zero\"; other[0X] = \"zero\"; "
+        "a[1e+] = \"plus\"; b[1e-] = \"minus\"; c[1UL] = \"unsigned\"; d[1.9e+0F] = \"float-one\"; } } }";
+    CHECK(sh_package_editor_native_form_type(type,(sh_decl_source){source,strlen(source)},
+        NULL,0,&out,&length) == 1 && out);
+    CHECK(out && strstr(out,"item[0] = \"zero\";") && strstr(out,"item[1] = \"float-one\";"));
+    free(out); out=NULL;
+    {
+        const char *bad[] = {"1E1","01.5","0e5","1ULL","1.0FF","0b12"};
+        for (unsigned i=0;i<sizeof(bad)/sizeof(*bad);i++) {
+            char text[256]; int result,kind;
+            snprintf(text,sizeof(text),"{ inherit = \"p\"; edit = { propertySheets = { num = 1; item[0] = { properties = { num = 2; alias[%s] = { path = \"x\"; } } } } } }",bad[i]);
+            out=rebase_one(text,SHEET("num = 0;"),SHEET("num = 0;"),0,&result,&kind);
+            CHECK(result<0 && kind==SH_PACKAGE_EDITOR_FAILURE_SOURCE && !out); free(out); out=NULL;
+        }
+    }
+    /* These are the native model row's defaults, including its TRUE bit. */
+    source = "{ edit = { renderModelInfoList = { num = 1; item[0] = { categoryId = \"#category\"; } } } }";
+    CHECK(sh_package_editor_native_restatement("snappropertyinspector_blockingvolumerendermodel",
+        (sh_decl_source){source,strlen(source)},NULL,0,&out,&length) == 1 && out);
+    CHECK(out && strstr(out,"renderModelMaterial = NULL;") && strstr(out,"renderModelIcon = NULL;") &&
+        strstr(out,"renderModelColorEnabled = true;") && strstr(out,"categoryId = \"#category\";"));
+    free(out);
+}
+
+static void test_editor_semantic_control_key(void)
+{
+    const char *a = "{ inherit = \"p\"; edit = { propertySheets = { num = 1; item[0] = { properties = { num = 1; "
+        "item[0] = { displayNameTag = \"#own\"; descriptionTag = \"#help\"; inspector = \"action\"; } } } } } }";
+    const char *b = "{ inherit = \"p\"; edit = { propertySheets = { num = 1; item[0] = { properties = { num = 1; "
+        "float ops alias[ 0b0 ] = ! { inspector = \"action\"; descriptionTag = \"#help\"; displayNameTag = \"#own\"; } } } } } }";
+    const char *empty = SHEET("num = 0;");
+    sh_package_editor_slots slots = {"#semantic:",{NULL,0}};
+    char x[256], y[256], *one, *two; int result, kind;
+    sh_package_file_identity first, second;
+    CHECK(sh_package_bytes_identity(a,strlen(a),&first) && sh_package_bytes_identity(b,strlen(b),&second) &&
+        memcmp(first.digest,second.digest,sizeof(first.digest)));
+    one = rebase_with(a,empty,empty,1,&slots,&result,&kind); CHECK(result == 1 && one);
+    two = rebase_with(b,empty,empty,1,&slots,&result,&kind); CHECK(result == 1 && two);
+    if (one && two) {
+        slot_identity(one,0,x,sizeof(x)); slot_identity(two,0,y,sizeof(y)); CHECK(x[0] && !strcmp(x,y));
+        char error[512]; size_t length = 0;
+        sh_decl_source inputs[2] = {{one,strlen(one)},{two,strlen(two)}}, base = {empty,strlen(empty)};
+        char *merged = sh_package_editor_contributions("snapeditorentitydef",base,inputs,2,inputs[0],0,&length,error,sizeof(error));
+        CHECK(merged);
+        if (merged) {
+            sh_decl_node *tree = sh_decl_tree_parse((sh_decl_source){merged,length},NULL,0);
+            const sh_decl_node *list = sh_decl_tree_member(sh_decl_tree_member(sh_decl_tree_member(
+                sh_decl_tree_member(tree,"edit"),"propertySheets"),"item[0]"),"properties");
+            CHECK(list && !strcmp(sh_decl_tree_member(list,"num")->value,"1")); sh_decl_tree_free(tree);
+        }
+        free(merged);
+    }
+    free(one); free(two);
+}
+typedef struct native_model_row {
+    char material[64], icon[64], display[64], description[64], category[64], parm1[64], parm2[64], bloom[64];
+    int hotspot, color;
+} native_model_row;
+typedef struct native_models { native_model_row rows[4]; int count; } native_models;
+static void native_model_string(char out[64], const sh_decl_node *field)
+{
+    const char *text; size_t length;
+    CHECK(sh_decl_tree_literal(field,&text,&length));
+    if (!sh_decl_tree_literal(field,&text,&length)) return;
+    if (length == 4 && !memcmp(text,"NULL",4)) length = 0;
+    memset(out,0,64); snprintf(out,64,"%.*s",(int)length,text);
+}
+/* Independent native value-state oracle for the paired seven-field model row
+ * and its four-field propertyState. Fresh rows have color enabled. */
+static void native_model_read(native_models *models, const char *text)
+{
+    sh_decl_node *tree = sh_decl_tree_parse_ordered((sh_decl_source){text,strlen(text)},NULL,0); CHECK(tree);
+    for (const sh_decl_node *edit = tree ? tree->children : NULL; edit; edit = edit->next)
+        for (const sh_decl_node *list = !strcmp(edit->key,"edit") ? edit->children : NULL; list; list = list->next) {
+            int count, index;
+            if (strcmp(list->key,"renderModelInfoList")) continue;
+            if (native_count(list,&count)) {
+                CHECK(count <= 4);
+                for (int i = models->count; i < count && i < 4; i++) { memset(models->rows+i,0,sizeof(models->rows[i])); models->rows[i].color = 1; }
+                models->count = count > 0 ? count : 0;
+            }
+            for (const sh_decl_node *item = list->children; item; item = item->next) {
+                if (!native_index(item->key,&index) || index < 0 || index >= models->count || index >= 4) continue;
+                native_model_row *row = models->rows + index;
+                for (const sh_decl_node *field = item->children; field; field = field->next) {
+                    if (!strcmp(field->key,"renderModelMaterial")) native_model_string(row->material,field);
+                    else if (!strcmp(field->key,"renderModelIcon")) native_model_string(row->icon,field);
+                    else if (!strcmp(field->key,"displayNameId")) native_model_string(row->display,field);
+                    else if (!strcmp(field->key,"descriptionId")) native_model_string(row->description,field);
+                    else if (!strcmp(field->key,"categoryId")) native_model_string(row->category,field);
+                    else if (!strcmp(field->key,"usesHotspotModel")) row->hotspot = !strcmp(field->value,"true");
+                    else if (!strcmp(field->key,"propertyState")) for (const sh_decl_node *state = field->children; state; state = state->next) {
+                        if (!strcmp(state->key,"renderModelColorEnabled")) row->color = !strcmp(state->value,"true");
+                        else if (!strcmp(state->key,"renderParm1")) native_model_string(row->parm1,state);
+                        else if (!strcmp(state->key,"renderParm2")) native_model_string(row->parm2,state);
+                        else if (!strcmp(state->key,"bloom")) native_model_string(row->bloom,state);
+                    }
+                }
+            }
+        }
+    sh_decl_tree_free(tree);
+}
+static void test_editor_model_constructor_state(void)
+{
+    const char *parent = "{ edit = { renderModelInfoList = { num = 1; item[0] = { renderModelMaterial = \"material\"; "
+        "renderModelIcon = \"icon\"; displayNameId = \"#name\"; descriptionId = \"#help\"; categoryId = \"#base\"; "
+        "usesHotspotModel = true; propertyState = { renderModelColorEnabled = false; renderParm1 = \"parm1\"; "
+        "renderParm2 = \"parm2\"; bloom = \"bloom\"; } } } } }";
+    const char *child = "{ edit = { renderModelInfoList = { num = 0; } } edit = { renderModelInfoList = { num = 1; "
+        "item[0] = { categoryId = \"#own\"; } } } }";
+    const char *family = "snappropertyinspector_blockingvolumerendermodel";
+    sh_decl_source base = {parent,strlen(parent)};
+    native_models want = {0}, got = {0}; char *out = NULL; size_t length = 0;
+    native_model_read(&want,parent); native_model_read(&want,child);
+    CHECK(want.count == 1 && want.rows[0].color == 1 && !want.rows[0].material[0] && !want.rows[0].hotspot);
+    CHECK(sh_package_editor_native_form_type(family,(sh_decl_source){child,strlen(child)},&base,1,&out,&length) == 1 && out);
+    if (out) { native_model_read(&got,parent); native_model_read(&got,out); CHECK(!memcmp(&want,&got,sizeof(want))); }
+    free(out);
+}
+
+/* Gap 2: a reset marker. The reflected reader consumes "!" after a member's
+ * "=" through FUN_141a24850 (Vulkan; OpenGL FUN_141a16c10) in the dispatcher
+ * FUN_141a209b0 (OpenGL FUN_141a12c00) and skips the block only when the
+ * read context's byte at +0xe is set; the context constructor stores 0x101
+ * at +0xc, so +0xe is 0, and the inheriting declaration's Parse reads its
+ * text with such a context. In those contexts "key = ! { ... }" reads
+ * exactly as "key = { ... }", and the marker is part of no state. The
+ * independent model reads texts ignoring it, which is the contract below. */
+static void test_editor_reset_markers(void)
+{
+    char got[1024], want[1024];
+    char *out = NULL, *exact = NULL, *form = NULL;
+    int result, kind;
+    const char *published = SHEET("num = 2; item[0] = { path = \"a\"; } item[1] = { path = \"b\"; inspector = \"x\"; }");
+    /* A marker on the list block of a complete restatement. */
+    const char *marked_list = "{ inherit = \"p\"; edit = { propertySheets = { num = 1; item[0] = { properties = ! { num = 2; "
+        "item[0] = { path = \"a\"; } item[1] = { path = \"b\"; descriptionTag = \"#b\"; inspector = \"x\"; } } } } } }";
+    const char *raw[2] = {published, marked_list};
+    native_page_text(raw, 2, 0, want, sizeof(want));
+    CHECK(!strcmp(want, "|path=a;descriptionTag=#b,inspector=x,path=b"));
+    CHECK(restate(marked_list, published, &exact) >= 0);
+    served_page_text(published, exact ? exact : marked_list, 0, got, sizeof(got));
+    if (strcmp(got, want)) fprintf(stderr, "marked list: %s\n", got);
+    CHECK(!strcmp(got, want));
+    free(exact); exact = NULL;
+    /* A marker in the inherited (published) slot. */
+    {
+        const char *parent = SHEET("num = 2; item[0] = { path = \"a\"; } item[1] = ! { path = \"b\"; }");
+        const char *text = "{ inherit = \"p\"; edit = { propertySheets = { num = 1; item[0] = { properties = { num = 2; "
+            "item[0] = { path = \"a\"; } item[1] = { path = \"b2\"; } } } } } }";
+        CHECK(restate(text, parent, &exact) >= 0);
+        served_page_text(parent, exact ? exact : text, 0, got, sizeof(got));
+        CHECK(!strcmp(got, "|path=a;path=b2"));
+        free(exact); exact = NULL;
+    }
+    /* A marked sparse patch keeps the field it does not state, as the
+     * unmarked one does, through a rebase onto a relaid parent. */
+    {
+        const char *relaid = SHEET("num = 3; item[0] = { path = \"z\"; } item[1] = { path = \"a\"; } "
+            "item[2] = { path = \"b\"; inspector = \"x\"; }");
+        const char *patch = "{ inherit = \"p\"; edit = { propertySheets = { item[0] = { properties = { "
+            "item[1] = ! { descriptionTag = \"#x\"; } } } } } }";
+        const char *author[2] = {published, patch};
+        native_page_text(author, 2, 0, want, sizeof(want));
+        CHECK(!strcmp(want, "|path=a;descriptionTag=#x,inspector=x,path=b"));
+        out = rebase_one(patch, published, relaid, 0, &result, &kind);
+        CHECK(result == 1 && out);
+        if (out) {
+            CHECK(restate(out, relaid, &exact) >= 0);
+            served_page_text(relaid, exact ? exact : out, 0, got, sizeof(got));
+            if (strcmp(got, "|path=z;path=a;descriptionTag=#x,inspector=x,path=b")) fprintf(stderr, "marked patch: %s\n", got);
+            CHECK(!strcmp(got, "|path=z;path=a;descriptionTag=#x,inspector=x,path=b"));
+        }
+        free(exact); exact = NULL; free(out); out = NULL;
+    }
+    /* A member stated twice, the second statement marked. */
+    {
+        const char *parent = SHEET("num = 2; item[0] = { path = \"a\"; descriptionTag = \"#a\"; } item[1] = { path = \"b\"; }");
+        const char *child = "{ inherit = \"p\"; edit = { propertySheets = { item[0] = { properties = { "
+            "item[1] = { descriptionTag = \"#b1\"; } } } } } edit = ! { propertySheets = { item[0] = { properties = { "
+            "item[1] = { descriptionTag = \"#b2\"; } } } } } }";
+        const char *both[2] = {parent, child};
+        native_page_text(both, 2, 0, want, sizeof(want));
+        CHECK(!strcmp(want, "|descriptionTag=#a,path=a;descriptionTag=#b2,path=b"));
+        CHECK(native_form(child, parent, &form) == 1 && form);
+        if (form) {
+            const char *read_form[2] = {parent, form};
+            native_page_text(read_form, 2, 0, got, sizeof(got));
+            if (strcmp(got, want)) fprintf(stderr, "marked repeat: %s\n%s\n", got, form);
+            CHECK(!strcmp(got, want));
+        }
+        free(form);
+    }
+}
+
+/* Gap 3: repeated statements of one member whose headers differ. A header is
+ * [type [ops]] name =, and the member is found by the last token alone (the
+ * dispatcher FUN_141a209b0 never reads the type or ops it parsed), so
+ * statements that differ in annotation or marker read exactly in order: the
+ * later one overlays the earlier. A statement without "=" is another matter:
+ * the three-token header read of FUN_141a26810 takes the brace and the next
+ * member's name as header tokens, so "edit { ... }" is not a block operation
+ * but a mis-tokenized declaration, which no model of this reader can read. */
+static void test_editor_header_repeats(void)
+{
+    char got[1024], want[1024];
+    char *form = NULL;
+    const char *parent = SHEET("num = 2; item[0] = { path = \"a\"; descriptionTag = \"#a\"; } item[1] = { path = \"b\"; }");
+    /* The second edit block carries a type token the first does not. */
+    {
+        const char *child = "{ inherit = \"p\"; edit = { propertySheets = { item[0] = { properties = { "
+            "item[1] = { descriptionTag = \"#b1\"; } } } } } float edit = { propertySheets = { item[0] = { properties = { "
+            "item[1] = { descriptionTag = \"#b2\"; } } } } } }";
+        const char *both[2] = {parent, child};
+        native_page_text(both, 2, 0, want, sizeof(want));
+        CHECK(!strcmp(want, "|descriptionTag=#a,path=a;descriptionTag=#b2,path=b"));
+        CHECK(native_form(child, parent, &form) == 1 && form);
+        if (form) {
+            const char *read_form[2] = {parent, form};
+            native_page_text(read_form, 2, 0, got, sizeof(got));
+            if (strcmp(got, want)) fprintf(stderr, "annotated repeat: %s\n%s\n", got, form);
+            CHECK(!strcmp(got, want));
+        }
+        free(form); form = NULL;
+    }
+    /* One slot stated twice in a list, the second under a type token. */
+    {
+        const char *child = "{ inherit = \"p\"; edit = { propertySheets = { item[0] = { properties = { "
+            "item[1] = { descriptionTag = \"#b1\"; } idStr item[1] = { descriptionTag = \"#b2\"; } } } } } }";
+        const char *both[2] = {parent, child};
+        native_page_text(both, 2, 0, want, sizeof(want));
+        CHECK(!strcmp(want, "|descriptionTag=#a,path=a;descriptionTag=#b2,path=b"));
+        CHECK(native_form(child, parent, &form) == 1 && form);
+        if (form) {
+            const char *read_form[2] = {parent, form};
+            native_page_text(read_form, 2, 0, got, sizeof(got));
+            if (strcmp(got, want)) fprintf(stderr, "annotated slot repeat: %s\n%s\n", got, form);
+            CHECK(!strcmp(got, want));
+        }
+        free(form); form = NULL;
+    }
+    /* Swapping the statements swaps the winner: order is state, headers are not. */
+    {
+        const char *child = "{ inherit = \"p\"; edit = { propertySheets = { item[0] = { properties = { "
+            "idStr item[1] = { descriptionTag = \"#b2\"; } item[1] = { descriptionTag = \"#b1\"; } } } } } }";
+        const char *both[2] = {parent, child};
+        native_page_text(both, 2, 0, want, sizeof(want));
+        CHECK(!strcmp(want, "|descriptionTag=#a,path=a;descriptionTag=#b1,path=b"));
+        CHECK(native_form(child, parent, &form) == 1 && form);
+        if (form) {
+            const char *read_form[2] = {parent, form};
+            native_page_text(read_form, 2, 0, got, sizeof(got));
+            CHECK(!strcmp(got, want));
+        }
+        free(form); form = NULL;
+    }
+    /* Control: statements that differ in the block operation ("edit {" has no
+     * "=") stay unmodelled; they are not read as a block operation. */
+    CHECK(native_form("{ inherit = \"p\"; edit = { displayNameTag = \"#x\"; } edit { displayNameTag = \"#y\"; } }", parent, &form) == -3 &&
+        !form);
+    free(form);
+}
+
+/* Gap 4: list entries other than item[n]. The array reader's header is
+ * [type [ops]] name[n] = (FUN_141a25b90 reads three tokens and takes the one
+ * followed by "[", then the number, "]" and "="); FUN_141a24c70 compares
+ * the type, ops and name with the expected ones and reports a difference as
+ * a warning, and FUN_141a202d0 ignores that result and reads the element at
+ * the index (OpenGL FUN_141a17f50 / FUN_141a17030 / the same caller). So
+ * "control[1] = { ... }" is slot 1, exactly as "item[1] = { ... }". A member
+ * with no "[n]" in its header is the lexer's error ("Expected 'type ops
+ * name[n]'"), a malformed list that the child's author has to fix. */
+static void test_editor_slot_names(void)
+{
+    char got[1024], want[1024];
+    char *out = NULL, *item = NULL, *exact = NULL;
+    int result, kind;
+    const char *authored = SHEET("num = 2; item[0] = { path = \"a\"; } item[1] = { path = \"b\"; }");
+    const char *relaid = SHEET("num = 3; item[0] = { path = \"z\"; } item[1] = { path = \"a\"; } item[2] = { path = \"b\"; }");
+    /* A sparse patch naming its element differently lands on the same slot
+     * and control as the item[n] spelling, through a rebase onto a relaid parent. */
+    {
+        const char *named = "{ inherit = \"p\"; edit = { propertySheets = { item[0] = { properties = { "
+            "control[1] = { descriptionTag = \"#str_b\"; } } } } } }";
+        const char *spelled = "{ inherit = \"p\"; edit = { propertySheets = { item[0] = { properties = { "
+            "item[1] = { descriptionTag = \"#str_b\"; } } } } } }";
+        const char *author[2] = {authored, named};
+        native_page_text(author, 2, 0, want, sizeof(want));
+        CHECK(!strcmp(want, "|path=a;descriptionTag=#str_b,path=b"));
+        out = rebase_one(named, authored, relaid, 0, &result, &kind);
+        item = rebase_one(spelled, authored, relaid, 0, &result, &kind);
+        CHECK(result == 1 && item);
+        CHECK(out && item && !strcmp(out, item));
+        if (out) {
+            const char *served[2] = {relaid, out};
+            native_page_text(served, 2, 0, got, sizeof(got));
+            if (strcmp(got, "|path=z;path=a;descriptionTag=#str_b,path=b")) fprintf(stderr, "named patch: %s\n%s\n", got, out);
+            CHECK(!strcmp(got, "|path=z;path=a;descriptionTag=#str_b,path=b"));
+        }
+        free(out); free(item); out = item = NULL;
+    }
+    /* A parent stating a differently named slot, read as any other. */
+    {
+        const char *named_parent = "{ edit = { propertySheets = { num = 1; item[0] = { properties = { num = 2; "
+            "item[0] = { path = \"a\"; } entry[1] = { path = \"b\"; } } } } } }";
+        const char *child = "{ inherit = \"p\"; edit = { propertySheets = { item[0] = { properties = { "
+            "item[1] = { descriptionTag = \"#x\"; } } } } } }";
+        const char *author[2] = {named_parent, child};
+        native_page_text(author, 2, 0, want, sizeof(want));
+        CHECK(!strcmp(want, "|path=a;descriptionTag=#x,path=b"));
+        out = rebase_one(child, named_parent, named_parent, 1, &result, &kind);
+        CHECK(result == 1 && out);
+        if (out) {
+            const char *served[2] = {named_parent, out};
+            native_page_text(served, 2, 0, got, sizeof(got));
+            if (strcmp(got, want)) fprintf(stderr, "named parent slot: %s\n%s\n", got, out);
+            CHECK(!strcmp(got, want));
+        }
+        free(out); out = NULL;
+    }
+    /* A complete restatement naming a slot differently is still complete: its
+     * second control would keep the occupant's label natively, so it is cut
+     * and regrown exactly as the item[n] spelling is (read as a sparse patch,
+     * it was passed on unchanged and read back stale). */
+    {
+        const char *published = SHEET("num = 2; item[0] = { path = \"a\"; } item[1] = { path = \"b\"; descriptionTag = \"#b\"; }");
+        const char *text = "{ inherit = \"p\"; edit = { propertySheets = { num = 1; item[0] = { properties = { num = 2; "
+            "item[0] = { path = \"a\"; } part[1] = { path = \"z\"; } } } } } }";
+        CHECK(restate(text, published, &exact) == 1 && exact);
+        if (exact) {
+            served_page_text(published, exact, 0, got, sizeof(got));
+            if (strcmp(got, "|path=a;path=z")) fprintf(stderr, "named restatement: %s\n%s\n", got, exact);
+            CHECK(!strcmp(got, "|path=a;path=z"));
+        }
+        free(exact); exact = NULL;
+    }
+    /* A member without an index is the child author's defect. */
+    out = rebase_one("{ inherit = \"p\"; edit = { propertySheets = { item[0] = { properties = { "
+        "label = \"x\"; } } } } }", authored, relaid, 0, &result, &kind);
+    CHECK(result < 0 && kind == SH_PACKAGE_EDITOR_FAILURE_SOURCE && !out);
+    free(out);
 }
 
 /* A child's sparse list addresses its parent's controls by position. When the
@@ -1849,14 +2502,16 @@ static void test_editor_rebase(void)
     CHECK(result == 1 && out); if (out) rebased_layout(out, "inputs", -1, layout, sizeof(layout));
     CHECK(out && !strcmp(layout, "x,y,w,z"));
     free(out);
-    /* A list member that is not a slot: the native array reader reports the
-     * header mismatch (a warning) and then range-checks an index the retained
-     * reads do not establish for such a member (B3 F5, FUN_141a24c70), so its
-     * reading is not modelled: a coverage gap, not a malformed source. */
+    /* A list member with no [n] index in its header (Vulkan FUN_141a25b90,
+     * OpenGL FUN_141a17f50): the array reader finds no '[' among three header
+     * tokens and reports "Expected 'type ops name[n]'" through the lexer's
+     * error sink (not the warning sink), leaving the index unwritten and the
+     * lexer three tokens on. That is a natively malformed list, the child
+     * author's defect, not a valid composition the product lacks. */
     out = rebase_one("{ inherit = \"p\"; edit = { inputs = { bogus = 1; } } }",
         "{ edit = { inputs = { num = 1; item[0] = \"x\"; } } }",
         "{ edit = { inputs = { num = 2; item[0] = \"x\"; item[1] = \"w\"; } } }", 0, &result, &kind);
-    CHECK(result < 0 && kind == SH_PACKAGE_EDITOR_FAILURE_COVERAGE && !out);
+    CHECK(result < 0 && kind == SH_PACKAGE_EDITOR_FAILURE_SOURCE && !out);
     out = rebase_one("{ inherit = \"p\"; edit = { inputs = { num = 2; item[1] = \"z\"; } } }",
         "{ edit = { inputs = { num = broken; } } }",
         "{ edit = { inputs = { num = 1; item[0] = \"w\"; } } }", 0, &result, &kind);
@@ -2054,6 +2709,7 @@ int main(int argc, char **argv)
     test_restoration(compiled);
     test_prune_native();
     test_prune_native_names();
+    test_prune_native_keep();
     test_builtin_composition(compiled);
     test_editor_wiring_collections();
     sh_package_compilation_free(compiled); compiled = NULL;
@@ -2075,7 +2731,11 @@ int main(int argc, char **argv)
 done:
     sh_package_compilation_free(compiled); sh_package_sources_free(sources);
     test_new_declarations(); test_native_original_provenance(); test_duplicate_editor_controls();
-    test_requirement_reduction(); test_editor_rebase(); test_editor_native_restatement(); test_editor_native_form(); test_editor_frame_bound(); test_encounter_membership_order(); cleanup();
+    test_requirement_reduction(); test_editor_rebase(); test_editor_native_restatement(); test_editor_native_form(); test_editor_frame_bound();
+    test_editor_first_slot(); test_editor_first_slot_encoding(); test_editor_reset_markers(); test_editor_header_repeats();
+    test_editor_family_normalization();
+    test_editor_semantic_control_key(); test_editor_model_constructor_state();
+    test_editor_slot_names(); test_encounter_membership_order(); cleanup();
     if (failures) return 1;
     puts("package compiler checks passed"); return 0;
 }

@@ -63,8 +63,8 @@ static void *pf_completion_context;
 static char pf_parsed[256];
 static const char *pf_source_json, *pf_engine_json;
 static char package_last_error[1024];
-void sh_mpkg_report_error(const char *line)
-{ if (line && *line) { package_errors++; snprintf(package_last_error, sizeof(package_last_error), "%s", line); } }
+void sh_mpkg_report_error(sh_mpkg_problem problem, const char *line)
+{ (void)problem; if (line && *line) { package_errors++; snprintf(package_last_error, sizeof(package_last_error), "%s", line); } }
 void sh_map_render_loaded(void *map) { (void)map; render_loaded_calls++; }
 int sh_decl_server_map_boundary_safe(void) { return pf_testing && pf_boundary; }
 int sh_decl_server_map_preparation_ready(void) { return pf_testing; }
@@ -357,6 +357,23 @@ const sh_package_provenance *sh_package_occurrence_provenance(const sh_package_o
 { return value ? &empty_occurrences : NULL; }
 const sh_package_bundle_binding *sh_package_occurrence_bundles(const sh_package_occurrence_snapshot *value, size_t *count)
 { (void)value; if (count) *count = 0; return NULL; }
+/* Exact-row carries record their target, their source, the attach count when
+ * they ran and the saved row they received; refusal is the fail-closed path. */
+static int occurrence_carry_failed, occurrence_carries, occurrence_carry_attaches, occurrence_document_carries;
+static const sh_package_occurrence_snapshot *occurrence_carry_target, *occurrence_carry_from;
+static char occurrence_carried_row[65];
+int sh_package_occurrence_carry_rows(sh_package_occurrence_snapshot *document, const sh_package_provenance *from)
+{
+    const char *row = NULL;
+    occurrence_carries++; occurrence_carry_attaches = occurrence_attaches; occurrence_carry_target = document;
+    occurrence_carried_row[0] = 0;
+    if (from && sh_package_provenance_row_get(from, "entity/0", &row) == 1)
+        snprintf(occurrence_carried_row, sizeof(occurrence_carried_row), "%s", row);
+    return !occurrence_carry_failed;
+}
+int sh_package_occurrence_carry_document_rows(sh_package_occurrence_snapshot *document,
+    const sh_package_occurrence_snapshot *from)
+{ occurrence_document_carries++; occurrence_carry_target = document; occurrence_carry_from = from; return !occurrence_carry_failed; }
 static int pf_serving_disabled, occurrence_saved_bindings, occurrence_saved_contexts;
 int sh_package_runtime_serving_disabled(void) { return pf_serving_disabled; }
 char *sh_package_runtime_capture_document(const sh_package_map_plan *plan, const sh_package_provenance *saved,
@@ -1166,6 +1183,8 @@ static void pf_reset(void)
     pf_binding_plans = pf_rebinds = pf_legacy_rebinds = pf_rebind_fail = 0;
     pf_local_rebinds = 0;
     occurrence_capture_failed = occurrence_attach_failed = occurrence_attaches = occurrence_captures = 0;
+    occurrence_carry_failed = occurrence_carries = occurrence_carry_attaches = occurrence_document_carries = 0;
+    occurrence_carry_target = occurrence_carry_from = NULL; occurrence_carried_row[0] = 0;
     pf_bundle_fail = pf_bundle_attaches = 0;
     pf_coverage = pf_ready = 1; pf_gate_calls = pf_availability_calls = 0;
     pf_install_requests = pf_inventory_reads = pf_cancellations = pf_commits = pf_aborts = 0;
@@ -1911,6 +1930,64 @@ static void occurrence_failures_do_not_save_or_attach_partial_sources(void)
     clean_state();
 }
 
+/* Exact editor rows ride the carrier. A load hands the file's decoded rows to
+ * the captured ownership before attaching it; a refused carry attaches
+ * nothing, keeps the world and reports. A save hands the editor's document to
+ * the capture's ownership before the carrier is written; a refused carry
+ * publishes nothing and keeps the selection and the one-shot. Row semantics
+ * themselves have their occurrence, editor and runtime tests. */
+static void exact_rows_carry_before_attach_and_save(void)
+{
+    static const char native_json[] = "{\"variables\":{\"allocCount\":[0,0,0,0,0],\"string\":[]},"
+        "\"entities\":[],\"message\":\"native \x97 bytes\"}";
+    static const char row[] = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+    unsigned char tree[1][32] = {{9}}, text[IDSTR_SIZE] = {0};
+    sh_package_provenance bindings = {0};
+    sh_package_provenance_site site = {SH_PACKAGE_USE_OBJECT, "entity/0", "entityDef"};
+    sh_package_occurrence_snapshot *selected = NULL;
+    char error[256], *carried = NULL, *body; size_t length = 0, context; int failed = 0, errors;
+    unsigned long saves;
+    pf_reset();
+    context = sh_package_provenance_context_add(&bindings, SH_PACKAGE_CONTEXT_ISOLATED, tree, 1, "");
+    CHECK(context != SIZE_MAX &&
+        sh_package_provenance_bind(&bindings, "entitydef", "actors/example", "smp/saved", &context, 1));
+    CHECK(sh_package_provenance_use_set(&bindings, &site, 0, &context, 1));
+    CHECK(sh_package_provenance_row_set(&bindings, "entity/0", row) == 1);
+    carried = sh_map_provenance_write(native_json, sizeof(native_json) - 1, &bindings, &length, error, sizeof(error));
+    CHECK(carried && strstr(carried, "smpbind.")); if (!carried) goto done;
+    CHECK(attach_loaded_occurrences(native_json, native_json, (void *)2));
+    CHECK(!occurrence_carries && occurrence_attaches == 1);  /* no carrier, nothing to carry */
+    CHECK(attach_loaded_occurrences(carried, native_json, (void *)2));
+    CHECK(occurrence_carries == 1 && occurrence_carry_attaches == 1 && occurrence_attaches == 2);
+    CHECK(occurrence_carry_target == (sh_package_occurrence_snapshot *)1 && !strcmp(occurrence_carried_row, row));
+    occurrence_world = (sh_package_occurrence_snapshot *)7; occurrence_carry_failed = 1; errors = package_errors;
+    CHECK(!attach_loaded_occurrences(carried, native_json, (void *)2));
+    CHECK(occurrence_carries == 2 && occurrence_attaches == 2 && occurrence_world == (sh_package_occurrence_snapshot *)7);
+    CHECK(package_errors == errors + 1 && strstr(package_last_error, "recorded exact editor rows could not be restored"));
+    occurrence_carry_failed = 0; length = 0;
+    body = embed_used_packages_owned(native_json, sizeof(native_json) - 1,
+        (sh_package_occurrence_snapshot *)5, &selected, &length, &failed);
+    CHECK(!failed && occurrence_document_carries == 1 && occurrence_carry_from == (sh_package_occurrence_snapshot *)5);
+    CHECK(occurrence_carry_target == (sh_package_occurrence_snapshot *)1 && selected == (sh_package_occurrence_snapshot *)1);
+    if (body) HeapFree(GetProcessHeap(), 0, body);
+    occurrence_carry_failed = 1; errors = package_errors; selected = (sh_package_occurrence_snapshot *)8; length = 0;
+    body = embed_used_packages_owned(native_json, sizeof(native_json) - 1,
+        (sh_package_occurrence_snapshot *)5, &selected, &length, &failed);
+    CHECK(!body && failed && !length && occurrence_document_carries == 2 && selected == (sh_package_occurrence_snapshot *)8);
+    CHECK(package_errors == errors + 1 && strstr(package_last_error, "exact editor rows could not be recorded"));
+    /* Through the save hook the carry receives the editor's own document. */
+    g_ser_orig = fixture_serialize; occurrence_carry_from = NULL;
+    sh_rawmap_save_arm_once(); saves = sh_rawmap_save_count();
+    CHECK(!sh_ser_detour((void *)1, text, 1));
+    CHECK(occurrence_document_carries == 3 && occurrence_carry_from == (sh_package_occurrence_snapshot *)1);
+    CHECK(sh_rawmap_save_count() == saves && sh_rawmap_save_oneshot_pending());
+    g_ser_orig = NULL;
+done:
+    occurrence_carry_failed = 0; occurrence_world = NULL; pf_testing = 0;
+    if (carried) HeapFree(GetProcessHeap(), 0, carried);
+    sh_package_provenance_free(&bindings); clean_state();
+}
+
 /* With user packages off for this launch (sh_user_overrides 0) nothing is
  * prepared. An ordinary load and an editor reload enter the native loader at
  * once: no saved-source read, plan, activation, availability check or editor
@@ -2001,7 +2078,12 @@ static void native_transitions_publish_retained_sources(void)
         CHECK(retained_activations == 1 && retained_pending == fail);
         CHECK(sh_rawmap_transition_commit() == !fail);
         CHECK(!pf_commits && !pf_activations && !pf_restorations && !pf_order_error);
-        sh_rawmap_transition_finished(!fail);
+        {
+            /* A canceled load names its reason even when the runtime has none. */
+            int errors = package_errors;
+            sh_rawmap_transition_finished(!fail);
+            CHECK(package_errors == errors + fail);
+        }
         CHECK(!sh_rawmap_defers_install_commit() && !g_preflight_busy);
         pf_transition = 0;
         /* Failed publication remains pending and can retry at the next load. */
@@ -2061,6 +2143,7 @@ int main(void)
     initial_published_reads();
     preflight_hook_publishes_helpers_before_detour();
     occurrence_failures_do_not_save_or_attach_partial_sources();
+    exact_rows_carry_before_attach_and_save();
     serving_disabled_loads_natively();
 
     DeleteFileA(archive);

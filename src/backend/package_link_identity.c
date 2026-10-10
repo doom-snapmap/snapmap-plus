@@ -24,7 +24,12 @@ typedef struct li_work {
 } li_work;
 
 static void *li_alloc(size_t count, size_t stride)
-{ return count <= SIZE_MAX / stride ? calloc(count ? count : 1, stride) : NULL; }
+{
+#ifdef SH_PACKAGE_LINK_GRAPH_TESTING
+    if (sh_package_link_graph_test_refused()) return NULL;
+#endif
+    return count <= SIZE_MAX / stride ? calloc(count ? count : 1, stride) : NULL;
+}
 
 static int li_fail(char *error, size_t capacity, const char *reason)
 { if (error && capacity) snprintf(error, capacity, "%s", reason); return 0; }
@@ -253,7 +258,10 @@ int sh_package_link_identify_ordered(const sh_package_link_node *nodes, size_t c
         out->identity_us = (unsigned long long)now.tv_sec * 1000000u + (unsigned long long)now.tv_nsec / 1000u - began;
 done:
     li_free(&work);
-    if (!ok) { sh_package_link_classes_free(out); li_fail(error, capacity, "resource binding identity could not be constructed"); }
+    if (!ok) {
+        sh_package_link_classes_free(out); sh_package_link_order_discard(order);
+        li_fail(error, capacity, "resource binding identity could not be constructed");
+    }
     return ok;
 }
 
