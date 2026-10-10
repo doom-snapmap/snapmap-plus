@@ -59,18 +59,43 @@ typedef int (*sh_nav_bake_entity_count)(void *ctx);
  */
 void sh_nav_bake_refresh_live(void);
 
-/* Re-read all boxes the last complete refresh found, including obstacles, a small
- * part of the map and correspondingly cheaper. Returns 1 when it committed an
- * answer, or 0 when it could not -- a new or deleted volume, a moved module, a
- * map it has not read yet -- which the caller answers with a complete refresh.
+/* Re-place the boxes the last complete refresh found, including obstacles.
+ * Geometry comes from the editor's memory, so only the flags are serialized.
+ * Returns 1 when it committed an answer, or 0 when it could not -- a new or
+ * deleted volume, a map it has not read yet -- which the caller answers with a
+ * complete refresh.
  *
  * Main thread only, same as the complete refresh. Reports how many volumes it
- * read through `volumes` when that is not NULL, so a caller can weigh this
- * against the complete refresh from its own timings. */
+ * serialized through `volumes` when that is not NULL. */
 int sh_nav_bake_refresh_volumes(int *volumes);
+
+/* Does the volume `uid` carry a navigation flag? For one the navigation has
+ * never taken in, where the answer decides whether a complete read is owed. */
+int sh_nav_bake_volume_flagged(int uid);
+
+/* What went wrong with the last bake: volumes drawn red, and rooms left with
+ * no navigation. Either may be zero while the other is not. */
+void sh_nav_bake_conflicts(int *marked, int *rooms);
+
+/* What the navigation currently holds: boxes demons walk on, and boxes they
+ * are kept out of. Both zero means this map has no navigation. */
+void sh_nav_bake_volume_counts(int *floors, int *walls);
+
+/* Did the last read produce a map? Zero means it was refused, which is not the
+ * same answer as a map holding no navigation. */
+int sh_nav_bake_has_map(void);
+
+/* How many rooms the open map has, which bounds the live module records. */
+int sh_nav_bake_instance_count(void);
 
 /* Why the last volumes-only refresh could not answer, for the console. */
 const char *sh_nav_bake_volumes_reason(void);
+
+/* The volumes the navigation actually knows about. One the editor has created
+ * since -- including a placement preview -- is not among them, and cannot
+ * affect the navigation until a complete read takes it in. */
+int sh_nav_bake_volume_uids(int *out, int cap);
+int sh_nav_bake_knows_volume(int uid);
 
 /* Counter that advances whenever a refresh finds the editor geometry different
  * from what the bake holds. A caller compares it across a refresh to learn
@@ -119,6 +144,7 @@ int sh_nav_bake_instance_name(int instance, const char *name, char *out, size_t 
 void sh_nav_bake_set_live_editor(sh_nav_bake_entity_count count,
                                  sh_navr_entity_valid valid,
                                  sh_navr_entity_json get_json,
+                                 sh_navr_entity_transform get_transform,
                                  void *ctx);
 
 #ifdef SH_NAV_BAKE_TESTING

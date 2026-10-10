@@ -32,7 +32,11 @@ SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, rawmap_status) == 0x328);
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, rawmap_configure) == 0x330);
 /* ext 26, appended 2026-09-07: reload the editor map now, so a staged rawmap actually opens. */
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, rawmap_load_now) == 0x338);
-SH_STATIC_ASSERT(sizeof(sh_iface_vtbl) == 0x340);
+/* ext 27, appended 2026-09-23: the navigation view the View menu updates. */
+SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, navmesh_view) == 0x340);
+/* ext 28: run a call on DOOM's main thread and wait for it. */
+SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, run_on_main) == 0x348);
+SH_STATIC_ASSERT(sizeof(sh_iface_vtbl) == 0x350);
 SH_STATIC_ASSERT(offsetof(sh_iface, sub) == 0x58);
 SH_STATIC_ASSERT(sizeof(sh_iface) == 0x60);
 

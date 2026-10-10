@@ -437,11 +437,17 @@ entities in the map. An obstructed or disconnected route can also stop a demon
 without removing the navigation mesh. Leave enough room around wall ends for
 the intended demon size and keep spawn, approach and landing points clear.
 
-The preview updates after placement and hides while geometry is held. Box shapes
-come from complete map snapshots; live flag refreshes keep that recorded shape.
+The preview is read when the map opens and when you choose **View > Update
+Navmesh**. Editing does not read the map. When you add, delete, move or change
+the flags of a box with **AI Navigation** or **Block Demons**, the View menu says
+**Navmesh is out of date**. Other edits do not change it. The preview hides while
+geometry is held. Play always uses the current map: if it changed since the last
+update, Play bakes it again. If the View menu says **Could not read this map**,
+run `sh_navmesh` for the reason.
+
 Duplicated boxes that share an ID keep their navigation when the map assigns
-that ID to one module. Until their IDs are unique again, refreshes read the whole
-map. An ID assigned to different modules is ambiguous and still refuses the bake.
+that ID to one module. An ID assigned to different modules is ambiguous and
+still refuses the bake.
 Baking runs in the background, so the previous lines can remain briefly while the new
 result arrives. `sh_perf` reports time spent reading the map and building the
 preview; `sh_perf reset` clears those counters.

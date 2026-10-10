@@ -156,9 +156,10 @@ still reference them. Save files contain the dimension-bearing module identity;
 players need Snapmap+ to reconstruct its resources. Vanilla loading is unsupported.
 
 The shared object uses an append-only vtable. Its original 77-slot prefix is
-retained, with extensions through `+0x338`; the current table occupies `0x340`
-bytes. The last three are the File menu's rawmap surface: `rawmap_status`
-(`+0x328`), `rawmap_configure` (`+0x330`) and `rawmap_load_now` (`+0x338`).
+retained, with extensions through `+0x348`; the current table occupies `0x350`
+bytes. The File menu's rawmap surface is `rawmap_status` (`+0x328`),
+`rawmap_configure` (`+0x330`) and `rawmap_load_now` (`+0x338`). The last two
+are `navmesh_view` (`+0x340`) and `run_on_main` (`+0x348`).
 Static assertions pin the layout. Do not insert, reorder or repurpose
 existing slots. Add new capability slots at the end and update both DLLs.
 
@@ -173,6 +174,12 @@ The WebView host owns its window and browser callbacks. Its worker polls the
 backend through a manual think loop at about 30 Hz. UI callbacks stage requests;
 the worker drains them and posts result messages. A UI mutex protects its shared
 request state, not the engine's objects.
+
+Selection, class/inherit, display-name, source and camera writes from the UI go
+through `run_on_main`. The backend runs the call after the next native frame
+while the worker waits. A call that has not started when its wait expires is
+withdrawn and never runs. A started call borrows the worker's data, so the
+worker waits for it to finish; the main thread never waits on the worker.
 
 Package, navigation and staging maintenance run after a successful native engine
 frame on DOOM's verified main thread. Recovery suppresses that pass. The frontend

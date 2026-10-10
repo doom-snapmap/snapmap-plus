@@ -16,7 +16,9 @@
 #include "typeinfo.h"
 #include "ui_bridge.h"
 #include "iface_engine.h"
+#include <float.h>
 #include "signatures.h"
+#include "patch.h"
 #include "engine_globals.h"
 #include "host_image.h"
 #include "overrides.h"
@@ -37,6 +39,31 @@
 #define ARR_ENT_COUNT_OFF      0x6a8        /* arrObj+0x6a8 -> entity count (u32) */
 #define ENT_VALID_OFF          0x8          /* entity[id]+8 != 0 => valid; ALSO the clone base (ent+8) */
 #define ENT_CLONE_DEFSUB_OFF   0x150        /* cloneBase+0x150 = ent+0x158 = the defsub EntityClone derefs */
+#define ENT_TRANSFORM_OFF      0x288        /* cloneBase+0x288: origin (3 floats) then the 3x3, module space */
+/* What navigation reads out of a volume, and nothing else. GridApplyEntityTree
+ * writes the origin at +0x288, the 3x3 at +0x294 and clipModelInfo.size at
+ * +0x2b8, which are contiguous. The rest of the block is scratch the engine
+ * rewrites constantly, so hashing it would report a change every frame. */
+#define ENT_NAV_FIELDS_OFF     0x288
+#define ENT_NAV_FIELDS_LEN     0x3c
+#define DECL_NAV_PATH_OFF      0x1a0        /* decl+0x1a0: nonzero only on a Blocking Volume */
+#define MAP_MODULES_OFF        0x750        /* mapObj+0x750 -> module record array */
+#define MAP_ENT_INSTANCE_OFF   0x6f0        /* mapObj+0x6f0 -> int per entity: its module */
+/* mapObj+0x6d0 -> 64-bit words, one bit per entity id. The paste path sets the
+ * bit for each entity it creates. Only ever folded into a fingerprint, so a
+ * wrong guess at its meaning costs a read and cannot place a box wrongly. */
+#define MAP_ENT_STATE_OFF      0x6d0
+#define MAP_MODULE_STRIDE      0x98         /* one record, mostly scratch */
+#define MOD_ORIGIN_OFF         0x0c         /* three floats */
+#define MOD_ORIENT_OFF         0x18
+#define MAP_MODULE_MAX         4096
+#define NAV_VOLUME_MAX         4096         /* volumes the navigation can know about */
+/* CommitEdit pushes the undo snapshot through *(editor+0x10). Undo and redo
+ * restore into the map object rather than replacing it, so its pointer never
+ * moves; the stack's cursor is what says one happened. */
+#define ED_UNDO_STACK_OFF      0x10
+#define UNDO_COUNT_OFF         0x08
+#define UNDO_CURSOR_OFF        0x18
 #define ENT_DEFSUB_OFF         0x158        /* entity[id]+0x158 -> def sub-object (commit target) */
 
 #define DEFSUB_CLASS_OFF       0x60         /* defsub+0x60 -> classname idStr (commit dst) */
@@ -105,7 +132,6 @@ typedef void (*memlocal_popheap_fn)(void *self);
 #define PREFAB_POPULATE_RVA    0x54e410u
 #define PREFAB_DTOR_RVA        0x51d870u
 #define PREFAB_TEMP_SIZE       0x2000      /* Headroom above the constructor/populate write range. */
-#define PASTE_INSTANTIATE_RVA  0x54f950u   /* Native paste worker reference; kind 2 queues its action instead of calling it directly. */
 #define ENT_DESHARE_RVA        0x52c920u   /* Optional copy-on-write helper, resolved for diagnostics but not used by apply. */
 
 /* Reflection object layouts. */
@@ -224,11 +250,8 @@ static prefab_dtor_fn      g_prefab_dtor     = NULL;
 static paste_instantiate_fn g_paste_instantiate = NULL;
 static enter_prefab_grab_fn g_enter_prefab_grab = NULL;
 /* Load-state transitions drive the staged-prefab lifetime check. */
-/* Extraction-build reference; resolve the engine main-thread ID through its code anchor. */
-#define LOAD_STATE_PINNED_RVA 0x6dde198u
 #define LOAD_STATE_RUNNING    3
 
-#define MAIN_THREAD_ID_PINNED_RVA 0x6dde190u
 /* Unresolved thread identity refuses engine edits and maintenance. */
 static const uint8_t       *g_load_state_at = NULL;
 static const uint8_t       *g_main_thread_at = NULL;
@@ -458,6 +481,90 @@ static void ae_pop_heap(void)
     if (!self || !g_memlocal_pop) return;
     if (!ae_in_doom_module((const void *)g_memlocal_pop)) return;
     __try { g_memlocal_pop(self); } __except (EXCEPTION_EXECUTE_HANDLER) { }
+}
+
+/* One cross-thread call at a time, run after a native frame by sh_apply_prefab_poll_play. */
+#define AE_MC_EMPTY    0
+#define AE_MC_PUBLISHED 1
+#define AE_MC_RUNNING  2
+#define AE_MC_DONE     3
+static SRWLOCK            g_mc_lock = SRWLOCK_INIT;
+static CONDITION_VARIABLE g_mc_cv   = CONDITION_VARIABLE_INIT;
+static int                g_mc_state;          /* AE_MC_*, guarded by g_mc_lock */
+static sh_main_call_fn    g_mc_fn;
+static void              *g_mc_ctx;
+static int                g_mc_result;
+
+/* Process-heap scope matches the heap these calls used when they ran off-main. */
+static int ae_main_call_invoke(sh_main_call_fn fn, void *ctx)
+{
+    int r = 0;
+    int pushed = ae_push_heap_global();
+    __try { r = fn(ctx); } __except (EXCEPTION_EXECUTE_HANDLER) { r = 0; }
+    if (pushed) ae_pop_heap();
+    return r;
+}
+
+static void ae_main_call_poll(void)
+{
+    sh_main_call_fn fn;
+    void *ctx;
+    AcquireSRWLockExclusive(&g_mc_lock);
+    if (g_mc_state != AE_MC_PUBLISHED) { ReleaseSRWLockExclusive(&g_mc_lock); return; }
+    fn = g_mc_fn; ctx = g_mc_ctx;
+    g_mc_state = AE_MC_RUNNING;
+    ReleaseSRWLockExclusive(&g_mc_lock);
+
+    int r = ae_main_call_invoke(fn, ctx);
+
+    AcquireSRWLockExclusive(&g_mc_lock);
+    g_mc_result = r;
+    g_mc_state = AE_MC_DONE;
+    ReleaseSRWLockExclusive(&g_mc_lock);
+    WakeAllConditionVariable(&g_mc_cv);
+}
+
+/* A withdrawn call never runs. A started one borrows the caller's ctx, so the
+ * caller waits it out; the main thread never waits on the caller. */
+static int slot_run_on_main(sh_iface *self, sh_main_call_fn fn, void *ctx, int timeout_ms, int *out_result)
+{
+    (void)self;
+    if (out_result) *out_result = 0;
+    if (!fn) return 0;
+    int on_main = ae_on_main_thread();
+    if (on_main == 1) {
+        int r = ae_main_call_invoke(fn, ctx);
+        if (out_result) *out_result = r;
+        return 1;
+    }
+    if (on_main < 0) return 0;
+
+    AcquireSRWLockExclusive(&g_mc_lock);
+    if (g_mc_state != AE_MC_EMPTY) { ReleaseSRWLockExclusive(&g_mc_lock); return 0; }
+    g_mc_fn = fn; g_mc_ctx = ctx; g_mc_result = 0;
+    g_mc_state = AE_MC_PUBLISHED;
+    ULONGLONG deadline = GetTickCount64() + (ULONGLONG)(timeout_ms > 0 ? timeout_ms : 0);
+    for (;;) {
+        ULONGLONG now = GetTickCount64();
+        if (g_mc_state != AE_MC_PUBLISHED || now >= deadline) break;
+        SleepConditionVariableSRW(&g_mc_cv, &g_mc_lock, (DWORD)(deadline - now), 0);
+    }
+    if (g_mc_state == AE_MC_PUBLISHED) {
+        g_mc_state = AE_MC_EMPTY; g_mc_fn = NULL; g_mc_ctx = NULL;
+        ReleaseSRWLockExclusive(&g_mc_lock);
+        return 0;
+    }
+    while (g_mc_state == AE_MC_RUNNING)
+        SleepConditionVariableSRW(&g_mc_cv, &g_mc_lock, INFINITE, 0);
+    if (out_result) *out_result = g_mc_result;
+    g_mc_state = AE_MC_EMPTY; g_mc_fn = NULL; g_mc_ctx = NULL;
+    ReleaseSRWLockExclusive(&g_mc_lock);
+    return 1;
+}
+
+void sh_apply_engine_get_run_on_main(sh_run_on_main_fn *run_on_main)
+{
+    if (run_on_main) *run_on_main = slot_run_on_main;
 }
 
 /* A valid process/persistent-heap allocation survives map teardown.
@@ -1455,6 +1562,46 @@ int sh_apply_engine_entity_json(int id, char *out, int cap, void *ctx)
     return slot_serialize_entity(NULL, id, out, cap);
 }
 
+/* Which room an entity belongs to, as the editor holds it. The paste path
+ * (0x140CDCB40) reads this same array to decide whether an entity has crossed
+ * rooms, and transforms its coordinates when it has. */
+static int ae_entity_instance(int id)
+{
+    const uint8_t *ed = ae_editor_session();
+    void *map = NULL, *owners = NULL;
+    int owner = -1;
+    if (!ed || id < 0) return -1;
+    if (!ae_read_ptr(ed + ED_MAP_OBJ_OFF, &map) || !map) return -1;
+    if (!ae_read_ptr((const uint8_t *)map + MAP_ENT_INSTANCE_OFF, &owners) || !owners) return -1;
+    if (!ae_read_u32_safe((const uint8_t *)owners + (size_t)id * 4, &owner)) return -1;
+    return owner;
+}
+
+int sh_apply_engine_entity_transform(int id, float origin[3], float m[3][3],
+                                     float size[3], int *instance, void *ctx)
+{
+    void *array = NULL, *ent = NULL;
+    uint32_t count = 0;
+    float t[15];
+    int i, r, c;
+    (void)ctx;
+    if (instance) *instance = -1;
+    if (!ae_entity_array(&array, &count)) return 0;
+    ent = ae_entity_ptr(array, count, id);
+    if (!ent) return 0;
+    __try {
+        memcpy(t, (const uint8_t *)ent + ENT_VALID_OFF + ENT_TRANSFORM_OFF, sizeof t);
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+    for (i = 0; i < 15; i++) if (!_finite(t[i])) return 0;
+    for (i = 12; i < 15; i++) if (!(t[i] > 0.0f)) return 0;
+    for (i = 0; i < 3; i++) origin[i] = t[i];
+    for (r = 0; r < 3; r++)
+        for (c = 0; c < 3; c++) m[r][c] = t[3 + r * 3 + c];
+    for (i = 0; i < 3; i++) size[i] = t[12 + i];
+    if (instance) *instance = ae_entity_instance(id);
+    return 1;
+}
+
 int sh_apply_engine_nav_snapshot(char **out, size_t *len, void *ctx)
 {
     uint8_t str[IDSTR_SIZE] = {0};
@@ -1627,7 +1774,6 @@ void sh_apply_engine_read_probe(void (*out)(const char *fmt, ...))
 
 static volatile LONG g_nav_refresh_queued;
 static int g_nav_refresh_registered;
-static ULONGLONG g_nav_refresh_next;
 
 /* The geometry the lines on screen were built from. Published lines keep
  * drawing every frame on their own, so rebuilding them unchanged costs about
@@ -1661,85 +1807,295 @@ static void ae_nav_preview(const uint8_t *ed)
     g_preview_built_revision = revision;
 }
 
-/* How often the bake re-reads the editor.
- *
- * One read costs the engine's whole-map serializer, which is tens of
- * milliseconds on a small map and over a tenth of a second on a large one --
- * always several frames -- so the wait is a multiple of what the last read
- * actually cost. That holds the editor's share of frame time near 2% whatever
- * the map size, and a cheap read earns a fast rate rather than paying for it.
- *
- * A read taken mid-drag would be thrown away by the next one anyway, so none
- * is taken while the editor is holding geometry; the one that counts is taken
- * when it is put down. Adding or deleting an entity also reads at once. */
-#define NAV_REFRESH_BASE_MS  1000
-#define NAV_REFRESH_IDLE_MS  8000
-#define NAV_REFRESH_BUDGET   50     /* wait at least 50x the cost of one read */
+/* Every undoable editor action ends in CommitEdit, so the map changes only
+ * when one has run. The per-box read handles what an action did to a box it
+ * already knows; a box added since the last complete read is not one of those,
+ * and the entity table lengthening is what betrays it. */
+static volatile LONG g_nav_edit_pending;
+/* A property applied to a volume. The reflected flags -- the navigation tick,
+ * Block Demons -- are accessors rather than fields, so no fingerprint of the
+ * entity's memory is guaranteed to see one change. */
+static volatile LONG g_nav_volume_property;
 
-/* Two ways to read the editor, and which is cheaper depends on the map.
- *
- * Reading the marked volumes one at a time wins while there are few of them;
- * past the break-even the engine's single bulk write wins. Both costs are
- * measured here rather than assumed, so the break-even follows the map. The
- * margin keeps a map sitting near it from alternating every second.
- *
- * The cheap read only re-reads volumes it already knows, so one complete read
- * still runs every NAV_FULL_EVERY refreshes to pick up a new volume, or a
- * module that moved, that no count this poll can see would betray. */
-#define NAV_CHOICE_MARGIN    2.0
-#define NAV_FULL_EVERY       10
+/* The volumes a property edit named, which are the only ones whose flags are
+ * worth re-reading. More than this holds means re-read them all. */
+#define NAV_DIRTY_MAX 64
+static int  g_nav_dirty[NAV_DIRTY_MAX];
+static int  g_nav_dirty_count;
+static volatile LONG g_nav_dirty_all;
+static LONGLONG g_nav_retry_at;    /* when the last read was attempted with no fingerprint */
+/* The editor is not read while it is being edited. A change is noticed and
+ * remembered; the read happens when the View menu asks for it. */
+static int  g_nav_stale;
+static volatile LONG g_nav_update_requested;
+/* A refused read is retried a few times on its own and then left alone; a map
+ * that cannot be read would otherwise cost a stalled frame every second. */
+#define NAV_READ_TRIES 5
+static int  g_nav_read_tries;
+/* An entity was deleted. The label is only a gate: it says a removal happened,
+ * and the volume set then says whether it was one navigation was built from. */
+static volatile LONG g_nav_delete_pending;
 
-static double g_nav_whole_ms;      /* last complete read, 0 = not measured */
-static double g_nav_volumes_ms;    /* last volumes-only read, 0 = not measured */
-static int    g_nav_until_full;    /* refreshes left before a complete read */
+/* Which entity ids are blocking boxes, now and as of the last settled read.
+ * The difference names the boxes that have just arrived, which is what has to
+ * be read; without it every unflagged box is read again on every placement. */
+#define NAV_UID_MAX 65536
+static unsigned char g_nav_now_bits[NAV_UID_MAX / 8];
+static unsigned char g_nav_seen_bits[NAV_UID_MAX / 8];
+static int g_nav_seen_valid;
+
+static unsigned g_nav_shape_hash;   /* where the known boxes stood, at the last read */
+static unsigned g_nav_tracked_hash; /* the identity of those boxes */
+static unsigned g_nav_present_hash; /* which blocking boxes the editor held */
+static int      g_nav_have_hash;
+static void *g_nav_map_obj;        /* a different map object means a different map */
+static void *g_nav_undo_cursor;
+static int   g_nav_undo_count = -1;
+
+/* What the editor has actually cost since this DLL loaded, for sh_navmesh
+ * reads. An untouched map leaves every one of these at zero. */
+static struct {
+    unsigned reads, noticed;
+    unsigned by_edit, by_undo, by_start;
+    double   read_ms;
+} g_nav_reads;
 
 /* mode+0x1ac: 1 and 2 accept a new action; any other value is the editor
  * holding or manipulating something, which is the drag this poll sits out. */
 #define ED_MODE_STATE_OFF    (ED_MODE_OBJ_OFF + 0x1ac)
 
-static ULONGLONG g_nav_refresh_wait = NAV_REFRESH_BASE_MS;
-static int       g_nav_probe_ents   = -1;
-static int       g_nav_was_holding;
+static int g_nav_was_holding;
 
-static ULONGLONG ae_perf_ms(LONGLONG ticks)
+/* A Blocking Volume carries the affectsNavmesh typeinfo path on its type
+ * record; no other entity does. `block` is the entity pointer plus 8. */
+static int ae_block_is_volume(const uint8_t *block)
 {
-    LARGE_INTEGER freq;
-    QueryPerformanceFrequency(&freq);
-    if (freq.QuadPart <= 0 || ticks <= 0) return 0;
-    return (ULONGLONG)(ticks * 1000 / freq.QuadPart);
+    void *decl = NULL;
+    int navpath = 0;
+    if (!block || !ae_read_ptr(block, &decl) || !decl) return 0;
+    if (!ae_read_u32_safe((const uint8_t *)decl + DECL_NAV_PATH_OFF, &navpath)) return 0;
+    return navpath != 0;
 }
 
-/* A fingerprint of the editor's entity table. The length alone misses a
- * delete that empties a slot without shortening the table, so the slots
- * themselves are folded in. Reading is capped because this runs every frame. */
-#define ENT_FINGERPRINT_MAX 8192
-
-static int ae_entity_fingerprint(void)
+/* Which entity this block belongs to. The array is indexed by uniqueId, so the
+ * slot that points at the block names it. */
+static int ae_block_uid(const uint8_t *block)
 {
     void *array = NULL, *slot = NULL;
-    uint32_t count = 0, i, top;
-    unsigned h = 2166136261u;
+    uint32_t count = 0, i;
+    const void *want = (const void *)(block - ENT_VALID_OFF);
     if (!ae_entity_array(&array, &count)) return -1;
-    h ^= count; h *= 16777619u;
-    top = count > ENT_FINGERPRINT_MAX ? ENT_FINGERPRINT_MAX : count;
-    for (i = 0; i < top; i++) {
-        uintptr_t v = 0;
-        if (ae_read_ptr((const uint8_t *)array + (size_t)i * 8, &slot)) v = (uintptr_t)slot;
-        h ^= (unsigned)v; h *= 16777619u;
-        h ^= (unsigned)(v >> 32); h *= 16777619u;
+    for (i = 0; i < count; i++) {
+        if (!ae_read_ptr((const uint8_t *)array + (size_t)i * 8, &slot)) continue;
+        if (slot == want) return (int)i;
     }
-    return (int)(h & 0x7fffffff);
+    return -1;
 }
 
-/* What an edit changes and this poll can read without the serializer. An
- * unreadable mode state reads as settled, so a bad read can never stop the
- * refresh for good. */
-static void ae_nav_probe(const uint8_t *ed, int *ents, int *holding)
+static void ae_nav_mark_dirty(int uid)
+{
+    int i;
+    if (uid < 0 || g_nav_dirty_count >= NAV_DIRTY_MAX) {
+        InterlockedExchange(&g_nav_dirty_all, 1);
+        return;
+    }
+    for (i = 0; i < g_nav_dirty_count; i++) if (g_nav_dirty[i] == uid) return;
+    g_nav_dirty[g_nav_dirty_count++] = uid;
+}
+
+static unsigned ae_fold(unsigned h, const void *p, size_t n)
+{
+    const uint8_t *b = (const uint8_t *)p;
+    size_t i;
+    for (i = 0; i < n; i++) { h ^= b[i]; h *= 16777619u; }
+    return h;
+}
+
+/* Where the editor's undo stack stands. Both values move on an edit, on an
+ * undo and on a redo, which is every way the map changes. */
+static int ae_undo_mark(const uint8_t *ed, void **cursor, int *count)
+{
+    void *stack = NULL;
+    *cursor = NULL;
+    *count = -1;
+    if (!ae_read_ptr(ed + ED_UNDO_STACK_OFF, &stack) || !stack) return 0;
+    if (!ae_read_ptr((const uint8_t *)stack + UNDO_CURSOR_OFF, cursor)) return 0;
+    if (!ae_read_u32_safe((const uint8_t *)stack + UNDO_COUNT_OFF, count)) return 0;
+    return 1;
+}
+
+/* The placed modules, whose origins every box coordinate is relative to. A
+ * room the user dragged moves its boxes without touching a single one of their
+ * blocks, and the per-box refresh keeps the instance table it was given, so a
+ * change here has to reach the complete read. */
+static unsigned ae_fold_modules(unsigned h)
+{
+    const uint8_t *ed = ae_editor_session();
+    void *map = NULL, *records = NULL;
+    int count = 0;
+
+    if (!ed || !ae_read_ptr(ed + ED_MAP_OBJ_OFF, &map) || !map) return h;
+    if (!ae_read_ptr((const uint8_t *)map + MAP_MODULES_OFF, &records) || !records) return h;
+    count = sh_nav_bake_instance_count();
+    if (count < 0 || count > MAP_MODULE_MAX) return h;
+    h = ae_fold(h, &count, sizeof count);
+    __try {
+        int i;
+        for (i = 0; i < count; i++) {
+            const uint8_t *rec = (const uint8_t *)records + (size_t)i * MAP_MODULE_STRIDE;
+            h = ae_fold(h, rec + MOD_ORIGIN_OFF, 12);
+            h = ae_fold(h, rec + MOD_ORIENT_OFF, 4);
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) { }
+    return h;
+}
+
+/* Which volumes the editor holds right now. A copy, a paste and a duplicate
+ * all arrive as a volume the navigation has never seen, and none of them
+ * touches a volume it has, so this is what notices them. */
+static int ae_nav_live_volume_set(unsigned *set)
+{
+    void *array = NULL, *slot = NULL;
+    uint32_t count = 0, i;
+    unsigned h = 2166136261u;
+
+    if (!ae_entity_array(&array, &count)) return 0;
+    memset(g_nav_now_bits, 0, sizeof g_nav_now_bits);
+    for (i = 0; i < count; i++) {
+        if (!ae_read_ptr((const uint8_t *)array + (size_t)i * 8, &slot) || !slot) continue;
+        if (!ae_block_is_volume((const uint8_t *)slot + ENT_VALID_OFF)) continue;
+        h = ae_fold(h, &i, sizeof i);
+        if (i < NAV_UID_MAX) g_nav_now_bits[i >> 3] |= (unsigned char)(1u << (i & 7));
+    }
+    *set = h;
+    return 1;
+}
+
+/* Take the boxes standing now as the set that has been accounted for. */
+static void ae_nav_seen_commit(void)
+{
+    memcpy(g_nav_seen_bits, g_nav_now_bits, sizeof g_nav_seen_bits);
+    g_nav_seen_valid = 1;
+}
+
+/* A blocking box that has only just appeared and carries a flag. Reads only
+ * the boxes standing now that were not standing at the last settled read,
+ * which is one box for a placement and none for anything else. */
+static int ae_nav_arrived_flagged(void)
+{
+    unsigned b, i;
+    if (!g_nav_seen_valid) return 1;
+    for (b = 0; b < sizeof g_nav_now_bits; b++) {
+        unsigned new_here = (unsigned)(g_nav_now_bits[b] & ~g_nav_seen_bits[b]);
+        if (!new_here) continue;
+        for (i = 0; i < 8; i++) {
+            int uid;
+            if (!(new_here & (1u << i))) continue;
+            uid = (int)(b * 8 + i);
+            if (sh_nav_bake_knows_volume(uid)) continue;
+            if (sh_nav_bake_volume_flagged(uid)) return 1;
+        }
+    }
+    return 0;
+}
+
+/* A box the navigation is built from that is no longer a blocking box in the
+ * editor. The mirror of the arrival test, and the same cost: memory only.
+ * Deleting anything else leaves this set untouched. */
+static int ae_nav_known_volume_gone(void)
+{
+    static int uids[NAV_VOLUME_MAX];
+    int n, k;
+    n = sh_nav_bake_volume_uids(uids, NAV_VOLUME_MAX);
+    for (k = 0; k < n; k++) {
+        int uid = uids[k];
+        if (uid < 0 || uid >= NAV_UID_MAX) return 1;
+        if (!(g_nav_now_bits[uid >> 3] & (1u << (uid & 7)))) return 1;
+    }
+    return 0;
+}
+
+/* Did a property edit land anywhere the navigation cares about? A box it
+ * already serves may have had a flag taken off; any other box matters only if
+ * a flag has just gone on. Anything else touched no navigation. */
+static int ae_nav_edit_matters(void)
+{
+    int i;
+    if (InterlockedCompareExchange(&g_nav_dirty_all, 0, 0)) return 1;
+    for (i = 0; i < g_nav_dirty_count; i++) {
+        if (sh_nav_bake_knows_volume(g_nav_dirty[i])) return 1;
+        if (sh_nav_bake_volume_flagged(g_nav_dirty[i])) return 1;
+    }
+    return 0;
+}
+
+/* Two fingerprints over the volumes the navigation was built from.
+ *
+ * `shape` is where each box stands and how big it is: a drag, a turn or a
+ * resize moves only this, and the geometry for that comes out of memory, so it
+ * costs no serializing at all.
+ *
+ * `roster` is everything about which boxes exist -- the entity count, each
+ * box's slot, its per-entity state bit, and whether it still reads as a
+ * blocking volume. A delete, an add or a paste has to show up in at least one
+ * of those, and when it does the answer comes from serializing the boxes
+ * rather than from anything guessed about how the editor marks a box gone. */
+static int ae_nav_fingerprints(unsigned *shape, unsigned *tracked, unsigned *present)
+{
+    static int uids[NAV_VOLUME_MAX];
+    const uint8_t *ed = ae_editor_session();
+    void *array = NULL, *slot = NULL, *map = NULL, *states = NULL;
+    uint32_t count = 0;
+    unsigned hs = 2166136261u, ht = 2166136261u, hp = 0;
+    int known, k;
+
+    if (!ae_entity_array(&array, &count)) return 0;
+    if (!ae_nav_live_volume_set(&hp)) return 0;
+    /* A map with no blocking boxes has nothing to track, which is an answer,
+     * not a failure. The loop runs no times and the fingerprints settle, so
+     * editing such a map reads nothing at all. */
+    known = sh_nav_bake_volume_uids(uids, NAV_VOLUME_MAX);
+    if (known < 0) known = 0;
+    hs = ae_fold_modules(hs);
+    if (ed && ae_read_ptr(ed + ED_MAP_OBJ_OFF, &map) && map)
+        ae_read_ptr((const uint8_t *)map + MAP_ENT_STATE_OFF, &states);
+    for (k = 0; k < known; k++) {
+        int uid = uids[k], is_volume = 0;
+        const uint8_t *block;
+        ht = ae_fold(ht, &uid, sizeof uid);
+        slot = (uid >= 0) ? ae_entity_ptr(array, count, uid) : NULL;
+        ht = ae_fold(ht, &slot, sizeof slot);
+        /* This box's own bit, not the word around it: the word covers 64
+         * entity ids, and a neighbour being deleted is not this box changing. */
+        if (states && uid >= 0) {
+            int bit = 0;
+            __try {
+                bit = (((const uint64_t *)states)[(unsigned)uid >> 6] >>
+                       ((unsigned)uid & 63)) & 1;
+            } __except (EXCEPTION_EXECUTE_HANDLER) { bit = 0; }
+            ht = ae_fold(ht, &bit, sizeof bit);
+        }
+        if (!slot) continue;
+        block = (const uint8_t *)slot + ENT_VALID_OFF;
+        is_volume = ae_block_is_volume(block);
+        ht = ae_fold(ht, &is_volume, sizeof is_volume);
+        __try {
+            hs = ae_fold(hs, block + ENT_NAV_FIELDS_OFF, ENT_NAV_FIELDS_LEN);
+        } __except (EXCEPTION_EXECUTE_HANDLER) { }
+    }
+    *shape = hs;
+    *tracked = ht;
+    *present = hp;
+    return 1;
+}
+
+/* Is the editor holding geometry? An unreadable state reads as settled, so a
+ * bad read can never stop the refresh for good. */
+static int ae_nav_holding(const uint8_t *ed)
 {
     int mode_state = 1;
-    *ents = ae_entity_fingerprint();
     if (!ae_read_u32_safe(ed + ED_MODE_STATE_OFF, &mode_state)) mode_state = 1;
-    *holding = mode_state != 1 && mode_state != 2;
+    return mode_state != 1 && mode_state != 2;
 }
 
 static void ae_nav_refresh_cmd(void)
@@ -1749,36 +2105,72 @@ static void ae_nav_refresh_cmd(void)
     __try {
         if (ed && ae_read_u32_safe(g_load_state_at, &state) && state == LOAD_STATE_RUNNING &&
             ae_read_u32_safe(ed + ED_ENTITY_MODE_OFF, &mode) && mode >= 0 && mode <= 2) {
-            unsigned long before = sh_nav_bake_geometry_revision();
-            int ents = -1, holding = 0, cheap = 0;
-            ULONGLONG budget;
-            LONGLONG started = sh_perf_now();
+            unsigned shape = 0, tracked = 0, present = 0;
+            int property = InterlockedExchange(&g_nav_volume_property, 0) != 0;
+            int deleted = InterlockedExchange(&g_nav_delete_pending, 0) != 0;
+            int read = ae_nav_fingerprints(&shape, &tracked, &present);
+            int known = read && g_nav_have_hash;
+            /* A blocking box has come or gone. Only one carrying a flag can
+             * change the navigation, and that costs one read of that box. */
+            int arrived = known && present != g_nav_present_hash;
+            int changed = !known ||
+                          shape != g_nav_shape_hash ||
+                          tracked != g_nav_tracked_hash ||
+                          (property && ae_nav_edit_matters()) ||
+                          (deleted && ae_nav_known_volume_gone()) ||
+                          (arrived && ae_nav_arrived_flagged());
+            /* Asked for from the View menu, or owed because the map has only
+             * just opened and has no picture yet. Asking by hand always tries
+             * again, however many times the map has refused before. */
+            int requested = InterlockedExchange(&g_nav_update_requested, 0) != 0;
+            int update;
+            if (requested) g_nav_read_tries = 0;
+            update = requested ||
+                     (!g_nav_have_hash && g_nav_read_tries < NAV_READ_TRIES);
 
-            if (g_nav_until_full > 0 &&
-                (g_nav_volumes_ms == 0.0 ||
-                 g_nav_volumes_ms * NAV_CHOICE_MARGIN < g_nav_whole_ms))
-                cheap = sh_nav_bake_refresh_volumes(NULL);
-            if (cheap) {
-                g_nav_volumes_ms = ae_perf_msf(sh_perf_now() - started);
-                g_nav_until_full--;
-            } else {
+            InterlockedExchange(&g_nav_dirty_all, 0);
+            g_nav_dirty_count = 0;
+
+            /* Boxes came or went and none of them served navigation. Take the
+             * new set as the baseline so it is not asked about again. */
+            if (arrived && !changed) { g_nav_present_hash = present; ae_nav_seen_commit(); }
+
+            if (changed && !update) {
+                g_nav_stale = 1;
+                g_nav_reads.noticed++;
+            }
+            if (update) {
+                LONGLONG started = sh_perf_now();
+                g_nav_reads.reads++;
                 sh_nav_bake_refresh_live();
-                g_nav_whole_ms = ae_perf_msf(sh_perf_now() - started);
-                g_nav_until_full = NAV_FULL_EVERY;
+                g_nav_reads.read_ms += ae_perf_msf(sh_perf_now() - started);
+                /* A refused read leaves no map behind. Fingerprinting that
+                 * would record an empty one, and an empty map and a map that
+                 * could not be read are not the same answer. */
+                if (sh_nav_bake_has_map() &&
+                    ae_nav_fingerprints(&shape, &tracked, &present)) {
+                    g_nav_shape_hash = shape;
+                    g_nav_tracked_hash = tracked;
+                    g_nav_present_hash = present;
+                    ae_nav_seen_commit();
+                    g_nav_have_hash = 1;
+                    g_nav_stale = 0;
+                    g_nav_read_tries = 0;
+                } else {
+                    g_nav_read_tries++;
+                    g_nav_stale = 1;
+                }
+                g_preview_built_revision = ~0UL;
             }
             SH_PERF_BEGIN(tp);
             if (mode == 2) ae_nav_preview(ed);
             else sh_nav_preview_clear();
             SH_PERF_END(SH_PERF_NAV_PREVIEW, tp);
 
-            ae_nav_probe(ed, &ents, &holding);
-            g_nav_probe_ents = ents;
-            g_nav_was_holding = holding;
-            budget = ae_perf_ms(sh_perf_now() - started) * NAV_REFRESH_BUDGET;
-            if (budget < NAV_REFRESH_BASE_MS) budget = NAV_REFRESH_BASE_MS;
-            if (budget > NAV_REFRESH_IDLE_MS) budget = NAV_REFRESH_IDLE_MS;
-            g_nav_refresh_wait = budget;
-            (void)before;
+            g_nav_was_holding = ae_nav_holding(ed);
+        } else {
+            /* Nothing can be read here, so a View menu request ends unanswered. */
+            InterlockedExchange(&g_nav_update_requested, 0);
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         sh_nav_preview_clear();
@@ -1787,32 +2179,195 @@ static void ae_nav_refresh_cmd(void)
     InterlockedExchange(&g_nav_refresh_queued, 0);
 }
 
-/* Frame maintenance schedules reflection and publication on the engine command
- * drain, with at most one refresh outstanding. */
+/* CommitEdit(editor, label). Sixteen bytes of whole, position-independent
+ * prologue: push, sub, mov, mov. */
+#define AE_COMMIT_EDIT_STOLEN 16
+
+typedef void (*ae_commit_edit_fn)(void *editor, void *label);
+static ae_commit_edit_fn g_commit_edit_tramp;
+
+static void ae_commit_edit_detour(void *editor, void *label)
+{
+    char what[32];
+    InterlockedExchange(&g_nav_edit_pending, 1);
+    if (ae_read_idstr(label, what, sizeof what) &&
+        !strncmp(what, "Delete Entit", 12))
+        InterlockedExchange(&g_nav_delete_pending, 1);
+    if (g_commit_edit_tramp) g_commit_edit_tramp(editor, label);
+}
+
+/* GridApplyEntityTree(entity, tree). Eighteen bytes of whole,
+ * position-independent prologue: two stores, a push, a sub and a move. */
+#define AE_APPLY_TREE_STOLEN 18
+
+typedef void (*ae_apply_tree_fn)(void *entity, void *tree);
+static ae_apply_tree_fn g_apply_tree_tramp;
+
+static void ae_apply_tree_detour(void *entity, void *tree)
+{
+    if (ae_block_is_volume((const uint8_t *)entity)) {
+        ae_nav_mark_dirty(ae_block_uid((const uint8_t *)entity));
+        InterlockedExchange(&g_nav_volume_property, 1);
+    }
+    if (g_apply_tree_tramp) g_apply_tree_tramp(entity, tree);
+}
+
+void sh_apply_engine_nav_decl_rewritten(int id)
+{
+    ae_nav_mark_dirty(id);
+    InterlockedExchange(&g_nav_volume_property, 1);
+    InterlockedExchange(&g_nav_edit_pending, 1);
+}
+
+static void *ae_detour_named(const sig_result *results, size_t n, const char *name,
+                             void *detour, size_t stolen, const char *what)
+{
+    const sig_result *r = NULL;
+    void *tramp;
+    size_t i;
+    for (i = 0; i < n && !r; i++)
+        if (results[i].name && !strcmp(results[i].name, name)) r = &results[i];
+    if (!r || r->status != SIG_OK) {
+        backend_log(what);
+        return NULL;
+    }
+    tramp = sh_prepare_detour_sig(r, detour, stolen);
+    if (!tramp) { backend_log(what); return NULL; }
+    if (sh_commit_detour(tramp) != B2_PATCH_OK) {
+        sh_uninstall_detour(tramp);
+        backend_log(what);
+        return NULL;
+    }
+    return tramp;
+}
+
+void sh_apply_engine_install_edit_hook(const sig_result *results, size_t n)
+{
+    g_commit_edit_tramp = (ae_commit_edit_fn)ae_detour_named(
+        results, n, "EditorCommitEdit", (void *)ae_commit_edit_detour,
+        AE_COMMIT_EDIT_STOLEN,
+        "NAV: edit hook SKIPPED -- navigation geometry will not follow editor actions");
+    g_apply_tree_tramp = (ae_apply_tree_fn)ae_detour_named(
+        results, n, "GridApplyEntityTree", (void *)ae_apply_tree_detour,
+        AE_APPLY_TREE_STOLEN,
+        "NAV: property hook SKIPPED -- a volume's navigation tick will not be seen "
+        "until it is also moved");
+}
+
+void sh_apply_engine_nav_request_update(void)
+{
+    InterlockedExchange(&g_nav_update_requested, 1);
+}
+
+int sh_apply_engine_nav_view_state(void)
+{
+    int state = g_nav_stale ? 1 : 0;
+    if (InterlockedCompareExchange(&g_nav_update_requested, 0, 0)) state |= 2;
+    if (g_nav_read_tries >= NAV_READ_TRIES) state |= 4;
+    return state;
+}
+
+void sh_apply_engine_nav_read_stats(unsigned *reads, unsigned *noticed, double *read_ms,
+                                    unsigned *by_edit, unsigned *by_undo,
+                                    unsigned *by_start, int *hooked)
+{
+    if (reads) *reads = g_nav_reads.reads;
+    if (noticed) *noticed = g_nav_reads.noticed;
+    if (read_ms) *read_ms = g_nav_reads.read_ms;
+    if (by_edit) *by_edit = g_nav_reads.by_edit;
+    if (by_undo) *by_undo = g_nav_reads.by_undo;
+    if (by_start) *by_start = g_nav_reads.by_start;
+    if (hooked) *hooked = g_commit_edit_tramp != NULL && g_apply_tree_tramp != NULL;
+}
+
+/* Ask for a read on the engine's command drain, with at most one outstanding. */
+static void ae_nav_refresh_queue(void)
+{
+    __try {
+        if (!g_nav_refresh_registered) {
+            g_add_command(g_cmdsys, "sh_nav_refresh_internal", (void *)ae_nav_refresh_cmd,
+                          NULL, "refresh current editor navigation geometry", 0);
+            g_nav_refresh_registered = 1;
+        }
+        if (InterlockedCompareExchange(&g_nav_refresh_queued, 1, 0) == 0)
+            g_buffer_cmd(g_cmdsys, "sh_nav_refresh_internal\n");
+    } __except (EXCEPTION_EXECUTE_HANDLER) { InterlockedExchange(&g_nav_refresh_queued, 0); }
+}
+
+/* Frame maintenance. An unedited map reaches the first return having read one
+ * flag, so a map nobody is changing costs nothing per frame. */
 static void ae_nav_refresh_poll(void)
 {
-    ULONGLONG now = GetTickCount64();
-    const uint8_t *ed = ae_editor_session();
-    int state = -1, enabled = 0, ents = -1, holding = 0;
+    const uint8_t *ed;
+    void *map_obj = NULL;
+    int state = -1, enabled = 0, undone, edited;
+
+    ed = ae_editor_session();
     if (!ed || !ae_read_u32_safe(g_load_state_at, &state) ||
         state != LOAD_STATE_RUNNING) { sh_nav_preview_clear(); return; }
     if (!g_cmdsys || !g_add_command || !g_buffer_cmd) return;
     /* Both consumers of the read -- the green preview and the resource served at
      * Play -- are off with navigation disabled, so the read has no reader. */
     if (!sh_config_get_bool("navmesh.enabled", &enabled, NULL) || !enabled) {
-        sh_nav_preview_clear(); g_preview_built_revision = ~0UL; return;
+        sh_nav_preview_clear(); g_preview_built_revision = ~0UL;
+        InterlockedExchange(&g_nav_update_requested, 0);
+        return;
     }
 
-    ae_nav_probe(ed, &ents, &holding);
-    if (holding) {
-        /* Mid-drag: whatever this read found would be stale by the next frame.
-         * The lines already drawn are staler still -- they sit where the volume
-         * was picked up from -- so they come down until it is put back. */
+    /* A different map object is a different map, and nothing cached survives it. */
+    if (!ae_read_ptr(ed + ED_MAP_OBJ_OFF, &map_obj)) map_obj = g_nav_map_obj;
+    if (map_obj != g_nav_map_obj) {
+        g_nav_map_obj = map_obj;
+        g_nav_have_hash = 0;
+        g_nav_read_tries = 0;
+        g_nav_stale = 0;
+        g_nav_seen_valid = 0;
+    }
+
+    if (ae_nav_holding(ed)) {
+        /* Mid-drag the lines sit where the volume was picked up from, so they
+         * come down until it is put back. */
         if (!g_nav_was_holding) sh_nav_preview_clear();
-        g_nav_probe_ents = ents;
         g_nav_was_holding = 1;
         return;
     }
+
+    /* Undo and redo never reach CommitEdit. They move the undo cursor, and so
+     * does an edit, so this only says "look again" -- the volume fingerprint
+     * decides whether anything actually has to be read. */
+    {
+        void *cursor = NULL;
+        int count = -1;
+        undone = ae_undo_mark(ed, &cursor, &count) &&
+                 (cursor != g_nav_undo_cursor || count != g_nav_undo_count);
+        if (undone) { g_nav_undo_cursor = cursor; g_nav_undo_count = count; }
+    }
+    /* No fingerprint yet -- a map just opened, or one was thrown away. Ask for
+     * the read that establishes it, but only once the table it is taken from can
+     * be read at all, or an unreadable table would mean a read every frame.
+     *
+     * A map that has only just opened refuses the read until its boxes can be
+     * measured, so attempts are held a second apart; without that, the whole
+     * wait is spent inside back-to-back complete reads. */
+    if (!g_nav_have_hash && g_nav_read_tries < NAV_READ_TRIES) {
+        void *array = NULL;
+        uint32_t count = 0;
+        LONGLONG now = sh_perf_now();
+        if ((g_nav_retry_at == 0 || ae_perf_msf(now - g_nav_retry_at) >= 1000.0) &&
+            ae_entity_array(&array, &count)) {
+            g_nav_retry_at = now;
+            undone = 1;
+        }
+    }
+
+    /* Letting go is not an edit. A cancelled placement, and stepping in and out
+     * of a menu, both end a hold without changing the map, so the lines are put
+     * back from the geometry already in hand and nothing is read. */
+    if (g_nav_was_holding) {
+        g_nav_was_holding = 0;
+        g_preview_built_revision = ~0UL;
+    }
+
     /* The bake finishes on the worker's clock, not the read clock, so the green
      * is put up on the frame it becomes ready. Both tests are ours and cheap;
      * neither touches the engine unless one of them says there is work. */
@@ -1824,28 +2379,17 @@ static void ae_nav_refresh_poll(void)
             ae_nav_preview(ed);
     }
 
-    /* What is selected is not what the map is. A marquee changes the selection
-     * on every frame it covers something new, and reading the map for that costs
-     * a frame each time while telling us nothing that moved. */
-    if (g_nav_was_holding || ents != g_nav_probe_ents) {
-        g_nav_probe_ents = ents;
-        g_nav_was_holding = 0;
-        g_nav_refresh_wait = NAV_REFRESH_BASE_MS;
-        g_nav_refresh_next = 0;
-        g_nav_until_full = 0; /* changed topology or module transform */
-    }
-    if (now < g_nav_refresh_next) return;
-    g_nav_refresh_next = now + g_nav_refresh_wait;
-    if (!ae_read_u32_safe(g_load_state_at, &state) || state != LOAD_STATE_RUNNING) return;
-    __try {
-        if (!g_nav_refresh_registered) {
-            g_add_command(g_cmdsys, "sh_nav_refresh_internal", (void *)ae_nav_refresh_cmd,
-                          NULL, "refresh current editor navigation geometry", 0);
-            g_nav_refresh_registered = 1;
-        }
-        if (InterlockedCompareExchange(&g_nav_refresh_queued, 1, 0) == 0)
-            g_buffer_cmd(g_cmdsys, "sh_nav_refresh_internal\n");
-    } __except (EXCEPTION_EXECUTE_HANDLER) { InterlockedExchange(&g_nav_refresh_queued, 0); }
+    /* Claimed only here, where the claim is always acted on: a frame that
+     * returned earlier leaves the edit pending for the next one. */
+    edited = InterlockedExchange(&g_nav_edit_pending, 0) != 0;
+    /* An update asked for from the View menu runs on its own, on a frame where
+     * nothing was edited. Without this it waits for the next edit to carry it. */
+    if (!edited && !undone &&
+        !InterlockedCompareExchange(&g_nav_update_requested, 0, 0)) return;
+    if (edited) g_nav_reads.by_edit++;
+    else if (g_nav_have_hash) g_nav_reads.by_undo++;
+    else g_nav_reads.by_start++;
+    ae_nav_refresh_queue();
 }
 
 /* Normalize palette timelines to the portable inherit value. */
@@ -2383,6 +2927,7 @@ static void ae_play_log_diff(const ae_play_snap *before, const ae_play_snap *aft
 void sh_apply_prefab_poll_play(void)
 {
     if (ae_on_main_thread() != 1) return;
+    ae_main_call_poll();
     /* Fallback package requirements application. The decl server normally applies
      * them before boot publication; both entry points share a one-shot latch. */
     sh_package_requirements_poll();

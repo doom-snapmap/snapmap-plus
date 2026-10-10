@@ -59,6 +59,7 @@ static void bake_plan_locked(void);
 static sh_nav_bake_entity_count g_live_count;
 static sh_navr_entity_valid     g_live_valid;
 static sh_navr_entity_json      g_live_json;
+static sh_navr_entity_transform g_live_transform;
 static void                    *g_live_ctx;
 static sh_nav_bake_snapshot g_snapshot;
 static void *g_snapshot_ctx;
@@ -185,12 +186,14 @@ void sh_nav_bake_set_snapshot(sh_nav_bake_snapshot snapshot, void *ctx)
 void sh_nav_bake_set_live_editor(sh_nav_bake_entity_count count,
                                  sh_navr_entity_valid valid,
                                  sh_navr_entity_json get_json,
+                                 sh_navr_entity_transform get_transform,
                                  void *ctx)
 {
     AcquireSRWLockExclusive(&g_bake_lock);
     g_live_count = count;
     g_live_valid = valid;
     g_live_json = get_json;
+    g_live_transform = get_transform;
     g_live_ctx = ctx;
     ReleaseSRWLockExclusive(&g_bake_lock);
 }
@@ -399,6 +402,83 @@ static const char *g_volumes_reason = "never tried";
 
 const char *sh_nav_bake_volumes_reason(void) { return g_volumes_reason; }
 
+/* A refused read keeps g_have_map but leaves g_loaded describing the read it threw away. */
+static int bake_map_held_locked(void) { return g_have_map && !g_live_refused; }
+
+int sh_nav_bake_volume_uids(int *out, int cap)
+{
+    int n;
+    AcquireSRWLockShared(&g_bake_lock);
+    n = bake_map_held_locked() ? sh_nav_regions_volume_uids(out, cap) : 0;
+    ReleaseSRWLockShared(&g_bake_lock);
+    return n;
+}
+
+int sh_nav_bake_knows_volume(int uid)
+{
+    int known;
+    AcquireSRWLockShared(&g_bake_lock);
+    known = bake_map_held_locked() && sh_nav_regions_knows_volume(uid);
+    ReleaseSRWLockShared(&g_bake_lock);
+    return known;
+}
+
+/* What went wrong with the last bake: `marked` is the volumes drawn red, and
+ * `rooms` the rooms that produced no navigation. A room can fail with no volume
+ * to blame, which is why both are counted. */
+void sh_nav_bake_conflicts(int *marked, int *rooms)
+{
+    int i, m = 0, r = 0;
+    AcquireSRWLockShared(&g_bake_lock);
+    for (i = 0; i < g_module_count; i++) {
+        m += g_preview[i].refused_count;
+        /* Until the bake catches up, a room without bytes is still building. */
+        if (g_preview_revision == g_geometry_revision &&
+            g_modules[i].regions > 0 && !g_preview[i].bytes) r++;
+    }
+    ReleaseSRWLockShared(&g_bake_lock);
+    if (marked) *marked = m;
+    if (rooms)  *rooms  = r;
+}
+
+void sh_nav_bake_volume_counts(int *floors, int *walls)
+{
+    AcquireSRWLockShared(&g_bake_lock);
+    if (floors) *floors = bake_map_held_locked() ? g_map.region_count : 0;
+    if (walls)  *walls  = bake_map_held_locked() ? g_map.obstacle_count : 0;
+    ReleaseSRWLockShared(&g_bake_lock);
+}
+
+int sh_nav_bake_has_map(void)
+{
+    int have;
+    AcquireSRWLockShared(&g_bake_lock);
+    have = bake_map_held_locked();
+    ReleaseSRWLockShared(&g_bake_lock);
+    return have;
+}
+
+int sh_nav_bake_instance_count(void)
+{
+    int n;
+    AcquireSRWLockShared(&g_bake_lock);
+    n = bake_map_held_locked() ? g_map.instance_count : 0;
+    ReleaseSRWLockShared(&g_bake_lock);
+    return n;
+}
+
+int sh_nav_bake_volume_flagged(int uid)
+{
+    sh_navr_entity_json get_json;
+    void *ctx;
+    AcquireSRWLockShared(&g_bake_lock);
+    get_json = g_live_json;
+    ctx = g_live_ctx;
+    ReleaseSRWLockShared(&g_bake_lock);
+    if (!get_json) return 0;
+    return sh_nav_regions_volume_flagged(uid, get_json, ctx);
+}
+
 int sh_nav_bake_refresh_volumes(int *volumes)
 {
     sh_nav_map *before = NULL;
@@ -418,7 +498,8 @@ int sh_nav_bake_refresh_volumes(int *volumes)
         if (!before) { why = "allocation failed"; __leave; }
         *before = g_map;
         if (!sh_nav_regions_refresh_known(&g_map, g_live_valid, g_live_json,
-                                          g_live_ctx, &count, &why)) __leave;
+                                          g_live_transform, g_live_ctx,
+                                          &count, &why)) __leave;
         g_live_marked = g_map.region_count;
         g_live_scanned = count;
         if (memcmp(before, &g_map, sizeof g_map)) {
@@ -454,7 +535,13 @@ void sh_nav_bake_refresh_live(void)
                       "no navigation is available"
                     : "NAV: a volume could not be read, so the whole map read "
                       "was refused and no navigation is available");
-            ok = ok && !candidate->truncated && !candidate->invalid_geometry;
+            /* An incomplete read is worth saying so once, and worth another
+             * attempt rather than a refusal. */
+            if (ok && candidate->unmeasured)
+                backend_log("NAV: the map had just opened and some boxes could not "
+                            "be measured; reading it again");
+            ok = ok && !candidate->truncated && !candidate->invalid_geometry &&
+                 !candidate->unmeasured;
         }
         if (ok) {
             int changed = !g_have_map || g_live_refused || memcmp(&g_map, candidate, sizeof g_map);
@@ -523,7 +610,8 @@ void sh_nav_bake_set_map(const char *json, size_t len)
     if (bake_enabled() && json && len) {
         __try {
             ok = sh_nav_regions_read(json, len, &g_map);
-            if (ok && !g_map.truncated && !g_map.invalid_geometry) {
+            if (ok && !g_map.truncated && !g_map.invalid_geometry &&
+                !g_map.unmeasured) {
                 bake_plan_locked();
                 g_have_map = 1;
             } else g_live_refused = 1;

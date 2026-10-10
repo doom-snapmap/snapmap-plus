@@ -1224,6 +1224,14 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "8B DA 4D 85 C0 74 ?? 48 8D 54 24 40 48 8D 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? "
       "48 8B 08 48 89 38 48 8B 7C 24 40 48 89 0B 48 85 FF 74 ?? 48 8B CF E8 ?? "
       "?? ?? ?? BA 48 00 00 00 48 8B CF E8 ?? ?? ?? ??", 0 },
+    /* Every undoable editor action ends here: it stores the action's label in
+     * the map object and pushes the undo snapshot. The one notification that
+     * covers placement, move, rotate, resize, duplicate, property edit and
+     * delete. */
+    { "EditorCommitEdit", /* VK 0x524070, GL 0x5239b0. */
+      "40 53 48 83 EC 20 48 8B D9 48 8B 89 C8 04 02 00 48 83 C1 18 E8 ?? ?? ?? ?? "
+      "48 8D 4B 10 48 8B D3 E8 ?? ?? ?? ?? 48 8B 03 BA 01 00 00 00 48 8B CB "
+      "48 83 C4 20 5B 48 FF A0 60 01 00 00", 0x524070u },
     { "GridApplyEntityTree", /* VK 0x545120, GL 0x544a40. */
       "48 89 6C 24 18 48 89 74 24 20 57 48 83 EC 30 48 8B F9 48 8B F2 48 8B 0D "
       "?? ?? ?? ?? 48 8B 01 FF 90 40 02 00 00 F6 87 60 01 00 00 01 48 8B E8 74 "

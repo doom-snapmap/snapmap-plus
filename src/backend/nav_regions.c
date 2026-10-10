@@ -23,9 +23,9 @@
  */
 #define NAVR_VOLUME_INHERIT "snapmaps/volume/blocking"
 
-/* Shared marker spelling for the map reader and live prefilter. */
+/* Shared marker spelling for the map reader and live prefilter. The engine's
+ * own affectsNavmesh is a separate property and is never read or written. */
 #define NAVR_MARKER         "noFlood"
-#define NAVR_LEGACY_MARKER  "affectsNavmesh"
 
 /* An omitted clipModelInfo.type uses the box default. */
 #define NAVR_CLIPMODEL_BOX  "CLIPMODEL_BOX"
@@ -336,13 +336,36 @@ static int navr_module_name(const char *decl, char *out, size_t cap)
  * members, including diagonal ones. Require orthonormality and determinant +1
  * to reject shear, degenerate transforms and reflections.
  */
+/* Orthonormal with a right-handed determinant, which a rotation always is and
+ * a stale or misread block never is. */
+static int navr_mat3_valid(const float m[3][3])
+{
+    double det;
+    int r;
+
+    for (r = 0; r < 3; r++) {
+        double n2 = (double)m[r][0] * m[r][0] + (double)m[r][1] * m[r][1]
+                  + (double)m[r][2] * m[r][2];
+        if (!_finite(n2) || n2 < 0.99 || n2 > 1.01) return 0;
+    }
+    for (r = 0; r < 3; r++) {
+        int s = (r + 1) % 3;
+        double dp = (double)m[r][0] * m[s][0] + (double)m[r][1] * m[s][1]
+                  + (double)m[r][2] * m[s][2];
+        if (dp < -0.01 || dp > 0.01) return 0;
+    }
+    det = (double)m[0][0] * ((double)m[1][1] * m[2][2] - (double)m[1][2] * m[2][1])
+        - (double)m[0][1] * ((double)m[1][0] * m[2][2] - (double)m[1][2] * m[2][0])
+        + (double)m[0][2] * ((double)m[1][0] * m[2][1] - (double)m[1][1] * m[2][0]);
+    return det >= 0.99 && det <= 1.01;
+}
+
 static int navr_mat3(const char *json, size_t len, const sh_shard_doc *doc,
                      int edit, float m[3][3])
 {
     static const char *ROW[3] = { "mat[0]", "mat[1]", "mat[2]" };
     static const char *COMP[3] = { "x", "y", "z" };
     int so, mat, r, c;
-    double det;
 
     for (r = 0; r < 3; r++)
         for (c = 0; c < 3; c++) m[r][c] = (r == c) ? 1.0f : 0.0f;
@@ -365,22 +388,7 @@ static int navr_mat3(const char *json, size_t len, const sh_shard_doc *doc,
         }
     }
 
-    for (r = 0; r < 3; r++) {
-        double n2 = (double)m[r][0] * m[r][0] + (double)m[r][1] * m[r][1]
-                  + (double)m[r][2] * m[r][2];
-        if (n2 < 0.99 || n2 > 1.01) return 0;
-    }
-    for (r = 0; r < 3; r++) {
-        int s = (r + 1) % 3;
-        double dp = (double)m[r][0] * m[s][0] + (double)m[r][1] * m[s][1]
-                  + (double)m[r][2] * m[s][2];
-        if (dp < -0.01 || dp > 0.01) return 0;
-    }
-    det = (double)m[0][0] * ((double)m[1][1] * m[2][2] - (double)m[1][2] * m[2][1])
-        - (double)m[0][1] * ((double)m[1][0] * m[2][2] - (double)m[1][2] * m[2][0])
-        + (double)m[0][2] * ((double)m[1][0] * m[2][1] - (double)m[1][1] * m[2][0]);
-    if (det < 0.99 || det > 1.01) return 0;
-    return 1;
+    return navr_mat3_valid(m);
 }
 
 /* Encode the box as one representative face and its depth. Local x/y span
@@ -390,45 +398,27 @@ static int navr_mat3(const char *json, size_t len, const sh_shard_doc *doc,
  * Choose the greatest +Z normal; nav_geometry reconstructs the solid and
  * evaluates all faces. Load and legacy live refresh share this conversion.
  */
-static int navr_volume_face(const char *json, size_t len, const sh_shard_doc *doc,
-                            int edit, sh_nav_region *r, const float *resolved)
+int sh_nav_regions_box_face(const float origin[3], const float m[3][3],
+                            const float size[3], sh_nav_region *r)
 {
     static const float SU[4] = { -1.0f, +1.0f, +1.0f, -1.0f };
     static const float SV[4] = { -1.0f, -1.0f, +1.0f, +1.0f };
-    char text[64];
-    int clip, box, at, i, k, best, a, u, v;
-    float sx, sy, sz, cx, cy, cz, m[3][3], half[3], centre[3], s;
+    int i, k, best, a, u, v;
+    float cx = origin[0], cy = origin[1], cz = origin[2];
+    float half[3], centre[3], s;
     float bestz, bestarea;
     double sh;
-    size_t value;
 
-    clip = navr_member(json, len, doc, edit, "clipModelInfo", '{');
-    if (clip < 0 && navr_value(json, len, doc, edit, "clipModelInfo", &value)) return 0;
-    if (navr_value(json, len, doc, clip, "type", &value) &&
-        (!navr_str(json, len, doc, clip, "type", text, sizeof text) ||
-         strcmp(text, NAVR_CLIPMODEL_BOX) != 0)) return 0;
-
-    box = navr_member(json, len, doc, clip, "size", '{');
-    if (box < 0 && navr_value(json, len, doc, clip, "size", &value)) return 0;
-    sx = navr_num(json, len, doc, box, "x", resolved ? resolved[0] : NAN);
-    sy = navr_num(json, len, doc, box, "y", resolved ? resolved[1] : NAN);
-    sz = navr_num(json, len, doc, box, "z", resolved ? resolved[2] : NAN);
-    if (!_finite(sx) || !_finite(sy) || !_finite(sz) ||
-        sx <= 0.0f || sy <= 0.0f || sz <= 0.0f) return 0;
-
-    at = navr_member(json, len, doc, edit, "spawnPosition", '{');
-    cx = navr_num(json, len, doc, at, "x", 0.0f);
-    cy = navr_num(json, len, doc, at, "y", 0.0f);
-    cz = navr_num(json, len, doc, at, "z", 0.0f);
+    if (!r || !navr_mat3_valid(m)) return 0;
+    if (!_finite(size[0]) || !_finite(size[1]) || !_finite(size[2]) ||
+        size[0] <= 0.0f || size[1] <= 0.0f || size[2] <= 0.0f) return 0;
     if (!_finite(cx) || !_finite(cy) || !_finite(cz)) return 0;
 
-    if (!navr_mat3(json, len, doc, edit, m)) return 0;
-
-    half[0] = sx / 2.0f;
-    half[1] = sy / 2.0f;
-    half[2] = sz / 2.0f;
-    /* spawnPosition is the box BOTTOM in LOCAL z, so the centre sits half a
-     * height along the local z axis -- which in world is row 2. */
+    half[0] = size[0] / 2.0f;
+    half[1] = size[1] / 2.0f;
+    half[2] = size[2] / 2.0f;
+    /* The origin is the box BOTTOM in LOCAL z, so the centre sits half a
+     * height along the local z axis -- which in module space is row 2. */
     centre[0] = cx + m[2][0] * half[2];
     centre[1] = cy + m[2][1] * half[2];
     centre[2] = cz + m[2][2] * half[2];
@@ -479,6 +469,54 @@ static int navr_volume_face(const char *json, size_t len, const sh_shard_doc *do
     return 1;
 }
 
+/* A clip model this reader has no encoding for. A cylinder is a legitimate
+ * thing to build with; it just cannot become a navigation face, so it is left
+ * out of the navigation rather than taking the map's navigation down with it. */
+static int navr_clip_unsupported(const char *json, size_t len, const sh_shard_doc *doc,
+                                 int edit, char *kind, size_t cap)
+{
+    int clip = navr_member(json, len, doc, edit, "clipModelInfo", '{');
+    size_t value;
+    char text[64];
+    if (!navr_value(json, len, doc, clip, "type", &value)) return 0;
+    if (!navr_str(json, len, doc, clip, "type", text, sizeof text)) return 0;
+    if (!strcmp(text, NAVR_CLIPMODEL_BOX)) return 0;
+    if (kind) strcpy_s(kind, cap, text);
+    return 1;
+}
+
+/* The box a serialized entity describes. A clip model of any other type, or a
+ * size the entity does not carry and the caller could not resolve, is not a
+ * box this reader can place. */
+static int navr_volume_face(const char *json, size_t len, const sh_shard_doc *doc,
+                            int edit, sh_nav_region *r, const float *resolved)
+{
+    char text[64];
+    int clip, box, at;
+    float m[3][3], size[3], origin[3];
+    size_t value;
+
+    clip = navr_member(json, len, doc, edit, "clipModelInfo", '{');
+    if (clip < 0 && navr_value(json, len, doc, edit, "clipModelInfo", &value)) return 0;
+    if (navr_value(json, len, doc, clip, "type", &value) &&
+        (!navr_str(json, len, doc, clip, "type", text, sizeof text) ||
+         strcmp(text, NAVR_CLIPMODEL_BOX) != 0)) return 0;
+
+    box = navr_member(json, len, doc, clip, "size", '{');
+    if (box < 0 && navr_value(json, len, doc, clip, "size", &value)) return 0;
+    size[0] = navr_num(json, len, doc, box, "x", resolved ? resolved[0] : NAN);
+    size[1] = navr_num(json, len, doc, box, "y", resolved ? resolved[1] : NAN);
+    size[2] = navr_num(json, len, doc, box, "z", resolved ? resolved[2] : NAN);
+
+    at = navr_member(json, len, doc, edit, "spawnPosition", '{');
+    origin[0] = navr_num(json, len, doc, at, "x", 0.0f);
+    origin[1] = navr_num(json, len, doc, at, "y", 0.0f);
+    origin[2] = navr_num(json, len, doc, at, "z", 0.0f);
+
+    if (!navr_mat3(json, len, doc, edit, m)) return 0;
+    return sh_nav_regions_box_face(origin, m, size, r);
+}
+
 /* ==================================================================== */
 /* the volumes the load pass saw                                         */
 /* ==================================================================== */
@@ -494,16 +532,48 @@ static int navr_volume_face(const char *json, size_t len, const sh_shard_doc *do
 #define NAVR_MAX_VOLUMES    4096
 
 typedef struct navr_volume {
-    unsigned entity;    /* index in the map's entities array (NOT the live id) */
-    int      uid;       /* uniqueId, which is what instanceEntities addresses */
-    int      instance;  /* -1 until the multimap says otherwise */
+    unsigned entity;      /* index in the map's entities array (NOT the live id) */
+    int      uid;         /* uniqueId, which is what instanceEntities addresses */
+    int      instance;    /* -1 until the multimap says otherwise */
+    /* Only a property edit moves these, so they are re-read for the volumes an
+     * edit named and carried over for the rest. */
+    int      marked;
+    int      block_demons;
+    int      unshaped;    /* a shape that carries no navigation, such as a cylinder */
 } navr_volume;
 
 static struct {
     const sh_nav_map *owner;
     navr_volume       v[NAVR_MAX_VOLUMES];
     int               count;
+    /* The editor's own module index per entity, checked against the ownership
+     * the map text gave: 0 not yet checked, 1 agreed, -1 disagreed. */
+    int               live_instance;
+    /* Copies the map's ids_unusable: the list still fingerprints, but no refresh may address by id. */
+    int               ids_unusable;
 } g_loaded;
+
+/* The volumes this map's navigation is actually built from: cached, and
+ * carrying a flag. A box with neither flag serves nothing, so moving it or
+ * deleting it changes no navigation and is not worth noticing. */
+int sh_nav_regions_volume_uids(int *out, int cap)
+{
+    int i, n = 0;
+    for (i = 0; i < g_loaded.count && n < cap; i++) {
+        const navr_volume *v = &g_loaded.v[i];
+        if (v->uid >= 0 && (v->marked || v->block_demons)) out[n++] = v->uid;
+    }
+    return n;
+}
+
+int sh_nav_regions_knows_volume(int uid)
+{
+    int i;
+    for (i = 0; i < g_loaded.count; i++)
+        if (g_loaded.v[i].uid == uid)
+            return g_loaded.v[i].marked || g_loaded.v[i].block_demons;
+    return 0;
+}
 
 /* Look up ownership by uniqueId, which indexes both the sparse live entity
  * table and instanceEntities. The position in the JSON entities array is a
@@ -598,100 +668,6 @@ static void navr_attribute(const char *json, size_t len, const sh_shard_doc *doc
 /* the map                                                               */
 /* ==================================================================== */
 
-typedef struct navr_patch {
-    size_t at, remove;
-    const char *text;
-} navr_patch;
-
-static int navr_patch_order(const void *a, const void *b)
-{
-    const navr_patch *pa = (const navr_patch *)a, *pb = (const navr_patch *)b;
-    return pa->at < pb->at ? -1 : pa->at > pb->at;
-}
-
-/* Migrate only the known Blocking Box entity state. Preserve unrelated fields
- * and an explicit new marker (including false). Clear the native legacy flag
- * even when the new marker is present, so later toggle-off cannot resurrect it.
- * Collect all splices before writing: a refusal never partially migrates a map. */
-char *sh_nav_regions_migrate(const char *json, size_t len, size_t *out_len)
-{
-    sh_shard_doc doc;
-    navr_patch *patches = NULL;
-    char *out = NULL;
-    size_t count = 0, total = len, used = 0, read_at = 0, p;
-    int arr, i;
-
-    if (out_len) *out_len = len;
-    if (!json || !len || !sh_shard_find(json, len, NAVR_LEGACY_MARKER,
-                                       sizeof NAVR_LEGACY_MARKER - 1)) return NULL;
-    if (!sh_shard_doc_build(json, len, &doc)) return NULL;
-    if (doc.c[0].kind != '{') goto done;
-    arr = navr_member(json, len, &doc, 0, "entities", '[');
-    if (arr < 0 || doc.count > (size_t)-1 / sizeof *patches) goto done;
-    patches = (navr_patch *)malloc(doc.count * sizeof *patches);
-    if (!patches) goto done;
-    for (i = arr + 1; (size_t)i < doc.count && doc.c[i].open < doc.c[arr].close; i++) {
-        int ed, edit, flags;
-        size_t legacy, value, first;
-        char inherit[64];
-        if (doc.c[i].parent != arr || doc.c[i].kind != '{') continue;
-        ed = navr_member(json, len, &doc, i, "entityDef", '{');
-        if (!navr_str(json, len, &doc, ed, "inherit", inherit, sizeof inherit) ||
-            strcmp(inherit, NAVR_VOLUME_INHERIT) != 0) continue;
-        edit = navr_member(json, len, &doc,
-            navr_member(json, len, &doc, ed, "state", '{'), "edit", '{');
-        if (!navr_bool(json, len, &doc, edit, NAVR_LEGACY_MARKER) ||
-            !navr_value(json, len, &doc, edit, NAVR_LEGACY_MARKER, &legacy)) continue;
-        if (count + 2 > doc.count) goto done;
-        flags = navr_member(json, len, &doc, edit, "flags", '{');
-        if (flags < 0) {
-            /* A present non-object flags value cannot be replaced safely. */
-            if (navr_value(json, len, &doc, edit, "flags", &value)) goto done;
-            patches[count++] = (navr_patch){doc.c[edit].open + 1, 0,
-                                            "\"flags\":{\"noFlood\":true},"};
-        } else if (!navr_value(json, len, &doc, flags, NAVR_MARKER, &value)) {
-            first = doc.c[flags].open + 1;
-            while (first < doc.c[flags].close && sh_shard_is_ws(json[first])) first++;
-            patches[count++] = (navr_patch){doc.c[flags].open + 1, 0,
-                first == doc.c[flags].close ? "\"noFlood\":true" : "\"noFlood\":true,"};
-        } else {
-            /* Never make an invalid native bool look valid by dropping it. */
-            size_t n = navr_bool(json, len, &doc, flags, NAVR_MARKER) ? 4 : 5;
-            if (n == 5 && (len - value < 5 || memcmp(json + value, "false", 5))) goto done;
-            value += n;
-            if (value < len && !sh_shard_is_ws(json[value]) && json[value] != ',' &&
-                json[value] != '}') goto done;
-        }
-        patches[count++] = (navr_patch){legacy, 4, "false"};
-    }
-    if (!count) goto done;
-    qsort(patches, count, sizeof *patches, navr_patch_order);
-    for (p = 0; p < count; p++) {
-        size_t n = strlen(patches[p].text);
-        if (patches[p].at < read_at || patches[p].at > len ||
-            patches[p].remove > len - patches[p].at) goto done;
-        read_at = patches[p].at + patches[p].remove;
-        if (total - patches[p].remove > (size_t)-1 - n - 1) goto done;
-        total = total - patches[p].remove + n;
-    }
-    out = (char *)HeapAlloc(GetProcessHeap(), 0, total + 1);
-    if (!out) goto done;
-    read_at = 0;
-    for (p = 0; p < count; p++) {
-        size_t copy = patches[p].at - read_at, n = strlen(patches[p].text);
-        memcpy(out + used, json + read_at, copy); used += copy;
-        memcpy(out + used, patches[p].text, n); used += n;
-        read_at = patches[p].at + patches[p].remove;
-    }
-    memcpy(out + used, json + read_at, len - read_at);
-    out[total] = '\0';
-    if (out_len) *out_len = total;
-done:
-    free(patches);
-    sh_shard_doc_free(&doc);
-    return out;
-}
-
 int sh_nav_regions_read(const char *json, size_t len, sh_nav_map *out)
 {
     return sh_nav_regions_read_resolved(json, len, out, NULL, NULL);
@@ -712,6 +688,8 @@ int sh_nav_regions_read_resolved(const char *json, size_t len, sh_nav_map *out,
      * only ever run against a map this function finished reading. */
     g_loaded.owner = NULL;
     g_loaded.count = 0;
+    g_loaded.live_instance = 0;
+    g_loaded.ids_unusable = 0;
     if (!json || len == 0) return 0;
     if (!sh_shard_doc_build(json, len, &doc)) return 0;
     if (doc.c[0].kind != '{') {
@@ -789,22 +767,44 @@ int sh_nav_regions_read_resolved(const char *json, size_t len, sh_nav_map *out,
             v->entity = self;
             v->uid = vuid;
             v->instance = -1;
+            v->marked = navr_marked(json, len, &doc, edit);
+            v->block_demons = navr_bool(json, len, &doc, edit, "blockDemons");
+            v->unshaped = navr_clip_unsupported(json, len, &doc, edit, NULL, 0);
         }
 
         /* Only marked volumes contribute support; unmarked boxes may be obstacles. */
         if (!navr_marked(json, len, &doc, edit) &&
             !navr_bool(json, len, &doc, edit, "blockDemons")) continue;
 
-        if ((read_size && !read_size(self, resolved, ctx)) ||
-            !navr_volume_face(json, len, &doc, edit, &region, read_size ? resolved : NULL)) {
-            char note[160];
+        {
             char kind[64];
-            int clip = navr_member(json, len, &doc, edit, "clipModelInfo", 0x7b);
-            if (!navr_str(json, len, &doc, clip, "type", kind, sizeof kind))
-                strcpy_s(kind, sizeof kind, "a box");
+            if (navr_clip_unsupported(json, len, &doc, edit, kind, sizeof kind)) {
+                if (out->unshaped == 0) {
+                    char note[160];
+                    _snprintf_s(note, sizeof note, _TRUNCATE,
+                                "NAV: volume %u is a %s, which carries no navigation; "
+                                "volumes of that shape are left out",
+                                self, kind);
+                    backend_log(note);
+                }
+                out->unshaped++;
+                continue;
+            }
+        }
+
+        /* A box that cannot be measured yet is not a broken box. The map has
+         * only just opened and the entity is not answering; the read that
+         * follows gets it. Refusing the map over it would leave the whole map
+         * without navigation until the next edit. */
+        if (read_size && !read_size(self, resolved, ctx)) {
+            out->unmeasured++;
+            continue;
+        }
+        if (!navr_volume_face(json, len, &doc, edit, &region, read_size ? resolved : NULL)) {
+            char note[160];
             _snprintf_s(note, sizeof note, _TRUNCATE,
-                        "NAV: volume %u has no shape this reader can use (%s)",
-                        self, kind);
+                        "NAV: blocking box %u has a size or orientation navigation "
+                        "cannot use", self);
             backend_log(note);
             out->invalid_geometry = 1;
             continue;
@@ -850,7 +850,7 @@ int sh_nav_regions_read_resolved(const char *json, size_t len, sh_nav_map *out,
 
     /* This map, and only this one, may now be refreshed from the live editor,
      * and only while every box can be addressed by its own id. */
-    if (out->ids_unusable) g_loaded.count = 0;
+    g_loaded.ids_unusable = out->ids_unusable;
     g_loaded.owner = out;
 
     sh_shard_doc_free(&doc);
@@ -972,7 +972,7 @@ int sh_nav_regions_refresh_live(sh_nav_map *m, int highest_id,
     /* Without cached volumes, every ownership lookup would fail; skip engine
      * serialization.
      */
-    if (g_loaded.count == 0) return -1;
+    if (g_loaded.count == 0 || g_loaded.ids_unusable) return -1;
 
     top = highest_id;
     if (top > NAVR_LIVE_SCAN_MAX) top = NAVR_LIVE_SCAN_MAX;
@@ -1013,19 +1013,76 @@ static int navr_shape_of(const sh_nav_map *m, unsigned entity, sh_nav_region *r)
     return 1;
 }
 
+/* The box this entity is now, taken from the editor's own memory: where it
+ * stands, how it is turned and how big it is. Nothing is serialized, so
+ * following a box the user moved, turned or resized costs a memory read. */
+static int navr_live_box(const navr_volume *v, sh_navr_entity_transform get_transform,
+                         void *ctx, sh_nav_region *r, int *instance)
+{
+    float origin[3], m[3][3], size[3];
+    *instance = -1;
+    if (!get_transform || !get_transform(v->uid, origin, m, size, instance, ctx)) return 0;
+    return sh_nav_regions_box_face(origin, m, size, r);
+}
+
+/* Re-read one volume's navigation flags and shape kind. This is the only part
+ * of a refresh that serializes, and it runs for the volumes an edit named. */
+static int navr_read_flags(navr_volume *v, sh_navr_entity_json get_json,
+                           char *json, void *ctx)
+{
+    sh_shard_doc doc;
+    char inherit[64];
+    int n, ed, state, at, ok = 0;
+
+    n = get_json(v->uid, json, NAVR_LIVE_JSON_CAP, ctx);
+    if (n <= 0 || n >= NAVR_LIVE_JSON_CAP ||
+        !sh_shard_doc_build(json, (size_t)n, &doc)) return 0;
+    ed = navr_member(json, n, &doc, 0, "entityDef", '{');
+    state = navr_member(json, n, &doc, ed, "state", '{');
+    at = navr_member(json, n, &doc, state, "edit", '{');
+    if (doc.c[0].kind == '{' && at >= 0 &&
+        navr_str(json, n, &doc, ed, "inherit", inherit, sizeof inherit) &&
+        !strcmp(inherit, NAVR_VOLUME_INHERIT)) {
+        v->marked = navr_marked(json, n, &doc, at);
+        v->block_demons = navr_bool(json, n, &doc, at, "blockDemons");
+        v->unshaped = navr_clip_unsupported(json, n, &doc, at, NULL, 0);
+        ok = 1;
+    }
+    sh_shard_doc_free(&doc);
+    return ok;
+}
+
+int sh_nav_regions_volume_flagged(int uid, sh_navr_entity_json get_json, void *ctx)
+{
+    navr_volume probe;
+    char *json;
+    int flagged = 0;
+
+    if (uid < 0 || uid > NAVR_LIVE_SCAN_MAX || !get_json) return 0;
+    json = (char *)malloc(NAVR_LIVE_JSON_CAP);
+    if (!json) return 1;          /* unanswerable: leave the caller its safe path */
+    memset(&probe, 0, sizeof probe);
+    probe.uid = uid;
+    if (navr_read_flags(&probe, get_json, json, ctx))
+        flagged = probe.marked || probe.block_demons;
+    free(json);
+    return flagged;
+}
+
 int sh_nav_regions_refresh_known(sh_nav_map *m,
                                  sh_navr_entity_valid valid,
-                                 sh_navr_entity_json get_json, void *ctx,
+                                 sh_navr_entity_json get_json,
+                                 sh_navr_entity_transform get_transform, void *ctx,
                                  int *read_count, const char **why)
 {
     sh_nav_map *next;
     char *json;
-    int i, ok = 0;
+    int i, ok = 0, agreed = 0, disagreed = 0;
     const char *ignored;
     if (!why) why = &ignored;
     *why = "the cached box inventory is unavailable";
     if (read_count) *read_count = 0;
-    if (!m || !valid || !get_json || m != g_loaded.owner ||
+    if (!m || !valid || !get_json || m != g_loaded.owner || g_loaded.ids_unusable ||
         !g_loaded.count || g_loaded.count >= NAVR_MAX_VOLUMES) return 0;
     next = (sh_nav_map *)malloc(sizeof *next);
     json = (char *)malloc(NAVR_LIVE_JSON_CAP);
@@ -1033,48 +1090,63 @@ int sh_nav_regions_refresh_known(sh_nav_map *m,
     *next = *m;
     memset(next->regions, 0, sizeof next->regions);
     memset(next->obstacles, 0, sizeof next->obstacles);
-    next->region_count = next->obstacle_count = 0;
+    next->region_count = next->obstacle_count = next->unshaped = 0;
     for (i = 0; i < next->instance_count; i++) next->instances[i].region_count = 0;
     for (i = 0; i < g_loaded.count; i++) {
-        const navr_volume *v = &g_loaded.v[i];
-        sh_shard_doc doc;
+        navr_volume *v = &g_loaded.v[i];
         sh_nav_region r;
-        char inherit[64];
-        int n, ed, state, at, parsed = 0;
-        *why = "a cached box no longer answers; a complete snapshot is required";
-        if (v->uid < 0 || v->uid > NAVR_LIVE_SCAN_MAX || !valid(v->uid, ctx)) goto done;
-        n = get_json(v->uid, json, NAVR_LIVE_JSON_CAP, ctx);
-        if (n <= 0 || n >= NAVR_LIVE_JSON_CAP ||
-            !sh_shard_doc_build(json, (size_t)n, &doc)) goto done;
-        memset(&r, 0, sizeof r);
-        ed = navr_member(json, n, &doc, 0, "entityDef", '{');
-        state = navr_member(json, n, &doc, ed, "state", '{');
-        at = navr_member(json, n, &doc, state, "edit", '{');
-        if (doc.c[0].kind == '{' && at >= 0 &&
-            navr_str(json, n, &doc, ed, "inherit", inherit, sizeof inherit) &&
-            !strcmp(inherit, NAVR_VOLUME_INHERIT)) {
-            r.marked = navr_marked(json, n, &doc, at);
-            r.block_demons = navr_bool(json, n, &doc, at, "blockDemons");
-            parsed = 1;
-        }
-        sh_shard_doc_free(&doc);
-        if (!parsed) goto done;
+        int live = -1, owner;
+        *why = "a box carries an unusable id; a complete snapshot is required";
+        if (v->uid < 0 || v->uid > NAVR_LIVE_SCAN_MAX) goto done;
+        /* Deleted, or undone back out of the map. The record is kept: the box
+         * returns under the same uniqueId, and is read again when it does. */
+        if (!valid(v->uid, ctx)) continue;
         if (read_count) (*read_count)++;
-        if (!r.marked && !r.block_demons) continue;
-        /* A box with no recorded shape was neither a floor nor a wall when
-         * the map was last read, so only a complete snapshot can place it. */
+        /* No longer a Blocking Volume, so it serves no navigation. */
+        if (!navr_read_flags(v, get_json, json, ctx)) {
+            v->marked = v->block_demons = 0;
+            continue;
+        }
+        if (!v->marked && !v->block_demons) continue;
+        if (v->unshaped) { next->unshaped++; continue; }
+        memset(&r, 0, sizeof r);
+        r.marked = v->marked;
+        r.block_demons = v->block_demons;
+        /* Falling back on the shape the last complete snapshot recorded, which
+         * a box that has since become a floor or a wall does not have. */
         *why = "a box became a floor or a wall; a complete snapshot is required";
-        if (!navr_shape_of(m, v->entity, &r)) goto done;
-        if (v->instance < 0 || v->instance >= next->instance_count ||
-            !next->instances[v->instance].module[0]) continue;
+        if (!navr_live_box(v, get_transform, ctx, &r, &live) &&
+            !navr_shape_of(m, v->entity, &r)) goto done;
+        if (live >= 0) {
+            if (live == v->instance) agreed++; else disagreed++;
+        }
+        /* A box dragged into another room belongs to that room now, and its
+         * position is relative to it. */
+        owner = (g_loaded.live_instance > 0 && live >= 0) ? live : v->instance;
+        if (owner < 0 || owner >= next->instance_count ||
+            !next->instances[owner].module[0]) continue;
         *why = "the geometry capacity requires a complete snapshot";
         if (next->region_count + next->obstacle_count >= SH_NAVR_MAX_REGIONS) goto done;
-        r.instance = v->instance;
+        r.instance = owner;
         r.entity = v->entity;
         if (r.marked) {
             next->regions[next->region_count++] = r;
             next->instances[r.instance].region_count++;
         } else next->obstacles[next->obstacle_count++] = r;
+    }
+    /* Nothing has moved between a complete read and the refresh that follows
+     * it, so any disagreement there means the editor's index is not the
+     * ownership this map records, and it is left alone. */
+    if (g_loaded.live_instance == 0 && (agreed || disagreed)) {
+        g_loaded.live_instance = disagreed ? -1 : 1;
+        if (disagreed) {
+            char note[160];
+            _snprintf_s(note, sizeof note, _TRUNCATE,
+                        "NAV: the editor's room index disagrees with the map on %d of %d "
+                        "boxes; a box moved between rooms needs a complete read",
+                        disagreed, agreed + disagreed);
+            backend_log(note);
+        }
     }
     *m = *next;
     *why = "read";

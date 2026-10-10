@@ -13,6 +13,7 @@
 #include "edit_pair.h"
 #include "engine_cvar_read.h"
 #include "apply_engine.h"
+#include "nav_bake.h"
 #include "signatures.h"
 #include "engine_globals.h"
 #include "backend_log.h"
@@ -468,6 +469,26 @@ static int slot_get_prefab_mesh(sh_iface *self, void *out_blob, int out_capacity
     return sh_prefabpreview_get(out_blob, out_capacity);
 }
 
+/* The View menu's navigation entry. The read itself runs on the game's thread
+ * a frame later, so this only asks and reports. */
+static int slot_navmesh_view(sh_iface *self, int update, char *out_json, int cap)
+{
+    int state, floors = 0, walls = 0, pending, red = 0, rooms = 0;
+    (void)self;
+    if (update) sh_apply_engine_nav_request_update();
+    state = sh_apply_engine_nav_view_state();
+    if (!out_json || cap <= 0) return 0;
+    sh_nav_bake_volume_counts(&floors, &walls);
+    /* Still working while the read is owed or the bake is on the worker. */
+    pending = ((state & 2) || sh_nav_bake_preview_pending()) ? 1 : 0;
+    sh_nav_bake_conflicts(&red, &rooms);
+    return _snprintf_s(out_json, (size_t)cap, _TRUNCATE,
+                       "{\"stale\":%d,\"pending\":%d,\"floors\":%d,\"walls\":%d,"
+                       "\"red\":%d,\"rooms\":%d,\"refused\":%d}",
+                       (state & 1) ? 1 : 0, pending, floors, walls, red, rooms,
+                       (state & 4) ? 1 : 0);
+}
+
 /* Sparse prefab state omits inherited scale; resolve defaults for preview dimensions. */
 static int slot_resolve_prefab_defaults(sh_iface *self, const char *inherit_name,
                                         char *out_model, int out_capacity,
@@ -857,6 +878,7 @@ static void slot_rebuild_declsource(sh_iface *self, int id, const char *cstr)
     if (!defsub) return;
     __try { g_decl_rebuild(defsub, cstr, 1); }
     __except (EXCEPTION_EXECUTE_HANDLER) {}
+    sh_apply_engine_nav_decl_rewritten(id);
 }
 
 /* Remove the ID from selection; synchronize idle state if selection becomes empty. */
@@ -1144,6 +1166,7 @@ int sh_iface_engine_install(const sig_result *results, size_t n, const uint8_t *
                               &slots.normalize_timeline_inherit); /* +0x298 palette-timeline portable-inherit */
 
     sh_apply_engine_get_serialize_selection(&slots.serialize_selection);
+    sh_apply_engine_get_run_on_main(&slots.run_on_main);         /* +0x348 ext 28 */
 
     slots.push_to_stack          = slot_push_to_stack;        /* +0x2A0 ext 7 */
 
@@ -1166,6 +1189,7 @@ int sh_iface_engine_install(const sig_result *results, size_t n, const uint8_t *
     /* the File menu's rawmap load/save file surface. These bodies live in rawmap.c beside the gate and
      * path state they act on, and touch no engine memory, so they bind unconditionally -- there is no
      * signature for them to depend on and nothing for a shifted build to break. */
+    slots.navmesh_view            = slot_navmesh_view;               /* +0x340 ext 27 */
     sh_rawmap_get_slots(&slots.rawmap_status,        /* +0x328 ext 24 */
                         &slots.rawmap_configure,     /* +0x330 ext 25 */
                         &slots.rawmap_load_now);     /* +0x338 ext 26 */

@@ -319,6 +319,8 @@ static void test_box_shape(void)
         CHECK(near_f(quad_max_y(&m.regions[1]), 128.0f));
         CHECK(near_f(quad_top_z(&m.regions[1]), 48.0f));
     }
+    CHECK(m.unshaped == 1);            /* the cylinder, counted not condemned */
+    CHECK(m.invalid_geometry == 1);    /* ...but the degenerate boxes still are */
 
     free(json);
     bclose(&inst);
@@ -791,7 +793,15 @@ static void test_inherited_box_dimensions(void)
             /* Explicit malformed JSON must still fail even with a valid native size. */
             if (!cases[c].valid) { effective[0]=73; effective[1]=157; effective[2]=91; }
             CHECK(sh_nav_regions_read_resolved(json, n, &m, resolved_size, effective));
-            CHECK(m.invalid_geometry == !cases[c].valid);
+            /* A shape this reader cannot encode is left out and counted;
+             * only a box it should have been able to read condemns the map. */
+            if (strstr(cases[c].geometry, "CLIPMODEL_CYLINDER")) {
+                CHECK(!m.invalid_geometry);
+                CHECK(m.unshaped == 1);
+            } else {
+                CHECK(m.invalid_geometry == !cases[c].valid);
+                CHECK(m.unshaped == 0);
+            }
             CHECK(!m.truncated);
             CHECK(m.region_count == (marked && cases[c].valid));
             CHECK(m.obstacle_count == (!marked && cases[c].valid));
@@ -801,9 +811,11 @@ static void test_inherited_box_dimensions(void)
                 CHECK(near_f(quad_extent_y(r), cases[c].y));
                 CHECK(near_f(quad_top_z(r), 32 + cases[c].z));
                 CHECK(r->instance == 0);
-                /* A failed current entity read cannot reuse an earlier size. */
+                /* A failed current entity read cannot reuse an earlier size.
+                 * It reads as unmeasured, which refuses this read and asks for
+                 * another rather than condemning the box. */
                 CHECK(sh_nav_regions_read_resolved(json, n, &m, resolved_size, NULL));
-                CHECK(m.invalid_geometry);
+                CHECK(m.unmeasured && !m.invalid_geometry);
             }
             free(json); bclose(&inst); bclose(&ents); bclose(&edit);
         }
@@ -832,6 +844,94 @@ static char *two_box_map(sh_nav_map *m)
     bclose(&inst);
     bclose(&ents);
     return json;
+}
+
+/* An editor that has moved and turned the boxes since they were serialized.
+ * A live transform is what the editor is showing; the entity's own
+ * spawnPosition is what it was created with. */
+typedef struct live_moves {
+    float origin[LIVE_MAX][3];
+    float m[LIVE_MAX][3][3];
+    float size[LIVE_MAX][3];
+    int   have[LIVE_MAX];
+    int   calls;
+} live_moves;
+
+static live_moves g_moves;
+
+static int live_transform(int id, float origin[3], float m[3][3], float size[3],
+                          int *instance, void *ctx)
+{
+    (void)ctx;
+    g_moves.calls++;
+    *instance = -1;
+    if (id < 0 || id >= LIVE_MAX || !g_moves.have[id]) return 0;
+    memcpy(origin, g_moves.origin[id], sizeof g_moves.origin[id]);
+    memcpy(m, g_moves.m[id], sizeof g_moves.m[id]);
+    memcpy(size, g_moves.size[id], sizeof g_moves.size[id]);
+    return 1;
+}
+
+static void moves_put(int id, float x, float y, float z,
+                      float sx, float sy, float sz)
+{
+    int r, c;
+    g_moves.have[id] = 1;
+    g_moves.origin[id][0] = x; g_moves.origin[id][1] = y; g_moves.origin[id][2] = z;
+    g_moves.size[id][0] = sx; g_moves.size[id][1] = sy; g_moves.size[id][2] = sz;
+    for (r = 0; r < 3; r++)
+        for (c = 0; c < 3; c++) g_moves.m[id][r][c] = (r == c) ? 1.0f : 0.0f;
+}
+
+/* A dragged box has to come back where the editor has it, not where it was
+ * created, and that has to happen without a complete snapshot. */
+static void test_live_transform_places_a_moved_box(void)
+{
+    sh_nav_map m;
+    live_editor e;
+    char *json = two_box_map(&m);
+    char *live0 = live_box(TICKED, 0, 0, 0, 128, 128, 64);
+    char *live1 = live_box(UNTICKED, 100, 200, 64, 200, 400, 128);
+    int reads = -1;
+    const char *why = NULL;
+
+    memset(&e, 0, sizeof e);
+    memset(&g_moves, 0, sizeof g_moves);
+    e.json[11] = live0;
+    e.json[22] = live1;
+    moves_put(11, 256.0f, 0.0f, 0.0f, 128.0f, 128.0f, 64.0f);
+    moves_put(22, 100.0f, 200.0f, 64.0f, 200.0f, 400.0f, 128.0f);
+
+    CHECK(sh_nav_regions_refresh_known(&m, live_valid, live_json, live_transform,
+                                       &e, &reads, &why) == 1);
+    CHECK(reads == 2);
+    CHECK(m.region_count == 1 && m.obstacle_count == 1);
+    if (m.region_count == 1) {
+        /* Created at x 0 with a 128 span, the editor has it 256 further on. */
+        CHECK(near_f(quad_min_x(&m.regions[0]), 192.0f));
+        CHECK(near_f(quad_max_x(&m.regions[0]), 320.0f));
+        CHECK(m.regions[0].instance == 0);
+    }
+    /* The box that did not move stays put. */
+    if (m.obstacle_count == 1) {
+        CHECK(near_f(quad_min_x(&m.obstacles[0]), 0.0f));
+        CHECK(near_f(quad_max_x(&m.obstacles[0]), 200.0f));
+        CHECK(near_f(quad_top_z(&m.obstacles[0]), 192.0f));
+    }
+
+    /* Moving it again follows the editor, with no complete snapshot. */
+    moves_put(11, 512.0f, 0.0f, 0.0f, 128.0f, 128.0f, 64.0f);
+    CHECK(sh_nav_regions_refresh_known(&m, live_valid, live_json, live_transform,
+                                       &e, &reads, &why) == 1);
+    if (m.region_count == 1) CHECK(near_f(quad_min_x(&m.regions[0]), 448.0f));
+
+    /* With no transform reader the cached shape is used, so the map comes back
+     * where the last placement left it. */
+    CHECK(sh_nav_regions_refresh_known(&m, live_valid, live_json, NULL,
+                                       &e, &reads, &why) == 1);
+    if (m.region_count == 1) CHECK(near_f(quad_min_x(&m.regions[0]), 448.0f));
+
+    free(json); free(live0); free(live1);
 }
 
 /* An unsaved AI Navigation toggle must update the volume while retaining
@@ -1332,76 +1432,55 @@ static void test_reflection_is_refused(void)
     free(json);
 }
 
-static void test_marker_migration(void)
+/* A shape this reader cannot encode is left out of the navigation. It must not
+ * take the rest of the map's navigation with it: a room built with cylinders
+ * still gets a navmesh everywhere else. */
+static void test_cylinder_keeps_the_map(void)
 {
-    static const char *cases[] = {
-        "\"affectsNavmesh\":true,",
-        "\"affectsNavmesh\":true,\"flags\":{},",
-        "\"flags\":{\"hide\":false},\"affectsNavmesh\":true,",
-        "\"flags\":{\"noFlood\":true,\"hide\":false},\"affectsNavmesh\":true,",
-        "\"flags\":{\"noFlood\":false,\"hide\":false},\"affectsNavmesh\":true,"
-    };
-    size_t k;
-    for (k = 0; k < sizeof cases / sizeof cases[0]; k++) {
-        blob inst, ents;
-        char edit[1024], *json, *migrated;
-        size_t len, out_len;
-        sh_nav_map before, after;
-        bopen(&inst); bopen(&ents);
-        put_instance(&inst, 1, MODULE_DECL, 0, 0, 0, 0);
-        edit_box(edit, sizeof edit, cases[k], "", 0, 0, 0, 64, 64, 8);
-        put_entity(&ents, 1, 1, INHERIT, edit);
-        json = map_of(inst.p, ents.p, "0,1,1", "1", &len);
-        CHECK(sh_nav_regions_read(json, len, &before));
-        /* Legacy field alone never participates in a bake. */
-        CHECK(before.region_count == (k == 3 ? 1 : 0));
-        migrated = sh_nav_regions_migrate(json, len, &out_len);
-        CHECK(migrated != NULL);
-        if (migrated) {
-            CHECK(out_len == strlen(migrated));
-            CHECK(strstr(migrated, "\"affectsNavmesh\":false") != NULL);
-            CHECK(sh_nav_regions_read(migrated, out_len, &after));
-            CHECK(after.region_count == (k == 4 ? 0 : 1));
-            if (after.region_count) CHECK(after.regions[0].instance == 0);
-            if (k >= 2) CHECK(strstr(migrated, "\"hide\":false") != NULL);
-            CHECK(sh_nav_regions_migrate(migrated, out_len, NULL) == NULL);
-            HeapFree(GetProcessHeap(), 0, migrated);
-        }
-        /* Input ownership and old file bytes remain untouched. */
-        CHECK(strstr(json, "\"affectsNavmesh\":true") != NULL);
-        free(json); bclose(&inst); bclose(&ents);
-    }
-}
+    blob inst, ents;
+    char edit[1024], *json;
+    size_t n;
+    sh_nav_map m;
 
-static void test_marker_migration_boundaries(void)
-{
-    static const char *unchanged[] = {
-        "{\"entities\":[]}",
-        "{\"entities\":[{\"entityDef\":{\"inherit\":\"other\",\"state\":{\"edit\":{\"affectsNavmesh\":true}}}}]}",
-        "{\"entities\":[{\"entityDef\":{\"inherit\":\"snapmaps/volume/blocking\",\"state\":{\"edit\":{\"affectsNavmesh\":false}}}}]}",
-        "{\"entities\":[{\"entityDef\":{\"inherit\":\"snapmaps/volume/blocking\",\"state\":{\"edit\":{\"nested\":{\"affectsNavmesh\":true}}}}}]}",
-        "{\"entities\":[{\"entityDef\":{\"inherit\":\"snapmaps/volume/blocking\",\"state\":{\"edit\":{\"affectsNavmesh\":true,\"flags\":null}}}}]}",
-        "{\"entities\":[{\"entityDef\":{\"inherit\":\"snapmaps/volume/blocking\",\"state\":{\"edit\":{\"affectsNavmesh\":true,\"flags\":{\"noFlood\":\"false\"}}}}}]}",
-        "{\"entities\":[{\"entityDef\":{\"inherit\":\"snapmaps/volume/blocking\",\"state\":{\"edit\":{\"affectsNavmesh\":trueSuffix}}}}]}",
-        "{\"entities\":["
-    };
-    size_t i;
-    for (i = 0; i < sizeof unchanged / sizeof unchanged[0]; i++) {
-        size_t len = strlen(unchanged[i]), out_len = 0;
-        CHECK(sh_nav_regions_migrate(unchanged[i], len, &out_len) == NULL);
-        CHECK(out_len == len);
+    bopen(&inst);
+    bopen(&ents);
+    put_instance(&inst, 1, MODULE_DECL, 0, 0, 0, 0);
+    edit_box(edit, sizeof edit, TICKED, "\"type\":\"CLIPMODEL_CYLINDER\",",
+             0, 0, 0, 64, 64, 8);
+    put_entity(&ents, 1, 1, INHERIT, edit);
+    edit_box(edit, sizeof edit, TICKED, "", 256, 0, 0, 64, 64, 8);
+    put_entity(&ents, 0, 2, INHERIT, edit);
+    json = map_of(inst.p, ents.p, "0,2,2", "1,2", &n);
+
+    CHECK(sh_nav_regions_read(json, n, &m) == 1);
+    CHECK(m.invalid_geometry == 0);
+    CHECK(m.unshaped == 1);
+    CHECK(m.region_count == 1);
+    if (m.region_count == 1) {
+        CHECK(m.regions[0].entity == 1);
+        CHECK(near_f(quad_min_x(&m.regions[0]), 224.0f));
     }
-    /* The actual shipped native property points to the new field. Its native
-     * affectsNavmeshPath stays independent and no new engine field is added. */
-    {
-        char text[sizeof g_ov_baked_d4 + 1];
-        memcpy(text, g_ov_baked_d4, sizeof g_ov_baked_d4);
-        text[sizeof g_ov_baked_d4] = 0;
-        CHECK(strstr(text, "path = \"flags.noFlood\";") != NULL);
-        CHECK(strstr(text, "path = \"affectsNavmesh\";") == NULL);
-        CHECK(strstr(text, "affectsNavmeshPath = \"affectsNavmesh\";") != NULL);
-        CHECK(strstr(text, "#str_sh_bv_navigation") != NULL);
-    }
+
+    /* A cylinder that blocks demons is left out the same way, and still does
+     * not condemn the map. */
+    free(json);
+    bclose(&ents);
+    bopen(&ents);
+    edit_box(edit, sizeof edit, UNTICKED, "\"type\":\"CLIPMODEL_CYLINDER\",",
+             0, 0, 0, 64, 64, 8);
+    put_entity(&ents, 1, 1, INHERIT, edit);
+    edit_box(edit, sizeof edit, TICKED, "", 256, 0, 0, 64, 64, 8);
+    put_entity(&ents, 0, 2, INHERIT, edit);
+    json = map_of(inst.p, ents.p, "0,2,2", "1,2", &n);
+    CHECK(sh_nav_regions_read(json, n, &m) == 1);
+    CHECK(m.invalid_geometry == 0);
+    CHECK(m.unshaped == 1);
+    CHECK(m.obstacle_count == 0);
+    CHECK(m.region_count == 1);
+
+    free(json);
+    bclose(&inst);
+    bclose(&ents);
 }
 
 static void test_duplicate_box_ids(void)
@@ -1434,9 +1513,17 @@ static void test_duplicate_box_ids(void)
         CHECK(m.instances[0].region_count == 2);
         CHECK(m.regions[0].instance == 0 && m.regions[1].instance == 0);
         CHECK(near_f(quad_min_x(&m.regions[1]) - quad_min_x(&m.regions[0]), 256));
-        CHECK(!sh_nav_regions_refresh_known(&m, live_valid, live_json, &live,
+        CHECK(!sh_nav_regions_refresh_known(&m, live_valid, live_json, NULL, &live,
                                             &reads, &why));
         CHECK(reads == 0 && live.valid_calls == 0);
+        /* The flagged boxes stay tracked, so moving or deleting one still marks the view. */
+        {
+            int uids[4];
+            CHECK(sh_nav_regions_volume_uids(uids, 4) == 2 && uids[0] == 7 && uids[1] == 7);
+            CHECK(sh_nav_regions_knows_volume(7));
+        }
+        CHECK(sh_nav_regions_refresh_live(&m, 8, live_valid, live_json, &live) == -1);
+        CHECK(live.valid_calls == 0);
         free(json);
     }
     /* The shared ID cannot decide which box belongs to which room. */
@@ -1459,7 +1546,7 @@ static void test_duplicate_box_ids(void)
     CHECK(m.region_count == 1);
     {
         live_editor live = {0};
-        CHECK(!sh_nav_regions_refresh_known(&m, live_valid, live_json, &live,
+        CHECK(!sh_nav_regions_refresh_known(&m, live_valid, live_json, NULL, &live,
                                             NULL, NULL));
         CHECK(live.valid_calls == 0);
     }
@@ -1471,8 +1558,8 @@ int main(void)
     test_resolved_decl_size();
     test_inherited_box_dimensions();
     test_duplicate_box_ids();
-    test_marker_migration();
-    test_marker_migration_boundaries();
+    test_cylinder_keeps_the_map();
+    test_live_transform_places_a_moved_box();
     test_one_volume();
     test_sparse_orientation_seeds_identity();
     test_45_yaw_on_oblong_pins_the_convention();

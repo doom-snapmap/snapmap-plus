@@ -54,6 +54,14 @@ static void nav_heap_push(void *self, const sh_nav_heap_node *item, sh_nav_heap_
 static int nav_heap_install(const sig_result *results, size_t count)
 {
     size_t i;
+    int enabled = 0;
+    /* Read once at startup: a config read is too costly for every queue insertion. */
+    if (!sh_config_get_bool("navmesh.enabled", &enabled, NULL) || !enabled) {
+        if (g_heap_push && !hook_unpatch((void *)g_heap_push)) return 0;
+        g_heap_push = NULL;
+        backend_log("NAV: path-search queue capacity safeguard off with navmesh.enabled false");
+        return 1;
+    }
     if (g_heap_push) {
         if (hook_is_installed((void *)g_heap_push)) return 1;
         if (!hook_unpatch((void *)g_heap_push)) return 0;

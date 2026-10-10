@@ -277,6 +277,8 @@ void sh_iface_bind_engine_slots(const sh_iface_engine_slots *s)
     g_iface_vtbl_live.rawmap_status           = s->rawmap_status;           /* +0x328 */
     g_iface_vtbl_live.rawmap_configure        = s->rawmap_configure;        /* +0x330 */
     g_iface_vtbl_live.rawmap_load_now         = s->rawmap_load_now;         /* +0x338 */
+    g_iface_vtbl_live.navmesh_view            = s->navmesh_view;            /* +0x340 */
+    g_iface_vtbl_live.run_on_main             = s->run_on_main;             /* +0x348 */
 }
 
 /* Allocate the fixed object and private subobject with an empty registry/queue. */

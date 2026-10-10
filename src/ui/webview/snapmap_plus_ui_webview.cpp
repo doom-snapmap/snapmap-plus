@@ -700,6 +700,26 @@ static void poc_apply_deselect()
         if (g_iface && g_iface->vtbl && g_iface->vtbl->clear_selection) g_iface->vtbl->clear_selection(g_iface);
     } __except (EXCEPTION_EXECUTE_HANDLER) { poc_log("deselect: SEH in apply"); }
 }
+/* Engine edits run on DOOM's main thread while this thread waits. */
+#define POC_MAIN_WAIT_MS      1000   /* a user action; allows for a slow frame */
+#define POC_MAIN_CAM_WAIT_MS   100   /* a held camera writes again next pass */
+static bool poc_on_main(sh_main_call_fn fn, void *ctx, int timeout_ms)
+{
+    int r = 0;
+    return g_iface && g_iface->vtbl && g_iface->vtbl->run_on_main &&
+           g_iface->vtbl->run_on_main(g_iface, fn, ctx, timeout_ms, &r) == 1;
+}
+struct PocMainEdits { bool save, del, select, deselect, cam; };
+static int poc_main_edits(void *ctx)
+{
+    const PocMainEdits *e = (const PocMainEdits *)ctx;
+    if (e->save)     poc_apply_save();
+    if (e->del)      poc_apply_deletes();
+    if (e->select)   poc_apply_select_in_editor();
+    if (e->deselect) poc_apply_deselect();
+    if (e->cam)      poc_cam_write();
+    return 1;
+}
 /* __try can't share a function with a C++ object needing unwinding (/EHsc, C2712) -- this leaf has only
  * PODs in scope, so the SEH guard around the engine call is safe here. */
 static int poc_serialize_selection_raw(char *buf, int cap)
@@ -833,11 +853,16 @@ static void poc_apply_rename_prefab()
  * Placement depends on backend editor gates; queue acceptance alone is not placement. */
 /* __try can't share a function with a C++ object needing unwinding (/EHsc, C2712) -- these leaves have
  * only PODs in scope, so the SEH guards around the engine calls are safe here. */
-static void poc_clear_selection_seh()
+static int poc_clear_selection_main(void *)
 {
     if (g_iface && g_iface->vtbl && g_iface->vtbl->clear_selection) {
         __try { g_iface->vtbl->clear_selection(g_iface); } __except (EXCEPTION_EXECUTE_HANDLER) {}
     }
+    return 1;
+}
+static void poc_clear_selection_seh()
+{
+    poc_on_main(poc_clear_selection_main, nullptr, POC_MAIN_WAIT_MS);
 }
 static int poc_apply_edit_seh(const sh_apply_item *it, int count, const char *op)
 {
@@ -1008,7 +1033,11 @@ static void poc_apply_delete_folder()
     for (size_t i = 0; i < items.size(); i++) {
         std::string src = std::string(dir) + items[i] + ".json";
         std::string dst = std::string(rootDir) + items[i] + ".json";
-        MoveFileA(src.c_str(), dst.c_str());
+        if (!MoveFileA(src.c_str(), dst.c_str())) continue;
+        char oldm[1024], newm[1024];   /* the sidecar follows its prefab; absent is fine */
+        if (poc_prefab_meta_path(g_delete_folder_name, items[i], oldm, (int)sizeof oldm) &&
+            poc_prefab_meta_path("", items[i], newm, (int)sizeof newm))
+            MoveFileA(oldm, newm);
     }
     poc_strip_trailing_sep(dir);
     g_delete_folder_result = RemoveDirectoryA(dir) ? 1 : 0;
@@ -1329,6 +1358,26 @@ static std::wstring poc_widen(const char *utf8)
     int wl = MultiByteToWideChar(CP_UTF8, 0, utf8, -1, nullptr, 0);
     if (wl > 0) { w.resize(wl - 1); if (wl > 1) MultiByteToWideChar(CP_UTF8, 0, utf8, -1, &w[0], wl); }
     return w;
+}
+
+/* Tell the page where the navigation view stands. Sent when the View menu opens
+ * and again after an update is asked for. */
+static void poc_send_navmesh_state()
+{
+    if (!g_webview) return;
+    char state[128] = "";
+    bool have = false;
+    if (g_iface && g_iface->vtbl && g_iface->vtbl->navmesh_view)
+        have = g_iface->vtbl->navmesh_view(g_iface, 0, state, (int)sizeof state) > 0;
+
+    std::wstring json = L"{\"kind\":\"navmeshState\",\"ok\":";
+    json += have ? L"true" : L"false";
+    if (have) {
+        json += L",\"state\":";
+        json += poc_widen(state);   /* already a JSON object -- forward it */
+    }
+    json += L"}";
+    g_webview->PostWebMessageAsJson(json.c_str());
 }
 
 static void poc_send_rawmap_status(const wchar_t *note, const wchar_t *confirm_file = nullptr)
@@ -2436,6 +2485,14 @@ static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventA
                 poc_rawmap_configure(nullptr, nullptr, 5, nullptr);
             } else if (cmd == L"rawmapSavePick") {
                 poc_begin_pick(1);
+            } else if (cmd == L"navmeshState") {
+                poc_send_navmesh_state();
+            } else if (cmd == L"navmeshUpdate") {
+                if (g_iface && g_iface->vtbl && g_iface->vtbl->navmesh_view) {
+                    char state[128] = "";
+                    g_iface->vtbl->navmesh_view(g_iface, 1, state, (int)sizeof state);
+                }
+                poc_send_navmesh_state();
             } else if (cmd == L"rawmapLoadNow") {
                 /* Ask the backend's editor-frame hook to reload the map, so the staged file opens
                  * without a trip to the SnapMap menu. The reply is a REQUEST result, not a
@@ -2733,17 +2790,25 @@ static void poc_think_loop()
         bool did_open_timeline = false, did_resolve_entity = false, did_save_timeline = false;
         EnterCriticalSection(&g_loop->mtx);
         if (g_iface && g_iface->vtbl && g_iface->vtbl->drain_work_queue) g_iface->vtbl->drain_work_queue(g_iface);
-        if (g_pending_save)   { poc_apply_save();    g_pending_save = false;   did_save = true; }
-        if (g_pending_delete) { poc_apply_deletes(); g_delete_eids.clear(); g_pending_delete = false; did_delete = true; }
+        {
+            PocMainEdits edits = { g_pending_save, g_pending_delete, g_pending_select, g_pending_deselect,
+                                   g_cam_lock || g_cam_write_once };
+            bool user = edits.save || edits.del || edits.select || edits.deselect || g_cam_write_once;
+            if (edits.save) g_save_result = -2;
+            if ((user || edits.cam) &&
+                !poc_on_main(poc_main_edits, &edits, user ? POC_MAIN_WAIT_MS : POC_MAIN_CAM_WAIT_MS) && user)
+                poc_log("engine edits: the game did not take them within the wait; dropped");
+            g_cam_write_once = false;
+        }
+        if (g_pending_save)   { g_pending_save = false;   did_save = true; }
+        if (g_pending_delete) { g_delete_eids.clear(); g_pending_delete = false; did_delete = true; }
         if (g_pending_select) {
-            poc_apply_select_in_editor();
             /* keep forward-sync (editor->list) quiet about the selection WE just pushed (avoid a ping-pong). */
             g_last_editor_sel = (g_select_eids.size() == 1) ? g_select_eids[0] : -1;
             if (g_select_eids.size() == 1) g_displayed_eid = g_select_eids[0];
             g_select_eids.clear(); g_pending_select = false;
         }
         if (g_pending_deselect) {
-            poc_apply_deselect();
             g_last_editor_sel = -1; g_last_sel_sig = 0;
             g_pending_deselect = false;
         }
@@ -2769,8 +2834,6 @@ static void poc_think_loop()
         if (g_pending_open_timeline) { g_tl_json_len = poc_serialize_entity_raw(g_open_timeline_eid); g_pending_open_timeline = false; did_open_timeline = true; }
         if (g_pending_resolve_entity) { g_resolve_json_len = poc_serialize_entity_resolve(g_resolve_entity_eid); g_pending_resolve_entity = false; did_resolve_entity = true; }
         if (g_pending_save_timeline) { poc_apply_save_timeline(); g_pending_save_timeline = false; did_save_timeline = true; }
-        /* Hold the requested camera lock, or flush one committed coordinate edit. */
-        if (g_cam_lock || g_cam_write_once) { poc_cam_write(); g_cam_write_once = false; }
         LeaveCriticalSection(&g_loop->mtx);
 
         if (did_save) {

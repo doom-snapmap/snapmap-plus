@@ -1,9 +1,8 @@
 /* Read Blocking Box navigation geometry and instance ownership from map JSON.
  *
- * AI Navigation uses flags.noFlood. Legacy affectsNavmesh markers migrate
- * before native parsing; an explicit new marker, including false, wins.
- * Runtime obstacle policy is applied separately. See docs/navigation-
- * markers.md.
+ * AI Navigation uses flags.noFlood. The engine's own affectsNavmesh is a
+ * separate property this module never reads or writes. Runtime obstacle policy
+ * is applied separately. See docs/navigation-markers.md.
  *
  * Ownership comes from instanceEntities, never spatial containment:
  * coordinates are module-local and repeated instances can share the same
@@ -79,6 +78,9 @@ typedef struct sh_nav_map {
     int             region_count;
     int             truncated;          /* a cap was hit; the caller should say so */
     int             invalid_geometry;   /* invalid solid, transform or ownership */
+    /* Boxes the editor could not measure yet, which a later read gets. Nonzero
+     * means this read is incomplete, not that the map is bad. */
+    int             unmeasured;
     /* Two volumes share an id, or one carries none. The shapes are still
      * good; only the per-entity refresh, which addresses a box by id, is
      * not. Duplicating a box in the editor produces this until the map is
@@ -86,6 +88,9 @@ typedef struct sh_nav_map {
     int             ids_unusable;
     sh_nav_region   obstacles[SH_NAVR_MAX_REGIONS];
     int             obstacle_count;
+    /* Volumes whose clip model is not a box -- a cylinder, say. They carry no
+     * navigation and are left out; they never invalidate the map. */
+    int             unshaped;
 } sh_nav_map;
 
 /* Parse into out, overwriting it even on failure. Returns 1 for a map
@@ -103,11 +108,6 @@ int sh_nav_regions_read_resolved(const char *json, size_t len, sh_nav_map *out,
  * declaration. Requires all components and a box type; never supplies sizes. */
 int sh_nav_regions_decl_size(const char *text, size_t len, float size[3]);
 
-/* Convert legacy Blocking Box markers before native map parsing. Returns a
- * NUL-terminated HeapAlloc buffer (caller HeapFrees), or NULL for no change or
- * a refusal. Other entities and unrelated bytes are preserved. */
-char *sh_nav_regions_migrate(const char *json, size_t len, size_t *out_len);
-
 /* Legacy per-entity refresh for callers without a complete-map snapshot.
  * Production editor baking uses sh_nav_bake_set_snapshot instead: it refreshes
  * ownership and the instance table together with geometry, including new IDs.
@@ -121,6 +121,19 @@ typedef int (*sh_navr_entity_json)(int id, char *out, int cap, void *ctx);
 /* Is `id` a live entity? */
 typedef int (*sh_navr_entity_valid)(int id, void *ctx);
 
+/* The editor's current transform for `id`: origin at the box bottom in local z,
+ * and the 3x3 whose rows are the box's local axes, both in module space. A
+ * serialized spawnPosition is the value the box was created with, so this is
+ * the only reader that sees a box the user has moved or turned. Returns 0 when
+ * the transform cannot be read, leaving the outputs untouched. */
+typedef int (*sh_navr_entity_transform)(int id, float origin[3], float m[3][3],
+                                        float size[3], int *instance, void *ctx);
+
+/* Encode a box as one representative face and its depth. Rejects a non-finite
+ * or non-positive size, and a matrix that is not a rotation. */
+int sh_nav_regions_box_face(const float origin[3], const float m[3][3],
+                            const float size[3], sh_nav_region *r);
+
 /* Legacy refresh of markers and geometry using the existing instance
  * attribution. Returns the marked-volume count, or -1 without changing m if
  * the live surface cannot be read. highest_id bounds probes through valid.
@@ -131,10 +144,25 @@ int sh_nav_regions_refresh_live(sh_nav_map *m, int highest_id,
 
 /* Refresh all cached Blocking Boxes by their live uniqueIds, including
  * unmarked obstacles. Preserve map-array indices and instance ownership.
- * Returns 0 without changing m when a complete snapshot is required. */
+ * Returns 0 without changing m when a complete snapshot is required.
+ *
+ * Geometry comes from the editor's own memory, so a box that has been moved,
+ * turned or resized costs nothing to follow; each box's flags are re-read. */
 int sh_nav_regions_refresh_known(sh_nav_map *m, sh_navr_entity_valid valid,
-                                 sh_navr_entity_json get_json, void *ctx,
+                                 sh_navr_entity_json get_json,
+                                 sh_navr_entity_transform get_transform, void *ctx,
                                  int *read_count, const char **why);
+
+/* Does the volume `uid` carry a navigation flag? Asked about one the cached
+ * inventory has never seen, where the answer decides whether a complete
+ * snapshot is owed. Costs one entity read. */
+int sh_nav_regions_volume_flagged(int uid, sh_navr_entity_json get_json, void *ctx);
+
+/* The uniqueIds of the volumes the last complete read recorded. Returns how
+ * many were written. A volume created since, including a placement preview, is
+ * not among them. */
+int sh_nav_regions_volume_uids(int *out, int cap);
+int sh_nav_regions_knows_volume(int uid);
 
 /* Move the right to refresh onto `m`, which must already hold a copy of what
  * the last read produced. Only one map at a time may be refreshed, and a

@@ -224,6 +224,20 @@ typedef int (*sh_get_prefab_mesh_fn)(struct sh_iface *self, void *out_blob, int 
 #define SH_PREFAB_DEFAULT_MODEL 0x1
 #define SH_PREFAB_DEFAULT_SCALE 0x2
 #endif
+/* The navigation view. `update` asks for it to be brought up to date on the
+ * game's next frame; 0 only reports. Writes {"stale","pending","floors","walls",
+ * "red","rooms","refused"}, all integers, and returns its length. */
+typedef int (*sh_navmesh_view_fn)(struct sh_iface *self, int update,
+                                  char *out_json, int cap);
+
+/* Run fn(ctx) on DOOM's main thread after the next native frame; inline when the
+ * caller is already there. Return 1 with *out_result set when fn ran, 0 when it
+ * did not start within timeout_ms. Once started, the caller waits for it to end,
+ * so fn must never wait on the caller's thread. */
+typedef int (*sh_main_call_fn)(void *ctx);
+typedef int (*sh_run_on_main_fn)(struct sh_iface *self, sh_main_call_fn fn, void *ctx,
+                                 int timeout_ms, int *out_result);
+
 typedef int (*sh_resolve_prefab_defaults_fn)(struct sh_iface *self, const char *inherit_name,
                                              char *out_model, int out_capacity,
                                              float *out_scale, int out_scale_count);
@@ -429,6 +443,8 @@ typedef struct sh_iface_vtbl {
     sh_rawmap_status_fn        rawmap_status;        /* +0x328 (ext 24) staged paths + arm state */
     sh_rawmap_configure_fn     rawmap_configure;     /* +0x330 (ext 25) choose those paths / arm */
     sh_rawmap_load_now_fn      rawmap_load_now;      /* +0x338 (ext 26) reload the map now */
+    sh_navmesh_view_fn         navmesh_view;         /* +0x340 (ext 27) the navigation view */
+    sh_run_on_main_fn          run_on_main;          /* +0x348 (ext 28) main-thread call */
 } sh_iface_vtbl;
 
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, config_get_json) == 0x2B0);
@@ -449,7 +465,9 @@ SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, resolve_prefab_defaults) == 0x320);
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, rawmap_status) == 0x328);
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, rawmap_configure) == 0x330);
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, rawmap_load_now) == 0x338);
-SH_STATIC_ASSERT(sizeof(sh_iface_vtbl) == 0x340);
+SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, navmesh_view) == 0x340);
+SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, run_on_main) == 0x348);
+SH_STATIC_ASSERT(sizeof(sh_iface_vtbl) == 0x350);
 
 /* Fixed object layout: vtable +0, reserved bytes +0x08..+0x57, subobject
  * pointer +0x58. Reserved bytes stay zero; private subobject storage holds
@@ -586,6 +604,8 @@ typedef struct sh_iface_engine_slots {
     sh_rawmap_status_fn        rawmap_status;               /* +0x328 (ext 24) */
     sh_rawmap_configure_fn     rawmap_configure;            /* +0x330 (ext 25) */
     sh_rawmap_load_now_fn      rawmap_load_now;             /* +0x338 (ext 26) */
+    sh_navmesh_view_fn         navmesh_view;                /* +0x340 (ext 27) */
+    sh_run_on_main_fn          run_on_main;                 /* +0x348 (ext 28) */
 } sh_iface_engine_slots;
 
 void sh_iface_bind_engine_slots(const sh_iface_engine_slots *slots);

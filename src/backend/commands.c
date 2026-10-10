@@ -9,6 +9,7 @@
 #include <string.h>
 #include "commands.h"
 #include "cvars.h"
+#include "overrides.h"
 #include "user_overrides.h"
 #include "clipboard.h"
 #include "typeinfo.h"
@@ -1765,6 +1766,22 @@ static void h_sh_dialogdump(idCmdArgs *a)
 static void h_sh_navmesh(idCmdArgs *a)
 {
     const char *verb = cmd_argv(a, 1);
+    if (verb && _stricmp(verb, "reads") == 0) {
+        unsigned reads = 0, noticed = 0;
+        unsigned by_edit = 0, by_undo = 0, by_start = 0;
+        double read_ms = 0.0;
+        int hooked = 0;
+        sh_apply_engine_nav_read_stats(&reads, &noticed, &read_ms,
+                                      &by_edit, &by_undo, &by_start, &hooked);
+        sh_printf("Navigation read %u time(s) this session, %.1f ms total.\n",
+                  reads, read_ms);
+        sh_printf("Editor actions that put the view out of date: %u\n", noticed);
+        sh_printf("What asked for a look: %u edits, %u undo or redo, %u map openings\n",
+                  by_edit, by_undo, by_start);
+        sh_printf("Editor actions are %s; the map is read when the View menu asks.\n",
+                  hooked ? "watched" : "NOT watched -- the edit hook did not install");
+        return;
+    }
     if (verb && _stricmp(verb, "marks") == 0) {
         const char *howmany = cmd_argv(a, 2);
         int n = howmany ? atoi(howmany) : 4;
@@ -1854,9 +1871,23 @@ static void h_sh_perf(idCmdArgs *a)
     sh_perf_report(sh_printf);
 }
 
+/* Take our resource layer back out, so the engine's own cost can be measured
+ * without it. One way: the editor's own resources go with it, so the session is
+ * for measuring, not for editing. */
+static void h_sh_overrides_off(idCmdArgs *a)
+{
+    (void)a;
+    if (sh_overrides_uninstall())
+        sh_printf("Resource layer removed. Timings from here are the engine alone.\n"
+                  "Restart DOOM to get it back.\n");
+    else
+        sh_printf("Resource layer was not installed.\n");
+}
+
 static const cmd_entry CMD_TABLE[] = {
     { "sh_packages",          (void *)h_sh_packages, "Show installed package sources and compiler results. 'sh_packages dependencies [type name]' inspects observed native dependencies." },
     { "sh_perf",              (void *)h_sh_perf,     "Where frame time goes inside snapmap-plus. 'sh_perf reset' starts the counting again." },
+    { "sh_overrides_off",     (void *)h_sh_overrides_off, "Remove our resource layer for the rest of this session, to measure the engine without it. Editor resources go with it; restart to get them back." },
     { "sh_rawmaps",           (void *)h_sh_rawmaps,   "Raw JSON map files: state, paths, load, save. Run with no arguments to see what is set, or 'sh_rawmaps help' (or '?') for every verb." },
     { "sh_rawmaps_on",       (void *)h_rawmaps_on,  "(legacy) Same as 'sh_rawmaps on'. Kept because older guides use it." },
     { "sh_rawmaps_off",      (void *)h_rawmaps_off, "(legacy) Same as 'sh_rawmaps off'. Kept because older guides use it." },
@@ -1895,7 +1926,7 @@ static const cmd_entry CMD_TABLE[] = {
     { "sh_user_overrides", (void *)h_sh_user_overrides,
       "sh_user_overrides [0|1] -- persist whether player override files load on the next DOOM launch; restart required; built-in defaults stay enabled." },
     { "sh_navmesh",          (void *)h_sh_navmesh,
-      "Reports the baked AI navigation the current map is serving -- which modules and nav classes, or why a bake was refused." },
+      "Reports the baked AI navigation the current map is serving -- which modules and nav classes, or why a bake was refused. `reads` counts what the editor has cost it." },
 
     { "sh_help",             (void *)h_sh_help,        "Lists every Snapmap+ console command and cvar with its description." },
 };

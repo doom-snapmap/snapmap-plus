@@ -44,7 +44,9 @@ static void snapshot_dimensions_follow_array_order(void)
     assert(out.regions[0].c[0][0] == -36.5f && out.regions[1].c[0][0] == -41.5f);
     assert(!memcmp(json,*(const char **)(str+IDSTR_DATA_OFF),sizeof json));
     *(uint32_t *)(snapshot + AE_SNAPSHOT_COUNT_OFF) = 1;
-    assert(ae_nav_snapshot_visit(snapshot,str,&out) && out.invalid_geometry);
+    /* The entity cannot be measured, which refuses the read without calling the
+     * geometry itself unusable. */
+    assert(ae_nav_snapshot_visit(snapshot,str,&out) && out.unmeasured);
 }
 void backend_log(const char *text) { (void)text; }
 sh_iface *sh_ui_get_iface(void) { return NULL; }
@@ -251,6 +253,10 @@ const char *ie_resolve_id_string(int id, char *buf, int cap) { (void)id; (void)b
 uintptr_t glb_resolve(const uint8_t *base, const char *name, glb_status *status) { (void)base; (void)name; (void)status; assert(0); return 0; }
 int sh_host_is_pinned_rva_build(void) { assert(0); return 0; }
 unsigned char *sh_overrides_read_engine_resource(const char *name, size_t *len) { (void)name; (void)len; assert(0); return NULL; }
+void *sh_prepare_detour_sig(const sig_result *r, void *detour, size_t stolen)
+{ (void)r; (void)detour; (void)stolen; assert(0); return NULL; }
+sh_patch_status sh_commit_detour(void *tramp) { (void)tramp; assert(0); return B2_PATCH_OK; }
+int sh_uninstall_detour(void *tramp) { (void)tramp; assert(0); return 0; }
 int sh_config_get_bool(const char *key, int *value, unsigned *flags) { (void)key; (void)value; (void)flags; assert(0); return 0; }
 int sh_rawmap_snapshot(void *serializer, void *map, void *out) { (void)serializer; (void)map; (void)out; assert(0); return 0; }
 int sh_rawmap_snapshot_inspect(void *serializer, void *map, void *out, sh_rawmap_snapshot_visit visit, void *ctx)
@@ -258,6 +264,13 @@ int sh_rawmap_snapshot_inspect(void *serializer, void *map, void *out, sh_rawmap
 void sh_nav_bake_refresh_live(void) { assert(0); }
 unsigned long sh_nav_bake_geometry_revision(void) { return 0; }
 int sh_nav_bake_refresh_volumes(int *volumes) { (void)volumes; assert(0); return 0; }
+int sh_nav_bake_volume_flagged(int uid) { (void)uid; assert(0); return 0; }
+int sh_nav_bake_volume_uids(int *out, int cap) { (void)out; (void)cap; return 0; }
+int sh_nav_bake_knows_volume(int uid) { (void)uid; return 0; }
+int sh_nav_bake_instance_count(void) { return 0; }
+int sh_nav_bake_has_map(void) { return 1; }
+void sh_nav_bake_volume_counts(int *floors, int *walls)
+{ if (floors) *floors = 0; if (walls) *walls = 0; }
 const char *sh_nav_bake_volumes_reason(void) { return ""; }
 int sh_nav_bake_preview(sh_nav_bake_reader reader, sh_nav_preview_line line, sh_nav_preview_colour_fn colour, void *ctx) { (void)reader; (void)line; (void)colour; (void)ctx; assert(0); return 0; }
 int sh_nav_preview_install(const sig_result *r, size_t n) { (void)r; (void)n; assert(0); return 0; }
