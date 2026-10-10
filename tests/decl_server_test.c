@@ -223,6 +223,11 @@ int sh_palette_refresh_after_decl_registration(void)
 }
 
 static int g_failed;
+static int g_editor_live, g_editor_ready_refuse, g_editor_end_refuse, g_editor_after_commit_refuse;
+static int g_editor_end_calls, g_editor_end_throw, g_editor_after_commit_throw;
+static int g_editor_begins, g_editor_accepts, g_editor_rejects;
+static int (*g_editor_admitted)(void *);
+static void *g_editor_context;
 
 #define CHECK(expr) do {                                                        \
     if (!(expr)) {                                                              \
@@ -231,6 +236,33 @@ static int g_failed;
     }                                                                           \
 } while (0)
 
+sh_resource_editor_state *sh_resource_graph_native_editor_state_begin(
+    int (*admitted)(void *),void *context,char *error,size_t capacity)
+{
+    (void)error; (void)capacity; CHECK(!g_editor_live && admitted(context));
+    g_editor_admitted=admitted; g_editor_context=context; g_editor_live=1; g_editor_begins++;
+    return (sh_resource_editor_state *)2;
+}
+int sh_resource_graph_native_editor_state_ok(sh_resource_editor_state *state)
+{ return state==(sh_resource_editor_state *)2 && g_editor_live && g_editor_admitted(g_editor_context); }
+int sh_resource_graph_native_editor_state_ready(sh_resource_editor_state *state)
+{
+    if (g_editor_ready_refuse) { g_editor_ready_refuse--; return 0; }
+    return sh_resource_graph_native_editor_state_ok(state);
+}
+int sh_resource_graph_native_editor_state_end(sh_resource_editor_state **owned,
+    int accepted,int *committed,char *error,size_t capacity)
+{
+    (void)error; (void)capacity; *committed=0; g_editor_end_calls++;
+    if (!*owned) { *committed=accepted; return 1; }
+    CHECK(*owned==(sh_resource_editor_state *)2 && g_editor_live && g_editor_admitted(g_editor_context));
+    if (g_editor_end_throw) {
+        g_editor_end_throw=0; RaiseException(0xe0410012,0,0,NULL);
+    }
+    if (g_editor_end_refuse) { g_editor_end_refuse--; return 0; }
+    if (accepted) g_editor_accepts++; else g_editor_rejects++;
+    *committed=accepted; *owned=NULL; g_editor_live=0; g_editor_context=NULL; return 1;
+}
 /* Model the allocator scope stack independently of resource-level promotion. */
 static struct {
     unsigned char prefix[0x44];
@@ -252,13 +284,15 @@ void sh_mpkg_boot_capture(const char *root)
 int sh_mpkg_activation_commit(char *error, size_t capacity)
 {
     g_install_commit_calls++;
-    if (g_heap_check_native) CHECK(g_heap_local.depth == 1);
+    if (g_heap_check_native) CHECK(g_heap_local.depth == 2 && g_editor_live);
     if (g_install_commit_fail) {
         int failure = g_install_commit_fail;
         g_install_commit_fail = 0;
         if (failure == 2) RaiseException(0xe04d504d, 0, 0, NULL);
         snprintf(error, capacity, "fixture installation commit failure"); return 0;
     }
+    if (g_editor_after_commit_refuse) { g_editor_after_commit_refuse=0; g_editor_end_refuse=1; }
+    if (g_editor_after_commit_throw) { g_editor_after_commit_throw=0; g_editor_end_throw=1; }
     return 1;
 }
 int sh_mpkg_activation_cancel(void)
@@ -3418,11 +3452,38 @@ static void test_empty_launch_and_runtime_results(void)
             int begins = g_resident_begin_calls, ends = g_resident_end_calls;
             if (failure) g_resident_fail_drain = 1; else g_resident_fail_begin = 1;
             CHECK(sh_decl_server_rearm() == 0);
-            CHECK(g_resident_begin_calls == begins + 2 && g_resident_end_calls == ends + 2);
+            /* Failed Begin owns no resident handle. Only recovery ends one;
+             * a failed drain still ends both admitted resident passes. */
+            CHECK(g_resident_begin_calls == begins + 2 && g_resident_end_calls == ends + (failure ? 2 : 1));
             CHECK(g_install_commit_calls == commits && sh_package_runtime_admission_ready());
             after = sh_package_runtime_acquire(); CHECK(after == before); sh_package_runtime_release();
         }
         CHECK(sh_decl_server_rearm() == 1);
+    }
+    {
+        /* A failed read-only storage preflight cannot reach disk commit. */
+        const sh_package_compilation *before=sh_package_runtime_acquire(),*after;
+        sh_package_runtime_release(); int commits=g_install_commit_calls,rejects=g_editor_rejects;
+        g_editor_ready_refuse=1;
+        CHECK(!sh_decl_server_rearm());
+        after=sh_package_runtime_acquire(); CHECK(after==before); sh_package_runtime_release();
+        CHECK(g_install_commit_calls==commits && g_editor_rejects==rejects+1 && !g_editor_live);
+        CHECK(sh_decl_server_rearm());
+        /* Simulate identity/admission refusal after the irreversible commit.
+         * The candidate remains served; NEXT refresh closes accepted storage
+         * before new work, without repeating the previous disk commit. */
+        before=sh_package_runtime_acquire(); sh_package_runtime_release();
+        commits=g_install_commit_calls; rejects=g_editor_rejects; int accepts=g_editor_accepts;
+        int cancels=g_install_cancel_calls;
+        g_editor_after_commit_refuse=1;
+        CHECK(!sh_decl_server_rearm());
+        after=sh_package_runtime_acquire(); CHECK(after!=before); sh_package_runtime_release();
+        CHECK(g_install_commit_calls==commits+1 && g_editor_accepts==accepts &&
+            g_editor_rejects==rejects && g_editor_live && !sh_package_runtime_admission_ready());
+        CHECK(g_install_cancel_calls==cancels);
+        CHECK(sh_decl_server_rearm());
+        CHECK(g_install_commit_calls==commits+2 && g_editor_accepts==accepts+2 &&
+            g_editor_rejects==rejects && !g_editor_live && g_install_cancel_calls==cancels);
     }
     {
         /* Installed packages changed outside an installation are prepared again
@@ -3779,6 +3840,33 @@ static void test_empty_launch_and_runtime_results(void)
         /* Keep the verified original reader until fixture teardown completes. */
         g_boundary_resource_head = NULL;
         g_linked_fixture = 0;
+    }
+    {
+        /* End raises after successful disk commit, before writing committed.
+         * Keep the new provider, disable readiness and retain the damaged
+         * native context without cancellation or End/destructor replay. */
+        const sh_package_compilation *before=sh_package_runtime_acquire(),*after;
+        sh_package_runtime_release();
+        int commits=g_install_commit_calls,cancels=g_install_cancel_calls;
+        int ends=g_editor_end_calls,accepts=g_editor_accepts,rejects=g_editor_rejects;
+        g_boundary_resource_head=g_rt_builtin_node;
+        g_editor_after_commit_throw=1;
+        CHECK(!sh_decl_server_rearm());
+        after=sh_package_runtime_acquire(); CHECK(after!=before); sh_package_runtime_release();
+        CHECK(g_install_commit_calls==commits+1 && g_install_cancel_calls==cancels &&
+            g_editor_end_calls==ends+1 && g_editor_live &&
+            g_editor_accepts==accepts && g_editor_rejects==rejects);
+        CHECK(!sh_package_runtime_ready() && !sh_package_runtime_admission_ready());
+        CHECK(!sh_decl_server_rearm());
+        sh_decl_server_request_rearm(); sh_decl_server_rearm_poll();
+        after=sh_package_runtime_acquire(); CHECK(after!=before); sh_package_runtime_release();
+        CHECK(g_install_commit_calls==commits+1 && g_install_cancel_calls==cancels &&
+            g_editor_end_calls==ends+1 && g_editor_accepts==accepts && g_editor_rejects==rejects);
+        /* Fixture-owned sentinels and wrappers are discarded directly, after
+         * asserting the production damage path cannot replay native cleanup. */
+        sh_decl_server_test_reset_install();
+        g_editor_live=g_shader_resident_live=0; g_editor_context=NULL;
+        sh_package_runtime_test_dispose(); heap_fixture_reset();
     }
     test_boot_hook_recovery(results, sizeof(results)/sizeof(results[0]), base, &registry);
     g_rt_builtin_count = 0;

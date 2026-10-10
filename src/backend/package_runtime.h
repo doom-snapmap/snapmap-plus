@@ -59,6 +59,20 @@ int sh_package_runtime_refresh_guarded(const char *data_root, sh_package_activat
  * it does not certify native cache readiness or complete dependency coverage. */
 typedef int (*sh_package_activation_fn)(void *context, int restoring,
     const sh_package_changes *changes, char *error, size_t capacity);
+/* One owning-storage finish per serialized activation callback. Register while
+ * the callback is running, with an owned context that survives its return and
+ * exceptions. Reject runs before previous-provider consumer recovery; accept
+ * runs after material status, FSM binding and any occurrence finalizer.
+ * accepted=2 is a read-only preflight before an irreversible disk finalizer;
+ * return readiness without consuming context or setting *committed.
+ * Return 1 when consumed, 0 when admission/restoration is still owed, -1 for
+ * damaged native storage whose cleanup must never be replayed. Set *committed
+ * before irreversible accepted cleanup. A cleanup failure after that latch
+ * keeps the candidate provider and disables native use; it cannot roll back
+ * storage already freed. Duplicate, stale and recursive registration refuse. */
+typedef int (*sh_package_activation_finish_fn)(void *context, int accepted,
+    int *committed, char *error, size_t capacity);
+int sh_package_runtime_defer_activation_finish(sh_package_activation_finish_fn finish, void *context);
 int sh_package_runtime_refresh_activated(const char *data_root, sh_package_activation_guard guard,
     sh_package_activation_fn activate, void *context);
 /* Record that the package tree gained or lost sources outside a refresh: a

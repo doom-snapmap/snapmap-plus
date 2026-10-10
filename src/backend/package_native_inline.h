@@ -37,8 +37,9 @@ typedef struct sh_native_inline_source {
      * package still does, such as a global stock change), or NULL to allow
      * conversion. May be NULL. */
     const char *(*keep)(void *context, size_t entity, const char *name, sh_decl_carrier_limit *limit);
-    /* The entity carrier's current `~version`; other versions are upgraded by
-     * the native reader first, so their state is left alone. */
+    /* Current native entity carrier version. Supported original versions are
+     * upgraded on a derived copy before source lookup and inheritance folding;
+     * only an accepted equivalent result is emitted at this version. */
     int version;
     /* Native placement. SnapMap's map validator admits an entity only when its
      * inherit names the entityDef of a palette row (a snapEditorEntityDef).
@@ -71,5 +72,12 @@ void sh_native_inline_report_free(sh_native_inline_report *report);
 char *sh_native_inline_document(const char *json, size_t length,
     const sh_native_inline_source *source, size_t *output_length,
     sh_native_inline_report *report, char *error, size_t capacity);
+
+#ifdef SH_NATIVE_INLINE_TESTING
+/* Test the original-version policy without stamping an accepted version or
+ * converting inheritance. Return 1/copy, 0/coverage, or -1/allocation failure. */
+int sh_native_inline_test_version_copy(const char *json, int target, char **copy);
+void sh_native_inline_test_version_alloc_fail_after(long count);
+#endif
 
 #endif

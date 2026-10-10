@@ -33,6 +33,104 @@ sh_patch_status hook_commit(void *trampoline)
 int hook_unpatch(void *trampoline) { (void)trampoline; CHECK(0); return 0; }
 
 static const char *health_path = "generated/decls/entitydef/ai/cyberdemon.decl";
+static int baseline(void *context,const char *path,unsigned char **body,size_t *length);
+typedef struct finish_token { int old, restoring; } finish_token;
+static struct {
+    int enabled, live, serial, accepts, rejects, calls, preflights, finalizations;
+    int refuse_once, preflight_refuse, cleanup_fault, activation_fault;
+    finish_token *active, *damaged;
+} finish_probe;
+static int probe_finish(void *context,int accepted,int *committed,char *error,size_t capacity)
+{
+    finish_token *token=context; CHECK(token==finish_probe.active); *committed=0;
+    if (accepted==2) {
+        finish_probe.preflights++;
+        if (finish_probe.preflight_refuse) { finish_probe.preflight_refuse=0; return 0; }
+        return 1;
+    }
+    finish_probe.calls++;
+    if (finish_probe.refuse_once) {
+        finish_probe.refuse_once=0; snprintf(error,capacity,"fixture native admission owed"); return 0;
+    }
+    if (accepted) { *committed=1; finish_probe.accepts++; }
+    else { finish_probe.live=token->old; finish_probe.rejects++; }
+    finish_probe.active=NULL;
+    if (accepted && finish_probe.cleanup_fault) {
+        finish_probe.damaged=token;
+        if (finish_probe.cleanup_fault==2) RaiseException(0xe0420001,0,0,NULL);
+        snprintf(error,capacity,"fixture accepted native cleanup damaged"); return -1;
+    }
+    free(token); return 1;
+}
+static void probe_begin(int restoring)
+{
+    if (!finish_probe.enabled) return;
+    CHECK(!finish_probe.active); /* Reject must finish before consumer recovery. */
+    finish_token *token=calloc(1,sizeof(*token)); CHECK(token); if (!token) return;
+    token->old=finish_probe.live; token->restoring=restoring;
+    finish_probe.active=token; finish_probe.live=++finish_probe.serial;
+    CHECK(sh_package_runtime_defer_activation_finish(probe_finish,token));
+    CHECK(!sh_package_runtime_defer_activation_finish(probe_finish,token)); /* Duplicate. */
+}
+static int probe_activate(void *context,int restoring,const sh_package_changes *changes,char *error,size_t capacity)
+{
+    (void)context; (void)changes; probe_begin(restoring);
+    if (!restoring && finish_probe.activation_fault==2) RaiseException(0xe0420002,0,0,NULL);
+    if (!restoring && finish_probe.activation_fault) { snprintf(error,capacity,"fixture native parse failed"); return 0; }
+    return 1;
+}
+static int probe_fsm_installed(void) { return 1; }
+static int probe_fsm_issue(const char *const *names,size_t count) { (void)names; (void)count; return 1; }
+static int probe_fsm_fault;
+static int probe_fsm_publish(const struct sh_fsm_web_table *table)
+{
+    (void)table; CHECK(finish_probe.active);
+    if (probe_fsm_fault) {
+        int fault=probe_fsm_fault; probe_fsm_fault=0;
+        if (fault==2) RaiseException(0xe0420003,0,0,NULL);
+        return 0;
+    }
+    return 1;
+}
+static void test_deferred_activation_finish(void)
+{
+    char map[MAX_PATH],error[2048]; snprintf(map,sizeof(map),"%s\\deferred-map",root);
+    create("deferred-map/overrides/p/package.json","{\"id\":\"deferred\",\"name\":\"Deferred\"}");
+    create("deferred-map/overrides/p/assets/generated/decls/entitydef/ai/cyberdemon.decl","{ edit = { health = 77; } }");
+    for (int fault=0;fault<2;fault++) {
+        sh_package_runtime_test_dispose(); sh_package_runtime_test_baseline(baseline,NULL);
+        CHECK(sh_package_runtime_refresh(root)); memset(&finish_probe,0,sizeof(finish_probe)); finish_probe.enabled=1;
+        CHECK(!sh_package_runtime_defer_activation_finish(probe_finish,&finish_probe)); /* Stale registration. */
+        sh_package_runtime_test_fsm_hook(probe_fsm_installed,probe_fsm_issue,probe_fsm_publish);
+        for (int fail=1;fail<=2;fail++) {
+            finish_probe.activation_fault=fail;
+            CHECK(!sh_package_runtime_activate_map(root,map,(sh_package_activation_guard){0},probe_activate,NULL));
+            CHECK(!finish_probe.active && finish_probe.rejects==fail && finish_probe.accepts==fail);
+        }
+        finish_probe.activation_fault=0;
+        for (int fail=1;fail<=2;fail++) {
+            probe_fsm_fault=fail; int rejects=finish_probe.rejects;
+            CHECK(!sh_package_runtime_activate_map(root,map,(sh_package_activation_guard){0},probe_activate,NULL));
+            CHECK(!finish_probe.active && finish_probe.rejects==rejects+1);
+        }
+        CHECK(sh_package_runtime_activate_map(root,map,(sh_package_activation_guard){0},probe_activate,NULL));
+        CHECK(!finish_probe.active && finish_probe.preflights && sh_package_runtime_admission_ready());
+        finish_probe.preflight_refuse=1;
+        CHECK(!sh_package_runtime_activate_map(root,map,(sh_package_activation_guard){0},probe_activate,NULL));
+        CHECK(!finish_probe.active && sh_package_runtime_admission_ready());
+        finish_probe.cleanup_fault=fault+1;
+        const sh_package_compilation *before=sh_package_runtime_acquire(); sh_package_runtime_release();
+        CHECK(!sh_package_runtime_activate_map(root,map,(sh_package_activation_guard){0},probe_activate,NULL));
+        const sh_package_compilation *latched=sh_package_runtime_acquire(); CHECK(latched && latched!=before); sh_package_runtime_release();
+        CHECK(!finish_probe.active && finish_probe.damaged && !sh_package_runtime_admission_ready());
+        int calls=finish_probe.calls;
+        CHECK(!sh_package_runtime_activate_map(root,NULL,(sh_package_activation_guard){0},probe_activate,NULL));
+        const sh_package_compilation *after=sh_package_runtime_acquire(); CHECK(after==latched); sh_package_runtime_release();
+        CHECK(finish_probe.calls==calls); sh_package_runtime_error(error,sizeof(error)); CHECK(strstr(error,"damaged"));
+        sh_package_runtime_test_fsm_hook(NULL,NULL,NULL); sh_package_runtime_test_dispose();
+        free(finish_probe.damaged); memset(&finish_probe,0,sizeof(finish_probe));
+    }
+}
 static const char *descriptor = "{\"id\":\"installed-bosses\",\"name\":\"Installed Bosses\",\"strings\":{\"en\":{\"label\":\"local\"}}}";
 static const char *original = "{ edit = { health = 25000; } }";
 /* Library compiles that left an unchanged judged package out without
@@ -1261,6 +1359,7 @@ static int activate_atlas(void *context, int restoring,
     const sh_package_changes *changes, char *error, size_t capacity)
 {
     atlas_activation *s = context;
+    probe_begin(restoring);
     int index = restoring ? s->previous : s->next;
     const char *names[] = {"variants/red", "variants/green"};
     char path[256];
@@ -3232,6 +3331,7 @@ static int additive_activate(void *context, int restoring, const sh_package_chan
     char *error, size_t capacity)
 {
     additive_activation *state = context;
+    probe_begin(restoring);
     unsigned char *body = NULL; size_t length = 0;
     CHECK(sh_package_runtime_has_map_provider());
     expect_current(state->old_path, "health = 10");
@@ -3258,6 +3358,7 @@ static int additive_finalize(void *context, char *error, size_t capacity)
 {
     additive_activation *state = context;
     state->finalizations++;
+    if (finish_probe.enabled) { CHECK(finish_probe.active); finish_probe.finalizations++; }
     CHECK(sh_package_runtime_has_map_provider());
     expect_current(state->old_path, "health = 10");
     expect_current(state->new_path, "health = 20");
@@ -3365,6 +3466,21 @@ static void test_additive_occurrence_admission(void)
     current = sh_package_runtime_acquire();
     CHECK(current && current->resource_count == resource_count && current->sources->package_count == owner_count);
     sh_package_runtime_release(); CHECK(state.calls == 6 && state.recoveries == 4);
+    if (finish_probe.enabled) {
+        int finalizations=state.finalizations,accepts=finish_probe.accepts,rejects=finish_probe.rejects;
+        finish_probe.refuse_once=1;
+        CHECK(sh_package_runtime_admit_occurrences(plans[1],documents[1],(sh_package_activation_guard){0},
+            additive_activate,additive_finalize,&state,error,sizeof(error))==SH_PACKAGE_ADMISSION_READY);
+        CHECK(finish_probe.active && finish_probe.accepts==accepts && finish_probe.rejects==rejects &&
+            state.finalizations==finalizations+1 && !sh_package_runtime_admission_ready());
+        /* NEXT admission consumes the previously accepted cleanup, before
+         * refusing new work on an unusable provider. It cannot reject the
+         * committed decision or repeat the disk finalizer. */
+        CHECK(sh_package_runtime_admit_occurrences(plans[1],documents[1],(sh_package_activation_guard){0},
+            additive_activate,additive_finalize,&state,error,sizeof(error))==SH_PACKAGE_ADMISSION_FAILED);
+        CHECK(!finish_probe.active && finish_probe.accepts==accepts+1 && finish_probe.rejects==rejects &&
+            state.finalizations==finalizations+1);
+    }
     lease_activation held = {new_path, 1, 1};
     CHECK(sh_package_runtime_activate_occurrences(NULL, (sh_package_activation_guard){0}, lease_activate, &held));
     unsigned char *unwanted = NULL; size_t unwanted_length = 0;
@@ -4467,6 +4583,10 @@ static int d8r_controls(const library_row *rows, size_t count, const char *name,
                 !strcmp(field->key, "inspector") ? list[index].inspector : NULL;
             size_t capacity = !strcmp(field->key, "path") ? sizeof(list[index].path) : sizeof(list[index].inspector);
             if (slot && sh_decl_tree_literal(field, &text, &text_length) && text_length < capacity) {
+                /* The native declaration-pointer reader clears unquoted NULL;
+                 * it is a constructor default, not an inspector's name. */
+                if (!strcmp(field->key, "inspector") && field->value[0] != '"' &&
+                    text_length == 4 && !memcmp(text, "NULL", 4)) text_length = 0;
                 memcpy(slot, text, text_length); slot[text_length] = 0;
             }
         }
@@ -7053,7 +7173,8 @@ int main(int argc, char **argv)
     test_committed_install_joins_library();
     test_variant_ownership();
     test_installed_inventory_is_not_active_composition();
-    test_native_material_provider_transaction();
+    finish_probe.enabled=1; test_native_material_provider_transaction(); CHECK(!finish_probe.active);
+    finish_probe.enabled=0;
     test_complete_source_snapshots();
     test_original_deliveries_before_compilation();
     test_historical_private_preparation();
@@ -7072,8 +7193,10 @@ int main(int argc, char **argv)
     test_retained_bound_dependencies();
     test_retained_registration_meaning(0);
     test_retained_registration_meaning(1);
-    test_additive_occurrence_admission();
+    finish_probe.enabled=1; test_additive_occurrence_admission(); CHECK(!finish_probe.active);
+    finish_probe.enabled=0;
     test_fsm_admission();
+    test_deferred_activation_finish();
     test_installed_authoring_admission();
     test_initial_installed_authoring();
     test_local_authoring_defect();

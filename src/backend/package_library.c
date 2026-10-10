@@ -2043,23 +2043,22 @@ static int pl_contribution_group(pl_build *b, const sh_package_sources *sources,
     for (size_t i = 0; phase != 2 && i < count; i++) {
         pl_chain authored_chain = {0};
         char *form = NULL; size_t form_length = 0;
-        int repeats = sh_package_editor_repeats(texts[i]), formed;
+        int repeats = sh_package_editor_repeats_type(c->inputs.units[members[i]].family, texts[i]), formed;
         if (repeats < 0) { snprintf(error, capacity, "editor contribution allocation failed"); goto failed; }
-        if (!repeats) continue;
-        if (parents[i] && !pl_parent_chain(c, members[i], texts[i], 0, &authored_chain, &kind, error, capacity)) {
+        if (repeats && parents[i] && !pl_parent_chain(c, members[i], texts[i], 0, &authored_chain, &kind, error, capacity)) {
             culprit = members[i]; goto failed;
         }
-        formed = sh_package_editor_native_form(texts[i], authored_chain.texts, authored_chain.count, &form, &form_length);
+        formed = sh_package_editor_native_form_type(c->inputs.units[members[i]].family, texts[i], authored_chain.texts, authored_chain.count, &form, &form_length);
         pl_chain_free(&authored_chain);
         if (formed == -1) { kind = SH_PACKAGE_EDITOR_FAILURE_ENVIRONMENT; snprintf(error, capacity, "editor contribution allocation failed"); goto failed; }
         if (formed == -2) {
             kind = SH_PACKAGE_EDITOR_FAILURE_SOURCE; culprit = members[i];
-            snprintf(error, capacity, "the declaration's own fields change between a value and a block over its parents");
+            snprintf(error, capacity, "the editor declaration has a malformed member or changes between a value and a block over its parents");
             goto failed;
         }
         if (formed < 0) {
             kind = SH_PACKAGE_EDITOR_FAILURE_COVERAGE;
-            snprintf(error, capacity, "a member stated more than once reads natively as no single statement does");
+            snprintf(error, capacity, "the editor declaration's native collection form is not modelled");
             goto failed;
         }
         if (formed) { free((char *)texts[i].text); texts[i] = (sh_decl_source){form, form_length}; }

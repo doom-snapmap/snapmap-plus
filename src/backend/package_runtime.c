@@ -165,6 +165,16 @@ static int g_occurrence_recovery_ready, g_occurrence_recovery_usable;
 /* Native activation runs with this thread owning the refresh lock. Editor
  * callbacks may inspect the published candidate without reacquiring it. */
 static __declspec(thread) unsigned g_activation_callback;
+/* g_refresh_lock serializes this slot. The owning thread is retained across
+ * a refused admission; a different thread cannot consume native storage. */
+static struct {
+    sh_package_activation_finish_fn finish;
+    void *context;
+    DWORD thread;
+    int running, accepted;
+} g_activation_finish;
+static int g_activation_damaged;
+static void *g_activation_diagnostic_context;
 static char g_error[2048];
 static char g_authoring_error[2048];
 static char *g_map_json;
@@ -844,16 +854,70 @@ static int pr_fsm_bind(const pr_provider *view, char *error, size_t capacity)
         }
         table = (sh_fsm_web_table){bindings, webs->count, (const char *const *)webs->owned, webs->owned_count};
     }
-    ok = g_fsm.publish(pr_fsm_content(view) ? &table : NULL);
+    __try { ok = g_fsm.publish(pr_fsm_content(view) ? &table : NULL); }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        free(bindings);
+        snprintf(error,capacity,"package AI state-machine publication raised exception 0x%08lx",(unsigned long)GetExceptionCode());
+        return 0;
+    }
     free(bindings);
     if (!ok) snprintf(error, capacity, "package AI state-machine webs do not resolve against the registered declarations (backend log)");
     return ok;
 }
 
+int sh_package_runtime_defer_activation_finish(sh_package_activation_finish_fn finish, void *context)
+{
+    if (g_activation_callback != 1 || !finish || !context || g_activation_finish.finish ||
+        g_activation_finish.running || g_activation_damaged) return 0;
+    g_activation_finish.finish = finish; g_activation_finish.context = context;
+    g_activation_finish.thread = GetCurrentThreadId(); return 1;
+}
+static int pr_activation_finish(int accepted, int *committed, char *error, size_t capacity)
+{
+    int result = 0;
+    *committed = 0;
+    if (g_activation_damaged) {
+        snprintf(error,capacity,"native activation storage was damaged; cleanup cannot be replayed"); return -1;
+    }
+    if (!g_activation_finish.finish) { *committed = accepted != 0; return 1; }
+    if (g_activation_finish.running || g_activation_finish.thread != GetCurrentThreadId()) {
+        snprintf(error,capacity,"native activation storage requires its owning thread and admission"); return 0;
+    }
+    int preflight=accepted==2;
+    if (!preflight) accepted = accepted || g_activation_finish.accepted;
+    g_activation_finish.running = 1;
+    g_activation_callback++;
+    __try {
+        __try { result = g_activation_finish.finish(g_activation_finish.context,accepted,committed,error,capacity); }
+        __except (EXCEPTION_EXECUTE_HANDLER) {
+            snprintf(error,capacity,"native activation storage cleanup raised exception 0x%08lx; cleanup cannot be replayed",
+                (unsigned long)GetExceptionCode()); result = -1;
+            g_activation_diagnostic_context = g_activation_finish.context;
+        }
+    }
+    __finally { g_activation_callback--; }
+    g_activation_finish.running = 0;
+    if (preflight) {
+        *committed=0;
+        if (result<0) { g_activation_damaged=1; g_activation_diagnostic_context=g_activation_finish.context; }
+        return result;
+    }
+    if (*committed && result == 0) g_activation_finish.accepted = 1;
+    if (result) {
+        if (result < 0) g_activation_damaged = 1;
+        memset(&g_activation_finish,0,sizeof(g_activation_finish));
+    }
+    return result;
+}
+static int pr_activation_recover(sh_package_activation_fn activate, void *context,
+    const sh_package_changes *changes, const pr_provider *previous, char *error, size_t capacity);
 static int pr_activate(sh_package_activation_fn activate, void *context, int restoring,
     const sh_package_changes *changes, char *error, size_t capacity)
 {
     int result = 0;
+    if (g_activation_finish.finish || g_activation_damaged || g_activation_callback) {
+        snprintf(error,capacity,"previous native activation storage has not finished"); return 0;
+    }
     g_activation_callback++;
     __try {
         __try {
@@ -867,6 +931,18 @@ static int pr_activate(sh_package_activation_fn activate, void *context, int res
     }
     __finally { g_activation_callback--; }
     return result;
+}
+static int pr_activation_recover(sh_package_activation_fn activate, void *context,
+    const sh_package_changes *changes, const pr_provider *previous, char *error, size_t capacity)
+{
+    int ready = pr_activate(activate,context,1,changes,error,capacity) && pr_fsm_bind(previous,error,capacity);
+    int committed = 0;
+    int finished = pr_activation_finish(ready,&committed,error,capacity);
+    if (!ready || !committed) {
+        if (finished == 0) pr_activation_finish(0,&committed,error,capacity);
+        return 0;
+    }
+    return finished == 1;
 }
 
 /* The scan's rejection report line; NULL when it cannot grow. */
@@ -3662,6 +3738,10 @@ static int pr_update(const char *data_root, int change_map, const char *map_sour
     int ok = 0, guarded = 0, composition_failed = 0, old_usable = 0, library_rescanned = 0;
     LONG lease_generation, promotion_generation;
     AcquireSRWLockExclusive(&g_refresh_lock);
+    {
+        int committed = 0;
+        if (pr_activation_finish(0,&committed,error,sizeof(error)) != 1) { g_usable = 0; goto done; }
+    }
     if (g_native_preparing || g_occurrence_recovery_provider) {
         /* A concurrent/reentrant refresh cannot replace this immutable retry
          * or mark its still-valid provider failed. The owning preparation
@@ -3813,10 +3893,17 @@ static int pr_update(const char *data_root, int change_map, const char *map_sour
     g_activating = activate != NULL; g_usable = 0; g_ready = !g_activating; g_error[0] = 0;
     ReleaseSRWLockExclusive(&g_lock);
     if (guarded) { guard.end(1); guarded = 0; }
-    if (activate && (!pr_activate(activate, context, 0, &changes, error, sizeof(error)) ||
-        !pr_fsm_bind(current, error, sizeof(error)))) {
+    int candidate_ready = !activate || (pr_activate(activate, context, 0, &changes, error, sizeof(error)) &&
+        pr_fsm_bind(current, error, sizeof(error)));
+    int committed = 0;
+    if (candidate_ready && g_activation_finish.finish)
+        candidate_ready=pr_activation_finish(2,&committed,error,sizeof(error))==1;
+    int finish_result = pr_activation_finish(candidate_ready,&committed,error,sizeof(error));
+    int cleanup_failed = finish_result != 1;
+    if (!candidate_ready || !committed) {
         char recovery_error[1024] = "";
-        int recovered;
+        int recovered, rejected = finish_result;
+        if (rejected == 0) rejected = pr_activation_finish(0,&committed,recovery_error,sizeof(recovery_error));
         if (!error[0]) strcpy_s(error, sizeof(error), "package activation did not complete");
         if (guard.begin) { guard.begin(); guarded = 1; }
         AcquireSRWLockExclusive(&g_lock);
@@ -3832,8 +3919,8 @@ static int pr_update(const char *data_root, int change_map, const char *map_sour
         ReleaseSRWLockExclusive(&g_lock);
         if (guarded) { guard.end(1); guarded = 0; }
         sh_package_changes_reverse(&changes);
-        recovered = pr_activate(activate, context, 1, &changes, recovery_error, sizeof(recovery_error)) &&
-            pr_fsm_bind(old_current, recovery_error, sizeof(recovery_error));
+        recovered = rejected == 1 && activate && pr_activation_recover(activate,context,&changes,
+            old_current,recovery_error,sizeof(recovery_error));
         AcquireSRWLockExclusive(&g_lock); g_usable = recovered && old_usable; ReleaseSRWLockExclusive(&g_lock);
         if (!recovered) {
             char activation_error[sizeof(error)];
@@ -3846,9 +3933,9 @@ static int pr_update(const char *data_root, int change_map, const char *map_sour
         goto done;
     }
     AcquireSRWLockExclusive(&g_lock);
-    g_activating = 0; g_ready = 1; g_usable = activate != NULL;
+    g_activating = 0; g_ready = !cleanup_failed; g_usable = activate != NULL && !cleanup_failed;
 #ifdef SH_PACKAGE_RUNTIME_TESTING
-    if (!g_native_bound) g_usable = 1; /* Pure filesystem/compiler host. */
+    if (!g_native_bound && !cleanup_failed) g_usable = 1; /* Pure filesystem/compiler host. */
 #endif
     if (!change_map) strcpy_s(g_authoring_error, sizeof(g_authoring_error), source_error);
     sh_package_provenance_free(&g_promoted); g_promoted = promoted; memset(&promoted, 0, sizeof(promoted));
@@ -3889,6 +3976,7 @@ static int pr_update(const char *data_root, int change_map, const char *map_sour
     pr_release(old_current); pr_release(old_library); pr_release(old_map);
     InterlockedExchange(&g_lease_published, lease_generation); pr_collect_leases();
     sh_package_policy_free(&old_selected); ok = 1;
+    if (cleanup_failed) ok = 0; /* Candidate ownership already latched: keep it. */
     if (source_error[0]) { strcpy_s(error, sizeof(error), source_error); ok = 0; }
 done:
     if (guarded) guard.end(0);
@@ -3989,6 +4077,10 @@ int sh_package_runtime_admit_occurrences(sh_package_map_plan *plan,
     if (!error || !capacity) { error = fallback; capacity = sizeof(fallback); }
     *error = 0;
     AcquireSRWLockExclusive(&g_refresh_lock);
+    {
+        int committed = 0;
+        if (pr_activation_finish(0,&committed,error,capacity) != 1) goto done;
+    }
     if (!plan || !activate || !g_current_provider || !g_usable || g_activating || g_native_preparing ||
         (!!guard.begin != !!guard.end)) {
         snprintf(error, capacity, "additive source admission requires a stable provider and complete native activation boundary"); goto done;
@@ -4044,6 +4136,9 @@ int sh_package_runtime_admit_occurrences(sh_package_map_plan *plan,
     ReleaseSRWLockExclusive(&g_lock);
     if (guarded) { guard.end(1); guarded = 0; }
     int native_ready = pr_activate(activate, context, 0, &changes, error, capacity) && pr_fsm_bind(candidate, error, capacity);
+    if (native_ready && g_activation_finish.finish) {
+        int preflight=0; native_ready=pr_activation_finish(2,&preflight,error,capacity)==1;
+    }
     if (native_ready && finalize) {
         __try { native_ready = finalize(context, error, capacity) == 1; }
         __except (EXCEPTION_EXECUTE_HANDLER) {
@@ -4051,8 +4146,20 @@ int sh_package_runtime_admit_occurrences(sh_package_map_plan *plan,
             snprintf(error, capacity, "occurrence installation finalization raised exception 0x%08lx", (unsigned long)GetExceptionCode());
         }
     }
-    if (!native_ready) {
+    /* A successful disk finalizer cannot be undone by an allocator-scope
+     * refusal during finish. Retain this accepted decision for owed cleanup. */
+    if (native_ready && finalize && g_activation_finish.finish) g_activation_finish.accepted = 1;
+    int committed = 0, finish_result = pr_activation_finish(native_ready,&committed,error,capacity);
+    int cleanup_failed = finish_result != 1;
+    if (native_ready && finalize && !committed) {
+        cleanup_failed = 1; committed = 1;
+        if (finish_result == 1) g_activation_damaged = 1;
+        if (!*error) snprintf(error,capacity,"committed occurrence storage could not finish; native use is disabled");
+    }
+    if (!native_ready || !committed) {
         char recovery_error[1024] = "";
+        int rejected = finish_result;
+        if (rejected == 0) rejected = pr_activation_finish(0,&committed,recovery_error,sizeof(recovery_error));
         if (!*error) snprintf(error, capacity, "additive native preparation did not complete");
         if (guard.begin) { guard.begin(); guarded = 1; }
         AcquireSRWLockExclusive(&g_lock);
@@ -4061,8 +4168,8 @@ int sh_package_runtime_admit_occurrences(sh_package_map_plan *plan,
         ReleaseSRWLockExclusive(&g_lock);
         if (guarded) { guard.end(1); guarded = 0; }
         sh_package_changes_reverse(&changes);
-        int recovered = pr_activate(activate, context, 1, &changes, recovery_error, sizeof(recovery_error)) &&
-            pr_fsm_bind(previous, recovery_error, sizeof(recovery_error));
+        int recovered = rejected == 1 && pr_activation_recover(activate,context,&changes,
+            previous,recovery_error,sizeof(recovery_error));
         AcquireSRWLockExclusive(&g_lock);
         g_activating = 0; g_ready = recovered && old_ready; g_usable = recovered && old_usable;
         if (!recovered) {
@@ -4078,7 +4185,8 @@ int sh_package_runtime_admit_occurrences(sh_package_map_plan *plan,
         ReleaseSRWLockExclusive(&g_lock); previous = NULL; goto done;
     }
     AcquireSRWLockExclusive(&g_lock);
-    g_activating = 0; g_ready = old_ready; g_usable = old_usable;
+    g_activating = 0; g_ready = old_ready && !cleanup_failed; g_usable = old_usable && !cleanup_failed;
+    if (cleanup_failed) { snprintf(g_error,sizeof(g_error),"%s",error); backend_log(error); }
     plan->occurrences_admitted = 1;
     if (finalize) pr_commit_inventory_locked(plan, &old_library, &old_inventory);
     ReleaseSRWLockExclusive(&g_lock);
@@ -4087,6 +4195,9 @@ int sh_package_runtime_admit_occurrences(sh_package_map_plan *plan,
 #endif
     candidate = NULL; pr_release(previous); previous = NULL;
     pr_inventory_release(old_inventory); pr_release(old_library);
+    /* The finalizer and owning-storage latch have committed. Returning a
+     * rollback result would make callers undo a committed installation. The
+     * runtime remains unusable and exposes the cleanup fault above. */
     result = SH_PACKAGE_ADMISSION_READY;
 done:
     if (guarded) guard.end(0);
@@ -4106,6 +4217,13 @@ int sh_package_runtime_complete_occurrence_recovery(void *context)
 {
     pr_provider *retained = NULL;
     AcquireSRWLockExclusive(&g_refresh_lock);
+    {
+        char error[1024]; int committed = 0;
+        if (pr_activation_finish(0,&committed,error,sizeof(error)) != 1) {
+            AcquireSRWLockExclusive(&g_lock); snprintf(g_error,sizeof(g_error),"%s",error);
+            ReleaseSRWLockExclusive(&g_lock); ReleaseSRWLockExclusive(&g_refresh_lock); return 0;
+        }
+    }
     AcquireSRWLockExclusive(&g_lock);
     if (g_occurrence_recovery_provider && context == g_occurrence_recovery_context &&
         g_current_provider == g_occurrence_recovery_provider && !g_activating && !g_native_preparing) {
@@ -6293,6 +6411,15 @@ void sh_package_runtime_test_dispose(void)
     pr_provider *current, *library, *map;
     pr_inventory *inventory;
     AcquireSRWLockExclusive(&g_refresh_lock);
+    {
+        char error[1024]; int committed = 0;
+        if (g_activation_finish.finish) pr_activation_finish(0,&committed,error,sizeof(error));
+        /* Fixture teardown resets its intentional damaged-cleanup seam. This
+         * is never a production recovery or native destructor retry. */
+        if (!g_activation_finish.finish) {
+            g_activation_damaged = 0; g_activation_diagnostic_context = NULL;
+        }
+    }
     AcquireSRWLockExclusive(&g_lock);
     current=g_current_provider; library=g_library_provider; map=g_map_provider;
     inventory=g_inventory; g_inventory=NULL;

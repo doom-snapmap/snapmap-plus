@@ -101,6 +101,293 @@ static rg_parm_publish_fn g_parm_publish;
 static rg_parm_write_fn g_parm_write;
 static rg_buffer_name_fn g_buffer_name;
 static volatile LONG g_ready, g_attempted;
+static int rg_identity(void *resource, char type[128], char name[4096]);
+typedef struct rg_editor_layout {
+    const char *family;
+    size_t size;
+    size_t strings[9], lists[8];
+    unsigned string_count, list_count;
+} rg_editor_layout;
+typedef struct rg_editor_range { size_t first, last; } rg_editor_range;
+/* Exact non-owning stores in 1404f7270/1404f6ca0 and their paired embedded
+ * 1404f75d0/1404f7000 helper. Unwritten padding/bookkeeping stays in place.
+ * +3d1 is a masked store and is handled separately, preserving its high bits. */
+static const rg_editor_range g_editor_sedef_defaults[] = {
+    {0x68,0xa2},{0x1c8,0x1e0},{0x210,0x215},{0x218,0x23c},{0x270,0x2a4},
+    {0x2f0,0x2f1},{0x2f4,0x301},{0x302,0x304},{0x308,0x315},
+    {0x318,0x319},{0x31a,0x31c},{0x320,0x32d},{0x330,0x331},{0x332,0x334},{0x338,0x345},
+    {0x348,0x349},{0x34a,0x34c},{0x350,0x35d},{0x360,0x361},{0x362,0x364},{0x368,0x375},
+    {0x378,0x379},{0x37c,0x381},{0x388,0x389},{0x38c,0x39d},{0x3a0,0x3a9},
+    {0x3c8,0x3d1},{0x3d4,0x40c}
+};
+/* Paired R140 constructors/destructors, including embedded +1e0 ownership.
+ * Only idStr.data may point into its own inline +1c buffer (20 bytes).
+ * Both idStr constructors 1419fd040/1419ef2a0 set data=this+1c. Lists point to
+ * external arrays; their nested objects stay at their original addresses. */
+static const rg_editor_layout g_editor_layouts[] = {
+    {"snapeditorentitydef", 0x4a0,
+        {0xa8,0xd8,0x108,0x138,0x168,0x198,0x1e0,0x240,0x2c0},
+        {0x2a8,0x3b0,0x410,0x428,0x440,0x458,0x470,0x488},9,8},
+    {"snappropertyinspector_bitflag", 0xb0,{0x68},{0x98},1,1},
+    {"snappropertyinspector_blockingvolumerendermodel",0xf8,{0x88,0xb8},{0x68},2,1},
+    {"snappropertyinspector_whitelistencounterdecl",0x80,{0},{0x68},0,1},
+    {"snappropertyinspector_whitelistencounterdecllist",0x80,{0},{0x68},0,1}
+};
+typedef struct rg_editor_value {
+    struct rg_editor_value *next;
+    void *resource, *scratch, *manager, *name, *vtable;
+    const rg_editor_layout *layout;
+    unsigned char payload[0x4a0 - 0x68], parent[9];
+    int started, constructed, detached, restored, cleared, damaged, clearing, used;
+    unsigned reading;
+} rg_editor_value;
+struct sh_resource_editor_state {
+    rg_editor_value *values;
+    int (*admitted)(void *);
+    void *context;
+    DWORD thread;
+    int failed, decision, damaged;
+    struct sh_resource_editor_state *quarantine_next;
+};
+static __declspec(thread) sh_resource_editor_state *g_editor_state;
+static __declspec(thread) sh_resource_editor_state *g_editor_quarantine;
+static __declspec(thread) int g_editor_damaged;
+#ifdef SH_RESOURCE_EDITOR_TESTING
+static unsigned g_editor_allocation_fault;
+#endif
+static void *rg_editor_alloc(size_t bytes)
+{
+#ifdef SH_RESOURCE_EDITOR_TESTING
+    if (g_editor_allocation_fault && !--g_editor_allocation_fault) return NULL;
+#endif
+    return calloc(1,bytes);
+}
+static const rg_editor_layout *rg_editor_layout_for(const char *family)
+{
+    for (size_t i = 0; i < sizeof(g_editor_layouts)/sizeof(g_editor_layouts[0]); i++)
+        if (!_stricmp(family,g_editor_layouts[i].family)) return g_editor_layouts+i;
+    return NULL;
+}
+static int rg_editor_owned(sh_resource_editor_state *state)
+{ return state && state == g_editor_state && state->thread == GetCurrentThreadId() &&
+    state->admitted && state->admitted(state->context); }
+static void rg_editor_relocate(unsigned char *field, const unsigned char *from)
+{
+    char *data; memcpy(&data, field+0x10, sizeof(data));
+    if (data == (const char *)from+0x1c) {
+        data = (char *)field+0x1c; memcpy(field+0x10,&data,sizeof(data));
+    }
+}
+static void rg_editor_swap(rg_editor_value *value)
+{
+    unsigned char saved[0x30], *live = value->resource, *scratch = value->scratch;
+    const rg_editor_layout *layout = value->layout;
+    for (unsigned i = 0; i < layout->string_count; i++) {
+        size_t at = layout->strings[i];
+        memcpy(saved,live+at,0x30); memcpy(live+at,scratch+at,0x30);
+        rg_editor_relocate(live+at,scratch+at);
+        memcpy(scratch+at,saved,0x30); rg_editor_relocate(scratch+at,live+at);
+    }
+    for (unsigned i = 0; i < layout->list_count; i++) {
+        size_t at = layout->lists[i];
+        memcpy(saved,live+at,0x18); memcpy(live+at,scratch+at,0x18); memcpy(scratch+at,saved,0x18);
+    }
+}
+static void rg_editor_defaults(rg_editor_value *value)
+{
+    unsigned char *live = value->resource, *fresh = value->scratch;
+    /* Inheriting-decl constructors 1417bc2f0/1417aee00 reset these nine
+     * bytes. Identity/source/native bookkeeping outside them is preserved. */
+    memcpy(live+0x58,fresh+0x58,9);
+    if (!_stricmp(value->layout->family,"snapeditorentitydef")) {
+        for (size_t i = 0; i < sizeof(g_editor_sedef_defaults)/sizeof(*g_editor_sedef_defaults); i++) {
+            rg_editor_range r = g_editor_sedef_defaults[i]; memcpy(live+r.first,fresh+r.first,r.last-r.first);
+        }
+        live[0x3d1] = (live[0x3d1] & 0xc0) | (fresh[0x3d1] & 0x3f);
+    } else if (!_stricmp(value->layout->family,"snappropertyinspector_blockingvolumerendermodel")) {
+        /* Exact model constructor stores 1404fd380/1404fcd70. */
+        memcpy(live+0x80,fresh+0x80,2); memcpy(live+0xe8,fresh+0xe8,0x10);
+    }
+}
+static void rg_editor_detach_borrowed(rg_editor_value *value)
+{
+    unsigned char *scratch = value->scratch;
+    for (unsigned i = 0; i < value->layout->list_count; i++) {
+        unsigned char *list = scratch + value->layout->lists[i];
+        /* Paired final destructors test the whole byte at idList+13, not
+         * logical count or its granularity bits. Modes 0/3/4 own capacity. */
+        if (list[0x13] != 0 && list[0x13] != 3 && list[0x13] != 4) memset(list,0,0x10);
+    }
+    for (unsigned i = 0; i < value->layout->string_count; i++) {
+        unsigned char *field = scratch + value->layout->strings[i];
+        uint32_t flags; void *data;
+        memcpy(&flags,field+0x18,4); memcpy(&data,field+0x10,8);
+        /* idStr 1419fd120/1419ef380 frees only ownership bit30. Detach
+         * external borrowed strings; neither they nor their owner are freed. */
+        if (data && data != field+0x1c && !(flags & 0x40000000u)) {
+            memset(field+0x10,0,8); memset(field+8,0,4); flags &= 0xc0000000u; memcpy(field+0x18,&flags,4);
+        }
+    }
+}
+static rg_editor_value *rg_editor_find(void *resource)
+{
+    if (!resource) return NULL;
+    for (rg_editor_value *v = g_editor_state ? g_editor_state->values : NULL; v; v = v->next)
+        if (v->resource == resource) return v;
+    return NULL;
+}
+static int rg_editor_prepare(void *resource, int reset)
+{
+    sh_resource_editor_state *state = g_editor_state;
+    rg_editor_value *value = NULL;
+    char family[128], name[4096];
+    const rg_editor_layout *layout;
+    if (!state) return 1;
+    if (!rg_identity(resource,family,name) || !(layout = rg_editor_layout_for(family))) return 1;
+    if (!rg_editor_owned(state) || state->failed) { state->failed = 1; return 0; }
+    rg_editor_value *prior = rg_editor_find(resource);
+    if (prior && (!prior->detached || prior->restored)) { state->failed = 1; return 0; }
+    if (prior && !reset) return 1;
+    value = rg_editor_alloc(sizeof(*value));
+    if (!value || !(value->scratch = rg_editor_alloc(layout->size))) {
+        free(value); state->failed = 1; return 0;
+    }
+    value->resource = resource; value->layout = layout;
+    __try {
+        unsigned char *live = resource;
+        value->vtable = *(void **)live; value->name = *(void **)(live+8);
+        value->manager = *(void **)(live+0x10);
+        if (!prior) {
+            memcpy(value->payload,live+0x68,layout->size-0x68);
+            memcpy(value->parent,live+0x58,9);
+        }
+        /* ResourceReconstruct 1417ffdb0/1417f2700 obtains this info from
+         * object virtual+10 and invokes its in-place constructor at+28.
+         * Construct an unpublished scratch; never destruct the live identity. */
+        void *info = ((void *(*)(void *))(*(void ***)resource)[2])(resource);
+        if (!info) __leave;
+        value->next = state->values; state->values = value; value->started = 1;
+        ((void (*)(void *,void *))(*(void ***)info)[5])(info,value->scratch);
+        value->constructed = 1;
+        if (*(void **)value->scratch != value->vtable) { value->damaged = state->damaged = 1; __leave; }
+        rg_editor_swap(value); rg_editor_defaults(value);
+        if (prior) {
+            /* This scratch now owns the intermediate candidate. Keep it apart
+             * from the first scratch, which still owns the original payload.
+             * Final End clears both, after restoring the original on reject. */
+            value->resource = NULL; prior->used = 0;
+        } else value->detached = 1;
+        return 1;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { value->damaged = state->damaged = 1; }
+    if (!value->started) { free(value->scratch); free(value); }
+    state->failed = 1; return 0;
+}
+static int rg_editor_read_begin(void *resource)
+{
+    rg_editor_value *value = rg_editor_find(resource);
+    int reset = value && value->used && !value->reading;
+    if (!rg_editor_prepare(resource,reset)) return 0;
+    if ((value = rg_editor_find(resource))) { value->used = 1; value->reading++; }
+    return 1;
+}
+static void rg_editor_read_end(void *resource)
+{
+    rg_editor_value *value = rg_editor_find(resource);
+    if (value && value->reading) value->reading--;
+}
+static int rg_editor_selected(void *resource)
+{
+    char family[128], name[4096];
+    return g_editor_state && rg_identity(resource,family,name) && rg_editor_layout_for(family);
+}
+sh_resource_editor_state *sh_resource_graph_native_editor_state_begin(
+    int (*admitted)(void *), void *context, char *error, size_t capacity)
+{
+    sh_resource_editor_state *state;
+    if (error && capacity) *error = 0;
+    if (g_editor_state || g_editor_damaged || !admitted || !admitted(context) ||
+        !(state = rg_editor_alloc(sizeof(*state)))) {
+        if (error && capacity) snprintf(error,capacity,"editor storage transaction could not be admitted");
+        return NULL;
+    }
+    state->admitted = admitted; state->context = context; state->thread = GetCurrentThreadId(); state->decision = -1;
+    g_editor_state = state; return state;
+}
+int sh_resource_graph_native_editor_state_ok(sh_resource_editor_state *state)
+{ return rg_editor_owned(state) && !state->failed && !state->damaged; }
+int sh_resource_graph_native_editor_state_ready(sh_resource_editor_state *state)
+{
+    if (!sh_resource_graph_native_editor_state_ok(state)) return 0;
+    __try {
+        for (rg_editor_value *v=state->values;v;v=v->next) if (v->detached) {
+            unsigned char *live=v->resource;
+            if (*(void **)live!=v->vtable || *(void **)(live+8)!=v->name || *(void **)(live+0x10)!=v->manager)
+                return 0;
+        }
+        return 1;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { state->failed=state->damaged=1; return 0; }
+}
+int sh_resource_graph_native_editor_state_end(sh_resource_editor_state **owned,
+    int accepted, int *committed, char *error, size_t capacity)
+{
+    sh_resource_editor_state *state = owned ? *owned : NULL;
+    int ok = 1, commit;
+    if (committed) *committed = 0;
+    if (!owned) return -1;
+    if (!state) { if (committed) *committed = accepted != 0; return 1; }
+    if (!rg_editor_owned(state)) goto owed;
+    commit = accepted && !state->failed;
+    if (state->decision >= 0 && state->decision != commit) goto owed;
+    /* Restore every object before attempting any destructor. A cleanup fault
+     * must not leave a mixture of prior and candidate published payloads. */
+    for (rg_editor_value *value = state->values; value; value = value->next) {
+        __try {
+            unsigned char *live = value->resource;
+            if (!value->detached) continue;
+            if (*(void **)live != value->vtable || *(void **)(live+8) != value->name ||
+                *(void **)(live+0x10) != value->manager) { ok = 0; __leave; }
+            if (!commit && value->detached && !value->restored) {
+                rg_editor_swap(value);
+                memcpy(live+0x68,value->payload,value->layout->size-0x68);
+                memcpy(live+0x58,value->parent,9);
+                value->restored = 1;
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) { state->damaged = 1; ok = 0; }
+    }
+    if (state->damaged) goto damaged;
+    if (!ok) goto owed;
+    state->decision = commit;
+    if (committed) *committed = commit;
+    for (rg_editor_value *value = state->values; value; value = value->next) {
+        if (value->cleared) continue;
+        if (!value->constructed || value->clearing || value->damaged) goto damaged;
+        __try {
+            rg_editor_detach_borrowed(value); value->clearing = 1;
+            ((void (*)(void *,unsigned))(*(void ***)value->scratch)[0])(value->scratch,0);
+            value->cleared = 1;
+        } __except (EXCEPTION_EXECUTE_HANDLER) { value->damaged = 1; goto damaged; }
+    }
+    while (state->values) {
+        rg_editor_value *value = state->values; state->values = value->next;
+        free(value->scratch); free(value);
+    }
+    g_editor_state = NULL; *owned = NULL; free(state); return 1;
+owed:
+    if (error && capacity) snprintf(error,capacity,"editor native storage restoration or cleanup remains owed");
+    return 0;
+damaged:
+    /* Match map_native's no-replay rule. A destructor fault may follow a free;
+     * an interrupted constructor has no complete-object cleanup contract. Keep
+     * the damaged workspaces for diagnostics, revoke the active scope, and
+     * refuse further native editor transactions. Never retry their destructor. */
+    state->damaged = 1; g_editor_damaged = 1;
+    if (committed) *committed = state->decision == 1;
+    state->admitted = NULL; state->context = NULL;
+    state->quarantine_next = g_editor_quarantine; g_editor_quarantine = state;
+    g_editor_state = NULL; *owned = NULL;
+    if (error && capacity) snprintf(error,capacity,"native editor storage was damaged; cleanup must not be replayed");
+    return -1;
+}
 /* These workspaces contain native compiler-owned allocations, never a copy of
  * a live resource. Paired constructors/destructors own every nested allocation. */
 typedef uintptr_t (*rg_shader_worker_fn)(void *, void *, const char *, const void *, void *, void *, void *, void *);
@@ -554,6 +841,15 @@ static void rg_load_hook(void *resource)
 static void rg_reconstruct_hook(void *resource)
 {
     sh_package_shader_receipt_invalidate((uintptr_t)resource);
+    if (g_editor_state) {
+        char family[128], name[4096];
+        if (rg_identity(resource,family,name) && rg_editor_layout_for(family)) {
+            /* Only the admitted families replace teardown with fresh owning
+             * members. Their existing parent/default Parse still runs. */
+            if (!rg_editor_prepare(resource,1)) g_editor_state->failed = 1;
+            return;
+        }
+    }
     g_reconstruct(resource);
 }
 static void *rg_lookup_hook(void *manager, const char *name)
@@ -583,10 +879,19 @@ static unsigned int rg_parse_hook(void *resource, unsigned char read_source, voi
     sh_package_shader_receipt_frame receipt;
     unsigned int result = 1;
     int tracked = 0, observing = InterlockedCompareExchange(&g_ready, 0, 0) != 0;
+    int editor_started = 0;
     rg_font_frame *font_parent = g_font_frame;
     rg_movie_frame *movie_parent = g_movie_frame;
     sh_package_consumer_hold requests = {0}, *request_parent = g_request_hold;
-    if (g_shader_state && !rg_fixed_capture(resource)) { g_shader_state->failed = 1; return 1; }
+    if (g_editor_state) {
+        if (!rg_editor_read_begin(resource)) return 1;
+        editor_started = 1;
+    }
+    if (g_shader_state && !rg_fixed_capture(resource)) {
+        g_shader_state->failed = 1;
+        if (editor_started) rg_editor_read_end(resource);
+        return 1;
+    }
     if (observing) {
         char type[128], name[4096]; int identified = rg_identity(resource, type, name);
         tracked = rg_begin_source(resource, &frame);
@@ -599,6 +904,11 @@ static unsigned int rg_parse_hook(void *resource, unsigned char read_source, voi
         result = g_parse(resource, read_source, error_text); if (!result) rg_shader_capture(resource);
     }
     __finally {
+        if (g_editor_state) {
+            if (result || AbnormalTermination()) g_editor_state->failed = 1;
+            if (AbnormalTermination()) g_editor_state->damaged = 1;
+            if (editor_started) rg_editor_read_end(resource);
+        }
         g_font_frame = font_parent; g_movie_frame = movie_parent;
         g_request_hold = request_parent; sh_package_runtime_consumer_release(&requests);
         int restored = rg_fixed_finish(resource, result);
@@ -621,11 +931,19 @@ static unsigned int rg_read_hook(void *resource, void *error_text)
     sh_package_shader_receipt_frame receipt;
     unsigned int result = 1;
     int tracked = 0, observing = InterlockedCompareExchange(&g_ready, 0, 0) != 0;
-    int restored = 0;
+    int restored = 0, editor_started = 0;
     rg_font_frame *font_parent = g_font_frame;
     rg_movie_frame *movie_parent = g_movie_frame;
     sh_package_consumer_hold requests = {0}, *request_parent = g_request_hold;
-    if (g_shader_state && !rg_fixed_capture(resource)) { g_shader_state->failed = 1; return 0; }
+    if (g_editor_state && rg_read_has_source(resource)) {
+        if (!rg_editor_read_begin(resource)) return 0;
+        editor_started = 1;
+    }
+    if (g_shader_state && !rg_fixed_capture(resource)) {
+        g_shader_state->failed = 1;
+        if (editor_started) rg_editor_read_end(resource);
+        return 0;
+    }
     if (observing) {
         char type[128], name[4096]; int source = rg_read_has_source(resource);
         int identified = source && rg_identity(resource, type, name);
@@ -640,6 +958,11 @@ static unsigned int rg_read_hook(void *resource, void *error_text)
         result = g_read(resource, error_text); if (!result) rg_shader_capture(resource);
     }
     __finally {
+        if (g_editor_state) {
+            if (result || AbnormalTermination()) g_editor_state->failed = 1;
+            if (AbnormalTermination()) g_editor_state->damaged = 1;
+            if (editor_started) rg_editor_read_end(resource);
+        }
         g_font_frame = font_parent; g_movie_frame = movie_parent;
         g_request_hold = request_parent; sh_package_runtime_consumer_release(&requests);
         restored = rg_fixed_finish(resource, result);
@@ -649,6 +972,9 @@ static unsigned int rg_read_hook(void *resource, void *error_text)
     /* GenericLoad's zero branch performs only successful-read bookkeeping.
      * A restored preexisting fixed object must not enter its reconstruct/default
      * fallback. The independent scope/receipt failure still aborts preparation. */
+    /* Suppress GenericLoad's destructive fallback only in the poisoned
+     * admitted editor transaction; its separate batch status rejects it. */
+    if (rg_editor_selected(resource) && g_editor_state->failed) return 0;
     return restored == 1 ? 0 : result;
 }
 static int rg_font_route(void *manager, const char *name, void **resource)

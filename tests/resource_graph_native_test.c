@@ -2,6 +2,7 @@
 #include <windows.h>
 #include <stdio.h>
 #include <string.h>
+#define SH_RESOURCE_EDITOR_TESTING
 #include "../src/backend/resource_graph_native.c"
 
 static int failures, calls, throw_error;
@@ -965,6 +966,313 @@ static void test_constructor_requests(void)
     g_parse = NULL; g_read = NULL; g_load = NULL; g_lookup = NULL; g_materialize = NULL;
     sh_resource_graph_test_reset();
 }
+/* Independent paired-layout fixture. Its destructor walks capacity, even at
+ * logical zero, and never destroys a referenced declaration. The allocation
+ * ledger catches stranded nested storage, borrowed frees and double cleanup. */
+typedef struct editor_case {
+    const char *family; size_t size;
+    unsigned strings,lists; size_t string[9],list[8];
+} editor_case;
+static const editor_case editor_cases[] = {
+    {"snapeditorentitydef",0x4a0,9,8,{0xa8,0xd8,0x108,0x138,0x168,0x198,0x1e0,0x240,0x2c0},
+        {0x2a8,0x3b0,0x410,0x428,0x440,0x458,0x470,0x488}},
+    {"snappropertyinspector_bitflag",0xb0,1,1,{0x68},{0x98}},
+    {"snappropertyinspector_blockingvolumerendermodel",0xf8,2,1,{0x88,0xb8},{0x68}},
+    {"snappropertyinspector_whitelistencounterdecl",0x80,0,1,{0},{0x68}},
+    {"snappropertyinspector_whitelistencounterdecllist",0x80,0,1,{0},{0x68}}
+};
+static const editor_case *editor_kind;
+static struct { void *p; int live,borrowed; } editor_blocks[1024];
+static unsigned editor_blocks_count, editor_ctor_calls, editor_dtor_calls;
+static int editor_admission = 1, editor_no_info, editor_ctor_fault, editor_dtor_fault;
+static void *editor_vtable[3], *editor_info_vtable[6];
+static void **editor_info_object = editor_info_vtable;
+static void *editor_alloc(size_t bytes, int borrowed)
+{
+    void *p = calloc(1,bytes); CHECK(p && editor_blocks_count < 1024);
+    if (p && editor_blocks_count < 1024) {
+        editor_blocks[editor_blocks_count].p=p; editor_blocks[editor_blocks_count].live=1;
+        editor_blocks[editor_blocks_count++].borrowed=borrowed;
+    }
+    return p;
+}
+static void editor_free(void *p)
+{
+    if (!p) return;
+    for (unsigned i=0;i<editor_blocks_count;i++) if (editor_blocks[i].p==p && editor_blocks[i].live) {
+        CHECK(!editor_blocks[i].borrowed); editor_blocks[i].live=0; free(p); return;
+    }
+    CHECK(0); /* Neither an unknown pointer nor an already freed one is owned. */
+}
+static unsigned editor_live(void)
+{ unsigned n=0; for (unsigned i=0;i<editor_blocks_count;i++) n+=editor_blocks[i].live; return n; }
+static void editor_string_init(unsigned char *s)
+{
+    /* Paired native idStr constructors: baseBuffer@28, capacity20. */
+    uint32_t flags=0x80000014u;
+    memset(s,0,0x30); put_pointer(s,0x10,s+0x1c); memcpy(s+0x18,&flags,4);
+}
+static void editor_string_fill(unsigned char *s, int borrowed)
+{
+    char *p=editor_alloc(48,borrowed); if (p) strcpy(p,"owned-or-borrowed-path");
+    put_pointer(s,0x10,p); uint32_t flags=borrowed?0:0x40000030u;
+    memcpy(s+0x18,&flags,4); int length=22; memcpy(s+8,&length,4);
+}
+static void editor_string_clear(unsigned char *s)
+{
+    void *p; uint32_t flags; memcpy(&p,s+0x10,8); memcpy(&flags,s+0x18,4);
+    if (p && (flags&0x40000000u)) editor_free(p);
+    memset(s+0x10,0,8); memset(s+8,0,4); flags&=0xc0000000u; memcpy(s+0x18,&flags,4);
+}
+static void editor_list_fill(unsigned char *list,size_t stride,int borrowed)
+{
+    put_pointer(list,0,editor_alloc(2*stride,borrowed)); int zero=0,two=2;
+    memcpy(list+8,&zero,4); memcpy(list+12,&two,4); list[0x13]=borrowed?1:0;
+}
+static void editor_fill(unsigned char *live, int borrowed)
+{
+    for (unsigned i=0;i<editor_kind->strings;i++) {
+        unsigned char *s=live+editor_kind->string[i];
+        if (i==1) { int length=6; strcpy((char *)s+0x1c,"inline");
+            put_pointer(s,0x10,s+0x1c); memcpy(s+8,&length,4); }
+        else editor_string_fill(s,borrowed);
+    }
+    for (unsigned i=0;i<editor_kind->lists;i++) {
+        size_t at=editor_kind->list[i],stride=8;
+        if (at==0x3b0) stride=0x20;
+        if (!strcmp(editor_kind->family,"snappropertyinspector_bitflag")) stride=0x38;
+        if (!strcmp(editor_kind->family,"snappropertyinspector_blockingvolumerendermodel")) stride=0x40;
+        unsigned char *list=live+at; editor_list_fill(list,stride,borrowed);
+        unsigned char *rows=*(unsigned char **)list;
+        if (at==0x3b0) for (unsigned j=0;j<2;j++) {
+            unsigned char *nested=rows+j*0x20+8; editor_list_fill(nested,0x40,borrowed);
+            unsigned char *controls=*(unsigned char **)nested;
+            for (unsigned k=0;k<2;k++) {
+                editor_string_init(controls+k*0x40); editor_string_fill(controls+k*0x40,borrowed);
+                put_pointer(controls+k*0x40,0x38,(void *)0x12345678);
+            }
+        }
+        if (stride==0x38) for (unsigned j=0;j<2;j++) {
+            editor_string_init(rows+j*stride); editor_string_fill(rows+j*stride,borrowed);
+        }
+    }
+}
+static void editor_list_clear(unsigned char *list,size_t at)
+{
+    unsigned char *rows=*(unsigned char **)list; int capacity; memcpy(&capacity,list+12,4);
+    if (list[0x13]==0 || list[0x13]==3 || list[0x13]==4) {
+        if (rows && at==0x3b0) for (int j=0;j<capacity;j++) {
+            unsigned char *nested=rows+j*0x20+8,*controls=*(unsigned char **)nested; int slots;
+            memcpy(&slots,nested+12,4);
+            if (nested[0x13]==0 || nested[0x13]==3 || nested[0x13]==4) {
+                for (int k=0;controls && k<slots;k++) editor_string_clear(controls+k*0x40);
+                editor_free(controls);
+            }
+        }
+        if (rows && !strcmp(editor_kind->family,"snappropertyinspector_bitflag"))
+            for (int j=0;j<capacity;j++) editor_string_clear(rows+j*0x38);
+        editor_free(rows); memset(list,0,0x10);
+    }
+}
+static void editor_destroy(void *object,unsigned flags)
+{
+    unsigned char *live=object; CHECK(flags==0); editor_dtor_calls++;
+    for (unsigned i=0;i<editor_kind->lists;i++) {
+        editor_list_clear(live+editor_kind->list[i],editor_kind->list[i]);
+        if (editor_dtor_fault) { editor_dtor_fault=0; RaiseException(0xe0410010,0,0,NULL); }
+    }
+    for (unsigned i=0;i<editor_kind->strings;i++) editor_string_clear(live+editor_kind->string[i]);
+}
+static void editor_construct(void *info,void *object)
+{
+    unsigned char *live=object; (void)info; editor_ctor_calls++;
+    memset(live,0,editor_kind->size); put_pointer(live,0,editor_vtable);
+    for (unsigned i=0;i<editor_kind->strings;i++) editor_string_init(live+editor_kind->string[i]);
+    for (unsigned i=0;i<editor_kind->lists;i++) { uint32_t ctrl=0x50000; memcpy(live+editor_kind->list[i]+16,&ctrl,4); }
+    if (!strcmp(editor_kind->family,"snapeditorentitydef")) {
+        uint64_t enum_default=3,external=0; put_pointer(live,0x68,(void *)(uintptr_t)enum_default);
+        put_pointer(live,0x228,(void *)(uintptr_t)external); live[0x300]=1; live[0x388]=1;
+        uint32_t tag=100; memcpy(live+0x9c,&tag,4);
+    }
+    if (editor_ctor_fault) { editor_ctor_fault=0; RaiseException(0xe0410011,0,0,NULL); }
+}
+static void *editor_info(void *object)
+{ (void)object; return editor_no_info?NULL:&editor_info_object; }
+static int editor_admitted(void *context) { return context==&editor_admission && editor_admission; }
+static void editor_attach(unsigned char *live,unsigned char owner[16])
+{
+    put_pointer(owner,8,editor_kind->family); put_pointer(live,8,"collection-fixture");
+    put_pointer(live,0x10,owner); live[0x20]=4; live[0x34]=0xa5;
+    put_pointer(live,0x38,(void *)0x334455); put_pointer(live,0x58,(void *)0x556677); live[0x60]=1;
+}
+static void editor_quarantine_dispose(void)
+{
+    /* Only the synthetic fixture disposes ledger blocks and wrapper memory
+     * directly. It never retries the interrupted native destructor. */
+    while (g_editor_quarantine) {
+        sh_resource_editor_state *s=g_editor_quarantine; g_editor_quarantine=s->quarantine_next;
+        while (s->values) { rg_editor_value *v=s->values; s->values=v->next; free(v->scratch); free(v); }
+        free(s);
+    }
+    g_editor_damaged=0;
+}
+static void test_editor_storage(void)
+{
+    char error[256]; int committed=0;
+    editor_vtable[0]=editor_destroy; editor_vtable[2]=editor_info; editor_info_vtable[5]=editor_construct;
+    for (unsigned family=0;family<5;family++) {
+        editor_kind=editor_cases+family;
+        for (int borrowed=0;borrowed<2;borrowed++) for (int accept=0;accept<2;accept++) {
+            unsigned char live[0x4a0],original_bytes[0x4a0],owner[16]={0};
+            editor_construct(NULL,live); editor_attach(live,owner); editor_fill(live,borrowed);
+            if (!family) { live[0x300]=0; live[0x68]=7; put_pointer(live,0x228,(void *)0xabc);
+                live[0x3d1]=0xfd; live[0x3d2]=0x9b; }
+            if (family==2) { live[0x80]=1; put_pointer(live,0xe8,(void *)0xabc); }
+            memcpy(original_bytes,live,editor_kind->size);
+            unsigned old_blocks=editor_live();
+            sh_resource_editor_state *state=sh_resource_graph_native_editor_state_begin(editor_admitted,&editor_admission,error,sizeof(error));
+            CHECK(state && rg_editor_read_begin(live));
+            CHECK(!*(void **)(live+editor_kind->list[0]) && !*(void **)(live+0x58) && !live[0x60]);
+            CHECK(live[0x20]==4 && live[0x34]==original_bytes[0x34] &&
+                *(void **)(live+0x38)==(void *)0x334455);
+            if (!family) CHECK(live[0x300]==1 && live[0x68]==3 && !*(void **)(live+0x228) &&
+                live[0x3d1]==0xc0 && live[0x3d2]==0x9b);
+            if (family==2) CHECK(!live[0x80] && !*(void **)(live+0xe8));
+            editor_fill(live,0); unsigned after_first=editor_live();
+            /* Nested Read->Parse must not reset the same logical read. */
+            void *first=*(void **)(live+editor_kind->list[0]);
+            CHECK(rg_editor_read_begin(live) && *(void **)(live+editor_kind->list[0])==first);
+            rg_editor_read_end(live); rg_editor_read_end(live);
+            /* A second read gets ctor defaults and retains intermediate owners. */
+            CHECK(rg_editor_read_begin(live) && !*(void **)(live+editor_kind->list[0]));
+            CHECK(editor_live()==after_first); editor_fill(live,0); rg_editor_read_end(live);
+            /* A second reconstruction also resets the candidate, not the saved original. */
+            CHECK(rg_editor_prepare(live,1) && !*(void **)(live+editor_kind->list[0])); editor_fill(live,0);
+            if (!family) { live[0x300]=0; live[0x68]=9; put_pointer(live,0x228,(void *)0xdef); }
+            editor_admission=0;
+            CHECK(sh_resource_graph_native_editor_state_end(&state,accept,&committed,error,sizeof(error))==0 && state && !committed);
+            editor_admission=1;
+            CHECK(sh_resource_graph_native_editor_state_end(&state,accept,&committed,error,sizeof(error))==1 && !state && committed==accept);
+            if (!accept) CHECK(!memcmp(live,original_bytes,editor_kind->size) && editor_live()==old_blocks);
+            else CHECK(editor_live()==old_blocks+(borrowed?old_blocks:0));
+            editor_destroy(live,0);
+            /* Borrowed callers own every nested slot and remain untouched. */
+            for (unsigned i=0;i<editor_blocks_count;i++) if (editor_blocks[i].live) {
+                CHECK(editor_blocks[i].borrowed); free(editor_blocks[i].p); editor_blocks[i].live=0;
+            }
+            CHECK(!editor_live()); editor_blocks_count=0;
+        }
+    }
+    editor_kind=editor_cases;
+    for (unsigned fail=1;fail<=3;fail++) {
+        unsigned char live[0x4a0],saved[0x4a0],owner[16]={0}; editor_construct(NULL,live); editor_attach(live,owner);
+        memcpy(saved,live,sizeof(live));
+        sh_resource_editor_state *state=sh_resource_graph_native_editor_state_begin(editor_admitted,&editor_admission,error,sizeof(error));
+        if (fail<3) g_editor_allocation_fault=fail; else editor_no_info=1;
+        CHECK(!rg_editor_prepare(live,0)); g_editor_allocation_fault=0; editor_no_info=0;
+        CHECK(!memcmp(live,saved,sizeof(live)));
+        CHECK(sh_resource_graph_native_editor_state_end(&state,1,&committed,error,sizeof(error))==1 && !state && !committed);
+    }
+    for (int fault=0;fault<2;fault++) {
+        unsigned char live[0x4a0],saved[0x4a0],owner[16]={0}; editor_construct(NULL,live); editor_attach(live,owner);
+        editor_fill(live,0); memcpy(saved,live,sizeof(live));
+        sh_resource_editor_state *state=sh_resource_graph_native_editor_state_begin(editor_admitted,&editor_admission,error,sizeof(error));
+        if (!fault) { editor_ctor_fault=1; CHECK(!rg_editor_prepare(live,0)); }
+        else { CHECK(rg_editor_prepare(live,0)); editor_fill(live,0); editor_dtor_fault=1; }
+        unsigned dtors=editor_dtor_calls;
+        CHECK(sh_resource_graph_native_editor_state_end(&state,fault,&committed,error,sizeof(error))==-1 && !state && committed==fault);
+        CHECK(editor_dtor_calls==dtors+(fault?1:0));
+        if (!fault) CHECK(!memcmp(live,saved,sizeof(live)));
+        CHECK(!sh_resource_graph_native_editor_state_begin(editor_admitted,&editor_admission,error,sizeof(error)));
+        CHECK(sh_resource_graph_native_editor_state_end(&state,0,&committed,error,sizeof(error))==1);
+        CHECK(editor_dtor_calls==dtors+(fault?1:0));
+        editor_quarantine_dispose();
+        for (unsigned i=0;i<editor_blocks_count;i++) if (editor_blocks[i].live) { free(editor_blocks[i].p); editor_blocks[i].live=0; }
+        editor_blocks_count=0;
+    }
+    CHECK(!g_editor_state && !editor_live());
+}
+
+static void editor_set_inline(unsigned char *s,const char *text)
+{
+    int length=(int)strlen(text); CHECK(length<20);
+    editor_string_init(s); memcpy(s+0x1c,text,(size_t)length+1); memcpy(s+8,&length,4);
+}
+static void editor_check_inline(unsigned char *s,const char *text)
+{
+    void *data; int length; uint32_t flags;
+    memcpy(&data,s+0x10,8); memcpy(&length,s+8,4); memcpy(&flags,s+0x18,4);
+    CHECK(data==s+0x1c && length==(int)strlen(text) && flags==0x80000014u);
+    CHECK(!memcmp(s+0x1c,text,strlen(text)+1));
+}
+static void test_editor_native_inline_storage(void)
+{
+    char error[256]; int committed;
+    /* The expected offset is the paired constructor's byte28, independently
+     * of the adapter. Exercise every transferred string, including hide path. */
+    for (unsigned family=0;family<3;family++) for (int accept=0;accept<2;accept++) {
+        unsigned char live[0x4a0],saved[0x4a0],owner[16]={0};
+        editor_kind=editor_cases+family;
+        editor_construct(NULL,live); editor_attach(live,owner);
+        for (unsigned i=0;i<editor_kind->strings;i++)
+            editor_set_inline(live+editor_kind->string[i],"original.path");
+        memcpy(saved,live,editor_kind->size);
+        sh_resource_editor_state *state=sh_resource_graph_native_editor_state_begin(
+            editor_admitted,&editor_admission,error,sizeof(error));
+        CHECK(state && rg_editor_read_begin(live));
+        rg_editor_value *original=rg_editor_find(live); CHECK(original);
+        for (unsigned i=0;i<editor_kind->strings;i++) {
+            size_t at=editor_kind->string[i];
+            editor_check_inline(live+at,"");
+            if (original) editor_check_inline((unsigned char *)original->scratch+at,"original.path");
+            editor_set_inline(live+at,"first.path");
+        }
+        rg_editor_read_end(live);
+        CHECK(rg_editor_read_begin(live));
+        /* The second parse resets its live strings and retains both prior
+         * payloads at their own inline addresses until the decision. */
+        rg_editor_value *intermediate=state?state->values:NULL;
+        CHECK(intermediate && intermediate!=original);
+        for (unsigned i=0;i<editor_kind->strings;i++) {
+            size_t at=editor_kind->string[i];
+            editor_check_inline(live+at,"");
+            if (original) editor_check_inline((unsigned char *)original->scratch+at,"original.path");
+            if (intermediate) editor_check_inline((unsigned char *)intermediate->scratch+at,"first.path");
+            editor_set_inline(live+at,"candidate.path");
+        }
+        rg_editor_read_end(live);
+        CHECK(sh_resource_graph_native_editor_state_end(&state,accept,&committed,error,sizeof(error))==1 &&
+            !state && committed==accept);
+        for (unsigned i=0;i<editor_kind->strings;i++)
+            editor_check_inline(live+editor_kind->string[i],accept?"candidate.path":"original.path");
+        if (!accept) CHECK(!memcmp(live,saved,editor_kind->size));
+        editor_destroy(live,0); CHECK(!editor_live());
+    }
+    /* Native short/empty assignment may retain an external owned capacity.
+     * Length alone must never reclassify that allocation as inline/borrowed. */
+    editor_kind=editor_cases;
+    for (int accept=0;accept<2;accept++) {
+        unsigned char live[0x4a0],saved[0x4a0],owner[16]={0};
+        editor_construct(NULL,live); editor_attach(live,owner);
+        unsigned char *hide=live+0xd8; editor_string_fill(hide,0);
+        char *old=*(char **)(hide+0x10); old[0]=0; memset(hide+8,0,4);
+        memcpy(saved,live,sizeof(live));
+        sh_resource_editor_state *state=sh_resource_graph_native_editor_state_begin(
+            editor_admitted,&editor_admission,error,sizeof(error));
+        CHECK(state && rg_editor_read_begin(live)); editor_check_inline(hide,"");
+        editor_string_fill(hide,0); char *candidate=*(char **)(hide+0x10);
+        strcpy(candidate,"short.path"); int length=10; memcpy(hide+8,&length,4);
+        candidate[0]=0; memset(hide+8,0,4); rg_editor_read_end(live);
+        CHECK(sh_resource_graph_native_editor_state_end(&state,accept,&committed,error,sizeof(error))==1 &&
+            !state && committed==accept);
+        CHECK(*(char **)(hide+0x10)==(accept?candidate:old) && !*(int *)(hide+8) &&
+            *(uint32_t *)(hide+0x18)==0x40000030u && !(*(char **)(hide+0x10))[0]);
+        CHECK(editor_live()==1);
+        if (!accept) CHECK(!memcmp(live,saved,sizeof(live)));
+        editor_destroy(live,0); CHECK(!editor_live()); editor_blocks_count=0;
+    }
+}
+
 int main(void)
 {
     sh_resource_graph_frame outer, pause;
@@ -1093,6 +1401,8 @@ int main(void)
     test_font_construction();
     test_movie_construction();
     test_constructor_requests();
+    test_editor_storage();
+    test_editor_native_inline_storage();
     if (failures) return 1;
     puts("canonical entity-state, direct source and production read capture checks passed"); return 0;
 }

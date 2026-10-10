@@ -6,6 +6,25 @@ int sh_resource_graph_native_install(const sig_result *results, size_t count);
 int sh_resource_graph_native_ready(void);
 /* Only fully connected constructor families are admitted through this route. */
 int sh_resource_graph_native_consumer_ready(const char *family);
+typedef struct sh_resource_editor_state sh_resource_editor_state;
+/* Existing admitted registration/reconstruction/drain transaction only.
+ * Moves paired destructor-owned members and resets exact constructor stores,
+ * keeping identity/source/unwritten bookkeeping in place. Old storage survives
+ * until End. Rejection restores it before prior-provider consumer recovery;
+ * borrowed buffers are detached, never freed. Context must outlive the scope.
+ * Repeated reads/reconstruction keep intermediate candidate storage separately.
+ * End=1 consumes *owned. End=0 retains it because admission or identity
+ * restoration remains owed, before any cleanup. End=-1 consumes the active
+ * handle into damaged storage retained for diagnostics; NEVER replay cleanup.
+ * *committed latches acceptance before cleanup, so an accepted cleanup fault
+ * cannot be treated as rollback after original storage was freed. */
+sh_resource_editor_state *sh_resource_graph_native_editor_state_begin(
+    int (*admitted)(void *), void *context, char *error, size_t capacity);
+int sh_resource_graph_native_editor_state_ok(sh_resource_editor_state *state);
+/* Read-only admission and live-identity preflight before any disk finalizer. */
+int sh_resource_graph_native_editor_state_ready(sh_resource_editor_state *state);
+int sh_resource_graph_native_editor_state_end(sh_resource_editor_state **owned,
+    int accepted, int *committed, char *error, size_t capacity);
 /* Explicit engine preparation, never a compiler/read callback. The admission
  * callback must verify the engine main thread, settled browser and the existing
  * provider activation/recovery transaction, with no package/provider lock held.

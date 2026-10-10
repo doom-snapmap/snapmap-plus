@@ -104,6 +104,21 @@ int main(void)
             length == 1 && *literal == 'b');
         sh_decl_tree_free(root);
         assert(!parse("{ item[ x ] = 1; }") && !parse("{ item[ 0 = 1; }"));
+        root = parse("{ ordinary = { float ops alias[ 0x1 ] = 1; other[\t0b10\t] = 2;"
+            " item[ 1.9e+0 ] = 3; keep[012] = 4; } }"); assert(root);
+        node = (sh_decl_node *)sh_decl_tree_member(root, "ordinary");
+        assert(sh_decl_tree_member(node, "alias[0x1]")->annotation &&
+            sh_decl_tree_member(node, "other[0b10]") && sh_decl_tree_member(node, "item[1.9e+0]") &&
+            sh_decl_tree_member(node, "keep[012]"));
+        text = sh_decl_tree_write(root, &length); assert(text && strstr(text, "float ops alias[0x1]"));
+        free(text); sh_decl_tree_free(root);
+        root=parse("{ alias[0b] = 1; other[0X] = 2; exponent[1e+] = 3; integer[1UL] = 4; real[0.5F] = 5; }");
+        assert(root && sh_decl_tree_member(root,"alias[0b]") && sh_decl_tree_member(root,"exponent[1e+]"));
+        sh_decl_tree_free(root);
+        assert(!parse("{ item[ 0b12 ] = 1; }") && !parse("{ item[ 1foo ] = 1; }") &&
+            !parse("{ item[1E1] = 1; }") && !parse("{ item[01.5] = 1; }") && !parse("{ item[0e5] = 1; }") &&
+            !parse("{ item[1ULL] = 1; }") && !parse("{ item[1.0FF] = 1; }") &&
+            !parse("{ item[ 1 2 ] = 1; }"));
     }
     {
         const char *paths = "{ inherit = \"projectile\\player\\mp\\directional_melee\";"
