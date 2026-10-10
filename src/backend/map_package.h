@@ -179,7 +179,18 @@ int sh_mpkg_test_session_installed_count(void);
  * modal is raised into, and answered out of, the live dialog queue, neither of
  * which a worker thread may touch. No-op when no package is awaiting consent. */
 void sh_mpkg_consent_poll(void);
-/* Queue a native acknowledgement from any thread; engine UI runs on tick. */
-void sh_mpkg_report_error(const char *message);
+/* Player notices describe the operation, never internal paths, identifiers or
+ * parser diagnostics. The complete diagnostic goes to the backend log.
+ * Queue from any thread; engine UI runs on tick. */
+typedef enum sh_mpkg_problem {
+    SH_MPKG_PROBLEM_OPEN,
+    SH_MPKG_PROBLEM_SAVE,
+    SH_MPKG_PROBLEM_PLAY,
+    SH_MPKG_PROBLEM_INSTALL,
+    SH_MPKG_PROBLEM_CONTENT,
+    SH_MPKG_PROBLEM_PREFAB,
+    SH_MPKG_PROBLEM_MODS_DISABLED
+} sh_mpkg_problem;
+void sh_mpkg_report_error(sh_mpkg_problem problem, const char *diagnostic);
 
 #endif /* BACKEND_MAP_PACKAGE_H */

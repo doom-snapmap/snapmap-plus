@@ -794,6 +794,14 @@ typedef struct pl_contribution_unit {
     pl_contribution_edge *edges;
     size_t count, capacity;
 } pl_contribution_unit;
+/* Compiler-only exact localization witnesses and the immutable late binding.
+ * Mapping bytes never become provider files or new native resource roots. */
+typedef struct pl_movie_string {
+    size_t unit;
+    char *slot;
+    const char *key;
+    sh_compiled_resource witness;
+} pl_movie_string;
 struct pl_contributions {
     sh_package_source_link *source;
     sh_package_link_inputs inputs;
@@ -802,6 +810,8 @@ struct pl_contributions {
     size_t unit_capacity;
     sh_package_link_edge **implicit;
     sh_package_link_witness **witnesses;
+    pl_movie_string **movie_strings;
+    size_t movie_string_count;
     sh_package_link_classes classes;
     char **tokens;
     size_t *token_order;
@@ -876,6 +886,11 @@ static void pl_contributions_close(pl_contributions *c)
     sh_package_link_reuse_close(c->reuse);
     for (size_t i = 0; i < c->key_scan_capacity; i++) pl_key_scan_free(c->key_scans[i]);
     free(c->key_scans);
+    for (size_t i = 0; i < c->movie_string_count; i++) {
+        pl_movie_string *value = c->movie_strings[i];
+        free(value->slot); free(value);
+    }
+    free(c->movie_strings);
     free(c->origins); free(c->scopes); free(c->implicit); free(c->witnesses);
     free(c->certification); free(c->notes);
     free(c->units); free(c->inputs.units); free(c->shared); free(c->global); free(c);
@@ -1332,11 +1347,13 @@ typedef struct pl_string_site {
     char *slot;
     sh_package_string_request request;
     size_t unit;
+    int late;
 } pl_string_site;
 typedef struct pl_localization {
     pl_build *build;
     pl_string_site *sites;
     size_t count, capacity, unit, component;
+    int late;
     sh_package_strings *strings;
     char *error;
     size_t error_capacity;
@@ -1371,7 +1388,79 @@ static int pl_string_bind(void *context, const char *slot, const char *key,
     char *saved = malloc(length + 1), *path = _strdup(slot);
     if (!saved || !path) { free(saved); free(path); return -1; }
     memcpy(saved, key, length); saved[length] = 0;
-    p->sites[p->count++] = (pl_string_site){path, {p->component, saved}, p->unit}; return 0;
+    p->sites[p->count++] = (pl_string_site){path, {p->component, saved}, p->unit, p->late}; return 0;
+}
+
+/* Enumerate descriptor keys, not movie literals. Translation selection stays
+ * entirely in package_strings (per-locale nearest-ancestor precedence). */
+static int pl_movie_string_requests(pl_localization *p, const sh_package_sources *sources, size_t unit)
+{
+    pl_build *b = p->build; pl_contributions *c = b->contributions;
+    size_t scope = c->inputs.scopes[unit];
+    if (scope >= b->authored_count || !pl_modern(b, scope)) return 1;
+    size_t component = b->views[scope].component;
+    if (component >= sources->component_count) return 0;
+    const sh_package_component *child = sources->components + component;
+    p->unit = unit; p->component = component; p->late = 1;
+    for (size_t i = 0; i < sources->component_count; i++) {
+        const sh_package_component *parent = sources->components + i;
+        size_t depth = strlen(parent->relative);
+        if (parent->owner != child->owner || (depth && (strncmp(parent->relative, child->relative, depth) ||
+            (child->relative[depth] && child->relative[depth] != '/')))) continue;
+        const char *raw = sh_package_descriptor_section(&parent->descriptor, "strings");
+        if (!raw) continue;
+        sh_json_object locales = {0};
+        if (!sh_json_parse_object(raw, strlen(raw), 24, &locales)) return 0;
+        int ok = 1;
+        for (size_t j = 0; ok && j < locales.count; j++) {
+            sh_json_object pairs = {0};
+            const char *map = locales.members[j].value_json;
+            ok = sh_json_parse_object(map, strlen(map), 24, &pairs);
+            for (size_t k = 0; ok && k < pairs.count; k++) {
+                const sh_json_member *value = pairs.members + k;
+                size_t n = value->key_length;
+                char *key = n <= SIZE_MAX - 6 ? malloc(n + 6) : NULL;
+                if (!key || strlen(value->key) != n) { free(key); ok = 0; break; }
+                memcpy(key, "#str_", 5); memcpy(key + 5, value->key, n + 1);
+                char *slot = sh_package_movie_string_slot(key); const char *unused = NULL;
+                if (!slot) { free(key); ok = 0; break; }
+                size_t seen;
+                for (seen = 0; seen < p->count; seen++)
+                    if (p->sites[seen].unit == unit && !strcmp(p->sites[seen].slot, slot)) break;
+                if (seen == p->count) ok = pl_string_bind(p, slot, key, strlen(key), &unused) == 0;
+                free(slot); free(key);
+            }
+            sh_json_object_free(&pairs);
+        }
+        sh_json_object_free(&locales); if (!ok) return 0;
+    }
+    p->late = 0; return 1;
+}
+static int pl_movie_string_capture(pl_contributions *c, const pl_string_site *site,
+    const sh_package_localized_string *mapping)
+{
+    sh_package_link_unit *unit = c->inputs.units + site->unit;
+    if (c->movie_string_count >= SIZE_MAX / sizeof(*c->movie_strings) ||
+        unit->witness_count >= SIZE_MAX / sizeof(*unit->witnesses)) return 0;
+    pl_movie_string *value = calloc(1, sizeof(*value));
+    sh_package_link_witness *witnesses = calloc(unit->witness_count + 1, sizeof(*witnesses));
+    if (!value || !witnesses) { free(value); free(witnesses); return 0; }
+    value->unit = site->unit; value->slot = _strdup(site->slot); value->key = mapping->key;
+    value->witness.engine_path = value->slot;
+    /* pl_close releases contributions before b.shared. Borrow its one owned
+     * canonical mapping/key instead of copying locale payload per movie. */
+    value->witness.body = (unsigned char *)mapping->mapping; value->witness.body_length = strlen(mapping->mapping);
+    if (!value->slot) goto failed;
+    pl_movie_string **grown = realloc(c->movie_strings, (c->movie_string_count + 1) * sizeof(*grown));
+    if (!grown) goto failed;
+    c->movie_strings = grown; c->movie_strings[c->movie_string_count++] = value;
+    if (unit->witness_count) memcpy(witnesses, unit->witnesses, unit->witness_count * sizeof(*witnesses));
+    witnesses[unit->witness_count++] = (sh_package_link_witness){value->slot, &value->witness};
+    free(c->witnesses[site->unit]); c->witnesses[site->unit] = witnesses; unit->witnesses = witnesses;
+    unit->original_binding = 0; c->shared[site->unit] = 0;
+    return 1;
+failed:
+    free(value->slot); free(value); free(witnesses); return 0;
 }
 
 /* Admit the policy's historical/global string keys into this compilation's
@@ -1446,6 +1535,7 @@ static int pl_localize(pl_build *b, const sh_package_sources *sources, char *err
     int ok = 0;
     for (size_t i = 0; i < c->inputs.count; i++) {
         const sh_package_link_unit *unit = c->inputs.units + i;
+        if (sh_package_movie_owner(unit->family, unit->name) && !pl_movie_string_requests(&p, sources, i)) goto done;
         if (!pl_modern(b, c->inputs.scopes[i]) || unit->file_count != 1) continue;
         const sh_compiled_resource *file = unit->files[0];
         if (!file->type || !file->source_count) continue;
@@ -1465,7 +1555,7 @@ static int pl_localize(pl_build *b, const sh_package_sources *sources, char *err
         size_t length = 0, bound_length = 0;
         unsigned char *raw = sh_package_source_read(authored, SIZE_MAX, &length, error, capacity);
         if (!raw) goto done;
-        p.unit = i; p.component = authored->component;
+        p.unit = i; p.component = authored->component; p.late = 0;
         unsigned char *observed = sh_package_source_link_bind_strings(b->reader, i, raw, length,
             pl_string_bind, &p, &bound_length, error, capacity);
         free(raw); if (!observed) goto done; free(observed);
@@ -1485,6 +1575,7 @@ static int pl_localize(pl_build *b, const sh_package_sources *sources, char *err
             sh_package_localized_string *value = b->shared->policy.localized + j;
             if (!strcmp(value->key, key)) {
                 if (!sh_package_owners_add(&value->owners, sources->components[p.sites[i].request.component].owner)) goto done;
+                if (p.sites[i].late && !pl_movie_string_capture(c, p.sites + i, value)) goto done;
                 break;
             }
         }
@@ -1492,7 +1583,7 @@ static int pl_localize(pl_build *b, const sh_package_sources *sources, char *err
     }
     for (size_t i = 0; i < c->inputs.count; i++) {
         size_t site;
-        for (site = 0; site < p.count; site++) if (p.sites[site].unit == i) break;
+        for (site = 0; site < p.count; site++) if (p.sites[site].unit == i && !p.sites[site].late) break;
         if (site == p.count) continue;
         sh_package_link_unit *unit = c->inputs.units + i;
         const sh_compiled_resource *file = unit->files[0];
@@ -2043,23 +2134,22 @@ static int pl_contribution_group(pl_build *b, const sh_package_sources *sources,
     for (size_t i = 0; phase != 2 && i < count; i++) {
         pl_chain authored_chain = {0};
         char *form = NULL; size_t form_length = 0;
-        int repeats = sh_package_editor_repeats(texts[i]), formed;
+        int repeats = sh_package_editor_repeats_type(c->inputs.units[members[i]].family, texts[i]), formed;
         if (repeats < 0) { snprintf(error, capacity, "editor contribution allocation failed"); goto failed; }
-        if (!repeats) continue;
-        if (parents[i] && !pl_parent_chain(c, members[i], texts[i], 0, &authored_chain, &kind, error, capacity)) {
+        if (repeats && parents[i] && !pl_parent_chain(c, members[i], texts[i], 0, &authored_chain, &kind, error, capacity)) {
             culprit = members[i]; goto failed;
         }
-        formed = sh_package_editor_native_form(texts[i], authored_chain.texts, authored_chain.count, &form, &form_length);
+        formed = sh_package_editor_native_form_type(c->inputs.units[members[i]].family, texts[i], authored_chain.texts, authored_chain.count, &form, &form_length);
         pl_chain_free(&authored_chain);
         if (formed == -1) { kind = SH_PACKAGE_EDITOR_FAILURE_ENVIRONMENT; snprintf(error, capacity, "editor contribution allocation failed"); goto failed; }
         if (formed == -2) {
             kind = SH_PACKAGE_EDITOR_FAILURE_SOURCE; culprit = members[i];
-            snprintf(error, capacity, "the declaration's own fields change between a value and a block over its parents");
+            snprintf(error, capacity, "the editor declaration has a malformed member or changes between a value and a block over its parents");
             goto failed;
         }
         if (formed < 0) {
             kind = SH_PACKAGE_EDITOR_FAILURE_COVERAGE;
-            snprintf(error, capacity, "a member stated more than once reads natively as no single statement does");
+            snprintf(error, capacity, "the editor declaration's native collection form is not modelled");
             goto failed;
         }
         if (formed) { free((char *)texts[i].text); texts[i] = (sh_decl_source){form, form_length}; }
@@ -3092,11 +3182,11 @@ static void pl_contribution_report(const pl_build *b, const sh_package_compile_e
     snprintf(error, capacity, "%s", first->reason);
 }
 /* Free keys: private keys in allocation order under the contract, otherwise
- * the lowest unnamed bit. 0 when none is left. A peer's multi-bit keys are
- * held in held[]; no key touches a historical bit. */
+ * the lowest unnamed bit. 0 when none is left. A peer's multi-bit keys, group
+ * codes and group members are held; no key touches a historical bit. */
 typedef struct pl_key_pool {
     int private_keys; uint32_t pool, used, historical; size_t cursor;
-    const uint32_t *held; size_t held_count;
+    const sh_package_key_set *held;
     sh_package_key_set taken; /* multi-bit keys issued by this compile */
 } pl_key_pool;
 /* A multi-bit code sharing a bit with a frozen legacy registration. */
@@ -3109,14 +3199,11 @@ static uint32_t pl_key_take(pl_key_pool *p)
         p->used |= bit; return bit;
     }
     for (uint32_t key; (key = sh_package_key_private(p->cursor)) != 0;) {
-        size_t h = 0;
         p->cursor++;
         /* Marked keys come only from here; single bits skip authored ones. */
         if (key & SH_PACKAGE_KEY_MARKER) {
-            if (pl_key_historical(p, key)) continue;
-            while (h < p->held_count && p->held[h] != key) h++;
-            if (h == p->held_count) { sh_package_key_set_add(&p->taken, key); return key; }
-            continue;
+            if (pl_key_historical(p, key) || (p->held && sh_package_key_set_has(p->held, key))) continue;
+            sh_package_key_set_add(&p->taken, key); return key;
         }
         if (!(p->used & key)) { p->used |= key; return key; }
     }
@@ -3124,8 +3211,10 @@ static uint32_t pl_key_take(pl_key_pool *p)
 }
 /* A peer library's keys, by source tree, component and authored bit. */
 typedef struct pl_key_pin { const sh_package_provenance_context *context; uint32_t original, current; } pl_key_pin;
-typedef struct pl_key_pins { pl_key_pin *pins; size_t count; uint32_t *held; size_t held_count; } pl_key_pins;
-static void pl_key_pins_free(pl_key_pins *pins) { free(pins->pins); free(pins->held); memset(pins, 0, sizeof(*pins)); }
+/* held: every multi-bit code a peer keeps (binding keys, group codes and
+ * group members); members: its group members that are single bits. */
+typedef struct pl_key_pins { pl_key_pin *pins; size_t count; sh_package_key_set held; uint32_t members; } pl_key_pins;
+static void pl_key_pins_free(pl_key_pins *pins) { free(pins->pins); memset(pins, 0, sizeof(*pins)); }
 static int pl_key_number(const char *text, uint32_t *value)
 {
     char *end = NULL;
@@ -3140,16 +3229,26 @@ static int pl_key_pins_open(const sh_package_provenance *peer, const sh_package_
 {
     size_t total = 0;
     memset(out, 0, sizeof(*out));
-    if (groups) total += groups->count;
     for (size_t i = 0; peer && i < peer->binding_count; i++)
-        if (!strcmp(peer->bindings[i].family, SH_PACKAGE_KEY_FAMILY)) total += peer->bindings[i].context_count + 1;
-    if (!total) return 1;
-    if (total > SIZE_MAX / sizeof(*out->pins) || !(out->pins = calloc(total, sizeof(*out->pins))) ||
-        !(out->held = calloc(total, sizeof(*out->held)))) { pl_key_pins_free(out); return 0; }
-    /* A peer's group codes stay its sets' (equal sets reuse them). */
-    for (uint32_t pattern = 1; groups && pattern < SH_PACKAGE_KEY_PATTERNS; pattern++)
-        if (groups->defined[pattern]) out->held[out->held_count++] = SH_PACKAGE_KEY_MARKER | (pattern << 19);
-    for (size_t i = 0; i < peer->binding_count; i++) {
+        if (!strcmp(peer->bindings[i].family, SH_PACKAGE_KEY_FAMILY)) {
+            if (peer->bindings[i].context_count > SIZE_MAX - total) return 0;
+            total += peer->bindings[i].context_count;
+        }
+    if (total && (total > SIZE_MAX / sizeof(*out->pins) || !(out->pins = calloc(total, sizeof(*out->pins))))) return 0;
+    /* A peer's group codes stay its sets' (equal sets reuse them), and its
+     * group members stay its scopes' keys: a changed row's own key appears
+     * only inside the group its named bit's binding records. */
+    for (uint32_t pattern = 1; groups && pattern < SH_PACKAGE_KEY_PATTERNS; pattern++) {
+        if (!groups->defined[pattern]) continue;
+        sh_package_key_set_add(&out->held, SH_PACKAGE_KEY_MARKER | (pattern << 19));
+        for (size_t index = 0; index < SH_PACKAGE_KEY_CODES; index++) {
+            uint32_t member = sh_package_key_code(index);
+            if (!sh_package_key_set_has(groups->members + pattern, member)) continue;
+            if (member & SH_PACKAGE_KEY_MARKER) sh_package_key_set_add(&out->held, member);
+            else out->members |= member;
+        }
+    }
+    for (size_t i = 0; peer && i < peer->binding_count; i++) {
         const sh_package_provenance_binding *binding = peer->bindings + i;
         uint32_t original = 0, current = 0, held;
         if (strcmp(binding->family, SH_PACKAGE_KEY_FAMILY) || !pl_key_number(binding->original, &original) ||
@@ -3162,7 +3261,7 @@ static int pl_key_pins_open(const sh_package_provenance *peer, const sh_package_
         }
         /* The key itself: a custom bit's whole key, a named bit's key beside it. */
         held = original & SH_PACKAGE_KEY_UNNAMED ? current : current & ~original;
-        if (held & SH_PACKAGE_KEY_MARKER) out->held[out->held_count++] = held;
+        if (held & SH_PACKAGE_KEY_MARKER) sh_package_key_set_add(&out->held, held);
     }
     return 1;
 }
@@ -3201,6 +3300,42 @@ static int pl_key_pinned(const pl_build *b, const sh_package_sources *sources, c
     }
     return 0;
 }
+static void pl_key_set_remove(sh_package_key_set *set, uint32_t code)
+{
+    size_t index = sh_package_key_index(code);
+    if (index != SIZE_MAX) set->words[index / 64] &= ~(1ull << (index % 64));
+}
+/* A changed row's own key inside the peer group its named bit's binding
+ * records: the group's members without the keys this context holds under its
+ * other authored bits. Exactly one valid member must remain, held directly by
+ * no peer binding (another context's key is never borrowed); otherwise 0. */
+static uint32_t pl_key_row_member(const pl_build *b, const sh_package_sources *sources, const pl_key_pins *pins,
+    const pl_key_pool *pool, const sh_package_key_groups *peer, size_t scope, unsigned named, uint32_t group)
+{
+    uint32_t pattern = (group & SH_PACKAGE_KEY_SINGLE) >> 19, found = 0;
+    size_t remaining = 0;
+    sh_package_key_set candidates;
+    if (!peer || !(group & SH_PACKAGE_KEY_MARKER) || !pattern || !peer->defined[pattern]) return 0;
+    candidates = peer->members[pattern];
+    for (unsigned bit = 0; bit < SH_PACKAGE_KEY_BITS; bit++) {
+        uint32_t other = 0;
+        if (bit == named || !pl_key_pinned(b, sources, pins, scope, 1u << bit, &other)) continue;
+        if (other & SH_PACKAGE_KEY_MARKER) pl_key_set_remove(&candidates, other & SH_PACKAGE_KEY_PRIVATE);
+        else for (unsigned single = 19; single < 28; single++)
+            if (other >> single & 1u) pl_key_set_remove(&candidates, 1u << single);
+    }
+    for (size_t index = 0; index < SH_PACKAGE_KEY_CODES; index++) {
+        uint32_t code = sh_package_key_code(index);
+        if (sh_package_key_set_has(&candidates, code)) { found = code; remaining++; }
+    }
+    if (remaining != 1 || !sh_package_key_private_valid(found) || pl_key_historical(pool, found) ||
+        ((found & SH_PACKAGE_KEY_MARKER) && peer->defined[(found & SH_PACKAGE_KEY_SINGLE) >> 19])) return 0;
+    for (size_t i = 0; i < pins->count; i++) {
+        uint32_t held = pins->pins[i].current & SH_PACKAGE_KEY_PRIVATE;
+        if ((held & SH_PACKAGE_KEY_MARKER) ? held == found : !(found & SH_PACKAGE_KEY_MARKER) && (held & found)) return 0;
+    }
+    return found;
+}
 /* Group codes for sets of several keys that are not single-bit keys only:
  * an equal set keeps the code this compile or its peer gave it; a new set
  * takes the first multi-bit code no key, held code or group uses. */
@@ -3219,13 +3354,12 @@ static int pl_key_group(void *context, const sh_package_key_set *keys, uint32_t 
     if ((found = sh_package_key_groups_find(g->peer, keys)) && pl_key_historical(g->pool, found)) found = 0;
     for (size_t n = 9; !found; n++) {
         uint32_t candidate = sh_package_key_private(n), pattern;
-        size_t h = 0;
         if (!candidate) return 0;
         pattern = (candidate & SH_PACKAGE_KEY_SINGLE) >> 19;
         if (sh_package_key_set_has(&g->pool->taken, candidate) || b->key_groups->defined[pattern] ||
-            pl_key_historical(g->pool, candidate)) continue;
-        while (h < g->pool->held_count && g->pool->held[h] != candidate) h++;
-        if (h == g->pool->held_count) found = candidate;
+            pl_key_historical(g->pool, candidate) ||
+            (g->pool->held && sh_package_key_set_has(g->pool->held, candidate))) continue;
+        found = candidate;
     }
     if (!sh_package_key_groups_define(b->key_groups, found, keys)) return -1;
     *code = found; return 1;
@@ -3281,7 +3415,23 @@ static int pl_key_rewrite(void *context, const char *slot, const char *value, si
  * removes a stock registration or modifier for anyone else. Each follows the
  * stock row before it (the first leads the rows), as in the stock list: a
  * partial list's own rows stay after the stock rows, like a complete list's. */
-static int pl_key_restore(sh_decl_node *list, const sh_decl_node *stock, int *changed)
+static sh_decl_node *pl_row_find_mask(const sh_decl_node *list, const sh_package_key_space *space,
+    const char *key, size_t length)
+{
+    uint32_t wanted = 0;
+    if (!space || !sh_package_key_bits(space, key, length, &wanted)) return pl_row_find(list, key, length);
+    for (const sh_decl_node *item = list ? list->children : NULL; item; item = item->next) {
+        const char *value = NULL;
+        size_t value_length = 0;
+        uint32_t mask = 0;
+        if (pl_row_key(item, &value, &value_length) &&
+            sh_package_key_bits(space, value, value_length, &mask) && mask == wanted)
+            return (sh_decl_node *)item;
+    }
+    return NULL;
+}
+static int pl_key_restore(sh_decl_node *list, const sh_decl_node *stock,
+    const sh_package_key_space *space, int *changed)
 {
     sh_decl_node *previous = NULL;
     for (const sh_decl_node *row = stock ? stock->children : NULL; row; row = row->next) {
@@ -3289,7 +3439,9 @@ static int pl_key_restore(sh_decl_node *list, const sh_decl_node *stock, int *ch
         size_t length = 0;
         sh_decl_node *held;
         if (!pl_row_key(row, &key, &length)) continue;
-        if ((held = pl_row_find(list, key, length))) { previous = held; continue; }
+        /* A numeric mask and its reflected names designate the same row. A
+         * restored symbolic spelling must not precede that authored winner. */
+        if ((held = pl_row_find_mask(list, space, key, length))) { previous = held; continue; }
         sh_decl_node *copy = pl_node_clone(row), **link = previous ? &previous->next : &list->children;
         if (!copy) return 0;
         copy->next = *link; *link = copy; previous = copy; *changed = 1;
@@ -3353,8 +3505,8 @@ static int pl_key_split(const sh_package_key_space *space, int private_keys, int
             }
         }
     }
-    if (!failed && restore && ((list && !pl_key_restore(list, stock_list, &changed)) ||
-        (mods && !pl_key_restore(mods, stock_mods, &changed)))) failed = 1;
+    if (!failed && restore && ((list && !pl_key_restore(list, stock_list, space, &changed)) ||
+        (mods && !pl_key_restore(mods, stock_mods, space, &changed)))) failed = 1;
     if (!failed && changed && ((list && !pl_list_renumber(list)) || (mods && !pl_list_renumber(mods)) ||
         !(*out = sh_decl_tree_write(tree, out_length)))) failed = 1;
     if (failed && error && capacity && !*error) snprintf(error, capacity, "registration rows could not be split");
@@ -3521,7 +3673,9 @@ static int pl_key_phase(pl_build *b, const sh_package_sources *sources, char *er
             pins.pins[i].current & ~pins.pins[i].original;
         if (!(held & SH_PACKAGE_KEY_MARKER)) { pool.used |= held; pinned_bits |= held; }
     }
-    pool.held = pins.held; pool.held_count = pins.held_count;
+    /* A peer group's single-bit member is held like a peer's single-bit key. */
+    pool.used |= pins.members; pinned_bits |= pins.members;
+    pool.held = &pins.held;
     most = (keys.count > changes.count ? keys.count : changes.count) + 1;
     rows_to = calloc(b->authored_count, sizeof(*rows_to)); to = calloc(b->authored_count, sizeof(*to));
     scopes = calloc(most, sizeof(*scopes)); starts = calloc(most, sizeof(*starts)); order = calloc(most, sizeof(*order));
@@ -3628,6 +3782,10 @@ static int pl_key_phase(pl_build *b, const sh_package_sources *sources, char *er
                                 !pl_key_historical(&pool, pinned) &&
                                 !((pinned & SH_PACKAGE_KEY_MARKER) && peer &&
                                     peer->defined[(pinned & SH_PACKAGE_KEY_SINGLE) >> 19])) target = pinned;
+                            /* A group names this row's own key beside the keys
+                             * of the context's other authored bits. */
+                            else if (private_keys) target = pl_key_row_member(b, sources, &pins, &pool, peer,
+                                changes.rows[m].scope, named, pinned);
                         }
                     if (!target) target = !private_keys && fallback ? fallback : pl_key_take(&pool);
                     if (!target) { snprintf(error, capacity, "registration key namespace is exhausted"); goto done; }
@@ -4811,28 +4969,45 @@ row_done:
     return sh_package_hud_publish(policy, 0, 0);
 }
 
-static int pl_consumers(const sh_package_link_inputs *inputs, const sh_package_link_output *linked,
+static int pl_consumers(const pl_contributions *c, const sh_package_link_output *linked,
     sh_package_consumers **out, char *error, size_t capacity)
 {
-    if (!linked->implicit_count) return 1;
+    const sh_package_link_inputs *inputs = &c->inputs;
+    if (!linked->implicit_count && !c->movie_string_count) return 1;
     sh_package_consumer *owners = NULL;
     sh_package_consumer_target *targets = NULL;
-    size_t count = 0;
-    if (linked->implicit_count > SIZE_MAX / sizeof(*owners) || linked->implicit_count > SIZE_MAX / sizeof(*targets)) goto done;
-    owners = calloc(linked->implicit_count, sizeof(*owners)); targets = calloc(linked->implicit_count, sizeof(*targets));
-    if (!owners || !targets) goto done;
+    size_t count = 0, total, *sizes = NULL, *indexes = NULL;
+    if (c->movie_string_count > SIZE_MAX - linked->implicit_count) goto done;
+    total = linked->implicit_count + c->movie_string_count;
+    if (total > SIZE_MAX / sizeof(*targets) || linked->classes.count > SIZE_MAX / sizeof(*owners)) goto done;
+    owners = calloc(linked->classes.count, sizeof(*owners)); targets = calloc(total, sizeof(*targets));
+    sizes = calloc(linked->classes.count, sizeof(*sizes)); indexes = calloc(linked->classes.count, sizeof(*indexes));
+    if (!owners || !targets || !sizes || !indexes) goto done;
+    for (size_t i = 0; i < linked->implicit_count; i++) sizes[linked->implicit[i].owner]++;
+    for (size_t i = 0; i < c->movie_string_count; i++) sizes[linked->classes.nodes[c->movie_strings[i]->unit]]++;
+    size_t offset = 0;
+    for (size_t i = 0; i < linked->classes.count; i++) if (sizes[i]) {
+        const sh_package_link_unit *owner = inputs->units + linked->classes.representatives[i];
+        indexes[i] = count;
+        owners[count++] = (sh_package_consumer){owner->family, linked->names[i], targets + offset, 0};
+        offset += sizes[i];
+    }
     for (size_t i = 0; i < linked->implicit_count; i++) {
         const sh_package_link_implicit_binding *binding = linked->implicit + i;
-        const sh_package_link_unit *owner = inputs->units + linked->classes.representatives[binding->owner];
         const sh_package_link_unit *target = inputs->units + linked->classes.representatives[binding->target];
-        if (!i || linked->implicit[i - 1].owner != binding->owner)
-            owners[count++] = (sh_package_consumer){owner->family, linked->names[binding->owner], targets + i, 0};
-        targets[i] = (sh_package_consumer_target){binding->slot, target->family, linked->names[binding->target]};
-        owners[count - 1].count++;
+        sh_package_consumer *owner = owners + indexes[binding->owner];
+        ((sh_package_consumer_target *)owner->targets)[owner->count++] =
+            (sh_package_consumer_target){binding->slot, target->family, linked->names[binding->target]};
+    }
+    for (size_t i = 0; i < c->movie_string_count; i++) {
+        const pl_movie_string *value = c->movie_strings[i];
+        sh_package_consumer *owner = owners + indexes[linked->classes.nodes[value->unit]];
+        ((sh_package_consumer_target *)owner->targets)[owner->count++] =
+            (sh_package_consumer_target){value->slot, "string", value->key};
     }
     *out = sh_package_consumers_create(owners, count, error, capacity);
 done:
-    free(owners); free(targets);
+    free(owners); free(targets); free(sizes); free(indexes);
     if (!*out && error && capacity && !*error) snprintf(error, capacity, "cannot retain compiled native consumer bindings");
     return *out != NULL;
 }
@@ -5062,9 +5237,18 @@ static int pl_registration_inheritance(pl_build *b, const sh_package_sources *so
  * that effective input before dependency discovery: a modifier-only package
  * still refers to the AI its modifier classifies. Historical complete tables
  * retain their recorded omissions and first-match behavior. */
-static int pl_registration_sources(pl_build *b, const sh_package_sources *sources, char *error, size_t capacity)
+static int pl_registration_sources(pl_build *b, const sh_package_sources *sources,
+    sh_decl_registry_source registry, uintptr_t reflection, char *error, size_t capacity)
 {
-    if (!b->native || !b->native->private_keys) return 1;
+    if (!b->native || !b->native->private_keys || !b->authored_count) return 1;
+    sh_package_key_space space = {0};
+    sh_decl_native_schema *schema = sh_decl_native_schema_open(
+        (sh_decl_native_source){registry.context, registry.read, reflection, registry.scripts},
+        (sh_decl_dependency_observer){0}, error, capacity);
+    if (!schema) return 0;
+    int reflected = sh_package_key_space_read(schema, &space);
+    sh_decl_native_schema_close(schema);
+    if (reflected < 0) return 0;
     const sh_package_compilation *stock = b->scopes[b->count - 1];
     for (size_t scope = 0; scope < b->authored_count; scope++) {
         if (!pl_modern(b, scope)) continue;
@@ -5108,7 +5292,7 @@ static int pl_registration_sources(pl_build *b, const sh_package_sources *source
                     sh_decl_node **tail = &edit->children;
                     while (*tail) tail = &(*tail)->next;
                     *tail = into; restored = 1;
-                } else ok = pl_key_restore(into, from, &restored) && pl_list_renumber(into);
+                } else ok = pl_key_restore(into, from, reflected ? &space : NULL, &restored) && pl_list_renumber(into);
             }
             if (ok && restored) {
                 owned[i] = (unsigned char *)sh_decl_tree_write(tree, &projections[i].length);
@@ -5636,7 +5820,7 @@ static int pl_compile(const sh_package_sources *sources, const sh_package_proven
     if (!pl_registration_inheritance(&b, sources, b.count - 1, catalog,
         env.baseline ? env.baseline : original, env.baseline ? env.baseline_context : original_context,
         registry, reflection, error, capacity)) goto done;
-    if (!pl_registration_sources(&b, sources, error, capacity)) goto done;
+    if (!pl_registration_sources(&b, sources, registry, reflection, error, capacity)) goto done;
     if (!pl_native_open(&b, catalog, original, original_context, registry, reflection, error, capacity)) goto done;
     pl_phase(&b, out, SH_PACKAGE_LIBRARY_PHASE_NATIVE, &mark);
     source_native.audio = b.audio;
@@ -5765,7 +5949,7 @@ static int pl_compile(const sh_package_sources *sources, const sh_package_proven
     if (!pl_provenance(&b, sources, &out->bindings) || !pl_key_provenance(&b, sources, &out->bindings, error, capacity) ||
         !pl_hud(&b, error, capacity) ||
         !sh_package_sound_prepare(b.linked.compiled, error, capacity) ||
-        !pl_consumers(assignment.inputs, &b.linked, &out->consumers, error, capacity) ||
+        !pl_consumers(b.contributions, &b.linked, &out->consumers, error, capacity) ||
         !pl_fsm_webs(&b, original, original_context, &out->fsm_webs, error, capacity)) goto done;
     if (b.materials) {
         out->virtual_materials = sh_package_virtual_material_prepare(b.materials, assignment.inputs,

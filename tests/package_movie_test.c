@@ -174,9 +174,88 @@ static void routing(void)
     sh_package_consumers_free(catalog);
 }
 
+static void late_strings(void)
+{
+    sh_package_consumer_target targets[] = {
+        {"movie/string/#str_case/key", "string", "#str_smp_loc_a"},
+        {"movie/string/#str_native", "string", "#str_native"},
+        {"movie/string/#str_wrong", "material", "invalid"},
+        {"request/material/gui/fx", "material", "smp/fx"},
+        {"request/sound/play_computed", "sound", "smp/sound"}
+    };
+    sh_package_consumer owner = {"file", "generated/swf/panel.bswf", targets, 5};
+    const char *replacement = NULL;
+    char *slot = sh_package_movie_string_slot("#str_Case/Key");
+    assert(slot && !strcmp(slot, targets[0].slot)); free(slot);
+    assert(sh_package_movie_string_route(&owner, "#str_Case/Key", &replacement) == 1 &&
+        !strcmp(replacement, "#str_smp_loc_a"));
+    assert(sh_package_movie_string_route(&owner, "#STR_case/key", &replacement) == 1 && replacement);
+    assert(sh_package_movie_string_route(&owner, "#str_Case\\Key", &replacement) == 0);
+    assert(sh_package_movie_string_route(&owner, "#str_native", &replacement) == 0 && !replacement);
+    assert(sh_package_movie_string_route(&owner, "#str_missing", &replacement) == 0);
+    assert(sh_package_movie_string_route(&owner, "#str_wrong", &replacement) == -1);
+    targets[2].family = NULL;
+    assert(sh_package_movie_string_route(&owner, "#str_wrong", &replacement) == -1 && !replacement);
+    char computed[64]; snprintf(computed, sizeof(computed), "play_%s", "computed");
+    assert(!strcmp(sh_package_consumer_request(&owner, "sound", computed), "smp/sound"));
+    assert(!strcmp(sh_package_consumer_request(&owner, "material", "GUI\\FX"), "smp/fx"));
+    assert(!sh_package_consumer_request(&owner, "sound", "missing"));
+}
+
+static void plan_validation(void)
+{
+    sh_package_consumer_target rows[] = {
+        {"movie/font/tt supermolot", "font", "private/font"},
+        {"movie/material/guisolid", "material", "private/gui"},
+        {"request/sound/computed_sound", "sound", "private/sound"},
+        {"request/material/gui/fx", "material", "private/fx"},
+        {"movie/string/#str_path\\\\key", "string", "#str_private"}};
+    sh_package_consumer owner = {"file", "generated/swf/panel.bswf", rows, 5};
+    assert(sh_package_movie_plan_valid(&owner));
+    const char *saved = rows[4].family; rows[4].family = NULL;
+    assert(!sh_package_movie_plan_valid(&owner)); rows[4].family = saved;
+    rows[4].slot = "movie/string/#str_Path"; assert(!sh_package_movie_plan_valid(&owner));
+    rows[4].slot = "movie/string/#str_path\\\\key";
+    rows[3].family = "sound"; assert(!sh_package_movie_plan_valid(&owner)); rows[3].family = "material";
+    rows[2].slot = "request/sound/COMPUTED_sound"; assert(!sh_package_movie_plan_valid(&owner));
+    rows[2].slot = "request/sound/computed_sound";
+    rows[1].slot = "movie/unknown/guisolid"; assert(!sh_package_movie_plan_valid(&owner));
+    rows[1].slot = "movie/material/guisolid";
+    rows[0].name = ""; assert(!sh_package_movie_plan_valid(&owner)); rows[0].name = "private/font";
+    owner.name = "generated/swf/a.bimage/panel.bswf"; assert(!sh_package_movie_plan_valid(&owner));
+    owner.name = "generated/swf/panel.bswf"; owner.targets = NULL;
+    assert(!sh_package_movie_plan_valid(&owner)); owner.count = 0;
+    assert(sh_package_movie_plan_valid(&owner));
+    sh_package_consumer_target repeats[] = {{"request/sound/a", "sound", "private/a"},
+        {"request/sound/a", "sound", "private/a"}};
+    owner.targets = repeats; owner.count = 2; assert(sh_package_movie_plan_valid(&owner));
+    repeats[1].name = "private/b"; assert(!sh_package_movie_plan_valid(&owner));
+}
+static void plan_native(void)
+{
+    sh_package_consumer_target rows[] = {
+        {"movie/font/tt supermolot", "font", "tt supermolot"},
+        {"movie/material/guisolid", "material", "guisolid"},
+        {"request/material/gui/fx", "material", "gui/fx"},
+        {"request/sound/computed_sound", "sound", "computed_sound"}};
+    sh_package_consumer owner = {"file", "generated/swf/panel.bswf", rows, 4};
+    assert(sh_package_movie_plan_valid(&owner) && sh_package_movie_plan_native(&owner));
+    rows[1].name = "private/gui"; assert(!sh_package_movie_plan_native(&owner)); rows[1].name = "guisolid";
+    rows[0].family = "material"; assert(!sh_package_movie_plan_native(&owner)); rows[0].family = "font";
+    rows[3].slot = "request/sound/computed"; assert(!sh_package_movie_plan_native(&owner));
+    rows[3].slot = "request/sound/computed_sound"; assert(sh_package_movie_plan_native(&owner));
+    sh_package_consumer_target localized[] = {{"movie/string/#str_notice", "string", "#str_notice"}};
+    sh_package_consumer strings = {"file", "generated/swf/panel.bswf", localized, 1};
+    assert(sh_package_movie_plan_valid(&strings) && !sh_package_movie_plan_native(&strings));
+    sh_package_consumer_target unknown[] = {{"movie/dictionary/0", "material", "0"}};
+    owner.targets = unknown; owner.count = 1; assert(!sh_package_movie_plan_native(&owner));
+    owner.targets = NULL; assert(!sh_package_movie_plan_native(&owner));
+    owner.count = 0; assert(sh_package_movie_plan_native(&owner));
+    assert(!sh_package_movie_plan_native(NULL));
+}
 int main(void)
 {
-    names(); capture(); relocation(); routing();
+    names(); capture(); relocation(); routing(); late_strings(); plan_validation(); plan_native();
     puts("UI movie constructor tests passed");
     return 0;
 }

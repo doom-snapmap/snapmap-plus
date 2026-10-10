@@ -21,6 +21,12 @@ static sh_package_spawn_registry read_registry(const char *text)
     if (result != 1) fprintf(stderr, "%s\n", error);
     assert(result == 1); return out;
 }
+static size_t exact_modifier(const sh_package_spawn_registry *registry, uint32_t type)
+{
+    for (size_t i = 0; i < registry->modifier_count; i++)
+        if (registry->modifiers[i].mask == type) return i;
+    return SIZE_MAX;
+}
 typedef struct test_codes { sh_package_key_groups groups; sh_package_key_set taken; } test_codes;
 static int group_code(void *context, const sh_package_key_set *members, uint32_t *code)
 {
@@ -239,14 +245,15 @@ static void test_composed_first_modifiers(void)
         for (size_t i = 0; i < out.count; i++) {
             size_t first;
             for (first = 0; first < out.modifier_count; first++)
-                if (sh_package_key_modifier_matches(&groups, out.rows[i].mask, out.modifiers[first].mask)) break;
+                if ((out.rows[i].mask & SH_PACKAGE_KEY_PRIVATE) ? out.rows[i].mask == out.modifiers[first].mask :
+                    sh_package_key_modifier_matches(&groups, out.rows[i].mask, out.modifiers[first].mask)) break;
             const char *expected = !strcmp(out.rows[i].entity, "a") ? "healthMod = 2" :
                 !strcmp(out.rows[i].entity, "b") ? "healthMod = 3" : "healthMod = 99";
             if (first == out.modifier_count || !strstr(out.modifiers[first].body, expected))
                 fprintf(stderr, "composed first modifier for %s: expected %s\n", out.rows[i].entity, expected);
             assert(first < out.modifier_count && strstr(out.modifiers[first].body, expected));
         }
-        assert(out.count == 3 && out.modifier_count == 3);
+        assert(out.count == 3);
         size_t again_length = 0;
         char *again = sh_package_spawn_registry_compose((sh_decl_source){text, length}, tables, 2,
             &groups, &again_length, error, sizeof(error));
@@ -254,10 +261,130 @@ static void test_composed_first_modifiers(void)
         free(again); free(text); sh_package_spawn_registry_free(&out);
     }
 }
+/* Exact retained D8 input: one classifier and its registry wrote the same
+ * native 1/1 policy in opposite field orders. This is a two-row cycle in the
+ * old string-based ordering graph, independent of the group dictionary. */
+static void test_retained_field_order_cycle(void)
+{
+    const char *a = "{ edit = { aiTypeList = { num = 1; item[0] = { aiType = \"310378496\"; entityDef = \"actor\"; } } "
+        "globalAIMods = { num = 1; item[0] = { aiType = \"310378496\"; healthMod = 1; damageMod = 1; } } } }";
+    const char *b = "{ edit = { aiTypeList = { num = 1; item[0] = { aiType = \"310378496\"; entityDef = \"actor\"; } } "
+        "globalAIMods = { num = 1; item[0] = { aiType = \"310378496\"; damageMod = 1; healthMod = 1; } } } }";
+    for (int reversed = 0; reversed < 2; reversed++) {
+        sh_decl_source tables[] = {{reversed ? b : a, strlen(a)}, {reversed ? a : b, strlen(b)}};
+        const char *base = "{ edit = { aiTypeList = { num = 0; } globalAIMods = { num = 0; } } }";
+        char error[256] = ""; size_t length = 0;
+        char *text = sh_package_spawn_registry_compose((sh_decl_source){base, strlen(base)}, tables, 2,
+            NULL, &length, error, sizeof(error));
+        if (!text) fprintf(stderr, "retained field-order cycle: %s\n", error);
+        assert(text);
+        sh_package_spawn_registry out = read_registry(text);
+        size_t modifier = exact_modifier(&out, 310378496u);
+        assert(out.count == 1 && modifier != SIZE_MAX && out.modifier_count == 1);
+        assert(strstr(out.modifiers[modifier].body, "healthMod = 1") && strstr(out.modifiers[modifier].body, "damageMod = 1"));
+        free(text); sh_package_spawn_registry_free(&out);
+    }
+}
+/* Three pairwise-overlapping private classification sets select different
+ * broad policies. No ordering of intersection predicates can preserve them:
+ * every policy meets every type. Exact classification dispatch can. */
+static void test_different_policy_cycle(void)
+{
+    uint32_t keys[] = {524288u, 1048576u, 2097152u};
+    uint32_t types[] = {keys[0] | keys[1] | 4u, keys[1] | keys[2] | 8u, keys[2] | keys[0] | 16u};
+    uint32_t broad = keys[0] | keys[1] | keys[2];
+    const char *base = "{ edit = { aiTypeList = { num = 1; item[0] = { aiType = 4; entityDef = \"stock\"; } } "
+        "globalAIMods = { num = 1; item[0] = { aiType = 4; healthMod = 9; damageMod = 1; } } } }";
+    char source[3][768];
+    for (size_t i = 0; i < 3; i++) snprintf(source[i], sizeof(source[i]),
+        "{ edit = { aiTypeList = { num = 2; item[0] = { aiType = \"%u\"; entityDef = \"actor%zu\"; } "
+        "item[1] = { aiType = \"%u\"; entityDef = \"actor%zu\"; weight = 7; } } globalAIMods = { num = 1; "
+        "item[0] = { aiType = \"%u\"; healthMod = %zu; damageMod = 1; } } } }",
+        types[i], i, types[i], i, broad, i + 2);
+    for (int reversed = 0; reversed < 2; reversed++) {
+        sh_decl_source tables[3];
+        for (size_t i = 0; i < 3; i++) { const char *s = source[reversed ? 2 - i : i]; tables[i] = (sh_decl_source){s, strlen(s)}; }
+        char error[256] = ""; size_t length = 0;
+        char *text = sh_package_spawn_registry_compose((sh_decl_source){base, strlen(base)}, tables, 3,
+            NULL, &length, error, sizeof(error));
+        if (!text) fprintf(stderr, "different policy cycle: %s\n", error);
+        assert(text);
+        sh_package_spawn_registry out = read_registry(text);
+        assert(out.count == 7);
+        for (size_t i = 0; i < 3; i++) {
+            size_t modifier = exact_modifier(&out, types[i]); char expected[32];
+            snprintf(expected, sizeof(expected), "healthMod = %zu", i + 2);
+            assert(modifier != SIZE_MAX && strstr(out.modifiers[modifier].body, expected));
+            assert(out.modifiers[modifier].mask == types[i]);
+        }
+        size_t again_length = 0;
+        char *again = sh_package_spawn_registry_compose((sh_decl_source){text, length}, tables, 3,
+            NULL, &again_length, error, sizeof(error));
+        assert(again && length == again_length && !strcmp(text, again));
+        free(again); free(text); sh_package_spawn_registry_free(&out);
+    }
+}
+static void test_classifier_policy_projection(void)
+{
+    const char *base = "{ edit = { aiTypeList = { num = 0; } globalAIMods = { num = 0; } } }";
+    const char *named = "{ edit = { aiTypeList = { num = 1; item[0] = { aiType = 524292; entityDef = \"named\"; } } "
+        "globalAIMods = { num = 1; item[0] = { aiType = 4; healthMod = 2; damageMod = 1; } } } }";
+    const char *all = "{ edit = { aiTypeList = { num = 1; item[0] = { aiType = 1048584; entityDef = \"all\"; } } "
+        "globalAIMods = { num = 1; item[0] = { aiType = -1; healthMod = 3; damageMod = 1; } } } }";
+    const char *historical = "{ edit = { aiTypeList = { num = 1; item[0] = { aiType = 2097156; entityDef = \"old\"; } } "
+        "globalAIMods = { num = 1; item[0] = { aiType = 4; healthMod = 5; damageMod = 1; } } } }";
+    const char *broad = "{ edit = { aiTypeList = { num = 1; item[0] = { aiType = 524292; entityDef = \"named\"; } } "
+        "globalAIMods = { num = 1; item[0] = { aiType = 524292; healthMod = 99; damageMod = 1; } } } }";
+    sh_decl_source tables[] = {{broad, strlen(broad)}, {historical, strlen(historical)},
+        {all, strlen(all)}, {named, strlen(named)}};
+    unsigned char flags[] = {0, 1, 1, 1};
+    sh_package_key_groups groups = {0}; groups.historical = 2097152u;
+    char error[256] = ""; size_t length = 0;
+    char *text = sh_package_spawn_registry_compose_classified((sh_decl_source){base, strlen(base)}, tables,
+        flags, 4, &groups, &length, error, sizeof(error));
+    assert(text);
+    sh_package_spawn_registry out = read_registry(text);
+    assert(out.modifiers[0].mask == 524292 && strstr(out.modifiers[0].body, "healthMod = 2"));
+    assert(out.modifiers[1].mask == 1048584 && strstr(out.modifiers[1].body, "healthMod = 3"));
+    assert(exact_modifier(&out, 2097156) == SIZE_MAX);
+    size_t broad_at = SIZE_MAX;
+    for (size_t i = 2; i < out.modifier_count; i++)
+        if (out.modifiers[i].mask == 524292 && strstr(out.modifiers[i].body, "healthMod = 99")) broad_at = i;
+    assert(broad_at != SIZE_MAX);
+    free(text); sh_package_spawn_registry_free(&out);
+
+    const char *changed = "{ edit = { aiTypeList = { num = 1; item[0] = { aiType = 524292; entityDef = \"other\"; } } "
+        "globalAIMods = { num = 1; item[0] = { aiType = 4; healthMod = 3; damageMod = 1; } } } }";
+    tables[0] = (sh_decl_source){changed, strlen(changed)}; flags[0] = 1;
+    assert(!sh_package_spawn_registry_compose_classified((sh_decl_source){base, strlen(base)}, tables,
+        flags, 4, &groups, &length, error, sizeof(error)));
+    assert(strstr(error, "classification 524292 has different modifier policies"));
+    const char *absent = "{ edit = { aiTypeList = { num = 1; item[0] = { aiType = 524292; entityDef = \"absent\"; } } "
+        "globalAIMods = { num = 0; } } }";
+    tables[0] = (sh_decl_source){absent, strlen(absent)};
+    assert(!sh_package_spawn_registry_compose_classified((sh_decl_source){base, strlen(base)}, tables,
+        flags, 4, &groups, &length, error, sizeof(error)));
+    assert(strstr(error, "different modifier policies"));
+}
+static void test_high_bit_projection(void)
+{
+    uint32_t type = 0x80080004u;
+    char source[512];
+    snprintf(source, sizeof(source), "{ edit = { aiTypeList = { num = 1; item[0] = { aiType = %d; entityDef = \"high\"; } } "
+        "globalAIMods = { num = 1; item[0] = { aiType = 524288; healthMod = 2; damageMod = 1; } } } }", (int)(int32_t)type);
+    sh_decl_source table = {source, strlen(source)}; char error[256] = ""; size_t length = 0;
+    char *text = sh_package_spawn_registry_compose(table, &table, 1, NULL, &length, error, sizeof(error));
+    assert(text);
+    sh_package_spawn_registry out = read_registry(text);
+    assert(out.modifiers[0].mask == type && strstr(out.modifiers[0].body, "aiType = \"-2146959356\""));
+    free(text); sh_package_spawn_registry_free(&out);
+}
 int main(void)
 {
     test_native_membership(); test_empty_and_rejected(); test_publication(); test_classification_identity();
+    test_retained_field_order_cycle(); test_different_policy_cycle();
     test_composed_first_modifiers();
+    test_classifier_policy_projection(); test_high_bit_projection();
     test_native_defaults();
     puts("package spawn registry tests passed"); return 0;
 }

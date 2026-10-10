@@ -148,8 +148,48 @@ static char *dt_key(dt_parser *p)
         unsigned char c = (unsigned char)p->text[p->offset];
         if (!(isalnum(c) || c == '_' || c == '.' || c == '[' || c == ']' || c == '-')) break;
         p->offset++;
+        if (c == '[') break; /* Index is a separate native numeric token. */
     }
     return start == p->offset ? NULL : dt_copy(p->text + start, p->offset - start);
+}
+/* Lexical numeric token only; family readers own conversion and bounds. Keep
+ * its spelling (including radix/exponent) in the ordinary key. */
+static int dt_index_number(const char *text, size_t length)
+{
+    size_t at=0,digits=0; int real=0;
+    if (!length) return 0;
+    if (text[at]=='-' || text[at]=='+') { if (++at==length) return 0; }
+    /* Paired ReadNumber 141a0c920/1419feb50 chooses radix before exponent
+     * recognition. Only a zero immediately followed by dot is decimal. */
+    if (text[at]=='0' && (at+1==length || text[at+1]!='.')) {
+        at++;
+        if (at<length && (text[at]=='x' || text[at]=='X')) {
+            at++; while (at<length && isxdigit((unsigned char)text[at])) at++;
+        } else if (at<length && (text[at]=='b' || text[at]=='B')) {
+            at++; while (at<length && (text[at]=='0' || text[at]=='1')) at++;
+        } else while (at<length && text[at]>='0' && text[at]<='7') at++;
+    } else {
+        while (at<length && isdigit((unsigned char)text[at])) { at++; digits++; }
+        if (at<length && text[at]=='.') {
+            real=1; at++; while (at<length && isdigit((unsigned char)text[at])) { at++; digits++; }
+        }
+        if (!digits) return 0;
+        if (at<length && text[at]=='e') {
+            real=1; at++; if (at<length && (text[at]=='-' || text[at]=='+')) at++;
+            while (at<length && isdigit((unsigned char)text[at])) at++;
+        }
+    }
+    /* Suffixes are consumed but never appended to native token text. The
+     * lexer accepts at most two U/L integer suffixes, or one F/L float suffix.
+     * Empty radix/exponent digits are native tokens; family conversion owns
+     * their meaning rather than this syntax-preserving tree parser. */
+    if (real) {
+        if (at<length && (text[at]=='f' || text[at]=='F' || text[at]=='l' || text[at]=='L')) at++;
+    } else for (unsigned i=0;i<2 && at<length;i++) {
+        if (text[at]!='u' && text[at]!='U' && text[at]!='l' && text[at]!='L') break;
+        at++;
+    }
+    return at==length;
 }
 
 /* Native saved declarations can prefix a key with type and ops tokens.
@@ -186,11 +226,12 @@ static char *dt_field(dt_parser *p, char **annotation)
                     indexed[count] = 1;
                     /* The native lexer reads item[ 0 ] as separate tokens: an
                      * array index may be surrounded by blanks. */
-                    size_t digits;
+                    size_t number;
                     while (p->offset < p->length && (p->text[p->offset] == ' ' || p->text[p->offset] == '\t')) p->offset++;
-                    digits = p->offset;
-                    while (p->offset < p->length && isdigit((unsigned char)p->text[p->offset])) p->offset++;
-                    if (digits == p->offset) return NULL;
+                    number = p->offset;
+                    while (p->offset < p->length && (isalnum((unsigned char)p->text[p->offset]) ||
+                        p->text[p->offset] == '.' || p->text[p->offset] == '-' || p->text[p->offset] == '+')) p->offset++;
+                    if (!dt_index_number(p->text + number, p->offset - number)) return NULL;
                     while (p->offset < p->length && (p->text[p->offset] == ' ' || p->text[p->offset] == '\t')) p->offset++;
                     if (p->offset >= p->length || p->text[p->offset] != ']') return NULL;
                     p->offset++;
@@ -212,7 +253,7 @@ static char *dt_field(dt_parser *p, char **annotation)
     }
     for (size_t i = 0; key[i]; i++) {
         unsigned char c = (unsigned char)key[i];
-        if (!(isalnum(c) || c == '_' || c == '.' || c == '[' || c == ']' || c == '-')) {
+        if (!(isalnum(c) || c == '_' || c == '.' || c == '[' || c == ']' || c == '-' || (indexed[count] && c == '+'))) {
             free(key); return NULL;
         }
     }

@@ -91,7 +91,7 @@ int sh_mpkg_activation_ready(void) { return ready; }
 int sh_mpkg_activation_cancel(void) { cancels++; event('X'); return cancel_ok; }
 int sh_mpkg_activation_commit(char *error, size_t capacity)
 { (void)error; (void)capacity; commits++; event('K'); return commit_ok; }
-void sh_mpkg_report_error(const char *message) { assert(message && *message); reports++; }
+void sh_mpkg_report_error(sh_mpkg_problem problem, const char *message) { (void)problem; assert(message && *message); reports++; }
 int sh_package_map_plan_prepare_inventory(sh_package_map_plan *plan, const char *root, char *error, size_t capacity)
 { (void)error; (void)capacity; assert(plan == (void *)&plan_object && !strcmp(root, "test-root")); inventories++; event('I'); return inventory_ok; }
 static const char *expected_native;

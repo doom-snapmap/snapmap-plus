@@ -75,16 +75,11 @@ typedef struct rg_font_frame {
     int failed;
 } rg_font_frame;
 static __declspec(thread) rg_font_frame *g_font_frame;
-/* A cooked UI movie constructor holds its compiled plan while it resolves its
- * dictionary fonts (through the language resolver) and fixed GUI materials.
- * Only requests the plan binds to a different identity are prepared/routed. */
+/* Entered native movie frames borrow the exact prepublished complete plan.
+ * Resource aliases reach the original manager with unchanged native arguments. */
 typedef void *(*rg_swf_construct_fn)(void *swf, const char *name, void *parent, unsigned char flags);
-enum { RG_MOVIE_TARGETS = 64 };
 typedef struct rg_movie_frame {
     sh_package_consumer_hold hold;
-    const char *families[RG_MOVIE_TARGETS], *names[RG_MOVIE_TARGETS];
-    void *resources[RG_MOVIE_TARGETS];
-    size_t count;
     int failed;
 } rg_movie_frame;
 static __declspec(thread) rg_movie_frame *g_movie_frame;
@@ -93,6 +88,30 @@ static __declspec(thread) rg_movie_frame *g_movie_frame;
  * through the call; nested constructors always establish their own scope. */
 static __declspec(thread) sh_package_consumer_hold *g_request_hold;
 static rg_swf_construct_fn g_swf_construct;
+typedef void (*rg_swf_destroy_fn)(void *swf);
+typedef void *(*rg_swf_call_fn)(void *callback, void *out, void *object, void *parameters);
+typedef int (*rg_dictionary_index_fn)(void *dictionary, const char *key);
+static rg_swf_destroy_fn g_swf_destroy;
+static rg_swf_call_fn g_swf_precache_sound, g_swf_precache_material, g_swf_play_sound, g_swf_local_string;
+static rg_dictionary_index_fn g_dictionary_index;
+static void *g_movie_dictionary;
+static __declspec(thread) sh_package_consumer_hold *g_movie_string_hold;
+/* Stack tokens identify entered construction/destruction, never native objects
+ * retained after their positive destruction fence. Runtime owns prepublication
+ * records and all instance/frame counters; no native call runs under its lock. */
+typedef struct rg_movie_lifetime_frame {
+    struct rg_movie_lifetime_frame *parent;
+    void *swf;
+    sh_package_movie_hold *hold;
+    int ended;
+    struct rg_movie_lifetime_frame *entered_parent, *instance;
+} rg_movie_lifetime_frame;
+static __declspec(thread) rg_movie_lifetime_frame *g_movie_constructors, *g_movie_destructors;
+static __declspec(thread) rg_movie_lifetime_frame *g_movie_lifetimes;
+static const char *const g_movie_required[] = {
+    "SwfConstruct", "SwfDestroy", "SwfPrecacheSound", "SwfPrecacheFontFXMaterial",
+    "SwfPlaySound", "SwfGetLocalString", "LocalStringDictionaryIndex"
+};
 static volatile LONG g_movie_ready, g_movie_attempted;
 static rg_set_text_fn g_set_text;
 static rg_shader_write_fn g_shader_write;
@@ -101,6 +120,296 @@ static rg_parm_publish_fn g_parm_publish;
 static rg_parm_write_fn g_parm_write;
 static rg_buffer_name_fn g_buffer_name;
 static volatile LONG g_ready, g_attempted;
+static int rg_identity(void *resource, char type[128], char name[4096]);
+typedef struct rg_editor_layout {
+    const char *family;
+    size_t size;
+    size_t strings[9], lists[8];
+    unsigned string_count, list_count;
+} rg_editor_layout;
+typedef struct rg_editor_range { size_t first, last; } rg_editor_range;
+/* Exact non-owning stores in 1404f7270/1404f6ca0 and their paired embedded
+ * 1404f75d0/1404f7000 helper. Unwritten padding/bookkeeping stays in place.
+ * +3d1 is a masked store and is handled separately, preserving its high bits. */
+static const rg_editor_range g_editor_sedef_defaults[] = {
+    {0x68,0xa2},{0x1c8,0x1e0},{0x210,0x215},{0x218,0x23c},{0x270,0x2a4},
+    {0x2f0,0x2f1},{0x2f4,0x301},{0x302,0x304},{0x308,0x315},
+    {0x318,0x319},{0x31a,0x31c},{0x320,0x32d},{0x330,0x331},{0x332,0x334},{0x338,0x345},
+    {0x348,0x349},{0x34a,0x34c},{0x350,0x35d},{0x360,0x361},{0x362,0x364},{0x368,0x375},
+    {0x378,0x379},{0x37c,0x381},{0x388,0x389},{0x38c,0x39d},{0x3a0,0x3a9},
+    {0x3c8,0x3d1},{0x3d4,0x40c}
+};
+/* Paired R140 constructors/destructors, including embedded +1e0 ownership.
+ * Only idStr.data may point into its own inline +1c buffer (20 bytes).
+ * Both idStr constructors 1419fd040/1419ef2a0 set data=this+1c. Lists point to
+ * external arrays; their nested objects stay at their original addresses. */
+static const rg_editor_layout g_editor_layouts[] = {
+    {"snapeditorentitydef", 0x4a0,
+        {0xa8,0xd8,0x108,0x138,0x168,0x198,0x1e0,0x240,0x2c0},
+        {0x2a8,0x3b0,0x410,0x428,0x440,0x458,0x470,0x488},9,8},
+    {"snappropertyinspector_bitflag", 0xb0,{0x68},{0x98},1,1},
+    {"snappropertyinspector_blockingvolumerendermodel",0xf8,{0x88,0xb8},{0x68},2,1},
+    {"snappropertyinspector_whitelistencounterdecl",0x80,{0},{0x68},0,1},
+    {"snappropertyinspector_whitelistencounterdecllist",0x80,{0},{0x68},0,1}
+};
+typedef struct rg_editor_value {
+    struct rg_editor_value *next;
+    void *resource, *scratch, *manager, *name, *vtable;
+    const rg_editor_layout *layout;
+    unsigned char payload[0x4a0 - 0x68], parent[9], state_low;
+    /* state_low is owed back on rejection only after an actual reconstruct
+     * cleared it (rg_reconstruct_hook); direct reads never touch the header. */
+    int started, constructed, detached, restored, cleared, damaged, clearing, used, header_owed;
+    unsigned reading;
+} rg_editor_value;
+struct sh_resource_editor_state {
+    rg_editor_value *values;
+    int (*admitted)(void *);
+    void *context;
+    DWORD thread;
+    int failed, decision, damaged;
+    struct sh_resource_editor_state *quarantine_next;
+};
+static __declspec(thread) sh_resource_editor_state *g_editor_state;
+static __declspec(thread) sh_resource_editor_state *g_editor_quarantine;
+static __declspec(thread) int g_editor_damaged;
+#ifdef SH_RESOURCE_EDITOR_TESTING
+static unsigned g_editor_allocation_fault;
+#endif
+static void *rg_editor_alloc(size_t bytes)
+{
+#ifdef SH_RESOURCE_EDITOR_TESTING
+    if (g_editor_allocation_fault && !--g_editor_allocation_fault) return NULL;
+#endif
+    return calloc(1,bytes);
+}
+static const rg_editor_layout *rg_editor_layout_for(const char *family)
+{
+    for (size_t i = 0; i < sizeof(g_editor_layouts)/sizeof(g_editor_layouts[0]); i++)
+        if (!_stricmp(family,g_editor_layouts[i].family)) return g_editor_layouts+i;
+    return NULL;
+}
+static int rg_editor_owned(sh_resource_editor_state *state)
+{ return state && state == g_editor_state && state->thread == GetCurrentThreadId() &&
+    state->admitted && state->admitted(state->context); }
+static void rg_editor_relocate(unsigned char *field, const unsigned char *from)
+{
+    char *data; memcpy(&data, field+0x10, sizeof(data));
+    if (data == (const char *)from+0x1c) {
+        data = (char *)field+0x1c; memcpy(field+0x10,&data,sizeof(data));
+    }
+}
+static void rg_editor_swap(rg_editor_value *value)
+{
+    unsigned char saved[0x30], *live = value->resource, *scratch = value->scratch;
+    const rg_editor_layout *layout = value->layout;
+    for (unsigned i = 0; i < layout->string_count; i++) {
+        size_t at = layout->strings[i];
+        memcpy(saved,live+at,0x30); memcpy(live+at,scratch+at,0x30);
+        rg_editor_relocate(live+at,scratch+at);
+        memcpy(scratch+at,saved,0x30); rg_editor_relocate(scratch+at,live+at);
+    }
+    for (unsigned i = 0; i < layout->list_count; i++) {
+        size_t at = layout->lists[i];
+        memcpy(saved,live+at,0x18); memcpy(live+at,scratch+at,0x18); memcpy(scratch+at,saved,0x18);
+    }
+}
+static void rg_editor_defaults(rg_editor_value *value)
+{
+    unsigned char *live = value->resource, *fresh = value->scratch;
+    /* Inheriting-decl constructors 1417bc2f0/1417aee00 reset these nine
+     * bytes. Identity/source/native bookkeeping outside them is preserved. */
+    memcpy(live+0x58,fresh+0x58,9);
+    if (!_stricmp(value->layout->family,"snapeditorentitydef")) {
+        for (size_t i = 0; i < sizeof(g_editor_sedef_defaults)/sizeof(*g_editor_sedef_defaults); i++) {
+            rg_editor_range r = g_editor_sedef_defaults[i]; memcpy(live+r.first,fresh+r.first,r.last-r.first);
+        }
+        live[0x3d1] = (live[0x3d1] & 0xc0) | (fresh[0x3d1] & 0x3f);
+    } else if (!_stricmp(value->layout->family,"snappropertyinspector_blockingvolumerendermodel")) {
+        /* Exact model constructor stores 1404fd380/1404fcd70. */
+        memcpy(live+0x80,fresh+0x80,2); memcpy(live+0xe8,fresh+0xe8,0x10);
+    }
+}
+static void rg_editor_detach_borrowed(rg_editor_value *value)
+{
+    unsigned char *scratch = value->scratch;
+    for (unsigned i = 0; i < value->layout->list_count; i++) {
+        unsigned char *list = scratch + value->layout->lists[i];
+        /* Paired final destructors test the whole byte at idList+13, not
+         * logical count or its granularity bits. Modes 0/3/4 own capacity. */
+        if (list[0x13] != 0 && list[0x13] != 3 && list[0x13] != 4) memset(list,0,0x10);
+    }
+    for (unsigned i = 0; i < value->layout->string_count; i++) {
+        unsigned char *field = scratch + value->layout->strings[i];
+        uint32_t flags; void *data;
+        memcpy(&flags,field+0x18,4); memcpy(&data,field+0x10,8);
+        /* idStr 1419fd120/1419ef380 frees only ownership bit30. Detach
+         * external borrowed strings; neither they nor their owner are freed. */
+        if (data && data != field+0x1c && !(flags & 0x40000000u)) {
+            memset(field+0x10,0,8); memset(field+8,0,4); flags &= 0xc0000000u; memcpy(field+0x18,&flags,4);
+        }
+    }
+}
+static rg_editor_value *rg_editor_find(void *resource)
+{
+    if (!resource) return NULL;
+    for (rg_editor_value *v = g_editor_state ? g_editor_state->values : NULL; v; v = v->next)
+        if (v->resource == resource) return v;
+    return NULL;
+}
+static int rg_editor_prepare(void *resource, int reset)
+{
+    sh_resource_editor_state *state = g_editor_state;
+    rg_editor_value *value = NULL;
+    char family[128], name[4096];
+    const rg_editor_layout *layout;
+    if (!state) return 1;
+    if (!rg_identity(resource,family,name) || !(layout = rg_editor_layout_for(family))) return 1;
+    if (!rg_editor_owned(state) || state->failed) { state->failed = 1; return 0; }
+    rg_editor_value *prior = rg_editor_find(resource);
+    if (prior && (!prior->detached || prior->restored)) { state->failed = 1; return 0; }
+    if (prior && !reset) return 1;
+    value = rg_editor_alloc(sizeof(*value));
+    if (!value || !(value->scratch = rg_editor_alloc(layout->size))) {
+        free(value); state->failed = 1; return 0;
+    }
+    value->resource = resource; value->layout = layout;
+    __try {
+        unsigned char *live = resource;
+        value->vtable = *(void **)live; value->name = *(void **)(live+8);
+        value->manager = *(void **)(live+0x10);
+        if (!prior) {
+            memcpy(value->payload,live+0x68,layout->size-0x68);
+            memcpy(value->parent,live+0x58,9);
+        }
+        /* ResourceReconstruct 1417ffdb0/1417f2700 obtains this info from
+         * object virtual+10 and invokes its in-place constructor at+28.
+         * Construct an unpublished scratch; never destruct the live identity. */
+        void *info = ((void *(*)(void *))(*(void ***)resource)[2])(resource);
+        if (!info) __leave;
+        value->next = state->values; state->values = value; value->started = 1;
+        ((void (*)(void *,void *))(*(void ***)info)[5])(info,value->scratch);
+        value->constructed = 1;
+        if (*(void **)value->scratch != value->vtable) { value->damaged = state->damaged = 1; __leave; }
+        rg_editor_swap(value); rg_editor_defaults(value);
+        if (prior) {
+            /* This scratch now owns the intermediate candidate. Keep it apart
+             * from the first scratch, which still owns the original payload.
+             * Final End clears both, after restoring the original on reject. */
+            value->resource = NULL; prior->used = 0;
+        } else value->detached = 1;
+        return 1;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { value->damaged = state->damaged = 1; }
+    if (!value->started) { free(value->scratch); free(value); }
+    state->failed = 1; return 0;
+}
+static int rg_editor_read_begin(void *resource)
+{
+    rg_editor_value *value = rg_editor_find(resource);
+    int reset = value && value->used && !value->reading;
+    if (!rg_editor_prepare(resource,reset)) return 0;
+    if ((value = rg_editor_find(resource))) { value->used = 1; value->reading++; }
+    return 1;
+}
+static void rg_editor_read_end(void *resource)
+{
+    rg_editor_value *value = rg_editor_find(resource);
+    if (value && value->reading) value->reading--;
+}
+static int rg_editor_selected(void *resource)
+{
+    char family[128], name[4096];
+    return g_editor_state && rg_identity(resource,family,name) && rg_editor_layout_for(family);
+}
+sh_resource_editor_state *sh_resource_graph_native_editor_state_begin(
+    int (*admitted)(void *), void *context, char *error, size_t capacity)
+{
+    sh_resource_editor_state *state;
+    if (error && capacity) *error = 0;
+    if (g_editor_state || g_editor_damaged || !admitted || !admitted(context) ||
+        !(state = rg_editor_alloc(sizeof(*state)))) {
+        if (error && capacity) snprintf(error,capacity,"editor storage transaction could not be admitted");
+        return NULL;
+    }
+    state->admitted = admitted; state->context = context; state->thread = GetCurrentThreadId(); state->decision = -1;
+    g_editor_state = state; return state;
+}
+int sh_resource_graph_native_editor_state_ok(sh_resource_editor_state *state)
+{ return rg_editor_owned(state) && !state->failed && !state->damaged; }
+int sh_resource_graph_native_editor_state_ready(sh_resource_editor_state *state)
+{
+    if (!sh_resource_graph_native_editor_state_ok(state)) return 0;
+    __try {
+        for (rg_editor_value *v=state->values;v;v=v->next) if (v->detached) {
+            unsigned char *live=v->resource;
+            if (*(void **)live!=v->vtable || *(void **)(live+8)!=v->name || *(void **)(live+0x10)!=v->manager)
+                return 0;
+        }
+        return 1;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { state->failed=state->damaged=1; return 0; }
+}
+int sh_resource_graph_native_editor_state_end(sh_resource_editor_state **owned,
+    int accepted, int *committed, char *error, size_t capacity)
+{
+    sh_resource_editor_state *state = owned ? *owned : NULL;
+    int ok = 1, commit;
+    if (committed) *committed = 0;
+    if (!owned) return -1;
+    if (!state) { if (committed) *committed = accepted != 0; return 1; }
+    if (!rg_editor_owned(state)) goto owed;
+    commit = accepted && !state->failed;
+    if (state->decision >= 0 && state->decision != commit) goto owed;
+    /* Restore every object before attempting any destructor. A cleanup fault
+     * must not leave a mixture of prior and candidate published payloads. */
+    for (rg_editor_value *value = state->values; value; value = value->next) {
+        __try {
+            unsigned char *live = value->resource;
+            if (!value->detached) continue;
+            if (*(void **)live != value->vtable || *(void **)(live+8) != value->name ||
+                *(void **)(live+0x10) != value->manager) { ok = 0; __leave; }
+            if (!commit && value->detached && !value->restored) {
+                rg_editor_swap(value);
+                memcpy(live+0x68,value->payload,value->layout->size-0x68);
+                memcpy(live+0x58,value->parent,9);
+                if (value->header_owed) live[0x2c] = (live[0x2c] & 0xf0) | value->state_low;
+                value->restored = 1;
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) { state->damaged = 1; ok = 0; }
+    }
+    if (state->damaged) goto damaged;
+    if (!ok) goto owed;
+    state->decision = commit;
+    if (committed) *committed = commit;
+    for (rg_editor_value *value = state->values; value; value = value->next) {
+        if (value->cleared) continue;
+        if (!value->constructed || value->clearing || value->damaged) goto damaged;
+        __try {
+            rg_editor_detach_borrowed(value); value->clearing = 1;
+            ((void (*)(void *,unsigned))(*(void ***)value->scratch)[0])(value->scratch,0);
+            value->cleared = 1;
+        } __except (EXCEPTION_EXECUTE_HANDLER) { value->damaged = 1; goto damaged; }
+    }
+    while (state->values) {
+        rg_editor_value *value = state->values; state->values = value->next;
+        free(value->scratch); free(value);
+    }
+    g_editor_state = NULL; *owned = NULL; free(state); return 1;
+owed:
+    if (error && capacity) snprintf(error,capacity,"editor native storage restoration or cleanup remains owed");
+    return 0;
+damaged:
+    /* Match map_native's no-replay rule. A destructor fault may follow a free;
+     * an interrupted constructor has no complete-object cleanup contract. Keep
+     * the damaged workspaces for diagnostics, revoke the active scope, and
+     * refuse further native editor transactions. Never retry their destructor. */
+    state->damaged = 1; g_editor_damaged = 1;
+    if (committed) *committed = state->decision == 1;
+    state->admitted = NULL; state->context = NULL;
+    state->quarantine_next = g_editor_quarantine; g_editor_quarantine = state;
+    g_editor_state = NULL; *owned = NULL;
+    if (error && capacity) snprintf(error,capacity,"native editor storage was damaged; cleanup must not be replayed");
+    return -1;
+}
 /* These workspaces contain native compiler-owned allocations, never a copy of
  * a live resource. Paired constructors/destructors own every nested allocation. */
 typedef uintptr_t (*rg_shader_worker_fn)(void *, void *, const char *, const void *, void *, void *, void *, void *);
@@ -180,6 +489,8 @@ int sh_resource_graph_native_signature(const char *name)
     size_t i;
     if (name) for (i = 0; i < sizeof(g_required) / sizeof(g_required[0]); i++)
         if (!strcmp(name, g_required[i])) return 1;
+    if (name) for (i = 0; i < sizeof(g_movie_required) / sizeof(g_movie_required[0]); i++)
+        if (!strcmp(name, g_movie_required[i])) return 1;
     return 0;
 }
 
@@ -213,6 +524,12 @@ static const char *rg_request_name(void *manager, const char *name)
     if (!g_request_hold || !g_request_hold->binding || !manager || !name) return name;
     __try {
         const char *family = *(const char **)((unsigned char *)manager + 8);
+        if (g_movie_frame && g_request_hold == &g_movie_frame->hold) {
+            const char *replacement = NULL;
+            int route = sh_package_movie_route(g_request_hold->binding, family, name, &replacement);
+            if (route == 1) return replacement;
+            if (route < 0) g_movie_frame->failed = 1; /* Rejected by prepublication validation. */
+        }
         const char *bound = sh_package_consumer_request(g_request_hold->binding, family, name);
         return bound ? bound : name;
     } __except (EXCEPTION_EXECUTE_HANDLER) { return name; }
@@ -554,6 +871,29 @@ static void rg_load_hook(void *resource)
 static void rg_reconstruct_hook(void *resource)
 {
     sh_package_shader_receipt_invalidate((uintptr_t)resource);
+    if (g_editor_state) {
+        char family[128], name[4096];
+        if (rg_identity(resource,family,name) && rg_editor_layout_for(family)) {
+            /* Only the admitted families replace teardown with fresh owning
+             * members. Their existing parent/default Parse still runs. */
+            if (!rg_editor_prepare(resource,1)) { g_editor_state->failed = 1; return; }
+            /* idResource constructors 1417feac0/1417f1410 clear all four state
+             * bits, and a successful Read does not clear an old DEFAULTED bit
+             * itself. Only this reconstruction carries that constructor
+             * contract; direct Read/Parse preparation keeps its caller's
+             * state. The first reset latches what it clears, so a rejected
+             * transaction restores it; later resets keep that snapshot. */
+            rg_editor_value *original = rg_editor_find(resource);
+            __try {
+                unsigned char *live = resource;
+                if (original && !original->header_owed) {
+                    original->state_low = live[0x2c] & 0x0f; original->header_owed = 1;
+                }
+                live[0x2c] &= 0xf0;
+            } __except (EXCEPTION_EXECUTE_HANDLER) { g_editor_state->failed = g_editor_state->damaged = 1; }
+            return;
+        }
+    }
     g_reconstruct(resource);
 }
 static void *rg_lookup_hook(void *manager, const char *name)
@@ -583,10 +923,19 @@ static unsigned int rg_parse_hook(void *resource, unsigned char read_source, voi
     sh_package_shader_receipt_frame receipt;
     unsigned int result = 1;
     int tracked = 0, observing = InterlockedCompareExchange(&g_ready, 0, 0) != 0;
+    int editor_started = 0;
     rg_font_frame *font_parent = g_font_frame;
     rg_movie_frame *movie_parent = g_movie_frame;
     sh_package_consumer_hold requests = {0}, *request_parent = g_request_hold;
-    if (g_shader_state && !rg_fixed_capture(resource)) { g_shader_state->failed = 1; return 1; }
+    if (rg_editor_selected(resource)) {
+        if (!rg_editor_read_begin(resource)) return 1;
+        editor_started = 1;
+    }
+    if (g_shader_state && !rg_fixed_capture(resource)) {
+        g_shader_state->failed = 1;
+        if (editor_started) rg_editor_read_end(resource);
+        return 1;
+    }
     if (observing) {
         char type[128], name[4096]; int identified = rg_identity(resource, type, name);
         tracked = rg_begin_source(resource, &frame);
@@ -599,6 +948,11 @@ static unsigned int rg_parse_hook(void *resource, unsigned char read_source, voi
         result = g_parse(resource, read_source, error_text); if (!result) rg_shader_capture(resource);
     }
     __finally {
+        if (editor_started && g_editor_state) {
+            if (result || AbnormalTermination()) g_editor_state->failed = 1;
+            if (AbnormalTermination()) g_editor_state->damaged = 1;
+            if (editor_started) rg_editor_read_end(resource);
+        }
         g_font_frame = font_parent; g_movie_frame = movie_parent;
         g_request_hold = request_parent; sh_package_runtime_consumer_release(&requests);
         int restored = rg_fixed_finish(resource, result);
@@ -621,11 +975,19 @@ static unsigned int rg_read_hook(void *resource, void *error_text)
     sh_package_shader_receipt_frame receipt;
     unsigned int result = 1;
     int tracked = 0, observing = InterlockedCompareExchange(&g_ready, 0, 0) != 0;
-    int restored = 0;
+    int restored = 0, editor_started = 0;
     rg_font_frame *font_parent = g_font_frame;
     rg_movie_frame *movie_parent = g_movie_frame;
     sh_package_consumer_hold requests = {0}, *request_parent = g_request_hold;
-    if (g_shader_state && !rg_fixed_capture(resource)) { g_shader_state->failed = 1; return 0; }
+    if (rg_editor_selected(resource) && rg_read_has_source(resource)) {
+        if (!rg_editor_read_begin(resource)) return 0;
+        editor_started = 1;
+    }
+    if (g_shader_state && !rg_fixed_capture(resource)) {
+        g_shader_state->failed = 1;
+        if (editor_started) rg_editor_read_end(resource);
+        return 0;
+    }
     if (observing) {
         char type[128], name[4096]; int source = rg_read_has_source(resource);
         int identified = source && rg_identity(resource, type, name);
@@ -640,6 +1002,11 @@ static unsigned int rg_read_hook(void *resource, void *error_text)
         result = g_read(resource, error_text); if (!result) rg_shader_capture(resource);
     }
     __finally {
+        if (editor_started && g_editor_state) {
+            if (result || AbnormalTermination()) g_editor_state->failed = 1;
+            if (AbnormalTermination()) g_editor_state->damaged = 1;
+            if (editor_started) rg_editor_read_end(resource);
+        }
         g_font_frame = font_parent; g_movie_frame = movie_parent;
         g_request_hold = request_parent; sh_package_runtime_consumer_release(&requests);
         restored = rg_fixed_finish(resource, result);
@@ -649,6 +1016,9 @@ static unsigned int rg_read_hook(void *resource, void *error_text)
     /* GenericLoad's zero branch performs only successful-read bookkeeping.
      * A restored preexisting fixed object must not enter its reconstruct/default
      * fallback. The independent scope/receipt failure still aborts preparation. */
+    /* Suppress GenericLoad's destructive fallback only in the poisoned
+     * admitted editor transaction; its separate batch status rejects it. */
+    if (rg_editor_selected(resource) && g_editor_state->failed) return 0;
     return restored == 1 ? 0 : result;
 }
 static int rg_font_route(void *manager, const char *name, void **resource)
@@ -747,100 +1117,183 @@ static void *rg_manager(const char *family)
     } __except (EXCEPTION_EXECUTE_HANDLER) { }
     return NULL;
 }
-/* Slots are movie/<font|material>/<native request>. Only a request bound to a
- * different identity is prepared; an original binding keeps native lookup. */
-static int rg_movie_prepare(rg_movie_frame *frame)
+/* Reject contradictory/unsupported metadata before provider publication. Native
+ * preparation of these dependencies belongs to the existing admitted batch.
+ * Constructor and Call entry consume this immutable plan without allocation. */
+int sh_resource_graph_native_movie_plan_valid(const sh_package_consumer *owner)
+{ return sh_package_movie_plan_valid(owner); }
+static void rg_movie_context(rg_movie_frame *frame, const sh_package_movie_hold *hold)
 {
-    const sh_package_consumer *owner = frame->hold.binding;
-    for (size_t i = 0; i < owner->count; i++) {
-        const sh_package_consumer_target *target = owner->targets + i;
-        const char *request = NULL, *family = NULL;
-        if (!strncmp(target->slot, "movie/font/", 11)) { family = "font"; request = target->slot + 11; }
-        else if (!strncmp(target->slot, "movie/material/", 15)) { family = "material"; request = target->slot + 15; }
-        else return 0;
-        if (!target->family || _stricmp(target->family, family) || !target->name || !*target->name) return 0;
-        if (!strcmp(target->name, request)) continue;
-        if (frame->count == RG_MOVIE_TARGETS) return 0;
-        void *manager = rg_manager(family);
-        if (!manager || !g_materialize) return 0;
-        /* No movie plan is active while its private dependency constructs. */
-        void *resource = g_materialize(manager, target->name, 0, 0);
-        if (!resource || *(void **)((unsigned char *)resource + 0x18) ||
-            (*(unsigned char *)((unsigned char *)resource + 0x2c) & 7)) return 0;
-        sh_resource_resident_touch(resource);
-        if (sh_resource_graph_recording()) rg_returned(resource);
-        frame->families[frame->count] = family; frame->names[frame->count] = target->name;
-        frame->resources[frame->count++] = resource;
-    }
-    return 1;
+    frame->hold.binding = hold->binding; /* Borrowed only through this entered frame. */
+    g_movie_frame = hold->binding ? frame : NULL;
+    g_request_hold = hold->binding ? &frame->hold : NULL;
+    g_font_frame = NULL; g_movie_string_hold = NULL;
 }
-static int rg_movie_route(void *manager, const char *name, void **resource)
+static rg_movie_lifetime_frame *rg_movie_destructor_instance(rg_movie_lifetime_frame *frame)
 {
-    rg_movie_frame *frame = g_movie_frame; *resource = NULL;
-    if (!frame || !frame->hold.binding) return 0;
-    __try {
-        const char *family = manager ? *(const char **)((unsigned char *)manager + 8) : NULL;
-        const char *target = NULL;
-        if (!family) return 0;
-        int route = sh_package_movie_route(frame->hold.binding, family, name, &target);
-        if (route == 1) for (size_t i = 0; i < frame->count; i++)
-            if (!_stricmp(frame->families[i], family) && !strcmp(frame->names[i], target)) {
-                *resource = frame->resources[i]; return 1;
-            }
-        if (!route) return 0;
-    } __except (EXCEPTION_EXECUTE_HANDLER) { }
-    /* A contradictory or unprepared binding keeps native lookup and is reported. */
-    frame->failed = 1; return 0;
+    for (rg_movie_lifetime_frame *f = g_movie_lifetimes; f; f = f->entered_parent)
+        if (f->swf == frame->swf && f->hold->token == frame->hold->token) {
+            /* A filename token can serve several incarnations. The nearest
+             * ended incarnation is a reuse boundary, never an end-once owner
+             * for a new instance at that same address and with that same name. */
+            return f->instance->ended ? frame : f->instance;
+        }
+    return frame;
+}
+static void rg_movie_end_once(rg_movie_lifetime_frame *frame)
+{
+    if (!frame->instance->ended && frame->hold->token) {
+        frame->instance->ended = 1;
+        sh_package_runtime_movie_end_instance(frame->hold);
+    }
 }
 static void *rg_swf_construct_hook(void *swf, const char *name, void *parent, unsigned char flags)
 {
-    if (!InterlockedCompareExchange(&g_movie_ready, 0, 0)) return g_swf_construct(swf, name, parent, flags);
     rg_movie_frame frame = {0}, *movie_parent = g_movie_frame;
     rg_font_frame *font_parent = g_font_frame;
-    sh_package_consumer_hold *request_parent = g_request_hold;
-    sh_package_movie_names names;
-    void *result = NULL; int prepared = 0, compiled = 0;
+    sh_package_consumer_hold *request_parent = g_request_hold, *string_parent = g_movie_string_hold;
+    sh_package_movie_hold hold = {0}; sh_package_movie_names names;
+    rg_movie_lifetime_frame lifetime = {g_movie_constructors, swf, &hold, 0, g_movie_lifetimes, NULL};
+    lifetime.instance = &lifetime; /* This begin owns one distinct instance obligation. */
+    void *result = NULL; int completed = 0;
     __try {
-        g_movie_frame = NULL; g_font_frame = NULL; g_request_hold = NULL; /* Nested movies never inherit a plan. */
-        if (!name || sh_package_movie_names_for_consumer(name, strlen(name), &names) != 1 ||
-            sh_package_runtime_consumer_acquire("file", names.movie, &frame.hold) != 1) {
-            result = g_swf_construct(swf, name, parent, flags); __leave;
-        }
-        compiled = 1;
-        prepared = rg_movie_prepare(&frame);
-        if (prepared && frame.count) g_movie_frame = &frame;
-        result = g_swf_construct(swf, name, parent, flags);
+        rg_movie_context(&frame, &hold); /* Stock/nested movies never inherit another plan. */
+        if (InterlockedCompareExchange(&g_movie_ready, 0, 0) && name &&
+            sh_package_movie_names_for_consumer(name, strlen(name), &names) == 1)
+            sh_package_runtime_movie_begin(names.movie, &hold);
+        /* begin is allocation-free: 0 means stock, 1 a prepared immutable plan.
+         * An unprepared compiled name is a publication bug, not a fallback. */
+        rg_movie_context(&frame, &hold); g_movie_constructors = g_movie_lifetimes = &lifetime;
+        result = g_swf_construct(swf, name, parent, flags); completed = 1;
     } __finally {
-        g_movie_frame = movie_parent; g_font_frame = font_parent; g_request_hold = request_parent;
-        sh_package_runtime_consumer_release(&frame.hold);
+        /* Original constructor unwinding reaches this frame after its native
+         * subobject cleanup. A reentrant whole destructor may already end it. */
+        if (!completed) rg_movie_end_once(&lifetime);
+        g_movie_constructors = lifetime.parent;
+        g_movie_lifetimes = lifetime.entered_parent;
+        g_movie_frame = movie_parent; g_font_frame = font_parent;
+        g_request_hold = request_parent; g_movie_string_hold = string_parent;
+        sh_package_runtime_movie_release(&hold);
     }
-    /* A constructor cannot fail; an unbindable plan keeps the native requests. */
-    if (compiled && (!prepared || frame.failed))
-        backend_log("package movie construction kept native font/material lookups: its compiled plan could not be prepared");
     return result;
+}
+static void *rg_swf_call(rg_swf_call_fn original, int local_string,
+    void *callback, void *out, void *object, void *parameters)
+{
+    rg_movie_frame frame = {0}, *movie_parent = g_movie_frame;
+    rg_font_frame *font_parent = g_font_frame;
+    sh_package_consumer_hold *request_parent = g_request_hold, *string_parent = g_movie_string_hold;
+    sh_package_movie_hold hold = {0}; void *result = NULL;
+    __try {
+        rg_movie_context(&frame, &hold);
+        if (InterlockedCompareExchange(&g_movie_ready, 0, 0)) {
+            /* Paired embedded Call objects: +c0 is owner; owner+0 is a native
+             * interned .bswf filename. Read only during legal native lifetime. */
+            void *owner = *(void **)((unsigned char *)callback + 0xc0);
+            if (owner) sh_package_runtime_movie_borrow(*(const char **)owner, &hold);
+        }
+        rg_movie_context(&frame, &hold);
+        if (local_string && hold.binding) g_movie_string_hold = &frame.hold;
+        result = original(callback, out, object, parameters);
+    } __finally {
+        g_movie_frame = movie_parent; g_font_frame = font_parent;
+        g_request_hold = request_parent; g_movie_string_hold = string_parent;
+        sh_package_runtime_movie_release(&hold);
+    }
+    return result;
+}
+static void *rg_swf_precache_sound_hook(void *c, void *o, void *t, void *p)
+{ return rg_swf_call(g_swf_precache_sound, 0, c, o, t, p); }
+static void *rg_swf_precache_material_hook(void *c, void *o, void *t, void *p)
+{ return rg_swf_call(g_swf_precache_material, 0, c, o, t, p); }
+static void *rg_swf_play_sound_hook(void *c, void *o, void *t, void *p)
+{ return rg_swf_call(g_swf_play_sound, 0, c, o, t, p); }
+static void *rg_swf_local_string_hook(void *c, void *o, void *t, void *p)
+{ return rg_swf_call(g_swf_local_string, 1, c, o, t, p); }
+static int rg_dictionary_index_hook(void *dictionary, const char *key)
+{
+    if (g_movie_string_hold && g_request_hold == g_movie_string_hold &&
+        dictionary == g_movie_dictionary) {
+        const char *replacement = NULL;
+        int route = sh_package_movie_string_route(g_movie_string_hold->binding, key, &replacement);
+        if (route == 1) key = replacement;
+        else if (route < 0 && g_movie_frame) g_movie_frame->failed = 1;
+    }
+    /* Original GetString keeps its original key for disabled/missing fallback.
+     * Only this index lookup sees a private key; native text/result copies stay native. */
+    return g_dictionary_index(dictionary, key);
+}
+static void rg_swf_destroy_hook(void *swf)
+{
+    rg_movie_frame frame = {0}, *movie_parent = g_movie_frame;
+    rg_font_frame *font_parent = g_font_frame;
+    sh_package_consumer_hold *request_parent = g_request_hold, *string_parent = g_movie_string_hold;
+    sh_package_movie_hold hold = {0};
+    rg_movie_lifetime_frame lifetime = {g_movie_destructors, swf, &hold, 0, g_movie_lifetimes, NULL};
+    lifetime.instance = &lifetime;
+    int completed = 0;
+    __try {
+        rg_movie_context(&frame, &hold);
+        if (InterlockedCompareExchange(&g_movie_ready, 0, 0))
+            sh_package_runtime_movie_borrow(*(const char **)swf, &hold);
+        lifetime.instance = rg_movie_destructor_instance(&lifetime);
+        rg_movie_context(&frame, &hold); g_movie_destructors = g_movie_lifetimes = &lifetime;
+        g_swf_destroy(swf); completed = 1;
+    } __finally {
+        /* Never read swf after original returns. Reentrant callback frames
+         * retain this exact token; runtime waits for their frame count as well. */
+        if (completed) rg_movie_end_once(&lifetime);
+        g_movie_destructors = lifetime.parent;
+        g_movie_lifetimes = lifetime.entered_parent;
+        g_movie_frame = movie_parent; g_font_frame = font_parent;
+        g_request_hold = request_parent; g_movie_string_hold = string_parent;
+        sh_package_runtime_movie_release(&hold);
+    }
+}
+static void *rg_clean(const sig_result *results, size_t count, const char *name);
+static void *rg_movie_dictionary_for(const unsigned char *call)
+{
+    __try {
+        /* Paired getLocalString+59: LEA RCX,[rip+disp32]; next instruction
+         * +60 is the native GetString CALL. This is a data decode, not a hook. */
+        if (!call || call[0x59] != 0x48 || call[0x5a] != 0x8d || call[0x5b] != 0x0d || call[0x60] != 0xe8) return NULL;
+        int32_t displacement; memcpy(&displacement, call + 0x5c, sizeof(displacement));
+        return (void *)(call + 0x60 + displacement);
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return NULL; }
 }
 static void rg_movie_install(const sig_result *results, size_t count)
 {
-    void *construct = NULL;
+    void *targets[7], *tramps[7] = {0};
+    void *detours[7] = {rg_swf_construct_hook, rg_swf_destroy_hook, rg_swf_precache_sound_hook,
+        rg_swf_precache_material_hook, rg_swf_play_sound_hook, rg_swf_local_string_hook, rg_dictionary_index_hook};
+    void **originals[7] = {(void **)&g_swf_construct, (void **)&g_swf_destroy, (void **)&g_swf_precache_sound,
+        (void **)&g_swf_precache_material, (void **)&g_swf_play_sound, (void **)&g_swf_local_string, (void **)&g_dictionary_index};
+    const size_t stolen[7] = {20, 15, 15, 15, 20, 19, 15};
     if (InterlockedCompareExchange(&g_movie_ready, 0, 0) || !sh_resource_graph_native_ready()) return;
-    for (size_t i = 0; results && i < count; i++) if (results[i].name && !strcmp(results[i].name, "SwfConstruct")) {
-        if (results[i].status != SIG_OK || !results[i].addr) return;
-        construct = (void *)results[i].addr;
+    for (size_t i = 0; i < 7; i++) if (!(targets[i] = rg_clean(results, count, g_movie_required[i]))) return;
+    void *dictionary = rg_movie_dictionary_for(targets[5]); if (!dictionary) return;
+    if (InterlockedCompareExchange(&g_movie_attempted, 1, 0)) return;
+    /* The existing startup installer owns target quiescence. Publish ALL
+     * call-throughs before any commit. Roll back every owned hook on failure. */
+    for (size_t i = 0; i < 7; i++) {
+        tramps[i] = hook_prepare(targets[i], detours[i], stolen[i]);
+        if (!tramps[i]) goto failed;
+        *originals[i] = tramps[i];
     }
-    if (!construct || InterlockedCompareExchange(&g_movie_attempted, 1, 0)) return;
-    /* Seven pushes and the frame LEA: 20 position-independent bytes, identical
-     * in both retail renderers. */
-    g_swf_construct = (rg_swf_construct_fn)hook_prepare(construct, rg_swf_construct_hook, 20);
-    if (!g_swf_construct || hook_commit((void *)g_swf_construct) != B2_PATCH_OK) {
-        backend_log("package movie routing unavailable: constructor hook did not install"); return;
-    }
-    InterlockedExchange(&g_movie_ready, 1);
+    g_movie_dictionary = dictionary;
+    for (size_t i = 0; i < 7; i++) if (hook_commit(tramps[i]) != B2_PATCH_OK) goto failed;
+    InterlockedExchange(&g_movie_ready, 1); return;
+failed:
+    for (size_t i = 7; i; i--) if (tramps[i - 1] && hook_unpatch(tramps[i - 1])) *originals[i - 1] = NULL;
+    /* Failed removals keep transparent call-throughs and owned trampolines;
+     * readiness stays false and no compiled movie is admitted through this route. */
+    backend_log("package movie routing unavailable: complete callback/lifetime hooks did not install");
 }
 static void *rg_optional_material_hook(void *manager, const char *name, unsigned char create_default)
 {
     void *resource;
-    if (!rg_font_route(manager, name, &resource) && !rg_movie_route(manager, name, &resource))
-        return g_optional_material(manager, name, create_default);
+    if (!rg_font_route(manager, name, &resource))
+        return g_optional_material(manager, rg_request_name(manager, name), create_default);
     sh_resource_resident_touch(resource);
     if (sh_resource_graph_recording()) rg_returned(resource);
     return resource;
@@ -850,7 +1303,7 @@ static void *rg_materialize_hook(void *manager, const char *name, unsigned char 
     int handled = 0; void *probe = rg_cook_lookup(manager, name, &handled);
     if (handled) return probe;
     void *resource;
-    if (!rg_font_route(manager, name, &resource) && !rg_movie_route(manager, name, &resource))
+    if (!rg_font_route(manager, name, &resource))
         resource = g_materialize(manager, rg_request_name(manager, name), create_default, flags);
     sh_resource_resident_touch(resource);
     if (sh_resource_graph_recording()) rg_returned(resource);

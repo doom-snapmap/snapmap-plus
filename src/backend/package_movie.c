@@ -173,3 +173,91 @@ int sh_package_movie_route(const sh_package_consumer *owner, const char *family,
     if (!strcmp(target->name, normalized)) return 0;
     *replacement = target->name; return 1;
 }
+
+int sh_package_movie_plan_valid(const sh_package_consumer *owner)
+{
+    sh_package_movie_names names;
+    if (!owner || !sh_package_movie_owner(owner->family, owner->name) ||
+        sh_package_movie_names_for_path(owner->name, &names) != 1 || strcmp(names.movie, owner->name) ||
+        (owner->count && !owner->targets)) return 0;
+    for (size_t i = 0; i < owner->count; i++) {
+        const sh_package_consumer_target *target = owner->targets + i;
+        const char *family = NULL, *request = NULL;
+        if (!target->slot || !target->family || !target->name || !*target->name) return 0;
+        if (!strncmp(target->slot, "movie/font/", 11)) { family = "font"; request = target->slot + 11; }
+        else if (!strncmp(target->slot, "movie/material/", 15)) { family = "material"; request = target->slot + 15; }
+        else if (!strncmp(target->slot, "request/sound/", 14)) { family = "sound"; request = target->slot + 14; }
+        else if (!strncmp(target->slot, "request/material/", 17)) { family = "material"; request = target->slot + 17; }
+        else if (!strncmp(target->slot, "movie/string/", 13)) { family = "string"; request = target->slot + 13; }
+        else return 0;
+        if (!*request || strcmp(family, target->family)) return 0;
+        /* All captured request identities are canonical. Strings fold ASCII
+         * case only, so slash, backslash and non-ASCII bytes remain distinct. */
+        if (!strcmp(family, "string")) {
+            for (const unsigned char *p = (const unsigned char *)request; *p; p++)
+                if (*p >= 'A' && *p <= 'Z') return 0;
+        } else {
+            if (*request == '/') return 0;
+            for (const unsigned char *p = (const unsigned char *)request; *p; p++)
+                if (*p == '\\' || (*p >= 'A' && *p <= 'Z')) return 0;
+        }
+        for (size_t j = 0; j < i; j++) if (!strcmp(owner->targets[j].slot, target->slot) &&
+            (strcmp(owner->targets[j].family, target->family) || strcmp(owner->targets[j].name, target->name))) return 0;
+    }
+    return 1;
+}
+int sh_package_movie_plan_native(const sh_package_consumer *owner)
+{
+    static const struct { const char *slot, *family; } native[] = {
+        {"movie/font/", "font"}, {"movie/material/", "material"},
+        {"request/sound/", "sound"}, {"request/material/", "material"}};
+    if (!owner || (owner->count && !owner->targets)) return 0;
+    for (size_t i = 0; i < owner->count; i++) {
+        const sh_package_consumer_target *target = owner->targets + i;
+        size_t k, n = 0;
+        if (!target->slot || !target->family || !target->name) return 0;
+        for (k = 0; k < sizeof(native) / sizeof(*native); k++)
+            if (!strncmp(target->slot, native[k].slot, n = strlen(native[k].slot))) break;
+        if (k == sizeof(native) / sizeof(*native) || strcmp(target->family, native[k].family) ||
+            strcmp(target->name, target->slot + n)) return 0;
+    }
+    return 1;
+}
+char *sh_package_movie_string_slot(const char *key)
+{
+    static const char prefix[] = "movie/string/";
+    size_t n = key ? strlen(key) : 0;
+    char *slot = n <= SIZE_MAX - sizeof(prefix) ? malloc(n + sizeof(prefix)) : NULL;
+    if (slot) {
+        memcpy(slot, prefix, sizeof(prefix) - 1);
+        for (size_t i = 0; i < n; i++) {
+            unsigned char c = (unsigned char)key[i];
+            slot[sizeof(prefix) - 1 + i] = c >= 'A' && c <= 'Z' ? (char)(c + 32) : (char)c;
+        }
+        slot[n + sizeof(prefix) - 1] = 0;
+    }
+    return slot;
+}
+int sh_package_movie_string_route(const sh_package_consumer *owner,
+    const char *key, const char **replacement)
+{
+    if (replacement) *replacement = NULL;
+    if (!key || !replacement) return -1;
+    if (!owner || !sh_package_movie_owner(owner->family, owner->name)) return 0;
+    for (size_t i = 0; i < owner->count; i++) {
+        const sh_package_consumer_target *target = owner->targets + i;
+        if (!strncmp(target->slot, "movie/string/", 13)) {
+            const char *native = target->slot + 13, *request = key;
+            while (*native && *request) {
+                unsigned char c = (unsigned char)*request;
+                if ((unsigned char)*native != (c >= 'A' && c <= 'Z' ? c + 32 : c)) break;
+                native++; request++;
+            }
+            if (*native || *request) continue;
+            if (!target->family || strcmp(target->family, "string") || !target->name || !*target->name) return -1;
+            if (!strcmp(target->name, key)) return 0;
+            *replacement = target->name; return 1;
+        }
+    }
+    return 0;
+}

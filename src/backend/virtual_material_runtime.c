@@ -162,32 +162,52 @@ static int vmr_private(const sh_virtual_material_view *view)
     for (size_t i = 0; view && i < view->count; i++) if (view->entries[i].pages) return 1;
     return 0;
 }
-int sh_virtual_material_runtime_publish(sh_virtual_material_view *candidate,
-    sh_virtual_material_view **previous, char *error, size_t capacity)
+static int vmr_admissible(sh_virtual_material_view *candidate, char *error, size_t capacity)
 {
-    int ok = 0;
-    if (error && capacity) error[0] = 0;
-    if (!previous) return vmr_error(error, capacity, "missing virtual material rollback handle");
     if (candidate && candidate->count && !sh_virtual_material_runtime_ready())
         return vmr_error(error, capacity, "native virtual material lookup is unavailable");
     if (vmr_private(candidate) && !sh_vt_provider_ready())
         return vmr_error(error, capacity, "private virtual texture page providers are unavailable");
-    AcquireSRWLockExclusive(&g_vmr_lock);
+    return 1;
+}
+/* Called under g_vmr_lock; reservation and forward publish share the exact
+ * alias/registry contract. Inactive registration cannot expose new bindings. */
+static int vmr_register_locked(sh_virtual_material_view *candidate, char *error, size_t capacity)
+{
     if (candidate && candidate->retired) {
-        vmr_error(error, capacity, "cannot publish retired virtual material bindings"); goto done;
+        return vmr_error(error, capacity, "cannot publish retired virtual material bindings");
     }
     if (candidate) for (sh_virtual_material_view *v = g_vmr_views; v; v = v->next)
         for (size_t i = 0; i < candidate->count; i++) {
             vmr_entry *other = vmr_find(v, candidate->entries[i].name);
             if (other && !vmr_equal(other, &candidate->entries[i])) {
-                vmr_error(error, capacity, "a retained material alias has a different atlas binding"); goto done;
+                return vmr_error(error, capacity, "a retained material alias has a different atlas binding");
             }
         }
     if (candidate && !candidate->published) {
         candidate->published = 1; candidate->next = g_vmr_views; g_vmr_views = candidate;
     }
-    *previous = g_vmr_active; g_vmr_active = candidate; ok = 1;
-done:
+    return 1;
+}
+int sh_virtual_material_runtime_reserve(sh_virtual_material_view *candidate, char *error, size_t capacity)
+{
+    int ok;
+    if (error && capacity) *error = 0;
+    if (!vmr_admissible(candidate, error, capacity)) return 0;
+    AcquireSRWLockExclusive(&g_vmr_lock);
+    ok = vmr_register_locked(candidate, error, capacity);
+    ReleaseSRWLockExclusive(&g_vmr_lock); return ok;
+}
+int sh_virtual_material_runtime_publish(sh_virtual_material_view *candidate,
+    sh_virtual_material_view **previous, char *error, size_t capacity)
+{
+    int ok;
+    if (error && capacity) *error = 0;
+    if (!previous) return vmr_error(error, capacity, "missing virtual material rollback handle");
+    if (!vmr_admissible(candidate, error, capacity)) return 0;
+    AcquireSRWLockExclusive(&g_vmr_lock);
+    ok = vmr_register_locked(candidate, error, capacity);
+    if (ok) { *previous = g_vmr_active; g_vmr_active = candidate; }
     ReleaseSRWLockExclusive(&g_vmr_lock); return ok;
 }
 void sh_virtual_material_runtime_restore(sh_virtual_material_view *previous)

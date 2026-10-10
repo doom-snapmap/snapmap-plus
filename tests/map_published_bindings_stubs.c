@@ -1,6 +1,7 @@
 /* Image binding must never enter runtime map preparation or install hooks. */
 #include <assert.h>
 #include "rawmap.h"
+#include "map_package.h"
 #include "hook.h"
 #include "map_render.h"
 #include "resource_catalog.h"
@@ -16,7 +17,7 @@ int sh_decl_server_map_browser_present(void) { assert(0); return 0; }
 int sh_map_render_capture(void *snapshot, sh_map_render *settings)
 { (void)snapshot; (void)settings; assert(0); return 0; }
 void sh_map_render_select(const sh_map_render *settings) { (void)settings; assert(0); }
-void sh_mpkg_report_error(const char *error) { (void)error; assert(0); }
+void sh_mpkg_report_error(sh_mpkg_problem problem, const char *error) { (void)problem; (void)error; assert(0); }
 void sh_rawmap_inspection_enter(void) { assert(0); }
 void sh_rawmap_inspection_leave(void) { assert(0); }
 void sh_rawmap_read_enter(sh_rawmap_read_scope *scope, const void *caller)

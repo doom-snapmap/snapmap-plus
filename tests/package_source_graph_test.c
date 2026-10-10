@@ -5,6 +5,7 @@
 #include <string.h>
 #include "package_source_graph.h"
 #include "package_keys.h"
+#include "package_spawn_registry.h"
 #include "package_source_link.h"
 #include "package_native_names.h"
 #include "resource_graph.h"
@@ -853,8 +854,10 @@ static void test_atlas_sources(fixture *native, sh_decl_registry_source registry
 /* Discovery keeps each path's canonical key per scope canonicalizer for the
  * capture: a scope whose canonicalizer aliases the atlas image selects its own
  * aliased supply, and the other scope its plain one, whichever comes first. */
+static size_t aliased_atlas_calls;
 static char *aliased_atlas(const char *path)
 {
+    aliased_atlas_calls++;
     char *key = sh_package_engine_path(path);
     if (key && !strcmp(key, "generated/transsortatlas/textures/atlas/private.bimage")) {
         free(key); key = _strdup("generated/transsortatlas/textures/atlas/aliased.bimage");
@@ -864,7 +867,8 @@ static char *aliased_atlas(const char *path)
 static void test_canonicalizer_scopes(fixture *native, sh_decl_registry_source registry)
 {
     const char *material = "{ transAtlasMap \"textures/atlas/private.tga\"\n }";
-    for (size_t aliased = 0; aliased < 2; aliased++) {
+    size_t calls[2] = {0}, reads[2] = {0};
+    for (size_t aliased = 0; aliased < 2; aliased++) for (int memo = 0; memo < 2; memo++) {
         sh_compiled_resource files[2][2] = {0}; sh_package_compilation compiled[2] = {0};
         const sh_package_compilation *scopes[] = {compiled, compiled + 1};
         source_link_fixture f = {0}; f.native = native; f.certificate = 1;
@@ -881,6 +885,7 @@ static void test_canonicalizer_scopes(fixture *native, sh_decl_registry_source r
             compiled[i].resources = files[i]; compiled[i].resource_count = 2;
         }
         compiled[aliased].canonical_path = aliased_atlas;
+        aliased_atlas_calls = 0; sh_package_source_link_lookup_memo(memo);
         sh_package_source_link *source = sh_package_source_link_open(scopes, 2, NULL,
             link_original, &f, registry, (uintptr_t)native->reflection, &admission, error, sizeof(error));
         if (!source) fprintf(stderr, "canonicalizer scopes: %s\n", error);
@@ -893,8 +898,11 @@ static void test_canonicalizer_scopes(fixture *native, sh_decl_registry_source r
                     selected |= f.inputs->units[u].files[k] == &files[i][1];
             assert(selected);
         }
+        if (!memo) { calls[aliased] = aliased_atlas_calls; reads[aliased] = f.reads; }
+        else assert(calls[aliased] == aliased_atlas_calls && reads[aliased] == f.reads);
         sh_package_source_link_close(source);
     }
+    sh_package_source_link_lookup_memo(1);
 }
 /* Synthetic aliases exercise the production readers/linker, not live native
  * alias admission. Runtime ABI admission requires the engine adapter. */
@@ -1782,6 +1790,116 @@ static void memo_counts(const replay_run *run, size_t *binds, size_t *retained, 
     at = strstr(counters, " ms; ");
     assert(at && sscanf(at, " ms; %zu replayed from earlier compiles (memo %15[a-z])", retained, memo) == 2);
 }
+/* Full callback trace detects skipped or extra canonicalization, including
+ * source selection's intentional second canonicalizer evaluation. */
+static char lookup_trace[2048][192];
+static size_t lookup_trace_count;
+static char *lookup_canonical(const char *path)
+{
+    assert(path && strlen(path) < sizeof(lookup_trace[0]) && lookup_trace_count < 2048);
+    strcpy_s(lookup_trace[lookup_trace_count++], sizeof(lookup_trace[0]), path);
+    return sh_package_engine_path(path);
+}
+static int lookup_failed_original(void *context, const char *path, unsigned char **body, size_t *length)
+{
+    if (!strcmp(path, "generated/decls/entitydef/replay/child.decl")) {
+        ((source_link_fixture *)context)->reads++;
+        *body = NULL; *length = 0; return -1;
+    }
+    return replay_original(context, path, body, length);
+}
+static void test_lookup_memo(fixture *native, sh_decl_registry_source registry)
+{
+    const size_t budget = 32u * 1024u * 1024u;
+    const char *seed = "{ class = \"Entity\"; edit = { target = \"replay/child\"; } }";
+    const char *root = "{ class = \"Entity\"; edit = { target = \"parent-only\"; } }";
+    const char *modifier = "{ edit = { target = \"parent-only\"; } }";
+    sh_package_sources inventory = {0};
+    sh_compiled_resource files[REPLAY_SCOPES][3];
+    sh_package_compilation compiled[REPLAY_SCOPES] = {0};
+    const sh_package_compilation *scopes[REPLAY_SCOPES];
+    char (*expected_trace)[192] = calloc(2048, sizeof(*expected_trace)); assert(expected_trace);
+    size_t expected_count = 0;
+    replay_run *plain = NULL;
+    for (size_t i = 0; i < REPLAY_SCOPES; i++) {
+        size_t count = 0;
+        files[i][count++] = link_decl("replay/seed", "generated/decls/entitydef/replay/seed.decl", seed);
+        if (i == REPLAY_ROOT) files[i][count++] = link_decl("root", "generated/decls/entitydef/root.decl", root);
+        if (i == REPLAY_MOD) {
+            files[i][count] = link_decl("replay/mod", "generated/decls/actormodifier/replay/mod.decl", modifier);
+            files[i][count++].type = "actormodifier";
+        }
+        qsort(files[i], count, sizeof(files[i][0]), replay_path_order);
+        compiled[i].resources = files[i]; compiled[i].resource_count = count;
+        compiled[i].sources = &inventory; compiled[i].canonical_path = lookup_canonical;
+        scopes[i] = compiled + i;
+    }
+    /* Same graph with misses in most scopes, a supplied target in one, and a
+     * supplied optional modifier in another. Exhausted/failed optional storage
+     * and deliberate hash collisions must also equal the uncached oracle. */
+    for (int mode = 0; mode < 6; mode++) {
+        replay_run *run = calloc(1, sizeof(*run)); assert(run);
+        sh_package_source_link_lookup_memo(mode != 0);
+        sh_package_source_link_test_lookup(mode == 2 ? 0 : mode == 5 ? 8192 : budget,
+            mode == 3 ? 1000000 : 0, mode == 4);
+        lookup_trace_count = 0;
+        replay_open(native, registry, scopes, &inventory, 1, run);
+        sh_package_source_lookup_counters before, after;
+        sh_package_source_link_lookup_counters(run->source, &before);
+        size_t unit = sh_package_link_inputs_find(run->link.inputs, REPLAY_PLAIN, "entitydef", "replay/seed");
+        assert(unit != SIZE_MAX);
+        sh_package_file_identity expected, actual; char error[256];
+        assert(sh_package_compilation_identity(compiled, files[0], &expected, error, sizeof(error)));
+        for (int repeat = 0; repeat < 3; repeat++) {
+            assert(sh_package_source_link_identity(run->source, unit, files[0], &actual, error, sizeof(error)));
+            assert(expected.length == actual.length && !memcmp(expected.digest, actual.digest, 32));
+        }
+        sh_package_source_link_lookup_counters(run->source, &after);
+        assert(after.lookups && after.identities >= 3 && after.peak_bytes <= after.limit);
+        assert(after.replay_validation_without_capture_us <= after.replay_validation_us);
+        if (mode == 0 || mode == 2 || mode == 3) {
+            assert(!after.entries && !after.bytes && !after.lookup_hits && !after.identity_hits);
+            assert(after.searches == after.lookups && after.identity_computations == after.identities);
+        } else if (mode == 1 || mode == 4) {
+            assert(after.lookup_hits && after.searches < after.lookups);
+            assert(after.identity_hits > before.identity_hits &&
+                after.identity_computations - before.identity_computations <= 1);
+            assert(after.body_hashes - before.body_hashes <= 1);
+        }
+        if (!mode) {
+            plain = run; expected_count = lookup_trace_count;
+            memcpy(expected_trace, lookup_trace, expected_count * sizeof(lookup_trace[0]));
+        } else {
+            assert(expected_count == lookup_trace_count &&
+                !memcmp(expected_trace, lookup_trace, expected_count * sizeof(lookup_trace[0])));
+            replay_same(plain, run);
+            sh_package_source_lookup_counters baseline;
+            sh_package_source_link_lookup_counters(plain->source, &baseline);
+            assert(baseline.original_captures == after.original_captures && baseline.original_bytes == after.original_bytes);
+            replay_close(run);
+        }
+    }
+    replay_close(plain);
+    sh_package_source_link_test_lookup(budget, 0, 0);
+    /* A new capture must still observe an original I/O error after successful
+     * captures of the same path; it remains environmental in either mode. */
+    char errors[2][1024]; size_t reads[2];
+    for (int enabled = 0; enabled < 2; enabled++) {
+        source_link_fixture link = {0}; link.native = native;
+        replay_calls calls = {0}; sh_package_source_failure failure = {0};
+        sh_package_source_link_native admission = {0};
+        admission.context = &calls; admission.implicit = replay_implicit;
+        sh_package_source_link_lookup_memo(enabled); lookup_trace_count = 0;
+        sh_package_source_link *source = sh_package_source_link_open_attributed(scopes, REPLAY_SCOPES, NULL,
+            lookup_failed_original, &link, registry, (uintptr_t)native->reflection, &admission, NULL,
+            &failure, errors[enabled], sizeof(errors[enabled]));
+        assert(!source && failure.kind == SH_PACKAGE_SOURCE_FAILURE_ENVIRONMENT);
+        reads[enabled] = link.reads;
+    }
+    assert(reads[0] == reads[1] && !strcmp(errors[0], errors[1]));
+    free(expected_trace);
+    sh_package_source_link_lookup_memo(1);
+}
 /* Separate captures sharing one memo (sh_package_source_memo), each checked
  * against a capture of the same inputs without it (replay_same: inputs, bytes,
  * sites, identities, classes, outputs, native calls, original reads). An
@@ -1872,7 +1990,9 @@ static void test_source_memo(fixture *native, sh_decl_registry_source registry)
         replay_run *with = calloc(1, sizeof(*with)), *without = calloc(1, sizeof(*without));
         assert(with && without);
         replay_open_memo(native, registry, scopes, &inventory, 1, memo, with);
+        sh_package_source_link_lookup_memo(0);
         replay_open(native, registry, scopes, &inventory, 1, without);
+        sh_package_source_link_lookup_memo(1);
         replay_same(with, without);
         memo_counts(with, &binds, &retained, state);
         memo_counts(without, &unmemo, &unretained, unstate);
@@ -4147,7 +4267,11 @@ static void test_editor_parent_contracts(fixture *f, sh_decl_registry_source reg
             const sh_decl_node *item = sh_decl_tree_member(properties, slot);
             assert(item);
             if (!strcmp(node_value(sh_decl_tree_member(item, "path")), "speed")) speed = k;
-            if (sh_decl_tree_member(item, "descriptionTag")) labelled++;
+            /* Restated native defaults include an empty description. Only
+             * the child's authored nonempty tag labels a control. */
+            const sh_decl_node *description = sh_decl_tree_member(item, "descriptionTag");
+            assert(description);
+            if (*node_value(description)) labelled++;
         }
         /* The published parent's slot order is kept; the patch follows speed. */
         assert(speed == 2 && labelled == 1);
@@ -4257,7 +4381,7 @@ static void child_layout(const sh_package_compilation *compiled, char *out, size
         if (!item) break;
         const sh_decl_node *path = sh_decl_tree_member(item, "path");
         used += snprintf(out + used, capacity - used, "%s%s", k ? "," : "", path ? node_value(path) : "?");
-        if ((tag = sh_decl_tree_member(item, "descriptionTag")))
+        if ((tag = sh_decl_tree_member(item, "descriptionTag")) && *node_value(tag))
             used += snprintf(out + used, capacity - used, "=%s", node_value(tag));
         assert(used < capacity);
     }
@@ -5348,6 +5472,10 @@ static uint32_t scoped_modifier(fixture *f, const sh_package_library *library, c
 {
     const char *ai = scoped_entity_name(library, sources, package, original);
     const sh_compiled_resource *conductor = named_resource(library->compiled, "entitydef", "conductor");
+    if (!conductor) {
+        const char *name = scoped_entity_name(library, sources, package, "conductor");
+        if (name) conductor = named_resource(library->compiled, "entitydef", name);
+    }
     key_row rows[32], mods[32];
     if (!ai || !conductor) {
         fprintf(stderr, "modifier lookup %s/%s: ai=%s conductor=%p\n", package, original, ai ? ai : "(none)", (void *)conductor);
@@ -5430,6 +5558,192 @@ static void test_registration_modifier_order(void)
     rename_package("zz-order-a", "order-a");
     registration_conductor = NULL;
     cleanup(); assert(!failures);
+    while (f->count) free(f->regions[--f->count].address);
+}
+static void numeric_modifier_reflection(fixture *f)
+{
+    void *container = *(void **)f->reflection;
+    void *records = *(void **)((char *)container + 0x20);
+    void *numeric_records = alloc(f, 28 * 0x38), *numeric_objects = alloc(f, 28 * 16), *numeric_pointers = alloc(f, 28 * 16);
+    memcpy(numeric_records, records, 27 * 0x38);
+    memcpy(numeric_objects, *(void **)((char *)f->reflection + 0x88), 27 * 16);
+    memcpy(numeric_pointers, *(void **)((char *)f->reflection + 0xa0), 27 * 16);
+    records = numeric_records; pointer(container, 0x20, records);
+    pointer(f->reflection, 0x88, numeric_objects); number(f->reflection, 0x90, 28);
+    pointer(f->reflection, 0xa0, numeric_pointers); number(f->reflection, 0xa8, 28);
+    pointer(records, 26 * 0x38, string(f, "float")); pointer(records, 26 * 0x38 + 8, string(f, ""));
+    const char *types[] = {"float", "float", "spawnAIType_t"};
+    const char *options[] = {"", "", ""}, *names[] = {"healthMod", "damageMod", "aiType"};
+    fields(f, (char *)records + 21 * 0x38, 3, types, options, names);
+}
+/* Valid native float tokens accompany the symbolic identity fixture above.
+ * Opposite winners must produce distinct classifier and AI identities. */
+static void test_registration_numeric_modifier_order(void)
+{
+    static const char *baseline = "{ class = \"Entity\"; edit = { aiTypeList = { num = 2; "
+        "item[0] = { aiType = \"IMP\"; entityDef = \"imp\"; } item[1] = { aiType = \"T5 T6\"; entityDef = \"t3\"; } } "
+        "globalAIMods = { num = 1; item[0] = { aiType = \"IMP\"; healthMod = 1; damageMod = 1; } } } }";
+    fixture storage; fixture *f = &storage; setup(f); conductor_reflection(f); numeric_modifier_reflection(f);
+    sh_decl_registry_source registry = {f, read_memory, (uintptr_t)f->registry, NULL};
+    source_link_fixture originals = {f};
+    sh_package_compile_environment env = {0}; sh_package_library_native native = {0};
+    size_t unserved = SIZE_MAX, invalid = SIZE_MAX;
+    char error[1024], path[256], text[1024]; uint32_t kept[2] = {0};
+    registration_root("registration-numeric-modifier-order"); registration_conductor = baseline;
+    env.baseline = registration_original; env.baseline_context = &originals;
+    env.unserved_package = &unserved; env.invalid_package = &invalid; native.private_keys = 1;
+    first_rows("numeric-a", "globalAIMods", "T5=2|T6=3");
+    first_rows("numeric-b", "globalAIMods", "T6=3|T5=2");
+    for (int i = 0; i < 2; i++) {
+        snprintf(path, sizeof(path), "overrides/numeric-%c/assets/generated/decls/entitydef/conductor.decl", 'a' + i);
+        snprintf(text, sizeof(text), "{ class = \"Entity\"; edit = { globalAIMods = { num = 3; "
+            "item[0] = { aiType = \"IMP\"; healthMod = 1; damageMod = 1; } "
+            "item[1] = { aiType = \"%s\"; healthMod = %d; damageMod = 1; } "
+            "item[2] = { aiType = \"%s\"; healthMod = %d; damageMod = 1; } } } }",
+            i ? "T6" : "T5", i ? 3 : 2, i ? "T5" : "T6", i ? 2 : 3);
+        create(path, text);
+    }
+    for (int round = 0; round < 2; round++) {
+        if (round) rename_package("numeric-a", "zz-numeric-a");
+        sh_package_sources *sources = sh_package_sources_scan(root, error, sizeof(error)); assert(sources);
+        sh_package_library library = {0};
+        int ok = sh_package_library_compile(sources, &env, NULL, registration_original, &originals, registry,
+            (uintptr_t)f->reflection, &native, &library, error, sizeof(error));
+        if (!ok) fprintf(stderr, "numeric modifier order %d: %s\n", round, error);
+        assert(ok && unserved == SIZE_MAX && invalid == SIZE_MAX);
+        const char *a_package = round ? "zz-numeric-a" : "numeric-a";
+        uint32_t a = scoped_modifier(f, &library, sources, a_package, "t3", "2");
+        uint32_t b = scoped_modifier(f, &library, sources, "numeric-b", "t3", "3");
+        assert(a != b && strcmp(scoped_entity_name(&library, sources, a_package, "t3"),
+            scoped_entity_name(&library, sources, "numeric-b", "t3")));
+        sh_package_key_set members;
+        sh_package_key_decode(library.key_groups, a, &members); size_t a_keys = sh_package_key_set_count(&members);
+        sh_package_key_decode(library.key_groups, b, &members); size_t b_keys = sh_package_key_set_count(&members);
+        printf("numeric opposite-policy classifications round%d: %u=2 (%zu keys), %u=3 (%zu keys)\n", round, a, a_keys, b, b_keys);
+        assert(a_keys == 2 && b_keys == 2);
+        assert((a & ~SH_PACKAGE_KEY_PRIVATE) == 96u && (b & ~SH_PACKAGE_KEY_PRIVATE) == 96u);
+        if (!round) { kept[0] = a; kept[1] = b; }
+        else assert(kept[0] == a && kept[1] == b);
+        sh_package_library_free(&library); sh_package_sources_free(sources);
+    }
+    rename_package("zz-numeric-a", "numeric-a"); registration_conductor = NULL;
+    cleanup(); assert(!failures);
+    while (f->count) free(f->regions[--f->count].address);
+}
+/* Complete sources carry identical AI bytes and an unnamed key beside two
+ * named bits. Their first intersecting modifier remains part of each AI's
+ * identity before lowering, in the library and explicit isolated contexts.
+ * Modes 1/2 reverse symbolic/numeric stock and authored spellings; mode 3
+ * supplies a distinct nonmatching mask; mode 4 inherits stock modifiers. */
+static void test_registration_full_numeric_modifier_order(int restored)
+{
+    static const char *baseline = "{ class = \"Entity\"; edit = { aiTypeList = { num = 1; "
+        "item[0] = { aiType = 4; entityDef = \"imp\"; } } "
+        "globalAIMods = { num = 1; item[0] = { aiType = 4; healthMod = 1; damageMod = 1; } } } }";
+    static const char *restored_baseline = "{ class = \"Entity\"; edit = { aiTypeList = { num = 3; "
+        "item[0] = { aiType = 1; entityDef = \"t3\"; } item[1] = { aiType = 4; entityDef = \"imp\"; } "
+        "item[2] = { aiType = 8; entityDef = \"t3\"; } } globalAIMods = { num = 3; "
+        "item[0] = { aiType = \"T0\"; healthMod = 1; damageMod = 1; } "
+        "item[1] = { aiType = \"IMP\"; healthMod = 1; damageMod = 1; } "
+        "item[2] = { aiType = \"T3\"; healthMod = 1; damageMod = 1; } } } }";
+    static const char *numeric_baseline = "{ class = \"Entity\"; edit = { aiTypeList = { num = 3; "
+        "item[0] = { aiType = 1; entityDef = \"t3\"; } item[1] = { aiType = 4; entityDef = \"imp\"; } "
+        "item[2] = { aiType = 8; entityDef = \"t3\"; } } globalAIMods = { num = 3; "
+        "item[0] = { aiType = 1; healthMod = 1; damageMod = 1; } "
+        "item[1] = { aiType = 4; healthMod = 1; damageMod = 1; } "
+        "item[2] = { aiType = 8; healthMod = 1; damageMod = 1; } } } }";
+    fixture storage; fixture *f = &storage; setup(f); conductor_reflection(f); numeric_modifier_reflection(f);
+    sh_decl_registry_source registry = {f, read_memory, (uintptr_t)f->registry, NULL};
+    source_link_fixture originals = {f};
+    sh_package_compile_environment env = {0}; sh_package_library_native native = {0};
+    const sh_package_key_space space = {0x4007ffffu, SH_PACKAGE_KEY_UNNAMED,
+        {{"IMP", 4}, {"T3", 8}}, 2};
+    size_t unserved = SIZE_MAX, invalid = SIZE_MAX;
+    char error[1024], path[256], text[1024], mods[384], *capsules[2] = {0}; size_t capsule_lengths[2] = {0};
+    registration_root(restored ? "registration-restored-numeric-modifier-order" : "registration-full-numeric-modifier-order");
+    registration_conductor = restored == 2 ? numeric_baseline : restored ? restored_baseline : baseline;
+    const char *ai = restored ? "full-ai" : "t3";
+    env.baseline = registration_original; env.baseline_context = &originals;
+    env.unserved_package = &unserved; env.invalid_package = &invalid; native.private_keys = 1;
+    for (int i = 0; i < 2; i++) {
+        snprintf(path, sizeof(path), "overrides/full-%c/package.json", 'a' + i);
+        snprintf(text, sizeof(text), "{\"id\":\"local.full-%c\",\"name\":\"full-%c\"}", 'a' + i, 'a' + i);
+        create(path, text);
+        snprintf(path, sizeof(path), "overrides/full-%c/assets/generated/decls/entitydef/conductor.decl", 'a' + i);
+        if (restored < 3) {
+            const char *four = restored == 2 ? "\"IMP\"" : "4", *eight = restored == 2 ? "\"T3\"" : "8";
+            snprintf(mods, sizeof(mods), "globalAIMods = { num = 2; "
+                "item[0] = { aiType = %s; healthMod = %d; damageMod = %d; } "
+                "item[1] = { aiType = %s; healthMod = %d; damageMod = %d; } }",
+                i ? eight : four, i ? 3 : 2, i ? 3 : 2, i ? four : eight, i ? 2 : 3, i ? 2 : 3);
+        } else snprintf(mods, sizeof(mods), "%s", restored == 3 ?
+            "globalAIMods = { num = 1; item[0] = { aiType = 16; healthMod = 2; damageMod = 2; } }" : "");
+        snprintf(text, sizeof(text), "{ class = \"Entity\"; edit = { aiTypeList = { num = %d; %s"
+            "item[%d] = { aiType = 524300; entityDef = \"%s\"; } } %s } }",
+            restored ? 4 : 2, restored ? "item[0] = { aiType = 1; entityDef = \"t3\"; } "
+                "item[1] = { aiType = 4; entityDef = \"imp\"; } item[2] = { aiType = 8; entityDef = \"t3\"; } " :
+                "item[0] = { aiType = 4; entityDef = \"imp\"; } ", restored ? 3 : 1, ai, mods);
+        create(path, text);
+        capsules[i] = sh_package_spawn_registry_classification((sh_decl_source){text, strlen(text)},
+            &space, ai, capsule_lengths + i, error, sizeof(error));
+        assert(capsules[i]);
+        snprintf(path, sizeof(path), "overrides/full-%c/assets/generated/decls/entitydef/%s.decl", 'a' + i, ai);
+        create(path, "{ class = \"Entity\"; edit = { } }");
+        if (restored) {
+            snprintf(path, sizeof(path), "overrides/full-%c/assets/generated/decls/entitydef/t3.decl", 'a' + i);
+            create(path, "{ class = \"Entity\"; edit = { } }");
+        }
+        snprintf(path, sizeof(path), "overrides/full-%c/assets/generated/decls/entitydef/imp.decl", 'a' + i);
+        create(path, "{ class = \"Entity\"; edit = { } }");
+    }
+    fprintf(stderr, "full numeric authored capsule a: %s\nfull numeric authored capsule b: %s\n", capsules[0], capsules[1]);
+    if (restored < 3)
+        assert(capsule_lengths[0] != capsule_lengths[1] || memcmp(capsules[0], capsules[1], capsule_lengths[0]));
+    else assert(capsule_lengths[0] == capsule_lengths[1] && !memcmp(capsules[0], capsules[1], capsule_lengths[0]));
+    free(capsules[0]); free(capsules[1]);
+    for (int round = 0; round < 2; round++) {
+        sh_package_sources *sources = sh_package_sources_scan(root, error, sizeof(error)); assert(sources);
+        sh_package_library library = {0}; sh_package_provenance contexts = {0};
+        for (size_t i = 0; round && i < sources->package_count; i++)
+            assert(sh_package_provenance_context_add(&contexts, SH_PACKAGE_CONTEXT_ISOLATED,
+                (const unsigned char (*)[32])sh_package_source_tree(sources, i), 1, "") != SIZE_MAX);
+        int ok = round ? sh_package_library_compile_contexts(sources, &contexts, &env, NULL,
+            registration_original, &originals, registry, (uintptr_t)f->reflection, &native, &library, error, sizeof(error)) :
+            sh_package_library_compile(sources, &env, NULL, registration_original, &originals, registry,
+                (uintptr_t)f->reflection, &native, &library, error, sizeof(error));
+        if (!ok) fprintf(stderr, "full numeric modifier order %d: %s\n", round, error);
+        assert(ok && unserved == SIZE_MAX && invalid == SIZE_MAX);
+        const char *a_name = scoped_entity_name(&library, sources, "full-a", ai);
+        const char *b_name = scoped_entity_name(&library, sources, "full-b", ai);
+        fprintf(stderr, "full numeric opposite policies restored%d %s AI a=%s b=%s\n", restored, round ? "isolated" : "library",
+            a_name ? a_name : "(none)", b_name ? b_name : "(none)");
+        assert(a_name && b_name && (!!strcmp(a_name, b_name) == (restored < 3)));
+        uint32_t a = scoped_modifier(f, &library, sources, "full-a", ai, restored < 3 ? "2" : "1");
+        uint32_t b = scoped_modifier(f, &library, sources, "full-b", ai, restored < 3 ? "3" : "1");
+        fprintf(stderr, "full numeric policies mode%d %s classifications %u=%s, %u=%s\n", restored,
+            round ? "isolated" : "library", a, restored < 3 ? "2" : "1", b, restored < 3 ? "3" : "1");
+        assert((a != b) == (restored < 3) && (a & ~SH_PACKAGE_KEY_PRIVATE) == 12u && (b & ~SH_PACKAGE_KEY_PRIVATE) == 12u);
+        if (restored >= 3) {
+            /* An unchanged stock AI has no private scope binding. Inspect its
+             * actual served row rather than requiring such a binding. */
+            const sh_compiled_resource *table = named_resource(library.compiled, "entitydef", "conductor");
+            if (!table) table = named_resource(library.compiled, "entitydef",
+                scoped_entity_name(&library, sources, "full-a", "conductor"));
+            assert(table);
+            key_row registrations[32], modifiers[32]; int stock_seen = 0;
+            size_t registered = key_rows(f, table, "aiTypeList", "entityDef", registrations, 32);
+            size_t modified = key_rows(f, table, "globalAIMods", "healthMod", modifiers, 32);
+            g_key_groups = library.key_groups;
+            for (size_t r = 0; r < registered; r++) if (registrations[r].mask == 4u &&
+                !strcmp(registrations[r].field, "imp")) {
+                const char *winner = modifier_for(modifiers, modified, registrations[r].mask);
+                assert(winner && !strcmp(winner, "1")); stock_seen = 1;
+            }
+            assert(stock_seen);
+        }
+        sh_package_provenance_free(&contexts); sh_package_library_free(&library); sh_package_sources_free(sources);
+    }
+    registration_conductor = NULL; cleanup(); assert(!failures);
     while (f->count) free(f->regions[--f->count].address);
 }
 /* Modifier winners beside every other kind of package. The stock conductor
@@ -6581,6 +6895,271 @@ static void test_registration_pinned_keys(void)
     while (f->count) free(f->regions[--f->count].address);
 }
 
+/* A group-coded key records a changed stock row's own private key beside the
+ * keys of the scope's custom rows naming the same type ("524300" names IMP and
+ * T3). Those member keys belong to that context as much as its bindings: no
+ * composed (historical) context or other scope compiled beside it may take one,
+ * and a recompile of the same sources recovers each row's own member from the
+ * group its binding records, so its served names stay. Recovery needs exactly
+ * one member left once the context's other keys are removed, held directly by
+ * no other context; otherwise the row takes a free key, never a member. A
+ * peer holding every single-bit key makes these keys marked, as many
+ * installed packages do. */
+static const char *gm_stock = "{ class = \"Entity\"; edit = { aiTypeList = { num = 2; "
+    "item[0] = { aiType = \"IMP\"; entityDef = \"imp\"; } item[1] = { aiType = \"T3\"; entityDef = \"t3\"; } } } }";
+static void gm_row_package(const char *package, int changed, const char *custom)
+{
+    char path[512], text[1024];
+    snprintf(path, sizeof(path), "overrides/%s/package.json", package);
+    snprintf(text, sizeof(text), "{\"id\":\"local.%s\",\"name\":\"%s\"}", package, package); create(path, text);
+    snprintf(path, sizeof(path), "overrides/%s/assets/generated/decls/entitydef/conductor.decl", package);
+    if (changed)
+        snprintf(text, sizeof(text), "{ class = \"Entity\"; edit = { aiTypeList = { num = 3; "
+            "item[0] = { aiType = \"IMP\"; entityDef = \"%s_imp\"; } item[1] = { aiType = \"T3\"; entityDef = \"%s_t3\"; } "
+            "item[2] = { aiType = \"%s\"; entityDef = \"%s_boss\"; } } } }", package, package, custom, package);
+    else
+        snprintf(text, sizeof(text), "{ class = \"Entity\"; edit = { aiTypeList = { num = 3; "
+            "item[0] = { aiType = \"IMP\"; entityDef = \"imp\"; } item[1] = { aiType = \"T3\"; entityDef = \"t3\"; } "
+            "item[2] = { aiType = \"%s\"; entityDef = \"%s_boss\"; } } } }", custom, package);
+    create(path, text);
+    const char *roles[] = {"imp", "t3", "boss"};
+    for (int i = changed ? 0 : 2; i < 3; i++) {
+        snprintf(path, sizeof(path), "overrides/%s/assets/generated/decls/entitydef/%s_%s.decl", package, package, roles[i]);
+        snprintf(text, sizeof(text), "{ class = \"Entity\"; edit = { target = \"%s-%s\"; } }", package, roles[i]);
+        create(path, text);
+    }
+}
+static size_t gm_package_index(const sh_package_sources *sources, const char *name)
+{
+    for (size_t i = 0; i < sources->package_count; i++) if (!strcmp(sources->packages[i].name, name)) return i;
+    assert(0); return SIZE_MAX;
+}
+static void gm_compile(fixture *f, const sh_package_provenance *keys, const sh_package_key_groups *groups,
+    const char *composed, sh_package_sources **sources, sh_package_library *out)
+{
+    sh_decl_registry_source registry = {f, read_memory, (uintptr_t)f->registry, NULL};
+    source_link_fixture originals = {f};
+    sh_package_compile_environment env = {0};
+    sh_package_library_native native = {0};
+    sh_package_provenance contexts = {0};
+    size_t unserved = SIZE_MAX, invalid = SIZE_MAX;
+    char error[1024];
+    int ok;
+    native.private_keys = 1; native.keys = keys; native.key_groups = groups;
+    env.baseline = registration_original; env.baseline_context = &originals;
+    *sources = sh_package_sources_scan(root, error, sizeof(error)); assert(*sources);
+    if (composed) {
+        size_t legacy = gm_package_index(*sources, composed);
+        assert(sh_package_provenance_context_add(&contexts, SH_PACKAGE_CONTEXT_COMPOSED,
+            (const unsigned char (*)[32])sh_package_source_tree(*sources, legacy), 1, NULL) != SIZE_MAX);
+        ok = sh_package_library_compile_contexts(*sources, &contexts, &env, NULL, registration_original, &originals,
+            registry, (uintptr_t)f->reflection, &native, out, error, sizeof(error));
+    } else {
+        env.unserved_package = &unserved; env.invalid_package = &invalid;
+        ok = sh_package_library_compile(*sources, &env, NULL, registration_original, &originals,
+            registry, (uintptr_t)f->reflection, &native, out, error, sizeof(error));
+        assert(!ok || (unserved == SIZE_MAX && invalid == SIZE_MAX));
+    }
+    if (!ok) fprintf(stderr, "group member keys: %s\n", error);
+    assert(ok);
+    sh_package_provenance_free(&contexts);
+}
+static uint32_t gm_key(const sh_package_library *library, const unsigned char *tree, unsigned mode, uint32_t original)
+{
+    char key[16]; snprintf(key, sizeof(key), "%u", original);
+    for (size_t i = 0; i < library->bindings.binding_count; i++) {
+        const sh_package_provenance_binding *binding = library->bindings.bindings + i;
+        if (strcmp(binding->family, SH_PACKAGE_KEY_FAMILY) || strcmp(binding->original, key)) continue;
+        for (size_t c = 0; c < binding->context_count; c++) {
+            const sh_package_provenance_context *context = library->bindings.contexts + binding->contexts[c];
+            if (context->mode == mode && context->tree_count == 1 && !memcmp(context->trees[0], tree, 32))
+                return (uint32_t)strtoul(binding->name, NULL, 10);
+        }
+    }
+    return 0;
+}
+static void gm_peer_bind(sh_package_provenance *peer, unsigned mode, const unsigned char *tree,
+    const char *component, uint32_t original, uint32_t current)
+{
+    char from[16], to[16];
+    size_t at = sh_package_provenance_context_add(peer, mode, (const unsigned char (*)[32])tree, 1, component);
+    snprintf(from, sizeof(from), "%u", original); snprintf(to, sizeof(to), "%u", current);
+    assert(at != SIZE_MAX && sh_package_provenance_bind(peer, SH_PACKAGE_KEY_FAMILY, from, to, &at, 1));
+}
+/* Unrelated isolated contexts holding every single-bit key. */
+static void gm_peer_fill(sh_package_provenance *peer)
+{
+    unsigned char tree[32];
+    for (unsigned bit = 19; bit < 28; bit++) {
+        memset(tree, (int)(0x60 + bit), sizeof(tree));
+        gm_peer_bind(peer, SH_PACKAGE_CONTEXT_ISOLATED, tree, "", 1u << bit, 1u << bit);
+    }
+}
+static void gm_peer_add(sh_package_provenance *peer, const sh_package_provenance *source)
+{
+    for (size_t i = 0; i < source->binding_count; i++) {
+        const sh_package_provenance_binding *binding = source->bindings + i;
+        if (strcmp(binding->family, SH_PACKAGE_KEY_FAMILY)) continue;
+        for (size_t c = 0; c < binding->context_count; c++) {
+            const sh_package_provenance_context *context = source->contexts + binding->contexts[c];
+            size_t at = sh_package_provenance_context_add(peer, context->mode, (const unsigned char (*)[32])context->trees,
+                context->tree_count, context->component);
+            assert(at != SIZE_MAX && sh_package_provenance_bind(peer, binding->family, binding->original, binding->name, &at, 1));
+        }
+    }
+}
+/* The one member of a group other than except. */
+static uint32_t gm_member(const sh_package_key_groups *groups, uint32_t group, uint32_t except)
+{
+    sh_package_key_set members;
+    uint32_t found = 0;
+    int count = 0;
+    sh_package_key_decode(groups, group, &members);
+    for (size_t i = 0; i < SH_PACKAGE_KEY_CODES; i++) {
+        uint32_t code = sh_package_key_code(i);
+        if (code == except || !sh_package_key_set_has(&members, code)) continue;
+        found = code; count++;
+    }
+    assert(count == 1); return found;
+}
+/* Every key a compile's composed contexts hold, expanded through its groups. */
+static int gm_composed_meets(const sh_package_library *library, const uint32_t *codes, size_t count)
+{
+    for (size_t i = 0; i < library->bindings.binding_count; i++) {
+        const sh_package_provenance_binding *binding = library->bindings.bindings + i;
+        if (strcmp(binding->family, SH_PACKAGE_KEY_FAMILY)) continue;
+        for (size_t c = 0; c < binding->context_count; c++) {
+            if (library->bindings.contexts[binding->contexts[c]].mode != SH_PACKAGE_CONTEXT_COMPOSED) continue;
+            uint32_t value = (uint32_t)strtoul(binding->name, NULL, 10);
+            sh_package_key_set members;
+            sh_package_key_decode(library->key_groups, value, &members);
+            for (size_t k = 0; k < count; k++)
+                if ((value & SH_PACKAGE_KEY_PRIVATE) == codes[k] || sh_package_key_set_has(&members, codes[k])) {
+                    fprintf(stderr, "composed key %s=%u meets protected %u\n", binding->original, value, codes[k]);
+                    return 1;
+                }
+        }
+    }
+    return 0;
+}
+static void test_registration_group_member_keys(void)
+{
+    fixture storage; fixture *f = &storage; setup(f); conductor_reflection(f);
+    sh_package_provenance fill = {0}, peer = {0}, merged = {0}, stale = {0}, forged = {0};
+    sh_package_key_groups groups = {0}, forged_groups = {0};
+    sh_package_library first = {0}, legacy = {0}, again = {0}, reversed = {0}, settled = {0}, chosen = {0};
+    sh_package_sources *s1 = NULL, *s2 = NULL, *s3 = NULL, *s4 = NULL, *s5 = NULL, *s6 = NULL;
+    const uint32_t custom = 524288u, imp = 4u, t3 = 8u;
+    unsigned char tree[32], tree_after[32];
+    registration_root("registration-group-members");
+    registration_conductor = gm_stock;
+    gm_row_package("grp", 1, "524300");
+    gm_row_package("zlegacy", 0, "524288");
+    gm_peer_fill(&fill);
+    /* The installed library: the custom key and both row keys are marked, and
+     * each named type's binding is a group of the custom key and its row key. */
+    gm_compile(f, &fill, NULL, NULL, &s1, &first);
+    memcpy(tree, sh_package_source_tree(s1, gm_package_index(s1, "grp")), 32);
+    uint32_t key = gm_key(&first, tree, SH_PACKAGE_CONTEXT_ISOLATED, custom);
+    uint32_t g_imp = gm_key(&first, tree, SH_PACKAGE_CONTEXT_ISOLATED, imp);
+    uint32_t g_t3 = gm_key(&first, tree, SH_PACKAGE_CONTEXT_ISOLATED, t3);
+    printf("group member keys: custom %u, IMP %u, T3 %u\n", key, g_imp, g_t3);
+    assert(key & SH_PACKAGE_KEY_MARKER && g_imp & SH_PACKAGE_KEY_MARKER && g_t3 & SH_PACKAGE_KEY_MARKER);
+    assert(first.key_groups && first.key_groups->defined[(g_imp & SH_PACKAGE_KEY_SINGLE) >> 19] &&
+        first.key_groups->defined[(g_t3 & SH_PACKAGE_KEY_SINGLE) >> 19] && g_imp != g_t3);
+    uint32_t row_imp = gm_member(first.key_groups, g_imp, key), row_t3 = gm_member(first.key_groups, g_t3, key);
+    assert(row_imp != row_t3 && sh_package_key_private_valid(row_imp) && sh_package_key_private_valid(row_t3));
+    const uint32_t protected_codes[] = {key, row_imp, row_t3, g_imp, g_t3};
+    /* A map's composed (historical) context compiled beside that library
+     * takes none of its keys, its group codes or the rows' own member keys. */
+    gm_peer_add(&peer, &fill); gm_peer_add(&peer, &first.bindings);
+    gm_compile(f, &peer, first.key_groups, "zlegacy", &s2, &legacy);
+    CHECK(!gm_composed_meets(&legacy, protected_codes, 5));
+    /* The next library compile beside the retained composed context keeps
+     * every key, so no served identity changes after leaving the map. */
+    assert(sh_package_key_groups_merge(&groups, first.key_groups) && sh_package_key_groups_merge(&groups, legacy.key_groups));
+    gm_peer_add(&merged, &fill); gm_peer_add(&merged, &first.bindings); gm_peer_add(&merged, &legacy.bindings);
+    gm_compile(f, &merged, &groups, NULL, &s3, &again);
+    CHECK(gm_key(&again, tree, SH_PACKAGE_CONTEXT_ISOLATED, custom) == key);
+    CHECK(gm_key(&again, tree, SH_PACKAGE_CONTEXT_ISOLATED, imp) == g_imp);
+    CHECK(gm_key(&again, tree, SH_PACKAGE_CONTEXT_ISOLATED, t3) == g_t3);
+    /* Reversed discovery of the same sources gives the same keys. */
+    rename_package("grp", "zz-grp"); rename_package("zlegacy", "aa-zlegacy");
+    gm_compile(f, &merged, &groups, NULL, &s4, &reversed);
+    memcpy(tree_after, sh_package_source_tree(s4, gm_package_index(s4, "zz-grp")), 32);
+    assert(!memcmp(tree, tree_after, 32));
+    CHECK(gm_key(&reversed, tree, SH_PACKAGE_CONTEXT_ISOLATED, imp) == g_imp);
+    CHECK(gm_key(&reversed, tree, SH_PACKAGE_CONTEXT_ISOLATED, t3) == g_t3);
+    rename_package("zz-grp", "grp"); rename_package("aa-zlegacy", "zlegacy");
+    /* A row key another context holds directly is not recovered: that row
+     * takes a free key no context holds, while the other row keeps its own. */
+    gm_peer_add(&stale, &fill); gm_peer_add(&stale, &first.bindings);
+    memset(tree_after, 0x5a, sizeof(tree_after));
+    gm_peer_bind(&stale, SH_PACKAGE_CONTEXT_COMPOSED, tree_after, NULL, 1u, row_imp);
+    gm_compile(f, &stale, first.key_groups, NULL, &s5, &settled);
+    uint32_t moved = gm_key(&settled, tree, SH_PACKAGE_CONTEXT_ISOLATED, imp);
+    CHECK(gm_key(&settled, tree, SH_PACKAGE_CONTEXT_ISOLATED, t3) == g_t3);
+    CHECK(moved != g_imp && moved && settled.key_groups &&
+        !sh_package_key_set_has(&settled.key_groups->members[(moved & SH_PACKAGE_KEY_SINGLE) >> 19], row_imp));
+    /* Ambiguous groups recover nothing and lend no member: IMP's group holds
+     * two candidate rows, T3's holds only keys of the context's other
+     * originals. Each row takes a key that is not one of those members. */
+    uint32_t ra = sh_package_key_private(60), rb = sh_package_key_private(61), kx = sh_package_key_private(62);
+    uint32_t ga = sh_package_key_private(63), gz = sh_package_key_private(64);
+    sh_package_key_set set_a = {{0}}, set_z = {{0}};
+    sh_package_key_set_add(&set_a, key); sh_package_key_set_add(&set_a, ra); sh_package_key_set_add(&set_a, rb);
+    sh_package_key_set_add(&set_z, key); sh_package_key_set_add(&set_z, kx);
+    assert(sh_package_key_groups_define(&forged_groups, ga, &set_a) && sh_package_key_groups_define(&forged_groups, gz, &set_z));
+    gm_peer_add(&forged, &fill);
+    gm_peer_bind(&forged, SH_PACKAGE_CONTEXT_ISOLATED, tree, "", custom, key);
+    gm_peer_bind(&forged, SH_PACKAGE_CONTEXT_ISOLATED, tree, "", 1048576u, kx);
+    gm_peer_bind(&forged, SH_PACKAGE_CONTEXT_ISOLATED, tree, "", imp, ga);
+    gm_peer_bind(&forged, SH_PACKAGE_CONTEXT_ISOLATED, tree, "", t3, gz);
+    gm_compile(f, &forged, &forged_groups, NULL, &s6, &chosen);
+    uint32_t c_imp = gm_key(&chosen, tree, SH_PACKAGE_CONTEXT_ISOLATED, imp);
+    uint32_t c_t3 = gm_key(&chosen, tree, SH_PACKAGE_CONTEXT_ISOLATED, t3);
+    uint32_t c_key = gm_key(&chosen, tree, SH_PACKAGE_CONTEXT_ISOLATED, custom);
+    CHECK(c_key == key && c_imp && c_t3 && chosen.key_groups);
+    if (c_imp && c_t3 && chosen.key_groups) {
+        uint32_t r_imp = gm_member(chosen.key_groups, c_imp, key), r_t3 = gm_member(chosen.key_groups, c_t3, key);
+        CHECK(r_imp != ra && r_imp != rb && r_imp != kx && r_t3 != ra && r_t3 != rb && r_t3 != kx && r_imp != r_t3);
+    }
+    /* A single-bit member is held too: with every other single bit taken,
+     * a composed context beside a peer whose group holds bit 20 next to a
+     * marked key never takes bit 20. */
+    {
+        sh_package_provenance single = {0};
+        sh_package_key_groups single_groups = {0};
+        sh_package_library composed = {0};
+        sh_package_sources *s7 = NULL;
+        sh_package_key_set set_s = {{0}};
+        unsigned char fake[32];
+        uint32_t marked = sh_package_key_private(70), gs = sh_package_key_private(71);
+        sh_package_key_set_add(&set_s, 1u << 20); sh_package_key_set_add(&set_s, marked);
+        assert(sh_package_key_groups_define(&single_groups, gs, &set_s));
+        for (unsigned bit = 19; bit < 28; bit++) {
+            if (bit == 20) continue;
+            memset(fake, (int)(0x60 + bit), sizeof(fake));
+            gm_peer_bind(&single, SH_PACKAGE_CONTEXT_ISOLATED, fake, "", 1u << bit, 1u << bit);
+        }
+        memset(fake, 0x77, sizeof(fake));
+        gm_peer_bind(&single, SH_PACKAGE_CONTEXT_ISOLATED, fake, "", imp, gs);
+        gm_compile(f, &single, &single_groups, "zlegacy", &s7, &composed);
+        const uint32_t member_codes[] = {1u << 20, marked, gs};
+        CHECK(!gm_composed_meets(&composed, member_codes, 3));
+        sh_package_library_free(&composed); sh_package_sources_free(s7); sh_package_provenance_free(&single);
+    }
+    sh_package_library_free(&chosen); sh_package_library_free(&settled); sh_package_library_free(&reversed);
+    sh_package_library_free(&again); sh_package_library_free(&legacy); sh_package_library_free(&first);
+    sh_package_sources_free(s6); sh_package_sources_free(s5); sh_package_sources_free(s4);
+    sh_package_sources_free(s3); sh_package_sources_free(s2); sh_package_sources_free(s1);
+    sh_package_provenance_free(&forged); sh_package_provenance_free(&stale); sh_package_provenance_free(&merged);
+    sh_package_provenance_free(&peer); sh_package_provenance_free(&fill);
+    registration_conductor = NULL;
+    cleanup(); assert(!failures);
+    while (f->count) free(f->regions[--f->count].address);
+}
+
 /* A map compile recompiles the packages a saved map uses under that map's
  * contexts. Given the installed library's keys it serves every one of their
  * resources under the installed library's names, so each saved use resolves
@@ -7676,15 +8255,16 @@ static void movie_reflection(fixture *native)
 {
     {
         void *container = *(void **)native->reflection;
-        void *records = alloc(native, 21 * 0x38), *objects = alloc(native, 21 * 16), *pointers = alloc(native, 21 * 16);
-        memcpy(records, *(void **)((char *)container + 0x20), 20 * 0x38);
-        memcpy(objects, *(void **)((char *)native->reflection + 0x88), 20 * 16);
-        memcpy(pointers, *(void **)((char *)native->reflection + 0xa0), 20 * 16);
+        size_t count = *(int *)((char *)native->reflection + 0x90), added = count - 1;
+        void *records = alloc(native, (count + 1) * 0x38), *objects = alloc(native, (count + 1) * 16), *pointers = alloc(native, (count + 1) * 16);
+        memcpy(records, *(void **)((char *)container + 0x20), count * 0x38);
+        memcpy(objects, *(void **)((char *)native->reflection + 0x88), count * 16);
+        memcpy(pointers, *(void **)((char *)native->reflection + 0xa0), count * 16);
         pointer(container, 0x20, records);
-        pointer(native->reflection, 0x88, objects); number(native->reflection, 0x90, 21);
-        pointer(native->reflection, 0xa0, pointers); number(native->reflection, 0xa8, 21);
-        pointer(records, 19 * 0x38, string(native, "idSWF")); pointer(records, 19 * 0x38 + 8, string(native, ""));
-        pointer(pointers, 19 * 16 + 8, (void *)0xa0);
+        pointer(native->reflection, 0x88, objects); number(native->reflection, 0x90, (int)count + 1);
+        pointer(native->reflection, 0xa0, pointers); number(native->reflection, 0xa8, (int)count + 1);
+        pointer(records, added * 0x38, string(native, "idSWF")); pointer(records, added * 0x38 + 8, string(native, ""));
+        pointer(pointers, added * 16 + 8, (void *)0xa0);
         const char *t[] = {"idDeclEntityDef", "OpaqueStringReader", "idDeclActorModifier", "idDeclSnapEditorEntity", "idRenderModel", "idImage", "idSWF"};
         const char *o[] = {"*", "", "*", "*", "*", "*", "*"}, *n[] = {"target", "custom", "modifier", "preview", "model", "image", "gui"};
         fields(native, (char *)records + 0x38, 7, t, o, n);
@@ -7758,12 +8338,13 @@ static void test_movie_source_link(void)
     assert(out.classes.nodes[movies[0]] != out.classes.nodes[movies[3]]);
     assert(out.classes.nodes[screens[0]] == out.classes.nodes[screens[2]]);
     assert(out.classes.nodes[screens[1]] != out.classes.nodes[screens[0]] && out.classes.nodes[screens[3]] != out.classes.nodes[screens[0]]);
-    size_t movie_rows = 0;
+    size_t movie_rows = 0, late_rows = 0;
     for (size_t i = 0; i < out.implicit_count; i++)
         if (out.implicit[i].owner == out.classes.nodes[movies[0]] || out.implicit[i].owner == out.classes.nodes[movies[1]]) {
-            assert(!strcmp(out.implicit[i].slot, "movie/font/title")); movie_rows++;
+            if (!strncmp(out.implicit[i].slot, "request/material/", 17)) late_rows++;
+            else { assert(!strcmp(out.implicit[i].slot, "movie/font/title")); movie_rows++; }
         }
-    assert(movie_rows == 2);
+    assert(movie_rows == 2 && late_rows == 4);
     for (size_t i = 0; i < 4; i++) {
         const char *movie_name = out.names[out.classes.nodes[movies[i]]];
         sh_package_movie_names names;
@@ -7867,6 +8448,142 @@ static void test_movie_source_link(void)
 static movie_source_fixture token_movies;
 static int movie_token_original(void *context, const char *path, unsigned char **body, size_t *length)
 { (void)context; return movie_original(&token_movies, path, body, length); }
+/* Identical opaque movies bind complete context namespaces, including names
+ * assembled only at the eventual callback. No ActionScript literal is present. */
+static int movie_late_reserve(void *context, const char *key, const unsigned char identity[32], const char *mapping)
+{
+    if (*(int *)context) return -1;
+    return label_reserve(NULL, key, identity, mapping);
+}
+static int movie_late_atlas(void *context, size_t scope, const sh_package_compilation *compiled,
+    const char *material, const char *page_file, sh_package_virtual_atlas *out, char *error, size_t capacity)
+{
+    unsigned *seen = context;
+    (void)scope; (void)error; (void)capacity;
+    assert(compiled && material && page_file && !*page_file && out);
+    if (!strcmp(material, "late/fx")) *seen |= 1;
+    if (!strcmp(material, "sibling/only")) *seen |= 2;
+    /* All fixture materials have no native VT row. Their prepared original
+     * empty provider still certifies every material, including the sibling. */
+    out->name = "_vmtr"; out->source = "virtualtextures/_vmtr"; out->original = 1;
+    return 1;
+}
+static void test_movie_late_namespace(void)
+{
+    fixture storage; fixture *native = &storage; setup_sound(native); movie_reflection(native);
+    sh_decl_registry_source registry = {native, read_memory, (uintptr_t)native->registry, NULL};
+    char temporary[MAX_PATH], relative[512], text[512], error[2048];
+    assert(GetTempPathA(sizeof(temporary), temporary));
+    snprintf(root, sizeof(root), "%ssmp-movie-late-%lu-%llu", temporary, GetCurrentProcessId(), GetTickCount64());
+    assert(CreateDirectoryA(root, NULL));
+    create("overrides/outer/package.json", "{\"id\":\"movies\",\"name\":\"Movies\",\"strings\":{"
+        "\"english\":{\"notice\":\"parent\"},\"french\":{\"notice\":\"ancestor\"}}}");
+    create("overrides/outer/assets/generated/decls/material/late/fx.decl", "{ color {1,0,0} }");
+    create("overrides/outer/assets/generated/decls/sound/play_computed.decl", "{ edit = { } }");
+    const char *components[] = {"a", "a2", "b", "c"};
+    for (size_t i = 0; i < 4; i++) {
+        snprintf(relative, sizeof(relative), "overrides/outer/%s/package.json", components[i]);
+        snprintf(text, sizeof(text), "{\"id\":\"same\",\"name\":\"Movie\",\"strings\":{"
+            "\"english\":{\"notice\":\"%s\",\"empty\":\"\"}}}", i == 3 ? "B" : "A");
+        create(relative, text);
+        snprintf(relative, sizeof(relative), "overrides/outer/%s/assets/generated/decls/entitydef/screen_%s.decl", components[i], components[i]);
+        create(relative, "{ class = \"Entity\"; edit = { gui = \"swf/stock/panel.swf\"; } }");
+    }
+    create("overrides/outer/b/assets/generated/decls/material/late/fx.decl", "{ color {0,1,0} }");
+    create("overrides/outer/sibling/package.json", "{\"id\":\"sibling\",\"name\":\"Sibling\","
+        "\"strings\":{\"english\":{\"sibling\":\"foreign\"}}}");
+    create("overrides/outer/sibling/assets/generated/decls/material/sibling/only.decl", "{ color {0,0,1} }");
+    token_movies = (movie_source_fixture){0}; token_movies.stock = 1;
+    mv_build(&token_movies.stock_movie, "GUI/Paint", "Absent");
+    sh_package_sources *sources = sh_package_sources_scan(root, error, sizeof(error)); assert(sources);
+    sh_package_compile_environment env = {0}; env.baseline = movie_token_original;
+    sh_package_library_native certified = {0}; certified.source.semantics = movie_semantics;
+    unsigned atlas_seen = 0;
+    certified.source.context = &atlas_seen;
+    int unavailable = 0;
+    certified.strings = (sh_package_string_reservations){movie_late_reserve, &unavailable, 4, label_reserve_global};
+    sh_package_library library = {0};
+    /* A missing atlas adapter must reject authored material admission. */
+    assert(!sh_package_library_compile(sources, &env, NULL, movie_token_original, NULL, registry,
+        (uintptr_t)native->reflection, &certified, &library, error, sizeof(error)));
+    assert(strstr(error, "prepared native atlas binding") && !library.compiled && !library.consumers);
+    certified.atlas = movie_late_atlas;
+    unavailable = 1;
+    assert(!sh_package_library_compile(sources, &env, NULL, movie_token_original, NULL, registry,
+        (uintptr_t)native->reflection, &certified, &library, error, sizeof(error)));
+    assert(strstr(error, "native string ID reservation failed") && !library.compiled && !library.consumers);
+    unavailable = 0;
+    int ok = sh_package_library_compile(sources, &env, NULL, movie_token_original, NULL, registry,
+        (uintptr_t)native->reflection, &certified, &library, error, sizeof(error));
+    if (!ok) fprintf(stderr, "late movie namespaces: %s\n", error);
+    assert(ok);
+    assert((atlas_seen & 3) == 3); /* General preparation also admits the valid sibling. */
+    size_t movies = 0, red = 0, green = 0, string_variant = 0;
+    for (size_t i = 0; i < sh_package_consumers_count(library.consumers); i++) {
+        const sh_package_consumer *owner = sh_package_consumers_at(library.consumers, i);
+        if (!sh_package_movie_owner(owner->family, owner->name)) continue;
+        movies++;
+        const sh_compiled_resource *movie = sh_package_compilation_find(library.compiled, owner->name);
+        assert(movie && movie->body_length == token_movies.stock_movie.used &&
+            !memcmp(movie->body, token_movies.stock_movie.data, movie->body_length));
+        char computed[64]; snprintf(computed, sizeof(computed), "%s_%s", "play", "computed");
+        const char *sound = sh_package_consumer_request(owner, "sound", computed);
+        const char *material = sh_package_consumer_request(owner, "material", "LATE\\FX");
+        assert(sound && material && named_resource(library.compiled, "sound", sound));
+        const sh_compiled_resource *fx = named_resource(library.compiled, "material", material);
+        assert(fx);
+        const char *key = NULL;
+        assert(sh_package_movie_string_route(owner, "#str_notice", &key) == 1 && key);
+        const sh_package_localized_string *mapping = NULL;
+        for (size_t j = 0; j < library.compiled->policy.localized_count; j++)
+            if (!strcmp(library.compiled->policy.localized[j].key, key)) mapping = library.compiled->policy.localized + j;
+        assert(mapping && strstr(mapping->mapping, "ancestor") && strstr(mapping->mapping, "#str_notice"));
+        if (strstr(mapping->mapping, "\"B\"")) { string_variant++; assert(strstr((char *)fx->body, "1,0,0")); }
+        else {
+            assert(strstr(mapping->mapping, "\"A\""));
+            if (strstr((char *)fx->body, "1,0,0")) red++;
+            else { green++; assert(strstr((char *)fx->body, "0,1,0")); }
+        }
+        assert(!sh_package_consumer_request(owner, "material", "sibling/only"));
+        assert(!sh_package_consumer_request(owner, "sound", "missing"));
+        assert(sh_package_movie_string_route(owner, "#str_sibling", &key) == 0 && !key);
+        assert(sh_package_movie_string_route(owner, "#str_missing", &key) == 0);
+        assert(sh_package_movie_string_route(owner, "#str_empty", &key) == 1);
+        sh_package_movie_names pair;
+        assert(sh_package_movie_names_for_path(owner->name, &pair) == 1);
+        const sh_compiled_resource *atlas = sh_package_compilation_find(library.compiled, pair.atlas);
+        assert(atlas && sh_package_resource_native_matches(atlas, "image", pair.atlas));
+        /* Companion files form a cycle. Unit-wide late requests are retained
+         * by its first (.bimage) member, reached from this (.bswf) root. */
+        size_t count = library.compiled->resource_count, queued = 1, visited = 0;
+        const sh_compiled_resource **queue = calloc(count, sizeof(*queue));
+        unsigned char *seen = calloc(count, sizeof(*seen));
+        assert(queue && seen);
+        queue[0] = movie; seen[(size_t)(movie - library.compiled->resources)] = 1;
+        int closure = 0, atlas_reached = 0;
+        while (visited < queued) {
+            const sh_compiled_resource *current = queue[visited++];
+            for (size_t j = 0; j < current->bound_dependency_count; j++) {
+                const sh_compiled_resource *dependency = sh_package_compilation_find(library.compiled, current->bound_dependencies[j]);
+                assert(dependency); /* No dangling path may hide an omitted dependency. */
+                assert(!dependency->original_path || strcmp(dependency->original_path,
+                    "generated/decls/material/sibling/only.decl"));
+                if (dependency == atlas) atlas_reached = 1;
+                if (sh_package_resource_native_matches(dependency, "material", material)) closure |= 1;
+                if (sh_package_resource_native_matches(dependency, "sound", sound)) closure |= 2;
+                size_t index = (size_t)(dependency - library.compiled->resources);
+                assert(index < count);
+                if (!seen[index]) { assert(queued < count); seen[index] = 1; queue[queued++] = dependency; }
+            }
+        }
+        free(seen); free(queue);
+        assert(closure == 3 && atlas_reached);
+    }
+    /* a/a2 share; b changes only the nearest material; c only localization. */
+    assert(movies == 3 && red == 1 && green == 1 && string_variant == 1);
+    sh_package_library_free(&library); sh_package_sources_free(sources); cleanup(); assert(!failures);
+    while (native->count) free(native->regions[--native->count].address);
+}
 static void test_contribution_movie_token(void)
 {
     fixture storage; fixture *native = &storage; setup(native); movie_reflection(native);
@@ -8520,8 +9237,8 @@ static void anon_layout(const owners_run *run, const char *name, char *out, size
         path = sh_decl_tree_member(item, "path"); label = sh_decl_tree_member(item, "descriptionTag");
         type = sh_decl_tree_member(item, "type");
         /* node_value returns one shared buffer: copy each before the next. */
-        if (path) snprintf(path_text, sizeof(path_text), "%s", node_value(path));
-        if (label) snprintf(label_text, sizeof(label_text), "=%s", node_value(label));
+        if (path && *node_value(path)) snprintf(path_text, sizeof(path_text), "%s", node_value(path));
+        if (label && *node_value(label)) snprintf(label_text, sizeof(label_text), "=%s", node_value(label));
         if (type) snprintf(type_text, sizeof(type_text), ":%s", node_value(type));
         used += snprintf(out + used, capacity - used, "%s%s%s%s", k ? "," : "", path_text, label_text, type_text);
         if (used >= capacity) break;
@@ -8796,7 +9513,9 @@ static void native_controls(const char *const *texts, size_t text_count, char *o
                                 while (at < c->count && strcmp(c->keys[at], field->key)) at++;
                                 if (at == c->count) { assert(c->count < 12); c->count++; }
                                 snprintf(c->keys[at], sizeof(c->keys[at]), "%s", field->key);
-                                snprintf(c->values[at], sizeof(c->values[at]), "%s", node_value(field));
+                                snprintf(c->values[at], sizeof(c->values[at]), "%s",
+                                    !strcmp(field->key, "inspector") && field->value &&
+                                    !strcmp(field->value, "NULL") ? "" : node_value(field));
                             }
                         }
                     }
@@ -8816,8 +9535,14 @@ static void native_controls(const char *const *texts, size_t text_count, char *o
                 memcpy(c->values[b], value, sizeof(value));
             }
         if (j) strcat_s(out, capacity, ";");
+        int emitted = 0;
         for (int a = 0; a < c->count; a++) {
-            if (a) strcat_s(out, capacity, ",");
+            /* Apply clears above, then omit only proven empty native defaults
+             * from this semantic summary. Other fields remain observable. */
+            if (!*c->values[a] && (!strcmp(c->keys[a], "path") ||
+                !strcmp(c->keys[a], "displayNameTag") || !strcmp(c->keys[a], "descriptionTag") ||
+                !strcmp(c->keys[a], "inspector"))) continue;
+            if (emitted++) strcat_s(out, capacity, ",");
             strcat_s(out, capacity, c->keys[a]); strcat_s(out, capacity, "="); strcat_s(out, capacity, c->values[a]);
         }
     }
@@ -8838,8 +9563,8 @@ static char *served_text(const owners_run *run, const char *name)
  * text reads there: the edited control keeps its slot and the peer's label,
  * the additions follow it, and no slot keeps a previous occupant's field.
  * A package member stating edit and its list more than once composes as its
- * native form (nobody blamed). A stock child emptying its controls against a
- * peer's addition is an open product gap: reported, nobody excluded. */
+ * native form (nobody blamed). A stock child emptying its controls keeps a
+ * peer's independent addition with fresh native defaults. */
 static void test_contribution_inherited_rekey(void)
 {
     fixture storage; fixture *f = &storage; setup(f); conductor_reflection(f);
@@ -8907,13 +9632,16 @@ static void test_contribution_inherited_rekey(void)
         free(parent); free(child);
         owners_done(&run); sh_package_sources_free(sources); cleanup(); assert(!failures);
     }
-    /* A stock child emptying its controls and a peer's addition: the composed
-     * child keeps the addition (a removal never erases a peer's addition),
-     * which this encoding cannot serve without a stranding count. The
-     * candidate reports the gap and excludes nobody. */
+    /* A stock child emptying its controls keeps the peer's addition. The owning
+     * adapter prepares fresh storage; the native encoding restates that one
+     * control without first clearing an inherited owning list. */
     {
         char added[512];
-        snprintf(added, sizeof(added), whole, "3", "", "item[2] = { displayNameTag = \"#str_size\"; }");
+        /* This native-state case uses real property fields. The other graph
+         * fixtures' synthetic `type` member has no native constructor slot. */
+        snprintf(added, sizeof(added), "%s", "{ edit = { target = \"parent-only\"; propertySheets = { num = 1; "
+            "item[0] = { properties = { num = 3; item[0] = { path = \"health\"; } "
+            "item[1] = { path = \"speed\"; } item[2] = { displayNameTag = \"#str_size\"; } } } } } }");
         registration_root("inherited-zero");
         owners_package("a-add"); owners_file("a-add", "snapeditorentitydef/demo_parent.decl", added);
         owners_package("m-copy"); owners_file("m-copy", "snapeditorentitydef/demo_zero.decl",
@@ -8922,10 +9650,18 @@ static void test_contribution_inherited_rekey(void)
         sh_package_sources *sources = sh_package_sources_scan(root, found, sizeof(found)); assert(sources);
         owners_run run = {0};
         owners_compile(f, registry, sources, NULL, 1, &run);
-        if (run.ok || run.invalid != SIZE_MAX || run.unserved != SIZE_MAX || run.more.count || !strstr(run.error, "proven"))
+        if (!run.ok || run.invalid != SIZE_MAX || run.unserved != SIZE_MAX || run.more.count)
             fprintf(stderr, "inherited zero: ok=%d invalid=%zu unserved=%zu more=%zu %s\n", run.ok, run.invalid, run.unserved,
                 run.more.count, run.error);
-        assert(!run.ok && run.invalid == SIZE_MAX && run.unserved == SIZE_MAX && !run.more.count && strstr(run.error, "proven"));
+        assert(run.ok && run.invalid == SIZE_MAX && run.unserved == SIZE_MAX && !run.more.count);
+        char *parent = served_text(&run, "demo_parent"), *child = served_text(&run, "demo_zero");
+        assert(parent && child);
+        const char *served[] = {parent, child};
+        native_controls(served, 2, child_read[0], sizeof(child_read[0]));
+        if (strcmp(child_read[0], "displayNameTag=#str_size"))
+            fprintf(stderr, "inherited zero state: %s\nparent: %s\nchild: %s\n", child_read[0], parent, child);
+        assert(!strcmp(child_read[0], "displayNameTag=#str_size"));
+        free(parent); free(child);
         owners_done(&run); sh_package_sources_free(sources); cleanup(); assert(!failures);
     }
     for (size_t i = 0; i < f->count; i++) free(f->regions[i].address);
@@ -9198,7 +9934,8 @@ static void test_contribution_owners_together(void)
             const sh_decl_node *health = sh_decl_tree_member(properties, "item[0]");
             const sh_decl_node *added = sh_decl_tree_member(properties, "item[2]");
             const sh_decl_node *tag = sh_decl_tree_member(health, "descriptionTag");
-            int placed = tag && !strcmp(node_value(tag), "#str_health") && added && !sh_decl_tree_member(added, "path") &&
+            int placed = tag && !strcmp(node_value(tag), "#str_health") && added &&
+                sh_decl_tree_member(added, "path") && !*node_value(sh_decl_tree_member(added, "path")) &&
                 sh_decl_tree_member(added, "type") && !strcmp(node_value(sh_decl_tree_member(added, "type")), "float");
             if (!placed && child) fprintf(stderr, "withheld gap %d child: %.*s\n", order, (int)child->body_length, (char *)child->body);
             sh_decl_tree_free(tree);
@@ -9245,7 +9982,8 @@ static void test_contribution_owners_together(void)
                 health && !strcmp(node_value(sh_decl_tree_member(health, "path")), "health") &&
                 tag && !strcmp(node_value(tag), "#str_health") &&
                 speed && !strcmp(node_value(sh_decl_tree_member(speed, "path")), "speed") &&
-                added && !sh_decl_tree_member(added, "path") && sh_decl_tree_member(added, "type") &&
+                added && sh_decl_tree_member(added, "path") && !*node_value(sh_decl_tree_member(added, "path")) &&
+                sh_decl_tree_member(added, "type") &&
                 !strcmp(node_value(sh_decl_tree_member(added, "type")), "float") &&
                 !memchr_text(child->body, child->body_length, "#snapmap-plus-slot:");
             if (!placed && child) fprintf(stderr, "relaid gap %d child: %.*s\n", order, (int)child->body_length, (char *)child->body);
@@ -9318,6 +10056,7 @@ int main(void)
     test_implicit_source_link(&f, registry);
     test_library_replay(&f, registry);
     test_source_link_replay(&f, registry);
+    test_lookup_memo(&f, registry);
     test_source_memo(&f, registry);
     test_library_memo(&f, registry);
     test_font_source_link(&f, registry);
@@ -9330,6 +10069,12 @@ int main(void)
     test_registration_row_order();
     test_registration_mixed_lists();
     test_registration_modifier_order();
+    test_registration_numeric_modifier_order();
+    test_registration_full_numeric_modifier_order(0);
+    test_registration_full_numeric_modifier_order(1);
+    test_registration_full_numeric_modifier_order(2);
+    test_registration_full_numeric_modifier_order(3);
+    test_registration_full_numeric_modifier_order(4);
     test_registration_named_modifier_scope();
     test_registration_inherited_lists();
     test_registration_discovered_inheritance();
@@ -9344,10 +10089,12 @@ int main(void)
     test_registration_group_capacity();
     test_registration_pinned_keys();
     test_registration_historical_keys();
+    test_registration_group_member_keys();
     test_registration_historical_conductor();
     test_registration_context_names();
     test_registration_keys();
     test_contribution_movie_token();
+    test_movie_late_namespace();
     test_open_effect_body();
     test_map_occurrences(&f, registry);
     test_library(&f, registry);

@@ -19,6 +19,7 @@
 #include "map_embed.h"
 #include "package_spawn_registry.h"
 #include "strids.h"
+#include "package_movie.h"
 
 static void *(*atlas_lookup)(void *, void *);
 static void *atlas_native_lookup(void *owner, void *material)
@@ -33,6 +34,104 @@ sh_patch_status hook_commit(void *trampoline)
 int hook_unpatch(void *trampoline) { (void)trampoline; CHECK(0); return 0; }
 
 static const char *health_path = "generated/decls/entitydef/ai/cyberdemon.decl";
+static int baseline(void *context,const char *path,unsigned char **body,size_t *length);
+typedef struct finish_token { int old, restoring; } finish_token;
+static struct {
+    int enabled, live, serial, accepts, rejects, calls, preflights, finalizations;
+    int refuse_once, preflight_refuse, cleanup_fault, activation_fault;
+    finish_token *active, *damaged;
+} finish_probe;
+static int probe_finish(void *context,int accepted,int *committed,char *error,size_t capacity)
+{
+    finish_token *token=context; CHECK(token==finish_probe.active); *committed=0;
+    if (accepted==2) {
+        finish_probe.preflights++;
+        if (finish_probe.preflight_refuse) { finish_probe.preflight_refuse=0; return 0; }
+        return 1;
+    }
+    finish_probe.calls++;
+    if (finish_probe.refuse_once) {
+        finish_probe.refuse_once=0; snprintf(error,capacity,"fixture native admission owed"); return 0;
+    }
+    if (accepted) { *committed=1; finish_probe.accepts++; }
+    else { finish_probe.live=token->old; finish_probe.rejects++; }
+    finish_probe.active=NULL;
+    if (accepted && finish_probe.cleanup_fault) {
+        finish_probe.damaged=token;
+        if (finish_probe.cleanup_fault==2) RaiseException(0xe0420001,0,0,NULL);
+        snprintf(error,capacity,"fixture accepted native cleanup damaged"); return -1;
+    }
+    free(token); return 1;
+}
+static void probe_begin(int restoring)
+{
+    if (!finish_probe.enabled) return;
+    CHECK(!finish_probe.active); /* Reject must finish before consumer recovery. */
+    finish_token *token=calloc(1,sizeof(*token)); CHECK(token); if (!token) return;
+    token->old=finish_probe.live; token->restoring=restoring;
+    finish_probe.active=token; finish_probe.live=++finish_probe.serial;
+    CHECK(sh_package_runtime_defer_activation_finish(probe_finish,token));
+    CHECK(!sh_package_runtime_defer_activation_finish(probe_finish,token)); /* Duplicate. */
+}
+static int probe_activate(void *context,int restoring,const sh_package_changes *changes,char *error,size_t capacity)
+{
+    (void)context; (void)changes; probe_begin(restoring);
+    if (!restoring && finish_probe.activation_fault==2) RaiseException(0xe0420002,0,0,NULL);
+    if (!restoring && finish_probe.activation_fault) { snprintf(error,capacity,"fixture native parse failed"); return 0; }
+    return 1;
+}
+static int probe_fsm_installed(void) { return 1; }
+static int probe_fsm_issue(const char *const *names,size_t count) { (void)names; (void)count; return 1; }
+static int probe_fsm_fault;
+static int probe_fsm_publish(const struct sh_fsm_web_table *table)
+{
+    (void)table; CHECK(finish_probe.active);
+    if (probe_fsm_fault) {
+        int fault=probe_fsm_fault; probe_fsm_fault=0;
+        if (fault==2) RaiseException(0xe0420003,0,0,NULL);
+        return 0;
+    }
+    return 1;
+}
+static void test_deferred_activation_finish(void)
+{
+    char map[MAX_PATH],error[2048]; snprintf(map,sizeof(map),"%s\\deferred-map",root);
+    create("deferred-map/overrides/p/package.json","{\"id\":\"deferred\",\"name\":\"Deferred\"}");
+    create("deferred-map/overrides/p/assets/generated/decls/entitydef/ai/cyberdemon.decl","{ edit = { health = 77; } }");
+    for (int fault=0;fault<2;fault++) {
+        sh_package_runtime_test_dispose(); sh_package_runtime_test_baseline(baseline,NULL);
+        CHECK(sh_package_runtime_refresh(root)); memset(&finish_probe,0,sizeof(finish_probe)); finish_probe.enabled=1;
+        CHECK(!sh_package_runtime_defer_activation_finish(probe_finish,&finish_probe)); /* Stale registration. */
+        sh_package_runtime_test_fsm_hook(probe_fsm_installed,probe_fsm_issue,probe_fsm_publish);
+        for (int fail=1;fail<=2;fail++) {
+            finish_probe.activation_fault=fail;
+            CHECK(!sh_package_runtime_activate_map(root,map,(sh_package_activation_guard){0},probe_activate,NULL));
+            CHECK(!finish_probe.active && finish_probe.rejects==fail && finish_probe.accepts==fail);
+        }
+        finish_probe.activation_fault=0;
+        for (int fail=1;fail<=2;fail++) {
+            probe_fsm_fault=fail; int rejects=finish_probe.rejects;
+            CHECK(!sh_package_runtime_activate_map(root,map,(sh_package_activation_guard){0},probe_activate,NULL));
+            CHECK(!finish_probe.active && finish_probe.rejects==rejects+1);
+        }
+        CHECK(sh_package_runtime_activate_map(root,map,(sh_package_activation_guard){0},probe_activate,NULL));
+        CHECK(!finish_probe.active && finish_probe.preflights && sh_package_runtime_admission_ready());
+        finish_probe.preflight_refuse=1;
+        CHECK(!sh_package_runtime_activate_map(root,map,(sh_package_activation_guard){0},probe_activate,NULL));
+        CHECK(!finish_probe.active && sh_package_runtime_admission_ready());
+        finish_probe.cleanup_fault=fault+1;
+        const sh_package_compilation *before=sh_package_runtime_acquire(); sh_package_runtime_release();
+        CHECK(!sh_package_runtime_activate_map(root,map,(sh_package_activation_guard){0},probe_activate,NULL));
+        const sh_package_compilation *latched=sh_package_runtime_acquire(); CHECK(latched && latched!=before); sh_package_runtime_release();
+        CHECK(!finish_probe.active && finish_probe.damaged && !sh_package_runtime_admission_ready());
+        int calls=finish_probe.calls;
+        CHECK(!sh_package_runtime_activate_map(root,NULL,(sh_package_activation_guard){0},probe_activate,NULL));
+        const sh_package_compilation *after=sh_package_runtime_acquire(); CHECK(after==latched); sh_package_runtime_release();
+        CHECK(finish_probe.calls==calls); sh_package_runtime_error(error,sizeof(error)); CHECK(strstr(error,"damaged"));
+        sh_package_runtime_test_fsm_hook(NULL,NULL,NULL); sh_package_runtime_test_dispose();
+        free(finish_probe.damaged); memset(&finish_probe,0,sizeof(finish_probe));
+    }
+}
 static const char *descriptor = "{\"id\":\"installed-bosses\",\"name\":\"Installed Bosses\",\"strings\":{\"en\":{\"label\":\"local\"}}}";
 static const char *original = "{ edit = { health = 25000; } }";
 /* Library compiles that left an unchanged judged package out without
@@ -1261,6 +1360,7 @@ static int activate_atlas(void *context, int restoring,
     const sh_package_changes *changes, char *error, size_t capacity)
 {
     atlas_activation *s = context;
+    probe_begin(restoring);
     int index = restoring ? s->previous : s->next;
     const char *names[] = {"variants/red", "variants/green"};
     char path[256];
@@ -1665,6 +1765,7 @@ static void expect_consumer(const char *owner, const char *target)
 typedef struct consumer_activation {
     const char *owner[2], *target[2];
     int next, previous, calls, recoveries, fail, retained;
+    sh_package_consumer_hold *lifetime;
 } consumer_activation;
 static int consumer_activate(void *context, int restoring, const sh_package_changes *changes, char *error, size_t capacity)
 {
@@ -1672,23 +1773,28 @@ static int consumer_activate(void *context, int restoring, const sh_package_chan
     CHECK(changes && !sh_package_runtime_admission_ready());
     for (int i = 0; i < 2; i++) expect_consumer(state->owner[i],
         i == current || (!i && state->retained) ? state->target[i] : NULL);
+    if (state->lifetime && current == 0 && !state->lifetime->provider) {
+        CHECK(sh_package_runtime_consumer_retain("entitydef", state->owner[0], state->lifetime, error, capacity) == 1);
+        CHECK(state->lifetime->binding && state->lifetime->provider && state->lifetime->lifetime);
+    }
     if (restoring) { state->recoveries++; return 1; }
     state->calls++;
     if (state->fail) { snprintf(error, capacity, "fixture constructor activation failure"); return 0; }
     return 1;
 }
-static void test_constructor_provider_lifetimes(void)
+static void test_constructor_provider_lifetimes(int persistent)
 {
     const char *owner_path = "generated/decls/entitydef/consumer/root.decl";
     const char *leaf_path = "generated/decls/entitydef/consumer/leaf.decl";
     const char *json = "{\"variables\":{\"allocCount\":[0,0,0,0,0],\"string\":[]},"
         "\"entities\":[{\"targetType\":\"idDeclEntityDef\",\"inherit\":\"consumer/root\"}]}";
     char data[MAX_PATH], map[2][MAX_PATH], error[2048], owners[2][1024], targets[2][1024];
-    sh_package_map_plan *plans[2] = {0}; sh_package_consumer_hold held = {0};
+    sh_package_map_plan *plans[2] = {0}; sh_package_consumer_hold held = {0}, lifetime = {0};
     sh_package_occurrence_snapshot *document = NULL;
     admission_fixture f; admission_setup(&f);
     sh_decl_registry_source registry = {&f, admission_read, (uintptr_t)f.registry, NULL};
     consumer_activation state = {{owners[0], owners[1]}, {targets[0], targets[1]}, 0, -1};
+    state.retained = persistent; state.lifetime = persistent ? &lifetime : NULL;
     create("consumer-data/overrides", NULL); snprintf(data, sizeof(data), "%s/consumer-data", root);
     for (int i = 0; i < 2; i++) {
         char path[512]; snprintf(map[i], sizeof(map[i]), "%s/consumer-%c", root, 'a' + i);
@@ -1699,6 +1805,12 @@ static void test_constructor_provider_lifetimes(void)
         snprintf(path, sizeof(path), "consumer-%c/overrides/p/assets/%s", 'a' + i, leaf_path);
         create(path, i ? "{ class = \"Entity\"; edit = { health = 20; } }" :
             "{ class = \"Entity\"; edit = { health = 10; } }");
+        snprintf(path, sizeof(path), "consumer-%c/overrides/p/assets/generated/decls/entitydef/consumer/sibling.decl", 'a' + i);
+        create(path, "{ class = \"Entity\"; edit = { health = 77; } }");
+        snprintf(path, sizeof(path), "consumer-%c/overrides/unrelated/package.json", 'a' + i);
+        create(path, "{\"id\":\"unrelated\",\"name\":\"Unrelated source\"}");
+        snprintf(path, sizeof(path), "consumer-%c/overrides/unrelated/assets/generated/decls/entitydef/consumer/unrelated.decl", 'a' + i);
+        create(path, "{ class = \"Entity\"; edit = { health = 88; } }");
     }
     sh_package_runtime_test_dispose(); sh_package_runtime_test_baseline(baseline, NULL);
     CHECK(sh_package_runtime_refresh(data));
@@ -1716,6 +1828,22 @@ static void test_constructor_provider_lifetimes(void)
     CHECK(strcmp(owners[0], owners[1]) && strcmp(targets[0], targets[1]));
     CHECK(sh_package_runtime_activate_prepared_map(plans[0], (sh_package_activation_guard){0}, consumer_activate, &state));
     CHECK(sh_package_runtime_consumer_acquire("entitydef", owners[0], &held) == 1);
+    if (persistent) {
+        const sh_package_consumer *prior = lifetime.binding;
+        CHECK(sh_package_runtime_consumer_retain("entitydef", owners[0], &lifetime, error, sizeof(error)) == -1);
+        CHECK(lifetime.binding == prior && lifetime.lifetime);
+        sh_package_consumer_hold absent = {0};
+        CHECK(sh_package_runtime_consumer_retain("entitydef", "consumer/not-in-catalog", &absent, error, sizeof(error)) == 0);
+        CHECK(!absent.provider && !absent.binding && !absent.lifetime);
+        for (unsigned allocation = 1; allocation <= 3; allocation++) {
+            sh_package_runtime_test_consumer_allocation_fault(allocation);
+            CHECK(sh_package_runtime_consumer_retain("entitydef", owners[0], &absent, error, sizeof(error)) == -1);
+            CHECK(error[0] && !absent.provider && !absent.binding && !absent.lifetime);
+            CHECK(lifetime.binding == prior && lifetime.lifetime);
+            expect_consumer(owners[0], targets[0]);
+        }
+        sh_package_runtime_test_consumer_allocation_fault(0);
+    }
     state.next = 1; state.previous = 0; state.fail = 1;
     CHECK(!sh_package_runtime_activate_prepared_map(plans[1], (sh_package_activation_guard){0}, consumer_activate, &state));
     CHECK(state.recoveries == 1 && sh_package_runtime_admission_ready());
@@ -1725,6 +1853,7 @@ static void test_constructor_provider_lifetimes(void)
     CHECK(held.binding && !strcmp(sh_package_consumer_find(held.binding, "constructor/target")->name, targets[0]));
     /* Capture a copied A occurrence, then release both plans. Its own lease must
      * retain A's constructor bindings and dependency files beside the B map. */
+    if (!persistent) {
     size_t rebound_length = 0, captured_length = 0;
     char *rebound = sh_package_map_plan_rebind(plans[0], NULL, json, strlen(json), &rebound_length, error, sizeof(error));
     if (!rebound) fprintf(stderr, "consumer rebind: %s\n", error);
@@ -1736,6 +1865,7 @@ static void test_constructor_provider_lifetimes(void)
         CHECK(captured && document); free(captured); HeapFree(GetProcessHeap(), 0, rebound);
     }
     CHECK(document); if (!document) goto done;
+    }
     state.retained = 1; state.previous = 1;
     CHECK(sh_package_runtime_activate_occurrences(NULL, (sh_package_activation_guard){0}, consumer_activate, &state));
     for (int i = 0; i < 2; i++) { sh_package_map_plan_free(plans[i]); plans[i] = NULL; }
@@ -1745,14 +1875,20 @@ static void test_constructor_provider_lifetimes(void)
     const sh_package_compilation *current = sh_package_runtime_acquire(); int retained_leaf = 0;
     for (size_t i = 0; current && i < current->resource_count; i++)
         if (sh_package_resource_native_matches(current->resources + i, "entitydef", targets[0])) retained_leaf = 1;
-    CHECK(retained_leaf); sh_package_runtime_release();
+    CHECK(retained_leaf);
+    CHECK(!historical_resource(current, "generated/decls/entitydef/consumer/sibling.decl"));
+    CHECK(!historical_resource(current, "generated/decls/entitydef/consumer/unrelated.decl"));
+    sh_package_runtime_release();
     sh_package_occurrence_release(document); document = NULL;
+    sh_package_runtime_consumer_release(&lifetime); state.lifetime = NULL;
+    CHECK(!lifetime.provider && !lifetime.binding && !lifetime.lifetime);
     state.retained = 0; state.previous = -1;
     CHECK(sh_package_runtime_activate_occurrences(NULL, (sh_package_activation_guard){0}, consumer_activate, &state));
     expect_consumer(owners[0], NULL);
     CHECK(held.binding && !strcmp(sh_package_consumer_find(held.binding, "constructor/target")->name, targets[0]));
 done:
     sh_package_occurrence_release(document);
+    sh_package_runtime_consumer_release(&lifetime);
     for (int i = 0; i < 2; i++) sh_package_map_plan_free(plans[i]);
     sh_package_runtime_test_dispose(); sh_package_runtime_consumer_release(&held);
     sh_package_runtime_test_constructor_requests(NULL, NULL);
@@ -1761,6 +1897,901 @@ done:
     for (size_t i = 0; i < f.count; i++) free(f.regions[i].address);
     cleanup_resources(data);
 }
+/* Same cooked dictionary and registered readers as test_movie_late_namespace.
+ * There are no ActionScript literals: the late namespace, not token scanning,
+ * must retain computed sound/material names and private localized keys. */
+typedef struct movie_lease_bytes { unsigned char data[512]; size_t used; } movie_lease_bytes;
+static void movie_lease_put(movie_lease_bytes *m, const void *p, size_t n)
+{ CHECK(n <= sizeof(m->data) - m->used); memcpy(m->data + m->used, p, n); m->used += n; }
+static void movie_lease_zero(movie_lease_bytes *m, size_t n)
+{ CHECK(n <= sizeof(m->data) - m->used); memset(m->data + m->used, 0, n); m->used += n; }
+static void movie_lease_word(movie_lease_bytes *m, unsigned n)
+{ unsigned char p[4] = {(unsigned char)(n >> 24), (unsigned char)(n >> 16), (unsigned char)(n >> 8), (unsigned char)n}; movie_lease_put(m, p, 4); }
+static void movie_lease_text(movie_lease_bytes *m, const char *s)
+{ unsigned n = (unsigned)strlen(s); unsigned char p[4] = {(unsigned char)n, (unsigned char)(n >> 8), 0, 0};
+  movie_lease_put(m, p, 4); movie_lease_put(m, s, n); }
+static void movie_lease_build(movie_lease_bytes *m)
+{
+    m->used = 0; movie_lease_word(m, 0x42535717); movie_lease_zero(m, 22);
+    movie_lease_zero(m, 2);
+    for (unsigned i = 0; i < 4; i++) movie_lease_word(m, 0);
+    movie_lease_word(m, 3);
+    movie_lease_word(m, 1); movie_lease_text(m, "GUI/Paint"); movie_lease_zero(m, 32);
+    movie_lease_word(m, 1); movie_lease_text(m, ".atlas"); movie_lease_zero(m, 32);
+    movie_lease_word(m, 5); movie_lease_text(m, "Absent"); movie_lease_zero(m, 6); movie_lease_word(m, 0);
+}
+static int movie_lease_baseline(void *context, const char *path, unsigned char **body, size_t *length)
+{
+    movie_lease_bytes *m = context; const char *text = NULL; const unsigned char *bytes = NULL; size_t n = 0;
+    static const unsigned char glyphs[14] = {'i','d','f','+',0,12,0,0,0,12,0,12,0,0};
+    static const unsigned char atlas[] = "stock atlas pixels";
+    *body = NULL; *length = 0;
+    if (!strcmp(path, "generated/decls/renderparm/color.decl")) text = "{ Vec 0 }";
+    else if (!strcmp(path, "generated/decls/renderparm/landpagefile.decl")) text = "{ String }";
+    else if (!strcmp(path, "generated/swf/stock/panel.bswf")) { bytes = m->data; n = m->used; }
+    else if (!strcmp(path, "generated/swf/stock/panel.bimage")) { bytes = atlas; n = sizeof(atlas) - 1; }
+    else if (!strcmp(path, "fonts/title/64_df.dat")) { bytes = glyphs; n = sizeof(glyphs); }
+    else if (!strcmp(path, "generated/decls/material/fonts/title/64_df.tga.decl")) text = "{ color {1,0,0} }";
+    else if (!strcmp(path, "generated/decls/material/gui/paint.decl")) text = "{ color {0,0,1} }";
+    else if (!strcmp(path, "generated/decls/material/guisolid.decl")) text = "{ color {1,1,1} }";
+    else return 0;
+    if (text) { bytes = (const unsigned char *)text; n = strlen(text); }
+    *body = malloc(n + 1); CHECK(*body); if (!*body) return -1;
+    memcpy(*body, bytes, n); (*body)[n] = 0; *length = n; return 1;
+}
+static void movie_lease_reflection(admission_fixture *f)
+{
+    admission_setup(f);
+    void *managers = admission_alloc(f, 2 * 8), *manager = admission_alloc(f, 0x90);
+    memcpy(managers, *(void **)((char *)f->registry + 8), 8);
+    admission_pointer(managers, 8, manager);
+    admission_pointer(manager, 8, admission_string(f, "sound"));
+    admission_pointer(manager, 0x10, admission_string(f, "idSoundShader"));
+    admission_pointer(f->registry, 8, managers); admission_number(f->registry, 0x10, 2);
+    void *container = *(void **)f->reflection;
+    void *records = admission_alloc(f, 9 * 0x38), *objects = admission_alloc(f, 9 * 16),
+        *pointers = admission_alloc(f, 9 * 16), *fields = admission_alloc(f, 5 * 0x48);
+    memcpy(records, *(void **)((char *)container + 0x20), 6 * 0x38);
+    memcpy(objects, *(void **)((char *)f->reflection + 0x88), 6 * 16);
+    memcpy(pointers, *(void **)((char *)f->reflection + 0xa0), 6 * 16);
+    /* Replace the old terminator, append both readers, and retain a new one. */
+    admission_pointer(records, 5 * 0x38, admission_string(f, "idSoundShader"));
+    admission_pointer(records, 5 * 0x38 + 8, admission_string(f, "idDeclTypeInfo"));
+    admission_pointer(pointers, 5 * 16 + 8, (void *)0x10);
+    admission_pointer(records, 6 * 0x38, admission_string(f, "idSWF"));
+    admission_pointer(records, 6 * 0x38 + 8, admission_string(f, ""));
+    admission_pointer(pointers, 6 * 16 + 8, (void *)0xa0);
+    /* Sound's registered declaration reader must also distinguish non-graph
+     * declarations from the native graph base, as setup_sound does. */
+    admission_pointer(records, 7 * 0x38, admission_string(f, "idDeclTypeInfoGraph"));
+    admission_pointer(records, 7 * 0x38 + 8, admission_string(f, "idDeclTypeInfo"));
+    admission_pointer(objects, 7 * 16 + 8, (void *)0x30);
+    admission_pointer(container, 0x20, records);
+    admission_pointer(f->reflection, 0x88, objects); admission_number(f->reflection, 0x90, 9);
+    admission_pointer(f->reflection, 0xa0, pointers); admission_number(f->reflection, 0xa8, 9);
+    memcpy(fields, *(void **)((char *)records + 0x38 + 0x20), 3 * 0x48);
+    admission_pointer(fields, 3 * 0x48, admission_string(f, "idSWF"));
+    admission_pointer(fields, 3 * 0x48 + 8, admission_string(f, "*"));
+    admission_pointer(fields, 3 * 0x48 + 0x10, admission_string(f, "gui"));
+    admission_number(fields, 3 * 0x48 + 0x1c, 8);
+    admission_pointer(records, 0x38 + 0x20, fields);
+}
+static int movie_lease_reserve(void *context, const char *key, const unsigned char identity[32], const char *mapping)
+{ (void)context; (void)identity; CHECK(key && mapping && !strncmp(key, "#str_smp_loc_", 13)); return 1; }
+static int movie_lease_global(void *context, const char *key)
+{ (void)context; (void)key; return 1; }
+static const sh_package_localized_string *movie_lease_mapping(const sh_package_compilation *compiled, const char *key)
+{
+    for (size_t i = 0; compiled && key && i < compiled->policy.localized_count; i++)
+        if (!strcmp(compiled->policy.localized[i].key, key)) return compiled->policy.localized + i;
+    return NULL;
+}
+static const sh_compiled_resource *movie_lease_named(const sh_package_compilation *compiled, const char *family, const char *name)
+{
+    for (size_t i = 0; compiled && name && i < compiled->resource_count; i++)
+        if (sh_package_resource_native_matches(compiled->resources + i, family, name)) return compiled->resources + i;
+    return NULL;
+}
+typedef struct movie_lease_expected {
+    char owner[1024], sound[1024], material[1024], key[1024], empty[1024];
+    char sibling_key[1024], sibling_owner[1024], sibling_path[1024], unrelated_path[1024];
+} movie_lease_expected;
+static int movie_lease_capture(sh_package_map_plan *plan, movie_lease_expected *out, int variant,
+    int sibling_published)
+{
+    const sh_package_compilation *compiled = sh_package_map_plan_compilation(plan);
+    sh_package_consumer_hold held = {0}; const sh_package_consumer *movie = NULL;
+    /* Current catalog is public; acquire the exact FILE entry after activation. */
+    for (size_t i = 0; compiled && i < compiled->resource_count; i++) {
+        const sh_compiled_resource *r = compiled->resources + i;
+        if (sh_package_movie_owner("file", r->engine_path) &&
+            sh_package_runtime_consumer_acquire("file", r->engine_path, &held) == 1) {
+            const char *candidate_key = NULL;
+            sh_package_movie_string_route(held.binding, "#str_notice", &candidate_key);
+            const sh_package_localized_string *candidate = movie_lease_mapping(compiled, candidate_key);
+            if (candidate && strstr(candidate->mapping, variant ? "\"B\"" : "\"A\"")) {
+                movie = held.binding; break;
+            }
+            sh_package_runtime_consumer_release(&held);
+        }
+    }
+    if (!movie) {
+        fprintf(stderr, "movie capture: %zu resources, %zu localized mappings\n",
+            compiled ? compiled->resource_count : 0, compiled ? compiled->policy.localized_count : 0);
+        for (size_t i = 0; compiled && i < compiled->resource_count; i++) {
+            const sh_compiled_resource *r = compiled->resources + i;
+            fprintf(stderr, "movie resource: %s native %s/%s aliases %zu\n", r->engine_path,
+                r->native_type ? r->native_type : "", r->native_name ? r->native_name : "", r->native_alias_count);
+        }
+        for (size_t i = 0; compiled && i < compiled->policy.localized_count; i++)
+            fprintf(stderr, "movie mapping: %s -> %s\n", compiled->policy.localized[i].key,
+                compiled->policy.localized[i].mapping);
+    }
+    CHECK(movie); if (!movie) return 0;
+    const char *sound = sh_package_consumer_request(movie, "sound", "play_computed");
+    const char *material = sh_package_consumer_request(movie, "material", "LATE\\FX"), *key = NULL, *empty = NULL;
+    CHECK(sh_package_movie_string_route(movie, "#str_notice", &key) == 1);
+    CHECK(sh_package_movie_string_route(movie, "#str_empty", &empty) == 1);
+    CHECK(sound && material && key && empty);
+    if (!sound || !material || !key || !empty) { sh_package_runtime_consumer_release(&held); return 0; }
+    strcpy_s(out->owner, sizeof(out->owner), movie->name); strcpy_s(out->sound, sizeof(out->sound), sound);
+    strcpy_s(out->material, sizeof(out->material), material); strcpy_s(out->key, sizeof(out->key), key);
+    strcpy_s(out->empty, sizeof(out->empty), empty);
+    CHECK(!sh_package_consumer_request(movie, "material", "sibling/only"));
+    CHECK(sh_package_movie_string_route(movie, "#str_sibling", &key) == 0 && !key);
+    const sh_package_localized_string *mapping = movie_lease_mapping(compiled, out->key);
+    CHECK(mapping && strstr(mapping->mapping, variant ? "\"B\"" : "\"A\"") && strstr(mapping->mapping, "ancestor"));
+    const sh_compiled_resource *fx = movie_lease_named(compiled, "material", out->material);
+    CHECK(fx && strstr((const char *)fx->body, variant ? "0,1,0" : "1,0,0"));
+    const sh_compiled_resource *sibling = historical_resource(compiled, "generated/decls/material/sibling/only.decl");
+    const sh_compiled_resource *unrelated = historical_resource(compiled, "generated/decls/entitydef/movie/unrelated.decl");
+    CHECK(sibling && unrelated);
+    if (sibling) strcpy_s(out->sibling_path, sizeof(out->sibling_path), sibling->engine_path);
+    if (unrelated) strcpy_s(out->unrelated_path, sizeof(out->unrelated_path), unrelated->engine_path);
+    for (size_t i = 0; compiled && i < compiled->policy.localized_count; i++)
+        if (strstr(compiled->policy.localized[i].mapping, "#str_sibling"))
+            strcpy_s(out->sibling_key, sizeof(out->sibling_key), compiled->policy.localized[i].key);
+    /* The complete prepared plan contains the distinct sibling namespace. */
+    CHECK(out->sibling_key[0]);
+    sh_package_runtime_consumer_release(&held);
+    if (!sibling_published) {
+        /* Additive admission publishes only the selected occurrence. Resolve
+         * the fixture's one rewritten GUI field in the complete prepared plan,
+         * then prove that unrelated sibling is absent from the serving view. */
+        const sh_compiled_resource *entity = historical_resource(compiled,
+            "generated/decls/entitydef/movie/sibling.decl");
+        const char *start = entity && entity->body ? strstr((const char *)entity->body, "gui = \"") : NULL;
+        if (start) start += strlen("gui = \"");
+        const char *end = start ? strchr(start, '"') : NULL;
+        sh_package_movie_names names = {0};
+        int named = end && sh_package_movie_names_for_consumer(start, (size_t)(end - start), &names) == 1;
+        CHECK(named && sh_package_compilation_find(compiled, names.movie));
+        if (!named) return 0;
+        strcpy_s(out->sibling_owner, sizeof(out->sibling_owner), names.movie);
+        CHECK(sh_package_runtime_consumer_acquire("file", out->sibling_owner, &held) == 0);
+        sh_package_runtime_consumer_release(&held);
+        CHECK(out->sibling_owner[0] && strcmp(out->sibling_owner, out->owner)); return 1;
+    }
+    for (size_t i = 0; compiled && i < compiled->resource_count; i++) {
+        const sh_compiled_resource *r = compiled->resources + i;
+        if (sh_package_movie_owner("file", r->engine_path) &&
+            sh_package_runtime_consumer_acquire("file", r->engine_path, &held) == 1) {
+            const char *sibling_key = NULL;
+            if (sh_package_movie_string_route(held.binding, "#str_sibling", &sibling_key) == 1 &&
+                sibling_key && !strcmp(sibling_key, out->sibling_key))
+                strcpy_s(out->sibling_owner, sizeof(out->sibling_owner), held.binding->name);
+            sh_package_runtime_consumer_release(&held);
+        }
+    }
+    CHECK(out->sibling_owner[0] && strcmp(out->sibling_owner, out->owner)); return 1;
+}
+static void movie_lease_expect(const movie_lease_expected *a, const sh_package_consumer *held,
+    const movie_lease_bytes *bytes, int retained, int vanilla)
+{
+    CHECK(held && !strcmp(held->name, a->owner));
+    const char *sound = sh_package_consumer_request(held, "sound", "play_computed");
+    const char *material = sh_package_consumer_request(held, "material", "LATE\\FX");
+    CHECK(sound && !strcmp(sound, a->sound)); CHECK(material && !strcmp(material, a->material));
+    const char *key = NULL;
+    CHECK(sh_package_movie_string_route(held, "#str_notice", &key) == 1 && key && !strcmp(key, a->key));
+    sh_package_consumer_hold published = {0};
+    CHECK(sh_package_runtime_consumer_acquire("file", a->owner, &published) == 1);
+    key = NULL;
+    CHECK(sh_package_movie_string_route(published.binding, "#str_notice", &key) == 1 && key && !strcmp(key, a->key));
+    sh_package_runtime_consumer_release(&published);
+    const sh_package_compilation *current = sh_package_runtime_acquire();
+    const sh_compiled_resource *movie = movie_lease_named(current, "file", a->owner);
+    CHECK(!!movie == retained);
+    if (retained) {
+        CHECK(movie && movie->body_length == bytes->used && !memcmp(movie->body, bytes->data, bytes->used));
+        const sh_compiled_resource *sound = movie_lease_named(current, "sound", a->sound);
+        CHECK(sound);
+        const sh_compiled_resource *fx = movie_lease_named(current, "material", a->material);
+        CHECK(fx && strstr((const char *)fx->body, "1,0,0"));
+        const sh_package_localized_string *mapping = movie_lease_mapping(current, a->key);
+        CHECK(mapping && strstr(mapping->mapping, "\"A\"") && strstr(mapping->mapping, "ancestor"));
+        CHECK(movie_lease_mapping(current, a->empty));
+        /* Physical movie dependencies and late request targets are distinct
+         * edges. Verify/read both exact closures outside the acquired view. */
+        size_t count = movie ? movie->bound_dependency_count : 0;
+        char **paths = calloc(count + 2, sizeof(*paths));
+        CHECK(paths);
+        unsigned closure = 0;
+        for (size_t i = 0; paths && i < count; i++) {
+            const sh_compiled_resource *dependency = sh_package_compilation_find(current, movie->bound_dependencies[i]);
+            CHECK(dependency);
+            if (dependency && sh_package_resource_native_matches(dependency, "sound", a->sound)) closure |= 1;
+            if (dependency && sh_package_resource_native_matches(dependency, "material", a->material)) closure |= 2;
+            paths[i] = _strdup(movie->bound_dependencies[i]); CHECK(paths[i]);
+        }
+        if (paths && sound) { paths[count] = _strdup(sound->engine_path); CHECK(paths[count]); closure |= 1; }
+        if (paths && fx) { paths[count + 1] = _strdup(fx->engine_path); CHECK(paths[count + 1]); closure |= 2; }
+        count += 2;
+        CHECK(closure == 3);
+        CHECK(!movie_lease_named(current, "file", a->sibling_owner));
+        CHECK(!sh_package_compilation_find(current, a->sibling_path));
+        CHECK(!sh_package_compilation_find(current, a->unrelated_path));
+        CHECK(!movie_lease_mapping(current, a->sibling_key));
+        if (vanilla) {
+            /* The native dictionary projection must contain the retained
+             * private labels; no authored public key or global HUD is allowed. */
+            CHECK(!current->policy.hud.count && !current->policy.hud_binding_count);
+            CHECK(current->policy.strings.count == 2);
+            CHECK(!strncmp(a->key, "#str_", 5) && !strncmp(a->empty, "#str_", 5));
+            unsigned labels = 0;
+            for (size_t i = 0; i < current->policy.strings.count; i++) {
+                const sh_json_member *locale = current->policy.strings.members + i;
+                int english = !strcmp(locale->key, "english"), french = !strcmp(locale->key, "french");
+                sh_json_object values = {0};
+                CHECK(english || french);
+                int parsed = sh_json_parse_object(locale->value_json, strlen(locale->value_json), 16, &values);
+                CHECK(parsed);
+                for (size_t j = 0; parsed && j < values.count; j++) {
+                    const sh_json_member *value = values.members + j;
+                    if (!strcmp(value->key, a->key + 5)) {
+                        CHECK(!strcmp(value->value_json, english ? "\"A\"" : "\"ancestor\""));
+                        labels |= english ? 1 : 2;
+                    } else if (!strcmp(value->key, a->empty + 5)) {
+                        CHECK(english && !strcmp(value->value_json, "\"\"")); labels |= 4;
+                    } else CHECK(0); /* Any public or sibling label is a leak. */
+                }
+                sh_json_object_free(&values);
+            }
+            CHECK(labels == 7);
+            CHECK(!sh_package_owners_count(&current->policy.legacy_string_owners));
+        }
+        sh_package_runtime_release();
+        unsigned char *body = NULL; size_t length = 0;
+        CHECK(sh_package_runtime_read(a->owner, &body, &length) == 1 && length == bytes->used &&
+            body && !memcmp(body, bytes->data, bytes->used)); free(body);
+        for (size_t i = 0; paths && i < count; i++) {
+            body = NULL; length = 0;
+            CHECK(paths[i] && sh_package_runtime_read(paths[i], &body, &length) == 1 && body && length);
+            free(body); free(paths[i]);
+        }
+        free(paths); return;
+    }
+    CHECK(!movie_lease_mapping(current, a->key) && !movie_lease_mapping(current, a->empty));
+    sh_package_runtime_release();
+}
+static int movie_lease_activate(void *context, int restoring, const sh_package_changes *changes,
+    char *error, size_t capacity)
+{ (void)context; (void)restoring; (void)changes; (void)error; (void)capacity; return 1; }
+
+typedef struct movie_rollback_probe {
+    sh_package_map_plan *plan;
+    movie_lease_expected expected;
+    sh_package_movie_hold hold;
+    unsigned forward, recovered;
+    int release_constructor_frame;
+} movie_rollback_probe;
+static void movie_rollback_served(const movie_rollback_probe *probe, const movie_lease_bytes *bytes)
+{
+    const movie_lease_expected *b = &probe->expected;
+    const sh_package_compilation *current = sh_package_runtime_acquire();
+    const sh_compiled_resource *movie = movie_lease_named(current, "file", b->owner);
+    const sh_compiled_resource *sound = movie_lease_named(current, "sound", b->sound);
+    const sh_compiled_resource *fx = movie_lease_named(current, "material", b->material);
+    const sh_package_localized_string *mapping = movie_lease_mapping(current, b->key);
+    CHECK(movie && movie->body_length == bytes->used && !memcmp(movie->body, bytes->data, bytes->used));
+    CHECK(sound && fx && strstr((const char *)fx->body, "0,1,0"));
+    CHECK(mapping && strstr(mapping->mapping, "\"B\"") && strstr(mapping->mapping, "ancestor"));
+    CHECK(movie_lease_mapping(current, b->empty));
+    for (size_t i = 0; movie && i < movie->bound_dependency_count; i++)
+        CHECK(sh_package_compilation_find(current, movie->bound_dependencies[i]));
+    CHECK(!sh_package_compilation_find(current, b->unrelated_path));
+    const sh_compiled_resource *authored = historical_resource(sh_package_map_plan_compilation(probe->plan),
+        "generated/decls/entitydef/movie/screen.decl");
+    CHECK(authored && !sh_package_compilation_find(current, authored->engine_path));
+    CHECK(!sh_package_owners_count(&current->policy.legacy_string_owners));
+    sh_package_runtime_release();
+    unsigned char *body = NULL; size_t length = 0;
+    CHECK(sh_package_runtime_read(b->owner, &body, &length) == 1);
+    CHECK(body && length == bytes->used && !memcmp(body, bytes->data, bytes->used)); free(body);
+}
+static int movie_rollback_activate(void *context, int restoring, const sh_package_changes *changes,
+    char *error, size_t capacity)
+{
+    movie_rollback_probe *probe = context;
+    if (!restoring) {
+        probe->forward++;
+        CHECK(movie_lease_capture(probe->plan, &probe->expected, 1, !probe->release_constructor_frame));
+        CHECK(sh_package_runtime_movie_begin(probe->expected.owner, &probe->hold) == 1);
+        if (probe->release_constructor_frame) sh_package_runtime_movie_release(&probe->hold);
+        snprintf(error, capacity, "injected failure after candidate movie begin"); return 0;
+    }
+    probe->recovered++;
+    /* Recovery must not retire a B file/consumer which the fallback still
+     * serves. The instance may already have returned from its constructor. */
+    for (size_t i = 0; i < changes->count; i++)
+        CHECK(strcmp(changes->items[i].path, probe->expected.owner) ||
+            changes->items[i].kind != SH_PACKAGE_RESOURCE_REMOVED);
+    for (size_t i = 0; i < changes->removed_count; i++)
+        CHECK(strcmp(changes->removed[i].name, probe->expected.owner));
+    const sh_package_compilation *current = sh_package_runtime_acquire();
+    const sh_compiled_resource *fx = movie_lease_named(current, "material", probe->expected.material);
+    int reconstructed = 0;
+    for (size_t i = 0; fx && i < changes->count; i++)
+        if (!strcmp(changes->items[i].path, fx->engine_path) &&
+            changes->items[i].kind == SH_PACKAGE_RESOURCE_REPLACED) reconstructed = 1;
+    CHECK(fx && reconstructed); /* Covers a material fault after diff preparation. */
+    sh_package_runtime_release();
+    return 1;
+}
+static int movie_lease_atlas(void *context, size_t scope, const sh_package_compilation *compiled,
+    const char *material, const char *page_file, sh_package_virtual_atlas *out, char *error, size_t capacity)
+{
+    unsigned *seen = context;
+    (void)scope; (void)error; (void)capacity;
+    CHECK(seen && compiled && material && page_file && out);
+    if (!seen || !compiled || !material || !page_file || !out) return -1;
+    CHECK(!*page_file); if (*page_file) return -1;
+    if (!strcmp(material, "late/fx")) *seen |= 1;
+    if (!strcmp(material, "sibling/only")) *seen |= 2;
+    /* These materials have no VT row. Certify their original empty provider
+     * while retaining the real scoped material-body/dependency validation. */
+    memset(out, 0, sizeof(*out));
+    out->name = "_vmtr"; out->source = "virtualtextures/_vmtr"; out->original = 1;
+    return 1;
+}
+static struct {
+    const char *name;
+    sh_package_movie_hold *hold;
+    unsigned begun, aborted, committed;
+} movie_lease_race;
+static void movie_lease_race_begin(void)
+{
+    movie_lease_race.begun++;
+    if (!movie_lease_race.hold->token)
+        CHECK(sh_package_runtime_movie_begin(movie_lease_race.name, movie_lease_race.hold) == 1);
+}
+static void movie_lease_race_end(int committed)
+{
+    if (committed) movie_lease_race.committed++;
+    else movie_lease_race.aborted++;
+}
+static sh_package_map_plan *movie_lease_prepare(const char *data, const char *map, char *error, size_t capacity)
+{
+    sh_package_sources *sources = sh_package_sources_scan(map, error, capacity);
+    sh_package_provenance recipe = {0}; sh_package_map_plan *plan = NULL;
+    CHECK(sources); if (!sources) return NULL;
+    /* This fixture is authored library content with one namespace per source
+     * component. Historical COMPOSED maps intentionally use another policy. */
+    for (size_t i = 0; i < sources->component_count; i++) {
+        const sh_package_component *component = sources->components + i;
+        const unsigned char *tree = sh_package_source_tree(sources, component->owner);
+        size_t context = tree ? sh_package_provenance_context_add(&recipe, SH_PACKAGE_CONTEXT_ISOLATED,
+            (const unsigned char (*)[32])tree, 1, component->relative) : SIZE_MAX;
+        CHECK(context != SIZE_MAX); if (context == SIZE_MAX) goto done;
+    }
+    CHECK(recipe.context_count == sources->component_count && recipe.context_count);
+    if (recipe.context_count) plan = sh_package_runtime_prepare_map_with_bindings(data, map, &recipe, error, capacity);
+done:
+    sh_package_provenance_free(&recipe); sh_package_sources_free(sources); return plan;
+}
+static void test_movie_file_provider_lifetime_mode(int pooled)
+{
+    char data[MAX_PATH], maps[2][MAX_PATH], error[2048];
+    sh_package_map_plan *plans[2] = {0}; movie_lease_expected expected[2] = {0};
+    sh_package_consumer_hold lifetime = {0}; movie_lease_bytes movie = {0};
+    sh_package_movie_hold first = {0}, second = {0}, delayed = {0}, callback = {0}, stock = {0};
+    movie_rollback_probe rollback = {0};
+    sh_package_occurrence_snapshot *rollback_document = NULL;
+    char *rollback_bound = NULL; size_t rollback_length = 0;
+    const sh_package_consumer *retained = NULL;
+    int first_ended = 0, second_ended = 0;
+    unsigned atlas_seen = 0;
+    admission_fixture f; movie_lease_reflection(&f); movie_lease_build(&movie);
+    sh_decl_registry_source registry = {&f, admission_read, (uintptr_t)f.registry, NULL};
+    sh_package_string_reservations strings = {movie_lease_reserve, NULL, 64, movie_lease_global};
+    create("movie-lease-data/overrides", NULL); snprintf(data, sizeof(data), "%s/movie-lease-data", root);
+    for (unsigned i = 0; i < 2; i++) {
+        char path[512], descriptor[512]; snprintf(maps[i], sizeof(maps[i]), "%s/movie-lease-%c", root, 'a' + i);
+        snprintf(path, sizeof(path), "movie-lease-%c/overrides/outer/package.json", 'a' + i);
+        create(path, "{\"id\":\"movies\",\"name\":\"Movies\",\"strings\":{\"french\":{\"notice\":\"ancestor\"}},"
+            "\"hud\":{\"weapons\":{\"retained-a\":{\"ammo_display\":\"weapon\"}}}}");
+        snprintf(path, sizeof(path), "movie-lease-%c/overrides/outer/assets/generated/decls/material/late/fx.decl", 'a' + i);
+        create(path, i ? "{ color {0,1,0} }" : "{ color {1,0,0} }");
+        snprintf(path, sizeof(path), "movie-lease-%c/overrides/outer/assets/generated/decls/sound/play_computed.decl", 'a' + i);
+        create(path, "{ edit = {} }");
+        snprintf(path, sizeof(path), "movie-lease-%c/overrides/outer/selected/package.json", 'a' + i);
+        snprintf(descriptor, sizeof(descriptor), "{\"id\":\"same\",\"name\":\"Selected movie\",\"strings\":{\"english\":{\"notice\":\"%c\",\"empty\":\"\"}}}", 'A' + i);
+        create(path, descriptor);
+        snprintf(path, sizeof(path), "movie-lease-%c/overrides/outer/selected/assets/generated/decls/entitydef/movie/screen.decl", 'a' + i);
+        create(path, "{ class = \"Entity\"; edit = { gui = \"swf/stock/panel.swf\"; } }");
+        snprintf(path, sizeof(path), "movie-lease-%c/overrides/outer/sibling/package.json", 'a' + i);
+        create(path, i ? "{\"id\":\"sibling\",\"name\":\"Sibling movie\",\"strings\":{\"english\":{\"sibling\":\"foreign B\"}}}" :
+            "{\"id\":\"sibling\",\"name\":\"Sibling movie\",\"strings\":{\"english\":{\"sibling\":\"foreign A\"}}}");
+        snprintf(path, sizeof(path), "movie-lease-%c/overrides/outer/sibling/assets/generated/decls/material/sibling/only.decl", 'a' + i);
+        create(path, i ? "{ color {1,1,0} }" : "{ color {0,0,1} }");
+        snprintf(path, sizeof(path), "movie-lease-%c/overrides/outer/sibling/assets/generated/decls/entitydef/movie/sibling.decl", 'a' + i);
+        create(path, "{ class = \"Entity\"; edit = { gui = \"swf/stock/panel.swf\"; } }");
+        snprintf(path, sizeof(path), "movie-lease-%c/overrides/unrelated/package.json", 'a' + i);
+        create(path, "{\"id\":\"unrelated\",\"name\":\"Unrelated\"}");
+        snprintf(path, sizeof(path), "movie-lease-%c/overrides/unrelated/assets/generated/decls/entitydef/movie/unrelated.decl", 'a' + i);
+        create(path, i ? "{ class = \"Entity\"; edit = { health = 89; } }" :
+            "{ class = \"Entity\"; edit = { health = 88; } }");
+    }
+    sh_package_runtime_test_dispose(); sh_package_runtime_test_baseline(movie_lease_baseline, &movie);
+    CHECK(sh_package_runtime_refresh(data));
+    sh_package_runtime_test_source_readers(registry, (uintptr_t)f.reflection);
+    /* Existing constructor capture-only seam; source_link still constructs the
+     * real movie namespace and graph. No catalog or closure is injected. */
+    sh_package_runtime_test_constructor_requests(consumer_requests, NULL);
+    sh_package_runtime_test_strings(&strings);
+    sh_package_runtime_test_atlas(movie_lease_atlas, &atlas_seen);
+    for (unsigned i = 0; i < 2; i++) {
+        atlas_seen = 0;
+        plans[i] = movie_lease_prepare(data, maps[i], error, sizeof(error));
+        if (!plans[i]) fprintf(stderr, "movie lease prepare: %s\n", error);
+        CHECK(plans[i]); if (!plans[i]) goto done;
+        CHECK((atlas_seen & 3) == 3); /* Target and nonselected sibling were both inspected. */
+        if (pooled >= 2) {
+            /* The ordinary closure fixture certifies an empty VMTR. Recovery
+             * reconstruction needs an actual mapped binding, so add the same
+             * valid test-owned row used by the native atlas transaction case. */
+            const sh_compiled_resource *fx = historical_resource(sh_package_map_plan_compilation(plans[i]),
+                "generated/decls/material/late/fx.decl");
+            sh_virtual_material_record row = {"source/texture", 0, 0, 16, 16, 0, 1, 2};
+            sh_virtual_material_runtime_binding binding = {fx ? fx->name : NULL, "_vmtr", &row, 0};
+            CHECK(fx && fx->name); if (!fx || !fx->name) goto done;
+            int bound = sh_package_map_plan_bind_virtual_materials(plans[i], &binding, 1, error, sizeof(error));
+            if (!bound) fprintf(stderr, "movie rollback atlas binding mode %d: %s\n", pooled, error);
+            CHECK(bound); if (!bound) goto done;
+        }
+    }
+    if (pooled >= 2) {
+        CHECK(sh_package_runtime_activate_prepared_map(plans[0], (sh_package_activation_guard){0}, NULL, NULL));
+        CHECK(movie_lease_capture(plans[0], expected, 0, 1));
+        rollback.plan = plans[1]; rollback.release_constructor_frame = pooled == 3;
+        if (pooled >= 3) {
+            /* A fresh isolated use names the prepared native catalog identity.
+             * No historical occurrence exists to select an authored spelling. */
+            const sh_compiled_resource *screen = historical_resource(sh_package_map_plan_compilation(plans[1]),
+                "generated/decls/entitydef/movie/screen.decl");
+            char json[2048];
+            CHECK(screen && screen->name); if (!screen || !screen->name) goto done;
+            snprintf(json, sizeof(json), "{\"variables\":{\"allocCount\":[0,0,0,0,0],\"string\":[]},"
+                "\"entities\":[{\"targetType\":\"idDeclEntityDef\",\"inherit\":\"%s\"}]}", screen->name);
+            size_t length = 0;
+            char *rebound = sh_package_map_plan_rebind(plans[1], NULL, json, strlen(json), &length, error, sizeof(error));
+            if (!rebound) fprintf(stderr, "movie rollback rebind mode %d: %s\n", pooled, error);
+            CHECK(rebound);
+            if (rebound) {
+                rollback_bound = sh_package_runtime_capture_document(plans[1], NULL, NULL, 0, rebound, length,
+                    &rollback_length, &rollback_document, NULL, NULL, error, sizeof(error));
+                if (!rollback_bound || !rollback_document)
+                    fprintf(stderr, "movie rollback capture mode %d: %s\n", pooled, error);
+                HeapFree(GetProcessHeap(), 0, rebound);
+            }
+            CHECK(rollback_bound && rollback_document); if (!rollback_document) goto done;
+        }
+        if (pooled == 4) {
+            /* Clone already covers A, but a post-clone birth still must abort
+             * and retry before the additive publication/activation begins. */
+            memset(&movie_lease_race, 0, sizeof(movie_lease_race));
+            movie_lease_race.name = expected[0].owner; movie_lease_race.hold = &first;
+            CHECK(sh_package_runtime_activate_prepared_occurrences(plans[1], rollback_document,
+                (sh_package_activation_guard){movie_lease_race_begin, movie_lease_race_end},
+                movie_lease_activate, NULL, error, sizeof(error)) == SH_PACKAGE_ADMISSION_READY);
+            CHECK(movie_lease_race.begun == 2 && movie_lease_race.aborted == 1 && movie_lease_race.committed == 1);
+            CHECK(first.binding && first.token && sh_package_runtime_has_map_provider());
+            sh_package_runtime_movie_end_instance(&first); first_ended = 1;
+            sh_package_runtime_movie_release(&first);
+        } else {
+            /* First reserve candidate records, then fail rollback reservation:
+             * there must be no native activation or serving-pointer mutation. */
+            sh_package_runtime_test_consumer_allocation_fault(2);
+            CHECK(!sh_package_runtime_activate_prepared_map(plans[1], (sh_package_activation_guard){0},
+                movie_rollback_activate, &rollback));
+            CHECK(!rollback.forward && !rollback.recovered && !rollback.hold.token);
+            CHECK(!sh_package_runtime_test_consumer_allocation_remaining());
+            CHECK(sh_package_runtime_has_map_provider());
+            const sh_package_compilation *before = sh_package_runtime_acquire();
+            CHECK(movie_lease_named(before, "file", expected[0].owner)); sh_package_runtime_release();
+            sh_package_runtime_test_consumer_allocation_fault(0);
+            if (pooled == 2)
+                CHECK(!sh_package_runtime_activate_prepared_map(plans[1], (sh_package_activation_guard){0},
+                    movie_rollback_activate, &rollback));
+            else
+                CHECK(sh_package_runtime_activate_prepared_occurrences(plans[1], rollback_document,
+                    (sh_package_activation_guard){0}, movie_rollback_activate, &rollback,
+                    error, sizeof(error)) == SH_PACKAGE_ADMISSION_FAILED);
+            CHECK(rollback.forward == 1 && rollback.recovered == 1);
+            CHECK(sh_package_runtime_has_map_provider() && sh_package_runtime_admission_ready());
+            CHECK(sh_package_runtime_movie_borrow(rollback.expected.owner, &callback) == 1);
+            CHECK(callback.binding && !strcmp(callback.binding->name, rollback.expected.owner));
+            movie_rollback_served(&rollback, &movie);
+            /* Cancel the rejected incoming document. Its separately captured
+             * occurrence lease may legitimately retain the B entitydef on a
+             * later refresh; this regression isolates the movie obligation. */
+            sh_package_occurrence_release(rollback_document); rollback_document = NULL;
+            free(rollback_bound); rollback_bound = NULL;
+            /* The same previous map continues. A supported refresh narrows the
+             * preallocated superset while B remains a valid live movie. */
+            CHECK(sh_package_runtime_activate_occurrences(NULL, (sh_package_activation_guard){0},
+                movie_lease_activate, NULL));
+            movie_rollback_served(&rollback, &movie);
+            const sh_package_compilation *narrowed = sh_package_runtime_acquire();
+            CHECK(!movie_lease_named(narrowed, "file", rollback.expected.sibling_owner));
+            CHECK(!movie_lease_mapping(narrowed, rollback.expected.sibling_key));
+            sh_package_runtime_release();
+            sh_package_runtime_movie_end_instance(&callback);
+            sh_package_runtime_movie_release(&callback); sh_package_runtime_movie_release(&rollback.hold);
+        }
+        sh_package_occurrence_release(rollback_document); rollback_document = NULL;
+        free(rollback_bound); rollback_bound = NULL;
+        CHECK(sh_package_runtime_activate_prepared_map(NULL, (sh_package_activation_guard){0}, movie_lease_activate, NULL));
+        const sh_package_compilation *retired = sh_package_runtime_acquire();
+        if (pooled != 4) CHECK(!movie_lease_named(retired, "file", rollback.expected.owner));
+        CHECK(!movie_lease_named(retired, "file", expected[0].owner)); sh_package_runtime_release();
+        size_t providers = 99, live = 99;
+        CHECK(!sh_package_runtime_test_movie_records(&providers, &live) && !providers && !live);
+        goto done;
+    }
+    if (pooled) {
+        size_t before = sh_package_runtime_test_movie_records(NULL, NULL);
+        sh_package_movie_hold untouched = {(const sh_package_consumer *)1, (void *)2};
+        CHECK(sh_package_runtime_movie_begin("generated/swf/stock/panel.bswf", &untouched) == -1);
+        CHECK(untouched.binding == (const sh_package_consumer *)1 && untouched.token == (void *)2);
+        sh_package_runtime_test_consumer_allocation_fault(1);
+        CHECK(!sh_package_runtime_activate_prepared_map(plans[0], (sh_package_activation_guard){0}, NULL, NULL));
+        CHECK(!sh_package_runtime_has_map_provider());
+        CHECK(sh_package_runtime_test_movie_records(NULL, NULL) == before);
+        CHECK(!sh_package_runtime_test_consumer_allocation_remaining());
+        CHECK(sh_package_runtime_movie_begin("generated/swf/stock/panel.bswf", &stock) == 0);
+        CHECK(!stock.binding && !stock.token);
+        sh_package_runtime_test_consumer_allocation_fault(0);
+    }
+    CHECK(sh_package_runtime_activate_prepared_map(plans[0], (sh_package_activation_guard){0}, NULL, NULL));
+    CHECK(movie_lease_capture(plans[0], expected, 0, 1)); if (!expected[0].owner[0]) goto done;
+    if (pooled) {
+        CHECK(sh_package_runtime_movie_borrow(expected[0].owner, &callback) == -1);
+        CHECK(!callback.binding && !callback.token);
+        sh_package_runtime_test_consumer_allocation_fault(1);
+        CHECK(sh_package_runtime_movie_begin(expected[0].owner, &first) == 1);
+        CHECK(first.binding && first.token); if (!first.binding || !first.token) goto done;
+        CHECK(sh_package_runtime_movie_borrow(expected[0].owner, &callback) == 1);
+        CHECK(callback.binding == first.binding && callback.token == first.token);
+        CHECK(sh_package_runtime_movie_begin("generated/swf/stock/panel.bswf", &stock) == 0);
+        CHECK(sh_package_runtime_movie_borrow("generated/swf/stock/panel.bswf", &stock) == 0);
+        CHECK(sh_package_runtime_movie_borrow("generated/swf/missing/not-owned.bswf", &stock) == 0);
+        CHECK(!stock.binding && !stock.token); /* A nested stock request cannot inherit A. */
+        CHECK(sh_package_runtime_test_consumer_allocation_remaining() == 1); /* begin/borrow allocate nothing. */
+        sh_package_runtime_test_consumer_allocation_fault(0);
+        sh_package_runtime_movie_release(&callback);
+        /* The first view selects no live A. Starting A at the prepublication
+         * guard must rebuild that view internally, before native retirement. */
+        sh_package_runtime_movie_end_instance(&first);
+        sh_package_runtime_movie_release(&first);
+        memset(&movie_lease_race, 0, sizeof(movie_lease_race));
+        movie_lease_race.name = expected[0].owner; movie_lease_race.hold = &first;
+        CHECK(sh_package_runtime_activate_prepared_map(NULL,
+            (sh_package_activation_guard){movie_lease_race_begin, movie_lease_race_end}, movie_lease_activate, NULL));
+        CHECK(movie_lease_race.begun == 2 && movie_lease_race.aborted == 1 && movie_lease_race.committed == 1);
+        CHECK(first.binding && first.token && !sh_package_runtime_has_map_provider());
+        unsigned char *race_bytes = NULL; size_t race_length = 0;
+        CHECK(sh_package_runtime_read(expected[0].owner, &race_bytes, &race_length) == 1);
+        CHECK(race_bytes && race_length == movie.used && !memcmp(race_bytes, movie.data, movie.used));
+        free(race_bytes);
+        /* A second provider with the same complete plan uses the live record,
+         * rather than redirecting existing instances to its idle reservation. */
+        CHECK(sh_package_runtime_activate_prepared_map(plans[0], (sh_package_activation_guard){0}, NULL, NULL));
+        CHECK(sh_package_runtime_movie_begin(expected[0].owner, &second) == 1);
+        CHECK(second.binding == first.binding && second.token == first.token);
+        retained = first.binding;
+    } else {
+        CHECK(sh_package_runtime_consumer_retain("file", expected[0].owner, &lifetime, error, sizeof(error)) == 1);
+        CHECK(lifetime.binding && lifetime.lifetime); if (!lifetime.binding || !lifetime.lifetime) goto done;
+        retained = lifetime.binding;
+    }
+    CHECK(sh_package_runtime_activate_prepared_map(plans[1], (sh_package_activation_guard){0}, NULL, NULL));
+    CHECK(movie_lease_capture(plans[1], expected + 1, 1, 1)); if (!expected[1].owner[0]) goto done;
+    CHECK(strcmp(expected[0].owner, expected[1].owner));
+    CHECK(strcmp(expected[0].material, expected[1].material) && strcmp(expected[0].key, expected[1].key));
+    CHECK(strcmp(expected[0].sibling_key, expected[1].sibling_key));
+    CHECK(strcmp(expected[0].sibling_path, expected[1].sibling_path) &&
+        strcmp(expected[0].unrelated_path, expected[1].unrelated_path));
+    const sh_package_compilation *active_b = sh_package_runtime_acquire();
+    const sh_package_localized_string *b_mapping = movie_lease_mapping(active_b, expected[1].key);
+    const sh_compiled_resource *b_fx = movie_lease_named(active_b, "material", expected[1].material);
+    CHECK(b_mapping && strstr(b_mapping->mapping, "\"B\""));
+    CHECK(b_fx && strstr((const char *)b_fx->body, "0,1,0"));
+    sh_package_runtime_release();
+    for (unsigned i = 0; i < 2; i++) { sh_package_map_plan_free(plans[i]); plans[i] = NULL; }
+    if (pooled) {
+        size_t providers = 0, live = 0;
+        CHECK(sh_package_runtime_test_movie_records(&providers, &live) && providers && live == 1);
+        CHECK(sh_package_runtime_movie_borrow(expected[0].owner, &delayed) == 1);
+        CHECK(delayed.binding == retained && delayed.token == first.token);
+        sh_package_runtime_movie_end_instance(&first); first_ended = 1;
+        CHECK(sh_package_runtime_movie_borrow(expected[0].owner, &callback) == 1); /* Second instance still live. */
+        sh_package_runtime_movie_release(&callback);
+        sh_package_runtime_movie_end_instance(&second); second_ended = 1;
+        sh_package_runtime_movie_release(&first); sh_package_runtime_movie_release(&second);
+        CHECK(sh_package_runtime_movie_borrow(expected[0].owner, &callback) == -1);
+        CHECK(!callback.binding && !callback.token);
+        CHECK(sh_package_runtime_test_movie_records(NULL, &live) && live == 1); /* Last entered frame owns A. */
+    }
+    movie_lease_expect(expected, retained, &movie, 1, 0);
+    CHECK(sh_package_runtime_activate_prepared_map(NULL, (sh_package_activation_guard){0}, NULL, NULL));
+    CHECK(!sh_package_runtime_has_map_provider());
+    movie_lease_expect(expected, retained, &movie, 1, 1);
+    if (pooled) {
+        const sh_package_compilation *vanilla = sh_package_runtime_acquire();
+        CHECK(!movie_lease_named(vanilla, "file", expected[1].owner)); /* B was never begun. */
+        sh_package_runtime_release();
+        /* Offline teardown clears the published provider without destroying
+         * the last entered frame. Its exact record remains usable on its own. */
+        sh_package_runtime_test_dispose();
+        CHECK(sh_package_runtime_movie_begin(expected[0].owner, &callback) == 1);
+        CHECK(callback.binding == delayed.binding && callback.token == delayed.token);
+        CHECK(sh_package_runtime_movie_borrow(expected[0].owner, &stock) == 1);
+        CHECK(stock.binding == delayed.binding && stock.token == delayed.token);
+        sh_package_runtime_movie_end_instance(&callback);
+        sh_package_runtime_movie_release(&callback); sh_package_runtime_movie_release(&stock);
+        CHECK(sh_package_runtime_refresh(data));
+        sh_package_runtime_movie_release(&delayed);
+        CHECK(!delayed.token && !delayed.binding);
+        CHECK(sh_package_runtime_occurrences_pending());
+    } else sh_package_runtime_consumer_release(&lifetime);
+    CHECK(!lifetime.binding && !lifetime.provider && !lifetime.lifetime);
+    CHECK(sh_package_runtime_activate_occurrences(NULL, (sh_package_activation_guard){0}, movie_lease_activate, NULL));
+    if (pooled) {
+        size_t providers = 99, live = 99;
+        CHECK(!sh_package_runtime_test_movie_records(&providers, &live) && !providers && !live);
+    }
+    const sh_package_compilation *current = sh_package_runtime_acquire();
+    CHECK(!movie_lease_named(current, "file", expected[0].owner));
+    CHECK(!movie_lease_named(current, "file", expected[1].owner));
+    CHECK(!movie_lease_named(current, "sound", expected[0].sound));
+    CHECK(!movie_lease_named(current, "material", expected[0].material));
+    CHECK(!movie_lease_mapping(current, expected[0].key) && !movie_lease_mapping(current, expected[0].empty));
+    CHECK(!current->policy.localized_count);
+    /* Native originals restored after an override retires may remain served;
+     * no private or package-owned resource may survive this final boundary. */
+    for (size_t i = 0; i < current->resource_count; i++) {
+        const sh_compiled_resource *r = current->resources + i;
+        CHECK((r->native_original || r->restored_original) && !r->original_path);
+        CHECK(!sh_package_owners_count(&r->owners) && !sh_package_owners_count(&r->gameplay_owners));
+        CHECK(r->source == SIZE_MAX && !r->source_count);
+    }
+    CHECK(!current->policy.strings.count && !current->policy.hud.count && !current->policy.hud_binding_count);
+    sh_package_runtime_release();
+    unsigned char *served = NULL; size_t length = 0;
+    CHECK(sh_package_runtime_read(expected[0].owner, &served, &length) == 0); free(served);
+done:
+    sh_package_runtime_test_consumer_allocation_fault(0);
+    if (rollback.expected.owner[0] && sh_package_runtime_movie_borrow(rollback.expected.owner, &stock) == 1) {
+        sh_package_runtime_movie_end_instance(&stock); sh_package_runtime_movie_release(&stock);
+    }
+    sh_package_runtime_movie_release(&rollback.hold);
+    sh_package_occurrence_release(rollback_document); free(rollback_bound);
+    if (!first_ended) sh_package_runtime_movie_end_instance(&first);
+    if (!second_ended) sh_package_runtime_movie_end_instance(&second);
+    sh_package_runtime_movie_release(&callback); sh_package_runtime_movie_release(&delayed);
+    sh_package_runtime_movie_release(&first); sh_package_runtime_movie_release(&second);
+    sh_package_runtime_consumer_release(&lifetime);
+    for (unsigned i = 0; i < 2; i++) sh_package_map_plan_free(plans[i]);
+    sh_package_runtime_test_dispose(); sh_package_runtime_test_constructor_requests(NULL, NULL);
+    sh_package_runtime_test_strings(NULL); sh_package_runtime_test_atlas(NULL, NULL);
+    sh_package_runtime_test_source_readers((sh_decl_registry_source){0}, 0);
+    sh_package_runtime_test_baseline(baseline, NULL);
+    while (f.count) free(f.regions[--f.count].address);
+    cleanup_resources(data);
+}
+static void test_movie_file_provider_lifetime(void) { test_movie_file_provider_lifetime_mode(0); }
+static void test_movie_record_provider_lifetime(void) { test_movie_file_provider_lifetime_mode(1); }
+static void test_movie_rollback_provider_lifetime(void)
+{
+    test_movie_file_provider_lifetime_mode(2); /* Full activation, entered frame remains. */
+    test_movie_file_provider_lifetime_mode(3); /* Additive activation, instance only. */
+    test_movie_file_provider_lifetime_mode(4); /* Additive zero-to-live publication race. */
+}
+/* Library pruning keeps an unchanged SnapMap movie native only when that is
+ * its whole behavior: every captured request names its own unchanged identity.
+ * It then needs no binding or lifetime record, so inventory activation succeeds
+ * and the movie begins as stock. A scope that changes a material the movie
+ * draws, adds a late request or localizes a string keeps a served movie with
+ * its binding, the changed target and a lifetime record. */
+static void native_movie_build(movie_lease_bytes *m, const char *font)
+{
+    m->used = 0; movie_lease_word(m, 0x42535717); movie_lease_zero(m, 22);
+    movie_lease_zero(m, 2);
+    for (unsigned i = 0; i < 4; i++) movie_lease_word(m, 0);
+    movie_lease_word(m, 3);
+    movie_lease_word(m, 1); movie_lease_text(m, "GUI/Paint"); movie_lease_zero(m, 32);
+    movie_lease_word(m, 1); movie_lease_text(m, ".atlas"); movie_lease_zero(m, 32);
+    movie_lease_word(m, 5); movie_lease_text(m, font); movie_lease_zero(m, 6); movie_lease_word(m, 0);
+}
+typedef struct native_movie_seen { char names[8][256]; size_t count; } native_movie_seen;
+static void native_movie_served(native_movie_seen *out)
+{
+    const sh_package_compilation *current = sh_package_runtime_acquire();
+    out->count = 0;
+    for (size_t i = 0; current && i < current->resource_count; i++)
+        for (size_t n = 0; n < sh_package_resource_native_count(current->resources + i); n++) {
+            sh_package_native_identity id = sh_package_resource_native_at(current->resources + i, n);
+            if (!id.type || !id.name || !sh_package_movie_owner(id.type, id.name)) continue;
+            CHECK(out->count < 8);
+            if (out->count < 8) strcpy_s(out->names[out->count++], sizeof(out->names[0]), id.name);
+        }
+    sh_package_runtime_release();
+}
+/* Each served movie must begin with its lifetime record. Returns which changes
+ * the bound plans route: 1 late material, 2 late sound, 4 string, 8 drawn
+ * material, each to its served private target or localized mapping. */
+static unsigned native_movie_records(const char *label)
+{
+    native_movie_seen seen; unsigned routed = 0;
+    native_movie_served(&seen);
+    for (size_t i = 0; i < seen.count; i++) {
+        sh_package_movie_hold hold = {0};
+        int begun = sh_package_runtime_movie_begin(seen.names[i], &hold);
+        fprintf(stderr, "native movie %s: %s begins %d with %zu row(s)\n", label, seen.names[i], begun,
+            hold.binding ? hold.binding->count : 0);
+        CHECK(begun == 1 && hold.binding && hold.token);
+        const sh_package_compilation *current = sh_package_runtime_acquire();
+        for (size_t t = 0; begun == 1 && hold.binding && t < hold.binding->count; t++) {
+            const sh_package_consumer_target *row = hold.binding->targets + t;
+            const sh_compiled_resource *target = movie_lease_named(current, row->family, row->name);
+            if (!strcmp(row->slot, "request/material/gui/paint") && target && target->body &&
+                strstr((const char *)target->body, "0,1,0")) routed |= 1;
+            if (!strcmp(row->slot, "movie/material/guisolid") && target && target->body &&
+                strstr((const char *)target->body, "0,0,0")) routed |= 8;
+            if (!strcmp(row->slot, "request/sound/play_computed") && target) routed |= 2;
+            if (!strcmp(row->family, "string") && movie_lease_mapping(current, row->name)) routed |= 4;
+        }
+        sh_package_runtime_release();
+        if (begun == 1) sh_package_runtime_movie_end_instance(&hold);
+        sh_package_runtime_movie_release(&hold);
+    }
+    return routed;
+}
+static void native_movie_stock(const char *stock)
+{
+    sh_package_movie_hold hold = {0}; sh_package_consumer_hold binding = {0};
+    unsigned char *served = NULL; size_t length = 0;
+    CHECK(sh_package_runtime_read(stock, &served, &length) == 0); free(served);
+    CHECK(sh_package_runtime_consumer_acquire("file", stock, &binding) == 0);
+    sh_package_runtime_consumer_release(&binding);
+    CHECK(sh_package_runtime_movie_begin(stock, &hold) == 0 && !hold.binding && !hold.token);
+    sh_package_runtime_movie_release(&hold);
+}
+/* Captured movies are decided after every other resource. Only an unchanged
+ * movie whose valid plan requests its own identities, none served, stays
+ * native and loses its binding. A changed target, localized or redirected
+ * row keeps the movie published; a changed movie, or one the compilation never
+ * held, keeps its binding too. Other consumers are untouched. */
+static void native_movie_resource(sh_compiled_resource *r, const char *path, const char *type,
+    const char *name, int original)
+{
+    r->engine_path = _strdup(path); r->owns_engine_path = 1; r->source = SIZE_MAX;
+    r->type = _strdup(type); r->name = _strdup(name);
+    r->native_original = original; r->baseline_known = 1;
+    CHECK(r->engine_path && r->type && r->name);
+}
+static void test_native_movie_decisions(void)
+{
+    static const char *const movies[] = {"generated/swf/a/native.bswf", "generated/swf/b/target.bswf",
+        "generated/swf/c/localized.bswf", "generated/swf/d/redirect.bswf", "generated/swf/e/changed.bswf",
+        "generated/swf/f/absent.bswf"};
+    char error[512]; size_t counts[2] = {9, 9};
+    sh_package_consumer_target native_rows[] = {{"movie/font/title", "font", "title"},
+        {"movie/material/a/stock", "material", "a/stock"}};
+    sh_package_consumer_target target_rows[] = {{"movie/material/b/paint", "material", "b/paint"}};
+    sh_package_consumer_target localized_rows[] = {{"movie/string/#str_notice", "string", "#str_notice"}};
+    sh_package_consumer_target redirect_rows[] = {{"request/material/a/stock", "material", "private/stock"}};
+    sh_package_consumer_target font_rows[] = {{"request/material/fonts/title/64_df.tga", "material",
+        "fonts/title/64_df.tga"}};
+    sh_package_consumer rows[] = {{"file", movies[0], native_rows, 2}, {"file", movies[1], target_rows, 1},
+        {"file", movies[2], localized_rows, 1}, {"file", movies[3], redirect_rows, 1},
+        {"file", movies[4], native_rows, 2}, {"file", movies[5], native_rows, 2}, {"font", "title", font_rows, 1}};
+    sh_package_consumers *consumers = sh_package_consumers_create(rows, 7, error, sizeof(error));
+    sh_package_compilation *compiled = calloc(1, sizeof(*compiled));
+    if (compiled) compiled->resources = calloc(8, sizeof(*compiled->resources));
+    CHECK(consumers && compiled && compiled->resources);
+    if (!consumers || !compiled || !compiled->resources) {
+        sh_package_consumers_free(consumers); if (compiled) free(compiled->resources); free(compiled); return;
+    }
+    compiled->resource_count = 8;
+    /* Ordered by engine path; the paint material changed, so it stays served. */
+    native_movie_resource(compiled->resources, "fonts/title/64_df.dat", "font", "title", 1);
+    native_movie_resource(compiled->resources + 1, "generated/decls/material/a/stock.decl", "material", "a/stock", 1);
+    native_movie_resource(compiled->resources + 2, "generated/decls/material/b/paint.decl", "material", "b/paint", 0);
+    for (size_t i = 0; i < 5; i++) native_movie_resource(compiled->resources + 3 + i, movies[i], "file", movies[i], i < 4);
+    CHECK(sh_package_runtime_test_prune_native(compiled, &consumers, counts, error, sizeof(error)) == 3);
+    CHECK(counts[0] == 1 && counts[1] == 3 && compiled->resource_count == 5);
+    CHECK(!sh_package_compilation_find(compiled, movies[0]));
+    for (size_t i = 1; i < 5; i++) CHECK(sh_package_compilation_find(compiled, movies[i]) != NULL);
+    CHECK(sh_package_compilation_find(compiled, "generated/decls/material/b/paint.decl") != NULL);
+    CHECK(sh_package_consumers_count(consumers) == 6 && !sh_package_consumers_find(consumers, "file", movies[0]));
+    for (size_t i = 1; i < 6; i++) CHECK(sh_package_consumers_find(consumers, "file", movies[i]) != NULL);
+    CHECK(sh_package_consumers_find(consumers, "font", "title") != NULL);
+    sh_package_consumers_free(consumers); sh_package_compilation_free(compiled);
+}
+static void test_native_movie_pruning(void)
+{
+    static const char stock[] = "generated/swf/stock/panel.bswf";
+    static const char screen[] = "{ class = \"Entity\"; edit = { gui = \"swf/stock/panel.swf\"; } }";
+    char data[MAX_PATH], error[1024];
+    movie_lease_bytes movie = {0}; unsigned atlas_seen = 0;
+    admission_fixture f; movie_lease_reflection(&f); native_movie_build(&movie, "Title");
+    sh_decl_registry_source registry = {&f, admission_read, (uintptr_t)f.registry, NULL};
+    sh_package_string_reservations strings = {movie_lease_reserve, NULL, 64, movie_lease_global};
+    snprintf(data, sizeof(data), "%s/native-movie", root);
+    create("native-movie/overrides/native/package.json", "{\"id\":\"native-movie\",\"name\":\"Native movie\"}");
+    create("native-movie/overrides/native/assets/generated/decls/entitydef/movie/native_screen.decl", screen);
+    sh_package_runtime_test_dispose(); sh_package_runtime_test_baseline(movie_lease_baseline, &movie);
+    sh_package_runtime_test_source_readers(registry, (uintptr_t)f.reflection);
+    sh_package_runtime_test_constructor_requests(consumer_requests, NULL);
+    sh_package_runtime_test_strings(&strings); sh_package_runtime_test_atlas(movie_lease_atlas, &atlas_seen);
+    sh_package_runtime_test_installed_links(1);
+    int ready = sh_package_runtime_refresh(data);
+    if (!ready) { sh_package_runtime_error(error, sizeof(error)); fprintf(stderr, "native movie: %s\n", error); }
+    CHECK(ready);
+    native_movie_stock(stock);
+    CHECK(native_movie_records("unchanged") == 0);
+    /* The same stock movie drawing a material its scope changes. */
+    create("native-movie/overrides/paint/package.json", "{\"id\":\"paint-movie\",\"name\":\"Paint movie\"}");
+    create("native-movie/overrides/paint/assets/generated/decls/material/gui/paint.decl", "{ color {0,1,0} }");
+    create("native-movie/overrides/paint/assets/generated/decls/entitydef/movie/paint_screen.decl", screen);
+    ready = sh_package_runtime_refresh(data);
+    if (!ready) { sh_package_runtime_error(error, sizeof(error)); fprintf(stderr, "native movie paint: %s\n", error); }
+    CHECK(ready && native_movie_records("paint") == 1);
+    /* A late request in its scope, then a localized string. */
+    create("native-movie/overrides/late/package.json", "{\"id\":\"late-movie\",\"name\":\"Late movie\"}");
+    create("native-movie/overrides/late/assets/generated/decls/sound/play_computed.decl", "{ edit = { } }");
+    create("native-movie/overrides/late/assets/generated/decls/entitydef/movie/late_screen.decl", screen);
+    ready = sh_package_runtime_refresh(data);
+    if (!ready) { sh_package_runtime_error(error, sizeof(error)); fprintf(stderr, "native movie late: %s\n", error); }
+    CHECK(ready && native_movie_records("late") == 3);
+    create("native-movie/overrides/notice/package.json",
+        "{\"id\":\"notice-movie\",\"name\":\"Notice movie\",\"strings\":{\"english\":{\"notice\":\"N\"}}}");
+    create("native-movie/overrides/notice/assets/generated/decls/entitydef/movie/notice_screen.decl", screen);
+    ready = sh_package_runtime_refresh(data);
+    if (!ready) { sh_package_runtime_error(error, sizeof(error)); fprintf(stderr, "native movie notice: %s\n", error); }
+    CHECK(ready && native_movie_records("notice") == 7);
+    /* A material the movie itself draws. */
+    create("native-movie/overrides/solid/package.json", "{\"id\":\"solid-movie\",\"name\":\"Solid movie\"}");
+    create("native-movie/overrides/solid/assets/generated/decls/material/guisolid.decl", "{ color {0,0,0} }");
+    create("native-movie/overrides/solid/assets/generated/decls/entitydef/movie/solid_screen.decl", screen);
+    ready = sh_package_runtime_refresh(data);
+    if (!ready) { sh_package_runtime_error(error, sizeof(error)); fprintf(stderr, "native movie solid: %s\n", error); }
+    CHECK(ready && native_movie_records("solid") == 15);
+    /* The package that only uses the movie still leaves it native. */
+    sh_package_movie_hold hold = {0};
+    CHECK(sh_package_runtime_movie_begin(stock, &hold) == 0 && !hold.token);
+    sh_package_runtime_movie_release(&hold);
+    sh_package_runtime_test_installed_links(0); sh_package_runtime_test_dispose();
+    sh_package_runtime_test_constructor_requests(NULL, NULL);
+    sh_package_runtime_test_strings(NULL); sh_package_runtime_test_atlas(NULL, NULL);
+    sh_package_runtime_test_source_readers((sh_decl_registry_source){0}, 0);
+    sh_package_runtime_test_baseline(baseline, NULL);
+    while (f.count) free(f.regions[--f.count].address);
+    cleanup_resources(data);
+}
+
 static void test_historical_private_preparation(void)
 {
     const char *json = "{\"variables\":{\"allocCount\":[0,0,0,0,0],\"string\":[]},"
@@ -2935,13 +3966,17 @@ static uint32_t lease_registration_request(const sh_compiled_resource *r)
 typedef struct registration_activation {
     uint32_t classification;
     int calls, recoveries, fail;
+    int modified;
+    uint32_t local_classification;
 } registration_activation;
 static int registration_admit(void *context, int restoring, const sh_package_changes *changes,
     char *error, size_t capacity)
 {
     registration_activation *state = context;
     CHECK(sh_package_runtime_test_key_groups_current());
-    CHECK(sh_package_runtime_test_unmodified_type(state->classification) == !restoring);
+    CHECK(sh_package_runtime_test_unmodified_type(state->classification) == (!restoring && !state->modified));
+    CHECK(!sh_package_runtime_test_exact_type(state->classification));
+    CHECK(sh_package_runtime_test_exact_type(state->local_classification));
     for (size_t i = 0; i < changes->count; i++)
         CHECK(changes->items[i].kind == (restoring ? SH_PACKAGE_RESOURCE_REMOVED : SH_PACKAGE_RESOURCE_ADDED));
     if (restoring) { state->recoveries++; return 1; }
@@ -2949,14 +3984,14 @@ static int registration_admit(void *context, int restoring, const sh_package_cha
     if (state->fail) { snprintf(error, capacity, "registration admission fixture failure"); return 0; }
     return 1;
 }
-static void test_retained_registration_meaning(int additive)
+static void test_retained_registration_meaning(int additive, int modified)
 {
     admission_fixture f; lease_registration_setup(&f);
     sh_decl_registry_source registry = {&f, admission_read, (uintptr_t)f.registry, NULL};
     char data[MAX_PATH], map[MAX_PATH], error[2048], request[1024] = "", ai[1024] = "";
     sh_package_map_plan *plan = NULL;
     sh_package_occurrence_snapshot *document = NULL;
-    uint32_t local_key = 0, map_key = 0;
+    uint32_t local_key = 0, map_key = 0, local_classification = 0;
     char local_ai[1024] = "";
     for (size_t i = 0; i < 2; i++) {
         const char *directory = i ? "registration-map" : "registration-data";
@@ -2969,7 +4004,10 @@ static void test_retained_registration_meaning(int additive)
         snprintf(path, sizeof(path), "%s/overrides/variant/assets/generated/decls/entitydef/request.decl", directory);
         create(path, "{ class = \"Entity\"; edit = { spawnType = 524288; } }");
         snprintf(path, sizeof(path), "%s/overrides/variant/assets/generated/decls/entitydef/conductor.decl", directory);
-        create(path, "{ class = \"Entity\"; edit = { aiTypeList = { num = 1; "
+        create(path, i && modified ? "{ class = \"Entity\"; edit = { aiTypeList = { num = 1; "
+            "item[0] = { aiType = 524292; entityDef = \"unit\"; } } globalAIMods = { num = 1; "
+            "item[0] = { aiType = 524288; healthMod = 3; damageMod = 1; } } } }" :
+            "{ class = \"Entity\"; edit = { aiTypeList = { num = 1; "
             "item[0] = { aiType = 524292; entityDef = \"unit\"; } } } }");
     }
     snprintf(data, sizeof(data), "%s/registration-data", root); snprintf(map, sizeof(map), "%s/registration-map", root);
@@ -2986,6 +4024,14 @@ static void test_retained_registration_meaning(int additive)
         if (r->body && strstr((char *)r->body, "spawnType =")) local_key = lease_registration_request(r);
         if (r->body && strstr((char *)r->body, "health = 12000")) strcpy_s(local_ai, sizeof(local_ai), r->native_name);
     }
+    const sh_compiled_resource *local_conductor = sh_package_compilation_find(local, "generated/decls/entitydef/conductor.decl");
+    sh_package_spawn_registry local_rows = {0}; sh_package_key_space numeric_keys = {0};
+    CHECK(local_conductor && sh_package_spawn_registry_read((sh_decl_source){(char *)local_conductor->body,
+        local_conductor->body_length}, &numeric_keys, &local_rows, error, sizeof(error)) == 1);
+    for (size_t i = 0; i < local_rows.count; i++)
+        if (!strcmp(local_rows.rows[i].entity, local_ai)) { local_classification = local_rows.rows[i].mask; break; }
+    sh_package_spawn_registry_free(&local_rows);
+    CHECK(local_classification && sh_package_runtime_test_exact_type(local_classification));
     sh_package_runtime_release(); CHECK(local_key && *local_ai);
     plan = sh_package_runtime_prepare_map(data, map, error, sizeof(error));
     if (!plan) fprintf(stderr, "registration map prepare: %s\n", error);
@@ -3021,19 +4067,23 @@ static void test_retained_registration_meaning(int additive)
             if (classification) break;
         }
         CHECK(classification);
-        registration_activation state = {classification, 0, 0, 1};
+        CHECK(!sh_package_runtime_test_exact_type(classification));
+        registration_activation state = {classification, 0, 0, 1, modified, local_classification};
         CHECK(sh_package_runtime_admit_occurrences(plan, document, (sh_package_activation_guard){0},
             registration_admit, NULL, &state, error, sizeof(error)) == SH_PACKAGE_ADMISSION_FAILED);
         CHECK(state.calls == 1 && state.recoveries == 1 && sh_package_runtime_ready());
         CHECK(sh_package_runtime_test_key_groups_current() &&
             !sh_package_runtime_test_unmodified_type(classification));
+        CHECK(!sh_package_runtime_test_exact_type(classification) &&
+            sh_package_runtime_test_exact_type(local_classification));
         state.fail = 0;
         int result = sh_package_runtime_admit_occurrences(plan, document, (sh_package_activation_guard){0},
             registration_admit, NULL, &state, error, sizeof(error));
         if (result != SH_PACKAGE_ADMISSION_READY) fprintf(stderr, "registration admission: %s\n", error);
         CHECK(result == SH_PACKAGE_ADMISSION_READY && state.calls == 2 && state.recoveries == 1);
         CHECK(sh_package_runtime_test_key_groups_current());
-        CHECK(sh_package_runtime_test_unmodified_type(classification));
+        CHECK(sh_package_runtime_test_unmodified_type(classification) == !modified);
+        CHECK(!sh_package_runtime_test_exact_type(classification));
     } else CHECK(sh_package_runtime_activate_prepared_map(plan, (sh_package_activation_guard){0}, NULL, NULL));
     sh_package_map_plan_free(plan); plan = NULL;
     if (additive) {
@@ -3059,11 +4109,20 @@ static void test_retained_registration_meaning(int additive)
         const sh_package_spawn_row *row = registrations.rows + i;
         if (sh_package_key_request_matches(&groups, map_key, row->mask)) {
             map_matches++; CHECK(!strcmp(row->entity, ai));
-            CHECK(sh_package_runtime_test_unmodified_type(row->mask));
+            CHECK(sh_package_runtime_test_unmodified_type(row->mask) == !modified);
+            CHECK(sh_package_runtime_test_exact_type(row->mask) == modified);
+            if (modified) {
+                size_t first;
+                for (first = 0; first < registrations.modifier_count; first++)
+                    if (registrations.modifiers[first].mask == row->mask) break;
+                CHECK(first < registrations.modifier_count &&
+                    strstr(registrations.modifiers[first].body, "healthMod = 3"));
+            }
         }
         if (sh_package_key_request_matches(&groups, local_key, row->mask)) {
             local_matches++; CHECK(!strcmp(row->entity, local_ai));
             CHECK(!sh_package_runtime_test_unmodified_type(row->mask));
+            CHECK(sh_package_runtime_test_exact_type(row->mask));
         }
     }
     CHECK(map_matches == 1 && local_matches == 1);
@@ -3073,6 +4132,179 @@ done:
     sh_package_runtime_test_dispose(); sh_package_runtime_test_installed_links(0);
     sh_package_runtime_test_spawn_keys(0);
     sh_package_runtime_test_source_readers((sh_decl_registry_source){0}, 0); cleanup_resources(data);
+    while (f.count) free(f.regions[--f.count].address);
+}
+/* An accepted map's unpublished historical key dictionary already owns its
+ * codes while the installed authoring increment is prepared. The active
+ * library beside it owns independent keys throughout this admission. */
+static void test_prepared_map_install_key_reservations(void)
+{
+    admission_fixture f; lease_registration_setup(&f);
+    sh_decl_registry_source registry = {&f, admission_read, (uintptr_t)f.registry, NULL};
+    char data[MAX_PATH], map[MAX_PATH], error[2048] = "";
+    sh_package_map_plan *plan = NULL;
+    sh_package_provenance live = {0};
+    sh_package_occurrence_snapshot *document = NULL, *world = NULL;
+    sh_package_occurrence_tracker *tracker = sh_package_occurrence_tracker_create();
+    sh_package_occurrence_key object_key = {1, 0x1000}, clipboard_key = {2, 0x2000};
+    uintptr_t object = object_key.object;
+    char request_name[1024] = "", map_ai[1024] = "", installed_ai[1024] = "", local_ai[1024] = "";
+    uint32_t map_key = 0, installed_key = 0, local_key = 0, reserved_group = 0;
+    sh_package_key_groups pending_groups = {0}; sh_package_key_set members = {0};
+    for (size_t i = 0; i < 3; i++) {
+        const char *directory = i == 0 ? "keyinstall-data/overrides/local" :
+            i == 1 ? "keyinstall-map/overrides/incoming" : "keyinstall-data/overrides/incoming";
+        char path[512];
+        snprintf(path, sizeof(path), "%s/package.json", directory);
+        create(path, i ? "{\"id\":\"incoming\",\"name\":\"Incoming\"}" :
+            "{\"id\":\"local\",\"name\":\"Local\"}");
+        snprintf(path, sizeof(path), "%s/assets/generated/decls/entitydef/%s.decl", directory, i ? "incoming" : "local");
+        create(path, i ? "{ class = \"Entity\"; edit = { health = 30; } }" :
+            "{ class = \"Entity\"; edit = { health = 12000; } }");
+        snprintf(path, sizeof(path), "%s/assets/generated/decls/entitydef/request.decl", directory);
+        create(path, "{ class = \"Entity\"; edit = { spawnType = 524288; } }");
+        snprintf(path, sizeof(path), "%s/assets/generated/decls/entitydef/conductor.decl", directory);
+        create(path, i ? "{ class = \"Entity\"; edit = { aiTypeList = { num = 1; "
+            "item[0] = { aiType = 524288; entityDef = \"incoming\"; } } } }" :
+            "{ class = \"Entity\"; edit = { aiTypeList = { num = 1; "
+            "item[0] = { aiType = 524288; entityDef = \"local\"; } } } }");
+        if (i == 0) {
+            snprintf(data, sizeof(data), "%s/keyinstall-data", root);
+            snprintf(map, sizeof(map), "%s/keyinstall-map", root);
+            sh_package_runtime_test_dispose();
+            sh_package_runtime_test_baseline(lease_registration_baseline, NULL);
+            sh_package_runtime_test_source_readers(registry, (uintptr_t)f.reflection);
+            sh_package_runtime_test_installed_links(1); sh_package_runtime_test_spawn_keys(1);
+            CHECK(sh_package_runtime_refresh(data));
+            const sh_package_compilation *local = sh_package_runtime_acquire();
+            for (size_t j = 0; local && j < local->resource_count; j++) {
+                const sh_compiled_resource *r = local->resources + j;
+                if (r->body && strstr((char *)r->body, "health = 12000")) strcpy_s(local_ai, sizeof(local_ai), r->native_name);
+                if (r->body && strstr((char *)r->body, "spawnType =")) local_key = lease_registration_request(r);
+            }
+            CHECK(sh_package_provenance_overlay(sh_package_runtime_bindings(), NULL, &live));
+            sh_package_runtime_release(); CHECK(*local_ai && local_key);
+        } else if (i == 1) {
+            plan = sh_package_runtime_prepare_map(data, map, error, sizeof(error));
+            if (!plan) fprintf(stderr, "key install map prepare: %s\n", error);
+            CHECK(plan); if (!plan) goto done;
+        }
+    }
+    const sh_package_compilation *map_compiled = sh_package_map_plan_compilation(plan);
+    for (size_t i = 0; map_compiled && i < map_compiled->resource_count; i++) {
+        const sh_compiled_resource *r = map_compiled->resources + i;
+        if (r->body && strstr((char *)r->body, "spawnType =")) {
+            strcpy_s(request_name, sizeof(request_name), r->native_name); map_key = lease_registration_request(r);
+        }
+        if (r->body && strstr((char *)r->body, "health = 30")) strcpy_s(map_ai, sizeof(map_ai), r->native_name);
+    }
+    CHECK(*request_name && *map_ai && map_key);
+    /* A pending group's code is held even without a single-key binding for
+     * it. Choose the next available marked code so the increment must skip it. */
+    const sh_package_provenance *before = sh_package_runtime_test_plan_bindings(plan, 0);
+    for (size_t i = 0; before && i < before->binding_count; i++) {
+        const sh_package_provenance_binding *b = before->bindings + i;
+        if (!strcmp(b->family, SH_PACKAGE_KEY_FAMILY) && sh_package_key_set_count(&members) < 2)
+            CHECK(sh_package_key_set_add(&members, (uint32_t)strtoul(b->name, NULL, 10)));
+    }
+    for (size_t i = 0; i < SH_PACKAGE_KEY_CODES && !reserved_group; i++) {
+        uint32_t code = sh_package_key_private(i); int held = 0;
+        if (!(code & SH_PACKAGE_KEY_MARKER)) continue;
+        for (size_t j = 0; before && j < before->binding_count; j++)
+            if (!strcmp(before->bindings[j].family, SH_PACKAGE_KEY_FAMILY) &&
+                (uint32_t)strtoul(before->bindings[j].name, NULL, 10) == code) held = 1;
+        for (size_t j = 0; j < live.binding_count; j++)
+            if (!strcmp(live.bindings[j].family, SH_PACKAGE_KEY_FAMILY) &&
+                (uint32_t)strtoul(live.bindings[j].name, NULL, 10) == code) held = 1;
+        if (!held) reserved_group = code;
+    }
+    CHECK(reserved_group && sh_package_key_groups_define(&pending_groups, reserved_group, &members));
+    sh_package_runtime_test_plan_key_table(plan, &pending_groups);
+    CHECK(sh_package_map_plan_prepare_inventory(plan, data, error, sizeof(error)));
+    const sh_package_provenance *pending = sh_package_runtime_test_plan_bindings(plan, 0);
+    const sh_package_provenance *installed = sh_package_runtime_test_plan_bindings(plan, 1);
+    CHECK(pending && installed);
+    size_t historical_keys = 0, installed_keys = 0, collisions = 0;
+    for (size_t i = 0; pending && i < pending->binding_count; i++) {
+        const sh_package_provenance_binding *a = pending->bindings + i;
+        if (strcmp(a->family, SH_PACKAGE_KEY_FAMILY)) continue;
+        historical_keys++;
+        for (size_t j = 0; installed && j < installed->binding_count; j++) {
+            const sh_package_provenance_binding *b = installed->bindings + j;
+            if (!strcmp(b->family, SH_PACKAGE_KEY_FAMILY) && !strcmp(a->name, b->name)) {
+                collisions++;
+                fprintf(stderr, "key install collision: historical %s / installed %s = %s\n", a->original, b->original, a->name);
+            }
+        }
+    }
+    for (size_t i = 0; installed && i < installed->binding_count; i++) {
+        const sh_package_provenance_binding *a = installed->bindings + i;
+        if (strcmp(a->family, SH_PACKAGE_KEY_FAMILY)) continue;
+        installed_keys++;
+        installed_key = (uint32_t)strtoul(a->name, NULL, 10);
+        CHECK(installed_key != reserved_group);
+        for (size_t j = 0; j < live.binding_count; j++) {
+            const sh_package_provenance_binding *b = live.bindings + j;
+            CHECK(strcmp(b->family, SH_PACKAGE_KEY_FAMILY) || strcmp(a->name, b->name));
+        }
+    }
+    CHECK(historical_keys == 32 && installed_keys == 1 && !collisions);
+    CHECK(sh_package_runtime_activate_prepared_map(plan, (sh_package_activation_guard){0}, startup_activation, &(int){0}));
+    inventory_commit_calls = 0; inventory_commit_failure = 0;
+    int committed = sh_package_runtime_commit_map(plan, commit_inventory, error, sizeof(error));
+    if (!committed) fprintf(stderr, "key install commit: %s\n", error);
+    CHECK(committed && inventory_commit_calls == 1);
+    char json[2048]; size_t length = 0;
+    snprintf(json, sizeof(json), "{\"entities\":[{\"targetType\":\"idDeclEntityDef\",\"inherit\":\"%s\"}]}", request_name);
+    char *captured = sh_package_runtime_capture_document(plan, NULL, NULL, 0, json, strlen(json),
+        &length, &document, NULL, NULL, error, sizeof(error));
+    if (!captured) fprintf(stderr, "key install capture: %s\n", error);
+    CHECK(captured && document); free(captured); if (!document) goto done;
+    CHECK(sh_package_occurrence_attach_snapshot(tracker, object_key.namespace_id, &object, 1, document, &world,
+        error, sizeof(error)));
+    CHECK(sh_package_occurrence_copy(tracker, clipboard_key, object_key));
+    sh_package_occurrence_erase_namespace(tracker, object_key.namespace_id);
+    sh_package_occurrence_release(document); document = NULL; sh_package_occurrence_release(world); world = NULL;
+    sh_package_map_plan_free(plan); plan = NULL;
+    int left = sh_package_runtime_activate_prepared_map(NULL, (sh_package_activation_guard){0}, startup_activation, &(int){0});
+    if (!left) { sh_package_runtime_error(error, sizeof(error)); fprintf(stderr, "key install retirement: %s\n", error); }
+    CHECK(left && !sh_package_runtime_has_map_provider());
+    const sh_package_compilation *library = sh_package_runtime_library_acquire();
+    for (size_t i = 0; library && i < library->resource_count; i++) {
+        const sh_compiled_resource *r = library->resources + i;
+        if (r->body && strstr((char *)r->body, "health = 30")) strcpy_s(installed_ai, sizeof(installed_ai), r->native_name);
+    }
+    sh_package_runtime_release(); CHECK(*installed_ai);
+    const sh_package_compilation *current = sh_package_runtime_acquire();
+    const sh_compiled_resource *conductor = sh_package_compilation_find(current, "generated/decls/entitydef/conductor.decl");
+    sh_package_spawn_registry registrations = {0}; sh_package_key_space numeric = {0};
+    CHECK(conductor && sh_package_spawn_registry_read((sh_decl_source){(char *)conductor->body, conductor->body_length},
+        &numeric, &registrations, error, sizeof(error)) == 1);
+    sh_package_runtime_release();
+    sh_package_key_groups groups; sh_package_runtime_test_serving_key_table(&groups);
+    size_t map_matches = 0, installed_matches = 0, local_matches = 0;
+    for (size_t i = 0; i < registrations.count; i++) {
+        const sh_package_spawn_row *row = registrations.rows + i;
+        if (sh_package_key_request_matches(&groups, map_key, row->mask)) {
+            map_matches++; CHECK(!strcmp(row->entity, map_ai));
+        }
+        if (sh_package_key_request_matches(&groups, installed_key, row->mask)) {
+            installed_matches++; CHECK(!strcmp(row->entity, installed_ai));
+        }
+        if (sh_package_key_request_matches(&groups, local_key, row->mask)) {
+            local_matches++; CHECK(!strcmp(row->entity, local_ai));
+        }
+    }
+    CHECK(map_matches == 1 && installed_matches == 1 && local_matches == 1);
+    sh_package_key_set decoded; sh_package_key_decode(&groups, reserved_group, &decoded);
+    CHECK(sh_package_key_set_equal(&members, &decoded));
+    sh_package_spawn_registry_free(&registrations); sh_package_occurrence_erase(tracker, clipboard_key);
+done:
+    sh_package_provenance_free(&live); sh_package_map_plan_free(plan);
+    sh_package_occurrence_release(world); sh_package_occurrence_release(document); sh_package_occurrence_tracker_free(tracker);
+    sh_package_runtime_test_dispose(); sh_package_runtime_test_installed_links(0); sh_package_runtime_test_spawn_keys(0);
+    sh_package_runtime_test_source_readers((sh_decl_registry_source){0}, 0);
+    sh_package_runtime_test_baseline(baseline, NULL); cleanup_resources(data); cleanup_resources(map);
     while (f.count) free(f.regions[--f.count].address);
 }
 static void test_retained_bound_dependencies(void)
@@ -3232,6 +4464,7 @@ static int additive_activate(void *context, int restoring, const sh_package_chan
     char *error, size_t capacity)
 {
     additive_activation *state = context;
+    probe_begin(restoring);
     unsigned char *body = NULL; size_t length = 0;
     CHECK(sh_package_runtime_has_map_provider());
     expect_current(state->old_path, "health = 10");
@@ -3258,6 +4491,7 @@ static int additive_finalize(void *context, char *error, size_t capacity)
 {
     additive_activation *state = context;
     state->finalizations++;
+    if (finish_probe.enabled) { CHECK(finish_probe.active); finish_probe.finalizations++; }
     CHECK(sh_package_runtime_has_map_provider());
     expect_current(state->old_path, "health = 10");
     expect_current(state->new_path, "health = 20");
@@ -3365,6 +4599,21 @@ static void test_additive_occurrence_admission(void)
     current = sh_package_runtime_acquire();
     CHECK(current && current->resource_count == resource_count && current->sources->package_count == owner_count);
     sh_package_runtime_release(); CHECK(state.calls == 6 && state.recoveries == 4);
+    if (finish_probe.enabled) {
+        int finalizations=state.finalizations,accepts=finish_probe.accepts,rejects=finish_probe.rejects;
+        finish_probe.refuse_once=1;
+        CHECK(sh_package_runtime_admit_occurrences(plans[1],documents[1],(sh_package_activation_guard){0},
+            additive_activate,additive_finalize,&state,error,sizeof(error))==SH_PACKAGE_ADMISSION_READY);
+        CHECK(finish_probe.active && finish_probe.accepts==accepts && finish_probe.rejects==rejects &&
+            state.finalizations==finalizations+1 && !sh_package_runtime_admission_ready());
+        /* NEXT admission consumes the previously accepted cleanup, before
+         * refusing new work on an unusable provider. It cannot reject the
+         * committed decision or repeat the disk finalizer. */
+        CHECK(sh_package_runtime_admit_occurrences(plans[1],documents[1],(sh_package_activation_guard){0},
+            additive_activate,additive_finalize,&state,error,sizeof(error))==SH_PACKAGE_ADMISSION_FAILED);
+        CHECK(!finish_probe.active && finish_probe.accepts==accepts+1 && finish_probe.rejects==rejects &&
+            state.finalizations==finalizations+1);
+    }
     lease_activation held = {new_path, 1, 1};
     CHECK(sh_package_runtime_activate_occurrences(NULL, (sh_package_activation_guard){0}, lease_activate, &held));
     unsigned char *unwanted = NULL; size_t unwanted_length = 0;
@@ -4467,6 +5716,10 @@ static int d8r_controls(const library_row *rows, size_t count, const char *name,
                 !strcmp(field->key, "inspector") ? list[index].inspector : NULL;
             size_t capacity = !strcmp(field->key, "path") ? sizeof(list[index].path) : sizeof(list[index].inspector);
             if (slot && sh_decl_tree_literal(field, &text, &text_length) && text_length < capacity) {
+                /* The native declaration-pointer reader clears unquoted NULL;
+                 * it is a constructor default, not an inspector's name. */
+                if (!strcmp(field->key, "inspector") && field->value[0] != '"' &&
+                    text_length == 4 && !memcmp(text, "NULL", 4)) text_length = 0;
                 memcpy(slot, text, text_length); slot[text_length] = 0;
             }
         }
@@ -7053,7 +8306,8 @@ int main(int argc, char **argv)
     test_committed_install_joins_library();
     test_variant_ownership();
     test_installed_inventory_is_not_active_composition();
-    test_native_material_provider_transaction();
+    finish_probe.enabled=1; test_native_material_provider_transaction(); CHECK(!finish_probe.active);
+    finish_probe.enabled=0;
     test_complete_source_snapshots();
     test_original_deliveries_before_compilation();
     test_historical_private_preparation();
@@ -7065,15 +8319,26 @@ int main(int argc, char **argv)
     run_native_inline_library();
     test_native_inline_placement_provenance();
     test_native_inline_placement_label_alias();
-    test_constructor_provider_lifetimes();
+    test_constructor_provider_lifetimes(0);
+    test_constructor_provider_lifetimes(1);
+    test_movie_file_provider_lifetime();
+    test_movie_record_provider_lifetime();
+    test_movie_rollback_provider_lifetime();
+    test_native_movie_pruning();
+    test_native_movie_decisions();
     test_constructor_binding_changes();
     test_native_membership_changes();
     test_retained_occurrence_resources();
     test_retained_bound_dependencies();
-    test_retained_registration_meaning(0);
-    test_retained_registration_meaning(1);
-    test_additive_occurrence_admission();
+    test_retained_registration_meaning(0, 0);
+    test_retained_registration_meaning(1, 0);
+    test_retained_registration_meaning(0, 1);
+    test_retained_registration_meaning(1, 1);
+    test_prepared_map_install_key_reservations();
+    finish_probe.enabled=1; test_additive_occurrence_admission(); CHECK(!finish_probe.active);
+    finish_probe.enabled=0;
     test_fsm_admission();
+    test_deferred_activation_finish();
     test_installed_authoring_admission();
     test_initial_installed_authoring();
     test_local_authoring_defect();

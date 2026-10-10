@@ -77,6 +77,21 @@ typedef struct sl_original {
     int identified; /* identity holds the payload identity of resource.body */
     sh_package_file_identity identity;
 } sl_original;
+/* kind 1: exact canonical supplied-path lookup (including a true miss).
+ * kind 2: successful identity of one immutable supplied resource. No bytes or
+ * provider references are retained, and the two key domains never alias. */
+typedef struct sl_lookup_entry {
+    uint64_t hash;
+    size_t scope;
+    char *key;
+    const sh_compiled_resource *file;
+    sh_package_file_identity identity;
+    int kind;
+} sl_lookup_entry;
+typedef struct sl_lookup_cache {
+    sl_lookup_entry *slots;
+    size_t count, capacity, bytes, peak, limit;
+} sl_lookup_cache;
 /* One recorded discovery a later discovery may replay (sl_replay_*): the
  * reads a scope's reader made to prepare, bind and request a unit, and what
  * they read. Each file, and each scoped path the reader consulted, keeps how
@@ -159,6 +174,8 @@ struct sh_package_source_link {
     sl_store own, *store;
     sh_package_source_memo *memo;
     unsigned long long capture;
+    sl_lookup_cache lookup;
+    sh_package_source_lookup_counters lookup_counts;
     /* Diagnostics only (sh_package_source_link_counters). */
     struct {
         size_t units, binds, original_binds, originals, replayed, recorded, declined, reverse_units;
@@ -171,10 +188,24 @@ struct sh_package_source_link {
         unsigned long long fresh_us; /* within read_us: reads of units not replayed */
         unsigned long long original_us, identify_us; /* capturing and hashing originals */
         unsigned long long companion_us; /* within select_us: material companion requests */
+        unsigned long long applies_without_capture_us;
     } census;
 };
 static int g_sl_replay = 1;
 void sh_package_source_link_replay(int enabled) { g_sl_replay = enabled != 0; }
+static int g_sl_lookup = 0;
+#define SL_LOOKUP_LIMIT (32u * 1024u * 1024u)
+static size_t g_sl_lookup_limit = SL_LOOKUP_LIMIT;
+void sh_package_source_link_lookup_memo(int enabled) { g_sl_lookup = enabled != 0; }
+#ifdef SH_PACKAGE_LIBRARY_TESTING
+static long g_sl_lookup_failures;
+static int g_sl_lookup_collisions;
+void sh_package_source_link_test_lookup(size_t limit, long failures, int collisions)
+{
+    g_sl_lookup_limit = limit < SL_LOOKUP_LIMIT ? limit : SL_LOOKUP_LIMIT;
+    g_sl_lookup_failures = failures; g_sl_lookup_collisions = collisions != 0;
+}
+#endif
 static int g_sl_fsm = 1;
 void sh_package_source_link_fsm(int enabled) { g_sl_fsm = enabled != 0; }
 static const char *const sl_phase_names[9] = {
@@ -203,6 +234,113 @@ static uint64_t sl_hash_text(uint64_t hash, const char *text)
 }
 static uint64_t sl_unit_hash(size_t scope, const char *family, const char *name)
 { return sl_hash_text(sl_hash_text(UINT64_C(14695981039346656037) ^ scope, family), name); }
+static uint64_t sl_lookup_hash(size_t scope, const char *key, const sh_compiled_resource *file)
+{
+#ifdef SH_PACKAGE_LIBRARY_TESTING
+    if (g_sl_lookup_collisions) return 0;
+#endif
+    uint64_t seed = UINT64_C(14695981039346656037) ^ scope;
+    return key ? sl_hash_text(seed, key) : (seed ^ (uint64_t)(uintptr_t)file) * UINT64_C(1099511628211);
+}
+static size_t sl_lookup_slot(const sl_lookup_cache *cache, uint64_t hash, size_t scope,
+    const char *key, const sh_compiled_resource *file)
+{
+    size_t at = (size_t)hash & (cache->capacity - 1);
+    int kind = key ? 1 : 2;
+    while (cache->slots[at].kind) {
+        const sl_lookup_entry *entry = cache->slots + at;
+        if (entry->hash == hash && entry->scope == scope && entry->kind == kind &&
+            (key ? !strcmp(entry->key, key) : entry->file == file)) break;
+        at = (at + 1) & (cache->capacity - 1);
+    }
+    return at;
+}
+static void *sl_lookup_allocate(size_t bytes, int clear)
+{
+#ifdef SH_PACKAGE_LIBRARY_TESTING
+    if (g_sl_lookup_failures > 0) { g_sl_lookup_failures--; return NULL; }
+#endif
+    return clear ? calloc(1, bytes) : malloc(bytes);
+}
+static int sl_lookup_grow(sl_lookup_cache *cache)
+{
+    size_t next = cache->capacity ? cache->capacity * 2 : 64;
+    if (next <= cache->capacity || next > SIZE_MAX / sizeof(*cache->slots)) return 0;
+    size_t bytes = next * sizeof(*cache->slots);
+    /* The budget also covers the temporary old+new slot arrays during growth. */
+    if (cache->bytes > cache->limit || bytes > cache->limit - cache->bytes) return 0;
+    sl_lookup_entry *slots = sl_lookup_allocate(bytes, 1);
+    if (!slots) return 0;
+    sl_lookup_cache grown = *cache; grown.slots = slots; grown.capacity = next;
+    for (size_t i = 0; i < cache->capacity; i++) if (cache->slots[i].kind) {
+        const sl_lookup_entry *entry = cache->slots + i;
+        slots[sl_lookup_slot(&grown, entry->hash, entry->scope, entry->key, entry->file)] = *entry;
+    }
+    if (cache->peak < cache->bytes + bytes) cache->peak = cache->bytes + bytes;
+    cache->bytes += bytes - cache->capacity * sizeof(*cache->slots);
+    free(cache->slots); cache->slots = slots; cache->capacity = next; return 1;
+}
+static sl_lookup_entry *sl_lookup_get(sh_package_source_link *s, size_t scope,
+    const char *key, const sh_compiled_resource *file, int add)
+{
+    sl_lookup_cache *cache = &s->lookup;
+    if (!cache->limit) return NULL;
+    uint64_t hash = sl_lookup_hash(scope, key, file);
+    if (cache->capacity) {
+        size_t at = sl_lookup_slot(cache, hash, scope, key, file);
+        if (cache->slots[at].kind) return cache->slots + at;
+    }
+    if (!add || (cache->count >= cache->capacity / 2 && !sl_lookup_grow(cache))) return NULL;
+    size_t length = key ? strlen(key) + 1 : 0;
+    if (cache->bytes > cache->limit || length > cache->limit - cache->bytes) return NULL;
+    char *copy = length ? sl_lookup_allocate(length, 0) : NULL;
+    if (length && !copy) return NULL;
+    if (length) memcpy(copy, key, length);
+    size_t at = sl_lookup_slot(cache, hash, scope, key, file);
+    sl_lookup_entry *entry = cache->slots + at;
+    entry->hash = hash; entry->scope = scope; entry->key = copy; entry->file = file;
+    entry->kind = key ? 1 : 2; cache->count++; cache->bytes += length;
+    if (cache->peak < cache->bytes) cache->peak = cache->bytes;
+    return entry;
+}
+/* Same canonicalizer call and binary search as sh_package_compilation_find.
+ * Callers that canonicalized first still do so: the resulting original path
+ * must not be substituted with this second supplied-search key. */
+static const sh_compiled_resource *sl_lookup_supplied(sh_package_source_link *s, size_t scope, const char *path)
+{
+    const sh_package_compilation *compiled = s->scopes[scope];
+    char *key = compiled && compiled->canonical_path ? compiled->canonical_path(path) : sh_package_engine_path(path);
+    s->lookup_counts.lookups++;
+    if (!compiled || !key) { free(key); return NULL; }
+    if (!compiled->resource_count) { s->lookup_counts.searches++; free(key); return NULL; }
+    sl_lookup_entry *entry = sl_lookup_get(s, scope, key, NULL, 0);
+    if (entry) { s->lookup_counts.lookup_hits++; free(key); return entry->file; }
+    size_t low = 0, high = compiled->resource_count;
+    const sh_compiled_resource *found = NULL;
+    s->lookup_counts.searches++;
+    while (low < high) {
+        size_t mid = low + (high - low) / 2u;
+        int compare = strcmp(key, compiled->resources[mid].engine_path);
+        if (!compare) { found = compiled->resources + mid; break; }
+        if (compare < 0) high = mid; else low = mid + 1u;
+    }
+    entry = sl_lookup_get(s, scope, key, NULL, 1);
+    if (entry) entry->file = found;
+    free(key); return found;
+}
+static int sl_lookup_identity(sh_package_source_link *s, size_t scope, const sh_compiled_resource *file,
+    sh_package_file_identity *out, char *error, size_t capacity)
+{
+    s->lookup_counts.identities++;
+    sl_lookup_entry *entry = sl_lookup_get(s, scope, NULL, file, 0);
+    if (entry) { s->lookup_counts.identity_hits++; *out = entry->identity; return 1; }
+    s->lookup_counts.identity_computations++;
+    if (file->body) s->lookup_counts.body_hashes++;
+    if (!sh_package_compilation_identity(s->scopes[scope], file, out, error, capacity)) return 0;
+    entry = sl_lookup_get(s, scope, NULL, file, 1);
+    if (entry) entry->identity = *out;
+    return 1;
+}
 static int sl_fail(sh_package_source_link *s, const char *reason, const char *name)
 {
     s->failed = 1;
@@ -394,7 +532,7 @@ static int sl_source_file(sh_package_source_link *s, size_t scope_index,
     int result = -1;
     *out = NULL;
     if (!key) { sl_fail(s, "invalid native dependency path", path); return -1; }
-    file = sh_package_compilation_find(scope, key);
+    file = sl_lookup_supplied(s, scope_index, key);
     if (file) { *out = file; result = 1; }
     else {
         sl_original *original = sl_original_get(s, key);
@@ -803,7 +941,7 @@ static int sl_seed_inputs(sh_package_source_link *s)
             sl_unit *unit = sl_find(s, scope, roots.units[i].family, roots.units[i].name, 1);
             if (!unit) { ok = 0; break; }
             for (size_t f = 0; ok && f < roots.units[i].file_count; f++) {
-                const sh_compiled_resource *file = sh_package_compilation_find(original, roots.units[i].files[f]->engine_path);
+                const sh_compiled_resource *file = sl_lookup_supplied(s, scope, roots.units[i].files[f]->engine_path);
                 ok = file && sl_member(s, unit, file);
             }
         }
@@ -1113,6 +1251,31 @@ static int sl_movie_files(sh_package_source_link *s, sl_unit *unit)
     unit->movie_captured = 1; return 1;
 }
 typedef struct sl_movie_sites { sh_package_binding_resolver reference; void *context; size_t record; } sl_movie_sites;
+/* Freeze the finite namespace after reverse nomination. These resources and
+ * their transitive sources are already captured in this scope; neither the stock catalog nor
+ * script literals are a namespace. Certified unchanged targets are conditional
+ * edges, so they keep ordinary baseline lookup and do not rename a movie. */
+static int sl_movie_late_requests(sh_package_source_link *s)
+{
+    if (s->observe) return 1;
+    for (size_t i = 0; i < s->count; i++) {
+        sl_unit *movie = s->units[i];
+        if (!sh_package_movie_owner(movie->unit.family, movie->unit.name)) continue;
+        sl_discover walk = {s, movie};
+        for (size_t j = 0; j < s->count; j++) {
+            sl_unit *target = s->units[j];
+            if (target->scope != movie->scope ||
+                (strcmp(target->unit.family, "sound") && strcmp(target->unit.family, "material"))) continue;
+            size_t n = strlen(target->unit.family) + strlen(target->unit.name);
+            char *slot = n <= SIZE_MAX - 10 ? malloc(n + 10) : NULL;
+            if (!slot) return sl_env_fail(s, "cannot retain late movie namespace", movie->unit.name);
+            snprintf(slot, n + 10, "request/%s/%s", target->unit.family, target->unit.name);
+            int ok = sl_implicit_add(&walk, slot, target->unit.family, target->unit.name, 1);
+            free(slot); if (!ok) return 0;
+        }
+    }
+    return 1;
+}
 static int sl_movie_resolve(void *context, const char *family, const char *name, const char **replacement)
 {
     sl_movie_sites *sites = context; char slot[48], normalized[256];
@@ -1282,7 +1445,7 @@ static int sl_input_resolve(sh_package_source_link *s, size_t scope, const char 
     memset(&out->identity, 0, sizeof(out->identity));
     if (supplied) {
         out->state = -1;
-        return !identify || sh_package_compilation_identity(s->scopes[scope], supplied, &out->identity, NULL, 0);
+        return !identify || sl_lookup_identity(s, scope, supplied, &out->identity, NULL, 0);
     }
     sl_original *original = sl_original_get(s, path);
     if (!original || original->status < 0) return 0;
@@ -1339,7 +1502,6 @@ static sl_replay *sl_replay_open(sh_package_source_link *s, const sl_unit *unit)
  * content identity when a memo will keep it for later captures. */
 static int sl_replay_complete(sh_package_source_link *s, sl_replay *r)
 {
-    const sh_package_compilation *scope = s->scopes[r->scope];
     int identify = s->memo != NULL;
     /* Without a memo, recordings serve other scopes of this capture only:
      * one that read supplied content is not kept. */
@@ -1347,12 +1509,12 @@ static int sl_replay_complete(sh_package_source_link *s, sl_replay *r)
     for (size_t i = 0; !identify && r->valid && i < r->lookup_count; i++) if (r->lookups[i].state == -1) r->valid = 0;
     for (size_t i = 0; r->valid && i < r->file_count; i++) {
         sl_replay_input *input = r->files + i;
-        const sh_compiled_resource *supplied = input->state == -1 ? sh_package_compilation_find(scope, input->path) : NULL;
+        const sh_compiled_resource *supplied = input->state == -1 ? sl_lookup_supplied(s, r->scope, input->path) : NULL;
         if ((input->state == -1 && !supplied) || !sl_input_resolve(s, r->scope, input->path, supplied, identify, input)) r->valid = 0;
     }
     for (size_t i = 0; r->valid && i < r->lookup_count; i++) {
         sl_replay_input *input = r->lookups + i;
-        const sh_compiled_resource *supplied = input->state == -1 ? sh_package_compilation_find(scope, input->path) : NULL;
+        const sh_compiled_resource *supplied = input->state == -1 ? sl_lookup_supplied(s, r->scope, input->path) : NULL;
         if ((input->state == -1 && !supplied) || !sl_input_resolve(s, r->scope, input->path, supplied, identify, input)) r->valid = 0;
     }
     return r->valid;
@@ -1360,7 +1522,6 @@ static int sl_replay_complete(sh_package_source_link *s, sl_replay *r)
 /* The same files, and every recorded path resolving to the same content. */
 static int sl_replay_applies(sh_package_source_link *s, const sl_unit *unit, const sl_replay *r)
 {
-    const sh_package_compilation *scope = s->scopes[unit->scope];
     int same_capture = r->capture == s->capture;
     if (!r->valid || r->file_count != unit->unit.file_count || (same_capture && r->scope == unit->scope)) return 0;
     for (size_t i = 0; i < r->file_count; i++) {
@@ -1370,7 +1531,7 @@ static int sl_replay_applies(sh_package_source_link *s, const sl_unit *unit, con
     }
     for (size_t i = 0; i < r->lookup_count; i++)
         if (!sl_input_same(s, unit->scope, r->lookups + i,
-            sh_package_compilation_find(scope, r->lookups[i].path), same_capture)) return 0;
+            sl_lookup_supplied(s, unit->scope, r->lookups[i].path), same_capture)) return 0;
     return 1;
 }
 /* What a memo's recordings depend on besides the paths they validate: the
@@ -1667,10 +1828,14 @@ static int sl_discover_unit_requests(sh_package_source_link *s, sl_unit *unit)
         for (const sl_replay *r = sl_store_find(s->store, unit); r; r = r->next) {
             if (!r->valid) continue;
             known = 1; s->census.replay_tries++;
+            unsigned long long captured = s->census.original_us;
             unsigned long long checking = sl_now_us();
             int applies = sl_replay_applies(s, unit, r);
             unsigned long long applying = sl_now_us();
             s->census.applies_us += applying - checking;
+            unsigned long long capture_us = s->census.original_us - captured;
+            if (applying >= checking && applying - checking > capture_us)
+                s->census.applies_without_capture_us += applying - checking - capture_us;
             if (!applies) {
                 if (s->failed) return 0; /* A read that failed while validating. */
                 continue;
@@ -2392,6 +2557,8 @@ static int sl_discover_through(sh_package_source_link *s, size_t *inspected)
 void sh_package_source_link_close(sh_package_source_link *s)
 {
     if (!s) return;
+    for (size_t i = 0; i < s->lookup.capacity; i++) free(s->lookup.slots[i].key);
+    free(s->lookup.slots);
     sl_store_clear(&s->own);
     if (s->memo) _InterlockedExchange(&s->memo->busy, 0);
     for (size_t i = 0; s->readers && i < s->scope_count; i++) sh_package_source_reader_close(s->readers[i]);
@@ -2464,6 +2631,7 @@ sh_package_source_link *sh_package_source_link_open_attributed(const sh_package_
         snprintf(error, capacity, "cannot allocate source linker"); return NULL;
     }
     s->failed_scope = SIZE_MAX;
+    s->lookup.limit = g_sl_lookup ? g_sl_lookup_limit : 0;
     s->error = error; s->error_capacity = capacity; s->catalog = catalog;
     s->original = original; s->original_context = original_context;
     if (native) {
@@ -2540,6 +2708,7 @@ sh_package_source_link *sh_package_source_link_open_attributed(const sh_package_
         if (!sl_discover_through(s, &inspected) || !sl_phase_complete(s)) goto failed;
     }
     s->native.withdrawals = NULL; /* Borrowed for discovery only. */
+    if (!sl_movie_late_requests(s)) goto failed;
     sl_phase(s, 3, &mark);
     if (!sl_shader_accounted(s)) goto failed;
     sl_phase(s, 4, &mark);
@@ -2708,10 +2877,34 @@ const char *sh_package_source_link_counters(const sh_package_source_link *s, cha
             s->census.companion_us / 1000u, s->census.applies_us / 1000u, s->census.replay_tries,
             s->census.apply_us / 1000u, s->census.fresh_us / 1000u, s->census.original_us / 1000u,
             s->census.identify_us / 1000u);
+    size_t used = strlen(out);
+    if (used < capacity)
+        snprintf(out + used, capacity - used, "\nsource link lookup memo: %zu lookups, %zu searches, %zu hits; "
+            "%zu identities, %zu computations, %zu body hashes, %zu hits; %zu entries, %zu bytes, %zu peak bytes, %zu limit; "
+            "replay validation without first original capture %llu ms",
+            s->lookup_counts.lookups, s->lookup_counts.searches, s->lookup_counts.lookup_hits,
+            s->lookup_counts.identities, s->lookup_counts.identity_computations, s->lookup_counts.body_hashes,
+            s->lookup_counts.identity_hits,
+            s->lookup.count, s->lookup.bytes, s->lookup.peak, s->lookup.limit,
+            s->census.applies_without_capture_us / 1000u);
     return out;
 }
 int sh_package_source_link_unit_replayed(const sh_package_source_link *s, size_t index)
 { return s && s->frozen && index < s->count && s->units[index]->replayed; }
+void sh_package_source_link_lookup_counters(const sh_package_source_link *s,
+    sh_package_source_lookup_counters *out)
+{
+    if (!out) return;
+    memset(out, 0, sizeof(*out));
+    if (!s) return;
+    *out = s->lookup_counts;
+    out->entries = s->lookup.count; out->bytes = s->lookup.bytes;
+    out->peak_bytes = s->lookup.peak; out->limit = s->lookup.limit;
+    out->original_captures = s->census.originals;
+    out->original_bytes = s->census.original_bytes; out->original_capture_us = s->census.original_us;
+    out->replay_validation_us = s->census.applies_us;
+    out->replay_validation_without_capture_us = s->census.applies_without_capture_us;
+}
 int sh_package_source_link_identity(sh_package_source_link *s, size_t index,
     const sh_compiled_resource *file, sh_package_file_identity *out, char *error, size_t capacity)
 {
@@ -2732,6 +2925,9 @@ int sh_package_source_link_identity(sh_package_source_link *s, size_t index,
         if (error && capacity) snprintf(error, capacity, "resource identity has no source unit");
         return 0;
     }
+    size_t scope = s->units[index]->scope;
+    if (out && file && s->units[index]->unit.compilation == s->scopes[scope] && sl_supplied_file(s, scope, file))
+        return sl_lookup_identity(s, scope, file, out, error, capacity);
     return sh_package_compilation_identity(s->units[index]->unit.compilation, file, out, error, capacity);
 }
 const char *sh_package_source_link_phases(const sh_package_source_link *source, char *out, size_t capacity)

@@ -48,6 +48,14 @@
 #include "nav_bake.h"
 
 static sh_resource_resident *g_resident_pass;
+static volatile LONG g_editor_committed_cleanup_pending;
+static void ds_cancel_installation(void)
+{
+    /* A committed installation can owe accepted native cleanup. A later
+     * failed-ready check must not request the opposite disk decision. */
+    if (!InterlockedCompareExchange(&g_editor_committed_cleanup_pending,0,0))
+        sh_mpkg_activation_cancel();
+}
 /* Additive admission shares scanners, never runtime reconstruction or the
  * destructive whole-palette rebuild. Its own transaction owns those steps. */
 static int g_additive_scan;
@@ -2833,7 +2841,7 @@ static void __cdecl ds_rearm_command(void)
     if (!InterlockedCompareExchange(&g_runtime_ready, 0, 0) ||
         !sh_user_overrides_enabled_for_launch()) {
         backend_log("decl-server RE-ARM refused: runtime dependencies are unavailable");
-        sh_mpkg_activation_cancel();
+        ds_cancel_installation();
         return;
     }
     if (!ds_runtime_boundary_safe()) {
@@ -2848,7 +2856,7 @@ static void __cdecl ds_rearm_command(void)
             InterlockedExchange(&g_registration_succeeded, 0);
             InterlockedExchange(&g_state, DS_STATE_FAILED);
             backend_log("decl-server RE-ARM refused: interrupted installation recovery or package startup capture is incomplete");
-            sh_mpkg_activation_cancel();
+            ds_cancel_installation();
             return;
         }
     }
@@ -2859,7 +2867,7 @@ static void __cdecl ds_rearm_command(void)
         InterlockedExchange(&g_state, DS_STATE_FAILED);
         backend_log("decl-server RE-ARM refused: native refresh raised an exception");
     }
-    if (!sh_decl_server_registration_succeeded()) sh_mpkg_activation_cancel();
+    if (!sh_decl_server_registration_succeeded()) ds_cancel_installation();
 }
 
 /* Registry watermark/delta promotion uses the same list as native promotion:
@@ -3286,7 +3294,7 @@ void sh_decl_server_rearm_poll(void)
         return;
     }
     if (!InterlockedCompareExchange(&g_runtime_ready, 0, 0)) {
-        sh_mpkg_activation_cancel(); return;
+        ds_cancel_installation(); return;
     }
     if (state != DS_STATE_DONE && state != DS_STATE_FAILED) return;
     if (!ds_runtime_boundary_safe()) return;
@@ -3406,12 +3414,87 @@ static int ds_activation_fault_armed(void)
     return 1;
 }
 
+typedef struct ds_editor_activation {
+    sh_process_heap_scope heap;
+    sh_resource_resident *resident;
+    sh_resource_editor_state *editor;
+    DWORD thread;
+    int succeeded, boot, restoring, installed;
+    struct ds_editor_activation *next;
+} ds_editor_activation;
+static ds_editor_activation *g_editor_activation, *g_editor_activation_diagnostic;
+static int ds_editor_admitted(void *context)
+{
+    ds_editor_activation *pass = context;
+    return pass && pass == g_editor_activation && pass->thread == GetCurrentThreadId() &&
+        pass->resident && sh_resource_resident_owned(pass->resident);
+}
+static int ds_editor_activation_finish(void *context, int accepted, int *committed,
+    char *error, size_t capacity)
+{
+    ds_editor_activation *pass = context;
+    int editor_result = -1, resident_result = 1, heap_result;
+    *committed = 0;
+    if (!pass || pass != g_editor_activation || pass->thread != GetCurrentThreadId()) return 0;
+    if (accepted==2) return pass->succeeded && sh_resource_graph_native_editor_state_ready(pass->editor);
+    accepted = pass->installed || (accepted && pass->succeeded);
+    /* This pending disk commit is fallible. Keep original native storage until
+     * it succeeds, after the runtime's material/FSM/finalizer checks. */
+    if (accepted && !pass->installed && !sh_resource_graph_native_editor_state_ready(pass->editor)) accepted=0;
+    if (accepted && !pass->installed && !pass->boot && !pass->restoring && !sh_rawmap_defers_install_commit()) {
+        __try { accepted = sh_mpkg_activation_commit(error,capacity); }
+        __except (EXCEPTION_EXECUTE_HANDLER) {
+            accepted=0; snprintf(error,capacity,"package installation commit raised exception 0x%08lx",(unsigned long)GetExceptionCode());
+        }
+        pass->installed=accepted;
+        if (pass->installed) InterlockedExchange(&g_editor_committed_cleanup_pending,1);
+    }
+    __try {
+        editor_result = sh_resource_graph_native_editor_state_end(&pass->editor,accepted,committed,error,capacity);
+    } __finally {
+        /* End can reset the out parameter before an exception. Preserve the
+         * irreversible disk decision through that unwind too. The runtime
+         * retains this owned context for diagnostics and never replays End. */
+        if (pass->installed) {
+            *committed=1;
+        }
+        if (*committed) InterlockedExchange(&g_editor_committed_cleanup_pending,1);
+        if (AbnormalTermination()) {
+            InterlockedExchange(&g_runtime_ready,0);
+            InterlockedExchange(&g_registration_succeeded,0);
+            InterlockedExchange(&g_state,DS_STATE_FAILED);
+        }
+    }
+    if (!editor_result) {
+        if (*committed) InterlockedExchange(&g_editor_committed_cleanup_pending,1);
+        return 0; /* Owned admission/context stay alive for retry. */
+    }
+    if (pass->resident) {
+        resident_result = sh_resource_resident_end(pass->resident,
+            editor_result == 1 && *committed,error,capacity);
+        pass->resident = NULL; /* Resident cleanup owns its retained recovery. */
+    }
+    heap_result = sh_process_heap_leave(&pass->heap);
+    g_editor_activation = NULL;
+    if (editor_result < 0 || !heap_result || (*committed && !resident_result)) {
+        if (*committed) InterlockedExchange(&g_editor_committed_cleanup_pending,1);
+        InterlockedExchange(&g_runtime_ready,0);
+        InterlockedExchange(&g_registration_succeeded,0);
+        InterlockedExchange(&g_state,DS_STATE_FAILED);
+        if (!heap_result) {
+            pass->next = g_editor_activation_diagnostic; g_editor_activation_diagnostic = pass;
+        } else free(pass);
+        if (error && capacity && !*error) snprintf(error,capacity,"native activation storage cleanup did not complete");
+        return -1; /* An accepted latch cannot turn into rollback here. */
+    }
+    InterlockedExchange(&g_editor_committed_cleanup_pending,0);
+    free(pass); return 1;
+}
 static int ds_activate_provider(void *context, int restoring,
     const sh_package_changes *changes, char *error, size_t capacity)
 {
-    sh_process_heap_scope scope = {0};
-    sh_resource_resident *resident = NULL;
-    int succeeded = 0, heap_restored = 1;
+    ds_editor_activation *pass = NULL;
+    int succeeded = 0;
     char transition[160];
     snprintf(transition, sizeof(transition), "decl-server: package %s has %zu changed resources and %zu rebound native identities",
         restoring ? "recovery" : "activation", changes->count, changes->rebound_count);
@@ -3420,19 +3503,29 @@ static int ds_activate_provider(void *context, int restoring,
     InterlockedExchange(&g_registration_succeeded, 0);
     InterlockedExchange(&g_rearm_drain_faults, 0);
     if (restoring) backend_log("decl-server: recovering consumers against the previous package provider");
-    /* Match native editor allocation lifetime, and verify scope restoration
-     * BEFORE either the compiler or a pending installation can commit. */
+    if (g_editor_activation || !(pass = calloc(1,sizeof(*pass)))) {
+        snprintf(error,capacity,"native editor activation storage could not be allocated"); return 0;
+    }
+    pass->thread = GetCurrentThreadId(); pass->boot = context != NULL; pass->restoring = restoring;
+    if (!sh_package_runtime_defer_activation_finish(ds_editor_activation_finish,pass)) {
+        free(pass); snprintf(error,capacity,"native editor activation has no serialized finish boundary"); return 0;
+    }
+    g_editor_activation = pass;
+    /* Keep native allocation/render ownership through the runtime's complete
+     * candidate outcome. The deferred finish owns this heap context on every
+     * return and exception unwind. */
     if (!context && (!InterlockedCompareExchange(&g_runtime_ready, 0, 0) ||
-        !sh_process_heap_enter(&g_runtime_heap, &scope))) {
-        if (scope.active) InterlockedExchange(&g_runtime_ready, 0);
+        !sh_process_heap_enter(&g_runtime_heap, &pass->heap))) {
+        if (pass->heap.active) InterlockedExchange(&g_runtime_ready, 0);
         InterlockedExchange(&g_state, DS_STATE_FAILED);
         snprintf(error, capacity, "process heap scope could not be established for package %s",
             restoring ? "recovery" : "activation"); return 0;
     }
     __try {
-        resident = sh_resource_resident_begin(changes, restoring, context != NULL, error, capacity);
-        if (resident) {
-            g_resident_pass = resident;
+        pass->resident = sh_resource_resident_begin(changes, restoring, context != NULL, error, capacity);
+        if (pass->resident && (pass->editor = sh_resource_graph_native_editor_state_begin(
+            ds_editor_admitted,pass,error,capacity))) {
+            g_resident_pass = pass->resident;
             if (context) ds_boot_published(); else ds_rearm_published();
             succeeded = InterlockedCompareExchange(&g_state, 0, 0) == DS_STATE_DONE &&
                 InterlockedCompareExchange(&g_registration_succeeded, 0, 0) != 0;
@@ -3452,9 +3545,10 @@ static int ds_activate_provider(void *context, int restoring,
                 restoring ? "recovery" : "activation");
             /* A provider containing only cooked files has no declaration
              * premark phase. Its captured resources still need reconstruction. */
-            if (succeeded) succeeded = sh_resource_resident_reconstruct(resident, error, capacity) &&
-                sh_resource_resident_drain(resident, error, capacity);
+            if (succeeded) succeeded = sh_resource_resident_reconstruct(pass->resident, error, capacity) &&
+                sh_resource_resident_drain(pass->resident, error, capacity);
             if (succeeded) succeeded = ds_activate_audio(error, capacity);
+            if (succeeded) succeeded = sh_resource_graph_native_editor_state_ok(pass->editor);
         }
     }
     __finally {
@@ -3470,20 +3564,12 @@ static int ds_activate_provider(void *context, int restoring,
         g_res_mark = NULL; g_res_mark_count = 0;
         ds_free_candidates();
         g_resident_pass = NULL;
-        succeeded = sh_resource_resident_end(resident, succeeded &&
-            InterlockedCompareExchange(&g_state, 0, 0) == DS_STATE_DONE, error, capacity);
-        if (!context) heap_restored = sh_process_heap_leave(&scope);
-        if (!heap_restored) {
-            InterlockedExchange(&g_registration_succeeded, 0);
-            InterlockedExchange(&g_state, DS_STATE_FAILED);
-            InterlockedExchange(&g_runtime_ready, 0);
-            backend_log("decl-server RE-ARM refused: process heap scope was not restored; further refresh disabled");
-        }
+        if (AbnormalTermination()) succeeded = 0;
+        pass->succeeded = succeeded && InterlockedCompareExchange(&g_state,0,0) == DS_STATE_DONE;
     }
-    succeeded = succeeded && heap_restored && InterlockedCompareExchange(&g_state, 0, 0) == DS_STATE_DONE &&
+    succeeded = succeeded && InterlockedCompareExchange(&g_state, 0, 0) == DS_STATE_DONE &&
         InterlockedCompareExchange(&g_registration_succeeded, 0, 0) != 0;
-    if (succeeded && !context && !restoring && !sh_rawmap_defers_install_commit())
-        succeeded = sh_mpkg_activation_commit(error, capacity);
+    pass->succeeded = succeeded;
     if (!succeeded) {
         InterlockedExchange(&g_registration_succeeded, 0);
         InterlockedExchange(&g_state, DS_STATE_FAILED);
@@ -4437,6 +4523,18 @@ void sh_decl_server_test_reset_install(void)
 {
     /* Test callers stop using the synthetic hook before resetting its owner. */
     if (g_boot_promotion_original && !hook_unpatch((void *)g_boot_promotion_original)) return;
+    /* The synthetic fixture owns its native handles separately. Discard only
+     * adapter wrappers after its damaged-End assertions; never replay End or
+     * a native destructor here. Production has no corresponding reset. */
+    if (g_editor_activation) {
+        sh_process_heap_leave(&g_editor_activation->heap);
+        free(g_editor_activation); g_editor_activation=NULL;
+    }
+    while (g_editor_activation_diagnostic) {
+        ds_editor_activation *pass=g_editor_activation_diagnostic;
+        g_editor_activation_diagnostic=pass->next; free(pass);
+    }
+    InterlockedExchange(&g_editor_committed_cleanup_pending,0);
     g_boot_promotion_original = NULL;
     InterlockedExchange(&g_boot_promotion_entered, 0);
     InterlockedExchange(&g_boot_hook_retry, 0);

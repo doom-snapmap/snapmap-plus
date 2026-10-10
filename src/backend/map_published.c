@@ -308,7 +308,7 @@ done:;
         snprintf(error, sizeof(error), "Published-map preparation raised exception %08lx.", GetExceptionCode());
     }
     if (!accepted && request) pub_release(request);
-    if (!accepted && error[0]) sh_mpkg_report_error(error);
+    if (!accepted && error[0]) sh_mpkg_report_error(SH_MPKG_PROBLEM_OPEN, error);
     return accepted;
 }
 
@@ -329,7 +329,7 @@ static unsigned char pub_lobby(void *manager, unsigned char option)
             return ((pub_lobby_fn)g_pub_original[PUB_LOBBY])(manager, option);
         if (history) return (unsigned char)pub_prepare(PUB_LOBBY, manager, (unsigned char *)history + 8, NULL, option);
     } __except (EXCEPTION_EXECUTE_HANDLER) { }
-    sh_mpkg_report_error("The selected published map is no longer available."); return 0;
+    sh_mpkg_report_error(SH_MPKG_PROBLEM_OPEN, "The selected published map is no longer available."); return 0;
 }
 static void pub_direct(void *manager, const void *metadata, void *snapshot)
 {
@@ -344,7 +344,7 @@ static void pub_ready(void *manager, void *download, const void *metadata, void 
         void *progress = *(void **)((unsigned char *)manager + 0xa38);
         if (progress) ((void (*)(void *, int))(*(void ***)progress)[0x30 / 8])(progress, 0);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
-        sh_mpkg_report_error("The published-map progress display could not be released."); return;
+        sh_mpkg_report_error(SH_MPKG_PROBLEM_OPEN, "The published-map progress display could not be released."); return;
     }
     (void)pub_prepare(PUB_READY, manager, metadata, snapshot, 0);
 }

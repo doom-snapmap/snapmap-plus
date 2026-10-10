@@ -284,88 +284,163 @@ done:
 }
 static int sr_private(uint32_t mask)
 { return (mask & SH_PACKAGE_KEY_PRIVATE) && !(mask & SH_PACKAGE_KEY_COMPOSITE); }
-static void sr_before(unsigned char *before, size_t *indegree, size_t count, size_t a, size_t b)
+static int sr_owned(uint32_t mask, const sh_package_key_groups *groups)
 {
-    if (a != b && !before[a * count + b]) { before[a * count + b] = 1; indegree[b]++; }
+    uint32_t keys = mask & SH_PACKAGE_KEY_PRIVATE;
+    return sr_private(mask) && !(groups && keys && !(keys & ~groups->historical));
 }
-/* A projection retains its AI's native first modifier, even when another
- * retained projection has a broader mask. Preserve those observations as
- * ordering constraints over the deduped rows, not table insertion order. */
-static int sr_modifier_order(sh_decl_node *edit, const sh_decl_source *sources, size_t source_count,
+/* These three independent native scalar fields occupy health/damage/type at
+ * offsets 0/4/8. Only this proven row shape may ignore their statement order;
+ * other fields, annotations and compound bodies retain their authored order.
+ * Values remain native parser input, never host-parsed floats. */
+static void sr_modifier_scalars(sh_decl_node *row)
+{
+    const char *names[] = {"healthMod", "damageMod", "aiType"};
+    sh_decl_node *fields[3]; size_t count = 0;
+    for (sh_decl_node *field = row->children; field; field = field->next) count++;
+    if (count != 3 || row->reset || row->annotation) return;
+    for (size_t i = 0; i < 3; i++) {
+        fields[i] = (sh_decl_node *)sh_decl_tree_member(row, names[i]);
+        if (!fields[i] || !fields[i]->assignment || fields[i]->compound || fields[i]->reset || fields[i]->annotation) return;
+    }
+    row->children = fields[0]; fields[0]->next = fields[1]; fields[1]->next = fields[2]; fields[2]->next = NULL;
+}
+static int sr_modifier_mask(sh_decl_node *row, uint32_t type)
+{
+    sh_decl_node *mask = (sh_decl_node *)sh_decl_tree_member(row, "aiType");
+    char number[32];
+    if (type & 0x80000000u) snprintf(number, sizeof(number), "\"%d\"", (int)(int32_t)type);
+    else snprintf(number, sizeof(number), "\"%u\"", type);
+    char *value = mask ? _strdup(number) : NULL;
+    if (!value) return 0;
+    free(mask->value); mask->value = value; return 1;
+}
+static int sr_modifier_normalize(sh_decl_node *row)
+{
+    const char *literal = NULL; size_t length = 0; uint32_t type;
+    if (!sh_decl_tree_literal(sh_decl_tree_member(row, "aiType"), &literal, &length) || !length ||
+        !(literal[0] == '-' || (literal[0] >= '0' && literal[0] <= '9')) ||
+        !sr_mask(row, NULL, &type) || !sr_private(type)) return 1;
+    if (!sr_modifier_mask(row, type)) return 0;
+    sr_modifier_scalars(row); return 1;
+}
+typedef struct sr_modifier_policy { uint32_t type; sh_decl_node *row; char *body; int authoritative; } sr_modifier_policy;
+static int sr_policy_order(const void *a, const void *b)
+{
+    uint32_t x = ((const sr_modifier_policy *)a)->type, y = ((const sr_modifier_policy *)b)->type;
+    return x < y ? -1 : x > y;
+}
+/* Retained classifications select a policy in their own original program.
+ * Publish one exact-type row for that selection before the broad native rows.
+ * The immutable dispatch program uses equality for these private types, so
+ * overlapping multi-key types do not demand an impossible shared row order.
+ * Stock and frozen historical types keep their native intersection policy. */
+static int sr_modifier_project(sh_decl_node *edit, const sh_decl_source *sources,
+    const unsigned char *classifiers, size_t source_count,
     const sh_package_key_groups *groups, char *error, size_t capacity)
 {
     sh_decl_node *list = (sh_decl_node *)sh_decl_tree_member(edit, "globalAIMods");
     sh_package_key_space numeric = {0};
-    size_t count = 0, *indegree = NULL, *order = NULL;
-    sh_decl_node **rows = NULL;
-    uint32_t *masks = NULL;
-    char **bodies = NULL, **keys = NULL;
-    unsigned char *before = NULL;
+    sr_modifier_policy *policies = NULL;
+    size_t count = 0, policy_count = 0, emitted = 0;
+    sh_decl_node *output = NULL, **tail = &output;
     int ok = 0;
     if (!list || !sr_count(list, &count)) goto done;
-    if (!count) return 1;
-    if (count > SIZE_MAX / count || count > SIZE_MAX / sizeof(*rows)) goto done;
-    rows = calloc(count, sizeof(*rows)); masks = calloc(count, sizeof(*masks));
-    bodies = calloc(count, sizeof(*bodies)); keys = calloc(count, sizeof(*keys));
-    indegree = calloc(count, sizeof(*indegree)); order = calloc(count, sizeof(*order)); before = calloc(count, count);
-    if (!rows || !masks || !bodies || !keys || !indegree || !order || !before) goto done;
-    for (size_t i = 0; i < count; i++) {
-        char key[48]; snprintf(key, sizeof(key), "item[%zu]", i);
-        rows[i] = (sh_decl_node *)sh_decl_tree_member(list, key);
-        if (!sr_mask(rows[i], &numeric, masks + i) || !(bodies[i] = sr_body(rows[i])) || !(keys[i] = _strdup(key))) goto done;
-    }
-    /* Generic stock rows cannot precede an owned private modifier. Their
-     * mutual order remains stable, preserving the base native policy. */
-    for (size_t i = 0; i < count; i++) if (sr_private(masks[i]))
-        for (size_t j = 0; j < count; j++) if (!sr_private(masks[j])) sr_before(before, indegree, count, i, j);
-    for (size_t s = 0; s < source_count; s++) {
+    for (int pass = 0; pass < (classifiers ? 2 : 1); pass++) for (size_t s = 0; s < source_count; s++) {
+        int authoritative = !classifiers || classifiers[s];
+        if (classifiers && (classifiers[s] != 0) != (pass == 0)) continue;
         sh_package_spawn_registry program = {0};
         if (sh_package_spawn_registry_read(sources[s], &numeric, &program, error, capacity) != 1) goto done;
+        if (classifiers && authoritative && program.count != 1) {
+            sh_package_spawn_registry_free(&program); goto done;
+        }
         int valid = 1;
         for (size_t i = 0; valid && i < program.count; i++) {
             uint32_t type = program.rows[i].mask;
-            if (!sr_private(type) || sh_package_spawn_registry_type(&program, i) != i) continue;
+            if (!sr_owned(type, groups) || sh_package_spawn_registry_type(&program, i) != i) continue;
             size_t first;
             for (first = 0; first < program.modifier_count; first++)
-                if (sr_private(program.modifiers[first].mask) &&
+                if ((authoritative || sr_owned(program.modifiers[first].mask, groups)) &&
                     sh_package_key_modifier_matches(groups, type, program.modifiers[first].mask)) break;
-            if (first == program.modifier_count) continue;
-            size_t winner;
-            for (winner = 0; winner < count; winner++)
-                if (!strcmp(bodies[winner], program.modifiers[first].body)) break;
-            if (winner == count) { valid = 0; break; }
-            for (size_t j = 0; j < count; j++)
-                if (sh_package_key_modifier_matches(groups, type, masks[j])) sr_before(before, indegree, count, winner, j);
+            int absent = first == program.modifier_count;
+            if (absent && !authoritative) continue;
+            const char *body = absent ? NULL : program.modifiers[first].body;
+            sh_decl_node *row = body ? sh_decl_tree_parse((sh_decl_source){body, strlen(body)}, error, capacity) : NULL;
+            char *canonical = NULL;
+            if (row && sr_modifier_mask(row, type)) { sr_modifier_scalars(row); canonical = sr_body(row); }
+            size_t peer;
+            for (peer = 0; peer < policy_count; peer++) if (policies[peer].type == type) break;
+            if (!absent && !canonical) valid = 0;
+            else if (peer < policy_count && (authoritative || !policies[peer].authoritative)) {
+                if ((!policies[peer].body != !canonical) ||
+                    (canonical && strcmp(policies[peer].body, canonical))) {
+                    if (error && capacity) snprintf(error, capacity,
+                        "retained private classification %u has different modifier policies", type);
+                    valid = 0;
+                }
+            } else if (peer == policy_count) {
+                sr_modifier_policy *grown = policy_count < SIZE_MAX / sizeof(*grown) - 1 ?
+                    realloc(policies, (policy_count + 1) * sizeof(*grown)) : NULL;
+                if (!grown) valid = 0;
+                else {
+                    policies = grown; policies[policy_count++] = (sr_modifier_policy){type, row, canonical, authoritative};
+                    row = NULL; canonical = NULL;
+                }
+            }
+            sh_decl_tree_free(row); free(canonical);
         }
         sh_package_spawn_registry_free(&program);
         if (!valid) goto done;
     }
-    for (size_t n = 0; n < count; n++) {
-        size_t next;
-        for (next = 0; next < count; next++) if (!indegree[next]) break;
-        if (next == count) {
-            if (error && capacity) snprintf(error, capacity, "retained spawn modifiers have inconsistent first-match constraints");
-            goto done;
+    if (!policy_count) return 1;
+    if (count > SIZE_MAX - policy_count) goto done;
+    qsort(policies, policy_count, sizeof(*policies), sr_policy_order);
+    for (size_t i = 0; i < policy_count + count; i++) {
+        sh_decl_node *row = NULL;
+        if (i < policy_count) {
+            row = policies[i].row; policies[i].row = NULL;
+            if (!row) continue;
         }
-        order[n] = next; indegree[next] = SIZE_MAX;
-        for (size_t j = 0; j < count; j++) if (before[next * count + j]) indegree[j]--;
-    }
-    sh_decl_node *num = (sh_decl_node *)sh_decl_tree_member(list, "num"), **tail = &num->next;
-    list->children = num;
-    for (size_t i = 0; i < count; i++) {
-        sh_decl_node *row = rows[order[i]];
-        free(row->key); row->key = keys[i]; keys[i] = NULL;
+        else {
+            char key[48]; snprintf(key, sizeof(key), "item[%zu]", i - policy_count);
+            const sh_decl_node *input = sh_decl_tree_member(list, key);
+            char *body = input ? sr_body(input) : NULL;
+            row = body ? sh_decl_tree_parse((sh_decl_source){body, strlen(body)}, error, capacity) : NULL;
+            free(body);
+            if (row) {
+                if (!sr_modifier_normalize(row)) { sh_decl_tree_free(row); goto done; }
+                body = sr_body(row);
+                if (!body) { sh_decl_tree_free(row); goto done; }
+                size_t peer;
+                for (peer = 0; peer < policy_count; peer++)
+                    if (policies[peer].body && !strcmp(policies[peer].body, body)) break;
+                free(body);
+                if (peer < policy_count) { sh_decl_tree_free(row); continue; }
+            }
+        }
+        char key[48]; snprintf(key, sizeof(key), "item[%zu]", emitted++);
+        if (!row) goto done;
+        free(row->key); row->key = _strdup(key); row->assignment = 1;
+        if (!row->key) { sh_decl_tree_free(row); goto done; }
         *tail = row; tail = &row->next;
     }
-    *tail = NULL; ok = 1;
+    sh_decl_node *num = (sh_decl_node *)sh_decl_tree_member(list, "num");
+    char number[48]; snprintf(number, sizeof(number), "%zu", emitted);
+    char *value = _strdup(number);
+    if (!value) goto done;
+    free(num->value); num->value = value;
+    sh_decl_node *old = list->children;
+    while (old) { sh_decl_node *next = old->next; old->next = NULL; if (old != num) sh_decl_tree_free(old); old = next; }
+    list->children = num; num->next = output; output = NULL; ok = 1;
 done:
-    for (size_t i = 0; i < count; i++) { if (bodies) free(bodies[i]); if (keys) free(keys[i]); }
-    free(rows); free(masks); free(bodies); free(keys); free(indegree); free(order); free(before);
-    if (!ok && error && capacity && !*error) snprintf(error, capacity, "cannot preserve retained modifier ordering");
+    for (size_t i = 0; i < policy_count; i++) { sh_decl_tree_free(policies[i].row); free(policies[i].body); }
+    free(policies); sh_decl_tree_free(output);
+    if (!ok && error && capacity && !*error) snprintf(error, capacity, "cannot project retained modifier policies");
     return ok;
 }
-char *sh_package_spawn_registry_compose(sh_decl_source base, const sh_decl_source *tables,
-    size_t count, const sh_package_key_groups *groups, size_t *length, char *error, size_t capacity)
+char *sh_package_spawn_registry_compose_classified(sh_decl_source base, const sh_decl_source *tables,
+    const unsigned char *classifiers, size_t count, const sh_package_key_groups *groups,
+    size_t *length, char *error, size_t capacity)
 {
     sh_decl_node *tree = NULL, **parts = NULL;
     char *out = NULL;
@@ -379,15 +454,29 @@ char *sh_package_spawn_registry_compose(sh_decl_source base, const sh_decl_sourc
     for (size_t i = 0; i < count; i++)
         if (!(parts[i] = sh_decl_tree_parse(tables[i], error, capacity)) || sr_initialize_tree(parts[i]) <= 0) goto done;
     parts[count] = tree;
+    /* Normalize proven numeric masks before multiplicity accounting, so bare
+     * and quoted spellings cannot grow a duplicate on every reprojection. */
+    for (size_t i = 0; i <= count; i++) {
+        sh_decl_node *part = (sh_decl_node *)sh_decl_tree_member(parts[i], "edit");
+        sh_decl_node *list = (sh_decl_node *)sh_decl_tree_member(part, "globalAIMods");
+        for (sh_decl_node *row = list ? list->children : NULL; row; row = row->next)
+            if (row->compound && !sr_modifier_normalize(row)) goto done;
+    }
     if (sr_compose_list(edit, (const sh_decl_node *const *)parts, count + 1, "aiTypeList") &&
         sr_compose_list(edit, (const sh_decl_node *const *)parts, count + 1, "globalAIMods") &&
-        sr_modifier_order(edit, tables, count, groups, error, capacity))
+        sr_modifier_project(edit, tables, classifiers, count, groups, error, capacity))
         out = sh_decl_tree_write(tree, length);
 done:
     if (parts) for (size_t i = 0; i < count; i++) sh_decl_tree_free(parts[i]);
     free(parts); sh_decl_tree_free(tree);
     if (!out && error && capacity && !*error) snprintf(error, capacity, "cannot publish retained spawn registrations");
     return out;
+}
+char *sh_package_spawn_registry_compose(sh_decl_source base, const sh_decl_source *tables,
+    size_t count, const sh_package_key_groups *groups, size_t *length, char *error, size_t capacity)
+{
+    return sh_package_spawn_registry_compose_classified(base, tables, NULL, count,
+        groups, length, error, capacity);
 }
 size_t sh_package_spawn_registry_modifier(const sh_package_spawn_registry *registry, size_t row)
 {

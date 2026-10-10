@@ -838,7 +838,13 @@ int sh_audio_banks_native_additions_end(sh_audio_bank_addition **handle,
         an_programs_addition_rollback(addition); addition->prepared = 0;
     } else if (!accepted && !sh_audio_banks_restore_additions(g_slots, g_count, addition->before,
         addition->count, (sh_audio_bank_ops){NULL, an_load, an_unload}, error, capacity)) return 0;
-    sh_audio_banks_native_additions_accept(handle); return 1;
+    int retire = !accepted && addition->programs;
+    sh_audio_banks_native_additions_accept(handle);
+    if (retire) {
+        char detail[256];
+        if (sh_audio_banks_native_programs_retire(detail, sizeof(detail)) < 0) backend_log(detail);
+    }
+    return 1;
 }
 
 /* Retained audio programs. Each active program's scope banks stay loaded while
@@ -863,6 +869,10 @@ static an_pbank *g_pbanks;
 static size_t g_pbank_count;
 static an_program *g_programs;
 static size_t g_program_count;
+/* The main thread owns program transitions. Audio streaming threads only read
+ * owner/lease pairs under this lock, retaining a sealed file before releasing
+ * it. Never hold it across OS opens, native calls or provider-release callbacks. */
+static SRWLOCK g_program_files_lock = SRWLOCK_INIT;
 static void (*g_program_release)(void *owner);
 static int g_shared_published;
 static sh_audio_limits_change g_tx_limits;
@@ -874,6 +884,40 @@ static sh_audio_switch_change g_tx_switch;
  * effective policy a pending bus receipt reads. */
 static sh_audio_bus_policy g_bus_baseline, g_bus_effective;
 static int g_bus_baseline_known;
+
+int sh_audio_banks_native_open_media(const char *path, FILE **stream, uint64_t *length)
+{
+    const char *filename;
+    uint32_t id;
+    int result = 0;
+    sh_package_file *file = NULL;
+    if (stream) *stream = NULL;
+    if (length) *length = 0;
+    if (!path || !stream || !length) return -1;
+    if (sh_package_audio_path_kind(path) != 2) return 0;
+    filename = strrchr(path, '/');
+    if (!filename || !sh_audio_media_identity(filename + 1, &id)) return 0;
+    AcquireSRWLockShared(&g_program_files_lock);
+    for (size_t p = 0; p < g_program_count; p++) {
+        const an_program *program = g_programs + p;
+        if (!sh_audio_id_lease_private(program->lease, SH_AUDIO_ID_MEDIA, id)) continue;
+        /* An ID match grants no path substitution. Equal active/retiring
+         * claims may share bytes, but each candidate must own this exact path. */
+        int found = sh_package_runtime_audio_file(program->owner, path, &file);
+        if (found < 0) result = -1;
+        if (found == 1) {
+            result = 1; break;
+        }
+    }
+    ReleaseSRWLockShared(&g_program_files_lock);
+    if (file) {
+        char error[512];
+        *stream = sh_package_file_open(file, length, error, sizeof(error));
+        result = *stream ? 1 : -1;
+        sh_package_file_release(file);
+    }
+    return result;
+}
 
 static int an_fail(char *error, size_t capacity, const char *format, uint32_t value)
 { if (error && capacity) snprintf(error, capacity, format, (unsigned)value); return 0; }
@@ -1054,9 +1098,12 @@ int sh_audio_banks_native_programs_retire(char *error, size_t capacity)
             ready = !vacancy.state; failed |= vacancy.state < 0;
         }
         if (!ready) { remaining += program->retiring != 0; p++; continue; }
-        an_program_free(program);
+        an_program retired = *program;
+        AcquireSRWLockExclusive(&g_program_files_lock);
         memmove(g_programs + p, g_programs + p + 1, (g_program_count - p - 1) * sizeof(*g_programs));
         g_program_count--;
+        ReleaseSRWLockExclusive(&g_program_files_lock);
+        an_program_free(&retired);
         {
             char line[96];
             snprintf(line, sizeof(line), "audio programs: released a superseded program; %zu remain", g_program_count);
@@ -1293,17 +1340,32 @@ int sh_audio_banks_native_programs_activate(const sh_audio_active_program *progr
         size_t known = SIZE_MAX;
         for (size_t p = 0; p < g_program_count; p++) if (g_programs[p].owner == programs[i].owner) known = p;
         if (known != SIZE_MAX) {
-            next[used] = g_programs[known]; g_programs[known].owner = NULL; free(next[used].banks);
-            if (g_program_release) g_program_release(programs[i].owner);
+            next[used] = g_programs[known];
         } else next[used] = (an_program){programs[i].owner, programs[i].program, programs[i].lease, NULL, 0, 0};
         next[used].banks = plans[i]; next[used].bank_count = plan_counts[i]; plans[i] = NULL; next[used].retiring = 0;
         if (next[used].lease && !sh_audio_id_lease_active(next[used].lease)) sh_audio_id_lease_activate(next[used].lease);
         used++;
     }
-    for (size_t p = 0; p < g_program_count; p++) if (g_programs[p].owner) {
-        next[used] = g_programs[p]; next[used].retiring = 1; used++;
+    for (size_t p = 0; p < g_program_count; p++) {
+        size_t i = 0;
+        while (i < count && programs[i].owner != g_programs[p].owner) i++;
+        if (i == count) {
+            next[used] = g_programs[p]; next[used].retiring = 1; used++;
+        }
     }
-    free(g_programs); g_programs = next; g_program_count = used; next = NULL; ok = 1;
+    an_program *previous = g_programs; size_t previous_count = g_program_count;
+    AcquireSRWLockExclusive(&g_program_files_lock);
+    g_programs = next; g_program_count = used; next = NULL;
+    ReleaseSRWLockExclusive(&g_program_files_lock);
+    for (size_t p = 0; p < previous_count; p++) {
+        size_t i = 0;
+        while (i < count && programs[i].owner != previous[p].owner) i++;
+        if (i != count) {
+            free(previous[p].banks);
+            if (g_program_release) g_program_release(programs[i].owner);
+        }
+    }
+    free(previous); ok = 1;
     {
         char line[160];
         snprintf(line, sizeof(line), "audio programs: %zu active, %zu retiring, %zu banks loaded; shared controls %s",
@@ -1379,14 +1441,19 @@ int sh_audio_banks_native_programs_add(sh_audio_bank_addition *addition,
         sh_audio_bank_gate_end(&scope, NULL, 0);
         if (configured != 1) { addition->bus = g_bus.pending != NULL; goto done; }
     }
+    AcquireSRWLockExclusive(&g_program_files_lock);
     an_program *grown = realloc(g_programs, (g_program_count + fresh + 1) * sizeof(*grown));
-    if (!grown) { an_error(error, capacity, "cannot retain admitted audio programs"); goto done; }
+    if (!grown) {
+        ReleaseSRWLockExclusive(&g_program_files_lock);
+        an_error(error, capacity, "cannot retain admitted audio programs"); goto done;
+    }
     g_programs = grown;
     for (size_t i = 0; i < fresh; i++) {
         g_programs[g_program_count++] = (an_program){admitted[i].owner, admitted[i].program, admitted[i].lease,
             plans[i], plan_counts[i], 0};
         plans[i] = NULL;
     }
+    ReleaseSRWLockExclusive(&g_program_files_lock);
     kept = fresh; an_pbank_holders(); ok = 1;
 done:
     if (!ok) {
@@ -1405,7 +1472,9 @@ done:
  * banks it loaded unload when idle (or retire later). */
 static void an_programs_addition_rollback(sh_audio_bank_addition *addition)
 {
-    while (g_program_count > addition->first_program) an_program_free(g_programs + --g_program_count);
+    /* A reentrant voice can still own a bank even after admission rolls back.
+     * Keep its exact source until the ordinary retirement fence passes. */
+    for (size_t p = addition->first_program; p < g_program_count; p++) g_programs[p].retiring = 1;
     an_unload_new(addition->loaded, addition->loaded_count);
     if (addition->bus) { an_bus_abandon(); addition->bus = 0; }
     an_pbank_holders(); an_pbank_compact();

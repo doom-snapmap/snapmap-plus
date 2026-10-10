@@ -689,6 +689,7 @@ static int rp_init(void *manager, abc_completion *completion) { (void)manager; (
 static int rp_wait(void *manager, abc_completion *completion, int submitted) { (void)manager; (void)completion; return submitted; }
 static int rp_named_load(const char *name, int pool, uint32_t *id)
 { CHECK(pool == -1); CHECK(sh_audio_bank_identity(name, id)); return rp_bank_load(*id); }
+static HANDLE rp_retirement_reached;
 static int rp_unload(uint32_t id, const void *memory, int *pool)
 {
     unsigned char **link = NULL, *slot = rp_find_slot(id, &link); (void)memory; (void)pool;
@@ -697,14 +698,50 @@ static int rp_unload(uint32_t id, const void *memory, int *pool)
     int32_t refs; memcpy(&refs, slot + 0x70, 4);
     rp_cut_voices += refs - 1; /* Native unload stops every item holding the slot. */
     memcpy(link, slot + 0x20, sizeof(void *)); free(slot);
-    rp_drop_objects(id); return 1;
+    rp_drop_objects(id);
+    if (rp_retirement_reached) SetEvent(rp_retirement_reached);
+    return 1;
 }
 static void rp_set_refs(uint32_t id, int32_t refs)
 { unsigned char *slot = rp_find_slot(id, NULL); CHECK(slot); if (slot) memcpy(slot + 0x70, &refs, 4); }
 static int rp_occupied(void *context, sh_audio_identity_domain domain, uint32_t id, char *error, size_t capacity)
 { (void)context; (void)domain; return sh_audio_registry_occupied(&g_registry, id, error, capacity); }
-typedef struct rp_owner { int references; } rp_owner;
+typedef struct rp_owner { int references; uint32_t media; } rp_owner;
 static rp_owner rp_owners[8];
+static int rp_media_failed, rp_media_opens;
+static sh_package_file *rp_media_file;
+static HANDLE rp_reader_entered, rp_reader_resume;
+int sh_package_runtime_audio_file(void *owner, const char *path, sh_package_file **file)
+{
+    rp_owner *o = owner;
+    char exact[96];
+    *file = NULL;
+    CHECK(o >= rp_owners && o < rp_owners + 8 && o->references > 0);
+    ++rp_media_opens;
+    snprintf(exact, sizeof(exact), "sound/soundbanks/pc/%u.wem", o->media);
+    if (!o->media || strcmp(path, exact)) return 0;
+    if (rp_media_failed) return -1;
+    if (rp_reader_entered) {
+        SetEvent(rp_reader_entered);
+        CHECK(WaitForSingleObject(rp_reader_resume, 5000) == WAIT_OBJECT_0);
+        CHECK(o->references > 0);
+    }
+    *file = sh_package_file_retain(rp_media_file);
+    return *file ? 1 : -1;
+}
+typedef struct rp_stream_read { const char *path; FILE *stream; uint64_t length; int result; } rp_stream_read;
+static DWORD WINAPI rp_stream_reader(void *context)
+{
+    rp_stream_read *read = context;
+    read->result = sh_audio_banks_native_open_media(read->path, &read->stream, &read->length);
+    return 0;
+}
+static DWORD WINAPI rp_stream_retire(void *context)
+{
+    char error[512];
+    *(int *)context = sh_audio_banks_native_programs_retire(error, sizeof(error));
+    return 0;
+}
 static void rp_release(void *owner) { rp_owner *o = owner; CHECK(o->references > 0); o->references--; }
 static sh_audio_active_program rp_ref(size_t owner, sh_package_audio_program *program, sh_audio_id_lease *lease)
 { rp_owners[owner].references++; return (sh_audio_active_program){rp_owners + owner, program, lease}; }
@@ -791,9 +828,32 @@ static void rp_refresh(sh_audio_parameter_table *t, void *record, char flag) { (
 static sh_audio_switch_node *rp_switch(uint32_t id)
 { for (sh_audio_switch_node *n = rp_switches.table.buckets[id % 193]; n; n = n->next) if (n->id == id) return n; return NULL; }
 typedef struct rp_program {
-    unsigned char banks[2][160]; sh_compiled_resource files[2]; sh_package_compilation scope;
+    unsigned char banks[2][160]; sh_compiled_resource files[3]; sh_package_compilation scope;
     char paths[2][64]; sh_package_audio_program *program; sh_audio_id_lease *lease;
 } rp_program;
+static int rp_streamed;
+/* Real event -> play action -> streamed sound, with media 900 in the same scope. */
+static size_t rp_stream_bank(unsigned char *bank, const char *name, uint32_t event)
+{
+    uint32_t id = 0;
+    CHECK(sh_audio_bank_identity(name, &id));
+    memset(bank, 0, 160);
+#define RP_U32(at, value) do { uint32_t v_ = (value); memcpy(bank + (at), &v_, 4); } while (0)
+    memcpy(bank, "BKHD", 4); RP_U32(4, 16); RP_U32(8, 113); RP_U32(12, id);
+    memcpy(bank + 24, "HIRC", 4); RP_U32(28, 95); RP_U32(32, 3);
+    bank[36] = 4; RP_U32(37, 12); RP_U32(41, event); RP_U32(45, 1); RP_U32(49, event + 1);
+    bank[53] = 3; RP_U32(54, 18); RP_U32(58, event + 1);
+    bank[62] = 3; bank[63] = 4; RP_U32(64, event + 2); RP_U32(72, id);
+    bank[76] = 2; RP_U32(77, 46); RP_U32(81, event + 2); RP_U32(85, 0x20001);
+    bank[89] = 1; RP_U32(90, 900); RP_U32(94, 4);
+#undef RP_U32
+    return 127;
+}
+static int rp_media_id(void *context, uint32_t authored, uint32_t bound, const sh_audio_graph_media *media)
+{
+    CHECK(authored == 900 && !media->original && bound != 900);
+    *(uint32_t *)context = bound; return 1;
+}
 static int rp_build(rp_program *p, sh_audio_originals *originals, sh_audio_id_pool *pool,
     const char *first, const char *second, uint32_t event, float threshold)
 {
@@ -804,7 +864,20 @@ static int rp_build(rp_program *p, sh_audio_originals *originals, sh_audio_id_po
         snprintf(p->paths[i], sizeof(p->paths[i]), "sound/soundbanks/pc/%s", names[i]);
         p->files[i].engine_path = p->paths[i]; p->files[i].body = p->banks[i];
         p->files[i].body_length = rp_bank(p->banks[i], names[i], event + (uint32_t)i, i ? 0 : threshold);
+        if (rp_streamed && !i) p->files[i].body_length = rp_stream_bank(p->banks[i], names[i], event);
         p->files[i].owners.bits = p->files[i].gameplay_owners.bits = 1; p->scope.resource_count++;
+    }
+    if (rp_streamed) {
+        sh_compiled_resource *media = p->files + p->scope.resource_count++;
+        media->engine_path = "sound/soundbanks/pc/900.wem";
+        media->body = (unsigned char *)"tone"; media->body_length = 4;
+        media->owners.bits = media->gameplay_owners.bits = 1;
+        /* Compilation lookup uses canonical sorted paths. */
+        for (size_t j = p->scope.resource_count - 1; j > 0 &&
+            strcmp(p->files[j].engine_path, p->files[j - 1].engine_path) < 0; j--) {
+            sh_compiled_resource swap = p->files[j];
+            p->files[j] = p->files[j - 1]; p->files[j - 1] = swap;
+        }
     }
     p->scope.resources = p->files;
     p->program = sh_package_audio_program_open(&scope, 1, originals, error, sizeof(error));
@@ -913,7 +986,16 @@ static void retained_programs(void)
     CHECK(sh_audio_shared_policy_compile(&init_input, 1, &baseline, error, sizeof(error)));
     sh_audio_id_pool *pool = sh_audio_id_pool_open(rp_occupied, NULL); CHECK(pool);
     static rp_program a, b, c, s, d, w, v;
+    rp_streamed = 1;
     CHECK(rp_build(&a, originals, pool, "pa.bnk", NULL, 70, 0));
+    rp_streamed = 0;
+    CHECK(sh_package_audio_program_media(a.program, 0, rp_media_id, &rp_owners[0].media, error, sizeof(error)));
+    CHECK(rp_owners[0].media);
+    { char path[MAX_PATH]; FILE *stream = NULL;
+      snprintf(path, sizeof(path), "%s/retiring-a.wem", root);
+      CHECK(!fopen_s(&stream, path, "wb") && stream);
+      if (stream) { CHECK(fwrite("map-a", 1, 5, stream) == 5); fclose(stream); }
+      rp_media_file = sh_package_file_capture(path, error, sizeof(error)); CHECK(rp_media_file); }
     CHECK(rp_build(&b, originals, pool, "pb.bnk", NULL, 80, 0));
     CHECK(rp_build(&c, originals, pool, "pc1.bnk", "pc2.bnk", 90, 0));
     CHECK(rp_build(&s, originals, pool, "ps.bnk", NULL, 100, -72));
@@ -943,9 +1025,54 @@ static void retained_programs(void)
     CHECK(sh_audio_banks_native_programs_activate(set, 1, &baseline, rp_release, error, sizeof(error)));
     CHECK(sh_audio_banks_native_programs_count() == 2 && rp_find_slot(pa.ids[0], NULL) && rp_owners[0].references == 1);
     CHECK(sh_audio_banks_native_programs_retire(error, sizeof(error)) == 1 && rp_find_slot(pa.ids[0], NULL));
+    char media_path[96], wrong_path[112]; FILE *media_stream = NULL; uint64_t media_length = 0;
+    snprintf(media_path, sizeof(media_path), "sound/soundbanks/pc/%u.wem", rp_owners[0].media);
+    snprintf(wrong_path, sizeof(wrong_path), "sound/soundbanks/pc/french/%u.wem", rp_owners[0].media);
+    CHECK(sh_audio_banks_native_open_media(media_path, &media_stream, &media_length) == 1);
+    CHECK(media_stream && media_length == 5);
+    FILE *unclaimed = NULL;
+    CHECK(sh_audio_banks_native_open_media(wrong_path, &unclaimed, &media_length) == 0 && !unclaimed);
+    int opens_before = rp_media_opens;
+    CHECK(sh_audio_banks_native_open_media("sound/soundbanks/pc/900.wem", &unclaimed, &media_length) == 0);
+    CHECK(sh_audio_banks_native_open_media("sound/soundbanks/pc/1.bnk", &unclaimed, &media_length) == 0);
+    CHECK(rp_media_opens == opens_before);
+    rp_media_failed = 1;
+    CHECK(sh_audio_banks_native_open_media(media_path, &unclaimed, &media_length) == -1 && !unclaimed);
+    rp_media_failed = 0;
+    /* Leaving B for vanilla cannot remove a still-playing A's exact file. */
+    CHECK(sh_audio_banks_native_programs_activate(NULL, 0, &baseline, rp_release, error, sizeof(error)));
+    CHECK(sh_audio_banks_native_open_media(media_path, &unclaimed, &media_length) == 1);
+    if (unclaimed) fclose(unclaimed);
     rp_set_refs(pa.ids[0], 1);
-    CHECK(sh_audio_banks_native_programs_retire(error, sizeof(error)) == 0);
+    /* Streaming may already be copying a retained owner when the main-thread
+     * boundary unloads the last idle bank. Removal must wait for that read. */
+    rp_reader_entered = CreateEventW(NULL, TRUE, FALSE, NULL);
+    rp_reader_resume = CreateEventW(NULL, TRUE, FALSE, NULL);
+    rp_retirement_reached = CreateEventW(NULL, TRUE, FALSE, NULL);
+    CHECK(rp_reader_entered && rp_reader_resume && rp_retirement_reached);
+    rp_stream_read read = {media_path, NULL, 0, -2};
+    int retirement_result = -2;
+    HANDLE reader = CreateThread(NULL, 0, rp_stream_reader, &read, 0, NULL);
+    CHECK(reader && WaitForSingleObject(rp_reader_entered, 5000) == WAIT_OBJECT_0);
+    HANDLE retire = CreateThread(NULL, 0, rp_stream_retire, &retirement_result, 0, NULL);
+    CHECK(retire && WaitForSingleObject(rp_retirement_reached, 5000) == WAIT_OBJECT_0);
+    CHECK(rp_owners[0].references == 1);
+    SetEvent(rp_reader_resume);
+    CHECK(WaitForSingleObject(reader, 5000) == WAIT_OBJECT_0);
+    CHECK(WaitForSingleObject(retire, 5000) == WAIT_OBJECT_0);
+    CHECK(read.result == 1 && read.stream && read.length == 5 && retirement_result == 0);
+    if (read.stream) fclose(read.stream);
+    CloseHandle(reader); CloseHandle(retire);
+    CloseHandle(rp_reader_entered); CloseHandle(rp_reader_resume); CloseHandle(rp_retirement_reached);
+    rp_reader_entered = rp_reader_resume = rp_retirement_reached = NULL;
     CHECK(!rp_find_slot(pa.ids[0], NULL) && rp_owners[0].references == 0 && !rp_cut_voices);
+    CHECK(sh_audio_banks_native_open_media(media_path, &unclaimed, &media_length) == 0 && !unclaimed);
+    /* An already-opened stream has its own lifetime beyond program retirement. */
+    if (media_stream) {
+        char bytes[6] = {0};
+        rewind(media_stream); CHECK(fread(bytes, 1, 5, media_stream) == 5 && !strcmp(bytes, "map-a"));
+        fclose(media_stream);
+    }
     /* 4. Registered private objects outlive the bank: the lease waits for them. */
     set[0] = rp_ref(0, a.program, a.lease);
     CHECK(sh_audio_banks_native_programs_activate(set, 1, &baseline, rp_release, error, sizeof(error)));
@@ -1032,6 +1159,14 @@ static void retained_programs(void)
     CHECK(sh_audio_banks_native_additions_end(&addition, 0, error, sizeof(error)) && !addition);
     CHECK(!rp_find_slot(pd.ids[0], NULL) && rp_owners[4].references == 0 && sh_audio_banks_native_programs_count() == 1);
     addition = sh_audio_banks_native_additions_begin(error, sizeof(error)); CHECK(addition);
+    set[0] = rp_ref(4, d.program, d.lease);
+    CHECK(sh_audio_banks_native_programs_add(addition, set, 1, rp_release, error, sizeof(error)));
+    rp_set_refs(pd.ids[0], 2);
+    CHECK(sh_audio_banks_native_additions_end(&addition, 0, error, sizeof(error)) && !addition);
+    CHECK(rp_find_slot(pd.ids[0], NULL) && rp_owners[4].references == 1);
+    rp_set_refs(pd.ids[0], 1);
+    CHECK(sh_audio_banks_native_programs_retire(error, sizeof(error)) == 0 && !rp_owners[4].references);
+    addition = sh_audio_banks_native_additions_begin(error, sizeof(error)); CHECK(addition);
     set[0] = rp_ref(4, d.program, d.lease); set[1] = rp_ref(1, b.program, b.lease);
     CHECK(sh_audio_banks_native_programs_add(addition, set, 2, rp_release, error, sizeof(error)));
     CHECK(sh_audio_banks_native_additions_ready(addition, error, sizeof(error)));
@@ -1047,6 +1182,8 @@ static void retained_programs(void)
     CHECK(sh_audio_banks_native_programs_activate(NULL, 0, &baseline, rp_release, error, sizeof(error)));
     CHECK(sh_audio_banks_native_programs_count() == 0 && !rp_find_slot(pb.ids[0], NULL) && !rp_find_slot(pd.ids[0], NULL));
     for (size_t i = 0; i < 8; i++) CHECK(rp_owners[i].references == 0);
+    sh_package_file_release(rp_media_file); rp_media_file = NULL;
+    { char path[MAX_PATH]; snprintf(path, sizeof(path), "%s/retiring-a.wem", root); CHECK(DeleteFileA(path)); }
     CHECK(!rp_cut_voices && !g_pbank_count);
     rp_program *all[] = {&a, &b, &c, &s, &d, &w, &v};
     for (size_t i = 0; i < 7; i++) { sh_audio_id_lease_release(all[i]->lease); sh_package_audio_program_close(all[i]->program); }

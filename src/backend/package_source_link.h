@@ -90,6 +90,10 @@ typedef struct sh_package_source_link_native {
  * once per path and shared as immutable bytes; package bytes are not changed.
  * Campaign-only dependencies absent from the authored scope are not silently
  * imported into a bundle. Unsupported/absent readers fail the whole candidate.
+ * Movies additionally bind the finite supplied/reverse-affected sound/material
+ * namespace in their scope, independent of ActionScript literal spellings.
+ * Conditional edges retain changed complete bindings; certified baseline
+ * targets keep native lookup. Movie string bindings join in package_library.
  * Font units capture their available 48/64_df/12 glyph forms and exact material
  * request slots. Optional materials use only this scope and SnapMap originals;
  * confirmed absence is retained by omitting that slot from the complete plan.
@@ -220,6 +224,23 @@ int sh_package_source_link_identity(sh_package_source_link *source, size_t index
 /* Tests and diagnostics: discovery replay of unchanged units is on by
  * default; 0 binds every unit afresh (the same result, more slowly). */
 void sh_package_source_link_replay(int enabled);
+/* Capture-local supplied lookups and payload identities only. Canonicalizer
+ * calls and original/native validation still run. 0 is the diagnostic oracle. */
+void sh_package_source_link_lookup_memo(int enabled);
+typedef struct sh_package_source_lookup_counters {
+    size_t lookups, searches, lookup_hits;
+    size_t identities, identity_computations, body_hashes, identity_hits;
+    size_t entries, bytes, peak_bytes, limit;
+    size_t original_captures;
+    unsigned long long original_bytes, original_capture_us;
+    unsigned long long replay_validation_us, replay_validation_without_capture_us;
+} sh_package_source_lookup_counters;
+void sh_package_source_link_lookup_counters(const sh_package_source_link *source,
+    sh_package_source_lookup_counters *out);
+#ifdef SH_PACKAGE_LIBRARY_TESTING
+/* Optional-storage failure/budget and exact-key collision oracles. */
+void sh_package_source_link_test_lookup(size_t limit, long allocation_failures, int collisions);
+#endif
 /* Tests only: 0 captures as before AI state-machine selection (no behavior
  * edges), reproducing the identities a pre-selection build recorded. */
 void sh_package_source_link_fsm(int enabled);

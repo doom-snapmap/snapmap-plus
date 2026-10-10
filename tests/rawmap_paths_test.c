@@ -63,8 +63,8 @@ static void *pf_completion_context;
 static char pf_parsed[256];
 static const char *pf_source_json, *pf_engine_json;
 static char package_last_error[1024];
-void sh_mpkg_report_error(const char *line)
-{ if (line && *line) { package_errors++; snprintf(package_last_error, sizeof(package_last_error), "%s", line); } }
+void sh_mpkg_report_error(sh_mpkg_problem problem, const char *line)
+{ (void)problem; if (line && *line) { package_errors++; snprintf(package_last_error, sizeof(package_last_error), "%s", line); } }
 void sh_map_render_loaded(void *map) { (void)map; render_loaded_calls++; }
 int sh_decl_server_map_boundary_safe(void) { return pf_testing && pf_boundary; }
 int sh_decl_server_map_preparation_ready(void) { return pf_testing; }

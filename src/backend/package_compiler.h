@@ -379,40 +379,38 @@ int sh_package_editor_frame_slots(const char *type, sh_decl_source text, sh_decl
  * states). 1 with malloc-owned *out, 0 when the text carries none, -1 on
  * failure. */
 int sh_package_editor_strip_slots(const char *type, const char *space, sh_decl_source text, char **out, size_t *length);
-/* A rebased restatement (complete lists: a count and every slot) is read
- * natively onto its published parents' lists slot by slot, each restated
- * control keeping any field of the previous occupant it does not name (B3
- * evidence). Where that would leave a field or header the restatement does
- * not state, insert before the list (or a page's control list) a statement of
- * the same list holding only a count of at least 1 that drops that slot and
- * the ones after it, so the restatement regrows them default-constructed; a
- * count below 1, which strands what the dropped elements own, is never
- * inserted. published is the parent chain, nearest first. 1 with
- * malloc-owned *out, proven to read as stated; 0 when every complete list
- * already reads as stated (a sparse statement is its author's native patch,
- * read as written); -1 on allocation failure; -3 when this encoding cannot
- * prove one: an open product gap (a first slot that would need a count below
- * 1, a reset marker or a member stated more than once, which are not modelled
- * yet, or a parent this model does not read), never a judgement of the
- * input. */
+/* Complete desired rows explicitly state the registered family's constructor
+ * defaults for omitted path/tag/reference fields, including the model's TRUE
+ * color-enabled bit. Sparse statements remain author patches. The admitted
+ * native storage transaction retains/replaces owning containers through batch
+ * outcome; this text never uses temporary zero/regrowth to clear ownership.
+ * published is the parent chain, nearest first. Returns 1 with malloc-owned
+ * normalized/defaulted *out, 0 when unchanged, -1 on allocation failure, -3
+ * when the family read state cannot be represented. Source bundles retain
+ * their exact authored bytes independently of this served representation. */
 int sh_package_editor_native_restatement(const char *type, sh_decl_source text,
     const sh_decl_source *published, size_t published_count, char **out, size_t *length);
 /* 1 when a declaration states some member more than once (natively read
  * again, in order), 0 when not or when it does not read at all, -1 on
  * allocation failure. */
 int sh_package_editor_repeats(sh_decl_source text);
+/* Family-bearing variants normalize only the registered native collection
+ * paths. The legacy entry points select snapeditorentitydef. */
+int sh_package_editor_repeats_type(const char *type, sh_decl_source text);
 /* The native form of a declaration stating some member more than once: one
  * statement per member writing what its statements write, each written field
  * with the value the native reader leaves over parents (the chain its author
  * saw, nearest first), proven to read the same over them. 1 with malloc-owned
- * *out; 0 when no member is stated more than once; -1 on allocation failure;
+ * *out; 0 when neither repeats nor indexed aliases require normalization; -1 on allocation failure;
  * -2 when the text does not read, or its own fields change between a value
- * and a block over its parents; -3 when no single statement reads the same (a
- * slot dropped by one count and grown again by a later one below the
- * inherited count, differing headers, a reset marker) or a parent does not
- * read. */
+ * and a block over its parents; -3 when no single statement reads the same
+ * or a parent does not read. Dropped/regrown value rows use explicit constructor
+ * defaults. Header type/ops and ! are warning/consumed tokens in the paired
+ * normal inherited editor ReadClass contexts, never source-identity changes. */
 int sh_package_editor_native_form(sh_decl_source text, const sh_decl_source *parents, size_t parent_count,
     char **out, size_t *length);
+int sh_package_editor_native_form_type(const char *type, sh_decl_source text,
+    const sh_decl_source *parents, size_t parent_count, char **out, size_t *length);
 /* 1 when authored, read over the parent texts (nearest first), leaves some
  * inherited editor list's controls at other slots than original does (the
  * layout test the rebase uses), so the children of that declaration would
@@ -473,6 +471,12 @@ typedef int (*sh_package_native_served)(void *context, const char *path,
     const char *type, const char *name);
 size_t sh_package_compilation_prune_native(sh_package_compilation *compiled,
     sh_package_native_served served, void *context);
+/* As above, and keep, when supplied, is asked about each resource that would
+ * otherwise be dropped: nonzero keeps it published. Every decision is made on
+ * the intact table before anything is dropped, so keep may read the table. */
+typedef int (*sh_package_native_keep)(void *context, const sh_compiled_resource *resource);
+size_t sh_package_compilation_prune_native_except(sh_package_compilation *compiled,
+    sh_package_native_served served, void *context, sh_package_native_keep keep, void *keep_context);
 /* Retain removed SnapMap or built-in product identities with original bytes so
  * native refresh also rebuilds their existing objects. Neither input changes
  * on failure. Campaign imports and new identities have no SnapMap original. */

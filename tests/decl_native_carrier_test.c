@@ -58,7 +58,6 @@ static void scalars(void)
     /* Outside the writer's grammar: equivalence would need its reader. */
     refuses("\"a\" \"b\"", NULL, SH_DECL_CARRIER_GAP);
     refuses("SPAWN_AI_TYPE_IMP", NULL, SH_DECL_CARRIER_GAP);
-    refuses("1e5", "float", SH_DECL_CARRIER_GAP);
     refuses("( 1, 1, 1 )", NULL, SH_DECL_CARRIER_GAP);
     refuses("1.2.3", "float", SH_DECL_CARRIER_GAP);
     refuses("-", NULL, SH_DECL_CARRIER_GAP);
@@ -69,6 +68,39 @@ static void scalars(void)
     accepts(".5", "float", "0.5");
     accepts("123456.789", "float", "123456.7890625");
     accepts("0.0000000001", "float", "0.0000000001");
+    /* Native float tokens may use a lowercase exponent. Preserve the float
+     * value through the carrier's decimal writer, including integral results. */
+    accepts("1e5", "float", "100000.0");
+    accepts("-1e5", "float", "-100000.0");
+    accepts("1.25e-1", "float", "0.125");
+    accepts(".5e+2", "float", "50.0");
+    accepts("0.5e1", "float", "5.0");
+    accepts("1.e1", "float", "10.0");
+    accepts("1e-10", "float", "0.0000000001");
+    accepts("0.0e0", "float", "0.0");
+    /* ReadNumber includes an empty exponent; native atof rewinds it and
+     * converts the already-read mantissa on both renderers. */
+    accepts("1e", "float", "1.0");
+    accepts("1e+", "float", "1.0");
+    accepts("1e-", "float", "1.0");
+    accepts("-1.25e+", "float", "-1.25");
+    accepts("0.0e", "float", "0.0");
+    /* These do not form the same native float token, or need a different
+     * field reader. Never turn a partial token into a different valid value. */
+    const char *invalid[] = {"1E5", "1e+-", "1e1.5", "1e2e3",
+        "1ee2", "1e 2", "1.2.3e1", "e1", ".e1", "+1e2", "0e5", "00.5", "01.5e1"};
+    for (size_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); i++)
+        refuses(invalid[i], "float", SH_DECL_CARRIER_GAP);
+    refuses("1e5", NULL, SH_DECL_CARRIER_GAP);
+    refuses("1e5", "int", SH_DECL_CARRIER_GAP);
+    refuses("1e5", "double", SH_DECL_CARRIER_GAP);
+    refuses("1e+", "int", SH_DECL_CARRIER_GAP);
+    refuses("1e", NULL, SH_DECL_CARRIER_GAP);
+    refuses("1e-11", "float", SH_DECL_CARRIER_ENGINE);
+    refuses("1e-39", "float", SH_DECL_CARRIER_ENGINE);
+    refuses("-0.0e0", "float", SH_DECL_CARRIER_ENGINE);
+    refuses("1e100", "float", SH_DECL_CARRIER_GAP);
+    refuses("1.6777216e7", "float", SH_DECL_CARRIER_GAP);
     /* FS_WriteFloatString flushes |v| < FLT_MIN, zero included, to +0: the
      * sign of -0.0 does not survive loading. */
     refuses("-0.0", "float", SH_DECL_CARRIER_ENGINE);
@@ -107,8 +139,20 @@ static void state(void)
     CHECK(json && !strcmp(json, expected) && length == strlen(expected));
     free(json); sh_decl_tree_free(tree);
 
-    /* The refusal names the member and whether it is a native limit. */
+    /* Exponents survive the JSON -> loaded declaration -> JSON round trip. */
     tree = parse("{ edit = { spawnPosition = { x = 1e5; } } }");
+    json = sh_decl_carrier_state(tree, fixture_type, NULL, &length, &refusal);
+    CHECK(json && !strcmp(json, "{\"edit\":{\"spawnPosition\":{\"x\":100000.0}}}"));
+    if (json) {
+        char error[256]; size_t again_length = 0;
+        sh_decl_node *loaded = sh_decl_carrier_tree(json, length, NULL, NULL, error, sizeof(error));
+        char *again = loaded ? sh_decl_carrier_state(loaded, fixture_type, NULL, &again_length, &refusal) : NULL;
+        CHECK(again && !strcmp(again, "{\"edit\":{\"spawnPosition\":{\"x\":100000}}}"));
+        free(again); sh_decl_tree_free(loaded);
+    }
+    free(json); sh_decl_tree_free(tree);
+    /* The refusal names the member and whether it is a native limit. */
+    tree = parse("{ edit = { spawnPosition = { x = 1E5; } } }");
     json = sh_decl_carrier_state(tree, fixture_type, NULL, &length, &refusal);
     CHECK(!json && refusal.limit == SH_DECL_CARRIER_GAP && !strcmp(refusal.path, "edit.spawnPosition.x"));
     free(json); sh_decl_tree_free(tree);
