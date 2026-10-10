@@ -522,6 +522,24 @@ done:
     free(bound); sh_package_occurrence_release(ownership); sh_package_provenance_free(&saved); return ok;
 }
 
+/* DIAG r090: cap flat entityDef text after native deserialization. Not for commit. */
+static void diag_flat_caps(const char *where, void *map)
+{
+    __try {
+        unsigned char *first = *(unsigned char **)((unsigned char *)map + 0x20);
+        int total = *(int *)((unsigned char *)map + 0x28);
+        char line[300];
+        for (int i = 0; first && i < total && i < 4096; i++) {
+            unsigned char *flat = first + (size_t)i * 0x1b0u;
+            const char *text = *(const char **)(flat + 0x38);
+            int length = *(int *)(flat + 0x40);
+            if (!text || length <= 0 || !strstr(text, "visblockers")) continue;
+            _snprintf_s(line, sizeof(line), _TRUNCATE, "DIAG flat %s: entity %d text=%d rotatable=%d",
+                where, i, length, strstr(text, "rotatable") != NULL);
+            backend_log(line);
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) { backend_log("DIAG flat read faulted"); }
+}
 static int sh_deser_owned(const char *json, void *out_map)
 {
     if (g_deser_orig == NULL) return 0;   /* defensive: should never happen once installed */
@@ -545,6 +563,7 @@ static int sh_deser_owned(const char *json, void *out_map)
         const char *chosen = prepared ? prepared : g_preflight_json;
         __try {
             rc = g_deser_orig(chosen, out_map);
+            if (rc) diag_flat_caps("after native deserialize", out_map);
             if (rc && !attach_loaded_occurrences(g_preflight_json, chosen, out_map)) rc = 0;
             if (rc) sh_map_render_loaded(out_map);
             InterlockedExchange(&g_open_is_rawmap, g_preflight_rawmap);
