@@ -203,21 +203,9 @@
       "## Snapmap+ " + release.querySelector("h2").textContent.trim(),
       release.querySelector("time").textContent.trim()
     ];
-    // Read the rendered notes so every displayed paragraph and bullet is included.
-    release.querySelectorAll(".release-notes > *").forEach(function (block) {
-      var text = block.textContent.trim();
-      if (!text) return;
-      if (block.tagName === "UL") {
-        text = Array.prototype.map.call(block.children, function (item) {
-          return "- " + item.textContent.trim();
-        }).join("\n");
-      } else if (block.querySelector("strong")) {
-        text = "**" + text + "**";
-      } else if (block.querySelector("em")) {
-        text = "_" + text + "_";
-      }
-      if (text) parts.push(text);
-    });
+    // Copy the source so inline bold/code retain their exact Markdown boundaries.
+    var notes = release.querySelector(".release-markdown").textContent.trim();
+    if (notes) parts.push(notes);
     parts.push("[View on GitHub](" + release.querySelector(".release-links a").href + ")");
     return parts.join("\n\n");
   }

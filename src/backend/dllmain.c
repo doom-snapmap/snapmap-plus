@@ -40,6 +40,7 @@
 #include "fsm_web.h"
 #include "navmesh.h"
 #include "nav_bake.h"
+#include "nav_menu.h"
 #include "nav_play.h"
 #include "decl_server.h"
 #include "commands.h"
@@ -449,11 +450,16 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
         if(!sh_map_render_install(results,db,g_doom_base)||!sh_map_render_editor_install(results,db))
             backend_log("RENDER: per-map rendering controls unavailable on this build");
 
+        /* Navigation geometry follows editor actions rather than a poll. */
+        sh_apply_engine_install_edit_hook(results, db);
+
         /* Expose live entity reads so navigation sees marks edited since map load. */
         sh_nav_bake_set_live_editor(sh_apply_engine_entity_count,
                                     sh_apply_engine_entity_valid,
-                                    sh_apply_engine_entity_json, NULL);
+                                    sh_apply_engine_entity_json,
+                                    sh_apply_engine_entity_transform, NULL);
         sh_nav_bake_set_snapshot(sh_apply_engine_nav_regions, NULL);
+        sh_nav_menu_install(results, db);
 
         /* Read marks at entry to edit-to-build conversion, on the engine main thread.
          * Later bake callbacks can see entities with incomplete defsub state and

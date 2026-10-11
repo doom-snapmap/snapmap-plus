@@ -44,14 +44,27 @@ std::string to_utf8(const std::wstring &w)
     WideCharToMultiByte(CP_UTF8, 0, w.c_str(), (int)w.size(), &s[0], n, nullptr, nullptr);
     return s;
 }
+/* Position just after the ':' of a "key" that is a member name, not text inside
+ * a string value; npos when absent. */
+static size_t find_value(const std::wstring &j, const wchar_t *key)
+{
+    size_t klen = wcslen(key);
+    for (size_t p = 0; p < j.size(); p++) {
+        if (j[p] != L'"') continue;
+        size_t start = ++p;
+        while (p < j.size() && j[p] != L'"') p += (j[p] == L'\\') ? 2 : 1;
+        if (p >= j.size()) return std::wstring::npos;
+        size_t q = p + 1;
+        while (q < j.size() && (j[q] == L' ' || j[q] == L'\t' || j[q] == L'\r' || j[q] == L'\n')) q++;
+        if (q < j.size() && j[q] == L':' && p - start == klen && j.compare(start, klen, key) == 0)
+            return q + 1;
+    }
+    return std::wstring::npos;
+}
 bool get_string(const std::wstring &j, const wchar_t *key, std::wstring &out)
 {
-    std::wstring needle = L"\""; needle += key; needle += L"\"";
-    size_t p = j.find(needle);
+    size_t p = find_value(j, key);
     if (p == std::wstring::npos) return false;
-    p += needle.size();
-    while (p < j.size() && j[p] != L':') p++;
-    if (p >= j.size()) return false; p++;
     while (p < j.size() && (j[p] == L' ' || j[p] == L'\t')) p++;
     if (p >= j.size() || j[p] != L'"') return false; p++;
     out.clear();
@@ -73,12 +86,8 @@ bool get_string(const std::wstring &j, const wchar_t *key, std::wstring &out)
 }
 bool get_int(const std::wstring &j, const wchar_t *key, int *out)
 {
-    std::wstring needle = L"\""; needle += key; needle += L"\"";
-    size_t p = j.find(needle);
+    size_t p = find_value(j, key);
     if (p == std::wstring::npos) return false;
-    p += needle.size();
-    while (p < j.size() && j[p] != L':') p++;
-    if (p >= j.size()) return false; p++;
     while (p < j.size() && (j[p] == L' ' || j[p] == L'\t')) p++;
     bool neg = false; if (p < j.size() && j[p] == L'-') { neg = true; p++; }
     if (p >= j.size() || j[p] < L'0' || j[p] > L'9') return false;
@@ -89,10 +98,8 @@ bool get_int(const std::wstring &j, const wchar_t *key, int *out)
 void get_int_array(const std::wstring &j, const wchar_t *key, std::vector<int> &out)
 {
     out.clear();
-    std::wstring needle = L"\""; needle += key; needle += L"\"";
-    size_t p = j.find(needle);
+    size_t p = find_value(j, key);
     if (p == std::wstring::npos) return;
-    p += needle.size();
     while (p < j.size() && j[p] != L'[') p++;
     if (p >= j.size()) return; p++;
     while (p < j.size() && j[p] != L']') {
@@ -107,12 +114,8 @@ void get_int_array(const std::wstring &j, const wchar_t *key, std::vector<int> &
 
 bool get_double(const std::wstring &j, const wchar_t *key, double *out)
 {
-    std::wstring needle = L"\""; needle += key; needle += L"\"";
-    size_t p = j.find(needle);
+    size_t p = find_value(j, key);
     if (p == std::wstring::npos) return false;
-    p += needle.size();
-    while (p < j.size() && j[p] != L':') p++;
-    if (p >= j.size()) return false; p++;
     while (p < j.size() && (j[p] == L' ' || j[p] == L'\t')) p++;
     wchar_t *end = nullptr;
     double v = wcstod(j.c_str() + p, &end);

@@ -186,3 +186,15 @@ int sh_package_editor_attach(unsigned kind, const void *flat, const sh_package_o
 { (void)kind; (void)flat; (void)owner; (void)error; (void)capacity; assert(0); return 0; }
 void *sh_editor_transition_capture(const void *editor) { (void)editor; assert(0); return NULL; }
 int sh_editor_transition_frame_ready(void *editor, void *map) { (void)editor; (void)map; assert(0); return 0; }
+
+void *sh_prepare_detour_sig(const sig_result *r, void *detour, size_t stolen)
+{ (void)r; (void)detour; (void)stolen; assert(0); return NULL; }
+sh_patch_status sh_commit_detour(void *tramp) { (void)tramp; assert(0); return B2_PATCH_OK; }
+int sh_uninstall_detour(void *tramp) { (void)tramp; assert(0); return 0; }
+int sh_nav_bake_volume_flagged(int uid) { (void)uid; assert(0); return 0; }
+void sh_nav_bake_conflicts(int *marked, int *rooms) { (void)marked; (void)rooms; assert(0); }
+int sh_nav_bake_has_map(void) { assert(0); return 0; }
+int sh_nav_bake_instance_count(void) { assert(0); return 0; }
+int sh_nav_bake_volume_uids(int *out, int cap) { (void)out; (void)cap; assert(0); return 0; }
+int sh_nav_bake_knows_volume(int uid) { (void)uid; assert(0); return 0; }
+int sh_nav_bake_prepare(sh_nav_bake_reader reader) { (void)reader; assert(0); return 0; }

@@ -198,13 +198,20 @@ still reference them. Save files contain the dimension-bearing module identity;
 players need Snapmap+ to reconstruct its resources. Vanilla loading is unsupported.
 
 The shared object uses an append-only vtable. Its original 77-slot prefix is
-retained, with extensions through `+0x340`; the current table occupies `0x348`
-bytes. The File menu's rawmap callbacks occupy `+0x328` through `+0x338`.
-`prefab_export` at `+0x340` returns one complete process-heap allocation,
+retained, with extensions through `+0x358`; the current table occupies `0x360`
+bytes. The File menu's rawmap surface is `rawmap_status` (`+0x328`),
+`rawmap_configure` (`+0x330`) and `rawmap_load_now` (`+0x338`). The next three
+are `navmesh_view` (`+0x340`), `run_on_main` (`+0x348`) and `delete_entities`
+(`+0x350`). The backend writes a marker and the table's size into the object's
+first reserved cell (`+0x08`); older backends left it zero and had `0x350`
+bytes. Check `SH_IFACE_HAS_SLOT` before calling any slot at or past `+0x350`,
+so a frontend never reads past an older backend's table.
+`prefab_export` at `+0x358` returns one complete process-heap allocation,
 which the frontend releases with `HeapFree(GetProcessHeap(), 0, bytes)`.
-The fixed object records a marker and table extent in formerly reserved bytes
-at `+0x08` and `+0x10`. Check `sh_iface_prefab_export` before reading the new
-slot; an older zeroed marker safely reports that export is unavailable.
+Check `sh_iface_prefab_export` before reading that callback.
+The earlier development table assigned `+0x340` to prefab export under a
+different marker. Its compatible prefix ends before that slot; size checks
+refuse the new navigation, dispatch, delete and export callbacks for that table.
 Static assertions pin the layout. Do not insert, reorder or repurpose
 existing slots. Add new capability slots at the end and update both DLLs.
 
@@ -229,6 +236,12 @@ The WebView host owns its window and browser callbacks. Its worker polls the
 backend through a manual think loop at about 30 Hz. UI callbacks stage requests;
 the worker drains them and posts result messages. A UI mutex protects its shared
 request state, not the engine's objects.
+
+Selection, class/inherit, display-name, source and camera writes from the UI go
+through `run_on_main`. The backend runs the call after the next native frame
+while the worker waits. A call that has not started when its wait expires is
+withdrawn and never runs. A started call borrows the worker's data, so the
+worker waits for it to finish; the main thread never waits on the worker.
 
 Package, navigation and staging maintenance run after a successful native engine
 frame on DOOM's verified main thread. Recovery suppresses that pass. The frontend
@@ -267,6 +280,18 @@ map. Native staging and source ownership remain retained until either successful
 finalization or verified rollback. Imported content does not replace the current
 map's provider or authorize a global palette rebuild.
 
+Entities-list Delete calls `delete_entities` inside `run_on_main`. The backend
+applies the gates DOOM's own Delete key passes (object editing active, no grab,
+placement or pending action, the map's Delete restriction), makes the native
+selection exactly the requested entities, clears a hover on any other entity,
+and calls the engine's Delete Selection. The engine checks eligibility,
+releases the entities and empties the selection; the "Delete Selection" undo
+step and the return to idle follow on later native frames. Until they do, the
+selection guard refuses product selection writes and reports `2`. Every refusal
+before the action restores the previous selection. Portal doors and frames are
+refused before anything changes. The page edits its own selection and announces
+success only from the returned status.
+
 ## Engine data ownership
 
 Engine allocators inherit the calling thread's heap scope. Objects retained
@@ -297,6 +322,12 @@ or after an empty or refused snapshot. Sparse box refreshes include unmarked
 obstacles and use live uniqueIds; topology changes require a complete snapshot.
 Play always takes its own complete snapshot. The worker and session log handle
 have process lifetime; DllMain must not wait on them or acquire their locks.
+
+The native Start-menu action in `nav_menu.c` shares the View menu's update
+request and completion state. It creates its additional button through the
+engine, repairs the SWF binding after timeline rewinds, and uses native busy
+and toast widgets with literal text. Completion collects the worker result
+independently of preview drawing; the UI does not invoke saving or map validation.
 
 Navigation surfaces and obstacles have separate roles. The bake emits only
 exposed box faces meeting each AAS class's floor-slope threshold; ordinary

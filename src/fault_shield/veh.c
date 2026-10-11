@@ -239,6 +239,27 @@ static int unwind_to_rva_range(CONTEXT *ctx, uintptr_t lo_rva, uintptr_t hi_rva,
     return 0;
 }
 
+/* Unwind a context copy one frame to its caller. Return 0 if the stack cannot be read. */
+static int unwind_one_frame(CONTEXT *ctx)
+{
+    __try {
+        DWORD64 imageBase = 0;
+        PRUNTIME_FUNCTION fn = RtlLookupFunctionEntry((DWORD64)ctx->Rip, &imageBase, NULL);
+        if (fn == NULL) {
+            uintptr_t sp = (uintptr_t)ctx->Rsp;
+            if (sp == 0 || is_wild((void *)sp)) return 0;
+            ctx->Rip = *(uintptr_t *)sp;
+            ctx->Rsp = sp + 8;
+        } else {
+            PVOID  handlerData = NULL;
+            DWORD64 establisherFrame = 0;
+            RtlVirtualUnwind(UNW_FLAG_NHANDLER, imageBase, (DWORD64)ctx->Rip, fn,
+                             ctx, &handlerData, &establisherFrame, NULL);
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+    return ctx->Rip != 0 && rip_in_doom((void *)ctx->Rip);
+}
+
 /* ---- Capture the FAULTING call stack as a compact "DOOM+0xRVA <- ..." string (for the crash log + popup).
  * Walks a COPY of the fault context with the OS unwinder (like unwind_to_rva_range); non-DOOM frames show as
  * module+off. SEH-guarded per frame so a wild frame just ends the walk -- never re-faults the VEH. */
@@ -714,8 +735,22 @@ static LONG CALLBACK shield_veh(PEXCEPTION_POINTERS ep)
             shield_emit(&nf);
             return EXCEPTION_CONTINUE_SEARCH;
         }
-        uintptr_t sp = (ep->ContextRecord->Rsp & ~(uintptr_t)0xF) - 8;
-        *(uintptr_t *)sp = (uintptr_t)rip;
+        /* The pushed address must sit at the faulting RSP - 8 or the unwinder reads
+         * the faulting frame 8 bytes off. An RSP that is not 16-aligned (a frameless
+         * leaf, a prologue) is first unwound to its caller. */
+        if (ep->ContextRecord->Rsp & 0xF) {
+            CONTEXT caller = *ep->ContextRecord;
+            if (!unwind_one_frame(&caller) || (caller.Rsp & 0xF) != 0) {
+                shield_fault nf = { "sig", (int)code,
+                    "Class-B declined: the faulting frame could not be unwound to an aligned caller",
+                    rva, (uintptr_t)fault_addr };
+                shield_emit(&nf);
+                return EXCEPTION_CONTINUE_SEARCH;
+            }
+            *ep->ContextRecord = caller;
+        }
+        uintptr_t sp = ep->ContextRecord->Rsp - 8;
+        *(uintptr_t *)sp = (uintptr_t)ep->ContextRecord->Rip;
         ep->ContextRecord->Rsp = sp;
         ep->ContextRecord->Rcx = (uintptr_t)g_why;                   /* Error(fmt) in rcx */
         ep->ContextRecord->Rip = error6;                             /* resume INTO Error(6) */

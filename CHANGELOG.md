@@ -3,6 +3,23 @@
 Every Snapmap+ release, newest first. Beta versions are opt-in previews; the
 latest stable version is what `snapmap-plus update` installs.
 
+## v0.2.1-beta.18 -- 2026-10-11 (beta)
+
+**Build demon navigation from the editor's Start menu**
+
+Rebuild the paths demons use from the editor's Start menu. **Build Navmesh** sits beside **Save** and does not save your map or require a player start.
+
+### New
+- **Build Navmesh** shows in-game progress and a completion message. It also works in Blueprint mode and with the green preview turned off.
+
+### Improved
+- Navigation previews refresh on map open or with **Update Navmesh** in the **View** menu. Relevant box edits mark the preview out of date.
+- Play rebuilds navigation for the current map when it has changed since the last update.
+
+### Fixed
+- Every rawmap save now respects the formatting setting. Use `sh_pretty_on 1` to save these editable map files with line breaks and indentation.
+- Fixed a freeze when first activating certain packaged sounds.
+
 ## v0.2.1-beta.17 -- 2026-09-18 (beta)
 
 **Older map text loads correctly, and compatible mods combine**

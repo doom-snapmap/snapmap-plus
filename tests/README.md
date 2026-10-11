@@ -14,6 +14,10 @@ Checks native helpers, engine-interface contracts, frontend JavaScript and optio
   fail; the default continues to run every suite.
 - `*_test.c` and `*_test.cpp` exercise runtime helpers and source contracts.
 - `*_test.js` checks page behavior, browser modules and Worker services.
+- `nav_menu_test.c` checks native action ordering, progress and completion,
+  repeated requests, cancellation, and rollback after a partial installation.
+  `nav_bake_test.c` collects background builds without preview drawing.
+  `apply_dispatch_test.c` checks Start-menu scheduling and worker completion.
 - `package_migration_test.c` checks the shared legacy descriptor, namespace and
   policy planner. `package_legacy_test.c` checks old archives, mixed and nested
   components, untouched current descriptors, authored bytes and stock imports.

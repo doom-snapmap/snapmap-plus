@@ -114,6 +114,9 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
         <div class="menu-popup" id="menu-view" role="menu" hidden>
           <button type="button" id="menuLight" role="menuitemradio" aria-checked="true"><span>Light Theme</span></button>
           <button type="button" id="menuDark" role="menuitemradio" aria-checked="false"><span>Dark Theme</span></button>
+          <div class="menu-sep" role="separator"></div>
+          <button type="button" id="menuNavmeshUpdate" role="menuitem"><span>Update Navmesh</span></button>
+          <div class="menu-note" id="menuNavmeshNote">Checking...</div>
         </div>
       </div>
     </div>
@@ -1070,9 +1073,6 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       if (o.cmd === 'rawmapArm') previewRawmap.armed = o.on ? 1 : 0;
       // Ticking pins the path already shown, so the readout does not move on the click.
       if (o.cmd === 'rawmapKeepHere') previewRawmap.saveTarget = o.on ? previewRawmap.save : '';
-      // Save Rawmap As arms one save; Load Rawmap raises the confirm prompt. Both are modelled here
-      // so the two states the readout can show are reachable without the game.
-      if (o.cmd === 'rawmapSavePick' || o.cmd === 'rawmapSaveNow') previewRawmap.savePending = 1;
       // The load half, so the greying of "Open ... as New Map" is reachable in browser preview:
       // picking stages a file, opening it spends the stage.
       if (o.cmd === 'rawmapLoadPick') previewRawmap.loadPending = 1;
@@ -1082,7 +1082,6 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
         save: previewRawmap.save,
         saveTarget: previewRawmap.saveTarget || '',
         armed: previewRawmap.armed, saves: 0, lastBytes: 0, loads: 0, loadsDone: 0,
-        savePending: previewRawmap.savePending || 0,
         loadPending: previewRawmap.loadPending || 0,
         // No test file in browser preview, so this can only be the gate. Sent rather than omitted
         // so the preview exercises the field the game sends.
@@ -2259,6 +2258,59 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     refreshEditorForSelection();
   }
 
+  /* Delete runs DOOM's own Delete Selection. Nothing changes here until the backend
+     answers: a refusal keeps the selection, and success is announced only for what the
+     engine released. Codes mirror SH_DELETE_* in snapmap_plus_iface.h. */
+  var DELETE_STATUS = {DISPATCHED: 1, UNAVAILABLE: 0, NOT_MAIN: -1, NOT_READY: -2, NOT_ENTITY: -3,
+                       BUSY: -4, INVALID: -5, RESTRICTED: -6, PORTAL: -7, PROTECTED: -8,
+                       REFERENCED: -9, FAULT: -10, INCOMPLETE: -11};
+  var DELETE_BUSY_HOLDING = 5;   /* busy detail: a grab or placement owns the selection */
+  var deleteInFlight = null;   /* IDs of the one request still waiting for its deleteResult */
+  function requestDelete(ids) {
+    /* One request at a time, held until its own reply. The host answers every
+       request, including one the game never started ("timeout"), so a reply
+       always arrives and can never be matched to a newer list. */
+    if (!ids.length) return;
+    if (deleteInFlight) { toast('A delete is still running; wait for its result', 'warn'); return; }
+    deleteInFlight = ids.slice();
+    post({cmd:'delete', eids: ids});
+  }
+  function deleteResultMessage(d) {
+    var S = DELETE_STATUS;
+    if (d.status === 'timeout') return {text: 'Not deleted: the game did not respond; try again', level: 'warn'};
+    if (d.status === S.DISPATCHED)
+      return {text: 'Deleted ' + d.released + ' entit' + (d.released === 1 ? 'y' : 'ies'), level: 'ok'};
+    if (d.status === S.INCOMPLETE)
+      return {text: 'Deleted ' + d.released + ' of ' + d.targets + '; see the log', level: 'err'};
+    if (d.status === S.BUSY)
+      return d.busy === DELETE_BUSY_HOLDING
+        ? {text: 'Place or cancel what you are holding in the 3D view first, then delete', level: 'warn'}
+        : {text: 'The editor is busy finishing another action; try Delete again', level: 'warn'};
+    if (d.status === S.INVALID) return {text: 'Not deleted: the list was out of date; it has been refreshed', level: 'warn'};
+    if (d.status === S.RESTRICTED) return {text: 'Not deleted: this map does not allow deleting objects here', level: 'warn'};
+    if (d.status === S.PORTAL) return {text: 'Not deleted: room doors and caps belong to their room', level: 'warn'};
+    if (d.status === S.PROTECTED) return {text: 'Not deleted: the selection includes an object the editor protects', level: 'warn'};
+    if (d.status === S.REFERENCED) return {text: 'Not deleted: another object still uses this one', level: 'warn'};
+    if (d.status === S.NOT_ENTITY || d.status === S.NOT_READY)
+      return {text: 'Not deleted: switch to object editing in the 3D editor first', level: 'warn'};
+    if (d.status === S.UNAVAILABLE)
+      return {text: 'Delete is unavailable; reinstall Snapmap+ so both of its files match', level: 'err'};
+    return {text: 'Delete failed (see log)', level: 'err'};
+  }
+  function applyDeleteResult(d) {
+    if (!deleteInFlight) return;   /* nothing outstanding: a stale or repeated reply changes nothing */
+    var ids = deleteInFlight;
+    deleteInFlight = null;
+    var m = deleteResultMessage(d);
+    if (d.status === DELETE_STATUS.DISPATCHED) {
+      /* The engine already emptied its selection and is committing the undo step;
+         pushing a selection now would be refused, so only the list side changes. */
+      for (var i = 0; i < ids.length; i++) delete selectedEids[ids[i]];
+      updateSelDom(); refreshEditorForSelection(false);
+    }
+    toast(m.text, m.level);
+  }
+
   // ---- context menu ----
   var ctx = document.getElementById('ctxmenu');
   function onRowContext(ev) { ev.preventDefault(); showCtx(ev.pageX, ev.pageY); }
@@ -2271,12 +2323,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       var out = ids.map(function(e){return strById[e]||e;}).join('\n'); copyText(out);
       toast('Copied ' + n + ' id' + (n>1?'s':''), 'ok');
     });
-    addCtx('Delete' + (n>1?' ('+n+')':''), function(){
-      post({cmd:'delete', eids: ids});
-      for (var i=0;i<ids.length;i++) delete selectedEids[ids[i]];
-      updateSelDom(); refreshEditorForSelection();
-      toast('Deleted ' + n + ' entit' + (n>1?'ies':'y'), 'ok');
-    });
+    addCtx('Delete' + (n>1?' ('+n+')':''), function(){ requestDelete(ids); });
     addCtx('Push to stack 0' + (n>1?' ('+n+')':''), function(){ post({cmd:'pushStack', eids: ids}); });
     addCtx('Clear stack 0', function(){ post({cmd:'clearStack'}); });   // not scoped to the current selection -- empties the whole stack, same as `sh cstk 0`
     ctx.style.left = x+'px'; ctx.style.top = y+'px'; ctx.style.display = 'block';
@@ -2482,6 +2529,22 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
   // ---- messages from native ----
   function onMessage(d) {
+    if (d.kind === 'navmeshState') {
+      if (!d.ok) { navmeshNote('This build has no navigation view.'); return; }
+      var st = d.state || {};
+      var empty = !st.floors && !st.walls;
+      var red = st.red || 0, rooms = st.rooms || 0;
+      navmeshNote(st.pending ? 'Updating...'
+                : st.refused ? 'Could not read this map. Run sh_navmesh for the reason'
+                : red        ? red + ' volume' + (red === 1 ? '' : 's')
+                               + ' in conflict, shown red. Fix and try again'
+                : rooms      ? rooms + ' room' + (rooms === 1 ? '' : 's')
+                               + ' could not be built. Run sh_navmesh for the reason'
+                : st.stale   ? 'Navmesh is out of date'
+                : empty      ? 'This map has no navmesh'
+                             : 'Navmesh is up to date');
+      return;
+    }
     if (d.kind === 'rawmapStatus') {
       renderRawmapStatus(d.ok ? d.status : null);
       // The note is only present when something actually changed, so a plain refresh stays silent.
@@ -2692,12 +2755,16 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
           renderTlBody();
         }
       }
+    } else if (d.kind === 'deleteResult') {
+      applyDeleteResult(d);
     } else if (d.kind === 'selectRefused') {
-      // A grab snapshot depends on selection order. If the backend refuses a change,
-      // restore the list highlight to the selection the editor retained.
+      // A grab snapshot depends on selection order, and a native Delete owns the selection
+      // until it commits. If the backend refuses a change, restore the list highlight to
+      // the selection the editor retained.
       selectedEids = {}; anchorEid = -1;
       updateSelDom(); refreshEditorForSelection(false);
-      toast('Place or cancel what you are holding in the 3D view first, then select', 'warn');
+      toast(d.reason === 'native' ? 'The editor is finishing the last action; select again in a moment'
+                                  : 'Place or cancel what you are holding in the 3D view first, then select', 'warn');
     } else if (d.kind === 'selCount') {
       var prevEditorSel = editorSelCount;
       editorSelCount = d.count; updateCreateBtn();
@@ -2708,6 +2775,9 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
         updateSelDom(); refreshEditorForSelection(false);   // false: native already cleared, don't push back
       }
     } else if (d.kind === 'createPrefabResult') {
+      var createdMeta = pendingCreateMeta; pendingCreateMeta = null;
+      if (d.result === 1 && createdMeta && createdMeta.name === d.name)
+        post({cmd:'savePrefabMeta', name: d.name, folder: '', body: createdMeta.body});
       if (d.result === 1) toast('Created "' + d.name + '"', 'ok');
       else if (d.result === 0) toast('Nothing selected in the editor -- select entities first', 'warn');
       else if (d.result === 2) toast('Hover over one of the selected entities in the 3D view, then try again', 'warn');
@@ -2772,6 +2842,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   var prefabData = {root: [], folders: []};
   var prefabTags = {};   // "<folder>/<name>" (or "<name>" at root) -> [tags], from the list message's meta map
   var currentPrefabNames = [];   // root names only -- Create-from-selection always targets root
+  var pendingCreateMeta = null;  // {name, body} from the New Prefab dialog, saved once the create succeeds
   function allPrefabNamesInFolder(folder) {
     if (!folder) return prefabData.root.slice();
     for (var i = 0; i < prefabData.folders.length; i++) if (prefabData.folders[i].name === folder) return prefabData.folders[i].items.slice();
@@ -3070,6 +3141,10 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     for (i = 0; i < popups.length; i++) popups[i].hidden = true;
     OPEN_MENU = null;
   }
+  function navmeshNote(text) {
+    var el = document.getElementById('menuNavmeshNote');
+    if (el) el.textContent = text;
+  }
   function openMenu(name, focusFirst) {
     closeMenus();
     var label = document.querySelector('.menu-label[data-menu="' + name + '"]');
@@ -3079,6 +3154,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     label.setAttribute('aria-expanded', 'true');
     popup.hidden = false;
     OPEN_MENU = name;
+    if (name === 'view') post({cmd: 'navmeshState'});
     if (focusFirst) {
       var first = popup.querySelector('button:not(:disabled)');
       if (first) first.focus();
@@ -3302,6 +3378,14 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   (function(){
     var lbl = document.querySelector('.menu-label[data-menu="file"]');
     if (lbl) lbl.addEventListener('click', function(){ post({cmd: 'rawmapStatus'}); });
+  })();
+  (function(){
+    var item = document.getElementById('menuNavmeshUpdate');
+    if (item) item.addEventListener('click', function(){
+      navmeshNote('Updating...');
+      post({cmd: 'navmeshUpdate'});
+      closeMenus();
+    });
   })();
   (function(){
     var dark = document.documentElement.classList.contains('dark');
@@ -6161,6 +6245,9 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     var name = (document.getElementById('npName').value || '').trim();
     if (!name) { if (typeof toast === 'function') toast('Enter a name', 'warn'); return; }
     function doCreate(){
+      var desc = (document.getElementById('npDesc').value || '').trim();
+      var tags = parseTagsInput(document.getElementById('npTags').value);
+      pendingCreateMeta = (desc || tags.length) ? {name: name, body: JSON.stringify({desc: desc, tags: tags})} : null;
       post({cmd:'createPrefab', name: name});
       showPrefabModal(false);
       document.getElementById('npName').value=''; document.getElementById('npDesc').value=''; document.getElementById('npTags').value='';

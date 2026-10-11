@@ -314,7 +314,7 @@ static void test_open_never_reads_the_live_editor(void)
 
     printf("a bake never reads the live editor (issues #87/#89)\n");
     sh_nav_bake_test_reset();
-    sh_nav_bake_set_live_editor(live_count, live_valid, live_json, NULL);
+    sh_nav_bake_set_live_editor(live_count, live_valid, live_json, NULL, NULL);
     live_reset();
 
     json = make_map("ind_dlc/room", 1, 1, 0x1u, 0x1u, owner);
@@ -335,7 +335,7 @@ static void test_open_never_reads_the_live_editor(void)
     CHECK_MSG(g_live_json_calls == 0,
               "an open must not serialize a live entity -- that is the EntityClone fault");
 
-    sh_nav_bake_set_live_editor(NULL, NULL, NULL, NULL);
+    sh_nav_bake_set_live_editor(NULL, NULL, NULL, NULL, NULL);
 }
 
 /* Editor-side refresh must include unsaved navigation toggles in the plan. */
@@ -346,7 +346,7 @@ static void test_refresh_live_is_callable_from_the_editor(void)
 
     printf("the editor-side refresh reads the live editor\n");
     sh_nav_bake_test_reset();
-    sh_nav_bake_set_live_editor(live_count, live_valid, live_json, NULL);
+    sh_nav_bake_set_live_editor(live_count, live_valid, live_json, NULL, NULL);
     live_reset();
 
     json = make_map("ind_dlc/room", 1, 1, 0x1u, 0x1u, owner);
@@ -356,7 +356,7 @@ static void test_refresh_live_is_callable_from_the_editor(void)
     CHECK_MSG(g_live_count_calls > 0,
               "the editor-side refresh is what reads the live surface now");
 
-    sh_nav_bake_set_live_editor(NULL, NULL, NULL, NULL);
+    sh_nav_bake_set_live_editor(NULL, NULL, NULL, NULL, NULL);
 }
 
 /* Without a map there is nothing to attribute a live mark to, and the refresh
@@ -365,11 +365,11 @@ static void test_refresh_live_without_a_map_is_a_no_op(void)
 {
     printf("the editor-side refresh does nothing without a map\n");
     sh_nav_bake_test_reset();
-    sh_nav_bake_set_live_editor(live_count, live_valid, live_json, NULL);
+    sh_nav_bake_set_live_editor(live_count, live_valid, live_json, NULL, NULL);
     live_reset();
     sh_nav_bake_refresh_live();
     CHECK_MSG(g_live_count_calls == 0, "no map means nothing to refresh");
-    sh_nav_bake_set_live_editor(NULL, NULL, NULL, NULL);
+    sh_nav_bake_set_live_editor(NULL, NULL, NULL, NULL, NULL);
 }
 
 static const char *g_snapshot_json;
@@ -401,6 +401,30 @@ static void test_complete_snapshot_tracks_creation_and_deletion(void)
     sh_nav_bake_refresh_live();
     sh_nav_bake_test_copy_map(&map); CHECK(map.region_count == 0);
     CHECK(map.instances[0].region_count == 0);
+    sh_nav_bake_set_snapshot(NULL, NULL);
+}
+
+static void test_refused_read_holds_no_map(void)
+{
+    const int owner[2] = {0, 0};
+    int uids[4], floors = -1, walls = -1;
+    printf("a refused read after a good one reports no map until the next good read\n");
+    sh_nav_bake_test_reset();
+    sh_nav_bake_set_snapshot(snapshot_read, NULL);
+    g_snapshot_json = make_map("ind_dlc/room", 1, 2, 3, 3, owner);
+    sh_nav_bake_refresh_live();
+    CHECK(sh_nav_bake_has_map());
+    CHECK(sh_nav_bake_volume_uids(uids, 4) > 0);
+    g_snapshot_json = NULL;
+    sh_nav_bake_refresh_live();
+    CHECK_MSG(!sh_nav_bake_has_map(), "the poll must not fingerprint a refused read");
+    CHECK(sh_nav_bake_volume_uids(uids, 4) == 0);
+    sh_nav_bake_volume_counts(&floors, &walls);
+    CHECK(floors == 0 && walls == 0);
+    CHECK(sh_nav_bake_instance_count() == 0);
+    g_snapshot_json = make_map("ind_dlc/room", 1, 2, 3, 3, owner);
+    sh_nav_bake_refresh_live();
+    CHECK(sh_nav_bake_has_map());
     sh_nav_bake_set_snapshot(NULL, NULL);
 }
 
@@ -479,7 +503,7 @@ static void test_fast_snapshot_reads_ids_and_obstacles(void)
     int read = 0;
     sh_nav_bake_test_reset();
     sh_nav_bake_set_snapshot(snapshot_read, NULL);
-    sh_nav_bake_set_live_editor(live_count, box_valid, box_json, NULL);
+    sh_nav_bake_set_live_editor(live_count, box_valid, box_json, NULL, NULL);
     g_snapshot_json = make_map("ind_dlc/room", 1, 2, 1, 3, owner);
     sh_nav_bake_refresh_live();
     sh_nav_bake_test_copy_map(&before);
@@ -506,12 +530,19 @@ static void test_fast_snapshot_reads_ids_and_obstacles(void)
     CHECK(sh_nav_bake_refresh_volumes(&read) == 1);
     sh_nav_bake_test_copy_map(&before);
     CHECK(before.region_count == 1 && before.obstacle_count == 0);
+    /* A deleted box is dropped where it stands rather than costing a complete
+     * snapshot. One that carried nothing leaves the map as it was. */
     g_box_missing = 101;
-    CHECK(sh_nav_bake_refresh_volumes(&read) == 0);
+    CHECK(sh_nav_bake_refresh_volumes(&read) == 1);
     sh_nav_bake_test_copy_map(&after);
     CHECK(!memcmp(&before, &after, sizeof before));
+    /* Deleting the one that carried the region takes the region with it. */
+    g_box_missing = 100;
+    CHECK(sh_nav_bake_refresh_volumes(&read) == 1);
+    sh_nav_bake_test_copy_map(&after);
+    CHECK(after.region_count == 0 && after.obstacle_count == 0);
     g_box_missing = 0; g_box_x = 0; g_box_blocks = 3; g_box_marked = 1;
-    sh_nav_bake_set_live_editor(NULL, NULL, NULL, NULL);
+    sh_nav_bake_set_live_editor(NULL, NULL, NULL, NULL, NULL);
     sh_nav_bake_set_snapshot(NULL, NULL);
 }
 
@@ -526,9 +557,34 @@ static void test_empty_preview_completes(void)
     sh_nav_bake_test_reset();
     json = make_map("ind_dlc/room", 1, 0, 0, 0, owner);
     sh_nav_bake_set_map(json, strlen(json));
+    CHECK(sh_nav_bake_prepare(no_shipped_bytes) == 1);
     CHECK(sh_nav_bake_preview(no_shipped_bytes, unexpected_line, NULL, NULL) == 1);
     sh_nav_bake_set_map(NULL, 0);
+    CHECK(sh_nav_bake_prepare(no_shipped_bytes) == -1);
     CHECK(sh_nav_bake_preview(no_shipped_bytes, unexpected_line, NULL, NULL) == 1);
+}
+
+static void test_prepare_collects_worker_without_drawing(void)
+{
+    const int owner[] = {0};
+    char *json = make_map("ind_dlc/room", 1, 1, 1, 1, owner);
+    ULONGLONG deadline;
+    int ready;
+    sh_nav_bake_test_reset();
+    sh_nav_bake_set_map(json, strlen(json));
+    /* No preview callback is supplied or called. Enqueuing is not completion. */
+    CHECK(sh_nav_bake_prepare(no_shipped_bytes) == 0);
+    deadline = GetTickCount64() + 5000;
+    do {
+        Sleep(1);
+        ready = sh_nav_bake_prepare(no_shipped_bytes);
+    } while (!ready && GetTickCount64() < deadline);
+    CHECK(ready == 1);
+    CHECK(!sh_nav_bake_preview_pending());
+    CHECK(sh_nav_bake_prepare(no_shipped_bytes) == 1);
+    sh_nav_bake_set_map(NULL, 0);
+    CHECK(sh_nav_bake_prepare(no_shipped_bytes) == -1);
+    sh_nav_bake_test_reset();
 }
 
 static void test_package_sources_retire_cached_and_inflight_results(void)
@@ -720,7 +776,10 @@ int main(void)
     test_refresh_live_is_callable_from_the_editor();
     test_refresh_live_without_a_map_is_a_no_op();
     test_complete_snapshot_tracks_creation_and_deletion();
+    test_refused_read_holds_no_map();
     test_snapshot_moves_and_changes_ownership();
+    test_prepare_collects_worker_without_drawing();
+    sh_nav_bake_preview_stop();
     printf("%s -- %d checks, %d failed\n", g_fail ? "FAILED" : "ok", g_checks, g_fail);
     return g_fail ? 1 : 0;
 }

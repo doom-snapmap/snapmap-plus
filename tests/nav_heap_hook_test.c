@@ -3,8 +3,9 @@
 
 void backend_log(const char *message) {(void)message;}
 void sh_map_render_build(void *map) {(void)map;}
+static int g_navmesh_enabled=1;
 int sh_config_get_bool(const char *key,int *value,unsigned *flags)
-{(void)key;(void)flags;*value=1;return 1;}
+{(void)key;(void)flags;*value=g_navmesh_enabled;return 1;}
 void sh_nav_bake_build_begin(void) {}
 void sh_nav_bake_build_end(void) {}
 void sh_nav_bake_enable_instances(int on) {(void)on;}
@@ -41,6 +42,10 @@ int main(void)
     memset(code,0x90,15);memcpy(code+15,copy,sizeof copy);
     FlushInstructionCache(GetCurrentProcess(),code,64);
     site.addr=(uintptr_t)code;
+    g_navmesh_enabled=0;
+    CHECK(nav_heap_install(&site,1));
+    CHECK(!g_heap_push && hook_owned_count()==before && code[0]==0x90);
+    g_navmesh_enabled=1;
     sh_patch_test_observe_write(observe_publication);
     sh_patch_test_faults(2|4|8,0,0);
     CHECK(!nav_heap_install(&site,1));
@@ -60,7 +65,8 @@ int main(void)
     CHECK(nodes[0].cost==3); /* Full queue retains the cheaper existing route. */
     CHECK(nodes[1].index==0xa5a5 && nodes[1].cost==0xa5a5);
     sh_patch_test_observe_write(NULL);
-    CHECK(hook_unpatch((void *)g_heap_push));g_heap_push=NULL;
+    g_navmesh_enabled=0;
+    CHECK(nav_heap_install(&site,1) && !g_heap_push);
     CHECK(hook_owned_count()==before);
     CHECK(!memcmp(code+15,copy,sizeof copy) && code[0]==0x90);
     VirtualFree(code,0,MEM_RELEASE);

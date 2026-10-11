@@ -1375,9 +1375,12 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
     /* Portable function identities checked on both renderers. Generic/short leaves
      * such as decl-manager access, list growth, and visibility resolve through
      * signed call sites in engine_globals_table.gen.h instead. */
-    { "RemoveFromSelection", /* void(editor [rcx], entity handle [edx]) -- drops one entity from the
-                              * editor selection. The `add rcx,0x5e0` that walks to the selection
-                              * sub-object sits in the fixed bytes, which is what makes it unique.
+    { "RemoveFromSelection", /* void(selection [rcx], entity id [edx]). Despite the historical
+                              * name this DESTROYS one entity (membership, undo record, slot
+                              * release) and never edits the selected-ID array, hover or
+                              * EntityMode. No product path calls it any more; window deletion
+                              * uses SelectionDeleteAction. The `add rcx,0x5e0` to the map's
+                              * entity tables sits in the fixed bytes, which makes it unique.
                               * Vulkan 0x59FDA0, OpenGL 0x59F510. */
       "48 89 5C 24 08 57 48 83 EC 20 48 8B F9 8B DA 48 8B 09 48 81 C1 E0 05 00 00",
       0x59FDA0u },
@@ -1504,6 +1507,31 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "8B DA 4D 85 C0 74 ?? 48 8D 54 24 40 48 8D 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? "
       "48 8B 08 48 89 38 48 8B 7C 24 40 48 89 0B 48 85 FF 74 ?? 48 8B CF E8 ?? "
       "?? ?? ?? BA 48 00 00 00 48 8B CF E8 ?? ?? ?? ??", 0 },
+    /* Every undoable editor action ends here: it stores the action's label in
+     * the map object and pushes the undo snapshot. The one notification that
+     * covers placement, move, rotate, resize, duplicate, property edit and
+     * delete. */
+    { "EditorCommitEdit", /* VK 0x524070, GL 0x5239b0. */
+      "40 53 48 83 EC 20 48 8B D9 48 8B 89 C8 04 02 00 48 83 C1 18 E8 ?? ?? ?? ?? "
+      "48 8D 4B 10 48 8B D3 E8 ?? ?? ?? ?? 48 8B 03 BA 01 00 00 00 48 8B CB "
+      "48 83 C4 20 5B 48 FF A0 60 01 00 00", 0x524070u },
+    /* EntityMode's Selection substate (idSnapEntityMode_Selection), used by
+     * editor_delete.c to run the native Delete Selection for window requests.
+     * The action's hover-clear callee is decoded from its own call site: that
+     * helper has a byte-identical twin and is not signable. */
+    { "SelectionDeleteAction", /* VK 0xce3b60, GL 0xce3540. Prologue through the
+                                * capability test movzx eax,[rcx+0x58]; test al,2. */
+      "40 55 56 57 41 54 41 55 41 56 41 57 48 8D 6C 24 D9 48 81 EC D0 00 00 00 "
+      "48 C7 45 AF FE FF FF FF 48 89 9C 24 28 01 00 00 48 8B 05 ?? ?? ?? ?? "
+      "48 33 C4 48 89 45 17 4D 8B E8 48 89 55 9F 48 89 4D A7 0F B6 41 58 A8 02 "
+      "0F 84 ?? ?? ?? ??", 0xCE3B60u },
+    { "SelectionCapabilities", /* VK 0xce5110, GL 0xce4af0. Rebuilds the capability bits over
+                                * the selection plus the hovered entity: and byte [rcx+0x59],0xFE;
+                                * and byte [rcx+0x58],0x16; movsxd rsi,[rcx+0x2c]. */
+      "40 55 53 48 8B EC 48 83 EC 48 80 61 59 FE 48 8B D9 80 61 58 16 "
+      "49 8B 88 D0 04 02 00 48 89 74 24 60 48 89 7C 24 68 49 8B F8 "
+      "4C 89 74 24 78 45 32 F6 48 63 71 2C 83 FE FF 0F 84 ?? ?? ?? ?? "
+      "4C 89 64 24 70 8B D6 4C 89 7C 24 40", 0xCE5110u },
     { "GridApplyEntityTree", /* VK 0x545120, GL 0x544a40. */
       "48 89 6C 24 18 48 89 74 24 20 57 48 83 EC 30 48 8B F9 48 8B F2 48 8B 0D "
       "?? ?? ?? ?? 48 8B 01 FF 90 40 02 00 00 F6 87 60 01 00 00 01 48 8B E8 74 "
@@ -1590,5 +1618,43 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "48 89 45 A0 83 3D ?? ?? ?? ?? 00 40 0F 95 C7", 0 },
     { "FsmWebReplayFirstCall",
       "4C 8B FA 4C 8B F1 33 D2 48 8D 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? 4C 8B E8 48 89 45 FF 48 85 C0", 0 },
+    { "StartMenuBind", /* VK 0xd18470, GL 0xd17bd0. */
+      "48 89 5C 24 20 55 48 83 EC 20 48 8B E9 48 89 7C 24 38 48 8B 89 C8 01 00 00 4C 89 74 24 40 4C 8B F2 48 8B 01 FF 50 18 33 DB 41 39 5E 08 7E 29 33 FF", 0 },
+    { "StartMenuAction", /* VK 0x534a10, GL 0x534330. */
+      "40 55 56 57 48 8D AC 24 20 FF FF FF 48 81 EC E0 01 00 00 48 C7 44 24 30 FE FF FF FF 48 89 9C 24 10 02 00 00", 0 },
+    { "StartMenuThink", /* VK 0x535020, GL 0x534940. */
+      "48 89 5C 24 10 48 89 74 24 18 57 48 83 EC 20 80 79 2D 00 48 8B FA 0F B6 B2 ED 00 00 00 48 8B D9 75 05 40 84 F6 74 09 E8 ?? ?? ?? ?? C6 43 2D 00", 0 },
+    { "StartMenuEnd", /* VK 0x535830, GL 0x535150. */
+      "40 53 48 83 EC 20 48 8B 82 88 10 02 00 48 8B DA 33 D2 C7 80 2C 0A 00 00 00 00 00 00 48 8B 49 08 E8 ?? ?? ?? ?? 48 8B 83 88 10 02 00", 0 },
+    { "StartMenuInit", /* VK 0xd163b0, GL 0xd15b10. */
+      "40 55 41 54 41 55 41 56 41 57 48 8D AC 24 F0 BF FF FF B8 10 41 00 00 E8 ?? ?? ?? ?? 48 2B E0 48 C7 45 90 FE FF FF FF", 0 },
+    { "StartMenuRow", /* VK 0xd14790, GL 0xd13ef0. */
+      "48 8B C4 41 56 48 83 EC 60 48 C7 40 D8 FE FF FF FF 48 89 58 08 48 89 68 10 48 89 70 18 48 89 78 20 41 8B D8", 0 },
+    { "StartMenuSelect", /* VK 0xd149b0, GL 0xd14110. */
+      "48 89 5C 24 08 48 89 74 24 10 57 48 83 EC 20 8B 99 BC 01 00 00 8B F2 48 8B F9", 0 },
+    { "SwfDuplicateSprite", /* VK 0x2a7240, GL 0x2a6200. */
+      "48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18 57 48 83 EC 60 48 8B 79 30 49 8B F0 8B EA 48 8B D9 48 85 FF 75 17 48 8B 51 20 48 8D 0D ?? ?? ?? ??", 0 },
+    { "SwfDisplayEntry", /* VK 0x2a7400, GL 0x2a63c0. */
+      "48 89 5C 24 10 57 44 8B 89 88 00 00 00 45 33 DB 8B FA 48 8B D9 45 8B D3 45 85 C9 7E 3F 48 89 74 24 10 48 8B B1 80 00 00 00 0F 1F 80 00 00 00 00", 0 },
+    { "SwfWidgetChild", /* VK 0xf56780, GL 0xf48040. */
+      "85 D2 78 17 3B 91 C0 01 00 00 7D 0F 48 8B 81 B8 01 00 00 48 63 D2 48 8B 04 D0 C3 33 C0 C3", 0 },
+    { "SwfWidgetResolve", /* VK 0x171ac20, GL 0x170d8b0. */
+      "40 53 48 83 EC 20 48 8B 41 18 48 8B D9 48 85 C0 75 09 48 8B 49 20 E8 ?? ?? ?? ?? 8B 53 40 48 8B 48 20 E8 ?? ?? ?? ?? 48 85 C0 48 89 43 08 0F 95 C0", 0 },
+    { "SwfNestedValue", /* VK 0x2a8c50, GL 0x2a7be0. */
+      "40 53 55 56 57 41 56 48 81 EC 80 00 00 00 48 C7 44 24 38 FE FF FF FF 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 44 24 78 49 8B F9 4C 8B F2 48 8B 84 24 D0 00 00 00", 0 },
+    { "SwfTextInstance", /* VK 0x29e700, GL 0x29d860. */
+      "40 53 48 83 EC 20 83 39 08 75 2B 48 8B 59 08 48 85 DB 74 22 4C 8B 03 48 8B CB 48 8B 15 ?? ?? ?? ?? 41 FF 50 08 84 C0 74 0D 48 8B 83 C0 00 00 00 48 83 C4 20 5B C3 33 C0 48 83 C4 20 5B C3 CC CC 40 53 48 83 EC 20 83 39 08 75 2D", 0 },
+    { "SwfValueDestroy", /* VK 0x29e610, GL 0x29d770. */
+      "40 53 48 83 EC 20 8B 01 48 8B D9 83 F8 02 75 20 48 8B 49 08 83 69 30 01 75 0A 48 8B 01 BA 01 00 00 00 FF 10 C7 03 00 00 00 00 48 83 C4 20 5B C3", 0 },
+    { "SwfSetText", /* VK 0x2b7830, GL 0x2b6820. */
+      "48 89 5C 24 08 57 48 83 EC 20 48 8B D9 48 8D 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? 48 8B D0 48 8D 4B 38 E8 ?? ?? ?? ?? 33 FF C6 83 4C 01 00 00 00 89 BB 50 01 00 00", 0 },
+    { "EditorBusyShow", /* VK 0x52a560, GL 0x529e90. */
+      "48 89 5C 24 08 48 89 74 24 10 57 48 83 EC 20 48 8B F2 48 8B D9 48 8B 89 88 10 02 00 BA 00 04 00 00 49 8B F8 E8 ?? ?? ?? ?? 48 8B 8B 88 10 02 00", 0 },
+    { "EditorBusyClear", /* VK 0x524050, GL 0x523990. */
+      "48 8B 89 88 10 02 00 BA 00 04 00 00 E9 ?? ?? ?? ??", 0 },
+    { "SwfFrameLabel", /* VK 0x2a7480, GL 0x2a6440. */
+      "40 57 48 83 EC 70 48 C7 44 24 28 FE FF FF FF 48 89 9C 24 90 00 00 00 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 44 24 60 48 8B DA 48 8B F9 48 8B CA E8 ?? ?? ?? ??", 0 },
+    { "SwfPlayFrame", /* VK 0x2ac0b0, GL 0x2ab040. */
+      "48 89 5C 24 08 57 48 83 EC 20 8B DA 48 8B F9 E8 ?? ?? ?? ?? BA 01 00 00 00 48 8B CF 3B DA 0F 4F D3 E8 ?? ?? ?? ?? 48 8B 47 30 48 85 C0 74 0E 90", 0 },
     { NULL, NULL, 0 }   /* terminator */
 };

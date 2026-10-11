@@ -178,10 +178,9 @@ def main(argv=None):
         _write(args.out, found["body"] + "\n")
         return 0
 
-    payload = [
-        {k: v for k, v in section.items() if k != "body"} for section in sections
-    ]
-    _write(args.out, json.dumps(payload, indent=2, ensure_ascii=False) + "\n")
+    # Keep the original Markdown for copying; rendered HTML cannot recover its
+    # inline formatting reliably.
+    _write(args.out, json.dumps(sections, indent=2, ensure_ascii=False) + "\n")
     return 0
 
 

@@ -59,13 +59,15 @@ The header defines the complete ABI. These are the main entry points:
 | Entity list and state | Count, validity, classname, inherit, display name and serialization slots. |
 | Selection | `get_selection` at `+0x150`, `add_to_selection` at `+0x138`, and `clear_selection` at `+0x148`. |
 | Camera position | `get_editor_vec3` at `+0x08` and `set_editor_vec3` at `+0x00`. Position lock reapplies saved coordinates. |
-| Create prefab | Capability-checked `prefab_export` at `+0x340` returns a complete owned snapshot; the engine requires hovering a selected entity. The host frees it with `HeapFree`. |
+| Create prefab | Capability-checked `prefab_export` at `+0x358` returns a complete owned snapshot; the engine requires hovering a selected entity. The host frees it with `HeapFree`. |
 | Load / Place | `apply_edit` at `+0xD0`, kind 2: stage the prefab and request the native paste action. Engine state can force a stage-only fallback, reported by toast. |
 | Save Timeline | `apply_sync` at `+0x290`, kind 0, with the target entity ID. |
 | Timeline inheritance | The normalization slot at `+0x298`. |
 | Persistent settings | `config_get_json` at `+0x2B0` and `config_set_json` at `+0x2B8`. |
 | Prefab geometry | Model lookup and request/completion slots at `+0x308` through `+0x320`. |
 | File menu rawmap I/O | `rawmap_status` at `+0x328`, `rawmap_configure` at `+0x330` and `rawmap_load_now` at `+0x338`. The picker is host-side and touches no engine state. Loading stages a file: the swap substitutes it into the next map the engine parses. |
+| View menu navigation | `navmesh_view` at `+0x340` reports whether the preview is out of date and, when asked, requests an update on the game's next frame. |
+| Engine edits | `run_on_main` at `+0x348`. Selection, delete, Entity State save and camera writes run on the game's thread; the page waits up to one second, then drops the edit and logs it. |
 
 Prefab files and metadata use the path returned by `resolve_prefab_path`; their
 rename, delete and folder operations are native filesystem work. Feedback and

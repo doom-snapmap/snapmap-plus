@@ -68,6 +68,8 @@ the installer unless `--no-self` is supplied.
 The changelog command reads GitHub release bodies derived from reviewed
 [CHANGELOG.md](../CHANGELOG.md) entries. It shows the newest release and an older
 release index by default; a version, `latest`, or `all` selects another view.
+Terminal output removes inline bold and code markers before wrapping the text,
+while preserving command names such as `sh_pretty_on`.
 
 ## Installation and player data
 
