@@ -437,8 +437,15 @@ entities in the map. An obstructed or disconnected route can also stop a demon
 without removing the navigation mesh. Leave enough room around wall ends for
 the intended demon size and keep spawn, approach and landing points clear.
 
-The preview is read when the map opens and when you choose **View > Update
-Navmesh**. Editing does not read the map. When you add, delete, move or change
+Build navigation from the editor's Start menu with **Build Navmesh**, beside
+**Save**. The game shows **Building Navmesh** while the worker runs, then a
+native completion toast, just like ordinary Save. This does not save or name
+the map, and it does not require a player start. It also works in Blueprint mode
+and with the green preview turned off.
+
+The same operation is available through **View > Update Navmesh** in Snapmap+.
+The preview is read when the map opens and when you request an update.
+Editing does not read the map. When you add, delete, move or change
 the flags of a box with **AI Navigation** or **Block Demons**, the View menu says
 **Navmesh is out of date**. Other edits do not change it. The preview hides while
 geometry is held. Play always uses the current map: if it changed since the last

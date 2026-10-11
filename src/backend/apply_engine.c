@@ -1828,6 +1828,7 @@ static LONGLONG g_nav_retry_at;    /* when the last read was attempted with no f
  * remembered; the read happens when the View menu asks for it. */
 static int  g_nav_stale;
 static volatile LONG g_nav_update_requested;
+static volatile LONG g_nav_update_status;
 /* A refused read is retried a few times on its own and then left alone; a map
  * that cannot be read would otherwise cost a stalled frame every second. */
 #define NAV_READ_TRIES 5
@@ -2098,13 +2099,34 @@ static int ae_nav_holding(const uint8_t *ed)
     return mode_state != 1 && mode_state != 2;
 }
 
+static void ae_nav_update_poll(void)
+{
+    int ready, marked = 0, rooms = 0;
+    if (InterlockedCompareExchange(&g_nav_update_requested, 0, 0) ||
+        sh_apply_engine_nav_update_status() != SH_NAV_UPDATE_BUILDING) return;
+    __try {
+        ready = sh_nav_bake_prepare(sh_overrides_read_engine_resource);
+        if (!ready) return;
+        if (ready > 0) sh_nav_bake_conflicts(&marked, &rooms);
+    } __except (EXCEPTION_EXECUTE_HANDLER) { ready = -1; }
+    if (ready < 0 || marked || rooms) {
+        g_nav_stale = 1;
+        InterlockedExchange(&g_nav_update_status, SH_NAV_UPDATE_FAILED);
+        backend_log("NAV: requested update finished with refused geometry or inputs");
+    } else {
+        InterlockedExchange(&g_nav_update_status, SH_NAV_UPDATE_READY);
+        backend_log("NAV: requested update complete; current navigation is ready for Play");
+    }
+}
+
 static void ae_nav_refresh_cmd(void)
 {
     int state = -1, mode = -1;
     const uint8_t *ed = ae_editor_session();
     __try {
         if (ed && ae_read_u32_safe(g_load_state_at, &state) && state == LOAD_STATE_RUNNING &&
-            ae_read_u32_safe(ed + ED_ENTITY_MODE_OFF, &mode) && mode >= 0 && mode <= 2) {
+            ae_read_u32_safe(ed + ED_ENTITY_MODE_OFF, &mode) &&
+            ((mode >= 0 && mode <= 2) || mode == 11)) {
             unsigned shape = 0, tracked = 0, present = 0;
             int property = InterlockedExchange(&g_nav_volume_property, 0) != 0;
             int deleted = InterlockedExchange(&g_nav_delete_pending, 0) != 0;
@@ -2161,7 +2183,10 @@ static void ae_nav_refresh_cmd(void)
                     g_nav_stale = 1;
                 }
                 g_preview_built_revision = ~0UL;
+                if (requested) InterlockedExchange(&g_nav_update_status,
+                    g_nav_have_hash && !g_nav_stale ? SH_NAV_UPDATE_BUILDING : SH_NAV_UPDATE_FAILED);
             }
+            ae_nav_update_poll();
             SH_PERF_BEGIN(tp);
             if (mode == 2) ae_nav_preview(ed);
             else sh_nav_preview_clear();
@@ -2171,10 +2196,13 @@ static void ae_nav_refresh_cmd(void)
         } else {
             /* Nothing can be read here, so a View menu request ends unanswered. */
             InterlockedExchange(&g_nav_update_requested, 0);
+            InterlockedExchange(&g_nav_update_status, SH_NAV_UPDATE_FAILED);
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         sh_nav_preview_clear();
         backend_log("NAV: editor snapshot refresh faulted");
+        InterlockedExchange(&g_nav_update_requested, 0);
+        InterlockedExchange(&g_nav_update_status, SH_NAV_UPDATE_FAILED);
     }
     InterlockedExchange(&g_nav_refresh_queued, 0);
 }
@@ -2256,14 +2284,21 @@ void sh_apply_engine_install_edit_hook(const sig_result *results, size_t n)
 
 void sh_apply_engine_nav_request_update(void)
 {
+    InterlockedExchange(&g_nav_update_status, SH_NAV_UPDATE_REQUESTED);
     InterlockedExchange(&g_nav_update_requested, 1);
+}
+
+int sh_apply_engine_nav_update_status(void)
+{
+    return (int)InterlockedCompareExchange(&g_nav_update_status, 0, 0);
 }
 
 int sh_apply_engine_nav_view_state(void)
 {
     int state = g_nav_stale ? 1 : 0;
-    if (InterlockedCompareExchange(&g_nav_update_requested, 0, 0)) state |= 2;
-    if (g_nav_read_tries >= NAV_READ_TRIES) state |= 4;
+    int update = sh_apply_engine_nav_update_status();
+    if (update == SH_NAV_UPDATE_REQUESTED || update == SH_NAV_UPDATE_BUILDING) state |= 2;
+    if (g_nav_read_tries >= NAV_READ_TRIES || update == SH_NAV_UPDATE_FAILED) state |= 4;
     return state;
 }
 
@@ -2291,7 +2326,11 @@ static void ae_nav_refresh_queue(void)
         }
         if (InterlockedCompareExchange(&g_nav_refresh_queued, 1, 0) == 0)
             g_buffer_cmd(g_cmdsys, "sh_nav_refresh_internal\n");
-    } __except (EXCEPTION_EXECUTE_HANDLER) { InterlockedExchange(&g_nav_refresh_queued, 0); }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        InterlockedExchange(&g_nav_refresh_queued, 0);
+        InterlockedExchange(&g_nav_update_requested, 0);
+        InterlockedExchange(&g_nav_update_status, SH_NAV_UPDATE_FAILED);
+    }
 }
 
 /* Frame maintenance. An unedited map reaches the first return having read one
@@ -2300,23 +2339,43 @@ static void ae_nav_refresh_poll(void)
 {
     const uint8_t *ed;
     void *map_obj = NULL;
-    int state = -1, enabled = 0, undone, edited;
+    int state = -1, mode = -1, enabled = 0, undone, edited;
 
     ed = ae_editor_session();
     if (!ed || !ae_read_u32_safe(g_load_state_at, &state) ||
-        state != LOAD_STATE_RUNNING) { sh_nav_preview_clear(); return; }
-    if (!g_cmdsys || !g_add_command || !g_buffer_cmd) return;
+        state != LOAD_STATE_RUNNING) {
+        sh_nav_preview_clear();
+        if (sh_apply_engine_nav_update_status() == SH_NAV_UPDATE_REQUESTED ||
+            sh_apply_engine_nav_update_status() == SH_NAV_UPDATE_BUILDING) {
+            InterlockedExchange(&g_nav_update_requested, 0);
+            InterlockedExchange(&g_nav_update_status, SH_NAV_UPDATE_FAILED);
+        }
+        return;
+    }
+    if (!g_cmdsys || !g_add_command || !g_buffer_cmd) {
+        if (sh_apply_engine_nav_update_status() == SH_NAV_UPDATE_REQUESTED ||
+            sh_apply_engine_nav_update_status() == SH_NAV_UPDATE_BUILDING) {
+            InterlockedExchange(&g_nav_update_requested, 0);
+            InterlockedExchange(&g_nav_update_status, SH_NAV_UPDATE_FAILED);
+        }
+        return;
+    }
     /* Both consumers of the read -- the green preview and the resource served at
      * Play -- are off with navigation disabled, so the read has no reader. */
     if (!sh_config_get_bool("navmesh.enabled", &enabled, NULL) || !enabled) {
         sh_nav_preview_clear(); g_preview_built_revision = ~0UL;
         InterlockedExchange(&g_nav_update_requested, 0);
+        if (sh_apply_engine_nav_update_status() == SH_NAV_UPDATE_REQUESTED ||
+            sh_apply_engine_nav_update_status() == SH_NAV_UPDATE_BUILDING)
+            InterlockedExchange(&g_nav_update_status, SH_NAV_UPDATE_FAILED);
         return;
     }
 
     /* A different map object is a different map, and nothing cached survives it. */
     if (!ae_read_ptr(ed + ED_MAP_OBJ_OFF, &map_obj)) map_obj = g_nav_map_obj;
     if (map_obj != g_nav_map_obj) {
+        if (sh_apply_engine_nav_update_status() == SH_NAV_UPDATE_BUILDING)
+            InterlockedExchange(&g_nav_update_status, SH_NAV_UPDATE_FAILED);
         g_nav_map_obj = map_obj;
         g_nav_have_hash = 0;
         g_nav_read_tries = 0;
@@ -2324,13 +2383,17 @@ static void ae_nav_refresh_poll(void)
         g_nav_seen_valid = 0;
     }
 
-    if (ae_nav_holding(ed)) {
+    ae_read_u32_safe(ed + ED_ENTITY_MODE_OFF, &mode);
+    if (ae_nav_holding(ed) && !(mode == 11 &&
+        (sh_apply_engine_nav_update_status() == SH_NAV_UPDATE_REQUESTED ||
+         sh_apply_engine_nav_update_status() == SH_NAV_UPDATE_BUILDING))) {
         /* Mid-drag the lines sit where the volume was picked up from, so they
          * come down until it is put back. */
         if (!g_nav_was_holding) sh_nav_preview_clear();
         g_nav_was_holding = 1;
         return;
     }
+    ae_nav_update_poll();
 
     /* Undo and redo never reach CommitEdit. They move the undo cursor, and so
      * does an edit, so this only says "look again" -- the volume fingerprint

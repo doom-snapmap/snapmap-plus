@@ -1186,7 +1186,6 @@ static preview_batch *preview_gather(sh_nav_bake_reader read_shipped)
         SH_PERF_END(SH_PERF_BAKE_READ, tr);
     }
     HeapFree(GetProcessHeap(), 0, scratch);
-    if (b->count == 0) { preview_batch_free(b); return NULL; }
     return b;
 }
 
@@ -1235,6 +1234,60 @@ static void preview_install(preview_batch *b)
     g_preview_revision = b->revision;
 }
 
+/* The worker cache is also consumed by Play. Building it must not depend on
+ * whether the mapper has enabled the green preview or opened Object mode. */
+static int preview_prepare_locked(sh_nav_bake_reader read_shipped)
+{
+    if(!g_have_map||g_live_refused) return -1;
+    if (!g_module_count) {
+        g_preview_revision = g_geometry_revision;
+        return 1;
+    }
+
+    /* Collect whatever the worker finished, then schedule the next bake if
+     * the geometry has moved past what is on screen. */
+    if (InterlockedCompareExchange(&g_pv_ready, 0, 0) == 2) {
+        preview_batch *done = NULL;
+        EnterCriticalSection(&g_pv_lock);
+        done = g_pv_done; g_pv_done = NULL;
+        LeaveCriticalSection(&g_pv_lock);
+        if (done) {
+            if (done->revision == g_pv_inflight) g_pv_inflight = 0;
+            preview_install(done);
+            preview_batch_free(done);
+        }
+    }
+    if (g_preview_revision != g_geometry_revision &&
+        g_pv_inflight != g_geometry_revision) {
+        preview_batch *b = preview_gather(read_shipped);
+        if (!b) return -1;
+        if (preview_worker_ready()) {
+            EnterCriticalSection(&g_pv_lock);
+            preview_batch_free(g_pv_queued);   /* an older batch is superseded */
+            g_pv_queued = b;
+            LeaveCriticalSection(&g_pv_lock);
+            g_pv_inflight = b->revision;
+            SetEvent(g_pv_wake);
+        } else {
+            preview_batch_run(b);
+            preview_install(b);
+            preview_batch_free(b);
+        }
+    }
+    return g_preview_revision == g_geometry_revision;
+}
+
+int sh_nav_bake_prepare(sh_nav_bake_reader read_shipped)
+{
+    int current = -1;
+    if (!read_shipped || !bake_enabled()) return -1;
+    if (InterlockedCompareExchange(&g_building, 0, 0)) return 0;
+    AcquireSRWLockExclusive(&g_bake_lock);
+    __try { current = preview_prepare_locked(read_shipped); }
+    __finally { ReleaseSRWLockExclusive(&g_bake_lock); }
+    return current;
+}
+
 int sh_nav_bake_preview(sh_nav_bake_reader read_shipped,sh_nav_preview_line line,
                         sh_nav_preview_colour_fn colour,void *ctx)
 {
@@ -1242,44 +1295,11 @@ int sh_nav_bake_preview(sh_nav_bake_reader read_shipped,sh_nav_preview_line line
     if(!line||!read_shipped||!bake_enabled()||InterlockedCompareExchange(&g_building,0,0))return 0;
     AcquireSRWLockExclusive(&g_bake_lock);
     __try {
-        if(!g_have_map||g_live_refused) { current = 1; __leave; }
-        if (!g_module_count) {
-            g_preview_revision = g_geometry_revision;
-            current = 1; __leave;
-        }
-
-        /* Collect whatever the worker finished, then schedule the next bake if
-         * the geometry has moved past what is on screen. */
-        if (InterlockedCompareExchange(&g_pv_ready, 0, 0) == 2) {
-            preview_batch *done = NULL;
-            EnterCriticalSection(&g_pv_lock);
-            done = g_pv_done; g_pv_done = NULL;
-            LeaveCriticalSection(&g_pv_lock);
-            if (done) {
-                if (done->revision == g_pv_inflight) g_pv_inflight = 0;
-                preview_install(done);
-                preview_batch_free(done);
-            }
-        }
-        if (g_preview_revision != g_geometry_revision &&
-            g_pv_inflight != g_geometry_revision) {
-            preview_batch *b = preview_gather(read_shipped);
-            if (b && preview_worker_ready()) {
-                EnterCriticalSection(&g_pv_lock);
-                preview_batch_free(g_pv_queued);   /* an older batch is superseded */
-                g_pv_queued = b;
-                LeaveCriticalSection(&g_pv_lock);
-                g_pv_inflight = b->revision;
-                SetEvent(g_pv_wake);
-            } else if (b) {
-                preview_batch_run(b);
-                preview_install(b);
-                preview_batch_free(b);
-            }
-        }
+        int prepared = preview_prepare_locked(read_shipped);
+        if (prepared < 0) { current = 1; __leave; }
         /* Still waiting on the worker: the lines that are up describe the
          * previous geometry, which is closer to the truth than none. */
-        if (g_preview_revision != g_geometry_revision) __leave;
+        if (!prepared) __leave;
         current = 1;
         SH_PERF_BEGIN(tl);
         g_preview_lines=0;

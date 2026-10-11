@@ -238,6 +238,12 @@ obstacles and use live uniqueIds; topology changes require a complete snapshot.
 Play always takes its own complete snapshot. The worker and session log handle
 have process lifetime; DllMain must not wait on them or acquire their locks.
 
+The native Start-menu action in `nav_menu.c` shares the View menu's update
+request and completion state. It creates its additional button through the
+engine, repairs the SWF binding after timeline rewinds, and uses native busy
+and toast widgets with literal text. Completion collects the worker result
+independently of preview drawing; the UI does not invoke saving or map validation.
+
 Navigation surfaces and obstacles have separate roles. The bake emits only
 exposed box faces meeting each AAS class's floor-slope threshold; ordinary
 Block Demons boxes subtract occupied standing space without adding surfaces.

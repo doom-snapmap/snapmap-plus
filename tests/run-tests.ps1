@@ -40,6 +40,7 @@ if (-not (Get-Command cl -ErrorAction SilentlyContinue)) { throw "cl not on PATH
 
 # name | sources (relative to tests\) | runtime arg
 $tests = @(
+    @{ name = "nav_menu_test"; src = 'nav_menu_test.c ..\src\backend\patch.c ..\src\backend\hook.c'; defs = '/DSH_PATCH_TESTING'; arg = "" }
     @{ name = "package_legacy_test"; src = 'package_legacy_test.c ..\src\backend\resource_catalog.c ..\src\backend\package_legacy.c ..\src\backend\package_migration.c ..\src\backend\decl_server_path.c ..\src\backend\package_archive.c ..\src\backend\raw_deflate_encode.c ..\src\backend\raw_deflate.c ..\src\backend\package_sources.c ..\src\backend\packages.c ..\src\backend\package_descriptor.c ..\src\backend\config_json.c'; arg = "" }
     @{ name = "package_migration_test"; src = 'package_migration_test.c ..\src\backend\package_migration.c ..\src\backend\decl_server_path.c ..\src\backend\package_descriptor.c ..\src\backend\config_json.c ..\src\backend\package_sources.c ..\src\backend\packages.c'; arg = "" }
     @{ name = "package_owners_test"; src = 'package_owners_test.c'; arg = "" }

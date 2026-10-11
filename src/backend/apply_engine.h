@@ -58,6 +58,12 @@ void sh_apply_engine_install_edit_hook(const sig_result *results, size_t n);
  * game's own thread on the next frame, never on the caller's. */
 void sh_apply_engine_nav_request_update(void);
 
+/* One shared update lifecycle for View and the native editor menu. Completion
+ * means the worker result was collected, including when preview is disabled. */
+enum { SH_NAV_UPDATE_IDLE, SH_NAV_UPDATE_REQUESTED, SH_NAV_UPDATE_BUILDING,
+       SH_NAV_UPDATE_READY, SH_NAV_UPDATE_FAILED };
+int sh_apply_engine_nav_update_status(void);
+
 /* An entity's decl text was replaced in place, which reaches neither CommitEdit
  * nor GridApplyEntityTree. Main thread only. */
 void sh_apply_engine_nav_decl_rewritten(int id);

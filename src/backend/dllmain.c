@@ -34,6 +34,7 @@
 #include "weapon_hud.h"
 #include "navmesh.h"
 #include "nav_bake.h"
+#include "nav_menu.h"
 #include "nav_play.h"
 #include "decl_server.h"
 #include "commands.h"
@@ -413,6 +414,7 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
                                     sh_apply_engine_entity_json,
                                     sh_apply_engine_entity_transform, NULL);
         sh_nav_bake_set_snapshot(sh_apply_engine_nav_regions, NULL);
+        sh_nav_menu_install(results, db);
 
         /* Read marks at entry to edit-to-build conversion, on the engine main thread.
          * Later bake callbacks can see entities with incomplete defsub state and

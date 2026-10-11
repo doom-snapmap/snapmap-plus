@@ -125,6 +125,11 @@ typedef void (*sh_nav_preview_colour_fn)(float r, float g, float b, void *ctx);
 int sh_nav_bake_preview(sh_nav_bake_reader read_shipped, sh_nav_preview_line line,
                         sh_nav_preview_colour_fn colour, void *ctx);
 
+/* Gather or collect the same worker bake without drawing it. Main thread only.
+ * Returns 1 when current, 0 while working, -1 when the map or inputs were refused.
+ * The result is available to Play even when the green preview is switched off. */
+int sh_nav_bake_prepare(sh_nav_bake_reader read_shipped);
+
 /* Request worker shutdown outside DllMain; test/process teardown only. */
 void sh_nav_bake_preview_stop(void);
 

@@ -12,6 +12,7 @@ static int append_fails, delay_execution;
 static HANDLE registration_entered, registration_release;
 static int registration_fails;
 static int maintenance_allowed, maintenance_step;
+static int nav_test_allowed, nav_ready, nav_prepare_calls, nav_rooms, nav_queued;
 
 static void snapshot_dimensions_follow_array_order(void)
 {
@@ -141,6 +142,49 @@ static void test_maintenance_thread(void)
     g_load_state_at = NULL;
 }
 
+static void nav_append(void *sys, const char *text)
+{ (void)sys; assert(!strcmp(text,"sh_nav_refresh_internal\n")); nav_queued++; }
+static void nav_register(void *sys, const char *name, void *cb, void *arg,
+                         const char *help, unsigned flags)
+{ (void)sys; (void)cb; (void)arg; (void)help; (void)flags; assert(!strcmp(name,"sh_nav_refresh_internal")); }
+
+static void test_start_menu_update_lifecycle(void)
+{
+    unsigned char *editor = calloc(1, ED_ENTITY_MODE_OFF + 16), map[0x400] = {0};
+    int load_state = LOAD_STATE_RUNNING;
+    const uint8_t *previous = g_editor;
+    assert(editor);
+    nav_test_allowed = 1;
+    g_editor = editor; g_load_state_at = (const uint8_t *)&load_state;
+    *(void **)(editor + ED_MAP_OBJ_OFF) = map;
+    *(int *)(editor + ED_ENTITY_MODE_OFF) = 11;
+    *(int *)(editor + ED_MODE_STATE_OFF) = 7; /* stale drag state must not block Start */
+    g_nav_map_obj = map; g_nav_have_hash = 1;
+    g_cmdsys = editor; g_buffer_cmd = nav_append; g_add_command = nav_register;
+    sh_apply_engine_nav_request_update();
+    ae_nav_refresh_poll();
+    assert(nav_queued == 1 && !nav_prepare_calls && (sh_apply_engine_nav_view_state() & 2));
+    /* The command has now read the snapshot; the worker has not finished. */
+    g_nav_update_requested = 0; g_nav_update_status = SH_NAV_UPDATE_BUILDING;
+    ae_nav_refresh_poll();
+    assert(nav_prepare_calls == 1 && sh_apply_engine_nav_update_status() == SH_NAV_UPDATE_BUILDING);
+    nav_ready = 1; ae_nav_refresh_poll();
+    assert(nav_prepare_calls == 2 && sh_apply_engine_nav_update_status() == SH_NAV_UPDATE_READY);
+    assert(!(sh_apply_engine_nav_view_state() & 2));
+    g_nav_update_status = SH_NAV_UPDATE_BUILDING; nav_rooms = 1;
+    ae_nav_refresh_poll();
+    assert(sh_apply_engine_nav_update_status() == SH_NAV_UPDATE_FAILED);
+    assert(sh_apply_engine_nav_view_state() & 4);
+    g_nav_update_status = SH_NAV_UPDATE_BUILDING;
+    *(void **)(editor + ED_MAP_OBJ_OFF) = NULL; ae_nav_refresh_poll();
+    assert(sh_apply_engine_nav_update_status() == SH_NAV_UPDATE_FAILED);
+    free(editor); g_editor = previous; g_load_state_at = NULL;
+    g_cmdsys = NULL; g_buffer_cmd = NULL; g_add_command = NULL;
+    g_nav_map_obj = NULL; g_nav_have_hash = 0; g_nav_stale = 0;
+    g_nav_refresh_queued = 0; g_nav_refresh_registered = 0; g_nav_update_status = 0;
+    nav_test_allowed = 0;
+}
+
 int main(void)
 {
     snapshot_dimensions_follow_array_order();
@@ -149,6 +193,7 @@ int main(void)
     g_editor = editor;
     *(void **)(editor + ED_MAP_OBJ_OFF) = editor;
     test_maintenance_thread();
+    test_start_menu_update_lifecycle();
     g_main_thread_at = (const uint8_t *)&engine_id;
     g_apply_test_executor = execute;
     engine_id = 0;
@@ -257,12 +302,19 @@ void *sh_prepare_detour_sig(const sig_result *r, void *detour, size_t stolen)
 { (void)r; (void)detour; (void)stolen; assert(0); return NULL; }
 sh_patch_status sh_commit_detour(void *tramp) { (void)tramp; assert(0); return B2_PATCH_OK; }
 int sh_uninstall_detour(void *tramp) { (void)tramp; assert(0); return 0; }
-int sh_config_get_bool(const char *key, int *value, unsigned *flags) { (void)key; (void)value; (void)flags; assert(0); return 0; }
+int sh_config_get_bool(const char *key, int *value, unsigned *flags)
+{ (void)flags; assert(nav_test_allowed && !strcmp(key,"navmesh.enabled")); *value=1; return 1; }
 int sh_rawmap_snapshot(void *serializer, void *map, void *out) { (void)serializer; (void)map; (void)out; assert(0); return 0; }
 int sh_rawmap_snapshot_inspect(void *serializer, void *map, void *out, sh_rawmap_snapshot_visit visit, void *ctx)
 { (void)serializer; (void)map; (void)out; (void)visit; (void)ctx; assert(0); return 0; }
 void sh_nav_bake_refresh_live(void) { assert(0); }
+int sh_nav_bake_prepare(sh_nav_bake_reader reader)
+{ (void)reader; assert(nav_test_allowed); nav_prepare_calls++; return nav_ready; }
+void sh_nav_bake_conflicts(int *marked, int *rooms)
+{ assert(nav_test_allowed); *marked=0; *rooms=nav_rooms; }
 unsigned long sh_nav_bake_geometry_revision(void) { return 0; }
+int sh_nav_bake_preview_pending(void) { assert(0); return 0; }
+int sh_nav_preview_published(void *world) { (void)world; assert(0); return 0; }
 int sh_nav_bake_refresh_volumes(int *volumes) { (void)volumes; assert(0); return 0; }
 int sh_nav_bake_volume_flagged(int uid) { (void)uid; assert(0); return 0; }
 int sh_nav_bake_volume_uids(int *out, int cap) { (void)out; (void)cap; return 0; }
@@ -277,7 +329,7 @@ int sh_nav_preview_install(const sig_result *r, size_t n) { (void)r; (void)n; as
 void sh_nav_preview_begin(void *world) { (void)world; assert(0); }
 void sh_nav_preview_add_line(const float start[3], const float end[3], void *unused) { (void)start; (void)end; (void)unused; assert(0); }
 void sh_nav_preview_publish(void) { assert(0); }
-void sh_nav_preview_clear(void) { assert(0); }
+void sh_nav_preview_clear(void) { assert(nav_test_allowed); }
 void sh_nav_preview_colour(float r, float g, float b) { (void)r; (void)g; (void)b; assert(0); }
 
 int sh_iface_engine_copy_paste_enabled(void) { assert(0); return 0; }

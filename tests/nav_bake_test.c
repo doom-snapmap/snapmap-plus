@@ -557,9 +557,34 @@ static void test_empty_preview_completes(void)
     sh_nav_bake_test_reset();
     json = make_map("ind_dlc/room", 1, 0, 0, 0, owner);
     sh_nav_bake_set_map(json, strlen(json));
+    CHECK(sh_nav_bake_prepare(no_shipped_bytes) == 1);
     CHECK(sh_nav_bake_preview(no_shipped_bytes, unexpected_line, NULL, NULL) == 1);
     sh_nav_bake_set_map(NULL, 0);
+    CHECK(sh_nav_bake_prepare(no_shipped_bytes) == -1);
     CHECK(sh_nav_bake_preview(no_shipped_bytes, unexpected_line, NULL, NULL) == 1);
+}
+
+static void test_prepare_collects_worker_without_drawing(void)
+{
+    const int owner[] = {0};
+    char *json = make_map("ind_dlc/room", 1, 1, 1, 1, owner);
+    ULONGLONG deadline;
+    int ready;
+    sh_nav_bake_test_reset();
+    sh_nav_bake_set_map(json, strlen(json));
+    /* No preview callback is supplied or called. Enqueuing is not completion. */
+    CHECK(sh_nav_bake_prepare(no_shipped_bytes) == 0);
+    deadline = GetTickCount64() + 5000;
+    do {
+        Sleep(1);
+        ready = sh_nav_bake_prepare(no_shipped_bytes);
+    } while (!ready && GetTickCount64() < deadline);
+    CHECK(ready == 1);
+    CHECK(!sh_nav_bake_preview_pending());
+    CHECK(sh_nav_bake_prepare(no_shipped_bytes) == 1);
+    sh_nav_bake_set_map(NULL, 0);
+    CHECK(sh_nav_bake_prepare(no_shipped_bytes) == -1);
+    sh_nav_bake_test_reset();
 }
 
 static void test_package_sources_retire_cached_and_inflight_results(void)
@@ -753,6 +778,8 @@ int main(void)
     test_complete_snapshot_tracks_creation_and_deletion();
     test_refused_read_holds_no_map();
     test_snapshot_moves_and_changes_ownership();
+    test_prepare_collects_worker_without_drawing();
+    sh_nav_bake_preview_stop();
     printf("%s -- %d checks, %d failed\n", g_fail ? "FAILED" : "ok", g_checks, g_fail);
     return g_fail ? 1 : 0;
 }
