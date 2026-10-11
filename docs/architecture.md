@@ -156,10 +156,14 @@ still reference them. Save files contain the dimension-bearing module identity;
 players need Snapmap+ to reconstruct its resources. Vanilla loading is unsupported.
 
 The shared object uses an append-only vtable. Its original 77-slot prefix is
-retained, with extensions through `+0x348`; the current table occupies `0x350`
+retained, with extensions through `+0x350`; the current table occupies `0x358`
 bytes. The File menu's rawmap surface is `rawmap_status` (`+0x328`),
-`rawmap_configure` (`+0x330`) and `rawmap_load_now` (`+0x338`). The last two
-are `navmesh_view` (`+0x340`) and `run_on_main` (`+0x348`).
+`rawmap_configure` (`+0x330`) and `rawmap_load_now` (`+0x338`). The last three
+are `navmesh_view` (`+0x340`), `run_on_main` (`+0x348`) and `delete_entities`
+(`+0x350`). The backend writes a marker and the table's size into the object's
+first reserved cell (`+0x08`); older backends left it zero and had `0x350`
+bytes. Check `SH_IFACE_HAS_SLOT` before calling any slot at or past `+0x350`,
+so a frontend never reads past an older backend's table.
 Static assertions pin the layout. Do not insert, reorder or repurpose
 existing slots. Add new capability slots at the end and update both DLLs.
 
@@ -206,6 +210,18 @@ that every native engine operation can be undone.
 Prefab Load/Place stages data and queues the native paste action after checking
 editor state and the copy/paste cvar. Queue acceptance does not confirm that the
 engine has entered placement mode. The engine consumes that action later.
+
+Entities-list Delete calls `delete_entities` inside `run_on_main`. The backend
+applies the gates DOOM's own Delete key passes (object editing active, no grab,
+placement or pending action, the map's Delete restriction), makes the native
+selection exactly the requested entities, clears a hover on any other entity,
+and calls the engine's Delete Selection. The engine checks eligibility,
+releases the entities and empties the selection; the "Delete Selection" undo
+step and the return to idle follow on later native frames. Until they do, the
+selection guard refuses product selection writes and reports `2`. Every refusal
+before the action restores the previous selection. Portal doors and frames are
+refused before anything changes. The page edits its own selection and announces
+success only from the returned status.
 
 ## Engine data ownership
 

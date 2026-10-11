@@ -27,8 +27,9 @@ typedef struct sub_impl {
     CRITICAL_SECTION lock;          /* guards both the map and the work-queue */
 } sub_impl;
 
-/* obj + 0x08 remains reserved for ABI compatibility. The subobject's critical
- * section is the live guard for both registry and queue. */
+/* obj + 0x08 holds the vtable size marker; the remaining reserved bytes stay
+ * zero. The subobject's critical section is the live guard for both registry
+ * and queue. */
 
 
 static void iface_register_cmd(sh_iface *self, const char *name, sh_cmd_handler handler, void *ctx)
@@ -279,6 +280,7 @@ void sh_iface_bind_engine_slots(const sh_iface_engine_slots *s)
     g_iface_vtbl_live.rawmap_load_now         = s->rawmap_load_now;         /* +0x338 */
     g_iface_vtbl_live.navmesh_view            = s->navmesh_view;            /* +0x340 */
     g_iface_vtbl_live.run_on_main             = s->run_on_main;             /* +0x348 */
+    g_iface_vtbl_live.delete_entities         = s->delete_entities;         /* +0x350 */
 }
 
 /* Allocate the fixed object and private subobject with an empty registry/queue. */
@@ -303,7 +305,10 @@ sh_iface *sh_iface_create(void)
     si->pinned.map_size = 0;
 
     obj->vtbl = &g_iface_vtbl_live;     /* +0x00 */
-    /* Reserved object mutex bytes stay zero; si->lock guards live state. */
+    /* Publish the vtable size so a frontend never reads past an older table.
+     * The other reserved bytes stay zero; si->lock guards live state. */
+    ((uint32_t *)(void *)obj->mtx)[0] = SH_IFACE_VTBL_MARK;
+    ((uint32_t *)(void *)obj->mtx)[1] = (uint32_t)sizeof(sh_iface_vtbl);
     obj->sub  = (sh_iface_sub *)si;     /* +0x58: sub_impl starts with the fixed header. */
 
     return obj;

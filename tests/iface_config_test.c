@@ -36,7 +36,10 @@ SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, rawmap_load_now) == 0x338);
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, navmesh_view) == 0x340);
 /* ext 28: run a call on DOOM's main thread and wait for it. */
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, run_on_main) == 0x348);
-SH_STATIC_ASSERT(sizeof(sh_iface_vtbl) == 0x350);
+/* ext 29: delete entities through the native Delete Selection action. */
+SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, delete_entities) == 0x350);
+SH_STATIC_ASSERT(sizeof(sh_iface_vtbl) == 0x358);
+SH_STATIC_ASSERT(sizeof(sh_delete_result) == 40);
 SH_STATIC_ASSERT(offsetof(sh_iface, sub) == 0x58);
 SH_STATIC_ASSERT(sizeof(sh_iface) == 0x60);
 
@@ -50,6 +53,29 @@ static int stub_get(sh_iface *self, const char *key, char *out_json,
     if (out_json && out_capacity >= (int)sizeof(value))
         memcpy(out_json, value, sizeof(value));
     return (int)sizeof(value) - 1;
+}
+
+static int stub_delete(sh_iface *self, const int *ids, int count, sh_delete_result *out)
+{
+    (void)self; (void)ids;
+    if (out) { memset(out, 0, sizeof *out); out->status = SH_DELETE_DISPATCHED; out->released = count; }
+    return SH_DELETE_DISPATCHED;
+}
+
+/* A frontend must never read a slot the backend's vtable does not have. */
+static int check_vtable_size_contract(sh_iface *iface)
+{
+    static sh_iface legacy;                     /* an older backend leaves +0x08 zero */
+    static unsigned char old_vtbl[sizeof(sh_iface_vtbl)];
+    memset(&legacy, 0, sizeof legacy);
+    memset(old_vtbl, 0xCC, sizeof old_vtbl);    /* bytes past an old table are not callbacks */
+    legacy.vtbl = (const sh_iface_vtbl *)(const void *)old_vtbl;
+    if (sh_iface_vtbl_bytes(&legacy) != SH_IFACE_LEGACY_VTBL_BYTES) return 0;
+    if (SH_IFACE_HAS_SLOT(&legacy, delete_entities)) return 0;
+    if (!SH_IFACE_HAS_SLOT(&legacy, run_on_main)) return 0;   /* nonzero filler counts as bound */
+    if (sh_iface_vtbl_bytes(NULL) != 0) return 0;
+    if (sh_iface_vtbl_bytes(iface) != (uint32_t)sizeof(sh_iface_vtbl)) return 0;
+    return 1;
 }
 
 static int stub_set(sh_iface *self, const char *key, const char *value_json)
@@ -94,6 +120,27 @@ int main(void)
         SH_CONFIG_SET_PERSISTED) {
         fprintf(stderr, "iface_config_test: setter callback contract failed\n");
         return 1;
+    }
+
+    if (!check_vtable_size_contract(iface)) {
+        fprintf(stderr, "iface_config_test: vtable size marker contract failed\n");
+        return 1;
+    }
+    if (SH_IFACE_HAS_SLOT(iface, delete_entities)) {
+        fprintf(stderr, "iface_config_test: unbound delete slot reported present\n");
+        return 1;
+    }
+    engine_slots.delete_entities = stub_delete;
+    sh_iface_bind_engine_slots(&engine_slots);
+    {
+        sh_delete_result r;
+        int ids[2] = { 4, 5 };
+        if (!SH_IFACE_HAS_SLOT(iface, delete_entities) ||
+            iface->vtbl->delete_entities(iface, ids, 2, &r) != SH_DELETE_DISPATCHED ||
+            r.released != 2) {
+            fprintf(stderr, "iface_config_test: delete slot was not bound\n");
+            return 1;
+        }
     }
 
     puts("iface_config_test: OK");

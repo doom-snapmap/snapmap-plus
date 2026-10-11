@@ -27,6 +27,7 @@
 #include "wiring_cleandirect.h"
 #include "snapstack.h"
 #include "rawmap.h"
+#include "editor_delete.h"
 
 /* Editor layout. */
 /* Extraction RVA for re-derivation only; runtime uses editor_singleton.
@@ -104,11 +105,6 @@
 #define DEFSUB_SRC_LEN_OFF      0x138      /* defsub+0x138 -> canonical decl-source text len (s32) */
 #define DEFSUB_CLASS_OFF        0x60       /* Interned classname pointer slot. */
 #define DEFSUB_INHERIT_OFF      0x58       /* Interned inherit pointer slot. */
-#define ED_SEL_OBJ_OFF_C3       0x204d0    /* editor+0x204d0 -> selection object (Delete guard) */
-
-/* Audit RVA only. Resolve RemoveFromSelection by its signed wrapper,
- * including add rcx,0x5E0 before the selection-subobject call. */
-#define REMOVE_FROM_SEL_PINNED_RVA     0x59fda0u
 
 /* Display name is a full idStr: assign through IdStrAssignCStr to maintain
  * length, data, and SSO/heap ownership. Class/inherit are pooled pointer
@@ -135,7 +131,6 @@ typedef void  (*idstr_dtor_fn)(void *self);
 typedef void  (*idstr_assign_fn)(void *dstField, const char *cstr);          /* Interned pointer assignment for class/inherit. */
 typedef void  (*idstr_opassign_fn)(void *idStrField, const char *cstr);      /* Full idStr assignment for display name. */
 typedef void  (*decl_src_rebuild_fn)(void *defsub, const char *src, int one);
-typedef void  (*remove_from_sel_fn)(void *selObj, int id);
 typedef void *(*get_decls_fn)(const char *type_name);
 
 /* Resolved engine state. */
@@ -149,7 +144,6 @@ static idstr_dtor_fn  g_idstr_dtor = NULL;
 static idstr_assign_fn    g_idstr_assign = NULL;   /* +0x78/+0x80 set className/inherit (idPoolStr fields) */
 static idstr_opassign_fn  g_idstr_opassign = NULL; /* +0x128 set displayName (FULL idStr field entity+0x170) */
 static decl_src_rebuild_fn g_decl_rebuild = NULL;  /* +0x40 Save-to-Decl rebuild */
-static remove_from_sel_fn g_remove_sel    = NULL;  /* +0x130 Delete */
 static get_decls_fn       g_get_decls     = NULL;  /* +0x110 enum-decls-of-resclass (GetDeclsOfType) */
 static const uint8_t     *g_cvarsys_slot  = NULL;  /* glb_resolve("cvar_system_slot"); NULL = unresolved */
 static void              *g_devlayer_cvar = NULL;  /* cached snapEdit_enableDevLayer idCVar* (lazy; dev-layer gate) */
@@ -336,6 +330,8 @@ static int slot_get_selection(sh_iface *self, int *out_ids, int max)
  * selection state refuses mutation. */
 static int manipulation_in_progress(void)
 {
+    /* A native editor action owns the selection until its commit phase ends. */
+    if (sh_editor_delete_native_pending()) return 2;
     const uint8_t *ed = editor_session();
     if (!ed) return 1;                       /* Unknown editor: refuse mutation. */
     void *mapObj = NULL, *sel = NULL;
@@ -364,11 +360,12 @@ static int manipulation_in_progress(void)
     return 0;
 }
 
-/* Expose the selection-mutation guard so the UI can explain refusals. */
+/* Expose the selection-mutation guard so the UI can explain refusals:
+ * 1 for a grab or unreadable state, 2 while a native action finishes. */
 static int slot_manipulation_in_progress(sh_iface *self)
 {
     (void)self;
-    return manipulation_in_progress() ? 1 : 0;
+    return manipulation_in_progress();
 }
 
 /* Cached material lookup only; do not invoke the fatal-on-miss loader. */
@@ -881,21 +878,41 @@ static void slot_rebuild_declsource(sh_iface *self, int id, const char *cstr)
     sh_apply_engine_nav_decl_rewritten(id);
 }
 
-/* Remove the ID from selection; synchronize idle state if selection becomes empty. */
+/* The legacy single-ID Delete slot. It used to call the engine's destructive
+ * leaf directly; it now takes the same native Delete Selection route as the
+ * batch slot, so one call deletes at most one entity. */
 static void slot_remove_from_selection(sh_iface *self, int id)
 {
     (void)self;
-    if (!g_remove_sel || id == -1) return;
-    if (manipulation_in_progress()) return;
-    const uint8_t *ed = editor_session();
-    if (!ed) return;
-    void *sel = NULL;
-    if (!ie_read_ptr(ed + ED_SEL_OBJ_OFF_C3, &sel) || sel == NULL) return;
-    __try { g_remove_sel(sel, id); } __except (EXCEPTION_EXECUTE_HANDLER) {}
-    int remaining = 0;
-    if (ie_read_s32((const uint8_t *)sel + SEL_COUNT_OFF, &remaining) && remaining <= 0)
-        mode_set_selection_state(MODE_STATE_IDLE);
+    if (id >= 0) sh_editor_delete_batch(&id, 1, NULL);
 }
+
+/* Batch Delete through DOOM's Delete Selection. Main thread only. */
+static int slot_delete_entities(sh_iface *self, const int *ids, int count, sh_delete_result *out)
+{
+    (void)self;
+    return sh_editor_delete_batch(ids, count, (sh_editor_delete_result *)out);
+}
+SH_STATIC_ASSERT(sizeof(sh_delete_result) == sizeof(sh_editor_delete_result));
+SH_STATIC_ASSERT(offsetof(sh_delete_result, rolled_back) == offsetof(sh_editor_delete_result, rolled_back));
+SH_STATIC_ASSERT(SH_DELETE_DISPATCHED == SH_EDITOR_DELETE_DISPATCHED &&
+                 SH_DELETE_UNAVAILABLE == SH_EDITOR_DELETE_UNAVAILABLE &&
+                 SH_DELETE_NOT_MAIN == SH_EDITOR_DELETE_NOT_MAIN &&
+                 SH_DELETE_NOT_READY == SH_EDITOR_DELETE_NOT_READY &&
+                 SH_DELETE_NOT_ENTITY == SH_EDITOR_DELETE_NOT_ENTITY &&
+                 SH_DELETE_BUSY == SH_EDITOR_DELETE_BUSY &&
+                 SH_DELETE_INVALID == SH_EDITOR_DELETE_INVALID &&
+                 SH_DELETE_RESTRICTED == SH_EDITOR_DELETE_RESTRICTED &&
+                 SH_DELETE_PORTAL == SH_EDITOR_DELETE_PORTAL &&
+                 SH_DELETE_PROTECTED == SH_EDITOR_DELETE_PROTECTED &&
+                 SH_DELETE_REFERENCED == SH_EDITOR_DELETE_REFERENCED &&
+                 SH_DELETE_FAULT == SH_EDITOR_DELETE_FAULT &&
+                 SH_DELETE_INCOMPLETE == SH_EDITOR_DELETE_INCOMPLETE);
+SH_STATIC_ASSERT(SH_DELETE_BUSY_SUBSTATE == SH_EDITOR_DELETE_BUSY_SUBSTATE &&
+                 SH_DELETE_BUSY_TRANSITION == SH_EDITOR_DELETE_BUSY_TRANSITION &&
+                 SH_DELETE_BUSY_PHASE == SH_EDITOR_DELETE_BUSY_PHASE &&
+                 SH_DELETE_BUSY_QUEUED == SH_EDITOR_DELETE_BUSY_QUEUED &&
+                 SH_DELETE_BUSY_MANIPULATION == SH_EDITOR_DELETE_BUSY_MANIPULATION);
 
 /* Pack decl names for a short decl type into NUL-separated output. */
 static int slot_enum_decls_of_resclass(sh_iface *self, const char *res_class, char *out_buf, int cap,
@@ -1119,7 +1136,6 @@ int sh_iface_engine_install(const sig_result *results, size_t n, const uint8_t *
     g_idstr_assign = (idstr_assign_fn)    sig_addr_by_name(results, n, "IdStrAssign");
     g_decl_rebuild = (decl_src_rebuild_fn)sig_addr_by_name(results, n, "DeclSourceRebuild");
     g_get_decls    = (get_decls_fn)       sig_addr_by_name(results, n, "GetDeclsOfType"); /* +0x110 */
-    g_remove_sel     = (remove_from_sel_fn)sig_addr_by_name(results, n, "RemoveFromSelection"); /* +0x130 */
     g_idstr_opassign = (idstr_opassign_fn) sig_addr_by_name(results, n, "IdStrAssignCStr");     /* +0x128 */
 
     /* Bind callbacks even when some engine dependencies are unavailable. */
@@ -1148,6 +1164,10 @@ int sh_iface_engine_install(const sig_result *results, size_t n, const uint8_t *
     slots.set_displayname        = slot_set_displayname;      /* +0x128 */
     slots.resolve_prefab_path    = slot_resolve_prefab_path;  /* +0xc0  */
     slots.remove_from_selection  = slot_remove_from_selection;/* +0x130 */
+    /* Deletion runs DOOM's Delete Selection; product selection writes wait
+     * while its commit is pending. */
+    sh_editor_delete_install(results, n, module_base, g_editor, manipulation_in_progress);
+    slots.delete_entities        = slot_delete_entities;      /* +0x350 ext 29 */
 
     slots.enum_decls_of_resclass = slot_enum_decls_of_resclass;/* +0x110 */
 

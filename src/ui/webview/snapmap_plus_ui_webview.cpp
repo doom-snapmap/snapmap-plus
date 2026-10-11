@@ -76,11 +76,16 @@ static int           g_save_result  = 0;
 
 static volatile bool g_pending_delete = false;
 static std::vector<int> g_delete_eids;
+/* The page announces nothing until it receives this result. NOT_RUN means the
+ * main-thread call never started, so the engine was not touched. */
+#define POC_DELETE_NOT_RUN (-1000)
+static int              g_entity_delete_status = POC_DELETE_NOT_RUN;
+static sh_delete_result g_entity_delete_result;
 
 static volatile bool g_pending_select = false;   /* list -> editor selection push ("Select in editor") */
 static std::vector<int> g_select_eids;
 static volatile bool g_pending_deselect = false;  /* UI blank-space deselect -- clear_selection convenience */
-static volatile bool g_select_refused   = false;  /* last selection push was refused (editor mid-grab/hold) */
+static volatile int  g_select_refused   = 0;      /* refusal reason: 1 grab/hold, 2 native action finishing */
 static char g_enumbuf[262144];                   /* packed-string scratch for enum_inherits / enum_valid_classes */
 
 /* Camera-manipulation state for the editable footer controls. camSet queues a one-shot write; camLock
@@ -568,15 +573,20 @@ static void poc_apply_save()
         } else g_save_result = r == 0 ? 0 : -2;
     } __except (EXCEPTION_EXECUTE_HANDLER) { g_save_result = -2; }
 }
+/* Window deletion runs DOOM's own Delete Selection through one backend call
+ * (ext 29). A backend without that slot refuses rather than falling back to
+ * the old per-ID path, which skipped the engine's hover, selection, undo and
+ * eligibility handling. Runs on the main thread inside poc_main_edits. */
 static void poc_apply_deletes()
 {
+    memset(&g_entity_delete_result, 0, sizeof g_entity_delete_result);
+    g_entity_delete_status = SH_DELETE_UNAVAILABLE;
     __try {
-        if (g_iface && g_iface->vtbl && g_iface->vtbl->selection_guard)
-            for (size_t i = 0; i < g_delete_eids.size(); i++) {
-                int id = g_delete_eids[i];
-                if (id >= 0) g_iface->vtbl->selection_guard(g_iface, id);
-            }
-    } __except (EXCEPTION_EXECUTE_HANDLER) { }
+        if (SH_IFACE_HAS_SLOT(g_iface, delete_entities) && !g_delete_eids.empty())
+            g_entity_delete_status = g_iface->vtbl->delete_entities(g_iface, g_delete_eids.data(),
+                                                                    (int)g_delete_eids.size(),
+                                                                    &g_entity_delete_result);
+    } __except (EXCEPTION_EXECUTE_HANDLER) { g_entity_delete_status = SH_DELETE_FAULT; }
 }
 /* Serialize into caller-owned storage under SEH. Timeline-open and target-inherit
  * requests use separate buffers so requests in one drain cannot overwrite each other. */
@@ -670,12 +680,16 @@ static void poc_emit_entity_inherit(int eid, int json_len)
 static void poc_apply_select_in_editor()
 {
     poc_logf("select-in-editor: apply start ids=%lu", (unsigned long)g_select_eids.size());
-    /* Manipulation snapshots index the selection positionally. Changing it during
-     * a grab can corrupt Escape restoration; the backend enforces this gate too. */
-    if (g_iface && g_iface->vtbl && g_iface->vtbl->manipulation_in_progress
-        && g_iface->vtbl->manipulation_in_progress(g_iface)) {
-        poc_log("select-in-editor: REFUSED -- editor is mid-manipulation (grab/hold)");
-        g_select_refused = true;
+    /* Manipulation snapshots index the selection positionally, and a native
+     * Delete owns the selection until it commits. The backend enforces this
+     * gate too; its value says which one refused. */
+    int busy = 0;
+    if (g_iface && g_iface->vtbl && g_iface->vtbl->manipulation_in_progress)
+        busy = g_iface->vtbl->manipulation_in_progress(g_iface);
+    if (busy) {
+        poc_log(busy == 2 ? "select-in-editor: REFUSED -- a native editor action is finishing"
+                          : "select-in-editor: REFUSED -- editor is mid-manipulation (grab/hold)");
+        g_select_refused = busy;
         return;
     }
     __try {
@@ -710,6 +724,32 @@ static bool poc_on_main(sh_main_call_fn fn, void *ctx, int timeout_ms)
            g_iface->vtbl->run_on_main(g_iface, fn, ctx, timeout_ms, &r) == 1;
 }
 struct PocMainEdits { bool save, del, select, deselect, cam; };
+/* Report the backend's delete result. The page changes its selection and
+ * announces success only from this message; "timeout" means the request never
+ * reached the game thread, so nothing was attempted. */
+static void poc_post_delete_result()
+{
+    const sh_delete_result &r = g_entity_delete_result;
+    wchar_t m[320];
+    char l[256];
+    if (g_entity_delete_status == POC_DELETE_NOT_RUN) {
+        poc_post_json(L"{\"kind\":\"deleteResult\",\"status\":\"timeout\"}");
+        poc_log("delete: the game did not run the request within the wait; nothing was deleted");
+        return;
+    }
+    _snwprintf_s(m, _countof(m), _TRUNCATE,
+                 L"{\"kind\":\"deleteResult\",\"status\":%d,\"busy\":%d,\"requested\":%d,\"targets\":%d,"
+                 L"\"released\":%d,\"firstId\":%d,\"deselected\":%d,\"rolledBack\":%d}",
+                 g_entity_delete_status, r.busy, r.requested, r.targets, r.released, r.first_id,
+                 r.deselected, r.rolled_back);
+    poc_post_json(m);
+    _snprintf_s(l, sizeof l, _TRUNCATE,
+                "delete: status=%d busy=%d requested=%d targets=%d released=%d first=%d "
+                "deselected=%d hover_cleared=%d wire_cleared=%d rolled_back=%d",
+                g_entity_delete_status, r.busy, r.requested, r.targets, r.released, r.first_id,
+                r.deselected, r.hover_cleared, r.wire_cleared, r.rolled_back);
+    poc_log(l);
+}
 static int poc_main_edits(void *ctx)
 {
     const PocMainEdits *e = (const PocMainEdits *)ctx;
@@ -2783,6 +2823,7 @@ static void poc_think_loop()
     for (;;) {
         frame++;
         bool did_save = false, did_delete = false, did_create_prefab = false, did_select_refused = false;
+        int  select_refused_reason = 0;
         bool did_delete_prefab = false, did_rename_prefab = false, did_load_prefab = false;
         bool did_new_entity = false;
         bool did_sound_preview = false;
@@ -2795,6 +2836,7 @@ static void poc_think_loop()
                                    g_cam_lock || g_cam_write_once };
             bool user = edits.save || edits.del || edits.select || edits.deselect || g_cam_write_once;
             if (edits.save) g_save_result = -2;
+            if (edits.del) g_entity_delete_status = POC_DELETE_NOT_RUN;
             if ((user || edits.cam) &&
                 !poc_on_main(poc_main_edits, &edits, user ? POC_MAIN_WAIT_MS : POC_MAIN_CAM_WAIT_MS) && user)
                 poc_log("engine edits: the game did not take them within the wait; dropped");
@@ -2812,7 +2854,7 @@ static void poc_think_loop()
             g_last_editor_sel = -1; g_last_sel_sig = 0;
             g_pending_deselect = false;
         }
-        if (g_select_refused) { g_select_refused = false; did_select_refused = true; }
+        if (g_select_refused) { select_refused_reason = g_select_refused; g_select_refused = 0; did_select_refused = true; }
         if (g_pending_create_prefab) {
             poc_apply_create_prefab();
             g_pending_create_prefab = false;
@@ -2842,8 +2884,10 @@ static void poc_think_loop()
             poc_send_list("save");
             if (g_save_eid >= 0) poc_send_state(g_save_eid, false);
         }
-        if (did_delete) poc_send_list("delete");
-        if (did_select_refused) poc_post_json(L"{\"kind\":\"selectRefused\"}");
+        if (did_delete) { poc_post_delete_result(); poc_send_list("delete"); }
+        if (did_select_refused)
+            poc_post_json(select_refused_reason == 2 ? L"{\"kind\":\"selectRefused\",\"reason\":\"native\"}"
+                                                     : L"{\"kind\":\"selectRefused\",\"reason\":\"hold\"}");
         if (did_create_prefab) {
             std::wstring m = L"{\"kind\":\"createPrefabResult\",\"result\":"; m += std::to_wstring(g_create_result);
             m += L",\"name\":\""; m += sh_webview_json::escape_wide(g_create_prefab_name.c_str()); m += L"\"}";

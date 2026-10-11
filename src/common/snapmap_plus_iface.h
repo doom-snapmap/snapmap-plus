@@ -2,7 +2,9 @@
  * interface object and callbacks; both DLLs must build against this header.
  * The 0x60-byte object has a vtable at +0 and subobject pointer at +0x58.
  * The original 77-slot prefix ends at +0x260; append-only extensions end
- * at +0x320, making the current vtable 0x328 bytes.
+ * at +0x350, making the current vtable 0x358 bytes. The backend records that
+ * size in the object (see sh_iface_vtbl_bytes); check it before calling a
+ * slot at or past +0x350.
  * Engine layouts remain private to backend implementations. Reserved cells
  * preserve ABI offsets; optional callbacks can be null. */
 #ifndef SNAPMAP_PLUS_IFACE_H
@@ -130,10 +132,12 @@ typedef void          (*sh_push_to_stack_fn)(struct sh_iface *self, int index, c
 
 /* Clear a backend stack and return its previous ID count. */
 typedef int           (*sh_clear_stack_fn)(struct sh_iface *self, int index);                      /* +0x2A8 (ext 8) */
-/* Return 1 when the selection-mutation guard detects manipulation or certain
- * unreadable states. A positional snapshot must keep its selection stable
- * until Escape/commit restores it. Check before changing selection to explain
- * a refusal; add/clear/remove callbacks also apply this guard. */
+/* Return nonzero when the selection-mutation guard refuses: 1 for a grab
+ * (manipulation) or certain unreadable states, 2 while a native editor action
+ * such as Delete Selection finishes its commit. A positional snapshot must
+ * keep its selection stable until Escape/commit restores it. Check before
+ * changing selection to explain a refusal; add/clear/remove callbacks also
+ * apply this guard. */
 typedef int           (*sh_manipulation_in_progress_fn)(struct sh_iface *self);                     /* +0x2C0 (ext 11) */
 
 
@@ -237,6 +241,56 @@ typedef int (*sh_navmesh_view_fn)(struct sh_iface *self, int update,
 typedef int (*sh_main_call_fn)(void *ctx);
 typedef int (*sh_run_on_main_fn)(struct sh_iface *self, sh_main_call_fn fn, void *ctx,
                                  int timeout_ms, int *out_result);
+
+/* Delete entities through DOOM's own Delete Selection, with its eligibility,
+ * restriction and busy checks. Main thread only: call inside run_on_main.
+ * Fills out when nonnull and returns its status.
+ *   DISPATCHED  the native action ran and every target's slot was released
+ *               before the call returned. The "Delete Selection" undo step
+ *               and the return to idle complete on later native frames, and
+ *               product selection writes are refused until they do.
+ *   INCOMPLETE  the action ran but released fewer targets than requested;
+ *               the released ones stay deleted and the native commit is armed.
+ *   FAULT       an engine call raised. With rolled_back = 1 a failure before
+ *               the action was fully undone; otherwise the editor may be
+ *               partially changed (selection, hover, substate request, or
+ *               targets released without a commit when the action raised).
+ *   Others      refusals decided before the action. They change nothing,
+ *               except that a hovered non-target may have lost its hover and
+ *               released IDs are not put back into the selection. */
+#define SH_DELETE_DISPATCHED   1
+#define SH_DELETE_UNAVAILABLE  0     /* engine boundaries unresolved */
+#define SH_DELETE_NOT_MAIN    (-1)
+#define SH_DELETE_NOT_READY   (-2)   /* no editor/map/screen, or a state change */
+#define SH_DELETE_NOT_ENTITY  (-3)   /* the editor is not in object (entity) editing */
+#define SH_DELETE_BUSY        (-4)   /* a native action, grab or queued input owns the selection */
+#define SH_DELETE_INVALID     (-5)   /* empty/oversized request, or a dead or unknown ID */
+#define SH_DELETE_RESTRICTED  (-6)   /* the map's editor restrictions block Delete */
+#define SH_DELETE_PORTAL      (-7)   /* a target is a portal door or frame */
+#define SH_DELETE_PROTECTED   (-8)   /* the engine reports a target is not deletable */
+#define SH_DELETE_REFERENCED  (-9)   /* the engine's referenced-entity refusal */
+#define SH_DELETE_FAULT       (-10)  /* an engine call faulted */
+#define SH_DELETE_INCOMPLETE  (-11)  /* the action released fewer targets than requested */
+/* busy detail for SH_DELETE_BUSY */
+#define SH_DELETE_BUSY_SUBSTATE     1   /* placing, editing properties or another mode */
+#define SH_DELETE_BUSY_TRANSITION   2   /* leaving such a mode has not finished */
+#define SH_DELETE_BUSY_PHASE        3   /* a native action is still committing */
+#define SH_DELETE_BUSY_QUEUED       4   /* native input is queued for the next frame */
+#define SH_DELETE_BUSY_MANIPULATION 5   /* a grab or hold owns the selection */
+typedef struct sh_delete_result {
+    int status;         /* SH_DELETE_*, also the return value */
+    int busy;           /* SH_DELETE_BUSY_* detail when status is SH_DELETE_BUSY */
+    int requested;      /* IDs supplied */
+    int targets;        /* distinct valid targets */
+    int released;       /* targets released by the action */
+    int first_id;       /* offending ID for INVALID/PORTAL, else -1 */
+    int deselected;     /* other selected entities dropped by a dispatch */
+    int hover_cleared;  /* a hovered non-target lost its hover */
+    int wire_cleared;   /* a hovered connection touching a target was dropped */
+    int rolled_back;    /* a refusal restored the previous selection */
+} sh_delete_result;
+typedef int (*sh_delete_entities_fn)(struct sh_iface *self, const int *ids, int count,
+                                     sh_delete_result *out);                  /* +0x350 (ext 29) */
 
 typedef int (*sh_resolve_prefab_defaults_fn)(struct sh_iface *self, const char *inherit_name,
                                              char *out_model, int out_capacity,
@@ -445,6 +499,7 @@ typedef struct sh_iface_vtbl {
     sh_rawmap_load_now_fn      rawmap_load_now;      /* +0x338 (ext 26) reload the map now */
     sh_navmesh_view_fn         navmesh_view;         /* +0x340 (ext 27) the navigation view */
     sh_run_on_main_fn          run_on_main;          /* +0x348 (ext 28) main-thread call */
+    sh_delete_entities_fn      delete_entities;      /* +0x350 (ext 29) native batch delete */
 } sh_iface_vtbl;
 
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, config_get_json) == 0x2B0);
@@ -467,11 +522,14 @@ SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, rawmap_configure) == 0x330);
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, rawmap_load_now) == 0x338);
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, navmesh_view) == 0x340);
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, run_on_main) == 0x348);
-SH_STATIC_ASSERT(sizeof(sh_iface_vtbl) == 0x350);
+SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, delete_entities) == 0x350);
+SH_STATIC_ASSERT(sizeof(sh_iface_vtbl) == 0x358);
+SH_STATIC_ASSERT(sizeof(sh_delete_result) == 40);
 
 /* Fixed object layout: vtable +0, reserved bytes +0x08..+0x57, subobject
- * pointer +0x58. Reserved bytes stay zero; private subobject storage holds
- * the live lock. Frontends access state through callbacks. */
+ * pointer +0x58. The first eight reserved bytes carry the vtable size marker;
+ * the rest stay zero. Private subobject storage holds the live lock.
+ * Frontends access state through callbacks. */
 #define SH_IFACE_VTBL_OFF   0x00
 #define SH_IFACE_MTX_OFF    0x08
 #define SH_IFACE_SUB_OFF    0x58    /* Pointer to the fixed 0x78-byte subobject header. */
@@ -498,6 +556,27 @@ struct sh_iface {
 
 SH_STATIC_ASSERT(offsetof(sh_iface, sub) == 0x58);
 SH_STATIC_ASSERT(sizeof(sh_iface) == 0x60);
+
+/* sh_iface_create stores a marker and sizeof(sh_iface_vtbl) in the first
+ * reserved cell (+0x08). Backends from before extension 29 left that cell
+ * zero and expose 0x350 vtable bytes. A frontend paired with an older backend
+ * must not read past them, so test slots at or past +0x350 with
+ * SH_IFACE_HAS_SLOT. */
+#define SH_IFACE_VTBL_MARK         0x53485654u   /* "SHVT" */
+#define SH_IFACE_LEGACY_VTBL_BYTES 0x350u
+
+static __inline uint32_t sh_iface_vtbl_bytes(const struct sh_iface *self)
+{
+    const uint32_t *cell;
+    if (!self) return 0;
+    cell = (const uint32_t *)(const void *)self->mtx;
+    return cell[0] == SH_IFACE_VTBL_MARK ? cell[1] : SH_IFACE_LEGACY_VTBL_BYTES;
+}
+
+#define SH_IFACE_HAS_SLOT(self, member)                                          \
+    ((self) && (self)->vtbl &&                                                   \
+     offsetof(sh_iface_vtbl, member) + sizeof(void *) <= sh_iface_vtbl_bytes(self) && \
+     (self)->vtbl->member != NULL)
 
 /* Frontend thread-init block: output-state slot, argc, argv, and the
  * backend-owned interface. Preserve alignment and field order across DLLs. */
@@ -606,6 +685,7 @@ typedef struct sh_iface_engine_slots {
     sh_rawmap_load_now_fn      rawmap_load_now;             /* +0x338 (ext 26) */
     sh_navmesh_view_fn         navmesh_view;                /* +0x340 (ext 27) */
     sh_run_on_main_fn          run_on_main;                 /* +0x348 (ext 28) */
+    sh_delete_entities_fn      delete_entities;             /* +0x350 (ext 29) */
 } sh_iface_engine_slots;
 
 void sh_iface_bind_engine_slots(const sh_iface_engine_slots *slots);

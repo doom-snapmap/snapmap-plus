@@ -269,7 +269,9 @@ Right-clicking one or more selected rows gives you:
 
 - **Copy ID** — copies the reference ID(s) to your clipboard, for pasting into another entity's property
   (e.g. a `targets` list — see [Targets and Logic Signaling](#targets-and-logic-signaling)).
-- **Delete** — deletes the entity(ies), the same as doing it in-game, but remotely.
+- **Delete** — deletes the entity(ies) exactly as pressing Delete in the 3D editor would, following
+  the same rules: objects the editor protects and room doors or caps are not deleted, and Ctrl+Z
+  undoes it like any other delete. A message says what was deleted, or why nothing was.
 - **Push to stack 0** — adds the entity(ies) to SnapStack's scratch stack 0 (see
   [SnapStack](#snapstack-bulk-editing)).
 - **Clear stack 0** — empties stack 0 out, regardless of what's currently selected.

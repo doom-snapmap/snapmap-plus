@@ -9,7 +9,7 @@ param(
                            "decl_native_schema.c", "decl_native_registry.c", "decl_entity_class.c", "decl_graph.c", "decl_graph_compose.c", "decl_md6_compose.c", "decl_block_compose.c", "md6_binary.c", "model_binary.c", "decl_material.c", "decl_material_compose.c", "decl_native_lex.c", "package_material.c", "decl_graph_dependencies.c", "decl_polymorphic.c", "resource_graph_prepared.c", "decl_json_dependencies.c",
                            "config.c", "config_json.c", "package_usage.c", "package_source_graph.c", "package_archive.c", "raw_deflate_encode.c", "package_descriptor.c", "package_sources.c", "package_compiler.c", "package_runtime.c", "resource_catalog.c", "resource_graph.c", "resource_graph_native.c", "resource_resident.c", "decl_compose.c", "decl_tree.c", "decl_dependencies.c",
                            "entity.c", "typeinfo.c", "preview.c", "megapreview.c", "imgpreview.c", "prefabpreview.c", "soundpreview.c", "audio_banks.c", "audio_packages.c", "audio_originals.c", "audio_banks_native.c", "audio_files.c", "audio_files_native.c", "bcn.c", "patch.c", "algo.c", "target_any.c", "wiring_cleandirect.c", "swf_textedit.c", "ui_bridge.c",
-                           "iface_engine.c", "apply_engine.c", "../common/snapmap_plus_iface.c",
+                           "iface_engine.c", "editor_delete.c", "apply_engine.c", "../common/snapmap_plus_iface.c",
                            "../common/log_rotate.c",
                            # The backend owns the SnapStack command handlers and stores.
                            "snapstack.c", "json_patch.c",

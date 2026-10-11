@@ -1095,9 +1095,12 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
     /* Portable function identities checked on both renderers. Generic/short leaves
      * such as decl-manager access, list growth, and visibility resolve through
      * signed call sites in engine_globals_table.gen.h instead. */
-    { "RemoveFromSelection", /* void(editor [rcx], entity handle [edx]) -- drops one entity from the
-                              * editor selection. The `add rcx,0x5e0` that walks to the selection
-                              * sub-object sits in the fixed bytes, which is what makes it unique.
+    { "RemoveFromSelection", /* void(selection [rcx], entity id [edx]). Despite the historical
+                              * name this DESTROYS one entity (membership, undo record, slot
+                              * release) and never edits the selected-ID array, hover or
+                              * EntityMode. No product path calls it any more; window deletion
+                              * uses SelectionDeleteAction. The `add rcx,0x5e0` to the map's
+                              * entity tables sits in the fixed bytes, which makes it unique.
                               * Vulkan 0x59FDA0, OpenGL 0x59F510. */
       "48 89 5C 24 08 57 48 83 EC 20 48 8B F9 8B DA 48 8B 09 48 81 C1 E0 05 00 00",
       0x59FDA0u },
@@ -1232,6 +1235,23 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "40 53 48 83 EC 20 48 8B D9 48 8B 89 C8 04 02 00 48 83 C1 18 E8 ?? ?? ?? ?? "
       "48 8D 4B 10 48 8B D3 E8 ?? ?? ?? ?? 48 8B 03 BA 01 00 00 00 48 8B CB "
       "48 83 C4 20 5B 48 FF A0 60 01 00 00", 0x524070u },
+    /* EntityMode's Selection substate (idSnapEntityMode_Selection), used by
+     * editor_delete.c to run the native Delete Selection for window requests.
+     * The action's hover-clear callee is decoded from its own call site: that
+     * helper has a byte-identical twin and is not signable. */
+    { "SelectionDeleteAction", /* VK 0xce3b60, GL 0xce3540. Prologue through the
+                                * capability test movzx eax,[rcx+0x58]; test al,2. */
+      "40 55 56 57 41 54 41 55 41 56 41 57 48 8D 6C 24 D9 48 81 EC D0 00 00 00 "
+      "48 C7 45 AF FE FF FF FF 48 89 9C 24 28 01 00 00 48 8B 05 ?? ?? ?? ?? "
+      "48 33 C4 48 89 45 17 4D 8B E8 48 89 55 9F 48 89 4D A7 0F B6 41 58 A8 02 "
+      "0F 84 ?? ?? ?? ??", 0xCE3B60u },
+    { "SelectionCapabilities", /* VK 0xce5110, GL 0xce4af0. Rebuilds the capability bits over
+                                * the selection plus the hovered entity: and byte [rcx+0x59],0xFE;
+                                * and byte [rcx+0x58],0x16; movsxd rsi,[rcx+0x2c]. */
+      "40 55 53 48 8B EC 48 83 EC 48 80 61 59 FE 48 8B D9 80 61 58 16 "
+      "49 8B 88 D0 04 02 00 48 89 74 24 60 48 89 7C 24 68 49 8B F8 "
+      "4C 89 74 24 78 45 32 F6 48 63 71 2C 83 FE FF 0F 84 ?? ?? ?? ?? "
+      "4C 89 64 24 70 8B D6 4C 89 7C 24 40", 0xCE5110u },
     { "GridApplyEntityTree", /* VK 0x545120, GL 0x544a40. */
       "48 89 6C 24 18 48 89 74 24 20 57 48 83 EC 30 48 8B F9 48 8B F2 48 8B 0D "
       "?? ?? ?? ?? 48 8B 01 FF 90 40 02 00 00 F6 87 60 01 00 00 01 48 8B E8 74 "
