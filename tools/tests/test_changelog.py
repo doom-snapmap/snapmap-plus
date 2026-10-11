@@ -136,7 +136,7 @@ class TestCli(unittest.TestCase):
             self.assertEqual(data[0]["tag"], "v0.2.1")
             self.assertEqual(data[1]["added"][0],
                              "Install everything a map needs from one prompt.")
-            self.assertNotIn("body", data[0])
+            self.assertEqual(data[0]["body"], changelog.parse(VALID)[0]["body"])
 
     def test_has_exit_codes(self):
         self.assertEqual(self._run("--has", "v0.2.1").returncode, 0)

@@ -7,6 +7,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -92,8 +93,31 @@ func parseEntry(body string) changelogEntry {
 		}
 	}
 
-	e.Summary = strings.Join(summary, " ")
+	e.Headline = plainChangelogInline(e.Headline)
+	e.Summary = plainChangelogInline(strings.Join(summary, " "))
+	e.Collapsed = plainChangelogInline(e.Collapsed)
+	for i := range e.Groups {
+		for j := range e.Groups[i].Items {
+			e.Groups[i].Items[j] = plainChangelogInline(e.Groups[i].Items[j])
+		}
+	}
+	for i := range e.Loose {
+		e.Loose[i] = plainChangelogInline(e.Loose[i])
+	}
 	return e
+}
+
+var changelogInline = regexp.MustCompile("`[^`\\n]+`|\\*\\*[^*\\n]+\\*\\*")
+
+// The terminal is deliberately plain text. Remove inline bold and code markers
+// before wrapping, while preserving underscores in commands and literal code.
+func plainChangelogInline(text string) string {
+	return changelogInline.ReplaceAllStringFunc(text, func(span string) string {
+		if span[0] == '`' {
+			return span[1 : len(span)-1]
+		}
+		return plainChangelogInline(span[2 : len(span)-2])
+	})
 }
 
 // wrap lays text out inside width columns, prefixing the first line with indent and every

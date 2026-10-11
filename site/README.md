@@ -16,4 +16,6 @@ Contains the Jekyll source for the public Snapmap+ website, player guide, releas
 
 The [Pages workflow](../.github/workflows/pages.yml) renders `CHANGELOG.md` into temporary `_data/changelog.json`, then builds this directory with Jekyll. Do not maintain a second release history here. Community pages call the separate [Community service](../community/README.md).
 
+Changelog fields are rendered through Jekyll's Markdown filter so bold labels and inline code display correctly. The copy button reads the preserved Markdown body instead of reconstructing formatting from the displayed HTML.
+
 Use a local Jekyll preview to verify Liquid includes and Markdown pages. Check narrow layouts and keyboard navigation when changing presentation. Directory READMEs are contributor documentation and are excluded from the published site.

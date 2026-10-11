@@ -74,6 +74,41 @@ func TestParseEntryJoinsAHandWrappedBullet(t *testing.T) {
 	}
 }
 
+func TestInlineChangelogFormattingPreservesCommandsAndLiteralCode(t *testing.T) {
+	for input, want := range map[string]string{
+		"Choose **Build Navmesh** beside **Save**.": "Choose Build Navmesh beside Save.",
+		"Use `sh_pretty_on 1`.":                     "Use sh_pretty_on 1.",
+		"Keep sh_pretty_on and *.json.":             "Keep sh_pretty_on and *.json.",
+		"Literal `**stars**` in code.":              "Literal **stars** in code.",
+		"Run **`sh_pretty_on 1`**.":                 "Run sh_pretty_on 1.",
+		"Unclosed **bold and `code":                 "Unclosed **bold and `code",
+	} {
+		if got := plainChangelogInline(input); got != want {
+			t.Errorf("plainChangelogInline(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
+func TestFormattedChangelogKeepsAllViewsReadable(t *testing.T) {
+	list := []ghRelease{
+		{TagName: "v0.2.1-beta.18", Body: "**Build `navigation`**\n\nChoose **Build Navmesh** beside **Save**.\n\n### New\n- Use `sh_pretty_on 1`\n  for **readable** map files.\n\n_Plus **two** fixes._"},
+		{TagName: "v0.2.1-beta.17", Body: "**Read `rawmap` files**\n\n- Keep **old** notes and `sh_pretty_on`."},
+	}
+	for _, arg := range []string{"", "all", "0.2.1-beta.18"} {
+		out := formatChangelog(list, "", arg, 60)
+		for _, marker := range []string{"**", "`"} {
+			if strings.Contains(out, marker) {
+				t.Errorf("%q view retained %q:\n%s", arg, marker, out)
+			}
+		}
+		for _, want := range []string{"Build navigation", "Choose Build Navmesh beside Save.", "sh_pretty_on 1", "Plus two fixes."} {
+			if !strings.Contains(out, want) {
+				t.Errorf("%q view lost %q:\n%s", arg, want, out)
+			}
+		}
+	}
+}
+
 func TestParseEntryHandlesASkeletonEntry(t *testing.T) {
 	// What the drafter emits when the API call fails; the CLI must still render it.
 	body := "**NEEDS WRITING**\n\nAutomatic drafting did not run.\n\n### New\n- Some commit subject\n"

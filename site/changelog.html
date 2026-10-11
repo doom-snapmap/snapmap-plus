@@ -45,8 +45,8 @@
           {% if latest_stable and rel.tag == latest_stable.tag %}<span class="tag-pill tag-latest">Latest</span>{% endif %}
         </div>
         <div class="release-notes">
-          {% if rel.headline %}<p><strong>{{ rel.headline | escape }}</strong></p>{% endif %}
-          {% if rel.summary %}<p>{{ rel.summary | escape }}</p>{% endif %}
+          {% if rel.headline %}<p><strong>{{ rel.headline | markdownify | remove: '<p>' | remove: '</p>' | strip }}</strong></p>{% endif %}
+          {% if rel.summary %}{{ rel.summary | markdownify }}{% endif %}
           {% for group in groups %}
             {% assign items = rel[group] %}
             {% if items and items.size > 0 %}
@@ -55,11 +55,12 @@
                 {% when "improved" %}<p><strong>Improved</strong></p>
                 {% when "fixed" %}<p><strong>Fixed</strong></p>
               {% endcase %}
-              <ul>{% for item in items %}<li>{{ item | escape }}</li>{% endfor %}</ul>
+              <ul>{% for item in items %}<li>{{ item | markdownify | remove: '<p>' | remove: '</p>' | strip }}</li>{% endfor %}</ul>
             {% endif %}
           {% endfor %}
-          {% if rel.collapsed %}<p><em>{{ rel.collapsed | escape }}</em></p>{% endif %}
+          {% if rel.collapsed %}<p><em>{{ rel.collapsed | markdownify | remove: '<p>' | remove: '</p>' | strip }}</em></p>{% endif %}
         </div>
+        <pre class="release-markdown" hidden>{{ rel.body | escape }}</pre>
         <div class="release-links">
           <a href="https://github.com/doom-snapmap/snapmap-plus/releases/tag/{{ rel.tag | escape }}">View on GitHub</a>
           <button class="release-copy" type="button" aria-label="Copy changelog" title="Copy changelog" hidden>
