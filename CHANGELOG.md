@@ -3,6 +3,18 @@
 Every Snapmap+ release, newest first. Beta versions are opt-in previews; the
 latest stable version is what `snapmap-plus update` installs.
 
+## v0.2.1-beta.18 -- 2026-10-11 (beta)
+
+**NEEDS WRITING**
+
+Automatic drafting did not run (DraftRejected: improved item contains '>', which could forge markup or a section header), so this entry is the raw commit list and must be rewritten before merging.
+
+### New
+- Add Build Navmesh to the native editor Start menu
+- Pretty-print every rawmap save and document the File menu
+- Update navigation on request and run window edits on the game thread
+- Fix an audio lock hang, a shield redirect and message key lookup
+
 ## v0.2.1-beta.17 -- 2026-09-18 (beta)
 
 **Older map text loads correctly, and compatible mods combine**
