@@ -11,6 +11,7 @@ static void *shell_slot = shell, *session_slot = &session_object, *history_slot 
 static DWORD thread_id;
 static int history_count = 1, boundary, mode, allocated, released, errors, prepared, decoded, calls[4], hidden;
 static int inspection, read_action, throws_read, hook_prepares, hook_commits, hook_removes, fail_prepare, fail_commit, fail_remove;
+static int carrier = 1, scans;   /* what the retained text declares: 1 package, 0 none */
 static unsigned char bound_sites[9][512];
 static __declspec(thread) sh_rawmap_read_scope *read_scope;
 static sh_rawmap_request retained;
@@ -20,6 +21,8 @@ static void *call_callbacks[PUB_HOOKS];
 
 void backend_log(const char *text) { (void)text; }
 void sh_mpkg_report_error(const char *text) { assert(text && *text); errors++; }
+size_t sh_mpkg_scan(const char *json, size_t len, sh_mpkg_decl *out, size_t cap)
+{ assert(json && len == strlen(json) && !out && !cap); scans++; return (size_t)carrier; }
 int sh_decl_server_map_boundary_safe(void) { return boundary && thread_id == GetCurrentThreadId(); }
 int sh_decl_server_map_preparation_ready(void) { return boundary && thread_id == GetCurrentThreadId(); }
 int sh_decl_server_map_browser_present(void)
@@ -132,7 +135,12 @@ static unsigned char original_lobby(void *self, unsigned char option)
 static void original_direct(void *self, const void *input, void *snapshot)
 { assert(self == manager && input && snapshot); calls[PUB_DIRECT]++; }
 static void original_ready(void *self, void *download, const void *input, void *snapshot)
-{ assert(self == manager && input && snapshot); if (g_pub_ready) assert(!download); calls[PUB_READY]++; }
+{
+    assert(self == manager && input && snapshot);
+    /* The retained route consumed the download; a native pass-through keeps it. */
+    if (g_pub_ready) assert(carrier ? !download : download == (void *)9);
+    calls[PUB_READY]++;
+}
 static void original_complete(void *download)
 {
     assert(download == (void *)9);
@@ -199,7 +207,29 @@ static void reset(void)
     call_callbacks[3] = original_ready; call_callbacks[4] = original_read; call_callbacks[5] = original_complete;
     memcpy(g_pub_original, call_callbacks, sizeof(g_pub_original));
     boundary = g_pub_ready = 1; g_pub_delegating = inspection = read_action = throws_read = 0;
-    mode = errors = prepared = decoded = hidden = 0;
+    mode = errors = prepared = decoded = hidden = scans = 0; carrier = 1;
+}
+/* A published map whose text carries no package takes the untouched native
+ * launch: no preflight, no retained request, no notice, the progress display
+ * left to the engine, and the compiler's readiness never consulted. */
+static void vanilla_passes_through(void)
+{
+    for (int ready = 0; ready <= 1; ready++) for (int kind = 0; kind < 4; kind++) {
+        reset(); carrier = 0; boundary = ready;
+        if (kind == PUB_OFFLINE) pub_offline(manager, metadata, (void *)1);
+        if (kind == PUB_LOBBY) assert(pub_lobby(manager, 1) == 1);
+        if (kind == PUB_DIRECT) pub_direct(manager, metadata, (void *)1);
+        if (kind == PUB_READY) pub_ready(manager, (void *)9, metadata, (void *)1);
+        assert(scans == 1 && calls[kind] == 1 && !prepared && !retained.context);
+        assert(!errors && !hidden && !inspection && !g_pub_delegating && allocated == released);
+    }
+    /* A packaged text still takes the retained route after the same scan. */
+    reset(); pub_offline(manager, metadata, (void *)1);
+    assert(scans == 1 && prepared == 1 && !calls[PUB_OFFLINE] && retained.context);
+    assert(finish(1) && calls[PUB_OFFLINE] == 1 && allocated == released);
+    /* Unreadable text keeps the guarded route and its notice. */
+    reset(); carrier = 0; mode = 1; pub_offline(manager, metadata, (void *)1);
+    assert(!scans && !calls[PUB_OFFLINE] && !prepared && errors == 1 && allocated == released);
 }
 static void grouped_installation(void)
 {
@@ -310,6 +340,7 @@ int main(void)
     }
     reset(); g_pub_ready = 0; pub_offline(manager, metadata, (void *)1);
     assert(calls[0] == 1 && !prepared);
-    puts("map_published_test: readers, four retained launch routes, cancellation, cleanup and hook-group failure passed");
+    vanilla_passes_through();
+    puts("map_published_test: readers, native pass-through, four retained launch routes, cancellation, cleanup and hook-group failure passed");
     return 0;
 }

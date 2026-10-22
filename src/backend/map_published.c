@@ -13,6 +13,9 @@
 #include "hook.h"
 
 enum { PUB_OFFLINE, PUB_LOBBY, PUB_DIRECT, PUB_READY, PUB_READ, PUB_COMPLETE, PUB_HOOKS };
+/* What a launch gate decided: refused with a notice, retained for the package
+ * route, or handed to the untouched native launch. */
+enum { PUB_REFUSED, PUB_RETAINED, PUB_NATIVE };
 typedef void (*pub_launch_fn)(void *, const void *, void *);
 typedef unsigned char (*pub_lobby_fn)(void *, unsigned char);
 typedef void (*pub_ready_fn)(void *, void *, const void *, void *);
@@ -268,11 +271,17 @@ void sh_map_published_poll(void)
     }
 }
 
-static int pub_prepare(int kind, void *manager, const void *metadata, void *snapshot, unsigned char option)
+/* A published map whose text carries no package is the engine's own case: it
+ * never enters the package context, the retained request or the transition
+ * handoff, and its native launch runs exactly as it did before these gates
+ * existed. Only a map that carries smpkg shards takes the retained route; a
+ * text that cannot be read keeps the guarded route and its notices. */
+static int pub_prepare(int kind, void *manager, const void *metadata, void *snapshot, unsigned char option,
+    int release_progress)
 {
     pub_request *request = NULL;
     char error[1024] = "";
-    int accepted = 0;
+    int accepted = PUB_REFUSED;
     __try {
         const char *json;
         size_t length;
@@ -286,6 +295,18 @@ static int pub_prepare(int kind, void *manager, const void *metadata, void *snap
         request->history = kind == PUB_LOBBY ? pub_history() : NULL;
         request->selection = sh_map_native_capture(metadata, error, sizeof(error));
         if (!request->selection) goto done;
+        json = sh_map_native_source(request->selection, &length);
+        if (json && length && sh_mpkg_scan(json, length, NULL, 0) == 0) {
+            /* Nothing of ours may outlive this launch; a retained request that
+             * cannot be canceled is left to its own validity checks. */
+            if (!sh_rawmap_cancel_pending_map())
+                backend_log("MPKG: a previous retained map request could not be canceled before a native published launch");
+            accepted = PUB_NATIVE; goto done;
+        }
+        if (release_progress) {
+            void *progress = *(void **)((unsigned char *)manager + 0xa38);
+            if (progress) ((void (*)(void *, int))(*(void ***)progress)[0x30 / 8])(progress, 0);
+        }
         if (kind == PUB_READY && !pub_host_matches(request->selection)) goto done;
         if (!sh_rawmap_cancel_pending_map()) {
             strcpy_s(error, sizeof(error), "The previous map installation could not be canceled."); goto done;
@@ -297,22 +318,23 @@ static int pub_prepare(int kind, void *manager, const void *metadata, void *snap
         if (!cache) { strcpy_s(error, sizeof(error), "The native published-map cache is unavailable."); goto done; }
         if (kind != PUB_LOBBY && kind != PUB_READY) g_pub_cache_set(cache, metadata, snapshot);
         request->sequence = ++g_pub_sequence;
-        json = sh_map_native_source(request->selection, &length);
         launch.context = request; launch.valid = pub_valid; launch.enter = pub_enter; launch.release = pub_release;
-        accepted = sh_rawmap_preflight_loading_request(json, length, &launch, &loading, error, sizeof(error));
+        if (sh_rawmap_preflight_loading_request(json, length, &launch, &loading, error, sizeof(error)))
+            accepted = PUB_RETAINED;
 done:;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         snprintf(error, sizeof(error), "Published-map preparation raised exception %08lx.", GetExceptionCode());
     }
-    if (!accepted && request) pub_release(request);
-    if (!accepted && error[0]) sh_mpkg_report_error(error);
+    if (accepted != PUB_RETAINED && request) pub_release(request);
+    if (accepted == PUB_REFUSED && error[0]) sh_mpkg_report_error(error);
     return accepted;
 }
 
 static void pub_offline(void *manager, const void *metadata, void *snapshot)
 {
-    if (!g_pub_ready || pub_same_launch(manager, metadata)) { ((pub_launch_fn)g_pub_original[PUB_OFFLINE])(manager, metadata, snapshot); return; }
-    (void)pub_prepare(PUB_OFFLINE, manager, metadata, snapshot, 0);
+    if (!g_pub_ready || pub_same_launch(manager, metadata) ||
+        pub_prepare(PUB_OFFLINE, manager, metadata, snapshot, 0, 0) == PUB_NATIVE)
+        ((pub_launch_fn)g_pub_original[PUB_OFFLINE])(manager, metadata, snapshot);
 }
 static unsigned char pub_lobby(void *manager, unsigned char option)
 {
@@ -321,26 +343,28 @@ static unsigned char pub_lobby(void *manager, unsigned char option)
         void *history = pub_history();
         if (history && pub_same_launch(manager, (unsigned char *)history + 8))
             return ((pub_lobby_fn)g_pub_original[PUB_LOBBY])(manager, option);
-        if (history) return (unsigned char)pub_prepare(PUB_LOBBY, manager, (unsigned char *)history + 8, NULL, option);
+        if (history) {
+            int decided = pub_prepare(PUB_LOBBY, manager, (unsigned char *)history + 8, NULL, option, 0);
+            if (decided == PUB_NATIVE) return ((pub_lobby_fn)g_pub_original[PUB_LOBBY])(manager, option);
+            return decided == PUB_RETAINED;
+        }
     } __except (EXCEPTION_EXECUTE_HANDLER) { }
     sh_mpkg_report_error("The selected published map is no longer available."); return 0;
 }
 static void pub_direct(void *manager, const void *metadata, void *snapshot)
 {
-    if (!g_pub_ready || pub_same_launch(manager, metadata)) { ((pub_launch_fn)g_pub_original[PUB_DIRECT])(manager, metadata, snapshot); return; }
-    (void)pub_prepare(PUB_DIRECT, manager, metadata, snapshot, 0);
+    if (!g_pub_ready || pub_same_launch(manager, metadata) ||
+        pub_prepare(PUB_DIRECT, manager, metadata, snapshot, 0, 0) == PUB_NATIVE)
+        ((pub_launch_fn)g_pub_original[PUB_DIRECT])(manager, metadata, snapshot);
 }
 static void pub_ready(void *manager, void *download, const void *metadata, void *snapshot)
 {
     if (!g_pub_ready || pub_same_launch(manager, metadata)) { ((pub_ready_fn)g_pub_original[PUB_READY])(manager, download, metadata, snapshot); return; }
     if (!pub_manager_current(manager)) return;
-    __try {
-        void *progress = *(void **)((unsigned char *)manager + 0xa38);
-        if (progress) ((void (*)(void *, int))(*(void ***)progress)[0x30 / 8])(progress, 0);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        sh_mpkg_report_error("The published-map progress display could not be released."); return;
-    }
-    (void)pub_prepare(PUB_READY, manager, metadata, snapshot, 0);
+    /* The retained route releases the native progress display itself; the
+     * native launch keeps it and its own download argument. */
+    if (pub_prepare(PUB_READY, manager, metadata, snapshot, 0, 1) == PUB_NATIVE)
+        ((pub_ready_fn)g_pub_original[PUB_READY])(manager, download, metadata, snapshot);
 }
 static void *pub_read(void *client, const char *id, const char *revision, void *success, void *failure)
 {

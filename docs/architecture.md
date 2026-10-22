@@ -301,6 +301,14 @@ files. Discovery, semantic compilation and native publication are separate
 operations. Incomplete inventories must not publish a partial package set.
 Author-facing format and examples live in the [player guide](../site/snapmap-plus-guide.md#overrides).
 
+A published map launched from the SnapMap browser is read under an inspection
+scope and then decided by its own text in `map_published.c`: a map whose text
+carries no `smpkg.` shard is handed to the untouched native launch, so the
+package context, the retained request and the `map_transition.c` handoff never
+run for it and the compiler's readiness is never consulted. Only a map that
+carries packages takes the retained route, which decodes the selection's own
+compiled document at the native allocation boundary.
+
 The local authoring library isolates defects that belong to one outer package.
 `sh_package_sources_scan_local` skips a package whose own content is invalid:
 its descriptor, an unusable or case-duplicate name, a link, or a path the
