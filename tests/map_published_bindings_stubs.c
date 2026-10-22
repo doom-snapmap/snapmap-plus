@@ -4,6 +4,7 @@
 #include "hook.h"
 #include "map_render.h"
 #include "resource_catalog.h"
+#include "map_package.h"
 const sh_resource_catalog *sh_package_runtime_catalog(void) { assert(0); return NULL; }
 int sh_decl_server_map_boundary_safe(void) { assert(0); return 0; }
 int sh_decl_server_map_preparation_ready(void) { assert(0); return 0; }
@@ -12,6 +13,8 @@ int sh_map_render_capture(void *snapshot, sh_map_render *settings)
 { (void)snapshot; (void)settings; assert(0); return 0; }
 void sh_map_render_select(const sh_map_render *settings) { (void)settings; assert(0); }
 void sh_mpkg_report_error(const char *error) { (void)error; assert(0); }
+size_t sh_mpkg_scan(const char *json, size_t len, sh_mpkg_decl *out, size_t cap)
+{ (void)json; (void)len; (void)out; (void)cap; assert(0); return 0; }
 void sh_rawmap_inspection_enter(void) { assert(0); }
 void sh_rawmap_inspection_leave(void) { assert(0); }
 void sh_rawmap_read_enter(sh_rawmap_read_scope *scope, const void *caller)
