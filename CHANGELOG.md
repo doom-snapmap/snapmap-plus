@@ -3,6 +3,23 @@
 Every Snapmap+ release, newest first. Beta versions are opt-in previews; the
 latest stable version is what `snapmap-plus update` installs.
 
+## v0.2.1-beta.19 -- 2026-10-22 (beta)
+
+**Published maps start again, plus safer remote delete**
+
+Published maps that don't use add-on packages launch normally again. Deleting entities from the list now behaves exactly like pressing Delete in the 3D editor, including undo and protected objects.
+
+### Improved
+- Deleting entities from the list now follows the same rules as pressing Delete in the editor, and Ctrl+Z undoes it like any other delete.
+- A message tells you what was deleted or why nothing was, and the list keeps your selection.
+- Release notes now read cleanly on the website and in the installer, with command names left intact.
+
+### Fixed
+- Published maps that don't include add-on packages start correctly again instead of being rejected.
+- Deleting from the list leaves unrelated entities, room doors and caps untouched, and no longer removes whatever the 3D cursor happens to point at.
+
+_Plus 1 smaller fix and internal change._
+
 ## v0.2.1-beta.18 -- 2026-10-11 (beta)
 
 **Build demon navigation from the editor's Start menu**
