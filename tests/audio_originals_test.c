@@ -21,10 +21,10 @@ static void binary(const char *relative,const unsigned char *bytes,size_t length
     CHECK(!fopen_s(&file,path,"wb"));if(!file)return;
     CHECK(fwrite(bytes,1,length,file)==length);CHECK(!fclose(file));
 }
-static void packed(const char *relative,unsigned kind,uint64_t id,uint32_t language,const char *body)
+static void packed_bytes(const char *relative,unsigned kind,uint64_t id,uint32_t language,const void *body,size_t length)
 {
     unsigned char bytes[1024]={0};uint32_t position=72,width=kind==2 ? 24 : 20;
-    size_t length=strlen(body);CHECK(length<=sizeof(bytes)-512);if(length>sizeof(bytes)-512)return;
+    CHECK(length<=sizeof(bytes)-512);if(length>sizeof(bytes)-512)return;
     memcpy(bytes,"AKPK",4);put(bytes+4,76+width);put(bytes+8,1);put(bytes+12,44);
     for(unsigned i=0;i<3;i++)put(bytes+16+4*i,4+(i==kind ? width : 0));
     put(bytes+28,2);put(bytes+32,20);put(bytes+36,1);put(bytes+40,36);put(bytes+44,0);
@@ -40,6 +40,8 @@ static void packed(const char *relative,unsigned kind,uint64_t id,uint32_t langu
     }
     memcpy(bytes+512,body,length);binary(relative,bytes,512+length);
 }
+static void packed(const char *relative,unsigned kind,uint64_t id,uint32_t language,const char *body)
+{ packed_bytes(relative,kind,id,language,body,strlen(body)); }
 static sh_audio_originals *open_prefixed(const char *base,const wchar_t *language,const char *prefix)
 {
     char path[4096];snprintf(path,sizeof(path),"%s/%s",root,base);
@@ -84,6 +86,62 @@ static int count_banks(void *context,uint32_t id,uint32_t language)
 static int stop_banks(void *context,uint32_t id,uint32_t language)
 { (void)id;(void)language;++*(size_t *)context;return 0; }
 
+static void cooked_bank(unsigned char bytes[49],uint32_t id,uint32_t event,uint32_t language)
+{
+    memset(bytes,0,49);memcpy(bytes,"BKHD",4);put(bytes+4,16);put(bytes+8,113);
+    put(bytes+12,id);put(bytes+16,language);memcpy(bytes+24,"HIRC",4);put(bytes+28,17);
+    put(bytes+32,1);bytes[36]=4;put(bytes+37,8);put(bytes+41,event);
+}
+static void bank_catalog(void)
+{
+    unsigned char bank[49],other[49];uint32_t foo;char error[512],path[4096];
+    CHECK(sh_audio_bank_identity("foo.bnk",&foo));cooked_bank(bank,foo,77,1);cooked_bank(other,foo,88,0);
+    binary("catalog/sound/soundbanks/pc/foo.bnk",other,sizeof(other));
+    binary("catalog/sound/soundbanks/pc/english/foo.bnk",other,sizeof(other));
+    packed_bytes("catalog/sound/soundbanks/pc/english/voice.pck",0,foo,1,bank,sizeof(bank));
+    cooked_bank(other,42,99,0);packed_bytes("catalog/sound/soundbanks/pc/a.pck",0,42,0,other,sizeof(other));
+    packed("catalog/sound/soundbanks/pc/media.pck",1,9001,0,"UNUSED MEDIA");
+    create("catalog/sound/soundbanks/pc/9002.wem","LOOSE UNUSED MEDIA");
+    create("catalog/sound/soundbanks/pc/english/9003.wem","LOCALIZED UNUSED MEDIA");
+    sh_audio_originals *originals=open_originals("catalog",L"english");
+    const sh_audio_original_bank *rows=NULL,*again=NULL;size_t count=0,next=0;
+    int result=sh_audio_originals_banks(originals,&rows,&count,error,sizeof(error));
+    if(result!=1)fprintf(stderr,"catalog: %s\n",error);
+    CHECK(result==1 && count==2);
+    if(count==2) {
+        CHECK(rows[0].metadata.id==foo && rows[0].metadata.events[0]==77);
+        CHECK(!strcmp(rows[0].path,"sound/soundbanks/pc/english/foo.bnk"));
+        CHECK(rows[1].metadata.id==42 && rows[1].metadata.events[0]==99);
+        CHECK(!strcmp(rows[1].filename,"42.bnk"));
+    }
+    CHECK(sh_audio_originals_banks(originals,&again,&next,error,sizeof(error))==1 && again==rows && next==count);
+    {
+        const uint32_t *ids=NULL,*reused=NULL;size_t used=0,reused_count=0;
+        CHECK(sh_audio_originals_ids(originals,&ids,&used,error,sizeof(error))==1 && used==7);
+        uint32_t expected[]={42,77,99,9001,9002,9003,foo};
+        for(size_t i=0;i<sizeof(expected)/sizeof(expected[0]);i++) {
+            size_t hits=0;for(size_t j=0;j<used;j++)hits+=ids[j]==expected[i];CHECK(hits==1);
+        }
+        for(size_t i=1;i<used;i++)CHECK(ids[i]>ids[i-1]);
+        CHECK(sh_audio_originals_ids(originals,&reused,&reused_count,error,sizeof(error))==1 && reused==ids && reused_count==used);
+    }
+    snprintf(path,sizeof(path),"%s/catalog/sound/soundbanks/pc/english/voice.pck",root);
+    HANDLE writer=CreateFileA(path,GENERIC_WRITE,FILE_SHARE_READ,NULL,OPEN_EXISTING,0,NULL);
+    CHECK(writer==INVALID_HANDLE_VALUE && GetLastError()==ERROR_SHARING_VIOLATION);
+    if(writer!=INVALID_HANDLE_VALUE)CloseHandle(writer);
+    sh_audio_originals_close(originals);
+    originals=open_originals("catalog-absent",L"english");
+    CHECK(sh_audio_originals_banks(originals,&rows,&count,error,sizeof(error))==1 && !count);
+    { const uint32_t *ids=NULL;size_t used=3;CHECK(sh_audio_originals_ids(originals,&ids,&used,error,sizeof(error))==1 && !used); }
+    sh_audio_originals_close(originals);
+    create("catalog-bad/sound/soundbanks/pc/bad.bnk","BROKEN");
+    originals=open_originals("catalog-bad",L"english");
+    CHECK(sh_audio_originals_banks(originals,&rows,&count,error,sizeof(error))==-1 && !rows && !count && *error);
+    { const uint32_t *ids=(const uint32_t *)1;size_t used=3;
+      CHECK(sh_audio_originals_ids(originals,&ids,&used,error,sizeof(error))==-1 && !ids && !used && *error); }
+    sh_audio_originals_close(originals);
+}
+
 static int activate(void *context,int restoring,const sh_package_changes *changes,char *error,size_t capacity)
 { (void)context;(void)restoring;(void)error;(void)capacity;CHECK(changes);return 1; }
 static void runtime_originals(void)
@@ -126,8 +184,140 @@ static void runtime_originals(void)
     }
     sh_package_runtime_test_dispose();sh_package_runtime_test_audio_originals(NULL,NULL);
 }
-int main(void)
+static int rank_of(sh_audio_originals *originals,const char *relative,int authored,int authored_root,
+    sh_audio_native_rank *rank)
 {
+    char path[4096],error[256]={0};
+    snprintf(path,sizeof(path),"sound/soundbanks/pc/%s",relative);
+    int result=sh_audio_originals_registration(originals,path,authored,authored_root,rank,error,sizeof(error));
+    if(result<0)fprintf(stderr,"registration %s: %s\n",path,error);
+    return result;
+}
+/* SnapMap's sound init (VK FUN_1402b97d0, GL FUN_1402b87c0): Init.bnk, the
+ * prepared doom_initial.bnk, root names, then names only the language
+ * directory lists; "initial" and SnapMap-mode "_sp" names are skipped. Within
+ * a pass the order is the directory's own unsorted listing. */
+static void registration_ranks(void)
+{
+    static const char *files[]={"init.bnk","doom_initial.bnk","doom_items.bnk","ab.bnk","a_b.bnk","x_sp.bnk",
+        "my_initial.bnk","english/doom_vo.bnk","english/doom_items.bnk","english/init.bnk","french/f.bnk"};
+    char relative[512],pattern[4096];sh_audio_native_rank rank,items,ab,a_b;
+    for(size_t i=0;i<sizeof(files)/sizeof(*files);i++) {
+        snprintf(relative,sizeof(relative),"ranks/sound/soundbanks/pc/%s",files[i]);create(relative,files[i]);
+    }
+    sh_audio_originals *originals=open_originals("ranks",L"ENGLISH");if(!originals)return;
+    CHECK(rank_of(originals,"init.bnk",0,0,&rank)==1 && rank.phase==0);
+    CHECK(rank_of(originals,"doom_initial.bnk",0,0,&rank)==1 && rank.phase==1);
+    CHECK(rank_of(originals,"doom_items.bnk",0,0,&items)==1 && items.phase==2 && items.position!=SIZE_MAX);
+    /* A language file the root pass requests by name registers at that root position. */
+    CHECK(rank_of(originals,"english/doom_items.bnk",0,0,&rank)==1 && rank.phase==2 && rank.position==items.position);
+    CHECK(rank_of(originals,"english/doom_vo.bnk",0,0,&rank)==1 && rank.phase==3 && rank.position!=SIZE_MAX);
+    CHECK(rank_of(originals,"x_sp.bnk",0,0,&rank)==0);
+    CHECK(rank_of(originals,"my_initial.bnk",0,0,&rank)==0);
+    CHECK(rank_of(originals,"english/init.bnk",0,0,&rank)==0);
+    CHECK(rank_of(originals,"french/f.bnk",0,0,&rank)==0);
+    CHECK(rank_of(originals,"absent.bnk",0,0,&rank)==0);
+    /* Authored files rank as if installed; an unlisted name has no native position. */
+    CHECK(rank_of(originals,"doom_items.bnk",1,0,&rank)==1 && rank.phase==2 && rank.position==items.position);
+    CHECK(rank_of(originals,"new.bnk",1,0,&rank)==1 && rank.phase==2 && rank.position==SIZE_MAX);
+    CHECK(rank_of(originals,"new_sp.bnk",1,0,&rank)==0);
+    CHECK(rank_of(originals,"english/new.bnk",1,0,&rank)==1 && rank.phase==3);
+    CHECK(rank_of(originals,"english/new.bnk",1,1,&rank)==1 && rank.phase==2);
+    /* The listing order, not a name order ("ab" and "a_b" compare differently
+     * by lowercase and by uppercase), orders one pass. */
+    CHECK(rank_of(originals,"ab.bnk",0,0,&ab)==1 && rank_of(originals,"a_b.bnk",0,0,&a_b)==1);
+    snprintf(pattern,sizeof(pattern),"%s\\ranks\\sound\\soundbanks\\pc\\*",root);
+    WIN32_FIND_DATAA found;HANDLE search=FindFirstFileA(pattern,&found);int ab_first=-1;
+    CHECK(search!=INVALID_HANDLE_VALUE);
+    if(search!=INVALID_HANDLE_VALUE) {
+        do {
+            if(!_stricmp(found.cFileName,"ab.bnk")){ab_first=1;break;}
+            if(!_stricmp(found.cFileName,"a_b.bnk")){ab_first=0;break;}
+        } while(FindNextFileA(search,&found));
+        FindClose(search);
+    }
+    CHECK(ab_first>=0 && (ab.position<a_b.position)==(ab_first==1));
+    sh_audio_originals_close(originals);
+}
+/* Put a deleted fixture file back so the fixture's own cleanup finds it. */
+static void recreate(const char *path)
+{
+    HANDLE file=CreateFileA(path,GENERIC_WRITE,0,NULL,CREATE_NEW,0,NULL);
+    CHECK(file!=INVALID_HANDLE_VALUE);if(file!=INVALID_HANDLE_VALUE)CloseHandle(file);
+}
+extern int sh_audio_originals_test_refuse_locations;
+size_t sh_audio_originals_test_located(const sh_audio_originals *originals);
+/* Only located answers are kept, by exact path. Refused memory only loses the
+ * saving, absence and ambiguity are asked again, and close releases files. */
+static void located_answers(void)
+{
+    char path[4096],name[64],body[64],error[256];size_t before,partial=0;
+    packed("located/sound/soundbanks/pc/a.pck",1,99,0,"PACKED");
+    packed("located/sound/soundbanks/pc/b.pck",1,99,0,"PACKED");
+    create("located/sound/soundbanks/pc/loose.wem","LOOSE");
+    sh_audio_originals *originals=open_originals("located",L"english");
+    for(int refuse=1;refuse>=0;refuse--) for(int repeat=0;repeat<2;repeat++) {
+        sh_audio_originals_test_refuse_locations=refuse;
+        expect_read(originals,"99.wem",1,"PACKED");expect_read(originals,"loose.wem",1,"LOOSE");
+        expect_read(originals,"late.wem",0,NULL);expect_read(originals,"english/late.wem",0,NULL);
+        CHECK(sh_audio_originals_test_located(originals)==(refuse ? 0u : 2u));
+    }
+    create("located/sound/soundbanks/pc/late.wem","LATE");
+    expect_read(originals,"late.wem",1,"LATE");CHECK(sh_audio_originals_test_located(originals)==3);
+    before=sh_audio_originals_test_located(originals);
+    for(unsigned i=0;i<200;i++) {
+        snprintf(name,sizeof(name),"located/sound/soundbanks/pc/grow/%u.wem",i);
+        snprintf(body,sizeof(body),"G%u",i);create(name,body);
+    }
+    for(int pass=0;pass<2;pass++) {
+        for(unsigned i=0;i<200;i++) {
+            sh_audio_originals_test_refuse_locations=!pass && (i&1);
+            snprintf(name,sizeof(name),"grow/%u.wem",i);snprintf(body,sizeof(body),"G%u",i);
+            expect_read(originals,name,1,body);
+        }
+        if(!pass)partial=sh_audio_originals_test_located(originals);
+    }
+    sh_audio_originals_test_refuse_locations=0;
+    CHECK(partial<before+200 && sh_audio_originals_test_located(originals)==before+200);
+    expect_read(originals,"99.wem",1,"PACKED");expect_read(originals,"loose.wem",1,"LOOSE");
+    snprintf(path,sizeof(path),"%s/located/sound/soundbanks/pc/loose.wem",root);CHECK(!DeleteFileA(path));
+    sh_audio_originals_close(originals);
+    CHECK(DeleteFileA(path));
+    originals=open_originals("located",L"english");
+    expect_read(originals,"loose.wem",0,NULL);expect_read(originals,"99.wem",1,"PACKED");
+    sh_audio_originals_close(originals);recreate(path);
+    originals=open_originals("conflict",L"english");
+    for(int repeat=0;repeat<2;repeat++)
+        CHECK(sh_audio_originals_read(originals,"sound/soundbanks/pc/foo.bnk",0,NULL,0,NULL,error,sizeof(error))==-1 && strstr(error,"ambiguous"));
+    CHECK(sh_audio_originals_test_located(originals)==0);
+    sh_audio_originals_close(originals);
+}
+int main(int argc,char **argv)
+{
+    if(argc==3) {
+        wchar_t language[256];char error[2048];const sh_audio_original_bank *banks=NULL;size_t count=0,events=0,media=0,targets=0;
+        if(!MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,argv[2],-1,language,256))return 2;
+        sh_audio_originals *catalog=sh_audio_originals_open(argv[1],language,NULL);
+        int ok=catalog && sh_audio_originals_banks(catalog,&banks,&count,error,sizeof(error))==1;
+        if(!ok)fprintf(stderr,"installed audio catalog: %s\n",catalog ? error : "allocation failed");
+        for(size_t i=0;ok && i<count;i++){events+=banks[i].metadata.event_count;media+=banks[i].metadata.media_count;targets+=banks[i].metadata.target_count;}
+        if(ok) {
+            printf("installed audio catalog: %zu banks, %zu events, %zu media rows, %zu external targets\n",count,events,media,targets);
+            const uint32_t *ids=NULL;size_t id_count=0;
+            ok=sh_audio_originals_ids(catalog,&ids,&id_count,error,sizeof(error))==1;
+            printf("installed original identities: %zu, %s%s%s\n",id_count,ok ? "pass" : "failed",ok ? "" : ": ",ok ? "" : error);
+            if(!ok){sh_audio_originals_close(catalog);return 1;}
+            const sh_audio_bank **view=calloc(count ? count : 1,sizeof(*view));unsigned char *selected=malloc(count ? count : 1);
+            ok=view && selected;
+            if(ok) {
+                memset(selected,1,count);for(size_t i=0;i<count;i++)view[i]=&banks[i].metadata;
+                ok=sh_audio_bank_closure(view,count,NULL,0,1,selected,NULL,error,sizeof(error));
+                printf("installed complete inventory dependency closure: %s%s%s\n",ok ? "pass" : "failed",ok ? "" : ": ",ok ? "" : error);
+            }
+            free(view);free(selected);
+        }
+        sh_audio_originals_close(catalog);return ok ? 0 : 1;
+    }
     char temporary[MAX_PATH],path[4096],error[256];uint32_t foo,bar;
     sh_package_original_identity answer;
     CHECK(GetTempPathA(sizeof(temporary),temporary));CHECK(GetTempFileNameA(temporary,"aor",0,root));
@@ -242,7 +432,7 @@ int main(void)
     CHECK(sh_audio_originals_identity(originals,"sound/soundbanks/pc/foo.bnk",&answer,error,sizeof(error))==-1 && strstr(error,"metadata"));
     sh_audio_originals_close(originals);
     originals=open_originals("absent",L"english");expect(originals,"foo.bnk",0,NULL);sh_audio_originals_close(originals);
-    runtime_originals();
+    bank_catalog();runtime_originals();registration_ranks();located_answers();
     originals=open_originals("base",L"english");expect(originals,"foo.bnk",1,"PACK");sh_audio_originals_close(originals);
     cleanup();if(failures)return 1;puts("installed audio original and runtime availability checks passed");return 0;
 }

@@ -18,6 +18,7 @@
 
 #include "backend_log.h"
 #include "engine_dialog.h"
+#include "boot_phases.h"
 #include "hook.h"
 
 /* Descriptor layout (RE: copy ctor 0xE640D0, dtor 0xE63CE0, ShowDialog 0xE6A260). */
@@ -222,6 +223,7 @@ static void ed_wrapper_detour(void *shell, void *params)
     if (shell && !g_shell) {
         g_shell = shell;
         backend_log("engine-dialog: shell observed; the engine dialog surface is ready");
+        sh_boot_phases_report_menu(); /* R-400: the menu is up; the boot phases line closes here */
     }
     if (g_wrapper_original) g_wrapper_original(shell, params);
 }

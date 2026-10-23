@@ -41,7 +41,6 @@ typedef enum sh_config_test_fault {
     SH_CONFIG_TEST_FAIL_WRITE,
     SH_CONFIG_TEST_FAIL_FLUSH,
     SH_CONFIG_TEST_FAIL_REPLACE,
-    SH_CONFIG_TEST_FAIL_BACKUP,
     SH_CONFIG_TEST_FAIL_REPLACE_AFTER_COMMIT,
     SH_CONFIG_TEST_FAIL_REPLACE_KEEP_NAMES,
     SH_CONFIG_TEST_FAIL_REPLACE_MOVED_OLD
@@ -50,7 +49,6 @@ typedef enum sh_config_test_fault {
 void sh_config_test_reset(void);
 void sh_config_test_set_local_appdata(const wchar_t *path);
 void sh_config_test_fail_next(sh_config_test_fault fault);
-void sh_config_test_set_timestamp(const wchar_t *timestamp);
 void sh_config_test_hold_mutex_ms(unsigned int milliseconds);
 #endif
 

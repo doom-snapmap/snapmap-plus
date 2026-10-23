@@ -42,6 +42,9 @@ enum {
  * code-space checks used by the decoder without exposing the tree in a build. */
 int sh_inflate_test_huff_build(const unsigned char *lens, size_t count,
                                int kind);
+/* Test-only: nonzero decodes every Huffman symbol bit by bit, the reference
+ * the table lookup must match exactly. */
+void sh_inflate_test_bitwise(int enabled);
 #endif
 
 #endif /* BACKEND_RAW_DEFLATE_H */

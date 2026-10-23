@@ -28,6 +28,15 @@ void sh_rawmap_pending_map_poll(void);
 /* Abandon the retained request and its whole install before replacing a native
  * selection. Main thread only; 0 means cleanup is still held or busy. */
 int sh_rawmap_cancel_pending_map(void);
+/* Observe the retained saved-load request immediately after its native entry
+ * returns. Return 1 attaches exactly one completion callback to this matching
+ * editor/save ID on the main thread. The context must survive until completion;
+ * loaded is true only after native loading and package commit both succeed.
+ * Return 0 means no matching retained request was observed. No callback is made.
+ * Completion may update caller state, but must not initiate another native load. */
+typedef void (*sh_rawmap_saved_completion)(void *context, int loaded);
+int sh_rawmap_observe_saved_load(void *editor, const char *save_id,
+    sh_rawmap_saved_completion completion, void *context);
 
 /* An actual map launch can retain its own native selection instead of borrowing
  * a download callback or temporary deserializer output. Main thread only.
@@ -52,11 +61,18 @@ int sh_rawmap_preflight_request(const char *json, size_t length,
 /* Internal native launch continuation. Preparation retains the old map until
  * its requested unload completes. waiting validates lobby ownership; matches
  * validates the exact gameSpawnInfo at allocation; select publishes copied
- * map settings after activation, without issuing another native launch. */
+ * map settings after activation, without issuing another native launch. select
+ * receives the compiled, rebound JSON with private carriers removed. It must
+ * decode those bytes, not the earlier cached source. The buffer is borrowed for
+ * that synchronous callback only; retain native state through a deep copy. */
+/* The three answers a loading boundary can give about a level while a request is retained:
+ * `matches` -- positively the retained map; `differs` -- positively another level; neither --
+ * the level cannot be told apart, and the native build is refused. */
 typedef struct sh_rawmap_loading {
     int (*waiting)(void *context);
     int (*matches)(void *context, const void *parameters);
-    int (*select)(void *context);
+    int (*differs)(void *context, const void *level_parameters);   /* positively another level */
+    int (*select)(void *context, const char *json);
 } sh_rawmap_loading;
 int sh_rawmap_preflight_loading_request(const char *json, size_t length,
     const sh_rawmap_request *request, const sh_rawmap_loading *loading,
@@ -67,6 +83,18 @@ int sh_rawmap_transition_commit(void);
 /* The native map-change owner, rather than an unrelated resource refresh,
  * must finish the pending installation for a deferred launch. */
 int sh_rawmap_defers_install_commit(void);
+/* R-398 perf17: the engine thread is registering a browser open's packages inside LoadMap, after its load screen
+ * was launched; the decl server treats that as its map boundary. */
+int sh_rawmap_launch_at_boundary(void);
+/* Logs the departure phases of the retained-resource activation that just ran
+ * (route names where) when it took a second or more. */
+void sh_rawmap_log_retained_departure(const char *route);
+/* 1 while the retained request waits for nothing but its native entry: every
+ * package it needs is already available, so no consent is owed. */
+int sh_rawmap_pending_map_covered(void);
+/* The retained native launch request's context while one is pending (prepared,
+ * awaiting consent or entered) on this thread; NULL otherwise. */
+void *sh_rawmap_pending_map_context(void);
 void sh_rawmap_transition_finished(int loaded);
 /* Bracket native published-cache / inspector readers, including their async
  * completion bodies. Nestable and thread-local; callers must leave in finally.

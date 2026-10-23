@@ -9,6 +9,8 @@
 
 static const char *child_path = "generated/decls/entitydef/a_child.decl";
 static const char *parent_path = "generated/decls/entitydef/z_parent.decl";
+static const char *seq_root_path = "generated/decls/entitydef/seq_root.decl";
+static const char *seq_child_path = "generated/decls/entitydef/seq_child.decl";
 static const char *child_base = "{ inherit = \"z_parent\"; edit = { health = 100; shared = 0; "
     "slots = { slots[0] = { x = 1; } } } }";
 static const char *child_a = "{ inherit = \"z_parent\"; edit = { health = 100; shared = 0; "
@@ -24,6 +26,8 @@ static int baseline(void *context, const char *path, unsigned char **body, size_
     (void)context; *body = NULL; *length = 0;
     if (!strcmp(path, child_path)) value = child_base;
     if (!strcmp(path, parent_path)) value = "{ class = \"Base\"; edit = {} }";
+    if (!strcmp(path, seq_root_path)) value = "{ class = \"Base\"; editorVars { placeable = true; } edit = { health = 1; } }";
+    if (!strcmp(path, seq_child_path)) value = "{ inherit = \"z_parent\"; edit = { health = 1; } }";
     if (!value) return 0;
     *body = (unsigned char *)_strdup(value); *length = strlen(value); return *body ? 1 : -1;
 }
@@ -78,6 +82,120 @@ static sh_package_compilation *compile(sh_package_compile_environment *environme
 {
     *sources = sh_package_sources_scan(root, error, 2048); CHECK(*sources);
     return *sources ? sh_package_compile_with(*sources, environment, error, 2048) : NULL;
+}
+static size_t occurrences(const char *text, const char *needle)
+{
+    size_t count = 0;
+    for (const char *at = text; (at = strstr(at, needle)) != NULL; at += strlen(needle)) count++;
+    return count;
+}
+/* Compilation keeps both packages' exact authored copies as the sources. */
+static void authored_copies(const sh_package_compilation *compiled, const sh_compiled_resource *resource,
+    const char *first, const char *second)
+{
+    const char *texts[2] = {first, second};
+    char error[512];
+    CHECK(resource && resource->source_count == 2 && resource->owners.bits == 3);
+    for (size_t i = 0; resource && i < resource->source_count && i < 2; i++) {
+        size_t length = 0;
+        unsigned char *bytes = sh_package_source_read(compiled->sources->files + resource->sources[i], SIZE_MAX,
+            &length, error, sizeof(error));
+        CHECK(bytes && length == strlen(texts[i]) && !memcmp(bytes, texts[i], length)); free(bytes);
+    }
+}
+static const char *compiled_body(const sh_package_compilation *compiled, const char *path)
+{
+    const sh_compiled_resource *resource = compiled ? sh_package_compilation_find(compiled, path) : NULL;
+    return resource && resource->body ? (const char *)resource->body : "";
+}
+/* M86: entityDef state text from several packages through the product
+ * compiler. A definition with no parent is the first stateful layer: its first
+ * block keeps repeats as an ordered sequence and its later statements are
+ * inert. A child of a stateful parent updates: every statement named as the
+ * inherited state applies in order, a repeat updating its first match.
+ * editorVars members match in any case. */
+static void test_entity_sequences(sh_package_compile_environment *environment)
+{
+    static const char *const root_a = "{ class = \"Base\"; editorVars { placeable = true; color = 1; } "
+        "edit = { health = 40; health = 45; } edit = { shared = 5; } }";
+    static const char *const root_b = "{ class = \"Base\"; editorVars { Placeable = true; size = 4; } "
+        "edit = { health = 1; x = 3; } }";
+    static const char *const child_a2 = "{ inherit = \"z_parent\"; edit = { health = 40; health = 45; } "
+        "edit = { shared = 5; } }";
+    static const char *const child_b2 = "{ inherit = \"z_parent\"; edit = { health = 1; x = 3; } }";
+    static const char *const child_same = "{ inherit = \"z_parent\"; edit = { health = 45; } }";
+    static const char *const unmodelled = "{ class = \"Base\"; editorVars { placeable = true; "
+        "spawn = { a = 1; } spawn = { b = 2; } } edit = { health = 1; } }";
+    sh_package_sources *sources;
+    sh_package_compilation *compiled;
+    const sh_compiled_resource *resource;
+    const char *body, *at;
+    char error[2048];
+    authored("a", "seq_root", root_a); authored("b", "seq_root", root_b);
+    authored("a", "seq_child", child_a2); authored("b", "seq_child", child_b2);
+    compiled = compile(environment, &sources, error);
+    if (!compiled) fprintf(stderr, "entity sequences: %s\n", error);
+    CHECK(compiled);
+    if (compiled) {
+        /* Multi-change, first stateful layer: a's sequence stays in order, b's
+         * addition joins it, a's later edit never reaches the state, and one
+         * editorVars block holds both additions under the original spelling. */
+        resource = sh_package_compilation_find(compiled, seq_root_path);
+        authored_copies(compiled, resource, root_a, root_b);
+        CHECK(resource && resource->composed);
+        body = compiled_body(compiled, seq_root_path); at = strstr(body, "health = 40;");
+        CHECK(at && strstr(at, "health = 45;") && strstr(body, "x = 3;") && !strstr(body, "shared = 5;"));
+        CHECK(occurrences(body, "edit =") == 1 && occurrences(body, "editorVars") == 1);
+        CHECK(strstr(body, "color = 1;") && strstr(body, "size = 4;") && occurrences(body, "placeable") == 1 &&
+            !strstr(body, "Placeable"));
+        if (!at || strstr(body, "shared = 5;")) fprintf(stderr, "entity sequences root: %s\n", body);
+        /* Multi-change, update mode: the repeat leaves its last value and the
+         * later edit applies. */
+        resource = sh_package_compilation_find(compiled, seq_child_path);
+        authored_copies(compiled, resource, child_a2, child_b2);
+        body = compiled_body(compiled, seq_child_path);
+        CHECK(strstr(body, "health = 45;") && !strstr(body, "health = 40;") && strstr(body, "shared = 5;") &&
+            strstr(body, "x = 3;") && occurrences(body, "edit =") == 1);
+        if (!strstr(body, "shared = 5;")) fprintf(stderr, "entity sequences child: %s\n", body);
+    }
+    sh_package_compilation_free(compiled); sh_package_sources_free(sources);
+    /* Equal variants: identical copies, and in update mode a repeat equal in
+     * effect to a single assignment, are one change with both provenances. */
+    authored("b", "seq_root", root_a); authored("b", "seq_child", child_same);
+    compiled = compile(environment, &sources, error);
+    if (!compiled) fprintf(stderr, "entity sequences equal: %s\n", error);
+    CHECK(compiled);
+    if (compiled) {
+        resource = sh_package_compilation_find(compiled, seq_root_path);
+        authored_copies(compiled, resource, root_a, root_a);
+        body = compiled_body(compiled, seq_root_path); at = strstr(body, "health = 40;");
+        CHECK(resource && !resource->composed && at && strstr(at, "health = 45;") && !strstr(body, "shared = 5;"));
+        resource = sh_package_compilation_find(compiled, seq_child_path);
+        authored_copies(compiled, resource, child_a2, child_same);
+        body = compiled_body(compiled, seq_child_path);
+        CHECK(occurrences(body, "health =") == 1 && strstr(body, "health = 45;") && strstr(body, "shared = 5;"));
+    }
+    sh_package_compilation_free(compiled); sh_package_sources_free(sources);
+    /* Different variants of one sequence are a peer conflict, never either. */
+    authored("b", "seq_root", "{ class = \"Base\"; edit = { health = 40; health = 50; } }");
+    compiled = compile(environment, &sources, error);
+    CHECK(!compiled && strstr(error, "seq_root") && *environment->invalid_package == SIZE_MAX);
+    sh_package_compilation_free(compiled); sh_package_sources_free(sources);
+    /* One change the composer does not model is served exactly as written;
+     * with a second change it stays apart, unmerged and unattributed. */
+    authored("a", "seq_root", unmodelled); remove_authored("b", "seq_root");
+    compiled = compile(environment, &sources, error);
+    if (!compiled) fprintf(stderr, "entity sequences exact: %s\n", error);
+    resource = compiled ? sh_package_compilation_find(compiled, seq_root_path) : NULL;
+    CHECK(resource && resource->source_count == 1 && resource->body_length == strlen(unmodelled) &&
+        !memcmp(resource->body, unmodelled, resource->body_length));
+    sh_package_compilation_free(compiled); sh_package_sources_free(sources);
+    authored("b", "seq_root", root_b);
+    compiled = compile(environment, &sources, error);
+    CHECK(!compiled && strstr(error, "seq_root") && *environment->invalid_package == SIZE_MAX);
+    sh_package_compilation_free(compiled); sh_package_sources_free(sources);
+    /* Leave equal copies, which compile, for the checks that follow. */
+    authored("a", "seq_root", root_b);
 }
 int main(void)
 {
@@ -190,6 +308,20 @@ int main(void)
     CHECK(!compiled && strstr(error, "e_new") && invalid == SIZE_MAX);
     sh_package_compilation_free(compiled); sh_package_sources_free(sources);
     authored("e", "e_parent", "{ inherit = \"z_parent\"; edit = {} }");
+    /* An unexpanded definition prepares its own state text alone, but Parse
+     * still takes its class from the chain: a valid declaration, never a
+     * classless defect of its package. */
+    authored("e", "e_unexpanded", "{ inherit = \"z_parent\"; expandInheritance = false; poolCount = 3; "
+        "edit = { health = 1; } }");
+    compiled = compile(&environment, &sources, error);
+    if (!compiled) fprintf(stderr, "unexpanded: %s\n", error);
+    CHECK(compiled && sh_package_compilation_find(compiled, "generated/decls/entitydef/e_unexpanded.decl"));
+    if (compiled) {
+        const char *body = compiled_body(compiled, "generated/decls/entitydef/e_unexpanded.decl");
+        const char *parent = body ? strstr(body, "inherit") : NULL, *mode = body ? strstr(body, "expandInheritance") : NULL;
+        CHECK(parent && mode && parent < mode && strstr(body, "health = 1;"));
+    }
+    sh_package_compilation_free(compiled); sh_package_sources_free(sources);
     /* Packages that are valid alone but disagree remain one peer conflict. */
     authored("e", "a_child", "{ inherit = \"z_parent\"; edit = { health = 300; shared = 0; "
         "slots = { slots[0] = { x = 1; } } } }");
@@ -207,6 +339,7 @@ int main(void)
     if (!compiled) fprintf(stderr, "%s\n", error);
     CHECK(compiled && invalid == SIZE_MAX);
     sh_package_compilation_free(compiled); sh_package_sources_free(sources);
+    test_entity_sequences(&environment);
     sources = sh_package_sources_scan(root, error, sizeof(error));
     /* Invalid producer inventories fail before any prospective output exists. */
     builtins[1] = builtins[0];

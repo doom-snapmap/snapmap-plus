@@ -36,12 +36,13 @@ sh_resource_graph_preparation *sh_resource_graph_prepare_open(sh_decl_registry_s
     uintptr_t reflection)
 {
     sh_resource_graph_preparation *p = (sh_resource_graph_preparation *)calloc(1, sizeof(*p));
-    sh_decl_native_source metadata = {source.context, source.read, reflection};
+    sh_decl_native_source metadata = {source.context, source.read, reflection, source.scripts};
     sh_decl_dependency_observer observer = {p, rp_reference, NULL};
     if (!p) return NULL;
     p->registry = sh_decl_native_registry_open(source, NULL, 0);
     p->schema = sh_decl_native_schema_open(metadata, observer, NULL, 0);
     if (!p->registry || !p->schema) { sh_resource_graph_prepare_close(p); return NULL; }
+    sh_decl_native_schema_attach_registry(p->schema, p->registry);
     return p;
 }
 int sh_resource_graph_prepare_entity(sh_resource_graph_preparation *p,
@@ -69,10 +70,12 @@ int sh_resource_graph_prepare_entity(sh_resource_graph_preparation *p,
     wrapped[0] = '{'; memcpy(wrapped + 1, state.text, state.length);
     wrapped[state.length + 1] = '}'; wrapped[state.length + 2] = 0;
     source.text = wrapped; source.length = state.length + 2;
-    tree = sh_decl_tree_parse(source, NULL, 0);
+    /* The prepared text keeps every occurrence the merge appended, and the
+     * member walker reads each one (R-210): walk them all, in order. */
+    tree = sh_decl_tree_parse_ordered(source, NULL, 0);
     if (!tree) goto done;
     type.name = state.class_name; type.ops = "";
-    frame.expanded_inheritance = state.expanded_inheritance;
+    sh_resource_graph_expanded_inheritance(&frame, state.expanded_inheritance);
     p->unresolved = 0;
     inspected = 1;
     complete = sh_decl_entity_dependencies(tree, type,

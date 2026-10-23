@@ -38,6 +38,100 @@ static void refused(const char *source)
     CHECK(!sh_decl_material_read((sh_decl_source){source, strlen(source)}, &schema, &out, error, sizeof(error)));
     CHECK(!out.count && !out.writes && !out.references && !out.tokens.items && error[0]);
 }
+/* The material served for material/smp/5dea5f3e... in the 2026-10-22 Vulkan boot: the installed
+ * textures/effects/hud/magic_glass_broken_2 with spare2Map rebound to a private image copy (1247 bytes,
+ * SHA-256 e9fd5a7982a7f4a45cec70aaa340cbb93c71236424a09820bbfda9664bbca864). Its stageProgram names hud_magic_glass_off, a render program no
+ * shipped renderprog declaration carries, so the native parm-block reader stops there and the engine
+ * gives it the default; blendProgram hud_magic_blend_broken is never reached. */
+static const char magic_glass_broken_2_rebound[] =
+        "{\r\n"
+        "\t// DO NOT EDIT TEXT DIRECTLY!\r\n"
+        "\t//transmap\tbc7  \t\ttextures/effects/misc/hud_hexagons\r\n"
+        "\t//transmap \tbc7\t\tmodels/characters/helmet_interior/helmet_grid\r\n"
+        "\ttransmap1\thqcompressNormal\ttextures/effects/hud/hud_broken_glass_3\r\n"
+        "\ttransmap2\ttextures/luts/digital_artifact_01\r\n"
+        "\t//transmap3\ttextures/effects/hud/hud_broken_glass_mask2\r\n"
+        "\ttransmap3 \ttextures/system/constant_color/grey_dk\r\n"
+        "\r\n"
+        "\tspare1Map\thqcompressNormal\ttextures/effects/hud/hud_broken_glass_3\r\n"
+        "\tspare2Map\tgenerated/image/smp/fd7afd8520398873745e9ca43ae016c290a6b934239edb939caec4d40332b274.bimage\r\n"
+        "\r\n"
+        "\tnoshadows\t\t1\r\n"
+        "\tnoselfshadow\t1\r\n"
+        "\r\n"
+        "\ttiling\t\t{ 5.0, 5.0, 2.0, 2.0 }\r\n"
+        "\tramp1\t\t1\r\n"
+        "\tramp2\t\t2\r\n"
+        "\r\n"
+        "\t//ambientProgram\t\thud_magic_glass\r\n"
+        "\tstageProgram\t\thud_magic_glass_off\r\n"
+        "\tblendProgram\t\thud_magic_blend_broken\r\n"
+        "\r\n"
+        "\t//addProgram\t\t\t\t\t\t\t\t\t\tglassPrototype_helmet_interior_broken\r\n"
+        "\ttransMap\t\t\t\t\t\t\t\t\t\tmodels/characters/helmet_interior/helmet_glass_d\r\n"
+        "\tspareBumpMap\t\t/*hqcompressnormal*/ \t\tmodels/characters/helmet_interior/helmet_interior_local\r\n"
+        "\tspareSpecularMap\t/*bc7*/\t\t\tmodels/characters/helmet_interior/helmet_interior_s\r\n"
+        "\tsparePowerMap\t\t/*bc7*/\t\t\tmodels/characters/helmet_interior/helmet_interior_pm\r\n"
+        "\tenvMap\t\t\t\ttextures/system/constant_color/black.tga\r\n"
+        "\tglassColorTint\t\t{ 0.07, 0.07, 0.07, 0.25 }\r\n"
+        "}";
+static int glass_resolve(void *context, const char *family, sh_decl_source name, int *kind)
+{
+    (void)context;
+    *kind = -1;
+    if (!strcmp(family, "renderparm")) {
+        static const char *const images[] = {"transmap1", "transmap2", "transmap3", "spare1Map", "spare2Map",
+            "transMap", "spareBumpMap", "spareSpecularMap", "sparePowerMap", "envMap"};
+        static const char *const vectors[] = {"noshadows", "noselfshadow", "tiling", "ramp1", "ramp2", "glassColorTint"};
+        for (size_t i = 0; i < sizeof(images) / sizeof(images[0]); i++) if (equal(name, images[i])) *kind = 1;
+        for (size_t i = 0; i < sizeof(vectors) / sizeof(vectors[0]); i++) if (equal(name, vectors[i])) *kind = 0;
+        if (equal(name, "stageProgram") || equal(name, "blendProgram") || equal(name, "interactionProgram")) *kind = 11;
+        return *kind >= 0;
+    }
+    return !strcmp(family, "image") || !strcmp(family, "renderprog") || !strcmp(family, "sampler");
+}
+/* The inventory: every program except the two the magic-glass materials alone name. */
+static int glass_known(void *context, const char *family, const char *name)
+{
+    int *answer = context;
+    if (answer && *answer < 0) return -1;
+    if (strcmp(family, "renderprog")) return 1;
+    return strcmp(name, "hud_magic_glass_off") && strcmp(name, "hud_magic_blend_broken");
+}
+static void test_native_default(void)
+{
+    sh_decl_material_schema schema = {NULL, glass_resolve};
+    sh_decl_source text = {magic_glass_broken_2_rebound, sizeof(magic_glass_broken_2_rebound) - 1};
+    char program[128] = "x", error[256] = "";
+    int unknown_answer = -1;
+    CHECK(sizeof(magic_glass_broken_2_rebound) - 1 == 1247);
+    /* The product's grammar reads the served text; the native parse stops at stageProgram. */
+    CHECK(sh_decl_material_native_default(text, &schema, glass_known, NULL, program, sizeof(program), error, sizeof(error)) == 1);
+    CHECK(!strcmp(program, "hud_magic_glass_off"));
+    /* With every program declared nothing defaults. */
+    {
+        const char *fine = "{ transmap1 textures/a stageProgram hud_known blendProgram hud_known_2 interactionProgram hud_unknown_ok }";
+        sh_decl_source source = {fine, strlen(fine)};
+        CHECK(sh_decl_material_native_default(source, &schema, glass_known, NULL, program, sizeof(program), error, sizeof(error)) == 0);
+        CHECK(program[0] == 0);
+    }
+    /* interactionProgram is consumed and ignored natively, so an undeclared one does not default. */
+    {
+        const char *ignored = "{ interactionProgram hud_magic_glass_off transmap1 textures/a }";
+        sh_decl_source source = {ignored, strlen(ignored)};
+        CHECK(sh_decl_material_native_default(source, &schema, glass_known, NULL, program, sizeof(program), error, sizeof(error)) == 0);
+    }
+    /* An inventory that cannot answer, an unreadable text and a missing destination are unknown, never a verdict. */
+    CHECK(sh_decl_material_native_default(text, &schema, glass_known, &unknown_answer, program, sizeof(program), error, sizeof(error)) == -1);
+    {
+        const char *broken = "{ stageProgram }";
+        sh_decl_source source = {broken, strlen(broken)};
+        CHECK(sh_decl_material_native_default(source, &schema, glass_known, NULL, program, sizeof(program), error, sizeof(error)) == -1);
+        CHECK(error[0] != 0);
+    }
+    CHECK(sh_decl_material_native_default(text, &schema, glass_known, NULL, NULL, 0, error, sizeof(error)) == -1);
+    CHECK(sh_decl_material_native_default(text, &schema, glass_known, NULL, program, 4, error, sizeof(error)) == -1);
+}
 int main(void)
 {
     int kind = -1; char error[256];
@@ -120,5 +214,6 @@ int main(void)
             m = read(source); CHECK(m.count == 1); sh_decl_material_free(&m); free(source);
         }
     }
+    test_native_default();
     printf("typed material reader: %s\n", failures ? "FAIL" : "PASS"); return failures ? 1 : 0;
 }

@@ -57,6 +57,17 @@ static void gd_gap(void *context, const char *path, sh_decl_value_type type, con
         free(full);
     }
 }
+static int gd_site(void *context, const char *path, sh_decl_value_type type,
+    const char *name, size_t length, const sh_decl_reference_site *site)
+{
+    gd_context *c = context;
+    char *full;
+    int ok;
+    if (!c->types->reference_site) return 1;
+    full = gd_path(c, path);
+    ok = full && c->types->reference_site(c->types->context, full, type, name, length, site);
+    free(full); return ok;
+}
 static int gd_add(sh_decl_dependency_result *to, const sh_decl_dependency_result *from)
 {
     if (from->visited > SIZE_MAX - to->visited || from->references > SIZE_MAX - to->references ||
@@ -69,24 +80,24 @@ static int gd_state(const sh_decl_node *state, sh_decl_value_type type, const ch
     int root_object, const sh_decl_dependency_schema *types, sh_decl_dependency_result *result)
 {
     gd_context context = {types, prefix, root_object, 0};
-    sh_decl_dependency_schema adapter = {&context, gd_describe, gd_field, gd_reference, gd_gap, gd_dynamic_type};
+    sh_decl_dependency_schema adapter = {&context, gd_describe, gd_field, gd_reference, gd_gap, gd_dynamic_type, gd_site};
     sh_decl_dependency_result walked = {0};
     (void)sh_decl_state_dependencies(state, type, &adapter, &walked);
     if (context.failed) walked.aborted = 1;
     return gd_add(result, &walked);
 }
 
-int sh_decl_graph_dependencies(const sh_decl_graph *graph, const char *declaration_type,
-    sh_decl_native_schema *schema, sh_decl_dependency_result *result)
+int sh_decl_graph_dependencies_with(const sh_decl_graph *graph, const char *declaration_type,
+    sh_decl_native_schema *schema, const sh_decl_dependency_schema *types,
+    sh_decl_dependency_result *result)
 {
     static const char *const bases[] = {"idTypeInfoSubGraph", "idTypeInfoGraphNode", "idTypeInfoGraphLink"};
-    const sh_decl_dependency_schema *types = sh_decl_native_schema_view(schema);
     const sh_decl_node *inherit, *state;
     sh_decl_value_type root = {0};
     size_t i;
     if (!result) return 0;
     memset(result, 0, sizeof(*result));
-    if (!graph || !schema || !declaration_type ||
+    if (!graph || !schema || !types || !types->reference || !declaration_type ||
         sh_decl_native_schema_decl_type(schema, declaration_type, &root) != 1 ||
         sh_decl_native_schema_graph_type(schema, root) != 1) {
         result->aborted = 1; return 0;
@@ -96,7 +107,7 @@ int sh_decl_graph_dependencies(const sh_decl_graph *graph, const char *declarati
         const char *name;
         size_t length;
         sh_decl_value_type reference_type = {root.name, "*"};
-        if (!sh_decl_tree_literal(inherit, &name, &length)) { result->aborted = 1; return 0; }
+        if (!sh_decl_reference_literal(inherit, &name, &length)) { result->aborted = 1; return 0; }
         result->visited++;
         if (length) {
             if (sh_decl_native_schema_reader(schema, reference_type) != SH_DECL_READER_DECL) {
@@ -104,7 +115,14 @@ int sh_decl_graph_dependencies(const sh_decl_graph *graph, const char *declarati
                 if (types->gap) types->gap(types->context, "inherit", reference_type, "graph inheritance reader is unavailable");
             } else if (!types->reference(types->context, "inherit", reference_type, name, length)) {
                 result->aborted = 1; return 0;
-            } else result->references++;
+            } else {
+                sh_decl_reference_site site = {inherit, NULL, 0};
+                result->references++;
+                if (types->reference_site && !types->reference_site(types->context,
+                    "inherit", reference_type, name, length, &site)) {
+                    result->aborted = 1; return 0;
+                }
+            }
         }
     }
     state = sh_decl_graph_state(graph);
@@ -129,4 +147,11 @@ int sh_decl_graph_dependencies(const sh_decl_graph *graph, const char *declarati
         if (!ok) return 0;
     }
     return !result->gaps && !result->aborted;
+}
+
+int sh_decl_graph_dependencies(const sh_decl_graph *graph, const char *declaration_type,
+    sh_decl_native_schema *schema, sh_decl_dependency_result *result)
+{
+    return sh_decl_graph_dependencies_with(graph, declaration_type, schema,
+        sh_decl_native_schema_view(schema), result);
 }

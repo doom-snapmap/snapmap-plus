@@ -42,7 +42,11 @@ static void requests(void)
         "maps/modules/smpgrid/v1/m/1536_1024_512/1536_1024_512.aas_monster48",
         "maps/modules/smpgrid/v1/c/512_768_384/512_768_384.aas_monster128",
         "generated/maps/modules/smpgrid/v1/m/1536_1024_512/1536_1024_512.baas_monster48",
-        "generated/maps/modules/smpgrid/v1/c/512_768_384/512_768_384.baas_monster96"
+        "generated/maps/modules/smpgrid/v1/c/512_768_384/512_768_384.baas_monster96",
+        "cooked/model/smpgrid/v1/m/1536_1024_512/models/maps/game/snapmaps/industrial_dlc/ind_big_blank_room_4x/ind_big_blank_room_4x_blueprint_floor_00.bmodel",
+        "cooked/model/smpgrid/v1/c/512_768_384/models/maps/game/snapmaps/classic/connections/classic_blank_room_blueprint_floor_00.bmodel",
+        "maps/modules/smpgrid/v1/m/1536_1024_512/1536_1024_512.sbsp",
+        "maps/modules/smpgrid/v1/c/512_768_384/512_768_384.ambientsh"
     };
     const char *sources[]={
         "maps/modules/ind_dlc/ind_totally_blank_room_4x.decl",
@@ -59,7 +63,11 @@ static void requests(void)
         "generated/maps/modules/ind_dlc/ind_totally_blank_room_4x/ind_totally_blank_room_4x.baas_monster48",
         "generated/maps/modules/classic/classic_blank_room/classic_blank_room.baas_monster128",
         "generated/maps/modules/ind_dlc/ind_totally_blank_room_4x/ind_totally_blank_room_4x.baas_monster48",
-        "generated/maps/modules/classic/classic_blank_room/classic_blank_room.baas_monster96"
+        "generated/maps/modules/classic/classic_blank_room/classic_blank_room.baas_monster96",
+        "cooked/model/models/maps/game/snapmaps/industrial_dlc/ind_big_blank_room_4x/ind_big_blank_room_4x_blueprint_floor_00.bmodel",
+        "cooked/model/models/maps/game/snapmaps/classic/connections/classic_blank_room_blueprint_floor_00.bmodel",
+        "maps/modules/ind_dlc/ind_totally_blank_room_4x/ind_totally_blank_room_4x.sbsp",
+        "maps/modules/classic/classic_blank_room/classic_blank_room.ambientsh"
     };
     reader r={0};size_t bytes;unsigned char *out;unsigned i;
     for(i=0;i<sizeof names/sizeof names[0];++i){
@@ -83,11 +91,26 @@ static void requests(void)
         "maps/modules/smpgrid/v1/m/1536_1024_512/1536_1024_512.aas_monster48evil",
         "maps/modules/smpgrid/v1/m/1536_1024_512/1536_1024_512.aas_monster999",
         "generated/maps/modules/smpgrid/v1/m/1536_1024_512/1536_1024_512.baas_monster999",
-        "generated/maps/modules/smpgrid/v1/m/1536_1024_512/a"};
+        "generated/maps/modules/smpgrid/v1/m/1536_1024_512/a",
+        "cooked/model/smpgrid/v1/m/1536_1024_512/models/snapmaps/door_frames/frame_01.bmodel",
+        "cooked/model/smpgrid/v1/m/1536_1024_512/models/maps/game/snapmaps/industrial_dlc/ind_big_blank_room_4x/ind_big_blank_room_4x_blueprint_floor_00.lwo",
+        "cooked/model/smpgrid/v1/c/512_768_384/models/maps/game/snapmaps/industrial_dlc/ind_big_blank_room_4x/ind_big_blank_room_4x_blueprint_floor_00.bmodel",
+        "cooked/model/smpgrid/v1/m/1536_1024_512/../models/maps/game/snapmaps/industrial_dlc/ind_big_blank_room_4x/ind_big_blank_room_4x_blueprint_floor_00.bmodel",
+        "cooked/model/smpgrid/v1/m/1536_1024_512/maps/modules/ind_dlc/ind_totally_blank_room_4x/ind_totally_blank_room_4x_wall_0.bmodel",
+        "maps/modules/smpgrid/v1/m/1536_1024_512/other.sbsp",
+        "maps/modules/smpgrid/v1/m/1536_1024_512/1536_1024_512.sbspx",
+        "maps/modules/smpgrid/v1/c/512_768_384/512_768_384.ambientsh.bak"};
         for(i=0;i<sizeof bad/sizeof bad[0];++i){unsigned calls=r.calls; char *key = NULL;
             assert(sh_grid_asset_canonical(bad[i], &key) == -1 && !key);
             assert(sh_grid_asset_open(bad[i],read_source,release,&r,&out,&bytes)==-1&&calls==r.calls);}}
     assert(!sh_grid_asset_open("maps/modules/classic/classic_blank_room.decl",read_source,release,&r,&out,&bytes));
+    /* No occlusion tome is produced for a resized room: the name is not the
+     * producer's, so the engine reads none, as for a shipped tome-less module. */
+    {const char *tomes[]={"maps/modules/smpgrid/v1/m/1536_1024_512/_combo/_world.tome",
+        "maps/modules/smpgrid/v1/c/512_768_384/_world.tome"};
+        for(i=0;i<2;++i){unsigned calls=r.calls; char *key = NULL;
+            assert(sh_grid_asset_canonical(tomes[i], &key) == 0 && !key);
+            assert(!sh_grid_asset_open(tomes[i],read_source,release,&r,&out,&bytes)&&calls==r.calls);}}
 }
 static int installed(const char *root,const char *classic,const char *modern)
 {

@@ -14,6 +14,13 @@ static int describe(void *context, sh_decl_value_type type, sh_decl_value_shape 
     if (!strcmp(type.name, "Root") || !strncmp(type.name, "State", 5)) shape->kind = SH_DECL_VALUE_OBJECT;
     else if (!strcmp(type.name, "Variant")) {
         shape->kind = SH_DECL_VALUE_POLYMORPHIC; shape->element = (sh_decl_value_type){"StateBase", ""};
+    } else if (!strcmp(type.name, "Pointer")) {
+        /* The idTypeInfoObjectPtr reader: NULL forms keep the destination. */
+        shape->kind = SH_DECL_VALUE_POLYMORPHIC; shape->element = (sh_decl_value_type){"StateBase", ""};
+        shape->null_keeps = 1;
+    } else if (!strcmp(type.name, "Pointers")) {
+        shape->kind = SH_DECL_VALUE_COLLECTION; shape->element = (sh_decl_value_type){"Pointer", ""};
+        shape->item_key = "item"; shape->count_key = "num";
     } else if (!strcmp(type.name, "int")) shape->kind = SH_DECL_VALUE_IGNORE;
     else if (!strcmp(type.name, "Resource")) shape->kind = SH_DECL_VALUE_REFERENCE;
     else if (!strcmp(type.name, "FixedVariants")) {
@@ -27,6 +34,8 @@ static int field(void *context, sh_decl_value_type owner, const char *key, sh_de
     (void)context;
     *type = (sh_decl_value_type){"int", ""};
     if (!strcmp(key, "variant") || !strcmp(key, "nested")) type->name = "Variant";
+    else if (!strcmp(key, "pointer")) type->name = "Pointer";
+    else if (!strcmp(key, "conditions")) type->name = "Pointers";
     else if (!strcmp(key, "slots")) type->name = "FixedVariants";
     else if (!strcmp(key, "target")) type->name = "Resource";
     else if (!strcmp(key, "custom")) type->name = "Unsupported";
@@ -224,9 +233,65 @@ static void dependencies(void)
     CHECK(root && !sh_decl_state_dependencies(root, (sh_decl_value_type){"Root", ""}, &types, &result));
     CHECK(result.references == 1 && result.gaps == 1 && !result.aborted); sh_decl_tree_free(root);
 }
+/* Native idTypeInfoObjectPtr reader (decl_polymorphic.h): NULL, an empty block
+ * and a NULL class leave the destination as it was, so the walk takes nothing
+ * from them; graph-object readers without null_keeps still report a gap. */
+static void unchanged_forms(void)
+{
+    static const struct { const char *text; int unchanged; } cases[] = {
+        {"{ pointer = NULL; }", 1},
+        {"{ pointer = \"NULL\"; }", 1},
+        {"{ pointer = {} }", 1},
+        {"{ pointer = { className = NULL; } }", 1},
+        {"{ pointer = { className = \"NULL\"; object = { target = \"asset/skipped\"; } } }", 1},
+        {"{ pointer = \"\"; }", 0},
+        {"{ pointer = { className = \"\"; } }", 0},
+        {"{ pointer = StateA; }", 0},
+        {"{ pointer = { className = \"StateA\"; } }", 0},
+        {"{ pointer = { object = {} className = NULL; } }", 0},
+        {"{ pointer = { className = { x = 1; } } }", 0}
+    };
+    fixture f = {0};
+    sh_decl_dependency_schema types = schema(&f);
+    sh_decl_dependency_result result;
+    sh_decl_node *root;
+    const char *text;
+    size_t i;
+    for (i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        sh_decl_node *tree = sh_decl_tree_parse_ordered(view(cases[i].text), NULL, 0);
+        CHECK(tree && sh_decl_polymorphic_unchanged(tree->children) == cases[i].unchanged);
+        if (tree) {
+            memset(&f, 0, sizeof(f));
+            CHECK(sh_decl_state_dependencies(tree, (sh_decl_value_type){"Root", ""}, &types, &result) ==
+                (cases[i].unchanged || i == 7 || i == 8));
+            CHECK(!result.references && result.gaps == (cases[i].unchanged || i == 7 || i == 8 ? 0u : 1u));
+        }
+        sh_decl_tree_free(tree);
+    }
+    {
+        sh_decl_node *tree = sh_decl_tree_parse(view(cases[0].text), NULL, 0);
+        CHECK(tree);
+        if (tree) { tree->children->reset = 1; CHECK(!sh_decl_polymorphic_unchanged(tree->children)); }
+        sh_decl_tree_free(tree);
+        CHECK(!sh_decl_polymorphic_unchanged(NULL));
+    }
+    /* The stock shape that the live library met (states/impcombat): a resized
+     * list whose new slot is read as NULL, beside ordinary references. */
+    text = "{ conditions = { num = 2; item[0] = NULL; item[1] = { className = \"StateB\"; "
+        "object = { y = \"asset/kept\"; } } } target = \"known/asset\"; }";
+    root = sh_decl_tree_parse(view(text), NULL, 0);
+    memset(&f, 0, sizeof(f));
+    CHECK(root && sh_decl_state_dependencies(root, (sh_decl_value_type){"Root", ""}, &types, &result));
+    CHECK(result.references == 2 && !result.gaps); sh_decl_tree_free(root);
+    /* A reader without null_keeps keeps its gap for the same text. */
+    root = sh_decl_tree_parse(view("{ variant = NULL; target = \"known/asset\"; }"), NULL, 0);
+    CHECK(root && !sh_decl_state_dependencies(root, (sh_decl_value_type){"Root", ""}, &types, &result));
+    CHECK(result.references == 1 && result.gaps == 1); sh_decl_tree_free(root);
+}
+
 int main(void)
 {
-    composition(); reader_forms(); three_contributors(); dependencies();
+    composition(); reader_forms(); three_contributors(); dependencies(); unchanged_forms();
     if (failures) { fprintf(stderr, "%d polymorphic failures\n", failures); return 1; }
     puts("decl_polymorphic_test: PASS"); return 0;
 }

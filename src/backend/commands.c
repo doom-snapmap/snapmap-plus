@@ -29,6 +29,8 @@
 #include "perf.h"
 #include "apply_engine.h"
 #include "package_runtime.h"
+#include "package_requirements.h"
+#include "decl_server.h"
 #include "resource_graph.h"
 #include "resource_graph_native.h"
 
@@ -757,7 +759,17 @@ static void h_sh_resread(idCmdArgs *a)
         free(body); return;
     }
     sh_printf("sh_resread: %s -- %zu byte(s) served\n", path, length);
-    if (match && *match) {
+    if (match && !strcmp(match, "*")) {
+        /* The whole body in numbered 400-byte pieces (control bytes shown as
+         * '.'), for declarations written on one line. Bounded to 64 KiB. */
+        for (size_t at = 0; at < length && at < 65536; at += 400) {
+            char piece[401];
+            size_t n = length - at < 400 ? length - at : 400;
+            for (size_t k = 0; k < n; k++) piece[k] = body[at + k] >= 32 && body[at + k] < 127 ? (char)body[at + k] : '.';
+            piece[n] = 0;
+            sh_printf("  %05zu %s\n", at, piece);
+        }
+    } else if (match && *match) {
         size_t begin = 0;
         for (size_t i = 0; i <= length; i++) {
             if (i != length && body[i] != '\n') continue;
@@ -866,6 +878,60 @@ static void h_sh_listres(idCmdArgs *a)
             sh_printf("sh_listres: copied %u name(s) to the clipboard.\n", printed);
     }
     free(buf.data);
+}
+
+/* List the editor's placeable palette: the catalog at editor+0x20660 that the
+ * toybox and the map validator both search (sorted 0x6F0-byte entity templates;
+ * +0 the editor definition; +0x150 the template's own 0x168-byte declaration,
+ * whose +0x58 is the entityDef name the palette is sorted and searched by).
+ * Each line is "<editor definition> -> <entityDef>", then the count. Read-only
+ * and SEH-guarded; the optional filter matches either name. Layout verified on
+ * both images (builders, entry constructors, lookups and name getters). */
+#define PAL_EDITOR_OFF    0x20660
+#define PAL_ARRAY_OFF     0x10
+#define PAL_COUNT_OFF     0x18
+#define PAL_ENTRY_SIZE    0x6F0
+#define PAL_ENTRY_EDITOR  0x000
+#define PAL_ENTRY_DEF     0x150
+#define PAL_TEMPLATE_NAME 0x58
+static void pal_copy_text(const char *name, int present, char *out, size_t capacity)
+{
+    out[0] = 0;
+    if (!name) { snprintf(out, capacity, "%s", present ? "(unreadable)" : "(none)"); return; }
+    __try {
+        size_t i = 0;
+        for (; i + 1 < capacity && name[i]; i++) out[i] = name[i];
+        out[i] = 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { snprintf(out, capacity, "(unreadable)"); }
+}
+static void h_sh_palette(idCmdArgs *a)
+{
+    const char *filter = cmd_argv(a, 1);
+    uintptr_t editor = g_module_base ? glb_resolve(g_module_base, "editor_singleton", NULL) : 0;
+    void *array = NULL;
+    uint32_t count = 0, shown = 0;
+    if (!editor) { sh_printf("sh_palette: editor_singleton unresolved on this build.\n"); return; }
+    if (!lr_read_ptr((const void *)(editor + PAL_EDITOR_OFF + PAL_ARRAY_OFF), &array) ||
+        !lr_read_u32((const void *)(editor + PAL_EDITOR_OFF + PAL_COUNT_OFF), &count)) {
+        sh_printf("sh_palette: palette unreadable.\n"); return;
+    }
+    if (!array || count > LISTRES_COUNT_CAP) { sh_printf("sh_palette: no palette (%u entries).\n", count); return; }
+    for (uint32_t i = 0; i < count; i++) {
+        const uint8_t *entry = (const uint8_t *)array + (size_t)i * PAL_ENTRY_SIZE;
+        void *row = NULL, *def = NULL;
+        char row_name[256], def_name[256];
+        if (!lr_read_ptr(entry + PAL_ENTRY_EDITOR, &row) || !lr_read_ptr(entry + PAL_ENTRY_DEF, &def)) {
+            sh_printf("sh_palette: entry %u unreadable.\n", i); break;
+        }
+        void *placed = NULL;
+        pal_copy_text(row ? lr_decl_name(row) : NULL, row != NULL, row_name, sizeof(row_name));
+        if (def && !lr_read_ptr((const uint8_t *)def + PAL_TEMPLATE_NAME, &placed)) placed = NULL;
+        pal_copy_text((const char *)placed, def != NULL, def_name, sizeof(def_name));
+        if (filter && !strstr(row_name, filter) && !strstr(def_name, filter)) continue;
+        sh_printf("%s -> %s\n", row_name, def_name);
+        shown++;
+    }
+    sh_printf("sh_palette: %u entries, %u shown\n", count, shown);
 }
 
 /* List live idEntity subclasses, including decl-less types and idTarget_Command.
@@ -1821,6 +1887,11 @@ static void h_sh_packages(idCmdArgs *a)
 {
     char *text = NULL;
     const char *operation = cmd_argv(a, 1);
+    if (operation && !strcmp(operation, "rescan")) {
+        sh_decl_server_request_rearm();
+        sh_printf("Package rescan requested: it runs at the settled SnapMap browser and judges every installed package again.\n");
+        return;
+    }
     if (operation && !strcmp(operation, "dependencies")) {
         const char *type = cmd_argv(a, 2), *name = cmd_argv(a, 3);
         size_t nodes, complete, edges;
@@ -1840,6 +1911,19 @@ static void h_sh_packages(idCmdArgs *a)
                 sh_printf("Listing shows %zu of %zu visits; traversal checked every recorded edge.\n", report.shown, report.edges);
             text = report.text;
         }
+    } else if (operation && !strcmp(operation, "inputs")) {
+        const char *query = cmd_argv(a, 2), *first = cmd_argv(a, 3);
+        text = sh_package_runtime_inputs(query, first ? (size_t)strtoull(first, NULL, 10) : 1);
+        if (!text) sh_printf("Input accounting is unavailable: out of memory.\n");
+    } else if (operation && !strcmp(operation, "exposures")) {
+        const char *query = cmd_argv(a, 2), *entry = cmd_argv(a, 3), *first = cmd_argv(a, 4);
+        if (!query || !entry) {
+            sh_printf("Usage: sh_packages exposures <package id, folder or path> <row> [first line]\n");
+            return;
+        }
+        text = sh_package_runtime_input_exposures(query, (size_t)strtoull(entry, NULL, 10),
+            first ? (size_t)strtoull(first, NULL, 10) : 1);
+        if (!text) sh_printf("Input accounting is unavailable: out of memory.\n");
     } else text = sh_package_runtime_summary();
     if (text) {
         const char *line = text;
@@ -1852,6 +1936,11 @@ static void h_sh_packages(idCmdArgs *a)
             line += length; if (*line == '\n') line++;
         }
         free(text);
+    }
+    if (!operation || strcmp(operation, "dependencies")) {
+        char settings[384];
+        sh_package_requirements_describe(settings, sizeof(settings));
+        sh_printf("%s\n", settings);
     }
 }
 static void h_sh_perf(idCmdArgs *a)
@@ -1883,7 +1972,7 @@ static void h_sh_overrides_off(idCmdArgs *a)
 }
 
 static const cmd_entry CMD_TABLE[] = {
-    { "sh_packages",          (void *)h_sh_packages, "Show installed package sources and compiler results. 'sh_packages dependencies [type name]' inspects observed native dependencies." },
+    { "sh_packages",          (void *)h_sh_packages, "Show installed package sources and compiler results. 'sh_packages inputs [package or path] [first row]' accounts for every installed file and 'sh_packages exposures <package or path> <row>' lists all of one entry's exposures; 'sh_packages dependencies [type name]' inspects observed native dependencies; 'sh_packages rescan' judges the installed packages again at the browser." },
     { "sh_perf",              (void *)h_sh_perf,     "Where frame time goes inside snapmap-plus. 'sh_perf reset' starts the counting again. 'sh_perf read' times reading the open map whole and entity by entity." },
     { "sh_overrides_off",     (void *)h_sh_overrides_off, "Remove our resource layer for the rest of this session, to measure the engine without it. Editor resources go with it; restart to get them back." },
     { "sh_rawmaps",           (void *)h_sh_rawmaps,   "Raw JSON map files: state, paths, load, save. Run with no arguments to see what is set, or 'sh_rawmaps help' (or '?') for every verb." },
@@ -1905,8 +1994,9 @@ static const cmd_entry CMD_TABLE[] = {
     { "sh_dialogpoll",       (void *)h_sh_dialogpoll, "read the answer to the dialog sh_dialogtest raised (diagnostic)" },
     { "sh_dialogdump",       (void *)h_sh_dialogdump, "print the engine dialog queue: id, button set and flag bytes (diagnostic)" },
     { "sh_listres",          (void *)h_sh_listres,  "<resource classname (ex:idMaterial)> <optional: filter> list all resources of a given type" },
+    { "sh_palette",          (void *)h_sh_palette,  "[filter] list the editor's placeable palette: each entry's editor definition and the entityDef it places (diagnostic)" },
     { "sh_declfamilies",     (void *)h_sh_declfamilies, "list every declaration family and the composition route it takes (diagnostic)" },
-    { "sh_resread",          (void *)h_sh_resread,  "<engine path> [substring] print what the runtime currently serves for one resource path (diagnostic)" },
+    { "sh_resread",          (void *)h_sh_resread,  "<engine path> [substring|*] print what the runtime currently serves for one resource path; * prints the whole body (diagnostic)" },
     { "sh_alginfo",          (void *)h_alginfo,     "Prints CPU dispatcher info for the engine-math (algo) override layer." },
     { "sh_debugrender",      (void *)h_sh_debugrender,"Internal renderer-test mutators -- not for normal use" },
     { "cs_dontuse",          (void *)h_cs_dontuse,  "Overrides some calculations in the engine to be more precise, just for shiggles. probably degrades performance and breaks stuff." },

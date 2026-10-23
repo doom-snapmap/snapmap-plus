@@ -11,7 +11,19 @@ Checks native helpers, engine-interface contracts, frontend JavaScript and optio
   unknown selection instead of reporting success for an empty or partial run.
   `-Skip` omits explicitly named native suites, reports each omission, and still
   runs JavaScript when `-Only` is absent. Unknown names or conflicting selectors
-  fail; the default continues to run every suite.
+  fail; the default continues to run every suite. Digest-backed native fixtures
+  require `-Doom <unpacked Vulkan exe>` and `-DoomAlt <unpacked OpenGL exe>`.
+  CI uses `-SkipNativeImageTests` to explicitly omit and report those fixtures;
+  it cannot qualify their native contracts. `-DoomBase`,
+  `-ReflectionReplay` and `-RecordRetainedClosure` configure the retained
+  composition described under "Working here".
+- The runner holds an operating-system file lock for `tests/obj` throughout
+  compilation and execution. A second runner in the same checkout fails before
+  changing outputs; wait for the first to finish and retry. Different checkouts
+  are independent. The lock file remains after exit and must not be deleted to
+  bypass a live owner. Run manual probes only after the runner finishes.
+  `output_lock_test.ps1` checks contention, independent directories and release
+  after success, failure and process termination without compiling game code.
 - `*_test.c` and `*_test.cpp` exercise runtime helpers and source contracts.
 - `*_test.js` checks page behavior, browser modules and Worker services.
 - `nav_menu_test.c` checks native action ordering, progress and completion,
@@ -39,6 +51,16 @@ Checks native helpers, engine-interface contracts, frontend JavaScript and optio
   `audio_banks_test.c` also indexes a synthetic bank larger than 4 GiB while
   reading only its 53 bytes of metadata, and distinguishes malformed data from
   an IO failure. These are offline checks, not native bank activation proof.
+  Native-record witnesses also prove that an unrelated event edit retains native
+  actions and their preparation banks. Private projections omit native definitions
+  and compact selected media, including unsorted overlapping ranges, without
+  reading payloads during compilation. The load plan retains original providers
+  before their edited counterparts. `package_audio_test --inspect-bank <base>
+  <engine-path> <authored-bank>` reports the actual private output sizes and scoped
+  identity counts without loading banks or changing installed packages.
+- `package_compiler_test.c` compares and probes generated sealed files without
+  authored source rows, including additions/removals, equal and differing outputs,
+  stale source metadata and memory/file comparisons spanning multiple IO chunks.
 - `audio_packages_test.c` validates all three PCK tables, local language IDs,
   bounds and metadata-only reads above 4 GiB. An optional directory argument
   audits installed PCK metadata. `audio_originals_test.c` checks packed-before-
@@ -221,8 +243,24 @@ Checks native helpers, engine-interface contracts, frontend JavaScript and optio
   a successful recovery still refuses the failed install, and retry succeeds.
 - `map_payload_test.c` executes authored native save/read length-check fixtures
   before and after repair, including signed boundaries, signature refusal and
-  rollback of both sites after a partial failure. Rawmap path tests also read
-  a file over 64 MiB.
+  rollback of both sites after a partial failure. Install records the reader
+  fixture's own bound for size accounting; a refused preflight records nothing.
+  Rawmap path tests also read a file over 64 MiB.
+- `map_capacity_test.c` measures stored map text built through the real shard
+  envelope: package deliveries, binding records and navigation shards are
+  exactly the bytes their writers added, an author's own `smpkg.`-named variable
+  is not a delivery, and a complete map of exactly 10,485,760 bytes is within
+  DOOM's limit while one more byte is not. `rawmap_paths_test.c` drives the save
+  detour across the same boundary and through inspection, and `globals_test.c`
+  binds the shared bound on both executable images: the cached reader, the
+  publish and copy uploads and the save builder accept exactly up to one
+  read-only value of 10,485,760. Live publication is not covered.
+- `map_reference_audit_test.c` audits uniqueId-keyed tables extracted from a
+  live Vulkan map: rows at an empty uniqueId are a hazard, a speaker minted there
+  owns rows its same-inherit peers lack and is named, removing only those rows
+  is consistent, and broken prefix sums, attribution, wires and duplicate
+  uniqueIds are named. `rawmap_paths_test.c` checks that a refused prepared load
+  logs the audit, including when the tables do not read.
 - `decl_compose_test.c` checks merging all contributions, new nested entries,
   authored ordering, cycles, deletion conflicts and precise source attribution
   across input permutations. Typed cases cover sparse positions, independent
@@ -253,6 +291,20 @@ Checks native helpers, engine-interface contracts, frontend JavaScript and optio
   composition leave unrelated packages usable. Valid conflicting packages retain
   physical availability for authored maps; repaired sources rejoin on refresh.
   String tests include all incompatible pairs in inventories above 64 packages.
+- `package_map_uses_test.c` also checks metadata-free local name compatibility:
+  custom typed references bind, native names and legacy prose bytes stay exact,
+  and ambiguous old names select consistently under reordered source catalogs.
+  `package_runtime_context_test.c` verifies that this route uses the installed
+  library even while a different map supplies the same authored name.
+  `rawmap_paths_test.c` keeps saved deliveries outside that fallback and checks
+  failure atomicity before native loading.
+- `package_native_inline_test.c` checks native map conversion: one inline layer
+  over the first native ancestor, replaced stock identities, dropped and hidden
+  values, and placement refusals. `decl_native_carrier_test.c` checks which values
+  the entity carrier reproduces; `package_editor_rows_test.c` checks which shipped
+  editor entry places a base. `package_runtime_context_test.c` drives save and
+  load conversion, native and mixed requirements, installed stock-named copies and
+  editor-entry provenance; `package_map_uses_test.c` keeps a converted value fresh.
 - `rawmap_paths_test.c` also drives saved-map preflight: retained JSON replaces a
   different second engine read, refusal prevents native loading, parse failures
   defer retirement until the browser, and held files retain cleanup ownership.
@@ -277,6 +329,19 @@ Checks native helpers, engine-interface contracts, frontend JavaScript and optio
   nested read-only completion, stale cache/host selections, request replacement,
   deferred cleanup and partial hook-group failure. Native functions are doubles;
   these checks do not establish live lobby or next-map acceptance.
+- `published_source_test.c` composes the published launch bridge, native
+  selection and cached source, retained request, consent and installation,
+  private map context, document bind, prepared resource graph and package
+  runtime over the historical writers' carriers, a current-writer variant of
+  one package identity and the R137 load positive's convertible and mixed
+  uses. Launches cover offline, direct, hosting a lobby and a joining player's
+  readiness for the host's map. Engine objects, the JSON parser, declaration
+  registration, the native state evaluator, transition predicates and the
+  dialog are doubles. It checks exact source and compiled-document delivery,
+  accepted, declined, withdrawn and rolled-back installation, a fully native
+  result needing no installation, stale selections, replacement before and
+  after native entry and one release per request. It does not establish live
+  publication, download, multiplayer sessions or engine execution.
 - Required-resource checks in `package_context_test.c` cover distinct local/map
   bytes, alternate package IDs, unused bundle assets, nested delivery owners,
   duplicate suppliers, missing undeliverable files, invalid/unreadable paths,
@@ -328,7 +393,70 @@ null program/sampler defaults, multiline Strings, typed images, named versus
 inline buffer types, struct bodies, uniform byte counts and image-store formats.
 The source-graph suite follows a buffer's source-selected struct definition.
 
-From the repository root, run `powershell -NoProfile -ExecutionPolicy Bypass -File tests/run-tests.ps1` with Node 22.13 or newer installed. Build outputs go to ignored `tests/obj/`.
+From the repository root, run `powershell -NoProfile -ExecutionPolicy Bypass -File tests/run-tests.ps1 -Doom <unpacked Vulkan exe> -DoomAlt <unpacked OpenGL exe>` with Node 22.13 or newer installed. Build outputs go to ignored `tests/obj/`. Native fixture spans come from these local images and are checked against SHA256 identities; complete executable bodies are not distributed as test data. A missing image fails the selected fixture group before compilation.
+
+### Retained request-6 composition
+
+The default suite includes `occurrence_revival_retained`. It reruns
+`occurrence_revival_test.exe` over a recorded live composition: the installed
+game's resources and a Vulkan reflection replay captured with snaphak-re's
+`tools/re/reflection_snapshot.py replay`. It fails until both inputs are
+configured once:
+
+`powershell -NoProfile -ExecutionPolicy Bypass -File tests/run-tests.ps1 -Only occurrence_revival_retained -DoomBase <DOOM>\base -ReflectionReplay <replay.tsv>`
+
+A passing run copies the replay to `tests/local/` and records both inputs in
+`tests/local/retained-inputs.json`. Both are untracked; later runs read them.
+CI has no game and passes `-Skip occurrence_revival_retained -SkipNativeImageTests`.
+
+The test pins everything it consumes:
+
+- `DOOMx64vk.exe` (`RT_DOOM_VK_SHA256`) and the replay (`RT_REPLAY_SHA256`);
+- every stock path the composition reads, with its reader, length, SHA-256 and
+  catalog provider rows, or its absence (`retained_stock_closure.h`).
+
+A different input exits 3 and names what changed. `RT_STOCK_CHANGE=<path>`
+is the control: the composition then reads that path with one byte inverted.
+After a deliberate game or replay change, update the pins and rewrite the
+closure with `-RecordRetainedClosure`. Review the diff like any other fixture
+change.
+
+### Retained request-6 composition
+
+The default suite includes `occurrence_revival_retained`. It reruns
+`occurrence_revival_test.exe` over a recorded live composition: the installed
+game's resources and a Vulkan reflection replay captured with snaphak-re's
+`tools/re/reflection_snapshot.py replay`. It fails until both inputs are
+configured once:
+
+`powershell -NoProfile -ExecutionPolicy Bypass -File tests/run-tests.ps1 -Only occurrence_revival_retained -DoomBase <DOOM>\base -ReflectionReplay <replay.tsv>`
+
+A passing run copies the replay to `tests/local/` and records both inputs in
+`tests/local/retained-inputs.json`. Both are untracked; later runs read them.
+CI has no game and passes `-Skip occurrence_revival_retained`.
+
+The test pins everything it consumes:
+
+- `DOOMx64vk.exe` (`RT_DOOM_VK_SHA256`) and the replay (`RT_REPLAY_SHA256`);
+- every stock path the composition reads, with its reader, length, SHA-256 and
+  catalog provider rows, or its absence (`retained_stock_closure.h`).
+
+A different input exits 3 and names what changed. `RT_STOCK_CHANGE=<path>`
+is the control: the composition then reads that path with one byte inverted.
+After a deliberate game or replay change, update the pins and rewrite the
+closure with `-RecordRetainedClosure`. Review the diff like any other fixture
+change.
+
+### Engine-written map forms
+
+`map_form_sweep_test` opens minimal engine-written entity states
+(`map_form_sweep_fixtures.jsonl`) through the product's local map open with
+the retained reflection replay, the installed catalog and the installed
+`superscriptx64.dll` metadata, so it needs the inputs configured above; CI
+skips it. `-Only map_form_sweep_corpus` runs the same walk over every map listed
+in the untracked `tests/local/map-form-corpus.txt` (rawmap JSON or a saved
+slot's `map.decl`), writes `tests/obj/map-form-corpus.tsv` and fails on any
+refused map; it skips when the list is absent.
 
 The Worker runtime suite uses local storage and a GitHub mock. Install its pinned
 dependency with `npm install --prefix build/worker-tests --no-audit --no-fund --no-package-lock miniflare@4.20260730.0`, then run

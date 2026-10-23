@@ -6,20 +6,46 @@
 #include <limits.h>
 #include "resource_catalog.h"
 #include "raw_deflate.h"
+#include <bcrypt.h>
+#pragma comment(lib, "bcrypt.lib")
 
 #define RC_INDEX_LIMIT (64u * 1024u * 1024u)
 #define RC_ROW_LIMIT 1000000u
 #define RC_FIELD_LIMIT 4096u
 #define RC_RESOURCE_LIMIT ((size_t)INT_MAX)
 
+/* The four archive handles, shared by a catalog and every slice taken from it: the last reference closes them.
+ * Reads seek and read under the lock. */
+typedef struct rc_archives {
+    volatile LONG references;
+    HANDLE files[4];
+    SRWLOCK lock;
+} rc_archives;
 struct sh_resource_catalog {
+    volatile LONG references;
     sh_resource_catalog_entry *rows;
     size_t count, capacity;
     sh_resource_catalog_entry **paths, **identities, **legacy_paths;
-    HANDLE archives[4];
+    rc_archives *archives;
     uint64_t archive_sizes[4];
-    SRWLOCK archive_lock;
+    unsigned char digest[32]; /* sh_resource_catalog_digest */
 };
+struct sh_resource_slice {
+    volatile LONG references;
+    rc_archives *archives;
+    uint64_t offset;
+    uint32_t size, stored_size;
+    unsigned char archive;
+};
+static void rc_archives_release(rc_archives *archives)
+{
+    if (!archives || InterlockedDecrement(&archives->references)) return;
+    for (size_t i = 0; i < 4; i++)
+        if (archives->files[i] && archives->files[i] != INVALID_HANDLE_VALUE) CloseHandle(archives->files[i]);
+    free(archives);
+}
+static int rc_hash(BCRYPT_HASH_HANDLE hash, const void *bytes, size_t length)
+{ return length <= ULONG_MAX && BCryptHashData(hash, (PUCHAR)bytes, (ULONG)length, 0) >= 0; }
 
 static uint32_t rc_be32(const unsigned char *p)
 {
@@ -135,33 +161,46 @@ sh_resource_catalog *sh_resource_catalog_open(const char *doom_base, char *error
 {
     static const char *const stems[] = {"snap_gameresources", "gameresources"};
     sh_resource_catalog *catalog = (sh_resource_catalog *)calloc(1, sizeof(*catalog));
+    BCRYPT_ALG_HANDLE algorithm = NULL;
+    BCRYPT_HASH_HANDLE hash = NULL;
     char path[4096];
     size_t i;
+    if (catalog) catalog->references = 1;
     if (error && error_capacity) error[0] = 0;
-    if (!catalog || !doom_base || !doom_base[0]) goto bad;
-    for (i = 0; i < 4; i++) catalog->archives[i] = INVALID_HANDLE_VALUE;
-    InitializeSRWLock(&catalog->archive_lock);
+    if (!catalog || !doom_base || !doom_base[0] || !(catalog->archives = calloc(1, sizeof(*catalog->archives)))) goto bad;
+    catalog->archives->references = 1;
+    for (i = 0; i < 4; i++) catalog->archives->files[i] = INVALID_HANDLE_VALUE;
+    InitializeSRWLock(&catalog->archives->lock);
+    if (BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_SHA256_ALGORITHM, NULL, 0) < 0 ||
+        BCryptCreateHash(algorithm, &hash, NULL, 0, NULL, 0, 0) < 0) goto bad;
     for (i = 0; i < 2; i++) {
         size_t length = 0;
         unsigned char *bytes;
+        uint64_t size;
         if (snprintf(path, sizeof(path), "%s/%s.pindex", doom_base, stems[i]) >= sizeof(path)) goto bad;
         bytes = rc_read_file(path, &length);
         if (!bytes) goto bad;
-        if (!rc_parse(catalog, bytes, length, (unsigned)i * 2u)) { free(bytes); goto bad; }
+        size = length;
+        if (!rc_hash(hash, &size, sizeof(size)) || !rc_hash(hash, bytes, length) ||
+            !rc_parse(catalog, bytes, length, (unsigned)i * 2u)) { free(bytes); goto bad; }
         free(bytes);
     }
     for (i = 0; i < 4; i++) {
         LARGE_INTEGER size;
         BY_HANDLE_FILE_INFORMATION info;
         if (snprintf(path, sizeof(path), "%s/%s.%s", doom_base, stems[i / 2u], i % 2u ? "patch" : "resources") >= sizeof(path)) goto bad;
-        catalog->archives[i] = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING,
+        catalog->archives->files[i] = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING,
             FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
-        if (catalog->archives[i] == INVALID_HANDLE_VALUE ||
-            !GetFileInformationByHandle(catalog->archives[i], &info) ||
+        if (catalog->archives->files[i] == INVALID_HANDLE_VALUE ||
+            !GetFileInformationByHandle(catalog->archives->files[i], &info) ||
             (info.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) ||
-            !GetFileSizeEx(catalog->archives[i], &size) || size.QuadPart < 0) goto bad;
+            !GetFileSizeEx(catalog->archives->files[i], &size) || size.QuadPart < 0) goto bad;
         catalog->archive_sizes[i] = (uint64_t)size.QuadPart;
+        if (!rc_hash(hash, &catalog->archive_sizes[i], sizeof(catalog->archive_sizes[i]))) goto bad;
     }
+    if (BCryptFinishHash(hash, catalog->digest, sizeof(catalog->digest), 0) < 0) goto bad;
+    BCryptDestroyHash(hash); hash = NULL;
+    BCryptCloseAlgorithmProvider(algorithm, 0); algorithm = NULL;
     catalog->paths = (sh_resource_catalog_entry **)calloc(catalog->count ? catalog->count : 1u, sizeof(*catalog->paths));
     catalog->identities = (sh_resource_catalog_entry **)calloc(catalog->count ? catalog->count : 1u, sizeof(*catalog->identities));
     catalog->legacy_paths = (sh_resource_catalog_entry **)calloc(catalog->count ? catalog->count : 1u, sizeof(*catalog->legacy_paths));
@@ -178,15 +217,89 @@ sh_resource_catalog *sh_resource_catalog_open(const char *doom_base, char *error
     qsort(catalog->legacy_paths, catalog->count, sizeof(*catalog->legacy_paths), rc_legacy_path_cmp);
     return catalog;
 bad:
+    if (hash) BCryptDestroyHash(hash);
+    if (algorithm) BCryptCloseAlgorithmProvider(algorithm, 0);
     if (error && error_capacity) snprintf(error, error_capacity, "installed resource catalog or archive validation failed under %s", doom_base ? doom_base : "(null)");
     sh_resource_catalog_close(catalog); return NULL;
+}
+int sh_resource_catalog_digest(const sh_resource_catalog *catalog, unsigned char out[32])
+{
+    if (!catalog || !out) return 0;
+    memcpy(out, catalog->digest, sizeof(catalog->digest)); return 1;
+}
+
+sh_resource_catalog *sh_resource_catalog_retain(sh_resource_catalog *catalog)
+{
+    if (catalog) InterlockedIncrement(&catalog->references);
+    return catalog;
+}
+int sh_resource_catalog_matches(const sh_resource_catalog *catalog, const char *doom_base, char *error, size_t capacity)
+{
+    static const char *const stems[] = {"snap_gameresources", "gameresources"};
+    BCRYPT_ALG_HANDLE algorithm = NULL;
+    BCRYPT_HASH_HANDLE hash = NULL;
+    unsigned char digest[32];
+    char path[4096];
+    int result = -1;
+    size_t i;
+    if (error && capacity) error[0] = 0;
+    if (!catalog || !catalog->archives || !doom_base || !doom_base[0]) goto done;
+    if (BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_SHA256_ALGORITHM, NULL, 0) < 0 ||
+        BCryptCreateHash(algorithm, &hash, NULL, 0, NULL, 0, 0) < 0) goto done;
+    /* The index bytes exactly as open hashes them. */
+    for (i = 0; i < 2; i++) {
+        size_t length = 0;
+        unsigned char *bytes;
+        uint64_t size;
+        if (snprintf(path, sizeof(path), "%s/%s.pindex", doom_base, stems[i]) >= (int)sizeof(path)) goto done;
+        if (!(bytes = rc_read_file(path, &length))) {
+            DWORD absent = GetFileAttributesA(path) == INVALID_FILE_ATTRIBUTES ? GetLastError() : 0;
+            if (absent == ERROR_FILE_NOT_FOUND || absent == ERROR_PATH_NOT_FOUND) result = 0;
+            goto done;
+        }
+        size = length;
+        if (!rc_hash(hash, &size, sizeof(size)) || !rc_hash(hash, bytes, length)) { free(bytes); goto done; }
+        free(bytes);
+    }
+    /* Each archive path must name the file this catalog holds (the full volume and file identity), and its size is the
+     * one a fresh open would hash. The held handle shares reading only, so the file has had no writer, deleter or
+     * replacement since the catalog opened it. */
+    for (i = 0; i < 4; i++) {
+        BY_HANDLE_FILE_INFORMATION now;
+        FILE_ID_INFO now_id, held_id;
+        uint64_t size;
+        HANDLE file;
+        int examined;
+        if (snprintf(path, sizeof(path), "%s/%s.%s", doom_base, stems[i / 2u], i % 2u ? "patch" : "resources") >= (int)sizeof(path)) goto done;
+        file = CreateFileA(path, FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+            OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+        if (file == INVALID_HANDLE_VALUE) { result = 0; goto done; }
+        examined = GetFileInformationByHandle(file, &now) &&
+            GetFileInformationByHandleEx(file, FileIdInfo, &now_id, sizeof(now_id)) &&
+            GetFileInformationByHandleEx(catalog->archives->files[i], FileIdInfo, &held_id, sizeof(held_id));
+        CloseHandle(file);
+        if (!examined) goto done;
+        if ((now.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) ||
+            now_id.VolumeSerialNumber != held_id.VolumeSerialNumber ||
+            memcmp(&now_id.FileId, &held_id.FileId, sizeof(now_id.FileId))) { result = 0; goto done; }
+        size = (uint64_t)now.nFileSizeHigh << 32 | now.nFileSizeLow;
+        if (!rc_hash(hash, &size, sizeof(size))) goto done;
+    }
+    if (BCryptFinishHash(hash, digest, sizeof(digest), 0) < 0) goto done;
+    result = !memcmp(digest, catalog->digest, sizeof(digest));
+done:
+    if (hash) BCryptDestroyHash(hash);
+    if (algorithm) BCryptCloseAlgorithmProvider(algorithm, 0);
+    if (result < 0 && error && capacity) snprintf(error, capacity, "installed resource catalog could not be examined under %s",
+        doom_base ? doom_base : "(null)");
+    return result;
 }
 
 void sh_resource_catalog_close(sh_resource_catalog *catalog)
 {
     size_t i;
-    if (!catalog) return;
-    for (i = 0; i < 4; i++) if (catalog->archives[i] && catalog->archives[i] != INVALID_HANDLE_VALUE) CloseHandle(catalog->archives[i]);
+    if (!catalog || InterlockedDecrement(&catalog->references) > 0) return;
+    rc_archives_release(catalog->archives); /* Slices taken from it keep the handles. */
     for (i = 0; i < catalog->count; i++) { free(catalog->rows[i].type); free(catalog->rows[i].name); free(catalog->rows[i].path); }
     free(catalog->legacy_paths); free(catalog->paths); free(catalog->identities); free(catalog->rows); free(catalog);
 }
@@ -197,43 +310,83 @@ const sh_resource_catalog_entry *sh_resource_catalog_at(const sh_resource_catalo
     return catalog && index < catalog->count ? &catalog->rows[index] : NULL;
 }
 
-static int rc_read_payload(sh_resource_catalog *catalog,
-    const sh_resource_catalog_entry *row, unsigned char *stored)
+static int rc_read_payload(rc_archives *archives, unsigned char archive, uint64_t offset, uint32_t stored_size,
+    unsigned char *stored)
 {
     DWORD got = 0;
     LARGE_INTEGER position;
     int ok;
-    if (!row->stored_size) return 1;
-    position.QuadPart = (LONGLONG)row->offset;
-    AcquireSRWLockExclusive(&catalog->archive_lock);
-    ok = SetFilePointerEx(catalog->archives[row->archive], position, NULL, FILE_BEGIN) &&
-         ReadFile(catalog->archives[row->archive], stored, row->stored_size, &got, NULL) && got == row->stored_size;
-    ReleaseSRWLockExclusive(&catalog->archive_lock);
+    if (!stored_size) return 1;
+    position.QuadPart = (LONGLONG)offset;
+    AcquireSRWLockExclusive(&archives->lock);
+    ok = SetFilePointerEx(archives->files[archive], position, NULL, FILE_BEGIN) &&
+         ReadFile(archives->files[archive], stored, stored_size, &got, NULL) && got == stored_size;
+    ReleaseSRWLockExclusive(&archives->lock);
     return ok;
 }
 
-static int rc_read(sh_resource_catalog *catalog, const sh_resource_catalog_entry *row,
-    unsigned char **body, size_t *length, unsigned char **encoded)
+/* The decoded bytes of one stored payload: exactly size bytes and a NUL, or 0. */
+static int rc_decode(rc_archives *archives, unsigned char archive, uint64_t offset, uint32_t size,
+    uint32_t stored_size, unsigned char **body, size_t *length, unsigned char **encoded)
 {
     unsigned char *stored = NULL, *decoded = NULL;
     int ok = 0;
     if (encoded) *encoded = NULL;
-    if (row->size > RC_RESOURCE_LIMIT || row->stored_size > RC_RESOURCE_LIMIT) return 0;
-    decoded = (unsigned char *)malloc((size_t)row->size + 1u);
+    if (size > RC_RESOURCE_LIMIT || stored_size > RC_RESOURCE_LIMIT) return 0;
+    decoded = (unsigned char *)malloc((size_t)size + 1u);
     if (!decoded) goto done;
-    decoded[row->size] = 0;
-    if (!row->size) { ok = 1; goto done; }
-    stored = row->size == row->stored_size ? decoded : (unsigned char *)malloc(row->stored_size);
+    decoded[size] = 0;
+    if (!size) { ok = 1; goto done; }
+    stored = size == stored_size ? decoded : (unsigned char *)malloc(stored_size);
     if (!stored) goto done;
-    ok = rc_read_payload(catalog, row, stored);
-    if (ok && stored != decoded) ok = sh_inflate_raw(stored, row->stored_size, decoded, row->size) == row->size;
+    ok = rc_read_payload(archives, archive, offset, stored_size, stored);
+    if (ok && stored != decoded) ok = sh_inflate_raw(stored, stored_size, decoded, size) == size;
 done:
     if (stored != decoded) {
         if (ok && encoded) *encoded = stored;
         else free(stored);
     }
     if (!ok) { free(decoded); return 0; }
-    *body = decoded; *length = row->size; return 1;
+    *body = decoded; *length = size; return 1;
+}
+static int rc_read(sh_resource_catalog *catalog, const sh_resource_catalog_entry *row,
+    unsigned char **body, size_t *length, unsigned char **encoded)
+{
+    return rc_decode(catalog->archives, row->archive, row->offset, row->size, row->stored_size, body, length, encoded);
+}
+
+static sh_resource_slice *rc_slice(sh_resource_catalog *catalog, const sh_resource_catalog_entry *row)
+{
+    sh_resource_slice *slice = (sh_resource_slice *)calloc(1, sizeof(*slice));
+    if (!slice) return NULL;
+    slice->references = 1;
+    slice->archives = catalog->archives; InterlockedIncrement(&catalog->archives->references);
+    slice->archive = row->archive; slice->offset = row->offset;
+    slice->size = row->size; slice->stored_size = row->stored_size;
+    return slice;
+}
+unsigned char *sh_resource_slice_read(const sh_resource_slice *slice, size_t *length)
+{
+    unsigned char *body = NULL;
+    size_t got = 0;
+    if (length) *length = 0;
+    if (!slice || !length ||
+        !rc_decode(slice->archives, slice->archive, slice->offset, slice->size, slice->stored_size, &body, &got, NULL))
+        return NULL;
+    *length = got; return body;
+}
+size_t sh_resource_slice_length(const sh_resource_slice *slice) { return slice ? slice->size : 0; }
+int sh_resource_slice_same(const sh_resource_slice *slice, const sh_resource_slice *other)
+{
+    return slice && other && (slice == other || (slice->archives == other->archives && slice->archive == other->archive &&
+        slice->offset == other->offset && slice->size == other->size && slice->stored_size == other->stored_size));
+}
+sh_resource_slice *sh_resource_slice_retain(sh_resource_slice *slice)
+{ if (slice) InterlockedIncrement(&slice->references); return slice; }
+void sh_resource_slice_release(sh_resource_slice *slice)
+{
+    if (!slice || InterlockedDecrement(&slice->references)) return;
+    rc_archives_release(slice->archives); free(slice);
 }
 
 int sh_resource_catalog_read_entry(sh_resource_catalog *catalog, size_t index, unsigned char **body, size_t *length)
@@ -258,7 +411,36 @@ static char *rc_key(const char *text)
     return out;
 }
 
+/* Rows without a filename are provided under their resource name. Every
+ * catalog row of this kind is a zero-byte placeholder; SnapMap's rows win and
+ * divergent rows in one catalog still refuse. */
+static int rc_read_unnamed(sh_resource_catalog *catalog, const char *key, unsigned char **body, size_t *length)
+{
+    const sh_resource_catalog_entry *const *rows = NULL;
+    size_t count = sh_resource_catalog_find_provider(catalog, key, &rows), i;
+    unsigned class = 2;
+    unsigned char *first = NULL;
+    size_t first_length = 0;
+    for (i = 0; i < count; i++) if (rows[i]->archive / 2u < class) class = rows[i]->archive / 2u;
+    for (i = 0; i < count; i++) {
+        unsigned char *other = NULL;
+        size_t other_length = 0;
+        int same;
+        if (rows[i]->archive / 2u != class) continue;
+        if (!rc_read(catalog, rows[i], &other, &other_length, NULL)) { free(first); return -1; }
+        if (!first) { first = other; first_length = other_length; continue; }
+        same = first_length == other_length && (!first_length || !memcmp(first, other, first_length));
+        free(other);
+        if (!same) { free(first); return -1; }
+    }
+    if (!first) return 0;
+    *body = first; *length = first_length; return class ? 2 : 1;
+}
+
 int sh_resource_catalog_read_path(void *context, const char *path, unsigned char **body, size_t *length)
+{ return sh_resource_catalog_read_path_slice(context, path, body, length, NULL); }
+int sh_resource_catalog_read_path_slice(void *context, const char *path, unsigned char **body, size_t *length,
+    sh_resource_slice **slice)
 {
     sh_resource_catalog *catalog = (sh_resource_catalog *)context;
     size_t low = 0, high, i;
@@ -269,13 +451,16 @@ int sh_resource_catalog_read_path(void *context, const char *path, unsigned char
     size_t first_length = 0;
     if (body) *body = NULL;
     if (length) *length = 0;
+    if (slice) *slice = NULL;
     if (!catalog || !key || !key[0] || !body || !length) { free(key); return -1; }
     high = catalog->count;
     while (low < high) {
         size_t mid = low + (high - low) / 2u;
         if (strcmp(catalog->paths[mid]->path, key) < 0) low = mid + 1u; else high = mid;
     }
-    if (low == catalog->count || strcmp(catalog->paths[low]->path, key)) goto done;
+    if (low == catalog->count || strcmp(catalog->paths[low]->path, key)) {
+        result = rc_read_unnamed(catalog, key, body, length); goto done;
+    }
     initial = catalog->paths[low];
     if (!rc_read(catalog, initial, &first, &first_length, &encoded)) { result = -1; goto done; }
     for (i = low + 1u; i < catalog->count && !strcmp(catalog->paths[i]->path, key) &&
@@ -295,7 +480,9 @@ int sh_resource_catalog_read_path(void *context, const char *path, unsigned char
             if (!comparison && !(comparison = (unsigned char *)malloc(row->stored_size))) {
                 result = -1; goto done;
             }
-            if (!rc_read_payload(catalog, row, comparison)) { result = -1; goto done; }
+            if (!rc_read_payload(catalog->archives, row->archive, row->offset, row->stored_size, comparison)) {
+                result = -1; goto done;
+            }
             if (!memcmp(encoded ? encoded : first, comparison, row->stored_size)) continue;
         }
         same = rc_read(catalog, row, &other, &other_length, NULL) &&
@@ -304,6 +491,9 @@ int sh_resource_catalog_read_path(void *context, const char *path, unsigned char
         if (!same) { result = -1; goto done; }
     }
     result = catalog->paths[low]->archive / 2u ? 2 : 1;
+    /* The bytes are the first row's decode (every duplicate equals it): reading that row again through these
+     * handles repeats it. Without a slice they are simply the caller's only copy. */
+    if (slice) *slice = rc_slice(catalog, initial);
     *body = first; *length = first_length; first = NULL;
 done:
     free(first); free(encoded); free(comparison); free(key); return result;
@@ -323,6 +513,24 @@ size_t sh_resource_catalog_find_path(const sh_resource_catalog *catalog,
     }
     for (end = low; end < catalog->count && !strcmp(catalog->paths[end]->path, key); end++) {}
     if (end > low) *entries = (const sh_resource_catalog_entry *const *)(catalog->paths + low);
+    free(key); return end - low;
+}
+
+size_t sh_resource_catalog_find_provider(const sh_resource_catalog *catalog,
+    const char *path, const sh_resource_catalog_entry *const **entries)
+{
+    size_t low = 0, high, end, count = sh_resource_catalog_find_path(catalog, path, entries);
+    char *key;
+    if (count || !catalog || !entries || !(key = rc_key(path))) return count;
+    if (!*key) { free(key); return 0; }
+    high = catalog->count;
+    while (low < high) {
+        size_t mid = low + (high - low) / 2u;
+        if (strcmp(rc_legacy_provider(catalog->legacy_paths[mid]), key) < 0) low = mid + 1u; else high = mid;
+    }
+    /* No row has this filename, so every match here is an unnamed row. */
+    for (end = low; end < catalog->count && !strcmp(rc_legacy_provider(catalog->legacy_paths[end]), key); end++) {}
+    if (end > low) *entries = (const sh_resource_catalog_entry *const *)(catalog->legacy_paths + low);
     free(key); return end - low;
 }
 

@@ -456,6 +456,61 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
                              * NULL progress is allowed; callers validate the live palette vtable. */
       "48 8B C4 56 57 41 54 41 56 41 57 48 81 EC 70 07 00 00",
       0x54AEE0u },
+    { "SnapPaletteFindEntity", /* Exact-name lookup; miss returns palette+0x28 end pointer. */
+      "4C 8B DC 49 89 5B 18 49 89 53 10 57 48 83 EC 40 48 8B 79 28 "
+      "48 8D 05 ?? ?? ?? ?? 49 89 43 E8 4D 8D 4B 08 4C 8B C7 "
+      "48 B8 5D A8 39 09 C4 85 9A 93 4C 2B 41 10 48 8B 49 10",
+      0x54AB50u },
+    { "SnapPaletteFindDecl", /* Row by declaration pointer, first match or the end row; identical bytes
+                              * in both renderers (R-155b). Role default-marker seam. */
+      "48 8B 41 10 48 63 49 18 4C 69 C1 F0 06 00 00 4C 03 C0 49 3B C0 74 10 "
+      "48 39 10 74 0B 48 05 F0 06 00 00 49 3B C0 75 F0 C3",
+      0x54AB20u },
+    { "SnapMapHasEntityDecl", /* bool(map, decl): entity rows at map+0xc0, count +0xc8, row at +8;
+                               * identical bytes in both renderers (R-155b). Role identity seam. */
+      "48 8B 81 C0 00 00 00 48 63 89 C8 00 00 00 4C 8D 04 C8 49 3B C0 74 12 "
+      "48 8B 08 48 39 51 08 74 0C 48 83 C0 08 49 3B C0 75 EE 32 C0 C3 B0 01 C3",
+      0x5A4A00u },
+    { "SnapPaletteEntryConstruct", /* Native 0x6f0-byte template from snapEditorEntity. */
+      "48 89 4C 24 08 57 48 83 EC 30 48 C7 44 24 20 FE FF FF FF "
+      "48 89 5C 24 50 48 89 74 24 58 48 8B DA 48 8B F9 48 89 11 "
+      "48 83 C1 08 E8 ?? ?? ?? ?? 0F 10 05 ?? ?? ?? ?? 0F 11 87 28 01 00 00 "
+      "C7 87 38 01 00 00 00 00 80 3F",
+      0x53C3F0u },
+    { "SnapPaletteEntryValid", /* Boolean return is AL; checks entityDef and typed I/O. */
+      "48 83 EC 28 48 83 B9 C8 01 00 00 00 48 8B D1 75 ?? 48 8B 51 08 "
+      "48 8D 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? 32 C0 48 83 C4 28 C3 "
+      "48 8B 89 40 04 00 00 48 63 82 48 04 00 00 4C 8D 04 C1 49 3B C8",
+      0x4F8180u },
+    { "SnapPaletteArrayResize",
+      "48 89 4C 24 08 53 55 56 57 41 56 48 83 EC 40 48 C7 44 24 30 FE FF FF FF "
+      "8B EA 48 8B F9 85 D2 7F ?? 0F B6 41 13 33 F6 84 C0 74 ?? 2C 03 3C 01 77 "
+      "?? 48 8B 09 48 85 C9 74 ?? 8B 57 0C E8 ?? ?? ?? ?? 48 89 37 89 77 0C 89 "
+      "77 08 E9 ?? ?? ?? ?? 8B 41 0C 3B E8 0F 84 ?? ?? ?? ?? 0F B6 49 13 80 F9 "
+      "02 0F 85 ?? ?? ?? ?? 3B E8 0F 8E ?? ?? ?? ?? 0F B6 57 12 45 33 C0 8B CD "
+      "E8 ?? ?? ?? ?? 4C 8B F0 48 89 84 24 80 00 00 00 48 85 C0 75 ?? 32 C0 E9 "
+      "?? ?? ?? ?? C6 47 13 00 33 F6 89 74 24 78 39 77 08 7E ?? 0F 1F 40 00 66 "
+      "0F 1F 84 00 00 00 00 00 48 63 C6 48 69 D8 F0 06 00 00",
+      0x54B180u },
+    { "SnapPaletteDestroy",
+      "40 57 48 83 EC 30 48 C7 44 24 20 FE FF FF FF 48 89 5C 24 40 48 8B D9 0F "
+      "B6 41 5B 33 FF 84 C0 74 ?? 2C 03 3C 01 77 ?? 48 8B 49 48 48 85 C9 74 ?? "
+      "8B 53 54 E8 ?? ?? ?? ?? 90 48 89 7B 48 89 7B 54 89 7B 50 0F B6 43 43 84 "
+      "C0 74 ?? 2C 03 3C 01 77 ?? 48 8B 53 30 48 85 D2 74 ?? 48 8B 0D ?? ?? ?? "
+      "?? 48 8B 01 41 B8 10 00 00 00 FF 50 10 90 48 89 7B 30 89 7B 3C 89 7B 38 "
+      "0F B6 43 23 84 C0 74 ?? 2C 03 3C 01 77 ?? 48 8B 4B 10",
+      0x51D740u },
+    { "SnapPaletteAddPrepare",
+      "48 89 5C 24 08 57 48 83 EC 20 48 8B F9 48 8B DA 48 8B CA E8 ?? ?? ?? ?? "
+      "0F B6 47 0C",
+      0xCD7590u },
+    { "SnapPaletteFpsPrepare",
+      "48 89 5C 24 08 48 89 74 24 10 57 48 83 EC 20 48 8D BA 60 06 02 00",
+      0xCD8D80u },
+    { "SnapEntityModeCtor",
+      "48 89 4C 24 08 57 48 83 EC 40 48 C7 44 24 30 FE FF FF FF 48 89 5C 24 68 "
+      "48 8B F9 48 8D 05 ?? ?? ?? ?? 48 89 01 48 83 C1 08",
+      0xCF3190u },
     { "SnapEntityTraversalDecode", /* void(entity,data); empty palette defaults are not late additions. */
       "48 8B C4 55 57 41 56 48 8D 68 A1 48 81 EC D0 00 00 00 "
       "48 C7 45 DF FE FF FF FF 48 89 58 18 48 89 70 20 48 8B 05 ?? ?? ?? ?? "
@@ -537,6 +592,13 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "E8 ?? ?? ?? ?? 48 8B 93 98 00 00 00 48 8D 0D ?? ?? ?? ?? 45 33 C9 48 89 43 08 "
       "41 B0 01 E8 ?? ?? ?? ?? 48 89 43 10 48 83 C4 20 5B C3",
       0x4F91E0u },
+    { "VirtualMaterialLookup", /* row*(atlasContext, material). Cached native row or
+                                * name lookup; private aliases need independent associations.
+                                * Vulkan 0xe0f9d0, OpenGL 0xe013f0. */
+      "40 55 57 48 83 EC 28 48 8B EA 48 8B F9 48 85 D2 75 09 33 C0 48 83 C4 28 5F 5D C3 "
+      "48 8B 82 70 01 00 00 48 85 C0 0F 85 4C 01 00 00 48 89 5C 24 40 48 8D 15 ?? ?? ?? ?? "
+      "48 89 74 24 48 48 8D 0D ?? ?? ?? ?? 4C 89 74 24 50 41 B0 01 4C 89 7C 24 20",
+      0xE0F9D0u },
     { "MaterialVirtualTextureRebind", /* void(void). Rebuilds every material's virtual-texture
                                        * parm binding; the engine runs it after map preload
                                        * and texture reloads. Unique in both renderers:
@@ -547,6 +609,24 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "0F 1F 84 00 00 00 00 00 48 8B 4C 24 28 48 8B 0C 0F E8 ?? ?? ?? ?? FF C3 "
       "48 8D 7F 08 3B 5C 24 30 7C E6",
       0xE1B0C0u },
+    { "VirtualTextureSystemInit", /* void(idVirtualTextureSystem*). Renderer init: resets
+                                   * providers 1..31, then builds the global _vmtr in slot 1.
+                                   * Same prologue in both renderers: Vulkan 0xe18440,
+                                   * OpenGL 0xe0a340. */
+      "40 55 41 54 41 55 41 56 41 57 48 8D AC 24 20 BF FF FF B8 E0 41 00 00 E8 ?? ?? ?? ?? "
+      "48 2B E0 48 C7 45 D8 FE FF FF FF 48 89 9C 24 18 42 00 00 48 89 B4 24 20 42 00 00 "
+      "48 89 BC 24 28 42 00 00 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 85 D0 40 00 00 48 8B D9 "
+      "C6 81 ?? ?? 02 00 00 48 8B 0D ?? ?? ?? ?? 48 8B 01 C7 44 24 30 FF FF FF FF "
+      "BF 80 00 00 00 89 7C 24 28 C6 44 24 20 01 44 8D 4F A7 41 B8 00 02 00 00 48 8D 15",
+      0xE18440u },
+    { "ResourceListAdd", /* void(manager, resource). Native identity registration,
+                           * also used by static preallocation before source reads.
+                           * VK 0x1800700 / GL 0x17f3050, independently verified. */
+      "40 57 48 83 EC 40 48 C7 44 24 20 FE FF FF FF 48 89 5C 24 50 "
+      "48 89 6C 24 58 48 89 74 24 60 48 8B FA 48 8B D9 E8 ?? ?? ?? ?? "
+      "48 8B E8 48 89 44 24 28 B2 01 48 8B C8 E8 ?? ?? ?? ?? "
+      "C6 44 24 30 01 83 7F 20 00 74 0D 48 8D 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? CC",
+      0x1800700u },
     { "ResourceGenericLoad", /* void(idResource*). Read source and run native post-parse.
                              * Reconstruction belongs to its fallback path, not every load.
                             * DeclFind normally reaches this through the pending-load path;
@@ -557,6 +637,189 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "48 89 4C 24 38 48 8B 01 FF 50 10 48 8B C8 E8 ?? ?? ?? ?? 4C 8B C0 48 8B 57 08 "
       "48 8B CF E8 ?? ?? ?? ?? 48 8B CF E8 ?? ?? ?? ??",
       0x17FF5F0u },
+    { "ResourceManagerConstruct", /* Static resource-manager constructor; its LEA at
+                                   * +0x1b names the read-only vtable whose +0x68 is
+                                   * the file open. VK 0x1802970 / GL 0x17f52b0 (R-309). */
+      "48 89 4C 24 08 57 48 83 EC 30 48 C7 44 24 20 FE FF FF FF 48 89 5C 24 48 48 8B D9 "
+      "48 8D 05 ?? ?? ?? ?? 48 89 01 33 FF 89 79 08",
+      0x1802970u },
+    { "ResourceManagerOpenFile", /* idFile*(manager, name): vtable +0x68. Loose files only
+                                  * under resource_loadLooseAssets, else the containers.
+                                  * VK 0x18071f0 / GL 0x17f9b20 (R-309). */
+      "40 53 55 56 57 41 56 48 83 EC 60 48 C7 44 24 50 FE FF FF FF 48 8B FA",
+      0x18071F0u },
+    { "FileResourceLoad", /* idFileResource vtable +0x40, the whole body through the
+                           * opcode of its open-into call (SIG_MAX_PATTERN): state >= 2
+                           * calls the manager's +0x68 at +0x3c; below 2, operator new
+                           * +0xad, idFile_Memory(name) +0xc3 and open-into +0xfe.
+                           * VK 0x17f7700 / GL 0x17ea030 (R-309). */
+      "40 57 48 83 EC 40 48 C7 44 24 30 FE FF FF FF 48 89 5C 24 50 48 89 6C 24 58 48 89 74 24 68 "
+      "48 8B EA 48 8B D9 E8 ?? ?? ?? ?? 83 F8 02 7C 7A 48 8B 0D ?? ?? ?? ?? 48 8B 01 48 8B 53 08 "
+      "FF 50 68 48 8B F8 48 8B 4B 38 48 3B C1 74 10 48 85 C9 74 0B 4C 8B 01 BA 01 00 00 00 41 FF 10 "
+      "48 89 7B 38 48 83 FF 00 75 3F B9 80 01 00 00 E8 ?? ?? ?? ?? 48 89 44 24 60 48 85 C0 74 0D "
+      "48 8B C8 E8 ?? ?? ?? ?? 48 8B F8 EB 02 33 FF 48 8B 4B 38 48 3B F9 74 0F 48 85 C9 74 0A "
+      "48 8B 01 BA 01 00 00 00 FF 10 48 89 7B 38 33 C0 EB 5B B9 80 01 00 00 E8 ?? ?? ?? ?? "
+      "48 89 44 24 60 48 85 C0 74 11 48 8B 53 08 48 8B C8 E8 ?? ?? ?? ?? 48 8B F8 EB 02 33 FF "
+      "48 8B 4B 38 48 3B F9 74 0F 48 85 C9 74 0A 48 8B 01 BA 01 00 00 00 FF 10 48 89 7B 38 "
+      "48 89 6C 24 20 41 B1 01 4C 8B 43 08 48 8D 53 38 48 8B CB E8",
+      0x17F7700u },
+    { "FontRead", /* uint32_t(font, errorText), zero on success. First 18 bytes
+                    * end before the stack-probe call; VK 0x1819c30 / GL 0x180c5c0. */
+      "40 55 57 41 56 48 8D AC 24 B0 7F FF FF B8 50 81 00 00 "
+      "E8 ?? ?? ?? ?? 48 2B E0 48 C7 44 24 48 FE FF FF FF "
+      "48 89 9C 24 80 81 00 00 48 89 B4 24 88 81 00 00 "
+      "48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 85 40 80 00 00 "
+      "4C 8B F2 48 8B D9 C7 41 48 FF FF FF FF 48 8B 79 40",
+      0x1819C30u },
+    { "MaterialImageHeight", /* int(idMaterial*): the material's height (R-309 copied sizes). Flag 0x20 takes
+                              * the largest named texture; type 1, an object at +0x170 or explicit sizes take
+                              * no image; otherwise the editor image (+0x188) height. Byte-identical on VK
+                              * 0xd75b40 and GL 0xd75db0; the out-parameter order separates it from width. */
+      "40 53 48 83 EC 50 F6 41 68 20 BB 01 00 00 00 89 5C 24 60 74 ?? 4C 8D 44 24 60 89 5C 24 68 "
+      "48 8D 54 24 68 E8 ?? ?? ?? ?? 8B 54 24 60 3B D3 0F 4C D3 8B C2 48 83 C4 50 5B C3 39 99 DC 00 00 00",
+      0xD75B40u },
+    { "MaterialImageWidth", /* int(idMaterial*): the width counterpart, VK 0xd75d40 / GL 0xd75fb0. */
+      "40 53 48 83 EC 50 F6 41 68 20 BB 01 00 00 00 89 5C 24 60 74 ?? 4C 8D 44 24 68 89 5C 24 68 "
+      "48 8D 54 24 60 E8 ?? ?? ?? ?? 8B 54 24 60 3B D3 0F 4C D3 8B C2 48 83 C4 50 5B C3 39 99 DC 00 00 00",
+      0xD75D40u },
+    /* Copied-size owners (R-321, size_owners.h). Each pattern is unique on both pinned images. */
+    { "SwfSpriteSetMaterial", /* SetMaterial(sprite, name, width, height): binds +0x60, copies the material size into
+                               * +0x68 / +0x6a, then keeps each nonnegative explicit axis. VK 0x2ae8b0 / GL 0x2ad840. */
+      "48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18 57 48 83 EC 20 33 ED 41 8B F1 41 8B F8 48 8B D9 48 85 D2 "
+      "74 ?? 40 38 2A 74 ?? 41 B0 01 48 8D 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? 48 89 43 60",
+      0x2AE8B0u },
+    { "SwfScriptMaterialSet", /* idSWFScriptNativeVar_material::Set(self, object, value); the sprite is the
+                               * MovieClip object's +0xc0. VK 0x2ae2d0 / GL 0x2ad260. */
+      "40 57 48 83 EC 60 48 C7 44 24 20 FE FF FF FF 48 89 5C 24 70 48 89 B4 24 88 00 00 00 "
+      "48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 44 24 58 49 8B F8 48 8B",
+      0x2AE2D0u },
+    { "SwfScriptMaterialWidthSet", /* materialWidth::Set: explicit +0x68. VK 0x2ae440 / GL 0x2ad3d0. */
+      "48 89 5C 24 08 57 48 83 EC 20 49 8B F8 48 8B DA 48 85 D2 74 ?? 48 8B 02 48 8B CB 48 8B 15 ?? ?? ?? ?? "
+      "FF 50 08 84 C0 74 ?? 48 8B 9B C0 00 00 00 EB ?? 33 DB 48 85 DB 75 ?? 48 8D 0D ?? ?? ?? ?? 48 8B 5C 24 30 "
+      "48 83 C4 20 5F E9 ?? ?? ?? ?? 48 8B CF E8 ?? ?? ?? ?? 66 89 43 68 48",
+      0x2AE440u },
+    { "SwfScriptMaterialHeightSet", /* materialHeight::Set: explicit +0x6a. VK 0x2ae3d0 / GL 0x2ad360. */
+      "48 89 5C 24 08 57 48 83 EC 20 49 8B F8 48 8B DA 48 85 D2 74 ?? 48 8B 02 48 8B CB 48 8B 15 ?? ?? ?? ?? "
+      "FF 50 08 84 C0 74 ?? 48 8B 9B C0 00 00 00 EB ?? 33 DB 48 85 DB 75 ?? 48 8D 0D ?? ?? ?? ?? 48 8B 5C 24 30 "
+      "48 83 C4 20 5F E9 ?? ?? ?? ?? 48 8B CF E8 ?? ?? ?? ?? 66 89 43 6A 48",
+      0x2AE3D0u },
+    { "SwfScriptMaterialWidthGet", /* materialWidth::Get(self, out, object): reads +0x68 into script.
+                                    * VK 0x2a8990 / GL 0x2a7920. */
+      "48 89 5C 24 08 48 89 74 24 10 57 48 83 EC 30 33 F6 49 8B D8 89 74 24 20 48 8B FA 4D 85 C0 74 ?? "
+      "49 8B 00 48 8B CB 48 8B 15 ?? ?? ?? ?? FF 50 08 84 C0 74 ?? 48 8B 83 C0 00 00 00 EB ?? 48 8B C6 "
+      "48 85 C0 75 ?? 48 8D 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? 48 8B C7 89 37 48 89 77 08 48 8B 5C 24 40 "
+      "48 8B 74 24 48 48 83 C4 30 5F C3 0F B7 58 68 48 8B",
+      0x2A8990u },
+    { "SwfScriptMaterialHeightGet", /* materialHeight::Get: reads +0x6a. VK 0x2a88f0 / GL 0x2a7880. */
+      "48 89 5C 24 08 48 89 74 24 10 57 48 83 EC 30 33 F6 49 8B D8 89 74 24 20 48 8B FA 4D 85 C0 74 ?? "
+      "49 8B 00 48 8B CB 48 8B 15 ?? ?? ?? ?? FF 50 08 84 C0 74 ?? 48 8B 83 C0 00 00 00 EB ?? 48 8B C6 "
+      "48 85 C0 75 ?? 48 8D 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? 48 8B C7 89 37 48 89 77 08 48 8B 5C 24 40 "
+      "48 8B 74 24 48 48 83 C4 30 5F C3 0F B7 58 6A 48 8B",
+      0x2A88F0u },
+    { "SwfSpriteDestroy", /* ~idSWFSpriteInstance body, reached from vtable slot 0's scalar deleting destructor
+                           * (VK 0x2a5af0 / GL 0x2a4d50), the only direct caller. VK 0x2a5890 / GL 0x2a4a80. */
+      "40 57 48 83 EC 30 48 C7 44 24 20 FE FF FF FF 48 89 5C 24 40 48 8B D9 48 8D 05 ?? ?? ?? ?? 48 89 01 "
+      "48 8B 49 20 48 85 C9 74 ?? 48 8B D3 E8 ?? ??",
+      0x2A5890u },
+    { "HotBoxBuildGeometry", /* idRenderModelHotBox geometry from the hotSpot material size (constructor and the
+                              * scale-change update). VK 0x17460f0 / GL 0x1738d90. */
+      "48 8B C4 55 41 54 41 55 41 56 41 57 48 8D A8 58 FE FF FF 48 81 EC 80 02 00 00 48 C7 45 00 FE FF FF FF "
+      "48 89 58 10 48 89 70 18 48 89 78 20 0F 29 70 C8 0F 29 78 B8 44 0F 29 40 A8 44 0F 29 48 98 44 0F 29 50 88 "
+      "44 0F 29 98 78 FF FF FF 44 0F 29 A0 68 FF FF FF 44 0F 29 A8 58 FF FF FF 44 0F 29 B0 48 FF FF FF "
+      "44 0F 29 B8 38 FF FF FF 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 85 D0 00 00 00 48 8B F1 48 8B 81",
+      0x17460F0u },
+    { "HotBoxDestroy", /* ~idRenderModelHotBox body, from vtable slot 19. VK 0x1745d00 / GL 0x17389a0. */
+      "41 56 48 83 EC 30 48 C7 44 24 20 FE FF FF FF 48 89 5C 24 40 48 89 6C 24 48 48 89 74 24 50 48 89 7C 24 58 "
+      "4C 8B F1 48 8D 05 ?? ?? ?? ?? 48 89 01 48 8D B9 90 0E 00 00 48 8D 99 90 0E 00 00 BE 03 00 00 00 83 3F 00 "
+      "7D ?? 48 8B CB E8 ?? ?? ?? ?? 90 48 8B CB E8 ?? ?? ?? ?? 90 48 83 C3 ?? 48 83 C7 ?? 48 83 EE 01 75 ?? "
+      "49 8D 8E ?? 0F 00 00 E8 ?? ?? ?? ?? 90 49 8D 8E",
+      0x1745D00u },
+    { "HotBoxUpdateGeometry", /* vtable slot 15: rebuilds when the scale at +0xf8 differs from the saved scale,
+                               * VK +0xfc0 / GL +0xf40 (decoded, never hooked). VK 0x1747fe0 / GL 0x173ac80. */
+      "40 53 48 83 EC 20 F3 0F 10 81 F8 00 00 00 48 8B D9 0F 2E 81 ?? 0F 00 00 7A ?? 75 ?? "
+      "F3 0F 10 81 FC 00 00 00 0F 2E 81 ?? 0F 00 00 7A ?? 75 ?? F3 0F 10 81 00 01 00 00 0F 2E 81 ?? 0F 00 00 7A ??",
+      0x1747FE0u },
+    { "SnapCodexContentUpdate", /* idMenuWidget_Snap_Codex_Content vtable slot 3: lays out the info box from the
+                                 * entry material's size. VK 0x12e0460 / GL 0x12d2610. */
+      "48 8B C4 41 56 48 83 EC 60 48 C7 40 D8 FE FF FF FF 48 89 58 08 48 89 68 10 48 89 70 18 48 89 78 20 "
+      "48 8B D9 E8 ?? ?? ?? ?? 84 C0 0F 84 ?? ?? ?? ?? 48 8B 7B",
+      0x12E0460u },
+    { "DossierCodexContentUpdate", /* idMenuWidget_Dossier_Codex_Content vtable slot 3. VK 0x4d0e70 / GL 0x4d0930. */
+      "40 57 48 81 EC 80 00 00 00 48 C7 44 24 28 FE FF FF FF 48 89 9C 24 98 00 00 00 48 8B 05 ?? ?? ?? ?? "
+      "48 33 C4 48 89 44 24 70 48 8B F9",
+      0x4D0E70u },
+    { "CreditsItemLayout", /* idMenuScreen_Shell_Credits item layout(screen, data, item). VK 0xe476e0 / GL 0xe395c0. */
+      "48 8B C4 57 41 56 41 57 48 81 EC D0 00 00 00 48 C7 44 24 40 FE FF FF FF 48 89 58 08 48 89 68 10 "
+      "48 89 70 18 0F 29 70 D8 0F 29 78 C8 49 8B E8 4C 8B F2 48 8B F9 33 DB 48 89 5C 24 38 48 89 5C 24",
+      0xE476E0u },
+    { "MenuWidgetDestroy", /* ~idMenuWidget body, reached by every widget's destructor (both codex classes'
+                            * vtable slot 1). VK 0x171a860 / GL 0x170d4f0. */
+      "40 57 48 83 EC 30 48 C7 44 24 20 FE FF FF FF 48 89 5C 24 40 48 8B D9 48 8D 05 ?? ?? ?? ?? 48 89 01 "
+      "E8 ?? ?? ?? ?? 90 0F B6 83 BB 00",
+      0x171A860u },
+    { "SwfPrecacheSound", /* Paired VK/GL ABI and whole stolen prefix: 15 bytes.
+                         * VK 0x288bf0 / GL 0x2881c0. Include the lookup and
+                         * resource-name result, beyond the shared conversion
+                         * prologue. Evidence: E2 source-graph-fix-20261004. */
+      "40 57 48 83 EC 70 48 C7 44 24 28 FE FF FF FF 48 89 9C 24 80 00 00 00 "
+      "48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 44 24 60 48 8B FA C7 44 24 20 00 00 00 00 "
+      "48 8D 54 24 30 49 8B 09 E8 ?? ?? ?? ?? 90 48 8B 50 10 48 85 D2 75 04 "
+      "33 DB EB 12 41 B0 01 48 8D 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? 48 8B D8 "
+      "48 8D 4C 24 30 E8 ?? ?? ?? ?? 48 8B 53 08 C7 07 00 00 00 00 "
+      "48 8D 4C 24 30 E8 ?? ?? ?? ?? 90 48 8B D0 48 8B CF E8 ?? ?? ?? ?? "
+      "90 48 8D 4C 24 30 E8 ?? ?? ?? ?? 48 8B C7",
+      0x288BF0u },
+    { "SwfPrecacheFontFXMaterial", /* Paired VK/GL ABI and whole stolen prefix: 15 bytes.
+                         * Source evidence: E2 native-adapter-20261004. */
+      "40 57 48 83 EC 70 48 C7 44 24 28 FE FF FF FF 48 89 9C 24 90 00 00 00 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 44 24 60 48 8B FA 48 8B D9 C7 44 24 20 00 00 00 00 48 8D 54 24 30 49 8B 09 E8 ?? ?? ??",
+      0x288B50u },
+    { "SwfPlaySound", /* Paired VK/GL ABI and whole stolen prefix: 20 bytes.
+                         * Source evidence: E2 native-adapter-20261004. */
+      "40 55 56 57 48 81 EC 80 00 00 00 48 C7 44 24 40 FE FF FF FF 48 89 9C 24 B0 00 00 00 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 44 24 78 49 8B F9 48 8B DA 48 8B E9 C7 44 24 30 00 00 00 00 41 83 79 08",
+      0x2889A0u },
+    { "SwfGetLocalString", /* Paired VK/GL ABI and whole stolen prefix: 19 bytes.
+                         * Source evidence: E2 native-adapter-20261004. */
+      "48 8B C4 57 48 81 EC A0 00 00 00 48 C7 40 80 FE FF FF FF 48 89 58 08 48 89 70 18 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 84 24 98 00 00 00 48 8B DA 33 F6 89 74 24 20 41 39 71 08 75 0B 89 32 48 89",
+      0x288780u },
+    { "SwfDestroy", /* Paired VK/GL ABI and whole stolen prefix: 15 bytes.
+                         * Source evidence: E2 native-adapter-20261004. */
+      "40 57 48 83 EC 30 48 C7 44 24 20 FE FF FF FF 48 89 5C 24 40 48 89 6C 24 48 48 89 74 24 50 48 8B D9 48 8B 0D ?? ?? ?? ?? 48 85 C9 74 2A 48 8B 01 FF 90 28 02 00 00 90 48 85 C0 74 1B 48 8B 10 48",
+      0x287580u },
+    { "LocalStringDictionaryIndex", /* Paired VK/GL ABI and whole stolen prefix: 15 bytes.
+                         * Source evidence: E2 native-adapter-20261004. */
+      "41 56 48 83 EC 50 48 C7 44 24 20 FE FF FF FF 48 89 5C 24 68 48 89 74 24 70 48 89 7C 24 78 48 8B F2 4C 8B F1 BB C5 9D 1C 81 0F B6 02 84 C0 74 2A 48 8B FA 0F B6 C8 E8 ?? ?? ?? ?? 0F BE C8 33 CB",
+      0x1A29E70u },
+    { "SwfConstruct", /* idSWF*(swf, name, parent, flags): UI movie constructor.
+                        * Resolves dictionary fonts and fixed GUI materials before
+                        * returning. First 20 bytes (seven pushes, frame LEA) are
+                        * position independent; VK 0x285a50 / GL 0x285060. */
+      "40 55 56 57 41 54 41 55 41 56 41 57 48 8D AC 24 10 FE FF FF "
+      "48 81 EC F0 02 00 00 48 C7 44 24 50 FE FF FF FF 48 89 9C 24 40 03 00 00 "
+      "48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 85 E0 01 00 00 45 0F B6 E9 "
+      "4C 89 44 24 48 48 8B FA 48 8B F1 48 89 4C 24 58 48 8B 05 ?? ?? ?? ?? "
+      "48 89 01 48 83 C1 10 E8 ?? ?? ?? ?? 90 33 DB 48 89 9E D0 01 00 00 "
+      "C7 86 84 05 00 00 10 00 00 00 89 9E 80 05 00 00",
+      0x285A50u },
+    { "SwfRegisterFontFX", /* int(swf, name): dedups the swf+0x1c10 font-FX list by
+                            * material name, else appends DeclFind(materials, name).
+                            * Paired VK 0x289b80 / GL 0x2890a0 (R-309); first 15 bytes
+                            * are whole position-independent instructions. */
+      "48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18 57 48 83 EC 20 33 DB 48 8B EA 48 8B F1 "
+      "39 99 18 1C 00 00 7E 35 8B FB 66 66 0F 1F 84 00 00 00 00 00 48 8B 86 10 1C 00 00 "
+      "48 8B 14 07 48 8B 4A 08 48 8B D5 E8 ?? ?? ?? ?? 85 C0 74 68 FF C3 48 83 C7 08 "
+      "3B 9E 18 1C 00 00 7C D7 48 85 ED 74 59 45 33 C0 48 8D 0D ?? ?? ?? ?? 48 8B D5 "
+      "E8 ?? ?? ?? ?? 48 8B D8 48 85 C0 74 3F",
+      0x289B80u },
+    { "ResourcePurgeLevel", /* void(mask): the map-transition purge driver. It holds the
+                             * resource-list CRITICAL_SECTION (getter call at +0x1b, blocking
+                             * acquire at +0x2d, release at +0x59) while it walks the list-of-
+                             * lists (+0x37) and purges each list. Native add and remove hold the
+                             * same lock. VK 0x1800e10 / GL 0x17f3760 (R-309); decoded, never hooked. */
+      "40 57 48 83 EC 40 48 C7 44 24 20 FE FF FF FF 48 89 5C 24 50 48 89 74 24 58 8B F9 "
+      "E8 ?? ?? ?? ?? 48 8B F0 48 89 44 24 28 B2 01 48 8B C8 E8 ?? ?? ?? ?? C6 44 24 30 01 "
+      "48 8B 1D ?? ?? ?? ?? 48 85 DB 74 13 8B D7 48 8B CB E8 ?? ?? ?? ?? 48 8B 5B 18 48 85 DB "
+      "75 ED 48 8B CE E8 ?? ?? ?? ?? 90 48 8B 5C 24 50 48 8B 74 24 58 48 83 C4 40",
+      0x1800E10u },
     { "DeclRead", /* uint32_t(decl, errorText). The production-file branch calls
                     * the typed parser directly; implicit text returns without
                     * parsing. Independently verified VK 0x17aab70 / GL 0x179d660.
@@ -565,7 +828,56 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "48 C7 44 24 48 FE FF FF FF 48 89 9C 24 50 0A 00 00 "
       "48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 84 24 08 0A 00 00 "
       "4C 8B FA 48 8B F1 48 89 4C 24 40 48 89 54 24 38 80 79 48 00",
-      0x17AAB70u },
+        0x17AAB70u },
+    { "ShaderParmDefaultsPublish", /* Global manager fanout of one default to
+                                     * registered renderer states; VK 0x192e730 /
+                                     * GL 0x1921380. First four stack stores: 20. */
+      "48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18 48 89 7C 24 20 41 56 "
+      "48 83 EC 20 48 63 B1 90 01 01 00 33 DB 49 8B E8 4C 8B F2 48 8B F9 "
+      "48 85 F6 7E 1E 48 8B 8F 88 01 01 00 4C 8B C5 49 8B D6 48 8B 0C D9 "
+      "E8 ?? ?? ?? ?? 48 FF C3 48 3B DE 7C E2",
+      0x192E730u },
+    { "ShaderParmStateWrite", /* Native 16-byte state update plus native dirty
+                                * counters; VK 0x1930340 / GL 0x1925500. */
+      "48 89 5C 24 08 48 89 74 24 10 57 48 83 EC 20 48 63 42 68 49 8B F0 "
+      "48 8B FA 48 8B D9 44 8B 8C 81 70 94 00 00 44 85 89 7C B9 00 00 "
+      "74 07 B2 01 E8 ?? ?? ?? ?? 48 63 47 68 0F 10 06 48 83 C0 07 "
+      "48 8B 74 24 38 48 03 C0 0F 11 04 C3 48 63 4F 68 48 8B 05 ?? ?? ?? ?? "
+      "0F B7 94 48 00 4A 00 00 48 FF 03",
+      0x1930340u },
+    { "ShaderBufferFindName", /* Native structured-buffer entry lookup, before
+                                * the parser publishes pooled type text.
+                                * VK 0xdfed70 / GL 0xdf30f0; stolen 17 bytes. */
+      "48 89 6C 24 20 41 56 48 83 EC 20 4C 8B F2 48 85 D2 75 0F 83 C8 FF "
+      "48 8B 6C 24 48 48 83 C4 20 41 5E C3 48 89 5C 24 30 83 CD FF "
+      "48 89 74 24 38 33 F6 48 89 7C 24 40 8B DE 48 8D 79 08 0F 1F 40 00 "
+      "48 8B 17 48 85 D2 74 0C 49 8B CE E8 ?? ?? ?? ?? 85 C0 74 11 "
+      "FF C6 48 FF C3 48 83 C7 20 48 83 FB 10 7C DD",
+      0xDFED70u },
+    { "ShaderMetadataWrite", /* void(native metadata, idFile). Read-only native
+                               * serialization; VK 0xd80280 / GL 0xd80630.
+                               * Used only within admitted source preparation. */
+      "48 89 5C 24 10 48 89 74 24 18 48 89 7C 24 20 55 41 54 41 55 41 56 41 57 "
+      "48 8B EC 48 83 EC 30 F3 0F 10 01 48 8B FA F3 0F 11 45 30 48 8B F1 "
+      "0F B6 45 33 48 8B CF 44 0F B6 45 30 88 45 30 0F B6 45 32 44 88 45 33 "
+      "44 0F B6 45 31 88 45 31 48 8B 02 48 8D 55 30 44 88 45 32 41 B8 04 00 00 00 FF 50",
+      0xD80280u },
+    { "ShaderSourceCompile", /* Nine integer/pointer arguments, returns metadata
+                               * result. VK 0xd8e940 / GL 0xd8ed30. First 21
+                               * bytes are whole position-independent pushes/LEA. */
+      "40 55 53 56 57 41 54 41 55 41 56 41 57 48 8D AC 24 D8 89 FF FF "
+      "B8 28 77 00 00 E8 ?? ?? ?? ?? 48 2B E0 48 C7 45 E0 FE FF FF FF "
+      "48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 85 10 76 00 00 49 8B F9 4D 8B E8 "
+      "48 89 55 C8 48 89 4C 24 78",
+      0xD8E940u },
+    { "DeclSetText", /* void(decl, bytes, length). Observe the actual normalized
+                         * parser input before production Read retires it.
+                         * Independently verified VK 0x17ac910 / GL 0x179f3f0;
+                         * the first 15 bytes are three complete stack stores. */
+      "48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18 57 48 83 EC 40 "
+      "48 8B F2 33 DB 48 8B 51 38 41 8B E8 48 8B F9 48 85 D2 74 15 "
+      "48 8B 0D ?? ?? ?? ?? 44 8D 43 10 48 8B 01 FF 50 10 48 89 5F 38",
+      0x17AC910u },
     { "DeclParseSource", /* uint32_t(decl, readSource, errorText). Zero means parsed.
                             * "No text for decl" independently identifies Vulkan
                             * 0x17ab5e0 and OpenGL 0x179e0c0. Direct edit/touch paths
@@ -724,6 +1036,13 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
                             * main thread. */
       "40 57 48 83 EC 30 48 C7 44 24 20 FE FF FF FF 48 89 5C 24 40 48 89 6C 24 48 48 89 74 24 50 48 8B F2 48 8B D9",
       0x525250u },
+    { "EditorSetActive", /* Native editor activation/deactivation and state write.
+                           * Vulkan 0x529720, OpenGL 0x529050. */
+      "40 57 48 83 EC 30 48 C7 44 24 20 FE FF FF FF 48 89 5C 24 40 0F B6 FA 48 8B D9 "
+      "48 8B 0D ?? ?? ?? ?? 48 8B 01 33 D2 FF 50 48 90 80 7B 08 00 75 10 40 84 FF 74 0B "
+      "48 8B 03 33 D2 48 8B CB FF 50 08 0F B6 43 09 84 C0 75 13 40 84 FF 74 0A 48 8B CB "
+      "E8 ?? ?? ?? ?? EB 11 84 C0 74 0D 40 84 FF 75 08 48 8B CB E8 ?? ?? ?? ?? 40 88 7B 09",
+      0x529720u },
     { "MenuPump",
       "40 56 41 57 48 81 EC 18 01 00 00",
       0x1702BA0u },
@@ -815,6 +1134,27 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
     { "EntityClone",
       "48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18 57 48 83 EC 20 48 8B 81 50 01 00 00",
       0x5A6460u },
+    /* Flat idSnapEntity copy assignment; the source survives until its destructor. */
+    { "FlatEntityAssign",
+      "48 89 5C 24 08 57 48 83 EC 20 48 8B DA 48 8B F9 48 81 C2 68 01 00 00 48 81 C1 68 01 00 00",
+      0x5E9F00u },
+    /* Paired editor body lifetime boundaries. Assignment tail anchors are
+     * resolved back to their independently verified native entry prologues. */
+    { "EntityBodyCopyCtor",
+      "48 89 4C 24 08 57 48 83 EC 30 48 C7 44 24 20 FE FF FF FF 48 89 5C 24 50 48 89 74 24 58 48 8B FA 48 8B F1 48 8B 02 48 89 01 48 8D 41 08",
+      0x53D800u },
+    { "EntityBodyCopyAssignAnchor",
+      "00 00 0F 10 8B 68 04 00 00 0F 11 8E 68 04 00 00 0F 10 83 78 04 00 00 0F 11 86 78 04 00 00 0F B6 83 88 04 00 00 88 86 88 04 00 00 8B 83 8C 04 00 00 89 86 8C 04 00 00 8B 83 90 04 00 00 89 86 90 04 00 00 8B 83 94 04 00 00 89 86 94 04 00 00 8B 83 98 04 00 00 89 86 98 04 00 00 8B 83 9C 04 00 00 89 86 9C 04 00 00 8B 83 A0 04 00 00 89 86 A0 04 00 00 8B 83 A4 04 00 00 48 8D 93 80 05 00 00",
+      0x53F632u },
+    { "EntityBodyMoveAssignAnchor",
+      "04 00 00 0F 10 8B 68 04 00 00 0F 11 8E 68 04 00 00 0F 10 83 78 04 00 00 0F 11 86 78 04 00 00 0F B6 83 88 04 00 00 88 86 88 04 00 00 8B 83 8C 04 00 00 89 86 8C 04 00 00 8B 83 90 04 00 00 89 86 90 04 00 00 8B 83 94 04 00 00 89 86 94 04 00 00 8B 83 98 04 00 00 89 86 98 04 00 00 8B 83 9C 04 00 00 89 86 9C 04 00 00 8B 83 A0 04 00 00 89 86 A0 04 00 00 8B 83 A4 04 00 00 89 86 A4 04 00 00",
+      0x53EDD1u },
+    { "EntityBodyDtor",
+      "40 57 48 83 EC 30 48 C7 44 24 20 FE FF FF FF 48 89 5C 24 40 48 8B D9 48 81 C1 20 06 00 00",
+      0x2E7DC0u },
+    { "EntityFromFlat",
+      "40 53 55 56 57 48 81 EC 38 07 00 00 48 C7 44 24 20 FE FF FF FF",
+      0x5A6530u },
     { "StructSerialize",
       "4C 8B DC 57 48 81 EC 80 00 00 00 49 C7 43 B8 FE FF FF FF 49 89 5B 10 49 89 73 18",
       0x1A21B40u },
@@ -1060,12 +1400,84 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "89 03 48 8D 54 24 58 48 8B 0D ?? ?? ?? ?? 48 8B 01 FF 50 20 83 F8 01 "
       "0F 85 ?? ?? ?? ?? 8B 03 48 8D 54 24 70 33 C9",
       0x1D13500u },
+    { "AudioEventPost",     /* Index slot at +0x1a, event table at index+0x12a8.
+                             * Lookup acquires a reference; occupancy never calls it. */
+      "48 89 74 24 20 41 54 41 56 41 57 48 83 EC 30 4C 8B E2 4D 8B F1 8B D1 "
+      "45 8B F8 48 8B 0D ?? ?? ?? ?? 48 81 C1 A8 12 00 00 E8 ?? ?? ?? ?? 48 8B F0 48 85 C0",
+      0x1D13760u },
+    { "AudioBankPrepare",   /* Bank usage registry lock is the LEA at +0x26. */
+      "44 89 4C 24 20 4C 89 44 24 18 55 56 57 41 54 41 55 41 56 41 57 "
+      "48 8B EC 48 81 EC 80 00 00 00 44 8B 62 20 4C 8B E9 48 8D 0D ?? ?? ?? ?? "
+      "44 89 65 B4 45 8B F9 4D 8B F0 48 8B FA",
+      0x1D2C9D0u },
+    { "AudioThresholdSet",  /* int(float, priority); success can mean priority suppressed the write. */
+      "48 83 EC 58 0F 29 74 24 40 0F 29 7C 24 30 0F 28 F8 0F 2F 3D ?? ?? ?? ?? "
+      "0F 82 ?? ?? ?? ?? 0F 57 F6 0F 2F FE 0F 87 ?? ?? ?? ?? 3B 15 ?? ?? ?? ?? "
+      "0F 8F ?? ?? ?? ?? 44 0F 29 44 24 20 44 0F 28 C0",
+      0x1D14820u },
+    { "AudioVoiceLimitSet", /* int(u16, priority); zero is a native no-op failure. */
+      "66 85 C9 75 06 B8 1F 00 00 00 C3 3B 15 ?? ?? ?? ?? 7F 0D 89 15 ?? ?? ?? ?? "
+      "66 89 0D ?? ?? ?? ?? B8 01 00 00 00 C3",
+      0x1D14450u },
+    { "AudioRenderTick",   /* Native audio processing holds the lock from the LEA at +0x1c. */
+      "48 89 5C 24 08 48 89 6C 24 18 48 89 74 24 20 57 48 83 EC 30 48 8B F9 "
+      "0F 29 74 24 20 48 8D 0D ?? ?? ?? ?? FF 15 ?? ?? ?? ?? "
+      "48 8D 0D ?? ?? ?? ?? FF 15 ?? ?? ?? ?? 48 8B CF E8 ?? ?? ?? ?? 33 ED 8B F0 85 C0",
+      0x1D494D0u },
+    { "AudioBankDispatch", /* Common bank operation dispatcher; native queue lock is not held here. */
+      "48 89 5C 24 08 48 89 7C 24 10 55 48 8D 6C 24 A9 48 81 EC 90 00 00 00 "
+      "48 63 02 48 8B F9 BB 01 00 00 00 83 F8 0B 0F 87 ?? ?? ?? ?? "
+      "48 8D 0D ?? ?? ?? ?? 44 8B 84 81 ?? ?? ?? ?? 4C 03 C1 41 FF E0",
+      0x1D2C030u },
+    { "AudioStateSettingsRead", /* Shared STMG controls; group rules are distinct from runtime state. */
+      "40 55 53 48 8B EC 48 83 EC 68 BB 01 00 00 00 85 D2 0F 84 ?? ?? ?? ?? "
+      "48 89 7C 24 60 44 8D 43 03 48 8D 79 08 4C 89 7C 24 50 48 8B CF "
+      "48 8D 55 D4 E8 ?? ?? ?? ?? F3 0F 10 45 D4 BA 02 00 00 00 8B D8 E8 ?? ?? ?? ?? 83 FB 01",
+      0x1D2EB70u },
+    { "AudioAuxBusCreate", /* Auxiliary bus constructor; its shared construction also builds normal buses. */
+      "48 89 5C 24 08 57 48 83 EC 20 8B F9 BA 68 01 00 00 8B 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? "
+      "48 8B D8 48 85 C0 74 35 8B D7 48 8B C8 E8 ?? ?? ?? ?? 48 8D 05 ?? ?? ?? ?? 48 8B CB 48 89 03 "
+      "48 8D 05 ?? ?? ?? ?? 48 89 43 18 E8 ?? ?? ?? ?? 83 F8 01 74 16",
+      0x1D6B8E0u },
+    { "AudioStateGroupEnsure", /* Native detached group construction from a manager table prefix. */
+      "48 89 6C 24 10 48 89 74 24 18 48 89 7C 24 20 41 56 48 83 EC 20 "
+      "48 8B 01 8B F2 44 8B 41 08 4C 8B F1 49 C1 E0 04 BF 01 00 00 00 "
+      "4C 03 C0 49 3B C0 74 0D 39 30 74 09 48 83 C0 10 49 3B C0 75 F3",
+      0x1D28900u },
+    { "AudioParameterEnsure", /* Parameter hash table construction; active consumers remain separate. */
+      "48 89 5C 24 08 57 48 83 EC 20 8B DA B8 49 09 39 15 F7 E2 44 8B C3 "
+      "48 8B F9 C1 EA 04 69 C2 C1 00 00 00 44 2B C0 4A 8B 04 C1 48 85 C0 74 1A "
+      "66 90 39 18 74 0B 48 8B 40 08 48 85 C0 75 F3 EB 09 48 85 C0 0F 85 85 00 00 00 "
+      "8B 0D ?? ?? ?? ?? BA 70 00 00 00 E8 ?? ?? ?? ??",
+      0x1D1A340u },
+    { "AudioParameterDestroy", /* Full detached node disposal, including subscriber/value storage. */
+      "48 8B C4 48 89 58 08 48 89 70 10 57 48 83 EC 50 33 F6 C6 40 E0 FF "
+      "48 8D 50 C8 89 70 D0 89 70 D8 48 8B D9 48 89 70 F0 48 89 70 C8 C6 40 E8 FF "
+      "E8 ?? ?? ?? ?? 48 8D 4B 20 E8 ?? ?? ?? ?? 48 8B 53 50 48 85 D2 74 15",
+      0x1D18B10u },
+    { "AudioEnvironmentRead", /* Six global curves; native reader ignores curve setter failure. */
+      "48 83 EC 68 48 83 3D ?? ?? ?? ?? 00 75 0A B8 02 00 00 00 48 83 C4 68 C3 "
+      "48 89 5C 24 70 48 89 6C 24 78 48 89 74 24 60 48 89 7C 24 58 "
+      "4C 89 64 24 50 4C 89 74 24 48 4C 89 7C 24 40 85 D2 0F 84 ?? ?? ?? ?? "
+      "45 33 FF 4C 8D 71 08 45 33 E4",
+      0x1D2E9C0u },
+    { "AudioEnvironmentSet", /* Native allocation and first-column curve conversion. */
+      "48 89 5C 24 08 48 89 74 24 10 57 48 83 EC 20 48 63 C2 45 8B D1 "
+      "44 8B 4C 24 58 48 8B 54 24 50 49 63 F8 45 8B C2 48 8D 34 40 "
+      "48 03 F7 48 C1 E6 04 48 03 F1 48 8D 4E 08 E8 ?? ?? ?? ?? 8B D8 "
+      "83 F8 01 75 0F 85 FF 75 0B 48 8D 4E 08 E8 ?? ?? ?? ?? 8B C3",
+      0x1D523F0u },
     { "AudioBankUnload",    /* int(id, memory=NULL, outPool=NULL), synchronous release.
                              * Only release a bank whose new load we own. */
       "48 89 5C 24 08 48 89 74 24 10 57 48 81 EC B0 00 00 00 8B F1 48 8B FA "
       "48 8B 0D ?? ?? ?? ?? 48 8D 54 24 58 49 8B D8 48 8B 01 FF 50 20 83 F8 01 "
       "0F 85 ?? ?? ?? ?? 48 8B 0D ?? ?? ?? ?? 48 8D 54 24",
       0x1D14E70u },
+    { "SoundEventInitialize", /* void(sound*): shared parse, event-table constructor,
+                                * and preview initializer. Name +8 becomes event +0xac. */
+      "48 8B C4 55 41 56 41 57 48 8D A8 48 FE FF FF 48 81 EC A0 02 00 00 "
+      "48 C7 44 24 20 FE FF FF FF 48 89 58 10 48 89 70 18 48 89 78 20",
+      0x184D3B0u },
     { "SoundPreview",       /* void*(world,outHandle,name), sound-world vtable +0x30.
                              * Editor audition sets solo/listener state and allocates an emitter;
                              * stop the previous handle before starting another. An empty/missing
@@ -1188,6 +1600,25 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "40 55 56 57 41 56 41 57 48 81 EC 60 01 00 00 48 C7 44 24 40 FE FF FF FF "
       "48 89 9C 24 98 01 00 00 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 84 24 50 01 00 00 "
       "49 8B E9 49 8B F0 48 8B FA 4C 8B F9 48 8B 9C 24 B0 01 00 00", 0 },
+    /* Module picker publication (module_ribbon_native.c), verified in both
+     * images: the blueprint add mode's tick, VK CE6150 / GL CE5B30. */
+    { "ModuleModeAddTick",
+      "48 8B C4 55 56 57 41 54 41 55 41 56 41 57 48 8D 68 A1 48 81 EC 00 01 00 00 "
+      "48 C7 44 24 58 FE FF FF FF 48 89 58 20 0F 29 70 B8 0F 29 78 A8 44 0F 29 40 98 48 8B 05 ?? ?? ?? ??", 0 },
+    /* Its sort cycle: rebuild, current record from the preview instance, ribbon
+     * scroll and item refresh (calls at +10, +47, +66, +85). VK CE65DF / GL CE5FBF. */
+    { "ModuleRibbonSortCycle",
+      "44 8B 46 60 48 8B D7 48 8B CE E8 ?? ?? ?? ?? 48 63 46 08 48 69 D0 98 00 00 00 "
+      "48 8B 87 C8 04 02 00 48 03 90 50 07 00 00 48 8D 8F C0 06 02 00 E8 ?? ?? ?? ?? "
+      "48 8B 8F 88 10 02 00 48 8B 89 C0 09 00 00 E8 ?? ?? ?? ?? "
+      "48 8B 8F 88 10 02 00 48 8B 89 C0 09 00 00 E8 ?? ?? ?? ??", 0 },
+    /* The module palette's record insert; its call at +0x74 is the record
+     * list's resize. VK 5B3B70 / GL 5B3260. */
+    { "ModuleRecordInsert",
+      "4C 8B DC 41 54 41 56 41 57 48 83 EC 40 49 C7 43 C8 FE FF FF FF 49 89 5B 08 49 89 6B 10 "
+      "49 89 73 18 49 89 7B 20 4D 8B F8 48 63 FA 48 8B F1 48 63 41 08 8D 58 01 8B 49 0C 3B D9 "
+      "0F 8E ?? ?? ?? ?? 4C 8B 26 48 69 E8 98 00 00 00 49 03 EC 8B C1 D1 F8 03 C8 8B D3 3B CB "
+      "0F 4D D1 33 C0 C7 44 24 38 00 00 05 00 49 89 43 D0", 0 },
     /* Replace one compiled instance and recompute native portal connections.
      * Vulkan 5993A0/59DA90; OpenGL 598B10/59D200. */
     { "GridReplaceInstance",
@@ -1275,6 +1706,78 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "4C 8B C6 48 8B D7 48 8B CB E8 ?? ?? ?? ?? 48 85 C0 74 ?? 4C 8D 80 90 00 "
       "00 00 0F 28 CE 48 8B CB E8 ?? ?? ?? ?? B0 01 48 8B 5C 24 40 48 8B 74 24 "
       "48", 0 },
+    /* Spawn-type dispatch (spawn_keys.c), bodies equal in both images apart
+     * from call and global displacements: the spawn manager's entry selection
+     * (VK 0x1123830, GL 0x1115610), the global modifier lookup (VK 0x110faa0,
+     * GL 0x1101890) and the AI filter test (VK 0x1268070, GL 0x1259f70). */
+    { "SpawnSelectEntry",
+      "48 8B C4 41 54 41 56 41 57 48 83 EC 40 48 C7 40 C8 FE FF FF FF 48 89 58 08 48 89 68 10 "
+      "48 89 70 18 48 89 78 20 44 8B E2 4C 8B F9 33 ED C7 40 E0 00 00 05 00", 0 },
+    { "SpawnGlobalModifier",
+      "48 89 74 24 10 57 48 83 EC 50 48 8B F2 4C 89 44 24 20 48 8B F9 E8 ?? ?? ?? ?? 48 63 8F 18 22 00 00 "
+      "85 C9 0F 8E ?? ?? ?? ?? 48 89 5C 24 60 45 33 C0 48 8B 9F 10 22 00 00 85 43 08", 0 },
+    { "SnapFilterAiMatches",
+      "48 89 5C 24 08 48 89 74 24 10 57 48 83 EC 20 48 8B F2 48 8B D9 8B 91 A4 0C 00 00 83 FA FF 74 26 "
+      "48 8B 05 ?? ?? ?? ?? 4C 8B 80 28 81 29 00 49 8B 48 48 E8 ?? ?? ?? ?? 48 8B D0 48 8B CB E8", 0 },
+    /* idSnapTypeInfoCache: Build, Get and Find (VK 0x5f2b00 / 0x5f2dc0 /
+     * 0x5f2ff0, GL 0x5f2700 / 0x5f29c0 / 0x5f2bf0; snap_type_cache.c). */
+    { "SnapTypeCacheBuild",
+      "40 56 57 41 56 B8 70 12 00 00 E8 ?? ?? ?? ?? 48 2B E0 48 C7 44 24 48 FE FF FF FF 48 89 9C 24 98 12 00 00 "
+      "48 89 AC 24 A0 12 00 00 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 84 24 60 12 00 00 48 8B D9 83 39 00 "
+      "0F 85 CB 01 00 00 48 8B 0D ?? ?? ?? ?? 48 8B 01 FF 90 28 02 00 00", 0x5f2b00 },
+    { "SnapTypeCacheGet",
+      "40 55 56 57 41 54 41 55 41 56 41 57 B8 90 12 00 00 E8 ?? ?? ?? ?? 48 2B E0 48 C7 44 24 50 FE FF FF FF "
+      "48 89 9C 24 E8 12 00 00 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 84 24 80 12 00 00 49 8B E8 4C 89 44 24 30 "
+      "4C 8B E2 48 8B D1 48 89 4C 24 48 33 F6 89 74 24 38 49 8B 58 58", 0x5f2dc0 },
+    { "SnapTypeCacheFind",
+      "48 89 5C 24 08 57 48 83 EC 20 48 8B FA 48 8B D9 E8 ?? ?? ?? ?? 3B 03 75 1C 48 8B 17 48 8D 0D ?? ?? ?? ?? "
+      "E8 ?? ?? ?? ?? 33 C0 48 8B 5C 24 30 48 83 C4 20 5F C3 48 98 48 8D 04 C0 48 8D 80 DD 05 00 00 48 8D 04 C3", 0x5f2ff0 },
+    /* Private entityDef definition and context written text (native_decl_eval.c;
+     * R-191): constructor GL 0x179f6d0 and written-text
+     * getter GL 0x1a17cf0. */
+    { "DeclEntityDefCtor",
+      "48 89 4C 24 08 57 48 83 EC 30 48 C7 44 24 20 FE FF FF FF 48 89 5C "
+      "24 48 48 8B D9 E8 ?? ?? ?? ?? 90 48 8D 05 ?? ?? ?? ?? 48 89 03 48 8B 05", 0x17acbf0 },
+    { "ContextWrittenText",
+      "48 8B 81 18 10 00 00 48 85 C0 75 "
+      "08 48 8D 05 ?? ?? ?? ?? C3 48 8B 80 68", 0x1a25930 },
+    /* The entityDef parent lookups (native_decl_eval.c, M62): Parse's call
+     * (VK 0x17ad689 / GL 0x17a0169) and the root-first inheritance merge's
+     * (VK 0x17aec67 / GL 0x17a1747), each lookup(entityDef list, name, 0).
+     * Unique in both unpacked images; resolved by content only because
+     * they are redirected. */
+    { "DeclEntityDefParseParentCall",
+      "E8 ?? ?? ?? ?? 4C 8B F8 48 85 C0 0F 84 ?? ?? ?? ?? 48 8B 0D ?? ?? ?? ?? 4C 8B 09", 0 },
+    { "DeclEntityDefMergeParentCall",
+      "E8 ?? ?? ?? ?? 48 8B D8 48 85 C0 74 2A 48 8B D7", 0 },
+    /* Model<idSnapBitFlagInspector> build and apply (key_inspector.c). */
+    { "BitFlagInspectorBuild",
+      "40 55 56 57 41 54 41 55 41 56 41 57 48 81 EC 90 00 00 00 48 C7 44 24 50 FE FF FF FF 48 89 9C 24 E0 00 00 00 "
+      "48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 84 24 88 00 00 00 4C 89 44 24 40 48 89 54 24 48 4C 8B E1 48 8D 4C 24 58 "
+      "E8 ?? ?? ?? ?? 90 49 8B 04 24 41 B1 01 4C 8D 44 24 58 49 8B 54 24 10 48 8B 08 E8", 0x5c25c0 },
+    { "BitFlagInspectorApply",
+      "40 57 48 83 EC 60 48 C7 44 24 20 FE FF FF FF 48 89 5C 24 78 48 89 B4 24 80 00 00 00 48 8B 05 ?? ?? ?? ?? "
+      "48 33 C4 48 89 44 24 58 48 8B F1 44 8B 41 38 8B 79 3C F7 D7 41 23 F8 83 79 28 00 7E 29 48 8B 41 20 8B 51 28", 0x5cf600 },
+    /* AI FSM web builder (fsm_web.c): its only call site, the decl-0 and per-index
+     * aifsmmanager list lookups inside it, the decl-0 lookup of its cache replay
+     * (called at builder+0x74), and its cache gate (the integer value of cvar
+     * ai_fsm_allowCache, default 1). Independently matched on Vulkan/OpenGL:
+     * builder 0x108BFB0/0x107DB20, call 0x650868/0x6506A8, lookups 0x108C03E/
+     * 0x107DBAE and 0x108C1B9/0x107DD29, replay lookup 0x108BA29/0x107D599.
+     * No pinned-image RVA fallback. */
+    { "FsmWebBuilder",
+      "48 89 4C 24 08 55 56 57 41 54 41 55 41 56 41 57 48 8D AC 24 E0 FB FF FF 48 81 EC 20 05 00 00 "
+      "48 C7 45 D0 FE FF FF FF 48 89 9C 24 68 05 00 00 48 8B DA 4C 8B E1", 0 },
+    { "FsmWebBuildCall",
+      "48 8B 93 20 C1 00 00 48 81 C2 58 05 00 00 48 8D 8B B8 23 01 00 E8 ?? ?? ?? ?? 84 C0 75 2D", 0 },
+    { "FsmWebDeclFirstCall",
+      "48 8B 03 49 89 45 00 33 D2 48 8D 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? 4C 8B F0", 0 },
+    { "FsmWebDeclAtCall",
+      "66 0F 1F 44 00 00 8B D6 48 8D 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? 4C 8B F8", 0 },
+    { "FsmWebCacheFlag",
+      "48 89 45 A0 83 3D ?? ?? ?? ?? 00 40 0F 95 C7", 0 },
+    { "FsmWebReplayFirstCall",
+      "4C 8B FA 4C 8B F1 33 D2 48 8D 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? 4C 8B E8 48 89 45 FF 48 85 C0", 0 },
     { "StartMenuBind", /* VK 0xd18470, GL 0xd17bd0. */
       "48 89 5C 24 20 55 48 83 EC 20 48 8B E9 48 89 7C 24 38 48 8B 89 C8 01 00 00 4C 89 74 24 40 4C 8B F2 48 8B 01 FF 50 18 33 DB 41 39 5E 08 7E 29 33 FF", 0 },
     { "StartMenuAction", /* VK 0x534a10, GL 0x534330. */
@@ -1313,5 +1816,11 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "40 57 48 83 EC 70 48 C7 44 24 28 FE FF FF FF 48 89 9C 24 90 00 00 00 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 44 24 60 48 8B DA 48 8B F9 48 8B CA E8 ?? ?? ?? ??", 0 },
     { "SwfPlayFrame", /* VK 0x2ac0b0, GL 0x2ab040. */
       "48 89 5C 24 08 57 48 83 EC 20 8B DA 48 8B F9 E8 ?? ?? ?? ?? BA 01 00 00 00 48 8B CF 3B DA 0F 4F D3 E8 ?? ?? ?? ?? 48 8B 47 30 48 85 C0 74 0E 90", 0 },
+    /* idGameLocal::InitFromNewMap's snapshot-template list copy (snapshot_templates.c, R-398 perf17):
+     * MOV [RBP-0x60],0x850000 .. CALL idResourceList get-all at VK 0x324c89 / GL 0x324669. The
+     * refetch at +0x12d and get-all's prologue are verified at install. */
+    { "SnapshotTemplateList",
+      "C7 45 A0 00 00 85 00 4C 89 65 90 4C 89 65 98 45 33 C0 48 8D 55 90 48 8D 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? "
+      "45 8B EC 44 39 65 98 0F 8E ?? ?? ?? ?? 4D 8B F4 BF 01 00 00 00 48 8B 45 90 49 8B 34 06", 0x324c89u },
     { NULL, NULL, 0 }   /* terminator */
 };

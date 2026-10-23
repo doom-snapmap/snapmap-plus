@@ -19,6 +19,7 @@ static char           g_name[64] = { 0 };
 static INIT_ONCE      g_resolved = INIT_ONCE_STATIC_INIT;
 static INIT_ONCE      g_fingerprinted = INIT_ONCE_STATIC_INIT;
 static int            g_pinned = 0;
+static int            g_pinned_renderer = -1;
 static const char * volatile g_renderer = NULL;   /* "vulkan"/"opengl" once definite; NULL until then */
 
 static const char *basename_of(const char *path)
@@ -75,20 +76,24 @@ static void resolve_once(void)
 
 /* Hash the file, not loaded code: relocations and installed detours must not
  * change build identity. Opening without write sharing pins the bytes we read. */
-static int file_is_pinned(const wchar_t *path)
+static int file_renderer(const wchar_t *path)
 {
-    static const unsigned char hashes[][32] = {
-        {0x13,0x97,0x63,0xe9,0x4f,0x1a,0x75,0xb5,0x31,0x01,0x79,0xf9,0xee,0xeb,0x8a,0x94,
-         0x9a,0x1f,0x53,0xc4,0x9a,0xcb,0xc7,0x22,0xfc,0xfc,0x5d,0xfe,0x7b,0xb6,0xd3,0x23},
-        {0x5a,0xd2,0x54,0x8c,0xea,0xb3,0xdf,0xa2,0x7f,0x27,0x1e,0x38,0x12,0x22,0xca,0x4a,
-         0x84,0xdc,0xac,0x7c,0xb8,0x3c,0xce,0x94,0x46,0x44,0x4c,0x30,0xc8,0x30,0x93,0x67}
+    static const struct { unsigned char hash[32]; int vulkan; } builds[] = {
+        {{0x13,0x97,0x63,0xe9,0x4f,0x1a,0x75,0xb5,0x31,0x01,0x79,0xf9,0xee,0xeb,0x8a,0x94,
+          0x9a,0x1f,0x53,0xc4,0x9a,0xcb,0xc7,0x22,0xfc,0xfc,0x5d,0xfe,0x7b,0xb6,0xd3,0x23}, 1},
+        {{0x5a,0xd2,0x54,0x8c,0xea,0xb3,0xdf,0xa2,0x7f,0x27,0x1e,0x38,0x12,0x22,0xca,0x4a,
+          0x84,0xdc,0xac,0x7c,0xb8,0x3c,0xce,0x94,0x46,0x44,0x4c,0x30,0xc8,0x30,0x93,0x67}, 1},
+        {{0xd4,0x6c,0xa9,0x67,0x82,0x4d,0xa6,0xff,0xc4,0x0f,0x1c,0xe0,0xb6,0xd7,0xf4,0xaf,
+          0xa8,0x68,0xfe,0x12,0xb7,0x95,0x12,0x4d,0x3e,0x31,0xa1,0xbd,0xb6,0x46,0xa8,0xe5}, 0},
+        {{0xff,0xd0,0xba,0x84,0xad,0x5f,0x29,0x66,0x03,0x92,0x7a,0x57,0x6a,0xc5,0xce,0x6c,
+          0x68,0x3a,0x3a,0x6d,0x8f,0xaf,0xc2,0x6b,0x50,0xb2,0x8d,0xb2,0x08,0x2a,0xbc,0x03}, 0}
     };
     HANDLE file = INVALID_HANDLE_VALUE;
     BCRYPT_ALG_HANDLE algorithm = NULL;
     BCRYPT_HASH_HANDLE hash = NULL;
     unsigned char bytes[64 * 1024], digest[32];
     DWORD count;
-    int matched = 0;
+    int matched = -1;
     file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING,
                        FILE_FLAG_SEQUENTIAL_SCAN, NULL);
     if (file == INVALID_HANDLE_VALUE) goto done;
@@ -100,8 +105,8 @@ static int file_is_pinned(const wchar_t *path)
         if (BCryptHashData(hash, bytes, count, 0) < 0) goto done;
     }
     if (BCryptFinishHash(hash, digest, sizeof digest, 0) < 0) goto done;
-    for (size_t i = 0; i < sizeof hashes / sizeof hashes[0]; i++)
-        if (!memcmp(digest, hashes[i], sizeof digest)) matched = 1;
+    for (size_t i = 0; i < sizeof builds / sizeof builds[0]; i++)
+        if (!memcmp(digest, builds[i].hash, sizeof digest)) matched = builds[i].vulkan;
 done:
     if (hash) BCryptDestroyHash(hash);
     if (algorithm) BCryptCloseAlgorithmProvider(algorithm, 0);
@@ -117,7 +122,10 @@ static BOOL CALLBACK fingerprint_host(PINIT_ONCE once, PVOID arg, PVOID *context
     resolve_once();
     if (!g_base) return TRUE;
     count = GetModuleFileNameW(NULL, path, (DWORD)(sizeof path / sizeof path[0]));
-    if (count && count < sizeof path / sizeof path[0]) g_pinned = file_is_pinned(path);
+    if (count && count < sizeof path / sizeof path[0]) g_pinned_renderer = file_renderer(path);
+    /* Legacy callers own Vulkan-only fallback RVAs. Recognizing OpenGL must
+     * never authorize those addresses against the other executable. */
+    g_pinned = g_pinned_renderer == 1;
     return TRUE;
 }
 
@@ -145,13 +153,21 @@ int sh_host_is_pinned_rva_build(void)
     return g_pinned;
 }
 
+int sh_host_is_pinned_renderer_build(int vulkan)
+{
+    InitOnceExecuteOnce(&g_fingerprinted, fingerprint_host, NULL, NULL);
+    return (vulkan == 0 || vulkan == 1) && g_pinned_renderer == vulkan;
+}
+
 #ifdef SH_HOST_IMAGE_TESTING
 static const uint8_t *g_test_pinned_base;
 int sh_host_test_bind_pinned_image(const uint8_t *base, const wchar_t *path)
 {
-    g_test_pinned_base = base && path && file_is_pinned(path) ? base : NULL;
+    g_test_pinned_base = base && path && file_renderer(path) == 1 ? base : NULL;
     return g_test_pinned_base != NULL;
 }
+int sh_host_test_file_renderer(const wchar_t *path)
+{ return path ? file_renderer(path) : -1; }
 #endif
 
 int sh_host_is_pinned_rva_image(const uint8_t *base)

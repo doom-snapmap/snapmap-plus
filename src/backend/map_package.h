@@ -15,12 +15,13 @@
 #include <limits.h>
 #include "package_compiler.h"
 #include "package_legacy.h"
+#include "package_bundle.h"
 /* Configure before map interception starts; callback owns catalog lifetime. */
 void sh_mpkg_set_legacy_reader(sh_package_legacy_reader reader, void *context);
 
 /* Format constants -- keep in lockstep with src/map_package.py. */
 #define SH_MPKG_DIGEST_CHARS   16          /* sha256 hexdigest prefix length */
-#define SH_MPKG_ID_CAP         128         /* package id buffer (incl NUL) */
+#define SH_MPKG_ID_CAP         SH_PACKAGE_BUNDLE_KEY_CAP /* transport, not authored ID */
 #define SH_MPKG_MAX_SHARDS     ((unsigned)INT_MAX / SH_MPKG_SHARD_CHARS + 1u)
 #define SH_MPKG_MAX_CHUNK      65536       /* b64 chars per shard (py emits 8192) */
 /* Only a representation bound: base64 must fit a signed native idStr. The
@@ -28,7 +29,7 @@ void sh_mpkg_set_legacy_reader(sh_package_legacy_reader reader, void *context);
 #define SH_MPKG_MAX_PAYLOAD    ((size_t)(INT_MAX / 4) * 3u)
 #define SH_MPKG_SHARD_CHARS    8192        /* b64 chars WRITTEN per shard; 16384 failed
                                               * to deserialize, so this is a measured cap */
-#define SH_MPKG_HEADER_CAP     192         /* "smpkg." + id + two indices + digest + NUL */
+#define SH_MPKG_HEADER_CAP     (SH_MPKG_ID_CAP + 64u) /* transport plus trailing fields */
 #define SH_MPKG_ERR_CAP        256
 
 /* One declared package, summarised from the shard headers (the cheap
@@ -50,11 +51,13 @@ typedef struct sh_mpkg_decl {
  * on allocation failure or insufficient caller capacity; never a partial set. */
 size_t sh_mpkg_scan(const char *json, size_t len, sh_mpkg_decl *out, size_t cap);
 
-/* Reassemble one declared package's packed payload from the buffer,
+/* Reassemble one declared package's complete archive from the buffer,
  * verifying the digest. Same refusals as py extract(): inconsistent
  * headers, duplicate shard, incomplete set, bad base64, digest mismatch,
- * not present. Returns a HeapAlloc'd buffer (caller HeapFrees) + *out_len,
- * or NULL with the reason in `err`. */
+ * not present. A carrier stored as an exact delta of the map's other
+ * deliveries (map_package_share.h) is rebuilt and verified byte for byte;
+ * any invalid, missing or mismatched part refuses it. Returns a HeapAlloc'd
+ * buffer (caller HeapFrees) + *out_len, or NULL with the reason in `err`. */
 unsigned char *sh_mpkg_extract(const char *json, size_t len, const char *pkg_id,
                                size_t *out_len, char *err, size_t err_cap);
 
@@ -66,8 +69,13 @@ int sh_mpkg_unpack(const unsigned char *payload, size_t len, const char *dest_di
                    unsigned *files_out, char *err, size_t err_cap);
 
 /* Private map sources, separate from the installed overrides library. Opening
- * validates every archive and retains complete authored trees. No installation,
- * consent or native activation occurs. A vanilla map has an empty context.
+ * validates every archive and retains complete authored trees. A reference
+ * shard whose complete tree is installed (the boot snapshot, a session install
+ * or the compiled library, matched by tree digest, never by id or name) is laid
+ * out in the context from that installed tree, so a record that composed it
+ * compiles; a reference nobody has stays a reference for the load to degrade.
+ * No installation, consent or native activation occurs. A vanilla map has an
+ * empty context.
  * Keep the context alive while its provider or save operation uses its paths.
  * Close only after retiring that provider; failure retains the handle for retry.
  */
@@ -76,11 +84,22 @@ sh_mpkg_context *sh_mpkg_context_open(const char *data_root, const char *json, s
     char *error, size_t capacity);
 const char *sh_mpkg_context_root(const sh_mpkg_context *context);
 size_t sh_mpkg_context_count(const sh_mpkg_context *context);
+/* Borrowed complete original archives and their exact normalized source owners.
+ * Attach them to an unpublished runtime plan before activation. */
+const sh_package_bundle_binding *sh_mpkg_context_bundles(const sh_mpkg_context *context,
+    size_t *count);
+/* The exact transport id of the carrier unpacked for bundles[index]. Private
+ * owner folders are context-local ordinals that never stand for authorship. */
+const char *sh_mpkg_context_carrier(const sh_mpkg_context *context, size_t index);
 int sh_mpkg_context_close(sh_mpkg_context **context);
 /* Only after the provider has released this context: transfer temporary-file
  * cleanup to the retry queue. A filesystem lock must not block the next map. */
 void sh_mpkg_context_retire(sh_mpkg_context **context);
 void sh_mpkg_context_collect(void);
+/* Release this process's shared copies of complete trees (package-cache/maps/map-<tree digest>/tree), which
+ * live contexts' folders are hard-linked to; the folders keep their files. For teardown: the startup sweep of a
+ * later process reclaims the copies a dead process left. */
+void sh_mpkg_shared_trees_release(void);
 
 /* Capture authored source identities at startup and retain the installation
  * destination. Exact source rechecks reject removed or changed package trees.
@@ -145,10 +164,117 @@ char *sh_mpkg_embed(const char *json, size_t len, const char *pkg_id,
                     const unsigned char *payload, size_t payload_len,
                     size_t *out_len, char *err, size_t err_cap);
 
+/* Embed a complete set of deliveries, in order, each under its own key with
+ * its exact complete archive. A later delivery whose archive shares enough
+ * exact bytes with earlier ones is stored as a delta of them where that at
+ * least halves its transport shards (map_package_share.h); otherwise, and for
+ * any set that shares nothing, the result equals consecutive sh_mpkg_embed
+ * calls. A reader
+ * before shared carriers has no delta decoder. Replacing a carrier
+ * that an existing delta reads makes the delta unreadable, so callers embed
+ * complete sets into documents without carriers. Returns a HeapAlloc'd buffer
+ * or NULL with the reason; *failed_item names the item that failed, if any. */
+typedef struct sh_mpkg_delivery {
+    const char *id;                 /* transport key */
+    const unsigned char *archive;   /* exact complete original archive, borrowed */
+    size_t length;
+} sh_mpkg_delivery;
+char *sh_mpkg_embed_set(const char *json, size_t len, const sh_mpkg_delivery *items, size_t count,
+                        size_t *out_len, size_t *failed_item, char *err, size_t err_cap);
+
 /* The first 16 hex characters of the payload's sha256 -- the digest
  * that goes in the internal shard header. */
 void sh_mpkg_digest16(const unsigned char *payload, size_t len,
                       char out[SH_MPKG_DIGEST_CHARS + 1]);
+
+/* THE REFERENCE CARRIER (level L2). A delivery that does not fit the map
+ * travels as one shard "smpref.<key>.<digest16>" whose base64 body is a small
+ * JSON object naming the package for a reader without it: descriptor id,
+ * display name, author and homepage from package.json when present, the
+ * packed archive size and its full sha256. key is the delivery's complete-tree
+ * transport key, so a reader matches an installed package by tree identity;
+ * digest16 is the body's own sha256 prefix. A vanilla client ignores the
+ * variable like any other; Snapmap+ strips it before the engine parses. */
+#define SH_MPREF_MAGIC        "smpref."
+#define SH_MPREF_AUTHOR_CAP   128
+#define SH_MPREF_HOMEPAGE_CAP 256
+/* One delivery fits the map when its packed archive is within both bounds.
+ * The complete text is bounded separately (map_capacity.h). */
+#define SH_MPKG_DELIVERY_BUDGET_BYTES  ((size_t)8u << 20)
+#define SH_MPKG_DELIVERY_BUDGET_SHARDS 2048u
+typedef struct sh_mpkg_reference {
+    char key[SH_MPKG_ID_CAP];
+    char digest[SH_MPKG_DIGEST_CHARS + 1];
+    char id[SH_PACKAGE_ID_CAP];
+    char name[SH_PACKAGE_DISPLAY_CAP];
+    char author[SH_MPREF_AUTHOR_CAP];
+    char homepage[SH_MPREF_HOMEPAGE_CAP];
+    char sha256[65];
+    unsigned long long packed;
+    unsigned char tree[32];
+    int tree_known;                 /* key named a complete tree */
+} sh_mpkg_reference;
+/* Describe a delivery from its exact archive: the descriptor supplies id,
+ * name and the optional "author" and "homepage" strings. */
+int sh_mpkg_reference_describe(const char *key, const unsigned char *archive, size_t length,
+                               sh_mpkg_reference *out, char *err, size_t err_cap);
+/* Write one reference, replacing any reference or delivery carried under the
+ * same key. Returns a HeapAlloc'd buffer or NULL with the reason. */
+char *sh_mpkg_reference_embed(const char *json, size_t len, const sh_mpkg_reference *reference,
+                              size_t *out_len, char *err, size_t err_cap);
+/* Every reference in the map, each verified against its digest. Returns the
+ * count, or SIZE_MAX for a malformed reference, allocation failure or
+ * insufficient capacity; never a partial set. */
+size_t sh_mpkg_reference_scan(const char *json, size_t len, sh_mpkg_reference *out, size_t cap);
+/* Strip every reference. NULL keeps the original (nothing to strip or the
+ * structure did not read). */
+char *sh_mpkg_reference_strip(const char *json, size_t len, size_t *out_len);
+/* Shard count one packed archive needs. */
+size_t sh_mpkg_shards_for(size_t payload_len);
+
+/* Embed a set within the budgets. A delivery over the per-package bounds, or
+ * whose embedding would put the text over text_limit (0: unbounded), travels
+ * as a reference instead, largest first until the rest fit. referenced[i] is
+ * set for each item that did not travel inside the map; existing references
+ * are removed first. Returns a HeapAlloc'd buffer or NULL with the reason. */
+char *sh_mpkg_embed_within(const char *json, size_t len, const sh_mpkg_delivery *items, size_t count,
+                           size_t text_limit, int *referenced, size_t *out_len, size_t *failed_item,
+                           char *err, size_t err_cap);
+
+/* The complete trees of references whose package is neither installed nor
+ * installed this session (a map opened without that content). Returns the
+ * count, writing at most cap; SIZE_MAX for malformed references. */
+size_t sh_mpkg_reference_missing(const char *json, size_t len, unsigned char (*trees)[32], size_t cap);
+
+/* Whether the game itself (the stock resource catalog) ships the declaration
+ * family/name: 1 yes (SnapMap or campaign-only), 0 no, -1 cannot tell. */
+typedef int (*sh_mpkg_stock_fn)(void *context, const char *family, const char *name);
+
+/* Opening without a referenced package the player lacks, for this load only
+ * (the saved file is untouched): the uses whose contexts name that package's
+ * tree leave the binding record; a use whose saved name is a private identity
+ * of the compile that made it goes back to its authored name in the text (JSON
+ * string literals only); and an entity whose use names an identity nobody here
+ * supplies (not stock, not another present context) leaves the document with
+ * every reference to its uniqueId (instance attribution, logic wires,
+ * reference rows, door slots), the remaining uses renumbered. A shadowed stock
+ * identity stays as stock. Each entity left out is logged. *json is a
+ * process-heap buffer and is replaced when anything changed. Returns 1
+ * (nothing missing, or degraded), 0 when the record could not be read or
+ * rewritten, the stock question could not be answered, an identity the map
+ * itself uses outside an entity would have to go, or the entity tables could
+ * not be rewritten consistently. */
+int sh_mpkg_degrade_absent_references(char **json, size_t *length, sh_mpkg_stock_fn stock, void *stock_context);
+
+/* Load-time admission of references. 1: every reference names an installed
+ * package or one already opened without this session, nothing to ask. 0: one
+ * notice naming the package, its author and homepage is staged for the engine
+ * tick; completion reports 1 to open the map without the content or 0 to
+ * cancel, exactly once, never synchronously. -1: malformed references or a
+ * notice that could not be staged, with error set. A NULL completion stages the
+ * same notice for a later explicit load (the gate route). */
+int sh_mpkg_request_reference_consent(const char *json, size_t len,
+    sh_mpkg_install_completion completion, void *context, char *error, size_t capacity);
 
 #ifdef SH_MAP_PACKAGE_TESTING
 /* Consent modes: production stages an engine modal; tests decide
@@ -174,7 +300,24 @@ int sh_mpkg_test_session_installed_count(void);
  * modal is raised into, and answered out of, the live dialog queue, neither of
  * which a worker thread may touch. No-op when no package is awaiting consent. */
 void sh_mpkg_consent_poll(void);
-/* Queue a native acknowledgement from any thread; engine UI runs on tick. */
-void sh_mpkg_report_error(const char *message);
+/* Player notices describe the operation, never internal paths, identifiers or
+ * parser diagnostics. The complete diagnostic goes to the backend log.
+ * Queue from any thread; engine UI runs on tick. */
+typedef enum sh_mpkg_problem {
+    SH_MPKG_PROBLEM_OPEN,
+    SH_MPKG_PROBLEM_SAVE,
+    SH_MPKG_PROBLEM_PLAY,
+    SH_MPKG_PROBLEM_INSTALL,
+    SH_MPKG_PROBLEM_CONTENT,
+    SH_MPKG_PROBLEM_PREFAB,
+    SH_MPKG_PROBLEM_MODS_DISABLED,
+    /* The product's own binding record in a map it saved could not be read
+     * back or bound: a product defect, never a damaged map. */
+    SH_MPKG_PROBLEM_RECORD
+} sh_mpkg_problem;
+void sh_mpkg_report_error(sh_mpkg_problem problem, const char *diagnostic);
+/* One short author-facing notice in the author's own words about the map, such
+ * as which package will not travel inside it. Logged and shown once. */
+void sh_mpkg_report_notice(const char *text);
 
 #endif /* BACKEND_MAP_PACKAGE_H */

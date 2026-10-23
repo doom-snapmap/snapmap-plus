@@ -195,7 +195,12 @@ static int pm_rows(sh_package_migration *m, const char *path, const char *body, 
             const char *old;
             if (strcmp(line, "cvar") || (strcmp(a, "g_useResourceBlackList") && strcmp(a, "g_useImageBlackList")) || strcmp(b, "0")) goto invalid;
             old = sh_json_object_get(&m->cvars, a);
-            if (old && strcmp(old, "0")) { pm_error(m, "%s:%zu: conflicting requirement '%s'", path, number, a); goto done; }
+            if (old && strcmp(old, "0") && strcmp(old, "1") && strcmp(old, "false") && strcmp(old, "true")) {
+                pm_error(m, "%s:%zu: invalid requirement '%s'", path, number, a); goto done;
+            }
+            /* A legacy literal-zero row opens this audited gate even when
+             * the descriptor makes no request. Original delivery stays owned
+             * by the adapter; only this normalized policy becomes zero. */
             if (!sh_json_object_set(&m->cvars, a, "0", 24)) goto done;
         }
         continue;
@@ -210,7 +215,7 @@ done:
 static int pm_weapon_name(const char *s)
 {
     const char *p;
-    if (!pm_field(s, 0, 192)) return 0;
+    if (!pm_field(s, 0, SIZE_MAX)) return 0;
     for (p = s; *p; p++) if (!((*p >= 'a' && *p <= 'z') || (*p >= '0' && *p <= '9') ||
         *p == '/' || *p == '-' || *p == '_' || *p == '.')) return 0;
     return 1;
@@ -386,7 +391,10 @@ char *sh_package_migration_finish(sh_package_migration *m, size_t *length)
     if (!m || m->failed) return NULL;
     for (i = 0; i < m->cvars.count; i++) {
         const sh_json_member *v = &m->cvars.members[i];
-        if ((strcmp(v->key, "g_useResourceBlackList") && strcmp(v->key, "g_useImageBlackList")) || strcmp(v->value_json, "0")) {
+        if (v->key_length != strlen(v->key) ||
+            (strcmp(v->key, "g_useResourceBlackList") && strcmp(v->key, "g_useImageBlackList")) ||
+            (strcmp(v->value_json, "0") && strcmp(v->value_json, "1") &&
+                strcmp(v->value_json, "false") && strcmp(v->value_json, "true"))) {
             pm_error(m, "unsupported cvar requirement '%s'", v->key); goto done;
         }
     }
@@ -399,7 +407,6 @@ char *sh_package_migration_finish(sh_package_migration *m, size_t *length)
         int valid = mode && pm_weapon_name(m->weapons.members[i].key);
         free(mode); if (!valid) { pm_error(m, "invalid HUD rule"); goto done; }
     }
-    if (m->weapons.count > 256) { pm_error(m, "too many HUD rules"); goto done; }
     if (m->cvars.count && (!pm_store(m, &m->requirements, "cvars", &m->cvars) ||
         !pm_store(m, &m->descriptor, "requirements", &m->requirements))) goto done;
     if (m->english.count && (!pm_store(m, &m->strings, "en", &m->english) ||

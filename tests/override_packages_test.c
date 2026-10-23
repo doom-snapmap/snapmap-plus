@@ -7,6 +7,23 @@
 #include "overrides.h"
 #include "package_runtime.h"
 #include "resource_graph.h"
+#include "resource_graph_native.h"
+#include "package_runtime.h"
+static int source_failure, source_recovered, source_consumer, source_input;
+int sh_resource_graph_native_source_target(char family[128],char name[4096])
+{
+    if (!source_failure) return 0;
+    strcpy_s(family,128,"entitydef"); strcpy_s(name,4096,"ai/cyber"); return 1;
+}
+int sh_resource_graph_native_source_fault_target(void **object,uint64_t *token)
+{ *object=&source_consumer; *token=1; return 1; }
+int sh_resource_graph_native_source_fault_input(void **object,uint64_t *token)
+{ *object=&source_input; *token=2; return 1; }
+int sh_resource_graph_native_source_fault_recovered(void *object,uint64_t token)
+{ return source_recovered && object==&source_consumer && token==1; }
+int sh_resource_graph_native_source_observed(const char *family,const char *name,
+    sh_package_resource_capture *capture,int baseline)
+{ (void)family;(void)name;(void)baseline;sh_package_runtime_resource_capture_release(capture);return source_failure ? -1 : 0; }
 #include "package_fixture.h"
 #include "../src/backend/overrides_baked.h"
 
@@ -17,6 +34,14 @@ void backend_log(const char *message)
 }
 
 static int user_layer_enabled = 1;
+static int cook_input_mode;
+int sh_resource_graph_native_cook_input(const char *path,unsigned char **body,size_t *length)
+{
+    (void)path;*body=NULL;*length=0;
+    if(!cook_input_mode)return 0;
+    if(cook_input_mode<0)return -1;
+    *body=(unsigned char *)_strdup("captured original");*length=strlen((char *)*body);return 1;
+}
 int sh_user_overrides_enabled_for_launch(void)
 {
     return user_layer_enabled;
@@ -288,6 +313,56 @@ static void test_activation_rollback(void)
     CHECK(sh_overrides_rescan_packages() == 4);
 }
 
+/* The resource manager's file route (R-309) claims exactly what an ordinary
+ * open serves, never chains to the engine, and receives its claimed stream
+ * through a handoff that only the same name pointer on the same thread takes. */
+typedef struct handoff_open { const char *name; void *stream; } handoff_open;
+static DWORD WINAPI handoff_other_thread(LPVOID context)
+{
+    handoff_open *open = context;
+    open->stream = sh_overrides_test_open(open->name, 0);
+    return 0;
+}
+static void test_claim_handoff(void)
+{
+    static const char name[] = "generated/image/demon.bimage";
+    char copy[sizeof(name)], bytes[32] = {0};
+    void *stream = NULL, *again;
+    handoff_open other = {name, NULL};
+    HANDLE thread;
+    CHECK(!sh_overrides_claim_open("missing.bin", &stream) && !stream);
+    CHECK(!sh_overrides_claim_open(NULL, &stream) && !stream);
+    CHECK(sh_overrides_claim_open(name, &stream) == 1 && stream);
+    if (!stream) return;
+    CHECK(sh_overrides_test_stream_read(stream, bytes, sizeof bytes) == 11 && !strcmp(bytes, "image bytes"));
+    sh_overrides_test_stream_close(stream);
+    CHECK(sh_overrides_claim_open(name, &stream) == 1 && stream);
+    if (!stream) return;
+    sh_overrides_pending_open(name, stream);
+    memcpy(copy, name, sizeof(name));
+    again = sh_overrides_test_open(copy, 0);   /* equal text, another pointer: claimed afresh */
+    CHECK(again && again != stream);
+    if (again) sh_overrides_test_stream_close(again);
+    CHECK(!sh_overrides_test_open(name, 2));   /* the mode guard never receives it */
+    thread = CreateThread(NULL, 0, handoff_other_thread, &other, 0, NULL);
+    CHECK(thread && WaitForSingleObject(thread, 30000) == WAIT_OBJECT_0);
+    if (thread) CloseHandle(thread);
+    CHECK(other.stream && other.stream != stream);
+    if (other.stream) sh_overrides_test_stream_close(other.stream);
+    CHECK(sh_overrides_test_open(name, 0) == stream);
+    CHECK(!sh_overrides_pending_take());
+    sh_overrides_test_stream_close(stream);
+    /* An unconsumed handoff returns to its owner, who closes it. */
+    CHECK(sh_overrides_claim_open(name, &stream) == 1 && stream);
+    sh_overrides_pending_open(name, stream);
+    CHECK(sh_overrides_pending_take() == stream);
+    if (stream) sh_overrides_stream_close(stream);
+    /* An owned name that is unavailable is claimed without a stream. */
+    cook_input_mode = -1;
+    CHECK(sh_overrides_claim_open(name, &stream) == 1 && !stream);
+    cook_input_mode = 0;
+}
+
 static void test_all_builtin_defaults(void)
 {
     size_t i;
@@ -519,6 +594,47 @@ static void test_private_outputs(void)
     CHECK(sh_overrides_rescan_packages() == 2);
 }
 
+static void test_failed_source_opening(void)
+{
+    const char *path="generated/decls/entitydef/ai/cyber.decl";
+    const char *body="{ class = \"idAI\"; }";
+    char authored[4096], parked[4096], bytes[128], error[128];
+    snprintf(authored,sizeof(authored),"%s/overrides/cyberdemon/assets/%s",root,path);
+    snprintf(parked,sizeof(parked),"%s/retained-source.decl",root);
+    source_failure=1; source_recovered=0;
+    void *stream=sh_overrides_test_open(path,0); CHECK(stream);
+    if (!stream) { source_failure=0; return; }
+    void **table=*(void ***)stream;
+    CHECK(((long long(*)(void*,void*,uint64_t))table[5])(stream,bytes,sizeof(bytes))==(long long)strlen(body));
+    CHECK(sh_overrides_test_pending_source_count()==1);
+    ((void *(*)(void*,unsigned))table[0])(stream,1);
+    CHECK(sh_overrides_test_pending_source_count()==1);
+    source_failure=0;
+    CHECK(MoveFileA(authored,parked));
+    create("overrides/cyberdemon/assets/generated/image/demon.bimage","new unrelated image");
+    unsigned long retained_count=sh_overrides_rescan_packages();
+    if (retained_count!=3) {
+        sh_package_runtime_error(error,sizeof(error));
+        fprintf(stderr,"retained SOURCE package count=%lu error=%s\n",retained_count,error);
+    }
+    CHECK(retained_count==3); /* Two current units plus the exact retired author variant. */
+    CHECK(matches(path,body)); /* The consumer still needs the exact retired opening. */
+    CHECK(matches("generated/image/demon.bimage","new unrelated image"));
+    void *inputs[]={&source_input};
+    CHECK(!sh_overrides_source_receipts_admit(inputs,1,error,sizeof(error)));
+    CHECK(sh_package_runtime_admission_ready());
+    source_recovered=1;
+    sh_overrides_collect_source_receipts();
+    CHECK(!sh_overrides_test_pending_source_count());
+    CHECK(sh_overrides_source_receipts_admit(inputs,1,error,sizeof(error)));
+    CHECK(sh_overrides_rescan_packages()==2);
+    CHECK(!sh_overrides_test_open(path,0));
+    CHECK(MoveFileA(parked,authored));
+    create("overrides/cyberdemon/assets/generated/image/demon.bimage","image bytes");
+    CHECK(sh_overrides_rescan_packages()==2);
+    CHECK(matches(path,body));
+}
+
 int main(void)
 {
     char temp[MAX_PATH];
@@ -552,6 +668,22 @@ int main(void)
     CHECK(matches("generated/image/demon.bimage", "image bytes"));
     CHECK(matches("cooked/model/demon.bmodel", "model bytes"));
     CHECK(matches("md6/demon.md6rig", "rig bytes"));
+    test_failed_source_opening();
+    /* Preparation inputs take precedence over a healthy published provider.
+     * Missing captured input must never silently borrow that provider's file. */
+    cook_input_mode=1;
+    CHECK(matches("generated/image/demon.bimage", "captured original"));
+    void *captured=sh_overrides_test_open("generated/image/demon.bimage",0);
+    CHECK(captured);
+    cook_input_mode=-1;
+    CHECK(!sh_overrides_test_open("generated/image/demon.bimage",0));
+    cook_input_mode=0;
+    CHECK(matches("generated/image/demon.bimage", "image bytes"));
+    char captured_bytes[32]={0};
+    CHECK(captured && sh_overrides_test_stream_read(captured,captured_bytes,sizeof(captured_bytes))==17);
+    CHECK(!strcmp(captured_bytes,"captured original"));
+    if(captured)sh_overrides_test_stream_close(captured);
+    test_claim_handoff();
     {
         char bytes[32768];
         size_t read = 0;
@@ -755,3 +887,7 @@ int main(void)
 }
 int sh_navmesh_validate_aas(const unsigned char *p,size_t n,char *e,size_t cap)
 {(void)p;(void)n;if(e&&cap)e[0]=0;return 0;}
+
+/* This fixture models source/VT capture, not native DEFAULT consumers. */
+int sh_resource_graph_native_observe_resource(void *resource)
+{ (void)resource; sh_resource_graph_incomplete(); return 0; }

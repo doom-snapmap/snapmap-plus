@@ -18,6 +18,7 @@
 
 #include "backend_log.h"
 #include "decl_visibility.h"
+#include "prepare_worker.h"
 #include "host_image.h"
 #include "engine_globals.h"  /* the manager slot, resolved from the code site that computes it */
 #include "overrides.h"
@@ -115,7 +116,14 @@ static unsigned char dv_probe_hook(void *self, const char *path, void *out1,
     return dv_path_is_published(path) > 0 ? (unsigned char)1 : (unsigned char)0;
 }
 
-int sh_decl_visibility_source_exists(const char *path)
+static int dv_native_exists_engine(const char *path);
+static intptr_t dv_native_exists_thunk(void *p) { return dv_native_exists_engine((const char *)p); }
+int sh_decl_visibility_native_exists(const char *path)
+{
+    if (sh_prepare_on_worker()) return (int)sh_prepare_engine(dv_native_exists_thunk, (void *)path);
+    return dv_native_exists_engine(path);
+}
+static int dv_native_exists_engine(const char *path)
 {
     uint64_t offset = 0, size = 0, stored_size = 0;
     unsigned char compressed = 0, present;
@@ -123,7 +131,13 @@ int sh_decl_visibility_source_exists(const char *path)
     __try {
         present = g_orig_probe(g_manager, path, &offset, &size, &stored_size, &compressed, 1);
     } __except (EXCEPTION_EXECUTE_HANDLER) { return -1; }
-    return present ? 1 : dv_path_is_published(path);
+    return present ? 1 : 0;
+}
+
+int sh_decl_visibility_source_exists(const char *path)
+{
+    int present = sh_decl_visibility_native_exists(path);
+    return present ? present : dv_path_is_published(path);
 }
 
 /* Require a clean SIG_OK match at the slot address. A hooked known-RVA

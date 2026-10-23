@@ -224,7 +224,13 @@ static void string_dtor(void *p)
 static void *get_type(void *r,const char *name)
 {assert(r==registry_object&&!strcmp(name,"snapModuleInfo"));return registry_object;}
 static void *find_source(void *r,const char *name)
-{assert(r==registry_object&&strstr(name,"smpgrid/v1/"));return registry_object;}
+{assert(r==registry_object&&(strstr(name,"smpgrid/v1/")||!strncmp(name,"smp/",4)));return registry_object;}
+/* The served library's identities, for module variant admission. */
+static int serves=1;static unsigned serves_calls;
+int sh_package_runtime_serves_native_identity(const char *type,const char *name)
+{assert(type&&name);++serves_calls;
+ assert(!strcmp(type,"snapmodule")?!strncmp(name,"maps/modules/smp/",17):!strcmp(type,"snapmoduleinfo")&&!strncmp(name,"smp/",4));
+ return serves;}
 static unsigned char register_file(void *r,const void *name,void *unused)
 {(void)r;(void)name;(void)unused;assert(0);return 0;}
 static void *find_decl(void *r,const char *name,unsigned char create)
@@ -253,7 +259,17 @@ static unsigned char load_variant(void *palette,void *palette_decl,void *palette
     assert(*(unsigned*)(p+0x60)==0x50000&&*(unsigned*)(p+0x78)==0x50000);
     assert(*(int*)(heap_state+0xc4)>=1&&*(int*)(heap_state+0xc4)<=2);strcpy(copy,name);
     *(void**)record=wrapper;*(void**)wrapper=module;*(void**)(module+8)=copy;
-    {sh_grid_size size;assert(sh_grid_parse_name(name,&size));geometry(module,&size);}
+    /* LoadModule preserves the render-palette name and palette owner in its
+     * wrapper. A package variant of a Grid Room reads those native fields. */
+    *(const char **)(wrapper+0x18)=*(const char **)(stock_wrappers[1]+0x18);
+    *(void **)(wrapper+0x90)=palette_decl;
+    {sh_grid_size size;char base[300];
+        if(!sh_grid_parse_name(name,&size)){
+            /* A module variant has its base module's geometry. */
+            assert(variant_base(name,base,sizeof base));
+            if(!sh_grid_parse_name(base,&size))sh_grid_default(SH_GRID_MODERN,&size);
+        }
+        geometry(module,&size);}
     *(void**)(wrapper+0x80)=allocate(0x240);*(void**)(wrapper+0x88)=allocate(0x80);
     *(void**)(p+0x10)=record;*(int*)(p+0x18)=1;
     *(void**)(p+0x68)=wrapper;*(int*)(p+0x70)=1;++loads;return 1;
@@ -299,12 +315,40 @@ int main(void)
         editor[8]=1;assert(loads==3&&catalog_loads==3);}
     /* Already parsed catalogs are never torn down. Empty in-progress objects
      * and source loads that still lack geometry must not reach the loader. */
-    catalog_empty=0;assert(catalog("smpgrid/v1/m/1536_1024_512")&&catalog_loads==3);
+    catalog_empty=0;assert(catalog("smpgrid/v1/m/1536_1024_512",1)&&catalog_loads==3);
     catalog_empty=1;catalog_state=1;
-    assert(!catalog("smpgrid/v1/m/1536_1024_512")&&catalog_loads==3);
+    assert(!catalog("smpgrid/v1/m/1536_1024_512",1)&&catalog_loads==3);
     catalog_state=2;catalog_fail=1;
-    assert(!catalog("smpgrid/v1/m/1536_1024_512")&&catalog_loads==4);
+    assert(!catalog("smpgrid/v1/m/1536_1024_512",1)&&catalog_loads==4);
     catalog_state=0;catalog_fail=0;
+    /* A package module variant loads like a Grid Room into its own palette from
+     * its base module's wrapper, and only while the library serves it and its
+     * card. A variant of a Grid Room reaches its base through the Grid route. */
+    {const char *stock_variant="maps/modules/smp/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        "/ind_dlc/ind_totally_blank_room_4x.decl";
+     const char *grid_variant="maps/modules/smp/fedcba9876543210/smpgrid/v1/m/1536_1024_512.decl";
+     unsigned prior=loads,checks;void *record,*grid_record;char base[300];
+     assert(variant_base(stock_variant,base,sizeof base)&&!strcmp(base,"maps/modules/ind_dlc/ind_totally_blank_room_4x.decl"));
+     assert(!variant_base("maps/modules/smp/0123/ind_dlc/x.decl",base,sizeof base));
+     assert(!variant_base("maps/modules/smp/0123456789abcdef/smp/0123456789abcdef/x.decl",base,sizeof base));
+     assert(!variant_base("maps/modules/ind_dlc/ind_totally_blank_room_4x.decl",base,sizeof base));
+     serves=0;checks=serves_calls;
+     assert(!sh_grid_native_variant_record(stock_variant)&&loads==prior&&!variant_find(stock_variant));
+     assert(serves_calls>checks&&!has_variant(editor+0x206c0,stock_variant));
+     serves=1;record=sh_grid_native_variant_record(stock_variant);
+     assert(record&&loads==prior+1&&sh_grid_native_variant_record(stock_variant)==record&&loads==prior+1);
+     assert(has_variant(editor+0x206c0,stock_variant)&&find_variant(editor+0x206c0,stock_variant)==record);
+     assert(sh_grid_native_variant_wrapper(*(void**)record)&&!sh_grid_native_variant_wrapper(stock_wrappers[1]));
+     assert(!sh_grid_native_variant_wrapper(*(void**)a)&&!sh_grid_native_variant_wrapper(NULL));
+     assert(*(unsigned*)((char*)**(void***)record+0x28)==4);
+     grid_record=sh_grid_native_variant_record(grid_variant);
+     assert(grid_record&&grid_record!=record&&loads==prior+2);
+     /* The Grid base was already loaded; the variant did not load it again. */
+     assert(sh_grid_native_wrapper(&compact)==a);
+     /* Malformed or nested names are not variants and reach the stock lookup. */
+     assert(!sh_grid_native_variant_record("maps/modules/smp/0123/ind_dlc/x.decl"));
+     assert(*(int*)(heap_state+0xc4)==0);
+    }
     assert(*(int*)(heap_state+0xc4)==0&&constructors==destructors);
     assert(*(unsigned*)((char*)*(void**)a+0x28)==4);
     assert(*(unsigned*)((char*)*(void**)b+0x28)==4);
@@ -316,6 +360,13 @@ int main(void)
         assert(grid_build_collision(editor,map_data,0));
         assert(*(unsigned*)(collision_resources[0]+0x28)==4&&*(unsigned*)(collision_resources[1]+0x28)==4);
         assert(*(int*)(heap_state+0xc4)==0);
+        {variant_entry *entry=g_variants;unsigned char *wrapper;
+            while(entry&&entry->state!=2)entry=entry->next;
+            assert(entry);wrapper=*(unsigned char**)entry->record;
+            *(void**)placed[1]=wrapper;*(unsigned*)(collision_resources[0]+0x28)=1;
+            assert(grid_build_collision(editor,map_data,1));
+            assert(*(unsigned*)(collision_resources[0]+0x28)==4&&*(int*)(heap_state+0xc4)==0);
+            *(void**)(wrapper+0x68)=*(void**)(wrapper+0x70)=NULL;}
         *(void**)placed[1]=stock_wrappers[1];assert(grid_build_collision(editor,map_data,1));
         assert(!*(void**)(stock_wrappers[1]+0x68)&&!*(void**)(stock_wrappers[1]+0x70));
         *(void**)placed[1]=b;

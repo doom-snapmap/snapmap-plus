@@ -11,6 +11,7 @@
 #include <stdarg.h>
 #include <stdlib.h>
 #include <shlobj.h>
+#include <intrin.h>
 #pragma comment(lib, "shell32.lib")   /* SHGetFolderPathA */
 #include "overrides.h"
 #include "backend_log.h"
@@ -19,6 +20,10 @@
 #include "packages.h"
 #include "package_runtime.h"
 #include "resource_graph.h"
+#include "resource_graph_native.h"
+#include "resource_instances.h"
+#include "virtual_texture_provider.h"
+#include "package_shader_receipt.h"
 #include "grid_room_asset.h"
 #include "user_overrides.h"
 #include "navmesh.h"                /* baked AI navigation, served under the module's own names */
@@ -49,6 +54,9 @@ typedef void *(*open_fn_t)(void *self, const char *name, unsigned char b1, unsig
 
 static open_fn_t  g_orig_open  = NULL;   /* the saved engine resource-open (the slot's original value) */
 static void     **g_slot       = NULL;   /* the live vtable slot we patched (for uninstall) */
+static PVOID volatile g_file_return_observer;
+static PVOID volatile g_file_open_guard;
+static SRWLOCK g_file_observer_lock=SRWLOCK_INIT;
 static volatile LONG g_shadow_count = 0;
 typedef struct ov_internal_decl {
     char *name;                   /* exact lower-case decltree/<type>/<name>.decl */
@@ -59,6 +67,11 @@ typedef struct ov_internal_decl {
 static SRWLOCK g_internal_lock = SRWLOCK_INIT;
 static ov_internal_decl *g_internal_decls;
 static size_t g_internal_decl_count;
+/* The published keys' positions in key order (R-398): the engine opens every
+ * decltree source by name and each registration pass asks about every
+ * candidate, so a lookup is a binary search instead of a walk of ~6,000 keys.
+ * NULL only when its allocation failed; lookups then walk the table. */
+static size_t *g_internal_index;
 static volatile LONG g_internal_decl_table_state;
 
 enum {
@@ -347,6 +360,18 @@ static ov_stream *make_stream(FILE *fp, long long length, const char *name)
     return s;
 }
 
+void *sh_overrides_stream_take_file(FILE *file, uint64_t length, const char *name)
+{
+    ov_stream *stream = NULL;
+    if (file && name && *name && length <= LLONG_MAX &&
+        InterlockedCompareExchange(&g_stream_helpers_state, OV_STREAM_HELPERS_NEW,
+            OV_STREAM_HELPERS_NEW) == OV_STREAM_HELPERS_READY &&
+        _fseeki64(file, 0, SEEK_SET) == 0)
+        stream = make_stream(file, (long long)length, name);
+    if (!stream && file) fclose(file);
+    return stream;
+}
+
 /* Construct a MEMORY-backed stream over `buf`/`length`. owns_buf=1 hands the (heap) buffer to the
  * stream's dtor; owns_buf=0 leaves it (the static baked text). NULL on alloc failure. */
 static ov_stream *make_mem_stream(const unsigned char *buf, long long length, const char *name, int owns_buf)
@@ -358,6 +383,19 @@ static ov_stream *make_mem_stream(const unsigned char *buf, long long length, co
     s->pos      = 0;
     s->owns_buf = owns_buf;
     return s;
+}
+
+void *sh_overrides_stream_copy_bytes(const void *bytes, size_t length, const char *name)
+{
+    if ((!bytes && length) || length > LLONG_MAX || !name || !*name ||
+        InterlockedCompareExchange(&g_stream_helpers_state, OV_STREAM_HELPERS_NEW,
+            OV_STREAM_HELPERS_NEW) != OV_STREAM_HELPERS_READY) return NULL;
+    unsigned char *owned = HeapAlloc(GetProcessHeap(), 0, length ? length : 1u);
+    if (!owned) return NULL;
+    if (length) memcpy(owned, bytes, length);
+    ov_stream *stream = make_mem_stream(owned, (long long)length, name, 1);
+    if (!stream) HeapFree(GetProcessHeap(), 0, owned);
+    return stream;
 }
 
 /* Resource names normally map to overrides/<name>. The shader-include branch
@@ -447,8 +485,74 @@ static void ov_internal_decl_table_free(ov_internal_decl *entries, size_t count)
     HeapFree(GetProcessHeap(), 0, entries);
 }
 
+static int __cdecl ov_internal_index_compare(void *context, const void *a, const void *b)
+{
+    const ov_internal_decl *table = (const ov_internal_decl *)context;
+    return strcmp(table[*(const size_t *)a].name, table[*(const size_t *)b].name);
+}
+/* Positions 0..count of table (every name present) in key order; NULL on allocation failure. */
+static size_t *ov_internal_index_build(const ov_internal_decl *table, size_t count)
+{
+    size_t *index;
+    if (!count || count > SIZE_MAX / sizeof(*index)) return NULL;
+    if (!(index = (size_t *)HeapAlloc(GetProcessHeap(), 0, count * sizeof(*index)))) return NULL;
+    for (size_t i = 0; i < count; i++) index[i] = i;
+    qsort_s(index, count, sizeof(*index), ov_internal_index_compare, (void *)table);
+    return index;
+}
+/* The table position holding exactly key, or SIZE_MAX. */
+static size_t ov_internal_index_find(const ov_internal_decl *table, const size_t *index, size_t count, const char *key)
+{
+    size_t low = 0, high = count;
+    if (!index) {
+        for (size_t i = 0; i < count; i++) if (table[i].name && !strcmp(key, table[i].name)) return i;
+        return SIZE_MAX;
+    }
+    while (low < high) {
+        size_t middle = low + (high - low) / 2;
+        int order = strcmp(key, table[index[middle]].name);
+        if (!order) return index[middle];
+        if (order < 0) high = middle; else low = middle + 1;
+    }
+    return SIZE_MAX;
+}
+static void ov_internal_index_replace(size_t *index)
+{
+    if (g_internal_index) HeapFree(GetProcessHeap(), 0, g_internal_index);
+    g_internal_index = index;
+}
+
 static int ov_internal_decl_table_publish(const sh_overrides_internal_decl_entry *entries, size_t count, int provider_ready, int user_enabled);
 static ov_stream * open_internal_decl(const char *name, int *matched);
+static ov_stream *open_internal_decl_captured(const char *path, int *matched,
+    const char *family, const char *name, sh_package_resource_capture **capture);
+static void ov_source_attach(void *stream, const char *path, sh_package_resource_capture *capture, int baseline);
+#ifdef SH_OVERRIDES_TESTING
+static int (*g_test_vt_recording)(void);
+static int (*g_test_vt_observed)(sh_resource_instance_origin *);
+void sh_overrides_test_vt_observer(int (*recording)(void), int (*observed)(sh_resource_instance_origin *))
+{ g_test_vt_recording=recording; g_test_vt_observed=observed; }
+#endif
+static int ov_vt_recording(void)
+{
+#ifdef SH_OVERRIDES_TESTING
+    if (g_test_vt_recording) return g_test_vt_recording();
+#endif
+    return sh_vt_provider_source_recording();
+}
+static int ov_vt_observed(sh_resource_instance_origin *origin)
+{
+#ifdef SH_OVERRIDES_TESTING
+    if (g_test_vt_observed) return g_test_vt_observed(origin);
+#endif
+    return sh_vt_provider_source_observed(origin);
+}
+static int ov_source_target(const char *path, char family[128], char name[4096])
+{
+    if (sh_resource_graph_native_source_target(family, name) &&
+        sh_package_runtime_resource_path_matches(path, family, name)) return 1;
+    *family = *name = 0; return 0;
+}
 size_t sh_overrides_internal_decl_published_count(void);
 int sh_overrides_internal_decl_published(const char *name);
 int sh_overrides_internal_decl_table_can_install(void);
@@ -481,13 +585,6 @@ static int ov_internal_decl_table_publish_locked(
             InterlockedExchange(&g_internal_decl_table_state, OV_INTERNAL_DECL_TABLE_FAILED);
             return 0;
         }
-        for (j = 0; j < i; j++) {
-            if (strcmp(copy[i].name, copy[j].name) == 0) {
-                ov_internal_decl_table_free(copy, count);
-                InterlockedExchange(&g_internal_decl_table_state, OV_INTERNAL_DECL_TABLE_FAILED);
-                return 0;
-            }
-        }
         copy[i].body = (unsigned char *)HeapAlloc(GetProcessHeap(), 0,
                                                   entries[i].body_length);
         if (!copy[i].body) {
@@ -498,6 +595,22 @@ static int ov_internal_decl_table_publish_locked(
         memcpy(copy[i].body, entries[i].body, entries[i].body_length);
         copy[i].body_length = entries[i].body_length;
     }
+    {
+        /* One key per identity: the sorted index makes a duplicate adjacent. */
+        size_t *index = ov_internal_index_build(copy, count);
+        int duplicate = 0;
+        for (i = 0; i < count && !duplicate; i++) {
+            if (index) duplicate = i + 1 < count && !strcmp(copy[index[i]].name, copy[index[i + 1]].name);
+            else for (j = 0; j < i && !duplicate; j++) duplicate = !strcmp(copy[i].name, copy[j].name);
+        }
+        if (duplicate) {
+            if (index) HeapFree(GetProcessHeap(), 0, index);
+            ov_internal_decl_table_free(copy, count);
+            InterlockedExchange(&g_internal_decl_table_state, OV_INTERNAL_DECL_TABLE_FAILED);
+            return 0;
+        }
+        ov_internal_index_replace(index);
+    }
     g_internal_decls = copy;
     g_internal_decl_count = count;
     /* Publish only complete keys and bodies; open streams own separate copies. */
@@ -505,33 +618,12 @@ static int ov_internal_decl_table_publish_locked(
     return 1;
 }
 
-static ov_stream *open_internal_decl_locked(const char *name, int *matched)
+static int ov_internal_decl_registered_locked(const char *name)
 {
-    size_t i;
-    if (matched) *matched = 0;
     if (!name || !sh_user_overrides_enabled_for_launch() ||
         InterlockedCompareExchange(&g_internal_decl_table_state, 0, 0) !=
-            OV_INTERNAL_DECL_TABLE_READY) return NULL;
-    for (i = 0; i < g_internal_decl_count; i++) {
-        if (strcmp(name, g_internal_decls[i].name) != 0) continue;
-        if (matched) *matched = 1;
-        {
-            ov_stream *stream;
-            size_t length = 0;
-            unsigned char *current = NULL;
-            int claimed = sh_package_runtime_read_decl_alias(name, &current, &length);
-            unsigned char *body;
-            if (claimed != 1) { free(current); return NULL; }
-            body = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, length ? length : 1u);
-            if (!body) { free(current); return NULL; }
-            if (length) memcpy(body, current, length);
-            free(current);
-            stream = make_mem_stream(body, (long long)length, g_internal_decls[i].name, 1);
-            if (!stream) HeapFree(GetProcessHeap(), 0, body);
-            return stream;
-        }
-    }
-    return NULL;
+            OV_INTERNAL_DECL_TABLE_READY) return 0;
+    return ov_internal_index_find(g_internal_decls, g_internal_index, g_internal_decl_count, name) != SIZE_MAX;
 }
 
 size_t sh_overrides_internal_decl_published_count_locked(void)
@@ -545,9 +637,18 @@ size_t sh_overrides_internal_decl_published_count_locked(void)
 int sh_overrides_internal_decl_published_locked(const char *name)
 {
     size_t i;
+    char key[1024];
+    size_t length;
     if (!name || !sh_user_overrides_enabled_for_launch() ||
         InterlockedCompareExchange(&g_internal_decl_table_state, 0, 0) !=
             OV_INTERNAL_DECL_TABLE_READY) return 0;
+    /* Every key is lower case: a case-insensitive match is the lower-cased name's exact key. */
+    length = strlen(name);
+    if (length < sizeof(key)) {
+        for (i = 0; i <= length; i++) key[i] = name[i] >= 'A' && name[i] <= 'Z' ? (char)(name[i] - 'A' + 'a') : name[i];
+        return ov_internal_index_find(g_internal_decls, g_internal_index, g_internal_decl_count, key) != SIZE_MAX &&
+            sh_package_runtime_decl_alias_exists(name);
+    }
     for (i = 0; i < g_internal_decl_count; i++)
         if (_stricmp(name, g_internal_decls[i].name) == 0)
             return sh_package_runtime_decl_alias_exists(name);
@@ -574,8 +675,9 @@ static int ov_internal_decl_table_merge_locked(
     ov_internal_decl *merged;
     ov_internal_decl *old = g_internal_decls;
     size_t old_count = g_internal_decl_count;
-    size_t total, i, j, at = 0;
-    char line[192];
+    size_t total, i, j, at = 0, changed = 0, unchanged = 0;
+    size_t *supplied = NULL;
+    char line[256];
 
     if (!provider_ready || !sh_user_overrides_enabled_for_launch()) return 0;
     if (!entries || count == 0) return 0;
@@ -594,12 +696,6 @@ static int ov_internal_decl_table_merge_locked(
             ov_internal_decl_table_free(merged, total);
             return 0;
         }
-        for (j = 0; j < at; j++) {
-            if (strcmp(merged[at].name, merged[j].name) == 0) {
-                ov_internal_decl_table_free(merged, total);
-                return 0;                      /* duplicate within the new set */
-            }
-        }
         merged[at].body = (unsigned char *)HeapAlloc(GetProcessHeap(), 0,
                                                      entries[i].body_length);
         if (!merged[at].body) {
@@ -610,18 +706,36 @@ static int ov_internal_decl_table_merge_locked(
         merged[at].body_length = entries[i].body_length;
         at++;
     }
+    /* The supplied keys in order: a duplicate within the new set is adjacent,
+     * and each old key finds the entry superseding it by binary search. */
+    supplied = ov_internal_index_build(merged, count);
+    for (i = 0; i < count; i++) {
+        int duplicate = 0;
+        if (supplied) duplicate = i + 1 < count && !strcmp(merged[supplied[i]].name, merged[supplied[i + 1]].name);
+        else for (j = 0; j < i && !duplicate; j++) duplicate = !strcmp(merged[i].name, merged[j].name);
+        if (duplicate) {
+            if (supplied) HeapFree(GetProcessHeap(), 0, supplied);
+            ov_internal_decl_table_free(merged, total);
+            return 0;                      /* duplicate within the new set */
+        }
+    }
 
     /* Copy unchanged identities into the replacement snapshot. */
     for (i = 0; i < old_count; i++) {
         int superseded = 0;
         if (!old[i].name || !old[i].body) continue;
-        for (j = 0; j < count; j++) {
-            if (strcmp(old[i].name, merged[j].name) == 0) { superseded = 1; break; }
+        j = ov_internal_index_find(merged, supplied, count, old[i].name);
+        superseded = j != SIZE_MAX;
+        if (superseded) {
+            if (merged[j].body_length == old[i].body_length &&
+                memcmp(merged[j].body, old[i].body, old[i].body_length) == 0) unchanged++;
+            else changed++;
+            continue;
         }
-        if (superseded) continue;
         merged[at].name = (char *)HeapAlloc(GetProcessHeap(), 0, strlen(old[i].name) + 1);
         merged[at].body = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, old[i].body_length);
         if (!merged[at].name || !merged[at].body) {
+            if (supplied) HeapFree(GetProcessHeap(), 0, supplied);
             ov_internal_decl_table_free(merged, total);
             return 0;
         }
@@ -631,14 +745,16 @@ static int ov_internal_decl_table_merge_locked(
         at++;
     }
 
+    if (supplied) HeapFree(GetProcessHeap(), 0, supplied);
     g_internal_decls = merged;
     g_internal_decl_count = at;
+    ov_internal_index_replace(ov_internal_index_build(merged, at));
     ov_internal_decl_table_free(old, old_count);
     InterlockedExchange(&g_internal_decl_table_state, OV_INTERNAL_DECL_TABLE_READY);
     _snprintf_s(line, sizeof line, _TRUNCATE,
-                "B1: overrides internal decl table MERGED -- %zu new + %zu carried forward = %zu "
-                "published (previous snapshot released)",
-                count, at - count, at);
+                "B1: overrides internal decl table MERGED -- %zu supplied (%zu added, %zu changed, %zu unchanged) "
+                "+ %zu carried forward = %zu published (previous snapshot released)",
+                count, count - changed - unchanged, changed, unchanged, at - count, at);
     backend_log(line);
     return 1;
 }
@@ -657,6 +773,7 @@ void sh_overrides_test_internal_decl_table_reset(void)
     ov_internal_decl_table_free(g_internal_decls, g_internal_decl_count);
     g_internal_decls = NULL;
     g_internal_decl_count = 0;
+    ov_internal_index_replace(NULL);
     InterlockedExchange(&g_internal_decl_table_state, OV_INTERNAL_DECL_TABLE_NEW);
 }
 
@@ -665,6 +782,15 @@ int sh_overrides_test_internal_decl_table_install(
 {
     return ov_internal_decl_table_publish(entries, count, 1,
                                           sh_user_overrides_enabled_for_launch());
+}
+
+int sh_overrides_test_internal_decl_registered(const char *key)
+{
+    int registered;
+    AcquireSRWLockShared(&g_internal_lock);
+    registered = ov_internal_decl_registered_locked(key);
+    ReleaseSRWLockShared(&g_internal_lock);
+    return registered;
 }
 
 void *sh_overrides_test_internal_decl_open(const char *name)
@@ -688,7 +814,7 @@ void *sh_overrides_test_memory_stream(const unsigned char *body, size_t length)
 
 long long sh_overrides_test_stream_read(void *stream, void *buffer, uint64_t length)
 {
-    return ov_read((ov_stream *)stream, buffer, length);
+    return ((long long (*)(void *,void *,uint64_t))(*(void ***)stream)[5])(stream,buffer,length);
 }
 
 long long sh_overrides_test_stream_read_at(void *stream, long long offset,
@@ -786,7 +912,7 @@ void *sh_overrides_test_stream_open_file(const char *path)
 
 void sh_overrides_test_stream_close(void *stream)
 {
-    ov_dtor((ov_stream *)stream);
+    if(stream) ((void (*)(void *,unsigned))(*(void ***)stream)[0])(stream,1);
 }
 #endif
 
@@ -841,6 +967,16 @@ int sh_overrides_activate_map(sh_package_map_plan *plan, sh_package_activation_f
         sh_nav_bake_source_update_begin, sh_nav_bake_source_update_end}, activate, context)) return 0;
     InterlockedIncrement(&g_ov_pkg_generation);
     backend_log(plan ? "B1: prepared map resource provider activated" : "B1: local resource provider restored");
+    return 1;
+}
+
+int sh_overrides_activate_occurrences(const sh_package_occurrence_snapshot *map,
+    sh_package_activation_fn activate, void *context)
+{
+    if (!sh_user_overrides_enabled_for_launch()) return 0;
+    if (!sh_package_runtime_activate_occurrences(map, (sh_package_activation_guard){
+        sh_nav_bake_source_update_begin, sh_nav_bake_source_update_end}, activate, context)) return 0;
+    InterlockedIncrement(&g_ov_pkg_generation);
     return 1;
 }
 
@@ -1025,24 +1161,58 @@ unsigned char *sh_overrides_read_engine_resource(const char *name,size_t *out_le
     free(generated);return copy;
 }
 
-static void *ov_open_body(void *self, const char *name, unsigned char b1, unsigned char b2, unsigned int mode)
+static int ov_owned(void **out, void *stream) { *out = stream; return 1; }
+static int ov_owned_source(void **out, void *stream, const char *path,
+    sh_package_resource_capture *capture, int baseline)
 {
-#ifndef SH_OVERRIDES_TESTING
-    if (g_orig_open == NULL) return NULL;   /* defensive: never happens once installed */
-#endif
-    if (g_provider_self == NULL) g_provider_self = self;
+    ov_source_attach(stream, path, capture, baseline);
+    return ov_owned(out, stream);
+}
+
+/* The shadow's claim for a named open, never chaining to the engine. Returns 1
+ * when the shadow owns the name: *out is its stream, or NULL when that owned
+ * name is unavailable, which never resolves to another payload. Returns 0
+ * when the name belongs to the engine. Called for mode < 2 opens only. */
+static int ov_claim(const char *name, void **out)
+{
+    char source_family[128], source_name[4096];
+    sh_package_resource_capture *capture = NULL;
+    int source_target = ov_source_target(name, source_family, source_name);
+    int capture_file = !source_target && ov_vt_recording();
+    const char *capture_family = source_target ? source_family : NULL;
+    const char *capture_name = source_target ? source_name : NULL;
+    /* Source preparation is a synchronous original-only read scope. Includes
+     * and ancestors must use the same captured installed view as the root,
+     * including when campaign files are outside the active SnapMap mount. */
+    {
+        unsigned char *bytes = NULL, *owned = NULL; size_t length = 0;
+        int claimed = sh_resource_graph_native_cook_input(name, &bytes, &length);
+        if (claimed) {
+            ov_stream *stream = NULL;
+            if (claimed > 0 && length <= LLONG_MAX) {
+                owned = HeapAlloc(GetProcessHeap(), 0, length ? length : 1u);
+                if (owned) {
+                    if (length) memcpy(owned, bytes, length);
+                    stream = make_mem_stream(owned, (long long)length, name, 1);
+                }
+            }
+            free(bytes);
+            if (!stream && owned) HeapFree(GetProcessHeap(), 0, owned);
+            return ov_owned(out, stream);
+        }
+    }
 
     /* Let embedded or marked-volume navigation take precedence over the
      * resized room's base AAS; its source reader still resolves that base. */
-    if(mode<2&&grid_aas_name(name)){
+    if(grid_aas_name(name)){
         unsigned char *nav=NULL;size_t length=0;
         if(!sh_navmesh_open(name,&nav,&length))
             sh_nav_bake_open(name,sh_overrides_read_engine_resource,&nav,&length);
         if(nav){void *stream=make_mem_stream(nav,(long long)length,name,1);
-            if(stream)return stream;HeapFree(GetProcessHeap(),0,nav);return NULL;}
+            if(stream)return ov_owned_source(out,stream,name,NULL,0);HeapFree(GetProcessHeap(),0,nav);return ov_owned(out,NULL);}
     }
 
-    if(mode<2&&name){
+    {
         unsigned char *generated=NULL,*owned=NULL;size_t bytes=0;
         int claimed=grid_open_validated(name,&generated,&bytes);
         if(claimed){
@@ -1055,14 +1225,14 @@ static void *ov_open_body(void *self, const char *name, unsigned char b1, unsign
             if(!stream&&owned)HeapFree(GetProcessHeap(),0,owned);
             /* A malformed or unsupported private resource cannot resolve to
              * another room's stock payload. */
-            return stream;
+            return ov_owned_source(out, stream, name, NULL, 0);
         }
     }
 
     /* Map-carried navigation precedes disk overrides and is independent of
      * the launch user-layer gate.
      */
-    if (mode < 2 && name != NULL && !grid_aas_name(name)) {
+    if (!grid_aas_name(name)) {
         unsigned char *nav = NULL;
         size_t nav_len = 0;
         /* Embedded navigation takes precedence over dynamically generated output. */
@@ -1070,17 +1240,18 @@ static void *ov_open_body(void *self, const char *name, unsigned char b1, unsign
             sh_nav_bake_open(name, sh_overrides_read_engine_resource, &nav, &nav_len);
         if (nav) {
             ov_stream *s = make_mem_stream(nav, (long long)nav_len, name, 1);
-            if (s) return s;
+            if (s) return ov_owned_source(out, s, name, NULL, 0);
             HeapFree(GetProcessHeap(), 0, nav);
         }
     }
 
-    if (mode < 2) {
+    {
         ov_stream *internal = NULL;
         int internal_match = 0;
         SH_PERF_BEGIN(t0);
         __try {
-            internal = open_internal_decl(name, &internal_match);
+            internal = open_internal_decl_captured(name, &internal_match, capture_family, capture_name,
+                (source_target || capture_file) ? &capture : NULL);
         } __except (EXCEPTION_EXECUTE_HANDLER) {
             internal = NULL;
         }
@@ -1089,31 +1260,33 @@ static void *ov_open_body(void *self, const char *name, unsigned char b1, unsign
             /* A published identity is authoritative. Do not let an
              * allocation/read failure fall through to a physical file or the
              * packaged resource under the same canonical name. */
-            if (!internal) return NULL;
+            if (!internal) { sh_package_runtime_resource_capture_release(capture); return ov_owned(out, NULL); }
             unsigned long n = (unsigned long)InterlockedIncrement(&g_shadow_count);
             char line[MAX_PATH + 160];
             _snprintf_s(line, sizeof line, _TRUNCATE,
                         "B1: overrides internal decl FIRED for '%s' (%lld bytes) [#%lu]",
                         name, internal->length, n);
             backend_log(line);
-            return internal;
+            return ov_owned_source(out, internal, name, capture, 0);
         }
     }
 
-    if (mode < 2 && name && sh_user_overrides_enabled_for_launch()) {
+    if (sh_user_overrides_enabled_for_launch()) {
         FILE *file = NULL;
         uint64_t file_length = 0;
         unsigned char *bytes = NULL;
         size_t length = 0;
-        int claimed = sh_package_runtime_open_file(name, &file, &file_length);
+        int claimed = sh_package_runtime_open_file_captured(name, &file, &file_length, capture_family, capture_name,
+            (source_target || capture_file) ? &capture : NULL);
         if (claimed) {
             ov_stream *stream = claimed > 0 && file_length <= LLONG_MAX ?
                 make_stream(file, (long long)file_length, name) : NULL;
             if (!stream && file) fclose(file);
             if (stream) InterlockedIncrement(&g_shadow_count);
-            return stream;
+            return ov_owned_source(out, stream, name, capture, 0);
         }
-        claimed = sh_package_runtime_read(name, &bytes, &length);
+        claimed = sh_package_runtime_read_captured(name, &bytes, &length, capture_family, capture_name,
+            (source_target || capture_file) ? &capture : NULL);
         if (claimed) {
             unsigned char *owned = NULL;
             ov_stream *stream = NULL;
@@ -1127,11 +1300,11 @@ static void *ov_open_body(void *self, const char *name, unsigned char b1, unsign
             free(bytes);
             if (!stream && owned) HeapFree(GetProcessHeap(), 0, owned);
             if (stream) InterlockedIncrement(&g_shadow_count);
-            return stream;
+            return ov_owned_source(out, stream, name, capture, 0);
         }
     }
 
-    if (mode < 2 && name != NULL) {
+    {
         ov_stream *s = NULL;
         const char *src = NULL;
         __try {
@@ -1152,28 +1325,496 @@ static void *ov_open_body(void *self, const char *name, unsigned char b1, unsign
                         "B1: overrides file-shadow FIRED [%s] for '%s' (%lld bytes) [#%lu]",
                         src ? src : "?", name, s->length, n);
             backend_log(line);
-            return s;   /* the engine reads the override bytes through our idFile vtable */
+            return ov_owned_source(out, s, name, NULL, 1);
         }
 
     }
+    return 0;
+}
+
+static void *ov_open_body(void *self, const char *name, unsigned char b1, unsigned char b2, unsigned int mode)
+{
+#ifndef SH_OVERRIDES_TESTING
+    if (g_orig_open == NULL) return NULL;   /* defensive: never happens once installed */
+#endif
+    if (g_provider_self == NULL) g_provider_self = self;
+
+    if (mode < 2 && name) {
+        void *claimed = NULL;
+        if (ov_claim(name, &claimed)) return claimed;
+    }
+
     /* No shadow, or mode guard: chain with the original byte arguments. */
     {
         void *chained;
         SH_PERF_BEGIN(t0);
         chained = g_orig_open ? g_orig_open(self, name, (unsigned char)(b1 & 0xff), (unsigned char)(b2 & 0xff), mode) : NULL;
         SH_PERF_END(SH_PERF_ENGINE_OPEN, t0);
+        if (chained && name && mode < 2) ov_source_attach(chained, name, NULL, 1);
         return chained;
     }
 }
 
-/* Every resource the engine opens passes through here, so its cost is counted. */
-static void *ov_open_hook(void *self, const char *name, unsigned char b1, unsigned char b2, unsigned int mode)
+/* Observe the bytes actually returned to a fixed shader declaration's parser.
+ * Keep the original idFile object and every name/time/seek/provider method.
+ * Only Read and destruction are wrapped in a private copy of the audited base
+ * vtable. No extra file reads, source replacement or inferred baseline occurs.
+ * Files whose metadata cannot be observed keep their original behavior and do
+ * not acquire a positive receipt. */
+typedef struct ov_source_fault {
+    void *consumer, *input;
+    uint64_t consumer_token, input_token;
+    struct ov_source_fault *next;
+} ov_source_fault;
+typedef struct ov_receipt_stream {
+    void *table[31];
+    void **original;
+    char *path;
+    char *family, *name;
+    sh_package_resource_capture *capture;
+    sh_package_selector_hold *opening;
+    int baseline;
+    sh_resource_instance_origin *vt_origin;
+    int vt_origin_tried, vt_fault, source_unknown, closed;
+    volatile LONG references;
+    uint64_t source_serial;
+    ov_source_fault first_fault;
+    struct ov_receipt_stream *source_next;
+    struct ov_receipt_stream *failed_next;
+    struct ov_receipt_stream *active_next;
+    void *active_stream;
+    void *failed_stream;
+} ov_receipt_stream;
+static SRWLOCK g_receipt_active_lock=SRWLOCK_INIT;
+static ov_receipt_stream *g_receipt_active;
+static void ov_receipt_unlink_active(ov_receipt_stream *receipt)
 {
+    AcquireSRWLockExclusive(&g_receipt_active_lock);
+    ov_receipt_stream **slot=&g_receipt_active;
+    while(*slot && *slot!=receipt)slot=&(*slot)->active_next;
+    if(*slot)*slot=receipt->active_next;
+    receipt->active_next=NULL;receipt->active_stream=NULL;
+    ReleaseSRWLockExclusive(&g_receipt_active_lock);
+}
+static SRWLOCK g_receipt_failed_lock = SRWLOCK_INIT;
+static ov_receipt_stream *g_receipt_failed;
+static SRWLOCK g_receipt_sources_lock = SRWLOCK_INIT;
+static ov_receipt_stream *g_receipt_sources;
+static uint64_t g_receipt_source_serial, g_receipt_source_generation;
+static void ov_receipt_release(ov_receipt_stream *receipt)
+{
+    if (InterlockedDecrement(&receipt->references)) return;
+    sh_resource_instances_origin_unhold(receipt->vt_origin);
+    sh_package_runtime_selectors_release(receipt->opening);
+    sh_package_runtime_resource_capture_release(receipt->capture);
+    ov_source_fault *fault = receipt->first_fault.next;
+    while (fault) { ov_source_fault *next = fault->next; free(fault); fault = next; }
+    free(receipt->family); free(receipt->name); free(receipt->path); free(receipt);
+}
+static void ov_receipt_source_fault(ov_receipt_stream *receipt)
+{
+    ov_source_fault value = {0};
+    if (!sh_resource_graph_native_source_fault_target(&value.consumer, &value.consumer_token) ||
+        !sh_resource_graph_native_source_fault_input(&value.input, &value.input_token) ||
+        !value.consumer || !value.consumer_token || !value.input || !value.input_token) {
+        receipt->source_unknown = 1;
+        sh_package_runtime_source_cleanup_failed();
+        return;
+    }
+    AcquireSRWLockExclusive(&g_receipt_sources_lock);
+    ov_source_fault *last = &receipt->first_fault;
+    if (!last->consumer) {
+        *last = value;
+        receipt->source_serial = ++g_receipt_source_serial;
+        InterlockedIncrement(&receipt->references); /* List owns the exact opening. */
+        receipt->source_next = g_receipt_sources; g_receipt_sources = receipt;
+    } else {
+        while (last->consumer != value.consumer || last->consumer_token != value.consumer_token ||
+               last->input != value.input || last->input_token != value.input_token) {
+            if (!last->next) {
+                last->next = malloc(sizeof(*last));
+                if (!last->next) { receipt->source_unknown = 1; break; }
+                *last->next = value;
+            }
+            last = last->next;
+        }
+    }
+    ++g_receipt_source_generation; /* Includes a repeated failure of a recovered token. */
+    ReleaseSRWLockExclusive(&g_receipt_sources_lock);
+    if (receipt->source_unknown) sh_package_runtime_source_cleanup_failed();
+}
+/* Pin one list member before calling the instance registry. No registry or
+ * provider callback executes under the receipt lock. Serial order makes list
+ * removal safe without a snapshot allocation on the failure path. */
+static ov_receipt_stream *ov_source_next(uint64_t after)
+{
+    ov_receipt_stream *result = NULL;
+    AcquireSRWLockShared(&g_receipt_sources_lock);
+    for (ov_receipt_stream *p = g_receipt_sources; p; p = p->source_next)
+        if (p->source_serial > after && (!result || p->source_serial < result->source_serial)) result = p;
+    if (result) InterlockedIncrement(&result->references);
+    ReleaseSRWLockShared(&g_receipt_sources_lock);
+    return result;
+}
+void sh_overrides_collect_source_receipts(void)
+{
+    uint64_t serial = 0;
+    ov_receipt_stream *receipt;
+    while ((receipt = ov_source_next(serial)) != NULL) {
+        serial = receipt->source_serial;
+        AcquireSRWLockShared(&g_receipt_sources_lock);
+        int closed = receipt->closed;
+        ReleaseSRWLockShared(&g_receipt_sources_lock);
+        int recovered = closed;
+        /* A completed stream cannot append another source-consumer edge. */
+        if (closed) for (ov_source_fault *f = &receipt->first_fault; f; f = f->next)
+            if (!sh_resource_graph_native_source_fault_recovered(f->consumer, f->consumer_token)) { recovered = 0; break; }
+        if (recovered) {
+            int removed = 0;
+            AcquireSRWLockExclusive(&g_receipt_sources_lock);
+            ov_receipt_stream **link = &g_receipt_sources;
+            while (*link && *link != receipt) link = &(*link)->source_next;
+            if (*link) { *link = receipt->source_next; ++g_receipt_source_generation; removed = 1; }
+            ReleaseSRWLockExclusive(&g_receipt_sources_lock);
+            if (removed) ov_receipt_release(receipt);
+        }
+        ov_receipt_release(receipt);
+    }
+}
+int sh_overrides_source_receipts_admit(void *const *resources, size_t count, char *error, size_t capacity)
+{
+    sh_overrides_collect_source_receipts();
+    AcquireSRWLockShared(&g_receipt_sources_lock);
+    uint64_t generation = g_receipt_source_generation;
+    ReleaseSRWLockShared(&g_receipt_sources_lock);
+    uint64_t serial = 0; int allowed = !count || resources != NULL;
+    ov_receipt_stream *receipt;
+    while (allowed && (receipt = ov_source_next(serial)) != NULL) {
+        serial = receipt->source_serial;
+        ov_source_fault *fault = &receipt->first_fault;
+        while (fault) {
+            AcquireSRWLockShared(&g_receipt_sources_lock);
+            ov_source_fault value = *fault;
+            ReleaseSRWLockShared(&g_receipt_sources_lock);
+            for (size_t i = 0; i < count; ++i)
+                if (resources[i] == value.input &&
+                    !sh_resource_graph_native_source_fault_recovered(value.consumer, value.consumer_token)) {
+                    allowed = 0; break;
+                }
+            if (!allowed) break;
+            fault = value.next;
+        }
+        ov_receipt_release(receipt);
+    }
+    AcquireSRWLockShared(&g_receipt_sources_lock);
+    if (generation != g_receipt_source_generation) allowed = 0;
+    ReleaseSRWLockShared(&g_receipt_sources_lock);
+    if (!allowed && error && capacity) snprintf(error, capacity, "native source consumer recovery pending");
+    return allowed;
+}
+static void ov_receipt_quarantine(ov_receipt_stream *receipt, void *stream)
+{
+    receipt->failed_stream = stream;
+    AcquireSRWLockExclusive(&g_receipt_failed_lock);
+    receipt->failed_next = g_receipt_failed; g_receipt_failed = receipt;
+    ReleaseSRWLockExclusive(&g_receipt_failed_lock);
+    sh_package_runtime_source_cleanup_failed();
+}
+static void ov_receipt_vt_read(ov_receipt_stream *receipt)
+{
+    if (!ov_vt_recording()) return;
+    if (!receipt->vt_origin_tried) {
+        receipt->vt_origin_tried = 1;
+        if (sh_package_runtime_resource_observation_allowed() &&
+            (receipt->capture || receipt->baseline)) {
+            sh_package_resource_capture *capture = sh_package_runtime_resource_capture_retain(receipt->capture);
+            sh_resource_instance_origin *origin = sh_resource_instances_origin(capture, receipt->baseline);
+            if (!origin) sh_package_runtime_resource_capture_release(capture);
+            if (origin) {
+                if (sh_resource_instances_origin_hold(origin)) receipt->vt_origin = origin;
+                sh_resource_instances_origin_release(origin);
+            }
+        }
+    }
+    if (!ov_vt_observed(receipt->vt_origin)) receipt->vt_fault = 1;
+}
+static long long ov_receipt_read_body(ov_receipt_stream *receipt,void *self,void *body,uint64_t wanted)
+{
+    typedef long long (*read_fn)(void *, void *, uint64_t);
+    typedef long long (*value_fn)(void *);
+    long long offset = -1, total = -1;
+    int observing = sh_package_shader_receipt_wants(receipt->path);
+    if (observing) {
+        __try {
+            offset = ((value_fn)receipt->original[13])(self);
+            total = ((value_fn)receipt->original[11])(self);
+        } __except (EXCEPTION_EXECUTE_HANDLER) { offset = total = -1; }
+    }
+    long long got = ((read_fn)receipt->original[5])(self, body, wanted);
+    DWORD native_error=GetLastError();
+    /* A positive-sized request consumes the file's payload or its established
+     * empty/EOF result. Open, timestamps, lengths and zero-sized reads alone
+     * do not consume payload and must not add a package dependency. */
+    int consumed = wanted && got >= 0 && (uint64_t)got <= wanted;
+    if (consumed) sh_resource_graph_file(receipt->path);
+    else if (wanted) sh_resource_graph_incomplete();
+    if (consumed && receipt->family) {
+        int observed = sh_resource_graph_native_source_observed(receipt->family, receipt->name,
+            sh_package_runtime_resource_capture_retain(receipt->capture), receipt->baseline);
+        if (observed < 0) {
+            /* A matching native request consumed bytes but could not record
+             * their origin. Preserve the actual opening lease, not merely a
+             * capture whose lease has already transferred to this receipt. */
+            ov_receipt_source_fault(receipt);
+        }
+    }
+    if (consumed) ov_receipt_vt_read(receipt);
+    if (observing) {
+        __try {
+            if (offset >= 0 && total > 0 && got >= 0 && (uint64_t)got <= wanted &&
+                (uint64_t)total <= SIZE_MAX && (uint64_t)offset <= SIZE_MAX && (uint64_t)got <= SIZE_MAX)
+                sh_package_shader_receipt_bytes(receipt->path, (size_t)total, (size_t)offset, body, (size_t)got);
+            else sh_package_shader_receipt_bytes(receipt->path, 0, 0, NULL, 0);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            sh_package_shader_receipt_bytes(receipt->path, 0, 0, NULL, 0);
+        }
+    }
+    SetLastError(native_error);return got;
+}
+static long long ov_receipt_read(void *self,void *body,uint64_t wanted)
+{
+    ov_receipt_stream *receipt=*(ov_receipt_stream **)self;
+    /* Original Read may reenter the deleting callback. Keep this metadata and
+     * its existing opening share alive without retaining native self. */
+    InterlockedIncrement(&receipt->references);long long got=0;
+    __try {got=ov_receipt_read_body(receipt,self,body,wanted);}
+    __finally {DWORD error=GetLastError();ov_receipt_release(receipt);SetLastError(error);}
+    return got;
+}
+static void *ov_receipt_destroy(void *self, unsigned flags)
+{
+    ov_receipt_stream *receipt = *(ov_receipt_stream **)self;
+    typedef void *(*destroy_fn)(void *, unsigned);
+    destroy_fn original = (destroy_fn)receipt->original[0];
+    ov_receipt_unlink_active(receipt);
+    *(void ***)self = receipt->original;
+    void *result = NULL; int returned = 0;
+    __try { result = original(self, flags); returned = 1; }
+    __finally {
+        if (returned && !receipt->source_unknown &&
+            (!receipt->vt_fault || (!receipt->opening && !receipt->capture))) {
+            AcquireSRWLockExclusive(&g_receipt_sources_lock);
+            receipt->closed = 1;
+            ReleaseSRWLockExclusive(&g_receipt_sources_lock);
+            ov_receipt_release(receipt); /* Pending consumers retain their own reference. */
+            sh_overrides_collect_source_receipts();
+        } else {
+            /* The native object may be partially destroyed or already freed.
+             * Keep the opening fence without touching it or retrying cleanup.
+             * This process cannot safely activate another provider afterward. */
+            ov_receipt_quarantine(receipt, returned ? NULL : self);
+            backend_log("native source stream cleanup interrupted; opening resources retained");
+        }
+    }
+    return result;
+}
+static int ov_receipt_attach_full(void *stream, const char *path, const char *family, const char *name,
+    sh_package_resource_capture *capture, int baseline)
+{
+    ov_receipt_stream *receipt = calloc(1, sizeof(*receipt));
+    if (!receipt) return 0;
+    receipt->references = 1;
+    receipt->path = _strdup(path);
+    if (family) { receipt->family = _strdup(family); receipt->name = _strdup(name); }
+    if (!receipt->path || (family && (!receipt->family || !receipt->name))) {
+        free(receipt->path); free(receipt->family); free(receipt->name); free(receipt); return 0;
+    }
+    receipt->capture = capture; receipt->baseline = baseline;
+    receipt->opening = sh_package_runtime_resource_capture_take_opening_hold(capture);
+    if (capture && !receipt->opening) {
+        free(receipt->path); free(receipt->family); free(receipt->name); free(receipt); return 0;
+    }
+    int attached = 0;
+    __try {
+        receipt->original = *(void ***)stream;
+        if (receipt->original && receipt->original[0] && receipt->original[5] &&
+            receipt->original[11] && receipt->original[13] &&
+            receipt->original[5] != (void *)ov_receipt_read) {
+            memcpy(receipt->table, receipt->original, sizeof(receipt->table));
+            receipt->table[0] = (void *)ov_receipt_destroy; receipt->table[5] = (void *)ov_receipt_read;
+            *(void ***)stream = receipt->table; attached = 1;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) { attached = 0; }
+    if(attached) {
+        AcquireSRWLockExclusive(&g_receipt_active_lock);
+        receipt->active_stream=stream;receipt->active_next=g_receipt_active;g_receipt_active=receipt;
+        ReleaseSRWLockExclusive(&g_receipt_active_lock);
+    }
+    if (!attached) {
+        /* A successful native open can still be consumed without our wrapper.
+         * Retain its atomic opening fence when the adapter cannot be attached. */
+        if (capture) { receipt->capture = NULL; ov_receipt_quarantine(receipt, stream); }
+        else { free(receipt->path); free(receipt->family); free(receipt->name); free(receipt); }
+    }
+    return attached;
+}
+static void ov_receipt_attach(void *stream, const char *path)
+{
+    int graph = sh_resource_graph_recording();
+    if (graph || sh_package_shader_receipt_wants(path)) {
+        __try { if (stream && (*(void ***)stream)[5] == (void *)ov_receipt_read) return; }
+        __except (EXCEPTION_EXECUTE_HANDLER) { if (graph) sh_resource_graph_incomplete(); return; }
+        if (!ov_receipt_attach_full(stream, path, NULL, NULL, NULL, 0) && graph)
+            sh_resource_graph_incomplete();
+    }
+}
+static void ov_source_attach(void *stream, const char *path, sh_package_resource_capture *capture, int baseline)
+{
+    sh_overrides_collect_source_receipts();
+    char family[128], name[4096];
+    int target = ov_source_target(path, family, name), vt = ov_vt_recording();
+    if (stream && (target || vt)) {
+        if (ov_receipt_attach_full(stream, path, target ? family : NULL, target ? name : NULL, capture, baseline)) return;
+        /* The source may be consumed without a witness. Retain no stale
+         * baseline/capture association when a native read succeeds. */
+        if (target) sh_resource_graph_native_source_observed(family, name, NULL, 0);
+        if (vt) ov_vt_observed(NULL);
+        /* If attachment failed before taking the hold, the capture still
+         * owns it. Quarantine consumes this reference without allocation. */
+        if (capture) sh_package_runtime_source_capture_failed(capture);
+        return;
+    }
+    sh_package_runtime_resource_capture_release(capture);
+}
+#ifdef SH_OVERRIDES_TESTING
+size_t sh_overrides_test_pending_source_count(void)
+{
+    size_t count = 0;
+    AcquireSRWLockShared(&g_receipt_sources_lock);
+    for (ov_receipt_stream *p = g_receipt_sources; p; p = p->source_next) count++;
+    ReleaseSRWLockShared(&g_receipt_sources_lock);
+    return count;
+}
+size_t sh_overrides_test_failed_source_count(void)
+{
+    size_t count = 0;
+    AcquireSRWLockShared(&g_receipt_failed_lock);
+    for (ov_receipt_stream *p = g_receipt_failed; p; p = p->failed_next) count++;
+    ReleaseSRWLockShared(&g_receipt_failed_lock);
+    return count;
+}
+void sh_overrides_test_receipt_attach(void *stream, const char *path)
+{ ov_receipt_attach(stream, path); }
+void sh_overrides_test_source_attach(void *stream, const char *path,
+    sh_package_resource_capture *capture, int baseline)
+{ ov_source_attach(stream, path, capture, baseline); }
+#endif
+
+/* A stream the resource-file route already claimed, handed to the engine's own
+ * fill of a native memory file: the next open of exactly this name pointer on
+ * this thread returns it instead of claiming the name again. */
+static __declspec(thread) const char *g_pending_name;
+static __declspec(thread) void *g_pending_stream;
+
+/* Every resource the engine opens passes through here, so its cost is counted. */
+static __declspec(noinline) void *ov_open_hook(void *self, const char *name, unsigned char b1, unsigned char b2, unsigned int mode)
+{
+    uintptr_t caller=(uintptr_t)_ReturnAddress();
+    uint64_t stamp=0;
+    sh_overrides_file_open_guard guard=(sh_overrides_file_open_guard)
+        InterlockedCompareExchangePointer(&g_file_open_guard,NULL,NULL);
+    if(guard){DWORD error=GetLastError();__try {stamp=guard(caller,self);}
+        __except(EXCEPTION_EXECUTE_HANDLER){sh_resource_graph_native_observe_resource(NULL);}SetLastError(error);}
     SH_PERF_BEGIN(t0);
-    void *s = ov_open_body(self, name, b1, b2, mode);
-    if (s && mode < 2 && name) sh_resource_graph_file(name);
+    void *s;
+    if (g_pending_stream && name && name == g_pending_name && mode < 2) {
+        s = g_pending_stream; g_pending_stream = NULL; g_pending_name = NULL;
+    } else s = ov_open_body(self, name, b1, b2, mode);
+    if (s && mode < 2 && name) {
+        ov_receipt_attach(s, name);
+    }
     SH_PERF_END(SH_PERF_OVERRIDE_OPEN, t0);
+    sh_overrides_file_return_observer observer=(sh_overrides_file_return_observer)
+        InterlockedCompareExchangePointer(&g_file_return_observer,NULL,NULL);
+    if(observer) {
+        DWORD error=GetLastError();
+        __try {observer(s,caller,self,stamp);}
+        __except(EXCEPTION_EXECUTE_HANDLER){sh_resource_graph_native_observe_resource(NULL);}
+        SetLastError(error);
+    }
     return s;
+}
+int sh_overrides_set_file_return_observer(sh_overrides_file_open_guard guard,sh_overrides_file_return_observer observer)
+{
+    if(!observer || !guard)return 0;int ok=0;
+    AcquireSRWLockExclusive(&g_file_observer_lock);
+    void *prior=InterlockedCompareExchangePointer(&g_file_return_observer,NULL,NULL);
+    if(!prior){InterlockedExchangePointer(&g_file_open_guard,(void *)guard);InterlockedExchangePointer(&g_file_return_observer,(void *)observer);ok=1;}
+    else ok=prior==(void *)observer && (void *)guard==InterlockedCompareExchangePointer(&g_file_open_guard,NULL,NULL);
+    ReleaseSRWLockExclusive(&g_file_observer_lock);return ok;
+}
+int sh_overrides_file_return_observer_ready(sh_overrides_file_open_guard guard,sh_overrides_file_return_observer observer,
+    const void *provider_table,const void *native_open)
+{
+    int ready=0;DWORD error=GetLastError();
+    __try {
+        ready=guard && observer && (void *)guard==InterlockedCompareExchangePointer(&g_file_open_guard,NULL,NULL) &&
+            (void *)observer==InterlockedCompareExchangePointer(&g_file_return_observer,NULL,NULL) &&
+            provider_table && native_open && g_orig_open==(open_fn_t)native_open &&
+            g_slot==(void **)((const unsigned char *)provider_table+OPEN_SLOT_OFFSET) && *g_slot==(void *)ov_open_hook;
+    }__except(EXCEPTION_EXECUTE_HANDLER){ready=0;}
+    SetLastError(error);return ready;
+}
+int sh_overrides_file_dispatch_snapshot(void *stream,sh_overrides_file_dispatch *out)
+{
+    if(!out)return 0;memset(out,0,sizeof(*out));if(!stream)return 0;
+    DWORD error=GetLastError();int ok=0;const unsigned slots[]={0,3,5,11,19};
+    AcquireSRWLockShared(&g_receipt_active_lock);
+    __try {
+        void **table=*(void ***)stream,**original=table;int receipt=0;
+        for(ov_receipt_stream *r=g_receipt_active;r;r=r->active_next)if(table==r->table && r->active_stream==stream) {
+            if(table[0]!=(void *)ov_receipt_destroy || table[5]!=(void *)ov_receipt_read || !r->original || r->references<=0)__leave;
+            for(unsigned i=1;i<31;i++)if(i!=5 && table[i]!=r->original[i])__leave;
+            original=r->original;receipt=1;out->shader=sh_package_shader_receipt_wants(r->path);break;
+        }
+        /* Our callbacks on an unregistered/counterfeit/stale table do not
+         * establish allocation lineage, even if the addresses were copied. */
+        if(!original || (!receipt && (table[0]==(void *)ov_receipt_destroy || table[5]==(void *)ov_receipt_read)))__leave;
+        out->table=(uintptr_t)original;out->receipt=receipt;out->product=original==g_stream_vtable;
+        out->read_string=(uintptr_t)original[28];out->tell=(uintptr_t)original[13];
+        for(unsigned i=0;i<5;i++){out->slots[i]=(uintptr_t)original[slots[i]];if(!out->slots[i])__leave;}
+        if(out->product) {
+            void *expected[]={ov_dtor,ov_name,ov_read,ov_length_byseek,ov_ret0_e};
+            for(unsigned i=0;i<5;i++)if(out->slots[i]!=(uintptr_t)expected[i])__leave;
+            if(out->tell!=(uintptr_t)ov_tell || original[14]!=(void *)ov_seek)__leave;
+        }
+        ok=1;
+    }__except(EXCEPTION_EXECUTE_HANDLER){ok=0;}
+    ReleaseSRWLockShared(&g_receipt_active_lock);if(!ok)memset(out,0,sizeof(*out));SetLastError(error);return ok;
+}
+
+int sh_overrides_claim_open(const char *name, void **stream)
+{
+    if (stream) *stream = NULL;
+    if (!stream || !name || !*name) return 0;
+#ifndef SH_OVERRIDES_TESTING
+    if (g_orig_open == NULL) return 0;   /* only while the shadow serves ordinary opens */
+#endif
+    return ov_claim(name, stream);
+}
+void sh_overrides_pending_open(const char *name, void *stream)
+{
+    g_pending_name = name; g_pending_stream = stream;
+}
+void *sh_overrides_pending_take(void)
+{
+    void *stream = g_pending_stream;
+    g_pending_stream = NULL; g_pending_name = NULL;
+    return stream;
+}
+void sh_overrides_stream_close(void *stream)
+{
+    if (stream) ((void (*)(void *, int))(*(void ***)stream)[0])(stream, 1);
 }
 
 #ifdef SH_OVERRIDES_TESTING
@@ -1447,14 +2088,32 @@ static int ov_internal_decl_table_publish(const sh_overrides_internal_decl_entry
     return result;
 }
 
-static ov_stream * open_internal_decl(const char *name, int *matched)
+static ov_stream *open_internal_decl_captured(const char *path, int *matched,
+    const char *family, const char *name, sh_package_resource_capture **capture)
 {
-    ov_stream * result;
+    int registered;
     AcquireSRWLockShared(&g_internal_lock);
-    __try { result = open_internal_decl_locked(name, matched); }
+    __try { registered = ov_internal_decl_registered_locked(path); }
     __finally { ReleaseSRWLockShared(&g_internal_lock); }
-    return result;
+    if (matched) *matched = registered;
+    if (!registered) return NULL;
+    /* Never wait for provider publication while holding its table's lock.
+     * Registration only owns this alias; the atomic provider read below
+     * chooses its current exact bytes and opening lifetime. */
+    size_t length = 0;
+    unsigned char *current = NULL;
+    int claimed = sh_package_runtime_read_decl_alias_captured(path, &current, &length, family, name, capture);
+    if (claimed != 1) { free(current); return NULL; }
+    unsigned char *body = HeapAlloc(GetProcessHeap(), 0, length ? length : 1u);
+    if (!body) { free(current); return NULL; }
+    if (length) memcpy(body, current, length);
+    free(current);
+    ov_stream *stream = make_mem_stream(body, (long long)length, path, 1);
+    if (!stream) HeapFree(GetProcessHeap(), 0, body);
+    return stream;
 }
+static ov_stream *open_internal_decl(const char *name, int *matched)
+{ return open_internal_decl_captured(name, matched, NULL, NULL, NULL); }
 
 size_t sh_overrides_internal_decl_published_count(void)
 {

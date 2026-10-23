@@ -1,5 +1,6 @@
-/* Private native palettes keep dimension variants out of the stock palette's
- * movable arrays. Each cache entry owns a one-module palette for the process. */
+/* Private native palettes keep dimension variants and package module variants
+ * out of the stock palette's movable arrays. Each cache entry owns a one-module
+ * palette for the process. */
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -15,6 +16,8 @@
 #include "overrides.h"
 #include "process_heap_scope.h"
 #include "hook.h"
+#include "package_runtime.h"
+#include <ctype.h>
 
 void backend_log(const char *message);
 typedef void *(*find_module_fn)(void *,const char *);
@@ -57,6 +60,22 @@ typedef struct grid_native_entry {
 #define GRID_NATIVE_CAP 64
 static grid_native_entry g_entries[GRID_NATIVE_CAP];
 static unsigned g_count;
+/* A package module variant (package_native_names: maps/modules/smp/<token>/
+ * <R>.decl) is module R with a package's members published under the variant's
+ * own path. Like a Grid Room it is loaded into its own one-module palette from
+ * R's wrapper (snappalette +0x90, render palette name), which the variant keeps:
+ * members named from (palette, B) keep their stock names. Entries stay for the
+ * process: a withdrawn variant's wrapper can still be owned by placed map
+ * records, undo/redo or clipboard state and Play collision, which are not
+ * traced to a release path yet (m129 module-variants/NATIVE-RIBBON.md). */
+typedef struct variant_entry {
+    struct variant_entry *next;
+    int state; /* 1 constructing, 2 ready, -1 refused */
+    void *record;
+    union {void *align;unsigned char bytes[128];} palette;
+    char name[1];
+} variant_entry;
+static variant_entry *g_variants;
 static LONG g_busy,g_faulted;
 static LONG g_edit_busy,g_edit_faulted;
 static unsigned char *g_editor;
@@ -133,6 +152,7 @@ static unsigned char grid_build_collision(void *collision,void *map,int instance
         wrapper=*(unsigned char**)(*(unsigned char**)(m+0x750)+(size_t)instance*0x98);
         for(i=0;i<g_count;++i)if(g_entries[i].state==2&&
             *(void**)g_entries[i].record==wrapper){own=1;break;}
+        if(!own)own=sh_grid_native_variant_wrapper(wrapper);
     }
     if(!own)return g_build_collision(collision,map,instance);
     /* These two resources are cached by a process-lifetime private palette.
@@ -176,7 +196,7 @@ static void *registry(void)
     if(!vt||vt[7]!=(void*)g_register||vt[11]!=(void*)g_type)return NULL;
     return r;
 }
-static int catalog(const char *logical)
+static int catalog(const char *logical,int grid_shape)
 {
     void *r=registry(),*manager,*decl;native_string source;char path[160];unsigned char state;
     if(!r){backend_log("GRID: declaration registry unavailable");return 0;}
@@ -208,7 +228,7 @@ static int catalog(const char *logical)
     if(state&3){
         char message[128];snprintf(message,sizeof message,"GRID: module catalog state 0x%02x is not ready",state);
         backend_log(message);return 0;}
-    if(*(int*)((unsigned char*)decl+0x118)!=1||*(int*)((unsigned char*)decl+0x130)!=4){
+    if(grid_shape&&(*(int*)((unsigned char*)decl+0x118)!=1||*(int*)((unsigned char*)decl+0x130)!=4)){
         char message[160];snprintf(message,sizeof message,
             "GRID: module catalog has %d floors and %d walls (state 0x%02x); variant refused",
             *(int*)((unsigned char*)decl+0x118),*(int*)((unsigned char*)decl+0x130),state);
@@ -265,7 +285,7 @@ static void *create(void *palette,const sh_grid_size *size)
     __try {
         char logical[112];size_t k=strlen(variant+13)-5;
         memcpy(logical,variant+13,k);logical[k]=0;
-        if(!catalog(logical))__leave;
+        if(!catalog(logical,1))__leave;
         p=entry->palette.bytes;
         /* Same empty list construction as the editor's module palette. The
          * private palette never enters a stock array or a stock destructor. */
@@ -292,15 +312,102 @@ static void *create(void *palette,const sh_grid_size *size)
     backend_log(result?"GRID: independent native module variant loaded":"GRID: native module variant refused");
     return result;
 }
+/* maps/modules/smp/<16..64 hex>/<R>.decl, R not itself a variant: its base
+ * module maps/modules/<R>.decl. */
+static int variant_base(const char *name,char *base,size_t capacity)
+{
+    size_t k=17,n;
+    if(!name||_strnicmp(name,"maps/modules/smp/",17))return 0;
+    while(isxdigit((unsigned char)name[k]))++k;
+    if(k-17<16||k-17>64||name[k]!='/'||!_strnicmp(name+k+1,"smp/",4))return 0;
+    n=strlen(name+k+1);
+    if(n<=5||_stricmp(name+k+1+n-5,".decl"))return 0;
+    return snprintf(base,capacity,"maps/modules/%s",name+k+1)<(int)capacity;
+}
+static variant_entry *variant_find(const char *name)
+{
+    variant_entry *entry;
+    for(entry=g_variants;entry;entry=entry->next)if(!_stricmp(entry->name,name))return entry;
+    return NULL;
+}
+static void *create_variant(void *palette,const char *name)
+{
+    variant_entry *entry=variant_find(name);unsigned char *base_record,*base_wrapper,*p;
+    const char *render,*slash;char base[300],palette_name[128],logical[300];
+    native_string palette_string,module_string;void *module,*result=NULL;sh_grid_size size;
+    sh_process_heap_scope heap={0};size_t len;int strings=0;
+    if(entry)return entry->state==2?entry->record:NULL;
+    /* Admission runs on the engine thread with the editor's module palette
+     * built: a variant's base record and its render palette come from it. */
+    if(palette!=g_editor+0x206c0||!variant_base(name,base,sizeof base))return NULL;
+    base_record=sh_grid_parse_name(base,&size)?(unsigned char*)create(palette,&size):(unsigned char*)g_find(palette,base);
+    if(!base_record||base_record==end_record(palette))return NULL;
+    base_wrapper=*(unsigned char**)base_record;if(!base_wrapper)return NULL;
+    render=*(const char**)(base_wrapper+0x18);
+    if(!render||strncmp(render,"maps/modules/palettes/",22))return NULL;
+    slash=strchr(render+22,'/');if(!slash)return NULL;
+    len=(size_t)(slash-render-22);if(!len||len>=sizeof palette_name)return NULL;
+    memcpy(palette_name,render+22,len);palette_name[len]=0;
+    len=strlen(name)-13-5;if(len>=sizeof logical)return NULL;
+    memcpy(logical,name+13,len);logical[len]=0;
+    /* Only a variant the served library publishes, with its card, is loaded. */
+    if(!sh_package_runtime_serves_native_identity("snapmodule",name)||
+       !sh_package_runtime_serves_native_identity("snapmoduleinfo",logical)){
+        backend_log("MODULES: module variant is not served by the package library");return NULL;}
+    entry=(variant_entry*)HeapAlloc(GetProcessHeap(),HEAP_ZERO_MEMORY,sizeof *entry+strlen(name));
+    if(!entry)return NULL;
+    memcpy(entry->name,name,strlen(name)+1);entry->state=1;entry->next=g_variants;g_variants=entry;
+    if(!sh_process_heap_enter(&g_heap,&heap)){entry->state=-1;return NULL;}
+    __try {
+        if(!catalog(logical,0))__leave;
+        p=entry->palette.bytes;
+        /* The same empty one-module palette as a Grid Room's. */
+        *(void**)p=*(void**)palette;
+        *(unsigned*)(p+0x20)=*(unsigned*)(p+0x38)=
+            *(unsigned*)(p+0x60)=*(unsigned*)(p+0x78)=0x50000;
+        g_ctor(&palette_string,palette_name);strings=1;
+        g_ctor(&module_string,name);strings=2;
+        if(!g_load(p,*(void**)(base_wrapper+0x90),&palette_string,&module_string,g_editor+0x20660)){
+            backend_log("MODULES: native module loader rejected the variant");__leave;}
+        if(*(int*)(p+0x18)!=1||*(int*)(p+0x70)!=1){backend_log("MODULES: private module palette has unexpected counts");__leave;}
+        result=*(void**)(p+0x10);if(!result||!*(void**)result){result=NULL;__leave;}
+        module=**(void***)result;
+        if(!module||!*(void**)((unsigned char*)*(void**)result+0x80)||
+           !*(void**)((unsigned char*)*(void**)result+0x88)) {result=NULL;__leave;}
+        *(unsigned*)((unsigned char*)module+0x28)=4;
+    } __finally {
+        __try {
+            __try {if(strings>=2)g_dtor(&module_string);}
+            __finally {if(strings>=1)g_dtor(&palette_string);}
+        } __finally {if(!sh_process_heap_leave(&heap))result=NULL;}
+    }
+    entry->record=result;entry->state=result?2:-1;
+    backend_log(result?"MODULES: module variant loaded into its own native palette":"MODULES: module variant refused");
+    return result;
+}
 static void *find_variant(void *palette,const char *name)
 {
-    sh_grid_size size;void *record=NULL;
-    if(!sh_grid_parse_name(name,&size))return g_find(palette,name);
+    sh_grid_size size;void *record=NULL;char base[300];int grid=sh_grid_parse_name(name,&size);
+    if(!grid&&!variant_base(name,base,sizeof base))return g_find(palette,name);
     if(InterlockedCompareExchange(&g_faulted,0,0)||InterlockedCompareExchange(&g_busy,1,0))return end_record(palette);
-    __try {record=create(palette,&size);}
+    __try {record=grid?create(palette,&size):create_variant(palette,name);}
     __except(EXCEPTION_EXECUTE_HANDLER){InterlockedExchange(&g_faulted,1);backend_log("GRID: native variant creation faulted; disabled");}
     InterlockedExchange(&g_busy,0);
     return record?record:end_record(palette);
+}
+void *sh_grid_native_variant_record(const char *name)
+{
+    void *record;
+    if(!g_find||!g_editor||!name)return NULL;
+    record=find_variant(g_editor+0x206c0,name);
+    return record&&record!=end_record(g_editor+0x206c0)?record:NULL;
+}
+int sh_grid_native_variant_wrapper(const void *wrapper)
+{
+    variant_entry *entry;
+    for(entry=g_variants;wrapper&&entry;entry=entry->next)
+        if(entry->state==2&&*(void**)entry->record==wrapper)return 1;
+    return 0;
 }
 static unsigned char has_variant(void *palette,const char *name)
 {

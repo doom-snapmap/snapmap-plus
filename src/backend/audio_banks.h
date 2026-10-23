@@ -11,6 +11,8 @@
  * declaration name. Return 0 for names the verified native string conversion
  * cannot represent; the output is cleared. These do not prove bank presence. */
 int sh_audio_bank_identity(const char *filename, uint32_t *id);
+/* Canonical decimal file identity, distinct from hashing the filename. */
+int sh_audio_bank_numeric_identity(const char *filename, uint32_t *id);
 int sh_audio_event_identity(const char *declaration, uint32_t *id);
 /* Whether a bank file name denotes this cooked identity. The native loader
  * accepts both forms: the folded name hash above, and a decimal file stem that
@@ -26,6 +28,7 @@ typedef struct sh_audio_bank_media {
     unsigned char stream;
     unsigned char embedded;       /* this bank carries bytes for the identity */
 } sh_audio_bank_media;
+typedef struct sh_audio_bank_target { uint32_t bank, object; } sh_audio_bank_target;
 
 typedef struct sh_audio_bank {
     uint32_t id, language;
@@ -48,6 +51,10 @@ typedef struct sh_audio_bank {
     size_t optional_count;
     sh_audio_bank_media *media;   /* sorted, unique by identity */
     size_t media_count;
+    uint32_t *objects;           /* sorted definitions, including events/actions */
+    size_t object_count;
+    sh_audio_bank_target *targets; /* play targets owned by a different bank */
+    size_t target_count;
 } sh_audio_bank;
 
 /* Bounded random access to verified bytes, in memory or on disk. Read must
@@ -68,10 +75,46 @@ int sh_audio_bank_read_source(sh_audio_bank_source source, sh_audio_bank *out,
  * remains caller-owned. A malformed/unsupported bank leaves out empty. */
 int sh_audio_bank_read(FILE *stream, sh_audio_bank *out, char *error, size_t capacity);
 void sh_audio_bank_free(sh_audio_bank *bank);
+/* Copy retained metadata only. Output starts empty and stays empty on failure. */
+int sh_audio_bank_copy(const sh_audio_bank *source, sh_audio_bank *out);
 int sh_audio_bank_has_event(const sh_audio_bank *bank, uint32_t event);
 int sh_audio_bank_needs_bank(const sh_audio_bank *bank, uint32_t id);
 /* Borrowed row for the bank lifetime, or NULL when this bank never names it. */
 const sh_audio_bank_media *sh_audio_bank_find_media(const sh_audio_bank *bank, uint32_t id);
+
+typedef struct sh_audio_bank_closure_report {
+    size_t matched_events, dependency_banks, optional_targets;
+    size_t native_absent; /* lookups SnapMap itself leaves unresolved */
+} sh_audio_bank_closure_report;
+/* Pure selection shared by immutable source analysis and native activation.
+ * selected contains caller-owned seed banks and receives the complete union.
+ * A direct-use event requires membership; scanning available declarations may
+ * allow unplayed/unbanked declarations by setting require_events to zero.
+ * Hard object references select their scoped defining bank; they need not be
+ * stored in the referring bank. Explicit preparation-bank targets still require
+ * membership in that named bank. Resident media selects the bank carrying DATA,
+ * preferring an already selected provider. Remaining external-media lookup is
+ * the caller's responsibility. Explicit bank dependencies and hard references are mandatory
+ * in both modes. No allocation or native action occurs; discard the selection
+ * on failure. The input inventory already resolved scope and native language. */
+int sh_audio_bank_closure(const sh_audio_bank *const *banks, size_t bank_count,
+    const uint32_t *events, size_t event_count, int require_events,
+    unsigned char *selected, sh_audio_bank_closure_report *report,
+    char *error, size_t capacity);
+/* The same closure over SnapMap's native bank set. flags[i] (NULL means every
+ * bank is registered and none is native): REGISTERED banks are loaded by
+ * SnapMap's own sound init and are preferred providers; a NATIVE bank is that
+ * registered installed original, so its own references need no provider that
+ * SnapMap never registers (absent receives each such object ID). A bank the
+ * program supplies may still select such a provider, and an event defined
+ * only there selects it: startup filtering is not a ban on used content. */
+#define SH_AUDIO_CLOSURE_REGISTERED 1u
+#define SH_AUDIO_CLOSURE_NATIVE 2u
+int sh_audio_bank_closure_native(const sh_audio_bank *const *banks, const unsigned char *flags,
+    size_t bank_count, const uint32_t *events, size_t event_count, int require_events,
+    unsigned char *selected, sh_audio_bank_closure_report *report,
+    int (*absent)(void *context, uint32_t id), void *absent_context,
+    char *error, size_t capacity);
 
 typedef struct sh_audio_bank_slot {
     const char *name;
@@ -103,5 +146,15 @@ typedef struct sh_audio_bank_ops {
  * have unloaded a bank since the last provider transition. */
 int sh_audio_banks_reconcile(sh_audio_bank_slot *slots, size_t count,
     const unsigned char *wanted, const sh_package_file_identity *const *content,
+    sh_audio_bank_ops ops, char *error, size_t capacity);
+/* Active-editor admission never cycles existing banks. Unknown already-loaded
+ * override bytes require a separate identity, not destructive replacement.
+ * Snapshot slots before this call, then restore_additions after a failed outer
+ * transaction. Only loads successfully owned by this addition are released. */
+int sh_audio_banks_append(sh_audio_bank_slot *slots, size_t count,
+    const unsigned char *wanted, const sh_package_file_identity *const *content,
+    sh_audio_bank_ops ops, char *error, size_t capacity);
+int sh_audio_banks_restore_additions(sh_audio_bank_slot *slots, size_t count,
+    const sh_audio_bank_slot *before, size_t before_count,
     sh_audio_bank_ops ops, char *error, size_t capacity);
 #endif

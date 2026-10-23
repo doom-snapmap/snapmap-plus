@@ -1,45 +1,40 @@
 /* Expose registered cvars to console and startup +cvar lookup.
- * A deferred worker aliases the developer lookup to the full table and marks
- * cvars settable, then repeats briefly while boot registration continues.
- * Engine-memory accesses are guarded because initialization can race the worker. */
+ * A deferred worker waits for decrypted code, points every cvar-system gate
+ * selection at the full table, then marks cvars settable and repeats the
+ * marking briefly while boot registration continues. Engine-memory accesses
+ * are guarded because initialization can race the worker. */
 #include <windows.h>
+#include <intrin.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 #include "cvar_unlock.h"
 #include "backend_log.h"
 #include "host_image.h"
+#include "patch.h"
 
-/* Developer-table alias and cvar flags. */
+/* Cvar flags. */
 
-/* Copy both table headers; return 0 if the boot-time object is not readable. */
-static int alias_dev_to_full(uint8_t *cvarSys)
-{
-    __try {
-        memcpy(cvarSys + CVARSYS_DEV_LIST_OFF, cvarSys + CVARSYS_FULL_LIST_OFF, SIZEOF_IDLIST);
-        memcpy(cvarSys + CVARSYS_DEV_HASH_OFF, cvarSys + CVARSYS_FULL_HASH_OFF, SIZEOF_IDHASHINDEX);
-        return 1;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return 0;
-    }
-}
-
-/* Guard each flags write because registration can replace cvar pointers. */
+/* Guard each flags access because registration can replace cvar pointers.
+ * Only a missing bit is written, atomically, so no engine flag update is lost. */
 static void set_settable_one(void *cvar_v)
 {
     __try {
         uint8_t *cvar = (uint8_t *)cvar_v;
         if (cvar == NULL)
             return;
-        uint32_t *flags = (uint32_t *)(cvar + CVAR_FLAGS_OFF);
-        *flags |= CVAR_FLAG_NOCHEAT;
+        volatile LONG *flags = (volatile LONG *)(cvar + CVAR_FLAGS_OFF);
+        if (!(*flags & CVAR_FLAG_NOCHEAT))
+            InterlockedOr(flags, CVAR_FLAG_NOCHEAT);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         /* A later pass retries entries still being initialized. */
     }
 }
 
 /* Resolve CmdSystemLea independently of backend bootstrap, then decode its
- * singleton slot. The adjacent cvar-system slot is 0x10 bytes later.
- * A pinned-RVA fallback remains for the encrypted early-boot window. */
+ * singleton slot. The adjacent cvar-system slot is 0x10 bytes later. A match
+ * shows SteamStub has decrypted CmdSystemLea; later .text can still be
+ * encrypted at that moment. */
 
 /* CmdSystemLea; relative operands are wildcarded. */
 static const char *const CVU_CMDSYS_LEA_SIG =
@@ -130,6 +125,7 @@ static const uint8_t *cvu_decode_rip_slot(const uint8_t *fn)
     return NULL;
 }
 
+
 /* Decode and cache the slot, then read cvarSys. A cached slot with no object
  * means engine construction is pending; a missing slot means resolution failed. */
 static uint8_t *cvu_resolve_cvarsys_portable(const uint8_t *base)
@@ -145,7 +141,7 @@ static uint8_t *cvu_resolve_cvarsys_portable(const uint8_t *base)
         const uint8_t *slot = cvu_decode_rip_slot(fn);
         if (!slot) return NULL;
         g_cvu_cmdsys_slot = slot;
-        backend_log("B2: cvar-unlock CmdSystemLea sig RESOLVED -> portable cvarSys path live (SteamStub .text decrypted)");
+        backend_log("B2: cvar-unlock CmdSystemLea sig RESOLVED -> portable cvarSys path live (SteamStub has decrypted it)");
     }
     uint8_t *cvarSys = NULL;
     __try { cvarSys = *(uint8_t **)(g_cvu_cmdsys_slot + CVU_CMDSYS_TO_CVARSYS); }
@@ -153,21 +149,169 @@ static uint8_t *cvu_resolve_cvarsys_portable(const uint8_t *base)
     return cvarSys;
 }
 
-/* Apply the alias and flags once the cvar list looks populated. Return 0 to retry.
- * Only engine data is written; each memory access is guarded against faults. */
-static int apply_unlock(uint8_t *base)
+/* Gate selections. */
+
+/* The eleven cvar-system gate selections, identical in both renderer images
+ * (OpenGL / Vulkan RVAs noted). Copying the full table's list and hash headers
+ * over the developer table raced boot registration: two lists shared one
+ * buffer, and a lookup processing startup +cvar options read a NULL entry
+ * (OpenGL 0x19f7d7d in FindVar) before the launcher could start Vulkan.
+ * Rewriting each selection's one-byte immediate never exposes a shared or
+ * half-copied table. FindVar reads its hash selection before its list
+ * selection, so rewriting list selections first can pair at worst a developer
+ * hash with the full list: a name mismatch, never an index past the smaller
+ * developer list. The worker rewrites them once .text is decrypted, before
+ * boot registration fills either table, so the one function that reads its
+ * list selection first (third and fourth sites) has nothing to index yet. */
+typedef struct cvu_gate_site { const char *sig; int imm; uint8_t developer, full; } cvu_gate_site;
+static const cvu_gate_site CVU_GATE_SITES[SH_CVAR_UNLOCK_GATE_SITES] = {
+    {"FF 50 10 B9 08 00 00 00 41 B9 20 00 00 00 85 C0 44 0F 44 C9", 10,
+     CVARSYS_DEV_LIST_OFF, CVARSYS_FULL_LIST_OFF},                                              /* 0x19f785b / 0x1a0560b */
+    {"FF 50 10 B9 08 00 00 00 41 B8 20 00 00 00 85 C0 44 0F 44 C1 49 03", 10,
+     CVARSYS_DEV_LIST_OFF, CVARSYS_FULL_LIST_OFF},                                              /* 0x19f79c2 / 0x1a05772 */
+    {"FF 50 10 B9 08 00 00 00 BE 20 00 00 00 85 C0 0F 44 F1 48 8B", 9,
+     CVARSYS_DEV_LIST_OFF, CVARSYS_FULL_LIST_OFF},                                              /* 0x19f7be6 / 0x1a05996 */
+    {"FF 50 10 BA 38 00 00 00 41 BE 60 00 00 00 85 C0 44 0F 44 F2", 10,
+     CVARSYS_DEV_HASH_OFF, CVARSYS_FULL_HASH_OFF},                                              /* 0x19f7c05 / 0x1a059b5 */
+    {"FF 50 10 B9 38 00 00 00 BE 60 00 00 00 85 C0 0F 44 F1 48 8B", 9,
+     CVARSYS_DEV_HASH_OFF, CVARSYS_FULL_HASH_OFF},                                              /* 0x19f7d12 / 0x1a05ac2 */
+    {"20 BA 08 00 00 00 85 C0 41 BE 20 00 00 00 48 63 46 1C 44 0F", 10,
+     CVARSYS_DEV_LIST_OFF, CVARSYS_FULL_LIST_OFF},                                              /* 0x19f7d44 / 0x1a05af4 */
+    {"FF 50 10 B9 08 00 00 00 41 B8 20 00 00 00 85 C0 44 0F 44 C1 49 8B 04 38 48 8B 04 D8", 10,
+     CVARSYS_DEV_LIST_OFF, CVARSYS_FULL_LIST_OFF},                                              /* 0x19f7df2 / 0x1a05ba2 */
+    {"FF 51 10 B9 08 00 00 00 41 BE 20 00 00 00 85 C0 44 0F 44 F1", 10,
+     CVARSYS_DEV_LIST_OFF, CVARSYS_FULL_LIST_OFF},                                              /* 0x19f7e5f / 0x1a05c0f */
+    {"8B FA 48 8B 01 FF 50 10 BE 20 00 00 00 B9 08 00 00 00 85 C0", 9,
+     CVARSYS_DEV_LIST_OFF, CVARSYS_FULL_LIST_OFF},                                              /* 0x19f8b1d / 0x1a068dd */
+    {"00 48 8B 0D ?? ?? ?? ?? 48 8B 01 FF 50 10 BE 20 00 00 00 B9 08 00 00 00 85 C0", 15,
+     CVARSYS_DEV_LIST_OFF, CVARSYS_FULL_LIST_OFF},                                              /* 0x19f8eab / 0x1a06c6b */
+    {"FF 50 10 B9 08 00 00 00 41 B8 20 00 00 00 85 C0 44 0F 44 C1 49 8B 04 38 48 8B 1C D8", 10,
+     CVARSYS_DEV_LIST_OFF, CVARSYS_FULL_LIST_OFF}                                               /* 0x19f8fec / 0x1a06dac */
+};
+
+/* Locate every developer immediate in one pass over .text. A site matches
+ * with its immediate at either value, so a rewritten selection is still found.
+ * Return 1 when every site matches exactly once, 0 when a site is absent, or
+ * -1 when one matches more than once; unproven receives each such site's bit. */
+static int cvu_gate_targets(const uint8_t *text, size_t size, uint8_t *targets[SH_CVAR_UNLOCK_GATE_SITES],
+                            unsigned *unproven)
 {
-    /* SteamStub may still hide .text during boot. Try the signature first, then
-     * the Vulkan-name-gated RVA while it is unavailable. */
-    uint8_t *cvarSys = cvu_resolve_cvarsys_portable(base);
-    if (cvarSys == NULL && g_cvu_cmdsys_slot == NULL && sh_host_is_pinned_rva_build()) {
-        /* The gate excludes OpenGL by name; it does not verify the pinned build hash. */
-        __try {
-            cvarSys = *(uint8_t **)(base + RVA_CVAR_SYSTEM_PTR);
-        } __except (EXCEPTION_EXECUTE_HANDLER) {
-            return 0;
+    uint8_t bytes[SH_CVAR_UNLOCK_GATE_SITES][32], mask[SH_CVAR_UNLOCK_GATE_SITES][32];
+    int len[SH_CVAR_UNLOCK_GATE_SITES], hits[SH_CVAR_UNLOCK_GATE_SITES] = {0};
+    uint16_t first[256] = {0};
+    for (int s = 0; s < SH_CVAR_UNLOCK_GATE_SITES; s++) {
+        const cvu_gate_site *site = CVU_GATE_SITES + s;
+        len[s] = cvu_parse_sig(site->sig, bytes[s], mask[s], (int)sizeof bytes[s]);
+        if (len[s] <= site->imm || !mask[s][0] || !mask[s][site->imm] || bytes[s][site->imm] != site->developer) {
+            *unproven = (1u << SH_CVAR_UNLOCK_GATE_SITES) - 1;
+            return -1;
+        }
+        mask[s][site->imm] = 0;
+        first[bytes[s][0]] |= (uint16_t)(1u << s);
+    }
+    for (size_t i = 0; i < size; i++) {
+        for (unsigned pending = first[text[i]]; pending; pending &= pending - 1) {
+            unsigned long s;
+            _BitScanForward(&s, pending);
+            const cvu_gate_site *site = CVU_GATE_SITES + s;
+            if (size - i < (size_t)len[s]) continue;
+            int j = 1;
+            while (j < len[s] && (!mask[s][j] || text[i + j] == bytes[s][j])) j++;
+            if (j < len[s]) continue;
+            uint8_t value = text[i + (size_t)site->imm];
+            if (value != site->developer && value != site->full) continue;
+            hits[s]++;
+            targets[s] = (uint8_t *)text + i + site->imm;
         }
     }
+    int result = 1;
+    for (int s = 0; s < SH_CVAR_UNLOCK_GATE_SITES; s++) {
+        if (hits[s] == 1) continue;
+        *unproven |= 1u << s;
+        result = hits[s] > 1 ? -1 : result < 0 ? -1 : 0;
+    }
+    return result;
+}
+
+int sh_cvar_unlock_rewrite_gates(uint8_t *text, size_t size, unsigned *unproven)
+{
+    uint8_t *targets[SH_CVAR_UNLOCK_GATE_SITES];
+    sh_patch_handle handles[SH_CVAR_UNLOCK_GATE_SITES];
+    unsigned ignored;
+    int written = 0, found;
+    if (unproven == NULL)
+        unproven = &ignored;
+    *unproven = 0;
+    if (text == NULL)
+        return 0;
+    found = cvu_gate_targets(text, size, targets, unproven);
+    if (found <= 0)
+        return found;
+    memset(handles, 0, sizeof handles);
+    for (int pass = 0; pass < 2; pass++) {
+        for (int i = 0; i < SH_CVAR_UNLOCK_GATE_SITES; i++) {
+            const cvu_gate_site *site = CVU_GATE_SITES + i;
+            if ((site->developer == CVARSYS_DEV_HASH_OFF) != (pass == 1) || *targets[i] == site->full)
+                continue;
+            if (code_patch(targets[i], &site->developer, &site->full, 1, &handles[written]) != B2_PATCH_OK) {
+                /* Undo in reverse, hash selections first, so every step stays a safe pairing. */
+                if (handles[written].live)
+                    code_unpatch(&handles[written]);
+                while (written > 0)
+                    code_unpatch(&handles[--written]);
+                return -1;
+            }
+            written++;
+        }
+    }
+    return SH_CVAR_UNLOCK_GATE_SITES;
+}
+
+static int g_cvu_gate_scans;
+
+/* Rewrite the gates once CmdSystemLea resolves. Return 1 when done, 0 to
+ * retry, or -1 when this build's selections are refused. The cvar code lies
+ * well past CmdSystemLea and may still be encrypted, so absent sites stay
+ * retryable until registered cvars prove the engine is running decrypted code;
+ * a site matching more than once is refused at once. */
+static int cvu_rewrite_image_gates(const uint8_t *base)
+{
+    const uint8_t *text; size_t size;
+    uint8_t *cvarSys = cvu_resolve_cvarsys_portable(base);
+    uint32_t registered = 0;
+    unsigned unproven = 0;
+    int rewritten = 0;
+    char line[192];
+    if (g_cvu_cmdsys_slot == NULL || !cvu_find_text(base, &text, &size))
+        return 0;
+    if (cvarSys != NULL) {
+        __try { registered = *(uint32_t *)(cvarSys + CVARSYS_LIST_COUNT_OFF); }
+        __except (EXCEPTION_EXECUTE_HANDLER) { registered = 0; }
+    }
+    __try { rewritten = sh_cvar_unlock_rewrite_gates((uint8_t *)text, size, &unproven); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { rewritten = 0; }
+    g_cvu_gate_scans++;
+    if (rewritten == 0 && registered == 0)
+        return 0;
+    if (rewritten != SH_CVAR_UNLOCK_GATE_SITES) {
+        _snprintf_s(line, sizeof line, _TRUNCATE,
+            "B2: cvar-unlock gate sites 0x%03x %s after %d scans (%u cvars registered)",
+            unproven, rewritten == 0 ? "absent" : "ambiguous or not rewritable", g_cvu_gate_scans, registered);
+        backend_log(line);
+        return -1;
+    }
+    _snprintf_s(line, sizeof line, _TRUNCATE,
+        "B2: cvar-unlock gate selections now use the full table (%d sites after %d scans; %u cvars registered)",
+        rewritten, g_cvu_gate_scans, registered);
+    backend_log(line);
+    return 1;
+}
+
+/* Mark cvars settable once the full list looks populated. Return 0 to retry.
+ * Only cvar flags are written; each memory access is guarded against faults. */
+static int apply_unlock(uint8_t *base)
+{
+    uint8_t *cvarSys = cvu_resolve_cvarsys_portable(base);
     if (cvarSys == NULL)
         return 0;
 
@@ -184,39 +328,48 @@ static int apply_unlock(uint8_t *base)
     if (arr == NULL || count == 0 || count > CVAR_LIST_SANITY_MAX)
         return 0;
 
-    /* Alias developer lookup to the full registered-cvar table. */
-    if (!alias_dev_to_full(cvarSys))
-        return 0;
-
-    /* NOCHEAT permits setting cvars through the developer gate. */
+    /* NOCHEAT lets the setter accept a cvar while the gate is nonzero.
+     * Registration can reallocate the array: read each entry only while it is
+     * still the live one, and let the next pass finish a walk it cuts short. */
     for (uint32_t i = 0; i < count; i++) {
-        void *cvar_v = NULL;
-        __try { cvar_v = arr[i]; }
-        __except (EXCEPTION_EXECUTE_HANDLER) { break; } /* Registration may reallocate the array during this walk. */
+        void *cvar_v = NULL, **live = NULL;
+        __try { live = *(void ***)(cvarSys + CVARSYS_LIST_ARRAY_OFF); if (live == arr) cvar_v = arr[i]; }
+        __except (EXCEPTION_EXECUTE_HANDLER) { break; }
+        if (live != arr)
+            break;
         set_settable_one(cvar_v);
     }
     return 1;
 }
 
-/* Wait for construction, then refresh the alias while boot registration continues. */
+/* Wait for decrypted code and the cvar system, then keep marking cvars
+ * settable while boot registration continues. */
 static DWORD WINAPI unlock_thread(LPVOID param)
 {
     (void)param;
     uint8_t *base = (uint8_t *)sh_host_image_base();
 
-    /* Wait up to about 60 seconds for the cvar system. */
-    int applied = 0;
+    /* Wait up to about 60 seconds for decrypted code and the cvar system. */
+    int gates = 0, applied = 0;
     for (int i = 0; i < 6000 && !applied; i++) {
         if (base == NULL)
             base = (uint8_t *)sh_host_image_base();
-        if (base != NULL)
+        if (base != NULL && gates == 0)
+            gates = cvu_rewrite_image_gates(base);
+        if (gates < 0) {
+            backend_log("B2: cvar-unlock REFUSED -- this build's cvar gate selections were not proven; lookups stay native");
+            return 0;
+        }
+        if (gates > 0)
             applied = apply_unlock(base);
         if (!applied)
             Sleep(10);
     }
-    if (!applied)
+    if (!applied) {
+        backend_log("B2: cvar-unlock NOT APPLIED -- decrypted code or the cvar list did not appear within 60 seconds");
         return 0;
-    backend_log("B2: cvar-unlock APPLIED -- all cvars findable+settable (dev-table alias + NOCHEAT); +cvar launch options now apply");
+    }
+    backend_log("B2: cvar-unlock APPLIED -- all cvars findable+settable (full-table gate selections + NOCHEAT); +cvar launch options now apply");
 
     /* Refresh for about ten seconds; startup +cvar timing is still a polling race. */
     for (int i = 0; i < 200; i++) {

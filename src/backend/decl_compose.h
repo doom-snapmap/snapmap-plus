@@ -7,10 +7,31 @@
 #include "decl_tree.h"
 #include "decl_dependencies.h"
 
+/* Prefix of a refusal for native-valid input the composer does not model.
+ * It is never the author's defect and names no individual source: the caller
+ * applies the platform's resolution (an only contribution is served as
+ * written, several are kept apart). */
+#define SH_DECL_COMPOSE_COVERAGE "composition coverage"
+
 /* Compare parsed entity definitions while excluding the engine's top-level
  * editorVars authoring block. Return 1 only with a proven gameplay match;
  * unsupported syntax returns 0 and never silently drops a dependency. */
 int sh_decl_entity_gameplay_equal(sh_decl_source baseline, sh_decl_source source);
+
+enum {
+    /* Authored positions are presentation preferences. Resolve opposing
+     * preferences deterministically; native order callbacks remain mandatory. */
+    SH_DECL_COLLECTION_PRESENTATION_ORDER = 1u,
+    /* One primary key may expose several editing functions. Identity includes
+     * every non-presentation field and native block operation. Callers bind
+     * resource references before composition; raw names do not prove equality. */
+    SH_DECL_COLLECTION_DISTINCT_BEHAVIOR = 2u,
+    /* The native consumer applies the first row matching an identity (the
+     * conductor's modifiers). A later row of one list sharing an earlier row's
+     * identity is never reached; it is dropped rather than refused, which
+     * leaves the native result unchanged. */
+    SH_DECL_COLLECTION_FIRST_MATCH = 4u
+};
 
 /* These rules are supplied by verified engine-family adapters, never package
  * metadata. NULL item_key identifies a scalar collection; an object collection
@@ -19,6 +40,8 @@ int sh_decl_entity_gameplay_equal(sh_decl_source baseline, sh_decl_source source
  * A path may use [*] for a numeric index in a verified nested collection.
  * Semantic collections preserve compatible authored ordering constraints;
  * independent additions use identity order only to break unconstrained ties.
+ * Only an explicit presentation-order flag, or a native adapter's significance
+ * contract (sh_decl_collection_order), makes those positions advisory.
  * Index-referenced collections require a separate verified relocation contract. */
 typedef struct sh_decl_collection_rule {
     const char *path;
@@ -28,10 +51,23 @@ typedef struct sh_decl_collection_rule {
      * Group positions are presentation order, never externally referenced IDs. */
     const char *group_items;
     const char *group_identity;
+    /* Optional NULL-terminated direct fields that only label a control. Within
+     * one contribution, repeated identities with otherwise equal behavior
+     * retain their earliest slot and labels; absent labels can be filled by a
+     * later copy. With zero flags this establishes no precedence between
+     * contributors; PRESENTATION_ORDER resolves their cosmetic disagreements.
+     * Group rules apply these fields to members, not to group metadata. */
+    const char *const *presentation_keys;
+    /* Opt-in native consumer contracts. Zero preserves strict semantic order
+     * and primary-key identity. Neither flag is valid for fixed positions.
+     * Group rules apply both flags to their members. PRESENTATION_ORDER also
+     * resolves competing member labels and page placement without rejection. */
+    unsigned flags;
 } sh_decl_collection_rule;
 
 /* Native adapters derive extra ordering from merged entry references before
- * identity tie-breaking. Opposing authored relations remain conflicts. This
+ * identity tie-breaking. These relations remain mandatory even for presentation
+ * collections; only the authored layout preferences can be discarded. This
  * pure synchronous callback must not retain its borrowed nodes. Return -1 for
  * left-before-right, 1 for right-before-left, 0 unconstrained, or 2 incompatible.
  * Reversing arguments must reverse the relation. This is a compiler format
@@ -39,6 +75,15 @@ typedef struct sh_decl_collection_rule {
 typedef struct sh_decl_collection_order {
     void *context;
     int (*relation)(void *context, const char *path,
+        const sh_decl_node *left, const sh_decl_node *right);
+    /* Optional: whether the native consumer observes the relative order of
+     * two distinct entries of the collection at path. 1 it does, 0 it cannot
+     * (for example a first-match list no one value reaches both entries of),
+     * -1 the rule's flags decide. An order nobody observes is a presentation
+     * preference, resolved deterministically; an observed one stays mandatory
+     * even in a presentation collection. Symmetric and pure, like relation.
+     * Either callback may be NULL, not both. */
+    int (*significant)(void *context, const char *path,
         const sh_decl_node *left, const sh_decl_node *right);
 } sh_decl_collection_order;
 
@@ -68,6 +113,13 @@ char *sh_decl_compose_root_metadata(sh_decl_source baseline,
     const sh_decl_source *sources, size_t count, size_t *out_length,
     char *error, size_t error_capacity, sh_decl_conflict *conflict);
 
+/* Compose projected entity editorVars while retaining a variant's own edits
+ * on disagreement. Other fields keep strict composition semantics. A target
+ * equal to baseline uses a deterministic choice for one shared presentation;
+ * independent field additions still compose. This is not a gameplay merge. */
+char *sh_decl_compose_editor_variant(sh_decl_source baseline, const sh_decl_source *sources,
+    size_t count, sh_decl_source target, size_t *out_length, char *error, size_t capacity);
+
 typedef enum sh_decl_composition_role {
     SH_DECL_COMPOSITION_ORIGINAL,
     SH_DECL_COMPOSITION_CONTRIBUTION,
@@ -94,7 +146,25 @@ typedef struct sh_decl_composition_schema {
     int (*resolve)(void *context, const sh_decl_node *definition,
         sh_decl_composition_role role, size_t index, sh_decl_value_type *type,
         char *error, size_t error_capacity);
+    /* Optional, entityDef only: how this definition's own state text merges
+     * into its inheritance chain (VK 0x141a65560 passes *tree != 0). Return 1
+     * when an ancestor layer has state whose first statement is a block
+     * assignment, with its malloc-owned name in state_name (update mode:
+     * statements of that name collapse by first match, others are inert), 0
+     * when it is the first stateful layer (every occurrence is appended, so
+     * repeats compose as an ordered sequence), -1 unavailable. Same view rules
+     * as resolve. NULL keeps state needing the mode refused as coverage. */
+    int (*merges)(void *context, const sh_decl_node *definition,
+        sh_decl_composition_role role, size_t index, char **state_name, char *error, size_t error_capacity);
 } sh_decl_composition_schema;
+
+/* sh_decl_normalize_collections for an entityDef whose text repeats a
+ * statement: with schema->merges (and schema->context) both views are reduced
+ * in the inheritance merge mode, and the authored bytes stay unless
+ * normalization changes that reduction. NULL schema is the plain contract. */
+int sh_decl_normalize_entity_collections(sh_decl_source source,
+    const sh_decl_collection_rule *rules, size_t rule_count, const sh_decl_composition_schema *schema,
+    char **body, size_t *length, char *error, size_t error_capacity);
 
 /* Return a malloc-owned native declaration or NULL with a conflicting path or
  * syntax diagnostic. All sources are merged together, including new nested
@@ -135,6 +205,13 @@ char *sh_decl_compose_resource_report(const char *declaration_type,
     size_t count, const sh_decl_collection_rule *rules, size_t rule_count,
     const sh_decl_composition_schema *schema, size_t *out_length,
     char *error, size_t error_capacity, sh_decl_conflict *conflict,
+    unsigned char *conflicting_sources);
+/* The same under a native adapter's order contract (NULL for none). */
+char *sh_decl_compose_resource_ordered(const char *declaration_type,
+    sh_decl_source baseline, const sh_decl_source *sources,
+    size_t count, const sh_decl_collection_rule *rules, size_t rule_count,
+    const sh_decl_composition_schema *schema, const sh_decl_collection_order *order,
+    size_t *out_length, char *error, size_t error_capacity, sh_decl_conflict *conflict,
     unsigned char *conflicting_sources);
 
 #endif

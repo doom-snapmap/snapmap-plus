@@ -16,9 +16,12 @@
 const sh_package_compilation *sh_package_runtime_acquire(void) { return NULL; }
 const sh_package_compilation *sh_package_runtime_library_acquire(void) { return NULL; }
 void sh_package_runtime_release(void) {}
+sh_package_bundle *sh_package_runtime_installed_bundle(const unsigned char fingerprint[32]) { (void)fingerprint; return NULL; }
 int sh_package_runtime_ready(void) { return 0; }
 int sh_package_runtime_admission_ready(void) { return 0; }
+int sh_package_runtime_serving_disabled(void) { return 0; }
 void sh_package_runtime_note_sources_changed(void) {}
+void sh_package_runtime_note_install_published(void) {}
 int sh_decl_server_registration_succeeded(void) { return 0; }
 void sh_decl_server_request_rearm(void) {}
 int sh_engine_dialog_ready(void) { return 0; }

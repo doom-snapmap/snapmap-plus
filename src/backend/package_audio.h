@@ -3,6 +3,8 @@
 #define SH_PACKAGE_AUDIO_H
 #include "package_compiler.h"
 #include "audio_banks.h"
+#include "audio_hirc.h"
+#include "audio_originals.h"
 
 typedef struct sh_package_audio sh_package_audio;
 typedef struct sh_package_audio_bank {
@@ -62,4 +64,63 @@ size_t sh_package_audio_find(const sh_package_audio *audio, uint32_t event,
  * the payload; the installed original or a mounted package still can. */
 size_t sh_package_audio_find_media(const sh_package_audio *audio, uint32_t id,
     const sh_package_audio_media **media);
+
+typedef struct sh_package_audio_scope sh_package_audio_scope;
+/* Native PC bank/media paths, including captured bank-prefix/locale directories.
+ * 1 bank, 2 media, 0 another family. This is classification, not validation. */
+int sh_package_audio_path_kind(const char *path);
+typedef int (*sh_package_audio_path_visit)(void *context, const char *path, int original);
+/* Immutable effective source inventory for one authored scope and captured
+ * native locale. Candidate files shadow originals only at the same native
+ * lookup path; a peer package cannot repair an absent authored dependency.
+ * originals is borrowed and must outlive this scope. No native calls occur. */
+sh_package_audio_scope *sh_package_audio_scope_open(const sh_package_compilation *compiled,
+    sh_audio_originals *originals, char *error, size_t capacity);
+void sh_package_audio_scope_close(sh_package_audio_scope *scope);
+/* Complete explicit event/action bank and streamed media dependency closure.
+ * Visits only actual selected paths. An absent played event or mandatory bank,
+ * object or media fails; control-action targets are allowed native no-ops. */
+int sh_package_audio_scope_event(sh_package_audio_scope *scope, uint32_t event,
+    sh_package_audio_path_visit visit, void *context, char *error, size_t capacity);
+/* 1 when a bank of this effective scope and locale implements the event. The
+ * engine plays nothing for an event no bank implements; callers decide whether
+ * such a reference is allowed. */
+int sh_package_audio_scope_implements(const sh_package_audio_scope *scope, uint32_t event);
+/* Whether the effective bank at path is SnapMap's registered installed
+ * original (native activation owns it and its unresolved references). */
+int sh_package_audio_scope_native(const sh_package_audio_scope *scope, const char *path);
+/* Sorted object IDs that only native originals reference and only banks
+ * SnapMap never registers define; borrowed until the scope closes. */
+size_t sh_package_audio_scope_absent(const sh_package_audio_scope *scope, const uint32_t **ids);
+/* Capture the union once in native inventory order, independent of requested
+ * event order. The resulting construction order is also used by audio linking. */
+int sh_package_audio_scope_events(sh_package_audio_scope *scope, const uint32_t *events,
+    size_t count, sh_package_audio_path_visit visit, void *context, char *error, size_t capacity);
+/* Seed effective authored banks and banks naming effective authored media in
+ * addition to requested events. Unselected locales remain delivery inventory.
+ * Refine typed metadata first so plug-in media participates in nomination. */
+int sh_package_audio_scope_inventory(sh_package_audio_scope *scope, const uint32_t *events,
+    size_t count, sh_package_audio_path_visit visit, void *context, char *error, size_t capacity);
+/* Explicit bank roots use the same locale selection, typed closure and ordered
+ * inventory as events. Every requested bank must exist in this source scope.
+ * Used to capture baseline bus recipes without inventing an event reference. */
+int sh_package_audio_scope_roots(sh_package_audio_scope *scope, const uint32_t *banks,
+    size_t count, sh_package_audio_path_visit visit, void *context, char *error, size_t capacity);
+/* Effective native registration inventory for typed refinement. Does not select
+ * or activate these banks; the visitor may refine each row in place. */
+int sh_package_audio_scope_banks(sh_package_audio_scope *scope,
+    sh_package_audio_path_visit visit, void *context);
+/* Current-locale media resolution shared by dependency walking and typed audio
+ * capture. 1 visited, 0 absent, -1 IO/visitor failure. Never search peer scopes. */
+int sh_package_audio_scope_media(sh_package_audio_scope *scope, uint32_t id,
+    sh_package_audio_path_visit visit, void *context, char *error, size_t capacity);
+/* Refine this private working index after fully decoding a selected source.
+ * Identity/language must match its captured row. Metadata remains borrowed;
+ * the same immutable source and decoded metadata must outlive this scope. */
+int sh_package_audio_scope_refine(sh_package_audio_scope *scope, const char *path,
+    const sh_audio_bank *metadata);
+/* Borrow complete typed references for reverse inventory nomination. The
+ * captured codec owns these through scope close. Shared controls stay global. */
+int sh_package_audio_scope_references(sh_package_audio_scope *scope, const char *path,
+    const sh_audio_identity_span *spans, size_t count);
 #endif

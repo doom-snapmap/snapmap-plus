@@ -7,6 +7,7 @@
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 #include "mapload_guards.h"
 #include "engine_layout.h"   /* RVA_EVLINK / RVA_INTERACTABLE_SPAWN + the offsets, with their recipes */
 #include "../backend/host_image.h"
@@ -191,21 +192,26 @@ static void sh_evlink_detour(void *a, void *b)
 }
 
 /* Resolve by signature, with pinned-build fallback. Callers also verify the
- * stolen prologue because an identified function may already be hooked. */
-static void *guard_target(const uint8_t *module_base, const char *sig_name, uint32_t pinned_rva)
+ * stolen prologue because an identified function may already be hooked. The
+ * startup results already hold the database's resolutions; a name they lack
+ * is resolved alone (a whole-database rescan per guard cost seconds a boot). */
+static void *guard_target(const uint8_t *module_base, const sig_result *results, size_t count,
+    const char *sig_name, uint32_t pinned_rva)
 {
-    sig_result results[SIG_RESULTS_MAX];
-    size_t db = sig_db_count();
-    uintptr_t a;
-    if (db > SIG_RESULTS_MAX) db = SIG_RESULTS_MAX;
-    /* Results use database indices, not the number of successful resolutions. */
-    (void)sig_resolve_all(module_base, results, SIG_RESULTS_MAX);
-    a = sig_addr_by_name(results, db, sig_name);
+    uintptr_t a = results ? sig_addr_by_name(results, count, sig_name) : 0;
+    if (!a) {
+        for (const sig_entry *e = BACKEND_ENGINE_SIGNATURES; e->name; e++) {
+            sig_result one;
+            if (strcmp(e->name, sig_name)) continue;
+            if (sig_resolve_one(module_base, e, &one) == SIG_OK || one.status == SIG_OK_HOOKED) a = one.addr;
+            break;
+        }
+    }
     if (a) return (void *)a;
     if (sh_host_is_pinned_rva_build()) return (void *)(module_base + pinned_rva);
     return NULL;   /* unknown build: refuse rather than detour a guessed address */
 }
-int sh_evwire_guard_install(const uint8_t *module_base)
+int sh_evwire_guard_install(const uint8_t *module_base, const sig_result *results, size_t count)
 {
     void *target, *tramp;
 
@@ -216,7 +222,7 @@ int sh_evwire_guard_install(const uint8_t *module_base)
         g_orig_evlink = NULL;
     }
 
-    target = guard_target(module_base, "EventLink", RVA_EVLINK);
+    target = guard_target(module_base, results, count, "EventLink", RVA_EVLINK);
     if (target == NULL) {
         shield_fault f = { "load", -1,
             "evwire-guard: EventLink is unresolved on this build -- NOT installed", RVA_EVLINK, 0 };
@@ -309,7 +315,7 @@ static void sh_ia_spawn_detour(void *self)
     g_orig_ia_spawn(self);      /* OUTSIDE every __try -- must not swallow the engine's C++ throws */
 }
 
-int sh_interactable_guard_install(const uint8_t *module_base)
+int sh_interactable_guard_install(const uint8_t *module_base, const sig_result *results, size_t count)
 {
     void *target, *tramp;
 
@@ -320,7 +326,7 @@ int sh_interactable_guard_install(const uint8_t *module_base)
         g_orig_ia_spawn = NULL;
     }
 
-    target = guard_target(module_base, "InteractableSpawn", RVA_INTERACTABLE_SPAWN);
+    target = guard_target(module_base, results, count, "InteractableSpawn", RVA_INTERACTABLE_SPAWN);
     if (target == NULL) {
         shield_fault f = { "load", -1,
             "interactable-guard: InteractableSpawn is unresolved on this build -- NOT installed",

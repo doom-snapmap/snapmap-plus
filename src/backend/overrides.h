@@ -15,6 +15,23 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <stdio.h>
+
+/* Construct a native idFile stream for an exact compiled resource already
+ * opened by its owning subsystem. Takes ownership of file on every outcome;
+ * successful streams close it through their native destructor. Rewinds before
+ * publication and requires the verified idStr helpers to be installed. This
+ * does not resolve a path, consult local packages, or fall back to the game. */
+void *sh_overrides_stream_take_file(FILE *file, uint64_t length, const char *name);
+/* Copy a compiled in-memory resource into a stream with the same native ABI.
+ * Source bytes remain caller-owned. No partial stream is returned on failure. */
+void *sh_overrides_stream_copy_bytes(const void *bytes, size_t length, const char *name);
+
+/* Failed SOURCE observations retain the actual opening until every affected
+ * consumer lifetime has positively recovered. Collect only completed streams;
+ * admission also checks still-open streams before changing an actual input. */
+void sh_overrides_collect_source_receipts(void);
+int sh_overrides_source_receipts_admit(void *const *resources, size_t count, char *error, size_t capacity);
 
 /* Native DeclRegisterFile canonicalizes a source argument to decltree/<source>.
  * The dynamic decl server therefore publishes one exact provider entry per
@@ -100,6 +117,10 @@ struct sh_package_map_plan;
 int sh_overrides_activate_map(struct sh_package_map_plan *plan,
     int (*activate)(void *context, int restoring, const struct sh_package_changes *changes,
         char *error, size_t capacity), void *context);
+struct sh_package_occurrence_snapshot;
+int sh_overrides_activate_occurrences(const struct sh_package_occurrence_snapshot *map,
+    int (*activate)(void *context, int restoring, const struct sh_package_changes *changes,
+        char *error, size_t capacity), void *context);
 #define SH_OVERRIDES_RESCAN_FAILED ((unsigned long)-1)
 
 /* Prepare runtime rearm without hiding existing entries. This retains READY
@@ -119,6 +140,41 @@ int sh_overrides_internal_decl_table_merge(
  */
 int sh_overrides_uninstall(void);
 
+/* The resource manager's file route (resource_file_visibility.h) serves the
+ * names this shadow claims. Claim name as an ordinary open would, without
+ * chaining to the engine: 1 with *stream set when the shadow owns the name
+ * (NULL when that owned name is unavailable), 0 when the name belongs to the
+ * engine or the shadow is not installed. */
+int sh_overrides_claim_open(const char *name, void **stream);
+/* Hand a claimed stream to the next open of exactly this name pointer on the
+ * calling thread, so a native helper that opens by name receives it. */
+void sh_overrides_pending_open(const char *name, void *stream);
+/* Withdraw the calling thread's pending stream; NULL once it was consumed. */
+void *sh_overrides_pending_take(void);
+/* Close a stream that was not given to the engine. */
+void sh_overrides_stream_close(void *stream);
+/* A synchronous observer runs after receipt attachment and before the native
+ * opening caller resumes. It borrows stream/provider, never replaces the
+ * result, and is not called on exceptional native exit. */
+typedef uint64_t (*sh_overrides_file_open_guard)(uintptr_t caller,void *provider);
+typedef void (*sh_overrides_file_return_observer)(void *stream,uintptr_t caller,void *provider,uint64_t stamp);
+/* The guard's opaque stamp belongs only to this stack opening. No resource
+ * origin/capture is transferred or duplicated. A failed guard never skips the
+ * native open; the return observer receives zero and records incompleteness. */
+int sh_overrides_set_file_return_observer(sh_overrides_file_open_guard guard,sh_overrides_file_return_observer observer);
+int sh_overrides_file_return_observer_ready(sh_overrides_file_open_guard guard,sh_overrides_file_return_observer observer,
+    const void *provider_table,const void *native_open);
+/* Reached ScriptLoadFile dispatch only: deleting, relative name, Read, Length,
+ * Timestamp. A live owned receipt is authenticated by allocation/stream/table
+ * identity before copying its original callbacks. No lease is acquired.
+ * product=1 identifies our current exact native-compatible stream methods;
+ * otherwise the caller must qualify every returned native callback. */
+typedef struct sh_overrides_file_dispatch {
+    uintptr_t table,slots[5],read_string,tell;
+    int product,receipt,shader;
+} sh_overrides_file_dispatch;
+int sh_overrides_file_dispatch_snapshot(void *stream,sh_overrides_file_dispatch *out);
+
 #ifdef SH_OVERRIDES_TESTING
 void *sh_overrides_test_open(const char *name, unsigned int mode);
 void sh_overrides_test_internal_decl_table_reset(void);
@@ -127,6 +183,8 @@ int sh_overrides_test_internal_decl_table_install(
 int sh_overrides_test_internal_decl_table_merge(
     const sh_overrides_internal_decl_entry *entries, size_t count);
 void *sh_overrides_test_internal_decl_open(const char *name);
+/* Whether the published table holds exactly this lower-case decltree key. */
+int sh_overrides_test_internal_decl_registered(const char *key);
 void *sh_overrides_test_memory_stream(const unsigned char *body, size_t length);
 long long sh_overrides_test_stream_read(void *stream, void *buffer, uint64_t length);
 long long sh_overrides_test_stream_read_at(void *stream, long long offset,
@@ -153,6 +211,14 @@ int sh_overrides_test_supported_build_abi(const uint8_t *module_base,
 int sh_overrides_test_address_in_readonly_section(const uint8_t *module_base, const void *address);
 void *sh_overrides_test_stream_open_file(const char *path);
 void sh_overrides_test_stream_close(void *stream);
+void sh_overrides_test_receipt_attach(void *stream, const char *path);
+size_t sh_overrides_test_failed_source_count(void);
+size_t sh_overrides_test_pending_source_count(void);
+struct sh_package_resource_capture;
+void sh_overrides_test_source_attach(void *stream, const char *path,
+    struct sh_package_resource_capture *capture, int baseline);
+struct sh_resource_instance_origin;
+void sh_overrides_test_vt_observer(int (*recording)(void), int (*observed)(struct sh_resource_instance_origin *));
 #endif
 
 #endif /* BACKEND_B1_OVERRIDES_H */

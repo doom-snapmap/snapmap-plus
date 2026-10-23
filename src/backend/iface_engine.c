@@ -1186,6 +1186,7 @@ int sh_iface_engine_install(const sig_result *results, size_t n, const uint8_t *
                               &slots.normalize_timeline_inherit); /* +0x298 palette-timeline portable-inherit */
 
     sh_apply_engine_get_serialize_selection(&slots.serialize_selection);
+    sh_apply_engine_get_prefab_export(&slots.prefab_export);
     sh_apply_engine_get_run_on_main(&slots.run_on_main);         /* +0x348 ext 28 */
 
     slots.push_to_stack          = slot_push_to_stack;        /* +0x2A0 ext 7 */

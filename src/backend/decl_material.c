@@ -409,6 +409,37 @@ void sh_decl_material_free(sh_decl_material *material)
         memset(material, 0, sizeof(*material));
     }
 }
+int sh_decl_material_native_default(sh_decl_source source, const sh_decl_material_schema *schema,
+    int (*known)(void *context, const char *family, const char *name), void *context,
+    char *program, size_t program_capacity, char *error, size_t capacity)
+{
+    sh_decl_material material = {0};
+    int result = 0;
+    if (program && program_capacity) *program = 0;
+    if (!known || !program || !program_capacity) return -1;
+    if (!sh_decl_material_read(source, schema, &material, error, capacity)) return -1;
+    for (size_t w = 0; w < material.count && !result; w++) {
+        const sh_decl_material_write *write = &material.writes[w];
+        if (write->kind != 11 || mt_same(write->name, "interactionProgram")) continue;
+        for (size_t r = write->first_reference; r < write->first_reference + write->reference_count && !result; r++) {
+            const sh_decl_material_reference *ref = &material.references[r];
+            char *name;
+            int answer;
+            if (strcmp(ref->family, "renderprog") || ref->name.length == SIZE_MAX) continue;
+            if (!(name = malloc(ref->name.length + 1))) { result = -1; break; }
+            memcpy(name, ref->name.text, ref->name.length); name[ref->name.length] = 0;
+            answer = known(context, "renderprog", name);
+            if (answer < 0) result = -1;
+            else if (!answer) {
+                if (ref->name.length >= program_capacity) result = -1;
+                else { memcpy(program, name, ref->name.length + 1); result = 1; }
+            }
+            free(name);
+        }
+    }
+    sh_decl_material_free(&material);
+    return result;
+}
 int sh_decl_material_read(sh_decl_source source, const sh_decl_material_schema *schema,
     sh_decl_material *out, char *error, size_t capacity)
 {

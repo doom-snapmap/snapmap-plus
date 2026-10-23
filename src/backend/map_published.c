@@ -8,6 +8,8 @@
 #include "rawmap.h"
 #include "map_package.h"
 #include "decl_server.h"
+#include "engine_dialog.h"
+#include "package_runtime.h"
 #include "engine_globals.h"
 #include "backend_log.h"
 #include "hook.h"
@@ -16,6 +18,7 @@ enum { PUB_OFFLINE, PUB_LOBBY, PUB_DIRECT, PUB_READY, PUB_READ, PUB_COMPLETE, PU
 /* What a launch gate decided: refused with a notice, retained for the package
  * route, or handed to the untouched native launch. */
 enum { PUB_REFUSED, PUB_RETAINED, PUB_NATIVE };
+#define MAP_STRING_SIZE_CAP 256
 typedef void (*pub_launch_fn)(void *, const void *, void *);
 typedef unsigned char (*pub_lobby_fn)(void *, unsigned char);
 typedef void (*pub_ready_fn)(void *, void *, const void *, void *);
@@ -44,6 +47,11 @@ typedef struct pub_request {
 } pub_request;
 static pub_request *g_pub_retired;
 static __declspec(thread) pub_request *g_pub_entering;
+/* The published item (id, revision) whose lobby was created at the player's
+ * press, until its boundary is handled. A native build of that map with no
+ * activation would run against the library palette, where the map's private
+ * identities do not exist. */
+static char g_pub_armed_id[MAP_STRING_SIZE_CAP], g_pub_armed_revision[MAP_STRING_SIZE_CAP];
 
 static const uint8_t *pub_site(const sig_result *results, size_t count, const uint8_t *base, const char *name)
 {
@@ -120,15 +128,31 @@ static void *pub_history(void)
     if (count <= 0 || !records) return NULL;
     return *(void **)(records + (size_t)(count - 1) * 0x38 + 0x18);
 }
+/* The session's current lobby parameters: the published item they name sits at
+ * +0x550 (id) and +0x600 (revision), where the lobby launch wrote it. */
+static const unsigned char *pub_session_parameters(void)
+{
+    void *session, *lobby, *parameters;
+    __try {
+        session = g_pub_session_slot ? *g_pub_session_slot : NULL;
+        if (!session) return NULL;
+        lobby = ((void *(*)(void *))(*(void ***)session)[0x338 / 8])(session);
+        if (!lobby) return NULL;
+        parameters = ((void *(*)(void *))(*(void ***)lobby)[0x2b0 / 8])(lobby);
+        return parameters;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return NULL; }
+}
 static int pub_host_matches(const sh_map_native_selection *selection)
 {
-    void *session = *g_pub_session_slot, *lobby, *parameters;
-    if (!session) return 0;
-    lobby = ((void *(*)(void *))(*(void ***)session)[0x338 / 8])(session);
-    if (!lobby) return 0;
-    parameters = ((void *(*)(void *))(*(void ***)lobby)[0x2b0 / 8])(lobby);
-    return parameters && sh_map_native_matches_ids(selection,
-        (unsigned char *)parameters + 0x550, (unsigned char *)parameters + 0x600);
+    const unsigned char *parameters = pub_session_parameters();
+    return parameters && sh_map_native_matches_ids(selection, parameters + 0x550, parameters + 0x600);
+}
+/* The published item the session's lobby names, when readable. */
+static int pub_session_identity(char *id, size_t id_capacity, char *revision, size_t revision_capacity)
+{
+    const unsigned char *parameters = pub_session_parameters();
+    return parameters && sh_map_native_string_copy(parameters + 0x550, id, id_capacity) &&
+        sh_map_native_string_copy(parameters + 0x600, revision, revision_capacity);
 }
 static int pub_manager_current(const void *manager)
 {
@@ -138,25 +162,71 @@ static int pub_manager_current(const void *manager)
             *(void **)((unsigned char *)*g_pub_shell_slot + 0x18) == manager;
     } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
 }
-static int pub_valid(void *context)
+/* Why a retained request no longer stands, or NULL while it does. The reason
+ * names the first failed check with the menu values it read, so a refusal in
+ * the backend log says which boundary moved. */
+static const char *pub_invalid_reason(const pub_request *request)
 {
-    pub_request *request = context;
+    static char why[160];
     void *shell, *cache;
     int screen, next, state;
     __try {
-        if (!g_pub_ready || !g_pub_thread || *g_pub_thread != GetCurrentThreadId() ||
-            request->sequence != g_pub_sequence || !(shell = *g_pub_shell_slot) ||
-            *(void **)((unsigned char *)shell + 0x18) != request->manager) return 0;
+        if (!g_pub_ready) return "the published launch gates are not installed";
+        if (!g_pub_thread || *g_pub_thread != GetCurrentThreadId()) return "not on the engine thread";
+        if (request->sequence != g_pub_sequence) return "a newer published request replaced it";
+        if (!(shell = *g_pub_shell_slot) || *(void **)((unsigned char *)shell + 0x18) != request->manager)
+            return "the menu manager changed";
         screen = *(int *)((unsigned char *)request->manager + 8);
         next = *(int *)((unsigned char *)request->manager + 12);
         state = *(int *)((unsigned char *)request->manager + 0x910);
-        if (screen < 46 || screen > 65 || next < 46 || next > 65 || state == 9 || state == 10) return 0;
-        if (request->kind == PUB_READY) return pub_host_matches(request->selection);
-        if (request->kind == PUB_LOBBY && pub_history() != request->history) return 0;
+        if (screen < 46 || screen > 65 || next < 46 || next > 65 || state == 9 || state == 10) {
+            _snprintf_s(why, sizeof why, _TRUNCATE, "the menu moved (screen %d, next %d, state %d)", screen, next, state);
+            return why;
+        }
+        if (request->kind == PUB_READY)
+            return pub_host_matches(request->selection) ? NULL : "the host's lobby names another map";
+        if (request->kind == PUB_LOBBY && pub_history() != request->history) return "the lobby history moved";
         cache = pub_cache();
-        return cache && sh_map_native_matches_ids(request->selection,
-            (unsigned char *)cache + 0x24408, (unsigned char *)cache + 0x24438);
-    } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+        if (!cache) return "the published cache is unavailable";
+        return sh_map_native_matches_ids(request->selection, (unsigned char *)cache + 0x24408,
+            (unsigned char *)cache + 0x24438) ? NULL : "the browser cache names another map";
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return "reading the menu state faulted"; }
+}
+static int pub_valid(void *context)
+{
+    const char *why = pub_invalid_reason(context);
+    if (why) {
+        char line[240];
+        _snprintf_s(line, sizeof line, _TRUNCATE, "MPKG: the retained published request no longer stands: %s", why);
+        backend_log(line);
+    }
+    return why == NULL;
+}
+int sh_map_published_level_armed(const void *level_parameters)
+{
+    char id[96], revision[96];
+    if (!g_pub_armed_id[0]) return 0;
+    if (sh_map_native_level_is_snapmap(level_parameters) != 1) return 0;
+    if (!pub_session_identity(id, sizeof id, revision, sizeof revision)) return 1;   /* cannot be told apart */
+    return !strcmp(id, g_pub_armed_id) && !strcmp(revision, g_pub_armed_revision);
+}
+void sh_map_published_disarm(void)
+{
+    g_pub_armed_id[0] = 0; g_pub_armed_revision[0] = 0;
+}
+/* The engine's own launch returned false. It explains itself with a dialog
+ * (sign-in, rate limit) or an engine warning; record which it did. */
+static void pub_log_declined(const char *route)
+{
+    char line[200];
+    int idle = 1;
+    __try { idle = sh_engine_dialog_queue_idle(g_pub_shell_slot ? *g_pub_shell_slot : NULL); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { idle = -1; }
+    _snprintf_s(line, sizeof line, _TRUNCATE,
+        "MPKG: the engine declined the published %s launch (returned false); %s",
+        route, idle == 1 ? "no native dialog is queued" :
+        idle == 0 ? "a native dialog is queued with its reason" : "the dialog queue could not be read");
+    backend_log(line);
 }
 static int pub_same_launch(void *manager, const void *metadata)
 {
@@ -183,10 +253,35 @@ static int pub_waiting(void *context)
             (request->kind != PUB_READY && pub_valid(request));
     } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
 }
+/* The spawn info FinalizeMapChange receives names every SnapMap level
+ * "DynamicSnapMap" (flag 0x2); which map it is lives in the session's lobby
+ * parameters, which the published launch filled with the item's id and
+ * revision at the press. A level still spelled "snapmap/<name>" is accepted as
+ * well. */
 static int pub_matches_level(void *context, const void *parameters)
 {
     pub_request *request = context;
-    return request->launched && sh_map_native_matches_level(request->selection, parameters);
+    if (!request->launched) return 0;
+    if (sh_map_native_level_is_snapmap(parameters) == 1 && pub_host_matches(request->selection)) return 1;
+    return sh_map_native_matches_level(request->selection, parameters);
+}
+/* Positively another level: one that is not a SnapMap level at all, or a
+ * SnapMap level whose session item is readable and names another published
+ * map. An unreadable level or session identity is not evidence of anything. */
+static int pub_differs_level(void *context, const void *parameters)
+{
+    pub_request *request = context;
+    char name[96] = "", id[96] = "", revision[96] = "", line[320];
+    int kind = sh_map_native_level_is_snapmap(parameters);
+    if (kind == 0) return 1;
+    if (kind == 1 && pub_session_identity(id, sizeof id, revision, sizeof revision) &&
+        !pub_host_matches(request->selection)) return 1;
+    sh_map_native_level_name_of(parameters, name, sizeof name);
+    _snprintf_s(line, sizeof line, _TRUNCATE,
+        "MPKG: loading level '%s' (snapmap %d) with session item '%s'/'%s' cannot be told from the retained published map",
+        name, kind, id, revision);
+    backend_log(line);
+    return 0;
 }
 static int pub_select_decoded(void *context, const void *metadata, void *snapshot)
 {
@@ -198,13 +293,13 @@ static int pub_select_decoded(void *context, const void *metadata, void *snapsho
     sh_map_render_select(&settings);
     return 1;
 }
-static int pub_select(void *context)
+static int pub_select(void *context, const char *json)
 {
     pub_request *request = context;
     char error[512];
     int ok;
     sh_rawmap_inspection_enter();
-    __try { ok = sh_map_native_enter(request->selection, sh_map_native_source(request->selection, NULL),
+    __try { ok = sh_map_native_enter(request->selection, json,
         pub_select_decoded, request, error, sizeof(error)); }
     __finally { sh_rawmap_inspection_leave(); }
     if (!ok && error[0]) backend_log(error);
@@ -214,18 +309,27 @@ static int pub_enter_native(void *context, const void *metadata, void *snapshot)
 {
     pub_request *request = context;
     pub_request *previous = g_pub_entering;
+    const char *why = pub_invalid_reason(request);
     int ok = 1;
-    if (!pub_valid(request)) return 0;
+    if (why) {
+        char line[240];
+        _snprintf_s(line, sizeof line, _TRUNCATE, "MPKG: the retained published map is not entered: %s", why);
+        backend_log(line);
+        return 0;
+    }
     request->launched = 1;
     g_pub_entering = request;
     g_pub_delegating++;
     __try {
         if (request->kind == PUB_LOBBY) {
             void *cache = pub_cache();
-            if (!cache || !sh_map_native_matches(request->selection, (unsigned char *)pub_history() + 8)) ok = 0;
-            else {
+            if (!cache || !sh_map_native_matches(request->selection, (unsigned char *)pub_history() + 8)) {
+                backend_log("MPKG: the retained published map is not entered: the lobby history names another map");
+                ok = 0;
+            } else {
                 g_pub_cache_set(cache, metadata, snapshot);
                 ok = ((pub_lobby_fn)g_pub_original[PUB_LOBBY])(request->manager, request->option) != 0;
+                if (!ok) pub_log_declined("lobby");
             }
         } else if (request->kind == PUB_READY) {
             /* This callback never reads its consumed download-request argument.
@@ -235,11 +339,44 @@ static int pub_enter_native(void *context, const void *metadata, void *snapshot)
     } __finally { g_pub_delegating--; g_pub_entering = previous; }
     return ok;
 }
+/* A lobby whose map needs no consent is created now, inside the player's own
+ * press, exactly when the engine would have created it: its launch reads the
+ * history record and the browser cache the engine filled a moment ago, and the
+ * session state is the one the press found. Deferring it to a later frame let
+ * the engine's own sign-in, rate-limit and party checks fail after a long
+ * preparation. The map's packages still activate at the native allocation
+ * boundary through the retained request. */
+static int pub_launch_lobby_now(pub_request *request)
+{
+    pub_request *previous = g_pub_entering;
+    int ok = 0;
+    request->launched = 1;
+    g_pub_entering = request;
+    g_pub_delegating++;
+    __try { ok = ((pub_lobby_fn)g_pub_original[PUB_LOBBY])(request->manager, request->option) != 0; }
+    __finally { g_pub_delegating--; g_pub_entering = previous; }
+    if (ok) {
+        char name[96] = "", line[400];
+        if (!sh_map_native_identity(request->selection, g_pub_armed_id, sizeof g_pub_armed_id,
+                g_pub_armed_revision, sizeof g_pub_armed_revision))
+            sh_map_published_disarm();
+        sh_map_native_level_name(request->selection, name, sizeof name);
+        _snprintf_s(line, sizeof line, _TRUNCATE,
+            "MPKG: published lobby created at the player's press for item '%s' revision '%s' (map '%s'); "
+            "its packages activate at the native map boundary", g_pub_armed_id, g_pub_armed_revision, name);
+        backend_log(line);
+    } else pub_log_declined("lobby");
+    return ok;
+}
 static int pub_enter(void *context, const char *json)
 {
     pub_request *request = context;
     char error[512];
     int ok;
+    /* A lobby created at the press has nothing left to enter natively. */
+    if (request->launched) return 0;
+    /* This preliminary snapshot contains only lobby settings. Full gameplay
+     * decoding receives the prepared source through pub_select at activation. */
     (void)json;
     sh_rawmap_inspection_enter();
     __try { ok = sh_map_native_session(request->selection, pub_enter_native, request, error, sizeof(error)); }
@@ -274,8 +411,9 @@ void sh_map_published_poll(void)
 /* A published map whose text carries no package is the engine's own case: it
  * never enters the package context, the retained request or the transition
  * handoff, and its native launch runs exactly as it did before these gates
- * existed. Only a map that carries smpkg shards takes the retained route; a
- * text that cannot be read keeps the guarded route and its notices. */
+ * existed. Only a map that carries smpkg deliveries or package references
+ * takes the retained route; a text that cannot be read keeps the guarded
+ * route and its notices. */
 static int pub_prepare(int kind, void *manager, const void *metadata, void *snapshot, unsigned char option,
     int release_progress)
 {
@@ -287,8 +425,18 @@ static int pub_prepare(int kind, void *manager, const void *metadata, void *snap
         size_t length;
         void *cache;
         sh_rawmap_request launch;
-        sh_rawmap_loading loading = {pub_waiting, pub_matches_level, pub_select};
+        sh_rawmap_loading loading = {pub_waiting, pub_matches_level, pub_differs_level, pub_select};
         if (!pub_manager_current(manager)) goto done;
+        /* One retained request per selection. A press repeated while the map is
+         * still being prepared, waits for consent or sits in its lobby must not
+         * cancel that request, prepare again or create a second lobby. */
+        {
+            const pub_request *pending = sh_rawmap_pending_map_context();
+            if (pending && pending->manager == manager && sh_map_native_matches(pending->selection, metadata)) {
+                backend_log("MPKG: the published map is already prepared or waiting in its lobby; the repeated launch is ignored");
+                accepted = PUB_RETAINED; goto done;
+            }
+        }
         request = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*request));
         if (!request) { strcpy_s(error, sizeof(error), "Published-map request allocation failed."); goto done; }
         request->kind = kind; request->manager = manager; request->option = option;
@@ -296,7 +444,10 @@ static int pub_prepare(int kind, void *manager, const void *metadata, void *snap
         request->selection = sh_map_native_capture(metadata, error, sizeof(error));
         if (!request->selection) goto done;
         json = sh_map_native_source(request->selection, &length);
-        if (json && length && sh_mpkg_scan(json, length, NULL, 0) == 0) {
+        /* A reference shard names a package the map needs as surely as an
+         * embedded delivery does; either keeps the map on the retained route. */
+        if (json && length && sh_mpkg_scan(json, length, NULL, 0) == 0 &&
+            sh_mpkg_reference_scan(json, length, NULL, 0) == 0) {
             /* Nothing of ours may outlive this launch; a retained request that
              * cannot be canceled is left to its own validity checks. */
             if (!sh_rawmap_cancel_pending_map())
@@ -319,26 +470,38 @@ static int pub_prepare(int kind, void *manager, const void *metadata, void *snap
         if (kind != PUB_LOBBY && kind != PUB_READY) g_pub_cache_set(cache, metadata, snapshot);
         request->sequence = ++g_pub_sequence;
         launch.context = request; launch.valid = pub_valid; launch.enter = pub_enter; launch.release = pub_release;
-        if (sh_rawmap_preflight_loading_request(json, length, &launch, &loading, error, sizeof(error)))
+        if (sh_rawmap_preflight_loading_request(json, length, &launch, &loading, error, sizeof(error))) {
             accepted = PUB_RETAINED;
+            if (kind == PUB_LOBBY && sh_rawmap_pending_map_covered() && !pub_launch_lobby_now(request)) {
+                /* The retained request owns the selection now; canceling it
+                 * releases both. The engine has already said why. */
+                request = NULL;
+                if (!sh_rawmap_cancel_pending_map())
+                    backend_log("MPKG: the declined lobby's retained request could not be canceled");
+                accepted = PUB_REFUSED;
+            }
+        }
 done:;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         snprintf(error, sizeof(error), "Published-map preparation raised exception %08lx.", GetExceptionCode());
     }
     if (accepted != PUB_RETAINED && request) pub_release(request);
-    if (accepted == PUB_REFUSED && error[0]) sh_mpkg_report_error(error);
+    if (accepted == PUB_REFUSED && error[0]) sh_mpkg_report_error(SH_MPKG_PROBLEM_OPEN, error);
     return accepted;
 }
 
+/* A launch is prepared only when user packages are served this launch;
+ * otherwise it runs natively, as without Snapmap+. */
+static int pub_prepares(void) { return g_pub_ready && !sh_package_runtime_serving_disabled(); }
 static void pub_offline(void *manager, const void *metadata, void *snapshot)
 {
-    if (!g_pub_ready || pub_same_launch(manager, metadata) ||
+    if (!pub_prepares() || pub_same_launch(manager, metadata) ||
         pub_prepare(PUB_OFFLINE, manager, metadata, snapshot, 0, 0) == PUB_NATIVE)
         ((pub_launch_fn)g_pub_original[PUB_OFFLINE])(manager, metadata, snapshot);
 }
 static unsigned char pub_lobby(void *manager, unsigned char option)
 {
-    if (!g_pub_ready) return ((pub_lobby_fn)g_pub_original[PUB_LOBBY])(manager, option);
+    if (!pub_prepares()) return ((pub_lobby_fn)g_pub_original[PUB_LOBBY])(manager, option);
     __try {
         void *history = pub_history();
         if (history && pub_same_launch(manager, (unsigned char *)history + 8))
@@ -349,17 +512,17 @@ static unsigned char pub_lobby(void *manager, unsigned char option)
             return decided == PUB_RETAINED;
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) { }
-    sh_mpkg_report_error("The selected published map is no longer available."); return 0;
+    sh_mpkg_report_error(SH_MPKG_PROBLEM_OPEN, "The selected published map is no longer available."); return 0;
 }
 static void pub_direct(void *manager, const void *metadata, void *snapshot)
 {
-    if (!g_pub_ready || pub_same_launch(manager, metadata) ||
+    if (!pub_prepares() || pub_same_launch(manager, metadata) ||
         pub_prepare(PUB_DIRECT, manager, metadata, snapshot, 0, 0) == PUB_NATIVE)
         ((pub_launch_fn)g_pub_original[PUB_DIRECT])(manager, metadata, snapshot);
 }
 static void pub_ready(void *manager, void *download, const void *metadata, void *snapshot)
 {
-    if (!g_pub_ready || pub_same_launch(manager, metadata)) { ((pub_ready_fn)g_pub_original[PUB_READY])(manager, download, metadata, snapshot); return; }
+    if (!pub_prepares() || pub_same_launch(manager, metadata)) { ((pub_ready_fn)g_pub_original[PUB_READY])(manager, download, metadata, snapshot); return; }
     if (!pub_manager_current(manager)) return;
     /* The retained route releases the native progress display itself; the
      * native launch keeps it and its own download argument. */

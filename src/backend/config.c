@@ -57,7 +57,6 @@ typedef enum config_fault {
     CONFIG_FAIL_WRITE,
     CONFIG_FAIL_FLUSH,
     CONFIG_FAIL_REPLACE,
-    CONFIG_FAIL_BACKUP,
     CONFIG_FAIL_REPLACE_AFTER_COMMIT,
     CONFIG_FAIL_REPLACE_KEEP_NAMES,
     CONFIG_FAIL_REPLACE_MOVED_OLD
@@ -140,7 +139,6 @@ static LONG g_temp_counter;
 #ifdef SH_CONFIG_TESTING
 static wchar_t *g_test_local_appdata;
 static sh_config_test_fault g_test_fault;
-static wchar_t *g_test_timestamp;
 static unsigned int g_test_hold_mutex_ms;
 #endif
 
@@ -974,46 +972,6 @@ fail:
     return 0;
 }
 
-static wchar_t *make_backup_path_locked(void)
-{
-    SYSTEMTIME now;
-    wchar_t generated[32];
-    const wchar_t *timestamp;
-    unsigned int collision;
-#ifdef SH_CONFIG_TESTING
-    timestamp = g_test_timestamp;
-#else
-    timestamp = NULL;
-#endif
-    if (!timestamp) {
-        GetLocalTime(&now);
-        _snwprintf_s(generated, sizeof(generated) / sizeof(generated[0]),
-                     _TRUNCATE, L"%04u%02u%02u-%02u%02u%02u",
-                     (unsigned)now.wYear, (unsigned)now.wMonth,
-                     (unsigned)now.wDay, (unsigned)now.wHour,
-                     (unsigned)now.wMinute, (unsigned)now.wSecond);
-        timestamp = generated;
-    }
-    for (collision = 0; collision < 10000u; collision++) {
-        wchar_t name[128];
-        wchar_t *path;
-        if (collision == 0) {
-            _snwprintf_s(name, sizeof(name) / sizeof(name[0]), _TRUNCATE,
-                         L"config.%s.corrupt.json", timestamp);
-        } else {
-            _snwprintf_s(name, sizeof(name) / sizeof(name[0]), _TRUNCATE,
-                         L"config.%s.%u.corrupt.json", timestamp, collision);
-        }
-        path = join_path(g_config_dir, name);
-        if (!path) return NULL;
-        if (GetFileAttributesW(path) == INVALID_FILE_ATTRIBUTES &&
-            GetLastError() == ERROR_FILE_NOT_FOUND)
-            return path;
-        free(path);
-    }
-    return NULL;
-}
-
 static int file_matches_bytes(const wchar_t *path, const char *bytes,
                               size_t length)
 {
@@ -1046,31 +1004,68 @@ done:
     return matches;
 }
 
-static int recover_corrupt_locked(const char *replacement, size_t length)
+/* The first 4 KB of a corrupt file go to the backend log before it is replaced;
+ * no copy of it is kept on disk. corrupt NULL reads them back from the file (an
+ * oversized file was never read whole). Control characters become dots so that
+ * every record stays one line. */
+static void log_corrupt_locked(const char *corrupt, size_t corrupt_length)
+{
+    char buffer[4096], line[1024], chunk[801];
+    size_t total = corrupt_length, shown, at;
+    if (!corrupt) {
+        HANDLE file = CreateFileW(g_config_path, GENERIC_READ,
+                                  FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                  NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+        LARGE_INTEGER size;
+        DWORD read = 0;
+        if (file == INVALID_HANDLE_VALUE) {
+            backend_log("config: corrupt file could not be read back for the log; replacing it with defaults");
+            return;
+        }
+        total = GetFileSizeEx(file, &size) && size.QuadPart >= 0 ? (size_t)size.QuadPart : 0;
+        if (!ReadFile(file, buffer, sizeof(buffer), &read, NULL)) read = 0;
+        CloseHandle(file);
+        corrupt = buffer;
+        corrupt_length = read;
+    }
+    shown = corrupt_length < sizeof(buffer) ? corrupt_length : sizeof(buffer);
+    _snprintf_s(line, sizeof(line), _TRUNCATE,
+                "config: corrupt file is %zu bytes; the first %zu follow, then it is replaced with defaults",
+                total, shown);
+    backend_log(line);
+    for (at = 0; at < shown;) {
+        size_t n = shown - at < sizeof(chunk) - 1 ? shown - at : sizeof(chunk) - 1, i;
+        for (i = 0; i < n; i++) {
+            unsigned char c = (unsigned char)corrupt[at + i];
+            chunk[i] = c < 0x20 || c == 0x7f ? '.' : (char)c;
+        }
+        chunk[n] = 0;
+        _snprintf_s(line, sizeof(line), _TRUNCATE, "config: corrupt text %zu-%zu: %s", at, at + n, chunk);
+        backend_log(line);
+        at += n;
+    }
+}
+
+static int recover_corrupt_locked(const char *replacement, size_t length,
+                                  const char *corrupt, size_t corrupt_length)
 {
     wchar_t *temp_path = NULL;
-    wchar_t *backup_path = NULL;
     DWORD replace_error = ERROR_SUCCESS;
-    int backup_exists;
     int ok = 0;
+    log_corrupt_locked(corrupt, corrupt_length);
     if (!create_flushed_temp_locked(replacement, length, &temp_path)) return 0;
-    backup_path = make_backup_path_locked();
-    if (!backup_path || test_fault(CONFIG_FAIL_BACKUP) ||
-        test_fault(CONFIG_FAIL_REPLACE))
-        goto done;
-    ok = ReplaceFileW(g_config_path, temp_path, backup_path, 0, NULL, NULL) != 0;
+    if (test_fault(CONFIG_FAIL_REPLACE)) goto done;
+    /* No backup name: the corrupt text is in the log above and nothing else keeps it. */
+    ok = ReplaceFileW(g_config_path, temp_path, NULL, 0, NULL, NULL) != 0;
     if (ok && test_fault(CONFIG_FAIL_REPLACE_AFTER_COMMIT))
         ok = 0; /* test the documented partial-failure reconciliation path */
     if (!ok) {
         replace_error = GetLastError();
-        backup_exists = GetFileAttributesW(backup_path) != INVALID_FILE_ATTRIBUTES;
-        /* ReplaceFileW documents failure states where the names may already have moved. Reopen both
+        /* ReplaceFileW documents failure states where the names may already have moved. Reopen the
          * artifacts instead of assuming a false return means the original is still at config.json. */
-        if (backup_exists &&
-            file_matches_bytes(g_config_path, replacement, length)) {
+        if (file_matches_bytes(g_config_path, replacement, length)) {
             ok = 1;
-        } else if (backup_exists &&
-                   GetFileAttributesW(g_config_path) == INVALID_FILE_ATTRIBUTES &&
+        } else if (GetFileAttributesW(g_config_path) == INVALID_FILE_ATTRIBUTES &&
                    GetFileAttributesW(temp_path) != INVALID_FILE_ATTRIBUTES &&
                    MoveFileExW(temp_path, g_config_path,
                                MOVEFILE_REPLACE_EXISTING |
@@ -1085,7 +1080,6 @@ static int recover_corrupt_locked(const char *replacement, size_t length)
     }
 done:
     if (temp_path) DeleteFileW(temp_path);
-    free(backup_path);
     free(temp_path);
     return ok;
 }
@@ -1127,10 +1121,10 @@ static int init_existing_locked(const char *bytes, size_t length)
         if (!document_defaults(&document)) return 0;
         serialized = document_serialize(&document, &serialized_length);
         if (serialized &&
-            recover_corrupt_locked(serialized, serialized_length)) {
+            recover_corrupt_locked(serialized, serialized_length, bytes, length)) {
             g_status_flags |= SH_CONFIG_STATUS_RECOVERED_CORRUPT;
             ok = install_document_values_locked(&document);
-            backend_log("config: corrupt file backed up; defaults restored");
+            backend_log("config: corrupt file replaced with defaults; its text is in the lines above");
         }
         free(serialized);
         document_free(&document);
@@ -1184,7 +1178,7 @@ int sh_config_init(void)
         if (document_defaults(&document)) {
             serialized = document_serialize(&document, &serialized_length);
             if (serialized &&
-                recover_corrupt_locked(serialized, serialized_length)) {
+                recover_corrupt_locked(serialized, serialized_length, NULL, 0)) {
                 g_status_flags |= SH_CONFIG_STATUS_RECOVERED_CORRUPT;
                 persisted = install_document_values_locked(&document);
             }
@@ -1317,11 +1311,11 @@ static int set_json_for_access(const char *key, const char *value_json,
     if (!serialized) goto volatile_value;
 
     if (read_result == CONFIG_READ_OK && parsed == CONFIG_PARSE_INVALID) {
-        if (!recover_corrupt_locked(serialized, serialized_length))
+        if (!recover_corrupt_locked(serialized, serialized_length, bytes, length))
             goto volatile_value;
         g_status_flags |= SH_CONFIG_STATUS_RECOVERED_CORRUPT;
     } else if (read_result == CONFIG_READ_TOO_LARGE) {
-        if (!recover_corrupt_locked(serialized, serialized_length))
+        if (!recover_corrupt_locked(serialized, serialized_length, NULL, 0))
             goto volatile_value;
         g_status_flags |= SH_CONFIG_STATUS_RECOVERED_CORRUPT;
     } else if (!write_atomic_locked(serialized, serialized_length,
@@ -1407,9 +1401,7 @@ void sh_config_test_reset(void)
     AcquireSRWLockExclusive(&g_config_lock);
     clear_state_locked();
     free(g_test_local_appdata);
-    free(g_test_timestamp);
     g_test_local_appdata = NULL;
-    g_test_timestamp = NULL;
     g_test_fault = SH_CONFIG_TEST_FAIL_NONE;
     g_test_hold_mutex_ms = 0;
     ReleaseSRWLockExclusive(&g_config_lock);
@@ -1428,15 +1420,6 @@ void sh_config_test_fail_next(sh_config_test_fault fault)
 {
     AcquireSRWLockExclusive(&g_config_lock);
     g_test_fault = fault;
-    ReleaseSRWLockExclusive(&g_config_lock);
-}
-
-void sh_config_test_set_timestamp(const wchar_t *timestamp)
-{
-    wchar_t *copy = copy_wstring(timestamp);
-    AcquireSRWLockExclusive(&g_config_lock);
-    free(g_test_timestamp);
-    g_test_timestamp = copy;
     ReleaseSRWLockExclusive(&g_config_lock);
 }
 

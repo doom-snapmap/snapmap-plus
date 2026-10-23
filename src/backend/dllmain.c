@@ -8,6 +8,7 @@
 #include <string.h>
 #include <shlobj.h>
 #pragma comment(lib, "shell32.lib")
+#include "native_class_registry.h"
 #include "signatures.h"
 #include "startup_bindings.h"
 #include "hook.h"
@@ -20,18 +21,27 @@
 #include "map_native.h"
 #include "map_published.h"
 #include "map_transition.h"
+#include "editor_transition.h"
 #include "palette_refresh.h"
 #include "engine_dialog.h"
 #include "../fault_shield/mapload_guards.h"
 #include "../fault_shield/serialized_entities_guard.h"
 #include "strids.h"
 #include "overrides.h"
+#include "resource_file_visibility.h"
+#include "decl_source_file_reads.h"
 #include "grid_room_native.h"
+#include "module_ribbon_native.h"
 #include "grid_room_editor.h"
 #include "map_render.h"
 #include "grid_room_snap.h"
+#include "spawn_keys.h"
+#include "snap_type_cache.h"
+#include "native_decl_eval.h"
+#include "key_inspector.h"
 #include "package_requirements.h"
 #include "weapon_hud.h"
+#include "fsm_web.h"
 #include "navmesh.h"
 #include "nav_bake.h"
 #include "nav_menu.h"
@@ -46,6 +56,7 @@
 #include "prefabpreview.h"
 #include "soundpreview.h"
 #include "audio_banks_native.h"
+#include "package_sound_native.h"
 #include "patch.h"
 #include "algo.h"
 #include "target_any.h"
@@ -55,8 +66,28 @@
 #include "config.h"
 #include "user_overrides.h"
 #include "package_runtime.h"
+#include "boot_phases.h"
+#include "package_editor.h"
+#include "package_role.h"
 #include "resource_graph_native.h"
+#include "resource_graph.h"
+#include "resource_model_reads.h"
+#include "resource_material_reads.h"
+#include "resource_renderprog_reads.h"
+#include "resource_md6_reads.h"
+#include "resource_joint_reads.h"
+#include "resource_presentation.h"
+#include "resource_default_reads.h"
+#include "decl_default_reads.h"
+#include "decl_custom_default_reads.h"
+#include "decl_particle_default_reads.h"
+#include "resource_metadata_reads.h"
+#include "image_exclusion.h"
+#include "virtual_material_runtime.h"
+#include "virtual_texture_provider.h"
 #include "resource_resident.h"
+#include "discrete_default.h"
+#include "rig_default.h"
 #include "audio_files_native.h"
 #include "iface_engine.h"
 #include "apply_engine.h"
@@ -78,6 +109,52 @@ static void resolve_doom(void)
     /* Resolve the host image for either accepted executable name. */
     g_doom_base = (uint8_t *)sh_host_image_base();
     g_doom_size = sh_host_image_size();
+}
+
+static int resource_default_read(void *context, uintptr_t address, void *out, size_t size)
+{
+    (void)context;
+    if (!address || !out || size > UINTPTR_MAX - address) return 0;
+    __try { memcpy(out, (const void *)address, size); return 1; }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+}
+static void resource_default_prepare(sh_resource_default_read_receipt *receipt,
+    sh_resource_default_read_input *input, void *resource, void *actual_default)
+{
+    memset(input, 0, sizeof(*input));
+    input->image_base = (uintptr_t)sh_host_image_base();
+    input->image_size = sh_host_image_size();
+    input->renderer = sh_host_is_vulkan();
+    input->pinned_image = input->renderer >= 0 && sh_host_is_pinned_renderer_build(input->renderer);
+    input->resource = (uintptr_t)resource;
+    input->default_callback = (uintptr_t)actual_default;
+    input->read = resource_default_read;
+    sh_resource_default_read_begin(receipt, input);
+    if (receipt->reason == SH_DEFAULT_READ_UNSUPPORTED)
+        sh_decl_default_read_begin(receipt, input);
+    if (receipt->reason == SH_DEFAULT_READ_UNSUPPORTED)
+        sh_decl_custom_default_read_begin(receipt, input);
+    if (receipt->reason == SH_DEFAULT_READ_UNSUPPORTED)
+        sh_decl_particle_default_read_begin(receipt, input);
+}
+static int resource_default_finish(sh_resource_default_read_receipt *receipt,
+    const sh_resource_default_read_input *input, int returned, int in_order)
+{
+    int complete = sh_resource_default_read_finish(receipt, input, returned, in_order);
+    if (!sh_resource_graph_native_ready() || !sh_resource_graph_recording_requests()) return 0;
+    /* Only an unimplemented routine uses the static contract. A supported
+     * cleanup whose old state could not be inspected remains incomplete. */
+    if (receipt->reason == SH_DEFAULT_READ_UNSUPPORTED && returned && in_order) {
+        if (sh_rig_default_observed((void *)input->resource,(void *)input->default_callback)) return 1;
+        return sh_resource_graph_native_default_observed((void *)input->resource);
+    }
+    return complete;
+}
+static int resource_default_ready(const char *family)
+{
+    return sh_discrete_default_ready(family) && sh_rig_default_ready(family) &&
+        sh_resource_model_reads_default_ready(family) &&
+        (!family || _stricmp(family,"articulatedfigure") || sh_resource_joint_reads_ready());
 }
 
 /* SteamStub exposes the engine .text after DLL initialization. Poll resolution
@@ -108,6 +185,30 @@ static void ensure_user_dirs(void)
     backend_log("snapmap-plus user-data dirs ensured (root + strings/overrides/prefabs)");
 }
 
+/* Out-of-process observers that inline-hook engine functions must not attach
+ * while startup installs its detours: either side would steal the other's jump.
+ * This per-process manual-reset event is set once startup has finished trying
+ * (including an unsupported host), and stays open for later attaches. */
+static HANDLE g_startup_hooks_done;
+
+static void startup_hooks_open(void)
+{
+    wchar_t name[64];
+    _snwprintf_s(name, 64, _TRUNCATE, L"Local\\SnapmapPlusStartupHooks.%lu", GetCurrentProcessId());
+    g_startup_hooks_done = CreateEventW(NULL, TRUE, FALSE, name);
+}
+
+static void startup_hooks_done(void)
+{
+    sh_boot_phases_mark(SH_BOOT_HOOKS);
+    if (g_startup_hooks_done) SetEvent(g_startup_hooks_done);
+}
+
+/* R-400: a boot whose first registration waits for the menu prepares its shader sources inside the promotion. */
+static char g_boot_data_root[MAX_PATH];
+static int boot_prepare_shaders(char *why, size_t capacity)
+{ return sh_package_runtime_boot_prepare_shaders(g_boot_data_root, why, capacity); }
+
 static DWORD WINAPI bootstrap_thread(LPVOID p)
 {
     (void)p;
@@ -119,6 +220,7 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
     if (g_doom_base == NULL) {
         backend_log("FATAL: host process is not a supported DOOM 2016 build "
                     "(expected DOOMx64vk.exe or DOOMx64.exe)");
+        startup_hooks_done();
         return 0;
     }
 
@@ -134,6 +236,34 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
     ensure_user_dirs();
     sh_config_init(); /* nonfatal: the service retains defaults and status flags on failure */
     sh_user_overrides_capture_launch_state();
+    /* User packages off for this launch: native map documents carry no package
+     * ownership, and package-bearing ones are refused at capture. */
+    sh_package_runtime_set_serving_disabled(!sh_user_overrides_enabled_for_launch());
+
+    /* R-400: place the first package registration, and start the boot worker now, while the engine is still
+     * decrypting and initializing: it needs no engine state. The marker file register-after-menu in the package
+     * data root places the first registration after the menu (the runtime pass at the first SnapMap browser). */
+    {
+        char data_root[MAX_PATH], marker[MAX_PATH + 32];
+        int enabled = sh_user_overrides_enabled_for_launch(), after_menu = 0;
+        if (sh_overrides_get_root(data_root, sizeof(data_root))) {
+            _snprintf_s(marker, sizeof(marker), _TRUNCATE, "%s\\register-after-menu", data_root);
+            after_menu = GetFileAttributesA(marker) != INVALID_FILE_ATTRIBUTES;
+        } else data_root[0] = 0;
+        sh_boot_placement placement = sh_boot_placement_decide(enabled, after_menu);
+        sh_boot_phases_set_placement(placement);
+        if (placement != SH_BOOT_PLACE_NONE && data_root[0]) sh_package_runtime_boot_prefetch_start(data_root);
+        if (placement == SH_BOOT_PLACE_FIRST_BOUNDARY) {
+            strcpy_s(g_boot_data_root, sizeof(g_boot_data_root), data_root);
+            sh_decl_server_set_boot_preparation(boot_prepare_shaders);
+        }
+        char note[320];
+        _snprintf_s(note, sizeof(note), _TRUNCATE, "MPKG: boot: the first package registration runs %s%s%s",
+            sh_boot_placement_name(placement), placement != SH_BOOT_PLACE_NONE && data_root[0] ?
+            "; the boot worker prefetches the warm record's installed reads" : "",
+            placement == SH_BOOT_PLACE_FIRST_BOUNDARY ? "; its shader sources are prepared inside the boot promotion" : "");
+        backend_log(note);
+    }
 
     /* These scratch-only checks do not depend on engine symbol resolution. */
     sh_patch_selftest();
@@ -157,6 +287,7 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
         Sleep(PB0_POLL_INTERVAL_MS);
     }
     DWORD elapsed = GetTickCount() - t0;
+    sh_boot_phases_mark(SH_BOOT_SIGNATURES);
 
     /* Reuse the verified pre-install snapshot: an early observer already owns
      * its detours, including on OpenGL where Vulkan RVA fallback is invalid. */
@@ -177,6 +308,19 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
         /* Idempotent after early binding, or report unavailable dependencies
          * after a partial startup. Never infer that earlier loads were seen. */
         sh_resource_graph_native_install(results, db);
+        /* Native image exclusion state for scopes that declare g_useImageBlackList 0 (R-309). */
+        sh_image_exclusion_install(results, db);
+        sh_virtual_material_runtime_install(results, db);
+        sh_vt_provider_install(results, db, (void *const *)glb_resolve(g_doom_base, "decl_resource_head", NULL));
+        sh_resource_model_reads_install(g_doom_base, sh_resource_graph_native_observe_resource,
+            sh_resource_graph_native_observe_origin);
+        sh_resource_material_reads_install(g_doom_base, sh_resource_graph_native_observe_resource);
+        sh_resource_renderprog_reads_install(g_doom_base, sh_resource_graph_native_observe_resource);
+        sh_resource_md6_reads_install(g_doom_base, sh_resource_graph_native_observe_resource);
+        sh_resource_joint_reads_install(g_doom_base, sh_resource_graph_native_observe_resource);
+        sh_resource_presentation_install(g_doom_base, sh_resource_graph_native_presentation_begin,
+            sh_resource_graph_native_presentation_end);
+        sh_resource_metadata_reads_bind(g_doom_base);
 
         /* Install rawmap load interception only on a clean prologue. The swap starts
          * disarmed; package admission also runs inside this detour. */
@@ -234,6 +378,8 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
                         ed_tojson = (void *)results[i].addr;
                 }
             }
+            if (!sh_editor_transition_install(results, db, g_doom_base))
+                backend_log("MPKG: editor saved-read activation boundary unavailable");
             sh_editor_frame_install(ed_frame, ed_frame_clean, ed_loadmap, g_doom_base);
             /* Save Rawmap serializes the open map, not the newest save on disk. The tag
              * function also derives the engine's idStr ctor/dtor. */
@@ -263,6 +409,20 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
         sh_map_payload_install(results, db);
         if (!sh_resource_resident_bind(results, db, g_doom_base))
             backend_log("MPKG: native cached-resource refresh binding unavailable");
+        /* Retired discrete animations get their engine default without a GPU readback (R-321). */
+        sh_discrete_default_install(g_doom_base);
+        sh_rig_default_install(g_doom_base,g_doom_size,sh_host_is_vulkan());
+        sh_resource_resident_set_default_construction(sh_discrete_default_enter, sh_discrete_default_leave,
+            resource_default_ready);
+        sh_resource_resident_set_default_invoke(sh_rig_default_invoke);
+        sh_resource_resident_set_default_origins(sh_resource_graph_native_default_origin_begin,
+                                                sh_resource_graph_native_default_origin_finish);
+        sh_resource_resident_set_instance_refresh(sh_resource_graph_native_refresh_instances);
+        sh_resource_resident_set_instance_admit(sh_resource_graph_native_admit_instances);
+        sh_resource_resident_set_instance_report(sh_resource_graph_native_admit_report);
+        /* A retirement default's frame completes by the engine routine it ran (R-352). */
+        sh_resource_resident_set_default_observation(sh_resource_graph_native_default_observed);
+        sh_resource_resident_set_default_probe(resource_default_prepare, resource_default_finish);
         {
             const sh_map_transition_callbacks callbacks = {sh_rawmap_transition_pending,
                 sh_rawmap_transition_activate, sh_rawmap_transition_commit, sh_rawmap_transition_finished};
@@ -285,8 +445,8 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
 
         /* Guard stale event-wire lists and interactables whose subsystem is absent.
          * Their implementations define the engine-layout checks and recovery limits. */
-        sh_evwire_guard_install(g_doom_base);
-        sh_interactable_guard_install(g_doom_base);
+        sh_evwire_guard_install(g_doom_base, results, db);
+        sh_interactable_guard_install(g_doom_base, results, db);
         sh_serialized_entities_guard_install(results, db);
 
         void *get_decls = (void *)sig_addr_by_name(results, db, "GetDeclsOfType");
@@ -295,6 +455,15 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
         /* Bind read-only compiler metadata now. Initial compilation runs on
          * the main thread at the pre-promotion boundary, after native reader
          * setup. Do not wait or scan packages before arming that hook. */
+        /* The idClass registry construction reads (read only; no factory). */
+        sh_native_class_bind_process(
+            glb_resolve(g_doom_base, "class_registry_ready", NULL),
+            glb_resolve(g_doom_base, "class_sorted_types", NULL),
+            glb_resolve(g_doom_base, "class_sorted_count", NULL),
+            glb_resolve(g_doom_base, "managed_class_first", NULL),
+            glb_resolve(g_doom_base, "managed_class_last", NULL));
+        /* The pool settings those construction routes read (cvar values only). */
+        sh_native_pool_bind_process(glb_resolve(g_doom_base, "cvar_system_slot", NULL));
         sh_package_runtime_bind_native(
             glb_resolve(g_doom_base, "declmgr_accessor", NULL),
             glb_resolve(g_doom_base, "type_container", NULL),
@@ -316,6 +485,11 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
         void *strids_ins   = (void *)sig_addr_by_name(results, db, "StridsInsert");
         void *strids_hash  = (void *)sig_addr_by_name(results, db, "StridsHash");
         void *idstr_ctor   = (void *)sig_addr_by_name(results, db, "IdStrAssign");
+        sh_strids_bind_native_localization((const void *)glb_resolve(g_doom_base, "cvar_system_slot", NULL));
+        {
+            static const sh_strids_palette palette = {NULL, sh_package_runtime_palette};
+            sh_strids_set_palette(&palette);
+        }
         sh_strids_install(sort_body, sort_clean, strids_lea, strids_ins, strids_hash, idstr_ctor);
 
         /* Replace resource-provider open-by-name slot +0xF8 after validating the audited
@@ -358,6 +532,14 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
                                                        compare, compare_clean,
                                                        write_string, write_string_clean);
 
+        /* Once a map is running, file and JSON resources read through the
+         * resource manager's file open instead of the provider slot; serve the
+         * shadow's claims there too. */
+        if (overrides_installed && !sh_resource_file_visibility_install(results, db, g_doom_base))
+            backend_log("resource-file visibility unavailable: running-state file resources read only the game's archives");
+        if (overrides_installed && !sh_decl_source_file_reads_install(g_doom_base))
+            backend_log("source-file observation unavailable: native input transitions retain their prior resources");
+
         /* Dimension-bearing module names use the same backend resource provider.
          * Construct native variants only when a map actually requests one. */
         int grid_installed = overrides_installed && sh_grid_native_install(results, db, g_doom_base);
@@ -365,6 +547,23 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
             backend_log("GRID: native module variants unavailable on this build");
         if (grid_installed && !sh_grid_snap_install(results, db, g_doom_base))
             backend_log("GRID: exact doorway attachment unavailable on this build");
+        /* Published package module variants join the module picker; the
+         * private lookup above admits them for maps. */
+        if (grid_installed && !sh_module_ribbon_install(results, db, g_doom_base))
+            backend_log("MODULES: module picker publication unavailable on this build");
+
+        /* Package AI registration keys are private at native dispatch before
+         * the first package library compiles (package_keys.h). */
+        sh_spawn_keys_install(results, db);
+
+        /* Editor entities read their defaults from a type cache built once;
+         * complete it for entity types published afterwards. */
+        sh_snap_type_cache_install(results, db, g_doom_base);
+        sh_native_decl_eval_install(results, db, g_doom_base);
+
+        /* The AI filter's choices can name package keys, which the stock
+         * bit-flag inspector cannot offer or write. */
+        sh_key_inspector_install(results, db, g_doom_base);
 
         /* Navigation uses the resource shadow and map funnel; report its startup state. */
         sh_navmesh_install();
@@ -391,6 +590,9 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
                                                 sh_user_overrides_enabled_for_launch());
                 sh_weapon_hud_install(override_root, g_doom_base, results, db,
                                       sh_user_overrides_enabled_for_launch());
+                /* Package state-machine variants bind per layer configuration; the
+                 * package runtime publishes each activation's substitutions. */
+                sh_fsm_web_install(g_doom_base, results, db);
             } else
                 backend_log("package-requirements REFUSED: effective override root unavailable");
         }
@@ -400,6 +602,14 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
 
         /* Bind apply dependencies before publishing their interface slots. */
         sh_apply_engine_install(results, db, g_doom_base, cmdsys);
+        sh_package_editor_bind_native(); sh_palette_refresh_steer(sh_package_editor_row_steer);
+        sh_palette_refresh_rows_retired(sh_package_editor_rows_retire);
+        sh_package_runtime_lookup_rows_sink(sh_palette_refresh_internal_rows);
+        sh_decl_server_rows_retired(sh_package_editor_rows_retire);
+        sh_decl_server_image_state(sh_image_exclusion_query);
+        if (!sh_package_editor_install(results, db, g_doom_base))
+            backend_log("package editor ownership hooks could not be installed");
+        sh_package_role_install(results, db, g_doom_base);
         if(grid_installed&&!sh_grid_editor_install(results,db,sh_grid_native_read,sh_grid_native_apply))
             backend_log("GRID: native dimension properties unavailable on this build");
         if(!sh_map_render_install(results,db,g_doom_base)||!sh_map_render_editor_install(results,db))
@@ -448,6 +658,7 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
 
         sh_audio_banks_native_install(results, db);
         sh_audio_files_native_install(results, db, g_doom_base);
+        sh_package_sound_native_install(results, db);
 
         /* Queue immutable new-declaration registration on the engine main thread.
          * The interface and palette callbacks must be ready before its command runs. */
@@ -489,6 +700,14 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
 
     shield_install(g_doom_base, g_doom_size);
 
+    {
+        char line[128];
+        _snprintf_s(line, sizeof(line), _TRUNCATE,
+            "startup hooks: %d installed, %d owned", hook_installed_count(), hook_owned_count());
+        backend_log(line);
+    }
+    startup_hooks_done();
+
     return 0;
 }
 
@@ -497,15 +716,19 @@ BOOL WINAPI DllMain(HINSTANCE hinst, DWORD reason, LPVOID reserved)
     (void)reserved;
     if (reason == DLL_PROCESS_ATTACH) {
         DisableThreadLibraryCalls(hinst);
+        sh_boot_phases_mark(SH_BOOT_ATTACH);
         backend_set_logpath_from_module(hinst);   /* sh_backend.log under <DOOM>\snapmap-plus\logs\ */
         shield_set_logpath_from_module(hinst);     /* shield_faults.log under <DOOM>\snapmap-plus\logs\ (shield's own log) */
 #ifdef SH_DIAG
         /* Diagnostic builds record faults and environment details without recovering. */
         shield_diag_install(hinst);
 #endif
+        /* Create the readiness event before any observer could look for it. */
+        startup_hooks_open();
         /* Don't do engine work in DllMain (loader lock). Spin the bootstrap onto its own thread. */
         HANDLE h = CreateThread(NULL, 0, bootstrap_thread, NULL, 0, NULL);
         if (h) CloseHandle(h);
+        else startup_hooks_done();   /* nothing will install; never leave observers waiting */
         /* The independent unlock worker can run before backend resolution completes. */
         sh_cvar_unlock_start();
     }

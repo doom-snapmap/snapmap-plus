@@ -2,7 +2,10 @@
 #include <windows.h>
 #include <stdlib.h>
 #include <string.h>
+#include <limits.h>
+#include "execution_context.h"
 #include "resource_graph.h"
+#include "native_filename.h"
 
 typedef struct rg_phase {
     size_t *children, count;
@@ -20,13 +23,35 @@ typedef struct rg_node {
     size_t generation;
     rg_phase phases[2];
     rg_producer *producers;
+    unsigned history; /* SH_RESOURCE_GRAPH_HISTORY_*: never cleared by a reparse. */
 } rg_node;
 
 static SRWLOCK g_lock = SRWLOCK_INIT;
 static rg_node *g_nodes;
 static size_t g_count, g_capacity, *g_hash, g_hash_capacity;
 static int g_failed;
-static __declspec(thread) sh_resource_graph_frame *g_frame;
+static volatile LONG g_size_history;
+typedef struct rg_scope {
+    uint64_t serial;
+    size_t node, generation, *children, count, capacity;
+    unsigned phase;
+    int failed, requests, expanded_inheritance;
+    struct rg_scope *parent;
+} rg_scope;
+typedef struct rg_context {
+    uint64_t id;
+    rg_scope *top;
+    struct rg_context *next;
+} rg_context;
+static rg_context *g_contexts;
+static volatile LONG64 g_scope_serial;
+static void rg_retire(uint64_t context);
+static sh_execution_owner g_execution = {rg_retire};
+static rg_context *rg_context_find(uint64_t id)
+{
+    for (rg_context *c = g_contexts; c; c = c->next) if (c->id == id) return c;
+    return NULL;
+}
 
 static void rg_producer_free(rg_producer *producer)
 {
@@ -45,6 +70,7 @@ static uint64_t rg_hash_key(const char *type, const char *name)
 {
     uint64_t hash = 14695981039346656037ULL;
     unsigned i;
+    if (!*type) name = sh_native_virtual_path(name);
     for (i = 0; i < 2; i++) {
         const char *s = i ? name : type;
         do { hash = (hash ^ (unsigned char)rg_fold(*s)) * 1099511628211ULL; } while (*s++);
@@ -77,6 +103,7 @@ static int rg_rehash(size_t capacity)
 static size_t rg_find(const char *type, const char *name, uint64_t hash)
 {
     size_t slot;
+    if (!*type) name = sh_native_virtual_path(name);
     if (!g_hash_capacity) return SIZE_MAX;
     slot = (size_t)hash & (g_hash_capacity - 1);
     while (g_hash[slot]) {
@@ -91,7 +118,9 @@ static size_t rg_intern(const char *type, const char *name)
     uint64_t hash;
     size_t index, slot;
     rg_node node = {0};
-    if (!type || !name || !*name) return SIZE_MAX;
+    if (!type || !name) return SIZE_MAX;
+    if (!*type) name = sh_native_virtual_path(name);
+    if (!*name) return SIZE_MAX;
     hash = rg_hash_key(type, name);
     index = rg_find(type, name, hash);
     if (index != SIZE_MAX) return index;
@@ -117,7 +146,7 @@ static size_t rg_intern(const char *type, const char *name)
 bad:
     g_failed = 1; return SIZE_MAX;
 }
-static void rg_append(sh_resource_graph_frame *frame, size_t child)
+static void rg_append(rg_scope *frame, size_t child)
 {
     size_t i;
     if (!frame || frame->node == SIZE_MAX) return;
@@ -134,100 +163,182 @@ static void rg_append(sh_resource_graph_frame *frame, size_t child)
     }
     frame->children[frame->count++] = child;
 }
-static int rg_begin(sh_resource_graph_frame *frame, const char *type, const char *name, unsigned phase,
-                     int only_missing)
+/* All scope and graph operations below hold g_lock. Execution-context
+ * retirement is drained before taking that lock and never reads a token's
+ * caller stack or enters native code. */
+static void rg_scope_finish(rg_scope *scope, int parsed, int publish)
 {
-    memset(frame, 0, sizeof(*frame));
-    frame->parent = g_frame;
-    frame->phase = phase;
-    AcquireSRWLockExclusive(&g_lock);
-    frame->node = rg_intern(type, name);
-    if (frame->node != SIZE_MAX) {
-        rg_node *node = &g_nodes[frame->node];
-        rg_phase *record = &node->phases[phase];
-        if (only_missing && (record->complete || record->active || node->phases[0].active)) {
-            ReleaseSRWLockExclusive(&g_lock); return 0;
+    if (scope->node != SIZE_MAX && scope->node < g_count) {
+        rg_node *node = &g_nodes[scope->node];
+        rg_phase *record = &node->phases[scope->phase];
+        if (record->active > 0) record->active--;
+        else { scope->failed = 1; record->complete = 0; }
+        if (scope->generation == node->generation && publish) {
+            free(record->children); record->children = scope->children; record->count = scope->count;
+            record->complete = parsed && !scope->failed && !record->active && !record->raced;
+            record->expanded_inheritance = scope->expanded_inheritance;
+            scope->children = NULL;
         }
-        if (!phase) {
-            unsigned i;
-            node->generation++;
-            rg_producer_free(node->producers); node->producers = NULL;
-            for (i = 0; i < 2; i++) {
-                free(node->phases[i].children);
-                node->phases[i].children = NULL;
-                node->phases[i].count = 0;
-                node->phases[i].complete = 0;
+    }
+    free(scope->children); free(scope);
+}
+static void rg_retire(uint64_t id)
+{
+    AcquireSRWLockExclusive(&g_lock);
+    rg_context **at = &g_contexts;
+    while (*at && (*at)->id != id) at = &(*at)->next;
+    if (*at) {
+        rg_context *c = *at; *at = c->next;
+        while (c->top) {
+            rg_scope *scope = c->top; c->top = scope->parent;
+            scope->failed = 1; rg_scope_finish(scope, 0, 1);
+        }
+        free(c);
+    }
+    ReleaseSRWLockExclusive(&g_lock);
+}
+static void rg_invalid(const sh_resource_graph_frame *frame, rg_context *current)
+{
+    if (current && current->top) current->top->failed = 1;
+    if (!frame || !frame->serial) return;
+    rg_context *owner = rg_context_find(frame->context);
+    for (rg_scope *s = owner ? owner->top : NULL; s; s = s->parent)
+        if (s->serial == frame->serial) { s->failed = 1; break; }
+    if (frame->node < g_count && frame->phase < 2 &&
+        g_nodes[frame->node].generation == frame->generation)
+        g_nodes[frame->node].phases[frame->phase].complete = 0;
+}
+static int rg_begin(sh_resource_graph_frame *frame, const char *type, const char *name,
+    unsigned phase, int only_missing, int pause, int requests, int expanded)
+{
+    if (!frame) return 0;
+    memset(frame, 0, sizeof(*frame)); frame->node = SIZE_MAX;
+    uint64_t id = sh_execution_context(&g_execution, 1);
+    rg_scope *scope = calloc(1, sizeof(*scope));
+    if (scope) { scope->serial = sh_execution_next(&g_scope_serial); scope->node = SIZE_MAX; }
+    AcquireSRWLockExclusive(&g_lock);
+    if (!id || !scope || !scope->serial) { g_failed = 1; goto bad; }
+    rg_context *c = rg_context_find(id);
+    if (!c) {
+        c = calloc(1, sizeof(*c));
+        if (!c) { g_failed = 1; goto bad; }
+        c->id = id; c->next = g_contexts; g_contexts = c;
+    }
+    scope->phase = phase; scope->requests = requests; scope->expanded_inheritance = expanded;
+    if (!pause) {
+        scope->node = rg_intern(type, name);
+        if (scope->node != SIZE_MAX) {
+            rg_node *node = &g_nodes[scope->node];
+            rg_phase *record = &node->phases[phase];
+            if (only_missing && (record->complete || record->active || node->phases[0].active)) goto bad;
+            if (record->active == INT_MAX || (!phase && node->generation == SIZE_MAX)) {
+                g_failed = 1; scope->node = SIZE_MAX;
+            } else {
+                if (!phase) {
+                    node->generation++;
+                    rg_producer_free(node->producers); node->producers = NULL;
+                    for (unsigned i = 0; i < 2; i++) {
+                        free(node->phases[i].children); node->phases[i].children = NULL;
+                        node->phases[i].count = 0; node->phases[i].complete = 0;
+                    }
+                }
+                scope->generation = node->generation;
+                record->raced = record->active != 0; record->active++; record->complete = 0;
             }
         }
-        frame->generation = node->generation;
-        record->raced = record->active != 0;
-        record->active++;
-        record->complete = 0;
+        rg_append(c->top, scope->node);
+        scope->failed = scope->node == SIZE_MAX;
     }
-    ReleaseSRWLockExclusive(&g_lock);
-    rg_append(g_frame, frame->node);
-    frame->failed = frame->node == SIZE_MAX;
-    g_frame = frame;
-    return 1;
+    scope->parent = c->top; c->top = scope;
+    frame->context = id; frame->serial = scope->serial; frame->node = scope->node;
+    frame->generation = scope->generation; frame->phase = scope->phase;
+    ReleaseSRWLockExclusive(&g_lock); return 1;
+bad:
+    ReleaseSRWLockExclusive(&g_lock); free(scope); return 0;
 }
 void sh_resource_graph_begin(sh_resource_graph_frame *frame, const char *type, const char *name)
-{
-    rg_begin(frame, type, name, 0, 0);
-}
+{ rg_begin(frame,type,name,0,0,0,0,0); }
 void sh_resource_graph_begin_state(sh_resource_graph_frame *frame, const char *type, const char *name,
-                                    int expanded_inheritance)
-{
-    rg_begin(frame, type, name, 1, 0);
-    frame->expanded_inheritance = expanded_inheritance != 0;
-}
-int sh_resource_graph_begin_missing_state(sh_resource_graph_frame *frame,
-    const char *type, const char *name, int expanded_inheritance)
-{
-    if (!rg_begin(frame, type, name, 1, 1)) return 0;
-    frame->expanded_inheritance = expanded_inheritance != 0; return 1;
-}
+    int expanded_inheritance)
+{ rg_begin(frame,type,name,1,0,0,0,expanded_inheritance != 0); }
+int sh_resource_graph_begin_missing_state(sh_resource_graph_frame *frame, const char *type,
+    const char *name, int expanded_inheritance)
+{ return rg_begin(frame,type,name,1,1,0,0,expanded_inheritance != 0); }
 void sh_resource_graph_pause(sh_resource_graph_frame *frame)
+{ rg_begin(frame,NULL,NULL,0,0,1,0,0); }
+static void rg_end(sh_resource_graph_frame *frame, int parsed, int publish)
 {
-    memset(frame, 0, sizeof(*frame));
-    frame->node = SIZE_MAX;
-    frame->parent = g_frame;
-    g_frame = frame;
-}
-void sh_resource_graph_end(sh_resource_graph_frame *frame, int parsed)
-{
+    uint64_t id = sh_execution_context(NULL,0);
     AcquireSRWLockExclusive(&g_lock);
-    if (frame->node != SIZE_MAX && frame->node < g_count) {
-        rg_node *node = &g_nodes[frame->node];
-        rg_phase *record = &node->phases[frame->phase];
-        record->active--;
-        if (frame->generation == node->generation) {
-            free(record->children); record->children = frame->children; record->count = frame->count;
-            record->complete = parsed && !frame->failed && !record->active && !record->raced;
-            record->expanded_inheritance = frame->expanded_inheritance;
-            frame->children = NULL;
-        }
+    rg_context *c = rg_context_find(id);
+    if (!frame || !frame->serial || frame->context != id || !c) { rg_invalid(frame,c); goto done; }
+    rg_scope *scope = c->top;
+    while (scope && scope->serial != frame->serial) scope = scope->parent;
+    if (!scope) { rg_invalid(frame,c); goto done; }
+    int ordered = c->top == scope;
+    while (c->top != scope) {
+        rg_scope *lost = c->top; c->top = lost->parent;
+        lost->failed = 1; rg_scope_finish(lost,0,1);
     }
+    c->top = scope->parent;
+    if (!ordered) scope->failed = 1;
+    rg_scope_finish(scope,parsed && ordered,publish);
+done:
     ReleaseSRWLockExclusive(&g_lock);
-    g_frame = frame->parent;
-    free(frame->children);
 }
-void sh_resource_graph_reference(const char *type, const char *name)
+void sh_resource_graph_end(sh_resource_graph_frame *frame, int parsed) { rg_end(frame,parsed,1); }
+void sh_resource_graph_discard(sh_resource_graph_frame *frame) { rg_end(frame,0,0); }
+static void rg_reference(const char *type, const char *name, int request)
 {
-    size_t node;
-    if (!sh_resource_graph_recording() || !name || !*name) return;
+    if (!name || !*name) return;
+    uint64_t id = sh_execution_context(NULL,0);
     AcquireSRWLockExclusive(&g_lock);
-    node = rg_intern(type, name);
+    rg_context *c = rg_context_find(id); rg_scope *scope = c ? c->top : NULL;
+    if (scope && scope->node != SIZE_MAX && (!request || scope->requests))
+        rg_append(scope,rg_intern(type,name));
     ReleaseSRWLockExclusive(&g_lock);
-    rg_append(g_frame, node);
 }
-void sh_resource_graph_discard(sh_resource_graph_frame *frame)
+void sh_resource_graph_reference(const char *type, const char *name) { rg_reference(type,name,0); }
+void sh_resource_graph_incomplete(void)
 {
+    uint64_t id = sh_execution_context(NULL,0);
     AcquireSRWLockExclusive(&g_lock);
-    if (frame->node != SIZE_MAX && frame->node < g_count)
-        g_nodes[frame->node].phases[frame->phase].active--;
+    rg_context *c = rg_context_find(id);
+    if (c && c->top && c->top->node != SIZE_MAX) c->top->failed = 1;
     ReleaseSRWLockExclusive(&g_lock);
-    g_frame = frame->parent; free(frame->children);
 }
+int sh_resource_graph_frame_current(const sh_resource_graph_frame *frame)
+{
+    uint64_t id = sh_execution_context(NULL,0); int current = 0;
+    AcquireSRWLockShared(&g_lock);
+    rg_context *c = rg_context_find(id);
+    current = frame && frame->serial && frame->context == id && c && c->top && c->top->serial == frame->serial;
+    ReleaseSRWLockShared(&g_lock); return current;
+}
+void sh_resource_graph_expanded_inheritance(sh_resource_graph_frame *frame, int expanded)
+{
+    uint64_t id = sh_execution_context(NULL,0);
+    AcquireSRWLockExclusive(&g_lock);
+    rg_context *c = rg_context_find(id);
+    if (frame && frame->serial && frame->context == id && c && c->top && c->top->serial == frame->serial)
+        c->top->expanded_inheritance = expanded != 0;
+    else rg_invalid(frame,c);
+    ReleaseSRWLockExclusive(&g_lock);
+}
+void sh_resource_graph_begin_requests(sh_resource_graph_frame *frame, const char *type, const char *name)
+{ rg_begin(frame,type,name,0,0,0,1,0); }
+void sh_resource_graph_begin_state_requests(sh_resource_graph_frame *frame, const char *type,
+    const char *name, int expanded_inheritance)
+{ rg_begin(frame,type,name,1,0,0,1,expanded_inheritance != 0); }
+int sh_resource_graph_recording_requests(void)
+{
+    uint64_t id = sh_execution_context(NULL,0); int recording = 0;
+    AcquireSRWLockShared(&g_lock);
+    rg_context *c = rg_context_find(id);
+    recording = c && c->top && c->top->node != SIZE_MAX && c->top->requests;
+    ReleaseSRWLockShared(&g_lock); return recording;
+}
+void sh_resource_graph_request(const char *type, const char *name) { rg_reference(type,name,1); }
 void sh_resource_graph_file(const char *path) { sh_resource_graph_reference("", path); }
 int sh_resource_graph_producer_inputs(const char *producer, const char *path,
     const char *const *inputs, size_t count)
@@ -268,19 +379,50 @@ done:
     ReleaseSRWLockExclusive(&g_lock);
     rg_producer_free(pending); return ok;
 }
-int sh_resource_graph_recording(void) { return g_frame && g_frame->node != SIZE_MAX; }
+void sh_resource_graph_history_mark(const char *type, const char *name, unsigned bits)
+{
+    size_t node;
+    if (!bits) return;
+    if (!type || !name || !*name) { sh_resource_graph_size_history_invalidate(); return; }
+    AcquireSRWLockExclusive(&g_lock);
+    node = rg_intern(type, name);
+    if (node != SIZE_MAX) g_nodes[node].history |= bits;
+    ReleaseSRWLockExclusive(&g_lock);
+    if (node == SIZE_MAX) sh_resource_graph_size_history_invalidate();
+}
+unsigned sh_resource_graph_history(const char *type, const char *name)
+{
+    unsigned bits = 0;
+    size_t node;
+    if (!type || !name || !*name) return 0;
+    AcquireSRWLockShared(&g_lock);
+    node = rg_find(type, name, rg_hash_key(type, name));
+    if (node != SIZE_MAX) bits = g_nodes[node].history;
+    ReleaseSRWLockShared(&g_lock);
+    return bits;
+}
+/* 0 not begun, 1 begun, -1 invalid (sticky). */
+void sh_resource_graph_size_history_begin(void) { InterlockedCompareExchange(&g_size_history, 1, 0); }
+void sh_resource_graph_size_history_invalidate(void) { InterlockedExchange(&g_size_history, -1); }
+int sh_resource_graph_size_history_ready(void) { return InterlockedCompareExchange(&g_size_history, 0, 0) == 1; }
+int sh_resource_graph_recording(void)
+{
+    uint64_t id = sh_execution_context(NULL,0); int recording = 0;
+    AcquireSRWLockShared(&g_lock);
+    rg_context *c = rg_context_find(id); recording = c && c->top && c->top->node != SIZE_MAX;
+    ReleaseSRWLockShared(&g_lock); return recording;
+}
 int sh_resource_graph_source_active(const char *type, const char *name)
 {
-    int active = 0;
-    if (!type || !name || !sh_resource_graph_recording() || g_frame->phase) return 0;
+    int active = 0; uint64_t id = sh_execution_context(NULL,0);
+    if (!type || !name) return 0;
     AcquireSRWLockShared(&g_lock);
-    if (g_frame->node < g_count) {
-        const rg_node *node = &g_nodes[g_frame->node];
-        active = g_frame->generation == node->generation &&
-                 rg_equal(type, node->type) && rg_equal(name, node->name);
+    rg_context *c = rg_context_find(id); rg_scope *scope = c ? c->top : NULL;
+    if (scope && !scope->phase && scope->node < g_count) {
+        const rg_node *node = &g_nodes[scope->node];
+        active = scope->generation == node->generation && rg_equal(type,node->type) && rg_equal(name,node->name);
     }
-    ReleaseSRWLockShared(&g_lock);
-    return active;
+    ReleaseSRWLockShared(&g_lock); return active;
 }
 
 static int rg_complete(const rg_node *node)
@@ -382,6 +524,9 @@ static int rg_impact_compare(const void *a, const void *b)
 }
 sh_resource_graph_status sh_resource_graph_consumers(const sh_resource_graph_identity *seeds,
     size_t count, sh_resource_graph_impact *out)
+{ return sh_resource_graph_consumers_bounded(seeds, count, NULL, NULL, out); }
+sh_resource_graph_status sh_resource_graph_consumers_bounded(const sh_resource_graph_identity *seeds,
+    size_t count, sh_resource_graph_barrier barrier, void *context, sh_resource_graph_impact *out)
 {
     typedef struct rg_reverse_edge { size_t parent, next; } rg_reverse_edge;
     rg_reverse_edge *edges = NULL;
@@ -455,7 +600,10 @@ sh_resource_graph_status sh_resource_graph_consumers(const sh_resource_graph_ide
         size_t edge;
         for (edge = heads[queue[position++]]; edge != SIZE_MAX; edge = edges[edge].next) {
             size_t parent = edges[edge].parent;
-            if (!visited[parent]) { visited[parent] = 1; queue[queued++] = parent; }
+            if (visited[parent]) continue;
+            visited[parent] = 1;
+            if (!barrier || !barrier(context, g_nodes[parent].type, g_nodes[parent].name))
+                queue[queued++] = parent;
         }
     }
     if (queued > SIZE_MAX / sizeof(*out->items)) goto done;
@@ -496,6 +644,74 @@ sh_resource_graph_status sh_resource_graph_affected(const char *const *paths,
     free(seeds); return result;
 }
 
+/* The bounded closure of sh_resource_graph_consumers_bounded, with coverage judged on that closure
+ * alone: COMPLETE when every seed has a node and every node the walk visits (consumers it returns
+ * and barrier holders it stops at) has every recorded phase complete. Otherwise INCOMPLETE, naming
+ * the first unobserved seed or incompletely observed consumer in first. */
+sh_resource_graph_status sh_resource_graph_consumers_observed(const sh_resource_graph_identity *seeds,
+    size_t count, sh_resource_graph_barrier barrier, void *context, sh_resource_graph_impact *out,
+    char *first, size_t capacity)
+{
+    sh_resource_graph_status result = SH_RESOURCE_GRAPH_ERROR;
+    size_t *queue = NULL;
+    unsigned char *visited = NULL;
+    size_t queued = 0, position = 0;
+    int covered = 1;
+    if (first && capacity) *first = 0;
+    if (!out) return result;
+    memset(out, 0, sizeof(*out));
+    if (count && !seeds) return result;
+    for (size_t i = 0; i < count; i++) if (!seeds[i].type || !seeds[i].name || !*seeds[i].name) return result;
+    if (!count) return SH_RESOURCE_GRAPH_COMPLETE;
+    AcquireSRWLockShared(&g_lock);
+    if (g_failed || g_count > SIZE_MAX / sizeof(*queue)) goto done;
+    if (g_count && (!(queue = (size_t *)malloc(g_count * sizeof(*queue))) ||
+        !(visited = (unsigned char *)calloc(g_count, 1)))) goto done;
+    for (size_t i = 0; i < count; i++) {
+        size_t node = rg_find(seeds[i].type, seeds[i].name, rg_hash_key(seeds[i].type, seeds[i].name));
+        if (node == SIZE_MAX) {
+            if (covered && first && capacity) snprintf(first, capacity, "%s:%s (no recorded node)", seeds[i].type, seeds[i].name);
+            covered = 0; continue;
+        }
+        if (!visited[node]) { visited[node] = 1; queue[queued++] = node; }
+    }
+    /* A reverse scan per dequeued node keeps this independent of any whole-graph coverage. */
+    while (position < queued) {
+        size_t target = queue[position++];
+        for (size_t parent = 0; parent < g_count; parent++) {
+            const rg_node *node = &g_nodes[parent];
+            const rg_producer *producer = node->producers;
+            int names = 0;
+            for (unsigned phase = 0; phase < 2 && !names; phase++)
+                for (size_t j = 0; j < node->phases[phase].count && !names; j++)
+                    names = node->phases[phase].children[j] == target;
+            for (; producer && !names; producer = producer->next)
+                for (size_t j = 0; j < producer->count && !names; j++) names = producer->children[j] == target;
+            if (!names || visited[parent]) continue;
+            visited[parent] = 1;
+            if (!rg_complete(node) || node->phases[1].active) {
+                if (covered && first && capacity) snprintf(first, capacity, "%s:%s", node->type, node->name);
+                covered = 0;
+            }
+            if (barrier && barrier(context, node->type, node->name)) continue;
+            queue[queued++] = parent;
+        }
+    }
+    if (queued && !(out->items = (sh_resource_graph_identity *)calloc(queued, sizeof(*out->items)))) goto done;
+    for (size_t i = 0; i < queued; i++) {
+        const rg_node *node = &g_nodes[queue[i]];
+        sh_resource_graph_identity *item = &out->items[out->count++];
+        item->type = rg_copy(node->type); item->name = rg_copy(node->name);
+        if (!item->type || !item->name) goto done;
+    }
+    if (out->count > 1) qsort(out->items, out->count, sizeof(*out->items), rg_impact_compare);
+    result = covered ? SH_RESOURCE_GRAPH_COMPLETE : SH_RESOURCE_GRAPH_INCOMPLETE;
+done:
+    free(queue); free(visited);
+    ReleaseSRWLockShared(&g_lock);
+    if (result == SH_RESOURCE_GRAPH_ERROR) sh_resource_graph_impact_free(out);
+    return result;
+}
 void sh_resource_graph_counts(size_t *nodes, size_t *complete, size_t *edges)
 {
     size_t i, parsed = 0, links = 0;
@@ -516,6 +732,12 @@ void sh_resource_graph_test_reset(void)
 {
     size_t i;
     AcquireSRWLockExclusive(&g_lock);
+    while (g_contexts) {
+        rg_context *c = g_contexts; g_contexts = c->next;
+        while (c->top) { rg_scope *scope = c->top; c->top = scope->parent;
+            free(scope->children); free(scope); }
+        free(c);
+    }
     for (i = 0; i < g_count; i++) {
         free(g_nodes[i].type); free(g_nodes[i].name);
         free(g_nodes[i].phases[0].children); free(g_nodes[i].phases[1].children);
@@ -523,6 +745,7 @@ void sh_resource_graph_test_reset(void)
     }
     free(g_nodes); free(g_hash); g_nodes = NULL; g_hash = NULL;
     g_count = g_capacity = g_hash_capacity = 0; g_failed = 0;
+    InterlockedExchange(&g_size_history, 0);
     ReleaseSRWLockExclusive(&g_lock);
 }
 #endif

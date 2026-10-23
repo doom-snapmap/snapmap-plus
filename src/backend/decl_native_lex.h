@@ -21,6 +21,8 @@ typedef struct sh_decl_tokens {
 
 /* No native resource loads, preprocessing or source rewriting. Preserve exact
  * spelling and line boundaries; pair ordinary delimiters with a heap stack.
+ * Native inter-token whitespace includes nonzero controls and high bytes under
+ * its signed-byte comparison. It does not trim or normalize quoted strings.
  * Declaration flags disable string escapes/implicit string concatenation and
  * allow path characters in names. Explicit string continuation, preprocessor
  * directives, verbatim blocks and non-decimal numbers currently refuse rather

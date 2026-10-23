@@ -65,9 +65,9 @@ int sh_editor_frame_request_reload(char *out_msg, int msg_capacity);
 
 typedef enum sh_reload_state {
     SH_RELOAD_IDLE = 0,     /* nothing requested since install */
-    SH_RELOAD_PENDING,      /* queued, waiting for a frame whose preconditions hold */
-    SH_RELOAD_DONE,         /* LoadMap ran and returned success */
-    SH_RELOAD_FAILED        /* LoadMap ran and reported failure, or the attempt faulted */
+    SH_RELOAD_PENDING,      /* waiting for a usable frame, package consent or retained load completion */
+    SH_RELOAD_DONE,         /* native map loading and any pending installation succeeded */
+    SH_RELOAD_FAILED        /* load refused, canceled, did not consume the source, or faulted */
 } sh_reload_state;
 
 /* Where the most recent reload request got to. `out_msg` (optional) receives the last detail line

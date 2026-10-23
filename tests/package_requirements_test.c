@@ -128,6 +128,95 @@ static int install(const char *root)
                                            (void *)fake_buffer, (void *)fake_execute, 1);
 }
 
+static void overlapping_permissions(const char *root, const char *marker)
+{
+    char peer[MAX_PATH], peer_marker[MAX_PATH];
+    snprintf(peer, sizeof(peer), "%s/overrides/permission-peer", root);
+    snprintf(peer_marker, sizeof(peer_marker), "%s/package.json", peer);
+    CHECK(make_dir(peer));
+    CHECK(write_text(peer_marker, "{\"id\":\"permission-peer\",\"name\":\"Permission peer\","
+        "\"requirements\":{\"cvars\":{\"g_useResourceBlackList\":false,\"g_useImageBlackList\":0}}}"));
+    policy(root, marker, "{\"g_useImageBlackList\":true,\"g_useResourceBlackList\":1}");
+    {
+        /* sh_packages names each effective setting and every package asking for it. */
+        char *summary = sh_package_runtime_summary();
+        CHECK(summary && !strstr(summary, "Skipped local package"));
+        CHECK(summary && strstr(summary, "Effective settings required by packages:") &&
+            strstr(summary, "g_useImageBlackList = ") && strstr(summary, "g_useResourceBlackList = ") &&
+            strstr(summary, "Permission peer [permission-peer] (0)") && strstr(summary, "Example [example] (true)"));
+        if (summary && !strstr(summary, "Permission peer [permission-peer] (0)")) fprintf(stderr, "%s\n", summary);
+        free(summary);
+    }
+    {
+        /* A nested component asking differently from its root is listed too. */
+        char nested[MAX_PATH], nested_marker[MAX_PATH];
+        snprintf(nested, sizeof(nested), "%s/overrides/my-overrides/nested", root);
+        snprintf(nested_marker, sizeof(nested_marker), "%s/package.json", nested);
+        CHECK(make_dir(nested));
+        CHECK(write_text(nested_marker, "{\"id\":\"example-nested\",\"name\":\"Example nested\","
+            "\"requirements\":{\"cvars\":{\"g_useImageBlackList\":0}}}"));
+        policy(root, marker, "{\"g_useImageBlackList\":true,\"g_useResourceBlackList\":1}");
+        char *summary = sh_package_runtime_summary();
+        CHECK(summary && strstr(summary, "Example [example] (true)") &&
+            strstr(summary, "Example [example] component nested (0)"));
+        if (summary && !strstr(summary, "component nested (0)")) fprintf(stderr, "%s\n", summary);
+        free(summary);
+        CHECK(DeleteFileA(nested_marker)); CHECK(RemoveDirectoryA(nested));
+        policy(root, marker, "{\"g_useImageBlackList\":true,\"g_useResourceBlackList\":1}");
+    }
+    {
+        /* Many requesting components are listed in full: the summary is sized
+         * from its content, so the last one is still there. */
+        enum { BULK = 80 };
+        char bulk[BULK][MAX_PATH], bulk_marker[MAX_PATH], wanted[160];
+        for (int k = 0; k < BULK; k++) {
+            snprintf(bulk[k], sizeof(bulk[k]), "%s/overrides/my-overrides/bulk-%02d-with-a-deliberately-long-component-name",
+                root, k);
+            snprintf(bulk_marker, sizeof(bulk_marker), "%s/package.json", bulk[k]);
+            CHECK(make_dir(bulk[k]));
+            CHECK(write_text(bulk_marker, "{\"id\":\"example-bulk\",\"name\":\"Example bulk\","
+                "\"requirements\":{\"cvars\":{\"g_useImageBlackList\":0}}}"));
+        }
+        policy(root, marker, "{\"g_useImageBlackList\":true,\"g_useResourceBlackList\":1}");
+        char *summary = sh_package_runtime_summary();
+        snprintf(wanted, sizeof(wanted), "Example [example] component bulk-%02d-with-a-deliberately-long-component-name (0)",
+            BULK - 1);
+        CHECK(summary && strlen(summary) > 4096 + 2 * 1024 && strstr(summary, wanted));
+        if (summary && !strstr(summary, wanted)) fprintf(stderr, "bulk summary truncated at %zu bytes\n", strlen(summary));
+        free(summary);
+        for (int k = 0; k < BULK; k++) {
+            snprintf(bulk_marker, sizeof(bulk_marker), "%s/package.json", bulk[k]);
+            CHECK(DeleteFileA(bulk_marker)); CHECK(RemoveDirectoryA(bulk[k]));
+        }
+        policy(root, marker, "{\"g_useImageBlackList\":true,\"g_useResourceBlackList\":1}");
+    }
+    reset_native(1, 1);
+    {
+        char state[384];
+        sh_package_requirements_describe(state, sizeof(state));
+        CHECK(!strcmp(state, "Package settings: not captured yet."));
+    }
+    CHECK(install(root) && sh_package_requirements_apply_now(NULL));
+    CHECK(sh_package_requirements_test_count() == 2 && *value(0) == 0 && *value(1) == 0);
+    {
+        char state[384];
+        sh_package_requirements_describe(state, sizeof(state));
+        CHECK(!strcmp(state, "Package settings in force: 2 applied and read back natively."));
+    }
+    CHECK(g_execute_calls == 1 && !strcmp(g_buffered,
+        "g_useImageBlackList 0\ng_useResourceBlackList 0\n"));
+    CHECK(DeleteFileA(peer_marker)); CHECK(RemoveDirectoryA(peer));
+    policy(root, marker, "{\"g_useImageBlackList\":true,\"g_useResourceBlackList\":1}");
+    CHECK(sh_package_requirements_rearm(root, NULL, 1));
+    CHECK(!sh_package_requirements_test_count() && *value(0) == 1 && *value(1) == 1);
+    /* A lone restrictive request does not acquire or force the native gate.
+     * In particular, it cannot override a previously disabled native value. */
+    reset_native(0, 1);
+    CHECK(install(root) && sh_package_requirements_apply_now(NULL));
+    CHECK(!sh_package_requirements_test_count() && !g_buffer_calls && !g_execute_calls);
+    CHECK(*value(0) == 0 && *value(1) == 1);
+}
+
 static void map_selection_retains_requirements(const char *root, const char *package, const char *marker)
 {
     char *selected;
@@ -269,11 +358,26 @@ int main(void)
     reset_native(1, 1); policy(root, marker, both); fail_execute(2, 0);
     CHECK(install(root) && !sh_package_requirements_apply_now(NULL));
     CHECK(*value(0) == 1 && *value(1) == 1 && g_execute_calls == 2);
+    {
+        /* sh_packages reports the refusal, its reason and what is in force. */
+        char state[384];
+        sh_package_requirements_describe(state, sizeof(state));
+        CHECK(!strcmp(state, "Package settings update refused: native requirement application failed; "
+            "previous values restored. No package setting was in force before it."));
+    }
     CHECK(sh_package_requirements_rearm(root, NULL, 1));
     CHECK(*value(0) == 0 && *value(1) == 0);
     policy(root, marker, "{}"); fail_execute(2, 0);
     CHECK(!sh_package_requirements_rearm(root, NULL, 1));
     CHECK(*value(0) == 0 && *value(1) == 0);
+    {
+        /* A rejected update keeps the earlier policy in force; nothing is re-read. */
+        char state[384];
+        sh_package_requirements_describe(state, sizeof(state));
+        CHECK(!strcmp(state, "Package settings update refused: native requirement application failed; "
+            "previous values restored. The earlier package settings stay as last applied: "
+            "g_useImageBlackList, g_useResourceBlackList."));
+    }
     CHECK(sh_package_requirements_rearm(root, NULL, 1));
     CHECK(*value(0) == 1 && *value(1) == 1);
 
@@ -281,6 +385,14 @@ int main(void)
     reset_native(1, 1); policy(root, marker, both); fail_execute(2, 1);
     CHECK(install(root) && !sh_package_requirements_apply_now(NULL));
     CHECK(*value(0) == 0 && *value(1) == 1);
+    {
+        /* The owed rollback is reported as pending, not as values restored. */
+        char state[384];
+        sh_package_requirements_describe(state, sizeof(state));
+        CHECK(!strcmp(state, "Package settings update refused: native requirement application and restoration "
+            "failed; retry must restore first. Restoring the previous value of 2 setting(s) is still pending; "
+            "the next application retries it first."));
+    }
     policy(root, marker, "{}");
     CHECK(sh_package_requirements_rearm(root, NULL, 1));
     CHECK(*value(0) == 1 && *value(1) == 1);
@@ -313,6 +425,7 @@ int main(void)
     sh_package_requirements_poll();
     CHECK(*value(0) == 0 && *value(1) == 0);
 
+    overlapping_permissions(root, marker);
     map_selection_retains_requirements(root, package, marker);
     policy(root, marker, both);
 
@@ -329,6 +442,13 @@ int main(void)
     }
     CHECK(install(root) && sh_package_requirements_apply_now(NULL));
     CHECK(sh_package_requirements_test_count() == 0);
+    {
+        /* The skipped package asks for nothing in force. */
+        char *summary = sh_package_runtime_summary(), state[384];
+        CHECK(summary && !strstr(summary, "quit = ")); free(summary);
+        sh_package_requirements_describe(state, sizeof(state));
+        CHECK(!strcmp(state, "Package settings in force: none."));
+    }
     CHECK(!strstr(g_buffered, "quit"));
     CHECK(!strstr(g_buffered, "g_useImageBlackList"));
 

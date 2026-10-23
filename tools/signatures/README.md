@@ -35,13 +35,27 @@ python extract_sig.py <reference.exe> <target.exe> <rva> [...]
 python derive_callee.py <reference.exe> <target.exe> <rva> [...]
 python derive_global.py <reference.exe> <target.exe> <rva> [...]
 python gen_globals_table.py [derived_globals.json] [out.h]
-python sigscan.py <signatures.c> <image> [<image> ...]
+python sigscan.py <signatures.c> <image> [<image> ...] [--output new-report.json]
 ```
 
 Run from this directory or use each script's full path. Function extraction
 masks RIP-relative displacements and relative branches while retaining structure
 displacements. Callee and global derivation use multiple sites to check agreement
 where possible. Read each script's argument handling before selecting output paths.
+
+`sigscan.py` prints a summary without writing a file by default. `--output`
+writes full JSON results to a new file in an existing directory, checking that
+destination before scanning. It refuses to overwrite an existing report. A
+failed scan can leave an empty report; only completed JSON contains results.
+Exit codes are 0 for unique matches throughout, 1 for missing or ambiguous
+matches, and 2 for input or output errors. These checks do not compare a unique
+match to its pinned RVA; the native gate below remains required.
+
+Run its CLI reporting controls from the repository root:
+
+```text
+python -m unittest discover -s tools/signatures -p test_sigscan.py
+```
 
 ## Adding or repairing an entry
 

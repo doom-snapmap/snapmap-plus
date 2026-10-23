@@ -1,0 +1,2787 @@
+#include <assert.h>
+#include <stdarg.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include "package_linker.h"
+#include "package_link_inputs.h"
+#include "package_native_names.h"
+#include "swf_binary.h"
+#include "package_scope.h"
+#include "map_provenance.h"
+#include "decl_rebind.h"
+#include "package_fixture.h"
+#include <windows.h>
+#include <psapi.h>
+#pragma comment(lib, "psapi.lib")
+
+static int describe(void *context, sh_decl_value_type type, sh_decl_value_shape *out)
+{
+    (void)context; memset(out, 0, sizeof(*out));
+    out->kind = !strcmp(type.name, "Entity") ? SH_DECL_VALUE_OBJECT :
+        !strcmp(type.name, "Material") ? SH_DECL_VALUE_REFERENCE : SH_DECL_VALUE_IGNORE;
+    return 1;
+}
+static int field(void *context, sh_decl_value_type type, const char *name, sh_decl_value_type *out)
+{
+    (void)context; (void)type;
+    *out = !strcmp(name, "material") ? (sh_decl_value_type){"Material", "*"} : (sh_decl_value_type){"int", ""};
+    return 1;
+}
+static const sh_decl_dependency_schema schema = {NULL, describe, field};
+
+/* Many bindings of one file, in bind order: the slots and targets binding
+ * reports, and the same as caller-supplied sites (target unit indices). */
+typedef struct plan_ref { const char *slot, *target; } plan_ref;
+typedef struct slot_plan {
+    const sh_compiled_resource *file;
+    const plan_ref *refs;
+    const sh_package_link_edge *sites;
+    size_t count;
+} slot_plan;
+typedef struct fixture {
+    sh_package_link_unit units[32];
+    size_t count, assigned, bound;
+    int unresolved, collision, changed_source, omit_replay, bad_inspection, abort_bind, shared_name;
+    int original_paths, alias_rewrite;
+    int member_fault, repeat_slot, native_originals;
+    int original_bindings[32];
+    unsigned char *mutate_witness;
+    sh_package_link_edge *mutate_implicit;
+    const slot_plan *plans;
+    size_t plan_count;
+} fixture;
+typedef struct bridge { sh_package_link_reference reference; void *context; } bridge;
+static int decl_reference(void *context, const char *slot, sh_decl_value_type type,
+    const char *name, size_t length, const char **replacement)
+{
+    bridge *b = context;
+    char *copy = malloc(length + 1); int result;
+    assert(copy && !strcmp(type.name, "Material"));
+    memcpy(copy, name, length); copy[length] = 0;
+    result = b->reference(b->context, slot, "material", copy, replacement);
+    free(copy); return result;
+}
+static int resolve(void *context, size_t unit, const char *family, const char *name,
+    size_t *target, char *error, size_t capacity)
+{
+    fixture *f = context; (void)error; (void)capacity;
+    if (f->unresolved) return 0;
+    for (size_t i = 0; i < f->count; i++) if (
+        f->units[unit].compilation == f->units[i].compilation &&
+        !strcmp(f->units[i].family, family) && !strcmp(f->units[i].name, name)) {
+        *target = i; return 1;
+    }
+    return 0;
+}
+static unsigned char *bind_file(void *context, size_t unit, const sh_compiled_resource *file,
+    const unsigned char *body, size_t length, sh_package_link_reference reference,
+    void *reference_context, size_t *output_length, char *error, size_t capacity)
+{
+    fixture *f = context;
+    unsigned char *result;
+    (void)file; (void)error; (void)capacity; f->bound++;
+    if (f->abort_bind) return NULL;
+    for (size_t p = 0; p < f->plan_count; p++) if (f->plans[p].file == file) {
+        for (size_t k = 0; k < f->plans[p].count; k++) {
+            const char *replacement = NULL;
+            if (reference(reference_context, f->plans[p].refs[k].slot, "material", f->plans[p].refs[k].target,
+                &replacement) < 0) return NULL;
+        }
+        result = malloc(length + 1); assert(result);
+        memcpy(result, body, length); result[length] = 0; *output_length = length; return result;
+    }
+    if (f->repeat_slot && !strcmp(f->units[unit].family, "entitydef")) {
+        /* Two assignments of one field in one file, as the native reader sees them. */
+        for (int k = 0; k < 2; k++) {
+            const char *replacement = NULL;
+            if (reference(reference_context, "edit.material", "material", "materials/stone", &replacement) < 0) return NULL;
+        }
+        result = malloc(length + 1); assert(result);
+        memcpy(result, body, length); result[length] = 0; *output_length = length; return result;
+    }
+    if (!strcmp(f->units[unit].family, "entitydef") && !(f->assigned && f->omit_replay)) {
+        bridge b = {reference, reference_context};
+        sh_decl_rebind_result details;
+        result = (unsigned char *)sh_decl_rebind_entity((sh_decl_source){(char *)body, length},
+            (sh_decl_value_type){"Entity", ""}, &schema, decl_reference, &b, output_length, &details);
+    } else {
+        result = malloc(length + 1); assert(result);
+        memcpy(result, body, length); result[length] = 0; *output_length = length;
+    }
+    if (result && f->bad_inspection && length) result[0] ^= 1;
+    if (result && f->alias_rewrite && f->assigned && unit && length) result[0] ^= 1;
+    return result;
+}
+static int assign(void *context, size_t unit, const unsigned char identity[32], int original_binding,
+    const sh_compiled_resource *const *files, size_t count, char **name, char ***paths,
+    char *error, size_t capacity)
+{
+    fixture *f = context;
+    char hex[65];
+    (void)error; (void)capacity; f->assigned++;
+    if (f->mutate_witness && f->assigned == 1) *f->mutate_witness ^= 1;
+    if (f->mutate_implicit && f->assigned == 1) f->mutate_implicit->target ^= 1;
+    f->original_bindings[unit] = original_binding;
+    for (size_t i = 0; i < 32; i++) snprintf(hex + i * 2, 3, "%02x", identity[i]);
+    if (!count) { *name = _strdup(f->units[unit].name); return *name != NULL; }
+    *name = malloc(strlen(f->units[unit].name) + 70); assert(*name);
+    int native = f->original_paths || f->units[unit].fixed_name || (f->native_originals && original_binding);
+    if (f->shared_name || native) sprintf(*name, "%s", f->units[unit].name);
+    else sprintf(*name, "smp/%s/%s", f->collision ? "same" : hex, f->units[unit].name);
+    *paths = calloc(count, sizeof(**paths)); assert(*paths);
+    for (size_t i = 0; i < count; i++) {
+        (*paths)[i] = malloc(strlen(files[i]->engine_path) + strlen(*name) + 80); assert((*paths)[i]);
+        if (native) sprintf((*paths)[i], "%s", files[i]->engine_path);
+        else if (files[i]->type) sprintf((*paths)[i], "generated/decls/%s/%s.decl", files[i]->type, *name);
+        else sprintf((*paths)[i], "linked/%s/%s", hex, files[i]->engine_path);
+    }
+    if (f->changed_source) {
+        /* Mutating an in-memory prepared input simulates a bad caller snapshot. */
+        sh_compiled_resource *resource = (sh_compiled_resource *)files[0];
+        if (resource->body && resource->body_length) resource->body[0] ^= 1;
+    }
+    return 1;
+}
+/* Every fixture unit binds through the fixed resolve() over immutable bytes. */
+static int stable_units(void *context, size_t unit) { (void)context; (void)unit; return 1; }
+static int available(void *context, const char *path, char *error, size_t capacity)
+{
+    (void)error; (void)capacity;
+    assert(!strstr(path, "/smp/") && !strstr(path, "linked/"));
+    return *(int *)context;
+}
+
+static int assign_members(void *context, size_t unit, const char *name,
+    const sh_compiled_resource *const *files, const char *const *paths, size_t count,
+    char ***names, char *error, size_t capacity)
+{
+    fixture *f = context; (void)error; (void)capacity;
+    *names = calloc(count, sizeof(**names)); assert(*names);
+    for (size_t i = 0; i < count; i++) {
+        size_t j;
+        for (j = 0; j < f->units[unit].file_count; j++) if (files[i] == f->units[unit].files[j]) break;
+        assert(j < f->units[unit].file_count);
+        const sh_package_link_file_identity *member = f->units[unit].file_identities + j;
+        int primary = !member->family || (!strcmp(member->family, f->units[unit].family) &&
+            !strcmp(member->name, f->units[unit].name));
+        const char *assigned = primary ? name : f->original_paths ? member->name : paths[i];
+        if (f->member_fault == 1 && !primary) continue;
+        if (f->member_fault == 2 && primary) assigned = "incorrect-primary";
+        if (f->member_fault == 3 && !primary) assigned = "shared-companion";
+        (*names)[i] = _strdup(assigned); assert((*names)[i]);
+        if (f->member_fault == 4) return 0; /* Partly allocated failure. */
+    }
+    return 1;
+}
+
+typedef struct native_fixture {
+    const char *colliding[2];
+    uint32_t occupied[2];
+    size_t checks, collisions;
+    int unavailable, invalid, constant, all_occupied, replace_shared;
+    const sh_package_link_output *resident;
+    const char *shared_original;
+} native_fixture;
+
+/* An injected ID space deliberately unrelated to the engine's algorithm. */
+static uint32_t test_native_id(const char *name)
+{
+    uint32_t id = 2166136261u;
+    for (const unsigned char *p = (const unsigned char *)name; *p; p++) id = (id ^ *p) * 16777619u;
+    return id ? id : 1;
+}
+
+static int native_check(void *context, const char *family, const char *name,
+    const unsigned char binding[32], int original, uint32_t *id, char *error, size_t capacity)
+{
+    native_fixture *native = context;
+    (void)family; (void)binding; (void)original; native->checks++;
+    if (native->unavailable) { snprintf(error, capacity, "native registry snapshot unavailable"); return -1; }
+    *id = native->invalid ? 0 : test_native_id(name);
+    if (native->constant || (native->colliding[0] && !strcmp(name, native->colliding[0])) ||
+        (native->colliding[1] && !strcmp(name, native->colliding[1]))) *id = 17;
+    if (native->all_occupied || *id == native->occupied[0] || *id == native->occupied[1]) {
+        native->collisions++; return 0;
+    }
+    if (native->shared_original && !strcmp(name, native->shared_original)) return SH_PACKAGE_LINK_REGISTRY_REPLACE_SHARED;
+    if (native->resident) for (size_t i = 0; i < native->resident->classes.count; i++)
+        if (!strcmp(name, native->resident->names[i])) return SH_PACKAGE_LINK_REGISTRY_OCCUPIED;
+    return native->replace_shared ? SH_PACKAGE_LINK_REGISTRY_REPLACE_SHARED : SH_PACKAGE_LINK_REGISTRY_AVAILABLE;
+}
+
+/* The developer report of a refused native identity: every line it notes. */
+static char collision_notes[16384];
+static void collision_note(void *context, const char *line)
+{
+    size_t used = strlen(collision_notes);
+    (void)context;
+    if (used + strlen(line) + 2 < sizeof(collision_notes)) { strcat(collision_notes, line); strcat(collision_notes, "\n"); }
+}
+static void collision_describe(void *context, size_t unit, char *out, size_t capacity)
+{ (void)context; snprintf(out, capacity, "fixture unit %zu", unit); }
+
+static void native_collisions(const sh_package_sources *sources, fixture *f,
+    sh_package_link_adapter *adapter, const size_t entities[3], const size_t materials[3])
+{
+    sh_package_link_output out = {0};
+    native_fixture native = {0};
+    sh_package_link_registry registry = {&native, native_check};
+    sh_package_link_unit saved[7];
+    char *initial[6], *stable[6], error[512];
+    memcpy(saved, f->units, sizeof(saved));
+    assert(sh_package_link(sources, f->units, f->count, adapter, NULL, NULL, &out, error, sizeof(error)));
+    for (size_t i = 0; i < f->count; i++) { initial[i] = _strdup(out.names[out.classes.nodes[i]]); assert(initial[i]); }
+    assert(strcmp(initial[materials[0]], initial[materials[1]]));
+    native.colliding[0] = initial[materials[0]]; native.colliding[1] = initial[materials[1]];
+    adapter->registry = &registry;
+    assert(sh_package_link(sources, f->units, f->count, adapter, NULL, NULL, &out, error, sizeof(error)));
+    /* Different alias strings that occupy one native ID must still relocate. */
+    assert((strcmp(initial[materials[0]], out.names[out.classes.nodes[materials[0]]]) != 0) +
+        (strcmp(initial[materials[1]], out.names[out.classes.nodes[materials[1]]]) != 0) == 1);
+    assert(native.checks == out.classes.count + 1);
+    for (size_t i = 0; i < f->count; i++) { stable[i] = _strdup(out.names[out.classes.nodes[i]]); assert(stable[i]); }
+    for (size_t i = 0; i < f->count; i++) f->units[i] = saved[f->count - i - 1];
+    assert(sh_package_link(sources, f->units, f->count, adapter, NULL, NULL, &out, error, sizeof(error)));
+    for (size_t i = 0; i < f->count; i++) assert(!strcmp(stable[f->count - i - 1], out.names[out.classes.nodes[i]]));
+    memcpy(f->units, saved, sizeof(saved));
+    for (size_t i = 0; i < f->count; i++) f->units[i].original_binding = 1;
+    f->units[materials[1]].original_binding = 0;
+    assert(sh_package_link(sources, f->units, f->count, adapter, NULL, NULL, &out, error, sizeof(error)));
+    assert(!strcmp(initial[materials[0]], out.names[out.classes.nodes[materials[0]]]));
+    assert(strcmp(initial[materials[1]], out.names[out.classes.nodes[materials[1]]]));
+    memcpy(f->units, saved, sizeof(saved));
+    memset(&native, 0, sizeof(native));
+    /* Baseline and still-live registries each reserve an ID, even when their
+     * stored resource names differ from the candidate's alias spelling. */
+    native.occupied[0] = test_native_id(initial[entities[0]]);
+    native.occupied[1] = test_native_id(initial[entities[1]]);
+    assert(sh_package_link(sources, f->units, f->count, adapter, NULL, NULL, &out, error, sizeof(error)));
+    assert(native.collisions == 2);
+    assert(strcmp(initial[entities[0]], out.names[out.classes.nodes[entities[0]]]));
+    assert(strcmp(initial[entities[1]], out.names[out.classes.nodes[entities[1]]]));
+    memset(&native, 0, sizeof(native)); native.unavailable = 1;
+    assert(!sh_package_link(sources, f->units, f->count, adapter, NULL, NULL, &out, error, sizeof(error)));
+    assert(strstr(error, "snapshot unavailable") && !out.compiled && !out.names);
+    memset(&native, 0, sizeof(native)); native.invalid = 1;
+    assert(!sh_package_link(sources, f->units, f->count, adapter, NULL, NULL, &out, error, sizeof(error)));
+    assert(strstr(error, "verification") && !out.compiled);
+    memset(&native, 0, sizeof(native)); native.constant = 1;
+    assert(!sh_package_link(sources, f->units, f->count, adapter, NULL, NULL, &out, error, sizeof(error)));
+    assert(strstr(error, "exhausted") && !out.compiled && !out.names);
+    memset(&native, 0, sizeof(native)); native.all_occupied = 1;
+    for (size_t i = 0; i < f->count; i++) f->units[i].original_binding = 1;
+    assert(!sh_package_link(sources, f->units, f->count, adapter, NULL, NULL, &out, error, sizeof(error)));
+    assert(strstr(error, "original resource") && native.checks == 1 && !out.compiled);
+    memcpy(f->units, saved, sizeof(saved)); adapter->registry = NULL;
+    for (size_t i = 0; i < f->count; i++) { free(initial[i]); free(stable[i]); }
+    sh_package_link_output_free(&out);
+}
+
+/* Entries in a directory. */
+static size_t directory_entries(const char *directory)
+{
+    char pattern[MAX_PATH + 64]; WIN32_FIND_DATAA data; size_t count = 0;
+    snprintf(pattern, sizeof(pattern), "%s/*", directory);
+    HANDLE find = FindFirstFileA(pattern, &data);
+    if (find == INVALID_HANDLE_VALUE) return 0;
+    do { if (strcmp(data.cFileName, ".") && strcmp(data.cFileName, "..")) count++; } while (FindNextFileA(find, &data));
+    FindClose(find); return count;
+}
+
+/* The history's exported records, appended into one buffer (as a warm record carries them). */
+typedef struct record_export { unsigned char *bytes; size_t length; } record_export;
+static int record_export_write(void *context, const void *bytes, size_t length)
+{
+    record_export *e = context;
+    unsigned char *grown = realloc(e->bytes, e->length + length + 1);
+    if (!grown) return 0;
+    memcpy(grown + e->length, bytes, length); e->bytes = grown; e->length += length; return 1;
+}
+
+static void repeated_native_bindings(const sh_package_sources *sources, const fixture *source,
+    const size_t entities[3], const size_t materials[3])
+{
+    fixture f = *source; native_fixture native = {0}; char error[1024], directory[MAX_PATH + 40];
+    sh_package_link_registry registry = {&native, native_check};
+    sh_package_link_adapter adapter = {&f, resolve, bind_file, assign, &registry};
+    sh_package_link_output first = {0}, next = {0};
+    snprintf(directory, sizeof(directory), "%s/package-cache", root);
+    assert(CreateDirectoryA(directory, NULL));
+    snprintf(directory, sizeof(directory), "%s/package-cache/resources", root);
+    assert(CreateDirectoryA(directory, NULL));
+    sh_package_link_history *history = sh_package_link_history_open(); assert(history);
+    adapter.history = history;
+    assert(sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &first, error, sizeof(error)));
+    assert(sh_package_link_history_count(history) == 4);
+    /* Records are memory only: nothing is written to the cache. */
+    assert(directory_entries(directory) == 0);
+    native.resident = &first;
+    /* An occupied name without exact retained evidence still branches safely. */
+    adapter.history = NULL;
+    assert(sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &next, error, sizeof(error)));
+    for (size_t i = 0; i < f.count; i++) assert(strcmp(first.names[first.classes.nodes[i]], next.names[next.classes.nodes[i]]));
+    adapter.history = history;
+    for (int pass = 0; pass < 12; pass++) {
+        assert(sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &next, error, sizeof(error)));
+        assert(sh_package_link_history_count(history) == 4 && next.compiled->resource_count == 4);
+        for (size_t i = 0; i < f.count; i++) assert(!strcmp(first.names[first.classes.nodes[i]], next.names[next.classes.nodes[i]]));
+    }
+    /* A changed dependency must branch both itself and its consumer. Failed
+     * replay leaves neither its proof nor its private identity reserved. */
+    f.units[materials[0]].semantics[0] ^= 1; f.omit_replay = 1; f.assigned = 0;
+    assert(!sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &next, error, sizeof(error)));
+    assert(sh_package_link_history_count(history) == 4);
+    f.omit_replay = 0;
+    assert(sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &next, error, sizeof(error)));
+    assert(sh_package_link_history_count(history) == 6);
+    assert(strcmp(first.names[first.classes.nodes[materials[0]]], next.names[next.classes.nodes[materials[0]]]));
+    assert(strcmp(first.names[first.classes.nodes[entities[0]]], next.names[next.classes.nodes[entities[0]]]));
+    assert(!strcmp(first.names[first.classes.nodes[entities[2]]], next.names[next.classes.nodes[entities[2]]]));
+    f.units[materials[0]].semantics[0] ^= 1;
+    native.unavailable = 1;
+    assert(!sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &next, error, sizeof(error)));
+    assert(sh_package_link_history_count(history) == 6);
+    native.unavailable = 0;
+    assert(sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &next, error, sizeof(error)));
+    for (size_t i = 0; i < f.count; i++) assert(!strcmp(first.names[first.classes.nodes[i]], next.names[next.classes.nodes[i]]));
+    /* Native numeric collisions cannot be waived by a matching record. */
+    native.all_occupied = 1;
+    assert(!sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &next, error, sizeof(error)));
+    assert(sh_package_link_history_count(history) == 6);
+    sh_package_link_output_free(&first); sh_package_link_output_free(&next);
+    assert(directory_entries(directory) == 0);
+    sh_package_link_history_close(history);
+    assert(directory_entries(directory) == 0);
+
+    /* A held fingerprint whose record names other components is refused: one
+     * identity cannot stand for two bindings. The exact record is accepted. */
+    {
+        record_export exported = {0};
+        memset(&native, 0, sizeof(native));
+        history = sh_package_link_history_open(); assert(history); adapter.history = history;
+        assert(sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &first, error, sizeof(error)));
+        size_t count = sh_package_link_history_count(history); assert(count == 4);
+        unsigned char (*identities)[32] = calloc(count, 32); uint64_t *lengths = calloc(count, sizeof(*lengths));
+        assert(identities && lengths);
+        for (size_t i = 0; i < count; i++) {
+            size_t before = exported.length;
+            assert(sh_package_link_history_node(history, i, identities[i], lengths + i));
+            assert(sh_package_link_history_record(history, i, record_export_write, &exported, error, sizeof(error)));
+            assert(exported.length - before == lengths[i] && lengths[i] > 40);
+        }
+        sh_package_link_history_close(history); sh_package_link_output_free(&first);
+        for (int forged = 1; forged >= 0; forged--) {
+            history = sh_package_link_history_open(); assert(history); adapter.history = history;
+            exported.bytes[exported.length - 1] ^= forged;
+            assert(sh_package_link_history_import(history, (const unsigned char (*)[32])identities, lengths, count,
+                exported.bytes, exported.length, NULL, 0, error, sizeof(error)));
+            exported.bytes[exported.length - 1] ^= forged;
+            assert(sh_package_link_history_count(history) == 4);
+            int linked = sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &next, error, sizeof(error));
+            if (forged) assert(!linked && strstr(error, "share a native binding fingerprint"));
+            else assert(linked && next.compiled->resource_count == 4);
+            assert(sh_package_link_history_count(history) == 4 && directory_entries(directory) == 0);
+            sh_package_link_output_free(&next); sh_package_link_history_close(history);
+        }
+        free(exported.bytes); free(identities); free(lengths);
+    }
+
+    /* Reservations cover unmaterialized identities too, across compilations. */
+    history = sh_package_link_history_open(); assert(history); adapter.history = history;
+    memset(&native, 0, sizeof(native)); f = *source; f.count = 1;
+    f.units[0] = source->units[materials[0]];
+    adapter.history = NULL;
+    assert(sh_package_link(sources, f.units, 1, &adapter, NULL, NULL, &first, error, sizeof(error)));
+    char *one = _strdup(first.names[0]); assert(one);
+    f.units[0] = source->units[materials[1]];
+    assert(sh_package_link(sources, f.units, 1, &adapter, NULL, NULL, &next, error, sizeof(error)));
+    char *two = _strdup(next.names[0]); assert(two);
+    native.colliding[0] = one; native.colliding[1] = two; adapter.history = history;
+    f.units[0] = source->units[materials[0]];
+    assert(sh_package_link(sources, f.units, 1, &adapter, NULL, NULL, &first, error, sizeof(error)));
+    assert(!strcmp(first.names[0], one));
+    f.units[0] = source->units[materials[1]];
+    assert(sh_package_link(sources, f.units, 1, &adapter, NULL, NULL, &next, error, sizeof(error)));
+    assert(strcmp(next.names[0], two) && sh_package_link_history_count(history) == 2);
+    char *salted = _strdup(next.names[0]); assert(salted);
+    assert(sh_package_link(sources, f.units, 1, &adapter, NULL, NULL, &next, error, sizeof(error)));
+    assert(!strcmp(next.names[0], salted) && sh_package_link_history_count(history) == 2);
+    free(one); free(two); free(salted);
+    sh_package_link_output_free(&first); sh_package_link_output_free(&next); sh_package_link_history_close(history);
+
+    /* Cyclic source graphs retain the same complete binding on a second load. */
+    history = sh_package_link_history_open(); assert(history); adapter.history = history;
+    memset(&native, 0, sizeof(native)); f = *source; f.count = 2;
+    f.units[0] = source->units[entities[0]]; f.units[1] = source->units[materials[0]];
+    sh_package_link_edge back = {"native-owner", 0};
+    f.units[1].implicit = &back; f.units[1].implicit_count = 1;
+    assert(sh_package_link(sources, f.units, 2, &adapter, NULL, NULL, &first, error, sizeof(error)));
+    native.resident = &first;
+    assert(sh_package_link(sources, f.units, 2, &adapter, NULL, NULL, &next, error, sizeof(error)));
+    for (size_t i = 0; i < 2; i++) assert(!strcmp(first.names[first.classes.nodes[i]], next.names[next.classes.nodes[i]]));
+    assert(sh_package_link_history_count(history) == 2);
+    sh_package_link_output_free(&first); sh_package_link_output_free(&next); sh_package_link_history_close(history);
+
+    /* Equal bytes aimed at a shared editor slot and at a map-private copy
+     * have different binding contracts, including for their consumers. */
+    history = sh_package_link_history_open(); assert(history); adapter.history = history;
+    memset(&native, 0, sizeof(native)); f = *source; f.count = 2;
+    f.units[0] = source->units[entities[0]]; f.units[1] = source->units[materials[0]];
+    f.units[1].fixed_name = 1; native.shared_original = f.units[1].name;
+    assert(sh_package_link(sources, f.units, 2, &adapter, NULL, NULL, &first, error, sizeof(error)));
+    assert(!strcmp(first.names[first.classes.nodes[1]], f.units[1].name));
+    native.resident = &first; f.units[1].fixed_name = 0;
+    assert(sh_package_link(sources, f.units, 2, &adapter, NULL, NULL, &next, error, sizeof(error)));
+    assert(strcmp(first.names[first.classes.nodes[0]], next.names[next.classes.nodes[0]]));
+    assert(strcmp(first.names[first.classes.nodes[1]], next.names[next.classes.nodes[1]]));
+    assert(sh_package_link_history_count(history) == 4);
+    sh_package_link_output_free(&first); sh_package_link_output_free(&next); sh_package_link_history_close(history);
+}
+
+static void shared_replacement(const sh_package_sources *sources, const fixture *source,
+    const size_t materials[3])
+{
+    fixture f = {0};
+    native_fixture native = {0}; native.replace_shared = 1;
+    sh_package_link_registry registry = {&native, native_check};
+    sh_package_link_adapter adapter = {&f, resolve, bind_file, assign, &registry};
+    sh_package_link_output out = {0};
+    char error[512];
+    f.units[0] = source->units[materials[0]]; f.count = 1; f.shared_name = 1;
+    assert(sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &out, error, sizeof(error)));
+    assert(!strcmp(out.names[0], f.units[0].name));
+    f.shared_name = 0;
+    assert(!sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &out, error, sizeof(error)));
+    assert(strstr(error, "same-name binding") && !out.compiled);
+    f.shared_name = 1; f.units[0].original_binding = 1;
+    assert(!sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &out, error, sizeof(error)));
+    assert(strstr(error, "same-name binding") && !out.compiled);
+    f.units[0].original_binding = 0; f.units[1] = source->units[materials[1]]; f.count = 2;
+    /* Replacement authorization for one shared slot cannot equate two distinct
+     * new bindings at that slot or waive the candidate registry's checks. */
+    assert(!sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &out, error, sizeof(error)));
+    assert(strstr(error, "exhausted") && !out.compiled && !out.names);
+    f.units[1].name = "materials/another"; native.constant = 1;
+    assert(!sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &out, error, sizeof(error)));
+    assert(strstr(error, "exhausted") && !out.compiled && !out.names);
+    sh_package_link_output_free(&out);
+}
+
+static void streamed_suppliers(const sh_package_sources *sources)
+{
+    sh_compiled_resource resources[2] = {0};
+    const sh_compiled_resource *files[2] = {resources, resources + 1};
+    sh_package_compilation compilation = {0}; compilation.sources = sources;
+    fixture f = {0};
+    sh_package_link_adapter adapter = {&f, resolve, bind_file, assign};
+    sh_package_link_output out = {0};
+    char error[512];
+    size_t found = 0, length;
+    unsigned char *body;
+    for (size_t i = 0; i < sources->file_count && found < 2; i++)
+        if (!strcmp(sources->files[i].relative, "equal.bin")) {
+            resources[found].engine_path = "shader/shared.bin"; resources[found].source = i; found++;
+        }
+    assert(found == 2);
+    resources[1].cache_file = sh_package_file_capture(sources->files[resources[1].source].absolute, error, sizeof(error));
+    assert(resources[1].cache_file);
+    for (size_t i = 0; i < 2; i++) f.units[i] = (sh_package_link_unit){"renderprog", "shared", &compilation, files + i, 1};
+    f.count = 2;
+    assert(sh_package_link(sources, f.units, 2, &adapter, NULL, NULL, &out, error, sizeof(error)));
+    assert(out.classes.count == 1 && out.compiled->resource_count == 1);
+    body = sh_package_compilation_read(&compilation, resources, SIZE_MAX, &length, error, sizeof(error));
+    assert(body && length > 32768);
+    resources[0].body = body; resources[0].body_length = length;
+    assert(sh_package_link(sources, f.units, 2, &adapter, NULL, NULL, &out, error, sizeof(error)));
+    assert(out.classes.count == 1);
+    sh_package_link_output_free(&out); free(body); sh_package_file_release(resources[1].cache_file);
+}
+
+/* One captured member shared by two units whose bound dependencies differ
+ * still makes two logical variants: both rocks hold the same captured object
+ * and reach exact verification, but one binds a red stone and the other a
+ * green one. With equal stones they are one variant. */
+static void shared_member_variants(const sh_package_sources *sources)
+{
+    static const char rock_text[] = "{ edit = { material = \"materials/stone\"; health = 10; } }";
+    static const char *colors[] = {"{ color {1,0,0,1} }", "{ color {0,1,0,1} }"};
+    sh_compiled_resource rock = {0}, stones[2] = {{0}};
+    rock.engine_path = "generated/decls/entitydef/props/rock.decl"; rock.type = "entitydef";
+    rock.name = "props/rock"; rock.source = SIZE_MAX;
+    rock.body = (unsigned char *)rock_text; rock.body_length = strlen(rock_text);
+    sh_package_compilation scopes[2] = {{0}};
+    for (size_t s = 0; s < 2; s++) {
+        stones[s].engine_path = "generated/decls/material/materials/stone.decl"; stones[s].type = "material";
+        stones[s].name = "materials/stone"; stones[s].source = SIZE_MAX;
+        stones[s].body = (unsigned char *)colors[s]; stones[s].body_length = strlen(colors[s]);
+        scopes[s].sources = sources;
+    }
+    const sh_compiled_resource *files[] = {&rock, stones, stones + 1};
+    fixture f = {0}; f.count = 4;
+    for (size_t s = 0; s < 2; s++) {
+        f.units[s * 2] = (sh_package_link_unit){"entitydef", "props/rock", scopes + s, files, 1};
+        f.units[s * 2 + 1] = (sh_package_link_unit){"material", "materials/stone", scopes + s, files + 1 + s, 1};
+    }
+    sh_package_link_adapter adapter = {&f, resolve, bind_file, assign};
+    sh_package_link_output out = {0};
+    char error[1024], counters[1024];
+    for (int equal = 0; equal < 2; equal++) {
+        unsigned long long pairs = 0, shared = 0;
+        if (equal) { stones[1].body = (unsigned char *)colors[0]; stones[1].body_length = strlen(colors[0]); }
+        adapter.reuse = sh_package_link_reuse_open(f.count); assert(adapter.reuse);
+        int ok = sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &out, error, sizeof(error));
+        if (!ok) fprintf(stderr, "shared member variants: %s\n", error);
+        const char *at = strstr(sh_package_link_reuse_counters(adapter.reuse, counters, sizeof(counters)),
+            "exact verification: ");
+        assert(ok && at && sscanf(at, "exact verification: %llu pairs, %llu shared members", &pairs, &shared) == 2);
+        /* The rocks always reach exact verification through the shared
+         * object; equal stones are compared as two objects. */
+        assert(shared == 1 && pairs == (equal ? 2u : 1u));
+        if (equal) assert(out.classes.nodes[0] == out.classes.nodes[2] && out.classes.nodes[1] == out.classes.nodes[3]);
+        else assert(out.classes.nodes[0] != out.classes.nodes[2] && out.classes.nodes[1] != out.classes.nodes[3] &&
+            strcmp(out.names[out.classes.nodes[0]], out.names[out.classes.nodes[2]]));
+        sh_package_link_reuse_close(adapter.reuse); adapter.reuse = NULL;
+        sh_package_link_output_free(&out);
+    }
+}
+
+/* A descriptor without its own bytes is read through each unit's compilation,
+ * so in two compilations it is two suppliers: under a forced fingerprint
+ * collision exact verification still compares their bytes. Within one
+ * compilation it is one supplier and certifies without a second read. */
+static const sh_package_compilation *claimed_supplier;
+static int claimed_identity(void *context, size_t unit, const sh_compiled_resource *file,
+    sh_package_file_identity *out, char *error, size_t capacity)
+{
+    (void)context; (void)unit;
+    return sh_package_compilation_identity(claimed_supplier, file, out, error, capacity);
+}
+static int no_sites(void *context, size_t unit, const sh_compiled_resource *file,
+    const sh_package_link_edge **sites, size_t *count)
+{
+    (void)context; (void)unit; (void)file; *sites = NULL; *count = 0; return 1;
+}
+static void foreign_suppliers(void)
+{
+    const char *bodies[] = {"AAAA", "BBBB"};
+    char base[MAX_PATH + 32], relative[128], error[1024], counters[1024];
+    sh_package_sources *sources[2];
+    sh_package_compilation compilations[2] = {{0}};
+    size_t index[2] = {SIZE_MAX, SIZE_MAX};
+    for (size_t s = 0; s < 2; s++) {
+        snprintf(relative, sizeof(relative), "suppliers/%c/overrides/p/package.json", 'a' + (int)s);
+        create(relative, "{\"id\":\"p\",\"name\":\"P\"}");
+        snprintf(relative, sizeof(relative), "suppliers/%c/overrides/p/x.bin", 'a' + (int)s);
+        create(relative, bodies[s]);
+        snprintf(base, sizeof(base), "%s/suppliers/%c", root, 'a' + (int)s);
+        sources[s] = sh_package_sources_scan(base, error, sizeof(error)); assert(sources[s]);
+        for (size_t i = 0; i < sources[s]->file_count; i++)
+            if (!strcmp(sources[s]->files[i].relative, "x.bin")) index[s] = i;
+        compilations[s].sources = sources[s];
+    }
+    assert(index[0] != SIZE_MAX && index[0] == index[1]);
+    sh_compiled_resource resource = {0};
+    resource.engine_path = "shader/x.bin"; resource.source = index[0];
+    const sh_compiled_resource *files[] = {&resource};
+    fixture f = {0}; f.count = 2;
+    sh_package_link_adapter adapter = {&f, resolve, bind_file, assign};
+    adapter.sites = no_sites; adapter.identity = claimed_identity;
+    sh_package_link_output out = {0};
+    claimed_supplier = compilations;
+    for (int same = 0; same < 2; same++) {
+        unsigned long long pairs = 0, shared = 0;
+        for (size_t i = 0; i < 2; i++)
+            f.units[i] = (sh_package_link_unit){"renderprog", "shared", compilations + (same ? 0 : i), files, 1};
+        adapter.reuse = sh_package_link_reuse_open(2); assert(adapter.reuse);
+        int ok = sh_package_link(sources[0], f.units, 2, &adapter, NULL, NULL, &out, error, sizeof(error));
+        const char *at = strstr(sh_package_link_reuse_counters(adapter.reuse, counters, sizeof(counters)),
+            "exact verification: ");
+        assert(at && sscanf(at, "exact verification: %llu pairs, %llu shared members", &pairs, &shared) == 2);
+        if (same) assert(ok && out.classes.count == 1 && pairs >= 1 && shared >= 1);
+        else assert(!ok && strstr(error, "exact supplier bytes differ") && pairs == 1 && !shared);
+        sh_package_link_reuse_close(adapter.reuse); adapter.reuse = NULL;
+        sh_package_link_output_free(&out);
+    }
+    for (size_t s = 0; s < 2; s++) sh_package_sources_free(sources[s]);
+}
+
+/* Files with more bindings than the scan threshold count repeated fields in a
+ * table. Each file numbers its own repeats exactly as the scan does, also for
+ * fields spelled with their own '#', whether bound, supplied as sites or
+ * replayed; a unit's second file and a second unit start their own counts. */
+static void expected_slots(const char *path, const plan_ref *refs, size_t count, char (*out)[192])
+{
+    for (size_t k = 0; k < count; k++) {
+        char key[192];
+        size_t seen = 0, n;
+        snprintf(key, sizeof(key), "%zu:%s%s", strlen(path), path, refs[k].slot);
+        n = strlen(key);
+        for (size_t i = 0; i < k; i++) if (!strncmp(out[i], key, n) && (!out[i][n] || out[i][n] == '#')) seen++;
+        if (seen) snprintf(out[k], 192, "%s#%zu", key, seen + 1);
+        else strcpy_s(out[k], 192, key);
+    }
+}
+static int plan_sites(void *context, size_t unit, const sh_compiled_resource *file,
+    const sh_package_link_edge **sites, size_t *count)
+{
+    const fixture *f = context;
+    (void)unit;
+    for (size_t p = 0; p < f->plan_count; p++) if (f->plans[p].file == file) {
+        *sites = f->plans[p].sites; *count = f->plans[p].count; return 1;
+    }
+    return 0;
+}
+static void many_repeated_slots(const sh_package_sources *sources)
+{
+    enum { A = 40, B = 36 };
+    static const char *const fields[] = {"edit.a", "edit.c", "edit.c#2", "edit.b", "edit.c", "edit.a#x", "edit.b#"};
+    static const char *const stones[] = {"materials/m0", "materials/m1", "materials/m2"};
+    static const char *const colors[] = {"{ color {1,0,0,1} }", "{ color {0,1,0,1} }", "{ color {0,0,1,1} }"};
+    static const char *const stone_paths[] = {"generated/decls/material/materials/m0.decl",
+        "generated/decls/material/materials/m1.decl", "generated/decls/material/materials/m2.decl"};
+    static const char *const paths[] = {"generated/decls/entitydef/props/many_a.decl",
+        "generated/decls/entitydef/props/many_b.decl"};
+    static plan_ref refs[2][2][A];
+    static sh_package_link_edge sites[2][2][A];
+    static char expected[A + B][192];
+    sh_compiled_resource entity[2][2] = {{{0}}}, stone[2][3] = {{{0}}};
+    const sh_compiled_resource *entity_files[2][2], *stone_files[2][3];
+    sh_package_compilation scopes[2] = {{0}};
+    slot_plan plans[4];
+    fixture f = {0};
+    char error[1024], *bound_names[8] = {0};
+    const char *got[A + B + 8];
+    for (size_t s = 0; s < 2; s++) {
+        scopes[s].sources = sources;
+        for (size_t j = 0; j < 3; j++) {
+            stone[s][j].engine_path = stone_paths[j]; stone[s][j].type = "material"; stone[s][j].name = stones[j];
+            stone[s][j].source = SIZE_MAX;
+            stone[s][j].body = (unsigned char *)colors[j]; stone[s][j].body_length = strlen(colors[j]);
+            stone_files[s][j] = &stone[s][j];
+            f.units[s * 4 + 1 + j] = (sh_package_link_unit){"material", stones[j], scopes + s, stone_files[s] + j, 1};
+        }
+        for (size_t file = 0; file < 2; file++) {
+            entity[s][file].engine_path = paths[file]; entity[s][file].source = SIZE_MAX;
+            entity[s][file].body = (unsigned char *)"{ }"; entity[s][file].body_length = 3;
+            entity_files[s][file] = &entity[s][file];
+            for (size_t k = 0; k < (file ? B : A); k++) {
+                refs[s][file][k] = (plan_ref){fields[(k + file * 3) % 7], stones[(k + file) % 3]};
+                sites[s][file][k] = (sh_package_link_edge){fields[(k + file * 3) % 7], s * 4 + 1 + (k + file) % 3};
+            }
+            plans[s * 2 + file] = (slot_plan){&entity[s][file], refs[s][file], sites[s][file], file ? B : A};
+        }
+        f.units[s * 4] = (sh_package_link_unit){"entitydef", "props/many", scopes + s, entity_files[s], 2};
+    }
+    f.count = 8; f.plans = plans; f.plan_count = 4;
+    expected_slots(paths[0], refs[0][0], A, expected);
+    expected_slots(paths[1], refs[0][1], B, expected + A);
+    sh_package_link_adapter adapter = {&f, resolve, bind_file, assign};
+    sh_package_link_output out = {0};
+    /* Bound, then supplied as sites; both replayed by the final link. */
+    for (int sited = 0; sited < 3; sited++) {
+        if (sited == 2) {
+            /* A late repeat in the second unit's first file binds another stone. */
+            refs[1][0][A - 3].target = stones[(A - 3 + 1) % 3];
+            sites[1][0][A - 3].target = 4 + 1 + (A - 3 + 1) % 3;
+        }
+        adapter.sites = sited == 1 ? plan_sites : NULL;
+        adapter.reuse = sh_package_link_reuse_open(f.count); assert(adapter.reuse);
+        int ok = sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &out, error, sizeof(error));
+        if (!ok) fprintf(stderr, "many repeated slots: %s\n", error);
+        assert(ok);
+        for (size_t s = 0; s < 2; s++) {
+            size_t n = sh_package_link_reuse_test_slots(adapter.reuse, s * 4, got, sizeof(got) / sizeof(*got));
+            assert(n == A + B);
+            for (size_t i = 0; i < n; i++) {
+                if (strcmp(got[i], expected[i])) fprintf(stderr, "slot %zu of unit %zu: %s, expected %s\n", i, s * 4, got[i], expected[i]);
+                assert(!strcmp(got[i], expected[i]));
+            }
+        }
+        if (sited < 2) assert(out.classes.nodes[0] == out.classes.nodes[4]);
+        else assert(out.classes.nodes[0] != out.classes.nodes[4] &&
+            strcmp(out.names[out.classes.nodes[0]], out.names[out.classes.nodes[4]]));
+        /* R-343: both entities' 76 bindings, out of slot order, were partitioned in place through the slot order
+         * their captures keep. */
+        sh_package_link_pass_meters meters;
+        assert(sh_package_link_reuse_test_meters(adapter.reuse, 0, &meters) && meters.ordered == 2);
+        for (size_t u = 0; u < f.count; u++) {
+            if (!sited) { bound_names[u] = _strdup(out.names[out.classes.nodes[u]]); assert(bound_names[u]); }
+            else if (sited == 1) assert(!strcmp(bound_names[u], out.names[out.classes.nodes[u]]));
+        }
+        sh_package_link_reuse_close(adapter.reuse); adapter.reuse = NULL;
+        sh_package_link_output_free(&out);
+    }
+    for (size_t u = 0; u < 8; u++) free(bound_names[u]);
+}
+
+/* One file of exactly 33 bindings, in the only unit with that many: capture
+ * leaves the repeat table at its 33rd binding, the unit then reads the reuse
+ * cache's shared slot texts, and the final link's replay reaches that binding
+ * again with no other table use in between. Slots, names and a different last
+ * target hold without a reuse cache, with one, and with caller-supplied sites. */
+static void occurrence_table_replay(const sh_package_sources *sources)
+{
+    enum { R = 33 };
+    static const char *const fields[] = {"edit.a", "edit.c", "edit.c#2", "edit.b", "edit.c", "edit.a#x", "edit.b#"};
+    static const char *const stones[] = {"materials/m0", "materials/m1", "materials/m2"};
+    static const char *const colors[] = {"{ color {1,0,0,1} }", "{ color {0,1,0,1} }", "{ color {0,0,1,1} }"};
+    static const char *const stone_paths[] = {"generated/decls/material/materials/m0.decl",
+        "generated/decls/material/materials/m1.decl", "generated/decls/material/materials/m2.decl"};
+    static const char path[] = "generated/decls/entitydef/props/single.decl";
+    static plan_ref refs[R];
+    static sh_package_link_edge sites[R];
+    static char expected[R][192];
+    sh_compiled_resource entity = {0}, stone[3] = {{0}};
+    const sh_compiled_resource *entity_files[1] = {&entity}, *stone_files[3];
+    sh_package_compilation scope = {0};
+    slot_plan plan;
+    fixture f = {0};
+    char error[1024], *names[3] = {0};
+    const char *got[R + 8];
+    scope.sources = sources;
+    for (size_t j = 0; j < 3; j++) {
+        stone[j].engine_path = stone_paths[j]; stone[j].type = "material"; stone[j].name = stones[j];
+        stone[j].source = SIZE_MAX; stone[j].body = (unsigned char *)colors[j]; stone[j].body_length = strlen(colors[j]);
+        stone_files[j] = stone + j;
+        f.units[1 + j] = (sh_package_link_unit){"material", stones[j], &scope, stone_files + j, 1};
+    }
+    entity.engine_path = path; entity.source = SIZE_MAX; entity.body = (unsigned char *)"{ }"; entity.body_length = 3;
+    f.units[0] = (sh_package_link_unit){"entitydef", "props/single", &scope, entity_files, 1};
+    for (size_t k = 0; k < R; k++) {
+        refs[k] = (plan_ref){fields[k % 7], stones[k % 3]};
+        sites[k] = (sh_package_link_edge){fields[k % 7], 1 + k % 3};
+    }
+    plan = (slot_plan){&entity, refs, sites, R};
+    f.count = 4; f.plans = &plan; f.plan_count = 1;
+    expected_slots(path, refs, R, expected);
+    sh_package_link_adapter adapter = {&f, resolve, bind_file, assign};
+    sh_package_link_output out = {0};
+    /* Without a cache; bound into one; supplied as sites into one; then the
+     * last binding names another stone. */
+    for (int run = 0; run < 4; run++) {
+        if (run == 3) { refs[R - 1].target = stones[R % 3]; sites[R - 1].target = 1 + R % 3; }
+        adapter.sites = run == 2 ? plan_sites : NULL;
+        adapter.reuse = run ? sh_package_link_reuse_open(f.count) : NULL;
+        assert(!run || adapter.reuse);
+        int ok = sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &out, error, sizeof(error));
+        if (!ok) fprintf(stderr, "occurrence table replay: %s\n", error);
+        assert(ok);
+        if (adapter.reuse) {
+            size_t n = sh_package_link_reuse_test_slots(adapter.reuse, 0, got, sizeof(got) / sizeof(*got));
+            assert(n == R);
+            for (size_t i = 0; i < n; i++) assert(!strcmp(got[i], expected[i]));
+        }
+        const char *name = out.names[out.classes.nodes[0]];
+        if (run < 3) {
+            names[run] = _strdup(name); assert(names[run]);
+            assert(!run || !strcmp(names[run], names[0]));
+        } else assert(strcmp(name, names[0]));
+        sh_package_link_reuse_close(adapter.reuse); adapter.reuse = NULL;
+        sh_package_link_output_free(&out);
+    }
+    for (size_t i = 0; i < 3; i++) free(names[i]);
+}
+
+/* Names after a repaired order: with a reuse cache, renaming one of many units
+ * between links moves it from the front to the back of the remembered shape
+ * order, which is repaired rather than sorted again; every unit keeps the
+ * class and name a fresh link gives. */
+static void repaired_order_names(const sh_package_sources *sources)
+{
+    enum { S = 3, M = 8 };
+    static char names[S * M][32], paths[S * M][80], bodies[S * M][40];
+    sh_compiled_resource parts[S * M] = {{0}};
+    const sh_compiled_resource *files[S * M];
+    sh_package_compilation scopes[S] = {{0}};
+    fixture f = {0};
+    sh_package_link_adapter adapter = {&f, resolve, bind_file, assign};
+    sh_package_link_output reused = {0}, fresh = {0};
+    char error[1024];
+    for (size_t s = 0; s < S; s++) {
+        scopes[s].sources = sources;
+        for (size_t i = 0; i < M; i++) {
+            size_t u = s * M + i;
+            snprintf(names[u], sizeof(names[u]), "materials/r%zu", i);
+            snprintf(paths[u], sizeof(paths[u]), "generated/decls/material/%s.decl", names[u]);
+            snprintf(bodies[u], sizeof(bodies[u]), "{ color {%zu,0,0,1} }", i);
+            parts[u].engine_path = paths[u]; parts[u].type = "material"; parts[u].name = names[u];
+            parts[u].source = SIZE_MAX; parts[u].body = (unsigned char *)bodies[u]; parts[u].body_length = strlen(bodies[u]);
+            files[u] = parts + u;
+            f.units[u] = (sh_package_link_unit){"material", names[u], scopes + s, files + u, 1};
+        }
+    }
+    f.count = S * M;
+    adapter.reuse = sh_package_link_reuse_open(f.count); assert(adapter.reuse);
+    assert(sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &reused, error, sizeof(error)));
+    /* Scope 2's r0 sorts first among the materials; renamed, it sorts last. */
+    size_t moved = 2 * M;
+    snprintf(names[moved], sizeof(names[moved]), "materials/zz");
+    snprintf(paths[moved], sizeof(paths[moved]), "generated/decls/material/materials/zz.decl");
+    sh_package_link_reuse_invalidate(adapter.reuse, moved);
+    assert(sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &reused, error, sizeof(error)));
+    sh_package_link_reuse_close(adapter.reuse); adapter.reuse = NULL;
+    assert(sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &fresh, error, sizeof(error)));
+    assert(reused.classes.count == fresh.classes.count);
+    for (size_t u = 0; u < f.count; u++) {
+        for (size_t v = 0; v < f.count; v++)
+            assert((reused.classes.nodes[u] == reused.classes.nodes[v]) == (fresh.classes.nodes[u] == fresh.classes.nodes[v]));
+        assert(!strcmp(reused.names[reused.classes.nodes[u]], fresh.names[fresh.classes.nodes[u]]));
+    }
+    assert(reused.classes.nodes[0] == reused.classes.nodes[M] && reused.classes.nodes[M] != reused.classes.nodes[moved]);
+    sh_package_link_output_free(&reused); sh_package_link_output_free(&fresh);
+}
+
+static void original_aliases(const sh_package_sources *sources)
+{
+    sh_compiled_resource resources[2] = {0};
+    const sh_compiled_resource *files[] = {resources, resources + 1};
+    sh_package_compilation compilation = {0}; compilation.sources = sources;
+    fixture f = {0}; f.original_paths = 1; f.count = 2;
+    native_fixture native = {0}; sh_package_link_registry registry = {&native, native_check};
+    sh_package_link_adapter adapter = {&f, resolve, bind_file, assign, &registry};
+    sh_package_link_output out = {0}; char error[512];
+    for (size_t i = 0; i < 2; i++) {
+        resources[i].engine_path = "generated/image/shared.bimage";
+        resources[i].body = (unsigned char *)"same"; resources[i].body_length = 4; resources[i].source = SIZE_MAX;
+        f.units[i] = (sh_package_link_unit){"image", i ? "two" : "one", &compilation, files + i, 1, {0}, 1};
+    }
+    assert(sh_package_link(sources, f.units, 2, &adapter, NULL, NULL, &out, error, sizeof(error)));
+    assert(out.classes.count == 2 && out.compiled->resource_count == 1 && native.checks == 2);
+    assert(sh_package_resource_native_matches(out.compiled->resources, "image", "one"));
+    assert(sh_package_resource_native_matches(out.compiled->resources, "image", "two"));
+    assert(sh_package_resource_native_count(out.compiled->resources) == 2);
+    resources[1].body = (unsigned char *)"diff";
+    assert(!sh_package_link(sources, f.units, 2, &adapter, NULL, NULL, &out, error, sizeof(error)));
+    assert(strstr(error, "original resource") && !out.compiled);
+    resources[1].body = (unsigned char *)"same"; f.assigned = 0; f.alias_rewrite = 1;
+    assert(!sh_package_link(sources, f.units, 2, &adapter, NULL, NULL, &out, error, sizeof(error)));
+    assert(strstr(error, "emit different bytes") && !out.compiled);
+    f.alias_rewrite = 0; native.constant = 1;
+    assert(!sh_package_link(sources, f.units, 2, &adapter, NULL, NULL, &out, error, sizeof(error)));
+    assert(strstr(error, "original resource") && !out.compiled);
+    sh_package_link_output_free(&out);
+}
+
+static void implicit_ownership(const sh_package_sources *sources)
+{
+    sh_compiled_resource resource = {0}; const sh_compiled_resource *file = &resource;
+    sh_package_compilation scopes[2] = {{0}, {0}};
+    resource.engine_path = "generated/decls/material/owned.decl";
+    resource.type = "material"; resource.name = "owned"; resource.source = SIZE_MAX;
+    resource.body = (unsigned char *)"{}"; resource.body_length = 2;
+    sh_package_owners a = {0}, b = {0}, invalid = {0};
+    assert(sources->package_count >= 2 && sh_package_owners_add(&a, 0) && sh_package_owners_add(&b, 1));
+    fixture f = {0}; f.count = 2;
+    for (size_t i = 0; i < 2; i++) {
+        scopes[i].sources = sources;
+        f.units[i] = (sh_package_link_unit){"material", "owned", scopes + i, &file, 1};
+    }
+    f.units[0].implicit_owners = &a;
+    f.units[1].implicit_owners = f.units[1].implicit_gameplay_owners = &b;
+    sh_package_link_adapter adapter = {&f, resolve, bind_file, assign};
+    sh_package_link_output out = {0}; char error[1024];
+    assert(sh_package_link(sources, f.units, 2, &adapter, NULL, NULL, &out, error, sizeof(error)));
+    assert(out.classes.count == 1 && out.compiled->resource_count == 1);
+    const sh_compiled_resource *linked = out.compiled->resources;
+    assert(sh_package_owners_count(&linked->owners) == 2 && sh_package_owners_contains(&linked->gameplay_owners, 1));
+    assert(sh_package_owners_count(&linked->gameplay_owners) == 1 && !linked->source_count);
+    char *name = _strdup(out.names[0]); assert(name);
+    /* Borrowed input sets can disappear without invalidating emitted ownership. */
+    sh_package_owners_free(&a); sh_package_owners_free(&b);
+    assert(sh_package_owners_count(&linked->owners) == 2);
+    assert(sh_package_link(sources, f.units, 2, &adapter, NULL, NULL, &out, error, sizeof(error)));
+    assert(out.classes.count == 1 && !strcmp(name, out.names[0]) && !sh_package_owners_count(&out.compiled->resources[0].owners));
+    free(name);
+    assert(sh_package_owners_add(&invalid, sources->package_count)); f.units[0].implicit_owners = &invalid;
+    assert(!sh_package_link(sources, f.units, 2, &adapter, NULL, NULL, &out, error, sizeof(error)) &&
+        strstr(error, "outside the captured inventory") && !out.compiled);
+    sh_package_owners_free(&invalid); sh_package_link_output_free(&out);
+}
+
+/* Witness bytes and roles join a unit's exact identity in any order: without a
+ * reuse cache, with one that copies a restored capture's witness arrays, and
+ * with one that borrows them. Restored units keep their witnesses through
+ * replay, which still rejects bytes changed during linking; an owner that
+ * changes a unit's witnesses invalidates it first, as the cache requires. */
+static void exact_witnesses(const sh_package_sources *sources)
+{
+    static unsigned char a[32771], b[32771];
+    unsigned char key[32] = {0};
+    for (int mode = 0; mode < 3; mode++) {   /* uncached, cache copying, cache borrowing */
+        fixture f = {0}; sh_package_link_output out = {0}; char error[512];
+        sh_package_compilation scope = {0}; scope.sources = sources;
+        sh_compiled_resource physical = {0}, pages[4] = {0};
+        unsigned long long borrowed = 0, unshared = 0;
+        memset(a, 0, sizeof(a)); memset(b, 0, sizeof(b));
+        physical.engine_path = "generated/model/main.bmodel";
+        physical.body = (unsigned char *)"main"; physical.body_length = 4; physical.source = SIZE_MAX;
+        for (size_t i = 0; i < 4; i++) {
+            pages[i].engine_path = i % 2 ? "virtualtextures/a_sq2.mega2" : "virtualtextures/a_sq1.mega2";
+            pages[i].body = i < 2 ? a : b; pages[i].body_length = sizeof(a); pages[i].source = SIZE_MAX;
+        }
+        sh_package_link_witness witnesses[] = {{"sq1", pages}, {"sq2", pages + 1},
+            {"sq2", pages + 3}, {"sq1", pages + 2}};
+        const sh_compiled_resource *file = &physical;
+        f.units[0] = (sh_package_link_unit){"model", "main", &scope, &file, 1};
+        f.units[1] = f.units[0]; f.count = 2;
+        f.units[0].witnesses = witnesses; f.units[0].witness_count = 2;
+        f.units[1].witnesses = witnesses + 2; f.units[1].witness_count = 2;
+        sh_package_link_adapter adapter = {&f, resolve, bind_file, assign};
+        if (mode) {
+            adapter.reuse = sh_package_link_reuse_open(f.count); assert(adapter.reuse);
+            sh_package_link_reuse_test_mode(adapter.reuse, mode == 1, 0);
+        }
+        assert(sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &out, error, sizeof(error)));
+        assert(out.classes.count == 1 && out.compiled->resource_count == 1 && f.bound == 4);
+        assert(!strstr(out.compiled->resources[0].engine_path, "virtualtextures"));
+        if (!mode) memcpy(key, out.classes.identities[0], 32);
+        assert(!memcmp(key, out.classes.identities[0], 32));
+        if (mode) {
+            /* Both units restore their captures, witness arrays included. */
+            f.assigned = 0;
+            assert(sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &out, error, sizeof(error)));
+            assert(out.classes.count == 1 && !memcmp(key, out.classes.identities[0], 32));
+            sh_package_link_reuse_test_counts(adapter.reuse, &borrowed, &unshared);
+            assert(mode == 1 ? !borrowed : borrowed == 2);
+            /* Replay reads the restored witnesses and still rejects bytes
+             * changed during linking; once restored they match again. */
+            f.assigned = 0; f.mutate_witness = a;
+            assert(!sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &out, error, sizeof(error)));
+            assert(strstr(error, "witness bytes changed") && !out.compiled);
+            *a = 0; f.mutate_witness = NULL; f.assigned = 0;
+            assert(sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &out, error, sizeof(error)));
+            assert(out.classes.count == 1 && !memcmp(key, out.classes.identities[0], 32));
+            sh_package_link_reuse_test_counts(adapter.reuse, &borrowed, &unshared);
+            assert(mode == 1 ? !borrowed : borrowed == 6);
+        }
+        sh_package_link_witness swap = witnesses[0]; witnesses[0] = witnesses[1]; witnesses[1] = swap;
+        if (mode) sh_package_link_reuse_invalidate(adapter.reuse, 0);
+        f.assigned = f.bound = 0;
+        assert(sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &out, error, sizeof(error)));
+        assert(out.classes.count == 1 && !memcmp(key, out.classes.identities[0], 32));
+        b[sizeof(b) - 1] = 1; f.assigned = 0;
+        if (mode) sh_package_link_reuse_invalidate(adapter.reuse, 1);
+        assert(sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &out, error, sizeof(error)));
+        assert(out.classes.count == 2 && out.compiled->resource_count == 2);
+        b[sizeof(b) - 1] = 0; f.assigned = 0;
+        if (mode) {
+            sh_package_link_reuse_invalidate(adapter.reuse, 1);
+            assert(sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &out, error, sizeof(error)));
+            assert(out.classes.count == 1 && !memcmp(key, out.classes.identities[0], 32));
+            f.assigned = 0;
+        }
+        f.mutate_witness = a;
+        assert(!sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &out, error, sizeof(error)));
+        assert(strstr(error, "witness bytes changed") && !out.compiled);
+        *a = 0; f.mutate_witness = NULL; witnesses[1].role = witnesses[0].role;
+        if (mode) sh_package_link_reuse_invalidate(adapter.reuse, 0);
+        assert(!sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &out, error, sizeof(error)));
+        assert(strstr(error, "repeats a native role")); sh_package_link_output_free(&out);
+        sh_package_link_reuse_close(adapter.reuse);
+    }
+}
+static int assign_native_pair(void *context, size_t unit, const unsigned char token[32], int original,
+    const sh_compiled_resource *const *files, size_t count, char **name, char ***paths, char *error, size_t capacity)
+{
+    fixture *f = context;
+    sh_package_link_inputs inputs = {f->units, NULL, f->count};
+    return sh_package_native_names_assign(&inputs, unit, token, original, files, count, name, paths, error, capacity);
+}
+static int assign_native_members(void *context, size_t unit, const char *name,
+    const sh_compiled_resource *const *files, const char *const *paths, size_t count,
+    char ***names, char *error, size_t capacity)
+{
+    fixture *f = context;
+    sh_package_link_inputs inputs = {f->units, NULL, f->count};
+    return sh_package_native_names_assign_members(&inputs, unit, name, files, paths, count, names, error, capacity);
+}
+
+static void coupled_native_pairs(const sh_package_sources *sources, fixture *f)
+{
+    native_fixture native = {0};
+    sh_package_link_registry registry = {&native, native_check};
+    sh_package_link_adapter adapter = {f, resolve, bind_file, assign_native_pair, &registry, assign_native_members};
+    sh_package_link_output out = {0};
+    char error[512], *first = NULL;
+    for (int attempt = 0; attempt < 2; attempt++) {
+        assert(sh_package_link(sources, f->units, f->count, &adapter, NULL, NULL, &out, error, sizeof(error)));
+        assert(out.classes.count == 2 && out.compiled->resource_count == 4);
+        assert(out.classes.nodes[0] == out.classes.nodes[2]);
+        if (attempt) assert(strcmp(first, out.names[out.classes.nodes[0]]) && native.collisions == 1);
+        else { first = _strdup(out.names[out.classes.nodes[0]]); assert(first); }
+        for (size_t i = 0; i < out.compiled->resource_count; i++) {
+            const sh_compiled_resource *movie = out.compiled->resources + i;
+            if (strcmp(movie->native_type, "file")) continue;
+            assert(movie->bound_dependency_count == 1 && !strcmp(movie->native_name, movie->engine_path));
+            const sh_compiled_resource *atlas = sh_package_compilation_find(out.compiled, movie->bound_dependencies[0]);
+            assert(atlas && !strcmp(atlas->native_type, "image") && !strcmp(atlas->native_name, atlas->engine_path));
+            char source[256]; sh_swf_binary_paths pair;
+            assert(strlen(movie->native_name) < sizeof(source) && !strncmp(movie->native_name, "generated/swf/smp/", 18));
+            snprintf(source, sizeof(source), "%s", movie->native_name + 10);
+            memcpy(source + strlen(source) - 5, ".swf", 5);
+            assert(sh_swf_binary_paths_for(source, &pair) && !strcmp(pair.movie, movie->engine_path) &&
+                !strcmp(pair.atlas, atlas->engine_path));
+            if (!attempt && !strcmp(movie->native_name, first)) native.occupied[0] = test_native_id(atlas->native_name);
+        }
+    }
+    free(first); sh_package_link_output_free(&out);
+}
+
+static void coupled_members(const sh_package_sources *sources)
+{
+    sh_compiled_resource resources[7] = {0};
+    const sh_compiled_resource *files[3][3] = {{0}};
+    sh_package_link_file_identity identities[3][3] = {{{0}}};
+    sh_package_compilation compilation = {0}; compilation.sources = sources;
+    fixture f = {0}; f.count = 3;
+    native_fixture native = {0};
+    sh_package_link_registry registry = {&native, native_check};
+    sh_package_link_adapter adapter = {&f, resolve, bind_file, assign, &registry, assign_members};
+    sh_package_link_output out = {0};
+    char error[512];
+    for (size_t i = 0; i < 6; i++) {
+        resources[i].engine_path = i % 2 ? "generated/swf/panel.bimage" : "generated/swf/panel.bswf";
+        resources[i].body = (unsigned char *)(i % 2 ? i == 3 ? "green" : "red" : "movie");
+        resources[i].body_length = strlen((char *)resources[i].body); resources[i].source = SIZE_MAX;
+        size_t group = i / 2, file = i % 2;
+        if (group == 2) file = 1 - file; /* Enumeration order has no meaning. */
+        files[group][file] = resources + i;
+        identities[group][file] = i % 2 ? (sh_package_link_file_identity){"image", "generated/swf/panel.bimage"} :
+            (sh_package_link_file_identity){0};
+    }
+    for (size_t i = 0; i < 3; i++) {
+        f.units[i] = (sh_package_link_unit){"file", "generated/swf/panel.bswf", &compilation, files[i], 2};
+        f.units[i].file_identities = identities[i];
+    }
+    coupled_native_pairs(sources, &f);
+    assert(sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &out, error, sizeof(error)));
+    assert(out.classes.count == 2 && out.compiled->resource_count == 4 && out.compiled->duplicate_count == 2);
+    assert(out.classes.nodes[0] == out.classes.nodes[2] && out.classes.nodes[0] != out.classes.nodes[1]);
+    char *primary = _strdup(out.names[out.classes.nodes[0]]), *atlas = NULL;
+    assert(primary);
+    for (size_t i = 0; i < out.compiled->resource_count; i++) {
+        const sh_compiled_resource *resource = out.compiled->resources + i;
+        assert(resource->bound_dependency_count == 1 && sh_package_resource_native_count(resource) == 1);
+        const sh_compiled_resource *paired = sh_package_compilation_find(out.compiled, resource->bound_dependencies[0]);
+        assert(paired && !strcmp(paired->bound_dependencies[0], resource->engine_path));
+        assert(strcmp(paired->native_type, resource->native_type));
+        if (!strcmp(resource->native_type, "file")) {
+            assert(strstr(resource->engine_path, ".bswf"));
+            if (!strcmp(resource->native_name, primary)) atlas = _strdup(paired->native_name);
+        } else assert(!strcmp(resource->native_type, "image") && strstr(resource->engine_path, ".bimage"));
+    }
+    assert(atlas && native.checks == 4);
+    /* A baseline/still-live collision on the companion must move both names,
+     * without reserving the failed primary name or leaking a partial group. */
+    native.occupied[0] = test_native_id(atlas); native.checks = 0;
+    assert(sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &out, error, sizeof(error)));
+    assert(native.collisions == 1 && native.checks == 6 && strcmp(primary, out.names[out.classes.nodes[0]]));
+    for (size_t i = 0; i < out.compiled->resource_count; i++) assert(strcmp(atlas, out.compiled->resources[i].native_name));
+    char *moved = _strdup(out.names[out.classes.nodes[0]]); assert(moved);
+    sh_package_link_unit swap = f.units[0]; f.units[0] = f.units[2]; f.units[2] = swap;
+    assert(sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &out, error, sizeof(error)));
+    assert(!strcmp(moved, out.names[out.classes.nodes[0]]));
+    swap = f.units[0]; f.units[0] = f.units[2]; f.units[2] = swap;
+    free(moved);
+    /* Candidate registry collisions also include companions, not just primaries. */
+    memset(&native, 0, sizeof(native)); f.member_fault = 3;
+    assert(!sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &out, error, sizeof(error)));
+    assert(strstr(error, "exhausted") && !out.compiled && !out.names);
+    f.member_fault = 0; memset(&native, 0, sizeof(native)); native.colliding[0] = atlas;
+    /* Capture the other variant's atlas, then force the two distinct names to
+     * have the same injected engine ID. One complete pair must relocate. */
+    adapter.registry = NULL;
+    assert(sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &out, error, sizeof(error)));
+    char *other_atlas = NULL;
+    for (size_t i = 0; i < out.compiled->resource_count; i++) if (!strcmp(out.compiled->resources[i].native_type, "image") &&
+        strcmp(atlas, out.compiled->resources[i].native_name)) other_atlas = _strdup(out.compiled->resources[i].native_name);
+    assert(other_atlas); native.colliding[1] = other_atlas; adapter.registry = &registry;
+    assert(sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &out, error, sizeof(error)));
+    assert(native.checks == 6);
+    size_t retained = 0;
+    for (size_t i = 0; i < out.compiled->resource_count; i++) if (!strcmp(out.compiled->resources[i].native_type, "image"))
+        retained += !strcmp(atlas, out.compiled->resources[i].native_name) || !strcmp(other_atlas, out.compiled->resources[i].native_name);
+    assert(retained == 1);
+    free(other_atlas); free(atlas); free(primary); memset(&native, 0, sizeof(native));
+    for (int fault = 1; fault <= 4; fault++) {
+        f.member_fault = fault;
+        assert(!sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &out, error, sizeof(error)));
+        assert(*error && !out.compiled && !out.names && !out.classes.count);
+    }
+    f.member_fault = 0; adapter.assign_members = NULL;
+    assert(!sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &out, error, sizeof(error)));
+    assert(strstr(error, "require native name assignment")); adapter.assign_members = assign_members;
+    /* A changed member identity alone changes equivalence, even when all
+     * physical paths and bytes match. Explicit primary metadata is a no-op. */
+    sh_package_link_classes classes = {0}; f.units[1] = f.units[2]; f.count = 2;
+    assert(sh_package_link_identify_units(f.units, f.count, &adapter, &classes, error, sizeof(error)) && classes.count == 1);
+    identities[2][1] = (sh_package_link_file_identity){"file", "generated/swf/panel.bswf"};
+    assert(sh_package_link_identify_units(f.units, f.count, &adapter, &classes, error, sizeof(error)) && classes.count == 1);
+    identities[2][0].name = "generated/swf/other.bimage";
+    assert(sh_package_link_identify_units(f.units, f.count, &adapter, &classes, error, sizeof(error)) && classes.count == 2);
+    identities[2][0].name = NULL;
+    assert(!sh_package_link_identify_units(f.units, f.count, &adapter, &classes, error, sizeof(error)));
+    assert(strstr(error, "incomplete native identity"));
+    identities[2][0].name = "generated/swf/panel.bimage";
+    identities[2][1] = identities[2][0];
+    assert(!sh_package_link_identify_units(f.units, f.count, &adapter, &classes, error, sizeof(error)));
+    assert(strstr(error, "no primary native member"));
+    /* Native IDs live within a family; equal numeric IDs across the movie
+     * and image managers are valid. Collisions within one group are not. */
+    f.count = 1; native.constant = 1;
+    assert(sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &out, error, sizeof(error)));
+    resources[6] = resources[1]; resources[6].engine_path = "generated/swf/other.bimage";
+    files[0][2] = resources + 6; identities[0][2] = (sh_package_link_file_identity){"image", "generated/swf/other.bimage"};
+    f.units[0].file_count = 3;
+    assert(!sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &out, error, sizeof(error)));
+    assert(strstr(error, "exhausted") && !out.compiled);
+    f.units[0].file_count = 2; memset(&native, 0, sizeof(native));
+    /* Baseline movie groups and a direct baseline image root can share the
+     * same original atlas, after exact bytes and graph certification. */
+    f.original_paths = 1; f.units[0].original_binding = 1;
+    f.units[1] = (sh_package_link_unit){"image", "generated/swf/panel.bimage", &compilation, files[0] + 1, 1};
+    f.units[1].original_binding = 1; f.count = 2;
+    assert(sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &out, error, sizeof(error)));
+    assert(out.compiled->resource_count == 2 && out.classes.count == 2);
+    f.units[1].original_binding = 0;
+    assert(!sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &out, error, sizeof(error)));
+    assert(strstr(error, "exhausted") && !out.compiled);
+    sh_package_link_classes_free(&classes); sh_package_link_output_free(&out);
+}
+
+/* Conditional bindings: a behavior's layer configuration selects state-machine
+ * declarations (fsm_web.h). Two scopes, each with a behavior b, state machines
+ * f and g it selects, and a dependency d that f reaches. */
+typedef struct conditional_case {
+    fixture f; sh_package_compilation scopes[2];
+    sh_compiled_resource parts[8]; const sh_compiled_resource *files[8];
+    sh_package_link_edge selects[2][2], uses[2][1];
+} conditional_case;
+static void conditional_setup(conditional_case *c, const sh_package_sources *sources)
+{
+    static const char *const families[] = {"aibehavior", "aifsmmanager", "aifsmmanager", "dep"};
+    static const char *const names[] = {"b", "f", "g", "d"};
+    static const char *const bodies[] = {"behavior", "fsm f", "fsm g", "dependency"};
+    memset(c, 0, sizeof(*c));
+    for (size_t s = 0; s < 2; s++) {
+        c->scopes[s].sources = sources;
+        for (size_t k = 0; k < 4; k++) {
+            size_t i = s * 4 + k;
+            c->parts[i].engine_path = k == 0 ? "generated/decls/aibehavior/b.decl" : k == 1 ?
+                "generated/decls/aifsmmanager/f.decl" : k == 2 ? "generated/decls/aifsmmanager/g.decl" : "dep/d.bin";
+            c->parts[i].body = (unsigned char *)bodies[k]; c->parts[i].body_length = strlen(bodies[k]);
+            c->parts[i].source = SIZE_MAX; c->files[i] = c->parts + i;
+            c->f.units[i] = (sh_package_link_unit){families[k], names[k], c->scopes + s, c->files + i, 1};
+            c->f.units[i].original_binding = 1;
+        }
+        c->selects[s][0] = (sh_package_link_edge){"fsm/f", s * 4 + 1};
+        c->selects[s][1] = (sh_package_link_edge){"fsm/g", s * 4 + 2};
+        c->uses[s][0] = (sh_package_link_edge){"uses", s * 4 + 3};
+        c->f.units[s * 4].conditional = c->selects[s]; c->f.units[s * 4].conditional_count = 2;
+        c->f.units[s * 4 + 1].implicit = c->uses[s]; c->f.units[s * 4 + 1].implicit_count = 1;
+    }
+    c->f.count = 8; c->f.native_originals = 1;
+}
+static void conditional_change(conditional_case *c, size_t unit, const char *body)
+{
+    c->parts[unit].body = (unsigned char *)body; c->parts[unit].body_length = strlen(body);
+    c->f.units[unit].original_binding = 0;
+}
+static size_t conditional_class(const sh_package_link_output *out, size_t unit) { return out->classes.nodes[unit]; }
+static const char *conditional_name(const sh_package_link_output *out, size_t unit)
+{ return out->names[out->classes.nodes[unit]]; }
+static int conditional_binds(const sh_package_link_output *out, size_t owner, size_t target)
+{
+    int found = 0;
+    for (size_t i = 0; i < out->implicit_count; i++)
+        found += out->implicit[i].owner == out->classes.nodes[owner] && out->implicit[i].target == out->classes.nodes[target];
+    return found;
+}
+static int conditional_depends(const sh_package_link_output *out, const char *owner, const char *target)
+{
+    for (size_t i = 0; i < out->compiled->resource_count; i++) {
+        const sh_compiled_resource *r = out->compiled->resources + i;
+        if (!r->native_name || strcmp(r->native_name, owner)) continue;
+        for (size_t j = 0; j < r->bound_dependency_count; j++) {
+            const sh_compiled_resource *t = sh_package_compilation_find(out->compiled, r->bound_dependencies[j]);
+            if (t && t->native_name && !strcmp(t->native_name, target)) return 1;
+        }
+    }
+    return 0;
+}
+static void conditional_bindings(const sh_package_sources *sources)
+{
+    conditional_case c;
+    sh_package_link_output out = {0}, plain = {0};
+    sh_package_link_adapter adapter;
+    unsigned char unchanged[32];
+    char error[512];
+    char *name_a = NULL;
+    /* Unchanged targets: the edges vanish. Identities and names are exactly
+     * those of the same graph without them, and both scopes dedupe natively. */
+    conditional_setup(&c, sources);
+    adapter = (sh_package_link_adapter){&c.f, resolve, bind_file, assign};
+    assert(sh_package_link(sources, c.f.units, c.f.count, &adapter, NULL, NULL, &out, error, sizeof(error)));
+    assert(conditional_class(&out, 0) == conditional_class(&out, 4) && !strcmp(conditional_name(&out, 0), "b"));
+    assert(c.f.original_bindings[out.classes.representatives[conditional_class(&out, 0)]] == 1);
+    assert(!conditional_binds(&out, 0, 1) && !conditional_binds(&out, 0, 2) && out.implicit_count == 1);
+    memcpy(unchanged, out.classes.identities[conditional_class(&out, 0)], 32);
+    c.f.units[0].conditional_count = c.f.units[4].conditional_count = 0;
+    assert(sh_package_link(sources, c.f.units, c.f.count, &adapter, NULL, NULL, &plain, error, sizeof(error)));
+    assert(!memcmp(unchanged, plain.classes.identities[conditional_class(&plain, 0)], 32));
+    sh_package_link_output_free(&plain);
+    /* A direct edit in scope 1 splits only its behavior and binds only the
+     * changed declaration; scope 0 keeps the native identity and name. */
+    conditional_setup(&c, sources);
+    adapter.context = &c.f;
+    conditional_change(&c, 5, "fsm f, changed");
+    assert(sh_package_link(sources, c.f.units, c.f.count, &adapter, NULL, NULL, &out, error, sizeof(error)));
+    assert(conditional_class(&out, 0) != conditional_class(&out, 4));
+    assert(!strcmp(conditional_name(&out, 0), "b") && strcmp(conditional_name(&out, 4), "b"));
+    assert(!memcmp(unchanged, out.classes.identities[conditional_class(&out, 0)], 32));
+    assert(!c.f.original_bindings[out.classes.representatives[conditional_class(&out, 4)]]);
+    assert(conditional_binds(&out, 4, 5) == 1 && !conditional_binds(&out, 4, 6) && !conditional_binds(&out, 0, 1));
+    assert(conditional_depends(&out, conditional_name(&out, 4), conditional_name(&out, 5)));
+    /* Downstream only: f keeps its native bytes but reaches a changed d. */
+    conditional_setup(&c, sources);
+    adapter.context = &c.f;
+    conditional_change(&c, 7, "dependency, changed");
+    assert(sh_package_link(sources, c.f.units, c.f.count, &adapter, NULL, NULL, &out, error, sizeof(error)));
+    assert(conditional_class(&out, 0) != conditional_class(&out, 4) && strcmp(conditional_name(&out, 4), "b"));
+    assert(conditional_binds(&out, 4, 5) == 1 && !conditional_binds(&out, 4, 6));
+    assert(!memcmp(unchanged, out.classes.identities[conditional_class(&out, 0)], 32));
+    /* Exact duplicates in both scopes dedupe to one private behavior. */
+    conditional_setup(&c, sources);
+    adapter.context = &c.f;
+    conditional_change(&c, 1, "fsm f, changed"); conditional_change(&c, 5, "fsm f, changed");
+    assert(sh_package_link(sources, c.f.units, c.f.count, &adapter, NULL, NULL, &out, error, sizeof(error)));
+    assert(conditional_class(&out, 0) == conditional_class(&out, 4) && strcmp(conditional_name(&out, 0), "b"));
+    name_a = _strdup(conditional_name(&out, 0)); assert(name_a);
+    /* Differing graphs stay apart, whichever scope comes first. */
+    conditional_change(&c, 5, "fsm f, other");
+    assert(sh_package_link(sources, c.f.units, c.f.count, &adapter, NULL, NULL, &out, error, sizeof(error)));
+    assert(conditional_class(&out, 0) != conditional_class(&out, 4));
+    assert(!strcmp(conditional_name(&out, 0), name_a) && strcmp(conditional_name(&out, 4), name_a));
+    assert(strcmp(conditional_name(&out, 4), "b"));
+    free(name_a);
+    /* The reuse cache keeps complete captures: certification is decided again
+     * in each pass, so a later change still binds its dependents. */
+    conditional_setup(&c, sources);
+    adapter.context = &c.f;
+    adapter.reuse = sh_package_link_reuse_open(c.f.count); assert(adapter.reuse);
+    assert(sh_package_link(sources, c.f.units, c.f.count, &adapter, NULL, NULL, &out, error, sizeof(error)));
+    assert(conditional_class(&out, 0) == conditional_class(&out, 4) && !conditional_binds(&out, 4, 5));
+    c.f.units[6].original_binding = 0;   /* g is scope 1's campaign-only or refused original now */
+    assert(sh_package_link(sources, c.f.units, c.f.count, &adapter, NULL, NULL, &out, error, sizeof(error)));
+    assert(conditional_class(&out, 0) != conditional_class(&out, 4) && conditional_binds(&out, 4, 6) == 1);
+    assert(!conditional_binds(&out, 4, 5));
+    c.f.units[6].original_binding = 1;
+    assert(sh_package_link(sources, c.f.units, c.f.count, &adapter, NULL, NULL, &out, error, sizeof(error)));
+    assert(conditional_class(&out, 0) == conditional_class(&out, 4) && !strcmp(conditional_name(&out, 4), "b"));
+    sh_package_link_reuse_close(adapter.reuse); adapter.reuse = NULL;
+    /* Scopes holding their members as the same captured objects certify them
+     * without reading those bytes twice, with the classes and names a byte
+     * comparison of separate objects gives. */
+    {
+        size_t compared[8]; char *compared_names[8], counters[1024];
+        unsigned long long pairs = 0, shared = 0;
+        conditional_setup(&c, sources);
+        adapter.context = &c.f;
+        assert(sh_package_link(sources, c.f.units, c.f.count, &adapter, NULL, NULL, &out, error, sizeof(error)));
+        for (size_t i = 0; i < 8; i++) {
+            compared[i] = conditional_class(&out, i);
+            compared_names[i] = _strdup(conditional_name(&out, i)); assert(compared_names[i]);
+        }
+        for (size_t i = 4; i < 8; i++) c.files[i] = c.parts + i - 4;
+        adapter.reuse = sh_package_link_reuse_open(c.f.count); assert(adapter.reuse);
+        assert(sh_package_link(sources, c.f.units, c.f.count, &adapter, NULL, NULL, &out, error, sizeof(error)));
+        for (size_t i = 0; i < 8; i++)
+            assert(conditional_class(&out, i) == compared[i] && !strcmp(conditional_name(&out, i), compared_names[i]));
+        const char *at = strstr(sh_package_link_reuse_counters(adapter.reuse, counters, sizeof(counters)),
+            "exact verification: ");
+        assert(at && sscanf(at, "exact verification: %llu pairs, %llu shared members", &pairs, &shared) == 2);
+        assert(pairs && shared);
+        sh_package_link_reuse_close(adapter.reuse); adapter.reuse = NULL;
+        for (size_t i = 0; i < 8; i++) free(compared_names[i]);
+    }
+    /* A slot is conditional or implicit, never both. */
+    conditional_setup(&c, sources);
+    adapter.context = &c.f;
+    sh_package_link_edge twice[] = {{"fsm/f", 1}};
+    c.f.units[0].implicit = twice; c.f.units[0].implicit_count = 1;
+    assert(!sh_package_link(sources, c.f.units, c.f.count, &adapter, NULL, NULL, &out, error, sizeof(error)));
+    assert(strstr(error, "both conditional and implicit"));
+    /* Found among several implicit slots, in either search: sorted index or one by one. */
+    sh_package_link_edge among[] = {{"zeta", 3}, {"fsm/g", 2}, {"alpha", 3}};
+    sh_package_link_edge apart[2][2] = {{{"zeta", 3}, {"alpha", 3}}, {{"zeta", 7}, {"alpha", 7}}};
+    for (int linear = 0; linear < 2; linear++) {
+        adapter.reuse = sh_package_link_reuse_open(c.f.count); assert(adapter.reuse);
+        sh_package_link_reuse_test_fail_index(adapter.reuse, linear);
+        c.f.units[0].implicit = among; c.f.units[0].implicit_count = 3; error[0] = 0;
+        assert(!sh_package_link(sources, c.f.units, c.f.count, &adapter, NULL, NULL, &out, error, sizeof(error)));
+        assert(strstr(error, "both conditional and implicit"));
+        sh_package_link_output_free(&out); sh_package_link_reuse_close(adapter.reuse);
+        adapter.reuse = sh_package_link_reuse_open(c.f.count); assert(adapter.reuse);
+        sh_package_link_reuse_test_fail_index(adapter.reuse, linear);
+        /* Both behaviors stay equal, so one certified name serves both. */
+        for (size_t s = 0; s < 2; s++) { c.f.units[s * 4].implicit = apart[s]; c.f.units[s * 4].implicit_count = 2; }
+        error[0] = 0;
+        int linked = sh_package_link(sources, c.f.units, c.f.count, &adapter, NULL, NULL, &out, error, sizeof(error));
+        if (!linked) fprintf(stderr, "conditional apart: %s\n", error);
+        assert(linked && !strstr(error, "both conditional and implicit"));
+        sh_package_link_output_free(&out); sh_package_link_reuse_close(adapter.reuse); adapter.reuse = NULL;
+        c.f.units[4].implicit = NULL; c.f.units[4].implicit_count = 0;
+    }
+    c.f.units[0].implicit = NULL; c.f.units[0].implicit_count = 0;
+    c.f.units[0].conditional = NULL;
+    assert(!sh_package_link(sources, c.f.units, c.f.count, &adapter, NULL, NULL, &out, error, sizeof(error)));
+    sh_package_link_output_free(&out);
+}
+
+/* Restored units borrow the reuse cache's arrays instead of copying them.
+ * Every pass and link must read the same either way: across conditional
+ * decisions that remove a binding and then keep it, invalidation, cache
+ * growth, a failed copy-on-write and a reopened cache. A link's text holds
+ * its partition and identity per member, names, certification, compiled
+ * resources with their bound dependencies, implicit bindings and provenance. */
+typedef struct borrow_text { char *data; size_t used, capacity; } borrow_text;
+static void borrow_add(borrow_text *t, const char *format, ...)
+{
+    va_list args;
+    for (;;) {
+        int n;
+        va_start(args, format);
+        n = t->data ? vsnprintf(t->data + t->used, t->capacity - t->used, format, args) : -1;
+        va_end(args);
+        if (n >= 0 && (size_t)n < t->capacity - t->used) { t->used += (size_t)n; return; }
+        t->capacity = t->capacity ? t->capacity * 2 : 4096;
+        t->data = realloc(t->data, t->capacity); assert(t->data);
+        if (!t->used) t->data[0] = 0;
+    }
+}
+static void borrow_hex(char out[65], const unsigned char *bytes)
+{ for (size_t i = 0; i < 32; i++) snprintf(out + i * 2, 3, "%02x", bytes[i]); }
+static char *borrow_classes_text(const sh_package_link_classes *classes, size_t count, int ok, const char *error)
+{
+    borrow_text t = {0};
+    char id[65];
+    if (!ok) { borrow_add(&t, "failed: %s\n", error); return t.data; }
+    borrow_add(&t, "%zu classes\n", classes->count);
+    for (size_t u = 0; u < count; u++) {
+        size_t first = u;
+        for (size_t v = 0; v < u; v++) if (classes->nodes[v] == classes->nodes[u]) { first = v; break; }
+        borrow_hex(id, classes->identities[classes->nodes[u]]);
+        borrow_add(&t, "unit %zu with %zu: %s\n", u, first, id);
+    }
+    return t.data;
+}
+static char *borrow_link_text(const sh_package_link_output *out, const conditional_case *c, int ok, const char *error,
+    const sh_package_provenance *contexts, const size_t *unit_contexts)
+{
+    borrow_text t = {0};
+    sh_package_provenance saved = {0};
+    size_t roots[8];
+    char id[65], problem[256];
+    if (!ok) { borrow_add(&t, "failed: %s\n", error); return t.data; }
+    borrow_add(&t, "%zu classes\n", out->classes.count);
+    for (size_t u = 0; u < c->f.count; u++) {
+        size_t node = out->classes.nodes[u], first = u;
+        for (size_t v = 0; v < u; v++) if (out->classes.nodes[v] == node) { first = v; break; }
+        borrow_hex(id, out->classes.identities[node]);
+        /* Certification is the class's, assigned through its representative;
+         * which member represents a class is not compared. */
+        borrow_add(&t, "unit %zu with %zu: %s %s original %d\n", u, first, id, out->names[node],
+            c->f.original_bindings[out->classes.representatives[node]]);
+    }
+    borrow_add(&t, "%zu resources, %zu duplicates\n", out->compiled->resource_count, out->compiled->duplicate_count);
+    for (size_t i = 0; i < out->compiled->resource_count; i++) {
+        const sh_compiled_resource *r = out->compiled->resources + i;
+        sh_package_file_identity identity;
+        size_t length = 0;
+        unsigned char *body = sh_package_compilation_read(out->compiled, r, SIZE_MAX, &length, problem, sizeof(problem));
+        assert(body && sh_package_bytes_identity(body, length, &identity));
+        free(body); borrow_hex(id, identity.digest);
+        borrow_add(&t, "%s %s %s original %d sources %zu body %s\n", r->engine_path, r->native_type ? r->native_type : "-",
+            r->native_name ? r->native_name : "-", r->native_original, r->source_count, id);
+        for (size_t j = 0; j < r->bound_dependency_count; j++) borrow_add(&t, "  needs %s\n", r->bound_dependencies[j]);
+    }
+    for (size_t i = 0; i < out->implicit_count; i++)
+        borrow_add(&t, "implicit %s -> %s at %s\n", out->names[out->implicit[i].owner],
+            out->names[out->implicit[i].target], out->implicit[i].slot);
+    for (size_t i = 0; i < c->f.count; i++) roots[i] = i;
+    ok = sh_package_link_provenance(out, c->f.units, c->f.count, contexts, unit_contexts, roots, c->f.count,
+        &saved, problem, sizeof(problem));
+    assert(ok);
+    borrow_add(&t, "provenance %d: %zu bindings, %zu contexts\n", ok, saved.binding_count, saved.context_count);
+    for (size_t i = 0; i < saved.binding_count; i++) {
+        const sh_package_provenance_binding *b = saved.bindings + i;
+        borrow_add(&t, "  %s %s %s:", b->family, b->original, b->name);
+        for (size_t j = 0; j < b->context_count; j++) borrow_add(&t, " %zu", b->contexts[j]);
+        borrow_add(&t, "\n");
+    }
+    sh_package_provenance_free(&saved);
+    return t.data;
+}
+typedef struct borrow_run {
+    char *texts[16];
+    size_t steps;
+    unsigned long long borrowed, unshared;
+    size_t ordered; /* nodes partitioned through their capture's slot order (R-343) */
+} borrow_run;
+static void borrow_counts(borrow_run *run, const sh_package_link_reuse *reuse)
+{
+    unsigned long long borrowed, unshared;
+    sh_package_link_pass_meters meters;
+    sh_package_link_reuse_test_counts(reuse, &borrowed, &unshared);
+    run->borrowed += borrowed; run->unshared += unshared;
+    for (size_t pass = 0; sh_package_link_reuse_test_meters(reuse, pass, &meters); pass++) run->ordered += meters.ordered;
+}
+static void borrow_scenario(const sh_package_sources *sources, int copy, borrow_run *run)
+{
+    conditional_case c;
+    sh_package_link_output out = {0};
+    sh_package_link_classes classes = {0};
+    sh_package_link_adapter adapter;
+    sh_package_provenance contexts = {0};
+    unsigned char trees[2][32] = {{0}};
+    size_t unit_contexts[8], bound;
+    char error[512];
+    conditional_setup(&c, sources);
+    adapter = (sh_package_link_adapter){&c.f, resolve, bind_file, assign};
+    trees[1][0] = 1;
+    for (size_t s = 0; s < 2; s++) {
+        size_t context = sh_package_provenance_context_add(&contexts, SH_PACKAGE_CONTEXT_ISOLATED,
+            (const unsigned char (*)[32])trees + s, 1, s ? "scope1" : "scope0");
+        assert(context != SIZE_MAX);
+        for (size_t k = 0; k < 4; k++) unit_contexts[s * 4 + k] = context;
+    }
+    adapter.reuse = sh_package_link_reuse_open(c.f.count); assert(adapter.reuse);
+    sh_package_link_reuse_test_mode(adapter.reuse, copy, 0);
+#define BORROW_LINK() do { \
+        int ok_ = sh_package_link(sources, c.f.units, c.f.count, &adapter, NULL, NULL, &out, error, sizeof(error)); \
+        if (!ok_) fprintf(stderr, "step %zu link failed: %s\n", run->steps, error); \
+        assert(ok_ && run->steps < 16); \
+        run->texts[run->steps++] = borrow_link_text(&out, &c, ok_, error, &contexts, unit_contexts); \
+    } while (0)
+    /* Capture, then restore every unit. */
+    for (int pass = 0; pass < 2; pass++) {
+        int ok = sh_package_link_identify_units(c.f.units, c.f.count, &adapter, &classes, error, sizeof(error));
+        assert(ok);
+        run->texts[run->steps++] = borrow_classes_text(&classes, c.f.count, ok, error);
+    }
+    BORROW_LINK();
+    /* g in scope 1 is no longer certified original, so the behavior keeps its
+     * selection of g; then g is original again and the selection goes, read
+     * from the complete capture the cache still holds. */
+    c.f.units[6].original_binding = 0; BORROW_LINK();
+    c.f.units[6].original_binding = 1; BORROW_LINK();
+    /* f in scope 1 changes: invalidated and captured afresh. */
+    conditional_change(&c, 5, "fsm f, changed"); sh_package_link_reuse_invalidate(adapter.reuse, 5); BORROW_LINK();
+    /* Growth keeps every capture. */
+    assert(sh_package_link_reuse_reserve(adapter.reuse, c.f.count + 8)); BORROW_LINK();
+    /* A failed copy-on-write fails only its own pass; the cache stays whole,
+     * so the next link restores and binds exactly as the copy mode does. */
+    if (!copy) {
+        unsigned long long before, after, unused;
+        sh_package_link_reuse_test_counts(adapter.reuse, &before, &unused);
+        sh_package_link_reuse_test_mode(adapter.reuse, 0, 1);
+        assert(!sh_package_link(sources, c.f.units, c.f.count, &adapter, NULL, NULL, &out, error, sizeof(error)));
+        assert(strstr(error, "cannot copy conditional resource bindings") && !out.compiled);
+        sh_package_link_reuse_test_counts(adapter.reuse, &after, &unused);
+        assert(after > before);
+        sh_package_link_reuse_test_mode(adapter.reuse, 0, 0);
+    }
+    bound = c.f.bound; BORROW_LINK();
+    {
+        borrow_text t = {0};
+        borrow_add(&t, "bound %zu\n", c.f.bound - bound);
+        run->texts[run->steps++] = t.data;
+    }
+    /* A reopened cache captures everything again, then restores it. */
+    borrow_counts(run, adapter.reuse);
+    sh_package_link_reuse_close(adapter.reuse);
+    adapter.reuse = sh_package_link_reuse_open(c.f.count); assert(adapter.reuse);
+    sh_package_link_reuse_test_mode(adapter.reuse, copy, 0);
+    BORROW_LINK(); BORROW_LINK();
+#undef BORROW_LINK
+    borrow_counts(run, adapter.reuse);
+    sh_package_link_reuse_close(adapter.reuse);
+    sh_package_link_output_free(&out); sh_package_link_classes_free(&classes);
+    sh_package_provenance_free(&contexts);
+}
+static void borrowed_restore_equivalence(const sh_package_sources *sources)
+{
+    borrow_run copied = {0}, borrowed = {0};
+    borrow_scenario(sources, 1, &copied);
+    borrow_scenario(sources, 0, &borrowed);
+    assert(copied.steps == borrowed.steps && copied.steps == 11);
+    for (size_t i = 0; i < copied.steps; i++) {
+        if (strcmp(copied.texts[i], borrowed.texts[i]))
+            fprintf(stderr, "step %zu differs\n--- copy\n%s--- borrow\n%s", i, copied.texts[i], borrowed.texts[i]);
+        assert(!strcmp(copied.texts[i], borrowed.texts[i]));
+    }
+    /* The scenario exercises what it claims: removing the selection changed
+     * the link, keeping it again restored it, and only borrowing borrowed. */
+    if (!strcmp(borrowed.texts[2], borrowed.texts[3]) || strcmp(borrowed.texts[2], borrowed.texts[4]))
+        fprintf(stderr, "--- before\n%s--- without g original\n%s--- g original again\n%s",
+            borrowed.texts[2], borrowed.texts[3], borrowed.texts[4]);
+    assert(strcmp(borrowed.texts[2], borrowed.texts[3]) && !strcmp(borrowed.texts[2], borrowed.texts[4]));
+    assert(!strstr(borrowed.texts[0], "failed") && strstr(borrowed.texts[2], "provenance 1"));
+    assert(!copied.borrowed && !copied.unshared && borrowed.borrowed && borrowed.unshared);
+    assert(!copied.ordered); /* R-343: copied captures hand no slot order; the partition orders them itself */
+    for (size_t i = 0; i < copied.steps; i++) { free(copied.texts[i]); free(borrowed.texts[i]); }
+}
+
+/* Host screening for restore by reference, outside the suite:
+ *   package_linker_test --restore-bench <units> <copy|borrow> [passes]
+ * A synthetic graph of one-file units with one to four bindings each is
+ * identified once to fill the reuse cache, then again restoring every unit.
+ * Prints each pass's wall time and peak private bytes, the cache's per-pass
+ * collect, partition and clear times, and the restore counts. */
+typedef struct restore_bench { sh_package_link_edge *sites; size_t *begin; } restore_bench;
+static int bench_resolve(void *context, size_t unit, const char *family, const char *name,
+    size_t *target, char *error, size_t capacity)
+{
+    (void)context; (void)unit; (void)family; (void)error; (void)capacity;
+    *target = (size_t)strtoull(name + 1, NULL, 10); return 1;
+}
+static unsigned char *bench_bind(void *context, size_t unit, const sh_compiled_resource *file,
+    const unsigned char *body, size_t length, sh_package_link_reference reference, void *reference_context,
+    size_t *output_length, char *error, size_t capacity)
+{
+    (void)context; (void)unit; (void)file; (void)body; (void)length; (void)reference; (void)reference_context;
+    (void)output_length; snprintf(error, capacity, "benchmark units bind through sites"); return NULL;
+}
+static int bench_sites(void *context, size_t unit, const sh_compiled_resource *file,
+    const sh_package_link_edge **sites, size_t *count)
+{
+    restore_bench *b = context; (void)file;
+    *sites = b->sites + b->begin[unit]; *count = b->begin[unit + 1] - b->begin[unit]; return 1;
+}
+static volatile LONG bench_sampling;
+static volatile SIZE_T bench_peak;
+static SIZE_T bench_private(void)
+{
+    PROCESS_MEMORY_COUNTERS_EX counters;
+    return GetProcessMemoryInfo(GetCurrentProcess(), (PROCESS_MEMORY_COUNTERS *)&counters, sizeof(counters)) ?
+        counters.PrivateUsage : 0;
+}
+static DWORD WINAPI bench_sampler(LPVOID unused)
+{
+    (void)unused;
+    while (InterlockedCompareExchange(&bench_sampling, 1, 1)) {
+        SIZE_T now = bench_private();
+        if (now > bench_peak) bench_peak = now;
+        Sleep(1);
+    }
+    return 0;
+}
+static int restore_benchmark(size_t count, int copy, int passes)
+{
+    static const char *const slots[] = {"edit.a", "edit.b", "edit.c", "edit.d"};
+    restore_bench b = {0};
+    sh_package_sources none = {0};
+    sh_package_compilation scope = {0};
+    sh_package_link_adapter adapter = {&b, bench_resolve, bench_bind};
+    sh_package_link_classes classes = {0};
+    sh_compiled_resource *parts = calloc(count, sizeof(*parts));
+    const sh_compiled_resource **files = calloc(count, sizeof(*files));
+    sh_package_link_unit *units = calloc(count, sizeof(*units));
+    char *strings = malloc(count * 64), error[1024], counters[8192];
+    LARGE_INTEGER frequency, began, ended;
+    unsigned long long borrowed = 0, unshared = 0;
+    HANDLE sampler;
+    if (count < 2 || passes < 2) { fprintf(stderr, "need at least 2 units and 2 passes\n"); return 2; }
+    b.begin = calloc(count + 1, sizeof(*b.begin)); b.sites = calloc(count * 4, sizeof(*b.sites));
+    assert(parts && files && units && strings && b.begin && b.sites);
+    scope.sources = &none;
+    for (size_t i = 0; i < count; i++) {
+        char *name = strings + i * 64, *path = name + 16;
+        size_t edges = 1 + (size_t)((i * 2654435761u) >> 7) % 4;
+        snprintf(name, 16, "u%zu", i); snprintf(path, 48, "bench/u%zu.decl", i);
+        parts[i].engine_path = path; parts[i].body = (unsigned char *)name;
+        parts[i].body_length = strlen(name); parts[i].source = SIZE_MAX; files[i] = parts + i;
+        units[i] = (sh_package_link_unit){"bench", name, &scope, files + i, 1};
+        b.begin[i + 1] = b.begin[i] + edges;
+        for (size_t k = 0; k < edges; k++)
+            b.sites[b.begin[i] + k] = (sh_package_link_edge){slots[k], (i * 31 + k * 7 + 1) % count};
+    }
+    adapter.sites = bench_sites;
+    adapter.reuse = sh_package_link_reuse_open(count); assert(adapter.reuse);
+    sh_package_link_reuse_test_mode(adapter.reuse, copy, 0);
+    QueryPerformanceFrequency(&frequency);
+    InterlockedExchange(&bench_sampling, 1);
+    sampler = CreateThread(NULL, 0, bench_sampler, NULL, 0, NULL); assert(sampler);
+    printf("restore benchmark: %zu units, %zu bindings, %s\n", count, b.begin[count], copy ? "copy" : "borrow");
+    for (int pass = 0; pass < passes; pass++) {
+        SIZE_T start = bench_private();
+        int ok;
+        bench_peak = start;
+        QueryPerformanceCounter(&began);
+        ok = sh_package_link_identify_units(units, count, &adapter, &classes, error, sizeof(error));
+        QueryPerformanceCounter(&ended);
+        if (bench_private() > bench_peak) bench_peak = bench_private();
+        printf("pass %d: %s, %.1f ms, %zu classes, private %.1f MB at start, peak %.1f MB\n", pass + 1,
+            ok ? "ok" : error, (double)(ended.QuadPart - began.QuadPart) * 1000.0 / (double)frequency.QuadPart,
+            classes.count, (double)start / 1048576.0, (double)bench_peak / 1048576.0);
+        if (!ok) return 1;
+    }
+    InterlockedExchange(&bench_sampling, 0);
+    WaitForSingleObject(sampler, INFINITE); CloseHandle(sampler);
+    sh_package_link_reuse_test_counts(adapter.reuse, &borrowed, &unshared);
+    printf("%s\nborrowed restores %llu, copied for conditional bindings %llu\n",
+        sh_package_link_reuse_counters(adapter.reuse, counters, sizeof(counters)), borrowed, unshared);
+    sh_package_link_reuse_close(adapter.reuse); sh_package_link_classes_free(&classes);
+    free(parts); free((void *)files); free(units); free(strings); free(b.begin); free(b.sites);
+    return 0;
+}
+
+static void implicit_bindings(const sh_package_sources *sources)
+{
+    fixture f = {0}; sh_package_compilation scope = {0}; scope.sources = sources;
+    sh_compiled_resource parts[6] = {0};
+    const sh_compiled_resource *files[6];
+    sh_package_link_edge edges[3][3];
+    sh_package_link_output out = {0}; sh_package_link_classes identified = {0};
+    sh_package_link_adapter adapter = {&f, resolve, bind_file, assign};
+    char error[512], main_slot[] = "main";
+    for (size_t i = 0; i < 6; i++) {
+        parts[i].engine_path = i % 2 ? "image/shared.bin" : "consumer/shared.bin";
+        parts[i].body = (unsigned char *)(i % 2 ? (i == 3 ? "green" : "red") : "same consumer");
+        parts[i].body_length = strlen((char *)parts[i].body); parts[i].source = SIZE_MAX;
+        files[i] = parts + i;
+        f.units[i] = (sh_package_link_unit){i % 2 ? "image" : "consumer", "shared", &scope, files + i, 1};
+    }
+    f.count = 6;
+    for (size_t i = 0; i < 3; i++) {
+        edges[i][0] = (sh_package_link_edge){main_slot, i * 2 + 1};
+        edges[i][1] = (sh_package_link_edge){"alternate", i * 2 + 1};
+        edges[i][2] = edges[i][0];
+        f.units[i * 2].implicit = edges[i]; f.units[i * 2].implicit_count = 3;
+    }
+    assert(sh_package_link_identify_units(f.units, f.count, &adapter, &identified, error, sizeof(error)));
+    assert(identified.count == 4 && identified.nodes[0] == identified.nodes[4] && identified.nodes[0] != identified.nodes[2]);
+    sh_package_link_classes_free(&identified);
+    assert(sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &out, error, sizeof(error)));
+    assert(out.classes.count == 4 && out.compiled->resource_count == 4 && out.implicit_count == 4);
+    char *stable = _strdup(out.names[out.classes.nodes[0]]); assert(stable);
+    for (size_t i = 0; i < out.implicit_count; i++) {
+        const sh_package_link_implicit_binding *binding = out.implicit + i;
+        size_t owner = out.classes.representatives[binding->owner];
+        assert(!(owner % 2));
+        assert(binding->target == out.classes.nodes[owner + 1]);
+        assert(!strcmp(binding->slot, "main") || !strcmp(binding->slot, "alternate"));
+        assert(binding->slot != main_slot);
+    }
+    size_t owners = 0;
+    for (size_t i = 0; i < out.compiled->resource_count; i++) {
+        const sh_compiled_resource *r = out.compiled->resources + i;
+        if (strcmp(r->native_type, "consumer")) continue;
+        owners++; assert(r->bound_dependency_count == 1);
+        const sh_compiled_resource *target = sh_package_compilation_find(out.compiled, r->bound_dependencies[0]);
+        assert(target && !strcmp(target->native_type, "image"));
+        size_t length; unsigned char *body = sh_package_compilation_read(out.compiled, r, SIZE_MAX, &length, error, sizeof(error));
+        assert(body && length == 13 && !memcmp(body, "same consumer", length)); free(body);
+    }
+    assert(owners == 2);
+    sh_package_link_edge swap = edges[0][0]; edges[0][0] = edges[0][1]; edges[0][1] = swap;
+    f.units[0].implicit_count = 2; /* Redundant repeated slots do not split a binding. */
+    assert(sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &out, error, sizeof(error)));
+    assert(!strcmp(stable, out.names[out.classes.nodes[0]]) && out.implicit_count == 4); free(stable);
+    /* Keep the mutated snapshot structurally valid so replay, rather than
+     * contradictory duplicate-slot validation, detects the changed target. */
+    f.units[4].implicit_count = 2;
+    f.assigned = 0; f.mutate_implicit = edges[2];
+    assert(!sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &out, error, sizeof(error)));
+    assert(strstr(error, "changed during linking") && !out.compiled && !out.implicit && !out.implicit_count);
+    edges[2][0].target ^= 1; f.mutate_implicit = NULL;
+    f.units[4].implicit_count = 3;
+    /* Slot identity is separate from its target identity. */
+    edges[2][0].slot = "different"; edges[2][2].slot = "different";
+    assert(sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &out, error, sizeof(error)));
+    assert(out.classes.count == 5 && out.classes.nodes[0] != out.classes.nodes[4]);
+    edges[2][0].slot = edges[2][2].slot = main_slot;
+    for (size_t i = 0; i < f.count; i++) f.units[i].original_binding = 1;
+    f.units[3].original_binding = 0;
+    assert(sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &out, error, sizeof(error)));
+    assert(!f.original_bindings[out.classes.representatives[out.classes.nodes[2]]]);
+    assert(f.original_bindings[out.classes.representatives[out.classes.nodes[0]]]);
+    /* Contradictory captures and missing/out-of-range metadata do not escape. */
+    sh_package_link_edge malformed[2] = {{"main", 1}, {"main", 3}};
+    f.units[0].implicit = malformed; f.units[0].implicit_count = 2;
+    assert(!sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &out, error, sizeof(error)));
+    assert(strstr(error, "contradictory"));
+    malformed[0].slot = NULL; f.units[0].implicit_count = 1;
+    assert(!sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &out, error, sizeof(error)));
+    malformed[0].slot = "";
+    assert(!sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &out, error, sizeof(error)));
+    malformed[0] = (sh_package_link_edge){"main", f.count};
+    assert(!sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &out, error, sizeof(error)));
+    f.units[0].implicit = NULL;
+    assert(!sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &out, error, sizeof(error)));
+    f.units[0].implicit = malformed; f.units[0].implicit_count = SIZE_MAX;
+    assert(!sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &out, error, sizeof(error)));
+    /* Retain supplied data through admitted native nodes, even across cycles. */
+    sh_package_link_edge root_edge[] = {{"native", 2}};
+    sh_package_link_edge a_edge[] = {{"next", 3}};
+    sh_package_link_edge b_edge[] = {{"back", 2}, {"data", 1}};
+    f.units[0].implicit = root_edge; f.units[0].implicit_count = 1;
+    f.units[2] = (sh_package_link_unit){"native", "a", NULL, NULL, 0};
+    f.units[3] = (sh_package_link_unit){"native", "b", NULL, NULL, 0};
+    f.units[2].implicit = a_edge; f.units[2].implicit_count = 1; f.units[2].original_binding = 1;
+    f.units[3].implicit = b_edge; f.units[3].implicit_count = 2; f.units[3].original_binding = 1;
+    f.count = 4;
+    assert(sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &out, error, sizeof(error)));
+    assert(out.compiled->resource_count == 2 && out.implicit_count == 4);
+    const sh_compiled_resource *owner = NULL;
+    for (size_t i = 0; i < out.compiled->resource_count; i++)
+        if (!strcmp(out.compiled->resources[i].native_type, "consumer")) owner = out.compiled->resources + i;
+    assert(owner && owner->bound_dependency_count == 1);
+    const sh_compiled_resource *target = sh_package_compilation_find(out.compiled, owner->bound_dependencies[0]);
+    assert(target && !strcmp(target->native_type, "image"));
+    assert(sh_package_link(sources, NULL, 0, &adapter, NULL, NULL, &out, error, sizeof(error)));
+    assert(!out.implicit && !out.implicit_count);
+    sh_package_link_output_free(&out);
+}
+
+/* Campaign-only bytes a scope supplies keep their native name (original binding
+ * 2), but never make a stock dependent original: that scope's consumer goes
+ * private while every other scope keeps the stock name. */
+static void campaign_originals(const sh_package_sources *sources)
+{
+    fixture f = {0}; sh_package_compilation first = {0}, second = {0};
+    first.sources = second.sources = sources;
+    sh_compiled_resource parts[4] = {0};
+    const sh_compiled_resource *files[4];
+    const char *paths[] = {"consumer/stock.bin", "consumer/stock.bin", "program/campaign.bin", "skeleton/campaign.bin"};
+    const char *bodies[] = {"stock consumer", "stock consumer", "campaign program", "campaign skeleton"};
+    sh_package_link_output out = {0};
+    sh_package_link_adapter adapter = {&f, resolve, bind_file, assign};
+    sh_package_link_edge program[] = {{"program", 2}}, skeleton[] = {{"skeleton", 3}};
+    char error[512];
+    for (size_t i = 0; i < 4; i++) {
+        parts[i].engine_path = paths[i]; parts[i].body = (unsigned char *)bodies[i];
+        parts[i].body_length = strlen(bodies[i]); parts[i].source = SIZE_MAX; files[i] = parts + i;
+    }
+    f.units[0] = (sh_package_link_unit){"consumer", "stock", &first, files, 1};
+    f.units[1] = (sh_package_link_unit){"consumer", "stock", &second, files + 1, 1};
+    f.units[2] = (sh_package_link_unit){"renderprog", "campaign", &second, files + 2, 1};
+    f.units[3] = (sh_package_link_unit){"skeleton", "campaign", &second, files + 3, 1};
+    f.units[1].implicit = program; f.units[1].implicit_count = 1;
+    f.units[2].implicit = skeleton; f.units[2].implicit_count = 1;
+    f.units[0].original_binding = f.units[1].original_binding = 1;
+    f.units[2].original_binding = f.units[3].original_binding = 2;
+    f.count = 4; f.native_originals = 1;
+    if (!sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &out, error, sizeof(error)))
+        fprintf(stderr, "campaign originals: %s\n", error);
+    assert(out.compiled && out.classes.nodes[0] != out.classes.nodes[1]);
+    assert(f.original_bindings[out.classes.representatives[out.classes.nodes[0]]]);
+    assert(!f.original_bindings[out.classes.representatives[out.classes.nodes[1]]]);
+    assert(!strcmp(out.names[out.classes.nodes[0]], "stock") && strcmp(out.names[out.classes.nodes[1]], "stock"));
+    /* Campaign data resting on campaign data keeps every name. */
+    assert(!strcmp(out.names[out.classes.nodes[2]], "campaign") && !strcmp(out.names[out.classes.nodes[3]], "campaign"));
+    /* A changed dependency still makes campaign data private. */
+    f.units[3].original_binding = 0; f.assigned = 0;
+    assert(sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &out, error, sizeof(error)));
+    assert(strcmp(out.names[out.classes.nodes[2]], "campaign") && !strcmp(out.names[out.classes.nodes[0]], "stock"));
+    /* Certified like SnapMap bytes, both stock consumers would claim one name. */
+    f.units[2].original_binding = f.units[3].original_binding = 1; f.assigned = 0;
+    assert(!sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &out, error, sizeof(error)));
+    assert(strstr(error, "native identity collision") && strstr(error, "consumer stock"));
+    sh_package_link_output_free(&out);
+}
+
+/* Derived publication (sh_package_link_adapter.derive): a changed owner
+ * publishes each implicit target where its own name derives it, assigned with
+ * the owner. A changed carried target is published only there; an unchanged
+ * installed one is an installed-original alias that keeps no bytes, read back
+ * through the compilation's installed reader and checked against its
+ * certified identity; an unchanged carried target stays its installed row. */
+static const char *g_installed_b;
+static int derived_installed(void *context, const char *path, unsigned char **body, size_t *length)
+{
+    (void)context; *body = NULL; *length = 0;
+    if (strcmp(path, "b.bin")) return 0;
+    *length = strlen(g_installed_b); *body = malloc(*length + 1); assert(*body);
+    memcpy(*body, g_installed_b, *length + 1); return 1;
+}
+static int derive_member(void *context, size_t unit, const char *name, const char *slot, size_t target,
+    char **path, char **native_name, char *error, size_t capacity)
+{
+    fixture *f = context; (void)error; (void)capacity;
+    assert(!strcmp(f->units[unit].family, "owner") && !strncmp(slot, "member/", 7));
+    *path = malloc(strlen(name) + strlen(f->units[target].name) + 16); assert(*path);
+    sprintf(*path, "%s/derived/%s", name, f->units[target].name);
+    *native_name = _strdup(*path); assert(*native_name);
+    return 2;
+}
+static void derived_members(const sh_package_sources *sources)
+{
+    fixture f = {0}; sh_package_compilation stock = {0}, package = {0};
+    stock.sources = package.sources = sources;
+    sh_compiled_resource parts[5] = {0};
+    const sh_compiled_resource *files[5];
+    const char *paths[] = {"room.decl", "a.bin", "b.bin", "room.decl", "a.bin"};
+    const char *bodies[] = {"room module", "stock a", "stock b", "room module", "package a"};
+    sh_package_link_edge stock_edges[] = {{"member/a", 1}, {"member/b", 2}}, package_edges[] = {{"member/a", 4}, {"member/b", 5}};
+    sh_package_link_output out = {0}; char error[512];
+    for (size_t i = 0; i < 5; i++) {
+        parts[i].engine_path = paths[i]; parts[i].body = (unsigned char *)bodies[i];
+        parts[i].body_length = strlen(bodies[i]); parts[i].source = SIZE_MAX; files[i] = parts + i;
+        parts[i].native_original = i != 4; parts[i].baseline_known = 1;
+    }
+    f.units[0] = (sh_package_link_unit){"owner", "room.decl", &stock, files, 1};
+    f.units[1] = (sh_package_link_unit){"file", "a.bin", &stock, files + 1, 1};
+    f.units[2] = (sh_package_link_unit){"file", "b.bin", &stock, files + 2, 1};
+    f.units[3] = (sh_package_link_unit){"owner", "room.decl", &package, files + 3, 1};
+    f.units[4] = (sh_package_link_unit){"file", "a.bin", &package, files + 4, 1};
+    f.units[5] = (sh_package_link_unit){"file", "b.bin", &package, files + 2, 1};
+    f.units[0].implicit = stock_edges; f.units[0].implicit_count = 2;
+    f.units[3].implicit = package_edges; f.units[3].implicit_count = 2;
+    for (size_t i = 0; i < 6; i++) f.units[i].original_binding = i != 4;
+    for (size_t i = 0; i < 6; i++) if (strcmp(f.units[i].family, "owner")) f.units[i].carried = 1;
+    f.count = 6; f.native_originals = 1;
+    sh_package_link_adapter adapter = {&f, resolve, bind_file, assign};
+    adapter.derive = derive_member;
+    if (!sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &out, error, sizeof(error)))
+        fprintf(stderr, "derived members: %s\n", error);
+    assert(out.compiled);
+    size_t room = out.classes.nodes[0], variant = out.classes.nodes[3], changed = out.classes.nodes[4];
+    assert(room != variant && !strcmp(out.names[room], "room.decl") && strcmp(out.names[variant], "room.decl"));
+    assert(out.classes.nodes[2] == out.classes.nodes[5] && out.carried && out.carried[changed] && !out.carried[room]);
+    assert(!out.carried[out.classes.nodes[1]] && !out.carried[out.classes.nodes[2]]);
+    assert(out.derived_count == 2);
+    /* Certified originals cover what a class binds: the variant owner's own
+     * bytes are the stock ones, its binding is not. */
+    assert(out.originals && out.originals[room] && !out.originals[variant] && !out.originals[changed] &&
+        out.originals[out.classes.nodes[1]] && out.originals[out.classes.nodes[2]]);
+    assert(f.units[3].original_binding);
+    char a[256], b[256];
+    snprintf(a, sizeof(a), "%s/derived/a.bin", out.names[variant]); snprintf(b, sizeof(b), "%s/derived/b.bin", out.names[variant]);
+    for (size_t d = 0; d < 2; d++) assert(out.derived[d].owner == variant &&
+        (!strcmp(out.derived[d].path, a) || !strcmp(out.derived[d].path, b)));
+    const sh_compiled_resource *derived_a = sh_package_compilation_find(out.compiled, a);
+    const sh_compiled_resource *derived_b = sh_package_compilation_find(out.compiled, b);
+    const sh_compiled_resource *own_a = sh_package_compilation_find(out.compiled, "a.bin");
+    const sh_compiled_resource *own_b = sh_package_compilation_find(out.compiled, "b.bin");
+    /* The changed member is served where its owner derives it, never at its own path. */
+    assert(derived_a && derived_a->body && derived_a->body_length == 9 && !memcmp(derived_a->body, "package a", 9));
+    assert(own_a && own_a->installed_alias && !own_a->body && own_a->native_original && !own_a->original_path);
+    /* The unchanged installed member keeps no copy anywhere. */
+    assert(derived_b && derived_b->installed_alias && !derived_b->body && !derived_b->native_original &&
+        derived_b->original_path && !strcmp(derived_b->original_path, "b.bin"));
+    assert(own_b && own_b->installed_alias && !own_b->body && own_b->native_original);
+    sh_package_file_identity identity;
+    assert(sh_package_compilation_identity(out.compiled, derived_b, &identity, error, sizeof(error)) &&
+        identity.length == 7);
+    size_t length = 0; unsigned char *body;
+    assert(!sh_package_compilation_read(out.compiled, derived_b, SIZE_MAX, &length, error, sizeof(error)) &&
+        strstr(error, "certified"));
+    out.compiled->installed = derived_installed; g_installed_b = "stock b";
+    body = sh_package_compilation_read(out.compiled, derived_b, SIZE_MAX, &length, error, sizeof(error));
+    assert(body && length == 7 && !memcmp(body, "stock b", 7)); free(body);
+    assert(sh_package_compilation_probe(out.compiled, b, error, sizeof(error)) == 1);
+    /* Other bytes at the installed path are not its certified source. */
+    g_installed_b = "other b";
+    assert(!sh_package_compilation_read(out.compiled, derived_b, SIZE_MAX, &length, error, sizeof(error)) &&
+        strstr(error, "certified") && sh_package_compilation_probe(out.compiled, b, error, sizeof(error)) < 0);
+    /* The variant owner retains both publications. */
+    const sh_compiled_resource *owner = NULL;
+    for (size_t i = 0; i < out.compiled->resource_count; i++)
+        if (sh_package_resource_native_matches(out.compiled->resources + i, "owner", out.names[variant])) owner = out.compiled->resources + i;
+    size_t retained = 0;
+    for (size_t i = 0; owner && i < owner->bound_dependency_count; i++)
+        retained += !strcmp(owner->bound_dependencies[i], a) || !strcmp(owner->bound_dependencies[i], b);
+    assert(owner && retained == 2);
+    /* An original owner derives nothing; without a derive adapter nothing is carried. */
+    f.units[4].original_binding = 1; parts[4].body = (unsigned char *)"stock a"; parts[4].body_length = 7;
+    parts[4].native_original = 1;
+    assert(sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &out, error, sizeof(error)));
+    assert(!out.derived_count && out.classes.nodes[0] == out.classes.nodes[3] && !strcmp(out.names[out.classes.nodes[3]], "room.decl"));
+    f.units[4].original_binding = 0; parts[4].body = (unsigned char *)"package a"; parts[4].body_length = 9;
+    parts[4].native_original = 0; adapter.derive = NULL;
+    assert(sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &out, error, sizeof(error)));
+    size_t published = 0;
+    for (size_t i = 0; i < out.compiled->resource_count; i++)
+        published += sh_package_resource_native_matches(out.compiled->resources + i, "file", out.names[out.classes.nodes[4]]);
+    assert(!out.derived_count && !out.carried[out.classes.nodes[4]] && published == 1);
+    sh_package_link_output_free(&out);
+}
+
+/* A declaration may assign one field twice (stock projectile impact effects
+ * repeat rumbleDecl); the native reader resolves both and keeps the last. Both
+ * references bind, each under its own replayable slot. */
+static void repeated_field_slots(void)
+{
+    char base[MAX_PATH + 32], error[1024];
+    snprintf(base, sizeof(base), "%s/repeated", root);
+    create("repeated/overrides/rock/package.json", "{\"id\":\"rock\",\"name\":\"Rock\"}");
+    create("repeated/overrides/rock/assets/generated/decls/entitydef/props/rock.decl", "{ edit = { } }");
+    sh_package_sources *sources = sh_package_sources_scan(base, error, sizeof(error)); assert(sources);
+    /* A captured original is read as the native reader reads it, not through
+     * the package compiler's authoring checks. */
+    sh_compiled_resource resources[2] = {0};
+    resources[0].engine_path = "generated/decls/entitydef/props/rock.decl"; resources[0].type = "entitydef";
+    resources[0].name = "props/rock"; resources[0].source = SIZE_MAX;
+    resources[0].body = (unsigned char *)"{ edit = { material = \"materials/stone\"; material = \"materials/stone\"; health = 10; } }";
+    resources[0].body_length = strlen((const char *)resources[0].body);
+    resources[1].engine_path = "generated/decls/material/materials/stone.decl"; resources[1].type = "material";
+    resources[1].name = "materials/stone"; resources[1].source = SIZE_MAX;
+    resources[1].body = (unsigned char *)"{ color {1,0,0,1} }"; resources[1].body_length = 19;
+    sh_package_compilation compiled = {0}; compiled.resources = resources; compiled.resource_count = 2;
+    compiled.sources = sources;
+    const sh_package_compilation *scope = &compiled;
+    sh_package_link_inputs discovered = {0};
+    assert(sh_package_link_inputs_open(&scope, 1, NULL, &discovered, error, sizeof(error)) && discovered.count == 2);
+    fixture f = {0}; f.count = 2; f.repeat_slot = 1;
+    for (size_t n = 0; n < 2; n++) f.units[n] = discovered.units[n];
+    sh_package_link_adapter adapter = {&f, resolve, bind_file, assign};
+    sh_package_link_output out = {0};
+    int ok = sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &out, error, sizeof(error));
+    if (!ok) fprintf(stderr, "repeated field: %s\n", error);
+    assert(ok && out.compiled && out.classes.count == 2);
+    sh_package_link_output_free(&out); sh_package_link_inputs_free(&discovered); sh_package_sources_free(sources);
+}
+
+/* Pass meters (F4 instrumentation): what each identity pass captured afresh, whether sticky-invalid
+ * recaptures reproduced their previous capture, and what the conditional certification did, on the
+ * conditional fixture (two scopes; behavior 0/4 selects f and g, f reaches d). The meters must not
+ * change any result: the last pass equals an uncached pass, and a failed meter allocation changes
+ * nothing but the meter. */
+static void pass_meters(const sh_package_sources *sources)
+{
+    conditional_case c;
+    sh_package_link_reuse *reuse;
+    sh_package_link_classes classes = {0}, plain_classes = {0};
+    sh_package_link_adapter inspect, plain;
+    sh_package_link_pass_meters m[5], none;
+    size_t bound[5] = {0};
+    char error[512], full[4096], tiny[16];
+    conditional_setup(&c, sources);
+    inspect = (sh_package_link_adapter){&c.f, resolve, bind_file};
+    plain = inspect;
+    reuse = sh_package_link_reuse_open(c.f.count); assert(reuse);
+    inspect.reuse = reuse;
+#define METER_PASS(n) do { bound[n] = c.f.bound; \
+        assert(sh_package_link_identify_units(c.f.units, c.f.count, &inspect, &classes, error, sizeof(error))); \
+        bound[n] = c.f.bound - bound[n]; } while (0)
+    METER_PASS(0);                                  /* everything captured afresh */
+    METER_PASS(1);                                  /* everything restored; nothing changed */
+    conditional_change(&c, 5, "fsm f, changed"); sh_package_link_reuse_invalidate(reuse, 5);
+    METER_PASS(2);                                  /* f of scope 1 recaptured: first sticky-invalid capture */
+    METER_PASS(3);                                  /* recaptured again from identical bytes */
+    conditional_change(&c, 5, "fsm f, other");
+    METER_PASS(4);                                  /* recaptured from different bytes */
+#undef METER_PASS
+    for (size_t p = 0; p < 5; p++) assert(sh_package_link_reuse_test_meters(reuse, p, m + p));
+    assert(!sh_package_link_reuse_test_meters(reuse, 5, &none));
+    /* Work counters against the fixture's own bind count (one bind per fresh capture). */
+    for (size_t p = 0; p < 5; p++) assert(m[p].fresh == bound[p] && m[p].fresh == (p == 0 ? 8u : p == 1 ? 0u : 1u));
+    assert(!m[0].again_first && !m[0].again_same && !m[0].again_changed);
+    assert(m[2].again_first == 1 && !m[2].again_same && !m[2].again_changed);
+    assert(!m[3].again_first && m[3].again_same == 1 && !m[3].again_changed);
+    assert(!m[4].again_first && !m[4].again_same && m[4].again_changed == 1);
+    /* Conditional certification: two behaviors, four selections, six bindings in the complete capture.
+     * Slot comparisons search each behavior's two sorted selections: fsm/f takes 2, fsm/g 1. A behavior
+     * with both selections removed searches 3 times (fsm/f found, then both removed); one keeping its
+     * uncertified fsm/f searches only fsm/g, twice. */
+    for (size_t p = 0; p < 5; p++)
+        assert(m[p].cond_units == 2 && m[p].cond_edges == 4 && m[p].cond_walk_edges == 6 && m[p].cond_compares == (p < 2 ? 10u : 7u));
+    assert(m[0].cond_nonlocal == 0 && m[0].cond_certified == 8 && m[0].cond_removed == 4);
+    assert(m[1].cond_nonlocal == 0 && m[1].cond_certified == 8 && m[1].cond_removed == 4);
+    assert(m[0].cond_digest == m[1].cond_digest);
+    for (size_t p = 2; p < 5; p++) assert(m[p].cond_nonlocal == 1 && m[p].cond_certified == 6 && m[p].cond_removed == 3);
+    assert(m[2].cond_digest != m[1].cond_digest && m[3].cond_digest == m[2].cond_digest);
+    /* The detail line carries every pass and truncates safely. */
+    assert(*sh_package_link_reuse_detail(reuse, full, sizeof(full)) && strstr(full, "identity pass detail by pass: 1: fresh 8 "));
+    assert(strstr(full, "; 5: fresh 1 ") && !strstr(full, "; 6: "));
+    assert(strlen(sh_package_link_reuse_detail(reuse, tiny, sizeof(tiny))) < sizeof(tiny));
+    assert(!*sh_package_link_reuse_detail(NULL, full, sizeof(full)));
+    /* Uncached oracle: the same partition and identities without any cache. */
+    assert(sh_package_link_identify_units(c.f.units, c.f.count, &plain, &plain_classes, error, sizeof(error)));
+    assert(plain_classes.count == classes.count);
+    for (size_t u = 0; u < c.f.count; u++) {
+        assert(!memcmp(classes.identities[classes.nodes[u]], plain_classes.identities[plain_classes.nodes[u]], 32));
+        for (size_t v = 0; v < c.f.count; v++)
+            assert((classes.nodes[u] == classes.nodes[v]) == (plain_classes.nodes[u] == plain_classes.nodes[v]));
+    }
+    /* Without the sorted slot index (as when it cannot be allocated): the same partition and identities,
+     * captured and restored, the slots compared one by one (4 per behavior: 1 + 1 + 2, or 2 + 2). */
+    {
+        sh_package_link_reuse *linear = sh_package_link_reuse_open(c.f.count);
+        sh_package_link_adapter one_by_one = inspect;
+        sh_package_link_classes linear_classes = {0};
+        sh_package_link_pass_meters lm[2];
+        assert(linear); one_by_one.reuse = linear; sh_package_link_reuse_test_fail_index(linear, 1);
+        for (size_t p = 0; p < 2; p++) {
+            assert(sh_package_link_identify_units(c.f.units, c.f.count, &one_by_one, &linear_classes, error, sizeof(error)));
+            assert(sh_package_link_reuse_test_meters(linear, p, lm + p));
+            assert(lm[p].cond_compares == 8 && lm[p].cond_removed == m[4].cond_removed && lm[p].cond_digest == m[4].cond_digest);
+            assert(linear_classes.count == plain_classes.count);
+            for (size_t u = 0; u < c.f.count; u++) {
+                assert(!memcmp(linear_classes.identities[linear_classes.nodes[u]], plain_classes.identities[plain_classes.nodes[u]], 32));
+                for (size_t v = 0; v < c.f.count; v++)
+                    assert((linear_classes.nodes[u] == linear_classes.nodes[v]) == (plain_classes.nodes[u] == plain_classes.nodes[v]));
+            }
+        }
+        assert(lm[1].fresh == 0);
+        sh_package_link_reuse_close(linear); sh_package_link_classes_free(&linear_classes);
+    }
+    sh_package_link_reuse_close(reuse);
+    /* A meter table that cannot be allocated: results unchanged, the recapture meter silent. */
+    conditional_setup(&c, sources);
+    inspect = (sh_package_link_adapter){&c.f, resolve, bind_file}; plain = inspect;
+    reuse = sh_package_link_reuse_open(c.f.count); assert(reuse);
+    inspect.reuse = reuse; sh_package_link_reuse_test_fail_meters(reuse, 1);
+    assert(sh_package_link_identify_units(c.f.units, c.f.count, &inspect, &classes, error, sizeof(error)));
+    conditional_change(&c, 5, "fsm f, changed"); sh_package_link_reuse_invalidate(reuse, 5);
+    assert(sh_package_link_identify_units(c.f.units, c.f.count, &inspect, &classes, error, sizeof(error)));
+    assert(sh_package_link_reuse_test_meters(reuse, 1, m + 1));
+    assert(m[1].fresh == 1 && !m[1].again_first && !m[1].again_same && !m[1].again_changed && m[1].cond_certified == 6);
+    assert(sh_package_link_identify_units(c.f.units, c.f.count, &plain, &plain_classes, error, sizeof(error)));
+    assert(plain_classes.count == classes.count);
+    for (size_t u = 0; u < c.f.count; u++)
+        assert(!memcmp(classes.identities[classes.nodes[u]], plain_classes.identities[plain_classes.nodes[u]], 32));
+    sh_package_link_reuse_close(reuse);
+    sh_package_link_classes_free(&classes); sh_package_link_classes_free(&plain_classes);
+}
+
+/* R-348 capture templates. Units binding one stable file with the same sites (scope copies) take that file's
+ * template: its keys (a repeated slot's occurrence included), its slot order and, alone in their unit, its content
+ * digest; their targets stay their own. A unit binding the file with other sites, or with an implicit edge, takes
+ * only what still holds. With templates off every unit captures afresh: the classes and identities agree exactly,
+ * the first pass and the restored one. */
+enum { TPL_UNITS = 14 };
+typedef struct template_case {
+    sh_package_sources none;
+    sh_package_compilation scope;
+    sh_compiled_resource parts[3];
+    const sh_compiled_resource *files[TPL_UNITS][2];
+    sh_package_link_unit units[TPL_UNITS];
+    sh_package_link_edge sites[TPL_UNITS][2][4], implicit[1];
+    size_t counts[TPL_UNITS][2];
+    char names[TPL_UNITS][16];
+} template_case;
+static int template_sites(void *context, size_t unit, const sh_compiled_resource *file,
+    const sh_package_link_edge **sites, size_t *count)
+{
+    template_case *t = context;
+    for (size_t f = 0; f < t->units[unit].file_count; f++)
+        if (t->files[unit][f] == file) { *sites = t->counts[unit][f] ? t->sites[unit][f] : NULL; *count = t->counts[unit][f]; return 1; }
+    return 0;
+}
+static void template_case_open(template_case *t)
+{
+    static const char *const paths[3] = {"tpl/a.decl", "tpl/b.decl", "tpl/c.decl"};
+    static const char *const a = "edit.a", *const b = "edit.b", *const c = "edit.c";
+    memset(t, 0, sizeof(*t));
+    t->scope.sources = &t->none;
+    for (size_t p = 0; p < 3; p++) {
+        t->parts[p].engine_path = paths[p]; t->parts[p].body = (unsigned char *)paths[p];
+        t->parts[p].body_length = strlen(paths[p]); t->parts[p].source = SIZE_MAX;
+    }
+    for (size_t u = 0; u < TPL_UNITS; u++) {
+        size_t first = u < 10 ? u % 2 : u == 10 || u == 11 ? 0 : u == 12 ? 2 : 1;
+        snprintf(t->names[u], sizeof(t->names[u]), "u%zu", u);
+        t->files[u][0] = t->parts + first; t->files[u][1] = t->parts + 2;
+        t->units[u] = (sh_package_link_unit){"bench", t->names[u], &t->scope, t->files[u], u == 11 ? 2 : 1};
+        for (size_t f = 0; f < t->units[u].file_count; f++) {
+            size_t part = f ? 2 : first, n = 0;
+            sh_package_link_edge *s = t->sites[u][f];
+            if (u == 10) s[n++] = (sh_package_link_edge){b, (u + 5) % TPL_UNITS}; /* the file's other sites */
+            else if (u == 13) n = 0; /* none */
+            else if (part == 0) {
+                s[n++] = (sh_package_link_edge){a, (u + 1) % TPL_UNITS}; s[n++] = (sh_package_link_edge){b, (u + 2) % TPL_UNITS};
+                s[n++] = (sh_package_link_edge){a, (u + 3) % TPL_UNITS}; /* a repeated slot: its second occurrence */
+            } else if (part == 1) s[n++] = (sh_package_link_edge){c, (u + 1) % TPL_UNITS};
+            else { s[n++] = (sh_package_link_edge){c, (u + 4) % TPL_UNITS}; s[n++] = (sh_package_link_edge){a, u}; }
+            t->counts[u][f] = n;
+        }
+    }
+    /* u4 also binds a native role: its order is its own, its file's keys and digest still the template's. */
+    t->implicit[0] = (sh_package_link_edge){"native.x", 0};
+    t->units[4].implicit = t->implicit; t->units[4].implicit_count = 1;
+}
+static void template_run(template_case *t, int templates, sh_package_link_classes out[2], sh_package_link_pass_meters *m)
+{
+    sh_package_link_adapter adapter = {t, bench_resolve, bench_bind};
+    char error[512];
+    adapter.sites = template_sites;
+    adapter.reuse = sh_package_link_reuse_open(TPL_UNITS); assert(adapter.reuse);
+    sh_package_link_test_templates(templates);
+    for (int pass = 0; pass < 2; pass++) {
+        int ok = sh_package_link_identify_units(t->units, TPL_UNITS, &adapter, out + pass, error, sizeof(error));
+        if (!ok) fprintf(stderr, "template pass %d (templates %d): %s\n", pass, templates, error);
+        assert(ok);
+    }
+    assert(sh_package_link_reuse_test_meters(adapter.reuse, 0, m));
+    sh_package_link_reuse_close(adapter.reuse);
+    sh_package_link_test_templates(1);
+}
+static void template_equivalence(void)
+{
+    template_case t;
+    sh_package_link_classes fresh[2] = {{0}}, templated[2] = {{0}};
+    sh_package_link_pass_meters off, on;
+    template_case_open(&t);
+    template_run(&t, 0, fresh, &off);
+    template_run(&t, 1, templated, &on);
+    for (int pass = 0; pass < 2; pass++) {
+        assert(fresh[pass].count == templated[pass].count && fresh[pass].node_count == TPL_UNITS &&
+            templated[pass].node_count == TPL_UNITS);
+        for (size_t u = 0; u < TPL_UNITS; u++) {
+            int same = fresh[pass].nodes[u] == templated[pass].nodes[u] &&
+                !memcmp(fresh[pass].identities[fresh[pass].nodes[u]], templated[pass].identities[templated[pass].nodes[u]], 32);
+            if (!same) fprintf(stderr, "template pass %d: unit %zu differs\n", pass, u);
+            assert(same);
+        }
+    }
+    /* Off, nothing is taken; on: files a, b, c each made once and taken by the rest of their units (u0..u9 alternate
+     * a and b, u11 takes a and makes c, u12 takes c, u4's implicit edge leaves its digest a template's), u10 and u13
+     * (other sites) take none, and single-file digests are taken from the second unit of each file on. */
+    assert(!off.template_files && !off.template_built && !off.template_edges && !off.template_digests);
+    if (on.template_built != 3 || on.template_files != 10 || on.template_digests != 8)
+        fprintf(stderr, "templates: %zu files, %zu made, %zu edges, %zu digests\n", on.template_files, on.template_built,
+            on.template_edges, on.template_digests);
+    assert(on.template_built == 3 && on.template_files == 10 && on.template_digests == 8 && on.template_edges == 21);
+    for (int pass = 0; pass < 2; pass++) { sh_package_link_classes_free(fresh + pass); sh_package_link_classes_free(templated + pass); }
+}
+
+/* R-348 templates kept across compiles. One compile of a case (two identity passes over one cache), offered a record
+ * first when given one (offer's expected result): whether every pass succeeded, its classes, its first pass's meters,
+ * the offer's counts and its own record. A failing pass is reported on stderr unless the caller expects failure
+ * (expect_failure, a control): then on stdout. */
+typedef struct template_record_run {
+    int ok;
+    sh_package_link_classes classes[2];
+    sh_package_link_pass_meters first;
+    size_t offered, taken, refused;
+    unsigned char *record;
+    size_t record_length;
+} template_record_run;
+static void template_record_compile(template_case *t, const unsigned char *offer, size_t offer_length, int offered,
+    int expect_failure, template_record_run *r)
+{
+    sh_package_link_adapter adapter = {t, bench_resolve, bench_bind};
+    char error[512];
+    memset(r, 0, sizeof(*r));
+    adapter.sites = template_sites;
+    adapter.reuse = sh_package_link_reuse_open(TPL_UNITS); assert(adapter.reuse);
+    if (offer) {
+        unsigned char *copy = malloc(offer_length ? offer_length : 1); assert(copy);
+        memcpy(copy, offer, offer_length);
+        assert(sh_package_link_reuse_offer_templates(adapter.reuse, copy, offer_length) == offered);
+    }
+    r->ok = 1;
+    for (int pass = 0; pass < 2 && r->ok; pass++)
+        r->ok = sh_package_link_identify_units(t->units, TPL_UNITS, &adapter, r->classes + pass, error, sizeof(error));
+    if (!r->ok) fprintf(expect_failure ? stdout : stderr, "template record run failed%s: %s\n",
+        expect_failure ? " (expected by this control)" : "", error);
+    if (!sh_package_link_reuse_test_meters(adapter.reuse, 0, &r->first)) memset(&r->first, 0, sizeof(r->first));
+    sh_package_link_reuse_offer_counts(adapter.reuse, &r->offered, &r->taken, &r->refused);
+    assert(sh_package_link_reuse_templates_encode(adapter.reuse, &r->record, &r->record_length));
+    sh_package_link_reuse_close(adapter.reuse);
+}
+static int template_record_same(const template_record_run *a, const template_record_run *b)
+{
+    for (int pass = 0; pass < 2; pass++) {
+        const sh_package_link_classes *x = a->classes + pass, *y = b->classes + pass;
+        if (x->count != y->count || x->node_count != y->node_count) return 0;
+        for (size_t u = 0; u < x->node_count; u++)
+            if (x->nodes[u] != y->nodes[u] || memcmp(x->identities[x->nodes[u]], y->identities[y->nodes[u]], 32)) return 0;
+    }
+    return 1;
+}
+static void template_record_free(template_record_run *r)
+{
+    for (int pass = 0; pass < 2; pass++) sh_package_link_classes_free(r->classes + pass);
+    free(r->record); memset(r, 0, sizeof(*r));
+}
+/* A hand-made record of one template (path hash 7) of two sites over one slot "s": each site's slot index, occurrence
+ * and order position as given, then extra trailing bytes. */
+static int template_record_offer(const unsigned char sites[2][3], size_t extra)
+{
+    unsigned char bytes[64];
+    size_t n = 0;
+    memcpy(bytes, "SMPIT1", 6); n = 6;
+    bytes[n++] = 1; memset(bytes + n, 0, 7); n += 7;               /* one slot */
+    bytes[n++] = 1; bytes[n++] = 's'; bytes[n++] = 0;
+    bytes[n++] = 1; memset(bytes + n, 0, 7); n += 7;               /* one template */
+    bytes[n++] = 7; memset(bytes + n, 0, 7); n += 7; bytes[n++] = 2;
+    for (int k = 0; k < 2; k++) for (int f = 0; f < 3; f++) bytes[n++] = sites[k][f];
+    memset(bytes + n, 0, extra); n += extra;
+    unsigned char *copy = malloc(n); assert(copy);
+    memcpy(copy, bytes, n);
+    sh_package_link_reuse *reuse = sh_package_link_reuse_open(1); assert(reuse);
+    int result = sh_package_link_reuse_offer_templates(reuse, copy, n);
+    if (result == 1) {
+        unsigned char *again = malloc(1); assert(again);
+        assert(sh_package_link_reuse_offer_templates(reuse, again, 1) == 0); /* one offer per cache */
+    }
+    sh_package_link_reuse_close(reuse);
+    return result;
+}
+/* A compile offered another compile's record takes every file's template from it (keys built from the file's own path,
+ * occurrences and order recorded) instead of making one, and agrees exactly with a fresh compile; its own record is the
+ * same bytes. A file whose sites' slots changed (same path, same count) is refused and made afresh. Controls: taking a
+ * template without comparing slots makes the compile differ silently; dropping the occurrences repeats a slot, which
+ * fails the pass; dropping the order changes nothing but the partition's own sort (it reads a node through a slot
+ * order only when the slots increase along it). A malformed record is dropped whole. */
+static void template_record_equivalence(void)
+{
+    template_case t, changed;
+    template_record_run fresh, recorded, restored, run;
+    template_case_open(&t);
+    sh_package_link_test_templates(0);
+    template_record_compile(&t, NULL, 0, 0, 0, &fresh);
+    sh_package_link_test_templates(1);
+    template_record_compile(&t, NULL, 0, 0, 0, &recorded);
+    assert(fresh.ok && recorded.ok && template_record_same(&fresh, &recorded));
+    assert(recorded.first.template_built == 3 && !recorded.first.template_restored && recorded.record_length > 6);
+    template_record_compile(&t, recorded.record, recorded.record_length, 1, 0, &restored);
+    assert(restored.ok && template_record_same(&fresh, &restored));
+    if (restored.first.template_restored != 3 || restored.first.template_built || restored.taken != 3)
+        fprintf(stderr, "record templates: %zu restored, %zu made, %zu taken of %zu, %zu refused\n",
+            restored.first.template_restored, restored.first.template_built, restored.taken, restored.offered, restored.refused);
+    assert(restored.first.template_restored == 3 && !restored.first.template_built && restored.first.template_files == 10 &&
+        restored.first.template_digests == 8 && restored.first.template_edges == 21);
+    assert(restored.offered == 3 && restored.taken == 3 && !restored.refused);
+    assert(restored.first.ordered == recorded.first.ordered);
+    assert(restored.record_length == recorded.record_length && !memcmp(restored.record, recorded.record, recorded.record_length));
+    /* Dropping occurrences: file a's repeated slot repeats a key, and the partition refuses the pass (expected). */
+    sh_package_link_test_offer_mutation(2);
+    template_record_compile(&t, recorded.record, recorded.record_length, 1, 1, &run);
+    sh_package_link_test_offer_mutation(0);
+    if (run.ok && template_record_same(&fresh, &run)) fprintf(stderr, "record template mutation 2 was not caught\n");
+    assert((!run.ok || !template_record_same(&fresh, &run)) && run.taken == 3);
+    template_record_free(&run);
+    /* Dropping the order: the same classes, with fewer nodes read through their capture's order. */
+    sh_package_link_test_offer_mutation(3);
+    template_record_compile(&t, recorded.record, recorded.record_length, 1, 0, &run);
+    sh_package_link_test_offer_mutation(0);
+    if (!run.ok || run.first.ordered >= restored.first.ordered)
+        fprintf(stderr, "record template mutation 3: ok %d, %zu ordered (restored %zu)\n", run.ok, run.first.ordered,
+            restored.first.ordered);
+    assert(run.ok && template_record_same(&fresh, &run) && run.taken == 3 && run.first.ordered < restored.first.ordered);
+    template_record_free(&run);
+    /* File a's third site becomes slot c instead of a repeat of a: the same path and count, other slots. Refused, made
+     * afresh, exact; taken without the slot comparison, its third key reads c#2 and the compile differs. */
+    template_case_open(&changed);
+    {
+        static const size_t binding_a[] = {0, 2, 4, 6, 8, 11};
+        for (size_t i = 0; i < sizeof(binding_a) / sizeof(binding_a[0]); i++)
+            changed.sites[binding_a[i]][0][2].slot = changed.sites[1][0][0].slot;
+    }
+    template_record_run changed_fresh;
+    sh_package_link_test_templates(0);
+    template_record_compile(&changed, NULL, 0, 0, 0, &changed_fresh);
+    sh_package_link_test_templates(1);
+    template_record_compile(&changed, recorded.record, recorded.record_length, 1, 0, &run);
+    assert(changed_fresh.ok && run.ok && template_record_same(&changed_fresh, &run));
+    if (run.taken != 2 || run.refused != 1 || run.first.template_restored != 2 || run.first.template_built != 1)
+        fprintf(stderr, "changed record templates: %zu taken, %zu refused, %zu restored, %zu made\n", run.taken, run.refused,
+            run.first.template_restored, run.first.template_built);
+    assert(run.taken == 2 && run.refused == 1 && run.first.template_restored == 2 && run.first.template_built == 1);
+    template_record_free(&run);
+    sh_package_link_test_offer_mutation(1);
+    template_record_compile(&changed, recorded.record, recorded.record_length, 1, 0, &run);
+    sh_package_link_test_offer_mutation(0);
+    if (run.ok && template_record_same(&changed_fresh, &run)) fprintf(stderr, "record template mutation 1 was not caught\n");
+    assert(run.ok && !template_record_same(&changed_fresh, &run) && run.taken == 3);
+    template_record_free(&run); template_record_free(&changed_fresh);
+    /* Malformed: truncated, or another magic. Dropped whole; every template made afresh. */
+    for (int damage = 0; damage < 2; damage++) {
+        unsigned char *bytes = malloc(recorded.record_length); assert(bytes);
+        memcpy(bytes, recorded.record, recorded.record_length);
+        if (damage) bytes[0] = 'X';
+        template_record_compile(&t, bytes, recorded.record_length - (damage ? 0 : 1), 0, 0, &run);
+        free(bytes);
+        assert(run.ok && template_record_same(&fresh, &run) && run.first.template_built == 3 &&
+            !run.first.template_restored && !run.taken);
+        template_record_free(&run);
+    }
+    {   /* The decoder's checks, on a hand-made record: valid; duplicate order; slot out of range; occurrence out of
+         * range (the first site, and 3 at the second); trailing bytes. */
+        static const unsigned char valid[2][3] = {{0, 0, 1}, {0, 2, 0}}, duplicate[2][3] = {{0, 0, 0}, {0, 2, 0}},
+            slot[2][3] = {{1, 0, 1}, {0, 2, 0}}, first[2][3] = {{0, 2, 1}, {0, 0, 0}}, third[2][3] = {{0, 0, 1}, {0, 3, 0}};
+        assert(template_record_offer(valid, 0) == 1);
+        assert(template_record_offer(duplicate, 0) == 0 && template_record_offer(slot, 0) == 0);
+        assert(template_record_offer(first, 0) == 0 && template_record_offer(third, 0) == 0);
+        assert(template_record_offer(valid, 1) == 0);
+    }
+    template_record_free(&fresh); template_record_free(&recorded); template_record_free(&restored);
+}
+
+/* ---- Binding history benchmark (--history-bench <units> <kib> [passes]) ----
+ * count units with one distinct kib-KiB file each are linked with a history
+ * attached: the first pass records every binding, later passes find them all
+ * held. Prints the linker's step times (the history step is the one measured),
+ * the history size and what the cache directory holds. */
+static int hb_resolve(void *context, size_t unit, const char *family, const char *name,
+    size_t *target, char *error, size_t capacity)
+{ (void)context; (void)unit; (void)family; (void)name; (void)target; (void)error; (void)capacity; return 0; }
+static unsigned char *hb_bind(void *context, size_t unit, const sh_compiled_resource *file,
+    const unsigned char *body, size_t length, sh_package_link_reference reference, void *reference_context,
+    size_t *output_length, char *error, size_t capacity)
+{
+    unsigned char *result = malloc(length + 1);
+    (void)context; (void)unit; (void)file; (void)reference; (void)reference_context; (void)error; (void)capacity;
+    if (!result) return NULL;
+    memcpy(result, body, length); result[length] = 0; *output_length = length; return result;
+}
+static int hb_assign(void *context, size_t unit, const unsigned char identity[32], int original_binding,
+    const sh_compiled_resource *const *files, size_t count, char **name, char ***paths, char *error, size_t capacity)
+{
+    char hex[17];
+    (void)context; (void)original_binding; (void)error; (void)capacity;
+    for (size_t i = 0; i < 8; i++) snprintf(hex + i * 2, 3, "%02x", identity[i]);
+    *name = malloc(64); if (!*name) return 0;
+    snprintf(*name, 64, "smp/%s/u%zu", hex, unit);
+    *paths = calloc(count, sizeof(**paths)); if (!*paths) return 0;
+    for (size_t i = 0; i < count; i++) {
+        size_t n = strlen(files[i]->engine_path) + 32;
+        (*paths)[i] = malloc(n); if (!(*paths)[i]) return 0;
+        snprintf((*paths)[i], n, "smp/%s/%s", hex, files[i]->engine_path);
+    }
+    return 1;
+}
+static int hb_check(void *context, const char *family, const char *name, const unsigned char binding[32],
+    int original, uint32_t *id, char *error, size_t capacity)
+{
+    (void)context; (void)family; (void)binding; (void)original; (void)error; (void)capacity;
+    *id = test_native_id(name); return SH_PACKAGE_LINK_REGISTRY_AVAILABLE;
+}
+static int history_benchmark(size_t count, size_t kib, int passes)
+{
+    char error[1024], temporary[MAX_PATH], directory[MAX_PATH + 40], line[256];
+    LARGE_INTEGER frequency, began, ended;
+    size_t size = kib * 1024;
+    assert(count && size && count < SIZE_MAX / size);
+    assert(GetTempPathA(sizeof(temporary), temporary));
+    snprintf(root, sizeof(root), "%ssmp-linker-hb-%lu-%llu", temporary, GetCurrentProcessId(), GetTickCount64());
+    assert(CreateDirectoryA(root, NULL));
+    create("overrides/bench/package.json", "{\"id\":\"bench\",\"name\":\"Bench\"}");
+    create("overrides/bench/assets/generated/decls/entitydef/props/one.decl", "{ }");
+    sh_package_sources *sources = sh_package_sources_scan(root, error, sizeof(error)); assert(sources);
+    snprintf(directory, sizeof(directory), "%s/package-cache", root); assert(CreateDirectoryA(directory, NULL));
+    snprintf(directory, sizeof(directory), "%s/package-cache/resources", root); assert(CreateDirectoryA(directory, NULL));
+    sh_package_compilation scope = {0}; scope.sources = sources;
+    sh_compiled_resource *parts = calloc(count, sizeof(*parts));
+    const sh_compiled_resource **files = calloc(count, sizeof(*files));
+    sh_package_link_unit *units = calloc(count, sizeof(*units));
+    char *strings = malloc(count * 64);
+    unsigned char *bodies = malloc(count * size);
+    assert(parts && files && units && strings && bodies);
+    for (size_t i = 0; i < count; i++) {
+        char *name = strings + i * 64, *path = name + 16;
+        unsigned char *body = bodies + i * size;
+        unsigned seed = (unsigned)(i * 2654435761u + 7u);
+        for (size_t k = 0; k < size; k++) { seed = seed * 1103515245u + 12345u; body[k] = (unsigned char)(seed >> 16); }
+        snprintf(name, 16, "u%zu", i); snprintf(path, 48, "generated/bench/u%zu.bin", i);
+        parts[i].engine_path = path; parts[i].body = body; parts[i].body_length = size; parts[i].source = SIZE_MAX;
+        files[i] = parts + i;
+        units[i] = (sh_package_link_unit){"bench", name, &scope, files + i, 1};
+    }
+    sh_package_link_registry registry = {NULL, hb_check};
+    sh_package_link_adapter adapter = {NULL, hb_resolve, hb_bind, hb_assign, &registry};
+    adapter.reuse = sh_package_link_reuse_open(count); assert(adapter.reuse);
+    sh_package_link_history *history = sh_package_link_history_open(); assert(history);
+    adapter.history = history;
+    QueryPerformanceFrequency(&frequency);
+    printf("history benchmark: %zu units of %zu KiB (%.1f MB of payload), private %.1f MB\n", count, kib,
+        (double)(count * size) / 1048576.0, (double)bench_private() / 1048576.0);
+    for (int pass = 0; pass < passes; pass++) {
+        sh_package_link_output out = {0};
+        QueryPerformanceCounter(&began);
+        int ok = sh_package_link(sources, units, count, &adapter, NULL, NULL, &out, error, sizeof(error));
+        QueryPerformanceCounter(&ended);
+        printf("pass %d: %s, %.1f ms total, %s; history %zu nodes; cache directory holds %zu entries; private %.1f MB\n",
+            pass + 1, ok ? "ok" : error, (double)(ended.QuadPart - began.QuadPart) * 1000.0 / (double)frequency.QuadPart,
+            sh_package_link_reuse_link_steps(adapter.reuse, line, sizeof(line)), sh_package_link_history_count(history),
+            directory_entries(directory), (double)bench_private() / 1048576.0);
+        sh_package_link_output_free(&out);
+        if (!ok) return 1;
+    }
+    sh_package_link_history_close(history);
+    printf("after close: cache directory holds %zu entries\n", directory_entries(directory));
+    sh_package_link_reuse_close(adapter.reuse);
+    free(parts); free((void *)files); free(units); free(strings); free(bodies);
+    sh_package_sources_free(sources);
+    RemoveDirectoryA(directory); snprintf(directory, sizeof(directory), "%s/package-cache", root); RemoveDirectoryA(directory);
+    cleanup();
+    return failures ? 1 : 0;
+}
+
+int main(int argc, char **argv)
+{
+    const char *folders[] = {"mars", "green", "duplicate"};
+    const char *entity = "{ edit = { material = \"materials/stone\"; health = 10; } }";
+    const char *colors[] = {"{ color {1,0,0,1} }", "{ color {0,1,0,1} }", "{ color {1,0,0,1} }"};
+    sh_package_sources *sources;
+    sh_package_scope views[3] = {{0}};
+    sh_package_compilation *scopes[3] = {0};
+    sh_package_link_inputs discovered = {0};
+    const sh_compiled_resource *files[7][2] = {{0}};
+    sh_package_link_output out = {0};
+    fixture f = {0};
+    sh_package_link_adapter adapter = {&f, resolve, bind_file, assign};
+    char temporary[MAX_PATH], relative[256], error[1024];
+    size_t entities[3], materials[3];
+    if (argc >= 3 && !strcmp(argv[1], "--restore-bench"))
+        return restore_benchmark((size_t)strtoull(argv[2], NULL, 10), argc > 3 && !strcmp(argv[3], "copy"),
+            argc > 4 ? atoi(argv[4]) : 4);
+    if (argc >= 4 && !strcmp(argv[1], "--history-bench"))
+        return history_benchmark((size_t)strtoull(argv[2], NULL, 10), (size_t)strtoull(argv[3], NULL, 10),
+            argc > 4 ? atoi(argv[4]) : 3);
+    assert(GetTempPathA(sizeof(temporary), temporary));
+    snprintf(root, sizeof(root), "%ssmp-linker-%lu-%llu", temporary, GetCurrentProcessId(), GetTickCount64());
+    assert(CreateDirectoryA(root, NULL));
+    for (size_t i = 0; i < 3; i++) {
+        snprintf(relative, sizeof(relative), "overrides/%s/package.json", folders[i]);
+        create(relative, "{\"id\":\"rocks\",\"name\":\"Rocks\"}");
+        snprintf(relative, sizeof(relative), "overrides/%s/assets/generated/decls/entitydef/props/rock.decl", folders[i]); create(relative, entity);
+        snprintf(relative, sizeof(relative), "overrides/%s/assets/generated/decls/material/materials/stone.decl", folders[i]); create(relative, colors[i]);
+        char stream[32780]; memset(stream, 'x', sizeof(stream) - 1); stream[sizeof(stream) - 1] = 0;
+        snprintf(relative, sizeof(relative), "overrides/%s/equal.bin", folders[i]); create(relative, stream);
+    }
+    /* Different delivery content does not turn identical native assets into
+     * another instance, but both supplying authored trees retain provenance. */
+    create("overrides/duplicate/readme.txt", "Another author's intact delivery bundle.");
+    sources = sh_package_sources_scan(root, error, sizeof(error)); assert(sources && sources->component_count == 3);
+    for (size_t s = 0; s < 3; s++) {
+        assert(sh_package_scope_open(sources, s, &views[s], error, sizeof(error)));
+        scopes[s] = sh_package_compile(&views[s].sources, NULL, NULL, error, sizeof(error));
+        assert(scopes[s] && scopes[s]->resource_count == 2);
+    }
+    assert(sh_package_link_inputs_open((const sh_package_compilation *const *)scopes, 3,
+        NULL, &discovered, error, sizeof(error)) && discovered.count == 6);
+    for (size_t n = 0; n < discovered.count; n++) f.units[n] = discovered.units[n];
+    for (size_t s = 0; s < 3; s++) {
+        entities[s] = sh_package_link_inputs_find(&discovered, s, "entitydef", "props/rock");
+        materials[s] = sh_package_link_inputs_find(&discovered, s, "material", "materials/stone");
+        assert(entities[s] != SIZE_MAX && materials[s] != SIZE_MAX);
+    }
+    f.count = 6;
+    native_collisions(sources, &f, &adapter, entities, materials);
+    repeated_native_bindings(sources, &f, entities, materials);
+    shared_replacement(sources, &f, materials);
+    streamed_suppliers(sources);
+    shared_member_variants(sources);
+    foreign_suppliers();
+    many_repeated_slots(sources);
+    occurrence_table_replay(sources);
+    repaired_order_names(sources);
+    repeated_field_slots();
+    campaign_originals(sources);
+    derived_members(sources);
+    assert(sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &out, error, sizeof(error)));
+    assert(out.classes.count == 4 && out.compiled->resource_count == 4 && out.compiled->duplicate_count == 2);
+    assert(out.classes.nodes[entities[0]] == out.classes.nodes[entities[2]]);
+    assert(out.classes.nodes[entities[0]] != out.classes.nodes[entities[1]]);
+    /* Equal bytes with another observable meaning (for a font, its native name
+     * hash, R-309) are separate forms: semantics split the class and its name. */
+    {
+        sh_package_link_output split = {0};
+        assert(out.classes.nodes[materials[0]] == out.classes.nodes[materials[2]]);
+        f.units[materials[2]].semantics[0] ^= 1;
+        assert(sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &split, error, sizeof(error)));
+        assert(split.classes.nodes[materials[0]] != split.classes.nodes[materials[2]] &&
+            strcmp(split.names[split.classes.nodes[materials[0]]], split.names[split.classes.nodes[materials[2]]]));
+        f.units[materials[2]].semantics[0] ^= 1;
+        sh_package_link_output_free(&split);
+    }
+    /* Two unequal classes that both keep one native name refuse the link, and
+     * the report names both claimants: their classes, certification, sources,
+     * payloads and the bound dependencies that differ. */
+    {
+        sh_package_link_unit saved[12];
+        memcpy(saved, f.units, sizeof(saved));
+        f.units[entities[0]].fixed_name = 1; f.units[entities[1]].fixed_name = 1;
+        adapter.note = collision_note; adapter.describe = collision_describe; collision_notes[0] = 0;
+        assert(!sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &out, error, sizeof(error)));
+        if (!strstr(error, "exhausted") || getenv("SH_LINKER_TEST_NOTES"))
+            fprintf(stderr, "collision refusal: %s\nnotes:\n%s", error, collision_notes);
+        assert(strstr(error, "exhausted") && strstr(error, "props/rock") && !out.compiled);
+        assert(strstr(collision_notes, "collision claimant: unit ") && strstr(collision_notes, "collision holder: unit "));
+        assert(strstr(collision_notes, "collision claimant source: fixture unit ") &&
+            strstr(collision_notes, "collision holder source: fixture unit "));
+        assert(strstr(collision_notes, "collision claimant differs (") && strstr(collision_notes, "materials/stone") &&
+            strstr(collision_notes, "collision claimant file ") && strstr(collision_notes, "collision holder edges ("));
+        adapter.note = NULL; adapter.describe = NULL;
+        memcpy(f.units, saved, sizeof(saved));
+        assert(sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &out, error, sizeof(error)));
+    }
+    {
+        sh_package_link_classes captured = {0};
+        sh_package_link_adapter inspect = {&f, resolve, bind_file};
+        int assigned = f.assigned;
+        assert(sh_package_link_identify_units(f.units, f.count, &inspect, &captured, error, sizeof(error)));
+        assert(f.assigned == assigned && captured.count == out.classes.count);
+        for (size_t i = 0; i < f.count; i++)
+            assert(!memcmp(captured.identities[captured.nodes[i]],
+                out.classes.identities[out.classes.nodes[i]], 32));
+        assert(captured.nodes[entities[0]] == captured.nodes[entities[2]]);
+        assert(captured.nodes[entities[0]] != captured.nodes[entities[1]]);
+        f.unresolved = 1;
+        assert(!sh_package_link_identify_units(f.units, f.count, &inspect, &captured, error, sizeof(error)));
+        assert(!captured.count && !captured.nodes && *error && f.assigned == assigned);
+        f.unresolved = 0;
+        assert(sh_package_link_identify_units(NULL, 0, &inspect, &captured, error, sizeof(error)));
+        assert(!captured.node_count && !captured.count);
+        sh_package_link_classes_free(&captured);
+    }
+    {
+        /* Appending resource units must preserve completed captures for the
+         * unchanged prefix, while new units and invalidated units are read. */
+        sh_package_link_classes prefix = {0}, grown = {0};
+        sh_package_link_reuse *reuse = sh_package_link_reuse_open(2);
+        sh_package_link_adapter inspect = {&f, resolve, bind_file};
+        inspect.reuse = reuse;
+        size_t bound = f.bound;
+        assert(reuse && sh_package_link_identify_units(f.units, 2, &inspect, &prefix, error, sizeof(error)));
+        assert(f.bound - bound == 2);
+        assert(sh_package_link_reuse_reserve(reuse, f.count));
+        bound = f.bound;
+        assert(sh_package_link_identify_units(f.units, f.count, &inspect, &grown, error, sizeof(error)));
+        assert(f.bound - bound == f.count - 2 && grown.count == out.classes.count);
+        for (size_t i = 0; i < f.count; i++)
+            assert(!memcmp(grown.identities[grown.nodes[i]], out.classes.identities[out.classes.nodes[i]], 32));
+        assert(sh_package_link_reuse_reserve(reuse, 1)); /* Reserving less never shrinks. */
+        assert(!sh_package_link_reuse_reserve(reuse, SIZE_MAX));
+        bound = f.bound;
+        assert(sh_package_link_identify_units(f.units, f.count, &inspect, &grown, error, sizeof(error)));
+        assert(f.bound == bound); /* A failed reservation retains every capture. */
+        sh_package_link_reuse_invalidate(reuse, materials[0]);
+        assert(sh_package_link_reuse_reserve(reuse, f.count + 16));
+        assert(sh_package_link_identify_units(f.units, f.count, &inspect, &grown, error, sizeof(error)));
+        assert(f.bound - bound == 1);
+        sh_package_link_reuse_close(reuse);
+        sh_package_link_classes_free(&prefix); sh_package_link_classes_free(&grown);
+    }
+    {
+        /* Later passes reuse each valid unit's capture and exact-byte proofs:
+         * nothing is bound again and the classes are identical. An invalidated
+         * unit is captured afresh from its current bytes. */
+        sh_package_link_classes first = {0}, again = {0};
+        sh_package_link_reuse *reuse = sh_package_link_reuse_open(f.count);
+        sh_package_link_adapter inspect = {&f, resolve, bind_file};
+        inspect.reuse = reuse;
+        size_t bound = f.bound;
+        assert(reuse && sh_package_link_identify_units(f.units, f.count, &inspect, &first, error, sizeof(error)));
+        assert(f.bound - bound == f.count && first.count == 4);
+        bound = f.bound;
+        assert(sh_package_link_identify_units(f.units, f.count, &inspect, &again, error, sizeof(error)));
+        assert(f.bound == bound && again.count == first.count);
+        for (size_t i = 0; i < f.count; i++)
+            assert(again.nodes[i] == first.nodes[i] &&
+                !memcmp(again.identities[again.nodes[i]], first.identities[first.nodes[i]], 32));
+        /* The full link binds its replay only; its classes match the passes. */
+        sh_package_link_output linked = {0};
+        inspect.assign = assign; bound = f.bound;
+        assert(sh_package_link(sources, f.units, f.count, &inspect, NULL, NULL, &linked, error, sizeof(error)));
+        assert(linked.classes.count == first.count && f.bound - bound < 2 * f.count);
+        sh_package_link_output_free(&linked); inspect.assign = NULL;
+        /* Green's stone becomes red: stale captures would keep four classes. */
+        sh_compiled_resource *stone = (sh_compiled_resource *)f.units[materials[1]].files[0];
+        unsigned char kept[64]; size_t length = stone->body_length;
+        assert(stone->body && length == strlen(colors[1]) && length < sizeof(kept));
+        memcpy(kept, stone->body, length); memcpy(stone->body, colors[0], length);
+        bound = f.bound;
+        assert(sh_package_link_identify_units(f.units, f.count, &inspect, &again, error, sizeof(error)));
+        assert(f.bound == bound && again.count == 4);
+        sh_package_link_reuse_invalidate(reuse, materials[1]);
+        assert(sh_package_link_identify_units(f.units, f.count, &inspect, &again, error, sizeof(error)));
+        assert(f.bound - bound == 1 && again.count == 2);
+        assert(again.nodes[entities[0]] == again.nodes[entities[1]] && again.nodes[materials[0]] == again.nodes[materials[1]]);
+        memcpy(stone->body, kept, length);
+        bound = f.bound;
+        assert(sh_package_link_identify_units(f.units, f.count, &inspect, &again, error, sizeof(error)));
+        assert(f.bound - bound == 1 && again.count == 4);
+        sh_package_link_reuse_close(reuse);
+        sh_package_link_classes_free(&first); sh_package_link_classes_free(&again);
+    }
+    {
+        /* A stable adapter lets projection skip replaying units held in
+         * memory: a class whose targets all keep their names (the materials)
+         * projects its own bytes, duplicates are not replayed, and classes
+         * with renamed references (the entities) still replay. The linked
+         * output is identical. */
+        sh_package_link_output plain = {0}, skipped = {0};
+        size_t bound = f.bound;
+        assert(sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &plain, error, sizeof(error)));
+        size_t replayed = f.bound - bound;
+        adapter.stable = stable_units; bound = f.bound;
+        assert(sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &skipped, error, sizeof(error)));
+        adapter.stable = NULL;
+        /* Identify binds all six units; projection replays the two entity
+         * classes only, instead of four classes and two duplicates. */
+        assert(replayed == 12 && f.bound - bound == 8);
+        assert(plain.classes.count == skipped.classes.count &&
+            plain.compiled->resource_count == skipped.compiled->resource_count);
+        for (size_t i = 0; i < f.count; i++)
+            assert(!strcmp(plain.names[plain.classes.nodes[i]], skipped.names[skipped.classes.nodes[i]]));
+        for (size_t i = 0; i < plain.compiled->resource_count; i++) {
+            const sh_compiled_resource *a = plain.compiled->resources + i, *b = skipped.compiled->resources + i;
+            size_t alen = 0, blen = 0;
+            unsigned char *x = sh_package_compilation_read(plain.compiled, a, SIZE_MAX, &alen, error, sizeof(error));
+            unsigned char *y = sh_package_compilation_read(skipped.compiled, b, SIZE_MAX, &blen, error, sizeof(error));
+            assert(!strcmp(a->engine_path, b->engine_path) && x && y && alen == blen && !memcmp(x, y, alen));
+            assert(a->source_count == b->source_count && a->native_original == b->native_original);
+            free(x); free(y);
+        }
+        sh_package_link_output_free(&plain); sh_package_link_output_free(&skipped);
+    }
+    {
+        const char map[] = "{\"variables\":{\"allocCount\":[0,0,0,0,0],\"string\":[]}}";
+        sh_package_provenance contexts = {0}, saved = {0}, restored = {0};
+        size_t unit_contexts[7], roots[3] = {entities[0], entities[2], entities[0]}, length;
+        int present; char *carrier;
+        for (size_t s = 0; s < 3; s++) {
+            const sh_package_component *component = sources->components + s;
+            size_t context = sh_package_provenance_context_add(&contexts, SH_PACKAGE_CONTEXT_ISOLATED,
+                sources->fingerprints + component->owner, 1, component->relative);
+            assert(context != SIZE_MAX); unit_contexts[s * 2] = unit_contexts[s * 2 + 1] = context;
+        }
+        assert(sh_package_link_provenance(&out, f.units, f.count, &contexts, unit_contexts,
+            roots, 3, &saved, error, sizeof(error)));
+        /* Exact duplicate assets share one binding, retaining both distinct
+         * authored trees. The unused green variant is not embedded. */
+        assert(saved.binding_count == 1 && saved.context_count == 2 && saved.bindings[0].context_count == 2);
+        assert(!strcmp(saved.bindings[0].name, out.names[out.classes.nodes[entities[0]]]));
+        carrier = sh_map_provenance_write(map, sizeof(map) - 1, &saved, &length, error, sizeof(error));
+        assert(carrier && sh_map_provenance_read(carrier, length, &restored, &present, error, sizeof(error)) && present);
+        assert(restored.binding_count == 1 && !strcmp(restored.bindings[0].name, saved.bindings[0].name));
+        HeapFree(GetProcessHeap(), 0, carrier);
+        roots[1] = entities[1];
+        assert(sh_package_link_provenance(&out, f.units, f.count, &contexts, unit_contexts,
+            roots, 2, &saved, error, sizeof(error)) && saved.binding_count == 2 && saved.context_count == 3);
+        assert(sh_package_link_provenance(&out, f.units, f.count, &contexts, unit_contexts,
+            NULL, 0, &saved, error, sizeof(error)) && !saved.binding_count && !saved.context_count);
+        roots[0] = f.count;
+        assert(!sh_package_link_provenance(&out, f.units, f.count, &contexts, unit_contexts,
+            roots, 1, &saved, error, sizeof(error)) && !saved.binding_count && !saved.context_count);
+        unit_contexts[entities[0]] = SIZE_MAX; roots[0] = entities[0];
+        assert(!sh_package_link_provenance(&out, f.units, f.count, &contexts, unit_contexts,
+            roots, 1, &saved, error, sizeof(error)) && !saved.binding_count);
+        sh_package_provenance_free(&contexts); sh_package_provenance_free(&saved); sh_package_provenance_free(&restored);
+    }
+    for (size_t s = 0; s < 3; s++) {
+        char path[256]; size_t length;
+        snprintf(path, sizeof(path), "generated/decls/entitydef/%s.decl", out.names[out.classes.nodes[entities[s]]]);
+        const sh_compiled_resource *resource = sh_package_compilation_find(out.compiled, path);
+        unsigned char *body = sh_package_compilation_read(out.compiled, resource, SIZE_MAX, &length, error, sizeof(error));
+        assert(body && strstr((char *)body, out.names[out.classes.nodes[materials[s]]]) && strstr((char *)body, "health = 10"));
+        assert(resource->source_count == (s == 1 ? 1 : 2)); free(body);
+    }
+    {
+        int present = 1; sh_package_missing missing = {0};
+        assert(sh_package_compilation_payload_missing(out.compiled, available, &present, &missing, error, sizeof(error)) && !missing.count);
+        present = 0;
+        assert(sh_package_compilation_payload_missing(out.compiled, available, &present, &missing, error, sizeof(error)));
+        assert(missing.count == 2 && sh_package_owners_count(&missing.packages) == 3);
+        sh_package_missing_free(&missing);
+    }
+    /* A new independent native identity must not rename existing variants. */
+    char *stable = _strdup(out.names[out.classes.nodes[entities[0]]]); assert(stable);
+    f.units[6] = (sh_package_link_unit){"image", "native/white", NULL, NULL, 0}; f.count = 7;
+    assert(sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &out, error, sizeof(error)));
+    assert(out.classes.count == 5 && out.compiled->resource_count == 4 &&
+        !strcmp(stable, out.names[out.classes.nodes[entities[0]]])); free(stable);
+    f.count = 6;
+    /* Failures clear the previous candidate, never publishing a partial set. */
+    for (size_t i = 0; i < f.count; i++) f.units[i].original_binding = 1;
+    f.units[materials[1]].original_binding = 0;
+    assert(sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &out, error, sizeof(error)));
+    for (size_t i = 0; i < 3; i++) {
+        size_t entity = out.classes.representatives[out.classes.nodes[entities[i]]];
+        size_t material = out.classes.representatives[out.classes.nodes[materials[i]]];
+        assert(f.original_bindings[entity] == (i != 1));
+        assert(f.original_bindings[material] == (i != 1));
+    }
+    /* An uncertified duplicate cannot inherit its representative's certificate.
+     * Its parents must become variants too, regardless of input order. */
+    f.units[materials[2]].original_binding = 0;
+    assert(sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &out, error, sizeof(error)));
+    for (size_t i = 0; i < out.classes.count; i++) assert(!f.original_bindings[out.classes.representatives[i]]);
+    for (size_t i = 0; i < f.count; i++) f.units[i].original_binding = 0;
+    int *faults[] = {&f.unresolved, &f.collision, &f.omit_replay, &f.bad_inspection, &f.abort_bind, &f.changed_source};
+    for (size_t i = 0; i < sizeof(faults) / sizeof(faults[0]); i++) {
+        *faults[i] = 1; f.assigned = 0;
+        assert(!sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &out, error, sizeof(error)));
+        assert(*error && !out.compiled && !out.names && !out.classes.count); *faults[i] = 0;
+    }
+    /* A single manager with several physical files compares the complete set,
+     * independent of source enumeration order. No text references in this unit. */
+    sh_compiled_resource parts[4] = {0};
+    sh_package_compilation fake = {0}; fake.sources = sources;
+    for (size_t i = 0; i < 4; i++) {
+        parts[i].engine_path = i % 2 ? "shader/fragment.bin" : "shader/vertex.bin";
+        parts[i].body = (unsigned char *)(i % 2 ? "fragment" : "vertex"); parts[i].body_length = strlen((char *)parts[i].body);
+        parts[i].source = SIZE_MAX;
+    }
+    files[0][0] = &parts[0]; files[0][1] = &parts[1];
+    files[1][0] = &parts[3]; files[1][1] = &parts[2];
+    f.units[0] = (sh_package_link_unit){"renderprog", "shared", &fake, files[0], 2};
+    f.units[1] = (sh_package_link_unit){"renderprog", "shared", &fake, files[1], 2}; f.count = 2;
+    assert(sh_package_link(sources, f.units, 2, &adapter, NULL, NULL, &out, error, sizeof(error)));
+    assert(out.classes.count == 1 && out.compiled->resource_count == 2 && out.compiled->duplicate_count == 2);
+    {
+        sh_package_changes changes = {0};
+        sh_package_sources empty_sources = {0};
+        sh_package_compilation empty = {0}; empty.sources = &empty_sources;
+        sh_package_compilation *copy = sh_package_compilation_overlay(out.compiled, &empty, error, sizeof(error));
+        assert(copy && sh_package_compilation_changes(NULL, copy, &changes, error, sizeof(error)));
+        assert(changes.count == 2 && changes.added_count == 1 && changes.identities_complete);
+        for (size_t i = 0; i < copy->resource_count; i++) {
+            const sh_compiled_resource *resource = copy->resources + i;
+            assert(!resource->type && !resource->name); /* Never a declaration. */
+            assert(resource->native_type && !strcmp(resource->native_type, "renderprog"));
+            assert(resource->native_name && !strcmp(resource->native_name, out.names[0]));
+            assert(resource->native_name != out.compiled->resources[i].native_name);
+            assert(changes.items[i].type && !strcmp(changes.items[i].type, "renderprog"));
+        }
+        sh_package_compilation_free(copy); sh_package_changes_free(&changes);
+    }
+    parts[3].body = (unsigned char *)"different"; parts[3].body_length = 9;
+    assert(sh_package_link(sources, f.units, 2, &adapter, NULL, NULL, &out, error, sizeof(error)));
+    assert(out.classes.count == 2 && out.compiled->resource_count == 4);
+    files[1][1] = files[1][0];
+    assert(!sh_package_link(sources, f.units, 2, &adapter, NULL, NULL, &out, error, sizeof(error)) && *error);
+    assert(sh_package_link(sources, NULL, 0, &adapter, NULL, NULL, &out, error, sizeof(error)));
+    assert(out.compiled && !out.compiled->resource_count && !out.classes.count);
+    sh_package_link_output_free(&out);
+    {
+        sh_compiled_resource declaration = {0};
+        declaration.engine_path = "generated/decls/material/original.decl";
+        declaration.type = "material"; declaration.name = "original"; declaration.source = SIZE_MAX;
+        declaration.body = (unsigned char *)"{}"; declaration.body_length = 2;
+        const sh_compiled_resource *input = &declaration;
+        sh_package_resource_projection projection = {"generated/decls/material/linked.decl", &input, 1,
+            NULL, 0, "model", "linked"};
+        assert(!sh_package_compilation_project(sources, &projection, 1, NULL, NULL, error, sizeof(error)));
+        assert(strstr(error, "disagrees with declaration path"));
+        projection.native_type = "material"; projection.native_name = "linked";
+        sh_package_compilation *projected = sh_package_compilation_project(sources, &projection, 1,
+            NULL, NULL, error, sizeof(error));
+        assert(projected && !strcmp(projected->resources[0].native_name, "linked"));
+        sh_package_compilation_free(projected);
+        projection.native_name = NULL;
+        assert(!sh_package_compilation_project(sources, &projection, 1, NULL, NULL, error, sizeof(error)));
+    }
+    original_aliases(sources);
+    exact_witnesses(sources);
+    implicit_ownership(sources);
+    coupled_members(sources);
+    implicit_bindings(sources);
+    conditional_bindings(sources);
+    borrowed_restore_equivalence(sources);
+    template_equivalence();
+    template_record_equivalence();
+    pass_meters(sources);
+    sh_package_link_inputs_free(&discovered);
+    for (size_t i = 0; i < 3; i++) { sh_package_compilation_free(scopes[i]); sh_package_scope_close(&views[i]); }
+    for (size_t i = 0; i < sources->file_count; i++) if (!sources->files[i].directory) assert(sh_package_source_verify(&sources->files[i]));
+    sh_package_sources_free(sources); cleanup();
+    puts("package linker tests passed"); return failures != 0;
+}

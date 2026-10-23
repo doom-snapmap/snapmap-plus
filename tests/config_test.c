@@ -18,10 +18,20 @@ static unsigned long g_root_serial;
     }                                                                           \
 } while (0)
 
+/* Every backend log line, for the controls that check what recovery reports. */
+static char g_log[1 << 16];
+static size_t g_log_length;
 void backend_log(const char *line)
 {
-    (void)line;
+    size_t n = strlen(line);
+    if (g_log_length + n + 2 >= sizeof(g_log)) return;
+    memcpy(g_log + g_log_length, line, n);
+    g_log_length += n;
+    g_log[g_log_length++] = '\n';
+    g_log[g_log_length] = 0;
 }
+static void log_reset(void) { g_log_length = 0; g_log[0] = 0; }
+static int log_contains(const char *text) { return strstr(g_log, text) != NULL; }
 
 static int make_temp_root(wchar_t *out, size_t capacity)
 {
@@ -604,12 +614,13 @@ static void test_accepts_bom_and_canonicalizes_registered_strings(void)
     cleanup_temp_root(root);
 }
 
-static void test_corrupt_file_is_backed_up_and_replaced(void)
+/* A damaged file is replaced with defaults and its text goes to the log; no
+ * .corrupt.json copy is written. */
+static void test_corrupt_file_is_replaced_and_logged(void)
 {
-    wchar_t root[MAX_PATH], dir[MAX_PATH], path[MAX_PATH], backup[MAX_PATH];
+    wchar_t root[MAX_PATH], dir[MAX_PATH], path[MAX_PATH];
     char value[16];
     char *disk = NULL;
-    char *saved = NULL;
     unsigned int flags = 0;
     const char corrupt[] =
         "{\"schema_version\":1,\"settings\":{\"theme\":\"dark\",\"same\":1,"
@@ -620,7 +631,7 @@ static void test_corrupt_file_is_backed_up_and_replaced(void)
     CHECK(write_file(path, corrupt, sizeof(corrupt) - 1));
     sh_config_test_reset();
     sh_config_test_set_local_appdata(root);
-    sh_config_test_set_timestamp(L"20260722-143012");
+    log_reset();
 
     CHECK(sh_config_init() == 1);
     CHECK(sh_config_get_json("theme", value, (int)sizeof(value), &flags) == 7);
@@ -629,13 +640,12 @@ static void test_corrupt_file_is_backed_up_and_replaced(void)
     CHECK((flags & SH_CONFIG_STATUS_VOLATILE) == 0);
     CHECK(read_file(path, &disk, NULL));
     CHECK(disk && strstr(disk, "\"theme\": \"light\"") != NULL);
-    _snwprintf_s(backup, MAX_PATH, _TRUNCATE,
-                 L"%s\\config.20260722-143012.corrupt.json", dir);
-    CHECK(read_file(backup, &saved, NULL));
-    CHECK(saved && strcmp(saved, corrupt) == 0);
+    CHECK(count_files_with_prefix(dir, L"config.") == 1); /* config.json alone */
+    CHECK(log_contains(corrupt));
+    CHECK(log_contains("config: corrupt file is 66 bytes; the first 66 follow"));
+    CHECK(log_contains("config: corrupt file replaced with defaults"));
 
     free(disk);
-    free(saved);
     sh_config_test_reset();
     cleanup_temp_root(root);
 }
@@ -912,7 +922,6 @@ static void test_startup_restores_interrupted_existing_replace(void)
 static void test_failed_corrupt_recovery_leaves_original_untouched(void)
 {
     static const sh_config_test_fault faults[] = {
-        SH_CONFIG_TEST_FAIL_BACKUP,
         SH_CONFIG_TEST_FAIL_REPLACE
     };
     const char corrupt[] = "{\"schema_version\":1,\"settings\":";
@@ -928,7 +937,6 @@ static void test_failed_corrupt_recovery_leaves_original_untouched(void)
         CHECK(write_file(path, corrupt, sizeof(corrupt) - 1));
         sh_config_test_reset();
         sh_config_test_set_local_appdata(root);
-        sh_config_test_set_timestamp(L"20260722-150000");
         sh_config_test_fail_next(faults[i]);
 
         CHECK(sh_config_init() == 0);
@@ -939,7 +947,7 @@ static void test_failed_corrupt_recovery_leaves_original_untouched(void)
         CHECK(disk && memcmp(disk, corrupt, sizeof(corrupt) - 1) == 0);
         CHECK(disk && strlen(disk) == sizeof(corrupt) - 1);
         CHECK(count_files_with_prefix(dir, L"config.json.tmp.") == 0);
-        CHECK(count_files_with_prefix(dir, L"config.20260722-150000") == 0);
+        CHECK(count_files_with_prefix(dir, L"config.") == 1);
 
         free(disk);
         sh_config_test_reset();
@@ -949,9 +957,8 @@ static void test_failed_corrupt_recovery_leaves_original_untouched(void)
 
 static void test_partial_replace_result_is_reconciled_from_disk(void)
 {
-    wchar_t root[MAX_PATH], dir[MAX_PATH], path[MAX_PATH], backup[MAX_PATH];
+    wchar_t root[MAX_PATH], dir[MAX_PATH], path[MAX_PATH];
     char *disk = NULL;
-    char *saved = NULL;
     unsigned int flags = 0;
     const char corrupt[] = "{\"schema_version\":1,\"settings\":";
 
@@ -960,7 +967,6 @@ static void test_partial_replace_result_is_reconciled_from_disk(void)
     CHECK(write_file(path, corrupt, sizeof(corrupt) - 1));
     sh_config_test_reset();
     sh_config_test_set_local_appdata(root);
-    sh_config_test_set_timestamp(L"20260722-150500");
     sh_config_test_fail_next(SH_CONFIG_TEST_FAIL_REPLACE_AFTER_COMMIT);
 
     CHECK(sh_config_init() == 1);
@@ -969,23 +975,21 @@ static void test_partial_replace_result_is_reconciled_from_disk(void)
     CHECK((flags & SH_CONFIG_STATUS_VOLATILE) == 0);
     CHECK(read_file(path, &disk, NULL));
     CHECK(disk && strstr(disk, "\"theme\": \"light\"") != NULL);
-    _snwprintf_s(backup, MAX_PATH, _TRUNCATE,
-                 L"%s\\config.20260722-150500.corrupt.json", dir);
-    CHECK(read_file(backup, &saved, NULL));
-    CHECK(saved && strcmp(saved, corrupt) == 0);
     CHECK(count_files_with_prefix(dir, L"config.json.tmp.") == 0);
+    CHECK(count_files_with_prefix(dir, L"config.") == 1);
 
     free(disk);
-    free(saved);
     sh_config_test_reset();
     cleanup_temp_root(root);
 }
 
-static void test_oversized_file_is_recovered_with_exact_backup(void)
+/* An oversized file was never read whole: the first 4 KB are read back for
+ * the log, nothing is copied, and defaults replace it. */
+static void test_oversized_file_is_replaced_and_logged(void)
 {
-    wchar_t root[MAX_PATH], dir[MAX_PATH], path[MAX_PATH], backup[MAX_PATH];
+    wchar_t root[MAX_PATH], dir[MAX_PATH], path[MAX_PATH];
     char *oversized;
-    char *saved = NULL;
+    char *disk = NULL;
     size_t length = SH_CONFIG_MAX_FILE_BYTES + 1u;
     unsigned int flags = 0;
 
@@ -993,27 +997,27 @@ static void test_oversized_file_is_recovered_with_exact_backup(void)
     CHECK(oversized != NULL);
     if (!oversized) return;
     memset(oversized, 'x', length);
+    memcpy(oversized, "{\"schema_version\":1,", 20);
     CHECK(make_temp_root(root, MAX_PATH));
     CHECK(make_config_dir(root, dir, path));
     CHECK(write_file(path, oversized, length));
     sh_config_test_reset();
     sh_config_test_set_local_appdata(root);
-    sh_config_test_set_timestamp(L"20260722-151500");
+    log_reset();
 
     CHECK(sh_config_init() == 1);
     CHECK(sh_config_get_json("theme", NULL, 0, &flags) == 7);
     CHECK((flags & SH_CONFIG_STATUS_RECOVERED_CORRUPT) != 0);
-    _snwprintf_s(backup, MAX_PATH, _TRUNCATE,
-                 L"%s\\config.20260722-151500.corrupt.json", dir);
-    {
-        size_t saved_length = 0;
-        CHECK(read_file(backup, &saved, &saved_length));
-        CHECK(saved_length == length);
-        CHECK(saved && memcmp(saved, oversized, length) == 0);
-    }
+    CHECK(read_file(path, &disk, NULL));
+    CHECK(disk && strstr(disk, "\"theme\": \"light\"") != NULL);
     CHECK(count_files_with_prefix(dir, L"config.json.tmp.") == 0);
+    CHECK(count_files_with_prefix(dir, L"config.") == 1);
+    CHECK(log_contains("config: corrupt file is 65537 bytes; the first 4096 follow"));
+    CHECK(log_contains("config: corrupt text 0-800: {\"schema_version\":1,xxxx"));
+    CHECK(log_contains("config: corrupt text 4000-4096: xxxx"));
+    CHECK(!log_contains("corrupt text 4096-"));
 
-    free(saved);
+    free(disk);
     free(oversized);
     sh_config_test_reset();
     cleanup_temp_root(root);
@@ -1042,52 +1046,18 @@ static void test_structural_errors_are_recovered(void)
         CHECK(write_file(path, documents[i], strlen(documents[i])));
         sh_config_test_reset();
         sh_config_test_set_local_appdata(root);
-        sh_config_test_set_timestamp(L"20260722-160000");
 
         CHECK(sh_config_init() == 1);
         CHECK(sh_config_get_json("theme", NULL, 0, &flags) == 7);
         CHECK((flags & SH_CONFIG_STATUS_RECOVERED_CORRUPT) != 0);
         CHECK(read_file(path, &disk, NULL));
         CHECK(disk && strstr(disk, "\"theme\": \"light\"") != NULL);
-        CHECK(count_files_with_prefix(dir, L"config.20260722-160000") == 1);
+        CHECK(count_files_with_prefix(dir, L"config.") == 1);
 
         free(disk);
         sh_config_test_reset();
         cleanup_temp_root(root);
     }
-}
-
-static void test_backup_name_collision_never_overwrites_previous_recovery(void)
-{
-    wchar_t root[MAX_PATH], dir[MAX_PATH], path[MAX_PATH];
-    wchar_t first_backup[MAX_PATH], second_backup[MAX_PATH];
-    char *saved = NULL;
-    const char previous[] = "previous recovery";
-    const char corrupt[] = "{\"schema_version\":";
-
-    CHECK(make_temp_root(root, MAX_PATH));
-    CHECK(make_config_dir(root, dir, path));
-    _snwprintf_s(first_backup, MAX_PATH, _TRUNCATE,
-                 L"%s\\config.20260722-161500.corrupt.json", dir);
-    _snwprintf_s(second_backup, MAX_PATH, _TRUNCATE,
-                 L"%s\\config.20260722-161500.1.corrupt.json", dir);
-    CHECK(write_file(first_backup, previous, sizeof(previous) - 1));
-    CHECK(write_file(path, corrupt, sizeof(corrupt) - 1));
-    sh_config_test_reset();
-    sh_config_test_set_local_appdata(root);
-    sh_config_test_set_timestamp(L"20260722-161500");
-
-    CHECK(sh_config_init() == 1);
-    CHECK(read_file(first_backup, &saved, NULL));
-    CHECK(saved && strcmp(saved, previous) == 0);
-    free(saved);
-    saved = NULL;
-    CHECK(read_file(second_backup, &saved, NULL));
-    CHECK(saved && strcmp(saved, corrupt) == 0);
-
-    free(saved);
-    sh_config_test_reset();
-    cleanup_temp_root(root);
 }
 
 static void test_rejects_oversized_api_inputs_without_mutation(void)
@@ -1293,7 +1263,7 @@ int wmain(int argc, wchar_t **argv)
     test_repairs_missing_and_invalid_registered_values();
     test_setter_rereads_external_edits_and_recreates_deleted_file();
     test_accepts_bom_and_canonicalizes_registered_strings();
-    test_corrupt_file_is_backed_up_and_replaced();
+    test_corrupt_file_is_replaced_and_logged();
     test_newer_schema_is_never_modified();
     test_first_write_failures_use_volatile_defaults_and_clean_temp();
     test_mutation_failures_keep_old_file_and_session_value();
@@ -1303,9 +1273,8 @@ int wmain(int argc, wchar_t **argv)
     test_startup_restores_interrupted_existing_replace();
     test_failed_corrupt_recovery_leaves_original_untouched();
     test_partial_replace_result_is_reconciled_from_disk();
-    test_oversized_file_is_recovered_with_exact_backup();
+    test_oversized_file_is_replaced_and_logged();
     test_structural_errors_are_recovered();
-    test_backup_name_collision_never_overwrites_previous_recovery();
     test_rejects_oversized_api_inputs_without_mutation();
     test_process_writers_are_serialized();
     test_shared_interface_uses_registered_config_service();

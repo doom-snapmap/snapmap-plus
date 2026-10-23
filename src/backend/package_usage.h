@@ -20,13 +20,29 @@ typedef int (*sh_package_state_visitor)(void *context, const char *class_name,
     const char *inherit, const char *edit, size_t length);
 int sh_package_map_states(const char *json, size_t length,
     sh_package_state_visitor visitor, void *context);
+/* Inline edit spans borrow the map buffer and need not end in NUL. The ordinary
+ * state visitor above retains its separate, terminated-string contract. */
+int sh_package_map_state_sites(const char *json, size_t length,
+    sh_package_state_visitor visitor, void *context);
 int sh_package_map_references(const char *json, size_t length,
                               sh_package_reference_visitor visitor, void *context);
+/* Same typed roots, with the native pointer class and exact JSON string span.
+ * Spans borrow the original map buffer, like map_state_sites;
+ * callers may rebind those sites without reserializing unrelated map text. */
+typedef int (*sh_package_reference_site_visitor)(void *context, const char *native_class,
+    const char *type, const char *name, const char *json, size_t length);
+int sh_package_map_reference_sites(const char *json, size_t length,
+    sh_package_reference_site_visitor visitor, void *context);
 /* Select roots and their known gameplay dependencies. Coverage is separate
  * from success: missing graph records do not erase known owners or make a
  * vanilla map fail. An interrupted walk or invalid JSON returns 0 and clears
  * both outputs. Initialize owner sets to zero and release them with
  * sh_package_owners_free; repeat calls replace their contents. The caller holds a stable compilation; no engine calls occur. */
+/* Map traversal work since the last reset: roots met and those already
+ * walked in the same traversal, resource-graph walks, identity collects and
+ * those already collected. Diagnostics for a caller's timing line. */
+typedef struct sh_package_usage_stats { size_t roots, roots_repeated, walks, collects, collects_repeated; } sh_package_usage_stats;
+void sh_package_usage_stats_take(sh_package_usage_stats *out, int reset);
 int sh_package_map_owners(const sh_package_compilation *compiled,
                                const sh_resource_catalog *catalog,
                                const char *json, size_t length,

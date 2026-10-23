@@ -9,36 +9,148 @@
 
 #include "engine_globals.h"
 #include "decl_server.h"
+#include "boot_phases.h"
 int sh_map_transition_at_boundary(void) { return 0; }
+int sh_editor_transition_at_boundary(void) { return 0; }
+static int g_occurrence_frame;
+void *sh_editor_transition_capture(const void *editor)
+{ return g_occurrence_frame && editor ? (void *)2 : NULL; }
+int sh_editor_transition_frame_ready(void *editor, void *map)
+{ return g_occurrence_frame && editor && map == (void *)2; }
+void sh_nav_bake_source_update_begin(void) { }
+void sh_nav_bake_source_update_end(int committed) { (void)committed; }
 static int g_defer_install_commit;
-int sh_rawmap_defers_install_commit(void) { return g_defer_install_commit; }
+/* Counts this predicate's calls down when positive; the call that reaches zero
+ * returns g_defer_hook's answer instead, so a state change can begin between
+ * the poll's check and the re-arm command's own. */
+static int g_defer_countdown;
+static int (*g_defer_hook)(void);
+/* R-398: the native map boundary is available, so the idle retirement may wait for it (off by default). */
+static int g_transition_ready;
+int sh_map_transition_ready(void) { return g_transition_ready; }
+/* Departures the idle retirement accounted for (sh_rawmap_log_retained_departure). */
+static int g_retained_departures;
+static char g_retained_route[64];
+void sh_rawmap_log_retained_departure(const char *route)
+{ g_retained_departures++; strcpy_s(g_retained_route, sizeof(g_retained_route), route ? route : ""); }
+int sh_rawmap_launch_at_boundary(void) { return 0; }
+int sh_rawmap_defers_install_commit(void)
+{
+    if (g_defer_countdown > 0 && --g_defer_countdown == 0 && g_defer_hook) return g_defer_hook();
+    return g_defer_install_commit;
+}
 #include "package_runtime.h"
 #include "resource_resident.h"
+#include "resource_graph_native.h"
+#include "package_native_assets.h"
+#include "package_shader_receipt.h"
+#include "native_resource_id.h"
 static int g_resident_begin_calls, g_resident_drain_calls, g_resident_end_calls;
 static int g_resident_fail_begin, g_resident_fail_drain;
 static void *g_resident_only;
 static int g_resident_filter;
+static int g_shader_fixture_active, g_shader_scope_live, g_shader_resident_live;
+static int g_shader_mode, g_shader_hold_end, g_shader_restores;
+static int (*g_shader_admission)(void *);
+static void *g_shader_admission_context;
+static struct {
+    unsigned char head[8], manager[0x30], items[8], object[0x90];
+    char type[16], name[16];
+} g_shader_native;
+static const char g_shader_source[] = "{ Tex2D textures/fixture }";
+static int shader_native_read(void *context, uintptr_t address, void *out, size_t length)
+{
+    uintptr_t start = (uintptr_t)&g_shader_native;
+    (void)context;
+    if (address < start || address - start > sizeof(g_shader_native) ||
+        length > sizeof(g_shader_native) - (size_t)(address - start)) return 0;
+    memcpy(out, (const void *)address, length); return 1;
+}
+static char g_shader_events[64];
+static size_t g_shader_event_count;
+static void shader_event(char event)
+{
+    if (g_shader_fixture_active && g_shader_event_count + 1 < sizeof(g_shader_events)) {
+        g_shader_events[g_shader_event_count++] = event; g_shader_events[g_shader_event_count] = 0;
+    }
+}
+/* Templates the stub pass selected (R-398 palette decision); none unless a test says so. */
+static size_t g_resident_templates;
+#ifndef SH_DECL_SERVER_REAL_RESIDENT
 int sh_resource_resident_selected(const sh_resource_resident *pass, const void *object)
 { (void)pass; return !g_resident_filter || object == g_resident_only; }
+int sh_resource_resident_describe(const sh_resource_resident *pass, const void *object, char *out, size_t capacity)
+{
+    int selected = sh_resource_resident_selected(pass, object);
+    if (out && capacity) snprintf(out, capacity, "%s", selected ? "test:consumer (selected)" : "");
+    return selected;
+}
+size_t sh_resource_resident_selected_count(const sh_resource_resident *pass)
+{ (void)pass; return g_resident_filter && !g_resident_only ? 0 : 1; }
+size_t sh_resource_resident_selected_type(const sh_resource_resident *pass, const char *type)
+{ (void)pass; (void)type; return g_resident_templates; }
+size_t sh_resource_resident_blocking_count(const sh_resource_resident *pass, char *first, size_t capacity)
+{
+    size_t count = sh_resource_resident_selected_count(pass);
+    if (first && capacity) snprintf(first, capacity, "%s", count ? "test:consumer" : "");
+    return count;
+}
+size_t sh_resource_resident_release_revived(const sh_resource_resident *pass, void **existing, size_t count)
+{ (void)pass; (void)existing; return count; }
+/* No recorded consumers here: recovery keeps refusing every selected object. */
+int sh_resource_resident_take_prior(sh_resource_resident *pass, sh_resource_graph_impact *out)
+{ (void)pass; if (out) { sh_resource_graph_impact_free(out); memset(out, 0, sizeof(*out)); } return 1; }
+int sh_resource_resident_acquired(const sh_resource_resident *pass, const void *resource,
+    const sh_resource_graph_impact *prior)
+{ (void)pass; (void)resource; (void)prior; return 0; }
 sh_resource_resident *sh_resource_resident_begin(const sh_package_changes *changes, int restoring, int initial, char *error, size_t capacity)
 {
     (void)changes; (void)restoring; (void)initial; ++g_resident_begin_calls;
     if (g_resident_fail_begin) { g_resident_fail_begin = 0; snprintf(error, capacity, "resident capture failed"); return NULL; }
+    shader_event('R'); g_shader_resident_live = 1;
     return (sh_resource_resident *)1;
 }
+int sh_resource_resident_owned(const sh_resource_resident *pass)
+{ return pass == (sh_resource_resident *)1 && g_shader_resident_live; }
 void sh_resource_resident_external(sh_resource_resident *pass, void *object) { (void)pass; (void)object; }
+int sh_resource_resident_isolated_identity(const sh_resource_resident *pass, const char *type, const char *name)
+{ (void)pass; (void)type; (void)name; return 0; }
+void sh_resource_resident_touch(void *object) { (void)object; }
 int sh_resource_resident_reconstruct(sh_resource_resident *pass, char *error, size_t capacity)
 { (void)pass; (void)error; (void)capacity; return 1; }
 int sh_resource_resident_defaults(sh_resource_resident *pass, char *error, size_t capacity)
 { (void)pass; (void)error; (void)capacity; return 1; }
+int sh_resource_resident_revives(const sh_resource_resident *pass, const void *resource,
+    const char *type, const char *name)
+{ (void)pass; (void)resource; (void)type; (void)name; return 0; }
+#endif
+/* Leaves reload after defaults and before any declaration is re-parsed. */
+static int g_rt_load_total;
+static int g_resident_leaf_calls, g_resident_leaf_loads_seen = -1;
+#ifndef SH_DECL_SERVER_REAL_RESIDENT
+int sh_resource_resident_drain_leaves(sh_resource_resident *pass, int (*leaf)(const char *family),
+    char *error, size_t capacity)
+{
+    (void)pass; (void)error; (void)capacity; ++g_resident_leaf_calls;
+    g_resident_leaf_loads_seen = g_rt_load_total;
+    return leaf && leaf("skeleton") && !leaf("md6def");
+}
 int sh_resource_resident_drain(sh_resource_resident *pass, char *error, size_t capacity)
 {
     (void)pass; ++g_resident_drain_calls;
     if (g_resident_fail_drain) { g_resident_fail_drain = 0; snprintf(error, capacity, "resident drain failed"); return 0; }
     return 1;
 }
+int sh_resource_resident_drain_additions(sh_resource_resident *pass, void *const *existing,
+    size_t count, char *error, size_t capacity)
+{ (void)existing; (void)count; return sh_resource_resident_drain(pass, error, capacity); }
 int sh_resource_resident_end(sh_resource_resident *pass, int succeeded, char *error, size_t capacity)
-{ (void)pass; (void)error; (void)capacity; ++g_resident_end_calls; return succeeded; }
+{
+    (void)pass; (void)error; (void)capacity; ++g_resident_end_calls;
+    if (g_shader_fixture_active && error && capacity) *error = 0;
+    shader_event('X'); g_shader_resident_live = 0; return succeeded;
+}
+#endif
 #include "decl_server_path.h"
 #include "decl_text.h"
 #include "overrides.h"
@@ -55,16 +167,106 @@ static int g_fail_next_string_refresh;
 static int g_audio_refreshes, g_fail_next_audio_refresh;
 #include "audio_banks_native.h"
 int sh_audio_banks_native_activate(const uint32_t *events, size_t count,
-    const sh_package_audio_bank *banks, size_t bank_count, char *error, size_t capacity)
+    const sh_package_audio_bank *banks, size_t bank_count,
+    const sh_package_audio_media *media, size_t media_count, char *error, size_t capacity)
 {
-    (void)events; (void)count; (void)banks; (void)bank_count; ++g_audio_refreshes;
+    (void)events; (void)count; (void)banks; (void)bank_count; (void)media; (void)media_count; ++g_audio_refreshes;
     if (g_fail_next_audio_refresh) {
         g_fail_next_audio_refresh = 0;
         snprintf(error, capacity, "test audio activation failed"); return 0;
     }
     return 1;
 }
+sh_audio_bank_addition *sh_audio_banks_native_additions_begin(char *error, size_t capacity)
+{ (void)error; (void)capacity; return (sh_audio_bank_addition *)1; }
+int sh_audio_banks_native_activate_additive(sh_audio_bank_addition *addition,
+    const uint32_t *events, size_t count, const sh_package_audio_bank *banks, size_t bank_count,
+    const sh_package_audio_media *media, size_t media_count, char *error, size_t capacity)
+{ (void)addition; return sh_audio_banks_native_activate(events, count, banks, bank_count, media, media_count, error, capacity); }
+int sh_audio_banks_native_additions_end(sh_audio_bank_addition **addition, int accepted, char *error, size_t capacity)
+{ (void)accepted; (void)error; (void)capacity; *addition = NULL; return 1; }
+int sh_audio_banks_native_additions_ready(sh_audio_bank_addition *addition, char *error, size_t capacity)
+{ (void)error; (void)capacity; return addition != NULL; }
+void sh_audio_banks_native_additions_accept(sh_audio_bank_addition **addition) { *addition = NULL; }
+/* Retained-program route: each call counts as one audio activation and
+ * releases every owner reference it receives, as the native adapter does on
+ * failure or duplicate delivery. */
+int sh_audio_banks_native_programs_activate(const sh_audio_active_program *programs, size_t count,
+    const sh_audio_shared_policy *baseline, void (*release)(void *), char *error, size_t capacity)
+{
+    (void)baseline;
+    for (size_t i = 0; i < count; i++) if (release && programs[i].owner) release(programs[i].owner);
+    return sh_audio_banks_native_activate(NULL, 0, NULL, 0, NULL, 0, error, capacity);
+}
+int sh_audio_banks_native_programs_add(sh_audio_bank_addition *addition,
+    const sh_audio_active_program *programs, size_t count, void (*release)(void *), char *error, size_t capacity)
+{
+    (void)addition;
+    for (size_t i = 0; i < count; i++) if (release && programs[i].owner) release(programs[i].owner);
+    return sh_audio_banks_native_activate(NULL, 0, NULL, 0, NULL, 0, error, capacity);
+}
+int sh_audio_banks_native_programs_retire(char *error, size_t capacity) { (void)error; (void)capacity; return 0; }
+size_t sh_audio_banks_native_programs_count(void) { return 0; }
+#include "palette_refresh.h"
+int sh_palette_entries_ready(void) { return 1; }
+/* The additive palette's exact-name contract (palette_refresh.c
+ * sh_palette_entries_prepare): the additive entries hold one declaration per
+ * exact entityDef name, and a source naming a held name with another
+ * declaration refuses the whole batch, which then holds nothing. */
+typedef struct palette_stub_entry { char name[256]; const void *decl; const void *batch; } palette_stub_entry;
+static palette_stub_entry g_palette_stub[64];
+static size_t g_palette_stub_count;
+static unsigned char g_palette_stub_tokens[16];
+static int g_palette_stub_fail; /* a palette-stage fault after native publication */
+static size_t g_palette_stub_token;
+int sh_palette_entries_prepare(const sh_palette_entry_source *sources, size_t count,
+    sh_palette_entries_admitted_fn admitted, void *context, sh_palette_entries **out, char *error, size_t capacity)
+{
+    size_t first = g_palette_stub_count;
+    const void *batch;
+    if (!admitted(context)) return 0;
+    if (g_palette_stub_fail) { snprintf(error, capacity, "fixture palette refused"); return 0; }
+    batch = g_palette_stub_tokens + g_palette_stub_token++ % sizeof(g_palette_stub_tokens);
+    for (size_t i = 0; i < count; i++) {
+        const char *name = sources[i].entity_def_name ? sources[i].entity_def_name : "";
+        int held = 0;
+        for (size_t e = 0; e < g_palette_stub_count && !held; e++) if (!strcmp(g_palette_stub[e].name, name)) {
+            if (g_palette_stub[e].decl != sources[i].snap_editor_entity) {
+                g_palette_stub_count = first;
+                snprintf(error, capacity, "palette exact name already belongs to a different declaration"); return 0;
+            }
+            held = 1;
+        }
+        if (!held && g_palette_stub_count < sizeof(g_palette_stub) / sizeof(*g_palette_stub)) {
+            palette_stub_entry *entry = g_palette_stub + g_palette_stub_count++;
+            snprintf(entry->name, sizeof(entry->name), "%s", name);
+            entry->decl = sources[i].snap_editor_entity; entry->batch = batch;
+        }
+    }
+    *out = (sh_palette_entries *)batch; return 1;
+}
+int sh_palette_entries_publish(sh_palette_entries *batch, sh_palette_entries_admitted_fn admitted,
+    void *context, char *error, size_t capacity)
+{ (void)batch; (void)error; (void)capacity; return admitted(context); }
+int sh_palette_entries_prepare_authoring(sh_palette_entries *batch, sh_palette_entries_admitted_fn admitted,
+    void *context, char *error, size_t capacity)
+{ (void)batch; (void)error; (void)capacity; return admitted(context); }
+void sh_palette_entries_accept(sh_palette_entries *batch) { (void)batch; }
+static int g_palette_end_result = 1, g_palette_end_calls;
+int sh_palette_entries_end(sh_palette_entries **batch, sh_palette_entries_admitted_fn admitted,
+    void *context, char *error, size_t capacity)
+{
+    (void)error; (void)capacity; if (!admitted(context)) return 0;
+    ++g_palette_end_calls;
+    if (g_palette_end_result != 1) return g_palette_end_result;
+    for (size_t e = 0; e < g_palette_stub_count;)
+        if (g_palette_stub[e].batch == *batch) g_palette_stub[e] = g_palette_stub[--g_palette_stub_count]; else e++;
+    *batch = NULL; return 1;
+}
 static int g_scan_calls, g_scan_fail;
+/* Whether the last pass was the installed-package watcher's (it may reuse an
+ * unchanged library); -1 before any pass is observed. */
+static int g_scan_watched = -1;
 static int g_table_published;
 static int g_table_merges;
 static char g_fixture_root[MAX_PATH];
@@ -77,9 +279,18 @@ static unsigned char g_boundary_common[0xf577];
 static void *g_boundary_shell_slot = g_boundary_shell;
 static void *g_boundary_common_slot = g_boundary_common;
 static DWORD g_boundary_thread;
+/* g_defer_hook answers at the re-arm command's own deferral check: an
+ * installation starts deferring there, or the browser stops being a safe
+ * boundary (the poll found it safe a moment before). */
+static int defer_begins(void) { return 1; }
+static int boundary_closes(void) { g_boundary_thread = 0; return 0; }
 static int g_boundary_unknown;
 static void *g_boundary_resource_head;
 static void heap_observe_native(int palette);
+/* Whether the stub palette holds the rows its last rebuild produced (R-398): never, unless
+ * a test says so, so every pass rebuilds as before. */
+static int g_palette_current;
+int sh_palette_refresh_current(void) { return g_palette_current; }
 /* Stub palette notification while testing decl-server helpers. */
 int sh_palette_refresh_after_decl_registration(void)
 {
@@ -94,6 +305,11 @@ int sh_palette_refresh_after_decl_registration(void)
 }
 
 static int g_failed;
+static int g_editor_live, g_editor_ready_refuse, g_editor_end_refuse, g_editor_after_commit_refuse;
+static int g_editor_end_calls, g_editor_end_throw, g_editor_after_commit_throw;
+static int g_editor_begins, g_editor_accepts, g_editor_rejects;
+static int (*g_editor_admitted)(void *);
+static void *g_editor_context;
 
 #define CHECK(expr) do {                                                        \
     if (!(expr)) {                                                              \
@@ -102,6 +318,33 @@ static int g_failed;
     }                                                                           \
 } while (0)
 
+sh_resource_editor_state *sh_resource_graph_native_editor_state_begin(
+    int (*admitted)(void *),void *context,char *error,size_t capacity)
+{
+    (void)error; (void)capacity; CHECK(!g_editor_live && admitted(context));
+    g_editor_admitted=admitted; g_editor_context=context; g_editor_live=1; g_editor_begins++;
+    return (sh_resource_editor_state *)2;
+}
+int sh_resource_graph_native_editor_state_ok(sh_resource_editor_state *state)
+{ return state==(sh_resource_editor_state *)2 && g_editor_live && g_editor_admitted(g_editor_context); }
+int sh_resource_graph_native_editor_state_ready(sh_resource_editor_state *state)
+{
+    if (g_editor_ready_refuse) { g_editor_ready_refuse--; return 0; }
+    return sh_resource_graph_native_editor_state_ok(state);
+}
+int sh_resource_graph_native_editor_state_end(sh_resource_editor_state **owned,
+    int accepted,int *committed,char *error,size_t capacity)
+{
+    (void)error; (void)capacity; *committed=0; g_editor_end_calls++;
+    if (!*owned) { *committed=accepted; return 1; }
+    CHECK(*owned==(sh_resource_editor_state *)2 && g_editor_live && g_editor_admitted(g_editor_context));
+    if (g_editor_end_throw) {
+        g_editor_end_throw=0; RaiseException(0xe0410012,0,0,NULL);
+    }
+    if (g_editor_end_refuse) { g_editor_end_refuse--; return 0; }
+    if (accepted) g_editor_accepts++; else g_editor_rejects++;
+    *committed=accepted; *owned=NULL; g_editor_live=0; g_editor_context=NULL; return 1;
+}
 /* Model the allocator scope stack independently of resource-level promotion. */
 static struct {
     unsigned char prefix[0x44];
@@ -123,13 +366,15 @@ void sh_mpkg_boot_capture(const char *root)
 int sh_mpkg_activation_commit(char *error, size_t capacity)
 {
     g_install_commit_calls++;
-    if (g_heap_check_native) CHECK(g_heap_local.depth == 1);
+    if (g_heap_check_native) CHECK(g_heap_local.depth == 2 && g_editor_live);
     if (g_install_commit_fail) {
         int failure = g_install_commit_fail;
         g_install_commit_fail = 0;
         if (failure == 2) RaiseException(0xe04d504d, 0, 0, NULL);
         snprintf(error, capacity, "fixture installation commit failure"); return 0;
     }
+    if (g_editor_after_commit_refuse) { g_editor_after_commit_refuse=0; g_editor_end_refuse=1; }
+    if (g_editor_after_commit_throw) { g_editor_after_commit_throw=0; g_editor_end_throw=1; }
     return 1;
 }
 int sh_mpkg_activation_cancel(void)
@@ -173,15 +418,28 @@ static void heap_observe_native(int palette)
     else g_heap_decl_calls++;
 }
 
+/* The native image state probe sh_decl_server_image_state installs (R-309). */
+static int g_test_image_state;
+static int test_image_state(const char *name, const unsigned char *installed, size_t length)
+{ (void)installed; (void)length; return name && !strcmp(name, "env/x") ? g_test_image_state : 0; }
 static char g_last_log[512];
 static char g_last_failure[512];
 static int g_log_count;
 
+/* Every line since the last reset, for checks that need more than the last line. */
+static char g_log_all[16384];
+static size_t g_log_all_used;
+static void log_all_reset(void) { g_log_all[0] = 0; g_log_all_used = 0; }
 void backend_log(const char *message)
 {
     g_log_count++;
-    strcpy_s(g_last_log, sizeof(g_last_log), message ? message : "");
-    if (message && strstr(message, "FAILED:")) strcpy_s(g_last_failure, sizeof(g_last_failure), message);
+    /* Truncate: a long product log line must not fast-fail the fixture. */
+    strncpy_s(g_last_log, sizeof(g_last_log), message ? message : "", _TRUNCATE);
+    if (message && g_log_all_used < sizeof(g_log_all) - 1) {
+        int n = _snprintf_s(g_log_all + g_log_all_used, sizeof(g_log_all) - g_log_all_used, _TRUNCATE, "%s\n", message);
+        g_log_all_used = n < 0 ? sizeof(g_log_all) - 1 : g_log_all_used + (size_t)n;
+    }
+    if (message && strstr(message, "FAILED:")) strncpy_s(g_last_failure, sizeof(g_last_failure), message, _TRUNCATE);
 }
 
 /* Record optional post-palette operations without letting them fail registration. */
@@ -199,6 +457,7 @@ int sh_decl_visibility_install(const unsigned char *module_base,
 
 /* Exercise hook ownership without modifying executable memory. */
 int sh_decl_visibility_source_exists(const char *path) { (void)path; return -1; }
+int sh_decl_visibility_native_exists(const char *path) { (void)path; return -1; }
 static void *g_hook_owned;
 static void (*g_hook_detour)(void);
 static int g_hook_prepare_fail = 1;
@@ -300,21 +559,83 @@ static int runtime_original(void *context, const char *path, unsigned char **bod
     *length = strlen("{ original = 1; }");
     return *body ? 1 : -1;
 }
+/* Replace a file's contents, as an author's editor would. */
+static void inventory_write(const char *path, const char *text)
+{
+    HANDLE file = CreateFileA(path, GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    DWORD written = 0;
+    CHECK(file != INVALID_HANDLE_VALUE);
+    if (file == INVALID_HANDLE_VALUE) return;
+    CHECK(WriteFile(file, text, (DWORD)strlen(text), &written, NULL) && written == strlen(text));
+    CloseHandle(file);
+}
+/* Write text unless the file already holds it: a preparation reads the
+ * installed packages and never rewrites them, so the fixture keeps their
+ * write times as production would. */
+static void fixture_put(const char *path, const char *text)
+{
+    FILE *file = NULL;
+    char current[4096];
+    size_t length = strlen(text), read = 0;
+    if (!fopen_s(&file, path, "rb") && file) {
+        read = fread(current, 1, sizeof(current), file); fclose(file); file = NULL;
+        if (read == length && !memcmp(current, text, length)) return;
+    }
+    inventory_write(path, text);
+}
 static void runtime_fixture_write(void)
 {
-    char path[MAX_PATH]; FILE *file = NULL;
+    char path[MAX_PATH];
     for (size_t i = 0; i < sizeof(runtime_dirs)/sizeof(runtime_dirs[0]); i++) {
         snprintf(path, sizeof path, "%s/%s", g_fixture_root, runtime_dirs[i]);
         CHECK(CreateDirectoryA(path, NULL) || GetLastError() == ERROR_ALREADY_EXISTS);
     }
     snprintf(path, sizeof path, "%s/overrides/fixture/package.json", g_fixture_root);
-    CHECK(!fopen_s(&file, path, "wb") && file);
-    if (file) { fputs("{\"id\":\"fixture\",\"name\":\"Fixture\"}", file); fclose(file); }
+    fixture_put(path, "{\"id\":\"fixture\",\"name\":\"Fixture\"}");
     snprintf(path, sizeof path, "%s/overrides/fixture/assets/generated/decls/material/rt/alpha.decl", g_fixture_root);
-    if (g_linked_fixture) {
-        CHECK(!fopen_s(&file, path, "wb") && file);
-        if (file) { fputs(g_linked_body, file); fclose(file); }
-    } else if (GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES) CHECK(DeleteFileA(path));
+    if (g_linked_fixture) fixture_put(path, g_linked_body);
+    else if (GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES) CHECK(DeleteFileA(path));
+}
+/* The settle time the inventory tests use; production waits 2000 ms. */
+#define INVENTORY_QUIET_MS 300u
+static void inventory_poll_for(ULONGLONG ms)
+{
+    for (ULONGLONG start = GetTickCount64(); GetTickCount64() - start < ms;) { sh_decl_server_rearm_poll(); Sleep(5); }
+}
+/* Poll until a pass starts after scans, for at most 10 s (a pass runs inside
+ * one poll). */
+static void inventory_until_pass(int scans)
+{
+    for (ULONGLONG start = GetTickCount64(); g_scan_calls == scans && GetTickCount64() - start < 10000;) {
+        sh_decl_server_rearm_poll(); Sleep(5);
+    }
+}
+/* Poll until no pass has started for five settle times. */
+static void inventory_settle(void)
+{
+    ULONGLONG start = GetTickCount64(), last = start;
+    for (int before = g_scan_calls; GetTickCount64() - last < INVENTORY_QUIET_MS * 5 && GetTickCount64() - start < 30000;) {
+        sh_decl_server_rearm_poll(); Sleep(5);
+        if (g_scan_calls != before) { before = g_scan_calls; last = GetTickCount64(); }
+    }
+}
+static int inventory_remove_tree(const char *path)
+{
+    char pattern[MAX_PATH], child[MAX_PATH];
+    WIN32_FIND_DATAA found;
+    HANDLE search;
+    _snprintf_s(pattern, sizeof(pattern), _TRUNCATE, "%s\\*", path);
+    search = FindFirstFileA(pattern, &found);
+    if (search != INVALID_HANDLE_VALUE) {
+        do {
+            if (!strcmp(found.cFileName, ".") || !strcmp(found.cFileName, "..")) continue;
+            _snprintf_s(child, sizeof(child), _TRUNCATE, "%s\\%s", path, found.cFileName);
+            if (found.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) { if (!inventory_remove_tree(child)) { FindClose(search); return 0; } }
+            else if (!DeleteFileA(child)) { FindClose(search); return 0; }
+        } while (FindNextFileA(search, &found));
+        FindClose(search);
+    }
+    return RemoveDirectoryA(path) != 0;
 }
 static void runtime_fixture(void)
 {
@@ -328,9 +649,18 @@ unsigned long sh_overrides_rescan_packages(void)
     runtime_fixture(); return 1;
 }
 
+/* When set, the author corrects the package while this pass reads it: the pass
+ * still fails, and the file changes after its inventory was taken. */
+static const char *g_scan_correct_path;
 unsigned long sh_overrides_rescan_packages_activated(sh_package_activation_fn activate, void *context)
 {
     g_scan_calls++;
+    g_scan_watched = sh_package_runtime_test_watched_change();
+    if (g_scan_correct_path) {
+        inventory_write(g_scan_correct_path, "corrected during the pass");
+        g_scan_correct_path = NULL; g_scan_fail = 0;
+        return SH_OVERRIDES_RESCAN_FAILED;
+    }
     if (g_scan_fail) return SH_OVERRIDES_RESCAN_FAILED;
     runtime_fixture_write();
     return sh_package_runtime_refresh_activated(g_fixture_root, (sh_package_activation_guard){0},
@@ -340,6 +670,66 @@ unsigned long sh_overrides_rescan_packages_activated(sh_package_activation_fn ac
 int sh_overrides_activate_map(sh_package_map_plan *plan, sh_package_activation_fn activate, void *context)
 {
     return sh_package_runtime_activate_prepared_map(plan, (sh_package_activation_guard){0}, activate, context);
+}
+int sh_overrides_activate_occurrences(const sh_package_occurrence_snapshot *map,
+    sh_package_activation_fn activate, void *context)
+{
+    return sh_package_runtime_activate_occurrences(map, (sh_package_activation_guard){0}, activate, context);
+}
+sh_resource_shader_state *sh_resource_graph_native_shader_state_begin(
+    sh_resource_shader_admission admitted, void *context, char *error, size_t capacity)
+{
+    (void)error; (void)capacity;
+    CHECK(g_shader_fixture_active && !g_shader_scope_live && admitted(context));
+    g_shader_scope_live = 1; g_shader_admission = admitted; g_shader_admission_context = context;
+    shader_event('B'); return (sh_resource_shader_state *)1;
+}
+int sh_resource_graph_native_shader_state_restore(sh_resource_shader_state *state,
+    char *error, size_t capacity)
+{
+    (void)error; (void)capacity;
+    CHECK(state == (sh_resource_shader_state *)1 && g_shader_scope_live &&
+        g_shader_admission(g_shader_admission_context));
+    g_shader_restores++; shader_event('T'); return 1;
+}
+int sh_resource_graph_native_shader_state_end(sh_resource_shader_state *state,
+    int accepted, char *error, size_t capacity)
+{
+    CHECK(state == (sh_resource_shader_state *)1 && g_shader_scope_live &&
+        g_shader_admission(g_shader_admission_context));
+    shader_event('E');
+    if (g_shader_hold_end) { snprintf(error, capacity, "fixture restoration remains owed"); return -1; }
+    g_shader_scope_live = 0; g_shader_admission = NULL; g_shader_admission_context = NULL;
+    return accepted && g_shader_mode == 2 ? 0 : 1;
+}
+int sh_resource_graph_native_prepare_shader(void *resource, const char *family,
+    const char *name, const void *source, size_t length,
+    int (*admitted)(void *), void *context, char *error, size_t capacity)
+{
+    (void)error; (void)capacity;
+    CHECK(g_shader_fixture_active && g_shader_scope_live && admitted(context));
+    shader_event('P');
+    if (g_shader_mode == 3) RaiseException(0xe0504453, 0, 0, NULL);
+    if (g_shader_mode == 1 || g_shader_mode == 5) {
+        snprintf(error, capacity, "fixture shader source failed"); return 0;
+    }
+    sh_package_shader_receipt_frame receipt;
+    sh_package_shader_receipt_begin(&receipt, (uintptr_t)resource, family, name);
+    sh_package_shader_receipt_retained(source, length);
+    sh_package_shader_receipt_end(&receipt, 1, shader_native_read, NULL);
+    return 1;
+}
+int sh_resource_graph_native_prepare_program(void *manager, const char *name,
+    const void *source, size_t length, sh_resource_shader_source_reader original,
+    void *original_context, int (*admitted)(void *), void *context,
+    char *error, size_t capacity)
+{
+    (void)manager; (void)name; (void)source; (void)length; (void)error; (void)capacity;
+    CHECK(original == sh_package_native_assets_shader_original_read && original_context);
+    CHECK(admitted(context));
+    /* Program cooking and its isolated receipt are exercised by the native
+     * graph fixture. Fixed-slot tests must never enter this route. */
+    CHECK(0); return 0;
 }
 
 int sh_strids_rearm(void)
@@ -360,13 +750,13 @@ void sh_overrides_internal_decl_table_reopen(void)
 {
 }
 
+/* A fixture that serves native reads from the published table installs this. */
+static int (*g_table_merge_hook)(const sh_overrides_internal_decl_entry *entries, size_t count);
 int sh_overrides_internal_decl_table_merge(
     const sh_overrides_internal_decl_entry *entries, size_t count)
 {
-    (void)entries;
-    (void)count;
     g_table_merges++;
-    return 1;
+    return g_table_merge_hook ? g_table_merge_hook(entries, count) : 1;
 }
 
 /* The re-arm applies the package's cut-content gates before registering. Not linked here. */
@@ -1136,6 +1526,22 @@ static void test_integrated_scan_materialize_pipeline(void)
     CHECK(memcmp(g_pipeline_events, "CSDCSDTFFTFFP", 13) == 0);
     CHECK(sh_decl_server_registration_succeeded() == 0);
 
+    /* Active-editor admission uses the same scan/materialize ordering but
+     * leaves whole-palette and resident refresh to its fresh-only owner. */
+    pipeline_reset(); g_pipeline_decl = decl_memory;
+    sh_decl_server_test_set_additive(1);
+    sh_decl_server_test_set_resident((void *)1);
+    int drains_before = g_resident_drain_calls;
+    ok = sh_decl_server_test_scan_and_materialize_missing(
+        items, sizeof(items) / sizeof(items[0]), (void *)(uintptr_t)0x98760000u,
+        pipeline_type_by_name, pipeline_source_find, pipeline_find_decl,
+        pipeline_palette_refresh, pipeline_ctor, pipeline_dtor, pipeline_register_file,
+        &registered, &materialized, &failure_phase);
+    sh_decl_server_test_set_additive(0); sh_decl_server_test_set_resident(NULL);
+    CHECK(ok && registered == 2 && materialized == 2 && !failure_phase);
+    CHECK(!g_pipeline_palette_calls && g_resident_drain_calls == drains_before);
+    CHECK(g_pipeline_event_count == 12 && !memcmp(g_pipeline_events, "CSDCSDTFFTFF", 12));
+
     pipeline_reset();
     g_pipeline_decl = decl_memory;
     g_pipeline_scan_fail_on = 2;
@@ -1368,6 +1774,69 @@ static void test_cyber_shaped_registration_order(void)
     HeapFree(GetProcessHeap(), 0, decl_memory);
 }
 
+/* A private child perk named before its private parent existed was created on
+ * demand and completed with its default. Reached in dependency order, after
+ * the parent, it is rebuilt and parsed from its source; an identity that
+ * parsed is left alone, and a child still ahead of its parent stays refused. */
+static unsigned char *g_rd_parent, *g_rd_child;
+static int g_rd_parent_made, g_rd_reconstructs, g_rd_child_parses;
+static void *rd_type_by_name(void *registry, const char *short_name)
+{ (void)registry; (void)short_name; return (void *)(uintptr_t)0x44000000u; }
+static void *rd_source_find(void *type_manager, const char *logical_name)
+{ (void)type_manager; (void)logical_name; return (void *)(uintptr_t)0x44100000u; }
+static void *rd_find_decl(void *type_manager, const char *logical_name, unsigned char make_default)
+{
+    (void)type_manager;
+    if (!strcmp(logical_name, "smp/parent")) {
+        if (make_default) g_rd_parent_made = 1;
+        return g_rd_parent_made ? g_rd_parent : NULL;
+    }
+    if (strcmp(logical_name, "smp/child")) return NULL;
+    /* A pending lookup parses a rebuilt object (the child inherits the
+     * parent); a defaulted object only drops the request, as observed. */
+    if (g_rd_child[0x2c] & 0x02) {
+        if (g_rd_child[0x2c] & 0x04) g_rd_child[0x2c] &= (unsigned char)~0x02;
+        else { g_rd_child_parses++; g_rd_child[0x2c] = g_rd_parent_made ? 0x00 : 0x04; }
+    }
+    return g_rd_child;
+}
+static void rd_reconstruct(void *decl) { g_rd_reconstructs++; ((unsigned char *)decl)[0x2c] = 0x00; }
+
+static void test_defaulted_identity_reparse(void)
+{
+    static const unsigned char parent_body[] = "{ edit = { maxNumUses = 4; } }";
+    static const unsigned char child_body[] = "{ inherit = \"smp/parent\"; edit = { upgradeStat = \"STAT_INVALID\"; } }";
+    sh_decl_server_test_materialize_item items[] = {
+        { "perks", "smp/parent", "parent", SH_DECL_SERVER_TEST_MISSING, parent_body, sizeof(parent_body) - 1 },
+        { "perks", "smp/child", "child", SH_DECL_SERVER_TEST_MISSING, child_body, sizeof(child_body) - 1 }
+    }, reversed[2];
+    int materialized = 0;
+    g_rd_parent = (unsigned char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, DS_TEST_DECL_BYTES);
+    g_rd_child = (unsigned char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, DS_TEST_DECL_BYTES);
+    CHECK(g_rd_parent && g_rd_child);
+    if (!g_rd_parent || !g_rd_child) return;
+    sh_decl_server_test_set_reconstruct(rd_reconstruct, NULL);
+    g_rd_parent_made = g_rd_reconstructs = g_rd_child_parses = 0;
+    g_rd_child[0x2c] = 0x04;
+    CHECK(sh_decl_server_test_materialize_missing_sedefs(items, 2, (void *)(uintptr_t)0x44200000u,
+        rd_type_by_name, rd_source_find, rd_find_decl, &materialized) == 1);
+    CHECK(materialized == 1 && g_rd_reconstructs == 1 && g_rd_child_parses == 1 && g_rd_child[0x2c] == 0x00);
+    /* An existing identity that parsed is not rebuilt. */
+    g_rd_parent_made = g_rd_reconstructs = g_rd_child_parses = 0; materialized = 0;
+    CHECK(sh_decl_server_test_materialize_missing_sedefs(items, 2, (void *)(uintptr_t)0x44200000u,
+        rd_type_by_name, rd_source_find, rd_find_decl, &materialized) == 1);
+    CHECK(materialized == 1 && !g_rd_reconstructs && !g_rd_child_parses);
+    /* Ahead of its parent the rebuilt child still completes with its default. */
+    reversed[0] = items[1]; reversed[1] = items[0];
+    g_rd_parent_made = g_rd_reconstructs = g_rd_child_parses = 0; materialized = 0;
+    g_rd_child[0x2c] = 0x04;
+    CHECK(sh_decl_server_test_materialize_missing_sedefs(reversed, 2, (void *)(uintptr_t)0x44200000u,
+        rd_type_by_name, rd_source_find, rd_find_decl, &materialized) == 0);
+    CHECK(g_rd_reconstructs == 1 && g_rd_child[0x2c] == 0x04);
+    sh_decl_server_test_set_reconstruct(NULL, NULL);
+    HeapFree(GetProcessHeap(), 0, g_rd_parent); HeapFree(GetProcessHeap(), 0, g_rd_child);
+}
+
 static void test_materialization_failure_guards(void)
 {
     static const unsigned char root_body[] =
@@ -1504,11 +1973,29 @@ static void test_identity_paths(void)
     refuse_path("actormodifier//cacodemon.decl", "empty");
     refuse_path("actormodifier/../cacodemon.decl", "traversal");
     refuse_path("actormodifier/./cacodemon.decl", "traversal");
+    /* Shipped declaration names use these characters. */
+    expect_path("material/models/weapons/bfg/bfg_3p_[3p_lp].decl",
+                "material", "models/weapons/bfg/bfg_3p_[3p_lp]",
+                "generated/decls/material/models/weapons/bfg/bfg_3p_[3p_lp].decl");
+    expect_path("table/autogen/creature/archvile/shockwave_single/stage 2/c_0.decl",
+                "table", "autogen/creature/archvile/shockwave_single/stage 2/c_0",
+                "generated/decls/table/autogen/creature/archvile/shockwave_single/stage 2/c_0.decl");
+    expect_path("unlockable/challenges/pvp/can't_fight_the_power_challenge.decl",
+                "unlockable", "challenges/pvp/can't_fight_the_power_challenge",
+                "generated/decls/unlockable/challenges/pvp/can't_fight_the_power_challenge.decl");
+    expect_path("material/models/mapobjects/prop/hell/soulcube_[mesh_(2)].decl",
+                "material", "models/mapobjects/prop/hell/soulcube_[mesh_(2)]",
+                "generated/decls/material/models/mapobjects/prop/hell/soulcube_[mesh_(2)].decl");
+
     refuse_path("actor modifier/cacodemon.decl", "type");
-    refuse_path("actormodifier/demon rune.decl", "character");
+    refuse_path("actormodifier/demon ;evil.decl", "character");
     refuse_path("actormodifier/demon;evil.decl", "character");
     refuse_path("actormodifier/demon{evil}.decl", "character");
     refuse_path("actormodifier/demon=evil.decl", "character");
+    refuse_path("actormodifier/demon\"evil.decl", "character");
+    refuse_path("actormodifier/demon,evil.decl", "character");
+    refuse_path("actormodifier/demon /rune.decl", "space");
+    refuse_path("actormodifier/demon .decl", "space");
     refuse_path("actormodifier/.decl", "name");
 }
 
@@ -1517,7 +2004,7 @@ static void test_text_validation(void)
     static const unsigned char valid[] =
         "// opening brace in a comment: {\n"
         "{\n"
-        "  inherit = \"player/{ignored}\\\"quoted\\\"\"\n"
+        "  inherit = \"player\\{ignored}\\\"\n"
         "  /* ignored close: } */\n"
         "}\n";
     static const unsigned char nested[] = "{ outer { inner } }";
@@ -1537,6 +2024,17 @@ static void test_text_validation(void)
     CHECK(sh_decl_text_well_formed(no_brace, sizeof(no_brace) - 1) == 0);
     CHECK(sh_decl_text_well_formed(embedded_nul, sizeof(embedded_nul)) == 0);
     CHECK(sh_decl_text_well_formed(NULL, 0) == 0);
+    CHECK(sh_decl_server_test_body_is_single_block(valid, sizeof(valid) - 1) == 1);
+    {
+        const unsigned char child[] = "{ inherit = \"z\\parent\"; }";
+        const unsigned char parent[] = "{}";
+        sh_decl_reference_item items[] = {
+            {"a/child", child, sizeof(child) - 1}, {"z/parent", parent, sizeof(parent) - 1}
+        };
+        size_t edges = 0, cycles = 0;
+        CHECK(sh_decl_text_order_by_references(items, 2, &edges, &cycles));
+        CHECK(edges == 1 && !cycles && !strcmp(items[0].name, "z/parent"));
+    }
 }
 
 static void test_single_body_validation(void)
@@ -1714,6 +2212,29 @@ static void test_material_table_dependency_ordering(void)
         if (items[i].value == (void *)2) table_index = i;
     }
     CHECK(table_index < material_index);
+}
+
+/* A boss (parent) lists its AI component, the component's groupEntityDefs
+ * load its weapon entities, and those inherit the boss: one component of the
+ * reference graph. Materializing the component loads the weapons, so their
+ * parent must come first even when the component's name sorts earlier. */
+static void test_scc_parent_before_loading_member(void)
+{
+    static const unsigned char boss[] =
+        "{ edit = { components = { ptr[0] = { componentDecl = \"smp/22d0\"; } } } }";
+    static const unsigned char guard[] = "{ edit = { groupEntityDefs = { item[0] = \"smp/47f2\"; } } }";
+    static const unsigned char hammer[] = "{ inherit = \"smp/665b\"; }";
+    sh_decl_reference_item items[] = {
+        { "smp/22d0", guard, sizeof(guard) - 1, (void *)(uintptr_t)1 },
+        { "smp/47f2", hammer, sizeof(hammer) - 1, (void *)(uintptr_t)2 },
+        { "smp/665b", boss, sizeof(boss) - 1, (void *)(uintptr_t)3 }
+    };
+    size_t edges = 0, cycles = 0;
+    CHECK(sh_decl_text_order_by_references(items, 3, &edges, &cycles) == 1);
+    CHECK(edges == 3 && cycles == 3);
+    CHECK(strcmp(items[0].name, "smp/665b") == 0);
+    CHECK(strcmp(items[1].name, "smp/22d0") == 0);
+    CHECK(strcmp(items[2].name, "smp/47f2") == 0);
 }
 
 static void test_scc_dependency_ordering(void)
@@ -2186,6 +2707,48 @@ static void test_runtime_premark_reused_empties(void)
     HeapFree(GetProcessHeap(), 0, b);
 }
 
+/* A live declaration naming a new identity (the stock player hands web naming
+ * a package's private model) re-parses only after that identity exists: the
+ * pass follows the snapshot's dependency order, not reloads first. */
+static unsigned char g_order_model[0x300];
+static int g_order_clock, g_order_model_made, g_order_web_loaded;
+static void *rt_order_find(void *type_manager, const char *logical_name, unsigned char make_default)
+{
+    if (logical_name && !strcmp(logical_name, "rt/model")) {
+        if (make_default && !g_order_model_made) g_order_model_made = ++g_order_clock;
+        return g_order_model_made ? g_order_model : NULL;
+    }
+    if (logical_name && !strcmp(logical_name, "rt/web") && g_rt_objects[0] &&
+        (g_rt_objects[0][0x2c] & 0x02) && !g_order_web_loaded)
+        g_order_web_loaded = ++g_order_clock;
+    return rt_find_decl(type_manager, logical_name, make_default);
+}
+static void test_runtime_reload_follows_new_dependencies(void)
+{
+    static const unsigned char body[] = "{ }";
+    sh_decl_server_test_materialize_item items[] = {
+        { "md6Def", "rt/model", "generated/decls/md6def/rt/model.decl",
+          SH_DECL_SERVER_TEST_MISSING, body, sizeof(body) - 1, 0 },
+        { "animWeb", "rt/web", "generated/decls/animweb/rt/web.decl",
+          SH_DECL_SERVER_TEST_SHADOWED, NULL, 0, SH_DECL_SERVER_TEST_SHADOW_LIVE }
+    };
+    unsigned char web[0x300] = {0};
+    int materialized = -1;
+    memset(g_order_model, 0, sizeof(g_order_model));
+    g_order_clock = g_order_model_made = g_order_web_loaded = 0;
+    rt_reset(); sh_decl_server_test_reset_runtime_state();
+    g_rt_names[0] = "rt/web"; g_rt_objects[0] = web;
+    *(unsigned int *)(web + 0x28) = 4u;
+    sh_decl_server_test_set_runtime(1);
+    CHECK(sh_decl_server_test_materialize_missing_sedefs(items, 2, (void *)(uintptr_t)0x98760000u,
+        rt_type_by_name, rt_source_find, rt_order_find, &materialized) == 1);
+    sh_decl_server_test_set_runtime(0);
+    CHECK(materialized == 1 && g_rt_loads[0] == 1);
+    CHECK(g_order_model_made && g_order_web_loaded && g_order_model_made < g_order_web_loaded);
+    CHECK((web[0x2c] & 0x02) == 0 && sh_decl_server_test_clear_stray_pending() == 0);
+    rt_reset(); sh_decl_server_test_reset_runtime_state();
+}
+
 static void test_runtime_preserves_unaffected_caches(void)
 {
     unsigned char objects[2][0x800] = {0};
@@ -2212,9 +2775,11 @@ static void test_runtime_preserves_unaffected_caches(void)
     /* A changed dependency can select a consumer even if its own bytes did
      * not change. The declaration pass follows the captured resident set. */
     g_resident_only = objects[1];
+    g_resident_leaf_calls = 0; g_resident_leaf_loads_seen = -1;
     CHECK(sh_decl_server_test_materialize_missing_sedefs(items, 2, (void *)1,
         rt_type_by_name, rt_source_find, rt_find_decl, &materialized));
     CHECK(g_rt_reconstructs == 1 && g_rt_loads[0] == 0 && g_rt_loads[1] == 1);
+    CHECK(g_resident_leaf_calls == 1 && g_resident_leaf_loads_seen == 0);
     CHECK(*(void **)(objects[0] + 0x688) == objects[0]);
     sh_decl_server_test_set_resident(NULL); sh_decl_server_test_set_runtime(0);
     g_resident_filter = 0; g_resident_only = NULL;
@@ -2526,6 +3091,237 @@ static void test_runtime_import_keeps_native_fallback(void)
     sh_decl_server_test_reset_runtime_state();
 }
 
+/* Rebound installed originals (package_compiler.h rebound_original; R-321, r9's copy of
+ * textures/effects/hud/magic_glass_broken_2). The engine's default is excused only for a material whose
+ * rebinding renamed image names alone, and only while its installed original has not parsed without the
+ * default in this process; the strict rule holds for every other case. */
+static unsigned char *g_rebound_original_object;
+static void *rebound_peek(void *manager, const char *name, unsigned char make_default)
+{
+    (void)manager; (void)make_default;
+    return g_rebound_original_object && name && !strcmp(name, "textures/x") ? g_rebound_original_object : NULL;
+}
+typedef struct rebound_case {
+    const char *type; int rebound; const char *original;
+    int stock_state; /* the installed original's state byte; -1 when it is not registered */
+    int accept; const char *basis;
+} rebound_case;
+static const rebound_case g_rebound_cases[] = {
+    { "material", 1, "textures/x", -1, 1, "which this process has not parsed" },
+    { "material", 1, "textures/x", 0x02, 1, "which this process has not parsed" },  /* registered, not loaded */
+    { "material", 1, "textures/x", 0x04, 1, "as that original did in this process" },
+    { "material", 1, "textures/x", 0x00, 0, NULL },  /* parsed without the default: the copy's own */
+    { "material", 2, "textures/x", -1, 0, NULL },    /* a non-image name was rebound */
+    { "entityDef", 1, "textures/x", -1, 0, NULL },   /* another declaration family */
+    { "material", 1, NULL, -1, 0, NULL },            /* no installed original name */
+    { "material", 0, "textures/x", -1, 0, NULL },    /* no certificate: authored or composed */
+};
+static void test_rebound_original_materialization(void)
+{
+    static const unsigned char body[] = "{ tex \"generated/image/smp/aa.bimage\" }";
+    unsigned char *decl = (unsigned char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, DS_TEST_DECL_BYTES);
+    unsigned char *stock = (unsigned char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, DS_TEST_DECL_BYTES);
+    CHECK(decl && stock);
+    if (!decl || !stock) return;
+    for (size_t i = 0; i < sizeof(g_rebound_cases) / sizeof(g_rebound_cases[0]); i++) {
+        const rebound_case *c = &g_rebound_cases[i];
+        sh_decl_server_test_materialize_item item = {
+            c->type, "smp/rebound", "generated/decls/material/smp/rebound.decl",
+            SH_DECL_SERVER_TEST_MISSING, body, sizeof(body) - 1, 0, 0, 0, 0, c->rebound, c->original
+        };
+        materialize_reset();
+        memset(decl, 0, DS_TEST_DECL_BYTES);
+        decl[0x2c] = 0x04; *(void **)(decl + 0x18) = (void *)1; /* the engine's default */
+        g_materialize_decl = decl;
+        memset(stock, 0, DS_TEST_DECL_BYTES);
+        g_rebound_original_object = c->stock_state < 0 ? NULL : stock;
+        if (c->stock_state >= 0) {
+            stock[0x2c] = (unsigned char)c->stock_state;
+            if (c->stock_state & 0x04) *(void **)(stock + 0x18) = (void *)1;
+        }
+        sh_decl_server_test_set_reconstruct(NULL, rebound_peek);
+        log_all_reset();
+        /* A refused material is present and defaulted, so the pass isolates it and goes on
+         * (test_defaulted_material_isolation); a refused entityDef stays terminal. */
+        {
+            int isolated = !c->accept && !strcmp(c->type, "material");
+            run_materialize_case(&item, 1, c->accept || isolated, c->accept);
+            CHECK(sh_decl_server_test_isolated_defaults() == isolated);
+        }
+        if (c->accept) {
+            CHECK(strstr(g_log_all, "NATIVE-FALLBACK") && strstr(g_log_all, "rebound copy of installed material textures/x"));
+            CHECK(strstr(g_log_all, c->basis) != NULL);
+        } else {
+            CHECK(!strstr(g_log_all, "NATIVE-FALLBACK"));
+            CHECK(strstr(g_log_all, "REFUSED") != NULL);
+        }
+        if (c->stock_state == 0)
+            CHECK(strstr(g_log_all, "its installed original parsed in this process without the engine's default") != NULL);
+        if (!c->accept) {
+            if (!strstr(g_log_all, "REFUSED")) fprintf(stderr, "rebound case %zu log:\n%s\n", i, g_log_all);
+        }
+    }
+    sh_decl_server_test_set_reconstruct(NULL, NULL);
+    g_rebound_original_object = NULL;
+    HeapFree(GetProcessHeap(), 0, decl);
+    HeapFree(GetProcessHeap(), 0, stock);
+}
+/* A material whose text names a render program neither the library nor the installed inventory
+ * declares parses to the engine's default natively, whatever its certificate (the 2026-10-22 boot refused
+ * material/smp/5dea5f3e..., the image-rebound copy of textures/effects/hud/magic_glass_broken_2, under the
+ * strict rule). The predicted default is excused and logged with the program; other families and an
+ * unfinished load keep the strict rule. */
+static void test_native_default_materialization(void)
+{
+    static const unsigned char body[] = "{ stageProgram hud_magic_glass_off tex \"generated/image/smp/aa.bimage\" }";
+    unsigned char *decl = (unsigned char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, DS_TEST_DECL_BYTES);
+    CHECK(decl != NULL);
+    if (!decl) return;
+    sh_decl_server_test_set_reconstruct(NULL, NULL);
+    for (int variant = 0; variant < 3; variant++) {
+        sh_decl_server_test_materialize_item item = {
+            variant == 1 ? "entityDef" : "material", "smp/glass", "generated/decls/material/smp/glass.decl",
+            SH_DECL_SERVER_TEST_MISSING, body, sizeof(body) - 1, 0, 0, 0, 0, 0, NULL, "hud_magic_glass_off"
+        };
+        int accept = variant == 0;
+        materialize_reset();
+        memset(decl, 0, DS_TEST_DECL_BYTES);
+        decl[0x2c] = variant == 2 ? 0x05 : 0x04; *(void **)(decl + 0x18) = (void *)1;
+        g_materialize_decl = decl;
+        log_all_reset();
+        run_materialize_case(&item, 1, accept, accept);
+        if (getenv("DS_TEST_VERBOSE")) fprintf(stderr, "native default variant %d:\n%s", variant, g_log_all);
+        if (accept) {
+            CHECK(strstr(g_log_all, "NATIVE-FALLBACK") && strstr(g_log_all, "renderProg 'hud_magic_glass_off'"));
+            CHECK(!strstr(g_log_all, "REFUSED"));
+        } else {
+            CHECK(!strstr(g_log_all, "NATIVE-FALLBACK") && strstr(g_log_all, "REFUSED") != NULL);
+        }
+        CHECK(sh_decl_server_test_isolated_defaults() == 0);
+    }
+    HeapFree(GetProcessHeap(), 0, decl);
+}
+
+/* One present, defaulted material the pass cannot excuse is refused alone: the identities after it still
+ * materialize, the pass completes, and the refusal is accounted (REFUSED with its certificate and original,
+ * the isolated count). A null object or a defaulted declaration of another family stays terminal. */
+static void test_defaulted_material_isolation(void)
+{
+    static const unsigned char body[] = "{ tex \"generated/image/smp/aa.bimage\" }";
+    unsigned char *defaulted = (unsigned char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, DS_TEST_DECL_BYTES);
+    unsigned char *clean = (unsigned char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, DS_TEST_DECL_BYTES);
+    CHECK(defaulted && clean);
+    if (!defaulted || !clean) return;
+    defaulted[0x2c] = 0x04; *(void **)(defaulted + 0x18) = (void *)1;
+    sh_decl_server_test_set_reconstruct(NULL, NULL);
+    {
+        sh_decl_server_test_materialize_item items[] = {
+            { "material", "smp/broken", "generated/decls/material/smp/broken.decl",
+              SH_DECL_SERVER_TEST_MISSING, body, sizeof(body) - 1, 0, 0, 0, 0, 0, NULL, NULL },
+            { "material", "smp/fine", "generated/decls/material/smp/fine.decl",
+              SH_DECL_SERVER_TEST_MISSING, body, sizeof(body) - 1, 0, 0, 0, 0, 0, NULL, NULL }
+        };
+        materialize_reset();
+        g_materialize_decl = clean;
+        g_materialize_null_entity_name = "smp/broken"; g_materialize_decl_null_entity = defaulted;
+        log_all_reset();
+        run_materialize_case(items, 2, 1, 1);
+        if (getenv("DS_TEST_VERBOSE")) fprintf(stderr, "isolation case:\n%s", g_log_all);
+        CHECK(sh_decl_server_test_isolated_defaults() == 1);
+        CHECK(strstr(g_log_all, "REFUSED: 'generated/decls/material/smp/broken.decl -> material/smp/broken'") != NULL);
+        CHECK(strstr(g_log_all, "did not complete source parsing (certificate 0, original '-'); isolated:") != NULL);
+        CHECK(strstr(g_log_all, "MATERIALIZED: 'generated/decls/material/smp/fine.decl'") != NULL);
+        CHECK(!strstr(g_log_all, "NATIVE-FALLBACK"));
+    }
+    {
+        /* The certificate and original of a refused copy are named, so a live refusal can be read. */
+        sh_decl_server_test_materialize_item item = {
+            "material", "smp/copy", "generated/decls/material/smp/copy.decl",
+            SH_DECL_SERVER_TEST_MISSING, body, sizeof(body) - 1, 0, 0, 0, 0, 2, "textures/x", NULL
+        };
+        materialize_reset();
+        g_materialize_decl = defaulted;
+        log_all_reset();
+        run_materialize_case(&item, 1, 1, 0);
+        if (getenv("DS_TEST_VERBOSE")) fprintf(stderr, "isolation case:\n%s", g_log_all);
+        CHECK(strstr(g_log_all, "(certificate 2, original 'textures/x'); isolated:") != NULL);
+        CHECK(sh_decl_server_test_isolated_defaults() == 1);
+    }
+    {
+        /* A null object is the cut-content shape and stays terminal: nothing after it materializes. */
+        sh_decl_server_test_materialize_item items[] = {
+            { "material", "smp/broken", "generated/decls/material/smp/broken.decl",
+              SH_DECL_SERVER_TEST_MISSING, body, sizeof(body) - 1, 0, 0, 0, 0, 0, NULL, NULL },
+            { "material", "smp/fine", "generated/decls/material/smp/fine.decl",
+              SH_DECL_SERVER_TEST_MISSING, body, sizeof(body) - 1, 0, 0, 0, 0, 0, NULL, NULL }
+        };
+        materialize_reset();
+        g_materialize_decl = clean;
+        g_materialize_null_entity_name = "smp/broken"; g_materialize_decl_null_entity = NULL;
+        log_all_reset();
+        run_materialize_case(items, 2, 0, 0);
+        if (getenv("DS_TEST_VERBOSE")) fprintf(stderr, "isolation case:\n%s", g_log_all);
+        CHECK(sh_decl_server_test_isolated_defaults() == 0);
+        CHECK(strstr(g_log_all, "null decl") != NULL && !strstr(g_log_all, "isolated:"));
+        CHECK(!strstr(g_log_all, "MATERIALIZED: 'generated/decls/material/smp/fine.decl'"));
+    }
+    {
+        /* A defaulted declaration of another family is still terminal. */
+        sh_decl_server_test_materialize_item item = {
+            "entityDef", "smp/entity", "generated/decls/entitydef/smp/entity.decl",
+            SH_DECL_SERVER_TEST_MISSING, body, sizeof(body) - 1, 0, 0, 0, 0, 0, NULL, NULL
+        };
+        materialize_reset();
+        g_materialize_decl = defaulted;
+        log_all_reset();
+        run_materialize_case(&item, 1, 0, 0);
+        if (getenv("DS_TEST_VERBOSE")) fprintf(stderr, "isolation case:\n%s", g_log_all);
+        CHECK(sh_decl_server_test_isolated_defaults() == 0 && !strstr(g_log_all, "isolated:"));
+    }
+    HeapFree(GetProcessHeap(), 0, defaulted);
+    HeapFree(GetProcessHeap(), 0, clean);
+}
+/* The runtime shadowed drain (activation and the recovery that restores a provider) applies the same rule:
+ * a certified material's default is reloaded as accepted, and the contradicted, non-image and unfinished cases
+ * are drain failures. */
+static void test_runtime_rebound_original(void)
+{
+    for (int variant = 0; variant < 4; variant++) {
+        unsigned char decl[0x300] = {0}, stock[0x300] = {0};
+        sh_decl_server_test_materialize_item item = {
+            "material", "rt/rebound", "generated/decls/material/rt/rebound.decl",
+            SH_DECL_SERVER_TEST_SHADOWED, NULL, 0, SH_DECL_SERVER_TEST_SHADOW_LIVE, 0, 0, 0,
+            variant == 2 ? 2 : 1, "rt/original"
+        };
+        int materialized = -1, accept = variant == 0;
+        long faults = 0, shadow = 0;
+        rt_reset();
+        g_rt_names[0] = "rt/rebound"; g_rt_objects[0] = decl; g_rt_no_drain = 1;
+        if (variant == 1) { g_rt_names[1] = "rt/original"; g_rt_objects[1] = stock; stock[0x2c] = 0; }
+        sh_decl_server_test_reset_runtime_state();
+        sh_decl_server_test_set_generic_load(variant == 3 ? NULL : rt_fallback_load);
+        sh_decl_server_test_set_runtime(1);
+        log_all_reset();
+        CHECK(sh_decl_server_test_materialize_missing_sedefs(&item, 1,
+            (void *)1, rt_type_by_name, rt_source_find, rt_find_decl, &materialized) == accept);
+        sh_decl_server_test_runtime_counters(NULL, NULL, &shadow, &faults);
+        if (accept) {
+            CHECK(shadow == 1 && faults == 0);
+            CHECK(strstr(g_log_all, "rebound copy of installed material rt/original") != NULL);
+            CHECK(strstr(g_log_all, "RELOADED") != NULL && !strstr(g_log_all, "DRAIN-FAILED"));
+            CHECK((decl[0x2c] & 2) == 0 && (decl[0x2c] & 4) != 0);
+            CHECK(sh_decl_server_test_clear_stray_pending() == 0);
+        } else {
+            CHECK(!strstr(g_log_all, "NATIVE-FALLBACK"));
+            if (variant != 3) CHECK(faults == 1 && strstr(g_log_all, "DRAIN-FAILED") != NULL);
+            /* An unfinished load is never excused; its mark is swept. */
+            if (variant == 3) CHECK(sh_decl_server_test_clear_stray_pending() == 1);
+        }
+        sh_decl_server_test_set_runtime(0);
+        sh_decl_server_test_reset_runtime_state();
+    }
+}
+
 static void test_runtime_stray_pending_cleared(void)
 {
     static const unsigned char body[] = "{ }";
@@ -2691,6 +3487,76 @@ static void test_boot_hook_recovery(const sig_result *results, size_t count,
     g_hook_invoke_on_commit = 0;
 }
 
+/* R-400: a boot whose first registration waits for the menu. The promotion runs only the shader preparation,
+ * in the boot scope where native shader preparation is admitted; nothing registers there; the first settled
+ * browser tick registers the library. A preparation that cannot complete keeps the default placement: the
+ * registration runs inside the promotion. */
+static int g_boot_prep_calls, g_boot_prep_admitted, g_boot_prep_result;
+static int boot_prepare_fixture(char *why, size_t capacity)
+{
+    g_boot_prep_calls++;
+    g_boot_prep_admitted = sh_decl_server_shader_preparation_ready();
+    if (!g_boot_prep_result) snprintf(why, capacity, "no shader preparation hint exists yet for these installed packages");
+    return g_boot_prep_result;
+}
+static void test_deferred_first_registration(const sig_result *results, size_t count,
+                                             const unsigned char *base, void *cmdsys)
+{
+    unsigned char resource_node[0x30] = {0}, resource[0x30] = {0};
+    void *resources[] = {resource};
+    for (int prepared = 1; prepared >= 0; prepared--) {
+        sh_decl_server_test_reset_install();
+        *(void **)(resource_node + 0x20) = resources;
+        *(int *)(resource_node + 0x28) = 1;
+        g_boundary_resource_head = resource_node;
+        g_linked_fixture = 1;
+        runtime_fixture();
+        g_hook_prepare_fail = 0; g_hook_unpatch_fail = 0;
+        g_hook_commit_result = B2_PATCH_OK;
+        g_hook_invoke_on_commit = 0; /* the engine reaches the promotion later in idCommonLocal::Init */
+        g_boot_prep_calls = g_boot_prep_admitted = 0; g_boot_prep_result = prepared;
+        sh_boot_phases_set_placement(SH_BOOT_PLACE_FIRST_BOUNDARY);
+        sh_decl_server_set_boot_preparation(boot_prepare_fixture);
+        int requirements = g_requirements_calls, originals = g_hook_original_calls, strings = g_string_refreshes;
+        CHECK(sh_decl_server_install(results, count, base, cmdsys) == 1);
+        CHECK(g_hook_detour != NULL && g_requirements_calls == requirements);
+        if (g_hook_detour) g_hook_detour();
+        CHECK(g_hook_original_calls == originals + 1); /* the engine's own promotion always runs */
+        if (g_boot_prep_calls != 1 || g_boot_prep_admitted != 1) fprintf(stderr, "boot preparation: %d call(s), admitted %d\n", g_boot_prep_calls, g_boot_prep_admitted);
+        CHECK(g_boot_prep_calls == 1 && g_boot_prep_admitted == 1);
+        if (prepared) {
+            /* Menu first: nothing registered in the promotion, no half view, one pass at the browser. */
+            CHECK(g_requirements_calls == requirements && g_string_refreshes == strings);
+            CHECK(sh_decl_server_registration_succeeded() == 0);
+            CHECK(sh_boot_phases_placement() == SH_BOOT_PLACE_FIRST_BOUNDARY);
+            sh_decl_server_rearm_poll();
+            if (!sh_decl_server_registration_succeeded()) fprintf(stderr, "deferred first registration: %s\n", g_last_log);
+            CHECK(sh_decl_server_registration_succeeded() == 1);
+            CHECK(g_requirements_calls == requirements + 1 && g_string_refreshes == strings + 1);
+        } else {
+            /* No hint: the registration runs inside the promotion exactly as a default boot. */
+            CHECK(sh_boot_phases_placement() == SH_BOOT_PLACE_PROMOTION);
+            CHECK(g_requirements_calls == requirements + 1);
+            CHECK(sh_decl_server_registration_succeeded() == 1);
+            sh_decl_server_rearm_poll();
+            CHECK(g_string_refreshes == strings + 1); /* no second pass is waiting */
+        }
+    }
+    sh_decl_server_set_boot_preparation(NULL);
+    sh_boot_phases_set_placement(SH_BOOT_PLACE_PROMOTION);
+    sh_decl_server_test_reset_install();
+    g_boundary_resource_head = NULL;
+    g_linked_fixture = 0;
+    g_hook_prepare_fail = 1;
+    g_hook_invoke_on_commit = 0;
+}
+
+static int builtin_loads(void)
+{
+    int loads = 0;
+    for (size_t b = 0; b < g_rt_builtin_count; b++) loads += g_rt_builtins[b].loads;
+    return loads;
+}
 static void test_empty_launch_and_runtime_results(void)
 {
     static struct { unsigned char anchor[32]; void *registry; } image_anchor;
@@ -2704,6 +3570,7 @@ static void test_empty_launch_and_runtime_results(void)
         {"IdStrCtor", pipeline_ctor}, {"IdStrDtor", pipeline_dtor},
         {"ResourceStaticPromote", lifecycle_promote}, {"CmdExecuteBuffer", lifecycle_noop},
         {"ResourceGenericLoad", rt_generic_load}, {"ResourceReconstruct", rt_reconstruct},
+        {"ResourceListAdd", lifecycle_noop},
         {"AddCommand", lifecycle_add_command},
         {"MemLocalGet", heap_get}, {"MemLocalPushHeap", heap_push},
         {"MemLocalPopHeap", heap_pop}
@@ -2921,6 +3788,236 @@ static void test_empty_launch_and_runtime_results(void)
     g_boundary_common_slot = g_boundary_common;
     sh_decl_server_rearm_poll();
     CHECK(sh_decl_server_registration_succeeded() == 1 && g_string_refreshes == 2);
+    /* An installed-package request waits for the browser, as after a consent
+     * install committed in the editor. A map-boundary activation completing
+     * meanwhile finds the served view unchanged and keeps the registration
+     * (R-381); the deferred pass still runs after. The watcher's pass over an
+     * unchanged inventory keeps the registration too; a forced pass compiles,
+     * registers and, changing nothing, logs its SHADOWED identities as a count. */
+    {
+        const LONG kinds[] = {0, 1};
+        for (size_t k = 0; k < sizeof(kinds) / sizeof(kinds[0]); k++) {
+            int refreshes = g_string_refreshes;
+            long skipped = sh_package_runtime_activations_skipped();
+            if (kinds[k]) sh_decl_server_request_rearm(); else sh_decl_server_test_request_watched();
+            CHECK(!sh_decl_server_registration_succeeded());
+            CHECK(sh_decl_server_activate_occurrences(NULL) == 1);
+            CHECK(g_string_refreshes == refreshes && sh_package_runtime_activations_skipped() == skipped + 1 &&
+                !sh_decl_server_registration_succeeded());
+            log_all_reset();
+            sh_decl_server_rearm_poll();
+            CHECK(sh_decl_server_registration_succeeded() == 1);
+            if (kinds[k]) {
+                CHECK(g_string_refreshes == refreshes + 1 && !strstr(g_log_all, "served library is unchanged"));
+                CHECK(strstr(g_log_all, "decl-server SHADOWED: ") != NULL && !strstr(g_log_all, "decl-server SHADOWED: '"));
+                CHECK(strstr(g_log_all, "as at the last pass") != NULL);
+            } else {
+                CHECK(g_string_refreshes == refreshes && sh_package_runtime_activations_skipped() == skipped + 2);
+                CHECK(strstr(g_log_all, "decl-server RE-ARM: the served library is unchanged") != NULL);
+            }
+        }
+        /* A pending request never masks a failed activation. */
+        sh_package_runtime_test_force_activation(1);
+        g_runtime_dependencies_ok = 0;
+        sh_decl_server_test_request_watched();
+        CHECK(sh_decl_server_activate_occurrences(NULL) == 0);
+        g_runtime_dependencies_ok = 1;
+        sh_package_runtime_test_force_activation(0);
+        sh_decl_server_rearm_poll();
+        CHECK(sh_decl_server_registration_succeeded() == 1);
+    }
+    {
+        /* A map provider activation that keeps failing (the departure poll asks
+         * again) marks the first failure of the run and the run's end, and the
+         * runtime counts its repeated diagnosis instead of logging it again. */
+        int failures = 0, repeats = 0, recovered = 0;
+        sh_package_runtime_test_force_activation(1);
+        g_runtime_dependencies_ok = 0;
+        log_all_reset();
+        for (int attempt = 0; attempt < 3; attempt++) CHECK(sh_decl_server_activate_map(NULL) == 0);
+        for (const char *at = g_log_all; (at = strstr(at, "map provider activation failed")); at++) failures++;
+        CHECK(failures == 1);
+        g_runtime_dependencies_ok = 1;
+        sh_package_runtime_test_force_activation(0);
+        log_all_reset();
+        CHECK(sh_decl_server_activate_map(NULL) == 1);
+        for (const char *at = g_log_all; (at = strstr(at, "repeated 2 more time(s)")); at++) repeats++;
+        for (const char *at = g_log_all; (at = strstr(at, "succeeded after 3 failed attempt(s)")); at++) recovered++;
+        CHECK(repeats == 1 && recovered == 1 && sh_decl_server_registration_succeeded() == 1);
+    }
+    {
+        /* The idle retirement poll backs off after a failed retained activation (the 2026-10-22 boot
+         * asked, and logged, once a second for the whole session): the wait doubles up to the cap, the
+         * cap is announced once, and the schedule clears with the pending resources. */
+        long attempts; int polls = 0, capped = 0;
+        sh_decl_server_test_retirement_timing(20, 80);
+        sh_package_runtime_test_force_activation(1);
+        g_runtime_dependencies_ok = 0;
+        sh_package_runtime_test_occurrences_pending(1);
+        CHECK(sh_package_runtime_occurrences_pending() && sh_decl_server_map_retirement_safe());
+        for (ULONGLONG start = GetTickCount64(); GetTickCount64() - start < 400;) {
+            log_all_reset();
+            sh_decl_server_rearm_poll();
+            if (strstr(g_log_all, "retrying every 80 ms")) capped++;
+            Sleep(5); polls++;
+        }
+        attempts = sh_decl_server_test_retirement_attempts();
+        if (attempts < 3 || attempts > 8) fprintf(stderr, "retirement attempts %ld over %d polls\n", attempts, polls);
+        CHECK(attempts >= 3 && attempts <= 8 && polls > attempts * 4);
+        CHECK(capped == 1);
+        sh_package_runtime_test_occurrences_pending(0);
+        sh_decl_server_rearm_poll();
+        CHECK(sh_decl_server_test_retirement_attempts() == attempts);
+        g_runtime_dependencies_ok = 1;
+        sh_package_runtime_test_force_activation(0);
+        sh_decl_server_test_retirement_timing(1000, 60000);
+        CHECK(sh_decl_server_rearm() == 1 && sh_decl_server_registration_succeeded());
+    }
+    {
+        /* R-381: leases pending over an unchanged view (the 2026-10-22 boot: the
+         * registration pass's own holds left them pending after every pass, and
+         * the poll re-registered the library every 16 s for the session). The
+         * boundary finds nothing to activate, keeps the registration, publishes
+         * the leases and asks once. */
+        long attempts, skipped = sh_package_runtime_activations_skipped();
+        int refreshes = g_string_refreshes;
+        sh_decl_server_test_retirement_timing(20, 80);
+        sh_package_runtime_test_occurrences_pending(1);
+        CHECK(sh_package_runtime_occurrences_pending() && sh_decl_server_map_retirement_safe());
+        attempts = sh_decl_server_test_retirement_attempts();
+        int departures = g_retained_departures;
+        log_all_reset();
+        for (ULONGLONG start = GetTickCount64(); GetTickCount64() - start < 300;) { sh_decl_server_rearm_poll(); Sleep(5); }
+        CHECK(sh_decl_server_test_retirement_attempts() == attempts + 1);
+        /* R-393: the successful retirement is accounted as a departure, once. */
+        CHECK(g_retained_departures == departures + 1 && !strcmp(g_retained_route, "retired at the browser"));
+        CHECK(!sh_package_runtime_occurrences_pending() && sh_package_runtime_activations_skipped() == skipped + 1);
+        CHECK(g_string_refreshes == refreshes && sh_decl_server_registration_succeeded() == 1);
+        CHECK(strstr(g_log_all, "the served provider is unchanged") != NULL);
+        CHECK(!strstr(g_log_all, "RE-ARM:") && !strstr(g_log_all, "retained resource activation"));
+        sh_decl_server_test_retirement_timing(1000, 60000);
+    }
+    {
+        /* R-398: with the native map boundary available and nothing the browser shows at stake, released consumers'
+         * retained rows wait for the next boundary: no retirement activation at the browser, one line. */
+        long attempts;
+        sh_decl_server_test_retirement_timing(20, 80);
+        sh_package_runtime_test_occurrences_pending(1);
+        g_transition_ready = 1;
+        attempts = sh_decl_server_test_retirement_attempts();
+        log_all_reset();
+        for (ULONGLONG start = GetTickCount64(); GetTickCount64() - start < 200;) { sh_decl_server_rearm_poll(); Sleep(5); }
+        CHECK(sh_decl_server_test_retirement_attempts() == attempts && sh_package_runtime_occurrences_pending());
+        CHECK(strstr(g_log_all, "retained resource retirement deferred to the next map boundary") != NULL);
+        {
+            const char *first = strstr(g_log_all, "retirement deferred");
+            CHECK(first && !strstr(first + 1, "retirement deferred"));
+        }
+        /* Without the boundary the browser retires them as before. */
+        g_transition_ready = 0;
+        for (ULONGLONG start = GetTickCount64(); GetTickCount64() - start < 300;) { sh_decl_server_rearm_poll(); Sleep(5); }
+        CHECK(sh_decl_server_test_retirement_attempts() == attempts + 1 && !sh_package_runtime_occurrences_pending());
+        sh_decl_server_test_retirement_timing(1000, 60000);
+    }
+    {
+        /* R-398: each registration step runs only when its inputs changed, and
+         * the registered state is the full pass's. The built-ins are editor
+         * declarations: a pass that re-parses them rebuilds the palette. */
+        int palettes, refreshes, loads;
+        int before_loads;
+        g_palette_current = 1;
+        g_resident_filter = 1; g_resident_only = NULL; /* nothing selected: nothing changed */
+        /* A full pass that changed no editor or entity template row keeps the palette. */
+        loads = builtin_loads(); before_loads = loads; palettes = g_apply_palette_calls;
+        log_all_reset();
+        CHECK(sh_decl_server_rearm() == 1 && sh_decl_server_registration_succeeded());
+        loads = builtin_loads();
+        CHECK(loads == before_loads && g_apply_palette_calls == palettes);
+        CHECK(strstr(g_log_all, "palette-refresh KEPT") != NULL && !strstr(g_log_all, "RE-ARM kept"));
+        /* A reopen that changed nothing keeps the registration: the policy steps
+         * run, nothing is re-parsed and the palette stands. */
+        palettes = g_apply_palette_calls; refreshes = g_string_refreshes;
+        sh_package_runtime_test_force_activation(1);
+        log_all_reset();
+        CHECK(sh_decl_server_activate_map(NULL) == 1 && sh_decl_server_registration_succeeded());
+        loads = builtin_loads();
+        CHECK(loads == before_loads && g_apply_palette_calls == palettes && g_string_refreshes == refreshes + 1);
+        if (!strstr(g_log_all, "RE-ARM kept")) fprintf(stderr, "reopen: %s\n", g_log_all);
+        CHECK(strstr(g_log_all, "RE-ARM kept") != NULL);
+        /* Its registered state is the full pass's: a full pass over it re-parses
+         * nothing, changes no row and keeps the same palette. */
+        log_all_reset();
+        CHECK(sh_decl_server_rearm() == 1 && sh_decl_server_registration_succeeded());
+        loads = builtin_loads();
+        CHECK(loads == before_loads && g_apply_palette_calls == palettes);
+        CHECK(strstr(g_log_all, "palette-refresh KEPT") != NULL);
+        /* A declaration not in its parsed state is repaired by a full pass, as before. */
+        g_rt_builtins[0].object[0x2c] |= 0x04;
+        log_all_reset();
+        CHECK(sh_decl_server_activate_map(NULL) == 1 && sh_decl_server_registration_succeeded());
+        CHECK(strstr(g_log_all, "registers in full: a declaration is not in its parsed state") != NULL);
+        loads = builtin_loads();
+        CHECK(loads > before_loads && !(g_rt_builtins[0].object[0x2c] & 0x04));
+        CHECK(g_apply_palette_calls == palettes + 1); /* an editor declaration was re-parsed */
+        before_loads = loads; palettes = g_apply_palette_calls;
+        /* A pass whose resident refresh selects consumers (a changed or rebound
+         * resource's) registers in full; re-parsed editor rows rebuild the palette. */
+        g_resident_filter = 0;
+        log_all_reset();
+        CHECK(sh_decl_server_activate_map(NULL) == 1 && sh_decl_server_registration_succeeded());
+        CHECK(strstr(g_log_all, "registers in full: the resident refresh selected consumers") != NULL);
+        loads = builtin_loads();
+        CHECK(loads > before_loads && g_apply_palette_calls == palettes + 1);
+        g_resident_filter = 1; g_resident_only = NULL;
+        /* Selected templates alone (the resident pass's consumers) rebuild it too. */
+        loads = builtin_loads(); before_loads = loads; palettes = g_apply_palette_calls;
+        g_resident_templates = 1;
+        CHECK(sh_decl_server_rearm() == 1);
+        CHECK(g_apply_palette_calls == palettes + 1);
+        g_resident_templates = 0;
+        /* A palette that is not the one built for these rows is rebuilt, and a
+         * reopen over it registers in full. */
+        palettes = g_apply_palette_calls;
+        g_palette_current = 0;
+        log_all_reset();
+        CHECK(sh_decl_server_activate_map(NULL) == 1 && sh_decl_server_registration_succeeded());
+        CHECK(g_apply_palette_calls == palettes + 1 && !strstr(g_log_all, "RE-ARM kept"));
+        g_palette_current = 1;
+        /* R-401: under register-once, a pass the runtime hands no change keeps the registration even when its
+         * candidates are not the standing registration's inputs (a view that lost rows the engine keeps), and
+         * records its rows as a full pass would; without the switch the same pass registers in full. */
+        CHECK(sh_decl_server_rearm() == 1);
+        sh_decl_server_test_perturb_registration();
+        log_all_reset();
+        CHECK(sh_decl_server_activate_map(NULL) == 1);
+        CHECK(strstr(g_log_all, "registers in full: these inputs are not the registration standing") != NULL);
+        loads = builtin_loads(); before_loads = loads; palettes = g_apply_palette_calls;
+        sh_package_runtime_test_register_once(1);
+        sh_decl_server_test_perturb_registration();
+        log_all_reset();
+        CHECK(sh_decl_server_activate_map(NULL) == 1 && sh_decl_server_registration_succeeded());
+        if (!strstr(g_log_all, "RE-ARM kept (register-once)")) fprintf(stderr, "register-once keep: %s\n", g_log_all);
+        CHECK(strstr(g_log_all, "RE-ARM kept (register-once)") != NULL);
+        CHECK(builtin_loads() == before_loads && g_apply_palette_calls == palettes);
+        /* Its registered state is the full pass's: a full pass re-parses nothing and keeps the palette. */
+        log_all_reset();
+        CHECK(sh_decl_server_rearm() == 1 && sh_decl_server_registration_succeeded());
+        CHECK(builtin_loads() == before_loads && g_apply_palette_calls == palettes);
+        sh_package_runtime_test_register_once(0);
+        /* Additive admission or shader preparation forgets the standing registration. */
+        CHECK(sh_decl_server_rearm() == 1);
+        log_all_reset();
+        CHECK(sh_decl_server_activate_map(NULL) == 1 && strstr(g_log_all, "RE-ARM kept"));
+        sh_decl_server_test_forget_registration();
+        log_all_reset();
+        CHECK(sh_decl_server_activate_map(NULL) == 1);
+        CHECK(strstr(g_log_all, "registers in full: these inputs are not the registration standing") != NULL);
+        /* An explicit re-arm is always a full pass. */
+        log_all_reset();
+        CHECK(sh_decl_server_rearm() == 1 && !strstr(g_log_all, "RE-ARM kept"));
+        sh_package_runtime_test_force_activation(0);
+        g_resident_filter = 0; g_resident_only = NULL; g_palette_current = 0;
+    }
     {
         const sh_package_compilation *before = sh_package_runtime_acquire(), *after;
         int scans = g_scan_calls, refreshes = g_string_refreshes, retries = g_startup_retries;
@@ -2957,6 +4054,36 @@ static void test_empty_launch_and_runtime_results(void)
     }
 
     {
+        /* R-309 in-place image recovery: after the resident drain a forward activation that recovers
+         * an image fails while the native probe still reports an exclusion placeholder (or cannot
+         * tell, or none is installed), and the previous provider is restored; a recovered image
+         * passes; its return to the native decision is never refused. */
+        static const char *const need[] = {"env/x"};
+        const sh_package_compilation *before = sh_package_runtime_acquire(), *after;
+        char error[2048];
+        sh_package_runtime_release();
+        sh_package_runtime_test_recovery_need(need, 1, 1);
+        for (int state = 1; state >= -2; state -= 1) {
+            if (state == 0) continue;
+            g_test_image_state = state;
+            sh_decl_server_image_state(state == -2 ? NULL : test_image_state);
+            CHECK(sh_decl_server_rearm() == 0);
+            after = sh_package_runtime_acquire(); CHECK(after == before); sh_package_runtime_release();
+            sh_package_runtime_error(error, sizeof(error));
+            if (!strstr(error, "declared image availability was not recovered: env/x"))
+                fprintf(stderr, "recovery verification %d: %s\n", state, error);
+            CHECK(strstr(error, "declared image availability was not recovered: env/x") &&
+                strstr(error, state == 1 ? "still an exclusion placeholder" : "native state unknown"));
+        }
+        g_test_image_state = 0; sh_decl_server_image_state(test_image_state);
+        CHECK(sh_decl_server_rearm() == 1 && sh_decl_server_registration_succeeded());
+        /* The gate is no longer declared: the image returns, whatever the probe now reports. */
+        sh_package_runtime_test_recovery_need(NULL, 0, 0);
+        g_test_image_state = 1;
+        CHECK(sh_decl_server_rearm() == 1 && sh_decl_server_registration_succeeded());
+        sh_decl_server_image_state(NULL);
+    }
+    {
         const sh_package_compilation *before = sh_package_runtime_acquire(), *after;
         int audio = g_audio_refreshes, commits = g_install_commit_calls;
         int scans = g_scan_calls;
@@ -2982,11 +4109,299 @@ static void test_empty_launch_and_runtime_results(void)
             int begins = g_resident_begin_calls, ends = g_resident_end_calls;
             if (failure) g_resident_fail_drain = 1; else g_resident_fail_begin = 1;
             CHECK(sh_decl_server_rearm() == 0);
-            CHECK(g_resident_begin_calls == begins + 2 && g_resident_end_calls == ends + 2);
+            /* Failed Begin owns no resident handle. Only recovery ends one;
+             * a failed drain still ends both admitted resident passes. */
+            CHECK(g_resident_begin_calls == begins + 2 && g_resident_end_calls == ends + (failure ? 2 : 1));
             CHECK(g_install_commit_calls == commits && sh_package_runtime_admission_ready());
             after = sh_package_runtime_acquire(); CHECK(after == before); sh_package_runtime_release();
         }
         CHECK(sh_decl_server_rearm() == 1);
+    }
+    {
+        /* A failed read-only storage preflight cannot reach disk commit. */
+        const sh_package_compilation *before=sh_package_runtime_acquire(),*after;
+        sh_package_runtime_release(); int commits=g_install_commit_calls,rejects=g_editor_rejects;
+        g_editor_ready_refuse=1;
+        CHECK(!sh_decl_server_rearm());
+        after=sh_package_runtime_acquire(); CHECK(after==before); sh_package_runtime_release();
+        CHECK(g_install_commit_calls==commits && g_editor_rejects==rejects+1 && !g_editor_live);
+        CHECK(sh_decl_server_rearm());
+        /* Simulate identity/admission refusal after the irreversible commit.
+         * The candidate remains served; NEXT refresh closes accepted storage
+         * before new work, without repeating the previous disk commit. */
+        before=sh_package_runtime_acquire(); sh_package_runtime_release();
+        commits=g_install_commit_calls; rejects=g_editor_rejects; int accepts=g_editor_accepts;
+        int cancels=g_install_cancel_calls;
+        g_editor_after_commit_refuse=1;
+        CHECK(!sh_decl_server_rearm());
+        after=sh_package_runtime_acquire(); CHECK(after!=before); sh_package_runtime_release();
+        CHECK(g_install_commit_calls==commits+1 && g_editor_accepts==accepts &&
+            g_editor_rejects==rejects && g_editor_live && !sh_package_runtime_admission_ready());
+        CHECK(g_install_cancel_calls==cancels);
+        CHECK(sh_decl_server_rearm());
+        CHECK(g_install_commit_calls==commits+2 && g_editor_accepts==accepts+2 &&
+            g_editor_rejects==rejects && !g_editor_live && g_install_cancel_calls==cancels);
+    }
+    {
+        /* Installed packages changed outside an installation are prepared again
+         * in this process at the browser, once per change: after a failed
+         * preparation and in a served library that left an owner out, for a
+         * change made after or during a pass or before the watch could open,
+         * across the watched directory being replaced or removed, for an edit
+         * in place that keeps the size and write time, and for a request the
+         * server could not take at first. An unchanged inventory, served or
+         * failed, is never prepared again, and a lost watch reopens, and an
+         * unanswered request repeats, at a growing interval, not per frame.
+         * Each wait outlasts the settle time several times before passes are
+         * counted. */
+        char overrides[MAX_PATH], marker[MAX_PATH], moved[MAX_PATH], left[MAX_PATH], path[MAX_PATH];
+        const sh_package_compilation *served;
+        size_t packages;
+        long opens, requests;
+        int scans;
+        _snprintf_s(overrides, sizeof(overrides), _TRUNCATE, "%s\\overrides", g_fixture_root);
+        _snprintf_s(marker, sizeof(marker), _TRUNCATE, "%s\\overrides\\fixture\\corrected.txt", g_fixture_root);
+        _snprintf_s(moved, sizeof(moved), _TRUNCATE, "%s\\overrides-moved", g_fixture_root);
+        _snprintf_s(left, sizeof(left), _TRUNCATE, "%s\\overrides\\left", g_fixture_root);
+        sh_decl_server_test_inventory_timing(INVENTORY_QUIET_MS, 20, 0, 20);
+        /* Start with the watch open and nothing pending: earlier tests may
+         * have closed it, and its reopening would count as one change. */
+        sh_decl_server_test_inventory_drop();
+        CHECK(sh_decl_server_rearm() == 1);
+        inventory_settle();
+        /* 1. The whole preparation failed; an unchanged inventory waits. */
+        g_scan_fail = 1;
+        CHECK(sh_decl_server_rearm() == 0);
+        scans = g_scan_calls;
+        inventory_settle();
+        CHECK(g_scan_calls == scans && !sh_decl_server_registration_succeeded());
+        /* Corrected afterwards: one pass at the browser serves it. */
+        g_scan_fail = 0; inventory_write(marker, "corrected");
+        inventory_settle();
+        CHECK(g_scan_calls == scans + 1 && sh_decl_server_registration_succeeded() && sh_package_runtime_ready());
+        /* 2. Corrected while the failing pass read the inventory. */
+        g_scan_fail = 1; g_scan_correct_path = marker;
+        CHECK(sh_decl_server_rearm() == 0);
+        scans = g_scan_calls;
+        inventory_settle();
+        CHECK(g_scan_calls == scans + 1 && sh_decl_server_registration_succeeded());
+        /* 3. A retry that fails again waits for the next change. */
+        g_scan_fail = 1;
+        CHECK(sh_decl_server_rearm() == 0);
+        scans = g_scan_calls;
+        inventory_write(marker, "still broken");
+        inventory_settle();
+        CHECK(g_scan_calls == scans + 1 && !sh_decl_server_registration_succeeded());
+        /* 4. No watch when the pass began (its handle failed and reopening
+         * still fails), and the correction comes before any watch exists: the
+         * reopened watch counts as a change and the inventory is retried. */
+        sh_decl_server_test_inventory_drop();
+        sh_decl_server_test_inventory_fail_opens(2);
+        CHECK(sh_decl_server_rearm() == 0);
+        scans = g_scan_calls;
+        g_scan_fail = 0; inventory_write(marker, "corrected before the watch");
+        inventory_settle();
+        CHECK(g_scan_calls == scans + 1 && sh_decl_server_registration_succeeded());
+        /* 5. Replaced: the old handle watches the moved tree; the identity
+         * check finds the new directory and its inventory is served. */
+        g_scan_fail = 1;
+        CHECK(sh_decl_server_rearm() == 0);
+        scans = g_scan_calls;
+        CHECK(MoveFileA(overrides, moved));
+        CHECK(CreateDirectoryA(overrides, NULL));
+        runtime_fixture_write();
+        inventory_write(marker, "replaced");
+        g_scan_fail = 0;
+        inventory_settle();
+        CHECK(g_scan_calls == scans + 1 && sh_decl_server_registration_succeeded());
+        CHECK(inventory_remove_tree(moved));
+        /* 6. Removed, then recreated: reopening backs off instead of trying
+         * every frame, and the recreated inventory is served. */
+        g_scan_fail = 1;
+        CHECK(sh_decl_server_rearm() == 0);
+        scans = g_scan_calls;
+        CHECK(MoveFileA(overrides, moved));
+        opens = sh_decl_server_test_inventory_opens();
+        inventory_poll_for(1000);
+        opens = sh_decl_server_test_inventory_opens() - opens;
+        if (opens < 2 || opens > 6) fprintf(stderr, "removed watch: %ld reopen attempt(s) in 1 s\n", opens);
+        CHECK(opens >= 2 && opens <= 6);
+        g_scan_fail = 0;
+        CHECK(MoveFileA(moved, overrides));
+        inventory_write(marker, "recreated");
+        inventory_until_pass(scans);
+        inventory_settle();
+        CHECK(g_scan_calls == scans + 1 && sh_decl_server_registration_succeeded());
+        /* 7. Served with an owner left out (one of its declarations does not
+         * read); correcting it serves it in this process. */
+        CHECK(CreateDirectoryA(left, NULL));
+        _snprintf_s(path, sizeof(path), _TRUNCATE, "%s\\package.json", left);
+        inventory_write(path, "{\"id\":\"left\",\"name\":\"Left\"}");
+        const char *levels[] = {"assets", "assets\\generated", "assets\\generated\\decls",
+            "assets\\generated\\decls\\snapeditorentitydef"};
+        for (size_t i = 0; i < sizeof(levels) / sizeof(levels[0]); i++) {
+            _snprintf_s(path, sizeof(path), _TRUNCATE, "%s\\%s", left, levels[i]);
+            CHECK(CreateDirectoryA(path, NULL) || GetLastError() == ERROR_ALREADY_EXISTS);
+        }
+        _snprintf_s(path, sizeof(path), _TRUNCATE, "%s\\assets\\left.bin", left);
+        inventory_write(path, "independent resource");
+        _snprintf_s(path, sizeof(path), _TRUNCATE, "%s\\assets\\generated\\decls\\snapeditorentitydef\\bad.decl", left);
+        inventory_write(path, "{} }");
+        scans = g_scan_calls;
+        inventory_settle();
+        CHECK(g_scan_calls == scans + 1 && sh_decl_server_registration_succeeded());
+        {
+            char *summary = sh_package_runtime_summary();
+            if (!summary || !strstr(summary, "Skipped local package")) fprintf(stderr, "left out owner: %s\n", summary ? summary : "");
+            CHECK(summary && strstr(summary, "Skipped local package"));
+            free(summary);
+        }
+        served = sh_package_runtime_acquire(); packages = served ? served->sources->package_count : 0;
+        sh_package_runtime_release();
+        scans = g_scan_calls;
+        CHECK(DeleteFileA(path));
+        inventory_settle();
+        CHECK(g_scan_calls == scans + 1 && sh_decl_server_registration_succeeded());
+        served = sh_package_runtime_acquire();
+        if (!served || served->sources->package_count != packages + 1) {
+            char *summary = sh_package_runtime_summary();
+            fprintf(stderr, "corrected owner: %zu package(s) served, %zu before: %s\n",
+                served ? served->sources->package_count : 0, packages, summary ? summary : "");
+            free(summary);
+        }
+        CHECK(served && served->sources->package_count == packages + 1);
+        sh_package_runtime_release();
+        /* 8. An edit in place that keeps the size and restores the write time
+         * is a change: the notification decides, not the file's metadata, and
+         * the pass serves the new bytes. */
+        {
+            WIN32_FILE_ATTRIBUTE_DATA after;
+            unsigned char *body = NULL;
+            size_t length = 0;
+            FILETIME written;
+            DWORD count = 0;
+            HANDLE file;
+            _snprintf_s(path, sizeof(path), _TRUNCATE, "%s\\assets\\left.bin", left);
+            CHECK(sh_package_runtime_read("left.bin", &body, &length) == 1 && length == 20 &&
+                !memcmp(body, "independent resource", 20));
+            free(body); body = NULL;
+            file = CreateFileA(path, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+            CHECK(file != INVALID_HANDLE_VALUE);
+            scans = g_scan_calls;
+            if (file != INVALID_HANDLE_VALUE) {
+                CHECK(GetFileTime(file, NULL, NULL, &written));
+                CHECK(WriteFile(file, "INDEPENDENT RESOURCE", 20, &count, NULL) && count == 20);
+                CHECK(SetFileTime(file, NULL, NULL, &written) && FlushFileBuffers(file));
+                CloseHandle(file);
+                CHECK(GetFileAttributesExA(path, GetFileExInfoStandard, &after) && after.nFileSizeLow == 20 &&
+                    !after.nFileSizeHigh && !CompareFileTime(&after.ftLastWriteTime, &written));
+            }
+            inventory_settle();
+            CHECK(g_scan_calls == scans + 1 && sh_decl_server_registration_succeeded());
+            CHECK(sh_package_runtime_read("left.bin", &body, &length) == 1 && length == 20 &&
+                !memcmp(body, "INDEPENDENT RESOURCE", 20));
+            free(body);
+        }
+        /* 9. A request the server cannot take yet (overrides unavailable for
+         * this launch) is repeated at a growing interval, not lost and not per
+         * frame, and the change is prepared once it can be. */
+        g_user_enabled = 0;
+        scans = g_scan_calls; requests = sh_decl_server_test_inventory_requests();
+        inventory_write(marker, "while unavailable");
+        inventory_poll_for(2500);
+        requests = sh_decl_server_test_inventory_requests() - requests;
+        if (requests < 3 || requests > 10) fprintf(stderr, "unanswered request: repeated %ld time(s) in 2.5 s\n", requests);
+        CHECK(g_scan_calls == scans && requests >= 3 && requests <= 10);
+        g_user_enabled = 1;
+        inventory_until_pass(scans);
+        inventory_settle();
+        CHECK(g_scan_calls == scans + 1 && sh_decl_server_registration_succeeded());
+        /* 10. The watcher's pass, and only it, lets the runtime reuse an
+         * unchanged library; a forced request upgrades a pending watched one,
+         * and a programmatic pass is forced. The note never outlives a pass. */
+        scans = g_scan_calls; g_scan_watched = -1;
+        inventory_write(marker, "watched pass");
+        inventory_until_pass(scans);
+        CHECK(g_scan_calls == scans + 1 && g_scan_watched == 1 && !sh_package_runtime_test_watched_change());
+        inventory_settle();
+        scans = g_scan_calls; g_scan_watched = -1;
+        sh_decl_server_test_request_watched(); sh_decl_server_request_rearm();
+        inventory_until_pass(scans);
+        CHECK(g_scan_calls == scans + 1 && g_scan_watched == 0);
+        scans = g_scan_calls; g_scan_watched = -1;
+        sh_decl_server_test_request_watched();
+        inventory_until_pass(scans);
+        CHECK(g_scan_calls == scans + 1 && g_scan_watched == 1 && !sh_package_runtime_test_watched_change());
+        scans = g_scan_calls; g_scan_watched = -1;
+        CHECK(sh_decl_server_rearm() == 1 && g_scan_calls == scans + 1 && g_scan_watched == 0);
+        inventory_settle();
+        /* A watched pass whose scan fails before any refresh leaves no note. */
+        scans = g_scan_calls; g_scan_watched = -1; g_scan_fail = 1;
+        inventory_write(marker, "watched failure");
+        inventory_until_pass(scans);
+        CHECK(g_scan_calls == scans + 1 && g_scan_watched == 1 && !sh_package_runtime_test_watched_change());
+        g_scan_fail = 0;
+        CHECK(sh_decl_server_rearm() == 1);
+        inventory_settle();
+        /* 11. The product's own outputs beside the overrides tree (the package
+         * cache and its warm, scope-reuse and eviction writes, the staging
+         * folder, the rawmap shadow, prefabs, exports, the log) are not
+         * watched: nothing the product writes there re-arms the server (R-381). */
+        {
+            const char *siblings[] = {"package-cache", "package-cache\\resources", "package-staging",
+                "package-staging\\map-0123456789abcdef", "prefabs", "exports"};
+            const char *files[] = {"package-cache\\warm-publication.txt", "package-cache\\resources\\0123.bin",
+                "package-cache\\scope-reuse-a.txt", "package-staging\\map-0123456789abcdef\\pending",
+                "rawmap.json", "prefabs\\probe.json", "exports\\probe.txt", "sh_backend.log"};
+            int created[sizeof(siblings) / sizeof(siblings[0])] = {0};
+            for (size_t i = 0; i < sizeof(siblings) / sizeof(siblings[0]); i++) {
+                _snprintf_s(path, sizeof(path), _TRUNCATE, "%s\\%s", g_fixture_root, siblings[i]);
+                created[i] = CreateDirectoryA(path, NULL) != 0;
+                CHECK(created[i] || GetLastError() == ERROR_ALREADY_EXISTS);
+            }
+            scans = g_scan_calls; requests = sh_decl_server_test_inventory_requests();
+            for (size_t i = 0; i < sizeof(files) / sizeof(files[0]); i++) {
+                _snprintf_s(path, sizeof(path), _TRUNCATE, "%s\\%s", g_fixture_root, files[i]);
+                inventory_write(path, "product output");
+            }
+            inventory_settle();
+            for (size_t i = 0; i < sizeof(files) / sizeof(files[0]); i++) {
+                _snprintf_s(path, sizeof(path), _TRUNCATE, "%s\\%s", g_fixture_root, files[i]);
+                inventory_write(path, "product output again");
+                DeleteFileA(path);
+            }
+            inventory_settle();
+            CHECK(g_scan_calls == scans && sh_decl_server_test_inventory_requests() == requests);
+            CHECK(sh_decl_server_registration_succeeded());
+            /* Only the exact directories this step created, deepest first. */
+            for (size_t i = sizeof(siblings) / sizeof(siblings[0]); i; i--) if (created[i - 1]) {
+                _snprintf_s(path, sizeof(path), _TRUNCATE, "%s\\%s", g_fixture_root, siblings[i - 1]);
+                CHECK(RemoveDirectoryA(path));
+            }
+        }
+        /* 12. A report over an unchanged inventory (a file written with the bytes
+         * it had) prepares once at the browser; the runtime keeps the served
+         * library and the server keeps its registration: no compile, no pass. */
+        {
+            int refreshes = g_string_refreshes;
+            long skipped = sh_package_runtime_activations_skipped();
+            scans = g_scan_calls; g_scan_watched = -1;
+            log_all_reset();
+            inventory_write(marker, "watched failure");
+            inventory_until_pass(scans);
+            inventory_settle();
+            CHECK(g_scan_calls == scans + 1 && g_scan_watched == 1);
+            CHECK(g_string_refreshes == refreshes && sh_package_runtime_activations_skipped() == skipped + 1);
+            CHECK(strstr(g_log_all, "nothing to compile") != NULL);
+            CHECK(strstr(g_log_all, "decl-server RE-ARM: the served library is unchanged") != NULL);
+            CHECK(sh_decl_server_registration_succeeded());
+        }
+        /* Restore the fixture inventory for the rest of the suite. */
+        CHECK(inventory_remove_tree(left));
+        CHECK(DeleteFileA(marker));
+        inventory_settle();
+        CHECK(sh_decl_server_rearm() == 1);
+        sh_decl_server_test_inventory_timing(2000, 1000, 5000, 2000);
     }
     {
         int commits = g_install_commit_calls;
@@ -2997,6 +4412,36 @@ static void test_empty_launch_and_runtime_results(void)
         g_defer_install_commit = 0;
         sh_decl_server_rearm_poll();
         CHECK(g_install_commit_calls == commits + 1);
+    }
+    {
+        /* A watched request waits out an installation's deferral at the poll
+         * and is still the watcher's pass when it runs. */
+        int scans = g_scan_calls;
+        g_defer_install_commit = 1; g_scan_watched = -1;
+        sh_decl_server_test_request_watched();
+        sh_decl_server_rearm_poll();
+        CHECK(g_scan_calls == scans);
+        g_defer_install_commit = 0;
+        sh_decl_server_rearm_poll();
+        CHECK(g_scan_calls == scans + 1 && g_scan_watched == 1 && !sh_package_runtime_test_watched_change());
+    }
+    {
+        /* Deferrals that begin after the poll took a watched request, at the
+         * re-arm command's own checks, request it again as the watcher's: an
+         * installation starting to defer, and the browser ceasing to be a
+         * safe boundary. */
+        int (*hooks[2])(void) = {defer_begins, boundary_closes};
+        for (int i = 0; i < 2; i++) {
+            int scans = g_scan_calls;
+            g_scan_watched = -1;
+            sh_decl_server_test_request_watched();
+            g_defer_hook = hooks[i]; g_defer_countdown = 2;
+            sh_decl_server_rearm_poll();
+            CHECK(g_scan_calls == scans && !g_defer_countdown);
+            g_defer_hook = NULL; g_boundary_thread = GetCurrentThreadId();
+            sh_decl_server_rearm_poll();
+            CHECK(g_scan_calls == scans + 1 && g_scan_watched == 1 && !sh_package_runtime_test_watched_change());
+        }
     }
     for (int failure = 1; failure <= 2; failure++) {
         const sh_package_compilation *before = sh_package_runtime_acquire(), *after;
@@ -3097,6 +4542,23 @@ static void test_empty_launch_and_runtime_results(void)
         CHECK(sh_decl_server_rearm() == 1);
         CHECK(g_rt_loads[0] > loads && g_apply_palette_calls == palettes + 1);
         {
+            /* R-398: a package adding, then withdrawing, a row that is no editor
+             * declaration or entity template (this material) re-parses it and
+             * keeps a palette holding the rows its last rebuild produced. */
+            int kept_loads = g_rt_loads[0], kept_palettes = g_apply_palette_calls;
+            g_palette_current = 1; g_resident_filter = 1; g_resident_only = decl;
+            g_linked_fixture = 1;
+            log_all_reset();
+            CHECK(sh_decl_server_rearm() == 1);
+            CHECK(g_rt_loads[0] > kept_loads && g_apply_palette_calls == kept_palettes);
+            CHECK(strstr(g_log_all, "palette-refresh KEPT") != NULL);
+            kept_loads = g_rt_loads[0];
+            g_linked_fixture = 0;
+            CHECK(sh_decl_server_rearm() == 1);
+            CHECK(g_rt_loads[0] > kept_loads && g_apply_palette_calls == kept_palettes);
+            g_palette_current = 0; g_resident_filter = 0; g_resident_only = NULL;
+        }
+        {
             unsigned char *restored = NULL; size_t length = 0;
             CHECK(sh_package_runtime_read("generated/decls/material/rt/alpha.decl", &restored, &length) == 1);
             CHECK(restored && !strcmp((char *)restored, "{ original = 1; }"));
@@ -3106,7 +4568,35 @@ static void test_empty_launch_and_runtime_results(void)
         g_boundary_resource_head = NULL;
         g_linked_fixture = 0;
     }
+    {
+        /* End raises after successful disk commit, before writing committed.
+         * Keep the new provider, disable readiness and retain the damaged
+         * native context without cancellation or End/destructor replay. */
+        const sh_package_compilation *before=sh_package_runtime_acquire(),*after;
+        sh_package_runtime_release();
+        int commits=g_install_commit_calls,cancels=g_install_cancel_calls;
+        int ends=g_editor_end_calls,accepts=g_editor_accepts,rejects=g_editor_rejects;
+        g_boundary_resource_head=g_rt_builtin_node;
+        g_editor_after_commit_throw=1;
+        CHECK(!sh_decl_server_rearm());
+        after=sh_package_runtime_acquire(); CHECK(after!=before); sh_package_runtime_release();
+        CHECK(g_install_commit_calls==commits+1 && g_install_cancel_calls==cancels &&
+            g_editor_end_calls==ends+1 && g_editor_live &&
+            g_editor_accepts==accepts && g_editor_rejects==rejects);
+        CHECK(!sh_package_runtime_ready() && !sh_package_runtime_admission_ready());
+        CHECK(!sh_decl_server_rearm());
+        sh_decl_server_request_rearm(); sh_decl_server_rearm_poll();
+        after=sh_package_runtime_acquire(); CHECK(after!=before); sh_package_runtime_release();
+        CHECK(g_install_commit_calls==commits+1 && g_install_cancel_calls==cancels &&
+            g_editor_end_calls==ends+1 && g_editor_accepts==accepts && g_editor_rejects==rejects);
+        /* Fixture-owned sentinels and wrappers are discarded directly, after
+         * asserting the production damage path cannot replay native cleanup. */
+        sh_decl_server_test_reset_install();
+        g_editor_live=g_shader_resident_live=0; g_editor_context=NULL;
+        sh_package_runtime_test_dispose(); heap_fixture_reset();
+    }
     test_boot_hook_recovery(results, sizeof(results)/sizeof(results[0]), base, &registry);
+    test_deferred_first_registration(results, sizeof(results)/sizeof(results[0]), base, &registry);
     g_rt_builtin_count = 0;
     sh_decl_server_test_reset_install();
     g_user_enabled = 0;
@@ -3114,10 +4604,34 @@ static void test_empty_launch_and_runtime_results(void)
     {
         char path[MAX_PATH];
         g_linked_fixture = 0; runtime_fixture();
+        sh_package_runtime_test_dispose(); /* Close delete-on-close bundle snapshots first. */
         snprintf(path, sizeof path, "%s/overrides/fixture/package.json", g_fixture_root); CHECK(DeleteFileA(path));
         for (size_t i = sizeof(runtime_dirs)/sizeof(runtime_dirs[0]); i; i--) {
             snprintf(path, sizeof path, "%s/%s", g_fixture_root, runtime_dirs[i - 1]); CHECK(RemoveDirectoryA(path));
         }
+        /* The served owner of the inventory steps leaves its asset in the
+         * content-addressed resource cache: remove those files and that exact
+         * directory. */
+        {
+            char pattern[MAX_PATH], file[MAX_PATH]; WIN32_FIND_DATAA found; HANDLE search;
+            snprintf(pattern, sizeof pattern, "%s/package-cache/resources/*", g_fixture_root);
+            search = FindFirstFileA(pattern, &found);
+            if (search != INVALID_HANDLE_VALUE) {
+                do if (!(found.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
+                    snprintf(file, sizeof file, "%s/package-cache/resources/%s", g_fixture_root, found.cFileName);
+                    CHECK(DeleteFileA(file));
+                } while (FindNextFileA(search, &found));
+                FindClose(search);
+            }
+            snprintf(path, sizeof path, "%s/package-cache/resources", g_fixture_root);
+            CHECK(RemoveDirectoryA(path) || GetLastError() == ERROR_PATH_NOT_FOUND || GetLastError() == ERROR_FILE_NOT_FOUND);
+        }
+        /* The bundle cache leaves these known empty children under this
+         * fixture root. Remove only those exact directories, never recurse. */
+        snprintf(path, sizeof path, "%s/package-cache/bundles", g_fixture_root);
+        CHECK(RemoveDirectoryA(path) || GetLastError() == ERROR_PATH_NOT_FOUND);
+        snprintf(path, sizeof path, "%s/package-cache", g_fixture_root);
+        CHECK(RemoveDirectoryA(path) || GetLastError() == ERROR_PATH_NOT_FOUND);
     }
     CHECK(RemoveDirectoryA(g_fixture_root));
     g_fixture_root[0] = '\0';
@@ -3187,6 +4701,563 @@ done:
     CHECK(RemoveDirectoryA(root));
 }
 
+/* Editor-row publication lineage: the linker's exact binding per row, fixed
+ * identities, dependency variants, equal-resource sharing, product names never
+ * native, positive native proof, bounded records and generation lifetime. */
+typedef struct rl_decl { void *vtable; const char *name; } rl_decl;
+static rl_decl rl_a = {0, "pkg/row_a"}, rl_v = {0, "pkg/row_v"}, rl_a2 = {0, "pkg/row_a"},
+    rl_l = {0, "pkg/row_l"}, rl_d = {0, "pkg/row_d"}, rl_native = {0, "native/row"}, rl_stale = {0, "native/row"},
+    rl_p = {0, "public/row"};
+static rl_decl *rl_live[8]; static int rl_sources = 1, rl_retired;
+static char rl_manager;
+static void *rl_peek(void *manager, const char *name, unsigned char make_default)
+{
+    (void)manager; (void)make_default;
+    for (int i = 0; i < 8; i++) if (rl_live[i] && !strcmp(rl_live[i]->name, name)) return rl_live[i];
+    return NULL;
+}
+static void *rl_source(void *manager, const char *name) { (void)manager; (void)name; return rl_sources ? &rl_manager : NULL; }
+/* Production mode's native resource index. */
+static int rl_index = 1; static char rl_index_path[200];
+static int rl_probe(const char *path) { snprintf(rl_index_path, sizeof(rl_index_path), "%s", path); return rl_index; }
+static void rl_retire(void) { rl_retired++; }
+static void rl_resource(sh_compiled_resource *resource, const char *name, const char *engine, const char *original, const char *body)
+{
+    memset(resource, 0, sizeof(*resource));
+    resource->type = "snapEditorEntityDef"; resource->name = (char *)name; resource->engine_path = (char *)engine;
+    resource->original_path = (char *)original; resource->body = (unsigned char *)body; resource->body_length = strlen(body);
+    CHECK(sh_package_owners_add(&resource->owners, 0));
+}
+static void test_row_lineage(void)
+{
+    static unsigned char fingerprints[2][32], originals[2][32], tree_a[1][32], tree_b[1][32], tree_ad[2][32];
+    static char longpath[1500];
+    sh_package_sources sources = {0}; sh_package_compilation compiled = {0};
+    sh_compiled_resource resources[3];
+    sh_package_provenance bindings = {0}, supply = {0};
+    char ia[80], iv[80], name[80];
+    size_t ca, cb, cad, many[40], records;
+    const char *authored = "decls/snapeditorentitydef/start.decl";
+    memset(fingerprints[0], 0x11, 32); memset(fingerprints[1], 0x22, 32);
+    memset(originals[0], 0xa1, 32); memset(originals[1], 0xb2, 32);
+    memset(tree_a, 0xa1, sizeof(tree_a)); memset(tree_b, 0xb2, sizeof(tree_b));
+    memset(tree_ad[0], 0xa1, 32); memset(tree_ad[1], 0xd4, 32);
+    sources.package_count = 2; sources.fingerprints = fingerprints; sources.original_fingerprints = originals;
+    /* Linker bindings: row_a is one resource equal in contexts A and B (shared
+     * registration); row_v is the same authored path and tree linked in
+     * another dependency context. */
+    ca = sh_package_provenance_context_add(&bindings, SH_PACKAGE_CONTEXT_ISOLATED, (const unsigned char (*)[32])tree_a, 1, "pkg/a");
+    cb = sh_package_provenance_context_add(&bindings, SH_PACKAGE_CONTEXT_ISOLATED, (const unsigned char (*)[32])tree_b, 1, "pkg/b");
+    cad = sh_package_provenance_context_add(&bindings, SH_PACKAGE_CONTEXT_COMPOSED, (const unsigned char (*)[32])tree_ad, 2, NULL);
+    CHECK(ca != SIZE_MAX && cb != SIZE_MAX && cad != SIZE_MAX);
+    CHECK(sh_package_provenance_bind(&bindings, "snapeditorentitydef", authored, "pkg/row_a", &ca, 1) &&
+          sh_package_provenance_bind(&bindings, "snapeditorentitydef", authored, "pkg/row_a", &cb, 1) &&
+          sh_package_provenance_bind(&bindings, "snapeditorentitydef", authored, "pkg/row_v", &cad, 1));
+    rl_resource(resources + 0, "pkg/row_a", "generated/decls/snapeditorentitydef/pkg/row_a.decl", authored, "{ a }");
+    rl_resource(resources + 1, "pkg/row_v", "generated/decls/snapeditorentitydef/pkg/row_v.decl", authored, "{ v }");
+    compiled.sources = &sources; compiled.resources = resources; compiled.resource_count = 2;
+    sh_decl_server_test_rows_reset(); sh_decl_server_test_rows_bindings(&bindings); sh_decl_server_rows_retired(rl_retire);
+    sh_decl_server_test_set_reconstruct(NULL, (sh_decl_server_test_find_decl_fn)rl_peek);
+    sh_decl_server_test_rows_manager(&rl_manager, rl_source);
+    memset(rl_live, 0, sizeof(rl_live)); rl_live[0] = &rl_a; rl_live[1] = &rl_v; rl_live[2] = &rl_native;
+    /* Positive native proof only before and outside product publication. */
+    CHECK(sh_decl_server_row_class(&rl_native, NULL, 0) == 0);
+    CHECK(sh_decl_server_row_class(&rl_stale, NULL, 0) == -1);   /* not the live entry */
+    rl_sources = 0; CHECK(sh_decl_server_row_class(&rl_native, NULL, 0) == -1); rl_sources = 1;
+    /* Production mode has no source records for stock rows: the proof is the
+     * native resource index for the row's own path, and only a positive one. */
+    rl_sources = 0; sh_decl_server_test_rows_production(rl_probe);
+    CHECK(sh_decl_server_row_class(&rl_native, NULL, 0) == 0 &&
+          !strcmp(rl_index_path, "generated/decls/snapeditorentitydef/native/row.decl"));
+    CHECK(sh_decl_server_row_class(&rl_stale, NULL, 0) == -1);
+    rl_index = 0; CHECK(sh_decl_server_row_class(&rl_native, NULL, 0) == -1);
+    rl_index = -1; rl_sources = 1; CHECK(sh_decl_server_row_class(&rl_native, NULL, 0) == -1);
+    rl_index = 1; sh_decl_server_test_rows_production(NULL);
+    rl_retired = 0; CHECK(sh_decl_server_test_rows_record(&compiled, 1) && rl_retired == 1);
+    /* A published row is never native, whatever the index says. */
+    sh_decl_server_test_rows_production(rl_probe);
+    CHECK(sh_decl_server_row_class(&rl_a, NULL, 0) == 1 && sh_decl_server_row_class(&rl_v, NULL, 0) == 1);
+    sh_decl_server_test_rows_production(NULL);
+    /* Fixed-size exact identities; the dependency variant is distinct. */
+    CHECK(sh_decl_server_row_class(&rl_a, ia, sizeof(ia)) == 1 && strlen(ia) == 64);
+    CHECK(sh_decl_server_row_class(&rl_v, iv, sizeof(iv)) == 1 && strlen(iv) == 64 && strcmp(ia, iv));
+    CHECK(sh_decl_server_row_class(&rl_a, name, 64) == -1);       /* never a truncated identity */
+    CHECK(sh_decl_server_row_resolve(ia) == &rl_a && sh_decl_server_row_resolve(iv) == &rl_v);
+    /* Equal-resource sharing: one binding carrying both linked contexts. */
+    CHECK(sh_decl_server_row_supply(&rl_a, &supply) == 1 && supply.binding_count == 1 &&
+          supply.bindings[0].context_count == 2 && !strcmp(supply.bindings[0].original, authored));
+    sh_package_provenance_free(&supply); memset(&supply, 0, sizeof(supply));
+    CHECK(sh_decl_server_row_supply(&rl_v, &supply) == 1 && supply.bindings[0].context_count == 1 &&
+          supply.contexts[supply.bindings[0].contexts[0]].mode == SH_PACKAGE_CONTEXT_COMPOSED);
+    sh_package_provenance_free(&supply); memset(&supply, 0, sizeof(supply));
+    CHECK(sh_decl_server_row_supply(&rl_native, &supply) == 0 && !supply.binding_count);
+    CHECK(sh_decl_server_row_class(&rl_native, NULL, 0) == 0);
+    /* Only the wrong variant available: the identity never resolves to it. */
+    rl_live[0] = NULL; CHECK(!sh_decl_server_row_resolve(ia) && sh_decl_server_row_resolve(iv) == &rl_v);
+    /* A reused address carries only its new meaning (here a live native row). */
+    rl_live[0] = &rl_a; rl_a.name = "pkg/row_x";
+    CHECK(sh_decl_server_row_class(&rl_a, name, sizeof(name)) == 0 && sh_decl_server_row_supply(&rl_a, &supply) == 0);
+    rl_a.name = "pkg/row_a";
+    /* A reused name at a new unrecorded object: never native, never resolved. */
+    rl_live[0] = &rl_a2;
+    CHECK(sh_decl_server_row_class(&rl_a2, NULL, 0) == -1 && !sh_decl_server_row_resolve(ia));
+    CHECK(sh_decl_server_test_rows_record(&compiled, 1));          /* republished at the new address */
+    CHECK(sh_decl_server_row_class(&rl_a2, name, sizeof(name)) == 1 && !strcmp(name, ia));
+    CHECK(sh_decl_server_row_resolve(ia) == &rl_a2 && sh_decl_server_row_class(&rl_a, NULL, 0) == -1);
+    /* Repeated retirement and republication: one record per name. */
+    records = sh_decl_server_test_rows_count(); CHECK(records == 2);
+    for (int i = 0; i < 50; i++) CHECK(sh_decl_server_test_rows_record(&compiled, i & 1));
+    CHECK(sh_decl_server_test_rows_count() == records && sh_decl_server_row_resolve(ia) == &rl_a2);
+    /* A registration that fails over existing names: their meaning ends first. */
+    rl_retired = 0; CHECK(sh_decl_server_test_rows_record(&compiled, 0) && rl_retired == 1);
+    CHECK(sh_decl_server_row_class(&rl_a2, NULL, 0) == -1 && !sh_decl_server_row_resolve(ia) && !sh_decl_server_row_resolve(iv));
+    CHECK(sh_decl_server_row_supply(&rl_a2, &supply) == 0);
+    CHECK(sh_decl_server_test_rows_record(&compiled, 1) && sh_decl_server_row_resolve(ia) == &rl_a2);
+    /* A valid row beyond the earlier capacity: long path, forty linked contexts. */
+    memset(longpath, 'p', sizeof(longpath) - 1);
+    for (int i = 0; i < 40; i++) {
+        unsigned char tree[1][32]; char component[16];
+        memset(tree, i + 1, sizeof(tree)); snprintf(component, sizeof(component), "pkg/m%d", i);
+        many[i] = sh_package_provenance_context_add(&bindings, SH_PACKAGE_CONTEXT_ISOLATED, (const unsigned char (*)[32])tree, 1, component);
+        CHECK(many[i] != SIZE_MAX);
+    }
+    CHECK(sh_package_provenance_bind(&bindings, "snapeditorentitydef", longpath, "pkg/row_l", many, 40));
+    rl_resource(resources + 2, "pkg/row_l", "generated/decls/snapeditorentitydef/pkg/row_l.decl", longpath, "{ l }");
+    compiled.resources = resources + 2; compiled.resource_count = 1; rl_live[3] = &rl_l;
+    CHECK(sh_decl_server_test_rows_record(&compiled, 1));
+    CHECK(sh_decl_server_row_class(&rl_l, name, sizeof(name)) == 1 && strlen(name) == 64 && sh_decl_server_row_resolve(name) == &rl_l);
+    CHECK(sh_decl_server_row_supply(&rl_l, &supply) == 1 && supply.bindings[0].context_count == 40);
+    sh_package_provenance_free(&supply); memset(&supply, 0, sizeof(supply));
+    sh_package_owners_free(&resources[2].owners);
+    /* Changed bytes served at an installed SnapMap original's own path occupy
+     * that native slot (2), still an exact publication; the same scope under a
+     * private name (the linker's original_path) is an alias, a publication (1);
+     * a campaign original or an added path is only a publication (1); exact
+     * original bytes are native (0). */
+    CHECK(sh_package_provenance_bind(&bindings, "snapeditorentitydef", authored, "public/row", &ca, 1));
+    rl_resource(resources + 2, "public/row", authored, NULL, "{ p }");
+    resources[2].baseline_known = 1; rl_live[5] = &rl_p; CHECK(sh_decl_server_test_rows_record(&compiled, 1));
+    CHECK(sh_decl_server_row_class(&rl_p, name, sizeof(name)) == 2 && strlen(name) == 64 && sh_decl_server_row_resolve(name) == &rl_p);
+    CHECK(sh_decl_server_row_supply(&rl_p, &supply) == 1 && supply.binding_count == 1);
+    sh_package_provenance_free(&supply); memset(&supply, 0, sizeof(supply));
+    sh_package_owners_free(&resources[2].owners);
+    rl_resource(resources + 2, "public/row", "generated/decls/snapeditorentitydef/public/row.decl", authored, "{ p }");
+    resources[2].baseline_known = 1; CHECK(sh_decl_server_test_rows_record(&compiled, 1));
+    CHECK(sh_decl_server_row_class(&rl_p, name, sizeof(name)) == 1 && strlen(name) == 64 && sh_decl_server_row_resolve(name) == &rl_p);
+    resources[2].baseline_known = 2; CHECK(sh_decl_server_test_rows_record(&compiled, 1));
+    CHECK(sh_decl_server_row_class(&rl_p, NULL, 0) == 1);
+    resources[2].baseline_known = 0; CHECK(sh_decl_server_test_rows_record(&compiled, 1));
+    CHECK(sh_decl_server_row_class(&rl_p, NULL, 0) == 1);
+    resources[2].baseline_known = 1; resources[2].native_original = 1; CHECK(sh_decl_server_test_rows_record(&compiled, 1));
+    CHECK(sh_decl_server_row_class(&rl_p, NULL, 0) == 0 && !sh_decl_server_row_resolve(name));
+    sh_package_owners_free(&resources[2].owners);
+    /* Two current publications of one exact identity: ambiguous. */
+    CHECK(sh_package_provenance_bind(&bindings, "snapeditorentitydef", authored, "pkg/row_d", &ca, 1));
+    rl_resource(resources + 2, "pkg/row_d", "generated/decls/snapeditorentitydef/pkg/row_d.decl", authored, "{ a }");
+    rl_live[4] = &rl_d; compiled.resources = resources; compiled.resource_count = 3;
+    CHECK(sh_decl_server_test_rows_record(&compiled, 1));
+    CHECK(sh_decl_server_row_class(&rl_d, name, sizeof(name)) == 1 && !strcmp(name, ia) && !sh_decl_server_row_resolve(ia));
+    /* A full compilation that no longer holds a name retires it, never
+     * current, though the engine keeps its declaration allocated; an additive
+     * pass retires nothing it does not compile. */
+    compiled.resources = resources + 2; compiled.resource_count = 1; CHECK(sh_decl_server_test_rows_record(&compiled, 1));
+    CHECK(sh_decl_server_row_resolve(ia) == &rl_d && sh_decl_server_row_class(&rl_a2, NULL, 0) == -1 &&
+          !sh_decl_server_row_named(&rl_a2, ia) && !sh_decl_server_row_exact(&rl_a2, name, sizeof(name)));
+    compiled.resources = resources; compiled.resource_count = 3;
+    CHECK(sh_decl_server_test_rows_record(&compiled, 1) && !sh_decl_server_row_resolve(ia));
+    sh_decl_server_test_set_additive(1); compiled.resources = resources + 2; compiled.resource_count = 1;
+    CHECK(sh_decl_server_test_rows_record(&compiled, 1) && !sh_decl_server_row_resolve(ia) && sh_decl_server_row_class(&rl_a2, NULL, 0) == 1);
+    sh_decl_server_test_set_additive(0);
+    sh_package_owners_free(&resources[0].owners); sh_package_owners_free(&resources[1].owners);
+    sh_package_owners_free(&resources[2].owners);
+    sh_decl_server_rows_retired(NULL); sh_decl_server_test_rows_bindings(NULL);
+    sh_decl_server_test_rows_manager(NULL, NULL); sh_decl_server_test_set_reconstruct(NULL, NULL);
+    sh_decl_server_test_rows_reset(); sh_package_provenance_free(&bindings);
+}
+/* The original-slot pair as production emits it (VK s1, 2026-10-07: rows
+ * player/start and smp/093d..., both scope 1). The installed editor package
+ * restates a stock role row; the real library links that restatement in the
+ * package's own scope under a private name and the linker records the
+ * authored path as its original_path. The alias carries the original's scope
+ * (1) by copy, so scope alone cannot say which row occupies the native slot:
+ * only a resource served at its original's path does. The alias below is the
+ * library's own output; the slot control is that same emitted resource served
+ * at its authored path, as the shared publication serves player/start. */
+static const char *slot_row = "generated/decls/snapeditorentitydef/player/start.decl";
+static const char *slot_def = "generated/decls/entitydef/player/coop/player_start.decl";
+static int slot_baseline(void *context, const char *path, unsigned char **body, size_t *length)
+{
+    const char *text = !strcmp(path, slot_row) ?
+            "{\n\tedit = {\n\t\tentityDef = \"player/coop/player_start\";\n\t\tplacementFlags = \"SNAP_ENTITY_PLACE_FLOOR\";\n"
+            "\t\tcollisionFlags = \"SNAP_ENTITY_ECF_SOLID\";\n\t\tinputs = {\n\t\t\tnum = 0;\n\t\t}\n\t}\n}\n" :
+        !strcmp(path, slot_def) ? "{\n\tclass = \"Entity\";\n\tedit = {\n\t\thealth = 100;\n\t}\n}\n" : NULL;
+    (void)context; *body = NULL; *length = 0;
+    if (!text) return 0;
+    *length = strlen(text); *body = (unsigned char *)_strdup(text); return *body ? 1 : -1;
+}
+/* Native registrations for the two typed families the pair reaches (the
+ * runtime context test's collection fixture): the library's source readers
+ * walk these, never a loaded declaration. */
+typedef struct slot_region { void *address; size_t length; } slot_region;
+typedef struct slot_fixture { slot_region regions[64]; size_t count; void *registry, *reflection; } slot_fixture;
+static void *slot_alloc(slot_fixture *f, size_t length)
+{
+    void *p = calloc(1, length); CHECK(p && f->count < 64);
+    if (p && f->count < 64) f->regions[f->count++] = (slot_region){p, length};
+    return p;
+}
+static void slot_pointer(void *p, size_t at, const void *value)
+{ uintptr_t address = (uintptr_t)value; memcpy((char *)p + at, &address, 8); }
+static void slot_number(void *p, size_t at, int value) { memcpy((char *)p + at, &value, 4); }
+static char *slot_string(slot_fixture *f, const char *text)
+{ char *copy = slot_alloc(f, strlen(text) + 1); if (copy) strcpy(copy, text); return copy; }
+static int slot_read(void *context, uintptr_t address, void *out, size_t length)
+{
+    slot_fixture *f = context;
+    for (size_t i = 0; i < f->count; i++) {
+        uintptr_t start = (uintptr_t)f->regions[i].address;
+        if (address >= start && address - start <= f->regions[i].length &&
+            length <= f->regions[i].length - (size_t)(address - start)) {
+            memcpy(out, (void *)address, length); return 1;
+        }
+    }
+    return 0;
+}
+static void slot_reflection(slot_fixture *f)
+{
+    const char *classes[] = {"idDeclEntityDef", "Entity", "idDeclTypeInfo", "int",
+        "idDeclSnapEditorEntity", "idList < EntityRefs >", "idDeclTypeInfoGraph"};
+    const char *types[] = {"entityDef", "snapEditorEntityDef"};
+    const size_t indices[] = {0, 4};
+    memset(f, 0, sizeof(*f));
+    f->registry = slot_alloc(f, 0x18);
+    void *managers = slot_alloc(f, 16);
+    slot_pointer(f->registry, 8, managers); slot_number(f->registry, 0x10, 2);
+    for (size_t i = 0; i < 2; i++) {
+        void *manager = slot_alloc(f, 0x90); slot_pointer(managers, i * 8, manager);
+        slot_pointer(manager, 8, slot_string(f, types[i]));
+        slot_pointer(manager, 0x10, slot_string(f, classes[indices[i]]));
+    }
+    f->reflection = slot_alloc(f, 0xb0);
+    void *container = slot_alloc(f, 0x30), *records = slot_alloc(f, 8 * 0x38);
+    void *objects = slot_alloc(f, 8 * 16), *pointers = slot_alloc(f, 8 * 16);
+    slot_pointer(f->reflection, 0, container); slot_pointer(container, 0x20, records);
+    slot_pointer(f->reflection, 0x88, objects); slot_number(f->reflection, 0x90, 8);
+    slot_pointer(f->reflection, 0xa0, pointers); slot_number(f->reflection, 0xa8, 8);
+    for (size_t i = 0; i < 7; i++) {
+        slot_pointer(records, i * 0x38, slot_string(f, classes[i]));
+        slot_pointer(records, i * 0x38 + 8, slot_string(f, i == 4 || i == 6 ? "idDeclTypeInfo" : ""));
+    }
+    slot_pointer(pointers, 8, (void *)0x10); slot_pointer(pointers, 4 * 16 + 8, (void *)0x10);
+    slot_pointer(objects, 5 * 16 + 8, (void *)0x80);
+    slot_pointer(objects, 6 * 16 + 8, (void *)0x30);
+    void *entity = slot_alloc(f, 3 * 0x48), *editor = slot_alloc(f, 3 * 0x48);
+    void *element = slot_alloc(f, 0x48);
+    slot_pointer(records, 0x38 + 0x20, entity); slot_pointer(records, 4 * 0x38 + 0x20, editor);
+    slot_pointer(records, 5 * 0x38 + 0x18, element);
+    void *rows[] = {entity, (char *)entity + 0x48, editor, element, (char *)editor + 0x48};
+    const char *field_types[] = {"idDeclEntityDef", "int", "idList < EntityRefs >", "idDeclEntityDef", "idDeclEntityDef"};
+    const char *operators[] = {"*", "", "", "*", "*"}, *names[] = {"target", "health", "inputs", "element", "entityDef"};
+    for (size_t i = 0; i < 5; i++) {
+        slot_pointer(rows[i], 0, slot_string(f, field_types[i]));
+        slot_pointer(rows[i], 8, slot_string(f, operators[i]));
+        slot_pointer(rows[i], 0x10, slot_string(f, names[i])); slot_number(rows[i], 0x1c, 8);
+    }
+}
+static void slot_file(const char *root, const char *relative, const char *text)
+{
+    char path[MAX_PATH], *slash;
+    snprintf(path, sizeof(path), "%s/%s", root, relative);
+    for (slash = path + strlen(root) + 1; (slash = strchr(slash, '/')) != NULL; slash++) {
+        *slash = 0; CreateDirectoryA(path, NULL); *slash = '/';
+    }
+    inventory_write(path, text);
+}
+static void test_row_slot_production(void)
+{
+    char root[MAX_PATH], temp[MAX_PATH];
+    const sh_package_compilation *compiled = NULL;
+    const sh_compiled_resource *alias = NULL;
+    sh_compiled_resource pair[2];
+    sh_package_compilation shaped = {0};
+    rl_decl public_row = {0, "player/start"}, private_row = {0, NULL};
+    char alias_identity[80] = "";
+    size_t aliases = 0, at_path = 0;
+    slot_fixture fixture;
+    sh_decl_registry_source registry;
+    GetTempPathA(sizeof(temp), temp);
+    snprintf(root, sizeof(root), "%sdecl-server-slot-%lu", temp, GetCurrentProcessId());
+    CreateDirectoryA(root, NULL);
+    slot_file(root, "overrides/editor/package.json", "{\"id\":\"local.editor\",\"name\":\"editor\"}");
+    slot_file(root, "overrides/editor/assets/generated/decls/snapeditorentitydef/player/start.decl",
+        "{\n\tedit = {\n\t\tentityDef = \"player/coop/player_start\";\n\t\tplacementFlags = \"SNAP_ENTITY_PLACE_AIR_UNALIGNED\";\n"
+        "\t\tinputs = {\n\t\t\tnum = 0;\n\t\t}\n\t}\n}\n");
+    slot_reflection(&fixture);
+    registry = (sh_decl_registry_source){&fixture, slot_read, (uintptr_t)fixture.registry, NULL};
+    sh_package_runtime_test_dispose(); sh_package_runtime_test_baseline(slot_baseline, NULL);
+    sh_package_runtime_test_source_readers(registry, (uintptr_t)fixture.reflection);
+    sh_package_runtime_test_installed_links(1);
+    if (!sh_package_runtime_refresh(root)) {
+        char error[1024]; sh_package_runtime_error(error, sizeof(error));
+        fprintf(stderr, "slot pair library: %s\n", error); CHECK(0);
+    }
+    compiled = sh_package_runtime_acquire();
+    for (size_t i = 0; compiled && i < compiled->resource_count; i++) {
+        const sh_compiled_resource *r = compiled->resources + i;
+        if (!r->type || _stricmp(r->type, "snapeditorentitydef")) continue;
+        fprintf(stderr, "slot pair emitted: %s original=%s scope=%d native=%d restored=%d\n", r->engine_path,
+            r->original_path ? r->original_path : "-", r->baseline_known, r->native_original, r->restored_original);
+        if (!strcmp(r->engine_path, slot_row)) at_path++;
+        else if (r->original_path && !strcmp(r->original_path, slot_row)) { alias = r; aliases++; }
+    }
+    /* The library's own alias: private name, linker-recorded original path,
+     * the original's scope, not a native original. */
+    CHECK(alias && aliases == 1 && !at_path);
+    if (!alias) goto done;
+    CHECK(alias->baseline_known == 1 && !alias->native_original && !alias->restored_original &&
+          strcmp(alias->engine_path, alias->original_path));
+    pair[0] = *alias; pair[1] = *alias;
+    pair[1].engine_path = (char *)slot_row; pair[1].original_path = NULL; pair[1].name = "player/start";
+    shaped.resources = pair; shaped.resource_count = 2;
+    private_row.name = alias->name;
+    rl_live[6] = &public_row; rl_live[7] = &private_row;
+    sh_decl_server_test_rows_reset(); sh_decl_server_test_rows_bindings(sh_package_runtime_bindings());
+    sh_decl_server_test_set_reconstruct(NULL, (sh_decl_server_test_find_decl_fn)rl_peek);
+    sh_decl_server_test_rows_manager(&rl_manager, rl_source);
+    CHECK(sh_decl_server_test_rows_record(&shaped, 1));
+    /* Served at its original's path: the native slot. The alias: an ordinary
+     * publication with its own portable identity. */
+    {
+        int served = sh_decl_server_row_class(&public_row, NULL, 0);
+        int linked = sh_decl_server_row_class(&private_row, alias_identity, sizeof(alias_identity));
+        fprintf(stderr, "slot pair classes: served-at-path %d, private alias %d (%s)\n", served, linked, alias_identity);
+        CHECK(served == 2);
+        CHECK(linked == 1 && strlen(alias_identity) == 64 && sh_decl_server_row_resolve(alias_identity) == &private_row);
+    }
+done:
+    if (compiled) sh_package_runtime_release();
+    rl_live[6] = rl_live[7] = NULL;
+    sh_decl_server_test_rows_bindings(NULL); sh_decl_server_test_rows_manager(NULL, NULL);
+    sh_decl_server_test_set_reconstruct(NULL, NULL); sh_decl_server_test_rows_reset();
+    sh_package_runtime_test_installed_links(0); sh_package_runtime_test_dispose();
+    sh_package_runtime_test_source_readers((sh_decl_registry_source){0}, 0);
+    sh_package_runtime_test_baseline(runtime_original, NULL);
+    for (size_t i = 0; i < fixture.count; i++) free(fixture.regions[i].address);
+    CHECK(inventory_remove_tree(root));
+}
+/* Portable row identity (VK->GL s1, 2026-10-07: one authored cyberdemon row
+ * linked its changed entityDef as smp/78864d54... on Vulkan and smp/9d2ff008...
+ * on OpenGL, so OpenGL never resolved the Vulkan record). One authored row
+ * compiled three ways: over another stock unit its changed entityDef reaches
+ * (no rename: unchanged stock enters by native name), and with another changed
+ * entityDef, which the linker renames and the row's linked bytes with it. The
+ * authored row keeps one identity; the changed dependency is a different
+ * supplier (its trees), never the same choice. */
+static int g_port_stock, g_port_variant;
+static int port_baseline(void *context, const char *path, unsigned char **body, size_t *length)
+{
+    const char *text;
+    if (strcmp(path, "generated/decls/entitydef/player/coop/base.decl")) return slot_baseline(context, path, body, length);
+    text = g_port_stock ? "{\n\tclass = \"Entity\";\n\tedit = {\n\t\thealth = 2;\n\t}\n}\n" :
+        "{\n\tclass = \"Entity\";\n\tedit = {\n\t\thealth = 1;\n\t}\n}\n";
+    *length = strlen(text); *body = (unsigned char *)_strdup(text); return *body ? 1 : -1;
+}
+static int port_compile(int stock, int variant, char identity[80], char entity[160], unsigned char trees[32])
+{
+    char root[MAX_PATH], temp[MAX_PATH];
+    const sh_package_compilation *compiled = NULL;
+    const sh_compiled_resource *row = NULL;
+    sh_package_compilation shaped = {0};
+    sh_package_provenance supply = {0};
+    rl_decl private_row = {0, NULL};
+    slot_fixture fixture;
+    sh_decl_registry_source registry;
+    int ok = 0, rows = 0;
+    *identity = *entity = 0; memset(trees, 0, 32);
+    g_port_stock = stock; g_port_variant = variant;
+    GetTempPathA(sizeof(temp), temp);
+    snprintf(root, sizeof(root), "%sdecl-server-port-%lu-%d%d", temp, GetCurrentProcessId(), stock, variant);
+    CreateDirectoryA(root, NULL);
+    slot_file(root, "overrides/editor/package.json", "{\"id\":\"local.editor\",\"name\":\"editor\"}");
+    slot_file(root, "overrides/editor/assets/generated/decls/entitydef/player/coop/player_start.decl", variant ?
+        "{\n\tclass = \"Entity\";\n\tedit = {\n\t\ttarget = \"player/coop/base\";\n\t\thealth = 151;\n\t}\n}\n" :
+        "{\n\tclass = \"Entity\";\n\tedit = {\n\t\ttarget = \"player/coop/base\";\n\t\thealth = 150;\n\t}\n}\n");
+    slot_file(root, "overrides/editor/assets/generated/decls/snapeditorentitydef/player/start.decl",
+        "{\n\tedit = {\n\t\tentityDef = \"player/coop/player_start\";\n\t\tplacementFlags = \"SNAP_ENTITY_PLACE_AIR_UNALIGNED\";\n"
+        "\t\tinputs = {\n\t\t\tnum = 0;\n\t\t}\n\t}\n}\n");
+    slot_reflection(&fixture);
+    registry = (sh_decl_registry_source){&fixture, slot_read, (uintptr_t)fixture.registry, NULL};
+    sh_package_runtime_test_dispose(); sh_package_runtime_test_baseline(port_baseline, NULL);
+    sh_package_runtime_test_source_readers(registry, (uintptr_t)fixture.reflection);
+    sh_package_runtime_test_installed_links(1);
+    if (!sh_package_runtime_refresh(root)) {
+        char error[1024]; sh_package_runtime_error(error, sizeof(error));
+        fprintf(stderr, "portable row library: %s\n", error); goto done;
+    }
+    compiled = sh_package_runtime_acquire();
+    for (size_t i = 0; compiled && i < compiled->resource_count; i++) {
+        const sh_compiled_resource *r = compiled->resources + i;
+        if (!r->type || !r->original_path) continue;
+        if (!_stricmp(r->type, "snapeditorentitydef") && !strcmp(r->original_path, slot_row)) { row = r; rows++; }
+        else if (!_stricmp(r->type, "entitydef") && !strcmp(r->original_path, slot_def) && r->name)
+            snprintf(entity, 160, "%s", r->name);
+    }
+    if (!row || rows != 1 || !*entity) { fprintf(stderr, "portable row: emitted %d rows, entity '%s'\n", rows, entity); goto done; }
+    shaped.sources = compiled->sources; shaped.resources = (sh_compiled_resource *)row; shaped.resource_count = 1;
+    private_row.name = row->name; rl_live[7] = &private_row;
+    sh_decl_server_test_rows_reset(); sh_decl_server_test_rows_bindings(sh_package_runtime_bindings());
+    sh_decl_server_test_set_reconstruct(NULL, (sh_decl_server_test_find_decl_fn)rl_peek);
+    sh_decl_server_test_rows_manager(&rl_manager, rl_source);
+    if (sh_decl_server_test_rows_record(&shaped, 1) &&
+        sh_decl_server_row_class(&private_row, identity, 80) == 1 &&
+        sh_decl_server_row_supply(&private_row, &supply) == 1 && supply.binding_count == 1 &&
+        supply.bindings[0].context_count == 1 && supply.contexts[supply.bindings[0].contexts[0]].tree_count == 1) {
+        memcpy(trees, supply.contexts[supply.bindings[0].contexts[0]].trees[0], 32);
+        ok = sh_decl_server_row_resolve(identity) == &private_row;
+    }
+    fprintf(stderr, "portable row stock=%d variant=%d: row %s entity %s identity %s\n",
+        stock, variant, row->name, entity, identity);
+done:
+    sh_package_provenance_free(&supply);
+    if (compiled) sh_package_runtime_release();
+    rl_live[7] = NULL;
+    sh_decl_server_test_rows_bindings(NULL); sh_decl_server_test_rows_manager(NULL, NULL);
+    sh_decl_server_test_set_reconstruct(NULL, NULL); sh_decl_server_test_rows_reset();
+    sh_package_runtime_test_installed_links(0); sh_package_runtime_test_dispose();
+    sh_package_runtime_test_source_readers((sh_decl_registry_source){0}, 0);
+    sh_package_runtime_test_baseline(runtime_original, NULL);
+    for (size_t i = 0; i < fixture.count; i++) free(fixture.regions[i].address);
+    CHECK(inventory_remove_tree(root));
+    return ok;
+}
+/* A context of supply naming tree (an owner's selected supplier). */
+static int supplied_by(const sh_package_provenance *supply, const unsigned char tree[32])
+{
+    for (size_t b = 0; b < supply->binding_count; b++)
+        for (size_t c = 0; c < supply->bindings[b].context_count; c++) {
+            const sh_package_provenance_context *context = supply->contexts + supply->bindings[b].contexts[c];
+            for (size_t t = 0; t < context->tree_count; t++) if (!memcmp(context->trees[t], tree, 32)) return 1;
+        }
+    return 0;
+}
+/* One library, three packages publishing the same authored row. A and C are
+ * byte-equal with equal dependencies; B changes only a dependency (the entity
+ * its entityDef targets), so the linker keeps B's row as a separate variant.
+ * The row's identity cannot tell them apart; only the supplier does. */
+static void test_row_supplier_variants(void)
+{
+    static const char *const names[3] = {"a", "b", "c"};
+    char root[MAX_PATH], temp[MAX_PATH], identity[2][80] = {{0}};
+    const sh_package_compilation *compiled = NULL;
+    sh_compiled_resource rows[2];
+    sh_package_compilation shaped = {0};
+    sh_package_provenance supply[2] = {{0}};
+    rl_decl live[2] = {{0, NULL}, {0, NULL}};
+    slot_fixture fixture;
+    sh_decl_registry_source registry;
+    size_t found = 0, shared, variant;
+    g_port_stock = g_port_variant = 0;
+    GetTempPathA(sizeof(temp), temp);
+    snprintf(root, sizeof(root), "%sdecl-server-variants-%lu", temp, GetCurrentProcessId());
+    CreateDirectoryA(root, NULL);
+    for (int p = 0; p < 3; p++) {
+        char path[MAX_PATH], text[256];
+        snprintf(path, sizeof(path), "overrides/%s/package.json", names[p]);
+        snprintf(text, sizeof(text), "{\"id\":\"local.%s\",\"name\":\"%s\"}", names[p], names[p]);
+        slot_file(root, path, text);
+        snprintf(path, sizeof(path), "overrides/%s/assets/%s", names[p], slot_def);
+        slot_file(root, path, "{\n\tclass = \"Entity\";\n\tedit = {\n\t\ttarget = \"player/coop/base\";\n\t\thealth = 150;\n\t}\n}\n");
+        if (p == 1) {
+            snprintf(path, sizeof(path), "overrides/%s/assets/generated/decls/entitydef/player/coop/base.decl", names[p]);
+            slot_file(root, path, "{\n\tclass = \"Entity\";\n\tedit = {\n\t\thealth = 7;\n\t}\n}\n");
+        }
+        snprintf(path, sizeof(path), "overrides/%s/assets/%s", names[p], slot_row);
+        slot_file(root, path, "{\n\tedit = {\n\t\tentityDef = \"player/coop/player_start\";\n"
+            "\t\tplacementFlags = \"SNAP_ENTITY_PLACE_AIR_UNALIGNED\";\n\t\tinputs = {\n\t\t\tnum = 0;\n\t\t}\n\t}\n}\n");
+    }
+    slot_reflection(&fixture);
+    registry = (sh_decl_registry_source){&fixture, slot_read, (uintptr_t)fixture.registry, NULL};
+    sh_package_runtime_test_dispose(); sh_package_runtime_test_baseline(port_baseline, NULL);
+    sh_package_runtime_test_source_readers(registry, (uintptr_t)fixture.reflection);
+    sh_package_runtime_test_installed_links(1);
+    if (!sh_package_runtime_refresh(root)) {
+        char error[1024]; sh_package_runtime_error(error, sizeof(error));
+        fprintf(stderr, "row variants library: %s\n", error); CHECK(0); goto done;
+    }
+    compiled = sh_package_runtime_acquire();
+    for (size_t i = 0; compiled && i < compiled->resource_count; i++) {
+        const sh_compiled_resource *r = compiled->resources + i;
+        if (r->type && r->original_path && !_stricmp(r->type, "snapeditorentitydef") &&
+            !strcmp(r->original_path, slot_row) && found++ < 2) rows[found - 1] = *r;
+    }
+    CHECK(found == 2); if (found != 2) goto done;
+    shaped.sources = compiled->sources; shaped.resources = rows; shaped.resource_count = 2;
+    live[0].name = rows[0].name; live[1].name = rows[1].name; rl_live[6] = &live[0]; rl_live[7] = &live[1];
+    sh_decl_server_test_rows_reset(); sh_decl_server_test_rows_bindings(sh_package_runtime_bindings());
+    sh_decl_server_test_set_reconstruct(NULL, (sh_decl_server_test_find_decl_fn)rl_peek);
+    sh_decl_server_test_rows_manager(&rl_manager, rl_source);
+    CHECK(sh_decl_server_test_rows_record(&shaped, 2));
+    for (int i = 0; i < 2; i++) {
+        CHECK(sh_decl_server_row_class(&live[i], identity[i], sizeof(identity[i])) > 0);
+        CHECK(sh_decl_server_row_supply(&live[i], &supply[i]) == 1 && supply[i].binding_count == 1);
+    }
+    fprintf(stderr, "row variants: %s %s / %s %s\n", rows[0].name, identity[0], rows[1].name, identity[1]);
+    /* The linker kept two publications whose linked bodies differ; the authored
+     * row is one identity, so no name alone tells them apart. */
+    CHECK(strcmp(rows[0].name, rows[1].name) && strlen(identity[0]) == 64 && !strcmp(identity[0], identity[1]));
+    CHECK(!sh_decl_server_row_resolve(identity[0]));
+    shared = supply[0].binding_count == 1 && supply[0].bindings[0].context_count == 2 ? 0 : 1; variant = 1 - shared;
+    CHECK(supply[shared].binding_count == 1 && supply[shared].bindings[0].context_count == 2);
+    CHECK(supply[variant].binding_count == 1 && supply[variant].bindings[0].context_count == 1);
+    if (supply[shared].binding_count == 1 && supply[shared].bindings[0].context_count == 2 &&
+        supply[variant].binding_count == 1 && supply[variant].bindings[0].context_count == 1) {
+        const sh_package_provenance_context *a = supply[shared].contexts + supply[shared].bindings[0].contexts[0];
+        const sh_package_provenance_context *c = supply[shared].contexts + supply[shared].bindings[0].contexts[1];
+        const sh_package_provenance_context *b = supply[variant].contexts + supply[variant].bindings[0].contexts[0];
+        CHECK(a->tree_count == 1 && b->tree_count == 1 && c->tree_count == 1);
+        /* Equal resources: one decl, two owners whose selected suppliers stay distinct. */
+        CHECK(memcmp(a->trees[0], c->trees[0], 32));
+        CHECK(supplied_by(&supply[shared], a->trees[0]) && supplied_by(&supply[shared], c->trees[0]));
+        /* The exact supplier supplies its own variant and only it. */
+        CHECK(supplied_by(&supply[variant], b->trees[0]) && !supplied_by(&supply[shared], b->trees[0]));
+        CHECK(!supplied_by(&supply[variant], a->trees[0]) && !supplied_by(&supply[variant], c->trees[0]));
+        /* Wrong variant only: with B's publication gone the identity resolves
+         * uniquely to the A/C row, which B's selected supplier does not supply. */
+        rl_live[6 + (int)variant] = NULL;
+        CHECK(sh_decl_server_row_resolve(identity[0]) == &live[shared]);
+        CHECK(!supplied_by(&supply[shared], b->trees[0]));
+    }
+done:
+    for (int i = 0; i < 2; i++) sh_package_provenance_free(&supply[i]);
+    if (compiled) sh_package_runtime_release();
+    rl_live[6] = rl_live[7] = NULL;
+    sh_decl_server_test_rows_bindings(NULL); sh_decl_server_test_rows_manager(NULL, NULL);
+    sh_decl_server_test_set_reconstruct(NULL, NULL); sh_decl_server_test_rows_reset();
+    sh_package_runtime_test_installed_links(0); sh_package_runtime_test_dispose();
+    sh_package_runtime_test_source_readers((sh_decl_registry_source){0}, 0);
+    sh_package_runtime_test_baseline(runtime_original, NULL);
+    for (size_t i = 0; i < fixture.count; i++) free(fixture.regions[i].address);
+    CHECK(inventory_remove_tree(root));
+}
+static void test_row_portable_identity(void)
+{
+    char first[80], stock[80], variant[80], first_entity[160], stock_entity[160], variant_entity[160];
+    unsigned char first_trees[32], stock_trees[32], variant_trees[32];
+    CHECK(port_compile(0, 0, first, first_entity, first_trees));
+    CHECK(port_compile(1, 0, stock, stock_entity, stock_trees));
+    CHECK(port_compile(0, 1, variant, variant_entity, variant_trees));
+    /* An unchanged stock unit's bytes rename nothing. */
+    CHECK(strlen(first) == 64 && !strcmp(first, stock) && !strcmp(first_entity, stock_entity));
+    CHECK(!memcmp(first_trees, stock_trees, 32));
+    /* Premise: the linker renamed the changed entityDef the row names. */
+    CHECK(*first_entity && *variant_entity && strcmp(first_entity, variant_entity));
+    /* The authored row is the same bytes at the same original: one portable
+     * identity, whatever its dependencies were privately named. */
+    CHECK(strlen(variant) == 64 && !strcmp(first, variant));
+    /* The changed dependency is another supplier, never the same choice: the
+     * owner's selected context distinguishes it (package_editor). */
+    CHECK(memcmp(first_trees, variant_trees, 32));
+}
 static void test_many_candidates(void)
 {
     const size_t total = 4097;
@@ -3209,6 +5280,21 @@ static void test_many_candidates(void)
     CHECK(!sh_decl_server_test_capture(&compiled, &count, &bytes)); CHECK(count == 0 && bytes == 0);
     compiled.resource_count = SIZE_MAX;
     CHECK(!sh_decl_server_test_capture(&compiled, &count, &bytes)); CHECK(count == 0 && bytes == 0);
+    {
+        /* An effect's reader lets end of file close its outermost brace, as
+         * stock fists_1st does; other families and deeper gaps still refuse. */
+        static const char open[] = "{\r\n\tedit = {\r\n\t\teditEvents = {\r\n\t\t\tnum = 0;\r\n\t}\r\n}";
+        sh_compiled_resource effect = {0};
+        sh_package_compilation one = {0}; one.resources = &effect; one.resource_count = 1;
+        effect.name = "fx/weapons/fists/fists_1st"; effect.type = "fx";
+        effect.engine_path = "generated/decls/fx/fx/weapons/fists/fists_1st.decl";
+        effect.body = (unsigned char *)open; effect.body_length = sizeof(open) - 1;
+        CHECK(sh_decl_server_test_capture(&one, &count, &bytes)); CHECK(count == 1 && bytes == sizeof(open) - 1);
+        effect.type = "material";
+        CHECK(!sh_decl_server_test_capture(&one, &count, &bytes));
+        effect.type = "fx"; effect.body = (unsigned char *)"{ edit = { a = {"; effect.body_length = 16;
+        CHECK(!sh_decl_server_test_capture(&one, &count, &bytes));
+    }
 done:
     free(resources); free(names); free(paths);
 }
@@ -3304,6 +5390,303 @@ done:
     g_many_undrained = SIZE_MAX;
 }
 
+static int shader_original(void *context, const char *path, unsigned char **body, size_t *length)
+{
+    (void)context; *body = NULL; *length = 0;
+    if (strcmp(path, "generated/decls/renderparm/tex.decl")) return 0;
+    *body = (unsigned char *)_strdup(g_shader_source); *length = strlen(g_shader_source); return *body ? 1 : -1;
+}
+static void *shader_find(void *manager, const char *name, unsigned char make_default)
+{
+    (void)make_default;
+    CHECK(manager == g_shader_native.manager && !strcmp(name, "tex"));
+    CHECK(g_shader_scope_live); return g_shader_native.object;
+}
+static void test_shader_preparation_lifetime(void)
+{
+    char error[512]; uint32_t id = 0;
+    memset(&g_shader_native, 0, sizeof(g_shader_native));
+    strcpy(g_shader_native.type, "renderParm"); strcpy(g_shader_native.name, "tex");
+    *(void **)g_shader_native.head = g_shader_native.manager;
+    *(void **)(g_shader_native.manager + 8) = g_shader_native.type;
+    *(void **)(g_shader_native.manager + 0x20) = g_shader_native.items;
+    *(int *)(g_shader_native.manager + 0x28) = 1;
+    *(void **)g_shader_native.items = g_shader_native.object;
+    *(void **)(g_shader_native.object + 8) = g_shader_native.name;
+    *(void **)(g_shader_native.object + 0x10) = g_shader_native.manager;
+    CHECK(sh_native_resource_id(g_shader_native.type, g_shader_native.name, &id));
+    *(uint32_t *)(g_shader_native.object + 0x20) = id;
+    *(uint32_t *)(g_shader_native.object + 0x68) = 0x410;
+    *(uint32_t *)(g_shader_native.object + 0x6c) = 1;
+    for (int mode = 0; mode < 6; mode++) {
+        int kind = 0; uint32_t index = 0;
+        sh_decl_server_test_reset_install();
+        g_shader_fixture_active = 1; g_shader_mode = mode; g_shader_hold_end = mode >= 4;
+        g_shader_restores = 0; g_shader_event_count = 0; g_shader_events[0] = 0;
+        sh_package_shader_receipt_invalidate((uintptr_t)g_shader_native.object);
+        sh_package_native_assets *assets = sh_package_native_assets_open("C:/shader-decl-server-fixture");
+        CHECK(assets && sh_package_native_assets_configure_shader(assets, SH_PACKAGE_SHADER_OPENGL,
+            (sh_native_resource_registry_source){NULL, shader_native_read, (uintptr_t)g_shader_native.head},
+            shader_original, NULL, error, sizeof(error)));
+        sh_package_library_native native = sh_package_native_assets_adapter(assets);
+        const sh_package_source_shader *shader = native.source.shader;
+        /* 2: the preparation request is retained for the batch below. */
+        CHECK(shader->parameter(shader->context, "tex", (sh_decl_source){g_shader_source, strlen(g_shader_source)},
+            &kind, &index, error, sizeof(error)) == 2);
+        sh_package_shader_preparation *batch = sh_package_native_assets_shader_take(assets);
+        CHECK(batch && sh_package_shader_preparation_count(batch) == 1);
+        int result = sh_decl_server_test_prepare_shaders(batch, shader_find, error, sizeof(error));
+        CHECK(result == (mode == 0 ? 1 : mode >= 4 ? -1 : 0));
+        if (mode == 0) CHECK(!*error);
+        if (mode == 1) CHECK(strstr(error, "fixture shader source failed") && strstr(error, "prior provider recovered"));
+        if (mode == 2) CHECK(strstr(error, "native shader state cleanup failed"));
+        if (mode == 3) CHECK(strstr(error, "native shader construction raised exception"));
+        if (mode >= 4) CHECK(strstr(error, "fixture restoration remains owed"));
+        if (mode == 5) CHECK(strstr(error, "fixture shader source failed") && strstr(error, "prior provider recovered"));
+        CHECK(!strcmp(g_shader_events, mode == 5 ? "RBPTE" : mode == 4 ? "RBPE" : mode == 1 || mode == 3 ? "RBPTEX" : "RBPEX"));
+        CHECK(g_shader_restores == ((mode == 1 || mode == 3 || mode == 5) ? 1 : 0));
+        sh_package_shader_preparation_free(batch); sh_package_native_assets_close(assets);
+        if (mode >= 4) {
+            CHECK(g_shader_scope_live && g_shader_resident_live);
+            /* Borrowed batch/stack is gone; the native state callback still
+             * owns a valid context until final restoration and scope exit. */
+            g_shader_hold_end = 0;
+            CHECK(sh_decl_server_test_shader_recovery());
+            CHECK(!strcmp(g_shader_events, mode == 5 ? "RBPTEEX" : "RBPEEX"));
+        }
+        CHECK(!g_shader_scope_live && !g_shader_resident_live);
+        g_shader_fixture_active = 0;
+        sh_package_shader_receipt_invalidate((uintptr_t)g_shader_native.object);
+        sh_decl_server_test_reset_install();
+    }
+}
+
+typedef struct occurrence_fixture { int mode, prepared, finalized, rolled_back; } occurrence_fixture;
+static int occurrence_prepare(void *context, char *error, size_t capacity)
+{
+    occurrence_fixture *fixture = context;
+    CHECK(g_shader_resident_live); fixture->prepared++;
+    if (fixture->mode == 1) { snprintf(error, capacity, "fixture stage refusal"); return 0; }
+    return 1;
+}
+static int occurrence_finalize(void *context, char *error, size_t capacity)
+{
+    occurrence_fixture *fixture = context;
+    CHECK(!g_shader_resident_live); fixture->finalized++;
+    if (fixture->mode >= 2) { snprintf(error, capacity, "fixture commit refusal"); return 0; }
+    return 1;
+}
+static int occurrence_rollback(void *context, char *error, size_t capacity)
+{
+    occurrence_fixture *fixture = context;
+    CHECK(g_shader_resident_live); fixture->rolled_back++;
+    if (fixture->mode == 4 && fixture->rolled_back == 1) RaiseException(0xe0340002, 0, 0, NULL);
+    if (fixture->mode == 3 && fixture->rolled_back == 1) {
+        snprintf(error, capacity, "fixture retained teardown"); return 0;
+    }
+    return 1;
+}
+static void test_occurrence_admission(void)
+{
+    unsigned char manager[0x30] = {0}, resource[0x90] = {0};
+    void *objects[] = {resource}; char error[1024];
+    *(void ***)(manager + 0x20) = objects; *(int *)(manager + 0x28) = 1;
+    {
+        unsigned char decl[0x1d0] = {0}, entity[0x60] = {0};
+        *(void **)(decl + 0x1c8) = entity;
+        /* The materialized entityDef is a resource, not the editor body's
+         * independently allocated defsub. Its +0x58 is not a name. */
+        *(const char **)(entity + 8) = "palette/entity-name";
+        CHECK(sh_decl_server_test_occurrence_source_name(decl) &&
+            !strcmp(sh_decl_server_test_occurrence_source_name(decl), "palette/entity-name"));
+        *(const char **)(entity + 8) = NULL;
+        *(const char **)(entity + 0x58) = "unrelated-field";
+        CHECK(!sh_decl_server_test_occurrence_source_name(decl));
+    }
+    for (int mode = 0; mode < 5; mode++) {
+        sh_decl_server_test_reset_install();
+        g_occurrence_frame = g_user_enabled = 1;
+        g_boundary_thread = GetCurrentThreadId(); g_boundary_editor[9] = 1;
+        g_boundary_resource_head = manager;
+        g_resident_filter = 1; g_resident_only = NULL;
+        sh_decl_server_test_occurrence_ready(g_boundary_editor);
+        occurrence_fixture fixture = {mode};
+        sh_decl_server_occurrence_hooks hooks = {&fixture, occurrence_prepare, occurrence_finalize, occurrence_rollback};
+        int result = sh_decl_server_admit_occurrences(NULL, NULL, &hooks, error, sizeof(error));
+        CHECK(result == (mode ? SH_PACKAGE_ADMISSION_FAILED : SH_PACKAGE_ADMISSION_READY));
+        CHECK(fixture.prepared == 1 && fixture.finalized == (mode != 1));
+        CHECK(fixture.rolled_back == (mode != 0));
+        CHECK(!g_shader_resident_live);
+        CHECK(sh_decl_server_occurrence_recovery_pending(&fixture) == (mode >= 3));
+        if (mode >= 3) {
+            sh_decl_server_occurrence_maintenance();
+            CHECK(!sh_decl_server_occurrence_recovery_pending(&fixture) && fixture.rolled_back == 2);
+            CHECK(sh_decl_server_registration_succeeded());
+        }
+        g_occurrence_frame = 0; g_boundary_editor[9] = 0;
+        /* Retained successful batches leave with the browser; they never
+         * invoke a caller hook after its completed request is released. */
+        *(void **)(g_boundary_shell + 0x18) = g_boundary_manager;
+        *(int *)(g_boundary_manager + 8) = *(int *)(g_boundary_manager + 12) = 63;
+        *(int *)(g_boundary_manager + 0x910) = *(int *)(g_boundary_manager + 0x914) = 1;
+        sh_decl_server_occurrence_maintenance();
+    }
+    /* A live accepted palette must not block the native rebuild that will
+     * replace it. Only unsafe teardown failure blocks the rearm poll. */
+    CHECK(sh_decl_server_test_palette_hold((void *)1));
+    g_palette_end_result = 0; g_palette_end_calls = 0;
+    CHECK(sh_decl_server_test_palette_maintenance() == 1);
+    CHECK(g_palette_end_calls == 1 && sh_decl_server_test_palette_holds() == 1);
+    g_palette_end_result = -1;
+    CHECK(sh_decl_server_test_palette_maintenance() == 0);
+    CHECK(g_palette_end_calls == 2 && sh_decl_server_test_palette_holds() == 1);
+    g_palette_end_result = 1;
+    CHECK(sh_decl_server_test_palette_maintenance() == 1);
+    CHECK(g_palette_end_calls == 3 && sh_decl_server_test_palette_holds() == 0);
+    g_resident_filter = 0; g_boundary_resource_head = NULL;
+    sh_decl_server_test_reset_install();
+}
+/* Model the independently verified native cold/pending load distinction.
+ * Two children can observe their parent's early fields through a pointer
+ * cycle. Final inheritance must also receive its late fields; suppressing an
+ * in-progress error alone would leave both children and a descendant wrong. */
+static const char *const cycle_names[] = {
+    "cycle/base", "cycle/edge", "cycle/child1", "cycle/child2", "cycle/grand"
+};
+static unsigned char cycle_objects[5][0x100];
+static int cycle_present[5], cycle_reads[5], cycle_constructed, cycle_faults;
+static int cycle_fail_create, cycle_fail_finish, cycle_first_read_constructed, cycle_late;
+static void *cycle_vtable[4], *cycle_manager;
+static int cycle_index(const char *name)
+{ for (int i=0;i<5;i++) if (!strcmp(name,cycle_names[i])) return i; return -1; }
+static void *cycle_type(void *registry,const char *name)
+{ (void)registry;(void)name;return &cycle_manager; }
+static void *cycle_peek(void *manager,const char *name,unsigned char make_default)
+{ (void)manager;(void)make_default;int i=cycle_index(name);return i>=0 && cycle_present[i] ? cycle_objects[i] : NULL; }
+static void *cycle_source(void *manager,const char *name)
+{ (void)manager;return cycle_index(name)>=0 ? (void *)1 : NULL; }
+static void *cycle_create(void *manager,const char *name)
+{
+    (void)manager;int i=cycle_index(name);CHECK(i>=0);
+    if(i==cycle_fail_create)return NULL;
+    unsigned char *o=cycle_objects[i];memset(o,0,0x100);
+    *(const char **)(o+8)=cycle_names[i];cycle_constructed++;return o;
+}
+static void cycle_add(void *manager,void *object)
+{
+    unsigned char *o=object;int i=cycle_index(*(const char **)(o+8));CHECK(i>=0 && !cycle_present[i]);
+    cycle_present[i]=1;*(void **)(o+0x10)=manager;*(unsigned *)(o+0x20)=(unsigned)i+1;
+}
+static void cycle_read(void *object);
+static void *cycle_find(void *manager,const char *name,unsigned char make_default)
+{
+    int i=cycle_index(name);if(i<0)return NULL;
+    unsigned char *o=cycle_objects[i];
+    if(!cycle_present[i]) {
+        if(!make_default || !cycle_create(manager,name))return NULL;
+        cycle_add(manager,o);o[0x2c]|=1;cycle_read(o);o[0x2c]&=(unsigned char)~1;
+    } else if(o[0x2c]&2) { o[0x2c]&=(unsigned char)~2;cycle_read(o); }
+    return o;
+}
+static void cycle_read(void *object)
+{
+    unsigned char *o=object;int i=cycle_index(*(const char **)(o+8));
+    if(cycle_first_read_constructed<0)cycle_first_read_constructed=cycle_constructed;
+    cycle_reads[i]++;
+    if(i==0) {
+        *(int *)(o+0x50)=17;
+        CHECK(cycle_find(&cycle_manager,cycle_names[1],1)!=NULL);
+        *(int *)(o+0x54)=cycle_late;
+    } else if(i==1) {
+        CHECK(cycle_find(&cycle_manager,cycle_names[2],1)!=NULL);
+        CHECK(cycle_find(&cycle_manager,cycle_names[3],1)!=NULL);
+    } else {
+        unsigned char *parent=cycle_find(&cycle_manager,cycle_names[i==4 ? 2 : 0],1);
+        CHECK(parent!=NULL);
+        if(parent[0x2c]&1) { cycle_faults++;o[0x2c]|=4;return; }
+        memcpy(o+0x50,parent+0x50,8);
+        if(cycle_fail_finish && i==2 && cycle_reads[i]>1)o[0x2c]|=4;
+    }
+}
+static void cycle_reconstruct(void *object)
+{
+    unsigned char *o=object;
+    CHECK(*(unsigned *)(o+0x28)!=4);memset(o+0x48,0,0x100-0x48);o[0x2c]=0;
+}
+static void test_native_cycle_construction(void)
+{
+    static const unsigned char base[]="{ edit = { pointer = \"cycle/edge\"; early = 17; late = 83; } }";
+    static const unsigned char edge[]="{ a = \"cycle/child1\"; b = \"cycle/child2\"; }";
+    static const unsigned char child[]="{ inherit = \"cycle/base\"; }";
+    static const unsigned char grand[]="{ inherit = \"cycle/child1\"; }";
+    const unsigned char *bodies[]={base,edge,child,child,grand};
+    sh_decl_reference_item order[5]={0};
+    for(int i=0;i<5;i++)order[i]=(sh_decl_reference_item){cycle_names[i],bodies[i],strlen((const char *)bodies[i]),(void *)(uintptr_t)i,"perks"};
+    size_t edges,cycles;
+    CHECK(sh_decl_text_order_by_references(order,5,&edges,&cycles));CHECK(cycles==4);
+    sh_decl_server_test_materialize_item items[5]={0};
+    for(int i=0;i<5;i++) {
+        items[i]=(sh_decl_server_test_materialize_item){"perks",order[i].name,order[i].name,
+            SH_DECL_SERVER_TEST_MISSING,order[i].text,order[i].text_length,0,0,order[i].reserve_cycle,order[i].inherit_parent};
+        CHECK(order[i].reserve_cycle==(strcmp(order[i].name,"cycle/grand")!=0));
+        CHECK(!order[i].inherit_parent || order[i].inherit_parent<=(size_t)i);
+    }
+    for(int mode=0;mode<3;mode++) {
+        memset(cycle_objects,0,sizeof(cycle_objects));memset(cycle_present,0,sizeof(cycle_present));
+        memset(cycle_reads,0,sizeof(cycle_reads));cycle_constructed=cycle_faults=0;cycle_first_read_constructed=-1;
+        cycle_fail_create=mode==1 ? 2 : -1;cycle_fail_finish=mode==2;cycle_late=83;
+        cycle_vtable[3]=cycle_create;cycle_manager=cycle_vtable;
+        sh_decl_server_test_reset_runtime_state();sh_decl_server_test_set_runtime(0);
+        sh_decl_server_test_set_resource_add(cycle_add);
+        sh_decl_server_test_set_reconstruct(cycle_reconstruct,cycle_peek);
+        sh_decl_server_test_set_generic_load(cycle_read);
+        int grand_index=-1;
+        if(mode==1) {
+            /* Reservation failure precedes any reconstruction of old content. */
+            cycle_add(&cycle_manager,cycle_create(&cycle_manager,cycle_names[4]));
+            *(unsigned *)(cycle_objects[4]+0x28)=4;
+            *(int *)(cycle_objects[4]+0x54)=301;
+            for(int i=0;i<5;i++)if(!strcmp(items[i].name,cycle_names[4]))grand_index=i;
+            CHECK(grand_index>=0);items[grand_index].outcome=SH_DECL_SERVER_TEST_SHADOWED;
+            sh_decl_server_test_set_runtime(1);
+        }
+        int made=-1;
+        int ok=sh_decl_server_test_materialize_missing_sedefs(items,5,(void *)1,
+            cycle_type,cycle_source,cycle_find,&made);
+        CHECK(ok==(mode==0));CHECK(cycle_faults==0);
+        for(int i=0;i<5;i++)if(cycle_present[i])CHECK(!(cycle_objects[i][0x2c]&2));
+        if(mode==1) {
+            CHECK(cycle_first_read_constructed==-1);CHECK(cycle_objects[0][0x2c]&4);
+            CHECK(*(int *)(cycle_objects[4]+0x54)==301 && cycle_objects[4][0x2c]==0);
+            items[grand_index].outcome=SH_DECL_SERVER_TEST_MISSING;
+            sh_decl_server_test_set_runtime(0);cycle_fail_create=-1;
+            CHECK(sh_decl_server_test_materialize_missing_sedefs(items,5,(void *)1,
+                cycle_type,cycle_source,cycle_find,&made));
+            CHECK(cycle_constructed==5 && cycle_faults==0);
+            for(int i=2;i<5;i++)CHECK(*(int *)(cycle_objects[i]+0x54)==83);
+            continue;
+        }
+        CHECK(cycle_first_read_constructed==4);
+        if(mode==2)continue;
+        CHECK(made==5 && cycle_constructed==5);
+        for(int i=2;i<5;i++) { CHECK(*(int *)(cycle_objects[i]+0x50)==17);CHECK(*(int *)(cycle_objects[i]+0x54)==83); }
+        int reads=0;for(int i=0;i<5;i++)reads+=cycle_reads[i];
+        CHECK(sh_decl_server_test_materialize_missing_sedefs(items,5,(void *)1,cycle_type,cycle_source,cycle_find,&made));
+        CHECK(made==0 && cycle_constructed==5);
+        for(int i=0;i<5;i++)reads-=cycle_reads[i];CHECK(reads==0);
+        /* The same obligation applies to a cycle refreshed in place. */
+        for(int i=0;i<5;i++)items[i].outcome=SH_DECL_SERVER_TEST_SHADOWED;
+        cycle_late=97;sh_decl_server_test_set_runtime(1);
+        CHECK(sh_decl_server_test_materialize_missing_sedefs(items,5,(void *)1,cycle_type,cycle_source,cycle_find,&made));
+        CHECK(made==0 && cycle_constructed==5 && cycle_faults==0);
+        for(int i=2;i<5;i++)CHECK(*(int *)(cycle_objects[i]+0x54)==97);
+        CHECK(sh_decl_server_test_clear_stray_pending()==0);
+        for(int i=0;i<5;i++)items[i].outcome=SH_DECL_SERVER_TEST_MISSING;
+        sh_decl_server_test_set_runtime(0);
+    }
+    sh_decl_server_test_reset_runtime_state();sh_decl_server_test_set_reconstruct(NULL,NULL);
+}
+
 int main(void)
 {
     test_native_idstr_boundary();
@@ -3311,6 +5694,7 @@ int main(void)
     test_sedef_materialization();
     test_runtime_premark_reused_empties();
     test_runtime_shadowed_refresh();
+    test_runtime_reload_follows_new_dependencies();
     test_runtime_preserves_unaffected_caches();
     test_runtime_reconstruction_fault_restores_lifetime();
     test_rejected_new_identity_does_not_strand_replacements();
@@ -3319,6 +5703,10 @@ int main(void)
     test_runtime_rejects_native_fallback();
     test_runtime_shadowed_drain_failed_is_swept();
     test_runtime_import_keeps_native_fallback();
+    test_rebound_original_materialization();
+    test_runtime_rebound_original();
+    test_native_default_materialization();
+    test_defaulted_material_isolation();
     test_runtime_stray_pending_cleared();
     test_runtime_off_leaves_placeholders_alone();
     test_integrated_scan_materialize_pipeline();
@@ -3333,13 +5721,22 @@ int main(void)
     test_reference_dependency_ordering();
     test_material_table_dependency_ordering();
     test_scc_dependency_ordering();
+    test_scc_parent_before_loading_member();
     test_inheritance_cycle_refusal();
     test_complete_set_collision_ordering();
     test_walk_error_propagation();
     test_empty_launch_and_runtime_results();
     test_large_snapshot();
     test_many_candidates();
+    test_row_lineage();
+    test_row_slot_production();
+    test_row_portable_identity();
+    test_row_supplier_variants();
     test_many_runtime_marks();
+    test_shader_preparation_lifetime();
+    test_occurrence_admission();
+    test_defaulted_identity_reparse();
+    test_native_cycle_construction();
     if (g_failed) {
         fprintf(stderr, "%d decl-server test(s) failed\n", g_failed);
         return 1;

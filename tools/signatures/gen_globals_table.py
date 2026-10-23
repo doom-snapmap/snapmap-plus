@@ -29,6 +29,15 @@ NAMES = {
     0x2ded990: ('throwinfo_fatal',        0, 'ThrowInfo for the fatal level-7 throw (.rdata)'),
     0x6faf8b0: ('throw_suppressor_b',    0, 'level-6 dispatcher throw gate B'),
 
+    # idClass registry (GetClass VK 0x1403dd9b0 / GL 0x1403dd5e0, CreateManagedClassFromDecl
+    # VK 0x14030ce40 / GL 0x14030c650): Init's readiness byte, the sorted type array and
+    # idManagedClass::Type's typeNum/lastChild range. Read only; no factory is called.
+    0x5709308: ('class_registry_ready',   0, 'idClass::Init completion byte; Shutdown clears it'),
+    0x3031b58: ('class_sorted_types',     0, 'idClass sorted type array (idList data pointer)'),
+    0x3031b60: ('class_sorted_count',     0, 'idClass sorted type array element count (idList num)'),
+    0x593d6b8: ('managed_class_first',    0, 'idManagedClass::Type typeNum'),
+    0x593d6bc: ('managed_class_last',     0, 'idManagedClass::Type lastChild'),
+
     # Caller-anchored functions use the same rel32 decoding as data references.
     0x17F7030: ('declmgr_accessor',       0, 'idDeclManager accessor; its prologue is shared by ~47 functions'),
     0x699A60:  ('idlist_grow',            0, 'idList growth helper; too generic to sign by its own bytes'),

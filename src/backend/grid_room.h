@@ -56,6 +56,15 @@ int sh_grid_bmodel(const sh_grid_warp *warp, const unsigned char *source,
                     size_t length, unsigned char *target);
 int sh_grid_bcm(const sh_grid_warp *warp, const unsigned char *source,
                 size_t length, unsigned char *target);
+/* A module's sound BSP (<module>/<base>.sbsp): planes, vertices and the
+ * polygon centres derived from them move with the room; topology is kept.
+ * Only axis-aligned planes are accepted. */
+int sh_grid_sbsp(const sh_grid_warp *warp, const unsigned char *source,
+                 size_t length, unsigned char *target);
+/* A module's ambient lighting (<module>/<base>.ambientsh): every authored
+ * sample moves with the room and keeps its coefficients. */
+int sh_grid_ambient(const sh_grid_warp *warp, const unsigned char *source,
+                    size_t length, unsigned char *target);
 
 /* Independent light coverage, with effective dynamic-light center anchored
  * below the roof. Intensity is retained: coverage changes do not imply a

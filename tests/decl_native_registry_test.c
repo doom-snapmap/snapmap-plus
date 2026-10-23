@@ -1,8 +1,11 @@
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include "../src/backend/decl_native_registry.h"
+#include "../src/backend/native_resource_id.h"
 
 typedef struct region { void *memory; size_t size; } region;
 typedef struct fixture {
@@ -11,6 +14,8 @@ typedef struct fixture {
     unsigned char *registry, *managers[4];
     int sources[4], source_calls;
     uintptr_t unreadable;
+    uintptr_t mutate_at, change_at;
+    uint32_t change_value;
     int mutate;
 } fixture;
 static void *alloc(fixture *f, size_t size)
@@ -35,6 +40,9 @@ static int read_memory(void *context, uintptr_t address, void *out, size_t lengt
         if (address >= start && address - start <= f->regions[i].size &&
             length <= f->regions[i].size - (size_t)(address - start)) {
             memcpy(out, (void *)address, length);
+            if (address == f->mutate_at) {
+                memcpy((void *)f->change_at, &f->change_value, sizeof(f->change_value)); f->mutate_at = 0;
+            }
             if (f->mutate && address == (uintptr_t)f->managers[0] + 0x28) {
                 num(f->managers[0], 0x28, 0); f->mutate = 0;
             }
@@ -47,8 +55,9 @@ static int source_exists(void *context, uintptr_t manager, const char *type, con
 {
     fixture *f = context;
     size_t i;
-    assert(type && name && !strcmp(name, "same"));
+    assert(type && name && (!strcmp(name, "same") || !strcmp(name, "absent")));
     f->source_calls++;
+    if (!strcmp(name, "absent")) return 0;
     for (i = 0; i < 4; i++) if (manager == (uintptr_t)f->managers[i]) return f->sources[i];
     assert(0); return -1;
 }
@@ -73,10 +82,22 @@ static void setup(fixture *f)
 static uintptr_t loaded(fixture *f, size_t manager, const char *name)
 {
     void *array = alloc(f, sizeof(uintptr_t));
-    void *object = alloc(f, 0x18);
+    void *object = alloc(f, 0x30);
     ptr(object, 8, str(f, name)); ptr(object, 0x10, f->managers[manager]); ptr(array, 0, object);
     ptr(f->managers[manager], 0x20, array); num(f->managers[manager], 0x28, 1);
     return (uintptr_t)object;
+}
+
+static uintptr_t pointer_at(const void *memory, size_t offset)
+{ uintptr_t value; memcpy(&value, (const char *)memory + offset, sizeof(value)); return value; }
+
+static uintptr_t loaded_id(fixture *f, size_t manager, const char *name)
+{
+    uintptr_t object = loaded(f, manager, name);
+    const char *type = (const char *)pointer_at(f->managers[manager], 8);
+    uint32_t id;
+    assert(sh_native_resource_id(type, name, &id));
+    memcpy((void *)(object + 0x20), &id, sizeof(id)); return object;
 }
 static sh_decl_native_registry *open_registry(fixture *f, int with_sources)
 {
@@ -208,6 +229,19 @@ static void test_type_class(void)
     r = open_registry(&f, 1); assert(r);
     assert(sh_decl_native_registry_type_class(r, "weapon", &name) == -1 && !name);
     cleanup(&f, r);
+    /* Class lookups take the first manager in registry order, whatever the
+     * spelling of a later one (the indexed lookup keeps that order). */
+    setup(&f);
+    ptr(f.managers[3], 0x10, str(&f, "IDDECLWEAPON"));
+    r = open_registry(&f, 1); assert(r);
+    assert(sh_decl_native_registry_class_type(r, "iddeclweapon", &name) == 1 && !strcmp(name, "weapon"));
+    cleanup(&f, r);
+    setup(&f);
+    ptr(f.managers[0], 0x10, str(&f, "idDeclRenamed"));
+    ptr(f.managers[3], 0x10, str(&f, "IDDECLWEAPON"));
+    r = open_registry(&f, 1); assert(r);
+    assert(sh_decl_native_registry_class_type(r, "idDeclWeapon", &name) == 1 && !strcmp(name, "unrelated"));
+    cleanup(&f, r);
 }
 
 static void test_candidate_sources(void)
@@ -243,9 +277,481 @@ static void test_candidate_sources(void)
     assert(!ref.type && !ref.name && !ref.resource); cleanup(&f, r);
 }
 
+static void test_decl_identity(void)
+{
+    fixture f;
+    sh_decl_native_registry *r;
+    sh_native_resource_identity out = {0};
+    char error[256];
+    setup(&f);
+    ptr(f.managers[0], 8, str(&f, "entityDef"));
+    uintptr_t resident = loaded_id(&f, 0, "abcd");
+    r = open_registry(&f, 1); assert(r);
+    assert(sh_decl_native_registry_identity(r, "ENTITYDEF", "/ABCD", &out, error, sizeof(error)) == SH_NATIVE_RESOURCE_ID_SAME_NAME);
+    assert(!strcmp(out.type, "entityDef") && !strcmp(out.name, "abcd"));
+    assert(out.id == UINT32_C(0x8c39921c) && out.resident_id == out.id && out.resource == resident);
+    assert(out.manager == (uintptr_t)f.managers[0] && !strcmp(out.resident_name, "abcd"));
+    sh_native_resource_identity_clear(&out);
+    assert(sh_decl_native_registry_identity(r, "entitydef", "abcde", &out, error, sizeof(error)) == SH_NATIVE_RESOURCE_ID_FREE);
+    assert(out.id == UINT32_C(0x3118df15) && !out.resource && !out.resident_id && !out.resident_name);
+    sh_native_resource_identity_clear(&out);
+    assert(sh_decl_native_registry_identity(r, "missing", "abcde", &out, error, sizeof(error)) == SH_NATIVE_RESOURCE_ID_UNREGISTERED);
+    assert(!out.type && !out.name && !out.id && !f.source_calls);
+    assert(sh_decl_native_registry_identity_validate(r, error, sizeof(error)));
+    /* A same-name resident with an inconsistent stored ID is unavailable,
+     * never reported as equal or reusable. */
+    num((void *)resident, 0x20, 17);
+    assert(!sh_decl_native_registry_identity_validate(r, error, sizeof(error)) && *error);
+    assert(sh_decl_native_registry_identity(r, "entityDef", "abcd", &out, error, sizeof(error)) == SH_NATIVE_RESOURCE_ID_ERROR);
+    assert(!out.type && !out.name && !out.id); cleanup(&f, r);
+    setup(&f); loaded_id(&f, 0, "same"); r = open_registry(&f, 1); assert(r);
+    ptr((void *)pointer_at(f.registry, 8), 0, f.managers[1]);
+    assert(!sh_decl_native_registry_identity_validate(r, error, sizeof(error)));
+    cleanup(&f, r);
+}
+
+static uintptr_t native_setup(fixture *f)
+{
+    setup(f);
+    ptr(f->managers[0], 8, str(f, "image"));
+    ptr(f->managers[1], 8, str(f, "model"));
+    ptr(f->managers[2], 8, str(f, "entityDef"));
+    /* Deliberately invalid declaration metadata: the identity-only registry
+     * must not depend on class names, parents or declaration source lookup. */
+    for (size_t i = 0; i < 3; i++) {
+        ptr(f->managers[i], 0x10, (void *)17); ptr(f->managers[i], 0x88, (void *)23);
+        ptr(f->managers[i], 0x18, i < 2 ? f->managers[i + 1] : NULL);
+    }
+    void *head = alloc(f, sizeof(uintptr_t)); ptr(head, 0, f->managers[0]); return (uintptr_t)head;
+}
+
+static sh_native_resource_registry *native_open(fixture *f, uintptr_t head)
+{
+    char error[256];
+    sh_native_resource_registry_source source = {f, read_memory, head};
+    return sh_native_resource_registry_open(source, error, sizeof(error));
+}
+
+static void test_native_identity_collisions(void)
+{
+    fixture f;
+    uintptr_t head = native_setup(&f);
+    uintptr_t first = loaded_id(&f, 0, "smp/collision/75a3");
+    uintptr_t model = loaded_id(&f, 1, "abc");
+    sh_native_resource_registry *r = native_open(&f, head); assert(r);
+    sh_native_resource_identity out = {0};
+    char error[256];
+    assert(sh_native_resource_registry_identity(r, "IMAGE", "smp/collision/153f0", &out, error, sizeof(error)) == SH_NATIVE_RESOURCE_ID_COLLISION);
+    assert(out.id == UINT32_C(0x21287b03) && out.resident_id == out.id && out.resource == first);
+    assert(!strcmp(out.resident_name, "smp/collision/75a3")); sh_native_resource_identity_clear(&out);
+    assert(sh_native_resource_registry_identity(r, "image", "smp/collision/75a3", &out, error, sizeof(error)) == SH_NATIVE_RESOURCE_ID_SAME_NAME);
+    assert(out.resource == first); sh_native_resource_identity_clear(&out);
+    assert(sh_native_resource_registry_identity(r, "model", "ABC", &out, error, sizeof(error)) == SH_NATIVE_RESOURCE_ID_SAME_NAME);
+    assert(out.resource == model && out.id == UINT32_C(0x309b8c0b)); sh_native_resource_identity_clear(&out);
+    assert(sh_native_resource_registry_identity(r, "entitydef", "abc", &out, error, sizeof(error)) == SH_NATIVE_RESOURCE_ID_FREE);
+    assert(!strcmp(out.type, "entityDef") && out.id == UINT32_C(0xb59955bb)); sh_native_resource_identity_clear(&out);
+    assert(sh_native_resource_registry_validate(r, error, sizeof(error)) && !f.source_calls);
+    sh_native_resource_registry_close(r);
+    uintptr_t second = loaded_id(&f, 0, "smp/collision/153f0");
+    void *array = alloc(&f, 2 * sizeof(uintptr_t));
+    ptr(array, 0, (void *)first); ptr(array, sizeof(uintptr_t), (void *)second);
+    ptr(f.managers[0], 0x20, array); num(f.managers[0], 0x28, 2);
+    r = native_open(&f, head); assert(r);
+    /* A same-name hit must not conceal another object's colliding ID. */
+    assert(sh_native_resource_registry_identity(r, "image", "smp/collision/75a3", &out, error, sizeof(error)) == SH_NATIVE_RESOURCE_ID_COLLISION);
+    assert(out.resource == second && out.resident_id == out.id); sh_native_resource_identity_clear(&out);
+    sh_native_resource_registry_close(r); cleanup(&f, NULL);
+}
+
+/* The engine creates some resources unnamed (live: a font request with no
+ * face opened "fonts//12.dat" and left font "" with ID 0xec305aad). Such an
+ * entry keeps the snapshot usable; its ID must still be the unnamed one. */
+static void test_native_identity_unnamed(void)
+{
+    fixture f;
+    uintptr_t head = native_setup(&f);
+    sh_native_resource_identity out = {0};
+    char error[256];
+    uint32_t id = 0, font = 0;
+    assert(sh_native_resource_unnamed_id("font", &font) && font == UINT32_C(0xec305aad));
+    assert(!sh_native_resource_unnamed_id("", &id) && !id && !sh_native_resource_id("font", "", &id));
+    ptr(f.managers[0], 8, str(&f, "font"));
+    uintptr_t unnamed = loaded(&f, 0, "");
+    memcpy((void *)(unnamed + 0x20), &font, sizeof(font));
+    sh_native_resource_registry *r = native_open(&f, head); assert(r);
+    assert(sh_native_resource_registry_identity(r, "font", "zero threes", &out, error, sizeof(error)) == SH_NATIVE_RESOURCE_ID_FREE);
+    sh_native_resource_identity_clear(&out);
+    assert(sh_native_resource_registry_validate(r, error, sizeof(error)));
+    sh_native_resource_registry_close(r);
+    id = font + 1; memcpy((void *)(unnamed + 0x20), &id, sizeof(id));
+    r = native_open(&f, head); assert(r);
+    assert(sh_native_resource_registry_identity(r, "font", "zero threes", &out, error, sizeof(error)) == SH_NATIVE_RESOURCE_ID_ERROR);
+    sh_native_resource_registry_close(r); cleanup(&f, NULL);
+}
+
+static void test_native_identity_changes(void)
+{
+    for (int fault = 0; fault < 8; fault++) {
+        fixture f;
+        uintptr_t head = native_setup(&f), object = loaded_id(&f, 0, "same");
+        sh_native_resource_registry *r = native_open(&f, head); assert(r);
+        sh_native_resource_identity out = {0};
+        char error[256];
+        assert(sh_native_resource_registry_identity(r, "image", "unused", &out, error, sizeof(error)) == SH_NATIVE_RESOURCE_ID_FREE);
+        sh_native_resource_identity_clear(&out);
+        if (fault == 0) num((void *)object, 0x20, 17);
+        if (fault == 1) strcpy((char *)pointer_at((void *)object, 8), "fake");
+        if (fault == 2) ptr((void *)object, 0x10, f.managers[1]);
+        if (fault == 3) {
+            uintptr_t replacement = loaded_id(&f, 1, "same");
+            ptr((void *)pointer_at(f.managers[0], 0x20), 0, (void *)replacement);
+        }
+        if (fault == 4) ptr((void *)head, 0, f.managers[1]);
+        if (fault == 5) ptr(f.managers[0], 0x18, f.managers[2]);
+        if (fault == 6) ptr(f.managers[0], 8, str(&f, "Image"));
+        if (fault == 7) f.unreadable = object + 0x20;
+        assert(!sh_native_resource_registry_validate(r, error, sizeof(error)) && *error);
+        assert(sh_native_resource_registry_identity(r, "image", "unused", &out, error, sizeof(error)) == SH_NATIVE_RESOURCE_ID_ERROR);
+        assert(!out.name && !out.id && !out.resource);
+        sh_native_resource_registry_close(r); cleanup(&f, NULL);
+    }
+    fixture f;
+    uintptr_t head = native_setup(&f), object = loaded_id(&f, 0, "same");
+    sh_native_resource_registry *r = native_open(&f, head); assert(r);
+    sh_native_resource_identity out = {0};
+    char error[256];
+    f.mutate_at = object + 0x20; f.change_at = f.mutate_at; f.change_value = 17;
+    assert(sh_native_resource_registry_identity(r, "image", "same", &out, error, sizeof(error)) == SH_NATIVE_RESOURCE_ID_ERROR);
+    assert(!out.name && !out.id && *error);
+    sh_native_resource_registry_close(r); cleanup(&f, NULL);
+}
+
+/* Repeated queries of one snapshot revalidate only what each read: the manager
+ * header and the entries sharing the queried ID. Registration, removal, array
+ * replacement and a changed bucket entry fail; the full check covers the rest. */
+static void test_native_identity_bucket_validation(void)
+{
+    for (int fault = 0; fault < 5; fault++) {
+        fixture f;
+        uintptr_t head = native_setup(&f), object = loaded_id(&f, 0, "same");
+        sh_native_resource_registry *r = native_open(&f, head); assert(r);
+        sh_native_resource_identity same = {0}, unused = {0};
+        char error[256];
+        assert(sh_native_resource_registry_identity(r, "image", "same", &same, error, sizeof(error)) == SH_NATIVE_RESOURCE_ID_SAME_NAME);
+        assert(sh_native_resource_registry_identity(r, "image", "unused", &unused, error, sizeof(error)) == SH_NATIVE_RESOURCE_ID_FREE);
+        assert(sh_native_resource_registry_validate_identity(r, &same, error, sizeof(error)));
+        assert(sh_native_resource_registry_validate_identity(r, &unused, error, sizeof(error)));
+        void *array = (void *)pointer_at(f.managers[0], 0x20);
+        if (fault == 0) num((void *)object, 0x20, 17);                  /* bucket entry ID */
+        if (fault == 1) num(f.managers[0], 0x28, 2);                     /* registration count */
+        if (fault == 2) {                                                /* replaced array */
+            void *copy = alloc(&f, sizeof(uintptr_t)); ptr(copy, 0, (void *)object);
+            ptr(f.managers[0], 0x20, copy);
+        }
+        if (fault == 3) ptr(array, 0, (void *)loaded_id(&f, 1, "same")); /* swapped entry */
+        if (fault == 4) ptr(f.managers[0], 8, str(&f, "Image"));        /* manager identity */
+        if (fault == 0 || fault == 3) {
+            /* The bucket owner changed; the absent name's own reads did not. */
+            assert(!sh_native_resource_registry_validate_identity(r, &same, error, sizeof(error)) && *error);
+        } else {
+            assert(!sh_native_resource_registry_validate_identity(r, &same, error, sizeof(error)) && *error);
+            assert(!sh_native_resource_registry_validate_identity(r, &unused, error, sizeof(error)) && *error);
+        }
+        assert(!sh_native_resource_registry_validate(r, error, sizeof(error)));
+        sh_native_resource_identity_clear(&same); sh_native_resource_identity_clear(&unused);
+        sh_native_resource_registry_close(r); cleanup(&f, NULL);
+    }
+}
+
+static void test_native_identity_empty_and_malformed(void)
+{
+    fixture f;
+    uintptr_t head = native_setup(&f);
+    sh_native_resource_identity out = {0};
+    char error[256];
+    ptr((void *)head, 0, NULL);
+    sh_native_resource_registry *r = native_open(&f, head); assert(r);
+    assert(sh_native_resource_registry_identity(r, "image", "same", &out, error, sizeof(error)) == SH_NATIVE_RESOURCE_ID_UNREGISTERED);
+    assert(sh_native_resource_registry_validate(r, error, sizeof(error)));
+    sh_native_resource_registry_close(r);
+    ptr((void *)head, 0, f.managers[0]);
+    void *array = alloc(&f, sizeof(uintptr_t));
+    ptr(f.managers[0], 0x20, array); num(f.managers[0], 0x28, 1);
+    r = native_open(&f, head); assert(r);
+    assert(sh_native_resource_registry_identity(r, "image", "same", &out, error, sizeof(error)) == SH_NATIVE_RESOURCE_ID_FREE);
+    sh_native_resource_identity_clear(&out);
+    assert(sh_native_resource_registry_validate(r, error, sizeof(error))); sh_native_resource_registry_close(r);
+    ptr(f.managers[2], 0x18, f.managers[0]);
+    assert(!native_open(&f, head)); ptr(f.managers[2], 0x18, NULL);
+    ptr(f.managers[1], 8, str(&f, "IMAGE"));
+    r = native_open(&f, head); assert(r);
+    assert(sh_native_resource_registry_identity(r, "image", "same", &out, error, sizeof(error)) == SH_NATIVE_RESOURCE_ID_ERROR);
+    assert(!out.name && !out.id); sh_native_resource_registry_close(r);
+    cleanup(&f, NULL);
+}
+
+typedef struct candidates { const char *families[4]; size_t count, stop; } candidates;
+static int candidate(void *context, const char *family, const char *name)
+{
+    candidates *c = context;
+    assert(c->count < 4 && !strcmp(name, "missing/target"));
+    c->families[c->count++] = family;
+    return c->count != c->stop;
+}
+static void test_candidate_observation(void)
+{
+    fixture f; setup(&f); sh_decl_native_registry *r = open_registry(&f, 1); assert(r);
+    candidates c = {0};
+    assert(sh_decl_native_registry_source_candidates(r, "idDeclInventory", "/MISSING\\TARGET", candidate, &c));
+    assert(c.count == 3 && !strcmp(c.families[0], "inventoryItem") &&
+        !strcmp(c.families[1], "weapon") && !strcmp(c.families[2], "ammo"));
+    assert(!f.source_calls);
+    memset(&c, 0, sizeof(c));
+    assert(sh_decl_native_registry_source_candidates(r, "genericClass", "missing/target", candidate, &c));
+    assert(c.count == 4 && !f.source_calls);
+    memset(&c, 0, sizeof(c)); c.stop = 1;
+    assert(!sh_decl_native_registry_source_candidates(r, "idDeclInventory", "missing/target", candidate, &c));
+    assert(c.count == 1);
+    assert(!sh_decl_native_registry_source_candidates(r, "idDeclInventory", "\xC0", candidate, &c));
+    assert(sh_decl_native_registry_source_candidates(r, "idDeclInventory", "", candidate, &c));
+    assert(c.count == 1 && !f.source_calls); cleanup(&f, r);
+}
+
+/* ---- string reads ----
+ * Registry strings come through the source, which copies exactly the bytes
+ * requested; the process adapter (decl_server.c ds_registry_read) copies any
+ * mapped memory. Each name is read up to its terminator and never past it:
+ * exact-size allocations (empty, one byte, both sides of 64 bytes, long, high
+ * bytes) and a name ending at an inaccessible page, through a strict reader
+ * and through an unbounded process-style copy. A null entry name has no
+ * string, unlike "", and an unterminated or unreadable name fails its caller. */
+typedef struct string_source {
+    fixture *f;
+    unsigned char *page; /* one readable page, then an inaccessible one */
+    size_t page_size, past_end, faults;
+    int unbounded;
+} string_source;
+/* Strict: a request that starts in a fixture allocation and runs past its end
+ * is counted and refused, never copied. Unbounded: every request is copied,
+ * as the process adapter does. Both copy under a guard, so the inaccessible
+ * page faults as it would for the process adapter. */
+static int string_read(void *context, uintptr_t address, void *out, size_t length)
+{
+    string_source *s = context;
+    size_t i;
+    if (!s->unbounded) for (i = 0; i < s->f->count; i++) {
+        uintptr_t start = (uintptr_t)s->f->regions[i].memory;
+        if (address >= start && address - start < s->f->regions[i].size) {
+            if (length > s->f->regions[i].size - (size_t)(address - start)) { s->past_end++; return 0; }
+            break;
+        }
+    }
+    __try { memcpy(out, (const void *)address, length); return 1; }
+    __except (EXCEPTION_EXECUTE_HANDLER) { s->faults++; return 0; }
+}
+static sh_decl_native_registry *string_open(string_source *s)
+{
+    char error[160];
+    sh_decl_registry_source source = {s, string_read, (uintptr_t)s->f->registry, NULL};
+    s->past_end = s->faults = 0;
+    return sh_decl_native_registry_open(source, error, sizeof(error));
+}
+static char *repeated(fixture *f, char c, size_t length)
+{
+    char *p = alloc(f, length + 1);
+    memset(p, c, length); p[length] = 0; return p;
+}
+static void test_string_reads(void)
+{
+    static const char tail[] = "idDeclPageEnd";
+    for (int unbounded = 1; unbounded >= 0; unbounded--) {
+        fixture f;
+        string_source s = {&f};
+        SYSTEM_INFO system;
+        DWORD previous;
+        sh_decl_native_registry *r;
+        sh_decl_reference ref = {0};
+        const char *name = NULL;
+        char *one, *types[2], *classes[3], *long_entry;
+        void *array, *objects[3];
+        unsigned char *at_end;
+        setup(&f);
+        s.unbounded = unbounded;
+        GetSystemInfo(&system); s.page_size = system.dwPageSize;
+        s.page = VirtualAlloc(NULL, 2 * s.page_size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+        assert(s.page && VirtualProtect(s.page + s.page_size, s.page_size, PAGE_NOACCESS, &previous));
+        /* Manager types and classes: one byte, both sides of 64, long, high
+         * bytes, and a class name whose terminator ends the readable page. */
+        one = str(&f, "w"); ptr(f.managers[0], 8, one);
+        types[0] = repeated(&f, 't', 62); ptr(f.managers[1], 8, types[0]);
+        types[1] = repeated(&f, 'u', 64); ptr(f.managers[2], 8, types[1]);
+        classes[0] = repeated(&f, 'D', 63); ptr(f.managers[0], 0x10, classes[0]);
+        classes[1] = str(&f, "id\xC3\xA9v\xC3\xA9nement"); ptr(f.managers[1], 0x10, classes[1]);
+        classes[2] = repeated(&f, 'L', 5000); ptr(f.managers[2], 0x10, classes[2]);
+        at_end = s.page + s.page_size - sizeof(tail);
+        memcpy(at_end, tail, sizeof(tail)); ptr(f.managers[3], 0x10, at_end);
+        /* Manager w's entries: "", a 70-byte name and "x". */
+        long_entry = repeated(&f, 'e', 70);
+        array = alloc(&f, 3 * sizeof(uintptr_t));
+        for (size_t i = 0; i < 3; i++) {
+            objects[i] = alloc(&f, 0x30);
+            ptr(objects[i], 8, i == 0 ? str(&f, "") : i == 1 ? long_entry : str(&f, "x"));
+            ptr(objects[i], 0x10, f.managers[0]); ptr(array, i * sizeof(uintptr_t), objects[i]);
+        }
+        ptr(f.managers[0], 0x20, array); num(f.managers[0], 0x28, 3);
+
+        r = string_open(&s); assert(r);
+        assert(sh_decl_native_registry_type_class(r, "W", &name) == 1 && !strcmp(name, classes[0]));
+        assert(sh_decl_native_registry_type_class(r, types[0], &name) == 1 && !strcmp(name, classes[1]));
+        assert(sh_decl_native_registry_type_class(r, types[1], &name) == 1 && !strcmp(name, classes[2]));
+        assert(sh_decl_native_registry_class_type(r, tail, &name) == 1 && !strcmp(name, "unrelated"));
+        assert(sh_decl_native_registry_resolve(r, classes[0], "x", &ref) == 1 && ref.resource == (uintptr_t)objects[2]);
+        sh_decl_reference_clear(&ref);
+        assert(sh_decl_native_registry_resolve(r, classes[0], long_entry, &ref) == 1 &&
+            ref.resource == (uintptr_t)objects[1]);
+        sh_decl_reference_clear(&ref);
+        sh_decl_native_registry_close(r);
+        if (s.past_end || s.faults)
+            fprintf(stderr, "registry string reads (%s): %zu request(s) past an allocation's end, %zu fault(s)\n",
+                unbounded ? "unbounded" : "strict", s.past_end, s.faults);
+        assert(!s.past_end && !s.faults);
+
+        /* "" is a name; a null entry name is not, so the capture is unavailable. */
+        ptr(objects[0], 8, NULL);
+        r = string_open(&s); assert(r);
+        assert(sh_decl_native_registry_resolve(r, classes[0], "x", &ref) == -1 && !ref.resource);
+        sh_decl_native_registry_close(r);
+        ptr(objects[0], 8, str(&f, ""));
+        if (!unbounded) {
+            /* A class name that runs into the inaccessible page without a
+             * terminator, then one that starts there: the open fails after
+             * one refused byte. */
+            memcpy(s.page + s.page_size - 13, "idDeclNoTail!", 13);
+            ptr(f.managers[3], 0x10, s.page + s.page_size - 13);
+            assert(!string_open(&s) && s.faults == 1 && !s.past_end);
+            ptr(f.managers[3], 0x10, s.page + s.page_size);
+            assert(!string_open(&s) && s.faults == 1 && !s.past_end);
+        }
+        cleanup(&f, NULL);
+        VirtualFree(s.page, 0, MEM_RELEASE);
+    }
+}
+
+static void test_loaded_index(void)
+{
+    fixture f; setup(&f);
+    uintptr_t first = loaded_id(&f, 0, "z_actual_first"), second = loaded_id(&f, 0, "a_later");
+    void *array = alloc(&f, 2 * sizeof(uintptr_t)); ptr(array, 0, (void *)first); ptr(array, 8, (void *)second);
+    ptr(f.managers[0], 0x20, array); num(f.managers[0], 0x28, 2);
+    sh_decl_native_registry *r = open_registry(&f, 1); assert(r);
+    sh_decl_reference ref = {0}; char error[256];
+    assert(sh_decl_native_registry_loaded_at(r, "WEAPON", 0, &ref, error, sizeof(error)) == 1);
+    assert(ref.resource == first && !strcmp(ref.name, "z_actual_first") && !f.source_calls);
+    sh_decl_reference_clear(&ref);
+    assert(sh_decl_native_registry_loaded_at(r, "weapon", 1, &ref, error, sizeof(error)) == 1);
+    assert(ref.resource == second && !strcmp(ref.name, "a_later")); sh_decl_reference_clear(&ref);
+    assert(sh_decl_native_registry_loaded_at(r, "weapon", 2, &ref, error, sizeof(error)) == 0 && !ref.name);
+    assert(sh_decl_native_registry_loaded_at(r, "missing", 0, &ref, error, sizeof(error)) == 0 && !ref.resource);
+    assert(sh_decl_native_registry_identity_validate(r, error, sizeof(error)));
+    /* Membership changes at the same index cannot silently rebind the bank. */
+    ptr(array, 0, (void *)second);
+    assert(!sh_decl_native_registry_identity_validate(r, error, sizeof(error)));
+    assert(sh_decl_native_registry_loaded_at(r, "weapon", 0, &ref, error, sizeof(error)) == -1 && !ref.name);
+    cleanup(&f, r);
+
+    setup(&f); first = loaded_id(&f, 0, "chosen"); r = open_registry(&f, 0); assert(r);
+    f.unreadable = first + 0x20;
+    assert(sh_decl_native_registry_loaded_at(r, "weapon", 0, &ref, error, sizeof(error)) == -1 && !ref.resource);
+    cleanup(&f, r);
+    setup(&f); loaded_id(&f, 0, "chosen"); r = open_registry(&f, 0); assert(r); f.mutate = 1;
+    assert(sh_decl_native_registry_loaded_at(r, "weapon", 0, &ref, error, sizeof(error)) == -1 && !ref.name);
+    cleanup(&f, r);
+}
+
+/* R-388: a manager of thousands of loaded entries is searched by name, not
+ * scanned, and still answers with the first equal entry; inside a settled
+ * scope an engine-only source is asked once per manager and name across
+ * registries, while a caller-state source is asked every time. */
+static void test_large_manager_and_scope(void)
+{
+    enum { ENTRIES = 4096 };
+    fixture f; setup(&f);
+    uintptr_t *array = alloc(&f, (ENTRIES + 1) * sizeof(uintptr_t));
+    unsigned char *objects = alloc(&f, (ENTRIES + 1) * 0x30);
+    char *names = alloc(&f, (ENTRIES + 1) * 16);
+    for (size_t i = 0; i <= ENTRIES; i++) {
+        char *name = names + i * 16;
+        snprintf(name, 16, "w/%zu", i == ENTRIES ? (size_t)7 : i);  /* the last repeats w/7 */
+        ptr(objects + i * 0x30, 8, name); ptr(objects + i * 0x30, 0x10, f.managers[0]);
+        array[i] = (uintptr_t)(objects + i * 0x30);
+    }
+    ptr(f.managers[0], 0x20, array); num(f.managers[0], 0x28, ENTRIES + 1);
+    sh_decl_native_registry *r = open_registry(&f, 1); assert(r);
+    sh_decl_native_registry_stats st;
+    sh_decl_native_registry_stats_take(NULL, 1);
+    for (size_t i = 0; i < ENTRIES; i++) {
+        char name[16]; snprintf(name, sizeof(name), "w/%zu", i);
+        check(r, "idDeclWeapon", name, 1, "weapon", (uintptr_t)(objects + i * 0x30));
+    }
+    sh_decl_native_registry_stats_take(&st, 1);
+    assert(st.resolves == ENTRIES && st.compared <= 2 * ENTRIES && !st.probes);
+    sh_decl_native_registry_close(r);
+
+    /* Source answers: outside a scope, inside one for a caller-state source,
+     * and inside one for an engine-only source shared by two registries. */
+    char error[160];
+    f.sources[0] = 1;
+    sh_decl_registry_source caller = {&f, read_memory, (uintptr_t)f.registry, source_exists};
+    sh_decl_registry_source engine = caller; engine.settled_exists = 1;
+    for (int round = 0; round < 3; round++) {
+        f.source_calls = 0;
+        if (round) sh_decl_native_registry_scope(1);
+        sh_decl_native_registry *a = sh_decl_native_registry_open(round == 2 ? engine : caller, error, sizeof(error));
+        sh_decl_native_registry *b = sh_decl_native_registry_open(round == 2 ? engine : caller, error, sizeof(error));
+        assert(a && b);
+        check(a, "idDeclWeapon", "same", 1, "weapon", 0); check(a, "idDeclWeapon", "same", 1, "weapon", 0);
+        check(b, "idDeclWeapon", "same", 1, "weapon", 0);
+        sh_decl_native_registry_close(a); sh_decl_native_registry_close(b);
+        if (round) sh_decl_native_registry_scope(0);
+        assert(f.source_calls == (round == 2 ? 1 : 3));
+    }
+    /* Resolutions inside a scope: an engine-only registry answers a class and
+     * name again from the first answer, in either registry over the same
+     * engine registry, with the same reference; a caller-state one resolves
+     * every time. */
+    for (int settled = 0; settled < 2; settled++) {
+        sh_decl_native_registry_stats_take(NULL, 1);
+        sh_decl_native_registry_scope(1);
+        sh_decl_native_registry *a = sh_decl_native_registry_open(settled ? engine : caller, error, sizeof(error));
+        sh_decl_native_registry *b = sh_decl_native_registry_open(settled ? engine : caller, error, sizeof(error));
+        assert(a && b);
+        uintptr_t first = (uintptr_t)(objects + 3 * 0x30);
+        check(a, "idDeclWeapon", "w/3", 1, "weapon", first); check(a, "idDeclWeapon", "W/3", 1, "weapon", first);
+        check(b, "idDeclWeapon", "w/3", 1, "weapon", first);
+        check(a, "idDeclWeapon", "absent", 0, NULL, 0); check(b, "idDeclWeapon", "absent", 0, NULL, 0);
+        sh_decl_native_registry_close(a); sh_decl_native_registry_close(b);
+        sh_decl_native_registry_scope(0);
+        sh_decl_native_registry_stats_take(&st, 1);
+        assert(st.resolves == 5 && st.resolve_hits == (settled ? 3u : 0u));
+    }
+    /* A scope's answers end with it. */
+    f.source_calls = 0;
+    sh_decl_native_registry_scope(1);
+    r = sh_decl_native_registry_open(engine, error, sizeof(error)); assert(r);
+    check(r, "idDeclWeapon", "same", 1, "weapon", 0);
+    sh_decl_native_registry_close(r); sh_decl_native_registry_scope(0);
+    assert(f.source_calls == 1);
+    cleanup(&f, NULL);
+}
+
 int main(void)
 {
+    test_string_reads();
     test_lookup_order(); test_unknown_and_ancestry(); test_memory_and_names(); test_type_class();
-    test_candidate_sources();
+    test_candidate_sources(); test_candidate_observation();
+    test_loaded_index();
+    test_large_manager_and_scope();
+    test_decl_identity(); test_native_identity_collisions(); test_native_identity_unnamed(); test_native_identity_changes();
+    test_native_identity_bucket_validation(); test_native_identity_empty_and_malformed();
     puts("decl_native_registry_test: PASS"); return 0;
 }

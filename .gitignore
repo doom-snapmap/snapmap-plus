@@ -13,7 +13,7 @@ dist/
 *.syso
 
 # Keep the shared Claude instructions; ignore all other local agent state.
-.claude/*
+.claude/
 !.claude/CLAUDE.md
 .codex/
 
@@ -36,6 +36,8 @@ site/_site/
 
 # Native test build output and logs.
 /tests/obj/
+# Machine-local inputs of the retained test composition (tests/README.md).
+/tests/local/
 
 # Python bytecode.
 __pycache__/

@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "map_payload.h"
+#include "map_capacity.h"
 #include "patch.h"
 
 void backend_log(const char *line) { (void)line; }
@@ -56,6 +57,7 @@ int main(void)
     CHECK(!sh_map_payload_install(sites, 2));
     sh_patch_test_faults(0, 0, 0);
     CHECK(sh_map_payload_install(sites, 2)); /* Retained rollback is recovered. */
+    CHECK(sh_map_capacity_limit() == 10 * 1024 * 1024);
     CHECK(sh_map_payload_install(sites, 2));
     for (i = 0; i < 2; i++) {
         CHECK(accepts[i](1) && accepts[i](10 * 1024 * 1024 + 1));
@@ -82,6 +84,21 @@ int main(void)
     CHECK(!sh_map_payload_install(sites, 2));
     CHECK(page[151] == 0x75 && !memcmp(page, save_code, sizeof(save_code)));
     CHECK(sh_map_payload_remove());
+    /* Install records the reader's own bound, not a copied constant; a refused
+     * preflight records nothing. */
+    sh_map_capacity_set_limit(0);
+    CHECK(VirtualProtect(page, 4096, PAGE_READWRITE, &previous));
+    *(int *)(page + 192) = 4 * 1024 * 1024;
+    CHECK(VirtualProtect(page, 4096, PAGE_EXECUTE_READ, &previous));
+    CHECK(!sh_map_payload_install(sites, 2) && sh_map_capacity_limit() == 10 * 1024 * 1024);
+    CHECK(VirtualProtect(page, 4096, PAGE_READWRITE, &previous));
+    page[151] = 0x7e;
+    CHECK(VirtualProtect(page, 4096, PAGE_EXECUTE_READ, &previous));
+    CHECK(sh_map_payload_install(sites, 2) && sh_map_capacity_limit() == 4 * 1024 * 1024);
+    CHECK(accepts[1](4 * 1024 * 1024 + 1));
+    CHECK(sh_map_payload_remove() && sh_map_capacity_limit() == 4 * 1024 * 1024);
+    CHECK(!accepts[1](4 * 1024 * 1024 + 1) && accepts[1](4 * 1024 * 1024));
+    sh_map_capacity_set_limit(0);
     VirtualFree(page, 0, MEM_RELEASE);
     if (failures) return 1;
     puts("native map payload length checks passed"); return 0;

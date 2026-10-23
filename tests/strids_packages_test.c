@@ -9,6 +9,21 @@
 #include "package_runtime.h"
 #include "../src/backend/overrides.h"
 #include "../src/backend/hook.h"
+#include "resource_graph_native.h"
+#include "package_runtime.h"
+int sh_resource_graph_native_source_target(char family[128],char name[4096])
+{ (void)family;(void)name;return 0; }
+int sh_resource_graph_native_source_fault_target(void **object,uint64_t *token)
+{ *object=NULL; *token=0; return 0; }
+int sh_resource_graph_native_source_fault_input(void **object,uint64_t *token)
+{ *object=NULL; *token=0; return 0; }
+int sh_resource_graph_native_source_fault_recovered(void *object,uint64_t token)
+{ (void)object; (void)token; return 0; }
+int sh_resource_graph_native_source_observed(const char *family,const char *name,
+    sh_package_resource_capture *capture,int baseline)
+{ (void)family;(void)name;(void)baseline;sh_package_runtime_resource_capture_release(capture);return 0; }
+int sh_resource_graph_native_cook_input(const char *path,unsigned char **body,size_t *length)
+{ (void)path;*body=NULL;*length=0;return 0; }
 
 static int g_failed;
 #define CHECK(c) do { if (!(c)) { \
@@ -785,3 +800,7 @@ int main(void)
 /* AAS validation is exercised by grid_room_nav_test, not these lookup tests. */
 int sh_navmesh_validate_aas(const unsigned char *p,size_t n,char *e,size_t cap)
 {(void)p;(void)n;if(e&&cap)e[0]=0;return 0;}
+
+/* This fixture models source/VT capture, not native DEFAULT consumers. */
+int sh_resource_graph_native_observe_resource(void *resource)
+{ (void)resource; sh_resource_graph_incomplete(); return 0; }

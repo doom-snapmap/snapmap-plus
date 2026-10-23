@@ -2,7 +2,7 @@
  * interface object and callbacks; both DLLs must build against this header.
  * The 0x60-byte object has a vtable at +0 and subobject pointer at +0x58.
  * The original 77-slot prefix ends at +0x260; append-only extensions end
- * at +0x350, making the current vtable 0x358 bytes. The backend records that
+ * at +0x358, making the current vtable 0x360 bytes. The backend records that
  * size in the object (see sh_iface_vtbl_bytes); check it before calling a
  * slot at or past +0x350.
  * Engine layouts remain private to backend implementations. Reserved cells
@@ -68,8 +68,23 @@ typedef void         (*sh_set_displayname_fn)(struct sh_iface *self, int id, con
 /* Rebuild canonical decl source from current class/inherit and the supplied body. */
 typedef void         (*sh_rebuild_declsource_fn)(struct sh_iface *self, int id, const char *cstr); /* +0x40 */
 
-/* Serialize selected entities as prefab JSON. Return copied bytes (up to cap - 1), or zero. */
+/* Serialize selected entities as portable prefab JSON. Return the complete
+ * copied byte count, or zero; insufficient capacity never returns a prefix. */
 typedef int          (*sh_serialize_selection_fn)(struct sh_iface *self, char *out_json, int cap);  /* +0xb0 */
+/* One complete engine-thread snapshot, without a fixed transport buffer.
+ * selection: 0 staged clipboard, 1 selected entities. Success transfers a
+ * NUL-terminated GetProcessHeap allocation; caller uses HeapFree, never free.
+ * length excludes the terminator. Failure clears both outputs. Native idStr
+ * representation and allocation overflow are the only payload bounds. */
+typedef int (*sh_prefab_export_fn)(struct sh_iface *self, int selection, char **out_json, size_t *length);
+/* A selection export that native prefab admission refused returns one of these
+ * negative codes instead of 0; callers that test for 1 and owned bytes are
+ * unaffected. */
+#define SH_PREFAB_EXPORT_EMPTY        (-1)  /* nothing is selected */
+#define SH_PREFAB_EXPORT_NO_ANCHOR    (-2)  /* no selected entity under the view anchors the prefab */
+#define SH_PREFAB_EXPORT_UNCOPYABLE   (-3)  /* a selected entity cannot be duplicated */
+#define SH_PREFAB_EXPORT_CONNECTED    (-4)  /* connected entities lie outside the selection */
+#define SH_PREFAB_EXPORT_REFERENCED   (-5)  /* referenced entities lie outside the selection */
 
 /* Join the local app-data snapmap-plus root, prefix, and name into out_path.
  * Caller supplies separators and suffix. Return 1 when formatting succeeds. */
@@ -500,6 +515,7 @@ typedef struct sh_iface_vtbl {
     sh_navmesh_view_fn         navmesh_view;         /* +0x340 (ext 27) the navigation view */
     sh_run_on_main_fn          run_on_main;          /* +0x348 (ext 28) main-thread call */
     sh_delete_entities_fn      delete_entities;      /* +0x350 (ext 29) native batch delete */
+    sh_prefab_export_fn        prefab_export;       /* +0x358 (ext 30) complete owned prefab */
 } sh_iface_vtbl;
 
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, config_get_json) == 0x2B0);
@@ -523,8 +539,9 @@ SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, rawmap_load_now) == 0x338);
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, navmesh_view) == 0x340);
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, run_on_main) == 0x348);
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, delete_entities) == 0x350);
-SH_STATIC_ASSERT(sizeof(sh_iface_vtbl) == 0x358);
+SH_STATIC_ASSERT(sizeof(sh_iface_vtbl) == 0x360);
 SH_STATIC_ASSERT(sizeof(sh_delete_result) == 40);
+SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, prefab_export) == 0x358);
 
 /* Fixed object layout: vtable +0, reserved bytes +0x08..+0x57, subobject
  * pointer +0x58. The first eight reserved bytes carry the vtable size marker;
@@ -550,10 +567,11 @@ typedef struct sh_iface_sub {
 
 struct sh_iface {
     const sh_iface_vtbl *vtbl;      /* +0x00 */
-    uint8_t              mtx[0x50]; /* +0x08..+0x57: reserved. */
+    uint8_t              mtx[0x50]; /* +0x08..+0x57: size marker, then reserved. */
     sh_iface_sub        *sub;       /* +0x58  -> the cmd-map + work-queue sub-object */
 };
 
+SH_STATIC_ASSERT(offsetof(sh_iface, mtx) == 0x08);
 SH_STATIC_ASSERT(offsetof(sh_iface, sub) == 0x58);
 SH_STATIC_ASSERT(sizeof(sh_iface) == 0x60);
 
@@ -570,13 +588,28 @@ static __inline uint32_t sh_iface_vtbl_bytes(const struct sh_iface *self)
     const uint32_t *cell;
     if (!self) return 0;
     cell = (const uint32_t *)(const void *)self->mtx;
-    return cell[0] == SH_IFACE_VTBL_MARK ? cell[1] : SH_IFACE_LEGACY_VTBL_BYTES;
+    if (cell[0] == SH_IFACE_VTBL_MARK)
+        return cell[1] >= 0x268 && !(cell[1] % sizeof(void *)) ? cell[1] : 0;
+    /* An earlier development table used +0x340 for prefab export. Only its
+     * common prefix is compatible with the published navigation slots. */
+    if (cell[0] == 0x46494853u && cell[1] == 0x31545845u) return 0x340;
+    return SH_IFACE_LEGACY_VTBL_BYTES;
+}
+
+static __inline int sh_iface_has_slot(const sh_iface *iface, size_t offset, size_t bytes)
+{
+    return iface && iface->vtbl && bytes && offset <= SIZE_MAX - bytes &&
+        sh_iface_vtbl_bytes(iface) >= offset + bytes;
 }
 
 #define SH_IFACE_HAS_SLOT(self, member)                                          \
-    ((self) && (self)->vtbl &&                                                   \
-     offsetof(sh_iface_vtbl, member) + sizeof(void *) <= sh_iface_vtbl_bytes(self) && \
+    (sh_iface_has_slot((self), offsetof(sh_iface_vtbl, member), sizeof(void *)) && \
      (self)->vtbl->member != NULL)
+
+static __inline sh_prefab_export_fn sh_iface_prefab_export(const sh_iface *iface)
+{
+    return SH_IFACE_HAS_SLOT(iface, prefab_export) ? iface->vtbl->prefab_export : NULL;
+}
 
 /* Frontend thread-init block: output-state slot, argc, argv, and the
  * backend-owned interface. Preserve alignment and field order across DLLs. */
@@ -686,6 +719,7 @@ typedef struct sh_iface_engine_slots {
     sh_navmesh_view_fn         navmesh_view;                /* +0x340 (ext 27) */
     sh_run_on_main_fn          run_on_main;                 /* +0x348 (ext 28) */
     sh_delete_entities_fn      delete_entities;             /* +0x350 (ext 29) */
+    sh_prefab_export_fn        prefab_export;              /* +0x358 (ext 30) */
 } sh_iface_engine_slots;
 
 void sh_iface_bind_engine_slots(const sh_iface_engine_slots *slots);

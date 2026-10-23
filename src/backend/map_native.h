@@ -16,6 +16,20 @@ const char *sh_map_native_source(const sh_map_native_selection *selection, size_
 int sh_map_native_matches(const sh_map_native_selection *selection, const void *metadata);
 int sh_map_native_matches_ids(const sh_map_native_selection *selection, const void *id, const void *revision);
 int sh_map_native_matches_level(const sh_map_native_selection *selection, const void *level_parameters);
+/* The published map's own level name (the metadata's name string). */
+int sh_map_native_level_name(const sh_map_native_selection *selection, char *out, size_t capacity);
+/* The selection's published item id and revision as C strings. */
+int sh_map_native_identity(const sh_map_native_selection *selection, char *id, size_t id_capacity,
+    char *revision, size_t revision_capacity);
+/* Copy an engine string object (length +8, text +0x10) when it is readable and
+ * non-empty. */
+int sh_map_native_string_copy(const void *string, char *out, size_t capacity);
+/* The loading level's own name, as the spawn info carries it. */
+int sh_map_native_level_name_of(const void *level_parameters, char *out, size_t capacity);
+/* 1 when the loading level is a SnapMap level (the spawn-info builder flags
+ * every "snapmap/" map and renames it DynamicSnapMap), 0 for any other level,
+ * -1 when the parameters cannot be read. */
+int sh_map_native_level_is_snapmap(const void *level_parameters);
 /* Decode after package activation, then lend the native metadata/snapshot to a
  * synchronous original launch. They may not escape the callback except through
  * a native deep copy. Return 1 on success. A failed parse never calls launch.

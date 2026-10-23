@@ -425,6 +425,16 @@ int sh_package_archive_identity(const unsigned char *bytes, size_t length,
     pa_free(&z); return 1;
 }
 
+int sh_package_archive_tree_identity(const unsigned char *bytes, size_t length,
+    unsigned char fingerprint[32], char *error, size_t capacity)
+{
+    pa_zip z;
+    if (error && capacity) error[0] = 0;
+    if (fingerprint) memset(fingerprint, 0, 32);
+    if (!fingerprint || !pa_open(bytes, length, &z, 0, error, capacity)) return 0;
+    memcpy(fingerprint, z.fingerprint, 32); pa_free(&z); return 1;
+}
+
 void sh_package_archive_files_free(sh_package_archive_files *files)
 {
     size_t i;
@@ -476,8 +486,12 @@ static int pa_directory(wchar_t *path)
     return attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY) && !(attrs & FILE_ATTRIBUTE_REPARSE_POINT);
 }
 
-int sh_package_archive_unpack(const unsigned char *bytes, size_t length, const char *destination,
-                              unsigned *files, char *error, size_t capacity)
+/* durable: every extracted file is flushed to the device before the next one, so a tree that must outlive
+ * this process (an installation) is complete on disk when the call returns. A context's private extraction
+ * is read back and verified at once and is swept if the process dies, so it skips the per-file flush, which
+ * costs about as much as the decode and write for a tree of a thousand small files. */
+static int pa_unpack(const unsigned char *bytes, size_t length, const char *destination,
+                     unsigned *files, int durable, char *error, size_t capacity)
 {
     pa_zip z;
     wchar_t *base = NULL, *path = NULL;
@@ -527,7 +541,7 @@ int sh_package_archive_unpack(const unsigned char *bytes, size_t length, const c
             file = CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_NEW,
                                FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
             if (file == INVALID_HANDLE_VALUE) { free(decoded); goto done; }
-            ok = WriteFile(file, decoded, e->size, &written, NULL) && written == e->size && FlushFileBuffers(file);
+            ok = WriteFile(file, decoded, e->size, &written, NULL) && written == e->size && (!durable || FlushFileBuffers(file));
             CloseHandle(file); free(decoded);
             if (!ok) goto done;
             ok = 0;
@@ -540,3 +554,9 @@ done:
     if (!ok && error && capacity && !error[0]) pa_error(error, capacity, "cannot extract complete package into staging directory");
     free(base); free(path); pa_free(&z); return ok;
 }
+int sh_package_archive_unpack(const unsigned char *bytes, size_t length, const char *destination,
+                              unsigned *files, char *error, size_t capacity)
+{ return pa_unpack(bytes, length, destination, files, 1, error, capacity); }
+int sh_package_archive_unpack_volatile(const unsigned char *bytes, size_t length, const char *destination,
+                                       unsigned *files, char *error, size_t capacity)
+{ return pa_unpack(bytes, length, destination, files, 0, error, capacity); }

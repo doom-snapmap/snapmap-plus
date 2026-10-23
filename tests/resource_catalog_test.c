@@ -314,6 +314,159 @@ static void test_catalog_reads(void)
     CHECK(!context.failures);
     sh_resource_catalog_close(catalog);
 }
+/* R-342: a path's slice reads exactly the bytes the catalog's own read returned, through the catalog's pinned
+ * handles, also after the catalog closed. While any slice is held no writer or deleter can open the archive; the
+ * last slice closes the handles. Absence has no slice, and a stored row reads like a compressed one. */
+static void test_slices(void)
+{
+    char archive[MAX_PATH];
+    unsigned char *body = NULL, *read = NULL, index[2048] = {0};
+    size_t length = 0, read_length = 0, position;
+    sh_resource_slice *slice = NULL, *again = NULL;
+    sh_resource_catalog *catalog;
+    HANDLE writer;
+    fixture_reset(); catalog = open_catalog(); if (!catalog) return;
+    CHECK(sh_resource_catalog_read_path_slice(catalog, "absent", &body, &length, &slice) == 0 && !body && !slice);
+    CHECK(sh_resource_catalog_read_path_slice(catalog, resource_path, &body, &length, &slice) == 2 && body && slice);
+    CHECK(slice && sh_resource_slice_length(slice) == length && length == 832);
+    again = sh_resource_slice_retain(slice);
+    sh_resource_catalog_close(catalog);
+    read = sh_resource_slice_read(slice, &read_length);
+    CHECK(read && read_length == length && !memcmp(read, body, length) && !read[length]);
+    free(read); read = NULL;
+    snprintf(archive, sizeof(archive), "%s/gameresources.resources", fixture);
+    writer = CreateFileA(archive, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    CHECK(writer == INVALID_HANDLE_VALUE && GetLastError() == ERROR_SHARING_VIOLATION);
+    if (writer != INVALID_HANDLE_VALUE) CloseHandle(writer);
+    CHECK(!DeleteFileA(archive));
+    sh_resource_slice_release(slice);
+    writer = CreateFileA(archive, GENERIC_WRITE, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    CHECK(writer == INVALID_HANDLE_VALUE && GetLastError() == ERROR_SHARING_VIOLATION);
+    if (writer != INVALID_HANDLE_VALUE) CloseHandle(writer);
+    read = sh_resource_slice_read(again, &read_length);
+    CHECK(read && read_length == length && !memcmp(read, body, length)); free(read); read = NULL;
+    sh_resource_slice_release(again);
+    writer = CreateFileA(archive, GENERIC_WRITE, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    CHECK(writer != INVALID_HANDLE_VALUE);
+    if (writer != INVALID_HANDLE_VALUE) CloseHandle(writer);
+    free(body); body = NULL;
+    /* A stored SnapMap row: its slice reads the stored bytes themselves; read_path answers the same. */
+    position = append_pindex_row(index, 0x24, 1, "entityDef", "ai/demon/cyberdemon", resource_path, 1, 2, 2, 0);
+    length = finish_pindex(index, sizeof(index), 1, position);
+    put_file("snap_gameresources.pindex", index, length); put_file("snap_gameresources.resources", "xAB", 3);
+    catalog = open_catalog(); if (!catalog) return;
+    CHECK(sh_resource_catalog_read_path_slice(catalog, resource_path, &body, &length, &slice) == 1 && slice &&
+        length == 2 && !memcmp(body, "AB", 2));
+    read = sh_resource_slice_read(slice, &read_length);
+    CHECK(read && read_length == 2 && !memcmp(read, "AB", 2) && !read[2]);
+    free(read); free(body); body = NULL;
+    CHECK(sh_resource_catalog_read_path(catalog, resource_path, &body, &length) == 1 && length == 2 &&
+        !memcmp(body, "AB", 2));
+    free(body);
+    sh_resource_slice_release(slice); sh_resource_catalog_close(catalog);
+    CHECK(!sh_resource_slice_read(NULL, &read_length) && !read_length && !sh_resource_slice_length(NULL));
+    sh_resource_slice_release(NULL);
+}
+/* R-347: a catalog has counted holders: the first close leaves it readable for the others, and its slices outlive
+ * them all. It names its installation exactly (sh_resource_catalog_matches): the index bytes and archive sizes it
+ * hashed, and the very archive files it holds. Equal bytes in other files are not its payload, although a catalog
+ * opened over them has the same digest; a hard link names a held file itself. A changed or absent index and an
+ * absent archive differ. While any holder keeps the archives, no writer, deleter or replacement reaches them, also
+ * through a hard link; after the last one they are ordinary files again. */
+static void installation_copy(const char *to, int link_archives)
+{
+    static const char *const indexes[] = {"snap_gameresources.pindex", "gameresources.pindex"};
+    static const char *const archives[] = {"snap_gameresources.resources", "snap_gameresources.patch",
+        "gameresources.resources", "gameresources.patch"};
+    char from[MAX_PATH], path[MAX_PATH];
+    size_t i;
+    CHECK(make_dir(to));
+    for (i = 0; i < 2; i++) {
+        snprintf(from, sizeof(from), "%s/%s", fixture, indexes[i]); snprintf(path, sizeof(path), "%s/%s", to, indexes[i]);
+        CHECK(CopyFileA(from, path, FALSE));
+    }
+    for (i = 0; i < 4; i++) {
+        snprintf(from, sizeof(from), "%s/%s", fixture, archives[i]); snprintf(path, sizeof(path), "%s/%s", to, archives[i]);
+        CHECK(link_archives ? CreateHardLinkA(path, from, NULL) : CopyFileA(from, path, FALSE));
+    }
+}
+static void installation_remove(const char *dir)
+{
+    static const char *const files[] = {"snap_gameresources.pindex", "gameresources.pindex", "snap_gameresources.resources",
+        "snap_gameresources.patch", "gameresources.resources", "gameresources.patch"};
+    char path[MAX_PATH];
+    for (size_t i = 0; i < sizeof(files) / sizeof(files[0]); i++) {
+        snprintf(path, sizeof(path), "%s/%s", dir, files[i]); DeleteFileA(path);
+    }
+    CHECK(RemoveDirectoryA(dir));
+}
+static void test_shared_catalogs(void)
+{
+    char error[512] = "", copied[MAX_PATH], linked[MAX_PATH], archive[MAX_PATH], path[MAX_PATH];
+    unsigned char digest[32], other[32], *body = NULL, *again = NULL, index[512] = {0};
+    size_t length = 0, again_length = 0;
+    sh_resource_slice *slice = NULL;
+    sh_resource_catalog *catalog, *held, *fresh;
+    HANDLE writer;
+    fixture_reset(); catalog = open_catalog(); if (!catalog) return;
+    held = sh_resource_catalog_retain(catalog);
+    CHECK(held == catalog && !sh_resource_catalog_retain(NULL));
+    sh_resource_catalog_close(catalog);
+    CHECK(sh_resource_catalog_read_path_slice(held, resource_path, &body, &length, &slice) == 2 && slice && length == 832);
+    CHECK(sh_resource_catalog_matches(held, fixture, error, sizeof(error)) == 1 && !error[0]);
+    CHECK(sh_resource_catalog_matches(NULL, fixture, error, sizeof(error)) == -1 && error[0]);
+    CHECK(sh_resource_catalog_matches(held, NULL, NULL, 0) == -1);
+    snprintf(copied, sizeof(copied), "%s-copy", fixture); installation_copy(copied, 0);
+    snprintf(linked, sizeof(linked), "%s-link", fixture); installation_copy(linked, 1);
+    CHECK(sh_resource_catalog_matches(held, copied, error, sizeof(error)) == 0);
+    fresh = sh_resource_catalog_open(copied, error, sizeof(error)); CHECK(fresh);
+    CHECK(fresh && sh_resource_catalog_digest(held, digest) && sh_resource_catalog_digest(fresh, other) &&
+        !memcmp(digest, other, 32));
+    CHECK(fresh && sh_resource_catalog_matches(fresh, copied, NULL, 0) == 1 && !sh_resource_catalog_matches(fresh, fixture, NULL, 0));
+    sh_resource_catalog_close(fresh);
+    CHECK(sh_resource_catalog_matches(held, linked, error, sizeof(error)) == 1);
+    /* A changed index (the same row one stored byte shorter) and an absent one differ. */
+    snprintf(path, sizeof(path), "%s/gameresources.pindex", linked);
+    length = build_pindex(index, sizeof(index), 832, sizeof(compressed_body) - 1);
+    CHECK(length && write_bytes(path, index, length));
+    CHECK(sh_resource_catalog_matches(held, linked, error, sizeof(error)) == 0);
+    CHECK(DeleteFileA(path) && sh_resource_catalog_matches(held, linked, error, sizeof(error)) == 0);
+    /* An absent archive differs. */
+    snprintf(path, sizeof(path), "%s/gameresources.patch", copied);
+    CHECK(DeleteFileA(path) && sh_resource_catalog_matches(held, copied, error, sizeof(error)) == 0);
+    /* No writer, deleter or replacement while any holder keeps the archives, also through a hard link. */
+    snprintf(archive, sizeof(archive), "%s/gameresources.resources", fixture);
+    writer = CreateFileA(archive, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    CHECK(writer == INVALID_HANDLE_VALUE && GetLastError() == ERROR_SHARING_VIOLATION);
+    if (writer != INVALID_HANDLE_VALUE) CloseHandle(writer);
+    snprintf(path, sizeof(path), "%s/gameresources.resources", copied);
+    CHECK(!MoveFileExA(path, archive, MOVEFILE_REPLACE_EXISTING));
+    CHECK(!DeleteFileA(archive));
+    /* Another name of a held file (a hard link) opens no writer either; removing that name (NTFS allows it) leaves
+     * the held path and every byte of the file, and that path then differs. */
+    snprintf(path, sizeof(path), "%s/gameresources.resources", linked);
+    writer = CreateFileA(path, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    CHECK(writer == INVALID_HANDLE_VALUE && GetLastError() == ERROR_SHARING_VIOLATION);
+    if (writer != INVALID_HANDLE_VALUE) CloseHandle(writer);
+    DeleteFileA(path);
+    CHECK(GetFileAttributesA(archive) != INVALID_FILE_ATTRIBUTES && sh_resource_catalog_matches(held, fixture, NULL, 0) == 1);
+    CHECK(sh_resource_catalog_matches(held, linked, NULL, 0) == 0);
+    sh_resource_catalog_close(held);
+    /* The slice keeps the archives after the last catalog holder. */
+    again = sh_resource_slice_read(slice, &again_length);
+    CHECK(again && again_length == 832 && body && !memcmp(again, body, 832)); free(again); free(body);
+    writer = CreateFileA(archive, GENERIC_WRITE, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    CHECK(writer == INVALID_HANDLE_VALUE && GetLastError() == ERROR_SHARING_VIOLATION);
+    if (writer != INVALID_HANDLE_VALUE) CloseHandle(writer);
+    sh_resource_slice_release(slice);
+    writer = CreateFileA(archive, GENERIC_WRITE, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    CHECK(writer != INVALID_HANDLE_VALUE);
+    if (writer != INVALID_HANDLE_VALUE) CloseHandle(writer);
+    installation_remove(copied); installation_remove(linked);
+}
 static void test_patch_duplicates_and_baselines(void)
 {
     const sh_resource_catalog_entry *const *found;
@@ -437,6 +590,7 @@ static void test_legacy_imports(void)
 {
     unsigned char index[1024] = {0};
     sh_resource_catalog *catalog;
+    const sh_resource_catalog_entry *const *found = NULL;
     unsigned char *body = NULL;
     size_t length = 0, n, pos;
     char error[512];
@@ -444,6 +598,9 @@ static void test_legacy_imports(void)
     catalog = open_catalog(); if (!catalog) return;
     CHECK(sh_resource_catalog_legacy_read(catalog, "entityDef", "ai/demon/cyberdemon", resource_path,
         &body, &length, error, sizeof(error)) == 1 && body && length == 832);
+    /* A named row is provided only by its filename, never by its name. */
+    CHECK(sh_resource_catalog_find_provider(catalog, resource_path, &found) == 1 && found);
+    CHECK(sh_resource_catalog_find_provider(catalog, "ai/demon/cyberdemon", &found) == 0 && !found);
     free(body); body = NULL;
     CHECK(!sh_resource_catalog_legacy_read(catalog, "model", "ai/demon/cyberdemon", resource_path,
         &body, &length, error, sizeof(error)) && !body);
@@ -478,11 +635,45 @@ static void test_legacy_imports(void)
         &body, &length, error, sizeof(error)) == 1 && body && !length);
     free(body); body = NULL;
     CHECK(sh_resource_catalog_legacy_read(catalog, NULL, NULL, "models/boss.md6", NULL, NULL, error, sizeof(error)) == 1);
+    /* The imported file keeps that name as its provider path, so discovery
+     * resolves the same identity through the unnamed row. */
+    CHECK(sh_resource_catalog_find_path(catalog, "models/boss.md6", &found) == 0 && !found);
+    CHECK(sh_resource_catalog_find_provider(catalog, "MODELS\\Boss.md6", &found) == 1 && found &&
+        !strcmp(found[0]->type, "cm") && !strcmp(found[0]->name, "models/boss.md6") && !*found[0]->path);
+    CHECK(sh_resource_catalog_find_provider(catalog, "models/boss", &found) == 0 && !found);
+    CHECK(sh_resource_catalog_find_provider(catalog, "", &found) == 0 && !found);
+    CHECK(sh_resource_catalog_find_provider(catalog, NULL, &found) == 0 && !found);
+    CHECK(sh_resource_catalog_find_provider(NULL, "models/boss.md6", &found) == 0 && !found);
+    CHECK(sh_resource_catalog_find_provider(catalog, "models/boss.md6", NULL) == 0);
+    /* Its original is the campaign's empty placeholder, not an absent file. */
+    CHECK(sh_resource_catalog_read_path(catalog, "models/boss.md6", &body, &length) == 2 && body && !length);
+    free(body); body = NULL;
+    CHECK(sh_resource_catalog_read_path(catalog, "models/boss", &body, &length) == 0 && !body && !length);
     sh_resource_catalog_close(catalog);
     put_file("snap_gameresources.pindex", index, n);
     catalog = open_catalog(); if (!catalog) return;
     CHECK(sh_resource_catalog_legacy_read(catalog, "cm", "models/boss.md6", "models/boss.md6",
         &body, &length, error, sizeof(error)) == 2 && !body && !length);
+    CHECK(sh_resource_catalog_find_provider(catalog, "models/boss.md6", &found) == 2 && found &&
+        !strcmp(found[0]->type, "cm") && !strcmp(found[1]->type, "cm"));
+    CHECK(sh_resource_catalog_read_path(catalog, "models/boss.md6", &body, &length) == 1 && body && !length);
+    free(body); body = NULL;
+    sh_resource_catalog_close(catalog);
+    /* A real filename wins over an unnamed row spelled the same way. */
+    pos = append_pindex_row(index, 0x24, 1, "model", "models/other.lwo", "models/boss.md6", 0, 0, 0, 0);
+    put_file("snap_gameresources.pindex", index, finish_pindex(index, sizeof(index), 1, pos));
+    catalog = open_catalog(); if (!catalog) return;
+    CHECK(sh_resource_catalog_find_provider(catalog, "models/boss.md6", &found) == 1 && found &&
+        !strcmp(found[0]->type, "model") && !strcmp(found[0]->name, "models/other.lwo"));
+    sh_resource_catalog_close(catalog);
+    /* Divergent unnamed rows in one catalog never pick a winner. */
+    fixture_reset();
+    pos = append_pindex_row(index, 0x24, 1, "cm", "models/boss.md6", "", 0, 1, 1, 1);
+    pos = append_pindex_row(index, pos, 2, "model", "models/boss.md6", "", 1, 1, 1, 1);
+    put_file("gameresources.pindex", index, finish_pindex(index, sizeof(index), 2, pos));
+    put_file("gameresources.patch", "AB", 2);
+    catalog = open_catalog(); if (!catalog) return;
+    CHECK(sh_resource_catalog_read_path(catalog, "models/boss.md6", &body, &length) == -1 && !body && !length);
     sh_resource_catalog_close(catalog);
 }
 
@@ -493,7 +684,7 @@ int main(void)
     size_t i;
     CHECK(GetTempPathA(sizeof(temp), temp)); CHECK(GetTempFileNameA(temp, "rct", 0, fixture));
     CHECK(DeleteFileA(fixture)); CHECK(make_dir(fixture));
-    test_huffman_code_spaces(); test_full_stream_contract(); test_catalog_reads();
+    test_huffman_code_spaces(); test_full_stream_contract(); test_catalog_reads(); test_slices(); test_shared_catalogs();
     test_patch_duplicates_and_baselines(); test_encoded_aliases(); test_malformed_catalog();
     test_legacy_imports();
     for (i = 0; i < sizeof(files) / sizeof(files[0]); i++) {

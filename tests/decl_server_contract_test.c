@@ -206,7 +206,8 @@ int main(int argc, char **argv)
     CHECK(strstr(server, "DS_PINNED_SOURCE_FIND_RVA") != NULL);
     CHECK(strstr(server, "\"DeclSourceFind\", module_base, DS_PINNED_SOURCE_FIND_RVA") != NULL);
     CHECK(strstr(server, "existing = g_find_decl(type_manager, candidate->name, 0);") == NULL);
-    CHECK(strstr(server, "if (!ds_publish_missing_table(missing))") != NULL);
+    CHECK(strstr(server, "int table_published = ds_publish_missing_table(missing);") != NULL &&
+        strstr(server, "if (!table_published)") != NULL);
     CHECK(strstr(server, "if (candidate->outcome != DS_CANDIDATE_MISSING) continue;") != NULL);
     CHECK(strstr(server, "ds_register_candidate_source") != NULL);
     CHECK(strstr(server, "ctor(&idstr, source_name)") != NULL);

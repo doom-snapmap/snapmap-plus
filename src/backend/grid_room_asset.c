@@ -8,7 +8,7 @@
 #include <string.h>
 
 #define GRID_ASSET_LIMIT (64u*1024u*1024u)
-enum { ASSET_MODULE=1,ASSET_INFO,ASSET_GEOMETRY,ASSET_COPY,ASSET_NAV };
+enum { ASSET_MODULE=1,ASSET_INFO,ASSET_GEOMETRY,ASSET_COPY,ASSET_NAV,ASSET_COOKED,ASSET_SBSP,ASSET_AMBIENT };
 
 static int starts(const char *s,const char *prefix)
 {return !strncmp(s,prefix,strlen(prefix));}
@@ -46,6 +46,20 @@ static int request(const char *name,sh_grid_size *size,char source[768],int *typ
         if(!sh_grid_resource_name(size,stock,check,sizeof check)||strcmp(check,name))return -1;
         memcpy(source,stock,strlen(stock)+1);*type=ASSET_GEOMETRY;return 1;
     }
+    /* A model name the catalog does not list opens cooked/model/<stem>.bmodel
+     * (package-architecture-v2 R-010), so this is a private .lwo geometry
+     * name's file. Read the stock model's own cooked file. */
+    if(starts(name,"cooked/model/smpgrid/")){
+        char resource[768];size_t n=strlen(name);
+        if(n<=13+7||n-13-7+5>sizeof resource||strcmp(name+n-7,".bmodel"))return -1;
+        memcpy(resource,name+13,n-13-7);memcpy(resource+n-13-7,".lwo",5);
+        if(!safe_path(resource)||(end=dimensions(resource+8,size))==NULL||*end!='/')return -1;
+        stock=end+1;
+        if(!starts(stock,"models/")||strchr(stock,'-')||
+           !sh_grid_resource_name(size,stock,check,sizeof check)||strcmp(check,resource))return -1;
+        snprintf(source,768,"cooked/model/%.*s.bmodel",(int)(strlen(stock)-4),stock);
+        *type=ASSET_COOKED;return 1;
+    }
     p=name;
     if(starts(p,"generated/maps/modules/smpgrid/"))p+=10;
     if(starts(p,"decltree/snapmodule/"))p+=20;
@@ -66,6 +80,25 @@ static int request(const char *name,sh_grid_size *size,char source[768],int *typ
                 *type=ASSET_NAV;return 1;
                 }
             }
+        }
+        /* The engine names a module's sound BSP and ambient lighting from its
+         * path and basename (BuildSoundWorld VK 0x1404f0670 / GL 0x1404f0040;
+         * the placed-module walk VK 0x1404ec690 / GL 0x1404ec060). */
+        if(*end=='/'){
+            const char *leaf=p+26,*ext;
+            size_t length=(size_t)(end-leaf);
+            if(!strncmp(end+1,leaf,length)&&
+               (!strcmp(ext=end+1+length,".sbsp")||!strcmp(ext,".ambientsh"))){
+                snprintf(source,768,"%s/%s%s",stock,strrchr(stock,'/')+1,ext);
+                *type=ext[1]=='s'?ASSET_SBSP:ASSET_AMBIENT;return 1;
+            }
+            /* No occlusion tome is produced. Umbra computed the installed one
+             * from that room's geometry, so it would cull a resized room
+             * wrongly, and nothing in the game computes one. A module without
+             * a tome is native (six shipped modules have none): its context
+             * answers every visibility query as visible (SetTome VK
+             * 0x140e0a630 / GL 0x140dfeb90). */
+            if(strlen(end)>5&&!strcmp(end+strlen(end)-5,".tome"))return 0;
         }
         /* The modern room's compressed probe is requested relative to its
          * private module directory. Preserve the installed image bytes. */
@@ -129,6 +162,11 @@ int sh_grid_asset_canonical(const char *name, char **path)
         n = (int)strlen(canonical); break;
     case ASSET_COPY:
         n = snprintf(canonical, sizeof(canonical), "%s/lightprobes/light_probe_1_compressed.bimage", module); break;
+    case ASSET_COOKED: n = snprintf(canonical, sizeof(canonical), "%s", name); break;
+    case ASSET_SBSP:
+    case ASSET_AMBIENT:
+        n = snprintf(canonical, sizeof(canonical), "%s/%s%s", module, strrchr(module, '/') + 1,
+                     type == ASSET_SBSP ? ".sbsp" : ".ambientsh"); break;
     case ASSET_NAV:
         kind = strstr(source, ".baas_");
         if (!kind) return -1;
@@ -136,6 +174,17 @@ int sh_grid_asset_canonical(const char *name, char **path)
     }
     if (n < 0 || (size_t)n >= sizeof(canonical)) return -1;
     *path = _strdup(canonical); return *path ? 1 : -1;
+}
+
+int sh_grid_asset_module(const char *name, char *module, size_t capacity)
+{
+    sh_grid_size size;
+    char source[768];
+    int type = 0, claimed;
+    if (!name || !module || !capacity) return 0;
+    claimed = request(name, &size, source, &type);
+    if (claimed <= 0) return claimed;
+    return sh_grid_name(&size, module, capacity) ? 1 : 0;
 }
 
 int sh_grid_asset_open(const char *name,sh_grid_asset_read_fn read,
@@ -165,6 +214,10 @@ int sh_grid_asset_open(const char *name,sh_grid_asset_read_fn read,
     }else if(type==ASSET_COPY){
         result=(unsigned char*)malloc(bytes);
         if(result){memcpy(result,input,bytes);result_bytes=bytes;ok=1;}
+    }else if(type==ASSET_SBSP||type==ASSET_AMBIENT){
+        if(!sh_grid_warp_init(&size,&warp)||(result=(unsigned char*)malloc(bytes))==NULL)goto done;
+        ok=type==ASSET_SBSP?sh_grid_sbsp(&warp,input,bytes,result):sh_grid_ambient(&warp,input,bytes,result);
+        result_bytes=bytes;
     }else{
         if(!sh_grid_warp_init(&size,&warp))goto done;
         if(strstr(source,"/volume_flight_")){

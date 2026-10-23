@@ -31,12 +31,21 @@ static unsigned inf_bits(inf_t *s, unsigned n)
     }
 }
 
+/* Give back whole bytes the table path loaded ahead of need, so byte-oriented
+ * checks see exactly the position and bits of the bitwise reader. */
+static void inf_unread(inf_t *s)
+{
+    while (s->bitcnt >= 8u) { s->pos--; s->bitcnt -= 8u; }
+    s->bitbuf &= s->bitcnt ? (1u << s->bitcnt) - 1u : 0u;
+}
+
 /* Align stored blocks to the next byte. This decoder additionally requires
  * zero padding bits as a resource-slice policy.
  */
 static int inf_align_zero(inf_t *s)
 {
     unsigned mask;
+    if (s) inf_unread(s);
     if (!s || s->bitcnt > 7u) return 0;
     mask = s->bitcnt ? ((1u << s->bitcnt) - 1u) : 0u;
     if (s->bitbuf & mask) return 0;
@@ -48,9 +57,10 @@ static int inf_align_zero(inf_t *s)
 /* Treat pindex zsize as an exact slice. Require zero remaining bits after the
  * final block and reject any extra byte, including zero padding.
  */
-static int inf_at_exact_end(const inf_t *s)
+static int inf_at_exact_end(inf_t *s)
 {
     unsigned mask;
+    if (s) inf_unread(s);
     if (!s || s->pos != s->len || s->bitcnt > 7u) return 0;
     mask = s->bitcnt ? ((1u << s->bitcnt) - 1u) : 0u;
     return (s->bitbuf & mask) == 0;
@@ -63,8 +73,19 @@ typedef enum {
     HUFF_FIXED_DISTANCE
 } huff_kind;
 
+/* Codes of up to INF_FAST_BITS bits decode with one table lookup when that
+ * many input bits are present. Longer codes, codes running past the input and
+ * holes in incomplete trees take the bitwise path, which decides every
+ * failure exactly as before. */
+#define INF_FAST_BITS 10u
+#ifdef SH_RAW_DEFLATE_TESTING
+static int g_inf_bitwise;
+void sh_inflate_test_bitwise(int enabled) { g_inf_bitwise = enabled != 0; }
+#endif
+
 typedef struct {
     unsigned short count[16], symbol[288];
+    unsigned short fast[1u << INF_FAST_BITS]; /* (length << 9) | symbol; 0: bitwise */
     int empty;
 } huff_t;
 
@@ -113,6 +134,22 @@ static int huff_build(huff_t *h, const unsigned char *lens, unsigned n,
     offs[0] = 0;
     for (i = 1; i < 16; ++i) offs[i] = offs[i - 1] + h->count[i - 1];
     for (i = 0; i < n; ++i) if (lens[i]) h->symbol[offs[lens[i]]++] = (unsigned short)i;
+    {
+        /* The canonical codes huff_decode walks: per length, consecutive from
+         * first. The stream sends a code's first bit lowest, so the table is
+         * indexed by the bit-reversed code, repeated over the unused bits. */
+        unsigned len, j, k, index = 0, first = 0;
+        for (len = 1; len <= INF_FAST_BITS; ++len) {
+            for (j = 0; j < h->count[len]; ++j) {
+                unsigned code = first + j, reversed = 0;
+                for (k = 0; k < len; ++k) reversed |= ((code >> k) & 1u) << (len - 1u - k);
+                for (k = reversed; k < (1u << INF_FAST_BITS); k += 1u << len)
+                    h->fast[k] = (unsigned short)((len << 9) | h->symbol[index + j]);
+            }
+            index += h->count[len];
+            first = (first + h->count[len]) << 1;
+        }
+    }
     return 1;
 }
 
@@ -120,6 +157,27 @@ static int huff_decode(inf_t *s, const huff_t *h)
 {
     int code = 0, first = 0, index = 0, len;
     if (!h || h->empty) return -1;
+#ifdef SH_RAW_DEFLATE_TESTING
+    if (!g_inf_bitwise)
+#endif
+    {
+        unsigned entry, bits;
+        /* Whole bytes only, never past src_len; inf_unread gives back any
+         * not consumed before a byte-oriented check. */
+        while (s->bitcnt < INF_FAST_BITS && s->pos < s->len) {
+            s->bitbuf |= (unsigned)s->src[s->pos++] << s->bitcnt;
+            s->bitcnt += 8u;
+        }
+        entry = h->fast[s->bitbuf & ((1u << INF_FAST_BITS) - 1u)];
+        bits = entry >> 9;
+        /* A prefix code: a complete match within the present bits is the one
+         * symbol the bitwise walk returns at that length. */
+        if (bits && bits <= s->bitcnt && !s->exhausted) {
+            s->bitbuf >>= bits;
+            s->bitcnt -= bits;
+            return (int)(entry & 511u);
+        }
+    }
     for (len = 1; len < 16; ++len) {
         int count;
         code |= (int)inf_bits(s, 1);

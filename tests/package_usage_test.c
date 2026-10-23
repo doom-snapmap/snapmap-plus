@@ -165,6 +165,8 @@ static void resource_path_checks(sh_package_compilation *compiled)
     entity("demons/cyber", "model", "demons/cyber");
     sh_resource_graph_begin(&frame, "model", "demons/cyber");
     sh_resource_graph_file("GENERATED\\MODELS\\shared.bmodel");
+    sh_resource_graph_file("/GENERATED/MODELS/shared.bmodel");
+    sh_resource_graph_file("\\generated\\models\\shared.bmodel");
     sh_resource_graph_file("sound/not-delivered.wem");
     sh_resource_graph_reference("snapeditorentitydef", "palette");
     sh_resource_graph_end(&frame, 1);
@@ -175,6 +177,7 @@ static void resource_path_checks(sh_package_compilation *compiled)
     CHECK(has_path(&paths, "generated/models/shared.bmodel") && has_path(&paths, "sound/not-delivered.wem"));
     CHECK(!has_path(&paths, "image/editor-preview.bimage") && !has_path(&paths, "generated/decls/entitydef/replaced.decl"));
     CHECK(sh_package_references_add(&instance, "", "GENERATED/MODELS/shared.bmodel"));
+    CHECK(sh_package_references_add(&instance, "", "/generated/models/shared.bmodel"));
     instance.incomplete = 1;
     CHECK(sh_package_map_resources(compiled, NULL, cyber, strlen(cyber), &instance, &paths));
     CHECK(paths.incomplete && paths.count == 3); /* Canonical duplicates collapse. */
@@ -257,12 +260,102 @@ static void inline_checks(sh_package_compilation *compiled)
     CHECK(!references.count && !references.items && !references.incomplete);
     sh_package_owners_free(&owners);
 }
+
+typedef struct map_spans { const char *start, *end; size_t roots, states; } map_spans;
+static int inline_span(void *context, const char *class_name, const char *inherit, const char *json, size_t length)
+{
+    map_spans *spans = context;
+    CHECK(class_name && inherit && json >= spans->start && json + length <= spans->end);
+    CHECK(length && json[0] == '{'); spans->states++; return 1;
+}
+static int root_span(void *context, const char *native_class, const char *type,
+    const char *name, const char *json, size_t length)
+{
+    map_spans *spans = context;
+    CHECK(!strcmp(native_class, "idDeclEntityDef") && !strcmp(type, "entitydef"));
+    CHECK(!strcmp(name, "saved/actor") && json >= spans->start && json + length <= spans->end);
+    CHECK(length == strlen("\"saved\\/actor\"")); spans->roots++; return 1;
+}
+static void compiled_alias_checks(void)
+{
+    sh_compiled_resource files[2] = {0}; sh_package_compilation compiled = {0};
+    sh_package_references references = {0}, paths = {0};
+    sh_package_owners owners = {0};
+    const char *json = "{\"targetType\":\"idDeclEntityDef\",\"inherit\":\"saved\\/actor\","
+        "\"state\":{\"edit\": { \"text\":\"\x97\" }},"
+        "\"editorVars\":{\"targetType\":\"idDeclEntityDef\",\"value\":\"preview\"}}";
+    map_spans spans = {json, json + strlen(json)};
+    CHECK(sh_package_map_reference_sites(json, strlen(json), root_span, &spans) && spans.roots == 1);
+    CHECK(sh_package_map_state_sites(json, strlen(json), inline_span, &spans) && spans.states == 1);
+    files[0].engine_path = "generated/models/smp/a.bmodel";
+    files[1].engine_path = "generated/models/smp/a_extra.bmodel";
+    for (size_t i = 0; i < 2; i++) {
+        files[i].native_type = "model"; files[i].native_name = "smp/a.lwo";
+        files[i].gameplay_owners.bits = 1ull << i;
+    }
+    compiled.resources = files; compiled.resource_count = 2;
+    CHECK(sh_package_references_add(&references, "model", "smp/a.lwo"));
+    CHECK(sh_package_map_owners(&compiled, NULL, "{}", 2, &references, &owners, NULL));
+    CHECK(owners.bits == 3);
+    CHECK(sh_package_map_resources(&compiled, NULL, "{}", 2, &references, &paths));
+    CHECK(paths.count == 2 && !strcmp(paths.items[0].name, files[0].engine_path));
+    sh_package_references_free(&references); sh_package_references_free(&paths); sh_package_owners_free(&owners);
+}
+/* R-388: one traversal walks each distinct root once and collects each
+ * identity once. A map of 4096 entities sharing two inherits yields exactly
+ * the owners and the ordered resource list of a map naming each inherit once. */
+static char *scale_map(size_t entities)
+{
+    size_t capacity = entities * 96 + 64, used_bytes = 0;
+    char *json = malloc(capacity);
+    if (!json) return NULL;
+    used_bytes += (size_t)snprintf(json, capacity, "{\"entities\":[");
+    for (size_t i = 0; i < entities; i++)
+        used_bytes += (size_t)snprintf(json + used_bytes, capacity - used_bytes,
+            "%s{\"entityDef\":{\"inherit\":\"%s\",\"targetType\":\"idDeclEntityDef\"}}", i ? "," : "",
+            i % 3 ? "stock/lift" : "stock/encounter");
+    snprintf(json + used_bytes, capacity - used_bytes, "]}");
+    return json;
+}
+static void scale_checks(sh_package_compilation *compiled)
+{
+    sh_resource_graph_frame frame;
+    entity("stock/lift", "material", "stock/body");
+    sh_resource_graph_begin(&frame, "material", "stock/body");
+    sh_resource_graph_file("GENERATED\\IMAGE\\stock_body.bimage");
+    sh_resource_graph_reference("material", "stock/cycle");
+    sh_resource_graph_end(&frame, 1);
+    sh_resource_graph_begin(&frame, "material", "stock/cycle");
+    sh_resource_graph_reference("material", "stock/body");
+    sh_resource_graph_end(&frame, 1);
+    entity("stock/encounter", "entitydef", "demons/cyber");
+    entity("demons/cyber", NULL, NULL);
+    char *few = scale_map(3), *many = scale_map(4096);
+    CHECK(few && many);
+    if (!few || !many) { free(few); free(many); return; }
+    sh_package_references small = {0}, large = {0};
+    sh_package_usage_stats st;
+    CHECK(sh_package_map_resources(compiled, NULL, few, strlen(few), NULL, &small));
+    sh_package_usage_stats_take(NULL, 1);
+    CHECK(sh_package_map_resources(compiled, NULL, many, strlen(many), NULL, &large));
+    sh_package_usage_stats_take(&st, 1);
+    CHECK(small.count && small.count == large.count && small.incomplete == large.incomplete);
+    for (size_t i = 0; i < small.count && i < large.count; i++)
+        CHECK(!strcmp(small.items[i].type, large.items[i].type) && !strcmp(small.items[i].name, large.items[i].name));
+    CHECK(st.roots >= 4096 && st.walks == 2 && st.roots_repeated == st.roots - 2);
+    CHECK(used(compiled, few) == used(compiled, many));
+    sh_package_references_free(&small); sh_package_references_free(&large);
+    free(few); free(many);
+    sh_resource_graph_test_reset();
+}
+
 int main(void)
 {
     char temp[MAX_PATH], error[1024];
     sh_package_sources *sources = NULL;
     sh_package_compilation *compiled = NULL;
     sh_package_owners owners = {0};
+    compiled_alias_checks();
     CHECK(GetTempPathA(sizeof(temp), temp)); CHECK(GetTempFileNameA(temp, "pu", 0, root));
     CHECK(DeleteFileA(root)); CHECK(CreateDirectoryA(root, NULL));
     create("overrides/a-editor/package.json", "{\"id\":\"editor\",\"name\":\"Editor\","
@@ -311,6 +404,7 @@ int main(void)
     policy_checks(compiled);
     inline_checks(compiled);
     dependency_checks(compiled);
+    scale_checks(compiled);
     resource_path_checks(compiled);
     producer_policy_checks(compiled);
 done:

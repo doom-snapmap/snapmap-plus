@@ -25,4 +25,10 @@ char *sh_decl_md6_compose(sh_decl_source baseline,
 typedef int (*sh_decl_md6_reference_visitor)(void *context, const char *type, const char *name);
 int sh_decl_md6_references(sh_decl_source source, sh_decl_md6_reference_visitor visitor,
     void *context, char *error, size_t capacity);
+/* Exact original token spans, including quotes when authored, for relocation.
+ * Ordinary event strings, alias labels and skeleton joint names are not sites. */
+typedef int (*sh_decl_md6_site_visitor)(void *context, const char *type, const char *name,
+    size_t offset, size_t length);
+int sh_decl_md6_reference_sites(sh_decl_source source, sh_decl_md6_site_visitor visitor,
+    void *context, char *error, size_t capacity);
 #endif

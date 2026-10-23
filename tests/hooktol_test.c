@@ -88,6 +88,8 @@ int wmain(int argc, wchar_t **argv)
         { "DeserializeFromJson", 5 },   /* exactly the E9 rel32 width */
         { "AddCommand",          8 },   /* a wider whole-instruction steal (34-byte sig, long tail) */
         { "MenuPump",            5 },   /* short 11-byte sig: 5-byte steal leaves 6 fixed tail bytes */
+        { "FontRead",           18 },
+        { "DeclFind",           20 },
     };
     int NH = (int)(sizeof hooks / sizeof hooks[0]);
     for (int i = 0; i < NH; i++) {
@@ -147,6 +149,6 @@ int wmain(int argc, wchar_t **argv)
     printf("resolved=%zu/%zu  hook-tolerant=%d/%d  failures=%d\n", ok, total, hooked, NH, fail);
     sh_host_test_bind_pinned_image(NULL, NULL);
     free(base);
-    /* Pass iff all sigs resolved, all 3 hooked ones came back SIG_OK_HOOKED, and nothing else broke. */
+    /* Every simulated detour must resolve without disturbing clean signatures. */
     return (ok == total && hooked == NH && fail == 0) ? 0 : 1;
 }

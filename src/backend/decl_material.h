@@ -53,6 +53,20 @@ void sh_decl_material_free(sh_decl_material *material);
 int sh_decl_material_parameter_kind(sh_decl_source source, int *kind,
     char *error, size_t capacity);
 
+/* Whether this material's native parse stops at a Program-kind parameter whose
+ * render program the caller does not know. The native parm-block reader resolves
+ * a Program value by name without a default and reports an unknown renderProg;
+ * the parse stops at that first error and the material takes the engine's
+ * default (VK 0x140db3710 / GL 0x140da9930; interactionProgram is consumed
+ * but ignored). known(context, family, name) answers 1 for a name the installed
+ * inventory or the library declares, 0 when neither does, -1 when it cannot
+ * tell. Returns 1 with the first unknown program copied into program, 0 when
+ * every program is known, -1 when the text or an answer is unavailable. This
+ * predicts the default's cause from the text; it does not observe the engine. */
+int sh_decl_material_native_default(sh_decl_source source, const sh_decl_material_schema *schema,
+    int (*known)(void *context, const char *family, const char *name), void *context,
+    char *program, size_t program_capacity, char *error, size_t capacity);
+
 typedef struct sh_decl_renderparm {
     sh_decl_tokens tokens;
     int kind;

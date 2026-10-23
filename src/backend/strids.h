@@ -17,6 +17,77 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include "package_strings.h"
+
+/* Main-thread, read-only reservations using the installed native hash and
+ * dictionary, plus user/baked keys. No native row is inserted by this service.
+ * Keep the transaction through candidate preparation, validate at activation,
+ * and free it on success or failure. Exact owned mappings may reuse aliases. */
+typedef struct sh_strids_reservation sh_strids_reservation;
+sh_strids_reservation *sh_strids_reservation_open(char *error, size_t capacity);
+sh_package_string_reservations sh_strids_reservation_adapter(sh_strids_reservation *reservation,
+    size_t max_attempts);
+int sh_strids_reservation_validate(const sh_strids_reservation *reservation, char *error, size_t capacity);
+struct sh_package_policy;
+/* Seed all private and historical/global keys of another pending provider.
+ * Call before allocating peer aliases, then check the final combined policy. */
+int sh_strids_reservation_policy(sh_strids_reservation *reservation,
+    const struct sh_package_policy *policy, char *error, size_t capacity);
+void sh_strids_reservation_free(sh_strids_reservation *reservation);
+/* Whether a "#str_" key names a row of the engine's own dictionary, one it held
+ * before any injection: 1 yes, 0 no, -1 unknown (the dictionary is not bound).
+ * Main thread. */
+int sh_strids_native_key(const char *key);
+
+typedef struct sh_strids_localization {
+    void *context;
+    /* Complete verified locale order, stable until this synchronous refresh
+     * returns. No implicit English or regional fallback is added. */
+    int (*locales)(void *context, const char *const **order, size_t *count,
+        char *error, size_t capacity);
+    /* Original native lookup result under that same language snapshot, including
+     * the engine's missing-key behavior. Return malloc-owned exact native bytes;
+     * do not read a package-overridden row or transcode a byte string. */
+    int (*original)(void *context, const char *key, unsigned char **text, size_t *length,
+        char *error, size_t capacity);
+} sh_strids_localization;
+/* Bind before publishing scoped strings; callback state outlives every rearm.
+ * A language/dictionary change requires rearm at the admitted native boundary. */
+void sh_strids_set_localization(const sh_strids_localization *localization);
+
+/* Toybox labels: display-only source qualifiers. A package's placeable editor
+ * row serves its displayNameTag as a private alias whose mapping adds a
+ * "label" member to its base "native" key and authored "locales":
+ *   {"row", "category", "meta": its published row and effective keys,
+ *    "sources": {"0": {"name", "id", "component", "row"}, ...}}
+ * (package_library.c). At each refresh an alias shows its base label in the
+ * selected language, native fallback included. The callback lists every
+ * visible toybox row or logic selector (an Add Logic input or output, whose meta
+ * category is the empty text) once, by published row name, with the effective keys its
+ * served text selects: an aliased row names its alias, and a key without the
+ * #str_ prefix is a literal label. Rows whose visible meta category, category
+ * and label texts all match in that language collide when they show more than
+ * one key; each colliding alias gains " (<qualifier>)", the first of these
+ * that tells the group's aliases apart: package names, then with ids,
+ * components, authored row names, and finally an ordinal by published row
+ * name. Other keys keep their labels, and so does an alias no listed row
+ * selects (one an overlay or increment replaced, kept for lookup). Entries are
+ * borrowed until the refresh returns. Return 1 when listed, 0 when the shipped
+ * roster is unavailable (aliases keep their base labels), -1 on failure (the
+ * refresh fails). */
+typedef struct sh_strids_palette_entry {
+    const char *row, *label, *category, *meta;
+} sh_strids_palette_entry;
+typedef struct sh_strids_palette {
+    void *context;
+    int (*entries)(void *context, const sh_strids_palette_entry **entries, size_t *count);
+} sh_strids_palette;
+void sh_strids_set_palette(const sh_strids_palette *palette);
+/* Production adapter for the verified single native language table. The
+ * resolved cvar-system pointer slot is borrowed; no native setter is called.
+ * Known language names accept the documented descriptor locale aliases, with
+ * no implicit English translation. Original values bypass injector-owned rows. */
+int sh_strids_bind_native_localization(const void *cvar_system_slot);
 
 /* Install the sort-body detour and attempt immediate injection/resort.
  * sort_status_ok must be clean SIG_OK; missing dependencies or a hooked sort
@@ -44,6 +115,8 @@ unsigned long sh_strids_injected_count(void);
 /* Bind test doubles for the four engine entry points and run one inject pass; returns rows appended. */
 int sh_strids_test_inject(void *table_desc, void *insert, void *hash, void *idstr_ctor);
 void sh_strids_test_set_sort(void *sort);
+/* Exercise the native parser's sort boundary after replacing the test table. */
+int sh_strids_test_native_sort(void);
 /* Read back how row `index` was attributed: its id and its owning package ("<user>" if not a package). */
 int sh_strids_test_row(int index, const char **id_out, const char **owner_out);
 #endif

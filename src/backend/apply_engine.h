@@ -23,6 +23,28 @@ int sh_apply_last_place_result(void);
  * storage or reset our matching unsafe staged-prefab slot. */
 void sh_apply_prefab_poll_play(void);
 
+struct sh_package_occurrence_snapshot;
+typedef struct sh_apply_prefab_stage sh_apply_prefab_stage;
+/* DS calls prepare under its admitted engine-thread renderer/heap scope.
+ * JSON is already source-bound and carrier-stripped. Preparation owns a real
+ * temporary prefab and exact occurrence metadata; it leaves staging unchanged.
+ * Finalize performs a reversible native transfer, calls commit last, and clears
+ * *stage only on success. A commit refusal restores the previous staging slot.
+ * Abort requires recovery scopes and clears *stage only after safe destruction.
+ * Returns 1 success, 0 clean refusal, -1 quarantine. Prepare sets *out on 1 or
+ * -1, so callers can retain incomplete native obligations. A commit exception
+ * has unknown disk outcome and quarantines both native/source owners.
+ * Non-NULL handles after failure retain their native/source ownership. After
+ * successful disk commit, cleanup failure is retained internally and cannot
+ * convert the completed transaction into a reported refusal.
+ */
+int sh_apply_prefab_stage_prepare(void *editor, const char *json,
+    const struct sh_package_occurrence_snapshot *ownership, int place, sh_apply_prefab_stage **out,
+    char *error, size_t capacity);
+int sh_apply_prefab_stage_finalize(sh_apply_prefab_stage **stage,
+    int (*commit)(char *error, size_t capacity), char *error, size_t capacity);
+int sh_apply_prefab_stage_abort(sh_apply_prefab_stage **stage, char *error, size_t capacity);
+
 /* Commit a module-qualified target reference to the source inline, despite
  * the schedule name. Called on the engine main thread by bare-target wiring. */
 void ae_schedule_target_write(int source_id, int target_id);
@@ -40,6 +62,16 @@ void sh_apply_engine_get_run_on_main(sh_run_on_main_fn *run_on_main);
 
 /* Export selection-to-prefab serialization for the shared interface. */
 void sh_apply_engine_get_serialize_selection(sh_serialize_selection_fn *serialize_selection);
+void sh_apply_engine_get_prefab_export(sh_prefab_export_fn *prefab_export);
+
+enum { SH_APPLY_FLAT_MAP = 1, SH_APPLY_FLAT_PREFAB = 2, SH_APPLY_FLAT_ENTITY = 3 };
+/* Serialize an existing native flat object, without cloning/populating it or
+ * invoking the map-save hooks. Main thread only; nested calls are refused.
+ * Map/prefab bytes remain exact. An entity is wrapped as {"entities":[...]} so
+ * the typed map selector can assign document-local sites. Success returns an
+ * owned malloc buffer and its complete byte length; failure sets NULL/zero.
+ * No caller-owned object is constructed, destroyed or changed. */
+int sh_apply_engine_serialize_flat(const void *flat, unsigned kind, char **out, size_t *length);
 
 /* Live entity callbacks shaped for nav_regions, without a reverse link dependency. */
 int sh_apply_engine_entity_count(void *ctx);

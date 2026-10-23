@@ -16,6 +16,27 @@
 #include "engine_globals.h"
 
 const global_entry BACKEND_ENGINE_GLOBALS[] = {
+    { .name = "class_registry_ready",
+      /* idClass::Init completion byte; Shutdown clears it.
+       * Anchor: cmp byte ptr [rip + 0x532b7a1], 0 at Vulkan 0x3ddb60 (unique on both images).
+       * Resolves to Vulkan 0x5709308 / OpenGL 0x400b908; 5 of 5 reference sites agreed. */
+      .anchor = "80 3D ?? ?? ?? ?? 00 74 10 48 8D 0D ?? ?? ?? ?? 48 83 C4 28 E9 ?? ?? ?? ?? 48 89 5C 24 38",
+      .disp_slot = 2, .disp_tail = 1, .delta = 0, .pinned_rva = 0x5709308u },
+
+    { .name = "class_sorted_count",
+      /* idClass sorted type array element count (idList num).
+       * Anchor: mov qword ptr [rip + 0x10ac849], rax at Vulkan 0x1f85310 (unique on both images).
+       * Resolves to Vulkan 0x3031B60 / OpenGL 0x3076a00; 4 of 4 reference sites agreed. */
+      .anchor = "48 89 05 ?? ?? ?? ?? 48 83 C4 38 C3 CC CC CC CC 48 83 EC 38 48 C7 44 24 20 FE FF FF FF 48 8D 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? 90 48 83 C4 38 C3 CC 48 8D 0D ?? ?? ?? ?? E9 ?? ?? ?? ??",
+      .disp_slot = 3, .disp_tail = 0, .delta = 0, .pinned_rva = 0x3031B60u },
+
+    { .name = "class_sorted_types",
+      /* idClass sorted type array (idList data pointer).
+       * Anchor: mov qword ptr [rip + 0x10ac848], rax at Vulkan 0x1f85309 (unique on both images).
+       * Resolves to Vulkan 0x3031B58 / OpenGL 0x30769f8; 6 of 6 reference sites agreed. */
+      .anchor = "48 89 05 ?? ?? ?? ?? 48 89 05 ?? ?? ?? ?? 48 83 C4 38 C3 CC CC CC CC 48 83 EC 38 48 C7 44 24 20 FE FF FF FF 48 8D 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? 90 48 83 C4 38 C3 CC 48 8D 0D ?? ?? ?? ??",
+      .disp_slot = 3, .disp_tail = 0, .delta = 0, .pinned_rva = 0x3031B58u },
+
     { .name = "cmd_system_slot",
       /* idCmdSystem singleton pointer.
        * Anchor: mov rcx, qword ptr [rip + 0x5290195] at Vulkan 0x3270e4 (unique on both images).
@@ -99,6 +120,20 @@ const global_entry BACKEND_ENGINE_GLOBALS[] = {
        * Resolves to Vulkan 0x6DDE190 / OpenGL 0x56e4a00; 5 of 5 reference sites agreed. */
       .anchor = "48 39 05 ?? ?? ?? ?? 74 07 32 C0 48 83 C4 28 C3 B0 01",
       .disp_slot = 3, .disp_tail = 0, .delta = 0, .pinned_rva = 0x6DDE190u },
+
+    { .name = "managed_class_first",
+      /* idManagedClass::Type typeNum.
+       * Anchor: cmp eax, dword ptr [rip + 0x56307df] at Vulkan 0x30ced3 (unique on both images).
+       * Resolves to Vulkan 0x593D6B8 / OpenGL 0x423c3e8; 1 of 1 reference sites agreed. */
+      .anchor = "3B 05 ?? ?? ?? ?? 7C 2A 3B 05 ?? ?? ?? ?? 7F 22 FF 56 28 48 8B F8",
+      .disp_slot = 2, .disp_tail = 0, .delta = 0, .pinned_rva = 0x593D6B8u },
+
+    { .name = "managed_class_last",
+      /* idManagedClass::Type lastChild.
+       * Anchor: cmp eax, dword ptr [rip + 0x56307db] at Vulkan 0x30cedb (unique on both images).
+       * Resolves to Vulkan 0x593D6BC / OpenGL 0x423c3ec; 1 of 1 reference sites agreed. */
+      .anchor = "3B 05 ?? ?? ?? ?? 7F 22 FF 56 28 48 8B F8 48 85 C0 75 09",
+      .disp_slot = 2, .disp_tail = 0, .delta = 0, .pinned_rva = 0x593D6BCu },
 
     { .name = "material_manager_ctx",
       /* material type-manager context.

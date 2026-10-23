@@ -15,6 +15,7 @@ typedef struct md6_reader {
     char *error;
     size_t capacity;
     int failed;
+    sh_md6_binary_site_visitor site;
 } md6_reader;
 
 static int md6_fail(md6_reader *r, const char *reason)
@@ -71,20 +72,22 @@ static int md6_emit(md6_reader *r, sh_md6_binary_visitor visitor, void *context,
 {
     int ok;
     if (!name) return 0;
-    ok = !*name || visitor(context, type, name);
+    ok = !*name || ((!visitor || visitor(context, type, name)) &&
+        (!r->site || r->site(context, type, name, r->at - strlen(name) - 4, strlen(name) + 4)));
     free(name);
     if (!ok) md6_fail(r, "cooked md6 reference was refused");
     return ok;
 }
 
-int sh_md6_mesh_references(const unsigned char *body, size_t length,
-    sh_md6_binary_visitor visitor, void *context, char *error, size_t capacity)
+static int md6_mesh_references(const unsigned char *body, size_t length,
+    sh_md6_binary_visitor visitor, sh_md6_binary_site_visitor site, void *context,
+    char *error, size_t capacity)
 {
-    md6_reader r = {body, length, 0, error, capacity, 0};
+    md6_reader r = {body, length, 0, error, capacity, 0, site};
     const unsigned char *magic;
     unsigned shapes, meshes, records, i;
     if (error && capacity) error[0] = 0;
-    if (!body || !visitor) return md6_fail(&r, "cooked md6 mesh inspection needs a source and a visitor");
+    if (!body || (!visitor && !site)) return md6_fail(&r, "cooked md6 mesh inspection needs a source and a visitor");
     magic = md6_raw(&r, 4);
     if (!magic) return 0;
     if (memcmp(magic, g_md6_mesh_magic, 4)) return md6_fail(&r, "not a cooked md6 mesh");
@@ -147,14 +150,15 @@ int sh_md6_mesh_references(const unsigned char *body, size_t length,
 /* "AM" occupies the same two bytes of the magic word as the mesh's "MM". */
 static const unsigned char g_md6_anim_magic[2] = {0x41, 0x4d};
 
-int sh_md6_anim_references(const unsigned char *body, size_t length,
-    sh_md6_binary_visitor visitor, void *context, char *error, size_t capacity)
+static int md6_anim_references(const unsigned char *body, size_t length,
+    sh_md6_binary_visitor visitor, sh_md6_binary_site_visitor site, void *context,
+    char *error, size_t capacity)
 {
-    md6_reader r = {body, length, 0, error, capacity, 0};
+    md6_reader r = {body, length, 0, error, capacity, 0, site};
     char *name;
     unsigned skeleton;
     if (error && capacity) error[0] = 0;
-    if (!body || !visitor) return md6_fail(&r, "cooked md6 animation inspection needs a source and a visitor");
+    if (!body || (!visitor && !site)) return md6_fail(&r, "cooked md6 animation inspection needs a source and a visitor");
     if (!md6_raw(&r, 16)) return 0;
     if (memcmp(body + 2, g_md6_anim_magic, 2)) return md6_fail(&r, "not a cooked md6 animation");
     /* magic+version, own timestamp, skeleton timestamp, then the skeleton idStr. */
@@ -169,3 +173,19 @@ int sh_md6_anim_references(const unsigned char *body, size_t length,
     free(name);
     return 1;
 }
+
+int sh_md6_mesh_references(const unsigned char *body, size_t length,
+    sh_md6_binary_visitor visitor, void *context, char *error, size_t capacity)
+{ return md6_mesh_references(body, length, visitor, NULL, context, error, capacity); }
+
+int sh_md6_mesh_reference_sites(const unsigned char *body, size_t length,
+    sh_md6_binary_site_visitor visitor, void *context, char *error, size_t capacity)
+{ return md6_mesh_references(body, length, NULL, visitor, context, error, capacity); }
+
+int sh_md6_anim_references(const unsigned char *body, size_t length,
+    sh_md6_binary_visitor visitor, void *context, char *error, size_t capacity)
+{ return md6_anim_references(body, length, visitor, NULL, context, error, capacity); }
+
+int sh_md6_anim_reference_sites(const unsigned char *body, size_t length,
+    sh_md6_binary_site_visitor visitor, void *context, char *error, size_t capacity)
+{ return md6_anim_references(body, length, NULL, visitor, context, error, capacity); }

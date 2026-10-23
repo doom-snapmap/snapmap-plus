@@ -16,6 +16,7 @@ static BOOL protect_probe(LPVOID address, SIZE_T size, DWORD protection, PDWORD 
 
 static int failures, provider_calls, native_calls, graph_calls;
 static int provider_result = 1, wrong_length;
+static int retired_result, retired_calls;
 static uint64_t large_length;
 static const char *fixture = "first snapshot";
 static char requested[4096];
@@ -49,6 +50,18 @@ int sh_package_runtime_open_file(const char *path, FILE **stream, uint64_t *leng
 }
 static int provider(void *context, const char *path, FILE **stream, uint64_t *length)
 { CHECK(context == (void *)7); return sh_package_runtime_open_file(path, stream, length); }
+int sh_audio_banks_native_open_media(const char *path, FILE **stream, uint64_t *length)
+{
+    ++retired_calls;
+    *stream = NULL; *length = 0;
+    if (retired_result != 1) return retired_result;
+    CHECK(strstr(path, "17.wem"));
+    CHECK(!tmpfile_s(stream) && *stream);
+    if (!*stream) return -1;
+    *length = 7;
+    CHECK(fwrite("retired", 1, 7, *stream) == 7 && !fflush(*stream));
+    return 1;
+}
 static int original_id(void *self, uint32_t id, int mode, const void *flags,
     unsigned char *sync, sh_audio_file_descriptor *out)
 { CHECK(self && id == 17 && mode >= 0 && flags && sync && out); ++native_calls; return 42; }
@@ -231,6 +244,23 @@ static void native_adapter(void)
     provider_result=-1;
     CHECK(afn_open_id(image+0x3000,17,0,flags,&sync,&file)==2);
     CHECK(native_calls==2); /* An owned failure cannot fall through to old bytes. */
+    CHECK(retired_calls==1); /* Only the unclaimed lookup consulted old programs. */
+    provider_result=0; retired_result=1;
+    CHECK(afn_open_id(image+0x3000,17,0,flags,&sync,&file)==1);
+    CHECK(native_calls==2 && retired_calls==2 && file.length==7);
+    retired_result=0; /* The descriptor outlives eligibility for another open. */
+    { char bytes[8]={0}; DWORD read=0; LARGE_INTEGER at={0};
+      CHECK(SetFilePointerEx(file.handle,at,NULL,FILE_BEGIN));
+      CHECK(ReadFile(file.handle,bytes,7,&read,NULL) && read==7 && !strcmp(bytes,"retired")); }
+    CHECK(CloseHandle(file.handle));
+    retired_result=-1;
+    CHECK(afn_open_id(image+0x3000,17,0,flags,&sync,&file)==2);
+    CHECK(native_calls==2);
+    provider_result=1;
+    calls=retired_calls;
+    CHECK(afn_open_id(image+0x3000,17,0,flags,&sync,&file)==1);
+    CHECK(retired_calls==calls); /* Current exact provider always wins. */
+    CHECK(CloseHandle(file.handle));
     g_afn_ready=0;
     { char *a=(char *)1,*b=(char *)1; CHECK(!sh_audio_files_native_bank_paths("a.bnk",&a,&b) && !a && !b); }
     { wchar_t language[260]; CHECK(!sh_audio_files_native_language(language,260) && !language[0]); }

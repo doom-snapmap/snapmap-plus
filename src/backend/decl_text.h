@@ -12,12 +12,22 @@ typedef struct sh_decl_reference_item {
     size_t text_length;
     void *value;
     const char *type;
+    /* Ordering outputs: reserve identities in a reference cycle containing
+     * inheritance before parsing. Parent is a one-based index in the final
+     * order, or zero when there is no uniquely resolved explicit parent. */
+    int reserve_cycle;
+    size_t inherit_parent;
 } sh_decl_reference_item;
 
 /* Return 1 when `text` is non-empty, contains no embedded NUL, and has balanced
  * braces, quotes, and comments. This is deliberately structural only; DOOM's
  * own decl parser remains the semantic authority. */
 int sh_decl_text_well_formed(const unsigned char *text, size_t length);
+
+/* Return 1 for a declaration family whose native Parse ends in the shared
+ * reflected reader, which ignores its braced section's end-of-file result:
+ * end of file may close the outermost brace (effects, on both renderers). */
+int sh_decl_text_open_body_family(const char *type);
 
 /* Return 1 when a snapEditorEntityDef body contains a real top-level
  * `inherit = ...` assignment or a direct `edit.entityDef = ...` assignment.
@@ -54,12 +64,13 @@ int sh_decl_text_collect_entitydef_dependencies(const unsigned char *text,
 /* Reorder an already-admitted set so uniquely resolved logical names quoted by
  * one body are registered before the body that references them. Material
  * expressions also resolve unquoted name[index] references to table decls;
- * callers provide `type` to enable these typed edges. Comments and
- * escaped strings are ignored; ambiguous names create no edge. Strongly
+ * callers provide `type` to enable these typed edges. Comments are ignored;
+ * strings retain native literal backslashes. Ambiguous names create no edge. Strongly
  * connected components are condensed and selected by logical-name order, while
- * members of a component are also name-ordered unless explicit inherit edges
- * require a parent-first order. A true explicit-inherit cycle refuses the
- * snapshot (return 0), as does bounded scratch allocation failure. */
+ * members of a component follow explicit inherit edges parent first, members
+ * another member inherits ahead of the rest, then name order. A true
+ * explicit-inherit cycle refuses the snapshot (return 0), as does bounded
+ * scratch allocation failure. */
 int sh_decl_text_order_by_references(sh_decl_reference_item *items, size_t count,
                                      size_t *out_edge_count,
                                      size_t *out_cycle_count);

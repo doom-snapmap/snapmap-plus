@@ -1,4 +1,5 @@
 #include <stddef.h>
+#include <assert.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -38,8 +39,9 @@ SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, navmesh_view) == 0x340);
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, run_on_main) == 0x348);
 /* ext 29: delete entities through the native Delete Selection action. */
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, delete_entities) == 0x350);
-SH_STATIC_ASSERT(sizeof(sh_iface_vtbl) == 0x358);
+SH_STATIC_ASSERT(sizeof(sh_iface_vtbl) == 0x360);
 SH_STATIC_ASSERT(sizeof(sh_delete_result) == 40);
+SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, prefab_export) == 0x358);
 SH_STATIC_ASSERT(offsetof(sh_iface, sub) == 0x58);
 SH_STATIC_ASSERT(sizeof(sh_iface) == 0x60);
 
@@ -84,6 +86,42 @@ static int stub_set(sh_iface *self, const char *key, const char *value_json)
     return key && value_json ? SH_CONFIG_SET_PERSISTED : SH_CONFIG_SET_REJECTED;
 }
 
+static int stub_prefab_export(sh_iface *self, int selection, char **bytes, size_t *length)
+{
+    (void)self; (void)selection; *bytes = NULL; *length = 0; return 0;
+}
+
+static void test_optional_extent(void)
+{
+    sh_iface old = {0};
+    sh_iface_vtbl mock = {0};
+    uint32_t *extent = (uint32_t *)(void *)old.mtx;
+    /* No read may reach the absent trailing table: use an unreadable address. */
+    old.vtbl = (const sh_iface_vtbl *)(uintptr_t)1;
+    assert(!sh_iface_prefab_export(&old));
+    extent[0] = SH_IFACE_VTBL_MARK; extent[1] = 0x340;
+    assert(!sh_iface_prefab_export(&old));
+    extent[1] = 0x361;
+    assert(!sh_iface_prefab_export(&old));
+    assert(!sh_iface_has_slot(&old, SIZE_MAX, 8));
+    extent[1] = 0x358;
+    assert(!sh_iface_prefab_export(&old));
+    old.vtbl = &mock; extent[1] = sizeof(mock);
+    assert(!sh_iface_prefab_export(&old));
+    mock.prefab_export = stub_prefab_export;
+    assert(sh_iface_prefab_export(&old) == stub_prefab_export);
+    extent[0] ^= 1;
+    assert(!sh_iface_prefab_export(&old));
+    /* The older development layout must not expose prefab export as navigation. */
+    old.vtbl = (const sh_iface_vtbl *)(uintptr_t)1;
+    extent[0] = 0x46494853u; extent[1] = 0x31545845u;
+    assert(!SH_IFACE_HAS_SLOT(&old, navmesh_view));
+    assert(!SH_IFACE_HAS_SLOT(&old, run_on_main));
+    assert(!SH_IFACE_HAS_SLOT(&old, delete_entities));
+    assert(!sh_iface_prefab_export(&old));
+    assert(!sh_iface_prefab_export(NULL));
+}
+
 int main(void)
 {
     sh_iface_config_slots slots;
@@ -91,6 +129,7 @@ int main(void)
     sh_iface *iface;
     char value[16] = {0};
     unsigned int flags = 0;
+    test_optional_extent();
 
     memset(&slots, 0, sizeof(slots));
     slots.config_get_json = stub_get;
@@ -103,7 +142,10 @@ int main(void)
     }
     sh_iface_bind_config_slots(&slots);
     memset(&engine_slots, 0, sizeof(engine_slots));
+    engine_slots.prefab_export = stub_prefab_export;
     sh_iface_bind_engine_slots(&engine_slots);
+    assert(sh_iface_vtbl_bytes(iface) == sizeof(sh_iface_vtbl));
+    assert(sh_iface_prefab_export(iface) == stub_prefab_export);
     if (iface->vtbl->config_get_json != stub_get ||
         iface->vtbl->config_set_json != stub_set) {
         fprintf(stderr, "iface_config_test: config callbacks were not preserved\n");
@@ -132,6 +174,7 @@ int main(void)
     }
     engine_slots.delete_entities = stub_delete;
     sh_iface_bind_engine_slots(&engine_slots);
+    assert(sh_iface_prefab_export(iface) == stub_prefab_export);
     {
         sh_delete_result r;
         int ids[2] = { 4, 5 };

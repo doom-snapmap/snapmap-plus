@@ -9,7 +9,13 @@ static int nl_alpha(unsigned char ch)
 static int nl_digit(unsigned char ch)
 { return ch >= '0' && ch <= '9'; }
 static int nl_space(unsigned char ch)
-{ return ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r' || ch == '\f' || ch == '\v'; }
+{
+    /* ReadWhiteSpace uses a signed byte comparison with 0x20 in both native
+     * builds. Nonzero controls and high bytes between tokens are whitespace;
+     * quoted bytes still belong to their string. NUL is refused before lexing
+     * so an embedded terminator cannot silently hide the rest of a source. */
+    return (ch && ch <= 32) || ch >= 128;
+}
 static int nl_name(unsigned char ch)
 { return nl_alpha(ch) || nl_digit(ch) || (ch && strchr("/\\:.$", ch)); }
 
@@ -64,9 +70,11 @@ int sh_decl_native_lex(sh_decl_source source, sh_decl_tokens *out, char *error, 
         if (ch == '"' || ch == '\'') {
             kind = ch == '"' ? SH_DECL_TOKEN_STRING : SH_DECL_TOKEN_LITERAL;
             p++;
-            /* Under 0x20 a backslash is a byte, even before the closing quote. */
+            /* Under 0x20 a backslash is a byte, even before the closing quote.
+             * The quoted reader appends every other byte, including controls;
+             * only a newline is its error. */
             while (p < source.length && s[p] != ch) {
-                if ((unsigned char)s[p] < 32 && s[p] != '\t') { reason = "control byte inside quoted token"; goto bad; }
+                if (s[p] == '\n') { reason = "newline inside quoted token"; goto bad; }
                 p++;
             }
             if (p == source.length) { reason = "unterminated quoted token"; goto bad; }

@@ -65,6 +65,8 @@ static unsigned int g_recovery_mask;
 static int g_recovery_values[PR_COUNT];
 static size_t g_requirement_count;
 static size_t g_manifest_count;
+/* The last refusal, for sh_package_requirements_describe. */
+static char g_refusal[256];
 
 /* Recapture desired requirements without discarding native value ownership. */
 int sh_package_requirements_rearm(const char *data_root, void *execute_command_buffer,
@@ -102,6 +104,7 @@ static int pr_fail(const char *reason)
                 "package-requirements REFUSED: %s; zero settings admitted",
                 reason ? reason : "unknown failure");
     backend_log(line);
+    _snprintf_s(g_refusal, sizeof(g_refusal), _TRUNCATE, "%s", reason ? reason : "unknown failure");
     InterlockedExchange(&g_state, PR_STATE_FAILED);
     return 0;
 }
@@ -336,6 +339,47 @@ static void pr_apply(const char *when)
                 g_requirement_count, when);
     backend_log(line);
     InterlockedExchange(&g_state, PR_STATE_DONE);
+}
+
+void sh_package_requirements_describe(char *out, size_t capacity)
+{
+    LONG state = InterlockedCompareExchange(&g_state, PR_STATE_NEW, PR_STATE_NEW);
+    if (!out || !capacity) return;
+    if (state == PR_STATE_FAILED) {
+        /* A refused update changes nothing it could not restore: either every
+         * value it changed is back (the earlier application stays as last
+         * applied), or a rollback is still owed and the next application
+         * retries it first. Neither was read back since. */
+        char held[128] = "";
+        size_t pending = 0, owned = 0, i;
+        for (i = 0; i < PR_COUNT; i++) {
+            if (g_recovery_mask & (1u << i)) pending++;
+            if (g_allowed[i].owned) {
+                _snprintf_s(held + strlen(held), sizeof(held) - strlen(held), _TRUNCATE, "%s%s",
+                            owned++ ? ", " : "", g_allowed[i].name);
+            }
+        }
+        if (pending)
+            _snprintf_s(out, capacity, _TRUNCATE,
+                        "Package settings update refused: %s. Restoring the previous value of %zu setting(s) is "
+                        "still pending; the next application retries it first.",
+                        g_refusal[0] ? g_refusal : "unknown failure", pending);
+        else if (owned)
+            _snprintf_s(out, capacity, _TRUNCATE,
+                        "Package settings update refused: %s. The earlier package settings stay as last applied: %s.",
+                        g_refusal[0] ? g_refusal : "unknown failure", held);
+        else
+            _snprintf_s(out, capacity, _TRUNCATE,
+                        "Package settings update refused: %s. No package setting was in force before it.",
+                        g_refusal[0] ? g_refusal : "unknown failure");
+    } else if (state == PR_STATE_DONE)
+        _snprintf_s(out, capacity, _TRUNCATE, g_requirement_count ?
+                    "Package settings in force: %zu applied and read back natively." :
+                    "Package settings in force: none.", g_requirement_count);
+    else if (state == PR_STATE_NEW)
+        _snprintf_s(out, capacity, _TRUNCATE, "Package settings: not captured yet.");
+    else
+        _snprintf_s(out, capacity, _TRUNCATE, "Package settings: %zu captured, not yet applied.", g_requirement_count);
 }
 
 /* The engine can instantiate prepared editor resources during any map load.

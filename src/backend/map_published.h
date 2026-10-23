@@ -12,4 +12,10 @@ int sh_map_published_bind(const sig_result *results, size_t count, const uint8_t
 int sh_map_published_install(const sig_result *results, size_t count, const uint8_t *base);
 /* Retry owner cleanup on the native main thread, never from a download worker. */
 void sh_map_published_poll(void);
+/* Is the loading level the published map whose lobby this module created at the
+ * player's press and whose packages have not been activated at a boundary yet?
+ * Such a level must not be built natively against the library palette. */
+int sh_map_published_level_armed(const void *level_parameters);
+/* The armed lobby's boundary has been handled (activated or refused). */
+void sh_map_published_disarm(void);
 #endif

@@ -69,6 +69,21 @@ typedef struct sh_package_source_view {
         char *error, size_t capacity);
 } sh_package_source_view;
 
+/* The player hands web services of decl_block_compose.h, supplied by the
+ * package library: the stock contract's hands web names, and the alignment
+ * and weapon rename that let several packages of one scope change such a web
+ * (sh_decl_animweb_prepare, sh_decl_weapon_subweb_rename). */
+struct sh_decl_animweb_move;
+typedef struct sh_package_hands_adapter {
+    const char *const *webs;
+    size_t web_count;
+    int (*prepare)(sh_decl_source baseline, sh_decl_source *sources, size_t count, char **owned,
+        struct sh_decl_animweb_move **moves, size_t *move_count, char *error, size_t capacity);
+    void (*moves_free)(struct sh_decl_animweb_move *moves, size_t count);
+    char *(*weapon_rename)(sh_decl_source weapon, const char *from, const char *to,
+        size_t *length, int *changed, char *error, size_t capacity);
+} sh_package_hands_adapter;
+
 /* Compiler services are supplied by the product, never package metadata.
  * The baseline reader bypasses all overrides. Built-ins join the original
  * authored contributions in one merge and carry no delivery ownership.
@@ -90,6 +105,16 @@ typedef struct sh_package_compile_environment {
         sh_decl_value_type *state_type);
     sh_package_producer produce;
     void *producer_context;
+    /* Optional: 1 when produce generates path as a member of a module family,
+     * which its consumers reach only by a name they derive from the module's
+     * (the Grid Room's private module, catalog card, navigation, collision and
+     * probes). A different binding of such a member has no reachable private
+     * identity. Shares producer_context. */
+    int (*produce_derived)(void *context, const char *path);
+    /* Optional: 1 when produce generates path as a member of that module's
+     * family, writing its module path maps/modules/<R> (no extension); 0
+     * otherwise. Shares producer_context. */
+    int (*produce_module)(void *context, const char *path, char *module, size_t capacity);
     /* Stateless identity canonicalizer, with the same owned-string contract
      * as sh_package_engine_path. Retained by the result for runtime lookups. */
     char *(*canonical_path)(const char *path);
@@ -110,13 +135,62 @@ typedef struct sh_package_compile_environment {
      * to SIZE_MAX on entry. Peer conflicts, missing native metadata and failed
      * originals never select a package to discard. Strict callers omit it. */
     size_t *invalid_package;
+    /* Optional, with invalid_package; reset to 0 on entry. Set to 1 only when
+     * that decision reads the package's own bytes alone in the product's
+     * grammar: its file identities, declaration text or contribution cannot
+     * be parsed, or its descriptor states settings this build does not
+     * support. The same bytes then get the same decision for as long as this
+     * process runs (product build, game data and native reflection are fixed).
+     * Decisions involving stock or peer composition, readers, coverage or
+     * native state stay 0: they are judged again on every compile. */
+    int *invalid_own_bytes;
+    /* Optional local-library report, reset to SIZE_MAX on entry: an outer
+     * package whose own supplied content reaches a unit the product cannot
+     * link yet (missing product coverage, or a dependency SnapMap does not ship
+     * that it does not supply). It is not malformed; the caller excludes it
+     * from this candidate only and keeps its installed availability. Chains
+     * reached only from product/stock content never select a package. */
+    size_t *unserved_package;
+    /* Optional, with invalid_package and unserved_package: further outer
+     * packages the same failed compile found responsible on their own content
+     * after the first (isolated scopes, sh_package_source_withdrawals, and
+     * contributions judged apart from every package reported before them),
+     * each with its typed attribution and reason, so a caller can leave them
+     * out together instead of discovering them one compile at a time. Reset on
+     * entry. Never holds environmental, product or cross-package composition
+     * failures, and nobody is reported when the environment fails after an
+     * owner was found. */
+    struct sh_package_rejections *more_rejections;
     /* Optional local-library isolation report, reset on entry. A malformed
      * owner is reported above; an unresolved peer resource marks its changing
      * owners together, never a folder-order winner. Policy collisions mark
      * incompatible pairs. Operational failures leave this empty. Map builds
      * omit both outputs and remain strict. Caller owns/frees the set. */
     sh_package_owners *conflicted_packages;
+    /* Internal compiler context. Isolated libraries compose shared sources as
+     * peers, without the historical same-ID delivered-package precedence. */
+    int independent_sources;
+    /* Optional, for a scope holding several packages (a composed map
+     * context). Their different copies of a player hands web align against its
+     * stock original in stable package order before composing, and each
+     * package's weapons then name the subweb copies that package owns. */
+    const sh_package_hands_adapter *player_hands;
 } sh_package_compile_environment;
+
+/* One further responsible package of a failed compile (more_rejections). */
+typedef struct sh_package_rejection {
+    size_t package;   /* index in the compiled sources */
+    int invalid;      /* 1: malformed (loses installed availability); 0: not served here */
+    int own_bytes;    /* with invalid: decided by its own bytes alone (remembered, see invalid_own_bytes) */
+    char reason[1280];
+} sh_package_rejection;
+typedef struct sh_package_rejections {
+    sh_package_rejection *items;
+    size_t count, capacity;
+} sh_package_rejections;
+void sh_package_rejections_free(sh_package_rejections *rejections);
+
+typedef struct sh_package_native_identity { char *type, *name; } sh_package_native_identity;
 
 typedef struct sh_compiled_resource {
     const char *engine_path;
@@ -128,20 +202,121 @@ typedef struct sh_compiled_resource {
     int baseline_known, composed; /* original scope: 0 absent, 1 SnapMap, 2 campaign, 3 product */
     int native_original;         /* declaration bytes exactly match an installed game original */
     int restored_original;       /* owns engine_path; no authored source or owners */
+    /* Served as authored while its native semantics are undecided (its entity
+     * state selection is product coverage). No consumer may read it as a
+     * decided native state, an equivalence or a vanilla classification. */
+    int semantic_coverage;
     unsigned char *body;          /* owned native text or composed result */
     size_t body_length;
+    /* Display-only text the engine is served instead of body, or NULL (a
+     * toybox label alias, package_library.c). Authoring, conversion, identity
+     * and every other semantic decision read body; only serving reads this. */
+    unsigned char *presented;
+    size_t presented_length;
     size_t source;                /* effective opaque/unchanged source file */
     char *cache_path;             /* runtime-owned immutable opaque snapshot */
     int generated;               /* product producer participates in this result */
+    /* Declaration text added after compilation (sh_package_compilation_add_declaration):
+     * product bytes with no delivered source, original or producer. Its bound
+     * dependencies are its whole source authority; availability expands them. */
+    int generated_layer;
     char **generated_inputs;      /* canonical input paths, copied by compiler */
     size_t generated_input_count;
+    /* Source file indices whose bytes the producer read through those inputs:
+     * a composed input's every source, otherwise its effective file and exact
+     * copies of it, and a generated input's own; sorted and unique, renumbered
+     * with sources. Per-input report provenance only: no identity, serving or
+     * availability decision reads it. */
+    size_t *generated_sources;
+    size_t generated_source_count;
     int owns_engine_path;
     sh_package_file *cache_file;  /* retained immutable bytes, independent stream positions */
+    /* Private engine aliases probe the original authored path for installation.
+     * This owned provenance is generated by the linker, never trusted from map
+     * metadata. Equal availability does not replace the map's effective bytes. */
+    char *original_path;
+    /* Compiler-assigned manager identity, including cooked binary resources.
+     * Kept separate from declaration type/name so binary aliases never enter
+     * declaration registration. Both strings are owned, or both are NULL. */
+    char *native_type, *native_name;
+    /* Final compiler-owned paths reached by this resource's resolved binding
+     * graph. These preserve dependency lifetimes without repeating lexical
+     * lookup in another source scope; they do not confer authored ownership. */
+    char **bound_dependencies;
+    size_t bound_dependency_count;
+    /* Internal sound/event association. Zero together until sound preparation.
+     * The authored event comes from the original declaration path; the final
+     * event may differ only after typed bank relocation. Native alias spelling
+     * never replaces this association. Neither scalar is author metadata. */
+    uint32_t sound_authored_event, sound_event;
+    /* Additional logical identities serving these exact same physical bytes.
+     * Primary fields remain compatible; use the helpers below to enumerate or
+     * match the complete set. Each pair and this array are independently owned. */
+    sh_package_native_identity *native_aliases;
+    size_t native_alias_count;
+    /* A rebound installed original: a renamed private copy whose inputs are all
+     * installed SnapMap originals (native_original, no authored source) and
+     * whose bytes are theirs with only linker-bound reference names replaced.
+     * 1 when every replaced name is an image's, 2 when another family's is
+     * too, otherwise 0. Provenance only: decl_server.c decides which native
+     * outcome it may share with its original. */
+    int rebound_original;
+    /* NULL: body is this resource's own. Otherwise body and body_length are the
+     * shared immutable bytes of this owner (sh_package_body), of which the
+     * resource holds one reference; nothing may write or free them directly. */
+    sh_package_body *body_owner;
+    /* An installed-original alias: the linker's derived publication of an
+     * unchanged installed SnapMap file under another path (a module variant's
+     * member). Its bytes are the installed file at original_path, certified as
+     * installed_identity when linked; no body, cache or source is kept. Reads
+     * go through the compilation's installed reader, which must be the open
+     * catalog that certified it (its archives refuse writes while it stays
+     * open), and every read is checked against installed_identity. */
+    int installed_alias;
+    sh_package_file_identity installed_identity;
 } sh_compiled_resource;
+
+/* Borrowed logical identity view: explicit primary (or declaration identity)
+ * first, then distinct aliases. A missing/out-of-range entry returns {0}. */
+size_t sh_package_resource_native_count(const sh_compiled_resource *resource);
+sh_package_native_identity sh_package_resource_native_at(const sh_compiled_resource *resource, size_t index);
+int sh_package_resource_native_matches(const sh_compiled_resource *resource, const char *type, const char *name);
+/* Retain another positively verified identity for the same final bytes. This
+ * does not establish byte equality, native ID availability or source ownership.
+ * A declaration's aliases must agree with its path-derived identity. */
+int sh_package_resource_native_add(sh_compiled_resource *resource, const char *type, const char *name);
+
+typedef struct sh_package_localized_string {
+    char *key;                   /* complete private native #str_ key */
+    char *mapping;               /* exact canonical native/locales mapping */
+    sh_package_owners owners;    /* supplying delivery units, not precedence */
+} sh_package_localized_string;
+
+typedef struct sh_package_hud_binding {
+    char *name;                 /* exact linked idDeclWeapon identity */
+    int weapon_mode;
+    sh_package_owners owners;  /* descriptor suppliers, not folder priority */
+} sh_package_hud_binding;
 
 typedef struct sh_package_policy {
     sh_json_object requirements, strings, hud;
+    sh_package_localized_string *localized;
+    size_t localized_count;
+    /* Recorded COMPOSED contexts retain their historical native-key policy. */
+    sh_package_owners legacy_string_owners;
+    sh_package_hud_binding *hud_bindings;
+    size_t hud_binding_count;
+    int hud_bound; /* raw descriptor keys have been projected through linking */
 } sh_package_policy;
+
+/* Retain an already-reserved complete mapping and its delivery ownership.
+ * Also populate policy.strings for every authored locale. Duplicate keys must
+ * have exactly equal mappings; a hash/name match alone does not prove equality.
+ * A toybox label alias carries a third "label" member (strids.h) and may have
+ * no authored locale. A failed candidate policy must be discarded. No native
+ * mutation occurs. */
+int sh_package_policy_localization(sh_package_policy *policy, const char *key,
+    const char *mapping, const sh_package_owners *owners, char *error, size_t capacity);
 
 typedef struct sh_package_compilation {
     /* Input lifetime must exceed compilation lifetime. */
@@ -155,6 +330,12 @@ typedef struct sh_package_compilation {
      * overlay owns its copied inventory. Map owners follow local owners. */
     int owns_sources, map_overlay;
     size_t map_owner_begin;
+    int independent_sources, map_independent_sources;
+    /* Reader of installed originals for installed-original aliases: the owner
+     * of this compilation sets it to the open catalog that certified them and
+     * keeps that catalog open while the compilation is served or retained. */
+    sh_package_baseline_reader installed;
+    void *installed_context;
 } sh_package_compilation;
 
 /* Compose complete delivery owners selected by the resource graph. The set
@@ -173,6 +354,229 @@ sh_package_compilation *sh_package_compile(const sh_package_sources *sources,
 sh_package_compilation *sh_package_compile_with(const sh_package_sources *sources,
     const sh_package_compile_environment *environment, char *error, size_t error_capacity);
 void sh_package_compilation_free(sh_package_compilation *compilation);
+/* Optional process memory meter for compile diagnostics: mb[0] private bytes, mb[1] working set, mb[2] and mb[3]
+ * their process peaks, in MB. None by default (portable hosts); the runtime installs one. Diagnostics only: no
+ * decision may read it. sh_package_memory_read returns 0 when no meter is installed or it fails. */
+typedef int (*sh_package_memory_meter_fn)(unsigned long long mb[4]);
+void sh_package_set_memory_meter(sh_package_memory_meter_fn meter);
+int sh_package_memory_read(unsigned long long mb[4]);
+/* Registered shared editor fields, composed only after the caller has captured
+ * every typed reference in its source scope. Equal reference spellings in these
+ * inputs must denote equal bound objects; the library supplies temporary binding
+ * tokens, never native names chosen by peer precedence. Phase 1 is inspector
+ * lists, 2 entity editorVars, 3 editor controls; zero has no contribution adapter.
+ * Absent fields contribute nothing; explicit lists retain original-relative
+ * entry edits. All other target fields and native positional data remain private. The caller
+ * restores the captured references and recomputes graph identity afterwards.
+ * private_binding is compiler-derived gameplay ownership: its editorVars keep
+ * target-specific edits on disagreement. Shared editor-only slots choose one
+ * deterministic presentation. It is not an author setting or embedding flag. */
+int sh_package_editor_contribution_phase(const char *type);
+/* The top-level blocks, as sh_decl_tree_equal's unordered list, whose direct
+ * members editor composition moves without changing them: an entity
+ * definition's editorVars (written sorted) or, for editor entries and the
+ * composed inspector lists, edit (the collection fields move to its tail).
+ * NULL for families editor composition does not rewrite: they stay ordered. */
+const char *sh_package_editor_reordered_blocks(const char *type);
+char *sh_package_editor_contributions(const char *type, sh_decl_source baseline,
+    const sh_decl_source *sources, size_t count, sh_decl_source target, int private_binding,
+    size_t *length, char *error, size_t capacity);
+
+/* Why editor composition failed. Environment (allocation, reads) blames no
+ * content. Source names one contribution invalid in its own authored context.
+ * Coverage is valid input the product cannot compose yet. */
+enum {
+    SH_PACKAGE_EDITOR_FAILURE_NONE = 0,
+    SH_PACKAGE_EDITOR_FAILURE_ENVIRONMENT,
+    SH_PACKAGE_EDITOR_FAILURE_SOURCE,
+    SH_PACKAGE_EDITOR_FAILURE_COVERAGE
+};
+typedef struct sh_package_editor_failure {
+    int kind;
+    size_t source; /* sources[] index for SOURCE, otherwise SIZE_MAX */
+} sh_package_editor_failure;
+/* The same composition, classifying a failure. */
+char *sh_package_editor_contributions_report(const char *type, sh_decl_source baseline,
+    const sh_decl_source *sources, size_t count, sh_decl_source target, int private_binding,
+    size_t *length, sh_package_editor_failure *failure, char *error, size_t capacity);
+
+/* Registration lists (a conductor's aiTypeList and globalAIMods) of one entity
+ * declaration: rows keyed by their native aiType compose from every member
+ * into each, every row keeping the binding its own source gave it; the rest
+ * of target is kept. Equal keys with different bindings are a composition
+ * gap (they need a relocated key), reported as coverage. order is the key
+ * contract's row-order significance (NULL: the lists' rule flags alone). */
+char *sh_package_registration_contributions_report(sh_decl_source baseline,
+    const sh_decl_source *sources, size_t count, sh_decl_source target,
+    const sh_decl_collection_order *order,
+    size_t *length, sh_package_editor_failure *failure, char *error, size_t capacity);
+/* The same with each text's inheritance (count + 2 entries: baseline, each
+ * source, target): "" without a stateful ancestor, else the inherited first
+ * statement's name (sh_decl_entity_state_statement); NULL reads the text. */
+char *sh_package_registration_contributions_states(sh_decl_source baseline,
+    const sh_decl_source *sources, size_t count, sh_decl_source target,
+    const sh_decl_collection_order *order, const char *const *states,
+    size_t *length, sh_package_editor_failure *failure, char *error, size_t capacity);
+/* 1 when an entity declaration states registration lists in a state statement. */
+int sh_package_registration_lists(sh_decl_source text);
+
+/* Rebase a child editor definition's inherited collections. authored and
+ * published are the parent chains (nearest first) as the child's author saw
+ * them and as the library publishes them. A list the child states and whose
+ * parent layout (control identities by position) differs, or every stated
+ * list when force is set, is restated as a complete list: the child's
+ * effective controls in its own order, each inherited one as published plus
+ * the child's changes, the published parent's additions after their
+ * predecessors, and the child's removals kept. With slots, a restated control
+ * without its identity field (the native reader places it by slot alone)
+ * carries an identity under slots->space from where it came from (the
+ * published slot; for the shipped declaration's own such control, which every
+ * package's copy restates or edits at one native slot, that slot; otherwise
+ * its content, equal ones paired by occurrence), so restatements of one
+ * declaration compose; sh_package_editor_strip_slots drops it afterwards.
+ * slots->appends is set when the child appends, in its author's frame, an own
+ * such control (whether or not this call rebases): composing it needs every
+ * restatement of the declaration rebased (force).
+ * Returns 1 with malloc-owned *out, 0 when nothing changes, -1 on failure
+ * (failure->kind), -2 when an input states slots->space (choose another). */
+typedef struct sh_package_editor_slots {
+    const char *space;      /* a prefix no input of the composition states */
+    sh_decl_source shared;  /* the shipped declaration the child replaces; empty: none */
+    int appends;            /* out: an own control without an identity field */
+} sh_package_editor_slots;
+int sh_package_editor_rebase(const char *type, sh_decl_source child,
+    const sh_decl_source *authored, size_t authored_count,
+    const sh_decl_source *published, size_t published_count, int force, sh_package_editor_slots *slots,
+    char **out, size_t *length, sh_package_editor_failure *failure, char *error, size_t capacity);
+/* Complete lists composed without a rebase (a declaration restated whole):
+ * give their controls without an identity field (the native reader places them
+ * by slot alone) an identity under space relative to shipped, the shipped
+ * declaration: paired with one of its such controls (equal content first,
+ * then in order), that control's slot; otherwise the content, equal ones
+ * paired by occurrence. An identity field stating its default (an empty
+ * string, a NULL reference) is absent, except where it resets an identity the
+ * parents (nearest first; none for a declaration without one) give its slot.
+ * 1 with malloc-owned *out, 0 when none is given, -2 when text or shipped
+ * states space, -1 on failure. */
+int sh_package_editor_frame_slots(const char *type, sh_decl_source text, sh_decl_source shipped,
+    const sh_decl_source *parents, size_t parent_count, const char *space, char **out, size_t *length);
+/* How text states each registered inherited editor collection, two bits per
+ * collection path in rule order: 1 a sparse patch of its parent's slots, 2 a
+ * whole list (a declaration without a parent always states it whole), 0 not
+ * at all. 1 with *forms, 0 when it does not read, -1 on failure. */
+int sh_package_editor_list_forms(const char *type, sh_decl_source text, unsigned *forms);
+/* Drop the identities a rebase or framing gave under space to controls without
+ * one, stating again a reset framing marked; an authored value is never under
+ * space (the rebase refuses a space an input states). 1 with malloc-owned
+ * *out, 0 when the text carries none, -1 on failure. */
+int sh_package_editor_strip_slots(const char *type, const char *space, sh_decl_source text, char **out, size_t *length);
+/* Complete desired rows explicitly state the registered family's constructor
+ * defaults for omitted path/tag/reference fields, including the model's TRUE
+ * color-enabled bit. Sparse statements remain author patches. The admitted
+ * native storage transaction retains/replaces owning containers through batch
+ * outcome; this text never uses temporary zero/regrowth to clear ownership.
+ * published is the parent chain, nearest first. Returns 1 with malloc-owned
+ * normalized/defaulted *out, 0 when unchanged, -1 on allocation failure, -3
+ * when the family read state cannot be represented. Source bundles retain
+ * their exact authored bytes independently of this served representation. */
+int sh_package_editor_native_restatement(const char *type, sh_decl_source text,
+    const sh_decl_source *published, size_t published_count, char **out, size_t *length);
+/* 1 when a declaration states some member more than once (natively read
+ * again, in order), 0 when not or when it does not read at all, -1 on
+ * allocation failure. */
+int sh_package_editor_repeats(sh_decl_source text);
+/* Family-bearing variants normalize only the registered native collection
+ * paths. The legacy entry points select snapeditorentitydef. */
+int sh_package_editor_repeats_type(const char *type, sh_decl_source text);
+/* The native form of a declaration stating some member more than once: one
+ * statement per member writing what its statements write, each written field
+ * with the value the native reader leaves over parents (the chain its author
+ * saw, nearest first), proven to read the same over them. 1 with malloc-owned
+ * *out; 0 when neither repeats nor indexed aliases require normalization; -1 on allocation failure;
+ * -2 when the text does not read, or its own fields change between a value
+ * and a block over its parents; -3 when no single statement reads the same
+ * or a parent does not read. Dropped/regrown value rows use explicit constructor
+ * defaults. Header type/ops and ! are warning/consumed tokens in the paired
+ * normal inherited editor ReadClass contexts, never source-identity changes. */
+int sh_package_editor_native_form(sh_decl_source text, const sh_decl_source *parents, size_t parent_count,
+    char **out, size_t *length);
+int sh_package_editor_native_form_type(const char *type, sh_decl_source text,
+    const sh_decl_source *parents, size_t parent_count, char **out, size_t *length);
+/* 1 when authored, read over the parent texts (nearest first), leaves some
+ * inherited editor list's controls at other slots than original does (the
+ * layout test the rebase uses), so the children of that declaration would
+ * need a rebase onto it; 0 when every list keeps its layout; -2 when a text
+ * does not read as an editor declaration (a content defect, left to the
+ * phase that attributes it); -1 on allocation failure. */
+int sh_package_editor_moves_controls(const char *type, sh_decl_source authored, sh_decl_source original,
+    const sh_decl_source *parents, size_t parent_count);
+/* Presentation a package's own editor entry changes, for the shared entry of
+ * type. parts are the package texts composing onto base (the shipped entry, as
+ * bound for composition). presentation[i] is set when part i differs from base,
+ * outside the editor collections, only in fields the native editor reads for
+ * display (read with the ordered declaration codec; unknown fields count as
+ * behaviour). Returns 1 with *shared (malloc-owned) = base carrying those
+ * fields, the first authored position winning opposing values; 0 when no part
+ * changes presentation; -1 on allocation failure. */
+int sh_package_editor_presentation(const char *type, sh_decl_source base, const sh_decl_source *parts,
+    size_t count, unsigned char *presentation, char **shared, size_t *length);
+/* Final source-preserving projection after the linker has proved equivalence
+ * and rebound every selected dependency. Inputs use this inventory's original
+ * indices (including borrowed component views). Each projection is one served
+ * path with all equivalent contributions; supplying body selects verified
+ * rewritten bytes, NULL retains the first immutable payload. This operation
+ * neither infers equivalence nor resolves references or global policy. */
+typedef struct sh_package_resource_projection {
+    const char *engine_path;
+    const sh_compiled_resource *const *inputs;
+    size_t input_count;
+    const unsigned char *body;
+    size_t length;
+    /* Optional verified manager binding. Declaration bindings must agree with
+     * the identity of the projected declaration path. Both or neither. */
+    const char *native_type, *native_name;
+    /* Inputs after the first supply editor fields only. Retain their ordinary
+     * delivery ownership without importing their private gameplay ownership. */
+    int editor_contributions;
+    /* Linker facts, not an equivalence: the unit's own binding is a certified
+     * original, no package supplies it, and its class is renamed only through
+     * names it binds. Its bytes are its inputs' with rebound_references bound
+     * names replaced, rebound_non_image of them naming another family than
+     * image. The compiler decides what they certify (rebound_original below). */
+    int rebound_original;
+    size_t rebound_references, rebound_non_image;
+    /* Optional with body: its shared owner (body and length are that owner's
+     * bytes). The projected resource takes a reference instead of a copy. */
+    sh_package_body *body_owner;
+    /* An installed-original alias of the first input (sh_compiled_resource.
+     * installed_alias): body must be NULL; installed_identity is its certified
+     * payload identity. */
+    int installed;
+    sh_package_file_identity installed_identity;
+} sh_package_resource_projection;
+/* A projected resource shares the bytes of an input or projection that holds
+ * them in a body owner (sh_package_body) and copies bytes held otherwise. */
+sh_package_compilation *sh_package_compilation_project(const sh_package_sources *sources,
+    const sh_package_resource_projection *resources, size_t count,
+    const sh_package_policy *policy, char *(*canonical_path)(const char *),
+    char *error, size_t capacity);
+/* Let later copies share every body compiled holds as its own: each moves into
+ * a body owner without being copied. Only for a compilation no one else reads
+ * yet (a body may move). 0 when an owner could not be allocated; the bodies
+ * not yet moved stay the resources' own, and copies of them stay copies. */
+int sh_package_compilation_share(sh_package_compilation *compiled);
+/* A library compile's output may hold detached originals: installed originals whose shared body reads their bytes
+ * again from a pinned archive row (body NULL, body_owner set, body_length theirs; R-342). The read, identity, probe
+ * and copy functions here accept them. Attach makes every one hold its bytes again, so the compilation serves them
+ * in place as before: what a publication keeps does so (sh_package_runtime). 0 with the error when an original
+ * cannot be read again exactly; the resources already attached stay attached. */
+int sh_package_compilation_attach(sh_package_compilation *compiled, char *error, size_t capacity);
+#if defined(SH_PACKAGE_LIBRARY_TESTING) || defined(SH_PACKAGE_SOURCE_LINK_TESTING)
+/* Fail a projection at its nth resource that shares a body (0: none), after the
+ * resource took its reference. */
+void sh_package_compilation_test_project_refusal(long nth);
+long sh_package_compilation_test_project_refusal_left(void);
+#endif
 /* Each input has already composed its peer packages. Map resources replace
  * matching local resources; pure product defaults do not hide local edits.
  * The returned provider owns independent copies and retains every authored
@@ -181,6 +585,23 @@ void sh_package_compilation_free(sh_package_compilation *compilation);
 sh_package_compilation *sh_package_compilation_overlay(
     const sh_package_compilation *local, const sh_package_compilation *map,
     char *error, size_t error_capacity);
+/* Unchanged SnapMap originals stay native: drop resources whose exact bytes the
+ * game already serves under the same identity (not renamed, restored or
+ * composed), and the bound-dependency entries naming them. Publishing them
+ * would re-register engine-owned declarations and reload their consumers for
+ * no change. A file carrying several native names is dropped only when served
+ * confirms SnapMap serves every name from that file; without a callback it is
+ * kept. Order is kept. Returns the number dropped. */
+typedef int (*sh_package_native_served)(void *context, const char *path,
+    const char *type, const char *name);
+size_t sh_package_compilation_prune_native(sh_package_compilation *compiled,
+    sh_package_native_served served, void *context);
+/* As above, and keep, when supplied, is asked about each resource that would
+ * otherwise be dropped: nonzero keeps it published. Every decision is made on
+ * the intact table before anything is dropped, so keep may read the table. */
+typedef int (*sh_package_native_keep)(void *context, const sh_compiled_resource *resource);
+size_t sh_package_compilation_prune_native_except(sh_package_compilation *compiled,
+    sh_package_native_served served, void *context, sh_package_native_keep keep, void *keep_context);
 /* Retain removed SnapMap or built-in product identities with original bytes so
  * native refresh also rebuilds their existing objects. Neither input changes
  * on failure. Campaign imports and new identities have no SnapMap original. */
@@ -189,11 +610,29 @@ int sh_package_compilation_restore_missing(sh_package_compilation *current,
     void *context, char *error, size_t error_capacity);
 const sh_compiled_resource *sh_package_compilation_find(const sh_package_compilation *compilation,
                                                         const char *engine_path);
+/* Add compiler-generated declaration text (no authored source or owners) at
+ * the declaration's path, keeping the provider sorted. baseline_known 3 marks
+ * a product built-in the baseline reader also serves, so a later provider
+ * without it restores it (sh_package_compilation_restore_missing); 0 a
+ * provider-local declaration. A resource already at that path must carry
+ * exactly these bytes and is kept. 1, or 0 with a reason. */
+int sh_package_compilation_add_declaration(sh_package_compilation *compilation, const char *type,
+    const char *name, const unsigned char *body, size_t length, int baseline_known,
+    char *error, size_t error_capacity);
 /* Resource availability, independent of package ID and map/local byte
  * differences: 1 readable from this provider, 0 absent, -1 invalid/unreadable.
  * Opaque data is verified through its immutable cache or source handle without
  * allocating a whole resource. This checks one provider path; the caller must
  * resolve the complete dependency set and establish native activation readiness. */
+/* Compiled-resource work since the last reset: probes (in memory, installed
+ * aliases re-verified, files opened), reads (installed aliases re-verified,
+ * files read), and the milliseconds the verifying ones took. Diagnostics. */
+typedef struct sh_package_compilation_stats {
+    size_t probes, probes_in_memory, probes_installed, probes_opened;
+    size_t reads, reads_installed, reads_file;
+    double probe_ms, read_ms;
+} sh_package_compilation_stats;
+void sh_package_compilation_stats_take(sh_package_compilation_stats *out, int reset);
 int sh_package_compilation_probe(const sh_package_compilation *compilation,
     const char *engine_path, char *error, size_t error_capacity);
 /* Check resolved engine paths, independently of package names and authored
@@ -202,6 +641,7 @@ int sh_package_compilation_probe(const sh_package_compilation *compilation,
  * temporary map provider. This service does not discover gameplay dependencies
  * or establish native activation readiness; callers must supply the closure.
  * Product-generated resources expand to their compiler-recorded input paths.
+ * Generated layers expand to their bound dependencies instead of their text.
  * Missing paths select every supplying map delivery owner, preserving duplicate
  * authored packages. A missing path with no delivered source is an error.
  * Initialize the result to zero. Failure clears it; repeated calls replace it. */
@@ -216,6 +656,14 @@ int sh_package_compilation_missing(const sh_package_compilation *map,
     const char *const *required_paths, size_t count,
     sh_package_resource_available available, void *context,
     sh_package_missing *out, char *error, size_t capacity);
+/* The same check for a map plan holding only generated layers over base, the
+ * library its document is bound against. A required path the map does not hold
+ * resolves in base; base resources are supplied by installed packages only, so
+ * an unavailable one is an error rather than a map delivery to install. */
+int sh_package_compilation_missing_over(const sh_package_compilation *map,
+    const sh_package_compilation *base, const char *const *required_paths, size_t count,
+    sh_package_resource_available available, void *context,
+    sh_package_missing *out, char *error, size_t capacity);
 void sh_package_missing_free(sh_package_missing *missing);
 typedef enum sh_package_change_kind {
     SH_PACKAGE_RESOURCE_ADDED,
@@ -225,14 +673,34 @@ typedef enum sh_package_change_kind {
 typedef struct sh_package_change {
     char *path;
     sh_package_change_kind kind;
-    /* Compiled declaration identity, independent of its native cooked path.
+    /* Compiled manager identity, independent of its native cooked path.
      * Owned copies survive retirement of the source provider. */
     char *type, *name;
+    /* Identity before a replacement. Complete compiler diffs retain both
+     * sides for native selection and allocation-free rollback. */
+    char *previous_type, *previous_name;
 } sh_package_change;
 typedef struct sh_package_changes {
     sh_package_change *items;
     size_t count;
+    /* Sorted unique native identity differences across the whole provider.
+     * Removing one permutation cannot retire a still-supplied native object. */
+    sh_package_native_identity *added, *removed;
+    size_t added_count, removed_count;
+    int identities_complete;
+    /* Surviving native identities whose captured constructor bindings changed,
+     * even when physical bytes did not. Select/reconstruct, never retire merely
+     * for appearing here. Owned, sorted, unique and unchanged by reversal. */
+    sh_package_native_identity *rebound;
+    size_t rebound_count;
+    /* Native images whose in-place recovery under a declared g_useImageBlackList 0 changes
+     * between the two publications (R-309): recover 1 when the later publication recovers it,
+     * 0 when its object returns to the native decision. Owned, sorted by name and unique;
+     * reversal flips recover. The bytes never change, so these are never retirements. */
+    struct sh_package_availability_change { char *type, *name; int recover; } *availability;
+    size_t availability_count;
 } sh_package_changes;
+typedef struct sh_package_availability_change sh_package_availability_change;
 /* Compare effective provider bytes, independent of package identity, ownership,
  * cache filename and authored duplicate count. NULL is an empty provider.
  * Opaque inputs use their captured SHA256/length; mixed memory/file inputs read
@@ -244,6 +712,9 @@ int sh_package_compilation_changes(const sh_package_compilation *before,
     const sh_package_compilation *after, sh_package_changes *out,
     char *error, size_t capacity);
 void sh_package_changes_free(sh_package_changes *changes);
+/* Reverse a retained transaction in place without allocation. Complete diffs
+ * swap replacement identities and provider identity sets as well as file kinds. */
+void sh_package_changes_reverse(sh_package_changes *changes);
 /* Check every resource supplied by the compiled map, including generated
  * inputs. A zero-missing result is sufficient to avoid reinstalling this
  * payload, without discovering every dependency the engine may request.
@@ -259,5 +730,17 @@ unsigned char *sh_package_compilation_read(const sh_package_compilation *compila
                                             const sh_compiled_resource *resource,
                                             size_t limit, size_t *length,
                                             char *error, size_t error_capacity);
+/* The bytes the engine is served: the resource's presented text when it has
+ * one, otherwise exactly what sh_package_compilation_read returns. */
+unsigned char *sh_package_compilation_read_served(const sh_package_compilation *compilation,
+                                            const sh_compiled_resource *resource,
+                                            size_t limit, size_t *length,
+                                            char *error, size_t error_capacity);
+/* Strong identity of the captured effective payload, without allocating opaque
+ * files. Source entries use their inventory digest; publication still verifies
+ * or seals those authored files so edits cannot enter an earlier snapshot. */
+int sh_package_compilation_identity(const sh_package_compilation *compilation,
+    const sh_compiled_resource *resource, sh_package_file_identity *out,
+    char *error, size_t error_capacity);
 
 #endif

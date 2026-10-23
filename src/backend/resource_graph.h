@@ -5,15 +5,13 @@
 #include <stdint.h>
 
 typedef struct sh_resource_graph_frame {
+    uint64_t context, serial;
     size_t node;
-    size_t *children;
-    size_t count, capacity;
     size_t generation;
     unsigned phase;
-    int expanded_inheritance;
-    int failed;
-    struct sh_resource_graph_frame *parent;
 } sh_resource_graph_frame;
+/* Frames are value tokens only. Owned scope state follows the execution
+ * fiber; no graph record points into a caller's stack. */
 
 /* Native hooks bracket each actual parse. A new source parse invalidates the
  * previous source and deferred-state edges. Entity definitions require both
@@ -37,6 +35,23 @@ void sh_resource_graph_end(sh_resource_graph_frame *frame, int parsed);
  * that fails before parsing uses this to preserve earlier partial evidence. */
 void sh_resource_graph_discard(sh_resource_graph_frame *frame);
 void sh_resource_graph_reference(const char *type, const char *name);
+/* A native read whose identity cannot be observed invalidates only the active
+ * phase; its other observed dependencies remain available. */
+void sh_resource_graph_incomplete(void);
+/* Positive nesting check before a scoped observer publishes a receipt. */
+int sh_resource_graph_frame_current(const sh_resource_graph_frame *frame);
+void sh_resource_graph_expanded_inheritance(sh_resource_graph_frame *frame, int expanded);
+/* A source frame that also records what a hooked lookup asked for and did not find (a
+ * retirement default's frame, R-321), so a later addition of that identity reaches this node
+ * as a recorded consumer. Nested frames do not inherit it; elsewhere a lookup that finds
+ * nothing records nothing. */
+void sh_resource_graph_begin_requests(sh_resource_graph_frame *frame, const char *type, const char *name);
+/* The same for canonical deferred entity state; missing names belong to that
+ * phase without replacing its source dependencies. */
+void sh_resource_graph_begin_state_requests(sh_resource_graph_frame *frame, const char *type,
+    const char *name, int expanded_inheritance);
+int sh_resource_graph_recording_requests(void);
+void sh_resource_graph_request(const char *type, const char *name);
 void sh_resource_graph_file(const char *path);
 /* Replace one product stage's exact file inputs without overwriting native
  * parse or other producer edges. No package metadata is involved. Empty input
@@ -93,8 +108,42 @@ sh_resource_graph_status sh_resource_graph_affected(const char *const *paths,
  * even when the original native read preceded graph instrumentation. */
 sh_resource_graph_status sh_resource_graph_consumers(
     const sh_resource_graph_identity *seeds, size_t count, sh_resource_graph_impact *out);
+/* The same closure stopped at consumers the barrier admits: such a node is
+ * neither returned nor followed unless it is itself a seed. Coverage is still
+ * reported for the whole recorded graph. The barrier runs under the graph lock
+ * and must not call back into the graph. */
+typedef int (*sh_resource_graph_barrier)(void *context, const char *type, const char *name);
+sh_resource_graph_status sh_resource_graph_consumers_bounded(
+    const sh_resource_graph_identity *seeds, size_t count,
+    sh_resource_graph_barrier barrier, void *context, sh_resource_graph_impact *out);
 void sh_resource_graph_impact_free(sh_resource_graph_impact *impact);
+/* The closure sh_resource_graph_consumers_bounded returns (seeds included), with coverage judged on
+ * that closure only: COMPLETE when every seed has a node and every node the walk visits, including
+ * barrier holders it stops at, has every recorded phase complete; else INCOMPLETE with the first
+ * unobserved seed or incompletely observed consumer named in first. Never a whole-graph claim and
+ * never a claim about consumers no recorded parse names. */
+sh_resource_graph_status sh_resource_graph_consumers_observed(const sh_resource_graph_identity *seeds,
+    size_t count, sh_resource_graph_barrier barrier, void *context, sh_resource_graph_impact *out,
+    char *first, size_t capacity);
 void sh_resource_graph_counts(size_t *nodes, size_t *complete, size_t *edges);
+/* Read history kept against an identity across reparses (R-309, copied state). A reparse replaces a
+ * node's edges and phases, never these bits. ESCAPED: a native size getter read the image's size, so a
+ * native owner may hold a copy that an in-place rebuild does not refresh. PRECAPTURE: the image already
+ * existed when size-read recording began, so reads before that are unknown. Marking interns the node. */
+enum {
+    SH_RESOURCE_GRAPH_HISTORY_ESCAPED = 1,
+    SH_RESOURCE_GRAPH_HISTORY_PRECAPTURE = 2
+};
+/* A mark that cannot be recorded (allocation failure) invalidates the size history. */
+void sh_resource_graph_history_mark(const char *type, const char *name, unsigned bits);
+unsigned sh_resource_graph_history(const char *type, const char *name);
+/* Begun once the size getters are hooked and every image then registered is marked PRECAPTURE; until
+ * then no image can be shown free of copies. Invalidation is permanent for the process: a size read
+ * whose image cannot be identified, or a lost mark, means no absence of reads can be shown any more,
+ * and a later begin does not restore it. */
+void sh_resource_graph_size_history_begin(void);
+void sh_resource_graph_size_history_invalidate(void);
+int sh_resource_graph_size_history_ready(void);
 
 #ifdef SH_RESOURCE_GRAPH_TESTING
 void sh_resource_graph_test_reset(void);

@@ -39,4 +39,15 @@ int sh_md6_mesh_references(const unsigned char *body, size_t length,
  * not a cooked animation, with the reason in error. */
 int sh_md6_anim_references(const unsigned char *body, size_t length,
     sh_md6_binary_visitor visitor, void *context, char *error, size_t capacity);
+
+/* Original idStr record spans, including the little-endian length prefix.
+ * Empty/placeholder names are not resource references. Queue edits until the
+ * complete reader succeeds; callbacks never authorize changing source bytes
+ * during the walk. Animation spans cover its verified skeleton header only. */
+typedef int (*sh_md6_binary_site_visitor)(void *context, const char *type, const char *name,
+    size_t offset, size_t length);
+int sh_md6_mesh_reference_sites(const unsigned char *body, size_t length,
+    sh_md6_binary_site_visitor visitor, void *context, char *error, size_t capacity);
+int sh_md6_anim_reference_sites(const unsigned char *body, size_t length,
+    sh_md6_binary_site_visitor visitor, void *context, char *error, size_t capacity);
 #endif

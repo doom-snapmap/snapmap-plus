@@ -3,7 +3,7 @@
 Mirrors src/backend/signatures.c: match masked byte patterns over the executable
 sections of a PE32+ image, uniqueness required.
 """
-import re, struct, sys, json
+import argparse, contextlib, re, struct, sys, json
 
 def strip_comments(s):
     out=[]; i=0; n=len(s)
@@ -22,7 +22,8 @@ def strip_comments(s):
     return ''.join(out)
 
 def parse_sigs(path):
-    src=open(path,encoding='utf-8',errors='replace').read()
+    with open(path,encoding='utf-8',errors='replace') as source:
+        src=source.read()
     body=src.split('BACKEND_ENGINE_SIGNATURES[] = {',1)[1]
     body=body.split('\n};',1)[0]
     body=strip_comments(body)
@@ -42,7 +43,8 @@ def compile_pat(pat):
     return bytes(b), bytes(mask)
 
 def exec_sections(path):
-    d=open(path,'rb').read()
+    with open(path,'rb') as image:
+        d=image.read()
     e=struct.unpack_from('<I',d,0x3c)[0]
     nsec=struct.unpack_from('<H',d,e+6)[0]
     secoff=e+24+struct.unpack_from('<H',d,e+20)[0]
@@ -80,10 +82,9 @@ def find_all(secs, pb, pm):
                 if len(hits)>4: return hits
     return hits
 
-if __name__=='__main__':
-    sigs=parse_sigs(sys.argv[1])
+def scan(sigs, images):
     results={}
-    for img in sys.argv[2:]:
+    for img in images:
         secs=exec_sections(img)
         rows=[]
         for name,pat,rva in sigs:
@@ -92,10 +93,38 @@ if __name__=='__main__':
             st='OK' if len(h)==1 else ('NOT_FOUND' if not h else 'AMBIGUOUS')
             rows.append({'name':name,'status':st,'hits':[hex(x) for x in h[:4]],'known_rva':hex(rva)})
         results[img]=rows
-    json.dump(results, open('.re-discipline/active/opengl-parity/work/sigscan.json','w'), indent=1)
+    return results
+
+
+def main(argv=None):
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('signatures', help='signature table source')
+    parser.add_argument('images', nargs='+', help='unpacked PE images')
+    parser.add_argument('--output', help='new JSON report; parent directory must exist')
+    args=parser.parse_args(argv)
+    try:
+        # Claim the requested output before an expensive scan. No implicit
+        # research directory or overwritten evidence is part of this tool.
+        with contextlib.ExitStack() as stack:
+            report=stack.enter_context(open(args.output, 'x', encoding='utf-8')) if args.output else None
+            sigs=parse_sigs(args.signatures)
+            if not sigs:
+                raise ValueError('no signatures were parsed')
+            results=scan(sigs, args.images)
+            if report:
+                json.dump(results, report, indent=1)
+                report.write('\n')
+    except (OSError, ValueError, IndexError, struct.error) as error:
+        print(f'sigscan: {error}', file=sys.stderr)
+        return 2
     for img,rows in results.items():
         ok=sum(1 for r in rows if r['status']=='OK')
         print(f"\n=== {img} : {ok}/{len(rows)} unique ===")
         for r in rows:
             if r['status']!='OK':
                 print(f"  {r['status']:10} {r['name']:24} known={r['known_rva']} hits={r['hits']}")
+    return 0 if all(r['status']=='OK' for rows in results.values() for r in rows) else 1
+
+
+if __name__=='__main__':
+    sys.exit(main())

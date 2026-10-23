@@ -16,6 +16,8 @@ typedef struct json_cursor {
     unsigned suppressed;
     int native_strings;
     sh_json_error *error;
+    sh_json_value_visitor value_visitor;
+    const sh_json_path *path;
 } json_cursor;
 
 static int json_fail(json_cursor *c, const char *reason)
@@ -325,7 +327,10 @@ static int scan_object(json_cursor *c, unsigned depth)
             follow = c->filter(c->visitor_context, key, key_length, depth);
         if (follow < 0) goto done;
         if (!follow) c->suppressed++;
+        sh_json_path path = {c->path, key, key_length, 0};
+        if (c->value_visitor) c->path = &path;
         scanned = scan_value(c, depth + 1, &keys[key_count - 1].kind);
+        if (c->value_visitor) c->path = path.parent;
         if (!follow) c->suppressed--;
         if (!scanned) goto done;
         keys[key_count - 1].value_length = (size_t)((const char *)c->p - keys[key_count - 1].value);
@@ -348,6 +353,7 @@ done:
 
 static int scan_array(json_cursor *c, unsigned depth)
 {
+    size_t index = 0;
     if (depth >= c->max_depth) return json_fail(c, "nesting limit exceeded");
     if (c->p >= c->end || *c->p != '[') return 0;
     c->p++;
@@ -357,7 +363,12 @@ static int scan_array(json_cursor *c, unsigned depth)
         return 1;
     }
     for (;;) {
-        if (!scan_value(c, depth + 1, NULL)) return 0;
+        sh_json_path path = {c->path, NULL, 0, index};
+        int scanned;
+        if (c->value_visitor) c->path = &path;
+        scanned = scan_value(c, depth + 1, NULL);
+        if (c->value_visitor) c->path = path.parent;
+        if (!scanned) return 0;
         skip_ws(c);
         if (c->p >= c->end) return 0;
         if (*c->p == ']') {
@@ -365,6 +376,8 @@ static int scan_array(json_cursor *c, unsigned depth)
             return 1;
         }
         if (*c->p != ',') return 0;
+        if (index == SIZE_MAX) return json_fail(c, "array index exceeds addressable size");
+        index++;
         c->p++;
         skip_ws(c);
     }
@@ -407,7 +420,7 @@ static int scan_literal(json_cursor *c, const char *literal)
     return 1;
 }
 
-static int scan_value(json_cursor *c, unsigned depth, sh_json_kind *out_kind)
+static int scan_value_body(json_cursor *c, unsigned depth, sh_json_kind *out_kind)
 {
     if (c->p >= c->end) return 0;
     switch (*c->p) {
@@ -442,6 +455,16 @@ int sh_json_validate(const char *json, size_t length, unsigned max_depth,
                      sh_json_kind *out_kind)
 {
     return sh_json_validate_ex(json, length, max_depth, out_kind, NULL);
+}
+
+static int scan_value(json_cursor *c, unsigned depth, sh_json_kind *out_kind)
+{
+    sh_json_kind kind;
+    const unsigned char *start = c->p;
+    if (!scan_value_body(c, depth, &kind)) return 0;
+    if (out_kind) *out_kind = kind;
+    return !c->value_visitor || c->suppressed || c->value_visitor(c->visitor_context,
+        c->path, (const char *)start, (size_t)(c->p - start), kind);
 }
 
 static int validate(const char *json, size_t length, unsigned max_depth,
@@ -513,6 +536,19 @@ int sh_native_json_visit_objects_filtered(const char *json, size_t length, unsig
                                           sh_json_field_filter filter, void *context)
 {
     return visit_objects_filtered(json, length, max_depth, visitor, filter, context, 1);
+}
+
+int sh_native_json_visit_values(const char *json, size_t length, unsigned max_depth,
+    sh_json_value_visitor visitor, void *context)
+{
+    json_cursor c = {0};
+    if (!json || !max_depth || !visitor) return 0;
+    c.begin = (const unsigned char *)json; c.p = c.begin; c.end = c.begin + length;
+    c.max_depth = max_depth; c.value_visitor = visitor; c.visitor_context = context;
+    c.native_strings = 1;
+    skip_ws(&c);
+    if (!scan_value(&c, 0, NULL)) return 0;
+    skip_ws(&c); return c.p == c.end;
 }
 
 static char *copy_range(const unsigned char *begin, const unsigned char *end)

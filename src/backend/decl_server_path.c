@@ -89,11 +89,14 @@ static int type_char(unsigned char c)
 static int name_char(unsigned char c)
 {
     /* The native scanner derives one logical name from the source path. Keep
-     * the portable path-token alphabet; punctuation such as braces,
-     * semicolons, equals, and parentheses is not a safe identity character
-     * even though Windows permits it in a filename. */
+     * the portable path-token alphabet plus the punctuation shipped
+     * declaration names use (SnapMap: "stage 2/c_0", "can't_...",
+     * "bfg_3p_[3p_lp]"; campaign: "soulcube_[mesh_(2)]"). Braces, semicolons,
+     * equals, quotes and commas are not safe identity characters even though
+     * Windows permits them in a filename. */
     return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-           (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.';
+           (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.' ||
+           c == ' ' || c == '\'' || c == '[' || c == ']' || c == '(' || c == ')';
 }
 
 static int dot_segment(const char *s, size_t n)
@@ -155,6 +158,8 @@ int sh_decl_server_identity_from_relative(const char *relative,
         if (i == segment_start) return refuse(reason, "empty logical-name segment");
         if (dot_segment(normalized + segment_start, i - segment_start))
             return refuse(reason, "dot traversal segment");
+        /* Windows drops a segment's trailing space, as package paths refuse. */
+        if (normalized[i - 1] == ' ') return refuse(reason, "logical-name segment ends in a space");
         segment_start = i + 1;
     }
 

@@ -315,8 +315,357 @@ static void impact_checks(void)
     sh_resource_graph_impact_free(&impact);
     sh_resource_graph_test_reset();
 }
+/* A barrier type is neither returned nor followed unless it is a seed; its
+ * consumers still arrive through any other path. */
+static int fixed_barrier(void *context, const char *type, const char *name)
+{
+    (void)name; ++*(int *)context;
+    return !strcmp(type, "renderparm");
+}
+static void barrier_checks(void)
+{
+    sh_resource_graph_frame frame;
+    sh_resource_graph_impact impact = {0};
+    sh_resource_graph_identity image = {"image", "black"}, parm = {"renderparm", "transmap"};
+    int calls = 0;
+    impact_source("image", "black", "generated/image/black.bimage");
+    sh_resource_graph_begin(&frame, "renderParm", "transmap");
+    sh_resource_graph_reference("image", "black");
+    sh_resource_graph_end(&frame, 1);
+    sh_resource_graph_begin(&frame, "renderProg", "font");
+    sh_resource_graph_reference("renderParm", "transmap");
+    sh_resource_graph_end(&frame, 1);
+    sh_resource_graph_begin(&frame, "material", "glyphs");
+    sh_resource_graph_reference("renderProg", "font");
+    sh_resource_graph_end(&frame, 1);
+    sh_resource_graph_begin(&frame, "material", "direct");
+    sh_resource_graph_reference("image", "black");
+    sh_resource_graph_end(&frame, 1);
+    CHECK(sh_resource_graph_consumers(&image, 1, &impact) == SH_RESOURCE_GRAPH_COMPLETE);
+    CHECK(impact.count == 5 && impact_has(&impact, "renderparm", "transmap") &&
+          impact_has(&impact, "material", "glyphs"));
+    sh_resource_graph_impact_free(&impact);
+    CHECK(sh_resource_graph_consumers_bounded(&image, 1, fixed_barrier, &calls, &impact) ==
+          SH_RESOURCE_GRAPH_COMPLETE);
+    CHECK(calls == 2 && impact.count == 2 && impact_has(&impact, "image", "black") &&
+          impact_has(&impact, "material", "direct"));
+    sh_resource_graph_impact_free(&impact);
+    /* A supplied barrier object keeps its consumers. */
+    CHECK(sh_resource_graph_consumers_bounded(&parm, 1, fixed_barrier, &calls, &impact) ==
+          SH_RESOURCE_GRAPH_COMPLETE);
+    CHECK(impact.count == 3 && impact_has(&impact, "renderparm", "transmap") &&
+          impact_has(&impact, "renderprog", "font") && impact_has(&impact, "material", "glyphs"));
+    sh_resource_graph_impact_free(&impact);
+    /* A shared consumer reached another way is still returned. */
+    sh_resource_graph_begin(&frame, "material", "glyphs");
+    sh_resource_graph_reference("renderProg", "font");
+    sh_resource_graph_reference("image", "black");
+    sh_resource_graph_end(&frame, 1);
+    CHECK(sh_resource_graph_consumers_bounded(&image, 1, fixed_barrier, &calls, &impact) ==
+          SH_RESOURCE_GRAPH_COMPLETE);
+    CHECK(impact.count == 3 && impact_has(&impact, "material", "glyphs") &&
+          !impact_has(&impact, "renderprog", "font"));
+    sh_resource_graph_impact_free(&impact);
+    sh_resource_graph_test_reset();
+}
+static int rooted_file_visit(void *context, const char *parent_type, const char *parent_name,
+    const char *type, const char *name)
+{
+    unsigned *seen = context;
+    (void)parent_type; (void)parent_name;
+    if (!*type) {
+        CHECK(!strcmp(name, "decls/renderprogs/global.inc")); ++*seen;
+    }
+    return 1;
+}
+static void rooted_file_checks(void)
+{
+    sh_resource_graph_frame frame;
+    sh_resource_graph_impact impact = {0};
+    const char *input[] = {"\\DECLS\\renderprogs\\GLOBAL.inc"};
+    size_t nodes, complete, edges;
+    unsigned seen = 0;
+    sh_resource_graph_test_reset();
+    sh_resource_graph_begin(&frame, "material", "stock/cap");
+    sh_resource_graph_file("/decls/renderprogs/global.inc");
+    sh_resource_graph_file(input[0]);
+    sh_resource_graph_file("decls/renderprogs/global.inc");
+    sh_resource_graph_end(&frame, 1);
+    CHECK(sh_resource_graph_walk_status("material", "stock/cap", rooted_file_visit, &seen) ==
+        SH_RESOURCE_GRAPH_COMPLETE && seen == 1);
+    sh_resource_graph_counts(&nodes, &complete, &edges);
+    CHECK(nodes == 2 && complete == 2 && edges == 1);
+    CHECK(sh_resource_graph_walk_status("", "/decls/renderprogs/global.inc", rooted_file_visit, &seen) ==
+        SH_RESOURCE_GRAPH_COMPLETE && seen == 2);
+    CHECK(sh_resource_graph_producer_inputs("shader compile", "/generated/program.bin", input, 1));
+    CHECK(sh_resource_graph_affected(input, 1, &impact) == SH_RESOURCE_GRAPH_COMPLETE);
+    CHECK(impact.count == 3 && impact_has(&impact, "material", "stock/cap") &&
+        impact_has(&impact, "", "generated/program.bin"));
+    sh_resource_graph_impact_free(&impact);
+    CHECK(sh_resource_graph_producer_inputs("shader compile", "generated/program.bin", NULL, 0));
+    CHECK(sh_resource_graph_affected(input, 1, &impact) == SH_RESOURCE_GRAPH_COMPLETE);
+    CHECK(impact.count == 2 && !impact_has(&impact, "", "generated/program.bin"));
+    sh_resource_graph_impact_free(&impact);
+    /* Only filesystem identities use the virtual-root rule. */
+    sh_resource_graph_begin(&frame, "material", "/named");
+    sh_resource_graph_end(&frame, 1);
+    CHECK(sh_resource_graph_walk_status("material", "named", rooted_file_visit, &seen) ==
+        SH_RESOURCE_GRAPH_INCOMPLETE);
+    sh_resource_graph_test_reset();
+}
+/* R-309 copied-size history: a read recorded against an image survives the consumer's reparse to another
+ * image and the image's own rebuild frame; only the test reset clears it. Marking an unknown identity
+ * interns it without completing it, and the history begins only when told. */
+static void history_checks(void)
+{
+    sh_resource_graph_frame frame;
+    sh_resource_graph_test_reset();
+    CHECK(!sh_resource_graph_size_history_ready() && !sh_resource_graph_history("image", "i"));
+    sh_resource_graph_begin(&frame, "material", "m"); sh_resource_graph_reference("image", "I");
+    sh_resource_graph_end(&frame, 1);
+    sh_resource_graph_history_mark("image", "I", SH_RESOURCE_GRAPH_HISTORY_ESCAPED);
+    sh_resource_graph_begin(&frame, "material", "m"); sh_resource_graph_reference("image", "J");
+    sh_resource_graph_end(&frame, 1);
+    sh_resource_graph_begin(&frame, "image", "i"); sh_resource_graph_end(&frame, 1);
+    CHECK(sh_resource_graph_history("image", "I") == SH_RESOURCE_GRAPH_HISTORY_ESCAPED);
+    CHECK(!sh_resource_graph_history("image", "J"));
+    sh_resource_graph_history_mark("image", "new", SH_RESOURCE_GRAPH_HISTORY_PRECAPTURE);
+    sh_resource_graph_history_mark("image", "NEW", SH_RESOURCE_GRAPH_HISTORY_ESCAPED);
+    CHECK(sh_resource_graph_history("image", "new") ==
+        (SH_RESOURCE_GRAPH_HISTORY_PRECAPTURE | SH_RESOURCE_GRAPH_HISTORY_ESCAPED));
+    sh_resource_graph_identity seed = {"image", "new"};
+    sh_resource_graph_impact impact = {0};
+    CHECK(sh_resource_graph_consumers(&seed, 1, &impact) == SH_RESOURCE_GRAPH_INCOMPLETE);
+    sh_resource_graph_impact_free(&impact);
+    sh_resource_graph_size_history_begin();
+    CHECK(sh_resource_graph_size_history_ready());
+    sh_resource_graph_test_reset();
+    CHECK(!sh_resource_graph_size_history_ready() && !sh_resource_graph_history("image", "I"));
+}
+/* R-321 request frames. A retirement default's frame also records names a hooked find asked for and did not
+ * find. Only that frame records them: an ordinary frame, a nested parse inside it, a paused scope and no frame
+ * at all record nothing. The latest frame replaces the identity's requests, and only a completed frame lets
+ * the consumer closure count them as observed. */
+static int observed_closure(const char *type, const char *name, sh_resource_graph_impact *impact, char first[160])
+{
+    sh_resource_graph_identity seed = {(char *)type, (char *)name};
+    return (int)sh_resource_graph_consumers_observed(&seed, 1, NULL, NULL, impact, first, 160);
+}
+static void request_checks(void)
+{
+    sh_resource_graph_frame defaulted, nested, paused, ordinary;
+    sh_resource_graph_impact impact = {0};
+    size_t nodes, complete, edges;
+    char first[160];
+    sh_resource_graph_test_reset();
+    CHECK(!sh_resource_graph_recording_requests());
+    sh_resource_graph_request("image", "env/outside");
+    sh_resource_graph_begin(&ordinary, "discreteAnimation", "anim/live");
+    CHECK(sh_resource_graph_recording() && !sh_resource_graph_recording_requests());
+    sh_resource_graph_request("image", "env/plain");
+    sh_resource_graph_reference("image", "env/default"); /* a found object is a reference in any frame */
+    sh_resource_graph_end(&ordinary, 1);
+    sh_resource_graph_begin_requests(&defaulted, "discreteAnimation", "anim/retired");
+    CHECK(sh_resource_graph_recording_requests());
+    sh_resource_graph_request("image", "env/later");
+    sh_resource_graph_begin(&nested, "material", "nested");
+    CHECK(sh_resource_graph_recording() && !sh_resource_graph_recording_requests());
+    sh_resource_graph_request("image", "env/nested");
+    sh_resource_graph_end(&nested, 1);
+    sh_resource_graph_pause(&paused);
+    CHECK(!sh_resource_graph_recording_requests());
+    sh_resource_graph_request("image", "env/paused");
+    sh_resource_graph_end(&paused, 0);
+    CHECK(sh_resource_graph_recording_requests()); /* the default's own frame records again */
+    sh_resource_graph_request("IMAGE", "ENV\\LATER"); /* the same identity, folded */
+    sh_resource_graph_reference("image", "env/default");
+    sh_resource_graph_end(&defaulted, 1);
+    CHECK(!sh_resource_graph_recording() && !sh_resource_graph_recording_requests());
+    sh_resource_graph_counts(&nodes, &complete, &edges);
+    /* anim/live, env/default, anim/retired, env/later and material:nested; nothing for the unrecorded names. */
+    CHECK(nodes == 5 && complete == 3 && edges == 4);
+    CHECK(observed_closure("image", "env/later", &impact, first) == SH_RESOURCE_GRAPH_COMPLETE && !first[0]);
+    CHECK(impact.count == 2 && impact_has(&impact, "discreteanimation", "anim/retired"));
+    sh_resource_graph_impact_free(&impact);
+    CHECK(observed_closure("material", "nested", &impact, first) == SH_RESOURCE_GRAPH_COMPLETE);
+    CHECK(impact.count == 2 && impact_has(&impact, "discreteanimation", "anim/retired"));
+    sh_resource_graph_impact_free(&impact);
+    CHECK(observed_closure("image", "env/default", &impact, first) == SH_RESOURCE_GRAPH_COMPLETE);
+    CHECK(impact.count == 3 && impact_has(&impact, "discreteanimation", "anim/live") &&
+        impact_has(&impact, "discreteanimation", "anim/retired"));
+    sh_resource_graph_impact_free(&impact);
+    {
+        const char *unrecorded[] = {"env/plain", "env/nested", "env/paused", "env/outside"};
+        for (int i = 0; i < 4; i++) {
+            char want[160];
+            snprintf(want, sizeof(want), "image:%s (no recorded node)", unrecorded[i]);
+            CHECK(observed_closure("image", unrecorded[i], &impact, first) == SH_RESOURCE_GRAPH_INCOMPLETE);
+            CHECK(!impact.count && !strcmp(first, want));
+            sh_resource_graph_impact_free(&impact);
+        }
+    }
+    /* An unrelated change: a completely observed consumer of another identity, never the retired default. */
+    sh_resource_graph_begin(&ordinary, "material", "elsewhere");
+    sh_resource_graph_reference("image", "env/unrelated");
+    sh_resource_graph_end(&ordinary, 1);
+    CHECK(observed_closure("image", "env/unrelated", &impact, first) == SH_RESOURCE_GRAPH_COMPLETE);
+    CHECK(impact.count == 2 && !impact_has(&impact, "discreteanimation", "anim/retired"));
+    sh_resource_graph_impact_free(&impact);
+    /* An incomplete end keeps the edges the frame recorded but leaves the identity incompletely observed. */
+    sh_resource_graph_begin_requests(&defaulted, "discreteanimation", "anim/retired");
+    sh_resource_graph_request("image", "env/later");
+    sh_resource_graph_end(&defaulted, 0);
+    CHECK(observed_closure("image", "env/later", &impact, first) == SH_RESOURCE_GRAPH_INCOMPLETE);
+    CHECK(!strcmp(first, "discreteanimation:anim/retired") && impact.count == 2 &&
+        impact_has(&impact, "discreteanimation", "anim/retired"));
+    sh_resource_graph_impact_free(&impact);
+    /* A later frame replaces the requests: env/later keeps its node, but no consumer. */
+    sh_resource_graph_begin_requests(&defaulted, "discreteanimation", "anim/retired");
+    sh_resource_graph_request("image", "env/other");
+    sh_resource_graph_end(&defaulted, 1);
+    CHECK(observed_closure("image", "env/later", &impact, first) == SH_RESOURCE_GRAPH_COMPLETE);
+    CHECK(impact.count == 1 && !impact_has(&impact, "discreteanimation", "anim/retired"));
+    sh_resource_graph_impact_free(&impact);
+    CHECK(observed_closure("image", "env/other", &impact, first) == SH_RESOURCE_GRAPH_COMPLETE);
+    CHECK(impact.count == 2 && impact_has(&impact, "discreteanimation", "anim/retired"));
+    sh_resource_graph_impact_free(&impact);
+    CHECK(observed_closure("image", "env/default", &impact, first) == SH_RESOURCE_GRAPH_COMPLETE);
+    CHECK(impact.count == 2 && !impact_has(&impact, "discreteanimation", "anim/retired"));
+    sh_resource_graph_impact_free(&impact);
+    /* Canonical deferred state has its own request set. Refreshing the state
+     * preserves source requests; a later state read replaces only its phase. */
+    sh_resource_graph_begin_requests(&ordinary, "entitydef", "state-owner");
+    sh_resource_graph_request("image", "source/missing");
+    sh_resource_graph_end(&ordinary, 1);
+    sh_resource_graph_begin_state_requests(&nested, "entitydef", "state-owner", 1);
+    CHECK(sh_resource_graph_recording_requests());
+    sh_resource_graph_request("material", "state/missing");
+    sh_resource_graph_pause(&paused);
+    sh_resource_graph_request("material", "instance/missing");
+    sh_resource_graph_end(&paused, 0);
+    sh_resource_graph_end(&nested, 1);
+    CHECK(observed_closure("material", "state/missing", &impact, first) == SH_RESOURCE_GRAPH_COMPLETE);
+    CHECK(impact.count == 2 && impact_has(&impact, "entitydef", "state-owner"));
+    sh_resource_graph_impact_free(&impact);
+    CHECK(observed_closure("image", "source/missing", &impact, first) == SH_RESOURCE_GRAPH_COMPLETE);
+    CHECK(impact.count == 2 && impact_has(&impact, "entitydef", "state-owner"));
+    sh_resource_graph_impact_free(&impact);
+    sh_resource_graph_begin_state_requests(&nested, "entitydef", "state-owner", 1);
+    sh_resource_graph_end(&nested, 1);
+    CHECK(observed_closure("material", "state/missing", &impact, first) == SH_RESOURCE_GRAPH_COMPLETE);
+    CHECK(impact.count == 1 && !impact_has(&impact, "entitydef", "state-owner"));
+    sh_resource_graph_impact_free(&impact);
+    CHECK(observed_closure("image", "source/missing", &impact, first) == SH_RESOURCE_GRAPH_COMPLETE);
+    CHECK(impact.count == 2 && impact_has(&impact, "entitydef", "state-owner"));
+    sh_resource_graph_impact_free(&impact);
+    CHECK(observed_closure("material", "instance/missing", &impact, first) == SH_RESOURCE_GRAPH_INCOMPLETE);
+    CHECK(!impact.count);
+    sh_resource_graph_impact_free(&impact);
+    sh_resource_graph_test_reset();
+}
+static void *graph_main_fiber;
+static sh_resource_graph_frame graph_other_token, graph_abandoned_token;
+static int graph_fiber_mode;
+static int graph_fiber_visit(void *context,const char *parent_type,const char *parent_name,const char *type,const char *name)
+{
+    (void)parent_type; (void)parent_name;
+    unsigned *seen=context;
+    if (!*type && !strcmp(name,"fiber/a")) *seen|=1;
+    if (!*type && !strcmp(name,"fiber/b")) *seen|=2;
+    if (!*type && !strcmp(name,"fiber/after")) *seen|=4;
+    return 1;
+}
+static int graph_fiber_walk(const char *name,unsigned *seen)
+{ *seen=0; return sh_resource_graph_walk("material",name,graph_fiber_visit,seen); }
+static void CALLBACK graph_fiber(void *unused)
+{
+    (void)unused;
+    sh_resource_graph_frame local;
+    const char *name=graph_fiber_mode==1 ? "abandoned" : graph_fiber_mode==2 ? "cross-a" : "fiber-a";
+    sh_resource_graph_begin_requests(&local,"material",name);
+    sh_resource_graph_file("fiber/a");
+    CHECK(sh_resource_graph_frame_current(&local) && sh_resource_graph_recording_requests());
+    if(graph_fiber_mode==1) {
+        graph_abandoned_token=local; SwitchToFiber(graph_main_fiber); CHECK(0);
+    }
+    if(graph_fiber_mode==2) {
+        CHECK(!sh_resource_graph_frame_current(&graph_other_token));
+        sh_resource_graph_end(&graph_other_token,1); /* wrong fiber must not pop its owner */
+        CHECK(sh_resource_graph_frame_current(&local));
+    } else {
+        SwitchToFiber(graph_main_fiber);
+        CHECK(sh_resource_graph_frame_current(&local) && sh_resource_graph_recording_requests());
+        sh_resource_graph_file("fiber/after");
+    }
+    sh_resource_graph_end(&local,1);
+    CHECK(!sh_resource_graph_recording());
+    SwitchToFiber(graph_main_fiber); CHECK(0);
+}
+static DWORD WINAPI graph_abandoned_thread(LPVOID unused)
+{
+    (void)unused; sh_resource_graph_frame local;
+    sh_resource_graph_begin(&local,"material","thread-abandoned");
+    sh_resource_graph_file("fiber/a"); return 0;
+}
+static void fiber_checks(void)
+{
+    sh_resource_graph_frame outer,inner; unsigned seen=0;
+    sh_resource_graph_test_reset();
+    int converted=!IsThreadAFiber();
+    graph_main_fiber=converted ? ConvertThreadToFiber(NULL) : GetCurrentFiber(); CHECK(graph_main_fiber);
+    graph_fiber_mode=0; void *fiber=CreateFiber(0,graph_fiber,NULL); CHECK(fiber);
+    SwitchToFiber(fiber);
+    CHECK(!sh_resource_graph_recording());
+    sh_resource_graph_begin(&outer,"material","fiber-b"); graph_other_token=outer;
+    sh_resource_graph_file("fiber/b");
+    SwitchToFiber(fiber);
+    CHECK(sh_resource_graph_frame_current(&outer));
+    sh_resource_graph_end(&outer,1); DeleteFiber(fiber);
+    CHECK(!sh_resource_graph_recording()); /* drains without reading a deleted fiber's stack */
+    CHECK(graph_fiber_walk("fiber-a",&seen) && seen==5);
+    CHECK(graph_fiber_walk("fiber-b",&seen) && seen==2);
+    graph_fiber_mode=1; fiber=CreateFiber(0,graph_fiber,NULL); CHECK(fiber);
+    SwitchToFiber(fiber); DeleteFiber(fiber);
+    CHECK(!sh_resource_graph_recording());
+    CHECK(!graph_fiber_walk("abandoned",&seen) && seen==1);
+    sh_resource_graph_begin(&outer,"material","abandoned"); sh_resource_graph_end(&outer,1);
+    CHECK(graph_fiber_walk("abandoned",&seen)); /* no stranded active counter */
+    sh_resource_graph_end(&graph_abandoned_token,1);
+    CHECK(graph_fiber_walk("abandoned",&seen)); /* an older generation cannot retire a fresh parse */
+    graph_fiber_mode=2;
+    sh_resource_graph_begin(&outer,"material","cross-b"); graph_other_token=outer;
+    fiber=CreateFiber(0,graph_fiber,NULL); CHECK(fiber); SwitchToFiber(fiber);
+    CHECK(sh_resource_graph_frame_current(&outer)); sh_resource_graph_end(&outer,1); DeleteFiber(fiber);
+    CHECK(!sh_resource_graph_recording());
+    CHECK(!graph_fiber_walk("cross-a",&seen) && !graph_fiber_walk("cross-b",&seen));
+    /* Out-of-order and stale completion publish no success and cannot
+     * underflow either node's active count on a later duplicate finish. */
+    sh_resource_graph_begin(&outer,"material","out-outer");
+    sh_resource_graph_begin(&inner,"material","out-inner");
+    sh_resource_graph_end(&outer,1); CHECK(!sh_resource_graph_recording());
+    sh_resource_graph_end(&inner,1);
+    CHECK(!graph_fiber_walk("out-outer",&seen) && !graph_fiber_walk("out-inner",&seen));
+    sh_resource_graph_begin(&outer,"material","out-outer"); sh_resource_graph_end(&outer,1);
+    sh_resource_graph_begin(&inner,"material","out-inner"); sh_resource_graph_end(&inner,1);
+    CHECK(graph_fiber_walk("out-outer",&seen) && graph_fiber_walk("out-inner",&seen));
+    sh_resource_graph_end(&inner,1); CHECK(!graph_fiber_walk("out-inner",&seen));
+    sh_resource_graph_begin(&inner,"material","out-inner"); sh_resource_graph_end(&inner,1);
+    CHECK(graph_fiber_walk("out-inner",&seen));
+    HANDLE thread=CreateThread(NULL,0,graph_abandoned_thread,NULL,0,NULL); CHECK(thread);
+    WaitForSingleObject(thread,INFINITE); CloseHandle(thread);
+    CHECK(!sh_resource_graph_recording());
+    CHECK(!graph_fiber_walk("thread-abandoned",&seen) && seen==1);
+    sh_resource_graph_begin(&outer,"material","thread-abandoned"); sh_resource_graph_end(&outer,1);
+    CHECK(graph_fiber_walk("thread-abandoned",&seen));
+    if(converted) CHECK(ConvertFiberToThread());
+    sh_resource_graph_test_reset();
+}
 int main(void)
 {
+    fiber_checks();
+    history_checks();
+    rooted_file_checks();
+    request_checks();
     {
         sh_resource_graph_frame source, native, fallback;
         sh_resource_graph_begin(&source, "entitydef", "static_guard");
@@ -389,6 +738,7 @@ int main(void)
     producer_checks();
     sh_resource_graph_test_reset();
     impact_checks();
+    barrier_checks();
     if (failures) return 1;
     puts("native dependency graph checks passed"); return 0;
 }

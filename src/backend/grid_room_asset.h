@@ -11,6 +11,12 @@ typedef void (*sh_grid_asset_release_fn)(void *context,void *bytes);
  * unrelated, -1 means an invalid private identity or allocation failure. */
 int sh_grid_asset_canonical(const char *name, char **path);
 
+/* The private module whose family a claimed name belongs to: 1 writes its
+ * module path maps/modules/smpgrid/v1/<k>/<dims> (no extension), 0 means
+ * unrelated or too small a buffer, -1 an invalid private identity. Input uses
+ * engine normalization, as for sh_grid_asset_canonical. */
+int sh_grid_asset_module(const char *name, char *module, size_t capacity);
+
 /* Decode only the feature's private names, then transform the effective stock
  * source. 0 = unrelated name, 1 = malloc-owned output, -1 = claimed name could
  * not be served. A claimed failure must never fall through to stock geometry.

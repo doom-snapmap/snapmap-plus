@@ -19,6 +19,11 @@
  * registration is complete at that boundary on both supported renderers.
  * Returns 1 when armed (including an empty authored inventory), 0 on refusal.
  */
+/* R-400: run inside the boot promotion (engine thread, boot scope) of a boot whose first registration waits for
+ * the menu; 1 when the shader sources the library needs are prepared, else 0 with why, and the boot registers
+ * inside the promotion instead. */
+typedef int (*sh_decl_server_boot_preparation_fn)(char *why, size_t capacity);
+void sh_decl_server_set_boot_preparation(sh_decl_server_boot_preparation_fn prepare);
 int sh_decl_server_install(const sig_result *results, size_t count,
                            const uint8_t *module_base, void *cmdsys);
 
@@ -43,7 +48,11 @@ int sh_decl_server_rearm(void);
  */
 void sh_decl_server_request_rearm(void);
 
-/* Advance a requested re-arm. Call from the engine tick (main thread). No-op when idle. */
+/* Advance a requested re-arm. Call from the engine tick (main thread). No-op when idle.
+ * It also notices installed packages changed outside an installation (a
+ * corrected package that failed the preparation or was left out of a served
+ * library) and requests a re-arm once the change has settled and differs from
+ * what the last preparation read, so it is served in the same process. */
 void sh_decl_server_rearm_poll(void);
 /* Main-thread map preflight admits settled SnapMap map information, browser,
  * tile browser and lobby menus with no active editor or native loading. */
@@ -58,11 +67,80 @@ int sh_decl_server_map_browser_present(void);
 int sh_decl_server_map_editor_matches(const void *editor);
 struct sh_package_map_plan;
 int sh_decl_server_activate_map(struct sh_package_map_plan *plan);
+struct sh_package_occurrence_snapshot;
+int sh_decl_server_activate_occurrences(const struct sh_package_occurrence_snapshot *map);
+typedef struct sh_decl_server_occurrence_hooks {
+    void *context;
+    int (*prepare)(void *context, char *error, size_t capacity);
+    int (*finalize)(void *context, char *error, size_t capacity);
+    int (*rollback)(void *context, char *error, size_t capacity);
+} sh_decl_server_occurrence_hooks;
+/* Active-editor preThink admission. Prepare native staging only after fresh
+ * resources and named templates are available, while resident scopes are held.
+ * Finalize owns installation commit and a prevalidated no-fail staging transfer.
+ * Rollback releases temporary staging before native/provider recovery. A NULL
+ * plan performs the same staged native transaction for vanilla/local content.
+ * Returns a SH_PACKAGE_ADMISSION_* result; never switches the current map. */
+int sh_decl_server_admit_occurrences(struct sh_package_map_plan *plan,
+    const struct sh_package_occurrence_snapshot *document,
+    const sh_decl_server_occurrence_hooks *hooks, char *error, size_t capacity);
+/* A failed native teardown retains the copied hooks and their caller context.
+ * Keep that context alive until this returns zero; main-thread maintenance
+ * retries cleanup at the owning editor frame or a retired-map boundary. */
+int sh_decl_server_occurrence_recovery_pending(void *hooks_context);
+void sh_decl_server_occurrence_maintenance(void);
+struct sh_package_shader_preparation;
+/* Source construction is admitted separately from source compilation. The
+ * caller retains its immutable candidate and releases all provider locks.
+ * Returns 1 verified, 0 refused/recovered, or -1 if native recovery failed. */
+int sh_decl_server_shader_preparation_ready(void);
+int sh_decl_server_prepare_shaders(struct sh_package_shader_preparation *batch,
+    char *error, size_t capacity);
 
 /* Bind the verified native registry and read-only source existence for a
  * short main-thread dependency pass. No compiler snapshot lock may be held
  * while the returned source callback enters the native source probe. */
 int sh_decl_server_registry_source(sh_decl_registry_source *source);
+
+/* Exact editor-row publication lineage for a live snapeditorentitydef decl.
+ * row_class: 1 product publication (name, at least 65 bytes, receives its
+ * portable identity: 64 hex digits naming the authored row, the provider
+ * binding's original and the exact source files compiled for it; equal on
+ * every renderer and for every dependency variant of that row), 2 a product
+ * publication whose changed bytes occupy an installed SnapMap original's path,
+ * its native slot (identity, resolve and supply as 1), 0 positively native
+ * original, -1 unknown or unidentified.
+ * row_resolve: the one current product publication carrying an identity (the
+ * portable one, or the registered-bytes identity earlier maps recorded);
+ * NULL for none or several. It is not supplier authority: a variant shares
+ * the portable identity and differs only in its supply.
+ * row_named: 1 when decl's current product publication carries name as its
+ * portable identity or as the registered-bytes identity earlier maps recorded
+ * (that decl's own record, never a search), else 0. Like resolve, it is not
+ * supplier authority.
+ * row_supply: copies the publication's exact binding (original and every
+ * linked supplying context) into out, owned by the caller; 1 copied, 0 none.
+ * row_exact: writes the registered-bytes identity of decl's current product
+ * publication (every dependency's private name included, so a dependency
+ * variant differs) as 64 hex digits; 1 written, 0 none. row_resolve and
+ * row_named accept it. It names this provider's spelling and is never saved.
+ * row_name: writes decl's registered name, as the engine reads it; 1
+ * written, 0 when unreadable, empty or longer than capacity.
+ * rows_retired: called before a pass registers anything, so stored editor
+ * row pointers retire before any object can be freed or replaced. */
+struct sh_package_provenance;
+int sh_decl_server_row_class(const void *decl, char *name, size_t capacity);
+const void *sh_decl_server_row_resolve(const char *name);
+int sh_decl_server_row_named(const void *decl, const char *name);
+int sh_decl_server_row_supply(const void *decl, struct sh_package_provenance *out);
+int sh_decl_server_row_exact(const void *decl, char *name, size_t capacity);
+int sh_decl_server_row_name(const void *decl, char *name, size_t capacity);
+void sh_decl_server_rows_retired(void (*retired)(void));
+/* R-309 in-place image recovery: the native image state probe (image_exclusion.h contract:
+ * 1 exclusion placeholder, 0 not, -1 unknown). After the resident drain, a forward activation
+ * that recovers an image fails while its object is not shown out of the exclusion state; with no
+ * probe installed such an activation cannot be verified and fails. Restoring passes only log. */
+void sh_decl_server_image_state(int (*state)(const char *name, const unsigned char *installed, size_t length));
 
 #ifdef SH_DECL_SERVER_TESTING
 #include <windows.h>
@@ -71,6 +149,27 @@ struct sh_package_compilation;
 int sh_decl_server_test_capture(const struct sh_package_compilation *compiled,
                                  size_t *count, size_t *bytes);
 void sh_decl_server_test_fail_mark_allocation(int fail);
+/* Installed-package change tracking: settle time before a changed inventory is
+ * prepared again, first reopen interval of a lost watch, how often the watched
+ * directory's identity is checked, and the first interval before an unanswered
+ * request is repeated (2000, 1000, 5000 and 2000 ms outside tests); counts of
+ * watch opens and of re-arms requested for changes; force the next opens to
+ * fail. */
+void sh_decl_server_test_inventory_timing(unsigned long quiet_ms, unsigned long backoff_ms, unsigned long identity_ms,
+    unsigned long request_ms);
+/* The idle retirement poll's retry base and cap, and its activation attempts so far. */
+void sh_decl_server_test_retirement_timing(unsigned long base_ms, unsigned long cap_ms);
+long sh_decl_server_test_retirement_attempts(void);
+long sh_decl_server_test_inventory_opens(void);
+long sh_decl_server_test_inventory_requests(void);
+/* Request a pass of the installed-package watcher's kind. */
+void sh_decl_server_test_request_watched(void);
+void sh_decl_server_test_forget_registration(void);
+void sh_decl_server_test_perturb_registration(void);
+void sh_decl_server_test_inventory_fail_opens(long count);
+/* Close the watch as if its handle failed; it may reopen at once. */
+void sh_decl_server_test_inventory_drop(void);
+void sh_decl_server_test_occurrence_ready(void *editor);
 
 typedef struct sh_decl_server_test_find_api {
     HANDLE (WINAPI *find_first)(LPCSTR pattern, LPWIN32_FIND_DATAA found);
@@ -145,7 +244,20 @@ typedef struct sh_decl_server_test_materialize_item {
     size_t body_length;
     int shadow_kind;
     int native_original;
+    int reserve_cycle;
+    size_t inherit_parent;
+    int rebound_original;   /* package_compiler.h rebound_original */
+    const char *original;   /* its installed original's declaration name */
+    const char *native_default; /* the undeclared render program its text names, or NULL */
 } sh_decl_server_test_materialize_item;
+
+void sh_decl_server_test_set_resource_add(void (*fn)(void *manager, void *decl));
+/* The native ABI the install resolves from signatures: the registry anchor
+ * instruction and the declaration functions. */
+void sh_decl_server_test_bind_native(const unsigned char *anchor,
+    sh_decl_server_test_type_by_name_fn type_by_name, sh_decl_server_test_register_file_fn register_file,
+    sh_decl_server_test_find_decl_fn find_decl, sh_decl_server_test_source_find_fn source_find,
+    sh_decl_server_test_idstr_ctor_fn ctor, sh_decl_server_test_idstr_dtor_fn dtor);
 
 /* Exercise the production source-first classification order. The return value
  * distinguishes an existing native source record from a live decl fallback;
@@ -173,6 +285,7 @@ int sh_decl_server_test_register_candidate(
  * protocol's outcome assertable. */
 typedef void (*sh_decl_server_test_generic_load_fn)(void *decl);
 void sh_decl_server_test_set_runtime(int active);
+void sh_decl_server_test_set_additive(int active);
 void sh_decl_server_test_set_resident(void *pass);
 void sh_decl_server_test_set_generic_load(sh_decl_server_test_generic_load_fn fn);
 void sh_decl_server_test_set_reconstruct(sh_decl_server_test_generic_load_fn fn,
@@ -180,6 +293,8 @@ void sh_decl_server_test_set_reconstruct(sh_decl_server_test_generic_load_fn fn,
 void sh_decl_server_test_reset_runtime_state(void);
 void sh_decl_server_test_runtime_counters(long *marked_pending, long *left_loaded,
                                           long *shadow_reparsed, long *drain_faults);
+/* The last pass's isolated identities: present, defaulted materials refused without ending the pass. */
+int sh_decl_server_test_isolated_defaults(void);
 int sh_decl_server_test_clear_stray_pending(void);
 
 /* Run the production two-phase materialization pass against a test candidate
@@ -204,10 +319,26 @@ int sh_decl_server_test_scan_and_materialize_missing(
     sh_decl_server_test_register_file_fn register_file,
     int *registered, int *materialized, int *failure_phase);
 void sh_decl_server_test_reset_install(void);
+const char *sh_decl_server_test_occurrence_source_name(void *decl);
+/* Editor-row lineage as one pass records it (every candidate registered). */
+int sh_decl_server_test_rows_record(const struct sh_package_compilation *compiled, int published);
+void sh_decl_server_test_rows_manager(void *manager, void *(*source_find)(void *manager, const char *name));
+void sh_decl_server_test_rows_bindings(const struct sh_package_provenance *bindings);
+/* NULL: development source mode (source records); else production mode, whose
+ * native provenance is this resource-index probe (1, 0, -1). */
+void sh_decl_server_test_rows_production(int (*native_exists)(const char *path));
+size_t sh_decl_server_test_rows_count(void);
+void sh_decl_server_test_rows_reset(void);
+int sh_decl_server_test_palette_hold(void *batch);
+int sh_decl_server_test_palette_maintenance(void);
+size_t sh_decl_server_test_palette_holds(void);
 int sh_decl_server_test_apply(const sh_decl_server_test_materialize_item *items,
                               size_t count, int runtime);
 int sh_decl_server_test_lifetime_watermark(void);
 int sh_decl_server_test_promote_delta(void);
+int sh_decl_server_test_prepare_shaders(struct sh_package_shader_preparation *batch,
+    sh_decl_server_test_find_decl_fn find, char *error, size_t capacity);
+int sh_decl_server_test_shader_recovery(void);
 #endif
 
 #endif /* BACKEND_DECL_SERVER_H */

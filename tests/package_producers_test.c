@@ -9,6 +9,7 @@
 
 static const char *target = "generated/decls/material/a_derived.decl";
 static const char *stock = "generated/decls/material/z_stock.decl";
+static const char *middle = "generated/decls/material/m_middle.decl"; /* generated from stock (mode 6) */
 static const char *base = "{ edit = { x = 1; y = 2; } }";
 static const char *edit_x = "{ edit = { x = 9; y = 2; } }";
 static const char *edit_y = "{ edit = { x = 1; y = 8; } }";
@@ -35,9 +36,10 @@ static int produce(void *context, const char *path, sh_package_producer_reader r
     const char *input;
     int got;
     (void)context;
-    if (!strcmp(path, target)) input = mode == 1 ? "middle.decl" : mode == 3 ? "missing.bin" : stock;
+    if (!strcmp(path, target)) input = mode == 1 ? "middle.decl" : mode == 3 ? "missing.bin" : mode == 6 ? middle : stock;
     else if (!strcmp(path, "a_derived.bin")) input = "z_stock.bin";
     else if (!strcmp(path, "middle.decl") && mode == 1) input = target;
+    else if (!strcmp(path, middle) && mode == 6) input = stock;
     else return 0;
     if (mode == 5) return 0;
     got = read(reader_context, input, body, length);
@@ -46,6 +48,22 @@ static int produce(void *context, const char *path, sh_package_producer_reader r
         if (*length == strlen(edit_y) && !memcmp(*body, edit_y, *length)) effective_reads++;
     }
     return got > 0 ? 1 : -1;
+}
+/* 1 when generated row read exactly the files of these packages at path. */
+static int read_from(const sh_compiled_resource *row, const sh_package_sources *sources, const char *path,
+    unsigned owners)
+{
+    unsigned seen = 0;
+    if (!row || !sources) return 0;
+    for (size_t i = 0; i < row->generated_source_count; i++) {
+        const sh_package_source_file *file;
+        if (row->generated_sources[i] >= sources->file_count) return 0;
+        if (i && row->generated_sources[i - 1] >= row->generated_sources[i]) return 0; /* sorted, unique */
+        file = &sources->files[row->generated_sources[i]];
+        if (!file->engine_path || strcmp(file->engine_path, path) || file->owner >= 32) return 0;
+        seen |= 1u << file->owner;
+    }
+    return seen == owners;
 }
 static void authored(const char *package, const char *path, const char *body)
 {
@@ -126,6 +144,16 @@ int main(void)
     CHECK(resource && strstr((char *)resource->body, "x = 9;") && strstr((char *)resource->body, "y = 8;"));
     CHECK(resource && resource->source_count == 1 && resource->owners.bits == 3 && resource->gameplay_owners.bits == 3);
     CHECK(resource && resource->generated_input_count == 1 && !strcmp(resource->generated_inputs[0], stock));
+    /* The producer read Input package's file, and no other. */
+    CHECK(read_from(resource, sources, stock, 2));
+    {
+        /* A map overlay renumbers its map half's reads with that half's files. */
+        sh_package_compilation *overlay = compiled ? sh_package_compilation_overlay(compiled, compiled, error, sizeof(error)) : NULL;
+        const sh_compiled_resource *row = overlay ? sh_package_compilation_find(overlay, target) : NULL;
+        if (!overlay) fprintf(stderr, "overlay: %s\n", error);
+        CHECK(row && row->generated && read_from(row, overlay->sources, stock, 1u << (sources->package_count + 1)));
+        sh_package_compilation_free(overlay);
+    }
     CHECK(resource == sh_package_compilation_find(compiled, "ALIASES\\DERIVED.DECL"));
     for (i = 0; sources && i < sources->file_count; i++) if (!sources->files[i].directory) CHECK(sh_package_source_verify(&sources->files[i]));
     /* A removed output must regenerate with today's inputs, not yesterday's
@@ -137,6 +165,7 @@ int main(void)
     resource = sh_package_compilation_find(next, target);
     CHECK(resource && resource->generated && !resource->source_count && resource->owners.bits == 2);
     CHECK(resource && !strcmp((char *)resource->body, edit_y));
+    CHECK(read_from(resource, next_sources, stock, 2));
     if (next) generated_availability(next);
     sh_package_compilation_free(compiled); sh_package_sources_free(sources);
     compiled = next; sources = next_sources; env.previous = compiled;
@@ -145,6 +174,7 @@ int main(void)
     resource = sh_package_compilation_find(next, target);
     CHECK(resource && resource->generated && !resource->owners.bits && !resource->gameplay_owners.bits);
     CHECK(resource && !strcmp((char *)resource->body, base));
+    CHECK(resource && !resource->generated_source_count); /* the original alone: no package file read */
     sh_package_compilation_free(compiled); sh_package_sources_free(sources);
     /* A removed producer is an error; no incomplete replacement snapshot. */
     env.previous = next; mode = 5;
@@ -191,7 +221,35 @@ int main(void)
     authored("a", "a_derived.bin", "private"); authored("b", "z_stock.bin", "stock edit");
     compiled = compile(&env, &sources, error);
     CHECK(!compiled && strstr(error, "opaque replacements") && strstr(error, "generated inputs from: b"));
+    sh_package_compilation_free(compiled);
+    remove_authored(sources, "a_derived.bin"); remove_authored(sources, "z_stock.bin"); sh_package_sources_free(sources);
+    /* Every file whose bytes the producer read: each exact copy of its input,
+     * and every contribution to a composed input. */
+    create("overrides/c/package.json", "{\"id\":\"c\",\"name\":\"Copy package\"}");
+    authored("a", target, edit_x); authored("b", stock, edit_y); authored("c", stock, edit_y);
+    compiled = compile(&env, &sources, error);
+    if (!compiled) fprintf(stderr, "%s\n", error);
+    resource = sh_package_compilation_find(compiled, target);
+    CHECK(resource && resource->generated && read_from(resource, sources, stock, 6));
+    sh_package_compilation_free(compiled); remove_authored(sources, stock); sh_package_sources_free(sources);
+    authored("b", stock, edit_y); authored("c", stock, "{ edit = { x = 1; y = 2; z = 5; } }");
+    compiled = compile(&env, &sources, error);
+    if (!compiled) fprintf(stderr, "%s\n", error);
+    resource = sh_package_compilation_find(compiled, stock);
+    CHECK(resource && resource->composed && resource->source_count == 2);
+    resource = sh_package_compilation_find(compiled, target);
+    CHECK(resource && resource->generated && read_from(resource, sources, stock, 6) &&
+        strstr((char *)resource->body, "z = 5;"));
     sh_package_compilation_free(compiled); sh_package_sources_free(sources);
+    /* A generated input brings the files its own producer read. */
+    mode = 6; compiled = compile(&env, &sources, error);
+    if (!compiled) fprintf(stderr, "%s\n", error);
+    resource = sh_package_compilation_find(compiled, middle);
+    CHECK(resource && resource->generated && read_from(resource, sources, stock, 6));
+    resource = sh_package_compilation_find(compiled, target);
+    CHECK(resource && resource->generated && resource->generated_input_count == 1 &&
+        !strcmp(resource->generated_inputs[0], middle) && read_from(resource, sources, stock, 6));
+    sh_package_compilation_free(compiled); sh_package_sources_free(sources); mode = 0;
     cleanup();
     if (failures) return 1;
     puts("package_producers_test: PASS"); return 0;

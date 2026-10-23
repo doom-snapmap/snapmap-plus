@@ -1,6 +1,8 @@
 #include "map_payload.h"
+#include "map_capacity.h"
 #include "patch.h"
 #include "backend_log.h"
+#include <stdio.h>
 #include <string.h>
 
 static sh_patch_handle g_limits[2];
@@ -42,10 +44,21 @@ int sh_map_payload_remove(void)
         if (g_limits[i - 1].live && code_unpatch(&g_limits[i - 1]) != B2_PATCH_OK) ok = 0;
     return ok;
 }
+/* The reader's CMP EAX,[RIP+disp32] ends at the JLE patched below. Its operand
+ * is the read-only bound the publish and copy uploads also compare
+ * (map_capacity.h). Zero when it cannot be read. */
+static size_t native_text_limit(uintptr_t jle)
+{
+    __try {
+        int displacement = *(const int *)(jle - 4);
+        int value = *(const int *)(jle + (intptr_t)displacement);
+        return value > 0 ? (size_t)value : 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+}
 int sh_map_payload_install(const sig_result *results, size_t count)
 {
     sig_result sites[2];
-    size_t i, j;
+    size_t i, j, limit;
     if (g_ready) return current_bytes(0) && current_bytes(1);
     /* A failed write can retain a rollback handle. Recover it before retrying. */
     if (!sh_map_payload_remove()) return 0;
@@ -64,6 +77,9 @@ int sh_map_payload_install(const sig_result *results, size_t count)
             if (memcmp((void *)sites[i].addr, g_sites[i].original, g_sites[i].length)) goto failed;
         } __except (EXCEPTION_EXECUTE_HANDLER) { goto failed; }
     }
+    /* Both sites hold the original code: read the bound the reader compares. */
+    limit = native_text_limit(sites[1].addr);
+    if (limit) sh_map_capacity_set_limit(limit);
     for (i = 0; i < 2; i++) {
         if (code_patch_sig(&sites[i], g_sites[i].original, g_sites[i].replacement,
                            g_sites[i].length, &g_limits[i]) != B2_PATCH_OK) {
@@ -72,7 +88,14 @@ int sh_map_payload_install(const sig_result *results, size_t count)
         }
     }
     g_ready = 1;
-    backend_log("MPKG: native map saves and saved/published reads accept positive idStr lengths; fixed 10 MiB ceilings removed");
+    {
+        char line[256];
+        _snprintf_s(line, sizeof(line), _TRUNCATE,
+            "MPKG: native map saves and cached saved/published reads accept positive idStr lengths in this "
+            "process; DOOM's %zu-byte map limit still applies to publishing, to copying a published map and "
+            "to cloud-saved or published maps read without Snapmap+", sh_map_capacity_limit());
+        backend_log(line);
+    }
     return 1;
 failed:
     backend_log("MPKG: native map length repair unavailable; signature or patch verification failed");

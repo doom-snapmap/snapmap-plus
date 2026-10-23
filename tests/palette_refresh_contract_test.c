@@ -91,7 +91,13 @@ int main(int argc, char **argv)
     CHECK(strstr(refresh, "init_byte") == NULL);
     CHECK(strstr(refresh, "PR_EDITOR_INIT_OFF") == NULL);
     CHECK(strstr(refresh, "palette-refresh REFUSED") != NULL);
-    CHECK(strstr(refresh, "21088") == NULL);
+    /* Registration must not depend on an existing UI widget. Authoring rollback
+     * separately reads that widget pointer to refresh a live toybox; banning
+     * its offset throughout this file confuses those different responsibilities. */
+    {
+        const char *registration = strstr(refresh, "int sh_palette_refresh_after_decl_registration(void)");
+        CHECK(registration && strstr(registration, "21088") == NULL);
+    }
     CHECK(strstr(refresh, "InterlockedCompareExchange(&g_state, PR_STATE_APPLIED, PR_STATE_PENDING)") != NULL);
     CHECK(strstr(refresh, "Sleep(") == NULL);
     /* Allow rebuilding after each registration pass, including from APPLIED,

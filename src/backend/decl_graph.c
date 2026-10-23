@@ -25,7 +25,7 @@ static int dg_text(sh_decl_graph *g, const sh_decl_node *node,
     sh_decl_graph_text *text, const char *where)
 {
     if (!sh_decl_tree_literal(node, &text->text, &text->length))
-        return dg_fail(g, where, "expected an unescaped literal");
+        return dg_fail(g, where, "expected one native literal");
     return 1;
 }
 

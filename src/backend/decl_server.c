@@ -10,16 +10,20 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
+#include <stddef.h>
 #include <stdint.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <bcrypt.h>
 
+#include "native_class_registry.h"
 #include "backend_log.h"
 #include "engine_globals.h"  /* engine data globals, resolved not hardcoded */
 #include "decl_server.h"
 #include "map_transition.h"
+#include "editor_transition.h"
 #include "rawmap.h"
 #include "hook.h"
 #include "package_requirements.h"
@@ -27,19 +31,43 @@
 #include "decl_server_path.h"
 #include "decl_text.h"
 #include "overrides.h"
+#include "package_sources.h"
 #include "palette_refresh.h"
 #include "engine_dialog.h"
 #include "decl_visibility.h"
 #include "packages.h"
 #include "package_runtime.h"
+#include "package_source_graph.h"
 #include "map_package.h"
 #include "user_overrides.h"
 #include "strids.h"
 #include "process_heap_scope.h"
 #include "audio_banks_native.h"
 #include "resource_resident.h"
+#include "package_shader_receipt.h"
+#include "package_native_assets.h"
+#include "resource_graph_native.h"
+#include "nav_bake.h"
+#include "boot_phases.h"
+#include "prepare_worker.h"
+#pragma comment(lib, "bcrypt.lib")
 
 static sh_resource_resident *g_resident_pass;
+static volatile LONG g_editor_committed_cleanup_pending;
+static void ds_cancel_installation(void)
+{
+    /* A committed installation can owe accepted native cleanup. A later
+     * failed-ready check must not request the opposite disk decision. */
+    if (!InterlockedCompareExchange(&g_editor_committed_cleanup_pending,0,0))
+        sh_mpkg_activation_cancel();
+}
+/* Additive admission shares scanners, never runtime reconstruction or the
+ * destructive whole-palette rebuild. Its own transaction owns those steps. */
+static int g_additive_scan;
+static __declspec(thread) int g_source_boot_scope, g_shader_prepare_scope;
+static int ds_shader_recovery_poll(void);
+static int ds_occurrence_maintenance(void);
+static int ds_occurrence_busy(void);
 
 #define DS_INTERNAL_COMMAND     "snapmap_plus_decl_server_apply"
 #define DS_REARM_COMMAND        "snapmap_plus_decl_server_rearm"
@@ -117,6 +145,9 @@ typedef void *(*decl_find_fn)(void *type_manager, const char *logical_name,
 typedef int (*decl_palette_refresh_fn)(void);
 typedef void (*resource_promote_static_fn)(void);
 typedef void (*resource_generic_load_fn)(void *decl);
+typedef void (*resource_list_add_fn)(void *manager, void *decl);
+typedef void *(*resource_create_fn)(void *manager, const char *name);
+static resource_list_add_fn g_resource_add;
 static resource_generic_load_fn g_reconstruct;
 static int g_boot_refresh;
 #ifdef SH_DECL_SERVER_TESTING
@@ -137,6 +168,23 @@ typedef struct ds_candidate {
     int outcome;
     int shadow_kind;
     int native_original;
+    /* package_compiler.h rebound_original, and its installed original's name
+     * (empty when it is not one). */
+    int rebound_original;
+    char original[SH_DECL_SERVER_NAME_CAP];
+    /* A material whose text names this render program at a Program-kind
+     * parameter while neither the library nor the installed catalog declares
+     * it: the native parse stops there with the engine's default
+     * (decl_material.h sh_decl_material_native_default). Empty otherwise. */
+    char native_default[SH_DECL_SERVER_NAME_CAP];
+    int baseline_slot; /* an installed SnapMap original exists at its path */
+    int reserve_cycle, reserved, initializing, finish_inherit;
+    size_t inherit_parent;
+    /* Editor-row publication lineage (snapeditorentitydef only): authored
+     * identity and every owner's original and compiler tree. */
+    char *authored;
+    sh_package_provenance *supply; /* the provider's exact binding of this row, or NULL */
+    unsigned char identity[32], linked[32]; /* portable; linked bytes (earlier saves) */
 } ds_candidate;
 
 enum {
@@ -168,6 +216,7 @@ enum {
 };
 
 static void *ds_peek_decl(void *manager, const char *name);
+static int ds_original_name(const sh_compiled_resource *resource, char *out, size_t capacity);
 
 /* Classification must not load resources. DeclFind with makeDefault=0 still
  * materializes archive declarations, whose dependencies would predate the
@@ -262,6 +311,23 @@ static volatile LONG g_state = DS_STATE_NEW;
 /* Set for the duration of a RUNTIME registration pass. Boot passes leave it clear: at boot
  * every identity is created fresh and the engine's own promotion covers them all. */
 static volatile LONG g_rearm_is_runtime;
+/* The activation being driven changes no resource or native identity at
+ * runtime: its registration pass logs per-identity SHADOWED outcomes as one
+ * count, since each is the outcome the last pass logged. */
+static volatile LONG g_pass_unchanged;
+/* R-398: what the activation being driven changed, so each registration step
+ * runs only when its inputs did. The changes it hands the pass; whether it is
+ * a map or retained-resource activation at the native boundary (an explicit
+ * or watched re-arm always registers in full); and whether this pass kept the
+ * live palette or the standing registration. */
+static const sh_package_changes *g_pass_changes;
+static int g_pass_boundary, g_pass_forward, g_pass_palette_kept, g_pass_reused;
+/* Every registration input of the candidates the pass captured: the last
+ * runtime registration that completed records it, and an activation keeps
+ * that registration only while the same inputs stand registered. Additive
+ * admissions, shader preparation, recovery and any failure forget it. */
+static unsigned char g_pass_digest[32], g_registered_digest[32];
+static int g_pass_digest_ok, g_registered_known, g_prior_registered;
 static volatile LONG g_rearm_touched_promoted;
 static volatile LONG g_rearm_marked_pending;
 static volatile LONG g_rearm_left_loaded;
@@ -292,6 +358,10 @@ static ds_candidate *g_candidates;
 static int g_candidate_count;
 static int g_capture_refused;
 static size_t g_total_bytes;
+/* Identities the last pass refused and isolated: present, defaulted
+ * declarations the engine keeps as its own fallback object while the rest of
+ * the library activates (ds_materialize_identity). */
+static int g_isolated_defaults;
 static void *g_cmdsys;
 static add_command_fn g_add_command;
 static const uint8_t *g_module_base;
@@ -415,7 +485,6 @@ static int ds_decl_body_is_single_block(const unsigned char *text, size_t length
     int root_seen = 0;
     int root_closed = 0;
     int in_quote = 0;
-    int escaped = 0;
     int line_comment = 0;
     int block_comment = 0;
 
@@ -438,9 +507,7 @@ static int ds_decl_body_is_single_block(const unsigned char *text, size_t length
             continue;
         }
         if (in_quote) {
-            if (escaped) escaped = 0;
-            else if (c == '\\') escaped = 1;
-            else if (c == '"') in_quote = 0;
+            if (c == '"') in_quote = 0;
             i++;
             continue;
         }
@@ -474,7 +541,7 @@ static int ds_decl_body_is_single_block(const unsigned char *text, size_t length
         i++;
     }
     return root_seen && root_closed && depth == 0 && !in_quote &&
-           !escaped && !block_comment;
+           !block_comment;
 }
 
 static int ds_checked_add(size_t *value, size_t add)
@@ -553,6 +620,118 @@ static int ds_clean_identity(const sig_result *results, size_t count,
            result->addr == (uintptr_t)module_base + result->rva;
 }
 
+/* Copy one binding of from, with exactly its contexts, into out. */
+static int ds_rows_copy_binding(const sh_package_provenance *from, const sh_package_provenance_binding *binding,
+                                sh_package_provenance *out)
+{
+    size_t *selected = binding->context_count ? malloc(binding->context_count * sizeof(*selected)) : NULL;
+    int ok = selected != NULL;
+    for (size_t c = 0; ok && c < binding->context_count; c++) {
+        const sh_package_provenance_context *context;
+        if (binding->contexts[c] >= from->context_count) { ok = 0; break; }
+        context = from->contexts + binding->contexts[c];
+        selected[c] = sh_package_provenance_context_add(out, context->mode,
+            (const unsigned char (*)[32])context->trees, context->tree_count, context->component);
+        ok = selected[c] != SIZE_MAX;
+    }
+    if (ok) ok = sh_package_provenance_bind(out, binding->family, binding->original, binding->name,
+                                            selected, binding->context_count);
+    free(selected);
+    return ok;
+}
+static void ds_rows_supply_free(sh_package_provenance *supply)
+{ if (supply) { sh_package_provenance_free(supply); free(supply); } }
+#ifdef SH_DECL_SERVER_TESTING
+static const sh_package_provenance *g_test_rows_bindings;
+#endif
+/* original NUL payload(body): 1, 0 unidentifiable, -1 allocation failure. */
+static int ds_rows_identity(const char *original, const unsigned char *body, size_t length, unsigned char out[32])
+{
+    sh_package_file_identity payload;
+    size_t prefix = strlen(original) + 1;
+    unsigned char *key;
+    if (!sh_package_bytes_identity(body, length, &payload)) return 0;
+    if (!(key = malloc(prefix + sizeof(payload)))) return -1;
+    memcpy(key, original, prefix); memcpy(key + prefix, &payload, sizeof(payload));
+    if (!sh_package_bytes_identity(key, prefix + sizeof(payload), &payload)) { free(key); return 0; }
+    free(key);
+    memcpy(out, payload.digest, 32);
+    return 1;
+}
+/* The authored row: its binding's original, whether the compiler composed it,
+ * and the exact source files it read (length and digest, each distinct file
+ * once, in compile order). Neither the linker's private names nor the
+ * registered bytes enter it, so equal authored rows agree on every renderer,
+ * publication and library order. 1, 0 when the resource has no exact authored
+ * source, -1 allocation failure. */
+static int ds_rows_authored(const char *original, const sh_package_compilation *compiled,
+                            const sh_compiled_resource *resource, unsigned char out[32])
+{
+    static const char domain[] = "snapmap-plus/editor-row/authored";
+    const sh_package_sources *sources = compiled ? compiled->sources : NULL;
+    size_t named = strlen(original) + 1, used = sizeof(domain) + named + 1, entry = 8 + 32;
+    unsigned char *key;
+    sh_package_file_identity hashed;
+    if (!sources || !resource->sources || !resource->source_count ||
+        resource->source_count > (SIZE_MAX - used) / entry) return 0;
+    if (!(key = malloc(used + resource->source_count * entry))) return -1;
+    memcpy(key, domain, sizeof(domain)); memcpy(key + sizeof(domain), original, named);
+    key[used - 1] = resource->composed ? 1 : 0;
+    for (size_t i = 0; i < resource->source_count; i++) {
+        const sh_package_source_file *file;
+        unsigned char item[8 + 32];
+        size_t seen = sizeof(domain) + named + 1;
+        if (resource->sources[i] >= sources->file_count ||
+            (file = sources->files + resource->sources[i])->directory) { free(key); return 0; }
+        for (int b = 0; b < 8; b++) item[b] = (unsigned char)(file->length >> (8 * b));
+        memcpy(item + 8, file->digest, 32);
+        while (seen < used && memcmp(key + seen, item, entry)) seen += entry;
+        if (seen == used) { memcpy(key + used, item, entry); used += entry; }
+    }
+    if (!sh_package_bytes_identity(key, used, &hashed)) { free(key); return 0; }
+    free(key);
+    memcpy(out, hashed.digest, 32);
+    return 1;
+}
+/* The row's lineage from the linker's own record: the provider's one binding
+ * of this native name (authored original and every context the linker found
+ * the resource equal in). identity is the authored row; a dependency variant
+ * is a different binding with its own suppliers, which an owned object's
+ * selected supplier distinguishes (package_editor). linked hashes the
+ * registered bytes, whose private names are this provider's spelling, and
+ * still names rows recorded by that spelling. A row without exact authored
+ * sources keeps that exact identity only. Called under the runtime lock that
+ * froze compiled, so the bindings are that same provider's. */
+static int ds_candidate_lineage(ds_candidate *candidate, const sh_package_compilation *compiled,
+                                const sh_compiled_resource *resource)
+{
+#ifdef SH_DECL_SERVER_TESTING
+    const sh_package_provenance *bindings = g_test_rows_bindings;
+#else
+    const sh_package_provenance *bindings = sh_package_runtime_bindings();
+#endif
+    const sh_package_provenance_binding *found = NULL;
+    int ok;
+    candidate->authored = _strdup(resource->original_path ? resource->original_path : resource->engine_path);
+    if (!candidate->authored) return 0;
+    for (size_t i = 0; bindings && i < bindings->binding_count; i++) {
+        const sh_package_provenance_binding *binding = bindings->bindings + i;
+        if (_stricmp(binding->family, "snapeditorentitydef") || _stricmp(binding->name, candidate->name)) continue;
+        if (found) return 1; /* not one exact binding: never resolved or supplying */
+        found = binding;
+    }
+    if (!found || !found->context_count) return 1;
+    if ((ok = ds_rows_identity(found->original, resource->body, resource->body_length, candidate->linked)) <= 0)
+        return ok == 0;
+    if ((ok = ds_rows_authored(found->original, compiled, resource, candidate->identity)) < 0) return 0;
+    if (!ok) memcpy(candidate->identity, candidate->linked, 32);
+    if (!(candidate->supply = calloc(1, sizeof(*candidate->supply)))) return 0;
+    if (!ds_rows_copy_binding(bindings, found, candidate->supply)) {
+        ds_rows_supply_free(candidate->supply); candidate->supply = NULL; return 0;
+    }
+    return 1;
+}
+
 static void ds_free_candidates(void)
 {
     int i;
@@ -560,6 +739,8 @@ static void ds_free_candidates(void)
         for (i = 0; i < g_candidate_count; i++) {
             if (g_candidates[i].body) HeapFree(GetProcessHeap(), 0, g_candidates[i].body);
             g_candidates[i].body = NULL;
+            free(g_candidates[i].authored); ds_rows_supply_free(g_candidates[i].supply);
+            g_candidates[i].authored = NULL; g_candidates[i].supply = NULL;
         }
         HeapFree(GetProcessHeap(), 0, g_candidates);
     }
@@ -876,6 +1057,22 @@ int sh_decl_server_test_walk(const char *directory, const char *relative,
 }
 #endif
 
+/* One well-formed top-level block. An open-body family's reader lets end of
+ * file close the outermost brace, so its stock bodies may omit that byte. */
+static int ds_native_body(const char *type, const unsigned char *body, size_t length)
+{
+    unsigned char *closed;
+    int ok;
+    if (sh_decl_text_well_formed(body, length) && ds_decl_body_is_single_block(body, length)) return 1;
+    if (!sh_decl_text_open_body_family(type) || !length || length > SIZE_MAX - 2) return 0;
+    closed = (unsigned char *)malloc(length + 2);
+    if (!closed) return 0;
+    memcpy(closed, body, length); closed[length] = '\n'; closed[length + 1] = '}';
+    ok = ds_decl_body_is_single_block(closed, length + 2);
+    free(closed);
+    return ok;
+}
+
 static int ds_capture_snapshot_locked(const sh_package_compilation *compiled)
 {
     size_t i, count = 0;
@@ -901,15 +1098,24 @@ static int ds_capture_snapshot_locked(const sh_package_compilation *compiled)
         size_t length;
         const unsigned char *body;
         if (!resource->type) continue;
-        if (!resource->body || resource->body_length > PTRDIFF_MAX ||
-            resource->body_length > SIZE_MAX - g_total_bytes) goto done;
-        body = resource->body; length = resource->body_length;
+        /* The engine registers what is served: a presented text when there is one. */
+        body = resource->presented ? resource->presented : resource->body;
+        length = resource->presented ? resource->presented_length : resource->body_length;
+        if (!body || length > PTRDIFF_MAX || length > SIZE_MAX - g_total_bytes) goto done;
         if (length >= 3 && body[0] == 0xef && body[1] == 0xbb && body[2] == 0xbf) { body += 3; length -= 3; }
-        if (!sh_decl_text_well_formed(body, length) || !ds_decl_body_is_single_block(body, length)) {
+        if (!ds_native_body(resource->type, body, length)) {
             ds_log("REFUSED", resource->engine_path, "compiled declaration is not one valid native body"); goto done;
         }
         candidate = &g_candidates[g_candidate_count++];
         candidate->native_original = resource->native_original;
+        candidate->rebound_original = resource->rebound_original &&
+            ds_original_name(resource, candidate->original, sizeof(candidate->original)) ?
+            resource->rebound_original : 0;
+        /* Scope names the original, and a private alias copies it; only the
+         * resource served at its original's path occupies that native slot.
+         * The linker records an alias's authored path as original_path. */
+        candidate->baseline_slot = resource->baseline_known == 1 &&
+            (!resource->original_path || !_stricmp(resource->original_path, resource->engine_path));
         if (strcpy_s(candidate->type, sizeof(candidate->type), resource->type) ||
             strcpy_s(candidate->name, sizeof(candidate->name), resource->name) ||
             strcpy_s(candidate->source, sizeof(candidate->source), resource->engine_path)) goto done;
@@ -917,6 +1123,11 @@ static int ds_capture_snapshot_locked(const sh_package_compilation *compiled)
         if (!candidate->body) goto done;
         memcpy(candidate->body, body, length); candidate->body[length] = 0;
         candidate->body_length = length; g_total_bytes += length;
+        if (!_stricmp(resource->type, "material") &&
+            sh_package_runtime_material_native_default(compiled, body, length, candidate->native_default,
+                sizeof(candidate->native_default)) <= 0)
+            candidate->native_default[0] = 0;
+        if (!_stricmp(resource->type, "snapeditorentitydef") && !ds_candidate_lineage(candidate, compiled, resource)) goto done;
     }
 
     if (g_candidate_count > 1) {
@@ -957,6 +1168,8 @@ static int ds_capture_snapshot_locked(const sh_package_compilation *compiled)
         for (i = 0; i < (size_t)g_candidate_count; i++) {
             size_t source_index = (size_t)(uintptr_t)references[i].value - 1u;
             dependency_order[i] = g_candidates[source_index];
+            dependency_order[i].reserve_cycle = references[i].reserve_cycle;
+            dependency_order[i].inherit_parent = references[i].inherit_parent;
         }
         memcpy(g_candidates, dependency_order,
                (size_t)g_candidate_count * sizeof(g_candidates[0]));
@@ -1080,7 +1293,7 @@ static int ds_publish_missing_table(int missing_count)
      * on a re-arm drops identities an earlier pass published -- including packages this pass
      * never looked at -- and their decltree source stops resolving. */
     published = at == 0 ||
-                (InterlockedCompareExchange(&g_rearm_is_runtime, 0, 0)
+                (g_additive_scan || InterlockedCompareExchange(&g_rearm_is_runtime, 0, 0)
                      ? sh_overrides_internal_decl_table_merge(entries, (size_t)at)
                      : sh_overrides_internal_decl_table_install(entries,
                                                                 (size_t)at));
@@ -1247,22 +1460,107 @@ static int ds_decl_usable(void *decl, const char **reason)
     return 1;
 }
 
+/* A rebound installed original (package_compiler.h rebound_original 1) is a
+ * scope's private copy of an installed SnapMap material that only image names
+ * separate from it. On both renderers a texture parm value is read as image
+ * options, one name token and a find-or-create of the image, and none of those
+ * readers reports a parse error (VK 0x140d7b540 -> 0x140d7b640, 0x140dac300 ->
+ * 0x140dabf60, 0x140da2900; GL 0x140d7b780 -> 0x140d7b880, 0x140da30c0 ->
+ * 0x140da2d20, 0x140d996c0). The parm-block parsers (VK 0x140db3710, GL
+ * 0x140da9930) fail only on renderParm, sampler and renderProg names, which the
+ * linker never renames, an open brace and a write mask. Parse (VK 0x140d76bb0,
+ * GL 0x140d76df0) reads only a leading "generic" and "baked/" from the name,
+ * which package_native_names.c keeps (and textures/common/missing_material,
+ * a flag, not a default). So the copy's default is its original's in this
+ * native context, as for an unchanged import. An original this process has
+ * already parsed without the default contradicts that: the copy is refused. Any
+ * other renamed family, authored or composed source, or declaration family
+ * keeps the strict rule, because its default may be the rebinding's own.
+ * 1 excused, -1 contradicted (reason set), 0 not a rebound original. */
+static int ds_rebound_default(const ds_candidate *candidate, void *manager, void *decl, const char **reason)
+{
+    unsigned char *original = NULL, state = 0;
+    void *error = NULL;
+    char detail[SH_DECL_SERVER_NAME_CAP + 200];
+    (void)decl;
+    if (candidate->rebound_original != 1 || !candidate->original[0] || _stricmp(candidate->type, "material"))
+        return 0;
+    __try {
+        original = manager ? (unsigned char *)ds_peek_decl(manager, candidate->original) : NULL;
+        if (original) { state = original[DS_DECL_STATE_OFFSET]; error = *(void **)(original + 0x18); }
+    } __except (EXCEPTION_EXECUTE_HANDLER) { original = NULL; }
+    if (original && !(state & (DS_DECL_PENDING_LOAD | DS_DECL_IN_PROGRESS)) &&
+        !(state & DS_DECL_DEFAULTED) && !error) {
+        if (reason) *reason = "its installed original parsed in this process without the engine's default; "
+            "the copy's default is its own";
+        return -1;
+    }
+    _snprintf_s(detail, sizeof(detail), _TRUNCATE, original && (state & DS_DECL_DEFAULTED) &&
+            !(state & (DS_DECL_PENDING_LOAD | DS_DECL_IN_PROGRESS)) ?
+        "rebound copy of installed material %s completed with the engine's default, as that original did in this process" :
+        "rebound copy of installed material %s completed with the engine's default; only image names separate it "
+        "from that original, which this process has not parsed", candidate->original);
+    ds_log("NATIVE-FALLBACK", candidate->source, detail);
+    return 1;
+}
+
 /* Shipped declarations can intentionally reach the engine's fallback (for
  * example, old campaign materials naming uncooked programs). Importing their
  * unchanged bytes must preserve that native behavior. Only the compiler's
- * exact installed-original comparison authorizes it; authored changes still
- * require a successful parse, and editor entities still pass the palette gate. */
-static int ds_candidate_usable(const ds_candidate *candidate, void *decl, const char **reason)
+ * exact installed-original comparison authorizes it, or its rebound-original
+ * certificate where the rebinding cannot change the parse (ds_rebound_default);
+ * authored changes still require a successful parse, and editor entities still
+ * pass the palette gate. */
+static int ds_candidate_usable(const ds_candidate *candidate, void *manager, void *decl, const char **reason)
 {
     unsigned char state;
     if (ds_decl_usable(decl, reason)) return 1;
-    if (candidate->native_original && ds_read_decl_state(decl, &state) &&
-        (state & DS_DECL_DEFAULTED) && !(state & (DS_DECL_PENDING_LOAD | DS_DECL_IN_PROGRESS))) {
+    if (!ds_read_decl_state(decl, &state) || !(state & DS_DECL_DEFAULTED) ||
+        (state & (DS_DECL_PENDING_LOAD | DS_DECL_IN_PROGRESS))) return 0;
+    if (candidate->native_original) {
         if (reason) *reason = NULL;
         ds_log("NATIVE-FALLBACK", candidate->source, "unchanged installed declaration completed with the engine's default");
         return 1;
     }
+    /* The text itself explains the default: a Program-kind parameter names a
+     * render program neither the library nor the installed catalog declares,
+     * so the native parm-block reader stops there (textures/effects/hud/
+     * magic_glass_broken_2 names hud_magic_glass_off this way, and so does its
+     * image-rebound copy). Predicted from the product's reading of the same
+     * text; the object is the engine's own default, as for the original. */
+    if (candidate->native_default[0] && !_stricmp(candidate->type, "material")) {
+        char detail[SH_DECL_SERVER_NAME_CAP + 200];
+        _snprintf_s(detail, sizeof(detail), _TRUNCATE,
+            "material names renderProg '%s' at a Program parameter, which neither the library nor the installed "
+            "inventory declares; its native parse stops there with the engine's default, as the installed text's does",
+            candidate->native_default);
+        ds_log("NATIVE-FALLBACK", candidate->source, detail);
+        if (reason) *reason = NULL;
+        return 1;
+    }
+    {
+        const char *contradiction = NULL;
+        int rebound = ds_rebound_default(candidate, manager, decl, &contradiction);
+        if (rebound > 0) { if (reason) *reason = NULL; return 1; }
+        if (rebound < 0 && reason) *reason = contradiction;
+    }
     return 0;
+}
+
+/* The installed original a rebound copy names: "generated/decls/<type>/<name>.decl"
+ * of the copy's own declaration type. 0 when the path is not that form. */
+static int ds_original_name(const sh_compiled_resource *resource, char *out, size_t capacity)
+{
+    const char *path = resource->original_path, *name;
+    size_t type_length = resource->type ? strlen(resource->type) : 0, length;
+    *out = 0;
+    if (!path || !type_length || _strnicmp(path, "generated/decls/", 16) ||
+        _strnicmp(path + 16, resource->type, type_length) || path[16 + type_length] != '/') return 0;
+    name = path + 16 + type_length + 1;
+    length = strlen(name);
+    if (length <= 5 || _stricmp(name + length - 5, ".decl") || length - 5 >= capacity) return 0;
+    memcpy(out, name, length - 5); out[length - 5] = 0;
+    return 1;
 }
 
 static void ds_bind_source_mode(const sig_result *results, size_t count)
@@ -1282,8 +1580,28 @@ static void ds_bind_source_mode(const sig_result *results, size_t count)
     g_source_mode_address = target + 6 + (intptr_t)displacement;
 }
 static int ds_registry_read(void *context, uintptr_t address, void *out, size_t length)
-{ (void)context; return address && ds_safe_read((const void *)address, out, length); }
+{
+    sh_decl_native_registry_stats *counters = sh_decl_native_registry_counters();
+    LARGE_INTEGER began, ended; QueryPerformanceCounter(&began);
+    (void)context; counters->memory_reads++;
+    int ok = address && ds_safe_read((const void *)address, out, length);
+    if (address && !ok) counters->memory_faults++;
+    if (address) sh_prepare_read_note(address, out, length, ok);
+    QueryPerformanceCounter(&ended); counters->memory_ticks += (unsigned long long)(ended.QuadPart - began.QuadPart);
+    return ok;
+}
+static int ds_registry_source_exists_engine(void *context, uintptr_t manager, const char *type, const char *name);
+typedef struct ds_source_exists_call { void *context; uintptr_t manager; const char *type, *name; } ds_source_exists_call;
+static intptr_t ds_source_exists_thunk(void *p)
+{ ds_source_exists_call *c = p; return ds_registry_source_exists_engine(c->context, c->manager, c->type, c->name); }
+/* The engine's source answer: an engine call, the engine thread's from an open's preparation worker too. */
 static int ds_registry_source_exists(void *context, uintptr_t manager, const char *type, const char *name)
+{
+    ds_source_exists_call call = {context, manager, type, name};
+    if (sh_prepare_on_worker()) return (int)sh_prepare_engine(ds_source_exists_thunk, &call);
+    return ds_registry_source_exists_engine(context, manager, type, name);
+}
+static int ds_registry_source_exists_engine(void *context, uintptr_t manager, const char *type, const char *name)
 {
     static const char prefix[] = "generated/decls/";
     int32_t mode;
@@ -1312,7 +1630,16 @@ static int ds_registry_source_exists(void *context, uintptr_t manager, const cha
     result = sh_decl_visibility_source_exists(path);
     free(path); return result;
 }
+static int ds_registry_source_engine(sh_decl_registry_source *source);
+static intptr_t ds_registry_source_thunk(void *p) { return ds_registry_source_engine((sh_decl_registry_source *)p); }
+/* The live registry, resolved on the engine thread; its readers serve an open's preparation worker too (they read
+ * memory, journaled for its verification, and hand native calls back). */
 int sh_decl_server_registry_source(sh_decl_registry_source *source)
+{
+    if (sh_prepare_on_worker()) return (int)sh_prepare_engine(ds_registry_source_thunk, source);
+    return ds_registry_source_engine(source);
+}
+static int ds_registry_source_engine(sh_decl_registry_source *source)
 {
     void *registry;
     DWORD main_thread;
@@ -1326,6 +1653,9 @@ int sh_decl_server_registry_source(sh_decl_registry_source *source)
     source->registry = (uintptr_t)registry;
     source->read = ds_registry_read;
     source->source_exists = ds_registry_source_exists;
+    source->settled_exists = 1;   /* the engine's own source answer */
+    source->scripts = sh_package_runtime_script_schema();
+    source->classes = sh_native_class_process();
     return 1;
 }
 
@@ -1480,6 +1810,51 @@ static int ds_materialize_failure(int index, const char *type,
     return 0;
 }
 
+/* An identity a declaration named before this identity's own dependencies
+ * existed was created on demand and completed with its default (a private
+ * perk inheriting a private perk not yet registered). Materialization reaches
+ * it in the snapshot's dependency order, after those dependencies: rebuild it
+ * in place and parse it from its source, as a runtime refresh rebuilds a
+ * defaulted identity. 1 when nothing faulted (the caller still validates). */
+static int ds_reparse_defaulted(ds_materialize_context *context, void *type_manager,
+                                const ds_candidate *candidate, void **decl, int complete_inherit)
+{
+    unsigned char *state;
+    __try {
+        state = (unsigned char *)*decl + DS_DECL_STATE_OFFSET;
+        if (!complete_inherit &&
+            ((*state & (DS_DECL_IN_PROGRESS | DS_DECL_DEFAULTED)) != DS_DECL_DEFAULTED || !g_reconstruct))
+            return 1;
+        if ((*state & DS_DECL_IN_PROGRESS) || !g_reconstruct) return 0;
+        unsigned int *level = (unsigned int *)((unsigned char *)*decl + DS_RES_LEVEL_OFF), kept = *level;
+        /* The native destructor runs with static lifetime released, as in
+         * the runtime reconstruction; the lifetime is restored even on a
+         * throw. */
+        __try {
+            if (*level == 4u) *level = 2u;
+            sh_package_shader_receipt_invalidate((uintptr_t)*decl);
+            g_reconstruct(*decl);
+        } __finally {
+            *level = kept;
+        }
+        state = (unsigned char *)*decl + DS_DECL_STATE_OFFSET;
+        *state = (unsigned char)(*state | DS_DECL_PENDING_LOAD);
+        void *resolved = context->find_decl(type_manager, candidate->name, 0);
+        if (resolved) *decl = resolved;
+        state = (unsigned char *)*decl + DS_DECL_STATE_OFFSET;
+        if ((*state & DS_DECL_PENDING_LOAD) && g_generic_load) {
+            *state = (unsigned char)(*state & ~DS_DECL_PENDING_LOAD);
+            g_generic_load(*decl);
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 0;
+    }
+    ds_log("REPARSED", candidate->source, complete_inherit ?
+           "inheritance copied again after its cyclic parent finished source parsing" :
+           "an identity named before its dependencies existed had completed with its default; rebuilt and parsed from its source");
+    return 1;
+}
+
 /* Give one registered identity a live object in its own manager. A lookup is
  * tried first because the engine may already have created and loaded the
  * object from the source scan; make-default is used only when no object
@@ -1512,13 +1887,38 @@ static int ds_materialize_identity(ds_materialize_context *context, int index)
         reason = "engine exception during identity materialization";
     }
 
-    if (!fault && !reason && !ds_candidate_usable(candidate, decl, &reason) && !reason)
+    if (!fault && !reason && decl && !made_default && !ds_reparse_defaulted(context, type_manager, candidate, &decl, 0)) {
+        fault = 1;
+        reason = "engine exception while re-parsing a defaulted identity";
+    }
+    if (!fault && !reason && !ds_candidate_usable(candidate, type_manager, decl, &reason) && !reason)
         reason = "materialized identity failed native state validation";
     if (fault || reason) {
+        unsigned char state = 0;
+        char detail[SH_DECL_SERVER_NAME_CAP + 320];
+        /* A present material the engine completed with its own default (not
+         * pending, not in progress) is the fallback object the engine serves
+         * for any material it cannot parse; consumers naming it get that
+         * default exactly as they would for a defaulting installed one, so it
+         * cannot strand a consumer. Refuse the identity alone and go on: the
+         * rest of the library activates, and the refusal stays accounted
+         * (REFUSED here, the isolated count in the pass summary). A null
+         * object, an unfinished load, an exception or any other family keeps
+         * the terminal rule below. */
+        int isolate = !fault && decl && !_stricmp(candidate->type, "material") &&
+            ds_read_decl_state(decl, &state) && (state & DS_DECL_DEFAULTED) &&
+            !(state & (DS_DECL_PENDING_LOAD | DS_DECL_IN_PROGRESS));
         ds_log_decl_state("after materialization", candidate->source,
                           fault ? NULL : decl, 0);
-        return ds_materialize_failure(index, candidate->type, candidate->name,
-                                      reason);
+        _snprintf_s(detail, sizeof(detail), _TRUNCATE, "%s (certificate %d, original '%s')%s",
+                    reason ? reason : "native resolution failed", candidate->rebound_original,
+                    candidate->original[0] ? candidate->original : "-",
+                    isolate ? "; isolated: the engine keeps its default object for this identity and the "
+                              "rest of the library activates without it" : "");
+        ds_materialize_failure(index, candidate->type, candidate->name, detail);
+        if (!isolate) return 0;
+        g_isolated_defaults++;
+        return 1;
     }
     if (made_default && context->materialized) (*context->materialized)++;
 
@@ -1568,6 +1968,103 @@ static void *ds_peek_decl(void *manager, const char *name)
         if (existing && !_stricmp(existing, name)) return entry;
     }
     return NULL;
+}
+
+/* The engine preallocates code-resource identities before reading their
+ * sources. Use that same constructor/Add/pending-load route for mixed
+ * reference/inheritance cycles. Cold make-default marks a parent in progress
+ * and raises an engine error when a recursive pointer reaches its child.
+ * Existing objects are never reconstructed by reservation. */
+static int ds_plan_inheritance_completion(void)
+{
+    for (int i = 0; i < g_candidate_count; i++) {
+        ds_candidate *candidate = &g_candidates[i];
+        if (!candidate->inherit_parent) continue;
+        if (candidate->inherit_parent > (size_t)i)
+            return ds_materialize_failure(i, candidate->type, candidate->name,
+                "inheritance construction plan is not parent-first");
+        ds_candidate *parent = &g_candidates[candidate->inherit_parent - 1];
+        candidate->finish_inherit = parent->initializing || parent->finish_inherit;
+    }
+    return 1;
+}
+static int ds_reserve_cycles(ds_materialize_context *context)
+{
+    for (int i = 0; i < g_candidate_count; i++) {
+        ds_candidate *candidate = &g_candidates[i];
+        void *manager = NULL, *decl = NULL;
+        int registered = 0;
+        if (!candidate->reserve_cycle || candidate->outcome != DS_CANDIDATE_MISSING) continue;
+        __try {
+            manager = context->type_by_name(context->registry, candidate->type);
+            if (!manager) __leave;
+            unsigned char *existing = ds_peek_decl(manager, candidate->name);
+            if (existing) {
+                if (existing[DS_DECL_STATE_OFFSET] & DS_DECL_IN_PROGRESS) __leave;
+                candidate->initializing = (existing[DS_DECL_STATE_OFFSET] &
+                    (DS_DECL_PENDING_LOAD | DS_DECL_DEFAULTED)) != 0;
+                continue;
+            }
+            if (!g_resource_add) __leave;
+            resource_create_fn create = *(resource_create_fn *)(*(unsigned char **)manager + 0x18);
+            if (!create || !(decl = create(manager, candidate->name))) __leave;
+            g_resource_add(manager, decl);
+            registered = ds_peek_decl(manager, candidate->name) == decl;
+            if (!registered) __leave;
+            candidate->reserved = 1;
+            candidate->initializing = 1;
+            *(unsigned int *)((unsigned char *)decl + DS_RES_LEVEL_OFF) = 4u;
+            unsigned char *state = (unsigned char *)decl + DS_DECL_STATE_OFFSET;
+            *state = (unsigned char)(*state | DS_DECL_PENDING_LOAD);
+        } __except (EXCEPTION_EXECUTE_HANDLER) { registered = 0; }
+        if (!registered) {
+            /* A constructor that never entered a manager has no consumers. */
+            if (decl && !candidate->reserved) __try {
+                if (!*(void **)((unsigned char *)decl + 0x10))
+                    (*(void (**)(void *, unsigned int))*(void ***)decl)(decl, 1u);
+            } __except (EXCEPTION_EXECUTE_HANDLER) { /* Preserve the original failure. */ }
+            return ds_materialize_failure(i, candidate->type, candidate->name,
+                "native cyclic identity reservation failed");
+        }
+        if (context->materialized) (*context->materialized)++;
+    }
+    /* A recursive pending read can copy a parent before its last fields have
+     * been parsed. Re-copy only inheritance descending from newly reserved
+     * objects, in the already-proven parent-first order, once all are ready. */
+    return ds_plan_inheritance_completion();
+}
+
+static int ds_complete_inheritance(ds_materialize_context *context)
+{
+    for (int i = 0; i < g_candidate_count; i++) {
+        ds_candidate *candidate = &g_candidates[i];
+        if (!candidate->finish_inherit ||
+            (candidate->outcome != DS_CANDIDATE_MISSING && candidate->outcome != DS_CANDIDATE_SHADOWED)) continue;
+        int ok = 0;
+        __try {
+            void *manager = context->type_by_name(context->registry, candidate->type);
+            void *decl = manager ? ds_peek_decl(manager, candidate->name) : NULL;
+            ok = decl && ds_reparse_defaulted(context, manager, candidate, &decl, 1) &&
+                ds_candidate_usable(candidate, manager, decl, NULL);
+        } __except (EXCEPTION_EXECUTE_HANDLER) { ok = 0; }
+        if (!ok) return ds_materialize_failure(i, candidate->type, candidate->name,
+            "native inheritance completion failed");
+    }
+    return 1;
+}
+
+/* Failed admission must not leave an unparsed staged object looking ready or
+ * allow its pending read to fire later against the restored provider. A later
+ * valid activation uses the ordinary defaulted-object reconstruction path. */
+static void ds_cancel_reservations(ds_materialize_context *context)
+{
+    for (int i = 0; i < g_candidate_count; i++) if (g_candidates[i].reserved) __try {
+        ds_candidate *candidate = &g_candidates[i];
+        void *manager = context->type_by_name(context->registry, candidate->type);
+        unsigned char *decl = manager ? ds_peek_decl(manager, candidate->name) : NULL;
+        if (decl && (decl[DS_DECL_STATE_OFFSET] & DS_DECL_PENDING_LOAD))
+            decl[DS_DECL_STATE_OFFSET] = (unsigned char)((decl[DS_DECL_STATE_OFFSET] & ~DS_DECL_PENDING_LOAD) | DS_DECL_DEFAULTED);
+    } __except (EXCEPTION_EXECUTE_HANDLER) { InterlockedIncrement(&g_rearm_drain_faults); }
 }
 
 /* Collect first, reconstruct second, then mark the complete set. No parser
@@ -1664,6 +2161,7 @@ static void ds_runtime_premark(ds_materialize_context *context)
              * no parser or later map transition may see a demoted target. */
             __try {
                 if (*level == 4u) *level = 2u;
+                sh_package_shader_receipt_invalidate((uintptr_t)decl);
                 g_reconstruct(decl);
             } __finally {
                 *level = 4u;
@@ -1685,7 +2183,12 @@ static void ds_runtime_premark(ds_materialize_context *context)
     }
     if (g_resident_pass) {
         char error[256];
-        if (!sh_resource_resident_defaults(g_resident_pass, error, sizeof(error))) {
+        /* Rebuilt leaves reload before any declaration is re-parsed: a mesh the
+         * pass kept reads its rebuilt skeleton directly, and an md6Def parsed
+         * against it while pending faulted on the skeleton's missing joints. */
+        if (!sh_resource_resident_defaults(g_resident_pass, error, sizeof(error)) ||
+            !sh_resource_resident_drain_leaves(g_resident_pass, sh_package_source_leaf_family,
+                error, sizeof(error))) {
             backend_log(error); InterlockedIncrement(&g_rearm_drain_faults);
         }
     }
@@ -1699,7 +2202,7 @@ static void ds_runtime_premark(ds_materialize_context *context)
  * guard leaves pending-load set, clear the bit and call generic load
  * directly. Type-specific reload lifetime still requires native validation.
  */
-static void ds_runtime_reload_shadowed(ds_materialize_context *context)
+static void ds_runtime_promote_marks(void)
 {
     int i;
 
@@ -1718,10 +2221,14 @@ static void ds_runtime_reload_shadowed(ds_materialize_context *context)
             g_rt_marks[i].shadowed = 0;
         }
     }
+}
 
-    for (i = 0; i < g_rt_mark_count; i++) {
+static void ds_runtime_reload_mark(ds_materialize_context *context, int i)
+{
+    {
         ds_candidate *candidate;
         void *decl;
+        void *checked_manager = NULL;
         unsigned char state = 0;
         int fault = 0;
 
@@ -1730,6 +2237,7 @@ static void ds_runtime_reload_shadowed(ds_materialize_context *context)
         __try {
             void *type_manager =
                 context->type_by_name(context->registry, candidate->type);
+            checked_manager = type_manager;
             if (type_manager) {
                 void *resolved = context->find_decl(type_manager, candidate->name, 0);
                 if (resolved) decl = resolved;
@@ -1744,7 +2252,7 @@ static void ds_runtime_reload_shadowed(ds_materialize_context *context)
             InterlockedIncrement(&g_rearm_drain_faults);
             ds_log("DRAIN-FAULT", candidate->source,
                    "forced re-parse raised an engine exception; pending mark will be swept");
-            continue;
+            return;
         }
         if ((state & DS_DECL_PENDING_LOAD) != 0 && g_generic_load) {
             /* If ordinary lookup leaves the mark, clear it and invoke generic
@@ -1764,10 +2272,10 @@ static void ds_runtime_reload_shadowed(ds_materialize_context *context)
                 InterlockedIncrement(&g_rearm_drain_faults);
                 ds_log("DRAIN-FAULT", candidate->source,
                        "direct generic load raised an engine exception");
-                continue;
+                return;
             }
         }
-        if (ds_candidate_usable(candidate, decl, NULL)) {
+        if (ds_candidate_usable(candidate, checked_manager, decl, NULL)) {
             char detail[160];
             if (g_rt_marks[i].shadowed)
                 InterlockedIncrement(&g_rearm_shadow_reparsed);
@@ -1931,9 +2439,10 @@ static int ds_materialize_missing_sedefs(void *registry,
                                          int *materialized)
 {
     ds_materialize_context context;
-    int i;
+    int i, refresh, mark = 0, failed = 0;
 
     if (materialized) *materialized = 0;
+    g_isolated_defaults = 0;
     if (!registry || !type_by_name || !source_find || !find_decl) return 0;
     context.registry = registry;
     context.type_by_name = type_by_name;
@@ -1943,19 +2452,7 @@ static int ds_materialize_missing_sedefs(void *registry,
 
     /* A runtime pass refreshes stale pre-existing decls with the engine's own pending-load
      * mechanism; every mark must exist before the first drain (see ds_runtime_premark). */
-    if (g_boot_refresh || InterlockedCompareExchange(&g_rearm_is_runtime, 0, 0))
-        ds_runtime_premark(&context);
-    if ((g_boot_refresh || InterlockedCompareExchange(&g_rearm_is_runtime, 0, 0)) &&
-        InterlockedCompareExchange(&g_rearm_drain_faults, 0, 0)) return 0;
-
-    /* Finish every reconstructed object before validating new identities.
-     * A rejected new material must not strand unrelated existing resources
-     * in their empty constructor state. This also drains reused defaults;
-     * dependency lookups may have completed some targets already. */
-    if (g_boot_refresh || InterlockedCompareExchange(&g_rearm_is_runtime, 0, 0)) {
-        ds_runtime_reload_shadowed(&context);
-        if (InterlockedCompareExchange(&g_rearm_drain_faults, 0, 0)) return 0;
-    }
+    refresh = g_boot_refresh || InterlockedCompareExchange(&g_rearm_is_runtime, 0, 0);
 
     for (i = 0; i < g_candidate_count; i++) {
         ds_candidate *candidate = &g_candidates[i];
@@ -1969,19 +2466,48 @@ static int ds_materialize_missing_sedefs(void *registry,
                    "source-only snapEditorEntityDef has no direct edit.entityDef or inherit assignment; excluded from materialization and palette admission");
         }
     }
+    /* Reload stale identities and materialize new ones in the snapshot's
+     * dependency order: a live declaration naming a new identity (the stock
+     * player hands web naming a package's model) must parse after that
+     * identity exists. Every reconstructed object is still reloaded before a
+     * failure is reported, so a rejected new material never strands an
+     * unrelated resource in its empty constructor state; after a failure or
+     * drain fault no further identity is materialized. */
+    if (!ds_reserve_cycles(&context)) { ds_cancel_reservations(&context); return 0; }
+    if (refresh) ds_runtime_premark(&context);
+    if (refresh && InterlockedCompareExchange(&g_rearm_drain_faults, 0, 0)) {
+        ds_cancel_reservations(&context); return 0;
+    }
+    if (refresh) {
+        for (i = 0; i < g_rt_mark_count; i++) {
+            ds_candidate *candidate = &g_candidates[g_rt_marks[i].candidate];
+            if (candidate->reserve_cycle) candidate->initializing = 1;
+        }
+        /* Ordering was checked before reconstruction; only initialization
+         * state changed while collecting the actual refresh set. */
+        ds_plan_inheritance_completion();
+    }
+    if (refresh) ds_runtime_promote_marks();
     for (i = 0; i < g_candidate_count; i++) {
         ds_candidate *candidate = &g_candidates[i];
-        if (candidate->outcome != DS_CANDIDATE_MISSING ||
-            _stricmp(candidate->type, "snapEditorEntityDef") == 0)
+        for (; refresh && mark < g_rt_mark_count && g_rt_marks[mark].candidate == i; mark++)
+            ds_runtime_reload_mark(&context, mark);
+        if (failed || candidate->outcome != DS_CANDIDATE_MISSING ||
+            (_stricmp(candidate->type, "snapEditorEntityDef") == 0 &&
+             !candidate->reserved && !candidate->finish_inherit))
             continue;
-        if (!ds_materialize_identity(&context, i)) return 0;
+        if (refresh && InterlockedCompareExchange(&g_rearm_drain_faults, 0, 0)) { failed = 1; continue; }
+        if (!ds_materialize_identity(&context, i)) failed = 1;
     }
+    for (; refresh && mark < g_rt_mark_count; mark++) ds_runtime_reload_mark(&context, mark);
+    if (failed || (refresh && InterlockedCompareExchange(&g_rearm_drain_faults, 0, 0)) ||
+        !ds_complete_inheritance(&context)) { ds_cancel_reservations(&context); return 0; }
     for (i = 0; i < g_candidate_count; i++) {
         ds_candidate *candidate = &g_candidates[i];
         if (candidate->outcome != DS_CANDIDATE_MISSING ||
             _stricmp(candidate->type, "snapEditorEntityDef") != 0)
             continue;
-        if (!ds_materialize_root(&context, i)) return 0;
+        if (!ds_materialize_root(&context, i)) { ds_cancel_reservations(&context); return 0; }
     }
     return !(g_boot_refresh || InterlockedCompareExchange(&g_rearm_is_runtime, 0, 0)) ||
            InterlockedCompareExchange(&g_rearm_drain_faults, 0, 0) == 0;
@@ -1995,10 +2521,181 @@ enum {
     DS_PHASE_FAILURE_VISIBILITY
 };
 
+static void ds_rows_record(void *registry, decl_type_by_name_fn type_by_name, int published);
+
 /* This is the production two-phase boundary. Every missing source is scanned
  * before the first make-default lookup can materialize an editor entity. Keep
  * the ordering in one helper so the executable test seam exercises this same
  * loop rather than a test-only approximation. */
+/* R-398: the engine registration's own steps, for the pass phases line:
+ * candidate classification (source and live lookups), the decltree table,
+ * the source scans of missing candidates, their materialization, visibility,
+ * the resident refresh (reconstruct and drain, where stale shadowed
+ * declarations re-parse), the row lineage and the palette rebuild. */
+static struct { double classify, table, scans, materialize, visibility, resident, rows, palette; int scanned; } g_registration_split;
+static double ds_split_now(void)
+{ LARGE_INTEGER c, f; QueryPerformanceCounter(&c); QueryPerformanceFrequency(&f); return (double)c.QuadPart * 1000.0 / (double)f.QuadPart; }
+/* The palette's rows are built from editor declarations and their entity templates. */
+static int ds_template_type(const char *type)
+{ return type && (!_stricmp(type, "snapEditorEntityDef") || !_stricmp(type, "entityDef")); }
+static int ds_template_path(const char *path)
+{
+    return path && (!_strnicmp(path, "generated/decls/snapeditorentitydef/", 36) ||
+        !_strnicmp(path, "generated/decls/entitydef/", 26));
+}
+static int ds_template_identities(const sh_package_native_identity *items, size_t count)
+{
+    for (size_t i = 0; items && i < count; i++) if (ds_template_type(items[i].type)) return 1;
+    return 0;
+}
+/* R-398: a runtime pass rebuilds the palette only when one of its rows can
+ * have changed. It keeps the live palette when that palette still holds
+ * exactly the rows its last rebuild produced and this pass registered,
+ * materialized, re-parsed, reconstructed, changed or rebound no editor
+ * declaration or entity template. A boot or recovery pass, an unreadable
+ * palette, authoring publication over it, or any template change rebuilds.
+ * 0 with *why naming the first reason a rebuild is needed. */
+static int ds_palette_kept(int materialized, const char **why)
+{
+    const sh_package_changes *changes = g_pass_changes;
+    *why = NULL;
+    if (!InterlockedCompareExchange(&g_rearm_is_runtime, 0, 0) || g_boot_refresh || !g_pass_forward || !changes) {
+        *why = "not a forward runtime pass"; return 0;
+    }
+    if (!sh_palette_refresh_current()) { *why = "the live palette is not the one the last rebuild produced"; return 0; }
+    if (materialized) { *why = "editor entities were materialized"; return 0; }
+    for (int i = 0; i < g_candidate_count; i++) {
+        const ds_candidate *candidate = g_candidates + i;
+        if ((candidate->outcome == DS_CANDIDATE_MISSING || candidate->outcome == DS_CANDIDATE_NON_PALETTE) &&
+            ds_template_type(candidate->type)) { *why = "an editor or entity template was registered"; return 0; }
+    }
+    for (int i = 0; i < g_rt_mark_count; i++) {
+        int at = g_rt_marks[i].candidate;
+        if (at >= 0 && at < g_candidate_count && ds_template_type(g_candidates[at].type)) {
+            *why = "an editor or entity template was re-parsed"; return 0;
+        }
+    }
+    if (!g_resident_pass || sh_resource_resident_selected_type(g_resident_pass, "snapEditorEntityDef") ||
+        sh_resource_resident_selected_type(g_resident_pass, "entityDef")) {
+        *why = "the resident refresh selected an editor or entity template"; return 0;
+    }
+    for (size_t i = 0; i < changes->count; i++) {
+        const sh_package_change *change = changes->items + i;
+        if (ds_template_type(change->type) || ds_template_type(change->previous_type) || ds_template_path(change->path)) {
+            *why = "an editor or entity template resource changed"; return 0;
+        }
+    }
+    if (ds_template_identities(changes->added, changes->added_count) ||
+        ds_template_identities(changes->removed, changes->removed_count) ||
+        ds_template_identities(changes->rebound, changes->rebound_count)) {
+        *why = "an editor or entity template identity was added, removed or rebound"; return 0;
+    }
+    return 1;
+}
+
+static int ds_digest_bytes(BCRYPT_HASH_HANDLE hash, const void *bytes, size_t length)
+{
+    unsigned long long n = length;
+    return BCryptHashData(hash, (PUCHAR)&n, sizeof(n), 0) >= 0 &&
+        (!length || BCryptHashData(hash, (PUCHAR)bytes, (ULONG)length, 0) >= 0);
+}
+static int ds_digest_text(BCRYPT_HASH_HANDLE hash, const char *text)
+{ return text ? ds_digest_bytes(hash, text, strlen(text)) : ds_digest_bytes(hash, "\xff", 1); }
+static int ds_digest_value(BCRYPT_HASH_HANDLE hash, unsigned long long value)
+{ return ds_digest_bytes(hash, &value, sizeof(value)); }
+/* Every input the registration reads from the captured candidates, in their
+ * dependency order: identity, served bytes, native and rebound originals,
+ * baseline slot, predicted default, cycle reservation, inheritance and the
+ * editor-row lineage with its exact supplying binding. */
+static int ds_candidates_digest(unsigned char out[32])
+{
+    BCRYPT_ALG_HANDLE algorithm = NULL;
+    BCRYPT_HASH_HANDLE hash = NULL;
+    int ok = 0;
+    if (BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_SHA256_ALGORITHM, NULL, 0) < 0 ||
+        BCryptCreateHash(algorithm, &hash, NULL, 0, NULL, 0, 0) < 0) goto done;
+    if (!ds_digest_value(hash, (unsigned long long)g_candidate_count)) goto done;
+    for (int i = 0; i < g_candidate_count; i++) {
+        const ds_candidate *c = g_candidates + i;
+        const sh_package_provenance *supply = c->supply;
+        if (!ds_digest_text(hash, c->type) || !ds_digest_text(hash, c->name) || !ds_digest_text(hash, c->source) ||
+            !ds_digest_bytes(hash, c->body, c->body_length) || !ds_digest_value(hash, (unsigned)c->native_original) ||
+            !ds_digest_value(hash, (unsigned)c->rebound_original) || !ds_digest_text(hash, c->original) ||
+            !ds_digest_value(hash, (unsigned)c->baseline_slot) || !ds_digest_text(hash, c->native_default) ||
+            !ds_digest_value(hash, (unsigned)c->reserve_cycle) || !ds_digest_value(hash, c->inherit_parent) ||
+            !ds_digest_text(hash, c->authored) || !ds_digest_bytes(hash, c->identity, 32) ||
+            !ds_digest_bytes(hash, c->linked, 32) || !ds_digest_value(hash, supply != NULL)) goto done;
+        if (!supply) continue;
+        if (!ds_digest_value(hash, supply->context_count) || !ds_digest_value(hash, supply->binding_count)) goto done;
+        for (size_t k = 0; k < supply->context_count; k++) {
+            const sh_package_provenance_context *context = supply->contexts + k;
+            if (!ds_digest_value(hash, context->mode) || !ds_digest_bytes(hash, context->trees, context->tree_count * 32) ||
+                !ds_digest_text(hash, context->component)) goto done;
+        }
+        for (size_t k = 0; k < supply->binding_count; k++) {
+            const sh_package_provenance_binding *binding = supply->bindings + k;
+            if (!ds_digest_text(hash, binding->family) || !ds_digest_text(hash, binding->original) ||
+                !ds_digest_text(hash, binding->name) ||
+                !ds_digest_bytes(hash, binding->contexts, binding->context_count * sizeof(*binding->contexts))) goto done;
+        }
+    }
+    ok = BCryptFinishHash(hash, out, 32, 0) >= 0;
+done:
+    if (hash) BCryptDestroyHash(hash);
+    if (algorithm) BCryptCloseAlgorithmProvider(algorithm, 0);
+    return ok;
+}
+
+/* R-398: a map or retained-resource activation that changed nothing keeps
+ * the standing registration. The full pass over it would classify every
+ * candidate as already registered, re-parse none (nothing is selected and
+ * each declaration is in the state its bytes parse to), publish the same
+ * table bytes, record the same editor rows and keep the palette; so its
+ * policy steps (HUD, requirements, strings) run and the registration is not
+ * handed to the engine again. Any difference -- a changed or rebound
+ * resource, a different candidate input, a declaration not in its parsed
+ * state, a selected consumer, a palette that is not the one built for these
+ * rows, or no completed registration of these inputs -- registers in full. */
+static int ds_registration_reusable(const char **why)
+{
+    const sh_package_changes *c = g_pass_changes;
+    void *registry = NULL;
+    decl_type_by_name_fn type_by_name = NULL;
+    decl_register_file_fn register_file = NULL;
+    *why = NULL;
+    if (!g_pass_boundary) { *why = "not a boundary activation"; return 0; }
+    if (!c || c->count || c->rebound_count || c->availability_count || c->added_count || c->removed_count) {
+        *why = "the activation changed resources"; return 0;
+    }
+    if (!g_pass_forward) { *why = "not a forward pass"; return 0; }
+    /* R-401: under register-once the runtime handed no change because every candidate is a row the engine
+     * already holds with these bytes (the standing registration, or a dormant row it kept); the candidate set
+     * may be a subset of the one last registered, so the digest stands in only without that switch. */
+    int settled = sh_package_runtime_register_once_settled();
+    if (!g_prior_registered || (!settled && (!g_pass_digest_ok || memcmp(g_pass_digest, g_registered_digest, 32)))) {
+        *why = "these inputs are not the registration standing"; return 0;
+    }
+    if (!g_resident_pass || sh_resource_resident_selected_count(g_resident_pass) != 0) {
+        *why = "the resident refresh selected consumers"; return 0;
+    }
+    if (InterlockedCompareExchange(&g_rearm_drain_faults, 0, 0) || !sh_palette_refresh_current()) {
+        *why = "the palette is not the one built for these rows"; return 0;
+    }
+    if (!ds_decode_registry(&registry, &type_by_name, &register_file)) { *why = "registry unavailable"; return 0; }
+    for (int i = 0; i < g_candidate_count; i++) {
+        ds_candidate *candidate = g_candidates + i;
+        void *manager = NULL, *decl = NULL;
+        int ok = 0;
+        __try {
+            manager = type_by_name(registry, candidate->type);
+            decl = manager ? ds_peek_decl(manager, candidate->name) : NULL;
+            ok = decl && (ds_decl_usable(decl, NULL) || ds_candidate_usable(candidate, manager, decl, NULL));
+        } __except (EXCEPTION_EXECUTE_HANDLER) { ok = 0; }
+        if (!ok) { *why = "a declaration is not in its parsed state"; return 0; }
+    }
+    return 1;
+}
+
 static int ds_scan_and_materialize_missing(
     void *registry, decl_type_by_name_fn type_by_name,
     decl_register_file_fn register_file, idstr_ctor_fn ctor,
@@ -2009,6 +2706,7 @@ static int ds_scan_and_materialize_missing(
     int *failure_phase)
 {
     int i;
+    const char *palette_why = NULL;
 
     if (registered) *registered = 0;
     if (materialized) *materialized = 0;
@@ -2018,12 +2716,19 @@ static int ds_scan_and_materialize_missing(
         if (failure_phase) *failure_phase = DS_PHASE_FAILURE_SCAN;
         return 0;
     }
+    /* Before anything registers, so a pass that fails part way can never
+     * leave a product row unrecorded, where it would look native. */
+    double split = ds_split_now(), split_now;
+#define DS_SPLIT(field) (split_now = ds_split_now(), g_registration_split.field += split_now - split, split = split_now)
+    ds_rows_record(registry, type_by_name, 0);
+    DS_SPLIT(rows);
     for (i = 0; i < g_candidate_count; i++) {
         ds_candidate *candidate = &g_candidates[i];
         char source_name[SH_DECL_SERVER_TYPE_CAP + SH_DECL_SERVER_NAME_CAP + 8];
         int registration;
 
         if (candidate->outcome != DS_CANDIDATE_MISSING) continue;
+        if (g_additive_scan && candidate->shadow_kind == DS_SHADOW_SOURCE) continue;
         if (!ds_candidate_source_name(candidate, source_name, sizeof(source_name))) {
             ds_log("REFUSED", candidate->source,
                    "native decltree source name exceeded its bounded path");
@@ -2068,10 +2773,12 @@ static int ds_scan_and_materialize_missing(
             backend_log(line);
         }
         if (registered) (*registered)++;
+        g_registration_split.scanned++;
     }
-    if (!ds_materialize_missing_sedefs(registry, type_by_name, source_find,
-                                       find_decl,
-                                       materialized) ||
+    DS_SPLIT(scans);
+    int materialized_ok = ds_materialize_missing_sedefs(registry, type_by_name, source_find, find_decl, materialized);
+    DS_SPLIT(materialize);
+    if (!materialized_ok ||
         (g_rearm_is_runtime && g_rearm_drain_faults)) {
         if (refused) (*refused)++;
         ds_refuse_remaining(0,
@@ -2096,12 +2803,13 @@ static int ds_scan_and_materialize_missing(
             return 0;
         }
     }
+    DS_SPLIT(visibility);
     /* Finish the native resident refresh before the palette is rebuilt. The
      * palette builder constructs an entity per template, and those entities
      * resolve the very resources this pass captured; rebuilding while they are
      * still marked pending drops their templates and the native entity bank
      * then reports a missing palette entry. */
-    if (g_resident_pass) {
+    if (g_resident_pass && !g_additive_scan) {
         char error[256];
         if (!sh_resource_resident_reconstruct(g_resident_pass, error, sizeof(error)) ||
             !sh_resource_resident_drain(g_resident_pass, error, sizeof(error))) {
@@ -2110,9 +2818,24 @@ static int ds_scan_and_materialize_missing(
             return 0;
         }
     }
-    {
+    DS_SPLIT(resident);
+    /* Lineage before any rebuild: row steering must never see an unrecorded
+     * product row, whose live declaration and source record look native. */
+    ds_rows_record(registry, type_by_name, 1);
+    DS_SPLIT(rows);
+    g_pass_palette_kept = 0;
+    if (!g_additive_scan && ds_palette_kept(materialized ? *materialized : 0, &palette_why)) {
+        g_pass_palette_kept = 1;
+        backend_log("palette-refresh KEPT: this pass changed no editor or entity template row; the live palette holds "
+                    "exactly the rows its last rebuild produced (R-398)");
+    } else if (!g_additive_scan) {
         int palette_ok = 0;
         int palette_fault = 0;
+        if (palette_why && g_pass_forward) {
+            char reason[160];
+            _snprintf_s(reason, sizeof reason, _TRUNCATE, "palette-refresh: rebuilding because %s", palette_why);
+            backend_log(reason);
+        }
         __try {
             palette_ok = palette_refresh() ? 1 : 0;
         } __except (EXCEPTION_EXECUTE_HANDLER) {
@@ -2123,6 +2846,8 @@ static int ds_scan_and_materialize_missing(
             return 0;
         }
     }
+    DS_SPLIT(palette);
+#undef DS_SPLIT
     return 1;
 }
 
@@ -2131,6 +2856,7 @@ void sh_decl_server_test_set_runtime(int active)
 {
     InterlockedExchange(&g_rearm_is_runtime, active ? 1 : 0);
 }
+void sh_decl_server_test_set_additive(int active) { g_additive_scan = active != 0; }
 void sh_decl_server_test_set_resident(void *pass)
 {
     g_resident_pass = (sh_resource_resident *)pass;
@@ -2146,6 +2872,19 @@ void sh_decl_server_test_set_reconstruct(sh_decl_server_test_generic_load_fn fn,
     g_reconstruct = (resource_generic_load_fn)fn;
     g_test_peek = (decl_find_fn)peek;
 }
+void sh_decl_server_test_set_resource_add(void (*fn)(void *manager, void *decl))
+{ g_resource_add = fn; }
+void sh_decl_server_test_bind_native(const unsigned char *anchor,
+    sh_decl_server_test_type_by_name_fn type_by_name, sh_decl_server_test_register_file_fn register_file,
+    sh_decl_server_test_find_decl_fn find_decl, sh_decl_server_test_source_find_fn source_find,
+    sh_decl_server_test_idstr_ctor_fn ctor, sh_decl_server_test_idstr_dtor_fn dtor)
+{
+    g_registry_anchor = anchor;
+    g_expected_type_by_name = (decl_type_by_name_fn)type_by_name;
+    g_expected_register_file = (decl_register_file_fn)register_file;
+    g_find_decl = (decl_find_fn)find_decl; g_find_source = (decl_source_find_fn)source_find;
+    g_idstr_ctor = (idstr_ctor_fn)ctor; g_idstr_dtor = (idstr_dtor_fn)dtor;
+}
 
 void sh_decl_server_test_reset_runtime_state(void)
 {
@@ -2154,6 +2893,7 @@ void sh_decl_server_test_reset_runtime_state(void)
     g_rt_marks = NULL;
     g_test_fail_mark_allocation = 0;
     g_generic_load = NULL;
+    g_resource_add = NULL;
     memset(&g_runtime_heap, 0, sizeof(g_runtime_heap));
     InterlockedExchange(&g_rearm_touched_promoted, 0);
     InterlockedExchange(&g_rearm_marked_pending, 0);
@@ -2219,6 +2959,19 @@ int sh_decl_server_test_materialize_missing_sedefs(
             test_candidates[i].body = (char *)items[i].body;
             test_candidates[i].body_length = items[i].body_length;
             test_candidates[i].native_original = items[i].native_original;
+            test_candidates[i].reserve_cycle = items[i].reserve_cycle;
+            test_candidates[i].inherit_parent = items[i].inherit_parent;
+            test_candidates[i].rebound_original = items[i].rebound_original;
+            if (items[i].original && strcpy_s(test_candidates[i].original, sizeof(test_candidates[i].original),
+                    items[i].original) != 0) {
+                HeapFree(GetProcessHeap(), 0, test_candidates);
+                return 0;
+            }
+            if (items[i].native_default && strcpy_s(test_candidates[i].native_default,
+                    sizeof(test_candidates[i].native_default), items[i].native_default) != 0) {
+                HeapFree(GetProcessHeap(), 0, test_candidates);
+                return 0;
+            }
         }
     }
     g_candidates = test_candidates;
@@ -2276,6 +3029,19 @@ int sh_decl_server_test_scan_and_materialize_missing(
             test_candidates[i].body = (char *)items[i].body;
             test_candidates[i].body_length = items[i].body_length;
             test_candidates[i].native_original = items[i].native_original;
+            test_candidates[i].reserve_cycle = items[i].reserve_cycle;
+            test_candidates[i].inherit_parent = items[i].inherit_parent;
+            test_candidates[i].rebound_original = items[i].rebound_original;
+            if (items[i].original && strcpy_s(test_candidates[i].original, sizeof(test_candidates[i].original),
+                    items[i].original) != 0) {
+                HeapFree(GetProcessHeap(), 0, test_candidates);
+                return 0;
+            }
+            if (items[i].native_default && strcpy_s(test_candidates[i].native_default,
+                    sizeof(test_candidates[i].native_default), items[i].native_default) != 0) {
+                HeapFree(GetProcessHeap(), 0, test_candidates);
+                return 0;
+            }
         }
     }
     g_candidates = test_candidates;
@@ -2301,6 +3067,10 @@ static void __cdecl ds_apply_command(void)
     decl_type_by_name_fn type_by_name = NULL;
     decl_register_file_fn register_file = NULL;
     int missing = 0, shadowed = 0, refused = g_capture_refused;
+    int shadowed_source = 0, shadowed_live = 0;
+    /* An unchanged runtime activation: every SHADOWED outcome is the one the
+     * last pass logged per identity, so they are counted here instead. */
+    int summarize = InterlockedCompareExchange(&g_pass_unchanged, 0, 0) != 0;
     int i;
 
     if (InterlockedCompareExchange(&g_state, DS_STATE_APPLYING, DS_STATE_QUEUED) != DS_STATE_QUEUED)
@@ -2316,6 +3086,7 @@ static void __cdecl ds_apply_command(void)
     /* This one engine command thread is the sole classifier, table publisher,
      * scanner, materializer, and palette-success publisher. Complete every
      * source/live lookup before exposing any exact decltree bytes. */
+    double classify_began = ds_split_now();
     for (i = 0; i < g_candidate_count; i++) {
         ds_candidate *candidate = &g_candidates[i];
         const char *reason = NULL;
@@ -2340,7 +3111,8 @@ static void __cdecl ds_apply_command(void)
             continue;
         }
         if (classification == DS_CLASSIFY_SHADOWED_SOURCE) {
-            ds_log("SHADOWED", candidate->source,
+            if (summarize) shadowed_source++;
+            else ds_log("SHADOWED", candidate->source,
                    "native source record already exists; ordinary file-shadow remains authoritative");
             candidate->outcome = DS_CANDIDATE_SHADOWED;
             candidate->shadow_kind = DS_SHADOW_SOURCE;
@@ -2348,7 +3120,8 @@ static void __cdecl ds_apply_command(void)
             continue;
         }
         if (classification == DS_CLASSIFY_SHADOWED_LIVE) {
-            ds_log("SHADOWED", candidate->source,
+            if (summarize) shadowed_live++;
+            else ds_log("SHADOWED", candidate->source,
                    "live decl object already exists; ordinary file-shadow remains authoritative");
             candidate->outcome = DS_CANDIDATE_SHADOWED;
             candidate->shadow_kind = DS_SHADOW_LIVE;
@@ -2357,6 +3130,16 @@ static void __cdecl ds_apply_command(void)
         }
         candidate->outcome = DS_CANDIDATE_MISSING;
         missing++;
+    }
+    g_registration_split.classify += ds_split_now() - classify_began;
+    if (summarize && (shadowed_source || shadowed_live)) {
+        char line[256];
+        _snprintf_s(line, sizeof(line), _TRUNCATE,
+                    "decl-server SHADOWED: %d identit%s as at the last pass (%d by native source record, %d by live decl object); "
+                    "the activation changed no resource, so the per-identity lines are not repeated",
+                    shadowed_source + shadowed_live, shadowed_source + shadowed_live == 1 ? "y" : "ies",
+                    shadowed_source, shadowed_live);
+        backend_log(line);
     }
 
     if (missing == 0 && shadowed == 0) {
@@ -2371,7 +3154,10 @@ static void __cdecl ds_apply_command(void)
         return;
     }
 
-    if (!ds_publish_missing_table(missing)) {
+    double table_began = ds_split_now();
+    int table_published = ds_publish_missing_table(missing);
+    g_registration_split.table += ds_split_now() - table_began;
+    if (!table_published) {
         ds_refuse_remaining(0, "exact decltree table publication failed", &refused);
         backend_log("decl-server FAILED: immutable per-decl table was not accepted by the installed override provider");
         InterlockedExchange(&g_state, DS_STATE_FAILED);
@@ -2423,10 +3209,10 @@ static void __cdecl ds_apply_command(void)
         } else {
             char line[448];
             _snprintf_s(line, sizeof(line), _TRUNCATE,
-                        "decl-server registration succeeded: %d MISSING registered in dependency order, %d live objects materialized, %d of them new editor entities held to the native palette contract, %d SHADOWED, %d REFUSED; the entity-palette rebuild that makes these types nameable by a loading map was %s",
+                        "decl-server registration succeeded: %d MISSING registered in dependency order, %d live objects materialized, %d of them new editor entities held to the native palette contract, %d SHADOWED, %d REFUSED, %d isolated to the engine's default; the entity-palette rebuild that makes these types nameable by a loading map was %s",
                         registered, materialized, ds_admitted_root_count(),
-                        shadowed, refused,
-                        "completed");
+                        shadowed, refused, g_isolated_defaults,
+                        g_pass_palette_kept ? "not needed: no editor or entity template row changed" : "completed");
             backend_log(line);
             /* Retain one identity, not an object pointer, for the post-
              * promotion lifetime check.
@@ -2474,8 +3260,8 @@ static int ds_runtime_boundary_safe(void)
 {
     const unsigned char *shell, *manager, *common;
     int current, next;
-    if (!g_module_base) return 0;
-    if (sh_map_transition_at_boundary()) return 1;
+    if (!g_module_base || g_shader_prepare_scope) return 0;
+    if (sh_map_transition_at_boundary() || sh_editor_transition_at_boundary() || sh_rawmap_launch_at_boundary()) return 1;
     if (!g_boundary_editor || !g_boundary_shell_slot ||
         !g_boundary_common_slot || !g_boundary_thread_slot) return 0;
     __try {
@@ -2500,10 +3286,23 @@ static int ds_runtime_boundary_safe(void)
     }
 }
 
+/* One runtime declaration pass's phases (ds_activate_provider logs them):
+ * ours (HUD, requirements, strings, the declaration snapshot) apart from the
+ * engine's registration of the candidates and the passes after it. */
+typedef struct ds_pass_phases {
+    double hud, requirements, strings, snapshot, registration, promotion;
+    double resident, editor, reconstruct, drain, verify, audio;
+    unsigned candidates;
+} ds_pass_phases;
+static ds_pass_phases g_pass_phases;
+static double ds_now(void)
+{ LARGE_INTEGER c, f; QueryPerformanceCounter(&c); QueryPerformanceFrequency(&f); return (double)c.QuadPart * 1000.0 / (double)f.QuadPart; }
 static void ds_rearm_published(void)
 {
     char line[192];
     size_t packages;
+    double phase = ds_now(), now;
+#define DS_PHASE(field) (now = ds_now(), g_pass_phases.field += now - phase, phase = now)
     const sh_package_compilation *compiled = sh_package_runtime_acquire();
     packages = compiled ? compiled->sources->package_count : 0;
     sh_package_runtime_release();
@@ -2512,9 +3311,9 @@ static void ds_rearm_published(void)
     {
         char root[MAX_PATH];
         if (!sh_overrides_get_root(root, sizeof(root)) ||
-            !sh_weapon_hud_reload(root) ||
-            !sh_package_requirements_rearm(root, (void *)g_execute_commands, 1) ||
-            !sh_strids_rearm()) {
+            !sh_weapon_hud_reload(root) || (DS_PHASE(hud), 0) ||
+            !sh_package_requirements_rearm(root, (void *)g_execute_commands, 1) || (DS_PHASE(requirements), 0) ||
+            !sh_strids_rearm() || (DS_PHASE(strings), 0)) {
             backend_log("decl-server RE-ARM refused: package inventory, requirements, resources, HUD, or strings failed to refresh");
             InterlockedExchange(&g_state, DS_STATE_FAILED);
             return;
@@ -2523,7 +3322,9 @@ static void ds_rearm_published(void)
     /* Requirements drain synchronously before any native declaration parse. */
     sh_overrides_internal_decl_table_reopen();
 
-    if (!ds_capture_snapshot()) {
+    int captured = ds_capture_snapshot();
+    DS_PHASE(snapshot); g_pass_phases.candidates = (unsigned)g_candidate_count;
+    if (!captured) {
         backend_log("decl-server RE-ARM refused: fresh snapshot capture failed");
         InterlockedExchange(&g_state, DS_STATE_FAILED);
         ds_free_candidates();
@@ -2535,6 +3336,44 @@ static void ds_rearm_published(void)
         InterlockedExchange(&g_state, DS_STATE_DONE);
         ds_free_candidates();
         return;
+    }
+    g_pass_digest_ok = ds_candidates_digest(g_pass_digest);
+    {
+        const char *why = NULL;
+        char kept[448];
+        if (ds_registration_reusable(&why)) {
+            int selected = sh_package_runtime_register_once_settled() &&
+                (!g_pass_digest_ok || memcmp(g_pass_digest, g_registered_digest, 32));
+            if (selected) {
+                /* The rows this view serves take their records again, as a full pass would record them. */
+                void *registry = NULL; decl_type_by_name_fn type_by_name = NULL; decl_register_file_fn register_file = NULL;
+                if (ds_decode_registry(&registry, &type_by_name, &register_file)) {
+                    /* Each candidate is live and parsed (ds_registration_reusable): it classifies as shadowed. */
+                    for (int i = 0; i < g_candidate_count; i++)
+                        if (g_candidates[i].outcome == DS_CANDIDATE_UNCLASSIFIED) g_candidates[i].outcome = DS_CANDIDATE_SHADOWED;
+                    ds_rows_record(registry, type_by_name, 0); ds_rows_record(registry, type_by_name, 1);
+                }
+            }
+            _snprintf_s(kept, sizeof kept, _TRUNCATE, selected ?
+                        "decl-server RE-ARM kept (register-once): every one of the %u candidate(s) is a row the engine "
+                        "already holds with these bytes, each in its parsed state; the HUD, requirements and strings were "
+                        "refreshed and nothing is handed to the engine (R-401)" :
+                        "decl-server RE-ARM kept: the activation changed no resource and its %u candidate(s) are the "
+                        "registration standing, each in its parsed state; the HUD, requirements and strings were "
+                        "refreshed and the registration is not handed to the engine again (R-398)",
+                        (unsigned)g_candidate_count);
+            backend_log(kept);
+            g_pass_reused = 1;
+            InterlockedExchange(&g_registration_succeeded, 1);
+            InterlockedExchange(&g_state, DS_STATE_DONE);
+            ds_free_candidates();
+            DS_PHASE(snapshot);
+            return;
+        }
+        if (g_pass_boundary && why) {
+            _snprintf_s(kept, sizeof kept, _TRUNCATE, "decl-server RE-ARM registers in full: %s", why);
+            backend_log(kept);
+        }
     }
 
     _snprintf_s(line, sizeof line, _TRUNCATE,
@@ -2568,7 +3407,9 @@ static void ds_rearm_published(void)
         InterlockedExchange(&g_rearm_drain_faults, 0);
         InterlockedExchange(&g_rearm_shadow_reparsed, 0);
         InterlockedExchange(&g_rearm_is_runtime, 1);
+        DS_PHASE(snapshot);
         ds_apply_command();
+        DS_PHASE(registration);
         {
             int stray = ds_runtime_clear_stray_pending();
             if (stray) {
@@ -2586,6 +3427,7 @@ static void ds_rearm_published(void)
             InterlockedExchange(&g_state, DS_STATE_FAILED);
             backend_log("decl-server FAILED: runtime resource lifetime promotion was incomplete");
         }
+        DS_PHASE(promotion);
         _snprintf_s(tline, sizeof tline, _TRUNCATE,
                     "decl-server: %ld pre-existing decl(s) the pass REUSED were also raised to "
                     "level 4; %ld empty one(s) re-parsed here at the browser, %ld left alone "
@@ -2600,24 +3442,28 @@ static void ds_rearm_published(void)
         backend_log(tline);
         InterlockedExchange(&g_rearm_is_runtime, 0);
     }
+#undef DS_PHASE
 }
 
 static void ds_rearm_transaction(void);
+/* The kind of the pass being run and a request of a kind (DS_AUTO_*, below). */
+static LONG g_rearm_kind;
+static void ds_request_rearm(LONG kind);
 
 static void __cdecl ds_rearm_command(void)
 {
     if (sh_rawmap_defers_install_commit()) {
-        sh_decl_server_request_rearm(); return;
+        ds_request_rearm(g_rearm_kind); return;
     }
     if (!InterlockedCompareExchange(&g_runtime_ready, 0, 0) ||
         !sh_user_overrides_enabled_for_launch()) {
         backend_log("decl-server RE-ARM refused: runtime dependencies are unavailable");
-        sh_mpkg_activation_cancel();
+        ds_cancel_installation();
         return;
     }
     if (!ds_runtime_boundary_safe()) {
         backend_log("decl-server RE-ARM deferred: return to the settled SnapMap browser before refreshing packages");
-        sh_decl_server_request_rearm();
+        ds_request_rearm(g_rearm_kind);
         return;
     }
     if (!sh_mpkg_startup_ready()) {
@@ -2627,7 +3473,7 @@ static void __cdecl ds_rearm_command(void)
             InterlockedExchange(&g_registration_succeeded, 0);
             InterlockedExchange(&g_state, DS_STATE_FAILED);
             backend_log("decl-server RE-ARM refused: interrupted installation recovery or package startup capture is incomplete");
-            sh_mpkg_activation_cancel();
+            ds_cancel_installation();
             return;
         }
     }
@@ -2638,7 +3484,7 @@ static void __cdecl ds_rearm_command(void)
         InterlockedExchange(&g_state, DS_STATE_FAILED);
         backend_log("decl-server RE-ARM refused: native refresh raised an exception");
     }
-    if (!sh_decl_server_registration_succeeded()) sh_mpkg_activation_cancel();
+    if (!sh_decl_server_registration_succeeded()) ds_cancel_installation();
 }
 
 /* Registry watermark/delta promotion uses the same list as native promotion:
@@ -2781,36 +3627,353 @@ static int ds_res_promote_delta(unsigned char level)
  */
 enum {
     DS_AUTO_IDLE = 0,
-    DS_AUTO_RUN          /* run the whole pass on the next tick */
+    DS_AUTO_RUN,         /* run the whole pass on the next tick */
+    DS_AUTO_WATCHED      /* the installed-package watcher's pass: an unchanged
+                          * installed inventory reuses the served library */
 };
 static volatile LONG g_auto_state;
+/* R-400: a boot whose first registration waits for the menu. Its first runtime pass reports when it completes. */
+static volatile LONG g_boot_deferred;
+/* R-400: what a deferred boot must do inside the promotion: prepare the library's shader sources. */
+static sh_decl_server_boot_preparation_fn g_boot_preparation;
+void sh_decl_server_set_boot_preparation(sh_decl_server_boot_preparation_fn prepare) { g_boot_preparation = prepare; }
+/* The kind of the pass being run; a console or programmatic pass is RUN. */
+static LONG g_rearm_kind = DS_AUTO_RUN;
 
+/* Request a pass of this kind; a RUN request upgrades a pending WATCHED one. */
+static void ds_request_rearm(LONG kind)
+{
+    LONG previous = InterlockedCompareExchange(&g_auto_state, kind, DS_AUTO_IDLE);
+    if (previous == DS_AUTO_WATCHED && kind == DS_AUTO_RUN)
+        InterlockedCompareExchange(&g_auto_state, DS_AUTO_RUN, DS_AUTO_WATCHED);
+    if (previous == DS_AUTO_IDLE)
+        backend_log("decl-server: runtime re-arm REQUESTED (installed packages changed); "
+                    "the engine tick will register it");
+}
 /* Request refresh from any thread; the engine Frame services it at the browser. */
 void sh_decl_server_request_rearm(void)
 {
-    if (InterlockedCompareExchange(&g_auto_state, DS_AUTO_RUN, DS_AUTO_IDLE) == DS_AUTO_IDLE)
-        backend_log("decl-server: runtime re-arm REQUESTED (a package was installed mid-session); "
-                    "the engine tick will register it");
+    ds_request_rearm(DS_AUTO_RUN);
 }
+
+/* Installed-package changes outside an installation. An installation requests
+ * its own pass. Anything else that changes the installed packages (an author
+ * correcting a package that failed the whole preparation or was left out of a
+ * served library, a package added or removed by hand) is found here, so it is
+ * served without a restart or a console command. A recursive directory-change
+ * read on <root>\overrides, opened by the first preparation and kept open
+ * across passes, advances a change generation for every batch of reports that
+ * names a change; each preparation records the generation it starts from. A
+ * generation newer than the last preparation's, once settled and while the
+ * server is idle (served or failed), requests one re-arm, which waits for the
+ * settled browser. The generation is consumed only when a preparation starts,
+ * so a refused or deferred request is repeated at a growing interval instead
+ * of being lost, a change made during a pass is prepared once more, and an
+ * inventory nobody changed is never prepared again. Reports decide, not file
+ * metadata: an edit that keeps the size and restores the write time is still a
+ * change. A directory reported modified is not one: NTFS reports a directory's
+ * own times when a handle to it next closes, which a preparation's reading
+ * does after an entry in it changed, and that entry's change is reported by
+ * name. Reports lost to a full buffer count as a change. No traversal is made,
+ * at startup, per frame or per change.
+ * Losing the watch (a failed read, the directory removed, or replaced, which
+ * leaves the handle on the moved directory and is found by checking the
+ * directory's volume and file index every few seconds; creation times can
+ * tunnel across a quick delete and recreate) reopens it no more often than a
+ * doubling interval. A reopened watch counts as one change, since changes may
+ * have been missed while nothing watched, at most once per preparation. */
+typedef struct ds_identity { DWORD volume, high, low; } ds_identity;
+#define DS_INVENTORY_FILTER (FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_DIR_NAME | \
+    FILE_NOTIFY_CHANGE_SIZE | FILE_NOTIFY_CHANGE_LAST_WRITE)
+static HANDLE g_inventory_watch = INVALID_HANDLE_VALUE;
+static OVERLAPPED g_inventory_read;
+/* 64 KiB, the most a network share accepts, DWORD-aligned as reports require. */
+static DWORD g_inventory_reports[16384];
+static wchar_t *g_inventory_root;
+static ds_identity g_inventory_identity;
+static int g_inventory_started, g_inventory_loss_counted;
+static ULONGLONG g_inventory_generation, g_attempt_generation;
+static ULONGLONG g_inventory_event_at, g_inventory_reopen_at, g_inventory_checked_at, g_inventory_backoff;
+static ULONGLONG g_inventory_request_at, g_inventory_request_backoff;
+static ULONGLONG g_inventory_quiet_ms = 2000, g_inventory_backoff_ms = 1000, g_inventory_identity_ms = 5000;
+static ULONGLONG g_inventory_request_ms = 2000;
+#define DS_INVENTORY_BACKOFF_CAP 30000u
+#define DS_INVENTORY_REQUEST_CAP 60000u
+#ifdef SH_DECL_SERVER_TESTING
+static long g_inventory_opens, g_inventory_fail_opens, g_inventory_requests;
+#endif
+
+/* "\\?\<root>\overrides", malloc-owned; NULL without a usable root. */
+static wchar_t *ds_inventory_path(void)
+{
+    char root[MAX_PATH + 16];
+    size_t length;
+    if (!sh_overrides_get_root(root, MAX_PATH) || !root[0]) return NULL;
+    length = strlen(root);
+    if (length && (root[length - 1] == '\\' || root[length - 1] == '/')) root[--length] = 0;
+    if (strcat_s(root, sizeof(root), "\\overrides")) return NULL;
+    return sh_package_source_wide_path(root);
+}
+static void ds_inventory_lost(ULONGLONG now)
+{
+    if (g_inventory_watch != INVALID_HANDLE_VALUE) {
+        DWORD ignored;
+        /* The read must finish before its buffer is used again. */
+        if (!HasOverlappedIoCompleted(&g_inventory_read) && CancelIoEx(g_inventory_watch, &g_inventory_read))
+            GetOverlappedResult(g_inventory_watch, &g_inventory_read, &ignored, TRUE);
+        CloseHandle(g_inventory_watch);
+    }
+    g_inventory_watch = INVALID_HANDLE_VALUE;
+    free(g_inventory_root); g_inventory_root = NULL;
+    if (!g_inventory_backoff) g_inventory_backoff = g_inventory_backoff_ms;
+    g_inventory_reopen_at = now + g_inventory_backoff;
+    g_inventory_backoff = g_inventory_backoff * 2 > DS_INVENTORY_BACKOFF_CAP ? DS_INVENTORY_BACKOFF_CAP : g_inventory_backoff * 2;
+}
+/* A directory's volume and file index. */
+static int ds_inventory_identify(HANDLE directory, ds_identity *identity)
+{
+    BY_HANDLE_FILE_INFORMATION info;
+    if (!GetFileInformationByHandle(directory, &info) || !(info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) return 0;
+    identity->volume = info.dwVolumeSerialNumber; identity->high = info.nFileIndexHigh; identity->low = info.nFileIndexLow;
+    return 1;
+}
+/* Pending until the read completes, which also sets its event. */
+static int ds_inventory_issue(void)
+{
+    HANDLE event = g_inventory_read.hEvent;
+    memset(&g_inventory_read, 0, sizeof(g_inventory_read));
+    g_inventory_read.hEvent = event; g_inventory_read.Internal = (ULONG_PTR)STATUS_PENDING; ResetEvent(event);
+    return ReadDirectoryChangesW(g_inventory_watch, g_inventory_reports, sizeof(g_inventory_reports), TRUE,
+        DS_INVENTORY_FILTER, NULL, &g_inventory_read, NULL) != 0;
+}
+static int ds_inventory_completed(void)
+{
+    return WaitForSingleObject(g_inventory_read.hEvent, 0) == WAIT_OBJECT_0;
+}
+static int ds_inventory_open(ULONGLONG now)
+{
+    wchar_t *path = ds_inventory_path();
+#ifdef SH_DECL_SERVER_TESTING
+    g_inventory_opens++;
+    if (g_inventory_fail_opens > 0) { g_inventory_fail_opens--; free(path); ds_inventory_lost(now); return 0; }
+#endif
+    if (!g_inventory_read.hEvent) g_inventory_read.hEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
+    g_inventory_root = path;
+    if (path && g_inventory_read.hEvent)
+        g_inventory_watch = CreateFileW(path, FILE_LIST_DIRECTORY, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED, NULL);
+    if (g_inventory_watch == INVALID_HANDLE_VALUE || !ds_inventory_identify(g_inventory_watch, &g_inventory_identity) ||
+        !ds_inventory_issue()) {
+        ds_inventory_lost(now); return 0;
+    }
+    g_inventory_checked_at = now; g_inventory_backoff = 0;
+    return 1;
+}
+static int ds_inventory_same_directory(void)
+{
+    ds_identity identity;
+    HANDLE directory = CreateFileW(g_inventory_root, FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE |
+        FILE_SHARE_DELETE, NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    int same;
+    if (directory == INVALID_HANDLE_VALUE) return 0;
+    same = ds_inventory_identify(directory, &identity) && identity.volume == g_inventory_identity.volume &&
+        identity.high == g_inventory_identity.high && identity.low == g_inventory_identity.low;
+    CloseHandle(directory); return same;
+}
+/* Whether a report is of a directory being modified, which is not a change. */
+static int ds_inventory_directory_modified(const FILE_NOTIFY_INFORMATION *report)
+{
+    size_t root = wcslen(g_inventory_root), name = report->FileNameLength / sizeof(WCHAR);
+    wchar_t *path;
+    DWORD attributes;
+    if (report->Action != FILE_ACTION_MODIFIED || !name) return 0;
+    if (!(path = (wchar_t *)malloc((root + name + 2) * sizeof(wchar_t)))) return 0;
+    memcpy(path, g_inventory_root, root * sizeof(wchar_t)); path[root] = L'\\';
+    memcpy(path + root + 1, report->FileName, name * sizeof(wchar_t)); path[root + 1 + name] = 0;
+    attributes = GetFileAttributesW(path);
+    free(path);
+    return attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY);
+}
+/* Collect a completed read and issue the next: 1 when its reports name a
+ * change (or were lost to a full buffer), 0 when they do not, -1 when the watch
+ * is lost. */
+static int ds_inventory_collect(void)
+{
+    const size_t header = offsetof(FILE_NOTIFY_INFORMATION, FileName);
+    DWORD bytes = 0;
+    int changed = 0;
+    if (!GetOverlappedResult(g_inventory_watch, &g_inventory_read, &bytes, FALSE)) {
+        if (GetLastError() != ERROR_NOTIFY_ENUM_DIR) return -1;
+        changed = 1;
+    } else if (!bytes || bytes > sizeof(g_inventory_reports)) {
+        changed = 1;
+    } else {
+        for (size_t at = 0; !changed;) {
+            const FILE_NOTIFY_INFORMATION *report = (const FILE_NOTIFY_INFORMATION *)((const unsigned char *)g_inventory_reports + at);
+            if (bytes - at < header || report->FileNameLength > bytes - at - header ||
+                !ds_inventory_directory_modified(report)) changed = 1;
+            else if (!report->NextEntryOffset) break;
+            else if (report->NextEntryOffset > bytes - at || (report->NextEntryOffset & 3)) changed = 1;
+            else at += report->NextEntryOffset;
+        }
+    }
+    return ds_inventory_issue() ? changed : -1;
+}
+/* A preparation is starting and reads the installed packages after this
+ * point, so changes already reported are ones it reads: they are consumed here
+ * (a bounded number of reads, so a stream of changes cannot hold the pass
+ * back) and only later reports count after it. */
+static void ds_inventory_attempt(void)
+{
+    ULONGLONG now = GetTickCount64();
+    g_inventory_started = 1;
+    if (g_inventory_watch == INVALID_HANDLE_VALUE && now >= g_inventory_reopen_at) ds_inventory_open(now);
+    for (int i = 0; i < 16 && g_inventory_watch != INVALID_HANDLE_VALUE && ds_inventory_completed(); i++)
+        if (ds_inventory_collect() < 0) ds_inventory_lost(now);
+    g_attempt_generation = g_inventory_generation;
+    g_inventory_loss_counted = 0; g_inventory_request_backoff = 0; g_inventory_request_at = 0;
+}
+static void ds_inventory_poll(LONG state)
+{
+    ULONGLONG now;
+    if (!g_inventory_started) return;
+    now = GetTickCount64();
+    if (g_inventory_watch == INVALID_HANDLE_VALUE) {
+        if (now >= g_inventory_reopen_at && ds_inventory_open(now) && !g_inventory_loss_counted) {
+            g_inventory_loss_counted = 1; g_inventory_generation++; g_inventory_event_at = now;
+        }
+    } else if (ds_inventory_completed()) {
+        int changed = ds_inventory_collect();
+        if (changed < 0) ds_inventory_lost(now);
+        else if (changed) { g_inventory_generation++; g_inventory_event_at = now; }
+        return;
+    } else if (now - g_inventory_checked_at >= g_inventory_identity_ms) {
+        g_inventory_checked_at = now;
+        if (!ds_inventory_same_directory()) { ds_inventory_lost(now); return; }
+    }
+    if (g_inventory_generation == g_attempt_generation || now - g_inventory_event_at < g_inventory_quiet_ms) return;
+    if (state != DS_STATE_DONE && state != DS_STATE_FAILED) return;
+    if (InterlockedCompareExchange(&g_auto_state, 0, 0) != DS_AUTO_IDLE || now < g_inventory_request_at) return;
+    if (!g_inventory_request_backoff) g_inventory_request_backoff = g_inventory_request_ms;
+    g_inventory_request_at = now + g_inventory_request_backoff;
+    g_inventory_request_backoff = g_inventory_request_backoff * 2 > DS_INVENTORY_REQUEST_CAP ?
+        DS_INVENTORY_REQUEST_CAP : g_inventory_request_backoff * 2;
+#ifdef SH_DECL_SERVER_TESTING
+    g_inventory_requests++;
+#endif
+    backend_log("decl-server: installed packages changed since the last preparation; preparing them again at the browser");
+    ds_request_rearm(DS_AUTO_WATCHED);
+}
+#ifdef SH_DECL_SERVER_TESTING
+void sh_decl_server_test_inventory_timing(unsigned long quiet_ms, unsigned long backoff_ms, unsigned long identity_ms,
+    unsigned long request_ms)
+{
+    g_inventory_quiet_ms = quiet_ms; g_inventory_backoff_ms = backoff_ms; g_inventory_identity_ms = identity_ms;
+    g_inventory_request_ms = request_ms; g_inventory_backoff = 0; g_inventory_request_backoff = 0;
+}
+long sh_decl_server_test_inventory_opens(void) { return g_inventory_opens; }
+long sh_decl_server_test_inventory_requests(void) { return g_inventory_requests; }
+void sh_decl_server_test_request_watched(void) { ds_request_rearm(DS_AUTO_WATCHED); }
+/* As an additive admission or shader preparation does: the standing registration is no longer known. */
+void sh_decl_server_test_forget_registration(void) { g_registered_known = 0; }
+/* R-401: the standing registration names other inputs than the next pass (a subset of its candidates). */
+void sh_decl_server_test_perturb_registration(void) { g_registered_digest[0] ^= 0x5a; }
+void sh_decl_server_test_inventory_fail_opens(long count) { g_inventory_fail_opens = count; }
+void sh_decl_server_test_inventory_drop(void) { ds_inventory_lost(GetTickCount64()); g_inventory_reopen_at = 0; }
+#endif
 
 /* Drive pending rearm on the engine main thread; requirement application
  * drains synchronously.
  */
+/* The idle retirement poll's retry schedule. A retained-occurrence activation
+ * that fails (no library yet, a refused library) fails again until the library
+ * or the pending resources change, so each failure doubles the wait up to the
+ * cap instead of asking, and logging, once a second for the whole session. */
+static ULONGLONG g_retirement_ms = 1000, g_retirement_cap_ms = 60000, g_retirement_backoff;
+#ifdef SH_DECL_SERVER_TESTING
+static long g_retirement_attempts;
+void sh_decl_server_test_retirement_timing(unsigned long base_ms, unsigned long cap_ms)
+{ g_retirement_ms = base_ms; g_retirement_cap_ms = cap_ms; g_retirement_backoff = 0; g_retirement_attempts = 0; }
+long sh_decl_server_test_retirement_attempts(void) { return g_retirement_attempts; }
+#endif
 void sh_decl_server_rearm_poll(void)
 {
+    static ULONGLONG next_retirement, next_audio;
+    LONG audio_state = InterlockedCompareExchange(&g_state, 0, 0);
+    /* Superseded audio programs wait for their playing items and registered
+     * objects; poll that idle state between provider transitions. */
+    if ((audio_state == DS_STATE_DONE || audio_state == DS_STATE_FAILED) && sh_audio_banks_native_programs_count()) {
+        ULONGLONG now = GetTickCount64();
+        if (now >= next_audio) {
+            char detail[256];
+            next_audio = now + 250;
+            if (sh_audio_banks_native_programs_retire(detail, sizeof(detail)) < 0) {
+                static ULONGLONG next_report;
+                if (now >= next_report) { next_report = now + 10000; backend_log(detail); }
+            }
+        }
+    }
+    if (!ds_shader_recovery_poll()) return;
+    if (!ds_occurrence_maintenance()) return;
     LONG state = InterlockedCompareExchange(&g_state, 0, 0);
     if (sh_rawmap_defers_install_commit()) return;
-    if (InterlockedCompareExchange(&g_auto_state, 0, 0) != DS_AUTO_RUN) return;
+    ds_inventory_poll(state);
+    if (InterlockedCompareExchange(&g_auto_state, 0, 0) == DS_AUTO_IDLE) {
+        /* Object destructors only release leases. Native cleanup happens here
+         * after confirmed map departure, using the ordinary recovery contract.
+         * An active map's promoted policy is never cleared by an idle tick. */
+        ULONGLONG now = GetTickCount64();
+        static int retirement_deferred;
+        char defer_reason[400] = "";
+        if (!sh_package_runtime_occurrences_pending()) { g_retirement_backoff = 0; retirement_deferred = 0; }
+        else if (!sh_package_runtime_has_map_provider() && sh_map_transition_ready() &&
+                 sh_package_runtime_retirement_deferrable(defer_reason, sizeof(defer_reason))) {
+            /* R-398: the next map boundary drops the released rows in its own pass (an open's activation, or a
+             * native level's retained transition), so nothing registers at the browser. */
+            if (!retirement_deferred)
+                backend_log("decl-server: retained resource retirement deferred to the next map boundary; nothing registers at the browser");
+            retirement_deferred = 1;
+        }
+        else if (now >= next_retirement && !sh_package_runtime_has_map_provider() &&
+                 sh_decl_server_map_retirement_safe()) {
+#ifdef SH_DECL_SERVER_TESTING
+            g_retirement_attempts++;
+#endif
+            if (sh_decl_server_activate_occurrences(NULL)) {
+                /* A departed map's last consumers released here (a plain
+                 * map's exit): its departure is accounted for on this line. */
+                sh_rawmap_log_retained_departure("retired at the browser");
+                g_retirement_backoff = 0; next_retirement = now + g_retirement_ms;
+            } else {
+                ULONGLONG doubled = g_retirement_backoff ? g_retirement_backoff * 2 : g_retirement_ms;
+                int capped_now = g_retirement_backoff < g_retirement_cap_ms && doubled >= g_retirement_cap_ms;
+                g_retirement_backoff = doubled > g_retirement_cap_ms ? g_retirement_cap_ms : doubled;
+                next_retirement = now + g_retirement_backoff;
+                if (capped_now) {
+                    char line[192];
+                    snprintf(line, sizeof(line), "decl-server: retained resource activation keeps failing; retrying every %lu ms until the library or the pending resources change",
+                        (unsigned long)g_retirement_cap_ms);
+                    backend_log(line);
+                }
+            }
+        }
+        return;
+    }
     if (!InterlockedCompareExchange(&g_runtime_ready, 0, 0)) {
-        sh_mpkg_activation_cancel(); return;
+        ds_cancel_installation(); return;
     }
     if (state != DS_STATE_DONE && state != DS_STATE_FAILED) return;
     if (!ds_runtime_boundary_safe()) return;
-    if (InterlockedCompareExchange(&g_auto_state, DS_AUTO_IDLE, DS_AUTO_RUN) != DS_AUTO_RUN)
-        return;
+    LONG kind = InterlockedExchange(&g_auto_state, DS_AUTO_IDLE);
+    if (kind == DS_AUTO_IDLE) return;
+    g_rearm_kind = kind;
+    ULONGLONG pass_began = GetTickCount64();
     ds_rearm_command();
-    if (sh_decl_server_registration_succeeded())
+    g_rearm_kind = DS_AUTO_RUN;
+    if (sh_decl_server_registration_succeeded()) {
         backend_log("decl-server: runtime re-arm COMPLETE -- declarations, palette, strings and lifetimes refreshed");
+        if (InterlockedExchange(&g_boot_deferred, 0)) sh_boot_phases_report_first_boundary(GetTickCount64() - pass_began);
+    }
 }
 
 /* Programmatic entry point for the same pass. Returns 1 when the pass was driven.
@@ -2860,77 +4023,47 @@ static void ds_boot_published(void)
     }
 }
 
-static int ds_activate_audio(char *error, size_t capacity)
+/* Publish the view's retained audio programs. Compiled audio exists only in
+ * programs: private banks, relocated events and shared controls activate
+ * together, and superseded programs retire once their consumers have. There
+ * is no fallback to replaying authored banks under their original names. */
+static int ds_activate_audio_mode(sh_audio_bank_addition *addition, char *error, size_t capacity)
 {
-    const sh_package_compilation *compiled = sh_package_runtime_acquire();
-    char **names = NULL;
-    uint32_t *events = NULL;
-    sh_package_audio *audio = NULL;
-    sh_package_audio_report audio_report = {0};
-    const sh_package_audio_bank *banks = NULL;
-    const sh_package_audio_media *media = NULL;
-    size_t bank_count = 0, media_count = 0;
-    size_t count = 0, used = 0;
-    int result = 0;
-    void *registry = NULL, *manager = NULL;
-    decl_type_by_name_fn type_by_name = NULL;
-    decl_register_file_fn register_file = NULL;
-    if (compiled) {
-        audio = sh_package_audio_open(compiled, &audio_report, error, capacity);
-        for (size_t i = 0; i < compiled->resource_count; ++i) {
-            const sh_compiled_resource *r = compiled->resources+i;
-            if (r->source_count && r->type && !strcmp(r->type, "sound") && r->name) ++count;
-        }
-        if (count && count <= SIZE_MAX / sizeof(*names) && count <= SIZE_MAX / sizeof(*events)) {
-            names = (char **)calloc(count, sizeof(*names));
-            events = (uint32_t *)malloc(count*sizeof(*events));
-            if (names && events) for (size_t i = 0; i < compiled->resource_count; ++i) {
-                const sh_compiled_resource *r = compiled->resources+i;
-                if (r->source_count && r->type && !strcmp(r->type, "sound") && r->name) {
-                    names[used] = _strdup(r->name);
-                    if (!names[used]) break;
-                    ++used;
-                }
+    sh_package_runtime_audio *rows = NULL;
+    sh_audio_active_program *programs = NULL;
+    sh_audio_shared_policy baseline = {0};
+    size_t count = 0;
+    int result = 0, have_baseline = 0;
+    if (!sh_package_runtime_audio_programs(&rows, &count, error, capacity)) return 0;
+    programs = (sh_audio_active_program *)calloc(count ? count : 1, sizeof(*programs));
+    if (!programs) {
+        for (size_t i = 0; i < count; ++i) sh_package_runtime_audio_release(rows[i].owner);
+        free(rows); snprintf(error, capacity, "cannot retain active audio programs"); return 0;
+    }
+    for (size_t i = 0; i < count; ++i)
+        programs[i] = (sh_audio_active_program){rows[i].owner, rows[i].program, rows[i].lease, rows[i].serving};
+    free(rows);
+    if (addition) {
+        result = sh_audio_banks_native_programs_add(addition, programs, count,
+            sh_package_runtime_audio_release, error, capacity);
+    } else {
+        /* The native Init baseline restores controls a departing program
+         * edited; it is not needed while no program was ever published. */
+        if (count || sh_audio_banks_native_programs_count()) {
+            have_baseline = sh_package_runtime_audio_baseline(&baseline, error, capacity);
+            if (!have_baseline) {
+                for (size_t i = 0; i < count; ++i) sh_package_runtime_audio_release(programs[i].owner);
+                free(programs); return 0;
             }
         }
+        result = sh_audio_banks_native_programs_activate(programs, count, have_baseline ? &baseline : NULL,
+            sh_package_runtime_audio_release, error, capacity);
     }
-    sh_package_runtime_release();
-    if ((compiled && !audio) || audio_report.invalid) {
-        if (audio_report.invalid) snprintf(error, capacity, "%s", audio_report.first_gap);
-        goto done;
-    }
-    if (count != used) {
-        snprintf(error, capacity, "prepared audio event snapshot allocation failed"); goto done;
-    }
-    if (count) {
-        if (!ds_decode_registry(&registry, &type_by_name, &register_file)) {
-            snprintf(error, capacity, "prepared audio registry is unavailable"); goto done;
-        }
-        __try {
-            manager = type_by_name(registry, "sound");
-            for (size_t i = 0; i < count; ++i) {
-                void *decl = ds_peek_decl(manager, names[i]);
-                unsigned char state = 0;
-                /* Prepared idSoundShader keeps its Wwise event identity at
-                 * +0xac in both renderers. Do not guess aliases from filenames. */
-                if (!decl || !ds_safe_read((const uint8_t *)decl+DS_DECL_STATE_OFFSET, &state, 1) ||
-                    (state & 7) || !ds_safe_read((const uint8_t *)decl+0xacu, events+i, sizeof(*events))) {
-                    snprintf(error, capacity, "sound '%s' has no prepared native event", names[i]); goto done;
-                }
-            }
-        } __except (EXCEPTION_EXECUTE_HANDLER) {
-            snprintf(error, capacity, "prepared audio event inspection failed"); goto done;
-        }
-    }
-    bank_count = sh_package_audio_banks(audio, &banks);
-    media_count = sh_package_audio_media_files(audio, &media);
-    result = sh_audio_banks_native_activate(events, count, banks, bank_count,
-        media, media_count, error, capacity);
-done:
-    sh_package_audio_close(audio);
-    for (size_t i = 0; i < used; ++i) free(names[i]);
-    free(names); free(events); return result;
+    free(programs); sh_audio_shared_policy_free(&baseline);
+    return result;
 }
+static int ds_activate_audio(char *error, size_t capacity)
+{ return ds_activate_audio_mode(NULL, error, capacity); }
 
 /* One-shot activation-failure diagnostic, armed by placing an empty
  * "activation-fault" file in the private package-staging directory. It only
@@ -2950,34 +4083,169 @@ static int ds_activation_fault_armed(void)
     return 1;
 }
 
+typedef struct ds_editor_activation {
+    sh_process_heap_scope heap;
+    sh_resource_resident *resident;
+    sh_resource_editor_state *editor;
+    DWORD thread;
+    int succeeded, boot, restoring, installed;
+    struct ds_editor_activation *next;
+} ds_editor_activation;
+static ds_editor_activation *g_editor_activation, *g_editor_activation_diagnostic;
+static int ds_editor_admitted(void *context)
+{
+    ds_editor_activation *pass = context;
+    return pass && pass == g_editor_activation && pass->thread == GetCurrentThreadId() &&
+        pass->resident && sh_resource_resident_owned(pass->resident);
+}
+static int ds_editor_activation_finish(void *context, int accepted, int *committed,
+    char *error, size_t capacity)
+{
+    ds_editor_activation *pass = context;
+    int editor_result = -1, resident_result = 1, heap_result;
+    *committed = 0;
+    if (!pass || pass != g_editor_activation || pass->thread != GetCurrentThreadId()) return 0;
+    if (accepted==2) return pass->succeeded && sh_resource_graph_native_editor_state_ready(pass->editor);
+    accepted = pass->installed || (accepted && pass->succeeded);
+    /* This pending disk commit is fallible. Keep original native storage until
+     * it succeeds, after the runtime's material/FSM/finalizer checks. */
+    if (accepted && !pass->installed && !sh_resource_graph_native_editor_state_ready(pass->editor)) accepted=0;
+    if (accepted && !pass->installed && !pass->boot && !pass->restoring && !sh_rawmap_defers_install_commit()) {
+        __try { accepted = sh_mpkg_activation_commit(error,capacity); }
+        __except (EXCEPTION_EXECUTE_HANDLER) {
+            accepted=0; snprintf(error,capacity,"package installation commit raised exception 0x%08lx",(unsigned long)GetExceptionCode());
+        }
+        pass->installed=accepted;
+        if (pass->installed) InterlockedExchange(&g_editor_committed_cleanup_pending,1);
+    }
+    __try {
+        editor_result = sh_resource_graph_native_editor_state_end(&pass->editor,accepted,committed,error,capacity);
+    } __finally {
+        /* End can reset the out parameter before an exception. Preserve the
+         * irreversible disk decision through that unwind too. The runtime
+         * retains this owned context for diagnostics and never replays End. */
+        if (pass->installed) {
+            *committed=1;
+        }
+        if (*committed) InterlockedExchange(&g_editor_committed_cleanup_pending,1);
+        if (AbnormalTermination()) {
+            InterlockedExchange(&g_runtime_ready,0);
+            InterlockedExchange(&g_registration_succeeded,0);
+            InterlockedExchange(&g_state,DS_STATE_FAILED);
+        }
+    }
+    if (!editor_result) {
+        if (*committed) InterlockedExchange(&g_editor_committed_cleanup_pending,1);
+        return 0; /* Owned admission/context stay alive for retry. */
+    }
+    if (pass->resident) {
+        resident_result = sh_resource_resident_end(pass->resident,
+            editor_result == 1 && *committed,error,capacity);
+        pass->resident = NULL; /* Resident cleanup owns its retained recovery. */
+    }
+    heap_result = sh_process_heap_leave(&pass->heap);
+    g_editor_activation = NULL;
+    if (editor_result < 0 || !heap_result || (*committed && !resident_result)) {
+        if (*committed) InterlockedExchange(&g_editor_committed_cleanup_pending,1);
+        InterlockedExchange(&g_runtime_ready,0);
+        InterlockedExchange(&g_registration_succeeded,0);
+        InterlockedExchange(&g_state,DS_STATE_FAILED);
+        if (!heap_result) {
+            pass->next = g_editor_activation_diagnostic; g_editor_activation_diagnostic = pass;
+        } else free(pass);
+        if (error && capacity && !*error) snprintf(error,capacity,"native activation storage cleanup did not complete");
+        return -1; /* An accepted latch cannot turn into rollback here. */
+    }
+    InterlockedExchange(&g_editor_committed_cleanup_pending,0);
+    free(pass); return 1;
+}
+static void *volatile g_image_state; /* sh_decl_server_image_state */
+/* After the resident drain each image this publication recovers in place must have left the
+ * native exclusion state (R-309). Still excluded means the declared requirement was not in force
+ * for it when it reloaded; the forward activation then fails, so the previous provider and its
+ * consumers are restored. A restoring pass must finish restoring and only reports. */
+static int ds_verify_availability(const sh_package_changes *changes, int restoring, char *error, size_t capacity)
+{
+    int (*state)(const char *, const unsigned char *, size_t) =
+        (int (*)(const char *, const unsigned char *, size_t))g_image_state;
+    for (size_t i = 0; changes && i < changes->availability_count; i++) {
+        const sh_package_availability_change *change = changes->availability + i;
+        int observed = state ? state(change->name, NULL, 0) : -1;
+        char line[600];
+        snprintf(line, sizeof(line), "decl-server: in-place image %s %s: native state %s", change->recover ?
+            "recovery" : "return", change->name, observed == 0 ? "not an exclusion placeholder" :
+            observed == 1 ? "exclusion placeholder" : "unknown");
+        backend_log(line);
+        if (change->recover && observed != 0 && !restoring) {
+            /* The resident pass isolated this image (copied sizes it cannot clear): it was never
+             * rebuilt, so its native state is the one it had, not a failed recovery. */
+            if (g_resident_pass && sh_resource_resident_isolated_identity(g_resident_pass, "image", change->name)) {
+                snprintf(line, sizeof(line), "decl-server: in-place image recovery %s was isolated by the resident pass; "
+                    "not verified", change->name);
+                backend_log(line); continue;
+            }
+            snprintf(error, capacity, "declared image availability was not recovered: %s (%s)", change->name,
+                observed == 1 ? "still an exclusion placeholder" : "native state unknown");
+            return 0;
+        }
+    }
+    return 1;
+}
+/* Set by every activation the runtime drives; a refresh that returns without
+ * it kept the served provider and the registration standing. */
+static volatile LONG g_activation_invoked;
 static int ds_activate_provider(void *context, int restoring,
     const sh_package_changes *changes, char *error, size_t capacity)
 {
-    sh_process_heap_scope scope = {0};
-    sh_resource_resident *resident = NULL;
-    int succeeded = 0, heap_restored = 1;
+    ds_editor_activation *pass = NULL;
+    int succeeded = 0;
     char transition[160];
-    snprintf(transition, sizeof(transition), "decl-server: package %s has %zu changed provider resources",
-        restoring ? "recovery" : "activation", changes->count);
+    InterlockedExchange(&g_activation_invoked, 1);
+    g_prior_registered = !context && !restoring && g_registered_known &&
+        InterlockedCompareExchange(&g_registration_succeeded, 0, 0) &&
+        InterlockedCompareExchange(&g_state, 0, 0) == DS_STATE_DONE;
+    g_registered_known = 0;
+    g_pass_changes = changes; g_pass_forward = !context && !restoring;
+    g_pass_palette_kept = 0; g_pass_reused = 0; g_pass_digest_ok = 0;
+    InterlockedExchange(&g_pass_unchanged, !context && !restoring && changes->count == 0 && changes->rebound_count == 0);
+    snprintf(transition, sizeof(transition), "decl-server: package %s has %zu changed resources and %zu rebound native identities",
+        restoring ? "recovery" : "activation", changes->count, changes->rebound_count);
     backend_log(transition);
     InterlockedExchange(&g_state, context ? DS_STATE_ARMED : DS_STATE_INSTALLING);
     InterlockedExchange(&g_registration_succeeded, 0);
     InterlockedExchange(&g_rearm_drain_faults, 0);
     if (restoring) backend_log("decl-server: recovering consumers against the previous package provider");
-    /* Match native editor allocation lifetime, and verify scope restoration
-     * BEFORE either the compiler or a pending installation can commit. */
+    if (g_editor_activation || !(pass = calloc(1,sizeof(*pass)))) {
+        snprintf(error,capacity,"native editor activation storage could not be allocated"); return 0;
+    }
+    pass->thread = GetCurrentThreadId(); pass->boot = context != NULL; pass->restoring = restoring;
+    if (pass->boot) sh_boot_phases_mark(SH_BOOT_LIBRARY); /* R-400: the library is prepared; registration begins */
+    if (!sh_package_runtime_defer_activation_finish(ds_editor_activation_finish,pass)) {
+        free(pass); snprintf(error,capacity,"native editor activation has no serialized finish boundary"); return 0;
+    }
+    g_editor_activation = pass;
+    /* Keep native allocation/render ownership through the runtime's complete
+     * candidate outcome. The deferred finish owns this heap context on every
+     * return and exception unwind. */
     if (!context && (!InterlockedCompareExchange(&g_runtime_ready, 0, 0) ||
-        !sh_process_heap_enter(&g_runtime_heap, &scope))) {
-        if (scope.active) InterlockedExchange(&g_runtime_ready, 0);
+        !sh_process_heap_enter(&g_runtime_heap, &pass->heap))) {
+        if (pass->heap.active) InterlockedExchange(&g_runtime_ready, 0);
         InterlockedExchange(&g_state, DS_STATE_FAILED);
         snprintf(error, capacity, "process heap scope could not be established for package %s",
             restoring ? "recovery" : "activation"); return 0;
     }
+    memset(&g_pass_phases, 0, sizeof(g_pass_phases)); memset(&g_registration_split, 0, sizeof(g_registration_split));
+    double phase = ds_now(), pass_began = phase, now;
+#define DS_STEP(field) (now = ds_now(), g_pass_phases.field += now - phase, phase = now)
     __try {
-        resident = sh_resource_resident_begin(changes, restoring, context != NULL, error, capacity);
-        if (resident) {
-            g_resident_pass = resident;
+        pass->resident = sh_resource_resident_begin(changes, restoring, context != NULL, error, capacity);
+        DS_STEP(resident);
+        if (pass->resident && (pass->editor = sh_resource_graph_native_editor_state_begin(
+            ds_editor_admitted,pass,error,capacity))) {
+            DS_STEP(editor);
+            g_resident_pass = pass->resident;
             if (context) ds_boot_published(); else ds_rearm_published();
+            phase = ds_now();
             succeeded = InterlockedCompareExchange(&g_state, 0, 0) == DS_STATE_DONE &&
                 InterlockedCompareExchange(&g_registration_succeeded, 0, 0) != 0;
             if (succeeded && ds_activation_fault_armed()) {
@@ -2996,9 +4264,15 @@ static int ds_activate_provider(void *context, int restoring,
                 restoring ? "recovery" : "activation");
             /* A provider containing only cooked files has no declaration
              * premark phase. Its captured resources still need reconstruction. */
-            if (succeeded) succeeded = sh_resource_resident_reconstruct(resident, error, capacity) &&
-                sh_resource_resident_drain(resident, error, capacity);
+            if (succeeded) succeeded = sh_resource_resident_reconstruct(pass->resident, error, capacity);
+            DS_STEP(reconstruct);
+            if (succeeded) succeeded = sh_resource_resident_drain(pass->resident, error, capacity);
+            DS_STEP(drain);
+            if (succeeded) succeeded = ds_verify_availability(changes, restoring, error, capacity);
+            DS_STEP(verify);
             if (succeeded) succeeded = ds_activate_audio(error, capacity);
+            DS_STEP(audio);
+            if (succeeded) succeeded = sh_resource_graph_native_editor_state_ok(pass->editor);
         }
     }
     __finally {
@@ -3009,30 +4283,238 @@ static int ds_activate_provider(void *context, int restoring,
             InterlockedExchange(&g_state, DS_STATE_FAILED);
         }
         InterlockedExchange(&g_rearm_is_runtime, 0);
+        InterlockedExchange(&g_pass_unchanged, 0);
+        g_pass_changes = NULL; g_pass_forward = 0;
         g_boot_refresh = 0;
         if (g_res_mark) HeapFree(GetProcessHeap(), 0, g_res_mark);
         g_res_mark = NULL; g_res_mark_count = 0;
         ds_free_candidates();
         g_resident_pass = NULL;
-        succeeded = sh_resource_resident_end(resident, succeeded &&
-            InterlockedCompareExchange(&g_state, 0, 0) == DS_STATE_DONE, error, capacity);
-        if (!context) heap_restored = sh_process_heap_leave(&scope);
-        if (!heap_restored) {
-            InterlockedExchange(&g_registration_succeeded, 0);
-            InterlockedExchange(&g_state, DS_STATE_FAILED);
-            InterlockedExchange(&g_runtime_ready, 0);
-            backend_log("decl-server RE-ARM refused: process heap scope was not restored; further refresh disabled");
-        }
+        if (AbnormalTermination()) succeeded = 0;
+        pass->succeeded = succeeded && InterlockedCompareExchange(&g_state,0,0) == DS_STATE_DONE;
     }
-    succeeded = succeeded && heap_restored && InterlockedCompareExchange(&g_state, 0, 0) == DS_STATE_DONE &&
+    succeeded = succeeded && InterlockedCompareExchange(&g_state, 0, 0) == DS_STATE_DONE &&
         InterlockedCompareExchange(&g_registration_succeeded, 0, 0) != 0;
-    if (succeeded && !context && !restoring && !sh_rawmap_defers_install_commit())
-        succeeded = sh_mpkg_activation_commit(error, capacity);
+    pass->succeeded = succeeded;
     if (!succeeded) {
         InterlockedExchange(&g_registration_succeeded, 0);
         InterlockedExchange(&g_state, DS_STATE_FAILED);
     }
+    /* A completed forward runtime registration (or one kept) stands for its inputs. */
+    if (succeeded && !context && !restoring && g_pass_digest_ok) {
+        memcpy(g_registered_digest, g_pass_digest, sizeof(g_registered_digest)); g_registered_known = 1;
+    }
+#undef DS_STEP
+    if (!context && ds_now() - pass_began >= 1000) {
+        /* Which part of a slow runtime pass is ours and which the engine's:
+         * the HUD, requirements and strings refreshes and the declaration
+         * snapshot are this pass's own; registration is the engine parsing
+         * and registering the candidates the snapshot hands it. */
+        const ds_pass_phases *p = &g_pass_phases;
+        char phases[512];
+        snprintf(phases, sizeof(phases), "decl-server: %s pass phases: resident %.0f ms, editor %.0f ms; HUD %.0f ms, "
+            "requirements %.0f ms, strings %.0f ms, snapshot %.0f ms (%u candidates), engine registration %.0f ms, "
+            "promotion %.0f ms; reconstruct %.0f ms, drain %.0f ms, availability %.0f ms, audio %.0f ms; total %.0f ms",
+            restoring ? "recovery" : "activation", p->resident, p->editor, p->hud, p->requirements, p->strings,
+            p->snapshot, p->candidates, p->registration, p->promotion, p->reconstruct, p->drain, p->verify, p->audio,
+            ds_now() - pass_began);
+        backend_log(phases);
+        snprintf(phases, sizeof(phases), "decl-server: %s registration steps: classification %.0f ms, table %.0f ms, source "
+            "scans %.0f ms (%d missing), materialization %.0f ms, visibility %.0f ms, resident refresh %.0f ms, row "
+            "lineage %.0f ms, palette rebuild %.0f ms%s%s", restoring ? "recovery" : "activation", g_registration_split.classify,
+            g_registration_split.table, g_registration_split.scans, g_registration_split.scanned,
+            g_registration_split.materialize, g_registration_split.visibility, g_registration_split.resident,
+            g_registration_split.rows, g_registration_split.palette, g_pass_palette_kept ? " (palette kept)" : "",
+            g_pass_reused ? "; registration kept (nothing changed)" : "");
+        backend_log(phases);
+    }
     return succeeded;
+}
+
+typedef struct ds_shader_preparation {
+    sh_resource_resident *resident;
+    sh_resource_shader_state *state;
+    sh_package_native_assets *assets; /* retained even if recovery outlives batch */
+    DWORD thread;
+    LONG previous_state, previous_registration;
+    int recovered;
+} ds_shader_preparation;
+static ds_shader_preparation *g_shader_recovery;
+
+int sh_decl_server_shader_preparation_ready(void)
+{
+    __try {
+        return !g_shader_prepare_scope && !g_shader_recovery && g_boundary_thread_slot &&
+            *(const DWORD *)g_boundary_thread_slot == GetCurrentThreadId() &&
+            InterlockedCompareExchange(&g_runtime_ready, 0, 0) &&
+            (g_source_boot_scope || ds_runtime_boundary_safe() ||
+             (g_boundary_editor && sh_editor_transition_frame_ready((void *)g_boundary_editor,
+                 sh_editor_transition_capture((const void *)g_boundary_editor))));
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+}
+static int ds_shader_admitted(void *context)
+{
+    ds_shader_preparation *pass = context;
+    /* Admission happened before these scopes were acquired. Restoration must
+     * check their actual ownership, not demand that menu state remain frozen. */
+    return pass && pass->resident && g_shader_prepare_scope && pass->thread == GetCurrentThreadId() &&
+        sh_resource_resident_owned(pass->resident);
+}
+static int ds_shader_prepare_one(void *context, const sh_package_shader_request *request,
+    char *error, size_t capacity)
+{
+    ds_shader_preparation *pass = context;
+    void *resource = NULL;
+    if (!ds_shader_admitted(pass) || !request || !request->manager || !g_find_decl) return 0;
+    __try {
+        /* Program source cooking uses an unregistered workspace. Finding a
+         * cold native program first would parse GPU state, while reparsing a
+         * ready one destroys its live handles before source capture. */
+        if (!strcmp(request->family, "renderprog"))
+            return sh_resource_graph_native_prepare_program((void *)request->manager,
+                request->name, request->source, request->source_length,
+                sh_package_native_assets_shader_original_read, pass->assets,
+                ds_shader_admitted, pass, error, capacity);
+        resource = ds_peek_decl((void *)request->manager, request->name);
+        if (request->resource && resource != (void *)request->resource) return 0;
+        if (!resource) resource = g_find_decl((void *)request->manager, request->name, 1);
+        if (!resource) return 0;
+        sh_resource_resident_touch(resource);
+        return sh_resource_graph_native_prepare_shader(resource, request->family, request->name,
+            request->source, request->source_length, ds_shader_admitted, pass, error, capacity);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        snprintf(error, capacity, "native shader construction raised exception %08lx", GetExceptionCode());
+        return 0;
+    }
+}
+static int ds_shader_recover(void *context, const sh_package_shader_preparation *batch,
+    char *error, size_t capacity)
+{
+    ds_shader_preparation *pass = context;
+    (void)batch;
+    if (!pass || !pass->state || !ds_shader_admitted(pass)) return 0;
+    __try {
+        /* These reads inspect original sources without publishing a provider.
+         * Restoring a shared fixed slot by reconstruction would allocate a new
+         * ABI index. The native scope owns its exact old payload/live values. */
+        pass->recovered = sh_resource_graph_native_shader_state_restore(pass->state, error, capacity);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        pass->recovered = 0;
+        snprintf(error, capacity, "native shader recovery raised exception %08lx", GetExceptionCode());
+    }
+    return pass->recovered;
+}
+/* Returns -1 with ownership retained when native restoration is still owed.
+ * Every retained context is heap-owned and survives the request's stack/batch. */
+static int ds_shader_finish(ds_shader_preparation *pass, int accepted, char *error, size_t capacity)
+{
+    int restored = 1;
+    char cleanup[512] = "";
+    if (pass->state) {
+        restored = sh_resource_graph_native_shader_state_end(pass->state, accepted, cleanup, sizeof(cleanup));
+        if (restored < 0) goto done;
+        pass->state = NULL;
+    }
+    if (pass->resident) {
+        sh_resource_resident *resident = pass->resident; pass->resident = NULL;
+        char resident_error[512] = "";
+        /* Even a rejected source read has been restored above. An empty
+         * preparation pass must never enqueue fixed-slot reconstruction. */
+        if (!sh_resource_resident_end(resident, 1, resident_error, sizeof(resident_error))) {
+            restored = -1;
+            size_t used = strlen(cleanup);
+            snprintf(cleanup + used, sizeof(cleanup) - used, "%s%s", used ? "; " : "",
+                *resident_error ? resident_error : "native shader resident cleanup failed");
+        }
+    }
+done:
+    /* Successful cleanup may clear its output buffer. Keep the construction
+     * failure, and append a cleanup failure without losing either cause. */
+    if (restored <= 0 && error && capacity) {
+        size_t used = strnlen(error, capacity);
+        if (used < capacity) snprintf(error + used, capacity - used, "%s%s", used ? "; " : "",
+            *cleanup ? cleanup : "native shader state cleanup failed");
+    }
+    return restored;
+}
+static void ds_shader_dispose(ds_shader_preparation *pass, int failed)
+{
+    g_shader_prepare_scope--;
+    InterlockedExchange(&g_state, failed ? DS_STATE_FAILED : pass->previous_state);
+    InterlockedExchange(&g_registration_succeeded, failed ? 0 : pass->previous_registration);
+    sh_package_native_assets_close(pass->assets);
+    free(pass);
+}
+static int ds_shader_recovery_poll(void)
+{
+    ds_shader_preparation *pass = g_shader_recovery;
+    char error[512] = "";
+    int result = -1;
+    if (!pass) return 1;
+    if (pass->thread != GetCurrentThreadId()) return 0;
+    __try { result = ds_shader_finish(pass, 0, error, sizeof(error)); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { }
+    if (pass->state || pass->resident) return 0;
+    g_shader_recovery = NULL;
+    /* The original compiler call already returned failure. Its saved DS state
+     * may have been INSTALLING; never resurrect that abandoned in-flight pass. */
+    ds_shader_dispose(pass, 1);
+    /* A failed preparation never commits its candidate. A subsequent admitted
+     * rescan may retry after recovery has released every captured obligation. */
+    sh_decl_server_request_rearm();
+    backend_log(result < 0 ? "decl-server: shader state restored; native scope cleanup requires recovery" :
+        "decl-server: retained shader preparation restored; a fresh compilation is scheduled");
+    return result >= 0;
+}
+
+int sh_decl_server_prepare_shaders(sh_package_shader_preparation *batch, char *error, size_t capacity)
+{
+    sh_package_changes unchanged = {0};
+    ds_shader_preparation *pass = NULL;
+    size_t count = sh_package_shader_preparation_count(batch);
+    int result = 0;
+    if (error && capacity) *error = 0;
+    if (!batch || !count || !sh_decl_server_shader_preparation_ready()) {
+        if (error && capacity) snprintf(error, capacity, "native shader source preparation awaits an admitted boundary");
+        return 0;
+    }
+    if (!(pass = calloc(1, sizeof(*pass)))) goto done;
+    g_registered_known = 0;
+    pass->assets = sh_package_native_assets_retain(sh_package_shader_preparation_assets(batch));
+    if (!pass->assets) { free(pass); goto done; }
+    pass->previous_state = InterlockedCompareExchange(&g_state, 0, 0);
+    pass->previous_registration = InterlockedCompareExchange(&g_registration_succeeded, 0, 0);
+    pass->thread = GetCurrentThreadId();
+    g_shader_prepare_scope++;
+    __try {
+        __try {
+            /* No provider bytes changed. Capture native scopes and known
+             * lifetimes, but do not select consumers for reconstruction. */
+            pass->resident = sh_resource_resident_begin(&unchanged, 0, g_source_boot_scope != 0, error, capacity);
+            if (pass->resident) pass->state = sh_resource_graph_native_shader_state_begin(
+                ds_shader_admitted, pass, error, capacity);
+            if (pass->state) result = sh_package_shader_preparation_run(batch,
+                ds_shader_prepare_one, ds_shader_recover, pass, error, capacity);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            snprintf(error, capacity, "native shader preparation raised exception %08lx", GetExceptionCode());
+            result = ds_shader_recover(pass, batch, error, capacity) ? 0 : -1;
+        }
+    } __finally {
+        int ended = -1;
+        __try { ended = ds_shader_finish(pass, result == 1, error, capacity); }
+        __except (EXCEPTION_EXECUTE_HANDLER) { }
+        if (ended < 0) result = -1;
+        else if (!ended || result < 0) result = 0;
+        if (result != 1) sh_package_shader_preparation_revoke(batch);
+        if (pass->state || pass->resident) {
+            g_shader_recovery = pass;
+            InterlockedExchange(&g_state, DS_STATE_FAILED);
+            InterlockedExchange(&g_registration_succeeded, 0);
+        } else ds_shader_dispose(pass, result < 0);
+    }
+done:
+    if (!result && error && capacity && !*error) snprintf(error, capacity, "native shader source preparation did not complete");
+    return result;
 }
 
 static void ds_publish_before_boot_promotion(void)
@@ -3040,12 +4522,31 @@ static void ds_publish_before_boot_promotion(void)
     /* Both native startup paths complete game-reader registration before
      * reaching promotion. Keep the previous provider through boot activation
      * too, without moving compilation ahead of native reader registration. */
+    if (sh_mpkg_startup_ready()) ds_inventory_attempt();
     if (!sh_mpkg_startup_ready() ||
         sh_overrides_rescan_packages_activated(ds_activate_provider, (void *)1) == SH_OVERRIDES_RESCAN_FAILED) {
         InterlockedExchange(&g_registration_succeeded, 0);
         InterlockedExchange(&g_state, DS_STATE_FAILED);
         backend_log("decl-server FAILED: initial package preparation or activation failed");
     }
+    sh_boot_phases_mark(SH_BOOT_REGISTERED);
+}
+
+/* R-400: the first registration placed after the menu. Nothing is prepared or registered inside the engine's
+ * boot promotion, so the promotion and the rest of idCommonLocal::Init run at the engine's own time and the game
+ * reaches the menu as vanilla. The first settled SnapMap browser then runs the ordinary runtime pass (rescan,
+ * requirements before registration, registration, registry delta promotion, palette rebuild, strings), the pass a
+ * mid-session install already takes; until it completes sh_decl_server_registration_succeeded() is 0, so map
+ * loads that need packages wait for it and no half-registered view is ever served. */
+static void ds_defer_first_registration(void)
+{
+    InterlockedExchange(&g_registration_succeeded, 0);
+    InterlockedExchange(&g_boot_deferred, 1);
+    InterlockedExchange(&g_state, DS_STATE_DONE);
+    ds_request_rearm(DS_AUTO_RUN);
+    backend_log("decl-server: the first package registration waits for the menu: its shader sources were prepared "
+        "inside the engine's boot promotion and nothing is compiled or registered there; the first settled SnapMap "
+        "browser prepares and registers the library");
 }
 
 static void ds_rearm_transaction(void)
@@ -3057,8 +4558,22 @@ static void ds_rearm_transaction(void)
         backend_log("decl-server RE-ARM refused: a pass is in flight");
         return;
     }
-    InterlockedExchange(&g_registration_succeeded, 0);
-    if (sh_overrides_rescan_packages_activated(ds_activate_provider, NULL) == SH_OVERRIDES_RESCAN_FAILED) {
+    LONG registered = InterlockedExchange(&g_registration_succeeded, 0);
+    ds_inventory_attempt();
+    InterlockedExchange(&g_activation_invoked, 0);
+    sh_package_runtime_note_watched_change(g_rearm_kind == DS_AUTO_WATCHED);
+    int rescanned = sh_overrides_rescan_packages_activated(ds_activate_provider, NULL);
+    sh_package_runtime_note_watched_change(0);
+    if (rescanned != SH_OVERRIDES_RESCAN_FAILED && !InterlockedCompareExchange(&g_activation_invoked, 0, 0)) {
+        /* The runtime kept the served library: the installed packages are the
+         * ones it was prepared from and nothing it serves changed. The
+         * declarations, palette and strings registered for it stand. */
+        InterlockedExchange(&g_registration_succeeded, registered);
+        InterlockedExchange(&g_state, st);
+        backend_log("decl-server RE-ARM: the served library is unchanged; the registered declarations, palette and strings are kept");
+        return;
+    }
+    if (rescanned == SH_OVERRIDES_RESCAN_FAILED) {
         /* Recovery may have succeeded; it must not admit the failed install. */
         InterlockedExchange(&g_registration_succeeded, 0);
         InterlockedExchange(&g_state, DS_STATE_FAILED);
@@ -3070,7 +4585,7 @@ int sh_decl_server_map_preparation_ready(void)
 {
     LONG state = InterlockedCompareExchange(&g_state, 0, 0);
     __try {
-        return (state == DS_STATE_DONE || state == DS_STATE_FAILED) &&
+        return !g_shader_prepare_scope && !ds_occurrence_busy() && (state == DS_STATE_DONE || state == DS_STATE_FAILED) &&
             InterlockedCompareExchange(&g_runtime_ready, 0, 0) && g_boundary_thread_slot &&
             *(const DWORD *)g_boundary_thread_slot == GetCurrentThreadId();
     } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
@@ -3105,16 +4620,780 @@ int sh_decl_server_map_retirement_safe(void)
 int sh_decl_server_map_editor_matches(const void *editor)
 { return editor && (uintptr_t)editor == g_boundary_editor; }
 
+/* The outcome of the registration pass that just ran. A re-arm requested for
+ * the browser (installed packages changed, e.g. by a consent install committed
+ * in the editor) is later work, not part of this outcome; the settled
+ * sh_decl_server_registration_succeeded() additionally requires none pending. */
+static int ds_registration_completed(void)
+{
+    return InterlockedCompareExchange(&g_registration_succeeded, 0, 0) != 0 &&
+           InterlockedCompareExchange(&g_runtime_ready, 0, 0) != 0 &&
+           InterlockedCompareExchange(&g_state, 0, 0) == DS_STATE_DONE &&
+           InterlockedCompareExchange(&g_rearm_is_runtime, 0, 0) == 0;
+}
+
+static int ds_map_activation_completed(const char *what)
+{
+    char line[192];
+    if (ds_registration_completed()) return 1;
+    snprintf(line, sizeof(line), "decl-server: %s did not complete registration (state %ld, registered %ld, runtime %ld)",
+        what, (long)InterlockedCompareExchange(&g_state, 0, 0),
+        (long)InterlockedCompareExchange(&g_registration_succeeded, 0, 0),
+        (long)InterlockedCompareExchange(&g_runtime_ready, 0, 0));
+    backend_log(line); return 0;
+}
+
+/* A map provider activation that fails is asked again by the departure poll
+ * until something changes; the runtime names the failure once (its own repeat
+ * count), so this line marks the first failure of a run and the run's end. */
+static unsigned long g_map_activation_failures;
 int sh_decl_server_activate_map(sh_package_map_plan *plan)
 {
+    int activated;
     if (!sh_decl_server_map_boundary_safe()) return 0;
-    if (!sh_overrides_activate_map(plan, ds_activate_provider, NULL)) {
+    g_pass_boundary = 1;
+    activated = sh_overrides_activate_map(plan, ds_activate_provider, NULL);
+    g_pass_boundary = 0;
+    if (!activated) {
         InterlockedExchange(&g_registration_succeeded, 0);
         InterlockedExchange(&g_state, DS_STATE_FAILED);
-        backend_log("decl-server: map provider activation failed"); return 0;
+        if (!g_map_activation_failures++) backend_log("decl-server: map provider activation failed");
+        return 0;
     }
-    return sh_decl_server_registration_succeeded();
+    if (g_map_activation_failures) {
+        char line[160];
+        snprintf(line, sizeof(line), "decl-server: map provider activation succeeded after %lu failed attempt(s)",
+            g_map_activation_failures);
+        backend_log(line); g_map_activation_failures = 0;
+    }
+    return ds_map_activation_completed("map provider activation");
 }
+
+int sh_decl_server_activate_occurrences(const sh_package_occurrence_snapshot *map)
+{
+    int activated;
+    if (!sh_decl_server_map_boundary_safe()) return 0;
+    g_pass_boundary = 1;
+    activated = sh_overrides_activate_occurrences(map, ds_activate_provider, NULL);
+    g_pass_boundary = 0;
+    if (!activated) {
+        InterlockedExchange(&g_registration_succeeded, 0);
+        InterlockedExchange(&g_state, DS_STATE_FAILED);
+        backend_log("decl-server: retained resource activation failed; previous provider kept");
+        return 0;
+    }
+    return ds_map_activation_completed("retained resource activation");
+}
+
+/* Editor-row publication lineage. Contract: one record per product name the
+ * process ever registered, so records are bounded by distinct names and a
+ * product name is never classified native. Each record holds only the current
+ * meaning of its name: the declaration registered for it by the latest pass
+ * and that publication's exact binding and identity. A pass clears its names'
+ * declarations before registering anything and retires every stored editor
+ * row pointer, so a failed or partial registration, a freed object or a
+ * reused address can never be matched to an earlier generation; republication
+ * replaces the meaning in place. Pointers handed in are live (palette entries
+ * or bodies being built); a hit is its name's record holding that pointer. A
+ * native-original row is positively a live registered declaration with a
+ * native source record. A changed publication at an installed SnapMap
+ * original's path stays a publication occupying that native slot; the
+ * compiler's exact baseline lookup, never the name, establishes it. */
+typedef struct ds_row_lineage {
+    const void *decl;              /* NULL: registering, or never published */
+    char *native;
+    sh_package_provenance *supply; /* exact binding, or NULL: never resolved or supplying */
+    unsigned char identity[32], linked[32]; /* portable; spelling-bound, as maps saved before record */
+    int native_original, baseline_slot;
+} ds_row_lineage;
+static ds_row_lineage *g_row_lineage;
+static size_t g_row_lineage_count, g_row_lineage_capacity;
+static SRWLOCK g_row_lineage_lock = SRWLOCK_INIT;
+static volatile LONG g_row_lineage_faulted;
+static void *volatile g_rows_retired;
+void sh_decl_server_rows_retired(void (*retired)(void)) { InterlockedExchangePointer(&g_rows_retired, (void *)retired); }
+void sh_decl_server_image_state(int (*state)(const char *name, const unsigned char *installed, size_t length))
+{ InterlockedExchangePointer(&g_image_state, (void *)state); }
+#ifdef SH_DECL_SERVER_TESTING
+static void *g_test_rows_manager;
+#endif
+static void *ds_rows_manager(void)
+{
+    void *registry = NULL, *manager = NULL;
+#ifdef SH_DECL_SERVER_TESTING
+    if (g_test_rows_manager) return g_test_rows_manager;
+#endif
+    decl_type_by_name_fn type_by_name = NULL; decl_register_file_fn register_file = NULL;
+    __try {
+        if (ds_decode_registry(&registry, &type_by_name, &register_file)) manager = type_by_name(registry, "snapeditorentitydef");
+    } __except (EXCEPTION_EXECUTE_HANDLER) { manager = NULL; }
+    return manager;
+}
+static void *ds_rows_peek(void *manager, const char *name)
+{
+    void *decl = NULL;
+    __try { decl = manager && name ? ds_peek_decl(manager, name) : NULL; } __except (EXCEPTION_EXECUTE_HANDLER) { decl = NULL; }
+    return decl;
+}
+/* Copy the declaration's current name; 0 when unreadable. */
+static int ds_rows_name(const void *decl, char *out, size_t capacity)
+{
+    const char *name = NULL; size_t i = 0;
+    if (!decl || !capacity || !ds_safe_read((const unsigned char *)decl + 8, &name, sizeof(name)) || !name) return 0;
+    __try { for (; i + 1 < capacity && name[i]; i++) out[i] = name[i]; } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+    out[i] = 0;
+    return i + 1 < capacity && i;
+}
+#ifdef SH_DECL_SERVER_TESTING
+static int (*g_test_rows_native)(const char *path);
+#endif
+/* Positive native provenance of a name no publication recorded: below
+ * production mode a development source record, otherwise the native resource
+ * index itself. Production mode has no source records for stock decls, and a
+ * published path is never native. 1 native, 0 not, -1 unknown. */
+static int ds_rows_native(void *manager, const char *name)
+{
+    static const char prefix[] = "generated/decls/snapeditorentitydef/";
+    char path[sizeof(prefix) + SH_DECL_SERVER_NAME_CAP + 5];
+    int32_t mode = -1;
+    int result = -1;
+#ifdef SH_DECL_SERVER_TESTING
+    if (g_test_rows_manager) mode = g_test_rows_native ? 2 : 1; else
+#endif
+    if (!g_source_mode_address || !ds_safe_read((void *)g_source_mode_address, &mode, sizeof(mode))) return -1;
+    if (mode < 0) return -1;
+    if (mode < 2) {
+        if (!g_find_source) return -1;
+        __try { result = g_find_source(manager, name) ? 1 : 0; } __except (EXCEPTION_EXECUTE_HANDLER) { result = -1; }
+        return result;
+    }
+    if (_snprintf_s(path, sizeof(path), _TRUNCATE, "%s%s.decl", prefix, name) < 0) return -1;
+#ifdef SH_DECL_SERVER_TESTING
+    if (g_test_rows_native) return g_test_rows_native(path);
+#endif
+    return sh_decl_visibility_native_exists(path);
+}
+static void ds_rows_free(ds_row_lineage *row) { free(row->native); ds_rows_supply_free(row->supply); memset(row, 0, sizeof(*row)); }
+/* Every name this pass registers. Before registration each record loses its
+ * declaration and editor rows retire; once published and materialized, each
+ * takes its live declaration and this publication's exact identity. A full
+ * pass compiles every authored name still installed: a recorded name it no
+ * longer compiles is retired, never current, however long the engine keeps
+ * its declaration allocated. */
+static void ds_rows_record(void *registry, decl_type_by_name_fn type_by_name, int published)
+{
+    void *manager = NULL;
+    void (*retired)(void) = (void (*)(void))g_rows_retired;
+    int any = 0;
+    for (int i = 0; i < g_candidate_count && !any; i++) any = g_candidates[i].authored != NULL;
+    if (!any) return;
+    if (published)
+        __try { manager = type_by_name(registry, "snapeditorentitydef"); } __except (EXCEPTION_EXECUTE_HANDLER) { manager = NULL; }
+    AcquireSRWLockExclusive(&g_row_lineage_lock);
+    for (int i = 0; i < g_candidate_count; i++) {
+        ds_candidate *candidate = g_candidates + i;
+        ds_row_lineage *row;
+        size_t at;
+        if (!candidate->authored ||
+            (candidate->outcome != DS_CANDIDATE_MISSING && candidate->outcome != DS_CANDIDATE_SHADOWED)) continue;
+        for (at = 0; at < g_row_lineage_count && _stricmp(g_row_lineage[at].native, candidate->name); at++) {}
+        if (at == g_row_lineage_count && g_row_lineage_count == g_row_lineage_capacity) {
+            size_t capacity = g_row_lineage_capacity ? g_row_lineage_capacity * 2 : 32;
+            ds_row_lineage *items = realloc(g_row_lineage, capacity * sizeof(*items));
+            if (items) { g_row_lineage = items; g_row_lineage_capacity = capacity; }
+        }
+        if (at == g_row_lineage_count) {
+            char *native = at < g_row_lineage_capacity ? _strdup(candidate->name) : NULL;
+            if (!native) {
+                /* Without its record a product name could later look native. */
+                InterlockedExchange(&g_row_lineage_faulted, 1);
+                ds_log("REFUSED", candidate->source, "editor row lineage could not be recorded"); continue;
+            }
+            memset(g_row_lineage + at, 0, sizeof(*g_row_lineage));
+            g_row_lineage[at].native = native; g_row_lineage_count++;
+        }
+        row = g_row_lineage + at;
+        if (!published) { row->decl = NULL; continue; }
+        row->decl = ds_rows_peek(manager, candidate->name);
+        ds_rows_supply_free(row->supply);
+        row->supply = candidate->supply; candidate->supply = NULL;
+        memcpy(row->identity, candidate->identity, sizeof(row->identity));
+        memcpy(row->linked, candidate->linked, sizeof(row->linked));
+        row->native_original = candidate->native_original;
+        row->baseline_slot = candidate->baseline_slot;
+    }
+    for (size_t at = 0; !published && !g_additive_scan && at < g_row_lineage_count; at++) {
+        int i = 0;
+        while (i < g_candidate_count && _stricmp(g_candidates[i].name, g_row_lineage[at].native)) i++;
+        if (i == g_candidate_count) g_row_lineage[at].decl = NULL;
+    }
+    ReleaseSRWLockExclusive(&g_row_lineage_lock);
+    if (!published && retired) retired();
+}
+static void ds_rows_hex(const unsigned char *tree, char *out)
+{
+    static const char digits[] = "0123456789abcdef";
+    for (int i = 0; i < 32; i++) { out[2*i] = digits[tree[i] >> 4]; out[2*i+1] = digits[tree[i] & 15]; }
+    out[64] = 0;
+}
+static int ds_rows_unhex(const char *text, unsigned char *out)
+{
+    if (!text || strlen(text) != 64) return 0;
+    for (int i = 0; i < 64; i++) {
+        int c = tolower((unsigned char)text[i]), v = c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : -1;
+        if (v < 0) return 0;
+        if (i & 1) out[i / 2] |= (unsigned char)v; else out[i / 2] = (unsigned char)(v << 4);
+    }
+    return 1;
+}
+/* Locked shared. The current publication of decl: its name's record, holding decl. */
+static const ds_row_lineage *ds_rows_find(const void *decl, const char *native)
+{
+    for (size_t i = 0; i < g_row_lineage_count; i++)
+        if (!_stricmp(g_row_lineage[i].native, native)) return g_row_lineage[i].decl == decl ? g_row_lineage + i : NULL;
+    return NULL;
+}
+int sh_decl_server_row_class(const void *decl, char *name, size_t capacity)
+{
+    char native[SH_DECL_SERVER_NAME_CAP];
+    int result = -1, product = 0;
+    const ds_row_lineage *row;
+    void *manager;
+    if (!ds_rows_name(decl, native, sizeof(native))) return -1;
+    AcquireSRWLockShared(&g_row_lineage_lock);
+    row = ds_rows_find(decl, native);
+    if (row) {
+        result = row->native_original ? 0 : row->baseline_slot ? 2 : 1;
+        if (result && name) {
+            /* Portable identity: fixed-size, whatever the path or owner count. */
+            if (!row->supply || capacity < 65) result = -1; else ds_rows_hex(row->identity, name);
+        }
+    } else {
+        product = g_row_lineage_faulted != 0;
+        for (size_t i = 0; i < g_row_lineage_count && !product; i++)
+            if (!_stricmp(g_row_lineage[i].native, native)) product = 1;
+    }
+    ReleaseSRWLockShared(&g_row_lineage_lock);
+    if (row || product) return result;
+    manager = ds_rows_manager();
+    if (manager && ds_rows_peek(manager, native) == decl && ds_rows_native(manager, native) == 1) result = 0;
+    return result;
+}
+const void *sh_decl_server_row_resolve(const char *name)
+{
+    unsigned char identity[32];
+    const void *found = NULL; int several = 0;
+    void *manager;
+    if (!ds_rows_unhex(name, identity) || !(manager = ds_rows_manager())) return NULL;
+    AcquireSRWLockShared(&g_row_lineage_lock);
+    for (size_t i = 0; i < g_row_lineage_count && !several; i++) {
+        const ds_row_lineage *row = g_row_lineage + i;
+        if (!row->decl || !row->supply || row->native_original ||
+            (memcmp(row->identity, identity, 32) && memcmp(row->linked, identity, 32)) ||
+            ds_rows_peek(manager, row->native) != row->decl) continue;
+        if (found && found != row->decl) several = 1; else found = row->decl;
+    }
+    ReleaseSRWLockShared(&g_row_lineage_lock);
+    return several ? NULL : found;
+}
+int sh_decl_server_row_named(const void *decl, const char *name)
+{
+    char native[SH_DECL_SERVER_NAME_CAP];
+    unsigned char identity[32];
+    const ds_row_lineage *row;
+    int result = 0;
+    if (!ds_rows_unhex(name, identity) || !ds_rows_name(decl, native, sizeof(native))) return 0;
+    AcquireSRWLockShared(&g_row_lineage_lock);
+    row = ds_rows_find(decl, native);
+    if (row && row->supply && !row->native_original &&
+        (!memcmp(row->identity, identity, 32) || !memcmp(row->linked, identity, 32))) result = 1;
+    ReleaseSRWLockShared(&g_row_lineage_lock);
+    return result;
+}
+int sh_decl_server_row_supply(const void *decl, sh_package_provenance *out)
+{
+    char native[SH_DECL_SERVER_NAME_CAP];
+    const ds_row_lineage *row;
+    int result = 0;
+    if (!out || !ds_rows_name(decl, native, sizeof(native))) return 0;
+    AcquireSRWLockShared(&g_row_lineage_lock);
+    row = ds_rows_find(decl, native);
+    if (row && row->supply && !row->native_original)
+        result = ds_rows_copy_binding(row->supply, row->supply->bindings, out) ? 1 : -1;
+    ReleaseSRWLockShared(&g_row_lineage_lock);
+    return result;
+}
+int sh_decl_server_row_exact(const void *decl, char *name, size_t capacity)
+{
+    char native[SH_DECL_SERVER_NAME_CAP];
+    const ds_row_lineage *row;
+    int result = 0;
+    if (!name || capacity < 65 || !ds_rows_name(decl, native, sizeof(native))) return 0;
+    AcquireSRWLockShared(&g_row_lineage_lock);
+    if ((row = ds_rows_find(decl, native)) && row->supply && !row->native_original) { ds_rows_hex(row->linked, name); result = 1; }
+    ReleaseSRWLockShared(&g_row_lineage_lock);
+    return result;
+}
+int sh_decl_server_row_name(const void *decl, char *name, size_t capacity)
+{ return name ? ds_rows_name(decl, name, capacity) : 0; }
+#ifdef SH_DECL_SERVER_TESTING
+static void *ds_test_rows_type(void *registry, const char *name) { (void)registry; (void)name; return g_test_rows_manager; }
+int sh_decl_server_test_rows_record(const struct sh_package_compilation *compiled, int published)
+{
+    int ok;
+    ds_free_candidates();
+    ok = ds_capture_snapshot_locked(compiled);
+    for (int i = 0; ok && i < g_candidate_count; i++) g_candidates[i].outcome = DS_CANDIDATE_MISSING;
+    if (ok) { /* production order: markers before registration, then publication */
+        ds_rows_record(NULL, ds_test_rows_type, 0);
+        if (published) ds_rows_record(NULL, ds_test_rows_type, 1);
+    }
+    ds_free_candidates();
+    return ok;
+}
+void sh_decl_server_test_rows_manager(void *manager, void *(*source_find)(void *manager, const char *name))
+{
+    g_test_rows_manager = manager; g_find_source = (decl_source_find_fn)source_find;
+}
+void sh_decl_server_test_rows_bindings(const sh_package_provenance *bindings) { g_test_rows_bindings = bindings; }
+void sh_decl_server_test_rows_production(int (*native_exists)(const char *path)) { g_test_rows_native = native_exists; }
+size_t sh_decl_server_test_rows_count(void) { return g_row_lineage_count; }
+void sh_decl_server_test_rows_reset(void)
+{
+    AcquireSRWLockExclusive(&g_row_lineage_lock);
+    while (g_row_lineage_count) ds_rows_free(g_row_lineage + --g_row_lineage_count);
+    free(g_row_lineage); g_row_lineage = NULL; g_row_lineage_capacity = 0;
+    InterlockedExchange(&g_row_lineage_faulted, 0);
+    ReleaseSRWLockExclusive(&g_row_lineage_lock);
+}
+#endif
+
+typedef struct ds_occurrence_admission {
+    sh_decl_server_occurrence_hooks hooks;
+    sh_package_occurrence_snapshot *document;
+    sh_package_selector_hold *selectors;
+    sh_palette_entries *palette;
+    sh_palette_entry_source *palette_sources;
+    size_t palette_source_count;
+    sh_audio_bank_addition *audio;
+    sh_resource_resident *resident;
+    sh_package_changes recovery;
+    void **existing;
+    size_t existing_count;
+    /* Recorded consumers of the addition before its preparation. */
+    sh_resource_graph_impact prior;
+    void *editor, *map;
+    int has_plan, metadata, native_started, staging, rollback_done, attempted, recovered;
+    LONG old_state, old_registered;
+    struct ds_occurrence_admission *next;
+} ds_occurrence_admission;
+static ds_occurrence_admission *g_occurrence_recovery, *g_occurrence_palettes;
+static int ds_occurrence_busy(void) { return g_occurrence_recovery != NULL; }
+
+static int ds_occurrence_boundary(ds_occurrence_admission *admission)
+{
+    return !g_shader_prepare_scope && (sh_editor_transition_frame_ready(admission->editor, admission->map) ||
+        (ds_runtime_boundary_safe() && sh_decl_server_map_browser_present()));
+}
+static int ds_occurrence_owned(void *context)
+{
+    ds_occurrence_admission *admission = context;
+    return admission && ds_occurrence_boundary(admission) && sh_resource_resident_owned(admission->resident);
+}
+static int ds_occurrence_changes(ds_occurrence_admission *admission, const sh_package_changes *changes)
+{
+    sh_package_changes *out = &admission->recovery;
+    if (changes->removed_count || changes->rebound_count || changes->availability_count ||
+        changes->count > SIZE_MAX / sizeof(*out->items) ||
+        changes->added_count > SIZE_MAX / sizeof(*out->removed)) return 0;
+    out->identities_complete = changes->identities_complete;
+    out->items = calloc(changes->count ? changes->count : 1, sizeof(*out->items));
+    out->removed = calloc(changes->added_count ? changes->added_count : 1, sizeof(*out->removed));
+    if (!out->items || !out->removed) return 0;
+    for (size_t i = 0; i < changes->count; i++) {
+        const sh_package_change *source = changes->items + i;
+        sh_package_change *target = out->items + out->count++;
+        if (source->kind != SH_PACKAGE_RESOURCE_ADDED) return 0;
+        target->kind = SH_PACKAGE_RESOURCE_REMOVED;
+        target->path = _strdup(source->path);
+        target->type = source->type ? _strdup(source->type) : NULL;
+        target->name = source->name ? _strdup(source->name) : NULL;
+        if (!target->path || (source->type && !target->type) || (source->name && !target->name)) return 0;
+    }
+    for (size_t i = 0; i < changes->added_count; i++) {
+        sh_package_native_identity *target = out->removed + out->removed_count++;
+        target->type = _strdup(changes->added[i].type); target->name = _strdup(changes->added[i].name);
+        if (!target->type || !target->name) return 0;
+    }
+    return 1;
+}
+static int ds_occurrence_capture(const sh_package_changes *changes)
+{
+    sh_package_compilation projection = {0};
+    const sh_package_compilation *compiled = sh_package_runtime_acquire();
+    int result = 0;
+    if (!compiled || changes->count > SIZE_MAX / sizeof(*projection.resources)) goto done;
+    projection.resources = calloc(changes->count ? changes->count : 1, sizeof(*projection.resources));
+    if (!projection.resources) goto done;
+    projection.sources = compiled->sources; /* owners' trees for editor-row lineage */
+    for (size_t i = 0; i < changes->count; i++) {
+        const sh_compiled_resource *resource = sh_package_compilation_find(compiled, changes->items[i].path);
+        if (!resource) goto done;
+        if (resource->type) projection.resources[projection.resource_count++] = *resource;
+    }
+    result = ds_capture_snapshot_locked(&projection);
+done:
+    free(projection.resources); sh_package_runtime_release(); return result;
+}
+static int ds_occurrence_metadata(char *error, size_t capacity)
+{
+    char root[MAX_PATH];
+    if (sh_overrides_get_root(root, sizeof(root)) &&
+        sh_package_requirements_rearm(root, (void *)g_execute_commands, 1) && sh_strids_rearm()) return 1;
+    snprintf(error, capacity, "additive package requirements or scoped strings did not activate"); return 0;
+}
+static int ds_occurrence_source_row(void *decl, sh_palette_entry_source *row)
+{
+    void *entity = NULL; const char *name = NULL;
+    /* The resolved entityDef is an idResource: its name is at +8. The
+     * palette constructor copies that name into a separate editor defsub;
+     * +0x58 belongs to that defsub, not to this resource. */
+    if (!decl || !row || !ds_safe_read((const unsigned char *)decl + DS_DECL_ENTITYDEF_OFFSET, &entity, sizeof(entity)) ||
+        !entity || !ds_safe_read((const unsigned char *)entity + 8, &name, sizeof(name)) || !name || !*name) return 0;
+    *row = (sh_palette_entry_source){name, decl}; return 1;
+}
+#ifdef SH_DECL_SERVER_TESTING
+const char *sh_decl_server_test_occurrence_source_name(void *decl)
+{
+    sh_palette_entry_source row = {0};
+    return ds_occurrence_source_row(decl, &row) ? row.entity_def_name : NULL;
+}
+#endif
+static int ds_occurrence_sources(ds_occurrence_admission *admission, char *error, size_t capacity)
+{
+    void *registry = NULL;
+    decl_type_by_name_fn type_by_name = NULL;
+    decl_register_file_fn register_file = NULL;
+    sh_palette_entry_source *rows = NULL;
+    size_t row_count = 0;
+    int result = 0, registered = 0, materialized = 0, refused = 0, phase = 0;
+    const char *failed = NULL;
+    if (!g_candidate_count) return 1;
+    __try {
+    if (!ds_decode_registry(&registry, &type_by_name, &register_file)) goto done;
+    rows = calloc((size_t)g_candidate_count, sizeof(*rows));
+    if (!rows) goto done;
+    for (int i = 0; i < g_candidate_count; i++) {
+        ds_candidate *candidate = g_candidates + i;
+        const char *reason = NULL;
+        int classification = ds_classify_candidate(candidate, registry, type_by_name,
+            g_find_source, ds_peek_decl, &reason);
+        if (classification != DS_CLASSIFY_MISSING && classification != DS_CLASSIFY_SHADOWED_SOURCE) {
+            snprintf(error, capacity, "%s: additive identity is not a fresh native declaration%s%s",
+                candidate->source, reason ? ": " : "", reason ? reason : ""); goto done;
+        }
+        if (classification == DS_CLASSIFY_SHADOWED_SOURCE) {
+            void *manager = type_by_name(registry, candidate->type);
+            void *live = ds_peek_decl(manager, candidate->name);
+            /* The one object an addition may meet is a shell this provider
+             * retired and this admission's own resident pass revives: the same
+             * object and identity. Anything else is a live declaration. */
+            if (live && !sh_resource_resident_revives(admission->resident, live, candidate->type, candidate->name)) {
+                snprintf(error, capacity, "%s: additive source already has a live object", candidate->source); goto done;
+            }
+            candidate->shadow_kind = DS_SHADOW_SOURCE;
+        }
+        candidate->outcome = DS_CANDIDATE_MISSING;
+    }
+    if (!ds_publish_missing_table(g_candidate_count)) goto done;
+    admission->native_started = 1;
+    /* Revived shells are rebuilt pending now, after their bytes are published,
+     * so materialization's lookups parse the addition; recovery retires them
+     * again. A retired default the addition refreshes (its recorded consumer,
+     * released with the revived shells) is not rebuilt here: it keeps its old
+     * default until sh_resource_resident_defaults rebuilds it, once these
+     * declarations exist. The later call is a no-op. */
+    if (!sh_resource_resident_reconstruct(admission->resident, error, capacity)) goto done;
+    if (!ds_scan_and_materialize_missing(registry, type_by_name, register_file,
+        g_idstr_ctor, g_idstr_dtor, g_find_source, g_find_decl,
+        sh_palette_refresh_after_decl_registration, &registered, &materialized, &refused, &failed, &phase)) {
+        snprintf(error, capacity, "additive declaration publication failed in phase %d%s%s", phase,
+            failed ? ": " : "", failed ? failed : ""); goto done;
+    }
+    for (int i = 0; i < g_candidate_count; i++) {
+        const ds_candidate *candidate = g_candidates + i;
+        if (candidate->outcome != DS_CANDIDATE_MISSING || _stricmp(candidate->type, "snapeditorentitydef")) continue;
+        void *manager = type_by_name(registry, candidate->type);
+        void *decl = ds_peek_decl(manager, candidate->name);
+        if (!ds_occurrence_source_row(decl, rows + row_count)) goto done;
+        row_count++;
+    }
+    admission->palette_sources = rows; admission->palette_source_count = row_count; rows = NULL;
+    result = 1;
+done:
+        ;
+    } __finally { free(rows); }
+    if (!result && !*error) snprintf(error, capacity, "additive native source or template preparation did not complete");
+    return result;
+}
+static void ds_occurrence_free(ds_occurrence_admission *admission)
+{
+    if (!admission) return;
+    sh_package_runtime_selectors_release(admission->selectors);
+    sh_package_occurrence_release(admission->document);
+    free(admission->palette_sources);
+    if (admission->existing) HeapFree(GetProcessHeap(), 0, admission->existing);
+    sh_resource_graph_impact_free(&admission->prior);
+    sh_package_changes_free(&admission->recovery); free(admission);
+}
+static int ds_occurrence_activate(void *context, int restoring,
+    const sh_package_changes *changes, char *error, size_t capacity)
+{
+    ds_occurrence_admission *admission = context;
+    sh_resource_resident *resident = NULL;
+    sh_package_changes empty = {0};
+    void **owners = NULL;
+    size_t owner_count = 0;
+    int succeeded = 0;
+    if (!ds_occurrence_boundary(admission)) {
+        snprintf(error, capacity, "prefab admission no longer owns the editor frame"); return 0;
+    }
+    if (!restoring && !ds_occurrence_changes(admission, changes)) {
+        snprintf(error, capacity, "prefab admission could not retain its inverse changes"); return 0;
+    }
+    admission->attempted = 1;
+    __try {
+        resident = sh_resource_resident_begin(restoring && !admission->native_started ? &empty : changes,
+            restoring, 0, error, capacity);
+        admission->resident = g_resident_pass = resident;
+        if (!resident) goto done;
+        if (!restoring) {
+            char first[300];
+            if (sh_resource_resident_blocking_count(resident, first, sizeof(first))) {
+                snprintf(error, capacity, "additive resource admission selected an existing native consumer (%s)", first);
+                goto done;
+            }
+            sh_resource_resident_take_prior(resident, &admission->prior);
+            if (!ds_res_watermark()) { snprintf(error, capacity, "prefab admission could not capture native ownership"); goto done; }
+            admission->existing = g_res_mark; admission->existing_count = g_res_mark_count;
+            g_res_mark = NULL; g_res_mark_count = 0;
+            /* Retired shells this addition revives are its own, not existing consumers. */
+            admission->existing_count = sh_resource_resident_release_revived(resident,
+                admission->existing, admission->existing_count);
+            if (admission->has_plan) {
+                if (!ds_occurrence_capture(changes)) goto done;
+                admission->metadata = 1;
+                if (!ds_occurrence_metadata(error, capacity) ||
+                    !(admission->audio = sh_audio_banks_native_additions_begin(error, capacity)) ||
+                    !ds_occurrence_sources(admission, error, capacity)) goto done;
+            }
+            if (!sh_resource_resident_reconstruct(resident, error, capacity) ||
+                !sh_resource_resident_drain_additions(resident, admission->existing, admission->existing_count, error, capacity) ||
+                (admission->audio && !ds_activate_audio_mode(admission->audio, error, capacity))) goto done;
+            if (admission->palette_source_count &&
+                !(admission->selectors = sh_package_runtime_selectors_retain("snapeditorentitydef", error, capacity))) goto done;
+            if (admission->palette_source_count &&
+                (sh_palette_entries_prepare(admission->palette_sources, admission->palette_source_count,
+                    ds_occurrence_owned, admission, &admission->palette, error, capacity) != 1 ||
+                 sh_palette_entries_prepare_authoring(admission->palette,
+                    ds_occurrence_owned, admission, error, capacity) != 1 ||
+                 sh_palette_entries_publish(admission->palette, ds_occurrence_owned, admission, error, capacity) != 1)) goto done;
+            /* Binary-only sources can first materialize in native staging. */
+            if (admission->has_plan) admission->native_started = 1;
+            admission->staging = 1;
+            if (!admission->hooks.prepare(admission->hooks.context, error, capacity)) goto done;
+            /* Template/entity construction may load additional dependencies.
+             * Complete those fresh caches under this same heap/renderer hold. */
+            if (!sh_resource_resident_drain_additions(resident, admission->existing, admission->existing_count, error, capacity)) goto done;
+        } else {
+            if (admission->staging && !admission->rollback_done) {
+                if (!admission->hooks.rollback(admission->hooks.context, error, capacity)) goto done;
+                admission->rollback_done = 1;
+            }
+            if (admission->palette && sh_palette_entries_end(&admission->palette,
+                ds_occurrence_owned, admission, error, capacity) != 1) goto done;
+            if (admission->audio && !sh_audio_banks_native_additions_end(&admission->audio, 0, error, capacity)) goto done;
+            if (admission->metadata && !ds_occurrence_metadata(error, capacity)) goto done;
+            /* A pre-existing consumer whose edge this admission's preparation
+             * recorded is the admission's own change: rebuild it from the
+             * restored provider with the rest. Any other selection refuses. */
+            if (admission->existing_count &&
+                !(owners = HeapAlloc(GetProcessHeap(), 0, admission->existing_count * sizeof(*owners)))) {
+                snprintf(error, capacity, "additive recovery could not retain its native ownership"); goto done;
+            }
+            for (size_t i = 0; i < admission->existing_count; i++) {
+                char selected[400], line[512];
+                if (sh_resource_resident_acquired(resident, admission->existing[i], &admission->prior)) {
+                    sh_resource_resident_describe(resident, admission->existing[i], selected, sizeof(selected));
+                    snprintf(line, sizeof(line), "native resident recovery rebuilds %s from the restored provider: "
+                        "it consumed this admission's identities only during its preparation", selected);
+                    backend_log(line); continue;
+                }
+                if (sh_resource_resident_describe(resident, admission->existing[i], selected, sizeof(selected))) {
+                    snprintf(error, capacity, "additive recovery selected a pre-existing native consumer: %s", selected); goto done;
+                }
+                owners[owner_count++] = admission->existing[i];
+            }
+            if (admission->native_started && (!sh_resource_resident_reconstruct(resident, error, capacity) ||
+                !sh_resource_resident_drain_additions(resident, owners, owner_count, error, capacity))) goto done;
+        }
+        succeeded = 1;
+done:;
+    } __finally {
+        ds_free_candidates();
+        if (resident) succeeded = sh_resource_resident_end(resident, succeeded, error, capacity);
+        admission->resident = g_resident_pass = NULL;
+        if (owners) HeapFree(GetProcessHeap(), 0, owners);
+    }
+    if (restoring) admission->recovered = succeeded;
+    return succeeded;
+}
+static int ds_occurrence_finalize(void *context, char *error, size_t capacity)
+{
+    ds_occurrence_admission *admission = context;
+    if (admission->audio && !sh_audio_banks_native_additions_ready(admission->audio, error, capacity)) return 0;
+    if (!admission->hooks.finalize(admission->hooks.context, error, capacity)) return 0;
+    if (admission->palette) sh_palette_entries_accept(admission->palette);
+    if (admission->audio) sh_audio_banks_native_additions_accept(&admission->audio);
+    return 1;
+}
+int sh_decl_server_occurrence_recovery_pending(void *context)
+{ return g_occurrence_recovery && g_occurrence_recovery->hooks.context == context; }
+
+int sh_decl_server_admit_occurrences(sh_package_map_plan *plan,
+    const sh_package_occurrence_snapshot *document, const sh_decl_server_occurrence_hooks *hooks,
+    char *error, size_t capacity)
+{
+    ds_occurrence_admission *admission;
+    sh_package_changes empty = {0};
+    int result = SH_PACKAGE_ADMISSION_FAILED, recovered = 1;
+    if (!error || !capacity) return 0;
+    *error = 0;
+    if (g_occurrence_recovery || g_additive_scan || g_candidates || !hooks || !hooks->prepare ||
+        !hooks->finalize || !hooks->rollback || !sh_decl_server_map_preparation_ready() ||
+        !sh_user_overrides_enabled_for_launch()) goto refused;
+    admission = calloc(1, sizeof(*admission)); if (!admission) goto refused;
+    admission->hooks = *hooks; admission->has_plan = plan != NULL;
+    admission->document = sh_package_occurrence_retain((sh_package_occurrence_snapshot *)document);
+    admission->editor = (void *)g_boundary_editor;
+    admission->map = sh_editor_transition_capture(admission->editor);
+    admission->old_state = g_state; admission->old_registered = g_registration_succeeded;
+    if (!sh_editor_transition_frame_ready(admission->editor, admission->map)) {
+        ds_occurrence_free(admission); goto refused;
+    }
+    g_additive_scan = 1; g_registered_known = 0;
+    __try {
+        if (plan) result = sh_package_runtime_admit_occurrences(plan, document,
+            (sh_package_activation_guard){sh_nav_bake_source_update_begin, sh_nav_bake_source_update_end},
+            ds_occurrence_activate, ds_occurrence_finalize, admission, error, capacity);
+        else {
+            __try {
+                if (ds_occurrence_activate(admission, 0, &empty, error, capacity) &&
+                    ds_occurrence_finalize(admission, error, capacity)) result = SH_PACKAGE_ADMISSION_READY;
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+                snprintf(error, capacity, "prefab native preparation raised exception 0x%08lx", GetExceptionCode());
+            }
+            if (result != SH_PACKAGE_ADMISSION_READY) {
+                char detail[1024] = "";
+                __try { recovered = ds_occurrence_activate(admission, 1, &empty, detail, sizeof(detail)); }
+                __except (EXCEPTION_EXECUTE_HANDLER) {
+                    recovered = 0;
+                    snprintf(detail, sizeof(detail), "prefab native recovery raised exception 0x%08lx", GetExceptionCode());
+                }
+                if (!recovered) backend_log(detail);
+            }
+        }
+    } __finally { g_additive_scan = 0; }
+    if (result == SH_PACKAGE_ADMISSION_READY) {
+        if (admission->palette) {
+            admission->hooks = (sh_decl_server_occurrence_hooks){0};
+            HeapFree(GetProcessHeap(), 0, admission->existing); admission->existing = NULL;
+            admission->existing_count = 0;
+            free(admission->palette_sources); admission->palette_sources = NULL;
+            admission->palette_source_count = 0; sh_package_changes_free(&admission->recovery);
+            admission->next = g_occurrence_palettes; g_occurrence_palettes = admission;
+        } else ds_occurrence_free(admission);
+        return result;
+    }
+    if (!recovered || (admission->attempted && !admission->recovered) || admission->palette ||
+        admission->audio || (admission->staging && !admission->rollback_done)) {
+        g_occurrence_recovery = admission;
+        InterlockedExchange(&g_registration_succeeded, 0); InterlockedExchange(&g_state, DS_STATE_FAILED);
+    } else ds_occurrence_free(admission);
+    return result;
+refused:
+    snprintf(error, capacity, "prefab source admission requires a ready, owned editor frame"); return result;
+}
+
+static int ds_occurrence_maintenance(void)
+{
+    ds_occurrence_admission *admission = g_occurrence_recovery;
+    char error[1024] = "";
+    if (admission) {
+        if (!ds_occurrence_boundary(admission)) return 0;
+        int restored = 0;
+        g_additive_scan = 1; g_registered_known = 0;
+        __try { restored = ds_occurrence_activate(admission, 1, &admission->recovery, error, sizeof(error)); }
+        __except (EXCEPTION_EXECUTE_HANDLER) { snprintf(error, sizeof(error), "retained prefab recovery raised a native exception"); }
+        g_additive_scan = 0;
+        if (!restored) { backend_log(error); return 0; }
+        if (admission->has_plan && !sh_package_runtime_complete_occurrence_recovery(admission)) {
+            backend_log("retained prefab recovery no longer matches its restored provider"); return 0;
+        }
+        InterlockedExchange(&g_state, admission->old_state);
+        InterlockedExchange(&g_registration_succeeded, admission->old_registered);
+        g_occurrence_recovery = NULL; ds_occurrence_free(admission);
+        backend_log("retained prefab recovery completed: the failed admission's native changes are rolled back");
+    }
+    if (!g_occurrence_palettes || !sh_decl_server_map_retirement_safe()) return 1;
+    for (ds_occurrence_admission **slot = &g_occurrence_palettes; (admission = *slot) != NULL;) {
+        sh_package_changes empty = {0};
+        sh_resource_resident *resident = sh_resource_resident_begin(&empty, 0, 0, error, sizeof(error));
+        if (!resident) return 0;
+        admission->resident = resident;
+        int ended = admission->palette ? sh_palette_entries_end(&admission->palette,
+            ds_occurrence_owned, admission, error, sizeof(error)) : 1;
+        int released = sh_resource_resident_end(resident, ended >= 0, error, sizeof(error));
+        admission->resident = NULL;
+        if (!released || ended < 0) { backend_log(error); return 0; }
+        /* An accepted array still used by the native palette is ordinary
+         * retained ownership. Permit the rebuild which can replace it. */
+        if (!ended) { slot = &admission->next; continue; }
+        *slot = admission->next; ds_occurrence_free(admission);
+    }
+    return 1;
+}
+void sh_decl_server_occurrence_maintenance(void)
+{ (void)ds_occurrence_maintenance(); }
+#ifdef SH_DECL_SERVER_TESTING
+int sh_decl_server_test_palette_hold(void *batch)
+{
+    ds_occurrence_admission *admission = calloc(1, sizeof(*admission));
+    if (!admission) return 0;
+    admission->palette = batch; admission->editor = (void *)g_boundary_editor;
+    admission->map = sh_editor_transition_capture(admission->editor);
+    admission->next = g_occurrence_palettes; g_occurrence_palettes = admission;
+    return 1;
+}
+int sh_decl_server_test_palette_maintenance(void) { return ds_occurrence_maintenance(); }
+size_t sh_decl_server_test_palette_holds(void)
+{
+    size_t count = 0;
+    for (ds_occurrence_admission *a = g_occurrence_palettes; a; a = a->next) ++count;
+    return count;
+}
+void sh_decl_server_test_occurrence_ready(void *editor)
+{
+    g_module_base = (const uint8_t *)1;
+    g_boundary_editor = (uintptr_t)editor;
+    g_boundary_thread_slot = glb_resolve(g_module_base, "main_thread_id", NULL);
+    g_boundary_shell_slot = glb_resolve(g_module_base, "shell_ptr_slot", NULL);
+    g_boundary_common_slot = glb_resolve(g_module_base, "validator_manager", NULL);
+    InterlockedExchange(&g_runtime_ready, 1);
+    InterlockedExchange(&g_state, DS_STATE_DONE);
+    InterlockedExchange(&g_registration_succeeded, 1);
+}
+#endif
 
 /* After native promotion, look up one published identity without creating it
  * and read its resource level. Level 4 verifies the intended lifetime
@@ -3167,17 +5446,48 @@ static void ds_boot_promotion_detour(void)
      * pass-through. */
     if (InterlockedCompareExchange(&g_state, 0, 0) == DS_STATE_ARMED &&
         InterlockedCompareExchange(&g_boot_promotion_entered, 1, 0) == 0) {
-        __try {
-            ds_publish_before_boot_promotion();
-        } __except (EXCEPTION_EXECUTE_HANDLER) {
-            backend_log("decl-server FAILED: publication faulted inside the engine boot promotion; the engine promotion still runs and startup continues");
-            InterlockedExchange(&g_state, DS_STATE_FAILED);
+        sh_boot_phases_mark(SH_BOOT_PROMOTION);
+        int deferred = 0;
+        if (sh_boot_phases_placement() == SH_BOOT_PLACE_FIRST_BOUNDARY) {
+            /* The registration waits for the menu, but the shader sources it needs can only be prepared here:
+             * staging a fixed renderparm's live value refuses any renderer parameter state with an active
+             * block, which the render thread holds while the menu and browser draw. Prepare them now (nothing
+             * is compiled, published or registered); if that cannot be done, register here as a default boot. */
+            char why[768] = "";
+            int prepared = 0;
+            g_source_boot_scope++;
+            __try {
+                __try { prepared = g_boot_preparation && g_boot_preparation(why, sizeof(why)); }
+                __finally { g_source_boot_scope--; }
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+                prepared = 0; snprintf(why, sizeof(why), "the preparation raised exception %08lx", GetExceptionCode());
+            }
+            if (prepared) { ds_defer_first_registration(); deferred = 1; }
+            else {
+                char line[1000];
+                snprintf(line, sizeof(line), "decl-server: the first package registration runs inside the boot promotion "
+                    "after all: the shader sources it needs could not be prepared ahead of the menu (%s)",
+                    why[0] ? why : g_boot_preparation ? "no reason given" : "no preparation is bound");
+                backend_log(line);
+                sh_boot_phases_set_placement(SH_BOOT_PLACE_PROMOTION);
+            }
+        }
+        if (!deferred) {
+            g_source_boot_scope++;
+            __try {
+                __try { ds_publish_before_boot_promotion(); }
+                __finally { g_source_boot_scope--; }
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+                backend_log("decl-server FAILED: publication faulted inside the engine boot promotion; the engine promotion still runs and startup continues");
+                InterlockedExchange(&g_state, DS_STATE_FAILED);
+            }
         }
     }
     /* Always call the original promotion; skipping it leaves engine content
      * map-scoped.
      */
     if (g_boot_promotion_original) g_boot_promotion_original();
+    sh_boot_phases_mark(SH_BOOT_PROMOTION_RETURNED);
     /* The diagnostic below may clobber EAX. The pinned Vulkan caller at
      * 0x17C6479 does not consume the promotion return value; recheck that ABI
      * on build changes. Hooks with consumed returns must preserve them.
@@ -3187,10 +5497,7 @@ static void ds_boot_promotion_detour(void)
 
 int sh_decl_server_registration_succeeded(void)
 {
-    return InterlockedCompareExchange(&g_registration_succeeded, 0, 0) != 0 &&
-           InterlockedCompareExchange(&g_runtime_ready, 0, 0) != 0 &&
-           InterlockedCompareExchange(&g_state, 0, 0) == DS_STATE_DONE &&
-           InterlockedCompareExchange(&g_rearm_is_runtime, 0, 0) == 0 &&
+    return ds_registration_completed() &&
            InterlockedCompareExchange(&g_auto_state, 0, 0) == DS_AUTO_IDLE;
 }
 
@@ -3207,7 +5514,7 @@ int sh_decl_server_install(const sig_result *results, size_t count,
     uintptr_t idstr_dtor;
     uintptr_t boot_promote;
     uintptr_t execute_commands;
-    uintptr_t generic_load, reconstruct;
+    uintptr_t generic_load, reconstruct, resource_add;
     int command_registered = 0;
     if (g_boot_promotion_original) {
         if (hook_is_installed((void *)g_boot_promotion_original))
@@ -3255,13 +5562,14 @@ int sh_decl_server_install(const sig_result *results, size_t count,
     /* Require a clean generic-load signature for the runtime fallback. */
     generic_load = ds_clean_addr(results, count, "ResourceGenericLoad");
     reconstruct = ds_clean_addr(results, count, "ResourceReconstruct");
+    resource_add = ds_clean_addr(results, count, "ResourceListAdd");
     if (!anchor || anchor->status != SIG_OK || !type_method || !register_file || !find_decl ||
         !source_find || source_find->status != SIG_OK || !source_find->addr ||
         type_method->status != SIG_OK || register_file->status != SIG_OK ||
         find_decl->status != SIG_OK || !type_method->addr ||
         !register_file->addr || !find_decl->addr ||
         !idstr_ctor || !idstr_dtor || !boot_promote || !execute_commands ||
-        !generic_load || !reconstruct || !add_command || !cmdsys || !module_base ||
+        !generic_load || !reconstruct || !resource_add || !add_command || !cmdsys || !module_base ||
         !sh_process_heap_bind(&g_runtime_heap, results, count, module_base) ||
         !ds_clean_identity(results, count, "DeclRegistryAnchor", module_base, DS_PINNED_ANCHOR_RVA) ||
         !ds_clean_identity(results, count, "DeclTypeByName", module_base, DS_PINNED_TYPE_RVA) ||
@@ -3277,7 +5585,8 @@ int sh_decl_server_install(const sig_result *results, size_t count,
         !ds_clean_identity(results, count, "ResourceGenericLoad", module_base,
                            DS_PINNED_GENERIC_LOAD_RVA) ||
         !ds_clean_identity(results, count, "ResourceReconstruct", module_base,
-                           DS_PINNED_RECONSTRUCT_RVA)) {
+                           DS_PINNED_RECONSTRUCT_RVA) ||
+        !ds_clean_identity(results, count, "ResourceListAdd", module_base, 0x1800700u)) {
         backend_log("decl-server REFUSED: a registry/idStr/boot-promotion ABI, command-system, or module-base dependency did not resolve to a clean, uniquely identified engine function");
         InterlockedExchange(&g_state, DS_STATE_FAILED);
         ds_free_candidates();
@@ -3298,6 +5607,7 @@ int sh_decl_server_install(const sig_result *results, size_t count,
     g_execute_commands = (cmd_execute_buffer_fn)execute_commands;
     g_generic_load = (resource_generic_load_fn)generic_load;
     g_reconstruct = (resource_generic_load_fn)reconstruct;
+    g_resource_add = (resource_list_add_fn)resource_add;
     /* Resolve once, including failure; never scan an unknown image on every tick. */
     g_boundary_editor = glb_resolve(module_base, "editor_singleton", NULL);
     g_boundary_shell_slot = glb_resolve(module_base, "shell_ptr_slot", NULL);
@@ -3368,11 +5678,39 @@ int sh_decl_server_install(const sig_result *results, size_t count,
 #ifdef SH_DECL_SERVER_TESTING
 int sh_decl_server_test_lifetime_watermark(void) { return ds_res_watermark(); }
 int sh_decl_server_test_promote_delta(void) { return ds_res_promote_delta(4); }
+int sh_decl_server_test_prepare_shaders(sh_package_shader_preparation *batch,
+    sh_decl_server_test_find_decl_fn find, char *error, size_t capacity)
+{
+    static DWORD thread;
+    int result;
+    thread = GetCurrentThreadId(); g_boundary_thread_slot = (uintptr_t)&thread;
+    g_find_decl = (decl_find_fn)find; g_test_peek = (decl_find_fn)find;
+    InterlockedExchange(&g_runtime_ready, 1);
+    InterlockedExchange(&g_state, DS_STATE_DONE);
+    InterlockedExchange(&g_registration_succeeded, 1);
+    g_source_boot_scope++;
+    result = sh_decl_server_prepare_shaders(batch, error, capacity);
+    g_source_boot_scope--;
+    return result;
+}
+int sh_decl_server_test_shader_recovery(void) { return ds_shader_recovery_poll(); }
 
 void sh_decl_server_test_reset_install(void)
 {
     /* Test callers stop using the synthetic hook before resetting its owner. */
     if (g_boot_promotion_original && !hook_unpatch((void *)g_boot_promotion_original)) return;
+    /* The synthetic fixture owns its native handles separately. Discard only
+     * adapter wrappers after its damaged-End assertions; never replay End or
+     * a native destructor here. Production has no corresponding reset. */
+    if (g_editor_activation) {
+        sh_process_heap_leave(&g_editor_activation->heap);
+        free(g_editor_activation); g_editor_activation=NULL;
+    }
+    while (g_editor_activation_diagnostic) {
+        ds_editor_activation *pass=g_editor_activation_diagnostic;
+        g_editor_activation_diagnostic=pass->next; free(pass);
+    }
+    InterlockedExchange(&g_editor_committed_cleanup_pending,0);
     g_boot_promotion_original = NULL;
     InterlockedExchange(&g_boot_promotion_entered, 0);
     InterlockedExchange(&g_boot_hook_retry, 0);
@@ -3388,6 +5726,7 @@ void sh_decl_server_test_reset_install(void)
     g_idstr_dtor = NULL;
     g_execute_commands = NULL;
     g_generic_load = NULL;
+    g_resource_add = NULL;
     g_cmdsys = NULL;
     g_add_command = NULL;
     g_boundary_editor = g_boundary_shell_slot = 0;
@@ -3399,6 +5738,7 @@ void sh_decl_server_test_reset_install(void)
     InterlockedExchange(&g_auto_state, DS_AUTO_IDLE);
 }
 
+int sh_decl_server_test_isolated_defaults(void) { return g_isolated_defaults; }
 int sh_decl_server_test_apply(const sh_decl_server_test_materialize_item *items,
                               size_t count, int runtime)
 {
@@ -3417,6 +5757,9 @@ int sh_decl_server_test_apply(const sh_decl_server_test_materialize_item *items,
         strcpy_s(candidate->source, sizeof(candidate->source), items[i].source);
         candidate->body_length = items[i].body_length;
         candidate->native_original = items[i].native_original;
+        candidate->rebound_original = items[i].rebound_original;
+        if (items[i].original) strcpy_s(candidate->original, sizeof(candidate->original), items[i].original);
+        if (items[i].native_default) strcpy_s(candidate->native_default, sizeof(candidate->native_default), items[i].native_default);
         candidate->body = (char *)HeapAlloc(GetProcessHeap(), 0, items[i].body_length + 1);
         if (!candidate->body) { ds_free_candidates(); return 0; }
         memcpy(candidate->body, items[i].body, items[i].body_length);

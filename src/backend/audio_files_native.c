@@ -4,6 +4,7 @@
 #include <string.h>
 #include "audio_files_native.h"
 #include "audio_files.h"
+#include "audio_banks_native.h"
 #include "package_runtime.h"
 #include "resource_graph.h"
 #include "backend_log.h"
@@ -33,6 +34,7 @@ static int afn_provider(void *context, const char *path, FILE **stream, uint64_t
     int result;
     (void)context;
     result = sh_package_runtime_open_file(path, stream, length);
+    if (!result) result = sh_audio_banks_native_open_media(path, stream, length);
     if (result > 0) sh_resource_graph_file(path);
     return result;
 }

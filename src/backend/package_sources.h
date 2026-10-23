@@ -36,7 +36,17 @@ typedef struct sh_package_sources {
     sh_package_source_file *files;
     size_t file_count;
     unsigned char (*fingerprints)[32]; /* full source tree identities */
+    /* Optional original authored trees for private normalized map views.
+     * fingerprints above still validates the actual inventoried file bytes.
+     * Set only before compiling, from retained importer-verified deliveries. */
+    unsigned char (*original_fingerprints)[32];
 } sh_package_sources;
+
+static __inline const unsigned char *sh_package_source_tree(const sh_package_sources *sources, size_t owner)
+{
+    if (!sources || owner >= sources->package_count || !sources->fingerprints) return NULL;
+    return sources->original_fingerprints ? sources->original_fingerprints[owner] : sources->fingerprints[owner];
+}
 
 typedef struct sh_package_file_identity {
     uint64_t length;
@@ -45,6 +55,11 @@ typedef struct sh_package_file_identity {
 /* SHA-256 of already-owned bytes, in bounded updates without another payload
  * allocation. Clears the identity on failure. */
 int sh_package_bytes_identity(const void *body, size_t length, sh_package_file_identity *out);
+/* SHA-256 of a bounded span in an immutable random-access source. read must
+ * fill each requested span and return 1; a short/failed read returns 0. No
+ * payload-sized allocation. Offset and length stay 64-bit for packed files. */
+int sh_package_reader_identity(void *context, uint64_t offset, uint64_t length,
+    int (*read)(void *, uint64_t, void *, size_t), sh_package_file_identity *out);
 
 /* Returns an owned, complete inventory, or NULL with a diagnostic. A failed
  * scan never publishes a prefix. Sources and descriptors are never rewritten.
@@ -111,16 +126,105 @@ typedef struct sh_package_file sh_package_file;
  * snapshots whose owners retain the handle until their work is complete. */
 sh_package_file *sh_package_file_capture(const char *absolute,
     char *error, size_t error_capacity);
+/* Pin without reading payload bytes. Identity is hashed lazily on first request
+ * and then reused. Used for engine-owned external data; authored comparisons
+ * must request the full identity and cannot substitute file metadata for it. */
+sh_package_file *sh_package_file_pin(const char *absolute,
+    char *error, size_t error_capacity);
+uint64_t sh_package_file_length(const sh_package_file *file);
 int sh_package_file_get_identity(const sh_package_file *file, sh_package_file_identity *out);
 sh_package_file *sh_package_file_seal(const sh_package_source_file *file,
     char *error, size_t error_capacity);
+/* Stream compiler output into the existing private resource cache. The caller
+ * supplies an admitted cache directory and exact output length; expected may
+ * additionally require a preverified digest. No source package is modified.
+ * Only complete output is published. Equal cached bytes share the existing
+ * file; a differing/cache-corrupt occupant is preserved and a separate private
+ * cache name is used. On success path is malloc-owned and file is sealed. */
+typedef int (*sh_package_file_producer)(void *context,
+    int (*write)(void *, const void *, size_t), void *sink, char *error, size_t capacity);
+sh_package_file *sh_package_file_generate(const char *directory, uint64_t length,
+    const unsigned char *expected, sh_package_file_producer produce, void *context,
+    char **path, char *error, size_t capacity);
+sh_package_file *sh_package_source_cache(const sh_package_source_file *source,
+    const char *directory, char **path, char *error, size_t capacity);
 sh_package_file *sh_package_file_retain(sh_package_file *file);
 void sh_package_file_release(sh_package_file *file);
+/* Exact bounded comparison of sealed bytes: 1 equal, 0 different, -1 read
+ * failure. Independent streams leave every existing reader position intact. */
+int sh_package_file_equal(const sh_package_file *left, const sh_package_file *right);
 FILE *sh_package_file_open(const sh_package_file *file, uint64_t *length,
     char *error, size_t error_capacity);
 unsigned char *sh_package_file_read(const sh_package_file *file, size_t limit,
     size_t *length, char *error, size_t error_capacity);
 int sh_package_source_copy(const sh_package_source_file *file, const char *destination);
+/* Immutable in-memory bytes that several owners share: a compilation resource,
+ * the library's original snapshot and a source capture's original keep one copy
+ * of the same exact bytes instead of one each. adopt takes a malloc-owned buffer
+ * of length bytes, NUL-terminates it (it may move: read it back through
+ * sh_package_body_bytes) and holds the first reference; NULL when that cannot be
+ * allocated, and then the buffer is untouched and still the caller's. Adopted
+ * bytes never change; the last release frees them. References may be taken and
+ * released on any thread. */
+typedef struct sh_package_body sh_package_body;
+sh_package_body *sh_package_body_adopt(unsigned char *bytes, size_t length);
+sh_package_body *sh_package_body_retain(sh_package_body *body);
+void sh_package_body_release(sh_package_body *body);
+/* The bytes, or NULL while they are released to the body's backing (below). */
+const unsigned char *sh_package_body_bytes(const sh_package_body *body);
+size_t sh_package_body_length(const sh_package_body *body);
+/* Where a body's bytes can be read again exactly, so that its holders may let them go in between (an installed
+ * original's pinned archive row, sh_resource_slice). read returns malloc-owned bytes and a NUL with *length set, or
+ * NULL; release frees the backing's own state. Both may be called on any thread. length is the byte count the
+ * backing reads. */
+typedef struct sh_package_backing {
+    unsigned char *(*read)(void *context, size_t *length);
+    void (*release)(void *context);
+    void *context;
+    size_t length;
+    /* Optional: 1 when two contexts of this backing read the very same stored bytes (one pinned archive row). */
+    int (*same)(const void *context, const void *other);
+} sh_package_backing;
+/* Gives body a backing that reads exactly its bytes; the caller has proven that (the bytes were just read from it,
+ * or compared equal to such a read). The body takes the backing either way: 0 when it already has one or the lengths
+ * differ, and the given backing is then released. */
+int sh_package_body_back(sh_package_body *body, sh_package_backing backing);
+int sh_package_body_backed(const sh_package_body *body);
+/* 1 when both bodies are backed by the same stored bytes (their backing's same), so they hold equal bytes without
+ * either being read; 0 otherwise, which says nothing about their bytes. */
+int sh_package_body_same_backing(const sh_package_body *body, const sh_package_body *other);
+/* Holders. A holder that keeps a pointer to the bytes is attached: adopt and retain make one. A detached holder holds
+ * the body but reads its bytes only through it (sh_package_body_read, or by attaching again). When every holder of
+ * a backed body is detached its bytes are freed; they are read again from the backing when a holder attaches.
+ * detach: the calling attached holder detaches; its pointer must not be used again.
+ * attach: the calling detached holder attaches; the bytes, or NULL when the backing cannot read exactly the body's
+ * length (the holder stays detached and the body records the failure).
+ * retain_detached: one more detached holder (a copy of a detached holder).
+ * drop: releases one holder, attached when held (its pointer) is non-NULL, detached otherwise. */
+void sh_package_body_detach(sh_package_body *body);
+const unsigned char *sh_package_body_attach(sh_package_body *body);
+sh_package_body *sh_package_body_retain_detached(sh_package_body *body);
+void sh_package_body_drop(sh_package_body *body, const void *held);
+/* A transient copy: malloc-owned length bytes and a NUL, from the resident bytes or the backing; NULL when they
+ * cannot be allocated or the backing cannot read exactly the body's length (recorded on the body). */
+unsigned char *sh_package_body_read(sh_package_body *body, size_t *length);
+/* 1 once any read of this body's backing failed. */
+int sh_package_body_failed(const sh_package_body *body);
+#if defined(SH_PACKAGE_LIBRARY_TESTING) || defined(SH_PACKAGE_SOURCE_LINK_TESTING) || \
+    defined(SH_PACKAGE_RUNTIME_TESTING)
+/* Refuse the nth adoption (0: none) as an exhausted heap would; _left reports a
+ * countdown no adoption reached. live counts the bodies not yet freed. */
+void sh_package_body_test_refusal(long nth);
+long sh_package_body_test_refusal_left(void);
+long sh_package_body_test_live(void);
+/* Fail the nth backing read (0: none) as an unreadable archive would; _left as above. reads counts backing reads,
+ * released the bodies whose bytes are released now, and releases every time a body's bytes were released. */
+void sh_package_body_test_backing_failure(long nth);
+long sh_package_body_test_backing_failure_left(void);
+long sh_package_body_test_backing_reads(void);
+long sh_package_body_test_released(void);
+long sh_package_body_test_releases(void);
+#endif
 
 /* Exact engine path normalization: case/slash folding only. Never infer
  * resource identities from file extensions. Refuse traversal and ambiguous

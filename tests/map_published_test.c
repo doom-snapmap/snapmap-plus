@@ -9,24 +9,47 @@ static void *system_table[8], *cache_table[64], *session_table[104], *lobby_tabl
 static void **system_object = system_table, **session_object = session_table, **lobby_object = lobby_table, **progress_object = progress_table;
 static void *shell_slot = shell, *session_slot = &session_object, *history_slot = history_record;
 static DWORD thread_id;
-static int history_count = 1, boundary, mode, allocated, released, errors, prepared, decoded, calls[4], hidden;
+static int history_count = 1, boundary, mode, allocated, released, errors, prepared, decoded, calls[4], hidden, cancel_refused;
 static int inspection, read_action, throws_read, hook_prepares, hook_commits, hook_removes, fail_prepare, fail_commit, fail_remove;
 static int carrier = 1, scans;   /* what the retained text declares: 1 package, 0 none */
+static int references;           /* package references the retained text carries */
+size_t sh_mpkg_reference_scan(const char *json, size_t len, sh_mpkg_reference *out, size_t cap)
+{ assert(json && len == strlen(json) && !out && !cap); return (size_t)references; }
+static int covered;              /* the retained request owes no consent (state 2) */
+int sh_rawmap_pending_map_covered(void) { return covered; }
+int sh_map_native_level_name(const sh_map_native_selection *selection, char *out, size_t capacity)
+{ assert(selection && out && capacity > 8); strcpy_s(out, capacity, "fixture"); return 1; }
+/* Levels: 0x777 a SnapMap level spelled with the fixture's name, 0x779 a SnapMap level named
+ * DynamicSnapMap, 0x778 a campaign level, 0x77a unreadable. Identities read the test's integer
+ * ids as decimal text; zero is unreadable. */
+int sh_map_native_level_is_snapmap(const void *parameters)
+{ return parameters == (void *)0x777 || parameters == (void *)0x779 ? 1 : parameters == (void *)0x778 ? 0 : -1; }
+int sh_map_native_level_name_of(const void *parameters, char *out, size_t capacity)
+{ strcpy_s(out, capacity, parameters == (void *)0x777 ? "snapmap/fixture" : parameters == (void *)0x779 ? "DynamicSnapMap" : parameters == (void *)0x778 ? "game/argent" : ""); return out[0] != 0; }
+int sh_map_native_string_copy(const void *string, char *out, size_t capacity)
+{ int v = *(const int *)string; if (!v) return 0; snprintf(out, capacity, "%d", v); return 1; }
+int sh_map_native_identity(const sh_map_native_selection *selection, char *id, size_t idc, char *revision, size_t rc)
+{ return sh_map_native_string_copy(selection->metadata, id, idc) && sh_map_native_string_copy(selection->metadata + 0x30, revision, rc); }
+int sh_engine_dialog_queue_idle(const void *shell) { (void)shell; return 1; }
 static unsigned char bound_sites[9][512];
 static __declspec(thread) sh_rawmap_read_scope *read_scope;
 static sh_rawmap_request retained;
+void *sh_rawmap_pending_map_context(void) { return retained.release ? retained.context : NULL; }
 static sh_rawmap_loading retained_loading;
 static char retained_json[64];
+static const char rebound_json[] = "compiled source with scoped aliases";
 static void *call_callbacks[PUB_HOOKS];
 
 void backend_log(const char *text) { (void)text; }
-void sh_mpkg_report_error(const char *text) { assert(text && *text); errors++; }
+void sh_mpkg_report_error(sh_mpkg_problem problem, const char *text) { (void)problem; assert(text && *text); errors++; }
 size_t sh_mpkg_scan(const char *json, size_t len, sh_mpkg_decl *out, size_t cap)
 { assert(json && len == strlen(json) && !out && !cap); scans++; return (size_t)carrier; }
 int sh_decl_server_map_boundary_safe(void) { return boundary && thread_id == GetCurrentThreadId(); }
 int sh_decl_server_map_preparation_ready(void) { return boundary && thread_id == GetCurrentThreadId(); }
 int sh_decl_server_map_browser_present(void)
 { return *(int *)(manager + 8) == 63 && *(int *)(manager + 12) == 63; }
+static int serving_disabled;
+int sh_package_runtime_serving_disabled(void) { return serving_disabled; }
 int sh_map_render_capture(void *snapshot, sh_map_render *settings)
 { assert(snapshot && settings); memset(settings, 0, sizeof(*settings)); return 1; }
 void sh_map_render_select(const sh_map_render *settings) { assert(settings); }
@@ -62,7 +85,10 @@ int sh_map_native_enter(const sh_map_native_selection *selection, const char *js
     sh_map_native_enter_fn enter, void *context, char *error, size_t capacity)
 {
     int snapshot = 123;
-    assert(inspection && !strcmp(json, "retained source")); decoded++;
+    assert(inspection && !strcmp(json, rebound_json)); decoded++;
+    /* Selection identity remains the captured request; only gameplay source is
+     * supplied by the compiled context at the activation boundary. */
+    assert(!strcmp(sh_map_native_source(selection, NULL), "retained source"));
     if (mode == 3) { snprintf(error, capacity, "decode refused"); return 0; }
     return enter(context, selection->metadata, &snapshot);
 }
@@ -91,7 +117,7 @@ int sh_rawmap_preflight_request(const char *json, size_t length, const sh_rawmap
 int sh_rawmap_preflight_loading_request(const char *json, size_t length, const sh_rawmap_request *request,
     const sh_rawmap_loading *loading, char *error, size_t capacity)
 {
-    assert(loading && loading->waiting && loading->matches && loading->select);
+    assert(loading && loading->waiting && loading->matches && loading->differs && loading->select);
     retained_loading = *loading;
     return sh_rawmap_preflight_request(json, length, request, error, capacity);
 }
@@ -105,12 +131,12 @@ static int finish(int consent)
         assert(retained_loading.waiting(request.context));
         assert(!retained_loading.matches(request.context, (void *)0x778));
         assert(retained_loading.matches(request.context, (void *)0x777));
-        result = retained_loading.select(request.context);
+        result = retained_loading.select(request.context, rebound_json);
     }
     if (request.release) request.release(request.context);
     return result;
 }
-int sh_rawmap_cancel_pending_map(void) { if (g_pub_delegating) return 0; (void)finish(0); return 1; }
+int sh_rawmap_cancel_pending_map(void) { if (g_pub_delegating || cancel_refused) return 0; (void)finish(0); return 1; }
 static void *get_system(void) { return &system_object; }
 static void *get_cache(void *self) { assert(self == &system_object); return cache; }
 static void set_cache(void *self, const void *input, void *snapshot)
@@ -137,9 +163,9 @@ static void original_direct(void *self, const void *input, void *snapshot)
 static void original_ready(void *self, void *download, const void *input, void *snapshot)
 {
     assert(self == manager && input && snapshot);
-    /* The retained route consumed the download; a native pass-through keeps it. */
-    if (g_pub_ready) assert(carrier ? !download : download == (void *)9);
-    calls[PUB_READY]++;
+    /* The retained route consumed the download; a native launch -- serving
+     * off, hooks off, or a text with no package -- keeps it. */
+    assert(download == (g_pub_ready && !serving_disabled && carrier ? NULL : (void *)9)); calls[PUB_READY]++;
 }
 static void original_complete(void *download)
 {
@@ -207,24 +233,154 @@ static void reset(void)
     call_callbacks[3] = original_ready; call_callbacks[4] = original_read; call_callbacks[5] = original_complete;
     memcpy(g_pub_original, call_callbacks, sizeof(g_pub_original));
     boundary = g_pub_ready = 1; g_pub_delegating = inspection = read_action = throws_read = 0;
-    mode = errors = prepared = decoded = hidden = scans = 0; carrier = 1;
+    mode = errors = prepared = decoded = hidden = serving_disabled = cancel_refused = scans = covered = references = 0;
+    carrier = 1;
+}
+/* A covered lobby request creates the engine's lobby inside the player's press.
+ * Entry then adds no second launch; the request still owns the transition. A
+ * declined engine launch releases the request with no notice of ours; the
+ * other routes and a consent-owing lobby keep their deferred entry. */
+static void covered_lobby_launches_at_press(void)
+{
+    reset(); covered = 1;
+    assert(pub_lobby(manager, 1) == 1);
+    assert(prepared == 1 && calls[PUB_LOBBY] == 1 && retained.context && !g_pub_delegating && !errors && !decoded);
+    /* Entry adds no preliminary decode; the transition's own full decode is the one. */
+    assert(finish(1) && calls[PUB_LOBBY] == 1 && decoded == 1 && allocated == released);
+    reset(); covered = 1; mode = 5;
+    assert(pub_lobby(manager, 1) == 0);
+    assert(prepared == 1 && calls[PUB_LOBBY] == 1 && !retained.context && !errors && allocated == released);
+    assert(!g_pub_entering && !g_pub_delegating && !g_pub_retired);
+    reset(); covered = 1; pub_offline(manager, metadata, (void *)1);
+    assert(prepared == 1 && !calls[PUB_OFFLINE] && retained.context);
+    assert(finish(1) && calls[PUB_OFFLINE] == 1 && allocated == released);
+    reset(); covered = 0;
+    assert(pub_lobby(manager, 1) == 1 && prepared == 1 && !calls[PUB_LOBBY] && retained.context);
+    assert(finish(1) && calls[PUB_LOBBY] == 1 && decoded == 2 && allocated == released);
+}
+/* One retained request per selection: a repeated press while the map is prepared,
+ * waiting or in its lobby neither cancels it, prepares again, reads the source
+ * again nor creates a second lobby; a different map still replaces it. The
+ * lobby created at the press arms its level until its boundary is handled. */
+static void repeated_press_keeps_one_request(void)
+{
+    unsigned char other[sizeof(metadata)];
+    reset(); covered = 1;
+    assert(pub_lobby(manager, 1) == 1 && calls[PUB_LOBBY] == 1 && prepared == 1 && scans == 1);
+    assert(sh_map_published_level_armed((void *)0x779) && !sh_map_published_level_armed((void *)0x778));
+    assert(pub_lobby(manager, 1) == 1 && calls[PUB_LOBBY] == 1 && prepared == 1 && scans == 1);
+    pub_offline(manager, metadata, (void *)1);
+    assert(calls[PUB_LOBBY] == 1 && !calls[PUB_OFFLINE] && prepared == 1 && scans == 1 && !errors);
+    assert(allocated == released + 1 && retained.context);
+    assert(finish(1) && calls[PUB_LOBBY] == 1 && allocated == released);
+    sh_map_published_disarm(); assert(!sh_map_published_level_armed((void *)0x779));
+    /* Deferred requests are kept the same way. */
+    reset(); covered = 0; pub_offline(manager, metadata, (void *)1);
+    assert(prepared == 1 && retained.context);
+    pub_direct(manager, metadata, (void *)1);
+    assert(prepared == 1 && scans == 1 && !calls[PUB_DIRECT] && allocated == released + 1);
+    assert(finish(1) && calls[PUB_OFFLINE] == 1 && allocated == released);
+    /* Another selection replaces the pending one. */
+    reset(); covered = 0; pub_offline(manager, metadata, (void *)1);
+    memcpy(other, metadata, sizeof(other)); *(int *)other = 43;
+    pub_offline(manager, other, (void *)1);
+    assert(prepared == 2 && scans == 2 && allocated == released + 1);
+    assert(finish(1) && calls[PUB_OFFLINE] == 1 && allocated == released);
+    /* A declined engine launch arms nothing. */
+    reset(); covered = 1; mode = 5;
+    assert(pub_lobby(manager, 1) == 0 && !sh_map_published_level_armed((void *)0x779));
+}
+static void launch_kind(int kind)
+{
+    if (kind == PUB_OFFLINE) pub_offline(manager, metadata, (void *)1);
+    if (kind == PUB_LOBBY) (void)pub_lobby(manager, 1);
+    if (kind == PUB_DIRECT) pub_direct(manager, metadata, (void *)1);
+    if (kind == PUB_READY) pub_ready(manager, (void *)9, metadata, (void *)1);
+}
+static void preparation_retry(void)
+{
+    /* A transient failure must release only that attempt. Its exact selection
+     * can retry through each bridge route without sticky state or a second
+     * notice after the successful retry. The four failure stages occur on
+     * different sides of capture, cancellation and request publication. */
+    for (int kind = 0; kind < 4; kind++) for (int failure = 0; failure < 4; failure++) {
+        reset();
+        if (failure == 0) boundary = 0;
+        if (failure == 1) mode = 1;
+        if (failure == 2) mode = 2;
+        if (failure == 3) cancel_refused = 1;
+        launch_kind(kind);
+        assert(!retained.context && !calls[kind] && errors == 1 && allocated == released);
+        boundary = 1; mode = cancel_refused = 0;
+        launch_kind(kind);
+        assert(retained.context && !calls[kind] && errors == 1);
+        assert(finish(1) && calls[kind] == 1 && errors == 1 && allocated == released);
+        assert(!g_pub_entering && !g_pub_delegating && !g_pub_retired && !inspection);
+    }
+    /* A replacement whose cancellation fails cannot overwrite the cache or
+     * invalidate the previous retained request. That request still enters
+     * its own map; the rejected replacement owns no source afterward. */
+    reset(); pub_offline(manager, metadata, (void *)1);
+    {
+        unsigned char other[sizeof(metadata)];
+        void *previous = retained.context;
+        memcpy(other, metadata, sizeof(other)); *(int *)other = 43;
+        cancel_refused = 1; pub_direct(manager, other, (void *)1);
+        assert(retained.context == previous && retained.valid(previous));
+        assert(allocated == released + 1 && !calls[PUB_DIRECT] && errors == 1);
+        cancel_refused = 0;
+        assert(finish(1) && calls[PUB_OFFLINE] == 1 && !calls[PUB_DIRECT] && allocated == released);
+    }
+
 }
 /* A published map whose text carries no package takes the untouched native
  * launch: no preflight, no retained request, no notice, the progress display
  * left to the engine, and the compiler's readiness never consulted. */
+/* The boundary's three answers while a lobby request is retained: ours (a SnapMap level whose session
+ * item is the request's, or one still spelled with its name), positively another level (a campaign
+ * level, or a SnapMap level the session attributes to another item), or neither (unreadable level or
+ * session item), which the boundary refuses. The armed check follows the same identity. */
+static void boundary_identity(void)
+{
+    void *ctx;
+    reset(); covered = 1;
+    assert(pub_lobby(manager, 1) == 1 && retained.context);
+    ctx = retained.context;
+    assert(retained_loading.matches(ctx, (void *)0x779) && retained_loading.matches(ctx, (void *)0x777));
+    assert(!retained_loading.matches(ctx, (void *)0x778) && !retained_loading.differs(ctx, (void *)0x779));
+    assert(retained_loading.differs(ctx, (void *)0x778) && !retained_loading.differs(ctx, (void *)0x77a));
+    assert(sh_map_published_level_armed((void *)0x779) && !sh_map_published_level_armed((void *)0x778));
+    /* The session now names another published item. */
+    *(int *)(host_parameters + 0x550) = 43;
+    assert(!retained_loading.matches(ctx, (void *)0x779) && retained_loading.differs(ctx, (void *)0x779));
+    assert(!sh_map_published_level_armed((void *)0x779));
+    assert(retained_loading.matches(ctx, (void *)0x777));   /* the spelled name still identifies it */
+    /* The session item is unreadable: nothing can be told, and the armed map stays armed. */
+    *(int *)(host_parameters + 0x550) = 0;
+    assert(!retained_loading.matches(ctx, (void *)0x779) && !retained_loading.differs(ctx, (void *)0x779));
+    assert(sh_map_published_level_armed((void *)0x779));
+    *(int *)(host_parameters + 0x550) = 42;
+    assert(finish(1) && calls[PUB_LOBBY] == 1 && allocated == released);
+    sh_map_published_disarm(); assert(!sh_map_published_level_armed((void *)0x779));
+}
+
 static void vanilla_passes_through(void)
 {
     for (int ready = 0; ready <= 1; ready++) for (int kind = 0; kind < 4; kind++) {
         reset(); carrier = 0; boundary = ready;
-        if (kind == PUB_OFFLINE) pub_offline(manager, metadata, (void *)1);
-        if (kind == PUB_LOBBY) assert(pub_lobby(manager, 1) == 1);
-        if (kind == PUB_DIRECT) pub_direct(manager, metadata, (void *)1);
-        if (kind == PUB_READY) pub_ready(manager, (void *)9, metadata, (void *)1);
+        if (kind == PUB_LOBBY) assert(pub_lobby(manager, 1) == 1); else launch_kind(kind);
         assert(scans == 1 && calls[kind] == 1 && !prepared && !retained.context);
         assert(!errors && !hidden && !inspection && !g_pub_delegating && allocated == released);
     }
+    /* A stale retained request that cannot be canceled is logged, never a refusal. */
+    reset(); carrier = 0; cancel_refused = 1; pub_offline(manager, metadata, (void *)1);
+    assert(scans == 1 && calls[PUB_OFFLINE] == 1 && !prepared && !errors && allocated == released);
     /* A packaged text still takes the retained route after the same scan. */
     reset(); pub_offline(manager, metadata, (void *)1);
+    assert(scans == 1 && prepared == 1 && !calls[PUB_OFFLINE] && retained.context);
+    assert(finish(1) && calls[PUB_OFFLINE] == 1 && allocated == released);
+    /* So does a text that only references a package (D1 L2): the reference names what the map needs. */
+    reset(); carrier = 0; references = 1; pub_offline(manager, metadata, (void *)1);
     assert(scans == 1 && prepared == 1 && !calls[PUB_OFFLINE] && retained.context);
     assert(finish(1) && calls[PUB_OFFLINE] == 1 && allocated == released);
     /* Unreadable text keeps the guarded route and its notice. */
@@ -284,6 +440,7 @@ static DWORD WINAPI stale_thread(void *unused)
 int main(void)
 {
     reset(); grouped_installation(); reset();
+    preparation_retry(); reset();
     assert(pub_read((void *)1, "id", "revision", (void *)2, (void *)3) == (void *)10);
     assert(!inspection && !prepared && !retained.context);
     throws_read = 1;
@@ -312,8 +469,11 @@ int main(void)
     assert(!finish(1) && !calls[3] && hidden == 1 && allocated == released);
     reset(); pub_lobby(manager, 1); *(void **)(history_record + 0x18) = (void *)1;
     assert(!finish(1) && !calls[1] && allocated == released);
+    /* The same map pressed again on another route while its request is pending is one request: the
+     * first route keeps it and the repeated press changes nothing. */
     reset(); pub_offline(manager, metadata, (void *)1); pub_direct(manager, metadata, (void *)1);
-    assert(finish(1) && !calls[0] && calls[2] == 1 && allocated == released);
+    assert(prepared == 1 && allocated == released + 1);
+    assert(finish(1) && calls[0] == 1 && !calls[2] && allocated == released);
     for (int failure = 0; failure <= 2; failure++) {
         reset(); if (!failure) boundary = 0; else mode = failure;
         pub_offline(manager, metadata, (void *)1);
@@ -340,7 +500,38 @@ int main(void)
     }
     reset(); g_pub_ready = 0; pub_offline(manager, metadata, (void *)1);
     assert(calls[0] == 1 && !prepared);
+    /* With user packages off for this launch (sh_user_overrides 0) each
+     * launch route runs its native original with its own arguments: nothing is
+     * captured, prepared, hidden or reported, and published reads keep their
+     * inspection scope. Serving that is expected but whose compiler is not
+     * ready still refuses each prepared route without the original. */
+    for (int kind = 0; kind < 4; kind++) {
+        int before;
+        reset(); serving_disabled = 1; before = allocated;
+        if (kind == PUB_OFFLINE) { read_action = 1; assert(pub_read((void *)1, "id", "revision", (void *)2, (void *)3) == (void *)10); }
+        if (kind == PUB_LOBBY) assert(pub_lobby(manager, 1));
+        if (kind == PUB_DIRECT) { read_action = 2; pub_complete((void *)9); }
+        if (kind == PUB_READY) pub_ready(manager, (void *)9, metadata, (void *)1);
+        assert(calls[kind] == 1 && !prepared && !retained.context && allocated == before && !decoded);
+        assert(!errors && !hidden && !inspection && !read_scope && !g_pub_delegating);
+        reset(); boundary = 0; before = allocated;
+        if (kind == PUB_OFFLINE) pub_offline(manager, metadata, (void *)1);
+        if (kind == PUB_LOBBY) assert(!pub_lobby(manager, 1));
+        if (kind == PUB_DIRECT) pub_direct(manager, metadata, (void *)1);
+        if (kind == PUB_READY) pub_ready(manager, (void *)9, metadata, (void *)1);
+        assert(!calls[kind] && !prepared && !retained.context && errors == 1);
+        assert(allocated == before + 1 && allocated == released && hidden == (kind == PUB_READY));
+    }
+    /* The switch is read at each launch: with serving on again it prepares. */
+    reset(); serving_disabled = 1; pub_offline(manager, metadata, (void *)1);
+    assert(calls[0] == 1 && !prepared);
+    serving_disabled = 0; pub_offline(manager, metadata, (void *)1);
+    assert(prepared == 1 && calls[0] == 1 && retained.context);
+    assert(finish(1) && calls[0] == 2 && allocated == released);
     vanilla_passes_through();
-    puts("map_published_test: readers, native pass-through, four retained launch routes, cancellation, cleanup and hook-group failure passed");
+    covered_lobby_launches_at_press();
+    repeated_press_keeps_one_request();
+    boundary_identity();
+    puts("map_published_test: readers, native pass-through, four retained launch routes, cancellation, cleanup, hook-group failure and serving-off native launches passed");
     return 0;
 }

@@ -29,6 +29,14 @@
 #include "nav_bake.h"
 #include "perf.h"
 #include "nav_preview.h"
+#include "prefab.h"
+#include "package_editor.h"
+#include "package_runtime.h"
+#include "map_embed.h"
+#include "prefab_import.h"
+#include "prefab_anchor.h"
+#include "editor_transition.h"
+#include "process_heap_scope.h"
 
 /* Editor layout. */
 /* Editor and entity offsets shared with iface_engine; globals use signed code anchors. */
@@ -125,13 +133,19 @@ typedef void (*memlocal_popheap_fn)(void *self);
 #define MODE_ACTION_ARMED         0          /* any value != -1 arms it; 0 is the menu's own first slot */
 
 
-/* Prefab construction needs at least 0x590 bytes; reserve 0x2000 for scratch.
+/* Paired constructor/destructor and native schema establish exactly 0x6b8.
  * Populate takes (prefab, editor, writable status), not two arguments, and
  * requires a usable selection. Destroy constructed scratch on every exit. */
 #define PREFAB_CTOR_RVA        0x54d0a0u   /* Extraction RVAs for signature-first prefab helpers. */
 #define PREFAB_POPULATE_RVA    0x54e410u
 #define PREFAB_DTOR_RVA        0x51d870u
 #define PREFAB_TEMP_SIZE       0x2000      /* Headroom above the constructor/populate write range. */
+#define PREFAB_NATIVE_SIZE     0x6b8
+#define PREFAB_GRAB_DISTANCE   0x24        /* float written by the grab-frame helper (both executables) */
+#define PREFAB_INLINE_LIST     0x1f8
+#define PREFAB_INLINE_ITEMS    0x210
+#define PREFAB_INLINE_COUNT    16
+#define PREFAB_INLINE_STRIDE   0x48
 #define ENT_DESHARE_RVA        0x52c920u   /* Optional copy-on-write helper, resolved for diagnostics but not used by apply. */
 
 /* Reflection object layouts. */
@@ -155,7 +169,9 @@ typedef void (*memlocal_popheap_fn)(void *self);
 
 /* Apply batches and diagnostics. */
 #define CLONE_BSS_CMD          "clone_bss_apply"
-#define APPLY_TEXT_CAP         (4 * 1024 * 1024) /* Maximum copied text per item; shared with the frontend payload limit. */
+#define APPLY_TEXT_CAP         ((size_t)INT_MAX) /* Native signed idStr byte count. */
+static int ae_text_length_supported(size_t length)
+{ return length <= APPLY_TEXT_CAP && length < SIZE_MAX; }
 #define APPLY_MAX_ITEMS        4096         /* sanity cap on a scheduled batch */
 
 /* Optional reflection serialization diagnostics. */
@@ -292,9 +308,11 @@ typedef struct ae_sync_request {
     apply_item_copy *items;     /* batch form (fn_kind 0); drain-owned once RUNNING */
     int              count;
     char             op[32];
-    int              fn_kind;   /* 0 = item batch; 1 = normalize-timeline-inherit on norm_id */
+    int              fn_kind;   /* 0 items; 1 timeline; 2 staged prefab; 3 selected prefab */
     int              norm_id;
     int              applied;
+    char            *output;    /* owned process-heap serialization, never caller storage */
+    size_t           output_length;
 } ae_sync_request;
 static ae_sync_request g_sync_req;              /* guarded by g_pending_lock */
 static HANDLE          g_sync_ev = NULL;        /* manual-reset; created once at install */
@@ -752,6 +770,57 @@ static int ae_commit_bound(void)
     return g_def_ctor && g_def_dtor && g_decl_rebuild && g_idstr_assign;
 }
 
+int sh_apply_engine_serialize_flat(const void *flat, unsigned kind, char **out, size_t *length)
+{
+    static volatile LONG active;
+    static const char entity_prefix[] = "{\"entities\":[", entity_suffix[] = "]}";
+    const char *type = kind == SH_APPLY_FLAT_MAP ? "idSnapMap" :
+        kind == SH_APPLY_FLAT_PREFAB ? "idSnapEntityPrefab" :
+        kind == SH_APPLY_FLAT_ENTITY ? "idSnapEntity" : NULL;
+    uint8_t tag[8 + PARSE_NODE_SIZE] = {0}, tree[PARSE_NODE_SIZE] = {0}, str[IDSTR_SIZE] = {0};
+    int tag_ready = 0, tree_ready = 0, str_ready = 0, ok = 0;
+    char *copy = NULL; size_t size = 0;
+    if (out) *out = NULL;
+    if (length) *length = 0;
+    if (!flat || !type || !out || !length || ae_on_main_thread() != 1 ||
+        !g_ser || !g_render || !g_node_ctor || !g_node_dtor || !g_idstr_ctor || !g_idstr_dtor ||
+        InterlockedCompareExchange(&active, 1, 0)) return 0;
+    __try {
+        void *reflect = ae_get_reflect();
+        if (reflect) {
+            /* Native serialization takes the tag's eight-byte header followed
+             * by an ordinary kind-7 parse node. Construct it at its final site. */
+            *(uint16_t *)tag = 1; tag[2] = 1;
+            g_node_ctor(tag + 8, SER_TAG_KIND); tag_ready = 1;
+            g_node_ctor(tree, SER_TREE_KIND); tree_ready = 1;
+            g_idstr_ctor(str, ""); str_ready = 1;
+            if (g_ser(reflect, type, (void *)flat, tree, tag, NULL) & 0xff) {
+                g_render(tree, str);
+                int native_length = *(const int *)(str + IDSTR_LEN_OFF);
+                const char *bytes = *(const char *const *)(str + IDSTR_DATA_OFF);
+                size_t prefix = kind == SH_APPLY_FLAT_ENTITY ? sizeof(entity_prefix) - 1 : 0;
+                size_t suffix = kind == SH_APPLY_FLAT_ENTITY ? sizeof(entity_suffix) - 1 : 0;
+                if (native_length > 0 && bytes && (size_t)native_length <= SIZE_MAX - prefix - suffix - 1) {
+                    size = prefix + (size_t)native_length + suffix;
+                    copy = malloc(size + 1);
+                    if (copy) {
+                        if (prefix) memcpy(copy, entity_prefix, prefix);
+                        memcpy(copy + prefix, bytes, (size_t)native_length);
+                        if (suffix) memcpy(copy + prefix + (size_t)native_length, entity_suffix, suffix);
+                        copy[size] = 0; ok = 1;
+                    }
+                }
+            }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) { ok = 0; }
+    if (str_ready) { __try { g_idstr_dtor(str); } __except (EXCEPTION_EXECUTE_HANDLER) { ok = 0; } }
+    if (tree_ready) { __try { g_node_dtor(tree); } __except (EXCEPTION_EXECUTE_HANDLER) { ok = 0; } }
+    if (tag_ready) { __try { g_node_dtor(tag + 8); } __except (EXCEPTION_EXECUTE_HANDLER) { ok = 0; } }
+    InterlockedExchange(&active, 0);
+    if (!ok) { free(copy); return 0; }
+    *out = copy; *length = size; return 1;
+}
+
 /* Clone ent + 8, serialize its defsub, then render JSON. Return bytes copied or zero. */
 static int ae_serialize_to_json(const char *typeName, void *cloneBase, char *out_json, int cap)
 {
@@ -933,17 +1002,31 @@ static int ae_extract_field(const char *text, const char *field, char *buf, size
     return 0;
 }
 
+/* Name the stage at which an entity edit did not apply. Every refusal below
+ * returns 0 to the caller's applied count; without the stage, a 0/N result
+ * cannot distinguish a missing entity from a parse or commit fault. */
+static int ae_apply_refused(int id, const char *stage, unsigned long code)
+{
+    char l[200];
+    _snprintf_s(l, sizeof l, _TRUNCATE, "C2 apply id=%d: not applied at %s (code=0x%08lx tid=%lu main=%d)",
+                id, stage, code, GetCurrentThreadId(), ae_on_main_thread());
+    backend_log(l);
+    return 0;
+}
+
 /* Deserialize patched text into a temporary entity, then commit source,
  * class, and inherit to the live defsub. */
 static int ae_apply_one(int id, const char *patched_text)
 {
-    if (!ae_deserialize_bound() || !ae_commit_bound() || !patched_text) return 0;
+    if (!ae_deserialize_bound() || !ae_commit_bound() || !patched_text)
+        return ae_apply_refused(id, "binding", 0);
     void *array = NULL; uint32_t count = 0;
-    if (!ae_entity_array(&array, &count)) return 0;
+    if (!ae_entity_array(&array, &count)) return ae_apply_refused(id, "entity-array", 0);
     void *ent = ae_entity_ptr(array, count, id);
-    if (!ent) return 0;
+    if (!ent) return ae_apply_refused(id, "entity-lookup", count);
     void *defsub = NULL;
-    if (!ae_read_ptr((const uint8_t *)ent + ENT_DEFSUB_OFF, &defsub) || defsub == NULL) return 0;
+    if (!ae_read_ptr((const uint8_t *)ent + ENT_DEFSUB_OFF, &defsub) || defsub == NULL)
+        return ae_apply_refused(id, "defsub", 0);
 
     /* Commit the existing defsub in place; the optional COW helper is not invoked. */
     (void)g_deshare;
@@ -955,7 +1038,7 @@ static int ae_apply_one(int id, const char *patched_text)
         int hc = ae_extract_field(patched_text, "class",   newcls, sizeof newcls);
         int hi = ae_extract_field(patched_text, "inherit", newinh, sizeof newinh);
         if ((hc || hi) && !sh_iface_class_inherit_ok(id, hc ? newcls : NULL, hi ? newinh : NULL))
-            return 0;
+            return ae_apply_refused(id, "class-inherit", 0);
     }
 
 
@@ -963,10 +1046,14 @@ static int ae_apply_one(int id, const char *patched_text)
     uint8_t tmpDef[TEMP_DEF_SIZE];
     memset(tmpDef, 0, sizeof tmpDef);   /* Clear scratch before construction so untouched fields are deterministic. */
     int def_ctored = 0, applied = 0;
+    const char *stage = "construct";
+    unsigned long fault = 0;
     __try {
         g_def_ctor(tmpDef); def_ctored = 1;
 
+        stage = "deserialize";
         if (ae_deserialize_to_obj(patched_text, tmpDef, "idSnapEntity")) {
+            stage = "commit";
 
             void *srcPtr = *(void * const *)(tmpDef + TDEF_SOURCE_OFF);
             void *clsPtr = *(void * const *)(tmpDef + TDEF_CLASS_OFF);
@@ -1005,10 +1092,11 @@ static int ae_apply_one(int id, const char *patched_text)
 
             applied = 1;
         }
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    } __except (fault = GetExceptionCode(), EXCEPTION_EXECUTE_HANDLER) {
         applied = 0;
     }
     if (def_ctored) { __try { g_def_dtor(tmpDef); } __except (EXCEPTION_EXECUTE_HANDLER) {} }
+    if (!applied) ae_apply_refused(id, stage, fault);
 
     /* Record thread identity and classify the rebuilt source allocation once.
      * The rebuild may reuse an existing buffer. Off-main or unknown identity
@@ -1101,68 +1189,305 @@ static int ae_apply_target_write(int source_id, int target_id)
     return ok;
 }
 
-/* Deserialize idSnapEntityPrefab into the pending editor slot. Return success. */
-static int ae_mkcmd_one(const char *prefab_text)
+struct sh_apply_prefab_stage {
+    struct sh_apply_prefab_stage *next;
+    void *editor, *map;
+    DWORD thread;
+    int place, constructed, ready, swapped, quarantined;
+    sh_package_occurrence_snapshot *ownership, *previous;
+    sh_process_heap_scope heap;
+    unsigned parser_nodes, parser_strings;
+    __declspec(align(16)) unsigned char prefab[PREFAB_NATIVE_SIZE];
+    unsigned char expected[PREFAB_NATIVE_SIZE];
+    unsigned char before_slot[PREFAB_NATIVE_SIZE], before_temp[PREFAB_NATIVE_SIZE];
+    __declspec(align(16)) unsigned char node[PARSE_NODE_SIZE], input[PARSE_NODE_SIZE];
+    __declspec(align(16)) unsigned char lexer[LEXER_SIZE], source[IDSTR_SIZE];
+    __declspec(align(16)) unsigned char tag[8 + PARSE_NODE_SIZE];
+};
+static sh_process_heap_api g_stage_heap;
+static sh_apply_prefab_stage *g_stage_quarantine;
+static volatile LONG g_stage_busy, g_stage_faulted;
+static int ae_prefab_place(void);
+
+static void ae_stage_error(char *error, size_t capacity, const char *message)
+{ if (error && capacity) snprintf(error, capacity, "%s", message); }
+
+static int ae_stage_memory(const void *memory, size_t length, int writable)
 {
-    const uint8_t *ed = ae_editor_session();
-    if (!ed || !prefab_text) return 0;
-    void *staging = (void *)(ed + PASTE_STAGING_OFF);
-    /* Reconstruct reused staging before deserializing: stale nested strings can
- * fault during compare/assign. The constructor replaces fields without
- * freeing prior allocations, so this intentionally leaks the previous slot. */
-    /* Allocate staged contents under process-heap scope so they survive Play.
- * Always balance a successful push, including exception paths. */
-#if AE_STAGE_DIAG_ON
-    /* Compare scope depth to detect ignored or ineffective pushes. */
-    int myTid = (int)GetCurrentThreadId(), depth0 = -1, depth1 = -1, depth2 = -1;
-    const void *memlocal = ae_memlocal();
-    if (memlocal) (void)ae_read_u32_safe((const unsigned char *)memlocal + MEMLOCAL_SCOPE_DEPTH, &depth0);
-    ae_log_memlocal_state("at-stage");
-#endif
+    uintptr_t at = (uintptr_t)memory, end;
+    if (!at || length > UINTPTR_MAX - at) return 0;
+    end = at + length;
+    while (at < end) {
+        MEMORY_BASIC_INFORMATION region;
+        if (!VirtualQuery((void *)at, &region, sizeof(region)) || region.State != MEM_COMMIT ||
+            (region.Protect & (PAGE_GUARD | PAGE_NOACCESS))) return 0;
+        DWORD flags = region.Protect & 0xff;
+        if (writable ? (flags != PAGE_READWRITE && flags != PAGE_WRITECOPY &&
+                flags != PAGE_EXECUTE_READWRITE && flags != PAGE_EXECUTE_WRITECOPY) :
+            (flags != PAGE_READONLY && flags != PAGE_READWRITE && flags != PAGE_WRITECOPY &&
+                flags != PAGE_EXECUTE_READ && flags != PAGE_EXECUTE_READWRITE && flags != PAGE_EXECUTE_WRITECOPY)) return 0;
+        uintptr_t next = (uintptr_t)region.BaseAddress + region.RegionSize;
+        if (next <= at) return 0;
+        at = next;
+    }
+    return 1;
+}
+static int ae_stage_inside(const void *pointer, const unsigned char *base)
+{ return (uintptr_t)pointer >= (uintptr_t)base && (uintptr_t)pointer - (uintptr_t)base < PREFAB_NATIVE_SIZE; }
 
-    int pushWhy = 0;
-    int pushed = ae_push_heap_global_why(&pushWhy);
-    (void)pushWhy;
-
-#if AE_STAGE_DIAG_ON
-    if (memlocal) (void)ae_read_u32_safe((const unsigned char *)memlocal + MEMLOCAL_SCOPE_DEPTH, &depth1);
-#endif
-
-    int ok = 0;
+/* R033 paired ctors/dtors and schema: nineteen external list headers, one
+ * inline idStaticList<integer,16>, and sixteen inline idStr base buffers.
+ * External arrays do not move, preserving every tracked flat-entity pointer.
+ * Refuse unknown interior pointers or list ownership before changing a byte. */
+static int ae_stage_layout(const unsigned char *value, const unsigned char *other)
+{
+    static const size_t strides[19] = {
+        0x1b0, 4, 4, 4, 4, 4, 4, 4, 4, 4,
+        0x48, 0x48, 0x40, 0x48, 0x68, 0x48, 0x48, 0x38, 0x38
+    };
+    if (!ae_stage_memory(value, PREFAB_NATIVE_SIZE, 1)) return 0;
     __try {
-        if (g_prefab_ctor) { __try { g_prefab_ctor(staging); } __except (EXCEPTION_EXECUTE_HANDLER) {} }
-        ok = ae_deserialize_to_obj(prefab_text, staging, "idSnapEntityPrefab");
-    } __finally {
-        if (pushed) ae_pop_heap();
-    }
-
-#if AE_STAGE_DIAG_ON
-    if (memlocal) (void)ae_read_u32_safe((const unsigned char *)memlocal + MEMLOCAL_SCOPE_DEPTH, &depth2);
-    AE_STAGE_DIAG("STAGE-DIAG: tid=%d | pushCall=%d why=%s "
-                  "scopeDepth %d -> %d -> %d (%s)",
-                  myTid, pushed,
-                  pushWhy == 0 ? "pushed" : pushWhy == 1 ? "no-instance" :
-                  pushWhy == 2 ? "pushfn-unresolved" : pushWhy == 3 ? "pushfn-outside-module" : "FAULTED",
-                  depth0, depth1, depth2,
-                  (depth1 == depth0 + 1) ? "push TOOK EFFECT"
-                                         : (depth1 == depth0 ? "push DID NOTHING" : "unexpected"));
-#endif
-    /* Track our staged count for the allocation-lifetime watchdog. */
-    if (ok) {
-        int n = 0;
-        const uint8_t *ed2 = ae_editor_session();
-        if (ed2 && ae_read_u32_safe(ed2 + PASTE_PREFAB_ENTCOUNT_OFF, &n)) {
-            int cap = 0;
-            if (ae_read_u32_safe(ed2 + PASTE_PREFAB_ENTCAP_OFF, &cap))
-                AE_STAGE_DIAG("stage: entities num=%d capacity=%d%s", n, cap,
-                              (n != cap) ? "  <-- CAPACITY TAIL" : "");
-            else
-                AE_STAGE_DIAG("stage: entities num=%d capacity=<unreadable>", n);
-            InterlockedExchange(&g_we_staged_count, n);
-            InterlockedExchange(&g_we_staged, 1);
+        for (size_t i = 0; i < 19; ++i) {
+            const unsigned char *header = value + 0x30 + i * 0x18;
+            const void *data = *(void *const *)header;
+            int count = *(const int *)(header + 8), capacity = *(const int *)(header + 12);
+            unsigned kind = header[0x13];
+            if (count < 0 || capacity < count || (!!capacity != !!data) ||
+                (kind != 0 && kind != 3 && kind != 4) ||
+                (data && (ae_stage_inside(data, value) || (other && ae_stage_inside(data, other)))) ||
+                (capacity && ((size_t)capacity > SIZE_MAX / strides[i] ||
+                    !ae_stage_memory(data, (size_t)capacity * strides[i], 1)))) return 0;
         }
+        const unsigned char *header = value + PREFAB_INLINE_LIST;
+        if (*(const void *const *)header != value + PREFAB_INLINE_ITEMS ||
+            *(const int *)(header + 8) < 0 || *(const int *)(header + 8) > PREFAB_INLINE_COUNT ||
+            *(const int *)(header + 12) != PREFAB_INLINE_COUNT || header[0x13] != 1) return 0;
+        for (size_t i = 0; i < PREFAB_INLINE_COUNT; ++i) {
+            const unsigned char *str = value + PREFAB_INLINE_ITEMS + i * PREFAB_INLINE_STRIDE;
+            const char *data = *(const char *const *)(str + IDSTR_DATA_OFF);
+            const void *icon = *(const void *const *)(str + 0x30);
+            int length = *(const int *)(str + IDSTR_LEN_OFF);
+            unsigned flags = *(const unsigned *)(str + IDSTR_FLAGS_OFF), capacity = flags & 0x3fffffff;
+            if (!*(const void *const *)str || !data || length < 0 || (unsigned)length >= capacity ||
+                (icon && (ae_stage_inside(icon, value) || (other && ae_stage_inside(icon, other))))) return 0;
+            if (data == (const char *)str + IDSTR_SSO_OFF) {
+                if (capacity != 20 || (flags & 0x40000000u)) return 0;
+            } else if (ae_stage_inside(data, value) || (other && ae_stage_inside(data, other))) return 0;
+            if (!ae_stage_memory(data, (size_t)length + 1, 0) || data[length]) return 0;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+    return 1;
+}
+
+static void ae_stage_relocate_inline(unsigned char *to, const unsigned char *from)
+{
+    *(void **)(to + PREFAB_INLINE_LIST) = to + PREFAB_INLINE_ITEMS;
+    for (size_t i = 0; i < PREFAB_INLINE_COUNT; ++i) {
+        size_t offset = PREFAB_INLINE_ITEMS + i * PREFAB_INLINE_STRIDE;
+        if (*(const void **)(to + offset + IDSTR_DATA_OFF) == from + offset + IDSTR_SSO_OFF)
+            *(void **)(to + offset + IDSTR_DATA_OFF) = to + offset + IDSTR_SSO_OFF;
     }
-    return ok;
+}
+static int ae_stage_exchange(sh_apply_prefab_stage *stage)
+{
+    unsigned char *slot = (unsigned char *)stage->editor + PASTE_STAGING_OFF;
+    if (!ae_stage_layout(slot, stage->prefab) || !ae_stage_layout(stage->prefab, slot)) return 0;
+    /* Backups are byte observations, never independently destructible objects.
+     * Between the first write and repairs there is no allocation/native call. */
+    __try {
+        memcpy(stage->before_slot, slot, PREFAB_NATIVE_SIZE);
+        memcpy(stage->before_temp, stage->prefab, PREFAB_NATIVE_SIZE);
+        memcpy(slot, stage->before_temp, PREFAB_NATIVE_SIZE);
+        memcpy(stage->prefab, stage->before_slot, PREFAB_NATIVE_SIZE);
+        ae_stage_relocate_inline(slot, stage->prefab);
+        ae_stage_relocate_inline(stage->prefab, slot);
+        stage->swapped = !stage->swapped;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        stage->quarantined = 1; InterlockedExchange(&g_stage_faulted, 1); return -1;
+    }
+    return 1;
+}
+
+static int ae_stage_parser_destroy(sh_apply_prefab_stage *stage)
+{
+    __try {
+        if (stage->parser_strings & 4) { stage->parser_strings &= ~4u; g_idstr_dtor(stage->source); }
+        if (stage->parser_nodes & 2) { stage->parser_nodes &= ~2u; g_node_dtor(stage->input); }
+        if (stage->parser_strings & 2) { stage->parser_strings &= ~2u; g_idstr_dtor(stage->lexer + LEXER_IDSTR1_OFF); }
+        if (stage->parser_strings & 1) { stage->parser_strings &= ~1u; g_idstr_dtor(stage->lexer + LEXER_IDSTR0_OFF); }
+        if (stage->parser_nodes & 1) { stage->parser_nodes &= ~1u; g_node_dtor(stage->node); }
+        return 1;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { stage->quarantined = 1; return -1; }
+}
+static int ae_stage_parse(sh_apply_prefab_stage *stage, const char *json)
+{
+    void *reflection = ae_get_reflect();
+    int result = 0;
+    if (!reflection) return 0;
+    __try {
+        g_node_ctor(stage->node, 7); stage->parser_nodes |= 1;
+        g_idstr_ctor(stage->lexer + LEXER_IDSTR0_OFF, ""); stage->parser_strings |= 1;
+        g_idstr_ctor(stage->lexer + LEXER_IDSTR1_OFF, ""); stage->parser_strings |= 2;
+        g_lex_ctor(stage->lexer);
+        g_node_ctor(stage->input, 0); stage->parser_nodes |= 2;
+        g_idstr_ctor(stage->source, json); stage->parser_strings |= 4;
+        if (g_lexer(stage->lexer, stage->source, stage->input, 1) & 0xff) {
+            *(uint16_t *)stage->tag = 1;
+            memcpy(stage->tag + 8, stage->node, PARSE_NODE_SIZE);
+            result = (g_deser(reflection, "idSnapEntityPrefab", stage->prefab,
+                stage->input, stage->tag, NULL) & 0xff) != 0;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) { stage->quarantined = 1; return -1; }
+    return ae_stage_parser_destroy(stage) == 1 ? result : -1;
+}
+static int ae_stage_native_destroy(sh_apply_prefab_stage *stage)
+{
+    if (stage->quarantined || ae_stage_parser_destroy(stage) != 1) return -1;
+    if (stage->constructed) {
+        stage->constructed = 0;
+        __try { g_prefab_dtor(stage->prefab); }
+        __except (EXCEPTION_EXECUTE_HANDLER) { stage->quarantined = 1; return -1; }
+    }
+    return 1;
+}
+static void ae_stage_free(sh_apply_prefab_stage *stage)
+{
+    sh_package_occurrence_release(stage->ownership);
+    sh_package_occurrence_release(stage->previous);
+    free(stage);
+}
+static int ae_stage_same_map(const sh_apply_prefab_stage *stage)
+{
+    return stage && ae_on_main_thread() == 1 && stage->thread == GetCurrentThreadId() &&
+        ae_editor_session() == stage->editor && sh_editor_transition_frame_ready(stage->editor, stage->map);
+}
+
+int sh_apply_prefab_stage_prepare(void *editor, const char *json,
+    const sh_package_occurrence_snapshot *ownership, int place, sh_apply_prefab_stage **out,
+    char *error, size_t capacity)
+{
+    sh_apply_prefab_stage *stage = NULL;
+    int result = 0;
+    void *map = NULL;
+    if (error && capacity) *error = 0;
+    if (!out || *out || !editor || !json || !ownership || ae_on_main_thread() != 1 ||
+        ae_editor_session() != editor || !(map = sh_editor_transition_capture(editor)) ||
+        !sh_editor_transition_frame_ready(editor, map) || !g_prefab_ctor || !g_prefab_dtor ||
+        !ae_deserialize_bound() || !g_idstr_dtor || strlen(json) > INT_MAX || !sh_package_editor_ready() ||
+        !sh_package_editor_healthy(error, capacity) || InterlockedCompareExchange(&g_stage_faulted, 0, 0) ||
+        InterlockedCompareExchange(&g_stage_busy, 1, 0)) {
+        ae_stage_error(error, capacity, "prefab preparation awaits an admitted native editor boundary"); return 0;
+    }
+    if (!(stage = calloc(1, sizeof(*stage)))) goto done;
+    stage->editor = editor; stage->map = map; stage->thread = GetCurrentThreadId(); stage->place = !!place;
+    stage->ownership = sh_package_occurrence_retain((sh_package_occurrence_snapshot *)ownership);
+    if (!stage->ownership || !ae_stage_layout((unsigned char *)editor + PASTE_STAGING_OFF, stage->prefab)) goto done;
+    stage->previous = sh_package_editor_snapshot(SH_PACKAGE_EDITOR_PREFAB,
+        (unsigned char *)editor + PASTE_STAGING_OFF, error, capacity);
+    if (!stage->previous) goto done;
+    memcpy(stage->expected, (unsigned char *)editor + PASTE_STAGING_OFF, PREFAB_NATIVE_SIZE);
+    if (!sh_process_heap_enter(&g_stage_heap, &stage->heap)) {
+        if (stage->heap.active) { stage->quarantined = 1; result = -1; }
+        goto done;
+    }
+    __try { g_prefab_ctor(stage->prefab); stage->constructed = 1; }
+    __except (EXCEPTION_EXECUTE_HANDLER) { stage->quarantined = 1; result = -1; goto done; }
+    result = ae_stage_parse(stage, json);
+    if (result == 1 && (!ae_stage_layout(stage->prefab, (unsigned char *)editor + PASTE_STAGING_OFF) ||
+        !sh_package_editor_attach(SH_PACKAGE_EDITOR_PREFAB, stage->prefab, ownership, error, capacity))) result = 0;
+    stage->ready = result == 1;
+done:
+    if (stage) {
+        if (!result && ae_stage_native_destroy(stage) < 0) result = -1;
+        if (!sh_process_heap_leave(&stage->heap)) { stage->quarantined = 1; result = -1; }
+        if (result < 0) InterlockedExchange(&g_stage_faulted, 1);
+        if (result) *out = stage;
+        else ae_stage_free(stage);
+    }
+    if (result != 1 && error && capacity && !*error) ae_stage_error(error, capacity,
+        result < 0 ? "native prefab preparation is quarantined; retain source owner" : "native prefab preparation refused the document");
+    InterlockedExchange(&g_stage_busy, 0);
+    return result;
+}
+
+int sh_apply_prefab_stage_abort(sh_apply_prefab_stage **owned, char *error, size_t capacity)
+{
+    sh_apply_prefab_stage *stage;
+    int result = 0;
+    if (error && capacity) *error = 0;
+    if (!owned || !(stage = *owned)) return 1;
+    if (stage->quarantined) { ae_stage_error(error, capacity, "native prefab is quarantined; retain source owner"); return -1; }
+    if (ae_on_main_thread() != 1 || stage->thread != GetCurrentThreadId() ||
+        InterlockedCompareExchange(&g_stage_busy, 1, 0)) return 0;
+    if (!sh_process_heap_enter(&g_stage_heap, &stage->heap)) goto done;
+    if (stage->swapped && (!ae_stage_same_map(stage) || ae_stage_exchange(stage) != 1)) {
+        stage->quarantined = 1; result = -1; goto done;
+    }
+    result = ae_stage_native_destroy(stage);
+done:
+    if (!sh_process_heap_leave(&stage->heap)) { stage->quarantined = 1; result = -1; }
+    if (result < 0) InterlockedExchange(&g_stage_faulted, 1);
+    if (result == 1) { *owned = NULL; ae_stage_free(stage); }
+    else ae_stage_error(error, capacity, result < 0 ? "native prefab cleanup is quarantined; retain source owner" : "prefab cleanup awaits native heap scope");
+    InterlockedExchange(&g_stage_busy, 0);
+    return result;
+}
+
+int sh_apply_prefab_stage_finalize(sh_apply_prefab_stage **owned,
+    int (*commit)(char *error, size_t capacity), char *error, size_t capacity)
+{
+    sh_apply_prefab_stage *stage;
+    int result = 0, committed = 0;
+    if (error && capacity) *error = 0;
+    if (!owned || !(stage = *owned) || !stage->ready) return 0;
+    if (stage->quarantined) return -1;
+    if (!ae_stage_same_map(stage) || InterlockedCompareExchange(&g_stage_busy, 1, 0)) return 0;
+    if (!sh_process_heap_enter(&g_stage_heap, &stage->heap)) goto done;
+    __try {
+        if (memcmp(stage->expected, (unsigned char *)stage->editor + PASTE_STAGING_OFF, PREFAB_NATIVE_SIZE)) {
+            ae_stage_error(error, capacity, "native clipboard changed during prefab preparation"); goto done;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) { goto done; }
+    result = ae_stage_exchange(stage);
+    if (result != 1) goto done;
+    __try { committed = !commit || commit(error, capacity); }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        /* The callback may already have committed disk state. Do not claim
+         * rollback of an unknown external result or retire either source. */
+        stage->quarantined = 1; result = -1; goto done;
+    }
+    if (!committed) {
+        result = ae_stage_exchange(stage);
+        if (result != 1) { stage->quarantined = 1; result = -1; }
+        else result = 0;
+        goto done;
+    }
+    /* No failure is reported after disk commit. Old-storage cleanup failure
+     * keeps its exact source snapshots in bounded internal quarantine. */
+    g_last_place_result = 1;
+    __try {
+        InterlockedExchange(&g_we_staged_count,
+            *(int *)((unsigned char *)stage->editor + PASTE_PREFAB_ENTCOUNT_OFF));
+        InterlockedExchange(&g_we_staged, 1);
+        if (stage->place) g_last_place_result = ae_prefab_place();
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        backend_log("Prefab committed and staged; native placement action was not completed");
+    }
+    result = ae_stage_native_destroy(stage);
+done:
+    if (!sh_process_heap_leave(&stage->heap)) { stage->quarantined = 1; result = -1; }
+    if (result < 0) InterlockedExchange(&g_stage_faulted, 1);
+    if (committed) {
+        *owned = NULL;
+        if (result < 0) {
+            stage->quarantined = 1; stage->next = g_stage_quarantine; g_stage_quarantine = stage;
+            backend_log("Prefab committed; old native storage retained after cleanup failure");
+        } else ae_stage_free(stage);
+        result = 1;
+    } else if (result < 0) ae_stage_error(error, capacity, "native prefab transfer is quarantined; retain source owner");
+    else if (error && capacity && !*error) ae_stage_error(error, capacity, "prefab staging did not commit; previous clipboard retained");
+    InterlockedExchange(&g_stage_busy, 0);
+    return result;
 }
 
 /* Stage a prefab, then request native paste on a later engine frame.
@@ -1175,10 +1500,8 @@ static int ae_mkcmd_one(const char *prefab_text)
 #define AE_PASTE_STAGED  1
 #define AE_PASTE_ARMED   2
 
-static int ae_mkcmd_instantiate(const char *prefab_text)
+static int ae_prefab_place(void)
 {
-    if (!ae_mkcmd_one(prefab_text)) return AE_PASTE_FAILED;
-
     /* Resolved paste worker/grab addresses are diagnostic only. Dispatch by action
  * so the engine performs the required state transitions itself. */
     const uint8_t *ed = ae_editor_session();
@@ -1306,19 +1629,33 @@ static int ae_run_item(int kind, int id, const char *text)
     return g_apply_test_executor ? g_apply_test_executor(kind, id, text) : 0;
 #else
     if (!text) return 0;
-    if (kind == 2) {
-        int pr = ae_mkcmd_instantiate(text);
-        g_last_place_result = pr;
-        return (pr != AE_PASTE_FAILED);
+    if (kind == 1 || kind == 2) {
+        g_last_place_result = 0;
+        return sh_prefab_import_request((void *)ae_editor_session(), text, strlen(text), kind == 2);
     }
-    return (kind == 1) ? ae_mkcmd_one(text)
-         : (kind == 3) ? ae_apply_target_write(id, atoi(text))
+    return (kind == 3) ? ae_apply_target_write(id, atoi(text))
                        : ae_apply_one(id, text);
 #endif
 }
 
 
 static int ae_normalize_timeline_inherit_body(int id);
+static char *ae_prefab_export_body(int selection, size_t *length, int *refusal);
+#ifdef SH_APPLY_ENGINE_TESTING
+static char *(*g_prefab_export_test)(int selection, size_t *length, int *refusal);
+#endif
+/* refusal receives a negative SH_PREFAB_EXPORT_* code when native admission
+ * refused the selection, else 0. */
+static char *ae_prefab_export_run(int selection, size_t *length, int *refusal)
+{
+    *refusal = 0;
+#ifdef SH_APPLY_ENGINE_TESTING
+    *length = 0;
+    return g_prefab_export_test ? g_prefab_export_test(selection, length, refusal) : NULL;
+#else
+    return ae_prefab_export_body(selection, length, refusal);
+#endif
+}
 
 /* Consume a blocking request on the engine command drain. Batch execution
  * owns the result toast; timeline normalization remains silent. */
@@ -1342,8 +1679,15 @@ static void ae_sync_consume_and_run(void)
     if (!take) return;
 
     int applied = 0;
+    char *output = NULL; size_t output_length = 0;
     if (fn_kind == 1) {
         applied = ae_normalize_timeline_inherit_body(norm_id);
+    } else if (fn_kind == 2 || fn_kind == 3) {
+        int refusal = 0;
+        __try { output = ae_prefab_export_run(fn_kind == 3, &output_length, &refusal); }
+        __except (EXCEPTION_EXECUTE_HANDLER) { output_length = 0; refusal = 0; }
+        /* A refusal travels back as a negative count; it never carries bytes. */
+        applied = output && output_length != 0 ? 1 : (refusal < 0 ? refusal : 0);
     } else {
         for (int i = 0; i < count; i++)
             if (items && ae_run_item(items[i].kind, items[i].id, items[i].text)) applied++;
@@ -1354,6 +1698,7 @@ static void ae_sync_consume_and_run(void)
     EnterCriticalSection(&g_pending_lock);
     g_sync_req.applied = applied;
     if (g_sync_req.state == AE_SYNC_RUNNING) {
+        g_sync_req.output = output; g_sync_req.output_length = output_length; output = NULL;
         g_sync_req.state = AE_SYNC_DONE;
         if (g_sync_ev) SetEvent(g_sync_ev);
     } else {
@@ -1361,6 +1706,7 @@ static void ae_sync_consume_and_run(void)
         g_sync_req.state = AE_SYNC_EMPTY;
     }
     LeaveCriticalSection(&g_pending_lock);
+    if (output) HeapFree(GetProcessHeap(), 0, output);
 }
 
 static void __cdecl ae_clone_bss_apply_cmd(void)
@@ -1418,10 +1764,20 @@ static int ae_ensure_command(void)
  * Pending timeouts withdraw and free work; running timeouts leave ownership
  * with the drain. BufferCommandText itself has no cross-thread queue lock,
  * so publication can race other engine command-buffer appends. */
+static void ae_sync_collect(int *out_applied, char **out_text, size_t *out_length)
+{
+    *out_applied = g_sync_req.applied;
+    if (out_text && out_length) {
+        *out_text = g_sync_req.output; *out_length = g_sync_req.output_length;
+    } else if (g_sync_req.output) HeapFree(GetProcessHeap(), 0, g_sync_req.output);
+    g_sync_req.output = NULL; g_sync_req.output_length = 0; g_sync_req.state = AE_SYNC_EMPTY;
+}
 static int ae_marshal_publish_and_wait(apply_item_copy *copy, int built, const char *op,
-                                       int fn_kind, int norm_id, int *out_applied)
+    int fn_kind, int norm_id, int *out_applied, char **out_text, size_t *out_length)
 {
     *out_applied = 0;
+    if (out_text) *out_text = NULL;
+    if (out_length) *out_length = 0;
     if (!g_pending_lock_init || !g_sync_ev || !g_buffer_cmd || !g_cmdsys || !ae_ensure_command()) {
         if (copy) { for (int i = 0; i < built; i++) free(copy[i].text); free(copy); }
         return AE_MARSHAL_UNAVAILABLE;
@@ -1441,6 +1797,7 @@ static int ae_marshal_publish_and_wait(apply_item_copy *copy, int built, const c
     if (op) strncpy_s(g_sync_req.op, sizeof g_sync_req.op, op, _TRUNCATE);
     else    g_sync_req.op[0] = '\0';
     g_sync_req.applied = 0;
+    g_sync_req.output = NULL; g_sync_req.output_length = 0;
     g_sync_req.state   = AE_SYNC_PUBLISHED;
     LeaveCriticalSection(&g_pending_lock);
 
@@ -1453,8 +1810,7 @@ static int ae_marshal_publish_and_wait(apply_item_copy *copy, int built, const c
     (void)wr;
     EnterCriticalSection(&g_pending_lock);
     if (g_sync_req.state == AE_SYNC_DONE) {
-        *out_applied = g_sync_req.applied;
-        g_sync_req.state = AE_SYNC_EMPTY;
+        ae_sync_collect(out_applied, out_text, out_length);
         LeaveCriticalSection(&g_pending_lock);
         return AE_MARSHAL_DONE;
     }
@@ -1475,8 +1831,7 @@ static int ae_marshal_publish_and_wait(apply_item_copy *copy, int built, const c
     (void)wr;
     EnterCriticalSection(&g_pending_lock);
     if (g_sync_req.state == AE_SYNC_DONE) {
-        *out_applied = g_sync_req.applied;
-        g_sync_req.state = AE_SYNC_EMPTY;
+        ae_sync_collect(out_applied, out_text, out_length);
         LeaveCriticalSection(&g_pending_lock);
         return AE_MARSHAL_DONE;
     }
@@ -1497,7 +1852,7 @@ static int ae_apply_marshal(const sh_apply_item *items, int count, const char *o
     for (int i = 0; i < count; i++) {
         const char *t = items[i].text ? items[i].text : "";
         size_t len = strlen(t);
-        if (len >= APPLY_TEXT_CAP) break;
+        if (!ae_text_length_supported(len)) break;
         char *tc = (char *)malloc(len + 1);
         if (!tc) break;
         memcpy(tc, t, len); tc[len] = '\0';
@@ -1511,7 +1866,7 @@ static int ae_apply_marshal(const sh_apply_item *items, int count, const char *o
         free(copy);
         return AE_MARSHAL_UNAVAILABLE;
     }
-    return ae_marshal_publish_and_wait(copy, built, op, 0, -1, out_applied);
+    return ae_marshal_publish_and_wait(copy, built, op, 0, -1, out_applied, NULL, NULL);
 }
 
 /* Shared interface slots. */
@@ -2535,7 +2890,7 @@ static int slot_normalize_timeline_inherit(sh_iface *self, int id)
     if (ae_on_main_thread() != 1) {
         if (ae_on_main_thread() < 0) return 0;
         int applied = 0;
-        int mr = ae_marshal_publish_and_wait(NULL, 0, "tl-inherit-portable", 1, id, &applied);
+        int mr = ae_marshal_publish_and_wait(NULL, 0, "tl-inherit-portable", 1, id, &applied, NULL, NULL);
         if (mr == AE_MARSHAL_DONE) return applied;
         return 0;
     }
@@ -2558,7 +2913,7 @@ static int slot_schedule_apply(sh_iface *self, const sh_apply_item *items, int c
     for (int i = 0; i < count; i++) {
         const char *t = items[i].text ? items[i].text : "";
         size_t len = strlen(t);
-        if (len >= APPLY_TEXT_CAP) break;
+        if (!ae_text_length_supported(len)) break;
         char *tc = (char *)malloc(len + 1);
         if (!tc) break;
         memcpy(tc, t, len); tc[len] = '\0';
@@ -2610,101 +2965,156 @@ void ae_schedule_target_write(int source_id, int target_id)
     __except (EXCEPTION_EXECUTE_HANDLER) {}
 }
 
-/* Reflect the pending idSnapEntityPrefab directly; it is already a live object
- * and needs no entity clone. */
-static int slot_read_prefab(sh_iface *self, char *out_json, int cap)
+/* Native populate status -> export refusal. */
+static int ae_prefab_refusal(int status)
 {
-    (void)self;
-    if (cap > 0 && out_json) out_json[0] = '\0';
-    if (!g_ser || !g_render || !g_node_ctor || !g_node_dtor || !g_idstr_ctor || !g_idstr_dtor) return 0;
-    const uint8_t *ed = ae_editor_session();
-    if (!ed) return 0;
-    void *reflect = ae_get_reflect();
-    if (!reflect) return 0;
-    void *staging = (void *)(ed + PASTE_STAGING_OFF);
-
-    uint8_t node7[PARSE_NODE_SIZE];
-    uint8_t outTree[PARSE_NODE_SIZE];
-    uint8_t jsStr[IDSTR_SIZE];
-    memset(node7, 0, sizeof node7);
-    memset(outTree, 0, sizeof outTree);
-    memset(jsStr, 0, sizeof jsStr);
-    int node7_ctored = 0, tree_ctored = 0, js_ctored = 0;
-    int written = 0;
-    __try {
-        g_node_ctor(node7, SER_TAG_KIND);   node7_ctored = 1;
-        g_node_ctor(outTree, SER_TREE_KIND); tree_ctored = 1;
-        g_idstr_ctor(jsStr, "");            js_ctored = 1;
-        /* Tag header at +0; parse node at +8. */
-        uint8_t arg5[8 + PARSE_NODE_SIZE];
-        memset(arg5, 0, sizeof arg5);
-        *(uint16_t *)(arg5) = 1;
-        arg5[2] = 1;
-        arg5[3] = 0;
-        memcpy(arg5 + 8, node7, PARSE_NODE_SIZE);
-        char ok = g_ser(reflect, "idSnapEntityPrefab", staging, outTree, arg5, NULL);
-        if (ok & 0xff) { g_render(outTree, jsStr); written = ae_read_idstr(jsStr, out_json, cap); }
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        written = 0;
+    switch (status) {
+    case 0: return SH_PREFAB_EXPORT_NO_ANCHOR;    /* not hovering an entity in the selection */
+    case 1: return SH_PREFAB_EXPORT_UNCOPYABLE;
+    case 2: return SH_PREFAB_EXPORT_CONNECTED;
+    case 3: return SH_PREFAB_EXPORT_REFERENCED;
+    default: return 0;
     }
-    if (js_ctored)    { __try { g_idstr_dtor(jsStr); }  __except (EXCEPTION_EXECUTE_HANDLER) {} }
-    if (tree_ctored)  { __try { g_node_dtor(outTree); } __except (EXCEPTION_EXECUTE_HANDLER) {} }
-    if (node7_ctored) { __try { g_node_dtor(node7); }   __except (EXCEPTION_EXECUTE_HANDLER) {} }
-    return written;
 }
 
-/* Construct a temporary prefab, populate from selection, then render JSON.
- * Return copied bytes or zero; destroy every successfully constructed object. */
-static int slot_serialize_selection(sh_iface *self, char *out_json, int cap)
+/* Populate a selection prefab. Without a native hover, the recorded anchor
+ * stands in for the populate call alone; when the view ray would miss the
+ * hovered entity's box, the equivalent origin does too. Both are removed
+ * before returning. */
+static int ae_prefab_populate_selection(void *prefab, const uint8_t *editor, int *refusal)
 {
-    (void)self;
-    if (cap > 0 && out_json) out_json[0] = '\0';
-    if (!g_prefab_ctor || !g_prefab_populate || !g_prefab_dtor ||
-        !g_ser || !g_render || !g_node_ctor || !g_node_dtor || !g_idstr_ctor || !g_idstr_dtor)
-        return 0;
-    const uint8_t *ed = ae_editor_session();
-    if (!ed) return 0;
-    void *reflect = ae_get_reflect();
-    if (!reflect) return 0;
-
-    uint8_t prefab[PREFAB_TEMP_SIZE];
-    uint8_t node7[PARSE_NODE_SIZE];
-    uint8_t outTree[PARSE_NODE_SIZE];
-    uint8_t jsStr[IDSTR_SIZE];
-    memset(prefab, 0, sizeof prefab);
-    memset(node7, 0, sizeof node7);
-    memset(outTree, 0, sizeof outTree);
-    memset(jsStr, 0, sizeof jsStr);
-    int prefab_ctored = 0, node7_ctored = 0, tree_ctored = 0, js_ctored = 0;
-    int written = 0;
-
-    __try {
-        g_prefab_ctor(prefab); prefab_ctored = 1;
-        int populateStatus = 0;
-        char populated = g_prefab_populate(prefab, (void *)ed, &populateStatus);
-        if (populated & 0xff) {
-            g_node_ctor(node7, SER_TAG_KIND);   node7_ctored = 1;
-            g_node_ctor(outTree, SER_TREE_KIND); tree_ctored = 1;
-            g_idstr_ctor(jsStr, "");            js_ctored = 1;
-            /* Tag header at +0; parse node at +8. */
-            uint8_t arg5[8 + PARSE_NODE_SIZE];
-            memset(arg5, 0, sizeof arg5);
-            *(uint16_t *)(arg5) = 1;
-            arg5[2] = 1;
-            arg5[3] = 0;
-            memcpy(arg5 + 8, node7, PARSE_NODE_SIZE);
-            char ok = g_ser(reflect, "idSnapEntityPrefab", prefab, outTree, arg5, NULL);
-            if (ok & 0xff) { g_render(outTree, jsStr); written = ae_read_idstr(jsStr, out_json, cap); }
+    sh_prefab_anchor_hold hold;
+    int status = -1, populated = 0, faulted = 0, aimed;
+    int anchored = sh_prefab_anchor_install((void *)editor, &hold);
+    if (anchored == SH_PREFAB_ANCHOR_EMPTY) { *refusal = SH_PREFAB_EXPORT_EMPTY; return 0; }
+    if (anchored == SH_PREFAB_ANCHOR_NONE) {
+        backend_log("prefab export: no selected entity under the view to anchor the prefab");
+        *refusal = SH_PREFAB_EXPORT_NO_ANCHOR; return 0;
+    }
+    aimed = sh_prefab_anchor_aim((void *)editor, &hold);
+    if (aimed == SH_PREFAB_ANCHOR_RAY_UNUSABLE) {
+        char line[256];
+        sh_prefab_anchor_restore(&hold);
+        _snprintf_s(line, sizeof line, _TRUNCATE,
+            "prefab export: selected %d is not in front of the view (%g %g %g | %g %g); no grab frame",
+            hold.entity, (double)hold.seen[0], (double)hold.seen[1], (double)hold.seen[2],
+            (double)hold.seen[3], (double)hold.seen[4]);
+        backend_log(line);
+        *refusal = SH_PREFAB_EXPORT_NO_ANCHOR; return 0;
+    }
+    __try { populated = (g_prefab_populate(prefab, (void *)editor, &status) & 0xff) != 0; }
+    __except (EXCEPTION_EXECUTE_HANDLER) { faulted = 1; }
+    sh_prefab_anchor_restore(&hold);
+    if (hold.entity >= 0) {
+        float distance = 0.0f;
+        int predicted = hold.expect == hold.expect;  /* NaN when no frame was predicted */
+        char line[384];
+        if (populated) distance = *(const float *)((const uint8_t *)prefab + PREFAB_GRAB_DISTANCE);
+        _snprintf_s(line, sizeof line, _TRUNCATE,
+            "prefab export: %s %d for populate from view (%g %g %g | %g %g), %s %g, expected grab %g "
+            "(ok=%d status=%d grab=%g)",
+            anchored == SH_PREFAB_ANCHOR_INSTALLED ? "anchored on selected" : "hovered", hold.entity,
+            (double)hold.seen[0], (double)hold.seen[1], (double)hold.seen[2],
+            (double)hold.seen[3], (double)hold.seen[4],
+            aimed == SH_PREFAB_ANCHOR_RAY_EQUIVALENT ? "ray missed its box; through the center at depth"
+                                                     : "ray meets its box; depth",
+            (double)hold.depth, (double)hold.expect, populated, status, (double)distance);
+        backend_log(line);
+        /* A frame from a ray that missed the box would leave a 1e30 bound; one
+         * other than predicted was not built from the box the ray was tested on. */
+        if (populated && (!sh_prefab_anchor_distance_ok(distance) ||
+                          (predicted && !sh_prefab_anchor_frame_matches(distance, hold.expect)))) {
+            *refusal = SH_PREFAB_EXPORT_NO_ANCHOR; return 0;
         }
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        written = 0;
     }
-    if (js_ctored)     { __try { g_idstr_dtor(jsStr); }  __except (EXCEPTION_EXECUTE_HANDLER) {} }
-    if (tree_ctored)   { __try { g_node_dtor(outTree); } __except (EXCEPTION_EXECUTE_HANDLER) {} }
-    if (node7_ctored)  { __try { g_node_dtor(node7); }   __except (EXCEPTION_EXECUTE_HANDLER) {} }
-    if (prefab_ctored) { __try { g_prefab_dtor(prefab); }__except (EXCEPTION_EXECUTE_HANDLER) {} }
+    if (faulted) return 0;
+    if (!populated) *refusal = ae_prefab_refusal(status);
+    return populated;
+}
+
+/* Capture before temporary flat records are destroyed. The native adapter has
+ * already mapped selected bodies to their serialized array positions. */
+static char *ae_prefab_export_body(int selection, size_t *length, int *refusal)
+{
+    uint8_t prefab[PREFAB_TEMP_SIZE] = {0};
+    const uint8_t *editor;
+    void *flat = NULL;
+    int constructed = 0, ok = 0;
+    char *json = NULL, *bound = NULL, *out = NULL, error[512] = "";
+    size_t json_length = 0, bound_length = 0, row_count = 0, used_count = 0;
+    sh_package_occurrence_snapshot *previous = NULL, *ownership = NULL;
+    sh_mpkg_used *used = NULL;
+    *length = 0;
+    if (ae_on_main_thread() != 1 || !(editor = ae_editor_session()) ||
+        !sh_package_editor_ready() || !sh_package_editor_healthy(error, sizeof(error)) ||
+        (selection && (!g_prefab_ctor || !g_prefab_populate || !g_prefab_dtor))) return NULL;
+    __try {
+        flat = (void *)(editor + PASTE_STAGING_OFF);
+        if (selection) {
+            g_prefab_ctor(prefab); constructed = 1; flat = prefab;
+            if (!ae_prefab_populate_selection(flat, editor, refusal)) goto done;
+        }
+        if (!sh_apply_engine_serialize_flat(flat, SH_APPLY_FLAT_PREFAB, &json, &json_length)) goto done;
+        previous = sh_package_editor_snapshot(SH_PACKAGE_EDITOR_PREFAB, flat, error, sizeof(error));
+        if (!previous) goto done;
+        const sh_package_bundle_binding *rows = sh_package_occurrence_bundles(previous, &row_count);
+        bound = sh_package_runtime_capture_document(NULL, sh_package_occurrence_provenance(previous),
+            rows, row_count, json, json_length, &bound_length, &ownership,
+            &used, &used_count, error, sizeof(error));
+        if (!bound || (ownership && !sh_package_occurrence_carry_document_rows(ownership, previous))) goto done;
+        out = sh_prefab_carrier_write(bound, bound_length, ownership, length, error, sizeof(error));
+        ok = out != NULL;
+done:;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { ok = 0; }
+    if (constructed) { __try { g_prefab_dtor(prefab); } __except (EXCEPTION_EXECUTE_HANDLER) { ok = 0; } }
+    free(json); free(bound); sh_mpkg_used_free(used);
+    sh_package_occurrence_release(previous); sh_package_occurrence_release(ownership);
+    if (!ok) {
+        if (out) HeapFree(GetProcessHeap(), 0, out);
+        out = NULL; *length = 0;
+        if (*error) backend_log(error);
+    }
+    return out;
+}
+
+static int slot_prefab_export(sh_iface *self, int selection, char **out_json, size_t *out_length)
+{
+    char *bytes = NULL; size_t length = 0;
+    int on_main = ae_on_main_thread(), refusal = 0;
+    (void)self;
+    if (out_json) *out_json = NULL;
+    if (out_length) *out_length = 0;
+    if (!out_json || !out_length || on_main < 0 || (selection != 0 && selection != 1)) return 0;
+    if (on_main) bytes = ae_prefab_export_run(selection, &length, &refusal);
+    else {
+        int applied = 0;
+        if (ae_marshal_publish_and_wait(NULL, 0, "export-prefab", selection ? 3 : 2,
+            -1, &applied, &bytes, &length) != AE_MARSHAL_DONE) return 0;
+        if (applied < 0) refusal = applied;
+    }
+    if (!bytes || !length || length > INT_MAX) {
+        if (bytes) HeapFree(GetProcessHeap(), 0, bytes);
+        return selection && !bytes && refusal < 0 ? refusal : 0;
+    }
+    *out_json = bytes; *out_length = length; return 1;
+}
+static int ae_prefab_export_slot(int selection, char *out_json, int cap)
+{
+    char *bytes = NULL; size_t length = 0;
+    int written = 0;
+    if (out_json && cap > 0) *out_json = 0;
+    if (!out_json || cap <= 0 || slot_prefab_export(NULL, selection, &bytes, &length) != 1) return 0;
+    /* Never return a valid-looking prefix of a complete source carrier. */
+    if (bytes && length < (size_t)cap && length <= INT_MAX) {
+        memcpy(out_json, bytes, length); out_json[length] = 0; written = (int)length;
+    } else if (bytes) backend_log("Prefab export exceeds the caller's buffer; no partial file was returned");
+    if (bytes) HeapFree(GetProcessHeap(), 0, bytes);
     return written;
 }
+static int slot_read_prefab(sh_iface *self, char *out_json, int cap)
+{ (void)self; return ae_prefab_export_slot(0, out_json, cap); }
+static int slot_serialize_selection(sh_iface *self, char *out_json, int cap)
+{ (void)self; return ae_prefab_export_slot(1, out_json, cap); }
 
 /* Run only on a verified main thread. A timed-out running request returns
  * SH_APPLY_IN_PROGRESS; zero means no item completed. Never retry inline. */
@@ -2718,7 +3128,7 @@ static int slot_apply_sync(sh_iface *self, const sh_apply_item *items, int count
     int on_main = ae_on_main_thread();
     if (on_main < 0) return 0;
     for (int i = 0; i < count; i++)
-        if (items[i].text && strlen(items[i].text) >= APPLY_TEXT_CAP) return 0;
+        if (items[i].text && !ae_text_length_supported(strlen(items[i].text))) return 0;
     if (on_main == 0) {
         int applied = 0;
         int mr = ae_apply_marshal(items, count, op, &applied);
@@ -2756,6 +3166,8 @@ void sh_apply_engine_get_serialize_selection(sh_serialize_selection_fn *serializ
 {
     if (serialize_selection) *serialize_selection = slot_serialize_selection;
 }
+void sh_apply_engine_get_prefab_export(sh_prefab_export_fn *prefab_export)
+{ if (prefab_export) *prefab_export = slot_prefab_export; }
 
 /* Most recent kind-2 result: failed, staged-only, or native paste action armed. */
 int sh_apply_last_place_result(void)
@@ -2999,6 +3411,7 @@ void sh_apply_prefab_poll_play(void)
     sh_rawmap_map_context_poll();
     sh_decl_server_rearm_poll();
     sh_mpkg_consent_poll();
+    sh_prefab_import_maintenance();
     sh_rawmap_pending_map_poll();
     ae_nav_refresh_poll();
     if (!g_doom_base) return;
@@ -3220,6 +3633,7 @@ int sh_apply_engine_install(const sig_result *results, size_t n, const uint8_t *
                                                                   module_base, MEMLOCAL_PUSHHEAP_RVA, "idMemLocal PushHeap");
         g_memlocal_pop  = (memlocal_popheap_fn) ae_pick_engine_fn(results, n, "MemLocalPopHeap",
                                                                   module_base, MEMLOCAL_POPHEAP_RVA, "idMemLocal PopHeap");
+        (void)sh_process_heap_bind(&g_stage_heap, results, n, module_base);
         g_prefab_dtor     = (prefab_dtor_fn)    ae_pick_engine_fn(results, n, "PrefabDtor",
                                                                   module_base, PREFAB_DTOR_RVA, "prefab dtor");
         g_deshare         = (ent_deshare_fn)    ae_pick_engine_fn(results, n, "EntityDeshare",

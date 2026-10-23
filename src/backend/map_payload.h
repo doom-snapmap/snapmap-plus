@@ -4,7 +4,8 @@
 #include "signatures.h"
 
 /* Bind save and saved/published read repairs together before maps can open or
- * save. No author setting controls this repair. Failed writes roll back both. */
+ * save. No author setting controls this repair. Failed writes roll back both.
+ * Install also records the reader's own map-text bound for map_capacity.c. */
 int sh_map_payload_install(const sig_result *results, size_t count);
 int sh_map_payload_remove(void);
 #endif
