@@ -92,7 +92,7 @@ $incArgs = @(
     # Share host_image.c so both DLLs identify the renderer consistently.
     "/I`"$backend`""
 ) -join " "
-$srcArgs = "webview\snapmap_plus_ui_webview.cpp webview\config_message.cpp webview\webview_json.cpp webview\theme_bootstrap.cpp sl_exports.cpp ..\common\log_rotate.c ..\backend\host_image.c"
+$srcArgs = "webview\snapmap_plus_ui_webview.cpp webview\config_message.cpp webview\webview_json.cpp webview\prefab_scene.c webview\theme_bootstrap.cpp sl_exports.cpp ..\common\log_rotate.c ..\backend\host_image.c ..\backend\config_json.c"
 $libArgs = @(
     "`"$wvLib`"",
     "ole32.lib", "oleaut32.lib", "shell32.lib", "shlwapi.lib",

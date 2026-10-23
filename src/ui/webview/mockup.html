@@ -357,7 +357,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   <div class="modal">
     <div class="modal-title">Create prefab from selection</div>
     <div class="muted" id="npSelInfo" style="margin-bottom:4px;">From 5 selected entities</div>
-    <div class="muted" style="margin-bottom:8px;font-size:0.9em;">Tip: hover your mouse over one of the selected entities in the 3D view before clicking Create -- the editor requires it.</div>
+    <div class="muted" style="margin-bottom:8px;font-size:0.9em;">The prefab is anchored on the selected entity you last pointed at in the 3D view.</div>
     <label>Name</label><input type="text" id="npName" placeholder="e.g. AirLock Door">
     <label>Description</label><textarea id="npDesc" placeholder="Optional"></textarea>
     <label>Tags</label><input type="text" id="npTags" placeholder="Optional, comma-separated">
@@ -2780,7 +2780,10 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
         post({cmd:'savePrefabMeta', name: d.name, folder: '', body: createdMeta.body});
       if (d.result === 1) toast('Created "' + d.name + '"', 'ok');
       else if (d.result === 0) toast('Nothing selected in the editor -- select entities first', 'warn');
-      else if (d.result === 2) toast('Hover over one of the selected entities in the 3D view, then try again', 'warn');
+      else if (d.result === 2) toast('Point the 3D view at one of the selected entities, then try again', 'warn');
+      else if (d.result === 3) toast('The selection includes entities that cannot be copied', 'warn');
+      else if (d.result === 4) toast('Also select the entities wired to the selection, then try again', 'warn');
+      else if (d.result === 5) toast('Also select the entities the selection references, then try again', 'warn');
       else toast('Could not create "' + d.name + '" (see log)', 'err');
     } else if (d.kind === 'pushStackResult') {
       if (d.result === 1) toast('Pushed ' + d.count + ' onto stack 0 -- try `sh popsel`/`sh bss`/etc. in the console', 'ok');
@@ -2789,10 +2792,9 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       if (d.result === 1) toast('Cleared stack 0 (' + d.count + ' id' + (d.count === 1 ? '' : 's') + ' removed)', 'ok');
       else toast('Clear stack 0 failed (editor down?)', 'err');
     } else if (d.kind === 'loadPrefabResult') {
-      /* The backend drain owns the OUTCOME toast ("Ready -- move it into position..." vs the
-         "press Ctrl+V" fallback), because only it knows whether the pick-up actually happened.
-         This one just confirms the request was accepted. */
-      if (d.result === 1) toast('"' + d.name + '" staged -- press Ctrl+V in the 3D view to place it', 'ok');
+      /* This confirms queue acceptance only. DOOM handles package consent and
+         starts native placement after the complete import has been admitted. */
+      if (d.result === 1) toast('Preparing "' + d.name + '" in DOOM...');
       else if (d.result === -1) toast('Could not read "' + d.name + '" (see log)', 'err');
       else toast('Could not stage "' + d.name + '" (editor down?)', 'err');
     } else if (d.kind === 'deletePrefabResult') {

@@ -216,8 +216,8 @@ loading.
 
 `config.json` is safe to leave alone. If you deliberately delete it, Snapmap+ treats that as **Reset
 preferences** and recreates the default light setting, Show Hidden off, Entity selection mode off, and user
-overrides enabled on the next startup. If the file is damaged, Snapmap+ keeps a timestamped `.corrupt.json`
-backup, restores defaults, and tells you once. If it cannot save a window setting, that setting still works
+overrides enabled on the next startup. If the file is damaged, Snapmap+ restores defaults, writes the first
+4 KB of the damaged text to its backend log, keeps no copy of it, and tells you once. If it cannot save a window setting, that setting still works
 for the current session and the window explains that it was not remembered. `sh_user_overrides` is different:
 a failed console write reports the failure, leaves this launch unchanged, and does not establish a change for
 the next launch. Updates, uninstall, and reinstall preserve the file.
@@ -918,7 +918,7 @@ lowercase automatically, with surrounding spaces, tabs and newlines removed;
 display names keep their capitalization. IDs use letters and digits, with dots,
 dashes and underscores allowed internally, and no consecutive dots. A UTF-8 byte-order
 mark in `package.json` is accepted. Runtime normalization does not rewrite your files;
-installer migration writes corrected metadata and keeps the original backup.
+installer migration writes corrected metadata in place.
 Copies or variants of one package may share an ID. Independently authored mods should
 use different IDs, even when they edit the same game asset.
 Maps distinguish complete bundles by their content, so different variants sharing
@@ -926,6 +926,12 @@ an ID can travel together without one replacing the other. If both need installa
 they get separate folders; their descriptors and asset trees stay intact. Sharing an
 ID does not make incompatible resource edits compatible.
 Optional `hud.weapons.<weapon declaration name>.ammo_display` accepts `weapon` or `engine`.
+Use the weapon declaration's name, not its entityDef name or file path. The compiler
+keeps the setting with each weapon variant automatically. If identical weapons
+share one native identity and request different modes, `weapon` wins among peers;
+an explicit setting authored in the map takes precedence over a local setting.
+`weapon` preserves the weapon's own capacity display, while `engine` preserves the
+game's normal mode override. Neither setting changes ammunition or weapon behavior.
 There are no versions, file lists, path mappings, author hashes, receipts, priorities or map-inclusion
 switches to maintain. Boss startup behavior belongs in its asset declarations and travels with them.
 
@@ -1003,10 +1009,11 @@ Fresh installations create `my-overrides/package.json` and an empty
 name. If a package already occupies it, migration uses the next free suffix
 (`my-overrides-2`, and so on) without overwriting your existing files.
 
-The originals are moved, byte for byte, to
-`%LOCALAPPDATA%\snapmap-plus\override-backups\migration-...\original`. Nothing there is loaded
-or deleted automatically. To undo a conversion, close DOOM, remove the converted package folder and
-move the original back to the same place under `overrides`.
+The conversion replaces the original files in place. While it runs, the originals are moved to
+`%LOCALAPPDATA%\snapmap-plus\override-backups\migration-...\original` and a journal lets an
+interrupted run finish or restore them; once a package has been converted, that folder is deleted and
+no copy of the originals is kept. Keep your own copy of a package before converting it if you may
+want the old layout back. Folders left there by releases before this one are not touched.
 
 If you copied the DLLs by hand, or later unzip a package made for an older release into your
 overrides folder, close DOOM and run this in a terminal next to `snapmap-plus.exe`:
