@@ -140,7 +140,8 @@ jobs:
       - name: Native and JavaScript tests
         shell: pwsh
         run: |
-          .\tests\run-tests.ps1
+          # The retained composition and the map form fixtures need an installed game (tests/README.md).
+          .\tests\run-tests.ps1 -Skip occurrence_revival_retained,map_form_sweep_test -SkipNativeImageTests
           if ($LASTEXITCODE -ne 0) { throw "C unit tests failed" }
       - name: Worker runtime tests
         shell: pwsh
