@@ -116,7 +116,7 @@ updates and for older packages copied in later. DOOM must be closed.
 This includes the original SnapHak layout, before Snapmap+: content under
 `%USERPROFILE%\snaphak` is verified and brought into the current data folder,
 then loose `overrides/generated/decls/...` files become a current package.
-Their declaration bytes are retained, and conversion keeps an original backup.
+Their declaration bytes are retained; the conversion keeps no copy of the originals.
 Already present destination files are never overwritten by the old-profile copy.
 
 Format conversion is implemented in `src/backend/package_migration.c`, shared
@@ -168,7 +168,15 @@ tree is staged and each copied byte is checked against a snapshot; the journal
 is written; originals move to `original/`; the moved originals are hashed
 again; only then is the new tree renamed into place. A later run finishes a
 verified transaction or restores an unverified one, and never overwrites a path
-that appeared in the meantime. Backups are never removed automatically.
+that appeared in the meantime. The journal exists only while the transaction is
+uncommitted: once the new tree is in place the transaction directory, moved
+originals included, is deleted, so no automatic backup of a converted package
+is kept. Transactions completed by earlier releases are left as they are.
+
+The one backup the installer does keep is `<file>.snapmap-plus-bak` for a
+pre-existing foreign DLL it displaces (an `XINPUT1_3.dll` that was not ours).
+Uninstall can restore a file that was never Snapmap+'s only from that copy, so
+it stays until uninstall consumes it.
 
 ## Private release repositories
 

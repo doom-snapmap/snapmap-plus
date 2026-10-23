@@ -21,10 +21,14 @@ import (
 //	stage/<n>/     the complete converted tree for each published folder
 //	original/...   the authored sources, moved out of overrides unchanged
 //	verified.json  written after the moved originals are verified again
-//	complete.json  written after publication or rollback
 //
 // Before verified.json, recovery restores the originals. After it, recovery
-// finishes publication. Neither direction overwrites an existing path.
+// finishes publication. Neither direction overwrites an existing path. The
+// transaction exists only while it is uncommitted: once the converted tree is
+// in place, or the originals are back, the whole directory is deleted, moved
+// originals included. No backup of a converted package is kept. A directory
+// holding complete.json was finished by an earlier release, which promised to
+// keep it; it is left alone.
 
 // Tests stop a transaction at its boundaries, as a crash would.
 var overrideMigrationCheckpoint func(point string)
@@ -48,7 +52,6 @@ type journalPublish struct {
 
 type convertedOverride struct {
 	Package string
-	Backup  string
 }
 
 type overrideMigration struct {
@@ -115,7 +118,7 @@ func recoverOverrideTransaction(root, transaction string) error {
 		return fmt.Errorf("linked migration transaction: %s", transaction)
 	}
 	if done, err := pathExists(filepath.Join(transaction, "complete.json")); done || err != nil {
-		return err
+		return err // finished by an earlier release that kept its originals
 	}
 	b, err := os.ReadFile(filepath.Join(transaction, "pending.json"))
 	if os.IsNotExist(err) {
@@ -170,15 +173,12 @@ func recoverOverrideTransaction(root, transaction string) error {
 				return err
 			}
 		}
-		if err := removeEmptyFolders(filepath.Join(transaction, "stage")); err != nil {
-			return err
-		}
-		return writeJournal(filepath.Join(transaction, "complete.json"), map[string]string{"result": "published"})
+		return removeTransaction(transaction)
 	}
 	if err := rollbackOverrideTransaction(root, transaction, j); err != nil {
 		return err
 	}
-	return writeJournal(filepath.Join(transaction, "complete.json"), map[string]string{"result": "rolled back"})
+	return removeTransaction(transaction)
 }
 
 // Restore moved originals, then discard the converted copies. Originals are
@@ -234,6 +234,20 @@ func removeEmptyFolders(path string) error {
 		return os.Remove(path)
 	}
 	return err
+}
+
+// Remove a committed or rolled-back transaction with everything it still
+// holds: the converted copies, and the moved originals once the converted tree
+// is in place. Only a migration directory below override-backups is removed.
+func removeTransaction(transaction string) error {
+	if !plainPath(transaction) || !strings.HasPrefix(filepath.Base(transaction), "migration-") ||
+		filepath.Base(filepath.Dir(transaction)) != "override-backups" {
+		return fmt.Errorf("unsafe migration cleanup: %s", transaction)
+	}
+	if err := os.RemoveAll(transaction); err != nil {
+		return fmt.Errorf("the conversion is complete, but its transaction folder could not be removed: %w", err)
+	}
+	return nil
 }
 
 // Remove converted copies, which exist only inside this transaction.
@@ -344,33 +358,33 @@ func (p *unitPlan) verifyMoved(transaction string) error {
 
 // publish runs one transaction. Content refusals were found during planning;
 // every error here is operational, after the unit has been restored.
-func (p *unitPlan) publish(backups string) (string, error) {
+func (p *unitPlan) publish(backups string) error {
 	transaction, err := newTransaction(backups)
 	if err != nil {
-		return "", err
+		return err
 	}
 	journal := migrationJournal{Unit: p.unit.rel, Sources: p.sources}
 	for i, root := range p.roots {
 		stage := fmt.Sprintf("stage/%d", i)
 		if i == 0 {
 			if err := os.Mkdir(filepath.Join(transaction, "stage"), 0o755); err != nil {
-				return "", err
+				return err
 			}
 		}
 		if err := p.stage(filepath.Join(transaction, filepath.FromSlash(stage)), root.outputs); err != nil {
-			return "", errors.Join(err, removeTransactionData(transaction, filepath.Join(transaction, "stage"), true))
+			return errors.Join(err, removeTransactionData(transaction, filepath.Join(transaction, "stage"), true))
 		}
 		journal.Publish = append(journal.Publish, journalPublish{Stage: stage, Destination: root.rel})
 	}
 	if err := writeJournal(filepath.Join(transaction, "pending.json"), journal); err != nil {
-		return "", errors.Join(err, removeTransactionData(transaction, filepath.Join(transaction, "stage"), true))
+		return errors.Join(err, removeTransactionData(transaction, filepath.Join(transaction, "stage"), true))
 	}
 	migrationCheckpoint("journaled")
-	restore := func(cause error) (string, error) {
+	restore := func(cause error) error {
 		if err := rollbackOverrideTransaction(p.ctx.root, transaction, journal); err != nil {
-			return transaction, fmt.Errorf("%v; restoring the originals also failed (%v); they are kept in %s", cause, err, transaction)
+			return fmt.Errorf("%v; restoring the originals also failed (%v); they are kept in %s", cause, err, transaction)
 		}
-		return "", errors.Join(cause, writeJournal(filepath.Join(transaction, "complete.json"), map[string]string{"result": "rolled back"}))
+		return errors.Join(cause, removeTransaction(transaction))
 	}
 	for _, source := range p.sources {
 		target := filepath.Join(transaction, "original", filepath.FromSlash(source))
@@ -400,23 +414,18 @@ func (p *unitPlan) publish(backups string) (string, error) {
 			for j := i - 1; j >= 0; j-- {
 				back := journal.Publish[j]
 				if undo := renameNoReplace(p.abs(back.Destination), filepath.Join(transaction, filepath.FromSlash(back.Stage))); undo != nil {
-					return transaction, fmt.Errorf("publishing %s failed (%v) and could not be undone (%v); run migrate-overrides again to finish", target.Destination, err, undo)
+					return fmt.Errorf("publishing %s failed (%v) and could not be undone (%v); run migrate-overrides again to finish", target.Destination, err, undo)
 				}
 			}
 			if undo := os.Remove(filepath.Join(transaction, "verified.json")); undo != nil {
-				return transaction, fmt.Errorf("publishing %s failed (%v); run migrate-overrides again to finish", target.Destination, err)
+				return fmt.Errorf("publishing %s failed (%v); run migrate-overrides again to finish", target.Destination, err)
 			}
 			return restore(err)
 		}
 		migrationCheckpoint("published:" + target.Destination)
 	}
-	if err := removeEmptyFolders(filepath.Join(transaction, "stage")); err != nil {
-		return transaction, err
-	}
-	if err := writeJournal(filepath.Join(transaction, "complete.json"), map[string]string{"result": "published"}); err != nil {
-		return transaction, err
-	}
-	return transaction, nil
+	migrationCheckpoint("committed")
+	return removeTransaction(transaction)
 }
 
 func migrateOverrides(dataRoot, doom string) (overrideMigration, error) {
@@ -485,11 +494,10 @@ func migrateOverrides(dataRoot, doom string) (overrideMigration, error) {
 	}
 	report.Notes = append(report.Notes, overlapNotes(plans, changed)...)
 	for _, plan := range changed {
-		transaction, err := plan.publish(backups)
-		if err != nil {
+		if err := plan.publish(backups); err != nil {
 			return report, fmt.Errorf("%s: %w", plan.unit.rel, err)
 		}
-		report.Converted = append(report.Converted, convertedOverride{plan.unit.rel, transaction})
+		report.Converted = append(report.Converted, convertedOverride{plan.unit.rel})
 		report.Notes = append(report.Notes, plan.notes...)
 	}
 	return report, nil
@@ -600,7 +608,7 @@ func printOverrideMigration(report overrideMigration) {
 	fmt.Printf("Overrides: %d converted, %d already current, %d need attention.\n",
 		len(report.Converted), report.Unchanged, len(report.Rejected))
 	for _, c := range report.Converted {
-		fmt.Printf("  ~ converted %s (originals kept in %s)\n", c.Package, filepath.Join(c.Backup, "original"))
+		fmt.Printf("  ~ converted %s\n", c.Package)
 	}
 	for _, reason := range report.Rejected {
 		fmt.Printf("  ! left unchanged: %s\n", reason)

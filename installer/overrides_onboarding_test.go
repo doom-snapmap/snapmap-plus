@@ -60,10 +60,9 @@ func verifyOriginalOnboarding(t *testing.T, doom string, files map[string]string
 		if all[prefix+"assets/"+name] != body {
 			t.Errorf("authored bytes were lost at %s", name)
 		}
-		backup := filepath.Join(report.Converted[0].Backup, "original", filepath.FromSlash(name))
-		if got := readF(t, backup); got != body {
-			t.Errorf("backup differs at %s", name)
-		}
+	}
+	if left := transactions(t, appDataDir()); len(left) != 0 {
+		t.Errorf("the committed conversion left transactions behind: %v", left)
 	}
 	if err := validateDescriptor([]byte(all[prefix+"package.json"])); err != nil {
 		t.Fatal(err)
@@ -72,7 +71,7 @@ func verifyOriginalOnboarding(t *testing.T, doom string, files map[string]string
 	if err != nil || len(again.Converted) != 0 || len(again.Rejected) != 0 {
 		t.Fatalf("migration was not idempotent: %v, %+v", err, again)
 	}
-	t.Logf("verified %d original files, their backups, current descriptor and repeat migration", len(files))
+	t.Logf("verified %d original files, the current descriptor and the repeat migration", len(files))
 }
 
 // Private acceptance against supplied archives. No user or game bytes are

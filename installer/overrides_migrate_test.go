@@ -30,9 +30,8 @@ func TestOverrideIdentityNormalization(t *testing.T) {
 	if lib.read("Boss Collection/assets/generated/model/boss.bmodel") != "exact authored bytes" {
 		t.Fatal("normalization changed an asset")
 	}
-	backups := transactions(t, lib.data)
-	if len(backups) != 1 || readF(t, filepath.Join(backups[0], "original", "Boss Collection", "package.json")) != original {
-		t.Fatal("original descriptor backup was not retained")
+	if len(transactions(t, lib.data)) != 0 {
+		t.Fatal("a committed conversion left its transaction behind")
 	}
 	before := treeOf(t, lib.root)
 	again := lib.migrate()
@@ -232,7 +231,6 @@ func TestOverrideMigrationConvertsMarkedLegacyPackage(t *testing.T) {
 		"old/child/assets/opaque.bin":                                "unchanged child",
 	}
 	lib.write(files)
-	original := treeOf(t, lib.path("old"))
 	report := lib.migrate()
 	if len(report.Converted) != 1 || len(report.Rejected) != 0 {
 		t.Fatalf("report: %+v", report)
@@ -290,8 +288,9 @@ func TestOverrideMigrationConvertsMarkedLegacyPackage(t *testing.T) {
 		d.member("hud").member("weapons").member("weapon/zion/player/sp/pistol") == nil {
 		t.Fatalf("policy not folded:\n%s", descriptor)
 	}
-	backup := filepath.Join(report.Converted[0].Backup, "original", "old")
-	sameTree(t, treeOf(t, backup), original, "retained original")
+	if len(transactions(t, lib.data)) != 0 {
+		t.Fatal("a committed conversion left its transaction behind")
+	}
 	if !strings.Contains(strings.Join(report.Notes, "\n"), "retired priority 5") {
 		t.Fatalf("priority change not reported: %v", report.Notes)
 	}
@@ -535,11 +534,10 @@ func TestOverrideMigrationRecoversFromEveryBoundary(t *testing.T) {
 		"maps/game/x.entities":             "entities",
 		"maps/empty/":                      "",
 	}
-	for _, point := range []string{"journaled", "moved:generated", "moved:maps", "verified", "published:my-overrides"} {
+	for _, point := range []string{"journaled", "moved:generated", "moved:maps", "verified", "published:my-overrides", "committed"} {
 		t.Run(point, func(t *testing.T) {
 			lib := newOverrideLibrary(t, fakeRecord{kind: "mapEntities", name: "x", path: "maps/game/x.entities", body: "stock"})
 			lib.write(files)
-			original := treeOf(t, lib.root)
 			if !crashAt(t, lib, point) {
 				t.Fatal("checkpoint not reached")
 			}
@@ -555,20 +553,30 @@ func TestOverrideMigrationRecoversFromEveryBoundary(t *testing.T) {
 			if _, ok := got["my-overrides/assets/maps/empty/"]; !ok {
 				t.Fatal("empty folder lost")
 			}
-			var originals int
-			for _, transaction := range transactions(t, lib.data) {
-				if !exists(filepath.Join(transaction, "complete.json")) || exists(filepath.Join(transaction, "stage")) {
-					t.Fatalf("unfinished transaction left behind: %s", transaction)
-				}
-				if exists(filepath.Join(transaction, "original")) {
-					originals++
-					sameTree(t, treeOf(t, filepath.Join(transaction, "original")), original, "backup")
-				}
-			}
-			if originals != 1 {
-				t.Fatalf("%d complete backups, want 1", originals)
+			if left := transactions(t, lib.data); len(left) != 0 {
+				t.Fatalf("transactions left after recovery, want none: %v", left)
 			}
 		})
+	}
+}
+
+// A transaction an earlier release completed (complete.json) kept its originals
+// by that release's promise; recovery leaves it alone.
+func TestOverrideMigrationLeavesEarlierCompletedTransactions(t *testing.T) {
+	lib := newOverrideLibrary(t)
+	lib.write(map[string]string{"old/package.json": legacyMarker, "old/decls/entitydef/a.decl": "{ a }"})
+	legacy := filepath.Join(lib.data, "override-backups", "migration-00112233aabbccdd")
+	writeF(t, filepath.Join(legacy, "pending.json"), `{"unit":"gone","sources":["gone"],"publish":[]}`)
+	writeF(t, filepath.Join(legacy, "verified.json"), `{"sources":"verified"}`)
+	writeF(t, filepath.Join(legacy, "complete.json"), `{"result":"published"}`)
+	writeF(t, filepath.Join(legacy, "original", "gone", "package.json"), "an earlier release's backup")
+	report := lib.migrate()
+	if len(report.Converted) != 1 {
+		t.Fatalf("report: %+v", report)
+	}
+	left := transactions(t, lib.data)
+	if len(left) != 1 || left[0] != legacy || readF(t, filepath.Join(legacy, "original", "gone", "package.json")) != "an earlier release's backup" {
+		t.Fatalf("the earlier release's completed transaction was touched: %v", left)
 	}
 }
 
@@ -593,6 +601,9 @@ func TestOverrideMigrationRecoveryNeverOverwrites(t *testing.T) {
 	report := lib.migrate()
 	if len(report.Converted) != 1 || lib.read("old/assets/generated/decls/entitydef/a.decl") != "{ original }" {
 		t.Fatalf("recovery did not resume: %+v", report)
+	}
+	if len(transactions(t, lib.data)) != 0 {
+		t.Fatal("the resumed conversion left its transaction behind")
 	}
 }
 
