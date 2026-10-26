@@ -17,6 +17,16 @@ typedef void (*map_free_fn)(void *, void *, int);
 static sh_process_heap_api g_source_heap;
 static void **g_source_files;
 static void **g_source_memory;
+/* idFileSystem slots, read from the reader's own calls at install. Build
+ * 13954591 moved GetFileLength from +0x130 to +0x180 and ReadFile from +0xC0 to
+ * +0xF8 (seven and ten slots inserted before them); SnapMapReadSizeLimit's entry
+ * calls exactly these, so decoding them keeps this reader on the engine's own
+ * slots. The allocator's free is still slot 2 (+0x10). */
+#define SOURCE_LENGTH_CALL_OFF 0x3d   /* FF 90 disp32: call [rax+GetFileLength] */
+#define SOURCE_READ_CALL_OFF   0x8d   /* FF 90 disp32: call [rax+ReadFile] */
+#define SOURCE_MEMORY_FREE_SLOT 2
+static size_t g_source_length_slot;
+static size_t g_source_read_slot;
 
 static int source_error(char *error, size_t capacity, const char *message)
 {
@@ -30,12 +40,21 @@ static void **source_slot(const uint8_t *instruction)
     memcpy(&displacement, instruction + 3, sizeof(displacement));
     return (void **)(instruction + 7 + displacement);
 }
+/* A vtable slot index from `call qword ptr [rax+disp32]`, or 0 when the bytes differ. */
+static size_t source_call_slot(const uint8_t *instruction)
+{
+    int32_t displacement;
+    if (instruction[0] != 0xff || instruction[1] != 0x90) return 0;
+    memcpy(&displacement, instruction + 2, sizeof(displacement));
+    if (displacement <= 0 || displacement >= 0x400 || displacement % 8) return 0;
+    return (size_t)displacement / sizeof(void *);
+}
 int sh_map_source_install(const sig_result *results, size_t count, const uint8_t *module_base)
 {
     const sig_result *reader = NULL;
     sh_process_heap_api heap;
     void **files = NULL, **memory = NULL;
-    size_t i;
+    size_t i, length_slot = 0, read_slot = 0;
     if (!results || !module_base) return 0;
     for (i = 0; i < count; i++) if (results[i].name && !strcmp(results[i].name, "SnapMapReadSizeLimit")) {
         if (reader) return 0;
@@ -51,9 +70,13 @@ int sh_map_source_install(const sig_result *results, size_t count, const uint8_t
         const uint8_t *entry = (const uint8_t *)reader->addr - 0x43;
         memory = source_slot(entry + 0x1a);
         files = source_slot(entry + 0x2a);
-        if (!memory || !files || memory == files) return 0;
+        length_slot = source_call_slot(entry + SOURCE_LENGTH_CALL_OFF);
+        read_slot = source_call_slot(entry + SOURCE_READ_CALL_OFF);
+        if (!memory || !files || memory == files || !length_slot || !read_slot ||
+            length_slot == read_slot) return 0;
     } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
     g_source_heap = heap; g_source_files = files; g_source_memory = memory;
+    g_source_length_slot = length_slot; g_source_read_slot = read_slot;
     return 1;
 }
 
@@ -77,16 +100,16 @@ char *sh_map_source_read(const char *path, size_t *length, char *error, size_t c
         }
         files = *g_source_files; memory = *g_source_memory;
         if (!files || !memory) { source_error(error, capacity, "The native map filesystem is unavailable."); goto done; }
-        release = (map_free_fn)(*(void ***)memory)[2];
-        if (!release || !(*(void ***)files)[0xc0 / sizeof(void *)] ||
-            !(*(void ***)files)[0x130 / sizeof(void *)]) {
+        release = (map_free_fn)(*(void ***)memory)[SOURCE_MEMORY_FREE_SLOT];
+        if (!release || !g_source_read_slot || !g_source_length_slot ||
+            !(*(void ***)files)[g_source_read_slot] || !(*(void ***)files)[g_source_length_slot]) {
             source_error(error, capacity, "The native map filesystem methods are unavailable."); goto done;
         }
-        file_length = ((map_size_fn)(*(void ***)files)[0x130 / sizeof(void *)])(files, path, 4);
+        file_length = ((map_size_fn)(*(void ***)files)[g_source_length_slot])(files, path, 4);
         if (file_length <= 0 || file_length == INT_MAX) {
             source_error(error, capacity, "The cached map is missing or its native buffer length is not representable."); goto done;
         }
-        ((map_read_fn)(*(void ***)files)[0xc0 / sizeof(void *)])(files, path, &buffer, 0, 4);
+        ((map_read_fn)(*(void ***)files)[g_source_read_slot])(files, path, &buffer, 0, 4);
         /* ReadFile's byte-buffer length includes its added terminator. The
          * filesystem length does not. Require the complete advertised source
          * and exactly the native terminator, rejecting partial/changing reads. */

@@ -249,14 +249,19 @@ static long long ov_storage_zero_b(ov_stream *s) { (void)s; return 0; } /* [27] 
  * before the provider hook is published. Preserve slot order even where several
  * methods share an implementation.
  */
+/* Designated entries pin the shared slot names to their positions; the
+ * asserts fail the build if either side moves. */
+typedef char ov_slot_layout_check[(SH_IDFILE_SLOT_CLOSE == 0 && SH_IDFILE_SLOT_TRUE_FLAG == 2 &&
+                                   SH_IDFILE_SLOT_READ == 6 && SH_IDFILE_SLOT_LENGTH == 13 &&
+                                   SH_IDFILE_SLOT_SET_LENGTH == 14) ? 1 : -1];
 #define OV_SLOT_BASE_HELPER   10   /* +0x50 */
 #define OV_SLOT_READ_STRING   31   /* +0xf8 */
 #define OV_SLOT_COMPARE       32   /* +0x100 */
 #define OV_SLOT_WRITE_STRING  33   /* +0x108 */
 static void *g_stream_vtable[SH_OVERRIDES_STREAM_SLOTS] = {
-    (void *)ov_dtor,          /* 0  +0x00 close/dtor */
+    [SH_IDFILE_SLOT_CLOSE] = (void *)ov_dtor, /* 0  +0x00 close/dtor */
     (void *)ov_ret0_a,        /* 1  +0x08 */
-    (void *)ov_ret1,          /* 2  +0x10 native constant true */
+    [SH_IDFILE_SLOT_TRUE_FLAG] = (void *)ov_ret1, /* 2  +0x10 native constant true */
     (void *)ov_new_false,     /* 3  +0x18 inserted in 13954591; base returns false */
     /* +0x20 is GetName: idLexer copies this pointer into an idStr when
      * reading renderprogs and includes. GetLength is +0x68; returning a
@@ -264,15 +269,15 @@ static void *g_stream_vtable[SH_OVERRIDES_STREAM_SLOTS] = {
      */
     (void *)ov_name,          /* 4  +0x20 GetName -> name char* */
     (void *)ov_name,          /* 5  +0x28 GetFullPath -> name char* */
-    (void *)ov_read,          /* 6  +0x30 Read */
+    [SH_IDFILE_SLOT_READ] = (void *)ov_read, /* 6  +0x30 Read */
     (void *)ov_write,         /* 7  +0x38 Write */
     (void *)ov_seekread,      /* 8  +0x40 */
     (void *)ov_seekwrite,     /* 9  +0x48 Seek(ABS) + Write */
     NULL,                     /* 10 +0x50 inserted in 13954591; the engine's base helper, published at install */
     (void *)ov_lock,          /* 11 +0x58 Lock */
     (void *)ov_unlock,        /* 12 +0x60 Unlock */
-    (void *)ov_length_byseek, /* 13 +0x68 */
-    (void *)ov_set_length,    /* 14 +0x70 SetLength -> read-only failure */
+    [SH_IDFILE_SLOT_LENGTH] = (void *)ov_length_byseek, /* 13 +0x68 GetLength */
+    [SH_IDFILE_SLOT_SET_LENGTH] = (void *)ov_set_length, /* 14 +0x70 SetLength -> read-only failure */
     (void *)ov_tell,          /* 15 +0x78 Tell */
     (void *)ov_seek,          /* 16 +0x80 Seek */
     (void *)ov_printf_thunk,  /* 17 +0x88 vfprintf */
@@ -737,12 +742,12 @@ long long sh_overrides_test_stream_length(void *stream)
 
 int sh_overrides_test_stream_true_flag(void *stream)
 {
-    return (int)((long long(*)(ov_stream *))g_stream_vtable[2])((ov_stream *)stream);
+    return (int)((long long(*)(ov_stream *))g_stream_vtable[SH_IDFILE_SLOT_TRUE_FLAG])((ov_stream *)stream);
 }
 
 int sh_overrides_test_stream_set_length(void *stream, long long length)
 {
-    return ((int(*)(ov_stream *, long long))g_stream_vtable[14])((ov_stream *)stream, length);
+    return ((int(*)(ov_stream *, long long))g_stream_vtable[SH_IDFILE_SLOT_SET_LENGTH])((ov_stream *)stream, length);
 }
 
 size_t sh_overrides_test_stream_vtable_slots(void)
@@ -914,22 +919,24 @@ static unsigned char *read_installed_resource(const char *name, size_t *out_len)
         vt = *(void ***)f;
         if (!vt) return NULL;
 
-        len = ((ov_len_fn)vt[11])(f);                    /* +0x58 GetLength */
+        /* The 34-slot layout g_stream_vtable implements (R-012 scenario 5:
+         * the 2018 indices 11/5 read +0x58, which returns 0 on 13954591). */
+        len = ((ov_len_fn)vt[SH_IDFILE_SLOT_LENGTH])(f);
         if (len <= 0 || (unsigned long long)len > SH_SMNAV_MAX_PAYLOAD) {
-            ((ov_close_fn)vt[0])(f);
+            ((ov_close_fn)vt[SH_IDFILE_SLOT_CLOSE])(f);
             return NULL;
         }
         buf = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, (size_t)len);
         if (!buf) {
-            ((ov_close_fn)vt[0])(f);
+            ((ov_close_fn)vt[SH_IDFILE_SLOT_CLOSE])(f);
             return NULL;
         }
-        if (((ov_read_fn)vt[5])(f, buf, (uint64_t)len) != len) {   /* +0x28 Read */
+        if (((ov_read_fn)vt[SH_IDFILE_SLOT_READ])(f, buf, (uint64_t)len) != len) {
             HeapFree(GetProcessHeap(), 0, buf);
-            ((ov_close_fn)vt[0])(f);
+            ((ov_close_fn)vt[SH_IDFILE_SLOT_CLOSE])(f);
             return NULL;
         }
-        ((ov_close_fn)vt[0])(f);                         /* +0x00 close + free */
+        ((ov_close_fn)vt[SH_IDFILE_SLOT_CLOSE])(f);      /* close + free */
         if (out_len) *out_len = (size_t)len;
         return buf;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
@@ -941,6 +948,22 @@ static unsigned char *read_installed_resource(const char *name, size_t *out_len)
         return NULL;
     }
 }
+
+#ifdef SH_OVERRIDES_TESTING
+unsigned char *sh_overrides_test_read_installed(void *open_fn, void *provider,
+                                                const char *name, size_t *out_len)
+{
+    open_fn_t saved_open = g_orig_open;
+    void *saved_provider = g_provider_self;
+    unsigned char *result;
+    g_orig_open = (open_fn_t)open_fn;
+    g_provider_self = provider;
+    result = read_installed_resource(name, out_len);
+    g_orig_open = saved_open;
+    g_provider_self = saved_provider;
+    return result;
+}
+#endif
 
 /* Inputs to product transforms use the same published package result as a
  * direct engine read. Stay below Grid/navigation here so derived reads cannot

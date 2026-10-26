@@ -26,6 +26,17 @@
 #define SH_OVERRIDES_STREAM_SLOTS 34u
 #define SH_OVERRIDES_OPEN_SLOT    0x148u
 
+/* Slot indices of the 34-slot idFile layout that both the native streams the
+ * provider returns and this module's own stream use. 2018 used Read 5 (+0x28)
+ * and GetLength 11 (+0x58); 13954591 inserted slots at +0x18 and +0x50, moving
+ * them to 6 (+0x30) and 13 (+0x68). The engine's own ReadFile (idFileSystemLocal
+ * vtable +0xF8) calls exactly these. */
+#define SH_IDFILE_SLOT_CLOSE       0u    /* +0x00 destructor: close and free */
+#define SH_IDFILE_SLOT_TRUE_FLAG   2u    /* +0x10 native constant true */
+#define SH_IDFILE_SLOT_READ        6u    /* +0x30 Read(self, buffer, length) */
+#define SH_IDFILE_SLOT_LENGTH      13u   /* +0x68 GetLength(self) */
+#define SH_IDFILE_SLOT_SET_LENGTH  14u   /* +0x70 SetLength(self, length) */
+
 typedef struct sh_overrides_internal_decl_entry {
     const char *type;
     const char *name;
@@ -145,6 +156,10 @@ int sh_overrides_test_stream_true_flag(void *stream);
 int sh_overrides_test_stream_set_length(void *stream, long long length);
 size_t sh_overrides_test_stream_vtable_slots(void);
 void *sh_overrides_test_stream_vtable_slot(size_t index);
+/* Run read_installed_resource against a caller-supplied engine open and
+ * provider, restoring the installed ones afterwards. The result is HeapAlloc'd. */
+unsigned char *sh_overrides_test_read_installed(void *open_fn, void *provider,
+                                                const char *name, size_t *out_len);
 int sh_overrides_test_stream_helpers_configure(void *read_string, int read_clean,
                                                 void *compare, int compare_clean,
                                                 void *write_string, int write_clean);

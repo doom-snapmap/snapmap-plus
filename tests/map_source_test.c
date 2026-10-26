@@ -7,7 +7,7 @@
 static struct { unsigned char prefix[0x44]; int heaps[32], depth; } allocator;
 static DWORD owner_thread;
 static unsigned char image[256];
-static void *file_table[40], *memory_table[12];
+static void *file_table[64], *memory_table[12];
 static void **file_object = file_table, **memory_object = memory_table;
 static char *input;
 static size_t input_length;
@@ -53,13 +53,19 @@ static void emit_slot(size_t offset, size_t target)
     memcpy(image + offset, "\x48\x8b\x0d", 3);
     memcpy(image + offset + 3, &displacement, 4);
 }
+/* call qword ptr [rax+disp32], as SnapMapReadSizeLimit's entry does on 13954591. */
+static void emit_call(size_t offset, int32_t displacement)
+{
+    image[offset] = 0xff; image[offset + 1] = 0x90;
+    memcpy(image + offset + 2, &displacement, 4);
+}
 static void reset(void)
 {
     memset(&allocator, 0, sizeof(allocator)); allocator.depth = 1; allocator.heaps[0] = 2;
     owner_thread = GetCurrentThreadId(); reads = releases = pushes = pops = mode = borrowed = 0;
-    file_table[0xc0 / 8] = read_file; file_table[0x130 / 8] = file_size; memory_table[2] = release_file;
-    *(void **)(image + 128) = &memory_object;
-    *(void **)(image + 136) = &file_object;
+    file_table[0xf8 / 8] = read_file; file_table[0x180 / 8] = file_size; memory_table[2] = release_file;
+    *(void **)(image + 200) = &memory_object;
+    *(void **)(image + 208) = &file_object;
 }
 static void binding(void)
 {
@@ -67,17 +73,24 @@ static void binding(void)
     sig_result results[5] = {0};
     const char *names[] = {"SnapMapReadSizeLimit", "MemLocalGet", "MemLocalPushHeap", "MemLocalPopHeap"};
     void *addresses[] = {image + 0x43, get_heap, push_heap, pop_heap};
-    emit_slot(0x1a, 128); emit_slot(0x2a, 136);
+    emit_slot(0x1a, 200); emit_slot(0x2a, 208);
+    emit_call(SOURCE_LENGTH_CALL_OFF, 0x180); emit_call(SOURCE_READ_CALL_OFF, 0xf8);
     for (int i = 0; i < 4; i++) {
         results[i].name = names[i]; results[i].addr = (uintptr_t)addresses[i];
         results[i].rva = (uint32_t)((const uint8_t *)addresses[i] - base); results[i].status = SIG_OK;
     }
     assert(sh_map_source_install(results, 4, base));
-    assert(g_source_files == (void **)(image + 136) && g_source_memory == (void **)(image + 128));
+    assert(g_source_files == (void **)(image + 208) && g_source_memory == (void **)(image + 200));
+    /* The 13954591 slots come from the reader's own calls: GetFileLength +0x180, ReadFile +0xF8. */
+    assert(g_source_length_slot == 0x180 / 8 && g_source_read_slot == 0xf8 / 8);
+    image[SOURCE_READ_CALL_OFF + 1] = 0x50; assert(!sh_map_source_install(results, 4, base));
+    emit_call(SOURCE_READ_CALL_OFF, 0xfc); assert(!sh_map_source_install(results, 4, base));
+    emit_call(SOURCE_READ_CALL_OFF, 0x180); assert(!sh_map_source_install(results, 4, base));
+    emit_call(SOURCE_READ_CALL_OFF, 0xf8); assert(sh_map_source_install(results, 4, base));
     results[4] = results[0]; assert(!sh_map_source_install(results, 5, base));
     results[1].status = SIG_OK_HOOKED; assert(!sh_map_source_install(results, 4, base));
     results[1].status = SIG_OK; image[0x2a] = 0;
-    assert(!sh_map_source_install(results, 4, base)); emit_slot(0x2a, 136);
+    assert(!sh_map_source_install(results, 4, base)); emit_slot(0x2a, 208);
     assert(sh_map_source_install(results, 4, base));
 }
 static char *read_source(size_t *length, char error[256])

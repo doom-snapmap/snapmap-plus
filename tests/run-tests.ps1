@@ -186,6 +186,8 @@ $identityImages = @(@($da, $alt) | Where-Object { $_ })
 $tests += @{ name = "build_identity_test"; src = 'build_identity_test.c ..\src\backend\host_image.c ..\src\backend\signatures.c'; defs = '/DSH_HOST_IMAGE_TESTING'; arg = $identityImages }
 # Prologue length decoding; with images, the cs_dontuse stolen boundaries.
 $tests += @{ name = "x64_len_test"; src = 'x64_len_test.c ..\src\backend\x64_len.c ..\src\backend\signatures.c ..\src\backend\host_image.c'; defs = '/DSH_HOST_IMAGE_TESTING'; arg = $identityImages }
+# Native idFile / idFileSystem slots the backend calls, against the images.
+$tests += @{ name = "native_slots_test"; src = 'native_slots_test.c ..\src\backend\x64_len.c ..\src\backend\signatures.c ..\src\backend\host_image.c'; defs = '/DSH_HOST_IMAGE_TESTING'; arg = $identityImages }
 # Every fixed detour window against the images: boundary and relative operands.
 $tests += @{ name = "detour_windows_test"; src = 'detour_windows_test.c ..\src\backend\x64_len.c ..\src\backend\signatures.c ..\src\backend\host_image.c'; defs = '/DSH_HOST_IMAGE_TESTING'; arg = @(@((Join-Path $here '..')) + $identityImages) }
 # The proxy's exports against System32 XINPUT1_4.dll once build.ps1 has produced

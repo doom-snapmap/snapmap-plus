@@ -348,11 +348,92 @@ static void test_refresh_keeps_open_streams(void)
     sh_overrides_test_internal_decl_table_reset();
 }
 
+
+/* Native-stream slots: the backend reads installed resources through the
+ * 34-slot idFile layout of build 13954591 (Read +0x30, GetLength +0x68). The
+ * fake native stream answers only at those slots; the 2018 slots (+0x28 Read,
+ * +0x58 GetLength) return what the 2024 engine returns there: a field getter
+ * and 0. */
+static const char g_native_body[] = "entityDef stock_module { }";
+static int g_native_closed;
+typedef struct fake_native_stream { void **vtable; long long position; } fake_native_stream;
+static long long fake_stale_getter(fake_native_stream *s) { (void)s; return 0x1234; }
+static long long fake_stale_zero(fake_native_stream *s) { (void)s; return 0; }
+static long long fake_read(fake_native_stream *s, void *buffer, unsigned long long n)
+{
+    long long left = (long long)sizeof g_native_body - 1 - s->position;
+    long long take = (long long)n < left ? (long long)n : left;
+    memcpy(buffer, g_native_body + s->position, (size_t)take);
+    s->position += take;
+    return take;
+}
+static long long fake_length(fake_native_stream *s) { (void)s; return (long long)sizeof g_native_body - 1; }
+static void fake_close(fake_native_stream *s) { g_native_closed++; HeapFree(GetProcessHeap(), 0, s); }
+static void *g_fake_native_vtable[SH_OVERRIDES_STREAM_SLOTS];
+static void *g_open_provider;
+static unsigned int g_open_mode;
+static void *fake_native_open(void *self, const char *name, unsigned char b1, unsigned char b2,
+                              unsigned int mode)
+{
+    fake_native_stream *s;
+    (void)b1; (void)b2;
+    g_open_provider = self; g_open_mode = mode;
+    if (strcmp(name, "maps/modules/ind_dlc/ind_totally_blank_room_4x.decl")) return NULL;
+    s = (fake_native_stream *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof *s);
+    if (s) s->vtable = g_fake_native_vtable;
+    return s;
+}
+static const unsigned char g_own_body[] = "own stream body";
+static void *own_stream_open(void *self, const char *name, unsigned char b1, unsigned char b2,
+                             unsigned int mode)
+{
+    (void)self; (void)name; (void)b1; (void)b2; (void)mode;
+    return sh_overrides_test_memory_stream(g_own_body, sizeof g_own_body - 1);
+}
+
+static void test_native_stream_slots(void)
+{
+    int provider;
+    size_t len = 99;
+    unsigned char *data;
+    for (size_t i = 0; i < SH_OVERRIDES_STREAM_SLOTS; i++) g_fake_native_vtable[i] = (void *)fake_stale_zero;
+    g_fake_native_vtable[SH_IDFILE_SLOT_CLOSE] = (void *)fake_close;
+    g_fake_native_vtable[5] = (void *)fake_stale_getter;    /* 2018 Read slot (+0x28) */
+    g_fake_native_vtable[11] = (void *)fake_stale_zero;     /* 2018 GetLength slot (+0x58) */
+    g_fake_native_vtable[SH_IDFILE_SLOT_READ] = (void *)fake_read;
+    g_fake_native_vtable[SH_IDFILE_SLOT_LENGTH] = (void *)fake_length;
+
+    CHECK(SH_IDFILE_SLOT_READ == 6 && SH_IDFILE_SLOT_LENGTH == 13 && SH_IDFILE_SLOT_CLOSE == 0);
+    CHECK(SH_IDFILE_SLOT_READ * 8 == 0x30 && SH_IDFILE_SLOT_LENGTH * 8 == 0x68);
+
+    g_native_closed = 0;
+    data = sh_overrides_test_read_installed((void *)fake_native_open, &provider,
+                                            "maps/modules/ind_dlc/ind_totally_blank_room_4x.decl", &len);
+    CHECK(data != NULL);
+    CHECK(len == sizeof g_native_body - 1);
+    CHECK(data && !memcmp(data, g_native_body, sizeof g_native_body - 1));
+    CHECK(g_native_closed == 1);
+    CHECK(g_open_provider == &provider && g_open_mode == 2);
+    if (data) HeapFree(GetProcessHeap(), 0, data);
+
+    len = 99;
+    CHECK(sh_overrides_test_read_installed((void *)fake_native_open, &provider, "missing.decl", &len) == NULL);
+    CHECK(len == 0);
+
+    /* The module's own stream implements the same layout, so it reads back too. */
+    len = 0;
+    data = sh_overrides_test_read_installed((void *)own_stream_open, &provider, "any", &len);
+    CHECK(data != NULL && len == sizeof g_own_body - 1);
+    CHECK(data && !memcmp(data, g_own_body, sizeof g_own_body - 1));
+    if (data) HeapFree(GetProcessHeap(), 0, data);
+}
+
 int main(void)
 {
     test_internal_decl_table();
     test_file_stream_is_read_only();
     test_refresh_keeps_open_streams();
+    test_native_stream_slots();
     if (g_failed) {
         fprintf(stderr, "%d overrides internal-decl-table test(s) failed\n", g_failed);
         return 1;
