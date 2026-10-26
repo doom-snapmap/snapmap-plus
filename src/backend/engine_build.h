@@ -81,7 +81,7 @@ static __inline int sh_live_verify(void)
 #define SH_PENDING_DECL_SERVER        1
 #define SH_PENDING_DECL_SERVER_WHY    "decl outputs count +0x448, decl field +0xac (decl_server.c)"
 #define SH_PENDING_ENGINE_DIALOG      1
-#define SH_PENDING_ENGINE_DIALOG_WHY  "dialog parameter +0x26, actions 0x4a/0x4b (engine_dialog.c)"
+#define SH_PENDING_ENGINE_DIALOG_WHY  "dialog parameter +0x26, actions 0x4a/0x4b match 2018 in code; the prompt reaching the screen is unconfirmed (engine_dialog.c)"
 #define SH_PENDING_GRID_PROPERTIES    1
 #define SH_PENDING_GRID_PROPERTIES_WHY "properties action 0x50, editor field +0xac (grid_room_editor.c)"
 #define SH_PENDING_IFACE_MODULES      1

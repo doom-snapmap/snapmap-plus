@@ -20,6 +20,11 @@
 int sh_engine_dialog_install(const sig_result *results, size_t count,
                              const uint8_t *module_base);
 
+/* Live verification: when on, every raise logs our whole descriptor (fields
+ * and all 0x1B0 bytes) and the queue, and a descriptor that leaves the queue
+ * without a button logs what remains in it. */
+void sh_engine_dialog_set_trace(int on);
+
 /* 1 once the menu manager has been observed, i.e. the engine has raised at least
  * one dialog of its own this session. Nothing can be raised before that. */
 int sh_engine_dialog_ready(void);

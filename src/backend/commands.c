@@ -1735,7 +1735,10 @@ static void h_sh_dialogtest(idCmdArgs *a)
 {
     char text[256];
     int argc = cmd_argc(a);
-    unsigned gdm_id = 0x6Du;
+    /* The id the product's own prompts use (GDM_CONFIRM_VIDEO_CHANGES). The
+     * old default 0x6D is GDM_SNAPMAP_EDITOR_RESTART_MAP, a prompt the shell
+     * acts on. */
+    unsigned gdm_id = 0x29u;
     unsigned button_set = 1u;
     int first = 1, i;
     const char *lead = cmd_argv(a, 1);

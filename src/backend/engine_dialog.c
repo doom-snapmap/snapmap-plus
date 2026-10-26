@@ -20,6 +20,14 @@
 #include "engine_dialog.h"
 #include "hook.h"
 
+/* Build 13954591 keeps every value below. AddDialog (Vulkan 0x102E4E0),
+ * AddDialogWrapper (0xFCC6A0), ShowDialog (0x1034180) and the descriptor
+ * constructor (0x102DDF0) disassemble to the 2018 instruction streams apart
+ * from relocated targets and vtable slots: params +0x98 is still the source
+ * file, the GDM switch still has the same eight cases, the text object still
+ * sits at +0x18 with its length at +0x20, and DialogAction (0x1031CB0) still
+ * sends actions 0x4a and 0x4b to its close-only case. */
+
 /* Descriptor layout (RE: copy ctor 0xE640D0, dtor 0xE63CE0, ShowDialog 0xE6A260). */
 #define ED_DESC_STRIDE        0x1B0u
 #define ED_DESC_GDM_ID        0x00u   /* int   */
@@ -106,6 +114,87 @@ static volatile LONG g_ticket;
 static volatile LONG g_pending_id = -1;
 static char          g_pending_key[256];
 static volatile LONG g_injected;
+static int           g_trace;   /* live verification: log whole descriptors */
+
+static int ed_read_int(const void *base, unsigned offset, int *out);
+static int ed_read_byte(const void *base, unsigned offset, unsigned char *out);
+
+void sh_engine_dialog_set_trace(int on)
+{
+    g_trace = on != 0;
+}
+
+/* Log one descriptor in full: decoded fields, then all 0x1B0 bytes in hex. */
+static void ed_trace_descriptor(const void *descriptor, const char *when)
+{
+    char line[160];
+    const unsigned char *bytes = (const unsigned char *)descriptor;
+    unsigned off;
+    int id = 0, buttons = 0, text_len = 0;
+    unsigned char cleared = 0, wait_clear = 0;
+    if (!g_trace || !descriptor) return;
+    (void)ed_read_int(descriptor, ED_DESC_GDM_ID, &id);
+    (void)ed_read_int(descriptor, ED_DESC_BUTTON_SET, &buttons);
+    (void)ed_read_int(descriptor, ED_DESC_TEXT_LENGTH, &text_len);
+    (void)ed_read_byte(descriptor, ED_DESC_CLEARED, &cleared);
+    (void)ed_read_byte(descriptor, ED_DESC_WAIT_CLEAR, &wait_clear);
+    _snprintf_s(line, sizeof line, _TRUNCATE,
+                "VERIFY engine-dialog descriptor %p %s: gdm=%d buttons=%d textLen=%d cleared=%u waitClear=%u",
+                descriptor, when, id, buttons, text_len, (unsigned)cleared, (unsigned)wait_clear);
+    backend_log(line);
+    for (off = 0; off < ED_DESC_STRIDE; off += 32) {
+        int n = _snprintf_s(line, sizeof line, _TRUNCATE, "VERIFY engine-dialog   +%03X:", off);
+        unsigned k;
+        __try {
+            for (k = 0; k < 32 && off + k < ED_DESC_STRIDE && n > 0; k++)
+                n += _snprintf_s(line + n, sizeof line - (size_t)n, _TRUNCATE, " %02X", bytes[off + k]);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            backend_log("VERIFY engine-dialog   descriptor became unreadable");
+            return;
+        }
+        backend_log(line);
+    }
+}
+
+/* Log every queued descriptor's id and flags, so a dialog the engine queued
+ * in front of or instead of ours is visible. */
+static void *ed_manager(void);
+
+static void ed_trace_queue(const char *when)
+{
+    char line[192];
+    void *mgr;
+    const unsigned char *queue = NULL;
+    int count = 0, active = -1, i;
+    if (!g_trace) return;
+    mgr = ed_manager();
+    if (!mgr) { backend_log("VERIFY engine-dialog queue: no manager"); return; }
+    __try {
+        queue = *(const unsigned char *const *)((const uint8_t *)mgr + ED_MGR_QUEUE_PTR);
+        count = *(const int *)((const uint8_t *)mgr + ED_MGR_QUEUE_COUNT);
+        active = *((const unsigned char *)mgr + ED_MGR_ACTIVE);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        backend_log("VERIFY engine-dialog queue: unreadable");
+        return;
+    }
+    _snprintf_s(line, sizeof line, _TRUNCATE, "VERIFY engine-dialog queue %s: count=%d active=%d",
+                when, count, active);
+    backend_log(line);
+    if (!queue || count <= 0 || count > 64) return;
+    for (i = 0; i < count; i++) {
+        const void *desc = queue + (size_t)i * ED_DESC_STRIDE;
+        int id = -1, buttons = -1, text_len = -1;
+        unsigned char cleared = 0;
+        (void)ed_read_int(desc, ED_DESC_GDM_ID, &id);
+        (void)ed_read_int(desc, ED_DESC_BUTTON_SET, &buttons);
+        (void)ed_read_int(desc, ED_DESC_TEXT_LENGTH, &text_len);
+        (void)ed_read_byte(desc, ED_DESC_CLEARED, &cleared);
+        _snprintf_s(line, sizeof line, _TRUNCATE,
+                    "VERIFY engine-dialog   [%d] gdm=%d buttons=%d textLen=%d cleared=%u",
+                    i, id, buttons, text_len, (unsigned)cleared);
+        backend_log(line);
+    }
+}
 
 static const sig_result *ed_result(const sig_result *results, size_t count,
                                    const char *name)
@@ -408,6 +497,8 @@ int sh_engine_dialog_ask(unsigned gdm_id, unsigned button_set, const char *text)
                 "engine-dialog: raised gdm %u with buttons %u carrying '%s'",
                 gdm_id, button_set, text);
     backend_log(line);
+    ed_trace_descriptor(desc, "after the raise and text assignment");
+    ed_trace_queue("after the raise");
     return (int)InterlockedIncrement(&g_ticket);
 }
 
@@ -461,6 +552,7 @@ int sh_engine_dialog_poll(int ticket)
      */
     desc = ed_find_descriptor(id);
     if (!desc) {
+        ed_trace_queue("after ours left it");
         InterlockedExchange(&g_pending_id, -1);
         backend_log("engine-dialog: the dialog left the queue with no button dispatched; "
                     "treating that as declined");

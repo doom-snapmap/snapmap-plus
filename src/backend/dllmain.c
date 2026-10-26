@@ -494,6 +494,7 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
 
         /* Install native prompts before the decl server can raise a package dialog.
          * Failed binding leaves the OS message-box fallback available. */
+        sh_engine_dialog_set_trace(sh_live_verify());
         if (!feature_pending(SH_PENDING_ENGINE_DIALOG, "native prompts (OS message boxes remain)",
                              SH_PENDING_ENGINE_DIALOG_WHY))
             sh_engine_dialog_install(results, db, g_doom_base);
