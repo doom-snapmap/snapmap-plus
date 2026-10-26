@@ -173,7 +173,12 @@ A few practical notes:
   `%LOCALAPPDATA%\snapmap-plus`) is left untouched.
 - `snapmap-plus help` in a terminal lists everything else: `status`, `changelog`, `version`.
 
-What actually lands in your DOOM folder is small: `XINPUT1_3.dll` in the folder itself, and
+Snapmap+ supports the current DOOM 2016 on Steam (the April 2024 update). The installer checks
+which build you have before downloading anything; if your game is the older 2018 build, it installs
+v0.2.1-beta.19, the final Snapmap+ release for that build.
+
+What actually lands in your DOOM folder is small: `XINPUT1_4.dll` in the folder itself (`XINPUT1_3.dll`
+on the 2018 build), and
 `snapmap-plus-ui.dll` inside a `snapmap-plus\` subfolder. Everything is hash-verified before a single
 file is touched, and the installer keeps a record so uninstall reverses exactly what it placed. Your
 settings are separate: Snapmap+ creates `%LOCALAPPDATA%\snapmap-plus\config.json` the first time it

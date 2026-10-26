@@ -322,7 +322,7 @@ keeps package-dependent maps gated; registering a name alone is insufficient.
 
 ## Also in the backend
 
-Beyond the manifest entries above, the backend `XINPUT1_3.dll` also bundles **cvar-unlock**
+Beyond the manifest entries above, the backend `XINPUT1_4.dll` also bundles **cvar-unlock**
 (developer cvars and `+<cvar>` launch options), a fixed **XInput proxy** (controller input keeps
 working, connected or not), and the resident **fault-shield**. See [`README.md`](../README.md)
 and [`fidelity.md`](fidelity.md).

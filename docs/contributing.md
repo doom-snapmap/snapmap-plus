@@ -2,7 +2,7 @@
 
 Snapmap+ (repo `snapmap-plus`) is an open-source, clean-room reimplementation of **SnapHak** — Chrispy's closed-source modding
 tool for DOOM 2016's in-game **SnapMap** level editor. It builds to two drop-in Windows DLLs (a backend
-`XINPUT1_3.dll` and a WebView2/HTML frontend `snapmap-plus-ui.dll`) plus a Go installer (`snapmap-plus.exe`). This guide takes you
+`XINPUT1_4.dll` and a WebView2/HTML frontend `snapmap-plus-ui.dll`) plus a Go installer (`snapmap-plus.exe`). This guide takes you
 from a **fresh Windows machine** all the way to a built, tested change and an open pull request.
 
 If anything here is wrong, missing, or unclear, fixing it is itself a welcome PR.
@@ -80,7 +80,7 @@ cd snapmap-plus
 powershell -NoProfile -ExecutionPolicy Bypass -File build.ps1
 ```
 
-This compiles both DLLs into **`build/`**: the backend `XINPUT1_3.dll` and the frontend
+This compiles both DLLs into **`build/`**: the backend `XINPUT1_4.dll` and the frontend
 `build/webview/snapmap-plus-ui.dll` (the WebView2 SDK is auto-fetched from NuGet on the first build). `build/`
 is gitignored. (`build.ps1` first builds the backend, then the frontend, so the two never drift out of ABI
 sync; their shared ABI is declared in `src/common/snapmap_plus_iface.h`.)
@@ -156,14 +156,15 @@ concurrent quotas, persistence and uploads against local storage and a GitHub
 mock. See [tests/README.md](../tests/README.md) for its pinned dependency and
 command. CI runs both the normal suite and the Worker runtime suite.
 
-Three more tests scan a **real DOOM image** — an executable that's been unpacked from its Steam DRM wrapper
-(e.g. with Steamless). **Running these is REQUIRED if you add or change any entry in the engine signature
-table** in `src/backend/signatures.c` **or in the engine-globals table** — they are the only thing that
-checks a `known_rva`, and CI cannot run them (it has no game image), so a green CI does not cover you:
+Three more tests scan a **real DOOM image** — the executables of the supported build (the April 2024
+update, Steam build 13954591; they are not DRM-wrapped, so use the shipped files). **Running these is
+REQUIRED if you add or change any entry in the engine signature table** in `src/backend/signatures.c` **or
+in the engine-globals table** — they are the only thing that checks a recorded RVA, and CI cannot run them
+(it has no game image), so a green CI does not cover you:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File tests\run-tests.ps1 -Doom C:\path\to\unpacked-DOOMx64vk.exe
-#   sig_test     -- every engine signature resolves to its known RVA
+powershell -NoProfile -ExecutionPolicy Bypass -File tests\run-tests.ps1 -Doom C:\path\to\DOOMx64vk.exe
+#   sig_test     -- every engine signature resolves to its recorded RVA for this renderer
 #   hooktol_test -- the resolver's hook-tolerant fallback (prologue-clobbered functions)
 #   globals_test -- every engine data global resolves, and its layout invariants hold
 ```
@@ -172,7 +173,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tests\run-tests.ps1 -Doom C:
 
 **DOOM 2016 ships two executables, and Snapmap+ has to work in both.** `DOOMx64vk.exe` (Vulkan) and
 `DOOMx64.exe` (OpenGL) are built from one source tree and linked one second apart; their import tables are
-identical except for `vulkan-1.dll` vs `OPENGL32.dll`, both import `XINPUT1_3.dll`, and the game
+identical except for `vulkan-1.dll` vs `OPENGL32.dll`, both import `XINPUT1_4.dll`, and the game
 *relaunches itself into the other one* when the `r_renderAPI` cvar changes (`0` = OpenGL, `1` = Vulkan).
 There is no separate launcher binary and no Steam launch option that picks a renderer, so a player can land
 in either from a single launch and we get loaded into whichever it is. Verify structure layouts in both
@@ -180,12 +181,12 @@ images as well as addresses: the render-model list, for example, begins 64 bytes
 Code and data addresses also move by different amounts, with no uniform delta between executables.
 
 So: **a resolver that works on one image is not finished until it works on the other.** Point `-DoomAlt` at
-the second unpacked executable and the suite re-runs `sig_test` and `globals_test` against it in portable
-mode, where the expected RVA is not checked but *uniqueness* is:
+the second executable and the suite re-runs `sig_test` and `globals_test` against it, requiring uniqueness
+and that renderer's own recorded RVA:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File tests\run-tests.ps1 `
-  -Doom C:\path\to\unpacked-DOOMx64vk.exe -DoomAlt C:\path\to\unpacked-DOOMx64.exe
+  -Doom C:\path\to\DOOMx64vk.exe -DoomAlt C:\path\to\DOOMx64.exe
 ```
 
 The runner reports the current signature and engine-global counts and requires
@@ -207,20 +208,20 @@ writing a pattern that short, get more bytes or anchor on something the function
 
 This matters more than it looks, and it is easy to get wrong without noticing.
 
-Every `known_rva` in the signature table and every `pinned_rva` in the engine-globals table comes from
-**one** image — the SteamStub-wrapped `DOOMx64vk.exe` with SHA256
-`139763E94F1A75B5310179F9EEEB8A949A1F53C49ACBC722FCFC5DFE7BB6D323`. That is **not** the build Steam
-currently ships, and it is not the OpenGL executable either. If your Ghidra project, your debugger, or your
-unpacked image is anything else, every raw address you read is for a different image and must be translated
-before it goes into `known_rva` or a call site. There is no single offset that converts between them: a
+Every `rva_vk`/`rva_gl` in the signature table and the engine-globals table comes from the two
+executables of build 13954591 — `DOOMx64vk.exe` (SHA256
+`3D8B4393649F80BDAE85C19AE2C985C45EC9AC54F74AB04A18816E30EAD63C21`) and `DOOMx64.exe` (SHA256
+`1BDDECAA4E86850412F96E3117978BCE1EC7BB701AE1B5A33120C21E4421E51E`), each for its own column. If your
+Ghidra project, your debugger, or your image is anything else (the 2018 build, for example), every raw
+address you read is for a different image and must be re-derived before it goes into the table or a call
+site. There is no single offset that converts between them: a
 different build is a cluster-wise re-link, so different functions move by different — and sometimes
 opposite-signed — amounts.
 
 Normal resolution scans function bytes or decodes a global's RIP-relative code
 anchor. Raw-RVA fallbacks require an exact SHA-256 match of the process's backing
-executable against the reference hashes in `host_image.c`. This recognizes the
-wrapped reference and its verified unpacked copy without depending on code bytes
-that installed hooks have changed. The hook-tolerant fallback also requires a
+executable against `SH_KNOWN_BUILDS` in `host_image.c`, and use that renderer's
+column, without depending on code bytes that installed hooks have changed. The hook-tolerant fallback also requires a
 recognized detour and at least six matching fixed tail bytes. Portable scans
 remain available on other supported images; an unverified file cannot authorize
 a raw-RVA fallback.
@@ -471,7 +472,7 @@ release. **Do not open a public issue for a security problem.** Use GitHub's **p
 
 | Path | What |
 |---|---|
-| `src/backend/` | the backend DLL (`XINPUT1_3.dll`): the hook layer, console commands, cvars, persistent configuration, cvar-unlock, the resident fault-shield |
+| `src/backend/` | the backend DLL (`XINPUT1_4.dll`): the hook layer, console commands, cvars, persistent configuration, cvar-unlock, the resident fault-shield |
 | `src/ui/` | the frontend DLL (`snapmap-plus-ui.dll`): the WebView2 host, HTML page, styles, declaration module and native message codecs |
 | `src/fault_shield/` | the recover-in-place vectored-exception fault shield (compiled into the backend) |
 | `src/common/` | the shared backend↔frontend interface ABI (`snapmap_plus_iface.h`) |
@@ -491,9 +492,9 @@ release. **Do not open a public issue for a security problem.** Use GitHub's **p
 - **The original SnapHak / "OG"** — Chrispy's closed-source tool that this project reimplements clean-room.
   **"The clone"** — this project's reimplementation.
 - **The overlay** — the two files that deploy into a DOOM install (the backend + frontend DLLs).
-- **Backend / frontend** — the backend `XINPUT1_3.dll` (the engine-side hook layer) and the frontend
+- **Backend / frontend** — the backend `XINPUT1_4.dll` (the engine-side hook layer) and the frontend
   `snapmap-plus-ui.dll` (the WebView2/HTML UI); they talk over the interface ABI in `src/common/`.
-- **`XINPUT1_3.dll` / ordinals** — the backend ships as an XInput proxy DLL DOOM already loads. It must export
+- **`XINPUT1_4.dll` / ordinals** — the backend ships as an XInput proxy DLL DOOM already loads. It must export
   `XInputGetState` / `XInputSetState` at ordinals **2 / 3** (DOOM imports them *by ordinal*) and forwards every
   XInput call through to the real `System32` DLL, so the controller keeps working.
 - **RVA** — relative virtual address: an offset into the DOOM image. **Signature ("sig") resolve** — locating

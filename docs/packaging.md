@@ -8,7 +8,7 @@ gitignored (binaries are never committed).
 
 | File | Source | What |
 |---|---|---|
-| `XINPUT1_3.dll` | `build/` | the backend: XInput proxy + hook layer + cvar-unlock + fault-shield + the SnapStack subsystem (all merged in) |
+| `XINPUT1_4.dll` | `build/` | the backend: XInput proxy + hook layer + cvar-unlock + fault-shield + the SnapStack subsystem (all merged in) |
 | `snapmap-plus\snapmap-plus-ui.dll` | `build/webview/` | the frontend: the Snapmap+ UI, rendered in a Microsoft Edge **WebView2** control (HTML/CSS/JS), with the HTML embedded in the DLL |
 
 Plus `MANIFEST.sha256` (the installer's file list + per-file hash verify). **Nothing else ships** — the
@@ -24,7 +24,7 @@ overlay remains the same two DLLs. Configuration is runtime-owned and installer-
 
 ```
 <DOOM install root>/            # the folder with DOOMx64vk.exe and DOOMx64.exe
-├── XINPUT1_3.dll
+├── XINPUT1_4.dll
 └── snapmap-plus/
     └── snapmap-plus-ui.dll
 ```
@@ -44,7 +44,7 @@ auto under `--yes`). This never blocks the mod install — the DLLs deploy regar
 
 ## What's deliberately NOT shipped
 
-- **`dinput8.dll`** — the cvar-unlock is merged into the backend `XINPUT1_3.dll` instead of riding a second
+- **`dinput8.dll`** — the cvar-unlock is merged into the backend `XINPUT1_4.dll` instead of riding a second
   proxy DLL; DOOM loads the real `System32\dinput8.dll`.
 - **`winmm.dll`** — the fault-shield is merged into the backend too; DOOM loads the real
   `System32\winmm.dll`. (Never ship a `winmm.dll`: a stub shadowing System32's copy kills the launch
@@ -69,31 +69,35 @@ installer's executable and `install.json` record. The installer never rewrites i
 update, uninstall, and reinstall; deleting it yourself resets preferences because the backend recreates
 defaults on the next startup.
 
-## Build-target anchor (portability)
+## Supported build and the final 2018 release
 
-The clone is built against a specific DOOM release, and that release ships **two** executables built from
-one source tree and linked one second apart: `DOOMx64vk.exe` (Vulkan) and `DOOMx64.exe` (OpenGL). The game
-relaunches itself into the other one when the `r_renderAPI` cvar changes, so a player can be in either from
-one launch. Both are supported by the same Snapmap+ build; the backend resolves the host process image
-rather than looking for a name.
-
-The hash below identifies the Vulkan executable, which is the image every `known_rva` in
-`src/backend/signatures.c` and every `pinned_rva` in the engine-globals table was extracted from:
+Snapmap+ targets one DOOM 2016 release: the April 2024 update, Steam build 13954591. It
+ships **two** executables built from one source tree, `DOOMx64vk.exe` (Vulkan) and
+`DOOMx64.exe` (OpenGL); the game relaunches itself into the other one when the
+`r_renderAPI` cvar changes, so a player can be in either from one launch. Both are
+supported by the same Snapmap+ build. They are not SteamStub-wrapped, and both import
+`XINPUT1_4.dll`:
 
 ```
-DOOMx64vk.exe  SHA256  139763E94F1A75B5310179F9EEEB8A949A1F53C49ACBC722FCFC5DFE7BB6D323
+DOOMx64vk.exe  SHA256  3D8B4393649F80BDAE85C19AE2C985C45EC9AC54F74AB04A18816E30EAD63C21
+DOOMx64.exe    SHA256  1BDDECAA4E86850412F96E3117978BCE1EC7BB701AE1B5A33120C21E4421E51E
 ```
 
-Recorded RVAs support validation and re-derivation. Raw-RVA fallbacks require a
-matching backing-file SHA-256 in `host_image.c`. The hook-tolerant fallback also
-requires a recognized detour and matching signature tail. Other images use the
-portable scan paths; their filenames do not authorize reference addresses.
-The OpenGL executable from the same release has different addresses. The engine
-signatures and engine-globals anchors must resolve **uniquely on both images** — the `-DoomAlt` portability gate in
-`tests\run-tests.ps1`, described in [`contributing.md`](contributing.md).
+These are `SH_KNOWN_BUILDS` in `host_image.c`; the installer and `installer/install.ps1`
+carry the same digests (a Go test checks both). Every signature `rva_vk`/`rva_gl`, every
+globals-table RVA and every `SH_RVA` constant describes these two images; the two
+executables are separate links with no uniform delta between them.
 
-A DOOM update changes these hashes, which means a re-port (signature re-resolve + build-specific offset
-re-derive). The clone is built to survive that: engine functions are signature-resolved (fail-loud), data
-globals are resolved by decoding the RIP-relative displacement out of the signed code site that computes
-them, and build-specific offsets carry re-derive recipes. The auto-re-patcher that automates this on each
-DOOM update is future work.
+**v0.2.1-beta.19 is the final release for the 2018 build** (Steam build 2642713, whose
+SteamStub-wrapped executables are `DOOMx64vk.exe` 139763E94F1A75B5310179F9EEEB8A949A1F53C49ACBC722FCFC5DFE7BB6D323
+and `DOOMx64.exe` D46CA967824DA6FFC40F1CE0B6D7F4AFA868FE12B795124D3E31A1BDB646A8E5). The
+installer and `install.ps1` identify that build by those digests and install
+v0.2.1-beta.19 by tag, so that release and its assets (`install.ps1`, `snapmap-plus.exe`,
+`snapmap-plus-bundle.zip`, `snapmap-plus-symbols.zip`) must stay published unchanged.
+`release.yml` must never delete, rebuild or overwrite it; it refuses to run for that tag.
+The tag lives in one constant, `legacyReleaseTag` in `installer/doombuild.go` (mirrored in
+`install.ps1`).
+
+A future DOOM update changes these hashes, which means a re-port: re-derive the
+signatures and globals with `tools/signatures`, re-verify every engine offset, and update
+the digest tables. The backend refuses an unrecognized executable rather than guessing.

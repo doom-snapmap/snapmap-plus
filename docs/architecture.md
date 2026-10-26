@@ -19,10 +19,35 @@ in the snaphak-re findings system.
 | Installer | Verified deployment, migration, update and uninstall. | [Installer README](../installer/README.md) |
 | Website services | Community authentication/content and feedback relay. | [Services](services.md), [feedback](feedback.md) |
 
-The backend is an XInput proxy named `XINPUT1_3.dll`. It forwards controller calls
+The backend is an XInput proxy named `XINPUT1_4.dll`. It forwards controller calls
 to the system library and initializes the editor integration. The frontend is
 `snapmap-plus-ui.dll`. Both are built and deployed together; mixing their versions
 can call the wrong interface slot. See [packaging](packaging.md).
+
+## Supported DOOM build
+
+Snapmap+ supports one build of DOOM 2016: the April 2024 update, Steam build
+13954591. Its executables are not SteamStub-wrapped and import `XINPUT1_4.dll` by
+ordinals 2 and 3; `xinput1_4.def` pins the real System32 `XINPUT1_4.dll` ordinal
+set (named and unnamed), with the backend's private exports at 200 and up.
+
+`host_image.c` identifies the host by the SHA-256 of its executable file
+(`SH_KNOWN_BUILDS`: the Vulkan and OpenGL executables of build 13954591). Any other
+executable, the 2018 build included, is unsupported: the backend logs one line
+naming the supported build and the final 2018 release, then only forwards XInput.
+Every engine constant is a build 13954591 value: struct and slot offsets in
+`engine_build.h`, function RVAs as Vulkan/OpenGL pairs in the signature table, and
+global RVAs in the generated globals table. Raw RVAs are applied only on a
+recognized executable, for its own renderer, so no address can reach another image.
+A feature whose engine offsets are not yet verified for this build stays off and
+logs which values it waits for (`SH_PENDING_*` in `engine_build.h`); starting DOOM with
+the environment variable `SNAPMAP_PLUS_LIVE_VERIFY=1` runs those features for live verification.
+
+The installer routes by build before downloading anything: it hashes
+`DOOMx64vk.exe` and `DOOMx64.exe`, installs the current release on build 13954591,
+installs the final 2018 release `v0.2.1-beta.19` (by tag, exactly as that release
+installs itself) on the 2018 build, and refuses unrecognized or mixed executables.
+See [packaging](packaging.md#supported-build-and-the-final-2018-release).
 
 ## Engine resolution and patching
 
@@ -36,7 +61,7 @@ pattern cannot carry: the rawmap branch answer follows the call its candidate
 makes and reads the literal that callee names, because the sibling it must not
 patch differs only there.
 
-A raw-RVA fallback requires an exact fingerprint of a supported reference
+A raw-RVA fallback requires an exact fingerprint of a supported
 executable. The hook-tolerant fallback additionally checks the detour and remaining
 signature bytes. A filename or a readable address is not sufficient evidence.
 Contributor changes to signatures or anchors require the two-image test gate in

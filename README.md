@@ -74,13 +74,14 @@ powershell -NoProfile -ExecutionPolicy Bypass -File package.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File tests/run-tests.ps1
 ```
 
-The output is `build/XINPUT1_3.dll` and
+The output is `build/XINPUT1_4.dll` and
 `build/webview/snapmap-plus-ui.dll`; `package.ps1` assembles them in `dist/` with
 `MANIFEST.sha256`. Deploy a local build with
 `installer/snapmap-plus.exe install --local dist`.
 
 Engine signature and global-anchor changes require the two-image test gate:
-`tests/run-tests.ps1 -Doom <unpacked-image> -DoomAlt <other-renderer-image>`.
+`tests/run-tests.ps1 -Doom <DOOMx64vk.exe> -DoomAlt <DOOMx64.exe>` with the
+executables of the supported build (the April 2024 update, Steam build 13954591).
 The [test guide](docs/contributing.md#7-run-the-tests) covers installer and
 release-tool checks as well.
 
