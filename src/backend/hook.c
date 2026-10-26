@@ -14,7 +14,7 @@ static void write_absjmp(uint8_t *p, void *dest)
 }
 
 /* Fixed records retain original bytes and trampoline ownership until unpatch. */
-#define MAX_PATCHES 64
+#define MAX_PATCHES 128
 typedef struct patch_record {
     void   *target;            /* engine fn whose prologue we overwrote */
     void   *tramp;             /* the trampoline (also this record's identity key) */
@@ -27,15 +27,22 @@ typedef struct patch_record {
 
 static patch_record g_patches[MAX_PATCHES];
 static int          g_patch_count = 0;   /* high-water count of slots ever used */
+static const char  *g_last_failure = "none";
+
+const char *hook_last_failure(void) { return g_last_failure; }
 
 static void *prepare(void *target, void *detour, size_t stolen, size_t offset, int relocation)
 {
     uint8_t original[48];
     size_t emitted = stolen;
     uintptr_t call_target = 0;
-    if (!target || !detour || stolen < 14 || stolen > 48) return NULL;
+    if (!target || !detour || stolen < 14 || stolen > 48) {
+        g_last_failure = "bad argument or stolen length outside 14..48";
+        return NULL;
+    }
     __try { memcpy(original, target, stolen); }
-    __except (EXCEPTION_EXECUTE_HANDLER) { return NULL; }
+    __except (EXCEPTION_EXECUTE_HANDLER) { g_last_failure = "target unreadable"; return NULL; }
+    g_last_failure = "relocation form refused";
     if (relocation == 1) {
         const uint8_t *lea;
         if (offset > stolen - 7) return NULL;
@@ -54,17 +61,23 @@ static void *prepare(void *target, void *detour, size_t stolen, size_t offset, i
 
     patch_record *rec = NULL;
     for (int i = 0; i < g_patch_count; i++) {
-        if (g_patches[i].tramp && g_patches[i].target == target) return NULL;
+        if (g_patches[i].tramp && g_patches[i].target == target) {
+            g_last_failure = "target already owns a trampoline";
+            return NULL;
+        }
         if (!g_patches[i].patch.live && !g_patches[i].tramp) rec = &g_patches[i];
     }
     if (!rec) {
-        if (g_patch_count >= MAX_PATCHES) return NULL;
+        if (g_patch_count >= MAX_PATCHES) {
+            g_last_failure = "patch table full";
+            return NULL;
+        }
         rec = &g_patches[g_patch_count++];
     }
 
     uint8_t *tramp = (uint8_t *)VirtualAlloc(NULL, emitted + 14, MEM_COMMIT | MEM_RESERVE,
                                              PAGE_EXECUTE_READWRITE);
-    if (!tramp) return NULL;
+    if (!tramp) { g_last_failure = "trampoline allocation failed"; return NULL; }
     if (relocation == 1) {
         const uint8_t *lea = original + offset;
         int32_t displacement;
@@ -93,6 +106,7 @@ static void *prepare(void *target, void *detour, size_t stolen, size_t offset, i
     memcpy(rec->original, original, stolen);
     rec->installed = 0;
     memset(&rec->patch, 0, sizeof rec->patch);
+    g_last_failure = "none";
     return tramp;
 }
 

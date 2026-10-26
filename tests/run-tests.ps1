@@ -184,6 +184,8 @@ if ($DoomAlt) {
 # Executable identity and the raw-RVA gate; hashes the given images too.
 $identityImages = @(@($da, $alt) | Where-Object { $_ })
 $tests += @{ name = "build_identity_test"; src = 'build_identity_test.c ..\src\backend\host_image.c ..\src\backend\signatures.c'; defs = '/DSH_HOST_IMAGE_TESTING'; arg = $identityImages }
+# Prologue length decoding; with images, the cs_dontuse stolen boundaries.
+$tests += @{ name = "x64_len_test"; src = 'x64_len_test.c ..\src\backend\x64_len.c ..\src\backend\signatures.c ..\src\backend\host_image.c'; defs = '/DSH_HOST_IMAGE_TESTING'; arg = $identityImages }
 # The proxy's exports against System32 XINPUT1_4.dll once build.ps1 has produced
 # it (CI builds first); with images, also their XInput imports.
 $proxyDir = Join-Path (Resolve-Path (Join-Path $here '..')).Path 'build'

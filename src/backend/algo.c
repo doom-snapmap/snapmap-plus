@@ -9,6 +9,7 @@
 #include <math.h>
 #include <float.h>
 #include "algo.h"
+#include "x64_len.h"
 #include "commands.h"
 #include "patch.h"
 #include "signatures.h"
@@ -361,9 +362,14 @@ float sh_algo_curveeval(const void *c, float t, uint8_t mode)
 #define ALGO_SIG_PACK    "AlgoPackRGBA"
 #define ALGO_SIG_CURVE   "AlgoCurveEval"
 
-/* These hooks replace whole functions and never call their trampolines.
- * The 14-byte jump may cover relative instructions because none are replayed. */
-#define ALGO_STOLEN 14
+/* The stolen window ends on the first decoded instruction boundary at or past
+ * the 14-byte jump. MatMul, Inverse and PackRGBA replace whole functions and
+ * never run their trampolines, so a RIP-relative operand in their window is
+ * tolerated. CurveEval falls back to its trampoline for unsupported curve
+ * shapes, so its window must replay verbatim: no RIP-relative or relative
+ * branch instruction may fall inside it. */
+#define ALGO_JUMP_BYTES 14
+#define ALGO_STOLEN_MAX 32
 
 static const uint8_t *g_algo_module_base = NULL;
 static volatile LONG  g_algo_installed   = 0;
@@ -394,9 +400,11 @@ typedef uint32_t (*pack_fn)   (const float *);
 typedef float    (*curve_fn)  (const void *, float, uint8_t);
 
 
-static void *algo_prepare_one(const char *name, void *hook)
+static void *algo_prepare_one(const char *name, void *hook, int replays)
 {
     sig_result r;
+    size_t stolen = 0;
+    unsigned window = 0;
     if (!algo_resolve_sig(name, &r)) {
         char line[128];
         _snprintf_s(line, sizeof line, _TRUNCATE,
@@ -404,7 +412,21 @@ static void *algo_prepare_one(const char *name, void *hook)
         backend_log(line);
         return NULL;
     }
-    void *tr = sh_prepare_detour_sig(&r, hook, ALGO_STOLEN);
+    if (r.status == SIG_OK && r.addr) {
+        __try {
+            stolen = sh_x64_stolen_boundary((const uint8_t *)r.addr, ALGO_STOLEN_MAX,
+                                            ALGO_JUMP_BYTES, ALGO_STOLEN_MAX, &window);
+        } __except (EXCEPTION_EXECUTE_HANDLER) { stolen = 0; }
+        if (!stolen || (replays && (window & (SH_X64_RIP_RELATIVE | SH_X64_BRANCH_REL)))) {
+            char line[160];
+            _snprintf_s(line, sizeof line, _TRUNCATE,
+                "B2: snaphak_algo %s prologue refused (boundary %u, flags 0x%x)",
+                name, (unsigned)stolen, window);
+            backend_log(line);
+            return NULL;
+        }
+    }
+    void *tr = sh_prepare_detour_sig(&r, hook, stolen);
     if (!tr) {
         char line[160];
         _snprintf_s(line, sizeof line, _TRUNCATE,
@@ -430,10 +452,10 @@ void h_cs_dontuse(struct idCmdArgs *a)
     (void)a;
     if (!g_algo_on) {
 
-        g_tramp_matmul  = algo_prepare_one(ALGO_SIG_MATMUL,  (void *)(matmul_fn) sh_algo_matmul);
-        g_tramp_inverse = algo_prepare_one(ALGO_SIG_INVERSE, (void *)(inverse_fn)sh_algo_inverse);
-        g_tramp_pack    = algo_prepare_one(ALGO_SIG_PACK,    (void *)(pack_fn)   sh_algo_packrgba);
-        g_tramp_curve   = algo_prepare_one(ALGO_SIG_CURVE,   (void *)(curve_fn)  sh_algo_curveeval);
+        g_tramp_matmul  = algo_prepare_one(ALGO_SIG_MATMUL,  (void *)(matmul_fn) sh_algo_matmul, 0);
+        g_tramp_inverse = algo_prepare_one(ALGO_SIG_INVERSE, (void *)(inverse_fn)sh_algo_inverse, 0);
+        g_tramp_pack    = algo_prepare_one(ALGO_SIG_PACK,    (void *)(pack_fn)   sh_algo_packrgba, 0);
+        g_tramp_curve   = algo_prepare_one(ALGO_SIG_CURVE,   (void *)(curve_fn)  sh_algo_curveeval, 1);
 
         if (!g_tramp_matmul || !g_tramp_inverse || !g_tramp_pack || !g_tramp_curve ||
             sh_commit_detour(g_tramp_matmul) != B2_PATCH_OK ||

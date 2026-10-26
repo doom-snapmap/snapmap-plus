@@ -11,6 +11,9 @@
  * instructions: no RIP-relative operands or relative calls/jumps are relocated. */
 void *hook_prepare(void *target, void *detour, size_t stolen);
 
+/* Why the most recent preparation returned NULL ("none" after a success). */
+const char *hook_last_failure(void);
+
 /* Like hook_prepare, but expand one caller-verified 64-bit RIP-relative LEA
  * at lea_offset into MOV reg,imm64. All other stolen instructions must remain
  * whole and position-independent. Reject any other opcode/addressing form. */

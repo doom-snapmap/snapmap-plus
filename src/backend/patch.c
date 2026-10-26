@@ -298,9 +298,10 @@ void *sh_prepare_detour_sig(const sig_result *r, void *detour, size_t stolen)
     }
     void *tramp = hook_prepare((void *)r->addr, detour, stolen);
     if (!tramp) {
-        char line[128];
+        char line[192];
         _snprintf_s(line, sizeof line, _TRUNCATE,
-            "B2: prepare_detour_sig %s FAILED", r->name ? r->name : "?");
+            "B2: prepare_detour_sig %s FAILED (%s, stolen %u)", r->name ? r->name : "?",
+            hook_last_failure(), (unsigned)stolen);
         backend_log(line);
     }
     return tramp;
