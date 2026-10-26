@@ -42,7 +42,7 @@ func acquireBundle(f flags) (*bundle, func(), error) {
 		}
 		return b, noop, err
 	}
-	dir, tag, cleanup, err := downloadRelease(f)
+	dir, tag, cleanup, err := downloadReleaseFn(f)
 	if err != nil {
 		return nil, noop, err
 	}
@@ -126,6 +126,9 @@ type ghAsset struct {
 	BrowserDownloadURL string `json:"browser_download_url"` // public URL
 	Digest             string `json:"digest"`               // "sha256:<hex>" (may be empty)
 }
+
+// downloadReleaseFn is the download step; tests replace it so routing runs without a network.
+var downloadReleaseFn = downloadRelease
 
 // downloadRelease resolves the requested release (stable / --beta pre-release / --release tag), downloads
 // its snapmap-plus-bundle.zip asset (with the token if set), and extracts it into a temp dir.

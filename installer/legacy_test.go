@@ -49,11 +49,11 @@ func TestLegacyMigrationOnInstall(t *testing.T) {
 			t.Errorf("original-SnapHak file %q should be removed", rel)
 		}
 	}
-	if exists(filepath.Join(doom, "XINPUT1_3.dll.snapmap-plus-bak")) {
-		t.Error("the original's XINPUT1_3.dll must NOT be backed up as a genuine file")
+	if exists(filepath.Join(doom, "XINPUT1_3.dll.snapmap-plus-bak")) || exists(filepath.Join(doom, "XINPUT1_3.dll")) {
+		t.Error("the original's XINPUT1_3.dll must be removed, NOT backed up as a genuine file")
 	}
-	if got := readF(t, filepath.Join(doom, "XINPUT1_3.dll")); got != "backend-v1" {
-		t.Errorf("XINPUT1_3.dll = %q, want ours (%q)", got, "backend-v1")
+	if got := readF(t, filepath.Join(doom, "XINPUT1_4.dll")); got != "backend-v1" {
+		t.Errorf("XINPUT1_4.dll = %q, want ours (%q)", got, "backend-v1")
 	}
 	if exists(filepath.Join(doom, "snaphak", "snaphakui.dll")) {
 		t.Error("the original's snaphak\\snaphakui.dll should be removed (ours deploys under snapmap-plus\\)")
@@ -82,7 +82,7 @@ func TestLegacyMigrationOnInstall(t *testing.T) {
 	if err := cmdUninstall(flags{}); err != nil {
 		t.Fatalf("uninstall: %v", err)
 	}
-	for _, rel := range []string{"XINPUT1_3.dll", "snaphak", "snapmap-plus"} {
+	for _, rel := range []string{"XINPUT1_3.dll", "XINPUT1_4.dll", "snaphak", "snapmap-plus"} {
 		if exists(filepath.Join(doom, rel)) {
 			t.Errorf("after uninstall %q should be gone (vanilla DOOM ships no such path)", rel)
 		}
@@ -171,7 +171,7 @@ func TestLegacyBackupDropped(t *testing.T) {
 	if err := cmdUninstall(flags{}); err != nil {
 		t.Fatalf("uninstall: %v", err)
 	}
-	if exists(filepath.Join(doom, "XINPUT1_3.dll")) {
-		t.Error("after uninstall no XINPUT1_3.dll may remain (nothing genuine to restore)")
+	if exists(filepath.Join(doom, "XINPUT1_3.dll")) || exists(filepath.Join(doom, "XINPUT1_4.dll")) {
+		t.Error("after uninstall no proxy DLL may remain (nothing genuine to restore)")
 	}
 }

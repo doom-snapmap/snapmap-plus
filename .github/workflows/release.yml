@@ -23,6 +23,16 @@ jobs:
       # select a supported version from the build error and validate the new output.
       SNAPMAPPLUS_VCVARS_VER: '14.44.35207'
     steps:
+      - name: Keep the final 2018 release intact
+        shell: bash
+        run: |
+          # v0.2.1-beta.19 is the last release for the 2018 DOOM build; installers
+          # download it by tag for that build. This workflow must never rebuild,
+          # replace or delete it (see docs/packaging.md).
+          if [ "$GITHUB_REF_NAME" = "v0.2.1-beta.19" ]; then
+            echo "refusing to republish the final 2018 release v0.2.1-beta.19" >&2
+            exit 1
+          fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Read this release's notes
         shell: bash
@@ -58,14 +68,14 @@ jobs:
         run: |
           # Bundle the two DLLs and manifest; publish the installer separately.
           Compress-Archive -Force -DestinationPath snapmap-plus-bundle.zip `
-            -Path dist\XINPUT1_3.dll, dist\snapmap-plus, dist\MANIFEST.sha256
+            -Path dist\XINPUT1_4.dll, dist\snapmap-plus, dist\MANIFEST.sha256
       - name: Zip the debug symbols (maintainer artifact)
         shell: pwsh
         run: |
           # Publish PDB/MAP files separately for crash symbolization. Keep them out
           # of dist and MANIFEST.sha256 so the installer does not deploy them.
           $ErrorActionPreference = 'Stop'
-          $syms = @("build\XINPUT1_3.pdb", "build\XINPUT1_3.map",
+          $syms = @("build\XINPUT1_4.pdb", "build\XINPUT1_4.map",
                     "build\webview\snapmap-plus-ui.pdb", "build\webview\snapmap-plus-ui.map")
           foreach ($s in $syms) { if (-not (Test-Path $s)) { throw "missing symbol artifact: $s" } }
           Compress-Archive -Force -DestinationPath snapmap-plus-symbols.zip -Path $syms

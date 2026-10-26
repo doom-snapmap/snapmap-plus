@@ -21,14 +21,14 @@ func TestInstallUninstallRoundTrip(t *testing.T) {
 
 	// a pre-existing file to exercise backup/restore
 	writeF(t, filepath.Join(doom, "DOOMx64vk.exe"), "exe")
-	writeF(t, filepath.Join(doom, "XINPUT1_3.dll"), "ORIGINAL")
+	writeF(t, filepath.Join(doom, "XINPUT1_4.dll"), "ORIGINAL")
 
 	// a legacy root-level logs dir from an older install -- install must fold it into snapmap-plus\logs\
 	writeF(t, filepath.Join(doom, "snaphak_logs", "old_backend.log"), "old log")
 
 	// a synthetic dist with a MANIFEST.sha256 (matches package.ps1's "hash  relpath" format)
 	overlay := map[string]string{
-		"XINPUT1_3.dll": "backend",
+		"XINPUT1_4.dll": "backend",
 		filepath.Join("snapmap-plus", "snapmap-plus-ui.dll"): "ui",
 		filepath.Join("platforms", "qwindows.dll"):           "qt",
 	}
@@ -43,11 +43,11 @@ func TestInstallUninstallRoundTrip(t *testing.T) {
 	if err := cmdInstall(flags{doom: doom, local: dist}); err != nil {
 		t.Fatalf("install: %v", err)
 	}
-	if !exists(filepath.Join(doom, "XINPUT1_3.dll.snapmap-plus-bak")) {
-		t.Error("expected a backup of the pre-existing XINPUT1_3.dll")
+	if !exists(filepath.Join(doom, "XINPUT1_4.dll.snapmap-plus-bak")) {
+		t.Error("expected a backup of the pre-existing XINPUT1_4.dll")
 	}
-	if got := readF(t, filepath.Join(doom, "XINPUT1_3.dll")); got != "backend" {
-		t.Errorf("deployed XINPUT1_3.dll = %q, want %q", got, "backend")
+	if got := readF(t, filepath.Join(doom, "XINPUT1_4.dll")); got != "backend" {
+		t.Errorf("deployed XINPUT1_4.dll = %q, want %q", got, "backend")
 	}
 	if got := readF(t, filepath.Join(doom, "snapmap-plus", "logs", "old_backend.log")); got != "old log" {
 		t.Errorf("legacy log migrated = %q, want %q", got, "old log")
@@ -62,10 +62,10 @@ func TestInstallUninstallRoundTrip(t *testing.T) {
 	if err := cmdUninstall(flags{}); err != nil {
 		t.Fatalf("uninstall: %v", err)
 	}
-	if got := readF(t, filepath.Join(doom, "XINPUT1_3.dll")); got != "ORIGINAL" {
-		t.Errorf("after uninstall XINPUT1_3.dll = %q, want the restored %q", got, "ORIGINAL")
+	if got := readF(t, filepath.Join(doom, "XINPUT1_4.dll")); got != "ORIGINAL" {
+		t.Errorf("after uninstall XINPUT1_4.dll = %q, want the restored %q", got, "ORIGINAL")
 	}
-	for _, p := range []string{"snapmap-plus", "platforms", "XINPUT1_3.dll.snapmap-plus-bak"} {
+	for _, p := range []string{"snapmap-plus", "platforms", "XINPUT1_4.dll.snapmap-plus-bak"} {
 		if exists(filepath.Join(doom, p)) {
 			t.Errorf("expected %q removed after uninstall", p)
 		}
@@ -110,27 +110,27 @@ func TestUpdateDoesNotBackUpOwnDLL(t *testing.T) {
 	doom := filepath.Join(tmp, "DOOM")
 	mkdirAll(t, doom)
 	t.Setenv("LOCALAPPDATA", filepath.Join(tmp, "appdata"))
-	// A clean DOOM dir -- NO pre-existing XINPUT1_3.dll. Named for the OpenGL executable so the
+	// A clean DOOM dir -- NO pre-existing XINPUT1_4.dll. Named for the OpenGL executable so the
 	// install/update/uninstall lifecycle is exercised against that name too.
 	writeF(t, filepath.Join(doom, "DOOMx64.exe"), "exe")
 
 	if err := cmdInstall(flags{doom: doom, local: synthDist(t, tmp, "v1")}); err != nil {
 		t.Fatalf("install v1: %v", err)
 	}
-	if exists(filepath.Join(doom, "XINPUT1_3.dll.snapmap-plus-bak")) {
+	if exists(filepath.Join(doom, "XINPUT1_4.dll.snapmap-plus-bak")) {
 		t.Fatal("fresh install into a clean dir must not create a backup (there was no genuine file)")
 	}
 	if err := cmdInstall(flags{doom: doom, local: synthDist(t, tmp, "v2")}); err != nil { // an update
 		t.Fatalf("update: %v", err)
 	}
-	if exists(filepath.Join(doom, "XINPUT1_3.dll.snapmap-plus-bak")) {
+	if exists(filepath.Join(doom, "XINPUT1_4.dll.snapmap-plus-bak")) {
 		t.Error("update must not back up our own previously-installed DLL")
 	}
 	if err := cmdUninstall(flags{}); err != nil {
 		t.Fatalf("uninstall: %v", err)
 	}
-	if exists(filepath.Join(doom, "XINPUT1_3.dll")) {
-		t.Error("after uninstall a clean dir must have no XINPUT1_3.dll (nothing genuine to restore)")
+	if exists(filepath.Join(doom, "XINPUT1_4.dll")) {
+		t.Error("after uninstall a clean dir must have no XINPUT1_4.dll (nothing genuine to restore)")
 	}
 }
 
@@ -211,7 +211,7 @@ func synthDist(t *testing.T, dir, tag string) string {
 	t.Helper()
 	dist := filepath.Join(dir, "dist-"+tag)
 	overlay := map[string]string{
-		"XINPUT1_3.dll": "backend-" + tag,
+		"XINPUT1_4.dll": "backend-" + tag,
 		filepath.Join("snapmap-plus", "snapmap-plus-ui.dll"): "ui-" + tag,
 		filepath.Join("platforms", "qwindows.dll"):           "qt-" + tag,
 	}
@@ -267,17 +267,17 @@ func TestRunningGameRefusesInstallAndUninstall(t *testing.T) {
 	newDataDirs(t)
 	doom := filepath.Join(t.TempDir(), "DOOM")
 	writeF(t, filepath.Join(doom, "DOOMx64vk.exe"), "game")
-	writeF(t, filepath.Join(doom, "XINPUT1_3.dll"), "original")
+	writeF(t, filepath.Join(doom, "XINPUT1_4.dll"), "original")
 	if err := cmdInstall(flags{doom: doom, local: "missing-bundle"}); err == nil || !strings.Contains(err.Error(), "DOOM is running") {
 		t.Fatalf("install did not refuse the running game: %v", err)
 	}
-	if err := saveRecord(&installRecord{DoomPath: doom, Files: []string{"XINPUT1_3.dll"}}); err != nil {
+	if err := saveRecord(&installRecord{DoomPath: doom, Files: []string{"XINPUT1_4.dll"}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := cmdUninstall(flags{}); err == nil || !strings.Contains(err.Error(), "DOOM is running") {
 		t.Fatalf("uninstall did not refuse the running game: %v", err)
 	}
-	if got := readF(t, filepath.Join(doom, "XINPUT1_3.dll")); got != "original" {
+	if got := readF(t, filepath.Join(doom, "XINPUT1_4.dll")); got != "original" {
 		t.Fatalf("guard changed game files: %q", got)
 	}
 }

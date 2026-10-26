@@ -81,6 +81,15 @@ func cmdInstall(f flags) error {
 	if err != nil {
 		return err
 	}
+	// Identify the DOOM build before downloading anything: the supported build takes the
+	// requested release, the 2018 build takes the final release made for it.
+	build, err := detectDoomBuild(doom)
+	if err != nil {
+		return err
+	}
+	if f, err = routeRelease(f, build); err != nil {
+		return err
+	}
 	if checkDoomRunning() {
 		return fmt.Errorf("DOOM is running -- close it and run this again (Snapmap+'s files can't be replaced while the game has them open)")
 	}
@@ -89,6 +98,10 @@ func cmdInstall(f flags) error {
 		return err
 	}
 	defer cleanup()
+	if err := checkBundleForBuild(b.files, build); err != nil {
+		return err
+	}
+	files := b.files
 
 	// Keep the original backups across updates. Backing up an earlier Snapmap+ DLL
 	// would make uninstall restore the mod instead of the pre-install file.
@@ -112,12 +125,14 @@ func cmdInstall(f flags) error {
 	}
 	// Detect legacy files now; remove them only after confirmation.
 	legacy := detectLegacy(doom)
-	confirmMsg := fmt.Sprintf("About to install Snapmap+ %s into\n  %s\nContinue?", rec.Version, doom)
+	confirmMsg := fmt.Sprintf("About to install Snapmap+ %s for the %s DOOM build into\n  %s\nContinue?",
+		rec.Version, build.label, doom)
 	if len(legacy) > 0 {
 		fmt.Println("Found the original SnapHak in this DOOM folder. Snapmap+ replaces it, so its")
 		fmt.Printf("files (%d) will be removed. Your maps, prefabs and overrides under\n", len(legacy))
 		fmt.Printf("%%USERPROFILE%%\\snaphak are yours and are kept (they carry over).\n")
-		confirmMsg = fmt.Sprintf("About to remove the original SnapHak and install Snapmap+ %s into\n  %s\nContinue?", rec.Version, doom)
+		confirmMsg = fmt.Sprintf("About to remove the original SnapHak and install Snapmap+ %s for the %s DOOM build into\n  %s\nContinue?",
+			rec.Version, build.label, doom)
 	}
 	// FINAL gate -- runs only after every check passed (DOOM found, DOOM closed, bundle downloaded + verified).
 	if !f.yes && isInteractive() {
@@ -147,8 +162,8 @@ func cmdInstall(f flags) error {
 	for _, bk := range rec.Backups {
 		backedUp[bk.Rel] = true
 	}
-	fmt.Printf("Installing Snapmap+ into %s\n", doom)
-	for _, e := range b.files {
+	fmt.Printf("Installing Snapmap+ into %s (%s DOOM build)\n", doom, build.label)
+	for _, e := range files {
 		target := filepath.Join(doom, e.rel)
 		// Back up pre-existing files unless the prior record owns them or their bytes
 		// already match this bundle. Preserve earlier backups for uninstall.

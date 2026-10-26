@@ -724,7 +724,7 @@ func TestInstallConvertsOverridesBeforeReplacingRuntime(t *testing.T) {
 	if err := cmdInstall(flags{doom: doom, local: dist, yes: true}); err == nil {
 		t.Fatal("install continued after a failed conversion recovery")
 	}
-	if exists(filepath.Join(doom, "XINPUT1_3.dll")) {
+	if exists(filepath.Join(doom, "XINPUT1_4.dll")) {
 		t.Fatal("runtime replaced before the conversion failure was resolved")
 	}
 	if err := os.RemoveAll(filepath.Join(overrides, "my-overrides")); err != nil {
@@ -734,7 +734,7 @@ func TestInstallConvertsOverridesBeforeReplacingRuntime(t *testing.T) {
 		t.Fatalf("install after resolving the conflict: %v", err)
 	}
 	if readF(t, filepath.Join(overrides, "my-overrides", "assets", "generated", "decls", "entitydef", "mine.decl")) != "{ mine }" ||
-		!exists(filepath.Join(doom, "XINPUT1_3.dll")) {
+		!exists(filepath.Join(doom, "XINPUT1_4.dll")) {
 		t.Fatal("install did not convert and then deploy")
 	}
 }
