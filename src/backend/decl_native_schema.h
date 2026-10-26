@@ -30,8 +30,9 @@ int sh_decl_native_source_bind(sh_decl_native_source *source,
  * list before binding reflection. This distinguishes allocated reader tables
  * from completed registration. Returns 1 ready, 0 initializing, -1 invalid.
  * Source readers must run before system shutdown, as with schema_open. */
+/* game_system_slot holds the idGameSystemLocal pointer (engine_build.h). */
 int sh_decl_native_source_ready(sh_decl_native_source *source,
-    uintptr_t accessor, uintptr_t type_container, uintptr_t game_system_export);
+    uintptr_t accessor, uintptr_t type_container, uintptr_t game_system_slot);
 
 typedef struct sh_decl_dependency_observer {
     void *context;

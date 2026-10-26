@@ -135,19 +135,19 @@ static void test_internal_decl_table(void)
         CHECK(sh_overrides_test_address_in_readonly_section(base, NULL) == 0);
         CHECK(sh_overrides_test_address_in_readonly_section(NULL, base) == 0);
     }
-    CHECK(sh_overrides_test_stream_vtable_slots() == 31);
+    CHECK(sh_overrides_test_stream_vtable_slots() == 34);
     CHECK(sh_overrides_test_stream_vtable_slot(0) != NULL);
-    CHECK(sh_overrides_test_stream_vtable_slot(24) != NULL);
-    CHECK(sh_overrides_test_stream_vtable_slot(25) != NULL);
     CHECK(sh_overrides_test_stream_vtable_slot(26) != NULL);
     CHECK(sh_overrides_test_stream_vtable_slot(27) != NULL);
-    CHECK(((long long(*)(void *))sh_overrides_test_stream_vtable_slot(24))(NULL) == 0);
-    CHECK(((long long(*)(void *))sh_overrides_test_stream_vtable_slot(25))(NULL) == 1);
+    CHECK(sh_overrides_test_stream_vtable_slot(28) != NULL);
+    CHECK(sh_overrides_test_stream_vtable_slot(29) != NULL);
     CHECK(((long long(*)(void *))sh_overrides_test_stream_vtable_slot(26))(NULL) == 0);
-    CHECK(((long long(*)(void *))sh_overrides_test_stream_vtable_slot(27))(NULL) == 0);
-    CHECK(sh_overrides_test_stream_vtable_slot(28) == NULL);
-    CHECK(sh_overrides_test_stream_vtable_slot(29) == NULL);
-    CHECK(sh_overrides_test_stream_vtable_slot(30) == NULL);
+    CHECK(((long long(*)(void *))sh_overrides_test_stream_vtable_slot(27))(NULL) == 1);
+    CHECK(((long long(*)(void *))sh_overrides_test_stream_vtable_slot(28))(NULL) == 0);
+    CHECK(((long long(*)(void *))sh_overrides_test_stream_vtable_slot(29))(NULL) == 0);
+    CHECK(sh_overrides_test_stream_vtable_slot(31) == NULL);
+    CHECK(sh_overrides_test_stream_vtable_slot(32) == NULL);
+    CHECK(sh_overrides_test_stream_vtable_slot(33) == NULL);
 
     /* A dirty/missing helper refuses as one terminal publication: no tail slot can be observed
      * partially configured. */
@@ -155,18 +155,18 @@ static void test_internal_decl_table(void)
                                                       (void *)(uintptr_t)0x2222, 0,
                                                       (void *)(uintptr_t)0x3333, 1) == 0);
     CHECK(sh_overrides_test_stream_helpers_ready() == 0);
-    CHECK(sh_overrides_test_stream_vtable_slot(28) == NULL);
-    CHECK(sh_overrides_test_stream_vtable_slot(29) == NULL);
-    CHECK(sh_overrides_test_stream_vtable_slot(30) == NULL);
+    CHECK(sh_overrides_test_stream_vtable_slot(31) == NULL);
+    CHECK(sh_overrides_test_stream_vtable_slot(32) == NULL);
+    CHECK(sh_overrides_test_stream_vtable_slot(33) == NULL);
 
     sh_overrides_test_stream_helpers_reset();
     CHECK(sh_overrides_test_stream_helpers_configure((void *)(uintptr_t)0x1111, 1,
                                                       (void *)(uintptr_t)0x2222, 1,
                                                       (void *)(uintptr_t)0x3333, 1) == 1);
     CHECK(sh_overrides_test_stream_helpers_ready() == 1);
-    CHECK(sh_overrides_test_stream_vtable_slot(28) == (void *)(uintptr_t)0x1111);
-    CHECK(sh_overrides_test_stream_vtable_slot(29) == (void *)(uintptr_t)0x2222);
-    CHECK(sh_overrides_test_stream_vtable_slot(30) == (void *)(uintptr_t)0x3333);
+    CHECK(sh_overrides_test_stream_vtable_slot(31) == (void *)(uintptr_t)0x1111);
+    CHECK(sh_overrides_test_stream_vtable_slot(32) == (void *)(uintptr_t)0x2222);
+    CHECK(sh_overrides_test_stream_vtable_slot(33) == (void *)(uintptr_t)0x3333);
     CHECK(sh_overrides_test_stream_helpers_configure((void *)(uintptr_t)0x4444, 1,
                                                       (void *)(uintptr_t)0x5555, 1,
                                                       (void *)(uintptr_t)0x6666, 1) == 0);

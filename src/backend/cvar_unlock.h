@@ -5,14 +5,15 @@
 #define B2_CVAR_UNLOCK_H
 
 #include <stdint.h>
+#include "engine_build.h"
 
 /* Pinned Vulkan cvar-system pointer slot. To rederive it, decode CmdSystemLea
  * to the command-system slot and add 0x10. The runtime has the same signature path. */
-#define RVA_CVAR_SYSTEM_PTR  0x55b7290u
+#define RVA_CVAR_SYSTEM_PTR  SH_RVA(0x2F451D0u, 0x2F8D1D0u)
 
 /* Pinned Vulkan command-system pointer slot, decoded from CmdSystemLea.
  * Its object exposes getGate/setGate at vtable +0x10/+0x18. */
-#define RVA_CMD_SYSTEM_PTR   0x55b7280u
+#define RVA_CMD_SYSTEM_PTR   SH_RVA(0x2F451C0u, 0x2F8D1C0u)
 
 /* FindCvar uses the full table at gate 0 and the developer table otherwise.
  * Each table combines an embedded idList and idHashIndex. */
@@ -28,8 +29,7 @@
 #define CVARSYS_LIST_COUNT_OFF  0x10u   /* uint32 element count */
 #define CVAR_LIST_SANITY_MAX    100000u /* refuse an absurd count (uninitialized / wrong build) */
 
-/* idCVar object */
-#define CVAR_FLAGS_OFF          0x58u
+/* idCVar flags: SH_IDCVAR_FLAGS (engine_build.h). */
 #define CVAR_FLAG_NOCHEAT       0x10u      /* dev-set-exempt: idCVar::Set FATALs at gate!=0 WITHOUT it */
 #define CVAR_FLAG_EXPOSE        0x200000u  /* developer-table membership (engine normalizes NOCHEAT->EXPOSE) */
 

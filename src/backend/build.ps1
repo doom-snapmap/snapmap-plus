@@ -1,5 +1,5 @@
-# Build the x64 XINPUT1_3.dll backend with Visual Studio 2022 C++ Build Tools.
-# Run: pwsh -File build.ps1 [-Out XINPUT1_3.dll] [-Diag] [-VcVarsVer <version>]
+# Build the x64 XINPUT1_4.dll backend with Visual Studio 2022 C++ Build Tools.
+# Run: pwsh -File build.ps1 [-Out XINPUT1_4.dll] [-Diag] [-VcVarsVer <version>]
 # Add backend translation units to Sources below. Keep this script ASCII for PS 5.1.
 param(
     [string[]]$Sources = @("dllmain.c", "host_image.c", "signatures.c", "startup_bindings.c", "engine_globals.c", "hook.c", "smoke.c",
@@ -26,7 +26,7 @@ param(
                            "../fault_shield/mapload_guards.c",
                            "../fault_shield/serialized_entities_guard.c",
                            "../fault_shield/fault_shield.c"),
-    [string]$Out = "XINPUT1_3.dll",
+    [string]$Out = "XINPUT1_4.dll",
     # Diag adds SH_DIAG and the crash/environment logger for troubleshooting.
     [switch]$Diag,
     # Pin the MSVC toolset for reproducible release builds. An empty value uses
@@ -77,7 +77,7 @@ if ($Diag) {
 }
 
 # Compile from this directory with relative paths to avoid cmd quoting issues.
-# xinput1_3.def is the sole export source and fixes native XInput ordinals.
+# xinput1_4.def is the sole export source and fixes native XInput ordinals.
 # DOOM imports by ordinal; automatic alphabetical numbering calls wrong functions.
 $srcArgs = ($Sources | ForEach-Object { '"' + $_.Trim() + '"' }) -join " "
 $implib  = $Out -replace '\.dll$', '.lib'   # Put import libraries and .exp files under build/obj/backend.
@@ -91,7 +91,7 @@ $implib  = $Out -replace '\.dll$', '.lib'   # Put import libraries and .exp file
 # /Brepro on compilation and linking removes timestamp-based output variation.
 # /PDBALTPATH:%_PDB% records only the PDB filename, omitting local build paths.
 $cl = "cl /nologo /LD /O2 /W3 /MT /Z7 /Brepro $defs /Fo..\..\build\obj\backend\ /I..\common $srcArgs /Fe:..\..\build\$Out " +
-      "/link /DEF:xinput1_3.def /IMPLIB:..\..\build\obj\backend\$implib shell32.lib ole32.lib " +
+      "/link /DEF:xinput1_4.def /IMPLIB:..\..\build\obj\backend\$implib shell32.lib ole32.lib " +
       "/DEBUG:FULL /INCREMENTAL:NO /OPT:REF /OPT:ICF /Brepro /PDBALTPATH:%_PDB% /MAP"
 
 $cmd = "cd /d `"$here`" && `"$vcvars`"$vcvarsArgs && $cl"

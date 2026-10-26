@@ -120,7 +120,7 @@ int sh_package_runtime_has_map_provider(void);
  * Native status is 1 after reader registration, 0 initializing, -1 invalid.
  * These are product startup services, not package author controls. */
 void sh_package_runtime_bind_native(uintptr_t accessor, uintptr_t type_container,
-    uintptr_t game_system_export);
+    uintptr_t game_system_slot);
 int sh_package_runtime_native_status(void);
 /* Whether the latest refresh succeeded. A failed attempt retains the entire
  * previous compilation, but must not admit a newly installed package. */

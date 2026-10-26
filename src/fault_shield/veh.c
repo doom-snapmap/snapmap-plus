@@ -74,7 +74,7 @@ static void veh_resolve_globals(void)
     const uint8_t *base = g_doom_base;
     uintptr_t v;
 
-    g_pinned_build = sh_host_is_pinned_rva_build();
+    g_pinned_build = sh_host_is_supported_build();
     if (base == NULL) return;
 
     g_errstate_at   = glb_resolve(base, "error_state", NULL);

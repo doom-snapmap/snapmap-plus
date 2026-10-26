@@ -1,0 +1,33 @@
+; xinput1_4.def -- the sole export source of the backend proxy; it pins every ordinal.
+;
+; The backend ships as XINPUT1_4.dll. DOOM 2016 (April 2024 update, Steam build 13954591)
+; imports exactly two functions from it BY ORDINAL: 2 (XInputGetState) and 3 (XInputSetState).
+; MSVC's __declspec(dllexport) numbers exports ALPHABETICALLY, which once put
+; XInputGetBatteryInformation at 2 and corrupted the heap on every controller poll; the bodies in
+; xinput_proxy.c therefore carry no dllexport.
+;
+; This is the real System32 XINPUT1_4.dll ordinal set (Windows 11 26200): the named exports at
+; their ordinals and the unnamed ones (100-104, 108, 109) as NONAME forwarders, so anything that
+; resolves an XInput 1.4 ordinal from the game folder reaches the system implementation.
+; Ordinal 1 is the system DLL's DllMain and is not exported.
+;
+; Private backend exports are resolved by name (the development daemon). They sit at 200 and
+; up, clear of every ordinal the system DLL uses.
+EXPORTS
+    XInputGetState                  @2
+    XInputSetState                  @3
+    XInputGetCapabilities           @4
+    XInputEnable                    @5
+    XInputGetBatteryInformation     @7
+    XInputGetKeystroke              @8
+    XInputGetAudioDeviceIds         @10
+    sh_xinput_ordinal_100           @100 NONAME
+    sh_xinput_ordinal_101           @101 NONAME
+    sh_xinput_ordinal_102           @102 NONAME
+    sh_xinput_ordinal_103           @103 NONAME
+    sh_xinput_ordinal_104           @104 NONAME
+    sh_xinput_ordinal_108           @108 NONAME
+    sh_xinput_ordinal_109           @109 NONAME
+    sh_rawmap_swap_is_armed         @200
+    sh_rawmap_swap_complete_count   @201
+    sh_rawmap_swap_will_fire        @202

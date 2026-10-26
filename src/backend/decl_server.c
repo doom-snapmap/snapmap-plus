@@ -38,6 +38,7 @@
 #include "process_heap_scope.h"
 #include "audio_banks_native.h"
 #include "resource_resident.h"
+#include "engine_build.h"
 
 static sh_resource_resident *g_resident_pass;
 
@@ -55,22 +56,22 @@ static sh_resource_resident *g_resident_pass;
  * clean masked-signature resolution on either renderer; these addresses are
  * not admission gates or OpenGL addresses.
  */
-#define DS_PINNED_ANCHOR_RVA    0x184E1D0u
-#define DS_PINNED_TYPE_RVA      0x17B43B0u
-#define DS_PINNED_REGISTER_RVA  0x17B7330u
-#define DS_PINNED_FIND_RVA      0x17B36F0u
-#define DS_PINNED_SOURCE_FIND_RVA 0x17B34B0u
-#define DS_PINNED_IDSTR_CTOR_RVA 0x19FCEF0u
-#define DS_PINNED_IDSTR_DTOR_RVA 0x19FD120u
+#define DS_PINNED_ANCHOR_RVA    SH_RVA(0x1686030u, 0x1687150u)
+#define DS_PINNED_TYPE_RVA      SH_RVA(0x155BAF0u, 0x155CDC0u)
+#define DS_PINNED_REGISTER_RVA  SH_RVA(0x155E9A0u, 0x155FC70u)
+#define DS_PINNED_FIND_RVA      SH_RVA(0x155AE90u, 0x155C160u)
+#define DS_PINNED_SOURCE_FIND_RVA SH_RVA(0x155AC80u, 0x155BF50u)
+#define DS_PINNED_IDSTR_CTOR_RVA SH_RVA(0x33A0F0u, 0x339D40u)
+#define DS_PINNED_IDSTR_DTOR_RVA SH_RVA(0x33A320u, 0x339F70u)
 /* Whole-registry promotion triggers boot publication; command drain applies
  * required cvars before parsing.
  */
-#define DS_PINNED_BOOT_PROMOTE_RVA 0x1801830u
-#define DS_PINNED_CMD_EXECUTE_RVA  0x1AA46B0u
+#define DS_PINNED_BOOT_PROMOTE_RVA SH_RVA(0x1572B10u, 0x1573CA0u)
+#define DS_PINNED_CMD_EXECUTE_RVA  SH_RVA(0x298320u, 0x298580u)
 /* GenericLoad reads without unconditional reconstruction. Refresh first uses
  * the separate native reconstruction entry point. */
-#define DS_PINNED_GENERIC_LOAD_RVA 0x17FF5F0u
-#define DS_PINNED_RECONSTRUCT_RVA 0x17FFDB0u
+#define DS_PINNED_GENERIC_LOAD_RVA SH_RVA(0x16C6050u, 0x16C6D30u)
+#define DS_PINNED_RECONSTRUCT_RVA SH_RVA(0x16C67F0u, 0x16C74D0u)
 /* Resource-level fields used to verify boot promotion after the engine
  * returns.
  */
@@ -2648,7 +2649,7 @@ static void __cdecl ds_rearm_command(void)
  * Raise only entries absent from the watermark. Purge checks level bits, not
  * ownership or reference counts.
  */
-#define DS_RES_HEAD_RVA     0x6217F90u
+#define DS_RES_HEAD_RVA     SH_RVA(0x5D78E60u, 0x467E4E0u)
 #define DS_RES_NEXT_OFF     0x18
 #define DS_RES_ARR_OFF      0x20
 #define DS_RES_CNT_OFF      0x28

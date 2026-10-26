@@ -218,26 +218,26 @@ static void source_binding(void)
     assert(sh_decl_native_source_bind(&source, (uintptr_t)accessor, (uintptr_t)container) == 1);
     assert(source.reflection == (uintptr_t)(manager + 0x80));
     {
-        unsigned char *getter = memory + 0x200, *system = memory + 0x220;
-        memcpy(getter, "\x48\x8d\x05", 3); getter[7] = 0xc3;
-        displacement = (int32_t)(system - (getter + 7)); memcpy(getter + 3, &displacement, 4);
+        unsigned char *slot = memory + 0x200, *system = memory + 0x220;
+        /* Build 13954591: the object is read through a pointer slot. */
+        pointer(slot, 0, system);
         /* Allocated reflection tables alone do not establish readiness. */
-        assert(sh_decl_native_source_ready(&source, (uintptr_t)accessor, (uintptr_t)container, (uintptr_t)getter) == 0);
+        assert(sh_decl_native_source_ready(&source, (uintptr_t)accessor, (uintptr_t)container, (uintptr_t)slot) == 0);
         assert(!source.reflection);
         pointer(system, 8, memory + 0x280); number(system, 0x10, 1); number(system, 0x14, 2);
-        assert(sh_decl_native_source_ready(&source, (uintptr_t)accessor, (uintptr_t)container, (uintptr_t)getter) == 1);
+        assert(sh_decl_native_source_ready(&source, (uintptr_t)accessor, (uintptr_t)container, (uintptr_t)slot) == 1);
         assert(source.reflection == (uintptr_t)(manager + 0x80));
         number(system, 0x10, 3);
-        assert(sh_decl_native_source_ready(&source, (uintptr_t)accessor, (uintptr_t)container, (uintptr_t)getter) == -1);
+        assert(sh_decl_native_source_ready(&source, (uintptr_t)accessor, (uintptr_t)container, (uintptr_t)slot) == -1);
         assert(!source.reflection);
         number(system, 0x10, -1);
-        assert(sh_decl_native_source_ready(&source, (uintptr_t)accessor, (uintptr_t)container, (uintptr_t)getter) == -1);
+        assert(sh_decl_native_source_ready(&source, (uintptr_t)accessor, (uintptr_t)container, (uintptr_t)slot) == -1);
         number(system, 0x10, 1); pointer(system, 8, NULL);
-        assert(sh_decl_native_source_ready(&source, (uintptr_t)accessor, (uintptr_t)container, (uintptr_t)getter) == -1);
-        pointer(system, 8, memory + 0x280); getter[7] = 0x90;
-        assert(sh_decl_native_source_ready(&source, (uintptr_t)accessor, (uintptr_t)container, (uintptr_t)getter) == -1);
-        getter[7] = 0xc3; f.unreadable = (uintptr_t)(system + 8);
-        assert(sh_decl_native_source_ready(&source, (uintptr_t)accessor, (uintptr_t)container, (uintptr_t)getter) == -1);
+        assert(sh_decl_native_source_ready(&source, (uintptr_t)accessor, (uintptr_t)container, (uintptr_t)slot) == -1);
+        pointer(system, 8, memory + 0x280); pointer(slot, 0, NULL);
+        assert(sh_decl_native_source_ready(&source, (uintptr_t)accessor, (uintptr_t)container, (uintptr_t)slot) == -1);
+        pointer(slot, 0, system); f.unreadable = (uintptr_t)(system + 8);
+        assert(sh_decl_native_source_ready(&source, (uintptr_t)accessor, (uintptr_t)container, (uintptr_t)slot) == -1);
         f.unreadable = 0;
     }
     assert(sh_decl_native_source_bind(&source, (uintptr_t)accessor, (uintptr_t)(container + 1)) == -1);

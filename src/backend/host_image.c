@@ -18,7 +18,6 @@ static size_t         g_size = 0;
 static char           g_name[64] = { 0 };
 static INIT_ONCE      g_resolved = INIT_ONCE_STATIC_INIT;
 static INIT_ONCE      g_fingerprinted = INIT_ONCE_STATIC_INIT;
-static int            g_pinned = 0;
 static const char * volatile g_renderer = NULL;   /* "vulkan"/"opengl" once definite; NULL until then */
 
 static const char *basename_of(const char *path)
@@ -73,22 +72,41 @@ static void resolve_once(void)
     InitOnceExecuteOnce(&g_resolved, resolve_host, NULL, NULL);
 }
 
+/* The supported executables: the April 2024 update, Steam build 13954591. They
+ * are not SteamStub-wrapped, so each renderer has exactly one digest. Any other
+ * executable, the 2018 build included, is unsupported. */
+const sh_build_identity SH_KNOWN_BUILDS[] = {
+    {{0x3d,0x8b,0x43,0x93,0x64,0x9f,0x80,0xbd,0xae,0x85,0xc1,0x9a,0xe2,0xc9,0x85,0xc4,
+      0x5e,0xc9,0xac,0x54,0xf7,0x4a,0xb0,0x4a,0x18,0x81,0x6e,0x30,0xea,0xd6,0x3c,0x21},
+     1, "13954591-vk"},
+    {{0x1b,0xdd,0xec,0xaa,0x4e,0x86,0x85,0x04,0x12,0xf9,0x6e,0x31,0x17,0x97,0x8b,0xce,
+      0x1e,0xc7,0xbb,0x70,0x1a,0xe1,0xb5,0xa3,0x31,0x20,0xc2,0x1e,0x44,0x21,0xe5,0x1e},
+     0, "13954591-gl"},
+    {{0}, 0, NULL}
+};
+
+static const sh_build_identity *g_identity = NULL;
+
+const sh_build_identity *sh_host_identity_for_digest(const unsigned char digest[32])
+{
+    size_t i;
+    if (!digest) return NULL;
+    for (i = 0; SH_KNOWN_BUILDS[i].label; i++)
+        if (!memcmp(digest, SH_KNOWN_BUILDS[i].sha256, 32)) return &SH_KNOWN_BUILDS[i];
+    return NULL;
+}
+
 /* Hash the file, not loaded code: relocations and installed detours must not
  * change build identity. Opening without write sharing pins the bytes we read. */
-static int file_is_pinned(const wchar_t *path)
+int sh_host_file_sha256(const wchar_t *path, unsigned char digest[32])
 {
-    static const unsigned char hashes[][32] = {
-        {0x13,0x97,0x63,0xe9,0x4f,0x1a,0x75,0xb5,0x31,0x01,0x79,0xf9,0xee,0xeb,0x8a,0x94,
-         0x9a,0x1f,0x53,0xc4,0x9a,0xcb,0xc7,0x22,0xfc,0xfc,0x5d,0xfe,0x7b,0xb6,0xd3,0x23},
-        {0x5a,0xd2,0x54,0x8c,0xea,0xb3,0xdf,0xa2,0x7f,0x27,0x1e,0x38,0x12,0x22,0xca,0x4a,
-         0x84,0xdc,0xac,0x7c,0xb8,0x3c,0xce,0x94,0x46,0x44,0x4c,0x30,0xc8,0x30,0x93,0x67}
-    };
     HANDLE file = INVALID_HANDLE_VALUE;
     BCRYPT_ALG_HANDLE algorithm = NULL;
     BCRYPT_HASH_HANDLE hash = NULL;
-    unsigned char bytes[64 * 1024], digest[32];
+    unsigned char bytes[64 * 1024];
     DWORD count;
-    int matched = 0;
+    int ok = 0;
+    if (!path || !digest) return 0;
     file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING,
                        FILE_FLAG_SEQUENTIAL_SCAN, NULL);
     if (file == INVALID_HANDLE_VALUE) goto done;
@@ -99,25 +117,30 @@ static int file_is_pinned(const wchar_t *path)
         if (!count) break;
         if (BCryptHashData(hash, bytes, count, 0) < 0) goto done;
     }
-    if (BCryptFinishHash(hash, digest, sizeof digest, 0) < 0) goto done;
-    for (size_t i = 0; i < sizeof hashes / sizeof hashes[0]; i++)
-        if (!memcmp(digest, hashes[i], sizeof digest)) matched = 1;
+    if (BCryptFinishHash(hash, digest, 32, 0) < 0) goto done;
+    ok = 1;
 done:
     if (hash) BCryptDestroyHash(hash);
     if (algorithm) BCryptCloseAlgorithmProvider(algorithm, 0);
     if (file != INVALID_HANDLE_VALUE) CloseHandle(file);
-    return matched;
+    return ok;
+}
+
+static const sh_build_identity *identity_of_file(const wchar_t *path)
+{
+    unsigned char digest[32];
+    return sh_host_file_sha256(path, digest) ? sh_host_identity_for_digest(digest) : NULL;
 }
 
 static BOOL CALLBACK fingerprint_host(PINIT_ONCE once, PVOID arg, PVOID *context)
 {
-    wchar_t path[32768];
+    static wchar_t path[32768];
     DWORD count;
     (void)once; (void)arg; (void)context;
     resolve_once();
     if (!g_base) return TRUE;
     count = GetModuleFileNameW(NULL, path, (DWORD)(sizeof path / sizeof path[0]));
-    if (count && count < sizeof path / sizeof path[0]) g_pinned = file_is_pinned(path);
+    if (count && count < sizeof path / sizeof path[0]) g_identity = identity_of_file(path);
     return TRUE;
 }
 
@@ -139,28 +162,58 @@ const char *sh_host_image_name(void)
     return g_name;
 }
 
-int sh_host_is_pinned_rva_build(void)
+const sh_build_identity *sh_host_identity(void)
 {
     InitOnceExecuteOnce(&g_fingerprinted, fingerprint_host, NULL, NULL);
-    return g_pinned;
+    return g_identity;
+}
+
+int sh_host_is_supported_build(void)
+{
+    return sh_host_identity() != NULL;
 }
 
 #ifdef SH_HOST_IMAGE_TESTING
-static const uint8_t *g_test_pinned_base;
-int sh_host_test_bind_pinned_image(const uint8_t *base, const wchar_t *path)
+static const uint8_t *g_test_base;
+static const sh_build_identity *g_test_identity;
+const sh_build_identity *sh_host_test_bind_image(const uint8_t *base, const wchar_t *path)
 {
-    g_test_pinned_base = base && path && file_is_pinned(path) ? base : NULL;
-    return g_test_pinned_base != NULL;
+    const sh_build_identity *id = base && path ? identity_of_file(path) : NULL;
+    g_test_base = id ? base : NULL;
+    g_test_identity = id;
+    return id;
+}
+void sh_host_test_bind_identity(const uint8_t *base, const sh_build_identity *identity)
+{
+    g_test_base = identity ? base : NULL;
+    g_test_identity = identity;
 }
 #endif
 
-int sh_host_is_pinned_rva_image(const uint8_t *base)
+const sh_build_identity *sh_host_image_identity(const uint8_t *base)
 {
-    if (!base) return 0;
+    if (!base) return NULL;
 #ifdef SH_HOST_IMAGE_TESTING
-    if (base == g_test_pinned_base) return 1;
+    if (base == g_test_base) return g_test_identity;
 #endif
-    return base == sh_host_image_base() && sh_host_is_pinned_rva_build();
+    return base == sh_host_image_base() ? sh_host_identity() : NULL;
+}
+
+int sh_host_image_is_supported(const uint8_t *base)
+{
+    return sh_host_image_identity(base) != NULL;
+}
+
+uint32_t sh_host_image_rva(const uint8_t *base, uint32_t rva_vk, uint32_t rva_gl)
+{
+    const sh_build_identity *id = sh_host_image_identity(base);
+    return id ? (id->vulkan ? rva_vk : rva_gl) : 0;
+}
+
+uint32_t sh_host_rva(uint32_t rva_vk, uint32_t rva_gl)
+{
+    const sh_build_identity *id = sh_host_identity();
+    return id ? (id->vulkan ? rva_vk : rva_gl) : 0;
 }
 
 int sh_host_is_vulkan(void)

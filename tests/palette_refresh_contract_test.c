@@ -65,20 +65,20 @@ int main(int argc, char **argv)
 
     CHECK(strstr(signatures, "\"SnapPaletteBuild\"") != NULL);
     CHECK(strstr(signatures, "48 8B C4 56 57 41 54 41 56 41 57 48 81 EC 70 07 00 00") != NULL);
-    CHECK(strstr(signatures, "0x54AEE0u") != NULL);
+    CHECK(strstr(signatures, "0x11AA710u") != NULL);
     /* Require a clean unique signature result and consistent address/RVA pair;
      * pinned reference addresses must not gate other supported images. */
     CHECK(strstr(refresh, "builder->status != SIG_OK") != NULL);
     CHECK(strstr(refresh, "builder->addr != (uintptr_t)module_base + builder->rva") != NULL);
     CHECK(strstr(refresh, "builder->rva != PR_BUILDER_RVA") == NULL);
-    CHECK(strstr(refresh, "PR_BUILDER_RVA          0x54AEE0u") != NULL);
+    CHECK(strstr(refresh, "PR_BUILDER_RVA          SH_RVA(0x11AA710u, 0x11A9820u)") != NULL);
     /* Locate the singleton through its runtime code anchor, not the pinned audit RVA. */
     CHECK(strstr(refresh, "PR_EDITOR_SINGLETON_RVA") != NULL);
     CHECK(strstr(refresh, "glb_resolve(g_module_base, \"editor_singleton\"") != NULL);
     CHECK(strstr(refresh, "editor != g_module_base + PR_EDITOR_SINGLETON_RVA") == NULL);
     /* The palette vtable is read out of the live editor object, so it is checked for plausibility
      * -- present, and a read-only location in the host image -- not against one build's address. */
-    CHECK(strstr(refresh, "PR_PALETTE_VTABLE_RVA   0x20499A0u") != NULL);
+    CHECK(strstr(refresh, "PR_PALETTE_VTABLE_RVA   SH_RVA(0x235FF50u, 0x2379CA0u)") != NULL);
     CHECK(strstr(refresh, "pr_address_in_readonly_section(g_module_base, palette_vtable)") != NULL);
     CHECK(strstr(refresh, "palette_vtable != (void *)(g_module_base + PR_PALETTE_VTABLE_RVA)") == NULL);
     CHECK(strstr(refresh, "PR_STATE_PENDING") != NULL);

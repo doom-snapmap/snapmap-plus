@@ -7,7 +7,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "engine_layout.h"
-#include "../backend/host_image.h"     /* sh_host_is_pinned_rva_build -- gates every pinned-RVA backstop */
+#include "../backend/host_image.h"     /* sh_host_is_supported_build -- gates every pinned-RVA backstop */
 #include "../backend/engine_globals.h" /* locate DOOM's data globals by signing the code that computes them */
 #include "../backend/apply_engine.h"
 #include "../backend/signatures.h"
@@ -394,7 +394,7 @@ int recovery_install(void)
         orig_frame = NULL;
     }
     /* Cache globals before installing the frame hook. */
-    g_pinned_build = sh_host_is_pinned_rva_build();
+    g_pinned_build = sh_host_is_supported_build();
     g_clear_dialog = NULL;
     if (g_doom_base) {
         const sig_entry *entry;

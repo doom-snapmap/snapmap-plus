@@ -1,11 +1,14 @@
-/* Offline signature-resolution checks against an unpacked PE mapped by RVA.
- * Pinned mode checks unique matches and expected Vulkan RVAs; portable mode
- * checks unique matches without requiring those addresses. Run via run-tests.ps1. */
+/* Offline signature-resolution checks against a PE mapped by RVA.
+ * The image is bound to its SHA-256 identity. On a build 13954591 executable
+ * every match must be unique and land on the recorded RVA for its renderer;
+ * "portable" (or any other image, e.g. a 2018 cross-check) requires uniqueness
+ * only. Run via run-tests.ps1. */
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include "signatures.h"
+#include "host_image.h"
 
 static uint8_t *map_pe_by_rva(const char *path, size_t *image_sz)
 {
@@ -40,18 +43,25 @@ static uint8_t *map_pe_by_rva(const char *path, size_t *image_sz)
 
 int main(int argc, char **argv)
 {
-    /* Uniqueness is required on each supported image. known_rva equality is
-     * specific to the pinned Vulkan image; portable mode accepts address shifts. */
+    /* Uniqueness is required on each image; recorded-RVA equality only on a
+     * supported executable, for its own renderer. */
     int pinned = 1;
     if (argc < 2) {
         fprintf(stderr, "usage: sig_test <DOOM_unpacked.exe> [portable]\n");
         return 2;
     }
-    if (argc >= 3 && strcmp(argv[2], "portable") == 0) pinned = 0;
-
     size_t image_sz = 0;
     uint8_t *base = map_pe_by_rva(argv[1], &image_sz);
     if (!base) return 2;
+
+    wchar_t wide[MAX_PATH];
+    MultiByteToWideChar(CP_ACP, 0, argv[1], -1, wide, MAX_PATH);
+    const sh_build_identity *identity = sh_host_test_bind_image(base, wide);
+    if (!identity) pinned = 0;
+    if (argc >= 3 && strcmp(argv[2], "portable") == 0) pinned = 0;
+    printf("image %s: %s, %s mode\n", argv[1],
+           identity ? identity->label : "not a supported executable (cross-check only)",
+           pinned ? "recorded-RVA" : "portable");
 
     /* Size results for the whole signature database to prevent out-of-bounds access. */
     size_t total = sig_db_count();
@@ -68,7 +78,8 @@ int main(int argc, char **argv)
         const char *st = results[i].status == SIG_OK ? "OK " :
                          results[i].status == SIG_NOT_FOUND ? "NOTFOUND" :
                          results[i].status == SIG_AMBIGUOUS ? "AMBIG" : "BAD";
-        uint32_t known = BACKEND_ENGINE_SIGNATURES[i].known_rva;
+        uint32_t known = identity ? (identity->vulkan ? BACKEND_ENGINE_SIGNATURES[i].rva_vk
+                                                      : BACKEND_ENGINE_SIGNATURES[i].rva_gl) : 0;
         int unique = (results[i].status == SIG_OK);
         int rva_ok = pinned && known ? (unique && results[i].rva == known) : unique;
         if (!rva_ok) bad++;
@@ -163,12 +174,36 @@ int main(int argc, char **argv)
     {
         sig_result target;
         sig_status status = sig_resolve_one(base, &NAV_RENDER_TARGET_GL_SIGNATURE, &target);
-        int is_gl = strstr(argv[1], "DOOMx64.exe") != NULL;
-        if ((is_gl && (status != SIG_OK || target.rva != 0x19231e0u)) ||
+        int is_gl = identity ? !identity->vulkan : strstr(argv[1], "DOOMx64.exe") != NULL;
+        if ((is_gl && (status != SIG_OK ||
+                       (pinned && target.rva != NAV_RENDER_TARGET_GL_SIGNATURE.rva_gl))) ||
             (!is_gl && status != SIG_NOT_FOUND)) {
             printf("BAD OpenGL navigation render-target helper: status=%d RVA=0x%x\n", status, target.rva);
             bad++;
         } else printf("OK  renderer-specific navigation target helper\n");
+    }
+    /* Grid-room tree cleanup: GridReapplyEntityTree must call the resolved
+     * GridEntityTree (+0x17) and GridApplyEntityTree (+0x25) before its destructor
+     * (+0x38) and sized delete (+0x45) calls, which grid_room_native.c binds. */
+    if (identity) {
+        const sig_result *re = NULL, *tree = NULL, *apply = NULL;
+        for (size_t i = 0; i < total; i++) {
+            if (!strcmp(results[i].name, "GridReapplyEntityTree")) re = &results[i];
+            else if (!strcmp(results[i].name, "GridEntityTree")) tree = &results[i];
+            else if (!strcmp(results[i].name, "GridApplyEntityTree")) apply = &results[i];
+        }
+        int ok_tree = 0;
+        if (re && tree && apply && re->status == SIG_OK && tree->status == SIG_OK && apply->status == SIG_OK) {
+            const uint8_t *p = base + re->rva;
+            int32_t d1, d2;
+            memcpy(&d1, p + 0x18, 4);
+            memcpy(&d2, p + 0x26, 4);
+            ok_tree = p[0x17] == 0xE8 && p[0x25] == 0xE8 && p[0x38] == 0xE8 && p[0x45] == 0xE8 &&
+                      (uint32_t)(re->rva + 0x1c + d1) == tree->rva &&
+                      (uint32_t)(re->rva + 0x2a + d2) == apply->rva;
+        }
+        if (!ok_tree) { printf("BAD grid-room tree cleanup: GridReapplyEntityTree calls do not match\n"); bad++; }
+        else printf("OK  grid-room tree cleanup decodes from GridReapplyEntityTree\n");
     }
     printf("======================================================================\n");
     printf("C resolver [%s]: %zu/%zu unique; %d %s\n",

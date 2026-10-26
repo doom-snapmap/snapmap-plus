@@ -107,11 +107,11 @@ static int pr_native_read(void *context, uintptr_t address, void *out, size_t le
 }
 
 void sh_package_runtime_bind_native(uintptr_t accessor, uintptr_t type_container,
-    uintptr_t game_system_export)
+    uintptr_t game_system_slot)
 {
     AcquireSRWLockExclusive(&g_refresh_lock);
     g_native_accessor = accessor; g_native_types = type_container;
-    g_native_game_system = game_system_export; g_native_bound = 1;
+    g_native_game_system = game_system_slot; g_native_bound = 1;
     ReleaseSRWLockExclusive(&g_refresh_lock);
 }
 

@@ -31,6 +31,7 @@
 #include "package_runtime.h"
 #include "resource_graph.h"
 #include "resource_graph_native.h"
+#include "engine_build.h"
 
 /* Engine call contracts. */
 
@@ -93,7 +94,7 @@ const char *cmd_argv(idCmdArgs *a, int n)
 
 /* Decode cmdSystem from CmdSystemLea, then an independent global anchor.
  * The last-resort pinned RVA uses the Vulkan filename gate, not a build hash. */
-#define CMDSYS_KNOWN_RVA   0x55b7280u   /* Pinned Vulkan audit/fallback slot, gated by host filename. */
+#define CMDSYS_KNOWN_RVA   SH_RVA(0x2F451C0u, 0x2F8D1C0u)   /* Pinned Vulkan audit/fallback slot, gated by host filename. */
 
 /* Guarded byte reads shared by global decoders and entity handlers. */
 int sh_safe_read(const uint8_t *src, uint8_t *dst, size_t n)
@@ -160,7 +161,7 @@ void *sh_resolve_cmdsys(const sig_result *results, size_t n, const uint8_t *modu
         }
     }
     /* Last resort: pinned Vulkan RVA behind the host filename gate. */
-    if (module_base && sh_host_is_pinned_rva_build()) {
+    if (module_base && sh_host_is_supported_build()) {
         const uint8_t *slot = module_base + CMDSYS_KNOWN_RVA;
         void *obj = NULL;
         if (sh_safe_read(slot, (uint8_t *)&obj, sizeof obj) && obj) {
@@ -933,6 +934,19 @@ static void h_disable_devmode(idCmdArgs *a)
         return;
     }
 
+    /* The getter reads one session byte; its displacement must be this build's
+     * dev-mode field, or the matched function is not this getter. */
+    if (r.status == SIG_OK) {
+        uint32_t field = 0;
+        __try { memcpy(&field, (const uint8_t *)r.addr + 3, sizeof field); }
+        __except (EXCEPTION_EXECUTE_HANDLER) { field = 0; }
+        if (field != SH_SESSION_DEVMODE_FIELD) {
+            sh_printf("sh_disable_devmode: %s reads session+0x%x, not the dev-mode field -- patch refused\n",
+                      DEVMODE_SIG_NAME, (unsigned)field);
+            return;
+        }
+    }
+
     /* Replace the verified head with xor eax,eax; ret. */
     const uint8_t expect[3]    = { 0x0F, 0xB6, 0x81 };
     const uint8_t new_bytes[3] = { 0x31, 0xC0, 0xC3 };
@@ -1227,7 +1241,7 @@ static void h_sh_genbmodel(idCmdArgs *a)
 /* Render inspection uses signed render-world anchors; showcursor writes one
  * signed editor-object field. Other toggles are local diagnostics. Unsupported
  * mutators and the original debugger/machine-specific dump paths are refused. */
-#define RW_SLOT_KNOWN_RVA         0x57216f0u  /* Pinned Vulkan fallback slot; the host gate checks filename only. */
+#define RW_SLOT_KNOWN_RVA         SH_RVA(0x5C43B30u, 0x45491B0u)  /* Pinned Vulkan fallback slot; the host gate checks filename only. */
 /* Recheck vtable/field offsets when porting. Derive model-count/model/name
  * accesses from the dumpmodelinfo handler and the cursor byte from showcursor. */
 #define RW_VSLOT_MODEL_COUNT      0x188       /* renderWorld vtbl -> GetActiveRenderModelCount() -> uint (BUILD-SPECIFIC) */
@@ -1235,7 +1249,7 @@ static void h_sh_genbmodel(idCmdArgs *a)
 #define RW_MODEL_NAME_OFF         0x10        /* render model -> name char* (model+0x10) (BUILD-SPECIFIC) */
 #define ED_SHOWCURSOR_OFF         0x23624u    /* editor -> showcursor byte (OG writes 0) (BUILD-SPECIFIC) */
 #define RW_MODEL_COUNT_CAP        1000000u    /* stale-renderWorld guard on the model count */
-#define EDITOR_SINGLETON_RVA      0x3056748u  /* Pinned Vulkan audit reference; the editor global anchor locates the object. */
+#define EDITOR_SINGLETON_RVA      SH_RVA(0x2F6AD18u, 0x2FB2C08u)  /* Pinned Vulkan audit reference; the editor global anchor locates the object. */
 
 
 
@@ -1260,7 +1274,7 @@ static void *dr_resolve_renderworld(void)
         }
     }
     /* Last resort: the pinned Vulkan slot behind the host filename gate. */
-    if (g_module_base && sh_host_is_pinned_rva_build()) {
+    if (g_module_base && sh_host_is_supported_build()) {
         void *rw = NULL;
         if (sh_safe_read(g_module_base + RW_SLOT_KNOWN_RVA, (uint8_t *)&rw, sizeof rw) && rw) return rw;
     }
@@ -1573,11 +1587,35 @@ static unsigned cde_read_eventnum(void *rec, unsigned fallback)
     __except (EXCEPTION_EXECUTE_HANDLER) { return fallback; }
 }
 
+/* The recorded event numbers are trusted only when they form a permutation of
+ * 0..count-1 (the event-def catalog is the same 1611 entries on build 13954591);
+ * otherwise the dump uses the dense table index for every row. */
+static int cde_eventnums_valid(void *evmgr, unsigned count);
+
 /* Guard file output and report write success. */
 static int cde_write_file(FILE *fp, const char *buf)
 {
     __try { fputs(buf, fp); return 1; }
     __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+}
+
+static int cde_eventnums_valid(void *evmgr, unsigned count)
+{
+    static unsigned char seen[SS_EV_COUNT_CAP];
+    if (count == 0 || count > SS_EV_COUNT_CAP) return 0;
+    memset(seen, 0, sizeof seen);
+    for (unsigned i = 0; i < count; i++) {
+        const char *name = ss_call_getname(evmgr, i);
+        void *rec;
+        unsigned n;
+        if (name == NULL || name[0] == '\0') continue;
+        rec = ss_call_findbyname(evmgr, name);
+        if (rec == NULL) return 0;
+        n = cde_read_eventnum(rec, count);
+        if (n >= count || seen[n]) return 0;
+        seen[n] = 1;
+    }
+    return 1;
 }
 
 /* Export the event table to a file. */
@@ -1617,6 +1655,10 @@ static void h_cs_dumpeventdefs(idCmdArgs *a)
         "\tstatic const eventdef_ss_t ALLEVENTS[]={\n");
 
     unsigned emitted = 0;
+    int recorded_numbers = cde_eventnums_valid(evmgr, count);
+    if (!recorded_numbers)
+        sh_printf("cs_dumpeventdefs: recorded event numbers are not a permutation of 0..%u; "
+                  "using table order.\n", count - 1);
     for (unsigned i = 0; i < count; i++) {
         const char *name = ss_call_getname(evmgr, i);
         if (name == NULL || name[0] == '\0') continue;
@@ -1627,7 +1669,7 @@ static void h_cs_dumpeventdefs(idCmdArgs *a)
         void *rec = ss_call_findbyname(evmgr, name);
         if (rec != NULL) {
             fspec    = ss_read_fspec(rec);
-            eventnum = cde_read_eventnum(rec, i);
+            if (recorded_numbers) eventnum = cde_read_eventnum(rec, i);
         }
         if (fspec == NULL) fspec = "";
         /* Count argument tokens from fspec; the reflected count is not populated. */
@@ -1963,7 +2005,7 @@ static void h_sh_help(idCmdArgs *a)
 /* Resolve list growth from AddCommand's LEA RCX,[RSI+8]; CALL rel32.
  * Generic idList instantiations share their bytes, so use this relationship
  * rather than a direct signature or raw RVA. */
-#define IDLIST_GROW_RVA     0x699a60u   /* pinned-build value -- cross-check only, never used to locate */
+#define IDLIST_GROW_RVA     SH_RVA(0xFE18D0u, 0x1724F20u)   /* pinned-build value -- cross-check only, never used to locate */
 typedef void (*idlist_grow_fn)(void *idlist);
 
 /* Decode the idList-grow callee out of AddCommand's body. Returns NULL if the call site is not found

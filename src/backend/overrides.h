@@ -21,6 +21,11 @@
  * genuinely new identity. There is intentionally no aggregate source alias. */
 #define SH_OVERRIDES_INTERNAL_DECL_PREFIX "decltree/"
 
+/* The idFile stream ABI this implementation provides (slot count) and the
+ * provider open slot it replaces; startup compares them with engine_build.h. */
+#define SH_OVERRIDES_STREAM_SLOTS 34u
+#define SH_OVERRIDES_OPEN_SLOT    0x148u
+
 typedef struct sh_overrides_internal_decl_entry {
     const char *type;
     const char *name;

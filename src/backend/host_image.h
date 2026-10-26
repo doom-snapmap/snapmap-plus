@@ -30,16 +30,48 @@ int sh_host_is_vulkan(void);
  * calls can retry; later reporting calls use the cached string without loader access. */
 const char *sh_host_renderer_name(void);
 
-/* Permit raw RVAs only when the backing executable has a known extraction-build
- * SHA-256. Both its original Steam wrapper and verified unpacked copy are known. */
-int sh_host_is_pinned_rva_build(void);
+/* Snapmap+ supports one DOOM build: the April 2024 update, Steam build 13954591.
+ * The host is identified by the SHA-256 of its executable file, never by its
+ * name, size or loaded bytes. Any other executable (the 2018 build included) is
+ * unsupported: the backend logs that once and only forwards XInput. */
+typedef struct sh_build_identity {
+    unsigned char  sha256[32];
+    int            vulkan;      /* 1 Vulkan executable, 0 OpenGL executable */
+    const char    *label;       /* "13954591-vk" / "13954591-gl", for logs */
+} sh_build_identity;
 
-/* The signature resolver must also bind that identity to the image it scans. */
-int sh_host_is_pinned_rva_image(const uint8_t *base);
+/* Supported executables, terminated by an entry with a NULL label. */
+extern const sh_build_identity SH_KNOWN_BUILDS[];
+
+/* Look a digest up in SH_KNOWN_BUILDS; NULL when it is not a supported executable. */
+const sh_build_identity *sh_host_identity_for_digest(const unsigned char digest[32]);
+
+/* SHA-256 of a file's bytes. Returns 1 on success. Opening without write
+ * sharing pins the bytes being read. */
+int sh_host_file_sha256(const wchar_t *path, unsigned char digest[32]);
+
+/* The live host's identity (hashes the executable once), or NULL. */
+const sh_build_identity *sh_host_identity(void);
+int sh_host_is_supported_build(void);
+
+/* Identity of an image being scanned: the live host when base is its mapped
+ * base, a test-bound image in test builds, otherwise NULL. Raw RVAs are only
+ * ever applied to an image this returns non-NULL for. */
+const sh_build_identity *sh_host_image_identity(const uint8_t *base);
+int sh_host_image_is_supported(const uint8_t *base);
+
+/* Pick the renderer's value from a Vulkan/OpenGL RVA pair: for an image
+ * (sh_host_image_rva) or for the live host (sh_host_rva). 0 when the image or
+ * host is not a supported executable, so callers must treat 0 as "none". */
+uint32_t sh_host_image_rva(const uint8_t *base, uint32_t rva_vk, uint32_t rva_gl);
+uint32_t sh_host_rva(uint32_t rva_vk, uint32_t rva_gl);
 
 #ifdef SH_HOST_IMAGE_TESTING
-/* Bind an offline mapped image only after checking its source file's SHA-256. */
-int sh_host_test_bind_pinned_image(const uint8_t *base, const wchar_t *path);
+/* Bind an offline mapped image to the identity of its source file's SHA-256.
+ * Returns the identity (NULL binds nothing). NULL base unbinds. */
+const sh_build_identity *sh_host_test_bind_image(const uint8_t *base, const wchar_t *path);
+/* Bind a synthetic buffer to a known identity without a file (unit tests). */
+void sh_host_test_bind_identity(const uint8_t *base, const sh_build_identity *identity);
 #endif
 
 #ifdef __cplusplus

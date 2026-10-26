@@ -10,6 +10,7 @@
 #include "engine_globals.h"
 #include "decl_server.h"
 int sh_map_transition_at_boundary(void) { return 0; }
+uint32_t sh_host_rva(uint32_t vk, uint32_t gl) { (void)vk; (void)gl; return 0; }
 static int g_defer_install_commit;
 int sh_rawmap_defers_install_commit(void) { return g_defer_install_commit; }
 #include "package_runtime.h"

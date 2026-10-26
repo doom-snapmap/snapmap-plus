@@ -121,7 +121,7 @@ int main(int argc, char **argv)
      * them map-scoped and vulnerable to transition purges. */
     CHECK(strstr(server, "hook_commit((void *)g_boot_promotion_original)") != NULL);
     CHECK(strstr(server, "ds_boot_promotion_detour") != NULL);
-    CHECK(strstr(server, "DS_PINNED_BOOT_PROMOTE_RVA 0x1801830u") != NULL);
+    CHECK(strstr(server, "DS_PINNED_BOOT_PROMOTE_RVA SH_RVA(0x1572B10u, 0x1573CA0u)") != NULL);
     CHECK(strstr(server, "g_boot_promotion_original();") != NULL);
     /* Exactly one engine code patch, and it is that one. */
     CHECK(count_occurrences(server, "hook_prepare(") == 1);
@@ -135,7 +135,7 @@ int main(int argc, char **argv)
     /* Apply package cvars synchronously before publication parses declarations. */
     CHECK(strstr(server, "sh_package_requirements_rearm") != NULL);
     CHECK(strstr(requirements, "return sh_package_requirements_apply_now(execute_command_buffer);") != NULL);
-    CHECK(strstr(server, "DS_PINNED_CMD_EXECUTE_RVA  0x1AA46B0u") != NULL);
+    CHECK(strstr(server, "DS_PINNED_CMD_EXECUTE_RVA  SH_RVA(0x298320u, 0x298580u)") != NULL);
     /* Use engine promotion without a per-type dependency walk. */
     CHECK(strstr(server, "DS_MD6DEF_MODEL_OFFSET") == NULL);
     /* Runtime refresh must drain all affected types at the browser-safe pass
@@ -250,7 +250,7 @@ int main(int argc, char **argv)
         if (visibility) {
             /* Pinned location and slot of the runtime decl-resource existence
              * probe that DeclFind consults from map-load state 2 upward. */
-            CHECK(strstr(visibility, "DV_MANAGER_PTR_RVA 0x5557090u") != NULL);
+            CHECK(strstr(visibility, "DV_MANAGER_PTR_RVA_VK 0x3611608u") != NULL);
             CHECK(strstr(visibility, "DV_PROBE_SLOT      0x78u") != NULL);
             CHECK(strstr(visibility, "DV_PATH_PREFIX     \"generated/decls/\"") != NULL);
             /* The engine's own answer is always taken first and always wins. */
@@ -263,12 +263,12 @@ int main(int argc, char **argv)
             CHECK(strstr(visibility, "sh_overrides_internal_decl_published") != NULL);
             /* Verify the existing probe slot against a clean unique prologue match
              * before patching it; the slot address alone does not establish identity. */
-            CHECK(strstr(visibility, "DV_PINNED_PROBE_RVA 0x1806100u") != NULL);
+            CHECK(strstr(visibility, "DV_PROBE_RVA_VK 0x1695FE0u") != NULL);
             CHECK(strstr(visibility, "DV_PROBE_SIGNATURE") != NULL);
             CHECK(strstr(visibility, "sig_resolve_one(module_base, &entry, &found) != SIG_OK") != NULL);
             CHECK(strstr(visibility, "found.addr == (uintptr_t)probe") != NULL);
             CHECK(strstr(visibility, "if (!dv_method_is_probe(module_base, probe))") != NULL);
-            CHECK(strstr(visibility, "method_rva != (unsigned long long)DV_PINNED_PROBE_RVA") == NULL);
+            CHECK(strstr(visibility, "method_rva != (unsigned long long)DV_PROBE_RVA") == NULL);
             /* Resolve the manager from its runtime code anchor rather than dereferencing
              * the pinned reference RVA. */
             CHECK(strstr(visibility, "glb_resolve(module_base, \"decl_visibility_manager\"") != NULL);
@@ -281,27 +281,27 @@ int main(int argc, char **argv)
     }
 
     CHECK(strstr(signatures, "\"DeclRegistryAnchor\"") != NULL);
-    CHECK(strstr(signatures, "0x184E1D0u") != NULL);
+    CHECK(strstr(signatures, "0x1686030u") != NULL);
     CHECK(strstr(signatures, "\"DeclRegisterFile\"") != NULL);
-    CHECK(strstr(signatures, "0x17B7330u") != NULL);
+    CHECK(strstr(signatures, "0x155E9A0u") != NULL);
     CHECK(strstr(signatures, "const idStr *source") != NULL);
     CHECK(strstr(signatures, "\"IdStrCtor\"") != NULL);
-    CHECK(strstr(signatures, "0x19FCEF0u") != NULL);
+    CHECK(strstr(signatures, "0x33A0F0u") != NULL);
     CHECK(strstr(signatures, "\"IdStrDtor\"") != NULL);
-    CHECK(strstr(signatures, "0x19FD120u") != NULL);
+    CHECK(strstr(signatures, "0x33A320u") != NULL);
     CHECK(strstr(signatures, "\"DeclTypeByName\"") != NULL);
-    CHECK(strstr(signatures, "0x17B43B0u") != NULL);
+    CHECK(strstr(signatures, "0x155BAF0u") != NULL);
     CHECK(strstr(signatures, "\"DeclAddFromText\"") == NULL);
     CHECK(strstr(signatures, "\"DeclFind\"") != NULL);
-    CHECK(strstr(signatures, "0x17B36F0u") != NULL);
+    CHECK(strstr(signatures, "0x155AE90u") != NULL);
     CHECK(strstr(signatures, "\"DeclSourceFind\"") != NULL);
-    CHECK(strstr(signatures, "0x17B34B0u") != NULL);
+    CHECK(strstr(signatures, "0x155AC80u") != NULL);
     CHECK(strstr(signatures, "\"IdFileReadString\"") != NULL);
-    CHECK(strstr(signatures, "0x267390u") != NULL);
+    CHECK(strstr(signatures, "0x299850u") != NULL);
     CHECK(strstr(signatures, "\"IdFileCompare\"") != NULL);
-    CHECK(strstr(signatures, "0x267290u") != NULL);
+    CHECK(strstr(signatures, "0x2996D0u") != NULL);
     CHECK(strstr(signatures, "\"IdFileWriteString\"") != NULL);
-    CHECK(strstr(signatures, "0x268470u") != NULL);
+    CHECK(strstr(signatures, "0x29A0B0u") != NULL);
 
     CHECK(strstr(build, "\"decl_text.c\"") != NULL);
     CHECK(strstr(build, "\"decl_server_path.c\"") != NULL);
@@ -316,7 +316,7 @@ int main(int argc, char **argv)
     CHECK(strstr(overrides, "published identity is authoritative") != NULL);
     CHECK(strstr(overrides, "decltree/") != NULL);
     CHECK(strstr(overrides, "sh_resource_bridge_open") == NULL);
-    CHECK(strstr(overrides, "31-entry table") != NULL);
+    CHECK(strstr(overrides, "idFile vtable has 34 entries") != NULL);
     CHECK(strstr(overrides, "OV_PINNED_PROVIDER_VTABLE_RVA") != NULL);
     CHECK(strstr(overrides, "ov_supported_build_abi") != NULL);
     CHECK(strstr(overrides, "OV_STREAM_HELPERS_FAILED") != NULL);

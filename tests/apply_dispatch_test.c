@@ -296,7 +296,8 @@ void *sh_typeinfo_get_declmgr(void) { assert(0); return NULL; }
 int sh_iface_class_inherit_ok(int id, const char *c, const char *h) { (void)id; (void)c; (void)h; assert(0); return 0; }
 const char *ie_resolve_id_string(int id, char *buf, int cap) { (void)id; (void)buf; (void)cap; assert(0); return NULL; }
 uintptr_t glb_resolve(const uint8_t *base, const char *name, glb_status *status) { (void)base; (void)name; (void)status; assert(0); return 0; }
-int sh_host_is_pinned_rva_build(void) { assert(0); return 0; }
+int sh_host_is_supported_build(void) { assert(0); return 0; }
+uint32_t sh_host_rva(uint32_t vk, uint32_t gl) { (void)vk; (void)gl; return 0; }
 unsigned char *sh_overrides_read_engine_resource(const char *name, size_t *len) { (void)name; (void)len; assert(0); return NULL; }
 void *sh_prepare_detour_sig(const sig_result *r, void *detour, size_t stolen)
 { (void)r; (void)detour; (void)stolen; assert(0); return NULL; }

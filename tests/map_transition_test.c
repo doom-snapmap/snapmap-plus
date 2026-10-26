@@ -3,7 +3,7 @@
 #include <stdio.h>
 #include "../src/backend/map_transition.c"
 
-static unsigned char image[4096], manager[0x2c78], parameters[0x17100], common[0xf580];
+static unsigned char image[4096], manager[0x2c78], parameters[0x17100], common[0xf5e0];
 static void *common_vtable[6];
 static DWORD thread_id;
 static int has_resource, force_full, pending_result, activation_result, mode;
@@ -35,13 +35,13 @@ static void native_unload(void *self, unsigned char force, unsigned char full)
 static unsigned char native_allocation(void *self, void *out, const void *parms, void *extra)
 {
     unsigned char full, force;
-    assert(self == manager && parms == parameters && out == common + 0x1298 && extra == (void *)4);
+    assert(self == manager && parms == parameters && out == common + TR_COMMON_RESOURCE && extra == (void *)4);
     allocations++;
     pending_resource = NULL;
     full = has_resource && (native_compare(*(const char *const *)(parameters + 0x30),
         *(const char *const *)(manager + 0x2c70)) || force_full);
     force = (parameters[0x170f8] >> 5) & 1;
-    if (mode != 15) transition_unload_from(common, force, full, image + 0x100 + 0xae);
+    if (mode != 15) transition_unload_from(common, force, full, image + 0x100 + TR_ALLOC_UNLOAD_RET);
     if (g_trans.phase == TRANS_LOADING && mode != 15) { assert(step == 3 && !g_trans.skip_unload && unloads == 1); step = 4; }
     if (mode == 5) RaiseException(0xe0475002, 0, 0, NULL);
     if (mode == 12) RaiseException(TRANS_CANCEL_EXCEPTION, 0, 0, NULL);
@@ -53,13 +53,13 @@ static void native_finalize(void *self, const void *parms, void *extra)
     native_frame++;
     __try {
         if (mode == 16) RaiseException(0xe0475016, 0, 0, NULL);
-        common[0xf576] = 1;
-        if (!transition_allocate_from(manager, common + 0x1298, parms, extra, image + 0x800 + 0x1ea)) {
+        common[TR_COMMON_LOADING] = 1;
+        if (!transition_allocate_from(manager, common + TR_COMMON_RESOURCE, parms, extra, image + 0x800 + 0x1ea)) {
             fatals++; RaiseException(0xe04750ff, 0, 0, NULL);
         }
         assert(!finishes); /* Successful allocation is not completed finalization. */
         if (mode == 13) RaiseException(0xe0475013, 0, 0, NULL);
-        common[0xf576] = 0; native_finalized++;
+        common[TR_COMMON_LOADING] = 0; native_finalized++;
     } __finally { native_frame--; }
 }
 static void native_cancel(void *self, unsigned char force)
@@ -79,7 +79,7 @@ static int activate(void)
     assert(sh_map_transition_at_boundary() && step == 2 && unloads == 1 && purges == 1);
     assert(!pending_resource); activations++; step = 3;
     if (mode == 3) RaiseException(0xe0475003, 0, 0, NULL);
-    if (mode == 9) transition_allocate(manager, common + 0x1298, parameters, (void *)4);
+    if (mode == 9) transition_allocate(manager, common + TR_COMMON_RESOURCE, parameters, (void *)4);
     if (mode == 11) transition_finalize(common, parameters, (void *)4);
     return activation_result;
 }
@@ -124,21 +124,21 @@ static void make_binding(sig_result result[4])
     unsigned char *allocation = image + 0x100, *unload = image + 0x300, *purge = image + 0x600;
     unsigned char *finalize = image + 0x800, *cancel = image + 0xb00;
     memset(image, 0x90, sizeof(image));
-    relative(allocation + 0x5b, "\x4c\x89\x3d", 3, &pending_resource);
-    relative(allocation + 0x62, "\x44\x39\x3d", 3, &has_resource);
-    relative(allocation + 0x84, "\x44\x39\x3d", 3, &force_full);
-    relative(allocation + 0x7b, "\xe8", 1, native_compare);
-    relative(allocation + 0xa2, "\x48\x8d\x0d", 3, common);
-    relative(allocation + 0xa9, "\xe8", 1, unload);
-    memcpy(allocation + 0x70, "\x48\x8b\x91\x70\x2c\x00\x00\x49\x8b\x48\x30", 11);
-    memcpy(allocation + 0x95, "\x0f\xb6\x96\xf8\x70\x01\x00\xc0\xea\x05\x80\xe2\x01", 13);
+    relative(allocation + TR_ALLOC_PENDING, "\x4c\x89\x3d", 3, &pending_resource);
+    relative(allocation + TR_ALLOC_HAS_RESOURCE, "\x44\x39\x3d", 3, &has_resource);
+    relative(allocation + TR_ALLOC_FORCE_FULL, "\x44\x39\x3d", 3, &force_full);
+    relative(allocation + TR_ALLOC_COMPARE_CALL, "\xe8", 1, native_compare);
+    relative(allocation + TR_ALLOC_COMMON_LEA, "\x48\x8d\x0d", 3, common);
+    relative(allocation + TR_ALLOC_UNLOAD_CALL, "\xe8", 1, unload);
+    memcpy(allocation + TR_ALLOC_COMPARE_ARGS, "\x48\x8b\x91\x70\x2c\x00\x00\x49\x8b\x48\x30", 11);
+    memcpy(allocation + TR_ALLOC_FLAGS, "\x41\x0f\xb6\x95\xf8\x70\x01\x00\xc0\xea\x05\x80\xe2\x01", 14);
     relative(unload + 0x1a4, "\xe8", 1, purge);
     relative(unload + 0x1b3, "\xe8", 1, purge);
     memcpy(purge, "\x40\x57\x48\x83\xec\x40\x48\xc7\x44\x24\x20\xfe\xff\xff\xff", 15);
     memcpy(finalize, "\x40\x53\x56\x57\x41\x54\x41\x55\x41\x56\x41\x57\xb8\x70\x74\x00\x00", 17);
     memcpy(finalize + 0x1b9, "\x48\x8b\x06\x33\xd2\x48\x8b\xce\xff\x50\x28", 11);
-    memcpy(finalize + 0x1c9, "\xc6\x86\x76\xf5\x00\x00\x01", 7);
-    memcpy(finalize + 0x1e0, "\x48\x8d\x96\x98\x12\x00\x00\xff\x50\x58\x84\xc0", 12);
+    memcpy(finalize + 0x1c9, "\xc6\x86\xd6\xf5\x00\x00\x01", 7);
+    memcpy(finalize + 0x1e0, "\x48\x8d\x96\x00\x13\x00\x00\xff\x50\x58\x84\xc0", 12);
     *(void ***)common = common_vtable; common_vtable[5] = cancel;
     memset(result, 0, 4 * sizeof(*result));
     result[0].name = "AllocateGameResources"; result[0].addr = (uintptr_t)allocation; result[0].rva = 0x100; result[0].status = SIG_OK;
@@ -150,7 +150,7 @@ static void reset_case(void)
 {
     checks_pending = activations = finishes = finished_result = allocations = unloads = purges = compares = 0;
     observed_force = observed_full = step = mode = cancellations = native_finalized = native_frame = fatals = 0;
-    common[0xf576] = common[0xf577] = 0;
+    common[TR_COMMON_LOADING] = common[TR_COMMON_LOADING + 1] = 0;
     install_commits = 0;
     pending_result = activation_result = 1; has_resource = 1; force_full = 0;
     pending_resource = (void *)123;
@@ -163,7 +163,7 @@ static void reset_case(void)
 static DWORD WINAPI wrong_thread(void *unused)
 {
     (void)unused;
-    assert(transition_allocate(manager, common + 0x1298, parameters, (void *)4));
+    assert(transition_allocate(manager, common + TR_COMMON_RESOURCE, parameters, (void *)4));
     assert(!sh_map_transition_at_boundary()); return 0;
 }
 int main(void)
@@ -174,7 +174,7 @@ int main(void)
     assert(sh_map_transition_bind(result, 4, image));
     assert(!sh_map_transition_bind(result, 1, image));
     result[0].rva++; assert(!sh_map_transition_bind(result, 4, image)); result[0].rva--;
-    image[0x100 + 0x95] ^= 1; assert(!sh_map_transition_bind(result, 4, image)); image[0x100 + 0x95] ^= 1;
+    image[0x100 + TR_ALLOC_FLAGS] ^= 1; assert(!sh_map_transition_bind(result, 4, image)); image[0x100 + TR_ALLOC_FLAGS] ^= 1;
     image[0x300 + 0x1b3] ^= 1; assert(!sh_map_transition_bind(result, 4, image)); image[0x300 + 0x1b3] ^= 1;
     assert(!sh_map_transition_install(result, 4, image, NULL));
     fail_prepare = 2;
@@ -194,7 +194,7 @@ int main(void)
         transition_finalize(common, parameters, (void *)4);
         assert(allocations == (select >= 0) && unloads == (select >= 0));
         assert(activations == (select == 1) && finishes == (select != 0));
-        assert(!sh_map_transition_at_boundary() && g_trans.phase == TRANS_IDLE && !fatals && !common[0xf576]);
+        assert(!sh_map_transition_at_boundary() && g_trans.phase == TRANS_IDLE && !fatals && !common[TR_COMMON_LOADING]);
     }
     for (int flags = 0; flags < 8; flags++) {
         reset_case(); has_resource = flags & 1; force_full = (flags & 2) != 0;
@@ -213,14 +213,14 @@ int main(void)
         assert(!!caught == (mode == 5 || mode == 6 || mode == 12 || mode == 13 || mode == 14 || mode == 16));
         assert(finishes == (mode != 16) && finished_result == (mode == 8 || mode == 10));
         assert(!fatals && !native_frame && g_trans.phase == TRANS_IDLE && !g_trans.parameters);
-        if (!caught) assert(!common[0xf576] && !common[0xf577]);
+        if (!caught) assert(!common[TR_COMMON_LOADING] && !common[TR_COMMON_LOADING + 1]);
         if (mode == 12) assert(caught == TRANS_CANCEL_EXCEPTION && !cancellations);
         if (mode == 13) assert(!cancellations && allocations == 1);
         assert(install_commits == (mode == 8 || mode == 10 || mode == 17 || mode == 18));
         if (mode >= 17) assert(cancellations == 1 && native_finalized == 1 && !finished_result);
     }
     reset_case();
-    assert(transition_allocate(manager, common + 0x1298, parameters, (void *)4));
+    assert(transition_allocate(manager, common + TR_COMMON_RESOURCE, parameters, (void *)4));
     assert(!checks_pending && !finishes && allocations == 1);
     reset_case();
     {
@@ -229,16 +229,16 @@ int main(void)
         assert(!checks_pending && allocations == 1 && unloads == 1 && !finishes);
     }
     reset_case(); g_trans.parameters = parameters; g_trans.extra = (void *)4;
-    assert(transition_allocate_from(manager, common + 0x1298, parameters, (void *)4, image + 0x800 + 0x1eb));
+    assert(transition_allocate_from(manager, common + TR_COMMON_RESOURCE, parameters, (void *)4, image + 0x800 + 0x1eb));
     assert(!checks_pending && allocations == 1 && !finishes);
     memset(&g_trans, 0, sizeof(g_trans));
     /* A neighboring return address or another owner cannot consume the bypass. */
     reset_case(); g_trans.phase = TRANS_LOADING; g_trans.skip_unload = 1;
     transition_unload_from(common, 0, 0, image + 0x100 + 0xaf);
     assert(unloads == 1 && g_trans.skip_unload);
-    transition_unload_from(common, 0, 0, image + 0x100 + 0xae);
+    transition_unload_from(common, 0, 0, image + 0x100 + TR_ALLOC_UNLOAD_RET);
     assert(unloads == 1 && !g_trans.skip_unload);
-    transition_unload_from(common, 0, 0, image + 0x100 + 0xae);
+    transition_unload_from(common, 0, 0, image + 0x100 + TR_ALLOC_UNLOAD_RET);
     assert(unloads == 2);
     memset(&g_trans, 0, sizeof(g_trans));
     puts("map_transition_test: PASS"); return 0;

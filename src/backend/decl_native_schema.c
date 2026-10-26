@@ -500,18 +500,16 @@ int sh_decl_native_source_bind(sh_decl_native_source *source,
 }
 
 int sh_decl_native_source_ready(sh_decl_native_source *source,
-    uintptr_t accessor, uintptr_t type_container, uintptr_t game_system_export)
+    uintptr_t accessor, uintptr_t type_container, uintptr_t game_system_slot)
 {
-    unsigned char code[8], list[16];
-    uintptr_t system, items;
-    int32_t displacement, count, capacity;
+    unsigned char list[16];
+    uintptr_t system = 0, items;
+    int32_t count, capacity;
     if (!source) return -1;
     source->reflection = 0;
-    if (!source->read || !accessor || !type_container || !game_system_export || game_system_export > UINTPTR_MAX - sizeof(code) ||
-        !source->read(source->context, game_system_export, code, sizeof(code)) ||
-        memcmp(code, "\x48\x8d\x05", 3) || code[7] != 0xc3) return -1;
-    memcpy(&displacement, code + 3, sizeof(displacement));
-    if (!dn_relative(game_system_export + 7, displacement, &system) ||
+    if (!source->read || !accessor || !type_container || !game_system_slot ||
+        game_system_slot > UINTPTR_MAX - sizeof(system) ||
+        !source->read(source->context, game_system_slot, &system, sizeof(system)) ||
         !system || system > UINTPTR_MAX - 24 ||
         !source->read(source->context, system + 8, list, sizeof(list))) return -1;
     memcpy(&items, list, 8); memcpy(&count, list + 8, 4); memcpy(&capacity, list + 12, 4);

@@ -13,13 +13,14 @@
 #include "backend_log.h"
 #include "engine_globals.h"
 #include "class_universe.h"
+#include "engine_build.h"
 
 /* Engine call contracts. */
 
 /* Decode the decl-manager accessor from a signed call site. Its own lazy-init
  * prologue is shared by other functions, so a prologue-only pattern is ambiguous. */
 typedef void *(*declmgr_getter_fn)(void);
-#define DECLMGR_ACCESSOR_KNOWN_RVA  0x17F7030u   /* Pinned Vulkan audit reference only; resolved through a signed call site. */
+#define DECLMGR_ACCESSOR_KNOWN_RVA  SH_RVA(0x1565BD0u, 0x1566EB0u)   /* Pinned Vulkan audit reference only; resolved through a signed call site. */
 
 /* Decl-manager vtable +0x80 returns its reflection context. */
 #define VSLOT_REFLECT_ACCESSOR  0x80
@@ -186,11 +187,11 @@ static int ti_read_u32(const void *base, size_t off, uint32_t *out)
  * before reparse: its Error(6) is caught inside the engine, beyond frame recovery.
  * Return 1 for a match, 0 for mismatch/unknown type, or -1 when reflection is
  * unavailable; callers must not reject solely on -1. Walk at most 64 ancestors. */
-/* The validator uses manager vtable +0x240, which includes SnapMap classes
+/* The validator uses manager vtable +0x258 (+0x240 in 2018), which includes SnapMap classes
  * missed by declMgr +0x80. Resolve the manager slot through its global anchor;
  * fall back to the decl-manager context when unavailable. */
-#define VALIDATOR_MGR_RVA         0x4DF9648u   /* Pinned Vulkan audit reference; the global anchor locates the slot. */
-#define VSLOT_VALIDATOR_REFLECT   0x240
+#define VALIDATOR_MGR_RVA         SH_RVA(0x35EB618u, 0x3633430u)   /* Pinned Vulkan audit reference; the global anchor locates the slot. */
+#define VSLOT_VALIDATOR_REFLECT   SH_VALIDATOR_REFLECT_SLOT
 static void *ti_get_validator_reflect(void)
 {
     if (!g_validator_mgr) return NULL;
@@ -225,8 +226,8 @@ int sh_typeinfo_class_derives(const char *className, const char *baseName)
 /* Find the inherit declaration through the read-only hash lookup, then copy
  * className@+0x60. Avoid load-or-create: unresolved names can trigger engine
  * fatal paths there. Return NULL if unavailable; the compatibility guard then opens. */
-#define RESOURCE_MGR_CTX_RVA   0x59BD8F0u   /* Pinned Vulkan audit reference from the validator call site. */
-#define DECL_PURE_FIND_RVA     0x18017A0u   /* Pinned Vulkan audit reference; DeclPureFind resolves the function. */
+#define RESOURCE_MGR_CTX_RVA   SH_RVA(0x66C4980u, 0x4FC9F40u)   /* Pinned Vulkan audit reference from the validator call site. */
+#define DECL_PURE_FIND_RVA     SH_RVA(0x1572A80u, 0x1573C10u)   /* Pinned Vulkan audit reference; DeclPureFind resolves the function. */
 #define DECL_CLASSNAME_OFF     0x60u        /* idDeclEntityDef.className char* (vtbl+0xb0 = return *(this+0x60)) */
 const char *sh_typeinfo_inherit_base(const char *inheritName, char *buf, size_t cap)
 {
@@ -330,9 +331,9 @@ int sh_typeinfo_inherit_model(const char *inheritName, char *buf, size_t cap)
  * Shipped material names are available before rendering; this does not imply
  * their GPU images are resident. Dimension getters are best effort. */
 /* Pinned Vulkan audit references; all three addresses resolve by signature. */
-#define MATERIAL_MGR_CTX_RVA    0x59BD9D0u  /* material type-manager context from the material setter */
-#define MATERIAL_WIDTH_FN_RVA   0xD75D40u   /* verified idMaterial width getter                       */
-#define MATERIAL_HEIGHT_FN_RVA  0xD75B40u   /* verified idMaterial height getter                      */
+#define MATERIAL_MGR_CTX_RVA    SH_RVA(0x66C4A60u, 0x4FCA020u)  /* material type-manager context from the material setter */
+#define MATERIAL_WIDTH_FN_RVA   SH_RVA(0x16C90A0u, 0x16C9D80u)   /* verified idMaterial width getter                       */
+#define MATERIAL_HEIGHT_FN_RVA  SH_RVA(0x16C8EA0u, 0x16C9B80u)   /* verified idMaterial height getter                      */
 
 /* Probe the virtual texture's resident minimum-LOD image without GPU calls.
  * Re-derive image extent fields from idImage_Vulkan_PC::Create (0xDADB70 on the
@@ -436,7 +437,7 @@ int sh_typeinfo_find_material(const char *name, char *buf, size_t cap)
 #define REGISTRY_NAME_OFF       0x00      /* record -> className char* (NULL name terminates the array) */
 #define REGISTRY_SUPER_OFF      0x08      /* record -> superclass name char* ("" for a root) */
 #define REGISTRY_WALK_CAP       65536u    /* Bound invalid or unterminated arrays. */
-#define TYPE_CONTAINER_RVA      0x3082b10u /* Pinned Vulkan audit reference; runtime uses the signed type_container anchor. */
+#define TYPE_CONTAINER_RVA      SH_RVA(0x2F5A940u, 0x2FA2900u) /* Pinned Vulkan audit reference; runtime uses the signed type_container anchor. */
 
 /* Prefer the reflection container. When the accessor is unavailable on the UI
  * thread, read the signed static container directly. Both yield array@P+0x20. */

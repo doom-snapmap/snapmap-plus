@@ -20,7 +20,8 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
     {"ClearDialogWrapper", "40 57", 0}, {NULL, NULL, 0}
 };
 
-int sh_host_is_pinned_rva_build(void) { return 0; }
+int sh_host_is_supported_build(void) { return 0; }
+uint32_t sh_host_rva(uint32_t vk, uint32_t gl) { (void)vk; (void)gl; return 0; }
 sig_status sig_resolve_one(const uint8_t *base, const sig_entry *entry, sig_result *result)
 {
     (void)base;

@@ -29,11 +29,12 @@
 #include "nav_bake.h"
 #include "perf.h"
 #include "nav_preview.h"
+#include "engine_build.h"
 
 /* Editor layout. */
 /* Editor and entity offsets shared with iface_engine; globals use signed code anchors. */
 /* Extraction-build editor RVA, retained for diagnostics. */
-#define EDITOR_SINGLETON_PINNED_RVA   0x3056748u
+#define EDITOR_SINGLETON_PINNED_RVA   SH_RVA(0x2F6AD18u, 0x2FB2C08u)
 #define ED_MAP_OBJ_OFF         0x204c8      /* editor+0x204c8 -> loaded-map object ptr (null off-editor) */
 #define ARR_ENT_ARRAY_OFF      0x6a0        /* arrObj+0x6a0 -> entity-ptr array (8-byte entries) */
 #define ARR_ENT_COUNT_OFF      0x6a8        /* arrObj+0x6a8 -> entity count (u32) */
@@ -88,9 +89,9 @@
 #define MEMLOCAL_SCOPE_DEPTH  0xc4      /* idMemLocal +0xC4 -> heap-scope stack depth (ids at +0x44) */
 /* Heap helpers use signatures first, then exact-build extraction RVAs.
  * Obtain idMemLocal through its getter, never a guessed instance address. */
-#define MEMLOCAL_GET_RVA      0x1a04bf0u   /* idMemLocal *(void) -- the magic-static accessor */
-#define MEMLOCAL_PUSHHEAP_RVA 0x1ac57a0u   /* void(this, int heapId) */
-#define MEMLOCAL_POPHEAP_RVA  0x1ac5770u   /* void(this) -- fatals on underflow */
+#define MEMLOCAL_GET_RVA      SH_RVA(0x31D4A0u, 0x31D020u)   /* idMemLocal *(void) -- the magic-static accessor */
+#define MEMLOCAL_PUSHHEAP_RVA SH_RVA(0x3217A0u, 0x3213E0u)   /* void(this, int heapId) */
+#define MEMLOCAL_POPHEAP_RVA  SH_RVA(0x321770u, 0x3213B0u)   /* void(this) -- fatals on underflow */
 #define MEMLOCAL_HEAP_GLOBAL  0     /* 0 global/process, 1 persist, 2 map */
 typedef void *(*memlocal_get_fn)(void);
 typedef void (*memlocal_pushheap_fn)(void *self, int heapId);
@@ -128,11 +129,11 @@ typedef void (*memlocal_popheap_fn)(void *self);
 /* Prefab construction needs at least 0x590 bytes; reserve 0x2000 for scratch.
  * Populate takes (prefab, editor, writable status), not two arguments, and
  * requires a usable selection. Destroy constructed scratch on every exit. */
-#define PREFAB_CTOR_RVA        0x54d0a0u   /* Extraction RVAs for signature-first prefab helpers. */
-#define PREFAB_POPULATE_RVA    0x54e410u
-#define PREFAB_DTOR_RVA        0x51d870u
+#define PREFAB_CTOR_RVA        SH_RVA(0x11AC8D0u, 0x11AB9E0u)   /* Extraction RVAs for signature-first prefab helpers. */
+#define PREFAB_POPULATE_RVA    SH_RVA(0x11ADB30u, 0x11ACD30u)
+#define PREFAB_DTOR_RVA        SH_RVA(0x117DC40u, 0x117CCC0u)
 #define PREFAB_TEMP_SIZE       0x2000      /* Headroom above the constructor/populate write range. */
-#define ENT_DESHARE_RVA        0x52c920u   /* Optional copy-on-write helper, resolved for diagnostics but not used by apply. */
+#define ENT_DESHARE_RVA        SH_RVA(0x118C2C0u, 0x118B420u)   /* Optional copy-on-write helper, resolved for diagnostics but not used by apply. */
 
 /* Reflection object layouts. */
 /* Scratch objects must fit engine constructor and parser writes. */
@@ -1193,6 +1194,12 @@ static int ae_mkcmd_instantiate(const char *prefab_text)
 
     if (!sh_iface_engine_copy_paste_enabled()) {
         backend_log("C2 place: native copy/paste is disabled or unavailable -> staged only");
+        return AE_PASTE_STAGED;
+    }
+    /* The paste bit (+0x41) and action id (0x5c) are not yet confirmed live on
+     * build 13954591 (engine_build.h); place staged only until they are. */
+    if (SH_PENDING_ON(SH_PENDING_APPLY_PASTE)) {
+        backend_log("C2 place: native paste arming awaits live confirmation -> staged only");
         return AE_PASTE_STAGED;
     }
 
@@ -3125,7 +3132,7 @@ static void *ae_pick_engine_fn(const sig_result *results, size_t n, const char *
                                const uint8_t *base, uint32_t fallback_rva, const char *label)
 {
     uintptr_t s = sig_addr_by_name(results, n, sig_name);
-    uintptr_t r = (base && sh_host_is_pinned_rva_build()) ? (uintptr_t)(base + fallback_rva) : 0;
+    uintptr_t r = (base && sh_host_is_supported_build()) ? (uintptr_t)(base + fallback_rva) : 0;
     char l[192];
 
     if (s && r && s == r) {

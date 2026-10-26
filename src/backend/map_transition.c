@@ -10,6 +10,19 @@
 enum { TRANS_ALLOC, TRANS_UNLOAD, TRANS_PURGE, TRANS_FINALIZE, TRANS_HOOKS };
 enum { TRANS_IDLE, TRANS_UNLOADING, TRANS_ACTIVATING, TRANS_LOADING, TRANS_FINISHING };
 #define TRANS_CANCEL_EXCEPTION ((DWORD)0xe0534d50)
+/* Build 13954591 layout of the engine functions this file verifies and calls
+ * into (rederive table R-008, intra-function checks; 2018 values in brackets). */
+#define TR_ALLOC_PENDING      0x5e     /* mov [rip+X], r15: pending resource [0x5b] */
+#define TR_ALLOC_HAS_RESOURCE 0x65     /* cmp [rip+X], r15d [0x62] */
+#define TR_ALLOC_COMPARE_ARGS 0x73     /* mov rdx,[rcx+0x2c70]; mov rcx,[r8+0x30] [0x70] */
+#define TR_ALLOC_COMPARE_CALL 0x7e     /* call map-name compare [0x7b] */
+#define TR_ALLOC_FORCE_FULL   0x87     /* cmp [rip+X], r15d [0x84] */
+#define TR_ALLOC_FLAGS        0x98     /* movzx edx, byte [r13+0x170f8]; shr dl,5; and dl,1 [0x95] */
+#define TR_ALLOC_COMMON_LEA   0xa6     /* lea rcx, [rip+common] [0xa2] */
+#define TR_ALLOC_UNLOAD_CALL  0xad     /* call UnloadGameResources [0xa9] */
+#define TR_ALLOC_UNLOAD_RET   0xb2     /* its return address [0xae] */
+#define TR_COMMON_RESOURCE    0x1300   /* common + this is the allocation output [0x1298] */
+#define TR_COMMON_LOADING     0xf5d6   /* common loading flag word [0xf576] */
 typedef unsigned char (*transition_alloc_fn)(void *, void *, const void *, void *);
 typedef void (*transition_unload_fn)(void *, unsigned char, unsigned char);
 typedef void (*transition_purge_fn)(unsigned);
@@ -63,24 +76,24 @@ int sh_map_transition_bind(const sig_result *results, size_t count, const uint8_
     __try {
         /* This exact prefix only clears one resource pointer and computes the
          * unload arguments. No loading local has been constructed at +0xae. */
-        pending = transition_relative(allocation + 0x5b, "\x4c\x89\x3d", 3);
-        has_resource = transition_relative(allocation + 0x62, "\x44\x39\x3d", 3);
-        force_full = transition_relative(allocation + 0x84, "\x44\x39\x3d", 3);
-        compare = transition_relative(allocation + 0x7b, "\xe8", 1);
-        common = transition_relative(allocation + 0xa2, "\x48\x8d\x0d", 3);
+        pending = transition_relative(allocation + TR_ALLOC_PENDING, "\x4c\x89\x3d", 3);
+        has_resource = transition_relative(allocation + TR_ALLOC_HAS_RESOURCE, "\x44\x39\x3d", 3);
+        force_full = transition_relative(allocation + TR_ALLOC_FORCE_FULL, "\x44\x39\x3d", 3);
+        compare = transition_relative(allocation + TR_ALLOC_COMPARE_CALL, "\xe8", 1);
+        common = transition_relative(allocation + TR_ALLOC_COMMON_LEA, "\x48\x8d\x0d", 3);
         if (!pending || !has_resource || !force_full || !compare || !common ||
-            memcmp(allocation + 0x70, "\x48\x8b\x91\x70\x2c\x00\x00\x49\x8b\x48\x30", 11) ||
-            memcmp(allocation + 0x95, "\x0f\xb6\x96\xf8\x70\x01\x00\xc0\xea\x05\x80\xe2\x01", 13) ||
-            transition_relative(allocation + 0xa9, "\xe8", 1) != unload) return 0;
+            memcmp(allocation + TR_ALLOC_COMPARE_ARGS, "\x48\x8b\x91\x70\x2c\x00\x00\x49\x8b\x48\x30", 11) ||
+            memcmp(allocation + TR_ALLOC_FLAGS, "\x41\x0f\xb6\x95\xf8\x70\x01\x00\xc0\xea\x05\x80\xe2\x01", 14) ||
+            transition_relative(allocation + TR_ALLOC_UNLOAD_CALL, "\xe8", 1) != unload) return 0;
         purge = transition_relative(unload + 0x1a4, "\xe8", 1);
         if (!purge || transition_relative(unload + 0x1b3, "\xe8", 1) != purge ||
             memcmp(purge, "\x40\x57\x48\x83\xec\x40\x48\xc7\x44\x24\x20\xfe\xff\xff\xff", 15)) return 0;
         /* Verified on both images: native bailout uses common +0x28; the
-         * resource allocation is the +0x1e7 virtual call with common+0x1298. */
+         * resource allocation is the +0x1e7 virtual call with common+0x1300. */
         if (memcmp(finalize, "\x40\x53\x56\x57\x41\x54\x41\x55\x41\x56\x41\x57\xb8\x70\x74\x00\x00", 17) ||
             memcmp(finalize + 0x1b9, "\x48\x8b\x06\x33\xd2\x48\x8b\xce\xff\x50\x28", 11) ||
-            memcmp(finalize + 0x1c9, "\xc6\x86\x76\xf5\x00\x00\x01", 7) ||
-            memcmp(finalize + 0x1e0, "\x48\x8d\x96\x98\x12\x00\x00\xff\x50\x58\x84\xc0", 12)) return 0;
+            memcmp(finalize + 0x1c9, "\xc6\x86\xd6\xf5\x00\x00\x01", 7) ||
+            memcmp(finalize + 0x1e0, "\x48\x8d\x96\x00\x13\x00\x00\xff\x50\x58\x84\xc0", 12)) return 0;
     } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
     thread = glb_resolve(base, "main_thread_id", NULL);
     if (!thread) return 0;
@@ -118,7 +131,7 @@ static void transition_unload_from(void *common, unsigned char force, unsigned c
     /* Only consume the exact call in the allocation whose unload we already
      * performed. Other callbacks must never inherit this one-shot bypass. */
     if (g_trans.phase == TRANS_LOADING && g_trans.skip_unload && common == g_trans_common &&
-        caller == (const uint8_t *)g_trans_sites[TRANS_ALLOC] + 0xae) {
+        caller == (const uint8_t *)g_trans_sites[TRANS_ALLOC] + TR_ALLOC_UNLOAD_RET) {
         g_trans.skip_unload = 0; return;
     }
     ((transition_unload_fn)g_trans_original[TRANS_UNLOAD])(common, force, full);
@@ -153,7 +166,7 @@ static unsigned char transition_allocate_from(void *manager, void *out,
         return ((transition_alloc_fn)g_trans_original[TRANS_ALLOC])(manager, out, parameters, extra);
     if (g_trans.phase != TRANS_IDLE) transition_abort();
     if (parameters != g_trans.parameters || extra != g_trans.extra ||
-        out != (uint8_t *)g_trans_common + 0x1298 ||
+        out != (uint8_t *)g_trans_common + TR_COMMON_RESOURCE ||
         caller != (const uint8_t *)g_trans_sites[TRANS_FINALIZE] + 0x1ea)
         return ((transition_alloc_fn)g_trans_original[TRANS_ALLOC])(manager, out, parameters, extra);
     pending = g_trans_callbacks.pending(manager, parameters);
@@ -222,7 +235,7 @@ static void transition_finalize(void *common, const void *parameters, void *extr
              * map. Its session/menu cleanup runs after all loading frames
              * unwind. It is never an activation step on the successful path. */
             g_trans_cancel(common, 0);
-            *(uint16_t *)((uint8_t *)common + 0xf576) = 0;
+            *(uint16_t *)((uint8_t *)common + TR_COMMON_LOADING) = 0;
         }
     } __finally {
         g_trans.phase = TRANS_FINISHING; g_trans.skip_unload = 0;

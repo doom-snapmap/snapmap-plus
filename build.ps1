@@ -14,10 +14,10 @@ if ($LASTEXITCODE -ne 0) { throw "shared migration build failed" }
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$here\src\backend\build.ps1" @Rest
 if ($LASTEXITCODE -ne 0) { throw "backend build failed" }
 if ($BackendOnly) {
-    Write-Host "built: build/XINPUT1_3.dll (backend only)"
+    Write-Host "built: build/XINPUT1_4.dll (backend only)"
 } else {
     powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$here\src\ui\build.ps1"
     if ($LASTEXITCODE -ne 0) { throw "frontend build failed" }
-    Write-Host "built: build/XINPUT1_3.dll + build/webview/snapmap-plus-ui.dll"
+    Write-Host "built: build/XINPUT1_4.dll + build/webview/snapmap-plus-ui.dll"
     Write-Host "package with: package.ps1"
 }

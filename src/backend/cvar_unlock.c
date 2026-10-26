@@ -5,6 +5,7 @@
 #include <windows.h>
 #include <stdint.h>
 #include <string.h>
+#include "engine_build.h"
 #include "cvar_unlock.h"
 #include "backend_log.h"
 #include "host_image.h"
@@ -30,7 +31,7 @@ static void set_settable_one(void *cvar_v)
         uint8_t *cvar = (uint8_t *)cvar_v;
         if (cvar == NULL)
             return;
-        uint32_t *flags = (uint32_t *)(cvar + CVAR_FLAGS_OFF);
+        uint32_t *flags = (uint32_t *)(cvar + SH_IDCVAR_FLAGS);
         *flags |= CVAR_FLAG_NOCHEAT;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         /* A later pass retries entries still being initialized. */
@@ -160,7 +161,7 @@ static int apply_unlock(uint8_t *base)
     /* SteamStub may still hide .text during boot. Try the signature first, then
      * the Vulkan-name-gated RVA while it is unavailable. */
     uint8_t *cvarSys = cvu_resolve_cvarsys_portable(base);
-    if (cvarSys == NULL && g_cvu_cmdsys_slot == NULL && sh_host_is_pinned_rva_build()) {
+    if (cvarSys == NULL && g_cvu_cmdsys_slot == NULL && sh_host_is_supported_build()) {
         /* The gate excludes OpenGL by name; it does not verify the pinned build hash. */
         __try {
             cvarSys = *(uint8_t **)(base + RVA_CVAR_SYSTEM_PTR);
@@ -203,6 +204,20 @@ static DWORD WINAPI unlock_thread(LPVOID param)
 {
     (void)param;
     uint8_t *base = (uint8_t *)sh_host_image_base();
+
+    /* The developer-table alias writes idCVarSystem fields: only on the supported
+     * executable, and only once that layout is established. */
+    if (!SH_CVARSYS_LAYOUT_ESTABLISHED) {
+        backend_log("B2: cvar-unlock SKIPPED -- the idCVarSystem layout is not established for "
+                    "build 13954591");
+        return 0;
+    }
+    for (int i = 0; i < 6000 && base == NULL; i++) {
+        Sleep(10);
+        base = (uint8_t *)sh_host_image_base();
+    }
+    if (base == NULL || !sh_host_is_supported_build())
+        return 0;
 
     /* Wait up to about 60 seconds for the cvar system. */
     int applied = 0;

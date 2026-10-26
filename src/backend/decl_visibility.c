@@ -24,15 +24,16 @@
 #include "signatures.h"
 
 /* Resolve the manager global through engine_globals using its referencing
- * instruction. Pinned RVAs are audit references only: the constant below is
- * Vulkan; OpenGL uses 0x3E59350.
+ * instruction. The build 13954591 RVAs are audit references only.
  */
-#define DV_MANAGER_PTR_RVA 0x5557090u
+#define DV_MANAGER_PTR_RVA_VK 0x3611608u
+#define DV_MANAGER_PTR_RVA_GL 0x3659220u
 #define DV_PROBE_SLOT      0x78u
-/* Probe RVAs for signature repair: the constant below is Vulkan; OpenGL uses
- * 0x17F8A40. Installation uses the prologue match.
+/* Probe RVAs (build 13954591) for signature repair and the hook-tolerant
+ * fallback. Installation uses the prologue match.
  */
-#define DV_PINNED_PROBE_RVA 0x1806100u
+#define DV_PROBE_RVA_VK 0x1695FE0u
+#define DV_PROBE_RVA_GL 0x1696E60u
 /* Require the clean unique prologue match to equal the method in the live
  * vtable slot.
  */
@@ -134,9 +135,11 @@ static int dv_method_is_probe(const uint8_t *module_base, const void *probe)
     sig_entry entry;
     sig_result found;
 
+    memset(&entry, 0, sizeof(entry));
     entry.name = "DeclResourceExistenceProbe";
     entry.pattern = DV_PROBE_SIGNATURE;
-    entry.known_rva = DV_PINNED_PROBE_RVA;
+    entry.rva_vk = DV_PROBE_RVA_VK;
+    entry.rva_gl = DV_PROBE_RVA_GL;
     memset(&found, 0, sizeof(found));
     if (sig_resolve_one(module_base, &entry, &found) != SIG_OK) return 0;
     return found.addr != 0 && found.addr == (uintptr_t)probe;

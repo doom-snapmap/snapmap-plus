@@ -1,4 +1,5 @@
 /* Map-owned variables and the native blended-environment rendering boundary. */
+#include "engine_build.h"
 #include "map_render.h"
 #include "engine_globals.h"
 #include "process_heap_scope.h"
@@ -211,7 +212,7 @@ int sh_map_render_install(const sig_result *results,size_t count,const uint8_t *
         system=(unsigned char*)*slot;vars=*(void***)(system+8);n=*(int*)(system+16);
         if(!vars||n<1||n>100000)return 0;
         for(i=0;i<n;i++)if(vars[i]) {
-            const char *name=*(const char**)((unsigned char*)vars[i]+0x40);
+            const char *name=*(const char**)((unsigned char*)vars[i]+SH_IDCVAR_NAME);
             if(name&&!strcmp(name,"com_gameType")){g_game_type=(const int*)((unsigned char*)vars[i]+0x30);break;}
         }
         if(!g_game_type)return 0;

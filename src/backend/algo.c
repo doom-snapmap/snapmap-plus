@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <math.h>
+#include <float.h>
 #include "algo.h"
 #include "commands.h"
 #include "patch.h"
@@ -207,6 +208,17 @@ static double curve_read_time(const uint8_t *times, int n, int idx, int edgeMode
     float tl = 0.0f; curve_rd_f32(times, n - 1, &tl); return (double)tl;
 }
 
+/* The curve's edgeMode (+0x218) and period (+0x21c) are not yet confirmed live on
+ * build 13954591. A curve whose fields break the engine's own invariants is handed
+ * back to the native evaluator (the detour's trampoline) and logged once. */
+static void *g_tramp_curve;
+static volatile LONG g_curve_shape_logged;
+static int curve_shape_ok(int count, int edge_mode, float period)
+{
+    if (count < 1 || count > 64 || edge_mode < 0 || edge_mode > 2) return 0;
+    return edge_mode != 2 || (_finite(period) && period > 0.0f);
+}
+
 float sh_algo_curveeval(const void *c, float t, uint8_t mode)
 {
     (void)mode;   /* The engine resume hint is unused; bracket search starts from scratch. */
@@ -237,6 +249,16 @@ float sh_algo_curveeval(const void *c, float t, uint8_t mode)
         float period_f = 0.0f;
         curve_rd_i32(base + CURVE_OFF_EDGEMODE, &edgeMode);
         curve_rd_f32(base + CURVE_OFF_PERIOD, 0, &period_f);
+        if (!curve_shape_ok(count, edgeMode, period_f)) {
+            if (InterlockedExchange(&g_curve_shape_logged, 1) == 0) {
+                char line[160];
+                _snprintf_s(line, sizeof line, _TRUNCATE,
+                    "VERIFY: curve shape rejected (count=%d edgeMode=%d period=%g) -- native evaluator used",
+                    count, edgeMode, (double)period_f);
+                backend_log(line);
+            }
+            return g_tramp_curve ? ((float (*)(const void *, float, uint8_t))g_tramp_curve)(c, t, mode) : 0.0f;
+        }
         double period = (double)period_f;
 
         float tfirst = 0.0f, tlast2 = 0.0f;
@@ -351,7 +373,7 @@ static int            g_algo_on          = 0;
 static void *g_tramp_matmul  = NULL;
 static void *g_tramp_inverse = NULL;
 static void *g_tramp_pack    = NULL;
-static void *g_tramp_curve   = NULL;
+/* g_tramp_curve is declared above sh_algo_curveeval. */
 
 /* Return a named signature result; the install gate checks its resolution status. */
 static int algo_resolve_sig(const char *name, sig_result *out)

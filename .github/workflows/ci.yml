@@ -114,7 +114,7 @@ jobs:
           # Require both DLLs and reject accidental Qt dependencies.
           $ErrorActionPreference = 'Stop'
           $dist = "dist"
-          $must = @("XINPUT1_3.dll", "snapmap-plus\snapmap-plus-ui.dll", "MANIFEST.sha256")
+          $must = @("XINPUT1_4.dll", "snapmap-plus\snapmap-plus-ui.dll", "MANIFEST.sha256")
           foreach ($f in $must) {
             if (-not (Test-Path (Join-Path $dist $f))) { throw "bundle guard: missing $f in dist\" }
           }
@@ -131,7 +131,7 @@ jobs:
         shell: pwsh
         run: |
           $dumpbin = (Get-ChildItem "C:\Program Files*\Microsoft Visual Studio\*\*\VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe" | Select-Object -First 1).FullName
-          $ex = & $dumpbin /exports build\XINPUT1_3.dll
+          $ex = & $dumpbin /exports build\XINPUT1_4.dll
           if (-not ($ex -match '(?m)^\s*2\s.*XInputGetState') -or -not ($ex -match '(?m)^\s*3\s.*XInputSetState')) {
             $ex | Write-Host
             throw "XInput ordinals must be 2=GetState, 3=SetState"

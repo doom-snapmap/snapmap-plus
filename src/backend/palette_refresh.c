@@ -23,16 +23,17 @@
 #include "iface_engine.h"
 #include "palette_refresh.h"
 #include "hook.h"
+#include "engine_build.h"
 
 /* PR_EDITOR_PALETTE_OFF is the supported structure offset. RVAs below are
  * pinned Vulkan audit references, not lookup gates. Resolve the builder by
  * clean signature and editor_singleton through engine_globals. The OpenGL
  * singleton RVA is 0x309B588.
  */
-#define PR_EDITOR_SINGLETON_RVA 0x3056748u
+#define PR_EDITOR_SINGLETON_RVA SH_RVA(0x2F6AD18u, 0x2FB2C08u)
 #define PR_EDITOR_PALETTE_OFF   0x20660u
-#define PR_PALETTE_VTABLE_RVA   0x20499A0u
-#define PR_BUILDER_RVA          0x54AEE0u
+#define PR_PALETTE_VTABLE_RVA   SH_RVA(0x235FF50u, 0x2379CA0u)
+#define PR_BUILDER_RVA          SH_RVA(0x11AA710u, 0x11A9820u)
 
 enum {
     PR_STATE_IDLE = 0,

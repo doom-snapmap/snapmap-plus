@@ -8,6 +8,7 @@
 #include "signatures.h"
 #include "hook.h"
 #include "backend_log.h"
+#include "host_image.h"
 
 /* Scratch detour target. */
 #define TAG_ORIG   1
@@ -91,12 +92,13 @@ static void log_sig_failure_diag(const uint8_t *doom_base, const sig_entry *e, s
 
 
     uint8_t got[DIAG_BYTES];
-    int readable = safe_read(doom_base + e->known_rva, got, en > 0 ? en : DIAG_BYTES);
+    uint32_t known_rva = sh_host_image_rva(doom_base, e->rva_vk, e->rva_gl);
+    int readable = known_rva && safe_read(doom_base + known_rva, got, en > 0 ? en : DIAG_BYTES);
     if (readable) hexdump(got, en > 0 ? en : DIAG_BYTES, got_hex, sizeof got_hex);
 
     _snprintf_s(line, sizeof line, _TRUNCATE,
         "PB0: sig FAIL %s status=%s @known_rva=0x%x exp=[%s] got=[%s]",
-        e->name, sig_status_str(st), e->known_rva, exp_hex,
+        e->name, sig_status_str(st), (unsigned)known_rva, exp_hex,
         readable ? got_hex : "<unreadable page>");
     backend_log(line);
 }
@@ -128,7 +130,8 @@ int sh_smoke_run(const uint8_t *doom_base, const sig_result *results, size_t cou
     for (size_t i = 0; i < total; i++) {
         if (results[i].status == SIG_OK) {
             ok++;
-            if (results[i].rva == BACKEND_ENGINE_SIGNATURES[i].known_rva) rva_match++;
+            if (results[i].rva == sh_host_image_rva(doom_base, BACKEND_ENGINE_SIGNATURES[i].rva_vk,
+                                                    BACKEND_ENGINE_SIGNATURES[i].rva_gl)) rva_match++;
             else rva_diff++;
         } else if (results[i].status == SIG_OK_HOOKED) {
             ok++;

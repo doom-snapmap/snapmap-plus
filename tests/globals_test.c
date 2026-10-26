@@ -1,9 +1,9 @@
 /* Offline data-global resolution and layout checks on an RVA-mapped PE.
- * Run both supported renderers: pinned mode checks Vulkan RVAs; portable mode
- * checks resolution and relative layout without fixed addresses.
+ * Run both build 13954591 renderers: each global must resolve to the RVA recorded
+ * for that renderer; portable mode checks resolution and relative layout only.
  *
- *   globals_test <unpacked.exe>
- *   globals_test <unpacked.exe> portable */
+ *   globals_test <DOOMx64vk.exe | DOOMx64.exe>
+ *   globals_test <image> portable */
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -16,6 +16,8 @@
 #include "map_published.h"
 #include "map_transition.h"
 #include "resource_resident.h"
+#include "host_image.h"
+#include "engine_build.h"
 
 /* Binding checks must never invoke live reflection on the mapped PE. */
 int sh_typeinfo_class_derives(const char *name, const char *base)
@@ -128,11 +130,20 @@ int main(int argc, char **argv)
         fprintf(stderr, "usage: globals_test <DOOM_unpacked.exe> [portable]\n");
         return 2;
     }
-    if (argc >= 3 && strcmp(argv[2], "portable") == 0) pinned = 0;
-
     size_t image_sz = 0;
     uint8_t *base = map_pe_by_rva(argv[1], &image_sz);
     if (!base) return 2;
+
+    wchar_t wide[MAX_PATH];
+    MultiByteToWideChar(CP_ACP, 0, argv[1], -1, wide, MAX_PATH);
+    const sh_build_identity *identity = sh_host_test_bind_image(base, wide);
+    if (!identity) {
+        printf("BAD %s is not a supported executable (build 13954591)\n", argv[1]);
+        free(base);
+        return 1;
+    }
+    if (argc >= 3 && strcmp(argv[2], "portable") == 0) pinned = 0;
+    printf("image %s: %s, %s mode\n", argv[1], identity->label, pinned ? "recorded-RVA" : "portable");
 
     size_t total = glb_db_count();
     size_t ok = 0;
@@ -202,13 +213,12 @@ int main(int argc, char **argv)
         }
         ok++;
         uint32_t rva = (uint32_t)(a - (uintptr_t)base);
-        if (pinned && rva != e->pinned_rva) {
-            printf("BAD %-24s resolved=0x%-9x pinned=0x%x\n", e->name, rva, e->pinned_rva);
+        uint32_t recorded = identity->vulkan ? e->rva_vk : e->rva_gl;
+        if (pinned && rva != recorded) {
+            printf("BAD %-24s resolved=0x%-9x recorded=0x%x\n", e->name, rva, recorded);
             bad++;
-        } else if (pinned) {
-            printf("OK  %-24s resolved=0x%-9x\n", e->name, rva);
         } else {
-            printf("OK  %-24s resolved=0x%-9x (pinned 0x%x)\n", e->name, rva, e->pinned_rva);
+            printf("OK  %-24s resolved=0x%-9x (recorded 0x%x)\n", e->name, rva, recorded);
         }
     }
 
@@ -239,42 +249,55 @@ int main(int argc, char **argv)
         sh_decl_native_source source = {&image, metadata_read, 0};
         uintptr_t accessor = glb_resolve(base, "declmgr_accessor", NULL);
         uintptr_t container = glb_resolve(base, "type_container", NULL);
-        uintptr_t rva = container - (uintptr_t)base;
-        uintptr_t expected = rva == 0x3082b10u ? (uintptr_t)base + 0x6012120u :
-            rva == 0x30c78e0u ? (uintptr_t)base + 0x4910430u : 0;
+        /* The binder decodes the reflection slot from the accessor's own code; no
+         * independent record of that slot exists for this build yet, so require an
+         * uninitialized read inside the image and report the address. */
         int state = sh_decl_native_source_bind(&source, accessor, container);
-        if (state != 0 || source.reflection || image.last != expected) {
-            printf("BAD read-only metadata binder state=%d read=0x%llx expected=0x%llx\n",
-                state, (unsigned long long)(image.last - (uintptr_t)base),
-                (unsigned long long)(expected - (uintptr_t)base));
+        if (state != 0 || source.reflection || !accessor || !container ||
+            image.last < (uintptr_t)base || image.last >= (uintptr_t)base + image_sz) {
+            printf("BAD read-only metadata binder state=%d read=0x%llx\n",
+                state, (unsigned long long)(image.last - (uintptr_t)base));
             bad++;
-        } else printf("OK  read-only metadata binder locates uninitialized reflection at 0x%llx\n",
-            (unsigned long long)(expected - (uintptr_t)base));
+        } else printf("OK  read-only metadata binder reads uninitialized reflection slot 0x%llx\n",
+            (unsigned long long)(image.last - (uintptr_t)base));
 
-        /* Use the actual export directory, as runtime GetProcAddress does.
-         * The getter's relative target and native list layout must agree on
-         * both images; static reader allocation alone is not readiness. */
+        /* GetGameSystemInterface is no longer exported. The object is behind a
+         * relocated data pointer: apply that one relocation to the RVA-mapped copy
+         * as the loader would, then read through the slot like the runtime. */
         {
-            uintptr_t getter = image_export(base, image_sz, "GetGameSystemInterface");
-            uintptr_t system = rva == 0x3082b10u ? (uintptr_t)base + 0x2dfa1b0u :
-                rva == 0x30c78e0u ? (uintptr_t)base + 0x2e3f050u : 0;
-            source.reflection = 1;
-            state = sh_decl_native_source_ready(&source, accessor, container, getter);
-            if (!getter || state != 0 || source.reflection || image.last != system + 8) {
-                printf("BAD native reader readiness state=%d getter=0x%llx read=0x%llx\n", state,
-                    (unsigned long long)(getter - (uintptr_t)base),
-                    (unsigned long long)(image.last - (uintptr_t)base));
+            IMAGE_DOS_HEADER *dos = (IMAGE_DOS_HEADER *)base;
+            IMAGE_NT_HEADERS64 *nt = (IMAGE_NT_HEADERS64 *)(base + dos->e_lfanew);
+            uintptr_t slot = sh_engine_game_system_slot(base);
+            /* idGameSystemLocal: Vulkan 0x2F48970, OpenGL 0x2F90970 (build 13954591). */
+            uintptr_t system = (uintptr_t)base + (identity->vulkan ? 0x2F48970u : 0x2F90970u);
+            uint64_t va = 0;
+            if (slot) memcpy(&va, (const void *)slot, sizeof va);
+            if (!slot || va != nt->OptionalHeader.ImageBase + (system - (uintptr_t)base) ||
+                image_export(base, image_sz, "GetGameSystemInterface")) {
+                printf("BAD game-system slot 0x%llx holds 0x%llx\n",
+                    (unsigned long long)(slot - (uintptr_t)base), (unsigned long long)va);
                 bad++;
-            } else printf("OK  native reader readiness waits at system 0x%llx through exported getter 0x%llx\n",
-                (unsigned long long)(system - (uintptr_t)base),
-                (unsigned long long)(getter - (uintptr_t)base));
+            } else {
+                uintptr_t relocated = system;
+                memcpy((void *)slot, &relocated, sizeof relocated);
+                source.reflection = 1;
+                state = sh_decl_native_source_ready(&source, accessor, container, slot);
+                if (state != 0 || source.reflection || image.last != system + 8) {
+                    printf("BAD native reader readiness state=%d read=0x%llx\n", state,
+                        (unsigned long long)(image.last - (uintptr_t)base));
+                    bad++;
+                } else printf("OK  native reader readiness waits at system 0x%llx through data slot 0x%llx\n",
+                    (unsigned long long)(system - (uintptr_t)base),
+                    (unsigned long long)(slot - (uintptr_t)base));
+                memcpy((void *)slot, &va, sizeof va);
+            }
         }
     }
 
-    /* Layout invariants -- true on any build, so they run in both modes. */
+    /* Layout invariants of build 13954591; they run in both modes. */
     check_adjacent(base, "cmd_system_slot",      "cvar_system_slot",     0x10, &bad);
-    check_adjacent(base, "main_thread_id",       "load_state",           0x08, &bad);
-    check_adjacent(base, "main_thread_id",       "error_state",          0x0C, &bad);
+    check_adjacent(base, "main_thread_id",       "load_state",           (uint32_t)-4, &bad);
+    check_adjacent(base, "main_thread_id",       "error_state",          0x08, &bad);
     check_adjacent(base, "resource_manager_ctx", "material_manager_ctx", 0xE0, &bad);
 
     printf("======================================================================\n");

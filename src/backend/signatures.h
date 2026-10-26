@@ -1,6 +1,7 @@
 /* Masked-byte resolver for functions in the mapped engine executable.
  * Scan executable sections independent of section names; reject ambiguous matches.
- * A verified extraction-build RVA may recover a detoured entry after a scan miss. */
+ * On the supported executable (host_image.h), a recorded RVA may recover a
+ * detoured entry after a scan miss. */
 #ifndef BACKEND_SIGNATURES_H
 #define BACKEND_SIGNATURES_H
 
@@ -8,12 +9,14 @@
 #include <stdint.h>
 #include <stddef.h>
 
-/* IDA-style pattern with ?/?? wildcards. known_rva is an extraction-build
- * reference and hook-tolerant fallback location; 0 disables that fallback. */
+/* IDA-style pattern with ?/?? wildcards. rva_vk / rva_gl are the function's
+ * RVAs in the two build 13954591 executables: audit references and the
+ * hook-tolerant fallback location on that exact executable; 0 = none. */
 typedef struct sig_entry {
     const char *name;
     const char *pattern;
-    uint32_t    known_rva;   /* the RVA on the extraction build (0 = none) */
+    uint32_t    rva_vk;      /* DOOMx64vk.exe build 13954591 */
+    uint32_t    rva_gl;      /* DOOMx64.exe build 13954591 */
 } sig_entry;
 
 typedef enum sig_status {
@@ -22,7 +25,7 @@ typedef enum sig_status {
     SIG_AMBIGUOUS,      /* more than one match -- not unique enough to identify a function */
     SIG_BAD_PATTERN,    /* empty / malformed pattern, or pattern longer than the scan buffer */
     SIG_BAD_MODULE,     /* the module base is not a parseable PE32+ image */
-    SIG_OK_HOOKED       /* verified build; detour at known_rva has a matching fixed tail */
+    SIG_OK_HOOKED       /* supported build; detour at the recorded RVA has a matching fixed tail */
 } sig_status;
 
 typedef struct sig_result {

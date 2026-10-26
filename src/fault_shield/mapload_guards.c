@@ -202,7 +202,7 @@ static void *guard_target(const uint8_t *module_base, const char *sig_name, uint
     (void)sig_resolve_all(module_base, results, SIG_RESULTS_MAX);
     a = sig_addr_by_name(results, db, sig_name);
     if (a) return (void *)a;
-    if (sh_host_is_pinned_rva_build()) return (void *)(module_base + pinned_rva);
+    if (sh_host_is_supported_build()) return (void *)(module_base + pinned_rva);
     return NULL;   /* unknown build: refuse rather than detour a guessed address */
 }
 int sh_evwire_guard_install(const uint8_t *module_base)

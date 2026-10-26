@@ -1,4 +1,4 @@
-/* Runtime check of XINPUT1_3 ordinal 2 (GetState) and 3 (SetState), matching
+/* Runtime check of XINPUT1_4 ordinal 2 (GetState) and 3 (SetState), matching
  * DOOM's imports. Guard buffers detect writes from an incorrect export; SEH
  * turns an access violation into a test failure. Accept success or no-controller
  * status from the real proxy DLL. */
@@ -10,7 +10,7 @@ typedef DWORD (WINAPI *fn3)(DWORD, void *);   /* XInputSetState(idx, XINPUT_VIBR
 
 int main(int argc, char **argv)
 {
-    const char *dll = (argc > 1) ? argv[1] : "XINPUT1_3.dll";
+    const char *dll = (argc > 1) ? argv[1] : "XINPUT1_4.dll";
     HMODULE h = LoadLibraryA(dll);
     if (!h) { printf("FAIL: LoadLibrary(%s) err=%lu\n", dll, GetLastError()); return 2; }
 

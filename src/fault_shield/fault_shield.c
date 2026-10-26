@@ -82,11 +82,11 @@ void shield_install(uint8_t *doom_base, size_t doom_size)
     g_doom_base = doom_base;
     g_doom_size = doom_size;
     if (g_doom_base == NULL) { shield_raw("shield_install: NULL base -> skipped"); return; }
-    shield_raw("shield_install: entered (merged into backend XINPUT1_3)");
+    shield_raw("shield_install: entered (merged into backend XINPUT1_4)");
     shield_wait_for_instr();
     if (shield_install_hooks()) {
         shield_raw("shield_install: ARMED (VEH + frame-hook installed)");
-        OutputDebugStringA("[shield] armed (merged into backend XINPUT1_3)\n");
+        OutputDebugStringA("[shield] armed (merged into backend XINPUT1_4)\n");
     } else {
         shield_raw("shield_install: FAILED to install hooks");
         OutputDebugStringA("[shield] FAILED to install hooks\n");

@@ -99,9 +99,9 @@ uintptr_t glb_resolve(const uint8_t *module_base, const char *name, glb_status *
 
     /* Disable RVA fallback: detours overwrite the displacement we need to decode.
  * Only an intact, unique anchor can locate a data global. */
+    memset(&anchor_sig, 0, sizeof anchor_sig);
     anchor_sig.name      = e->name;
     anchor_sig.pattern   = e->anchor;
-    anchor_sig.known_rva = 0;
 
     st = sig_resolve_one(module_base, &anchor_sig, &r);
     if (st != SIG_OK) {
@@ -142,8 +142,8 @@ size_t glb_resolve_all(const uint8_t *module_base)
         if (a) {
             ok++;
             _snprintf_s(line, sizeof line, _TRUNCATE,
-                "glb %-24s rva=0x%-9x (pinned 0x%x)", e->name,
-                (unsigned)(a - (uintptr_t)module_base), (unsigned)e->pinned_rva);
+                "glb %-24s rva=0x%-9x (recorded vk 0x%x / gl 0x%x)", e->name,
+                (unsigned)(a - (uintptr_t)module_base), (unsigned)e->rva_vk, (unsigned)e->rva_gl);
         } else {
             _snprintf_s(line, sizeof line, _TRUNCATE,
                 "glb %-24s UNRESOLVED status=%d -- dependent features will decline",

@@ -74,8 +74,8 @@ static void reset_native(int image, int resource)
     memset(g_cvars, 0, sizeof(g_cvars));
     memset(g_cvar_system, 0, sizeof(g_cvar_system));
     g_cvar_rows[0] = g_cvars[0]; g_cvar_rows[1] = g_cvars[1];
-    *(const char **)(g_cvars[0] + 0x40) = "g_useImageBlackList";
-    *(const char **)(g_cvars[1] + 0x40) = "g_useResourceBlackList";
+    *(const char **)(g_cvars[0] + 0x50) = "g_useImageBlackList";
+    *(const char **)(g_cvars[1] + 0x50) = "g_useResourceBlackList";
     *(void ***)(g_cvar_system + 8) = g_cvar_rows;
     *(unsigned int *)(g_cvar_system + 0x10) = 2;
     g_cvar_slot = g_cvar_system;

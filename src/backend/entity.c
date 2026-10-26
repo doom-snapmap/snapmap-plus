@@ -13,6 +13,7 @@
 #include "host_image.h"
 #include "backend_log.h"
 #include "dumpmap_path.h"
+#include "engine_build.h"
 
 /* Engine call contracts. */
 
@@ -37,7 +38,7 @@ typedef int   (*map_writer_fn)(void *map, const char *path);
 #define ENTITYDEF_TEXT_OFF   0x140
 
 /* Pinned Vulkan fallback; host_image requires a verified executable hash. */
-#define GAMEMGR_KNOWN_RVA    0x56ffb90u
+#define GAMEMGR_KNOWN_RVA    SH_RVA(0x5B0F6D0u, 0x4414D50u)
 
 /* Cached dependencies. */
 
@@ -91,7 +92,7 @@ const uint8_t *sh_resolve_gamemgr_slot(const sig_result *results, size_t n, cons
         }
     }
     /* Last resort: pinned Vulkan RVA, allowed by the filename gate only. */
-    if (module_base && sh_host_is_pinned_rva_build()) {
+    if (module_base && sh_host_is_supported_build()) {
         const uint8_t *slot = module_base + GAMEMGR_KNOWN_RVA;
         void *probe = NULL;
         if (sh_safe_read(slot, (uint8_t *)&probe, sizeof probe)) {

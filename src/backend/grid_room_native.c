@@ -728,12 +728,20 @@ int sh_grid_native_install(const sig_result *r,size_t n,const uint8_t *base)
     g_read_properties=(entity_tree_apply_fn)clean(r,n,"GridReadEntityProperties");
     g_tree_vec=(tree_vec_fn)clean(r,n,"GridTreeSetVec3");
     g_tree_float=(tree_float_fn)clean(r,n,"GridTreeSetFloat");
-    if(g_entity_tree){const unsigned char *p=(const unsigned char*)g_entity_tree;int32_t displacement;
-        /* Both verified getters contain the owning tree's cleanup sequence at
-         * these offsets. Use its exact destructor and matching native delete. */
-        if(p[0x46]==0xe8&&p[0x53]==0xe8&&!memcmp(p+0x4b,"\xba\x48\0\0\0\x48\x8b\xcf",8)){
-            memcpy(&displacement,p+0x47,4);g_tree_destroy=(tree_destroy_fn)(p+0x4b+displacement);
-            memcpy(&displacement,p+0x54,4);g_tree_free=(tree_free_fn)(p+0x58+displacement);
+    {const unsigned char *p=(const unsigned char*)clean(r,n,"GridReapplyEntityTree");int32_t displacement;
+        /* The native re-apply routine owns the same tree: it gets it from GridEntityTree,
+         * applies it, then destroys it and deletes its 0x48 bytes. Bind its destructor and
+         * delete only when its two leading calls reach the resolved getter and applier. */
+        if(p&&g_entity_tree&&g_apply_tree&&p[0x17]==0xe8&&p[0x25]==0xe8&&p[0x38]==0xe8&&p[0x45]==0xe8&&
+           !memcmp(p+0x3d,"\xba\x48\0\0\0\x48\x8b\xcb",8)){
+            memcpy(&displacement,p+0x18,4);
+            if((const void*)(p+0x1c+displacement)==(const void*)g_entity_tree){
+                memcpy(&displacement,p+0x26,4);
+                if((const void*)(p+0x2a+displacement)==(const void*)g_apply_tree){
+                    memcpy(&displacement,p+0x39,4);g_tree_destroy=(tree_destroy_fn)(p+0x3d+displacement);
+                    memcpy(&displacement,p+0x46,4);g_tree_free=(tree_free_fn)(p+0x4a+displacement);
+                }
+            }
         }
     }
     g_editor=(unsigned char*)glb_resolve(base,"editor_singleton",NULL);

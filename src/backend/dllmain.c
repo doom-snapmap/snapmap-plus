@@ -63,6 +63,7 @@
 #include "cvar_unlock.h"
 #include "backend_log.h"
 #include "host_image.h"
+#include "engine_build.h"
 #include "engine_globals.h"
 #include "../fault_shield/fault_shield.h"
 #include "../fault_shield/fault_record.h"
@@ -71,6 +72,25 @@
 #endif
 
 static uint8_t *g_doom_base = NULL;
+
+/* A feature whose engine offsets are still unverified on this build stays off.
+ * Returns 1 (and logs which values) when `pending` is set, 0 to go ahead. */
+static int feature_pending(int pending, const char *feature, const char *why)
+{
+    char line[512];
+    if (!pending) return 0;
+    if (sh_live_verify()) {
+        _snprintf_s(line, sizeof line, _TRUNCATE,
+            "VERIFY: %s runs for live verification with unconfirmed values: %s", feature, why);
+        backend_log(line);
+        return 0;
+    }
+    _snprintf_s(line, sizeof line, _TRUNCATE,
+        "OFF: %s -- engine offsets not yet confirmed live on build 13954591: %s "
+        "(SNAPMAP_PLUS_LIVE_VERIFY=1 runs it)", feature, why);
+    backend_log(line);
+    return 1;
+}
 static size_t   g_doom_size = 0;
 
 static void resolve_doom(void)
@@ -130,6 +150,16 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
         (void *)g_doom_base, g_doom_size);
     backend_log(line);
 
+    /* Every engine address and layout here is for one build, identified by the
+     * executable's SHA-256. On anything else this DLL only forwards XInput. */
+    if (!sh_host_is_supported_build()) {
+        backend_log("UNSUPPORTED: this DOOM executable is not the April 2024 update (Steam build "
+                    "13954591), the only build this Snapmap+ supports; Snapmap+ is off and only "
+                    "forwards controller input. For the 2018 build install Snapmap+ v0.2.1-beta.19.");
+        return 0;
+    }
+    _snprintf_s(line, sizeof line, _TRUNCATE, "host build 13954591 (%s)", sh_host_identity()->label);
+    backend_log(line);
 
     ensure_user_dirs();
     sh_config_init(); /* nonfatal: the service retains defaults and status flags on failure */
@@ -261,16 +291,21 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
             }
         }
         sh_map_payload_install(results, db);
-        if (!sh_resource_resident_bind(results, db, g_doom_base))
+        if (!feature_pending(SH_PENDING_RESIDENT, "cached-resource refresh", SH_PENDING_RESIDENT_WHY) &&
+            !sh_resource_resident_bind(results, db, g_doom_base))
             backend_log("MPKG: native cached-resource refresh binding unavailable");
         {
             const sh_map_transition_callbacks callbacks = {sh_rawmap_transition_pending,
                 sh_rawmap_transition_activate, sh_rawmap_transition_commit, sh_rawmap_transition_finished};
-            if (!sh_map_transition_install(results, db, g_doom_base, &callbacks))
+            if (!SH_MAP_TRANSITION_LAYOUT_ESTABLISHED)
+                backend_log("MPKG: native package activation boundary unavailable -- the map-transition "
+                            "layout is not established for build 13954591");
+            else if (!sh_map_transition_install(results, db, g_doom_base, &callbacks))
                 backend_log("MPKG: native package activation boundary unavailable");
         }
         if (!sh_map_source_install(results, db, g_doom_base) ||
             !sh_map_native_bind(results, db, g_doom_base) ||
+            feature_pending(SH_PENDING_MAP_PUBLISHED, "published-map launch", SH_PENDING_MAP_PUBLISHED_WHY) ||
             !sh_map_published_install(results, db, g_doom_base))
             backend_log("MPKG: published-map ownership and launch binding unavailable");
 
@@ -298,7 +333,7 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
         sh_package_runtime_bind_native(
             glb_resolve(g_doom_base, "declmgr_accessor", NULL),
             glb_resolve(g_doom_base, "type_container", NULL),
-            (uintptr_t)GetProcAddress((HMODULE)g_doom_base, "GetGameSystemInterface"));
+            sh_engine_game_system_slot(g_doom_base));
 
         /* Inject custom #str_ entries before the first top-level language-table sort.
          * The detour needs a clean prologue; helper functions come from the same scan. */
@@ -352,7 +387,15 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
                 write_string_clean = (results[i].status == SIG_OK);
             }
         }
-        int overrides_installed = sh_overrides_install(g_doom_base,
+        /* The override stream implements the 31-slot idFile ABI; build 13954591's
+         * idFile has 34 slots and its provider open slot is not established. */
+        int overrides_installed = 0;
+        if (SH_IDFILE_SLOTS != SH_OVERRIDES_STREAM_SLOTS || SH_PROVIDER_OPEN_SLOT != SH_OVERRIDES_OPEN_SLOT)
+            backend_log("B1: overrides file-shadow SKIPPED -- the override stream implements the 31-slot "
+                        "idFile ABI; build 13954591's idFile slot list and provider open slot are not "
+                        "established");
+        else
+            overrides_installed = sh_overrides_install(g_doom_base,
                                                        res_ctor, ctor_clean,
                                                        read_string, read_string_clean,
                                                        compare, compare_clean,
@@ -399,10 +442,16 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
         sh_ui_bridge_install();
 
         /* Bind apply dependencies before publishing their interface slots. */
+        feature_pending(SH_PENDING_APPLY_PASTE, "native prefab paste (staged-only placement remains)",
+                        SH_PENDING_APPLY_PASTE_WHY);
         sh_apply_engine_install(results, db, g_doom_base, cmdsys);
-        if(grid_installed&&!sh_grid_editor_install(results,db,sh_grid_native_read,sh_grid_native_apply))
+        if(grid_installed&&
+           !feature_pending(SH_PENDING_GRID_PROPERTIES,"grid-room dimension properties",SH_PENDING_GRID_PROPERTIES_WHY)&&
+           !sh_grid_editor_install(results,db,sh_grid_native_read,sh_grid_native_apply))
             backend_log("GRID: native dimension properties unavailable on this build");
-        if(!sh_map_render_install(results,db,g_doom_base)||!sh_map_render_editor_install(results,db))
+        if(!sh_map_render_install(results,db,g_doom_base)||
+           feature_pending(SH_PENDING_RENDER_EDITOR,"per-map rendering panel",SH_PENDING_RENDER_EDITOR_WHY)||
+           !sh_map_render_editor_install(results,db))
             backend_log("RENDER: per-map rendering controls unavailable on this build");
 
         /* Navigation geometry follows editor actions rather than a poll. */
@@ -414,7 +463,8 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
                                     sh_apply_engine_entity_json,
                                     sh_apply_engine_entity_transform, NULL);
         sh_nav_bake_set_snapshot(sh_apply_engine_nav_regions, NULL);
-        sh_nav_menu_install(results, db);
+        if (!feature_pending(SH_PENDING_NAV_MENU, "navigation menu", SH_PENDING_NAV_MENU_WHY))
+            sh_nav_menu_install(results, db);
 
         /* Read marks at entry to edit-to-build conversion, on the engine main thread.
          * Later bake callbacks can see entities with incomplete defsub state and
@@ -444,14 +494,18 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
 
         /* Install native prompts before the decl server can raise a package dialog.
          * Failed binding leaves the OS message-box fallback available. */
-        sh_engine_dialog_install(results, db, g_doom_base);
+        if (!feature_pending(SH_PENDING_ENGINE_DIALOG, "native prompts (OS message boxes remain)",
+                             SH_PENDING_ENGINE_DIALOG_WHY))
+            sh_engine_dialog_install(results, db, g_doom_base);
 
         sh_audio_banks_native_install(results, db);
         sh_audio_files_native_install(results, db, g_doom_base);
 
         /* Queue immutable new-declaration registration on the engine main thread.
          * The interface and palette callbacks must be ready before its command runs. */
-        if (overrides_installed)
+        if (feature_pending(SH_PENDING_DECL_SERVER, "decl server", SH_PENDING_DECL_SERVER_WHY))
+            ;
+        else if (overrides_installed)
             sh_decl_server_install(results, db, g_doom_base, cmdsys);
         else
             backend_log("decl-server REFUSED: pinned resource-provider ABI was not installed");
@@ -476,18 +530,21 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
         sh_algo_install(g_doom_base);
 
         /* Bind registry enumeration for the visibility-toggle command. */
-        sh_target_any_install(get_decls);
+        if (!feature_pending(SH_PENDING_TARGET_ANY, "visibility-toggle registry", SH_PENDING_TARGET_ANY_WHY))
+            sh_target_any_install(get_decls);
 
         /* Bare wire targets receive native references; real nodes retain stock wiring. */
         sh_wiring_cleandirect_install(g_doom_base);
 
         /* Add SWF clipboard shortcuts; paste requires its own assignment signature. */
-        sh_swf_textedit_install(g_doom_base);
+        if (!feature_pending(SH_PENDING_SWF_TEXTEDIT, "SWF clipboard shortcuts", SH_PENDING_SWF_TEXTEDIT_WHY))
+            sh_swf_textedit_install(g_doom_base);
     }
 
     /* Arm the resident fault shield after startup resolution. */
 
-    shield_install(g_doom_base, g_doom_size);
+    if (!feature_pending(SH_PENDING_FAULT_SHIELD, "fault shield", SH_PENDING_FAULT_SHIELD_WHY))
+        shield_install(g_doom_base, g_doom_size);
 
     return 0;
 }

@@ -24,23 +24,26 @@
 #include "navmesh.h"                /* baked AI navigation, served under the module's own names */
 #include "nav_bake.h"           /* navigation baked from the map's own marked volumes */
 #include "overrides_baked.h"        /* the built-in "*Custom"-tab default decls (Timeline + Unknown) */
+#include "engine_build.h"
 
-/* Provider open slot offset, +0xf8. Pinned Vulkan evidence: vtable RVA
- * 0x27984a0 and open-slot RVA 0x2798598.
+/* Provider open slot offset: +0x148 on build 13954591 (+0xf8 in 2018); the
+ * provider vtable is at OV_PINNED_PROVIDER_VTABLE_RVA below.
  */
-#define OPEN_SLOT_OFFSET 0xf8
+#define OPEN_SLOT_OFFSET SH_OVERRIDES_OPEN_SLOT
 
 /* Pinned Vulkan RVAs for audit and signature repair; they do not gate
  * installation. The supported builds share the idFile ABI while function
  * addresses differ. Installation requires clean SIG_OK matches, host-image
  * containment and a decoded read-only provider vtable. The stream below
- * implements the audited 31-slot ABI.
+ * implements the audited 34-slot ABI of build 13954591.
  */
-#define OV_PINNED_RES_PROVIDER_CTOR_RVA 0x1A51070u
-#define OV_PINNED_IDFILE_READSTR_RVA    0x0267390u
-#define OV_PINNED_IDFILE_COMPARE_RVA    0x0267290u
-#define OV_PINNED_IDFILE_WRITESTR_RVA   0x0268470u
-#define OV_PINNED_PROVIDER_VTABLE_RVA   0x27984A0u
+#define OV_PINNED_RES_PROVIDER_CTOR_RVA SH_RVA(0x2A28C0u, 0x2A2A90u)
+#define OV_PINNED_IDFILE_READSTR_RVA    SH_RVA(0x299850u, 0x299AB0u)
+#define OV_PINNED_IDFILE_COMPARE_RVA    SH_RVA(0x2996D0u, 0x299930u)
+#define OV_PINNED_IDFILE_WRITESTR_RVA   SH_RVA(0x29A0B0u, 0x29A310u)
+/* Base idFile implementation of slot +0x50 (build 13954591 base idFile vtable). */
+#define OV_BASE_HELPER_RVA              SH_RVA(0x2997D0u, 0x299A30u)
+#define OV_PINNED_PROVIDER_VTABLE_RVA   SH_RVA(0x1FF4CA0u, 0x200EA70u)
 
 /* Engine ABI: idFile* open(self, name, uint8 b1, uint8 b2, uint mode). Mode
  * >= 2 bypasses shadowing; preserve both byte arguments when chaining.
@@ -229,52 +232,66 @@ static void      ov_flush_a(ov_stream *s)                                       
     }
 }
 static void      ov_flush_b(ov_stream *s)       { if (s && s->fp) fflush(s->fp); }        /* [22] fflush */
+/* Slots build 13954591 inserted: +0x18 returns false and +0xF0 returns zero in
+ * the engine's base idFile; +0x50 is a base helper the stream borrows (below). */
+static unsigned char ov_new_false(ov_stream *s)  { (void)s; return 0; }   /* +0x18 */
+static long long ov_new_zero(ov_stream *s)       { (void)s; return 0; }   /* +0xf0 */
 static long long ov_ret1(ov_stream *s)          { (void)s; return 1; }   /* [23] return 1 */
 static long long ov_drive_type(ov_stream *s)   { (void)s; return 0; }   /* [24] drive/storage type */
 static long long ov_storage_true(ov_stream *s) { (void)s; return 1; }   /* [25] native bool true */
 static long long ov_storage_zero_a(ov_stream *s) { (void)s; return 0; } /* [26] reserved zero */
 static long long ov_storage_zero_b(ov_stream *s) { (void)s; return 0; } /* [27] reserved zero */
 
-/* Shared idFile vtable is a 31-entry table. Native idStr helpers occupy the final three
- * slots; all must resolve cleanly before the provider hook is published.
- * Preserve slot order even where several methods share an implementation.
+/* The build 13954591 idFile vtable has 34 entries: the 2018 slots moved by the
+ * three insertions at +0x18, +0x50 and +0xF0 (2018 index 0-2 unchanged, 3-8 +1,
+ * 9-27 +2, 28-30 +3; verified on every idFile class). Native idStr helpers occupy
+ * the final three slots and the borrowed base helper +0x50; all must resolve
+ * before the provider hook is published. Preserve slot order even where several
+ * methods share an implementation.
  */
-static void *g_stream_vtable[31] = {
+#define OV_SLOT_BASE_HELPER   10   /* +0x50 */
+#define OV_SLOT_READ_STRING   31   /* +0xf8 */
+#define OV_SLOT_COMPARE       32   /* +0x100 */
+#define OV_SLOT_WRITE_STRING  33   /* +0x108 */
+static void *g_stream_vtable[SH_OVERRIDES_STREAM_SLOTS] = {
     (void *)ov_dtor,          /* 0  +0x00 close/dtor */
     (void *)ov_ret0_a,        /* 1  +0x08 */
     (void *)ov_ret1,          /* 2  +0x10 native constant true */
-    /* +0x18 is GetName: idLexer copies this pointer into an idStr when
-     * reading renderprogs and includes. GetLength is +0x58; returning a
+    (void *)ov_new_false,     /* 3  +0x18 inserted in 13954591; base returns false */
+    /* +0x20 is GetName: idLexer copies this pointer into an idStr when
+     * reading renderprogs and includes. GetLength is +0x68; returning a
      * length here would treat an integer as a string pointer.
      */
-    (void *)ov_name,          /* 3  +0x18 GetName -> name char* */
-    (void *)ov_name,          /* 4  +0x20 GetFullPath -> name char* */
-    (void *)ov_read,          /* 5  +0x28 Read */
-    (void *)ov_write,         /* 6  +0x30 Write */
-    (void *)ov_seekread,      /* 7  +0x38 */
-    (void *)ov_seekwrite,      /* 8  +0x40 Seek(ABS) + Write */
-    (void *)ov_lock,          /* 9  +0x48 Lock */
-    (void *)ov_unlock,        /* 10 +0x50 Unlock */
-    (void *)ov_length_byseek, /* 11 +0x58 */
-    (void *)ov_set_length,    /* 12 +0x60 SetLength -> read-only failure */
-    (void *)ov_tell,          /* 13 +0x68 Tell */
-    (void *)ov_seek,          /* 14 +0x70 Seek */
-    (void *)ov_printf_thunk,  /* 15 +0x78 vfprintf */
-    (void *)ov_printf_thunk,  /* 16 +0x80 vfprintf */
-    (void *)ov_ret0_c,        /* 17 +0x88 */
-    (void *)ov_ret0_d,        /* 18 +0x90 */
-    (void *)ov_ret0_e,        /* 19 +0x98 */
-    (void *)ov_provider_flag, /* 20 +0xa0 */
-    (void *)ov_flush_a,       /* 21 +0xa8 Flush */
-    (void *)ov_flush_b,       /* 22 +0xb0 Flush */
-    (void *)ov_ret1,          /* 23 +0xb8 */
-    (void *)ov_drive_type,    /* 24 +0xc0 drive/storage type = 0 */
-    (void *)ov_storage_true,  /* 25 +0xc8 native bool true */
-    (void *)ov_storage_zero_a,/* 26 +0xd0 = 0 */
-    (void *)ov_storage_zero_b,/* 27 +0xd8 = 0 */
-    NULL,                      /* 28 +0xe0 native ReadString helper, published after clean SIG_OK */
-    NULL,                      /* 29 +0xe8 native Compare helper, published after clean SIG_OK */
-    NULL,                      /* 30 +0xf0 native WriteString helper, published after clean SIG_OK */
+    (void *)ov_name,          /* 4  +0x20 GetName -> name char* */
+    (void *)ov_name,          /* 5  +0x28 GetFullPath -> name char* */
+    (void *)ov_read,          /* 6  +0x30 Read */
+    (void *)ov_write,         /* 7  +0x38 Write */
+    (void *)ov_seekread,      /* 8  +0x40 */
+    (void *)ov_seekwrite,     /* 9  +0x48 Seek(ABS) + Write */
+    NULL,                     /* 10 +0x50 inserted in 13954591; the engine's base helper, published at install */
+    (void *)ov_lock,          /* 11 +0x58 Lock */
+    (void *)ov_unlock,        /* 12 +0x60 Unlock */
+    (void *)ov_length_byseek, /* 13 +0x68 */
+    (void *)ov_set_length,    /* 14 +0x70 SetLength -> read-only failure */
+    (void *)ov_tell,          /* 15 +0x78 Tell */
+    (void *)ov_seek,          /* 16 +0x80 Seek */
+    (void *)ov_printf_thunk,  /* 17 +0x88 vfprintf */
+    (void *)ov_printf_thunk,  /* 18 +0x90 vfprintf */
+    (void *)ov_ret0_c,        /* 19 +0x98 */
+    (void *)ov_ret0_d,        /* 20 +0xa0 */
+    (void *)ov_ret0_e,        /* 21 +0xa8 */
+    (void *)ov_provider_flag, /* 22 +0xb0 */
+    (void *)ov_flush_a,       /* 23 +0xb8 Flush */
+    (void *)ov_flush_b,       /* 24 +0xc0 Flush */
+    (void *)ov_ret1,          /* 25 +0xc8 */
+    (void *)ov_drive_type,    /* 26 +0xd0 drive/storage type = 0 */
+    (void *)ov_storage_true,  /* 27 +0xd8 native bool true */
+    (void *)ov_storage_zero_a,/* 28 +0xe0 = 0 */
+    (void *)ov_storage_zero_b,/* 29 +0xe8 = 0 */
+    (void *)ov_new_zero,      /* 30 +0xf0 inserted in 13954591; base returns 0 */
+    NULL,                     /* 31 +0xf8 native ReadString helper, published after clean SIG_OK */
+    NULL,                     /* 32 +0x100 native Compare helper, published after clean SIG_OK */
+    NULL,                     /* 33 +0x108 native WriteString helper, published after clean SIG_OK */
 };
 
 enum {
@@ -303,26 +320,26 @@ static int ov_stream_helpers_install(void *read_string, int read_clean,
                                            OV_STREAM_HELPERS_NEW,
                                            OV_STREAM_HELPERS_NEW);
         return state == OV_STREAM_HELPERS_READY &&
-               g_stream_vtable[28] == read_string &&
-               g_stream_vtable[29] == compare &&
-               g_stream_vtable[30] == write_string;
+               g_stream_vtable[OV_SLOT_READ_STRING] == read_string &&
+               g_stream_vtable[OV_SLOT_COMPARE] == compare &&
+               g_stream_vtable[OV_SLOT_WRITE_STRING] == write_string;
     }
     state = InterlockedCompareExchange(&g_stream_helpers_state,
                                        OV_STREAM_HELPERS_INSTALLING,
                                        OV_STREAM_HELPERS_NEW);
     if (state != OV_STREAM_HELPERS_NEW) {
         return state == OV_STREAM_HELPERS_READY &&
-               g_stream_vtable[28] == read_string &&
-               g_stream_vtable[29] == compare &&
-               g_stream_vtable[30] == write_string;
+               g_stream_vtable[OV_SLOT_READ_STRING] == read_string &&
+               g_stream_vtable[OV_SLOT_COMPARE] == compare &&
+               g_stream_vtable[OV_SLOT_WRITE_STRING] == write_string;
     }
 
     /* Publish READY only after all helper pointers are set.
      * InterlockedExchange supplies the memory barrier.
      */
-    g_stream_vtable[28] = read_string;
-    g_stream_vtable[29] = compare;
-    g_stream_vtable[30] = write_string;
+    g_stream_vtable[OV_SLOT_READ_STRING] = read_string;
+    g_stream_vtable[OV_SLOT_COMPARE] = compare;
+    g_stream_vtable[OV_SLOT_WRITE_STRING] = write_string;
     InterlockedExchange(&g_stream_helpers_state, OV_STREAM_HELPERS_READY);
     return 1;
 }
@@ -725,7 +742,7 @@ int sh_overrides_test_stream_true_flag(void *stream)
 
 int sh_overrides_test_stream_set_length(void *stream, long long length)
 {
-    return ((int(*)(ov_stream *, long long))g_stream_vtable[12])((ov_stream *)stream, length);
+    return ((int(*)(ov_stream *, long long))g_stream_vtable[14])((ov_stream *)stream, length);
 }
 
 size_t sh_overrides_test_stream_vtable_slots(void)
@@ -756,9 +773,9 @@ int sh_overrides_test_stream_helpers_ready(void)
 
 void sh_overrides_test_stream_helpers_reset(void)
 {
-    g_stream_vtable[28] = NULL;
-    g_stream_vtable[29] = NULL;
-    g_stream_vtable[30] = NULL;
+    g_stream_vtable[OV_SLOT_READ_STRING] = NULL;
+    g_stream_vtable[OV_SLOT_COMPARE] = NULL;
+    g_stream_vtable[OV_SLOT_WRITE_STRING] = NULL;
     InterlockedExchange(&g_stream_helpers_state, OV_STREAM_HELPERS_NEW);
 }
 
@@ -1356,6 +1373,24 @@ int sh_overrides_install(const uint8_t *module_base,
                                    write_string_fn, write_string_status_ok)) {
         backend_log("B1: overrides file-shadow SKIPPED -- idFile helper table publication refused");
         return 0;
+    }
+
+    /* +0x50 (inserted in build 13954591) borrows the engine's base idFile
+     * implementation, like the idStr helpers. Its RVA comes from the base idFile
+     * vtable of this exact executable; require the recorded prologue there. */
+    {
+        static const uint8_t prologue[] = { 0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x6C, 0x24, 0x10,
+                                            0x48, 0x89, 0x74, 0x24, 0x18 };
+        uint8_t got[sizeof prologue];
+        uint32_t rva = OV_BASE_HELPER_RVA;
+        const uint8_t *helper = rva ? module_base + rva : NULL;
+        if (!helper || !ov_address_in_image(module_base, helper) ||
+            !safe_read_n(helper, got, sizeof got) || memcmp(got, prologue, sizeof prologue) != 0) {
+            backend_log("B1: overrides file-shadow SKIPPED -- the base idFile helper for slot +0x50 is "
+                        "not at its recorded address on this executable");
+            return 0;
+        }
+        g_stream_vtable[OV_SLOT_BASE_HELPER] = (void *)helper;
     }
 
     void *vtable = decode_vtable_global((const uint8_t *)ctor_fn);

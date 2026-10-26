@@ -75,7 +75,7 @@ const uint8_t *sh_iface_engine_editor_base(void)
     return g_test_editor;
 }
 
-int sh_host_is_pinned_rva_build(void)
+int sh_host_is_supported_build(void)
 {
     return g_pinned_build;
 }

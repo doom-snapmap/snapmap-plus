@@ -1,6 +1,8 @@
-/* Offline known_rva fallback checks on an unpacked, RVA-mapped image.
- * Synthetic prologue detours must resolve as SIG_OK_HOOKED while untouched
- * functions retain SIG_OK. Run via run-tests.ps1. */
+/* Offline recorded-RVA fallback checks on an RVA-mapped image.
+ * On a build 13954591 executable, synthetic prologue detours at the recorded RVA
+ * of the image's renderer must resolve as SIG_OK_HOOKED once the image is bound
+ * to its hash identity, and never before; untouched functions keep SIG_OK. On any
+ * other image the detours must stay unresolved. Run via run-tests.ps1. */
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -51,6 +53,7 @@ static const sig_entry *find_sig(const char *name)
     return NULL;
 }
 
+/* A one-byte change to the file must lose the identity, and with it every RVA. */
 static int rejects_changed_file(const uint8_t *base, const wchar_t *source)
 {
     wchar_t root[MAX_PATH], temporary[MAX_PATH];
@@ -67,7 +70,7 @@ static int rejects_changed_file(const uint8_t *base, const wchar_t *source)
     SetFilePointer(file, 0, NULL, FILE_BEGIN);
     if (!WriteFile(file, &byte, 1, &count, NULL) || count != 1) goto done;
     CloseHandle(file); file = INVALID_HANDLE_VALUE;
-    refused = !sh_host_test_bind_pinned_image(base, temporary);
+    refused = sh_host_test_bind_image(base, temporary) == NULL && !sh_host_image_is_supported(base);
 done:
     if (file != INVALID_HANDLE_VALUE) CloseHandle(file);
     DeleteFileW(temporary);
@@ -76,7 +79,7 @@ done:
 
 int wmain(int argc, wchar_t **argv)
 {
-    if (argc < 2) { fprintf(stderr, "usage: hooktol_test <DOOM_unpacked.exe>\n"); return 2; }
+    if (argc < 2) { fprintf(stderr, "usage: hooktol_test <DOOM image>\n"); return 2; }
     size_t image_sz = 0;
     uint8_t *base = map_pe_by_rva(argv[1], &image_sz);
     if (!base) return 2;
@@ -84,28 +87,53 @@ int wmain(int argc, wchar_t **argv)
     /* Overwrite representative 5- and 8-byte prologues, retaining at least
      * HOOK_MIN_TAIL fixed bytes. Signatures whose entire fixed span is overwritten
      * cannot be recovered by this fallback. */
-    struct { const char *name; int stolen; } hooks[] = {
-        { "DeserializeFromJson", 5 },   /* exactly the E9 rel32 width */
-        { "AddCommand",          8 },   /* a wider whole-instruction steal (34-byte sig, long tail) */
-        { "MenuPump",            5 },   /* short 11-byte sig: 5-byte steal leaves 6 fixed tail bytes */
+    struct { const char *name; int stolen; uint32_t rva; } hooks[] = {
+        { "DeserializeFromJson", 5, 0 },   /* exactly the E9 rel32 width */
+        { "AddCommand",          8, 0 },   /* a wider whole-instruction steal */
+        { "MenuPump",            5, 0 },   /* short sig: 5-byte steal leaves 6 fixed tail bytes */
     };
     int NH = (int)(sizeof hooks / sizeof hooks[0]);
+
+    const sh_build_identity *id = sh_host_test_bind_image(base, argv[1]);
+    sh_host_test_bind_image(NULL, NULL);
+    printf("image identity: %s\n", id ? id->label : "not a supported executable");
+
+    /* Each function's clean match must sit at the renderer's recorded RVA. */
     for (int i = 0; i < NH; i++) {
         const sig_entry *s = find_sig(hooks[i].name);
-        if (!s) { printf("BAD: sig %s not in DB\n", hooks[i].name); free(base); return 1; }
-        hook_prologue(base, s->known_rva, hooks[i].stolen);
+        sig_result clean;
+        if (!s || sig_resolve_one(base, s, &clean) != SIG_OK) {
+            printf("BAD %s does not resolve uniquely on this image\n", hooks[i].name); free(base); return 1;
+        }
+        if (id && clean.rva != (id->vulkan ? s->rva_vk : s->rva_gl)) {
+            printf("BAD %s at 0x%x, recorded 0x%x\n", hooks[i].name, clean.rva, id->vulkan ? s->rva_vk : s->rva_gl);
+            free(base); return 1;
+        }
+        hooks[i].rva = clean.rva;
+        hook_prologue(base, clean.rva, hooks[i].stolen);
     }
 
     /* Matching detour/tail bytes alone must never authorize an RVA. */
     for (int i = 0; i < NH; i++) {
         sig_result result;
         if (sig_resolve_one(base, find_sig(hooks[i].name), &result) != SIG_NOT_FOUND) {
-            printf("BAD: unverified image accepted a hooked RVA\n"); free(base); return 1;
+            printf("BAD: an unbound image accepted a hooked RVA\n"); free(base); return 1;
         }
     }
-    if (!rejects_changed_file(base, argv[1]) ||
-        !sh_host_test_bind_pinned_image(base, argv[1]) ||
-        sh_host_is_pinned_rva_image(base + 1)) {
+    if (!id) {
+        /* Not a supported executable: binding is refused, so the detours stay unresolved. */
+        int fail = sh_host_test_bind_image(base, argv[1]) != NULL;
+        for (int i = 0; i < NH && !fail; i++) {
+            sig_result result;
+            if (sig_resolve_one(base, find_sig(hooks[i].name), &result) != SIG_NOT_FOUND) fail = 1;
+        }
+        printf("unsupported image: detours %s\n", fail ? "RECOVERED (BAD)" : "stay unresolved");
+        sh_host_test_bind_image(NULL, NULL);
+        free(base);
+        return fail;
+    }
+    if (!rejects_changed_file(base, argv[1]) || !sh_host_test_bind_image(base, argv[1]) ||
+        sh_host_image_is_supported(base + 1)) {
         printf("BAD: exact image fingerprint/binding failed\n"); free(base); return 1;
     }
 
@@ -122,31 +150,24 @@ int wmain(int argc, wchar_t **argv)
 
     int fail = 0, hooked = 0;
     for (size_t i = 0; i < total; i++) {
-        const char *name = BACKEND_ENGINE_SIGNATURES[i].name;
-        int should_be_hooked = 0;
-        for (int h = 0; h < NH; h++) if (strcmp(name, hooks[h].name) == 0) should_be_hooked = 1;
-
-        if (should_be_hooked) {
-            int good = (results[i].status == SIG_OK_HOOKED &&
-                        results[i].rva == BACKEND_ENGINE_SIGNATURES[i].known_rva);
+        const sig_entry *e = &BACKEND_ENGINE_SIGNATURES[i];
+        uint32_t known = id->vulkan ? e->rva_vk : e->rva_gl;
+        int h = -1;
+        for (int k = 0; k < NH; k++) if (strcmp(e->name, hooks[k].name) == 0) h = k;
+        if (h >= 0) {
+            int good = results[i].status == SIG_OK_HOOKED && results[i].rva == hooks[h].rva;
             if (good) hooked++; else fail++;
-            printf("%s %-20s status=%d rva=0x%-9x (expected SIG_OK_HOOKED@known)\n",
-                   good ? "OK " : "BAD", name, (int)results[i].status, results[i].rva);
-        } else {
-            int good = (results[i].status == SIG_OK &&
-                        (!BACKEND_ENGINE_SIGNATURES[i].known_rva ||
-                         results[i].rva == BACKEND_ENGINE_SIGNATURES[i].known_rva));
-            if (!good) {
-                fail++;
-                printf("BAD %-20s status=%d rva=0x%-9x (expected clean SIG_OK@known)\n",
-                       name, (int)results[i].status, results[i].rva);
-            }
+            printf("%s %-20s status=%d rva=0x%-9x (expected SIG_OK_HOOKED@recorded)\n",
+                   good ? "OK " : "BAD", e->name, (int)results[i].status, results[i].rva);
+        } else if (results[i].status != SIG_OK || (known && results[i].rva != known)) {
+            fail++;
+            printf("BAD %-20s status=%d rva=0x%-9x (expected clean SIG_OK@0x%x)\n",
+                   e->name, (int)results[i].status, results[i].rva, known);
         }
     }
     printf("======================================================================\n");
     printf("resolved=%zu/%zu  hook-tolerant=%d/%d  failures=%d\n", ok, total, hooked, NH, fail);
-    sh_host_test_bind_pinned_image(NULL, NULL);
+    sh_host_test_bind_image(NULL, NULL);
     free(base);
-    /* Pass iff all sigs resolved, all 3 hooked ones came back SIG_OK_HOOKED, and nothing else broke. */
     return (ok == total && hooked == NH && fail == 0) ? 0 : 1;
 }

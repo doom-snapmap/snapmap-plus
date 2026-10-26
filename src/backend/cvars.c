@@ -12,6 +12,7 @@
 #include "engine_globals.h"
 #include "host_image.h"
 #include "backend_log.h"
+#include "engine_build.h"
 
 
 typedef void (*cvar_register_fn)(void *self, const char *name, const char *def,
@@ -23,7 +24,7 @@ typedef int (*name_hash_fn)(const char *name);
 /* Full-table offsets follow RegisterStaticVars. The developer-table alias exposes
  * this same list to the console. Resolve the singleton from CmdSystemLea +0x10,
  * then an independent global anchor, then the Vulkan-name-gated pinned RVA. */
-#define CVARSYS_SLOT_RVA          0x55b7290u   /* Pinned Vulkan slot; the fallback gate checks its filename, not its hash. */
+#define CVARSYS_SLOT_RVA          SH_RVA(0x2F451D0u, 0x2F8D1D0u)   /* Pinned Vulkan slot; the fallback gate checks its filename, not its hash. */
 #define CVARSYS_OFF_FROM_CMDSYS   0x10         /* cvarSys .data slot == cmdSystem .data slot + 0x10 (adjacent) */
 #define CVARSYS_LIST_PTR_OFF      0x08    /* idList<idCVar*> base: list-ptr */
 #define CVARSYS_LIST_COUNT_OFF    0x10    /* idList count (int) */
@@ -35,7 +36,7 @@ typedef int (*name_hash_fn)(const char *name);
 #define CVARSYS_LOOKUPMASK_OFF    0x58    /* idHashIndex lookupMask (uint) */
 
 /* Registered name in the embedded idCVar; it matches the table string we hash. */
-#define IDCVAR_NAME_OFF           0x40
+#define IDCVAR_NAME_OFF           SH_IDCVAR_NAME
 
 /* Our rows can register after the unlock sweep, so include settability up front. */
 #define CVAR_FLAG_NOCHEAT         0x10u
@@ -74,12 +75,12 @@ static int register_one(cvar_register_fn reg, int i)
     }
 }
 
-/* Read back name@+0x40 and nonzero backing bytes to check registration.
+/* Read back the registered name and nonzero backing bytes to check registration.
  * Return bit 1 for a matching name and bit 0 for any mutation. */
 static int verify_one(int i)
 {
     __try {
-        const char *nm = *(const char * volatile *)(&g_cvar_objs[i][0x40]);
+        const char *nm = *(const char * volatile *)(&g_cvar_objs[i][IDCVAR_NAME_OFF]);
         int match = (nm != NULL && strcmp(nm, CVARS[i].name) == 0) ? 2 : 0;
         int mutated = 0;
         for (int b = 0; b < 0x100; b++) { if (g_cvar_objs[i][b]) { mutated = 1; break; } }
@@ -90,7 +91,7 @@ static int verify_one(int i)
 }
 
 /* Engine idCVar stores integer and bool values at +0x30. */
-#define IDCVAR_VALUE_INT_OFF 0x30
+#define IDCVAR_VALUE_INT_OFF SH_IDCVAR_VALUE_INT
 
 int sh_cvar_value_int(int index, int def)
 {
@@ -201,7 +202,7 @@ static uint8_t *sh_resolve_cvarsys(const uint8_t *module_base)
     }
 
     /* Last resort: pinned Vulkan RVA, gated by host filename rather than hash. */
-    if (module_base && sh_host_is_pinned_rva_build()) {
+    if (module_base && sh_host_is_supported_build()) {
         uint8_t *obj = NULL;
         __try {
             obj = *(uint8_t * volatile *)(module_base + CVARSYS_SLOT_RVA);
@@ -227,6 +228,11 @@ int sh_cvars_install(void *cvar_register, const void *module_base)
         backend_log("B2: cvars SKIPPED -- CvarRegister not resolved");
         return 0;
     }
+    if (!SH_CVARSYS_LAYOUT_ESTABLISHED) {
+        backend_log("B2: cvars SKIPPED -- the idCVarSystem list/hash layout is not established for "
+                    "build 13954591");
+        return 0;
+    }
     if (InterlockedCompareExchange(&g_installed, 1, 0) != 0) {
         backend_log("B2: cvars already registered (one-shot latch) -- skipping double-register");
         return 0;
@@ -250,8 +256,8 @@ int sh_cvars_install(void *cvar_register, const void *module_base)
         if (r & 1) mutated++;
     }
     _snprintf_s(line, sizeof line, _TRUNCATE,
-        "B2: cvar readback -- %d/%d name@+0x40 matched, %d/%d object-mutated (DIRECT engine-populated proof)",
-        matched, CVAR_COUNT, mutated, CVAR_COUNT);
+        "B2: cvar readback -- %d/%d name@+0x%x matched, %d/%d object-mutated (DIRECT engine-populated proof)",
+        matched, CVAR_COUNT, (unsigned)IDCVAR_NAME_OFF, mutated, CVAR_COUNT);
     backend_log(line);
 
     /* Make the late-registered rows findable through the full table and its alias. */

@@ -1,0 +1,137 @@
+{
+ "_doc": "Build 13954591 updates for engine_globals_table.gen.h: replacement anchors for the eight 2018 anchors that no longer match, and every global's Vulkan/OpenGL RVA. Source: snaphak-re rederive lane (R-008) address table, each value verified by at least two independent confirmations per renderer. Apply with gen_globals_table.py --update.",
+ "globals": {
+  "cmd_system_slot": {
+   "vk_rva": "0x2f451c0",
+   "gl_rva": "0x2f8d1c0"
+  },
+  "cvar_system_slot": {
+   "vk_rva": "0x2f451d0",
+   "gl_rva": "0x2f8d1d0"
+  },
+  "decl_resource_head": {
+   "vk_rva": "0x5d78e60",
+   "gl_rva": "0x467e4e0"
+  },
+  "decl_visibility_manager": {
+   "anchor": "48 89 4C 24 38 48 8B 0D ?? ?? ?? ?? 48 8B 01 BA ?? 00 00 00 FF 90 B0 00 00 00",
+   "disp_slot": 8,
+   "disp_tail": 0,
+   "delta": 0,
+   "vk_rva": "0x3611608",
+   "gl_rva": "0x3659220"
+  },
+  "declmgr_accessor": {
+   "vk_rva": "0x1565bd0",
+   "gl_rva": "0x1566eb0"
+  },
+  "editor_singleton": {
+   "anchor": "48 8D 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? 48 8D 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? 48 8D 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? EB ?? CC CC 40 53",
+   "disp_slot": 3,
+   "disp_tail": 0,
+   "delta": 0,
+   "vk_rva": "0x2f6ad18",
+   "gl_rva": "0x2fb2c08"
+  },
+  "error_state": {
+   "vk_rva": "0x583bd58",
+   "gl_rva": "0x41413d8"
+  },
+  "game_manager_slot": {
+   "vk_rva": "0x5b0f6d0",
+   "gl_rva": "0x4414d50"
+  },
+  "idlist_grow": {
+   "vk_rva": "0xfe18d0",
+   "gl_rva": "0x1724f20"
+  },
+  "last_error_msg": {
+   "vk_rva": "0x583bd70",
+   "gl_rva": "0x41413f0"
+  },
+  "load_state": {
+   "anchor": "89 0D ?? ?? ?? ?? C3 CC CC CC CC CC CC CC CC CC 48 83 EC 28",
+   "disp_slot": 2,
+   "disp_tail": 0,
+   "delta": 0,
+   "vk_rva": "0x583bd4c",
+   "gl_rva": "0x41413cc"
+  },
+  "main_thread_id": {
+   "vk_rva": "0x583bd50",
+   "gl_rva": "0x41413d0"
+  },
+  "material_manager_ctx": {
+   "vk_rva": "0x66c4a60",
+   "gl_rva": "0x4fca020"
+  },
+  "palette_vtable": {
+   "vk_rva": "0x235ff50",
+   "gl_rva": "0x2379ca0"
+  },
+  "provider_vtable": {
+   "anchor": "48 8D 05 ?? ?? ?? ?? 48 89 01 33 FF C7 41 18 00 00 ?? 00 48 89 79 08 48 89 79 10 48 83 C1 30",
+   "disp_slot": 3,
+   "disp_tail": 0,
+   "delta": 0,
+   "vk_rva": "0x1ff4ca0",
+   "gl_rva": "0x200ea70"
+  },
+  "render_world_slot": {
+   "vk_rva": "0x5c43b30",
+   "gl_rva": "0x45491b0"
+  },
+  "resource_manager_ctx": {
+   "anchor": "48 8D 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? 48 89 86 B8 A0 29 00 ?? 89 ?? 08 5C 28 00",
+   "disp_slot": 3,
+   "disp_tail": 0,
+   "delta": 0,
+   "vk_rva": "0x66c4980",
+   "gl_rva": "0x4fc9f40"
+  },
+  "shell_ptr_slot": {
+   "anchor": "C7 44 24 68 01 00 00 00 48 8B 0D ?? ?? ?? ?? 48 8B 01 48 8D 54 24 60",
+   "disp_slot": 11,
+   "disp_tail": 0,
+   "delta": 0,
+   "vk_rva": "0x2f60a10",
+   "gl_rva": "0x2fa89a0"
+  },
+  "throw_suppressor_a": {
+   "anchor": "75 ?? 83 3D ?? ?? ?? ?? 00 0F 84 ?? ?? ?? ?? C7 45 A0 00 00 ?? 00 4C 89 65 90",
+   "disp_slot": 4,
+   "disp_tail": 1,
+   "delta": 0,
+   "vk_rva": "0x583c7b0",
+   "gl_rva": "0x4141e30"
+  },
+  "throw_suppressor_b": {
+   "vk_rva": "0x583c850",
+   "gl_rva": "0x4141ed0"
+  },
+  "throwinfo_fatal": {
+   "vk_rva": "0x2f3dd00",
+   "gl_rva": "0x2f6ac38"
+  },
+  "throwinfo_recoverable": {
+   "vk_rva": "0x2f3dd58",
+   "gl_rva": "0x2f6ac90"
+  },
+  "type_container": {
+   "vk_rva": "0x2f5a940",
+   "gl_rva": "0x2fa2900"
+  },
+  "validator_manager": {
+   "anchor": "0F 84 ?? ?? ?? ?? 48 8B 0D ?? ?? ?? ?? 48 8B 01 FF 90 ?? 02 00 00 4C 8B F0",
+   "disp_slot": 9,
+   "disp_tail": 0,
+   "delta": 0,
+   "vk_rva": "0x35eb618",
+   "gl_rva": "0x3633430"
+  },
+  "vis_leaf_lo": {
+   "vk_rva": "0x12aa950",
+   "gl_rva": "0x12aa030"
+  }
+ }
+}

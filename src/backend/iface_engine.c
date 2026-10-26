@@ -28,12 +28,13 @@
 #include "snapstack.h"
 #include "rawmap.h"
 #include "editor_delete.h"
+#include "engine_build.h"
 
 /* Editor layout. */
 /* Extraction RVA for re-derivation only; runtime uses editor_singleton.
  * The editor is an inline object, not a pointer slot. Find its in-place
  * constructor and recover the this address passed to it. */
-#define EDITOR_SINGLETON_PINNED_RVA   0x3056748u
+#define EDITOR_SINGLETON_PINNED_RVA   SH_RVA(0x2F6AD18u, 0x2FB2C08u)
 #define ED_SEL_OBJ_OFF         0x204d0      /* editor+0x204d0 -> selection object ptr */
 #define ED_CAMERA_ORIGIN_OFF   0x170        /* Camera origin. Re-derive from the method at editor vtable +0xD8,
  * which returns the address of this vec3. */
@@ -85,9 +86,9 @@
  * snapEdit_enableDevLayer registration and the entity +0x160 bit test. */
 #define ENT_LAYER_BITS_OFF     0x160        /* entity[id]+0x160 -> layer bitmask (uint) */
 #define DEVL_CVAR_VALUE_OFF    0x30         /* idCVar+0x30 -> current integer value (== cvars.c value note) */
-#define DEVL_CVAR_NAME_OFF     0x40         /* idCVar+0x40 -> registered name char* (== cvars.c IDCVAR_NAME_OFF) */
+#define DEVL_CVAR_NAME_OFF     SH_IDCVAR_NAME /* idCVar registered name char* (== cvars.c IDCVAR_NAME_OFF) */
 /* Audit RVA only; runtime resolves cvar_system_slot from a signed code reference. */
-#define DEVL_CVARSYS_SLOT_PINNED_RVA  0x55b7290u
+#define DEVL_CVARSYS_SLOT_PINNED_RVA  SH_RVA(0x2F451D0u, 0x2F8D1D0u)
 #define DEVL_CVARSYS_ARR_OFF   0x08         /* cvarSys+0x08 -> FULL idCVar** array */
 #define DEVL_CVARSYS_CNT_OFF   0x10         /* cvarSys+0x10 -> FULL count (u32) */
 #define DEVL_CVAR_LIST_CAP     100000u      /* stale-cvarSys guard */
@@ -110,7 +111,7 @@
  * length, data, and SSO/heap ownership. Class/inherit are pooled pointer
  * slots and use IdStrAssign instead. These helpers are not interchangeable.
  * Audit RVA only; runtime uses the shared signature result. */
-#define IDSTR_OPASSIGN_PINNED_RVA      0x19fd5f0u
+#define IDSTR_OPASSIGN_PINNED_RVA      SH_RVA(0x33A7F0u, 0x33A440u)
 
 /* Asset registry node layout; decl dropdowns use the separate typeinfo walk. */
 #define DECLNODE_ARRAY_OFF      0x20        /* decl-manager node -> decl-pointer array */
@@ -620,7 +621,8 @@ static const char *slot_id_to_string(sh_iface *self, int id, char *buf, int cap)
 
         const uint8_t *ed = editor_session();
         void *lm = NULL;
-        if (ed && ie_read_ptr(ed + ED_MAP_OBJ_OFF, &lm) && lm) {
+        /* The module table layout is unverified on build 13954591 (engine_build.h). */
+        if (!SH_PENDING_ON(SH_PENDING_IFACE_MODULES) && ed && ie_read_ptr(ed + ED_MAP_OBJ_OFF, &lm) && lm) {
             int modIdx = id_module_index((const uint8_t *)lm, (uint32_t)id);
             if (modIdx >= 0) {
                 /* Dereference the table entry, then its module-name pointer. */
@@ -1058,7 +1060,7 @@ static int slot_resolve_prefab_path(sh_iface *self, const char *prefix, const ch
 /* Cache registry objects, whose lifetimes match the engine process. */
 static void *resolve_devlayer_cvar(void)
 {
-    if (!g_devlayer_cvar) g_devlayer_cvar = sh_engine_cvar_find(g_cvarsys_slot, DEVL_CVAR_NAME);
+    if (!g_devlayer_cvar) g_devlayer_cvar = sh_engine_cvar_find(g_cvarsys_slot, SH_IDCVAR_NAME_FOR_LOOKUP, DEVL_CVAR_NAME);
     return g_devlayer_cvar;
 }
 
@@ -1066,7 +1068,7 @@ int sh_iface_engine_copy_paste_enabled(void)
 {
     static void *copy_paste;
     int enabled = 0;
-    if (!copy_paste) copy_paste = sh_engine_cvar_find(g_cvarsys_slot, "snapEdit_enableCopyPaste");
+    if (!copy_paste) copy_paste = sh_engine_cvar_find(g_cvarsys_slot, SH_IDCVAR_NAME_FOR_LOOKUP, "snapEdit_enableCopyPaste");
     return sh_engine_cvar_read_int(copy_paste, &enabled) && enabled != 0;
 }
 

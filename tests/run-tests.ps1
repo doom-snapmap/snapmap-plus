@@ -2,12 +2,12 @@
 # Requires Visual Studio C++ Build Tools. Outputs go to tests\obj (gitignored).
 #
 #   tests\run-tests.ps1
-#   tests\run-tests.ps1 -Doom <unpacked Vulkan exe> -DoomAlt <unpacked OpenGL exe>
+#   tests\run-tests.ps1 -Doom <DOOMx64vk.exe 13954591> -DoomAlt <DOOMx64.exe 13954591>
 #   tests\run-tests.ps1 -Skip map_published_test
 #
-# The default suite needs no game or built DLL. -Doom adds pinned signature,
-# hook-fallback and global checks; -DoomAlt checks the second image in portable
-# mode, accepting address shifts while requiring unique matches and layout checks.
+# The default suite needs no game or built DLL. -Doom and -DoomAlt take the two
+# executables of the supported build (13954591, no unpacking needed) and add
+# signature, hook-fallback and global checks against each renderer's recorded RVAs.
 # Exit 0 means every selected test passed; failures include their build log.
 #
 # Optional manual probes:
@@ -124,7 +124,7 @@ $tests = @(
     @{ name = "user_overrides_test"; src = 'user_overrides_test.c ..\src\backend\user_overrides.c ..\src\backend\config.c ..\src\backend\config_json.c ..\src\common\snapmap_plus_iface.c'; defs = '/DSH_CONFIG_TESTING /DSH_USER_OVERRIDES_TESTING'; libs = 'shell32.lib ole32.lib'; arg = "" }
     @{ name = "user_overrides_contract_test"; src = 'user_overrides_contract_test.c'; arg = (Join-Path $here '..') }
     @{ name = "decl_server_test"; src = 'decl_server_test.c ..\src\backend\decl_server.c ..\src\backend\engine_dialog.c ..\src\backend\packages.c ..\src\backend\decl_server_path.c ..\src\backend\decl_text.c'; defs = '/DSH_DECL_SERVER_TESTING'; arg = "" }
-    @{ name = "overrides_internal_test"; src = 'overrides_internal_test.c ..\src\backend\perf.c ..\src\backend\overrides.c ..\src\backend\packages.c ..\src\backend\decl_text.c ..\src\backend\grid_room_asset.c ..\src\backend\grid_room_nav.c ..\src\backend\aas_edit.c ..\src\backend\grid_room.c ..\src\backend\grid_room_resources.c ..\src\backend\grid_room_decl.c ..\src\backend\config_json.c'; defs = '/DSH_OVERRIDES_TESTING'; libs = 'shell32.lib'; arg = "" }
+    @{ name = "overrides_internal_test"; src = 'overrides_internal_test.c ..\src\backend\perf.c ..\src\backend\overrides.c ..\src\backend\packages.c ..\src\backend\decl_text.c ..\src\backend\grid_room_asset.c ..\src\backend\grid_room_nav.c ..\src\backend\aas_edit.c ..\src\backend\grid_room.c ..\src\backend\grid_room_resources.c ..\src\backend\grid_room_decl.c ..\src\backend\config_json.c ..\src\backend\host_image.c'; defs = '/DSH_OVERRIDES_TESTING'; libs = 'shell32.lib'; arg = "" }
     @{ name = "decl_server_contract_test"; src = 'decl_server_contract_test.c'; arg = (Join-Path $here '..') }
     @{ name = "palette_refresh_test"; src = 'palette_refresh_test.c ..\src\backend\palette_refresh.c'; defs = '/DSH_PALETTE_REFRESH_TESTING'; arg = "" }
     @{ name = "process_heap_scope_test"; src = 'process_heap_scope_test.c'; arg = "" }
@@ -140,11 +140,11 @@ $tests = @(
     @{ name = "aas_augment_test"; src = 'aas_augment_test.c ..\src\backend\aas_augment.c ..\src\backend\nav_geometry.c ..\src\backend\aas_edit.c ..\src\backend\nav_traversal.c ..\src\backend\navmesh.c ..\src\backend\map_shards.c'; defs = '/DSH_NAVMESH_TESTING /DSH_AUG_TESTING /DSH_TRAV_TESTING'; arg = "" }
     @{ name = "nav_bake_test"; src = 'nav_bake_test.c ..\src\backend\resource_graph.c ..\src\backend\perf.c ..\src\backend\nav_bake.c ..\src\backend\nav_regions.c ..\src\backend\aas_edit.c ..\src\backend\aas_augment.c ..\src\backend\nav_geometry.c ..\src\backend\nav_traversal.c ..\src\backend\map_shards.c'; defs = '/DSH_NAV_BAKE_TESTING /DSH_RESOURCE_GRAPH_TESTING'; arg = "" }
     @{ name = "nav_traversal_test"; src = 'nav_traversal_test.c ..\src\backend\nav_traversal.c'; defs = '/DSH_TRAV_TESTING'; arg = "" }
-    @{ name = "override_packages_test"; src = 'override_packages_test.c ..\src\backend\perf.c ..\src\backend\overrides.c ..\src\backend\packages.c ..\src\backend\decl_text.c ..\src\backend\grid_room_asset.c ..\src\backend\grid_room_nav.c ..\src\backend\aas_edit.c ..\src\backend\grid_room.c ..\src\backend\grid_room_resources.c ..\src\backend\grid_room_decl.c ..\src\backend\config_json.c'; defs = '/DSH_OVERRIDES_TESTING /DSH_RESOURCE_GRAPH_TESTING'; libs = 'shell32.lib'; arg = "" }
+    @{ name = "override_packages_test"; src = 'override_packages_test.c ..\src\backend\perf.c ..\src\backend\overrides.c ..\src\backend\packages.c ..\src\backend\decl_text.c ..\src\backend\grid_room_asset.c ..\src\backend\grid_room_nav.c ..\src\backend\aas_edit.c ..\src\backend\grid_room.c ..\src\backend\grid_room_resources.c ..\src\backend\grid_room_decl.c ..\src\backend\config_json.c ..\src\backend\host_image.c'; defs = '/DSH_OVERRIDES_TESTING /DSH_RESOURCE_GRAPH_TESTING'; libs = 'shell32.lib'; arg = "" }
     # Link the real globals resolver to verify refusal when this non-game process
     # cannot provide the load-state address.
     @{ name = "package_requirements_test"; src = 'package_requirements_test.c ..\src\backend\package_requirements.c ..\src\backend\packages.c ..\src\backend\engine_globals.c ..\src\backend\signatures.c ..\src\backend\host_image.c'; defs = '/DSH_PACKAGE_REQUIREMENTS_TESTING'; arg = "" }
-    @{ name = "strids_packages_test"; src = 'strids_packages_test.c ..\src\backend\perf.c ..\src\backend\strids.c ..\src\backend\packages.c ..\src\backend\overrides.c ..\src\backend\decl_text.c ..\src\backend\grid_room_asset.c ..\src\backend\grid_room_nav.c ..\src\backend\aas_edit.c ..\src\backend\grid_room.c ..\src\backend\grid_room_resources.c ..\src\backend\grid_room_decl.c ..\src\backend\config_json.c'; defs = '/DSH_STRIDS_TESTING /DSH_OVERRIDES_TESTING'; libs = 'shell32.lib'; arg = "" }
+    @{ name = "strids_packages_test"; src = 'strids_packages_test.c ..\src\backend\perf.c ..\src\backend\strids.c ..\src\backend\packages.c ..\src\backend\overrides.c ..\src\backend\decl_text.c ..\src\backend\grid_room_asset.c ..\src\backend\grid_room_nav.c ..\src\backend\aas_edit.c ..\src\backend\grid_room.c ..\src\backend\grid_room_resources.c ..\src\backend\grid_room_decl.c ..\src\backend\config_json.c ..\src\backend\host_image.c'; defs = '/DSH_STRIDS_TESTING /DSH_OVERRIDES_TESTING'; libs = 'shell32.lib'; arg = "" }
     @{ name = "config_message_test"; src = 'config_message_test.cpp ..\src\ui\webview\config_message.cpp'; cxx = $true; arg = "" }
     @{ name = "webview_json_test"; src = 'webview_json_test.cpp ..\src\ui\webview\webview_json.cpp'; cxx = $true; arg = "" }
     @{ name = "crash_pending_test"; src = 'crash_pending_test.cpp'; cxx = $true; arg = "" }
@@ -169,16 +169,28 @@ $tests = @(
 if ($Doom) {
     if (-not (Test-Path $Doom)) { throw "-Doom path not found: $Doom" }
     $da = (Resolve-Path $Doom).Path
-    $tests += @{ name = "sig_test";     src = 'sig_test.c ..\src\backend\signatures.c ..\src\backend\host_image.c';     arg = $da }
+    $tests += @{ name = "sig_test";     src = 'sig_test.c ..\src\backend\signatures.c ..\src\backend\host_image.c'; defs = '/DSH_HOST_IMAGE_TESTING'; arg = $da }
     $tests += @{ name = "hooktol_test"; src = 'hooktol_test.c ..\src\backend\signatures.c ..\src\backend\host_image.c'; defs = '/DSH_HOST_IMAGE_TESTING'; arg = $da }
-    $tests += @{ name = "globals_test"; src = 'globals_test.c map_published_bindings_stubs.c ..\src\backend\resource_resident.c ..\src\backend\resource_catalog.c ..\src\backend\resource_graph.c ..\src\backend\raw_deflate.c ..\src\backend\map_source.c ..\src\backend\map_native.c ..\src\backend\map_session_json.c ..\src\backend\config_json.c ..\src\backend\map_published.c ..\src\backend\map_transition.c ..\src\backend\decl_native_schema.c ..\src\backend\engine_globals.c ..\src\backend\signatures.c ..\src\backend\host_image.c ..\src\backend\backend_log.c ..\src\backend\perf.c ..\src\common\log_rotate.c'; arg = $da }
+    $tests += @{ name = "globals_test"; src = 'globals_test.c map_published_bindings_stubs.c ..\src\backend\resource_resident.c ..\src\backend\resource_catalog.c ..\src\backend\resource_graph.c ..\src\backend\raw_deflate.c ..\src\backend\map_source.c ..\src\backend\map_native.c ..\src\backend\map_session_json.c ..\src\backend\config_json.c ..\src\backend\map_published.c ..\src\backend\map_transition.c ..\src\backend\decl_native_schema.c ..\src\backend\engine_globals.c ..\src\backend\signatures.c ..\src\backend\host_image.c ..\src\backend\backend_log.c ..\src\backend\perf.c ..\src\common\log_rotate.c'; defs = '/DSH_HOST_IMAGE_TESTING'; arg = $da }
 }
-# Check the second executable without requiring the pinned image's addresses.
+# The other renderer's executable gets the same checks against its own RVAs.
 if ($DoomAlt) {
     if (-not (Test-Path $DoomAlt)) { throw "-DoomAlt path not found: $DoomAlt" }
     $alt = (Resolve-Path $DoomAlt).Path
-    $tests += @{ name = "sig_test_alt"; src = 'sig_test.c ..\src\backend\signatures.c ..\src\backend\host_image.c'; arg = @($alt, "portable") }
-    $tests += @{ name = "globals_test_alt"; src = 'globals_test.c map_published_bindings_stubs.c ..\src\backend\resource_resident.c ..\src\backend\resource_catalog.c ..\src\backend\resource_graph.c ..\src\backend\raw_deflate.c ..\src\backend\map_source.c ..\src\backend\map_native.c ..\src\backend\map_session_json.c ..\src\backend\config_json.c ..\src\backend\map_published.c ..\src\backend\map_transition.c ..\src\backend\decl_native_schema.c ..\src\backend\engine_globals.c ..\src\backend\signatures.c ..\src\backend\host_image.c ..\src\backend\backend_log.c ..\src\backend\perf.c ..\src\common\log_rotate.c'; arg = @($alt, "portable") }
+    $tests += @{ name = "sig_test_alt"; src = 'sig_test.c ..\src\backend\signatures.c ..\src\backend\host_image.c'; defs = '/DSH_HOST_IMAGE_TESTING'; arg = $alt }
+    $tests += @{ name = "globals_test_alt"; src = 'globals_test.c map_published_bindings_stubs.c ..\src\backend\resource_resident.c ..\src\backend\resource_catalog.c ..\src\backend\resource_graph.c ..\src\backend\raw_deflate.c ..\src\backend\map_source.c ..\src\backend\map_native.c ..\src\backend\map_session_json.c ..\src\backend\config_json.c ..\src\backend\map_published.c ..\src\backend\map_transition.c ..\src\backend\decl_native_schema.c ..\src\backend\engine_globals.c ..\src\backend\signatures.c ..\src\backend\host_image.c ..\src\backend\backend_log.c ..\src\backend\perf.c ..\src\common\log_rotate.c'; defs = '/DSH_HOST_IMAGE_TESTING'; arg = $alt }
+}
+
+# Executable identity and the raw-RVA gate; hashes the given images too.
+$identityImages = @(@($da, $alt) | Where-Object { $_ })
+$tests += @{ name = "build_identity_test"; src = 'build_identity_test.c ..\src\backend\host_image.c ..\src\backend\signatures.c'; defs = '/DSH_HOST_IMAGE_TESTING'; arg = $identityImages }
+# The proxy's exports against System32 XINPUT1_4.dll once build.ps1 has produced
+# it (CI builds first); with images, also their XInput imports.
+$proxyDir = Join-Path (Resolve-Path (Join-Path $here '..')).Path 'build'
+if (Test-Path (Join-Path $proxyDir 'XINPUT1_4.dll')) {
+    $tests += @{ name = "xinput_exports_test"; src = 'xinput_exports_test.c'; arg = @(@($proxyDir) + $identityImages) }
+} else {
+    Write-Host "[skip] xinput_exports_test (build\XINPUT1_4.dll not built; run build.ps1 first)"
 }
 
 $compiledConsumers = @("package_runtime_context_test", "weapon_hud_test", "package_requirements_test", "strids_packages_test", "override_packages_test", "overrides_internal_test", "decl_server_test")

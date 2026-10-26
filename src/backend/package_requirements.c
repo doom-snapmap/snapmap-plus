@@ -15,11 +15,12 @@
 #include "engine_cvar_read.h"
 #include "package_runtime.h"
 #include "package_requirements.h"
+#include "engine_build.h"
 
 /* Pinned Vulkan RVA for audit only. Read the signature-resolved load_state
  * global; this address does not apply to OpenGL.
  */
-#define PR_LOAD_STATE_PINNED_RVA 0x6dde198u
+#define PR_LOAD_STATE_PINNED_RVA SH_RVA(0x583BD4Cu, 0x41413CCu)
 #define PR_LOAD_STATE_RUNNING   3
 
 enum {
@@ -242,13 +243,15 @@ int sh_package_requirements_install(const char *data_root,
 static int pr_read(size_t index, int *value)
 {
     const void *slot = g_cvar_system_slot;
+    uint32_t name_off = SH_IDCVAR_NAME_FOR_LOOKUP;
 #ifdef SH_PACKAGE_REQUIREMENTS_TESTING
-    if (g_test_cvar_slot) slot = g_test_cvar_slot;
+    /* The fixture models a registry with this build's idCVar layout. */
+    if (g_test_cvar_slot) { slot = g_test_cvar_slot; name_off = SH_IDCVAR_NAME; }
 #endif
     if (!slot && g_module_base)
         slot = g_cvar_system_slot = (const void *)glb_resolve(g_module_base, "cvar_system_slot", NULL);
     if (!g_allowed[index].cvar)
-        g_allowed[index].cvar = sh_engine_cvar_find(slot, g_allowed[index].name);
+        g_allowed[index].cvar = sh_engine_cvar_find(slot, name_off, g_allowed[index].name);
     return sh_engine_cvar_read_int(g_allowed[index].cvar, value);
 }
 
