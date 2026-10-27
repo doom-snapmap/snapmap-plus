@@ -20,7 +20,6 @@ Usage:
   snapmap-plus uninstall [--doom <path>] [--yes]
   snapmap-plus changelog [<version>|latest|all]
   snapmap-plus status
-  snapmap-plus migrate-overrides [--doom <path>]
   snapmap-plus version
   snapmap-plus help
 
@@ -43,10 +42,8 @@ With no argument it shows the newest release and lists the earlier ones.
 With no --local, install/update download from GitHub. Uninstall restores any files it
 replaced and leaves your Snapmap+ modding data untouched.
 
-Install and update convert override packages made for earlier Snapmap+ releases before
-replacing the runtime. After copying the DLLs by hand, or after unzipping an older package
-into your overrides folder, close DOOM and run "snapmap-plus migrate-overrides". Converted
-originals are kept in %LOCALAPPDATA%\snapmap-plus\override-backups.
+The package system is being rebuilt for the April 2024 DOOM update; this release installs and
+reads no packages, and leaves any package folders from earlier releases untouched.
 
 Running snapmap-plus with no arguments (a double-click) opens an interactive prompt: it offers
 to install (or to update when a newer version is out), and takes any command above.
@@ -95,8 +92,6 @@ func runCommand(cmd string, args []string) error {
 		return cmdUninstall(f)
 	case "status":
 		return cmdStatus(f)
-	case "migrate-overrides":
-		return cmdMigrateOverrides(f)
 	case "changelog", "info", "--info":
 		return cmdChangelog(f, args)
 	case "set-token":

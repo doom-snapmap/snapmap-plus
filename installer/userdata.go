@@ -6,13 +6,27 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // Player content lives in writable local app data, outside the game installation.
 // Keep userContentSubdirs aligned with the backend startup folders in dllmain.c.
 
-// userContentSubdirs is the content tree the installer scaffolds and the backend reads. Mirrors dllmain.c's subs[].
-var userContentSubdirs = []string{"strings", "overrides", "prefabs"}
+// userContentSubdirs is the content tree the installer scaffolds and the backend reads. Mirrors
+// sh_user_dirs_subfolders in src/backend/user_dirs.c.
+var userContentSubdirs = []string{"strings", "prefabs"}
+
+// retiredContent reports whether a path relative to a content root belongs to the retired
+// first-generation package system. It is never copied, scaffolded or removed: the package system
+// is being rebuilt, and the player decides what to do with the old folders.
+func retiredContent(rel string) bool {
+	first := strings.ToLower(strings.SplitN(filepath.ToSlash(rel), "/", 2)[0])
+	switch first {
+	case "overrides", "package-cache", "package-staging", "override-backups": // retired package folder names
+		return true
+	}
+	return false
+}
 
 // oldUserContentDir is the legacy home-root data folder; empty if USERPROFILE is unset.
 func oldUserContentDir() string {
@@ -66,13 +80,14 @@ func migrateUserData() {
 	}
 	ensureUserDataTree()
 
-	// 1) User content: %USERPROFILE%\snaphak -> the app-data dir, then remove the old folder if fully mirrored.
+	// 1) User content: %USERPROFILE%\snaphak -> the app-data dir, then remove the old folder if fully
+	// mirrored. Retired package folders stay where they are.
 	if old := oldUserContentDir(); old != "" && !sameFile(old, dir) {
 		if _, err := os.Stat(old); err == nil {
 			_, copyErr := copyTreeMissing(old, dir)
 			if copyErr == nil && fullyMirrored(old, dir) {
 				if removeMirroredTree(old, dir) == nil {
-					fmt.Printf("  ~ moved your saved content (overrides / prefabs / rawmaps) to %s\n", dir)
+					fmt.Printf("  ~ moved your saved content (prefabs / strings / rawmaps) to %s\n", dir)
 				}
 			} else {
 				fmt.Printf("  ~ copied your content to %s -- kept %s (some files could not be verified)\n", dir, old)
@@ -99,18 +114,25 @@ func migrateUserData() {
 	}
 }
 
-// fullyMirrored rejects missing entries, byte differences, links and read errors.
+// fullyMirrored rejects missing entries, byte differences, links and read errors. Retired package
+// content is outside the migration and is not required at the destination.
 func fullyMirrored(src, dst string) bool {
 	err := filepath.WalkDir(src, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		if d.IsDir() {
-			return nil
-		}
 		rel, rerr := filepath.Rel(src, path)
 		if rerr != nil {
 			return rerr
+		}
+		if rel != "." && retiredContent(rel) {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if d.IsDir() {
+			return nil
 		}
 		if !identicalFiles(path, filepath.Join(dst, rel)) {
 			return fmt.Errorf("unverified migration: %s", path)
@@ -120,7 +142,8 @@ func fullyMirrored(src, dst string) bool {
 	return err == nil
 }
 
-// copyTreeMissing never overwrites a destination and reports incomplete copies.
+// copyTreeMissing never overwrites a destination and reports incomplete copies. Retired package
+// content is not copied.
 func copyTreeMissing(src, dst string) (int, error) {
 	copied := 0
 	var failures error
@@ -129,12 +152,18 @@ func copyTreeMissing(src, dst string) (int, error) {
 			failures = errors.Join(failures, err)
 			return nil
 		}
-		if d.IsDir() {
-			return nil
-		}
 		rel, rerr := filepath.Rel(src, path)
 		if rerr != nil {
 			failures = errors.Join(failures, rerr)
+			return nil
+		}
+		if rel != "." && retiredContent(rel) {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if d.IsDir() {
 			return nil
 		}
 		target := filepath.Join(dst, rel)
@@ -215,20 +244,29 @@ func copyMissingFile(src, dst string) error {
 	return err
 }
 
-// Recheck each source and remove empty directories only. Late additions survive.
+// Recheck each source and remove empty directories only. Late additions survive, and retired
+// package content (with the folders that hold it) stays in place.
 func removeMirroredTree(src, dst string) error {
 	var dirs []string
+	kept := false
 	err := filepath.WalkDir(src, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		if d.IsDir() {
-			dirs = append(dirs, path)
-			return nil
-		}
 		rel, err := filepath.Rel(src, path)
 		if err != nil {
 			return err
+		}
+		if rel != "." && retiredContent(rel) {
+			kept = true
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if d.IsDir() {
+			dirs = append(dirs, path)
+			return nil
 		}
 		if !identicalFiles(path, filepath.Join(dst, rel)) {
 			return fmt.Errorf("migration changed before removal: %s", path)
@@ -239,7 +277,7 @@ func removeMirroredTree(src, dst string) error {
 		return err
 	}
 	for i := len(dirs) - 1; i >= 0; i-- {
-		if err := os.Remove(dirs[i]); err != nil {
+		if err := os.Remove(dirs[i]); err != nil && !(kept && dirs[i] == src) {
 			return err
 		}
 	}

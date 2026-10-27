@@ -132,7 +132,7 @@ func cmdInstall(f flags) error {
 		rec.Version, build.label, doom)
 	if len(legacy) > 0 {
 		fmt.Println("Found the original SnapHak in this DOOM folder. Snapmap+ replaces it, so its")
-		fmt.Printf("files (%d) will be removed. Your maps, prefabs and overrides under\n", len(legacy))
+		fmt.Printf("files (%d) will be removed. Your maps and prefabs under\n", len(legacy))
 		fmt.Printf("%%USERPROFILE%%\\snaphak are yours and are kept (they carry over).\n")
 		confirmMsg = fmt.Sprintf("About to remove the original SnapHak and install Snapmap+ %s for the %s DOOM build into\n  %s\nContinue?",
 			rec.Version, build.label, doom)
@@ -144,18 +144,9 @@ func cmdInstall(f flags) error {
 			return nil
 		}
 	}
-	// Convert packages from earlier releases before replacing the runtime that
-	// may still read them. Each outer package converts completely or not at
-	// all; a package that needs attention is reported and left unchanged.
+	// Bring player content forward from earlier install locations. The package system is being
+	// rebuilt, so no package folder is created, converted or removed.
 	migrateUserData()
-	report, err := migrateOverrides(appDataDir(), doom)
-	printOverrideMigration(report)
-	if err != nil {
-		return fmt.Errorf("could not convert existing overrides, so nothing was installed: %w", err)
-	}
-	if err := ensureStarterPackage(); err != nil {
-		fmt.Printf("  ! could not prepare the starter package: %v\n", err)
-	}
 	if len(legacy) > 0 {
 		fmt.Println("Removing the original SnapHak:")
 		rec.Backups = dropLegacyBackups(doom, rec.Backups)

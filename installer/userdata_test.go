@@ -31,18 +31,18 @@ func TestMigrateUserData_scaffolds(t *testing.T) {
 // Migrate legacy content into app data and retire the verified source.
 func TestMigrateUserData_foldsOldContentForward(t *testing.T) {
 	la, up := newDataDirs(t)
-	oldOverride := filepath.Join(up, "snaphak", "overrides", "unknown_entity.decl")
-	if err := os.MkdirAll(filepath.Dir(oldOverride), 0o755); err != nil {
+	oldPrefab := filepath.Join(up, "snaphak", "prefabs", "arena.json")
+	if err := os.MkdirAll(filepath.Dir(oldPrefab), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(oldOverride, []byte("MY OVERRIDE"), 0o644); err != nil {
+	if err := os.WriteFile(oldPrefab, []byte("MY PREFAB"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
 	migrateUserData()
 
-	got, err := os.ReadFile(filepath.Join(la, "snapmap-plus", "overrides", "unknown_entity.decl"))
-	if err != nil || string(got) != "MY OVERRIDE" {
+	got, err := os.ReadFile(filepath.Join(la, "snapmap-plus", "prefabs", "arena.json"))
+	if err != nil || string(got) != "MY PREFAB" {
 		t.Fatalf("content not migrated to the new location: %q, %v", got, err)
 	}
 	// The old folder is removed after migration.
@@ -51,11 +51,38 @@ func TestMigrateUserData_foldsOldContentForward(t *testing.T) {
 	}
 }
 
+// R-021: the retired package folders are neither copied nor created, and an old one is left
+// in place for the player to deal with; everything else still moves.
+func TestMigrateUserData_leavesRetiredPackageFolders(t *testing.T) {
+	la, up := newDataDirs(t)
+	oldPackage := filepath.Join(up, "snaphak", "overrides", "boss", "package.json") // retired package folder
+	oldPrefab := filepath.Join(up, "snaphak", "prefabs", "arena.json")
+	writeF(t, oldPackage, "{}")
+	writeF(t, oldPrefab, "MY PREFAB")
+
+	migrateUserData()
+
+	if got := readF(t, filepath.Join(la, "snapmap-plus", "prefabs", "arena.json")); got != "MY PREFAB" {
+		t.Fatalf("prefab not migrated: %q", got)
+	}
+	for _, retired := range []string{"overrides", "package-cache", "package-staging", "override-backups"} { // retired package folder names
+		if exists(filepath.Join(la, "snapmap-plus", retired)) {
+			t.Errorf("migration created the retired folder %s", retired)
+		}
+	}
+	if got := readF(t, oldPackage); got != "{}" {
+		t.Fatalf("the old package folder was not left in place: %q", got)
+	}
+	if exists(oldPrefab) {
+		t.Error("the migrated prefab was not retired from the old folder")
+	}
+}
+
 // TestMigrateUserData_neverClobbersNewer: if the user already has a file at the new location, an old-location
 // file of the same name must NOT overwrite it (and re-running is a no-op).
 func TestMigrateUserData_neverClobbersNewer(t *testing.T) {
 	la, up := newDataDirs(t)
-	name := filepath.Join("overrides", "keep.decl")
+	name := filepath.Join("prefabs", "keep.json")
 
 	oldFile := filepath.Join(up, "snaphak", name)
 	os.MkdirAll(filepath.Dir(oldFile), 0o755)
