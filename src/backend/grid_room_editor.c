@@ -2,6 +2,7 @@
 #include <windows.h>
 #include <math.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 #include "grid_room_editor.h"
 #include "hook.h"
@@ -122,19 +123,77 @@ static void grid_blueprint_help(void *normal,void *editor)
     }
 }
 
+/* What this panel last showed for its room. A room whose size changed under
+ * an open panel (undo, a console edit, or a module index shift after a
+ * deletion) is never edited from stale panel values. */
+static struct {void *panel,*map;int instance,valid;sh_grid_size size;} g_shown;
+static void remember(void *panel,void *map,int instance,const sh_grid_size *size)
+{g_shown.panel=panel;g_shown.map=map;g_shown.instance=instance;g_shown.size=*size;g_shown.valid=1;}
+static void report(const char *format,int instance,const sh_grid_size *size)
+{
+    char message[200];
+    snprintf(message,sizeof message,format,instance,size?size->xyz[0]:0,size?size->xyz[1]:0,size?size->xyz[2]:0);
+    backend_log(message);
+}
+
+/* The native XYZ inspector keeps three copies of its value: the row value
+ * (+0x100, written by SetVec3), the value its own cancel path restores (+0xe8,
+ * set at construction and on accept) and the value the panel opened with
+ * (+0xf4, restored by its revert and compared by the dirty marker). The open
+ * X/Y/Z sub-editor's draft lives in the panel's numeric-entry context (+0xd8 =
+ * panel+0x280), a list of three entries (pointer, count, capacity; stride 0x38,
+ * float at +0x30) at +0x58. The context also keeps two snapshots in the same
+ * list form: +0x70, the value the row was built with (its dirty comparison),
+ * and +0x88, copied from the draft when the sub-editor opens. Both cancel
+ * routes (the sub-editor's Delete revert and the Revert dialog's Yes) copy +0x88
+ * back into the draft, and the inspector then applies the draft, so a size
+ * shown after an outside change must reach the draft always and, for an
+ * outside change, every snapshot a cancel or revert can restore. */
+static int show_entries(unsigned char *list,const float dims[3])
+{
+    unsigned char *entries=*(unsigned char**)list;int count=*(int*)(list+8),capacity=*(int*)(list+12);unsigned i;
+    if(!entries||count!=3||capacity<count||capacity>65536)return 0;
+    for(i=0;i<3;++i)*(float*)(entries+i*0x38+0x30)=dims[i];
+    return 1;
+}
+static void show_size(unsigned char *panel,unsigned char *inspector,const float dims[3],int outside)
+{
+    unsigned char *ctx;
+    g_set_vec(inspector,dims);
+    __try {
+        ctx=*(unsigned char**)(inspector+0xd8);
+        if(!ctx||ctx!=panel+0x280||!show_entries(ctx+0x58,dims)||!outside)return;
+        /* The outside size becomes the baseline for every cancel and revert.
+         * A limited user edit (outside == 0) keeps them, so its cancel still
+         * returns to the size the user last accepted. */
+        memcpy(inspector+0xe8,dims,sizeof(float)*3);
+        memcpy(inspector+0xf4,dims,sizeof(float)*3);
+        show_entries(ctx+0x70,dims);
+        show_entries(ctx+0x88,dims);
+    } __except(EXCEPTION_EXECUTE_HANDLER) { }
+}
+
 static void grid_changed(void *panel,void *inspector,int action)
 {
     unsigned char *p=(unsigned char*)panel,*v=(unsigned char*)inspector;
     sh_grid_size current,next;sh_grid_warp check;
-    float dims[3],requested[3];unsigned i;int instance,adjusted=0;void *map;
+    float dims[3],requested[3];unsigned i;int instance,adjusted=0,outside=0;void *map;
     /* The null guard at the original entry precedes our detour. Other native
      * IDs always reach their original dispatcher with unchanged arguments. */
     if(g_property_handler&&g_property_handler(panel,inspector,action))return;
     if(*(const int*)(v+0x40)!=GRID_PROPERTY_SIZE){g_change(panel,inspector,action);return;}
-    if(InterlockedCompareExchange(&g_failed,0,0))return;
+    if(InterlockedCompareExchange(&g_failed,0,0)){
+        backend_log("GRID: room size edit ignored; the properties adapter was disabled by an earlier engine exception");return;}
     __try {
         map=*(void**)(p+0x1c0);instance=*(int*)(p+0x1dc);
-        if(!g_read(map,instance,&current))return;
+        if(!g_read(map,instance,&current)){
+            report("GRID: room size edit ignored; module %d is no longer a Grid Room",instance,NULL);return;}
+        if(g_shown.valid&&g_shown.panel==panel&&g_shown.map==map&&g_shown.instance==instance&&
+           memcmp(g_shown.size.xyz,current.xyz,sizeof current.xyz)){
+            report("GRID: module %d changed size since this panel showed it (now %u x %u x %u); showing the current size, edit again",
+                instance,&current);
+            goto stale;
+        }
         memcpy(requested,v+0x100,sizeof requested);
         if(!sh_grid_clamp(current.kind,requested,&next))goto restore;
         for(i=0;i<3;++i){
@@ -146,11 +205,18 @@ static void grid_changed(void *panel,void *inspector,int action)
             if(!g_read(map,instance,&next))goto restore;
             for(i=0;i<3;++i){dims[i]=(float)next.xyz[i];if(dims[i]!=requested[i])adjusted=1;}
         }
-        if(adjusted)g_set_vec(inspector,dims);
+        remember(panel,map,instance,&next);
+        if(adjusted)show_size(p,v,dims,0);
         return;
+stale:
+        outside=1;
 restore:
+        /* The adapter has already logged why; show what the room really is,
+         * in the row and in the sub-editor, so no later Esc, cancel or reopen
+         * can apply a value the room no longer has. */
         for(i=0;i<3;++i)dims[i]=(float)current.xyz[i];
-        g_set_vec(inspector,dims);
+        remember(panel,map,instance,&current);
+        show_size(p,v,dims,outside);
     } __except(EXCEPTION_EXECUTE_HANDLER) {
         InterlockedExchange(&g_failed,1);
         backend_log("GRID: native properties disabled after an engine exception");
@@ -176,6 +242,7 @@ static void grid_populate(void *panel,int instance,void *map,void *settings,void
          * shared native XYZ inspector supplies the overall numeric range. */
         grid_add_vec(panel,GRID_PROPERTY_SIZE,"Grid Room Size",&label,&description,
             1,dims,1,65534,1,16,1,p+0x280,NULL,NULL);
+        remember(panel,map,instance,&size);
         {void *list=*(void**)(p+0x258);
             if(list)((void(*)(void*))(*(void***)list)[3])(list);}
     } __except(EXCEPTION_EXECUTE_HANDLER) {

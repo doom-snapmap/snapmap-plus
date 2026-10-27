@@ -137,28 +137,29 @@ static void layout_checks(void)
     unsigned char local_map[0x800]={0},records[3][0x98]={0};grid_move moves[3];
     int keys[]={0,2,4,6},links[]={3,-1,-1,0,-1,-1};const char *reason="unknown";
     sh_grid_size huge={SH_GRID_MODERN,{10000,10000,10000}};void *wrapper=sh_grid_native_wrapper(&huge);
-    int i;
+    int i;float box[3][6];
+    for(i=0;i<3;++i){box[i][0]=box[i][1]=box[i][2]=-environment_limit;box[i][3]=box[i][4]=box[i][5]=environment_limit;}
     *(void**)(local_map+0x750)=records;*(void**)(local_map+0x7d8)=keys;*(int*)(local_map+0x7e0)=4;
     *(int*)(local_map+0x758)=3;*(void**)(local_map+0x7c0)=links;*(int*)(local_map+0x7c8)=6;
     for(i=0;i<3;++i)*(void**)records[i]=stock_wrappers[1];
     *(float*)(records[1]+0x10)=5120;*(float*)(records[2]+0xc)=20000;
-    memset(moves,0,sizeof moves);assert(plan_connected(local_map,0,wrapper,moves,3,links,6,&reason));
+    memset(moves,0,sizeof moves);assert(plan_connected(local_map,0,wrapper,moves,3,links,6,(const float(*)[6])box,&reason));
     assert(*(float*)(moves[1].after+0x10)==7560&&!memcmp(moves[2].after,records[2],0x98));
     /* Rotating the same assembly rotates its branch translation, preserving
      * the original portal planes without changing either room's rotation. */
     *(int*)(records[0]+0x18)=*(int*)(records[1]+0x18)=1;
     *(float*)(records[1]+0x10)=0;*(float*)(records[1]+0xc)=-5120;
-    memset(moves,0,sizeof moves);assert(plan_connected(local_map,0,wrapper,moves,3,links,6,&reason));
+    memset(moves,0,sizeof moves);assert(plan_connected(local_map,0,wrapper,moves,3,links,6,(const float(*)[6])box,&reason));
     assert(*(float*)(moves[1].after+0xc)==-7560&&*(int*)(moves[1].after+0x18)==1);
     *(int*)(records[0]+0x18)=*(int*)(records[1]+0x18)=0;
     *(float*)(records[1]+0x10)=5120;*(float*)(records[1]+0xc)=0;
     *(float*)(records[2]+0xc)=0;*(float*)(records[2]+0x10)=12000;
-    memset(moves,0,sizeof moves);assert(!plan_connected(local_map,0,wrapper,moves,3,links,6,&reason));
+    memset(moves,0,sizeof moves);assert(!plan_connected(local_map,0,wrapper,moves,3,links,6,(const float(*)[6])box,&reason));
     assert(strstr(reason,"overlap"));
     /* A second constraint back into an assigned branch cannot silently pull
      * the root away or break an existing edge. */
     links[1]=2;links[2]=1;
-    memset(moves,0,sizeof moves);assert(!plan_connected(local_map,0,wrapper,moves,3,links,6,&reason));
+    memset(moves,0,sizeof moves);assert(!plan_connected(local_map,0,wrapper,moves,3,links,6,(const float(*)[6])box,&reason));
     assert(strstr(reason,"loop"));
     /* A huge room near the south world edge used to become invalid while
      * retaining reciprocal doors, then crash native render construction. */
@@ -167,7 +168,7 @@ static void layout_checks(void)
         sh_grid_default(SH_GRID_MODERN,&before);
         *(float*)(records[0]+0xc)=7296;*(float*)(records[0]+0x10)=-10504;
         *(float*)(records[1]+0xc)=7296;*(float*)(records[1]+0x10)=-5384;
-        assert(fit_size(local_map,0,&before,&requested,&reason));
+        assert(fit_size(local_map,0,&before,&requested,&reason,box));
         assert(requested.xyz[0]==16384&&requested.xyz[1]==13552&&requested.xyz[2]==16000);
         assert(loads==prior_loads); /* Spatial fitting must not consume asset variants. */
         memset(moves,0,sizeof moves);
@@ -176,19 +177,20 @@ static void layout_checks(void)
         /* The current cvar is read for each edit, with no 16384 size cap. */
         environment_limit=30000;
         requested.xyz[0]=requested.xyz[1]=requested.xyz[2]=30000;
-        assert(fit_size(local_map,0,&before,&requested,&reason));
+        assert(fit_size(local_map,0,&before,&requested,&reason,box));
         assert(requested.xyz[0]==30000&&requested.xyz[1]==30000&&requested.xyz[2]==30000);
         environment_limit=16000;
-        assert(fit_size(local_map,0,&before,&requested,&reason));
+        assert(fit_size(local_map,0,&before,&requested,&reason,box));
         assert(requested.xyz[0]==17408&&requested.xyz[1]==13552&&requested.xyz[2]==16000);
         /* The boundary of a moved neighbor can be tighter than the root's. */
         *(float*)(records[0]+0xc)=*(float*)(records[1]+0xc)=0;
         *(float*)(records[0]+0x10)=3000;*(float*)(records[1]+0x10)=8120;
         requested=huge;requested.xyz[1]=16384;
-        assert(fit_size(local_map,0,&before,&requested,&reason)&&requested.xyz[1]==13200);
+        assert(fit_size(local_map,0,&before,&requested,&reason,box)&&requested.xyz[1]==13200);
     }
 }
-void backend_log(const char *s){fprintf(stderr,"%s\n",s);}
+static char last_log[512];
+void backend_log(const char *s){fprintf(stderr,"%s\n",s);strncpy(last_log,s,sizeof last_log-1);}
 uintptr_t glb_resolve(const uint8_t *b,const char *n,glb_status *info)
 {(void)b;(void)n;(void)info;return 0;}
 unsigned char *sh_overrides_read_engine_resource(const char *n,size_t *len)
@@ -258,6 +260,103 @@ static unsigned char load_variant(void *palette,void *palette_decl,void *palette
     *(void**)(p+0x10)=record;*(int*)(p+0x18)=1;
     *(void**)(p+0x68)=wrapper;*(int*)(p+0x70)=1;++loads;return 1;
 }
+/* Edit rules on synthetic maps: a request is honoured when physically
+ * possible, only requested axes change, and every limit says why. */
+static int fit(unsigned char *map,const sh_grid_size *before,sh_grid_size *size,const char **reason)
+{
+    float box[3][6];g_note[0]=0;*reason="";
+    return fit_size(map,0,before,size,reason,box);
+}
+static void edit_rule_checks(void)
+{
+    unsigned char map[0x800]={0},records[2][0x98]={0};
+    int keys2[]={0,2,4},links2[]={-1,-1,-1,-1},keys1[]={0,2},links1[]={-1,-1};
+    sh_grid_size room={SH_GRID_MODERN,{10000,10000,10000}},r;const char *reason;
+    *(void**)records[0]=sh_grid_native_wrapper(&room);*(void**)records[1]=stock_wrappers[1];
+    *(void**)(map+0x750)=records;
+    /* Isolated room at the origin: Y spans -3720..6280, Z 0..10000. */
+    *(int*)(map+0x758)=1;*(void**)(map+0x7d8)=keys1;*(int*)(map+0x7e0)=2;
+    *(void**)(map+0x7c0)=links1;*(int*)(map+0x7c8)=2;
+    r=room;r.xyz[2]=4000;assert(fit(map,&room,&r,&reason)&&r.xyz[2]==4000&&!g_note[0]);
+    r=room;r.xyz[2]=16000;assert(fit(map,&room,&r,&reason)&&r.xyz[2]==16000&&!g_note[0]);
+    r=room;r.xyz[2]=20000;assert(fit(map,&room,&r,&reason)&&r.xyz[0]==10000&&r.xyz[1]==10000&&r.xyz[2]==16000);
+    assert(strstr(g_note,"Z request 20000 limited to 16000")&&strstr(g_note,"z=16000"));
+    {sh_grid_size top=room;top.xyz[2]=16000;*(void**)records[0]=sh_grid_native_wrapper(&top);
+        r=top;r.xyz[2]=17000;assert(fit(map,&top,&r,&reason)&&!memcmp(&r,&top,sizeof r));
+        assert(strstr(g_note,"Z already at the map boundary: requested 17000, kept 16000"));
+        r=top;r.xyz[2]=9000;assert(fit(map,&top,&r,&reason)&&r.xyz[2]==9000&&!g_note[0]);
+        *(void**)records[0]=sh_grid_native_wrapper(&room);}
+    /* One neighbour on the north doorway: Y edits move it, Z edits do not. */
+    *(float*)(records[1]+0x10)=7560;
+    *(int*)(map+0x758)=2;*(void**)(map+0x7d8)=keys2;*(int*)(map+0x7e0)=3;
+    *(void**)(map+0x7c0)=links2;*(int*)(map+0x7c8)=4;links2[0]=3;links2[3]=0;
+    r=room;r.xyz[2]=4000;assert(fit(map,&room,&r,&reason)&&r.xyz[2]==4000&&!g_note[0]);
+    r=room;r.xyz[1]=16384;assert(fit(map,&room,&r,&reason)&&r.xyz[1]==16384&&!g_note[0]);
+    r=room;r.xyz[1]=30000;assert(fit(map,&room,&r,&reason)&&r.xyz[1]==19200);
+    assert(strstr(g_note,"connected module 1 reaches y=16000"));
+    /* Neighbour deleted: compacted tables with a connection not yet rebuilt
+     * are refused with a reason, never planned as a phantom neighbour. */
+    *(int*)(map+0x758)=1;*(void**)(map+0x7d8)=keys1;*(int*)(map+0x7e0)=2;
+    *(void**)(map+0x7c0)=links1;*(int*)(map+0x7c8)=2;links1[0]=3;
+    r=room;r.xyz[2]=4000;assert(!fit(map,&room,&r,&reason)&&strstr(reason,"stale or one-sided connection"));
+    links1[0]=-1;assert(fit(map,&room,&r,&reason)&&r.xyz[2]==4000);
+    /* Tables that disagree (a deletion mid-frame) are refused, not guessed. */
+    *(int*)(map+0x7e0)=3;assert(!fit(map,&room,&r,&reason)&&strstr(reason,"tables disagree"));
+    *(int*)(map+0x7e0)=2;
+    /* A room that already crosses the boundary (a lowered cvar or an older
+     * map) shrinks on the requested axis only; its other axes are held. */
+    *(float*)(records[0]+0x10)=-13000; /* Y spans -16720..-6720 */
+    r=room;r.xyz[2]=4000;assert(fit(map,&room,&r,&reason)&&r.xyz[1]==10000&&r.xyz[2]==4000);
+    assert(strstr(g_note,"already crosses the map boundary at y=-16720"));
+    r=room;r.xyz[1]=12000;assert(fit(map,&room,&r,&reason)&&r.xyz[1]==10000);
+    assert(strstr(g_note,"Y already at the map boundary: requested 12000, kept 10000")&&strstr(g_note,"existing extent"));
+    r=room;r.xyz[1]=8000;assert(fit(map,&room,&r,&reason)&&r.xyz[1]==8000&&!strstr(g_note,"limited"));
+    *(float*)(records[0]+0x10)=0;
+}
+/* The template census names the entities a loaded room receives and flags
+ * templates that lost their definition. */
+static void census_checks(void)
+{
+    static unsigned char wrapper[0x98],lists[0x80],entries[3][0x6f0],defs[2][0x80];
+    char text[480];
+    *(void**)(wrapper+0x88)=lists;*(void**)(lists+0x48)=entries;*(int*)(lists+0x50)=3;
+    *(int*)(lists+0x68)=5;*(int*)(lists+0x78)=255;
+    *(void**)(entries[0]+0x150)=defs[0];*(const char**)(defs[0]+8)="light_point_9448";
+    *(void**)(entries[1]+0x150)=defs[1];*(const char**)(defs[1]+8)="speaker_0";
+    assert(census(wrapper,text,sizeof text));
+    assert(strstr(text,"templates 0/0/0/3, category 4 without template 255, no editor palette entry 5, templates with no definition 1, light templates 1:"));
+    assert(strstr(text," light_point_9448")&&strstr(text," speaker_0")&&strstr(text," (null)"));
+    *(void**)(wrapper+0x88)=NULL;assert(!census(wrapper,text,sizeof text));
+}
+/* The Blueprint Add tool re-sorts the editor module palette in place, after
+ * which native FindModule's lower_bound misses names that are present. Stock
+ * and variant lookups must not depend on that order, and a lookup that does
+ * fail must name its step. */
+static void *find_unsorted(void *palette,const char *name)
+{(void)name;return end_record(palette);}
+static void palette_order_checks(void)
+{
+    unsigned char swapped[2][0x98];sh_grid_size stock,fresh={SH_GRID_MODERN,{2048,3072,1024}};
+    find_module_fn saved=g_find;unsigned before=loads;void *w;
+    memcpy(swapped[0],stock_records[1],0x98);memcpy(swapped[1],stock_records[0],0x98);
+    *(void**)(editor+0x206d0)=swapped;g_find=find_unsorted;
+    sh_grid_default(SH_GRID_MODERN,&stock);
+    assert(sh_grid_native_wrapper(&stock)==stock_wrappers[1]);
+    sh_grid_default(SH_GRID_CLASSIC,&stock);
+    assert(sh_grid_native_wrapper(&stock)==stock_wrappers[0]);
+    w=sh_grid_native_wrapper(&fresh);assert(w&&loads==before+1);
+    /* A missing stock room is refused with the step named, and the refusal
+     * is not cached: the same size succeeds once the room is present. */
+    fresh.xyz[2]=1280;last_log[0]=0;*(int*)(editor+0x206d8)=0;
+    assert(!sh_grid_native_wrapper(&fresh));
+    assert(strstr(last_log,"GRID: variant lookup failed at stock template lookup")&&
+           strstr(last_log,"smpgrid/v1/m/2048_3072_1280.decl"));
+    sh_grid_default(SH_GRID_MODERN,&stock);last_log[0]=0;
+    assert(!sh_grid_native_wrapper(&stock)&&strstr(last_log,"stock room is not in the module palette"));
+    *(int*)(editor+0x206d8)=2;
+    assert(sh_grid_native_wrapper(&fresh)&&loads==before+2);
+    *(void**)(editor+0x206d0)=stock_records;g_find=saved;
+}
 int main(void)
 {
     sh_grid_size compact={SH_GRID_MODERN,{1536,1024,512}},large={SH_GRID_MODERN,{8192,6144,4096}},read;
@@ -270,7 +369,8 @@ int main(void)
         *(void**)stock_records[i]=stock_wrappers[i];*(void**)(stock_wrappers[i]+0x90)=editor;
         *(void**)stock_wrappers[i]=module;
         {sh_grid_size size;sh_grid_default(SH_GRID_MODERN,&size);geometry(module,&size);}
-        *(const char**)(module+8)=sh_grid_stock_name(i?SH_GRID_MODERN:SH_GRID_CLASSIC);
+        /* Live palette declarations carry the ".decl" suffix (13954591). */
+        *(const char**)(module+8)=i?"maps/modules/ind_dlc/ind_totally_blank_room_4x.decl":"maps/modules/classic/classic_blank_room.decl";
         *(const char**)(stock_wrappers[i]+0x18)=i?
             "maps/modules/palettes/mega_blessed/ind_dlc/ind_totally_blank_room_4x.bmodel":
             "maps/modules/palettes/mega_blessed/classic/classic_blank_room.bmodel";
@@ -346,10 +446,10 @@ int main(void)
             cap1[3]=cap1[7]=cap1[11]=1;
             *(float*)(placed[1]+0xc)=30000;*(float*)(placed[1]+0x10)=30000;
             memset(placed[1]+0x40,0xa5,0x58);memcpy(untouched,placed[1],sizeof untouched);
-            connected[0]=2;assert(!sh_grid_native_apply(edit_data,0,&target)&&!commit_calls&&!replace_calls);
-            assert(!surface_refreshes);
-            connected[0]=-1;
-            assert(sh_grid_native_apply(edit_data,0,&target));resized=*(void**)placed[0];
+            /* A stale one-sided connection (a deleted neighbour) is rebuilt by
+             * the native reconnect at edit time instead of refusing the edit. */
+            connected[0]=2;assert(sh_grid_native_apply(edit_data,0,&target)&&connected[0]==-1);
+            resized=*(void**)placed[0];
             assert(surface_refreshes==1&&surface_wrapper==resized);
             assert(sh_grid_native_apply(edit_data,0,&target)&&surface_refreshes==1);
             assert(resized!=a&&resized!=b&&!memcmp(placed[1],untouched,sizeof untouched));
@@ -361,7 +461,7 @@ int main(void)
             assert(surface_refreshes==1&&surface_wrapper==resized);
             assert(*(void**)placed[0]==resized&&!memcmp(saved_caps[0],cap0,48)&&!memcmp(saved_caps[1],cap1,48));
             assert(!memcmp(placed[1],untouched,sizeof untouched)&&!g_edit_faulted);
-            assert(replace_calls==2&&reconnect_calls==2&&*(int*)(heap_state+0xc4)==0);
+            assert(replace_calls==2&&reconnect_calls==5&&*(int*)(heap_state+0xc4)==0); /* each edit first refreshes native connections */
             /* A cancel back to stock dimensions also restores moduleName,
              * rather than leaving a same-size generated resource dependency. */
             {sh_grid_size original;unsigned previous_loads=loads;
@@ -382,10 +482,23 @@ int main(void)
                 assert(cap0[1]==6280&&cap1[1]==-3720);
                 assert(!memcmp(own,entity_storage[3]+0x290,48));
                 assert(sh_grid_native_read(edit_data,0,&read)&&!memcmp(&read,&huge,sizeof read));
-                connected[0]=connected[3]=-1;
+                /* Neighbour deleted: native compacts the module and portal
+                 * tables, but the connection array still names the old port
+                 * until the next reconnect. The first shrink must apply. */
+                *(int*)(map_data+0x758)=1;*(int*)(map_data+0x7e0)=2;*(int*)(map_data+0x7c8)=2;
+                assert(connected[0]==3);
+                {sh_grid_size shrink=huge;shrink.xyz[2]=4000;
+                    assert(sh_grid_native_apply(edit_data,0,&shrink)&&connected[0]==-1);
+                    assert(sh_grid_native_read(edit_data,0,&read)&&!memcmp(&read,&shrink,sizeof read));
+                    assert(strstr(sh_grid_native_last_message(),"updated to 10000 x 10000 x 4000"));}
+                *(int*)(map_data+0x758)=2;*(int*)(map_data+0x7e0)=3;*(int*)(map_data+0x7c8)=4;
+                /* Still touching the doorway: native reconnect joins it again,
+                 * so it follows the room back as an attached neighbour. */
                 assert(sh_grid_native_apply(edit_data,0,&target));
                 assert(cap0[1]==2304&&cap1[1]==256);
-                assert(*(float*)(placed[1]+0x10)==7560);
+                assert(*(float*)(placed[1]+0x10)==3584&&connected[0]==3&&connected[3]==0);
+                *(float*)(placed[1]+0xc)=30000;
+                assert(sh_grid_native_apply(edit_data,0,&target)&&connected[0]==-1);
             }
             {unsigned char definitions[3][0x80]={0};float before_light[12],authored[12];
                 sh_grid_size huge={SH_GRID_MODERN,{10000,10000,10000}};
@@ -423,7 +536,10 @@ int main(void)
             }
         }
     }
+    palette_order_checks();
     layout_checks();
+    edit_rule_checks();
+    census_checks();
     containment_checks();
     assert(find_variant(editor+0x206c0,"unrelated.decl")==end_record(editor+0x206c0));
     /* A native string destructor fault must still restore the heap scope. */

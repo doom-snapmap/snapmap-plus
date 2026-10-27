@@ -244,32 +244,65 @@ static int aliases(node *root,const sh_grid_size *size)
         }
     }return 1;
 }
+/* Built-in module lights: every light/... entity plus the SnapMap dynamic
+ * point. One reader computes their target geometry for both the generated
+ * variant declaration (map load and Play) and the live editor resize. */
+static int builtin_light(const char *kind)
+{return kind&&(!strncmp(kind,"light/",6)||!strcmp(kind,"snapmaps/light/dynamic_point"));}
+static int orientation(node *edit,float axis[9])
+{
+    static const char *const rows[]={"mat[0]","mat[1]","mat[2]"},*const parts[]={"x","y","z"};
+    node *mat=member(member(edit,"spawnOrientation"),"mat");unsigned i,j;
+    for(i=0;i<9;++i)axis[i]=i%4==0?1.f:0.f;
+    if(!mat)return 1;
+    /* Omitted components keep the identity default, as in the decl format. */
+    for(i=0;i<3;++i){node *row=member(mat,rows[i]);
+        if(!row)continue;
+        for(j=0;j<3;++j)if(member(row,parts[j])&&!number(row,parts[j],axis+3*i+j))return 0;
+    }
+    return 1;
+}
+static int light_target(node *edit,const char *kind,const sh_grid_warp *w,sh_grid_builtin_light *out)
+{
+    float origin[3]={0,0,0},radius[3]={0,0,0},center[3]={0,0,0},axis[9],scale;
+    memset(out,0,sizeof *out);
+    if(!edit||(member(edit,"spawnPosition")&&!vec(edit,"spawnPosition",origin)))return 0;
+    out->has_radius=member(edit,"lightRadius")!=NULL;
+    if(out->has_radius&&!vec(edit,"lightRadius",radius))return 0;
+    if(member(edit,"lightCenter")&&!vec(edit,"lightCenter",center))return 0;
+    if(!orientation(edit,axis))return 0;
+    if(!w){ /* Read the declaration's values as they are. */
+        memcpy(out->origin,origin,sizeof origin);memcpy(out->radius,radius,sizeof radius);
+        memcpy(out->center,center,sizeof center);scale=1;
+    }else{
+        if(!sh_grid_light_axes(w,origin,radius,center,axis,
+            w->size.kind==SH_GRID_MODERN&&!strcmp(kind,"snapmaps/light/dynamic_point"),
+            out->origin,out->radius,out->center))return 0;
+        scale=sh_grid_light_range_scale(&w->size);
+    }
+    out->has_visible=member(edit,"maxVisibleRange")!=NULL;
+    out->has_shadow=member(edit,"maxShadowVisibleRange")!=NULL;
+    if((out->has_visible&&!number(edit,"maxVisibleRange",&out->visible_range))||
+       (out->has_shadow&&!number(edit,"maxShadowVisibleRange",&out->shadow_range)))return 0;
+    out->visible_range*=scale;out->shadow_range*=scale;
+    return 1;
+}
 static int entity(node *entry,const sh_grid_warp *w)
 {
     node *text=member(entry,"text"),*root=NULL,*edit,*inherit;
     char *decoded=NULL,*kind=NULL,*encoded=NULL;buffer output={0};int ok=0;
-    float p[3],r[3],c[3]={0,0,0},np[3],nr[3],nc[3];
+    float p[3],np[3];
     if(!text||!text->value||!(decoded=unquote(text->value))||!(root=parse(decoded,strlen(decoded))))goto done;
     edit=member(root,"edit");inherit=member(root,"inherit");kind=unquote(inherit?inherit->value:NULL);
     if(!edit||!kind)goto done;
-    if(member(edit,"spawnPosition")){
+    if(builtin_light(kind)){sh_grid_builtin_light t;
+        if(!light_target(edit,kind,w,&t)||!set_vec(edit,"spawnPosition",t.origin)||
+           (t.has_radius&&!set_vec(edit,"lightRadius",t.radius))||!set_vec(edit,"lightCenter",t.center)||
+           (t.has_visible&&!set_number(edit,"maxVisibleRange",t.visible_range))||
+           (t.has_shadow&&!set_number(edit,"maxShadowVisibleRange",t.shadow_range)))goto done;
+    }else if(member(edit,"spawnPosition")){
         if(!vec(edit,"spawnPosition",p))goto done;
-        if(!strncmp(kind,"light/",6)||!strcmp(kind,"snapmaps/light/dynamic_point")){
-            int have_radius=member(edit,"lightRadius")!=NULL;
-            r[0]=r[1]=r[2]=0;
-            if(have_radius&&!vec(edit,"lightRadius",r))goto done;
-            if(member(edit,"lightCenter")&&!vec(edit,"lightCenter",c))goto done;
-            if(!sh_grid_light(w,p,r,c,w->size.kind==SH_GRID_MODERN&&!strcmp(kind,"snapmaps/light/dynamic_point"),np,nr,nc)||
-               !set_vec(edit,"spawnPosition",np)||(have_radius&&!set_vec(edit,"lightRadius",nr))||
-               !set_vec(edit,"lightCenter",nc))goto done;
-            {const char *ranges[]={"maxVisibleRange","maxShadowVisibleRange"};
-                sh_grid_size stock;float scale=1,value;unsigned axis,index;
-                sh_grid_default(w->size.kind,&stock);
-                for(axis=0;axis<3;++axis)scale=fmaxf(scale,(float)w->size.xyz[axis]/stock.xyz[axis]);
-                for(index=0;index<2;++index)if(member(edit,ranges[index])&&
-                    (!number(edit,ranges[index],&value)||!set_number(edit,ranges[index],value*scale)))goto done;
-            }
-        }else{sh_grid_point(w,p,np);if(!set_vec(edit,"spawnPosition",np))goto done;}
+        sh_grid_point(w,p,np);if(!set_vec(edit,"spawnPosition",np))goto done;
     }
     if(!aliases(root,&w->size)||!emit(&output,root)||!(encoded=quote(output.s)))goto done;
     free(text->value);text->value=encoded;encoded=NULL;ok=1;
@@ -309,38 +342,33 @@ char *sh_grid_decl(const sh_grid_size *size,const char *source,size_t length,
 failed:dispose(root);free(output.s);return NULL;
 }
 
-int sh_grid_decl_lights(const sh_grid_size *size,const char *source,size_t length,
-                       sh_grid_builtin_light *out,size_t capacity,size_t *count)
+static int lights(const sh_grid_size *size,const char *source,size_t length,
+                  sh_grid_builtin_light *out,size_t capacity,size_t *count)
 {
     node *root=NULL,*list,*n;sh_grid_warp warp;size_t used=0;int ok=0;
     if(count)*count=0;
-    if(!out||!count||!sh_grid_warp_init(size,&warp)||!(root=parse(source,length)))goto done;
+    if(!out||!count||(size&&!sh_grid_warp_init(size,&warp))||!(root=parse(source,length)))goto done;
     list=member(member(member(root,"edit"),"module"),"entities");if(!list)goto done;
     for(n=list->children;n;n=n->next)if(!strncmp(n->key,"item[",5)){
-        node *t=member(n,"text"),*r=NULL,*edit,*field;char *decoded=NULL,*kind=NULL,*name=NULL;
-        float origin[3],radius[3],center[3]={0,0,0};int valid=0;
+        node *t=member(n,"text"),*r=NULL,*field;char *decoded=NULL,*kind=NULL,*name=NULL;int valid=0;
         if(!t||!t->value||!(decoded=unquote(t->value))||!(r=parse(decoded,strlen(decoded))))goto item_done;
         field=member(r,"inherit");kind=unquote(field?field->value:NULL);if(!kind)goto item_done;
-        if(strcmp(kind,"light/probe")&&strcmp(kind,"snapmaps/light/dynamic_point")){valid=1;goto item_done;}
-        field=member(n,"name");name=unquote(field?field->value:NULL);edit=member(r,"edit");
+        if(!builtin_light(kind)){valid=1;goto item_done;}
+        field=member(n,"name");name=unquote(field?field->value:NULL);
         if(!name||!*name||used==capacity||strlen(name)>=sizeof out[0].name||
-           strlen(kind)>=sizeof out[0].inherit||!vec(edit,"spawnPosition",origin)||
-           !vec(edit,"lightRadius",radius)||(member(edit,"lightCenter")&&!vec(edit,"lightCenter",center)))goto item_done;
-        if(!sh_grid_light(&warp,origin,radius,center,size->kind==SH_GRID_MODERN&&!strcmp(kind,"snapmaps/light/dynamic_point"),
-                          out[used].origin,out[used].radius,out[used].center))goto item_done;
-        if(!number(edit,"maxVisibleRange",&out[used].visible_range)||
-           !number(edit,"maxShadowVisibleRange",&out[used].shadow_range))goto item_done;
-        {sh_grid_size stock;float scale=1;unsigned axis;
-            sh_grid_default(size->kind,&stock);
-            for(axis=0;axis<3;++axis)scale=fmaxf(scale,(float)size->xyz[axis]/stock.xyz[axis]);
-            out[used].visible_range*=scale;out[used].shadow_range*=scale;
-        }
+           strlen(kind)>=sizeof out[0].inherit||!light_target(member(r,"edit"),kind,size?&warp:NULL,&out[used]))goto item_done;
         memcpy(out[used].name,name,strlen(name)+1);memcpy(out[used].inherit,kind,strlen(kind)+1);++used;valid=1;
 item_done:free(decoded);free(kind);free(name);dispose(r);if(!valid)goto done;
     }
     *count=used;ok=1;
 done:dispose(root);return ok;
 }
+int sh_grid_decl_lights(const sh_grid_size *size,const char *source,size_t length,
+                       sh_grid_builtin_light *out,size_t capacity,size_t *count)
+{return size?lights(size,source,length,out,capacity,count):0;}
+int sh_grid_decl_light_values(const char *source,size_t length,
+                              sh_grid_builtin_light *out,size_t capacity,size_t *count)
+{return lights(NULL,source,length,out,capacity,count);}
 
 int sh_grid_flight_warp(const sh_grid_size *size,const char *source,size_t length,
                          const char *resource,sh_grid_warp *out)

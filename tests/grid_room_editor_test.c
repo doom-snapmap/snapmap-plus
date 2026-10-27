@@ -86,6 +86,104 @@ static void blueprint_tests(void)
     *((unsigned char*)normal+0x10)=0;*(int*)(editor+0x21078)=3;
     grid_blueprint_update(normal,mode,editor);assert(opened==2);
 }
+/* The open X/Y/Z sub-editor keeps its draft in the panel context
+ * (panel+0x280: entries +0x58, count +0x60, capacity +0x64, stride 0x38, value
+ * +0x30), with two snapshots in the same form: +0x70 (the value the row was
+ * built with) and +0x88 (copied from the draft when the sub-editor opens).
+ * Native accept (Esc) copies the draft into +0x100 and dispatches 100. Both
+ * cancel routes restore the +0x88 snapshot into the draft and then apply the
+ * draft: the sub-editor's Delete revert dispatches a per-press change, and the
+ * Revert dialog's Yes runs the inspector cancel (+0xe8 into the row, context
+ * cancel) and dispatches -100. The panel revert restores +0xf4. None may apply
+ * a size the room had before an outside change (R-010 C4: the draft Z 3389
+ * undid a console resize to 3000; R-014 S2: both cancel routes restored the
+ * size the panel opened with). */
+static unsigned char draft[3*0x38],built[3*0x38],opened_draft[3*0x38];
+static float draft_value(int i){return *(float*)(draft+i*0x38+0x30);}
+static float entry(const unsigned char *list,int i){return *(float*)(list+i*0x38+0x30);}
+static void native_accept(void){int i;for(i=0;i<3;++i)*(float*)(widget+0x100+4*i)=draft_value(i);}
+static void native_open(void){memcpy(opened_draft,draft,sizeof draft);}
+static void native_context_cancel(void){memcpy(draft,opened_draft,sizeof draft);}
+static void native_delete_revert(unsigned char *panel)
+{native_context_cancel();native_accept();grid_changed(panel,widget,1);}
+static void native_dialog_yes(unsigned char *panel)
+{memcpy(widget+0x100,widget+0xe8,12);native_context_cancel();native_accept();grid_changed(panel,widget,-100);}
+static void sub_editor_draft_checks(unsigned char *panel)
+{
+    unsigned char *ctx=panel+0x280;unsigned before;int i,saved_rows=rows;
+    float shown[3];
+    *(void**)(ctx+0x58)=draft;*(int*)(ctx+0x60)=3;*(int*)(ctx+0x64)=3;
+    *(void**)(ctx+0x70)=built;*(int*)(ctx+0x78)=3;*(int*)(ctx+0x7c)=3;
+    *(void**)(ctx+0x88)=opened_draft;*(int*)(ctx+0x90)=3;*(int*)(ctx+0x94)=4;
+    *(void**)(widget+0xd8)=ctx;
+    sh_grid_default(SH_GRID_MODERN,&rooms[0]);
+    grid_populate(panel,0,rooms,NULL,NULL);
+    for(i=0;i<3;++i){*(float*)(draft+i*0x38+0x30)=(float)rooms[0].xyz[i];
+        *(float*)(widget+0xe8+4*i)=(float)rooms[0].xyz[i];
+        *(float*)(widget+0xf4+4*i)=(float)rooms[0].xyz[i];}
+    memcpy(built,draft,sizeof draft);native_open();
+    /* Two live steps in the sub-editor apply per press (5120 x 5120 x 3390). */
+    *(float*)(draft+2*0x38+0x30)=3390;native_accept();grid_changed(panel,widget,1);
+    assert(rooms[0].xyz[2]==3390);
+    /* The console resizes the room under the open sub-editor; the next press
+     * carries the stale draft 3389 and is refused by the guard. */
+    rooms[0].xyz[2]=3000;before=changes;
+    *(float*)(draft+2*0x38+0x30)=3389;native_accept();grid_changed(panel,widget,-1);
+    assert(changes==before&&rooms[0].xyz[2]==3000);
+    for(i=0;i<3;++i){shown[i]=(float)rooms[0].xyz[i];
+        assert(draft_value(i)==shown[i]);
+        assert(*(float*)(widget+0x100+4*i)==shown[i]&&*(float*)(widget+0xe8+4*i)==shown[i]);
+        assert(*(float*)(widget+0xf4+4*i)==shown[i]&&entry(built,i)==shown[i]&&entry(opened_draft,i)==shown[i]);}
+    /* After the guard, neither cancel route undoes the console resize. */
+    native_delete_revert(panel);
+    assert(changes==before&&rooms[0].xyz[2]==3000&&draft_value(2)==3000);
+    *(float*)(draft+2*0x38+0x30)=3100;native_accept();grid_changed(panel,widget,1);
+    assert(changes==before+1&&rooms[0].xyz[2]==3100);
+    native_dialog_yes(panel);
+    assert(changes==before+2&&rooms[0].xyz[2]==3000);
+    before=changes;
+    native_dialog_yes(panel);
+    assert(changes==before&&rooms[0].xyz[2]==3000);
+    /* Esc accepts the draft: it keeps 3000. */
+    native_accept();grid_changed(panel,widget,100);
+    assert(changes==before&&rooms[0].xyz[2]==3000);
+    /* Esc straight after an outside change, with no press in between. */
+    rooms[0].xyz[2]=2500;*(float*)(draft+2*0x38+0x30)=3000;
+    native_accept();grid_changed(panel,widget,100);
+    assert(changes==before&&rooms[0].xyz[2]==2500&&draft_value(2)==2500&&*(float*)(widget+0xe8+8)==2500);
+    native_accept();grid_changed(panel,widget,100);
+    assert(changes==before&&rooms[0].xyz[2]==2500);
+    /* User edits are still applied after the guard. */
+    *(float*)(draft+2*0x38+0x30)=2600;native_accept();grid_changed(panel,widget,1);
+    assert(changes==before+1&&rooms[0].xyz[2]==2600);
+    /* A limited edit shows the limit in the draft, and cancel still returns to
+     * the last accepted size (a user edit, so it is allowed). */
+    placement_max=700;*(float*)(draft+1*0x38+0x30)=10000;native_accept();grid_changed(panel,widget,1);
+    assert(rooms[0].xyz[1]==700&&draft_value(1)==700&&*(float*)(widget+0xe8+4)==5120);
+    assert(*(float*)(widget+0xf4+4)==5120&&entry(built,1)==5120&&entry(opened_draft,1)==5120);
+    placement_max=0;
+    /* Either cancel route then returns to the size before the user's edits:
+     * the outside size the guard made the baseline (5120 x 5120 x 2500). */
+    native_delete_revert(panel);
+    assert(rooms[0].xyz[1]==5120&&rooms[0].xyz[2]==2500);
+    placement_max=700;*(float*)(draft+1*0x38+0x30)=10000;*(float*)(draft+2*0x38+0x30)=2600;
+    native_accept();grid_changed(panel,widget,1);
+    assert(rooms[0].xyz[1]==700&&rooms[0].xyz[2]==2600&&entry(opened_draft,1)==5120);
+    placement_max=0;
+    native_dialog_yes(panel);
+    assert(rooms[0].xyz[1]==5120&&rooms[0].xyz[2]==2500);
+    /* A context that is not this panel's, or not a three-entry list, is left alone. */
+    rooms[0].xyz[2]=2000;*(float*)(draft+2*0x38+0x30)=2600;*(int*)(ctx+0x60)=2;
+    native_accept();grid_changed(panel,widget,1);
+    assert(rooms[0].xyz[2]==2000&&*(float*)(widget+0x108)==2000&&draft_value(2)==2600);
+    *(int*)(ctx+0x60)=3;*(void**)(widget+0xd8)=panel;rooms[0].xyz[2]=1900;
+    grid_changed(panel,widget,1);
+    assert(rooms[0].xyz[2]==1900&&draft_value(2)==2600);
+    *(void**)(widget+0xd8)=NULL;grid_changed(panel,widget,1);
+    *(void**)(ctx+0x58)=NULL;*(int*)(ctx+0x60)=0;*(int*)(ctx+0x64)=0;
+    memset(ctx+0x70,0,0x28);
+    rows=saved_rows; /* the later row-count checks count only the main sequence */
+}
 int main(void)
 {
     unsigned char panel[0x400]={0};sh_grid_size second;
@@ -114,6 +212,14 @@ int main(void)
     *(int*)(widget+0x40)=GRID_PROPERTY_SIZE;placement_max=700;
     *(float*)(widget+0x104)=10000;grid_changed(panel,widget,1);
     assert(rooms[0].xyz[1]==700&&*(float*)(widget+0x104)==700);placement_max=0;
+    /* The room under an open panel changed size elsewhere (an undo, a console
+     * edit, or a module index shift after a deletion): show it, apply nothing. */
+    {unsigned before=changes;rooms[0].xyz[2]=1000;
+        *(float*)(widget+0x108)=3000;grid_changed(panel,widget,1);
+        assert(changes==before&&rooms[0].xyz[2]==1000&&*(float*)(widget+0x108)==1000);
+        *(float*)(widget+0x108)=3000;grid_changed(panel,widget,1);
+        assert(changes==before+1&&rooms[0].xyz[2]==3000);}
+    sub_editor_draft_checks(panel);
     rooms[1].kind=SH_GRID_NONE;grid_populate(panel,1,rooms,NULL,NULL);assert(rows==1);
     grid_populate(panel,-1,rooms,NULL,NULL);assert(rows==1);
     /* Returning to ordinary Settings must restore its smaller range too. */

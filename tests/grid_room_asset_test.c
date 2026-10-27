@@ -105,12 +105,13 @@ static int installed(const char *root,const char *classic,const char *modern)
             if(status!=1){printf("REFUSED %s (source %s)\n",requests[i],r.requested);return 1;}
             assert(data&&bytes);free(data);++passed;}
         {sh_grid_size size={k==0?SH_GRID_CLASSIC:SH_GRID_MODERN,{16384,16384,16384}};
-            sh_grid_builtin_light lights[8];size_t n=0,bytes;unsigned char *source;char name[160];
+            sh_grid_builtin_light lights[16];size_t n=0,bytes;unsigned char *source;char name[160];
             snprintf(name,sizeof name,"%s.decl",sh_grid_stock_name(size.kind));
             source=read_source(&r,name,&bytes);assert(source);
-            assert(sh_grid_decl_lights(&size,(const char*)source,bytes,lights,8,&n));
-            assert(n==(k==0?1u:2u));
-            for(i=0;i<n;++i){assert(lights[i].origin[2]>7000&&lights[i].radius[0]>8000);
+            assert(sh_grid_decl_lights(&size,(const char*)source,bytes,lights,16,&n));
+            /* Classic: one dynamic point. Modern: probe, five static points, dynamic point. */
+            assert(n==(k==0?1u:7u));
+            for(i=0;i<n;++i){assert(lights[i].origin[2]>7000&&lights[i].radius[0]>4000);
                 if(k==1&&!strcmp(lights[i].inherit,"snapmaps/light/dynamic_point")){
                     assert(lights[i].visible_range>40000&&lights[i].shadow_range>24000);
                     assert(lights[i].origin[2]+lights[i].center[2]>15900);}}

@@ -28,6 +28,7 @@
 #include "perf.h"
 #include "apply_engine.h"
 #include "engine_build.h"
+#include "grid_room_native.h"
 
 /* Engine call contracts. */
 
@@ -1827,6 +1828,55 @@ static void h_sh_perf(idCmdArgs *a)
     sh_perf_report(sh_printf);
 }
 
+/* Resize the selected Grid Room through the inspector's own path (format
+ * clamp, boundary fit, native edit, read back). Prints the size and the
+ * adapter's sentence for the edit: applied, unchanged, limited or refused. */
+static void gridsize_print(const char *line)
+{
+    sh_printf("%s\n", line);
+}
+
+static void h_sh_gridsize(idCmdArgs *a)
+{
+    int argc = cmd_argc(a), instance = -1, resolved = -1, ok, i;
+    float requested[3];
+    sh_grid_size size;
+    if (argc == 2 && !strcmp(cmd_argv(a, 1) ? cmd_argv(a, 1) : "", "templates")) {
+        if (!sh_grid_native_templates(gridsize_print))
+            sh_printf("sh_gridsize: module palette is not available\n");
+        return;
+    }
+    if (argc != 1 && argc != 2 && argc != 4 && argc != 5) {
+        sh_printf("usage: sh_gridsize [instance] | sh_gridsize <x> <y> <z> [instance]\n");
+        return;
+    }
+    if (argc == 2 || argc == 5) {
+        const char *text = cmd_argv(a, argc - 1);
+        char *end = NULL;
+        long value = text ? strtol(text, &end, 10) : -1;
+        if (!text || end == text || *end || value < 0 || value > 4095) {
+            sh_printf("sh_gridsize: instance must be a module index\n");
+            return;
+        }
+        instance = (int)value;
+    }
+    for (i = 0; argc >= 4 && i < 3; ++i) {
+        const char *text = cmd_argv(a, i + 1);
+        char *end = NULL;
+        double value = text ? strtod(text, &end) : 0;
+        if (!text || end == text || *end) {
+            sh_printf("sh_gridsize: dimensions must be numbers\n");
+            return;
+        }
+        requested[i] = (float)value;
+    }
+    ok = sh_grid_native_selected(instance, argc >= 4 ? requested : NULL, &size, &resolved);
+    if (ok)
+        sh_printf("Grid Room %d: %u x %u x %u\n", resolved, size.xyz[0], size.xyz[1], size.xyz[2]);
+    if (argc >= 4 || !ok)
+        sh_printf("%s\n", sh_grid_native_last_message());
+}
+
 /* Take our resource layer back out, so the engine's own cost can be measured
  * without it. One way: the editor's own resources go with it, so the session is
  * for measuring, not for editing. */
@@ -1879,6 +1929,9 @@ static const cmd_entry CMD_TABLE[] = {
     { "noTarget",            (void *)h_notarget,       "Toggle notarget (enemies ignore the local player)." },
     { "sh_navmesh",          (void *)h_sh_navmesh,
       "Reports the baked AI navigation the current map is serving -- which modules and nav classes, or why a bake was refused. 'sh_navmesh marks [count]' marks boxes red like a refused bake; 'sh_navmesh marks 0' clears them. 'sh_navmesh reads' counts what the editor has cost it." },
+
+    { "sh_gridsize",         (void *)h_sh_gridsize,
+      "sh_gridsize [instance] prints the selected Grid Room's size; 'sh_gridsize templates' lists the module entity templates of the stock modern room and each resized variant; 'sh_gridsize <x> <y> <z> [instance]' resizes it through the same path as the room's properties and prints the result or the reason it was limited or refused." },
 
     { "sh_help",             (void *)h_sh_help,        "Lists every Snapmap+ console command and cvar with its description." },
 };

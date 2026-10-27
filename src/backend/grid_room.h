@@ -57,11 +57,26 @@ int sh_grid_bmodel(const sh_grid_warp *warp, const unsigned char *source,
 int sh_grid_bcm(const sh_grid_warp *warp, const unsigned char *source,
                 size_t length, unsigned char *target);
 
-/* Independent light coverage, with effective dynamic-light center anchored
- * below the roof. Intensity is retained: coverage changes do not imply a
- * universal photometric intensity multiplier. */
+/* Built-in light policy (one function for resize and for map load):
+ * - scale per room axis: X and Y by size/stock; Z by interior height
+ *   (modern: height-48 over 3344; classic: height over 2048);
+ * - origin scales about the room pivot (modern Y=1280, otherwise 0);
+ * - radius and center are on the light's own axes (spawnOrientation rows,
+ *   NULL = identity) and follow the room scale along each light axis;
+ * - roof_anchor keeps the effective point (origin+center) at its stock
+ *   clearance below the ceiling, at most a quarter of the interior height;
+ * - intensity, color and every other field are retained.
+ * The resulting origin must stay inside the room, or the call fails. */
+int sh_grid_light_scale(const sh_grid_size *size, float scale[3], float pivot[3],
+                        float *roof, float *stock_roof);
+int sh_grid_light_axes(const sh_grid_warp *warp, const float origin[3],
+                       const float radius[3], const float center[3], const float axis[9],
+                       int roof_anchor, float new_origin[3], float new_radius[3], float new_center[3]);
 int sh_grid_light(const sh_grid_warp *warp, const float origin[3],
                    const float radius[3], const float center[3], int roof_anchor,
                    float new_origin[3], float new_radius[3], float new_center[3]);
+/* Distance cutoffs (maxVisibleRange, maxShadowVisibleRange) grow with the
+ * largest size ratio and never fall below their stock values. */
+float sh_grid_light_range_scale(const sh_grid_size *size);
 
 #endif

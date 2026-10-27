@@ -177,29 +177,72 @@ void sh_grid_point(const sh_grid_warp *warp, const float source[3], float target
     for (i = 0; i < 3; ++i) target[i] = sh_grid_coordinate(warp, i, source[i]);
 }
 
-int sh_grid_light(const sh_grid_warp *warp, const float origin[3],
-                   const float radius[3], const float center[3], int roof_anchor,
-                   float new_origin[3], float new_radius[3], float new_center[3])
+float sh_grid_light_range_scale(const sh_grid_size *size)
 {
-    sh_grid_size stock;
-    float roof, old_roof, pivot[3] = {0,0,0}, scale[3], gap;
-    float o[3], r[3], c[3];
-    unsigned i;
+    sh_grid_size stock;float scale=1;unsigned axis;
+    if(!size||!sh_grid_default(size->kind,&stock))return 1;
+    for(axis=0;axis<3;++axis)scale=fmaxf(scale,(float)size->xyz[axis]/stock.xyz[axis]);
+    return scale;
+}
+
+int sh_grid_light_scale(const sh_grid_size *size,float scale[3],float pivot[3],float *roof,float *stock_roof)
+{
+    sh_grid_size stock;unsigned i;float top,old_top;
+    if(!size||!scale||!sh_grid_default(size->kind,&stock))return 0;
+    old_top=(float)stock.xyz[2];top=(float)size->xyz[2];
+    if(size->kind==SH_GRID_MODERN){old_top-=48;top-=48;}
+    for(i=0;i<3;++i){
+        scale[i]=i==2?top/old_top:(float)size->xyz[i]/stock.xyz[i];
+        if(pivot)pivot[i]=i==1&&size->kind==SH_GRID_MODERN?1280.f:0.f;
+    }
+    if(roof)*roof=top;if(stock_roof)*stock_roof=old_top;
+    return 1;
+}
+
+int sh_grid_light_axes(const sh_grid_warp *warp, const float origin[3],
+                       const float radius[3], const float center[3], const float axis[9],
+                       int roof_anchor, float new_origin[3], float new_radius[3], float new_center[3])
+{
+    static const float identity[9]={1,0,0,0,1,0,0,0,1};
+    float roof,old_roof,pivot[3],scale[3],gap;
+    float o[3],r[3],c[3],module_center[3];
+    unsigned i,j;
     if (!warp || !origin || !radius || !center || !new_origin || !new_radius ||
-        !new_center || !sh_grid_default(warp->size.kind, &stock)) return 0;
-    old_roof = (float)stock.xyz[2]; roof = (float)warp->size.xyz[2];
-    if (warp->size.kind == SH_GRID_MODERN) { old_roof -= 48; roof -= 48; pivot[1] = 1280; }
+        !new_center || !sh_grid_light_scale(&warp->size,scale,pivot,&roof,&old_roof)) return 0;
+    if(!axis)axis=identity;
+    for (i = 0; i < 9; ++i) if (!isfinite(axis[i])) return 0;
     for (i = 0; i < 3; ++i) {
+        float length=0;
         if (!isfinite(origin[i]) || !isfinite(radius[i]) || !isfinite(center[i]) || radius[i] < 0) return 0;
-        scale[i] = i == 2 ? roof / old_roof : (float)warp->size.xyz[i] / stock.xyz[i];
+        /* Each light axis must be a unit vector; spawnOrientation rows are. */
+        for (j = 0; j < 3; ++j) length += axis[3*i+j]*axis[3*i+j];
+        if (fabsf(length-1) > .001f) return 0;
         o[i] = pivot[i] + (origin[i] - pivot[i]) * scale[i];
-        r[i] = radius[i] * scale[i]; c[i] = center[i] * scale[i];
+    }
+    /* Radius and center are expressed on the light's own axes. Scale each
+     * light axis by the room's per-axis scale along that direction; a
+     * quarter-turn light therefore swaps which room axis its extents follow. */
+    for (i = 0; i < 3; ++i) {
+        float sum=0;
+        for (j = 0; j < 3; ++j) {float v=axis[3*i+j]*scale[j];sum+=v*v;}
+        r[i] = radius[i] * sqrtf(sum);
+    }
+    for (j = 0; j < 3; ++j) {
+        module_center[j]=0;
+        for (i = 0; i < 3; ++i) module_center[j]+=center[i]*axis[3*i+j];
     }
     if (roof_anchor) {
-        gap = old_roof - origin[2] - center[2];
+        /* The effective light point keeps its stock clearance below the
+         * ceiling, limited to a quarter of the room's interior height. */
+        gap = old_roof - origin[2] - module_center[2];
+        for (j = 0; j < 2; ++j) module_center[j] *= scale[j];
         if (gap < 0) gap = 0;
         if (gap > roof * .25f) gap = roof * .25f;
-        c[2] = roof - gap - o[2];
+        module_center[2] = roof - gap - o[2];
+    } else for (j = 0; j < 3; ++j) module_center[j] *= scale[j];
+    for (i = 0; i < 3; ++i) {
+        c[i]=0;
+        for (j = 0; j < 3; ++j) c[i]+=module_center[j]*axis[3*i+j];
     }
     for (i = 0; i < 3; ++i) {
         float lo = i == 2 ? 0 : pivot[i] - (float)warp->size.xyz[i] / 2;
@@ -208,4 +251,11 @@ int sh_grid_light(const sh_grid_warp *warp, const float origin[3],
     }
     memcpy(new_origin, o, sizeof o); memcpy(new_radius, r, sizeof r); memcpy(new_center, c, sizeof c);
     return 1;
+}
+
+int sh_grid_light(const sh_grid_warp *warp, const float origin[3],
+                   const float radius[3], const float center[3], int roof_anchor,
+                   float new_origin[3], float new_radius[3], float new_center[3])
+{
+    return sh_grid_light_axes(warp,origin,radius,center,NULL,roof_anchor,new_origin,new_radius,new_center);
 }

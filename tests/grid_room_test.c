@@ -105,6 +105,109 @@ static void lights(void)
     r[0]=-1; assert(!sh_grid_light(&w,p,r,c,1,o,nr,nc));
 }
 
+static void near_rel(float a, float b) { assert(fabsf(a-b) <= .0005f*fmaxf(1,fabsf(b))); }
+
+/* Synthetic modern-room light fixture with the stock geometry roles: a probe,
+ * a quarter-turn static point light, an unrotated fill light and the
+ * roof-anchored dynamic point. Values are illustrative, not game data. */
+static const char light_module[] =
+    "{edit={module={name=\"modules/ind_dlc/ind_totally_blank_room_4x.map\";"
+    "bounds={b={b[0]={x=-2560;y=-1280;z=0;}b[1]={x=2560;y=3840;z=3392;}}}"
+    "portals={num=0;}entities={num=5;"
+    "item[0]={name=\"probe_a\";text=\"{inherit=\\\"light/probe\\\";edit={spawnPosition={y=1248;z=1659;}lightRadius={x=2696;y=2699;z=1850;}}}\";}"
+    "item[1]={name=\"point_turned\";text=\"{inherit=\\\"light/point\\\";edit={spawnPosition={x=2;y=1264;z=1600;}"
+        "spawnOrientation={mat={mat[0]={x=0;y=-1;}mat[1]={x=1;y=0;}}}lightRadius={x=2500;y=2900;z=2300;}maxShadowVisibleRange=2500;}}\";}"
+    "item[2]={name=\"point_fill\";text=\"{inherit=\\\"light/point\\\";edit={spawnPosition={x=-1280;z=1600;}lightRadius={x=1536;y=1536;z=2048;}}}\";}"
+    "item[3]={name=\"room_light\";text=\"{inherit=\\\"snapmaps/light/dynamic_point\\\";edit={spawnPosition={y=1264;z=1436;}"
+        "lightRadius={x=3535;y=3460;z=2556;}lightCenter={z=1568;}maxVisibleRange=10000;maxShadowVisibleRange=6000;}}\";}"
+    "item[4]={name=\"not_a_light\";text=\"{inherit=\\\"info/cover\\\";edit={spawnPosition={x=-1024;}}}\";}"
+    "}}}}";
+
+static const sh_grid_builtin_light *find_light(const sh_grid_builtin_light *l, size_t n, const char *name)
+{ size_t i; for (i=0;i<n;++i) if (!strcmp(l[i].name,name)) return &l[i]; assert(0); return NULL; }
+
+static void light_cases(void)
+{
+    sh_grid_size stock, s; sh_grid_warp w;
+    const float p[3]={0,1264,1436}, r[3]={3535,3460,2556}, c[3]={0,0,1568};
+    float o[3], nr[3], nc[3];
+    sh_grid_default(SH_GRID_MODERN,&stock);
+    /* Stock size is the identity, including the roof anchor. */
+    assert(sh_grid_warp_init(&stock,&w)&&sh_grid_light(&w,p,r,c,1,o,nr,nc));
+    near_rel(o[1],1264); near_rel(o[2],1436); near_rel(nr[0],3535); near_rel(nr[2],2556); near_rel(nc[2],1568);
+    /* X only: X coverage doubles, height and depth are untouched. */
+    s=stock; s.xyz[0]=10240; assert(sh_grid_warp_init(&s,&w)&&sh_grid_light(&w,p,r,c,1,o,nr,nc));
+    near_rel(nr[0],7070); near_rel(nr[1],3460); near_rel(nr[2],2556); near_rel(o[2]+nc[2],3004);
+    /* Y only: depth scales about the modern Y pivot 1280. */
+    s=stock; s.xyz[1]=2560; assert(sh_grid_warp_init(&s,&w)&&sh_grid_light(&w,p,r,c,1,o,nr,nc));
+    near_rel(o[1],1272); near_rel(nr[1],1730); near_rel(nr[0],3535); near_rel(o[2]+nc[2],3004);
+    /* Z only: height follows the interior (height-48), the effective point
+     * keeps its 340-unit stock clearance below the ceiling. */
+    s=stock; s.xyz[2]=6736; assert(sh_grid_warp_init(&s,&w)&&sh_grid_light(&w,p,r,c,1,o,nr,nc));
+    near_rel(o[2],2872); near_rel(nr[2],5112); near_rel(nr[0],3535); near_rel(o[2]+nc[2],6688-340);
+    /* All three axes together equal the per-axis composition. */
+    s.xyz[0]=10240; s.xyz[1]=2560; assert(sh_grid_warp_init(&s,&w)&&sh_grid_light(&w,p,r,c,1,o,nr,nc));
+    near_rel(nr[0],7070); near_rel(nr[1],1730); near_rel(nr[2],5112); near_rel(o[1],1272); near_rel(o[2]+nc[2],6348);
+    /* Shrink below stock: the clearance is limited to a quarter of the height. */
+    s.xyz[0]=864; s.xyz[1]=272; s.xyz[2]=432; assert(sh_grid_warp_init(&s,&w)&&sh_grid_light(&w,p,r,c,1,o,nr,nc));
+    assert(o[2]>0&&o[2]<384&&o[2]+nc[2]<384); near_rel(o[2]+nc[2],384-96); near_rel(nr[0],3535.f*864/5120);
+    /* Extreme: the format maximum still yields finite, contained geometry. */
+    assert(sh_grid_maximum(SH_GRID_MODERN,&s)&&sh_grid_warp_init(&s,&w)&&sh_grid_light(&w,p,r,c,1,o,nr,nc));
+    near_rel(o[2]+nc[2],32719-340); assert(nr[0]>40000&&o[1]>-30000&&o[1]<33000);
+    /* Classic: no pivot offset, no ceiling margin, no anchor. */
+    sh_grid_default(SH_GRID_CLASSIC,&s); s.xyz[2]=4096;
+    {const float cp[3]={0,0,1024},cr[3]={1296,1296,1040},cc[3]={0,0,0};
+        assert(sh_grid_warp_init(&s,&w)&&sh_grid_light(&w,cp,cr,cc,0,o,nr,nc));
+        near_rel(o[2],2048); near_rel(nr[2],2080); near_rel(nr[0],1296); near_rel(nc[2],0);}
+    /* A quarter-turn light's X extent follows room Y and vice versa. */
+    {const float axis[9]={0,-1,0, 1,0,0, 0,0,1},pr[3]={2500,2900,2300},zero[3]={0,0,0},pp[3]={2,1264,1600};
+        s=stock; s.xyz[0]=10240; assert(sh_grid_warp_init(&s,&w));
+        assert(sh_grid_light_axes(&w,pp,pr,zero,axis,0,o,nr,nc));
+        near_rel(nr[0],2500); near_rel(nr[1],5800); near_rel(nr[2],2300);
+        s=stock; s.xyz[1]=2560; assert(sh_grid_warp_init(&s,&w)&&sh_grid_light_axes(&w,pp,pr,zero,axis,0,o,nr,nc));
+        near_rel(nr[0],1250); near_rel(nr[1],2900);
+        {const float bad[9]={2,0,0, 0,1,0, 0,0,1}; assert(!sh_grid_light_axes(&w,pp,pr,zero,bad,0,o,nr,nc));}}
+    /* Distance cutoffs grow with the largest ratio and never shrink. */
+    s=stock; s.xyz[2]=432; near_rel(sh_grid_light_range_scale(&s),1);
+    s.xyz[0]=20480; near_rel(sh_grid_light_range_scale(&s),4);
+}
+
+/* Map load and live resize must converge: the generated variant declaration
+ * (what a saved map loads and Play spawns) carries exactly the values the
+ * editor writes when the same room is resized. */
+static void light_convergence(void)
+{
+    const sh_grid_size sizes[] = {
+        {SH_GRID_MODERN,{10240,5120,3392}}, {SH_GRID_MODERN,{5120,2560,3392}},
+        {SH_GRID_MODERN,{5120,5120,6736}}, {SH_GRID_MODERN,{16384,15360,16384}},
+        {SH_GRID_MODERN,{864,272,432}}, {SH_GRID_MODERN,{5120,5120,3392}}
+    };
+    sh_grid_size stock; unsigned i, k, a;
+    sh_grid_default(SH_GRID_MODERN,&stock);
+    for (i=0;i<sizeof sizes/sizeof sizes[0];++i) {
+        sh_grid_builtin_light resize[16], loaded[16]; size_t n=0, m=0, bytes; char *variant;
+        assert(sh_grid_decl_lights(&sizes[i],light_module,strlen(light_module),resize,16,&n));
+        assert(n==4); /* probe, two static points, dynamic point; cover ignored */
+        variant=sh_grid_decl(&sizes[i],light_module,strlen(light_module),0,&bytes);
+        assert(variant);
+        assert(sh_grid_decl_light_values(variant,bytes,loaded,16,&m)&&m==n);
+        for (k=0;k<n;++k) {
+            const sh_grid_builtin_light *l=find_light(loaded,m,resize[k].name);
+            assert(!strcmp(l->inherit,resize[k].inherit)&&l->has_radius==resize[k].has_radius);
+            for (a=0;a<3;++a) {
+                near_rel(l->origin[a],resize[k].origin[a]);
+                near_rel(l->radius[a],resize[k].radius[a]);
+                assert(l->origin[a]==resize[k].origin[a]&&l->radius[a]==resize[k].radius[a]);
+                assert(l->center[a]==resize[k].center[a]);
+            }
+            assert(l->visible_range==resize[k].visible_range&&l->shadow_range==resize[k].shadow_range);
+        }
+        {const sh_grid_builtin_light *t=find_light(resize,n,"point_turned");
+            near_rel(t->radius[0],2500.f*sizes[i].xyz[1]/5120); near_rel(t->radius[1],2900.f*sizes[i].xyz[0]/5120);}
+        free(variant);
+    }
+}
+
 static void buffers(void)
 {
     sh_grid_size s={SH_GRID_MODERN,{1536,1024,512}}; sh_grid_warp w;
@@ -156,5 +259,5 @@ static int asset(const char *path, const char *kind)
 int main(int argc,char **argv)
 {
     if(argc==3)return asset(argv[1],argv[2]);
-    identities();geometry();lights();buffers();puts("grid_room_test: passed");return 0;
+    identities();geometry();lights();light_cases();light_convergence();buffers();puts("grid_room_test: passed");return 0;
 }
