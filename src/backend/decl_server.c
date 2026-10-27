@@ -2484,7 +2484,7 @@ static int ds_runtime_boundary_safe(void)
             *(const unsigned char *)(g_boundary_editor + 9) != 0) return 0;
         shell = *(const unsigned char **)g_boundary_shell_slot;
         common = *(const unsigned char **)g_boundary_common_slot;
-        if (!shell || !common || common[0xf576] != 0) return 0;
+        if (!shell || !common || common[SH_COMMON_LOADING_FLAG] != 0) return 0;
         manager = *(const unsigned char **)(shell + 0x18);
         if (!manager || !sh_engine_dialog_queue_idle(shell)) return 0;
         current = *(const int *)(manager + 8);
@@ -3099,7 +3099,7 @@ int sh_decl_server_map_browser_present(void)
         shell = *(const unsigned char **)g_boundary_shell_slot;
         common = *(const unsigned char **)g_boundary_common_slot;
         if (!shell || !common || !(manager = *(const unsigned char **)(shell + 0x18))) return 1;
-        return !*(const unsigned char *)(g_boundary_editor + 9) && !common[0xf576] &&
+        return !*(const unsigned char *)(g_boundary_editor + 9) && !common[SH_COMMON_LOADING_FLAG] &&
             *(const int *)(manager + 8) == 63 && *(const int *)(manager + 12) == 63;
     } __except (EXCEPTION_EXECUTE_HANDLER) { return 1; }
 }

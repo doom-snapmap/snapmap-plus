@@ -9,6 +9,7 @@
 
 #include "engine_globals.h"
 #include "decl_server.h"
+#include "engine_build.h"
 int sh_map_transition_at_boundary(void) { return 0; }
 uint32_t sh_host_rva(uint32_t vk, uint32_t gl) { (void)vk; (void)gl; return 0; }
 static int g_defer_install_commit;
@@ -74,7 +75,7 @@ static unsigned char g_boundary_shell[0x20];
 static unsigned char g_boundary_manager[0x918];
 static unsigned char g_boundary_dialog_manager[0x910];
 static unsigned char g_boundary_dialog_queue[2 * 0x1b0];
-static unsigned char g_boundary_common[0xf577];
+static unsigned char g_boundary_common[SH_COMMON_LOADING_FLAG + 1];
 static void *g_boundary_shell_slot = g_boundary_shell;
 static void *g_boundary_common_slot = g_boundary_common;
 static DWORD g_boundary_thread;
@@ -2842,9 +2843,9 @@ static void test_empty_launch_and_runtime_results(void)
         *(int *)(g_boundary_manager + 0x910) = *(int *)(g_boundary_manager + 0x914) = 1;
         CHECK(sh_decl_server_map_browser_present());
         CHECK(sh_decl_server_map_preparation_ready());
-        g_boundary_common[0xf576] = 1;
+        g_boundary_common[SH_COMMON_LOADING_FLAG] = 1;
         CHECK(sh_decl_server_map_preparation_ready() && !sh_decl_server_map_boundary_safe());
-        g_boundary_common[0xf576] = 0;
+        g_boundary_common[SH_COMMON_LOADING_FLAG] = 0;
         g_boundary_editor[9] = 1;
         CHECK(sh_decl_server_map_preparation_ready() && !sh_decl_server_map_boundary_safe());
         g_boundary_editor[9] = 0;
@@ -2854,7 +2855,7 @@ static void test_empty_launch_and_runtime_results(void)
         *(int *)(g_boundary_dialog_manager + 0x908) = 1; g_boundary_dialog_queue[8] = 0;
         CHECK(sh_decl_server_map_browser_present() && !sh_decl_server_map_retirement_safe());
         *(int *)(g_boundary_dialog_manager + 0x908) = 0;
-        g_boundary_common[0xf576] = 1; CHECK(!sh_decl_server_map_browser_present()); g_boundary_common[0xf576] = 0;
+        g_boundary_common[SH_COMMON_LOADING_FLAG] = 1; CHECK(!sh_decl_server_map_browser_present()); g_boundary_common[SH_COMMON_LOADING_FLAG] = 0;
     }
     sh_decl_server_request_rearm();
     CHECK(sh_decl_server_registration_succeeded() == 0);
@@ -2863,13 +2864,13 @@ static void test_empty_launch_and_runtime_results(void)
     sh_decl_server_rearm_poll();
     CHECK(g_string_refreshes == 1 && sh_decl_server_registration_succeeded() == 0);
     g_boundary_editor[9] = 0;
-    g_boundary_common[0xf576] = 1;
+    g_boundary_common[SH_COMMON_LOADING_FLAG] = 1;
     sh_decl_server_rearm_poll();
     CHECK(g_string_refreshes == 1);
-    g_boundary_common[0xf576] = 2;
+    g_boundary_common[SH_COMMON_LOADING_FLAG] = 2;
     sh_decl_server_rearm_poll();
     CHECK(g_string_refreshes == 1);
-    g_boundary_common[0xf576] = 0;
+    g_boundary_common[SH_COMMON_LOADING_FLAG] = 0;
     *(int *)(g_boundary_manager + 0x910) = 10;
     sh_decl_server_rearm_poll();
     CHECK(g_string_refreshes == 1);

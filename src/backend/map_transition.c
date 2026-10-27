@@ -6,6 +6,7 @@
 #include "engine_globals.h"
 #include "hook.h"
 #include "backend_log.h"
+#include "engine_build.h"
 
 enum { TRANS_ALLOC, TRANS_UNLOAD, TRANS_PURGE, TRANS_FINALIZE, TRANS_HOOKS };
 enum { TRANS_IDLE, TRANS_UNLOADING, TRANS_ACTIVATING, TRANS_LOADING, TRANS_FINISHING };
@@ -22,7 +23,7 @@ enum { TRANS_IDLE, TRANS_UNLOADING, TRANS_ACTIVATING, TRANS_LOADING, TRANS_FINIS
 #define TR_ALLOC_UNLOAD_CALL  0xad     /* call UnloadGameResources [0xa9] */
 #define TR_ALLOC_UNLOAD_RET   0xb2     /* its return address [0xae] */
 #define TR_COMMON_RESOURCE    0x1300   /* common + this is the allocation output [0x1298] */
-#define TR_COMMON_LOADING     0xf5d6   /* common loading flag word [0xf576] */
+#define TR_COMMON_LOADING     SH_COMMON_LOADING_FLAG   /* common loading flag word [0xf576] */
 typedef unsigned char (*transition_alloc_fn)(void *, void *, const void *, void *);
 typedef void (*transition_unload_fn)(void *, unsigned char, unsigned char);
 typedef void (*transition_purge_fn)(unsigned);

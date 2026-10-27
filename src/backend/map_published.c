@@ -31,6 +31,17 @@ static int *g_pub_history_count;
 static DWORD *g_pub_thread;
 static const void *g_pub_read_return, *g_pub_profile_return;
 static volatile LONG g_pub_ready;
+/* Virtual slots the cache-ready routine itself calls; bound from its code
+ * because build 13954591 moved two of them (session -> lobby +0x338 to +0x348,
+ * lobby -> launch parameters +0x2B0 to +0x2B8). Offsets into
+ * PublishedMapCacheReady, equal on both renderers: */
+#define PUB_READY_PROGRESS_CALL  0x49   /* FF 50 30: progress widget hide, +0x30 */
+#define PUB_READY_LOBBY_CALL     0x56   /* FF 90 disp32: session -> lobby */
+#define PUB_READY_PARAMS_CALL    0x62   /* FF 92 disp32: lobby -> launch parameters */
+#define PUB_READY_CACHE_GET_CALL 0xaa   /* 41 FF 51 38: system -> map cache, +0x38 */
+#define PUB_READY_CACHE_SET_CALL 0xba   /* 41 FF 91 disp32: cache set, +0x190 */
+static size_t g_pub_slot_progress, g_pub_slot_lobby, g_pub_slot_parameters,
+              g_pub_slot_cache_get, g_pub_slot_cache_set;
 static __declspec(thread) int g_pub_delegating;
 static unsigned long long g_pub_sequence;
 
@@ -61,6 +72,22 @@ static void *pub_call(const uint8_t *p)
     if (p[0] != 0xe8) return NULL;
     memcpy(&displacement, p + 1, 4); return (void *)(p + 5 + displacement);
 }
+/* The slot index of `call qword ptr [reg+disp]` (optional REX.B, FF /2 with
+ * an 8- or 32-bit displacement and no SIB), or 0 when the bytes differ. */
+static size_t pub_vcall_slot(const uint8_t *p)
+{
+    int32_t displacement;
+    uint8_t modrm;
+    if (p[0] == 0x41) p++;
+    if (p[0] != 0xff) return 0;
+    modrm = p[1];
+    if (((modrm >> 3) & 7) != 2 || (modrm & 7) == 4) return 0;
+    if ((modrm >> 6) == 1) displacement = (int8_t)p[2];
+    else if ((modrm >> 6) == 2) memcpy(&displacement, p + 2, 4);
+    else return 0;
+    if (displacement <= 0 || displacement >= 0x800 || displacement % 8) return 0;
+    return (size_t)displacement / sizeof(void *);
+}
 static void *pub_slot(const uint8_t *p, const char *opcode, size_t opcode_length)
 {
     int32_t displacement;
@@ -75,6 +102,7 @@ int sh_map_published_bind(const sig_result *results, size_t count, const uint8_t
         "PublishedMapDirectLaunch", "PublishedMapCacheReady", "PublishedMapRead", "PublishedMapComplete"};
     const uint8_t *sites[PUB_HOOKS], *cache, *parse, *profile;
     void *system, *history, *history_count, *session;
+    size_t progress_slot, lobby_slot, parameters_slot, cache_get_slot, cache_set_slot;
     uintptr_t shell, thread;
     if (!results || !base || g_pub_ready) return 0;
     for (size_t i = 0; i < PUB_HOOKS; i++) if (!(sites[i] = pub_site(results, count, base, names[i]))) return 0;
@@ -90,6 +118,13 @@ int sh_map_published_bind(const sig_result *results, size_t count, const uint8_t
         history_count = pub_slot(sites[PUB_LOBBY] + 0x58, "\x8b\x0d", 2);
         history = pub_slot(sites[PUB_LOBBY] + 0x77, "\x4c\x03\x35", 3);
         session = pub_slot(sites[PUB_READY] + 0x4c, "\x48\x8b\x0d", 3);
+        progress_slot = pub_vcall_slot(sites[PUB_READY] + PUB_READY_PROGRESS_CALL);
+        lobby_slot = pub_vcall_slot(sites[PUB_READY] + PUB_READY_LOBBY_CALL);
+        parameters_slot = pub_vcall_slot(sites[PUB_READY] + PUB_READY_PARAMS_CALL);
+        cache_get_slot = pub_vcall_slot(sites[PUB_READY] + PUB_READY_CACHE_GET_CALL);
+        cache_set_slot = pub_vcall_slot(sites[PUB_READY] + PUB_READY_CACHE_SET_CALL);
+        if (!progress_slot || !lobby_slot || !parameters_slot || !cache_get_slot || !cache_set_slot)
+            return 0;
         if (!history_count || !history || !session ||
             memcmp(cache + 0x54, "\x48\x8d\x8e\x08\x44\x02\x00", 7) ||
             memcmp(cache + 0x67, "\x48\x8d\x8e\x38\x44\x02\x00", 7)) return 0;
@@ -101,6 +136,9 @@ int sh_map_published_bind(const sig_result *results, size_t count, const uint8_t
     g_pub_system = (pub_get_fn)system; g_pub_cache_set = (pub_cache_fn)cache;
     g_pub_history_slot = history; g_pub_history_count = history_count;
     g_pub_session_slot = session; g_pub_shell_slot = (void **)shell; g_pub_thread = (DWORD *)thread;
+    g_pub_slot_progress = progress_slot; g_pub_slot_lobby = lobby_slot;
+    g_pub_slot_parameters = parameters_slot; g_pub_slot_cache_get = cache_get_slot;
+    g_pub_slot_cache_set = cache_set_slot;
     g_pub_read_return = sites[PUB_READ] + 0x12a;
     g_pub_profile_return = profile + 0x5d;
     return 1;
@@ -109,8 +147,8 @@ int sh_map_published_bind(const sig_result *results, size_t count, const uint8_t
 static void *pub_cache(void)
 {
     void *system = g_pub_system();
-    void *cache = system ? ((void *(*)(void *))(*(void ***)system)[0x38 / 8])(system) : NULL;
-    if (!cache || (*(void ***)cache)[0x190 / 8] != (void *)g_pub_cache_set) return NULL;
+    void *cache = system ? ((void *(*)(void *))(*(void ***)system)[g_pub_slot_cache_get])(system) : NULL;
+    if (!cache || (*(void ***)cache)[g_pub_slot_cache_set] != (void *)g_pub_cache_set) return NULL;
     return cache;
 }
 static void *pub_history(void)
@@ -124,9 +162,9 @@ static int pub_host_matches(const sh_map_native_selection *selection)
 {
     void *session = *g_pub_session_slot, *lobby, *parameters;
     if (!session) return 0;
-    lobby = ((void *(*)(void *))(*(void ***)session)[0x338 / 8])(session);
+    lobby = ((void *(*)(void *))(*(void ***)session)[g_pub_slot_lobby])(session);
     if (!lobby) return 0;
-    parameters = ((void *(*)(void *))(*(void ***)lobby)[0x2b0 / 8])(lobby);
+    parameters = ((void *(*)(void *))(*(void ***)lobby)[g_pub_slot_parameters])(lobby);
     return parameters && sh_map_native_matches_ids(selection,
         (unsigned char *)parameters + 0x550, (unsigned char *)parameters + 0x600);
 }
@@ -305,7 +343,7 @@ static int pub_prepare(int kind, void *manager, const void *metadata, void *snap
         }
         if (release_progress) {
             void *progress = *(void **)((unsigned char *)manager + 0xa38);
-            if (progress) ((void (*)(void *, int))(*(void ***)progress)[0x30 / 8])(progress, 0);
+            if (progress) ((void (*)(void *, int))(*(void ***)progress)[g_pub_slot_progress])(progress, 0);
         }
         if (kind == PUB_READY && !pub_host_matches(request->selection)) goto done;
         if (!sh_rawmap_cancel_pending_map()) {

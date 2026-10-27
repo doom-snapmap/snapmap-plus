@@ -39,6 +39,9 @@
 
 /* Session byte read by SessionDevModeGetter (movzx eax, byte [rcx+disp32]). */
 #define SH_SESSION_DEVMODE_FIELD     0x349BBu
+/* idCommonLocal map-loading byte: FinalizeMapChange writes 1 here
+ * (`mov byte [rsi+0xf5d6],1`); it was +0xF576 in 2018. */
+#define SH_COMMON_LOADING_FLAG       0xF5D6u
 
 /* Validator-manager reflection getter slot. */
 #define SH_VALIDATOR_REFLECT_SLOT    0x258u
@@ -88,7 +91,7 @@ static __inline int sh_live_verify(void)
 #define SH_PENDING_DECL_SOUND         1
 #define SH_PENDING_DECL_SOUND_WHY     "prepared sound decl Wwise event id +0xac (decl_server.c)"
 #define SH_PENDING_MAP_PUBLISHED      1
-#define SH_PENDING_MAP_PUBLISHED_WHY  "launch parameters +0x600 (map_published.c)"
+#define SH_PENDING_MAP_PUBLISHED_WHY  "lobby host match: session/lobby slots +0x348/+0x2b8 and parameters +0x600, bound from the engine's own calls but not yet run live (map_published.c)"
 #define SH_PENDING_RENDER_EDITOR      1
 #define SH_PENDING_RENDER_EDITOR_WHY  "settings panel slider +0x120 (map_render_editor.c)"
 #define SH_PENDING_RESIDENT           1

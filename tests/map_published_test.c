@@ -5,7 +5,7 @@
 struct sh_map_native_selection { unsigned char metadata[0x60]; char json[64]; };
 static unsigned char manager[0xa40], shell[0x20], cache[0x24470], metadata[0x60];
 static unsigned char history_record[0x38], history_object[0x590], host_parameters[0x680];
-static void *system_table[8], *cache_table[64], *session_table[104], *lobby_table[88], *progress_table[8];
+static void *system_table[8], *cache_table[64], *session_table[112], *lobby_table[88], *progress_table[8];
 static void **system_object = system_table, **session_object = session_table, **lobby_object = lobby_table, **progress_object = progress_table;
 static void *shell_slot = shell, *session_slot = &session_object, *history_slot = history_record;
 static DWORD thread_id;
@@ -192,7 +192,7 @@ static void reset(void)
     assert(!retained.context && !g_pub_retired && allocated == released);
     memset(manager, 0, sizeof(manager)); memset(cache, 0, sizeof(cache)); memset(calls, 0, sizeof(calls));
     *(void **)cache = cache_table; cache_table[0x190 / 8] = set_cache; system_table[7] = get_cache;
-    session_table[0x338 / 8] = get_lobby; lobby_table[0x2b0 / 8] = get_parameters;
+    session_table[0x348 / 8] = get_lobby; lobby_table[0x2b8 / 8] = get_parameters;
     progress_table[0x30 / 8] = hide_progress; *(void **)(manager + 0xa38) = &progress_object;
     *(void **)(shell + 0x18) = manager; thread_id = GetCurrentThreadId();
     *(int *)(manager + 8) = *(int *)(manager + 12) = 63; *(int *)(manager + 0x910) = 1;
@@ -250,6 +250,12 @@ static void grouped_installation(void)
     emit_relative(bound_sites[1] + 0x58, "\x8b\x0d", 2, &history_count);
     emit_relative(bound_sites[1] + 0x77, "\x4c\x03\x35", 3, &history_slot);
     emit_relative(bound_sites[3] + 0x4c, "\x48\x8b\x0d", 3, &session_slot);
+    /* PublishedMapCacheReady's own virtual calls on 13954591 (VK and GL). */
+    memcpy(bound_sites[3] + PUB_READY_PROGRESS_CALL, "\xff\x50\x30", 3);
+    memcpy(bound_sites[3] + PUB_READY_LOBBY_CALL, "\xff\x90\x48\x03\x00\x00", 6);
+    memcpy(bound_sites[3] + PUB_READY_PARAMS_CALL, "\xff\x92\xb8\x02\x00\x00", 6);
+    memcpy(bound_sites[3] + PUB_READY_CACHE_GET_CALL, "\x41\xff\x51\x38", 4);
+    memcpy(bound_sites[3] + PUB_READY_CACHE_SET_CALL, "\x41\xff\x91\x90\x01\x00\x00", 7);
     memcpy(bound_sites[6] + 0x54, "\x48\x8d\x8e\x08\x44\x02\x00", 7);
     memcpy(bound_sites[6] + 0x67, "\x48\x8d\x8e\x38\x44\x02\x00", 7);
     g_pub_ready = 0;
@@ -258,6 +264,12 @@ static void grouped_installation(void)
     bound_sites[1][0x58] = 0; assert(!sh_map_published_bind(results, 9, base)); bound_sites[1][0x58] = 0x8b;
     bound_sites[4][0x125] = 0; assert(!sh_map_published_bind(results, 9, base)); bound_sites[4][0x125] = 0xe8;
     bound_sites[8][0x58] = 0; assert(!sh_map_published_bind(results, 9, base)); bound_sites[8][0x58] = 0xe8;
+    assert(g_pub_slot_lobby == 0x348 / 8 && g_pub_slot_parameters == 0x2b8 / 8 && g_pub_slot_progress == 0x30 / 8 &&
+           g_pub_slot_cache_get == 0x38 / 8 && g_pub_slot_cache_set == 0x190 / 8);
+    bound_sites[3][PUB_READY_LOBBY_CALL + 1] = 0x10; assert(!sh_map_published_bind(results, 9, base));
+    bound_sites[3][PUB_READY_LOBBY_CALL + 1] = 0x90;
+    bound_sites[3][PUB_READY_PARAMS_CALL + 2] = 0xb9; assert(!sh_map_published_bind(results, 9, base));
+    bound_sites[3][PUB_READY_PARAMS_CALL + 2] = 0xb8; assert(sh_map_published_bind(results, 9, base));
     for (int failure = 1; failure <= 6; failure++) {
         memset(g_pub_original, 0, sizeof(g_pub_original)); hook_prepares = hook_commits = hook_removes = 0;
         fail_prepare = failure; fail_commit = fail_remove = 0;
