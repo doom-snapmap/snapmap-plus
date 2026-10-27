@@ -56,12 +56,32 @@ int sh_map_native_matches_ids(const sh_map_native_selection *selection, const vo
 { return selection && id && revision && *(const int *)id == *(int *)selection->metadata && *(const int *)revision == *(int *)(selection->metadata + 0x30); }
 int sh_map_native_matches(const sh_map_native_selection *selection, const void *input)
 { return sh_map_native_matches_ids(selection, input, (const unsigned char *)input + 0x30); }
-int sh_map_native_matches_level(const sh_map_native_selection *selection, const void *parameters)
-{ assert(selection); return parameters == (void *)0x777; }
+/* Engine strings are modelled as an int at the string's start. Level
+ * parameters: 0x777 a SnapMap level ("DynamicSnapMap", flag 2), 0x778 a
+ * campaign level, 0x779 unreadable. */
+int sh_map_native_string_copy(const void *string, char *out, size_t capacity)
+{
+    if (!string || !*(const int *)string) { if (out && capacity) out[0] = 0; return 0; }
+    snprintf(out, capacity, "%d", *(const int *)string); return 1;
+}
 int sh_map_native_level_name(const sh_map_native_selection *selection, char *out, size_t capacity)
 { assert(selection); strcpy_s(out, capacity, "test2"); return 1; }
-int sh_map_native_level_named(const void *parameters, const char *name)
-{ return parameters == (void *)0x777 && !strcmp(name, "test2"); }
+int sh_map_native_identity(const sh_map_native_selection *selection, char *id, size_t id_capacity,
+    char *revision, size_t revision_capacity)
+{
+    assert(selection);
+    return sh_map_native_string_copy(selection->metadata, id, id_capacity) &&
+        sh_map_native_string_copy(selection->metadata + 0x30, revision, revision_capacity);
+}
+int sh_map_native_level_name_of(const void *parameters, char *out, size_t capacity)
+{
+    if (parameters == (void *)0x779) { out[0] = 0; return 0; }
+    strcpy_s(out, capacity, parameters == (void *)0x777 ? "DynamicSnapMap" : "game/sp/intro/intro"); return 1;
+}
+int sh_map_native_level_flags(const void *parameters)
+{ return parameters == (void *)0x777 ? 2 : parameters == (void *)0x778 ? 0 : -1; }
+int sh_map_native_level_is_snapmap(const void *parameters)
+{ return parameters == (void *)0x777 ? 1 : parameters == (void *)0x778 ? 0 : -1; }
 static sh_rawmap_orphan_check_fn registered_orphan_check;
 void sh_rawmap_set_orphan_check(sh_rawmap_orphan_check_fn check) { registered_orphan_check = check; }
 int sh_map_native_enter(const sh_map_native_selection *selection, const char *json,
@@ -109,8 +129,8 @@ static int finish(int consent)
     if (request.enter && consent && request.valid(request.context)) result = request.enter(request.context, retained_json) == 0;
     if (result) {
         assert(retained_loading.waiting(request.context));
-        assert(!retained_loading.matches(request.context, (void *)0x778));
-        assert(retained_loading.matches(request.context, (void *)0x777));
+        assert(retained_loading.matches(request.context, (void *)0x778) == 0);
+        assert(retained_loading.matches(request.context, (void *)0x777) == 1);
         result = retained_loading.select(request.context);
     }
     if (request.release) request.release(request.context);
@@ -317,7 +337,10 @@ static void dropped_launch_is_orphaned(void)
     assert(!retained_loading.waiting(request.context));
     request.release(request.context);
     assert(!strcmp(g_pub_orphan, "test2") && strstr(g_pub_orphan_reason, "history changed"));
-    assert(!pub_orphan_check((void *)0x778, reason, sizeof(reason)));          /* another map loads natively */
+    assert(!strcmp(g_pub_orphan_id, "42") && !strcmp(g_pub_orphan_revision, "7"));
+    assert(!pub_orphan_check((void *)0x778, reason, sizeof(reason)));          /* another level loads natively */
+    assert(!pub_orphan_check((void *)0x777, reason, sizeof(reason)));          /* the lobby names revision 8 */
+    *(int *)(host_parameters + 0x600) = 7;
     assert(pub_orphan_check((void *)0x777, reason, sizeof(reason)) && strstr(reason, "test2"));
     assert(!pub_orphan_check((void *)0x777, reason, sizeof(reason)));          /* one-shot */
     /* a launch that reached activation leaves no orphan */
@@ -329,6 +352,32 @@ static void dropped_launch_is_orphaned(void)
     /* a new published launch supersedes a dropped one */
     strcpy_s(g_pub_orphan, sizeof(g_pub_orphan), "test2"); g_pub_orphan_at = GetTickCount64();
     reset(); pub_offline(manager, metadata, (void *)1); assert(!g_pub_orphan[0]); (void)finish(0);
+    assert(allocated == released);
+}
+
+/* R-020: the map-change parameters name every SnapMap level "DynamicSnapMap",
+ * so the transition identifies the prepared map by the session lobby's item.
+ * A SnapMap level that cannot be told apart is refused (-1), never passed. */
+static void level_identity_at_the_transition(void)
+{
+    sh_rawmap_request request;
+    reset();
+    assert(pub_lobby(manager, 1) == 1 && retained.context);
+    request = retained; memset(&retained, 0, sizeof(retained));
+    assert(request.enter(request.context, retained_json) == 0);
+    assert(retained_loading.matches(request.context, (void *)0x777) == 1);   /* lobby names item 42 rev 7 */
+    assert(retained_loading.matches(request.context, (void *)0x778) == 0);   /* a campaign level */
+    assert(retained_loading.matches(request.context, (void *)0x779) == -1);  /* unreadable level */
+    *(int *)(host_parameters + 0x600) = 8;
+    assert(retained_loading.matches(request.context, (void *)0x777) == -1);  /* another revision */
+    *(int *)(host_parameters + 0x600) = 0;
+    assert(retained_loading.matches(request.context, (void *)0x777) == -1);  /* unreadable lobby item */
+    *(int *)(host_parameters + 0x600) = 7;
+    session_slot = NULL;
+    assert(retained_loading.matches(request.context, (void *)0x777) == -1);  /* no session */
+    session_slot = &session_object;
+    assert(retained_loading.matches(request.context, (void *)0x777) == 1);
+    request.release(request.context);
     assert(allocated == released);
 }
 
@@ -393,6 +442,7 @@ int main(void)
     assert(calls[0] == 1 && !prepared);
     vanilla_passes_through();
     dropped_launch_is_orphaned();
+    level_identity_at_the_transition();
     puts("map_published_test: readers, native pass-through, four retained launch routes, cancellation, cleanup and hook-group failure passed");
     return 0;
 }

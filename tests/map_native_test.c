@@ -195,15 +195,32 @@ int main(void)
         }
     }
     {
+        /* The map-change parameters as their constructor leaves a SnapMap
+         * level: renamed "DynamicSnapMap" and flagged +0x170f8 bit 1. */
         unsigned char level[0x17100] = {0}, meta[MAP_METADATA_SIZE] = {0};
         sh_map_native_selection match = {0};
-        const char name[] = "example", path[] = "snapmap/example";
+        const char name[] = "example", id[] = "item-1", revision[] = "rev-2", dynamic[] = "DynamicSnapMap";
+        const char spelled[] = "snapmap/example", other[] = "game/sp/intro/intro";
+        char out[64], id_out[16], revision_out[16];
         match.metadata = meta;
         *(int *)(meta + 0x398 + 8) = 7; *(const char **)(meta + 0x398 + 0x10) = name;
-        *(int *)(level + 0x20 + 8) = 15; *(const char **)(level + 0x20 + 0x10) = path;
-        assert(!sh_map_native_matches_level(&match, level));
-        level[0x170f8] = 2; assert(sh_map_native_matches_level(&match, level));
-        *(int *)(level + 0x20 + 8) = 8; assert(!sh_map_native_matches_level(&match, level));
+        *(int *)(meta + 8) = 6; *(const char **)(meta + 0x10) = id;
+        *(int *)(meta + MAP_STRING_SIZE + 8) = 5; *(const char **)(meta + MAP_STRING_SIZE + 0x10) = revision;
+        assert(sh_map_native_level_name(&match, out, sizeof(out)) && !strcmp(out, "example"));
+        assert(sh_map_native_identity(&match, id_out, sizeof(id_out), revision_out, sizeof(revision_out)));
+        assert(!strcmp(id_out, "item-1") && !strcmp(revision_out, "rev-2"));
+        assert(!sh_map_native_identity(&match, id_out, 6, revision_out, sizeof(revision_out)) && !id_out[0]);
+        assert(sh_map_native_level_is_snapmap(level) == -1);              /* no readable name, no flag */
+        *(int *)(level + 0x20 + 8) = 14; *(const char **)(level + 0x20 + 0x10) = dynamic;
+        assert(sh_map_native_level_name_of(level, out, sizeof(out)) && !strcmp(out, "DynamicSnapMap"));
+        assert(sh_map_native_level_is_snapmap(level) == 1 && sh_map_native_level_flags(level) == 0);
+        level[0x170f8] = 2; assert(sh_map_native_level_is_snapmap(level) == 1 && sh_map_native_level_flags(level) == 2);
+        level[0x170f8] = 0;
+        *(int *)(level + 0x20 + 8) = 15; *(const char **)(level + 0x20 + 0x10) = spelled;
+        assert(sh_map_native_level_is_snapmap(level) == 1);
+        *(int *)(level + 0x20 + 8) = 19; *(const char **)(level + 0x20 + 0x10) = other;
+        assert(sh_map_native_level_is_snapmap(level) == 0);
+        assert(sh_map_native_level_is_snapmap(NULL) == -1 && sh_map_native_level_flags(NULL) == -1);
     }
     HANDLE thread = CreateThread(NULL, 0, wrong_thread, selection, 0, NULL);
     assert(thread && WaitForSingleObject(thread, 10000) == WAIT_OBJECT_0); CloseHandle(thread);

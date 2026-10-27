@@ -62,6 +62,7 @@ static __declspec(thread) pub_request *g_pub_entering;
  * If it is dropped before activation, remember the map so the transition can
  * cancel that load rather than build the map from the projection. */
 static char g_pub_orphan[256];
+static char g_pub_orphan_id[96], g_pub_orphan_revision[96];
 static char g_pub_orphan_reason[160];
 static ULONGLONG g_pub_orphan_at;
 #define PUB_ORPHAN_MS 600000ull
@@ -173,15 +174,32 @@ static void *pub_history(void)
     if (count <= 0 || !records) return NULL;
     return *(void **)(records + (size_t)(count - 1) * 0x38 + 0x18);
 }
+/* The session lobby's launch parameters. The published lobby launch wrote the
+ * item id at +0x550 and its revision at +0x600; at the map transition this is
+ * the only record of which published map is loading (the level itself is
+ * named "DynamicSnapMap"). */
+static const unsigned char *pub_session_parameters(void)
+{
+    __try {
+        void *session = g_pub_session_slot ? *g_pub_session_slot : NULL, *lobby;
+        if (!session) return NULL;
+        lobby = ((void *(*)(void *))(*(void ***)session)[g_pub_slot_lobby])(session);
+        if (!lobby) return NULL;
+        return ((const unsigned char *(*)(void *))(*(void ***)lobby)[g_pub_slot_parameters])(lobby);
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return NULL; }
+}
 static int pub_host_matches(const sh_map_native_selection *selection)
 {
-    void *session = *g_pub_session_slot, *lobby, *parameters;
-    if (!session) return 0;
-    lobby = ((void *(*)(void *))(*(void ***)session)[g_pub_slot_lobby])(session);
-    if (!lobby) return 0;
-    parameters = ((void *(*)(void *))(*(void ***)lobby)[g_pub_slot_parameters])(lobby);
-    return parameters && sh_map_native_matches_ids(selection,
-        (unsigned char *)parameters + 0x550, (unsigned char *)parameters + 0x600);
+    const unsigned char *parameters = pub_session_parameters();
+    return parameters && sh_map_native_matches_ids(selection, parameters + 0x550, parameters + 0x600);
+}
+static int pub_session_identity(char *id, size_t id_capacity, char *revision, size_t revision_capacity)
+{
+    const unsigned char *parameters = pub_session_parameters();
+    if (id && id_capacity) id[0] = 0;
+    if (revision && revision_capacity) revision[0] = 0;
+    return parameters && sh_map_native_string_copy(parameters + 0x550, id, id_capacity) &&
+        sh_map_native_string_copy(parameters + 0x600, revision, revision_capacity);
 }
 static int pub_manager_current(const void *manager)
 {
@@ -248,10 +266,38 @@ static int pub_waiting(void *context)
         return pub_valid(request);
     } __except (EXCEPTION_EXECUTE_HANDLER) { return pub_reject(request, "the wait check faulted"); }
 }
+/* Is the loading level this request's map? The map-change parameters name
+ * every SnapMap level "DynamicSnapMap" (their constructor rewrites any
+ * "snapmap/<name>" and sets +0x170f8 bit 1, 13954591 and 2018 alike), so a
+ * SnapMap level is identified by the session lobby's published item. 1: ours;
+ * 0: positively another level (a non-SnapMap level, or a request that never
+ * launched and so lent the cache nothing); -1: cannot be told apart. Both
+ * identities are logged verbatim. */
 static int pub_matches_level(void *context, const void *parameters)
 {
     pub_request *request = context;
-    return request->launched && sh_map_native_matches_level(request->selection, parameters);
+    char level[96] = "", name[96] = "", id[96] = "", revision[96] = "", host_id[96] = "", host_revision[96] = "";
+    char line[900];
+    int kind = sh_map_native_level_is_snapmap(parameters), flags = sh_map_native_level_flags(parameters);
+    int host = pub_session_identity(host_id, sizeof(host_id), host_revision, sizeof(host_revision));
+    int result;
+    const char *verdict;
+    sh_map_native_level_name_of(parameters, level, sizeof(level));
+    sh_map_native_level_name(request->selection, name, sizeof(name));
+    sh_map_native_identity(request->selection, id, sizeof(id), revision, sizeof(revision));
+    if (kind == 0) { result = 0; verdict = "another level; it loads natively"; }
+    else if (!request->launched) { result = 0; verdict = "the prepared request never launched; the level loads natively"; }
+    else if (kind == 1 && host && pub_host_matches(request->selection)) { result = 1; verdict = "the prepared map"; }
+    else {
+        result = -1;
+        verdict = kind < 0 ? "the level is unreadable" : !host ? "the session lobby item is unreadable" :
+            "the session lobby names a different item";
+    }
+    snprintf(line, sizeof(line), "MPKG: loading level '%s' (flags 0x%02X, snapmap %d) against prepared map '%s' "
+        "item '%s' revision '%s'; session lobby item '%s' revision '%s': %s",
+        level, flags < 0 ? 0 : flags, kind, name, id, revision, host_id, host_revision, verdict);
+    backend_log(line);
+    return result;
 }
 static int pub_select_decoded(void *context, const void *metadata, void *snapshot)
 {
@@ -318,7 +364,10 @@ static void pub_release(void *context)
 {
     pub_request *request = context;
     if (request->launched && !request->selected &&
-        sh_map_native_level_name(request->selection, g_pub_orphan, sizeof(g_pub_orphan))) {
+        sh_map_native_identity(request->selection, g_pub_orphan_id, sizeof(g_pub_orphan_id),
+            g_pub_orphan_revision, sizeof(g_pub_orphan_revision))) {
+        if (!sh_map_native_level_name(request->selection, g_pub_orphan, sizeof(g_pub_orphan)))
+            strcpy_s(g_pub_orphan, sizeof(g_pub_orphan), g_pub_orphan_id);
         char line[512];
         strcpy_s(g_pub_orphan_reason, sizeof(g_pub_orphan_reason),
                  request->reject ? request->reject : "its preparation was canceled");
@@ -462,13 +511,17 @@ static void pub_complete(void *download)
     __finally { sh_rawmap_read_leave(&scope); }
 }
 
-/* One-shot: does this native load name the published map whose prepared launch
- * was dropped after it gave the cache a lobby-only snapshot? */
+/* One-shot: is this native load the published map whose prepared launch was
+ * dropped after it gave the cache a lobby-only snapshot? A SnapMap level whose
+ * session lobby still names that item and revision. */
 static int pub_orphan_check(const void *parameters, char *reason, size_t capacity)
 {
+    char id[96], revision[96];
     if (!g_pub_orphan[0]) return 0;
     if (GetTickCount64() - g_pub_orphan_at > PUB_ORPHAN_MS) { g_pub_orphan[0] = 0; return 0; }
-    if (!sh_map_native_level_named(parameters, g_pub_orphan)) return 0;
+    if (sh_map_native_level_is_snapmap(parameters) != 1 ||
+        !pub_session_identity(id, sizeof(id), revision, sizeof(revision)) ||
+        strcmp(id, g_pub_orphan_id) || strcmp(revision, g_pub_orphan_revision)) return 0;
     if (reason && capacity)
         snprintf(reason, capacity, "'%s': %s", g_pub_orphan, g_pub_orphan_reason);
     g_pub_orphan[0] = 0;

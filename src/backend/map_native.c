@@ -188,38 +188,56 @@ int sh_map_native_matches(const sh_map_native_selection *selection, const void *
     return metadata && sh_map_native_matches_ids(selection, metadata, (const unsigned char *)metadata + MAP_STRING_SIZE);
 }
 
-int sh_map_native_level_named(const void *parameters, const char *name)
-{
-    size_t name_length = name ? strlen(name) : 0;
-    if (!parameters || !name_length) return 0;
-    __try {
-        int map_length;
-        const char *map = native_string((const unsigned char *)parameters + 0x20, &map_length);
-        return (*(const unsigned char *)((const unsigned char *)parameters + 0x170f8) & 2) &&
-            map && map_length > 8 && (size_t)map_length - 8 == name_length &&
-            !memcmp(map, "snapmap/", 8) && !memcmp(map + 8, name, name_length);
-    } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
-}
-
-int sh_map_native_level_name(const sh_map_native_selection *selection, char *out, size_t capacity)
+int sh_map_native_string_copy(const void *string, char *out, size_t capacity)
 {
     if (!out || !capacity) return 0;
     out[0] = 0;
-    if (!selection) return 0;
+    if (!string) return 0;
     __try {
-        int name_length;
-        const char *name = native_string(selection->metadata + 0x398, &name_length);
-        if (!name || name_length <= 0 || (size_t)name_length >= capacity) return 0;
-        memcpy(out, name, (size_t)name_length); out[name_length] = 0;
+        int length;
+        const char *text = native_string(string, &length);
+        if (!text || length <= 0 || (size_t)length >= capacity) return 0;
+        memcpy(out, text, (size_t)length); out[length] = 0;
         return 1;
     } __except (EXCEPTION_EXECUTE_HANDLER) { out[0] = 0; return 0; }
 }
 
-int sh_map_native_matches_level(const sh_map_native_selection *selection, const void *parameters)
+int sh_map_native_level_name(const sh_map_native_selection *selection, char *out, size_t capacity)
 {
-    char name[256];
-    return selection && parameters && sh_map_native_level_name(selection, name, sizeof(name)) &&
-        sh_map_native_level_named(parameters, name);
+    if (out && capacity) out[0] = 0;
+    return selection && sh_map_native_string_copy(selection->metadata + 0x398, out, capacity);
+}
+
+int sh_map_native_identity(const sh_map_native_selection *selection, char *id, size_t id_capacity,
+    char *revision, size_t revision_capacity)
+{
+    if (id && id_capacity) id[0] = 0;
+    if (revision && revision_capacity) revision[0] = 0;
+    return selection && sh_map_native_string_copy(selection->metadata, id, id_capacity) &&
+        sh_map_native_string_copy(selection->metadata + MAP_STRING_SIZE, revision, revision_capacity);
+}
+
+int sh_map_native_level_name_of(const void *parameters, char *out, size_t capacity)
+{
+    if (out && capacity) out[0] = 0;
+    return parameters && sh_map_native_string_copy((const unsigned char *)parameters + 0x20, out, capacity);
+}
+
+int sh_map_native_level_flags(const void *parameters)
+{
+    if (!parameters) return -1;
+    __try { return *(const unsigned char *)((const unsigned char *)parameters + 0x170f8); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return -1; }
+}
+
+int sh_map_native_level_is_snapmap(const void *parameters)
+{
+    char name[64];
+    int flags = sh_map_native_level_flags(parameters);
+    if (flags < 0) return -1;
+    if (flags & 2) return 1;
+    if (!sh_map_native_level_name_of(parameters, name, sizeof(name))) return -1;
+    return !strcmp(name, "DynamicSnapMap") || !strncmp(name, "snapmap/", 8);
 }
 
 /* The caller has entered heap zero and owns an empty constructed snapshot. */

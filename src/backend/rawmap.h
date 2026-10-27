@@ -61,6 +61,11 @@ typedef struct sh_rawmap_loading {
 int sh_rawmap_preflight_loading_request(const char *json, size_t length,
     const sh_rawmap_request *request, const sh_rawmap_loading *loading,
     char *error, size_t capacity);
+/* Called at the map transition. The loading route's `matches` answers 1 when
+ * the loading level is the retained map, 0 when it is positively another level
+ * (that load continues natively), and -1 when it cannot be told apart from the
+ * retained map: that load is canceled, because the engine would build the
+ * retained map without its packages. */
 int sh_rawmap_transition_pending(void *manager, const void *parameters);
 /* A launch route whose retained request was dropped after it handed the native
  * cache a lobby-only snapshot registers this check. Given the native level

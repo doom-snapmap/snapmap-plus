@@ -15,13 +15,22 @@ const char *sh_map_native_source(const sh_map_native_selection *selection, size_
 /* Compare both native map identifiers by value, never by object address. */
 int sh_map_native_matches(const sh_map_native_selection *selection, const void *metadata);
 int sh_map_native_matches_ids(const sh_map_native_selection *selection, const void *id, const void *revision);
-int sh_map_native_matches_level(const sh_map_native_selection *selection, const void *level_parameters);
-/* The selection's level name (metadata +0x398, the "<name>" of "snapmap/<name>")
- * copied into out; 1 on success. */
+/* The selection's map name (metadata +0x398) copied into out; 1 on success. */
 int sh_map_native_level_name(const sh_map_native_selection *selection, char *out, size_t capacity);
-/* 1 when native level parameters name the SnapMap level "snapmap/<name>"
- * (parameters +0x20) and carry the SnapMap flag (+0x170f8 bit 1). */
-int sh_map_native_level_named(const void *level_parameters, const char *name);
+/* The selection's published item id and revision (metadata +0 and +0x30). */
+int sh_map_native_identity(const sh_map_native_selection *selection, char *id, size_t id_capacity,
+    char *revision, size_t revision_capacity);
+/* Copy a readable, non-empty engine string (length +8, text +0x10); 1 on success. */
+int sh_map_native_string_copy(const void *string, char *out, size_t capacity);
+/* The loading level's name as the map-change parameters carry it (+0x20). The
+ * parameters constructor renames every "snapmap/<name>" level to
+ * "DynamicSnapMap" and flags it (+0x170f8 bit 1), so for a SnapMap level this
+ * never names the map: the session lobby's item does (map_published.c). */
+int sh_map_native_level_name_of(const void *level_parameters, char *out, size_t capacity);
+/* The parameters' flag byte +0x170f8, or -1 when unreadable. */
+int sh_map_native_level_flags(const void *level_parameters);
+/* 1 for a SnapMap level, 0 for any other level, -1 when unreadable. */
+int sh_map_native_level_is_snapmap(const void *level_parameters);
 /* Decode after package activation, then lend the native metadata/snapshot to a
  * synchronous original launch. They may not escape the callback except through
  * a native deep copy. Return 1 on success. A failed parse never calls launch.

@@ -1269,7 +1269,18 @@ int sh_rawmap_transition_pending(void *manager, const void *parameters)
     if (g_pending_map.state != 4 || !g_pending_map.loading.matches ||
         GetCurrentThreadId() != g_pending_map.thread) return transition_orphaned(parameters) ? -1 : 0;
     __try { matches = g_pending_map.loading.matches(g_pending_map.request.context, parameters); }
-    __except (EXCEPTION_EXECUTE_HANDLER) { }
+    __except (EXCEPTION_EXECUTE_HANDLER) { matches = -1; }
+    if (matches < 0) {
+        /* Not provably another level: a native build here would be the
+         * prepared map without its packages. The route logged both identities. */
+        backend_log("MPKG: the loading SnapMap level is not provably the prepared map nor another one; its native load is canceled");
+        g_pending_map.state = 5;
+        g_transition_previous_busy = g_preflight_busy; g_preflight_busy = 1;
+        strcpy_s(g_transition_error, sizeof(g_transition_error),
+            "This map's packages were no longer prepared when it started loading, so the load "
+            "was canceled. Start the map again from its page.");
+        return -1;
+    }
     if (!matches) {
         if (transition_orphaned(parameters)) return -1;
         backend_log("MPKG: a map load started while a different map's packages were prepared; it continues natively");

@@ -1278,8 +1278,9 @@ static void owned_map_requests_survive_consent(void)
 typedef struct deferred_owner { int valid, waiting, selected, entered, released, synchronous, fail_select; } deferred_owner;
 static int deferred_valid(void *context) { return ((deferred_owner *)context)->valid; }
 static int deferred_waiting(void *context) { return ((deferred_owner *)context)->waiting; }
+/* 0x77 the retained map, 0x88 positively another level, 0x99 indistinct. */
 static int deferred_matches(void *context, const void *parameters)
-{ (void)context; return parameters == (void *)0x77; }
+{ (void)context; return parameters == (void *)0x77 ? 1 : parameters == (void *)0x99 ? -1 : 0; }
 static int deferred_select(void *context)
 {
     deferred_owner *owner = context;
@@ -1374,6 +1375,33 @@ static void deferred_requests_publish_at_native_boundary(void)
     CHECK(g_map_context == (sh_mpkg_context *)2 && pf_active);
     sh_rawmap_transition_finished(0); CHECK(owner.released == 1 && !g_preflight_busy);
     pf_fail = 0; pf_boundary = 1; sh_rawmap_map_context_poll(); CHECK(!g_map_context);
+    pf_reset(); pf_testing = 0; g_deser_orig = NULL;
+}
+
+/* R-020: a SnapMap level the route cannot tell apart from its prepared map is
+ * canceled with the notice instead of building that map without its packages. */
+static void an_indistinct_snapmap_level_is_canceled(void)
+{
+    deferred_owner owner;
+    sh_rawmap_request request = {&owner, deferred_valid, deferred_enter, deferred_release};
+    sh_rawmap_loading loading = {deferred_waiting, deferred_matches, deferred_select};
+    char error[256];
+    int errors;
+    g_deser_orig = pf_parser;
+    pf_reset(); pf_deferred = 1; pf_boundary = 0; pf_packages = 1;
+    g_map_context = (sh_mpkg_context *)2; g_map_context_active = pf_active = 1;
+    memset(&owner, 0, sizeof(owner)); owner.valid = owner.waiting = 1;
+    CHECK(sh_rawmap_preflight_loading_request("{}", 2, &request, &loading, error, sizeof(error)));
+    sh_rawmap_pending_map_poll();
+    CHECK(owner.entered == 1 && g_pending_map.state == 4);
+    errors = package_errors;
+    CHECK(sh_rawmap_transition_pending(NULL, (void *)0x99) == -1 && g_pending_map.state == 5);
+    CHECK(!sh_rawmap_transition_activate());       /* not at a transition boundary */
+    sh_rawmap_transition_finished(0);
+    CHECK(owner.released == 1 && !owner.selected && !pf_activations && !g_preflight_busy);
+    CHECK(package_errors == errors + 1 && strstr(package_last_error, "no longer prepared"));
+    CHECK(g_map_context == (sh_mpkg_context *)2 && pf_active);
+    pf_boundary = 1; sh_rawmap_map_context_poll(); CHECK(!g_map_context);
     pf_reset(); pf_testing = 0; g_deser_orig = NULL;
 }
 
@@ -1567,6 +1595,7 @@ int main(void)
     saved_map_preflight_retains_checked_bytes();
     owned_map_requests_survive_consent();
     deferred_requests_publish_at_native_boundary();
+    an_indistinct_snapmap_level_is_canceled();
     inspection_preserves_active_map_state();
     initial_published_reads();
     preflight_hook_publishes_helpers_before_detour();
