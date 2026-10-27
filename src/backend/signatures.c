@@ -1119,5 +1119,51 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "40 57 48 83 EC 70 48 C7 44 24 28 FE FF FF FF 48 89 9C 24 90 00 00 00 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 44 24 60 48 8B DA 48 8B F9 48 8B CA E8 ?? ?? ?? ??", 0x1746C20u, 0x1747E00u },
     { "SwfPlayFrame", /* VK 0x2ac0b0, GL 0x2ab040. */
       "48 89 5C 24 08 57 48 83 EC 20 8B DA 48 8B F9 E8 ?? ?? ?? ?? BA 01 00 00 00 48 8B CF 3B DA 0F 4F D3 E8 ?? ?? ?? ?? 48 8B 47 30 48 85 C0 74 0E 90", 0x174B5B0u, 0x174C7C0u },
+    /* Map bounds, Blueprint zoom and the Snapmap+ settings tab (snaphak-re
+     * editor-fixes-13954591 R-004). Every pattern is unique on both build
+     * 13954591 executables at the recorded RVA. */
+    { "CvarSetString", /* idCVar::Set(cvar, text, force); SetFloat formats then calls it. */
+      "40 55 56 57 B8 70 40 00 00 E8 ?? ?? ?? ?? 48 2B E0 48 C7 44 24 20 FE FF FF FF 48 89 9C 24 A0 40 00 00 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 84 24 60 40 00 00 41 0F B6 D8 48 8B F2 48 8B F9 48 8B", 0x295780u, 0x2959A0u },
+    { "BlueprintZoomClamp", /* Sky-view dolly: height in [1024, environmentModuleBounds * 0.5]. */
+      "F3 0F 58 49 38 F3 0F 10 05 ?? ?? ?? ?? 0F 57 D2 F3 0F 10 D1 0F 28 C8 F3 0F 10 05 ?? ?? ?? ?? F3 0F 5F CA F3 0F 59 05 ?? ?? ?? ?? 0F 28 D0 0F 28 C1 F3 0F 5D D1 F3 0F 11 51 38 C3", 0x12B5130u, 0x12B4810u },
+    { "OrbitDollyClamp", /* Free orbit view (mode 0) dolly: z within +/-snapEdit_cameraDistanceLimit. */
+      "F3 0F 10 1D ?? ?? ?? ?? 0F 57 D2 48 8B 44 24 28 0F 28 C3 0F 57 05 ?? ?? ?? ?? F3 0F 58 48 08 F3 0F 10 D1 0F 57 C9 F3 0F 10 C8 F3 0F 5F CA", 0x12B57A0u, 0x12B4E80u },
+    { "OrbitPanClamp", /* Mode 0 pan: MOVSS of snapEdit_environmentModuleBounds before the 3-axis clamp. */
+      "F3 0F 10 0D ?? ?? ?? ?? 0F 28 C1 0F 57 CF F3 0F 10 D9 0F 28 D0 0F 1F 84 00 00 00 00 00 F3 0F 10 00 48 8D 40 04", 0x12B5AE3u, 0x12B51C3u },
+    { "EditorClockMs", /* timeGetTime() - base; the editor camera update uses it * 0.001. */
+      "48 83 EC 28 FF 15 ?? ?? ?? ?? 2B 05 ?? ?? ?? ?? 48 83 C4 28 C3", 0x32AF10u, 0x32AB90u },
+    { "SettingsCategoryCycle", /* Settings state LB/RB: state+0xc = (state+0xc + delta) mod 2, repopulate. */
+      "48 89 5C 24 08 48 89 74 24 10 57 48 83 EC 20 48 8B C2 C7 44 24 48 31 00 00 00 49 8B F0 48 8D 54 24 48 48 8B F9 45 33 C0 48 8B C8 41 8B D9 E8 ?? ?? ?? ?? 44 8B 4F 0C 44 03 CB 79 14 41 8B C1 B9", 0x118F2D0u, 0x118E450u },
+    { "SettingsCategorySelect", /* Notch click: index < 2 and different -> state+0xc = index, repopulate. */
+      "41 83 F9 02 7D 78 48 89 5C 24 08 48 89 74 24 10 57 48 83 EC 20 41 8B D9 49 8B F0 48 8B C2 48 8B F9 39 59 0C 74 49 45 33 C0 C7 44 24 48 31 00 00 00 48 8D 54 24 48 48 8B C8 E8", 0x118F360u, 0x118E4E0u },
+    { "SettingsPanelClear", /* Clears the panel's row, title and value lists and rebuilds the 17 notch hitboxes. */
+      "40 53 48 83 EC 20 83 79 30 00 48 8B D9 74 7F E8 ?? ?? ?? ?? 84 C0 74 76 48 8B CB E8 ?? ?? ?? ?? 84 C0 74 13 48 8B CB E8 ?? ?? ?? ?? 48 C7 80 A8 01 00 00 00 00 00 00 48 8B 8B 58 02 00 00 E8", 0x1281860u, 0x1280E10u },
+    { "SettingsPanelClearCall", /* The clear call at the start of RenderSettingsPopulate (aligned rel32). */
+      "E8 ?? ?? ?? ?? 45 33 ED 4C 89 AE D4 01 00 00 45 8D 75 02 45 85 FF 0F 84 ?? ?? ?? ?? 41 83 FF 01 0F 85", 0x1282E23u, 0x1282473u },
+    { "SettingsRepopulate", /* GUI manager -> settings panel -> RenderSettingsPopulate(panel, category). */
+      "48 89 5C 24 08 48 89 74 24 10 57 48 83 EC 20 8B F2 48 8B F9 8B 51 08 E8 ?? ?? ?? ?? 8B 57 0C 48 8B CF 48 8B D8 E8 ?? ?? ?? ?? 48 8B CB 48 8B F8 E8 ?? ?? ?? ?? 48 85 C0 75 0D 48 8B CF E8 ?? ?? ?? ?? 48 85 C0 74 ?? 8B D6", 0x1273C10u, 0x12731C0u },
+    { "EditorUiEvent", /* Editor UI event/sound by id (category change is 0x31). */
+      "48 89 6C 24 20 57 41 56 41 57 48 83 EC 50 48 63 02 41 0F B6 E8 4C 8B F2 48 8B F9 4C 8B BC C1 80 37 02 00 4D 85 FF 75 1D", 0x1187530u, 0x1186690u },
+    { "SwfSpriteInstance", /* SWF value -> sprite instance (+0xc0); the text twin follows it. */
+      "40 53 48 83 EC 20 83 39 08 75 2B 48 8B 59 08 48 85 DB 74 22 4C 8B 03 48 8B CB 48 8B 15 ?? ?? ?? ?? 41 FF 50 08 84 C0 74 0D 48 8B 83 C0 00 00 00 48 83 C4 20 5B C3 33 C0 48 83 C4 20 5B C3 CC CC 40 53 48 83 EC 20 83 39 08 75 2B", 0x1743690u, 0x1744450u },
+    { "SwfSpriteSetVisible", /* (sprite, visible, propagate): Populate shows notch_0..1 and hides notch_2..16. */
+      "38 51 41 74 5B 88 51 41 84 D2 74 21 48 8B 41 30 48 85 C0 74 18 66 66 66 0F 1F 84 00 00 00 00 00 C6 40 42 01 48 8B 40 30 48 85 C0 75 F3 C6 81 98 00 00 00 01 45 84 C0 74 27", 0x174E3F0u, 0x174F600u },
+    { "BlueprintFarClipA", /* Editor camera update: MOVSS xmm1,[33000.0] then idCVar::SetFloat(r_zfar, xmm1, force). */
+      "F3 0F 10 0D ?? ?? ?? ?? 48 8D 0D ?? ?? ?? ?? 41 B0 01 45 88 BE 38 04 00 00 45 88 BE 44 04 00 00 45 88 7E 2C E8", 0x1242FAAu, 0x12425DAu },
+    { "BlueprintFarClipB", /* The same r_zfar 33000 write on the in-transition path of that update. */
+      "F3 0F 10 0D ?? ?? ?? ?? 48 8D 0D ?? ?? ?? ?? 41 B0 01 E8 ?? ?? ?? ?? 41 8B F7 44 39 BF B8 02 00 00 0F 8E", 0x12430EEu, 0x124271Eu },
+    /* Map bounds toggle, editor environment volume and Blueprint ground plane
+     * (snaphak-re editor-fixes-13954591 R-009). */
+    { "RenderAddToggle", /* Settings panel on/off row (idMenuPropertyToggle, 0xe0 bytes): (panel, id, name, &label, &help, flag, value, on, off). */
+      "48 8B C4 57 41 56 41 57 48 83 EC 70 48 C7 40 A8 FE FF FF FF 48 89 58 10 48 89 68 18 48 89 70 20 4D 8B F1 49 8B E8 44 8B FA 48 8B F1 B9 E0 00 00 00 E8 ?? ?? ?? ?? 48 8B F8 48 89 84 24 90 00 00 00 48 85 C0 74 39 8B 9E E0 01 00 00 8D 53 01 89 96 E0 01 00 00 48 8B CE E8 ?? ?? ?? ?? 4C 8B C0 0F B6 84 24 C0 00 00 00 88 44 24 20", 0x12808F0u, 0x127FEA0u },
+    { "EditorFogVolume", /* Editor render-world setup: _unitCube scaled 32768 and the +/-snapEdit_environmentFogBounds environment area. */
+      "48 89 5C 24 10 48 89 74 24 18 57 48 83 EC 60 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 44 24 58 48 8B 01 48 8B DA 41 B0 01 48 8D 15 ?? ?? ?? ?? 48 8B F1 FF 90 90 00 00 00 48 8B C8 48 8B F8 C7 80 F8 00 00 00 00 00 00 47 C7 80 FC 00 00 00 00 00 00 47 C7 80 00 01 00 00 00 00 00 47 48 89 98 18 01 00 00 E8 ?? ?? ?? ?? F3 0F 10 0D", 0x12397B0u, 0x1238C50u },
+    { "RenderEntityUpdate", /* Marks a render entity changed (queues it for the next render-world update). */
+      "40 53 48 83 EC 20 48 8B 91 C0 00 00 00 48 8B D9 C6 41 30 00 48 85 D2 74 16 48 8B 41 28 8B 48 10 48 C1 E9 08 C6 44 11 08 02 48 83 C4 20 5B C3 48 8B 01 BA 16 00 00 00 FF 50 08", 0x15D8020u, 0x15D92A0u },
+    /* Blueprint module picking length (snaphak-re editor-fixes-13954591 R-011). */
+    { "ModulePickHover", /* Module hover pick: MOVSS xmm2,[snapEdit_modulePickingDistance] for end = origin + dir * value. */
+      "F3 0F 10 15 ?? ?? ?? ?? 41 83 CC FF 44 8B B1 58 07 00 00 0F 28 C2 F3 41 0F 59 01", 0x11F45CCu, 0x11F37ECu },
+    { "ModulePickFocus", /* Module Mode focus ray: MOVSS xmm0,[snapEdit_modulePickingDistance]. */
+      "F3 0F 10 05 ?? ?? ?? ?? 48 8B 86 C8 04 02 00 F3 0F 10 35", 0x1257A58u, 0x1256F58u },
     { NULL, NULL, 0 }   /* terminator */
 };

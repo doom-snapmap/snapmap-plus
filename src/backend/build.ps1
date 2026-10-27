@@ -24,7 +24,9 @@ param(
                            # Guards for event-link walks and interactable spawning.
                            "../fault_shield/mapload_guards.c",
                            "../fault_shield/serialized_entities_guard.c",
-                           "../fault_shield/fault_shield.c"),
+                           "../fault_shield/fault_shield.c",
+                           # Map bounds, Blueprint zoom and the Snapmap+ settings tab.
+                           "settings_tab.c", "map_bounds.c", "editor_zoom.c"),
     [string]$Out = "XINPUT1_4.dll",
     # Diag adds SH_DIAG and the crash/environment logger for troubleshooting.
     [switch]$Diag,

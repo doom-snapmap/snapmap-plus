@@ -22,21 +22,11 @@
 typedef struct { const char *id; const char *text; } strid_baked_t;
 
 static const strid_baked_t g_strids_baked[] = {
-    { "smp_render_distance", "View Distance" },
-    { "smp_render_distance_help", "Saved with this map. 8192 (default) or zero uses each module's original view distance. Other values override distance in world units. Larger distances can increase rendering cost." },
-    { "smp_render_strength", "Fog Strength" },
-    { "smp_render_strength_help", "Saved with this map. Zero restores each module's original fog. Values above zero apply the fog range and color below. Fog alone does not reduce rendering cost." },
-    { "smp_render_start", "Fog Start" },
-    { "smp_render_start_help", "Saved with this map. Distance in world units before distance fog begins." },
-    { "smp_render_end", "Fog End" },
-    { "smp_render_end_help", "Saved with this map. End of the fog distance range. Use a value below View Distance and enough Fog Strength to hide the render cutoff." },
-    { "smp_render_red", "Fog Red" },
-    { "smp_render_green", "Fog Green" },
-    { "smp_render_blue", "Fog Blue" },
-    { "smp_render_color_help", "Saved with this map. Linear fog color component from 0 to 1. Color is used when Fog Strength is above zero." },
+    { "smp_render_distance", "Map View Distance" },
+    { "smp_render_distance_help", "Saved with this map. 8192 (default) or 0 keeps each environment's own distance. Other values override every environment in the editor and in Play." },
     { "smp_grid_room_size", "Grid Room Size" },
-    { "smp_grid_room_modern_help", "Minimum X: 864, Y: 272, Z: 432. Maximum follows snapEdit_environmentModuleBounds, world position, connected rooms and native collision/navigation limits. Out-of-range values use the nearest limit. Connected branches follow their doors; conflicting loops or overlaps prevent the edit. Objects keep their room positions. Resized rooms require Snapmap+." },
-    { "smp_grid_room_classic_help", "Minimum X: 416, Y: 416, Z: 304. Maximum follows snapEdit_environmentModuleBounds, world position, connected rooms and native collision/navigation limits. Out-of-range values use the nearest limit. Connected branches follow their doors; conflicting loops or overlaps prevent the edit. Objects keep their room positions. Resized rooms require Snapmap+." },
+    { "smp_grid_room_modern_help", "Minimum X: 864, Y: 272, Z: 432. Maximum follows the map bounds, connected rooms and native collision and navigation limits. Resized rooms require Snapmap+." },
+    { "smp_grid_room_classic_help", "Minimum X: 416, Y: 416, Z: 304. Maximum follows the map bounds, connected rooms and native collision and navigation limits. Resized rooms require Snapmap+." },
     /* The "unknown" placeholder entity's own palette home. The override pack ships
      * snapeditorentitydef/unknown/unknown.decl referencing these; baking them gives it a clean "Unknown"
      * tab on every install instead of a raw token. */
@@ -63,6 +53,13 @@ static const strid_baked_t g_strids_baked[] = {
                                "as you edit. Players without Snapmap+ use the module's normal navigation." },
 
     /* (extend here as the shipped pack / UI grows -- one row per custom #str_ id.) */
+    /* "Unlock Map Bounds" on/off row in the Snapmap+ settings tab. The help
+     * says this is a mod saved into the map and that players need Snapmap+;
+     * native help texts are at most 161 characters, so this one stays short. */
+    { "smp_bounds_limit",      "Unlock Map Bounds" },
+    { "smp_bounds_limit_help", "Saved with this map. On lets modules go out to 32671 units instead of 16000. "
+                               "Players need Snapmap+ to play it; without it the game can crash." },
+
 };
 
 #define B1_STRIDS_BAKED_COUNT (sizeof(g_strids_baked) / sizeof(g_strids_baked[0]))

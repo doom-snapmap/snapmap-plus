@@ -1,3 +1,4 @@
+#include "map_bounds.h"
 #include "map_render.h"
 /* DeserializeFromJson detour: optionally substitute a file-backed rawmap,
  * prepare the chosen JSON, then call the native parser. The temporary buffer
@@ -350,6 +351,7 @@ static int deser_prepared(const char *json, void *out_map)
     char *prepared = prepare_map_buffer(json);
     int rc = g_deser_orig(prepared ? prepared : json, out_map);
     if (rc) sh_map_render_loaded(out_map);
+    if (rc) sh_map_bounds_loaded(out_map);
     if (prepared) HeapFree(GetProcessHeap(), 0, prepared);
     return rc;
 }
@@ -358,6 +360,7 @@ static int sh_deser_detour(const char *json, void *out_map)
 {
     if (g_deser_orig == NULL) return 0;   /* defensive: should never happen once installed */
     sh_map_render_loaded(NULL);
+    sh_map_bounds_loaded(NULL);
 
     /* A map is being opened, so the file the person picked for the last one stops
      * applying. This is the single place that knows a map is actually opening --

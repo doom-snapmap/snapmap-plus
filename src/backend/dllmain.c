@@ -24,6 +24,9 @@
 #include "grid_room_native.h"
 #include "grid_room_editor.h"
 #include "map_render.h"
+#include "settings_tab.h"
+#include "map_bounds.h"
+#include "editor_zoom.h"
 #include "grid_room_snap.h"
 #include "navmesh.h"
 #include "nav_bake.h"
@@ -352,10 +355,16 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
         if(grid_installed&&
            !sh_grid_editor_install(results,db,sh_grid_native_read,sh_grid_native_apply))
             backend_log("GRID: native dimension properties unavailable on this build");
+        /* The Snapmap+ settings tab owns the Settings / Properties hooks and the
+         * grid editor's property slot; mod settings register groups into it. */
+        if(!sh_settings_tab_install(results,db))
+            backend_log("SETTINGS: Snapmap+ settings tab unavailable on this build");
         if(!sh_map_render_install(results,db,g_doom_base)||
            feature_pending(SH_PENDING_RENDER_EDITOR,"per-map rendering panel",SH_PENDING_RENDER_EDITOR_WHY)||
            !sh_map_render_editor_install(results,db))
             backend_log("RENDER: per-map rendering controls unavailable on this build");
+        if(sh_map_bounds_install(results,db,g_doom_base))(void)sh_map_bounds_settings_register();
+        (void)sh_editor_zoom_install(results,db,g_doom_base);
 
         /* Navigation geometry follows editor actions rather than a poll. */
         sh_apply_engine_install_edit_hook(results, db);

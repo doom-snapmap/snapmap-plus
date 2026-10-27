@@ -84,7 +84,7 @@ static __inline int sh_live_verify(void)
  * visibility-toggle registry (+0x20/+0x28: 1384 decls revealed, 1380
  * re-hidden). */
 
-#define SH_PENDING_RENDER_EDITOR      1
+#define SH_PENDING_RENDER_EDITOR      0
 #define SH_PENDING_RENDER_EDITOR_WHY  "settings panel slider value +0x120 and dirty byte +0xc8 (map_render_editor.c)"
 
 #endif /* BACKEND_ENGINE_BUILD_H */
