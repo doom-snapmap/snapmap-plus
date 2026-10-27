@@ -60,6 +60,11 @@ foreach ($n in $exeNames) {
         throw "DOOMx64vk.exe and DOOMx64.exe in $doom come from different DOOM builds ($build and $this); verify the game files in Steam. $supported Nothing was changed."
     }
     $build = $this
+    # The same game identity the backend, the installer and every report use.
+    $steam = if ($this -eq "2018") { "2642713" } else { $this }
+    $binary = if ($this -eq "2018") { "20180321-154133-liver-goldenrod" } else { "20240321-104810-ginger-fuchsia" }
+    $renderer = if ($n -eq "DOOMx64vk.exe") { "Vulkan" } else { "OpenGL" }
+    Write-Host ("Game: {0}: DOOM 2016 build {1} ({2}, {3}, {4})" -f $n, $steam, $binary, $renderer, $hash.Substring(0, 8))
 }
 
 $dest = Join-Path $env:LOCALAPPDATA "snapmap-plus"

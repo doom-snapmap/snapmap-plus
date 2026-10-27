@@ -30,18 +30,65 @@ const (
 
 // doomBuild describes one recognized executable.
 type doomBuild struct {
-	build string // build2018 or build2024
-	label string // for messages
+	build  string // build2018 or build2024
+	label  string // for messages
+	steam  string // Steam build id
+	binary string // the console's Build Information binary name
+	vulkan bool   // the Vulkan executable (DOOMx64vk.exe) rather than OpenGL
 }
+
+const (
+	binary2024 = "20240321-104810-ginger-fuchsia"
+	binary2018 = "20180321-154133-liver-goldenrod"
+)
 
 // knownDoomBuilds maps an executable's lowercase SHA-256 to its build. Tests add synthetic entries.
 var knownDoomBuilds = map[string]doomBuild{
 	// April 2024 update, Steam build 13954591 (not SteamStub-wrapped).
-	"3d8b4393649f80bdae85c19ae2c985c45ec9ac54f74ab04a18816e30ead63c21": {build2024, "April 2024 Vulkan"},
-	"1bddecaa4e86850412f96e3117978bce1ec7bb701ae1b5a33120c21e4421e51e": {build2024, "April 2024 OpenGL"},
+	"3d8b4393649f80bdae85c19ae2c985c45ec9ac54f74ab04a18816e30ead63c21": {build2024, "April 2024 Vulkan", build2024, binary2024, true},
+	"1bddecaa4e86850412f96e3117978bce1ec7bb701ae1b5a33120c21e4421e51e": {build2024, "April 2024 OpenGL", build2024, binary2024, false},
 	// 2018, Steam build 2642713, as Steam ships it (SteamStub-wrapped).
-	"139763e94f1a75b5310179f9eeeb8a949a1f53c49acbc722fcfc5dfe7bb6d323": {build2018, "2018 Vulkan"},
-	"d46ca967824da6ffc40f1ce0b6d7f4afa868fe12b795124d3e31a1bdb646a8e5": {build2018, "2018 OpenGL"},
+	"139763e94f1a75b5310179f9eeeb8a949a1f53c49acbc722fcfc5dfe7bb6d323": {build2018, "2018 Vulkan", "2642713", binary2018, true},
+	"d46ca967824da6ffc40f1ce0b6d7f4afa868fe12b795124d3e31a1bdb646a8e5": {build2018, "2018 OpenGL", "2642713", binary2018, false},
+}
+
+// gameIdentity is the game identity every Snapmap+ report carries, formatted exactly as the
+// backend does (sh_host_game_identity in src/backend/host_image.c):
+// "DOOM 2016 build 13954591 (20240321-104810-ginger-fuchsia, Vulkan, 3d8b4393)".
+func gameIdentity(b doomBuild, sum string) string {
+	renderer := "OpenGL"
+	if b.vulkan {
+		renderer = "Vulkan"
+	}
+	hash8 := strings.ToLower(sum)
+	if len(hash8) > 8 {
+		hash8 = hash8[:8]
+	}
+	return fmt.Sprintf("DOOM 2016 build %s (%s, %s, %s)", b.steam, b.binary, renderer, hash8)
+}
+
+// describeDoomGames returns one line per DOOM executable in dir: its game identity, or why it
+// has none (unrecognized executable, unreadable file). Nothing when no executable is present.
+func describeDoomGames(dir string) []string {
+	var lines []string
+	for _, exe := range doomExes {
+		path := filepath.Join(dir, exe)
+		st, err := os.Stat(path)
+		if err != nil || st.IsDir() {
+			continue
+		}
+		sum, err := fileSHA256(path)
+		if err != nil {
+			lines = append(lines, fmt.Sprintf("%s: unreadable (%v)", exe, err))
+			continue
+		}
+		if b, ok := knownDoomBuilds[strings.ToLower(sum)]; ok {
+			lines = append(lines, fmt.Sprintf("%s: %s", exe, gameIdentity(b, sum)))
+		} else {
+			lines = append(lines, fmt.Sprintf("%s: unrecognized executable (SHA-256 %s)", exe, strings.ToLower(sum)[:8]))
+		}
+	}
+	return lines
 }
 
 // detectDoomBuild hashes every DOOM executable present in dir and returns the build they share.

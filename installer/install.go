@@ -87,6 +87,9 @@ func cmdInstall(f flags) error {
 	if err != nil {
 		return err
 	}
+	for _, line := range describeDoomGames(doom) {
+		fmt.Println("Game: " + line)
+	}
 	if f, err = routeRelease(f, build); err != nil {
 		return err
 	}
@@ -343,6 +346,13 @@ func cmdStatus(f flags) error {
 	fmt.Printf("  Installed: %s\n", rec.InstalledAt)
 	fmt.Printf("  Files:     %d\n", len(rec.Files))
 	fmt.Printf("  Backups:   %d\n", len(rec.Backups))
+	games := describeDoomGames(rec.DoomPath)
+	if len(games) == 0 {
+		fmt.Println("  Game:      no DOOM 2016 executable found")
+	}
+	for _, line := range games {
+		fmt.Printf("  Game:      %s\n", line)
+	}
 	missing := 0
 	for _, rel := range rec.Files {
 		if _, err := os.Stat(filepath.Join(rec.DoomPath, rel)); err != nil {
@@ -360,6 +370,9 @@ func cmdVersion() {
 	fmt.Println("snapmap-plus", version)
 	if rec, err := loadRecord(); err == nil {
 		fmt.Printf("installed mod: %s  (in %s)\n", rec.Version, rec.DoomPath)
+		for _, line := range describeDoomGames(rec.DoomPath) {
+			fmt.Println("game: " + line)
+		}
 	}
 }
 

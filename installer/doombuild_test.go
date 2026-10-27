@@ -26,9 +26,9 @@ func digestOf(content string) string {
 }
 
 func init() {
-	knownDoomBuilds[digestOf(fakeExe)] = doomBuild{build2024, "test 13954591"}
-	knownDoomBuilds[digestOf(fakeGame)] = doomBuild{build2024, "test 13954591"}
-	knownDoomBuilds[digestOf(fake2018)] = doomBuild{build2018, "test 2018"}
+	knownDoomBuilds[digestOf(fakeExe)] = doomBuild{build2024, "test 13954591", build2024, binary2024, true}
+	knownDoomBuilds[digestOf(fakeGame)] = doomBuild{build2024, "test 13954591", build2024, binary2024, false}
+	knownDoomBuilds[digestOf(fake2018)] = doomBuild{build2018, "test 2018", "2642713", binary2018, true}
 }
 
 // bundleDir writes a bundle shaped like package.ps1's output with the given backend name.
@@ -273,5 +273,46 @@ func TestBootstrapScriptMatchesRouting(t *testing.T) {
 	}
 	if !strings.Contains(string(script), legacyReleaseTag) {
 		t.Errorf("install.ps1 lacks the legacy tag %s", legacyReleaseTag)
+	}
+}
+
+// The installer prints the same game identity string the backend and the reports use.
+func TestGameIdentityMatchesBackendFormat(t *testing.T) {
+	vk := knownDoomBuilds["3d8b4393649f80bdae85c19ae2c985c45ec9ac54f74ab04a18816e30ead63c21"]
+	gl := knownDoomBuilds["1bddecaa4e86850412f96e3117978bce1ec7bb701ae1b5a33120c21e4421e51e"]
+	old := knownDoomBuilds["139763e94f1a75b5310179f9eeeb8a949a1f53c49acbc722fcfc5dfe7bb6d323"]
+	cases := []struct {
+		b         doomBuild
+		sum, want string
+	}{
+		{vk, "3D8B4393649F80BDAE85C19AE2C985C45EC9AC54F74AB04A18816E30EAD63C21",
+			"DOOM 2016 build 13954591 (20240321-104810-ginger-fuchsia, Vulkan, 3d8b4393)"},
+		{gl, "1bddecaa4e86850412f96e3117978bce1ec7bb701ae1b5a33120c21e4421e51e",
+			"DOOM 2016 build 13954591 (20240321-104810-ginger-fuchsia, OpenGL, 1bddecaa)"},
+		{old, "139763e94f1a75b5310179f9eeeb8a949a1f53c49acbc722fcfc5dfe7bb6d323",
+			"DOOM 2016 build 2642713 (20180321-154133-liver-goldenrod, Vulkan, 139763e9)"},
+	}
+	for _, c := range cases {
+		if got := gameIdentity(c.b, c.sum); got != c.want {
+			t.Errorf("gameIdentity = %q, want %q", got, c.want)
+		}
+	}
+}
+
+func TestDescribeDoomGames(t *testing.T) {
+	doom := doomWith(t, t.TempDir(), fakeExe, fakeMod)
+	lines := describeDoomGames(doom)
+	if len(lines) != 2 {
+		t.Fatalf("lines = %q", lines)
+	}
+	want := "DOOMx64vk.exe: DOOM 2016 build 13954591 (20240321-104810-ginger-fuchsia, Vulkan, " + digestOf(fakeExe)[:8] + ")"
+	if lines[0] != want {
+		t.Errorf("line 0 = %q, want %q", lines[0], want)
+	}
+	if lines[1] != "DOOMx64.exe: unrecognized executable (SHA-256 "+digestOf(fakeMod)[:8]+")" {
+		t.Errorf("line 1 = %q", lines[1])
+	}
+	if got := describeDoomGames(t.TempDir()); len(got) != 0 {
+		t.Errorf("empty folder: %q", got)
 	}
 }
