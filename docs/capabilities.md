@@ -26,13 +26,13 @@ loads use the settings, with bindings for OpenGL and Vulkan. Custom values take
 effect on Snapmap+ clients; restoring defaults does not retain a rendering
 requirement. See the [rendering controls](../site/snapmap-plus-guide.md#map-view-distance-and-fog).
 
-## Package weapon HUD settings
+## Packages
 
-Override packages can supply `hud/weapons.json` to select engine-default or
-weapon-capacity ammo presentation for exact weapon declarations. Unlimited
-capacity can use the existing infinity symbol and full ammo bar in SnapMap;
-finite capacity remains numeric. This changes presentation only and requires
-Snapmap+ on the displaying client. The package parser and supported fields are in `src/backend/weapon_hud.c`.
+The package system is being rebuilt for the April 2024 DOOM update (Steam build 13954591). This
+release reads, installs and carries no packages: nothing is loaded from
+`%LOCALAPPDATA%\snapmap-plus\overrides\`, no `package-cache` or `package-staging` folder is created,
+and a map saved or published with packages by an earlier release loads as a plain map without them.
+Folders that earlier releases left are not touched; you can keep or delete them.
 
 ## Console commands
 
@@ -70,7 +70,6 @@ Registered with the engine command system; run from the DOOM console.
 | `cs_start_render_logging` | Set up the render-logging hook. |
 | `sh_disable_devmode` | Turn developer features off while keeping Bethesda.net connectivity. |
 | `sh_reenable_devmode` | Turn developer features back on. |
-| `sh_user_overrides [0\|1]` | On a successful save, persist whether user file shadows and user new-decl registration run on the next DOOM launch. `0` disables and `1` enables both user mechanisms; restart DOOM to apply either value. If saving fails, the console says so, this launch stays unchanged, and no next-launch change is guaranteed. With no argument, reports this launch's state and either the saved next-launch state or a volatile value not confirmed saved. Built-in defaults and DOOM's packaged resources remain available. |
 | `noClip` / `infiniteHealth` / `noPlayerDeath` / `noPlayerKill` / `noTarget` | The five player-cheat toggles for the local player: no-collision flight, infinite health, can't die, can't be killed, enemies ignore you. |
 
 ## Cvars
@@ -252,15 +251,11 @@ names never arrived re-asks when it is selected, which is the only retry that wa
 `%LOCALAPPDATA%\snapmap-plus\config.json` holds player preferences shared through the backend-owned
 settings service. The registered settings are `theme` (`"light"` by default, or `"dark"`),
 `entities.show_hidden` (off by default), and `entities.selection_mode` (off by default; `off`, `follow`,
-or `select_in_3d`), `overrides.user_enabled` (on by default for both user decl mechanisms),
-`packages.embed_in_saved_maps`, `navmesh.enabled`, `navmesh.preview` and
-`navmesh.embed_in_saved_maps` (all on by default). Show Hidden and the exclusive Entity
-selection direction survive restarts. The runtime creates the file when needed, so deleting it resets
-preferences and the next startup recreates the defaults, including user overrides enabled. Manual config
-edits are consumed at the next startup; a successful `sh_user_overrides 0` or `sh_user_overrides 1` save
-uses the existing settings setter and recreates a deleted file. If the command cannot save, it reports the
-failure, leaves this launch unchanged, and does not establish a next-launch change. The generic bridge already
-permits a future frontend control for this setting.
+or `select_in_3d`), `navmesh.enabled`, `navmesh.preview` and `navmesh.embed_in_saved_maps` (all on by
+default). Show Hidden and the exclusive Entity selection direction survive restarts. The runtime creates
+the file when needed, so deleting it resets preferences and the next startup recreates the defaults.
+Manual config edits are consumed at the next startup. A key from an earlier release, such as
+`overrides.user_enabled`, is kept in the file but no longer read.
 
 **Pinned assets live in their own file**, `%LOCALAPPDATA%\snapmap-plus\pinned.json`, not in
 `config.json`. Pins are separate from the validated settings scalars, so a malformed pin list cannot reset
@@ -273,9 +268,8 @@ yet"; deleting it clears the shortlist and nothing else.
 The schema and registry are intentionally extensible: registered values are type-checked and repaired
 individually, while unrecognized root and `settings` members survive normal rewrites. A damaged file is
 backed up and replaced with defaults; a file from a newer schema is left untouched; and an I/O failure keeps
-ordinary settings for the current session while warning that they were not saved. `sh_user_overrides` is
-different: its launch snapshot remains unchanged after a failed write. The installer treats this file as
-player data and preserves it across update, uninstall, and reinstall.
+ordinary settings for the current session while warning that they were not saved. The installer treats
+this file as player data and preserves it across update, uninstall, and reinstall.
 
 ## Network use
 
@@ -302,23 +296,15 @@ Engine detours and resource-loader shadows the backend installs.
 | Rawmap save | When rawmaps are on, mirror each saved map's JSON to the save path. That is `%LOCALAPPDATA%\snapmap-plus\rawmap.json` until **File ▸ Save Rawmap As...** or `sh_rawmaps savepath` names another file, and opening a different map returns it to the default. A file someone downloads and opens is an archive entry, so nothing about opening one aims a save at it. Off, your save is untouched and that file is left alone — the same switch governs both directions. |
 | Rawmap branch answer | A map opened from a rawmap counts as a new map, so the engine's own Save asks for a name instead of replacing whichever map the rawmap opened over. Detours `idSnapEditorLocal::IsBranchMap`, the one function the editor's save menus ask, and answers for a substituted map without writing to the map. A sibling function in the image has the same body around the `map:new` check, so the scan confirms its target by the literal the callee names. `sh_rawmaps overwrite on` allows the replacement instead, for that session only, and says so when it is turned on. Loads are refused if the protective hook is unavailable unless overwrite was explicitly enabled. |
 | Rawmap file menu | **File > Load Rawmap...** stages a JSON file and offers to open it in place after confirmation. **Open Rawmap as New Map** confirms before replacing unsaved editor work. **Save Rawmap / Save Rawmap As...** serialize the live map, including unsaved edits; a missing or busy editor is refused, and a map change cancels queued saves. The File menu shows both paths and lets the user release a chosen save destination or enable rawmaps for every load/save. See the [rawmap guide](../site/snapmap-plus-guide.md#rawmaps). |
-| Overrides file-shadow | Serves immutable compiled package resources and built-in overrides through native file opens, falling back to installed originals. Map-authored views govern Play/Edit without rewriting local sources or game archives. The custom stream requires the audited native ABI. `sh_user_overrides` saves a next-launch diagnostic preference; map installation instead activates within the session. See [package ownership and refresh](architecture.md#packages-and-refresh-boundaries). |
-| Installed resource bridge | Resolves exact installed resources through verified archive indexes without changing game files. Compiler-generated dependency and binding data replace author-maintained resource manifests. Complete inventories and bounded archive reads are validated before publication; reader snapshots retain their source lifetime. |
-| Dynamic decl server | Registers and refreshes declarations from package `assets/generated/decls/<type>/<logical-name>.decl` and linked installed resources. Boot binds dependencies even with no packages. Publication occurs on the engine main thread and succeeds only after required materialization, visibility and palette refresh. Published bodies remain valid for active readers; see `src/backend/decl_server.h`. |
-| Package requirements | Reads supported cvars from `package.json` under `requirements.cvars`. The allowlist admits `g_useResourceBlackList 0` and `g_useImageBlackList 0`; arbitrary commands are refused. Requirements apply before native declaration parsing and remain while requested by installed packages. Removing the final request restores the displaced value while preserving a later external edit. |
-| Baked navigation | A map can carry its own AI navigation for the modules it places, as `smnav1.` base64 shards in its map variables — the same envelope map-embedded packages ride in, under a different magic, so an older Snapmap+ and vanilla DOOM both ignore it and load the map normally. On every map load the shards are reassembled, checked against their digest, and put through an integer-only structural check of the AAS file they decode to; what survives is served under the module's own `maps/modules/.../<module>.aas_<class>` name and its cooked `generated/...<module>.baas_<class>` sibling (the engine asks for the cooked name first) through the same open hook the overrides shadow uses, so a stale cooked artefact on disk cannot win. Serving is all-or-nothing per module: a missing shard, a bad digest, a payload that fails the structural check, or a module the map places more than once means that module keeps its shipped navmesh, and the refusal is logged and shown by `sh_navmesh`. The table is map-scoped and rebuilt from empty on every load, so a map with no bake can never inherit the previous map's navigation. Shards are stripped before the engine parses the map and written back when it is saved, so a load-then-save keeps the author's bake without the payload ever becoming map state. A fault anywhere in the path disables the feature for the rest of the session rather than being recovered per open. `navmesh.enabled` turns the whole thing off; `navmesh.embed_in_saved_maps` turns off only the write-back. |
+| Overrides file-shadow | Serves map navigation, the generated Grid Room variants and the built-in default declarations through native file opens, falling back to installed originals, which it reads through the provider's own open (`read_installed_resource`). It reads no user or package files. The custom stream requires the audited native ABI. |
+| Retired package payloads | A map saved or published with packages by an earlier release carries them as `smpkg.` string variables. The load path removes them before the native parse, logs one line, and the map loads as a plain map. See [Packages](#packages). |
+| Baked navigation | A map can carry its own AI navigation for the modules it places, as `smnav1.` base64 shards in its map variables — the same envelope the retired map-embedded packages used, under a different magic, so an older Snapmap+ and vanilla DOOM both ignore it and load the map normally. On every map load the shards are reassembled, checked against their digest, and put through an integer-only structural check of the AAS file they decode to; what survives is served under the module's own `maps/modules/.../<module>.aas_<class>` name and its cooked `generated/...<module>.baas_<class>` sibling (the engine asks for the cooked name first) through the same open hook the overrides shadow uses, so a stale cooked artefact on disk cannot win. Serving is all-or-nothing per module: a missing shard, a bad digest, a payload that fails the structural check, or a module the map places more than once means that module keeps its shipped navmesh, and the refusal is logged and shown by `sh_navmesh`. The table is map-scoped and rebuilt from empty on every load, so a map with no bake can never inherit the previous map's navigation. Shards are stripped before the engine parses the map and written back when it is saved, so a load-then-save keeps the author's bake without the payload ever becoming map state. A fault anywhere in the path disables the feature for the rest of the session rather than being recovered per open. `navmesh.enabled` turns the whole thing off; `navmesh.embed_in_saved_maps` turns off only the write-back. |
 | AI Navigation on a volume | Enable **AI Navigation** and **Block Demons** on Blocking Boxes. Boxes with inherited default dimensions support navigation, including in existing maps. Green outlines preview the smallest demon size; `navmesh.preview` controls its display. **Build Navmesh** in the native Start menu and **View > Update Navmesh** run the same bake, even with preview disabled or in Blueprint mode. The native action uses the game's busy modal and completion toast without saving or checking for a player start. The View menu says when a marked box has changed since. Climb approaches clear the rotated solid, and traversal candidate storage grows with geometry. Refused bakes log their reason. The [player guide](../site/snapmap-plus-guide.md#ai-navigation-on-blocking-boxes) explains clearance and authoring limits. Backend marker, geometry and bake rules are documented in their source files. |
-| Strids injector | Combines package-localized strings from `package.json` with user and built-in strings. Package refresh and map-view activation publish the appropriate owned values without duplicate rows, retaining storage needed by live native readers. See `src/backend/strids.h`. |
+| Strids injector | Combines the user's `strings\strids.json` with the built-in strings. A refresh publishes the owned values without duplicate rows, retaining storage needed by live native readers. See `src/backend/strids.h`. |
 | Text-field clipboard | **Ctrl+C / Ctrl+V in the editor's text fields** — every free-text property (datapad and transmission message bodies) plus the text-backed int / float / vec3 / size inspectors. Copies the selection, or the whole field when nothing is selected; pastes over the selection, or at the caret. Multi-line text pasted into a single-line field collapses each break to a space; datapad bodies keep their newlines. Respects the field's own character cap. Vanilla has no text clipboard at all here (only the dev console accepts a paste) — and it is genuinely absent rather than disabled: the engine's SWF text-edit key handler has no Ctrl branch whatsoever. Entity-level Ctrl+C/Ctrl+V and Ctrl+X are untouched. Exceeds the original. |
 | Fault handling | The clone replaces the original's two kill-detours (which terminate DOOM) with the recover-in-place fault-shield (see [`fidelity.md`](fidelity.md)). |
 | SuperScript table | Merge the parked `cs_*` SuperScript objects into the engine's eventDef enumerate/lookup/dispatch paths. |
 | Math acceleration | An optional SIMD/threading accelerator for engine math; not required for parity (a perf feature, not a user-facing one). |
-
-Package folders require `package.json` and engine-shaped `assets/` inputs.
-The map-package installation flow requests runtime refresh only at a settled My
-Maps browser, with no editor, loading transition or dialog active. Requests wait
-while that boundary is unsafe. Failed registration, visibility or palette refresh
-keeps package-dependent maps gated; registering a name alone is insufficient.
 
 ## Also in the backend
 

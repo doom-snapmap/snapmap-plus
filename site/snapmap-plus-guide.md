@@ -61,14 +61,11 @@ world box, while each room still has to fit at its actual position.
 Save and load normally. Collision, navigation and marked blocking-volume
 navigation use the resized room. **Players need Snapmap+ to load these maps.**
 The resizing feature is included in the existing backend DLL; it needs no
-separate override package or map sidecar file.
+separate file beside the map.
 
 To return a map to vanilla compatibility, restore every Grid Room to its
 original dimensions, restore **View Distance** to 8192 (or zero) and **Fog Strength**
-to zero, and remove any objects or
-logic that require packages. Save again. Removing the last use of a package
-removes that map's embedded dependency; it keeps your installed package available
-for other maps. Other mod-only content must also be removed.
+to zero, and remove any other mod-only content. Save again.
 
 The faint green surface grid appears when placing or moving objects that use
 the game's navigation placement display, such as demons. Its brightness pulses,
@@ -163,14 +160,13 @@ A few practical notes:
 - **Coming from the original SnapHak?** If your DOOM folder still has the original (closed-source)
   SnapHak in it, the installer notices, tells you, and removes its files as part of the install —
   Snapmap+ fully replaces it, so nothing of the old tool needs to stay behind. Your maps, prefabs and
-  overrides carry straight over: anything in the old `%USERPROFILE%\snaphak` folder is copied into
-  Snapmap+'s own data folder (`%LOCALAPPDATA%\snapmap-plus`), and the old folder itself is never touched.
-- **Packages from an earlier release?** Install and update convert them to the current package
-  format first, keeping the originals; see
-  [Packages from earlier Snapmap+ releases](#packages-from-earlier-snapmap-releases).
+  strings carry straight over: they are copied from the old `%USERPROFILE%\snaphak` folder into
+  Snapmap+'s own data folder (`%LOCALAPPDATA%\snapmap-plus`). An old `overrides` folder is left where
+  it is (see [Packages](#packages)).
+- **Packages from an earlier release?** This release does not use them; see [Packages](#packages).
 - **Uninstalling:** `snapmap-plus uninstall` restores your DOOM folder to exactly what it was before.
-  Your own Snapmap+ data (`config.json`, prefabs, rawmaps, overrides under
-  `%LOCALAPPDATA%\snapmap-plus`) is left untouched.
+  Your own Snapmap+ data (`config.json`, prefabs, rawmaps under `%LOCALAPPDATA%\snapmap-plus`) is left
+  untouched.
 - `snapmap-plus help` in a terminal lists everything else: `status`, `changelog`, `version`.
   `status` and `version` also print your game's identity (`Game: DOOMx64vk.exe: DOOM 2016 build
   13954591 (20240321-104810-ginger-fuchsia, Vulkan, 3d8b4393)`), the same line the app puts on reports.
@@ -222,12 +218,10 @@ before the window first appears on later launches, so a saved dark theme does no
 loading.
 
 `config.json` is safe to leave alone. If you deliberately delete it, Snapmap+ treats that as **Reset
-preferences** and recreates the default light setting, Show Hidden off, Entity selection mode off, and user
-overrides enabled on the next startup. If the file is damaged, Snapmap+ keeps a timestamped `.corrupt.json`
-backup, restores defaults, and tells you once. If it cannot save a window setting, that setting still works
-for the current session and the window explains that it was not remembered. `sh_user_overrides` is different:
-a failed console write reports the failure, leaves this launch unchanged, and does not establish a change for
-the next launch. Updates, uninstall, and reinstall preserve the file.
+preferences** and recreates the default light setting, Show Hidden off and Entity selection mode off on the
+next startup. If the file is damaged, Snapmap+ keeps a timestamped `.corrupt.json` backup, restores defaults,
+and tells you once. If it cannot save a window setting, that setting still works for the current session and
+the window explains that it was not remembered. Updates, uninstall, and reinstall preserve the file.
 
 The **status bar** along the bottom stays visible on every tab too:
 
@@ -573,9 +567,8 @@ compatible with any classname — no mismatch risk, regardless of what type you'
 
 Rather than making you build one of these by hand every time, Snapmap+ seeds ready-to-place starting
 points — **Unknown**, **Timeline**, and **Lift** — directly into DOOM's own Create menu, under a
-**"*Custom"** tab. These ship as Snapmap+'s own built-in [overrides](#overrides) — the same mechanism you
-can use yourself to add your own declarations, served from memory rather than written into your
-`overrides\` folder.
+**"*Custom"** tab. They are built into Snapmap+ and served from memory; nothing is written to your data
+folder.
 
 ![DOOM's Create menu with the *Custom tab open, placing a Timeline entity](images/custom-palette-tab.jpg)
 
@@ -861,271 +854,13 @@ guessing what's in them:
 
 ---
 
-## Overrides
+## Packages
 
-**Overrides** supply editor tools, gameplay resources, or both through packages. Snapmap+ compiles
-those packages for the game without changing their authored files or DOOM's installed archives.
-Maps carry the complete packages whose gameplay resources they use. Other Snapmap+ players can
-install missing content through an in-game prompt.
-
-### Authoring and organizing packages
-
-An override package is a folder beneath `%LOCALAPPDATA%\snapmap-plus\overrides\` with one
-`package.json` and resources at their exact extracted engine paths inside `assets/`:
-
-```text
-overrides/
-  campaign-demons/
-    package.json
-    assets/
-      generated/
-        decls/
-          entitydef/...
-          material/...
-          md6def/...
-          sound/...
-        basemodel/...
-        skeleton/...
-        image/...
-        renderprogs/...
-        spirv/...
-      cooked/
-        model/...
-        anim/...
-      md6/...
-```
-
-These are examples, not required directories. Preserve actual paths, extensions and renderer
-permutations from your extractor. A `.bmodel`, MD6 mesh and MD6 declaration answer different
-engine requests; moving them all into a new `models/` folder would break those requests.
-
-Only `id` and `name` are required in `package.json`. Requirements and strings go in the same file:
-
-```json
-{
-  "id": "campaign-demons",
-  "name": "Campaign demons",
-  "requirements": {
-    "cvars": {
-      "g_useResourceBlackList": 0,
-      "g_useImageBlackList": 0
-    }
-  },
-  "strings": {
-    "en": {
-      "campaign_demon_name": "Campaign demon"
-    }
-  }
-}
-```
-
-Omit sections you do not need. Requirements accept supported settings, not arbitrary commands.
-The ID, display name and folder name do not have to match. IDs are normalized to
-lowercase automatically, with surrounding spaces, tabs and newlines removed;
-display names keep their capitalization. IDs use letters and digits, with dots,
-dashes and underscores allowed internally, and no consecutive dots. A UTF-8 byte-order
-mark in `package.json` is accepted. Runtime normalization does not rewrite your files;
-installer migration writes corrected metadata and keeps the original backup.
-Copies or variants of one package may share an ID. Independently authored mods should
-use different IDs, even when they edit the same game asset.
-Maps distinguish complete bundles by their content, so different variants sharing
-an ID can travel together without one replacing the other. If both need installation,
-they get separate folders; their descriptors and asset trees stay intact. Sharing an
-ID does not make incompatible resource edits compatible.
-Optional `hud.weapons.<weapon declaration name>.ammo_display` accepts `weapon` or `engine`.
-There are no versions, file lists, path mappings, author hashes, receipts, priorities or map-inclusion
-switches to maintain. Boss startup behavior belongs in its asset declarations and travels with them.
-
-Folders without `package.json` can organize packages however you like. An outer package may also
-contain nested components with their own `package.json` and `assets/`; that outer package is then
-one delivery unit. Most packages only need one descriptor and one asset tree.
-
-The installer creates an empty `my-overrides` starter package. It has no special priority; you can
-use your own package folders instead. Files outside an `assets/` tree are not game resource inputs,
-but auxiliary files and empty directories still travel with their authored package.
-
-Copy a complete package into `overrides` to add it to your library. Remove its folder to uninstall
-it. After manually adding, editing or repairing package files while DOOM is running, run
-`snapmap_plus_decl_server_rearm` in the console and return to My Maps. The refresh waits for that
-settled browser, outside an editor, transition or dialog; no game restart is needed. Map installation
-requests this refresh automatically. Authored sources remain available for making new maps after
-installation.
-
-### Authoring imported demons
-
-A custom demon's conductor declaration needs its spawn registration in `aiTypeList` and a matching
-`globalAIMods` row for its AI type. Without the modifier row, the native conductor can spawn the demon
-but ignore SnapMap's Health and Damage percentages. Use neutral `healthMod = 1` and `damageMod = 1`
-defaults unless your package deliberately changes them. Keep existing rows and authored values;
-package composition combines the added rows with the stock conductor and other packages.
-
-Set the initial team in the demon's settings. For later team changes, use the stock Encounter object's
-Assign Team input with Include Spawned enabled; directly placed demons do not expose that input.
-Campaign bosses retain native shields, phase rules and stagger restrictions, so accepting a SnapMap
-setting does not remove those behaviors. A package update also does not rewrite packages already
-embedded in a saved map: the author must update that map's package content to adopt a repair.
-
-### When a package cannot load
-
-A package with a problem of its own, such as an invalid `package.json`, a declaration with a syntax
-error, an unknown class or parent, an unsupported requirement or a file name the game cannot use, is
-skipped as a whole: its nested components and assets stay unloaded together. Every other package
-still loads. Run `sh_packages` in the console to see each skipped package folder and the reason.
-Skipped files are not changed on disk, so fixing the reported problem and refreshing brings the
-package back.
-
-Some problems are not about one package. If a file cannot be read because another program has it
-open, or two healthy packages make incompatible edits to the same value, loading keeps the previous
-working result and reports the files or packages involved instead of guessing. The same happens when
-a declaration inherits from a new declaration that only a different package adds, so keep new parent
-declarations in the same package as the declarations that inherit from them. Maps are stricter:
-a package carried by a map must be complete and valid, or that map does not load it.
-
-### Packages from earlier Snapmap+ releases
-
-Maps carrying packages from the older format convert automatically when opened.
-You do not need to enter the map first or export a rawmap. The original saved map
-is left intact; conversion prepares the package content for that load. Installation
-still asks for consent only when resources are missing, and installs complete
-converted packages. Saving the map carries the current package format forward.
-
-Onboarding also imports the original SnapHak profile's loose `overrides/generated/`
-tree and converts it using the same rules as older Snapmap+ packages.
-
-Earlier releases used a different layout: `decls/`, `images/` and `shaders/` folders instead of
-`assets/`, separate `resources/`, `requirements/`, `strings/` and `hud/` files, a `package.json`
-without an `id`, loose files directly under `overrides`, and `shader_includes`. Installing or
-updating Snapmap+ converts all of these to the current format before the new DLLs are copied.
-
-Each package converts completely or not at all. Conversion keeps your folders and package
-boundaries, moves resources to their engine paths below `assets/`, and folds requirements, strings
-and weapon HUD settings into `package.json`. Manifest entries become the installed game resources
-they named, except resources SnapMap already ships unchanged. Loose files become a
-`my-overrides` package. Disabled or unused files, such as `.backup` copies, stay in the package
-outside `assets/` and never become active. Declaration contents are never edited, even when they
-contain a mistake.
-
-Fresh installations create `my-overrides/package.json` and an empty
-`my-overrides/assets/` directory. Loose legacy content uses that same package
-name. If a package already occupies it, migration uses the next free suffix
-(`my-overrides-2`, and so on) without overwriting your existing files.
-
-The originals are moved, byte for byte, to
-`%LOCALAPPDATA%\snapmap-plus\override-backups\migration-...\original`. Nothing there is loaded
-or deleted automatically. To undo a conversion, close DOOM, remove the converted package folder and
-move the original back to the same place under `overrides`.
-
-If you copied the DLLs by hand, or later unzip a package made for an older release into your
-overrides folder, close DOOM and run this in a terminal next to `snapmap-plus.exe`:
-
-```text
-snapmap-plus migrate-overrides
-```
-
-Add `--doom "C:\path\to\DOOM"` when your DOOM folder is not found automatically; loose files,
-manifests and shader includes are identified from its installed resource catalog. Running the
-command again does nothing to packages that are already current. A package that cannot be converted
-is listed with the reason and left untouched, for example a `package.json` that is not valid JSON or
-two files that supply different bytes for the same resource. Fix it and run the command again.
-
-### In-game package prompts
-
-Opening a supported older map converts its package format automatically. That
-conversion itself has no prompt. These are the package-related DOOM dialogs:
-
-| Dialog | When it should appear | Result |
-| --- | --- | --- |
-| **This map needs ... mod package(s). Install it now?** (Yes / No) | The installed resources do not cover the map's supplied resources. It lists whole packages, file counts and size. | Yes installs the complete required bundles and continues that map request without restarting. No cancels the request and installs nothing. |
-| **NOTICE** with a map JSON, package descriptor, archive or payload diagnostic | Input is actually incomplete, corrupt or unsafe, or cannot be reconstructed faithfully. Supported legacy layout alone is not an error. | The request stops; the original map and authored files are retained. |
-| **NOTICE** naming a resource, policy or compilation failure | Required content is missing or inconsistent, edits conflict, or the engine cannot apply the required policy. | The attempted map provider is rolled back. A completed native fallback for unchanged game declarations is allowed. |
-| **NOTICE** with an installation or filesystem failure | Staging, verification, publication or final commit fails, including disk, permission or source-change failures. | The entire attempted install is canceled; retry after resolving the cause. |
-| **NOTICE** about an unfinished installation or previous map resources | An actual rollback or native resource retirement cannot finish. | Reuse stops to preserve existing data. A locked, already-retired temporary cache alone does not block another map. |
-| **NOTICE** about native map continuation | The retained native request fails to resume or load. | That request and pending installation are canceled. |
-| **Map save failed ...** or **package ... could NOT be packed/embedded ...** | Required package usage cannot be established, source files changed or cannot be read, or the complete payload cannot be written. | The save is refused instead of publishing a map with missing content. |
-| **Play could not read the current map's package requirements** | The editor cannot serialize or prepare the map for Play. | Play does not start; the editor state remains available. |
-
-The specific **NOTICE** text comes from the failed operation, so filenames and
-details vary. Ordinary cancellation, successful migration, complete resource
-coverage, a differently named bundle using already available resources, and
-vanilla-only maps should produce no package error notice. Map-authored resource
-values remain active for that map even when different local values are installed.
-
-### Combining packages
-
-The compiler combines compatible changes from packages and built-in editor support against the
-original resource. For example, two packages adding different Blocking Box properties retain both
-additions and Snapmap+'s own navigation property. Identical contributions share an effective result
-while retaining every source owner. Authored duplicates remain in both package folders.
-
-Editor properties keep their identity when moved between pages. One package can move a property
-to another page while another changes its description or adds different properties. For collections
-whose entries have known identities, the compiler also repairs counts and gaps in numbering and
-combines identical duplicate entries. These repairs affect the served output; your files stay intact.
-Fixed arrays and collections whose indices are referenced elsewhere keep their original indices.
-
-Incompatible edits to the same value, contradictory collection ordering, or a deletion that conflicts
-with another edit produce a diagnostic naming the resource and packages. Folder order does not
-silently choose a winner. Binary models, images, compiled shaders and audio banks are served as
-whole payloads; concatenating them would corrupt their formats. No game archive is overwritten.
-
-A malformed local package is skipped as one complete package. When otherwise valid packages
-disagree over a field, the packages changing that field are skipped together; independent edits to
-the same resource remain available. Structural conflicts that cannot identify individual field edits
-skip the changing packages for that resource. Unrelated packages and built-in support remain available.
-Conflicting package strings or HUD settings
-exclude the incompatible package pairs. `sh_packages` shows the skipped folders and reasons.
-Correcting the files allows those packages to return on the next refresh. Valid conflicting packages
-still count as installed files when a map supplies its own valid authored policy, avoiding unnecessary
-reinstallation. A map's required packages must compile together before that map can load.
-
-### What a map carries
-
-Saving selects packages automatically from gameplay resource use, including overrides of existing
-gameplay assets. Selected outer packages travel intact: assets, nested components, strings,
-requirements, editor helpers and auxiliary files. A mixed gameplay/editor package stays together.
-An editor-only tool does not select a package merely because the author used it.
-
-Native Unknown, idTarget command, Timeline and Lift entities do not acquire a package dependency
-just because an editor tool exposed them. A map using only unchanged stock SnapMap resources has
-no package payload and remains vanilla compatible. Actual mod content requires Snapmap+ on the
-receiving client.
-
-Grouping folders and nested components work with map delivery. There is no fixed package-count
-quota or the former small total-payload cap; available memory, storage and native format bounds
-still apply.
-
-### Playing a map with packages
-
-Snapmap+ checks whether the client already has the map's required resources. Package names, IDs,
-grouping and different local values do not by themselves require installation.
-
-| What you have | What happens |
-|---|---|
-| All required resources | The map loads without an installation prompt. |
-| Cyberdemon; the map carries another Cyberdemon grouping | No prompt when its required paths are already available. |
-| Cyberdemon; the map also needs missing Hell Guard assets from Boss Demons | One prompt installs the **whole Boss Demons package**, including its duplicate Cyberdemon files. |
-| The same package ID, but a required file is missing | The complete incoming variant installs beside your existing authored folder. |
-| Different local values, such as 12,000 health instead of the map's 10 | No prompt for that difference. The map uses its authored 10; your local source remains 12,000. |
-| A missing required resource with no supplier | Loading reports the missing resource rather than silently substituting a default. |
-
-Map-authored resources and policy govern both Play and Edit for that map. Leaving it restores your
-local library view. This applies across resource types, not only to demon health. Saving an incoming
-map retains its authored bundles even when no installation was needed; local files do not replace
-its author’s work. Installed packages can also be used in new maps and carried to the next player.
-
-Accept the in-game prompt and Snapmap+ prepares complete packages, activates them and continues
-the requested load automatically. **Installing or serving packages does not restart or reset DOOM.**
-Declining cancels that pending mod-dependent load without installing anything; retrying can ask
-again. Interruption or activation failure cancels the entire new install group. Retry from the
-beginning; no partial package installation is kept for resuming.
-
-### Temporarily disabling your library
-
-For troubleshooting, `sh_user_overrides 0` saves a next-launch preference to disable user packages.
-`sh_user_overrides 1` restores that preference. This diagnostic switch requires a restart; normal
-map-package installation does not. Built-in editor defaults and DOOM resources remain available.
-Run `sh_user_overrides` without an argument to inspect the current and saved state. A failed save
-does not guarantee a next-launch change. The startup log lists active overrides.
+The package system is being rebuilt for the April 2024 DOOM update (Steam build 13954591). This
+release reads, installs and carries no packages: nothing is loaded from
+`%LOCALAPPDATA%\snapmap-plus\overrides\`, no `package-cache` or `package-staging` folder is created,
+and a map saved or published with packages by an earlier release loads as a plain map without them.
+Folders that earlier releases left are not touched; you can keep or delete them.
 
 ---
 
@@ -1177,13 +912,6 @@ Five toggles for your own player, mainly useful while testing a map solo:
 | `noPlayerKill` | You can't be killed outright. |
 | `noTarget` | Enemies ignore you. |
 
-### Override controls
-
-| Command | What it does |
-|---|---|
-| `sh_packages` | Lists installed packages, compiler results and every [skipped package](#when-a-package-cannot-load) with its reason. `sh_packages dependencies [type name]` inspects observed native dependencies. |
-| `sh_user_overrides [0\|1]` | On a successful save, controls whether player [override](#overrides) files load on the next DOOM launch. `0` disables and `1` enables only the first resource layer; restart DOOM to apply either value. A failed save is reported and leaves this launch unchanged, with no next-launch change guaranteed. With no argument, reports this launch's state plus either the saved next-launch state or a volatile value not confirmed saved. |
-
 ### Cvars
 
 Settings you read or change with `<name>` or `<name> <value>` in the console:
@@ -1211,7 +939,7 @@ them, but they're listed here for completeness since `sh_help` shows them too:
 | `cs_fieldinfo` | Print field info for a type. |
 | `cs_start_render_logging` | Set up the render-logging hook. |
 | `sh_disable_devmode` / `sh_reenable_devmode` | Turn DOOM's developer features off, or back on, without losing your Bethesda.net connection. |
-| `sh_dialogtest [id] [buttons] [text]` | Raise DOOM's own modal dialog carrying the given text — the same surface behind the [mod-package install prompt](#maps-can-carry-their-own-mod-packages). |
+| `sh_dialogtest [id] [buttons] [text]` | Raise DOOM's own modal dialog carrying the given text. |
 | `sh_dialogpoll` | Read the answer to the dialog `sh_dialogtest` raised. |
 | `sh_dialogdump` | Print the engine's dialog queue: id, button set, and flag bytes. |
 

@@ -52,17 +52,17 @@ auto under `--yes`). This never blocks the mod install — the DLLs deploy regar
 
 ## Per-user data is NOT shipped
 
-The bundle ships **no player override files**. At runtime the tool reads your own from
-`%LOCALAPPDATA%\snapmap-plus\overrides\`. Each package has a `package.json` marker.
-Existing identities use the file shadow; new text decl identities under
-`overrides\<package>\decls\<type>\` are registered by the decl server at boot.
-The map-package installation flow also requests a guarded runtime refresh of
-declarations, strings and installed-resource references; manual file changes
-require a restart. Published declaration snapshots remain valid for active
-readers. Each published entry is keyed by
-`decltree/<type>/<logical-name>.decl`; no aggregate source file is created or served.
-Snapmap+'s small built-in defaults are instead served from memory by the backend DLL. Neither user mechanism
-packages or distributes referenced binary assets.
+The bundle ships no player content. At startup the backend creates `%LOCALAPPDATA%\snapmap-plus\`
+with its `strings\` and `prefabs\` folders, and nothing else. Snapmap+'s small built-in default
+declarations are served from memory by the backend DLL.
+
+### Packages
+
+The package system is being rebuilt for the April 2024 DOOM update (Steam build 13954591). This release
+reads, installs and carries no packages: nothing is loaded from `%LOCALAPPDATA%\snapmap-plus\overrides\`,
+no `package-cache` or `package-staging` folder is created, and a map saved or published with packages by
+an earlier release loads as a plain map without them. Folders that earlier releases left are not touched;
+you can keep or delete them.
 
 The bundle also ships no `config.json`. That file is runtime-owned player data, separate from the
 installer's executable and `install.json` record. The installer never rewrites it and preserves it across

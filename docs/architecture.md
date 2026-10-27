@@ -12,7 +12,7 @@ in the snaphak-re findings system.
 
 | Component | Responsibility | Start reading |
 |---|---|---|
-| Backend | Bootstrap, hooks, editor operations, packages and installed-resource access. | `src/backend/dllmain.c` |
+| Backend | Bootstrap, hooks, editor operations and installed-resource access. | `src/backend/dllmain.c` |
 | Shared interface | Matched DLL contract, callback bindings and shared queues. | `src/common/snapmap_plus_iface.h` |
 | Frontend | Companion window, messages, editor views and preview controls. | [WebView UI](webview-ui.md) |
 | Fault shield | Selected engine-fault recovery and local crash evidence. | `src/fault_shield/fault_shield.c` |
@@ -210,7 +210,7 @@ while the worker waits. A call that has not started when its wait expires is
 withdrawn and never runs. A started call borrows the worker's data, so the
 worker waits for it to finish; the main thread never waits on the worker.
 
-Package, navigation and staging maintenance run after a successful native engine
+Navigation and staging maintenance run after a successful native engine
 frame on DOOM's verified main thread. Recovery suppresses that pass. The frontend
 queue drain does not schedule native maintenance or display engine dialogs.
 
@@ -261,9 +261,9 @@ completion cannot replace a newer selection. Large serialized results use owned,
 growable buffers instead of silently truncating fixed arrays.
 
 Asset browsers and prefab previews read declarations and resources from the
-player's installed game and enabled packages. The product does not embed DOOM
-assets. Resource caches and package snapshots need explicit reader lifetimes;
-rescanning must not invalidate storage a reader or native object still uses.
+player's installed game. The product does not embed DOOM assets. Resource
+caches need explicit reader lifetimes; a refresh must not invalidate storage a
+reader or native object still uses.
 
 Navigation snapshots and shipped resource reads run on the engine thread.
 The snapshot reader takes collision dimensions from each cloned entity's
@@ -298,9 +298,6 @@ bake refusal concerns that area's route complexity, not the map's entity count.
 It must remain distinguishable from a stale preview or a failed local obstacle
 query, either of which can occur while the underlying AAS remains loaded.
 
-Override misses carry the package generation that produced them. A rescan makes
-old misses inapplicable even when an earlier lookup completes concurrently.
-
 ## Configuration
 
 The backend owns `%LOCALAPPDATA%/snapmap-plus/config.json`, including defaults,
@@ -317,235 +314,20 @@ Configuration descriptors in `src/backend/config.c` define available keys and
 change behavior. Deleting the file resets preferences at the next startup.
 Installer updates and uninstall preserve player configuration.
 
-## Packages and refresh boundaries
+## Packages
 
-A package has one `package.json` with identity, requirements, strings and supported
-presentation policy, plus engine-shaped resources under `assets/`. The outer
-package is the intact delivery unit, including nested components and auxiliary
-files. Discovery, semantic compilation and native publication are separate
-operations. Incomplete inventories must not publish a partial package set.
-Author-facing format and examples live in the [player guide](../site/snapmap-plus-guide.md#overrides).
+The package system is being rebuilt for the April 2024 DOOM update (Steam build
+13954591). This release reads, installs and carries no packages: nothing is loaded
+from `%LOCALAPPDATA%\snapmap-plus\overrides\`, no `package-cache` or
+`package-staging` folder is created, and a map saved or published with packages by
+an earlier release loads as a plain map without them. Folders that earlier
+releases left are not touched; you can keep or delete them.
 
-A published map launched from the SnapMap browser is read under an inspection
-scope and then decided by its own text in `map_published.c`: a map whose text
-carries no `smpkg.` shard is handed to the untouched native launch, so the
-package context, the retained request and the `map_transition.c` handoff never
-run for it and the compiler's readiness is never consulted. Only a map that
-carries packages takes the retained route, which decodes the selection's own
-compiled document at the native allocation boundary.
-
-The local authoring library isolates defects that belong to one outer package.
-`sh_package_sources_scan_local` skips a package whose own content is invalid:
-its descriptor, an unusable or case-duplicate name, a link, or a path the
-runtime cannot address. The compiler reports an invalid package through
-`invalid_package` for bad per-package policy, text that is not a declaration, a
-path under `generated/decls` that is not a declaration identity, a contribution
-the declaration parser cannot read, and a resource that fails composition again
-with only that package, the installed original and product defaults. Typical
-typed defects are an unknown class, a parent no package declares, an inheritance
-cycle inside the package, an out-of-range fixed array entry or a contradiction
-of a product default. The runtime removes that whole package with its nested
-components and compiles again. A local resource conflict between independently
-valid packages reports its changing owners through `conflicted_packages` and
-excludes those complete units together. Scalar field conflicts identify every
-source editing that value, preserving independent edits to the same resource.
-Structural conflicts and adapters without precise attribution conservatively
-identify the resource's changing owners. This includes duplicate contributors;
-none becomes a winner through discovery order. Policy conflicts identify all
-incompatible owner pairs, preserving unrelated policy keys and packages.
-The runtime recompiles the remaining library, including built-ins. Valid excluded
-peers remain in the physical installation inventory: a map's own valid authored
-provider can use their available paths without another installation. Invalid
-packages do not establish availability. Source files are never removed.
-
-Storage, hashing, read and allocation failures, sources that change during a scan,
-a parent that only another package declares, unavailable reader metadata and
-original failures are not content-isolation decisions: they preserve the previous
-provider. Startup package identities and map installation planning use the same
-separation of inventory and effective compilation; a map-carried bundle is still read with
-the strict all-or-nothing scanner. Skipped folders and reasons appear in
-`sh_packages`, never as silent omissions.
-
-Map admission and save failures carry the first diagnostic back to the native
-notice and backend log. JSON validation includes a byte offset and rejection
-reason; preparation distinguishes inline dependency traversal from ownership
-selection, and HUD activation has its own diagnostic. Embedded archive identity
-errors include the supplying package ID. These diagnostics report where the
-product refused data; they do not establish that the engine would refuse the
-same map or that a package's assets are corrupt.
-
-Native map/state strings follow DOOM's byte-string contract. The shared JSON
-parser exposes explicit `sh_native_json_*` entry points for map admission,
-save preparation, dependency traversal, session extraction and native grid-room
-string decoding. These retain unescaped high bytes verbatim, including older
-Windows text mixed with UTF-8. They share syntax, escape, duplicate-key and depth
-validation with the strict parser; they do not infer a code page or rewrite a
-save. Configuration, package descriptors and embedded archive metadata still
-require UTF-8 through the ordinary `sh_json_*` entry points. Override-folder
-migration is separate and cannot repair or invalidate a native map's text.
-
-Editor definition collections include input-action and output-listener lists.
-Their declaration paths are semantic identities; adding an action in one
-package and another in a product default combines them through the same scalar
-collection composer. Identical entries deduplicate, compatible ordering is
-preserved, and deletions are evaluated against the original. These editor
-capabilities carry no gameplay ownership and do not embed their package merely
-because a map uses the exposed vanilla entity.
-
-Discovery uses wide-character enumeration, so Unicode and long group paths are
-found. A marked folder whose path does not fit the runtime package record is
-reported as a skipped package. The data root itself still comes from the ANSI
-`SHGetFolderPathA`; a profile path outside ASCII remains unsupported.
-
-Local libraries use the current layout. The installer converts old folders
-before replacing the DLLs and exposes that conversion as
-`snapmap-plus migrate-overrides`. Its contract, including original SnapHak
-onboarding, is in the [installer README](../installer/README.md#converting-overrides-from-earlier-releases).
-
-Old map-carried packages convert before current descriptor validation. Descriptor
-parsing canonicalizes IDs with ASCII case folding and trims surrounding JSON
-whitespace, while preserving display names and authored source bytes. The same
-normalizer serves migration and map carrier identities. A UTF-8 BOM is accepted;
-invalid punctuation, internal spaces, embedded NULs and corrupt JSON still fail.
-The installer routes noncanonical IDs through the shared planner before strict
-output validation, writes the corrected descriptor and retains the original backup.
-Unchanged installed declarations retain the engine's completed fallback behavior:
-the compiler records exact equality against game originals, and native admission
-permits a completed default only for those bytes. Modified declarations still
-require a successful parse; pending loads, exceptions and the editor palette's
-entity contract remain failures. This handles uncooked campaign placeholders
-without rewriting source data or adding package-specific exceptions.
-
-`package_migration.c` supplies the shared, read-only planner for descriptors,
-namespaces, manifests, requirements, strings and HUD rules. The backend links
-it directly; the installer embeds a private DLL built from the same source.
-The Go adapter owns discovery, verified filesystem snapshots, installed-file
-reads and recoverable publication. `package_legacy.c` owns verified ZIP input,
-nested components and private map-context output. Original transport checksums
-are verified first; conversion never rewrites the original save or local
-library. Current archive bytes pass through unchanged. Imported campaign
-records use their resource name when the index filename is empty, and bytes
-identical to all SnapMap providers stay installed dependencies.
-
-Installation still depends on resource availability, not package folder names
-or descriptor equality. A migrated map activates its authored resource view;
-it does not substitute an installed variant's values. Missing resources require
-consent to install complete converted bundles. Declining leaves the library
-unchanged. After the native provider releases a private context, filesystem
-locks defer deletion of that retired cache without preventing another map load.
-Failures to release a live provider or roll back an installation remain gates.
-
-Save transport identifies each complete source tree independently of its descriptor
-ID. This prevents two different same-ID variants from replacing each other's shards;
-identical complete copies need only one payload. The existing shard grammar remains
-unchanged, and descriptor-ID carriers are still accepted. Complete-tree keys are
-verified against the original archive before any conversion. Installation keeps all
-variants required by the current map, including those already present when only a
-different variant is missing. Published folders use package IDs with numeric suffixes
-when needed; authored descriptors and member paths remain intact. Save packing also
-rechecks the selected tree identity so changed sources cannot publish a mismatched map.
-
-Compilation includes built-in overrides and package sources relative to verified
-originals. Compatible changes compose using native field and collection semantics;
-contradictions are reported before publication. Opaque payloads are selected whole.
-The provider never modifies authored sources or installed game archives. Native
-reader and resource-family details belong alongside their implementation.
-
-Registered semantic collections normalize their count, index gaps and identical
-duplicate entries in private parsed trees. Different entries claiming one identity
-are rejected. Single contributions take the same validation route; an already
-valid contribution keeps its exact bytes. Fixed native arrays and unadapted
-index-referenced collections never undergo this renumbering.
-
-Native inherited declarations can instead contain sparse slot patches with no
-count or member identity in the child (for example, only `item[4].descriptionTag`).
-These retain their inherited indices and compose independent field edits at the
-same slot when the parent layout is consistent. They are not full collections
-with missing entries. Mixing complete layouts with unresolved inherited patches,
-or changing the parent while composing those patches, requires resolving that
-layout and is refused rather than guessing identities from numeric positions.
-
-Grouped collection adapters separate stable member identity from presentation
-placement. All SnapMap editor property sheets use this contract: a property's
-`path` remains its identity across pages, and adding/removing pages or moving a
-property can compose with independent edits to its fields. Ordering constraints
-apply within the final page; conflicting moves, deletions versus edits, ambiguous
-duplicate identities and ordering cycles remain conflicts. The reusable adapter
-is registered by the product for known formats, never by an author switch or a
-specific resource filename. Sources and embedded delivery bundles stay intact.
-
-Package inventories and resource ownership grow with the installed set. There
-is no fixed package-count quota in discovery, compilation, saved-map selection,
-or installation. Duplicate resources keep every contributing package as an
-owner; their authored directories remain intact. Internal ownership sets are
-never serialized into author descriptors. A failed allocation or incomplete
-scan refuses the new inventory and preserves the published compiler snapshot.
-
-The override provider serves file content and an immutable declaration view.
-The declaration server registers new identities and refreshes existing shadows;
-the installed-resource bridge supplies data already present in the game. A
-package can therefore refer to installed assets without redistributing them.
-
-Declaration classification reads source records and the live registry without
-loading content. Native `DeclFind` can materialize archive resources even with
-`makeDefault=0`; using it after the resident snapshot creates consumers that miss
-the refresh and retain pointers into reconstructed dependencies. Materialization
-starts only after the complete refresh set has been reconstructed and marked.
-
-An existing loaded declaration is reconstructed only when the provider diff or
-the captured native dependency graph selects it. Merely remaining in a package
-does not invalidate its caches. Recovery retains the affected identities even
-if a failed parse erased their dependency edges. Archive aliases count as direct
-changes even when the native path names cooked data. Compiled declaration
-identities also travel with the provider diff: a package-only source
-has no archive alias, and its removal must retire the native object rather than
-attempt to reload the missing source. Reflection-verified native
-parent links also select declarations that copied fields from a changed ancestor,
-including startup children whose lifetime has not yet been promoted. Ordinary
-startup consumers and runtime map-owned consumers keep their lifetime exclusions.
-After settings reload, native
-World Text font resolution runs before palette previews, under the same heap
-and renderer scopes as material rebinding; parsing font names alone does not
-restore the editor's cached font objects.
-
-Boot binds runtime dependencies even when no package declarations are present.
-Runtime refresh is a main-thread operation at a settled My Maps browser, with
-the editor inactive, no loading transition and no dialog. Unsafe requests remain
-pending until these conditions hold. Refresh drains required commands
-before native publication. The entire native refresh uses verified process-heap
-scope so palette arrays and declaration-owned strings survive map teardown;
-resource-level promotion separately retains the engine's resource objects.
-Every exit restores the previous heap scope. Failed admission or restoration
-keeps package-dependent maps gated.
-
-Refresh includes existing shadows and string changes, not only new declaration
-names. Reader synchronization keeps old snapshots valid until readers release
-them. Success includes materialization, required visibility and palette refresh;
-registration alone is insufficient to authorize loading a package-dependent map.
-
-The registered installed-resource inventory determines whether a map needs an
-installation. IDs, grouping, fingerprints and different local values are not
-installation requirements. Private incoming map sources cannot satisfy that
-installed-inventory check. Gameplay ownership selects complete authored bundles;
-unchanged vanilla SnapMap resources and built-in editor exposure add no delivery
-owner. Mixed bundles retain their editor support when gameplay selects them.
-
-Local-library and map-authored views have separate ownership. The map view is
-authoritative in Play and Edit; retirement restores the local view without
-rewriting its files. Saving retains incoming bundle provenance even when existing
-resources allowed installation to be skipped. Declared resource-loading permissions
-remain active for installed packages; unused gameplay presentation policy does not.
-
-Consent covers complete supplying bundles for missing resources. Preparation,
-publication, activation and native load form one transaction. Successful activation
-continues the retained load request; cancellation, interruption or failure rolls
-back the entire new install group. Recovery records prevent admission of an
-uncommitted group after interruption. Restoring the prior provider precedes native
-consumer recovery. Open streams retain immutable sources until released. No game
-restart/reset or forced map reload is an installation recovery mechanism.
-
-`decl_server.h`, `overrides.h`, `resource_bridge.h`, `strids.h` and `map_package.h`
-define the detailed contracts.
+The load path keeps one duty from that system: `map_legacy_payload.c` removes
+the retired `smpkg.` string variables before the native parse and logs one line.
+The resource provider (`overrides.c`) still serves map navigation, the generated
+Grid Room variants, the built-in defaults and the installed originals through
+`read_installed_resource`.
 
 ## Failure reporting
 

@@ -125,19 +125,12 @@ loaded into, so `DOOMx64vk.exe` and `DOOMx64.exe` are both fine (see `-DoomAlt` 
 **The installer (Go):**
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File installer\build-migration.ps1
 cd installer
 gofmt -l .            # must print nothing (format with: gofmt -w .)
 go vet ./...
 go test ./...
 cd ..
 ```
-
-Legacy conversion uses one native planner shared with the game backend. The
-installer embeds a private build of that planner; `build.ps1` and
-`installer/build.ps1` build it automatically. Run `build-migration.ps1` before
-standalone Go commands after changing the planner or on a fresh checkout.
-It needs the same MSVC tools as the backend. No extra file ships in the overlay.
 
 **The native unit tests:**
 
@@ -147,8 +140,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tests\run-tests.ps1
 
 The runner builds and executes the self-contained native suites, then runs the
 JavaScript suites with Node 22.13 or newer. No game is needed for these checks.
-They cover patch ownership and rollback, edit dispatch, package and resource
-lifetimes, navigation, crash records, previews, frontend contracts and Worker
+They cover patch ownership and rollback, edit dispatch, resource lifetimes,
+navigation, crash records, previews, frontend contracts and Worker
 request handling. The current test manifest is `tests/run-tests.ps1`.
 
 Run the Worker runtime suite as well when changing either service. It verifies
@@ -236,8 +229,7 @@ it), label it as such in the comment rather than putting it in a field that mean
 
 An entry with `known_rva=0` explicitly has no pinned-build fallback. It must
 still resolve uniquely in both images; the tests skip only its nonexistent
-pinned-address comparison, not signature resolution. The weapon HUD entries
-use this form.
+pinned-address comparison, not signature resolution.
 
 A third test, `xinput_ordinal_test.c`, is a **runtime** cross-check of the XInput ordinal invariant — it loads
 a built DLL and calls its exports by ordinal. CI verifies that same invariant *statically* with `dumpbin` (the

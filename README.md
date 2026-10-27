@@ -102,11 +102,12 @@ recovery. Deleting it resets preferences on the next startup. Manual changes
 are read at startup; UI settings use the registered service. The installer
 preserves this file.
 
-Each override package has one `package.json` and an `assets/` tree preserving
-extracted engine paths. Maps carry complete authored packages and prompt only
-when required resources are missing. In-game installation activates them and
-continues loading without restarting DOOM. See the
-[package guide](site/snapmap-plus-guide.md#overrides) for authoring and delivery.
+The package system is being rebuilt for the April 2024 DOOM update (Steam build
+13954591). This release reads, installs and carries no packages: nothing is
+loaded from `%LOCALAPPDATA%\snapmap-plus\overrides\`, no `package-cache` or
+`package-staging` folder is created, and a map saved or published with packages
+by an earlier release loads as a plain map without them. Folders that earlier
+releases left are not touched; you can keep or delete them.
 
 ## Credits
 

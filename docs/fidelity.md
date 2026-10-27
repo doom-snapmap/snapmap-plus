@@ -32,15 +32,9 @@ values occupy an ordinary map variable that vanilla can load, with no separate
 enable or compatibility flag. Legacy saved values remain readable; the former
 disabled mode migrates to defaults. Zero fog now preserves built-in module fog.
 
-Embedded packages are selected from the map's current declaration references
-on each native save. Deleting the last dependent object removes its package
-payload from that map; packages still referenced by objects or logic remain,
-and installed client packages are not removed. A native save/reopen test with a
-resized room, custom rendering and Cyberdemon retained the identical embedded
-package. After deleting Cyberdemon and resetting the room and rendering,
-the same saved map loaded and completed Play/return with both Snapmap+ DLLs
-uninstalled on Vulkan. This does not establish compatibility for unrelated
-mod-only content or console platforms.
+This release embeds no packages: the package system is being rebuilt for the
+April 2024 DOOM update, and a map carrying packages from an earlier release
+loads as a plain map without them.
 
 The `sh` console dispatcher executes SnapStack handlers on DOOM's main thread,
 inside the engine's command callback. SnapHak queued these handlers onto its
