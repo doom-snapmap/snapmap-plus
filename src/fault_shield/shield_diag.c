@@ -12,6 +12,7 @@
 #include <tlhelp32.h>
 #include <shlobj.h>
 #include <dbghelp.h>
+#include "../backend/host_image.h"
 
 #pragma comment(lib, "shell32.lib")   /* SHGetFolderPathA */
 #pragma comment(lib, "dbghelp.lib")   /* MiniDumpWriteDump */
@@ -341,6 +342,13 @@ static DWORD WINAPI env_thread(LPVOID p)
     diag_log("===================================================================");
     diag_log("SNAPMAP+ DIAGNOSTIC BUILD -- catch-all crash + environment logger");
     diag_log("  pid=%lu  dir=%s", GetCurrentProcessId(), g_dir);
+    {
+        /* The same game identity the reports carry (hashing runs off the loader lock). */
+        char game[SH_GAME_IDENTITY_MAX];
+        if (sh_host_game_identity(game, sizeof game)) diag_log("  game: %s", game);
+        else diag_log("  game: unsupported executable %s (%s)", sh_host_image_name(),
+                      sh_host_executable_hash8()[0] ? sh_host_executable_hash8() : "unhashed");
+    }
     diag_log("  Reproduce the crash, then send sh_diag.log AND sh_crash.dmp.");
     diag_log("===================================================================");
 

@@ -47,6 +47,7 @@ int main(void)
         r.engine_text = "^1ERROR: \"quoted\" thing";
         r.dump = ""; r.version = "0.2.0-beta.3"; r.time = "2026-07-18 12:00:00";
         r.renderer = "opengl";
+        r.game = "DOOM 2016 build 13954591 (20240321-104810-ginger-fuchsia, OpenGL, 1bddecaa)";
         n = crash_record_json(buf, sizeof buf, &r);
         assert(n > 0 && (int)strlen(buf) == n);
         assert(buf[0] == '{' && buf[n - 1] == '}');
@@ -60,6 +61,8 @@ int main(void)
         assert(strstr(buf, "\"version\":\"0.2.0-beta.3\""));
         /* Retain the crashing session's renderer even if the game later relaunches. */
         assert(strstr(buf, "\"renderer\":\"opengl\""));
+        /* The game identity captured at arm time rides beside the renderer. */
+        assert(strstr(buf, "\"game\":\"DOOM 2016 build 13954591 (20240321-104810-ginger-fuchsia, OpenGL, 1bddecaa)\""));
         assert(strstr(buf, "\"time\":\"2026-07-18 12:00:00\""));
     }
     /* NULL fields degrade to empty strings, not crashes */
@@ -71,6 +74,7 @@ int main(void)
         assert(strstr(buf, "\"kind\":\"fatal\""));
         assert(strstr(buf, "\"stack\":\"\""));
         assert(strstr(buf, "\"renderer\":\"\""));
+        assert(strstr(buf, "\"game\":\"\""));
     }
     /* Every insufficient capacity fails empty, including an exact byte fit
      * without room for NUL. Guard bytes detect writes outside the capacity. */

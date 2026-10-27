@@ -24,6 +24,7 @@ static char g_crash_dir[MAX_PATH] = {0};   /* <game>\snapmap-plus\crash */
 static char g_dump_path[MAX_PATH] = {0};   /* <game>\snapmap-plus\logs\sh_crash.dmp */
 static char g_inst_version[48]    = {0};   /* installed version at arm time */
 static const char *g_renderer     = "";    /* "vulkan"/"opengl" at arm time (see crash_report_init) */
+static char g_game[SH_GAME_IDENTITY_MAX] = {0};   /* game identity at arm time, never at fault time */
 static minidump_write_t g_minidump_write = NULL;
 static volatile LONG g_records_written = 0;
 static volatile LONG g_fatal_oneshot   = 0;   /* first-chance 0xC0000374/0xC0000409 full capture, once */
@@ -105,6 +106,7 @@ static void crash_report_file_locked(const char *kind, unsigned long code, uintp
     r.module = module_name; r.stack = stack; r.engine_text = engine_text;
     r.dump = dump_path; r.version = g_inst_version; r.time = tbuf;
     r.renderer = g_renderer;
+    r.game = g_game;
     len = crash_record_json(g_rec_buf, sizeof g_rec_buf, &r);
     if (len <= 0) return;
 
@@ -264,6 +266,8 @@ void crash_report_init(void)
     /* Snapshot the renderer before faults can occur: its first lookup may take the
      * loader lock. An unresolved renderer stays empty in the record. */
     g_renderer = sh_host_renderer_name();
+    /* The game identity hashes the executable once; do it here, never in a handler. */
+    sh_host_game_identity(g_game, sizeof g_game);
     dh = LoadLibraryA("dbghelp.dll");
     if (dh) g_minidump_write = (minidump_write_t)GetProcAddress(dh, "MiniDumpWriteDump");
 }

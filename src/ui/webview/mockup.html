@@ -988,7 +988,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     'Play_vo_snapmaps_genericfemale1_areaisoverrun_01|doom_dlc3_vo\n' +
     'Play_vo_snapmaps_genericfemale1_argh1_01|doom_dlc3_vo\n';
 
-  function previewList() { return {kind:'list', version:'local (preview)', renderer:'', editorReady:true, count:0, entities:previewEnts, timelines:previewTimelines}; }
+  function previewList() { return {kind:'list', version:'local (preview)', renderer:'', game:'', editorReady:true, count:0, entities:previewEnts, timelines:previewTimelines}; }
   var PREVIEW_MATERIALS =
     'default\nmaterial/snapmap/dynamic_block_textured_gore_floor\n' +
     'models/characters/doommarine/doommarine_eye\n' +
@@ -2597,6 +2597,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       bridgeDot.title = 'Connected';
       appVersion = d.version || '';   // rides along in feedback reports
       appRenderer = d.renderer || '';  // 'vulkan' | 'opengl' | '' -- rides along too
+      appGame = d.game || '';          // the backend's game identity; '' = not attached
       document.getElementById('verText').textContent = 'Snapmap+ ' + (d.version || '');
       flash('Updated: ' + new Date().toLocaleTimeString());
       allEntities = d.entities || [];
@@ -6118,6 +6119,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   // ---- feedback report dialog (the bottom-right "?") ----
   var appVersion = '';          // from the list message; "" until the first list arrives
   var appRenderer = '';         // which renderer the game is running, from the same message
+  var appGame = '';             // "DOOM 2016 build ... (binary, renderer, hash)", from the same message
   var reportInFlight = false;   // one submit at a time (the host guards too)
   var rpModal = document.getElementById('reportModal');
   function showReportModal(s){ if (rpModal) rpModal.style.display = s ? 'flex' : 'none'; }
@@ -6147,6 +6149,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       contact: (document.getElementById('rpContact').value || '').trim(),
       version: appVersion,
       renderer: appRenderer,
+      game: appGame,              // '' -> the relay writes "- Game: not attached"
       website: document.getElementById('rpWebsite').value || ''   // honeypot -- must stay empty
     })});
   });
@@ -6189,6 +6192,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     if (rec.time) line += '  --  ' + rec.time;
     if (rec.version) line += '  --  version ' + rec.version;
     if (rendererLabel(rec.renderer)) line += '  --  ' + rendererLabel(rec.renderer);
+    if (rec.game) line += '\n' + rec.game;
     document.getElementById('crashSummary').textContent = engineText ? engineText + '\n' + line : line;
     document.getElementById('crashStack').textContent = rec.stack ? rec.stack : '(no call stack captured)';
   }
@@ -6219,6 +6223,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     // the crash record's own renderer, not the live one: the game relaunches into the other
     // executable when r_renderAPI changes, so this session may not be the one that died
     if (rendererLabel(rec.renderer)) lines.push('Renderer at crash: ' + rendererLabel(rec.renderer));
+    // the game identity the backend captured when it armed, like the renderer
+    lines.push('Game at crash: ' + (rec.game || 'not recorded'));
     if (engineText) lines.push('Engine message: ' + engineText);
     lines.push('Call stack:', rec.stack ? rec.stack : '(none captured)');
     if (rec.dump)
@@ -6230,6 +6236,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     b.disabled = true; b.textContent = 'Sending...';
     post({cmd:'crashSubmit', title: title, body: body,
           renderer: rec.renderer || '',   // '' -> the host falls back to the live renderer
+          game: rec.game || '',           // '' -> the host falls back to the live game identity
           contact: (document.getElementById('crContact').value || '').trim(),
           attachLogs: document.getElementById('crAttach').checked ? 1 : 0,
           website: document.getElementById('crWebsite').value || ''});   // honeypot -- must stay empty

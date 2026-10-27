@@ -1,6 +1,7 @@
 /* host_image.c -- see host_image.h. */
 #include <windows.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 #include <bcrypt.h>
 #pragma comment(lib, "bcrypt.lib")
@@ -78,14 +79,15 @@ static void resolve_once(void)
 const sh_build_identity SH_KNOWN_BUILDS[] = {
     {{0x3d,0x8b,0x43,0x93,0x64,0x9f,0x80,0xbd,0xae,0x85,0xc1,0x9a,0xe2,0xc9,0x85,0xc4,
       0x5e,0xc9,0xac,0x54,0xf7,0x4a,0xb0,0x4a,0x18,0x81,0x6e,0x30,0xea,0xd6,0x3c,0x21},
-     1, "13954591-vk"},
+     1, "13954591-vk", "13954591", "20240321-104810-ginger-fuchsia"},
     {{0x1b,0xdd,0xec,0xaa,0x4e,0x86,0x85,0x04,0x12,0xf9,0x6e,0x31,0x17,0x97,0x8b,0xce,
       0x1e,0xc7,0xbb,0x70,0x1a,0xe1,0xb5,0xa3,0x31,0x20,0xc2,0x1e,0x44,0x21,0xe5,0x1e},
-     0, "13954591-gl"},
-    {{0}, 0, NULL}
+     0, "13954591-gl", "13954591", "20240321-104810-ginger-fuchsia"},
+    {{0}, 0, NULL, NULL, NULL}
 };
 
 static const sh_build_identity *g_identity = NULL;
+static char g_host_hash8[9];
 
 const sh_build_identity *sh_host_identity_for_digest(const unsigned char digest[32])
 {
@@ -140,7 +142,19 @@ static BOOL CALLBACK fingerprint_host(PINIT_ONCE once, PVOID arg, PVOID *context
     resolve_once();
     if (!g_base) return TRUE;
     count = GetModuleFileNameW(NULL, path, (DWORD)(sizeof path / sizeof path[0]));
-    if (count && count < sizeof path / sizeof path[0]) g_identity = identity_of_file(path);
+    if (count && count < sizeof path / sizeof path[0]) {
+        unsigned char digest[32];
+        if (sh_host_file_sha256(path, digest)) {
+            static const char hex[] = "0123456789abcdef";
+            int i;
+            for (i = 0; i < 4; i++) {
+                g_host_hash8[2 * i] = hex[digest[i] >> 4];
+                g_host_hash8[2 * i + 1] = hex[digest[i] & 15];
+            }
+            g_host_hash8[8] = '\0';
+            g_identity = sh_host_identity_for_digest(digest);
+        }
+    }
     return TRUE;
 }
 
@@ -171,6 +185,30 @@ const sh_build_identity *sh_host_identity(void)
 int sh_host_is_supported_build(void)
 {
     return sh_host_identity() != NULL;
+}
+
+int sh_build_game_identity(const sh_build_identity *identity, char *out, size_t cap)
+{
+    int n;
+    if (!out || !cap) return 0;
+    out[0] = '\0';
+    if (!identity || !identity->steam_build || !identity->binary) return 0;
+    n = _snprintf_s(out, cap, _TRUNCATE, "DOOM 2016 build %s (%s, %s, %02x%02x%02x%02x)",
+                    identity->steam_build, identity->binary, identity->vulkan ? "Vulkan" : "OpenGL",
+                    identity->sha256[0], identity->sha256[1], identity->sha256[2], identity->sha256[3]);
+    if (n < 0) { out[0] = '\0'; return 0; }
+    return 1;
+}
+
+int sh_host_game_identity(char *out, size_t cap)
+{
+    return sh_build_game_identity(sh_host_identity(), out, cap);
+}
+
+const char *sh_host_executable_hash8(void)
+{
+    InitOnceExecuteOnce(&g_fingerprinted, fingerprint_host, NULL, NULL);
+    return g_host_hash8;
 }
 
 #ifdef SH_HOST_IMAGE_TESTING

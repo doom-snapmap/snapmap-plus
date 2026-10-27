@@ -91,6 +91,7 @@ int crash_record_json(char *buf, size_t cap, const crash_record *r)
     field(&w, "dump", r->dump, 0);
     field(&w, "version", r->version, 0);
     field(&w, "renderer", r->renderer, 0);
+    field(&w, "game", r->game, 0);
     field(&w, "time", r->time, 1);
     if (!w.ok) { buf[0] = '\0'; return 0; }
     return (int)w.used;

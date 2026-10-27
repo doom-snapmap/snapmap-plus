@@ -14,6 +14,13 @@ int shield_last_engine_msg(char *out, size_t n) { if (n) out[0] = 0; return 0; }
 void shield_capture_stack(const CONTEXT *ctx, char *out, size_t cap, int frames)
 { (void)ctx; (void)frames; if (cap) out[0] = 0; }
 const char *sh_host_renderer_name(void) { return "vulkan"; }
+static int game_calls;
+int sh_host_game_identity(char *out, size_t cap)
+{
+    game_calls++;
+    strcpy_s(out, cap, "DOOM 2016 build 13954591 (20240321-104810-ginger-fuchsia, Vulkan, 3d8b4393)");
+    return 1;
+}
 
 static BOOL WINAPI test_write_file(HANDLE h, LPCVOID data, DWORD size, LPDWORD wrote, LPOVERLAPPED overlapped)
 {
@@ -64,6 +71,25 @@ int main(void)
     write_mode = 0;
     for (int i = 0; i < 9; i++) crash_report_file("fatal", 0, 0, 0, "", "", "", "");
     assert(check_files(1) == 7 && emitted == 7);
+    /* The game identity is taken at arm time only: writing records never asks
+     * for it, and a record carries whatever was captured. */
+    assert(game_calls == 0);
+    sh_host_game_identity(g_game, sizeof g_game); game_calls = 0;
+    g_records_written = 0;
+    crash_report_file("fatal", 0, 0, 0, "", "", "", "");
+    assert(game_calls == 0);
+    {
+        WIN32_FIND_DATAA fd; char pattern[MAX_PATH], path[MAX_PATH], buf[8192]; DWORD got = 0;
+        _snprintf_s(pattern, sizeof pattern, _TRUNCATE, "%s\\pending-*", g_crash_dir);
+        HANDLE find = FindFirstFileA(pattern, &fd);
+        assert(find != INVALID_HANDLE_VALUE); FindClose(find);
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", g_crash_dir, fd.cFileName);
+        HANDLE file = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+        assert(file != INVALID_HANDLE_VALUE);
+        assert(ReadFile(file, buf, sizeof buf - 1, &got, NULL)); CloseHandle(file); buf[got] = 0;
+        assert(strstr(buf, "\"game\":\"DOOM 2016 build 13954591 (20240321-104810-ginger-fuchsia, Vulkan, 3d8b4393)\""));
+        assert(DeleteFileA(path));
+    }
     assert(RemoveDirectoryA(g_crash_dir));
     puts("crash_report_test OK");
     return 0;

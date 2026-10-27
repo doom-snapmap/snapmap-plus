@@ -153,13 +153,20 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
     /* Every engine address and layout here is for one build, identified by the
      * executable's SHA-256. On anything else this DLL only forwards XInput. */
     if (!sh_host_is_supported_build()) {
+        _snprintf_s(line, sizeof line, _TRUNCATE, "game: unsupported executable %s (%s)",
+                    sh_host_image_name(), sh_host_executable_hash8()[0] ? sh_host_executable_hash8() : "unhashed");
+        backend_log(line);
         backend_log("UNSUPPORTED: this DOOM executable is not the April 2024 update (Steam build "
                     "13954591), the only build this Snapmap+ supports; Snapmap+ is off and only "
                     "forwards controller input. For the 2018 build install Snapmap+ v0.2.1-beta.19.");
         return 0;
     }
-    _snprintf_s(line, sizeof line, _TRUNCATE, "host build 13954591 (%s)", sh_host_identity()->label);
-    backend_log(line);
+    {
+        char game[SH_GAME_IDENTITY_MAX];
+        sh_host_game_identity(game, sizeof game);
+        _snprintf_s(line, sizeof line, _TRUNCATE, "game: %s", game);
+        backend_log(line);
+    }
 
     ensure_user_dirs();
     sh_config_init(); /* nonfatal: the service retains defaults and status flags on failure */

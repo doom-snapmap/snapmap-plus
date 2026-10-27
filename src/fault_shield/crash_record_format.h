@@ -20,6 +20,9 @@ typedef struct crash_record {
     /* Renderer at fault time: "vulkan", "opengl", or "" if unresolved. Preserve this
      * snapshot when reporting after a restart into the other renderer. */
     const char *renderer;
+    /* Game identity at arm time (sh_host_game_identity), e.g. "DOOM 2016 build
+     * 13954591 (20240321-104810-ginger-fuchsia, Vulkan, 3d8b4393)", or "". */
+    const char *game;
     const char *time;         /* preformatted local "YYYY-MM-DD HH:MM:SS" */
 } crash_record;
 

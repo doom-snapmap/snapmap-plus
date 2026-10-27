@@ -30,6 +30,7 @@
 #include "crash_pending.h"
 #include "log_rotate.h"     /* the UI log is append-only too; bound it like the backend's */
 #include "host_image.h"     /* sh_host_renderer_name -- which renderer the player is actually running */
+#include "game_identity.h"  /* the backend-provided game identity (startup argv) */
 #include "../sh_entity_desc.h"/* generated entity descriptions */
 #include "../sh_event_catalog.h"/* generated event names and argument types */
 #include "../sh_entity_asset_lists.h"/* generated per-class model and animation choices */
@@ -50,6 +51,8 @@ static ComPtr<ICoreWebView2_17>            g_webview17;
 static bool                     g_webview_ready = false;
 static std::wstring             g_html;
 static std::string              g_version = "dev";
+/* Game identity from the backend ("" = backend not attached to a supported build). */
+static std::string              g_game;
 static unsigned int             g_config_status_flags = 0;
 static bool                     g_config_status_posted = false;
 
@@ -1114,6 +1117,8 @@ static void poc_emit_list(int n, int ready, const char *reason)
     /* the renderer rides the list message alongside the version, for the same reason: the feedback
      * dialog composes its own payload in the page and needs both there. */
     json += L"\",\"renderer\":\""; json += sh_webview_json::escape_wide(sh_host_renderer_name());
+    /* and the game identity: '' means the backend is not attached ("- Game: not attached") */
+    json += L"\",\"game\":\""; json += sh_webview_json::escape_wide(g_game.c_str());
     json += L"\",\"editorReady\":"; json += ready ? L"true" : L"false";
     json += L",\"count\":"; json += std::to_wstring(n);
     json += L",\"entities\":[";
@@ -2646,7 +2651,7 @@ static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventA
             } else if (cmd == L"crashSubmit") {
                 /* Compose crash reports here to add optional local log tails, then use the
                  * same worker and result message as ordinary feedback. */
-                std::wstring title, bodyw, contact, hp, renderer;
+                std::wstring title, bodyw, contact, hp, renderer, game;
                 int attach = 0;
                 sh_webview_json::get_string(json, L"title", title);
                 sh_webview_json::get_string(json, L"body", bodyw);
@@ -2655,6 +2660,8 @@ static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventA
                 /* Prefer the recorded renderer: this session may differ from the one that
                  * faulted. Use the live renderer only for older records without the field. */
                 sh_webview_json::get_string(json, L"renderer", renderer);
+                /* Same for the game identity recorded at arm time. */
+                sh_webview_json::get_string(json, L"game", game);
                 sh_webview_json::get_int(json, L"attachLogs", &attach);
                 if (!title.empty() && !bodyw.empty() && !g_report_inflight) {
                     std::string logs = attach ? crash_collect_logs() : std::string();
@@ -2667,6 +2674,8 @@ static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventA
                     p += "\",\"contact\":\"";                      p += sh_webview_json::escape_utf8(sh_webview_json::to_utf8(contact));
                     p += "\",\"version\":\"";                      p += sh_webview_json::escape_utf8(g_version);
                     p += "\",\"renderer\":\"";                     p += sh_webview_json::escape_utf8(rend);
+                    p += "\",\"game\":\"";                         p += sh_webview_json::escape_utf8(
+                        game.empty() ? g_game : sh_webview_json::to_utf8(game));
                     p += "\",\"website\":\"";                      p += sh_webview_json::escape_utf8(sh_webview_json::to_utf8(hp));
                     p += "\",\"logs\":\"";                         p += sh_webview_json::escape_utf8(logs);
                     p += "\"}";
@@ -3119,10 +3128,12 @@ extern "C" __declspec(dllexport) DWORD WINAPI sh_ui_init(LPVOID param_1)
         return 1;
     }
     poc_read_version();
+    g_game = args ? sh_game_identity::from_argv(args->argc, args->argv) : std::string();
 
     poc_log("=== sh_ui_init (WebView2 POC, entities-deep) entered ===");
     poc_log(g_iface ? "interface handed over: yes" : "interface handed over: NO (null)");
     { char v[128]; _snprintf_s(v, sizeof v, _TRUNCATE, "installed version: %s", g_version.c_str()); poc_log(v); }
+    { char v[224]; _snprintf_s(v, sizeof v, _TRUNCATE, "game: %s", g_game.empty() ? "not attached" : g_game.c_str()); poc_log(v); }
 
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     int n = MultiByteToWideChar(CP_UTF8, 0, kMockupHtml, -1, nullptr, 0);

@@ -8,6 +8,7 @@
 #include "backend_log.h"
 #include "config.h"
 #include "snapstack.h"
+#include "host_image.h"
 
 /* Backend-owned object shared with the frontend and sh command dispatcher. */
 static sh_iface *g_iface = NULL;
@@ -16,9 +17,12 @@ static sh_iface *g_iface = NULL;
 static sh_ui_argblock g_argblock;
 static void          *g_ui_out_slot = NULL;   /* receives the frontend's loop-state obj address */
 
-/* Stable synthetic argv for the frontend startup ABI. */
+/* Stable synthetic argv for the frontend startup ABI. argv[1] carries the game
+ * identity ("--game=DOOM 2016 build ..."), the single string every report uses;
+ * the frontend reads it instead of identifying the executable itself. */
 static char  g_argv0[] = "snapmap-plus";
-static char *g_argv[]  = { g_argv0, NULL };
+static char  g_argv_game[sizeof "--game=" + SH_GAME_IDENTITY_MAX];
+static char *g_argv[]  = { g_argv0, g_argv_game, NULL };
 
 /* Keep the frontend module loaded for its thread lifetime. */
 static HMODULE g_ui_dll = NULL;
@@ -56,7 +60,13 @@ int sh_ui_bridge_install(void)
 
 
     g_argblock.out_slot = &g_ui_out_slot;
-    g_argblock.argc     = 1;
+    {
+        char game[SH_GAME_IDENTITY_MAX];
+        g_argv_game[0] = '\0';
+        if (sh_host_game_identity(game, sizeof game))
+            _snprintf_s(g_argv_game, sizeof g_argv_game, _TRUNCATE, "--game=%s", game);
+    }
+    g_argblock.argc     = g_argv_game[0] ? 2 : 1;
     g_argblock.argv     = g_argv;
     g_argblock.iface    = g_iface;
 

@@ -48,6 +48,18 @@ static void check_identities(void)
     assert(!sh_host_identity_for_digest(d));
     assert(!sh_host_identity_for_digest(NULL));
     puts("OK  only the two build 13954591 executables are recognized");
+    {
+        /* The one game-identity string every report carries. */
+        char game[SH_GAME_IDENTITY_MAX];
+        assert(sh_build_game_identity(vk, game, sizeof game) == 1);
+        assert(!strcmp(game, "DOOM 2016 build 13954591 (20240321-104810-ginger-fuchsia, Vulkan, 3d8b4393)"));
+        assert(sh_build_game_identity(gl, game, sizeof game) == 1);
+        assert(!strcmp(game, "DOOM 2016 build 13954591 (20240321-104810-ginger-fuchsia, OpenGL, 1bddecaa)"));
+        assert(strlen(game) < SH_GAME_IDENTITY_MAX);
+        assert(sh_build_game_identity(NULL, game, sizeof game) == 0 && game[0] == '\0');
+        assert(sh_build_game_identity(vk, NULL, 0) == 0);
+        puts("OK  game identity strings");
+    }
 }
 
 static void check_constants(void)

@@ -38,6 +38,8 @@ typedef struct sh_build_identity {
     unsigned char  sha256[32];
     int            vulkan;      /* 1 Vulkan executable, 0 OpenGL executable */
     const char    *label;       /* "13954591-vk" / "13954591-gl", for logs */
+    const char    *steam_build; /* Steam build id: "13954591" */
+    const char    *binary;      /* the console's Build Information binary name */
 } sh_build_identity;
 
 /* Supported executables, terminated by an entry with a NULL label. */
@@ -53,6 +55,19 @@ int sh_host_file_sha256(const wchar_t *path, unsigned char digest[32]);
 /* The live host's identity (hashes the executable once), or NULL. */
 const sh_build_identity *sh_host_identity(void);
 int sh_host_is_supported_build(void);
+
+/* The one game-identity string every report carries, e.g.
+ *   DOOM 2016 build 13954591 (20240321-104810-ginger-fuchsia, Vulkan, 3d8b4393)
+ * (Steam build, binary name, renderer of the executable, first eight hex
+ * digits of its SHA-256). Writes it and returns 1 for a supported executable;
+ * otherwise writes "" and returns 0. */
+#define SH_GAME_IDENTITY_MAX 96
+int sh_build_game_identity(const sh_build_identity *identity, char *out, size_t cap);
+int sh_host_game_identity(char *out, size_t cap);
+
+/* First eight hex digits of the host executable's SHA-256 (also for an
+ * unsupported executable), or "" when it could not be hashed. */
+const char *sh_host_executable_hash8(void);
 
 /* Identity of an image being scanned: the live host when base is its mapped
  * base, a test-bound image in test builds, otherwise NULL. Raw RVAs are only
