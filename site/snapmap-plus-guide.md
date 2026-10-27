@@ -37,7 +37,9 @@ Blueprint mode and keeps the Blueprint camera. Left Ctrl opens the action menu;
 the size controls are in DOOM itself.
 
 Each room keeps its own dimensions. Doors and frames stay their original size,
-and built-in room lights follow the resized room with adjusted coverage. Objects
+and all of the room's built-in lights follow the resized room: they spread with
+the walls, the ceiling light stays just under the roof, and the room looks the
+same after you save and reload it. Brightness and color do not change. Objects
 you placed keep their module-local positions and sizes, so inspect objects near
 the walls after shrinking. Connected branches move to retain their doorways;
 conflicting connection loops and new overlaps can prevent an edit.
@@ -47,7 +49,11 @@ conflicting connection loops and new overlaps can prevent an edit.
 | Classic | 2560 / 2560 / 2048 | 416 / 416 / 304 |
 | Modern | 5120 / 5120 / 3392 | 864 / 272 / 432 |
 
-Out-of-range values clamp and the panel shows the applied dimensions. The maximum
+Out-of-range values clamp and the panel shows the applied dimensions. Only the
+value you changed is adjusted. If a room cannot grow further on that axis, the
+panel keeps the size that fits; the Snapmap+ log (`sh_backend.log`) says which
+room or connected module reached which limit. A room that already extends past
+the limit can always be made smaller. The maximum
 follows the current `snapEdit_environmentModuleBounds` cvar, the room's world
 position and its connected neighbors. Raising that cvar allows larger rooms
 without restarting, up to native collision and navigation coordinate limits.
@@ -64,8 +70,8 @@ The resizing feature is included in the existing backend DLL; it needs no
 separate file beside the map.
 
 To return a map to vanilla compatibility, restore every Grid Room to its
-original dimensions, restore **View Distance** to 8192 (or zero) and **Fog Strength**
-to zero, and remove any other mod-only content. Save again.
+original dimensions, restore **View Distance** to 8192 (or zero), and remove any
+other mod-only content. Save again.
 
 The faint green surface grid appears when placing or moving objects that use
 the game's navigation placement display, such as demons. Its brightness pulses,
@@ -75,42 +81,90 @@ or logic object. **Snap to Grid** moves the held object to the editing grid;
 it does not toggle this display. The custom blocking-volume navigation preview
 is a separate overlay.
 
-## Map view distance and fog
+## Map view distance
 
-Open **Settings > Properties** in DOOM's SnapMap editor and scroll to
-**Map Rendering**. All seven settings are always available for editing.
-Choose **Apply**, then save your map normally. Cancel discards unapplied changes.
-The values are stored inside this map and work with both OpenGL and Vulkan.
-Loading another map uses that map's own settings.
-
-**View Distance** at 8192 (default) or zero uses each module's original view
-distance. Other values apply a distance override automatically. **Fog Strength**
-at zero uses each module's original fog; positive values apply the fog range and
-color below. Distance and fog operate independently. Returning these settings
-to their defaults restores the original environments automatically, even if
-unused fog colors or ranges remain edited. There is no separate enable or
-vanilla-compatibility switch. Players need Snapmap+ for custom values to take effect.
+Open **Settings > Properties** in DOOM's SnapMap editor and switch to the
+**SNAPMAP+ MOD SETTINGS** tab; the setting is **Map View Distance**. Choose
+**Apply**, then save your map normally. Cancel
+discards unapplied changes. The value is stored inside this map and works with
+both OpenGL and Vulkan. Loading another map uses that map's own setting.
 
 | Setting | Default value | Range |
 |---|---|---|
-| View Distance | 8192 (original environment) | 0, or 256 to 200000 game units |
-| Fog Strength | 0 (original environment) | 0 to 100 |
-| Fog Start | 1500 | 0 to 199999 game units |
-| Fog End | 6500 | 1 to 200000 game units |
-| Fog Red / Green / Blue | 0.35 / 0.40 / 0.45 | 0 to 1 each |
+| Map View Distance | 8192 (original environment) | 0, or 256 to 200000 game units |
 
-An extended view distance such as 60000 removes the nearby black cutoff in large
-Grid Rooms. Raising Fog Strength blends distant geometry into the selected color.
-Fog End always stays beyond Fog Start.
+**View Distance** decides how far the game draws before the black far-clip
+cutoff. It follows one rule:
 
-For a shorter rendering range, lower View Distance and tune fog to conceal the
-cutoff before that distance. Fog alone does not reduce the geometry being drawn;
-the view distance controls that tradeoff. Check the result from several positions
-in Play mode, especially in large open rooms.
+- **8192 or zero (default):** the map uses each environment's own distance.
+  Modules, **Set Environment** and **Player Set Environment** logic nodes and
+  campaign environments such as the Lazarus archive (15000) all keep control,
+  so your logic can still change the distance during play.
+- **Any other value:** the map's View Distance is used everywhere the map is
+  drawn, in the editor and in Play. It overrides module environments, Set
+  Environment and Player Set Environment nodes, and campaign environments.
+  Environment effects such as fog, color and lighting still come from those
+  environments; only the distance is replaced.
 
-Earlier saved custom values are read automatically. Maps saved with the former
-enable switch off load with native defaults instead of activating unused values.
-Zero Fog Strength now restores native fog, including a module's built-in fog.
+The editor's own camera limits are separate and are not changed by this
+setting. An extended view distance such as 60000 removes the nearby black
+cutoff in large Grid Rooms. Larger distances can increase rendering cost, so
+check the result from several positions in Play mode, especially in large open
+rooms. Players need Snapmap+ for a custom value to take effect.
+
+Fog is not a map setting. Use environments and Set Environment nodes for fog.
+Maps saved with earlier Snapmap+ versions keep their view distance; their old
+map fog values are ignored when the map loads and dropped the next time it is
+saved, whether or not you open the settings. Maps
+saved with the former enable switch off load with the default distance.
+
+## Map bounds and Blueprint zoom
+
+Snapmap+ adds a third tab to DOOM's **Settings > Properties** panel. Switch
+tabs with the bumpers (or Q / E) or click the third diamond at the top of the
+panel; the tab is titled **SNAPMAP+ MOD SETTINGS**. Every setting on it is a
+Snapmap+ mod. Stepping a number past either end of its range stops at that end.
+If the tab cannot be installed on your game build, the same controls appear at
+the end of the first tab.
+
+| Setting | Default value | Values |
+|---|---|---|
+| Unlock Map Bounds | Off (16000, native) | Off or On (32671 game units) |
+
+**Unlock Map Bounds** is an on/off setting. SnapMap normally marks any module
+that reaches beyond 16000 units from the map center in X, Y or Z as an invalid
+placement. Turning it on widens that box to the largest size the game can
+handle, 32671 units, for this map; the editor camera, the Blueprint floor grid
+and the Blueprint floor range follow. Choose **Apply**, then save the map; the
+setting is stored inside the map and is used whenever the map is edited, played
+or loaded directly. A map saved by an earlier Snapmap+ version with a number
+between the two keeps that number and shows the setting as On until you change
+it.
+
+The highest value is 32671. Collision and AI navigation store world positions
+as 16-bit numbers that end at 32767, and navigation reaches up to 96 units
+beyond a module, so modules cannot go farther even with Snapmap+.
+
+Only Snapmap+ can open the extra space. Each PC checks module positions with
+its own limit when it loads a map, so players without Snapmap+ see the modules
+past 16000 as invalid and the game can crash loading the map. Keep the default
+for maps you want everyone to play. Turning the setting off removes the
+requirement, as long as no module still sits outside the native box.
+
+Snapmap+ also lets the Blueprint camera zoom out until the whole map fits on
+screen, on any map: up to 44000 units above the floor instead of DOOM's 16000,
+or about 90000 when the map uses **Unlock Map Bounds**. While you are zoomed
+out in Blueprint the game draws far enough to keep the floor in view, and the
+editor's fog-free space is enlarged so the camera never ends up looking through
+a thick blue fog. This is an editor convenience on your PC only and changes
+nothing in your maps.
+
+Because the zoom-out limit grows with the map bounds, a fully zoomed-out map
+with **Unlock Map Bounds** fills the screen just as a native map does: the
+floor grid and the space for modules are about twice as wide in game units,
+but they look the same size on screen. Compare the two at the same camera
+height to see the difference. Modules can be hovered, grabbed and placed from
+any zoom level.
 
 ## Installing Snapmap+
 

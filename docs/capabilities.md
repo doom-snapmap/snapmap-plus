@@ -14,17 +14,88 @@ clamp to doorway minimums and placement-dependent world limits. See the
 [Grid Room instructions](../site/snapmap-plus-guide.md#resizing-grid-rooms).
 Maps using resized rooms require Snapmap+ on the player's PC.
 
+Every built-in room light (the probe, the modern room's five fill lights and
+its ceiling light, the classic room's light) scales per axis with the room:
+origins about the room center, coverage along each light's own axes, height by
+the interior below the ceiling, and the ceiling light keeps its stock clearance
+under the roof (at most a quarter of the height). Distance cutoffs grow with
+the largest ratio and never shrink; intensity and color are unchanged. A resize
+in the editor and a later map load or Play compute the same values from the
+installed room declaration.
+
+A size edit changes only the axes you changed. When the world limit stops an
+axis, the panel shows the value that fits and the backend log names the axis,
+the limiting module, the coordinate it reached and the limit. A room that
+already extends past the limit (a lowered cvar, an older map) can still be
+shrunk. `sh_gridsize` resizes the selected room from the console through the
+same path.
+
 ## Map rendering
 
-DOOM's native Settings > Properties panel includes map-wide View Distance,
-Fog Strength, Fog Start/End and RGB controls, all always editable. View Distance
-8192 or zero retains original module distance; Fog Strength zero retains original
-module fog. Other values apply their overrides automatically and independently.
-Apply commits the draft to native map variables; normal saving
-retains those values inside the map. Both editor playtests and direct saved-map
-loads use the settings, with bindings for OpenGL and Vulkan. Custom values take
-effect on Snapmap+ clients; restoring defaults does not retain a rendering
-requirement. See the [rendering controls](../site/snapmap-plus-guide.md#map-view-distance-and-fog).
+DOOM's native Settings > Properties panel includes a map-wide View Distance
+control on the Snapmap+ tab. 8192 or zero keeps each environment's own
+distance, so modules, Set Environment and Player Set Environment nodes and
+campaign environments decide it. Any other value is the far clip everywhere
+the map renders in SnapMap, editor and Play alike, overriding every environment
+source; environment fog and other effects are unchanged. The editor's own camera cvars are not touched.
+Apply commits the draft to native map variables; normal saving retains the
+value inside the map. Both editor playtests and direct saved-map loads use it,
+with bindings for OpenGL and Vulkan. A custom value takes effect on Snapmap+
+clients; restoring the default does not retain a rendering requirement. Fog is
+not a map setting; older maps' fog values are ignored, and loading such a map
+converts its value so the next normal save stores only the distance. See the
+[view distance guide](../site/snapmap-plus-guide.md#map-view-distance).
+
+## Map bounds and Blueprint zoom
+
+The native Settings / Properties panel gains a third category, **SNAPMAP+ MOD
+SETTINGS**, for built-in mod settings (`settings_tab.c`). It owns the panel
+hooks and keeps each registered group's map-owned draft, committed by native
+Apply and discarded by Cancel or Revert. When the category cannot be installed
+the groups appear first in category 0, or last if the row injection site is
+missing too.
+
+**Unlock Map Bounds** (`map_bounds.c`) is an on/off row (a native toggle row,
+`sh_settings_tab_add_bool`). It stores `smp.bounds.v1` in the map's native
+variables (`1;<units>`, 0 = native): on writes the 32671 ceiling, off writes
+`1;0`, and any stored value above 16000 (maps saved by the earlier numeric row)
+reads as on and keeps its value until changed. A map that sets it raises
+`snapEdit_environmentModuleBounds` and `snapEdit_cameraDistanceLimit` to that
+value and scales `snapEdit_minBlueprintFloor` / `snapEdit_maxBlueprintFloor` in
+proportion, from map load (editor, Play, or a direct saved-map load) until the
+next load restores the values captured before the first override. Values clamp
+to 16000..32671: assembled collision and navigation use signed 16-bit world
+coordinates and navigation reaches 96 units past a module. Unmodified clients
+recompute module validity from their own 16000 limit, so maps using the wider
+space require Snapmap+. Native maps never gain the variable. See the
+[map bounds guide](../site/snapmap-plus-guide.md#map-bounds-and-blueprint-zoom).
+
+`editor_zoom.c` raises the Blueprint zoom-out to 2.75x by default (range 1x to
+4x) on every map, enough to show the whole map square from above (the camera
+sees about 0.40 x its height to the top and bottom edges at 16:9): the free
+orbit camera's height limit (native
+`snapEdit_cameraDistanceLimit`, or the unlocked map bounds when larger), its pan
+range and the sky view's limit are read from Snapmap+ values instead of the
+engine constants. In Blueprint frames the editor forces r_zfar while the
+environment blend writes the map distance back. Both are raised to the same
+Blueprint far plane, 33000 times the zoom ratio: the editor's two 33000 loads
+read the Snapmap+ value, and the blend's maxViewDistance read
+(`map_render_native.c`) asks `sh_editor_zoom_far_plane()`, which applies it under
+the editor's own condition. Above the 33000-unit editor environment volume the
+blend stops writing, so the editor's write alone keeps the floor in view; if
+that write cannot be redirected, the height stays below 32000. Elsewhere the far
+clip is unchanged. The editor environment volume (`snapEdit_environmentFogBounds`,
+built once with the editor render world as a +/-33000 environment area and a
+32768-scaled `_unitCube`) is sized at install for the highest reachable camera,
+134768, so the camera never looks through the cube's thick blue fog and the
+environment blend keeps running; without that patch the height stays inside the
+native volume. When map bounds change, the Blueprint ground plane (the faint
+grid, a `_unitSquare` scaled to the module bound when the editor is set up) is
+rescaled in place. Module hover and selection trace a ray of
+`snapEdit_modulePickingDistance` (50000) from the camera; both of its loads read
+a Snapmap+ length instead, 50000 x (far plane / 33000) (137500 at native
+bounds, about 280770 unlocked), so a module the camera can see can be picked.
+Client-side only; no map data changes.
 
 ## Packages
 
@@ -60,6 +131,7 @@ Registered with the engine command system; run from the DOOM console.
 | `sh_debugrender` | Renderer debug toggle (developer tool); `dumprenderinfo` prints the active rendermodel count and every model's name. |
 | `sh_alginfo` | Report the math-acceleration status. |
 | `sh_perf` | Report how much time each Snapmap+ hot path has taken this session: the engine resource opens that pass through the override hook, the engine writing the open map as JSON, the navigation parse, the green preview build, and the session log. `sh_perf reset` starts the counting again. `sh_perf read` times reading the open editor map whole and entity by entity, and estimates the cost of reading only the marked navigation volumes. |
+| `sh_gridsize` | Print the selected Grid Room's size, or `sh_gridsize <x> <y> <z> [instance]` to resize it through the same path as Module Properties. Prints the applied size and the reason any axis was limited or the edit refused. `sh_gridsize templates` lists, for the stock modern room and each resized variant, the module entity templates a loaded room receives (diagnostic). Without an instance it uses the Blueprint selection, then the room whose properties are open. |
 | `sh_help` | List every Snapmap+ console command and cvar with its description in one place. |
 | `sh_navmesh` | Report the baked AI navigation the loaded map is serving — which modules and nav classes are in effect, and for anything refused, why. Leads with how many map loads have reached the navigation table this session and what the last one found, so a map that quietly brought none is distinguishable from a load that never happened. |
 | `sh_navmesh marks <n>` | Mark the first `n` marked volumes of every module red, the way a refused bake marks the ones it could not place, so the marks can be checked without a map that refuses. `0` clears them. |
@@ -299,7 +371,7 @@ Engine detours and resource-loader shadows the backend installs.
 | Overrides file-shadow | Serves map navigation, the generated Grid Room variants and the built-in default declarations through native file opens, falling back to installed originals, which it reads through the provider's own open (`read_installed_resource`). It reads no user or package files. The custom stream requires the audited native ABI. |
 | Retired package payloads | A map saved or published with packages by an earlier release carries them as `smpkg.` string variables. The load path removes them before the native parse, logs one line, and the map loads as a plain map. See [Packages](#packages). |
 | Baked navigation | A map can carry its own AI navigation for the modules it places, as `smnav1.` base64 shards in its map variables — the same envelope the retired map-embedded packages used, under a different magic, so an older Snapmap+ and vanilla DOOM both ignore it and load the map normally. On every map load the shards are reassembled, checked against their digest, and put through an integer-only structural check of the AAS file they decode to; what survives is served under the module's own `maps/modules/.../<module>.aas_<class>` name and its cooked `generated/...<module>.baas_<class>` sibling (the engine asks for the cooked name first) through the same open hook the overrides shadow uses, so a stale cooked artefact on disk cannot win. Serving is all-or-nothing per module: a missing shard, a bad digest, a payload that fails the structural check, or a module the map places more than once means that module keeps its shipped navmesh, and the refusal is logged and shown by `sh_navmesh`. The table is map-scoped and rebuilt from empty on every load, so a map with no bake can never inherit the previous map's navigation. Shards are stripped before the engine parses the map and written back when it is saved, so a load-then-save keeps the author's bake without the payload ever becoming map state. A fault anywhere in the path disables the feature for the rest of the session rather than being recovered per open. `navmesh.enabled` turns the whole thing off; `navmesh.embed_in_saved_maps` turns off only the write-back. |
-| AI Navigation on a volume | Enable **AI Navigation** and **Block Demons** on Blocking Boxes. Boxes with inherited default dimensions support navigation, including in existing maps. Green outlines preview the smallest demon size; `navmesh.preview` controls its display. **Build Navmesh** in the native Start menu and **View > Update Navmesh** run the same bake, even with preview disabled or in Blueprint mode. The native action uses the game's busy modal and completion toast without saving or checking for a player start. The View menu says when a marked box has changed since. Climb approaches clear the rotated solid, and traversal candidate storage grows with geometry. Refused bakes log their reason. The [player guide](../site/snapmap-plus-guide.md#ai-navigation-on-blocking-boxes) explains clearance and authoring limits. Backend marker, geometry and bake rules are documented in their source files. |
+| AI Navigation on a volume | Enable **AI Navigation** and **Block Demons** on Blocking Boxes. Boxes with inherited default dimensions support navigation, including in existing maps. Green outlines preview the smallest demon size; `navmesh.preview` controls its display. **Build Navmesh** in the native Start menu and **View > Update Navmesh** run the same bake, even with preview disabled or in Blueprint mode. The added row appears with the rest of the menu when it opens and is hidden as it closes. The native action uses the game's busy modal and completion toast without saving or checking for a player start. The View menu says when a marked box has changed since. Climb approaches clear the rotated solid, and traversal candidate storage grows with geometry. Refused bakes log their reason. The [player guide](../site/snapmap-plus-guide.md#ai-navigation-on-blocking-boxes) explains clearance and authoring limits. Backend marker, geometry and bake rules are documented in their source files. |
 | Strids injector | Combines the user's `strings\strids.json` with the built-in strings. A refresh publishes the owned values without duplicate rows, retaining storage needed by live native readers. See `src/backend/strids.h`. |
 | Text-field clipboard | **Ctrl+C / Ctrl+V in the editor's text fields** — every free-text property (datapad and transmission message bodies) plus the text-backed int / float / vec3 / size inspectors. Copies the selection, or the whole field when nothing is selected; pastes over the selection, or at the caret. Multi-line text pasted into a single-line field collapses each break to a space; datapad bodies keep their newlines. Respects the field's own character cap. Vanilla has no text clipboard at all here (only the dev console accepts a paste) — and it is genuinely absent rather than disabled: the engine's SWF text-edit key handler has no Ctrl branch whatsoever. Entity-level Ctrl+C/Ctrl+V and Ctrl+X are untouched. Exceeds the original. |
 | Fault handling | The clone replaces the original's two kill-detours (which terminate DOOM) with the recover-in-place fault-shield (see [`fidelity.md`](fidelity.md)). |

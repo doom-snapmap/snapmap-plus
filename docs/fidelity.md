@@ -26,11 +26,10 @@ runtime resources reconstructed by Snapmap+. Such maps are not compatible with
 vanilla or console players, even when their placed entities use stock assets.
 Restoring the original dimensions restores the stock module declaration.
 Map rendering defaults to the game's original module environments. View Distance
-8192 (or zero) and Fog Strength zero restore those environments automatically;
-unused fog range/color values do not keep an override active. The seven saved
-values occupy an ordinary map variable that vanilla can load, with no separate
-enable or compatibility flag. Legacy saved values remain readable; the former
-disabled mode migrates to defaults. Zero fog now preserves built-in module fog.
+8192 (or zero) restores them automatically. The saved value occupies an ordinary
+map variable that vanilla can load, with no separate enable or compatibility
+flag. Older saved values remain readable; their fog values are ignored and the
+former disabled mode migrates to the default. Fog is not a map setting.
 
 This release embeds no packages: the package system is being rebuilt for the
 April 2024 DOOM update, and a map carrying packages from an earlier release

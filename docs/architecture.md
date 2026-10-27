@@ -82,26 +82,40 @@ remain separate from relocated code for commit validation and restoration.
 ## DLL interface
 
 Map rendering lives in the backend and DOOM's native Settings / Properties
-panel. The panel owns an Apply/Cancel draft tied to the current editable map.
-Apply stores a versioned `smp.render.v1` string in native map variables; the
-native serializer carries it through normal saves without a sidecar. The
-reserved value contains view distance, fog strength, start/end and linear RGB.
-Version 3 stores only these seven values. Version 1 and enabled version 2 values
-are read directly; disabled version 2 maps migrate to native defaults. Missing
-metadata also uses native defaults. Save/Play conversion writes the current
-canonical values without reallocating an unchanged string or shifting variable
-indices. Malformed or duplicate metadata disables the
-override. The reserved variable should not be edited through generic variables.
-Map deserialization clears the previous runtime selection and reads the loaded
-map's variables. Editor-to-play conversion refreshes that selection from the
-current editable map. A locked value copy crosses to rendering, where the
-blended environment's literal view-distance and fog values are changed independently:
-view distance 8192 or zero leaves native distance intact, and fog strength zero
-leaves native fog intact. Fog range/color values do not enable an override while
-strength is zero. The controls are always editable and there is no stored enable
-flag. Overrides run before
-the engine reads its far clip. This applies only to SnapMap and uses signed
-bindings in both renderer executables. No WebView interface change is involved.
+panel, in the Snapmap+ tab. The View Distance group owns an Apply/Cancel draft
+tied to the current editable map. Apply stores a versioned `smp.render.v1`
+string in native map variables and publishes it to the editor view; the native
+serializer carries it through normal saves without a sidecar. Version 4 stores
+only the view distance. Version 1 and 3 strings and enabled version 2 strings
+keep their distance and drop their former fog values; disabled version 2 maps
+and missing metadata use the native default. Save/Play conversion rewrites the
+canonical version-4 value without shifting variable indices. Malformed or
+duplicate metadata disables the override. The reserved variable should not be
+edited through generic variables. Map deserialization clears the previous
+runtime selection and reads the loaded map's variables. Editor-to-play
+conversion refreshes that selection from the current editable map. A locked
+value copy crosses to rendering at the blended environment's single
+maxViewDistance read: 8192 or zero leaves the native blended distance, any other
+value is returned as the far clip and replaces the view's literal, so module
+environments, Set Environment nodes and campaign environments cannot override
+it. While the editor is in Blueprint the far plane is additionally held at or
+above the editor's own 33000 scaled by the zoom factor. This applies only to
+SnapMap and uses signed bindings in both renderer executables. No WebView
+interface change is involved.
+
+The Snapmap+ tab is a third category added to the native Settings / Properties
+panel (`settings_tab.c`): the category count, the diamond markers and the
+populate dispatch are extended under the panel's own hooks, and groups register
+through `sh_settings_tab_register_group` with their own draft, commit and reset
+callbacks because native Apply and Reset are not category-scoped. It holds the
+View Distance group and the Unlock Map Bounds group (`map_bounds.c`), whose
+`smp.bounds.v1` map variable raises `snapEdit_environmentModuleBounds` and the
+camera distance limit for that map up to the 32671-unit ceiling imposed by the
+signed-short collision and navigation coordinates, restoring the native 16000
+when a stock map loads. Every client re-validates module placement against its
+own cvar, so an unlocked map is a Snapmap+-only map. Blueprint zoom-out
+(`editor_zoom.c`) raises the orbit camera's dolly and pan height limits to a
+client-side multiple of the native height, default 2x.
 
 Grid Room resizing is implemented in the existing backend. The native DOOM
 Module Properties panel owns its XYZ control. In Blueprint mode, the normal
@@ -119,8 +133,15 @@ live local transform, including after a native cap replacement leaves serialized
 definition edit state null. Ordinary placed objects keep their local positions and sizes.
 Finite XYZ inputs clamp to the per-axis limits and display the applied dimensions.
 The current snapEdit_environmentModuleBounds cvar constrains the selected
-placement and every connected neighbor on each edit. Planning uses temporary
-spatial views and native bounds helpers before creating resources. Signed-short
+placement and every connected neighbor on each edit: only the axes the user
+changed move, each as far toward the request as the boundary allows, and an
+existing boundary crossing is tolerated but never extended, so a shrink always
+applies. Every limited axis is logged with the request, the accepted value and
+the limiting coordinate. The built-in probe and ceiling light that the editor
+owns follow the room on each edit; the fill lights, which get no editor entity, follow from
+the generated room on the next load or Play, through the same policy. Planning
+uses temporary spatial views and native bounds helpers before creating
+resources. Signed-short
 BCM/AAS coordinates impose independent representation limits, including navigation
 outsets beyond the shell. Changing the cvar does not change those formats.
 Connected module branches translate rigidly to follow the changed doorways. A
