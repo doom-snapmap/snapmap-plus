@@ -3308,6 +3308,10 @@ done:
 
 int main(void)
 {
+    /* R-019: every activation test below runs in the shipping configuration,
+     * with every pending gate closed (no live-verification override). */
+    SetEnvironmentVariableA("SNAPMAP_PLUS_LIVE_VERIFY", NULL);
+    CHECK(!sh_live_verify());
     test_native_idstr_boundary();
     test_source_first_classification();
     test_sedef_materialization();

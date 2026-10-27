@@ -44,6 +44,24 @@ static int count_occurrences(const char *haystack, const char *needle)
     return n;
 }
 
+/* The statement around `call` (from the previous ';', '{' or '}' to the call). */
+static int statement_is_gated(const char *file, const char *call)
+{
+    const char *at = strstr(file, call), *begin;
+    if (!at) return -1;
+    for (begin = at; begin > file && begin[-1] != ';' && begin[-1] != '{' && begin[-1] != '}'; begin--) {}
+    {
+        size_t n = (size_t)(at - begin);
+        char *statement = (char *)malloc(n + 1);
+        int gated;
+        if (!statement) return -1;
+        memcpy(statement, begin, n); statement[n] = 0;
+        gated = strstr(statement, "feature_pending(") != NULL || strstr(statement, "SH_PENDING_ON(") != NULL;
+        free(statement);
+        return gated;
+    }
+}
+
 int main(int argc, char **argv)
 {
     char *dllmain, *server, *signatures, *build, *overrides, *bridge, *requirements;
@@ -330,6 +348,27 @@ int main(int argc, char **argv)
     CHECK(strstr(requirements, "g_useResourceBlackList") != NULL);
     CHECK(strstr(requirements, "g_useImageBlackList") != NULL);
     CHECK(strstr(requirements, "PR_LOAD_STATE_RUNNING") != NULL);
+    /* R-019: package activation must work with every pending gate closed (the
+     * shipping default). Nothing it depends on may sit behind a gate: the
+     * resident refresh binding, the overrides provider, the decl server, the
+     * package requirements and the map transition. */
+    {
+        static const char *const activation[] = {
+            "sh_resource_resident_bind(results, db, g_doom_base)",
+            "sh_overrides_install(g_doom_base",
+            "sh_decl_server_install(results, db",
+            "sh_package_requirements_install(override_root",
+            "sh_map_transition_install(results, db",
+        };
+        for (size_t i = 0; i < sizeof activation / sizeof activation[0]; i++) {
+            int gated = statement_is_gated(dllmain, activation[i]);
+            if (gated != 0) fprintf(stderr, "activation dependency %s is %s\n", activation[i],
+                                    gated < 0 ? "missing from dllmain.c" : "behind a pending gate");
+            CHECK(gated == 0);
+        }
+        /* and the activation pass itself has no pending gate inside it */
+        CHECK(strstr(server, "SH_PENDING_ON(") == NULL);
+    }
     /* Requirement admission and command rejection have executable coverage
      * in package_requirements_test; a comment keyword is not a contract. */
 

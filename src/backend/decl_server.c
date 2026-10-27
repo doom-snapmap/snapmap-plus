@@ -2916,12 +2916,6 @@ static int ds_activate_audio(char *error, size_t capacity)
     if (count != used) {
         snprintf(error, capacity, "prepared audio event snapshot allocation failed"); goto done;
     }
-    if (count && SH_PENDING_ON(SH_PENDING_DECL_SOUND)) {
-        /* Fail closed: the +0xac event read has not run live on 13954591 (R-012). */
-        snprintf(error, capacity, "native audio events are off on this build until the sound "
-                 "decl field is confirmed (" SH_PENDING_DECL_SOUND_WHY "; SNAPMAP_PLUS_LIVE_VERIFY=1 runs it)");
-        goto done;
-    }
     if (count) {
         if (!ds_decode_registry(&registry, &type_by_name, &register_file)) {
             snprintf(error, capacity, "prepared audio registry is unavailable"); goto done;
@@ -2932,7 +2926,11 @@ static int ds_activate_audio(char *error, size_t capacity)
                 void *decl = ds_peek_decl(manager, names[i]);
                 unsigned char state = 0;
                 /* Prepared idSoundShader keeps its Wwise event identity at
-                 * +0xac in both renderers. Do not guess aliases from filenames. */
+                 * +0xac in both renderers (13954591: equal to the FNV-1 hash of
+                 * the event name, R-019). The state byte's low three bits are
+                 * the pending/defaulted load state and must be 0; its upper bits
+                 * are other resource flags (0x40 on Vulkan, 0x70 on OpenGL were
+                 * observed) and are not checked. Do not guess aliases from filenames. */
                 if (!decl || !ds_safe_read((const uint8_t *)decl+DS_DECL_STATE_OFFSET, &state, 1) ||
                     (state & 7) || !ds_safe_read((const uint8_t *)decl+0xacu, events+i, sizeof(*events))) {
                     snprintf(error, capacity, "sound '%s' has no prepared native event", names[i]); goto done;
@@ -2941,7 +2939,7 @@ static int ds_activate_audio(char *error, size_t capacity)
                     char line[320];
                     uint32_t expected = ds_wwise_short_id(names[i]);
                     _snprintf_s(line, sizeof line, _TRUNCATE,
-                        "VERIFY decl-sound: '%s' state %u event +0xac = 0x%08X; FNV-1 of the name 0x%08X (%s)",
+                        "VERIFY decl-sound: '%s' state 0x%02X (low bits 0: prepared) event +0xac = 0x%08X; FNV-1 of the name 0x%08X (%s)",
                         names[i], (unsigned)state, events[i], expected,
                         events[i] == expected ? "match" : "differs: the decl may name another event");
                     backend_log(line);

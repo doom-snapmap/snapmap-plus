@@ -87,16 +87,23 @@ static __inline int sh_live_verify(void)
  * Start menu row (+0x74/+0x78, stride 0x58, +0xC), the SWF field cap +0x280 and
  * the fault shield's exit flag editor+0x23294. */
 
-/* R-012: never ran (no active package carried prepared audio events). */
-#define SH_PENDING_DECL_SOUND         1
-#define SH_PENDING_DECL_SOUND_WHY     "prepared sound decl Wwise event id +0xac (decl_server.c)"
+/* Also bound after the R-012 addendum and round 3 (snaphak-re R-019): the
+ * prepared sound decl event +0xac (it equals the FNV-1 hash of the event name
+ * on both renderers), the cached-resource refresh (+0x14 count moves by one
+ * across the pass; World Text renders with its fonts at +0x688 after a re-arm)
+ * and the visibility-toggle registry (+0x20/+0x28: 1384 decls revealed, 1380
+ * re-hidden). The resident refresh is a dependency of every package
+ * activation, so it must never sit behind a default-off gate: with it unbound
+ * no user package activates at all. */
+
+/* The product's published-map launch hooks (map_published.c): they retain a
+ * published map that carries Snapmap+ packages and activate those packages at
+ * the map transition. With this gate closed the engine's own launch route is
+ * untouched -- a package-less published map launches normally, but a
+ * package-carrying one loads without its packages. */
 #define SH_PENDING_MAP_PUBLISHED      1
-#define SH_PENDING_MAP_PUBLISHED_WHY  "lobby host match: session/lobby slots +0x348/+0x2b8 and parameters +0x600, bound from the engine's own calls but not yet run live (map_published.c)"
+#define SH_PENDING_MAP_PUBLISHED_WHY  "package retention for published maps: lobby host match (session/lobby slots +0x348/+0x2b8, parameters +0x600) and the package-carrying lobby launch (map_published.c); the native launch route runs either way"
 #define SH_PENDING_RENDER_EDITOR      1
 #define SH_PENDING_RENDER_EDITOR_WHY  "settings panel slider value +0x120 and dirty byte +0xc8 (map_render_editor.c)"
-#define SH_PENDING_RESIDENT           1
-#define SH_PENDING_RESIDENT_WHY       "world-text fonts +0x688 and renderer count +0x14, both matched in code; a refresh with World Text placed is unconfirmed (resource_resident.c)"
-#define SH_PENDING_TARGET_ANY         1
-#define SH_PENDING_TARGET_ANY_WHY     "decl list +0x20/+0x28 (the node GetDeclsOfType returns; matched in code), visibility bits +0x3cd not yet toggled live (target_any.c)"
 
 #endif /* BACKEND_ENGINE_BUILD_H */

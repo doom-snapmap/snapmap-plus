@@ -298,8 +298,9 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
             }
         }
         sh_map_payload_install(results, db);
-        if (!feature_pending(SH_PENDING_RESIDENT, "cached-resource refresh", SH_PENDING_RESIDENT_WHY) &&
-            !sh_resource_resident_bind(results, db, g_doom_base))
+        /* Every package activation refreshes cached resources through this
+         * binding; it is never gated (an unbound refresh fails all activation). */
+        if (!sh_resource_resident_bind(results, db, g_doom_base))
             backend_log("MPKG: native cached-resource refresh binding unavailable");
         {
             const sh_map_transition_callbacks callbacks = {sh_rawmap_transition_pending,
@@ -507,8 +508,6 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
 
         /* Queue immutable new-declaration registration on the engine main thread.
          * The interface and palette callbacks must be ready before its command runs. */
-        feature_pending(SH_PENDING_DECL_SOUND, "native audio events for package sound decls",
-                        SH_PENDING_DECL_SOUND_WHY);
         if (overrides_installed)
             sh_decl_server_install(results, db, g_doom_base, cmdsys);
         else
@@ -534,8 +533,7 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
         sh_algo_install(g_doom_base);
 
         /* Bind registry enumeration for the visibility-toggle command. */
-        if (!feature_pending(SH_PENDING_TARGET_ANY, "visibility-toggle registry", SH_PENDING_TARGET_ANY_WHY))
-            sh_target_any_install(get_decls);
+        sh_target_any_install(get_decls);
 
         /* Bare wire targets receive native references; real nodes retain stock wiring. */
         sh_wiring_cleandirect_install(g_doom_base);
