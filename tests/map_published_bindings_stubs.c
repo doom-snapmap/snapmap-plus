@@ -21,6 +21,7 @@ void sh_rawmap_read_enter(sh_rawmap_read_scope *scope, const void *caller)
 { (void)scope; (void)caller; assert(0); }
 void sh_rawmap_read_leave(sh_rawmap_read_scope *scope) { (void)scope; assert(0); }
 int sh_rawmap_cancel_pending_map(void) { assert(0); return 0; }
+void sh_rawmap_set_orphan_check(sh_rawmap_orphan_check_fn check) { (void)check; assert(0); }
 int sh_rawmap_preflight_request(const char *json, size_t length, const sh_rawmap_request *request, char *error, size_t capacity)
 { (void)json; (void)length; (void)request; (void)error; (void)capacity; assert(0); return 0; }
 int sh_rawmap_preflight_loading_request(const char *json, size_t length, const sh_rawmap_request *request,

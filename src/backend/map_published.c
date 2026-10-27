@@ -52,9 +52,24 @@ typedef struct pub_request {
     unsigned long long sequence;
     unsigned char option;
     int kind, launched, departed_browser;
+    int selected;           /* activation replaced the cache with the full map */
+    const char *reject;     /* why the latest validity check failed (static text) */
 } pub_request;
 static pub_request *g_pub_retired;
 static __declspec(thread) pub_request *g_pub_entering;
+
+/* A launched request lent the native cache a lobby-only snapshot (no entities).
+ * If it is dropped before activation, remember the map so the transition can
+ * cancel that load rather than build the map from the projection. */
+static char g_pub_orphan[256];
+static char g_pub_orphan_reason[160];
+static ULONGLONG g_pub_orphan_at;
+#define PUB_ORPHAN_MS 600000ull
+static int pub_reject(pub_request *request, const char *reason)
+{
+    if (request) request->reject = reason;
+    return 0;
+}
 
 static const uint8_t *pub_site(const sig_result *results, size_t count, const uint8_t *base, const char *name)
 {
@@ -182,19 +197,27 @@ static int pub_valid(void *context)
     void *shell, *cache;
     int screen, next, state;
     __try {
-        if (!g_pub_ready || !g_pub_thread || *g_pub_thread != GetCurrentThreadId() ||
-            request->sequence != g_pub_sequence || !(shell = *g_pub_shell_slot) ||
-            *(void **)((unsigned char *)shell + 0x18) != request->manager) return 0;
+        if (!g_pub_ready || !g_pub_thread || *g_pub_thread != GetCurrentThreadId())
+            return pub_reject(request, "not on the engine thread");
+        if (request->sequence != g_pub_sequence) return pub_reject(request, "a newer published launch replaced it");
+        if (!(shell = *g_pub_shell_slot) || *(void **)((unsigned char *)shell + 0x18) != request->manager)
+            return pub_reject(request, "the shell menu manager changed");
         screen = *(int *)((unsigned char *)request->manager + 8);
         next = *(int *)((unsigned char *)request->manager + 12);
         state = *(int *)((unsigned char *)request->manager + 0x910);
-        if (screen < 46 || screen > 65 || next < 46 || next > 65 || state == 9 || state == 10) return 0;
-        if (request->kind == PUB_READY) return pub_host_matches(request->selection);
-        if (request->kind == PUB_LOBBY && pub_history() != request->history) return 0;
+        if (screen < 46 || screen > 65 || next < 46 || next > 65)
+            return pub_reject(request, "the shell left the SnapMap screens");
+        if (state == 9 || state == 10) return pub_reject(request, "the shell is paused or in game");
+        if (request->kind == PUB_READY)
+            return pub_host_matches(request->selection) ? 1 : pub_reject(request, "the lobby host map differs");
+        if (request->kind == PUB_LOBBY && pub_history() != request->history)
+            return pub_reject(request, "the published-map history changed");
         cache = pub_cache();
-        return cache && sh_map_native_matches_ids(request->selection,
-            (unsigned char *)cache + 0x24408, (unsigned char *)cache + 0x24438);
-    } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+        if (!cache) return pub_reject(request, "the native published-map cache is unavailable");
+        return sh_map_native_matches_ids(request->selection,
+            (unsigned char *)cache + 0x24408, (unsigned char *)cache + 0x24438)
+            ? 1 : pub_reject(request, "the native cache holds a different map");
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return pub_reject(request, "the validity check faulted"); }
 }
 static int pub_same_launch(void *manager, const void *metadata)
 {
@@ -207,19 +230,23 @@ static int pub_waiting(void *context)
     __try {
         void *cache;
         int browser;
-        if (!request->launched || !g_pub_ready || request->sequence != g_pub_sequence ||
-            !pub_manager_current(request->manager) || !(cache = pub_cache()) ||
-            !sh_map_native_matches_ids(request->selection, (unsigned char *)cache + 0x24408,
-                (unsigned char *)cache + 0x24438)) return 0;
+        if (!request->launched) return pub_reject(request, "it was never launched");
+        if (!g_pub_ready || request->sequence != g_pub_sequence)
+            return pub_reject(request, "a newer published launch replaced it");
+        if (!pub_manager_current(request->manager)) return pub_reject(request, "the shell menu manager changed");
+        if (!(cache = pub_cache())) return pub_reject(request, "the native published-map cache is unavailable");
+        if (!sh_map_native_matches_ids(request->selection, (unsigned char *)cache + 0x24408,
+                (unsigned char *)cache + 0x24438)) return pub_reject(request, "the native cache holds a different map");
         if (g_pub_entering == request) return 1;
         browser = sh_decl_server_map_browser_present();
         if (!browser) request->departed_browser = 1;
-        else if (request->departed_browser) return 0;
+        else if (request->departed_browser) return pub_reject(request, "the player returned to the map browser");
         /* Lobby identity continues to own the request when browser screens
          * close during the native transition into LOADING. */
-        return pub_host_matches(request->selection) ||
-            (request->kind != PUB_READY && pub_valid(request));
-    } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+        if (pub_host_matches(request->selection)) return 1;
+        if (request->kind == PUB_READY) return pub_reject(request, "the lobby host map differs");
+        return pub_valid(request);
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return pub_reject(request, "the wait check faulted"); }
 }
 static int pub_matches_level(void *context, const void *parameters)
 {
@@ -246,6 +273,7 @@ static int pub_select(void *context)
         pub_select_decoded, request, error, sizeof(error)); }
     __finally { sh_rawmap_inspection_leave(); }
     if (!ok && error[0]) backend_log(error);
+    if (ok) request->selected = 1;
     return ok;
 }
 static int pub_enter_native(void *context, const void *metadata, void *snapshot)
@@ -289,6 +317,16 @@ static int pub_enter(void *context, const char *json)
 static void pub_release(void *context)
 {
     pub_request *request = context;
+    if (request->launched && !request->selected &&
+        sh_map_native_level_name(request->selection, g_pub_orphan, sizeof(g_pub_orphan))) {
+        char line[512];
+        strcpy_s(g_pub_orphan_reason, sizeof(g_pub_orphan_reason),
+                 request->reject ? request->reject : "its preparation was canceled");
+        g_pub_orphan_at = GetTickCount64();
+        snprintf(line, sizeof(line), "MPKG: published map '%s' lost its prepared launch before loading: %s",
+                 g_pub_orphan, g_pub_orphan_reason);
+        backend_log(line);
+    }
     if (!sh_map_native_release(&request->selection)) {
         backend_log("MPKG: published-map metadata cleanup did not complete");
         if (request->selection) {
@@ -327,6 +365,7 @@ static int pub_prepare(int kind, void *manager, const void *metadata, void *snap
         sh_rawmap_request launch;
         sh_rawmap_loading loading = {pub_waiting, pub_matches_level, pub_select};
         if (!pub_manager_current(manager)) goto done;
+        g_pub_orphan[0] = 0;   /* a new launch supersedes any dropped one */
         request = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*request));
         if (!request) { strcpy_s(error, sizeof(error), "Published-map request allocation failed."); goto done; }
         request->kind = kind; request->manager = manager; request->option = option;
@@ -423,6 +462,19 @@ static void pub_complete(void *download)
     __finally { sh_rawmap_read_leave(&scope); }
 }
 
+/* One-shot: does this native load name the published map whose prepared launch
+ * was dropped after it gave the cache a lobby-only snapshot? */
+static int pub_orphan_check(const void *parameters, char *reason, size_t capacity)
+{
+    if (!g_pub_orphan[0]) return 0;
+    if (GetTickCount64() - g_pub_orphan_at > PUB_ORPHAN_MS) { g_pub_orphan[0] = 0; return 0; }
+    if (!sh_map_native_level_named(parameters, g_pub_orphan)) return 0;
+    if (reason && capacity)
+        snprintf(reason, capacity, "'%s': %s", g_pub_orphan, g_pub_orphan_reason);
+    g_pub_orphan[0] = 0;
+    return 1;
+}
+
 int sh_map_published_install(const sig_result *results, size_t count, const uint8_t *base)
 {
     static const size_t stolen[PUB_HOOKS] = {17, 18, 18, 15, 21, 20};
@@ -440,6 +492,7 @@ int sh_map_published_install(const sig_result *results, size_t count, const uint
     }
     for (size_t i = 0; i < PUB_HOOKS; i++) if (hook_commit(g_pub_original[i]) != B2_PATCH_OK) goto failed;
     InterlockedExchange(&g_pub_ready, 1);
+    sh_rawmap_set_orphan_check(pub_orphan_check);
     backend_log("MPKG: published reads inspect without activation; offline, lobby, direct and join readiness retain their launch sources");
     return 1;
 failed:

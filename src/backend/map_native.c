@@ -188,17 +188,38 @@ int sh_map_native_matches(const sh_map_native_selection *selection, const void *
     return metadata && sh_map_native_matches_ids(selection, metadata, (const unsigned char *)metadata + MAP_STRING_SIZE);
 }
 
+int sh_map_native_level_named(const void *parameters, const char *name)
+{
+    size_t name_length = name ? strlen(name) : 0;
+    if (!parameters || !name_length) return 0;
+    __try {
+        int map_length;
+        const char *map = native_string((const unsigned char *)parameters + 0x20, &map_length);
+        return (*(const unsigned char *)((const unsigned char *)parameters + 0x170f8) & 2) &&
+            map && map_length > 8 && (size_t)map_length - 8 == name_length &&
+            !memcmp(map, "snapmap/", 8) && !memcmp(map + 8, name, name_length);
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+}
+
+int sh_map_native_level_name(const sh_map_native_selection *selection, char *out, size_t capacity)
+{
+    if (!out || !capacity) return 0;
+    out[0] = 0;
+    if (!selection) return 0;
+    __try {
+        int name_length;
+        const char *name = native_string(selection->metadata + 0x398, &name_length);
+        if (!name || name_length <= 0 || (size_t)name_length >= capacity) return 0;
+        memcpy(out, name, (size_t)name_length); out[name_length] = 0;
+        return 1;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { out[0] = 0; return 0; }
+}
+
 int sh_map_native_matches_level(const sh_map_native_selection *selection, const void *parameters)
 {
-    if (!selection || !parameters) return 0;
-    __try {
-        int map_length, name_length;
-        const char *map = native_string((const unsigned char *)parameters + 0x20, &map_length);
-        const char *name = native_string(selection->metadata + 0x398, &name_length);
-        return (*(const unsigned char *)((const unsigned char *)parameters + 0x170f8) & 2) &&
-            map && name && name_length > 0 && map_length > 8 && map_length - 8 == name_length &&
-            !memcmp(map, "snapmap/", 8) && !memcmp(map + 8, name, (size_t)name_length);
-    } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+    char name[256];
+    return selection && parameters && sh_map_native_level_name(selection, name, sizeof(name)) &&
+        sh_map_native_level_named(parameters, name);
 }
 
 /* The caller has entered heap zero and owns an empty constructed snapshot. */

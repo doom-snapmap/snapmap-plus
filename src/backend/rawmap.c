@@ -1236,15 +1236,45 @@ done:;
     if (error[0]) sh_mpkg_report_error(error);
 }
 
+static sh_rawmap_orphan_check_fn g_orphan_check;
+void sh_rawmap_set_orphan_check(sh_rawmap_orphan_check_fn check) { g_orphan_check = check; }
+
+/* No retained request admits this load. A published launch that already gave
+ * the native cache its lobby-only snapshot must not continue: the engine would
+ * build the map without its entities (RepairAndMigrate rejects the empty
+ * instance list) and drop to the hub. Cancel it with a reason instead. */
+static int transition_orphaned(const void *parameters)
+{
+    char reason[512] = "";
+    int orphaned = 0;
+    if (!g_orphan_check) return 0;
+    __try { orphaned = g_orphan_check(parameters, reason, sizeof(reason)); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { orphaned = 0; }
+    if (!orphaned) return 0;
+    {
+        char line[700];
+        snprintf(line, sizeof(line), "MPKG: canceling the native load of a published map whose package "
+            "preparation was dropped (%s)", reason[0] ? reason : "no reason recorded");
+        backend_log(line);
+    }
+    sh_mpkg_report_error("This map's packages were no longer prepared when it started loading, so the load "
+        "was canceled. Start the map again from its page.");
+    return 1;
+}
+
 int sh_rawmap_transition_pending(void *manager, const void *parameters)
 {
     int matches = 0, valid = 0;
     (void)manager;
     if (g_pending_map.state != 4 || !g_pending_map.loading.matches ||
-        GetCurrentThreadId() != g_pending_map.thread) return 0;
+        GetCurrentThreadId() != g_pending_map.thread) return transition_orphaned(parameters) ? -1 : 0;
     __try { matches = g_pending_map.loading.matches(g_pending_map.request.context, parameters); }
     __except (EXCEPTION_EXECUTE_HANDLER) { }
-    if (!matches) return 0;
+    if (!matches) {
+        if (transition_orphaned(parameters)) return -1;
+        backend_log("MPKG: a map load started while a different map's packages were prepared; it continues natively");
+        return 0;
+    }
     g_pending_map.state = 5;
     g_transition_previous_busy = g_preflight_busy; g_preflight_busy = 1;
     g_transition_error[0] = 0;

@@ -58,6 +58,12 @@ int sh_map_native_matches(const sh_map_native_selection *selection, const void *
 { return sh_map_native_matches_ids(selection, input, (const unsigned char *)input + 0x30); }
 int sh_map_native_matches_level(const sh_map_native_selection *selection, const void *parameters)
 { assert(selection); return parameters == (void *)0x777; }
+int sh_map_native_level_name(const sh_map_native_selection *selection, char *out, size_t capacity)
+{ assert(selection); strcpy_s(out, capacity, "test2"); return 1; }
+int sh_map_native_level_named(const void *parameters, const char *name)
+{ return parameters == (void *)0x777 && !strcmp(name, "test2"); }
+static sh_rawmap_orphan_check_fn registered_orphan_check;
+void sh_rawmap_set_orphan_check(sh_rawmap_orphan_check_fn check) { registered_orphan_check = check; }
 int sh_map_native_enter(const sh_map_native_selection *selection, const char *json,
     sh_map_native_enter_fn enter, void *context, char *error, size_t capacity)
 {
@@ -283,6 +289,7 @@ static void grouped_installation(void)
         assert(g_pub_original[PUB_COMPLETE]); original_complete((void *)9); assert(!inspection);
         fail_remove = fail_commit = 0;
         assert(sh_map_published_install(results, 9, base) && g_pub_ready);
+        assert(registered_orphan_check == pub_orphan_check);
         g_pub_ready = 0;
         for (int i = 0; i < PUB_HOOKS; i++) g_pub_original[i] = NULL;
     }
@@ -293,6 +300,38 @@ static DWORD WINAPI stale_thread(void *unused)
     assert(pub_read((void *)1, "id", "revision", (void *)2, (void *)3) == (void *)10 && !read_scope && !inspection);
     assert(!hidden && !prepared && !errors); return 0;
 }
+/* R-019: a launched published request that is dropped before activation has
+ * left a lobby-only snapshot in the native cache. The map transition must be
+ * able to recognize that load (once) and cancel it, with the reason logged. */
+static void dropped_launch_is_orphaned(void)
+{
+    char reason[256];
+    sh_rawmap_request request;
+    reset(); g_pub_orphan[0] = 0;
+    assert(pub_lobby(manager, 1) == 1 && retained.context);
+    request = retained; memset(&retained, 0, sizeof(retained));
+    assert(request.enter(request.context, retained_json) == 0 && calls[PUB_LOBBY] == 1);
+    assert(retained_loading.waiting(request.context));
+    /* the lobby history changes and the host no longer matches: the wait fails with a reason */
+    *(void **)(history_record + 0x18) = (void *)1; *(int *)(host_parameters + 0x600) = 8;
+    assert(!retained_loading.waiting(request.context));
+    request.release(request.context);
+    assert(!strcmp(g_pub_orphan, "test2") && strstr(g_pub_orphan_reason, "history changed"));
+    assert(!pub_orphan_check((void *)0x778, reason, sizeof(reason)));          /* another map loads natively */
+    assert(pub_orphan_check((void *)0x777, reason, sizeof(reason)) && strstr(reason, "test2"));
+    assert(!pub_orphan_check((void *)0x777, reason, sizeof(reason)));          /* one-shot */
+    /* a launch that reached activation leaves no orphan */
+    reset(); g_pub_orphan[0] = 0;
+    assert(pub_lobby(manager, 1) == 1 && finish(1) && !g_pub_orphan[0]);
+    /* a dropped request that never launched leaves no orphan either */
+    reset(); g_pub_orphan[0] = 0; pub_offline(manager, metadata, (void *)1);
+    assert(!finish(0) && !g_pub_orphan[0]);
+    /* a new published launch supersedes a dropped one */
+    strcpy_s(g_pub_orphan, sizeof(g_pub_orphan), "test2"); g_pub_orphan_at = GetTickCount64();
+    reset(); pub_offline(manager, metadata, (void *)1); assert(!g_pub_orphan[0]); (void)finish(0);
+    assert(allocated == released);
+}
+
 int main(void)
 {
     reset(); grouped_installation(); reset();
@@ -353,6 +392,7 @@ int main(void)
     reset(); g_pub_ready = 0; pub_offline(manager, metadata, (void *)1);
     assert(calls[0] == 1 && !prepared);
     vanilla_passes_through();
+    dropped_launch_is_orphaned();
     puts("map_published_test: readers, native pass-through, four retained launch routes, cancellation, cleanup and hook-group failure passed");
     return 0;
 }

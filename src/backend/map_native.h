@@ -16,6 +16,12 @@ const char *sh_map_native_source(const sh_map_native_selection *selection, size_
 int sh_map_native_matches(const sh_map_native_selection *selection, const void *metadata);
 int sh_map_native_matches_ids(const sh_map_native_selection *selection, const void *id, const void *revision);
 int sh_map_native_matches_level(const sh_map_native_selection *selection, const void *level_parameters);
+/* The selection's level name (metadata +0x398, the "<name>" of "snapmap/<name>")
+ * copied into out; 1 on success. */
+int sh_map_native_level_name(const sh_map_native_selection *selection, char *out, size_t capacity);
+/* 1 when native level parameters name the SnapMap level "snapmap/<name>"
+ * (parameters +0x20) and carry the SnapMap flag (+0x170f8 bit 1). */
+int sh_map_native_level_named(const void *level_parameters, const char *name);
 /* Decode after package activation, then lend the native metadata/snapshot to a
  * synchronous original launch. They may not escape the callback except through
  * a native deep copy. Return 1 on success. A failed parse never calls launch.

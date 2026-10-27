@@ -62,6 +62,13 @@ int sh_rawmap_preflight_loading_request(const char *json, size_t length,
     const sh_rawmap_request *request, const sh_rawmap_loading *loading,
     char *error, size_t capacity);
 int sh_rawmap_transition_pending(void *manager, const void *parameters);
+/* A launch route whose retained request was dropped after it handed the native
+ * cache a lobby-only snapshot registers this check. Given the native level
+ * parameters, it returns 1 (and a reason) when they name that map: the map
+ * transition then cancels the load instead of building the map from a snapshot
+ * that lacks its entities. One-shot; NULL unregisters. */
+typedef int (*sh_rawmap_orphan_check_fn)(const void *parameters, char *reason, size_t capacity);
+void sh_rawmap_set_orphan_check(sh_rawmap_orphan_check_fn check);
 int sh_rawmap_transition_activate(void);
 int sh_rawmap_transition_commit(void);
 /* The native map-change owner, rather than an unrelated resource refresh,

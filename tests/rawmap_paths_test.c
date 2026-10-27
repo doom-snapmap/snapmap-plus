@@ -1505,6 +1505,30 @@ static void preflight_hook_publishes_helpers_before_detour(void)
     sh_patch_test_observe_write(NULL); VirtualFree(code, 0, MEM_RELEASE);
 }
 
+/* R-019: with no retained request admitting a load, a published map whose
+ * prepared launch was dropped is canceled with a notice instead of loading. */
+static int orphan_calls;
+static int test_orphan_check(const void *parameters, char *reason, size_t capacity)
+{
+    orphan_calls++;
+    if (parameters != (void *)0x77) return 0;
+    snprintf(reason, capacity, "'test2': the published-map history changed");
+    return 1;
+}
+static void a_dropped_published_launch_is_canceled(void)
+{
+    int errors = package_errors;
+    CHECK(!g_pending_map.state);
+    sh_rawmap_set_orphan_check(NULL);
+    CHECK(sh_rawmap_transition_pending(NULL, (void *)0x77) == 0);       /* nothing registered: native */
+    sh_rawmap_set_orphan_check(test_orphan_check);
+    CHECK(sh_rawmap_transition_pending(NULL, (void *)0x88) == 0 && orphan_calls == 1);
+    CHECK(package_errors == errors);
+    CHECK(sh_rawmap_transition_pending(NULL, (void *)0x77) == -1 && orphan_calls == 2);
+    CHECK(package_errors == errors + 1 && strstr(package_last_error, "no longer prepared"));
+    sh_rawmap_set_orphan_check(NULL);
+}
+
 int main(void)
 {
     char archive[MAX_PATH];
@@ -1520,6 +1544,7 @@ int main(void)
         return 1;
     }
 
+    a_dropped_published_launch_is_canceled();
     a_chosen_file_stays_chosen();
     a_failed_write_keeps_its_destination();
     opening_a_rawmap_never_aims_saves_at_it(archive);
