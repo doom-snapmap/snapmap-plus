@@ -731,7 +731,8 @@ int sh_grid_native_install(const sig_result *r,size_t n,const uint8_t *base)
     {const unsigned char *p=(const unsigned char*)clean(r,n,"GridReapplyEntityTree");int32_t displacement;
         /* The native re-apply routine owns the same tree: it gets it from GridEntityTree,
          * applies it, then destroys it and deletes its 0x48 bytes. Bind its destructor and
-         * delete only when its two leading calls reach the resolved getter and applier. */
+         * delete only when its two leading calls reach the resolved getter and applier.
+         * Its live destroy/free check stays open: R-012 could not reach it before the stream-slot fix. */
         if(p&&g_entity_tree&&g_apply_tree&&p[0x17]==0xe8&&p[0x25]==0xe8&&p[0x38]==0xe8&&p[0x45]==0xe8&&
            !memcmp(p+0x3d,"\xba\x48\0\0\0\x48\x8b\xcb",8)){
             memcpy(&displacement,p+0x18,4);

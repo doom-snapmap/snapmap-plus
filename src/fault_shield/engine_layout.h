@@ -98,7 +98,12 @@
 #define RVA_DIALOG_DESC_INIT SH_RVA(0x102DDF0u, 0x102D090u)   /* FUN_140e63930(req): zero-init the request descriptor, returns req */
 #define SHELL_DLGMGR_OFF     0x08u       /* *(S+0x08) = idMenuManager_Dialog (AddDialog's `this`) */
 #define SHELL_SHELLMGR_OFF   0x18u       /* *(S+0x18) = idMenuManager_Shell (owns the visible byte) */
-#define SHELLMGR_VISIBLE_OFF 0xA8u       /* (shellMgr)+0xa8 = the dialog-visible byte; write 1 on raise */
+/* (shellMgr)+0xa8 is NOT a "dialog is up" signal: AddDialogWrapper writes 1 on
+ * its raise (0xFCC6DA on 13954591 VK), but it read 0 throughout with a native
+ * dialog queued and on screen on 13954591 VK/GL and the 2018 control (snaphak-re
+ * R-012 scenario 13). For visibility use the dialog manager's queue count
+ * (DLGQ_COUNT_OFF) or its active widget (DLGMGR_ACTIVE_OFF). */
+#define SHELLMGR_VISIBLE_OFF 0xA8u
 #define DLGQ_ARR_OFF         0x900u      /* *(dlgMgr+0x900) = the descriptor array ptr (dedup scan) */
 #define DLGQ_COUNT_OFF       0x908u      /* *(int*)(dlgMgr+0x908) = queued count (<=4) */
 #define DLGMGR_ACTIVE_OFF    0x8F0u      /* active widget; native ClearDialog hides it before retirement */

@@ -76,29 +76,24 @@ static __inline int sh_live_verify(void)
 }
 #define SH_PENDING_ON(flag) ((flag) && !sh_live_verify())
 
-#define SH_PENDING_APPLY_PASTE        1
-#define SH_PENDING_APPLY_PASTE_WHY    "substate paste bit +0x41 / +0x42, paste action id 0x5c (apply_engine.c); staged-only placement remains"
-#define SH_PENDING_DECL_SERVER        1
-#define SH_PENDING_DECL_SERVER_WHY    "decl outputs count +0x448, decl field +0xac (decl_server.c)"
-#define SH_PENDING_ENGINE_DIALOG      1
-#define SH_PENDING_ENGINE_DIALOG_WHY  "dialog parameter +0x26, actions 0x4a/0x4b match 2018 in code; the prompt reaching the screen is unconfirmed (engine_dialog.c)"
-#define SH_PENDING_GRID_PROPERTIES    1
-#define SH_PENDING_GRID_PROPERTIES_WHY "properties action 0x50, editor field +0xac (grid_room_editor.c)"
-#define SH_PENDING_IFACE_MODULES      1
-#define SH_PENDING_IFACE_MODULES_WHY  "module table stride 0x98, name +0x48 (iface_engine.c)"
+/* Confirmed live on both renderers by the attended pass (snaphak-re R-012) and
+ * bound without a gate: native paste arming (editor+0x209E0/+0x209E4, substate
+ * +0x41 bit 0x40, mode +0x420/+0x424 = 0x5C), the decl server's outputs count
+ * +0x448, native dialogs (params +0x98, actions 0x4A/0x4B), grid-room
+ * properties (action 0x50, +0xAC), module names (stride 0x98, name +0x48), the
+ * Start menu row (+0x74/+0x78, stride 0x58, +0xC), the SWF field cap +0x280 and
+ * the fault shield's exit flag editor+0x23294. */
+
+/* R-012: never ran (no active package carried prepared audio events). */
+#define SH_PENDING_DECL_SOUND         1
+#define SH_PENDING_DECL_SOUND_WHY     "prepared sound decl Wwise event id +0xac (decl_server.c)"
 #define SH_PENDING_MAP_PUBLISHED      1
 #define SH_PENDING_MAP_PUBLISHED_WHY  "launch parameters +0x600 (map_published.c)"
 #define SH_PENDING_RENDER_EDITOR      1
 #define SH_PENDING_RENDER_EDITOR_WHY  "settings panel slider +0x120 (map_render_editor.c)"
-#define SH_PENDING_NAV_MENU           1
-#define SH_PENDING_NAV_MENU_WHY       "menu clone +0x74/+0x78, entry stride 0x58, matrix +0xc (nav_menu.c)"
 #define SH_PENDING_RESIDENT           1
 #define SH_PENDING_RESIDENT_WHY       "renderer count +0x14, world-text fonts +0x688 (resource_resident.c)"
-#define SH_PENDING_SWF_TEXTEDIT       1
-#define SH_PENDING_SWF_TEXTEDIT_WHY   "text input max chars +0x280 (swf_textedit.c)"
 #define SH_PENDING_TARGET_ANY         1
 #define SH_PENDING_TARGET_ANY_WHY     "decl list +0x20/+0x28 (target_any.c)"
-#define SH_PENDING_FAULT_SHIELD       1
-#define SH_PENDING_FAULT_SHIELD_WHY   "editor exit flag +0x23294, shell dialog-visible +0xa8 while a dialog is up (engine_layout.h)"
 
 #endif /* BACKEND_ENGINE_BUILD_H */

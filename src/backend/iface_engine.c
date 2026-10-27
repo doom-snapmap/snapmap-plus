@@ -621,8 +621,8 @@ static const char *slot_id_to_string(sh_iface *self, int id, char *buf, int cap)
 
         const uint8_t *ed = editor_session();
         void *lm = NULL;
-        /* The module table layout is unverified on build 13954591 (engine_build.h). */
-        if (!SH_PENDING_ON(SH_PENDING_IFACE_MODULES) && ed && ie_read_ptr(ed + ED_MAP_OBJ_OFF, &lm) && lm) {
+        /* Module table stride 0x98 and name +0x48: confirmed live on 13954591 (R-012). */
+        if (ed && ie_read_ptr(ed + ED_MAP_OBJ_OFF, &lm) && lm) {
             int modIdx = id_module_index((const uint8_t *)lm, (uint32_t)id);
             if (modIdx >= 0) {
                 /* Dereference the table entry, then its module-name pointer. */

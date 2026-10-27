@@ -442,11 +442,8 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
         sh_ui_bridge_install();
 
         /* Bind apply dependencies before publishing their interface slots. */
-        feature_pending(SH_PENDING_APPLY_PASTE, "native prefab paste (staged-only placement remains)",
-                        SH_PENDING_APPLY_PASTE_WHY);
         sh_apply_engine_install(results, db, g_doom_base, cmdsys);
         if(grid_installed&&
-           !feature_pending(SH_PENDING_GRID_PROPERTIES,"grid-room dimension properties",SH_PENDING_GRID_PROPERTIES_WHY)&&
            !sh_grid_editor_install(results,db,sh_grid_native_read,sh_grid_native_apply))
             backend_log("GRID: native dimension properties unavailable on this build");
         if(!sh_map_render_install(results,db,g_doom_base)||
@@ -463,8 +460,7 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
                                     sh_apply_engine_entity_json,
                                     sh_apply_engine_entity_transform, NULL);
         sh_nav_bake_set_snapshot(sh_apply_engine_nav_regions, NULL);
-        if (!feature_pending(SH_PENDING_NAV_MENU, "navigation menu", SH_PENDING_NAV_MENU_WHY))
-            sh_nav_menu_install(results, db);
+        sh_nav_menu_install(results, db);
 
         /* Read marks at entry to edit-to-build conversion, on the engine main thread.
          * Later bake callbacks can see entities with incomplete defsub state and
@@ -493,20 +489,20 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
         sh_palette_refresh_install(results, db, g_doom_base);
 
         /* Install native prompts before the decl server can raise a package dialog.
-         * Failed binding leaves the OS message-box fallback available. */
+         * Failed binding leaves the OS message-box fallback available. The
+         * live-verify descriptor trace stays for the package-consent prompt,
+         * which R-012 did not reach. */
         sh_engine_dialog_set_trace(sh_live_verify());
-        if (!feature_pending(SH_PENDING_ENGINE_DIALOG, "native prompts (OS message boxes remain)",
-                             SH_PENDING_ENGINE_DIALOG_WHY))
-            sh_engine_dialog_install(results, db, g_doom_base);
+        sh_engine_dialog_install(results, db, g_doom_base);
 
         sh_audio_banks_native_install(results, db);
         sh_audio_files_native_install(results, db, g_doom_base);
 
         /* Queue immutable new-declaration registration on the engine main thread.
          * The interface and palette callbacks must be ready before its command runs. */
-        if (feature_pending(SH_PENDING_DECL_SERVER, "decl server", SH_PENDING_DECL_SERVER_WHY))
-            ;
-        else if (overrides_installed)
+        feature_pending(SH_PENDING_DECL_SOUND, "native audio events for package sound decls",
+                        SH_PENDING_DECL_SOUND_WHY);
+        if (overrides_installed)
             sh_decl_server_install(results, db, g_doom_base, cmdsys);
         else
             backend_log("decl-server REFUSED: pinned resource-provider ABI was not installed");
@@ -538,14 +534,12 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
         sh_wiring_cleandirect_install(g_doom_base);
 
         /* Add SWF clipboard shortcuts; paste requires its own assignment signature. */
-        if (!feature_pending(SH_PENDING_SWF_TEXTEDIT, "SWF clipboard shortcuts", SH_PENDING_SWF_TEXTEDIT_WHY))
-            sh_swf_textedit_install(g_doom_base);
+        sh_swf_textedit_install(g_doom_base);
     }
 
     /* Arm the resident fault shield after startup resolution. */
 
-    if (!feature_pending(SH_PENDING_FAULT_SHIELD, "fault shield", SH_PENDING_FAULT_SHIELD_WHY))
-        shield_install(g_doom_base, g_doom_size);
+    shield_install(g_doom_base, g_doom_size);
 
     return 0;
 }

@@ -2903,6 +2903,12 @@ static int ds_activate_audio(char *error, size_t capacity)
     if (count != used) {
         snprintf(error, capacity, "prepared audio event snapshot allocation failed"); goto done;
     }
+    if (count && SH_PENDING_ON(SH_PENDING_DECL_SOUND)) {
+        /* Fail closed: the +0xac event read has not run live on 13954591 (R-012). */
+        snprintf(error, capacity, "native audio events are off on this build until the sound "
+                 "decl field is confirmed (" SH_PENDING_DECL_SOUND_WHY "; SNAPMAP_PLUS_LIVE_VERIFY=1 runs it)");
+        goto done;
+    }
     if (count) {
         if (!ds_decode_registry(&registry, &type_by_name, &register_file)) {
             snprintf(error, capacity, "prepared audio registry is unavailable"); goto done;

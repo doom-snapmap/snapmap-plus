@@ -1196,12 +1196,8 @@ static int ae_mkcmd_instantiate(const char *prefab_text)
         backend_log("C2 place: native copy/paste is disabled or unavailable -> staged only");
         return AE_PASTE_STAGED;
     }
-    /* The paste bit (+0x41) and action id (0x5c) are not yet confirmed live on
-     * build 13954591 (engine_build.h); place staged only until they are. */
-    if (SH_PENDING_ON(SH_PENDING_APPLY_PASTE)) {
-        backend_log("C2 place: native paste arming awaits live confirmation -> staged only");
-        return AE_PASTE_STAGED;
-    }
+    /* Staging +0x209E0/+0x209E4, the paste bit (+0x41, 0x40) and action 0x5C at
+     * mode +0x424 were confirmed live on build 13954591 (snaphak-re R-012). */
 
     /* Native paste requires a nonempty, bounded staged entity list. */
     int ent_count = 0;
