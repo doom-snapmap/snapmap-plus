@@ -63,7 +63,7 @@ typedef struct sh_trav_monster {
 typedef unsigned char *(*sh_trav_reader)(const char *name, size_t *out_len);
 
 /* Load the effective table. Returns 1 on success. Repeated calls reuse the
- * table until a newly published package source invalidates it. */
+ * table until a source invalidation retires it. */
 int sh_trav_load(sh_trav_reader read_decl);
 /* Forget source-derived rows under the same lock used by readers. The next
  * load reads the new effective table; no native resources are called here. */

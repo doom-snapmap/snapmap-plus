@@ -1,19 +1,11 @@
 /* Native idFile / idFileSystem slots against the supported executables.
- * The backend calls native streams through SH_IDFILE_SLOT_* (overrides.c) and
- * the filesystem through the slots map_source.c decodes from
- * SnapMapReadSizeLimit. This test checks both against the engine's own code on
- * each image:
+ * The backend calls native streams through SH_IDFILE_SLOT_* (overrides.c).
+ * This test checks them against the engine's own code on each image:
  *   - idFileSystemLocal (found through RTTI) slot +0xF8 is ReadFile; it opens
  *     through SH_PROVIDER_OPEN_SLOT and calls the returned stream's GetLength
  *     and Read at SH_IDFILE_SLOT_LENGTH and SH_IDFILE_SLOT_READ;
- *   - SnapMapReadSizeLimit's entry calls GetFileLength +0x180 and ReadFile
- *     +0xF8, where map_source.c reads them;
- *   - PublishedMapCacheReady makes the five virtual calls map_published.c
- *     binds from it (session -> lobby +0x348, lobby -> parameters +0x2B8,
- *     progress +0x30, map cache +0x38, cache set +0x190) and compares the
- *     launch parameters' item id +0x550 and revision +0x600;
- *   - FinalizeMapChange sets idCommonLocal's loading byte at
- *     SH_COMMON_LOADING_FLAG (decl_server.c and map_transition.c read it).
+ *   - SnapMapReadSizeLimit (whose length checks map_payload.c patches) calls
+ *     GetFileLength +0x180 and ReadFile +0xF8.
  * Run via run-tests.ps1 with -Doom / -DoomAlt. */
 #include <windows.h>
 #include <stdint.h>
@@ -156,39 +148,6 @@ static void check_image(const char *path)
             printf(", ReadFile +0x%x\n", (unsigned)disp);
             CHECK(disp == 0xf8);
         }
-    }
-    {
-        uintptr_t ready = sig_addr_by_name(results, sig_db_count(), "PublishedMapCacheReady");
-        static const struct { size_t at; const char *bytes; size_t n; } calls[] = {
-            { 0x49, "\xff\x50\x30", 3 },                  /* progress +0x30 */
-            { 0x56, "\xff\x90\x48\x03\x00\x00", 6 },      /* session -> lobby +0x348 (2018 +0x338) */
-            { 0x62, "\xff\x92\xb8\x02\x00\x00", 6 },      /* lobby -> parameters +0x2B8 (2018 +0x2B0) */
-            { 0xaa, "\x41\xff\x51\x38", 4 },              /* system -> cache +0x38 */
-            { 0xba, "\x41\xff\x91\x90\x01\x00\x00", 7 },  /* cache set +0x190 */
-        };
-        CHECK(ready != 0);
-        if (ready) {
-            const uint8_t *r = (const uint8_t *)ready;
-            for (size_t i = 0; i < sizeof calls / sizeof calls[0]; i++)
-                CHECK(!memcmp(r + calls[i].at, calls[i].bytes, calls[i].n));
-            /* The parameters are copied to rsp+0x30; item id and revision are
-             * compared at rsp+0x580 and rsp+0x630, i.e. +0x550 and +0x600. */
-            CHECK(!memcmp(r + 0x79, "\x48\x8d\x8c\x24\x80\x05\x00\x00", 8));
-            CHECK(!memcmp(r + 0x8e, "\x48\x8d\x8c\x24\x30\x06\x00\x00", 8));
-            printf("PublishedMapCacheReady: lobby +0x348, parameters +0x2b8, item +0x550, revision +0x600\n");
-        }
-    }
-    {
-        uintptr_t fin = sig_addr_by_name(results, sig_db_count(), "FinalizeMapChange");
-        uint8_t want[7] = { 0xc6, 0x86, 0, 0, 0, 0, 0x01 };
-        int found = 0;
-        uint32_t off = SH_COMMON_LOADING_FLAG;
-        memcpy(want + 2, &off, 4);
-        CHECK(fin != 0);
-        for (size_t i = 0; fin && i < 0x400 && !found; i++)
-            found = !memcmp((const uint8_t *)fin + i, want, sizeof want);
-        CHECK(found);
-        if (found) printf("FinalizeMapChange sets common+0x%x\n", (unsigned)off);
     }
     free(img);
 }

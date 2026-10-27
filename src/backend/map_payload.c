@@ -72,9 +72,9 @@ int sh_map_payload_install(const sig_result *results, size_t count)
         }
     }
     g_ready = 1;
-    backend_log("MPKG: native map saves and saved/published reads accept positive idStr lengths; fixed 10 MiB ceilings removed");
+    backend_log("MAP: native map saves and saved/published reads accept positive idStr lengths; fixed 10 MiB ceilings removed");
     return 1;
 failed:
-    backend_log("MPKG: native map length repair unavailable; signature or patch verification failed");
+    backend_log("MAP: native map length repair unavailable; signature or patch verification failed");
     return 0;
 }

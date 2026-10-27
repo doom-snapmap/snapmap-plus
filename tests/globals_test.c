@@ -10,32 +10,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include "engine_globals.h"
-#include "decl_native_schema.h"
-#include "map_source.h"
-#include "map_native.h"
-#include "map_published.h"
-#include "map_transition.h"
-#include "resource_resident.h"
 #include "host_image.h"
 #include "engine_build.h"
-
-/* Binding checks must never invoke live reflection on the mapped PE. */
-int sh_typeinfo_class_derives(const char *name, const char *base)
-{
-    (void)name; (void)base;
-    fputs("unexpected live reflection during binding checks\n", stderr);
-    abort();
-}
-
-typedef struct metadata_image { const uint8_t *base; size_t size; uintptr_t last; } metadata_image;
-static int metadata_read(void *context, uintptr_t address, void *out, size_t length)
-{
-    metadata_image *image = (metadata_image *)context;
-    uintptr_t base = (uintptr_t)image->base;
-    image->last = address;
-    if (address < base || address - base > image->size || length > image->size - (address - base)) return 0;
-    memcpy(out, (const void *)address, length); return 1;
-}
 
 static uint8_t *map_pe_by_rva(const char *path, size_t *image_sz)
 {
@@ -149,59 +125,6 @@ int main(int argc, char **argv)
     size_t ok = 0;
     int bad = 0;
 
-    /* The native profile reader derives its filesystem/allocator slots from
-     * instructions adjacent to the signed-length guard on each renderer. */
-    {
-        const char *names[] = {"SnapMapReadSizeLimit", "MemLocalGet", "MemLocalPushHeap", "MemLocalPopHeap",
-            "PublishedMapComplete", "PublishedMapSelectionConstruct", "PublishedMapMetadataDestroy", "DeserializeFromJson",
-            "PublishedMapOfflineLaunch", "PublishedMapLobbyLaunch", "PublishedMapDirectLaunch", "PublishedMapCacheReady",
-            "PublishedMapRead", "PublishedMapCacheSet", "SerializeToJson"};
-        sig_result source[15] = {0};
-        int bound = 1;
-        for (size_t i = 0; i < 15; i++) {
-            const sig_entry *entry = NULL;
-            for (size_t j = 0; BACKEND_ENGINE_SIGNATURES[j].name; j++)
-                if (!strcmp(BACKEND_ENGINE_SIGNATURES[j].name, names[i])) entry = &BACKEND_ENGINE_SIGNATURES[j];
-            if (!entry || sig_resolve_one(base, entry, &source[i]) != SIG_OK) {
-                printf("BAD published source signature %s\n", names[i]); bound = 0;
-            }
-        }
-        if (!bound || !sh_map_source_install(source, 15, base) || !sh_map_native_bind(source, 15, base) ||
-            !sh_map_published_bind(source, 15, base)) {
-            printf("BAD native profile source binding\n"); bad++;
-        } else printf("OK  native profile source binding\n");
-    }
-
-    {
-        const char *names[] = {"AllocateGameResources", "UnloadGameResources", "FinalizeMapChange", "CancelMapChange"};
-        sig_result source[4] = {0};
-        int bound = 1;
-        for (size_t i = 0; i < 4; i++) {
-            const sig_entry *entry = NULL;
-            for (size_t j = 0; BACKEND_ENGINE_SIGNATURES[j].name; j++)
-                if (!strcmp(BACKEND_ENGINE_SIGNATURES[j].name, names[i])) entry = &BACKEND_ENGINE_SIGNATURES[j];
-            if (!entry || sig_resolve_one(base, entry, &source[i]) != SIG_OK) bound = 0;
-        }
-        if (!bound || !sh_map_transition_bind(source, 4, base)) {
-            printf("BAD native map transition binding\n"); bad++;
-        } else printf("OK  native map transition binding\n");
-    }
-    {
-        const char *names[] = {"ResourceReloadRenderScope", "PublishedMapComplete", "DeclSourceModeCall",
-            "ResourceReconstruct", "ResourceGenericLoad", "ResourceLookup", "MemLocalGet", "MemLocalPushHeap", "MemLocalPopHeap",
-            "MaterialVirtualTextureRebind", "SnapWorldTextFonts"};
-        sig_result source[sizeof(names) / sizeof(names[0])] = {0};
-        int bound = 1;
-        for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
-            const sig_entry *entry = NULL;
-            for (size_t j = 0; BACKEND_ENGINE_SIGNATURES[j].name; j++)
-                if (!strcmp(BACKEND_ENGINE_SIGNATURES[j].name, names[i])) entry = &BACKEND_ENGINE_SIGNATURES[j];
-            if (!entry || sig_resolve_one(base, entry, &source[i]) != SIG_OK) bound = 0;
-        }
-        if (!bound || !sh_resource_resident_bind(source, sizeof(source) / sizeof(source[0]), base)) {
-            printf("BAD native resident refresh binding\n"); bad++;
-        } else printf("OK  native resident refresh binding\n");
-    }
     for (size_t i = 0; i < total; i++) {
         const global_entry *e = &BACKEND_ENGINE_GLOBALS[i];
         glb_status st = GLB_UNKNOWN_NAME;
@@ -242,25 +165,7 @@ int main(int argc, char **argv)
         }
     }
 
-    /* The runtime metadata binder must locate reflection without executing the
-     * lazy singleton accessor. Static PE state has not initialized its readers. */
     {
-        metadata_image image = {base, image_sz, 0};
-        sh_decl_native_source source = {&image, metadata_read, 0};
-        uintptr_t accessor = glb_resolve(base, "declmgr_accessor", NULL);
-        uintptr_t container = glb_resolve(base, "type_container", NULL);
-        /* The binder decodes the reflection slot from the accessor's own code; no
-         * independent record of that slot exists for this build yet, so require an
-         * uninitialized read inside the image and report the address. */
-        int state = sh_decl_native_source_bind(&source, accessor, container);
-        if (state != 0 || source.reflection || !accessor || !container ||
-            image.last < (uintptr_t)base || image.last >= (uintptr_t)base + image_sz) {
-            printf("BAD read-only metadata binder state=%d read=0x%llx\n",
-                state, (unsigned long long)(image.last - (uintptr_t)base));
-            bad++;
-        } else printf("OK  read-only metadata binder reads uninitialized reflection slot 0x%llx\n",
-            (unsigned long long)(image.last - (uintptr_t)base));
-
         /* GetGameSystemInterface is no longer exported. The object is behind a
          * relocated data pointer: apply that one relocation to the RVA-mapped copy
          * as the loader would, then read through the slot like the runtime. */
@@ -277,20 +182,9 @@ int main(int argc, char **argv)
                 printf("BAD game-system slot 0x%llx holds 0x%llx\n",
                     (unsigned long long)(slot - (uintptr_t)base), (unsigned long long)va);
                 bad++;
-            } else {
-                uintptr_t relocated = system;
-                memcpy((void *)slot, &relocated, sizeof relocated);
-                source.reflection = 1;
-                state = sh_decl_native_source_ready(&source, accessor, container, slot);
-                if (state != 0 || source.reflection || image.last != system + 8) {
-                    printf("BAD native reader readiness state=%d read=0x%llx\n", state,
-                        (unsigned long long)(image.last - (uintptr_t)base));
-                    bad++;
-                } else printf("OK  native reader readiness waits at system 0x%llx through data slot 0x%llx\n",
-                    (unsigned long long)(system - (uintptr_t)base),
-                    (unsigned long long)(slot - (uintptr_t)base));
-                memcpy((void *)slot, &va, sizeof va);
-            }
+            } else printf("OK  game-system object 0x%llx through data slot 0x%llx\n",
+                (unsigned long long)(system - (uintptr_t)base),
+                (unsigned long long)(slot - (uintptr_t)base));
         }
     }
 

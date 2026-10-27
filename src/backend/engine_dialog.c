@@ -604,7 +604,7 @@ void sh_engine_dialog_release(int ticket)
 {
     LONG id;
     unsigned params[ED_PARAMS_BYTES / sizeof(unsigned)] = {0};
-    const char *source = "package dialog cancellation";
+    const char *source = "dialog cancellation";
     void *descriptor;
     unsigned char cleared;
     if (ticket <= 0 || ticket != (int)InterlockedCompareExchange(&g_ticket, 0, 0)) return;

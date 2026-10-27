@@ -189,7 +189,7 @@ static void dump_env(void)
     if (SUCCEEDED(SHGetFolderPathA(NULL, CSIDL_LOCAL_APPDATA, NULL, 0, profile))) {
         _snprintf_s(sub, sizeof sub, _TRUNCATE, "%s\\snapmap-plus", profile);          dump_dir("LOCALAPPDATA\\snapmap-plus (user data)", sub);
         _snprintf_s(sub, sizeof sub, _TRUNCATE, "%s\\snapmap-plus\\strings", profile);  dump_dir("LOCALAPPDATA\\snapmap-plus\\strings", sub);
-        _snprintf_s(sub, sizeof sub, _TRUNCATE, "%s\\snapmap-plus\\overrides", profile);dump_dir("LOCALAPPDATA\\snapmap-plus\\overrides", sub);
+        _snprintf_s(sub, sizeof sub, _TRUNCATE, "%s\\snapmap-plus\\prefabs", profile);  dump_dir("LOCALAPPDATA\\snapmap-plus\\prefabs", sub);
     }
     dump_modules();
 }

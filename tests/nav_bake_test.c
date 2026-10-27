@@ -8,7 +8,6 @@
 
 #include "../src/backend/nav_bake.h"
 #include "../src/backend/nav_regions.h"
-#include "../src/backend/resource_graph.h"
 #include "../src/backend/nav_traversal.h"
 
 static int g_checks = 0, g_fail = 0;
@@ -587,7 +586,7 @@ static void test_prepare_collects_worker_without_drawing(void)
     sh_nav_bake_test_reset();
 }
 
-static void test_package_sources_retire_cached_and_inflight_results(void)
+static void test_source_invalidation_retires_cached_and_inflight_results(void)
 {
     const int owner[] = {0};
     const char *name = "maps/modules/ind_dlc/room/room.aas_monster48";
@@ -625,90 +624,6 @@ static void test_package_sources_retire_cached_and_inflight_results(void)
     sh_nav_bake_test_reset();
 }
 
-static int dependency_visit(void *context, const char *parent_type, const char *parent_name,
-    const char *type, const char *name)
-{
-    unsigned *seen = (unsigned *)context;
-    (void)parent_type; (void)parent_name;
-    if (*type) return 1;
-    if (!strcmp(name, "generated/maps/modules/ind_dlc/room/room.baas_monster48")) *seen |= 1;
-    if (!strcmp(name, SH_TRAV_DECL_NAME)) *seen |= 2;
-    if (!strcmp(name, "grid-stock-input")) *seen |= 4;
-    if (!strcmp(name, "new-base-input")) *seen |= 8;
-    if (!strcmp(name, "maps/modules/ind_dlc/room/room.aas_monster48")) *seen |= 16;
-    return 1;
-}
-static unsigned dependency_walk(const char *name)
-{
-    unsigned seen = 0;
-    CHECK(sh_resource_graph_walk("", name, dependency_visit, &seen));
-    return seen;
-}
-static unsigned unexpected_reads;
-static unsigned char *unexpected_input_read(const char *name, size_t *length)
-{
-    (void)name; *length = 0; unexpected_reads++; return NULL;
-}
-static unsigned char *fallback_input_read(const char *name, size_t *length)
-{
-    unsigned char *bytes;
-    if (strcmp(name, "maps/modules/ind_dlc/room/room.aas_monster48")) return NULL;
-    bytes = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, 4);
-    if (bytes) { memcpy(bytes, "base", 4); *length = 4; } return bytes;
-}
-static void test_cached_navigation_retains_source_dependencies(void)
-{
-    const int owner[] = {0};
-    const char *base = "generated/maps/modules/ind_dlc/room/room.baas_monster48";
-    const char *raw = "maps/modules/ind_dlc/room/room.aas_monster48";
-    char requested[384];
-    char *json = make_map("ind_dlc/room", 1, 1, 1, 1, owner);
-    unsigned char *bytes = NULL;
-    size_t length = 0;
-    unsigned long revision;
-    sh_resource_graph_frame frame;
-    sh_nav_bake_test_reset(); sh_resource_graph_test_reset(); unexpected_reads = 0;
-    sh_nav_bake_set_map(json, strlen(json)); sh_nav_bake_enable_instances(1);
-    revision = sh_nav_bake_geometry_revision();
-    CHECK(sh_nav_bake_instance_name(0, raw, requested, sizeof(requested)));
-    sh_resource_graph_begin(&frame, "", base);
-    sh_resource_graph_file("grid-stock-input"); sh_resource_graph_end(&frame, 1);
-    sh_nav_bake_test_preview_inputs(revision, "cached", base, 1);
-    CHECK(sh_nav_bake_open(requested, unexpected_input_read, &bytes, &length));
-    CHECK(!unexpected_reads && bytes && length == 6);
-    if (bytes) HeapFree(GetProcessHeap(), 0, bytes);
-    CHECK(dependency_walk(requested) == 7);
-    /* A later cache publication replaces provenance together with its bytes. */
-    sh_nav_bake_test_preview_inputs(revision, "new cache", "new-base-input", 0);
-    CHECK(sh_nav_bake_open(requested, unexpected_input_read, &bytes, &length));
-    if (bytes) HeapFree(GetProcessHeap(), 0, bytes);
-    CHECK(!unexpected_reads && dependency_walk(requested) == 8);
-    sh_nav_bake_test_preview_inputs(revision - 1, "stale cache", base, 1);
-    CHECK(sh_nav_bake_open(requested, unexpected_input_read, &bytes, &length));
-    if (bytes) HeapFree(GetProcessHeap(), 0, bytes);
-    CHECK(dependency_walk(requested) == 8);
-    /* Calls under the same base name must not overwrite the Grid source edges
-     * or create a self edge when recording navigation's additional inputs. */
-    sh_nav_bake_enable_instances(0);
-    sh_nav_bake_test_preview_inputs(revision, "same name", base, 1);
-    CHECK(sh_nav_bake_open(base, unexpected_input_read, &bytes, &length));
-    if (bytes) HeapFree(GetProcessHeap(), 0, bytes);
-    CHECK(dependency_walk(base) == 7);
-    sh_nav_bake_test_preview_inputs(revision, "same name", base, 0);
-    CHECK(sh_nav_bake_open(base, unexpected_input_read, &bytes, &length));
-    if (bytes) HeapFree(GetProcessHeap(), 0, bytes);
-    CHECK(dependency_walk(base) == 5);
-    /* Refusal removes the obsolete producer dependency, while a successful
-     * base fallback records only the base it actually serves. */
-    sh_nav_bake_enable_instances(1); sh_nav_bake_set_map(NULL, 0);
-    CHECK(!sh_nav_bake_open(requested, no_shipped_bytes, &bytes, &length));
-    CHECK(dependency_walk(requested) == 0);
-    CHECK(sh_nav_bake_open(requested, fallback_input_read, &bytes, &length));
-    CHECK(bytes && length == 4); if (bytes) HeapFree(GetProcessHeap(), 0, bytes);
-    CHECK(dependency_walk(requested) == 16); /* Raw fallback, no gathered cooked/table inputs. */
-    sh_nav_bake_test_reset(); sh_resource_graph_test_reset();
-}
-
 typedef struct guarded_read {
     HANDLE started;
     const char *name;
@@ -723,7 +638,7 @@ static DWORD WINAPI guarded_reader(LPVOID context)
     read->result = sh_nav_bake_open(read->name, no_shipped_bytes, &read->bytes, &read->length);
     return 0;
 }
-static void test_package_publication_guards_navigation_reads(void)
+static void test_source_update_guards_navigation_reads(void)
 {
     const int owner[] = {0};
     const char *raw = "maps/modules/ind_dlc/room/room.aas_monster48";
@@ -752,7 +667,7 @@ static void test_package_publication_guards_navigation_reads(void)
         if (read.bytes) HeapFree(GetProcessHeap(), 0, read.bytes);
         CloseHandle(thread); CloseHandle(read.started);
     }
-    sh_nav_bake_test_reset(); sh_resource_graph_test_reset();
+    sh_nav_bake_test_reset();
 }
 
 int main(void)
@@ -760,9 +675,8 @@ int main(void)
     printf("nav_bake_test\n");
     test_fast_snapshot_reads_ids_and_obstacles();
     test_empty_preview_completes();
-    test_package_sources_retire_cached_and_inflight_results();
-    test_cached_navigation_retains_source_dependencies();
-    test_package_publication_guards_navigation_reads();
+    test_source_invalidation_retires_cached_and_inflight_results();
+    test_source_update_guards_navigation_reads();
     test_name_grammar();
     test_marked_volume_is_planned();
     test_unmarked_map_is_silent();

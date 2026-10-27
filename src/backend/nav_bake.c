@@ -14,7 +14,6 @@
 #include "nav_traversal.h"
 #include "navmesh.h"
 #include "config.h"
-#include "resource_graph.h"
 
 #ifndef SH_NAV_BAKE_NO_LOG
 void backend_log(const char *message);
@@ -1157,7 +1156,7 @@ static preview_batch *preview_gather(sh_nav_bake_reader read_shipped)
     if (!scratch) { HeapFree(GetProcessHeap(), 0, b); return NULL; }
     b->revision = g_geometry_revision;
 
-    /* Cached until package sources change; without it no climbs are emitted.
+    /* Cached until its sources are invalidated; without it no climbs are emitted.
      * It reads effective resources, so it cannot go to the worker. */
     traversal = sh_trav_load(read_shipped);
 
@@ -1374,14 +1373,6 @@ int sh_nav_bake_preview(sh_nav_bake_reader read_shipped,sh_nav_preview_line line
     return current;
 }
 
-static void bake_record_inputs(const char *output, const char *source, int traversal, int served)
-{
-    const char *inputs[2] = {source, SH_TRAV_DECL_NAME};
-    if (!sh_resource_graph_producer_inputs("navigation bake", output, inputs,
-            served ? (traversal ? 2 : 1) : 0))
-        backend_log("NAV: could not retain generated navigation input dependencies");
-}
-
 int sh_nav_bake_open(const char *name, sh_nav_bake_reader read_shipped,
                      unsigned char **out_bytes, size_t *out_len)
 {
@@ -1417,7 +1408,6 @@ int sh_nav_bake_open(const char *name, sh_nav_bake_reader read_shipped,
     if (strcpy_s(source, sizeof(source), name)) return 0;
     if (InterlockedCompareExchange(&g_faulted, 0, 0) != 0) {
         if(instance>=0 && read_shipped) *out_bytes=read_shipped(name,out_len);
-        bake_record_inputs(requested, source, 0, *out_bytes != NULL);
         return *out_bytes!=NULL;
     }
 
@@ -1428,7 +1418,6 @@ int sh_nav_bake_open(const char *name, sh_nav_bake_reader read_shipped,
     if (!g_have_map) {
         ReleaseSRWLockExclusive(&g_bake_lock);
         if(instance>=0 && read_shipped) *out_bytes=read_shipped(name,out_len);
-        bake_record_inputs(requested, source, 0, *out_bytes != NULL);
         return *out_bytes!=NULL;
     }
     /* Do not inspect live entities here. This runs inside BuildAAS after
@@ -1473,7 +1462,6 @@ int sh_nav_bake_open(const char *name, sh_nav_bake_reader read_shipped,
             InterlockedIncrement(&g_bakes);
         }
     }
-    if (hit) bake_record_inputs(requested, source, traversal, 1);
     ReleaseSRWLockExclusive(&g_bake_lock);
 
     if (hit) {
@@ -1490,9 +1478,7 @@ int sh_nav_bake_open(const char *name, sh_nav_bake_reader read_shipped,
         traversal = 0;
         *out_bytes=read_shipped(name,out_len);
         hit=*out_bytes!=NULL;
-        bake_record_inputs(requested, source, 0, hit);
     }
-    else if (!hit) bake_record_inputs(requested, source, 0, 0);
     return hit;
 }
 

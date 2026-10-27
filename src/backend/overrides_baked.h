@@ -5,10 +5,10 @@
  * unlike Timeline this needs no entitydef-layer override, just the snapeditorentitydef tile itself moved
  * into the toybox category with its flags flipped placeable/editable/etc; no propertySheets yet).
  * overrides.c serves these FROM MEMORY as the built-in default layer (user disk file -> baked default
- * -> engine); nothing is written to the user's overrides folder. The text is LF-only ('\n') -- the
+ * -> engine); nothing is written to the user's data folder. The text is LF-only ('\n') -- the
  * install-time reclaim compares user files against it with CR bytes stripped, so keep it LF when
  * regenerating. (Historical: releases up to and including the first "*Custom"-tab release WROTE these
- * three to <profile>/snaphak/overrides/<name> if absent; the install-time reclaim in overrides.c
+ * three to the user's override folder if absent; an install-time reclaim in overrides.c
  * deletes such an untouched copy so this in-memory layer serves instead.) */
 #ifndef BACKEND_OVERRIDES_BAKED_H
 #define BACKEND_OVERRIDES_BAKED_H
@@ -23,8 +23,8 @@ static const unsigned char g_ov_baked_d1[] = {123,10,9,105,110,104,101,114,105,1
  * vanilla -- snapeditorentitydef/movement/bounce_pad.decl uses the identical path/tag/inspector
  * triples, so both inspectors and both #str tags are known-present in snap_gameresources.
  *
- * `placementFlags = "SNAP_ENTITY_PLACE_AIR_UNALIGNED"` IS LOAD-BEARING. A user override in
- * <profile>/overrides/ REPLACES this file wholesale -- overrides.c resolves USER -> BUILT-IN ->
+ * `placementFlags = "SNAP_ENTITY_PLACE_AIR_UNALIGNED"` IS LOAD-BEARING. A user override
+ * file once REPLACED this file wholesale -- overrides.c resolved USER -> BUILT-IN ->
  * ENGINE by whole stream, it does not merge fields -- so an override that drops the line does not
  * inherit ours: the entity falls back to the decl-type default placement mode and the editor
  * refuses every position (red bounds, cannot place, cannot edit). Anyone hand-editing this tile

@@ -10,9 +10,6 @@
 #include <string.h>
 #include "snapmap_plus_iface.h"
 #include "apply_engine.h"
-#include "decl_server.h"
-#include "map_package.h"
-#include "package_requirements.h"
 #include "typeinfo.h"
 #include "ui_bridge.h"
 #include "iface_engine.h"
@@ -25,7 +22,6 @@
 #include "config.h"
 #include "backend_log.h"
 #include "rawmap.h"
-#include "map_published.h"
 #include "nav_bake.h"
 #include "perf.h"
 #include "nav_preview.h"
@@ -2986,7 +2982,7 @@ static void ae_play_log_diff(const ae_play_snap *before, const ae_play_snap *aft
 #define AE_PLAY_DIAG(...) do { } while (0)
 #endif
 
-/* Poll package/nav maintenance after a successful native Frame on the main thread.
+/* Poll nav maintenance after a successful native Frame on the main thread.
  * On leaving RUNNING, preserve verified process/persistent allocations; reset
  * our matching staged slot when lifetime cannot be verified. Ownership uses
  * a marker and count heuristic, not a unique clipboard identity. */
@@ -2994,15 +2990,6 @@ void sh_apply_prefab_poll_play(void)
 {
     if (ae_on_main_thread() != 1) return;
     ae_main_call_poll();
-    /* Fallback package requirements application. The decl server normally applies
-     * them before boot publication; both entry points share a one-shot latch. */
-    sh_package_requirements_poll();
-    /* Retry pending re-arms; the decl server owns admission and command draining. */
-    sh_map_published_poll();
-    sh_rawmap_map_context_poll();
-    sh_decl_server_rearm_poll();
-    sh_mpkg_consent_poll();
-    sh_rawmap_pending_map_poll();
     ae_nav_refresh_poll();
     if (!g_doom_base) return;
 

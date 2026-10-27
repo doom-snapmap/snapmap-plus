@@ -25,7 +25,7 @@ void sh_nav_bake_set_map(const char *json, size_t len);
 
 /* Retain map geometry while retiring source-derived previews and traversal
  * rows. Older worker results cannot publish into the new revision. No engine
- * callbacks occur. Package publication uses the paired boundary below. */
+ * callbacks occur. A source change uses the paired boundary below. */
 void sh_nav_bake_invalidate_sources(void);
 /* Paired final-publication boundary: no bake/gather/cache read overlaps the
  * provider swap. Acquire before the compilation lock, release after it. A

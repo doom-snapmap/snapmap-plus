@@ -6,7 +6,7 @@ Builds the backend and frontend DLLs installed into DOOM 2016.
 
 ## Contents
 
-- [backend/](backend/) owns engine hooks, entity edits, packages, media previews and navigation.
+- [backend/](backend/) owns engine hooks, entity edits, media previews and navigation.
 - [common/](common/) owns the shared DLL interface and logging helper.
 - [fault_shield/](fault_shield/) handles selected engine faults and crash evidence.
 - [ui/](ui/) builds the WebView2 companion window.

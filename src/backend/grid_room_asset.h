@@ -14,7 +14,7 @@ int sh_grid_asset_canonical(const char *name, char **path);
 /* Decode only the feature's private names, then transform the effective stock
  * source. 0 = unrelated name, 1 = malloc-owned output, -1 = claimed name could
  * not be served. A claimed failure must never fall through to stock geometry.
- * Readers resolve compiled packages/product defaults/originals below generated
+ * Readers resolve product defaults/originals below generated
  * resources, so an override of a stock input survives the transform without
  * recursively requesting the derived resource itself. */
 int sh_grid_asset_open(const char *name,sh_grid_asset_read_fn read,

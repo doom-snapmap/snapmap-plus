@@ -10,7 +10,6 @@
 #include "commands.h"
 #include "cvars.h"
 #include "overrides.h"
-#include "user_overrides.h"
 #include "clipboard.h"
 #include "typeinfo.h"
 #include "entlist_classes.h"
@@ -28,9 +27,6 @@
 #include "nav_bake.h"
 #include "perf.h"
 #include "apply_engine.h"
-#include "package_runtime.h"
-#include "resource_graph.h"
-#include "resource_graph_native.h"
 #include "engine_build.h"
 
 /* Engine call contracts. */
@@ -741,21 +737,20 @@ static void lr_buf_append(lr_buf *b, const char *s)
     b->data[b->len]   = '\0';
 }
 
-/* Print what the runtime would serve for one engine path: its length and, when
- * a match string is given, every line of the served bytes that contains it.
- * Read-only; it serves the same bytes a consumer would receive, so it reports
- * which source currently governs without changing any state. */
+/* Print what the resource layer serves for one engine path (a generated Grid
+ * Room variant, a built-in default or the installed original): its length and,
+ * when a match string is given, every line of those bytes that contains it.
+ * Read-only; it changes no state. */
 static void h_sh_resread(idCmdArgs *a)
 {
     const char *path = cmd_argv(a, 1), *match = cmd_argv(a, 2);
     unsigned char *body = NULL;
     size_t length = 0, shown = 0;
-    int found;
     if (!path) { sh_printf("usage: sh_resread <engine path> [substring]\n"); return; }
-    found = sh_package_runtime_read(path, &body, &length);
-    if (found != 1 || !body) {
-        sh_printf("sh_resread: %s -- no package source serves this path (%d)\n", path, found);
-        free(body); return;
+    body = sh_overrides_read_engine_resource(path, &length);
+    if (!body) {
+        sh_printf("sh_resread: %s -- not readable through the resource layer\n", path);
+        return;
     }
     sh_printf("sh_resread: %s -- %zu byte(s) served\n", path, length);
     if (match && *match) {
@@ -775,36 +770,7 @@ static void h_sh_resread(idCmdArgs *a)
         }
         if (!shown) sh_printf("  no line contains '%s'\n", match);
     }
-    free(body);
-}
-
-/* Print the composition route of every registered declaration family: the
- * engine's own reflected state type, a verified custom adapter, or none.
- * Read-only; it loads no declaration and changes no state. */
-typedef struct sh_family_tally { int reflected, graph, adapter, custom, unknown; } sh_family_tally;
-
-static void h_family_row(void *context, const char *type, const char *state, const char *route)
-{
-    sh_family_tally *tally = context;
-    sh_printf("%-34s %-28s %s\n", type, state && *state ? state : "-", route);
-    if (!strcmp(route, "reflected state")) tally->reflected++;
-    else if (!strcmp(route, "graph adapter")) tally->graph++;
-    else if (!strcmp(route, "custom reader, no adapter")) tally->custom++;
-    else if (!strcmp(route, "metadata unavailable")) tally->unknown++;
-    else tally->adapter++;
-}
-
-static void h_sh_declfamilies(idCmdArgs *a)
-{
-    sh_family_tally tally = {0};
-    char error[512] = "";
-    int count;
-    (void)a;
-    count = sh_package_runtime_declaration_families(h_family_row, &tally, error, sizeof(error));
-    if (count < 0) { sh_printf("sh_declfamilies: %s\n", error[0] ? error : "unavailable"); return; }
-    sh_printf("families %d: %d reflected state, %d graph adapter, %d dedicated adapter, "
-        "%d custom reader without an adapter, %d metadata unavailable\n",
-        count, tally.reflected, tally.graph, tally.adapter, tally.custom, tally.unknown);
+    HeapFree(GetProcessHeap(), 0, body);
 }
 
 /* List resource names with optional substring filtering and clipboard copy. */
@@ -1846,59 +1812,6 @@ static void h_sh_navmesh(idCmdArgs *a)
 }
 
 /* Where frame time goes inside snapmap-plus. */
-typedef struct package_graph_report { char *text; size_t length, capacity, edges, shown; } package_graph_report;
-static int package_graph_line(void *context, const char *parent_type, const char *parent_name,
-                              const char *type, const char *name)
-{
-    package_graph_report *report = (package_graph_report *)context;
-    int written;
-    report->edges++;
-    if (report->capacity - report->length < strlen(parent_type ? parent_type : "root") +
-        strlen(parent_name ? parent_name : "") + strlen(type) + strlen(name) + 8) return 1;
-    written = snprintf(report->text + report->length, report->capacity - report->length,
-        "%s:%s -> %s:%s\n", parent_type ? parent_type : "root", parent_name ? parent_name : "", type, name);
-    if (written < 0 || (size_t)written >= report->capacity - report->length) return -1;
-    report->length += (size_t)written;
-    report->shown++;
-    return 1;
-}
-static void h_sh_packages(idCmdArgs *a)
-{
-    char *text = NULL;
-    const char *operation = cmd_argv(a, 1);
-    if (operation && !strcmp(operation, "dependencies")) {
-        const char *type = cmd_argv(a, 2), *name = cmd_argv(a, 3);
-        size_t nodes, complete, edges;
-        sh_resource_graph_counts(&nodes, &complete, &edges);
-        sh_printf("Native dependency capture: %s; %zu nodes, %zu complete, %zu edges.\n",
-            sh_resource_graph_native_ready() ? "active" : "unavailable", nodes, complete, edges);
-        if (type && name) {
-            package_graph_report report = {0};
-            int covered;
-            report.capacity = 128 * 1024;
-            report.text = (char *)calloc(report.capacity, 1);
-            if (!report.text) return;
-            covered = sh_resource_graph_walk(type, name, package_graph_line, &report);
-            sh_printf("%s:%s dependency traversal: %s (%zu edges visited).\n", type, name,
-                covered ? "all visited source/state phases recorded" : "unobserved or incomplete resource", report.edges);
-            if (report.shown != report.edges)
-                sh_printf("Listing shows %zu of %zu visits; traversal checked every recorded edge.\n", report.shown, report.edges);
-            text = report.text;
-        }
-    } else text = sh_package_runtime_summary();
-    if (text) {
-        const char *line = text;
-        while (*line) {
-            char piece[1000];
-            size_t length = strcspn(line, "\n");
-            if (length >= sizeof(piece)) length = sizeof(piece) - 1;
-            memcpy(piece, line, length); piece[length] = 0;
-            sh_printf("%s\n", piece);
-            line += length; if (*line == '\n') line++;
-        }
-        free(text);
-    }
-}
 static void h_sh_perf(idCmdArgs *a)
 {
     const char *verb = cmd_argv(a, 1);
@@ -1928,7 +1841,6 @@ static void h_sh_overrides_off(idCmdArgs *a)
 }
 
 static const cmd_entry CMD_TABLE[] = {
-    { "sh_packages",          (void *)h_sh_packages, "Show installed package sources and compiler results. 'sh_packages dependencies [type name]' inspects observed native dependencies." },
     { "sh_perf",              (void *)h_sh_perf,     "Where frame time goes inside snapmap-plus. 'sh_perf reset' starts the counting again. 'sh_perf read' times reading the open map whole and entity by entity." },
     { "sh_overrides_off",     (void *)h_sh_overrides_off, "Remove our resource layer for the rest of this session, to measure the engine without it. Editor resources go with it; restart to get them back." },
     { "sh_rawmaps",           (void *)h_sh_rawmaps,   "Raw JSON map files: state, paths, load, save. Run with no arguments to see what is set, or 'sh_rawmaps help' (or '?') for every verb." },
@@ -1950,8 +1862,7 @@ static const cmd_entry CMD_TABLE[] = {
     { "sh_dialogpoll",       (void *)h_sh_dialogpoll, "read the answer to the dialog sh_dialogtest raised (diagnostic)" },
     { "sh_dialogdump",       (void *)h_sh_dialogdump, "print the engine dialog queue: id, button set and flag bytes (diagnostic)" },
     { "sh_listres",          (void *)h_sh_listres,  "<resource classname (ex:idMaterial)> <optional: filter> list all resources of a given type" },
-    { "sh_declfamilies",     (void *)h_sh_declfamilies, "list every declaration family and the composition route it takes (diagnostic)" },
-    { "sh_resread",          (void *)h_sh_resread,  "<engine path> [substring] print what the runtime currently serves for one resource path (diagnostic)" },
+    { "sh_resread",          (void *)h_sh_resread,  "<engine path> [substring] print what the resource layer serves for one resource path (diagnostic)" },
     { "sh_alginfo",          (void *)h_alginfo,     "Prints CPU dispatcher info for the engine-math (algo) override layer." },
     { "sh_debugrender",      (void *)h_sh_debugrender,"Internal renderer-test mutators -- not for normal use" },
     { "cs_dontuse",          (void *)h_cs_dontuse,  "Overrides some calculations in the engine to be more precise, just for shiggles. probably degrades performance and breaks stuff." },
@@ -1966,8 +1877,6 @@ static const cmd_entry CMD_TABLE[] = {
     { "noPlayerDeath",       (void *)h_noplayerdeath,  "Toggle no-death (the player cannot die) for the local player." },
     { "noPlayerKill",        (void *)h_noplayerkill,   "Toggle no-kill (the player cannot be killed) for the local player." },
     { "noTarget",            (void *)h_notarget,       "Toggle notarget (enemies ignore the local player)." },
-    { "sh_user_overrides", (void *)h_sh_user_overrides,
-      "sh_user_overrides [0|1] -- persist whether player override files load on the next DOOM launch; restart required; built-in defaults stay enabled." },
     { "sh_navmesh",          (void *)h_sh_navmesh,
       "Reports the baked AI navigation the current map is serving -- which modules and nav classes, or why a bake was refused. 'sh_navmesh marks [count]' marks boxes red like a refused bake; 'sh_navmesh marks 0' clears them. 'sh_navmesh reads' counts what the editor has cost it." },
 

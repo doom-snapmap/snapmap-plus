@@ -1,4 +1,5 @@
-/* overrides_internal_test.c -- immutable per-decl table and read-only stream tests. */
+/* overrides_internal_test.c -- provider ABI checks, read-only streams and the
+ * resource ordering of the file shadow (navigation, built-in defaults, engine). */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
@@ -9,7 +10,6 @@
 #include "overrides.h"
 
 static int g_failed;
-static int g_user_enabled;
 
 #define CHECK(expr) do {                                                        \
     if (!(expr)) {                                                              \
@@ -23,10 +23,6 @@ void backend_log(const char *message)
     (void)message;
 }
 
-int sh_user_overrides_enabled_for_launch(void)
-{
-    return g_user_enabled;
-}
 
 
 
@@ -56,18 +52,10 @@ int sh_navmesh_open(const char *name, unsigned char **out_bytes, size_t *out_len
     return 0;
 }
 
-static void test_internal_decl_table(void)
+static void test_stream_abi_and_memory_streams(void)
 {
     static unsigned char source[] = "0123456789abcdef";
     static unsigned char source_two[] = "second-stream";
-    static const sh_overrides_internal_decl_entry entries[] = {
-        { "ActorModifier", "custom/first", source, sizeof(source) - 1 },
-        { "entityDef", "custom/second", source_two, sizeof(source_two) - 1 }
-    };
-    static const sh_overrides_internal_decl_entry duplicate_entries[] = {
-        { "entityDef", "custom/dup", source, sizeof(source) - 1 },
-        { "ENTITYDEF", "CUSTOM/dup", source_two, sizeof(source_two) - 1 }
-    };
     unsigned char readback[sizeof(source)];
     void *stream;
 
@@ -130,7 +118,7 @@ static void test_internal_decl_table(void)
          * and out-of-image pointers using real process addresses. */
         CHECK(sh_overrides_test_address_in_readonly_section(base, "rdata-probe") == 1);
         CHECK(sh_overrides_test_address_in_readonly_section(
-                  base, (const void *)(uintptr_t)&test_internal_decl_table) == 0);
+                  base, (const void *)(uintptr_t)&test_stream_abi_and_memory_streams) == 0);
         CHECK(sh_overrides_test_address_in_readonly_section(base, &readback) == 0);
         CHECK(sh_overrides_test_address_in_readonly_section(base, NULL) == 0);
         CHECK(sh_overrides_test_address_in_readonly_section(NULL, base) == 0);
@@ -172,24 +160,9 @@ static void test_internal_decl_table(void)
                                                       (void *)(uintptr_t)0x6666, 1) == 0);
     sh_overrides_test_stream_helpers_reset();
 
-    sh_overrides_test_internal_decl_table_reset();
-    g_user_enabled = 0;
-    CHECK(sh_overrides_test_internal_decl_table_install(entries, 2) == 0);
-
-    g_user_enabled = 1;
-    CHECK(sh_overrides_test_internal_decl_table_install(entries, 2) == 1);
-    CHECK(sh_overrides_test_internal_decl_table_install(entries, 2) == 0);
     stream = sh_overrides_test_memory_stream(source, sizeof(source) - 1);
     source[0] = 'X'; /* An opened memory stream owns its bytes. */
     source_two[0] = 'X';
-    CHECK(sh_overrides_test_internal_decl_open("decltree/ActorModifier/custom/first.decl") == NULL);
-    CHECK(sh_overrides_test_internal_decl_open("generated/decls/actormodifier/custom/first.decl") == NULL);
-    CHECK(sh_overrides_test_internal_decl_open("decltree/actormodifier/custom/first.decl.extra") == NULL);
-
-    /* Registry history alone cannot serve declarations without a compiler.
-     * Raw stream I/O is tested independently of declaration admission. */
-    CHECK(sh_overrides_test_internal_decl_open("decltree/actormodifier/custom/first.decl") == NULL);
-    CHECK(!sh_overrides_internal_decl_published("decltree/actormodifier/custom/first.decl"));
     CHECK(stream != NULL);
     if (stream) {
         CHECK(sh_overrides_test_stream_length(stream) == (long long)(sizeof(source) - 1));
@@ -234,7 +207,6 @@ static void test_internal_decl_table(void)
         sh_overrides_test_stream_close(stream);
     }
 
-    CHECK(sh_overrides_test_internal_decl_open("decltree/entitydef/custom/second.decl") == NULL);
     stream = sh_overrides_test_memory_stream((const unsigned char *)"second-stream", sizeof(source_two) - 1);
     CHECK(stream != NULL);
     if (stream) {
@@ -242,13 +214,6 @@ static void test_internal_decl_table(void)
         CHECK(memcmp(readback, "second", 6) == 0);
         sh_overrides_test_stream_close(stream);
     }
-
-    sh_overrides_test_internal_decl_table_reset();
-    CHECK(sh_overrides_test_internal_decl_table_install(duplicate_entries, 2) == 0);
-
-    g_user_enabled = 0;
-    CHECK(sh_overrides_test_internal_decl_open("decltree/actormodifier/custom/first.decl") == NULL);
-    sh_overrides_test_internal_decl_table_reset();
 }
 
 static void test_file_stream_is_read_only(void)
@@ -281,73 +246,30 @@ static void test_file_stream_is_read_only(void)
 }
 
 
-static void test_refresh_keeps_open_streams(void)
+/* R-021: the shadow serves map navigation, Grid Room variants, built-in
+ * defaults and otherwise the engine. With no engine open installed (this test
+ * process) an unclaimed name returns nothing; no user or package file is read,
+ * whatever exists under the user-data folder. */
+static void test_builtin_defaults_without_user_files(void)
 {
-    static const unsigned char old_body[] = "old body";
-    static const unsigned char new_body[] = "new body";
-    sh_overrides_internal_decl_entry entry = {"material", "test/refresh", old_body, 8};
-    char bytes[16] = {0};
-    void *old_stream, *new_stream;
-    g_user_enabled = 1;
-    sh_overrides_test_internal_decl_table_reset();
-    CHECK(sh_overrides_test_internal_decl_table_install(&entry, 1) == 1);
-    old_stream = sh_overrides_test_memory_stream(old_body, 8);
-    CHECK(old_stream != NULL);
-    sh_overrides_internal_decl_table_reopen();
-    CHECK(sh_overrides_internal_decl_published("decltree/material/test/refresh.decl") == 0);
-    entry.body = new_body;
-    for (int i = 0; i < 80; i++)
-        CHECK(sh_overrides_test_internal_decl_table_merge(&entry, 1) == 1);
-    CHECK(sh_overrides_internal_decl_published_count() == 1);
-    CHECK(sh_overrides_test_internal_decl_open("decltree/material/test/refresh.decl") == NULL);
-    new_stream = sh_overrides_test_memory_stream(new_body, 8);
-    CHECK(new_stream != NULL);
-    if (old_stream) {
-        CHECK(sh_overrides_test_stream_read(old_stream, bytes, 8) == 8);
-        CHECK(memcmp(bytes, old_body, 8) == 0);
-        sh_overrides_test_stream_close(old_stream);
+    char bytes[8] = {0};
+    void *stream = sh_overrides_test_open("generated/decls/snapeditorentitydef/func/lift.decl", 0);
+    CHECK(stream != NULL);
+    if (stream) {
+        CHECK(sh_overrides_test_stream_length(stream) > 0);
+        CHECK(sh_overrides_test_stream_read(stream, bytes, 1) == 1 && bytes[0] == '{');
+        sh_overrides_test_stream_close(stream);
     }
-    if (new_stream) {
-        CHECK(sh_overrides_test_stream_read(new_stream, bytes, 8) == 8);
-        CHECK(memcmp(bytes, new_body, 8) == 0);
-        sh_overrides_test_stream_close(new_stream);
-    }
-    {
-        sh_overrides_internal_decl_entry entries[1025];
-        char names[1025][32];
-        for (int i = 0; i < 1025; i++) {
-            _snprintf_s(names[i], sizeof(names[i]), _TRUNCATE, "test/entry-%03d", i);
-            entries[i].type = "material";
-            entries[i].name = names[i];
-            entries[i].body = old_body;
-            entries[i].body_length = 8;
-        }
-        sh_overrides_test_internal_decl_table_reset();
-        CHECK(sh_overrides_test_internal_decl_table_install(entries, SIZE_MAX) == 0);
-        CHECK(sh_overrides_test_internal_decl_table_install(entries, 1025) == 1);
-        for (int i = 0; i < 1025; i++) entries[i].body = new_body;
-        CHECK(sh_overrides_test_internal_decl_table_merge(entries, 1025) == 1);
-        CHECK(sh_overrides_internal_decl_published_count() == 1025);
-        /* Carry forward a table larger than the old limit while adding a key. */
-        CHECK(sh_overrides_test_internal_decl_table_merge(&entry, 1) == 1);
-        CHECK(sh_overrides_internal_decl_published_count() == 1026);
-        for (int i = 0; i < 1025; i++) {
-            char key[96];
-            void *current;
-            _snprintf_s(key, sizeof(key), _TRUNCATE,
-                        "decltree/material/test/entry-%03d.decl", i);
-            current = sh_overrides_test_internal_decl_open(key);
-            CHECK(current == NULL);
-            CHECK(!sh_overrides_internal_decl_published(key));
-        }
-        /* Refuse impossible allocation arithmetic without damaging publication. */
-        CHECK(sh_overrides_test_internal_decl_table_merge(&entry, SIZE_MAX) == 0);
-        CHECK(sh_overrides_test_internal_decl_table_merge(&entry, SIZE_MAX / 8) == 0);
-        CHECK(sh_overrides_internal_decl_published_count() == 1026);
-    }
-    sh_overrides_test_internal_decl_table_reset();
+    /* Case and separators are tolerated, as the engine asks with either. */
+    stream = sh_overrides_test_open("GENERATED\\decls\\snapeditorentitydef\\func\\lift.decl", 0);
+    CHECK(stream != NULL);
+    if (stream) sh_overrides_test_stream_close(stream);
+    /* Mode 2 bypasses the shadow entirely. */
+    CHECK(sh_overrides_test_open("generated/decls/snapeditorentitydef/func/lift.decl", 2) == NULL);
+    /* A name that only a user package could have supplied is not served. */
+    CHECK(sh_overrides_test_open("generated/decls/entitydef/custom/user_package_only.decl", 0) == NULL);
+    CHECK(sh_overrides_test_open("strings/policy.json", 0) == NULL);
 }
-
 
 /* Native-stream slots: the backend reads installed resources through the
  * 34-slot idFile layout of build 13954591 (Read +0x30, GetLength +0x68). The
@@ -430,15 +352,15 @@ static void test_native_stream_slots(void)
 
 int main(void)
 {
-    test_internal_decl_table();
+    test_stream_abi_and_memory_streams();
     test_file_stream_is_read_only();
-    test_refresh_keeps_open_streams();
+    test_builtin_defaults_without_user_files();
     test_native_stream_slots();
     if (g_failed) {
-        fprintf(stderr, "%d overrides internal-decl-table test(s) failed\n", g_failed);
+        fprintf(stderr, "%d overrides provider test(s) failed\n", g_failed);
         return 1;
     }
-    puts("overrides internal-decl-table tests passed");
+    puts("overrides provider tests passed");
     return 0;
 }
 

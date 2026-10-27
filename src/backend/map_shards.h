@@ -1,5 +1,5 @@
-/* Shared envelope for map-level package (smpkg) and navigation (smnav1)
- * payloads. Each variables.string entry carries a family header in info.name
+/* Shared envelope for map-level navigation (smnav1) payloads, and the retired
+ * package (smpkg) payloads that map_legacy_payload removes. Each variables.string entry carries a family header in info.name
  * and base64 in initialValue.
  *
  * This module provides digesting, base64, bounded scanning, container walks

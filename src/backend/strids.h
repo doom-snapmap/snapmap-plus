@@ -1,11 +1,9 @@
 /* Inject custom #str_ mappings into the native language dictionary. Read the
- * user strings/strids.json, compiled package.json strings, then baked
- * defaults. Keys are case-insensitive and first-writer-wins. Use the native
+ * user strings/strids.json, then baked defaults. Keys are case-insensitive and first-writer-wins. Use the native
  * hash, string pool and list append functions, then re-sort the table.
  *
- * Installation supplies local and baked text before package compilation.
- * Published package text joins on runtime rearm, which updates keys owned by this
- * injector and appends new keys before sorting. Existing vanilla keys are
+ * Installation supplies the text; a rearm re-reads it, updates keys owned by
+ * this injector and appends new keys before sorting. Existing vanilla keys are
  * replaced in place with their original records retained. Removing a mapping
  * restores that record or removes a newly introduced row; engine-pool text is
  * never freed. Complete input and ownership validation precedes retirement.
@@ -28,8 +26,8 @@
 int sh_strids_install(void *sort_body_fn, int sort_status_ok,
                       void *table_lea_fn, void *insert_fn, void *hash_fn, void *idstr_ctor_fn);
 
-/* Refresh on the engine main thread at the package-registration boundary.
- * Returns 0 if discovery, native mutation, or sorting failed. */
+/* Re-read the layers and re-sort on the engine main thread. Returns 0 if
+ * reading, native mutation, or sorting failed. */
 int sh_strids_rearm(void);
 
 /* Set the user document path; NULL restores %LOCALAPPDATA%\snapmap-
@@ -44,7 +42,7 @@ unsigned long sh_strids_injected_count(void);
 /* Bind test doubles for the four engine entry points and run one inject pass; returns rows appended. */
 int sh_strids_test_inject(void *table_desc, void *insert, void *hash, void *idstr_ctor);
 void sh_strids_test_set_sort(void *sort);
-/* Read back how row `index` was attributed: its id and its owning package ("<user>" if not a package). */
+/* Read back how row `index` was attributed: its id and its owner ("<user>"). */
 int sh_strids_test_row(int index, const char **id_out, const char **owner_out);
 #endif
 

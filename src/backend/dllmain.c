@@ -14,13 +14,8 @@
 #include "smoke.h"
 #include "rawmap.h"
 #include "editor_frame.h"
-#include "map_package.h"
 #include "map_payload.h"
-#include "map_source.h"
-#include "map_native.h"
-#include "map_published.h"
-#include "map_transition.h"
-#include "palette_refresh.h"
+#include "user_dirs.h"
 #include "engine_dialog.h"
 #include "../fault_shield/mapload_guards.h"
 #include "../fault_shield/serialized_entities_guard.h"
@@ -30,13 +25,10 @@
 #include "grid_room_editor.h"
 #include "map_render.h"
 #include "grid_room_snap.h"
-#include "package_requirements.h"
-#include "weapon_hud.h"
 #include "navmesh.h"
 #include "nav_bake.h"
 #include "nav_menu.h"
 #include "nav_play.h"
-#include "decl_server.h"
 #include "commands.h"
 #include "cvars.h"
 #include "entity.h"
@@ -45,7 +37,6 @@
 #include "imgpreview.h"
 #include "prefabpreview.h"
 #include "soundpreview.h"
-#include "audio_banks_native.h"
 #include "patch.h"
 #include "algo.h"
 #include "target_any.h"
@@ -53,11 +44,6 @@
 #include "swf_textedit.h"
 #include "ui_bridge.h"
 #include "config.h"
-#include "user_overrides.h"
-#include "package_runtime.h"
-#include "resource_graph_native.h"
-#include "resource_resident.h"
-#include "audio_files_native.h"
 #include "iface_engine.h"
 #include "apply_engine.h"
 #include "cvar_unlock.h"
@@ -105,28 +91,11 @@ static void resolve_doom(void)
 #define PB0_POLL_INTERVAL_MS  75
 #define PB0_POLL_TIMEOUT_MS   60000
 
-/* Create runtime data directories for hand-deployed overlays and fresh profiles.
- * Existing directories are harmless; other creation failures are logged. */
-static void ensure_user_dirs(void)
-{
-    static const char *subs[] = { "", "\\strings", "\\overrides", "\\prefabs" };
-    char base[MAX_PATH], path[MAX_PATH];
-    int i;
-    if (FAILED(SHGetFolderPathA(NULL, CSIDL_LOCAL_APPDATA, NULL, 0, base))) {
-        backend_log("WARN: SHGetFolderPathA(CSIDL_LOCAL_APPDATA) failed -- snapmap-plus user dirs not created");
-        return;
-    }
-    for (i = 0; i < (int)(sizeof subs / sizeof subs[0]); i++) {
-        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\snapmap-plus%s", base, subs[i]);
-        if (!CreateDirectoryA(path, NULL) && GetLastError() != ERROR_ALREADY_EXISTS) {
-            char line[MAX_PATH + 64];
-            _snprintf_s(line, sizeof line, _TRUNCATE, "WARN: CreateDirectory %s failed (err %lu)",
-                        path, GetLastError());
-            backend_log(line);
-        }
-    }
-    backend_log("snapmap-plus user-data dirs ensured (root + strings/overrides/prefabs)");
-}
+/* Startup binds no early resource observer: every signature resolves in the
+ * ordinary passes. */
+static int no_priority_signature(const char *name) { (void)name; return 0; }
+static int no_priority_ready(const sig_result *results, size_t count)
+{ (void)results; (void)count; return 1; }
 
 static DWORD WINAPI bootstrap_thread(LPVOID p)
 {
@@ -168,9 +137,8 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
         backend_log(line);
     }
 
-    ensure_user_dirs();
+    sh_user_dirs_ensure();
     sh_config_init(); /* nonfatal: the service retains defaults and status flags on failure */
-    sh_user_overrides_capture_launch_state();
 
     /* These scratch-only checks do not depend on engine symbol resolution. */
     sh_patch_selftest();
@@ -188,7 +156,7 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
     for (;;) {
         int final_pass = total > SIG_RESULTS_MAX || GetTickCount() - t0 >= PB0_POLL_TIMEOUT_MS;
         last_ok = sh_startup_bindings_step(&bindings, g_doom_base,
-            sh_resource_graph_native_signature, sh_resource_graph_native_install, final_pass);
+            no_priority_signature, no_priority_ready, final_pass);
         if (last_ok == total) break;
         if (final_pass) break;
         Sleep(PB0_POLL_INTERVAL_MS);
@@ -211,12 +179,8 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
 
     /* Bind features from the final resolution results, including partial results. */
     {
-        /* Idempotent after early binding, or report unavailable dependencies
-         * after a partial startup. Never infer that earlier loads were seen. */
-        sh_resource_graph_native_install(results, db);
-
         /* Install rawmap load interception only on a clean prologue. The swap starts
-         * disarmed; package admission also runs inside this detour. */
+         * disarmed; removal of retired package payloads also runs inside this detour. */
         void *deser = NULL;
         int   deser_clean = 0;
         for (size_t i = 0; i < db; i++) {
@@ -226,17 +190,6 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
                 deser_clean = (results[i].status == SIG_OK);   /* clean scan, not the hook-tolerant fallback */
                 break;
             }
-        }
-        /* Capture installed source identities before load interception can run.
-         * Later installs pass the gate after successful runtime registration. */
-        {
-            char mpkg_root[MAX_PATH];
-            sh_mpkg_set_legacy_reader(sh_package_runtime_legacy_read, NULL);
-            if (sh_overrides_get_root(mpkg_root, sizeof mpkg_root))
-                sh_mpkg_boot_capture(mpkg_root);
-            else
-                backend_log("MPKG: boot capture SKIPPED -- no effective override root "
-                            "(maps declaring packages will be refused, never crashed)");
         }
         sh_rawmap_swap_install(deser, deser_clean);
         /* Answer "is the open map a branch?" for a swapped map, so the engine's own Save asks for
@@ -248,8 +201,7 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
          * it serves, and like it does not depend on the editor being up. */
         {
             void *ed_frame = NULL, *ed_loadmap = NULL, *ed_addtag = NULL, *ed_tojson = NULL;
-            void *ed_readtext = NULL;
-            int   ed_frame_clean = 0, ed_load_clean = 0, ed_read_clean = 0;
+            int   ed_frame_clean = 0;
             for (size_t i = 0; i < db; i++) {
                 if (results[i].name == NULL) continue;
                 if (strcmp(results[i].name, "EditorFrame") == 0) {
@@ -259,10 +211,6 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
                 } else if (strcmp(results[i].name, "EditorLoadMap") == 0) {
                     if (results[i].status == SIG_OK || results[i].status == SIG_OK_HOOKED)
                         ed_loadmap = (void *)results[i].addr;
-                    ed_load_clean = results[i].status == SIG_OK;
-                } else if (strcmp(results[i].name, "ReadLocalSavedMapText") == 0) {
-                    if (results[i].status == SIG_OK) ed_readtext = (void *)results[i].addr;
-                    ed_read_clean = results[i].status == SIG_OK;
                 } else if (strcmp(results[i].name, "SnapMapAddBranchTag") == 0) {
                     if (results[i].status == SIG_OK || results[i].status == SIG_OK_HOOKED)
                         ed_addtag = (void *)results[i].addr;
@@ -275,7 +223,6 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
             /* Save Rawmap serializes the open map, not the newest save on disk. The tag
              * function also derives the engine's idStr ctor/dtor. */
             sh_rawmap_set_live_serialize(ed_tojson, ed_addtag);
-            sh_rawmap_preflight_install(ed_loadmap, ed_load_clean, ed_readtext, ed_read_clean);
         }
 
         /* Mirror saves to rawmap JSON. Require a clean serialization prologue before
@@ -291,32 +238,7 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
             }
         }
         sh_rawmap_save_install(serialize, serialize_clean);
-        for (size_t i = 0; i < db; i++) {
-            if (results[i].name && !strcmp(results[i].name, "EditorSaveAndPlay")) {
-                sh_rawmap_play_install((void *)results[i].addr, results[i].status == SIG_OK);
-                break;
-            }
-        }
         sh_map_payload_install(results, db);
-        /* Every package activation refreshes cached resources through this
-         * binding; it is never gated (an unbound refresh fails all activation). */
-        if (!sh_resource_resident_bind(results, db, g_doom_base))
-            backend_log("MPKG: native cached-resource refresh binding unavailable");
-        {
-            const sh_map_transition_callbacks callbacks = {sh_rawmap_transition_pending,
-                sh_rawmap_transition_activate, sh_rawmap_transition_commit, sh_rawmap_transition_finished};
-            if (!SH_MAP_TRANSITION_LAYOUT_ESTABLISHED)
-                backend_log("MPKG: native package activation boundary unavailable -- the map-transition "
-                            "layout is not established for build 13954591");
-            else if (!sh_map_transition_install(results, db, g_doom_base, &callbacks))
-                backend_log("MPKG: native package activation boundary unavailable");
-        }
-        if (!sh_map_source_install(results, db, g_doom_base) ||
-            !sh_map_native_bind(results, db, g_doom_base) ||
-            feature_pending(SH_PENDING_MAP_PUBLISHED, "published-map launch", SH_PENDING_MAP_PUBLISHED_WHY) ||
-            !sh_map_published_install(results, db, g_doom_base))
-            backend_log("MPKG: published-map ownership and launch binding unavailable");
-
         sh_rawmap_embed_install(g_doom_base);
 
 
@@ -334,14 +256,6 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
 
         void *get_decls = (void *)sig_addr_by_name(results, db, "GetDeclsOfType");
 
-
-        /* Bind read-only compiler metadata now. Initial compilation runs on
-         * the main thread at the pre-promotion boundary, after native reader
-         * setup. Do not wait or scan packages before arming that hook. */
-        sh_package_runtime_bind_native(
-            glb_resolve(g_doom_base, "declmgr_accessor", NULL),
-            glb_resolve(g_doom_base, "type_container", NULL),
-            sh_engine_game_system_slot(g_doom_base));
 
         /* Inject custom #str_ entries before the first top-level language-table sort.
          * The detour needs a clean prologue; helper functions come from the same scan. */
@@ -361,9 +275,9 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
         void *idstr_ctor   = (void *)sig_addr_by_name(results, db, "IdStrAssign");
         sh_strids_install(sort_body, sort_clean, strids_lea, strids_ins, strids_hash, idstr_ctor);
 
-        /* Replace resource-provider open-by-name slot +0xF8 after validating the audited
-         * provider ABI. User override layers use the immutable launch setting;
-         * built-in defaults and engine resources remain available regardless. */
+        /* Replace resource-provider open-by-name slot +0x148 after validating the audited
+         * provider ABI. It serves map navigation, Grid Room variants, built-in defaults
+         * and otherwise the engine's own resources. */
         /* Publish all three clean native idStr helpers before installing the provider. */
         void *res_ctor = NULL;
         int   ctor_clean = 0;
@@ -430,22 +344,6 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
         void *cmdsys   = sh_resolve_cmdsys(results, db, g_doom_base);
         sh_commands_install(add_cmd, cmdsys, printf_d, get_decls, g_doom_base);
 
-        /* Capture allowlisted package cvars, then verify them at native publication.
-         * Do not alter these gates during startup declaration parsing. */
-        {
-            char override_root[MAX_PATH];
-            void *buffer_cmd = (void *)sig_addr_by_name(results, db, "BufferCommandText");
-            void *execute_cmds = (void *)sig_addr_by_name(results, db, "CmdExecuteBuffer");
-            if (sh_overrides_get_root(override_root, sizeof(override_root))) {
-                sh_package_requirements_install(override_root, g_doom_base, cmdsys, buffer_cmd,
-                                                execute_cmds,
-                                                sh_user_overrides_enabled_for_launch());
-                sh_weapon_hud_install(override_root, g_doom_base, results, db,
-                                      sh_user_overrides_enabled_for_launch());
-            } else
-                backend_log("package-requirements REFUSED: effective override root unavailable");
-        }
-
         /* Create the shared interface and launch the frontend after sh registration. */
         sh_ui_bridge_install();
 
@@ -493,25 +391,10 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
          * The editor singleton resolves through the engine-globals anchor. */
         sh_iface_engine_install(results, db, g_doom_base);
 
-        /* Arm the native palette rebuild before declaration registration can queue it. */
-        sh_palette_refresh_install(results, db, g_doom_base);
-
-        /* Install native prompts before the decl server can raise a package dialog.
-         * Failed binding leaves the OS message-box fallback available. The
-         * live-verify descriptor trace stays for the package-consent prompt,
-         * which R-012 did not reach. */
+        /* Install the native dialog binding used by sh_dialogtest. Failed binding
+         * leaves the OS message-box fallback available. */
         sh_engine_dialog_set_trace(sh_live_verify());
         sh_engine_dialog_install(results, db, g_doom_base);
-
-        sh_audio_banks_native_install(results, db);
-        sh_audio_files_native_install(results, db, g_doom_base);
-
-        /* Queue immutable new-declaration registration on the engine main thread.
-         * The interface and palette callbacks must be ready before its command runs. */
-        if (overrides_installed)
-            sh_decl_server_install(results, db, g_doom_base, cmdsys);
-        else
-            backend_log("decl-server REFUSED: pinned resource-provider ABI was not installed");
 
         /* Bind dependencies for the already-registered entity commands. */
         sh_entity_install(results, db, g_doom_base, cmdsys);

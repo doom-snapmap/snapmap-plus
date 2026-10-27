@@ -92,13 +92,6 @@ static const config_descriptor g_registry[] = {
         normalize_entity_selection_mode
     },
     {
-        "overrides.user_enabled", SH_JSON_BOOL, "true",
-        SH_CONFIG_BACKEND_READ | SH_CONFIG_BACKEND_WRITE |
-        SH_CONFIG_UI_READ | SH_CONFIG_UI_WRITE,
-        NULL,
-        normalize_bool
-    },
-    {
         /* Control serving map-carried navigation. When disabled, retain its
          * shards as inert map variables.
          */

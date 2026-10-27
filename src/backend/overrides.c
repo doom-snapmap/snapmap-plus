@@ -1,6 +1,5 @@
-/* Resource-provider open hook and native idFile streams. Package resources
- * come from immutable compiled snapshots; existing streams retain their bytes
- * across a refresh. See overrides.h for built-in and map-resource ordering.
+/* Resource-provider open hook and native idFile streams. Streams own copies
+ * of the bytes they serve. See overrides.h for the resource ordering.
  * Each provider path has an SEH boundary and preserves native file semantics.
  */
 #include <windows.h>
@@ -16,11 +15,7 @@
 #include "backend_log.h"
 #include "perf.h"
 #include "decl_text.h"
-#include "packages.h"
-#include "package_runtime.h"
-#include "resource_graph.h"
 #include "grid_room_asset.h"
-#include "user_overrides.h"
 #include "navmesh.h"                /* baked AI navigation, served under the module's own names */
 #include "nav_bake.h"           /* navigation baked from the map's own marked volumes */
 #include "overrides_baked.h"        /* the built-in "*Custom"-tab default decls (Timeline + Unknown) */
@@ -53,27 +48,6 @@ typedef void *(*open_fn_t)(void *self, const char *name, unsigned char b1, unsig
 static open_fn_t  g_orig_open  = NULL;   /* the saved engine resource-open (the slot's original value) */
 static void     **g_slot       = NULL;   /* the live vtable slot we patched (for uninstall) */
 static volatile LONG g_shadow_count = 0;
-typedef struct ov_internal_decl {
-    char *name;                   /* exact lower-case decltree/<type>/<name>.decl */
-    unsigned char *body;          /* owned by the published snapshot */
-    size_t body_length;
-} ov_internal_decl;
-
-static SRWLOCK g_internal_lock = SRWLOCK_INIT;
-static ov_internal_decl *g_internal_decls;
-static size_t g_internal_decl_count;
-static volatile LONG g_internal_decl_table_state;
-
-enum {
-    OV_INTERNAL_DECL_TABLE_NEW = 0,
-    OV_INTERNAL_DECL_TABLE_INSTALLING = 1,
-    OV_INTERNAL_DECL_TABLE_READY = 2,
-    OV_INTERNAL_DECL_TABLE_FAILED = 3
-};
-
-/* Application data root; authored packages live in its overrides directory. */
-static char g_root[MAX_PATH] = {0};
-
 /* Native idFile stream head: +0x00 vtable, +0x08 FILE*, +0x10 name, +0x18
  * length, +0x20 short flag. All 31 slots use our stream object; its
  * destructor releases it with HeapFree.
@@ -382,319 +356,7 @@ static ov_stream *make_mem_stream(const unsigned char *buf, long long length, co
     return s;
 }
 
-/* Resource names normally map to overrides/<name>. The shader-include branch
- * applies only when the first ".inc" occurrence ends the name; it maps to
- * overrides/shader_includes/<relative>. In that branch, strip the first path
- * component unless the name starts with "includes". Normalize separators
- * after joining the data root.
- */
-
-static void default_root(char *out, size_t cap)
-{
-    char base[MAX_PATH];
-    if (SUCCEEDED(SHGetFolderPathA(NULL, CSIDL_LOCAL_APPDATA, NULL, 0, base)))
-        _snprintf_s(out, cap, _TRUNCATE, "%s\\snapmap-plus", base);
-    else
-        _snprintf_s(out, cap, _TRUNCATE, "snapmap-plus");
-}
-
-static void resolve_root(char *out, size_t cap)
-{
-    if (g_root[0]) strncpy_s(out, cap, g_root, _TRUNCATE);
-    else default_root(out, cap);
-}
-
-static int ov_internal_decl_char(unsigned char c, int allow_slash)
-{
-    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-           (c >= '0' && c <= '9') ||
-           c == '_' || c == '-' || (allow_slash && c == '.');
-}
-
-static int ov_internal_decl_key(const char *type, const char *name,
-                                char **out_key)
-{
-    size_t type_len, name_len, total, i, segment_start;
-    char *key;
-    if (!type || !name || !type[0] || !name[0] || !out_key) return 0;
-    type_len = strlen(type);
-    name_len = strlen(name);
-    if (type_len > 64 || name_len > 512 ||
-        type_len > SIZE_MAX - name_len - sizeof(SH_OVERRIDES_INTERNAL_DECL_PREFIX) - 6)
-        return 0;
-    for (i = 0; i < type_len; i++)
-        if (!ov_internal_decl_char((unsigned char)type[i], 0)) return 0;
-    segment_start = 0;
-    for (i = 0; i <= name_len; i++) {
-        int at_end = i == name_len;
-        if (!at_end && name[i] != '/') {
-            if (!ov_internal_decl_char((unsigned char)name[i], 1)) return 0;
-            continue;
-        }
-        if (i == segment_start ||
-            (i - segment_start == 1 && name[segment_start] == '.') ||
-            (i - segment_start == 2 && name[segment_start] == '.' &&
-             name[segment_start + 1] == '.')) return 0;
-        segment_start = i + 1;
-    }
-    total = sizeof(SH_OVERRIDES_INTERNAL_DECL_PREFIX) - 1 + type_len + 1 +
-            name_len + 5 + 1;
-    key = (char *)HeapAlloc(GetProcessHeap(), 0, total);
-    if (!key) return 0;
-    memcpy(key, SH_OVERRIDES_INTERNAL_DECL_PREFIX,
-           sizeof(SH_OVERRIDES_INTERNAL_DECL_PREFIX) - 1);
-    memcpy(key + sizeof(SH_OVERRIDES_INTERNAL_DECL_PREFIX) - 1, type, type_len);
-    key[sizeof(SH_OVERRIDES_INTERNAL_DECL_PREFIX) - 1 + type_len] = '/';
-    memcpy(key + sizeof(SH_OVERRIDES_INTERNAL_DECL_PREFIX) - 1 + type_len + 1,
-           name, name_len);
-    memcpy(key + sizeof(SH_OVERRIDES_INTERNAL_DECL_PREFIX) - 1 + type_len + 1 + name_len,
-           ".decl", 5);
-    key[total - 1] = '\0';
-    for (i = 0; i + 1 < total; i++) {
-        if (key[i] >= 'A' && key[i] <= 'Z')
-            key[i] = (char)(key[i] - 'A' + 'a');
-    }
-    *out_key = key;
-    return 1;
-}
-
-static void ov_internal_decl_table_free(ov_internal_decl *entries, size_t count)
-{
-    size_t i;
-    if (!entries) return;
-    for (i = 0; i < count; i++) {
-        if (entries[i].name) HeapFree(GetProcessHeap(), 0, entries[i].name);
-        if (entries[i].body) HeapFree(GetProcessHeap(), 0, entries[i].body);
-    }
-    HeapFree(GetProcessHeap(), 0, entries);
-}
-
-static int ov_internal_decl_table_publish(const sh_overrides_internal_decl_entry *entries, size_t count, int provider_ready, int user_enabled);
-static ov_stream * open_internal_decl(const char *name, int *matched);
-size_t sh_overrides_internal_decl_published_count(void);
-int sh_overrides_internal_decl_published(const char *name);
-int sh_overrides_internal_decl_table_can_install(void);
-static int ov_internal_decl_table_merge(const sh_overrides_internal_decl_entry *entries, size_t count, int provider_ready);
-
-static int ov_internal_decl_table_publish_locked(
-    const sh_overrides_internal_decl_entry *entries, size_t count,
-    int provider_ready, int user_enabled)
-{
-    ov_internal_decl *copy;
-    size_t i, j;
-    LONG expected;
-    if (!provider_ready || !user_enabled || !entries || count == 0 ||
-        count > SIZE_MAX / sizeof(copy[0])) return 0;
-    expected = InterlockedCompareExchange(&g_internal_decl_table_state,
-                                          OV_INTERNAL_DECL_TABLE_INSTALLING,
-                                          OV_INTERNAL_DECL_TABLE_NEW);
-    if (expected != OV_INTERNAL_DECL_TABLE_NEW) return 0;
-    copy = (ov_internal_decl *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY,
-                                         count * sizeof(copy[0]));
-    if (!copy) {
-        InterlockedExchange(&g_internal_decl_table_state, OV_INTERNAL_DECL_TABLE_FAILED);
-        return 0;
-    }
-    for (i = 0; i < count; i++) {
-        if (!entries[i].body || entries[i].body_length == 0 ||
-            entries[i].body_length > (size_t)INT64_MAX ||
-            !ov_internal_decl_key(entries[i].type, entries[i].name, &copy[i].name)) {
-            ov_internal_decl_table_free(copy, count);
-            InterlockedExchange(&g_internal_decl_table_state, OV_INTERNAL_DECL_TABLE_FAILED);
-            return 0;
-        }
-        for (j = 0; j < i; j++) {
-            if (strcmp(copy[i].name, copy[j].name) == 0) {
-                ov_internal_decl_table_free(copy, count);
-                InterlockedExchange(&g_internal_decl_table_state, OV_INTERNAL_DECL_TABLE_FAILED);
-                return 0;
-            }
-        }
-        copy[i].body = (unsigned char *)HeapAlloc(GetProcessHeap(), 0,
-                                                  entries[i].body_length);
-        if (!copy[i].body) {
-            ov_internal_decl_table_free(copy, count);
-            InterlockedExchange(&g_internal_decl_table_state, OV_INTERNAL_DECL_TABLE_FAILED);
-            return 0;
-        }
-        memcpy(copy[i].body, entries[i].body, entries[i].body_length);
-        copy[i].body_length = entries[i].body_length;
-    }
-    g_internal_decls = copy;
-    g_internal_decl_count = count;
-    /* Publish only complete keys and bodies; open streams own separate copies. */
-    InterlockedExchange(&g_internal_decl_table_state, OV_INTERNAL_DECL_TABLE_READY);
-    return 1;
-}
-
-static ov_stream *open_internal_decl_locked(const char *name, int *matched)
-{
-    size_t i;
-    if (matched) *matched = 0;
-    if (!name || !sh_user_overrides_enabled_for_launch() ||
-        InterlockedCompareExchange(&g_internal_decl_table_state, 0, 0) !=
-            OV_INTERNAL_DECL_TABLE_READY) return NULL;
-    for (i = 0; i < g_internal_decl_count; i++) {
-        if (strcmp(name, g_internal_decls[i].name) != 0) continue;
-        if (matched) *matched = 1;
-        {
-            ov_stream *stream;
-            size_t length = 0;
-            unsigned char *current = NULL;
-            int claimed = sh_package_runtime_read_decl_alias(name, &current, &length);
-            unsigned char *body;
-            if (claimed != 1) { free(current); return NULL; }
-            body = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, length ? length : 1u);
-            if (!body) { free(current); return NULL; }
-            if (length) memcpy(body, current, length);
-            free(current);
-            stream = make_mem_stream(body, (long long)length, g_internal_decls[i].name, 1);
-            if (!stream) HeapFree(GetProcessHeap(), 0, body);
-            return stream;
-        }
-    }
-    return NULL;
-}
-
-size_t sh_overrides_internal_decl_published_count_locked(void)
-{
-    if (InterlockedCompareExchange(&g_internal_decl_table_state, 0, 0) !=
-        OV_INTERNAL_DECL_TABLE_READY)
-        return 0;
-    return g_internal_decl_count;
-}
-
-int sh_overrides_internal_decl_published_locked(const char *name)
-{
-    size_t i;
-    if (!name || !sh_user_overrides_enabled_for_launch() ||
-        InterlockedCompareExchange(&g_internal_decl_table_state, 0, 0) !=
-            OV_INTERNAL_DECL_TABLE_READY) return 0;
-    for (i = 0; i < g_internal_decl_count; i++)
-        if (_stricmp(name, g_internal_decls[i].name) == 0)
-            return sh_package_runtime_decl_alias_exists(name);
-    return 0;
-}
-
-int sh_overrides_internal_decl_table_can_install_locked(void)
-{
-    return g_orig_open != NULL && sh_user_overrides_enabled_for_launch() &&
-           InterlockedCompareExchange(&g_internal_decl_table_state, 0, 0) ==
-               OV_INTERNAL_DECL_TABLE_NEW;
-}
-
-/* A runtime merge replaces an immutable table. Existing opens own their
- * bytes, so publication never hides the old table or invalidates a stream. */
-void sh_overrides_internal_decl_table_reopen(void)
-{
-    backend_log("B1: overrides internal decl table remains available during refresh");
-}
-
-static int ov_internal_decl_table_merge_locked(
-    const sh_overrides_internal_decl_entry *entries, size_t count, int provider_ready)
-{
-    ov_internal_decl *merged;
-    ov_internal_decl *old = g_internal_decls;
-    size_t old_count = g_internal_decl_count;
-    size_t total, i, j, at = 0;
-    char line[192];
-
-    if (!provider_ready || !sh_user_overrides_enabled_for_launch()) return 0;
-    if (!entries || count == 0) return 0;
-    if (count > SIZE_MAX - old_count) return 0;
-    total = old_count + count;
-    if (total > SIZE_MAX / sizeof(merged[0])) return 0;
-    merged = (ov_internal_decl *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY,
-                                           total * sizeof(merged[0]));
-    if (!merged) return 0;
-
-    /* The new entries first, so a key collision resolves in their favour below. */
-    for (i = 0; i < count; i++) {
-        if (!entries[i].body || entries[i].body_length == 0 ||
-            entries[i].body_length > (size_t)INT64_MAX ||
-            !ov_internal_decl_key(entries[i].type, entries[i].name, &merged[at].name)) {
-            ov_internal_decl_table_free(merged, total);
-            return 0;
-        }
-        for (j = 0; j < at; j++) {
-            if (strcmp(merged[at].name, merged[j].name) == 0) {
-                ov_internal_decl_table_free(merged, total);
-                return 0;                      /* duplicate within the new set */
-            }
-        }
-        merged[at].body = (unsigned char *)HeapAlloc(GetProcessHeap(), 0,
-                                                     entries[i].body_length);
-        if (!merged[at].body) {
-            ov_internal_decl_table_free(merged, total);
-            return 0;
-        }
-        memcpy(merged[at].body, entries[i].body, entries[i].body_length);
-        merged[at].body_length = entries[i].body_length;
-        at++;
-    }
-
-    /* Copy unchanged identities into the replacement snapshot. */
-    for (i = 0; i < old_count; i++) {
-        int superseded = 0;
-        if (!old[i].name || !old[i].body) continue;
-        for (j = 0; j < count; j++) {
-            if (strcmp(old[i].name, merged[j].name) == 0) { superseded = 1; break; }
-        }
-        if (superseded) continue;
-        merged[at].name = (char *)HeapAlloc(GetProcessHeap(), 0, strlen(old[i].name) + 1);
-        merged[at].body = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, old[i].body_length);
-        if (!merged[at].name || !merged[at].body) {
-            ov_internal_decl_table_free(merged, total);
-            return 0;
-        }
-        strcpy_s(merged[at].name, strlen(old[i].name) + 1, old[i].name);
-        memcpy(merged[at].body, old[i].body, old[i].body_length);
-        merged[at].body_length = old[i].body_length;
-        at++;
-    }
-
-    g_internal_decls = merged;
-    g_internal_decl_count = at;
-    ov_internal_decl_table_free(old, old_count);
-    InterlockedExchange(&g_internal_decl_table_state, OV_INTERNAL_DECL_TABLE_READY);
-    _snprintf_s(line, sizeof line, _TRUNCATE,
-                "B1: overrides internal decl table MERGED -- %zu new + %zu carried forward = %zu "
-                "published (previous snapshot released)",
-                count, at - count, at);
-    backend_log(line);
-    return 1;
-}
-
-int sh_overrides_internal_decl_table_install(
-    const sh_overrides_internal_decl_entry *entries, size_t count)
-{
-    return ov_internal_decl_table_publish(entries, count, g_orig_open != NULL,
-                                          sh_user_overrides_enabled_for_launch());
-}
-
 #ifdef SH_OVERRIDES_TESTING
-void sh_overrides_test_internal_decl_table_reset(void)
-{
-    /* Test-only reset occurs before any engine thread can retain a stream. */
-    ov_internal_decl_table_free(g_internal_decls, g_internal_decl_count);
-    g_internal_decls = NULL;
-    g_internal_decl_count = 0;
-    InterlockedExchange(&g_internal_decl_table_state, OV_INTERNAL_DECL_TABLE_NEW);
-}
-
-int sh_overrides_test_internal_decl_table_install(
-    const sh_overrides_internal_decl_entry *entries, size_t count)
-{
-    return ov_internal_decl_table_publish(entries, count, 1,
-                                          sh_user_overrides_enabled_for_launch());
-}
-
-void *sh_overrides_test_internal_decl_open(const char *name)
-{
-    int matched = 0;
-    return open_internal_decl(name, &matched);
-}
-
 void *sh_overrides_test_memory_stream(const unsigned char *body, size_t length)
 {
     unsigned char *copy;
@@ -812,60 +474,6 @@ void sh_overrides_test_stream_close(void *stream)
 }
 #endif
 
-int sh_overrides_get_root(char *out, size_t cap)
-{
-    if (!out || cap == 0) return 0;
-    resolve_root(out, cap);
-    return out[0] != '\0';
-}
-
-/* ============================================================ package resolution ==================*/
-
-/* The compiler publishes one complete inventory. Resource opens retain that
- * snapshot; a failed refresh leaves it available. */
-static volatile LONG g_ov_pkg_generation;
-
-unsigned long sh_overrides_rescan_packages_activated(sh_package_activation_fn activate, void *context)
-{
-    char root[MAX_PATH], line[192];
-    const sh_package_compilation *compiled;
-    size_t count;
-    LONG generation;
-    if (!sh_user_overrides_enabled_for_launch()) return 0;
-    resolve_root(root, sizeof(root));
-    if (!root[0] || !sh_package_runtime_refresh_activated(root, (sh_package_activation_guard){
-            sh_nav_bake_source_update_begin, sh_nav_bake_source_update_end}, activate, context)) {
-        backend_log("B1: overrides package inventory REFUSED -- preparation or activation failed");
-        return SH_OVERRIDES_RESCAN_FAILED;
-    }
-    compiled = sh_package_runtime_acquire();
-    count = compiled ? compiled->sources->package_count : 0;
-    sh_package_runtime_release();
-    generation = InterlockedIncrement(&g_ov_pkg_generation);
-    snprintf(line, sizeof(line),
-        "B1: overrides package list RE-SCANNED -- %zu package(s) now visible (generation %ld)",
-        count, (long)generation);
-    backend_log(line);
-    /* This diagnostic return shares a Win32 unsigned-long ABI with existing
-     * callers. Success must never collide with the failure sentinel. */
-    return count >= SH_OVERRIDES_RESCAN_FAILED ? SH_OVERRIDES_RESCAN_FAILED - 1 : (unsigned long)count;
-}
-
-unsigned long sh_overrides_rescan_packages(void)
-{
-    return sh_overrides_rescan_packages_activated(NULL, NULL);
-}
-
-int sh_overrides_activate_map(sh_package_map_plan *plan, sh_package_activation_fn activate, void *context)
-{
-    if (!sh_user_overrides_enabled_for_launch()) return 0;
-    if (!sh_package_runtime_activate_prepared_map(plan, (sh_package_activation_guard){
-        sh_nav_bake_source_update_begin, sh_nav_bake_source_update_end}, activate, context)) return 0;
-    InterlockedIncrement(&g_ov_pkg_generation);
-    backend_log(plan ? "B1: prepared map resource provider activated" : "B1: local resource provider restored");
-    return 1;
-}
-
 /* ====================================================== built-in default lookup + validation =======*/
 
 /* Path-tolerant name compare for the baked table: case-insensitive, '/' == '\\' (the engine asks with
@@ -965,55 +573,28 @@ unsigned char *sh_overrides_test_read_installed(void *open_fn, void *provider,
 }
 #endif
 
-/* Inputs to product transforms use the same published package result as a
- * direct engine read. Stay below Grid/navigation here so derived reads cannot
- * recurse into themselves. An owned read failure must not select stock bytes. */
+/* Inputs to product transforms: a built-in default, otherwise the installed
+ * original. Stay below Grid/navigation here so derived reads cannot recurse
+ * into themselves. */
 static unsigned char *read_effective_resource(const char *name, size_t *out_len)
 {
-    unsigned char *compiled = NULL, *copy;
-    const unsigned char *source;
+    unsigned char *copy;
     const ov_baked_decl_t *baked;
-    size_t length = 0;
-    int claimed = 0;
     if (out_len) *out_len = 0;
     if (!name || !out_len) return NULL;
-    if (sh_user_overrides_enabled_for_launch())
-        claimed = sh_package_runtime_read(name, &compiled, &length);
-    if (claimed < 0) { free(compiled); return NULL; }
-    if (claimed) source = compiled;
-    else {
-        baked = find_baked(name);
-        if (!baked) {
-            copy = read_installed_resource(name, out_len);
-            if (copy) sh_resource_graph_file(name);
-            return copy;
-        }
-        source = (const unsigned char *)baked->text; length = baked->len;
-    }
-    copy = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, length ? length : 1u);
+    baked = find_baked(name);
+    if (!baked) return read_installed_resource(name, out_len);
+    copy = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, baked->len ? baked->len : 1u);
     if (copy) {
-        if (length) memcpy(copy, source, length);
-        *out_len = length;
-        sh_resource_graph_file(name);
+        if (baked->len) memcpy(copy, baked->text, baked->len);
+        *out_len = baked->len;
     }
-    free(compiled); return copy;
+    return copy;
 }
-
-typedef struct grid_source_context {
-    const char *target;
-    sh_resource_graph_frame frame;
-    int active;
-} grid_source_context;
 
 static unsigned char *grid_read_effective(void *context,const char *name,size_t *length)
 {
-    grid_source_context *source = context;
-    /* The transform owns an exact file identity even when a preview requests
-     * it outside a native parse. Later native loads can follow these inputs. */
-    if (!source->active) {
-        sh_resource_graph_begin(&source->frame, "", source->target);
-        source->active = 1;
-    }
+    (void)context;
     return read_effective_resource(name,length);
 }
 static void grid_release_effective(void *context,void *bytes)
@@ -1021,32 +602,56 @@ static void grid_release_effective(void *context,void *bytes)
     (void)context;HeapFree(GetProcessHeap(),0,bytes);
 }
 
+/* The engine path a resource name denotes: lower case, '/' separators, and no
+ * empty, absolute, device or Windows-reserved component. Malloc-owned; NULL
+ * for a name that cannot be one. */
+static char *ov_engine_path(const char *path)
+{
+    char *out, *part, *p;
+    size_t length;
+    if (!path || !(length = strlen(path)) || length >= 1024 || path[0] == '/' || path[0] == '\\') return NULL;
+    out = (char *)malloc(length + 1);
+    if (!out) return NULL;
+    memcpy(out, path, length + 1);
+    for (p = out; *p; p++) {
+        unsigned char c = (unsigned char)*p;
+        if (c == '\\') *p = '/';
+        else if (c >= 'A' && c <= 'Z') *p += 'a' - 'A';
+        else if (c < 0x20 || c == ':' || c == '*' || c == '?' || c == '"' ||
+                 c == '<' || c == '>' || c == '|') goto bad;
+    }
+    part = out;
+    for (p = out; ; p++) if (*p == '/' || !*p) {
+        size_t n = (size_t)(p - part), stem = 0;
+        if (!n || part[n - 1] == '.' || part[n - 1] == ' ') goto bad;
+        while (stem < n && part[stem] != '.') stem++;
+        if ((stem == 3 && (!memcmp(part, "con", 3) || !memcmp(part, "prn", 3) ||
+                          !memcmp(part, "aux", 3) || !memcmp(part, "nul", 3))) ||
+            (stem == 4 && (!memcmp(part, "com", 3) || !memcmp(part, "lpt", 3)) &&
+             part[3] >= '1' && part[3] <= '9')) goto bad;
+        if (!*p) break;
+        part = p + 1;
+    }
+    return out;
+bad:
+    free(out); return NULL;
+}
+
 static int grid_aas_name(const char *name)
 {return name&&(strstr(name,".aas_")||strstr(name,".baas_"));}
 static int grid_open_validated(const char *name,unsigned char **out,size_t *length)
 {
-    grid_source_context source = {0};
-    int claimed = -1;
-    source.target = name;
-    __try {
-        char *canonical = NULL, *normalized = sh_package_engine_path(name);
-        int identity = normalized ? sh_grid_asset_canonical(normalized, &canonical) : 0;
-        free(normalized);
-        /* A compiler-owned private output already includes its generated
-         * contribution and every authored input. Do not generate over it. */
-        if (identity > 0 && sh_user_overrides_enabled_for_launch())
-            claimed = sh_package_runtime_read(name, out, length);
-        else claimed = identity < 0 ? -1 : 0;
-        free(canonical);
-        if (!claimed) claimed=sh_grid_asset_open(name,grid_read_effective,grid_release_effective,&source,out,length);
-        if(claimed>0&&grid_aas_name(name)){
-            char error[192];
-            if(!sh_navmesh_validate_aas(*out,*length,error,sizeof error)){
-                backend_log(error);free(*out);*out=NULL;*length=0;claimed=-1;
-            }
+    char *canonical = NULL, *normalized = ov_engine_path(name);
+    int identity = normalized ? sh_grid_asset_canonical(normalized, &canonical) : 0;
+    int claimed = identity < 0 ? -1 : 0;
+    free(normalized);
+    free(canonical);
+    if (!claimed) claimed=sh_grid_asset_open(name,grid_read_effective,grid_release_effective,NULL,out,length);
+    if(claimed>0&&grid_aas_name(name)){
+        char error[192];
+        if(!sh_navmesh_validate_aas(*out,*length,error,sizeof error)){
+            backend_log(error);free(*out);*out=NULL;*length=0;claimed=-1;
         }
-    } __finally {
-        if (source.active) sh_resource_graph_end(&source.frame, !AbnormalTermination() && claimed > 0);
     }
     return claimed;
 }
@@ -1115,72 +720,14 @@ static void *ov_open_body(void *self, const char *name, unsigned char b1, unsign
         }
     }
 
-    if (mode < 2) {
-        ov_stream *internal = NULL;
-        int internal_match = 0;
-        SH_PERF_BEGIN(t0);
-        __try {
-            internal = open_internal_decl(name, &internal_match);
-        } __except (EXCEPTION_EXECUTE_HANDLER) {
-            internal = NULL;
-        }
-        SH_PERF_END(SH_PERF_INTERNAL_DECL, t0);
-        if (internal_match) {
-            /* A published identity is authoritative. Do not let an
-             * allocation/read failure fall through to a physical file or the
-             * packaged resource under the same canonical name. */
-            if (!internal) return NULL;
-            unsigned long n = (unsigned long)InterlockedIncrement(&g_shadow_count);
-            char line[MAX_PATH + 160];
-            _snprintf_s(line, sizeof line, _TRUNCATE,
-                        "B1: overrides internal decl FIRED for '%s' (%lld bytes) [#%lu]",
-                        name, internal->length, n);
-            backend_log(line);
-            return internal;
-        }
-    }
-
-    if (mode < 2 && name && sh_user_overrides_enabled_for_launch()) {
-        FILE *file = NULL;
-        uint64_t file_length = 0;
-        unsigned char *bytes = NULL;
-        size_t length = 0;
-        int claimed = sh_package_runtime_open_file(name, &file, &file_length);
-        if (claimed) {
-            ov_stream *stream = claimed > 0 && file_length <= LLONG_MAX ?
-                make_stream(file, (long long)file_length, name) : NULL;
-            if (!stream && file) fclose(file);
-            if (stream) InterlockedIncrement(&g_shadow_count);
-            return stream;
-        }
-        claimed = sh_package_runtime_read(name, &bytes, &length);
-        if (claimed) {
-            unsigned char *owned = NULL;
-            ov_stream *stream = NULL;
-            if (claimed > 0) {
-                owned = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, length ? length : 1u);
-                if (owned) {
-                    if (length) memcpy(owned, bytes, length);
-                    stream = make_mem_stream(owned, (long long)length, name, 1);
-                }
-            }
-            free(bytes);
-            if (!stream && owned) HeapFree(GetProcessHeap(), 0, owned);
-            if (stream) InterlockedIncrement(&g_shadow_count);
-            return stream;
-        }
-    }
-
     if (mode < 2 && name != NULL) {
         ov_stream *s = NULL;
         const char *src = NULL;
         __try {
             const ov_baked_decl_t *baked = find_baked(name);
-            int user_on = sh_user_overrides_enabled_for_launch();
             if (s == NULL && baked != NULL) {
                 s = make_mem_stream((const unsigned char *)baked->text, (long long)baked->len, name, 0);
-                if (s && src == NULL)
-                    src = user_on ? "built-in" : "built-in (user layer disabled by config)";
+                if (s && src == NULL) src = "built-in";
             }
         } __except (EXCEPTION_EXECUTE_HANDLER) {
             s = NULL;   /* any fault in the shadow path -> fall through to the original open */
@@ -1211,7 +758,6 @@ static void *ov_open_hook(void *self, const char *name, unsigned char b1, unsign
 {
     SH_PERF_BEGIN(t0);
     void *s = ov_open_body(self, name, b1, b2, mode);
-    if (s && mode < 2 && name) sh_resource_graph_file(name);
     SH_PERF_END(SH_PERF_OVERRIDE_OPEN, t0);
     return s;
 }
@@ -1357,8 +903,6 @@ int sh_overrides_install(const uint8_t *module_base,
 {
     char line[MAX_PATH + 128];
 
-    if (!g_root[0]) default_root(g_root, sizeof g_root);
-
     if (ctor_fn == NULL) {
         backend_log("B1: overrides file-shadow SKIPPED -- ResProviderCtor not resolved");
         return 0;
@@ -1454,26 +998,13 @@ int sh_overrides_install(const uint8_t *module_base,
     FlushInstructionCache(GetCurrentProcess(), slot, sizeof(void *));
     g_slot = slot;
 
-    /* Initial package compilation belongs to the main-thread pre-promotion
-     * boundary. Arming this provider must not wait for native reader setup. */
     _snprintf_s(line, sizeof line, _TRUNCATE,
-        "B1: overrides file-shadow installed (vtable=%p slot+0x%x=%p, orig open=%p); root=%s\\overrides; "
+        "B1: overrides file-shadow installed (vtable=%p slot+0x%x=%p, orig open=%p); "
         "built-in defaults: %u from memory",
-        vtable, OPEN_SLOT_OFFSET, (void *)slot, orig, g_root,
+        vtable, OPEN_SLOT_OFFSET, (void *)slot, orig,
         (unsigned)(sizeof g_ov_baked_decls / sizeof g_ov_baked_decls[0]));
     backend_log(line);
     return 1;
-}
-
-int sh_overrides_set_root(const char *path)
-{
-    InterlockedIncrement(&g_ov_pkg_generation);
-    if (path == NULL || path[0] == '\0') {
-        default_root(g_root, sizeof g_root);
-        return 1;
-    }
-    strncpy_s(g_root, sizeof g_root, path, _TRUNCATE);
-    return g_root[0] != '\0';
 }
 
 unsigned long sh_overrides_shadow_count(void)
@@ -1495,69 +1026,3 @@ int sh_overrides_uninstall(void)
     g_orig_open = NULL;
     return 1;
 }
-
-static int ov_internal_decl_table_publish(const sh_overrides_internal_decl_entry *entries, size_t count, int provider_ready, int user_enabled)
-{
-    int result;
-    AcquireSRWLockExclusive(&g_internal_lock);
-    __try { result = ov_internal_decl_table_publish_locked(entries, count, provider_ready, user_enabled); }
-    __finally { ReleaseSRWLockExclusive(&g_internal_lock); }
-    return result;
-}
-
-static ov_stream * open_internal_decl(const char *name, int *matched)
-{
-    ov_stream * result;
-    AcquireSRWLockShared(&g_internal_lock);
-    __try { result = open_internal_decl_locked(name, matched); }
-    __finally { ReleaseSRWLockShared(&g_internal_lock); }
-    return result;
-}
-
-size_t sh_overrides_internal_decl_published_count(void)
-{
-    size_t result;
-    AcquireSRWLockShared(&g_internal_lock);
-    __try { result = sh_overrides_internal_decl_published_count_locked(); }
-    __finally { ReleaseSRWLockShared(&g_internal_lock); }
-    return result;
-}
-
-int sh_overrides_internal_decl_published(const char *name)
-{
-    int result;
-    AcquireSRWLockShared(&g_internal_lock);
-    __try { result = sh_overrides_internal_decl_published_locked(name); }
-    __finally { ReleaseSRWLockShared(&g_internal_lock); }
-    return result;
-}
-
-int sh_overrides_internal_decl_table_can_install(void)
-{
-    int result;
-    AcquireSRWLockShared(&g_internal_lock);
-    __try { result = sh_overrides_internal_decl_table_can_install_locked(); }
-    __finally { ReleaseSRWLockShared(&g_internal_lock); }
-    return result;
-}
-
-static int ov_internal_decl_table_merge(const sh_overrides_internal_decl_entry *entries, size_t count, int provider_ready)
-{
-    int result;
-    AcquireSRWLockExclusive(&g_internal_lock);
-    __try { result = ov_internal_decl_table_merge_locked(entries, count, provider_ready); }
-    __finally { ReleaseSRWLockExclusive(&g_internal_lock); }
-    return result;
-}
-
-int sh_overrides_internal_decl_table_merge(const sh_overrides_internal_decl_entry *entries, size_t count)
-{
-    return ov_internal_decl_table_merge(entries, count, g_orig_open != NULL);
-}
-
-#ifdef SH_OVERRIDES_TESTING
-int sh_overrides_test_internal_decl_table_merge(const sh_overrides_internal_decl_entry *entries, size_t count)
-{
-    return ov_internal_decl_table_merge(entries, count, 1);
-}
-#endif

@@ -71,7 +71,7 @@ static void check_constants(void)
     assert(SH_GAME_SYSTEM_SLOT_RVA_VK == 0x2F48600u && SH_GAME_SYSTEM_SLOT_RVA_GL == 0x2F905D8u);
     /* Established by the build 13954591 address table. */
     assert(SH_CVARSYS_LAYOUT_ESTABLISHED && SH_IDCVAR_NAME_FOR_LOOKUP == 0x50);
-    assert(SH_PROVIDER_OPEN_SLOT == 0x148 && SH_MAP_TRANSITION_LAYOUT_ESTABLISHED);
+    assert(SH_PROVIDER_OPEN_SLOT == 0x148);
     puts("OK  build 13954591 constants");
 }
 

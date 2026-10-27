@@ -1,4 +1,4 @@
-/* Inject user, package and baked #str_ mappings, then sort the live
+/* Inject user and baked #str_ mappings, then sort the live
  * dictionary by hash. Installation performs the usual injection; the sort
  * hook is a fallback.
  *
@@ -18,10 +18,6 @@
 #include "strids_baked.h"   /* the compiled-in canonical #str_ set (baked strids) */
 #include "hook.h"
 #include "backend_log.h"
-#include "overrides.h"
-#include "packages.h"
-#include "package_runtime.h"
-#include "user_overrides.h"
 #include "config_json.h"
 
 /* StridsSortBody prologue steal window (DIRECT, disasm of 0x1a2b490):
@@ -144,20 +140,17 @@ static char *read_source_file(size_t *out_len)
 }
 
 /* Deduplicate case-insensitively within an injection pass because the native
- * hash lowercases keys. First writer wins: user document, packages in
- * precedence order, then baked defaults. Duplicate native rows would make
- * hash lookup ambiguous.
+ * hash lowercases keys. First writer wins: user document, then baked
+ * defaults. Duplicate native rows would make hash lookup ambiguous.
  */
-/* Who supplied a row, so a cross-package disagreement can name both sides. The user's file and the
- * baked defaults are not packages and never conflict-report: the user outranks a package by design and
- * the baked set is only a backstop, so both use STRIDS_OWNER_NONE. */
+/* Which layer supplied a row. The user's file and the baked defaults share one
+ * owner; the user outranks the baked backstop by order alone. */
 #define STRIDS_OWNER_NONE (-1)
-#define STRIDS_OWNER_PACKAGES (-2)
 
 typedef struct strids_row {
     const char  *id;          /* borrows the stable owned ID allocation */
     unsigned int text_hash;   /* FNV-1a of the text: "same value?" without storing every value */
-    int          owner;       /* compiled packages or user/default layer */
+    int          owner;       /* the user/default layer */
 } strids_row;
 
 static strids_row *g_injected_ids;
@@ -330,7 +323,8 @@ static strids_row *find_injected(const char *id)
 
 static const char *strids_owner_name(int owner)
 {
-    return owner == STRIDS_OWNER_PACKAGES ? "<packages>" : "<user>";
+    (void)owner;
+    return "<user>";
 }
 
 /* Append one #str_<id> row through native helpers unless this pass already
@@ -339,22 +333,7 @@ static const char *strids_owner_name(int owner)
 static void inject_row_owned(const char *id, const char *text, size_t text_len, int owner)
 {
     strids_row *seen = find_injected(id);
-    if (seen != NULL) {
-        /* For differing values from two packages, retain the first and log
-         * both owners. Equal values compose silently; user and baked
-         * precedence does not produce a package conflict.
-         */
-        if (owner != STRIDS_OWNER_NONE && seen->owner != STRIDS_OWNER_NONE &&
-            seen->text_hash != strids_text_hash(text)) {
-            char line[320];
-            _snprintf_s(line, sizeof line, _TRUNCATE,
-                        "B1: strids REFUSED '#str_%s' from package '%s' -- package '%s' already defines "
-                        "it with different text; the first definition stands",
-                        id, strids_owner_name(owner), strids_owner_name(seen->owner));
-            backend_log(line);
-        }
-        return;                                             /* first-writer-wins: never append twice */
-    }
+    if (seen != NULL) return;                              /* first-writer-wins: never append twice */
     size_t id_length = strlen(id);
     if (!id_length || id_length > INT_MAX - 5u || text_len > INT_MAX ||
         g_injected_n == SIZE_MAX ||
@@ -536,32 +515,7 @@ invalid:
     sh_json_object_free(&pairs);
 }
 
-/* Policies are already composed and checked before any native insertion. */
-static void inject_packages(void)
-{
-    size_t length = 0;
-    char *json;
-    sh_json_object locales = {0};
-    const char *english;
-    const sh_package_compilation *compiled;
-    if (!sh_user_overrides_enabled_for_launch()) return;
-    compiled = sh_package_runtime_acquire();
-    /* No provider means local/baked text only, including recovery of a failed
-     * first activation. Package admission is the runtime transaction's job. */
-    if (!compiled) { sh_package_runtime_release(); return; }
-    /* A failed refresh may still have a valid prior snapshot. Copy it before
-     * calling the native string pool; latest-refresh readiness is not ownership. */
-    json = compiled ? sh_json_serialize_object(&compiled->policy.strings, 0, &length) : NULL;
-    sh_package_runtime_release();
-    if (!json || !sh_json_parse_object(json, length, 4, &locales)) {
-        g_pass_failed = 1; free(json); return;
-    }
-    english = sh_json_object_get(&locales, "en");
-    if (english) inject_pairs(english, strlen(english), STRIDS_OWNER_PACKAGES);
-    sh_json_object_free(&locales); free(json);
-}
-
-/* Inject the user, package and baked layers. Return the appended row count. */
+/* Inject the user and baked layers. Return the appended row count. */
 static long inject_layers(void)
 {
     if (g_table_desc == NULL || g_insert == NULL || g_hash == NULL || g_idstr_ctor == NULL)
@@ -577,11 +531,8 @@ static long inject_layers(void)
         HeapFree(GetProcessHeap(), 0, buf);
     } else {
         backend_log(g_pass_failed ? "B1: strids REFUSED: could not read the local string document" :
-                    "B1: strids -- no user strids.json (optional); packages and baked defaults still apply");
+                    "B1: strids -- no user strids.json (optional); baked defaults still apply");
     }
-
-    /* Package strings fill keys the user did not supply. */
-    inject_packages();
 
     /* Baked defaults fill remaining keys. */
     for (size_t bi = 0; bi < B1_STRIDS_BAKED_COUNT; bi++)
@@ -738,8 +689,7 @@ int sh_strids_install(void *sort_body_fn, int sort_status_ok,
         sort_body_fn, tramp, SORT_STOLEN, g_table_desc, g_src_path);
     backend_log(line);
 
-    /* Built-in declarations can load before compilation. Supply their text
-     * now; the publication pass adds package policy after it becomes available. */
+    /* Built-in declarations can load at any time. Supply their text now. */
     inject_and_resort_once();
     return 1;
 }
@@ -808,8 +758,8 @@ void sh_strids_test_set_sort(void *sort)
     g_sort_orig = (sort_fn_t)sort;
 }
 
-/* How the injector attributed each row this pass: the id, and the owning package name ("<user>" for
- * the user's own document and for the baked defaults). Returns 0 past the end. */
+/* How the injector attributed each row this pass: the id, and its owner ("<user>" for the user's
+ * own document and for the baked defaults). Returns 0 past the end. */
 int sh_strids_test_row(int index, const char **id_out, const char **owner_out)
 {
     if (index < 0 || (size_t)index >= g_injected_n) return 0;

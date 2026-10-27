@@ -39,16 +39,9 @@
 
 /* Session byte read by SessionDevModeGetter (movzx eax, byte [rcx+disp32]). */
 #define SH_SESSION_DEVMODE_FIELD     0x349BBu
-/* idCommonLocal map-loading byte: FinalizeMapChange writes 1 here
- * (`mov byte [rsi+0xf5d6],1`); it was +0xF576 in 2018. */
-#define SH_COMMON_LOADING_FLAG       0xF5D6u
 
 /* Validator-manager reflection getter slot. */
 #define SH_VALIDATOR_REFLECT_SLOT    0x258u
-
-/* AllocateGameResources / UnloadGameResources / FinalizeMapChange interior
- * layout that map_transition.c verifies and calls into (TR_* there). */
-#define SH_MAP_TRANSITION_LAYOUT_ESTABLISHED 1
 
 /* GetGameSystemInterface is no longer exported. The idGameSystemLocal object is
  * reached through a statically initialised, relocated pointer at these RVAs. */
@@ -88,21 +81,9 @@ static __inline int sh_live_verify(void)
  * the fault shield's exit flag editor+0x23294. */
 
 /* Also bound after the R-012 addendum and round 3 (snaphak-re R-019): the
- * prepared sound decl event +0xac (it equals the FNV-1 hash of the event name
- * on both renderers), the cached-resource refresh (+0x14 count moves by one
- * across the pass; World Text renders with its fonts at +0x688 after a re-arm)
- * and the visibility-toggle registry (+0x20/+0x28: 1384 decls revealed, 1380
- * re-hidden). The resident refresh is a dependency of every package
- * activation, so it must never sit behind a default-off gate: with it unbound
- * no user package activates at all. */
+ * visibility-toggle registry (+0x20/+0x28: 1384 decls revealed, 1380
+ * re-hidden). */
 
-/* The product's published-map launch hooks (map_published.c): they retain a
- * published map that carries Snapmap+ packages and activate those packages at
- * the map transition. With this gate closed the engine's own launch route is
- * untouched -- a package-less published map launches normally, but a
- * package-carrying one loads without its packages. */
-#define SH_PENDING_MAP_PUBLISHED      1
-#define SH_PENDING_MAP_PUBLISHED_WHY  "package retention for published maps: lobby host match (session/lobby slots +0x348/+0x2b8, parameters +0x600) and the package-carrying lobby launch (map_published.c); the native launch route runs either way"
 #define SH_PENDING_RENDER_EDITOR      1
 #define SH_PENDING_RENDER_EDITOR_WHY  "settings panel slider value +0x120 and dirty byte +0xc8 (map_render_editor.c)"
 
