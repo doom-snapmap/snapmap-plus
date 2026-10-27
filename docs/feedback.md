@@ -34,13 +34,36 @@ characters return 413. The UI receives a failed response and retains the draft.
 
 - **Title:** `[Bug] <the user's title>` (or `[Feature]` / `[Docs]` / `[Other]`).
 - **Body:** the user's details, then a metadata block: `- Version: 0.2.0-beta.3 (beta)`, a
-  `- Renderer: Vulkan` (or `OpenGL`) line, an optional `- Contact:` line, and an invisible
-  `<!-- report-sig:… -->` marker (the dedup signature: a hash of category + normalized title).
-  Nothing else is collected — no telemetry, and no system or hardware information beyond that one
-  renderer token.
+  `- Renderer: Vulkan` (or `OpenGL`) line, a `- Game:` line, an optional `- Contact:` line, and an
+  invisible `<!-- report-sig:… -->` marker (the dedup signature: a hash of category + normalized
+  title). Nothing else is collected — no telemetry, and no system or hardware information beyond the
+  renderer token and the game identity.
 - **Labels:** the category (`bug` / `enhancement` / `documentation` / `question`), the release channel
   (`beta` / `stable`, from the version string; dev builds get neither), the renderer (`vulkan` /
-  `opengl`), and `user-report` (identifies relay-filed issues for release retest prompts).
+  `opengl`), the game build (`build-13954591`, or `build-2642713` for a 2018-build report), and
+  `user-report` (identifies relay-filed issues for release retest prompts).
+
+A filed bug report's metadata block reads, for example:
+
+```text
+---
+- Version: v0.2.2-beta.1 (beta)
+- Renderer: Vulkan
+- Game: DOOM 2016 build 13954591 (20240321-104810-ginger-fuchsia, Vulkan, 3d8b4393)
+- Contact: someone@example.com
+```
+
+**Why the game identity:** Snapmap+ supports exactly one DOOM 2016 build, so a report is only
+actionable when it says which executable it came from. The backend produces one string from the
+executable's SHA-256 fingerprint (`sh_host_game_identity`, `src/backend/host_image.c`): the Steam
+build id, the binary name DOOM's console prints under Build Information, the renderer of that
+executable, and the first eight hex digits of its hash. The same string appears in the backend log
+(`game: …`), the diagnostic log, crash records, the installer's output and every report. The
+backend passes it to the UI host in the startup argument block; when the backend did not attach to
+a supported executable the UI has none, and the report says `- Game: not attached`. The relay
+accepts only the identity strings of known builds (13954591, and 2642713 for legacy reports, each
+with its binary name and per-renderer hash) and writes `- Game: unrecognized (not shown)` for
+anything else rather than echoing it.
 
 **Why the renderer:** DOOM 2016 ships one executable per renderer (`DOOMx64vk.exe` / `DOOMx64.exe`)
 and relaunches itself when `r_renderAPI` changes, so a player can be in either one from the same Steam
@@ -61,7 +84,10 @@ call. The signature covers category + title only, so the same bug reported from 
 
 Fault capture attempts to write a local **crash record** containing the fault
 class, exception code, `module+0xRVA`, call stack, available engine error,
-timestamp, version and renderer to `<game>\snapmap-plus\crash\`. A complete
+timestamp, version, renderer and game identity to `<game>\snapmap-plus\crash\`.
+Version, renderer and game identity are captured when the handlers are armed,
+never at fault time. The record has no format version; readers treat a missing
+`game` field (older records) as not recorded. A complete
 temporary file is renamed into the pending set only after a successful write.
 Capture is bounded and best effort: nested faults may be skipped, and some fatal
 terminations bypass handlers entirely.
@@ -83,7 +109,8 @@ record so the dialog never nags twice — the full logs and any dump stay on dis
 
 What lands on the tracker: title `Crash: <module>+0x<rva> (0x<code>)` — the crash *location*, so the
 signature lets the best-effort dedup group matching crashes — labels `crash` +
-`user-report` + channel + renderer, a readable crash-summary body, and the attached logs as a
+`user-report` + channel + renderer + `build-<id>`, a readable crash-summary body (including
+`Game at crash: …`), and the attached logs as a
 **collapsed follow-up comment**. Log attachment is best-effort: a failure after
 issue creation does not change the successful submission response.
 
@@ -96,7 +123,10 @@ below and does not require `user-report`. Pull requests are excluded.
 - [`issues-retest.yml`](../.github/workflows/issues-retest.yml) — on every published release, open
   user reports filed on an **older** version get a "still reproducible on vX?" comment + the
   `needs-retest` label. A pre-release only prompts `beta`-channel reports; a stable release prompts
-  everything older. Deliberately not auto-close-on-release: an old-version bug usually still exists —
+  everything older. A report is never prompted for a game build the new release does not run on: a
+  release after v0.2.1-beta.19 supports only build 13954591, so reports whose `- Game:` line names
+  another build, says `not attached` or is unrecognized are skipped, and reports filed without that
+  line on v0.2.1-beta.19 or earlier count as the 2018 build (2642713). Deliberately not auto-close-on-release: an old-version bug usually still exists —
   real fixes are closed by a maintainer with "fixed in vX".
 - [`issues-stale.yml`](../.github/workflows/issues-stale.yml) — nightly: issues labeled `needs-retest`
   or `awaiting-response` (i.e. waiting on their reporter) get a warning after 21 quiet days and close
@@ -104,10 +134,17 @@ below and does not require `user-report`. Pull requests are excluded.
   maintainer-filed issue; remove the label when a report no longer awaits a reply.
 
 Label glossary: `user-report` (relay-filed), `crash` (filed by the crash-report dialog),
-`beta`/`stable` (reported channel), `vulkan`/`opengl` (reported renderer), `needs-retest` (superseded
-by a release, awaiting confirmation),
+`beta`/`stable` (reported channel), `vulkan`/`opengl` (reported renderer), `build-<id>` (the DOOM
+build the report came from: `build-13954591`, or `build-2642713` for the 2018 build),
+`needs-retest` (superseded by a release, awaiting confirmation),
 `awaiting-response` (maintainer asked the reporter a question — apply by hand to arm the stale sweep),
 `stale` (the sweep's warning marker).
+
+## Reporting by hand
+
+Issues opened directly on GitHub (not through the app) should say which DOOM build they are on.
+`snapmap-plus status` prints a `Game:` line per executable, in the same form the app reports
+(`DOOM 2016 build 13954591 (20240321-104810-ginger-fuchsia, Vulkan, 3d8b4393)`); paste that line into the issue, or name the build if Snapmap+ is not installed.
 
 ## Failure modes
 
@@ -116,4 +153,5 @@ by a release, awaiting confirmation),
 | Relay down / offline / DNS | Red toast in-app ("could not send"); the dialog stays open with everything typed. |
 | App key revoked / secrets misconfigured (or, on the PAT fallback, token expired) | Same red toast; fixed by re-storing the secrets — [`feedback/README.md`](../feedback/README.md). |
 | Spam | Honeypot + size caps in the relay; escalation is a Cloudflare rate-limit rule (dashboard, no code). Worst case is deletable spam issues — the token can't touch anything but Issues. |
+| Backend not attached (unsupported executable) | The UI is not started by an unsupported backend, so in practice reports always carry a game identity; a report without one says `- Game: not attached` and receives no `build-` label. |
 | GitHub API down | Issue creation or confirmation failure returns an error. Dedup lookup failure can instead create a duplicate; a failed follow-up log attachment still reports success. |

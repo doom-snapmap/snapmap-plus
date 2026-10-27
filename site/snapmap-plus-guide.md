@@ -172,6 +172,8 @@ A few practical notes:
   Your own Snapmap+ data (`config.json`, prefabs, rawmaps, overrides under
   `%LOCALAPPDATA%\snapmap-plus`) is left untouched.
 - `snapmap-plus help` in a terminal lists everything else: `status`, `changelog`, `version`.
+  `status` and `version` also print your game's identity (`Game: DOOMx64vk.exe: DOOM 2016 build
+  13954591 (20240321-104810-ginger-fuchsia, Vulkan, 3d8b4393)`), the same line the app puts on reports.
 
 Snapmap+ supports the current DOOM 2016 on Steam (the April 2024 update). The installer checks
 which build you have before downloading anything; if your game is the older 2018 build, it installs
@@ -1232,6 +1234,11 @@ Fill in:
   specific, the more useful.
 - **Contact** *(optional)* — an email, Discord handle, or GitHub username, only if you want a reply.
 
+Each report also carries the Snapmap+ version, the renderer you are running and your game's identity,
+such as `DOOM 2016 build 13954591 (20240321-104810-ginger-fuchsia, Vulkan, 3d8b4393)`: the DOOM build, the game's own build name, the renderer
+and the start of the executable's fingerprint. That is how the developers tell which DOOM a report came
+from; nothing else about your PC is sent.
+
 Click **Send** and it's filed as a public issue on the project's tracker under the category you picked.
 If someone's already reported the same thing, Snapmap+ recognizes the duplicate and adds your report as
 a note on the existing issue instead of creating a new one.
@@ -1244,3 +1251,8 @@ files a `crash`-labeled issue the same way, and repeat crashes at the same spot 
 issue rather than filing duplicates.
 
 Nothing is sent unless you click Send — Snapmap+ makes no other network requests on its own.
+
+**Reporting without the app.** If you open an issue on GitHub yourself, say which DOOM build you are
+on: run `snapmap-plus status` in a terminal and paste its `Game:` line (for example
+`DOOM 2016 build 13954591 (20240321-104810-ginger-fuchsia, Vulkan, 3d8b4393)`). If Snapmap+ will not install, say whether your game is
+the April 2024 update or the 2018 build.

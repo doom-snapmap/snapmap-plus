@@ -84,7 +84,11 @@ DOOMx64.exe    SHA256  1BDDECAA4E86850412F96E3117978BCE1EC7BB701AE1B5A33120C21E4
 ```
 
 These are `SH_KNOWN_BUILDS` in `host_image.c`; the installer and `installer/install.ps1`
-carry the same digests (a Go test checks both). Every signature `rva_vk`/`rva_gl`, every
+carry the same digests (a Go test checks both). Each entry also names the Steam build and the
+binary name DOOM's console prints (`20240321-104810-ginger-fuchsia`), from which the backend,
+the installer and the relay build the one game-identity string reports carry, e.g.
+`DOOM 2016 build 13954591 (20240321-104810-ginger-fuchsia, Vulkan, 3d8b4393)` ([feedback pipeline](feedback.md)). A re-port adds the new
+build to those tables and to the relay's `GAME_BUILDS` allowlist. Every signature `rva_vk`/`rva_gl`, every
 globals-table RVA and every `SH_RVA` constant describes these two images; the two
 executables are separate links with no uniform delta between them.
 
