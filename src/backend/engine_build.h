@@ -93,10 +93,10 @@ static __inline int sh_live_verify(void)
 #define SH_PENDING_MAP_PUBLISHED      1
 #define SH_PENDING_MAP_PUBLISHED_WHY  "lobby host match: session/lobby slots +0x348/+0x2b8 and parameters +0x600, bound from the engine's own calls but not yet run live (map_published.c)"
 #define SH_PENDING_RENDER_EDITOR      1
-#define SH_PENDING_RENDER_EDITOR_WHY  "settings panel slider +0x120 (map_render_editor.c)"
+#define SH_PENDING_RENDER_EDITOR_WHY  "settings panel slider value +0x120 and dirty byte +0xc8 (map_render_editor.c)"
 #define SH_PENDING_RESIDENT           1
-#define SH_PENDING_RESIDENT_WHY       "renderer count +0x14, world-text fonts +0x688 (resource_resident.c)"
+#define SH_PENDING_RESIDENT_WHY       "world-text fonts +0x688 and renderer count +0x14, both matched in code; a refresh with World Text placed is unconfirmed (resource_resident.c)"
 #define SH_PENDING_TARGET_ANY         1
-#define SH_PENDING_TARGET_ANY_WHY     "decl list +0x20/+0x28 (target_any.c)"
+#define SH_PENDING_TARGET_ANY_WHY     "decl list +0x20/+0x28 (the node GetDeclsOfType returns; matched in code), visibility bits +0x3cd not yet toggled live (target_any.c)"
 
 #endif /* BACKEND_ENGINE_BUILD_H */

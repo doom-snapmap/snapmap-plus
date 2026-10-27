@@ -2861,6 +2861,19 @@ static void ds_boot_published(void)
     }
 }
 
+/* Wwise names events by the 32-bit FNV-1 hash of the lowercased name; a bank
+ * event's registered sound decl should carry exactly that id at +0xac. */
+static uint32_t ds_wwise_short_id(const char *name)
+{
+    uint32_t hash = 2166136261u;
+    for (; name && *name; ++name) {
+        unsigned char c = (unsigned char)*name;
+        if (c >= 'A' && c <= 'Z') c = (unsigned char)(c - 'A' + 'a');
+        hash = (hash * 16777619u) ^ c;
+    }
+    return hash;
+}
+
 static int ds_activate_audio(char *error, size_t capacity)
 {
     const sh_package_compilation *compiled = sh_package_runtime_acquire();
@@ -2923,6 +2936,15 @@ static int ds_activate_audio(char *error, size_t capacity)
                 if (!decl || !ds_safe_read((const uint8_t *)decl+DS_DECL_STATE_OFFSET, &state, 1) ||
                     (state & 7) || !ds_safe_read((const uint8_t *)decl+0xacu, events+i, sizeof(*events))) {
                     snprintf(error, capacity, "sound '%s' has no prepared native event", names[i]); goto done;
+                }
+                if (sh_live_verify() && i < 16) {
+                    char line[320];
+                    uint32_t expected = ds_wwise_short_id(names[i]);
+                    _snprintf_s(line, sizeof line, _TRUNCATE,
+                        "VERIFY decl-sound: '%s' state %u event +0xac = 0x%08X; FNV-1 of the name 0x%08X (%s)",
+                        names[i], (unsigned)state, events[i], expected,
+                        events[i] == expected ? "match" : "differs: the decl may name another event");
+                    backend_log(line);
                 }
             }
         } __except (EXCEPTION_EXECUTE_HANDLER) {
