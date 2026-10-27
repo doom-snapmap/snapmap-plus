@@ -60,6 +60,15 @@ reports then use that token owner's identity. Track its expiration and rotation.
 ## Validation and limits
 
 The relay applies a honeypot, payload caps and exact report-signature matching.
+An optional `game` field carries the backend's game identity
+(`DOOM 2016 build <id> (<binary>, <renderer>, <hash8>)`). It is accepted only
+when the build id, binary name and per-renderer hash match the `GAME_BUILDS`
+allowlist in `worker.js` (13954591, and 2642713 for legacy reports); accepted
+reports get a `- Game:` line and a `build-<id>` label. An absent value is written
+as `not attached`, and an unrecognized one as `unrecognized (not shown)`, never
+echoed. `node tests/feedback_game_test.js` covers these rules. Changing
+`worker.js` does not change the deployed relay; deploying it is a maintainer
+decision (see Deployment).
 It retains the 65,536-character JSON limit and caps incoming UTF-8 at 192 KiB
 while streaming. Malformed JSON or UTF-8 returns 400; excess bytes or characters
 return 413. Run `node tests/worker_body_test.js` from the repository root for

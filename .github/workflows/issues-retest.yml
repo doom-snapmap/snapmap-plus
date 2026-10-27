@@ -44,6 +44,23 @@ jobs:
               return false;
             }
 
+            // The DOOM build a report came from, from its "- Game:" line. Reports filed before that
+            // line existed came from v0.2.1-beta.19 or earlier, which only ran on the 2018 build.
+            const LEGACY_LAST = '0.2.1-beta.19';
+            const LEGACY_BUILD = '2642713', CURRENT_BUILD = '13954591';
+            function reportBuild(body, version) {
+              const g = String(body || '').match(/^- Game: (.*)$/m);
+              if (g) {
+                const b = g[1].match(/^DOOM 2016 build (\d+) \(/);
+                return b ? b[1] : null;                          // "not attached" / unrecognized -> unknown
+              }
+              return version && !lt(LEGACY_LAST, version) ? LEGACY_BUILD : null;
+            }
+            // A release after v0.2.1-beta.19 supports only build 13954591; that one and older only 2642713.
+            function releaseSupports(releaseTag, build) {
+              return build === (lt(LEGACY_LAST, releaseTag) ? CURRENT_BUILD : LEGACY_BUILD);
+            }
+
             const issues = await github.paginate(github.rest.issues.listForRepo, {
               owner: context.repo.owner, repo: context.repo.repo,
               state: 'open', labels: 'user-report', per_page: 100,
@@ -56,6 +73,8 @@ jobs:
               if (releaseIsPre && !names.includes('beta')) continue;        // betas only prompt beta reports
               const m = (issue.body || '').match(/^- Version: (\S+)/m);
               if (!m || !lt(m[1], tag)) continue;
+              // never ask for a retest on a game build this release does not run on
+              if (!releaseSupports(tag, reportBuild(issue.body, m[1]))) continue;
               await github.rest.issues.createComment({
                 owner: context.repo.owner, repo: context.repo.repo, issue_number: issue.number,
                 body: 'A newer version (**v' + tag + '**) has been released since this was reported (on v' + m[1] + '). '

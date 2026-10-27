@@ -20,6 +20,10 @@ const sandbox = {};
 new Function('exports', [
   extract('const RENDERERS = {', '};'),
   extract('function rendererOf(renderer) {', '\n}'),
+  extract('const GAME_BUILDS = {', '\n};'),
+  extract('const GAME_PATTERN =', ';\n'),
+  extract('function gameOf(game) {', '\n}'),
+  extract('function gameLine(game) {', '\n}'),
   extract('function issueBody(', '\n}'),
   extract('function commentBody(', '\n}'),
   'exports.rendererOf = rendererOf; exports.issueBody = issueBody; exports.commentBody = commentBody;',

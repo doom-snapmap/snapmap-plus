@@ -112,22 +112,50 @@ function rendererOf(renderer) {
   return Object.prototype.hasOwnProperty.call(RENDERERS, renderer) ? renderer : null;
 }
 
-function issueBody(details, version, channel, contact, renderer, sig) {
+/* Known DOOM 2016 builds by Steam build id: the binary name and the first eight
+ * hex digits of each renderer's executable SHA-256. A report's game identity
+ * ("DOOM 2016 build <id> (<binary>, <renderer>, <hash8>)", produced by the
+ * backend) is accepted only when every part matches one of these; 2642713 is the
+ * 2018 build that v0.2.1-beta.19 serves. Anything else is dropped, never echoed. */
+const GAME_BUILDS = {
+  '13954591': { binary: '20240321-104810-ginger-fuchsia', hashes: { Vulkan: '3d8b4393', OpenGL: '1bddecaa' } },
+  '2642713':  { binary: '20180321-154133-liver-goldenrod', hashes: { Vulkan: '139763e9', OpenGL: 'd46ca967' } },
+};
+const GAME_PATTERN = /^DOOM 2016 build (\d{1,10}) \(([0-9]{8}-[0-9]{6}-[a-z]+-[a-z]+), (Vulkan|OpenGL), ([0-9a-f]{8})\)$/;
+/* -> { build, text } for a known build; null when absent (the backend was not
+ * attached); false when present but unrecognized. */
+function gameOf(game) {
+  const value = String(game || '').trim();
+  if (!value || value === 'not attached') return null;
+  const m = GAME_PATTERN.exec(value);
+  if (!m || !Object.prototype.hasOwnProperty.call(GAME_BUILDS, m[1])) return false;
+  const known = GAME_BUILDS[m[1]];
+  if (m[2] !== known.binary || known.hashes[m[3]] !== m[4]) return false;
+  return { build: m[1], text: 'DOOM 2016 build ' + m[1] + ' (' + known.binary + ', ' + m[3] + ', ' + m[4] + ')' };
+}
+function gameLine(game) {
+  return game ? game.text : (game === null ? 'not attached' : 'unrecognized (not shown)');
+}
+
+function issueBody(details, version, channel, contact, renderer, sig, game) {
   const meta = [
     '',
     '---',
     '- Version: ' + version + (channel ? ' (' + channel + ')' : ''),
   ];
   if (renderer) meta.push('- Renderer: ' + RENDERERS[renderer]);
+  meta.push('- Game: ' + gameLine(game === undefined ? null : game));
   if (contact) meta.push('- Contact: ' + contact);
   meta.push('', '<!-- report-sig:' + sig + ' -->');
   meta.push('<sub>Filed automatically from the in-app feedback dialog.</sub>');
   return details + '\n' + meta.join('\n');
 }
 
-function commentBody(details, version, channel, contact, renderer, logs) {
+function commentBody(details, version, channel, contact, renderer, logs, game) {
   const lines = ['Another report of this, on version ' + version + (channel ? ' (' + channel + ')' : '') +
-                 (renderer ? ', ' + RENDERERS[renderer] : '') + ':', '', details];
+                 (renderer ? ', ' + RENDERERS[renderer] : '') +
+                 (game ? ', build ' + game.build : '') + ':', '', details];
+  lines.push('', '- Game: ' + gameLine(game === undefined ? null : game));
   if (contact) lines.push('', '- Contact: ' + contact);
   if (logs) lines.push('', logsBlock(logs));
   lines.push('', '<sub>Added automatically from the in-app feedback dialog (matching report signature).</sub>');
@@ -158,6 +186,7 @@ export default {
     const contact = String(body.contact || '').trim().slice(0, 200);
     const version = String(body.version || 'unknown').trim().slice(0, 40) || 'unknown';
     const renderer = rendererOf(String(body.renderer || '').trim().toLowerCase());
+    const game = gameOf(String(body.game || '').slice(0, 160));
     /* optional log attachment (crash reports only -- ignored for the other categories). */
     const logs = body.category === 'crash' ? String(body.logs || '').slice(0, LOGS_CAP).trim() : '';
     if (!cat) return json({ ok: false, error: 'bad category' }, 400);
@@ -184,7 +213,7 @@ export default {
       const n = match.number;
       const c = await gh(token, '/repos/' + REPO + '/issues/' + n + '/comments', {
         method: 'POST',
-        body: { body: commentBody(details, version, channel, contact, renderer, logs) },
+        body: { body: commentBody(details, version, channel, contact, renderer, logs, game) },
       });
       if (c) return json({ ok: true, mode: 'appended', number: n });
       /* comment failed -> fall through and file a fresh issue rather than dropping the report */
@@ -193,11 +222,12 @@ export default {
     const labels = [cat.label, 'user-report'];
     if (channel) labels.push(channel);
     if (renderer) labels.push(renderer);
+    if (game) labels.push('build-' + game.build);
     const issue = await gh(token, '/repos/' + REPO + '/issues', {
       method: 'POST',
       body: {
         title: '[' + cat.tag + '] ' + title,
-        body: issueBody(details, version, channel, contact, renderer, sig),
+        body: issueBody(details, version, channel, contact, renderer, sig, game),
         labels,
       },
     });
