@@ -95,8 +95,9 @@ edited through generic variables. Map deserialization clears the previous
 runtime selection and reads the loaded map's variables. Editor-to-play
 conversion refreshes that selection from the current editable map. A locked
 value copy crosses to rendering at the blended environment's single
-maxViewDistance read: 8192 or zero leaves the native blended distance, any other
-value is returned as the far clip and replaces the view's literal, so module
+maxViewDistance read: 8192 leaves the native blended distance, zero is returned
+as the maximum 200000 (the engine raises the read to at least 256, so a literal
+zero could never reach r_zfar), any other value is returned as the far clip and replaces the view's literal, so module
 environments, Set Environment nodes and campaign environments cannot override
 it. While the editor is in Blueprint the far plane is additionally held at or
 above the editor's own 33000 scaled by the zoom factor. This applies only to

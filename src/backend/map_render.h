@@ -15,10 +15,24 @@
 #define SH_RENDER_SETTINGS_CATEGORY 0
 #define SH_RENDER_SETTINGS_TITLE "Map Rendering"
 typedef struct sh_map_render { float value[SH_RENDER_FIELDS]; } sh_map_render;
-/* View distance in world units. 8192 or zero keeps the native environment's
- * distance; any other value is this map's authority over the far clip. */
+/* View distance in world units. 8192 keeps the native environment's
+ * distance (it is also the Default environment's own value); zero is the
+ * maximum, SH_RENDER_MAX_DISTANCE; any other value is this map's authority
+ * over the far clip. Zero is not an infinite far plane: the environment blend
+ * raises its read to at least 256 before writing r_zfar, and r_zfar itself
+ * accepts 0..200000 (editor-fixes-13954591 R-021). Version 4 text is kept, so
+ * a map saved with 0 under the former "follow the environment" meaning now
+ * renders at the maximum. */
 void sh_map_render_default(sh_map_render *settings);
 int sh_map_render_distance_override(const sh_map_render *settings);
+/* The far clip the map asks for: zero becomes SH_RENDER_MAX_DISTANCE. */
+float sh_map_render_distance(const sh_map_render *settings);
+/* The Map View Distance row is created with the native wrap, which moves a
+ * step past either limit to the other limit. Given the value shown before the
+ * step and the widget's new value, keep only the wrap from the minimum (zero,
+ * the maximum distance) to the maximum: a step down past zero from any other
+ * value stops at zero, and a step up past the maximum stays at the maximum. */
+float sh_map_render_step(float previous, float value);
 int sh_map_render_valid(const sh_map_render *settings);
 int sh_map_render_decode(const char *text, sh_map_render *settings);
 int sh_map_render_encode(const sh_map_render *settings, char *out, size_t cap);

@@ -22,15 +22,17 @@ static int render_begin(void *user,void *editor,void *map)
     g_map=map;g_base=g_draft=s.value[0];
     return 1;
 }
+/* *draft is the value the row showed before this step (the tab redraws the
+ * widget from the draft after every change). */
 static void render_adjust(void *user,float *draft,float value)
 {
     sh_map_render s;(void)user;
-    s.value[0]=*draft;sh_map_render_adjust(&s,0,value);*draft=s.value[0];
+    s.value[0]=*draft;sh_map_render_adjust(&s,0,sh_map_render_step(*draft,value));*draft=s.value[0];
 }
 static void render_populate(sh_settings_rows *rows,void *user)
 {
     static const sh_settings_float row={"Map View Distance","#str_smp_render_distance",
-        "#str_smp_render_distance_help",0,SH_RENDER_MAX_DISTANCE,256,4096};
+        "#str_smp_render_distance_help",0,SH_RENDER_MAX_DISTANCE,256,4096,1};
     (void)user;
     if(!g_map||InterlockedCompareExchange(&g_faulted,0,0))return;
     if(!sh_settings_tab_add_float(rows,&row,&g_draft,&g_base,render_adjust))InterlockedExchange(&g_faulted,1);

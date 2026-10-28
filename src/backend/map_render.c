@@ -10,7 +10,24 @@ void sh_map_render_default(sh_map_render *s)
 }
 int sh_map_render_distance_override(const sh_map_render *s)
 {
-    return s&&s->value[SH_RENDER_DISTANCE]>0&&s->value[SH_RENDER_DISTANCE]!=SH_RENDER_NATIVE_DISTANCE;
+    return s&&s->value[SH_RENDER_DISTANCE]!=SH_RENDER_NATIVE_DISTANCE;
+}
+float sh_map_render_distance(const sh_map_render *s)
+{
+    float d;if(!s)return SH_RENDER_NATIVE_DISTANCE;
+    d=s->value[SH_RENDER_DISTANCE];
+    return d==0?SH_RENDER_MAX_DISTANCE:d;
+}
+float sh_map_render_step(float previous,float value)
+{
+    /* A native step moves by one small or large step (4096 at most); a wrap
+     * crosses nearly the whole range, so half the range separates them. */
+    const float half=SH_RENDER_MAX_DISTANCE*0.5f;
+    if(!isfinite(value))return previous;
+    if(!isfinite(previous))return value;
+    if(value-previous>half)return previous<=0?SH_RENDER_MAX_DISTANCE:0;
+    if(previous-value>half)return SH_RENDER_MAX_DISTANCE;
+    return value;
 }
 int sh_map_render_valid(const sh_map_render *s)
 {

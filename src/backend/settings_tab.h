@@ -36,6 +36,10 @@ typedef struct sh_settings_float {
     const char *label;       /* "#str_..." label id */
     const char *help;        /* "#str_..." help id */
     float min, max, small_step, large_step;
+    /* Nonzero creates the row with the native wrap: a step past one limit
+     * lands on the other. adjust then sees that jump and decides which wraps
+     * to keep. Zero (the usual case) makes the native step stop at the limit. */
+    int wrap;
 } sh_settings_float;
 
 typedef struct sh_settings_bool {

@@ -171,8 +171,13 @@ void sh_map_render_select(const sh_map_render *settings)
 /* This call reads the blended environment's maxViewDistance, after every
  * environment source has been merged: module environment layers, Set
  * Environment and Player Set Environment blends, and view renderparm
- * overrides. The engine clamps the result to 256 and writes it to r_zfar.
- * A non-default map distance therefore wins over all of them. The view's
+ * overrides. The engine raises the result to at least 256 and writes it to
+ * r_zfar, so zero (the row's maximum) is passed on as SH_RENDER_MAX_DISTANCE.
+ * A non-default map distance therefore wins over all of them. The blend only
+ * reaches this read when some environment resolves for the view. Play adds no
+ * environment area for a module whose environment is snapmap/base (the
+ * editor's Default); live, such a room still resolved an 8192 environment in
+ * Play while the editor used snapmap/base's 60000 (R-021). The view's
  * existing literal is also changed so the block stays consistent; shared
  * environment declarations and unrelated render passes stay native. */
 static float render_clip_value(void *block,void *decl,uintptr_t context)
@@ -193,7 +198,7 @@ static float render_clip_value(void *block,void *decl,uintptr_t context)
                 /* The resource registry canonicalizes declaration names to lowercase. */
                 name=*(const char**)((unsigned char*)resource+8);
                 if(name&&!strcmp(name,"maxviewdistance"))
-                    for(j=0;j<4;j++)values[(size_t)i*4+j]=settings.value[SH_RENDER_DISTANCE];
+                    for(j=0;j<4;j++)values[(size_t)i*4+j]=sh_map_render_distance(&settings);
             }
         }
     } __except(EXCEPTION_EXECUTE_HANDLER) {
@@ -202,7 +207,7 @@ static float render_clip_value(void *block,void *decl,uintptr_t context)
     }
     /* Return the map distance even when the block has no literal to change. */
     (void)g_float(block,decl,context);
-    return settings.value[SH_RENDER_DISTANCE];
+    return sh_map_render_distance(&settings);
 }
 
 /* In the editor's Blueprint frames the editor camera also forces r_zfar;

@@ -87,9 +87,13 @@ int main(void)
      * Set Environment nodes and campaign environments stay in control. */
     row(rows,SH_RENDER_VARIABLE,"4;8192");
     sh_map_render_loaded(saved);values[4]=15000;assert(render_clip(block,NULL,0)==15000);
+    /* Zero is the maximum distance: the literal and the returned value are
+     * 200000, never the 0 the engine would raise to 256. */
     row(rows,SH_RENDER_VARIABLE,"4;0");
-    sh_map_render_loaded(saved);assert(render_clip(block,NULL,0)==15000);
-    for(i=0;i<24;i++)if(i!=4)assert(values[i]==(float)(i+42));
+    sh_map_render_loaded(saved);values[4]=15000;
+    assert(render_clip(block,NULL,0)==SH_RENDER_MAX_DISTANCE&&values[4]==SH_RENDER_MAX_DISTANCE);
+    for(i=0;i<24;i++)if(i<4||i>=8)assert(values[i]==(float)(i+42));
+    for(j=0;j<4;j++)values[4+j]=(float)(4+j+42);
     /* A custom distance wins over any blended value, including one that a
      * Set Environment node or the Lazarus environment produced. */
     row(rows,SH_RENDER_VARIABLE,"4;60000");

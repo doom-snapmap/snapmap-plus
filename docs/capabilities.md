@@ -55,11 +55,17 @@ exactly as before.
 ## Map rendering
 
 DOOM's native Settings > Properties panel includes a map-wide View Distance
-control on the Snapmap+ tab. 8192 or zero keeps each environment's own
-distance, so modules, Set Environment and Player Set Environment nodes and
-campaign environments decide it. Any other value is the far clip everywhere
+control on the Snapmap+ tab. 8192 keeps each environment's own distance, so
+modules, Set Environment and Player Set Environment nodes and campaign
+environments decide it. Zero is the maximum, 200000, the largest far clip the
+game accepts (not an infinite one). Any other value is the far clip everywhere
 the map renders in SnapMap, editor and Play alike, overriding every environment
-source; environment fog and other effects are unchanged. The editor's own camera cvars are not touched.
+source; environment fog and other effects are unchanged. Stepping left from
+zero wraps the row to the maximum. A module on the Default Environment FX
+(snapmap/base) draws to 60000 units in the editor, with dark fog from 32000,
+but adds no environment in Play, where the measured far clip was 8192; set a
+map value (0 for the maximum) to get the same distance in the editor and in
+Play. The editor's own camera cvars are not touched.
 Apply commits the draft to native map variables; normal saving retains the
 value inside the map. Both editor playtests and direct saved-map loads use it,
 with bindings for OpenGL and Vulkan. A custom value takes effect on Snapmap+

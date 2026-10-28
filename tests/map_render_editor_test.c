@@ -20,6 +20,8 @@ int sh_settings_tab_add_float(sh_settings_rows *rows,const sh_settings_float *ro
 {
     (void)rows;if(fail_add)return 0;
     assert(row&&row->min==0&&row->max==SH_RENDER_MAX_DISTANCE&&row->small_step>0&&row->large_step>0);
+    /* Created with the native wrap; render_adjust keeps only LEFT at zero. */
+    assert(row->wrap);
     row_name=row->name;row_draft=draft;row_base=base;row_adjust=adjust;rows_added++;return 1;
 }
 static int open(void *map)
@@ -43,6 +45,18 @@ int main(void)
     *row_draft=*row_base;assert(*row_draft==8192&&writes==0);
     /* Slider values below the minimum snap to 256; zero stays zero. */
     change(100);assert(*row_draft==256);change(0);assert(*row_draft==0);
+    /* LEFT at zero: the native wrap lands on the maximum and stays there. */
+    change(SH_RENDER_MAX_DISTANCE);assert(*row_draft==SH_RENDER_MAX_DISTANCE);
+    /* RIGHT at the maximum: the native wrap to zero is undone. */
+    change(0);assert(*row_draft==SH_RENDER_MAX_DISTANCE);
+    /* LEFT from a value above zero: the wrap to the maximum stops at zero. */
+    *row_draft=2000;
+    change(SH_RENDER_MAX_DISTANCE);assert(*row_draft==0);
+    /* A step down to exactly zero is a step, then LEFT again wraps. */
+    change(256);change(0);assert(*row_draft==0);
+    change(SH_RENDER_MAX_DISTANCE);assert(*row_draft==SH_RENDER_MAX_DISTANCE);
+    /* Cancel back to the base before the slider-value cases below. */
+    *row_draft=*row_base;
     change(32768);apply();assert(writes==1&&saved_a.value[0]==32768&&*row_base==32768);
     /* Apply publishes to the editor view immediately. */
     assert(selects==1&&selected.value[0]==32768);

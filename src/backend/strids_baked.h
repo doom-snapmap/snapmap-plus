@@ -23,7 +23,7 @@ typedef struct { const char *id; const char *text; } strid_baked_t;
 
 static const strid_baked_t g_strids_baked[] = {
     { "smp_render_distance", "Map View Distance" },
-    { "smp_render_distance_help", "Saved with this map. 8192 (default) or 0 keeps each environment's own distance. Other values override every environment in the editor and in Play." },
+    { "smp_render_distance_help", "Saved with this map. 8192 (default) follows each environment. 0 is the maximum, 200000. Other values override every environment in editor and Play." },
     { "smp_grid_room_size", "Grid Room Size" },
     { "smp_grid_room_modern_help", "Minimum X: 864, Y: 272, Z: 432. Maximum follows the map bounds, connected rooms and native collision and navigation limits. Resized rooms require Snapmap+." },
     { "smp_grid_room_classic_help", "Minimum X: 416, Y: 416, Z: 304. Maximum follows the map bounds, connected rooms and native collision and navigation limits. Resized rooms require Snapmap+." },

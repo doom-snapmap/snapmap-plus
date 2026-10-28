@@ -27,7 +27,8 @@
  *    or large step to the value at +0x120 and, past a limit, goes to the
  *    other limit when the row's wrap flag (+0x10c, RenderAddFloat's last
  *    argument) is set, else stops at the limit. Native rows pass 1; the tab
- *    passes 0 so a step can never land on the opposite end (R-009).
+ *    passes 0 so a step can never land on the opposite end (R-009), unless
+ *    the row sets sh_settings_float.wrap (Map View Distance, R-021).
  *  - Toggle rows: RenderAddToggle (VK 0x12808f0, GL 0x127fea0) creates an
  *    idMenuPropertyToggle whose value is the byte at +0xd0; its vtable +0x20
  *    stores the property id at +0x40 and +0x28 sets the value and redraws the
@@ -201,9 +202,10 @@ int sh_settings_tab_add_float(sh_settings_rows *rows,const sh_settings_float *ro
     g_rows[i].kind=ROW_FLOAT;g_rows[i].desc=*row;g_rows[i].draft=draft;g_rows[i].base=base;
     g_rows[i].adjust=adjust;g_rows[i].group=rows->group;g_rows[i].widget=NULL;
     label=g_hash(row->label);help=g_hash(row->help);
-    /* Last argument 0: the native step stops at min / max instead of wrapping. */
+    /* Last argument 0: the native step stops at min / max instead of wrapping;
+     * a row that asks for the wrap gets 1 and filters it in its adjust. */
     v=(unsigned char*)g_add(rows->panel,row->name,&label,&help,1,*base,
-        row->min,row->max,row->small_step,row->large_step,0);
+        row->min,row->max,row->small_step,row->large_step,row->wrap?1:0);
     if(!v)return 0;
     *(unsigned*)(v+0x40)=ROW_ID_BASE+(unsigned)i;g_rows[i].widget=v;
     return 1;
@@ -342,8 +344,9 @@ static int changed(void *panel,void *widget,int action)
                 /* The toggle flipped its own +0xd0 before this dispatch. */
                 *r->bool_draft=((unsigned char*)widget)[0xd0]!=0;
             } else {
-                /* Rows are created without the native wrap, so the value is
-                 * already inside [min, max]; adjust may snap or clamp it. */
+                /* The value is inside [min, max]. A row created without the
+                 * native wrap clamps; one created with it may have jumped to
+                 * the other limit, which its adjust filters. */
                 float value=*(float*)((unsigned char*)widget+0x120);
                 if(r->adjust)r->adjust(g_groups[r->group].desc.user,r->draft,value);
                 else if(isfinite(value))*r->draft=fminf(r->desc.max,fmaxf(r->desc.min,value));
