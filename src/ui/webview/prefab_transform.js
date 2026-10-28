@@ -97,9 +97,29 @@ var prefabTransform = (function () {
             blockDemons: blocking && edit.blockDemons === true};
   }
 
+  // Parse prefab scene text. The April 2024 build's serializer writes block
+  // comments (a "camera yaw" comment before "cameraYaw", and one before every
+  // member), which the engine's own reader accepts and JSON.parse does not;
+  // drop them outside strings first. Throws like JSON.parse on anything else.
+  function parseScene(sceneText) {
+    var s = String(sceneText), out = '', i = 0, n = s.length, start = 0;
+    while (i < n) {
+      var c = s.charAt(i);
+      if (c === '"') {
+        for (i++; i < n && s.charAt(i) !== '"'; i++) if (s.charAt(i) === '\\') i++;
+        i++;
+      } else if (c === '/' && s.charAt(i + 1) === '*') {
+        var end = s.indexOf('*/', i + 2);
+        if (end < 0) throw new SyntaxError('unterminated comment');
+        out += s.slice(start, i) + ' '; i = start = end + 2;
+      } else i++;
+    }
+    return JSON.parse(out + s.slice(start));
+  }
+
   function countNavigationBoxes(sceneText) {
     var doc;
-    try { doc = typeof sceneText === 'string' ? JSON.parse(sceneText) : sceneText; } catch (e) { return 0; }
+    try { doc = typeof sceneText === 'string' ? parseScene(sceneText) : sceneText; } catch (e) { return 0; }
     var list = doc && Array.isArray(doc.entities) ? doc.entities : [], count = 0;
     for (var i = 0; i < list.length; i++) {
       var def = list[i] && list[i].entityDef ? list[i].entityDef : {};
@@ -120,7 +140,7 @@ var prefabTransform = (function () {
           transformPoint:transformPoint, determinant:determinant, grabFrame:grabFrame,
           applyFrame:applyFrame, BLOCKING_DEFAULT_SIZE:BLOCKING_DEFAULT_SIZE,
           isBlockingVolume:isBlockingVolume, navigationFlags:navigationFlags,
-          countNavigationBoxes:countNavigationBoxes};
+          countNavigationBoxes:countNavigationBoxes, parseScene:parseScene};
 })();
 
 if (typeof module !== 'undefined' && module.exports) module.exports = prefabTransform;

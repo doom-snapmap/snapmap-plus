@@ -94,6 +94,13 @@ const scene=JSON.stringify({entities:[
   {entityDef:{inherit:'snapmaps/triggers/box',state:{edit:{flags:{noFlood:true}}}}}]});
 check(tx.countNavigationBoxes(scene)===2,'Prefab Details counts only Blocking Boxes ticked for AI Navigation');
 check(tx.countNavigationBoxes('not json')===0,'an unreadable scene counts no navigation boxes');
+const commented='{/*camera yaw*/\n   "cameraYaw" : 90.0,/*entities*/\n   "entities" : [{/*entity*/ "displayName" : "a /*not a comment*/ \\" b",'+
+  '"entityDef" : {"inherit" : "snapmaps/volume/blocking","state" : {"edit" : {"flags" : {/*x*/"noFlood" : true}}}}}]}';
+check(tx.parseScene(commented).entities[0].displayName==='a /*not a comment*/ " b',
+      'scene comments are dropped outside strings and kept inside them');
+check(tx.countNavigationBoxes(commented)===1,'a serializer-commented scene still counts its navigation boxes');
+let threw=false; try { tx.parseScene('{/* open'); } catch (e) { threw=true; }
+check(threw,'an unterminated comment is a parse error');
 check(tx.navigationFlags('','snapmaps/volume/blocking',{blockDemons:true}).blockDemons===true &&
       !tx.navigationFlags('','snapmaps/volume/blocking',{blockDemons:true}).marked,
       'Block Demons alone is not the AI Navigation tick');

@@ -707,7 +707,7 @@ var prefabViewport = (function () {
     newGeneration(); entities = []; lastSceneText = sceneText || ''; cameraTouched = false;
     if (!initGl()) return;
     var doc;
-    try { doc = JSON.parse(lastSceneText); } catch (e) { setStatus('Could not parse prefab scene'); markDirty(); return; }
+    try { doc = prefabTransform.parseScene(lastSceneText); } catch (e) { setStatus('Could not parse prefab scene'); markDirty(); return; }
     var list = doc && Array.isArray(doc.entities) ? doc.entities : [];
     var frame = grabFrame(doc);
     for (var i=0;i<list.length;i++) entities.push(entityFromJson(list[i], frame));
