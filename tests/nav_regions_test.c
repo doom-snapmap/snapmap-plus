@@ -1784,8 +1784,109 @@ static void test_duplicate_box_ids(void)
     free(json); bclose(&inst); bclose(&ents);
 }
 
+/* Shapes, not tables: order and entity indices never count, float noise
+ * within the tolerance never counts, and a move, flag change, addition or
+ * removal always does. */
+static void region_at(sh_nav_region *r, float x, float y, unsigned entity, int wall)
+{
+    int k;
+    float sq[4][2] = {{0, 64}, {64, 64}, {64, 0}, {0, 0}};
+    memset(r, 0, sizeof *r);
+    for (k = 0; k < 4; k++) { r->c[k][0] = x + sq[k][0]; r->c[k][1] = y + sq[k][1]; r->c[k][2] = 32; }
+    r->n[2] = 1; r->face = 4; r->depth = 32; r->block_demons = 1; r->marked = !wall;
+    r->entity = entity;
+}
+
+static void make_shapes(sh_nav_map *m, int n, int reversed, unsigned base, float noise)
+{
+    int i;
+    memset(m, 0, sizeof *m);
+    m->instances = (sh_nav_instance *)calloc(1, sizeof *m->instances);
+    m->regions = (sh_nav_region *)calloc((size_t)n, sizeof *m->regions);
+    m->obstacles = (sh_nav_region *)calloc(2, sizeof *m->obstacles);
+    m->instance_count = m->instance_cap = 1;
+    strcpy_s(m->instances[0].module, sizeof m->instances[0].module, "ind_dlc/room");
+    m->instances[0].region_count = n;
+    for (i = 0; i < n; i++) {
+        int box = reversed ? n - 1 - i : i;
+        region_at(&m->regions[i], box * 100.0f + noise, (box % 3) * 100.0f, base + (unsigned)i, 0);
+    }
+    m->region_count = m->region_cap = n;
+    region_at(&m->obstacles[reversed ? 1 : 0], -500, 0, base + 100, 1);
+    region_at(&m->obstacles[reversed ? 0 : 1], -500, 300, base + 101, 1);
+    m->obstacle_count = m->obstacle_cap = 2;
+}
+
+static void test_same_shapes_ignores_order_and_entities(void)
+{
+    sh_nav_map a, b;
+    int x, y, i;
+    printf("map comparison matches boxes by shape, not by table order or entity\n");
+    make_shapes(&a, 7, 0, 10, 0);
+    make_shapes(&b, 7, 1, 40, 0);
+    CHECK(!sh_nav_map_equal(&a, &b));
+    CHECK(sh_nav_map_same_shapes(&a, &b));
+    /* b now lists a's boxes in a's order, keeping its own entity indices. */
+    for (i = 0; i < 7; i++) {
+        CHECK(b.regions[i].c[0][0] == a.regions[i].c[0][0]);
+        CHECK(b.regions[i].entity == 40u + 6u - (unsigned)i);
+    }
+    CHECK(b.obstacles[0].c[0][1] == a.obstacles[0].c[0][1]);
+    CHECK(sh_nav_map_shape_difference(&a, &b, 0, &x, &y) && x < 0 && y < 0);
+    sh_nav_map_free(&b);
+
+    make_shapes(&b, 7, 1, 40, 0.004f);
+    CHECK(sh_nav_map_same_shapes(&a, &b));
+    sh_nav_map_free(&b);
+
+    /* A move: not the same, b left as read, and the difference names it. */
+    make_shapes(&b, 7, 1, 40, 0);
+    b.regions[2].c[0][0] += 1.0f; b.regions[2].c[1][0] += 1.0f;
+    b.regions[2].c[2][0] += 1.0f; b.regions[2].c[3][0] += 1.0f;
+    CHECK(!sh_nav_map_same_shapes(&a, &b));
+    CHECK(b.regions[0].entity == 40);
+    CHECK(sh_nav_map_shape_difference(&a, &b, 0, &x, &y));
+    CHECK(x == 4 && y == 2);
+    sh_nav_map_free(&b);
+
+    /* Block Demons switched off on one wall. */
+    make_shapes(&b, 7, 1, 40, 0);
+    b.obstacles[1].block_demons = 0;
+    CHECK(!sh_nav_map_same_shapes(&a, &b));
+    CHECK(sh_nav_map_shape_difference(&a, &b, 1, &x, &y) && x >= 0 && y >= 0);
+    sh_nav_map_free(&b);
+
+    /* The room itself moved or turned. */
+    make_shapes(&b, 7, 1, 40, 0);
+    b.instances[0].origin[0] = 1024.0f;
+    CHECK(!sh_nav_map_same_shapes(&a, &b));
+    b.instances[0].origin[0] = 0.004f;
+    CHECK(sh_nav_map_same_shapes(&a, &b));
+    sh_nav_map_free(&b);
+    make_shapes(&b, 7, 1, 40, 0);
+    b.instances[0].orientation = 2;
+    CHECK(!sh_nav_map_same_shapes(&a, &b));
+    sh_nav_map_free(&b);
+
+    /* One box fewer, or one more. */
+    make_shapes(&b, 6, 1, 40, 0);
+    CHECK(!sh_nav_map_same_shapes(&a, &b));
+    sh_nav_map_free(&b);
+    make_shapes(&b, 8, 0, 10, 0);
+    CHECK(!sh_nav_map_same_shapes(&a, &b));
+    sh_nav_map_free(&b);
+
+    /* The same count with one box swapped for another is a change. */
+    make_shapes(&b, 7, 0, 10, 0);
+    region_at(&b.regions[6], 5000, 0, 16, 0);
+    CHECK(!sh_nav_map_same_shapes(&a, &b));
+    sh_nav_map_free(&b);
+    sh_nav_map_free(&a);
+}
+
 int main(void)
 {
+    test_same_shapes_ignores_order_and_entities();
     test_growth_past_old_caps();
     test_unreadable_room_drops_only_its_boxes();
     test_map_text_defaults_from_the_entitydef();

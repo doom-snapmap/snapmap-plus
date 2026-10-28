@@ -138,6 +138,22 @@ void sh_nav_map_free(sh_nav_map *m);
 int  sh_nav_map_copy(sh_nav_map *dst, const sh_nav_map *src);
 /* Same tables and flags. */
 int  sh_nav_map_equal(const sh_nav_map *a, const sh_nav_map *b);
+/* Same rooms and the same boxes, in whatever order the two reads listed them
+ * and whatever entity indices they gave them: what a bake depends on. Corners,
+ * normals and depth agree within 0.05 units (1e-4 for normals), the float
+ * round trip of a converted read. Read flags and the left-out list are not
+ * compared. When they match, b's floor
+ * and wall tables are reordered into a's order, so the bake of b is the bake
+ * of a. Two reads of one map disagree on entity order (the editor's snapshot
+ * and the map Play converts), and comparing records whole made every Play
+ * re-bake. Returns 0, leaving b untouched, when they differ or on allocation
+ * failure. */
+int  sh_nav_map_same_shapes(const sh_nav_map *a, sh_nav_map *b);
+/* The first box only `a` has and the first only `b` has, comparing shapes as
+ * sh_nav_map_same_shapes does; -1 where none. walls selects the obstacle
+ * tables. Returns 0 on allocation failure. */
+int  sh_nav_map_shape_difference(const sh_nav_map *a, const sh_nav_map *b, int walls,
+                                 int *only_a, int *only_b);
 /* Free dst, then hand it src's tables; src is left empty. */
 void sh_nav_map_move(sh_nav_map *dst, sh_nav_map *src);
 /* Heap bytes the tables hold. */

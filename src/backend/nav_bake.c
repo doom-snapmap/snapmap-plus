@@ -124,11 +124,20 @@ static int bake_class_index(const char *cls)
 }
 
 /* Say what a refresh changed, so two readers that disagree can be told apart
- * by what each one produced rather than by the flicker they cause. */
+ * by what each one produced rather than by the flicker they cause. Boxes are
+ * matched by shape, not by position in the table or entity index, which two
+ * reads of one map need not share. */
 static void bake_log_change(const char *who, const sh_nav_map *a, const sh_nav_map *b)
 {
     char line[256];
-    int i, n;
+    int walls, x, y;
+    if (a->instance_count != b->instance_count) {
+        _snprintf_s(line, sizeof line, _TRUNCATE,
+                    "NAV: %s changed the rooms -- %d->%d", who,
+                    a->instance_count, b->instance_count);
+        backend_log(line);
+        return;
+    }
     if (a->region_count != b->region_count || a->obstacle_count != b->obstacle_count) {
         _snprintf_s(line, sizeof line, _TRUNCATE,
                     "NAV: %s changed the count -- floors %d->%d, walls %d->%d",
@@ -137,33 +146,29 @@ static void bake_log_change(const char *who, const sh_nav_map *a, const sh_nav_m
         backend_log(line);
         return;
     }
-    for (i = 0; i < a->region_count; i++) {
-        const sh_nav_region *x = &a->regions[i], *y = &b->regions[i];
-        if (!memcmp(x, y, sizeof *x)) continue;
-        _snprintf_s(line, sizeof line, _TRUNCATE,
-                    "NAV: %s moved floor %u in copy %d->%d from %.1f %.1f %.1f "
-                    "to %.1f %.1f %.1f",
-                    who, y->entity, x->instance, y->instance,
-                    x->c[0][0], x->c[0][1], x->c[0][2],
-                    y->c[0][0], y->c[0][1], y->c[0][2]);
-        backend_log(line);
-        return;
-    }
-    n = a->obstacle_count;
-    for (i = 0; i < n; i++) {
-        const sh_nav_region *x = &a->obstacles[i], *y = &b->obstacles[i];
-        if (!memcmp(x, y, sizeof *x)) continue;
-        _snprintf_s(line, sizeof line, _TRUNCATE,
-                    "NAV: %s moved wall %u in copy %d->%d from %.1f %.1f %.1f "
-                    "to %.1f %.1f %.1f",
-                    who, y->entity, x->instance, y->instance,
-                    x->c[0][0], x->c[0][1], x->c[0][2],
-                    y->c[0][0], y->c[0][1], y->c[0][2]);
+    for (walls = 0; walls < 2; walls++) {
+        const sh_nav_region *ra = walls ? a->obstacles : a->regions;
+        const sh_nav_region *rb = walls ? b->obstacles : b->regions;
+        if (!sh_nav_map_shape_difference(a, b, walls, &x, &y) || (x < 0 && y < 0)) continue;
+        if (x >= 0 && y >= 0)
+            _snprintf_s(line, sizeof line, _TRUNCATE,
+                        "NAV: %s moved %s %u in copy %d->%d from %.1f %.1f %.1f "
+                        "to %.1f %.1f %.1f",
+                        who, walls ? "wall" : "floor", rb[y].entity,
+                        ra[x].instance, rb[y].instance,
+                        ra[x].c[0][0], ra[x].c[0][1], ra[x].c[0][2],
+                        rb[y].c[0][0], rb[y].c[0][1], rb[y].c[0][2]);
+        else
+            _snprintf_s(line, sizeof line, _TRUNCATE,
+                        "NAV: %s changed %s %u in copy %d", who, walls ? "wall" : "floor",
+                        x >= 0 ? ra[x].entity : rb[y].entity,
+                        x >= 0 ? ra[x].instance : rb[y].instance);
         backend_log(line);
         return;
     }
     _snprintf_s(line, sizeof line, _TRUNCATE,
-                "NAV: %s changed something other than a box", who);
+                "NAV: %s changed something other than a box (a room's module, "
+                "position or orientation)", who);
     backend_log(line);
 }
 
@@ -565,7 +570,8 @@ int sh_nav_bake_refresh_volumes(int *volumes)
                                           &count, &why)) __leave;
         g_live_marked = g_map.region_count;
         g_live_scanned = count;
-        if (!sh_nav_map_equal(&before, &g_map)) {
+        /* Order and entity indices aside, the same boxes bake the same. */
+        if (!sh_nav_map_same_shapes(&before, &g_map)) {
             bake_log_change("the per-box refresh", &before, &g_map);
             g_geometry_revision++; bake_preview_clear(); bake_plan_locked();
         }
@@ -648,7 +654,11 @@ static void bake_refresh_live(int accept_unmeasured)
             ok = !candidate->invalid_geometry && (!candidate->unmeasured || accept_unmeasured);
         }
         if (ok) {
-            int changed = !g_have_map || g_live_refused || !sh_nav_map_equal(&g_map, candidate);
+            /* Two reads of one map list its boxes in different orders (the
+             * editor's snapshot and the map Play converts): compare the boxes,
+             * not the tables, so an unchanged map keeps its preview bakes. */
+            int changed = !g_have_map || g_live_refused ||
+                          !sh_nav_map_same_shapes(&g_map, candidate);
             if (changed && g_have_map && !g_live_refused)
                 bake_log_change("the complete snapshot", &g_map, candidate);
             sh_nav_map_move(&g_map, candidate);

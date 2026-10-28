@@ -502,9 +502,12 @@ static void test_snapshot_moves_and_changes_ownership(void)
     {
         const int swapped[3]={1,0,1};
         g_snapshot_json=make_map("ind_dlc/room",2,2,3,3,swapped);
+        /* Each room still holds one box at the same place in its own space, so
+         * the two copies bake exactly as before: the same revision. */
         sh_nav_bake_refresh_live();sh_nav_bake_test_copy_map(&map);
-        CHECK(map.regions[0].instance==1&&map.regions[1].instance==0);
-        CHECK(sh_nav_bake_instance_name(1,name,before,sizeof before));CHECK(strcmp(before,after)!=0);
+        CHECK(map.instances[0].region_count==1&&map.instances[1].region_count==1);
+        CHECK(map.regions[0].entity!=map.regions[1].entity);
+        CHECK(sh_nav_bake_instance_name(1,name,before,sizeof before));CHECK(!strcmp(before,after));
         /* New copied IDs join the owner's next snapshot; no load-time ID table. */
         g_snapshot_json=make_map("ind_dlc/room",2,3,7,7,swapped);
         sh_nav_bake_refresh_live();sh_nav_bake_test_copy_map(&map);
@@ -520,6 +523,99 @@ static void test_snapshot_moves_and_changes_ownership(void)
         CHECK(map.region_count==2&&map.obstacle_count==0);
     }
     sh_nav_bake_set_snapshot(NULL,NULL);
+}
+
+/* A snapshot built directly: `count` boxes of 64 x 64 in room 0, listed in
+ * order or reversed, with entity indices offset by `entity_base`. */
+static struct { int count, reversed; unsigned entity_base; float jitter, moved; int which; } g_direct;
+static int snapshot_direct(sh_nav_map *out, void *ctx)
+{
+    int i, k;
+    (void)ctx;
+    memset(out, 0, sizeof *out);
+    out->instances = (sh_nav_instance *)calloc(1, sizeof *out->instances);
+    out->regions = (sh_nav_region *)calloc((size_t)g_direct.count + 1, sizeof *out->regions);
+    if (!out->instances || !out->regions) return 0;
+    out->instance_count = out->instance_cap = 1;
+    strcpy_s(out->instances[0].module, sizeof out->instances[0].module, "ind_dlc/room");
+    out->region_cap = g_direct.count + 1;
+    for (i = 0; i < g_direct.count; i++) {
+        int box = g_direct.reversed ? g_direct.count - 1 - i : i;
+        sh_nav_region *r = &out->regions[i];
+        float x = (float)box * 300.0f + g_direct.jitter + (box == g_direct.which ? g_direct.moved : 0.0f);
+        float sq[4][2] = {{0, 64}, {64, 64}, {64, 0}, {0, 0}};
+        for (k = 0; k < 4; k++) {
+            r->c[k][0] = x + sq[k][0]; r->c[k][1] = sq[k][1] + g_direct.jitter; r->c[k][2] = 64.0f;
+        }
+        r->n[2] = 1.0f; r->face = 4; r->depth = 64.0f; r->instance = 0;
+        r->block_demons = 1; r->marked = 1;
+        r->entity = g_direct.entity_base + (unsigned)i;
+    }
+    out->region_count = g_direct.count;
+    out->instances[0].region_count = g_direct.count;
+    return 1;
+}
+
+/* Editor Play reads the same map again through the conversion, which lists
+ * the entities in another order. That must reuse the preview's bakes; a real
+ * move, an added box or a removed one must not. */
+static void test_reordered_read_keeps_the_bakes(void)
+{
+    static sh_nav_map map;
+    char first[384], now[384];
+    const char *name = "maps/modules/ind_dlc/room/room.aas_monster48";
+    float x0;
+    printf("a read listing the same boxes in another order keeps the bakes\n");
+    sh_nav_bake_test_reset(); sh_nav_bake_enable_instances(1);
+    memset(&g_direct, 0, sizeof g_direct);
+    g_direct.count = 5; g_direct.which = -1;
+    sh_nav_bake_set_snapshot(snapshot_direct, NULL);
+    sh_nav_bake_refresh_live();
+    CHECK(sh_nav_bake_instance_name(0, name, first, sizeof first));
+    sh_nav_bake_test_copy_map(&map);
+    x0 = map.regions[0].c[0][0];
+    sh_nav_map_free(&map);
+
+    /* Reversed, with other entity indices: the same geometry revision, and
+     * the table keeps the first read's order with the new read's indices. */
+    g_direct.reversed = 1; g_direct.entity_base = 16;
+    sh_nav_bake_refresh_live();
+    CHECK(sh_nav_bake_instance_name(0, name, now, sizeof now));
+    CHECK_MSG(!strcmp(first, now), "reordered entities keep the revision");
+    sh_nav_bake_test_copy_map(&map);
+    CHECK(map.region_count == 5 && map.regions[0].c[0][0] == x0);
+    CHECK(map.regions[0].entity == 16 + 4);
+    sh_nav_map_free(&map);
+
+    /* A float round trip's worth of difference is the same box. */
+    g_direct.jitter = 0.004f;
+    sh_nav_bake_refresh_live();
+    CHECK(sh_nav_bake_instance_name(0, name, now, sizeof now));
+    CHECK_MSG(!strcmp(first, now), "round-trip noise keeps the revision");
+
+    /* A box moved two units is a change. */
+    g_direct.which = 2; g_direct.moved = 2.0f;
+    sh_nav_bake_refresh_live();
+    CHECK(sh_nav_bake_instance_name(0, name, now, sizeof now));
+    CHECK_MSG(strcmp(first, now) != 0, "a moved box takes a new revision");
+    strcpy_s(first, sizeof first, now);
+    /* Moving it back, in the first order again, is a change as well. */
+    g_direct.moved = 0.0f; g_direct.reversed = 0;
+    sh_nav_bake_refresh_live();
+    CHECK(sh_nav_bake_instance_name(0, name, now, sizeof now));
+    CHECK(strcmp(first, now) != 0);
+    strcpy_s(first, sizeof first, now);
+    /* Removing and adding a box each take a new revision. */
+    g_direct.count = 4;
+    sh_nav_bake_refresh_live();
+    CHECK(sh_nav_bake_instance_name(0, name, now, sizeof now));
+    CHECK(strcmp(first, now) != 0);
+    strcpy_s(first, sizeof first, now);
+    g_direct.count = 6;
+    sh_nav_bake_refresh_live();
+    CHECK(sh_nav_bake_instance_name(0, name, now, sizeof now));
+    CHECK(strcmp(first, now) != 0);
+    sh_nav_bake_set_snapshot(NULL, NULL);
 }
 
 static unsigned g_box_marked = 1, g_box_blocks = 3;
@@ -1075,6 +1171,7 @@ int main(void)
     test_complete_snapshot_tracks_creation_and_deletion();
     test_refused_read_holds_no_map();
     test_snapshot_moves_and_changes_ownership();
+    test_reordered_read_keeps_the_bakes();
     test_prepare_collects_worker_without_drawing();
     test_classes_refuse_independently();
     test_toast_names_the_room_and_reason();

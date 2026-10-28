@@ -141,6 +141,152 @@ int sh_nav_map_equal(const sh_nav_map *a, const sh_nav_map *b)
     return 1;
 }
 
+/* Two reads of one box agree to within float round trips: the map Play
+ * converts carries world positions that are returned to module space, which
+ * is exact only for values the float can hold at world magnitude (about 0.004
+ * units at 32768). A move the editor can show is far larger than this. */
+#define NAVR_SAME_EPS        0.05f
+#define NAVR_SAME_NORMAL_EPS 0.0001f
+
+static int navr_close(const sh_nav_region *x, const sh_nav_region *y)
+{
+    int k, j;
+    if (x->instance != y->instance || x->face != y->face ||
+        x->block_demons != y->block_demons || x->marked != y->marked) return 0;
+    for (k = 0; k < 4; k++) for (j = 0; j < 3; j++)
+        if (fabsf(x->c[k][j] - y->c[k][j]) > NAVR_SAME_EPS) return 0;
+    for (j = 0; j < 3; j++) if (fabsf(x->n[j] - y->n[j]) > NAVR_SAME_NORMAL_EPS) return 0;
+    return fabsf(x->depth - y->depth) <= NAVR_SAME_EPS;
+}
+
+typedef struct navr_keyed { int instance; float cx; int at; } navr_keyed;
+
+static int navr_key_cmp(const void *x, const void *y)
+{
+    const navr_keyed *a = (const navr_keyed *)x, *b = (const navr_keyed *)y;
+    if (a->instance != b->instance) return a->instance < b->instance ? -1 : 1;
+    if (a->cx != b->cx) return a->cx < b->cx ? -1 : 1;
+    return (a->at > b->at) - (a->at < b->at);
+}
+
+static navr_keyed *navr_keys(const sh_nav_region *r, int n)
+{
+    navr_keyed *k = (navr_keyed *)malloc((size_t)(n > 0 ? n : 1) * sizeof *k);
+    int i;
+    if (!k) return NULL;
+    for (i = 0; i < n; i++) {
+        k[i].instance = r[i].instance;
+        k[i].cx = (r[i].c[0][0] + r[i].c[1][0] + r[i].c[2][0] + r[i].c[3][0]) * 0.25f;
+        k[i].at = i;
+    }
+    qsort(k, (size_t)n, sizeof *k, navr_key_cmp);
+    return k;
+}
+
+/* Pair each box of a with an unused close box of b, searching only b's boxes
+ * of the same room whose centre x is within the tolerance. to_b[i] is b's
+ * index for a's box i, or -1; used_b marks b's paired boxes. Returns the pairs
+ * made, or -1 on allocation failure. */
+static int navr_match(const sh_nav_region *a, int na, const sh_nav_region *b, int nb,
+                      int *to_b, unsigned char *used_b)
+{
+    navr_keyed *ka = navr_keys(a, na), *kb = navr_keys(b, nb);
+    int i, lo = 0, pairs = 0;
+    if (!ka || !kb) { free(ka); free(kb); return -1; }
+    for (i = 0; i < na; i++) to_b[i] = -1;
+    memset(used_b, 0, (size_t)(nb > 0 ? nb : 1));
+    for (i = 0; i < na; i++) {
+        const navr_keyed *x = &ka[i];
+        int j;
+        /* ka ascends, so the window's lower edge only moves forward. */
+        while (lo < nb && (kb[lo].instance < x->instance ||
+                           (kb[lo].instance == x->instance &&
+                            kb[lo].cx < x->cx - NAVR_SAME_EPS))) lo++;
+        for (j = lo; j < nb && kb[j].instance == x->instance &&
+                     kb[j].cx <= x->cx + NAVR_SAME_EPS; j++) {
+            if (used_b[kb[j].at] || !navr_close(&a[x->at], &b[kb[j].at])) continue;
+            used_b[kb[j].at] = 1;
+            to_b[x->at] = kb[j].at;
+            pairs++;
+            break;
+        }
+    }
+    free(ka); free(kb);
+    return pairs;
+}
+
+/* 1 when every box pairs (b then reordered to a's order), 0 when not, -1 on
+ * allocation failure. */
+static int navr_same_set(const sh_nav_region *a, sh_nav_region *b, int n)
+{
+    int *to_b, i, r;
+    unsigned char *used;
+    sh_nav_region *tmp;
+    if (n <= 0) return 1;
+    to_b = (int *)malloc((size_t)n * sizeof *to_b);
+    used = (unsigned char *)malloc((size_t)n);
+    tmp = (sh_nav_region *)malloc((size_t)n * sizeof *tmp);
+    if (!to_b || !used || !tmp) { free(to_b); free(used); free(tmp); return -1; }
+    r = navr_match(a, n, b, n, to_b, used);
+    if (r == n) {
+        memcpy(tmp, b, (size_t)n * sizeof *tmp);
+        for (i = 0; i < n; i++) b[i] = tmp[to_b[i]];
+        r = 1;
+    } else if (r >= 0) r = 0;
+    free(to_b); free(used); free(tmp);
+    return r;
+}
+
+int sh_nav_map_same_shapes(const sh_nav_map *a, sh_nav_map *b)
+{
+    sh_nav_region *regions = NULL;
+    int r;
+    if (!a || !b) return 0;
+    if (a->instance_count != b->instance_count || a->region_count != b->region_count ||
+        a->obstacle_count != b->obstacle_count)
+        return 0;
+    for (r = 0; r < a->instance_count; r++) {
+        const sh_nav_instance *x = &a->instances[r], *y = &b->instances[r];
+        if (strcmp(x->module, y->module) || x->orientation != y->orientation ||
+            x->region_count != y->region_count || x->unusable != y->unusable ||
+            fabsf(x->origin[0] - y->origin[0]) > NAVR_SAME_EPS ||
+            fabsf(x->origin[1] - y->origin[1]) > NAVR_SAME_EPS ||
+            fabsf(x->origin[2] - y->origin[2]) > NAVR_SAME_EPS)
+            return 0;
+    }
+    /* Reorder only when both tables match, so a mismatch leaves b as read. */
+    if (b->region_count) {
+        regions = (sh_nav_region *)malloc((size_t)b->region_count * sizeof *regions);
+        if (!regions) return 0;
+        memcpy(regions, b->regions, (size_t)b->region_count * sizeof *regions);
+    }
+    r = navr_same_set(a->regions, b->regions, a->region_count);
+    if (r == 1) r = navr_same_set(a->obstacles, b->obstacles, a->obstacle_count);
+    if (r != 1 && regions)
+        memcpy(b->regions, regions, (size_t)b->region_count * sizeof *regions);
+    free(regions);
+    return r == 1;
+}
+
+int sh_nav_map_shape_difference(const sh_nav_map *a, const sh_nav_map *b, int walls,
+                                int *only_a, int *only_b)
+{
+    const sh_nav_region *ra = walls ? a->obstacles : a->regions;
+    const sh_nav_region *rb = walls ? b->obstacles : b->regions;
+    int na = walls ? a->obstacle_count : a->region_count;
+    int nb = walls ? b->obstacle_count : b->region_count;
+    int *to_b = (int *)malloc((size_t)(na > 0 ? na : 1) * sizeof *to_b), i;
+    unsigned char *used = (unsigned char *)malloc((size_t)(nb > 0 ? nb : 1));
+    *only_a = *only_b = -1;
+    if (!to_b || !used || navr_match(ra, na, rb, nb, to_b, used) < 0) {
+        free(to_b); free(used); return 0;
+    }
+    for (i = 0; i < na && *only_a < 0; i++) if (to_b[i] < 0) *only_a = i;
+    for (i = 0; i < nb && *only_b < 0; i++) if (!used[i]) *only_b = i;
+    free(to_b); free(used);
+    return 1;
+}
+
 void sh_nav_map_move(sh_nav_map *dst, sh_nav_map *src)
 {
     if (!dst || !src || dst == src) return;
