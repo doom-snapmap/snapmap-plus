@@ -43,6 +43,15 @@ needs a coarser size. On a build where the size cannot be changed, a resize
 that would cross the limit is cut back on the changed axis to the largest
 size that loads instead.
 
+TAB from Blueprint places the Object Mode camera by dropping straight down
+from the top of the map onto the hovered spot. DOOM gives up when that drop
+crosses more than 18364 units of empty space, which a room taller than that
+always contains: you landed under the tall room's roof, or, for a module far
+below its roof, back at your last Object Mode position, often inside the
+tall room. `object_entry.c` lets the drop cross the whole map height, so TAB
+lands on the floor under the cursor. Maps with stock-height rooms behave
+exactly as before.
+
 ## Map rendering
 
 DOOM's native Settings > Properties panel includes a map-wide View Distance

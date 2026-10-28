@@ -115,7 +115,10 @@ signed-short collision and navigation coordinates, restoring the native 16000
 when a stock map loads. Every client re-validates module placement against its
 own cvar, so an unlocked map is a Snapmap+-only map. Blueprint zoom-out
 (`editor_zoom.c`) raises the orbit camera's dolly and pan height limits to a
-client-side multiple of the native height, default 2x.
+client-side multiple of the native height, default 2x. Object Mode entry
+(`object_entry.c`) repoints the FPS view's one load of its 18364-unit downward
+trace segment at a product float covering the whole coordinate range, so the
+entry drop reaches the floor of a Grid Room taller than that segment.
 
 Grid Room resizing is implemented in the existing backend. The native DOOM
 Module Properties panel owns its XYZ control. In Blueprint mode, the normal

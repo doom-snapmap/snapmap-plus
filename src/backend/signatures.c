@@ -1182,5 +1182,10 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "4C 8B C1 83 FA FF 75 03 33 C0 C3 48 63 C2 48 63 8C 81 50 03 00 00 41 39 88 D8 04 00 00 7E E9 49 8B 80 D0 04 00 00 48 8B 04 C8 C3", 0xF8F9C0u, 0xF8EEF0u },
     { "ContextListRedraw", /* Context-list screen: redraws its six item rows (name, value text, dirty marker) from the bound context +0x1b8. */
       "40 55 41 54 41 55 41 56 41 57 48 8D AC 24 10 7E FF FF B8 F0 82 00 00 E8 ?? ?? ?? ?? 48 2B E0 48 C7 44 24 70 FE FF FF FF 48 89 9C 24 28 83 00 00 48 89 B4 24 30 83 00 00 48 89 BC 24 38 83 00 00 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 85 E0 81 00 00 48 8B D9", 0x127B000u, 0x127A5B0u },
+    /* Object Mode entry drop (snaphak-re editor-fixes-13954591 R-020): the
+     * FPS entry solver's load of its 18364.0 downward trace segment, that
+     * constant's only reader. Unique on both build 13954591 executables. */
+    { "ObjectEntryDrop", /* MOVSS xmm9,[rip+disp32 -> 18364.0]; XORPS xmm7,xmm7; MOVSS xmm8,[rip+disp32 -> 1.0]; MOVSS [rsp+0x60],xmm2. */
+      "F3 44 0F 10 0D ?? ?? ?? ?? 0F 57 FF F3 44 0F 10 05 ?? ?? ?? ?? F3 0F 11 54 24 60", 0x12B3823u, 0x12B2F03u },
     { NULL, NULL, 0 }   /* terminator */
 };
