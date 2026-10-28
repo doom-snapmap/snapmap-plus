@@ -25,28 +25,13 @@ function streamed(chunks, declared) {
 async function loadWorker(name) {
   let source = fs.readFileSync(path.join(root, name, 'worker.js'), 'utf8');
   source = source.replace('../src/workers/request_body.js', bodyURL);
-  // The Cloudflare-only class export is exercised by worker_runtime_test.js.
-  source = source.replace("export { CommunityQuota } from './quota.js';", '');
   return (await import('data:text/javascript;base64,' + Buffer.from(source).toString('base64'))).default;
 }
 
 function requestFor(url, body, method = 'POST', extra = {}) {
   return new Request('https://service.test' + url, { method, body, duplex: 'half', headers: {
-    Authorization: 'Bearer ' + 'a'.repeat(64), Origin: 'https://doom-snapmap.github.io', ...extra,
+    Authorization: 'Bearer ' + 'a'.repeat(64), ...extra,
   } });
-}
-
-function communityEnv(allowed = true) {
-  const calls = { names: [], puts: 0 };
-  return {
-    calls,
-    SESSIONS: { get: async () => JSON.stringify({ id: '42', token: 'local-test-token', login: 'tester' }) },
-    WRITE_QUOTAS: {
-      idFromName(name) { calls.names.push(name); return name; },
-      get: () => ({ consume: async () => ({ allowed }) }),
-    },
-    MEDIA: { async put() { calls.puts++; } },
-  };
 }
 
 test('reader accepts exact bounds and counts many small chunks without chunk retention', async () => {
@@ -95,100 +80,6 @@ test('read errors become client errors and release the stream lock', async () =>
   const input = { headers: new Headers(), body: new ReadableStream({ pull() { throw new Error('disconnect'); } }) };
   await assert.rejects(readBody(input, 100), error => error.status === 400);
   assert.equal(input.body.locked, false);
-});
-
-test('all Community JSON writes reject excess bytes with CORS before an upstream write', async () => {
-  const worker = await loadWorker('community');
-  for (const [method, route] of [['POST', '/community/discussions'], ['POST', '/community/discussions/1/comments'],
-    ['POST', '/community/reactions'], ['POST', '/community/preview'], ['PATCH', '/community/discussions/1'],
-    ['PATCH', '/community/comments/example'], ['DELETE', '/community/discussions/1'], ['POST', '/auth/logout']]) {
-    const env = communityEnv();
-    const response = await worker.fetch(requestFor(route, new Uint8Array(384 * 1024 + 1), method), env);
-    assert.equal(response.status, 413, method + ' ' + route);
-    assert.equal(response.headers.get('Access-Control-Allow-Origin'), 'https://doom-snapmap.github.io');
-    assert.deepEqual(env.calls.names, []);
-  }
-});
-
-test('Community rejects malformed JSON and preserves session refusal', async () => {
-  const worker = await loadWorker('community');
-  for (const body of ['null', '[]', '{', new Uint8Array([0xff])]) {
-    assert.equal((await worker.fetch(requestFor('/community/reactions', body), communityEnv())).status, 400);
-  }
-  const env = communityEnv();
-  env.SESSIONS.get = async () => null;
-  assert.equal((await worker.fetch(requestFor('/community/reactions', '{}'), env)).status, 401);
-});
-
-test('upload overflow cancels before R2 and valid media retains its API shape', async () => {
-  const worker = await loadWorker('community');
-  const input = streamed([new Uint8Array(8 * 1024 * 1024), new Uint8Array(1), new Uint8Array(10)], '1');
-  const env = communityEnv();
-  const response = await worker.fetch(requestFor('/media/upload', input.body, 'POST', { 'Content-Length': '1' }), env);
-  assert.equal(response.status, 413);
-  assert.equal(input.cancelled(), true);
-  assert.equal(env.calls.puts, 0);
-  const image = new Uint8Array(16);
-  image.set([0x89, 0x50, 0x4e, 0x47]);
-  const valid = await worker.fetch(requestFor('/media/upload', image), env);
-  assert.equal(valid.status, 200);
-  assert.match((await valid.json()).url, /^https:\/\/service.test\/media\/community\/tester\/[a-f0-9]{32}\.png$/);
-  assert.equal(env.calls.puts, 1);
-  assert.ok(env.calls.names.every(name => name === 'github:42'));
-});
-
-test('quota exhaustion remains 429 and missing coordination fails closed with 503', async () => {
-  const worker = await loadWorker('community');
-  assert.equal((await worker.fetch(requestFor('/community/reactions', '{}'), communityEnv(false))).status, 429);
-  const env = communityEnv();
-  delete env.WRITE_QUOTAS;
-  assert.equal((await worker.fetch(requestFor('/community/reactions', '{}'), env)).status, 503);
-});
-
-test('legacy sessions resolve a stable account id before quota admission', async () => {
-  const worker = await loadWorker('community');
-  const env = communityEnv(false);
-  env.SESSIONS.get = async () => JSON.stringify({ token: 'local-test-token', login: 'tester' });
-  let saved;
-  env.SESSIONS.put = async (key, value) => { saved = { key, user: JSON.parse(value) }; };
-  const originalFetch = globalThis.fetch;
-  let lookups = 0;
-  globalThis.fetch = async (url, options) => {
-    assert.equal(url, 'https://api.github.com/user');
-    assert.equal(options.headers.Authorization, 'Bearer local-test-token');
-    lookups++;
-    return Response.json({ id: 42, login: 'tester' });
-  };
-  try {
-    const response = await worker.fetch(requestFor('/community/reactions', '{}'), env);
-    assert.equal(response.status, 429);
-    assert.equal(lookups, 1);
-    assert.equal(saved.user.id, '42');
-    assert.equal(saved.key, 'session:' + 'a'.repeat(64));
-    assert.deepEqual(env.calls.names, ['github:42']);
-    globalThis.fetch = async () => new Response(null, { status: 401 });
-    assert.equal((await worker.fetch(requestFor('/community/reactions', '{}'), env)).status, 503);
-    assert.equal(env.calls.names.length, 1);
-  } finally { globalThis.fetch = originalFetch; }
-});
-
-test('comment edits retain the user credential and GitHub ownership refusal', async () => {
-  const worker = await loadWorker('community');
-  const originalFetch = globalThis.fetch;
-  let authorized = true;
-  globalThis.fetch = async (url, options) => {
-    assert.equal(url, 'https://api.github.com/graphql');
-    assert.equal(options.headers.Authorization, 'Bearer local-test-token');
-    const payload = JSON.parse(options.body);
-    assert.deepEqual(payload.variables, { commentId: 'example', body: 'Edited comment' });
-    return Response.json({ data: authorized ? { updateDiscussionComment: { comment: { id: 'example' } } } : {} });
-  };
-  try {
-    const edit = () => worker.fetch(requestFor('/community/comments/example', '{"body":"Edited comment"}', 'PATCH'), communityEnv());
-    assert.equal((await edit()).status, 200);
-    authorized = false;
-    assert.equal((await edit()).status, 403);
-  } finally { globalThis.fetch = originalFetch; }
 });
 
 test('feedback keeps its character limit, bounds encoded bytes and rejects non-object reports', async () => {

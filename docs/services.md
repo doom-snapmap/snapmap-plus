@@ -1,38 +1,26 @@
 # External services
 
-The services used by the repository and website, their credentials, and fork
-setup requirements. Hosting charges depend on the account plan and usage;
+The services used by the repository and the in-app feedback relay, their
+credentials, and fork setup requirements. The website and its Community API are
+inventoried in the [snapmap-web](https://github.com/doom-snapmap/snapmap-web/blob/main/docs/services.md) repository. Hosting charges depend on the account plan and usage;
 release drafting makes a paid API call when its key is configured.
 
 | Service | Purpose | Credentials or bindings | Without it |
 |---|---|---|---|
 | GitHub Actions | Builds, checks and releases | Per-run `GITHUB_TOKEN` | Automated checks and publishing stop. |
-| GitHub Pages | Public website | Workflow Pages permissions | The site cannot publish. |
 | Feedback Worker and GitHub App | Files reports as issues | Worker secrets `APP_ID`, `APP_PRIVATE_KEY`; optional `GITHUB_TOKEN` fallback | In-app reports cannot reach GitHub. |
-| Community Worker and GitHub App | Reads Discussions and handles GitHub sign-in | Worker secrets `APP_ID`, `APP_PRIVATE_KEY`, `CLIENT_SECRET`; optional `GITHUB_TOKEN` read fallback | Community reads or sign-in fail. |
-| Workers KV | Community sessions and OAuth state | `SESSIONS` binding | Sign-in and authenticated routes fail. |
-| SQLite Durable Objects | Community write quotas per GitHub account | `WRITE_QUOTAS` binding and its migration | Authenticated writes fail closed with HTTP 503. |
-| R2 | Community screenshots | `MEDIA` binding | Uploads and media retrieval fail. |
-| Turnstile | Optional Community write challenge | Worker secret `TURNSTILE_SECRET` and matching site setup | The Worker skips the challenge when the secret is absent. |
 | Anthropic API | Drafts release notes for review | GitHub Environment `changelog`: `ANTHROPIC_API_KEY` | The workflow proposes a commit-list skeleton. |
 
-## Worker services
+## Feedback relay
 
 [Feedback setup](../feedback/README.md) covers the issue-writing App and its
-private key. [Community setup](../community/README.md) covers the Discussions App,
-OAuth callback, KV, Durable Objects and R2. Their App credentials live in Cloudflare, separately
-from GitHub Actions secrets. The Community Worker stores signed-in users' GitHub
-tokens in KV and sends browsers opaque session IDs; writes use the user's token.
+private key. The App credentials live in Cloudflare as Worker secrets, separately
+from GitHub Actions secrets. The Worker bounds request bodies while reading the
+stream; the local runtime test files a synthetic report against a GitHub mock.
 
-Both Workers bound request bodies while reading the stream. Community write
-quotas use one Durable Object per GitHub account, so simultaneous requests and
-multiple sessions share the same persisted hourly limit. Deploy the binding and
-migration in `community/wrangler.toml` with the Worker code. The local runtime
-tests verify concurrent enforcement and persistence without writing to GitHub.
-
-A fork must provision its own services and storage, configure the App repository
-permissions, replace account-specific IDs and callback/origin constants, and
-update the endpoint URLs in the frontend and website. Source comments and
+A fork must provision its own Worker and App, replace the repository constants in
+`feedback/worker.js`, and update the endpoint in
+`src/ui/webview/snapmap_plus_ui_webview.cpp`. Source comments and
 `wrangler.toml` describe the checked-in configuration, not current account billing
 or deployed permissions.
 

@@ -19,11 +19,14 @@ SnapHak binary content; game assets are read from the player's installation.
 | [docs/](docs/README.md) | Contributor guides and cross-component contracts. |
 | [tests/](tests/README.md) | Native and JavaScript regression tests. |
 | [tools/](tools/README.md) | Release-note tooling and signature derivation. |
-| [site/](site/README.md) | Public website and player guide. |
 | [feedback/](feedback/README.md) | In-app feedback relay. |
-| [community/](community/README.md) | Website discussions, sign-in and screenshots. |
 | [.github/](.github/AUTOMATION.md) | CI, releases, publishing and repository policy. |
 | `build.ps1`, `package.ps1` | Compile both DLLs and assemble the installable bundle. |
+
+The public website, player guide and Community live in the separate
+[snapmap-web](https://github.com/doom-snapmap/snapmap-web) repository at
+[www.snapmapplus.com](https://www.snapmapplus.com/); its changelog page reads this
+repository's published releases.
 
 ## Working here
 
@@ -52,7 +55,7 @@ snapmap-plus uninstall
 
 Close DOOM before installing or updating. Launch it afterward and enter SnapMap;
 run `sh` in the game console if the companion window does not open. See the
-[player guide](site/snapmap-plus-guide.md).
+[player guide](https://www.snapmapplus.com/snapmap-plus-guide.html).
 
 The installer and player data live under `%LOCALAPPDATA%\snapmap-plus`.
 Uninstall restores recorded backups and preserves settings, overrides, prefabs
@@ -105,7 +108,7 @@ Each override package has one `package.json` and an `assets/` tree preserving
 extracted engine paths. Maps carry complete authored packages and prompt only
 when required resources are missing. In-game installation activates them and
 continues loading without restarting DOOM. See the
-[package guide](site/snapmap-plus-guide.md#overrides) for authoring and delivery.
+[package guide](https://www.snapmapplus.com/snapmap-plus-guide.html#overrides) for authoring and delivery.
 
 ## Credits
 

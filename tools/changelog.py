@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-"""Parse CHANGELOG.md for CI, releases and website data using the standard library.
+"""Parse CHANGELOG.md for CI and releases using the standard library.
 Section headers are: ## <tag> -- <YYYY-MM-DD> (<channel>).
 Accept common Unicode dash separators, but emit ASCII --."""
 
 import argparse
 import datetime
-import json
 import re
 import sys
 
@@ -140,13 +139,12 @@ def main(argv=None):
     ap.add_argument("--out")
     mode = ap.add_mutually_exclusive_group(required=True)
     mode.add_argument("--section", metavar="TAG")
-    mode.add_argument("--json", action="store_true")
     mode.add_argument("--has", metavar="TAG")
     mode.add_argument("--lint", action="store_true")
     args = ap.parse_args(argv)
 
-    if (args.section or args.json) and not args.out:
-        ap.error("--section and --json both require --out")
+    if args.section and not args.out:
+        ap.error("--section requires --out")
 
     try:
         with open(args.file, encoding="utf-8") as fh:
@@ -166,21 +164,15 @@ def main(argv=None):
     if args.has:
         return 0 if find(sections, args.has) else 1
 
-    if args.section:
-        found = find(sections, args.section)
-        if not found:
-            print(
-                "::error::no section for " + args.section + " in " + args.file
-                + " -- run the prepare-release workflow for this version first",
-                file=sys.stderr,
-            )
-            return 1
-        _write(args.out, found["body"] + "\n")
-        return 0
-
-    # Keep the original Markdown for copying; rendered HTML cannot recover its
-    # inline formatting reliably.
-    _write(args.out, json.dumps(sections, indent=2, ensure_ascii=False) + "\n")
+    found = find(sections, args.section)
+    if not found:
+        print(
+            "::error::no section for " + args.section + " in " + args.file
+            + " -- run the prepare-release workflow for this version first",
+            file=sys.stderr,
+        )
+        return 1
+    _write(args.out, found["body"] + "\n")
     return 0
 
 

@@ -21,4 +21,4 @@ Explains how to develop and ship Snapmap+, and how its major components work tog
 
 Retain contributor instructions and cross-component contracts here. Explain narrow backend algorithms in source and concise comments; keep their detailed investigations in snaphak-re's findings system. Navigation and weapon HUD implementation references were moved there with their source revisions preserved.
 
-Player instructions live in the [website guide](../site/snapmap-plus-guide.md); release history lives in [CHANGELOG.md](../CHANGELOG.md). External contributors can supply investigation evidence in their pull request without needing a research checkout.
+Player instructions live in the [website guide](https://www.snapmapplus.com/snapmap-plus-guide.html), maintained in the [snapmap-web](https://github.com/doom-snapmap/snapmap-web) repository; release history lives in [CHANGELOG.md](../CHANGELOG.md). External contributors can supply investigation evidence in their pull request without needing a research checkout.

@@ -17,7 +17,7 @@ in the snaphak-re findings system.
 | Frontend | Companion window, messages, editor views and preview controls. | [WebView UI](webview-ui.md) |
 | Fault shield | Selected engine-fault recovery and local crash evidence. | `src/fault_shield/fault_shield.c` |
 | Installer | Verified deployment, migration, update and uninstall. | [Installer README](../installer/README.md) |
-| Website services | Community authentication/content and feedback relay. | [Services](services.md), [feedback](feedback.md) |
+| Feedback relay | Files in-app reports as GitHub issues. | [Services](services.md), [feedback](feedback.md) |
 
 The backend is an XInput proxy named `XINPUT1_3.dll`. It forwards controller calls
 to the system library and initializes the editor integration. The frontend is
@@ -299,7 +299,7 @@ presentation policy, plus engine-shaped resources under `assets/`. The outer
 package is the intact delivery unit, including nested components and auxiliary
 files. Discovery, semantic compilation and native publication are separate
 operations. Incomplete inventories must not publish a partial package set.
-Author-facing format and examples live in the [player guide](../site/snapmap-plus-guide.md#overrides).
+Author-facing format and examples live in the [player guide](https://www.snapmapplus.com/snapmap-plus-guide.html#overrides).
 
 A published map launched from the SnapMap browser is read under an inspection
 scope and then decided by its own text in `map_published.c`: a map whose text

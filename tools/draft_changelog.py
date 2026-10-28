@@ -20,8 +20,7 @@ MAX_INPUT_TOKENS = 40000  # counted before spending
 
 # Include changed feature documentation so drafts can describe how users reach a
 # feature.
-DOC_PATHS = ["docs/capabilities.md", "site/snapmap-plus-guide.md",
-             "installer/README.md", "README.md"]
+DOC_PATHS = ["docs/capabilities.md", "installer/README.md", "README.md"]
 MAX_DOC_CHARS = 24000
 
 # Require interface-location words to appear in the inputs. This catches invented

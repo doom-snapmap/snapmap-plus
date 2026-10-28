@@ -7,59 +7,8 @@ const { Miniflare } = require(process.argv[2] ? path.resolve(process.argv[2]) : 
 
 const root = path.join(__dirname, '..');
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'snapmap-plus-workers-'));
-const sidA = 'a'.repeat(64), sidB = 'b'.repeat(64), sidC = 'c'.repeat(64);
-const image = new Uint8Array(16);
-image.set([0x89, 0x50, 0x4e, 0x47]);
-
-function community() {
-  return new Miniflare({
-    name: 'community-runtime-test',
-    modules: true, modulesRoot: root, scriptPath: path.join(root, 'community/worker.js'),
-    modulesRules: [{ type: 'ESModule', include: ['**/*.js'] }],
-    compatibilityDate: '2026-07-01',
-    durableObjects: { WRITE_QUOTAS: { className: 'CommunityQuota', useSQLite: true } },
-    durableObjectsPersist: path.join(scratch, 'quotas'),
-    kvNamespaces: ['SESSIONS'], r2Buckets: ['MEDIA'],
-    outboundService: () => { throw new Error('unexpected external request'); },
-  });
-}
-
-async function seed(mf) {
-  const sessions = await mf.getKVNamespace('SESSIONS');
-  for (const [sid, id] of [[sidA, '42'], [sidB, '42'], [sidC, '99']]) {
-    await sessions.put('session:' + sid, JSON.stringify({ id, token: 'local-test-token', login: 'tester' }));
-  }
-}
-
-function upload(mf, sid) {
-  return mf.dispatchFetch('http://local.test/media/upload', { method: 'POST', body: image,
-    headers: { Authorization: 'Bearer ' + sid, Origin: 'https://doom-snapmap.github.io' } });
-}
 
 async function run() {
-  let mf = community();
-  try {
-    await seed(mf);
-    const replies = await Promise.all(Array.from({ length: 45 }, (_, i) => upload(mf, i % 2 ? sidA : sidB)));
-    assert.equal(replies.filter(response => response.status === 200).length, 30);
-    assert.equal(replies.filter(response => response.status === 429).length, 15);
-    assert.ok(replies.every(response => response.headers.get('Access-Control-Allow-Origin') === 'https://doom-snapmap.github.io'));
-    for (const response of replies) await response.arrayBuffer();
-    const other = await upload(mf, sidC);
-    assert.equal(other.status, 200);
-    await other.arrayBuffer();
-    const media = await mf.getR2Bucket('MEDIA');
-    assert.equal((await media.list()).objects.length, 31);
-  } finally { await mf.dispose(); }
-
-  mf = community();
-  try {
-    await seed(mf);
-    const retained = await upload(mf, sidA);
-    assert.equal(retained.status, 429, 'quota was lost when the object restarted');
-    await retained.arrayBuffer();
-  } finally { await mf.dispose(); }
-
   let issueWrites = 0;
   const feedback = new Miniflare({
     name: 'feedback-runtime-test',
@@ -90,7 +39,7 @@ async function run() {
     await oversized.arrayBuffer();
     assert.equal(issueWrites, 1);
   } finally { await feedback.dispose(); }
-  console.log('worker runtime: concurrent per-account quotas, restart persistence, R2 and feedback relay passed');
+  console.log('worker runtime: feedback relay passed');
 }
 
 run().catch(error => { console.error(error); process.exitCode = 1; }).finally(() => {
