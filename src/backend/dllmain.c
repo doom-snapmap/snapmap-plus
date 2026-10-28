@@ -29,6 +29,7 @@
 #include "editor_zoom.h"
 #include "world_area_cell.h"
 #include "object_entry.h"
+#include "place_anywhere.h"
 #include "boot_pacing.h"
 #include "grid_room_snap.h"
 #include "navmesh.h"
@@ -381,6 +382,7 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
         /* After the Grid Room install: the cell choice counts its module bounds. */
         (void)sh_world_area_cell_install(results,db,g_doom_base);
         (void)sh_object_entry_install(results,db);
+        (void)sh_place_anywhere_install(results,db);
 
         /* Navigation geometry follows editor actions rather than a poll. */
         sh_apply_engine_install_edit_hook(results, db);

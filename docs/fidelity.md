@@ -35,6 +35,16 @@ fog. Older saved View Distance values remain readable: 8192 reads as off and
 is removed, any other distance reads as on; their fog values are ignored and
 the former disabled mode reads as off. Fog is not a map setting.
 
+Entity placement is unrestricted. The unmodified editor refuses a held demon,
+player start, encounter spawner, AI point, item hint or pickup unless a floor
+is under it, and shows it red; with Snapmap+ any entity can be placed or moved
+into open air, while a floor or wall under it still counts as before. Overlap
+and outside-every-module refusals are unchanged. The map stores only the
+entity's position, so it loads in the unmodified game, where a floating entity
+stays where it was placed but turns red and cannot be put down in the air again
+once it is picked up. In Play the player starts on the floor under a floating
+player start, and floating demons are on the floor once they are active.
+
 This release embeds no packages: the package system is being rebuilt for the
 April 2024 DOOM update, and a map carrying packages from an earlier release
 loads as a plain map without them.

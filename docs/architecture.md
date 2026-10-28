@@ -138,7 +138,12 @@ own cvar, so an unlocked map is a Snapmap+-only map. Blueprint zoom-out
 client-side multiple of the native height, default 2x. Object Mode entry
 (`object_entry.c`) repoints the FPS view's one load of its 18364-unit downward
 trace segment at a product float covering the whole coordinate range, so the
-entry drop reaches the floor of a Grid Room taller than that segment.
+entry drop reaches the floor of a Grid Room taller than that segment. Unrestricted
+placement (`place_anywhere.c`) turns the two editor tests that refuse an
+entity with no accepted surface and no air flag (the held-entity colour and the
+Place admission) into unconditional passes for that clause only; the surface
+classification, snapping, alignment and the overlap and module refusals stay
+native.
 
 Grid Room resizing is implemented in the existing backend. The native DOOM
 Module Properties panel owns its XYZ control. In Blueprint mode, the normal

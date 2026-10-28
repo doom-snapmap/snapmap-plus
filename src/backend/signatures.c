@@ -1221,6 +1221,13 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
      * constant's only reader. Unique on both build 13954591 executables. */
     { "ObjectEntryDrop", /* MOVSS xmm9,[rip+disp32 -> 18364.0]; XORPS xmm7,xmm7; MOVSS xmm8,[rip+disp32 -> 1.0]; MOVSS [rsp+0x60],xmm2. */
       "F3 44 0F 10 0D ?? ?? ?? ?? 0F 57 FF F3 44 0F 10 05 ?? ?? ?? ?? F3 0F 11 54 24 60", 0x12B3823u, 0x12B2F03u },
+    /* Unrestricted placement (snaphak-re editor-fixes-13954591 R-025): the two
+     * tests that refuse an element with no accepted surface unless its
+     * placementFlags allow air. Unique on both build 13954591 executables. */
+    { "PlaceGateCommit", /* Place/commit group test: CMP dword [r12+rdx+8],0; JNZ +0x27 past TEST byte [def+0x1d0],0x30; JZ refuse. */
+      "41 83 7C 14 08 00 75 27 49 8B 46 28 49 63 0C 14 48 8B 00 48 8B 80 A0 06 00 00 48 8B 0C C8 48 8B 41 08 F6 80 D0 01 00 00 30 0F 84", 0x121951Cu, 0x121896Cu },
+    { "PlaceGateElement", /* Per-element ghost test: blocked +0x30, module +4 == -1, then CMP [r8+8],0; JNZ +0x2e past TEST [def+0x1d0],0x30. */
+      "40 55 57 48 81 EC D8 00 00 00 41 80 78 30 00 48 8B EA 48 8B F9 75 30 41 83 78 04 FF 74 29 41 83 78 08 00 75 2E 48 8B 41 28 49 63 08 48 8B 00 48 8B 80 A0 06 00 00 48 8B 0C C8 48 8B 41 08 F6 80 D0 01 00 00 30 75 0C 32 C0", 0x12197B0u, 0x1218C00u },
     /* Boot pacing (snaphak-re boot-time-13954591 R-001, R-002). The bootstrap
      * matches these at their recorded RVAs before the full scan, so each
      * pattern must stay unique at that RVA on both executables. */
