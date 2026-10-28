@@ -612,7 +612,7 @@ static void bake_refresh_live(int accept_unmeasured)
         sh_nav_map *candidate = (sh_nav_map *)calloc(1, sizeof *candidate);
         int ok = candidate && g_snapshot(candidate, g_snapshot_ctx);
         if (!candidate) g_read_reason = "out of memory";
-        else if (!ok) g_read_reason = "the editor map could not be serialized";
+        else if (!ok) g_read_reason = "the map could not be serialized";
         if (ok) {
             if (candidate->ids_unusable != g_ids_unusable) {
                 g_ids_unusable = candidate->ids_unusable;

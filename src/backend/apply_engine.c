@@ -270,6 +270,12 @@ static volatile LONG        g_last_place_result = 0;
 #define NAV_PLACE_WINDOW_MS  120000ULL
 static volatile LONG       g_nav_place_pending;
 static volatile ULONGLONG  g_nav_place_tick;
+/* The placement's update is owed until a read measures every box. Boxes that
+ * have only just been pasted may not be measurable on the tick they arrive,
+ * and a partial read there would leave them out with nothing later to notice
+ * (their live fields do not change when the engine resolves their size). */
+static int                 g_nav_place_owed;
+static int                 g_nav_place_tries;
 static volatile LONG       g_installed   = 0;
 static volatile LONG       g_cmd_registered = 0;
 
@@ -2301,11 +2307,17 @@ static void ae_nav_refresh_cmd(void)
              * just opened and has no picture yet. Asking by hand always tries
              * again, however many times the map has refused before. */
             int requested = InterlockedExchange(&g_nav_update_requested, 0) != 0;
-            int update;
+            int update, automatic = 0;
             if (placed && arrived_flagged && !requested) {
-                requested = 1;
-                InterlockedExchange(&g_nav_update_status, SH_NAV_UPDATE_REQUESTED);
+                g_nav_place_owed = 1;
+                g_nav_place_tries = 0;
                 backend_log("NAV: a placed prefab brought in AI Navigation boxes; updating the navmesh");
+            }
+            if (requested) g_nav_place_owed = 0;
+            else if (g_nav_place_owed) {
+                requested = automatic = 1;
+                g_nav_retry_at = sh_perf_now();
+                InterlockedExchange(&g_nav_update_status, SH_NAV_UPDATE_REQUESTED);
             }
             if (requested) g_nav_read_tries = 0;
             update = requested ||
@@ -2325,8 +2337,11 @@ static void ae_nav_refresh_cmd(void)
             if (update) {
                 LONGLONG started = sh_perf_now();
                 g_nav_reads.reads++;
-                /* Asked for by hand: bake what can be measured now. */
-                if (requested) sh_nav_bake_refresh_live_partial();
+                /* Asked for by hand: bake what can be measured now. After a
+                 * placement, wait for the pasted boxes to be measured, and
+                 * bake what can be measured only on the last try. */
+                if (automatic && g_nav_place_tries + 1 < NAV_READ_TRIES) sh_nav_bake_refresh_live();
+                else if (requested) sh_nav_bake_refresh_live_partial();
                 else sh_nav_bake_refresh_live();
                 g_nav_reads.read_ms += ae_perf_msf(sh_perf_now() - started);
                 /* A refused read leaves no map behind. Fingerprinting that
@@ -2346,8 +2361,11 @@ static void ae_nav_refresh_cmd(void)
                     g_nav_stale = 1;
                 }
                 g_preview_built_revision = ~0UL;
+                if (automatic && (!g_nav_stale || ++g_nav_place_tries >= NAV_READ_TRIES))
+                    g_nav_place_owed = 0;
                 if (requested) InterlockedExchange(&g_nav_update_status,
-                    g_nav_have_hash && !g_nav_stale ? SH_NAV_UPDATE_BUILDING : SH_NAV_UPDATE_FAILED);
+                    g_nav_have_hash && !g_nav_stale ? SH_NAV_UPDATE_BUILDING
+                    : g_nav_place_owed ? SH_NAV_UPDATE_REQUESTED : SH_NAV_UPDATE_FAILED);
             }
             ae_nav_update_poll();
             SH_PERF_BEGIN(tp);
@@ -2358,12 +2376,14 @@ static void ae_nav_refresh_cmd(void)
             g_nav_was_holding = ae_nav_holding(ed);
         } else {
             /* Nothing can be read here, so a View menu request ends unanswered. */
+            g_nav_place_owed = 0;
             InterlockedExchange(&g_nav_update_requested, 0);
             InterlockedExchange(&g_nav_update_status, SH_NAV_UPDATE_FAILED);
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         sh_nav_preview_clear();
         backend_log("NAV: editor snapshot refresh faulted");
+        g_nav_place_owed = 0;
         InterlockedExchange(&g_nav_update_requested, 0);
         InterlockedExchange(&g_nav_update_status, SH_NAV_UPDATE_FAILED);
     }
@@ -2672,6 +2692,13 @@ static void ae_nav_refresh_poll(void)
             g_nav_retry_at = now;
             undone = 1;
         }
+    }
+
+    /* A placement's update still waits for its boxes to be measured: look
+     * again a second after the last attempt, like a map that has just opened. */
+    if (g_nav_place_owed) {
+        LONGLONG now = sh_perf_now();
+        if (ae_perf_msf(now - g_nav_retry_at) >= 1000.0) undone = 1;
     }
 
     /* Letting go is not an edit. A cancelled placement, and stepping in and out

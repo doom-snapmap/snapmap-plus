@@ -740,7 +740,7 @@ It shows the prefab level and upright, the way it pastes, even when it was creat
 ramp. Blocking Boxes ticked for **AI Navigation** are tinted green, and their number appears beside the
 entity count. Click **Load / Place** to stage the prefab for placement with SnapMap's built-in paste
 function, then switch to the editor and press **Ctrl+V** to actually drop it into the map. When the
-placed prefab brings in AI Navigation boxes, Snapmap+ updates the navmesh by itself as soon as you drop
+placed prefab brings in AI Navigation boxes, Snapmap+ updates the navmesh by itself once you drop
 it, just as **View > Update Navmesh** would.
 
 **Organizing:** **New Folder** creates a folder you can drag prefabs into; **Filter prefabs...** narrows
