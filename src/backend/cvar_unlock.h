@@ -24,6 +24,10 @@
 #define SIZEOF_IDLIST           0x18u   /* Embedded idList header size. */
 #define SIZEOF_IDHASHINDEX      0x28u   /* Embedded idHashIndex header size. */
 
+/* idList and idHashIndex fields, relative to the embedded header. */
+#define IDLIST_NUM_OFF          0x08u   /* int32 count; capacity follows at +0x0C */
+#define IDHASH_HASH_SIZE_OFF    0x10u   /* int32 bucket count; mask at +0x1C, lookup mask at +0x20 */
+
 /* Full-list fields, relative to cvarSys. */
 #define CVARSYS_LIST_ARRAY_OFF  0x08u   /* idCVar** -- 8-byte entries */
 #define CVARSYS_LIST_COUNT_OFF  0x10u   /* uint32 element count */

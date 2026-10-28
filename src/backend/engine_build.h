@@ -19,6 +19,7 @@
 #define SH_IDCVAR_VALUE_INT          0x30u
 #define SH_IDCVAR_NAME               0x50u
 #define SH_IDCVAR_FLAGS              0x68u
+#define SH_IDCVAR_NEXT               0x90u   /* static registration chain link */
 
 /* idCVarSystemLocal list/hash layout (registration, lookup, developer-table
  * unlock): verified unchanged from 2018. */
