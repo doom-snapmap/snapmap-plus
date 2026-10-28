@@ -17,7 +17,7 @@ in the snaphak-re findings system.
 | Frontend | Companion window, messages, editor views and preview controls. | [WebView UI](webview-ui.md) |
 | Fault shield | Selected engine-fault recovery and local crash evidence. | `src/fault_shield/fault_shield.c` |
 | Installer | Verified deployment, migration, update and uninstall. | [Installer README](../installer/README.md) |
-| Website services | Community authentication/content and feedback relay. | [Services](services.md), [feedback](feedback.md) |
+| Feedback relay | Files in-app reports as GitHub issues. | [Services](services.md), [feedback](feedback.md) |
 
 The backend is an XInput proxy named `XINPUT1_4.dll`. It forwards controller calls
 to the system library and initializes the editor integration. The frontend is

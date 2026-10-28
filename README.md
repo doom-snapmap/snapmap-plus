@@ -21,7 +21,6 @@ SnapHak binary content; game assets are read from the player's installation.
 | [tools/](tools/README.md) | Release-note tooling and signature derivation. |
 | [site/](site/README.md) | Public website and player guide. |
 | [feedback/](feedback/README.md) | In-app feedback relay. |
-| [community/](community/README.md) | Website discussions, sign-in and screenshots. |
 | [.github/](.github/AUTOMATION.md) | CI, releases, publishing and repository policy. |
 | `build.ps1`, `package.ps1` | Compile both DLLs and assemble the installable bundle. |
 
