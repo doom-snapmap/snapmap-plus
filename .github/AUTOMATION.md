@@ -13,4 +13,4 @@ Defines contribution checks, release preparation, publishing, issue maintenance 
 
 ## Working here
 
-Read [contributing](../docs/contributing.md) before changing a workflow. Keep actions pinned to commit SHAs and give each job only the permissions it needs. `ci.yml` checks contributions; `prepare-release.yml` drafts reviewed notes; `release.yml` publishes tagged builds; `pages.yml` publishes the site. The two `issues-*.yml` workflows manage retest requests and unanswered reports.
+Read [contributing](../docs/contributing.md) before changing a workflow. Keep actions pinned to commit SHAs and give each job only the permissions it needs. `ci.yml` checks contributions; `prepare-release.yml` drafts reviewed notes; `release.yml` publishes tagged builds. The website is published from the separate snapmap-web repository. The two `issues-*.yml` workflows manage retest requests and unanswered reports.

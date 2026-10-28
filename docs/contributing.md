@@ -144,10 +144,10 @@ They cover patch ownership and rollback, edit dispatch, resource lifetimes,
 navigation, crash records, previews, frontend contracts and Worker
 request handling. The current test manifest is `tests/run-tests.ps1`.
 
-Run the Worker runtime suite as well when changing either service. It verifies
-concurrent quotas, persistence and uploads against local storage and a GitHub
-mock. See [tests/README.md](../tests/README.md) for its pinned dependency and
-command. CI runs both the normal suite and the Worker runtime suite.
+Run the Worker runtime suite as well when changing the feedback relay. It files
+a synthetic report against a GitHub mock. See [tests/README.md](../tests/README.md)
+for its pinned dependency and command. CI runs both the normal suite and the
+Worker runtime suite.
 
 Three more tests scan a **real DOOM image** — the executables of the supported build (the April 2024
 update, Steam build 13954591; they are not DRM-wrapped, so use the shipped files). **Running these is
@@ -250,16 +250,13 @@ These optional checks print recognized-record counts, streamed and retained meta
 Mega2 table bytes left on disk. They read the indexes, Wwise manifest, VMTR tables, and Mega2 headers
 in place; they do not write to the game directory.
 
-### Website changelog
+### The website changelog
 
-The website in `site/` renders release notes from `CHANGELOG.md` through
-`tools/changelog.py` and Jekyll. Each release has a Lucide copy button beside
-"View on GitHub" that copies its title, date, complete notes, and release link
-as Markdown for community announcements, including Discord. Successful copies
-show a green check for three seconds; failed copies show an inline message.
-The button is available when JavaScript and the browser Clipboard API are enabled.
-When changing this feature, verify the copied content, success/reset and failure
-states, keyboard access, and narrow layouts in a browser.
+The website's changelog page, in the [snapmap-web](https://github.com/doom-snapmap/snapmap-web)
+repository, reads this repository's published GitHub Releases in the browser. A
+release's body is the `CHANGELOG.md` entry that `release.yml` extracts for its tag,
+so a published release is visible on the site without any change here. Entries
+that are merged but not yet tagged do not appear.
 
 ## 8. The pull-request workflow
 
@@ -387,7 +384,8 @@ contributor's authorship and credit.
 ## 9. Keep the docs in sync (required)
 
 Update the instructions affected by a behavior change in the same contribution.
-Player workflows belong in the website guide; installation belongs in the root
+Player workflows belong in the website guide in the snapmap-web repository
+(https://www.snapmapplus.com/snapmap-plus-guide.html); installation belongs in the root
 and installer READMEs; build, test and release procedures belong here; service
 or credential changes belong in [services.md](services.md).
 
@@ -436,8 +434,7 @@ Entry points, relevant commands, constraints, and links to detailed guidance.
 Add focused sections when a component needs setup or usage instructions. Keep
 file lists selective and responsibilities precise; avoid repeating full feature
 inventories in several READMEs. Generated build outputs and dependency caches
-do not need repository documentation. Website READMEs are contributor files and
-are excluded from the published site.
+do not need repository documentation.
 
 Comments should explain a non-obvious decision, contract, limit or failure mode.
 Keep ABI offsets, ownership, thread requirements and porting clues that a reader
@@ -475,7 +472,7 @@ release. **Do not open a public issue for a security problem.** Use GitHub's **p
 | `docs/` | contributor guides and cross-component contracts, indexed in [README.md](README.md) |
 | `build.ps1` | compile the DLLs → `build/` (backend + frontend; `-BackendOnly` for backend alone) |
 | `package.ps1` | assemble the deployable overlay → `dist/` (the two clone DLLs) |
-| `.github/workflows/` | `ci.yml` (the PR gate) · `prepare-release.yml` (drafts a release's notes) · `release.yml` (tag-triggered release) · `pages.yml` (the website) |
+| `.github/workflows/` | `ci.yml` (the PR gate) · `prepare-release.yml` (drafts a release's notes) · `release.yml` (tag-triggered release) |
 | `LICENSE` | MIT |
 
 ## 13. Glossary

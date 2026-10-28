@@ -6,7 +6,7 @@ Contains maintainer tools for release notes, frontend assets and portable engine
 
 ## Contents
 
-- `changelog.py` parses and validates `CHANGELOG.md` and emits website data.
+- `changelog.py` parses and validates `CHANGELOG.md` and extracts a release's notes.
 - `draft_changelog.py` prepares release-note drafts for review.
 - `sync_release_notes.py` synchronizes reviewed notes to GitHub releases.
 - `update-avatar.ps1` deliberately refreshes the embedded organization avatar; normal builds use committed assets.

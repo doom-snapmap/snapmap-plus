@@ -13,7 +13,7 @@ Checks native helpers, engine-interface contracts, frontend JavaScript and optio
   runs JavaScript when `-Only` is absent. Unknown names or conflicting selectors
   fail; the default continues to run every suite.
 - `*_test.c` and `*_test.cpp` exercise runtime helpers and source contracts.
-- `*_test.js` checks page behavior, browser modules and Worker services.
+- `*_test.js` checks page behavior, browser modules and the feedback relay.
 - `nav_menu_test.c` checks native action ordering, progress and completion,
   repeated requests, cancellation, and rollback after a partial installation.
   `nav_bake_test.c` collects background builds without preview drawing.
@@ -62,7 +62,7 @@ Checks native helpers, engine-interface contracts, frontend JavaScript and optio
 
 From the repository root, run `powershell -NoProfile -ExecutionPolicy Bypass -File tests/run-tests.ps1` with Node 22.13 or newer installed. Build outputs go to ignored `tests/obj/`.
 
-The Worker runtime suite uses local storage and a GitHub mock. Install its pinned
+The Worker runtime suite runs the feedback relay under Miniflare against a GitHub mock. Install its pinned
 dependency with `npm install --prefix build/worker-tests --no-audit --no-fund --no-package-lock miniflare@4.20260730.0`, then run
 `node tests/worker_runtime_test.js build/worker-tests/node_modules/miniflare`.
 

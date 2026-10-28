@@ -52,7 +52,7 @@ snapmap-plus uninstall
 
 Close DOOM before installing or updating. Launch it afterward and enter SnapMap;
 run `sh` in the game console if the companion window does not open. See the
-[player guide](site/snapmap-plus-guide.md).
+[player guide](https://www.snapmapplus.com/snapmap-plus-guide.html).
 
 The installer and player data live under `%LOCALAPPDATA%\snapmap-plus`.
 Uninstall restores recorded backups and preserves settings, overrides, prefabs

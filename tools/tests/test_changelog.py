@@ -1,6 +1,5 @@
 """Tests for tools/changelog.py. Stdlib unittest -- no pytest dependency."""
 
-import json
 import pathlib
 import subprocess
 import sys
@@ -127,16 +126,6 @@ class TestCli(unittest.TestCase):
             r = self._run("--section", "v9.9.9", "--out", str(out))
             self.assertEqual(r.returncode, 1)
             self.assertIn("v9.9.9", r.stderr)
-
-    def test_json_shape(self):
-        with tempfile.TemporaryDirectory() as d:
-            out = pathlib.Path(d) / "changelog.json"
-            self.assertEqual(self._run("--json", "--out", str(out)).returncode, 0)
-            data = json.loads(out.read_text(encoding="utf-8"))
-            self.assertEqual(data[0]["tag"], "v0.2.1")
-            self.assertEqual(data[1]["added"][0],
-                             "Install everything a map needs from one prompt.")
-            self.assertEqual(data[0]["body"], changelog.parse(VALID)[0]["body"])
 
     def test_has_exit_codes(self):
         self.assertEqual(self._run("--has", "v0.2.1").returncode, 0)
