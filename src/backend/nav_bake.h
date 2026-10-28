@@ -202,6 +202,10 @@ void sh_nav_bake_test_preview_outcome(int slot, int state, const char *brief);
 /* The full reason and payload length of the last sh_nav_bake_test_run. */
 const char *sh_nav_bake_test_last_reason(void);
 size_t      sh_nav_bake_test_last_length(void);
+/* Lower the bake cache budget (0 restores it); returns the previous one. */
+size_t sh_nav_bake_test_set_cache_budget(size_t bytes);
+void   sh_nav_bake_test_cache_stats(int *entries, size_t *bytes, unsigned long *served,
+                                    unsigned long *evicted, unsigned long *declined);
 #endif
 
 #endif /* SNAPMAP_PLUS_NAV_BAKE_H */

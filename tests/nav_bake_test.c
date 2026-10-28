@@ -1149,6 +1149,273 @@ static void test_plans_past_the_old_tables(void)
     free(json);
 }
 
+/* ---- the bake cache ---------------------------------------------------- */
+
+/* Two rooms of three 64 x 64 boxes each, built directly, with knobs for the
+ * edits the cache must notice. Box `move_box` of room `move_room` is moved by
+ * `move` units; room 1 sits at `room1_x` turned by `room1_turn`. */
+static struct {
+    int reversed, move_room, move_box, unflag_room, extra_room;
+    float move, room1_x;
+    int room1_turn;
+} g_two;
+static int snapshot_two(sh_nav_map *out, void *ctx)
+{
+    int room, i, k, n = 0;
+    (void)ctx;
+    memset(out, 0, sizeof *out);
+    out->instances = (sh_nav_instance *)calloc(2, sizeof *out->instances);
+    out->regions = (sh_nav_region *)calloc(8, sizeof *out->regions);
+    if (!out->instances || !out->regions) return 0;
+    out->instance_count = out->instance_cap = 2;
+    out->region_cap = 8;
+    for (room = 0; room < 2; room++) {
+        strcpy_s(out->instances[room].module, sizeof out->instances[room].module, "ind_dlc/room");
+        out->instances[room].origin[0] = room ? g_two.room1_x : 0.0f;
+        out->instances[room].orientation = room ? g_two.room1_turn : 0;
+    }
+    for (i = 0; i < 8; i++) {
+        int slot = g_two.reversed ? 7 - i : i;
+        int r = slot / 4, box = slot % 4;
+        sh_nav_region *g;
+        float x, sq[4][2] = {{0, 64}, {64, 64}, {64, 0}, {0, 0}};
+        if (box == 3 && g_two.extra_room != r + 1) continue;
+        g = &out->regions[n];
+        x = -900.0f + (float)box * 300.0f +
+            (r == g_two.move_room && box == g_two.move_box ? g_two.move : 0.0f);
+        for (k = 0; k < 4; k++) {
+            g->c[k][0] = x + sq[k][0]; g->c[k][1] = sq[k][1]; g->c[k][2] = 64.0f;
+        }
+        g->n[2] = 1.0f; g->face = 4; g->depth = 64.0f; g->instance = r;
+        g->block_demons = !(g_two.unflag_room == r + 1 && box == 0);
+        g->marked = 1;
+        g->entity = 10u + (unsigned)(g_two.reversed ? 7 - i : i);
+        out->instances[r].region_count++;
+        n++;
+    }
+    out->region_count = n;
+    return 1;
+}
+
+/* The fixture module for every class, and nothing for the traversal table. */
+static int g_module_reads;
+static unsigned char *fixture_reader(const char *name, size_t *out_len)
+{
+    unsigned char *module, *copy;
+    size_t len = 0;
+    if (out_len) *out_len = 0;
+    if (!strstr(name, "aas_monster")) return NULL;
+    module = fixture_module(&len);
+    if (!module) return NULL;
+    copy = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, len);
+    if (copy) memcpy(copy, module, len);
+    free(module);
+    if (copy && out_len) *out_len = len;
+    g_module_reads++;
+    return copy;
+}
+
+static const char *CLASS_NAMES[3] = {
+    "maps/modules/ind_dlc/room/room.aas_monster48",
+    "maps/modules/ind_dlc/room/room.aas_monster96",
+    "maps/modules/ind_dlc/room/room.aas_monster128",
+};
+
+/* One Play: every class of every room through the private names, as BuildAAS
+ * asks. Returns how many loads ran a bake; `served` gets how many came back. */
+static int play_once(int *served)
+{
+    int room, ci, baked = 0;
+    *served = 0;
+    sh_nav_bake_build_begin();
+    for (room = 0; room < 2; room++)
+        for (ci = 0; ci < 3; ci++) {
+            char name[384];
+            unsigned char *bytes = NULL;
+            size_t len = 0;
+            if (!sh_nav_bake_instance_name(room, CLASS_NAMES[ci], name, sizeof name)) continue;
+            g_log_count = 0;
+            if (sh_nav_bake_open(name, fixture_reader, &bytes, &len) && bytes && len) (*served)++;
+            if (log_contains("NAV: baked '")) baked++;
+            if (bytes) HeapFree(GetProcessHeap(), 0, bytes);
+        }
+    sh_nav_bake_build_end();
+    return baked;
+}
+
+/* An unchanged map is served at the next Play for every class; an edit bakes
+ * again exactly the room it touched. */
+static void test_play_reuses_every_class_of_an_unchanged_copy(void)
+{
+    int served, baked, entries;
+    unsigned long hits;
+    printf("an unchanged copy is served from the bake cache for all three classes\n");
+    sh_nav_bake_test_reset(); sh_nav_bake_enable_instances(1);
+    memset(&g_two, 0, sizeof g_two);
+    g_two.move_room = -1; g_two.room1_x = 8192.0f;
+    sh_nav_bake_set_snapshot(snapshot_two, NULL);
+    sh_nav_bake_refresh_live();
+
+    baked = play_once(&served);
+    CHECK_MSG(baked == 6 && served == 6, "the first Play bakes two rooms by three classes");
+    sh_nav_bake_test_cache_stats(&entries, NULL, &hits, NULL, NULL);
+    CHECK(entries == 6 && hits == 0);
+
+    /* Play again with nothing changed, in the converted order. */
+    g_two.reversed = 1;
+    baked = play_once(&served);
+    CHECK_MSG(baked == 0 && served == 6, "the second Play bakes nothing and serves everything");
+    CHECK(log_contains("NAV: reused '") && log_contains("from an earlier bake of the same boxes"));
+
+    /* A map reload (a launch outside the editor sets the map again) keeps it. */
+    sh_nav_bake_set_snapshot(NULL, NULL);
+    sh_nav_bake_set_map(NULL, 0);
+    sh_nav_bake_set_snapshot(snapshot_two, NULL);
+    baked = play_once(&served);
+    CHECK_MSG(baked == 0 && served == 6, "a reload of the same map is served too");
+
+    /* Moving one box of room 1 bakes room 1's three classes and serves room 0. */
+    g_two.move_room = 1; g_two.move_box = 1; g_two.move = 64.0f;
+    baked = play_once(&served);
+    CHECK_MSG(baked == 3 && served == 6, "a moved box re-bakes its own copy only");
+    baked = play_once(&served);
+    CHECK_MSG(baked == 0 && served == 6, "and the Play after is served again");
+
+    /* Moving it back is the first shape again, which is still kept. */
+    g_two.move = 0.0f;
+    baked = play_once(&served);
+    CHECK_MSG(baked == 0, "the previous shape of a copy is still kept");
+
+    /* An added box, a reflagged box, a moved room and a turned room each bake
+     * the room they touch and nothing else. */
+    g_two.extra_room = 1;
+    baked = play_once(&served);
+    CHECK_MSG(baked == 3, "an added box re-bakes room 0 only");
+    g_two.extra_room = 0;
+    CHECK(play_once(&served) == 0);   /* removed again: the kept first shape */
+    g_two.unflag_room = 2;
+    baked = play_once(&served);
+    CHECK_MSG(baked == 3, "a box losing Block Demons re-bakes room 1 only");
+    g_two.unflag_room = 0;
+    g_two.room1_x = 8192.0f + 1024.0f;
+    baked = play_once(&served);
+    CHECK_MSG(baked == 3, "a moved room re-bakes that room only");
+    g_two.room1_turn = 1;
+    baked = play_once(&served);
+    CHECK_MSG(baked == 3, "a turned room re-bakes that room only");
+    sh_nav_bake_set_snapshot(NULL, NULL);
+    sh_nav_bake_test_reset();
+}
+
+/* The preview fills the cache for monster48, and an edit to one copy rebuilds
+ * only that copy's preview; Play then serves the larger classes it baked. */
+static void test_preview_and_play_share_the_cache(void)
+{
+    int served, baked, ready;
+    ULONGLONG deadline;
+    printf("the preview and Play share the bake cache\n");
+    sh_nav_bake_test_reset(); sh_nav_bake_enable_instances(1);
+    memset(&g_two, 0, sizeof g_two);
+    g_two.move_room = -1; g_two.room1_x = 8192.0f;
+    sh_nav_bake_set_snapshot(snapshot_two, NULL);
+    sh_nav_bake_refresh_live();
+    deadline = GetTickCount64() + 10000;
+    do { Sleep(1); ready = sh_nav_bake_prepare(fixture_reader); }
+    while (ready == 0 && GetTickCount64() < deadline);
+    CHECK(ready == 1);
+    baked = play_once(&served);
+    CHECK_MSG(baked == 4 && served == 6, "monster48 comes from the preview, the rest bake");
+    /* Edit room 1, then Build Navmesh: the preview serves room 0 from the cache. */
+    g_two.move_room = 1; g_two.move_box = 0; g_two.move = 64.0f;
+    sh_nav_bake_refresh_live();
+    g_log_count = 0;
+    deadline = GetTickCount64() + 10000;
+    do { Sleep(1); ready = sh_nav_bake_prepare(fixture_reader); }
+    while (ready == 0 && GetTickCount64() < deadline);
+    CHECK(ready == 1);
+    CHECK(log_contains("preview reused 1 of 2"));
+    baked = play_once(&served);
+    CHECK_MSG(baked == 2 && served == 6, "only room 1's larger classes bake at Play");
+    sh_nav_bake_set_snapshot(NULL, NULL);
+    sh_nav_bake_test_reset();
+}
+
+/* A refusal is still remembered per copy and class at its revision, and it
+ * leaves the cached classes of that copy alone. */
+static void test_refusal_memory_survives_the_cache(void)
+{
+    int served, baked;
+    char name[384];
+    printf("a refused class is not baked again and does not disturb the cache\n");
+    sh_nav_bake_test_reset(); sh_nav_bake_enable_instances(1);
+    memset(&g_two, 0, sizeof g_two);
+    g_two.move_room = -1; g_two.room1_x = 8192.0f;
+    sh_nav_bake_set_snapshot(snapshot_two, NULL);
+    sh_nav_bake_refresh_live();
+    CHECK(play_once(&served) == 6);
+    /* monster96 of copy 0 refuses at this geometry: no private name, no bake. */
+    sh_nav_bake_test_refuse_class(1, "navigation tree deeper than 128");
+    CHECK(!sh_nav_bake_instance_name(0, CLASS_NAMES[1], name, sizeof name));
+    baked = play_once(&served);
+    CHECK_MSG(baked == 0 && served == 5, "the refused class is skipped, the rest are served");
+    /* An edit elsewhere is a new revision: the class may try again, and its
+     * unchanged boxes are served from the cache rather than baked. */
+    g_two.move_room = 1; g_two.move_box = 2; g_two.move = 32.0f;
+    sh_nav_bake_refresh_live();
+    CHECK(sh_nav_bake_instance_name(0, CLASS_NAMES[1], name, sizeof name));
+    baked = play_once(&served);
+    CHECK(baked == 3 && served == 6);
+    sh_nav_bake_set_snapshot(NULL, NULL);
+    sh_nav_bake_test_reset();
+}
+
+/* The cache keeps to its budget: older shapes go first, and a pass that needs
+ * more than the budget keeps a stable part instead of evicting its own. */
+static void test_cache_keeps_to_its_budget(void)
+{
+    int served, entries, first;
+    size_t bytes, one;
+    unsigned long evicted, declined;
+    printf("the bake cache keeps to its memory budget\n");
+    sh_nav_bake_test_reset(); sh_nav_bake_enable_instances(1);
+    memset(&g_two, 0, sizeof g_two);
+    g_two.move_room = -1; g_two.room1_x = 8192.0f;
+    sh_nav_bake_set_snapshot(snapshot_two, NULL);
+    sh_nav_bake_refresh_live();
+    play_once(&served);
+    sh_nav_bake_test_cache_stats(&entries, &bytes, NULL, NULL, NULL);
+    CHECK(entries == 6 && bytes > 0);
+    one = bytes / 6;
+    /* Room for about four entries. */
+    sh_nav_bake_test_reset(); sh_nav_bake_enable_instances(1);
+    sh_nav_bake_set_snapshot(snapshot_two, NULL);
+    sh_nav_bake_refresh_live();
+    sh_nav_bake_test_set_cache_budget(one * 4 + one / 2);
+    g_log_count = 0;
+    first = play_once(&served);
+    CHECK(first == 6 && served == 6);
+    sh_nav_bake_test_cache_stats(&entries, &bytes, NULL, &evicted, &declined);
+    CHECK_MSG(entries == 4 && declined == 2 && evicted == 0,
+              "what does not fit is not kept; nothing this Play uses is evicted");
+    CHECK(bytes <= one * 4 + one / 2);
+    /* The next Play serves the same four and bakes the same two: stable. */
+    CHECK(play_once(&served) == 2);
+    sh_nav_bake_test_cache_stats(&entries, NULL, NULL, &evicted, NULL);
+    CHECK(entries == 4 && evicted == 0);
+    /* A new shape for room 1 evicts the oldest entries of the earlier Play. */
+    g_two.move_room = 1; g_two.move_box = 0; g_two.move = 64.0f;
+    play_once(&served);
+    sh_nav_bake_test_cache_stats(&entries, &bytes, NULL, &evicted, NULL);
+    CHECK(entries <= 4 && evicted > 0);
+    CHECK(bytes <= one * 4 + one / 2);
+    /* Source invalidation empties it. */
+    sh_nav_bake_invalidate_sources();
+    sh_nav_bake_test_cache_stats(&entries, &bytes, NULL, NULL, NULL);
+    CHECK(entries == 0 && bytes == 0);
+    sh_nav_bake_set_snapshot(NULL, NULL);
+    sh_nav_bake_test_reset();
+}
+
 int main(void)
 {
     printf("nav_bake_test\n");
@@ -1180,6 +1447,10 @@ int main(void)
     test_tree_depth_limit_keeps_most_floors();
     test_payload_cap_thins_instead_of_refusing();
     test_unmeasured_box_does_not_block_a_build();
+    test_play_reuses_every_class_of_an_unchanged_copy();
+    test_preview_and_play_share_the_cache();
+    test_refusal_memory_survives_the_cache();
+    test_cache_keeps_to_its_budget();
     sh_nav_bake_preview_stop();
     printf("%s -- %d checks, %d failed\n", g_fail ? "FAILED" : "ok", g_checks, g_fail);
     return g_fail ? 1 : 0;

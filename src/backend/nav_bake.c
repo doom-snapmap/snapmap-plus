@@ -75,6 +75,8 @@ static int g_live_refused;        /* the read declined to commit */
 static const char *g_read_reason = "";  /* why, when it declined */
 
 static void bake_plan_locked(void);
+static void bake_cache_clear(void);
+static void bake_cache_begin_pass(void);
 
 /* The live-editor surface, registered once at startup. */
 static sh_nav_bake_entity_count g_live_count;
@@ -208,6 +210,7 @@ static void bake_invalidate_sources_locked(void)
 {
     g_geometry_revision++;
     bake_preview_clear();
+    bake_cache_clear();   /* the shipped files and traversal table may differ now */
     sh_trav_invalidate();
     if (g_have_map && !g_live_refused) bake_plan_locked();
 }
@@ -228,6 +231,9 @@ void sh_nav_bake_build_begin(void)
     /* Play is about to convert the map: bake every box that can be measured
      * rather than none. */
     sh_nav_bake_refresh_live_partial();
+    AcquireSRWLockExclusive(&g_bake_lock);
+    bake_cache_begin_pass();
+    ReleaseSRWLockExclusive(&g_bake_lock);
     InterlockedExchange(&g_building, 1);
 }
 
@@ -1287,17 +1293,246 @@ static void bake_run(const char *name, const sh_aug_platform *in_plats, int in_c
     if (subset) HeapFree(GetProcessHeap(), 0, subset);
 }
 
-/* Bake one class inline, for BuildAAS. Inputs are gathered here, on the
- * thread that holds the bake lock; the scratch lives on the heap, not on the
- * loader thread's stack. */
-static void bake_one(const char *name, const bake_module *m, sh_nav_bake_reader read_shipped,
-                     bake_outcome *o, int *traversal)
+/* ==================================================================== */
+/* the bake cache                                                        */
+/* ==================================================================== */
+
+/* Successful class bakes, kept across Plays, map reloads and launches so a copy
+ * whose boxes have not changed is served instead of baked again. An entry is
+ * keyed by what bake_run reads: the module and class, the shipped file (its
+ * length and a 64-bit hash), whether a traversal table was loaded, and the
+ * copy's room and boxes. Boxes are compared with sh_nav_map_same_shapes, the
+ * comparison the preview uses, on a one-room map of that copy alone, so an edit
+ * to one copy leaves every other copy's entries matching.
+ *
+ * Memory: at most BAKE_CACHE_BUDGET bytes of payloads, box tables and marks,
+ * and BAKE_CACHE_MAX_ENTRIES entries. A new entry evicts the least recently
+ * used ones, but never one used since the current pass began (a Play or a
+ * preview gather): when everything the current pass needs does not fit, the
+ * newest bake is not kept rather than evicting one this same pass serves, so
+ * a map larger than the budget keeps a stable part of itself cached instead of
+ * every entry pushing out the next. Refusals are not kept here; the
+ * per-revision refusal memory in bake_class handles them. */
+#define BAKE_CACHE_BUDGET      ((size_t)128 * 1024 * 1024)
+#define BAKE_CACHE_MAX_ENTRIES 1024
+
+typedef struct bake_cache_key {
+    char               module[SH_NAVR_MODULE_CAP];
+    int                cls;
+    unsigned long long shipped_hash;
+    size_t             shipped_len;
+    int                traversal;
+    sh_nav_map         shapes;     /* one room, index 0, and its boxes */
+} bake_cache_key;
+
+typedef struct bake_cache_entry {
+    bake_cache_key     key;
+    unsigned char     *bytes;      /* process heap */
+    size_t             length;
+    unsigned           first_area;
+    int                state;
+    char               reason[BAKE_REASON_CAP];
+    char               brief[BAKE_BRIEF_CAP];
+    bake_refused       partial[BAKE_MAX_REFUSED];
+    int                partial_count;
+    size_t             cost;
+    unsigned long long used;       /* g_cache_clock at the last store or hit */
+} bake_cache_entry;
+
+static bake_cache_entry  **g_cache;
+static int                 g_cache_count;
+static size_t              g_cache_bytes;
+static size_t              g_cache_budget = BAKE_CACHE_BUDGET;
+static unsigned long long  g_cache_clock, g_cache_pass;
+static unsigned long       g_cache_hits, g_cache_stores, g_cache_evicted, g_cache_declined;
+static int                 g_cache_full_logged;
+
+static unsigned long long bake_hash(const unsigned char *p, size_t n)
+{
+    unsigned long long h = 1469598103934665603ULL;
+    size_t i;
+    for (i = 0; i < n; i++) { h ^= p[i]; h *= 1099511628211ULL; }
+    return h;
+}
+
+static void bake_cache_key_free(bake_cache_key *k) { sh_nav_map_free(&k->shapes); }
+
+/* The copy's room and every box it owns, renumbered as room 0. */
+static int bake_copy_shapes(const bake_module *m, sh_nav_map *out)
+{
+    int i, nr = 0, no = 0;
+    memset(out, 0, sizeof *out);
+    if (m->instance < 0 || m->instance >= g_map.instance_count) return 0;
+    for (i = 0; i < g_map.region_count; i++) if (g_map.regions[i].instance == m->instance) nr++;
+    for (i = 0; i < g_map.obstacle_count; i++) if (g_map.obstacles[i].instance == m->instance) no++;
+    out->instances = (sh_nav_instance *)malloc(sizeof *out->instances);
+    out->regions = (sh_nav_region *)malloc((size_t)(nr ? nr : 1) * sizeof *out->regions);
+    out->obstacles = (sh_nav_region *)malloc((size_t)(no ? no : 1) * sizeof *out->obstacles);
+    if (!out->instances || !out->regions || !out->obstacles) { sh_nav_map_free(out); return 0; }
+    out->instances[0] = g_map.instances[m->instance];
+    out->instance_count = out->instance_cap = 1;
+    out->region_cap = nr ? nr : 1; out->obstacle_cap = no ? no : 1;
+    for (i = 0; i < g_map.region_count; i++)
+        if (g_map.regions[i].instance == m->instance) {
+            out->regions[out->region_count] = g_map.regions[i];
+            out->regions[out->region_count++].instance = 0;
+        }
+    for (i = 0; i < g_map.obstacle_count; i++)
+        if (g_map.obstacles[i].instance == m->instance) {
+            out->obstacles[out->obstacle_count] = g_map.obstacles[i];
+            out->obstacles[out->obstacle_count++].instance = 0;
+        }
+    return 1;
+}
+
+static int bake_cache_key_make(bake_cache_key *k, const bake_module *m, int ci,
+                               const unsigned char *shipped, size_t shipped_len,
+                               int traversal)
+{
+    memset(k, 0, sizeof *k);
+    strncpy_s(k->module, sizeof k->module, m->module, _TRUNCATE);
+    k->cls = ci;
+    k->shipped_len = shipped ? shipped_len : 0;
+    k->shipped_hash = shipped ? bake_hash(shipped, shipped_len) : 0;
+    k->traversal = traversal;
+    return bake_copy_shapes(m, &k->shapes);
+}
+
+/* Called with the bake lock held. `k->shapes` may be reordered by a match. */
+static bake_cache_entry *bake_cache_find(bake_cache_key *k)
+{
+    int i;
+    for (i = 0; i < g_cache_count; i++) {
+        bake_cache_entry *e = g_cache[i];
+        if (e->key.cls != k->cls || e->key.shipped_len != k->shipped_len ||
+            e->key.shipped_hash != k->shipped_hash || e->key.traversal != k->traversal ||
+            e->key.shapes.region_count != k->shapes.region_count ||
+            e->key.shapes.obstacle_count != k->shapes.obstacle_count ||
+            strcmp(e->key.module, k->module))
+            continue;
+        if (sh_nav_map_same_shapes(&e->key.shapes, &k->shapes)) {
+            e->used = ++g_cache_clock;
+            return e;
+        }
+    }
+    return NULL;
+}
+
+static void bake_cache_drop(int i)
+{
+    bake_cache_entry *e = g_cache[i];
+    g_cache_bytes -= e->cost;
+    if (e->bytes) HeapFree(GetProcessHeap(), 0, e->bytes);
+    bake_cache_key_free(&e->key);
+    free(e);
+    g_cache[i] = g_cache[--g_cache_count];
+}
+
+static void bake_cache_clear(void)
+{
+    while (g_cache_count) bake_cache_drop(g_cache_count - 1);
+    free(g_cache); g_cache = NULL;
+    g_cache_bytes = 0; g_cache_full_logged = 0;
+}
+
+/* A new pass (a Play, or a preview gather) starts: what it uses is protected. */
+static void bake_cache_begin_pass(void)
+{
+    g_cache_pass = ++g_cache_clock;
+    g_cache_full_logged = 0;
+}
+
+/* Fill an outcome from an entry, as bake_run would have. 0 on allocation failure. */
+static int bake_cache_serve(const bake_cache_entry *e, bake_outcome *o)
+{
+    memset(o, 0, sizeof *o);
+    o->bytes = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, e->length ? e->length : 1);
+    if (!o->bytes) return 0;
+    memcpy(o->bytes, e->bytes, e->length);
+    o->length = e->length;
+    o->first_area = e->first_area;
+    o->state = e->state;
+    strcpy_s(o->reason, sizeof o->reason, e->reason);
+    strcpy_s(o->brief, sizeof o->brief, e->brief);
+    memcpy(o->partial, e->partial, sizeof o->partial);
+    o->partial_count = e->partial_count;
+    g_cache_hits++;
+    return 1;
+}
+
+/* Keep a successful outcome under `k`, whose shapes move into the entry. */
+static void bake_cache_store(bake_cache_key *k, const bake_outcome *o)
+{
+    bake_cache_entry *e;
+    size_t cost;
+    if (!o->bytes || o->state == SH_NAV_CLASS_REFUSED) return;
+    if (bake_cache_find(k)) return;   /* already kept, now touched */
+    cost = sizeof *e + o->length + sh_nav_map_bytes(&k->shapes);
+    while (g_cache_count >= BAKE_CACHE_MAX_ENTRIES || g_cache_bytes + cost > g_cache_budget) {
+        int i, oldest = -1;
+        for (i = 0; i < g_cache_count; i++)
+            if (g_cache[i]->used < g_cache_pass &&
+                (oldest < 0 || g_cache[i]->used < g_cache[oldest]->used)) oldest = i;
+        if (oldest < 0) break;
+        bake_cache_drop(oldest);
+        g_cache_evicted++;
+    }
+    if (g_cache_count >= BAKE_CACHE_MAX_ENTRIES || g_cache_bytes + cost > g_cache_budget) {
+        g_cache_declined++;
+        if (!g_cache_full_logged) {
+            char line[256];
+            g_cache_full_logged = 1;
+            _snprintf_s(line, sizeof line, _TRUNCATE,
+                        "NAV: the bake cache is full (%d payload(s), %.1f of %.0f MiB, all "
+                        "in use by this pass); a %.1f MiB bake is not kept and is baked again "
+                        "next time", g_cache_count, g_cache_bytes / 1048576.0,
+                        g_cache_budget / 1048576.0, o->length / 1048576.0);
+            backend_log(line);
+        }
+        return;
+    }
+    if (!(g_cache_count & 63)) {
+        bake_cache_entry **grown = (bake_cache_entry **)realloc(
+            g_cache, (size_t)(g_cache_count + 64) * sizeof *grown);
+        if (!grown) return;
+        g_cache = grown;
+    }
+    e = (bake_cache_entry *)calloc(1, sizeof *e);
+    if (!e) return;
+    e->bytes = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, o->length ? o->length : 1);
+    if (!e->bytes) { free(e); return; }
+    memcpy(e->bytes, o->bytes, o->length);
+    e->key = *k;
+    memset(&k->shapes, 0, sizeof k->shapes);
+    e->length = o->length;
+    e->first_area = o->first_area;
+    e->state = o->state;
+    strcpy_s(e->reason, sizeof e->reason, o->reason);
+    strcpy_s(e->brief, sizeof e->brief, o->brief);
+    memcpy(e->partial, o->partial, sizeof e->partial);
+    e->partial_count = o->partial_count;
+    e->cost = cost;
+    e->used = ++g_cache_clock;
+    g_cache[g_cache_count++] = e;
+    g_cache_bytes += cost;
+    g_cache_stores++;
+}
+
+/* Bake one class inline, for BuildAAS, or serve the same boxes' earlier bake.
+ * Inputs are gathered here, on the thread that holds the bake lock; the
+ * scratch lives on the heap, not on the loader thread's stack. Sets *reused
+ * when the outcome came from the cache. */
+static void bake_one(const char *name, const bake_module *m, int ci,
+                     sh_nav_bake_reader read_shipped, bake_outcome *o, int *traversal,
+                     int *reused)
 {
     unsigned char *shipped = NULL;
     size_t shipped_len = 0;
     sh_aug_platform *plats;
-    int n, left_out, not_floor;
+    bake_cache_key key;
+    int n, left_out, not_floor, keyed = 0;
     *traversal = 0;
+    *reused = 0;
 
     plats = bake_collect_platforms(m, &n, &left_out, &not_floor);
     /* Load traversal animations lazily through the active provider;
@@ -1310,7 +1545,18 @@ static void bake_one(const char *name, const bake_module *m, sh_nav_bake_reader 
         shipped = read_shipped ? read_shipped(name, &shipped_len) : NULL;
         SH_PERF_END(SH_PERF_BAKE_READ, tr);
     }
-    bake_run(name, plats, n, shipped, shipped_len, left_out, not_floor, o);
+    if (n && shipped) {
+        keyed = bake_cache_key_make(&key, m, ci, shipped, shipped_len, *traversal);
+        if (keyed) {
+            bake_cache_entry *e = bake_cache_find(&key);
+            if (e && bake_cache_serve(e, o)) *reused = 1;
+        }
+    }
+    if (!*reused) {
+        bake_run(name, plats, n, shipped, shipped_len, left_out, not_floor, o);
+        if (keyed) bake_cache_store(&key, o);
+    }
+    if (keyed) bake_cache_key_free(&key);
     if (shipped) HeapFree(GetProcessHeap(), 0, shipped);
     if (plats) HeapFree(GetProcessHeap(), 0, plats);
 }
@@ -1382,6 +1628,7 @@ typedef struct preview_task {
     unsigned char   *shipped;
     size_t           shipped_len;
     int              traversal;
+    int              cached;                 /* out came from the bake cache */
     bake_outcome     out;                    /* what the worker produced */
 } preview_task;
 
@@ -1425,6 +1672,7 @@ static void preview_batch_run(preview_batch *b)
     SH_PERF_BEGIN(t0);
     for (i = 0; i < b->count; i++) {
         preview_task *t = &b->t[i];
+        if (t->cached) continue;
         bake_run(t->name, t->plats, t->plat_count, t->shipped, t->shipped_len,
                  t->left_out, t->not_floor, &t->out);
     }
@@ -1530,6 +1778,7 @@ static preview_batch *preview_gather(sh_nav_bake_reader read_shipped)
     b = preview_batch_alloc(g_module_count);
     if (!b) return NULL;
     b->revision = g_geometry_revision;
+    bake_cache_begin_pass();
 
     /* Cached until its sources are invalidated; without it no climbs are emitted.
      * It reads effective resources, so it cannot go to the worker. */
@@ -1555,6 +1804,17 @@ static preview_batch *preview_gather(sh_nav_bake_reader read_shipped)
             SH_PERF_BEGIN(tr);
             t->shipped = read_shipped ? read_shipped(t->name, &t->shipped_len) : NULL;
             SH_PERF_END(SH_PERF_BAKE_READ, tr);
+        }
+        /* A copy whose boxes were baked before needs no worker time: an edit
+         * to one copy rebuilds that copy's preview only. */
+        if (t->plat_count > 0 && t->shipped) {
+            bake_cache_key key;
+            if (bake_cache_key_make(&key, &g_modules[i], 0, t->shipped, t->shipped_len,
+                                    traversal)) {
+                bake_cache_entry *e = bake_cache_find(&key);
+                if (e && bake_cache_serve(e, &t->out)) t->cached = 1;
+            }
+            bake_cache_key_free(&key);
         }
     }
     return b;
@@ -1583,12 +1843,21 @@ static void bake_class_set(bake_class *k, const bake_outcome *o)
  * a later edit describes a map that no longer exists. */
 static void preview_install(preview_batch *b)
 {
-    int i;
+    int i, served = 0;
     if (b->revision != g_geometry_revision) return;
     for (i = 0; i < b->count; i++) {
         preview_task *t = &b->t[i];
         bake_preview_cache *pc;
         if (t->slot < 0 || t->slot >= g_module_count) continue;
+        if (t->cached) served++;
+        else if (t->out.bytes && t->shipped) {
+            /* The geometry is the one gathered (same revision), so the key is too. */
+            bake_cache_key key;
+            if (bake_cache_key_make(&key, &g_modules[t->slot], 0, t->shipped,
+                                    t->shipped_len, t->traversal))
+                bake_cache_store(&key, &t->out);
+            bake_cache_key_free(&key);
+        }
         pc = &g_preview[t->slot];
         if (pc->bytes) HeapFree(GetProcessHeap(), 0, pc->bytes);
         if (pc->refused) HeapFree(GetProcessHeap(), 0, pc->refused);
@@ -1623,6 +1892,13 @@ static void preview_install(preview_batch *b)
                         t->instance, t->name, t->out.brief);
             backend_log(message);
         }
+    }
+    if (served) {
+        char message[128];
+        _snprintf_s(message, sizeof message, _TRUNCATE,
+                    "NAV: preview reused %d of %d copy bake(s) whose boxes are unchanged",
+                    served, b->count);
+        backend_log(message);
     }
     g_preview_revision = b->revision;
 }
@@ -1783,7 +2059,7 @@ int sh_nav_bake_open(const char *name, sh_nav_bake_reader read_shipped,
     char module[SH_NAVR_MODULE_CAP], cls[32];
     char why[BAKE_REASON_CAP], skipped[BAKE_REASON_CAP];
     bake_module *m;
-    int hit = 0, i, ci, instance=-1, attempted=0, partial=0;
+    int hit = 0, i, ci, instance=-1, attempted=0, partial=0, reused=0;
     unsigned long revision=0;
     char canonical[384], source[SH_SMNAV_RESNAME_CAP];
     int traversal = 0;
@@ -1849,7 +2125,7 @@ int sh_nav_bake_open(const char *name, sh_nav_bake_reader read_shipped,
             if(*out_bytes){memcpy(*out_bytes,g_preview[slot].bytes,g_preview[slot].length);
                 *out_len=g_preview[slot].length;hit=1;
                 strcpy_s(source, sizeof(source), g_preview[slot].source);
-                traversal = g_preview[slot].traversal;}
+                traversal = g_preview[slot].traversal;reused=2;}
             strncpy_s(why,sizeof why,k->reason[0]?k->reason:m->reason,_TRUNCATE);
             partial = g_preview[slot].state == SH_NAV_CLASS_PARTIAL;
         } else if (bake_class_refused_locked(m, ci)) {
@@ -1874,7 +2150,7 @@ int sh_nav_bake_open(const char *name, sh_nav_bake_reader read_shipped,
                 if (!o) {
                     strcpy_s(why, sizeof why, "out of memory");
                 } else {
-                    bake_one(name, m, read_shipped, o, &traversal);
+                    bake_one(name, m, ci, read_shipped, o, &traversal, &reused);
                     bake_class_set(k, o);
                     strncpy_s(why, sizeof why, o->reason, _TRUNCATE);
                     if (o->bytes) {
@@ -1900,8 +2176,12 @@ int sh_nav_bake_open(const char *name, sh_nav_bake_reader read_shipped,
 
     if (hit) {
         char line[SH_SMNAV_RESNAME_CAP + BAKE_REASON_CAP + 64];
-        _snprintf_s(line, sizeof line, _TRUNCATE, "NAV: baked '%s'%s -- %s", name,
-                    partial ? " with parts left out" : "", why);
+        /* A served bake says so: "baked" is a bake that ran during this load. */
+        _snprintf_s(line, sizeof line, _TRUNCATE, "NAV: %s '%s'%s%s -- %s",
+                    reused ? "reused" : "baked", name,
+                    partial ? " with parts left out" : "",
+                    reused == 2 ? " from the preview" :
+                    reused ? " from an earlier bake of the same boxes" : "", why);
         backend_log(line);
     } else if(attempted) {
         char line[SH_SMNAV_RESNAME_CAP+BAKE_REASON_CAP+96];
@@ -2091,6 +2371,10 @@ void sh_nav_bake_report(void (*out)(const char *fmt, ...))
     for (i = 0; i < g_census_count; i++)
         out("  the engine opened %s navigation %u time(s)\n",
             g_census[i].module, g_census[i].opens);
+    out("  bake cache: %d payload(s), %.1f of %.0f MiB; %lu served, %lu kept, %lu evicted, "
+        "%lu not kept for want of room.\n", g_cache_count, g_cache_bytes / 1048576.0,
+        g_cache_budget / 1048576.0, g_cache_hits, g_cache_stores, g_cache_evicted,
+        g_cache_declined);
     ReleaseSRWLockShared(&g_bake_lock);
     out("  baked %lu payload(s) this session.\n",
         (unsigned long)InterlockedCompareExchange(&g_bakes, 0, 0));
@@ -2107,6 +2391,9 @@ void sh_nav_bake_test_reset(void)
 {
     AcquireSRWLockExclusive(&g_bake_lock);
     bake_preview_clear();
+    bake_cache_clear();
+    g_cache_budget = BAKE_CACHE_BUDGET;
+    g_cache_hits = g_cache_stores = g_cache_evicted = g_cache_declined = 0;
     g_instance_serving=0;
     sh_nav_map_free(&g_map);
     if (g_modules) memset(g_modules, 0, (size_t)g_module_cap * sizeof *g_modules);
@@ -2199,6 +2486,28 @@ void sh_nav_bake_test_refuse_class(int ci, const char *reason)
         strncpy_s(k->brief, sizeof k->brief, reason, _TRUNCATE);
     }
     ReleaseSRWLockExclusive(&g_bake_lock);
+}
+
+size_t sh_nav_bake_test_set_cache_budget(size_t bytes)
+{
+    size_t was;
+    AcquireSRWLockExclusive(&g_bake_lock);
+    was = g_cache_budget;
+    g_cache_budget = bytes ? bytes : BAKE_CACHE_BUDGET;
+    ReleaseSRWLockExclusive(&g_bake_lock);
+    return was;
+}
+
+void sh_nav_bake_test_cache_stats(int *entries, size_t *bytes, unsigned long *served,
+                                  unsigned long *evicted, unsigned long *declined)
+{
+    AcquireSRWLockShared(&g_bake_lock);
+    if (entries) *entries = g_cache_count;
+    if (bytes) *bytes = g_cache_bytes;
+    if (served) *served = g_cache_hits;
+    if (evicted) *evicted = g_cache_evicted;
+    if (declined) *declined = g_cache_declined;
+    ReleaseSRWLockShared(&g_bake_lock);
 }
 
 /* Install a worker result for copy `slot` with a chosen outcome. */

@@ -544,7 +544,11 @@ Editing does not read the map. When you add, delete, move or change
 the flags of a box with **AI Navigation** or **Block Demons**, the View menu says
 **Navmesh is out of date**. Other edits do not change it. The preview hides while
 geometry is held. Play always uses the current map: if it changed since the last
-update, Play bakes it again. If the View menu says **Could not read this map**,
+update, Play bakes it again, but only the rooms that changed. Each room's
+navigation for all three demon sizes is kept after it is built, so a room whose
+boxes and position are unchanged is not baked again at the next Play, after
+reloading the map, or when it is launched from outside the editor. The first
+Play of a session bakes the two larger demon sizes, which Build Navmesh does not. If the View menu says **Could not read this map**,
 run `sh_navmesh` for the reason.
 
 Duplicated boxes that share an ID keep their navigation when the map assigns
