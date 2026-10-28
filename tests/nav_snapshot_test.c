@@ -363,6 +363,112 @@ static void test_omitted_axis_inherits_during_conversion(void)
     sh_nav_map_free(&m);
 }
 
+/* The converted copy carries world positions (live: the platform corner at
+ * module-local (-1024, 256, 512) read back as world (128, -2688, 512) in a
+ * room at (1152, -2944, 0)). Taking a converted snapshot returns its floors
+ * and walls to module-local space with the room's origin and orientation; the
+ * editor's own map is already local and is left alone. */
+static void to_world(const sh_nav_instance *in, const float p[3], float out[3], int vector)
+{
+    static const int xy[8][4] = {{1,0,0,1},{0,-1,1,0},{-1,0,0,-1},{0,1,-1,0},
+                                 {-1,0,0,1},{0,1,1,0},{1,0,0,-1},{0,-1,-1,0}};
+    int o = in->orientation;
+    out[0] = (vector ? 0.0f : in->origin[0]) + xy[o][0] * p[0] + xy[o][1] * p[1];
+    out[1] = (vector ? 0.0f : in->origin[1]) + xy[o][2] * p[0] + xy[o][3] * p[1];
+    out[2] = (vector ? 0.0f : in->origin[2]) + p[2];
+}
+
+static int near3(const float a[3], const float b[3])
+{
+    return fabsf(a[0] - b[0]) < 1e-3f && fabsf(a[1] - b[1]) < 1e-3f && fabsf(a[2] - b[2]) < 1e-3f;
+}
+
+static void test_converted_floors_return_to_module_space(void)
+{
+    static const float local[4][3] = {{-1024, 256, 512}, {-1024, 2304, 512},
+                                      {1024, 2304, 512}, {1024, 256, 512}};
+    static const float normal[3] = {0.6f, 0.8f, 0.0f};
+    int o, k;
+    for (o = 0; o < 8; o++) {
+        sh_nav_map m;
+        sh_nav_instance in[2];
+        sh_nav_region r[2], w[2];
+        memset(&m, 0, sizeof m); memset(in, 0, sizeof in); memset(r, 0, sizeof r);
+        in[0].origin[0] = 1152; in[0].origin[1] = -2944; in[0].origin[2] = 64;
+        in[0].orientation = o;
+        in[1] = in[0]; in[1].unusable = 1;
+        for (k = 0; k < 4; k++) to_world(&in[0], local[k], r[0].c[k], 0);
+        to_world(&in[0], normal, r[0].n, 1);
+        r[0].instance = 0;
+        r[1] = r[0]; r[1].instance = 1;          /* an unusable room's box is left alone */
+        memcpy(w, r, sizeof r);
+        m.instances = in; m.instance_count = 2;
+        m.regions = &r[0]; m.region_count = 2;
+        m.obstacles = NULL; m.obstacle_count = 0;
+        sh_nav_snapshot_map_to_local(&m);
+        for (k = 0; k < 4; k++) CHECK(near3(r[0].c[k], local[k]));
+        CHECK(near3(r[0].n, normal));
+        CHECK(!memcmp(&r[1], &w[1], sizeof r[1]));
+    }
+}
+
+/* Through sh_nav_snapshot_take: only a converted read is moved. */
+static int g_world_read_local_only;
+static int world_read(const void *object, int converting, sh_nav_map *out, void *ctx)
+{
+    static const float corner[3] = {-1024, 256, 512};
+    int id = *(const int *)object;
+    (void)converting; (void)ctx;
+    memset(out, 0, sizeof *out);
+    out->instances = (sh_nav_instance *)calloc(1, sizeof *out->instances);
+    out->regions = (sh_nav_region *)calloc(1, sizeof *out->regions);
+    if (!out->instances || !out->regions) abort();
+    strcpy_s(out->instances[0].module, sizeof out->instances[0].module, "ind_dlc/room_a");
+    out->instances[0].origin[0] = 1152; out->instances[0].origin[1] = -2944;
+    out->instance_count = out->instance_cap = 1;
+    out->region_count = out->region_cap = 1;
+    if (id == BUILD && !g_world_read_local_only) to_world(&out->instances[0], corner, out->regions[0].c[0], 0);
+    else memcpy(out->regions[0].c[0], corner, sizeof corner);
+    return 1;
+}
+
+static int world_modules(const void *object, char *names, size_t cap, int count, void *ctx)
+{
+    (void)object; (void)count; (void)ctx;
+    strcpy_s(names, cap, "maps/modules/ind_dlc/room_a.decl");
+    return 1;
+}
+
+static void test_take_moves_only_the_converted_read(void)
+{
+    static const float corner[3] = {-1024, 256, 512};
+    sh_nav_snapshot_sources src;
+    sh_nav_snapshot_result r;
+    sh_nav_map m;
+    memset(&src, 0, sizeof src);
+    src.read = world_read; src.modules = world_modules;
+    /* outside the editor: converted, world -> local */
+    memset(&m, 0, sizeof m);
+    src.build = &BUILD; src.edit = NULL;
+    CHECK(sh_nav_snapshot_take(&src, &m, &r) && r.source == SH_NAV_SNAPSHOT_CONVERTED);
+    CHECK(near3(m.regions[0].c[0], corner));
+    sh_nav_map_free(&m);
+    /* editor preview: the edit map is local and stays so */
+    memset(&m, 0, sizeof m);
+    src.build = NULL; src.edit = &EDIT;
+    CHECK(sh_nav_snapshot_take(&src, &m, &r) && r.source == SH_NAV_SNAPSHOT_EDITOR);
+    CHECK(near3(m.regions[0].c[0], corner));
+    sh_nav_map_free(&m);
+    /* the edit map being converted itself: not moved */
+    memset(&m, 0, sizeof m);
+    g_world_read_local_only = 1;
+    src.build = &EDIT; src.edit = &EDIT;
+    CHECK(sh_nav_snapshot_take(&src, &m, &r) && r.source == SH_NAV_SNAPSHOT_EDITOR_SAME);
+    CHECK(near3(m.regions[0].c[0], corner));
+    g_world_read_local_only = 0;
+    sh_nav_map_free(&m);
+}
+
 int main(void)
 {
     test_no_conversion_reads_the_editor();
@@ -377,6 +483,8 @@ int main(void)
     test_modules_match();
     test_inherited_size();
     test_omitted_axis_inherits_during_conversion();
+    test_converted_floors_return_to_module_space();
+    test_take_moves_only_the_converted_read();
     if (g_failed) {
         fprintf(stderr, "%d check(s) FAILED\n", g_failed);
         return 1;

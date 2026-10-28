@@ -84,6 +84,42 @@ static int navs_matches(const sh_nav_snapshot_sources *src, const sh_nav_map *ma
     return ok;
 }
 
+/* The inverse of nav_bake.c's bake_world_point: world.xy = origin.xy +
+ * M[o] * local.xy, world.z = origin.z + local.z. Every M[o] is orthogonal, so
+ * its inverse is its transpose. */
+static void navs_point_to_local(const sh_nav_instance *in, float p[3], int vector)
+{
+    static const int xy[8][4] = {{1,0,0,1},{0,-1,1,0},{-1,0,0,-1},{0,1,-1,0},
+                                 {-1,0,0,1},{0,1,1,0},{1,0,0,-1},{0,-1,-1,0}};
+    int o = in->orientation;
+    float dx = p[0], dy = p[1];
+    if (o < 0 || o > 7) o = 0;
+    if (!vector) { dx -= in->origin[0]; dy -= in->origin[1]; p[2] -= in->origin[2]; }
+    p[0] = xy[o][0] * dx + xy[o][2] * dy;
+    p[1] = xy[o][1] * dx + xy[o][3] * dy;
+}
+
+static void navs_regions_to_local(const sh_nav_map *m, sh_nav_region *r, int count)
+{
+    int i, k;
+    if (!r) return;
+    for (i = 0; i < count; i++) {
+        const sh_nav_instance *in;
+        if (r[i].instance < 0 || r[i].instance >= m->instance_count) continue;
+        in = &m->instances[r[i].instance];
+        if (in->unusable) continue;
+        for (k = 0; k < 4; k++) navs_point_to_local(in, r[i].c[k], 0);
+        navs_point_to_local(in, r[i].n, 1);
+    }
+}
+
+void sh_nav_snapshot_map_to_local(sh_nav_map *m)
+{
+    if (!m || !m->instances) return;
+    navs_regions_to_local(m, m->regions, m->region_count);
+    navs_regions_to_local(m, m->obstacles, m->obstacle_count);
+}
+
 int sh_nav_snapshot_take(const sh_nav_snapshot_sources *src, sh_nav_map *out,
                          sh_nav_snapshot_result *result)
 {
@@ -109,6 +145,10 @@ int sh_nav_snapshot_take(const sh_nav_snapshot_sources *src, sh_nav_map *out,
         if (navs_matches(src, out, why, sizeof why)) {
             result->source = src->edit == src->build ? SH_NAV_SNAPSHOT_EDITOR_SAME
                                                      : SH_NAV_SNAPSHOT_CONVERTED;
+            /* The pre-build pass has attached every entity to its module, so
+             * the converted copy carries world positions (live, both launch
+             * routes); the reader's tables are module-local. */
+            if (result->source == SH_NAV_SNAPSHOT_CONVERTED) sh_nav_snapshot_map_to_local(out);
             return 1;
         }
         _snprintf_s(result->why, sizeof result->why, _TRUNCATE,

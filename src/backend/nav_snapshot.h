@@ -77,4 +77,11 @@ int sh_nav_snapshot_modules_match(const sh_nav_map *map, const char *names, size
 
 const char *sh_nav_snapshot_source_name(sh_nav_snapshot_source source);
 
+/* Return every floor and wall of `m` from world to module-local space, using
+ * the owning instance's origin and orientation. The converted map carries
+ * world positions because the pre-build pass attaches each entity to its
+ * module; sh_nav_snapshot_take applies this to a SH_NAV_SNAPSHOT_CONVERTED
+ * read. Boxes of an unusable or unknown instance are left as they are. */
+void sh_nav_snapshot_map_to_local(sh_nav_map *m);
+
 #endif /* SNAPMAP_PLUS_NAV_SNAPSHOT_H */
