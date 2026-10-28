@@ -227,7 +227,7 @@ static void test_island_at_128(void)
     sh_aas *a = load_module();
     sh_aug_platform p;
     sh_aug_report rep;
-    sh_aug_opts o;
+    sh_aug_opts o = {0};
     printf("a platform past maxStepHeight is an island\n");
     if (!a) { CHECK(0); return; }
     memset(&o, 0, sizeof o);
@@ -278,7 +278,7 @@ static void test_step_regime_at_16(void)
     sh_aas *a = load_module();
     sh_aug_platform p;
     sh_aug_report rep;
-    sh_aug_opts o;
+    sh_aug_opts o = {0};
     printf("a platform inside maxStepHeight is walked, not climbed\n");
     if (!a) { CHECK(0); return; }
     memset(&o, 0, sizeof o);
@@ -301,7 +301,7 @@ static void test_refusals(void)
     sh_aas *a = load_module();
     sh_aug_platform p[3];
     sh_aug_report rep;
-    sh_aug_opts o;
+    sh_aug_opts o = {0};
     printf("refusals are reported, never fudged\n");
     if (!a) { CHECK(0); return; }
     memset(&o, 0, sizeof o);
@@ -330,7 +330,7 @@ static void test_zero_platforms_is_a_no_op(void)
 {
     sh_aas *a = load_module();
     sh_aug_report rep;
-    sh_aug_opts o;
+    sh_aug_opts o = {0};
     unsigned char *before, *after;
     size_t blen = 0, alen = 0;
     printf("augmenting with nothing changes nothing\n");
@@ -357,7 +357,7 @@ static void test_result_still_validates(void)
     sh_aas *a = load_module();
     sh_aug_platform p;
     sh_aug_report rep;
-    sh_aug_opts o;
+    sh_aug_opts o = {0};
     unsigned char *bytes;
     size_t len = 0;
     char err[192];
@@ -384,7 +384,7 @@ static void test_many_platforms_stay_within_depth(void)
     sh_aas *a = load_module();
     sh_aug_platform p[24];
     sh_aug_report rep;
-    sh_aug_opts o;
+    sh_aug_opts o = {0};
     int i;
     printf("a cityscape of separated roofs stays inside the loader depth limit\n");
     if (!a) { CHECK(0); return; }
@@ -584,7 +584,7 @@ static void test_minfloorcos_gate_at_the_boundary(void)
     sh_aas *a = load_module();
     sh_aug_platform p[2];
     sh_aug_report rep;
-    sh_aug_opts o;
+    sh_aug_opts o = {0};
     o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_NEVER;
     printf("a face steeper than minFloorCos is refused with its angle\n");
     mkplat_tilted(&p[0], 45.0, 512.0, 512.0, 16.0, "shallow");   /* cos 0.7071 */
@@ -605,7 +605,7 @@ static void test_unreadable_minfloorcos_rejects_the_payload(void)
     sh_aas *a = load_module();
     sh_aug_platform p;
     sh_aug_report rep;
-    sh_aug_opts o;
+    sh_aug_opts o = {0};
     o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_NEVER;
     printf("a payload with no readable slope limit is refused\n");
     sh_aas_set_setting_f32(a, 272u, 0.0f);
@@ -622,7 +622,7 @@ static void test_a_yawed_area_resolves_through_the_bsp(void)
     sh_aas *a = load_module();
     sh_aug_platform p;
     sh_aug_report rep;
-    sh_aug_opts o;
+    sh_aug_opts o = {0};
     o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_NEVER;
     printf("a yawed area is findable, and only where it actually is\n");
     mkplat_yawed(&p, 45.0, 400.0, 400.0, 16.0, "diamond");
@@ -699,7 +699,7 @@ static void test_two_abutting_platforms_link_to_each_other(void)
     sh_aas *a = load_module();
     sh_aug_platform p[2];
     sh_aug_report rep;
-    sh_aug_opts o;
+    sh_aug_opts o = {0};
     o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_NEVER;
     printf("two volumes standing together link to each other\n");
     mkplat(&p[0], -512.0f, -512.0f,    0.0f, 512.0f, 16.0f, "lower");
@@ -724,7 +724,7 @@ static void test_a_partially_abutting_neighbour_is_found(void)
     sh_aas *a = load_module();
     sh_aug_platform p[2];
     sh_aug_report rep;
-    sh_aug_opts o;
+    sh_aug_opts o = {0};
     o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_NEVER;
     printf("a neighbour touching only part of an edge is still found\n");
     mkplat(&p[0], -512.0f, -512.0f,   0.0f, 512.0f, 16.0f, "wide");
@@ -744,7 +744,7 @@ static void test_a_pair_is_not_emitted_twice(void)
     sh_aas *a = load_module();
     sh_aug_platform p[2];
     sh_aug_report rep;
-    sh_aug_opts o;
+    sh_aug_opts o = {0};
     int fwd, back;
     o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_NEVER;
     printf("each pair of volumes is linked once, not twice\n");
@@ -843,7 +843,7 @@ static void test_a_gap_within_range_becomes_a_leap(void)
     sh_aas *a = load_module();
     sh_aug_platform p[2];
     sh_aug_report rep;
-    sh_aug_opts o;
+    sh_aug_opts o = {0};
     o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_AUTO;
     printf("a gap the shipped animations cover becomes a leap\n");
     load_synthetic_traversal_table();
@@ -862,7 +862,7 @@ static void test_a_gap_beyond_range_is_not_crossed(void)
     sh_aas *a = load_module();
     sh_aug_platform p[2];
     sh_aug_report rep;
-    sh_aug_opts o;
+    sh_aug_opts o = {0};
     o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_AUTO;
     printf("a gap wider than any shipped leap is left uncrossed\n");
     load_synthetic_traversal_table();
@@ -879,7 +879,7 @@ static void test_a_steep_gap_is_refused(void)
     sh_aas *a = load_module();
     sh_aug_platform p[2];
     sh_aug_report rep;
-    sh_aug_opts o;
+    sh_aug_opts o = {0};
     o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_AUTO;
     printf("a gap between surfaces at very different heights is refused\n");
     load_synthetic_traversal_table();
@@ -901,7 +901,7 @@ static void test_a_tall_neighbour_gets_a_climb_not_a_walk(void)
     sh_aas *a = load_module();
     sh_aug_platform p[2];
     sh_aug_report rep;
-    sh_aug_opts o;
+    sh_aug_opts o = {0};
     o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_AUTO;
     printf("a neighbour standing above is climbed, not stepped onto\n");
     load_synthetic_traversal_table();
@@ -927,7 +927,7 @@ static void test_the_climb_is_reciprocated(void)
     sh_aas *a = load_module();
     sh_aug_platform p[2];
     sh_aug_report rep;
-    sh_aug_opts o;
+    sh_aug_opts o = {0};
     o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_AUTO;
     printf("a climb between two volumes goes both ways\n");
     load_synthetic_traversal_table();
@@ -949,7 +949,7 @@ static void test_a_three_tower_chain_links_end_to_end(void)
     sh_aas *a = load_module();
     sh_aug_platform p[3];
     sh_aug_report rep;
-    sh_aug_opts o;
+    sh_aug_opts o = {0};
     o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_AUTO;
     printf("a three-volume chain links end to end\n");
     load_synthetic_traversal_table();
@@ -973,7 +973,7 @@ static void test_a_gap_below_the_leap_minimum_is_not_crossed(void)
     sh_aas *a = load_module();
     sh_aug_platform p[2];
     sh_aug_report rep;
-    sh_aug_opts o;
+    sh_aug_opts o = {0};
     o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_AUTO;
     printf("a gap shorter than any shipped leap is not crossed\n");
     load_synthetic_traversal_table();
@@ -995,7 +995,7 @@ static void test_a_leap_through_a_third_volume_is_dropped(void)
     sh_aug_report bare;
     sh_aug_platform two[2];
     sh_aas *b = load_module();
-    sh_aug_opts o;
+    sh_aug_opts o = {0};
     o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_AUTO;
     printf("a leap whose path runs through another volume is dropped\n");
     load_synthetic_traversal_table();
@@ -1024,7 +1024,7 @@ static void test_an_upright_platform_is_not_a_side_face(void)
     sh_aas *a = load_module();
     sh_aug_platform p;
     sh_aug_report rep;
-    sh_aug_opts o;
+    sh_aug_opts o = {0};
     o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_NEVER;
     printf("an ordinary upright platform is not reported as a side face\n");
     mkplat(&p, -500.0f, -500.0f, 500.0f, 500.0f, 16.0f, "flat");
@@ -1041,7 +1041,7 @@ static void test_a_dense_yawed_chain_stays_within_the_depth_limit(void)
     sh_aas *a = load_module();
     sh_aug_platform p[16];
     sh_aug_report rep;
-    sh_aug_opts o;
+    sh_aug_opts o = {0};
     int i;
     o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_NEVER;
     printf("a dense chain of yawed platforms stays inside the loader depth limit\n");
@@ -1064,7 +1064,7 @@ static void test_a_bake_at_the_platform_cap_completes(void)
     sh_aas *a = load_module();
     static sh_aug_platform p[200];
     sh_aug_report rep;
-    sh_aug_opts o;
+    sh_aug_opts o = {0};
     int i, emitted = 0;
     o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_AUTO;
     printf("a bake with two hundred platforms completes and stays coherent\n");
@@ -1093,7 +1093,7 @@ static void test_existing_traversals_on_our_floor_are_regrouped_not_declined(voi
     sh_aas *a = load_module();
     sh_aug_platform p;
     sh_aug_report rep;
-    sh_aug_opts o;
+    sh_aug_opts o = {0};
     unsigned char *floor_area, *tp;
     unsigned first, np, na, i, j, claimed;
     size_t rs;
@@ -1153,7 +1153,7 @@ static void test_a_module_without_traversals_still_gets_climbs(void)
     sh_aas *a = load_module();
     sh_aug_platform p;
     sh_aug_report rep;
-    sh_aug_opts o;
+    sh_aug_opts o = {0};
     o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_AUTO;
     printf("a module with no climbs of its own still gets ours\n");
     load_synthetic_traversal_table();
@@ -1177,7 +1177,7 @@ static void test_a_pillar_through_a_slab_is_linked(void)
     sh_aas *a = load_module();
     sh_aug_platform p[2];
     sh_aug_report rep;
-    sh_aug_opts o;
+    sh_aug_opts o = {0};
     int slab, pil;
     o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_AUTO;
     printf("a pillar standing through a slab is linked, not stranded\n");
@@ -1203,7 +1203,7 @@ static void test_containment_works_with_the_index_order_reversed(void)
     sh_aas *a = load_module();
     sh_aug_platform p[2];
     sh_aug_report rep;
-    sh_aug_opts o;
+    sh_aug_opts o = {0};
     o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_AUTO;
     printf("containment is linked whichever platform is created first\n");
     load_synthetic_traversal_table();
@@ -1226,7 +1226,7 @@ static void test_identical_footprints_are_not_double_linked(void)
     sh_aas *a = load_module();
     sh_aug_platform p[2];
     sh_aug_report rep;
-    sh_aug_opts o;
+    sh_aug_opts o = {0};
     int fwd, back;
     o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_NEVER;
     printf("two volumes with the same footprint are linked once, not twice\n");
@@ -1248,7 +1248,7 @@ static void test_partially_overlapping_volumes_still_link_once(void)
     sh_aas *a = load_module();
     sh_aug_platform p[2];
     sh_aug_report rep;
-    sh_aug_opts o;
+    sh_aug_opts o = {0};
     o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_NEVER;
     printf("partially overlapping volumes link exactly once\n");
     mkplat(&p[0], -400.0f, -400.0f,  100.0f, 100.0f, 16.0f, "a");
@@ -1268,7 +1268,7 @@ static void test_a_floating_intersecting_volume_is_never_a_stranded_area(void)
     sh_aas *a = load_module();
     sh_aug_platform p[2];
     sh_aug_report rep;
-    sh_aug_opts o;
+    sh_aug_opts o = {0};
     int i;
     o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_AUTO;
     printf("a floating volume intersecting a solid one is linked or refused, "
@@ -1296,7 +1296,7 @@ static void test_a_platform_with_no_carrier_is_refused_not_phantom(void)
     sh_aas *a = load_module();
     sh_aug_platform p;
     sh_aug_report rep;
-    sh_aug_opts o;
+    sh_aug_opts o = {0};
     o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_NEVER;
     printf("a platform the tree cannot hold is refused, not left a phantom\n");
     /* Far outside the fixture's +/-2000 floor slab and high above it. */
@@ -1316,7 +1316,7 @@ static void test_no_arrangement_emits_a_stranded_area(void)
     sh_aas *a = load_module();
     sh_aug_platform p[8];
     sh_aug_report rep;
-    sh_aug_opts o;
+    sh_aug_opts o = {0};
     int i, emitted = 0;
     o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_AUTO;
     printf("no arrangement in the matrix emits a stranded area\n");
@@ -1356,7 +1356,7 @@ static void test_areas_added_equals_platforms_emitted(void)
         sh_aas *a = load_module();
         sh_aug_platform p;
         sh_aug_report rep;
-        sh_aug_opts o;
+        sh_aug_opts o = {0};
         int i, emitted = 0, added;
         o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_NEVER;
         mkplat(&p, CASE[ci].x0, CASE[ci].y0, CASE[ci].x1, CASE[ci].y1,
@@ -1389,7 +1389,7 @@ static void test_an_emitted_platform_resolves_at_its_own_centre(void)
         sh_aas *a = load_module();
         sh_aug_platform p;
         sh_aug_report rep;
-        sh_aug_opts o;
+        sh_aug_opts o = {0};
         float cx, cy, cz;
         o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_NEVER;
         mkplat(&p, CASE[ci].x0, CASE[ci].y0, CASE[ci].x1, CASE[ci].y1,
@@ -1432,7 +1432,7 @@ static void test_a_pillar_through_a_slab_is_cut_out_of_it(void)
     sh_aas *a = load_module();
     sh_aug_platform p[2];
     sh_aug_report rep;
-    sh_aug_opts o;
+    sh_aug_opts o = {0};
     int idx[8], n, i, at_centre, claimed = 0;
     o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_AUTO;
     printf("a pillar standing through a slab is cut out of the slab's top\n");
@@ -1480,7 +1480,7 @@ static void test_a_face_buried_in_another_volume_is_refused_by_name(void)
     sh_aas *a = load_module();
     sh_aug_platform p[2];
     sh_aug_report rep;
-    sh_aug_opts o;
+    sh_aug_opts o = {0};
     int idx[8], n;
     o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_AUTO;
     printf("a face entirely inside another volume is refused for that reason\n");
@@ -1512,7 +1512,7 @@ static void test_a_floating_volume_clipping_into_a_platform_is_cut_out(void)
     sh_aas *a = load_module();
     sh_aug_platform p[2];
     sh_aug_report rep;
-    sh_aug_opts o;
+    sh_aug_opts o = {0};
     int idx[8], n, i, at_centre, claimed = 0;
     o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_AUTO;
     printf("a floating volume clipping into a platform is cut out of it\n");
@@ -1539,7 +1539,7 @@ static void test_the_separated_control_arrangement_is_left_alone(void)
     sh_aas *a = load_module();
     sh_aug_platform p[2];
     sh_aug_report rep;
-    sh_aug_opts o;
+    sh_aug_opts o = {0};
     o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_AUTO;
     printf("two volumes that share nothing are not cut at all\n");
     load_synthetic_traversal_table();
@@ -1561,7 +1561,7 @@ static void test_a_box_parked_on_a_platform_is_cut_out_of_it(void)
     sh_aas *a = load_module();
     sh_aug_platform p[2];
     sh_aug_report rep;
-    sh_aug_opts o;
+    sh_aug_opts o = {0};
     int idx[8], n;
     o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_AUTO;
     printf("a box standing on a platform is cut out of the platform's top\n");
@@ -1583,7 +1583,7 @@ static void test_a_low_ceiling_over_part_of_a_platform_keeps_the_rest(void)
     sh_aas *a = load_module();
     sh_aug_platform p[2];
     sh_aug_report rep;
-    sh_aug_opts o;
+    sh_aug_opts o = {0};
     int idx[8], n, i, any = 0;
     o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_AUTO;
     printf("a low ceiling over half a platform costs it that half, not all of it\n");
@@ -1618,7 +1618,7 @@ static void test_a_cut_platform_never_strands_an_area(void)
         sh_aas *a = load_module();
         sh_aug_platform p[2];
         sh_aug_report rep;
-        sh_aug_opts o;
+        sh_aug_opts o = {0};
         int i;
         o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_AUTO;
         mkbox(&p[0], -384.0f, -384.0f, 384.0f, 384.0f, 16.0f, 0.0f, "slab");
@@ -1650,7 +1650,7 @@ static void test_a_gap_in_the_dead_zone_is_counted_and_named(void)
     sh_aas *a = load_module();
     sh_aug_platform p[2];
     sh_aug_report rep;
-    sh_aug_opts o;
+    sh_aug_opts o = {0};
     o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_AUTO;
     printf("a gap nothing can step or jump across is counted, not passed over\n");
     load_synthetic_traversal_table();
@@ -1672,7 +1672,7 @@ static void test_a_flush_pair_is_not_a_dead_gap(void)
     sh_aas *a = load_module();
     sh_aug_platform p[2];
     sh_aug_report rep;
-    sh_aug_opts o;
+    sh_aug_opts o = {0};
     o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_AUTO;
     printf("two volumes standing flush are not reported as a dead gap\n");
     load_synthetic_traversal_table();
@@ -2153,6 +2153,83 @@ static void test_more_than_512_boxes_bake_and_shed_routes(void)
     sh_aas_free(a);
 }
 
+/* A payload route budget below 256 thins every generated area to it, keeps
+ * the shortest moves (each top still reaches its nearest neighbour), and the
+ * budget sh_aug_route_budget_for picks brings the file under the cap. */
+static void build_tower_grid(sh_aug_platform *p, int side)
+{
+    int i;
+    for (i = 0; i < side * side; i++) {
+        float x = -800.0f + (float)(i % side) * 160.0f;
+        float y = -800.0f + (float)(i / side) * 160.0f;
+        mkbox(&p[i], x, y, x + 96.0f, y + 96.0f, 128.0f, 0.0f, "tower");
+    }
+}
+
+static void test_route_budget_thins_longest_routes_to_fit_the_file(void)
+{
+    static sh_aug_platform p[64];
+    sh_aug_report full, thin, again;
+    sh_aug_opts o = { SH_AUG_FALL_AUTO, 1, SH_AUG_TRAVERSAL_AUTO, 0 };
+    sh_aas *a = load_module(), *b = load_module(), *c = load_module();
+    unsigned na, i, worst = 0, shipped_max = 0;
+    size_t size_full, size_thin, cap;
+    int budget, next, areas_linked = 0, generated = 0, down = 0;
+    printf("a route budget thins the longest routes and fits the file\n");
+    load_synthetic_traversal_table();
+    for (i = 0; i < sh_aas_count(a, SH_AAS_L_AREAS); i++)
+        if (out_degree(a, i) > shipped_max) shipped_max = out_degree(a, i);
+    build_tower_grid(p, 8);
+    CHECK(sh_aas_augment(a, p, 64, &o, &full));
+    na = sh_aas_count(a, SH_AAS_L_AREAS);
+    for (i = full.areas_before; i < na; i++) if (out_degree(a, i) > worst) worst = out_degree(a, i);
+    printf("  64 towers: %u links, busiest generated area %u routes\n", full.reach_after, worst);
+    CHECK(worst > 8);
+    size_full = sh_aas_serialized_size(a);
+
+    /* Half the busiest area's routes, everywhere. */
+    budget = (int)worst / 2;
+    o.route_budget = budget;
+    CHECK(sh_aas_augment(b, p, 64, &o, &thin));
+    CHECK(!thin.reach_limit_exceeded);
+    CHECK(thin.routes_dropped > full.routes_dropped);
+    for (i = thin.areas_before; i < sh_aas_count(b, SH_AAS_L_AREAS); i++) {
+        unsigned d = out_degree(b, i);
+        CHECK_MSG(d <= (unsigned)budget, "every generated area within the budget");
+        if (d) areas_linked++;
+        generated++;
+    }
+    CHECK_MSG(areas_linked == generated, "no tower lost every route");
+    /* The shortest move off a tower, its climb down to the floor it stands
+     * on, outlasts the long leaps. */
+    for (i = 0; i < 64; i++) {
+        const sh_aug_platform_result *r = &thin.platforms[i];
+        if (!r->emitted || !full.platforms[i].emitted) continue;
+        if (!reach_exists(a, full.platforms[i].area, full.platforms[i].carrier)) continue;
+        CHECK_MSG(reach_exists(b, r->area, r->carrier), "every tower keeps its way down");
+        down++;
+    }
+    CHECK_MSG(down > 0, "the towers had a way down to keep");
+    size_thin = sh_aas_serialized_size(b);
+    CHECK(size_thin < size_full);
+    CHECK(payload_validates(b));
+
+    /* The chooser: a cap between the two sizes asks for a budget below 256
+     * that, baked, fits. */
+    cap = size_full - (size_full - size_thin) / 2;
+    next = sh_aug_route_budget_for(a, &full, size_full, cap, 0);
+    CHECK(next > 0 && next < (int)SH_AAS_MAX_AREA_REACHABILITIES);
+    o.route_budget = next;
+    CHECK(sh_aas_augment(c, p, 64, &o, &again));
+    CHECK_MSG(sh_aas_serialized_size(c) <= cap, "the chosen budget fits the cap");
+    /* Nothing to gain below a budget of one, nor under the cap. */
+    CHECK(sh_aug_route_budget_for(a, &full, size_full, cap, 1) == 0);
+    CHECK(sh_aug_route_budget_for(a, &full, size_full, size_full, 0) == 0);
+    (void)shipped_max;
+    sh_aug_report_free(&full); sh_aug_report_free(&thin); sh_aug_report_free(&again);
+    sh_aas_free(a); sh_aas_free(b); sh_aas_free(c);
+}
+
 /* At the piece ceiling, faces are left out whole and named; the pieces that
  * fit are built. A face is never emitted partly cut. */
 static void test_piece_ceiling_drops_whole_faces(void)
@@ -2419,6 +2496,7 @@ int main(void)
     test_route_drop_takes_just_enough();
     test_shipped_routes_over_limit_refuse();
     test_more_than_512_boxes_bake_and_shed_routes();
+    test_route_budget_thins_longest_routes_to_fit_the_file();
     test_piece_ceiling_drops_whole_faces();
     test_fixture_resolves();
     test_intersecting_bridge_routes();

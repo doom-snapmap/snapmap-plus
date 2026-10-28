@@ -69,6 +69,18 @@ struct sh_aas {
     aas_lump      lump[SH_AAS_L__COUNT];
 };
 
+static size_t g_aas_payload_cap = SH_AAS_MAX_BAKE_PAYLOAD;
+
+size_t sh_aas_payload_cap(void) { return g_aas_payload_cap; }
+#ifdef SH_AUG_TESTING
+size_t sh_aas_test_set_payload_cap(size_t cap)
+{
+    size_t was = g_aas_payload_cap;
+    g_aas_payload_cap = cap ? cap : SH_AAS_MAX_BAKE_PAYLOAD;
+    return was;
+}
+#endif
+
 static void aas_verr(char *err, size_t cap, const char *fmt, ...)
 {
     va_list ap;
@@ -183,9 +195,9 @@ sh_aas *sh_aas_parse(const unsigned char *bytes, size_t len, char *err, size_t e
         aas_verr(err, err_cap, "no payload");
         return NULL;
     }
-    if (len > SH_SMNAV_MAX_PAYLOAD) {
-        aas_verr(err, err_cap, "the payload is %zu bytes, over the %u-byte budget",
-                 len, (unsigned)SH_SMNAV_MAX_PAYLOAD);
+    if (len > g_aas_payload_cap) {
+        aas_verr(err, err_cap, "the payload is %zu bytes, over the %zu-byte budget",
+                 len, g_aas_payload_cap);
         return NULL;
     }
     if (len < SH_AAS_PREAMBLE_BYTES + (size_t)SH_AAS_LUMPS * 4) {
@@ -273,20 +285,28 @@ sh_aas *sh_aas_parse(const unsigned char *bytes, size_t len, char *err, size_t e
     return a;
 }
 
+size_t sh_aas_serialized_size(const sh_aas *a)
+{
+    size_t total = SH_AAS_PREAMBLE_BYTES;
+    int i;
+    if (!a) return 0;
+    for (i = 0; i < SH_AAS_L__COUNT; i++)
+        total += 4 + (size_t)a->lump[i].count * AAS_LUMPS[i].record;
+    return total;
+}
+
 unsigned char *sh_aas_write(const sh_aas *a, size_t *out_len)
 {
     unsigned char *out;
-    size_t total = SH_AAS_PREAMBLE_BYTES, off;
+    size_t total, off;
     int i;
 
     if (out_len) *out_len = 0;
     if (!a) return NULL;
 
-    for (i = 0; i < SH_AAS_L__COUNT; i++)
-        total += 4 + (size_t)a->lump[i].count * AAS_LUMPS[i].record;
-
-    /* Keep serialized output within the same payload limit as the shard reader. */
-    if (total > SH_SMNAV_MAX_PAYLOAD) return NULL;
+    /* Keep serialized output within what parse and validation accept. */
+    total = sh_aas_serialized_size(a);
+    if (total > g_aas_payload_cap) return NULL;
 
     out = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, total);
     if (!out) return NULL;

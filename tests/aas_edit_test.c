@@ -379,7 +379,7 @@ static void test_parse_refusals(void)
 
     /* over the one-payload budget, refused before anything is read */
     {
-        size_t big = (size_t)SH_SMNAV_MAX_PAYLOAD + 1;
+        size_t big = (size_t)SH_AAS_MAX_BAKE_PAYLOAD + 1;
         unsigned char *p = (unsigned char *)calloc(1, big);
         if (p) {
             memcpy(p, "2SAA", 4);
@@ -606,7 +606,7 @@ static void test_write_refuses_over_budget(void)
     CHECK(a != NULL);
     if (!a) { free_synth(&b); return; }
 
-    n = (unsigned)((SH_SMNAV_MAX_PAYLOAD - b.len) / 132) + 1;
+    n = (unsigned)((SH_AAS_MAX_BAKE_PAYLOAD - b.len) / 132) + 1;
     CHECK(sh_aas_append(a, SH_AAS_L_REACHNAMES, n, NULL) == 1);
     CHECK(sh_aas_count(a, SH_AAS_L_REACHNAMES) == n);
 

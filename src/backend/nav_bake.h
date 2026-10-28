@@ -199,6 +199,9 @@ int sh_nav_bake_test_run(const char *name, const struct sh_aug_platform *plats, 
                          const unsigned char *shipped, size_t shipped_len,
                          char *brief, size_t brief_cap, int *partial_marks);
 void sh_nav_bake_test_preview_outcome(int slot, int state, const char *brief);
+/* The full reason and payload length of the last sh_nav_bake_test_run. */
+const char *sh_nav_bake_test_last_reason(void);
+size_t      sh_nav_bake_test_last_length(void);
 #endif
 
 #endif /* SNAPMAP_PLUS_NAV_BAKE_H */

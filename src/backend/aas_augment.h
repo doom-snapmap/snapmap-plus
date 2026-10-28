@@ -52,6 +52,10 @@ typedef struct sh_aug_opts {
     int   fall;             /* SH_AUG_FALL_* */
     int   inset;            /* inset by the agent radius; 1 unless testing */
     int   traversal;        /* SH_AUG_TRAVERSAL_* */
+    /* Outgoing routes one area may keep, shipped ones included; 0 means the
+     * engine's 256. An area whose own shipped routes already pass it keeps
+     * those and gains nothing. Lowered only to fit the payload cap. */
+    int   route_budget;
 } sh_aug_opts;
 
 /* Per-class outcome for one emitted or refused surface. */
@@ -104,6 +108,7 @@ typedef struct sh_aug_report {
     int      dead_gaps;                 /* unlinked pairs beyond step range but below the shortest available jump */
     unsigned areas_before, areas_after;
     unsigned reach_before, reach_after;
+    unsigned traversal_points_before;   /* the shipped traversalPoints */
     unsigned depth_before, depth_after;
     int      depth_exceeded;            /* past the loader's 0x80 limit */
     int      links_truncated;           /* traversal allocation failed;
@@ -129,6 +134,13 @@ typedef struct sh_aug_report {
 int sh_aas_augment(sh_aas *a, const sh_aug_platform *plats, int n,
                    const sh_aug_opts *opts, sh_aug_report *out);
 void sh_aug_report_free(sh_aug_report *out);
+
+/* The route budget (for sh_aug_opts.route_budget) that brings an augmented
+ * model of `size` bytes under `cap`, judged from its generated routes per
+ * area. Always below `current` (0 meaning 256). Returns 0 when no lower budget
+ * can help: the budget is already 1, or the model has no generated route. */
+int sh_aug_route_budget_for(const sh_aas *a, const sh_aug_report *rep,
+                            size_t size, size_t cap, int current);
 
 /* Resolve a point through the BSP as the engine does; 0 means void. The
  * serving path uses this to verify that generated areas are findable.

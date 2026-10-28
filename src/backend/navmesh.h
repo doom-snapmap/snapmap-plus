@@ -36,10 +36,17 @@
 
 /* ---- budgets ----------------------------------------------------------- */
 
-#define SH_SMNAV_MAX_PAYLOAD    (8u * 1024u * 1024u)    /* one AAS payload */
+#define SH_SMNAV_MAX_PAYLOAD    (8u * 1024u * 1024u)    /* one embedded smnav1 payload */
 #define SH_SMNAV_MAX_TOTAL      (32u * 1024u * 1024u)   /* all of them, per map */
 #define SH_SMNAV_MAX_SETS       192                     /* (module, class) pairs per map */
 #define SH_SMNAV_MAX_MODULES    64
+
+/* One AAS file the bake produces, validates and serves. LoadBinary reads each
+ * lump's count and allocates it on the heap with no file-size check, and a
+ * bake is served from memory, never stored in the map, so this is the
+ * product's own bound on one copy's memory, not an engine limit. A 600-box
+ * copy measured 9.14 MiB. Past it the bake sheds routes, then floors. */
+#define SH_AAS_MAX_BAKE_PAYLOAD (16u * 1024u * 1024u)
 
 /* ---- the AAS2 3.29 binary shape the validator walks -------------------- */
 

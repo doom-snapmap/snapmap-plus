@@ -509,6 +509,11 @@ of refusing the map:
   enough of them.
 - The engine loads no navigation tree deeper than 128. A room that would pass it
   keeps three quarters of its floor boxes at a time until it fits.
+- One room's navigation file is kept within 16 MiB. Very many boxes close
+  together (hundreds within jumping range of each other) can pass that, because
+  every pair gets its own leaps. The room then keeps the shortest moves out of
+  each box and gives up the longest leaps until it fits; only if that is not
+  enough does it give up floor boxes, three quarters at a time.
 - Each demon size is baked on its own. If the smallest size cannot be built,
   larger demons still use the boxes, and a size that failed is not baked again
   at Play unless the map changed.

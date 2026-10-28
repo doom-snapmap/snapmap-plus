@@ -959,6 +959,54 @@ static void test_tree_depth_limit_keeps_most_floors(void)
     free(module);
 }
 
+/* A copy whose file would pass the payload cap is thinned, then loses floors,
+ * and is refused only when one floor alone is still over, naming the sizes. */
+static void test_payload_cap_thins_instead_of_refusing(void)
+{
+    sh_aug_platform p[12];
+    unsigned char *module;
+    size_t len = 0, full;
+    char brief[128];
+    int i, marks = 0, state;
+    printf("a copy past the payload cap is partly built, not refused\n");
+    module = fixture_module(&len);
+    CHECK(module != NULL);
+    if (!module) return;
+    for (i = 0; i < 12; i++) {
+        float x = -1800.0f + (float)i * 300.0f;
+        memset(&p[i], 0, sizeof p[i]);
+        p[i].c[0][0] = x;          p[i].c[0][1] = 200;
+        p[i].c[1][0] = x + 200.0f; p[i].c[1][1] = 200;
+        p[i].c[2][0] = x + 200.0f; p[i].c[2][1] = -200;
+        p[i].c[3][0] = x;          p[i].c[3][1] = -200;
+        p[i].c[0][2] = p[i].c[1][2] = p[i].c[2][2] = p[i].c[3][2] = 16.0f;
+        p[i].n[2] = 1.0f; p[i].face = 4; p[i].depth = 16.0f;
+        _snprintf_s(p[i].name, sizeof p[i].name, _TRUNCATE, "volume %d", i);
+    }
+    state = sh_nav_bake_test_run("size", p, 12, module, len, brief, sizeof brief, &marks);
+    CHECK(state == SH_NAV_CLASS_BUILT);
+    full = sh_nav_bake_test_last_length();
+    CHECK(full > len);
+    /* Just under the full size: built partly, within the cap, and the reason
+     * says what the file would have been. */
+    sh_aas_test_set_payload_cap(full - 64);
+    state = sh_nav_bake_test_run("size", p, 12, module, len, brief, sizeof brief, &marks);
+    CHECK(state == SH_NAV_CLASS_PARTIAL);
+    CHECK(sh_nav_bake_test_last_length() > 0 && sh_nav_bake_test_last_length() <= full - 64);
+    CHECK(strstr(brief, "file limit") != NULL);
+    CHECK(strstr(sh_nav_bake_test_last_reason(), "to keep the navigation file within") != NULL);
+    CHECK(strstr(sh_nav_bake_test_last_reason(), "did not produce") == NULL);
+    /* Barely above the module's own file: only floors can go; at worst it is a
+     * refusal that names the size and the cap, never "did not produce". */
+    sh_aas_test_set_payload_cap(len + 8);
+    state = sh_nav_bake_test_run("size", p, 12, module, len, brief, sizeof brief, &marks);
+    CHECK(state == SH_NAV_CLASS_REFUSED);
+    CHECK(strstr(brief, "navigation file over") != NULL);
+    CHECK(strstr(sh_nav_bake_test_last_reason(), "MiB is served per room") != NULL);
+    sh_aas_test_set_payload_cap(0);
+    free(module);
+}
+
 /* More marked boxes and rooms than the former fixed tables held. */
 static void test_plans_past_the_old_tables(void)
 {
@@ -1033,6 +1081,7 @@ int main(void)
     test_map_text_keeps_default_sized_and_drops_only_bad_boxes();
     test_plans_past_the_old_tables();
     test_tree_depth_limit_keeps_most_floors();
+    test_payload_cap_thins_instead_of_refusing();
     test_unmeasured_box_does_not_block_a_build();
     sh_nav_bake_preview_stop();
     printf("%s -- %d checks, %d failed\n", g_fail ? "FAILED" : "ok", g_checks, g_fail);

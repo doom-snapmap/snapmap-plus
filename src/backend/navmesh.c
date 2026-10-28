@@ -511,9 +511,9 @@ int sh_navmesh_validate_aas(const unsigned char *p, size_t len, char *err, size_
 
     if (err && err_cap) err[0] = '\0';
     if (!p) { nav_verr(err, err_cap, "no payload"); return 0; }
-    if (len > SH_SMNAV_MAX_PAYLOAD) {
+    if (len > SH_AAS_MAX_BAKE_PAYLOAD) {
         nav_verr(err, err_cap, "the payload is %zu bytes, over the %u-byte budget",
-                 len, (unsigned)SH_SMNAV_MAX_PAYLOAD);
+                 len, (unsigned)SH_AAS_MAX_BAKE_PAYLOAD);
         return 0;
     }
     if (len < SH_AAS_PREAMBLE_BYTES + (size_t)SH_AAS_LUMPS * 4) {

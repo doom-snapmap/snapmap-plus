@@ -920,6 +920,12 @@ static void bake_run(const char *name, const sh_aug_platform *in_plats, int in_c
     sh_aug_report rep;
     char err[192];
     int i, floors = 0, keep, tries = 0, depth_cut = 0, depth_first = 0;
+    /* The payload phase: lower the route budget, then shed floors, until the
+     * file fits sh_aas_payload_cap(). size_first is the size the full set
+     * would have had; routes_engine what the 256 limit alone sheds. */
+    int budget = 0, size_tries = 0, size_floor_tries = 0, size_keep = -1;
+    int routes_engine = -1, size_cut = 0;
+    size_t size_first = 0, size_last = 0, cap = sh_aas_payload_cap();
     const sh_aug_platform *plats = in_plats;
     int plat_count = in_count;
     sh_aug_platform *subset = NULL;
@@ -952,6 +958,7 @@ static void bake_run(const char *name, const sh_aug_platform *in_plats, int in_c
     opts.inset = 1;
     opts.traversal = 0;
     for (;;) {
+        opts.route_budget = budget;
         int augmented;
         err[0] = 0;
         model = sh_aas_parse(shipped, shipped_len, err, sizeof err);
@@ -997,8 +1004,51 @@ static void bake_run(const char *name, const sh_aug_platform *in_plats, int in_c
                         (unsigned)SH_AAS_MAX_DEPTH, in_count);
             strcpy_s(o->brief, sizeof o->brief, "navigation tree deeper than 128");
         } else if (augmented) {
-            o->bytes = sh_aas_write(model, &o->length);
-            depth_cut = floors - keep;
+            size_t size = sh_aas_serialized_size(model);
+            if (routes_engine < 0) routes_engine = rep.routes_dropped;
+            if (size > cap) {
+                /* A dense copy outgrows the file before the tree or the route
+                 * limit: thin its longest routes first, then its floors. */
+                int next = size_tries < 4
+                         ? sh_aug_route_budget_for(model, &rep, size, cap, budget) : 0;
+                if (!size_first) { size_first = size; size_keep = keep; }
+                size_last = size;
+                if (next > 0 || (keep > 1 && size_floor_tries < 6)) {
+                    sh_aas_free(model);
+                    sh_aug_report_free(&rep);
+                    if (next > 0) { budget = next; size_tries++; continue; }
+                    if (!subset) subset = (sh_aug_platform *)HeapAlloc(GetProcessHeap(), 0,
+                                              (size_t)in_count * sizeof *subset);
+                    if (!subset) {
+                        strcpy_s(o->reason, sizeof o->reason,
+                                 "out of memory while retrying with fewer boxes");
+                        strcpy_s(o->brief, sizeof o->brief, "out of memory");
+                        break;
+                    }
+                    keep = keep * 3 / 4;
+                    if (keep < 1) keep = 1;
+                    memcpy(subset, in_plats, (size_t)keep * sizeof *subset);
+                    memcpy(subset + keep, in_plats + floors,
+                           (size_t)(in_count - floors) * sizeof *subset);
+                    plats = subset;
+                    plat_count = keep + (in_count - floors);
+                    size_floor_tries++;
+                    continue;
+                }
+                _snprintf_s(o->reason, sizeof o->reason, _TRUNCATE,
+                            "the navigation file would be %.1f MiB and at most %.1f MiB is "
+                            "served per room; with every long route and all but one floor "
+                            "left out it was still %.1f MiB",
+                            size_first / 1048576.0, cap / 1048576.0, size_last / 1048576.0);
+                _snprintf_s(o->brief, sizeof o->brief, _TRUNCATE,
+                            "navigation file over %.0f MiB", cap / 1048576.0);
+            } else {
+                o->bytes = sh_aas_write(model, &o->length);
+                if (size_keep >= 0) {
+                    depth_cut = floors - size_keep;
+                    size_cut = size_keep - keep;
+                } else depth_cut = floors - keep;
+            }
         }
         sh_aas_free(model);
         break;
@@ -1097,7 +1147,8 @@ static void bake_run(const char *name, const sh_aug_platform *in_plats, int in_c
                         (unsigned)SH_AAS_MAX_DEPTH, depth_first);
             _snprintf_s(o->brief, sizeof o->brief, _TRUNCATE,
                         "%d box(es) left out at the 128 tree-depth limit", depth_cut);
-            for (i = keep; i < floors && o->partial_count < BAKE_MAX_REFUSED; i++)
+            for (i = size_keep >= 0 ? size_keep : keep;
+                 i < floors && o->partial_count < BAKE_MAX_REFUSED; i++)
                 bake_mark(o->partial, &o->partial_count, in_plats, in_count, i);
             o->state = SH_NAV_CLASS_PARTIAL;
             {
@@ -1108,10 +1159,47 @@ static void bake_run(const char *name, const sh_aug_platform *in_plats, int in_c
                 backend_log(line);
             }
         }
-        if (rep.routes_dropped) {
+        if (size_first) {
+            /* The routes the 256 limit alone would have shed are reported
+             * as such; the rest were thinned for the file size. */
+            int thinned = rep.routes_dropped - (routes_engine > 0 ? routes_engine : 0);
+            if (thinned < 0) thinned = 0;
             bake_append(o->reason, sizeof o->reason,
-                        "; %d route(s) left out so %d area(s) stay within the engine's %u",
-                        rep.routes_dropped, rep.route_areas, SH_AAS_MAX_AREA_REACHABILITIES);
+                        "; %d long route(s) left out (each area keeps at most %d)",
+                        thinned, budget ? budget : (int)SH_AAS_MAX_AREA_REACHABILITIES);
+            if (size_cut)
+                bake_append(o->reason, sizeof o->reason, " and the last %d floor box(es)",
+                            size_cut);
+            bake_append(o->reason, sizeof o->reason,
+                        " to keep the navigation file within %.0f MiB (it would have been "
+                        "%.1f MiB)", cap / 1048576.0, size_first / 1048576.0);
+            if (!o->brief[0] && size_cut)
+                _snprintf_s(o->brief, sizeof o->brief, _TRUNCATE,
+                            "%d route(s), %d box(es) left out at the %.0f MiB file limit",
+                            thinned, size_cut, cap / 1048576.0);
+            else if (!o->brief[0])
+                _snprintf_s(o->brief, sizeof o->brief, _TRUNCATE,
+                            "%d route(s) left out at the %.0f MiB file limit",
+                            thinned, cap / 1048576.0);
+            for (i = keep; i < (size_keep >= 0 ? size_keep : keep) &&
+                           o->partial_count < BAKE_MAX_REFUSED; i++)
+                bake_mark(o->partial, &o->partial_count, in_plats, in_count, i);
+            o->state = SH_NAV_CLASS_PARTIAL;
+            {
+                char line[SH_SMNAV_RESNAME_CAP + 200];
+                _snprintf_s(line, sizeof line, _TRUNCATE,
+                            "NAV:   '%s': the navigation file would have been %.1f MiB, over the "
+                            "%.0f MiB served per room; %d long route(s) and %d floor box(es) "
+                            "left out, %.1f MiB built", name, size_first / 1048576.0,
+                            cap / 1048576.0, thinned, size_cut, o->length / 1048576.0);
+                backend_log(line);
+            }
+        }
+        if (rep.routes_dropped) {
+            if (!size_first)
+                bake_append(o->reason, sizeof o->reason,
+                            "; %d route(s) left out so %d area(s) stay within the engine's %u",
+                            rep.routes_dropped, rep.route_areas, SH_AAS_MAX_AREA_REACHABILITIES);
             if (!o->brief[0])
                 _snprintf_s(o->brief, sizeof o->brief, _TRUNCATE,
                             "%d route(s) left out at the 256-per-area limit", rep.routes_dropped);
@@ -1169,9 +1257,10 @@ static void bake_run(const char *name, const sh_aug_platform *in_plats, int in_c
             for (i = 0; i < rep.dropped_count && i < 8; i++) {
                 int src = rep.dropped[i].source;
                 _snprintf_s(line, sizeof line, _TRUNCATE,
-                            "NAV:   '%s': %s lost %d route(s) out of area %d (256 limit)", name,
+                            "NAV:   '%s': %s lost %d route(s) out of area %d (%s)", name,
                             src >= 0 && src < plat_count ? plats[src].name : "the module floor",
-                            rep.dropped[i].routes, rep.dropped[i].area);
+                            rep.dropped[i].routes, rep.dropped[i].area,
+                            size_first ? "file size" : "256 limit");
                 backend_log(line);
             }
             for (i = 0; i < rep.dropped_source_count; i++) {
@@ -2065,6 +2154,11 @@ void sh_nav_bake_test_preview_complete(unsigned long revision, const char *bytes
 }
 
 /* Run one class bake on given inputs, as the worker and BuildAAS do. */
+static char   g_test_reason[BAKE_REASON_CAP];
+static size_t g_test_length;
+const char *sh_nav_bake_test_last_reason(void) { return g_test_reason; }
+size_t sh_nav_bake_test_last_length(void) { return g_test_length; }
+
 int sh_nav_bake_test_run(const char *name, const sh_aug_platform *plats, int n,
                          const unsigned char *shipped, size_t shipped_len,
                          char *brief, size_t brief_cap, int *partial_marks)
@@ -2074,6 +2168,8 @@ int sh_nav_bake_test_run(const char *name, const sh_aug_platform *plats, int n,
     if (!o) return -1;
     bake_run(name, plats, n, shipped, shipped_len, 0, 0, o);
     state = o->state;
+    strncpy_s(g_test_reason, sizeof g_test_reason, o->reason, _TRUNCATE);
+    g_test_length = o->length;
     if (brief && brief_cap) strncpy_s(brief, brief_cap, o->brief, _TRUNCATE);
     if (partial_marks) *partial_marks = o->partial_count;
     if (o->bytes) HeapFree(GetProcessHeap(), 0, o->bytes);

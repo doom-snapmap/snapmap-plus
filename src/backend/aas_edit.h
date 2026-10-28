@@ -51,9 +51,19 @@ sh_aas *sh_aas_parse(const unsigned char *bytes, size_t len, char *err, size_t e
 void sh_aas_free(sh_aas *a);
 
 /* Serialize. Returns a HeapAlloc(GetProcessHeap()) buffer the caller frees, or
- * NULL if the result would exceed SH_SMNAV_MAX_PAYLOAD. Re-serializing an
+ * NULL if the result would exceed sh_aas_payload_cap(). Re-serializing an
  * unmodified model reproduces its input byte for byte. */
 unsigned char *sh_aas_write(const sh_aas *a, size_t *out_len);
+
+/* The bytes sh_aas_write would produce, whatever the cap. */
+size_t sh_aas_serialized_size(const sh_aas *a);
+
+/* The largest payload parse and write accept: SH_AAS_MAX_BAKE_PAYLOAD. */
+size_t sh_aas_payload_cap(void);
+#ifdef SH_AUG_TESTING
+/* Lower the cap so a test reaches it cheaply; 0 restores it. Returns the old one. */
+size_t sh_aas_test_set_payload_cap(size_t cap);
+#endif
 
 /* ---- generic lump access ----------------------------------------------- */
 
