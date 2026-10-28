@@ -328,16 +328,27 @@ static int ng_merge(const ng_poly *a,const ng_poly *b,ng_poly *out)
     return fabs(ng_area(out)-ng_area(a)-ng_area(b))<1e-5;
 }
 
-int sh_nav_geometry_build_supported(const sh_aug_platform *src,int count,
+/* An agent-footprint strip is the hull of eight points, so it is stored at
+ * that size rather than as a full clip polygon. */
+typedef struct ng_strip { double p[8][3]; int n, face; } ng_strip;
+
+static void ng_strip_poly(const ng_strip *s, ng_poly *out)
+{
+    int i;
+    out->n = s->n;
+    for (i = 0; i < s->n; i++) memcpy(out->p[i], s->p[i], sizeof s->p[i]);
+}
+
+static int ng_build(const sh_aug_platform *src,int count,
     const sh_aug_platform *support,int support_count,double radius,
     double height,double floor_cos,double step,sh_aug_platform *out,int *source,int *pieces,
-    unsigned char *buried,int capacity)
+    unsigned char *buried,int capacity,sh_nav_geometry_stats *stats)
 {
     ng_box *boxes=NULL;ng_face *faces=NULL;ng_poly *mem=NULL,*a,*b,cut;
     ng_interval *iv=NULL,*next=NULL;
-    typedef struct ng_boundary { ng_poly p; int face; } ng_boundary;
-    ng_boundary *boundaries=NULL;
-    int nb=0,nbcap=0,i,j,k,f,nf=0,build_faces,nout=0,rc=-1;
+    ng_strip *boundaries=NULL;
+    unsigned char *strip_missing=NULL;
+    int nb=0,nbcap=0,i,j,k,f,nf=0,build_faces,nout=0,rc=-1,any_missing=0;
     if(support_count<0||support_count>65535||(support_count&&!support)||
        count<0||count>SH_AUG_MAX_PLATFORMS||capacity<1||radius<0.0||height<=0.0||
        floor_cos<=0.0||floor_cos>1.0||step<0.0||step>=height||!isfinite(step)||
@@ -347,7 +358,8 @@ int sh_nav_geometry_build_supported(const sh_aug_platform *src,int count,
     faces=(ng_face*)calloc((size_t)count*6+support_count+1,sizeof *faces);
     mem=(ng_poly*)malloc(2*(size_t)capacity*sizeof *mem);
     iv=(ng_interval*)malloc(2*(size_t)(count*6+support_count+1)*sizeof *iv);
-    if(!boxes||!faces||!mem||!iv)goto done;
+    strip_missing=(unsigned char*)calloc((size_t)count*6+1,1);
+    if(!boxes||!faces||!mem||!iv||!strip_missing)goto done;
     next=iv+count*6+support_count+1;
     for(i=0;i<count;i++) {
         if(!ng_box_read(&src[i],&boxes[i]))goto done;
@@ -397,12 +409,25 @@ int sh_nav_geometry_build_supported(const sh_aug_platform *src,int count,
                     double p0[3],p1[3];int x;
                     for(x=0;x<3;x++){p0[x]=p[x]+iv[v].lo*(q[x]-p[x]);p1[x]=p[x]+iv[v].hi*(q[x]-p[x]);}
                     if(nb==nbcap) {
-                        int nc=nbcap?nbcap*2:128;ng_boundary *grown;
-                        if(nc>32768)goto done;
-                        grown=(ng_boundary*)realloc(boundaries,(size_t)nc*sizeof *grown);
-                        if(!grown)goto done;boundaries=grown;nbcap=nc;
+                        int nc=nbcap?nbcap*2:128;ng_strip *grown=NULL;
+                        if(nc>SH_NAV_GEOMETRY_MAX_STRIPS)nc=SH_NAV_GEOMETRY_MAX_STRIPS;
+                        if(nc>nbcap)grown=(ng_strip*)realloc(boundaries,(size_t)nc*sizeof *grown);
+                        if(!grown) {
+                            /* Without its strips this face could be stood on
+                             * too close to its exposed edge: leave it out. */
+                            if(!stats)goto done;
+                            stats->strips_dropped++;strip_missing[i]=1;any_missing=1;
+                            continue;
+                        }
+                        boundaries=grown;nbcap=nc;
                     }
-                    ng_boundary_cut(&faces[i],p0,p1,radius,&boundaries[nb].p);
+                    {
+                        ng_poly hull;int x;
+                        ng_boundary_cut(&faces[i],p0,p1,radius,&hull);
+                        if(hull.n>8)hull.n=8;
+                        boundaries[nb].n=hull.n;
+                        for(x=0;x<hull.n;x++)memcpy(boundaries[nb].p[x],hull.p[x],sizeof hull.p[x]);
+                    }
                     boundaries[nb++].face=i;
                 }
             }
@@ -410,9 +435,17 @@ int sh_nav_geometry_build_supported(const sh_aug_platform *src,int count,
     for(f=0;f<build_faces;f++) {
         ng_face *face=&faces[f];int np=1,start=nout;
         a=mem;b=mem+capacity;a[0]=face->p;
+        /* A face whose own strips, or a coplanar neighbour's, were not all
+         * stored cannot be trimmed safely. */
+        if(any_missing) {
+            int unsafe=strip_missing[f];
+            for(j=0;j<build_faces&&!unsafe;j++)
+                if(strip_missing[j]&&ng_coplanar(face,&faces[j]))unsafe=1;
+            if(unsafe)goto drop_face;
+        }
         /* Partition overlapping support without inset along partition seams. */
         for(j=0;j<f&&np;j++)if(ng_coplanar(face,&faces[j]))
-            if(!ng_cut_all(&a,&b,&np,&faces[j].p,capacity))goto done;
+            if(!ng_cut_all(&a,&b,&np,&faces[j].p,capacity))goto fail_face;
         /* Subtract occupied standing space, including the actual underside of
          * an elevated box. Steep boxes remain obstacles even with no nav face. */
         for(j=0;j<count&&np;j++)if(j!=face->source&&boxes[j].solid) {
@@ -424,24 +457,31 @@ int sh_nav_geometry_build_supported(const sh_aug_platform *src,int count,
              * its riser must not erode an agent-width moat between the floors.
              * Unmarked obstacles, steep walls and headroom retain full checks. */
             if(step_clearance>0.0) {
-                if(!ng_obstacle(face,&boxes[j],0.0,height,floor_cos,1,0.0,&cut))goto done;
-                if(cut.n&&!ng_cut_all(&a,&b,&np,&cut,capacity))goto done;
+                if(!ng_obstacle(face,&boxes[j],0.0,height,floor_cos,1,0.0,&cut))goto fail_face;
+                if(cut.n&&!ng_cut_all(&a,&b,&np,&cut,capacity))goto fail_face;
             }
             if(!ng_obstacle(face,&boxes[j],radius,height,floor_cos,
-                           !src[j].obstacle_only,step_clearance,&cut))goto done;
-            if(cut.n&&!ng_cut_all(&a,&b,&np,&cut,capacity))goto done;
+                           !src[j].obstacle_only,step_clearance,&cut))goto fail_face;
+            if(cut.n&&!ng_cut_all(&a,&b,&np,&cut,capacity))goto fail_face;
         }
-        for(i=0;i<nb&&np;i++)if(ng_coplanar(face,&faces[boundaries[i].face]))
-            if(!ng_cut_all(&a,&b,&np,&boundaries[i].p,capacity))goto done;
+        for(i=0;i<nb&&np;i++)if(ng_coplanar(face,&faces[boundaries[i].face])) {
+            ng_poly strip;
+            ng_strip_poly(&boundaries[i],&strip);
+            if(!ng_cut_all(&a,&b,&np,&strip,capacity))goto fail_face;
+        }
         for(i=0;i<np;i++)for(j=i+1;j<np;) {
             ng_poly merged;
             if(ng_merge(&a[i],&a[j],&merged)) {
                 a[i]=merged;a[j]=a[--np];i=-1;break;
             } else j++;
         }
+        /* All of this face's pieces fit, or none of them is emitted. */
+        if(nout+np>capacity) {
+            if(!stats)goto done;
+            goto drop_face;
+        }
         for(i=0;i<np;i++) {
             sh_aug_platform *dst;
-            if(nout==capacity)goto done;
             dst=&out[nout];*dst=src[face->source];dst->corners=a[i].n;dst->prepared=1;
             dst->depth=0.0f;dst->face=face->face;
             for(k=0;k<3;k++)dst->n[k]=(float)face->normal[k];
@@ -450,6 +490,12 @@ int sh_nav_geometry_build_supported(const sh_aug_platform *src,int count,
             source[nout]=face->source;buried[nout]=0;nout++;
         }
         for(i=start;i<nout;i++)pieces[i]=nout-start;
+        continue;
+fail_face:
+        if(!stats)goto done;
+drop_face:
+        stats->faces_dropped++;
+        if(stats->source_dropped)stats->source_dropped[face->source]=1;
     }
     /* Keep a diagnostic for a source with no admitted face or standing room. */
     for(i=0;i<count;i++) {
@@ -457,12 +503,38 @@ int sh_nav_geometry_build_supported(const sh_aug_platform *src,int count,
         if(src[i].obstacle_only)continue;
         for(j=0;j<nout;j++)if(source[j]==i)found=1;
         if(found)continue;
-        if(nout==capacity)goto done;
+        /* A face left out at the ceiling is reported by the caller, not
+         * as buried. */
+        if(stats&&stats->source_dropped&&stats->source_dropped[i])continue;
+        if(nout==capacity) {
+            if(!stats)goto done;
+            break;
+        }
         out[nout]=src[i];source[nout]=i;pieces[nout]=0;buried[nout]=1;nout++;
     }
     rc=nout;
 done:
-    free(boundaries);free(iv);free(mem);free(faces);free(boxes);return rc;
+    free(strip_missing);free(boundaries);free(iv);free(mem);free(faces);free(boxes);return rc;
+}
+
+int sh_nav_geometry_build_supported(const sh_aug_platform *src,int count,
+    const sh_aug_platform *support,int support_count,double radius,
+    double height,double floor_cos,double step,sh_aug_platform *out,int *source,int *pieces,
+    unsigned char *buried,int capacity)
+{
+    return ng_build(src,count,support,support_count,radius,height,floor_cos,step,
+                    out,source,pieces,buried,capacity,NULL);
+}
+
+int sh_nav_geometry_build_budget(const sh_aug_platform *src,int count,
+    const sh_aug_platform *support,int support_count,double radius,
+    double height,double floor_cos,double step,sh_aug_platform *out,int *source,int *pieces,
+    unsigned char *buried,int capacity,sh_nav_geometry_stats *stats)
+{
+    sh_nav_geometry_stats ignored;
+    if(!stats){memset(&ignored,0,sizeof ignored);stats=&ignored;}
+    return ng_build(src,count,support,support_count,radius,height,floor_cos,step,
+                    out,source,pieces,buried,capacity,stats);
 }
 
 int sh_nav_geometry_build(const sh_aug_platform *src,int count,double radius,

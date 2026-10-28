@@ -5,10 +5,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdarg.h>
 
 #include "../src/backend/nav_bake.h"
 #include "../src/backend/nav_regions.h"
 #include "../src/backend/nav_traversal.h"
+#include "../src/backend/aas_augment.h"
+#include "../src/backend/navmesh.h"
+#include "aas_fixture.h"
 
 static int g_checks = 0, g_fail = 0;
 
@@ -403,6 +407,50 @@ static void test_complete_snapshot_tracks_creation_and_deletion(void)
     sh_nav_bake_set_snapshot(NULL, NULL);
 }
 
+static void report_line(const char *fmt, ...);
+
+/* The snapshot's size reader: the second box cannot be measured yet. */
+static int second_unmeasured(unsigned entity, float size[3], void *ctx)
+{
+    (void)ctx;
+    if (entity == 1) return 0;
+    size[0] = size[1] = 1024.0f; size[2] = 128.0f;
+    return 1;
+}
+static int snapshot_partly_measured(sh_nav_map *out, void *ctx)
+{
+    (void)ctx;
+    if (!g_snapshot_json) return 0;
+    return sh_nav_regions_read_resolved(g_snapshot_json, strlen(g_snapshot_json), out,
+                                        second_unmeasured, NULL);
+}
+
+/* A box the editor cannot measure keeps an ordinary read waiting for the
+ * next one, but an explicit build (or Play) bakes every box it could measure
+ * and names the one it left out. */
+static void test_unmeasured_box_does_not_block_a_build(void)
+{
+    const int owner[2] = {0, 0};
+    sh_nav_bake_summary s;
+    printf("a box the editor cannot measure does not block an explicit build\n");
+    sh_nav_bake_test_reset();
+    sh_nav_bake_set_snapshot(snapshot_partly_measured, NULL);
+    g_snapshot_json = make_map("ind_dlc/room", 1, 2, 3, 3, owner);
+    sh_nav_bake_refresh_live();
+    CHECK(!sh_nav_bake_has_map());
+    sh_nav_bake_summary_get(&s);
+    CHECK(strstr(s.read_reason, "measured") != NULL);
+    sh_nav_bake_refresh_live_partial();
+    CHECK(sh_nav_bake_has_map());
+    sh_nav_bake_summary_get(&s);
+    CHECK(s.rooms == 1 && s.boxes_left_out == 1);
+    g_log_count = 0;
+    sh_nav_bake_report(report_line);
+    CHECK(log_contains("could not measure it yet"));
+    sh_nav_bake_set_snapshot(NULL, NULL);
+    sh_nav_bake_test_reset();
+}
+
 static void test_refused_read_holds_no_map(void)
 {
     const int owner[2] = {0, 0};
@@ -509,7 +557,7 @@ static void test_fast_snapshot_reads_ids_and_obstacles(void)
     revision = sh_nav_bake_geometry_revision();
     CHECK(sh_nav_bake_refresh_volumes(&read) == 1 && read == 2);
     sh_nav_bake_test_copy_map(&after);
-    CHECK(!memcmp(&before, &after, sizeof before));
+    CHECK(sh_nav_map_equal(&before, &after));
     CHECK(sh_nav_bake_geometry_revision() == revision);
     /* A live entity reports the spawnPosition it was created with, so a moved
      * box still answers from where it started. Shape stays as the last complete
@@ -534,7 +582,7 @@ static void test_fast_snapshot_reads_ids_and_obstacles(void)
     g_box_missing = 101;
     CHECK(sh_nav_bake_refresh_volumes(&read) == 1);
     sh_nav_bake_test_copy_map(&after);
-    CHECK(!memcmp(&before, &after, sizeof before));
+    CHECK(sh_nav_map_equal(&before, &after));
     /* Deleting the one that carried the region takes the region with it. */
     g_box_missing = 100;
     CHECK(sh_nav_bake_refresh_volumes(&read) == 1);
@@ -609,7 +657,7 @@ static void test_source_invalidation_retires_cached_and_inflight_results(void)
     sh_nav_bake_invalidate_sources();
     CHECK(sh_nav_bake_geometry_revision() != old_revision);
     sh_nav_bake_test_copy_map(&after);
-    CHECK(!memcmp(&before, &after, sizeof(before)));
+    CHECK(sh_nav_map_equal(&before, &after));
     CHECK(sh_nav_bake_instance_name(0, name, new_name, sizeof(new_name)) && strcmp(new_name, old_name));
     sh_nav_bake_test_preview_complete(old_revision, "stale worker result");
     CHECK(!sh_nav_bake_open(new_name, no_shipped_bytes, &bytes, &length));
@@ -670,6 +718,293 @@ static void test_source_update_guards_navigation_reads(void)
     sh_nav_bake_test_reset();
 }
 
+
+/* ---- degrading instead of refusing ------------------------------------ */
+
+static int g_reads;
+static unsigned char *counting_reader(const char *name, size_t *out_len)
+{
+    (void)name;
+    g_reads++;
+    if (out_len) *out_len = 0;
+    return NULL;
+}
+
+static const char *ROOM48 = "maps/modules/ind_dlc/room/room.aas_monster48";
+static const char *ROOM96 = "maps/modules/ind_dlc/room/room.aas_monster96";
+static const char *ROOM128 = "maps/modules/ind_dlc/room/room.aas_monster128";
+
+/* A refused monster48 bake no longer costs the copy its monster96 and
+ * monster128 navigation, and a refusal already seen at this geometry is not
+ * baked again: the engine gets the shipped navigation without a second try. */
+static void test_classes_refuse_independently(void)
+{
+    const int owner[1] = { 0 };
+    char *json = make_map("ind_dlc/room", 1, 1, 0x1u, 0x1u, owner);
+    char name48[384], name96[384], name128[384];
+    unsigned char *bytes = NULL;
+    size_t len = 0;
+    printf("one demon class refusing leaves the other classes of that copy alone\n");
+    sh_nav_bake_test_reset();
+    sh_nav_bake_set_map(json, strlen(json));
+    sh_nav_bake_enable_instances(1);
+    CHECK(sh_nav_bake_instance_name(0, ROOM48, name48, sizeof name48));
+    /* The worker refused monster48 at this geometry. */
+    sh_nav_bake_test_preview_outcome(0, SH_NAV_CLASS_REFUSED, "navigation tree deeper than 128");
+    CHECK_MSG(!sh_nav_bake_instance_name(0, ROOM48, name48, sizeof name48),
+              "a class known to refuse gets the shipped navigation by its own name");
+    CHECK(sh_nav_bake_instance_name(0, ROOM96, name96, sizeof name96));
+    CHECK(sh_nav_bake_instance_name(0, ROOM128, name128, sizeof name128));
+
+    /* Play asking for the private monster48 name anyway: no second bake. */
+    _snprintf_s(name48, sizeof name48, _TRUNCATE, "maps/smpnav/%lu/0/modules/ind_dlc/room/room.aas_monster48",
+                sh_nav_bake_geometry_revision());
+    g_reads = 0; g_log_count = 0;
+    CHECK(!sh_nav_bake_open(name48, counting_reader, &bytes, &len));
+    CHECK_MSG(g_reads == 1, "only the shipped fallback is read, the bake is not run again");
+    CHECK(log_contains("refused earlier"));
+
+    /* monster96 bakes (and here refuses for want of shipped data) on its own. */
+    g_reads = 0;
+    CHECK(!sh_nav_bake_open(name96, counting_reader, &bytes, &len));
+    CHECK(g_reads >= 2);                 /* the bake's reads, then the fallback */
+    CHECK(!sh_nav_bake_instance_name(0, ROOM96, name96, sizeof name96));
+    g_reads = 0;
+    _snprintf_s(name96, sizeof name96, _TRUNCATE, "maps/smpnav/%lu/0/modules/ind_dlc/room/room.aas_monster96",
+                sh_nav_bake_geometry_revision());
+    CHECK(!sh_nav_bake_open(name96, counting_reader, &bytes, &len));
+    CHECK_MSG(g_reads == 1, "the same inputs are not baked twice");
+    CHECK(sh_nav_bake_instance_name(0, ROOM128, name128, sizeof name128));
+
+    /* A geometry change is new input: every class may try again. */
+    sh_nav_bake_invalidate_sources();
+    CHECK(sh_nav_bake_instance_name(0, ROOM48, name48, sizeof name48));
+    CHECK(sh_nav_bake_instance_name(0, ROOM96, name96, sizeof name96));
+    sh_nav_bake_test_reset();
+}
+
+static void report_line(const char *fmt, ...)
+{
+    char line[512];
+    va_list ap;
+    va_start(ap, fmt);
+    _vsnprintf_s(line, sizeof line, _TRUNCATE, fmt, ap);
+    va_end(ap);
+    backend_log(line);
+}
+
+/* The toast names the room and the reason, and tells partial success from
+ * total failure, inside the native help-row width. */
+static void test_toast_names_the_room_and_reason(void)
+{
+    const int owner[2] = { 0, 1 };
+    char *json = make_map("ind_dlc/room", 2, 2, 0x3u, 0x3u, owner);
+    sh_nav_bake_summary s;
+    char title[64], body[256];
+    printf("the toast says how many rooms were built and why one was not\n");
+    sh_nav_bake_test_reset();
+    sh_nav_bake_set_map(json, strlen(json));
+    sh_nav_bake_test_preview_outcome(0, SH_NAV_CLASS_BUILT, "");
+    sh_nav_bake_test_preview_outcome(1, SH_NAV_CLASS_REFUSED, "its own routes already fill one area");
+    sh_nav_bake_summary_get(&s);
+    CHECK(s.have_map && s.rooms == 2 && s.built == 1 && s.refused == 1 && s.pending == 0);
+    CHECK(strstr(s.first, "room (copy 1)") != NULL);
+    sh_nav_bake_toast(&s, 1, title, sizeof title, body, sizeof body);
+    CHECK(!strcmp(title, "Navmesh Partly Built"));
+    CHECK(strstr(body, "1 of 2 rooms built") != NULL);
+    CHECK(strstr(body, "room (copy 1): its own routes already fill one area") != NULL);
+    CHECK(strlen(body) < SH_NAV_TOAST_BODY_CAP);
+
+    /* sh_navmesh lists every class of every copy with its outcome. */
+    g_log_count = 0;
+    sh_nav_bake_report(report_line);
+    CHECK(log_contains("monster48: keeps its shipped navigation -- its own routes"));
+    CHECK(log_contains("monster96: not baked yet (baked when Play loads it)"));
+    CHECK(log_contains("monster48: built"));
+
+    sh_nav_bake_test_preview_outcome(1, SH_NAV_CLASS_PARTIAL, "12 route(s) left out at the 256-per-area limit");
+    sh_nav_bake_summary_get(&s);
+    sh_nav_bake_toast(&s, 1, title, sizeof title, body, sizeof body);
+    CHECK(!strcmp(title, "Navmesh Partly Built"));
+    CHECK(strstr(body, "2 of 2 rooms built, partly") != NULL);
+    CHECK(strstr(body, "256-per-area") != NULL);
+
+    sh_nav_bake_test_preview_outcome(1, SH_NAV_CLASS_BUILT, "");
+    sh_nav_bake_summary_get(&s);
+    sh_nav_bake_toast(&s, 1, title, sizeof title, body, sizeof body);
+    CHECK(!strcmp(title, "Navmesh Built"));
+
+    sh_nav_bake_test_preview_outcome(0, SH_NAV_CLASS_REFUSED, "navigation tree deeper than 128");
+    sh_nav_bake_test_preview_outcome(1, SH_NAV_CLASS_REFUSED, "navigation tree deeper than 128");
+    sh_nav_bake_summary_get(&s);
+    sh_nav_bake_toast(&s, 1, title, sizeof title, body, sizeof body);
+    CHECK(!strcmp(title, "Navmesh Build Failed"));
+    CHECK(strstr(body, "No room could be built. room (copy 0)") != NULL);
+
+    /* A very long room name and reason are shortened in the middle; the
+     * pointer to sh_navmesh at the end survives. */
+    {
+        sh_nav_bake_summary longer = s;
+        memset(longer.first, 'x', sizeof longer.first - 1);
+        longer.first[sizeof longer.first - 1] = 0;
+        sh_nav_bake_toast(&longer, 1, title, sizeof title, body, sizeof body);
+        CHECK(strlen(body) < SH_NAV_TOAST_BODY_CAP);
+        CHECK(strstr(body, "See sh_navmesh.") != NULL && strstr(body, "...") != NULL);
+    }
+
+    sh_nav_bake_toast(&s, 0, title, sizeof title, body, sizeof body);
+    CHECK(!strcmp(title, "Navmesh Build Failed"));
+
+    /* A map the read refused says why. */
+    sh_nav_bake_test_reset();
+    {
+        static const char bad[] =
+            "{\"instances\":[{\"moduleName\":\"maps/modules/ind_dlc/room.decl\"}],"
+            "\"entities\":[{\"uniqueId\":1,\"entityDef\":{\"inherit\":\"snapmaps/volume/blocking\","
+            "\"state\":{\"edit\":{\"blockDemons\":true,\"flags\":{\"noFlood\":true}}}}}],"
+            "\"instanceEntities\":{\"keyValues\":[0],\"values\":[1]}}";
+        sh_nav_bake_set_map(bad, sizeof bad - 1);
+    }
+    sh_nav_bake_summary_get(&s);
+    CHECK(!s.have_map && strstr(s.read_reason, "room table") != NULL);
+    sh_nav_bake_toast(&s, 1, title, sizeof title, body, sizeof body);
+    CHECK(!strcmp(title, "Navmesh Build Failed"));
+    CHECK(strstr(body, "room table") != NULL && strlen(body) < SH_NAV_TOAST_BODY_CAP);
+    sh_nav_bake_test_reset();
+}
+
+/* The load and Save reads have only map text. A box the author never resized
+ * carries no size there; it takes the entityDef's, so the preview survives a
+ * Save. One unreadable box is left out alone and named. */
+static void test_map_text_keeps_default_sized_and_drops_only_bad_boxes(void)
+{
+    static sh_nav_map map;
+    static const char json[] =
+        "{\"instances\":[{\"moduleName\":\"maps/modules/ind_dlc/room.decl\",\"orientation\":0,"
+        "\"origin\":{\"x\":0,\"y\":0,\"z\":0}}],"
+        "\"entities\":["
+        "{\"uniqueId\":1,\"entityDef\":{\"inherit\":\"snapmaps/volume/blocking\",\"state\":{\"edit\":{"
+        "\"blockDemons\":true,\"flags\":{\"noFlood\":true}}}}},"
+        "{\"uniqueId\":2,\"entityDef\":{\"inherit\":\"snapmaps/volume/blocking\",\"state\":{\"edit\":{"
+        "\"clipModelInfo\":{\"size\":{\"x\":0}},"
+        "\"blockDemons\":true,\"flags\":{\"noFlood\":true}}}}}],"
+        "\"instanceEntities\":{\"keyValues\":[0,2,2],\"values\":[1,2]}}";
+    sh_nav_bake_summary s;
+    float dx;
+    printf("a default-sized box keeps its navigation after a Save; a bad box is left out alone\n");
+    sh_nav_bake_test_reset();
+    g_log_count = 0;
+    sh_nav_bake_set_map(json, sizeof json - 1);
+    CHECK(sh_nav_bake_has_map());
+    sh_nav_bake_test_copy_map(&map);
+    CHECK(map.region_count == 1 && map.dropped_total == 1);
+    if (map.region_count == 1) {
+        dx = map.regions[0].c[1][0] - map.regions[0].c[0][0];
+        CHECK(dx == 16.0f || dx == -16.0f || map.regions[0].c[2][0] - map.regions[0].c[1][0] != 0.0f);
+        CHECK(map.regions[0].c[0][2] == 64.0f);
+    }
+    sh_nav_map_free(&map);
+    CHECK(log_contains("left out marked box 1 (id 2)"));
+    sh_nav_bake_summary_get(&s);
+    CHECK(s.have_map && s.rooms == 1 && s.boxes_left_out == 1);
+    sh_nav_bake_test_reset();
+}
+
+/* The engine loads no tree deeper than 128. A copy that would pass it keeps
+ * most of its floors and leaves the rest out, instead of losing all of them;
+ * one that cannot fit even one floor is refused by name. */
+static void test_tree_depth_limit_keeps_most_floors(void)
+{
+    sh_aug_platform p[12];
+    unsigned char *module;
+    size_t len = 0;
+    char brief[128];
+    int i, marks = 0, state;
+    unsigned was;
+    printf("a copy past the tree-depth limit keeps most of its floors\n");
+    module = fixture_module(&len);
+    CHECK(module != NULL);
+    if (!module) return;
+    for (i = 0; i < 12; i++) {
+        float x = -1800.0f + (float)i * 300.0f;
+        memset(&p[i], 0, sizeof p[i]);
+        p[i].c[0][0] = x;          p[i].c[0][1] = 200;
+        p[i].c[1][0] = x + 200.0f; p[i].c[1][1] = 200;
+        p[i].c[2][0] = x + 200.0f; p[i].c[2][1] = -200;
+        p[i].c[3][0] = x;          p[i].c[3][1] = -200;
+        p[i].c[0][2] = p[i].c[1][2] = p[i].c[2][2] = p[i].c[3][2] = 16.0f;
+        p[i].n[2] = 1.0f; p[i].face = 4; p[i].depth = 16.0f;
+        _snprintf_s(p[i].name, sizeof p[i].name, _TRUNCATE, "volume %d", i);
+    }
+    /* Unlimited, the twelve fit; measure how deep they go. */
+    state = sh_nav_bake_test_run("depth", p, 12, module, len, brief, sizeof brief, &marks);
+    CHECK(state == SH_NAV_CLASS_BUILT);
+    /* With a limit between what one floor and all twelve need, the copy sheds
+     * floors rather than refusing. */
+    was = sh_aug_test_set_depth_limit(0);
+    for (i = 3; i < 64; i++) {
+        sh_aug_test_set_depth_limit((unsigned)i);
+        state = sh_nav_bake_test_run("depth", p, 12, module, len, brief, sizeof brief, &marks);
+        if (state != SH_NAV_CLASS_REFUSED) break;
+    }
+    CHECK(state == SH_NAV_CLASS_PARTIAL);
+    CHECK(strstr(brief, "left out at the 128 tree-depth limit") != NULL);
+    CHECK(marks > 0);
+    /* A limit nothing fits under is a named refusal. */
+    sh_aug_test_set_depth_limit(1);
+    state = sh_nav_bake_test_run("depth", p, 12, module, len, brief, sizeof brief, &marks);
+    CHECK(state == SH_NAV_CLASS_REFUSED);
+    CHECK(!strcmp(brief, "navigation tree deeper than 128"));
+    sh_aug_test_set_depth_limit(was);
+    free(module);
+}
+
+/* More marked boxes and rooms than the former fixed tables held. */
+static void test_plans_past_the_old_tables(void)
+{
+    static sh_nav_map map;
+    const int rooms = 300, per_room = 2;
+    size_t cap = 4 * 1024 * 1024, used = 0;
+    char *json = (char *)malloc(cap);
+    int i, j, uid = 1;
+    char name[384];
+    printf("a map with 600 marked boxes in 300 rooms plans every room\n");
+    if (!json) { CHECK(0); return; }
+#define PUT(...) used += (size_t)_snprintf_s(json + used, cap - used, _TRUNCATE, __VA_ARGS__)
+    PUT("{\"instances\":[");
+    for (i = 0; i < rooms; i++)
+        PUT("%s{\"moduleName\":\"maps/modules/ind_dlc/room.decl\",\"orientation\":0,"
+            "\"origin\":{\"x\":%d,\"y\":0,\"z\":0}}", i ? "," : "", i * 4096);
+    PUT("],\"entities\":[");
+    for (i = 0; i < rooms * per_room; i++)
+        PUT("%s{\"uniqueId\":%d,\"entityDef\":{\"inherit\":\"snapmaps/volume/blocking\",\"state\":{\"edit\":{"
+            "\"clipModelInfo\":{\"size\":{\"x\":256,\"y\":256,\"z\":64}},"
+            "\"blockDemons\":true,\"flags\":{\"noFlood\":true}}}}}", i ? "," : "", i + 1);
+    PUT("],\"instanceEntities\":{\"keyValues\":[0");
+    for (i = 0; i < rooms; i++) PUT(",%d", (i + 1) * per_room);
+    PUT(",%d],\"values\":[", rooms * per_room);
+    for (i = 0; i < rooms; i++) for (j = 0; j < per_room; j++, uid++) PUT("%s%d", uid == 1 ? "" : ",", uid);
+    PUT("]}}");
+#undef PUT
+    sh_nav_bake_test_reset();
+    sh_nav_bake_set_map(json, used);
+    sh_nav_bake_enable_instances(1);
+    CHECK(sh_nav_bake_has_map());
+    CHECK(sh_nav_bake_instance_count() == rooms);
+    sh_nav_bake_test_copy_map(&map);
+    CHECK(map.region_count == rooms * per_room && map.dropped_total == 0);
+    sh_nav_map_free(&map);
+    CHECK(sh_nav_bake_instance_name(rooms - 1, "maps/modules/ind_dlc/room/room.aas_monster48",
+                                    name, sizeof name));
+    {
+        sh_nav_bake_summary s;
+        sh_nav_bake_summary_get(&s);
+        CHECK(s.rooms == rooms);
+    }
+    sh_nav_bake_test_reset();
+    free(json);
+}
+
 int main(void)
 {
     printf("nav_bake_test\n");
@@ -693,6 +1028,12 @@ int main(void)
     test_refused_read_holds_no_map();
     test_snapshot_moves_and_changes_ownership();
     test_prepare_collects_worker_without_drawing();
+    test_classes_refuse_independently();
+    test_toast_names_the_room_and_reason();
+    test_map_text_keeps_default_sized_and_drops_only_bad_boxes();
+    test_plans_past_the_old_tables();
+    test_tree_depth_limit_keeps_most_floors();
+    test_unmeasured_box_does_not_block_a_build();
     sh_nav_bake_preview_stop();
     printf("%s -- %d checks, %d failed\n", g_fail ? "FAILED" : "ok", g_checks, g_fail);
     return g_fail ? 1 : 0;

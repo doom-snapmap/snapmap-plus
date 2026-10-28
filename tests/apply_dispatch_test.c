@@ -182,10 +182,18 @@ static void test_start_menu_update_lifecycle(void)
     nav_ready = 1; ae_nav_refresh_poll();
     assert(nav_prepare_calls == 2 && sh_apply_engine_nav_update_status() == SH_NAV_UPDATE_READY);
     assert(!(sh_apply_engine_nav_view_state() & 2));
+    /* A room that keeps its shipped navigation is a finished update that
+     * names it, not a failed one. */
     g_nav_update_status = SH_NAV_UPDATE_BUILDING; nav_rooms = 1;
+    ae_nav_refresh_poll();
+    assert(sh_apply_engine_nav_update_status() == SH_NAV_UPDATE_READY);
+    assert(!(sh_apply_engine_nav_view_state() & 4));
+    /* A map the read refused is the failure. */
+    g_nav_update_status = SH_NAV_UPDATE_BUILDING; nav_ready = -1;
     ae_nav_refresh_poll();
     assert(sh_apply_engine_nav_update_status() == SH_NAV_UPDATE_FAILED);
     assert(sh_apply_engine_nav_view_state() & 4);
+    nav_ready = 1;
     g_nav_update_status = SH_NAV_UPDATE_BUILDING;
     *(void **)(editor + ED_MAP_OBJ_OFF) = NULL; ae_nav_refresh_poll();
     assert(sh_apply_engine_nav_update_status() == SH_NAV_UPDATE_FAILED);
@@ -308,10 +316,16 @@ int sh_rawmap_snapshot(void *serializer, void *map, void *out) { (void)serialize
 int sh_rawmap_snapshot_inspect(void *serializer, void *map, void *out, sh_rawmap_snapshot_visit visit, void *ctx)
 { (void)serializer; (void)map; (void)out; (void)visit; (void)ctx; assert(0); return 0; }
 void sh_nav_bake_refresh_live(void) { assert(0); }
+void sh_nav_bake_refresh_live_partial(void) { assert(0); }
 int sh_nav_bake_prepare(sh_nav_bake_reader reader)
 { (void)reader; assert(nav_test_allowed); nav_prepare_calls++; return nav_ready; }
 void sh_nav_bake_conflicts(int *marked, int *rooms)
 { assert(nav_test_allowed); *marked=0; *rooms=nav_rooms; }
+void sh_nav_bake_summary_get(sh_nav_bake_summary *s)
+{
+    assert(nav_test_allowed); memset(s, 0, sizeof *s);
+    s->have_map = 1; s->rooms = 2; s->refused = nav_rooms; s->built = 2 - nav_rooms;
+}
 unsigned long sh_nav_bake_geometry_revision(void) { return 0; }
 int sh_nav_bake_preview_pending(void) { assert(0); return 0; }
 int sh_nav_preview_published(void *world) { (void)world; assert(0); return 0; }

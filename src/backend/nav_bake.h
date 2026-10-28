@@ -45,8 +45,32 @@ typedef unsigned char *(*sh_nav_bake_reader)(const char *name, size_t *out_len);
 int sh_nav_bake_open(const char *name, sh_nav_bake_reader read_shipped,
                      unsigned char **out_bytes, size_t *out_len);
 
-/* Console report: what this map asked for and what it got. */
+/* Console report: what this map asked for and what it got, per module copy
+ * and per demon class, with every reason and every box left out. */
 void sh_nav_bake_report(void (*out)(const char *fmt, ...));
+
+/* What one demon class of one module copy got. */
+enum { SH_NAV_CLASS_UNTRIED = 0, SH_NAV_CLASS_BUILT, SH_NAV_CLASS_PARTIAL,
+       SH_NAV_CLASS_REFUSED };
+
+/* The map-wide outcome of the current monster48 bake, for the toast and the
+ * View menu. A room is one marked module copy. */
+typedef struct sh_nav_bake_summary {
+    int  have_map;          /* 0: the map could not be read; see read_reason */
+    int  rooms;             /* marked module copies */
+    int  built, partial, refused, pending;
+    int  boxes_left_out;    /* boxes the map read left out one at a time */
+    char read_reason[96];
+    char first[160];        /* "<module> (copy N): <short reason>" worth naming */
+} sh_nav_bake_summary;
+void sh_nav_bake_summary_get(sh_nav_bake_summary *s);
+
+/* Native help rows hold about 160 characters; the toast keeps to the same. */
+#define SH_NAV_TOAST_BODY_CAP 160
+/* Title and body for the Build Navmesh toast. `finished` is 0 when the update
+ * itself could not run (the editor left the state, or the read failed). */
+void sh_nav_bake_toast(const sh_nav_bake_summary *s, int finished, char *title,
+                       size_t title_cap, char *body, size_t body_cap);
 
 /* Legacy per-entity callbacks avoid a direct dependency on engine code.
  * Production editor baking uses the complete-map snapshot callback below.
@@ -58,6 +82,10 @@ typedef int (*sh_nav_bake_entity_count)(void *ctx);
  * edits. Never call from the UI worker or inside the AAS loader.
  */
 void sh_nav_bake_refresh_live(void);
+/* The same, for an explicit Build Navmesh or the read before Play: boxes the
+ * editor cannot measure yet are left out of this bake and named, instead of
+ * refusing the read and with it every other box. */
+void sh_nav_bake_refresh_live_partial(void);
 
 /* Re-place the boxes the last complete refresh found, including obstacles.
  * Geometry comes from the editor's memory, so only the flags are serialized.
@@ -165,6 +193,12 @@ void sh_nav_bake_test_copy_map(sh_nav_map *out);
 void sh_nav_bake_test_preview_complete(unsigned long revision, const char *bytes);
 void sh_nav_bake_test_preview_inputs(unsigned long revision, const char *bytes,
     const char *source, int traversal);
+void sh_nav_bake_test_refuse_class(int class_index, const char *reason);
+struct sh_aug_platform;
+int sh_nav_bake_test_run(const char *name, const struct sh_aug_platform *plats, int n,
+                         const unsigned char *shipped, size_t shipped_len,
+                         char *brief, size_t brief_cap, int *partial_marks);
+void sh_nav_bake_test_preview_outcome(int slot, int state, const char *brief);
 #endif
 
 #endif /* SNAPMAP_PLUS_NAV_BAKE_H */

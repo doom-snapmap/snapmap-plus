@@ -11,11 +11,18 @@
 #include <stddef.h>
 #include "aas_edit.h"
 
-#define SH_AUG_MAX_PLATFORMS   512
+/* Ceiling on the boxes one module copy offers and on the walkable pieces they
+ * cut into, per demon class. Scratch is about 3 KB per piece plus a 300-byte
+ * report entry, 1.5 KB of clip polygons and an 850 KB side buffer, so the
+ * ceiling bounds one bake at roughly 11 MB (edge strips aside, see
+ * nav_geometry.h). A box past it is left out and reported; it never refuses
+ * the module. */
+#define SH_AUG_MAX_PLATFORMS   2048
 #define SH_AUG_NAME_CAP        64
 #define SH_AUG_REASON_CAP      160
 #define SH_AUG_MAX_CORNERS     32
 #define SH_AUG_MAX_BLAMED      8
+#define SH_AUG_MAX_DROPPED     16
 
 /* A convex surface in module-local coordinates, wound clockwise from +Z.
  * Input boxes use four corners; prepared geometry may have more. n is its
@@ -68,15 +75,32 @@ typedef struct sh_aug_platform_result {
     char     reason[SH_AUG_REASON_CAP]; /* why it was not emitted */
 } sh_aug_platform_result;
 
+/* Routes left out of one area so it stays inside the engine's 256 outgoing
+ * reachabilities: `routes` of them leave `area` toward or from `source`. */
+typedef struct sh_aug_route_drop { int source, area, routes; } sh_aug_route_drop;
+
 typedef struct sh_aug_report {
-    /* One entry per walkable piece. source identifies its requested volume;
-     * source_count counts requested volumes.
+    /* One entry per walkable piece, on the heap: sh_aug_report_free releases
+     * it. source identifies its requested volume; source_count counts
+     * requested volumes.
      */
-    sh_aug_platform_result platforms[SH_AUG_MAX_PLATFORMS];
+    sh_aug_platform_result *platforms;
     int      platform_count;
     int      source_count;
-    int      pieces_truncated;          /* geometry capacity exhausted;
+    int      pieces_truncated;          /* a box's geometry could not be cut;
                                          * the whole candidate is refused */
+    /* Degraded, not refused: what was left out so the rest fits. */
+    int      pieces_dropped;            /* walkable faces past the piece ceiling */
+    int      sources_dropped;           /* boxes that lost a face that way */
+    int      dropped_sources[SH_AUG_MAX_BLAMED];
+    int      dropped_source_count;
+    int      routes_dropped;            /* distinct routes left out at the 256 limit */
+    int      route_areas;               /* areas that needed it */
+    sh_aug_route_drop dropped[SH_AUG_MAX_DROPPED];
+    int      dropped_count;
+    int      edges_skipped;             /* edges whose floor walk passed its budget */
+    int      file_full;                 /* the area table filled; later pieces skipped */
+    int      segments_failed;           /* an edge could not be measured; refused */
     int      dead_gaps;                 /* unlinked pairs beyond step range but below the shortest available jump */
     unsigned areas_before, areas_after;
     unsigned reach_before, reach_after;
@@ -84,7 +108,9 @@ typedef struct sh_aug_report {
     int      depth_exceeded;            /* past the loader's 0x80 limit */
     int      links_truncated;           /* traversal allocation failed;
                                          * the whole candidate is refused */
-    int      reach_limit_exceeded;      /* required routes cannot fit one area */
+    int      reach_limit_exceeded;      /* the module's own routes already exceed
+                                         * 256 from one area, or a route names an
+                                         * area that does not exist; refused */
     int      reach_limit_area;          /* that area, or -1 */
     /* Requested volumes routing into the full area: the ones a mapper can
      * move or delete to fit. Empty when the area is shipped floor whose own
@@ -102,6 +128,7 @@ typedef struct sh_aug_report {
  */
 int sh_aas_augment(sh_aas *a, const sh_aug_platform *plats, int n,
                    const sh_aug_opts *opts, sh_aug_report *out);
+void sh_aug_report_free(sh_aug_report *out);
 
 /* Resolve a point through the BSP as the engine does; 0 means void. The
  * serving path uses this to verify that generated areas are findable.
@@ -118,6 +145,8 @@ unsigned sh_aas_tree_depth(const sh_aas *a);
 int sh_aug_test_trav_anchors(double lo, double hi, double *out, int cap);
 /* Set the per-demon anchor cap; 0 is uncapped. Returns the previous cap. */
 int sh_aug_test_set_anchor_cap(int n);
+/* Lower the tree-depth limit the report checks; 0 restores 128. */
+unsigned sh_aug_test_set_depth_limit(unsigned limit);
 
 /* Test access to the private aug_quad type. Allocate sh_aug_test_quad_size()
  * bytes for each quad buffer.

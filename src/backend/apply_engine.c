@@ -23,6 +23,7 @@
 #include "backend_log.h"
 #include "rawmap.h"
 #include "nav_bake.h"
+#include "nav_entitydef.h"
 #include "nav_snapshot.h"
 #include "perf.h"
 #include "nav_preview.h"
@@ -1666,13 +1667,15 @@ static int ae_snapshot_box_size(unsigned index, float size[3], void *ctx)
                    AE_DECL_RESOLVED_OFF;
         if (ae_read_u32(resolved + IDSTR_LEN_OFF, &length) &&
             length && length < AE_DECL_TEXT_CAP &&
-            ae_read_ptr(resolved + IDSTR_DATA_OFF, &text) && text &&
-            sh_nav_regions_decl_size((const char *)text, length, size)) return 1;
+            ae_read_ptr(resolved + IDSTR_DATA_OFF, &text) && text)
+            /* Read but not a usable box: that box alone is left out. */
+            return sh_nav_regions_decl_size((const char *)text, length, size) ? 1 : -1;
     }
     /* In the editor an unmeasured box is one that has only just been placed,
      * and the next read gets it. A conversion has no next read: the box takes
-     * the size its entityDef gives it, and any axis the map spells still wins. */
-    if (box->converting && sh_nav_snapshot_inherited_size(AE_PROBE_VOLUME_DEF, size)) {
+     * the size its entityDef gives it through nav_entitydef, the same resolver
+     * the map-text reads use, and any axis the map spells still wins. */
+    if (box->converting && sh_nav_entitydef_box_size(AE_PROBE_VOLUME_DEF, size)) {
         box->inherited++;
         return 1;
     }
@@ -2223,21 +2226,35 @@ static int ae_nav_holding(const uint8_t *ed)
 
 static void ae_nav_update_poll(void)
 {
-    int ready, marked = 0, rooms = 0;
+    int ready;
+    sh_nav_bake_summary sum;
     if (InterlockedCompareExchange(&g_nav_update_requested, 0, 0) ||
         sh_apply_engine_nav_update_status() != SH_NAV_UPDATE_BUILDING) return;
     __try {
         ready = sh_nav_bake_prepare(sh_overrides_read_engine_resource);
         if (!ready) return;
-        if (ready > 0) sh_nav_bake_conflicts(&marked, &rooms);
     } __except (EXCEPTION_EXECUTE_HANDLER) { ready = -1; }
-    if (ready < 0 || marked || rooms) {
+    /* Only an unreadable map fails the update. A room that keeps its shipped
+     * navigation, or a box left out, is a finished update that says so; the
+     * toast and the View menu name the room and the reason. */
+    if (ready < 0) {
         g_nav_stale = 1;
         InterlockedExchange(&g_nav_update_status, SH_NAV_UPDATE_FAILED);
-        backend_log("NAV: requested update finished with refused geometry or inputs");
-    } else {
-        InterlockedExchange(&g_nav_update_status, SH_NAV_UPDATE_READY);
+        backend_log("NAV: requested update could not read the map");
+        return;
+    }
+    sh_nav_bake_summary_get(&sum);
+    InterlockedExchange(&g_nav_update_status, SH_NAV_UPDATE_READY);
+    if (!sum.refused && !sum.partial && !sum.boxes_left_out) {
         backend_log("NAV: requested update complete; current navigation is ready for Play");
+    } else {
+        char line[320];
+        _snprintf_s(line, sizeof line, _TRUNCATE,
+                    "NAV: requested update complete -- %d of %d room(s) built (%d partly), "
+                    "%d keep their shipped navigation, %d box(es) left out%s%s",
+                    sum.built + sum.partial, sum.rooms, sum.partial, sum.refused,
+                    sum.boxes_left_out, sum.first[0] ? "; " : "", sum.first);
+        backend_log(line);
     }
 }
 
@@ -2286,7 +2303,9 @@ static void ae_nav_refresh_cmd(void)
             if (update) {
                 LONGLONG started = sh_perf_now();
                 g_nav_reads.reads++;
-                sh_nav_bake_refresh_live();
+                /* Asked for by hand: bake what can be measured now. */
+                if (requested) sh_nav_bake_refresh_live_partial();
+                else sh_nav_bake_refresh_live();
                 g_nav_reads.read_ms += ae_perf_msf(sh_perf_now() - started);
                 /* A refused read leaves no map behind. Fingerprinting that
                  * would record an empty one, and an empty map and a map that

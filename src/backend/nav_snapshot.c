@@ -7,7 +7,6 @@
 
 #define NAVS_PREFIX  "maps/modules/"
 #define NAVS_SUFFIX  ".decl"
-#define NAVS_VOLUME  "snapmaps/volume/blocking"
 
 int sh_nav_snapshot_module_key(const char *decl, char *out, size_t cap)
 {
@@ -50,13 +49,6 @@ int sh_nav_snapshot_modules_match(const sh_nav_map *map, const char *names, size
             return 0;
         }
     }
-    return 1;
-}
-
-int sh_nav_snapshot_inherited_size(const char *entity_def, float size[3])
-{
-    if (!entity_def || !size || strcmp(entity_def, NAVS_VOLUME) != 0) return 0;
-    size[0] = 16.0f; size[1] = 128.0f; size[2] = 64.0f;
     return 1;
 }
 
@@ -126,6 +118,9 @@ int sh_nav_snapshot_take(const sh_nav_snapshot_sources *src, sh_nav_map *out,
 
     /* The same object was just refused; reading it again cannot help. */
     if (!src->edit || src->edit == src->build) return 0;
+    /* The map tables are heap-backed and a read never frees what `out`
+     * held: release the refused conversion's tables before reading again. */
+    sh_nav_map_free(out);
     if (!src->read(src->edit, 1, out, src->ctx)) {
         _snprintf_s(result->why + strlen(result->why), sizeof result->why - strlen(result->why),
                     _TRUNCATE, ", nor could the editor's map");
@@ -135,7 +130,7 @@ int sh_nav_snapshot_take(const sh_nav_snapshot_sources *src, sh_nav_map *out,
         /* An earlier editor session's map: its boxes belong to another map. */
         _snprintf_s(result->why + strlen(result->why), sizeof result->why - strlen(result->why),
                     _TRUNCATE, ", and the editor's map is a different map (%s)", why);
-        memset(out, 0, sizeof *out);
+        sh_nav_map_free(out);
         return 0;
     }
     result->source = SH_NAV_SNAPSHOT_EDITOR_FALLBACK;

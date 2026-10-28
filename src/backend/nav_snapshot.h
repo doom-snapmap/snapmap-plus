@@ -33,8 +33,9 @@ typedef enum sh_nav_snapshot_source {
 
 /* Read one idSnapMapEdit into `out`. `converting` says a conversion is under
  * way, so an entity the engine cannot measure takes its inherited size from
- * the entityDef instead of waiting for a later read. Returns 1 for a usable
- * map; `out` is overwritten either way. */
+ * the entityDef (nav_entitydef) instead of waiting for a later read. Returns 1
+ * for a usable map; `out` is overwritten either way, and its previous tables
+ * are not freed (sh_nav_snapshot_take frees them between reads). */
 typedef int (*sh_nav_snapshot_read_fn)(const void *edit_map, int converting,
                                        sh_nav_map *out, void *ctx);
 
@@ -73,12 +74,6 @@ int sh_nav_snapshot_module_key(const char *decl, char *out, size_t cap);
  * (optional) says where. */
 int sh_nav_snapshot_modules_match(const sh_nav_map *map, const char *names, size_t name_cap,
                                   int count, char *why, size_t why_cap);
-
-/* Size an entity inherits from its entityDef when it spells no axis. Only
- * snapmaps/volume/blocking reaches the navigation reader; on build 13954591
- * its edit.clipModelInfo is CLIPMODEL_BOX with size 16 x 128 x 64. Returns 0
- * for any other entityDef. */
-int sh_nav_snapshot_inherited_size(const char *entity_def, float size[3]);
 
 const char *sh_nav_snapshot_source_name(sh_nav_snapshot_source source);
 

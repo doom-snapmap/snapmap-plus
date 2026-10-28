@@ -109,7 +109,7 @@ static void *nav_instance_find(void *self,const char *name,unsigned char flags,
             const unsigned char *base=*(const unsigned char *const *)(g_build_map+0x750);
             int count=*(const int *)(g_build_map+0x758);
             uintptr_t offset=(uintptr_t)record-(uintptr_t)base;
-            if(base&&count>0&&count<=256&&offset<(uintptr_t)count*0x98&&offset%0x98==0 &&
+            if(base&&count>0&&count<=SH_NAVR_MAX_INSTANCES&&offset<(uintptr_t)count*0x98&&offset%0x98==0 &&
                sh_nav_bake_instance_name((int)(offset/0x98),name,g_instance_resource,
                                         sizeof g_instance_resource))return NULL;
         }

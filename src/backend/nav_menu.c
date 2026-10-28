@@ -6,6 +6,7 @@
 #include <float.h>
 #include "nav_menu.h"
 #include "apply_engine.h"
+#include "nav_bake.h"
 #include "hook.h"
 
 void backend_log(const char *message);
@@ -462,11 +463,16 @@ static void busy_tick(unsigned char *editor)
         if (GetTickCount64()-g_busy_since<600) return;
         release_busy();
         *(unsigned*)(screen+SCREEN_SHOWN)|=0xc0;
-        if (status==SH_NAV_UPDATE_READY)
-            message(g_toast,screen,"Navmesh Built","The map's navmesh is ready.");
-        else
-            message(g_toast,screen,"Navmesh Build Failed",
-                "The navmesh could not be completed. Check the navigation settings and marked geometry, then try again.");
+        /* Name the room and the reason, and tell a partial build from a
+         * failed one; nav_bake composes both within the native row width. */
+        {
+            sh_nav_bake_summary sum;
+            char title[48], body[SH_NAV_TOAST_BODY_CAP];
+            sh_nav_bake_summary_get(&sum);
+            sh_nav_bake_toast(&sum,status==SH_NAV_UPDATE_READY,title,sizeof title,body,sizeof body);
+            message(g_toast,screen,title,body);
+            backend_log(body);
+        }
     } __except(EXCEPTION_EXECUTE_HANDLER) {
         __try { release_busy(); } __except(EXCEPTION_EXECUTE_HANDLER) {}
         backend_log("NAV menu: progress cleanup after an engine exception");

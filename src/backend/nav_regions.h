@@ -13,8 +13,14 @@
 
 #include <stddef.h>
 
-#define SH_NAVR_MAX_INSTANCES   256
-#define SH_NAVR_MAX_REGIONS     512
+/* Ceilings, not array sizes: every table below grows with the map. They bound
+ * worst-case memory (documented in docs/capabilities.md): 65536 flagged boxes
+ * is the editor's own uniqueId space (84 bytes each, so at most 5.5 MB for the
+ * floors and as much again for the walls), and 8192 rooms is far above any
+ * SnapMap module budget (152 bytes each, 1.2 MB). A box or room past a ceiling
+ * is left out and counted; it never refuses the map. */
+#define SH_NAVR_MAX_INSTANCES   8192
+#define SH_NAVR_MAX_REGIONS     65536
 #define SH_NAVR_MODULE_CAP      128     /* A box encoded as one oriented face and
                                          * its depth in module-local space.
                                          * spawnPosition is centred in x/y and at
@@ -69,15 +75,43 @@ typedef struct sh_nav_instance {
     float origin[3];
     int   orientation;
     int   region_count;
+    int   unusable;     /* origin or orientation unreadable: its boxes are left out */
 } sh_nav_instance;
 
+/* Why one box was left out of the navigation while the rest of the map kept
+ * it. Only the room table itself (instanceEntities) can refuse a whole map. */
+enum {
+    SH_NAVR_DROP_SHAPE = 0,     /* size, orientation or origin navigation cannot use */
+    SH_NAVR_DROP_ROOM,          /* its room's origin or orientation is unreadable */
+    SH_NAVR_DROP_CONFLICT,      /* its id is claimed by two rooms, or by a room and no room */
+    SH_NAVR_DROP_UNLISTED,      /* the room table does not list it at all */
+    SH_NAVR_DROP_OUTSIDE,       /* marked, but placed outside every room */
+    SH_NAVR_DROP_UNNAMED,       /* marked, in a room whose module name is unreadable */
+    SH_NAVR_DROP_CAPACITY,      /* past a ceiling above */
+    SH_NAVR_DROP_UNMEASURED,    /* the editor could not measure it for this read */
+    SH_NAVR_DROP_KINDS
+};
+#define SH_NAVR_DROPPED_KEEP 32
+
+typedef struct sh_nav_dropped {
+    unsigned entity;            /* index in the map's entities array */
+    int      uid;               /* its uniqueId, or -1 */
+    int      instance;          /* the room it claimed, or -1 */
+    int      reason;            /* SH_NAVR_DROP_* */
+    int      marked;            /* AI Navigation (else Block Demons only) */
+} sh_nav_dropped;
+
+/* Heap-backed: initialize with {0}, release with sh_nav_map_free, copy with
+ * sh_nav_map_copy. A plain struct assignment shares the tables. */
 typedef struct sh_nav_map {
-    sh_nav_instance instances[SH_NAVR_MAX_INSTANCES];
-    int             instance_count;
-    sh_nav_region   regions[SH_NAVR_MAX_REGIONS];
-    int             region_count;
-    int             truncated;          /* a cap was hit; the caller should say so */
-    int             invalid_geometry;   /* invalid solid, transform or ownership */
+    sh_nav_instance *instances;
+    int             instance_count, instance_cap;
+    sh_nav_region   *regions;
+    int             region_count, region_cap;
+    int             truncated;          /* something past a ceiling was left out */
+    /* The room table itself is malformed, so no box can be given an owner.
+     * This, and only this, refuses the whole map. */
+    int             invalid_geometry;
     /* Boxes the editor could not measure yet, which a later read gets. Nonzero
      * means this read is incomplete, not that the map is bad. */
     int             unmeasured;
@@ -86,27 +120,67 @@ typedef struct sh_nav_map {
      * not. Duplicating a box in the editor produces this until the map is
      * saved, and it must not cost the map its navigation. */
     int             ids_unusable;
-    sh_nav_region   obstacles[SH_NAVR_MAX_REGIONS];
-    int             obstacle_count;
+    sh_nav_region   *obstacles;
+    int             obstacle_count, obstacle_cap;
     /* Volumes whose clip model is not a box -- a cylinder, say. They carry no
      * navigation and are left out; they never invalidate the map. */
     int             unshaped;
+    /* Boxes left out one at a time, by reason, and the first few of them. */
+    int             dropped_total;
+    int             dropped_by[SH_NAVR_DROP_KINDS];
+    int             dropped_kept;
+    sh_nav_dropped  dropped[SH_NAVR_DROPPED_KEEP];
 } sh_nav_map;
 
-/* Parse into out, overwriting it even on failure. Returns 1 for a map
+void sh_nav_map_free(sh_nav_map *m);
+/* Deep copy into dst, which must be empty (zeroed or freed). 0 on allocation
+ * failure, leaving dst empty. */
+int  sh_nav_map_copy(sh_nav_map *dst, const sh_nav_map *src);
+/* Same tables and flags. */
+int  sh_nav_map_equal(const sh_nav_map *a, const sh_nav_map *b);
+/* Free dst, then hand it src's tables; src is left empty. */
+void sh_nav_map_move(sh_nav_map *dst, sh_nav_map *src);
+/* Heap bytes the tables hold. */
+size_t sh_nav_map_bytes(const sh_nav_map *m);
+/* Short text for SH_NAVR_DROP_*. */
+const char *sh_nav_regions_drop_reason(int reason);
+
+/* Parse into out, overwriting it even on failure. out's previous tables are
+ * NOT freed (it may be uninitialized): free them first. Returns 1 for a map
  * document, including one with no regions, or 0 for invalid input.
  */
 int sh_nav_regions_read(const char *json, size_t len, sh_nav_map *out);
 
+/* The collision size an omitted clipModelInfo.size member inherits from the
+ * box's entityDef, for map-text reads that have no engine snapshot. 0 leaves
+ * the member unknown, which drops that box. */
+typedef int (*sh_navr_default_size)(const char *inherit, float size[3], void *ctx);
+int sh_nav_regions_read_defaults(const char *json, size_t len, sh_nav_map *out,
+                                 sh_navr_default_size defaults, void *ctx);
+
 /* Effective collision size of the entity at this exact snapshot-array index.
  * The callback and JSON must come from the same native snapshot; uniqueIds
- * cannot identify duplicated boxes reliably. No engine pointers are retained. */
+ * cannot identify duplicated boxes reliably. No engine pointers are retained.
+ * Returns >0 with the size, 0 when the entity cannot be measured yet (the read
+ * is incomplete), or <0 when it was measured and is not a usable box (that box
+ * alone is left out). */
 typedef int (*sh_navr_entity_size)(unsigned entity, float size[3], void *ctx);
 int sh_nav_regions_read_resolved(const char *json, size_t len, sh_nav_map *out,
                                 sh_navr_entity_size read_size, void *ctx);
 /* Read edit.clipModelInfo.size from a bounded, inheritance-resolved native
  * declaration. Requires all components and a box type; never supplies sizes. */
 int sh_nav_regions_decl_size(const char *text, size_t len, float size[3]);
+/* One level of an unresolved entityDef file: the clipModelInfo.size members it
+ * spells (bit i of *have for axis i), its clip type (1 box, -1 other, 0 not
+ * given) and its inherit name. The text may carry the file's outer braces.
+ * Returns 0 for text that does not tokenize. */
+int sh_nav_regions_decl_level(const char *text, size_t len, float size[3],
+                              unsigned *have, int *type, char *inherit, size_t cap);
+
+#ifdef SH_NAVR_TESTING
+/* Lower the ceilings so a test can reach them; 0 restores the defaults. */
+void sh_nav_regions_test_limits(int regions, int instances);
+#endif
 
 /* Legacy per-entity refresh for callers without a complete-map snapshot.
  * Production editor baking uses sh_nav_bake_set_snapshot instead: it refreshes

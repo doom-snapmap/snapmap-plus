@@ -2008,30 +2008,174 @@ static void test_dense_climbs_fit_native_routing(void)
     sh_aas_free(a);
 }
 
-static void test_required_routes_over_native_limit_refuse_bake(void)
+/* Fill area 1 with `count` outgoing shipped links (to itself), relinked. */
+static void fill_area_one(sh_aas *a, unsigned count)
+{
+    unsigned original = sh_aas_count(a, SH_AAS_L_REACHABILITIES), first, i;
+    CHECK(original <= count);
+    CHECK(sh_aas_append(a, SH_AAS_L_REACHABILITIES, count - original, &first));
+    for (i = 0; i < count; i++) {
+        unsigned char *r = sh_aas_rec(a, SH_AAS_L_REACHABILITIES, i);
+        sh_aas_put_u16(r, 6, 1); sh_aas_put_u16(r, 8, 1);
+        sh_aas_put_i32(r, 32, i == count - 1 ? -1 : (int)i + 1);
+        sh_aas_put_i32(r, 36, i == count - 1 ? -1 : (int)i + 1);
+    }
+    sh_aas_put_i32(sh_aas_rec(a, SH_AAS_L_AREAS, 1), 20, 0);
+    sh_aas_put_i32(sh_aas_rec(a, SH_AAS_L_AREAS, 1), 24, 0);
+}
+
+static unsigned out_degree(sh_aas *a, unsigned area)
+{
+    unsigned i, n = sh_aas_count(a, SH_AAS_L_REACHABILITIES), d = 0;
+    for (i = 0; i < n; i++)
+        if (sh_aas_get_u16(sh_aas_rec_const(a, SH_AAS_L_REACHABILITIES, i), 6) == area) d++;
+    return d;
+}
+
+static int payload_validates(sh_aas *a)
+{
+    size_t len = 0;
+    char err[256];
+    unsigned char *bytes = sh_aas_write(a, &len);
+    int ok;
+    if (!bytes) return 0;
+    err[0] = 0;
+    ok = sh_navmesh_validate_aas(bytes, len, err, sizeof err);
+    if (!ok) printf("  (validation: %s)\n", err);
+    HeapFree(GetProcessHeap(), 0, bytes);
+    return ok;
+}
+
+/* The floor the box stands on already has its 256 routes. The engine would
+ * refuse the map over a 257th, so the box gives up its routes out of that
+ * area and keeps the rest of its navigation, instead of the module losing
+ * all of it. */
+static void test_required_routes_over_native_limit_drop_the_box_routes(void)
 {
     sh_aas *a = load_module();
     sh_aug_platform p;
     sh_aug_report rep;
     sh_aug_opts o = { SH_AUG_FALL_AUTO, 1, SH_AUG_TRAVERSAL_AUTO };
-    unsigned original = sh_aas_count(a, SH_AAS_L_REACHABILITIES), first, i;
-    CHECK(original <= 256);
-    CHECK(sh_aas_append(a, SH_AAS_L_REACHABILITIES, 256 - original, &first));
-    for (i = 0; i < 256; i++) {
-        unsigned char *r = sh_aas_rec(a, SH_AAS_L_REACHABILITIES, i);
-        sh_aas_put_u16(r, 6, 1); sh_aas_put_u16(r, 8, 1);
-        sh_aas_put_i32(r, 32, i == 255 ? -1 : (int)i + 1);
-        sh_aas_put_i32(r, 36, i == 255 ? -1 : (int)i + 1);
-    }
-    sh_aas_put_i32(sh_aas_rec(a, SH_AAS_L_AREAS, 1), 20, 0);
-    sh_aas_put_i32(sh_aas_rec(a, SH_AAS_L_AREAS, 1), 24, 0);
+    printf("routes past 256 from one area are dropped from the box causing them\n");
+    fill_area_one(a, 256);
+    load_synthetic_traversal_table();
+    mkplat(&p, -150, -150, 150, 150, 128, "raised block");
+    CHECK(sh_aas_augment(a, &p, 1, &o, &rep));
+    CHECK(!rep.reach_limit_exceeded);
+    CHECK(rep.routes_dropped > 0 && rep.route_areas == 1);
+    CHECK(rep.dropped_count == 1 && rep.dropped[0].source == 0 && rep.dropped[0].area == 1);
+    CHECK(rep.dropped[0].routes == rep.routes_dropped);
+    CHECK(out_degree(a, 1) == 256);
+    CHECK(rep.platform_count == 1 && rep.platforms[0].emitted);
+    CHECK(payload_validates(a));
+    sh_aug_report_free(&rep);
+    CHECK(rep.platforms == NULL);
+    sh_aas_free(a);
+}
+
+/* With room for one more route, two boxes that each want one share it: just
+ * enough is dropped, from one box, and the other keeps its route. */
+static void test_route_drop_takes_just_enough(void)
+{
+    sh_aas *a = load_module();
+    sh_aug_platform p[2];
+    sh_aug_report rep;
+    sh_aug_opts o = { SH_AUG_FALL_AUTO, 1, SH_AUG_TRAVERSAL_AUTO };
+    int kept;
+    printf("a route overflow drops just enough, one box at a time\n");
+    fill_area_one(a, 255);
+    load_synthetic_traversal_table();
+    mkplat(&p[0], -900, -150, -600, 150, 128, "west block");
+    mkplat(&p[1], 600, -150, 900, 150, 128, "east block");
+    CHECK(sh_aas_augment(a, p, 2, &o, &rep));
+    CHECK(!rep.reach_limit_exceeded);
+    CHECK(out_degree(a, 1) == 256);
+    CHECK(rep.routes_dropped >= 1 && rep.dropped_count >= 1);
+    kept = reach_exists(a, 1, rep.platforms[0].area) + reach_exists(a, 1, rep.platforms[1].area);
+    CHECK(kept >= 1);
+    CHECK(payload_validates(a));
+    sh_aug_report_free(&rep);
+    sh_aas_free(a);
+}
+
+/* The module's own data already passes 256 from one area: nothing generated
+ * can make it fit, so that is the one route refusal left, with its area. */
+static void test_shipped_routes_over_limit_refuse(void)
+{
+    sh_aas *a = load_module();
+    sh_aug_platform p;
+    sh_aug_report rep;
+    sh_aug_opts o = { SH_AUG_FALL_AUTO, 1, SH_AUG_TRAVERSAL_AUTO };
+    printf("a module whose own area passes 256 routes is refused by name\n");
+    fill_area_one(a, 257);
     load_synthetic_traversal_table();
     mkplat(&p, -150, -150, 150, 150, 128, "raised block");
     CHECK(!sh_aas_augment(a, &p, 1, &o, &rep));
     CHECK(rep.reach_limit_exceeded);
     CHECK(rep.reach_limit_area == 1);
-    CHECK(rep.blamed_count == 1 && rep.blamed[0] == 0);
+    CHECK(rep.routes_dropped == 0);
+    sh_aug_report_free(&rep);
     sh_aas_free(a);
+}
+
+/* More boxes than the former 512 ceiling, all on one floor: the module bakes,
+ * the floor sheds the routes it cannot hold, and the payload is valid. */
+static void test_more_than_512_boxes_bake_and_shed_routes(void)
+{
+    static sh_aug_platform p[600];
+    sh_aug_report rep;
+    sh_aug_opts o = { SH_AUG_FALL_AUTO, 1, SH_AUG_TRAVERSAL_AUTO };
+    sh_aas *a = load_module();
+    LARGE_INTEGER t0, t1, f;
+    int i, emitted = 0;
+    printf("six hundred boxes in one module bake; the shared floor sheds routes\n");
+    load_synthetic_traversal_table();
+    for (i = 0; i < 600; i++) {
+        float x = -1900.0f + (float)(i % 25) * 150.0f;
+        float y = -1900.0f + (float)(i / 25) * 150.0f;
+        mkbox(&p[i], x, y, x + 100.0f, y + 100.0f, 16.0f + (float)(i % 2) * 6.0f, 0.0f, "cell");
+    }
+    QueryPerformanceFrequency(&f);
+    QueryPerformanceCounter(&t0);
+    CHECK(sh_aas_augment(a, p, 600, &o, &rep));
+    QueryPerformanceCounter(&t1);
+    printf("  600 boxes: %d pieces, %u areas, %u links, depth %u, %d routes dropped, %.0f ms\n",
+           rep.platform_count, rep.areas_after, rep.reach_after, rep.depth_after,
+           rep.routes_dropped, (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)f.QuadPart);
+    CHECK(rep.platform_count > 512);
+    for (i = 0; i < rep.platform_count; i++) if (rep.platforms[i].emitted) emitted++;
+    CHECK(emitted > 512);
+    CHECK(!rep.reach_limit_exceeded && rep.routes_dropped > 0);
+    CHECK(out_degree(a, 1) <= 256);
+    CHECK(rep.depth_exceeded == 0);
+    CHECK(payload_validates(a));
+    sh_aug_report_free(&rep);
+    sh_aas_free(a);
+}
+
+/* At the piece ceiling, faces are left out whole and named; the pieces that
+ * fit are built. A face is never emitted partly cut. */
+static void test_piece_ceiling_drops_whole_faces(void)
+{
+    static sh_aug_platform boxes[SH_AUG_MAX_PLATFORMS], out[8];
+    int source[8], pieces[8];
+    unsigned char buried[8], lost[SH_AUG_MAX_PLATFORMS];
+    sh_nav_geometry_stats stats;
+    int n, i;
+    printf("the piece ceiling leaves whole faces out and counts them\n");
+    for (i = 0; i < 5; i++)
+        mkbox(&boxes[i], -1900.0f + i * 400.0f, 0, -1700.0f + i * 400.0f, 200, 64, 0, "cell");
+    memset(&stats, 0, sizeof stats);
+    memset(lost, 0, sizeof lost);
+    stats.source_dropped = lost;
+    n = sh_nav_geometry_build_budget(boxes, 5, NULL, 0, 24, 80, 0.7, 18,
+                                     out, source, pieces, buried, 3, &stats);
+    CHECK(n == 3);
+    CHECK(stats.faces_dropped == 2);
+    CHECK(lost[3] && lost[4] && !lost[0] && !lost[1] && !lost[2]);
+    for (i = 0; i < n; i++) CHECK(!buried[i] && source[i] == i && pieces[i] == 1);
+    /* The strict form still refuses rather than build an incomplete mesh. */
+    CHECK(sh_nav_geometry_build(boxes, 5, 24, 80, 0.7, 18, out, source, pieces, buried, 3) == -1);
 }
 
 /* Decode independently into a flat membership set, bounded by the row's
@@ -2271,7 +2415,11 @@ int main(void)
     test_visibility_extends_sparse_native_rows();
     test_truncated_visibility_refuses_bake();
     test_dense_climbs_fit_native_routing();
-    test_required_routes_over_native_limit_refuse_bake();
+    test_required_routes_over_native_limit_drop_the_box_routes();
+    test_route_drop_takes_just_enough();
+    test_shipped_routes_over_limit_refuse();
+    test_more_than_512_boxes_bake_and_shed_routes();
+    test_piece_ceiling_drops_whole_faces();
     test_fixture_resolves();
     test_intersecting_bridge_routes();
     test_exposed_edges_remain_walls();

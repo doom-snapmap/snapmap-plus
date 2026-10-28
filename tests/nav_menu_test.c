@@ -13,6 +13,16 @@ static char title_seen[128],body_seen[256];
 void backend_log(const char *s) { (void)s; }
 void sh_apply_engine_nav_request_update(void) { requests++;status=SH_NAV_UPDATE_REQUESTED; }
 int sh_apply_engine_nav_update_status(void) { return status; }
+/* The toast text itself is composed and tested in nav_bake_test. */
+static int toast_finished_seen = -1;
+void sh_nav_bake_summary_get(sh_nav_bake_summary *s) { memset(s, 0, sizeof *s); s->have_map = 1; }
+void sh_nav_bake_toast(const sh_nav_bake_summary *s, int finished, char *title,
+                       size_t title_cap, char *body, size_t body_cap)
+{
+    (void)s; toast_finished_seen = finished;
+    strcpy_s(title, title_cap, finished ? "Navmesh Built" : "Navmesh Build Failed");
+    strcpy_s(body, body_cap, finished ? "ready" : "failed");
+}
 static void make_string(void *s,const char *text) { *(const char**)s=text; }
 static void destroy_string(void *s) { (void)s; }
 static void seen(void *title,void *body)
@@ -379,10 +389,12 @@ static void test_modal(void)
     menu_think(s,ed);CHECK(toasts==0 && g_busy_editor==ed);
     test_now+=600;
     menu_think(s,ed);CHECK(toasts==1 && !g_busy_editor && !strcmp(title_seen,"Navmesh Built"));
+    CHECK(toast_finished_seen==1 && !strcmp(body_seen,"ready"));
     menu_think(s,ed);CHECK(toasts==1 && requests==1);
     CHECK(menu_action(s,ed,2)==1);
     request_tick(s,ed);status=SH_NAV_UPDATE_FAILED;test_now+=600;menu_think(s,ed);
     CHECK(toasts==2 && !strcmp(title_seen,"Navmesh Build Failed"));
+    CHECK(toast_finished_seen==0);
     CHECK(menu_action(s,ed,2)==1);
     menu_end(s,ed);CHECK(!g_busy_editor && !(*(unsigned*)(screen+0xa20)&BUSY_FLAG));
     status=SH_NAV_UPDATE_READY;menu_think(s,ed);CHECK(toasts==2);

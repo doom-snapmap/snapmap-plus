@@ -44,13 +44,14 @@ static const strid_baked_t g_strids_baked[] = {
 
     /* The Blocking Box's added "AI Navigation" property row. The label and its
      * help text are the only place an author is told what marking a box does, so
-     * the description says which surfaces it affects, and that a marked
-     * map is still playable by people without Snapmap+ -- which is the question
-     * anyone sharing a map asks first. */
+     * the description says which surfaces it affects, that one unusable box
+     * costs only itself, and that a marked map is still playable by people
+     * without Snapmap+ -- which is the question anyone sharing a map asks
+     * first. Kept within the 155 characters a native help row shows. */
     { "sh_bv_navigation",      "AI Navigation" },
-    { "sh_bv_navigation_desc", "Build navigation on this volume's exposed walkable surfaces. "
-                               "Enable Block Demons so they can stand on it. Navigation updates "
-                               "as you edit. Players without Snapmap+ use the module's normal navigation." },
+    { "sh_bv_navigation_desc", "Demons walk this box's walkable faces; turn on Block Demons too. "
+                               "An unusable box is left out alone. Players without Snapmap+ use "
+                               "the module's navigation." },
 
     /* (extend here as the shipped pack / UI grows -- one row per custom #str_ id.) */
     /* "Unlock Map Bounds" on/off row in the Snapmap+ settings tab. The help

@@ -455,7 +455,26 @@ typedef struct aug_ctx {
     int solid_count;
     int prepared_geometry;
     unsigned original_areas;
+    struct aug_side *sides;         /* AUG_MAX_SIDES, shared by the link passes */
 } aug_ctx;
+
+/* Edge segments one generated area may examine per pass, and BSP nodes one
+ * edge's floor walk may visit. Past either, that edge (or the rest of that
+ * area's edges) gets no links of that kind; the bake goes on. 104 bytes a
+ * side, so the shared buffer is about 850 KB. */
+#define AUG_MAX_SIDES   8192
+#define AUG_MAX_VISITS  131072u
+
+/* The loader's tree-depth limit; a test may lower it to reach it cheaply. */
+static unsigned g_aug_depth_limit = SH_AAS_MAX_DEPTH;
+#ifdef SH_AUG_TESTING
+unsigned sh_aug_test_set_depth_limit(unsigned limit)
+{
+    unsigned was = g_aug_depth_limit;
+    g_aug_depth_limit = limit ? limit : SH_AAS_MAX_DEPTH;
+    return was;
+}
+#endif
 
 /* Read the native floor polygon, not its height bounds. Original module
  * floors can slope too; their maximum Z is not the landing height everywhere. */
@@ -1399,11 +1418,11 @@ static int aug_generated_segments(aug_ctx *c,int ai,const aug_quad *eff,
         for(q=0;q<ncand;q++) {
             double lo,hi;aug_side side;
             int found=aug_peer_interval(req,e,dir,cand[q]->eff,reach,&lo,&hi);
-            if(found<0){c->failed=1;return n;}
+            if(found<0){c->failed=1;c->rep->segments_failed=1;return n;}
             if(!found)continue;
             aug_close_segment(c,&side,eff,e,dir,lo,hi,cand[q]->area,peers,npeers,req);
             if((side.gap>AUG_TOUCH_EPS)!=gaps)continue;
-            if(n==cap){c->failed=1;return n;}
+            if(n>=cap){c->rep->edges_skipped++;return n;}
             out[n++]=side;
         }
     }
@@ -1420,8 +1439,8 @@ static void aug_floor_intervals(aug_ctx *c,int node,unsigned depth,
                                 const aug_peer *peers,int npeers,
                                 aug_side *out,int cap,int *count,unsigned *visits)
 {
-    if(c->failed||hi-lo<1e-9)return;
-    if(depth>SH_AAS_MAX_DEPTH||++*visits>131072){c->failed=1;return;}
+    if(c->failed||*visits>AUG_MAX_VISITS||hi-lo<1e-9)return;
+    if(depth>SH_AAS_MAX_DEPTH||++*visits>AUG_MAX_VISITS){*visits=AUG_MAX_VISITS+1;return;}
     if(node<=0) {
         int area=-node,have_floor;float bounds[6];double z0,dz,cuts[4];int nc=2,k,j;
         aug_quad floor;
@@ -1439,15 +1458,15 @@ static void aug_floor_intervals(aug_ctx *c,int node,unsigned depth,
         for(k=1;k<nc;k++)for(j=k;j>0&&cuts[j]<cuts[j-1];j--){double t=cuts[j];cuts[j]=cuts[j-1];cuts[j-1]=t;}
         for(k=1;k<nc;k++) {
             if(cuts[k]-cuts[k-1]<1e-9)continue;
-            if(*count==cap){c->failed=1;return;}
+            if(*count>=cap){*visits=AUG_MAX_VISITS+1;return;}
             aug_close_segment(c,&out[(*count)++],eff,edge,dir,cuts[k-1],cuts[k],area,peers,npeers,req);
         }
     } else {
         const unsigned char *nd=sh_aas_rec_const(c->a,SH_AAS_L_NODES,(unsigned)node);
         const unsigned char *plane;double a,b,dl,dh;int k;
-        if(!nd){c->failed=1;return;}
+        if(!nd){c->failed=1;c->rep->segments_failed=1;return;}
         plane=sh_aas_rec_const(c->a,SH_AAS_L_PLANES,(unsigned)sh_aas_get_i32(nd,ND_PLANE));
-        if(!plane){c->failed=1;return;}
+        if(!plane){c->failed=1;c->rep->segments_failed=1;return;}
         a=sh_aas_get_f32(plane,PL_DIST);b=0;
         for(k=0;k<3;k++){double v=sh_aas_get_f32(plane,PL_A+4*k);a+=v*origin[k];b+=v*delta[k];}
         dl=a+b*lo;dh=a+b*hi;
@@ -1470,7 +1489,7 @@ static int aug_edge_segments(aug_ctx *c,int ai,const aug_quad *eff,
 {
     int n=aug_generated_segments(c,ai,eff,req,peers,npeers,out,cap,0),e;
     for(e=0;e<eff->count&&!c->failed;e++) {
-        double in[2],dir[2],origin[3],delta[3];int j=(e+1)%eff->count;unsigned visits=0;
+        double in[2],dir[2],origin[3],delta[3];int j=(e+1)%eff->count,before=n;unsigned visits=0;
         aug_edge_normal_in(eff,e,in);dir[0]=-in[0];dir[1]=-in[1];
         origin[0]=req->c[e][0]+dir[0]*REACH_SIDE_OFFSET;
         origin[1]=req->c[e][1]+dir[1]*REACH_SIDE_OFFSET;
@@ -1479,6 +1498,9 @@ static int aug_edge_segments(aug_ctx *c,int ai,const aug_quad *eff,
         delta[2]=aug_z_at(eff,req->c[j][0],req->c[j][1])-origin[2];
         aug_floor_intervals(c,aug_tree_root(c->a),0,origin,delta,0,1,eff,req,e,dir,
             peers,npeers,out,cap,&n,&visits);
+        /* An edge whose walk ran out of budget gets none of its floor
+         * segments rather than some; the other edges keep theirs. */
+        if(visits>AUG_MAX_VISITS){n=before;c->rep->edges_skipped++;}
     }
     return n;
 }
@@ -1536,9 +1558,8 @@ static int aug_side_owns(const aug_side *s, int ai, const aug_quad *req,
 static int aug_step_links(aug_ctx *c, int ai, const aug_quad *eff,
                           const aug_quad *req, const aug_peer *peers, int npeers)
 {
-    aug_side sides[512];
-    int n = aug_edge_segments(c, ai, eff, req, peers, npeers, sides,
-                              (int)(sizeof sides / sizeof sides[0]));
+    aug_side *sides = c->sides;
+    int n = aug_edge_segments(c, ai, eff, req, peers, npeers, sides, AUG_MAX_SIDES);
     int added = 0, i, k;
 
     for (i = 0; i < n; i++) {
@@ -1599,14 +1620,13 @@ static int aug_step_links(aug_ctx *c, int ai, const aug_quad *eff,
 static int aug_fall_links(aug_ctx *c, int ai, const aug_quad *eff,
                           const aug_quad *req, const aug_peer *peers, int npeers)
 {
-    aug_side sides[512];
+    aug_side *sides = c->sides;
     int n, i, added = 0;
     double max_fall = sh_aas_setting_f32(c->a, SET_MAX_FALL_HEIGHT);
     double tt = sh_aas_setting_f32(c->a, SET_TT_WALK_OFF_LEDGE);
 
     if (c->o->fall == SH_AUG_FALL_NEVER) return 0;
-    n = aug_edge_segments(c, ai, eff, req, peers, npeers, sides,
-                          (int)(sizeof sides / sizeof sides[0]));
+    n = aug_edge_segments(c, ai, eff, req, peers, npeers, sides, AUG_MAX_SIDES);
     for (i = 0; i < n; i++) {
         double s3[3], e3[3], bx, by;
         int time;
@@ -1814,7 +1834,7 @@ static int aug_traversal_specs(aug_ctx *c, int ai, const aug_quad *eff,
                                const aug_quad *req, const aug_peer *peers,
                                int npeers, aug_trav_buffer *buffer)
 {
-    aug_side sides[512];
+    aug_side *sides = c->sides;
     int n, i, k, d, count = 0;
     const aug_peer *owner=NULL;
 
@@ -1822,13 +1842,12 @@ static int aug_traversal_specs(aug_ctx *c, int ai, const aug_quad *eff,
     if (!sh_trav_ready()) return 0;
     for(i=0;i<npeers;i++)if(peers[i].area==ai){owner=&peers[i];break;}
 
-    n = aug_edge_segments(c, ai, eff, req, peers, npeers, sides,
-                          (int)(sizeof sides / sizeof sides[0]));
+    n = aug_edge_segments(c, ai, eff, req, peers, npeers, sides, AUG_MAX_SIDES);
     /* Climbs come from the touching segments; leaps need their own long-range
      * cast, because a quad across a real gap is invisible to the touching
      * probe. */
     n += aug_edge_gap_segments(c, ai, eff, req, peers, npeers, sides + n,
-                               (int)(sizeof sides / sizeof sides[0]) - n);
+                               AUG_MAX_SIDES - n);
     for (i = 0; i < n; i++) {
         double anchors[24];
         double seglen, span;
@@ -1973,22 +1992,42 @@ static int aug_traversal_specs(aug_ctx *c, int ai, const aug_quad *eff,
  * metadata; dropping a later demon just because earlier ones filled the area
  * would turn a capacity fix into a class-specific navigation failure.
  * Shipped links are never removed. Generated walk/fall samples share the same
- * budget as traversals, so a long floor edge cannot crowd out every climb. */
+ * budget as traversals, so a long floor edge cannot crowd out every climb.
+ *
+ * The engine refuses a map whose area has more than 256 outgoing
+ * reachabilities. When the distinct routes out of one area would pass that,
+ * the box contributing most of them gives up just enough of its routes out of
+ * that area (traversals before walks, latest first), then the next, until the
+ * area fits; the rest of the module is kept. Only an area the module's own
+ * shipped data already fills, or a route naming no area, refuses the bake. */
 static int aug_budget_traversals(aug_ctx *c, aug_trav_spec *specs, int n,
                                  sh_aug_report *out)
 {
     unsigned na = sh_aas_count(c->a, SH_AAS_L_AREAS), i;
     unsigned nr = sh_aas_count(c->a, SH_AAS_L_REACHABILITIES);
     unsigned original = out->reach_before, nb = nr - original;
-    aug_trav_spec *choices = (aug_trav_spec *)calloc(nb + n + 1, sizeof *choices);
-    unsigned *degree = (unsigned *)calloc(na, sizeof *degree);
-    int *rank = (int *)calloc(nb + n + 1, sizeof *rank);
-    unsigned char *keep = (unsigned char *)calloc(nb + n + 1, 1);
-    unsigned slots = 1, *last = NULL;
-    int k, round, max_rank = 0, written = 0, full = -1;
+    size_t total = (size_t)nb + (size_t)n + 1;
+    int sources = out->source_count > 0 ? out->source_count : 0;
+    aug_trav_spec *choices = (aug_trav_spec *)calloc(total, sizeof *choices);
+    unsigned *degree = (unsigned *)calloc(na + 1, sizeof *degree);
+    unsigned *need = (unsigned *)calloc(na + 1, sizeof *need);
+    int *area_src = (int *)malloc((na + 1) * sizeof *area_src);
+    int *rank = (int *)calloc(total, sizeof *rank);
+    int *root = (int *)calloc(total, sizeof *root);
+    int *per_source = (int *)calloc((size_t)sources + 1, sizeof *per_source);
+    int *from_list = (int *)calloc(total, sizeof *from_list);
+    unsigned char *keep = (unsigned char *)calloc(total, 1);
+    unsigned char *drop = (unsigned char *)calloc(total, 1);
+    unsigned slots = 1, *last = NULL, *first_from = NULL, *next_from = NULL;
+    int k, round, max_rank = 0, written = 0, full = -1, dropped_alts = 0;
     while (slots < 2 * (nb + (unsigned)n + 1)) slots <<= 1;
     last = (unsigned *)calloc(slots, sizeof *last);
-    if (!choices || !degree || !rank || !keep || !last) { c->failed = 1; goto done; }
+    first_from = (unsigned *)calloc(na + 1, sizeof *first_from);
+    next_from = (unsigned *)calloc(total, sizeof *next_from);
+    if (!choices || !degree || !need || !area_src || !rank || !root || !per_source ||
+        !from_list || !keep || !drop || !last || !first_from || !next_from) {
+        c->failed = 1; goto done;
+    }
     for (i = 0; i < nb; i++) {
         const unsigned char *r = sh_aas_rec_const(c->a, SH_AAS_L_REACHABILITIES, original+i);
         choices[i].from_area = sh_aas_get_u16(r, RE_FROM_AREA);
@@ -2028,6 +2067,7 @@ static int aug_budget_traversals(aug_ctx *c, aug_trav_spec *specs, int n,
         hash = (hash ^ s->d30) * 16777619u;
         while (*name) hash = (hash ^ *name++) * 16777619u;
         bucket = hash & (slots - 1);
+        root[k] = k;
         while (last[bucket]) {
             unsigned j = last[bucket] - 1;
             if (choices[j].from_area == s->from_area &&
@@ -2035,6 +2075,7 @@ static int aug_budget_traversals(aug_ctx *c, aug_trav_spec *specs, int n,
                 choices[j].travel_flags == s->travel_flags &&
                 choices[j].d30 == s->d30 && !strcmp(choices[j].anim, s->anim)) {
                 rank[k] = rank[j] + 1;
+                root[k] = root[j];
                 break;
             }
             bucket = (bucket + 1) & (slots - 1);
@@ -2042,18 +2083,74 @@ static int aug_budget_traversals(aug_ctx *c, aug_trav_spec *specs, int n,
         last[bucket] = (unsigned)k + 1;
         if (rank[k] > max_rank) max_rank = rank[k];
         if (!rank[k]) {
-            if (++degree[choices[k].from_area] > SH_AAS_MAX_AREA_REACHABILITIES) {
-                full = choices[k].from_area;
-                goto overflow;
-            }
-            keep[k] = 1;
+            need[choices[k].from_area]++;
+            /* Per-area lists of distinct routes, in collection order. */
+            next_from[k] = first_from[choices[k].from_area];
+            first_from[choices[k].from_area] = (unsigned)k + 1;
         }
+    }
+
+    /* Which requested box each generated area came from. */
+    for (i = 0; i <= na; i++) area_src[i] = -1;
+    for (k = 0; k < out->platform_count; k++) {
+        const sh_aug_platform_result *p = &out->platforms[k];
+        if (p->emitted && p->area > 0 && (unsigned)p->area < na) area_src[p->area] = p->source;
+    }
+    for (i = 0; i < na; i++) {
+        int excess = (int)(degree[i] + need[i]) - SH_AAS_MAX_AREA_REACHABILITIES, count = 0, at;
+        unsigned j;
+        if (excess <= 0) continue;
+        /* This area's routes, oldest first (the list was built newest first). */
+        for (j = first_from[i]; j; j = next_from[j - 1]) from_list[count++] = (int)j - 1;
+        for (at = 0; at < count / 2; at++) {
+            int t = from_list[at]; from_list[at] = from_list[count - 1 - at];
+            from_list[count - 1 - at] = t;
+        }
+        memset(per_source, 0, ((size_t)sources + 1) * sizeof *per_source);
+        for (at = 0; at < count; at++) {
+            const aug_trav_spec *s = &choices[from_list[at]];
+            int src = area_src[s->to_area] >= 0 ? area_src[s->to_area] : area_src[s->from_area];
+            if (src < 0 || src >= sources) src = sources;
+            per_source[src]++;
+        }
+        out->route_areas++;
+        while (excess > 0) {
+            int best = -1, s, take, d;
+            for (s = 0; s <= sources; s++)
+                if (per_source[s] > 0 && (best < 0 || per_source[s] > per_source[best])) best = s;
+            if (best < 0) break;
+            take = per_source[best] < excess ? per_source[best] : excess;
+            for (at = count - 1, d = 0; at >= 0 && d < take; at--) {
+                const aug_trav_spec *sp = &choices[from_list[at]];
+                int src = area_src[sp->to_area] >= 0 ? area_src[sp->to_area]
+                                                     : area_src[sp->from_area];
+                if (src < 0 || src >= sources) src = sources;
+                if (src != best || drop[from_list[at]]) continue;
+                drop[from_list[at]] = 1;
+                d++;
+            }
+            per_source[best] -= d;
+            excess -= d;
+            out->routes_dropped += d;
+            if (out->dropped_count < SH_AUG_MAX_DROPPED) {
+                sh_aug_route_drop *rd = &out->dropped[out->dropped_count++];
+                rd->source = best < sources ? best : -1;
+                rd->area = (int)i;
+                rd->routes = d;
+            }
+            if (!d) break;
+        }
+        if (excess > 0) { full = (int)i; goto overflow; }
+    }
+    for (k = 0; k < n; k++) {
+        if (drop[root[k]]) { if (rank[k]) dropped_alts++; continue; }
+        if (!rank[k]) { degree[choices[k].from_area]++; keep[k] = 1; }
     }
     /* Round-robin across routes, retaining input order when no reduction is
      * needed. The collector tries midpoint anchors first. */
     for (round = 1; round <= max_rank && round < SH_AAS_MAX_AREA_REACHABILITIES; round++) for (k = 0; k < n; k++) {
         unsigned from = (unsigned)choices[k].from_area;
-        if (rank[k] == round && degree[from] < SH_AAS_MAX_AREA_REACHABILITIES) {
+        if (rank[k] == round && !drop[root[k]] && degree[from] < SH_AAS_MAX_AREA_REACHABILITIES) {
             degree[from]++;
             keep[k] = 1;
         }
@@ -2070,7 +2167,8 @@ static int aug_budget_traversals(aug_ctx *c, aug_trav_spec *specs, int n,
     }
     if (!sh_aas_truncate(c->a, SH_AAS_L_REACHABILITIES, nr)) { c->failed = 1; goto done; }
     for (k = (int)nb; k < n; k++) if (keep[k]) specs[written++] = choices[k];
-    out->anchors_reduced = n - written - (int)(nr - original);
+    out->anchors_reduced = n - written - (int)(nr - original) - out->routes_dropped - dropped_alts;
+    if (out->anchors_reduced < 0) out->anchors_reduced = 0;
     goto done;
 overflow:
     out->reach_limit_exceeded = 1;
@@ -2094,7 +2192,9 @@ overflow:
     }
     c->failed = 1;
 done:
-    free(choices); free(keep); free(rank); free(degree); free(last);
+    free(choices); free(keep); free(drop); free(rank); free(root); free(degree);
+    free(need); free(area_src); free(per_source); free(from_list); free(last);
+    free(first_from); free(next_from);
     return c->failed ? 0 : written;
 }
 
@@ -2514,8 +2614,11 @@ int sh_aas_augment(sh_aas *a, const sh_aug_platform *plats, int n,
     if (!opts) opts = &defaults;
     if (n < 0) n = 0;
     if (n > SH_AUG_MAX_PLATFORMS || (n>0&&!plats)) return 0;
+    out->platforms = (sh_aug_platform_result *)calloc(SH_AUG_MAX_PLATFORMS,
+                                                      sizeof *out->platforms);
+    if (!out->platforms) return 0;
 
-    c.a = a; c.o = opts; c.rep = out; c.failed = 0;c.prepared_geometry=0;
+    c.a = a; c.o = opts; c.rep = out; c.failed = 0;c.prepared_geometry=0;c.sides=NULL;
     c.solids=plats;c.solid_count=n;c.original_areas=sh_aas_count(a,SH_AAS_L_AREAS);
     c.radius = opts->inset ? aug_agent_radius(a) : 0.0f;
     c.height = aug_agent_height(a);
@@ -2538,7 +2641,12 @@ int sh_aas_augment(sh_aas *a, const sh_aug_platform *plats, int n,
                               sizeof *peers + 4 * sizeof(int) + 1);
         unsigned char *at;
         block = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, need);
-        if (!block) return 0;           /* nothing has been written yet */
+        c.sides = (aug_side *)malloc(AUG_MAX_SIDES * sizeof *c.sides);
+        if (!block || !c.sides) {      /* nothing has been written yet */
+            if (block) HeapFree(GetProcessHeap(), 0, block);
+            free(c.sides);
+            return 0;
+        }
         at = block;
         work     = (sh_aug_platform *)at; at += nmax * sizeof *work;
         effs     = (aug_quad *)at;        at += nmax * sizeof *effs;
@@ -2557,8 +2665,11 @@ int sh_aas_augment(sh_aas *a, const sh_aug_platform *plats, int n,
         if(solids) {
             c.prepared_geometry=1;
             sh_aug_platform *support=(sh_aug_platform*)calloc(c.original_areas,sizeof *support);
-            unsigned area;int ns=0;
-            if(!support){HeapFree(GetProcessHeap(),0,block);return 0;}
+            unsigned char *lost=(unsigned char*)calloc((size_t)n+1,1);
+            sh_nav_geometry_stats stats;
+            unsigned area;int ns=0,input=n;
+            if(!support||!lost){free(support);free(lost);free(c.sides);
+                HeapFree(GetProcessHeap(),0,block);return 0;}
             for(area=1;area<c.original_areas;area++) {
                 aug_quad floor;
                 if(aug_original_floor(a,area,&floor)&&floor.n[2]>=c.min_floor_cos) {
@@ -2569,10 +2680,20 @@ int sh_aas_augment(sh_aas *a, const sh_aug_platform *plats, int n,
                     ns++;
                 }
             }
-            n=sh_nav_geometry_build_supported(plats,n,support,ns,c.radius,c.height,c.min_floor_cos,c.step,
-                work,wsrc,wpieces,wburied,SH_AUG_MAX_PLATFORMS);
+            /* Faces past the piece ceiling are left out whole and named; the
+             * boxes behind them still stand in the way of every other face. */
+            memset(&stats,0,sizeof stats);stats.source_dropped=lost;
+            n=sh_nav_geometry_build_budget(plats,n,support,ns,c.radius,c.height,c.min_floor_cos,c.step,
+                work,wsrc,wpieces,wburied,SH_AUG_MAX_PLATFORMS,&stats);
             free(support);
-            if(n<0){out->pieces_truncated=1;HeapFree(GetProcessHeap(),0,block);return 0;}
+            out->pieces_dropped=stats.faces_dropped;
+            for(i=0;i<input;i++)if(lost[i]) {
+                if(out->dropped_source_count<SH_AUG_MAX_BLAMED)
+                    out->dropped_sources[out->dropped_source_count++]=i;
+                out->sources_dropped++;
+            }
+            free(lost);
+            if(n<0){out->pieces_truncated=1;free(c.sides);HeapFree(GetProcessHeap(),0,block);return 0;}
         } else for(i=0;i<n;i++){
             work[i]=plats[i];wsrc[i]=i;wpieces[i]=1;wburied[i]=0;
         }
@@ -2679,10 +2800,19 @@ int sh_aas_augment(sh_aas *a, const sh_aug_platform *plats, int n,
                         "hangs over space the module has no floor in");
             continue;
         }
+        /* The area table is 16-bit. Once it is full, the pieces already
+         * placed stand and the rest are reported, not the module refused. */
+        if (sh_aas_count(a, SH_AAS_L_AREAS) >= SH_AAS_MAX_AREAS) out->file_full = 1;
+        if (out->file_full) {
+            _snprintf_s(pr->reason, sizeof pr->reason, _TRUNCATE,
+                        "the module's navigation file is full (%u areas)",
+                        (unsigned)SH_AAS_MAX_AREAS);
+            continue;
+        }
         area = aug_add_area(&c, &eff, carrier);
         if (area < 0) {
             _snprintf_s(pr->reason, sizeof pr->reason, _TRUNCATE,
-                        "the navigation file is full");
+                        "the navigation file could not grow");
             c.failed = 1;
             break;
         }
@@ -2776,25 +2906,45 @@ int sh_aas_augment(sh_aas *a, const sh_aug_platform *plats, int n,
          * leaps. Both platforms can have floor routes without being linked to
          * each other.
          */
-        for (i = 0; i < nmade; i++) {
-            for (j = i + 1; j < nmade; j++) {
-                double gap = aug_quad_gap(&reqs[i], &reqs[j]);
-                unsigned r, nr;
-                int linked = 0;
-                if (gap <= AUG_TOUCH_EPS || gap >= (double)SH_TRAV_LEAP_MIN_SPAN)
-                    continue;
-                nr = sh_aas_count(a, SH_AAS_L_REACHABILITIES);
-                for (r = 0; r < nr && !linked; r++) {
-                    const unsigned char *rr =
-                        sh_aas_rec_const(a, SH_AAS_L_REACHABILITIES, r);
-                    int f, t;
+        if (nmade > 1) {
+            /* Generated areas are appended in order, so area - first is the
+             * row in a bit table of linked pairs, filled in one pass. */
+            unsigned first = (unsigned)made[0], span = (unsigned)made[nmade - 1] - first + 1;
+            size_t bits = (size_t)span * span;
+            unsigned char *linked = span <= 4u * SH_AUG_MAX_PLATFORMS
+                                  ? (unsigned char *)calloc(bits / 8 + 1, 1) : NULL;
+            if (linked) {
+                unsigned r, nr = sh_aas_count(a, SH_AAS_L_REACHABILITIES);
+                for (r = 0; r < nr; r++) {
+                    const unsigned char *rr = sh_aas_rec_const(a, SH_AAS_L_REACHABILITIES, r);
+                    unsigned f, t;
+                    size_t at;
                     if (!rr) continue;
-                    f = (int)sh_aas_get_u16(rr, RE_FROM_AREA);
-                    t = (int)sh_aas_get_u16(rr, RE_TO_AREA);
-                    if ((f == made[i] && t == made[j]) ||
-                        (f == made[j] && t == made[i])) linked = 1;
+                    f = sh_aas_get_u16(rr, RE_FROM_AREA);
+                    t = sh_aas_get_u16(rr, RE_TO_AREA);
+                    if (f < first || t < first || f - first >= span || t - first >= span) continue;
+                    at = (size_t)(f - first) * span + (t - first);
+                    linked[at >> 3] |= (unsigned char)(1u << (at & 7));
+                    at = (size_t)(t - first) * span + (f - first);
+                    linked[at >> 3] |= (unsigned char)(1u << (at & 7));
                 }
-                if (!linked) out->dead_gaps++;
+                for (i = 0; i < nmade; i++) {
+                    for (j = i + 1; j < nmade; j++) {
+                        size_t at;
+                        double gap;
+                        /* Bounds farther apart than a leap cannot be closer. */
+                        if (reqs[j].x0 - reqs[i].x1 >= SH_TRAV_LEAP_MIN_SPAN ||
+                            reqs[i].x0 - reqs[j].x1 >= SH_TRAV_LEAP_MIN_SPAN ||
+                            reqs[j].y0 - reqs[i].y1 >= SH_TRAV_LEAP_MIN_SPAN ||
+                            reqs[i].y0 - reqs[j].y1 >= SH_TRAV_LEAP_MIN_SPAN) continue;
+                        gap = aug_quad_gap(&reqs[i], &reqs[j]);
+                        if (gap <= AUG_TOUCH_EPS || gap >= (double)SH_TRAV_LEAP_MIN_SPAN)
+                            continue;
+                        at = (size_t)((unsigned)made[i] - first) * span + ((unsigned)made[j] - first);
+                        if (!(linked[at >> 3] & (1u << (at & 7)))) out->dead_gaps++;
+                    }
+                }
+                free(linked);
             }
         }
         aug_relink(&c);
@@ -2855,11 +3005,20 @@ int sh_aas_augment(sh_aas *a, const sh_aug_platform *plats, int n,
     out->areas_after = sh_aas_count(a, SH_AAS_L_AREAS);
     out->reach_after = sh_aas_count(a, SH_AAS_L_REACHABILITIES);
     out->depth_after = sh_aas_tree_depth(a);
-    out->depth_exceeded = out->depth_after > (unsigned)SH_AAS_MAX_DEPTH;
+    out->depth_exceeded = out->depth_after > g_aug_depth_limit;
 
     rc = c.failed ? 0 : 1;
+    free(c.sides);
     HeapFree(GetProcessHeap(), 0, block);
     return rc;
+}
+
+void sh_aug_report_free(sh_aug_report *out)
+{
+    if (!out) return;
+    free(out->platforms);
+    out->platforms = NULL;
+    out->platform_count = 0;
 }
 
 #ifdef SH_AUG_TESTING

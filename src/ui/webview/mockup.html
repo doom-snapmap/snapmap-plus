@@ -2533,13 +2533,22 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       if (!d.ok) { navmeshNote('This build has no navigation view.'); return; }
       var st = d.state || {};
       var empty = !st.floors && !st.walls;
-      var red = st.red || 0, rooms = st.rooms || 0;
+      var red = st.red || 0, rooms = st.rooms || 0, total = st.total || 0;
+      var note = st.note ? '. ' + st.note : '';
+      var left = st.left || 0;
+      var leftNote = left ? '. ' + left + ' box' + (left === 1 ? '' : 'es') + ' left out' : '';
       navmeshNote(st.pending ? 'Updating...'
-                : st.refused ? 'Could not read this map. Run sh_navmesh for the reason'
+                : st.refused ? 'Could not read this map' + (st.note ? ': ' + st.note : '')
+                               + '. Run sh_navmesh for the reason'
                 : red        ? red + ' volume' + (red === 1 ? '' : 's')
-                               + ' in conflict, shown red. Fix and try again'
-                : rooms      ? rooms + ' room' + (rooms === 1 ? '' : 's')
-                               + ' could not be built. Run sh_navmesh for the reason'
+                               + ' in conflict, shown red' + note
+                : rooms      ? (total > rooms ? (total - rooms) + ' of ' + total + ' rooms built'
+                                              : 'No room could be built')
+                               + note + leftNote + '. Run sh_navmesh for the reasons'
+                : st.partial ? 'Navmesh built with parts left out, shown amber' + note
+                               + leftNote
+                : left       ? 'Navmesh built; ' + left + ' box' + (left === 1 ? '' : 'es')
+                               + ' left out' + note
                 : st.stale   ? 'Navmesh is out of date'
                 : empty      ? 'This map has no navmesh'
                              : 'Navmesh is up to date');

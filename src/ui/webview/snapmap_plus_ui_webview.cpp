@@ -1410,7 +1410,7 @@ static std::wstring poc_widen(const char *utf8)
 static void poc_send_navmesh_state()
 {
     if (!g_webview) return;
-    char state[128] = "";
+    char state[512] = "";
     bool have = false;
     if (g_iface && g_iface->vtbl && g_iface->vtbl->navmesh_view)
         have = g_iface->vtbl->navmesh_view(g_iface, 0, state, (int)sizeof state) > 0;
@@ -2534,7 +2534,7 @@ static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventA
                 poc_send_navmesh_state();
             } else if (cmd == L"navmeshUpdate") {
                 if (g_iface && g_iface->vtbl && g_iface->vtbl->navmesh_view) {
-                    char state[128] = "";
+                    char state[512] = "";
                     g_iface->vtbl->navmesh_view(g_iface, 1, state, (int)sizeof state);
                 }
                 poc_send_navmesh_state();

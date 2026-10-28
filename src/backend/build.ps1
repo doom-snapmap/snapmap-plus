@@ -3,7 +3,7 @@
 # Add backend translation units to Sources below. Keep this script ASCII for PS 5.1.
 param(
     [string[]]$Sources = @("dllmain.c", "host_image.c", "signatures.c", "startup_bindings.c", "engine_globals.c", "hook.c", "smoke.c",
-                           "rawmap.c", "map_legacy_payload.c", "user_dirs.c", "editor_frame.c", "grid_room.c", "grid_room_resources.c", "grid_room_decl.c", "map_shards.c", "map_payload.c", "navmesh.c", "nav_regions.c", "nav_bake.c", "nav_menu.c", "nav_play.c", "nav_snapshot.c", "nav_traversal.c", "aas_edit.c", "aas_augment.c", "nav_geometry.c", "nav_preview.c", "engine_dialog.c", "strids.c",
+                           "rawmap.c", "map_legacy_payload.c", "user_dirs.c", "editor_frame.c", "grid_room.c", "grid_room_resources.c", "grid_room_decl.c", "map_shards.c", "map_payload.c", "navmesh.c", "nav_regions.c", "nav_entitydef.c", "nav_bake.c", "nav_menu.c", "nav_play.c", "nav_snapshot.c", "nav_traversal.c", "aas_edit.c", "aas_augment.c", "nav_geometry.c", "nav_preview.c", "engine_dialog.c", "strids.c",
                            "overrides.c", "grid_room_editor.c", "map_render.c", "map_render_native.c", "map_render_editor.c", "grid_room_asset.c", "grid_room_nav.c", "grid_room_native.c", "grid_room_areas.c", "world_area_cell.c", "object_entry.c", "grid_room_snap.c", "grid_room_edit.c", "raw_deflate.c", "decl_text.c",
                            "cvars.c", "commands.c", "clipboard.c",
                            "config.c", "config_json.c",

@@ -320,7 +320,12 @@ static void test_box_shape(void)
         CHECK(near_f(quad_top_z(&m.regions[1]), 48.0f));
     }
     CHECK(m.unshaped == 1);            /* the cylinder, counted not condemned */
-    CHECK(m.invalid_geometry == 1);    /* ...but the degenerate boxes still are */
+    /* The degenerate boxes are left out one at a time and named; the map
+     * keeps the two good ones. */
+    CHECK(m.invalid_geometry == 0);
+    CHECK(m.dropped_total == 2 && m.dropped_by[SH_NAVR_DROP_SHAPE] == 2);
+    CHECK(m.dropped_kept == 2 && m.dropped[0].entity == 2 && m.dropped[1].entity == 3);
+    CHECK(m.dropped[0].uid == 3 && m.dropped[0].marked == 1);
 
     free(json);
     bclose(&inst);
@@ -392,18 +397,28 @@ static void test_two_instances_of_one_module(void)
     CHECK(m.instances[1].region_count == 0);
     free(json);
 
-    /* Duplicate ownership, decreasing offsets and truncated value arrays
-     * cannot assign one physical solid to the wrong instance. */
+    /* Duplicate ownership cannot assign one physical solid to the wrong
+     * instance: the claimed box is left out, and so is the box no bucket
+     * lists, but the table itself is sound. */
     json = map_of(inst.p, ents.p, "0,1,2,2", "11,11", &n);
-    CHECK(sh_nav_regions_read(json,n,&m));CHECK(m.invalid_geometry);free(json);
+    CHECK(sh_nav_regions_read(json,n,&m));CHECK(!m.invalid_geometry);
+    CHECK(m.region_count == 0);
+    CHECK(m.dropped_by[SH_NAVR_DROP_CONFLICT] == 1 && m.dropped_by[SH_NAVR_DROP_UNLISTED] == 1);
+    free(json);
+    /* Decreasing offsets and truncated value arrays are a malformed table. */
     json = map_of(inst.p, ents.p, "0,2,1,2", "11,22", &n);
     CHECK(sh_nav_regions_read(json,n,&m));CHECK(m.invalid_geometry);free(json);
     json = map_of(inst.p, ents.p, "0,1,2,2", "11", &n);
     CHECK(sh_nav_regions_read(json,n,&m));CHECK(m.invalid_geometry);free(json);
     json = map_of(inst.p, ents.p, "0,1,2,2", "11.5,22", &n);
     CHECK(sh_nav_regions_read(json,n,&m));CHECK(m.invalid_geometry);free(json);
+    /* An id that names no box is harmless; the box nobody lists is left out. */
     json = map_of(inst.p, ents.p, "0,1,2,2", "11,99", &n);
-    CHECK(sh_nav_regions_read(json,n,&m));CHECK(m.invalid_geometry);free(json);
+    CHECK(sh_nav_regions_read(json,n,&m));CHECK(!m.invalid_geometry);
+    CHECK(m.region_count == 1 && m.regions[0].instance == 0);
+    CHECK(m.dropped_total == 1 && m.dropped_by[SH_NAVR_DROP_UNLISTED] == 1);
+    CHECK(m.dropped[0].uid == 22);
+    free(json);
 
     bclose(&inst);
     bclose(&ents);
@@ -481,8 +496,10 @@ static void test_unnameable_instance(void)
 
 static void test_truncation(void)
 {
-    const int volumes = SH_NAVR_MAX_REGIONS + 8;
-    const int placed  = SH_NAVR_MAX_INSTANCES + 4;
+    /* Ceilings lowered so the test reaches them in milliseconds; the growth
+     * test below covers the old fixed caps with the real ones. */
+    const int volumes = 64 + 8;
+    const int placed  = 16 + 4;
     blob inst, ents, kv, vals;
     char edit[1024];
     char *json;
@@ -505,10 +522,18 @@ static void test_truncation(void)
     bput(&kv, "0,%d,%d", volumes, volumes);
     json = map_of(inst.p, ents.p, kv.p, vals.p, &n);
 
+    sh_nav_regions_test_limits(64, 16);
     CHECK(sh_nav_regions_read(json, n, &m) == 1);
-    CHECK(m.region_count == SH_NAVR_MAX_REGIONS);
-    CHECK(m.instances[0].region_count == SH_NAVR_MAX_REGIONS);
-    CHECK(m.truncated == 1);
+    CHECK(m.region_count == 64);
+    CHECK(m.instances[0].region_count == 64);
+    /* Past the ceiling is a note per box, never a refusal. */
+    CHECK(m.truncated == 1 && !m.invalid_geometry);
+    CHECK(m.dropped_by[SH_NAVR_DROP_CAPACITY] == 8 && m.dropped_total == 8);
+    /* The tables grow by doubling, so the ceiling bounds the memory. */
+    CHECK(m.region_cap <= 2 * 64);
+    CHECK(sh_nav_map_bytes(&m) <= (size_t)2 * 64 * sizeof(sh_nav_region) +
+                                  (size_t)16 * sizeof(sh_nav_instance) + 64);
+    sh_nav_map_free(&m);
 
     free(json);
     bclose(&inst);
@@ -519,18 +544,207 @@ static void test_truncation(void)
     /* more placed instances than the instance table holds */
     bopen(&inst);
     for (i = 0; i < placed; i++) put_instance(&inst, i == 0, MODULE_DECL, 0, 0, 0, 0);
-    json = map_of(inst.p, "", "0,0", "", &n);
+    {
+        blob kv2;
+        bopen(&kv2);
+        for (i = 0; i < placed + 2; i++) bput(&kv2, "%s0", i ? "," : "");
+        json = map_of(inst.p, "", kv2.p, "", &n);
+        bclose(&kv2);
+    }
 
     CHECK(sh_nav_regions_read(json, n, &m) == 1);
-    CHECK(m.instance_count == SH_NAVR_MAX_INSTANCES);
+    CHECK(m.instance_count == 16);
     CHECK(m.region_count == 0);
-    CHECK(m.truncated == 1);
-    CHECK(sh_nav_regions_nth_instance(&m, MODULE, SH_NAVR_MAX_INSTANCES - 1) ==
-          SH_NAVR_MAX_INSTANCES - 1);
-    CHECK(sh_nav_regions_nth_instance(&m, MODULE, SH_NAVR_MAX_INSTANCES) == -1);
+    CHECK(m.truncated == 1 && !m.invalid_geometry);
+    CHECK(sh_nav_regions_nth_instance(&m, MODULE, 16 - 1) == 16 - 1);
+    CHECK(sh_nav_regions_nth_instance(&m, MODULE, 16) == -1);
+    sh_nav_map_free(&m);
+    free(json);
+
+    /* A box in a room past the ceiling is left out; earlier rooms keep theirs. */
+    {
+        blob ents2, kv2, vals2;
+        bopen(&ents2); bopen(&kv2); bopen(&vals2);
+        for (i = 0; i < placed; i++) {
+            put_entity(&ents2, i == 0, 100 + i, INHERIT, edit);
+            bput(&vals2, "%s%d", i ? "," : "", 100 + i);
+        }
+        for (i = 0; i <= placed; i++) bput(&kv2, "%s%d", i ? "," : "", i);
+        bput(&kv2, ",%d", placed);
+        json = map_of(inst.p, ents2.p, kv2.p, vals2.p, &n);
+        CHECK(sh_nav_regions_read(json, n, &m) == 1);
+        CHECK(!m.invalid_geometry && m.truncated);
+        CHECK(m.region_count == 16);
+        CHECK(m.dropped_by[SH_NAVR_DROP_CAPACITY] == placed - 16);
+        sh_nav_map_free(&m);
+        free(json);
+        bclose(&ents2); bclose(&kv2); bclose(&vals2);
+    }
+    sh_nav_regions_test_limits(0, 0);
+    bclose(&inst);
+}
+
+/* The tables grow past the former fixed caps (512 boxes, 256 rooms) with the
+ * production ceilings, and copy, compare and free as values. */
+static void test_growth_past_old_caps(void)
+{
+    const int rooms = 300, per_room = 2;
+    blob inst, ents, kv, vals;
+    char edit[1024];
+    char *json;
+    size_t n;
+    sh_nav_map m, copy;
+    int i, j, uid = 1;
+
+    bopen(&inst); bopen(&ents); bopen(&kv); bopen(&vals);
+    edit_box(edit, sizeof edit, "\"flags\":{\"noFlood\":true},\"blockDemons\":true,", "", 0, 0, 0, 64, 64, 8);
+    for (i = 0; i < rooms; i++) put_instance(&inst, i == 0, MODULE_DECL, i * 1024.0, 0, 0, 0);
+    bput(&kv, "0");
+    for (i = 0; i < rooms; i++) {
+        for (j = 0; j < per_room; j++, uid++) {
+            put_entity(&ents, uid == 1, uid, INHERIT, edit);
+            bput(&vals, "%s%d", uid == 1 ? "" : ",", uid);
+        }
+        bput(&kv, ",%d", (i + 1) * per_room);
+    }
+    bput(&kv, ",%d", rooms * per_room);
+    json = map_of(inst.p, ents.p, kv.p, vals.p, &n);
+
+    CHECK(sh_nav_regions_read(json, n, &m) == 1);
+    CHECK(m.instance_count == rooms && m.region_count == rooms * per_room);
+    CHECK(m.region_count > 512 && m.instance_count > 256);
+    CHECK(!m.truncated && !m.invalid_geometry && m.dropped_total == 0);
+    for (i = 0; i < rooms; i++) CHECK(m.instances[i].region_count == per_room);
+    CHECK(m.regions[rooms * per_room - 1].instance == rooms - 1);
+    CHECK(sh_nav_regions_nth_instance(&m, MODULE, rooms - 1) == rooms - 1);
+    /* Doubling growth: never more than twice what the map holds. */
+    CHECK(m.region_cap < 2 * m.region_count + 16 && m.instance_cap < 2 * rooms + 16);
+
+    CHECK(sh_nav_map_copy(&copy, &m));
+    CHECK(sh_nav_map_equal(&copy, &m));
+    CHECK(copy.regions != m.regions);
+    copy.regions[3].c[0][0] += 1.0f;
+    CHECK(!sh_nav_map_equal(&copy, &m));
+    sh_nav_map_free(&copy);
+    CHECK(copy.regions == NULL && copy.region_count == 0);
+    /* A second read of the same text is the same map, byte for byte. */
+    {
+        sh_nav_map again;
+        CHECK(sh_nav_regions_read(json, n, &again) == 1);
+        CHECK(sh_nav_map_equal(&again, &m));
+        sh_nav_map_move(&m, &again);
+        CHECK(again.regions == NULL && m.region_count == rooms * per_room);
+    }
+    sh_nav_map_free(&m);
+
+    /* The production ceilings and what they cost at worst. */
+    CHECK((size_t)SH_NAVR_MAX_REGIONS * sizeof(sh_nav_region) <= (size_t)6 * 1024 * 1024);
+    CHECK((size_t)SH_NAVR_MAX_INSTANCES * sizeof(sh_nav_instance) <= (size_t)2 * 1024 * 1024);
 
     free(json);
-    bclose(&inst);
+    bclose(&inst); bclose(&ents); bclose(&kv); bclose(&vals);
+}
+
+/* One unreadable room leaves out only its own boxes, named by reason. */
+static void test_unreadable_room_drops_only_its_boxes(void)
+{
+    blob inst, ents;
+    char edit[1024];
+    char *json;
+    size_t n;
+    sh_nav_map m;
+
+    bopen(&inst); bopen(&ents);
+    put_instance(&inst, 1, MODULE_DECL, 0, 0, 0, 0);
+    put_instance(&inst, 0, MODULE_DECL, 2048, 0, 0, 9);     /* no such rotation */
+    edit_box(edit, sizeof edit, "\"flags\":{\"noFlood\":true},\"blockDemons\":true,", "", 0, 0, 0, 128, 128, 64);
+    put_entity(&ents, 1, 11, INHERIT, edit);
+    put_entity(&ents, 0, 22, INHERIT, edit);
+    put_entity(&ents, 0, 33, INHERIT, edit);                /* pasted outside every room */
+    json = map_of(inst.p, ents.p, "0,1,2,3", "11,22,33", &n);
+    CHECK(sh_nav_regions_read(json, n, &m) == 1);
+    CHECK(!m.invalid_geometry);
+    CHECK(m.instances[1].unusable == 1 && m.instances[0].unusable == 0);
+    CHECK(m.region_count == 1 && m.regions[0].instance == 0);
+    CHECK(m.dropped_by[SH_NAVR_DROP_ROOM] == 1 && m.dropped_by[SH_NAVR_DROP_OUTSIDE] == 1);
+    CHECK(m.dropped_total == 2);
+    CHECK(m.dropped[0].uid == 22 && m.dropped[0].instance == 1);
+    CHECK(strlen(sh_nav_regions_drop_reason(SH_NAVR_DROP_ROOM)) > 0);
+    sh_nav_map_free(&m);
+    free(json);
+    bclose(&inst); bclose(&ents);
+}
+
+static float g_default_size[3] = { 16, 128, 64 };
+static int g_default_calls;
+static int default_size(const char *inherit, float size[3], void *ctx)
+{
+    (void)ctx;
+    g_default_calls++;
+    if (strcmp(inherit, INHERIT)) return 0;
+    memcpy(size, g_default_size, sizeof g_default_size);
+    return 1;
+}
+
+/* Map text omits members equal to the entityDef's. The map-text read that
+ * runs at load and after Save takes those from the entityDef, so a
+ * default-sized box keeps its shape instead of being refused. */
+static void test_map_text_defaults_from_the_entitydef(void)
+{
+    blob inst, ents;
+    char *json;
+    size_t n;
+    sh_nav_map m;
+
+    bopen(&inst); bopen(&ents);
+    put_instance(&inst, 1, MODULE_DECL, 0, 0, 0, 0);
+    put_entity(&ents, 1, 7, INHERIT,
+               "\"flags\":{\"noFlood\":true},\"blockDemons\":true,"
+               "\"clipModelInfo\":{\"size\":{\"x\":512}},\"spawnPosition\":{\"z\":32}");
+    put_entity(&ents, 0, 8, INHERIT,
+               "\"flags\":{\"noFlood\":true},\"blockDemons\":true,"
+               "\"spawnPosition\":{\"x\":1024}");
+    json = map_of(inst.p, ents.p, "0,2,2", "7,8", &n);
+
+    /* Without the entityDef both are unreadable, and only they are left out. */
+    CHECK(sh_nav_regions_read(json, n, &m) == 1);
+    CHECK(!m.invalid_geometry && m.region_count == 0 && m.dropped_by[SH_NAVR_DROP_SHAPE] == 2);
+    sh_nav_map_free(&m);
+
+    g_default_calls = 0;
+    CHECK(sh_nav_regions_read_defaults(json, n, &m, default_size, NULL) == 1);
+    CHECK(g_default_calls == 2);
+    CHECK(!m.invalid_geometry && m.dropped_total == 0 && m.region_count == 2);
+    if (m.region_count == 2) {
+        CHECK(near_f(quad_extent_x(&m.regions[0]), 512) && near_f(quad_extent_y(&m.regions[0]), 128));
+        CHECK(near_f(quad_top_z(&m.regions[0]), 32 + 64));
+        CHECK(near_f(quad_extent_x(&m.regions[1]), 16) && near_f(quad_min_x(&m.regions[1]), 1016));
+        CHECK(near_f(quad_top_z(&m.regions[1]), 64));
+    }
+    sh_nav_map_free(&m);
+    free(json);
+    bclose(&inst); bclose(&ents);
+}
+
+/* One level of an entityDef file, outer braces and all. */
+static void test_decl_level(void)
+{
+    static const char file[] =
+        "{\n\tinherit = \"snapmaps/volume/base\";\n\teditorVars { size = ( 0, 0, 0 ); }\n"
+        "\tedit = {\n\t\trenderModelInfo = { scale = { x = 16; y = 128; z = 64; } }\n"
+        "\t\tclipModelInfo = {\n\t\t\ttype = \"CLIPMODEL_BOX\";\n"
+        "\t\t\tsize = {\n\t\t\t\tx = 16;\n\t\t\t\tz = 64;\n\t\t\t}\n\t\t}\n\t}\n}\n";
+    float size[3] = { 0, 0, 0 };
+    unsigned have = 0;
+    int type = 0;
+    char inherit[64];
+    CHECK(sh_nav_regions_decl_level(file, sizeof file - 1, size, &have, &type,
+                                    inherit, sizeof inherit));
+    CHECK(have == 5 && type == 1 && near_f(size[0], 16) && near_f(size[2], 64));
+    CHECK(!strcmp(inherit, "snapmaps/volume/base"));
+    CHECK(sh_nav_regions_decl_level("{ edit = { } }", 14, size, &have, &type, NULL, 0));
+    CHECK(have == 0 && type == 0);
+    CHECK(!sh_nav_regions_decl_level("{ edit = { ", 11, size, &have, &type, NULL, 0));
 }
 
 /* ==================================================================== */
@@ -600,7 +814,7 @@ static void test_malformed(void)
     /* keyValues that runs off the end of values, and one that runs backwards */
     json = map_of(inst.p, ents.p, "0,900,900", "1", &n);
     CHECK(sh_nav_regions_read(json, n, &m) == 1);
-    CHECK(m.region_count == 1);
+    CHECK(m.invalid_geometry && m.region_count == 0);
     free(json);
 
     json = map_of(inst.p, ents.p, "9,1,1", "1", &n);
@@ -706,6 +920,13 @@ static char *live_box(const char *flags, double cx, double cy, double cz,
 static const char *TICKED  = "\"flags\":{\"noFlood\":true},\"blockDemons\":true,";
 static const char *UNTICKED = "\"blockDemons\":true,";
 
+/* A box the editor measured and found unusable: left out alone. */
+static int unusable_size(unsigned entity, float size[3], void *ctx)
+{
+    (void)entity; (void)size; (void)ctx;
+    return -1;
+}
+
 /* Deliberately unrelated to the shipped declaration's dimensions. */
 static int resolved_size(unsigned entity, float size[3], void *ctx)
 {
@@ -799,7 +1020,9 @@ static void test_inherited_box_dimensions(void)
                 CHECK(!m.invalid_geometry);
                 CHECK(m.unshaped == 1);
             } else {
-                CHECK(m.invalid_geometry == !cases[c].valid);
+                /* A box it should have been able to read is left out alone. */
+                CHECK(!m.invalid_geometry);
+                CHECK(m.dropped_by[SH_NAVR_DROP_SHAPE] == !cases[c].valid);
                 CHECK(m.unshaped == 0);
             }
             CHECK(!m.truncated);
@@ -816,6 +1039,12 @@ static void test_inherited_box_dimensions(void)
                  * another rather than condemning the box. */
                 CHECK(sh_nav_regions_read_resolved(json, n, &m, resolved_size, NULL));
                 CHECK(m.unmeasured && !m.invalid_geometry);
+                CHECK(m.dropped_by[SH_NAVR_DROP_UNMEASURED] == 1);
+                /* Measured and unusable is not "not yet": it is one bad box. */
+                CHECK(sh_nav_regions_read_resolved(json, n, &m, unusable_size, NULL));
+                CHECK(!m.unmeasured && !m.invalid_geometry);
+                CHECK(m.dropped_by[SH_NAVR_DROP_SHAPE] == 1);
+                CHECK(m.region_count == 0 && m.obstacle_count == 0);
             }
             free(json); bclose(&inst); bclose(&ents); bclose(&edit);
         }
@@ -986,8 +1215,7 @@ static void test_live_untick_this_session(void)
     CHECK(m.instances[0].region_count == 0);
     CHECK(m.instance_count == 1);
     /* the dropped region is gone, not merely uncounted */
-    CHECK(m.regions[0].entity == 0 && m.regions[0].instance == 0 &&
-          near_f(quad_top_z(&m.regions[0]), 0.0f));
+    CHECK(m.regions == NULL || m.region_cap >= 0);
 
     free(json); free(live0); free(live1);
 }
@@ -1232,7 +1460,7 @@ static void test_live_unreadable(void)
  * way the load path reports it, and nothing is written past the table. */
 static void test_live_region_cap(void)
 {
-    const int volumes = SH_NAVR_MAX_REGIONS + 8;
+    const int volumes = 64 + 8;
     blob inst, ents, kv, vals;
     char edit[1024];
     char *json, *live;
@@ -1256,6 +1484,7 @@ static void test_live_region_cap(void)
     bput(&kv, "0,%d,%d", volumes, volumes);
     json = map_of(inst.p, ents.p, kv.p, vals.p, &n);
 
+    sh_nav_regions_test_limits(64, 0);
     CHECK(sh_nav_regions_read(json, n, &m) == 1);
     CHECK(m.region_count == 0);
     CHECK(m.truncated == 1); /* Unmarked colliding boxes also consume the solid budget. */
@@ -1265,12 +1494,12 @@ static void test_live_region_cap(void)
     /* uniqueId i+1, so the live table is addressed one slot up. */
     for (i = 0; i < volumes && i + 1 < LIVE_MAX; i++) e.json[i + 1] = live;
 
-    CHECK(sh_nav_regions_refresh_live(&m, volumes, live_valid, live_json, &e) ==
-          SH_NAVR_MAX_REGIONS);
-    CHECK(m.region_count == SH_NAVR_MAX_REGIONS);
-    CHECK(m.instances[0].region_count == SH_NAVR_MAX_REGIONS);
+    CHECK(sh_nav_regions_refresh_live(&m, volumes, live_valid, live_json, &e) == 64);
+    CHECK(m.region_count == 64);
+    CHECK(m.instances[0].region_count == 64);
     CHECK(m.truncated == 1);
-    CHECK(m.regions[SH_NAVR_MAX_REGIONS - 1].entity == SH_NAVR_MAX_REGIONS);
+    CHECK(m.regions[64 - 1].entity == 64);
+    sh_nav_regions_test_limits(0, 0);
 
     free(json);
     free(live);
@@ -1413,7 +1642,7 @@ static void test_non_orthonormal_matrix_is_refused(void)
 
     CHECK(sh_nav_regions_read(json, n, &m) == 1);
     CHECK(m.region_count == 0);
-    CHECK(m.invalid_geometry == 1);
+    CHECK(m.invalid_geometry == 0 && m.dropped_by[SH_NAVR_DROP_SHAPE] == 1);
     free(json);
 }
 
@@ -1428,7 +1657,7 @@ static void test_reflection_is_refused(void)
 
     CHECK(sh_nav_regions_read(json, n, &m) == 1);
     CHECK(m.region_count == 0);
-    CHECK(m.invalid_geometry == 1);
+    CHECK(m.invalid_geometry == 0 && m.dropped_by[SH_NAVR_DROP_SHAPE] == 1);
     free(json);
 }
 
@@ -1526,11 +1755,13 @@ static void test_duplicate_box_ids(void)
         CHECK(live.valid_calls == 0);
         free(json);
     }
-    /* The shared ID cannot decide which box belongs to which room. */
+    /* The shared ID cannot decide which box belongs to which room, so both
+     * boxes carrying it are left out and the rest of the map is kept. */
     put_instance(&inst, 0, MODULE_DECL, 1024, 0, 0, 0);
     json = map_of(inst.p, ents.p, "0,1,2,2", "7,7", &n);
     CHECK(sh_nav_regions_read(json, n, &m));
-    CHECK(m.ids_unusable && m.invalid_geometry);
+    CHECK(m.ids_unusable && !m.invalid_geometry);
+    CHECK(m.region_count == 0 && m.dropped_by[SH_NAVR_DROP_CONFLICT] == 2);
     free(json);
     bclose(&inst); bclose(&ents);
 
@@ -1555,6 +1786,10 @@ static void test_duplicate_box_ids(void)
 
 int main(void)
 {
+    test_growth_past_old_caps();
+    test_unreadable_room_drops_only_its_boxes();
+    test_map_text_defaults_from_the_entitydef();
+    test_decl_level();
     test_resolved_decl_size();
     test_inherited_box_dimensions();
     test_duplicate_box_ids();

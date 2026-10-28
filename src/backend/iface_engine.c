@@ -471,7 +471,11 @@ static int slot_get_prefab_mesh(sh_iface *self, void *out_blob, int out_capacity
  * a frame later, so this only asks and reports. */
 static int slot_navmesh_view(sh_iface *self, int update, char *out_json, int cap)
 {
-    int state, floors = 0, walls = 0, pending, red = 0, rooms = 0;
+    int state, floors = 0, walls = 0, pending, red = 0, rooms = 0, n;
+    sh_nav_bake_summary sum;
+    char note[2 * sizeof sum.first + 8];
+    const char *why;
+    size_t i, k = 0;
     (void)self;
     if (update) sh_apply_engine_nav_request_update();
     state = sh_apply_engine_nav_view_state();
@@ -480,11 +484,31 @@ static int slot_navmesh_view(sh_iface *self, int update, char *out_json, int cap
     /* Still working while the read is owed or the bake is on the worker. */
     pending = ((state & 2) || sh_nav_bake_preview_pending()) ? 1 : 0;
     sh_nav_bake_conflicts(&red, &rooms);
-    return _snprintf_s(out_json, (size_t)cap, _TRUNCATE,
-                       "{\"stale\":%d,\"pending\":%d,\"floors\":%d,\"walls\":%d,"
-                       "\"red\":%d,\"rooms\":%d,\"refused\":%d}",
-                       (state & 1) ? 1 : 0, pending, floors, walls, red, rooms,
-                       (state & 4) ? 1 : 0);
+    sh_nav_bake_summary_get(&sum);
+    /* The reason worth naming: the read's when the map was refused, else the
+     * first room that kept or lost something. Escaped for JSON. */
+    why = sum.have_map ? sum.first : sum.read_reason;
+    for (i = 0; why[i] && k + 3 < sizeof note; i++) {
+        unsigned char ch = (unsigned char)why[i];
+        if (ch == '"' || ch == '\\') { note[k++] = '\\'; note[k++] = (char)ch; }
+        else if (ch >= 0x20 && ch < 0x7f) note[k++] = (char)ch;
+    }
+    note[k] = 0;
+    n = _snprintf_s(out_json, (size_t)cap, _TRUNCATE,
+                    "{\"stale\":%d,\"pending\":%d,\"floors\":%d,\"walls\":%d,"
+                    "\"red\":%d,\"rooms\":%d,\"refused\":%d,\"total\":%d,\"built\":%d,"
+                    "\"partial\":%d,\"left\":%d,\"note\":\"%s\"}",
+                    (state & 1) ? 1 : 0, pending, floors, walls, red, rooms,
+                    (state & 4) ? 1 : 0, sum.rooms, sum.built, sum.partial,
+                    sum.boxes_left_out, note);
+    /* A caller with an older, smaller buffer still gets whole JSON. */
+    if (n < 0)
+        n = _snprintf_s(out_json, (size_t)cap, _TRUNCATE,
+                        "{\"stale\":%d,\"pending\":%d,\"floors\":%d,\"walls\":%d,"
+                        "\"red\":%d,\"rooms\":%d,\"refused\":%d}",
+                        (state & 1) ? 1 : 0, pending, floors, walls, red, rooms,
+                        (state & 4) ? 1 : 0);
+    return n;
 }
 
 /* Sparse prefab state omits inherited scale; resolve defaults for preview dimensions. */

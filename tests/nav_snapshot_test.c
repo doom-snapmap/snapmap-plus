@@ -4,7 +4,7 @@
  * when it is that object, or when the converted map is unreadable and the
  * editor's map places exactly the converted modules -- never an earlier
  * session's different map. An omitted Blocking Box axis inherits the
- * entityDef size during a conversion. */
+ * entityDef size (nav_entitydef) during a conversion. */
 #include <windows.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -13,6 +13,7 @@
 
 #include "nav_snapshot.h"
 #include "nav_regions.h"
+#include "nav_entitydef.h"
 
 void backend_log(const char *message) { (void)message; }
 
@@ -36,11 +37,14 @@ typedef struct fake_world {
     int converting_seen[4];         /* per object */
 } fake_world;
 
+/* The map tables are heap-backed: a filled map owns its room table. */
 static void fill(sh_nav_map *out, const char *const *modules, int count, int regions)
 {
     int i;
     memset(out, 0, sizeof *out);
-    out->instance_count = count;
+    out->instances = (sh_nav_instance *)calloc(count ? count : 1, sizeof *out->instances);
+    if (!out->instances) abort();
+    out->instance_count = out->instance_cap = count;
     for (i = 0; i < count; i++)
         strcpy_s(out->instances[i].module, sizeof out->instances[i].module, modules[i]);
     out->region_count = regions;
@@ -54,7 +58,10 @@ static int fake_read(const void *object, int converting, sh_nav_map *out, void *
     int id = *(const int *)object;
     w->reads++;
     w->converting_seen[id] = converting;
-    memset(out, 0xcd, sizeof *out);     /* a refused read leaves junk */
+    /* A read overwrites `out` without freeing it (nav_regions.h); the caller
+     * must have released what it held, or the tables leak. A refused read
+     * leaves an empty map, as sh_nav_regions_read_resolved does. */
+    memset(out, 0, sizeof *out);
     if (id == BUILD) {
         w->build_reads++;
         if (!w->build_readable) return 0;
@@ -102,6 +109,7 @@ static int take(fake_world *w, const int *build, const int *edit, sh_nav_snapsho
     memset(&src, 0, sizeof src);
     src.build = build; src.edit = edit;
     src.read = fake_read; src.modules = fake_modules; src.ctx = w;
+    sh_nav_map_free(&g_map);
     return sh_nav_snapshot_take(&src, &g_map, r);
 }
 
@@ -277,7 +285,7 @@ static void test_modules_match(void)
     CHECK(!sh_nav_snapshot_modules_match(&m, names[0], SH_NAVR_MODULE_CAP, 2, why, sizeof why));
     CHECK(strstr(why, "copy 1") != NULL);
     /* An empty map matches an empty conversion. */
-    memset(&m, 0, sizeof m);
+    sh_nav_map_free(&m);
     CHECK(sh_nav_snapshot_modules_match(&m, NULL, 0, 0, NULL, 0));
 }
 
@@ -286,7 +294,7 @@ static void test_modules_match(void)
 static int inherited_only(unsigned entity, float size[3], void *ctx)
 {
     (void)entity; (void)ctx;
-    return sh_nav_snapshot_inherited_size("snapmaps/volume/blocking", size);
+    return sh_nav_entitydef_box_size("snapmaps/volume/blocking", size);
 }
 
 static int unresolved(unsigned entity, float size[3], void *ctx)
@@ -306,13 +314,15 @@ static float extent(const sh_nav_region *r, int axis)
     return hi - lo;
 }
 
+/* The conversion-time size comes from the shared resolver (nav_entitydef),
+ * the one the map-text reads at load and after Save use, without a reader. */
 static void test_inherited_size(void)
 {
     float s[3] = {0, 0, 0};
-    CHECK(sh_nav_snapshot_inherited_size("snapmaps/volume/blocking", s));
+    CHECK(sh_nav_entitydef_box_size("snapmaps/volume/blocking", s));
     CHECK(s[0] == 16.0f && s[1] == 128.0f && s[2] == 64.0f);
-    CHECK(!sh_nav_snapshot_inherited_size("snapmaps/volume/trigger", s));
-    CHECK(!sh_nav_snapshot_inherited_size(NULL, s));
+    CHECK(!sh_nav_entitydef_box_size("snapmaps/volume/trigger", s));
+    CHECK(!sh_nav_entitydef_box_size(NULL, s));
 }
 
 /* A marked box that spells only y and z: x is the entityDef's 16, y and z are
@@ -347,8 +357,10 @@ static void test_omitted_axis_inherits_during_conversion(void)
     }
     CHECK(!strcmp(m.instances[0].module, "ind_dlc/ind_totally_blank_room_4x"));
 
+    sh_nav_map_free(&m);
     CHECK(sh_nav_regions_read_resolved(json, sizeof json - 1, &m, unresolved, NULL));
     CHECK(m.unmeasured == 1 && m.region_count == 0);
+    sh_nav_map_free(&m);
 }
 
 int main(void)

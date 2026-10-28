@@ -477,7 +477,8 @@ the new walking surface. Slopes retain their actual angle, and overlapping boxes
 contribute their exposed surfaces.
 
 Default-sized boxes work too, including in maps created before Snapmap+ was
-installed. You do not need to resize a box or recreate the map to enable navigation.
+installed, and they keep their navigation preview after you save. You do not need
+to resize a box or recreate the map to enable navigation.
 
 For a wall that demons should go around, leave **AI Navigation** off and keep
 **Block Demons** on. Ordinary Blocking Boxes already participate as obstacles,
@@ -492,15 +493,39 @@ for a hell knight. Climbing also requires an available traversal animation and
 clear approach and landing positions; the floor-side positions account for the
 whole rotated box, including an overhanging slope.
 
-Adding boxes does not impose a fixed 2,048-traversal cutoff. There are still engine
-limits on navigation complexity. If a bake cannot fit safely, Snapmap+ refuses
-that module's custom navigation and records the reason in `sh_backend.log`.
-Use `sh_navmesh` in the game console for the current bake report. When a refusal
-identifies boxes involved in a full route area, the preview marks them red.
-That refusal concerns route complexity within an area, not a fixed number of
-entities in the map. An obstructed or disconnected route can also stop a demon
-without removing the navigation mesh. Leave enough room around wall ends for
-the intended demon size and keep spawn, approach and landing points clear.
+A map can hold up to 65,536 boxes with **AI Navigation** or **Block Demons** and
+8,192 placed modules. Each module copy (a "room" in the messages) bakes up to
+2,048 boxes, and up to 2,048 walkable pieces per demon size. Past any of these the
+extra boxes are left out and named, and the rest of the map keeps its navigation.
+
+When something does not fit, Snapmap+ leaves out the smallest part it can instead
+of refusing the map:
+
+- A box whose size, rotation or room cannot be read, or that two rooms claim, is
+  left out on its own. A box in a room whose position cannot be read is left out
+  with that room's other boxes only.
+- The engine allows at most 256 routes out of one navigation area. When a busy
+  floor would pass that, the boxes adding the most routes there give up just
+  enough of them.
+- The engine loads no navigation tree deeper than 128. A room that would pass it
+  keeps three quarters of its floor boxes at a time until it fits.
+- Each demon size is baked on its own. If the smallest size cannot be built,
+  larger demons still use the boxes, and a size that failed is not baked again
+  at Play unless the map changed.
+- A room that cannot be built at all keeps its normal navmesh; the other rooms
+  are still built.
+
+Boxes that lost routes or were left out this way are drawn amber in the preview.
+The completion toast says **Navmesh Built**, **Navmesh Partly Built** with how
+many rooms were built and the first room that kept or lost something and why, or
+**Navmesh Build Failed** when no room could be built or the map could not be read.
+The View menu shows the same summary. Run `sh_navmesh` in the game console for
+every room, demon size and box with its reason; `sh_backend.log` has the same
+lines. The one route refusal left is a module whose own navigation already fills
+an area; the boxes routing into it are marked red. An obstructed or disconnected
+route can also stop a demon without removing the navigation mesh. Leave enough
+room around wall ends for the intended demon size and keep spawn, approach and
+landing points clear.
 
 Build navigation from the editor's Start menu with **Build Navmesh**, beside
 **Save**. The game shows **Building Navmesh** while the worker runs, then a
@@ -518,8 +543,8 @@ update, Play bakes it again. If the View menu says **Could not read this map**,
 run `sh_navmesh` for the reason.
 
 Duplicated boxes that share an ID keep their navigation when the map assigns
-that ID to one module. An ID assigned to different modules is ambiguous and
-still refuses the bake.
+that ID to one module. An ID assigned to different modules is ambiguous, so the
+boxes carrying it are left out; the rest of the map keeps its navigation.
 Baking runs in the background, so the previous lines can remain briefly while the new
 result arrives. `sh_perf` reports time spent reading the map and building the
 preview; `sh_perf reset` clears those counters.
