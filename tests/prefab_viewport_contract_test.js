@@ -83,6 +83,20 @@ check(iface.includes('slots.resolve_prefab_defaults = slot_resolve_prefab_defaul
       common.includes('offsetof(sh_iface_vtbl, resolve_prefab_defaults) == 0x320'),
       'model-and-scale resolution is append-only at interface extension 23');
 check(html.includes("model:'',scale:[1,1,1]"),'browser preview completes model-and-scale requests');
+check(js.includes('var frame = grabFrame(doc);') && js.includes('entityFromJson(list[i], frame)') &&
+      js.includes('applyFrame(vec3(edit.spawnPosition,[0,0,0]), orientationAxes(edit.spawnOrientation)'),
+      'the preview places stored transforms through the prefab grabAxis, as the paste does');
+check(js.includes('color:nav.marked?NAVIGATION_COLOR:roleColor(role,className)') &&
+      html.includes('<i class="pc-legend-dot navigation"></i>AI Navigation') &&
+      /\.pc-legend-dot\.navigation\s*\{\s*background:\s*#5cb86b;/.test(css),
+      'AI Navigation boxes are tinted and explained in the legend');
+check(html.includes('prefabTransform.countNavigationBoxes(d.scene') && html.includes("' AI Navigation boxes'"),
+      'Prefab Details counts AI Navigation boxes beside the entity count');
+check(js.includes("if (!info.scale && entity.role === 'blocker') updateEntityTransform(entity,BLOCKING_DEFAULT_SIZE,true)"),
+      'an unresolved blocking decl keeps its 16/128/64 default instead of 1-unit slabs');
+check(html.includes("d.grab === 'corrected'") && html.includes('d.result === 3') &&
+      host.includes('sh_prefab_grab_json_check(buf') && host.includes('L",\\"grab\\":\\"corrected\\""'),
+      'Create reports a corrected grab point and refuses only an unusable frame');
 
 if(failures){console.error('prefab_viewport_contract_test: '+failures+' failure(s)');process.exit(1);}
 console.log('prefab_viewport_contract_test: OK');

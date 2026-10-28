@@ -726,14 +726,22 @@ running Snapmap+.
 **Creating one:** select the entities in the SnapMap editor, then click **Create from selection**. Give
 it a name, and it's added to the list. **Your cursor must be hovering one of the selected objects when
 you do this** — whichever object that is becomes the one centered on your cursor when you later paste
-the prefab back in.
+the prefab back in. SnapMap anchors the prefab on the line through the **centre of your view**, not on
+the cursor. If that line misses the hovered object, Snapmap+ anchors the prefab on the hovered object
+itself instead and says **grab point corrected** when it saves. Without this the saved positions could
+come out scrambled. When you paste, the prefab appears in front of the camera, turned by however much
+your heading has changed since you created it.
 
 **Using one:** select a prefab in the list to see its details on the right — its name, description, and
 tags, plus an **interactive 3D preview** of what you're about to place: drag to orbit, scroll to zoom,
-double-click to frame it. The preview colors entities by what they do — solid, blocking, interactable,
-logic/I/O, triggers — so you can tell what a prefab actually contains before you drop it in. Click
-**Load / Place** to stage the prefab for placement with SnapMap's built-in paste function, then switch to
-the editor and press **Ctrl+V** to actually drop it into the map.
+double-click to frame it. The preview colors entities by what they do — solid, blocking, AI Navigation,
+interactable, logic/I/O, triggers — so you can tell what a prefab actually contains before you drop it in.
+It shows the prefab level and upright, the way it pastes, even when it was created while hovering a tilted
+ramp. Blocking Boxes ticked for **AI Navigation** are tinted green, and their number appears beside the
+entity count. Click **Load / Place** to stage the prefab for placement with SnapMap's built-in paste
+function, then switch to the editor and press **Ctrl+V** to actually drop it into the map. When the
+placed prefab brings in AI Navigation boxes, Snapmap+ updates the navmesh by itself as soon as you drop
+it, just as **View > Update Navmesh** would.
 
 **Organizing:** **New Folder** creates a folder you can drag prefabs into; **Filter prefabs...** narrows
 the list by name. Selecting a prefab and clicking **Delete** removes it permanently.

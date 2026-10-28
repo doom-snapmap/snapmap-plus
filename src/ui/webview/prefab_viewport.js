@@ -6,6 +6,12 @@ var prefabViewport = (function () {
   var composeMatrix = prefabTransform.composeMatrix;
   var composeBottomAnchoredBox = prefabTransform.composeBottomAnchoredBox;
   var transformPoint = prefabTransform.transformPoint;
+  var grabFrame = prefabTransform.grabFrame;
+  var applyFrame = prefabTransform.applyFrame;
+  var navigationFlags = prefabTransform.navigationFlags;
+  var BLOCKING_DEFAULT_SIZE = prefabTransform.BLOCKING_DEFAULT_SIZE;
+  /* Blocking boxes ticked for AI Navigation; matches .pc-legend-dot.navigation. */
+  var NAVIGATION_COLOR = [0.36,0.72,0.42];
   var host = document.getElementById('pcPreview');
   var canvas = document.getElementById('pcCanvas');
   var status = document.getElementById('pcPreviewStatus');
@@ -355,22 +361,28 @@ var prefabViewport = (function () {
     entity.helperShape=/cylinder/i.test(entity.inherit+entity.model)?'cylinder':'box';
   }
 
-  function entityFromJson(raw) {
+  function entityFromJson(raw, frame) {
     var def = raw && raw.entityDef ? raw.entityDef : {};
     var state = def.state || {}, edit = state.edit || {};
     var rmi = edit.renderModelInfo || {};
     var className = (typeof def.className === 'string') ? def.className : '';
     var inherit = (typeof def.inherit === 'string') ? def.inherit : '';
     var role = entityRole(className, inherit, edit);
+    var nav = navigationFlags(className, inherit, edit);
+    /* Stored transforms are relative to the grab frame; place them as the paste does. */
+    var placed = applyFrame(vec3(edit.spawnPosition,[0,0,0]), orientationAxes(edit.spawnOrientation),
+                            frame || [[1,0,0],[0,1,0],[0,0,1]]);
     var entity={inherit:inherit, model:selectEntityModel(role,rmi,edit), className:className, role:role,
-      resolveModel:role!=='decal'&&!MARKER_MODELS[role], color:roleColor(role,className),
-      position:vec3(edit.spawnPosition,[0,0,0]), axes:orientationAxes(edit.spawnOrientation),
+      resolveModel:role!=='decal'&&!MARKER_MODELS[role],
+      color:nav.marked?NAVIGATION_COLOR:roleColor(role,className), navigation:nav.marked,
+      position:placed.position, axes:placed.axes,
       scalePatch:(rmi.scale&&typeof rmi.scale==='object')?rmi.scale:null,
       hasScalePatch:!!(rmi.scale&&typeof rmi.scale==='object'),
       clipSizePatch:(edit.clipModelInfo||{}).size||null,
       hasClipSizePatch:!!(edit.clipModelInfo&&(edit.clipModelInfo.size)), stampSize:edit.size||{},
       modelMatrix:null, proxyMatrix:null, helperShape:'box'};
-    updateEntityTransform(entity,[1,1,1],false);
+    if (role === 'blocker') updateEntityTransform(entity,BLOCKING_DEFAULT_SIZE,true);
+    else updateEntityTransform(entity,[1,1,1],false);
     return entity;
   }
 
@@ -464,7 +476,8 @@ var prefabViewport = (function () {
       var entity=entities[i];
       if (!entity.resolveModel || entity.inherit !== inherit) continue;
       if (!entity.model && info.model) entity.model=info.model;
-      updateEntityTransform(entity,info.scale||[1,1,1],!!info.scale);
+      if (!info.scale && entity.role === 'blocker') updateEntityTransform(entity,BLOCKING_DEFAULT_SIZE,true);
+      else updateEntityTransform(entity,info.scale||[1,1,1],!!info.scale);
       if (entity.model) requestMesh(entity.model);
     }
   }
@@ -696,7 +709,8 @@ var prefabViewport = (function () {
     var doc;
     try { doc = JSON.parse(lastSceneText); } catch (e) { setStatus('Could not parse prefab scene'); markDirty(); return; }
     var list = doc && Array.isArray(doc.entities) ? doc.entities : [];
-    for (var i=0;i<list.length;i++) entities.push(entityFromJson(list[i]));
+    var frame = grabFrame(doc);
+    for (var i=0;i<list.length;i++) entities.push(entityFromJson(list[i], frame));
     for (i=0;i<entities.length;i++) {
       if (entities[i].model) requestMesh(entities[i].model);
       if (entities[i].inherit && entities[i].resolveModel) resolveInherit(entities[i].inherit);

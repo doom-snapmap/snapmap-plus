@@ -914,6 +914,22 @@ static void slot_remove_from_selection(sh_iface *self, int id)
 }
 
 /* Batch Delete through DOOM's Delete Selection. Main thread only. */
+/* The Create grab-frame guard's verdict on the last serialize_selection. */
+static int slot_prefab_grab_status(sh_iface *self, sh_prefab_grab_info *out)
+{
+    sh_prefab_grab_result r;
+    int status;
+    (void)self;
+    status = sh_apply_engine_prefab_grab_status(&r);
+    if (out) {
+        out->status = status;
+        out->native_distance = r.native_distance;
+        out->distance = r.distance;
+        out->outside = r.outside;
+    }
+    return status;
+}
+
 static int slot_delete_entities(sh_iface *self, const int *ids, int count, sh_delete_result *out)
 {
     (void)self;
@@ -1194,6 +1210,7 @@ int sh_iface_engine_install(const sig_result *results, size_t n, const uint8_t *
      * while its commit is pending. */
     sh_editor_delete_install(results, n, module_base, g_editor, manipulation_in_progress);
     slots.delete_entities        = slot_delete_entities;      /* +0x350 ext 29 */
+    slots.prefab_grab_status     = slot_prefab_grab_status;   /* +0x358 ext 30 */
 
     slots.enum_decls_of_resclass = slot_enum_decls_of_resclass;/* +0x110 */
 

@@ -38,7 +38,10 @@ SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, navmesh_view) == 0x340);
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, run_on_main) == 0x348);
 /* ext 29: delete entities through the native Delete Selection action. */
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, delete_entities) == 0x350);
-SH_STATIC_ASSERT(sizeof(sh_iface_vtbl) == 0x358);
+/* ext 30: what the Create grab-frame guard did on the last serialize_selection. */
+SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, prefab_grab_status) == 0x358);
+SH_STATIC_ASSERT(sizeof(sh_iface_vtbl) == 0x360);
+SH_STATIC_ASSERT(sizeof(sh_prefab_grab_info) == 16);
 SH_STATIC_ASSERT(sizeof(sh_delete_result) == 40);
 SH_STATIC_ASSERT(offsetof(sh_iface, sub) == 0x58);
 SH_STATIC_ASSERT(sizeof(sh_iface) == 0x60);
@@ -62,6 +65,13 @@ static int stub_delete(sh_iface *self, const int *ids, int count, sh_delete_resu
     return SH_DELETE_DISPATCHED;
 }
 
+static int stub_grab_status(sh_iface *self, sh_prefab_grab_info *out)
+{
+    (void)self;
+    if (out) { out->status = 2; out->native_distance = -2.95e10f; out->distance = 128.0f; out->outside = 9.0f; }
+    return 2;
+}
+
 /* A frontend must never read a slot the backend's vtable does not have. */
 static int check_vtable_size_contract(sh_iface *iface)
 {
@@ -72,6 +82,7 @@ static int check_vtable_size_contract(sh_iface *iface)
     legacy.vtbl = (const sh_iface_vtbl *)(const void *)old_vtbl;
     if (sh_iface_vtbl_bytes(&legacy) != SH_IFACE_LEGACY_VTBL_BYTES) return 0;
     if (SH_IFACE_HAS_SLOT(&legacy, delete_entities)) return 0;
+    if (SH_IFACE_HAS_SLOT(&legacy, prefab_grab_status)) return 0;
     if (!SH_IFACE_HAS_SLOT(&legacy, run_on_main)) return 0;   /* nonzero filler counts as bound */
     if (sh_iface_vtbl_bytes(NULL) != 0) return 0;
     if (sh_iface_vtbl_bytes(iface) != (uint32_t)sizeof(sh_iface_vtbl)) return 0;
@@ -139,6 +150,21 @@ int main(void)
             iface->vtbl->delete_entities(iface, ids, 2, &r) != SH_DELETE_DISPATCHED ||
             r.released != 2) {
             fprintf(stderr, "iface_config_test: delete slot was not bound\n");
+            return 1;
+        }
+    }
+
+    if (SH_IFACE_HAS_SLOT(iface, prefab_grab_status)) {
+        fprintf(stderr, "iface_config_test: unbound grab-status slot reported present\n");
+        return 1;
+    }
+    engine_slots.prefab_grab_status = stub_grab_status;
+    sh_iface_bind_engine_slots(&engine_slots);
+    {
+        sh_prefab_grab_info info;
+        if (!SH_IFACE_HAS_SLOT(iface, prefab_grab_status) ||
+            iface->vtbl->prefab_grab_status(iface, &info) != 2 || info.distance != 128.0f) {
+            fprintf(stderr, "iface_config_test: grab-status slot was not bound\n");
             return 1;
         }
     }

@@ -28,6 +28,8 @@
 #include "perf.h"
 #include "nav_preview.h"
 #include "engine_build.h"
+#include "prefab_grab.h"
+#include <math.h>
 
 /* Editor layout. */
 /* Editor and entity offsets shared with iface_engine; globals use signed code anchors. */
@@ -261,6 +263,13 @@ static volatile LONG        g_we_staged      = 0;
 static volatile LONG        g_we_staged_count = 0;
 /* Most recent kind-2 staging/action result. */
 static volatile LONG        g_last_place_result = 0;
+/* A Load/Place armed the native paste. When the boxes it brings in arrive and
+ * one carries the AI Navigation tick, ask for the same update the View menu
+ * does, once, so the green preview and any refusal show without a menu trip.
+ * A placement nobody drops expires instead of claiming a later arrival. */
+#define NAV_PLACE_WINDOW_MS  120000ULL
+static volatile LONG       g_nav_place_pending;
+static volatile ULONGLONG  g_nav_place_tick;
 static volatile LONG       g_installed   = 0;
 static volatile LONG       g_cmd_registered = 0;
 
@@ -1310,6 +1319,10 @@ static int ae_run_item(int kind, int id, const char *text)
     if (kind == 2) {
         int pr = ae_mkcmd_instantiate(text);
         g_last_place_result = pr;
+        if (pr == AE_PASTE_ARMED) {
+            g_nav_place_tick = GetTickCount64();
+            InterlockedExchange(&g_nav_place_pending, 1);
+        }
         return (pr != AE_PASTE_FAILED);
     }
     return (kind == 1) ? ae_mkcmd_one(text)
@@ -2274,17 +2287,26 @@ static void ae_nav_refresh_cmd(void)
             /* A blocking box has come or gone. Only one carrying a flag can
              * change the navigation, and that costs one read of that box. */
             int arrived = known && present != g_nav_present_hash;
+            int arrived_flagged = arrived && ae_nav_arrived_flagged();
             int changed = !known ||
                           shape != g_nav_shape_hash ||
                           tracked != g_nav_tracked_hash ||
                           (property && ae_nav_edit_matters()) ||
                           (deleted && ae_nav_known_volume_gone()) ||
-                          (arrived && ae_nav_arrived_flagged());
+                          arrived_flagged;
+            /* The first arrival after a prefab placement settles it either way. */
+            int placed = arrived && InterlockedExchange(&g_nav_place_pending, 0) != 0 &&
+                         GetTickCount64() - g_nav_place_tick < NAV_PLACE_WINDOW_MS;
             /* Asked for from the View menu, or owed because the map has only
              * just opened and has no picture yet. Asking by hand always tries
              * again, however many times the map has refused before. */
             int requested = InterlockedExchange(&g_nav_update_requested, 0) != 0;
             int update;
+            if (placed && arrived_flagged && !requested) {
+                requested = 1;
+                InterlockedExchange(&g_nav_update_status, SH_NAV_UPDATE_REQUESTED);
+                backend_log("NAV: a placed prefab brought in AI Navigation boxes; updating the navmesh");
+            }
             if (requested) g_nav_read_tries = 0;
             update = requested ||
                      (!g_nav_have_hash && g_nav_read_tries < NAV_READ_TRIES);
@@ -2381,6 +2403,89 @@ static void ae_apply_tree_detour(void *entity, void *tree)
     if (g_apply_tree_tramp) g_apply_tree_tramp(entity, tree);
 }
 
+/* PrefabGrabFrame(editor, body, frame, grabDistance): VK 0x1412164d0 /
+ * GL 0x141215920. Nineteen bytes of whole, position-independent prologue:
+ * five pushes, an LEA and a SUB. The guard acts only on the thread that armed
+ * it in slot_serialize_selection, so the native Ctrl+C copy and the
+ * selection-grab caller keep the engine's own behaviour. */
+#define AE_GRAB_FRAME_STOLEN   19
+#define ED_VIEW_ORIGIN_OFF     0x170        /* editor+0x170: view origin the helper clips from */
+#define ED_VIEW_ANGLES_OFF     0x17c        /* editor+0x17c: pitch, yaw (+0x180, cameraYaw), roll */
+#define BODY_ORIGIN_OFF        0x288
+#define BODY_AXIS_OFF          0x294
+#define BODY_BOUNDS_OFF        0x2c4        /* six floats: min xyz, max xyz */
+#define BODY_SIZE_X_OFF        0x400        /* centred-box sizes when decl+0x3ce & 8 */
+#define BODY_SIZE_Y_OFF        0x404
+#define BODY_SIZE_Z_OFF        0x434
+#define DECL_CENTRED_BOX_OFF   0x3ce
+#define DECL_CENTRED_BOX_BIT   0x08
+
+typedef void (*ae_grab_frame_fn)(void *editor, void *body, float *frame, float *distance);
+static ae_grab_frame_fn g_grab_frame_tramp;
+static volatile DWORD g_grab_armed_thread;
+static sh_prefab_grab_result g_grab_result;
+
+static int ae_grab_read_box(const uint8_t *body, sh_prefab_grab_box *box)
+{
+    __try {
+        const uint8_t *decl = *(const uint8_t *const *)body;
+        memcpy(box->origin, body + BODY_ORIGIN_OFF, sizeof box->origin);
+        memcpy(box->axis, body + BODY_AXIS_OFF, sizeof box->axis);
+        if (decl && (decl[DECL_CENTRED_BOX_OFF] & DECL_CENTRED_BOX_BIT)) {
+            float size[3];
+            size[0] = *(const float *)(body + BODY_SIZE_X_OFF);
+            size[1] = *(const float *)(body + BODY_SIZE_Y_OFF);
+            size[2] = *(const float *)(body + BODY_SIZE_Z_OFF);
+            sh_prefab_grab_centred_box(size, box->bmin, box->bmax);
+        } else {
+            memcpy(box->bmin, body + BODY_BOUNDS_OFF, sizeof box->bmin);
+            memcpy(box->bmax, body + BODY_BOUNDS_OFF + 12, sizeof box->bmax);
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+    return 1;
+}
+
+static void ae_grab_frame_detour(void *editor, void *body, float *frame, float *distance)
+{
+    sh_prefab_grab_box box;
+    sh_prefab_grab_result r;
+    float view[3] = { NAN, NAN, NAN }, angles[3] = { NAN, NAN, NAN }, forward[3];
+    int have_box;
+    char line[400];
+
+    if (g_grab_frame_tramp) g_grab_frame_tramp(editor, body, frame, distance);
+    if (!g_grab_frame_tramp || g_grab_armed_thread != GetCurrentThreadId() || !frame || !distance) return;
+    __try {
+        memcpy(view, (const uint8_t *)editor + ED_VIEW_ORIGIN_OFF, sizeof view);
+        memcpy(angles, (const uint8_t *)editor + ED_VIEW_ANGLES_OFF, sizeof angles);
+    } __except (EXCEPTION_EXECUTE_HANDLER) { view[0] = NAN; }
+    sh_prefab_grab_forward(angles, forward);
+    have_box = body && ae_grab_read_box((const uint8_t *)body, &box);
+    __try {
+        sh_prefab_grab_guard(view, forward, have_box ? &box : NULL, frame, distance, &r);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        memset(&r, 0, sizeof r);
+        r.status = SH_PREFAB_GRAB_REFUSED;
+    }
+    g_grab_result = r;
+    if (r.status == SH_PREFAB_GRAB_OK) return;
+    _snprintf_s(line, sizeof line, _TRUNCATE,
+        "PREFAB: grab frame %s -- native grabDistance=%g point=(%g %g %g) outside hovered box by %g; "
+        "%s grabDistance=%g point=(%g %g %g)",
+        r.status == SH_PREFAB_GRAB_CORRECTED ? "corrected" : "refused",
+        (double)r.native_distance, (double)r.native_point[0], (double)r.native_point[1],
+        (double)r.native_point[2], (double)r.outside,
+        r.status == SH_PREFAB_GRAB_CORRECTED ? "now" : "no finite frame; kept",
+        (double)r.distance, (double)r.point[0], (double)r.point[1], (double)r.point[2]);
+    backend_log(line);
+}
+
+int sh_apply_engine_prefab_grab_status(sh_prefab_grab_result *out)
+{
+    if (out) *out = g_grab_result;
+    return g_grab_result.status;
+}
+
 void sh_apply_engine_nav_decl_rewritten(int id)
 {
     ae_nav_mark_dirty(id);
@@ -2421,6 +2526,11 @@ void sh_apply_engine_install_edit_hook(const sig_result *results, size_t n)
         AE_APPLY_TREE_STOLEN,
         "NAV: property hook SKIPPED -- a volume's navigation tick will not be seen "
         "until it is also moved");
+    g_grab_frame_tramp = (ae_grab_frame_fn)ae_detour_named(
+        results, n, "PrefabGrabFrame", (void *)ae_grab_frame_detour,
+        AE_GRAB_FRAME_STOLEN,
+        "PREFAB: grab-frame guard SKIPPED -- Create checks the saved file instead and refuses "
+        "a missed grab line");
 }
 
 void sh_apply_engine_nav_request_update(void)
@@ -2822,7 +2932,12 @@ static int slot_serialize_selection(sh_iface *self, char *out_json, int cap)
     __try {
         g_prefab_ctor(prefab); prefab_ctored = 1;
         int populateStatus = 0;
+        /* The grab-frame guard acts only inside this populate, on this thread. */
+        memset(&g_grab_result, 0, sizeof g_grab_result);
+        g_grab_armed_thread = GetCurrentThreadId();
         char populated = g_prefab_populate(prefab, (void *)ed, &populateStatus);
+        g_grab_armed_thread = 0;
+        if (g_grab_result.status == SH_PREFAB_GRAB_REFUSED) populated = 0;
         if (populated & 0xff) {
             g_node_ctor(node7, SER_TAG_KIND);   node7_ctored = 1;
             g_node_ctor(outTree, SER_TREE_KIND); tree_ctored = 1;
@@ -2838,6 +2953,7 @@ static int slot_serialize_selection(sh_iface *self, char *out_json, int cap)
             if (ok & 0xff) { g_render(outTree, jsStr); written = ae_read_idstr(jsStr, out_json, cap); }
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
+        g_grab_armed_thread = 0;
         written = 0;
     }
     if (js_ctored)     { __try { g_idstr_dtor(jsStr); }  __except (EXCEPTION_EXECUTE_HANDLER) {} }

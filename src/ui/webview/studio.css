@@ -420,6 +420,7 @@
   .pc-preview-legend span { display: inline-flex; align-items: center; gap: 3px; white-space: nowrap; }
   .pc-legend-dot { width: 6px; height: 6px; border-radius: 50%; background: #a3abb5; box-shadow: 0 0 0 1px rgba(0,0,0,.18); }
   .pc-legend-dot.blocker { background: #5794c7; }
+  .pc-legend-dot.navigation { background: #5cb86b; }
   .pc-legend-dot.interactable { background: #dba849; }
   .pc-legend-dot.logic { background: linear-gradient(90deg, #9c78d1 0 34%, #db6e4f 34% 67%, #47adca 67%); }
   .pc-legend-dot.helper { background: rgba(56,184,194,.18); border: 1px solid #38b8c2; box-shadow: none; }

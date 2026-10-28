@@ -8,7 +8,7 @@ param(
                            "cvars.c", "commands.c", "clipboard.c",
                            "config.c", "config_json.c",
                            "entity.c", "typeinfo.c", "preview.c", "megapreview.c", "imgpreview.c", "prefabpreview.c", "soundpreview.c", "bcn.c", "patch.c", "x64_len.c", "algo.c", "target_any.c", "wiring_cleandirect.c", "swf_textedit.c", "ui_bridge.c",
-                           "iface_engine.c", "editor_delete.c", "apply_engine.c", "../common/snapmap_plus_iface.c",
+                           "iface_engine.c", "editor_delete.c", "apply_engine.c", "prefab_grab.c", "../common/snapmap_plus_iface.c",
                            "../common/log_rotate.c",
                            # The backend owns the SnapStack command handlers and stores.
                            "snapstack.c", "json_patch.c",

@@ -2,7 +2,7 @@
  * interface object and callbacks; both DLLs must build against this header.
  * The 0x60-byte object has a vtable at +0 and subobject pointer at +0x58.
  * The original 77-slot prefix ends at +0x260; append-only extensions end
- * at +0x350, making the current vtable 0x358 bytes. The backend records that
+ * at +0x358, making the current vtable 0x360 bytes. The backend records that
  * size in the object (see sh_iface_vtbl_bytes); check it before calling a
  * slot at or past +0x350.
  * Engine layouts remain private to backend implementations. Reserved cells
@@ -292,6 +292,18 @@ typedef struct sh_delete_result {
 typedef int (*sh_delete_entities_fn)(struct sh_iface *self, const int *ids, int count,
                                      sh_delete_result *out);                  /* +0x350 (ext 29) */
 
+/* What the grab-frame guard did during the most recent serialize_selection.
+ * status is SH_PREFAB_GRAB_* from backend/prefab_grab.h: 0 unchecked (no
+ * guard), 1 the native frame hit, 2 corrected from the hovered box, 3 no
+ * finite frame (serialize_selection then returned 0). */
+typedef struct sh_prefab_grab_info {
+    int   status;
+    float native_distance;  /* grabDistance the engine computed */
+    float distance;         /* grabDistance written to the prefab */
+    float outside;          /* native grab point's distance outside the hovered box, <0 unknown */
+} sh_prefab_grab_info;
+typedef int (*sh_prefab_grab_status_fn)(struct sh_iface *self, sh_prefab_grab_info *out); /* +0x358 (ext 30) */
+
 typedef int (*sh_resolve_prefab_defaults_fn)(struct sh_iface *self, const char *inherit_name,
                                              char *out_model, int out_capacity,
                                              float *out_scale, int out_scale_count);
@@ -500,6 +512,7 @@ typedef struct sh_iface_vtbl {
     sh_navmesh_view_fn         navmesh_view;         /* +0x340 (ext 27) the navigation view */
     sh_run_on_main_fn          run_on_main;          /* +0x348 (ext 28) main-thread call */
     sh_delete_entities_fn      delete_entities;      /* +0x350 (ext 29) native batch delete */
+    sh_prefab_grab_status_fn   prefab_grab_status;   /* +0x358 (ext 30) Create grab-frame guard result */
 } sh_iface_vtbl;
 
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, config_get_json) == 0x2B0);
@@ -523,7 +536,9 @@ SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, rawmap_load_now) == 0x338);
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, navmesh_view) == 0x340);
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, run_on_main) == 0x348);
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, delete_entities) == 0x350);
-SH_STATIC_ASSERT(sizeof(sh_iface_vtbl) == 0x358);
+SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, prefab_grab_status) == 0x358);
+SH_STATIC_ASSERT(sizeof(sh_iface_vtbl) == 0x360);
+SH_STATIC_ASSERT(sizeof(sh_prefab_grab_info) == 16);
 SH_STATIC_ASSERT(sizeof(sh_delete_result) == 40);
 
 /* Fixed object layout: vtable +0, reserved bytes +0x08..+0x57, subobject
@@ -686,6 +701,7 @@ typedef struct sh_iface_engine_slots {
     sh_navmesh_view_fn         navmesh_view;                /* +0x340 (ext 27) */
     sh_run_on_main_fn          run_on_main;                 /* +0x348 (ext 28) */
     sh_delete_entities_fn      delete_entities;             /* +0x350 (ext 29) */
+    sh_prefab_grab_status_fn   prefab_grab_status;          /* +0x358 (ext 30) */
 } sh_iface_engine_slots;
 
 void sh_iface_bind_engine_slots(const sh_iface_engine_slots *slots);

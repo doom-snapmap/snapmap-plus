@@ -247,6 +247,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
           <div class="pc-preview-legend" aria-hidden="true">
             <span><i class="pc-legend-dot"></i>Solid</span>
             <span><i class="pc-legend-dot blocker"></i>Blocking</span>
+            <span><i class="pc-legend-dot navigation"></i>AI Navigation</span>
             <span><i class="pc-legend-dot interactable"></i>Interactable</span>
             <span><i class="pc-legend-dot logic"></i>Logic / I/O</span>
             <span><i class="pc-legend-dot helper"></i>Triggers</span>
@@ -2788,9 +2789,12 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       var createdMeta = pendingCreateMeta; pendingCreateMeta = null;
       if (d.result === 1 && createdMeta && createdMeta.name === d.name)
         post({cmd:'savePrefabMeta', name: d.name, folder: '', body: createdMeta.body});
-      if (d.result === 1) toast('Created "' + d.name + '"', 'ok');
+      if (d.result === 1 && d.grab === 'corrected')
+        toast('Created "' + d.name + '" (grab point corrected: the view centre missed the hovered entity, so it is anchored on that entity)', 'ok');
+      else if (d.result === 1) toast('Created "' + d.name + '"', 'ok');
       else if (d.result === 0) toast('Nothing selected in the editor -- select entities first', 'warn');
       else if (d.result === 2) toast('Hover over one of the selected entities in the 3D view, then try again', 'warn');
+      else if (d.result === 3) toast('Could not anchor "' + d.name + '" -- point the view centre at the hovered entity and try again', 'warn');
       else toast('Could not create "' + d.name + '" (see log)', 'err');
     } else if (d.kind === 'pushStackResult') {
       if (d.result === 1) toast('Pushed ' + d.count + ' onto stack 0 -- try `sh popsel`/`sh bss`/etc. in the console', 'ok');
@@ -2957,7 +2961,9 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     document.getElementById('pcDesc').value = mDesc;
     document.getElementById('pcTags').value = mTags.join(', ');
     metaBaseline = mDesc.trim() + '\u0000' + parseTagsInput(mTags.join(',')).join(',');
-    document.getElementById('pcEntityCount').textContent = d.count + (d.count === 1 ? ' entity' : ' entities');
+    var navBoxes = prefabTransform.countNavigationBoxes(d.scene || '');
+    document.getElementById('pcEntityCount').textContent = d.count + (d.count === 1 ? ' entity' : ' entities') +
+      (navBoxes ? ', ' + navBoxes + (navBoxes === 1 ? ' AI Navigation box' : ' AI Navigation boxes') : '');
     prefabViewport.load(d.scene || '');
   }
 

@@ -44,6 +44,7 @@ typedef struct site {
 static const site SITES[] = {
     { "apply_engine.c",       "EditorCommitEdit",           SITE_SIG, 0, 16, REPLAYS, 0 },
     { "apply_engine.c",       "GridApplyEntityTree",        SITE_SIG, 0, 18, REPLAYS, 0 },
+    { "apply_engine.c",       "PrefabGrabFrame",            SITE_SIG, 0, 19, REPLAYS, 0 },
     { "commands.c",           "RenderLogStub",              SITE_SIG, 0, 14, STUB_PADDING, 6 },
     { "commands.c",           "AddCommand",                 SITE_SIG, 0, 15, REPLAYS, 0 },
     { "editor_frame.c",       "EditorFrame",                SITE_SIG, 0, 25, REPLAYS, 0 },

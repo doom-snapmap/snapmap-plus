@@ -30,6 +30,7 @@
 #include "crash_pending.h"
 #include "log_rotate.h"     /* the UI log is append-only too; bound it like the backend's */
 #include "host_image.h"     /* sh_host_renderer_name -- which renderer the player is actually running */
+#include "prefab_grab.h"    /* SH_PREFAB_GRAB_*, and the saved-file check when the backend has no guard */
 #include "game_identity.h"  /* the backend-provided game identity (startup argv) */
 #include "../sh_entity_desc.h"/* generated entity descriptions */
 #include "../sh_event_catalog.h"/* generated event names and argument types */
@@ -100,7 +101,8 @@ static volatile bool g_cam_read_published = false;  /* force one readout after e
 
 static volatile bool g_pending_create_prefab = false;
 static std::string   g_create_prefab_name;
-static int           g_create_result = 0;        /* 1 ok; 0 empty editor selection; 2 not hovering an entity in selection; -1 resolve/serialize/write failure */
+static int           g_create_result = 0;        /* 1 ok; 0 empty editor selection; 2 not hovering an entity in selection; 3 no usable grab frame; -1 resolve/serialize/write failure */
+static bool          g_create_grab_corrected = false; /* Create rebuilt a missed grab frame from the hovered box */
 static int           g_last_selcount = -1;       /* last broadcast editor-selection count (Create-button gating) */
 
 static volatile bool g_pending_delete_prefab = false;
@@ -772,12 +774,28 @@ static int poc_serialize_selection_raw(char *buf, int cap)
     __except (EXCEPTION_EXECUTE_HANDLER) { n = 0; }
     return n;
 }
+/* The backend's grab-frame guard verdict on the serialize just made, or
+ * UNCHECKED when this backend has no guard. */
+static int poc_prefab_grab_status(sh_prefab_grab_info *info)
+{
+    memset(info, 0, sizeof *info);
+    info->outside = -1.0f;
+    if (!SH_IFACE_HAS_SLOT(g_iface, prefab_grab_status)) return SH_PREFAB_GRAB_UNCHECKED;
+    __try { return g_iface->vtbl->prefab_grab_status(g_iface, info); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return SH_PREFAB_GRAB_UNCHECKED; }
+}
 /* Save the current selection as prefab JSON. The engine requires the hovered
  * entity to be selected; report that refusal separately from an empty selection.
- * Results: 1 = saved, 0 = empty, 2 = hover refused, -1 = resolve/serialize/write failure. */
+ * The engine anchors a prefab on the view-centre line, not the cursor; when
+ * that line misses the hovered entity the backend rebuilds the frame from it
+ * (reported as corrected). Without that guard, a file whose frame missed is
+ * refused rather than written with collapsed positions.
+ * Results: 1 = saved, 0 = empty, 2 = hover refused, 3 = no usable grab frame,
+ * -1 = resolve/serialize/write failure. */
 static void poc_apply_create_prefab()
 {
     g_create_result = -1;
+    g_create_grab_corrected = false;
     { char l[300]; _snprintf_s(l, sizeof l, _TRUNCATE, "create-prefab: START name='%s'", g_create_prefab_name.c_str()); poc_log(l); }
     if (!g_iface || !g_iface->vtbl || !g_iface->vtbl->resolve_prefab_path || !g_iface->vtbl->serialize_selection || g_create_prefab_name.empty()) {
         poc_log("create-prefab: ABORT (iface/slot/name missing)");
@@ -802,7 +820,35 @@ static void poc_apply_create_prefab()
     static char buf[4 * 1024 * 1024];
     int n = poc_serialize_selection_raw(buf, (int)sizeof buf);
     poc_logf("create-prefab: serialize_selection returned n=%lu", (unsigned long)n);
-    if (n <= 0) { g_create_result = 0; return; }
+    sh_prefab_grab_info grab;
+    int grab_status = poc_prefab_grab_status(&grab);
+    if (n <= 0) {
+        if (grab_status == SH_PREFAB_GRAB_REFUSED) {
+            poc_log("create-prefab: ABORT (no finite grab frame could be built from the hovered entity)");
+            g_create_result = 3;
+        } else g_create_result = 0;
+        return;
+    }
+    if (grab_status == SH_PREFAB_GRAB_CORRECTED) {
+        char l[256];
+        _snprintf_s(l, sizeof l, _TRUNCATE,
+                    "create-prefab: grab point corrected -- the view-centre line missed the hovered entity "
+                    "(native grabDistance=%g, %g units outside it); saved grabDistance=%g from its centre",
+                    (double)grab.native_distance, (double)grab.outside, (double)grab.distance);
+        poc_log(l);
+        g_create_grab_corrected = true;
+    } else if (grab_status == SH_PREFAB_GRAB_UNCHECKED) {
+        double d = 0.0;
+        if (sh_prefab_grab_json_check(buf, (size_t)n, &d) == 0) {
+            char l[200];
+            _snprintf_s(l, sizeof l, _TRUNCATE,
+                        "create-prefab: ABORT (grabDistance=%g: the view-centre line missed the hovered entity and "
+                        "this backend cannot rebuild the frame)", d);
+            poc_log(l);
+            g_create_result = 3;
+            return;
+        }
+    }
     FILE *fp = nullptr;
     if (fopen_s(&fp, path, "wb") != 0 || !fp) { poc_log("create-prefab: ABORT (fopen failed)"); return; }
     fwrite(buf, 1, (size_t)n, fp);
@@ -2899,7 +2945,9 @@ static void poc_think_loop()
                                                      : L"{\"kind\":\"selectRefused\",\"reason\":\"hold\"}");
         if (did_create_prefab) {
             std::wstring m = L"{\"kind\":\"createPrefabResult\",\"result\":"; m += std::to_wstring(g_create_result);
-            m += L",\"name\":\""; m += sh_webview_json::escape_wide(g_create_prefab_name.c_str()); m += L"\"}";
+            m += L",\"name\":\""; m += sh_webview_json::escape_wide(g_create_prefab_name.c_str()); m += L"\"";
+            if (g_create_result == 1 && g_create_grab_corrected) m += L",\"grab\":\"corrected\"";
+            m += L"}";
             poc_post_json(m.c_str());
             if (g_create_result == 1) poc_send_prefabs();
         }

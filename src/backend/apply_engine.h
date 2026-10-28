@@ -7,6 +7,7 @@
 #include "signatures.h"
 #include "snapmap_plus_iface.h"
 #include "nav_regions.h"
+#include "prefab_grab.h"
 
 /* Resolve dependencies once after signatures and typeinfo bind. cmdsys may be
  * null, disabling deferred transport. Return 1 for a complete binding; each
@@ -49,6 +50,11 @@ int sh_apply_engine_entity_json(int id, char *out, int cap, void *ctx);
  * value the box was created with, so only this sees one the user has moved. */
 int sh_apply_engine_entity_transform(int id, float origin[3], float m[3][3],
                                      float size[3], int *instance, void *ctx);
+
+/* What the Create grab-frame guard (PrefabGrabFrame detour, armed only inside
+ * serialize_selection) did on the last call: SH_PREFAB_GRAB_*. UNCHECKED when
+ * the detour is not installed. */
+int sh_apply_engine_prefab_grab_status(sh_prefab_grab_result *out);
 
 /* Detour CommitEdit, the one call every undoable editor action ends in, so
  * navigation geometry is read when the map changes and at no other time. */

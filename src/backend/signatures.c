@@ -835,7 +835,18 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "40 55 56 57 41 54 41 55 41 56 41 57 48 8D AC 24 40 F7 FF FF "
       "48 81 EC C0 09 00 00 48 C7 85 10 01 00 00 FE FF FF FF 48 89 9C 24 18 0A 00 00",
       0x11ADB30u, 0x11ACD30u },
-    { "MemLocalGet",        /* idMemLocal *(void). Resolve the accessor rather than computing the
+    { "PrefabGrabFrame",    /* void(editor,body,frame[12],grabDistance*). PrefabPopulate's grab
+                             * frame: clips the view-centre line (editor+0x170, angles +0x17C)
+                             * against the hovered body's box (+0x2C4 bounds, or +-0.5 x
+                             * +0x400/+0x404/+0x434 when decl+0x3CE & 8), keeps the midpoint
+                             * even on a miss, and copies the body axis +0x294. Callers:
+                             * PrefabPopulate and the selection-grab setup. Re-find via the call
+                             * before PrefabPopulate's "prefab+0x24" store. */
+      "40 55 53 56 57 41 56 48 8D 6C 24 C9 48 81 EC D0 00 00 00 0F 29 B4 24 C0 00 00 00 "
+      "48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 45 17 F2 0F 10 81 70 01 00 00 48 8B FA "
+      "8B 81 78 01 00 00 48 8D 55 AF 48 81 C1 7C 01 00 00",
+      0x12164D0u, 0x1215920u },
+    { "MemLocalGet",       /* idMemLocal *(void). Resolve the accessor rather than computing the
                              * singleton address. Many magic-static getters resemble this;
                              * frame size, MOV R8D,4, and GS TLS load distinguish the pattern. */
       "40 53 48 83 EC 30 48 C7 44 24 20 FE FF FF FF 8B 0D ?? ?? ?? ?? "
