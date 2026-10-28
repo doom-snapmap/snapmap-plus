@@ -1165,5 +1165,16 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "F3 0F 10 15 ?? ?? ?? ?? 41 83 CC FF 44 8B B1 58 07 00 00 0F 28 C2 F3 41 0F 59 01", 0x11F45CCu, 0x11F37ECu },
     { "ModulePickFocus", /* Module Mode focus ray: MOVSS xmm0,[snapEdit_modulePickingDistance]. */
       "F3 0F 10 05 ?? ?? ?? ?? 48 8B 86 C8 04 02 00 F3 0F 10 35", 0x1257A58u, 0x1256F58u },
+    /* Grid Room Size sub-editor refresh after an outside size change
+     * (snaphak-re editor-fixes-13954591 R-016). Unique on both build 13954591
+     * executables at the recorded RVAs. */
+    { "GridPropertyDirtyRefresh", /* Property row: context lists +0x58 vs +0x70 (context vt+0x70) set or clear the dirty byte +0xc8 and relabel the row. */
+      "40 53 48 83 EC 20 48 8B D9 48 8B 89 D8 00 00 00 48 8B 01 FF 50 70 0F B6 8B C8 00 00 00 84 C9 74 1D 84 C0 74 30 84 C9 74 08 48 8B CB E8 ?? ?? ?? ?? C6 83 C8 00 00 00 00 48 83 C4 20 5B C3 84 C0 75 13 84 C9 75 08 48 8B CB E8 ?? ?? ?? ?? C6 83 C8 00 00 00 01", 0x12A8E30u, 0x12A8510u },
+    { "GridMenuOf", /* Widget -> root editor menu (parent chain +0x18/+0xb0); its +0xa10 is idMenuManager_ContextList_Vec. */
+      "48 83 EC 28 48 8B C1 48 8B 49 18 48 85 C9 75 0C 48 8B 48 20 E8 ?? ?? ?? ?? 48 8B C8 48 8B 81 B0 00 00 00 48 85 C0 74 17 0F 1F 84 00 00 00 00 00 48 8B C8 48 8B 80 B0 00 00 00 48 85 C0 75 F1 48 83 C4 28 E9", 0x1281B00u, 0x1281150u },
+    { "MenuScreenByIndex", /* Menu manager screen lookup: +0x350[index] into the +0x4d0/+0x4d8 list (the Vec screen is index 10). */
+      "4C 8B C1 83 FA FF 75 03 33 C0 C3 48 63 C2 48 63 8C 81 50 03 00 00 41 39 88 D8 04 00 00 7E E9 49 8B 80 D0 04 00 00 48 8B 04 C8 C3", 0xF8F9C0u, 0xF8EEF0u },
+    { "ContextListRedraw", /* Context-list screen: redraws its six item rows (name, value text, dirty marker) from the bound context +0x1b8. */
+      "40 55 41 54 41 55 41 56 41 57 48 8D AC 24 10 7E FF FF B8 F0 82 00 00 E8 ?? ?? ?? ?? 48 2B E0 48 C7 44 24 70 FE FF FF FF 48 89 9C 24 28 83 00 00 48 89 B4 24 30 83 00 00 48 89 BC 24 38 83 00 00 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 85 E0 81 00 00 48 8B D9", 0x127B000u, 0x127A5B0u },
     { NULL, NULL, 0 }   /* terminator */
 };

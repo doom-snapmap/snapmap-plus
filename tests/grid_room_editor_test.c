@@ -108,6 +108,49 @@ static void native_delete_revert(unsigned char *panel)
 {native_context_cancel();native_accept();grid_changed(panel,widget,1);}
 static void native_dialog_yes(unsigned char *panel)
 {memcpy(widget+0x100,widget+0xe8,12);native_context_cancel();native_accept();grid_changed(panel,widget,-100);}
+/* The open sub-editor is screen 10 of the menu's Vec context-list manager
+ * (menu +0xa10); native code redraws it, and refreshes the row's dirty marker
+ * (+0xc8: draft +0x58 differs from +0x70), only after a sub-editor key. */
+static unsigned char menu[0xa20],manager[0x10],screen[0x200];
+static int redraws,dirty_refreshes,resolve_ok=1;static float drawn[3];
+static unsigned char *expected_owner;
+static void dirty_refresh(void *v)
+{int i,dirty=0;assert(v==widget);++dirty_refreshes;
+ for(i=0;i<3;++i)if(draft_value(i)!=entry(built,i))dirty=1;widget[0xc8]=(unsigned char)dirty;}
+static void *menu_of(void *owner){assert(owner==expected_owner);return menu;}
+static void *screen_by_index(void *m,int index){assert(m==manager&&index==10);return screen;}
+static unsigned char widget_resolve(void *w){assert(w==screen);return (unsigned char)resolve_ok;}
+static void list_redraw(void *w)
+{int i;assert(w==screen);++redraws;for(i=0;i<3;++i)drawn[i]=draft_value(i);}
+static void redraw_checks(unsigned char *panel)
+{
+    unsigned char *ctx=panel+0x280;int before=redraws;
+    /* The sub-editor drew a stale Z 2900 and lit the row's dirty marker. */
+    rooms[0].xyz[2]=2800;*(float*)(draft+2*0x38+0x30)=2900;drawn[2]=2900;widget[0xc8]=1;
+    native_accept();grid_changed(panel,widget,-1);
+    assert(rooms[0].xyz[2]==2800&&redraws==before+1&&drawn[0]==5120&&drawn[1]==5120&&drawn[2]==2800);
+    assert(widget[0xc8]==0);
+    /* Closed sub-editor: the row marker still refreshes, nothing is drawn. */
+    widget[0x29]=0;rooms[0].xyz[2]=2700;widget[0xc8]=1;before=redraws;
+    {int refreshes=dirty_refreshes;native_accept();grid_changed(panel,widget,-1);
+     assert(redraws==before&&drawn[2]==2800&&widget[0xc8]==0&&dirty_refreshes==refreshes+1);}
+    widget[0x29]=1;
+    /* A screen bound to another context, or one whose sprite does not resolve,
+     * is not drawn. */
+    *(unsigned char**)(screen+0x1e8)=panel;rooms[0].xyz[2]=2600;
+    native_accept();grid_changed(panel,widget,-1);assert(redraws==before&&rooms[0].xyz[2]==2600);
+    *(unsigned char**)(screen+0x1e8)=ctx;resolve_ok=0;rooms[0].xyz[2]=2500;
+    native_accept();grid_changed(panel,widget,-1);assert(redraws==before&&rooms[0].xyz[2]==2500);
+    resolve_ok=1;*(unsigned char**)(menu+0xa10)=NULL;rooms[0].xyz[2]=2400;
+    native_accept();grid_changed(panel,widget,-1);assert(redraws==before);
+    *(unsigned char**)(menu+0xa10)=manager;
+    /* A user step from the redrawn sub-editor applies and redraws its value. */
+    *(float*)(draft+2*0x38+0x30)=2401;native_accept();grid_changed(panel,widget,1);
+    assert(rooms[0].xyz[2]==2401&&redraws==before);
+    /* Back to the C4 sequence's state (5120 x 5120 x 3000, as the console set it). */
+    rooms[0].xyz[2]=3000;native_accept();grid_changed(panel,widget,-1);
+    assert(redraws==before+1&&drawn[2]==3000&&widget[0xc8]==0);
+}
 static void sub_editor_draft_checks(unsigned char *panel)
 {
     unsigned char *ctx=panel+0x280;unsigned before;int i,saved_rows=rows;
@@ -116,6 +159,11 @@ static void sub_editor_draft_checks(unsigned char *panel)
     *(void**)(ctx+0x70)=built;*(int*)(ctx+0x78)=3;*(int*)(ctx+0x7c)=3;
     *(void**)(ctx+0x88)=opened_draft;*(int*)(ctx+0x90)=3;*(int*)(ctx+0x94)=4;
     *(void**)(widget+0xd8)=ctx;
+    expected_owner=panel;*(void**)(widget+0x48)=panel;widget[0x29]=1;
+    *(unsigned char**)(menu+0xa10)=manager;
+    *(unsigned char**)(screen+0x1b8)=ctx;*(unsigned char**)(screen+0x1e8)=ctx;
+    g_dirty_refresh=dirty_refresh;g_menu_of=menu_of;g_screen_by_index=screen_by_index;
+    g_widget_resolve=widget_resolve;g_list_redraw=list_redraw;
     sh_grid_default(SH_GRID_MODERN,&rooms[0]);
     grid_populate(panel,0,rooms,NULL,NULL);
     for(i=0;i<3;++i){*(float*)(draft+i*0x38+0x30)=(float)rooms[0].xyz[i];
@@ -133,7 +181,12 @@ static void sub_editor_draft_checks(unsigned char *panel)
     for(i=0;i<3;++i){shown[i]=(float)rooms[0].xyz[i];
         assert(draft_value(i)==shown[i]);
         assert(*(float*)(widget+0x100+4*i)==shown[i]&&*(float*)(widget+0xe8+4*i)==shown[i]);
-        assert(*(float*)(widget+0xf4+4*i)==shown[i]&&entry(built,i)==shown[i]&&entry(opened_draft,i)==shown[i]);}
+        assert(*(float*)(widget+0xf4+4*i)==shown[i]&&entry(built,i)==shown[i]&&entry(opened_draft,i)==shown[i]);
+        assert(drawn[i]==shown[i]);}
+    /* The open sub-editor was redrawn with the console size, and the row's
+     * dirty marker cleared, by that guard press. */
+    assert(redraws==1&&widget[0xc8]==0);
+    redraw_checks(panel);before=changes;
     /* After the guard, neither cancel route undoes the console resize. */
     native_delete_revert(panel);
     assert(changes==before&&rooms[0].xyz[2]==3000&&draft_value(2)==3000);
@@ -161,6 +214,8 @@ static void sub_editor_draft_checks(unsigned char *panel)
     placement_max=700;*(float*)(draft+1*0x38+0x30)=10000;native_accept();grid_changed(panel,widget,1);
     assert(rooms[0].xyz[1]==700&&draft_value(1)==700&&*(float*)(widget+0xe8+4)==5120);
     assert(*(float*)(widget+0xf4+4)==5120&&entry(built,1)==5120&&entry(opened_draft,1)==5120);
+    /* The limited value is drawn, and the row stays dirty (it is a user edit). */
+    assert(drawn[1]==700&&widget[0xc8]==1);
     placement_max=0;
     /* Either cancel route then returns to the size before the user's edits:
      * the outside size the guard made the baseline (5120 x 5120 x 2500). */
@@ -182,6 +237,8 @@ static void sub_editor_draft_checks(unsigned char *panel)
     *(void**)(widget+0xd8)=NULL;grid_changed(panel,widget,1);
     *(void**)(ctx+0x58)=NULL;*(int*)(ctx+0x60)=0;*(int*)(ctx+0x64)=0;
     memset(ctx+0x70,0,0x28);
+    g_dirty_refresh=NULL;g_menu_of=NULL;g_screen_by_index=NULL;g_widget_resolve=NULL;g_list_redraw=NULL;
+    widget[0x29]=0;*(void**)(widget+0x48)=NULL;
     rows=saved_rows; /* the later row-count checks count only the main sequence */
 }
 int main(void)

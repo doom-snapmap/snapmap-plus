@@ -24,6 +24,11 @@ typedef unsigned char (*pressed_fn)(void *,int);
 typedef unsigned char (*blocked_fn)(void *,unsigned);
 typedef void (*set_state_fn)(void *,int);
 typedef void (*action_help_fn)(void *,int,int);
+typedef void (*dirty_refresh_fn)(void *);
+typedef void *(*menu_of_fn)(void *);
+typedef void *(*screen_by_index_fn)(void *,int);
+typedef void (*list_redraw_fn)(void *);
+typedef unsigned char (*widget_resolve_fn)(void *);
 
 static populate_fn g_populate;
 static change_fn g_change;
@@ -40,6 +45,13 @@ static blocked_fn g_blocked;
 static set_state_fn g_set_state;
 static action_help_fn g_action_help;
 static sh_native_property_handler g_property_handler;
+/* Optional: redraw an open sub-editor after the guard. Unbound, the guard still
+ * syncs every store and a reopen shows the current size. */
+static dirty_refresh_fn g_dirty_refresh;
+static menu_of_fn g_menu_of;
+static screen_by_index_fn g_screen_by_index;
+static list_redraw_fn g_list_redraw;
+static widget_resolve_fn g_widget_resolve;
 
 static void grid_add_vec(void *panel,int id,const char *name,const uint32_t *label,const uint32_t *help,
     unsigned char enabled,const float *value,float min,float max,float step,float big_step,
@@ -156,20 +168,43 @@ static int show_entries(unsigned char *list,const float dims[3])
     for(i=0;i<3;++i)*(float*)(entries+i*0x38+0x30)=dims[i];
     return 1;
 }
+/* The open sub-editor is the editor menu's idMenuManager_ContextList_Vec
+ * (menu +0xa10) screen 10, bound to this context at +0x1b8 and +0x1e8 when the
+ * row highlights (inspector vt+0x48). It draws its X/Y/Z text, and each
+ * entry's dirty marker, only when native code redraws it after a key, so a
+ * draft written from here stays undrawn until then. The row's own dirty
+ * marker (+0xc8, set while the draft differs from +0x70) is likewise only
+ * recomputed by the native refresh after a sub-editor key. Run both now, as
+ * the native key path does, once the stores hold the shown size. */
+static void show_redraw(unsigned char *inspector,unsigned char *ctx)
+{
+    unsigned char *owner,*menu,*manager,*screen;
+    g_dirty_refresh(inspector);
+    if(!inspector[0x29])return; /* the sub-editor is not open */
+    owner=*(unsigned char**)(inspector+0x48);if(!owner)return;
+    menu=(unsigned char*)g_menu_of(owner);if(!menu)return;
+    manager=*(unsigned char**)(menu+0xa10);if(!manager)return;
+    screen=(unsigned char*)g_screen_by_index(manager,10);
+    if(!screen||*(unsigned char**)(screen+0x1b8)!=ctx||*(unsigned char**)(screen+0x1e8)!=ctx)return;
+    if(g_widget_resolve(screen))g_list_redraw(screen);
+}
 static void show_size(unsigned char *panel,unsigned char *inspector,const float dims[3],int outside)
 {
     unsigned char *ctx;
     g_set_vec(inspector,dims);
     __try {
         ctx=*(unsigned char**)(inspector+0xd8);
-        if(!ctx||ctx!=panel+0x280||!show_entries(ctx+0x58,dims)||!outside)return;
-        /* The outside size becomes the baseline for every cancel and revert.
-         * A limited user edit (outside == 0) keeps them, so its cancel still
-         * returns to the size the user last accepted. */
-        memcpy(inspector+0xe8,dims,sizeof(float)*3);
-        memcpy(inspector+0xf4,dims,sizeof(float)*3);
-        show_entries(ctx+0x70,dims);
-        show_entries(ctx+0x88,dims);
+        if(!ctx||ctx!=panel+0x280||!show_entries(ctx+0x58,dims))return;
+        if(outside){
+            /* The outside size becomes the baseline for every cancel and revert.
+             * A limited user edit (outside == 0) keeps them, so its cancel still
+             * returns to the size the user last accepted. */
+            memcpy(inspector+0xe8,dims,sizeof(float)*3);
+            memcpy(inspector+0xf4,dims,sizeof(float)*3);
+            show_entries(ctx+0x70,dims);
+            show_entries(ctx+0x88,dims);
+        }
+        if(g_list_redraw)show_redraw(inspector,ctx);
     } __except(EXCEPTION_EXECUTE_HANDLER) { }
 }
 
@@ -276,6 +311,14 @@ int sh_grid_editor_install(const sig_result *results,size_t count,
     g_read=read;g_apply=apply;g_set_vec=(set_vec_fn)set->addr;g_hash=(hash_fn)hash->addr;
     g_pressed=(pressed_fn)pressed->addr;g_blocked=(blocked_fn)blocked->addr;
     g_set_state=(set_state_fn)state->addr;g_action_help=(action_help_fn)action_help->addr;
+    {const sig_result *dirty=clean(results,count,"GridPropertyDirtyRefresh"),*menu=clean(results,count,"GridMenuOf"),
+        *screen=clean(results,count,"MenuScreenByIndex"),*redraw=clean(results,count,"ContextListRedraw"),
+        *resolve=clean(results,count,"SwfWidgetResolve");
+     if(dirty&&menu&&screen&&redraw&&resolve){
+        g_dirty_refresh=(dirty_refresh_fn)dirty->addr;g_menu_of=(menu_of_fn)menu->addr;
+        g_screen_by_index=(screen_by_index_fn)screen->addr;g_widget_resolve=(widget_resolve_fn)resolve->addr;
+        g_list_redraw=(list_redraw_fn)redraw->addr;
+     } else backend_log("GRID: sub-editor redraw unavailable (signatures not resolved); after an outside size change, reopen the X/Y/Z editor to see the current size");}
     /* Populate steals 16 register/stack-only bytes. Change's entry has a null
      * branch, so hook its non-null body at +9 and steal 17 position-independent
      * bytes. The branch itself and its destination remain untouched. */
