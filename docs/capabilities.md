@@ -54,25 +54,27 @@ exactly as before.
 
 ## Map rendering
 
-DOOM's native Settings > Properties panel includes a map-wide View Distance
-control on the Snapmap+ tab. 8192 keeps each environment's own distance, so
-modules, Set Environment and Player Set Environment nodes and campaign
-environments decide it. Zero is the maximum, 200000, the largest far clip the
-game accepts (not an infinite one). Any other value is the far clip everywhere
-the map renders in SnapMap, editor and Play alike, overriding every environment
-source; environment fog and other effects are unchanged. Stepping left from
-zero wraps the row to the maximum. A module on the Default Environment FX
-(snapmap/base) draws to 60000 units in the editor, with dark fog from 32000,
-but adds no environment in Play, where the measured far clip was 8192; set a
-map value (0 for the maximum) to get the same distance in the editor and in
-Play. The editor's own camera cvars are not touched.
-Apply commits the draft to native map variables; normal saving retains the
-value inside the map. Both editor playtests and direct saved-map loads use it,
-with bindings for OpenGL and Vulkan. A custom value takes effect on Snapmap+
-clients; restoring the default does not retain a rendering requirement. Fog is
-not a map setting; older maps' fog values are ignored, and loading such a map
-converts its value so the next normal save stores only the distance. See the
-[view distance guide](https://www.snapmapplus.com/snapmap-plus-guide.html#map-view-distance).
+DOOM's native Settings > Properties panel includes a per-map Unlock View
+Distance toggle on the Snapmap+ tab. Off is the unmodified game: each
+environment keeps its own far clip and fog, so modules, Set Environment and
+Player Set Environment nodes and campaign environments decide them. On sets
+the far clip to 200000, the largest the game accepts (not an infinite one),
+and stretches every environment's fog by the same factor, in the editor
+(every camera, Blueprint included) and in Play: with r = 200000 / the blended
+native distance (at least 1), the view's fogStart, fogEnd and fogStartDistance
+literals are multiplied by r and its fogScale and fogDensity divided by r each
+frame, so each Environment FX keeps its look while its fog saturates r times
+farther out; colour, maximum opacity and lighting parms are kept. A module on the Default Environment FX (snapmap/base) draws to
+60000 units in the editor, with dark fog from 32000, but only 8192 in Play;
+On gives the same whole-room view in both. The editor's own camera cvars are
+not touched. Apply commits the draft to the map: On stores the variable
+`smp.render.v1`, Off removes it, so a map turned off again saves exactly as
+the unmodified game writes it. Both editor playtests and direct saved-map loads
+use it, with bindings for OpenGL and Vulkan. Maps saved by earlier Snapmap+
+builds with a View Distance number read as On unless the distance was the old
+default 8192, whose variable is removed at load. Fog is not a map setting;
+older maps' fog values are ignored. See the
+[view distance guide](https://www.snapmapplus.com/snapmap-plus-guide.html#unlock-view-distance).
 
 ## Map bounds and Blueprint zoom
 

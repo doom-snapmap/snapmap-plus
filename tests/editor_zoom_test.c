@@ -17,6 +17,14 @@ int main(void)
     assert(0.40f*sh_editor_zoom_orbit_height(32671,SH_ZOOM_SCALE_DEFAULT)>=1.09f*32671);
     assert(fabsf(sh_editor_zoom_blueprint_far(32671,SH_ZOOM_SCALE_DEFAULT,0)-185305.8f)<1);
     assert(sh_editor_zoom_blueprint_far(16000,SH_ZOOM_SCALE_DEFAULT,0)==90750);
+    /* An unlocked view distance raises the Blueprint far plane to r_zfar's
+     * maximum and never past it; no floor (0) or a lower one changes nothing. */
+    assert(sh_editor_zoom_far_with_floor(90750,0)==90750);
+    assert(sh_editor_zoom_far_with_floor(90750,SH_ZOOM_FAR_MAX)==SH_ZOOM_FAR_MAX);
+    assert(sh_editor_zoom_far_with_floor(185305.8f,SH_ZOOM_FAR_MAX)==200000);
+    assert(sh_editor_zoom_far_with_floor(90750,500000)==SH_ZOOM_FAR_MAX);
+    assert(sh_editor_zoom_far_with_floor(90750,33000)==90750);
+    assert(sh_editor_zoom_far_with_floor(90750,NAN)==90750);
     /* Editor environment volume: native 33000 for a camera up to 32000, the
      * same margin above; the built volume holds the highest camera. */
     assert(sh_editor_zoom_fog_bounds(0)==33000&&sh_editor_zoom_fog_bounds(32000)==33000);

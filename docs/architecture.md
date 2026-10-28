@@ -92,25 +92,34 @@ remain separate from relocated code for commit validation and restoration.
 ## DLL interface
 
 Map rendering lives in the backend and DOOM's native Settings / Properties
-panel, in the Snapmap+ tab. The View Distance group owns an Apply/Cancel draft
-tied to the current editable map. Apply stores a versioned `smp.render.v1`
-string in native map variables and publishes it to the editor view; the native
-serializer carries it through normal saves without a sidecar. Version 4 stores
-only the view distance. Version 1 and 3 strings and enabled version 2 strings
-keep their distance and drop their former fog values; disabled version 2 maps
-and missing metadata use the native default. Save/Play conversion rewrites the
-canonical version-4 value without shifting variable indices. Malformed or
-duplicate metadata disables the override. The reserved variable should not be
-edited through generic variables. Map deserialization clears the previous
-runtime selection and reads the loaded map's variables. Editor-to-play
-conversion refreshes that selection from the current editable map. A locked
-value copy crosses to rendering at the blended environment's single
-maxViewDistance read: 8192 leaves the native blended distance, zero is returned
-as the maximum 200000 (the engine raises the read to at least 256, so a literal
-zero could never reach r_zfar), any other value is returned as the far clip and replaces the view's literal, so module
-environments, Set Environment nodes and campaign environments cannot override
-it. While the editor is in Blueprint the far plane is additionally held at or
-above the editor's own 33000 scaled by the zoom factor. This applies only to
+panel, in the Snapmap+ tab. The Unlock View Distance group owns an
+Apply/Cancel draft (one toggle) tied to the current editable map. On stores
+the versioned string `smp.render.v1` = `4;0` in native map variables, appending
+the row after every existing string and leaving `allocCount[4]` untouched; Off
+removes the row the way the native list removes an element. String variables
+are bound by index, so the row is removed only when every later row is one of
+Snapmap+'s own `smp.` settings (those move down one); otherwise it stays as
+`4;8192`, which reads as off. The native serializer carries the result through
+normal saves without a sidecar. Versions 1 to 4 stored a distance: 8192 and
+disabled version 2 read as off, any other distance as on. Deserialization
+normalizes the snapshot the editor builds its editable map from: an on value
+becomes `4;0` and an off value is removed. Malformed or duplicate metadata
+disables the override. Map deserialization clears the previous runtime
+selection and reads the loaded map's variables; editor-to-play conversion
+refreshes it from the build copy. A locked value copy crosses to rendering at
+the blended environment's single maxViewDistance read: off returns the native
+read, on returns 200000 (the engine raises the read to at least 256 before
+writing r_zfar) and rewrites the view's literal. Before that it reads the
+block's native distance and stretches its fog by r = 200000 / native (floored
+at 256, never below 1): the `fogstart`, `fogend` and `fogstartdistance`
+literals are multiplied by r and `fogscale` and `fogdensity` divided by r,
+whatever the blend target and in the editor and Play alike; the renderer packs
+them into `fogParms`/`fogParms2` from that block after the blend, and the block
+is the view's own per-frame copy, so no declaration changes and nothing needs
+restoring. The blend writes r_zfar only when an environment resolves, so
+selecting an unlocked map also sets r_zfar to 200000 once through the engine's
+forced cvar setter, and the editor's Blueprint far-plane writer (`editor_zoom.c`)
+is raised to 200000 for that map, so every r_zfar writer agrees. This applies only to
 SnapMap and uses signed bindings in both renderer executables. No WebView
 interface change is involved.
 
@@ -119,7 +128,7 @@ panel (`settings_tab.c`): the category count, the diamond markers and the
 populate dispatch are extended under the panel's own hooks, and groups register
 through `sh_settings_tab_register_group` with their own draft, commit and reset
 callbacks because native Apply and Reset are not category-scoped. It holds the
-View Distance group and the Unlock Map Bounds group (`map_bounds.c`), whose
+Unlock View Distance group and the Unlock Map Bounds group (`map_bounds.c`), whose
 `smp.bounds.v1` map variable raises `snapEdit_environmentModuleBounds` and the
 camera distance limit for that map up to the 32671-unit ceiling imposed by the
 signed-short collision and navigation coordinates, restoring the native 16000

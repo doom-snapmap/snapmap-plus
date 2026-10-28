@@ -22,8 +22,12 @@
 typedef struct { const char *id; const char *text; } strid_baked_t;
 
 static const strid_baked_t g_strids_baked[] = {
-    { "smp_render_distance", "Map View Distance" },
-    { "smp_render_distance_help", "Saved with this map. 8192 (default) follows each environment. 0 is the maximum, 200000. Other values override every environment in editor and Play." },
+    /* "Unlock View Distance" on/off row in the Snapmap+ settings tab. The
+     * help says the setting is saved into the map and that Off takes it out
+     * again; it stays within the 161 characters native help texts use. */
+    { "smp_render_unlock", "Unlock View Distance" },
+    { "smp_render_unlock_help", "Saved into this map. On: no far clip in editor or Play; Environment FX fog is "
+                                "stretched to match. Off removes it; the map saves as the unmodified game writes it." },
     { "smp_grid_room_size", "Grid Room Size" },
     { "smp_grid_room_modern_help", "Minimum X: 864, Y: 272, Z: 432. Maximum follows the map bounds, connected rooms and native collision and navigation limits. Resized rooms require Snapmap+." },
     { "smp_grid_room_classic_help", "Minimum X: 416, Y: 416, Z: 304. Maximum follows the map bounds, connected rooms and native collision and navigation limits. Resized rooms require Snapmap+." },

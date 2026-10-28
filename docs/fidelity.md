@@ -25,11 +25,15 @@ Properties panel and Blueprint X action. Its saved module identities require
 runtime resources reconstructed by Snapmap+. Such maps are not compatible with
 vanilla or console players, even when their placed entities use stock assets.
 Restoring the original dimensions restores the stock module declaration.
-Map rendering defaults to the game's original module environments. View Distance
-8192 (or zero) restores them automatically. The saved value occupies an ordinary
-map variable that vanilla can load, with no separate enable or compatibility
-flag. Older saved values remain readable; their fog values are ignored and the
-former disabled mode migrates to the default. Fog is not a map setting.
+Map rendering defaults to the game's original module environments, and with
+Unlock View Distance off the map carries no Snapmap+ rendering data: turning
+the setting off removes its variable, so the saved map is byte for byte what
+the unmodified game writes. On draws to 200000 with every environment's
+fog kept and stretched by the same factor, in the editor and in Play; it occupies one ordinary map string
+variable that a vanilla client loads and ignores, keeping native distance and
+fog. Older saved View Distance values remain readable: 8192 reads as off and
+is removed, any other distance reads as on; their fog values are ignored and
+the former disabled mode reads as off. Fog is not a map setting.
 
 This release embeds no packages: the package system is being rebuilt for the
 April 2024 DOOM update, and a map carrying packages from an earlier release

@@ -78,6 +78,14 @@ float sh_editor_zoom_blueprint_far(float bounds,float scale,float blended)
     if(isfinite(blended)&&blended>far_plane)return blended;
     return far_plane;
 }
+float sh_editor_zoom_far_with_floor(float far_plane,float floor_value)
+{
+    /* A map that unlocks its view distance asks for r_zfar's maximum in every
+     * state, Blueprint included; nothing raises the plane past that maximum. */
+    if(isfinite(floor_value)&&floor_value>far_plane)
+        far_plane=floor_value>SH_ZOOM_FAR_MAX?SH_ZOOM_FAR_MAX:floor_value;
+    return far_plane;
+}
 float sh_editor_zoom_capped_height(float height,int editor_far_plane)
 {
     /* Without the editor's own far plane, only the environment blend raises
@@ -159,6 +167,7 @@ static const float *g_threshold;
 static uintptr_t g_vtables[3];
 static LONG g_faulted;
 static int g_installed,g_far_live;
+static float g_far_floor;
 
 static const sig_result *binding(const sig_result *r,size_t n,const char *name)
 {
@@ -187,7 +196,7 @@ static void publish(void)
     char line[224];
     if(!g_page)return;
     /* Far plane first: the editor reads it as soon as the camera may rise. */
-    g_page->far_plane=sh_editor_zoom_blueprint_far(g_bounds,g_scale,0);
+    g_page->far_plane=sh_editor_zoom_far_with_floor(sh_editor_zoom_blueprint_far(g_bounds,g_scale,0),g_far_floor);
     {
         /* The camera stays inside the editor environment volume, and without
          * the editor's far-plane redirect below the blend's 33000 limit. */
@@ -231,6 +240,14 @@ static void refresh_ground(void)
     }
 }
 void sh_editor_zoom_set_scale(float scale){g_scale=sh_editor_zoom_clamp_scale(scale);publish();}
+void sh_editor_zoom_set_far_floor(float floor_value)
+{
+    if(!isfinite(floor_value)||floor_value<0)floor_value=0;
+    if(floor_value==g_far_floor)return;
+    g_far_floor=floor_value;
+    /* Before install the floor is kept for the first publish. */
+    if(g_page)publish();
+}
 void sh_editor_zoom_update(float bounds)
 {
     if(isfinite(bounds)&&bounds>0)g_bounds=bounds>SH_ZOOM_MAX_BOUNDS?SH_ZOOM_MAX_BOUNDS:bounds;
@@ -272,7 +289,7 @@ float sh_editor_zoom_far_plane(float blended)
         if(!InterlockedExchange(&g_faulted,1))backend_log("ZOOM: Blueprint far plane disabled after an engine exception");
         return blended;
     }
-    return blueprint?sh_editor_zoom_blueprint_far(g_bounds,g_scale,blended):blended;
+    return blueprint?sh_editor_zoom_far_with_floor(sh_editor_zoom_blueprint_far(g_bounds,g_scale,blended),g_far_floor):blended;
 }
 
 /* Repoint one rip-relative disp32 after checking it addresses expected_at. */
@@ -415,7 +432,7 @@ int sh_editor_zoom_install(const sig_result *results,size_t count,const uint8_t 
     g_threshold=(const float*)((unsigned char*)threshold_cvar+0x34);
     /* The far plane goes live before any height above native can be reached;
      * without it the height stays inside the editor environment volume. */
-    g_page->far_plane=sh_editor_zoom_blueprint_far(g_bounds,g_scale,0);
+    g_page->far_plane=sh_editor_zoom_far_with_floor(sh_editor_zoom_blueprint_far(g_bounds,g_scale,0),g_far_floor);
     g_far_live=install_far_plane(far_sites,zfar_cvar);
     if(!g_far_live)backend_log("ZOOM: editor far-plane write unavailable; Blueprint height kept inside the editor environment volume");
     /* The volume is built when the editor render world is set up, after this

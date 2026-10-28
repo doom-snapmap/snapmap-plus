@@ -28,7 +28,8 @@
  *    other limit when the row's wrap flag (+0x10c, RenderAddFloat's last
  *    argument) is set, else stops at the limit. Native rows pass 1; the tab
  *    passes 0 so a step can never land on the opposite end (R-009), unless
- *    the row sets sh_settings_float.wrap (Map View Distance, R-021).
+ *    the row sets sh_settings_float.wrap (no current row does; the former
+ *    numeric Map View Distance row used it, R-021).
  *  - Toggle rows: RenderAddToggle (VK 0x12808f0, GL 0x127fea0) creates an
  *    idMenuPropertyToggle whose value is the byte at +0xd0; its vtable +0x20
  *    stores the property id at +0x40 and +0x28 sets the value and redraws the

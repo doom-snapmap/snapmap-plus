@@ -82,6 +82,9 @@ float sh_editor_zoom_orbit_height(float bounds, float scale);
 float sh_editor_zoom_pan_limit(float bounds, float scale);
 float sh_editor_zoom_sky_factor(float scale);
 float sh_editor_zoom_blueprint_far(float bounds, float scale, float blended);
+/* The Blueprint far plane raised to floor_value (at most SH_ZOOM_FAR_MAX);
+ * a floor of 0 leaves it unchanged. */
+float sh_editor_zoom_far_with_floor(float far_plane, float floor_value);
 /* The orbit height the camera may reach: unchanged when the editor's own far
  * plane write is redirected, else at most SH_ZOOM_BLEND_CEILING. */
 float sh_editor_zoom_capped_height(float height, int editor_far_plane);
@@ -108,6 +111,10 @@ int  sh_editor_zoom_install(const sig_result *results, size_t count, const uint8
 void sh_editor_zoom_set_scale(float scale);
 /* The active module bound changed (map bounds). */
 void sh_editor_zoom_update(float module_bounds);
+/* Any thread. The lowest Blueprint far plane the open map asks for:
+ * SH_ZOOM_FAR_MAX while it unlocks its view distance (map_render), else 0.
+ * Both Blueprint r_zfar writers then use at least this value. */
+void sh_editor_zoom_set_far_floor(float floor_value);
 /* Any thread. Returns blended unchanged unless the editor camera update would
  * force r_zfar this frame; then at least the Blueprint far plane. */
 float sh_editor_zoom_far_plane(float blended);
