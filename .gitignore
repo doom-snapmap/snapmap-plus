@@ -12,9 +12,8 @@ dist/
 *.log
 *.syso
 
-# Keep the shared Claude instructions; ignore all other local agent state.
-.claude/*
-!.claude/CLAUDE.md
+# Local agent state. AGENTS.md is the only tracked agent file.
+.claude/
 .codex/
 
 # Local deployment helper.
