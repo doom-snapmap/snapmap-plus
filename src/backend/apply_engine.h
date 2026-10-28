@@ -83,6 +83,17 @@ int sh_apply_engine_nav_snapshot(char **out, size_t *len, void *ctx);
  * declarations in that same temporary snapshot. Main thread only. */
 int sh_apply_engine_nav_regions(sh_nav_map *out, void *ctx);
 
+/* Bracket the pre-build snapshot of one SnapMapEditToSnapBuild call with the
+ * idSnapMapEdit it converts. Inside the bracket sh_apply_engine_nav_regions
+ * reads that object instead of the editor's map (see nav_snapshot.h), so a map
+ * launched from the hub, the map browser or a co-op join gets its own
+ * navigation, and an editor map left over from an earlier session cannot
+ * stand in for it. Main thread only. */
+void sh_apply_engine_nav_build_begin(const void *build_map);
+void sh_apply_engine_nav_build_end(void);
+/* Which map the last Play's navigation was read from, for sh_navmesh. */
+const char *sh_apply_engine_nav_build_source(void);
+
 /* Time both ways of reading current editor geometry and report them. Main
  * thread, editor open; costs one whole-map read plus one read per entity. */
 void sh_apply_engine_read_probe(void (*out)(const char *fmt, ...));

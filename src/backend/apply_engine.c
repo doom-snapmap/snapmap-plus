@@ -23,6 +23,7 @@
 #include "backend_log.h"
 #include "rawmap.h"
 #include "nav_bake.h"
+#include "nav_snapshot.h"
 #include "perf.h"
 #include "nav_preview.h"
 #include "engine_build.h"
@@ -1641,59 +1642,181 @@ int sh_apply_engine_nav_snapshot(char **out, size_t *len, void *ctx)
 #define AE_SNAPSHOT_COUNT_OFF   0x28
 #define AE_SNAPSHOT_ENTITY_SIZE 0x1b0
 #define AE_DECL_RESOLVED_OFF    0x130
+#define AE_PROBE_VOLUME_DEF     "snapmaps/volume/blocking"
 #define AE_DECL_TEXT_CAP        (4 * 1024 * 1024)
+
+/* What the size resolver may do for the snapshot being read. */
+typedef struct ae_box_size_ctx {
+    const uint8_t *snapshot;    /* SerializeToJson's temporary idSnapMap */
+    int converting;             /* a conversion is under way; no later read follows */
+    int inherited;              /* boxes measured from the entityDef instead */
+} ae_box_size_ctx;
 
 static int ae_snapshot_box_size(unsigned index, float size[3], void *ctx)
 {
-    const uint8_t *snapshot = (const uint8_t *)ctx;
+    ae_box_size_ctx *box = (ae_box_size_ctx *)ctx;
+    const uint8_t *snapshot = box->snapshot;
     void *entities = NULL, *text = NULL;
     uint32_t count = 0, length = 0;
     const uint8_t *resolved;
-    if (!ae_read_u32(snapshot + AE_SNAPSHOT_COUNT_OFF, &count) ||
-        count > ENT_COUNT_CAP || index >= count ||
-        !ae_read_ptr(snapshot + AE_SNAPSHOT_ENTITIES_OFF, &entities)) return 0;
-    resolved = (const uint8_t *)entities + (size_t)index * AE_SNAPSHOT_ENTITY_SIZE + AE_DECL_RESOLVED_OFF;
-    if (!ae_read_u32(resolved + IDSTR_LEN_OFF, &length) ||
-        !length || length >= AE_DECL_TEXT_CAP ||
-        !ae_read_ptr(resolved + IDSTR_DATA_OFF, &text)) return 0;
-    return sh_nav_regions_decl_size((const char *)text, length, size);
+    if (snapshot && ae_read_u32(snapshot + AE_SNAPSHOT_COUNT_OFF, &count) &&
+        count <= ENT_COUNT_CAP && index < count &&
+        ae_read_ptr(snapshot + AE_SNAPSHOT_ENTITIES_OFF, &entities) && entities) {
+        resolved = (const uint8_t *)entities + (size_t)index * AE_SNAPSHOT_ENTITY_SIZE +
+                   AE_DECL_RESOLVED_OFF;
+        if (ae_read_u32(resolved + IDSTR_LEN_OFF, &length) &&
+            length && length < AE_DECL_TEXT_CAP &&
+            ae_read_ptr(resolved + IDSTR_DATA_OFF, &text) && text &&
+            sh_nav_regions_decl_size((const char *)text, length, size)) return 1;
+    }
+    /* In the editor an unmeasured box is one that has only just been placed,
+     * and the next read gets it. A conversion has no next read: the box takes
+     * the size its entityDef gives it, and any axis the map spells still wins. */
+    if (box->converting && sh_nav_snapshot_inherited_size(AE_PROBE_VOLUME_DEF, size)) {
+        box->inherited++;
+        return 1;
+    }
+    return 0;
 }
+
+typedef struct ae_nav_visit_ctx {
+    sh_nav_map *out;
+    ae_box_size_ctx box;
+} ae_nav_visit_ctx;
 
 static int ae_nav_snapshot_visit(const void *snapshot, const void *json_idstr, void *ctx)
 {
+    ae_nav_visit_ctx *visit = (ae_nav_visit_ctx *)ctx;
     uint32_t length = 0;
     void *text = NULL;
     int ok;
     if (!ae_read_u32((const uint8_t *)json_idstr + IDSTR_LEN_OFF, &length) ||
         !length || length >= 32 * 1024 * 1024 ||
         !ae_read_ptr((const uint8_t *)json_idstr + IDSTR_DATA_OFF, &text)) return 0;
+    visit->box.snapshot = (const uint8_t *)snapshot;
     SH_PERF_BEGIN(t0);
-    ok = sh_nav_regions_read_resolved((const char *)text, length, (sh_nav_map *)ctx,
-                                      ae_snapshot_box_size, (void *)snapshot);
+    ok = sh_nav_regions_read_resolved((const char *)text, length, visit->out,
+                                      ae_snapshot_box_size, &visit->box);
     SH_PERF_END(SH_PERF_NAV_PARSE, t0);
     return ok;
 }
 
-int sh_apply_engine_nav_regions(sh_nav_map *out, void *ctx)
+/* Serialize one idSnapMapEdit -- the editor's, or the one being converted --
+ * through EditorMapToJson and read its navigation while the temporary is alive. */
+static int ae_nav_read_edit_map(const void *edit_map, int converting, sh_nav_map *out, void *ctx)
 {
     uint8_t str[IDSTR_SIZE] = {0};
-    const uint8_t *ed;
-    void *map = NULL;
+    ae_nav_visit_ctx visit;
     int initialized = 0, ok = 0;
+    char line[160];
     (void)ctx;
-    if (!out || ae_on_main_thread() != 1 || !g_idstr_ctor || !g_idstr_dtor ||
-        !g_editor_map_to_json) return 0;
-    ed = ae_editor_session();
-    if (!ed || !ae_read_ptr(ed + ED_MAP_OBJ_OFF, &map)) return 0;
+    if (!edit_map || !out || !g_idstr_ctor || !g_idstr_dtor || !g_editor_map_to_json) return 0;
+    memset(&visit, 0, sizeof visit);
+    visit.out = out;
+    visit.box.converting = converting;
     __try {
         g_idstr_ctor(str, ""); initialized = 1;
         SH_PERF_BEGIN(t0);
-        ok = sh_rawmap_snapshot_inspect(g_editor_map_to_json, map, str,
-                                        ae_nav_snapshot_visit, out);
+        ok = sh_rawmap_snapshot_inspect(g_editor_map_to_json, (void *)edit_map, str,
+                                        ae_nav_snapshot_visit, &visit);
         SH_PERF_END(SH_PERF_MAP_SERIALIZE, t0);
     } __except (EXCEPTION_EXECUTE_HANDLER) { ok = 0; }
     if (initialized) {
         __try { g_idstr_dtor(str); } __except (EXCEPTION_EXECUTE_HANDLER) { ok = 0; }
+    }
+    if (ok && visit.box.inherited) {
+        _snprintf_s(line, sizeof line, _TRUNCATE,
+                    "NAV: %d blocking box(es) took their size from the entityDef "
+                    "(the engine had not resolved it)", visit.box.inherited);
+        backend_log(line);
+    }
+    return ok;
+}
+
+/* The module declaration names an idSnapMapEdit places, in record order:
+ * record +0 -> instance wrapper, wrapper +0 -> module decl, decl +8 -> name. */
+static int ae_nav_edit_modules(const void *edit_map, char *names, size_t name_cap,
+                               int cap, void *ctx)
+{
+    const uint8_t *map = (const uint8_t *)edit_map;
+    void *records = NULL;
+    uint32_t count = 0;
+    int i;
+    (void)ctx;
+    if (!map || !names || !name_cap ||
+        !ae_read_ptr(map + MAP_MODULES_OFF, &records) ||
+        !ae_read_u32(map + MAP_MODULES_OFF + 8, &count) ||
+        count > (uint32_t)cap || (count && !records)) return -1;
+    for (i = 0; i < (int)count; i++) {
+        void *wrapper = NULL, *decl = NULL, *name = NULL;
+        char *dst = names + (size_t)i * name_cap;
+        dst[0] = 0;
+        if (!ae_read_ptr((const uint8_t *)records + (size_t)i * MAP_MODULE_STRIDE, &wrapper) ||
+            !wrapper || !ae_read_ptr(wrapper, &decl) || !decl ||
+            !ae_read_ptr((const uint8_t *)decl + 8, &name) || !name) continue;
+        __try { strncpy_s(dst, name_cap, (const char *)name, _TRUNCATE); }
+        __except (EXCEPTION_EXECUTE_HANDLER) { dst[0] = 0; }
+    }
+    return (int)count;
+}
+
+/* The idSnapMapEdit SnapMapEditToSnapBuild is converting, set by its detour for
+ * the length of the pre-build snapshot. Thread-local: the conversion and the
+ * snapshot both run on the main thread. */
+static __declspec(thread) const void *g_nav_build_map;
+static volatile LONG g_nav_last_source = -1;    /* no conversion yet this session */
+
+void sh_apply_engine_nav_build_begin(const void *build_map) { g_nav_build_map = build_map; }
+void sh_apply_engine_nav_build_end(void) { g_nav_build_map = NULL; }
+
+const char *sh_apply_engine_nav_build_source(void)
+{
+    LONG source = InterlockedCompareExchange(&g_nav_last_source, 0, 0);
+    if (source < 0) return "nowhere yet: no map has been played this session";
+    return sh_nav_snapshot_source_name((sh_nav_snapshot_source)source);
+}
+
+int sh_apply_engine_nav_regions(sh_nav_map *out, void *ctx)
+{
+    sh_nav_snapshot_sources src;
+    sh_nav_snapshot_result result;
+    void *edit = NULL;
+    int ok;
+    char line[256];
+    (void)ctx;
+    if (!out || ae_on_main_thread() != 1 || !g_idstr_ctor || !g_idstr_dtor ||
+        !g_editor_map_to_json) {
+        if (g_nav_build_map) {
+            InterlockedExchange(&g_nav_last_source, SH_NAV_SNAPSHOT_NONE);
+            backend_log(ae_on_main_thread() != 1
+                ? "NAV: Play has no custom navigation -- the map was converted off the main thread"
+                : "NAV: Play has no custom navigation -- the map serializer is not resolved");
+        }
+        return 0;
+    }
+    if (g_editor &&!ae_read_ptr(g_editor + ED_MAP_OBJ_OFF, &edit)) edit = NULL;
+    memset(&src, 0, sizeof src);
+    src.build = g_nav_build_map;
+    src.edit = edit;
+    src.read = ae_nav_read_edit_map;
+    src.modules = ae_nav_edit_modules;
+    ok = sh_nav_snapshot_take(&src, out, &result);
+    if (!src.build) return ok;
+    InterlockedExchange(&g_nav_last_source, (LONG)result.source);
+    if (result.source == SH_NAV_SNAPSHOT_EDITOR_FALLBACK) {
+        _snprintf_s(line, sizeof line, _TRUNCATE,
+                    "NAV: Play read the editor's map instead -- %s", result.why);
+        backend_log(line);
+    } else if (!ok) {
+        _snprintf_s(line, sizeof line, _TRUNCATE,
+                    "NAV: Play has no custom navigation -- %s", result.why);
+        backend_log(line);
+    } else {
+        _snprintf_s(line, sizeof line, _TRUNCATE,
+                    "NAV: Play read %s: %d module(s), %d marked or blocking box(es)",
+                    sh_nav_snapshot_source_name(result.source), out->instance_count,
+                    out->region_count);
+        backend_log(line);
     }
     return ok;
 }

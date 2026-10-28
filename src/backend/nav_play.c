@@ -13,6 +13,7 @@
 #include "map_bounds.h"
 #include "map_render.h"
 #include "world_area_cell.h"
+#include "apply_engine.h"
 
 void backend_log(const char *message);
 
@@ -234,10 +235,14 @@ static int nav_snapbuild_detour(void *a, void *b, void *c)
         sh_map_bounds_build(b);
         /* Before the native build subdivides the map into world areas. */
         sh_world_area_cell_build(b);
+        /* `b` is the idSnapMapEdit the SnapBuild wrapper made from the map
+         * being played (editor+0x23C98); the navigation snapshot reads it. */
+        sh_apply_engine_nav_build_begin(b);
         sh_nav_bake_build_begin();
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         backend_log("NAV: the pre-build editor snapshot faulted");
     }
+    sh_apply_engine_nav_build_end();
     g_build_map=(const unsigned char*)b;
     __try {
         return g_orig(a, b, c);

@@ -301,7 +301,13 @@ lock precedes the worker handoff lock; the worker never acquires the bake lock.
 Published lines remain until their replacement completes, except during a drag
 or after an empty or refused snapshot. Sparse box refreshes include unmarked
 obstacles and use live uniqueIds; topology changes require a complete snapshot.
-Play always takes its own complete snapshot. The worker and session log handle
+Play always takes its own complete snapshot, of the idSnapMapEdit that
+SnapMapEditToSnapBuild is converting rather than the editor's map, so hub, map
+browser, co-op and direct launches read the map actually being played. The
+editor's map stands in only when the converted map cannot be read and the two
+place the same modules in the same order (`nav_snapshot.c`). During that
+snapshot an unresolved Blocking Box takes its entityDef size for omitted axes.
+The worker and session log handle
 have process lifetime; DllMain must not wait on them or acquire their locks.
 
 The native Start-menu action in `nav_menu.c` shares the View menu's update

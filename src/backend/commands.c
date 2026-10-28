@@ -1808,6 +1808,8 @@ static void h_sh_navmesh(idCmdArgs *a)
         return;
     }
     sh_navmesh_report(sh_printf);
+    sh_printf("navigation: the last Play read its boxes from %s.\n",
+              sh_apply_engine_nav_build_source());
     /* Compose stored-shard and marked-volume reports without coupling the modules. */
     sh_nav_bake_report(sh_printf);
 }

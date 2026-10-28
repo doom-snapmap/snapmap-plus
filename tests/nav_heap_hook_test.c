@@ -7,6 +7,8 @@ static int g_navmesh_enabled=1;
 int sh_config_get_bool(const char *key,int *value,unsigned *flags)
 {(void)key;(void)flags;*value=g_navmesh_enabled;return 1;}
 void sh_nav_bake_build_begin(void) {}
+void sh_apply_engine_nav_build_begin(const void *map) {(void)map;}
+void sh_apply_engine_nav_build_end(void) {}
 void sh_nav_bake_build_end(void) {}
 void sh_nav_bake_enable_instances(int on) {(void)on;}
 int sh_nav_bake_instance_name(int i,const char *n,char *out,size_t cap)

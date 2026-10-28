@@ -17,6 +17,7 @@ static int nav_test_allowed, nav_ready, nav_prepare_calls, nav_rooms, nav_queued
 static void snapshot_dimensions_follow_array_order(void)
 {
     static sh_nav_map out;
+    ae_nav_visit_ctx visit;
     unsigned char snapshot[0x30] = {0}, entities[2 * AE_SNAPSHOT_ENTITY_SIZE] = {0};
     unsigned char str[IDSTR_SIZE] = {0};
     const char *decls[] = {
@@ -39,7 +40,8 @@ static void snapshot_dimensions_follow_array_order(void)
         *(const char **)(resolved + IDSTR_DATA_OFF) = decls[i];
         *(uint32_t *)(resolved + IDSTR_LEN_OFF) = (uint32_t)strlen(decls[i]);
     }
-    assert(ae_nav_snapshot_visit(snapshot,str,&out));
+    memset(&visit, 0, sizeof visit); visit.out = &out;
+    assert(ae_nav_snapshot_visit(snapshot,str,&visit));
     assert(!out.invalid_geometry && out.ids_unusable && out.region_count == 2);
     assert(out.regions[0].depth == 91 && out.regions[1].depth == 101);
     assert(out.regions[0].c[0][0] == -36.5f && out.regions[1].c[0][0] == -41.5f);
@@ -47,7 +49,15 @@ static void snapshot_dimensions_follow_array_order(void)
     *(uint32_t *)(snapshot + AE_SNAPSHOT_COUNT_OFF) = 1;
     /* The entity cannot be measured, which refuses the read without calling the
      * geometry itself unusable. */
-    assert(ae_nav_snapshot_visit(snapshot,str,&out) && out.unmeasured);
+    assert(ae_nav_snapshot_visit(snapshot,str,&visit) && out.unmeasured);
+    assert(visit.box.inherited == 0);
+    /* During a conversion there is no later read: the unresolved box takes
+     * the 16 x 128 x 64 its entityDef gives it, the resolved one keeps its own. */
+    visit.box.converting = 1;
+    assert(ae_nav_snapshot_visit(snapshot,str,&visit) && !out.unmeasured);
+    assert(out.region_count == 2 && visit.box.inherited == 1);
+    assert(out.regions[0].depth == 91 && out.regions[1].depth == 64);
+    assert(out.regions[1].c[0][0] == -8.0f);
 }
 void backend_log(const char *text) { (void)text; }
 sh_iface *sh_ui_get_iface(void) { return NULL; }

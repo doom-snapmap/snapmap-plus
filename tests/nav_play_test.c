@@ -6,7 +6,24 @@ void backend_log(const char *message) {(void)message;}
 void sh_map_render_build(void *map) {(void)map;}
 int sh_config_get_bool(const char *key,int *value,unsigned *flags)
 {(void)key;(void)flags;*value=enabled;return 1;}
-void sh_nav_bake_build_begin(void) {}
+/* The detour must hand the navigation snapshot the object being converted,
+ * for exactly the length of the pre-build snapshot. */
+static const void *g_bracket;
+static int g_bracket_open, g_snapshot_saw_build, g_bracket_closed_before_build;
+void sh_apply_engine_nav_build_begin(const void *map) {g_bracket=map;g_bracket_open=1;}
+void sh_apply_engine_nav_build_end(void) {g_bracket_open=0;}
+void sh_nav_bake_build_begin(void) {if(g_bracket_open)g_snapshot_saw_build=(int)(intptr_t)g_bracket;}
+static int converting_original(void *a,void *b,void *c)
+{(void)a;(void)c;if(!g_bracket_open&&b)g_bracket_closed_before_build=1;return 7;}
+static int test_snapshot_reads_the_converted_map(void)
+{
+    int failed=0;snapbuild_fn_t saved=g_orig;
+    g_orig=converting_original;
+    if(nav_snapbuild_detour(NULL,(void *)(intptr_t)0x5150,NULL)!=7)failed++;
+    if(g_snapshot_saw_build!=0x5150)failed++;
+    if(g_bracket_open||!g_bracket_closed_before_build)failed++;
+    g_orig=saved;return failed;
+}
 void sh_nav_bake_build_end(void) {}
 void sh_nav_bake_enable_instances(int on) {(void)on;}
 int sh_nav_bake_instance_name(int i,const char *n,char *out,size_t cap)
@@ -83,5 +100,6 @@ int main(void)
     VirtualFree(g_volume_contents_relay,0,MEM_RELEASE);
     VirtualFree(code,0,MEM_RELEASE);
     failed+=test_hook_publication();
+    failed+=test_snapshot_reads_the_converted_map();
     printf("nav_play_test: %d failures\n",failed);return failed?1:0;
 }
