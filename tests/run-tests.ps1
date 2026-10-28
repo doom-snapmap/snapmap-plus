@@ -52,6 +52,7 @@ $tests = @(
     @{ name = "grid_room_areas_test"; src = 'grid_room_areas_test.c ..\src\backend\grid_room_areas.c ..\src\backend\grid_room.c'; arg = "" }
     @{ name = "world_area_cell_test"; src = 'world_area_cell_test.c ..\src\backend\grid_room_areas.c ..\src\backend\patch.c ..\src\backend\hook.c'; defs = '/DSH_PATCH_TESTING'; arg = "" }
     @{ name = "object_entry_test"; src = 'object_entry_test.c ..\src\backend\patch.c ..\src\backend\hook.c'; defs = '/DSH_PATCH_TESTING'; arg = "" }
+    @{ name = "boot_pacing_test"; src = 'boot_pacing_test.c ..\src\backend\patch.c ..\src\backend\hook.c ..\src\backend\signatures.c ..\src\backend\host_image.c'; defs = '/DSH_PATCH_TESTING'; arg = "" }
     @{ name = "grid_room_native_test"; src = 'grid_room_native_test.c ..\src\backend\grid_room_areas.c ..\src\backend\grid_room.c ..\src\backend\grid_room_decl.c ..\src\backend\config_json.c ..\src\backend\grid_room_edit.c ..\src\backend\patch.c ..\src\backend\hook.c'; arg = "" }
     @{ name = "grid_room_snap_test"; src = 'grid_room_snap_test.c ..\src\backend\grid_room.c ..\src\backend\patch.c ..\src\backend\hook.c'; arg = "" }
     @{ name = "nav_heap_test"; src = 'nav_heap_test.c'; arg = "" }

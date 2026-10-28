@@ -54,6 +54,13 @@ sig_status sig_resolve_one(const uint8_t *module_base, const sig_entry *sig, sig
  * SIG_OK_HOOKED. Callers should provide at least sig_db_count() slots. */
 size_t sig_resolve_all(const uint8_t *module_base, sig_result *results, size_t cap);
 
+/* Without scanning: on the supported executable (host_image.h) accept the
+ * entry's recorded RVA when its whole pattern matches there. For sites that
+ * must be patched before a full scan could finish; the offline signature tests
+ * prove each recorded RVA is the pattern's only match. Returns SIG_OK, or
+ * SIG_NOT_FOUND on any other image, missing RVA or mismatch. */
+sig_status sig_match_recorded(const uint8_t *module_base, const sig_entry *sig, sig_result *out);
+
 /* Look up a single resolved address by name from a results array (returns 0 if not OK / not found). */
 uintptr_t sig_addr_by_name(const sig_result *results, size_t n, const char *name);
 

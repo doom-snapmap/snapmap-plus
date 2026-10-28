@@ -26,7 +26,9 @@ param(
                            "../fault_shield/serialized_entities_guard.c",
                            "../fault_shield/fault_shield.c",
                            # Map bounds, Blueprint zoom and the Snapmap+ settings tab.
-                           "settings_tab.c", "map_bounds.c", "editor_zoom.c"),
+                           "settings_tab.c", "map_bounds.c", "editor_zoom.c",
+                           # Boot preload pacing (load-screen video lock, read poll).
+                           "boot_pacing.c"),
     [string]$Out = "XINPUT1_4.dll",
     # Diag adds SH_DIAG and the crash/environment logger for troubleshooting.
     [switch]$Diag,

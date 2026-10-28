@@ -29,6 +29,7 @@
 #include "editor_zoom.h"
 #include "world_area_cell.h"
 #include "object_entry.h"
+#include "boot_pacing.h"
 #include "grid_room_snap.h"
 #include "navmesh.h"
 #include "nav_bake.h"
@@ -116,12 +117,12 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
         return 0;
     }
 
-    char line[160];
+    char line[192];
     _snprintf_s(line, sizeof line, _TRUNCATE,
-        "backend attached host=%s renderer=%s base=%p size=%zx",
+        "backend attached host=%s renderer=%s base=%p size=%zx (process age %lu ms)",
         sh_host_image_name(),
         sh_host_is_vulkan() == 1 ? "vulkan" : (sh_host_is_vulkan() == 0 ? "opengl" : "unknown"),
-        (void *)g_doom_base, g_doom_size);
+        (void *)g_doom_base, g_doom_size, sh_boot_pacing_process_age_ms());
     backend_log(line);
 
     /* Every engine address and layout here is for one build, identified by the
@@ -140,6 +141,16 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
         sh_host_game_identity(game, sizeof game);
         _snprintf_s(line, sizeof line, _TRUNCATE, "game: %s", game);
         backend_log(line);
+    }
+
+    /* The engine's "common" preload starts a few seconds after launch and is
+     * paced by waits that boot_pacing.c shortens. Its sites are matched at
+     * their recorded RVAs and patched now, ahead of the full scan below. */
+    {
+        sig_result boot[SH_BOOT_PACING_SIGS];
+        (void)sh_boot_pacing_match(g_doom_base, boot, SH_BOOT_PACING_SIGS);
+        (void)sh_boot_pacing_install(boot, SH_BOOT_PACING_SIGS, SH_BOOT_PACING_DEFAULT,
+                                     sh_boot_pacing_process_age_ms());
     }
 
     sh_user_dirs_ensure();
@@ -255,8 +266,8 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
 
         /* Guard stale event-wire lists and interactables whose subsystem is absent.
          * Their implementations define the engine-layout checks and recovery limits. */
-        sh_evwire_guard_install(g_doom_base);
-        sh_interactable_guard_install(g_doom_base);
+        sh_evwire_guard_install(g_doom_base, results, db);
+        sh_interactable_guard_install(g_doom_base, results, db);
         sh_serialized_entities_guard_install(results, db);
 
         void *get_decls = (void *)sig_addr_by_name(results, db, "GetDeclsOfType");
@@ -443,6 +454,10 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
 
     shield_install(g_doom_base, g_doom_size);
 
+    _snprintf_s(line, sizeof line, _TRUNCATE,
+        "startup: install complete at process age %lu ms (signature scan %lu ms)",
+        sh_boot_pacing_process_age_ms(), (unsigned long)elapsed);
+    backend_log(line);
     return 0;
 }
 

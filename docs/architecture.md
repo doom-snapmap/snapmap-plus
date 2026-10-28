@@ -67,6 +67,16 @@ signature bytes. A filename or a readable address is not sufficient evidence.
 Contributor changes to signatures or anchors require the two-image test gate in
 [contributing](contributing.md#7-run-the-tests).
 
+The bootstrap scans the whole database once, which takes about five seconds;
+later installs reuse those results instead of scanning again. The boot pacing
+sites (`boot_pacing.c`) cannot wait for that scan: the engine's resource preload
+starts about two seconds after launch. Right after the build check they are
+matched at their recorded RVAs only (`sig_match_recorded`), checked byte by byte,
+and patched about 0.1 s after process creation. The offline signature tests
+prove each of those recorded RVAs is the pattern's only match. A patch that would
+land more than three seconds after process creation is not made, because the
+preload's threads could then be executing the redirected instructions.
+
 Hook callers prepare a trampoline, publish it as their original callback, then
 commit the detour. Preparation does not write the target. Callers own the
 lifetime of their original callbacks and any relay memory.

@@ -283,6 +283,29 @@ size_t sig_resolve_all(const uint8_t *module_base, sig_result *results, size_t c
     return ok;
 }
 
+sig_status sig_match_recorded(const uint8_t *module_base, const sig_entry *sig, sig_result *out)
+{
+    uint8_t pat[SIG_MAX_PATTERN], mask[SIG_MAX_PATTERN], live[SIG_MAX_PATTERN];
+    exec_section secs[MAX_SECTIONS];
+    size_t n, i;
+    uint32_t rva;
+    int nsec, s;
+    out->name = sig->name; out->status = SIG_NOT_FOUND; out->addr = 0; out->rva = 0;
+    n = compile_pattern(sig->pattern, pat, mask, SIG_MAX_PATTERN);
+    if (n == 0) { out->status = SIG_BAD_PATTERN; return out->status; }
+    nsec = collect_exec_sections(module_base, secs, MAX_SECTIONS);
+    if (nsec < 0) { out->status = SIG_BAD_MODULE; return out->status; }
+    rva = sh_host_image_rva(module_base, sig->rva_vk, sig->rva_gl);
+    if (rva == 0) return out->status;
+    for (s = 0; s < nsec; s++)
+        if (rva >= secs[s].vaddr && rva - secs[s].vaddr <= secs[s].vsize &&
+            n <= secs[s].vsize - (rva - secs[s].vaddr)) break;
+    if (s == nsec || !sig_safe_read(module_base + rva, live, n)) return out->status;
+    for (i = 0; i < n; i++) if (mask[i] && live[i] != pat[i]) return out->status;
+    out->status = SIG_OK; out->addr = (uintptr_t)(module_base + rva); out->rva = rva;
+    return SIG_OK;
+}
+
 uintptr_t sig_addr_by_name(const sig_result *results, size_t n, const char *name)
 {
     for (size_t i = 0; i < n; i++)
@@ -1198,5 +1221,14 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
      * constant's only reader. Unique on both build 13954591 executables. */
     { "ObjectEntryDrop", /* MOVSS xmm9,[rip+disp32 -> 18364.0]; XORPS xmm7,xmm7; MOVSS xmm8,[rip+disp32 -> 1.0]; MOVSS [rsp+0x60],xmm2. */
       "F3 44 0F 10 0D ?? ?? ?? ?? 0F 57 FF F3 44 0F 10 05 ?? ?? ?? ?? F3 0F 11 54 24 60", 0x12B3823u, 0x12B2F03u },
+    /* Boot pacing (snaphak-re boot-time-13954591 R-001, R-002). The bootstrap
+     * matches these at their recorded RVAs before the full scan, so each
+     * pattern must stay unique at that RVA on both executables. */
+    { "BootVideoLock", /* Load-screen video draw: LEA RDI,[bink lock]; enter it; CMP [first video handle],0; JZ. */
+      "48 8D 3D ?? ?? ?? ?? 48 89 7C 24 58 B2 01 48 8B CF E8 ?? ?? ?? ?? C6 44 24 60 01 48 83 3D ?? ?? ?? ?? 00 0F 84 ?? ?? ?? ?? 48 8B 0B E8", 0x1901E14u, 0x18FAC93u },
+    { "BootVideoSleep", /* The same draw: both handles drawn, then MOV ECX,10; CALL Sleep while the lock is held; CMP [second handle],0. */
+      "80 3D ?? ?? ?? ?? 00 74 2A 44 8B CE 44 8B C5 48 8D 15 ?? ?? ?? ?? 48 8B CB E8 ?? ?? ?? ?? 44 8B CE 44 8B C5 48 8D 15 ?? ?? ?? ?? 48 8B CB E8 ?? ?? ?? ?? B9 0A 00 00 00 E8 ?? ?? ?? ?? 48 83 3D ?? ?? ?? ?? 00", 0x1901E63u, 0x18FAD41u },
+    { "BootReadPoll", /* UncachedBackgroundRead completion poll: done byte [rsp+0x70], abort [rsi+0x10], MOV ECX,1; CALL Sleep. */
+      "0F B6 44 24 70 84 C0 75 1B 0F B6 46 10 84 C0 75 13 B9 01 00 00 00 E8 ?? ?? ?? ?? 0F B6 44 24 70 84 C0 74 E5", 0x1938EA8u, 0x192D818u },
     { NULL, NULL, 0 }   /* terminator */
 };

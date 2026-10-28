@@ -12,12 +12,33 @@
 
 /* Developer-table alias and cvar flags. */
 
-/* Copy both table headers; return 0 if the boot-time object is not readable. */
+/* Copy dwords in address order, each store visible before the next. */
+static void copy_ordered(uint8_t *dst, const uint8_t *src, size_t n)
+{
+    size_t i;
+    for (i = 0; i < n; i += 4)
+        *(volatile uint32_t *)(dst + i) = *(const volatile uint32_t *)(src + i);
+    MemoryBarrier();
+}
+
+/* Copy both table headers; return 0 if the boot-time object is not readable.
+ * The engine's main thread looks cvars up without a lock while this runs
+ * (idCVarSystem::Find, VK FUN_1402943f0: hash mask and arrays, then the list
+ * entry the hash names). A header published out of order let it index the
+ * old list with the new hash and fault during startup +cvar parsing
+ * (snaphak-re boot-time-13954591 R-002). So the list goes first, then the
+ * hash's arrays, then its sizes and masks, and an unchanged header is not
+ * rewritten. */
 static int alias_dev_to_full(uint8_t *cvarSys)
 {
     __try {
-        memcpy(cvarSys + CVARSYS_DEV_LIST_OFF, cvarSys + CVARSYS_FULL_LIST_OFF, SIZEOF_IDLIST);
-        memcpy(cvarSys + CVARSYS_DEV_HASH_OFF, cvarSys + CVARSYS_FULL_HASH_OFF, SIZEOF_IDHASHINDEX);
+        uint8_t *dev_list = cvarSys + CVARSYS_DEV_LIST_OFF, *dev_hash = cvarSys + CVARSYS_DEV_HASH_OFF;
+        const uint8_t *full_list = cvarSys + CVARSYS_FULL_LIST_OFF, *full_hash = cvarSys + CVARSYS_FULL_HASH_OFF;
+        if (!memcmp(dev_list, full_list, SIZEOF_IDLIST) && !memcmp(dev_hash, full_hash, SIZEOF_IDHASHINDEX))
+            return 1;
+        copy_ordered(dev_list, full_list, SIZEOF_IDLIST);
+        copy_ordered(dev_hash, full_hash, 0x10);   /* hash and index-chain arrays */
+        copy_ordered(dev_hash + 0x10, full_hash + 0x10, SIZEOF_IDHASHINDEX - 0x10);
         return 1;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return 0;
