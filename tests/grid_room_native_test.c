@@ -313,6 +313,93 @@ static void edit_rule_checks(void)
     r=room;r.xyz[1]=8000;assert(fit(map,&room,&r,&reason)&&r.xyz[1]==8000&&!strstr(g_note,"limited"));
     *(float*)(records[0]+0x10)=0;
 }
+/* Render area limit: a resize that would give the map more than 8192
+ * world areas or area nodes is limited on the changed axis, not refused. */
+static void area_rule_checks(void)
+{
+    unsigned char map[0x800]={0},records[1][0x98]={0};
+    int keys1[]={0,2},links1[]={-1,-1};
+    sh_grid_size room={SH_GRID_MODERN,{32000,32000,1000}},r;const char *reason;
+    sh_render_area_count count;float box[1][6];
+    environment_limit=32671;
+    *(void**)records[0]=sh_grid_native_wrapper(&room);
+    *(void**)(map+0x750)=records;*(int*)(map+0x758)=1;*(void**)(map+0x7d8)=keys1;*(int*)(map+0x7e0)=2;
+    *(void**)(map+0x7c0)=links1;*(int*)(map+0x7c8)=2;
+    /* 32000 x 32000: 64 x 65 = 4160 areas. Growing Y past 32768 would give
+     * 128 x 65 = 8320 (64 X pieces, 128 Y pieces, plus the slab). */
+    r=room;r.xyz[1]=40000;assert(fit(map,&room,&r,&reason)&&r.xyz[0]==32000&&r.xyz[1]==32768&&r.xyz[2]==1000);
+    assert(strstr(g_note,"Y request 40000 limited to 32768 by the render area limit: 32769 would give the map 8320 world areas"));
+    assert(strstr(g_note,"engine maximum 8192 each"));
+    /* This is the fallback when the cell size cannot follow the map. */
+    assert(strstr(g_note,"(engine maximum 8192 each); the world-area cell size cannot follow the map on this build"));
+    r=room;r.xyz[0]=40000;assert(fit(map,&room,&r,&reason)&&r.xyz[0]==32768&&r.xyz[1]==32000);
+    assert(strstr(g_note,"X request 40000 limited to 32768 by the render area limit: 32769 would give the map 8256 world areas"));
+    /* Within the limit, and a shrink, apply unchanged with no note. */
+    r=room;r.xyz[1]=32768;assert(fit(map,&room,&r,&reason)&&r.xyz[1]==32768&&!g_note[0]);
+    r=room;r.xyz[1]=20000;assert(fit(map,&room,&r,&reason)&&r.xyz[1]==20000&&!g_note[0]);
+    /* Already at the limit: the request keeps the current size, logged. */
+    {sh_grid_size top=room;top.xyz[1]=32768;*(void**)records[0]=sh_grid_native_wrapper(&top);
+        r=top;r.xyz[1]=33000;assert(fit(map,&top,&r,&reason)&&!memcmp(&r,&top,sizeof r));
+        assert(strstr(g_note,"Y already at the render area limit: requested 33000, kept 32768"));
+        /* Both axes in one request: X is fitted first, then Y against it. */
+        r=top;r.xyz[0]=16000;r.xyz[1]=60000;assert(fit(map,&top,&r,&reason)&&r.xyz[0]==16000&&r.xyz[1]==60000);
+        /* Growing X while shrinking Y: Y is fitted first, so X is not cut back
+         * against the old Y (64062 x 16384 is 32 x 129 = 4128 areas). */
+        r=top;r.xyz[0]=64062;r.xyz[1]=16384;assert(fit(map,&top,&r,&reason)&&r.xyz[0]==64062&&r.xyz[1]==16384&&!g_note[0]);
+        *(void**)records[0]=sh_grid_native_wrapper(&room);}
+    /* The reported room: a map already over the limit may shrink, never grow. */
+    {sh_grid_size big={SH_GRID_MODERN,{64062,62846,32671}};*(void**)records[0]=sh_grid_native_wrapper(&big);
+        assert(world_bounds(records[0],box[0],(float*)(*(unsigned char**)sh_grid_native_wrapper(&big)+0xa0)));
+        assert(sh_render_areas((const float(*)[6])box,1,1,&count)&&count.areas==16512);
+        r=big;r.xyz[2]=30000;assert(fit(map,&big,&r,&reason)&&r.xyz[2]==30000);
+        assert(strstr(g_note,"already has 16512 world areas and 16511 area nodes"));
+        r=big;r.xyz[1]=40000;assert(fit(map,&big,&r,&reason)&&r.xyz[1]==40000);
+        *(void**)records[0]=sh_grid_native_wrapper(&room);}
+    environment_limit=16000;
+}
+/* With Play's world-area cell size following the map (the redirect is live),
+ * resizes are no longer limited by the render area count; the log names the
+ * cell size Play will use. */
+static void adaptive_area_checks(void)
+{
+    unsigned char map[0x800]={0},records[1][0x98]={0};
+    int keys1[]={0,2},links1[]={-1,-1};
+    sh_grid_size room={SH_GRID_MODERN,{32000,32000,1000}},big={SH_GRID_MODERN,{64062,62846,32671}},r;
+    const char *reason;sh_render_cell_choice choice;
+    environment_limit=32671;sh_grid_native_set_adaptive_cells(1);
+    *(void**)records[0]=sh_grid_native_wrapper(&room);
+    *(void**)(map+0x750)=records;*(int*)(map+0x758)=1;*(void**)(map+0x7d8)=keys1;*(int*)(map+0x7e0)=2;
+    *(void**)(map+0x7c0)=links1;*(int*)(map+0x7c8)=2;
+    /* The fallback limited these to 32768; now they apply in full. */
+    r=room;r.xyz[1]=40000;assert(fit(map,&room,&r,&reason)&&r.xyz[1]==40000&&!strstr(g_note,"limited"));
+    assert(strstr(g_note,"Play will use world-area cell size 1024: 2112 world areas and 2111 area nodes (512 would give 8320 and 8319"));
+    r=room;r.xyz[0]=64062;r.xyz[1]=62846;r.xyz[2]=32671;
+    /* Only the map boundary limits it (this double's room sits off-centre in Y). */
+    assert(fit(map,&room,&r,&reason)&&r.xyz[0]==64062&&r.xyz[1]==62782&&r.xyz[2]==32671&&!strstr(g_note,"render area limit"));
+    assert(strstr(g_note,"Play will use world-area cell size 1024: 4160 world areas and 4159 area nodes (512 would give 16512 and 16511"));
+    /* Within 512, nothing is said. */
+    r=room;r.xyz[1]=20000;assert(fit(map,&room,&r,&reason)&&r.xyz[1]==20000&&!g_note[0]);
+    /* The reported map: no over-limit note, and shrinking back says 512 again. */
+    *(void**)records[0]=sh_grid_native_wrapper(&big);
+    r=big;r.xyz[2]=30000;assert(fit(map,&big,&r,&reason)&&r.xyz[2]==30000&&!strstr(g_note,"already has"));
+    assert(strstr(g_note,"cell size 1024"));
+    r=big;r.xyz[0]=32000;r.xyz[1]=32000;assert(fit(map,&big,&r,&reason)&&r.xyz[0]==32000&&r.xyz[1]==32000);
+    assert(strstr(g_note,"native world-area cell size 512 again: 4160 world areas"));
+    /* Play's own count of the map as placed. */
+    assert(sh_grid_native_render_cell(map,&choice)&&choice.fits&&choice.cell==1024&&
+           choice.count.areas==4160&&choice.count.nodes==4159&&choice.native.areas==16512);
+    *(void**)records[0]=sh_grid_native_wrapper(&room);
+    assert(sh_grid_native_render_cell(map,&choice)&&choice.cell==512&&choice.count.areas==4160);
+    /* A record without a loaded module is not counted. */
+    *(void**)records[0]=NULL;assert(!sh_grid_native_render_cell(map,&choice));
+    assert(!sh_grid_native_render_cell(NULL,&choice));
+    *(void**)records[0]=sh_grid_native_wrapper(&room);
+    /* Without the redirect the map is counted at 512 only. */
+    sh_grid_native_set_adaptive_cells(0);*(void**)records[0]=sh_grid_native_wrapper(&big);
+    assert(sh_grid_native_render_cell(map,&choice)&&!choice.fits&&choice.cell==512&&choice.count.areas==16512);
+    *(void**)records[0]=sh_grid_native_wrapper(&room);
+    environment_limit=16000;
+}
 /* The template census names the entities a loaded room receives and flags
  * templates that lost their definition. */
 static void census_checks(void)
@@ -539,6 +626,8 @@ int main(void)
     palette_order_checks();
     layout_checks();
     edit_rule_checks();
+    area_rule_checks();
+    adaptive_area_checks();
     census_checks();
     containment_checks();
     assert(find_variant(editor+0x206c0,"unrelated.decl")==end_record(editor+0x206c0));

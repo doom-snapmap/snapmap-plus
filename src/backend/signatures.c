@@ -1165,6 +1165,12 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "F3 0F 10 15 ?? ?? ?? ?? 41 83 CC FF 44 8B B1 58 07 00 00 0F 28 C2 F3 41 0F 59 01", 0x11F45CCu, 0x11F37ECu },
     { "ModulePickFocus", /* Module Mode focus ray: MOVSS xmm0,[snapEdit_modulePickingDistance]. */
       "F3 0F 10 05 ?? ?? ?? ?? 48 8B 86 C8 04 02 00 F3 0F 10 35", 0x1257A58u, 0x1256F58u },
+    /* SnapMap world-area cell size (snaphak-re editor-fixes-13954591 R-018,
+     * R-019): BuildRenderWorld's load of the 512.0 subdivision size, the
+     * fifth argument of its one subdivision call. Unique on both build
+     * 13954591 executables at the recorded RVAs. */
+    { "WorldAreaCellLoad", /* MOVSS xmm0,[rip+disp32 -> 512.0]; MOVSS [rsp+0x20],xmm0; LEA r9; LEA r8; XOR edx,edx. */
+      "F3 0F 10 05 ?? ?? ?? ?? F3 0F 11 44 24 20 4C 8D 4C 24 50 4C 8D 85 E0 01 00 00 33 D2 49 8B CF E8", 0x114FF66u, 0x114F166u },
     /* Grid Room Size sub-editor refresh after an outside size change
      * (snaphak-re editor-fixes-13954591 R-016). Unique on both build 13954591
      * executables at the recorded RVAs. */

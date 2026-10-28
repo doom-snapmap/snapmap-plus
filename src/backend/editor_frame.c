@@ -15,6 +15,7 @@
 #include <shlobj.h>
 
 #include "editor_frame.h"
+#include "world_area_cell.h"
 #include "hook.h"
 #include "backend_log.h"
 #include "engine_globals.h"
@@ -406,6 +407,9 @@ static void sh_editor_frame_detour(void *editor, void *arg)
 
     if (InterlockedCompareExchange(&g_faulted, 0, 0) != 0) return;
     if (editor == NULL) return;
+
+    /* One read unless a map was just opened (logs its world-area cell size). */
+    sh_world_area_cell_editor_tick();
 
     /* Service only explicit save requests after the engine has settled this frame. */
     if (InterlockedCompareExchange(&g_save_pending, 0, 0) != 0) ef_service_rawmap_save(editor);

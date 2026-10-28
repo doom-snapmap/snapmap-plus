@@ -27,6 +27,7 @@
 #include "settings_tab.h"
 #include "map_bounds.h"
 #include "editor_zoom.h"
+#include "world_area_cell.h"
 #include "grid_room_snap.h"
 #include "navmesh.h"
 #include "nav_bake.h"
@@ -365,6 +366,8 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
             backend_log("RENDER: per-map rendering controls unavailable on this build");
         if(sh_map_bounds_install(results,db,g_doom_base))(void)sh_map_bounds_settings_register();
         (void)sh_editor_zoom_install(results,db,g_doom_base);
+        /* After the Grid Room install: the cell choice counts its module bounds. */
+        (void)sh_world_area_cell_install(results,db,g_doom_base);
 
         /* Navigation geometry follows editor actions rather than a poll. */
         sh_apply_engine_install_edit_hook(results, db);

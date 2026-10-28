@@ -30,6 +30,19 @@ already extends past the limit (a lowered cvar, an older map) can still be
 shrunk. `sh_gridsize` resizes the selected room from the console through the
 same path.
 
+Play divides the map into world areas, culling cells at most 512 units wide
+on X and Y, and DOOM refuses to load a map with more than 8192 areas or 8192
+area nodes (its loading screen then never returns). A single modern room
+reaches that at about 32768 x 32768. Snapmap+ counts the areas when Play
+builds the map: a map that fits keeps DOOM's 512-unit areas exactly, and a
+larger one is built with the smallest coarser size (1024, 2048 and so on)
+that fits, so oversized rooms load. Coarser areas mean coarser visibility
+culling, so very large maps draw more of themselves each frame. The log names
+the size Play uses when a map is opened, on each Play and after a resize that
+needs a coarser size. On a build where the size cannot be changed, a resize
+that would cross the limit is cut back on the changed axis to the largest
+size that loads instead.
+
 ## Map rendering
 
 DOOM's native Settings > Properties panel includes a map-wide View Distance

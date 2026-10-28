@@ -12,6 +12,7 @@
 #include "nav_heap_queue.h"
 #include "map_bounds.h"
 #include "map_render.h"
+#include "world_area_cell.h"
 
 void backend_log(const char *message);
 
@@ -231,6 +232,8 @@ static int nav_snapbuild_detour(void *a, void *b, void *c)
     __try {
         sh_map_render_build(b);
         sh_map_bounds_build(b);
+        /* Before the native build subdivides the map into world areas. */
+        sh_world_area_cell_build(b);
         sh_nav_bake_build_begin();
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         backend_log("NAV: the pre-build editor snapshot faulted");
@@ -240,6 +243,7 @@ static int nav_snapbuild_detour(void *a, void *b, void *c)
         return g_orig(a, b, c);
     } __finally {
         g_build_map=NULL;g_instance_resource[0]=0;
+        sh_world_area_cell_build_end();
         sh_nav_bake_build_end();
     }
 }

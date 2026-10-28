@@ -2,3 +2,6 @@
  * bounds hooks those files call are exercised by map_bounds_test instead. */
 void sh_map_bounds_loaded(void *snapshot){(void)snapshot;}
 void sh_map_bounds_build(void *map){(void)map;}
+void sh_world_area_cell_build(void *map){(void)map;}
+void sh_world_area_cell_build_end(void){}
+void sh_world_area_cell_map_opened(void){}

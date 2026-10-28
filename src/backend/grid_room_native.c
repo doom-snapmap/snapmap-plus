@@ -16,6 +16,9 @@
 #include "overrides.h"
 #include "process_heap_scope.h"
 #include "hook.h"
+#include "grid_room_areas.h"
+#include "engine_build.h"
+#include "engine_cvar_read.h"
 
 void backend_log(const char *message);
 typedef void *(*find_module_fn)(void *,const char *);
@@ -83,6 +86,8 @@ static refresh_surfaces_fn g_refresh_surfaces;
 static containing_module_fn g_containing_module;
 static module_ray_fn g_module_ray;
 static const float *g_environment_bounds;
+static const void *g_cvar_slot;
+static void *g_portal_cvar;
 static entity_tree_fn g_entity_tree;
 static entity_tree_apply_fn g_apply_tree,g_read_properties;
 static tree_vec_fn g_tree_vec;
@@ -729,16 +734,161 @@ static void describe_limit(char *out,size_t capacity,int instance,int module,int
         module==instance?"the edited room":"connected module",module,"xyz"[bound%3],reach,
         fabsf(edge)>limit+.5f?"its existing extent":"the map boundary",edge);
 }
+/* BuildRenderWorld drops pieces outside their module only while
+ * sm_testPortalSystem (default 1, command line only) is set. */
+static int area_cull(void)
+{
+    int value=1;
+    if(!g_portal_cvar&&g_cvar_slot)g_portal_cvar=sh_engine_cvar_find(g_cvar_slot,SH_IDCVAR_NAME_FOR_LOOKUP,"sm_testPortalSystem");
+    if(g_portal_cvar&&sh_engine_cvar_read_int(g_portal_cvar,&value))return value!=0;
+    return 1;
+}
+/* Set by world_area_cell.c once Play's world-area cell size is redirected:
+ * a map over 8192 areas at 512 units then builds with coarser cells, so a
+ * resize is limited only when no cell size up to SH_RENDER_AREA_CELL_MAX fits. */
+static int g_adaptive_cells;
+void sh_grid_native_set_adaptive_cells(int live){g_adaptive_cells=live!=0;}
+static float area_cell_max(void){return g_adaptive_cells?SH_RENDER_AREA_CELL_MAX:SH_RENDER_AREA_CELL;}
+/* The render areas and nodes the map would have with the room at size, with
+ * the cell size Play would choose. 1 counted, 0 refused by the planner (with
+ * *reason), -1 not countable. */
+static int count_areas(unsigned char *map,int instance,const sh_grid_size *before,const sh_grid_size *size,
+                       grid_move *moves,int n,int *links,int ports,const char **reason,
+                       const float (*allowed)[6],sh_render_cell_choice *out)
+{
+    float (*boxes)[6];int i,ok;
+    if(!plan_size(map,instance,before,size,moves,n,links,ports,reason))return 0;
+    if(allowed&&!admissible(moves,n,allowed,NULL,NULL))return -1;
+    boxes=malloc((size_t)n*sizeof *boxes);if(!boxes)return -1;
+    for(i=0;i<n;++i)memcpy(boxes[i],moves[i].bounds,sizeof boxes[i]);
+    ok=sh_render_area_cell_choose((const float(*)[6])boxes,n,area_cull(),area_cell_max(),out);free(boxes);
+    return ok?1:-1;
+}
+/* Loads at some cell size, or adds no area or node to a map that is already
+ * over the limit (compared at the coarsest size, the one Play would use). */
+static int areas_admitted(const sh_render_cell_choice *count,const sh_render_cell_choice *base)
+{
+    return count->fits||(count->coarsest.areas<=base->coarsest.areas&&count->coarsest.nodes<=base->coarsest.nodes);
+}
+static void describe_cells(char *out,size_t capacity,const sh_render_cell_choice *c)
+{
+    if(g_adaptive_cells)snprintf(out,capacity," even with %.0f-unit world areas",c->cell);
+    else if(capacity)out[0]=0;
+}
+/* The limit applies in full only when the cell size cannot follow the map. */
+static const char *cells_fallback(void)
+{
+    return g_adaptive_cells?"":"; the world-area cell size cannot follow the map on this build";
+}
+/* Limit the axis just fitted to the map boundary so the map keeps at most
+ * SH_RENDER_AREA_MAX world areas and SH_RENDER_NODE_MAX area nodes at the
+ * cell size Play would choose; an over-limit map loads with a ParseAreas or
+ * ParseNodes error that leaves the native loading screen waiting forever.
+ * With the adaptive cell size this only binds for layouts that do not fit
+ * even at the coarsest size. The count is a step function of the size, so
+ * the largest admitted value is found by bisection and every value taken is
+ * counted. Returns 0 only for a planner refusal. */
+static int limit_areas(unsigned char *map,int instance,const sh_grid_size *before,sh_grid_size *accepted,
+                       int axis,unsigned start,unsigned want,grid_move *moves,int n,int *links,int ports,
+                       const float (*allowed)[6],const char **reason,int *reported)
+{
+    sh_grid_size probe=*accepted;sh_render_cell_choice base,count,over;
+    unsigned value=accepted->xyz[axis],kept=start,span,low=0,high;int grow=value>start,r;
+    char message[360],cells[96];
+    if(value==start)return 1;
+    probe.xyz[axis]=start;
+    if((r=count_areas(map,instance,before,&probe,moves,n,links,ports,reason,NULL,&base))<1){
+        if(r<0)note("GRID: render areas could not be counted for this layout; the render area limit was not checked");
+        return r<0;}
+    if(!base.fits&&!*reported){*reported=1;describe_cells(cells,sizeof cells,&base);
+        snprintf(message,sizeof message,
+            "GRID: this map already has %lld world areas and %lld area nodes%s, over the engine maximum of %d each; Play cannot load it until rooms are made smaller%s",
+            base.count.areas,base.count.nodes,cells,SH_RENDER_AREA_MAX,cells_fallback());note(message);}
+    probe.xyz[axis]=value;
+    if((r=count_areas(map,instance,before,&probe,moves,n,links,ports,reason,NULL,&count))<1){
+        if(r<0)note("GRID: render areas could not be counted for this size; the render area limit was not checked");
+        return r<0;}
+    if(areas_admitted(&count,&base))return 1;
+    over=count;span=grow?value-start:start-value;high=span;
+    /* low steps are admitted, high steps are not. */
+    while(high-low>1){
+        unsigned mid=low+(high-low)/2;
+        probe.xyz[axis]=grow?start+mid:start-mid;
+        r=count_areas(map,instance,before,&probe,moves,n,links,ports,reason,allowed,&count);
+        if(!r)return 0;
+        if(r>0&&areas_admitted(&count,&base))low=mid;else{high=mid;if(r>0)over=count;}
+    }
+    kept=grow?start+low:start-low;accepted->xyz[axis]=kept;
+    probe.xyz[axis]=grow?start+high:start-high;
+    describe_cells(cells,sizeof cells,&over);
+    if(kept==start)snprintf(message,sizeof message,
+        "GRID: %c already at the render area limit: requested %u, kept %u; %u would give the map %lld world areas and %lld area nodes%s (engine maximum %d each)%s",
+        "XYZ"[axis],want,start,probe.xyz[axis],over.count.areas,over.count.nodes,cells,SH_RENDER_AREA_MAX,cells_fallback());
+    else snprintf(message,sizeof message,
+        "GRID: %c request %u limited to %u by the render area limit: %u would give the map %lld world areas and %lld area nodes%s (engine maximum %d each)%s",
+        "XYZ"[axis],want,kept,probe.xyz[axis],over.count.areas,over.count.nodes,cells,SH_RENDER_AREA_MAX,cells_fallback());
+    note(message);
+    return 1;
+}
+/* After a size change, say which world-area cell size Play will use when
+ * the map needs (or needed) more than the native 512. */
+static void report_cells(unsigned char *map,int instance,const sh_grid_size *before,const sh_grid_size *after,
+                         grid_move *moves,int n,int *links,int ports)
+{
+    sh_render_cell_choice was,now;const char *reason=NULL;char message[320];
+    if(!g_adaptive_cells||!memcmp(before,after,sizeof *before))return;
+    if(count_areas(map,instance,before,after,moves,n,links,ports,&reason,NULL,&now)<1)return;
+    if(now.cell==SH_RENDER_AREA_CELL){
+        if(count_areas(map,instance,before,before,moves,n,links,ports,&reason,NULL,&was)<1||was.cell==SH_RENDER_AREA_CELL)return;
+        snprintf(message,sizeof message,
+            "GRID: Play will use the native world-area cell size 512 again: %lld world areas and %lld area nodes",
+            now.count.areas,now.count.nodes);
+    } else if(now.fits)snprintf(message,sizeof message,
+        "GRID: Play will use world-area cell size %.0f: %lld world areas and %lld area nodes (512 would give %lld and %lld; engine maximum %d each)",
+        now.cell,now.count.areas,now.count.nodes,now.native.areas,now.native.nodes,SH_RENDER_AREA_MAX);
+    else return; /* limit_areas already said why the map cannot load. */
+    note(message);
+}
+/* Play's cell choice for the map as it is: one GridWorldBounds box per
+ * placed module record. Engine thread. Returns 0 when it cannot be counted. */
+int sh_grid_native_render_cell(void *map_object,sh_render_cell_choice *out)
+{
+    unsigned char *map=(unsigned char*)map_object,*records,*wrapper,*module;
+    float (*boxes)[6]=NULL;int n,i,k,ok=0;
+    if(!map||!out||!g_world_bounds)return 0;
+    __try {
+        n=*(int*)(map+0x758);records=*(unsigned char**)(map+0x750);
+        if(n<1||n>4096||!records)__leave;
+        boxes=malloc((size_t)n*sizeof *boxes);if(!boxes)__leave;
+        for(i=0;i<n;++i){
+            if(!(wrapper=*(unsigned char**)(records+(size_t)i*0x98))||!(module=*(unsigned char**)wrapper))__leave;
+            g_world_bounds(records+(size_t)i*0x98,boxes[i],(const float*)(module+0xa0));
+            for(k=0;k<6;++k)if(!isfinite(boxes[i][k]))__leave;
+        }
+        ok=sh_render_area_cell_choose((const float(*)[6])boxes,n,area_cull(),area_cell_max(),out);
+    } __except(EXCEPTION_EXECUTE_HANDLER) {ok=0;}
+    free(boxes);
+    return ok;
+}
+/* The map open in the editor, or NULL. */
+void *sh_grid_native_editor_map(void)
+{
+    void *map=NULL;
+    if(!g_editor)return NULL;
+    __try {if(g_editor[8])map=*(void**)(g_editor+0x204c8);} __except(EXCEPTION_EXECUTE_HANDLER) {map=NULL;}
+    return map;
+}
 /* Fit a requested size to the map boundary. Only the axes the request
  * changes are ever altered; each moves from its current value toward the
- * request as far as the boundary admits. Every limited axis is logged with
- * the limiting module, coordinate and limit. Returns 0 only for a refusal
- * (with *reason); a request limited to the current size returns 1. */
+ * request as far as the boundary admits, then as far as the render area
+ * limit admits. Every limited axis is logged with the limiting module,
+ * coordinate and limit. Returns 0 only for a refusal (with *reason); a
+ * request limited to the current size returns 1. */
 static int fit_size(unsigned char *map,int instance,const sh_grid_size *before,
                     sh_grid_size *size,const char **reason,float (*allowed)[6])
 {
     int n=*(int*)(map+0x758),ports=*(int*)(map+0x7c8),*links=*(int**)(map+0x7c0);
-    int i,k,axis,ok=0;grid_move *current=NULL,*request=NULL;sh_grid_size accepted=*before;
+    int i,k,axis,pass,ok=0,reported=0;grid_move *current=NULL,*request=NULL;sh_grid_size accepted=*before;
     float limit=grid_world_limit();char message[320],where[160];
     if(n<1||n>4096||ports<0||ports>16384||!links||!*(void**)(map+0x7d8)){
         *reason=say("GRID: map module tables are unavailable (%d modules, %d portals); dimensions unchanged",n,ports);return 0;}
@@ -754,14 +904,19 @@ static int fit_size(unsigned char *map,int instance,const sh_grid_size *before,
             i==instance?"the edited room":"connected module",i,"xyz"[k%3],allowed[i][k],limit);
         note(message);
     }
-    for(axis=0;axis<3;++axis){
-        double t=1;int module=-1,bound=-1,grow;
-        unsigned value,start=accepted.xyz[axis],want=size->xyz[axis];
-        sh_grid_size probe=accepted;
-        if(want==start)continue;
+    /* Shrinking axes first: a request that grows one axis while shrinking
+     * another is then fitted against the smaller layout, which normally
+     * leaves more room (map bounds and render areas) for the grown axis. */
+    for(pass=0;pass<6;++pass){
+        double t=1;int module=-1,bound=-1,grow;unsigned value,start,want;sh_grid_size probe=accepted;
+        axis=pass%3;start=accepted.xyz[axis];want=size->xyz[axis];
+        if(want==start||(want>start)!=(pass>=3))continue;
         grow=want>start;probe.xyz[axis]=want;
         if(!plan_size(map,instance,before,&probe,request,n,links,ports,reason))goto done;
-        if(admissible(request,n,(const float(*)[6])allowed,NULL,NULL)){accepted=probe;continue;}
+        if(admissible(request,n,(const float(*)[6])allowed,NULL,NULL)){accepted=probe;
+            if(!limit_areas(map,instance,before,&accepted,axis,start,want,request,n,links,ports,
+                (const float(*)[6])allowed,reason,&reported))goto done;
+            continue;}
         if(!plan_size(map,instance,before,&accepted,current,n,links,ports,reason))goto done;
         /* Bounds are affine in one dimension between two valid sizes. */
         for(i=0;i<n;++i)if(request[i].assigned)for(k=0;k<6;++k){
@@ -792,7 +947,10 @@ static int fit_size(unsigned char *map,int instance,const sh_grid_size *before,
         else snprintf(message,sizeof message,
             "GRID: %c request %u limited to %u by the map boundary: %s","XYZ"[axis],want,value,where);
         note(message);
+        if(!limit_areas(map,instance,before,&accepted,axis,start,want,request,n,links,ports,
+            (const float(*)[6])allowed,reason,&reported))goto done;
     }
+    report_cells(map,instance,before,&accepted,request,n,links,ports);
     *size=accepted;ok=1;
 done:free(current);free(request);return ok;
 }
@@ -1037,6 +1195,7 @@ int sh_grid_native_install(const sig_result *r,size_t n,const uint8_t *base)
         }
     }
     g_editor=(unsigned char*)glb_resolve(base,"editor_singleton",NULL);
+    g_cvar_slot=(const void*)glb_resolve(base,"cvar_system_slot",NULL);
     if(!find||!has||!collision||!containing||!g_module_ray||!g_refresh_surfaces||!g_environment_bounds||!g_load||!g_ctor||!g_dtor||!g_anchor||!g_type||!g_register||!g_source||!g_decl||
         !g_generic_load||!g_editor||!g_replace||!g_reconnect||!g_edit_entity||!g_set_transform||
         !g_portal_bounds||!g_world_bounds||!g_entity_tree||!g_apply_tree||!g_read_properties||

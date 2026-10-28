@@ -1,5 +1,6 @@
 #include "map_bounds.h"
 #include "map_render.h"
+#include "world_area_cell.h"
 /* DeserializeFromJson detour: optionally substitute a file-backed rawmap,
  * prepare the chosen JSON, then call the native parser. The temporary buffer
  * lives through the call. An unavailable source falls back to engine JSON.
@@ -352,6 +353,7 @@ static int deser_prepared(const char *json, void *out_map)
     int rc = g_deser_orig(prepared ? prepared : json, out_map);
     if (rc) sh_map_render_loaded(out_map);
     if (rc) sh_map_bounds_loaded(out_map);
+    if (rc) sh_world_area_cell_map_opened();
     if (prepared) HeapFree(GetProcessHeap(), 0, prepared);
     return rc;
 }

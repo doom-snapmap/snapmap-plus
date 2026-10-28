@@ -2,6 +2,7 @@
 #define SH_GRID_ROOM_NATIVE_H
 #include "grid_room.h"
 #include "signatures.h"
+#include "grid_room_areas.h"
 #include <stdint.h>
 
 /* Bind the private module lookup on a quiescent boot thread. Runtime creation
@@ -18,4 +19,13 @@ int sh_grid_native_selected(int instance,const float *requested,sh_grid_size *ou
 /* Print the stock modern room's and every cached variant's module entity
  * templates (the entities a loaded room receives), one line each. */
 int sh_grid_native_templates(void (*print)(const char *line));
+/* world_area_cell.c reports whether Play's world-area cell size follows the
+ * map; while it does, resizes are not limited by the 8192 render area limit
+ * unless no cell size fits. */
+void sh_grid_native_set_adaptive_cells(int live);
+/* Count a map's placed modules (map object: records at +0x750, count +0x758)
+ * and choose Play's world-area cell size. Engine thread; 0 if not countable. */
+int sh_grid_native_render_cell(void *map,sh_render_cell_choice *out);
+/* The map open in the editor, or NULL. */
+void *sh_grid_native_editor_map(void);
 #endif
