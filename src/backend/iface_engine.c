@@ -28,6 +28,7 @@
 #include "snapstack.h"
 #include "rawmap.h"
 #include "editor_delete.h"
+#include "module_prefab.h"
 #include "engine_build.h"
 
 /* Editor layout. */
@@ -1211,6 +1212,7 @@ int sh_iface_engine_install(const sig_result *results, size_t n, const uint8_t *
     sh_editor_delete_install(results, n, module_base, g_editor, manipulation_in_progress);
     slots.delete_entities        = slot_delete_entities;      /* +0x350 ext 29 */
     slots.prefab_grab_status     = slot_prefab_grab_status;   /* +0x358 ext 30 */
+    slots.module_prefab          = sh_module_prefab_slot;     /* +0x360 ext 31 */
 
     slots.enum_decls_of_resclass = slot_enum_decls_of_resclass;/* +0x110 */
 

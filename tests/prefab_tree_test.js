@@ -97,5 +97,36 @@ check(cfg.indexOf('"prefabs.open_folders", SH_JSON_ARRAY, "[]"') !== -1, 'the se
 const css = fs.readFileSync(path.join(__dirname, '..', 'src', 'ui', 'webview', 'studio.css'), 'utf8');
 check(css.indexOf('.pf-folder-body::before') !== -1 && css.indexOf('.pf-folder-head.selected') !== -1, 'folder guide line and folder selection are styled');
 
+/* Module prefabs: the footprint layout fits every module and the anchor into the box. */
+const fpApi = {};
+const fpBegin = src.indexOf('  function pfFootprintLayout(');
+const fpEnd = src.indexOf('  // --- prefab tree (pure) end ---', fpBegin);
+new Function('api', src.slice(fpBegin, fpEnd) + '\napi.pfFootprintLayout = pfFootprintLayout;')(fpApi);
+let lay = fpApi.pfFootprintLayout([], 300, 200, 20);
+check(lay.rects.length === 0 && lay.anchor === null, 'no modules gives no rects');
+const mods = [
+  {name: 'a/room_a', label: 'Room A', bounds: {min: [-512, -512, 0], max: [512, 512, 768]}},
+  {name: 'b/hall', bounds: {min: [512, -256, 0], max: [1024, 256, 384]}},
+  {name: 'c/noBounds'}
+];
+lay = fpApi.pfFootprintLayout(mods, 300, 200, 20);
+check(lay.rects.length === 2, 'modules without bounds are skipped');
+check(lay.rects[0].label === 'Room A' && lay.rects[1].label === 'hall', 'labels use the display name or the last path segment');
+check(lay.rects.every(r => r.x >= 20 && r.y >= 20 && r.x + r.w <= 280.01 && r.y + r.h <= 180.01), 'every rect stays inside the padded box: ' + JSON.stringify(lay.rects));
+check(Math.abs(lay.rects[0].w - 1024 * lay.scale) < 0.01 && Math.abs(lay.rects[1].h - 512 * lay.scale) < 0.01, 'rects scale uniformly');
+check(lay.rects[1].x >= lay.rects[0].x + lay.rects[0].w - 0.01, 'the hall sits to the right of the room');
+check(Math.abs(lay.anchor[0] - (lay.rects[0].x + lay.rects[0].w / 2)) < 0.01 && Math.abs(lay.anchor[1] - (lay.rects[0].y + lay.rects[0].h / 2)) < 0.01, 'the anchor (0,0) is the centre of the first room');
+check(lay.rects[0].y + lay.rects[0].h > lay.rects[1].y + lay.rects[1].h - 0.01, 'y grows upward on the canvas (top-down view)');
+lay = fpApi.pfFootprintLayout([{name: 'far', bounds: {min: [2000, 2000, 0], max: [2100, 2100, 10]}}], 300, 200, 20);
+check(lay.anchor[0] >= 20 && lay.anchor[1] <= 180 && lay.rects[0].x + lay.rects[0].w <= 280.01, 'the anchor is kept in view even when every module is far from it');
+
+/* Contract strings between the page and the host for module prefabs. */
+check(src.indexOf("prefabKinds = d.kinds || {};") !== -1, 'the list message carries a kinds map');
+check(src.indexOf("d.kind === 'editorMode'") !== -1, 'the editor mode message is handled');
+check(src.indexOf("cmd: npModuleMode ? 'createModulePrefab' : 'createPrefab'") !== -1, 'Blueprint creates a module prefab');
+check(src.indexOf("d.kind === 'createModulePrefabResult'") !== -1 && src.indexOf("d.prefabKind === 'modules'") !== -1, 'module create and place results are handled');
+check(src.indexOf('id="pcFootprint"') !== -1 && src.indexOf('id="pcKindPill"') !== -1, 'the footprint canvas and the kind pill exist');
+check(css.indexOf('.pf-kind') !== -1 && css.indexOf('.pc-kind-pill') !== -1, 'the kind badge and pill are styled');
+
 console.log('prefab_tree_test: ' + failures + ' failures');
 process.exit(failures ? 1 : 0);

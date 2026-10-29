@@ -24,6 +24,7 @@
 #include "grid_room_native.h"
 #include "grid_room_editor.h"
 #include "fly_to.h"
+#include "module_prefab.h"
 #include "map_render.h"
 #include "settings_tab.h"
 #include "map_bounds.h"
@@ -368,6 +369,7 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
         /* Bind apply dependencies before publishing their interface slots. */
         sh_apply_engine_install(results, db, g_doom_base, cmdsys);
         sh_fly_to_install(results, db);
+        sh_module_prefab_install(results, db, g_doom_base);
         if(grid_installed&&
            !sh_grid_editor_install(results,db,sh_grid_native_read,sh_grid_native_apply))
             backend_log("GRID: native dimension properties unavailable on this build");

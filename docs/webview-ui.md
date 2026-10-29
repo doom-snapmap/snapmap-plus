@@ -74,6 +74,16 @@ rename, delete and folder operations are native filesystem work. Feedback and
 crash submission use a short-lived HTTPS worker in the host and the
 [feedback pipeline](feedback.md).
 
+## Page and host messages added for the tab trees
+
+| Direction | Message | Meaning |
+|---|---|---|
+| host to page | `editorMode {entityMode, blueprint}` | The editor state, posted on change: module prefabs place only in Blueprint, object prefabs and new timelines in Object mode. |
+| page to host | `movePrefabs {names, fromFolders, toFolder}` / `deletePrefabs {names, folders}` | A multi-selection drop or delete, one tick, one `movePrefabsResult` / `deletePrefabsResult`, one list refresh. |
+| page to host | `flyTo {eid}` | Apply kind 4: the EditorFrame detour switches to Object mode and aims the camera at the entity; `flyToResult` confirms the queue only. |
+| page to host | `createModulePrefab {name}` | Save the modules selected in Blueprint, with their entities, as a module prefab (`~type` `idSnapMap`); `createModulePrefabResult` carries the sidecar summary. `loadPrefab` routes by the file's `~type` and answers with `prefabKind`. |
+| page to host | `setDisplayNames {eids, names}` | Batch display-name writes through the `set_displayname` slot; the Timelines tree uses them for folder moves and renames. |
+
 ## Driving the page from a test
 
 A file `%LOCALAPPDATA%\snapmap-plus\devtools-port` containing one port number (1024 to

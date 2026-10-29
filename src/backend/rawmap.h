@@ -85,6 +85,14 @@ int sh_rawmap_live_serialize_ready(void);
 int sh_rawmap_write_from_live(void *map, const char *destination, char *out_msg, int msg_capacity,
                               unsigned long long *out_bytes);
 
+/* The open edit map as JSON, copied into the process heap (free with HeapFree). No
+ * navigation embedding, no mirror, no save side effects. MAIN THREAD ONLY. */
+int sh_rawmap_serialize_live_copy(void *edit_map, char **out, size_t *out_len);
+
+/* Native DeserializeFromJson without the load swap or the map-open side effects
+ * (`native` is used when the detour is not installed). MAIN THREAD ONLY. */
+int sh_rawmap_deserialize_plain(void *native, const char *json, void *out_map);
+
 /* Set the mirror destination. NULL restores the default
  * %LOCALAPPDATA%/snapmap-plus/rawmap.json. The default matches the load
  * source; explicit overrides are independent. Returns 1 if accepted.

@@ -40,7 +40,9 @@ SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, run_on_main) == 0x348);
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, delete_entities) == 0x350);
 /* ext 30: what the Create grab-frame guard did on the last serialize_selection. */
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, prefab_grab_status) == 0x358);
-SH_STATIC_ASSERT(sizeof(sh_iface_vtbl) == 0x360);
+/* ext 31: Blueprint module prefabs (state, save, place, status). */
+SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, module_prefab) == 0x360);
+SH_STATIC_ASSERT(sizeof(sh_iface_vtbl) == 0x368);
 SH_STATIC_ASSERT(sizeof(sh_prefab_grab_info) == 16);
 SH_STATIC_ASSERT(sizeof(sh_delete_result) == 40);
 SH_STATIC_ASSERT(offsetof(sh_iface, sub) == 0x58);
@@ -72,6 +74,13 @@ static int stub_grab_status(sh_iface *self, sh_prefab_grab_info *out)
     return 2;
 }
 
+static int stub_module_prefab(sh_iface *self, sh_module_prefab_call *call)
+{
+    (void)self;
+    if (!call) return 0;
+    if (call->op == SH_MODULE_PREFAB_STATE) { call->blueprint = 1; call->entity_mode = 0; return 1; }
+    return -1;
+}
 /* A frontend must never read a slot the backend's vtable does not have. */
 static int check_vtable_size_contract(sh_iface *iface)
 {
@@ -83,6 +92,7 @@ static int check_vtable_size_contract(sh_iface *iface)
     if (sh_iface_vtbl_bytes(&legacy) != SH_IFACE_LEGACY_VTBL_BYTES) return 0;
     if (SH_IFACE_HAS_SLOT(&legacy, delete_entities)) return 0;
     if (SH_IFACE_HAS_SLOT(&legacy, prefab_grab_status)) return 0;
+    if (SH_IFACE_HAS_SLOT(&legacy, module_prefab)) return 0;
     if (!SH_IFACE_HAS_SLOT(&legacy, run_on_main)) return 0;   /* nonzero filler counts as bound */
     if (sh_iface_vtbl_bytes(NULL) != 0) return 0;
     if (sh_iface_vtbl_bytes(iface) != (uint32_t)sizeof(sh_iface_vtbl)) return 0;
@@ -165,6 +175,23 @@ int main(void)
         if (!SH_IFACE_HAS_SLOT(iface, prefab_grab_status) ||
             iface->vtbl->prefab_grab_status(iface, &info) != 2 || info.distance != 128.0f) {
             fprintf(stderr, "iface_config_test: grab-status slot was not bound\n");
+            return 1;
+        }
+    }
+
+    if (SH_IFACE_HAS_SLOT(iface, module_prefab)) {
+        fprintf(stderr, "iface_config_test: unbound module-prefab slot reported present\n");
+        return 1;
+    }
+    engine_slots.module_prefab = stub_module_prefab;
+    sh_iface_bind_engine_slots(&engine_slots);
+    {
+        sh_module_prefab_call call;
+        memset(&call, 0, sizeof call);
+        call.op = SH_MODULE_PREFAB_STATE;
+        if (!SH_IFACE_HAS_SLOT(iface, module_prefab) ||
+            iface->vtbl->module_prefab(iface, &call) != 1 || call.blueprint != 1) {
+            fprintf(stderr, "iface_config_test: module-prefab slot was not bound\n");
             return 1;
         }
     }

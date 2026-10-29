@@ -282,6 +282,7 @@ void sh_iface_bind_engine_slots(const sh_iface_engine_slots *s)
     g_iface_vtbl_live.run_on_main             = s->run_on_main;             /* +0x348 */
     g_iface_vtbl_live.delete_entities         = s->delete_entities;         /* +0x350 */
     g_iface_vtbl_live.prefab_grab_status      = s->prefab_grab_status;      /* +0x358 */
+    g_iface_vtbl_live.module_prefab           = s->module_prefab;           /* +0x360 */
 }
 
 /* Allocate the fixed object and private subobject with an empty registry/queue. */

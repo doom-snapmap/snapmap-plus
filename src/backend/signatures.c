@@ -1242,5 +1242,27 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "80 3D ?? ?? ?? ?? 00 74 2A 44 8B CE 44 8B C5 48 8D 15 ?? ?? ?? ?? 48 8B CB E8 ?? ?? ?? ?? 44 8B CE 44 8B C5 48 8D 15 ?? ?? ?? ?? 48 8B CB E8 ?? ?? ?? ?? B9 0A 00 00 00 E8 ?? ?? ?? ?? 48 83 3D ?? ?? ?? ?? 00", 0x1901E63u, 0x18FAD41u },
     { "BootReadPoll", /* UncachedBackgroundRead completion poll: done byte [rsp+0x70], abort [rsi+0x10], MOV ECX,1; CALL Sleep. */
       "0F B6 44 24 70 84 C0 75 1B 0F B6 46 10 84 C0 75 13 B9 01 00 00 00 E8 ?? ?? ?? ?? 0F B6 44 24 70 84 C0 74 E5", 0x1938EA8u, 0x192D818u },
+    /* Module prefabs (snaphak-re editor-feature-requests R-002, R-003). Every
+     * entry verified on both build 13954591 executables. */
+    { "SnapMapCtor", /* idSnapMap in-place ctor (0x778 bytes): writes version 0x6f at +0. VK 1245b60, GL 1245190. */
+      "4C 8B DC 49 89 4B 08 56 57 41 56 48 83 EC 40 49 C7 43 C8 FE FF FF FF 49 89 5B 18 49 89 6B 20 48 8B F9 C7 01 6F 00 00 00", 0x1245B60u, 0x1245190u },
+    { "SnapMapDtor", /* idSnapMap dtor, paired with SnapMapCtor by EditorMapToJson. VK fcdcf0, GL fcd230. */
+      "40 57 48 83 EC 30 48 C7 44 24 20 FE FF FF FF 48 89 5C 24 40 48 89 74 24 48 48 8B F9 0F B6 81 6B 07 00 00 33 F6 84 C0 74", 0xFCDCF0u, 0xFCD230u },
+    { "SnapMapValidate", /* int(idSnapMap*, res98, res88): 0 = valid. RepairAndMigrate, duplicate-id and ref checks. VK 12488e0, GL 1247f10. */
+      "40 55 56 57 41 54 41 55 41 56 41 57 48 8D AC 24 E0 E1 FF FF B8 20 1F 00 00 E8 ?? ?? ?? ?? 48 2B E0 48 C7 44 24 78 FE FF", 0x12488E0u, 0x1247F10u },
+    { "SnapMapEditCtor", /* idSnapMapEdit(out 0xdd0, settings 0x550, idSnapMap*, res98, res88); ends in GridReconnectPortals. VK 11f1520, GL 11f0850. */
+      "48 8B C4 48 89 48 08 57 41 54 41 55 41 56 41 57 48 83 EC 50 48 C7 40 A8 FE FF FF FF 48 89 58 10 48 89 68 18 48 89 70 20 49", 0x11F1520u, 0x11F0850u },
+    { "SnapMapEditDtor", /* idSnapMapEdit dtor (the undo push frees with it). VK 114a9a0, GL 11499f0. */
+      "40 57 48 83 EC 30 48 C7 44 24 20 FE FF FF FF 48 89 5C 24 40 48 8B D9 48 81 C1 B8 0D 00 00 E8 ?? ?? ?? ?? 90 0F B6 83 AB", 0x114A9A0u, 0x11499F0u },
+    { "ModuleRedoAction", /* Module Mode redo handler: CALL Redo(editor) at +0x13, then event 0x29 and mode+0x1070 = 0x101. VK 126e4b0, GL 126daa0. */
+      "48 89 5C 24 08 57 48 83 EC 20 49 8B C8 49 8B F8 48 8B DA E8 ?? ?? ?? ?? 84 C0 74 21 45 33 C0 C7 44 24 48 29 00 00 00 48", 0x126E4B0u, 0x126DAA0u },
+    { "ModuleSelect", /* char(selection, module index): the Module Mode select (merge into editData+0x68). VK 11fd980, GL 11fcc90. */
+      "4C 8B DC 56 57 41 56 48 83 EC 40 49 C7 43 C8 FE FF FF FF 49 89 5B 10 49 89 6B 18 4C 8B F1 33 FF C7 44 24 38 00 00 05 00", 0x11FD980u, 0x11FCC90u },
+    { "EditorCursorPos", /* int2 *(editor+0x20, int2 *out): the editor cursor. VK 118dc70, GL 118cdd0. */
+      "48 89 5C 24 08 57 48 83 EC 20 48 8B 0D ?? ?? ?? ?? 48 8B FA 48 8B 01 FF 90 D8 01 00 00 48 8B 0D ?? ?? ?? ?? 8B 58 10 48", 0x118DC70u, 0x118CDD0u },
+    { "ModuleCursorFloor", /* float3 *(mode, float3 *out, editor, const int2 *cursor): the Blueprint floor point under the cursor. VK 1257640, GL 1256b40. */
+      "40 53 48 83 EC 20 44 8B 51 0C 48 8B DA 41 83 EA 01 74 2B 41 83 FA 01 74 11 33 C9 48 8B 01 FF 50 38 48 8B C3 48 83 C4 20", 0x1257640u, 0x1256B40u },
+    { "EditorBudgetUpdate", /* void(editor): recompute the editor budget; writes the limits-reached byte editor+0x236d0. VK 118b070, GL 118a1d0. */
+      "40 55 B8 50 41 00 00 E8 ?? ?? ?? ?? 48 2B E0 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 84 24 F0 40 00 00 83 3D ?? ?? ?? ?? 00", 0x118B070u, 0x118A1D0u },
     { NULL, NULL, 0 }   /* terminator */
 };

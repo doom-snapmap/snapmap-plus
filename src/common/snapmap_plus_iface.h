@@ -2,7 +2,7 @@
  * interface object and callbacks; both DLLs must build against this header.
  * The 0x60-byte object has a vtable at +0 and subobject pointer at +0x58.
  * The original 77-slot prefix ends at +0x260; append-only extensions end
- * at +0x358, making the current vtable 0x360 bytes. The backend records that
+ * at +0x360, making the current vtable 0x368 bytes. The backend records that
  * size in the object (see sh_iface_vtbl_bytes); check it before calling a
  * slot at or past +0x350.
  * Engine layouts remain private to backend implementations. Reserved cells
@@ -303,6 +303,39 @@ typedef struct sh_prefab_grab_info {
     float outside;          /* native grab point's distance outside the hovered box, <0 unknown */
 } sh_prefab_grab_info;
 typedef int (*sh_prefab_grab_status_fn)(struct sh_iface *self, sh_prefab_grab_info *out); /* +0x358 (ext 30) */
+/* Module prefabs: Blueprint modules saved with their entities, placed in another
+ * map's Blueprint mode (backend/module_prefab.c). One slot, four operations.
+ *   STATE  any thread. blueprint = editor in Blueprint (state 1), entity_mode =
+ *          Object Mode (state 2). Returns 1, or 0 when no editor is open.
+ *   SAVE   any thread except the game thread (it marshals its capture there and
+ *          waits). Cuts the selected modules out of the open map and writes path
+ *          (the prefab) and meta_path (the sidecar); out receives the sidecar
+ *          body. Returns 1 saved, -1 failed, -2 not in Blueprint, -3 no module
+ *          selected.
+ *   PLACE  any thread. Validates and merges text (a module prefab file) into the
+ *          open map, then stages the install for the game's next frames.
+ *          Returns 2 accepted (poll STATUS with the returned seq), -1 unreadable,
+ *          -4 not in Blueprint, 0 refused (busy or the map could not be read).
+ *   STATUS any thread. For the placement seq: 2 pending, 1 placed and grabbed,
+ *          0 the engine refused, -5 over the editor's budget, -1 unreadable.
+ *          out receives a short message. */
+#define SH_MODULE_PREFAB_STATE  1
+#define SH_MODULE_PREFAB_SAVE   2
+#define SH_MODULE_PREFAB_PLACE  3
+#define SH_MODULE_PREFAB_STATUS 4
+typedef struct sh_module_prefab_call {
+    int         op;
+    const char *path;        /* SAVE: prefab file */
+    const char *meta_path;   /* SAVE: sidecar file */
+    const char *text;        /* PLACE: prefab file text */
+    size_t      text_len;
+    char       *out;         /* SAVE: sidecar body; STATUS/PLACE: message */
+    int         out_cap;
+    int         seq;         /* PLACE out; STATUS in */
+    int         blueprint;   /* STATE out */
+    int         entity_mode; /* STATE out */
+} sh_module_prefab_call;
+typedef int (*sh_module_prefab_fn)(struct sh_iface *self, sh_module_prefab_call *call); /* +0x360 (ext 31) */
 
 typedef int (*sh_resolve_prefab_defaults_fn)(struct sh_iface *self, const char *inherit_name,
                                              char *out_model, int out_capacity,
@@ -513,6 +546,7 @@ typedef struct sh_iface_vtbl {
     sh_run_on_main_fn          run_on_main;          /* +0x348 (ext 28) main-thread call */
     sh_delete_entities_fn      delete_entities;      /* +0x350 (ext 29) native batch delete */
     sh_prefab_grab_status_fn   prefab_grab_status;   /* +0x358 (ext 30) Create grab-frame guard result */
+    sh_module_prefab_fn        module_prefab;        /* +0x360 (ext 31) Blueprint module prefabs */
 } sh_iface_vtbl;
 
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, config_get_json) == 0x2B0);
@@ -537,7 +571,8 @@ SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, navmesh_view) == 0x340);
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, run_on_main) == 0x348);
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, delete_entities) == 0x350);
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, prefab_grab_status) == 0x358);
-SH_STATIC_ASSERT(sizeof(sh_iface_vtbl) == 0x360);
+SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, module_prefab) == 0x360);
+SH_STATIC_ASSERT(sizeof(sh_iface_vtbl) == 0x368);
 SH_STATIC_ASSERT(sizeof(sh_prefab_grab_info) == 16);
 SH_STATIC_ASSERT(sizeof(sh_delete_result) == 40);
 
@@ -702,6 +737,7 @@ typedef struct sh_iface_engine_slots {
     sh_run_on_main_fn          run_on_main;                 /* +0x348 (ext 28) */
     sh_delete_entities_fn      delete_entities;             /* +0x350 (ext 29) */
     sh_prefab_grab_status_fn   prefab_grab_status;          /* +0x358 (ext 30) */
+    sh_module_prefab_fn        module_prefab;               /* +0x360 (ext 31) */
 } sh_iface_engine_slots;
 
 void sh_iface_bind_engine_slots(const sh_iface_engine_slots *slots);

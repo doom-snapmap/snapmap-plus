@@ -17,6 +17,7 @@
 #include "editor_frame.h"
 #include "world_area_cell.h"
 #include "fly_to.h"
+#include "module_prefab.h"
 #include "hook.h"
 #include "backend_log.h"
 #include "engine_globals.h"
@@ -414,6 +415,8 @@ static void sh_editor_frame_detour(void *editor, void *arg)
 
     /* A queued fly-to advances one phase per frame; idle costs one read. */
     sh_fly_to_tick(editor);
+    /* A staged module prefab installs, then follows its grab, one step per frame. */
+    sh_module_prefab_tick(editor);
 
     /* Service only explicit save requests after the engine has settled this frame. */
     if (InterlockedCompareExchange(&g_save_pending, 0, 0) != 0) ef_service_rawmap_save(editor);

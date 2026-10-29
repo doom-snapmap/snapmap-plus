@@ -160,4 +160,38 @@ bool get_double(const std::wstring &j, const wchar_t *key, double *out)
     return true;
 }
 
+std::string top_level_type(const std::string &text)
+{
+    size_t i = 0, n = text.size();
+    int depth = 0, want = 0;          // 0 key, 1 colon, 2 value, 3 rest of the value
+    std::string key;
+    auto skip_comment = [&](size_t at) -> size_t {
+        if (at + 1 >= n || text[at] != '/') return at;
+        if (text[at + 1] == '/') { size_t e = text.find('\n', at); return e == std::string::npos ? n : e; }
+        if (text[at + 1] == '*') { size_t e = text.find("*/", at + 2); return e == std::string::npos ? n : e + 1; }
+        return at;
+    };
+    for (; i < n; i++) {
+        char c = text[i];
+        if (c == '/') { i = skip_comment(i); continue; }
+        if (c == '"') {
+            size_t b = i + 1, e = b;
+            while (e < n && text[e] != '"') { if (text[e] == '\\') e++; e++; }
+            if (e >= n) return "";
+            if (depth == 1 && want == 0) { key = text.substr(b, e - b); want = 1; }
+            else if (depth == 1 && want == 2) {
+                if (key == "~type") return text.substr(b, e - b);
+                want = 3;
+            }
+            i = e;
+            continue;
+        }
+        if (c == ':' && depth == 1 && want == 1) { want = 2; continue; }
+        if (c == '{' || c == '[') { if (depth == 1 && want == 2) want = 3; depth++; continue; }
+        if (c == '}' || c == ']') { depth--; if (depth <= 0) return ""; continue; }
+        if (c == ',' && depth == 1) { want = 0; continue; }
+    }
+    return "";
+}
+
 }

@@ -999,6 +999,56 @@ int sh_rawmap_write_from_live(void *map, const char *destination, char *out_msg,
     return 1;
 }
 
+/* The open edit map as JSON in a process-heap copy, with no save side effects:
+ * no navigation embedding and no mirror. MAIN THREAD ONLY. *out is freed with
+ * HeapFree(GetProcessHeap()). */
+int sh_rawmap_serialize_live_copy(void *edit_map, char **out, size_t *out_len)
+{
+    unsigned char blk[IDSTR_SIZE];
+    unsigned char rc = 0;
+    int len = 0, ok = 0;
+    const char *data = NULL;
+    if (out) *out = NULL;
+    if (out_len) *out_len = 0;
+    if (!out || !edit_map || !sh_rawmap_live_serialize_ready()) return 0;
+    memset(blk, 0, sizeof blk);
+    __try {
+        g_idstr_ctor(blk, "");
+        g_snapshot_depth++;
+        __try { rc = g_map_to_json(edit_map, blk, 1); }
+        __finally { g_snapshot_depth--; }
+        len  = *(const int *)(blk + IDSTR_LEN_OFF);
+        data = *(const char *const *)(blk + IDSTR_DATA_OFF);
+        if (rc && data && len > 0) {
+            char *copy = (char *)HeapAlloc(GetProcessHeap(), 0, (size_t)len + 1);
+            if (copy) {
+                memcpy(copy, data, (size_t)len);
+                copy[len] = 0;
+                *out = copy;
+                if (out_len) *out_len = (size_t)len;
+                ok = 1;
+            }
+        }
+        g_idstr_dtor(blk);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        InterlockedExchange(&g_live_faulted, 1);
+        backend_log("B1: rawmap live-serialize FAULTED (copy); disabled for this session");
+        if (*out) { HeapFree(GetProcessHeap(), 0, *out); *out = NULL; }
+        return 0;
+    }
+    return ok;
+}
+
+/* Parse map JSON into an idSnapMap through the native parser only, bypassing
+ * the load swap and every per-map-open side effect. `native` is the resolved
+ * DeserializeFromJson, used when the detour is not installed. MAIN THREAD. */
+int sh_rawmap_deserialize_plain(void *native, const char *json, void *out_map)
+{
+    deser_fn_t fn = g_deser_orig ? g_deser_orig : (deser_fn_t)native;
+    if (!fn || !json || !out_map) return 0;
+    return fn(json, out_map);
+}
+
 static unsigned long long write_shadow_to(const char *data, size_t len, const char *path)
 {
     static volatile LONG sequence;

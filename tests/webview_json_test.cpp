@@ -53,6 +53,12 @@ int main()
     CHECK(names.empty());
     get_string_array(batch, L"missing", names);
     CHECK(names.empty());
+    // Load/Place routes a prefab file by its top-level ~type.
+    CHECK(top_level_type("{\"entities\":[{\"~type\":\"idSnapEntity\"}],\"~type\":\"idSnapMap\",\"~version\":111}") == "idSnapMap");
+    CHECK(top_level_type("{\r\n   /*string variables*/\r\n   \"x\" : {\"~type\" : \"idSnapMap\"},\r\n   \"~type\" : \"idSnapEntityPrefab\",\r\n   \"~version\" : 0\r\n}") == "idSnapEntityPrefab");
+    CHECK(top_level_type("{\"a\":\"~type\",\"b\":1}").empty());
+    CHECK(top_level_type("[]").empty());
+    CHECK(top_level_type("").empty());
     std::printf("webview_json_test: %d failures\n", failed);
     return failed != 0;
 }

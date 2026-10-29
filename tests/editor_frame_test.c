@@ -11,6 +11,7 @@ static int map_a, map_b;
 void backend_log(const char *message) { (void)message; }
 void sh_world_area_cell_editor_tick(void) {}
 void sh_fly_to_tick(void *editor) { (void)editor; }
+void sh_module_prefab_tick(void *editor) { (void)editor; }
 uintptr_t glb_resolve(const uint8_t *base, const char *name, glb_status *status)
 { (void)base; (void)name; (void)status; return 0; }
 void *hook_prepare(void *target, void *detour, size_t stolen)

@@ -245,6 +245,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       <div class="panel-body pad prefab-card" id="prefabCard" style="display:none;">
         <div class="pc-preview" id="pcPreview">
           <canvas id="pcCanvas" aria-label="Interactive 3D prefab preview"></canvas>
+          <canvas id="pcFootprint" aria-label="Top-down footprint of the module prefab" style="display:none;"></canvas>
+          <div class="pc-kind-pill" id="pcKindPill" style="display:none;">Blueprint prefab</div>
           <div class="pc-preview-status" id="pcPreviewStatus">Preparing preview...</div>
           <div class="pc-preview-count" id="pcEntityCount"></div>
           <div class="pc-preview-legend" aria-hidden="true">
@@ -280,7 +282,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       <div class="panel-head">
         <span class="panel-title">Timelines</span><span class="badge" id="tlBadge">0</span>
         <div class="panel-actions">
-          <button type="button" class="btn primary icon icon-button" id="createTimelineBtn" disabled title="Create New Timeline (not implemented -- place a timeline from the in-game SnapMap palette instead)." aria-label="Create New Timeline"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-plus"></use></svg></button>
+          <button type="button" class="btn icon icon-button" id="tlNewFolderBtn" title="New Folder: group timelines by name (a folder lives in its timelines' names as Folder/Name)" aria-label="New Folder"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-folder-plus"></use></svg></button>
+          <button type="button" class="btn primary icon icon-button" id="createTimelineBtn" disabled title="Create New Timeline: open a map in the editor first" aria-label="Create New Timeline"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-plus"></use></svg></button>
         </div>
       </div>
       <div class="panel-toolbar">
@@ -463,6 +466,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   var ENTITY_SHOW_HIDDEN_KEY = 'entities.show_hidden';
   var ENTITY_SELECTION_MODE_KEY = 'entities.selection_mode';
   var PREFAB_OPEN_FOLDERS_KEY = 'prefabs.open_folders';
+  var TIMELINE_OPEN_FOLDERS_KEY = 'timelines.open_folders';
   var entitySettingsPending = { showHidden:null, selectionMode:null };
   var entitySettingsHydrated = false;
   var inheritsRequested = false;
@@ -623,7 +627,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     {eid:49, id:'0_ind_totally_blank_room_4x/snapmaps/filter/droppable_49', name:'', hidden:true}
   ];
   var previewPrefabs = {
-    root: ['Stairs 384x192', 'UAC VTOL (Static) - Dredge'],
+    root: ['Stairs 384x192', 'UAC VTOL (Static) - Dredge', 'Hangar Block'],
     folders: [
       {name: 'Doors', items: ['AirLock Door']},
       {name: 'Encounters', items: ['Corpse Dropper', 'Loadout Station 01']}
@@ -632,6 +636,19 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   function previewFolderIndex(name) { for (var i = 0; i < previewPrefabs.folders.length; i++) if (previewPrefabs.folders[i].name === name) return i; return -1; }
   function previewFolderList(folder) { if (!folder) return previewPrefabs.root; var idx = previewFolderIndex(folder); return idx === -1 ? null : previewPrefabs.folders[idx].items; }
   var previewMetaBodies = {};   // preview stand-in for the "<name>.meta.json" sidecars, keyed "<folder>/<name>"
+  previewMetaBodies['Hangar Block'] = JSON.stringify({desc: 'Two hangar rooms and the hall between them', tags: ['industrial'], kind: 'modules',
+    moduleCount: 3, entityCount: 14, doorCount: 2, variableCount: 1, droppedWires: 1, droppedRefs: 0, hasNavigationBoxes: true,
+    environments: ['ind_lazarus'], bounds: {min: [-1024, -512, 0], max: [2048, 1536, 768]},
+    modules: [
+      {name: '0_ind_totally_blank_room_4x', label: 'Hangar A', origin: [0, 0, 0], rotation: 0, size: [1024, 1024, 768], bounds: {min: [-512, -512, 0], max: [512, 512, 768]}},
+      {name: 'ind_hall_2x', label: 'Hall', origin: [1024, 0, 0], rotation: 1, size: [512, 1024, 384], bounds: {min: [512, -512, 0], max: [1024, 512, 384]}},
+      {name: '0_ind_totally_blank_room_4x', label: 'Hangar B', origin: [1536, 512, 0], rotation: 2, size: [1024, 1024, 768], bounds: {min: [1024, 0, 0], max: [2048, 1536, 768]}}
+    ]});
+  function previewKindsMap() {
+    var m = {};
+    for (var k in previewMetaBodies) { try { var p = JSON.parse(previewMetaBodies[k]); if (p && p.kind === 'modules') m[k] = 'modules'; } catch (e) {} }
+    return m;
+  }
   function previewMetaMap() {
     var m = {};
     for (var k in previewMetaBodies) {
@@ -639,8 +656,9 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     }
     return m;
   }
-  function previewSendPrefabs() { onMessage({kind:'prefabs', root: previewPrefabs.root, folders: previewPrefabs.folders, meta: previewMetaMap()}); }
+  function previewSendPrefabs() { onMessage({kind:'prefabs', root: previewPrefabs.root, folders: previewPrefabs.folders, meta: previewMetaMap(), kinds: previewKindsMap()}); }
   var previewPrefabDetails = {
+    'Hangar Block': {count: 14, scene: ''},
     'AirLock Door': {count: 3},
     'Corpse Dropper': {count: 2},
     'Loadout Station 01': {count: 45},
@@ -694,7 +712,9 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   var previewTimelines = [
     {eid:101, id:'0_ind_totally_blank_room_4x/snapmaps/unknown_101', name:'Intro Sequence'},
     {eid:102, id:'0_ind_totally_blank_room_4x/snapmaps/unknown_102', name:'Wave 1 Spawns'},
-    {eid:103, id:'0_ind_totally_blank_room_4x/snapmaps/unknown_103', name:''}
+    {eid:103, id:'0_ind_totally_blank_room_4x/snapmaps/unknown_103', name:''},
+    {eid:104, id:'0_ind_totally_blank_room_4x/snapmaps/unknown_104', name:'Arena/Wave 2 Spawns'},
+    {eid:105, id:'0_ind_totally_blank_room_4x/snapmaps/unknown_105', name:'Arena/Boss'}
   ];
   // sample serialized-entity JSON per preview timeline (the shape parseTimeline walks). 101 = populated,
   // 102 = empty componentTimeLine, 103 = no timeline data at all.
@@ -1148,8 +1168,21 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     // material/snapmap/dynamic_block_textured_hell_cave_facade's actual .vmtr row.
     else if (o.cmd === 'newEntity') {
       // preview only: no engine to stage into, so just prove the authored prefab parses.
-      var neOk = false; try { neOk = !!JSON.parse(o.json); } catch (e) { neOk = false; }
+      var neOk = false, neParsed = null; try { neParsed = JSON.parse(o.json); neOk = !!neParsed; } catch (e) { neOk = false; }
       onMessage({kind:'newEntityResult', result: neOk ? 1 : -1, label: o.label});
+      if (neOk && o.label === 'Timeline') {   // the mock "places" it at once
+        var neEid = 200 + previewTimelines.length, neName = (neParsed.entities && neParsed.entities[0] && neParsed.entities[0].displayName) || 'New Timeline';
+        previewTimelines.push({eid: neEid, id: '0_ind_totally_blank_room_4x/snapmaps/unknown_' + neEid, name: neName});
+        setTimeout(function(){ onMessage(previewList()); }, 50);
+      }
+    }
+    else if (o.cmd === 'setDisplayNames') {
+      for (var sdi = 0; sdi < (o.eids || []).length; sdi++) {
+        for (var sdt = 0; sdt < previewTimelines.length; sdt++) if (previewTimelines[sdt].eid === o.eids[sdi]) previewTimelines[sdt].name = o.names[sdi];
+        for (var sde = 0; sde < previewEnts.length; sde++) if (previewEnts[sde].eid === o.eids[sdi]) previewEnts[sde].name = o.names[sdi];
+      }
+      onMessage({kind:'setDisplayNamesResult', applied: (o.eids || []).length, failed: 0});
+      setTimeout(function(){ onMessage(previewList()); }, 50);
     }
     else if (o.cmd === 'materialRect')   { onMessage({kind:'materialRect', name:o.name, ok:true,
                                                       x:88320, y:138240, w:3840, h:3840}); }
@@ -1176,7 +1209,17 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       }
     }
     else if (o.cmd === 'delete') { previewEnts = previewEnts.filter(function(e){ return o.eids.indexOf(e.eid) < 0; }); onMessage(previewList()); }
-    else if (o.cmd === 'listPrefabs') { previewSendPrefabs(); }
+    else if (o.cmd === 'listPrefabs') { previewSendPrefabs(); onMessage({kind:'editorMode', entityMode: 1, blueprint: 0}); }
+    else if (o.cmd === 'createModulePrefab') {
+      if (previewPrefabs.root.indexOf(o.name) !== -1) { onMessage({kind:'createModulePrefabResult', result:0, name:o.name}); return; }
+      previewPrefabs.root.push(o.name);
+      var cmSummary = {kind: 'modules', moduleCount: 1, entityCount: 3, doorCount: 0, variableCount: 0, droppedWires: 0, droppedRefs: 0, hasNavigationBoxes: false, environments: [],
+                       bounds: {min: [-512, -512, 0], max: [512, 512, 768]}, modules: [{name: '0_ind_totally_blank_room_4x', label: '', origin: [0,0,0], rotation: 0, size: [1024,1024,768], bounds: {min: [-512,-512,0], max: [512,512,768]}}]};
+      previewMetaBodies[o.name] = JSON.stringify(cmSummary);
+      previewPrefabDetails[o.name] = {count: 3, scene: ''};
+      onMessage({kind:'createModulePrefabResult', result:1, name:o.name, summary: cmSummary});
+      previewSendPrefabs();
+    }
     else if (o.cmd === 'selectPrefab') {
       var d = previewPrefabDetails[o.name];
       var mk = (o.folder ? o.folder + '/' : '') + o.name;
@@ -1613,36 +1656,174 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     return {matched:rows.length, mounted:windowPerf.mounted, ms:uiPerfNow()-started};
   }
 
+  // Timelines tree. A timeline's folder is the part of its display name before the first "/"
+  // (so "Arena/Wave 1" sits in "Arena"): folders travel with the map inside the names, need no
+  // extra storage, and read the same in the in-game logic view. A folder with nothing in it yet
+  // exists only in this window until a timeline is dropped into it. Moves, renames and folder
+  // deletions are display-name writes through setDisplayNames; the list follows the entity rescan.
+  // The visible-row, Shift-range and drop planning helpers are the Prefabs tab's pure functions
+  // (pfVisibleRows / pfRangeRows / pfPlanMove) fed with eids as item names.
+  var tlFolders = [];          // empty folders kept for this window (names)
+  var tlOpenFolders = {};      // folder name -> true, kept in the timelines.open_folders setting
+  var tlSel = [];              // [{folder, name:'<eid>'}] with name '' for a folder row
+  var tlAnchor = null;
+  var tlLabels = {};           // '<eid>' -> {leaf, id, name}
+  function tlSplitName(name) {
+    var i = (name || '').indexOf('/');
+    if (i <= 0 || i === name.length - 1) return {folder: '', leaf: name || ''};
+    return {folder: name.slice(0, i), leaf: name.slice(i + 1)};
+  }
+  function tlJoinName(folder, leaf) { return folder ? folder + '/' + leaf : leaf; }
+  function receiveTimelineOpenFolders(d) {
+    var names = [];
+    if (d.result === 1) { try { var parsed = JSON.parse(d.valueJson); if (Array.isArray(parsed)) names = parsed; } catch (e) {} }
+    tlOpenFolders = {};
+    for (var i = 0; i < names.length; i++) if (typeof names[i] === 'string' && names[i]) tlOpenFolders[names[i]] = true;
+    renderTimelineList();
+  }
+  function tlPersistOpenFolders() { if (!PREVIEW) configSet(TIMELINE_OPEN_FOLDERS_KEY, Object.keys(tlOpenFolders)); }
+  function tlSetFolderOpen(name, open) {
+    if (!name) return;
+    if (open) tlOpenFolders[name] = true; else delete tlOpenFolders[name];
+    tlPersistOpenFolders();
+  }
+  // The tree's data in the prefab helpers' shape: folders from the names plus the empty ones.
+  function tlTreeData() {
+    var byFolder = {}, order = [], root = [];
+    tlLabels = {};
+    for (var i = 0; i < allTimelines.length; i++) {
+      var t = allTimelines[i], sp = tlSplitName(t.name || ''), key = String(t.eid);
+      tlLabels[key] = {leaf: sp.leaf || t.id, id: t.id, name: t.name || '', folder: sp.folder};
+      if (sp.folder) { if (!byFolder[sp.folder]) { byFolder[sp.folder] = []; order.push(sp.folder); } byFolder[sp.folder].push(key); }
+      else root.push(key);
+    }
+    for (var f = 0; f < tlFolders.length; f++) if (tlFolders[f] && !byFolder[tlFolders[f]]) { byFolder[tlFolders[f]] = []; order.push(tlFolders[f]); }
+    order.sort(function(a, b){ return a.toLowerCase() < b.toLowerCase() ? -1 : a.toLowerCase() > b.toLowerCase() ? 1 : 0; });
+    var folders = [];
+    for (var o = 0; o < order.length; o++) folders.push({name: order[o], items: byFolder[order[o]]});
+    return {root: root, folders: folders};
+  }
+  function tlTagMap() {
+    var m = {};
+    for (var k in tlLabels) if (tlLabels.hasOwnProperty(k)) {
+      var l = tlLabels[k];
+      m[(l.folder ? l.folder + '/' : '') + k] = [l.leaf, l.id, l.name];
+    }
+    return m;
+  }
+  function tlSelKey(r) { return pfSelKey(r); }
+  function tlSelHas(r) { var k = tlSelKey(r); for (var i = 0; i < tlSel.length; i++) if (tlSelKey(tlSel[i]) === k) return true; return false; }
+  function tlRowOf(el) {
+    if (!el) return null;
+    if (el.classList.contains('tl-item')) return {folder: el.getAttribute('data-folder') || '', name: el.getAttribute('data-eid')};
+    if (el.classList.contains('pf-folder-head')) return {folder: el.parentNode.getAttribute('data-folder-name') || '', name: ''};
+    return null;
+  }
   function renderTimelineList() {
     var listEl = document.getElementById('timelineList'); if (!listEl) return;
     var filterEl = document.getElementById('timelineFilter');
     var filter = filterEl ? filterEl.value.toLowerCase() : '';
     var scroll = listEl.scrollTop;
-
-    var rows = allTimelines.filter(function(t){
-      if (!filter) return true;
-      return (t.name && t.name.toLowerCase().indexOf(filter) !== -1) || t.id.toLowerCase().indexOf(filter) !== -1;
-    });
-    document.getElementById('tlBadge').textContent = rows.length;   // panel-header count: rows actually shown
-
-    if (rows.length === 0) {
+    var data = tlTreeData();
+    var present = {}; for (var pi = 0; pi < data.folders.length; pi++) present[data.folders[pi].name] = true;
+    var pruned = false;
+    for (var on in tlOpenFolders) if (tlOpenFolders.hasOwnProperty(on) && !present[on]) { delete tlOpenFolders[on]; pruned = true; }
+    if (pruned) tlPersistOpenFolders();
+    document.getElementById('tlBadge').textContent = allTimelines.length;
+    var createBtn = document.getElementById('createTimelineBtn');
+    if (createBtn) {
+      var canCreate = PREVIEW || allEntities.length > 0;
+      createBtn.disabled = !canCreate;
+      createBtn.setAttribute('title', canCreate ? 'Create New Timeline: a new timeline is staged for placement in the 3D view and opens here once placed' : 'Create New Timeline: open a map in the editor first');
+    }
+    if (!allTimelines.length && !data.folders.length) {
       visibleTlEids = [];
-      listEl.innerHTML = '<div class="list-empty">' + (allTimelines.length === 0 ? 'No timelines (place one from the in-game SnapMap palette).' : 'No matches.') + '</div>';
+      listEl.innerHTML = '<div class="list-empty">No timelines yet -- press + to create one.</div>';
       return;
     }
-    visibleTlEids = rows.map(function(t){ return t.eid; });
-    var html = '';
-    for (var i = 0; i < rows.length; i++) {
-      var t = rows[i];
-      var cls = 'entity-item' + (selectedTlEid === t.eid ? ' selected' : '');
-      var label = t.name ? esc(t.name) : esc(t.id);
-      html += '<div class="' + cls + '" data-eid="' + t.eid + '" title="' + esc(t.id) + '">' + label + '</div>';
+    var rows = pfVisibleRows(data, tlTagMap(), filter, tlOpenFolders);
+    var h = '', openBody = false; visibleTlEids = [];
+    for (var r = 0; r < rows.length; r++) {
+      var row = rows[r];
+      if (!row.name) {
+        if (openBody) { h += '</div></div>'; openBody = false; }
+        h += '<div class="pf-folder' + (row.open ? ' pf-open' : '') + '" data-folder-name="' + esc(row.folder) + '">'
+           + '<div class="pf-folder-head" draggable="true"><span class="pf-caret">' + iconSvg('chevron-down') + '</span> <span class="pf-fname">' + esc(row.folder) + '</span><span class="pf-fcount">' + row.count + '</span><button type="button" class="pf-folder-del icon-button" title="Delete folder (its timelines move to the root)" aria-label="Delete folder">' + iconSvg('x') + '</button></div>'
+           + '<div class="pf-folder-body">';
+        openBody = true;
+        continue;
+      }
+      if (!row.folder && openBody) { h += '</div></div>'; openBody = false; }
+      var lab = tlLabels[row.name] || {leaf: row.name, id: ''};
+      var eidN = parseInt(row.name, 10);
+      visibleTlEids.push(eidN);
+      h += '<div class="pf-item tl-item' + (eidN === selectedTlEid ? ' open' : '') + '" draggable="true" data-folder="' + esc(row.folder) + '" data-eid="' + esc(row.name) + '" title="' + esc(lab.id) + '">' + esc(lab.leaf) + '</div>';
     }
-    listEl.innerHTML = html;
+    if (openBody) h += '</div></div>';
+    listEl.innerHTML = rows.length ? h : '<div class="list-empty">No matches.</div>';
+    // selection rows that vanished (deleted timelines, renamed folders) drop out
+    var keep = [];
+    for (var si = 0; si < tlSel.length; si++) {
+      var sr = tlSel[si];
+      if (sr.name ? (tlLabels[sr.name] && tlLabels[sr.name].folder === sr.folder) : !!present[sr.folder]) keep.push(sr);
+    }
+    tlSel = keep;
+    tlPaintSelection();
     listEl.scrollTop = scroll;
   }
-  // Move the Timelines-list selection to the next/previous VISIBLE row and open it, same effect as
-  // clicking that row (mirrors moveEntitySelection). delta is +1 (ArrowDown) or -1 (ArrowUp).
+  function tlPaintSelection() {
+    var listEl = document.getElementById('timelineList'); if (!listEl) return;
+    listEl.querySelectorAll('.selected').forEach(function(s){ s.classList.remove('selected'); });
+    listEl.querySelectorAll('.tl-item, .pf-folder-head').forEach(function(el){ var r = tlRowOf(el); if (r && tlSelHas(r)) el.classList.add('selected'); });
+    listEl.classList.toggle('pf-multi', tlSel.length > 1 || (tlSel.length === 1 && !tlSel[0].name));
+  }
+  function tlOpen(eid) {
+    if (eid === selectedTlEid && tlModel) return;   // already open -- don't silently discard unsaved edits on a re-click; use Revert for that
+    selectedTlEid = eid;
+    renderTimelineList();
+    post({cmd:'openTimeline', eid: selectedTlEid});
+  }
+  // Click selection: plain = this row only (a timeline opens); Ctrl = toggle; Shift = range.
+  function tlSelectRow(row, e) {
+    if (e && e.shiftKey) {
+      var filterEl = document.getElementById('timelineFilter');
+      tlSel = pfRangeRows(pfVisibleRows(tlTreeData(), tlTagMap(), filterEl ? filterEl.value : '', tlOpenFolders), tlAnchor, row);
+    } else if (e && (e.ctrlKey || e.metaKey)) {
+      if (tlSelHas(row)) { var k = tlSelKey(row); tlSel = tlSel.filter(function(r){ return tlSelKey(r) !== k; }); }
+      else tlSel.push(row);
+      tlAnchor = row;
+    } else {
+      tlSel = [row]; tlAnchor = row;
+      if (row.name) tlOpen(parseInt(row.name, 10));
+    }
+    tlPaintSelection();
+  }
+  // Rename timelines so they live in `toFolder` ('' = root); a selected folder moves its timelines.
+  function tlMoveSelection(toFolder) {
+    var plan = pfPlanMove(tlSel, tlTreeData(), toFolder);
+    if (!plan.moves.length) return;
+    var eids = [], names = [];
+    for (var i = 0; i < plan.moves.length; i++) {
+      var lab = tlLabels[plan.moves[i].name]; if (!lab) continue;
+      eids.push(parseInt(plan.moves[i].name, 10)); names.push(tlJoinName(toFolder, lab.leaf));
+    }
+    if (!eids.length) return;
+    tlSel = tlSel.filter(function(r){ return !!r.name; }).map(function(r){ return eids.indexOf(parseInt(r.name, 10)) !== -1 ? {folder: toFolder, name: r.name} : r; });
+    if (toFolder) tlSetFolderOpen(toFolder, true);
+    post({cmd:'setDisplayNames', eids: eids, names: names});
+    toast('Moving ' + eids.length + ' timeline' + (eids.length === 1 ? '' : 's') + (toFolder ? ' to "' + toFolder + '"' : ' to the root'), 'ok');
+  }
+  function tlRenameFolderTo(oldName, newName) {
+    var eids = [], names = [];
+    for (var k in tlLabels) if (tlLabels.hasOwnProperty(k) && tlLabels[k].folder === oldName) { eids.push(parseInt(k, 10)); names.push(tlJoinName(newName, tlLabels[k].leaf)); }
+    // a delete drops the folder from the empty-folder list; a rename re-labels it
+    tlFolders = tlFolders.filter(function(f){ return f && f !== oldName; });
+    if (newName && tlFolders.indexOf(newName) === -1 && !eids.length) tlFolders.push(newName);
+    if (tlOpenFolders[oldName]) { delete tlOpenFolders[oldName]; if (newName) tlSetFolderOpen(newName, true); else tlPersistOpenFolders(); }
+    if (eids.length) post({cmd:'setDisplayNames', eids: eids, names: names});
+    renderTimelineList();
+  }
+  // Move through visible timeline rows and open the one landed on (mirrors moveEntitySelection).
   function moveTimelineSelection(delta) {
     if (!visibleTlEids.length) return;
     var idx = (selectedTlEid !== -1) ? visibleTlEids.indexOf(selectedTlEid) : -1;
@@ -1650,11 +1831,55 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
                              : Math.min(visibleTlEids.length - 1, Math.max(0, idx + delta));
     var newEid = visibleTlEids[next];
     if (newEid === selectedTlEid) return;
-    selectedTlEid = newEid;
-    renderTimelineList();
-    post({cmd:'openTimeline', eid: selectedTlEid});
-    var row = document.querySelector('#timelineList .entity-item[data-eid="' + newEid + '"]');
+    var lab = tlLabels[String(newEid)];
+    tlSel = [{folder: lab ? lab.folder : '', name: String(newEid)}]; tlAnchor = tlSel[0];
+    tlOpen(newEid);
+    var row = document.querySelector('#timelineList .tl-item[data-eid="' + newEid + '"]');
     if (row) row.scrollIntoView({block: 'nearest'});
+  }
+  // Create New Timeline: a one-entity prefab (idTarget_Timeline on the portable inherit) staged for
+  // the editor's native paste, like the asset browser's New entity. It lands where the user clicks
+  // in Object mode and opens here as soon as the entity rescan lists it. A selected folder names it.
+  var tlCreatePending = null;   // {before: {eid:true}, folder}
+  function tlNewTimelinePrefab(displayName) {
+    var I = '               ';
+    return neePrefab({cls: 'idTarget_Timeline', inherit: 'snapmaps/unknown'},
+                     I + '"spawnPosition" : { "x" : 0, "y" : 0, "z" : 0 }', displayName);
+  }
+  function tlCreateTimeline() {
+    if (!PREVIEW && !allEntities.length) { toast('Open a map in the editor first', 'warn'); return; }
+    if (edMode.known && !edMode.entityMode) { toast('Switch to Object mode (Tab in the editor) first: a new timeline is placed in the 3D view', 'warn'); return; }
+    var folder = '';
+    if (tlSel.length === 1) folder = tlSel[0].name ? (tlLabels[tlSel[0].name] || {}).folder || '' : tlSel[0].folder;
+    else if (selectedTlEid !== -1 && tlLabels[String(selectedTlEid)]) folder = tlLabels[String(selectedTlEid)].folder;
+    var before = {}; for (var i = 0; i < allTimelines.length; i++) before[allTimelines[i].eid] = true;
+    tlCreatePending = {before: before, folder: folder};
+    post({cmd:'newEntity', label: 'Timeline', json: tlNewTimelinePrefab(tlJoinName(folder, 'New Timeline'))});
+  }
+  function tlOnNewEntityResult(d) {
+    if (d.result === 1) { toast('New timeline staged -- click in the 3D view to place it; it opens here once placed', 'ok'); return; }
+    tlCreatePending = null;
+    if (d.result === -2) toast('Move the mouse off that entity first -- the editor will not paste while hovering one', 'warn');
+    else if (d.result === -3) toast('Deselect in the 3D view first -- a new timeline cannot be pasted over a selection', 'warn');
+    else toast('Could not stage a new timeline (see log)', 'err');
+  }
+  // After a placement the rescan lists the new timeline: select and open it.
+  function tlCheckCreated() {
+    if (!tlCreatePending) return;
+    for (var i = 0; i < allTimelines.length; i++) {
+      var t = allTimelines[i];
+      if (!tlCreatePending.before[t.eid]) {
+        var lab = tlSplitName(t.name || '');
+        tlCreatePending = null;
+        tlSel = [{folder: lab.folder, name: String(t.eid)}]; tlAnchor = tlSel[0];
+        if (lab.folder) tlSetFolderOpen(lab.folder, true);
+        tlOpen(t.eid);
+        var tab = document.querySelector('.tabstrip .tab[data-tab=timelines]');
+        if (tab && !tab.classList.contains('active')) tab.click();
+        toast('Placed "' + (t.name || t.id) + '"', 'ok');
+        return;
+      }
+    }
   }
 
   // Timeline parsing and rendering.
@@ -1886,7 +2111,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   // Parse a serialized timeline entity into tlModel. Mirrors tl_collect_from_decl.
   function parseTimeline(eid, entityJson) {
     var doc;
-    try { doc = JSON.parse(entityJson); } catch (e) { return {eid:eid, ok:false, err:'parse'}; }
+    // the April 2024 build's serializer writes block comments; parseScene drops them before JSON.parse
+    try { doc = prefabTransform.parseScene(entityJson); } catch (e) { return {eid:eid, ok:false, err:'parse'}; }
     var edit = (((doc.entityDef || {}).state || {}).edit) || {};
     var comp = null, isEnc = false;
     if (edit.componentTimeLine) comp = edit.componentTimeLine;
@@ -1980,7 +2206,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   // Patch the rebuilt component into fresh entity JSON; return null for an invalid root shape.
   function tlBuildPatchedEntityJson(freshEntityJson) {
     var doc;
-    try { doc = JSON.parse(freshEntityJson); } catch (e) { return null; }
+    try { doc = prefabTransform.parseScene(freshEntityJson); } catch (e) { return null; }
     if (!doc || typeof doc.entityDef !== 'object' || doc.entityDef === null) return null;
     // A fresh entity can serialize state/edit as null. Check null explicitly before writing fields.
     if (typeof doc.entityDef.state !== 'object' || doc.entityDef.state === null) doc.entityDef.state = {};
@@ -2623,6 +2849,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
         } catch (e) {}
       } else if (d.key === PREFAB_OPEN_FOLDERS_KEY) {
         receivePrefabOpenFolders(d);
+      } else if (d.key === TIMELINE_OPEN_FOLDERS_KEY) {
+        receiveTimelineOpenFolders(d);
       } else {
         receiveEntitySetting(d);
       }
@@ -2630,7 +2858,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       var knownSetting = d.key === 'theme' ||
         d.key === ENTITY_SHOW_HIDDEN_KEY ||
         d.key === ENTITY_SELECTION_MODE_KEY ||
-        d.key === PREFAB_OPEN_FOLDERS_KEY;
+        d.key === PREFAB_OPEN_FOLDERS_KEY ||
+        d.key === TIMELINE_OPEN_FOLDERS_KEY;
       if (knownSetting && d.result !== 1)
         toast("Setting changed for this session, but couldn't be saved.", 'warn');
     } else if (d.kind === 'configStatus') {
@@ -2660,6 +2889,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       var tlExist = {}; for (var ti=0; ti<allTimelines.length; ti++) tlExist[allTimelines[ti].eid] = true;
       if (selectedTlEid !== -1 && !tlExist[selectedTlEid]) selectedTlEid = -1;
       renderTimelineList();
+      tlCheckCreated();
       /* One small acknowledgement per list publication gives the native log both sides of the bridge.
          It is intentionally event-driven (never part of the 330 ms unchanged-list poll). */
       post({cmd:'perfList', seq:(typeof d.seq === 'number' ? d.seq : 0),
@@ -2731,7 +2961,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     } else if (d.kind === 'materialRect') {
       onMaterialRect(d);
     } else if (d.kind === 'newEntityResult') {
-      onNewEntityResult(d);
+      if (tlCreatePending && d.label === 'Timeline') tlOnNewEntityResult(d); else onNewEntityResult(d);
     } else if (d.kind === 'soundPreviewResult') {
       onSoundPreviewResult(d);
     } else if (d.kind === 'assetList') {
@@ -2767,7 +2997,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     } else if (d.kind === 'entityInherit') {
       var slug = '';
       if (d.ok && d.json) {
-        try { var edoc = JSON.parse(d.json); slug = ((edoc.entityDef || {}).inherit) || ''; } catch (eiErr) { slug = ''; }
+        try { var edoc = prefabTransform.parseScene(d.json); slug = ((edoc.entityDef || {}).inherit) || ''; } catch (eiErr) { slug = ''; }
       }
       entityInheritCache[d.eid] = slug;
       // Re-render the active target after inheritance resolves so asset widgets replace their fallbacks.
@@ -2781,7 +3011,28 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       setCamField('camX', d.x); setCamField('camY', d.y); setCamField('camZ', d.z);
     } else if (d.kind === 'prefabs') {
       prefabTags = d.meta || {};
+      prefabKinds = d.kinds || {};
+      // a module prefab answers the words a reader would filter by, whatever its own tags say
+      for (var pk in prefabKinds) if (prefabKinds.hasOwnProperty(pk) && prefabKinds[pk] === 'modules')
+        prefabTags[pk] = (prefabTags[pk] || []).concat(['blueprint', 'modules']);
       renderPrefabList(d.root || [], d.folders || []);
+    } else if (d.kind === 'editorMode') {
+      edMode = {known: true, entityMode: d.entityMode ? 1 : 0, blueprint: d.blueprint ? 1 : 0};
+      pfRefreshModeUi(); updateCreateBtn();
+    } else if (d.kind === 'createModulePrefabResult') {
+      var cmMeta = pendingCreateMeta; pendingCreateMeta = null;
+      if (d.result === 1) {
+        // the host wrote the summary sidecar; fold the dialog's description and tags into it
+        var cmBody = {};
+        if (d.summary && typeof d.summary === 'object') cmBody = d.summary;
+        if (cmMeta && cmMeta.name === d.name) { try { var cmDt = JSON.parse(cmMeta.body); cmBody.desc = cmDt.desc; cmBody.tags = cmDt.tags; } catch (e) {} }
+        if (cmMeta && cmMeta.name === d.name) post({cmd:'savePrefabMeta', name: d.name, folder: '', body: JSON.stringify(cmBody)});
+        toast('Created module prefab "' + d.name + '"' + (d.summary && d.summary.moduleCount ? ' (' + d.summary.moduleCount + ' module' + (d.summary.moduleCount === 1 ? '' : 's') + ', ' + (d.summary.entityCount || 0) + ' object' + (d.summary.entityCount === 1 ? '' : 's') + ')' : ''), 'ok');
+      }
+      else if (d.result === 0) toast('A prefab named "' + d.name + '" already exists', 'warn');
+      else if (d.result === -2) toast('Switch to Blueprint mode (Tab in the editor) to save modules as a prefab', 'warn');
+      else if (d.result === -3) toast('Select one or more modules in Blueprint first', 'warn');
+      else toast('Could not create "' + d.name + '" (see log)', 'err');
     } else if (d.kind === 'prefabDetail') {
       renderPrefabDetail(d);
     } else if (d.kind === 'prefabModelResolved') {
@@ -2837,6 +3088,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       else if (d.result === 2) toast('Hover over one of the selected entities in the 3D view, then try again', 'warn');
       else if (d.result === 3) toast('Could not anchor "' + d.name + '" -- point the view centre at the hovered entity and try again', 'warn');
       else toast('Could not create "' + d.name + '" (see log)', 'err');
+    } else if (d.kind === 'setDisplayNamesResult') {
+      if (d.failed) toast('Could not rename ' + d.failed + ' timeline' + (d.failed === 1 ? '' : 's') + ' (editor down?)', 'err');
     } else if (d.kind === 'flyToResult') {
       if (d.result === 1) toast('Flying to entity ' + d.eid, 'ok');
       else toast('Could not fly to that entity (editor down?)', 'err');
@@ -2850,7 +3103,14 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       /* The backend drain owns the OUTCOME toast ("Ready -- move it into position..." vs the
          "press Ctrl+V" fallback), because only it knows whether the pick-up actually happened.
          This one just confirms the request was accepted. */
-      if (d.result === 1) toast('"' + d.name + '" staged -- press Ctrl+V in the 3D view to place it', 'ok');
+      if (d.prefabKind === 'modules') {
+        if (d.result === 1) toast('"' + d.name + '" is under the cursor -- move it into place and press Space, or Esc to cancel', 'ok');
+        else if (d.result === -1) toast('Could not read "' + d.name + '" (see log)', 'err');
+        else if (d.result === -4) toast('Switch to Blueprint mode (Tab in the editor) to place a module prefab', 'warn');
+        else if (d.result === -5) toast('"' + d.name + '" does not fit: the map would exceed its module budget', 'warn');
+        else toast('The editor refused to place "' + d.name + '" (see log)', 'err');
+      }
+      else if (d.result === 1) toast('"' + d.name + '" staged -- press Ctrl+V in the 3D view to place it', 'ok');
       else if (d.result === -1) toast('Could not read "' + d.name + '" (see log)', 'err');
       else toast('Could not stage "' + d.name + '" (editor down?)', 'err');
     } else if (d.kind === 'deletePrefabResult') {
@@ -2913,6 +3173,26 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   // every refresh -- the filesystem IS the truth, no separate client-side folder state to desync.
   var prefabData = {root: [], folders: []};
   var prefabTags = {};   // "<folder>/<name>" (or "<name>" at root) -> [tags], from the list message's meta map
+  var prefabKinds = {};  // "<folder>/<name>" -> "modules" for module prefabs (object prefabs are absent)
+  var selectedPrefabKind = '';   // kind of the prefab whose details are shown
+  var metaExtra = null;          // the loaded sidecar minus desc/tags (a module prefab's summary), kept on save
+  // The editor's mode, posted by the host: module prefabs place only in Blueprint, object prefabs in Object mode.
+  var edMode = {known: false, entityMode: 0, blueprint: 0};
+  function pfKindOf(folder, name) { return prefabKinds[(folder ? folder + '/' : '') + name] || 'objects'; }
+  function pfRefreshModeUi() {
+    var b = document.getElementById('prefabLoadBtn'); if (!b) return;
+    if (!selectedPrefabName) return;
+    if (selectedPrefabKind === 'modules') {
+      b.textContent = 'Place in Blueprint';
+      var can = !edMode.known || !!edMode.blueprint;
+      b.disabled = !can;
+      b.setAttribute('title', can ? 'Place these modules in the map: they appear under the cursor to position, Space places them'
+                                  : 'Switch to Blueprint mode (Tab in the editor) to place a module prefab');
+    } else {
+      b.textContent = 'Load / Place';
+      b.disabled = false; b.removeAttribute('title');
+    }
+  }
   var currentPrefabNames = [];   // root names only -- Create-from-selection always targets root
   var pendingCreateMeta = null;  // {name, body} from the New Prefab dialog, saved once the create succeeds
   // Folders start collapsed. The set of open folders is the user's, kept across refreshes, tab
@@ -2937,10 +3217,11 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   var pfSel = [];             // [{folder, name}] with name '' for a folder row
   var pfAnchor = null;        // the row a Shift-click ranges from
   function pfSelKey(r) { return (r.name ? 'p:' : 'f:') + r.folder + '/' + r.name; }
+  function pfItemName(el) { var t = el.firstChild; return t && t.nodeType === 3 ? t.nodeValue : el.textContent; }
   function pfSelHas(r) { var k = pfSelKey(r); for (var i = 0; i < pfSel.length; i++) if (pfSelKey(pfSel[i]) === k) return true; return false; }
   function pfRowOf(el) {
     if (!el) return null;
-    if (el.classList.contains('pf-item')) return {folder: el.getAttribute('data-folder') || '', name: el.textContent};
+    if (el.classList.contains('pf-item')) return {folder: el.getAttribute('data-folder') || '', name: pfItemName(el)};
     if (el.classList.contains('pf-folder-head')) return {folder: el.parentNode.getAttribute('data-folder-name') || '', name: ''};
     return null;
   }
@@ -3016,6 +3297,31 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     }
     return {moves: moves, skipped: skipped};
   }
+  // Fit module footprints (top-down, x right, y up) into a w x h box with padding: returns
+  // {scale, rects:[{x,y,w,h,label}], anchor:[x,y]} in canvas pixels. Empty input gives no rects.
+  function pfFootprintLayout(modules, w, h, pad) {
+    var out = {scale: 0, rects: [], anchor: null};
+    if (!modules || !modules.length || w <= 0 || h <= 0) return out;
+    var minx = Infinity, miny = Infinity, maxx = -Infinity, maxy = -Infinity, boxes = [];
+    for (var i = 0; i < modules.length; i++) {
+      var m = modules[i], b = m.bounds;
+      if (!b || !b.min || !b.max) continue;
+      boxes.push({x0: +b.min[0], y0: +b.min[1], x1: +b.max[0], y1: +b.max[1], label: m.label || (m.name || '').split('/').pop().replace(/\.decl$/, '')});
+      minx = Math.min(minx, +b.min[0]); miny = Math.min(miny, +b.min[1]); maxx = Math.max(maxx, +b.max[0]); maxy = Math.max(maxy, +b.max[1]);
+    }
+    if (!boxes.length) return out;
+    minx = Math.min(minx, 0); miny = Math.min(miny, 0); maxx = Math.max(maxx, 0); maxy = Math.max(maxy, 0);   // the anchor is always in view
+    var sw = maxx - minx || 1, sh = maxy - miny || 1;
+    var scale = Math.min((w - 2 * pad) / sw, (h - 2 * pad) / sh);
+    var ox = pad + ((w - 2 * pad) - sw * scale) / 2, oy = pad + ((h - 2 * pad) - sh * scale) / 2;
+    var X = function(x){ return ox + (x - minx) * scale; }, Y = function(y){ return h - (oy + (y - miny) * scale); };
+    for (var j = 0; j < boxes.length; j++) {
+      var bx = boxes[j];
+      out.rects.push({x: X(bx.x0), y: Y(bx.y1), w: (bx.x1 - bx.x0) * scale, h: (bx.y1 - bx.y0) * scale, label: bx.label});
+    }
+    out.scale = scale; out.anchor = [X(0), Y(0)];
+    return out;
+  }
   // --- prefab tree (pure) end ---
   function renderPrefabTree() {
     var tree = document.getElementById('prefabTree'); if (!tree) return;
@@ -3048,7 +3354,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
         continue;
       }
       if (!row.folder && openBody) { h += '</div></div>'; openBody = false; }
-      h += '<div class="pf-item" draggable="true" data-folder="' + esc(row.folder) + '">' + esc(row.name) + '</div>';
+      h += '<div class="pf-item" draggable="true" data-folder="' + esc(row.folder) + '">' + esc(row.name)
+         + (pfKindOf(row.folder, row.name) === 'modules' ? '<span class="pf-kind" title="Module prefab: places in Blueprint mode">Blueprint</span>' : '') + '</div>';
     }
     if (openBody) h += '</div></div>';
     tree.innerHTML = rows.length ? h : '<div class="list-empty">No matches.</div>';
@@ -3122,7 +3429,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     var from = selectedPrefabName ? {folder: selectedPrefabFolder, name: selectedPrefabName} : (pfAnchor && pfAnchor.name ? pfAnchor : null);
     if (from) {
       for (var k = 0; k < visible.length; k++)
-        if (visible[k].textContent === from.name && (visible[k].getAttribute('data-folder') || '') === from.folder) { idx = k; break; }
+        if (pfItemName(visible[k]) === from.name && (visible[k].getAttribute('data-folder') || '') === from.folder) { idx = k; break; }
     }
     var next = (idx === -1) ? (delta > 0 ? 0 : visible.length - 1)
                              : Math.min(visible.length - 1, Math.max(0, idx + delta));
@@ -3149,11 +3456,90 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     document.getElementById('pcDesc').value = mDesc;
     document.getElementById('pcTags').value = mTags.join(', ');
     metaBaseline = mDesc.trim() + '\u0000' + parseTagsInput(mTags.join(',')).join(',');
-    var navBoxes = prefabTransform.countNavigationBoxes(d.scene || '');
-    document.getElementById('pcEntityCount').textContent = d.count + (d.count === 1 ? ' entity' : ' entities') +
-      (navBoxes ? ', ' + navBoxes + (navBoxes === 1 ? ' AI Navigation box' : ' AI Navigation boxes') : '');
-    prefabViewport.load(d.scene || '');
+    metaExtra = {}; for (var mk in meta) if (meta.hasOwnProperty(mk) && mk !== 'desc' && mk !== 'tags') metaExtra[mk] = meta[mk];
+    selectedPrefabKind = (meta.kind === 'modules') ? 'modules' : 'objects';
+    if (selectedPrefabKind === 'modules') {
+      prefabViewport.clear();
+      pfShowFootprint(meta);
+    } else {
+      pfHideFootprint();
+      var navBoxes = prefabTransform.countNavigationBoxes(d.scene || '');
+      document.getElementById('pcEntityCount').textContent = d.count + (d.count === 1 ? ' entity' : ' entities') +
+        (navBoxes ? ', ' + navBoxes + (navBoxes === 1 ? ' AI Navigation box' : ' AI Navigation boxes') : '');
+      prefabViewport.load(d.scene || '');
+    }
+    pfRefreshModeUi();
   }
+  // A module prefab's preview is its top-down footprint: one box per module, the placement anchor
+  // marked, counts and environments in the corners. The 3D viewport and its legend step aside.
+  function pfShowFootprint(meta) {
+    var canvas3d = document.getElementById('pcCanvas'), fp = document.getElementById('pcFootprint');
+    var pill = document.getElementById('pcKindPill'), help = document.querySelector('#pcPreview .pc-preview-help');
+    var legend = document.querySelector('#pcPreview .pc-preview-legend'), status = document.getElementById('pcPreviewStatus');
+    if (canvas3d) canvas3d.style.display = 'none';
+    if (legend) legend.style.display = 'none';
+    if (help) help.style.display = 'none';
+    if (pill) pill.style.display = 'block';
+    if (fp) fp.style.display = 'block';
+    var mc = meta.moduleCount || (meta.modules ? meta.modules.length : 0), ec = meta.entityCount || 0, dc = meta.doorCount || 0;
+    var parts = [mc + (mc === 1 ? ' module' : ' modules'), ec + (ec === 1 ? ' object' : ' objects')];
+    if (dc) parts.push(dc + (dc === 1 ? ' door' : ' doors'));
+    if (meta.hasNavigationBoxes) parts.push('AI Navigation');
+    document.getElementById('pcEntityCount').textContent = parts.join(' \u00b7 ');
+    var envs = Array.isArray(meta.environments) ? meta.environments.filter(function(e){ return e; }) : [];
+    var dropped = (meta.droppedWires || 0) + (meta.droppedRefs || 0);
+    if (status) status.textContent = (envs.length ? 'Environment: ' + envs.join(', ') : 'Places in Blueprint mode')
+                                   + (dropped ? ' \u00b7 ' + dropped + ' link' + (dropped === 1 ? '' : 's') + ' to outside entities dropped' : '');
+    pfDrawFootprint(meta.modules || []);
+  }
+  function pfHideFootprint() {
+    var canvas3d = document.getElementById('pcCanvas'), fp = document.getElementById('pcFootprint');
+    var pill = document.getElementById('pcKindPill'), help = document.querySelector('#pcPreview .pc-preview-help');
+    var legend = document.querySelector('#pcPreview .pc-preview-legend');
+    if (canvas3d) canvas3d.style.display = '';
+    if (legend) legend.style.display = '';
+    if (help) help.style.display = '';
+    if (pill) pill.style.display = 'none';
+    if (fp) fp.style.display = 'none';
+  }
+  var pfFootprintModules = null;
+  function pfDrawFootprint(modules) {
+    pfFootprintModules = modules;
+    var fp = document.getElementById('pcFootprint'); if (!fp) return;
+    var box = fp.parentNode.getBoundingClientRect();
+    var dpr = window.devicePixelRatio || 1, w = Math.max(1, Math.round(box.width)), h = Math.max(1, Math.round(box.height));
+    fp.width = Math.round(w * dpr); fp.height = Math.round(h * dpr);
+    var g = fp.getContext('2d'); if (!g) return;
+    g.setTransform(dpr, 0, 0, dpr, 0, 0);
+    g.clearRect(0, 0, w, h);
+    var cs = getComputedStyle(document.documentElement);
+    var line = cs.getPropertyValue('--border2').trim() || '#999', text = cs.getPropertyValue('--text').trim() || '#000';
+    var accent = cs.getPropertyValue('--accent').trim() || '#2f7ad6', muted = cs.getPropertyValue('--muted').trim() || '#777';
+    var lay = pfFootprintLayout(modules, w, h, 26);
+    if (!lay.rects.length) { g.fillStyle = muted; g.font = '11px "Segoe UI", sans-serif'; g.textAlign = 'center'; g.fillText('No module footprint recorded for this prefab.', w / 2, h / 2); return; }
+    g.lineWidth = 1;
+    for (var i = 0; i < lay.rects.length; i++) {
+      var r = lay.rects[i];
+      g.fillStyle = 'rgba(87,148,199,0.18)'; g.fillRect(r.x, r.y, r.w, r.h);
+      g.strokeStyle = accent; g.strokeRect(Math.round(r.x) + 0.5, Math.round(r.y) + 0.5, Math.round(r.w), Math.round(r.h));
+      if (r.w > 28 && r.h > 14) {
+        g.fillStyle = text; g.font = '10px "Segoe UI", sans-serif'; g.textAlign = 'center'; g.textBaseline = 'middle';
+        var label = r.label || '', maxw = r.w - 8;
+        while (label.length > 2 && g.measureText(label).width > maxw) label = label.slice(0, -2);
+        if (label !== (r.label || '') && label.length > 2) label = label.slice(0, -1) + '\u2026';
+        g.fillText(label, r.x + r.w / 2, r.y + r.h / 2);
+      }
+    }
+    // the anchor: where the cursor will be when the group is placed
+    if (lay.anchor) {
+      var ax = Math.round(lay.anchor[0]) + 0.5, ay = Math.round(lay.anchor[1]) + 0.5;
+      g.strokeStyle = line; g.beginPath(); g.moveTo(ax - 7, ay); g.lineTo(ax + 7, ay); g.moveTo(ax, ay - 7); g.lineTo(ax, ay + 7); g.stroke();
+      g.strokeStyle = accent; g.beginPath(); g.arc(ax, ay, 3.5, 0, Math.PI * 2); g.stroke();
+    }
+    g.fillStyle = muted; g.font = '10px "Segoe UI", sans-serif'; g.textAlign = 'right'; g.textBaseline = 'alphabetic';
+    g.fillText('top-down', w - 8, h - 22);
+  }
+  window.addEventListener('resize', function(){ if (selectedPrefabKind === 'modules' && pfFootprintModules) pfDrawFootprint(pfFootprintModules); });
 
   if (window.chrome && window.chrome.webview) {
     window.chrome.webview.addEventListener('message', function(e){ onMessage(e.data); });
@@ -3296,8 +3682,9 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   });
   // Prevent native text drag/drop from moving selected declaration text. This does
   // not block ordinary drag selection. Capture-phase handling allows only the
-  // intentional prefab-tree drag used to move files between folders.
-  function inPrefabTree(t) { return !!(t && t.closest && t.closest('#prefabTree')); }
+  // intentional tree drags: the Prefabs tree (files between folders) and the Timelines
+  // tree (display-name folders).
+  function inPrefabTree(t) { return !!(t && t.closest && t.closest('#prefabTree, #timelineList')); }
   document.addEventListener('dragstart', function(e){ if (!inPrefabTree(e.target)) e.preventDefault(); }, true);
   document.addEventListener('drop',      function(e){ if (!inPrefabTree(e.target)) e.preventDefault(); }, true);
 
@@ -3612,6 +3999,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       configGet(ENTITY_SHOW_HIDDEN_KEY);
       configGet(ENTITY_SELECTION_MODE_KEY);
       configGet(PREFAB_OPEN_FOLDERS_KEY);
+      configGet(TIMELINE_OPEN_FOLDERS_KEY);
     }
   })();
 
@@ -5807,20 +6195,167 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       renderTlBody();
     });
   })();
-  // timeline list selection -> highlight the row AND open it (serialize + parse + render, Stage 2).
+  // Timelines tree: click opens or selects, drag moves between folders, right-click edits.
   (function(){
     var el = document.getElementById('timelineList');
-    if (el) el.addEventListener('click', function(e){
-      var item = e.target.closest('.entity-item'); if (!item) return;
-      var eid = parseInt(item.getAttribute('data-eid'), 10);
-      if (eid === selectedTlEid && tlModel) return;   // already open -- don't silently discard unsaved edits on a re-click; use Revert for that
-      selectedTlEid = eid;
-      renderTimelineList();
-      post({cmd:'openTimeline', eid: selectedTlEid});
+    if (!el) return;
+    var tlDragging = null;
+    el.addEventListener('click', function(e){
+      var del = e.target.closest('.pf-folder-del');
+      if (del) { tlDeleteFolder(del.closest('.pf-folder').getAttribute('data-folder-name') || ''); return; }
+      if (e.target.closest('input')) return;
+      var head = e.target.closest('.pf-folder-head');
+      if (head) {
+        if (e.shiftKey || e.ctrlKey || e.metaKey) { tlSelectRow(tlRowOf(head), e); return; }
+        var filterEl = document.getElementById('timelineFilter');
+        if (filterEl && filterEl.value) return;
+        var fel = head.parentNode, fname = fel.getAttribute('data-folder-name') || '';
+        var nowOpen = !fel.classList.contains('pf-open');
+        fel.classList.toggle('pf-open', nowOpen);
+        tlSetFolderOpen(fname, nowOpen);
+        return;
+      }
+      var item = e.target.closest('.tl-item');
+      if (!item) return;
+      tlSelectRow(tlRowOf(item), e);
       var tlFilterEl = document.getElementById('timelineFilter');
-      if (tlFilterEl) tlFilterEl.focus();   // keep ArrowUp/ArrowDown live after a mouse pick, same as the Entities list
+      if (tlFilterEl && !e.shiftKey && !e.ctrlKey && !e.metaKey) tlFilterEl.focus();   // keep ArrowUp/ArrowDown live after a mouse pick, same as the Entities list
+    });
+    el.addEventListener('dragstart', function(e){
+      var row = e.target.closest('.tl-item, .pf-folder-head'); if (!row) return;
+      var r = tlRowOf(row);
+      if (!tlSelHas(r)) { tlSel = [r]; tlAnchor = r; tlPaintSelection(); }
+      tlDragging = row; e.dataTransfer.effectAllowed = 'move';
+      el.querySelectorAll('.selected').forEach(function(s2){ s2.classList.add('dragging'); });
+    });
+    el.addEventListener('dragend', function(){
+      tlDragging = null;
+      el.querySelectorAll('.dragging').forEach(function(s2){ s2.classList.remove('dragging'); });
+      el.querySelectorAll('.drop-target').forEach(function(f){ f.classList.remove('drop-target'); });
+      el.classList.remove('drop-target-root');
+    });
+    el.addEventListener('dragover', function(e){
+      if (!tlDragging) return;
+      e.preventDefault();
+      el.querySelectorAll('.drop-target').forEach(function(f){ f.classList.remove('drop-target'); });
+      var folder = e.target.closest('.pf-folder');
+      if (folder) { folder.classList.add('drop-target'); el.classList.remove('drop-target-root'); }
+      else el.classList.add('drop-target-root');
+    });
+    el.addEventListener('drop', function(e){
+      if (!tlDragging) return;
+      e.preventDefault();
+      var folder = e.target.closest('.pf-folder');
+      el.querySelectorAll('.drop-target').forEach(function(f){ f.classList.remove('drop-target'); });
+      el.classList.remove('drop-target-root');
+      tlMoveSelection(folder ? (folder.getAttribute('data-folder-name') || '') : '');
+    });
+    el.addEventListener('contextmenu', function(e){
+      var head = e.target.closest('.pf-folder-head');
+      if (head) {
+        e.preventDefault();
+        var fname = head.parentNode.getAttribute('data-folder-name') || '';
+        ctx.innerHTML = '';
+        addCtx('Rename', function(){ tlRenameFolderInline(head.parentNode); });
+        addCtx('Delete', function(){ tlDeleteFolder(fname); });
+        ctx.style.left = e.pageX + 'px'; ctx.style.top = e.pageY + 'px'; ctx.style.display = 'block';
+        return;
+      }
+      var item = e.target.closest('.tl-item'); if (!item) return;
+      e.preventDefault();
+      var row = tlRowOf(item);
+      if (!tlSelHas(row)) { tlSel = [row]; tlAnchor = row; tlPaintSelection(); }
+      var n = 0; for (var i = 0; i < tlSel.length; i++) n += tlSel[i].name ? 1 : (tlTreeData().folders.filter(function(f){ return f.name === tlSel[i].folder; })[0] || {items: []}).items.length;
+      ctx.innerHTML = '';
+      if (n === 1 && row.name) addCtx('Open', function(){ tlOpen(parseInt(row.name, 10)); });
+      if (n === 1 && row.name) addCtx('Rename', function(){ tlRenameItemInline(item); });
+      var anyInFolder = tlSel.some(function(r){ return !!r.folder; });
+      if (anyInFolder) addCtx('Move to root' + (n > 1 ? ' (' + n + ')' : ''), function(){ tlMoveSelection(''); });
+      var data = tlTreeData();
+      for (var f = 0; f < data.folders.length; f++) (function(fname2){
+        if (tlSel.every(function(r){ return r.folder === fname2; })) return;
+        addCtx('Move to "' + fname2 + '"' + (n > 1 ? ' (' + n + ')' : ''), function(){ tlMoveSelection(fname2); });
+      })(data.folders[f].name);
+      ctx.style.left = e.pageX + 'px'; ctx.style.top = e.pageY + 'px'; ctx.style.display = 'block';
+    });
+    document.addEventListener('keydown', function(e){
+      if (e.key !== 'Escape') return;
+      if (document.getElementById('panel-timelines').style.display === 'none') return;
+      if (!tlSel.length || tlSel.length === 1 && tlSel[0].name) return;
+      var ae = document.activeElement;
+      if (ae && (ae.tagName === 'TEXTAREA' || (ae.tagName === 'INPUT' && ae.id !== 'timelineFilter'))) return;
+      tlSel = []; tlAnchor = null; tlPaintSelection();
     });
   })();
+  function tlDeleteFolder(name) {
+    if (!name) return;
+    var members = 0; for (var k in tlLabels) if (tlLabels.hasOwnProperty(k) && tlLabels[k].folder === name) members++;
+    var msg = members ? ('Move ' + members + ' timeline' + (members === 1 ? '' : 's') + ' to the root and delete the folder "' + name + '"?') : 'Delete the empty folder "' + name + '"?';
+    showConfirm(msg, function(){ tlRenameFolderTo(name, ''); });
+  }
+  function tlRenameFolderInline(folderEl) {
+    var lbl = folderEl.querySelector('.pf-fname'); if (!lbl) return;
+    var name = lbl.textContent;
+    lbl.innerHTML = '<input class="pf-folder-name" value="">';
+    var inp = lbl.querySelector('.pf-folder-name'); inp.value = name;
+    var done = false;
+    function finish(commit){
+      if (done) return; done = true;
+      var txt = (inp.value || '').trim().replace(/\//g, '-');
+      lbl.textContent = name;
+      if (!commit || !txt || txt === name) return;
+      var data = tlTreeData();
+      for (var i = 0; i < data.folders.length; i++) if (data.folders[i].name === txt) { toast('A folder named "' + txt + '" already exists', 'warn'); return; }
+      tlRenameFolderTo(name, txt);
+    }
+    inp.addEventListener('keydown', function(e){ if (e.key==='Enter'){ e.preventDefault(); finish(true); } else if (e.key==='Escape'){ finish(false); } });
+    inp.addEventListener('blur', function(){ finish(true); });
+    inp.focus(); inp.select();
+  }
+  function tlRenameItemInline(item) {
+    var eid = parseInt(item.getAttribute('data-eid'), 10), lab = tlLabels[String(eid)]; if (!lab) return;
+    var old = lab.leaf;
+    item.setAttribute('draggable', 'false');
+    item.innerHTML = '<input class="pf-item-name" value="">';
+    var inp = item.querySelector('.pf-item-name'); inp.value = old;
+    var done = false;
+    function finish(commit){
+      if (done) return; done = true;
+      var txt = (inp.value || '').trim().replace(/\//g, '-');
+      item.textContent = old; item.setAttribute('draggable', 'true');
+      if (!commit || !txt || txt === old) return;
+      post({cmd:'setDisplayNames', eids: [eid], names: [tlJoinName(lab.folder, txt)]});
+    }
+    inp.addEventListener('keydown', function(e){ if (e.key==='Enter'){ e.preventDefault(); finish(true); } else if (e.key==='Escape'){ finish(false); } });
+    inp.addEventListener('blur', function(){ finish(true); });
+    inp.focus(); inp.select();
+  }
+  var tlNewFolderBtn = document.getElementById('tlNewFolderBtn');
+  if (tlNewFolderBtn) tlNewFolderBtn.addEventListener('click', function(){
+    var listEl = document.getElementById('timelineList'); if (!listEl) return;
+    if (listEl.querySelector('.list-empty')) listEl.innerHTML = '';
+    var f = document.createElement('div'); f.className = 'pf-folder pf-open';
+    f.innerHTML = '<div class="pf-folder-head"><span class="pf-caret">' + iconSvg('chevron-down') + '</span> <input class="pf-folder-name" value="New Folder"></div><div class="pf-folder-body"></div>';
+    listEl.appendChild(f);
+    var inp = f.querySelector('.pf-folder-name');
+    var done = false;
+    function commit(){
+      if (done) return; done = true;
+      var nm = (inp.value || '').trim().replace(/\//g, '-');
+      f.remove();
+      if (!nm) { renderTimelineList(); return; }
+      var data = tlTreeData();
+      for (var i = 0; i < data.folders.length; i++) if (data.folders[i].name === nm) { toast('A folder named "' + nm + '" already exists', 'warn'); renderTimelineList(); return; }
+      tlFolders.push(nm); tlSetFolderOpen(nm, true);
+      renderTimelineList();
+      toast('Folder "' + nm + '" ready -- drag timelines into it (it is kept by their names)', 'ok');
+    }
+    inp.addEventListener('keydown', function(e){ if (e.key === 'Enter') { e.preventDefault(); commit(); } else if (e.key === 'Escape') { done = true; f.remove(); renderTimelineList(); } });
+    inp.addEventListener('blur', commit);
+    inp.focus(); inp.select();
+  });
+  var createTimelineBtnEl = document.getElementById('createTimelineBtn');
+  if (createTimelineBtnEl) createTimelineBtnEl.addEventListener('click', tlCreateTimeline);
   // Runs-on entity-picker ("Use current selection" reads the live SnapMap editor selection) + "Add
   // Eventcall" + per-event delete.
   (function(){
@@ -6116,6 +6651,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     ['pcName', 'pcDesc', 'pcTags'].forEach(function(id){ var el = document.getElementById(id); if (el) el.value = ''; });
     var count = document.getElementById('pcEntityCount'); if (count) count.textContent = '';
     prefabViewport.clear();
+    selectedPrefabKind = ''; metaExtra = null; pfHideFootprint();
     setPrefabButtons(false);
   }
   if (prefabTree) {
@@ -6299,6 +6835,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   var prefabLoadBtn = document.getElementById('prefabLoadBtn');
   if (prefabLoadBtn) prefabLoadBtn.addEventListener('click', function(){
     var name = document.getElementById('pcName').value; if (!name) return;
+    if (selectedPrefabKind === 'modules' && edMode.known && !edMode.blueprint) { toast('Switch to Blueprint mode (Tab in the editor) to place a module prefab', 'warn'); return; }
     post({cmd:'loadPrefab', name: name, folder: selectedPrefabFolder});
   });
   var prefabDeleteBtn = document.getElementById('prefabDeleteBtn');
@@ -6320,7 +6857,13 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     var sig = desc + '\u0000' + tags.join(',');
     if (sig === metaBaseline) return;
     metaBaseline = sig;
-    var body = (desc || tags.length) ? JSON.stringify({desc: desc, tags: tags}) : '';
+    var extraKeys = metaExtra ? Object.keys(metaExtra) : [];
+    var body = '';
+    if (desc || tags.length || extraKeys.length) {
+      var obj = {}; for (var ek = 0; ek < extraKeys.length; ek++) obj[extraKeys[ek]] = metaExtra[extraKeys[ek]];
+      obj.desc = desc; obj.tags = tags;
+      body = JSON.stringify(obj);
+    }
     post({cmd:'savePrefabMeta', name: selectedPrefabName, folder: selectedPrefabFolder, body: body});
   }
   ['pcDesc', 'pcTags'].forEach(function(id){
@@ -6334,6 +6877,13 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   var editorSelCount = PREVIEW ? 5 : 0;
   function updateCreateBtn(){
     var b = document.getElementById('prefabCreateBtn'); if (!b) return;
+    if (edMode.known && edMode.blueprint) {
+      // Blueprint: the selected modules and everything inside them become a module prefab
+      b.disabled = false;
+      b.setAttribute('title', 'Create a module prefab from the modules selected in Blueprint (their objects come along)');
+      b.setAttribute('aria-label', 'Create module prefab from the selected modules');
+      return;
+    }
     var label = editorSelCount > 0
       ? 'Create from Selection (' + editorSelCount + ' selected)'
       : 'Create from Selection - select entities in the editor first';
@@ -6508,8 +7058,12 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
           website: document.getElementById('crWebsite').value || ''});   // honeypot -- must stay empty
   });
   var pcCreateBtn = document.getElementById('prefabCreateBtn');
+  var npModuleMode = false;   // the New Prefab dialog was opened from Blueprint: it saves modules
   if (pcCreateBtn) pcCreateBtn.addEventListener('click', function(){
-    if (npSelInfo) npSelInfo.textContent = 'From ' + editorSelCount + ' selected ' + (editorSelCount === 1 ? 'entity' : 'entities');
+    npModuleMode = !!(edMode.known && edMode.blueprint);
+    if (npSelInfo) npSelInfo.textContent = npModuleMode
+      ? 'From the modules selected in Blueprint -- every object inside them comes along; places in Blueprint only'
+      : 'From ' + editorSelCount + ' selected ' + (editorSelCount === 1 ? 'entity' : 'entities');
     showPrefabModal(true); document.getElementById('npName').focus();
   });
   var npCancel = document.getElementById('npCancel');
@@ -6522,7 +7076,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       var desc = (document.getElementById('npDesc').value || '').trim();
       var tags = parseTagsInput(document.getElementById('npTags').value);
       pendingCreateMeta = (desc || tags.length) ? {name: name, body: JSON.stringify({desc: desc, tags: tags})} : null;
-      post({cmd:'createPrefab', name: name});
+      post({cmd: npModuleMode ? 'createModulePrefab' : 'createPrefab', name: name});
       showPrefabModal(false);
       document.getElementById('npName').value=''; document.getElementById('npDesc').value=''; document.getElementById('npTags').value='';
     }
