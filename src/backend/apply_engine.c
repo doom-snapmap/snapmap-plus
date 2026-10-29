@@ -15,6 +15,7 @@
 #include "iface_engine.h"
 #include <float.h>
 #include "signatures.h"
+#include "fly_to.h"
 #include "patch.h"
 #include "engine_globals.h"
 #include "host_image.h"
@@ -1302,7 +1303,8 @@ static void ae_toast_result(const char *op, int applied, int total)
 
     /* These callers own their toast or perform silent maintenance. */
     int quiet = (strcmp(op, "load-prefab") == 0) || (strcmp(op, "tl-inherit-portable") == 0) ||
-                (strcmp(op, "accl") == 0)         || (strcmp(op, "acctargets") == 0);
+                (strcmp(op, "accl") == 0)         || (strcmp(op, "acctargets") == 0) ||
+                (strcmp(op, "fly-to") == 0);
     /* Load/Place reports the stage/action result through sh_apply_last_place_result. */
     if (iface && iface->vtbl && iface->vtbl->toast && !quiet)
         iface->vtbl->toast(iface, "SnapStack", text);
@@ -1332,6 +1334,7 @@ static int ae_run_item(int kind, int id, const char *text)
         }
         return (pr != AE_PASTE_FAILED);
     }
+    if (kind == 4) return sh_fly_to_request(id, sh_ui_get_iface());   /* fly to entity; serviced by the editor frames */
     return (kind == 1) ? ae_mkcmd_one(text)
          : (kind == 3) ? ae_apply_target_write(id, atoi(text))
                        : ae_apply_one(id, text);

@@ -360,9 +360,9 @@ typedef int          (*sh_serialize_entity_fn)(struct sh_iface *self, int id, ch
  * 2 stages and arms native paste; 3 writes a target reference. Scheduling
  * deep-copies text into a single pending batch, replacing older pending work. */
 typedef struct sh_apply_item {
-    int         kind;       /* 0 entity edit, 1 prefab stage, 2 stage/queue paste, 3 target write. */
-    int         id;         /* Live entity ID for kinds 0/3; ignored for prefab staging. */
-    const char *text;       /* Entity/prefab JSON, or target ID text for kind 3. */
+    int         kind;       /* 0 entity edit, 1 prefab stage, 2 stage/queue paste, 3 target write, 4 fly to entity. */
+    int         id;         /* Live entity ID for kinds 0/3/4; ignored for prefab staging. */
+    const char *text;       /* Entity/prefab JSON, or target ID text for kind 3; "" for kind 4. */
 } sh_apply_item;
 
 /* Deep-copy into the pending batch and enqueue the main-thread drain.

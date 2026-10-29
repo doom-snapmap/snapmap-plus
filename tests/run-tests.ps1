@@ -43,6 +43,7 @@ $tests = @(
     @{ name = "map_render_editor_test"; src = 'map_render_editor_test.c ..\src\backend\map_render.c'; arg = "" }
     @{ name = "map_bounds_test"; src = 'map_bounds_test.c ..\src\backend\map_bounds.c'; defs = '/DSH_MAP_BOUNDS_PURE'; arg = "" }
     @{ name = "editor_zoom_test"; src = 'editor_zoom_test.c ..\src\backend\editor_zoom.c'; defs = '/DSH_EDITOR_ZOOM_PURE'; arg = "" }
+    @{ name = "fly_to_test"; src = 'fly_to_test.c'; arg = "" }
     @{ name = "settings_tab_test"; src = 'settings_tab_test.c ..\src\backend\settings_tab.c'; defs = '/DSH_SETTINGS_TAB_PURE'; arg = "" }
     @{ name = "map_render_native_test"; src = 'map_render_native_test.c ..\src\backend\map_render.c ..\src\backend\patch.c ..\src\backend\hook.c'; arg = "" }
     @{ name = "grid_room_nav_test"; src = 'grid_room_nav_test.c ..\src\backend\grid_room_nav.c ..\src\backend\grid_room.c ..\src\backend\aas_edit.c ..\src\backend\navmesh.c ..\src\backend\map_shards.c'; arg = "" }

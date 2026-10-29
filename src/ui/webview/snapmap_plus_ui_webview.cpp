@@ -2815,6 +2815,19 @@ static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventA
                 if (un == 1) _snwprintf_s(m, _countof(m), _TRUNCATE, L"{\"kind\":\"tlUseSelectionResult\",\"ok\":true,\"eid\":%d}", uselids[0]);
                 else _snwprintf_s(m, _countof(m), _TRUNCATE, L"{\"kind\":\"tlUseSelectionResult\",\"ok\":false,\"count\":%d}", un);
                 poc_post_json(m);
+            } else if (cmd == L"flyTo") {
+                /* Fly the editor camera to one entity (apply kind 4, serviced by the editor
+                 * frames). A held Lock position would rewrite the eye every frame, so it is released. */
+                int eid = -1; sh_webview_json::get_int(json, L"eid", &eid);
+                bool ok = eid >= 0 && g_iface && g_iface->vtbl && g_iface->vtbl->apply_edit;
+                if (ok) {
+                    g_cam_lock = false;
+                    sh_apply_item it; it.kind = 4; it.id = eid; it.text = "";
+                    ok = poc_apply_edit_seh(&it, 1, "fly-to") != 0;
+                }
+                wchar_t m[96];
+                _snwprintf_s(m, _countof(m), _TRUNCATE, L"{\"kind\":\"flyToResult\",\"result\":%d,\"eid\":%d}", ok ? 1 : 0, eid);
+                poc_post_json(m);
             } else if (cmd == L"pushStack") {
                 std::vector<int> ids; sh_webview_json::get_int_array(json, L"eids", ids);
                 bool ok = g_iface && g_iface->vtbl && g_iface->vtbl->push_to_stack && !ids.empty();

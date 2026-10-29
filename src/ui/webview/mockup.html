@@ -59,6 +59,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   <symbol id="icon-chevron-down" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"></path></symbol>
   <symbol id="icon-chevron-right" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"></path></symbol>
   <symbol id="icon-plus" viewBox="0 0 24 24"><path d="M5 12h14"></path><path d="M12 5v14"></path></symbol>
+  <symbol id="icon-locate" viewBox="0 0 24 24"><line x1="2" x2="5" y1="12" y2="12"></line><line x1="19" x2="22" y1="12" y2="12"></line><line x1="12" x2="12" y1="2" y2="5"></line><line x1="12" x2="12" y1="19" y2="22"></line><circle cx="12" cy="12" r="7"></circle></symbol>
   <symbol id="icon-folder-plus" viewBox="0 0 24 24"><path d="M12 10v6"></path><path d="M9 13h6"></path><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"></path></symbol>
   <symbol id="icon-refresh-cw" viewBox="0 0 24 24"><path d="M3 12a9 9 0 0 1 15-6.7L21 8"></path><path d="M21 3v5h-5"></path><path d="M21 12a9 9 0 0 1-15 6.7L3 16"></path><path d="M8 16H3v5"></path></symbol>
   <symbol id="icon-maximize-2" viewBox="0 0 24 24"><path d="M15 3h6v6"></path><path d="m21 3-7 7"></path><path d="m3 21 7-7"></path><path d="M9 21H3v-6"></path></symbol>
@@ -169,6 +170,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
         <span class="panel-title">Entity State</span>
         <div class="panel-actions" id="panelActions">
           <span class="hint" id="dirtyNote"></span>
+          <button type="button" class="btn icon icon-button" id="flyToBtn" disabled title="Fly to entity: switch to Object mode and put the cursor on this entity" aria-label="Fly to entity"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-locate"></use></svg></button>
           <button class="btn" id="revertBtn" disabled>Revert</button>
           <button class="btn primary" id="saveBtn" disabled>Save to Decl</button>
         </div>
@@ -1341,6 +1343,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     }
     else if (o.cmd === 'selectInEditor') { /* no 3D editor in browser preview */ }
     else if (o.cmd === 'camLock' || o.cmd === 'camSet') { /* no 3D editor in browser preview */ }
+    else if (o.cmd === 'flyTo') { onMessage({kind:'flyToResult', result:1, eid:o.eid}); }
     else if (o.cmd === 'winState') { onMessage({kind:'windowState', maximized:windowMaximized}); }
     else if (o.cmd === 'winMax') { onMessage({kind:'windowState', maximized:!windowMaximized}); }
     else if (o.cmd === 'winMin' || o.cmd === 'winDrag' || o.cmd === 'winResize') { /* no native window in preview */ }
@@ -2236,7 +2239,18 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     }
     updateSelCount();
   }
-  function updateSelCount() { document.getElementById('selCount').textContent = selCount(); }
+  function updateSelCount() {
+    document.getElementById('selCount').textContent = selCount();
+    var fly = document.getElementById('flyToBtn'); if (fly) fly.disabled = !(selCount() === 1 && primaryEid >= 0);
+  }
+  // Fly to entity: Object mode, camera placed in front of the entity, cursor on it. Releasing Lock
+  // position first, since a lock would pin the eye back where it was.
+  function flyToEntity(eid) {
+    if (typeof eid !== 'number' || eid < 0) return;
+    var lock = document.getElementById('camLockChk');
+    if (lock && lock.checked) { lock.checked = false; post({cmd:'camLock', on:0}); }
+    post({cmd:'flyTo', eid: eid});
+  }
 
   function onRowMouseDown(ev) {
     if (ev.button !== 0 && ev.button !== 2) return;
@@ -2347,6 +2361,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       var out = ids.map(function(e){return strById[e]||e;}).join('\n'); copyText(out);
       toast('Copied ' + n + ' id' + (n>1?'s':''), 'ok');
     });
+    if (n === 1) addCtx('Fly to entity', function(){ flyToEntity(ids[0]); });
     addCtx('Delete' + (n>1?' ('+n+')':''), function(){ requestDelete(ids); });
     addCtx('Push to stack 0' + (n>1?' ('+n+')':''), function(){ post({cmd:'pushStack', eids: ids}); });
     addCtx('Clear stack 0', function(){ post({cmd:'clearStack'}); });   // not scoped to the current selection -- empties the whole stack, same as `sh cstk 0`
@@ -2822,6 +2837,9 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       else if (d.result === 2) toast('Hover over one of the selected entities in the 3D view, then try again', 'warn');
       else if (d.result === 3) toast('Could not anchor "' + d.name + '" -- point the view centre at the hovered entity and try again', 'warn');
       else toast('Could not create "' + d.name + '" (see log)', 'err');
+    } else if (d.kind === 'flyToResult') {
+      if (d.result === 1) toast('Flying to entity ' + d.eid, 'ok');
+      else toast('Could not fly to that entity (editor down?)', 'err');
     } else if (d.kind === 'pushStackResult') {
       if (d.result === 1) toast('Pushed ' + d.count + ' onto stack 0 -- try `sh popsel`/`sh bss`/etc. in the console', 'ok');
       else toast('Push to stack 0: ' + d.count + ' selected -- failed (editor down, or nothing selected)', 'err');
@@ -3315,6 +3333,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   function fmtNum(v) { var n = Number(v); return isFinite(n) ? String(parseFloat(n.toFixed(6))) : '0'; }
   function camVal(id) { var n = parseFloat(document.getElementById(id).value); return isFinite(n) ? n : 0; }
   function setCamField(id, v) { var el = document.getElementById(id); if (document.activeElement !== el) el.value = fmtNum(v); }
+  var flyToBtnEl = document.getElementById('flyToBtn');
+  if (flyToBtnEl) flyToBtnEl.addEventListener('click', function(){ if (selCount() === 1) flyToEntity(primaryEid); });
   document.getElementById('camLockChk').addEventListener('change', function(){
     if (this.checked) post({cmd:'camLock', on:1, x:camVal('camX'), y:camVal('camY'), z:camVal('camZ')});
     else post({cmd:'camLock', on:0});
