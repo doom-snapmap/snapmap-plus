@@ -125,6 +125,15 @@ static const config_descriptor g_registry[] = {
         SH_CONFIG_UI_READ | SH_CONFIG_UI_WRITE,
         NULL,
         NULL
+    },
+    {
+        /* The Timelines tab folders (the Folder/Name display-name convention)
+         * the user has open; the rest start collapsed.
+         */
+        "timelines.open_folders", SH_JSON_ARRAY, "[]",
+        SH_CONFIG_UI_READ | SH_CONFIG_UI_WRITE,
+        NULL,
+        NULL
     }
 };
 
