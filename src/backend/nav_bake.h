@@ -62,6 +62,8 @@ typedef struct sh_nav_bake_summary {
     int  boxes_left_out;    /* boxes the map read left out one at a time */
     char read_reason[96];
     char first[160];        /* "<module> (copy N): <short reason>" worth naming */
+    int  faces_climbed;     /* monster48 box faces with a floor climb or step */
+    int  faces_total;       /* of every marked box face that offers a top */
 } sh_nav_bake_summary;
 void sh_nav_bake_summary_get(sh_nav_bake_summary *s);
 
@@ -201,6 +203,8 @@ int sh_nav_bake_test_run(const char *name, const struct sh_aug_platform *plats, 
 void sh_nav_bake_test_preview_outcome(int slot, int state, const char *brief);
 /* The full reason and payload length of the last sh_nav_bake_test_run. */
 const char *sh_nav_bake_test_last_reason(void);
+/* The last test bake's floor climbs per box face, as sh_navmesh prints them. */
+const char *sh_nav_bake_test_last_faces(void);
 size_t      sh_nav_bake_test_last_length(void);
 /* Lower the bake cache budget (0 restores it); returns the previous one. */
 size_t sh_nav_bake_test_set_cache_budget(size_t bytes);

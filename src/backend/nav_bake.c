@@ -35,6 +35,8 @@ static const char *const NAV_CLASSES[] = { "monster48", "monster96", "monster128
  */
 #define BAKE_REASON_CAP 384
 #define BAKE_BRIEF_CAP  80
+/* Floor climbs per box face, for sh_navmesh and the log. */
+#define BAKE_FACES_CAP  768
 
 /* What one demon class of one module copy got, and at which geometry
  * revision. A refusal recorded at the current revision is not baked again:
@@ -45,6 +47,8 @@ typedef struct bake_class {
     int           logged;                   /* the skip was reported at this revision */
     char          reason[BAKE_REASON_CAP];  /* full sentence, for the log and sh_navmesh */
     char          brief[BAKE_BRIEF_CAP];    /* short, for the toast and View menu */
+    char          faces[BAKE_FACES_CAP];    /* floor climbs per box face */
+    int           faces_climbed, faces_total;
 } bake_class;
 
 typedef struct bake_module {
@@ -843,6 +847,8 @@ typedef struct bake_outcome {
     int            state;               /* SH_NAV_CLASS_* */
     char           reason[BAKE_REASON_CAP];
     char           brief[BAKE_BRIEF_CAP];
+    char           faces[BAKE_FACES_CAP];
+    int            faces_climbed, faces_total;
     bake_refused   refused[BAKE_MAX_REFUSED];   /* red: what to move to fit */
     int            refused_count;
     bake_refused   partial[BAKE_MAX_REFUSED];   /* amber: what lost something */
@@ -922,6 +928,43 @@ static void bake_log_refusal(const char *name, const bake_outcome *o,
                     "NAV:   %s contributes routes from area %d",
                     plats[src].name, rep->reach_limit_area);
         backend_log(line);
+    }
+}
+
+/* "volume 2: N 9/9, E 9/9, S none (blocked), W 4/9; ..." -- for each box
+ * that offers a top, each top edge by the compass of its outward normal in
+ * module space, with the demons that have a floor climb onto it out of every
+ * demon with animations, or the commonest reason none was placed. */
+static void bake_faces_text(const sh_aug_report *rep, const sh_aug_platform *plats, int count,
+                            char *out, size_t cap, int *climbed, int *total)
+{
+    static const char *const why[SH_AUG_FACE_REASONS] = {
+        "blocked", "no floor", "edge", "too high", "inside", "no floor edge" };
+    static const char *const compass[8] = { "E", "NE", "N", "NW", "W", "SW", "S", "SE" };
+    int s, e, demons = sh_trav_monster_count();
+    out[0] = 0; *climbed = 0; *total = 0;
+    if (!rep->faces || demons <= 0) return;
+    for (s = 0; s < count && s < rep->source_count; s++) {
+        if (plats[s].obstacle_only) continue;
+        bake_append(out, cap, "%s%s:", out[0] ? "; " : "", plats[s].name);
+        for (e = 0; e < 4; e++) {
+            const sh_aug_face *f = &rep->faces[s * 4 + e];
+            const float *a = plats[s].c[e], *b = plats[s].c[(e + 1) % 4];
+            double ang = atan2(b[0] - a[0], -(b[1] - a[1])) * 180.0 / 3.14159265358979323846;
+            int dir = (int)floor(fmod(ang + 360.0 + 22.5, 360.0) / 45.0) & 7, m, bits = 0, best = -1;
+            for (m = 0; m < 32; m++) if (f->demons & (1u << m)) bits++;
+            (*total)++;
+            if (f->climbs) {
+                (*climbed)++;
+                bake_append(out, cap, "%s %s %d/%d", e ? "," : "", compass[dir], bits, demons);
+                continue;
+            }
+            if (f->walks) { (*climbed)++; bake_append(out, cap, "%s %s walk", e ? "," : "", compass[dir]); continue; }
+            for (m = 0; m < SH_AUG_FACE_REASONS; m++)
+                if (f->reasons[m] && (best < 0 || f->reasons[m] > f->reasons[best])) best = m;
+            bake_append(out, cap, "%s %s none (%s)", e ? "," : "", compass[dir],
+                        why[best >= 0 ? best : SH_AUG_FACE_NO_EDGE]);
+        }
     }
 }
 
@@ -1278,6 +1321,8 @@ static void bake_run(const char *name, const sh_aug_platform *in_plats, int in_c
         if (rep.dead_gaps)
             bake_append(o->reason, sizeof o->reason,
                         "; %d pair(s) too far to step and too close to jump", rep.dead_gaps);
+        bake_faces_text(&rep, plats, plat_count, o->faces, sizeof o->faces,
+                        &o->faces_climbed, &o->faces_total);
         if (o->state == SH_NAV_CLASS_PARTIAL) {
             char line[SH_SMNAV_RESNAME_CAP + 160];
             for (i = 0; i < rep.dropped_count && i < 8; i++) {
@@ -1343,6 +1388,8 @@ typedef struct bake_cache_entry {
     int                state;
     char               reason[BAKE_REASON_CAP];
     char               brief[BAKE_BRIEF_CAP];
+    char               faces[BAKE_FACES_CAP];
+    int                faces_climbed, faces_total;
     bake_refused       partial[BAKE_MAX_REFUSED];
     int                partial_count;
     size_t             cost;
@@ -1464,6 +1511,8 @@ static int bake_cache_serve(const bake_cache_entry *e, bake_outcome *o)
     o->state = e->state;
     strcpy_s(o->reason, sizeof o->reason, e->reason);
     strcpy_s(o->brief, sizeof o->brief, e->brief);
+    strcpy_s(o->faces, sizeof o->faces, e->faces);
+    o->faces_climbed = e->faces_climbed; o->faces_total = e->faces_total;
     memcpy(o->partial, e->partial, sizeof o->partial);
     o->partial_count = e->partial_count;
     g_cache_hits++;
@@ -1519,6 +1568,8 @@ static void bake_cache_store(bake_cache_key *k, const bake_outcome *o)
     e->state = o->state;
     strcpy_s(e->reason, sizeof e->reason, o->reason);
     strcpy_s(e->brief, sizeof e->brief, o->brief);
+    strcpy_s(e->faces, sizeof e->faces, o->faces);
+    e->faces_climbed = o->faces_climbed; e->faces_total = o->faces_total;
     memcpy(e->partial, o->partial, sizeof e->partial);
     e->partial_count = o->partial_count;
     e->cost = cost;
@@ -1846,6 +1897,8 @@ static void bake_class_set(bake_class *k, const bake_outcome *o)
     k->logged = 0;
     strncpy_s(k->reason, sizeof k->reason, o->reason, _TRUNCATE);
     strncpy_s(k->brief, sizeof k->brief, o->brief, _TRUNCATE);
+    strncpy_s(k->faces, sizeof k->faces, o->faces, _TRUNCATE);
+    k->faces_climbed = o->faces_climbed; k->faces_total = o->faces_total;
 }
 
 /* Move a finished batch into the preview cache. Called with the bake lock
@@ -1900,6 +1953,13 @@ static void preview_install(preview_batch *b)
             _snprintf_s(message, sizeof message, _TRUNCATE,
                         "NAV: preview built copy %d '%s' with parts left out -- %s",
                         t->instance, t->name, t->out.brief);
+            backend_log(message);
+        }
+        if (pc->bytes && t->out.faces[0] && !t->cached) {
+            char message[SH_SMNAV_RESNAME_CAP + BAKE_FACES_CAP + 96];
+            _snprintf_s(message, sizeof message, _TRUNCATE,
+                        "NAV: preview floor climbs for copy %d, %d of %d box face(s): %s",
+                        t->instance, t->out.faces_climbed, t->out.faces_total, t->out.faces);
             backend_log(message);
         }
     }
@@ -2067,7 +2127,7 @@ int sh_nav_bake_open(const char *name, sh_nav_bake_reader read_shipped,
                      unsigned char **out_bytes, size_t *out_len)
 {
     char module[SH_NAVR_MODULE_CAP], cls[32];
-    char why[BAKE_REASON_CAP], skipped[BAKE_REASON_CAP];
+    char why[BAKE_REASON_CAP], skipped[BAKE_REASON_CAP], faces[BAKE_FACES_CAP + 48] = "";
     bake_module *m;
     int hit = 0, i, ci, instance=-1, attempted=0, partial=0, reused=0;
     unsigned long revision=0;
@@ -2163,6 +2223,8 @@ int sh_nav_bake_open(const char *name, sh_nav_bake_reader read_shipped,
                     bake_one(name, m, ci, read_shipped, o, &traversal, &reused);
                     bake_class_set(k, o);
                     strncpy_s(why, sizeof why, o->reason, _TRUNCATE);
+                    _snprintf_s(faces, sizeof faces, _TRUNCATE, "%d of %d box face(s): %s",
+                                o->faces_climbed, o->faces_total, o->faces);
                     if (o->bytes) {
                         *out_bytes = o->bytes; *out_len = o->length; o->bytes = NULL;
                         hit = 1;
@@ -2193,6 +2255,11 @@ int sh_nav_bake_open(const char *name, sh_nav_bake_reader read_shipped,
                     reused == 2 ? " from the preview" :
                     reused ? " from an earlier bake of the same boxes" : "", why);
         backend_log(line);
+        if (strstr(faces, ": ") && faces[strlen(faces) - 1] != ' ') {
+            char line2[SH_SMNAV_RESNAME_CAP + BAKE_FACES_CAP + 64];
+            _snprintf_s(line2, sizeof line2, _TRUNCATE, "NAV:   floor climbs in '%s', %s", name, faces);
+            backend_log(line2);
+        }
     } else if(attempted) {
         char line[SH_SMNAV_RESNAME_CAP+BAKE_REASON_CAP+96];
         _snprintf_s(line,sizeof line,_TRUNCATE,"NAV: bake refused for copy %d '%s' -- %s",
@@ -2235,6 +2302,8 @@ void sh_nav_bake_summary_get(sh_nav_bake_summary *s)
             if (!g_modules[i].ok) continue;
             s->rooms++;
             if (g_preview_revision != g_geometry_revision || !pc->done) { s->pending++; continue; }
+            s->faces_climbed += g_modules[i].cls[0].faces_climbed;
+            s->faces_total += g_modules[i].cls[0].faces_total;
             if (!pc->bytes) { s->refused++; if (first_refused < 0) first_refused = i; }
             else if (pc->state == SH_NAV_CLASS_PARTIAL) {
                 s->partial++; if (first_partial < 0) first_partial = i;
@@ -2289,7 +2358,11 @@ void sh_nav_bake_toast(const sh_nav_bake_summary *s, int finished, char *title,
     }
     if (!s->refused && !s->partial && !s->boxes_left_out) {
         strcpy_s(title, title_cap, "Navmesh Built");
-        strcpy_s(body, cap, "The map's navmesh is ready.");
+        if (s->faces_total > s->faces_climbed)
+            _snprintf_s(body, cap, _TRUNCATE, "The map's navmesh is ready. Demons can climb "
+                        "%d of %d box faces from the floor; sh_navmesh lists them.",
+                        s->faces_climbed, s->faces_total);
+        else strcpy_s(body, cap, "The map's navmesh is ready.");
         return;
     }
     if (!s->built && !s->partial) {
@@ -2346,6 +2419,9 @@ void sh_nav_bake_report(void (*out)(const char *fmt, ...))
                     state != SH_NAV_CLASS_UNTRIED && k->reason[0] ? " -- " : "",
                     state != SH_NAV_CLASS_UNTRIED ? k->reason
                         : (c ? " (baked when Play loads it)" : ""));
+                if (state != SH_NAV_CLASS_UNTRIED && k->faces[0])
+                    out("      floor climbs on %d of %d box face(s): %s\n",
+                        k->faces_climbed, k->faces_total, k->faces);
             }
             out("    preview: %s, %d volume(s) marked as not placed, %d drawn amber\n",
                 g_preview[i].bytes ? "drawn from a finished bake" : "nothing to draw",
@@ -2463,7 +2539,9 @@ void sh_nav_bake_test_preview_complete(unsigned long revision, const char *bytes
 /* Run one class bake on given inputs, as the worker and BuildAAS do. */
 static char   g_test_reason[BAKE_REASON_CAP];
 static size_t g_test_length;
+static char   g_test_faces[BAKE_FACES_CAP];
 const char *sh_nav_bake_test_last_reason(void) { return g_test_reason; }
+const char *sh_nav_bake_test_last_faces(void) { return g_test_faces; }
 size_t sh_nav_bake_test_last_length(void) { return g_test_length; }
 
 int sh_nav_bake_test_run(const char *name, const sh_aug_platform *plats, int n,
@@ -2476,6 +2554,7 @@ int sh_nav_bake_test_run(const char *name, const sh_aug_platform *plats, int n,
     bake_run(name, plats, n, shipped, shipped_len, 0, 0, o);
     state = o->state;
     strncpy_s(g_test_reason, sizeof g_test_reason, o->reason, _TRUNCATE);
+    strncpy_s(g_test_faces, sizeof g_test_faces, o->faces, _TRUNCATE);
     g_test_length = o->length;
     if (brief && brief_cap) strncpy_s(brief, brief_cap, o->brief, _TRUNCATE);
     if (partial_marks) *partial_marks = o->partial_count;

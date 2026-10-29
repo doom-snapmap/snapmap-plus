@@ -79,6 +79,29 @@ typedef struct sh_aug_platform_result {
     char     reason[SH_AUG_REASON_CAP]; /* why it was not emitted */
 } sh_aug_platform_result;
 
+/* Why a floor-side climb onto one face of a box was not placed, most
+ * frequent first in the report. */
+enum {
+    SH_AUG_FACE_BLOCKED = 0,    /* another solid overhangs or stands in the run-up */
+    SH_AUG_FACE_NO_FLOOR,       /* the run-up point is not on walkable floor */
+    SH_AUG_FACE_NO_TOP,         /* the landing is not on the box's own top */
+    SH_AUG_FACE_HEIGHT,         /* no animation of that demon fits the rise */
+    SH_AUG_FACE_INSIDE,         /* the edge is a cut inside the box, not a face */
+    SH_AUG_FACE_NO_EDGE,        /* no edge of the top faces the floor there */
+    SH_AUG_FACE_REASONS
+};
+
+/* Floor climbs onto one side face of one requested box, per class: links
+ * placed, which demons (bit k is traversal monster k) and the reasons the
+ * other attempts failed. Faces are the box's four top edges in input order. */
+typedef struct sh_aug_face {
+    int      climbs;
+    unsigned demons;
+    int      attempts;
+    int      walks;             /* step-high: walk links, no climb needed */
+    int      reasons[SH_AUG_FACE_REASONS];
+} sh_aug_face;
+
 /* Routes left out of one area so it stays inside the engine's 256 outgoing
  * reachabilities: `routes` of them leave `area` toward or from `source`. */
 typedef struct sh_aug_route_drop { int source, area, routes; } sh_aug_route_drop;
@@ -131,6 +154,9 @@ typedef struct sh_aug_report {
     int      floor_pieces_added;
     int      floors_left_whole;
     int      shipped_routes_removed;
+    /* Four per requested box (faces[source * 4 + edge]), on the heap with
+     * platforms; NULL when no traversal table was ready. */
+    sh_aug_face *faces;
     int      climbs_declined;           /* climbs/leaps omitted because a source area already owns traversal points */
 } sh_aug_report;
 

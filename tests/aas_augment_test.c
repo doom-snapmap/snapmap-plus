@@ -2710,6 +2710,15 @@ static void test_a_climb_run_up_may_cross_a_floor_seam(void)
         }
         CHECK_MSG(bad == 0, "every climb endpoint resolves to the area it names");
     }
+    /* The per-face report: all four faces of the lone step carry a climb. */
+    CHECK(rep.faces != NULL);
+    if (rep.faces) {
+        int e;
+        for (e = 0; e < 4; e++) {
+            CHECK_MSG(rep.faces[e].climbs > 0 && rep.faces[e].demons & 1u,
+                      "every face of a lone step is climbed, and the report says by whom");
+        }
+    }
     sh_aug_report_free(&rep);
     sh_aas_free(a);
 }
@@ -2820,6 +2829,18 @@ static void test_no_floor_climb_lands_on_a_cut_inside_its_own_box(void)
     }
     CHECK_MSG(floor_climbs > 0, "step 1 is still climbable from the floor");
     CHECK_MSG(deep == 0, "every floor climb onto step 1 arrives at one of its real faces");
+    /* Its faces say which carry a climb, and why the rest do not. */
+    CHECK(rep.faces != NULL);
+    if (rep.faces) {
+        int e, climbed = 0, explained = 0;
+        for (e = 0; e < 4; e++) {
+            if (rep.faces[e].climbs) climbed++;
+            else if (rep.faces[e].reasons[SH_AUG_FACE_BLOCKED] || rep.faces[e].reasons[SH_AUG_FACE_INSIDE])
+                explained++;
+        }
+        CHECK_MSG(climbed >= 2, "step 1 keeps climbs on its open faces");
+        CHECK_MSG(climbed + explained == 4, "a face without a climb names the step above or the cut");
+    }
     {
         int dup = 0;
         unsigned j;

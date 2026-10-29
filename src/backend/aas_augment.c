@@ -1923,6 +1923,25 @@ static int aug_floor_accepts(aug_ctx *c, int area, const double p[3])
     return fabs(z - p[2]) <= (double)c->step;
 }
 
+/* The per-face record for a floor-side segment of `owner`'s box: the top
+ * edge of the requested box whose outward normal is closest to the segment's. */
+static sh_aug_face *aug_face_of(aug_ctx *c, const aug_peer *owner, const aug_side *s)
+{
+    const sh_aug_platform *box;
+    int e, best = -1;
+    double best_dot = -2.0;
+    if (!c->rep->faces || !owner || owner->source < 0 || owner->source >= c->solid_count) return NULL;
+    box = &c->solids[owner->source];
+    for (e = 0; e < 4; e++) {
+        const float *a = box->c[e], *b = box->c[(e + 1) % 4];
+        double ex = b[0] - a[0], ey = b[1] - a[1], len = sqrt(ex * ex + ey * ey), dot;
+        if (len < 1e-9) continue;
+        dot = (-ey * s->out[0] + ex * s->out[1]) / len;      /* outward of a clockwise loop */
+        if (dot > best_dot) { best_dot = dot; best = e; }
+    }
+    return best < 0 ? NULL : &c->rep->faces[owner->source * 4 + best];
+}
+
 /* Collect per-demon climbs and leaps for usable edge segments in both
  * directions. Refuse endpoints that resolve outside their claimed BSP areas,
  * except that a floor endpoint may stand on any walkable module floor.
@@ -1951,9 +1970,17 @@ static int aug_traversal_specs(aug_ctx *c, int ai, const aug_quad *eff,
         int na, regime, leap;
 
         regime = aug_regime(&sides[i], (double)c->step);
+        if (regime == REGIME_STEP && !sides[i].generated) {
+            sh_aug_face *f = aug_face_of(c, owner, &sides[i]);
+            if (f) f->walks++;          /* a step-high face is walked, not climbed */
+        }
         if (regime == REGIME_STEP || regime == REGIME_NONE) continue;
         if (!aug_side_owns(&sides[i], ai, req, peers, npeers)) continue;
-        if (!aug_floor_side_usable(c, owner, &sides[i])) continue;
+        if (!aug_floor_side_usable(c, owner, &sides[i])) {
+            sh_aug_face *f = regime == REGIME_DOWN ? aug_face_of(c, owner, &sides[i]) : NULL;
+            if (f) { f->attempts++; f->reasons[SH_AUG_FACE_INSIDE]++; }
+            continue;
+        }
         leap = (regime == REGIME_LEAP);
         /* A climb is measured vertically, a leap horizontally. */
         span = leap ? sides[i].gap : fabs(sides[i].drop);
@@ -1978,7 +2005,7 @@ static int aug_traversal_specs(aug_ctx *c, int ai, const aug_quad *eff,
                 const sh_trav_monster *m = sh_trav_monster_at(k);
                 char path[SH_TRAV_PATH_CAP];
                 float off = 0.0f;
-                int dist = 0, time = 0, aidx, placed = 0, dirn, inward;
+                int dist = 0, time = 0, aidx, placed = 0, dirn, inward, why = -1;
                 int floor_at = sides[i].floor_area;
                 double inner_pt[3], outer_pt[3], dirs, used[24];
                 aug_trav_spec *sp;
@@ -2016,7 +2043,7 @@ static int aug_traversal_specs(aug_ctx *c, int ai, const aug_quad *eff,
                         if(leap)memcpy(land,sides[i].land,sizeof land);
                         else if(!aug_ray_entry(pe,inner_pt[0],inner_pt[1],
                                 sides[i].out[0],sides[i].out[1],
-                                SH_TRAV_LEAP_MAX_SPAN+256.0,&distance,land))continue;
+                                SH_TRAV_LEAP_MAX_SPAN+256.0,&distance,land)){why=SH_AUG_FACE_NO_TOP;continue;}
                         outer_pt[0] = land[0];
                         outer_pt[1] = land[1];
                         outer_pt[2] = aug_z_at(pe, outer_pt[0], outer_pt[1]);
@@ -2033,32 +2060,32 @@ static int aug_traversal_specs(aug_ctx *c, int ai, const aug_quad *eff,
                         off=0.0f;
                         for(attempt=0;attempt<=SH_TRAV_DISTANCES;attempt++) {
                             float next_offset;double actual_span;
-                            if(!aug_floor_traversal_point(c,owner,&sides[i],bx,by,fabs(off),outer_pt))break;
+                            if(!aug_floor_traversal_point(c,owner,&sides[i],bx,by,fabs(off),outer_pt)){why=SH_AUG_FACE_NO_FLOOR;break;}
                             actual_span=fabs(inner_pt[2]-outer_pt[2]);
                             if(actual_span<=c->step||!sh_trav_select(m,dirn,(float)actual_span,
-                                path,sizeof path,&next_offset,&dist,&time))break;
+                                path,sizeof path,&next_offset,&dist,&time)){why=SH_AUG_FACE_HEIGHT;break;}
                             next_offset=(float)fabs(next_offset);
                             if(next_offset==off){selected=1;break;}
                             off=next_offset;
                         }
-                        if(!selected)continue;
+                        if(!selected){if(why<0)why=SH_AUG_FACE_HEIGHT;continue;}
                     }
                     if (sh_aas_point_area(c->a, (float)inner_pt[0], (float)inner_pt[1],
-                                          (float)(inner_pt[2] + 2.0)) != ai) continue;
+                                          (float)(inner_pt[2] + 2.0)) != ai) { why = SH_AUG_FACE_NO_TOP; continue; }
                     floor_at = sh_aas_point_area(c->a, (float)outer_pt[0], (float)outer_pt[1],
                                                  (float)(outer_pt[2] + 2.0));
                     if (floor_at != sides[i].floor_area &&
                         (sides[i].generated || !aug_floor_accepts(c, floor_at, outer_pt)))
-                        continue;
+                        { why = SH_AUG_FACE_NO_FLOOR; continue; }
                     if (!aug_path_is_clear(c, peers, npeers, ai, floor_at,
-                                           inner_pt, outer_pt)) continue;
+                                           inner_pt, outer_pt)) { why = SH_AUG_FACE_BLOCKED; continue; }
                     {
                         double stored[3];
-                        if(!aug_reach_point(c->a,ai,inner_pt,stored)||
-                           !aug_reach_point(c->a,floor_at,outer_pt,stored))continue;
+                        if(!aug_reach_point(c->a,ai,inner_pt,stored)){why=SH_AUG_FACE_NO_TOP;continue;}
+                        if(!aug_reach_point(c->a,floor_at,outer_pt,stored)){why=SH_AUG_FACE_NO_FLOOR;continue;}
                         if(!sides[i].generated&&
                            !sh_nav_geometry_path_clear(c->solids,c->solid_count,-1,-1,
-                               stored,stored,c->radius,c->height))continue;
+                               stored,stored,c->radius,c->height)){why=SH_AUG_FACE_BLOCKED;continue;}
                     }
                     used[placed++] = t;
 
@@ -2090,7 +2117,15 @@ static int aug_traversal_specs(aug_ctx *c, int ai, const aug_quad *eff,
                      * it gets only the one link. */
                     if (leap) break;
                 }
-                (void)placed;               /* nowhere on this segment may work for it */
+                /* Floor climbs onto the top, per face of the box. */
+                if (!sides[i].generated && up && regime == REGIME_DOWN) {
+                    sh_aug_face *f = aug_face_of(c, owner, &sides[i]);
+                    if (f) {
+                        f->attempts++;
+                        if (placed) { f->climbs += placed; if (k < 32) f->demons |= 1u << k; }
+                        else f->reasons[why >= 0 ? why : SH_AUG_FACE_HEIGHT]++;
+                    }
+                }
             }
         }
     }
@@ -3118,6 +3153,8 @@ int sh_aas_augment(sh_aas *a, const sh_aug_platform *plats, int n,
     out->platforms = (sh_aug_platform_result *)calloc(SH_AUG_MAX_PLATFORMS,
                                                       sizeof *out->platforms);
     if (!out->platforms) return 0;
+    out->faces = (sh_aug_face *)calloc((size_t)(n > 0 ? n : 1) * 4, sizeof *out->faces);
+    if (!out->faces) { free(out->platforms); out->platforms = NULL; return 0; }
 
     c.a = a; c.o = opts; c.rep = out; c.failed = 0;c.prepared_geometry=0;c.sides=NULL;
     c.floor_quads=NULL;c.floor_ids=NULL;c.floor_count=0;c.floor_parent=NULL;
@@ -3551,6 +3588,8 @@ void sh_aug_report_free(sh_aug_report *out)
     free(out->platforms);
     out->platforms = NULL;
     out->platform_count = 0;
+    free(out->faces);
+    out->faces = NULL;
 }
 
 #ifdef SH_AUG_TESTING
