@@ -485,14 +485,20 @@ unsigned sh_aug_test_set_depth_limit(unsigned limit)
 #endif
 
 /* Read the native floor polygon, not its height bounds. Original module
- * floors can slope too; their maximum Z is not the landing height everywhere. */
+ * floors can slope too; their maximum Z is not the landing height everywhere.
+ * The seam pass may split a floor's edges into many collinear pieces (a cut
+ * floor that kept its shipped number is stitched like any piece), so the loop
+ * is read whole and its collinear and repeated corners are dropped before the
+ * corner limit applies. */
+#define AUG_MAX_FLOOR_LOOP 1024
 static int aug_original_floor(const sh_aas *a,unsigned area,aug_quad *out)
 {
     const unsigned char *ar=sh_aas_rec_const(a,SH_AAS_L_AREAS,area);
-    double corners[SH_AUG_MAX_CORNERS][3];unsigned count,first,i,k;
+    double loop[AUG_MAX_FLOOR_LOOP][3];  /* 24 KB of stack */
+    double corners[SH_AUG_MAX_CORNERS][3];unsigned count,first,i,k;int n=0,kept=0;
     if(!ar||!(sh_aas_get_u32(ar,AR_FLAGS)&AREA_FLAGS_FLOOR))return 0;
     count=sh_aas_get_u16(ar,AR_NUM_EDGES);first=sh_aas_get_u32(ar,AR_FIRST_EDGE_INDEX);
-    if(count<3||count>SH_AUG_MAX_CORNERS)return 0;
+    if(count<3||count>AUG_MAX_FLOOR_LOOP)return 0;
     for(i=0;i<count;i++) {
         const unsigned char *ix=sh_aas_rec_const(a,SH_AAS_L_EDGEINDEX,first+i),*edge,*v;
         int ei;
@@ -500,9 +506,22 @@ static int aug_original_floor(const sh_aas *a,unsigned area,aug_quad *out)
         edge=sh_aas_rec_const(a,SH_AAS_L_EDGES,(unsigned)abs(ei));if(!edge)return 0;
         v=sh_aas_rec_const(a,SH_AAS_L_VERTICES,sh_aas_get_u32(edge,ei<0?4:0));
         if(!v)return 0;
-        for(k=0;k<3;k++)corners[i][k]=sh_aas_get_f32(v,k*4);
+        for(k=0;k<3;k++)loop[n][k]=sh_aas_get_f32(v,k*4);
+        if(n&&fabs(loop[n][0]-loop[n-1][0])<1e-3&&fabs(loop[n][1]-loop[n-1][1])<1e-3)continue;
+        n++;
     }
-    return aug_poly_init(out,corners,(int)count);
+    while(n>1&&fabs(loop[0][0]-loop[n-1][0])<1e-3&&fabs(loop[0][1]-loop[n-1][1])<1e-3)n--;
+    for(i=0;i<(unsigned)n;i++) {
+        const double *p=loop[(i+(unsigned)n-1)%(unsigned)n],*q=loop[i],*r=loop[(i+1)%(unsigned)n];
+        double ax=q[0]-p[0],ay=q[1]-p[1],bx=r[0]-q[0],by=r[1]-q[1];
+        double la=sqrt(ax*ax+ay*ay),lb=sqrt(bx*bx+by*by);
+        /* A corner on a straight run of edge is a seam split, not a corner. */
+        if(la>1e-9&&lb>1e-9&&fabs(ax*by-ay*bx)<=1e-6*la*lb&&ax*bx+ay*by>0)continue;
+        if(kept==SH_AUG_MAX_CORNERS)return 0;
+        for(k=0;k<3;k++)corners[kept][k]=q[k];
+        kept++;
+    }
+    return aug_poly_init(out,corners,kept);
 }
 
 /* An AABB, as (minx, miny, minz, maxx, maxy, maxz). */
@@ -3694,6 +3713,12 @@ void sh_aug_report_free(sh_aug_report *out)
 }
 
 #ifdef SH_AUG_TESTING
+int sh_aug_test_floor_corners(const sh_aas *a, unsigned area)
+{
+    aug_quad q;
+    return aug_original_floor(a, area, &q) ? q.count : -1;
+}
+
 int sh_aug_test_trav_anchors(double lo, double hi, double *out, int cap)
 {
     return aug_trav_anchors(lo, hi, out, cap);

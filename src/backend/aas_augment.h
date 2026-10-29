@@ -190,6 +190,8 @@ unsigned sh_aas_tree_depth(const sh_aas *a);
  * accommodate each demon animation's different floor-side offset.
  */
 int sh_aug_test_trav_anchors(double lo, double hi, double *out, int cap);
+/* Corners of `area` as the augmenter reads its floor polygon, or -1. */
+int sh_aug_test_floor_corners(const sh_aas *a, unsigned area);
 /* Set the per-demon anchor cap; 0 is uncapped. Returns the previous cap. */
 int sh_aug_test_set_anchor_cap(int n);
 /* Turn barrier-jump links on or off (SH_AUG_BARRIER_JUMPS builds start on).

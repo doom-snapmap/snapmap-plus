@@ -3052,10 +3052,53 @@ static void test_barrier_jumps_only_when_built_with_them(void)
     sh_aug_report_free(&rep);
     sh_aas_free(a);
 }
+/* The seam pass can split a floor's edges into more pieces than the corner
+ * limit. A floor read back after that is still its four-cornered polygon:
+ * split one slab's edges into 40 collinear pieces and read it. */
+static void test_a_floor_split_past_the_corner_limit_still_reads(void)
+{
+    sh_aas *a = load_slabs(NULL, 0);
+    unsigned first_v, first_e, first_ix, i;
+    unsigned char *ar;
+    const int pieces = 40;
+    printf("a floor split into more edges than the corner limit still reads as its polygon\n");
+    if (!a) { CHECK(0); return; }
+    CHECK(sh_aug_test_floor_corners(a, 1) == 4);
+    /* Corners (-2000,2000) (2000,2000) (2000,-2000) (-2000,-2000); the top edge
+     * becomes 37 pieces, the others one each. */
+    CHECK(sh_aas_append(a, SH_AAS_L_VERTICES, (unsigned)pieces, &first_v));
+    CHECK(sh_aas_append(a, SH_AAS_L_EDGES, (unsigned)pieces, &first_e));
+    CHECK(sh_aas_append(a, SH_AAS_L_EDGEINDEX, (unsigned)pieces, &first_ix));
+    {
+        double pts[40][2];
+        int n = 0, k;
+        for (k = 0; k < 37; k++) { pts[n][0] = -2000.0 + 4000.0 * k / 37.0; pts[n][1] = 2000.0; n++; }
+        pts[n][0] = 2000; pts[n][1] = 2000; n++;
+        pts[n][0] = 2000; pts[n][1] = -2000; n++;
+        pts[n][0] = -2000; pts[n][1] = -2000; n++;
+        for (k = 0; k < pieces; k++) {
+            unsigned char *v = sh_aas_rec(a, SH_AAS_L_VERTICES, first_v + (unsigned)k);
+            unsigned char *e = sh_aas_rec(a, SH_AAS_L_EDGES, first_e + (unsigned)k);
+            sh_aas_put_f32(v, 0, (float)pts[k][0]); sh_aas_put_f32(v, 4, (float)pts[k][1]);
+            sh_aas_put_f32(v, 8, 0.0f);
+            sh_aas_put_u32(e, 0, first_v + (unsigned)k);
+            sh_aas_put_u32(e, 4, first_v + (unsigned)((k + 1) % pieces));
+            sh_aas_put_u32(e, 8, 0x0C01);
+            sh_aas_put_i32(sh_aas_rec(a, SH_AAS_L_EDGEINDEX, first_ix + (unsigned)k), 0, (int)(first_e + (unsigned)k));
+        }
+    }
+    ar = sh_aas_rec(a, SH_AAS_L_AREAS, 1);
+    sh_aas_put_u16(ar, 6, (unsigned)pieces);
+    sh_aas_put_u32(ar, 8, first_ix);
+    i = (unsigned)sh_aug_test_floor_corners(a, 1);
+    CHECK_MSG(i == 4, "40 collinear edges read back as the four-cornered floor");
+    sh_aas_free(a);
+}
 
 int main(void)
 {
     printf("aas_augment_test\n");
+    test_a_floor_split_past_the_corner_limit_still_reads();
     test_barrier_jumps_only_when_built_with_them();
     test_the_floor_is_cut_around_the_boxes_on_it();
     test_no_floor_climb_lands_on_a_cut_inside_its_own_box();
