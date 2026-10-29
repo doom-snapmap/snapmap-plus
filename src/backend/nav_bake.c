@@ -1374,6 +1374,10 @@ static void bake_run(const char *name, const sh_aug_platform *in_plats, int in_c
             bake_append(o->reason, sizeof o->reason,
                         "; %d floor area(s) wholly under boxes closed", rep.floors_covered);
         /* Keep optional notes last so truncation preserves the cut-volume count. */
+        if (rep.leaps_farther)
+            bake_append(o->reason, sizeof o->reason,
+                        "; %d farther leap(s) relayed through a nearer box",
+                        rep.leaps_farther);
         if (rep.dead_gaps)
             bake_append(o->reason, sizeof o->reason,
                         "; %d pair(s) too far to step and too close to jump", rep.dead_gaps);

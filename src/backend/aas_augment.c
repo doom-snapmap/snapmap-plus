@@ -2460,6 +2460,148 @@ static int aug_traversal_specs(aug_ctx *c, int ai, const aug_quad *eff,
  * that area (traversals before walks, latest first), then the next, until the
  * area fits; the rest of the module is kept. Only an area the module's own
  * shipped data already fills, or a route naming no area, refuses the bake. */
+/* A box top inside a dense grid reaches every other top a face ray finds
+ * within leap range, per demon, so its leaps alone can fill the 256 routes
+ * out of it with targets several boxes away. Per source area and demon, take
+ * its leaps nearest landing first (horizontal distance plus rise) and keep
+ * one unless a kept leap already lands in the same area, or a kept leap lands
+ * on a top that has its own candidate leap there shorter than this one: the
+ * demon then relays through the nearer box. Every dropped leap is replaced by
+ * shorter ones, so each demon can still leap from any box top to every top
+ * it could before; a plain nearest-per-direction rule would lose the tops one
+ * stride past a gap too narrow to leap. Climbs, drops and walks are left
+ * alone. Order is preserved; returns the count kept. */
+typedef struct aug_leap_key {
+    int from_area, to_area, k;
+    unsigned travel_flags, d30;
+    double reach;
+} aug_leap_key;
+static int aug_leap_group_cmp(const aug_leap_key *a, const aug_leap_key *b)
+{
+    if (a->from_area != b->from_area) return a->from_area < b->from_area ? -1 : 1;
+    if (a->travel_flags != b->travel_flags) return a->travel_flags < b->travel_flags ? -1 : 1;
+    if (a->d30 != b->d30) return a->d30 < b->d30 ? -1 : 1;
+    return 0;
+}
+static int aug_leap_nearest_first(const void *x, const void *y)
+{
+    const aug_leap_key *a = (const aug_leap_key *)x, *b = (const aug_leap_key *)y;
+    int g = aug_leap_group_cmp(a, b);
+    if (g) return g;
+    if (a->reach != b->reach) return a->reach < b->reach ? -1 : 1;
+    return a->k < b->k ? -1 : a->k > b->k;
+}
+static int aug_leap_by_target(const void *x, const void *y)
+{
+    const aug_leap_key *a = (const aug_leap_key *)x, *b = (const aug_leap_key *)y;
+    int g = aug_leap_group_cmp(a, b);
+    if (g) return g;
+    if (a->to_area != b->to_area) return a->to_area < b->to_area ? -1 : 1;
+    if (a->reach != b->reach) return a->reach < b->reach ? -1 : 1;
+    return a->k < b->k ? -1 : a->k > b->k;
+}
+/* The shortest candidate leap probe->from_area -> probe->to_area for the
+ * probe's demon, or -1 when there is none. */
+static double aug_leap_shortest(const aug_leap_key *by_target, int n, const aug_leap_key *probe)
+{
+    int lo = 0, hi = n;
+    while (lo < hi) {
+        int mid = lo + (hi - lo) / 2, g = aug_leap_group_cmp(&by_target[mid], probe);
+        if (!g) g = by_target[mid].to_area < probe->to_area ? -1 : by_target[mid].to_area > probe->to_area;
+        if (g < 0) lo = mid + 1; else hi = mid;
+    }
+    if (lo < n && !aug_leap_group_cmp(&by_target[lo], probe) && by_target[lo].to_area == probe->to_area)
+        return by_target[lo].reach;
+    return -1.0;
+}
+static int aug_keep_nearest_leaps(aug_trav_spec *specs, int n, int *dropped)
+{
+    aug_leap_key *order, *by_target;
+    int *kept_to;
+    unsigned char *gone;
+    int k, nl = 0, w = 0, g0;
+    if (dropped) *dropped = 0;
+    for (k = 0; k < n; k++) if (specs[k].is_leap) nl++;
+    if (nl < 2) return n;
+    order = (aug_leap_key *)malloc((size_t)nl * sizeof *order);
+    by_target = (aug_leap_key *)malloc((size_t)nl * sizeof *by_target);
+    kept_to = (int *)malloc((size_t)nl * sizeof *kept_to);
+    gone = (unsigned char *)calloc((size_t)n, 1);
+    if (!order || !by_target || !kept_to || !gone) {
+        free(order); free(by_target); free(kept_to); free(gone);
+        return n;                               /* keep all: the budget still holds */
+    }
+    for (k = 0, nl = 0; k < n; k++) {
+        double dx, dy;
+        if (!specs[k].is_leap) continue;
+        dx = specs[k].end[0] - specs[k].start[0];
+        dy = specs[k].end[1] - specs[k].start[1];
+        order[nl].from_area = specs[k].from_area;
+        order[nl].to_area = specs[k].to_area;
+        order[nl].travel_flags = specs[k].travel_flags;
+        order[nl].d30 = specs[k].d30;
+        order[nl].reach = sqrt(dx * dx + dy * dy) + fabs(specs[k].end[2] - specs[k].start[2]);
+        order[nl].k = k;
+        nl++;
+    }
+    memcpy(by_target, order, (size_t)nl * sizeof *order);
+    qsort(order, (size_t)nl, sizeof *order, aug_leap_nearest_first);
+    qsort(by_target, (size_t)nl, sizeof *by_target, aug_leap_by_target);
+    for (g0 = 0; g0 < nl; ) {
+        int g1 = g0, nk = 0, i, q;
+        while (g1 < nl && !aug_leap_group_cmp(&order[g0], &order[g1])) g1++;
+        for (i = g0; i < g1; i++) {
+            const aug_leap_key *t = &order[i];
+            int relayed = 0;
+            for (q = 0; q < nk && !relayed; q++) {
+                aug_leap_key probe = *t;
+                double hop;
+                if (kept_to[q] == t->to_area) { relayed = 1; break; }
+                probe.from_area = kept_to[q];
+                hop = aug_leap_shortest(by_target, nl, &probe);
+                if (hop >= 0.0 && hop < t->reach) relayed = 1;
+            }
+            if (relayed) gone[t->k] = 1;
+            else kept_to[nk++] = t->to_area;
+        }
+        g0 = g1;
+    }
+    for (k = 0; k < n; k++) {
+        if (gone[k]) continue;
+        if (w != k) specs[w] = specs[k];
+        w++;
+    }
+    if (dropped) *dropped = n - w;
+    free(order); free(by_target); free(kept_to); free(gone);
+    return w;
+}
+
+#ifdef SH_AUG_TESTING
+/* Drive the rule on bare leaps; returns the count kept and writes the kept
+ * input indices to kept[], in order. */
+int sh_aug_test_nearest_leaps(const int *from, const int *to, const unsigned *flags,
+                              const double (*start)[3], const double (*end)[3],
+                              int n, int *kept)
+{
+    aug_trav_spec *s = (aug_trav_spec *)calloc((size_t)(n > 0 ? n : 1), sizeof *s);
+    int k, w, dropped;
+    if (!s) return -1;
+    for (k = 0; k < n; k++) {
+        s[k].from_area = from[k];
+        s[k].to_area = to[k];
+        s[k].travel_flags = flags[k];
+        s[k].travel_time = k;           /* carries the input index through */
+        s[k].is_leap = 1;
+        memcpy(s[k].start, start[k], sizeof s[k].start);
+        memcpy(s[k].end, end[k], sizeof s[k].end);
+    }
+    w = aug_keep_nearest_leaps(s, n, &dropped);
+    for (k = 0; k < w; k++) kept[k] = s[k].travel_time;
+    free(s);
+    return w;
+}
+#endif
+
 typedef struct aug_span { double span; int k; } aug_span;
 static int aug_span_longest_first(const void *x, const void *y)
 {
@@ -3857,6 +3999,9 @@ int sh_aas_augment(sh_aas *a, const sh_aug_platform *plats, int n,
 #endif
                 specs = buffer.data;
                 total = buffer.count;
+                /* Farther leaps go before the 256 budget sees them. */
+                if (!c.failed)
+                    total = aug_keep_nearest_leaps(specs, total, &out->leaps_farther);
                 /* Budget basic links and traversals together before allocating
                  * traversal-point indices. Report only emitted leap samples. */
                 if (!c.failed) total = aug_budget_traversals(&c, specs, total, out);

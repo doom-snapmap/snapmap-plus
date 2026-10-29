@@ -1040,6 +1040,95 @@ static void test_a_leap_through_a_third_volume_is_dropped(void)
     sh_aas_free(a);
 }
 
+/* The nearest-leap rule on bare leaps. Area 1 stands at x = 0; tops 2-5 lie
+ * east at 300, 450, 600 and 750. 2 and 3 are too close to leap between, so
+ * from 1 the demon keeps 2 and 3; 4 and 5 are relayed through 2 (2 -> 4 and
+ * 2 -> 5 are shorter than 1 -> 4 and 1 -> 5). A second, farther leap 1 -> 2
+ * from another edge goes, another demon keeps its own leap, and a leap north
+ * with no relay stays. */
+static void test_farther_leaps_are_relayed_through_the_nearer_box(void)
+{
+    enum { N = 10 };
+    static const int from[N] = { 1, 1, 1, 1, 1, 2, 2, 1, 1, 1 };
+    static const int to[N]   = { 5, 4, 3, 2, 2, 4, 5, 4, 6, 2 };
+    static const unsigned flags[N] = { 0x10001, 0x10001, 0x10001, 0x10001, 0x10001,
+                                       0x10001, 0x10001, 0x20001, 0x10001, 0x10001 };
+    static const double start[N][3] = {
+        {0,0,0}, {0,0,0}, {0,0,0}, {0,0,0}, {0,40,0},
+        {300,0,0}, {300,0,0}, {0,0,0}, {0,0,0}, {0,0,0} };
+    static const double end[N][3] = {
+        {750,0,0}, {600,0,0}, {450,0,0}, {300,0,0}, {290,40,0},
+        {600,0,0}, {750,0,0}, {600,0,0}, {0,500,0}, {300,0,0} };
+    int kept[N], n, i, has[N] = {0};
+    printf("a farther leap is relayed through a nearer box, never lost\n");
+    /* Entry 4 (290) is the nearest 1 -> 2; entries 3 and 9 (300) go. */
+    n = sh_aug_test_nearest_leaps(from, to, flags, start, end, N, kept);
+    for (i = 0; i < n; i++) if (kept[i] >= 0 && kept[i] < N) has[kept[i]] = 1;
+    for (i = 1; i < n; i++) CHECK_MSG(kept[i] > kept[i - 1], "the kept leaps keep their order");
+    CHECK_MSG(has[4] && !has[3] && !has[9], "one leap per landing area, the nearest");
+    CHECK_MSG(has[2], "1 -> 3 has no shorter relay and stays");
+    CHECK_MSG(!has[1] && !has[0], "1 -> 4 and 1 -> 5 relay through 2");
+    CHECK_MSG(has[5] && has[6], "2's own leaps are kept");
+    CHECK_MSG(has[7], "another demon keeps its own leap");
+    CHECK_MSG(has[8], "a leap no kept landing relays stays");
+    CHECK_MSG(n == 6, "six of the ten are kept");
+}
+
+/* In a bake: four tops in a row with 300-unit gaps. The far leaps (800) are
+ * relayed through the middle tops, each top still leaps to its neighbours,
+ * the report counts them, and the payload validates. Without the middle tops
+ * the same 800-unit leap is written. */
+static void test_a_row_of_tops_leaps_only_to_its_neighbours(void)
+{
+    sh_aas *a = load_module(), *b = load_module();
+    sh_aug_platform p[4], two[2];
+    sh_aug_report rep, bare;
+    sh_aug_opts o = {0};
+    unsigned char *bytes;
+    size_t len = 0;
+    char err[192];
+    printf("a row of tops leaps to its neighbours and relays the far ones\n");
+    if (!a || !b) { CHECK(0); sh_aas_free(a); sh_aas_free(b); return; }
+    o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_AUTO;
+    load_synthetic_traversal_table();
+    mkplat(&two[0], -1300.0f, -300.0f, -1100.0f, 300.0f, 16.0f, "west");
+    mkplat(&two[1],  -300.0f, -300.0f,  -100.0f, 300.0f, 16.0f, "east");
+    CHECK(sh_aas_augment(b, two, 2, &o, &bare) == 1);
+    CHECK_MSG(reach_exists(b, bare.platforms[0].area, bare.platforms[1].area),
+              "alone, the 800-unit gap is leapt");
+    CHECK_MSG(bare.leaps_farther == 0, "and nothing is relayed");
+
+    mkplat(&p[0], -1300.0f, -300.0f, -1100.0f, 300.0f, 16.0f, "t0");
+    mkplat(&p[1],  -800.0f, -300.0f,  -600.0f, 300.0f, 16.0f, "t1");
+    mkplat(&p[2],  -300.0f, -300.0f,  -100.0f, 300.0f, 16.0f, "t2");
+    mkplat(&p[3],   200.0f, -300.0f,   400.0f, 300.0f, 16.0f, "t3");
+    CHECK(sh_aas_augment(a, p, 4, &o, &rep) == 1);
+    {
+        int i, A[4];
+        for (i = 0; i < 4; i++) A[i] = rep.platforms[i].area;
+        for (i = 0; i < 3; i++) {
+            CHECK_MSG(reach_exists(a, A[i], A[i + 1]), "each top leaps to its east neighbour");
+            CHECK_MSG(reach_exists(a, A[i + 1], A[i]), "and back");
+        }
+        for (i = 0; i < 2; i++) {
+            CHECK_MSG(!reach_exists(a, A[i], A[i + 2]), "the 800-unit leap is relayed");
+            CHECK_MSG(!reach_exists(a, A[i + 2], A[i]), "both ways");
+        }
+    }
+    CHECK_MSG(rep.leaps_farther > 0, "the report counts the relayed leaps");
+    CHECK_MSG(rep.routes_dropped == 0, "nothing is left out");
+    bytes = sh_aas_write(a, &len);
+    CHECK(bytes != NULL);
+    if (bytes) {
+        err[0] = 0;
+        CHECK_MSG(sh_navmesh_validate_aas(bytes, len, err, sizeof err) == 1,
+                  err[0] ? err : "the structural gate refused the output");
+        HeapFree(GetProcessHeap(), 0, bytes);
+    }
+    sh_aas_free(a);
+    sh_aas_free(b);
+}
+
 /* An ordinary upright platform is NOT a side face. face 4 is an upright box's
  * top, so a `face != 0` test would flag every platform in every map. */
 static void test_an_upright_platform_is_not_a_side_face(void)
@@ -3589,6 +3678,8 @@ int main(void)
     test_a_three_tower_chain_links_end_to_end();
     test_a_gap_below_the_leap_minimum_is_not_crossed();
     test_a_leap_through_a_third_volume_is_dropped();
+    test_farther_leaps_are_relayed_through_the_nearer_box();
+    test_a_row_of_tops_leaps_only_to_its_neighbours();
     test_an_upright_platform_is_not_a_side_face();
     test_a_dense_yawed_chain_stays_within_the_depth_limit();
     test_a_bake_at_the_platform_cap_completes();

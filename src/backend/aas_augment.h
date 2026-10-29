@@ -164,6 +164,9 @@ typedef struct sh_aug_report {
     /* Climbs, drops and leaps refused because their path would pass through a
      * solid or start from a cut inside a box rather than a real edge. */
     int      through_solids;
+    /* Leaps dropped because shorter leaps through a nearer landing of the
+     * same area reach their target. */
+    int      leaps_farther;
 } sh_aug_report;
 
 /* Augment a in place. Returns 1 if the model remains coherent, including when
@@ -206,6 +209,11 @@ int sh_aug_test_set_anchor_cap(int n);
 int sh_aug_test_set_barrier(int on);
 /* Lower the tree-depth limit the report checks; 0 restores 128. */
 unsigned sh_aug_test_set_depth_limit(unsigned limit);
+/* The nearest-leap rule on bare leaps: from and to area, demon flags, start
+ * and end. Returns the count kept and writes the kept input indices, in order. */
+int sh_aug_test_nearest_leaps(const int *from, const int *to, const unsigned *flags,
+                              const double (*start)[3], const double (*end)[3],
+                              int n, int *kept);
 
 /* Test access to the private aug_quad type. Allocate sh_aug_test_quad_size()
  * bytes for each quad buffer.
