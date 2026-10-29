@@ -3179,6 +3179,114 @@ static void test_a_floor_wholly_under_a_box_is_closed(void)
     sh_aug_report_free(&rep);
     sh_aas_free(a);
 }
+/* The box under (x, y, z): the one whose top is at z there, or -1. */
+static int box_under(const sh_aug_platform *p, int n, double x, double y, double z)
+{
+    int i;
+    for (i = 0; i < n; i++)
+        if (fabs(p[i].c[0][2] - z) < 2.5 && point_in_footprint(&p[i], x, y, 0.5)) return i;
+    return -1;
+}
+
+/* A user's house: a ground slab, a second floor hanging over half of it high
+ * enough to walk under, a wall rising through the second floor (so its top
+ * is cut along lines deep inside it) and a step standing under its edge.
+ * Traversal animations are never collision-checked, so no climb or drop may
+ * pass through any of them: none may start on the ground under the second
+ * floor and arrive on top of it, and every one must rise in front of the
+ * higher box and step over its lip with the whole body in open air (a step's
+ * height above the feet excepted, as standing space is cut). The second
+ * floor stays reachable from the ground outside it and from the step. */
+static void test_no_traversal_passes_through_a_slab(void)
+{
+    sh_aas *a = load_slabs(NULL, 0);
+    sh_aug_platform p[4];
+    sh_aug_report rep;
+    sh_aug_opts o = { SH_AUG_FALL_AUTO, 1, SH_AUG_TRAVERSAL_AUTO, 0 };
+    unsigned i, nr;
+    int through = 0, swept = 0, onto_slab = 0, from_step = 0, links = 0;
+    printf("no climb or drop passes through a slab, a wall or a step\n");
+    if (!a) { CHECK(0); return; }
+    load_synthetic_traversal_table();
+    mkbox_yawed(&p[0], 0, 0, 1200, 800, 0, 16.0f, 0.0f, "ground slab");
+    mkbox_yawed(&p[1], 200, 0, 400, 600, 0, 148.0f, 132.0f, "second floor");
+    mkbox_yawed(&p[2], 210, 305, 20, 50, 0, 250.0f, 0.0f, "wall through it");
+    mkbox_yawed(&p[3], -40, 0, 120, 100, 0, 80.0f, 16.0f, "step under its edge");
+    CHECK(sh_aas_augment(a, p, 4, &o, &rep) == 1);
+    nr = sh_aas_count(a, SH_AAS_L_REACHABILITIES);
+    for (i = 0; i < nr; i++) {
+        const unsigned char *r = sh_aas_rec_const(a, SH_AAS_L_REACHABILITIES, i);
+        double st[3], en[3], *lo, *hi, from[3], rise[3], to[3];
+        int k, lb, hb, q, clear = 1;
+        if (!(sh_aas_get_u32(r, 0) >> 16)) continue;
+        links++;
+        for (k = 0; k < 3; k++) { st[k] = sh_aas_get_i16(r, 12 + 2 * k); en[k] = sh_aas_get_i16(r, 18 + 2 * k); }
+        lo = st[2] <= en[2] ? st : en;
+        hi = st[2] <= en[2] ? en : st;
+        lb = box_under(p, 4, lo[0], lo[1], lo[2]);
+        hb = box_under(p, 4, hi[0], hi[1], hi[2]);
+        if (hb == 1 && lo[2] < 132.0 && point_in_footprint(&p[1], lo[0], lo[1], 0.0)) through++;
+        if (hb == 1 && st[2] < en[2]) { onto_slab++; if (lb == 3) from_step++; }
+        from[0] = lo[0]; from[1] = lo[1]; from[2] = lo[2] + 18.0;
+        rise[0] = lo[0]; rise[1] = lo[1]; rise[2] = hi[2] + 18.0;
+        to[0] = hi[0]; to[1] = hi[1]; to[2] = hi[2] + 18.0;
+        for (q = 0; q < 4; q++) {
+            if (q != lb && !sh_nav_geometry_path_clear(&p[q], 1, -1, -1, from, rise, 24.0, 80.0 - 18.0)) clear = 0;
+            if (q != hb && !sh_nav_geometry_path_clear(&p[q], 1, -1, -1, rise, to, 24.0, 80.0 - 18.0)) clear = 0;
+        }
+        if (!clear) swept++;
+    }
+    CHECK_MSG(links > 0, "the house has climbs");
+    CHECK_MSG(through == 0, "no climb rises from the ground under the second floor onto it");
+    CHECK_MSG(swept == 0, "every climb and drop rises and steps over in open air");
+    CHECK_MSG(onto_slab > 0, "the second floor is still climbed from outside it");
+    CHECK_MSG(from_step > 0, "and from the step at its edge");
+    CHECK_MSG(rep.through_solids > 0, "the report counts the links refused");
+    {
+        size_t len; char err[192]; unsigned char *bytes = sh_aas_write(a, &len);
+        CHECK(bytes != NULL);
+        if (bytes) { CHECK_MSG(sh_navmesh_validate_aas(bytes, len, err, sizeof err), err);
+                     HeapFree(GetProcessHeap(), 0, bytes); }
+    }
+    sh_aug_report_free(&rep);
+    sh_aas_free(a);
+}
+/* A box floating above the floor higher than the agent: the floor under it
+ * is not cut, since a demon walks beneath it, but a demon rising to its lip
+ * in front of a face passes the box's whole height, so every floor climb
+ * starts where that body column clears the box -- moved out from under it,
+ * not dropped. */
+static void test_a_climb_onto_a_floating_box_starts_outside_it(void)
+{
+    sh_aas *a = load_slabs(NULL, 0);
+    sh_aug_platform p;
+    sh_aug_report rep;
+    sh_aug_opts o = { SH_AUG_FALL_AUTO, 1, SH_AUG_TRAVERSAL_AUTO, 0 };
+    unsigned i, nr;
+    int climbs = 0, under = 0, e;
+    printf("a floor climb onto a floating box starts outside it\n");
+    if (!a) { CHECK(0); return; }
+    load_synthetic_traversal_table();
+    mkbox_yawed(&p, 0, 0, 300, 300, 30, 160.0f, 90.0f, "floating box");
+    CHECK(sh_aas_augment(a, &p, 1, &o, &rep) == 1);
+    nr = sh_aas_count(a, SH_AAS_L_REACHABILITIES);
+    for (i = 0; i < nr; i++) {
+        const unsigned char *r = sh_aas_rec_const(a, SH_AAS_L_REACHABILITIES, i);
+        double x, y;
+        if (!(sh_aas_get_u32(r, 0) >> 16) || sh_aas_get_i16(r, 16) > 2) continue;
+        climbs++;
+        x = sh_aas_get_i16(r, 12); y = sh_aas_get_i16(r, 14);
+        /* The square body of radius 24 at the run-up clears the box. */
+        if (point_in_footprint(&p, x, y, 24.0 * sqrt(2.0) - 1.0)) under++;
+    }
+    CHECK_MSG(climbs > 0, "the floating box is climbed from the floor");
+    CHECK_MSG(under == 0, "and no run-up stands under it");
+    CHECK(rep.faces != NULL);
+    if (rep.faces) for (e = 0; e < 4; e++)
+        CHECK_MSG(rep.faces[e].climbs > 0, "every face keeps its climb");
+    sh_aug_report_free(&rep);
+    sh_aas_free(a);
+}
 /* Walks between floor pieces are kept like shipped routes, so they must never
  * push a floor past the engine's 256: a floor that already ships 200 routes is
  * not cut and the class still bakes, and no pair of floor areas gets more than
@@ -3227,6 +3335,8 @@ static void test_floor_walks_stay_inside_the_route_limit(void)
 int main(void)
 {
     printf("aas_augment_test\n");
+    test_no_traversal_passes_through_a_slab();
+    test_a_climb_onto_a_floating_box_starts_outside_it();
     test_floor_walks_stay_inside_the_route_limit();
     test_a_floor_wholly_under_a_box_is_closed();
     test_a_floor_whose_pieces_do_not_fit_stays_whole();

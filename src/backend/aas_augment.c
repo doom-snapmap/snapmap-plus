@@ -1736,6 +1736,10 @@ static int aug_path_is_clear(aug_ctx *c, const aug_peer *peers, int npeers,
                              int from_area, int to_area,
                              const double s3[3], const double e3[3]);
 static int aug_floor_accepts(aug_ctx *c, int area, const double p[3]);
+static int aug_settle_traversal(aug_ctx *c, const aug_peer *peers, int npeers,
+                                const aug_peer *owner, const aug_side *s, int leap,
+                                const aug_quad *eff, int ai, int far_area,
+                                double inner[3], double outer[3], int *moved, int *why);
 
 static int aug_barrier_links(aug_ctx *c, int ai, const aug_quad *eff,
                              const aug_quad *req, const aug_peer *peers, int npeers)
@@ -1781,7 +1785,18 @@ static int aug_barrier_links(aug_ctx *c, int ai, const aug_quad *eff,
             far_area = sh_aas_point_area(c->a, (float)outer[0], (float)outer[1], (float)(outer[2] + 2.0));
             if (far_area != sides[i].floor_area &&
                 (sides[i].generated || !aug_floor_accepts(c, far_area, outer))) continue;
-            if (!aug_path_is_clear(c, peers, npeers, ai, far_area, inner, outer)) continue;
+            {
+                int moved = 0, why = -1;
+                if (!aug_settle_traversal(c, peers, npeers, owner, &sides[i], 0, eff, ai, far_area,
+                                          inner, outer, &moved, &why)) {
+                    c->rep->through_solids++;
+                    continue;
+                }
+                dz = fabs(inner[2] - outer[2]);
+                if (dz <= c->step || dz > AUG_MAX_BARRIER_HEIGHT + AUG_BARRIER_TOLERANCE) continue;
+            }
+            if (!c->prepared_geometry &&
+                !aug_path_is_clear(c, peers, npeers, ai, far_area, inner, outer)) continue;
             low_is_inner = inner[2] < outer[2];
             if (aug_reach(c, REACH_BARRIER_JUMP, time, low_is_inner ? ai : far_area,
                           low_is_inner ? far_area : ai, low_is_inner ? inner : outer,
@@ -2003,7 +2018,7 @@ static int aug_floor_traversal_point(aug_ctx *c,const aug_peer *owner,
     aug_quad floor;int have_floor=aug_original_floor(c->a,(unsigned)side->floor_area,&floor);
     double distance=offset;
     if(owner&&owner->prepared&&owner->source>=0&&owner->source<c->solid_count) {
-        double lip=1e9,body_exit,origin[3],direction[3];int e;
+        double lip=1e9,body_exit,origin[3],direction[3],column;int e;
         for(e=0;e<owner->support.count;e++) {
             double normal[2],speed,inside;
             aug_edge_normal_in(&owner->support,e,normal);
@@ -2017,8 +2032,15 @@ static int aug_floor_traversal_point(aug_ctx *c,const aug_peer *owner,
         origin[2]=have_floor?aug_z_at(&floor,x,y):side->far_z;
         direction[0]=side->out[0];direction[1]=side->out[1];
         direction[2]=have_floor?aug_z_at(&floor,x+direction[0],y+direction[1])-origin[2]:0;
+        /* The demon rises in front of the face to the lip before stepping
+         * over it, so the body that must clear the box is the column from
+         * the floor to a standing height above the lip, not one standing
+         * height: under an overhang that a demon walks beneath, the run-up
+         * must still lie outside it. */
+        column=c->height;
+        if(side->near_z>origin[2])column+=side->near_z-origin[2];
         if(!sh_nav_geometry_ray_exit(&c->solids[owner->source],origin,direction,
-                                     c->radius,c->height,&body_exit))return 0;
+                                     c->radius,column,&body_exit))return 0;
         /* Cover the later integer-coordinate rounding without changing the
          * standing surface or its boundary. */
         if(body_exit>0&&distance<body_exit+2.0)distance=body_exit+2.0;
@@ -2049,6 +2071,153 @@ static int aug_floor_accepts(aug_ctx *c, int area, const double p[3])
     } else if (aug_area_box(c->a, (unsigned)area, box)) z = box[5];
     else return 0;
     return fabs(z - p[2]) <= (double)c->step;
+}
+
+/* How far (x, y) lies inside a top face, followed along dir: the distance
+ * to the face's edge, or 1e9 when the ray never leaves it. */
+static double aug_lip_distance(const aug_quad *support, double x, double y, const double dir[2])
+{
+    double lip = 1e9;
+    int e;
+    for (e = 0; e < support->count; e++) {
+        double normal[2], speed, inside;
+        aug_edge_normal_in(support, e, normal);
+        speed = normal[0] * dir[0] + normal[1] * dir[1];
+        inside = normal[0] * (x - support->c[e][0]) + normal[1] * (y - support->c[e][1]);
+        if (speed < -1e-9 && -inside / speed < lip) lip = -inside / speed;
+    }
+    return lip;
+}
+
+/* How far (x, y) stands inside a convex top face: its distance to the
+ * nearest edge. */
+static double aug_edge_depth(const aug_quad *support, double x, double y)
+{
+    double depth = 1e9;
+    int e;
+    for (e = 0; e < support->count; e++) {
+        double normal[2], inside;
+        aug_edge_normal_in(support, e, normal);
+        inside = normal[0] * (x - support->c[e][0]) + normal[1] * (y - support->c[e][1]);
+        if (inside < depth) depth = inside;
+    }
+    return depth;
+}
+
+/* An endpoint on a cut top stands at a real ledge only within the standing
+ * body's clearance of its box's nearest edge, plus its own unit inset.
+ * Measured to the nearest edge, not along the link: at a yawed corner the
+ * link's direction meets the face obliquely. */
+static double aug_lip_limit(const aug_ctx *c)
+{
+    return sqrt(2.0) * c->radius + 2.0 * AUG_TOUCH_EPS + 2.0 * REACH_SIDE_OFFSET;
+}
+
+/* Traversal animations move the demon by root motion between the two
+ * endpoints and are never collision-checked, so a link that exists is taken
+ * through whatever stands in its way. A climb or drop is therefore kept only
+ * when its whole path is open: the demon rises in front of the higher box's
+ * face from the low endpoint to the height of the lip, then steps over the
+ * lip to the high endpoint. The lip must be a real edge of the higher box
+ * (not a cut line inside it, where the low ground lies under the box); the
+ * low endpoint must stand where the body column up to the lip clears that
+ * box, so a run-up under an overhang is moved out from under it or refused;
+ * and the rise and the step over must cross no solid, the low endpoint's own
+ * support excepted on the way up and the high box's own top on the way over.
+ * Leaps keep their straight path test and must leave and land at real edges.
+ * Returns 0 to refuse the link. It may move the low endpoint along the edge
+ * normal, only toward a generated neighbour (whose landing carries no
+ * animation offset), and then sets *moved. */
+static int aug_settle_traversal(aug_ctx *c, const aug_peer *peers, int npeers,
+                                const aug_peer *owner, const aug_side *s, int leap,
+                                const aug_quad *eff, int ai, int far_area,
+                                double inner[3], double outer[3], int *moved, int *why)
+{
+    const aug_peer *peer = s->generated && s->peer >= 0 && s->peer < npeers ? &peers[s->peer] : NULL;
+    const aug_peer *hp, *lp;
+    const aug_quad *low_eff;
+    double *hi, *lo, dir[2];
+    int high_inner, low_area, hs, ls;
+    *moved = 0;
+    if (!c->prepared_geometry) return 1;
+    if (leap) {
+        double back[2];
+        back[0] = -s->out[0]; back[1] = -s->out[1];
+        if (owner && owner->prepared && owner->support.count >= 3 &&
+            (aug_lip_distance(&owner->support, inner[0], inner[1], s->out) >= 1e9 ||
+             aug_edge_depth(&owner->support, inner[0], inner[1]) > aug_lip_limit(c))) {
+            *why = SH_AUG_FACE_INSIDE; return 0;
+        }
+        if (peer && peer->prepared && peer->support.count >= 3 &&
+            (aug_lip_distance(&peer->support, outer[0], outer[1], back) >= 1e9 ||
+             aug_edge_depth(&peer->support, outer[0], outer[1]) > aug_lip_limit(c))) {
+            *why = SH_AUG_FACE_INSIDE; return 0;
+        }
+        return 1;
+    }
+    high_inner = inner[2] > outer[2];
+    hp = high_inner ? owner : peer;
+    lp = high_inner ? peer : owner;
+    hi = high_inner ? inner : outer;
+    lo = high_inner ? outer : inner;
+    low_eff = high_inner ? (peer ? peer->eff : NULL) : eff;
+    low_area = high_inner ? far_area : ai;
+    dir[0] = high_inner ? s->out[0] : -s->out[0];
+    dir[1] = high_inner ? s->out[1] : -s->out[1];
+    if (hp && hp->prepared && hp->source >= 0 && hp->source < c->solid_count &&
+        hp->support.count >= 3) {
+        double lip = aug_lip_distance(&hp->support, hi[0], hi[1], dir), edge[3], ray[3];
+        double exit = 0.0, need, at;
+        if (lip >= 1e9 || aug_edge_depth(&hp->support, hi[0], hi[1]) > aug_lip_limit(c)) {
+            *why = SH_AUG_FACE_INSIDE; return 0;
+        }
+        edge[0] = hi[0] + dir[0] * lip;
+        edge[1] = hi[1] + dir[1] * lip;
+        edge[2] = lo[2];
+        ray[0] = dir[0]; ray[1] = dir[1]; ray[2] = 0.0;
+        if (!sh_nav_geometry_ray_exit(&c->solids[hp->source], edge, ray, c->radius,
+                                      c->height + (hi[2] - lo[2]), &exit)) {
+            *why = SH_AUG_FACE_BLOCKED; return 0;
+        }
+        need = (exit > 0.0 ? exit : 0.0) + 2.0;
+        at = (lo[0] - edge[0]) * dir[0] + (lo[1] - edge[1]) * dir[1];
+        /* A floor run-up was already placed past this column; allow it the
+         * rounding of that placement. */
+        if (exit > 0.0 && !s->generated && at < need - 0.5) { *why = SH_AUG_FACE_BLOCKED; return 0; }
+        if (exit > 0.0 && s->generated && at < need) {
+            double p[3];
+            if (!low_eff) { *why = SH_AUG_FACE_BLOCKED; return 0; }
+            p[0] = edge[0] + dir[0] * need;
+            p[1] = edge[1] + dir[1] * need;
+            if (!aug_quad_contains_xy(low_eff, p[0], p[1])) { *why = SH_AUG_FACE_BLOCKED; return 0; }
+            p[2] = aug_z_at(low_eff, p[0], p[1]);
+            if (p[2] >= hi[2] - (double)c->step ||
+                sh_aas_point_area(c->a, (float)p[0], (float)p[1], (float)(p[2] + 2.0)) != low_area) {
+                *why = SH_AUG_FACE_BLOCKED; return 0;
+            }
+            memcpy(lo, p, sizeof p);
+            *moved = 1;
+        }
+    }
+    hs = hp ? hp->source : -1;
+    ls = lp ? lp->source : -1;
+    /* The body is swept above the step band, as standing space is cut: a
+     * demon standing at either end may overlap a walkable box less than a
+     * step above its feet, which it would simply step onto. */
+    {
+        double band = c->step > 0.0f && c->step < c->height ? (double)c->step : 0.0;
+        double from[3], rise[3], to[3];
+        from[0] = lo[0]; from[1] = lo[1]; from[2] = lo[2] + band;
+        rise[0] = lo[0]; rise[1] = lo[1]; rise[2] = hi[2] + band;
+        to[0] = hi[0]; to[1] = hi[1]; to[2] = hi[2] + band;
+        if (!sh_nav_geometry_path_clear(c->solids, c->solid_count, ls, -1, from, rise,
+                                        c->radius, c->height - band) ||
+            !sh_nav_geometry_path_clear(c->solids, c->solid_count, hs, -1, rise, to,
+                                        c->radius, c->height - band)) {
+            *why = SH_AUG_FACE_BLOCKED; return 0;
+        }
+    }
+    return 1;
 }
 
 /* The per-face record for a floor-side segment of `owner`'s box: the top
@@ -2205,7 +2374,25 @@ static int aug_traversal_specs(aug_ctx *c, int ai, const aug_quad *eff,
                     if (floor_at != sides[i].floor_area &&
                         (sides[i].generated || !aug_floor_accepts(c, floor_at, outer_pt)))
                         { why = SH_AUG_FACE_NO_FLOOR; continue; }
-                    if (!aug_path_is_clear(c, peers, npeers, ai, floor_at,
+                    {
+                        int moved = 0;
+                        if (!aug_settle_traversal(c, peers, npeers, owner, &sides[i], leap, eff, ai,
+                                                  floor_at, inner_pt, outer_pt, &moved, &why)) {
+                            c->rep->through_solids++;
+                            continue;
+                        }
+                        /* A moved run-up may stand at another height: the
+                         * clip is chosen again for the rise it now has. */
+                        if (moved && !sh_trav_select(m, dirn, (float)fabs(inner_pt[2] - outer_pt[2]),
+                                                     path, sizeof path, &off, &dist, &time)) {
+                            why = SH_AUG_FACE_HEIGHT; continue;
+                        }
+                    }
+                    /* With solids, a climb or drop was swept along its rise and
+                     * step over the lip above; the straight segment would cut
+                     * through the corner of any box beside the landing. */
+                    if ((leap || !c->prepared_geometry) &&
+                        !aug_path_is_clear(c, peers, npeers, ai, floor_at,
                                            inner_pt, outer_pt)) { why = SH_AUG_FACE_BLOCKED; continue; }
                     {
                         double stored[3];

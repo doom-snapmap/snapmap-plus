@@ -161,6 +161,9 @@ typedef struct sh_aug_report {
      * platforms; NULL when no traversal table was ready. */
     sh_aug_face *faces;
     int      climbs_declined;           /* climbs/leaps omitted because a source area already owns traversal points */
+    /* Climbs, drops and leaps refused because their path would pass through a
+     * solid or start from a cut inside a box rather than a real edge. */
+    int      through_solids;
 } sh_aug_report;
 
 /* Augment a in place. Returns 1 if the model remains coherent, including when
