@@ -1129,6 +1129,92 @@ static void test_a_row_of_tops_leaps_only_to_its_neighbours(void)
     sh_aas_free(b);
 }
 
+/* The rebuilt tree is the spliced one rebalanced: a grid of boxes at four
+ * heights, some stacked on others and some yawed, baked with and without the
+ * rebuild. Every lump but the nodes is identical, every off-plane sample point
+ * resolves to the same area through both trees, the rebuilt tree is
+ * shallower, and both validate. */
+static void test_the_rebuilt_tree_keeps_every_area_and_link(void)
+{
+    enum { NP = 44 };
+    sh_aas *a = load_module(), *b = load_module();
+    sh_aug_platform p[NP];
+    sh_aug_report ra, rb;
+    sh_aug_opts o = {0};
+    unsigned lump;
+    int i, was, same_lumps = 1, mismatched = 0, probes = 0, landed = 0;
+    unsigned char *bytes;
+    size_t len = 0;
+    char err[192];
+    double x, y;
+    static const double zs[] = { 2.0, 30.0, 58.0, 86.0, 114.0, 150.0, 210.0, 330.0 };
+    printf("the rebuilt tree keeps every area and link of the spliced one\n");
+    if (!a || !b) { CHECK(0); sh_aas_free(a); sh_aas_free(b); return; }
+    o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_AUTO;
+    load_synthetic_traversal_table();
+    for (i = 0; i < 36; i++) {
+        float x0 = -1500.0f + (float)(i % 6) * 500.0f;
+        float y0 = -1500.0f + (float)(i / 6) * 500.0f;
+        char nm[SH_AUG_NAME_CAP];
+        _snprintf_s(nm, sizeof nm, _TRUNCATE, "box%02d", i);
+        mkplat(&p[i], x0, y0, x0 + 300.0f, y0 + 300.0f, 24.0f + (float)(i % 4) * 28.0f, nm);
+    }
+    for (i = 36; i < NP; i++) {
+        /* Yawed tops, half of them over a box below (higher than a demon). */
+        int k, under = (i - 36) * 4;
+        float cx = p[under].c[0][0] + 150.0f, cy = p[under].c[2][1] + 150.0f;
+        mkplat_yawed(&p[i], 25.0 + 10.0 * (i - 36), 180.0, 140.0,
+                     (i & 1) ? 260.0 : 40.0, "yawed");
+        for (k = 0; k < 4; k++) {
+            p[i].c[k][0] += (i & 1) ? cx : cx + 250.0f;
+            p[i].c[k][1] += (i & 1) ? cy : cy + 250.0f;
+        }
+    }
+    was = sh_aug_test_set_rebuild(0);
+    CHECK(sh_aas_augment(a, p, NP, &o, &ra) == 1);
+    sh_aug_test_set_rebuild(1);
+    CHECK(sh_aas_augment(b, p, NP, &o, &rb) == 1);
+    sh_aug_test_set_rebuild(was);
+    for (i = 0; i < NP; i++) if (rb.platforms[i].emitted) landed++;
+    CHECK_MSG(landed >= NP - 4, "the boxes are emitted");
+    for (lump = 0; lump < 22; lump++) {
+        unsigned n = sh_aas_count(a, (int)lump), r;
+        if (lump == SH_AAS_L_NODES) continue;
+        if (n != sh_aas_count(b, (int)lump)) { same_lumps = 0; continue; }
+        for (r = 0; r < n; r++) {
+            const unsigned char *pa = sh_aas_rec_const(a, (int)lump, r);
+            const unsigned char *pb = sh_aas_rec_const(b, (int)lump, r);
+            if (!pa || !pb || memcmp(pa, pb, REC[lump])) { same_lumps = 0; break; }
+        }
+    }
+    CHECK_MSG(same_lumps, "areas, links and every other lump are unchanged");
+    for (x = -1612.37; x < 1640.0; x += 23.71)
+        for (y = -1608.53; y < 1640.0; y += 23.93)
+            for (i = 0; i < (int)(sizeof zs / sizeof zs[0]); i++) {
+                int qa = sh_aas_point_area(a, (float)x, (float)y, (float)(zs[i] + 0.37));
+                int qb = sh_aas_point_area(b, (float)x, (float)y, (float)(zs[i] + 0.37));
+                probes++;
+                if (qa != qb) mismatched++;
+            }
+    if (mismatched) printf("  %d of %d probes resolve differently\n", mismatched, probes);
+    CHECK_MSG(mismatched == 0, "every probe resolves to the same area through both trees");
+    CHECK_MSG(rb.depth_after < ra.depth_after, "the rebuilt tree is shallower");
+    CHECK_MSG(sh_aas_count(b, SH_AAS_L_NODES) <= sh_aas_count(a, SH_AAS_L_NODES),
+              "and no larger");
+    bytes = sh_aas_write(b, &len);
+    CHECK(bytes != NULL);
+    if (bytes) {
+        err[0] = 0;
+        CHECK_MSG(sh_navmesh_validate_aas(bytes, len, err, sizeof err) == 1,
+                  err[0] ? err : "the structural gate refused the rebuilt tree");
+        HeapFree(GetProcessHeap(), 0, bytes);
+    }
+    printf("  depth %u spliced, %u rebuilt; nodes %u -> %u\n", ra.depth_after, rb.depth_after,
+           sh_aas_count(a, SH_AAS_L_NODES), sh_aas_count(b, SH_AAS_L_NODES));
+    sh_aas_free(a);
+    sh_aas_free(b);
+}
+
 /* An ordinary upright platform is NOT a side face. face 4 is an upright box's
  * top, so a `face != 0` test would flag every platform in every map. */
 static void test_an_upright_platform_is_not_a_side_face(void)
@@ -3680,6 +3766,7 @@ int main(void)
     test_a_leap_through_a_third_volume_is_dropped();
     test_farther_leaps_are_relayed_through_the_nearer_box();
     test_a_row_of_tops_leaps_only_to_its_neighbours();
+    test_the_rebuilt_tree_keeps_every_area_and_link();
     test_an_upright_platform_is_not_a_side_face();
     test_a_dense_yawed_chain_stays_within_the_depth_limit();
     test_a_bake_at_the_platform_cap_completes();

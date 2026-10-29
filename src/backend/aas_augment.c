@@ -457,6 +457,7 @@ typedef struct aug_ctx {
     int solid_count;
     int prepared_geometry;
     unsigned original_areas;
+    unsigned original_nodes;        /* the shipped tree; generated nodes follow */
     unsigned floor_end;             /* areas below this are module floor */
     struct aug_side *sides;         /* AUG_MAX_SIDES, shared by the link passes */
     /* Module floor areas cut around the boxes standing on them: every piece's
@@ -1023,6 +1024,515 @@ static int aug_carve_leaves(aug_ctx *c, int area, const aug_quad *eff, int only,
     }
     HeapFree(GetProcessHeap(), 0, stack);
     return carved;
+}
+
+/* ---- the balanced rebuild ---------------------------------------------- */
+
+/* Each area is spliced into the tree as a chain of its own planes under every
+ * leaf it overlaps, so on a shared floor the chains nest and depth grows with
+ * the number of boxes. Once every link is written, each generated subtree
+ * (one per shipped leaf a carve replaced) is rebuilt over the same cells: its
+ * leaves are taken as convex cells with their areas, and a new subtree is
+ * grown by Doom 3's splitter choice (BrushBSP FindSplitter: 20 per coplanar
+ * cell face for an axial plane, 15 otherwise, minus 10 per cell split and the
+ * front/back imbalance) among the planes the old subtree used, until every
+ * cell in a branch belongs to one area. The new leaves are unions of the old
+ * ones, so a point keeps its area unless it lies within RB_THIN of a split
+ * plane, and the links, which were placed against the spliced tree, stay
+ * valid. The shipped tree above is left untouched. Any failure keeps the
+ * spliced tree. A cell is its bounding planes and its corners: two planes a
+ * fraction of a unit apart then leave a cell empty or thin, never malformed. */
+#define RB_WORLD   65536.0          /* past the int16 coordinate range */
+#define RB_TOL     1e-5             /* a corner on a plane */
+#define RB_EPS     1e-4             /* side test */
+#define RB_THIN    1e-3             /* a cell thinner than this is dropped */
+
+static int g_aug_rebuild = 1;
+#ifdef SH_AUG_TESTING
+int sh_aug_test_set_rebuild(int on) { int was = g_aug_rebuild; g_aug_rebuild = on; return was; }
+#endif
+
+typedef struct rb_cell {
+    int label;                      /* leaf child value: -area, or 0 */
+    int np, nv;
+    int *pid;                       /* engine plane index, or -1 for the world box */
+    double (*pl)[4];                /* inward: n.p + d >= 0 inside */
+    double (*v)[3];
+    double lo[3], hi[3];
+} rb_cell;
+typedef struct rb_plane { double n[3], d; int axis; int opp; } rb_plane;
+
+typedef struct rb_ctx {
+    aug_ctx *c;
+    const rb_plane *pl;             /* every engine plane, indexed like the lump */
+    const int *cand;                /* candidate plane indices of this subtree */
+    int ncand;
+    int failed;
+} rb_ctx;
+
+static void rb_free_cell(rb_cell *cell)
+{
+    if (!cell) return;
+    free(cell->pid); free(cell->pl); free(cell->v);
+    free(cell);
+}
+
+static double rb_dist4(const double p[4], const double v[3])
+{
+    return p[0] * v[0] + p[1] * v[1] + p[2] * v[2] + p[3];
+}
+
+static rb_cell *rb_alloc(int np, int nv)
+{
+    rb_cell *cell = (rb_cell *)calloc(1, sizeof *cell);
+    if (!cell) return NULL;
+    cell->pid = (int *)malloc((size_t)(np ? np : 1) * sizeof *cell->pid);
+    cell->pl = (double (*)[4])malloc((size_t)(np ? np : 1) * sizeof *cell->pl);
+    cell->v = (double (*)[3])malloc((size_t)(nv ? nv : 1) * sizeof *cell->v);
+    if (!cell->pid || !cell->pl || !cell->v) { rb_free_cell(cell); return NULL; }
+    return cell;
+}
+
+static void rb_bounds(rb_cell *cell)
+{
+    int j, k;
+    for (k = 0; k < 3; k++) { cell->lo[k] = 1e30; cell->hi[k] = -1e30; }
+    for (j = 0; j < cell->nv; j++)
+        for (k = 0; k < 3; k++) {
+            if (cell->v[j][k] < cell->lo[k]) cell->lo[k] = cell->v[j][k];
+            if (cell->v[j][k] > cell->hi[k]) cell->hi[k] = cell->v[j][k];
+        }
+}
+
+/* The corner where three planes meet, or 0 when they do not meet in one. */
+static int rb_corner(const double a[4], const double b[4], const double c[4], double out[3])
+{
+    double bc[3], ca[3], ab[3], det;
+    int k;
+    bc[0] = b[1] * c[2] - b[2] * c[1]; bc[1] = b[2] * c[0] - b[0] * c[2]; bc[2] = b[0] * c[1] - b[1] * c[0];
+    ca[0] = c[1] * a[2] - c[2] * a[1]; ca[1] = c[2] * a[0] - c[0] * a[2]; ca[2] = c[0] * a[1] - c[1] * a[0];
+    ab[0] = a[1] * b[2] - a[2] * b[1]; ab[1] = a[2] * b[0] - a[0] * b[2]; ab[2] = a[0] * b[1] - a[1] * b[0];
+    det = a[0] * bc[0] + a[1] * bc[1] + a[2] * bc[2];
+    if (fabs(det) < 1e-9) return 0;
+    for (k = 0; k < 3; k++) out[k] = -(a[3] * bc[k] + b[3] * ca[k] + c[3] * ab[k]) / det;
+    return 1;
+}
+
+/* The part of `cell` where n.p + d >= 0 as a new cell, or NULL when nothing
+ * of substance is left. *oom is set on allocation failure. */
+static rb_cell *rb_clip_cell(const rb_cell *cell, const double n[3], double d, int plane, int *oom)
+{
+    double P[4];
+    double (*v)[3] = NULL;
+    int *support = NULL;
+    rb_cell *out = NULL;
+    int i, j, k, nv = 0, cap, above = 0, below = 0, np;
+    P[0] = n[0]; P[1] = n[1]; P[2] = n[2]; P[3] = d;
+    for (i = 0; i < cell->nv; i++) {
+        double dd = rb_dist4(P, cell->v[i]);
+        if (dd > RB_TOL) above++;
+        else if (dd < -RB_TOL) below++;
+    }
+    if (!above) return NULL;                    /* wholly outside, or flat on it */
+    np = cell->np + 1;
+    cap = cell->nv + cell->np * cell->np + 1;
+    v = (double (*)[3])malloc((size_t)cap * sizeof *v);
+    support = (int *)calloc((size_t)np, sizeof *support);
+    if (!v || !support) goto oom;
+    for (i = 0; i < cell->nv; i++)
+        if (rb_dist4(P, cell->v[i]) >= -RB_TOL) memcpy(v[nv++], cell->v[i], sizeof v[0]);
+    if (below) {
+        for (i = 0; i < cell->np; i++)
+            for (j = i + 1; j < cell->np; j++) {
+                double q[3];
+                int ok = 1, m;
+                if (!rb_corner(cell->pl[i], cell->pl[j], P, q)) continue;
+                for (k = 0; k < cell->np && ok; k++)
+                    if (k != i && k != j && rb_dist4(cell->pl[k], q) < -RB_TOL) ok = 0;
+                if (!ok) continue;
+                for (m = 0; m < nv; m++)
+                    if (fabs(v[m][0] - q[0]) < RB_TOL && fabs(v[m][1] - q[1]) < RB_TOL &&
+                        fabs(v[m][2] - q[2]) < RB_TOL) break;
+                if (m < nv) continue;
+                memcpy(v[nv++], q, sizeof v[0]);
+            }
+    }
+    if (nv < 4) { free(v); free(support); return NULL; }
+    /* Keep only the planes that still bound the cell: three corners on it. */
+    for (k = 0; k < np; k++) {
+        const double *pk = k < cell->np ? cell->pl[k] : P;
+        for (i = 0; i < nv; i++) if (fabs(rb_dist4(pk, v[i])) < RB_TOL) support[k]++;
+    }
+    for (k = 0, j = 0; k < np; k++) if (support[k] >= 3) j++;
+    out = rb_alloc(j, nv);
+    if (!out) goto oom;
+    out->label = cell->label;
+    for (k = 0; k < np; k++) {
+        if (support[k] < 3) continue;
+        if (k < cell->np) { memcpy(out->pl[out->np], cell->pl[k], sizeof P); out->pid[out->np] = cell->pid[k]; }
+        else { memcpy(out->pl[out->np], P, sizeof P); out->pid[out->np] = plane; }
+        out->np++;
+    }
+    memcpy(out->v, v, (size_t)nv * sizeof v[0]);
+    out->nv = nv;
+    free(v); free(support);
+    if (out->np < 4) { rb_free_cell(out); return NULL; }
+    rb_bounds(out);
+    /* Thinner than RB_THIN across one of its own planes: dropped. */
+    for (k = 0; k < out->np; k++) {
+        double far_in = 0.0;
+        for (i = 0; i < out->nv; i++) {
+            double dd = rb_dist4(out->pl[k], out->v[i]);
+            if (dd > far_in) far_in = dd;
+        }
+        if (far_in < RB_THIN) { rb_free_cell(out); return NULL; }
+    }
+    return out;
+oom:
+    free(v); free(support);
+    *oom = 1;
+    return NULL;
+}
+
+/* Which side of engine plane p the cell lies on: 1 front, -1 back, 0 split. */
+static int rb_side(const rb_plane *p, const rb_cell *cell)
+{
+    double lo = 1e30, hi = -1e30;
+    int j;
+    if (p->axis >= 0) {
+        double s = p->n[p->axis];
+        double a = s * cell->lo[p->axis] + p->d, b = s * cell->hi[p->axis] + p->d;
+        lo = a < b ? a : b; hi = a < b ? b : a;
+    } else {
+        for (j = 0; j < cell->nv; j++) {
+            double dd = p->n[0] * cell->v[j][0] + p->n[1] * cell->v[j][1] +
+                        p->n[2] * cell->v[j][2] + p->d;
+            if (dd < lo) lo = dd;
+            if (dd > hi) hi = dd;
+        }
+    }
+    if (lo >= -RB_EPS) return 1;
+    if (hi <= RB_EPS) return -1;
+    return 0;
+}
+
+/* Build the subtree over cells[0..n) (owned; freed here) and return its child
+ * value: a node index, or the leaf value of the one area left. */
+static int rb_build(rb_ctx *r, rb_cell **cells, int n, int fallback)
+{
+    int i, k, best = -1, node, child0, child1, nf = 0, nb = 0, label;
+    double best_value = -1e300;
+    rb_cell **front = NULL, **back = NULL;
+    unsigned char *node_rec;
+
+    if (r->failed) goto release;
+    label = n ? cells[0]->label : fallback;
+    for (i = 1; i < n; i++) if (cells[i]->label != label) break;
+    if (i >= n) {
+        for (i = 0; i < n; i++) rb_free_cell(cells[i]);
+        free(cells);
+        return label;
+    }
+    for (k = 0; k < r->ncand; k++) {
+        const rb_plane *p = &r->pl[r->cand[k]];
+        int fr = 0, bk = 0, sp = 0, facing = 0;
+        double value;
+        for (i = 0; i < n; i++) {
+            int s = rb_side(p, cells[i]), j;
+            if (s > 0) fr++; else if (s < 0) bk++; else sp++;
+            for (j = 0; j < cells[i]->np; j++)
+                if (cells[i]->pid[j] == r->cand[k] ||
+                    (p->opp >= 0 && cells[i]->pid[j] == p->opp)) { facing++; break; }
+        }
+        if (!sp && (!fr || !bk)) continue;          /* separates nothing here */
+        value = (p->axis >= 0 ? 20.0 : 15.0) * facing - 10.0 * sp - abs(fr - bk);
+        if (value > best_value) { best_value = value; best = r->cand[k]; }
+    }
+    if (best < 0) goto release;                     /* not a BSP's cells */
+    front = (rb_cell **)malloc((size_t)n * sizeof *front);
+    back = (rb_cell **)malloc((size_t)n * sizeof *back);
+    if (!front || !back) goto release;
+    for (i = 0; i < n; i++) {
+        const rb_plane *p = &r->pl[best];
+        int s = rb_side(p, cells[i]);
+        if (s > 0) { front[nf++] = cells[i]; cells[i] = NULL; continue; }
+        if (s < 0) { back[nb++] = cells[i]; cells[i] = NULL; continue; }
+        {
+            double neg[3];
+            int oom = 0;
+            rb_cell *a = rb_clip_cell(cells[i], p->n, p->d, best, &oom), *b;
+            neg[0] = -p->n[0]; neg[1] = -p->n[1]; neg[2] = -p->n[2];
+            b = oom ? NULL : rb_clip_cell(cells[i], neg, -p->d, best, &oom);
+            if (oom) { rb_free_cell(a); rb_free_cell(b); goto release; }
+            if (a) front[nf++] = a;
+            if (b) back[nb++] = b;
+            rb_free_cell(cells[i]); cells[i] = NULL;
+        }
+    }
+    free(cells); cells = NULL; n = 0;
+    {
+        int fall = nf ? front[0]->label : nb ? back[0]->label : fallback;
+        node = aug_node(r->c, best, aug_node_field4(r->pl[best].n[2]), 0, 0);
+        if (node <= 0) goto release;
+        child0 = rb_build(r, front, nf, fall); front = NULL;
+        child1 = rb_build(r, back, nb, fall); back = NULL;
+    }
+    if (r->failed) return 0;
+    node_rec = sh_aas_rec(r->c->a, SH_AAS_L_NODES, (unsigned)node);
+    if (!node_rec) { r->failed = 1; return 0; }
+    sh_aas_put_i32(node_rec, ND_CHILD0, child0);
+    sh_aas_put_i32(node_rec, ND_CHILD1, child1);
+    return node;
+release:
+    for (i = 0; i < n; i++) rb_free_cell(cells[i]);
+    free(cells);
+    if (front) { for (i = 0; i < nf; i++) rb_free_cell(front[i]); free(front); }
+    if (back) { for (i = 0; i < nb; i++) rb_free_cell(back[i]); free(back); }
+    r->failed = 1;
+    return 0;
+}
+
+/* One generated subtree: its root slot, the cells of its leaves and the
+ * planes it used. */
+typedef struct rb_slot {
+    int node, slot;
+    rb_cell **cells;
+    int ncells, cap;
+    int *cand;
+    int ncand;
+} rb_slot;
+
+static int rb_push_cell(rb_slot *s, rb_cell *cell)
+{
+    if (s->ncells == s->cap) {
+        int cap = s->cap ? s->cap * 2 : 64;
+        rb_cell **m = (rb_cell **)realloc(s->cells, (size_t)cap * sizeof *m);
+        if (!m) return 0;
+        s->cells = m; s->cap = cap;
+    }
+    s->cells[s->ncells++] = cell;
+    return 1;
+}
+
+/* Walk a generated node inside `cell` (owned), collecting leaf cells and the
+ * planes used. A branch with no volume of substance holds no cell. */
+static int rb_collect(aug_ctx *c, const rb_plane *pl, unsigned nplanes, int node,
+                      rb_cell *cell, rb_slot *s, unsigned char *used, unsigned guard)
+{
+    const unsigned char *nd;
+    int plane, k, child[2];
+    if (guard > 65536u) { rb_free_cell(cell); return 0; }
+    nd = sh_aas_rec_const(c->a, SH_AAS_L_NODES, (unsigned)node);
+    if (!nd) { rb_free_cell(cell); return 0; }
+    plane = sh_aas_get_i32(nd, ND_PLANE);
+    child[0] = sh_aas_get_i32(nd, ND_CHILD0);
+    child[1] = sh_aas_get_i32(nd, ND_CHILD1);
+    if (plane < 0 || (unsigned)plane >= nplanes) { rb_free_cell(cell); return 0; }
+    if (!used[plane]) {
+        used[plane] = 1;
+        s->cand[s->ncand++] = plane;
+    }
+    for (k = 0; k < 2; k++) {
+        double n[3], d;
+        int oom = 0, j;
+        rb_cell *part;
+        for (j = 0; j < 3; j++) n[j] = k ? -pl[plane].n[j] : pl[plane].n[j];
+        d = k ? -pl[plane].d : pl[plane].d;
+        part = rb_clip_cell(cell, n, d, plane, &oom);
+        if (oom) { rb_free_cell(cell); return 0; }
+        if (!part) continue;
+        if (child[k] > 0) {
+            if (!rb_collect(c, pl, nplanes, child[k], part, s, used, guard + 1)) {
+                rb_free_cell(cell); return 0;
+            }
+        } else {
+            part->label = child[k];
+            if (!rb_push_cell(s, part)) { rb_free_cell(part); rb_free_cell(cell); return 0; }
+        }
+    }
+    rb_free_cell(cell);
+    return 1;
+}
+
+static rb_cell *rb_world_cell(void)
+{
+    rb_cell *cell = rb_alloc(6, 8);
+    int k;
+    if (!cell) return NULL;
+    for (k = 0; k < 6; k++) {
+        cell->pl[k][0] = cell->pl[k][1] = cell->pl[k][2] = 0.0;
+        cell->pl[k][k / 2] = (k & 1) ? -1.0 : 1.0;      /* inward */
+        cell->pl[k][3] = RB_WORLD;
+        cell->pid[k] = -1;
+    }
+    cell->np = 6;
+    for (k = 0; k < 8; k++) {
+        cell->v[k][0] = (k & 1) ? RB_WORLD : -RB_WORLD;
+        cell->v[k][1] = (k & 2) ? RB_WORLD : -RB_WORLD;
+        cell->v[k][2] = (k & 4) ? RB_WORLD : -RB_WORLD;
+    }
+    cell->nv = 8;
+    cell->label = 0;
+    rb_bounds(cell);
+    return cell;
+}
+
+/* Rebuild every generated subtree. Returns 1 when the tree was replaced, 0
+ * when the spliced tree was kept. */
+static int aug_rebuild_tree(aug_ctx *c, unsigned shipped_nodes)
+{
+    unsigned nplanes = sh_aas_count(c->a, SH_AAS_L_PLANES);
+    unsigned nnodes = sh_aas_count(c->a, SH_AAS_L_NODES), i;
+    rb_plane *pl = NULL;
+    rb_slot *slots = NULL;
+    int nslots = 0, slot_cap = 0, ok = 0, s;
+    unsigned spliced_depth;
+    unsigned char *saved = NULL, *used = NULL;
+    const size_t rec = 16;
+    typedef struct { int node; rb_cell *cell; } rb_frame;
+    rb_frame *stack = NULL;
+    unsigned top = 0, scap = 64;
+    int root = aug_tree_root(c->a);
+
+    if (!g_aug_rebuild || nnodes <= shipped_nodes || root <= 0 ||
+        (unsigned)root >= shipped_nodes) return 0;
+    pl = (rb_plane *)calloc(nplanes ? nplanes : 1, sizeof *pl);
+    used = (unsigned char *)calloc(nplanes ? nplanes : 1, 1);
+    stack = (rb_frame *)malloc(scap * sizeof *stack);
+    if (!pl || !used || !stack) goto done;
+    for (i = 0; i < nplanes; i++) {
+        const unsigned char *p = sh_aas_rec_const(c->a, SH_AAS_L_PLANES, i);
+        int k, nz = 0, ax = -1;
+        if (!p) goto done;
+        for (k = 0; k < 3; k++) {
+            pl[i].n[k] = sh_aas_get_f32(p, PL_A + 4 * k);
+            if (pl[i].n[k] != 0.0) { nz++; ax = k; }
+        }
+        pl[i].d = sh_aas_get_f32(p, PL_DIST);
+        pl[i].axis = nz == 1 ? ax : -1;
+        pl[i].opp = -1;
+    }
+    for (i = 0; i < nplanes; i++) {
+        unsigned j;
+        for (j = 0; j < nplanes && pl[i].opp < 0; j++)
+            if (j != i && pl[j].n[0] == -pl[i].n[0] && pl[j].n[1] == -pl[i].n[1] &&
+                pl[j].n[2] == -pl[i].n[2] && pl[j].d == -pl[i].d) pl[i].opp = (int)j;
+    }
+
+    /* Walk the shipped tree, carrying each node's cell, to every slot whose
+     * child is a generated node, and collect that subtree's leaf cells. */
+    stack[top].node = root;
+    stack[top].cell = rb_world_cell();
+    if (!stack[top].cell) goto done;
+    top++;
+    while (top > 0) {
+        rb_frame fr = stack[--top];
+        const unsigned char *nd = sh_aas_rec_const(c->a, SH_AAS_L_NODES, (unsigned)fr.node);
+        int plane, k;
+        if (!nd) { rb_free_cell(fr.cell); goto done; }
+        plane = sh_aas_get_i32(nd, ND_PLANE);
+        if (plane < 0 || (unsigned)plane >= nplanes) { rb_free_cell(fr.cell); goto done; }
+        for (k = 0; k < 2; k++) {
+            int child = sh_aas_get_i32(nd, k ? ND_CHILD1 : ND_CHILD0), oom = 0, j;
+            double n[3], d;
+            rb_cell *part;
+            if (child <= 0) continue;
+            for (j = 0; j < 3; j++) n[j] = k ? -pl[plane].n[j] : pl[plane].n[j];
+            d = k ? -pl[plane].d : pl[plane].d;
+            part = rb_clip_cell(fr.cell, n, d, plane, &oom);
+            if (oom) { rb_free_cell(fr.cell); goto done; }
+            /* A generated subtree in a slot without volume stays spliced. */
+            if (!part) {
+                if ((unsigned)child >= shipped_nodes) { rb_free_cell(fr.cell); goto done; }
+                continue;
+            }
+            if ((unsigned)child < shipped_nodes) {
+                if (top + 1 >= scap) {
+                    rb_frame *m = (rb_frame *)realloc(stack, (size_t)scap * 2 * sizeof *m);
+                    if (!m) { rb_free_cell(part); rb_free_cell(fr.cell); goto done; }
+                    stack = m; scap *= 2;
+                }
+                stack[top].node = child; stack[top].cell = part; top++;
+                continue;
+            }
+            if (nslots == slot_cap) {
+                int cap = slot_cap ? slot_cap * 2 : 16;
+                rb_slot *m = (rb_slot *)realloc(slots, (size_t)cap * sizeof *m);
+                if (!m) { rb_free_cell(part); rb_free_cell(fr.cell); goto done; }
+                slots = m; slot_cap = cap;
+            }
+            memset(&slots[nslots], 0, sizeof slots[nslots]);
+            slots[nslots].node = fr.node;
+            slots[nslots].slot = k;
+            slots[nslots].cand = (int *)malloc((size_t)nplanes * sizeof(int));
+            nslots++;
+            if (!slots[nslots - 1].cand) { rb_free_cell(part); rb_free_cell(fr.cell); goto done; }
+            memset(used, 0, nplanes);
+            if (!rb_collect(c, pl, nplanes, child, part, &slots[nslots - 1], used, 0)) {
+                rb_free_cell(fr.cell); goto done;
+            }
+        }
+        rb_free_cell(fr.cell);
+    }
+
+    /* Keep the spliced nodes until the new ones are in place. */
+    saved = (unsigned char *)malloc((size_t)(nnodes - shipped_nodes) * rec);
+    if (!saved) goto done;
+    for (i = shipped_nodes; i < nnodes; i++) {
+        const unsigned char *nd = sh_aas_rec_const(c->a, SH_AAS_L_NODES, i);
+        if (!nd) goto done;
+        memcpy(saved + (size_t)(i - shipped_nodes) * rec, nd, rec);
+    }
+    spliced_depth = sh_aas_tree_depth(c->a);
+    if (!sh_aas_truncate(c->a, SH_AAS_L_NODES, shipped_nodes)) goto done;
+    {
+        rb_ctx r;
+        int *values = (int *)malloc((size_t)(nslots ? nslots : 1) * sizeof *values);
+        memset(&r, 0, sizeof r);
+        r.c = c; r.pl = pl;
+        if (!values) r.failed = 1;
+        for (s = 0; s < nslots && !r.failed; s++) {
+            r.cand = slots[s].cand; r.ncand = slots[s].ncand;
+            values[s] = rb_build(&r, slots[s].cells, slots[s].ncells, 0);
+            slots[s].cells = NULL; slots[s].ncells = 0;
+        }
+        for (s = 0; s < nslots && !r.failed; s++) {
+            unsigned char *w = sh_aas_rec(c->a, SH_AAS_L_NODES, (unsigned)slots[s].node);
+            if (!w) { r.failed = 1; break; }
+            sh_aas_put_i32(w, slots[s].slot ? ND_CHILD1 : ND_CHILD0, values[s]);
+        }
+        free(values);
+        /* Never trade a shallower spliced tree for a deeper rebuilt one. */
+        if (!r.failed && sh_aas_tree_depth(c->a) > spliced_depth) r.failed = 1;
+        if (r.failed) {
+            /* Put the spliced subtrees back exactly as they were; the shipped
+             * slots still point at them. */
+            unsigned first;
+            sh_aas_truncate(c->a, SH_AAS_L_NODES, shipped_nodes);
+            if (sh_aas_append(c->a, SH_AAS_L_NODES, nnodes - shipped_nodes, &first)) {
+                for (i = shipped_nodes; i < nnodes; i++) {
+                    unsigned char *nd = sh_aas_rec(c->a, SH_AAS_L_NODES, i);
+                    if (nd) memcpy(nd, saved + (size_t)(i - shipped_nodes) * rec, rec);
+                }
+            } else c->failed = 1;
+            goto done;
+        }
+    }
+    ok = 1;
+done:
+    while (top > 0) rb_free_cell(stack[--top].cell);
+    free(stack);
+    for (s = 0; s < nslots; s++) {
+        int k;
+        for (k = 0; k < slots[s].ncells; k++) rb_free_cell(slots[s].cells[k]);
+        free(slots[s].cells);
+        free(slots[s].cand);
+    }
+    free(slots);
+    free(saved);
+    free(pl);
+    free(used);
+    return ok;
 }
 
 /* ---- reachabilities ---------------------------------------------------- */
@@ -3693,7 +4203,7 @@ int sh_aas_augment(sh_aas *a, const sh_aug_platform *plats, int n,
 
     c.a = a; c.o = opts; c.rep = out; c.failed = 0;c.prepared_geometry=0;c.sides=NULL;
     c.floor_quads=NULL;c.floor_ids=NULL;c.floor_count=0;c.floor_parent=NULL;c.floor_closed=NULL;
-    c.solids=plats;c.solid_count=n;c.original_areas=sh_aas_count(a,SH_AAS_L_AREAS);
+    c.solids=plats;c.solid_count=n;c.original_areas=sh_aas_count(a,SH_AAS_L_AREAS);c.original_nodes=sh_aas_count(a,SH_AAS_L_NODES);
     c.floor_end=c.original_areas;
     c.radius = opts->inset ? aug_agent_radius(a) : 0.0f;
     c.height = aug_agent_height(a);
@@ -4121,6 +4631,8 @@ int sh_aas_augment(sh_aas *a, const sh_aug_platform *plats, int n,
 
     out->areas_after = sh_aas_count(a, SH_AAS_L_AREAS);
     out->reach_after = sh_aas_count(a, SH_AAS_L_REACHABILITIES);
+    /* Links are in place: rebalance what the splices built. */
+    if (!c.failed) aug_rebuild_tree(&c, c.original_nodes);
     out->depth_after = sh_aas_tree_depth(a);
     out->depth_exceeded = out->depth_after > g_aug_depth_limit;
 

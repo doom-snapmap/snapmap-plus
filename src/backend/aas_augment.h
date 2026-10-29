@@ -209,6 +209,9 @@ int sh_aug_test_set_anchor_cap(int n);
 int sh_aug_test_set_barrier(int on);
 /* Lower the tree-depth limit the report checks; 0 restores 128. */
 unsigned sh_aug_test_set_depth_limit(unsigned limit);
+/* Turn the balanced rebuild of the generated tree on or off (on by default).
+ * Returns the previous setting. */
+int sh_aug_test_set_rebuild(int on);
 /* The nearest-leap rule on bare leaps: from and to area, demon flags, start
  * and end. Returns the count kept and writes the kept input indices, in order. */
 int sh_aug_test_nearest_leaps(const int *from, const int *to, const unsigned *flags,
