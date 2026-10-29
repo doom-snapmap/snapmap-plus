@@ -115,8 +115,11 @@ static int add_action(menu_actions *a)
     at=action_index(a);
     if (at>=0) return at;
     if (a->count>=MENU_ROWS || a->count>=a->capacity) return -1;
+    /* Below Save As (4) and above Play; a menu without Save As takes the
+     * slot below Save (3). */
     at=0;
-    for (i=0;i<a->count;i++) if (a->items[i]==3) { at=i+1; break; }
+    for (i=0;i<a->count;i++) if (a->items[i]==4) { at=i+1; break; }
+    if (!at) for (i=0;i<a->count;i++) if (a->items[i]==3) { at=i+1; break; }
     memmove(a->items+at+1,a->items+at,(size_t)(a->count-at)*sizeof(int));
     a->items[at]=NAV_ACTION;a->count++;
     return at;

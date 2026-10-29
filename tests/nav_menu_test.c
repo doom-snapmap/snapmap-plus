@@ -94,7 +94,7 @@ static void movie_fixture(void)
 }
 static void test_panel_layout(void)
 {
-    int items[]={1,3,9,4,5,6,7,8};
+    int items[]={1,3,4,9,5,6,7,8};
     menu_actions a={items,8,8,0};
     unsigned char original[14][0x58];
     movie_fixture();
@@ -183,7 +183,7 @@ static int movie_label(void *sprite,const char *label)
 static void movie_play(void *sprite,int frame)
 { plays_total++;last_play_sprite=sprite;if(frame==3)plays_off++; }
 static void movie_bind(void *widget,menu_actions *a)
-{ CHECK(widget==movie_widget && a->count==8 && a->items[2]==NAV_ACTION);order_bind=++order_step; }
+{ CHECK(widget==movie_widget && a->count==8 && a->items[3]==NAV_ACTION);order_bind=++order_step; }
 static int text_field;
 static void *movie_lookup(void *s,void *v,const char *a,const char *b,void *c,void *d,void *e,void *f)
 { (void)s;(void)a;(void)b;(void)c;(void)d;(void)e;(void)f;return v; }
@@ -214,7 +214,7 @@ static void test_open_close_order(void)
     /* The roll-on rewind precedes the clone, and the bind completes the row
      * and its placement without waiting for a think. */
     CHECK(order_visible==1 && order_clone==2 && order_bind==3 && !g_failed);
-    CHECK(a->count==8 && items[2]==NAV_ACTION);
+    CHECK(a->count==8 && items[3]==NAV_ACTION);
     CHECK(*(int*)(movie_parent+0x88)==14 && movie_entry(movie_parent,0x4200));
     CHECK(g_layout_parent==movie_parent);
     /* The roll-on is playing and moves no matrix: the extension is already
@@ -350,13 +350,13 @@ static void test_actions(void)
     int stock_ids[]={1,3,4,5,6,7,8},slots[9],short_ids[]={1,3,5,6,7,8};
     menu_actions a={slots,7,8,0};
     memcpy(slots,stock_ids,sizeof stock_ids);slots[8]=12345;
-    CHECK(add_action(&a)==2 && a.count==8 && slots[2]==NAV_ACTION);
-    CHECK(slots[0]==1 && slots[1]==3 && !memcmp(slots+3,stock_ids+2,5*sizeof(int)));
-    CHECK(add_action(&a)==2 && a.count==8 && slots[8]==12345);
+    CHECK(add_action(&a)==3 && a.count==8 && slots[3]==NAV_ACTION);
+    CHECK(slots[0]==1 && slots[1]==3 && slots[2]==4 && !memcmp(slots+4,stock_ids+3,4*sizeof(int)));
+    CHECK(add_action(&a)==3 && a.count==8 && slots[8]==12345);
     remove_action(&a);CHECK(a.count==7 && !memcmp(slots,stock_ids,sizeof stock_ids));
     a.capacity=7;CHECK(add_action(&a)==-1 && a.count==7 && !memcmp(slots,stock_ids,sizeof stock_ids));
     a.capacity=8;a.count=6;memcpy(slots,short_ids,sizeof short_ids);
-    CHECK(add_action(&a)==2 && a.count==7);
+    CHECK(add_action(&a)==2 && a.count==7 && slots[2]==NAV_ACTION);
     remove_action(&a);CHECK(!memcmp(slots,short_ids,sizeof short_ids));
     a.count=-1;CHECK(add_action(&a)==-1);
     a.count=9;CHECK(add_action(&a)==-1);
@@ -371,17 +371,17 @@ static void request_tick(void *s,void *ed)
 static void test_modal(void)
 {
     unsigned char *ed=(unsigned char*)calloc(1,ED_STATE+16),screen[0xa40]={0},s[64]={0};
-    int items[]={1,3,9,4,5,6,7,8};
+    int items[]={1,3,4,9,5,6,7,8};
     menu_actions *a=(menu_actions*)(s+0x10);
     *a=(menu_actions){items,8,8,0};
     *(void**)(ed+ED_SCREEN)=screen;*(void**)(ed+ED_MAP)=(void*)1;*(int*)(ed+ED_STATE)=11;
     g_enabled=1;g_think=think;g_end=think;g_action=stock;g_string=make_string;
     g_destroy=destroy_string;g_busy=show_busy;g_clear_busy=clear_busy;g_toast=toast;
     CHECK(menu_action(s,ed,1)==1 && stock_calls==1 && requests==0);
-    CHECK(menu_action(s,ed,2)==1 && busy_calls==1 && requests==0);
+    CHECK(menu_action(s,ed,3)==1 && busy_calls==1 && requests==0);
     CHECK(!strcmp(title_seen,"Building Navmesh"));
     CHECK(!strcmp(body_seen,"Building the map's navmesh..."));
-    CHECK(menu_action(s,ed,2)==0 && busy_calls==1);
+    CHECK(menu_action(s,ed,3)==0 && busy_calls==1);
     request_tick(s,ed);CHECK(requests==1 && toasts==0);
     status=SH_NAV_UPDATE_BUILDING;
     menu_think(s,ed);CHECK(toasts==0 && g_busy_editor==ed);
@@ -391,19 +391,19 @@ static void test_modal(void)
     menu_think(s,ed);CHECK(toasts==1 && !g_busy_editor && !strcmp(title_seen,"Navmesh Built"));
     CHECK(toast_finished_seen==1 && !strcmp(body_seen,"ready"));
     menu_think(s,ed);CHECK(toasts==1 && requests==1);
-    CHECK(menu_action(s,ed,2)==1);
+    CHECK(menu_action(s,ed,3)==1);
     request_tick(s,ed);status=SH_NAV_UPDATE_FAILED;test_now+=600;menu_think(s,ed);
     CHECK(toasts==2 && !strcmp(title_seen,"Navmesh Build Failed"));
     CHECK(toast_finished_seen==0);
-    CHECK(menu_action(s,ed,2)==1);
+    CHECK(menu_action(s,ed,3)==1);
     menu_end(s,ed);CHECK(!g_busy_editor && !(*(unsigned*)(screen+0xa20)&BUSY_FLAG));
     status=SH_NAV_UPDATE_READY;menu_think(s,ed);CHECK(toasts==2);
-    CHECK(menu_action(s,ed,2)==1);
+    CHECK(menu_action(s,ed,3)==1);
     *(void**)(ed+ED_MAP)=(void*)2;menu_think(s,ed);
     CHECK(!g_busy_editor && toasts==2 && !(*(unsigned*)(screen+0xa20)&BUSY_FLAG));
     /* A different native operation's busy flag is not ours to dismiss. */
     *(unsigned*)(screen+0xa20)=BUSY_FLAG;
-    CHECK(menu_action(s,ed,2)==0 && !g_busy_editor);
+    CHECK(menu_action(s,ed,3)==0 && !g_busy_editor);
     CHECK(*(unsigned*)(screen+0xa20)==BUSY_FLAG);
     g_enabled=0;g_bind=NULL;g_action=NULL;g_think=NULL;g_end=NULL;
     free(ed);
