@@ -1668,6 +1668,96 @@ static int aug_step_links(aug_ctx *c, int ai, const aug_quad *eff,
     return added;
 }
 
+/* Barrier jumps: AAS_TFL_BARRIERJUMP up and AAS_TFL_WALKOFFBARRIER down, the
+ * engine's only animation-free vertical link (e2m8.aas_monster128 carries 24
+ * pairs, 26 units high, travel time tt_barrierJump, no traversal point). One
+ * pair per anchor serves every demon of the class for rises above step height
+ * up to maxBarrierHeight (64), with a unit of tolerance so a box standing a
+ * quarter unit up still qualifies. Off unless built with SH_AUG_BARRIER_JUMPS:
+ * SnapMap demons have not been shown to take them. SH_AUG_BARRIER_ONLY also
+ * leaves the animated climbs out, to test the barrier jump on its own. */
+#define REACH_BARRIER_JUMP      0x00000100u
+#define REACH_WALK_OFF_BARRIER  0x00000080u
+#define AUG_MAX_BARRIER_HEIGHT  64.0
+#define AUG_BARRIER_TOLERANCE   1.0
+#define SET_MAX_BARRIER_HEIGHT  SET_W(13)
+#define SET_TT_BARRIER_JUMP     SET_W(35)
+#define TRAV_ANCHOR_GAP     128.0
+#if defined(SH_AUG_BARRIER_JUMPS) || defined(SH_AUG_BARRIER_ONLY)
+static int g_aug_barrier = 1;
+#else
+static int g_aug_barrier = 0;
+#endif
+#ifdef SH_AUG_TESTING
+int sh_aug_test_set_barrier(int on) { int was = g_aug_barrier; g_aug_barrier = on; return was; }
+#endif
+
+static int aug_trav_anchors(double lo, double hi, double *out, int cap);
+static int aug_floor_traversal_point(aug_ctx *c,const aug_peer *owner,
+    const aug_side *side,double x,double y,double offset,double point[3]);
+static int aug_path_is_clear(aug_ctx *c, const aug_peer *peers, int npeers,
+                             int from_area, int to_area,
+                             const double s3[3], const double e3[3]);
+static int aug_floor_accepts(aug_ctx *c, int area, const double p[3]);
+
+static int aug_barrier_links(aug_ctx *c, int ai, const aug_quad *eff,
+                             const aug_quad *req, const aug_peer *peers, int npeers)
+{
+    aug_side *sides = c->sides;
+    const aug_peer *owner = aug_owner(peers, npeers, ai);
+    int n, i, k, added = 0, time;
+    float tf = sh_aas_setting_f32(c->a, SET_TT_BARRIER_JUMP);
+    unsigned tu;
+    memcpy(&tu, &tf, sizeof tu);
+    time = tu > 0 && tu < 10000 ? (int)tu : 100;
+    n = aug_edge_segments(c, ai, eff, req, peers, npeers, sides, AUG_MAX_SIDES);
+    for (i = 0; i < n; i++) {
+        double anchors[24], used[24], seglen, rise;
+        int na, placed = 0, regime = aug_regime(&sides[i], (double)c->step);
+        if (regime != REGIME_UP && regime != REGIME_DOWN) continue;
+        if (!aug_side_owns(&sides[i], ai, req, peers, npeers)) continue;
+        if (!aug_floor_side_usable(c, owner, &sides[i])) continue;
+        rise = fabs(sides[i].drop);
+        if (rise <= c->step || rise > AUG_MAX_BARRIER_HEIGHT + AUG_BARRIER_TOLERANCE) continue;
+        seglen = hypot(sides[i].p1[0] - sides[i].p0[0], sides[i].p1[1] - sides[i].p0[1]);
+        na = aug_trav_anchors(0.0, seglen, anchors, 24);
+        for (k = 0; k < na; k++) {
+            double t = seglen > 1e-9 ? anchors[k] / seglen : 0.5, inner[3], outer[3], dz;
+            double bx = sides[i].p0[0] + t * (sides[i].p1[0] - sides[i].p0[0]);
+            double by = sides[i].p0[1] + t * (sides[i].p1[1] - sides[i].p0[1]);
+            int q, crowded = 0, far_area, low_is_inner;
+            for (q = 0; q < placed; q++) if (fabs(t - used[q]) * seglen < TRAV_ANCHOR_GAP) crowded = 1;
+            if (crowded) continue;
+            inner[0] = bx - sides[i].out[0] * REACH_SIDE_OFFSET;
+            inner[1] = by - sides[i].out[1] * REACH_SIDE_OFFSET;
+            inner[2] = aug_z_at(eff, inner[0], inner[1]);
+            if (sides[i].generated && sides[i].peer >= 0) {
+                const aug_quad *pe = peers[sides[i].peer].eff;
+                double distance, land[2];
+                if (!aug_ray_entry(pe, inner[0], inner[1], sides[i].out[0], sides[i].out[1],
+                                   SH_TRAV_LEAP_MAX_SPAN, &distance, land)) continue;
+                outer[0] = land[0]; outer[1] = land[1]; outer[2] = aug_z_at(pe, land[0], land[1]);
+            } else if (!aug_floor_traversal_point(c, owner, &sides[i], bx, by, 0.0, outer)) continue;
+            dz = fabs(inner[2] - outer[2]);
+            if (dz <= c->step || dz > AUG_MAX_BARRIER_HEIGHT + AUG_BARRIER_TOLERANCE) continue;
+            if (sh_aas_point_area(c->a, (float)inner[0], (float)inner[1], (float)(inner[2] + 2.0)) != ai) continue;
+            far_area = sh_aas_point_area(c->a, (float)outer[0], (float)outer[1], (float)(outer[2] + 2.0));
+            if (far_area != sides[i].floor_area &&
+                (sides[i].generated || !aug_floor_accepts(c, far_area, outer))) continue;
+            if (!aug_path_is_clear(c, peers, npeers, ai, far_area, inner, outer)) continue;
+            low_is_inner = inner[2] < outer[2];
+            if (aug_reach(c, REACH_BARRIER_JUMP, time, low_is_inner ? ai : far_area,
+                          low_is_inner ? far_area : ai, low_is_inner ? inner : outer,
+                          low_is_inner ? outer : inner)) added++;
+            if (aug_reach(c, REACH_WALK_OFF_BARRIER, time, low_is_inner ? far_area : ai,
+                          low_is_inner ? ai : far_area, low_is_inner ? outer : inner,
+                          low_is_inner ? inner : outer)) added++;
+            used[placed++] = t;
+        }
+    }
+    return added;
+}
+
 /* Emit downward walk-off links only under the selected fall policy. AUTO
  * follows maxFallHeight, zero in shipped monster modules.
  */
@@ -3442,6 +3532,15 @@ int sh_aas_augment(sh_aas *a, const sh_aug_platform *plats, int n,
             aug_step_links(&c, made[i], &effs[i], &reqs[i], peers, nmade);
         for (i = 0; i < nmade; i++)
             aug_fall_links(&c, made[i], &effs[i], &reqs[i], peers, nmade);
+        if (g_aug_barrier) {
+            int barriers = 0;
+            for (i = 0; i < nmade; i++)
+                barriers += aug_barrier_links(&c, made[i], &effs[i], &reqs[i], peers, nmade);
+            /* SnapMap modules declare 0; the native rule admits rises up to it. */
+            if (barriers && sh_aas_setting_f32(a, SET_MAX_BARRIER_HEIGHT) < AUG_MAX_BARRIER_HEIGHT)
+                sh_aas_set_setting_f32(a, SET_MAX_BARRIER_HEIGHT, (float)AUG_MAX_BARRIER_HEIGHT);
+            out->barrier_links = barriers;
+        }
 
         /* Append traversals last to keep their reachabilities in one tail. */
         {
@@ -3449,8 +3548,10 @@ int sh_aas_augment(sh_aas *a, const sh_aug_platform *plats, int n,
             {
                 int total = 0;
                 aug_trav_spec *specs;
+#ifndef SH_AUG_BARRIER_ONLY
                 for (i = 0; i < nmade && !c.failed; i++)
                     aug_traversal_specs(&c, made[i], &effs[i], &reqs[i], peers, nmade, &buffer);
+#endif
                 specs = buffer.data;
                 total = buffer.count;
                 /* Budget basic links and traversals together before allocating

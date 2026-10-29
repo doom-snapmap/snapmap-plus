@@ -154,6 +154,7 @@ typedef struct sh_aug_report {
     int      floor_pieces_added;
     int      floors_left_whole;
     int      shipped_routes_removed;
+    int      barrier_links;             /* barrier-jump links, when built with them */
     /* Four per requested box (faces[source * 4 + edge]), on the heap with
      * platforms; NULL when no traversal table was ready. */
     sh_aug_face *faces;
@@ -191,6 +192,9 @@ unsigned sh_aas_tree_depth(const sh_aas *a);
 int sh_aug_test_trav_anchors(double lo, double hi, double *out, int cap);
 /* Set the per-demon anchor cap; 0 is uncapped. Returns the previous cap. */
 int sh_aug_test_set_anchor_cap(int n);
+/* Turn barrier-jump links on or off (SH_AUG_BARRIER_JUMPS builds start on).
+ * Returns the previous setting. */
+int sh_aug_test_set_barrier(int on);
 /* Lower the tree-depth limit the report checks; 0 restores 128. */
 unsigned sh_aug_test_set_depth_limit(unsigned limit);
 

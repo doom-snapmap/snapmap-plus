@@ -2971,10 +2971,92 @@ static void test_the_floor_is_cut_around_the_boxes_on_it(void)
     sh_aug_report_free(&rep);
     sh_aas_free(a);
 }
+static int count_flags(sh_aas *a, unsigned flags)
+{
+    unsigned i, n = sh_aas_count(a, SH_AAS_L_REACHABILITIES);
+    int found = 0;
+    for (i = 0; i < n; i++)
+        if (sh_aas_get_u32(sh_aas_rec_const(a, SH_AAS_L_REACHABILITIES, i), 0) == flags) found++;
+    return found;
+}
+
+/* Barrier jumps are built only on request. Then a 64.25 rise from the floor
+ * (a box standing a quarter unit up) and a 62.8 rise between steps each get
+ * a reciprocal pair with tt_barrierJump and no traversal point, and the
+ * payload admits them through maxBarrierHeight; a 128 rise gets none. */
+static void test_barrier_jumps_only_when_built_with_them(void)
+{
+    static const float s1[4][2] = { { 162.321f, 1581.123f }, { -165.658f, 1584.897f },
+                                    { -162.321f, 1874.878f }, { 165.657f, 1871.104f } };
+    static const float s2[4][2] = { { -75.754f, 1269.929f }, { -325.081f, 1483.049f },
+                                    { -136.652f, 1703.491f }, { 112.675f, 1490.371f } };
+    sh_aug_platform p[3];
+    sh_aug_report rep;
+    sh_aug_opts o = { SH_AUG_FALL_AUTO, 1, SH_AUG_TRAVERSAL_NEVER, 0 };
+    sh_aas *a;
+    int k, was;
+    unsigned i, n, tp;
+    printf("barrier jumps are built only on request, for rises up to 64\n");
+    mkbox_yawed(&p[0], 0, 0, 10, 10, 0, 64.25f, 0.25f, "step 1");
+    mkbox_yawed(&p[1], 0, 0, 10, 10, 0, 127.024f, 63.024f, "step 2");
+    for (k = 0; k < 4; k++) {
+        p[0].c[k][0] = s1[k][0]; p[0].c[k][1] = s1[k][1];
+        p[1].c[k][0] = s2[k][0]; p[1].c[k][1] = s2[k][1];
+    }
+    mkbox_yawed(&p[2], 900, -900, 300, 300, 0, 128.0f, 0.0f, "tall block");
+    a = load_slabs(NULL, 0);
+    if (!a) { CHECK(0); return; }
+    was = sh_aug_test_set_barrier(0);
+    CHECK(sh_aas_augment(a, p, 3, &o, &rep) == 1);
+    CHECK_MSG(count_flags(a, 0x100u) == 0 && count_flags(a, 0x80u) == 0, "none by default");
+    sh_aug_report_free(&rep);
+    sh_aas_free(a);
+
+    a = load_slabs(NULL, 0);
+    if (!a) { CHECK(0); return; }
+    sh_aug_test_set_barrier(1);
+    tp = sh_aas_count(a, SH_AAS_L_TRAVERSALPOINTS);
+    CHECK(sh_aas_augment(a, p, 3, &o, &rep) == 1);
+    CHECK_MSG(count_flags(a, 0x100u) > 0, "barrier jumps up");
+    CHECK_MSG(count_flags(a, 0x100u) == count_flags(a, 0x80u), "each with its way back down");
+    CHECK_MSG(rep.barrier_links == count_flags(a, 0x100u) + count_flags(a, 0x80u), "and counted");
+    CHECK_MSG(sh_aas_count(a, SH_AAS_L_TRAVERSALPOINTS) == tp, "with no traversal point");
+    CHECK_MSG(sh_aas_setting_f32(a, SET_WORDS + 13 * 4) == 64.0f, "maxBarrierHeight admits them");
+    n = sh_aas_count(a, SH_AAS_L_REACHABILITIES);
+    {
+        int onto1 = 0, onto2 = 0, onto3 = 0;
+        for (i = 0; i < n; i++) {
+            const unsigned char *r = sh_aas_rec_const(a, SH_AAS_L_REACHABILITIES, i);
+            int to = sh_aas_get_u16(r, 8), j;
+            double dz = sh_aas_get_i16(r, 22) - sh_aas_get_i16(r, 16);
+            if (sh_aas_get_u32(r, 0) != 0x100u) continue;
+            CHECK(sh_aas_get_u16(r, 4) == 100);
+            CHECK_MSG(dz > 18.0 && dz <= 65.0, "only rises between step height and 64");
+            for (j = 0; j < rep.platform_count; j++) if (rep.platforms[j].area == to) {
+                if (rep.platforms[j].source == 0) onto1++;
+                if (rep.platforms[j].source == 1) onto2++;
+                if (rep.platforms[j].source == 2) onto3++;
+            }
+        }
+        CHECK_MSG(onto1 > 0, "the floor jumps onto the first step");
+        CHECK_MSG(onto2 > 0, "the first step jumps onto the second");
+        CHECK_MSG(onto3 == 0, "a 128 rise is past the barrier height");
+    }
+    {
+        size_t len; char err[192]; unsigned char *bytes = sh_aas_write(a, &len);
+        CHECK(bytes != NULL);
+        if (bytes) { CHECK_MSG(sh_navmesh_validate_aas(bytes, len, err, sizeof err), err);
+                     HeapFree(GetProcessHeap(), 0, bytes); }
+    }
+    sh_aug_test_set_barrier(was);
+    sh_aug_report_free(&rep);
+    sh_aas_free(a);
+}
 
 int main(void)
 {
     printf("aas_augment_test\n");
+    test_barrier_jumps_only_when_built_with_them();
     test_the_floor_is_cut_around_the_boxes_on_it();
     test_no_floor_climb_lands_on_a_cut_inside_its_own_box();
     test_a_climb_run_up_may_cross_a_floor_seam();
