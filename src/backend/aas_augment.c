@@ -67,6 +67,8 @@
  * marks a module-seam connector, and not 0x0020 -- that is a REACHABILITY travel
  * flag and means nothing in the area's own flag space. */
 #define AREA_TRAVEL_FLAGS_FLOOR 0x000Au
+/* area.travel_flags bit the cluster builder sets on a portal area. */
+#define AREA_TRAVEL_FLAG_PORTAL 0x0400u
 
 /* edge.flags. An edge used by exactly one area is a ledge/outer boundary and
  * carries 0x0C01 (17421 of 17442 shipped instances); one shared by two areas
@@ -2930,6 +2932,12 @@ static int aug_cut_floors(aug_ctx *c, const sh_aug_platform *solids, int nsolids
         int f;
         for (f = 0; f < 5; f++) { unsigned v = sh_aas_get_u16(p, (unsigned)f * 2); if (v < na) blocked[v] = 1; }
     }
+    /* The portal records' layout is unverified; an area flagged as a cluster
+     * portal (travel flag 0x400) is never cut, so no piece can carry that flag
+     * outside the portal list. */
+    for (i = 1; i < na; i++)
+        if (sh_aas_get_u16(sh_aas_rec_const(c->a, SH_AAS_L_AREAS, i), AR_TRAVEL_FLAGS) & AREA_TRAVEL_FLAG_PORTAL)
+            blocked[i] = 1;
     for (k = 0; k < ns; k++) if (!blocked[support_area[k]]) {
         keep[nk] = support[k]; areas[nk] = support_area[k]; nk++;
     }

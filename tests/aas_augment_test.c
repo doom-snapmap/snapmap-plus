@@ -3094,10 +3094,36 @@ static void test_a_floor_split_past_the_corner_limit_still_reads(void)
     CHECK_MSG(i == 4, "40 collinear edges read back as the four-cornered floor");
     sh_aas_free(a);
 }
+/* A floor area flagged as a cluster portal (travel flag 0x400) is never cut,
+ * so no generated area carries the portal flag. */
+static void test_a_portal_floor_is_never_cut(void)
+{
+    static const float seams[2] = { -168.0f, 168.0f };
+    sh_aas *a = load_slabs(seams, 2);
+    sh_aug_platform p;
+    sh_aug_report rep;
+    sh_aug_opts o = { SH_AUG_FALL_AUTO, 1, SH_AUG_TRAVERSAL_NEVER, 0 };
+    unsigned i, n;
+    int flagged = 0;
+    printf("a cluster-portal floor area is never cut\n");
+    if (!a) { CHECK(0); return; }
+    sh_aas_put_u16(sh_aas_rec(a, SH_AAS_L_AREAS, 2), 4, 0x000A | 0x0400);
+    mkbox_yawed(&p, 0, 0, 200, 200, 0, 64.0f, 0.0f, "box on the portal strip");
+    CHECK(sh_aas_augment(a, &p, 1, &o, &rep) == 1);
+    n = sh_aas_count(a, SH_AAS_L_AREAS);
+    for (i = rep.areas_before; i < n; i++)
+        if (sh_aas_get_u16(sh_aas_rec_const(a, SH_AAS_L_AREAS, i), 4) & 0x0400) flagged++;
+    CHECK_MSG(flagged == 0, "no generated area carries the portal flag");
+    CHECK_MSG(sh_aug_test_floor_corners(a, 2) == 4, "the portal strip keeps its whole polygon");
+    CHECK_MSG(sh_aas_point_area(a, 0.0f, 0.0f, 2.0f) == 2, "and its ground");
+    sh_aug_report_free(&rep);
+    sh_aas_free(a);
+}
 
 int main(void)
 {
     printf("aas_augment_test\n");
+    test_a_portal_floor_is_never_cut();
     test_a_floor_split_past_the_corner_limit_still_reads();
     test_barrier_jumps_only_when_built_with_them();
     test_the_floor_is_cut_around_the_boxes_on_it();
