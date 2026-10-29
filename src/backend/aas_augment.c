@@ -1552,6 +1552,39 @@ static int aug_side_owns(const aug_side *s, int ai, const aug_quad *req,
     return !(s->floor_area < ai);
 }
 
+/* A segment toward the module floor is a real ledge only where the box it
+ * was cut from ends just beyond it. A piece of a top split around another
+ * solid also has edges along the cut, deep inside its own box: the floor
+ * "beyond" those lies under the box, so no climb, step or fall may use them.
+ * Zero-length segments at the ends of such cuts are dropped too. */
+#define AUG_MIN_SEGMENT 1.0
+static const aug_peer *aug_owner(const aug_peer *peers, int npeers, int ai)
+{
+    int i;
+    for (i = 0; i < npeers; i++) if (peers[i].area == ai) return &peers[i];
+    return NULL;
+}
+
+static int aug_floor_side_usable(const aug_ctx *c, const aug_peer *owner, const aug_side *s)
+{
+    double dx = s->p1[0] - s->p0[0], dy = s->p1[1] - s->p0[1], x, y, lip = 1e9;
+    int e;
+    if (s->generated) return 1;
+    if (dx * dx + dy * dy < AUG_MIN_SEGMENT * AUG_MIN_SEGMENT) return 0;
+    if (!owner || !owner->prepared || owner->support.count < 3) return 1;
+    x = (s->p0[0] + s->p1[0]) / 2.0;
+    y = (s->p0[1] + s->p1[1]) / 2.0;
+    for (e = 0; e < owner->support.count; e++) {
+        double normal[2], speed, inside;
+        aug_edge_normal_in(&owner->support, e, normal);
+        speed = normal[0] * s->out[0] + normal[1] * s->out[1];
+        inside = normal[0] * (x - owner->support.c[e][0]) + normal[1] * (y - owner->support.c[e][1]);
+        if (speed < -1e-9 && -inside / speed < lip) lip = -inside / speed;
+    }
+    /* A real ledge sits within the standing body's clearance of the face. */
+    return lip <= sqrt(2.0) * c->radius + 2.0 * AUG_TOUCH_EPS;
+}
+
 /* Emit reciprocal plain walks within maxStepHeight. This handles platforms
  * carved inside an existing slab, where aug_walk_links cannot find a shared
  * boundary.
@@ -1562,12 +1595,14 @@ static int aug_step_links(aug_ctx *c, int ai, const aug_quad *eff,
     aug_side *sides = c->sides;
     int n = aug_edge_segments(c, ai, eff, req, peers, npeers, sides, AUG_MAX_SIDES);
     int added = 0, i, k;
+    const aug_peer *owner = aug_owner(peers, npeers, ai);
 
     for (i = 0; i < n; i++) {
         double ts[64];
         int cnt;
         if (aug_regime(&sides[i], (double)c->step) != REGIME_STEP) continue;
         if (!aug_side_owns(&sides[i], ai, req, peers, npeers)) continue;
+        if (!aug_floor_side_usable(c, owner, &sides[i])) continue;
         cnt = aug_samples_unit(ts, 64);
         for (k = 0; k < cnt; k++) {
             double t = ts[k], up[3], dn[3];
@@ -1634,6 +1669,7 @@ static int aug_fall_links(aug_ctx *c, int ai, const aug_quad *eff,
         /* Falling is DOWNWARD only, by definition -- a rise is a climb. */
         if (aug_regime(&sides[i], (double)c->step) != REGIME_DOWN) continue;
         if (!aug_side_owns(&sides[i], ai, req, peers, npeers)) continue;
+        if (!aug_floor_side_usable(c, aug_owner(peers, npeers, ai), &sides[i])) continue;
         if (c->o->fall == SH_AUG_FALL_AUTO && sides[i].drop > max_fall) continue;
         bx = (sides[i].p0[0] + sides[i].p1[0]) / 2.0;
         by = (sides[i].p0[1] + sides[i].p1[1]) / 2.0;
@@ -1899,6 +1935,7 @@ static int aug_traversal_specs(aug_ctx *c, int ai, const aug_quad *eff,
         regime = aug_regime(&sides[i], (double)c->step);
         if (regime == REGIME_STEP || regime == REGIME_NONE) continue;
         if (!aug_side_owns(&sides[i], ai, req, peers, npeers)) continue;
+        if (!aug_floor_side_usable(c, owner, &sides[i])) continue;
         leap = (regime == REGIME_LEAP);
         /* A climb is measured vertically, a leap horizontally. */
         span = leap ? sides[i].gap : fabs(sides[i].drop);

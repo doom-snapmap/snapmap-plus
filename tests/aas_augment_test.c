@@ -2747,10 +2747,91 @@ static void test_a_long_face_offers_climbs_along_its_length(void)
     sh_aug_report_free(&rep);
     sh_aas_free(a);
 }
+/* Distance from (x, y) to the nearest edge of a four-corner footprint. */
+static double footprint_edge_distance(const sh_aug_platform *p, double x, double y)
+{
+    double best = 1e30;
+    int i;
+    for (i = 0; i < 4; i++) {
+        const float *a = p->c[i], *b = p->c[(i + 1) % 4];
+        double ex = b[0] - a[0], ey = b[1] - a[1], len2 = ex * ex + ey * ey, t, dx, dy;
+        t = ((x - a[0]) * ex + (y - a[1]) * ey) / len2;
+        if (t < 0) t = 0;
+        if (t > 1) t = 1;
+        dx = x - (a[0] + t * ex); dy = y - (a[1] + t * ey);
+        if (sqrt(dx * dx + dy * dy) < best) best = sqrt(dx * dx + dy * dy);
+    }
+    return best;
+}
+
+/* A step whose top is split by the next step standing on it has edges along
+ * that cut, deep inside its own box. A floor climb must never arrive on one:
+ * its run-up would be pushed out through the box's own face and stretched
+ * across its top. Every floor climb lands within the body's clearance of a
+ * real face, and no two are identical. */
+static void test_no_floor_climb_lands_on_a_cut_inside_its_own_box(void)
+{
+    sh_aas *a = load_slabs(NULL, 0);
+    sh_aug_platform p[2];
+    sh_aug_report rep;
+    sh_aug_opts o = { SH_AUG_FALL_AUTO, 1, SH_AUG_TRAVERSAL_AUTO, 0 };
+    unsigned i, nr;
+    int k, floor_climbs = 0, deep = 0;
+    printf("no floor climb lands on a cut line inside its own box\n");
+    if (!a) { CHECK(0); return; }
+    load_synthetic_traversal_table();
+    /* Steps 1 and 2 of a user's fanned staircase, module coordinates. */
+    {
+        static const float s1[4][2] = { { 162.321f, 1581.123f }, { -165.658f, 1584.897f },
+                                        { -162.321f, 1874.878f }, { 165.657f, 1871.104f } };
+        static const float s2[4][2] = { { -75.754f, 1269.929f }, { -325.081f, 1483.049f },
+                                        { -136.652f, 1703.491f }, { 112.675f, 1490.371f } };
+        mkbox_yawed(&p[0], 0, 0, 10, 10, 0, 64.25f, 0.25f, "step 1");
+        mkbox_yawed(&p[1], 0, 0, 10, 10, 0, 127.024f, 63.024f, "step 2");
+        for (k = 0; k < 4; k++) {
+            p[0].c[k][0] = s1[k][0]; p[0].c[k][1] = s1[k][1];
+            p[1].c[k][0] = s2[k][0]; p[1].c[k][1] = s2[k][1];
+        }
+    }
+    CHECK(sh_aas_augment(a, p, 2, &o, &rep) == 1);
+    {
+        int idx[8], n = pieces_of(&rep, 0, idx, 8);
+        CHECK_MSG(n >= 2, "step 1's top is cut around step 2");
+    }
+    nr = sh_aas_count(a, SH_AAS_L_REACHABILITIES);
+    for (i = 0; i < nr; i++) {
+        const unsigned char *r = sh_aas_rec_const(a, SH_AAS_L_REACHABILITIES, i);
+        unsigned from = sh_aas_get_u16(r, 6), to = sh_aas_get_u16(r, 8);
+        int on_step1 = 0;
+        if (!(sh_aas_get_u32(r, 0) >> 16) || from != 1) continue;
+        for (k = 0; k < rep.platform_count; k++)
+            if (rep.platforms[k].source == 0 && rep.platforms[k].area == (int)to) on_step1 = 1;
+        if (!on_step1) continue;
+        floor_climbs++;
+        if (footprint_edge_distance(&p[0], sh_aas_get_i16(r, 18), sh_aas_get_i16(r, 20)) >
+            sqrt(2.0) * 24.0 + 10.0) deep++;
+    }
+    CHECK_MSG(floor_climbs > 0, "step 1 is still climbable from the floor");
+    CHECK_MSG(deep == 0, "every floor climb onto step 1 arrives at one of its real faces");
+    {
+        int dup = 0;
+        unsigned j;
+        for (i = 0; i < nr; i++) for (j = i + 1; j < nr; j++) {
+            const unsigned char *r = sh_aas_rec_const(a, SH_AAS_L_REACHABILITIES, i);
+            const unsigned char *q = sh_aas_rec_const(a, SH_AAS_L_REACHABILITIES, j);
+            if (!(sh_aas_get_u32(r, 0) >> 16) || sh_aas_get_u32(r, 0) != sh_aas_get_u32(q, 0)) continue;
+            if (!memcmp(r + 6, q + 6, 4) && !memcmp(r + 12, q + 12, 12)) dup++;
+        }
+        CHECK_MSG(dup == 0, "and no climb is written twice");
+    }
+    sh_aug_report_free(&rep);
+    sh_aas_free(a);
+}
 
 int main(void)
 {
     printf("aas_augment_test\n");
+    test_no_floor_climb_lands_on_a_cut_inside_its_own_box();
     test_a_climb_run_up_may_cross_a_floor_seam();
     test_a_long_face_offers_climbs_along_its_length();
     test_traversal_collection_grows_without_losing_demon_routes();
