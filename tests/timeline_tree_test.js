@@ -94,6 +94,8 @@ check(src.indexOf('id="tlNewFolderBtn"') !== -1 && src.indexOf('id="createTimeli
 check(src.indexOf("d.kind === 'setDisplayNamesResult'") !== -1, 'the rename result is handled');
 check(src.indexOf('doc = prefabTransform.parseScene(entityJson);') !== -1 && src.indexOf('doc = prefabTransform.parseScene(freshEntityJson);') !== -1, 'the timeline open and save paths strip the build 13954591 block comments before parsing');
 check(src.indexOf("t.closest('#prefabTree, #timelineList')") !== -1, 'the document drag guard lets the timelines tree drag');
+check(src.indexOf("tlSetFolderOpen(fname, !fel.classList.contains('pf-open'));\n        renderTimelineList();") !== -1, 'a folder click re-renders the list (its rows exist only while open)');
+check(src.indexOf("if (tlListSeen) for (var on in tlOpenFolders)") !== -1 && src.indexOf("tlListSeen = true;") !== -1, 'open folders are pruned only once a list has arrived');
 const cfg = fs.readFileSync(path.join(__dirname, '..', 'src', 'backend', 'config.c'), 'utf8');
 check(cfg.indexOf('"timelines.open_folders", SH_JSON_ARRAY, "[]"') !== -1, 'the settings registry carries the timelines open-folder list');
 const host = fs.readFileSync(path.join(__dirname, '..', 'src', 'ui', 'webview', 'snapmap_plus_ui_webview.cpp'), 'utf8');

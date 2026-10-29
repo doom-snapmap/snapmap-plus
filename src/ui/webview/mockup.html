@@ -1665,6 +1665,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   // (pfVisibleRows / pfRangeRows / pfPlanMove) fed with eids as item names.
   var tlFolders = [];          // empty folders kept for this window (names)
   var tlOpenFolders = {};      // folder name -> true, kept in the timelines.open_folders setting
+  var tlListSeen = false;      // prune that set against the map only once a list has arrived
   var tlSel = [];              // [{folder, name:'<eid>'}] with name '' for a folder row
   var tlAnchor = null;
   var tlLabels = {};           // '<eid>' -> {leaf, id, name}
@@ -1727,7 +1728,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     var data = tlTreeData();
     var present = {}; for (var pi = 0; pi < data.folders.length; pi++) present[data.folders[pi].name] = true;
     var pruned = false;
-    for (var on in tlOpenFolders) if (tlOpenFolders.hasOwnProperty(on) && !present[on]) { delete tlOpenFolders[on]; pruned = true; }
+    if (tlListSeen) for (var on in tlOpenFolders) if (tlOpenFolders.hasOwnProperty(on) && !present[on]) { delete tlOpenFolders[on]; pruned = true; }
     if (pruned) tlPersistOpenFolders();
     document.getElementById('tlBadge').textContent = allTimelines.length;
     var createBtn = document.getElementById('createTimelineBtn');
@@ -2886,6 +2887,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       for (var k in selectedEids) if (selectedEids[k] && !exist[k]) delete selectedEids[k];
       var entityPerf = renderList();
       allTimelines = d.timelines || [];
+      tlListSeen = true;
       var tlExist = {}; for (var ti=0; ti<allTimelines.length; ti++) tlExist[allTimelines[ti].eid] = true;
       if (selectedTlEid !== -1 && !tlExist[selectedTlEid]) selectedTlEid = -1;
       renderTimelineList();
@@ -3172,6 +3174,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   // prefabs: root *.json files + one real level of subdirectories (folders), read fresh from disk on
   // every refresh -- the filesystem IS the truth, no separate client-side folder state to desync.
   var prefabData = {root: [], folders: []};
+  var pfListSeen = false;   // the open-folder set is pruned against disk only once a list has arrived
   var prefabTags = {};   // "<folder>/<name>" (or "<name>" at root) -> [tags], from the list message's meta map
   var prefabKinds = {};  // "<folder>/<name>" -> "modules" for module prefabs (object prefabs are absent)
   var selectedPrefabKind = '';   // kind of the prefab whose details are shown
@@ -3232,6 +3235,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   }
   function renderPrefabList(root, folders) {
     prefabData = {root: root.slice(), folders: folders.map(function(f){ return {name: f.name, items: (f.items || []).slice()}; })};
+    pfListSeen = true;
     currentPrefabNames = root.slice();
     renderPrefabTree();
   }
@@ -3330,10 +3334,12 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     for (var pfi = 0; pfi < folders.length; pfi++) pfTotal += (folders[pfi].items || []).length;
     document.getElementById('pfBadge').textContent = pfTotal;
     // Forget open folders that are gone from disk, so the saved list does not grow stale names.
+    // Not before the first list: the saved set arrives first and would be wiped against nothing.
     var present = {}, pruned = false;
     for (var pi = 0; pi < folders.length; pi++) present[folders[pi].name] = true;
-    for (var on in pfOpenFolders) if (pfOpenFolders.hasOwnProperty(on) && !present[on]) { delete pfOpenFolders[on]; pruned = true; }
+    if (pfListSeen) for (var on in pfOpenFolders) if (pfOpenFolders.hasOwnProperty(on) && !present[on]) { delete pfOpenFolders[on]; pruned = true; }
     if (pruned) pfPersistOpenFolders();
+    var scroll = tree.scrollTop;
     if (!root.length && !folders.length) {
       tree.innerHTML = '<div class="muted" style="padding:8px;">No prefabs yet -- select entities in the editor and use "Create from selection".</div>';
       if (selectedPrefabName || pfSel.length) clearPrefabSelection();
@@ -3359,6 +3365,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     }
     if (openBody) h += '</div></div>';
     tree.innerHTML = rows.length ? h : '<div class="list-empty">No matches.</div>';
+    tree.scrollTop = scroll;
     // Drop selected rows that no longer exist (deleted, renamed or moved files); a filtered-out
     // row stays selected. A one-prefab selection keeps its details; an empty set clears them.
     var keep = [];
@@ -6210,9 +6217,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
         var filterEl = document.getElementById('timelineFilter');
         if (filterEl && filterEl.value) return;
         var fel = head.parentNode, fname = fel.getAttribute('data-folder-name') || '';
-        var nowOpen = !fel.classList.contains('pf-open');
-        fel.classList.toggle('pf-open', nowOpen);
-        tlSetFolderOpen(fname, nowOpen);
+        tlSetFolderOpen(fname, !fel.classList.contains('pf-open'));
+        renderTimelineList();   // a folder's rows exist only while it is open
         return;
       }
       var item = e.target.closest('.tl-item');
@@ -6666,9 +6672,10 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
         var fel = head.parentNode, fname = fel.getAttribute('data-folder-name') || '';
         var filterEl = document.getElementById('prefabFilter');
         if (filterEl && filterEl.value) return;   // a filter shows matching folders open; nothing to toggle
-        var nowOpen = !fel.classList.contains('pf-open');
-        fel.classList.toggle('pf-open', nowOpen);
-        pfSetFolderOpen(fname, nowOpen);
+        // The tree only holds the rows of open folders, so a toggle re-renders rather than
+        // flipping the class (which showed an empty body).
+        pfSetFolderOpen(fname, !fel.classList.contains('pf-open'));
+        renderPrefabTree();
         return;
       }
       var item = e.target.closest('.pf-item');
@@ -6772,7 +6779,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   function deleteFolder(folder){
     if (!folder) return;
     var name = folder.getAttribute('data-folder-name') || '';
-    var count = folder.querySelectorAll('.pf-item').length;
+    var count = allPrefabNamesInFolder(name).length;   // not the DOM: a collapsed folder renders no item rows
     var msg = count ? ('Move ' + count + ' prefab(s) to the root list and delete this folder?') : 'Delete this empty folder?';
     showConfirm(msg, function(){ post({cmd:'deleteFolder', name: name}); });
   }

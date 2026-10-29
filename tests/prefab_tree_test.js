@@ -126,6 +126,11 @@ check(src.indexOf("d.kind === 'editorMode'") !== -1, 'the editor mode message is
 check(src.indexOf("cmd: npModuleMode ? 'createModulePrefab' : 'createPrefab'") !== -1, 'Blueprint creates a module prefab');
 check(src.indexOf("d.kind === 'createModulePrefabResult'") !== -1 && src.indexOf("d.prefabKind === 'modules'") !== -1, 'module create and place results are handled');
 check(src.indexOf('id="pcFootprint"') !== -1 && src.indexOf('id="pcKindPill"') !== -1, 'the footprint canvas and the kind pill exist');
+/* Rows of a folder exist only while it is open, so a click must re-render, and the saved
+   open set must survive until the first list arrives (the setting is read before the list). */
+check(src.indexOf("pfSetFolderOpen(fname, !fel.classList.contains('pf-open'));\n        renderPrefabTree();") !== -1, 'a folder click re-renders the tree');
+check(src.indexOf("if (pfListSeen) for (var on in pfOpenFolders)") !== -1 && src.indexOf("pfListSeen = true;") !== -1, 'open folders are pruned only once a list has arrived');
+check(src.indexOf("var count = allPrefabNamesInFolder(name).length;") !== -1, 'folder delete counts from the data, not the collapsed DOM');
 check(css.indexOf('.pf-kind') !== -1 && css.indexOf('.pc-kind-pill') !== -1, 'the kind badge and pill are styled');
 
 console.log('prefab_tree_test: ' + failures + ' failures');
