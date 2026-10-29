@@ -2647,11 +2647,7 @@ void sh_nav_bake_toast(const sh_nav_bake_summary *s, int finished, char *title,
     }
     if (!s->refused && !s->partial && !s->boxes_left_out) {
         strcpy_s(title, title_cap, "Navmesh Built");
-        if (s->faces_total > s->faces_climbed)
-            _snprintf_s(body, cap, _TRUNCATE, "The map's navmesh is ready. Demons can climb "
-                        "%d of %d box faces from the floor; sh_navmesh lists them.",
-                        s->faces_climbed, s->faces_total);
-        else strcpy_s(body, cap, "The map's navmesh is ready.");
+        strcpy_s(body, cap, "The map's navmesh is ready.");
         return;
     }
     if (!s->built && !s->partial) {

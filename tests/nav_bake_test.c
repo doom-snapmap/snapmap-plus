@@ -987,14 +987,14 @@ static void test_toast_names_the_room_and_reason(void)
     sh_nav_bake_toast(&s, 1, title, sizeof title, body, sizeof body);
     CHECK(!strcmp(title, "Navmesh Built"));
     CHECK(!strcmp(body, "The map's navmesh is ready."));
-    /* Box faces no demon can climb from the floor are counted in the toast. */
+    /* A full build keeps the plain toast; faces no demon can climb from the
+     * floor are reported by sh_navmesh and the log, not here. */
     {
         sh_nav_bake_summary faced = s;
         faced.faces_climbed = 15; faced.faces_total = 24;
         sh_nav_bake_toast(&faced, 1, title, sizeof title, body, sizeof body);
         CHECK(!strcmp(title, "Navmesh Built"));
-        CHECK(strstr(body, "15 of 24 box faces") != NULL);
-        CHECK(strlen(body) < SH_NAV_TOAST_BODY_CAP);
+        CHECK(!strcmp(body, "The map's navmesh is ready."));
     }
 
     sh_nav_bake_test_preview_outcome(0, SH_NAV_CLASS_REFUSED, "navigation tree deeper than 128");
