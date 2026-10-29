@@ -11,6 +11,8 @@ void sh_apply_engine_nav_build_begin(const void *map) {(void)map;}
 void sh_apply_engine_nav_build_end(void) {}
 void sh_nav_bake_build_end(void) {}
 void sh_nav_bake_enable_instances(int on) {(void)on;}
+int sh_nav_bake_overlay_name(int i,const char *n,char *out,size_t cap) {(void)i;(void)n;(void)out;(void)cap;return 0;}
+int sh_grid_native_record_instance(const void *r) {(void)r;return -1;}
 int sh_nav_bake_instance_name(int i,const char *n,char *out,size_t cap)
 {(void)i;(void)n;(void)out;(void)cap;return 0;}
 

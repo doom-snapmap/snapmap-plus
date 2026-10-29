@@ -14,6 +14,7 @@
 #include "map_render.h"
 #include "world_area_cell.h"
 #include "apply_engine.h"
+#include "grid_room_native.h"
 
 void backend_log(const char *message);
 
@@ -127,8 +128,9 @@ static void *nav_instance_load(void *self,const char *name,unsigned char a,unsig
 }
 
 /* Leaf relays preserve the original call frame. The find-site relay supplies
- * its live R14 instance record as the fourth argument; the load relay leaves
- * all four original arguments intact. */
+ * its live R14 instance record as the fourth argument, the placement-name
+ * relay its R13 record; the load relay leaves all four original arguments
+ * intact. */
 static void *nav_near_relay(uintptr_t call,void *handler,int instance)
 {
     SYSTEM_INFO info;uintptr_t step,center,delta;
@@ -145,6 +147,7 @@ static void *nav_near_relay(uintptr_t call,void *handler,int instance)
             if(!relay)continue;
             if(instance==1){relay[at++]=0x4d;relay[at++]=0x8b;relay[at++]=0xce;}
             if(instance==2){relay[at++]=0x48;relay[at++]=0x8b;relay[at++]=0xcb;}
+            if(instance==3){relay[at++]=0x4d;relay[at++]=0x8b;relay[at++]=0xcd;}
             relay[at++]=0xff;relay[at++]=0x25;
             memset(relay+at,0,4);at+=4;memcpy(relay+at,&handler,8);at+=8;
             if(!VirtualProtect(relay,4096,PAGE_EXECUTE_READ,&old)){
@@ -293,4 +296,59 @@ int sh_nav_play_install(void *snapbuild_fn, int status_ok)
                 snapbuild_fn, tramp, SNAPBUILD_STOLEN);
     backend_log(line);
     return 1;
+}
+
+/* The editor's placement grid is a stock model per module and class, loaded
+ * by the name the native surface rebuild composes. Where the bake cut a copy's
+ * floor, the finished name is replaced with a private one the resource hook
+ * serves, so the native rebuild loads, shows and hides the cut model itself. */
+typedef void *(*nav_concat_fn)(void *,const void *,const char *);
+typedef void (*nav_assign_fn)(void *,const char *);
+static nav_concat_fn g_concat;
+static nav_assign_fn g_assign;
+static sh_patch_handle g_overlay_patch;
+static void *g_overlay_relay;
+static int g_overlay_ready;
+
+static void *nav_overlay_name(void *dest,const void *lhs,const char *rhs,const unsigned char *record)
+{
+    void *result=g_concat(dest,lhs,rhs);
+    __try {
+        /* idStr: length at +8, text at +0x10. */
+        const char *name=*(const char *const *)((const unsigned char *)result+0x10);
+        char private_name[512];
+        int instance=sh_grid_native_record_instance(record);
+        if(instance>=0&&name&&
+           sh_nav_bake_overlay_name(instance,name,private_name,sizeof private_name))
+            g_assign(result,private_name);
+    } __except(EXCEPTION_EXECUTE_HANDLER) { }
+    return result;
+}
+
+int sh_nav_play_install_overlay(const sig_result *results,size_t count)
+{
+    const sig_result *site=NULL;size_t i;
+    unsigned char expected[5],patch[5]={0xe8};int32_t relative;intptr_t distance;
+    if(g_overlay_ready)return 1;
+    if(g_overlay_patch.live)goto failed;
+    for(i=0;i<count;i++)if(results[i].name) {
+        if(!strcmp(results[i].name,"PlacementModelNameCall"))site=&results[i];
+        if(!strcmp(results[i].name,"IdStrAssignCStr")&&results[i].status==SIG_OK)
+            g_assign=(nav_assign_fn)results[i].addr;
+    }
+    if(!site||site->status!=SIG_OK||!g_assign)goto failed;
+    memcpy(expected,(void*)site->addr,5);if(expected[0]!=0xe8)goto failed;
+    memcpy(&relative,expected+1,4);
+    g_concat=(nav_concat_fn)(site->addr+5+relative);
+    g_overlay_relay=nav_near_relay(site->addr,(void*)nav_overlay_name,3);
+    if(!g_overlay_relay)goto failed;
+    distance=(intptr_t)g_overlay_relay-(intptr_t)(site->addr+5);
+    if(distance<INT32_MIN||distance>INT32_MAX)goto failed;
+    relative=(int32_t)distance;memcpy(patch+1,&relative,4);
+    if(code_patch_sig(site,expected,patch,5,&g_overlay_patch)!=B2_PATCH_OK)goto failed;
+    g_overlay_ready=1;
+    backend_log("NAV: editor placement grid follows the floor cut");return 1;
+failed:
+    if(g_overlay_relay&&!g_overlay_patch.live){VirtualFree(g_overlay_relay,0,MEM_RELEASE);g_overlay_relay=NULL;}
+    backend_log("NAV: editor placement grid keeps its stock models");return 0;
 }

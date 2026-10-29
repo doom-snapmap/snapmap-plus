@@ -12,6 +12,8 @@
 #include "../src/backend/nav_traversal.h"
 #include "../src/backend/aas_augment.h"
 #include "../src/backend/navmesh.h"
+#include "../src/backend/nav_overlay.h"
+#include "../src/backend/aas_edit.h"
 #include "aas_fixture.h"
 
 static int g_checks = 0, g_fail = 0;
@@ -1264,14 +1266,39 @@ static int snapshot_two(sh_nav_map *out, void *ctx)
 
 /* The fixture module for every class, and nothing for the traversal table. */
 static int g_module_reads;
+static unsigned char *grid_model(size_t *out_len);
+static int g_grid_models;
 static unsigned char *fixture_reader(const char *name, size_t *out_len)
 {
     unsigned char *module, *copy;
     size_t len = 0;
     if (out_len) *out_len = 0;
+    if (strstr(name, ".bmodel")) return g_grid_models && out_len ? grid_model(out_len) : NULL;
     if (!strstr(name, "aas_monster")) return NULL;
     module = fixture_module(&len);
     if (!module) return NULL;
+    /* The grid tests need a floor the boxes can cut: give the slab its corners. */
+    if (g_grid_models) {
+        static const float corner[4][2] = { { -2000, 2000 }, { 2000, 2000 }, { 2000, -2000 }, { -2000, -2000 } };
+        char err[128];
+        sh_aas *a = sh_aas_parse(module, len, err, sizeof err);
+        unsigned char *written = NULL;
+        size_t wlen = 0;
+        int k;
+        if (a) {
+            for (k = 0; k < 4; k++) {
+                sh_aas_put_f32(sh_aas_rec(a, SH_AAS_L_VERTICES, (unsigned)k), 0, corner[k][0]);
+                sh_aas_put_f32(sh_aas_rec(a, SH_AAS_L_VERTICES, (unsigned)k), 4, corner[k][1]);
+            }
+            sh_aas_put_u32(sh_aas_rec(a, SH_AAS_L_AREAS, 1), 0, 8);   /* a floor area */
+            written = sh_aas_write(a, &wlen);
+            sh_aas_free(a);
+        }
+        free(module);
+        if (written && out_len) *out_len = wlen;
+        g_module_reads++;
+        return written;
+    }
     copy = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, len);
     if (copy) memcpy(copy, module, len);
     free(module);
@@ -1306,6 +1333,129 @@ static int play_once(int *served)
         }
     sh_nav_bake_build_end();
     return baked;
+}
+
+/* The editor's placement grid for the fixture room: its slab at z = 0 as two
+ * triangles, wound like the stock models. Served only when asked for. */
+static unsigned char *grid_model(size_t *out_len)
+{
+    static const float v[4][2] = { { -2000, 2000 }, { 2000, 2000 }, { 2000, -2000 }, { -2000, -2000 } };
+    static const unsigned idx[6] = { 0, 1, 2, 2, 3, 0 };
+    static const char mat[] = "test/aas_surface";
+    size_t n = 12 + 4 + (sizeof mat - 1) + 4 + 12 + 52 + 4 * 48 + 6 * 2 + 32 + 4, at;
+    unsigned char *m = (unsigned char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, n);
+    unsigned i;
+    if (!m) return NULL;
+    put32(m, 0x1b4c4d42); put32(m + 8, 1);
+    at = 12;
+    m[at] = (unsigned char)(sizeof mat - 1); at += 4;
+    memcpy(m + at, mat, sizeof mat - 1); at += sizeof mat - 1;
+    at += 4 + 12;
+    put32(m + at, 4); put32(m + at + 4, 6); put32(m + at + 8, 0x1801f);
+    at += 52;
+    for (i = 0; i < 4; i++) { putf(m + at + i * 48, v[i][0]); putf(m + at + i * 48 + 4, v[i][1]); }
+    at += 4 * 48;
+    for (i = 0; i < 6; i++) put16(m + at + i * 2, idx[i]);
+    at += 12;
+    putf(m + at, -2000); putf(m + at + 4, -2000); putf(m + at + 12, 2000); putf(m + at + 16, 2000);
+    put32(m + at + 28, 0x1b4c4d42);
+    *out_len = n;
+    return m;
+}
+
+static int snapshot_none(sh_nav_map *out, void *ctx)
+{
+    (void)ctx;
+    memset(out, 0, sizeof *out);
+    out->instances = (sh_nav_instance *)calloc(2, sizeof *out->instances);
+    if (!out->instances) return 0;
+    out->instance_count = out->instance_cap = 2;
+    strcpy_s(out->instances[0].module, sizeof out->instances[0].module, "ind_dlc/room");
+    strcpy_s(out->instances[1].module, sizeof out->instances[1].module, "ind_dlc/room");
+    out->instances[1].origin[0] = 8192.0f;
+    return 1;
+}
+
+static int wait_prepared(void)
+{
+    ULONGLONG deadline = GetTickCount64() + 10000;
+    int ready;
+    do { Sleep(1); ready = sh_nav_bake_prepare(fixture_reader); }
+    while (ready == 0 && GetTickCount64() < deadline);
+    return ready;
+}
+
+/* Each copy's grid model is cut where its floor was cut, for every class; the
+ * preview's class bakes also serve Play; unmarking every box restores the
+ * stock models. */
+static void test_the_preview_cuts_the_placement_grid(void)
+{
+    static const char *const stock[3] = {
+        "maps/modules/ind_dlc/room/room_aas_monster48.bmodel",
+        "maps/modules/ind_dlc/room/room_aas_monster96.bmodel",
+        "maps/modules/ind_dlc/room/room_aas_monster128.bmodel",
+    };
+    char name[512], cooked[600], other[512];
+    unsigned char *bytes = NULL;
+    size_t len = 0;
+    int ci, room, named = 0, served, baked, triangles = 0;
+    unsigned long long first;
+    printf("the preview cuts the editor's placement grid for every class\n");
+    sh_nav_bake_test_reset(); sh_nav_bake_enable_instances(1);
+    memset(&g_two, 0, sizeof g_two);
+    g_two.move_room = -1; g_two.room1_x = 8192.0f;
+    g_grid_models = 1;
+    sh_nav_bake_set_snapshot(snapshot_two, NULL);
+    sh_nav_bake_refresh_live();
+    CHECK(wait_prepared() == 1);
+    first = sh_nav_bake_overlay_signature();
+    CHECK_MSG(first != 0, "cut grid models are installed");
+    for (room = 0; room < 2; room++)
+        for (ci = 0; ci < 3; ci++) {
+            if (!sh_nav_bake_overlay_name(room, stock[ci], name, sizeof name)) continue;
+            named++;
+            CHECK(!strncmp(name, "maps/smpnavgrid/", 16) && strstr(name, stock[ci]));
+            CHECK(sh_nav_bake_overlay_open(name, &bytes, &len) == 1 && bytes);
+            if (bytes) {
+                int t = sh_nav_overlay_triangle_count(bytes, len);
+                if (t > triangles) triangles = t;
+                HeapFree(GetProcessHeap(), 0, bytes); bytes = NULL;
+            }
+        }
+    CHECK_MSG(named == 6, "both copies, all three classes");
+    CHECK_MSG(triangles > 2, "the slab is split around the boxes");
+    CHECK(sh_nav_bake_overlay_name(0, stock[0], name, sizeof name));
+    _snprintf_s(cooked, sizeof cooked, _TRUNCATE, "generated/%s", name);
+    CHECK_MSG(sh_nav_bake_overlay_open(cooked, &bytes, &len) == 1, "the cooked spelling is served too");
+    if (bytes) { HeapFree(GetProcessHeap(), 0, bytes); bytes = NULL; }
+    strcpy_s(other, sizeof other, name);
+    other[16] = other[16] == '0' ? '1' : '0';
+    CHECK_MSG(sh_nav_bake_overlay_open(other, &bytes, &len) == -1 && !bytes, "an unknown model is not served");
+    CHECK_MSG(sh_nav_bake_overlay_open(stock[0], &bytes, &len) == 0, "a stock name is not claimed");
+    CHECK_MSG(!sh_nav_bake_overlay_name(2, stock[0], name, sizeof name), "a copy with no boxes keeps its model");
+    CHECK_MSG(!sh_nav_bake_overlay_name(0, "maps/modules/ind_dlc/other/other_aas_monster48.bmodel",
+                                         name, sizeof name), "another module keeps its model");
+    baked = play_once(&served);
+    CHECK_MSG(baked == 0 && served == 6, "Play reuses the preview's bakes of every class");
+
+    /* Unchanged boxes keep the same models and names. */
+    g_two.move_room = 1; g_two.move_box = 0; g_two.move = 64.0f;
+    sh_nav_bake_refresh_live();
+    CHECK(wait_prepared() == 1);
+    CHECK_MSG(sh_nav_bake_overlay_signature() != first, "a moved box changes its copy's grid");
+    g_two.move = 0.0f;
+    sh_nav_bake_refresh_live();
+    CHECK(wait_prepared() == 1);
+    CHECK_MSG(sh_nav_bake_overlay_signature() == first, "and moving it back restores the same models");
+
+    sh_nav_bake_set_snapshot(snapshot_none, NULL);
+    sh_nav_bake_refresh_live();
+    CHECK(wait_prepared() == 1);
+    CHECK_MSG(sh_nav_bake_overlay_signature() == 0, "no marked box: no cut models");
+    CHECK_MSG(!sh_nav_bake_overlay_name(0, stock[0], name, sizeof name), "the stock model is loaded again");
+    g_grid_models = 0;
+    sh_nav_bake_set_snapshot(NULL, NULL);
+    sh_nav_bake_test_reset();
 }
 
 /* An unchanged map is served at the next Play for every class; an edit bakes
@@ -1515,6 +1665,7 @@ int main(void)
     test_unmeasured_box_does_not_block_a_build();
     test_play_reuses_every_class_of_an_unchanged_copy();
     test_preview_and_play_share_the_cache();
+    test_the_preview_cuts_the_placement_grid();
     test_refusal_memory_survives_the_cache();
     test_cache_keeps_to_its_budget();
     sh_nav_bake_preview_stop();

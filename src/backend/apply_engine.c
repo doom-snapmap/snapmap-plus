@@ -27,6 +27,7 @@
 #include "nav_snapshot.h"
 #include "perf.h"
 #include "nav_preview.h"
+#include "grid_room_native.h"
 #include "engine_build.h"
 #include "prefab_grab.h"
 #include <math.h>
@@ -2604,6 +2605,23 @@ static void ae_nav_refresh_queue(void)
     }
 }
 
+/* The set of cut placement-grid models the native surfaces were last rebuilt
+ * with. The rebuild reloads every copy's grid model by name; the names of the
+ * copies the bake cut change with the cut, so it runs once per change. */
+static unsigned long long g_nav_overlay_shown;
+
+static void ae_nav_overlay_poll(void)
+{
+    unsigned long long now = sh_nav_bake_overlay_signature();
+    int rebuilt;
+    if (now == g_nav_overlay_shown) return;
+    g_nav_overlay_shown = now;
+    rebuilt = sh_grid_native_refresh_placement();
+    if (rebuilt < 0) backend_log("NAV: the placement grid could not be rebuilt for the floor cut");
+    else if (rebuilt > 0) backend_log(now ? "NAV: placement grid rebuilt with the floor cut"
+                                          : "NAV: placement grid back to the stock floor");
+}
+
 /* Frame maintenance. An unedited map reaches the first return having read one
  * flag, so a map nobody is changing costs nothing per frame. */
 static void ae_nav_refresh_poll(void)
@@ -2648,6 +2666,7 @@ static void ae_nav_refresh_poll(void)
         if (sh_apply_engine_nav_update_status() == SH_NAV_UPDATE_BUILDING)
             InterlockedExchange(&g_nav_update_status, SH_NAV_UPDATE_FAILED);
         g_nav_map_obj = map_obj;
+        sh_nav_bake_overlay_clear();
         g_nav_have_hash = 0;
         g_nav_read_tries = 0;
         g_nav_stale = 0;
@@ -2719,6 +2738,8 @@ static void ae_nav_refresh_poll(void)
              sh_nav_bake_geometry_revision() != g_preview_built_revision))
             ae_nav_preview(ed);
     }
+
+    ae_nav_overlay_poll();
 
     /* Claimed only here, where the claim is always acted on: a frame that
      * returned earlier leaves the edit pending for the next one. */

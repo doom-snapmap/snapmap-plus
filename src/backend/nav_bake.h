@@ -176,6 +176,18 @@ int sh_nav_bake_show_marks(int count);
 void sh_nav_bake_enable_instances(int enabled);
 int sh_nav_bake_instance_name(int instance, const char *name, char *out, size_t capacity);
 
+/* The editor's placement grid (nav_overlay.h). Each preview bake also bakes
+ * the two larger classes and cuts every class's stock grid model where that
+ * class's floor was cut. The native surface rebuild asks for a copy's model by
+ * its stock name; a cut copy gets a private name, which the resource open
+ * serves. A changed signature means the rebuild should run again. */
+int sh_nav_bake_overlay_name(int instance, const char *name, char *out, size_t capacity);
+/* 1 served (HeapAlloc'd bytes), 0 not an overlay name, -1 no such overlay. */
+int sh_nav_bake_overlay_open(const char *name, unsigned char **out, size_t *length);
+unsigned long long sh_nav_bake_overlay_signature(void);
+/* Back to the stock grid everywhere, for a map that is no longer open. */
+void sh_nav_bake_overlay_clear(void);
+
 void sh_nav_bake_set_live_editor(sh_nav_bake_entity_count count,
                                  sh_navr_entity_valid valid,
                                  sh_navr_entity_json get_json,

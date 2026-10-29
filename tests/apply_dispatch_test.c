@@ -328,6 +328,9 @@ void sh_nav_bake_summary_get(sh_nav_bake_summary *s)
 }
 unsigned long sh_nav_bake_geometry_revision(void) { return 0; }
 int sh_nav_bake_preview_pending(void) { assert(0); return 0; }
+unsigned long long sh_nav_bake_overlay_signature(void) { return 0; }
+void sh_nav_bake_overlay_clear(void) { }
+int sh_grid_native_refresh_placement(void) { return 0; }
 int sh_nav_preview_published(void *world) { (void)world; assert(0); return 0; }
 int sh_nav_bake_refresh_volumes(int *volumes) { (void)volumes; assert(0); return 0; }
 int sh_nav_bake_volume_flagged(int uid) { (void)uid; assert(0); return 0; }

@@ -44,6 +44,14 @@ int sh_nav_bake_open(const char *name, sh_nav_bake_reader read_shipped,
     return 0;
 }
 
+int sh_nav_bake_overlay_open(const char *name, unsigned char **out, size_t *length)
+{
+    (void)name;
+    if (out) *out = NULL;
+    if (length) *length = 0;
+    return 0;
+}
+
 int sh_navmesh_open(const char *name, unsigned char **out_bytes, size_t *out_len)
 {
     (void)name;

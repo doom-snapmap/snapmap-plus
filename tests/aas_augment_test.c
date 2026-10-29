@@ -12,6 +12,7 @@
 #include "../src/backend/nav_traversal.h"
 #include "../src/backend/navmesh.h"
 #include "../src/backend/nav_geometry.h"
+#include "../src/backend/nav_overlay.h"
 
 static int g_checks = 0, g_fail = 0;
 
@@ -2971,6 +2972,205 @@ static void test_the_floor_is_cut_around_the_boxes_on_it(void)
     sh_aug_report_free(&rep);
     sh_aas_free(a);
 }
+/* ---- the native placement grid, cut where the floor was cut ------------- */
+
+static unsigned ov_be32(const unsigned char *p)
+{ return (unsigned)p[0] << 24 | (unsigned)p[1] << 16 | (unsigned)p[2] << 8 | p[3]; }
+static float ov_getf(const unsigned char *p) { unsigned b = ov_be32(p); float f; memcpy(&f, &b, 4); return f; }
+
+/* A stock-shaped display model: one surface, a roof quad at z = 3360, then
+ * two floor triangles per slab of load_slabs at z = 0, wound like the stock. */
+static unsigned char *ov_model(const float *xs, int slabs, size_t *len)
+{
+    static const char mat[] = "test/aas_surface";
+    unsigned nv = 4 + 4 * (unsigned)slabs, ni = 6 + 6 * (unsigned)slabs, i, k;
+    size_t n = 12 + 4 + (sizeof mat - 1) + 4 + 12 + 52 + (size_t)nv * 48 + (size_t)ni * 2 + 32 + 4, at;
+    unsigned char *m = (unsigned char *)calloc(1, n);
+    float v[64][3];
+    unsigned idx[128];
+    if (!m || slabs > 15) { free(m); return NULL; }
+    v[0][0] = -2000; v[0][1] = 2000; v[1][0] = 2000; v[1][1] = 2000;
+    v[2][0] = 2000; v[2][1] = -2000; v[3][0] = -2000; v[3][1] = -2000;
+    for (k = 0; k < 4; k++) v[k][2] = 3360.0f;
+    idx[0] = 0; idx[1] = 1; idx[2] = 2; idx[3] = 2; idx[4] = 3; idx[5] = 0;
+    for (i = 0; i < (unsigned)slabs; i++) {
+        unsigned b = 4 + 4 * i;
+        v[b][0] = xs[i];         v[b][1] = 2000;
+        v[b + 1][0] = xs[i + 1]; v[b + 1][1] = 2000;
+        v[b + 2][0] = xs[i + 1]; v[b + 2][1] = -2000;
+        v[b + 3][0] = xs[i];     v[b + 3][1] = -2000;
+        for (k = 0; k < 4; k++) v[b + k][2] = 0.0f;
+        idx[6 + 6 * i] = b; idx[7 + 6 * i] = b + 1; idx[8 + 6 * i] = b + 2;
+        idx[9 + 6 * i] = b + 2; idx[10 + 6 * i] = b + 3; idx[11 + 6 * i] = b;
+    }
+    put32(m, 0x1b4c4d42); put32(m + 8, 1);
+    at = 12;
+    m[at] = (unsigned char)(sizeof mat - 1); at += 4;
+    memcpy(m + at, mat, sizeof mat - 1); at += sizeof mat - 1;
+    at += 4 + 12;
+    put32(m + at, nv); put32(m + at + 4, ni); put32(m + at + 8, 0x1801f);
+    putf(m + at + 12, 1.0f); putf(m + at + 16, 1.0f); putf(m + at + 20, 1.0f);
+    at += 52;
+    for (i = 0; i < nv; i++) {
+        unsigned char *q = m + at + (size_t)i * 48;
+        for (k = 0; k < 3; k++) putf(q + k * 4, v[i][k]);
+        putf(q + 16, (float)i / (float)nv);             /* a per-corner shade */
+        memset(q + 20, 0x80, 8); q[40] = 0xff; q[41] = 0xff;
+    }
+    at += (size_t)nv * 48;
+    for (i = 0; i < ni; i++) put16(m + at + (size_t)i * 2, idx[i]);
+    at += (size_t)ni * 2;
+    putf(m + at, -2000); putf(m + at + 4, -2000); putf(m + at + 8, 0);
+    putf(m + at + 12, 2000); putf(m + at + 16, 2000); putf(m + at + 20, 3360);
+    put32(m + at + 28, 0x1b4c4d42);
+    at += 32 + 4;
+    *len = at;
+    return m;
+}
+
+/* Floor area of a one-surface model, and the shape of its triangles. */
+static double ov_floor_area(const unsigned char *m, const sh_aug_platform *boxes, int nbox,
+                            int *inside, int *flipped, int *roof_kept)
+{
+    size_t at = 12;
+    unsigned nl = m[at] | m[at + 1] << 8, nv, ni, i;
+    const unsigned char *vb, *ib;
+    double area = 0;
+    at += 4 + nl + 4 + 12;
+    nv = ov_be32(m + at); ni = ov_be32(m + at + 4);
+    vb = m + at + 52; ib = vb + (size_t)nv * 48;
+    *inside = *flipped = 0;
+    *roof_kept = ni >= 6 && ib[1] == 0 && ib[3] == 1 && ib[5] == 2 && ib[7] == 2 && ib[9] == 3 &&
+                 ib[11] == 0 && ov_getf(vb + 8) == 3360.0f;
+    for (i = 0; i + 2 < ni; i += 3) {
+        double q[3][3], s, cx, cy;
+        int k, j;
+        for (k = 0; k < 3; k++) {
+            unsigned c = (unsigned)ib[(i + k) * 2] << 8 | ib[(i + k) * 2 + 1];
+            for (j = 0; j < 3; j++) q[k][j] = ov_getf(vb + (size_t)c * 48 + j * 4);
+        }
+        if (q[0][2] > 1000) continue;
+        s = 0.5 * ((q[1][0] - q[0][0]) * (q[2][1] - q[0][1]) - (q[2][0] - q[0][0]) * (q[1][1] - q[0][1]));
+        if (s > 0) (*flipped)++;            /* the stock floor winds clockwise */
+        area += fabs(s);
+        cx = (q[0][0] + q[1][0] + q[2][0]) / 3; cy = (q[0][1] + q[1][1] + q[2][1]) / 3;
+        for (k = 0; k < nbox; k++) if (point_in_footprint(&boxes[k], cx, cy, 0)) (*inside)++;
+    }
+    return area;
+}
+
+static double ov_poly_area(const double (*q)[2], int n)
+{
+    double s = 0;
+    int i;
+    for (i = 0; i < n; i++) s += q[i][0] * q[(i + 1) % n][1] - q[(i + 1) % n][0] * q[i][1];
+    return fabs(s) * 0.5;
+}
+
+static void test_the_placement_grid_is_cut_where_the_floor_was_cut(void)
+{
+    static const float seams[2] = { -168.0f, 168.0f };
+    static const float xs[4] = { -2000.0f, -168.0f, 168.0f, 2000.0f };
+    static const float s1[4][2] = { { 162.321f, 1581.123f }, { -165.658f, 1584.897f },
+                                    { -162.321f, 1874.878f }, { 165.657f, 1871.104f } };
+    static const float s2[4][2] = { { -75.754f, 1269.929f }, { -325.081f, 1483.049f },
+                                    { -136.652f, 1703.491f }, { 112.675f, 1490.371f } };
+    sh_aas *a = load_slabs(seams, 2);
+    sh_aug_platform p[2];
+    sh_aug_report rep;
+    sh_aug_opts o = { SH_AUG_FALL_AUTO, 1, SH_AUG_TRAVERSAL_AUTO, 0 };
+    unsigned char *shipped = NULL, *cut = NULL, *model = NULL, *out = NULL;
+    size_t shipped_len = 0, cut_len = 0, model_len = 0, out_len = 0;
+    sh_nav_overlay_stats st;
+    unsigned floor_end, ar;
+    double pieces = 0, drawn, stock;
+    int k, inside, flipped, roof, augmented = 0;
+    printf("the placement grid is cut where the module floor was cut\n");
+    memset(&rep, 0, sizeof rep);
+
+    /* One triangle, one cut: what lies outside the cut area stays, what lies
+     * inside it is kept only within its piece, and every corner stays on the
+     * triangle's own (tilted) plane. */
+    {
+        static const double tri[3][3] = { { 0, 0, 0 }, { 0, 100, 10 }, { 100, 0, 0 } };
+        static const double whole[4][3] = { { 0, 0, 0 }, { 50, 0, 0 }, { 50, 50, 0 }, { 0, 50, 0 } };
+        static const double half[4][3] = { { 0, 0, 0 }, { 25, 0, 0 }, { 25, 50, 0 }, { 0, 50, 0 } };
+        static const double high[4][3] = { { 0, 0, 500 }, { 50, 0, 500 }, { 50, 50, 500 }, { 0, 50, 500 } };
+        sh_ov_polygon piece = { 4, half };
+        sh_ov_cut c = { { 4, whole }, &piece, 1 }, up = { { 4, high }, &piece, 1 };
+        double res[64][3][3], sum = 0;
+        int touched = 0, n = sh_nav_overlay_cut_triangle(tri, &c, 1, res, 64, &touched), i, j, bad = 0, wind = 0;
+        CHECK_MSG(n > 1 && touched, "a triangle over a cut area is split");
+        for (i = 0; i < n; i++) {
+            double s = 0.5 * ((res[i][1][0] - res[i][0][0]) * (res[i][2][1] - res[i][0][1]) -
+                              (res[i][2][0] - res[i][0][0]) * (res[i][1][1] - res[i][0][1]));
+            sum += fabs(s);
+            if (s > 0) wind++;
+            for (j = 0; j < 3; j++) if (fabs(res[i][j][2] - 0.1 * res[i][j][1]) > 1e-6) bad++;
+        }
+        CHECK_MSG(fabs(sum - (5000.0 - 2500.0 + 1250.0)) < 0.01, "outside the area plus the kept piece");
+        CHECK_MSG(bad == 0, "new corners lie on the triangle's plane");
+        CHECK_MSG(wind == 0, "the winding is the triangle's");
+        n = sh_nav_overlay_cut_triangle(tri, &up, 1, res, 64, &touched);
+        CHECK_MSG(n == 1 && !touched && !memcmp(res[0], tri, sizeof tri), "a cut far above leaves it whole");
+        CHECK_MSG(sh_nav_overlay_cut_triangle(tri, &c, 1, res, 1, &touched) == -1, "a short buffer is refused");
+    }
+
+    if (!a) { CHECK(0); return; }
+    load_synthetic_traversal_table();
+    model = ov_model(xs, 3, &model_len);
+    shipped = sh_aas_write(a, &shipped_len);
+    CHECK(model && shipped);
+    if (!model || !shipped) goto done;
+    CHECK(sh_nav_overlay_triangle_count(model, model_len) == 8);
+    CHECK_MSG(sh_nav_overlay_build(model, model_len, shipped, shipped_len, shipped, shipped_len,
+                                   sh_aas_count(a, SH_AAS_L_AREAS), &out, &out_len, &st) == 0 && !out,
+              "an uncut floor keeps the stock model");
+    stock = ov_floor_area(model, p, 0, &inside, &flipped, &roof);
+    CHECK(fabs(stock - 4000.0 * 4000.0) < 1.0);
+
+    mkbox_yawed(&p[0], 0, 0, 10, 10, 0, 64.25f, 0.25f, "step 1");
+    mkbox_yawed(&p[1], 0, 0, 10, 10, 0, 127.024f, 63.024f, "step 2");
+    for (k = 0; k < 4; k++) {
+        p[0].c[k][0] = s1[k][0]; p[0].c[k][1] = s1[k][1];
+        p[1].c[k][0] = s2[k][0]; p[1].c[k][1] = s2[k][1];
+    }
+    augmented = sh_aas_augment(a, p, 2, &o, &rep) == 1;
+    CHECK(augmented);
+    if (!augmented) goto done;
+    floor_end = rep.areas_before + (unsigned)rep.floor_pieces_added;
+    cut = sh_aas_write(a, &cut_len);
+    CHECK(cut != NULL);
+    if (!cut) goto done;
+    for (ar = 1; ar < floor_end; ar++) {
+        double poly[64][2];
+        int n = area_polygon(a, ar, poly, 64);
+        if (n >= 3) pieces += ov_poly_area((const double (*)[2])poly, n);
+    }
+    CHECK(sh_nav_overlay_build(model, model_len, shipped, shipped_len, cut, cut_len, floor_end,
+                               &out, &out_len, &st) == 1 && out);
+    if (!out) goto done;
+    CHECK_MSG(st.cut_areas == rep.floors_cut, "one cut per floor area the bake cut");
+    CHECK_MSG(st.pieces == rep.floors_cut + rep.floor_pieces_added, "every piece of them");
+    CHECK_MSG(st.triangles_after > st.triangles_before, "the cut floor takes more triangles");
+    CHECK(sh_nav_overlay_triangle_count(out, out_len) == st.triangles_after);
+    drawn = ov_floor_area(out, p, 2, &inside, &flipped, &roof);
+    /* Both are float coordinates near 2000: rounding along the seams, not a gap. */
+    CHECK_MSG(fabs(drawn - pieces) < 16.0, "the grid covers exactly the floor the bake kept");
+    CHECK_MSG(drawn < stock - 50000.0, "and no longer the ground under the steps");
+    CHECK_MSG(inside == 0, "no floor triangle stands inside a step");
+    CHECK_MSG(flipped == 0, "every floor triangle keeps the stock winding");
+    CHECK_MSG(roof, "the upper triangles are kept as they were");
+    CHECK_MSG(!memcmp(out + out_len - 4, model + model_len - 4, 4), "the material table is kept");
+done:
+    if (augmented) sh_aug_report_free(&rep);
+    if (out) HeapFree(GetProcessHeap(), 0, out);
+    if (cut) HeapFree(GetProcessHeap(), 0, cut);
+    if (shipped) HeapFree(GetProcessHeap(), 0, shipped);
+    free(model);
+    sh_aas_free(a);
+}
+
 static int count_flags(sh_aas *a, unsigned flags)
 {
     unsigned i, n = sh_aas_count(a, SH_AAS_L_REACHABILITIES);
@@ -3344,6 +3544,7 @@ int main(void)
     test_a_floor_split_past_the_corner_limit_still_reads();
     test_barrier_jumps_only_when_built_with_them();
     test_the_floor_is_cut_around_the_boxes_on_it();
+    test_the_placement_grid_is_cut_where_the_floor_was_cut();
     test_no_floor_climb_lands_on_a_cut_inside_its_own_box();
     test_a_climb_run_up_may_cross_a_floor_seam();
     test_a_long_face_offers_climbs_along_its_length();

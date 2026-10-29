@@ -677,6 +677,20 @@ static void *ov_open_body(void *self, const char *name, unsigned char b1, unsign
 #endif
     if (g_provider_self == NULL) g_provider_self = self;
 
+    /* The editor's placement grid, cut where marked boxes cut the module floor.
+     * Only the native surface rebuild asks for these private names. */
+    if (mode < 2 && name && (!strncmp(name, "maps/smpnavgrid/", 16) ||
+                              !strncmp(name, "generated/maps/smpnavgrid/", 26))) {
+        unsigned char *grid = NULL;
+        size_t grid_len = 0;
+        if (sh_nav_bake_overlay_open(name, &grid, &grid_len) == 1) {
+            ov_stream *stream = make_mem_stream(grid, (long long)grid_len, name, 1);
+            if (stream) return stream;
+            HeapFree(GetProcessHeap(), 0, grid);
+        }
+        return NULL;
+    }
+
     /* Let embedded or marked-volume navigation take precedence over the
      * resized room's base AAS; its source reader still resolves that base. */
     if(mode<2&&grid_aas_name(name)){

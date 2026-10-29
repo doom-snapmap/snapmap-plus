@@ -405,6 +405,11 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "E8 ?? ?? ?? ?? 48 8B F8 41 B4 01 48 85 C0 75 23 48 8D 4D 98 E8 ?? ?? ?? ?? "
       "90 48 8D 4D C8 E8 ?? ?? ?? ?? 44 0F B6 64 24 40 48 8B 7C 24 48",
       0x114CFD7u, 0x114C1D7u },
+    { "PlacementModelNameCall", /* Appends ".bmodel" to a placement-display model name;
+      * R13 is the module-instance record, R12D the navigation class. */
+      "E8 ?? ?? ?? ?? 90 48 8D 4D 28 E8 ?? ?? ?? ?? 90 48 8D 4D 58 E8 ?? ?? ?? ?? "
+      "45 32 FF 33 FF 41 39 7E 20 7E 68",
+      0x1198E7Fu, 0x11980AFu },
     { "NavSearchHeapPush", /* Same verified leaf on Vulkan and OpenGL. */
       "48 89 5C 24 08 48 89 74 24 18 48 89 7C 24 20 4D 8B 08 33 C9 "
       "44 0F B7 1A 49 8B D8 48 8B FA 66 41 39 49 04",

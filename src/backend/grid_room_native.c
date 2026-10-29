@@ -973,6 +973,41 @@ static void refresh_placement_surfaces(unsigned char *map)
     if(surfaces&&world&&*(int*)((unsigned char*)surfaces+8)>0)
         g_refresh_surfaces(surfaces,map,world);
 }
+/* The editor map's module-instance index of `record`, or -1 when it is not
+ * one of that map's 0x98-byte records. */
+int sh_grid_native_record_instance(const void *record)
+{
+    int index=-1;
+    if(!g_editor||!record)return -1;
+    __try {
+        unsigned char *map=g_editor[8]?*(unsigned char**)(g_editor+0x204c8):NULL,*records;int n;uintptr_t offset;
+        if(map&&(records=*(unsigned char**)(map+0x750))!=NULL&&(n=*(int*)(map+0x758))>0&&n<=4096){
+            offset=(uintptr_t)record-(uintptr_t)records;
+            if(offset<(uintptr_t)n*0x98&&offset%0x98==0)index=(int)(offset/0x98);
+        }
+    } __except(EXCEPTION_EXECUTE_HANDLER){index=-1;}
+    return index;
+}
+/* Rebuild the editor's placement surfaces for the current map, as a dimension
+ * edit does, so a display model whose name changed is loaded. Engine thread
+ * only: the native rebuild allocates its display list and loads models, so it
+ * runs inside a verified process-heap scope, never on a map heap Play frees.
+ * 1 rebuilt, 0 nothing built yet (native Object Mode entry builds it), -1 refused. */
+int sh_grid_native_refresh_placement(void)
+{
+    sh_process_heap_scope heap={0};int result=-1;
+    if(!g_editor||!g_refresh_surfaces)return -1;
+    __try {
+        unsigned char *map=g_editor[8]?*(unsigned char**)(g_editor+0x204c8):NULL;
+        void *surfaces=*(void**)(g_editor+0x20548),*world=*(void**)(g_editor+0x198);
+        if(!map||!surfaces||!world||*(int*)((unsigned char*)surfaces+8)<=0)result=0;
+        else if(sh_process_heap_enter(&g_heap,&heap)){
+            __try { g_refresh_surfaces(surfaces,map,world);result=1; }
+            __finally { if(!sh_process_heap_leave(&heap))result=-1; }
+        }
+    } __except(EXCEPTION_EXECUTE_HANDLER){result=-1;}
+    return result;
+}
 static char g_last[1024];
 static void finish(const char *message)
 {

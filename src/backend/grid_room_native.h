@@ -28,4 +28,9 @@ void sh_grid_native_set_adaptive_cells(int live);
 int sh_grid_native_render_cell(void *map,sh_render_cell_choice *out);
 /* The map open in the editor, or NULL. */
 void *sh_grid_native_editor_map(void);
+/* The current editor map's module-instance index of a 0x98-byte record, or -1. */
+int sh_grid_native_record_instance(const void *record);
+/* Rebuild the editor's placement surfaces in a process-heap scope. Engine
+ * thread. 1 rebuilt, 0 none built yet, -1 refused. */
+int sh_grid_native_refresh_placement(void);
 #endif

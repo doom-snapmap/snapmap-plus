@@ -20,6 +20,7 @@
 #include "aas_augment.h"
 #include "nav_traversal.h"
 #include "navmesh.h"
+#include "nav_overlay.h"
 #include "config.h"
 
 #ifndef SH_NAV_BAKE_NO_LOG
@@ -136,6 +137,24 @@ static int g_preview_lines;
 static int g_preview_lines_last = -1;   /* -1 until the first pass runs */
 static int g_ids_unusable;              /* last reported duplicate-id state */
 static int g_instance_serving;
+
+/* The editor's placement grid, cut for the boxes: one model per copy and class
+ * whose floor the bake cut (nav_overlay.h). Replaced whole when a preview bake
+ * is installed and kept while the next one is on the worker, as the green
+ * lines are. Its own lock: the engine reads it inside the native surface
+ * rebuild and the resource open, never while holding the bake lock. */
+typedef struct bake_overlay {
+    int                instance, cls;
+    unsigned long long hash;               /* of the bytes; part of the private name */
+    char               source[SH_SMNAV_RESNAME_CAP];   /* the stock model it replaces */
+    unsigned char     *bytes;              /* process heap */
+    size_t             length;
+} bake_overlay;
+#define BAKE_OVERLAY_PREFIX "maps/smpnavgrid/"
+static SRWLOCK            g_overlay_lock = SRWLOCK_INIT;
+static bake_overlay      *g_overlays;
+static int                g_overlay_count;
+static unsigned long long g_overlay_signature;
 
 void sh_nav_bake_enable_instances(int enabled) { g_instance_serving=enabled; }
 
@@ -1736,6 +1755,21 @@ typedef struct preview_task {
     int              traversal;
     int              cached;                 /* out came from the bake cache */
     bake_outcome     out;                    /* what the worker produced */
+    /* The two larger classes and every class's stock placement-grid model,
+     * for the grid the editor shows a held demon. Index 0 is unused for the
+     * class bakes: class 0 is `shipped` and `out` above. */
+    char             cls_name[NAV_CLASS_COUNT][SH_SMNAV_RESNAME_CAP];
+    unsigned char   *cls_shipped[NAV_CLASS_COUNT];
+    size_t           cls_shipped_len[NAV_CLASS_COUNT];
+    int              cls_cached[NAV_CLASS_COUNT];
+    bake_outcome     cls_out[NAV_CLASS_COUNT];
+    char             model_name[NAV_CLASS_COUNT][SH_SMNAV_RESNAME_CAP];
+    unsigned char   *model[NAV_CLASS_COUNT];
+    size_t           model_len[NAV_CLASS_COUNT];
+    unsigned char   *overlay[NAV_CLASS_COUNT];
+    size_t           overlay_len[NAV_CLASS_COUNT];
+    sh_nav_overlay_stats overlay_stats[NAV_CLASS_COUNT];
+    int              overlay_result[NAV_CLASS_COUNT];   /* sh_nav_overlay_build's */
 } preview_task;
 
 typedef struct preview_batch {
@@ -1765,22 +1799,52 @@ static void preview_batch_free(preview_batch *b)
     int i;
     if (!b) return;
     for (i = 0; i < b->count; i++) {
+        int ci;
         if (b->t[i].plats)     HeapFree(GetProcessHeap(), 0, b->t[i].plats);
         if (b->t[i].shipped)   HeapFree(GetProcessHeap(), 0, b->t[i].shipped);
         if (b->t[i].out.bytes) HeapFree(GetProcessHeap(), 0, b->t[i].out.bytes);
+        for (ci = 0; ci < NAV_CLASS_COUNT; ci++) {
+            if (b->t[i].cls_shipped[ci])   HeapFree(GetProcessHeap(), 0, b->t[i].cls_shipped[ci]);
+            if (b->t[i].cls_out[ci].bytes) HeapFree(GetProcessHeap(), 0, b->t[i].cls_out[ci].bytes);
+            if (b->t[i].model[ci])         HeapFree(GetProcessHeap(), 0, b->t[i].model[ci]);
+            if (b->t[i].overlay[ci])       HeapFree(GetProcessHeap(), 0, b->t[i].overlay[ci]);
+        }
     }
     HeapFree(GetProcessHeap(), 0, b);
 }
 
+/* The placement grid of one task's classes, cut where its bakes cut the floor.
+ * A class that was not cut, or whose model or navigation is missing, keeps
+ * its stock model. */
+static void preview_overlays(preview_task *t)
+{
+    int ci;
+    for (ci = 0; ci < NAV_CLASS_COUNT; ci++) {
+        const bake_outcome *o = ci ? &t->cls_out[ci] : &t->out;
+        const unsigned char *shipped = ci ? t->cls_shipped[ci] : t->shipped;
+        size_t shipped_len = ci ? t->cls_shipped_len[ci] : t->shipped_len;
+        if (!o->bytes || !shipped || !t->model[ci]) continue;
+        t->overlay_result[ci] = sh_nav_overlay_build(t->model[ci], t->model_len[ci], shipped, shipped_len,
+                                                     o->bytes, o->length, o->first_area, &t->overlay[ci],
+                                                     &t->overlay_len[ci], &t->overlay_stats[ci]);
+        if (t->overlay_result[ci] != 1) { t->overlay[ci] = NULL; t->overlay_len[ci] = 0; }
+    }
+}
+
 static void preview_batch_run(preview_batch *b)
 {
-    int i;
+    int i, ci;
     SH_PERF_BEGIN(t0);
     for (i = 0; i < b->count; i++) {
         preview_task *t = &b->t[i];
-        if (t->cached) continue;
-        bake_run(t->name, t->plats, t->plat_count, t->shipped, t->shipped_len,
-                 t->left_out, t->not_floor, &t->out);
+        if (!t->cached)
+            bake_run(t->name, t->plats, t->plat_count, t->shipped, t->shipped_len,
+                     t->left_out, t->not_floor, &t->out);
+        for (ci = 1; ci < NAV_CLASS_COUNT; ci++)
+            if (t->plat_count > 0 && t->cls_shipped[ci] && !t->cls_cached[ci])
+                bake_run(t->cls_name[ci], t->plats, t->plat_count, t->cls_shipped[ci],
+                         t->cls_shipped_len[ci], t->left_out, t->not_floor, &t->cls_out[ci]);
+        preview_overlays(t);
     }
     SH_PERF_END(SH_PERF_PREVIEW_BAKE, t0);
 }
@@ -1922,6 +1986,31 @@ static preview_batch *preview_gather(sh_nav_bake_reader read_shipped)
             }
             bake_cache_key_free(&key);
         }
+        /* The placement grid a held demon shows is one stock model per class.
+         * Its cut needs that class's bake, which Play then reuses. */
+        if (t->plat_count > 0 && t->shipped) {
+            int ci;
+            for (ci = 0; ci < NAV_CLASS_COUNT; ci++) {
+                _snprintf_s(t->model_name[ci], sizeof t->model_name[ci], _TRUNCATE,
+                            "maps/modules/%s/%s_aas_%s.bmodel",
+                            g_modules[i].module, base + 1, NAV_CLASSES[ci]);
+                t->model[ci] = read_shipped ? read_shipped(t->model_name[ci], &t->model_len[ci]) : NULL;
+                if (!ci || !t->model[ci]) continue;
+                _snprintf_s(t->cls_name[ci], sizeof t->cls_name[ci], _TRUNCATE,
+                            "generated/maps/modules/%s/%s.baas_%s",
+                            g_modules[i].module, base + 1, NAV_CLASSES[ci]);
+                t->cls_shipped[ci] = read_shipped ? read_shipped(t->cls_name[ci], &t->cls_shipped_len[ci]) : NULL;
+                if (t->cls_shipped[ci]) {
+                    bake_cache_key key;
+                    if (bake_cache_key_make(&key, &g_modules[i], ci, t->cls_shipped[ci],
+                                            t->cls_shipped_len[ci], traversal)) {
+                        bake_cache_entry *e = bake_cache_find(&key);
+                        if (e && bake_cache_serve(e, &t->cls_out[ci])) t->cls_cached[ci] = 1;
+                    }
+                    bake_cache_key_free(&key);
+                }
+            }
+        }
     }
     return b;
 }
@@ -1945,6 +2034,141 @@ static void bake_class_set(bake_class *k, const bake_outcome *o)
     strncpy_s(k->faces, sizeof k->faces, o->faces, _TRUNCATE);
     k->faces_climbed = o->faces_climbed; k->faces_total = o->faces_total;
     k->detail = o->detail;
+}
+
+/* Replace the overlay table with `next` (moved in, may be NULL). */
+static void bake_overlay_replace(bake_overlay *next, int count)
+{
+    bake_overlay *old;
+    int i, old_count;
+    unsigned long long sig = 1469598103934665603ULL;
+    for (i = 0; i < count; i++) {
+        sig ^= next[i].hash + 0x9e3779b97f4a7c15ULL * (unsigned long long)(next[i].instance * 3 + next[i].cls + 1);
+        sig *= 1099511628211ULL;
+    }
+    if (!count) sig = 0;
+    AcquireSRWLockExclusive(&g_overlay_lock);
+    old = g_overlays; old_count = g_overlay_count;
+    g_overlays = next; g_overlay_count = count;
+    g_overlay_signature = sig;
+    ReleaseSRWLockExclusive(&g_overlay_lock);
+    for (i = 0; i < old_count; i++) if (old[i].bytes) HeapFree(GetProcessHeap(), 0, old[i].bytes);
+    if (old) HeapFree(GetProcessHeap(), 0, old);
+}
+
+void sh_nav_bake_overlay_clear(void) { bake_overlay_replace(NULL, 0); }
+
+unsigned long long sh_nav_bake_overlay_signature(void)
+{
+    unsigned long long sig;
+    AcquireSRWLockShared(&g_overlay_lock);
+    sig = g_overlay_signature;
+    ReleaseSRWLockShared(&g_overlay_lock);
+    return sig;
+}
+
+int sh_nav_bake_overlay_name(int instance, const char *name, char *out, size_t capacity)
+{
+    int i, ok = 0;
+    if (!name || !out || !capacity || InterlockedCompareExchange(&g_faulted, 0, 0)) return 0;
+    AcquireSRWLockShared(&g_overlay_lock);
+    for (i = 0; i < g_overlay_count; i++)
+        if (g_overlays[i].instance == instance && !strcmp(g_overlays[i].source, name)) {
+            int n = _snprintf_s(out, capacity, _TRUNCATE, BAKE_OVERLAY_PREFIX "%016llx/%s",
+                                g_overlays[i].hash, name);
+            ok = n > 0;
+            break;
+        }
+    ReleaseSRWLockShared(&g_overlay_lock);
+    return ok;
+}
+
+int sh_nav_bake_overlay_open(const char *name, unsigned char **out, size_t *length)
+{
+    unsigned long long hash;
+    const char *p, *source;
+    char *end;
+    int i, hit = 0;
+    if (name && !strncmp(name, "generated/", 10)) name += 10;   /* the cooked spelling */
+    if (!name || !out || !length || strncmp(name, BAKE_OVERLAY_PREFIX, sizeof BAKE_OVERLAY_PREFIX - 1))
+        return 0;
+    *out = NULL; *length = 0;
+    p = name + sizeof BAKE_OVERLAY_PREFIX - 1;
+    hash = _strtoui64(p, &end, 16);
+    if (end != p + 16 || *end != '/') return -1;
+    source = end + 1;
+    AcquireSRWLockShared(&g_overlay_lock);
+    for (i = 0; i < g_overlay_count; i++)
+        if (g_overlays[i].hash == hash && !strcmp(g_overlays[i].source, source)) {
+            *out = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, g_overlays[i].length);
+            if (*out) { memcpy(*out, g_overlays[i].bytes, g_overlays[i].length); *length = g_overlays[i].length; hit = 1; }
+            break;
+        }
+    ReleaseSRWLockShared(&g_overlay_lock);
+    return hit ? 1 : -1;
+}
+
+/* Keep each class's cut placement grid, and the larger classes' bakes for
+ * Play. Called from preview_install with the bake lock held. */
+static void preview_install_overlays(preview_batch *b)
+{
+    bake_overlay *next = NULL;
+    int i, ci, n = 0, cap = 0;
+    for (i = 0; i < b->count; i++) {
+        preview_task *t = &b->t[i];
+        if (t->slot < 0 || t->slot >= g_module_count) continue;
+        for (ci = 1; ci < NAV_CLASS_COUNT; ci++)
+            if (!t->cls_cached[ci] && t->cls_out[ci].bytes && t->cls_shipped[ci]) {
+                bake_cache_key key;
+                if (bake_cache_key_make(&key, &g_modules[t->slot], ci, t->cls_shipped[ci],
+                                        t->cls_shipped_len[ci], t->traversal))
+                    bake_cache_store(&key, &t->cls_out[ci]);
+                bake_cache_key_free(&key);
+            }
+        for (ci = 0; ci < NAV_CLASS_COUNT; ci++) {
+            cap += t->overlay[ci] != NULL;
+            if (t->overlay_result[ci] < 0) {
+                char line[SH_SMNAV_RESNAME_CAP + 128];
+                _snprintf_s(line, sizeof line, _TRUNCATE,
+                            "NAV: placement grid for copy %d %s keeps its stock model -- "
+                            "the cut model could not be built from '%s'",
+                            t->instance, NAV_CLASSES[ci], t->model_name[ci]);
+                backend_log(line);
+            }
+        }
+    }
+    if (cap) next = (bake_overlay *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (size_t)cap * sizeof *next);
+    for (i = 0; next && i < b->count; i++) {
+        preview_task *t = &b->t[i];
+        if (t->slot < 0 || t->slot >= g_module_count) continue;
+        for (ci = 0; ci < NAV_CLASS_COUNT; ci++) {
+            bake_overlay *e;
+            int k, known = 0;
+            if (!t->overlay[ci] || n == cap) continue;
+            e = &next[n++];
+            e->instance = t->instance;
+            e->cls = ci;
+            e->bytes = t->overlay[ci]; e->length = t->overlay_len[ci];
+            t->overlay[ci] = NULL;
+            e->hash = bake_hash(e->bytes, e->length);
+            strcpy_s(e->source, sizeof e->source, t->model_name[ci]);
+            AcquireSRWLockShared(&g_overlay_lock);
+            for (k = 0; k < g_overlay_count; k++)
+                if (g_overlays[k].instance == e->instance && g_overlays[k].cls == ci &&
+                    g_overlays[k].hash == e->hash) known = 1;
+            ReleaseSRWLockShared(&g_overlay_lock);
+            if (!known) {
+                char line[SH_SMNAV_RESNAME_CAP + 160];
+                const sh_nav_overlay_stats *st = &t->overlay_stats[ci];
+                _snprintf_s(line, sizeof line, _TRUNCATE,
+                            "NAV: placement grid for copy %d %s cut at %d floor area(s): "
+                            "%d -> %d triangle(s) (%s)", t->instance, NAV_CLASSES[ci],
+                            st->cut_areas, st->triangles_before, st->triangles_after, e->source);
+                backend_log(line);
+            }
+        }
+    }
+    bake_overlay_replace(next, next ? n : 0);
 }
 
 /* Move a finished batch into the preview cache. Called with the bake lock
@@ -2016,6 +2240,7 @@ static void preview_install(preview_batch *b)
                     served, b->count);
         backend_log(message);
     }
+    preview_install_overlays(b);
     g_preview_revision = b->revision;
 }
 
@@ -2025,6 +2250,8 @@ static int preview_prepare_locked(sh_nav_bake_reader read_shipped)
 {
     if(!g_have_map||g_live_refused) return -1;
     if (!g_module_count) {
+        /* Nothing is marked: every copy shows its stock placement grid. */
+        if (g_preview_revision != g_geometry_revision) bake_overlay_replace(NULL, 0);
         g_preview_revision = g_geometry_revision;
         return 1;
     }
@@ -2668,6 +2895,7 @@ void sh_nav_bake_test_reset(void)
     g_building = 0; g_geometry_revision = 0;
     g_read_reason = "";
     ReleaseSRWLockExclusive(&g_bake_lock);
+    bake_overlay_replace(NULL, 0);
     InterlockedExchange(&g_bakes, 0);
     InterlockedExchange(&g_faulted, 0);
 }
