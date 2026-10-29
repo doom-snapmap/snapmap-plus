@@ -2062,6 +2062,18 @@ static void bake_overlay_replace(bake_overlay *next, int count)
 
 void sh_nav_bake_overlay_clear(void) { bake_overlay_replace(NULL, 0); }
 
+/* A map is being parsed: whatever was cut belongs to the last one, even when
+ * the engine reuses the same map object. Advance the geometry revision so a
+ * preview batch gathered from the last map is discarded when it finishes, and
+ * the next preview pass bakes the map that is opening. */
+void sh_nav_bake_map_opened(void)
+{
+    AcquireSRWLockExclusive(&g_bake_lock);
+    g_geometry_revision++;
+    ReleaseSRWLockExclusive(&g_bake_lock);
+    bake_overlay_replace(NULL, 0);
+}
+
 unsigned long long sh_nav_bake_overlay_signature(void)
 {
     unsigned long long sig;

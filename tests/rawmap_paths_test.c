@@ -56,6 +56,8 @@ char *sh_navmesh_strip(const char *json, size_t len, size_t *out_len)
 char *sh_navmesh_embed_all(const char *json, size_t len, size_t *out_len)
 { (void)json; (void)len; if (out_len) *out_len = 0; return NULL; }
 void  sh_nav_bake_set_map(const char *json, size_t len) { (void)json; (void)len; }
+static int g_maps_opened;
+void  sh_nav_bake_map_opened(void) { g_maps_opened++; }
 
 int sh_editor_frame_request_rawmap_save(char *out_msg, int msg_capacity)
 { if (out_msg && msg_capacity > 0) strncpy_s(out_msg, (size_t)msg_capacity,
@@ -694,6 +696,29 @@ static void saved_and_published_maps_load_without_packages(void)
     clean_state();
 }
 
+/* The editor can reload into the same map object. Every parse still counts as a
+ * new map for anything keyed on the open map, so a module copy can never keep
+ * the previous map's cut placement grid. */
+static void a_reload_into_the_same_map_object_is_a_new_map(void)
+{
+    static const char plain[] = "{\"~type\":\"idSnapMap\",\"entities\":[]}";
+    void *same = (void *)1;
+    unsigned long generation;
+    int opened;
+    printf("\n-- a reload into the same map object is a new map\n");
+    clean_state();
+    g_deser_orig = fixture_deser;
+    sh_rawmap_swap_arm(0);
+    generation = sh_rawmap_load_generation();
+    opened = g_maps_opened;
+    CHECK(sh_deser_detour(plain, same) == 1);
+    CHECK(sh_deser_detour(plain, same) == 1);
+    CHECK(g_maps_opened == opened + 2);   /* each parse drops the last map's cut models */
+    CHECK(sh_rawmap_load_generation() == generation + 2);
+    g_deser_orig = NULL;
+    clean_state();
+}
+
 /* The rawmap load swap substitutes the staged file and strips it the same way. */
 static void a_staged_rawmap_with_a_retired_payload_loads_plain(void)
 {
@@ -778,6 +803,7 @@ int main(void)
     retired_header_grammar();
     saved_and_published_maps_load_without_packages();
     a_staged_rawmap_with_a_retired_payload_loads_plain();
+    a_reload_into_the_same_map_object_is_a_new_map();
     saves_carry_no_package_payload();
 
     DeleteFileA(archive);

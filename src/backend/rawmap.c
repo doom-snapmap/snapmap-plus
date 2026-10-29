@@ -370,6 +370,9 @@ static int sh_deser_detour(const char *json, void *out_map)
      * of someone who picked a file and then changed their mind about loading. */
     InterlockedIncrement(&g_load_generation);
     sh_rawmap_clear_save_target_for_new_map();
+    /* The editor may reuse the map object, so the placement grid's cut models
+     * cannot be keyed on its pointer; they go with every parse. */
+    sh_nav_bake_map_opened();
 
     /* The shared predicate includes the explicit switch and test flag. */
     int flag_armed = 0;

@@ -1438,6 +1438,14 @@ static void test_the_preview_cuts_the_placement_grid(void)
     baked = play_once(&served);
     CHECK_MSG(baked == 0 && served == 6, "Play reuses the preview's bakes of every class");
 
+    /* A reload into the same map object: the cut models go at once, and the
+     * next preview pass bakes the map now open. */
+    sh_nav_bake_map_opened();
+    CHECK_MSG(sh_nav_bake_overlay_signature() == 0, "a new map parse drops the cut models");
+    CHECK_MSG(!sh_nav_bake_overlay_name(0, stock[0], name, sizeof name), "so the stock model is loaded");
+    CHECK(wait_prepared() == 1);
+    CHECK_MSG(sh_nav_bake_overlay_signature() == first, "the next preview cuts the same boxes again");
+
     /* Unchanged boxes keep the same models and names. */
     g_two.move_room = 1; g_two.move_box = 0; g_two.move = 64.0f;
     sh_nav_bake_refresh_live();

@@ -187,6 +187,9 @@ int sh_nav_bake_overlay_open(const char *name, unsigned char **out, size_t *leng
 unsigned long long sh_nav_bake_overlay_signature(void);
 /* Back to the stock grid everywhere, for a map that is no longer open. */
 void sh_nav_bake_overlay_clear(void);
+/* Every map parse, including a reload into the same map object: drop the cut
+ * models and discard any preview bake of the previous map still in flight. */
+void sh_nav_bake_map_opened(void);
 
 void sh_nav_bake_set_live_editor(sh_nav_bake_entity_count count,
                                  sh_navr_entity_valid valid,
