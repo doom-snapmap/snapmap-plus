@@ -3179,10 +3179,55 @@ static void test_a_floor_wholly_under_a_box_is_closed(void)
     sh_aug_report_free(&rep);
     sh_aas_free(a);
 }
+/* Walks between floor pieces are kept like shipped routes, so they must never
+ * push a floor past the engine's 256: a floor that already ships 200 routes is
+ * not cut and the class still bakes, and no pair of floor areas gets more than
+ * four walks a way across one shared edge. */
+static void test_floor_walks_stay_inside_the_route_limit(void)
+{
+    static const float seams[2] = { -168.0f, 168.0f };
+    sh_aas *a = load_slabs(seams, 2);
+    sh_aug_platform p[2];
+    sh_aug_report rep;
+    sh_aug_opts o = { SH_AUG_FALL_AUTO, 1, SH_AUG_TRAVERSAL_NEVER, 0 };
+    unsigned first, i, n, degree[256] = {0};
+    int pair[64][64], worst = 0, f, t;
+    printf("walks between floor pieces stay inside the 256-route limit\n");
+    if (!a) { CHECK(0); return; }
+    CHECK(sh_aas_append(a, SH_AAS_L_REACHABILITIES, 200, &first));
+    for (i = 0; i < 200; i++) {
+        unsigned char *r = sh_aas_rec(a, SH_AAS_L_REACHABILITIES, first + i);
+        sh_aas_put_u32(r, 0, 0x20); sh_aas_put_u16(r, 4, 5);
+        sh_aas_put_u16(r, 6, 2); sh_aas_put_u16(r, 8, 2);
+        sh_aas_put_i16(r, 12, 0); sh_aas_put_i16(r, 14, (short)(-1900 + (int)i * 19));
+        sh_aas_put_i16(r, 18, 1); sh_aas_put_i16(r, 20, (short)(-1900 + (int)i * 19));
+    }
+    mkbox_yawed(&p[0], 0, 600, 600, 200, 0, 64.0f, 0.0f, "across the strip");
+    mkbox_yawed(&p[1], 0, -600, 600, 200, 0, 64.0f, 0.0f, "across the strip again");
+    CHECK_MSG(sh_aas_augment(a, p, 2, &o, &rep) == 1, "the class bakes");
+    CHECK_MSG(rep.floors_left_whole >= 1, "the strip that ships 200 routes stays whole");
+    CHECK_MSG(rep.floors_cut >= 1, "its neighbours are still cut");
+    memset(pair, 0, sizeof pair);
+    n = sh_aas_count(a, SH_AAS_L_REACHABILITIES);
+    for (i = 0; i < n; i++) {
+        const unsigned char *r = sh_aas_rec_const(a, SH_AAS_L_REACHABILITIES, i);
+        f = sh_aas_get_u16(r, 6); t = sh_aas_get_u16(r, 8);
+        if (f < 256) degree[f]++;
+        if (sh_aas_get_u32(r, 0) == 0x20 && f != t && f < 64 && t < 64 &&
+            (unsigned)f < rep.areas_before + (unsigned)rep.floor_pieces_added &&
+            (unsigned)t < rep.areas_before + (unsigned)rep.floor_pieces_added) pair[f][t]++;
+    }
+    for (f = 0; f < 64; f++) for (t = 0; t < 64; t++) if (pair[f][t] > worst) worst = pair[f][t];
+    CHECK_MSG(worst <= 4, "at most four walks one way between two floor areas");
+    for (i = 0; i < 256; i++) CHECK(degree[i] <= 256);
+    sh_aug_report_free(&rep);
+    sh_aas_free(a);
+}
 
 int main(void)
 {
     printf("aas_augment_test\n");
+    test_floor_walks_stay_inside_the_route_limit();
     test_a_floor_wholly_under_a_box_is_closed();
     test_a_floor_whose_pieces_do_not_fit_stays_whole();
     test_a_portal_floor_is_never_cut();

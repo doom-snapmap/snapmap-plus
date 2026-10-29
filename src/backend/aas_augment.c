@@ -2344,7 +2344,12 @@ static int aug_budget_traversals(aug_ctx *c, aug_trav_spec *specs, int n,
     for (k = 0; k < (int)nb; k++) {
         unsigned from = (unsigned)choices[k].from_area, to = (unsigned)choices[k].to_area;
         if (choices[k].travel_flags != REACH_WALK || from >= c->floor_end || to >= c->floor_end) continue;
-        if (from >= na || ++degree[from] > SH_AAS_MAX_AREA_REACHABILITIES) { full = (int)from; goto overflow; }
+        if (from >= na) { full = (int)from; goto overflow; }
+        /* aug_floor_piece_walks keeps a floor well inside the limit; should
+         * one still reach it, its remaining walks compete like any route
+         * instead of refusing the class. */
+        if (degree[from] >= SH_AAS_MAX_AREA_REACHABILITIES) continue;
+        degree[from]++;
         required[k] = 1;
     }
     /* Each area's ceiling: the engine's 256, or a lower payload budget that
@@ -2849,6 +2854,9 @@ static void aug_relink(aug_ctx *c)
 /* Pieces one module floor area may be cut into, and pieces per class. Past
  * either the area is left whole and counted; the bake goes on. */
 #define AUG_FLOOR_PIECES_PER_AREA 192
+/* Shipped routes out of a floor past which it is not cut: its pieces need
+ * room under the 256 limit for their walks. */
+#define AUG_FLOOR_SHIPPED_ROOM    128
 #define AUG_MAX_FLOOR_PIECES      1024
 static int g_floor_piece_cap = AUG_MAX_FLOOR_PIECES;
 #ifdef SH_AUG_TESTING
@@ -2930,7 +2938,7 @@ static int aug_cut_floors(aug_ctx *c, const sh_aug_platform *solids, int nsolids
     aug_quad *qs = NULL;
     int *owner = NULL, *areas = NULL, *qid = NULL;
     unsigned char *cut = NULL, *blocked = NULL, *group = NULL, *drop = NULL;
-    unsigned *remap = NULL;
+    unsigned *remap = NULL, *shipped = NULL;
     unsigned na = sh_aas_count(c->a, SH_AAS_L_AREAS), i, nr, ntp;
     int np, k, nk = 0, ok = 0;
     if (ns <= 0 || nsolids <= 0) return 1;
@@ -2975,6 +2983,14 @@ static int aug_cut_floors(aug_ctx *c, const sh_aug_platform *solids, int nsolids
                                      AUG_MAX_FLOOR_PIECES, AUG_FLOOR_PIECES_PER_AREA);
     if (np < 0) { ok = 1; goto done; }
     for (k = 0; k < nk; k++) if (cut[k] == 2) c->rep->floors_left_whole++;
+    /* A floor whose shipped routes already come near the 256 limit has no room
+     * for the walks its pieces need: it stays whole. */
+    shipped = (unsigned *)calloc(na + 1, sizeof *shipped);
+    if (!shipped) goto done;
+    for (i = 0; i < sh_aas_count(c->a, SH_AAS_L_REACHABILITIES); i++) {
+        unsigned f = sh_aas_get_u16(sh_aas_rec_const(c->a, SH_AAS_L_REACHABILITIES, i), RE_FROM_AREA);
+        if (f < na) shipped[f]++;
+    }
     /* A floor the marked boxes cover entirely has no standing room left: it
      * keeps its number and its ground under the boxes, but loses every route,
      * shipped or generated, and no walk or climb may use it. */
@@ -2990,6 +3006,7 @@ static int aug_cut_floors(aug_ctx *c, const sh_aug_platform *solids, int nsolids
         double best_area = -1.0;
         const unsigned char *src;
         if (cut[k] != 1) continue;
+        if (shipped[f] >= AUG_FLOOR_SHIPPED_ROOM) { c->rep->floors_left_whole++; continue; }
         for (j = 0; j < np; j++) if (owner[j] == k) {
             aug_quad q;
             if (aug_quad_from_platform(&q, &pieces[j]) && aug_quad_area(&q) > best_area) {
@@ -3089,7 +3106,7 @@ static int aug_cut_floors(aug_ctx *c, const sh_aug_platform *solids, int nsolids
     ok = 1;
 done:
     free(pieces); free(keep); free(owner); free(areas); free(cut); free(blocked); free(group);
-    free(drop); free(remap); free(qs); free(qid);
+    free(drop); free(remap); free(qs); free(qid); free(shipped);
     return ok;
 }
 
@@ -3098,16 +3115,25 @@ done:
  * piece and a neighbouring floor. Samples follow the module's own pattern
  * (aug_samples); one already standing within 32 units of a route between the
  * same pair is not added again. */
+#define AUG_FLOOR_WALKS_PER_EDGE 4    /* samples on one shared edge, ends and middle first */
+#define AUG_FLOOR_WALK_DEGREE    192  /* routes out of a floor past which no walk is added */
 static int aug_floor_piece_walks(aug_ctx *c)
 {
     int i, j, e, k, added = 0;
-    unsigned nf = c->original_areas, b;
+    unsigned nf = c->original_areas, b, na = sh_aas_count(c->a, SH_AAS_L_AREAS), r0;
+    unsigned *degree = NULL;
     aug_quad *others = NULL;
     int *other_ids = NULL, no = 0;
     if (!c->floor_count) return 0;
+    degree = (unsigned *)calloc((size_t)na + 1, sizeof *degree);
+    if (!degree) return 0;
+    for (r0 = 0; r0 < sh_aas_count(c->a, SH_AAS_L_REACHABILITIES); r0++) {
+        unsigned f = sh_aas_get_u16(sh_aas_rec_const(c->a, SH_AAS_L_REACHABILITIES, r0), RE_FROM_AREA);
+        if (f < na) degree[f]++;
+    }
     others = (aug_quad *)malloc(((size_t)c->floor_count + nf) * sizeof *others);
     other_ids = (int *)malloc(((size_t)c->floor_count + nf) * sizeof *other_ids);
-    if (!others || !other_ids) { free(others); free(other_ids); return 0; }
+    if (!others || !other_ids) { free(others); free(other_ids); free(degree); return 0; }
     for (i = 0; i < c->floor_count; i++) { others[no] = c->floor_quads[i]; other_ids[no++] = c->floor_ids[i]; }
     for (b = 1; b < nf; b++) {
         int listed = 0;
@@ -3140,6 +3166,15 @@ static int aug_floor_piece_walks(aug_ctx *c)
                     if (hi > len) hi = len;
                     if (hi - lo < 2.0 * WALK_END_INSET) continue;
                     n = aug_samples((float)lo, (float)hi, ts, 64);
+                    if (n > AUG_FLOOR_WALKS_PER_EDGE) {
+                        /* Keep the inset ends and evenly spread interior samples. */
+                        double pick[AUG_FLOOR_WALKS_PER_EDGE];
+                        int m;
+                        for (m = 0; m < AUG_FLOOR_WALKS_PER_EDGE; m++)
+                            pick[m] = ts[(int)((double)m * (n - 2) / (AUG_FLOOR_WALKS_PER_EDGE - 1) + 0.5)];
+                        for (m = 0; m < AUG_FLOOR_WALKS_PER_EDGE; m++) ts[m] = pick[m];
+                        n = AUG_FLOOR_WALKS_PER_EDGE;
+                    }
                     for (s = 0; s < n; s++) {
                         double px = a0[0] + dx / len * ts[s], py = a0[1] + dy / len * ts[s];
                         double s3[3], e3[3];
@@ -3159,14 +3194,21 @@ static int aug_floor_piece_walks(aug_ctx *c)
                                 dup = 1;
                         }
                         if (dup) continue;
-                        if (aug_reach(c, REACH_WALK, REACH_WALK_TIME, c->floor_ids[i], other_ids[j], s3, e3)) added++;
-                        if (aug_reach(c, REACH_WALK, REACH_WALK_TIME, other_ids[j], c->floor_ids[i], e3, s3)) added++;
+                        if ((unsigned)c->floor_ids[i] >= na || (unsigned)other_ids[j] >= na ||
+                            degree[c->floor_ids[i]] >= AUG_FLOOR_WALK_DEGREE ||
+                            degree[other_ids[j]] >= AUG_FLOOR_WALK_DEGREE) { c->rep->floor_walks_capped++; continue; }
+                        if (aug_reach(c, REACH_WALK, REACH_WALK_TIME, c->floor_ids[i], other_ids[j], s3, e3)) {
+                            added++; degree[c->floor_ids[i]]++;
+                        }
+                        if (aug_reach(c, REACH_WALK, REACH_WALK_TIME, other_ids[j], c->floor_ids[i], e3, s3)) {
+                            added++; degree[other_ids[j]]++;
+                        }
                     }
                 }
             }
         }
     }
-    free(others); free(other_ids);
+    free(others); free(other_ids); free(degree);
     return added;
 }
 

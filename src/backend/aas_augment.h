@@ -155,6 +155,7 @@ typedef struct sh_aug_report {
     int      floors_left_whole;
     int      shipped_routes_removed;
     int      floors_covered;            /* floor areas wholly under boxes, closed to routes */
+    int      floor_walks_capped;        /* floor-piece walk samples left out to keep a floor well under 256 */
     int      barrier_links;             /* barrier-jump links, when built with them */
     /* Four per requested box (faces[source * 4 + edge]), on the heap with
      * platforms; NULL when no traversal table was ready. */
