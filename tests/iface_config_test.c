@@ -44,7 +44,9 @@ SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, prefab_grab_status) == 0x358);
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, module_prefab) == 0x360);
 /* ext 32: the Timeline palette tile (status). */
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, timeline_tile) == 0x368);
-SH_STATIC_ASSERT(sizeof(sh_iface_vtbl) == 0x370);
+/* ext 33: the editor budget table (table, usage). */
+SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, budget) == 0x370);
+SH_STATIC_ASSERT(sizeof(sh_iface_vtbl) == 0x378);
 SH_STATIC_ASSERT(sizeof(sh_prefab_grab_info) == 16);
 SH_STATIC_ASSERT(sizeof(sh_delete_result) == 40);
 SH_STATIC_ASSERT(offsetof(sh_iface, sub) == 0x58);
@@ -92,6 +94,17 @@ static int stub_timeline_tile(sh_iface *self, sh_timeline_tile_call *call)
     strcpy(call->record_class, "idTarget_Timeline");
     return 1;
 }
+static int stub_budget(sh_iface *self, sh_budget_call *call)
+{
+    static const char table[] = "{\"gen\":4}";
+    (void)self;
+    if (!call || call->op != SH_BUDGET_TABLE) return 0;
+    call->generation = 4;
+    call->needed = (int)strlen(table);
+    if (!call->out || call->out_cap <= call->needed) return -1;
+    memcpy(call->out, table, sizeof table);
+    return 1;
+}
 /* A frontend must never read a slot the backend's vtable does not have. */
 static int check_vtable_size_contract(sh_iface *iface)
 {
@@ -105,6 +118,7 @@ static int check_vtable_size_contract(sh_iface *iface)
     if (SH_IFACE_HAS_SLOT(&legacy, prefab_grab_status)) return 0;
     if (SH_IFACE_HAS_SLOT(&legacy, module_prefab)) return 0;
     if (SH_IFACE_HAS_SLOT(&legacy, timeline_tile)) return 0;
+    if (SH_IFACE_HAS_SLOT(&legacy, budget)) return 0;
     if (!SH_IFACE_HAS_SLOT(&legacy, run_on_main)) return 0;   /* nonzero filler counts as bound */
     if (sh_iface_vtbl_bytes(NULL) != 0) return 0;
     if (sh_iface_vtbl_bytes(iface) != (uint32_t)sizeof(sh_iface_vtbl)) return 0;
@@ -222,6 +236,29 @@ int main(void)
             iface->vtbl->timeline_tile(iface, &call) != 1 || call.tile_row != 7 ||
             strcmp(call.record_class, "idTarget_Timeline") != 0) {
             fprintf(stderr, "iface_config_test: timeline-tile slot was not bound\n");
+            return 1;
+        }
+    }
+
+    if (SH_IFACE_HAS_SLOT(iface, budget)) {
+        fprintf(stderr, "iface_config_test: unbound budget slot reported present\n");
+        return 1;
+    }
+    engine_slots.budget = stub_budget;
+    sh_iface_bind_engine_slots(&engine_slots);
+    {
+        sh_budget_call call;
+        char buf[32];
+        memset(&call, 0, sizeof call);
+        call.op = SH_BUDGET_TABLE;
+        if (!SH_IFACE_HAS_SLOT(iface, budget) || iface->vtbl->budget(iface, &call) != -1 ||
+            call.needed != 9) {
+            fprintf(stderr, "iface_config_test: budget size query failed\n");
+            return 1;
+        }
+        call.out = buf; call.out_cap = (int)sizeof buf;
+        if (iface->vtbl->budget(iface, &call) != 1 || call.generation != 4 || strcmp(buf, "{\"gen\":4}") != 0) {
+            fprintf(stderr, "iface_config_test: budget slot was not bound\n");
             return 1;
         }
     }

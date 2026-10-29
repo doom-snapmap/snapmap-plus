@@ -259,6 +259,12 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
           </div>
           <div class="pc-preview-help">Drag to orbit &middot; Wheel to zoom &middot; Double-click to frame</div>
         </div>
+        <section class="pc-limits" id="pcLimits" aria-labelledby="pcLimitsHead">
+          <div class="pc-limits-head" id="pcLimitsHead">Limits</div>
+          <div class="pc-limits-rows" id="pcLimitsRows" role="table" aria-label="What this prefab adds to the map's limits"></div>
+          <div class="pc-limits-note" id="pcLimitsNote"></div>
+          <details class="pc-limits-details" id="pcLimitsDetails"><summary>Details</summary><div class="pc-limits-raw" id="pcLimitsRaw"></div></details>
+        </section>
         <label for="pcName">Name</label>
         <input type="text" class="pc-name" id="pcName" value="" readonly>
         <label for="pcDesc">Description</label>
@@ -420,6 +426,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 <script src="decl_language.js"></script>
 <script src="prefab_transform.js"></script>
 <script src="prefab_viewport.js"></script>
+<script src="prefab_budget.js"></script>
 <script>
   var allEntities = [];      // last list from backend
   var visibleEntities = [];  // full filtered logical list; only a bounded window is mounted in the DOM
@@ -1219,6 +1226,17 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       previewPrefabDetails[o.name] = {count: 3, scene: ''};
       onMessage({kind:'createModulePrefabResult', result:1, name:o.name, summary: cmSummary});
       previewSendPrefabs();
+    }
+    else if (o.cmd === 'budgetTable' || o.cmd === 'budgetUsage') {
+      // A two-row stand-in table: enough to lay out the Limits section in a browser.
+      var pbLimits = [768,14284,10384,2038,672,1000,8192,8192,0,0,500000,64], pbUsage = [32,67,91,1,30,0,1,0,1552,12,2545,0];
+      if (o.cmd === 'budgetUsage') onMessage({kind:'budgetUsage', data:{limits:pbLimits, usage:pbUsage, reached:0, gen:1}});
+      else onMessage({kind:'budgetTable', data:{gen:1, limits:pbLimits, usage:pbUsage, reached:0,
+        layers:{autoView:131072, sound:4194304, source:'decl'},
+        sedefs:{'volume/blocking':{l:[0,1,1,0,1,0,0,0,0,0,10,0], auto:0, ns:1}, 'prop/new/crate01':{l:[1,1,1,0,1,0,0,0,0,0,25,0], auto:0, ns:0}},
+        inherits:{'snapmaps/volume/blocking':'volume/blocking', 'snapmaps/props/new/crate01':'prop/new/crate01'},
+        modules:{'maps/modules/ind_dlc/ind_totally_blank_room_4x.decl':{own:[0,0,21,0,0,0,0,0,1552,12,50,0], templ:[0,2,0,0,0,0,0,0,0,0,400,0], view:[0,3,6,1,1,0,0,0,0,0,150,0], mask:131073}},
+        aliases:{'ind_totally_blank_room_4x':'maps/modules/ind_dlc/ind_totally_blank_room_4x.decl'}}});
     }
     else if (o.cmd === 'selectPrefab') {
       var d = previewPrefabDetails[o.name];
@@ -3037,6 +3055,12 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       else toast('Could not create "' + d.name + '" (see log)', 'err');
     } else if (d.kind === 'prefabDetail') {
       renderPrefabDetail(d);
+    } else if (d.kind === 'budgetTable') {
+      pfBudgetTable = d.data && typeof d.data === 'object' ? d.data : null;
+      pfRenderLimits();
+    } else if (d.kind === 'budgetUsage') {
+      pfBudgetLive = d.data && typeof d.data === 'object' ? d.data : null;
+      pfRenderLimits();
     } else if (d.kind === 'prefabModelResolved') {
       prefabViewport.modelResolved(d);
     } else if (d.kind === 'prefabMeshUnavailable') {
@@ -3405,6 +3429,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     ['pcName', 'pcDesc', 'pcTags'].forEach(function(id){ var el = document.getElementById(id); if (el) el.value = ''; });
     var count = document.getElementById('pcEntityCount'); if (count) count.textContent = '';
     prefabViewport.clear();
+    pfBudgetSel = null; pfRenderLimits();
     setPrefabButtons(false);
     pfPaintSelection();
   }
@@ -3465,17 +3490,90 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     metaBaseline = mDesc.trim() + '\u0000' + parseTagsInput(mTags.join(',')).join(',');
     metaExtra = {}; for (var mk in meta) if (meta.hasOwnProperty(mk) && mk !== 'desc' && mk !== 'tags') metaExtra[mk] = meta[mk];
     selectedPrefabKind = (meta.kind === 'modules') ? 'modules' : 'objects';
+    // The selected scene is parsed exactly once and shared by the preview and the Limits section.
+    var doc = null;
+    if (d.scene) { try { doc = prefabTransform.parseScene(d.scene); } catch (e) { doc = null; } }
     if (selectedPrefabKind === 'modules') {
       prefabViewport.clear();
       pfShowFootprint(meta);
     } else {
       pfHideFootprint();
-      var navBoxes = prefabTransform.countNavigationBoxes(d.scene || '');
+      var navBoxes = doc ? prefabTransform.countNavigationBoxes(doc) : 0;
       document.getElementById('pcEntityCount').textContent = d.count + (d.count === 1 ? ' entity' : ' entities') +
         (navBoxes ? ', ' + navBoxes + (navBoxes === 1 ? ' AI Navigation box' : ' AI Navigation boxes') : '');
-      prefabViewport.load(d.scene || '');
+      prefabViewport.load(d.scene || '', doc);
     }
+    pfBudgetSelect(d, doc, meta);
+    post({cmd:'budgetUsage'});
     pfRefreshModeUi();
+  }
+
+  // ---- Limits: what the selected prefab adds to the map's budget (prefab_budget.js) ----
+  // The backend's table (one block per palette row and per resident module) arrives once and again
+  // after a palette rebuild; usage arrives when the tab opens and on each selection. Only the selected
+  // prefab is ever summed, and its sum is memoized by folder/name, file signature and table generation.
+  var pfBudgetTable = null, pfBudgetLive = null, pfBudgetAsked = false, pfBudgetSel = null;
+  var pfBudgetCache = prefabBudget.createCache(32);
+  function pfBudgetSelect(d, doc, meta) {
+    var modules = [], owner = null, entities = doc && Array.isArray(doc.entities) ? doc.entities : [];
+    if (selectedPrefabKind === 'modules') {
+      // Place installs the file's own instances with their saved layer masks; the sidecar's list is the fallback.
+      if (doc && Array.isArray(doc.instances)) { var ms = prefabBudget.moduleScene(doc); modules = ms.modules; owner = ms.entityModule; }
+      else if (Array.isArray(meta.modules)) modules = meta.modules.map(function(m){ return (m && m.name) || ''; });
+    }
+    pfBudgetSel = {key: (d.folder || selectedPrefabFolder || '') + '/' + d.name + '|' + (d.sig || ''),
+                   entities: entities, modules: modules, entityModule: owner,
+                   kind: selectedPrefabKind, parsed: !!doc || (selectedPrefabKind === 'modules' && modules.length > 0)};
+    pfRenderLimits();
+  }
+  function pfLimitsCell(text, cls, title) {
+    var s = document.createElement('span');
+    s.textContent = text; s.className = cls || ''; s.setAttribute('role', 'cell');
+    if (title) s.title = title;
+    return s;
+  }
+  function pfRenderLimits() {
+    var rows = document.getElementById('pcLimitsRows'), note = document.getElementById('pcLimitsNote');
+    var raw = document.getElementById('pcLimitsRaw');
+    if (!rows || !note || !raw) return;
+    rows.textContent = ''; raw.textContent = ''; note.textContent = '';
+    if (!pfBudgetSel) return;
+    if (!pfBudgetTable || pfBudgetTable.error) {
+      note.textContent = pfBudgetTable && pfBudgetTable.error ? 'Limits unavailable: ' + pfBudgetTable.error
+                                                             : 'Limits appear once a map is open in the editor.';
+      return;
+    }
+    if (!pfBudgetSel.parsed) { note.textContent = 'Could not read this prefab\'s scene; limits unknown.'; return; }
+    var ck = pfBudgetSel.key + '|' + pfBudgetTable.gen, s = pfBudgetCache.get(ck);
+    if (!s) {
+      s = prefabBudget.sum(pfBudgetSel.entities, pfBudgetSel.modules, pfBudgetTable,
+                           {skipView: pfBudgetSel.kind === 'modules', entityModule: pfBudgetSel.entityModule});
+      pfBudgetCache.set(ck, s);
+    }
+    var live = pfBudgetLive && pfBudgetLive.usage && pfBudgetLive.limits ? pfBudgetLive : pfBudgetTable;
+    var m = prefabBudget.meters(s.block, live.usage, live.limits);
+    ['', 'This prefab', 'Map after'].forEach(function(h){ rows.appendChild(pfLimitsCell(h, 'pcl-col', '')); });
+    prefabBudget.METERS.forEach(function(name){
+      var v = m.meters[name];
+      rows.appendChild(pfLimitsCell(prefabBudget.LABELS[name], 'pcl-label', ''));
+      var addText = prefabBudget.formatPercent(v.add);
+      rows.appendChild(pfLimitsCell(addText.charAt(0) === '<' ? addText : '+' + addText, 'pcl-num', prefabBudget.rawText(name, s.block)));
+      rows.appendChild(pfLimitsCell(prefabBudget.formatPercent(v.after), 'pcl-num' + (v.reached ? ' pcl-over' : ''),
+        'Now ' + prefabBudget.formatPercent(v.before) + (v.reached ? '; placing it would reach this limit' : '')));
+    });
+    var notes = [];
+    if (s.misses.length) notes.push(s.misses.length + (s.misses.length === 1 ? ' entity type is' : ' entity types are') +
+      ' not in the editor palette (each counted as 1 entity, 1 model, 1 network): ' + s.misses.slice(0, 3).join(', ') + (s.misses.length > 3 ? ', ...' : ''));
+    if (s.unknownModules.length) notes.push(s.unknownModules.length + (s.unknownModules.length === 1 ? ' module is' : ' modules are') +
+      ' not in the editor palette and not counted: ' + s.unknownModules.slice(0, 3).map(prefabBudget.leaf).join(', ') + (s.unknownModules.length > 3 ? ', ...' : ''));
+    if (s.filtered) notes.push(s.filtered + (s.filtered === 1 ? ' entity is' : ' entities are') + ' on a layer the editor does not count.');
+    if (pfBudgetSel.kind === 'modules' && pfBudgetTable.layers && pfBudgetTable.layers.source !== 'decl')
+      notes.push('Module layers unavailable; every module layer is counted.');
+    if (m.reached) notes.unshift('Placing this prefab would reach the map\'s limits.');
+    note.textContent = notes.join(' ');
+    prefabBudget.FIELDS.forEach(function(f, i){
+      raw.appendChild(pfLimitsCell(f, '', '')); raw.appendChild(pfLimitsCell(String(s.block[i]), '', ''));
+    });
   }
   // A module prefab's preview is its top-down footprint: one box per module, the placement anchor
   // marked, counts and environments in the corners. The 3D viewport and its legend step aside.
@@ -4192,7 +4290,12 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
         document.getElementById('panel-' + name).style.display = (name === which) ? 'flex' : 'none';
       });
       queueSplitConstrain();
-      if (which === 'prefabs') post({cmd:'listPrefabs'});
+      if (which === 'prefabs') {
+        post({cmd:'listPrefabs'});
+        // The Limits table is asked for once; the host re-sends it after each palette rebuild.
+        if (!pfBudgetAsked) { pfBudgetAsked = true; post({cmd:'budgetTable'}); }
+        post({cmd:'budgetUsage'});
+      }
       if (which === 'timelines') tlMaybeAutoRefresh();   // catch stale content from a play-mode round-trip that happened while this tab wasn't visible
       // The selected catalog is cached after its first fetch, so later visits do not cross the bridge.
       if (which === 'assets') { abActive = abTabMount; abOpenCatalog(abTabMount); }
@@ -6658,6 +6761,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     var count = document.getElementById('pcEntityCount'); if (count) count.textContent = '';
     prefabViewport.clear();
     selectedPrefabKind = ''; metaExtra = null; pfHideFootprint();
+    pfBudgetSel = null; pfRenderLimits();
     setPrefabButtons(false);
   }
   if (prefabTree) {

@@ -90,7 +90,7 @@ check(js.includes('color:nav.marked?NAVIGATION_COLOR:roleColor(role,className)')
       html.includes('<i class="pc-legend-dot navigation"></i>AI Navigation') &&
       /\.pc-legend-dot\.navigation\s*\{\s*background:\s*#5cb86b;/.test(css),
       'AI Navigation boxes are tinted and explained in the legend');
-check(html.includes('prefabTransform.countNavigationBoxes(d.scene') && html.includes("' AI Navigation boxes'"),
+check(html.includes('prefabTransform.countNavigationBoxes(doc)') && html.includes("' AI Navigation boxes'"),
       'Prefab Details counts AI Navigation boxes beside the entity count');
 check(js.includes("if (!info.scale && entity.role === 'blocker') updateEntityTransform(entity,BLOCKING_DEFAULT_SIZE,true)"),
       'an unresolved blocking decl keeps its 16/128/64 default instead of 1-unit slabs');

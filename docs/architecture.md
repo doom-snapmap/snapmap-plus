@@ -230,13 +230,16 @@ still reference them. Save files contain the dimension-bearing module identity;
 players need Snapmap+ to reconstruct its resources. Vanilla loading is unsupported.
 
 The shared object uses an append-only vtable. Its original 77-slot prefix is
-retained, with extensions through `+0x368`; the current table occupies `0x370`
+retained, with extensions through `+0x370`; the current table occupies `0x378`
 bytes. The File menu's rawmap surface is `rawmap_status` (`+0x328`),
 `rawmap_configure` (`+0x330`) and `rawmap_load_now` (`+0x338`). The last three
 are `navmesh_view` (`+0x340`), `run_on_main` (`+0x348`), `delete_entities`
 (`+0x350`), `prefab_grab_status` (`+0x358`), `module_prefab` (`+0x360`, the
-Blueprint module-prefab state, save, place and status operations) and
-`timeline_tile` (`+0x368`, the Timeline palette tile's status). The retired
+Blueprint module-prefab state, save, place and status operations),
+`timeline_tile` (`+0x368`, the Timeline palette tile's status) and `budget`
+(`+0x370`, the editor budget table and usage for the Prefabs tab's Limits
+section, built on the game thread after each palette build by
+`budget_table.c`). The retired
 timeline-inherit normaliser at `+0x298` stays in the table and returns 1. The backend writes a marker and the table's size into the object's
 first reserved cell (`+0x08`); older backends left it zero and had `0x350`
 bytes. Check `SH_IFACE_HAS_SLOT` before calling any slot at or past `+0x350`,

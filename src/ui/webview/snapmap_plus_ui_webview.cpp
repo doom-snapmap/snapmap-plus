@@ -2188,10 +2188,40 @@ static bool poc_file_tail_is_module(const char *path)
     size_t q1 = tail.find('"', tail.find(':', t + 7) + 1);
     return q1 != std::string::npos && tail.compare(q1, 11, "\"idSnapMap\"") == 0;
 }
+/* The prefab file's size and write time, the content signature the page's
+ * Limits cache keys on. */
+static std::wstring poc_prefab_signature(const char *path)
+{
+    WIN32_FILE_ATTRIBUTE_DATA fa;
+    if (!GetFileAttributesExA(path, GetFileExInfoStandard, &fa)) return L"";
+    unsigned long long size = ((unsigned long long)fa.nFileSizeHigh << 32) | fa.nFileSizeLow;
+    unsigned long long mtime = ((unsigned long long)fa.ftLastWriteTime.dwHighDateTime << 32) | fa.ftLastWriteTime.dwLowDateTime;
+    return std::to_wstring(size) + L":" + std::to_wstring(mtime);
+}
+/* The selected prefab's file text, capped so a hand-dropped giant file cannot
+ * force a huge WebMessage allocation. */
+static bool poc_read_prefab_scene(const char *path, std::string &body)
+{
+    FILE *fp = nullptr;
+    bool ok = false;
+    body.clear();
+    if (fopen_s(&fp, path, "rb") != 0 || !fp) return false;
+    fseek(fp, 0, SEEK_END); long sz = ftell(fp); fseek(fp, 0, SEEK_SET);
+    if (sz > 0 && sz <= 8 * 1024 * 1024) {
+        body.resize((size_t)sz);
+        size_t got = fread(&body[0], 1, (size_t)sz, fp);
+        body.resize(got);
+        ok = got == (size_t)sz;
+    }
+    fclose(fp);
+    if (!ok) body.clear();
+    return ok;
+}
 static void poc_send_prefab_detail(const std::string &name, const std::string &folder)
 {
     if (!g_webview) return;
-    /* A module prefab shows its footprint from the sidecar, not an entity scene. */
+    /* A module prefab shows its footprint from the sidecar. Its scene still
+     * ships, once, for the Limits section's entity count. */
     if (!name.empty()) {
         char path[1024], mp[1024];
         std::string meta;
@@ -2200,9 +2230,14 @@ static void poc_send_prefab_detail(const std::string &name, const std::string &f
             if (poc_prefab_meta_path(folder, name, mp, (int)sizeof mp)) poc_read_small_file(mp, meta);
             if (poc_meta_kind_of(meta) == "modules" || poc_file_tail_is_module(path)) {
                 int count = poc_meta_int(meta, "entityCount");
+                std::string scene;
+                poc_read_prefab_scene(path, scene);
                 std::wstring json = L"{\"kind\":\"prefabDetail\",\"name\":\""; json += sh_webview_json::escape_wide(name.c_str());
+                json += L"\",\"folder\":\""; json += sh_webview_json::escape_wide(folder.c_str());
+                json += L"\",\"sig\":\""; json += poc_prefab_signature(path);
                 json += L"\",\"ok\":true,\"prefabKind\":\"modules\",\"meta\":\""; json += sh_webview_json::escape_wide(meta.c_str());
-                json += L"\",\"scene\":\"\",\"count\":"; json += std::to_wstring(count < 0 ? 0 : count);
+                json += L"\",\"scene\":\""; json += sh_webview_json::escape_wide(scene.c_str());
+                json += L"\",\"count\":"; json += std::to_wstring(count < 0 ? 0 : count);
                 json += L"}";
                 g_webview->PostWebMessageAsJson(json.c_str());
                 return;
@@ -2213,25 +2248,14 @@ static void poc_send_prefab_detail(const std::string &name, const std::string &f
     bool ok = false;
     std::string metaBody;
     std::string sceneBody;
+    std::wstring sig;
     if (!name.empty()) {
         char path[1024];
-        if (poc_prefab_file_path(folder, name, path, (int)sizeof path)) {
-            FILE *fp = nullptr;
-            if (fopen_s(&fp, path, "rb") == 0 && fp) {
-                fseek(fp, 0, SEEK_END); long sz = ftell(fp); fseek(fp, 0, SEEK_SET);
-                /* The scene is sent only for the selected prefab. Cap it independently of the tiny
-                 * metadata sidecar so a hand-dropped giant file cannot force a huge WebMessage allocation. */
-                if (sz > 0 && sz <= 8 * 1024 * 1024) {
-                    sceneBody.resize((size_t)sz);
-                    size_t got = fread(&sceneBody[0], 1, (size_t)sz, fp);
-                    sceneBody.resize(got);
-                    if (got == (size_t)sz) {
-                        entityCount = poc_count_prefab_entities(sceneBody);
-                        ok = true;
-                    }
-                }
-                fclose(fp);
-            }
+        /* The scene is sent only for the selected prefab. */
+        if (poc_prefab_file_path(folder, name, path, (int)sizeof path) && poc_read_prefab_scene(path, sceneBody)) {
+            entityCount = poc_count_prefab_entities(sceneBody);
+            sig = poc_prefab_signature(path);
+            ok = true;
         }
         char mp[1024];
         /* the sidecar body ships as an ESCAPED STRING (the page JSON.parses it with a try/catch), never
@@ -2240,12 +2264,92 @@ static void poc_send_prefab_detail(const std::string &name, const std::string &f
         if (ok && poc_prefab_meta_path(folder, name, mp, (int)sizeof mp)) poc_read_small_file(mp, metaBody);
     }
     std::wstring json = L"{\"kind\":\"prefabDetail\",\"name\":\""; json += sh_webview_json::escape_wide(name.c_str());
+    json += L"\",\"folder\":\""; json += sh_webview_json::escape_wide(folder.c_str());
+    json += L"\",\"sig\":\""; json += sig;
     json += L"\",\"ok\":"; json += ok ? L"true" : L"false";
     json += L",\"meta\":\""; json += sh_webview_json::escape_wide(metaBody.c_str());
     json += L"\",\"scene\":\""; json += sh_webview_json::escape_wide(sceneBody.c_str());
     json += L"\",\"count\":"; json += std::to_wstring(entityCount);
     json += L"}";
     g_webview->PostWebMessageAsJson(json.c_str());
+}
+
+/* The Prefabs tab's Limits section. The backend builds its budget table on the
+ * game thread after each palette build; the page asks for it once (budgetTable)
+ * and is sent it again whenever its generation changes, and asks for the map's
+ * current usage (budgetUsage) when the tab opens and on each selection. */
+static bool     g_budget_wanted = false;   /* the page has asked for the table */
+static unsigned g_budget_sent_gen = 0;     /* table generation last posted */
+
+static int poc_budget_call(sh_budget_call *call)
+{
+    if (!SH_IFACE_HAS_SLOT(g_iface, budget)) return 0;
+    __try { return g_iface->vtbl->budget(g_iface, call); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+}
+
+/* Post {"kind":kind,"data":<backend JSON>} or {"kind":kind,"data":null}. The
+ * backend writes the JSON itself (escaped names, integers), so it is spliced. */
+static void poc_post_budget(const wchar_t *kind, const std::string &body)
+{
+    std::wstring m = L"{\"kind\":\""; m += kind; m += L"\",\"data\":";
+    if (body.empty()) m += L"null";
+    else {
+        int wl = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, body.c_str(), (int)body.size(), nullptr, 0);
+        if (wl <= 0) m += L"null";
+        else {
+            std::wstring wb((size_t)wl, L'\0');
+            MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, body.c_str(), (int)body.size(), &wb[0], wl);
+            m += wb;
+        }
+    }
+    m += L"}";
+    poc_post_json(m.c_str());
+}
+
+/* Copy one budget op's JSON. Returns the generation, or 0 when there is none. */
+static unsigned poc_budget_read(int op, std::string &out)
+{
+    sh_budget_call call;
+    out.clear();
+    memset(&call, 0, sizeof call);
+    call.op = op;
+    int r = poc_budget_call(&call);
+    if (r == -1 && call.needed > 0 && call.needed < 64 * 1024 * 1024) {
+        std::vector<char> buf((size_t)call.needed + 1);
+        call.out = buf.data(); call.out_cap = (int)buf.size();
+        r = poc_budget_call(&call);
+        if (r == 1) out.assign(buf.data());
+    }
+    return r == 1 ? call.generation : 0;
+}
+
+static void poc_send_budget_table()
+{
+    std::string body;
+    unsigned gen = poc_budget_read(SH_BUDGET_TABLE, body);
+    g_budget_wanted = true;
+    if (!gen) { poc_post_budget(L"budgetTable", ""); return; }
+    g_budget_sent_gen = gen;
+    poc_post_budget(L"budgetTable", body);
+}
+
+static void poc_send_budget_usage()
+{
+    std::string body;
+    poc_budget_read(SH_BUDGET_USAGE, body);
+    poc_post_budget(L"budgetUsage", body);
+}
+
+/* UI cadence: re-send the table after a palette rebuild, only once asked. */
+static void poc_budget_poll()
+{
+    if (!g_budget_wanted) return;
+    sh_budget_call call;
+    memset(&call, 0, sizeof call);
+    call.op = SH_BUDGET_TABLE;
+    if (poc_budget_call(&call) == 0 && !call.generation) return;
+    if (call.generation && call.generation != g_budget_sent_gen) poc_send_budget_table();
 }
 
 /* Extract flat sidecar tags and re-escape each value. Never splice sidecar
@@ -2703,6 +2807,10 @@ static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventA
             } else if (cmd == L"selectPrefab") {
                 std::wstring nm, fo; sh_webview_json::get_string(json, L"name", nm); sh_webview_json::get_string(json, L"folder", fo);
                 poc_send_prefab_detail(sh_webview_json::to_utf8(nm), sh_webview_json::to_utf8(fo));
+            } else if (cmd == L"budgetTable") {
+                poc_send_budget_table();
+            } else if (cmd == L"budgetUsage") {
+                poc_send_budget_usage();
             } else if (cmd == L"resolvePrefabModel") {
                 int generation = 0; std::wstring inherit;
                 sh_webview_json::get_int(json, L"generation", &generation);
@@ -3515,6 +3623,8 @@ static void poc_think_loop()
                 }
                 /* Object Mode / Blueprint, for the Prefabs tab's Load and Create gates */
                 poc_post_editor_mode(false);
+                /* The Limits section's table, after a palette rebuild. */
+                poc_budget_poll();
                 if (g_sync_on) {
                     /* mirror the WHOLE editor selection (any N) into the list, only when it changes. */
                     std::sort(selids, selids + sn);

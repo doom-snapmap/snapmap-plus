@@ -30,6 +30,7 @@
 #include "editor_delete.h"
 #include "module_prefab.h"
 #include "timeline_tile.h"
+#include "budget_table.h"
 #include "engine_build.h"
 
 /* Editor layout. */
@@ -1215,6 +1216,7 @@ int sh_iface_engine_install(const sig_result *results, size_t n, const uint8_t *
     slots.prefab_grab_status     = slot_prefab_grab_status;   /* +0x358 ext 30 */
     slots.module_prefab          = sh_module_prefab_slot;     /* +0x360 ext 31 */
     slots.timeline_tile          = sh_timeline_tile_slot;     /* +0x368 ext 32 */
+    slots.budget                 = sh_budget_table_slot;      /* +0x370 ext 33 */
 
     slots.enum_decls_of_resclass = slot_enum_decls_of_resclass;/* +0x110 */
 

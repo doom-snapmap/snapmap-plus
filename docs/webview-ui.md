@@ -15,6 +15,7 @@ operations use the interface in `src/common/snapmap_plus_iface.h`.
 | `src/ui/webview/decl_language.js` | Declaration tokens, parsing, schema checks, highlighting and completion; each instance owns its schema cache. |
 | `src/ui/webview/prefab_viewport.js` | Prefab rendering, mesh transport, framing and orbit controls. |
 | `src/ui/webview/prefab_transform.js` | Sparse saved transforms and inherited scale composition. |
+| `src/ui/webview/prefab_budget.js` | What a prefab adds to the editor's limits: block sums, the five HUD meter ratios, the reached rule and a bounded memo. No DOM. |
 | `src/ui/webview/schema_slice.js` | Declaration schema slicing for the property editor. |
 | `src/ui/webview/config_message.{h,cpp}` | Bounded extraction of configuration messages. |
 | `src/ui/webview/webview_json.{h,cpp}` | Text encoding, JSON escaping and field access for WebView messages. |
@@ -63,6 +64,7 @@ The header defines the complete ABI. These are the main entry points:
 | Load / Place | `apply_edit` at `+0xD0`, kind 2: stage the prefab and request the native paste action. Engine state can force a stage-only fallback, reported by toast. |
 | Save Timeline | `apply_sync` at `+0x290`, kind 0, with the target entity ID. |
 | Timeline tile | `timeline_tile` at `+0x368` reports the toybox tile's palette row, its prototype record class and the rebind counts. The page does not call it; the `+0x298` normaliser is retired. |
+| Prefab limits | `budget` at `+0x370`: TABLE copies the budget table the backend built after the last palette build, USAGE the map's limits, usage and reached byte from the last editor frame. |
 | Persistent settings | `config_get_json` at `+0x2B0` and `config_set_json` at `+0x2B8`. |
 | Prefab geometry | Model lookup and request/completion slots at `+0x308` through `+0x320`. |
 | File menu rawmap I/O | `rawmap_status` at `+0x328`, `rawmap_configure` at `+0x330` and `rawmap_load_now` at `+0x338`. The picker is host-side and touches no engine state. Loading stages a file: the swap substitutes it into the next map the engine parses. |
@@ -82,7 +84,30 @@ crash submission use a short-lived HTTPS worker in the host and the
 | page to host | `movePrefabs {names, fromFolders, toFolder}` / `deletePrefabs {names, folders}` | A multi-selection drop or delete, one tick, one `movePrefabsResult` / `deletePrefabsResult`, one list refresh. |
 | page to host | `flyTo {eid}` | Apply kind 4: the EditorFrame detour switches to Object mode and aims the camera at the entity; `flyToResult` confirms the queue only. |
 | page to host | `createModulePrefab {name}` | Save the modules selected in Blueprint, with their entities, as a module prefab (`~type` `idSnapMap`); `createModulePrefabResult` carries the sidecar summary. `loadPrefab` routes by the file's `~type` and answers with `prefabKind`. |
+| page to host | `budgetTable` | Ask once for the budget table; the host answers `budgetTable {data}` (null until an editor has been entered) and re-sends it from its 330 ms poll whenever the table generation changes, that is after a palette rebuild. |
+| page to host | `budgetUsage` | The map's current `{limits, usage, reached}` as `budgetUsage {data}`; asked when the Prefabs tab opens and on each prefab selection. |
+| host to page | `prefabDetail {..., folder, sig}` | The selected prefab now also carries its folder and a `size:mtime` content signature, and a module prefab carries its scene, so the Limits section can count its entities. |
 | page to host | `setDisplayNames {eids, names}` | Batch display-name writes through the `set_displayname` slot; the Timelines tree uses them for folder moves and renames. |
+
+## Prefabs Limits section
+
+The prefab card shows, under the preview, what placing the selected prefab adds
+to the editor's five HUD meters and what each meter would read afterwards.
+`prefab_budget.js` applies the editor's own accounting: a placed entity costs
+exactly its palette row's sedef `limits` block, with network 0 when it is
+network-static (an explicit `isNetworkStatic` in the saved entity wins over the
+row's default), and an entity whose inherit has no palette row costs 1 entity,
+1 render model and 1 network. A module costs its own block (floors + 3 walls +
+2 (portals + 2) render models and the card's memory KB), its GAME template
+entities and palette misses, its VIEW entities (instantiated into the room by
+the engine, so a module prefab's scene copy of one is not counted again) and
+two 50 KB block bases; templates and scene entities count only when their layer
+overlaps the instance's saved `layerMask` OR the snapLayers autoView mask.
+The meters are NETWORK = network / limit, OBJECTS = max(entities, memory KB sum
+over the KB limit sum), MEMORY = max(render models, lights, world areas,
+decals), DEMONS = AI / 64 and DECALS = decals / limit; a result is red when
+NETWORK, OBJECTS or MEMORY would reach 1.0 or DEMONS would pass it. The limits
+and usage are always read live, never hard-coded.
 
 ## Driving the page from a test
 
@@ -106,6 +131,13 @@ returns an in-progress status, so the page must not report completion or retry i
 automatically. See [architecture](architecture.md#threads-and-edit-results).
 
 Camera polling runs at the loop cadence and posts only changed coordinates.
+The prefab list never reads a prefab scene: previews, and the Limits section,
+are only ever loaded for the one selected prefab. That scene is parsed once
+and the parsed document is shared by the 3D preview, the AI Navigation count
+and the Limits sum, which is memoized (32 entries) by folder, name, file
+signature and table generation, so reselecting a prefab costs one cache hit
+and the meters are recomputed from the latest usage. The budget table is held
+once by the page and looked up by key.
 Entity state and selection are sampled roughly every 330 ms. Timeline scanning
 is change-gated. Prefab rendering redraws when scene data, input, theme or
 viewport dimensions change.

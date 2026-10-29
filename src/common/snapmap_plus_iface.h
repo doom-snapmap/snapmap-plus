@@ -2,7 +2,7 @@
  * interface object and callbacks; both DLLs must build against this header.
  * The 0x60-byte object has a vtable at +0 and subobject pointer at +0x58.
  * The original 77-slot prefix ends at +0x260; append-only extensions end
- * at +0x368, making the current vtable 0x370 bytes. The backend records that
+ * at +0x370, making the current vtable 0x378 bytes. The backend records that
  * size in the object (see sh_iface_vtbl_bytes); check it before calling a
  * slot at or past +0x350.
  * Engine layouts remain private to backend implementations. Reserved cells
@@ -349,6 +349,29 @@ typedef struct sh_timeline_tile_call {
     char record_class[64];  /* class of the tile's prototype record */
 } sh_timeline_tile_call;
 typedef int (*sh_timeline_tile_fn)(struct sh_iface *self, sh_timeline_tile_call *call); /* +0x368 (ext 32) */
+/* Editor budget table for the Prefabs tab's Limits section
+ * (backend/budget_table.c). Text crosses as UTF-8 JSON. out == NULL or an
+ * out_cap not above needed is a size query: needed is set, out is untouched
+ * and the call returns -1.
+ *   TABLE  any thread. Copies the table built on the game thread after the
+ *          last palette build: limits, usage, reached, layers, sedefs (per
+ *          palette row), inherits (inherit -> row), modules (per resident
+ *          module) and aliases (leaf name -> module). Returns 1, or 0 when no
+ *          table has been built yet (no editor entered).
+ *   USAGE  any thread. Copies {"limits","usage","reached","gen"} from the
+ *          last editor frame. Returns 1, or 0 before the first editor frame.
+ * generation is set by both: it changes whenever the table is rebuilt. */
+#define SH_BUDGET_TABLE 1
+#define SH_BUDGET_USAGE 2
+typedef struct sh_budget_call {
+    int          op;
+    char        *out;
+    int          out_cap;
+    int          needed;       /* out: bytes of JSON excluding the NUL */
+    unsigned int generation;   /* out: table generation, 0 = none built */
+    int          reached;      /* out: the limits-reached byte (USAGE) */
+} sh_budget_call;
+typedef int (*sh_budget_fn)(struct sh_iface *self, sh_budget_call *call); /* +0x370 (ext 33) */
 
 typedef int (*sh_resolve_prefab_defaults_fn)(struct sh_iface *self, const char *inherit_name,
                                              char *out_model, int out_capacity,
@@ -561,6 +584,7 @@ typedef struct sh_iface_vtbl {
     sh_prefab_grab_status_fn   prefab_grab_status;   /* +0x358 (ext 30) Create grab-frame guard result */
     sh_module_prefab_fn        module_prefab;        /* +0x360 (ext 31) Blueprint module prefabs */
     sh_timeline_tile_fn        timeline_tile;        /* +0x368 (ext 32) Timeline palette tile */
+    sh_budget_fn               budget;               /* +0x370 (ext 33) editor budget table */
 } sh_iface_vtbl;
 
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, config_get_json) == 0x2B0);
@@ -587,7 +611,8 @@ SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, delete_entities) == 0x350);
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, prefab_grab_status) == 0x358);
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, module_prefab) == 0x360);
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, timeline_tile) == 0x368);
-SH_STATIC_ASSERT(sizeof(sh_iface_vtbl) == 0x370);
+SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, budget) == 0x370);
+SH_STATIC_ASSERT(sizeof(sh_iface_vtbl) == 0x378);
 SH_STATIC_ASSERT(sizeof(sh_prefab_grab_info) == 16);
 SH_STATIC_ASSERT(sizeof(sh_delete_result) == 40);
 
@@ -754,6 +779,7 @@ typedef struct sh_iface_engine_slots {
     sh_prefab_grab_status_fn   prefab_grab_status;          /* +0x358 (ext 30) */
     sh_module_prefab_fn        module_prefab;               /* +0x360 (ext 31) */
     sh_timeline_tile_fn        timeline_tile;               /* +0x368 (ext 32) */
+    sh_budget_fn               budget;                      /* +0x370 (ext 33) */
 } sh_iface_engine_slots;
 
 void sh_iface_bind_engine_slots(const sh_iface_engine_slots *slots);

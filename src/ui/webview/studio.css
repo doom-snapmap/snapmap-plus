@@ -441,6 +441,19 @@
   /* Typography deliberately comes from the same global input/textarea rule as Entity State. */
   .pc-name { width: 100%; }
   .pc-desc { min-height: 60px; resize: vertical; }
+  /* Limits: what the selected prefab adds to the editor's five HUD meters. */
+  .pc-limits { flex: 0 0 auto; display: flex; flex-direction: column; gap: 3px; margin-top: 4px; }
+  .pc-limits-head { color: var(--muted); }
+  .pc-limits-rows { display: grid; grid-template-columns: minmax(76px, auto) minmax(72px, auto) auto; justify-content: start; gap: 1px 28px; font-size: 11px; }
+  .pc-limits-rows .pcl-col { color: var(--muted); font-size: 10px; }
+  .pc-limits-rows .pcl-label { letter-spacing: .04em; }
+  .pc-limits-rows .pcl-num { font-variant-numeric: tabular-nums; }
+  .pc-limits-rows .pcl-over { color: var(--danger); font-weight: 600; }
+  .pc-limits-note { color: var(--muted); font-size: 10px; min-height: 0; }
+  .pc-limits-note:empty { display: none; }
+  .pc-limits-details summary { color: var(--muted); font-size: 10px; cursor: pointer; }
+  .pc-limits-raw { display: grid; grid-template-columns: auto 1fr; gap: 0 10px; font-size: 10px; padding: 2px 0 0 12px; }
+  .pc-limits-raw span:nth-child(2n) { font-variant-numeric: tabular-nums; }
   @media (max-height: 520px) { .pc-preview { flex-basis: 130px; } }
 
   .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.45); z-index: 3000; display: flex; align-items: center; justify-content: center; }

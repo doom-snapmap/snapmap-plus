@@ -19,6 +19,7 @@
 #include "fly_to.h"
 #include "module_prefab.h"
 #include "timeline_tile.h"
+#include "budget_table.h"
 #include "hook.h"
 #include "backend_log.h"
 #include "engine_globals.h"
@@ -420,6 +421,8 @@ static void sh_editor_frame_detour(void *editor, void *arg)
     sh_module_prefab_tick(editor);
     /* The Timeline tile's prototype record, and entity rows after list changes. */
     sh_timeline_tile_tick(editor);
+    /* The budget usage snapshot, and the Prefabs tab's table after a palette build. */
+    sh_budget_table_tick(editor);
 
     /* Service only explicit save requests after the engine has settled this frame. */
     if (InterlockedCompareExchange(&g_save_pending, 0, 0) != 0) ef_service_rawmap_save(editor);

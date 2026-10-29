@@ -26,6 +26,7 @@
 #include "fly_to.h"
 #include "module_prefab.h"
 #include "timeline_tile.h"
+#include "budget_table.h"
 #include "map_render.h"
 #include "settings_tab.h"
 #include "map_bounds.h"
@@ -375,6 +376,7 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
          * build registers it before the first editor entry. */
         if (overrides_installed) sh_timeline_tile_install(results, db, g_doom_base);
         else backend_log("TL tile: unavailable; the override provider is not installed");
+        sh_budget_table_install(results, db);
         if(grid_installed&&
            !sh_grid_editor_install(results,db,sh_grid_native_read,sh_grid_native_apply))
             backend_log("GRID: native dimension properties unavailable on this build");

@@ -703,11 +703,16 @@ var prefabViewport = (function () {
     if (typeof post === 'function') post({cmd:'requestPrefabMesh', generation:generation, model:''});
   }
 
-  function load(sceneText) {
+  /* parsedDoc, when given, is sceneText already parsed by the caller (the Prefabs tab parses the
+     selected scene once and shares it with the Limits section); null means it did not parse. */
+  function load(sceneText, parsedDoc) {
     newGeneration(); entities = []; lastSceneText = sceneText || ''; cameraTouched = false;
     if (!initGl()) return;
-    var doc;
-    try { doc = prefabTransform.parseScene(lastSceneText); } catch (e) { setStatus('Could not parse prefab scene'); markDirty(); return; }
+    var doc = parsedDoc;
+    if (doc === undefined) {
+      try { doc = prefabTransform.parseScene(lastSceneText); } catch (e) { doc = null; }
+    }
+    if (!doc) { setStatus('Could not parse prefab scene'); markDirty(); return; }
     var list = doc && Array.isArray(doc.entities) ? doc.entities : [];
     var frame = grabFrame(doc);
     for (var i=0;i<list.length;i++) entities.push(entityFromJson(list[i], frame));

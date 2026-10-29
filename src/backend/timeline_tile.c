@@ -45,6 +45,7 @@ int sh_tl_substate_blocks_rebind(int substate)
 #include "patch.h"
 #include "process_heap_scope.h"
 #include "engine_globals.h"
+#include "budget_table.h"
 
 #define ED_PALETTE_OFF      0x20660
 #define ED_MAP_OFF          0x204c8
@@ -280,6 +281,7 @@ static void tl_palette_build(void *palette, void *progress)
     g_build_orig(palette, progress);
     g_pal_entries = NULL;   /* force a rescan and a fresh patch on the next tick */
     g_patch_failed_entries = NULL;
+    sh_budget_table_palette_rebuilt();
 }
 
 /* ------------------------------------------------------------ palette rows */
