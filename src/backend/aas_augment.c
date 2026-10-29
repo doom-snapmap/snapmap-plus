@@ -466,6 +466,7 @@ typedef struct aug_ctx {
     int *floor_ids;
     int floor_count;
     int *floor_parent;              /* indexed by area - original_areas */
+    unsigned char *floor_closed;    /* per shipped area: wholly under boxes */
 } aug_ctx;
 
 /* Edge segments one generated area may examine per pass, and BSP nodes one
@@ -2039,6 +2040,7 @@ static int aug_floor_accepts(aug_ctx *c, int area, const double p[3])
     float box[6];
     double z;
     if (area <= 0 || (unsigned)area >= c->floor_end) return 0;
+    if (c->floor_closed && (unsigned)area < c->original_areas && c->floor_closed[area]) return 0;
     ar = sh_aas_rec_const(c->a, SH_AAS_L_AREAS, (unsigned)area);
     if (!ar || !(sh_aas_get_u32(ar, AR_FLAGS) & AREA_FLAGS_FLOOR)) return 0;
     if (aug_original_floor(c->a, (unsigned)area, &floor)) {
@@ -2973,6 +2975,16 @@ static int aug_cut_floors(aug_ctx *c, const sh_aug_platform *solids, int nsolids
                                      AUG_MAX_FLOOR_PIECES, AUG_FLOOR_PIECES_PER_AREA);
     if (np < 0) { ok = 1; goto done; }
     for (k = 0; k < nk; k++) if (cut[k] == 2) c->rep->floors_left_whole++;
+    /* A floor the marked boxes cover entirely has no standing room left: it
+     * keeps its number and its ground under the boxes, but loses every route,
+     * shipped or generated, and no walk or climb may use it. */
+    c->floor_closed = (unsigned char *)calloc(na + 1, 1);
+    if (!c->floor_closed) goto done;
+    for (k = 0; k < nk; k++) if (cut[k] == 3) {
+        c->floor_closed[areas[k]] = 1;
+        group[areas[k]] = 1;
+        c->rep->floors_covered++;
+    }
     for (k = 0; k < nk; k++) {
         int j, best = -1, f = areas[k];
         double best_area = -1.0;
@@ -3032,7 +3044,7 @@ static int aug_cut_floors(aug_ctx *c, const sh_aug_platform *solids, int nsolids
         c->rep->floors_cut++;
     }
     c->floor_end = sh_aas_count(c->a, SH_AAS_L_AREAS);
-    if (!c->rep->floors_cut) { ok = 1; goto done; }
+    if (!c->rep->floors_cut && !c->rep->floors_covered) { ok = 1; goto done; }
     /* Move each shipped route to the piece its endpoint lies in. */
     nr = sh_aas_count(c->a, SH_AAS_L_REACHABILITIES);
     drop = (unsigned char *)calloc((size_t)nr + 1, 1);
@@ -3100,6 +3112,7 @@ static int aug_floor_piece_walks(aug_ctx *c)
     for (b = 1; b < nf; b++) {
         int listed = 0;
         for (i = 0; i < c->floor_count; i++) if (c->floor_ids[i] == (int)b) listed = 1;
+        if (c->floor_closed && c->floor_closed[b]) continue;
         if (!listed && aug_original_floor(c->a, b, &others[no])) other_ids[no++] = (int)b;
     }
     for (i = 0; i < c->floor_count; i++) {
@@ -3308,7 +3321,7 @@ int sh_aas_augment(sh_aas *a, const sh_aug_platform *plats, int n,
     if (!out->faces) { free(out->platforms); out->platforms = NULL; return 0; }
 
     c.a = a; c.o = opts; c.rep = out; c.failed = 0;c.prepared_geometry=0;c.sides=NULL;
-    c.floor_quads=NULL;c.floor_ids=NULL;c.floor_count=0;c.floor_parent=NULL;
+    c.floor_quads=NULL;c.floor_ids=NULL;c.floor_count=0;c.floor_parent=NULL;c.floor_closed=NULL;
     c.solids=plats;c.solid_count=n;c.original_areas=sh_aas_count(a,SH_AAS_L_AREAS);
     c.floor_end=c.original_areas;
     c.radius = opts->inset ? aug_agent_radius(a) : 0.0f;
@@ -3739,7 +3752,7 @@ int sh_aas_augment(sh_aas *a, const sh_aug_platform *plats, int n,
 
     rc = c.failed ? 0 : 1;
     free(c.sides);
-    free(c.floor_quads); free(c.floor_ids); free(c.floor_parent);
+    free(c.floor_quads); free(c.floor_ids); free(c.floor_parent); free(c.floor_closed);
     HeapFree(GetProcessHeap(), 0, block);
     return rc;
 }

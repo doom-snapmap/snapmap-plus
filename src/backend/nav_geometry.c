@@ -597,7 +597,8 @@ int sh_nav_geometry_cut_support(const sh_aug_platform *src,int count,
             ok=ng_cut_solid(&face,&src[j],bx,radius,height,floor_cos,step,&a,&b,&np,per_support);
         }
         if(!touched)continue;
-        if(!ok||!np){cut[i]=2;continue;}
+        if(!ok){cut[i]=2;continue;}
+        if(!np){cut[i]=3;continue;}         /* wholly covered, not too many pieces */
         ng_merge_all(a,&np);
         /* Slivers along a cut hold no standing room worth a route: they stay
          * with the ground cut out of the support. */
@@ -612,7 +613,7 @@ int sh_nav_geometry_cut_support(const sh_aug_platform *src,int count,
             }
             if(ng_area(&a[j])<NG_MIN_PIECE_AREA||width<NG_MIN_PIECE_WIDTH)a[j]=a[--np];else j++;
         }
-        if(!np){cut[i]=2;continue;}
+        if(!np){cut[i]=3;continue;}
         if(np==1&&fabs(ng_area(&a[0])-ng_area(&face.p))<1e-3)continue;
         if(nout+np>capacity){cut[i]=2;continue;}
         for(j=0;j<np;j++) {

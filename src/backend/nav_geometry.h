@@ -50,9 +50,10 @@ int sh_nav_geometry_build_budget(const sh_aug_platform *boxes, int count,
  * Walls that only block (obstacle_only) are not cut out.
  *
  * Pieces of support[i] go to out[] with owner[k] = i; cut[i] is 1 when support
- * i lost ground, 0 when it is untouched (and then it emits nothing), and 2 when
- * its pieces would not fit `per_support` and it was left whole. Returns the
- * piece count, or -1 for invalid input. */
+ * i lost ground, 0 when it is untouched (and then it emits nothing), 2 when
+ * its pieces would not fit `per_support` and it was left whole, and 3 when the
+ * solids cover all of it (nothing standable is left; it emits nothing).
+ * Returns the piece count, or -1 for invalid input. */
 int sh_nav_geometry_cut_support(const sh_aug_platform *boxes, int count,
     const sh_aug_platform *support, int support_count,
     double radius, double height, double floor_cos, double step,

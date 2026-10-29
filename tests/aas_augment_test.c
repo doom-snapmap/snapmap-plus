@@ -3151,10 +3151,39 @@ static void test_a_floor_whose_pieces_do_not_fit_stays_whole(void)
     sh_aug_report_free(&rep);
     sh_aas_free(a);
 }
+/* A floor strip a marked box covers end to end has no standing room left:
+ * it is closed (counted as covered, not as left whole), keeps no route and
+ * is never walked to. */
+static void test_a_floor_wholly_under_a_box_is_closed(void)
+{
+    static const float seams[2] = { -168.0f, 168.0f };
+    sh_aas *a = load_slabs(seams, 2);
+    sh_aug_platform p;
+    sh_aug_report rep;
+    sh_aug_opts o = { SH_AUG_FALL_AUTO, 1, SH_AUG_TRAVERSAL_NEVER, 0 };
+    unsigned i, n;
+    int touching = 0;
+    printf("a floor wholly under a box is closed, not left whole\n");
+    if (!a) { CHECK(0); return; }
+    mkbox_yawed(&p, 0, 0, 400, 4100, 0, 64.0f, 0.0f, "slab cover");
+    CHECK(sh_aas_augment(a, &p, 1, &o, &rep) == 1);
+    CHECK_MSG(rep.floors_covered == 1, "the centre strip is reported covered");
+    CHECK_MSG(rep.floors_left_whole == 0, "not as too many boxes");
+    n = sh_aas_count(a, SH_AAS_L_REACHABILITIES);
+    for (i = 0; i < n; i++) {
+        const unsigned char *r = sh_aas_rec_const(a, SH_AAS_L_REACHABILITIES, i);
+        if (sh_aas_get_u16(r, 6) == 2 || sh_aas_get_u16(r, 8) == 2) touching++;
+    }
+    CHECK_MSG(touching == 0, "no route starts or ends on the covered strip");
+    CHECK_MSG(sh_aas_point_area(a, 0.0f, 0.0f, 2.0f) == 2, "its ground under the box still resolves to it");
+    sh_aug_report_free(&rep);
+    sh_aas_free(a);
+}
 
 int main(void)
 {
     printf("aas_augment_test\n");
+    test_a_floor_wholly_under_a_box_is_closed();
     test_a_floor_whose_pieces_do_not_fit_stays_whole();
     test_a_portal_floor_is_never_cut();
     test_a_floor_split_past_the_corner_limit_still_reads();

@@ -276,6 +276,12 @@ static void test_support_cut_around_boxes(void)
             CHECK(cut[0] == 2);
         }
     }
+    /* A box covering the whole floor leaves nothing standable: that is
+     * reported as covered (3), not as too many pieces (2). */
+    box(0, -600, -600, 600, 600, 0, 64);
+    a = support_area_after(1, 24, 80, 18, &state);
+    CHECK(state == 3);
+    CHECK(fabs(a) < 1e-6);
     /* Invalid input refuses. */
     CHECK(sh_nav_geometry_cut_support(boxes, 1, NULL, 1, 24, 80, 0.7, 18, result, source, buried, 8, 4) == -1);
 }

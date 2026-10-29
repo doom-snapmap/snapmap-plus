@@ -1317,6 +1317,9 @@ static void bake_run(const char *name, const sh_aug_platform *in_plats, int in_c
         if (rep.floors_left_whole)
             bake_append(o->reason, sizeof o->reason,
                         "; %d floor area(s) under too many boxes left whole", rep.floors_left_whole);
+        if (rep.floors_covered)
+            bake_append(o->reason, sizeof o->reason,
+                        "; %d floor area(s) wholly under boxes closed", rep.floors_covered);
         /* Keep optional notes last so truncation preserves the cut-volume count. */
         if (rep.dead_gaps)
             bake_append(o->reason, sizeof o->reason,
