@@ -975,39 +975,18 @@ int sh_apply_engine_deshare_bound(void)
     return g_deshare != NULL;
 }
 
-/* Deserialize patched text into a temporary entity, then commit source,
- * class, and inherit to the live defsub. */
-static int ae_apply_one(int id, const char *patched_text)
+/* Deserialize text into a temporary entity, then commit source, class and
+ * inherit to the live defsub. Returns 1 when committed. */
+static int ae_commit_entity_text(int id, void *defsub, const char *text)
 {
-    if (!ae_deserialize_bound() || !ae_commit_bound() || !patched_text) return 0;
-    void *array = NULL; uint32_t count = 0;
-    if (!ae_entity_array(&array, &count)) return 0;
-    if (id < 0 || (uint32_t)id >= count) return 0;
-    if (!ae_deshare_slot((void **)array + id)) return 0;
-    void *ent = ae_entity_ptr(array, count, id);
-    if (!ent) return 0;
-    void *defsub = NULL;
-    if (!ae_read_ptr((const uint8_t *)ent + ENT_DEFSUB_OFF, &defsub) || defsub == NULL) return 0;
-
-    /* Preserve live class/inherit when omitted. Empty replacements can trigger
- * fatal engine declaration errors. */
-    {
-        char newcls[256], newinh[256];
-        int hc = ae_extract_field(patched_text, "class",   newcls, sizeof newcls);
-        int hi = ae_extract_field(patched_text, "inherit", newinh, sizeof newinh);
-        if ((hc || hi) && !sh_iface_class_inherit_ok(id, hc ? newcls : NULL, hi ? newinh : NULL))
-            return 0;
-    }
-
-
-
     uint8_t tmpDef[TEMP_DEF_SIZE];
     memset(tmpDef, 0, sizeof tmpDef);   /* Clear scratch before construction so untouched fields are deterministic. */
     int def_ctored = 0, applied = 0;
+    (void)id;
     __try {
         g_def_ctor(tmpDef); def_ctored = 1;
 
-        if (ae_deserialize_to_obj(patched_text, tmpDef, "idSnapEntity")) {
+        if (ae_deserialize_to_obj(text, tmpDef, "idSnapEntity")) {
 
             void *srcPtr = *(void * const *)(tmpDef + TDEF_SOURCE_OFF);
             void *clsPtr = *(void * const *)(tmpDef + TDEF_CLASS_OFF);
@@ -1019,7 +998,7 @@ static int ae_apply_one(int id, const char *patched_text)
                 __try { clen = clsPtr ? (int)strlen((const char *)clsPtr) : -1; } __except (EXCEPTION_EXECUTE_HANDLER) { clen = -2; }
                 __try { ilen = inhPtr ? (int)strlen((const char *)inhPtr) : -1; } __except (EXCEPTION_EXECUTE_HANDLER) { ilen = -2; }
                 AE_APPLY_DIAG("apply id=%d: textlen=%d srcPtr=%p slen=%d clsPtr=%p clen=%d cls='%.48s' inhPtr=%p ilen=%d inh='%.48s'",
-                              id, (int)strlen(patched_text), srcPtr, slen, clsPtr, clen,
+                              id, (int)strlen(text), srcPtr, slen, clsPtr, clen,
                               (clen >= 0 ? (const char *)clsPtr : "?"), inhPtr, ilen, (ilen >= 0 ? (const char *)inhPtr : "?"));
                 if (slen >= 0) AE_APPLY_DIAG("apply id=%d: src head='%.220s'", id, (const char *)srcPtr);
                 if (slen >= 0 && slen > 200) AE_APPLY_DIAG("apply id=%d: src tail='%.120s'", id, (const char *)srcPtr + slen - 120);
@@ -1050,6 +1029,182 @@ static int ae_apply_one(int id, const char *patched_text)
         applied = 0;
     }
     if (def_ctored) { __try { g_def_dtor(tmpDef); } __except (EXCEPTION_EXECUTE_HANDLER) {} }
+    return applied;
+}
+
+/* The network-static property. The budget sum (VK 0x141201dc0, GL 0x141201190)
+ * subtracts an entity's sedef limits.network when the holder byte +0x320
+ * (entry +0x318) is set. The engine fills that byte only when it reads an entry
+ * from its definition tree (VK 0x1411a3750): it clears it and, when the sedef's
+ * networkStaticPath (sedef +0x108, path count +0x110) is not empty, reads the
+ * bool at that path. Replacing the definition text in place does not reread
+ * the entry, so the text and the counted state diverge until a reload unless
+ * the apply writes the byte itself. The native Static toggle (VK 0x1412328b0)
+ * writes the byte, recomputes the budget and, when turning Static off leaves the
+ * limits-reached byte set, restores the byte and shows the limits toast. */
+#define ENT_NET_STATIC_OFF        0x320   /* holder +0x320 = entry +0x318 */
+#define ENTRY_SEDEF_OFF           0x0     /* entry +0 -> idDeclSnapEditorEntity */
+#define SEDEF_NET_STATIC_PATH_NUM 0x110   /* sedef networkStaticPath (+0x108) path count */
+#define ED_LIMITS_REACHED_OFF     0x236d0 /* byte: a budget is at or over its limit */
+
+enum { AE_STATIC_UNCHANGED = 0, AE_STATIC_WRITTEN = 1, AE_STATIC_REFUSED = 2 };
+
+typedef void (*budget_update_fn)(void *editor);
+static budget_update_fn g_budget_update = NULL;   /* EditorBudgetUpdate; optional guard */
+
+static int ae_is_space(char c) { return c == ' ' || c == '\t' || c == '\r' || c == '\n'; }
+
+/* The isNetworkStatic value the text sets: 1, 0, or -1 when the key is absent,
+ * its value is not a boolean, or two occurrences disagree. Accepts JSON
+ * ("isNetworkStatic": true) and decl (isNetworkStatic = 1;) spellings. */
+static int ae_text_network_static(const char *text)
+{
+    static const char key[] = "isNetworkStatic";
+    const size_t klen = sizeof key - 1;
+    int found = -1;
+    const char *p = text;
+    if (!text) return -1;
+    while ((p = strstr(p, key)) != NULL) {
+        char before = (p == text) ? ' ' : p[-1];
+        const char *q = p + klen;
+        int value;
+        p = q;
+        if (!(before == '"' || before == '{' || before == ',' || before == ';' || ae_is_space(before))) continue;
+        if (*q == '"') q++;
+        while (ae_is_space(*q)) q++;
+        if (*q != ':' && *q != '=') continue;
+        q++;
+        while (ae_is_space(*q)) q++;
+        if (!strncmp(q, "true", 4))       { value = 1; q += 4; }
+        else if (!strncmp(q, "false", 5)) { value = 0; q += 5; }
+        else if (*q == '1' || *q == '0')  { value = *q - '0'; q += 1; }
+        else return -1;
+        if ((*q >= '0' && *q <= '9') || (*q >= 'a' && *q <= 'z') || (*q >= 'A' && *q <= 'Z') ||
+            *q == '_' || *q == '.') return -1;
+        if (found >= 0 && found != value) return -1;
+        found = value;
+    }
+    return found;
+}
+
+/* 1 when the entity's sedef names a networkStaticPath, so the engine itself
+ * reads the property into the byte; 0 when it does not or cannot be read. */
+static int ae_entity_static_supported(const uint8_t *ent)
+{
+    void *sedef = NULL;
+    int num = 0;
+    if (!ent || !ae_read_ptr(ent + ENT_VALID_OFF + ENTRY_SEDEF_OFF, &sedef) || !sedef) return 0;
+    if (!ae_read_u32_safe((const uint8_t *)sedef + SEDEF_NET_STATIC_PATH_NUM, &num)) return 0;
+    return num > 0;
+}
+
+static int ae_write_u8(uint8_t *at, unsigned value)
+{
+    __try { *at = (uint8_t)value; return 1; } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+}
+
+/* Recompute the editor budget now and report the limits-reached byte. The byte
+ * is cleared first: with snapEdit_skipLimits the recompute writes nothing and
+ * the engine's own reader reports 0, which the cleared byte then matches. */
+static int ae_budget_reached(const uint8_t *ed)
+{
+    unsigned reached = 0;
+    if (!ed || !g_budget_update) return 0;
+    __try {
+        *(volatile uint8_t *)(ed + ED_LIMITS_REACHED_OFF) = 0;
+        g_budget_update((void *)ed);
+        reached = *(volatile const uint8_t *)(ed + ED_LIMITS_REACHED_OFF);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 0;
+    }
+    return reached != 0;
+}
+
+/* Bring the byte in line with committed text that sets the property to want
+ * (0 or 1). before is the byte read ahead of the commit. When guard is set and
+ * the write turns Static off, recompute; over a limit, restore before and
+ * report AE_STATIC_REFUSED, leaving the text to the caller. */
+static int ae_static_after_commit(uint8_t *ent, const uint8_t *ed, int want, unsigned before, int guard)
+{
+    if (!ent || want < 0) return AE_STATIC_UNCHANGED;
+    if ((before != 0) == (want != 0)) return AE_STATIC_UNCHANGED;
+    if (!ae_write_u8(ent + ENT_NET_STATIC_OFF, (unsigned)want)) return AE_STATIC_UNCHANGED;
+    if (want == 0 && guard && ae_budget_reached(ed)) {
+        (void)ae_write_u8(ent + ENT_NET_STATIC_OFF, before);
+        return AE_STATIC_REFUSED;
+    }
+    return AE_STATIC_WRITTEN;
+}
+
+static void ae_static_refusal_toast(void)
+{
+    sh_iface *iface = sh_ui_get_iface();
+    if (iface && iface->vtbl && iface->vtbl->toast)
+        iface->vtbl->toast(iface, "Entity edit",
+                           "Turning Static off would put the map over the editor's limits, so the edit was not applied.");
+}
+
+/* Deserialize patched text into a temporary entity, commit it to the live
+ * defsub, then mirror its isNetworkStatic into the counted byte. */
+static int ae_apply_one(int id, const char *patched_text)
+{
+    if (!ae_deserialize_bound() || !ae_commit_bound() || !patched_text) return 0;
+    void *array = NULL; uint32_t count = 0;
+    if (!ae_entity_array(&array, &count)) return 0;
+    if (id < 0 || (uint32_t)id >= count) return 0;
+    if (!ae_deshare_slot((void **)array + id)) return 0;
+    void *ent = ae_entity_ptr(array, count, id);
+    if (!ent) return 0;
+    void *defsub = NULL;
+    if (!ae_read_ptr((const uint8_t *)ent + ENT_DEFSUB_OFF, &defsub) || defsub == NULL) return 0;
+
+    /* Preserve live class/inherit when omitted. Empty replacements can trigger
+ * fatal engine declaration errors. */
+    {
+        char newcls[256], newinh[256];
+        int hc = ae_extract_field(patched_text, "class",   newcls, sizeof newcls);
+        int hi = ae_extract_field(patched_text, "inherit", newinh, sizeof newinh);
+        if ((hc || hi) && !sh_iface_class_inherit_ok(id, hc ? newcls : NULL, hi ? newinh : NULL))
+            return 0;
+    }
+
+    /* Text that omits the property leaves the byte alone. Turning Static off
+     * is guarded like the native toggle, which needs the text to put back. */
+    int want_static = ae_text_network_static(patched_text);
+    unsigned static_before = 0;
+    char *original = NULL;
+    if (want_static >= 0 && ae_entity_static_supported((const uint8_t *)ent) &&
+        ae_read_u8_safe((const uint8_t *)ent + ENT_NET_STATIC_OFF, &static_before)) {
+        if (want_static == 0 && static_before != 0 && g_budget_update) {
+            original = (char *)malloc(APPLY_TEXT_CAP);
+            int got = original ? ae_serialize_to_json("idSnapEntity", (uint8_t *)ent + ENT_VALID_OFF,
+                                                      original, APPLY_TEXT_CAP) : 0;
+            if (original && (got <= 0 || got >= APPLY_TEXT_CAP - 1)) {   /* unreadable or truncated */
+                free(original); original = NULL;
+            }
+            if (!original) backend_log("C2 apply: Static off applied without the limits guard (entity text unreadable)");
+        }
+    } else {
+        want_static = -1;
+    }
+
+    int applied = ae_commit_entity_text(id, defsub, patched_text);
+    if (applied) {
+        int st = ae_static_after_commit((uint8_t *)ent, ae_editor_session(), want_static,
+                                        static_before, original != NULL);
+        if (st == AE_STATIC_REFUSED) {
+            int back = ae_commit_entity_text(id, defsub, original);
+            (void)ae_budget_reached(ae_editor_session());
+            char l[160];
+            _snprintf_s(l, sizeof l, _TRUNCATE,
+                        "C2 apply: id=%d Static off refused over the editor limits; text %s", id,
+                        back ? "restored" : "could not be restored");
+            backend_log(l);
+            ae_static_refusal_toast();
+            applied = 0;
+        }
+    }
+    free(original);
 
     /* Record thread identity and classify the rebuilt source allocation once.
      * The rebuild may reuse an existing buffer. Off-main or unknown identity
@@ -3477,6 +3632,8 @@ int sh_apply_engine_install(const sig_result *results, size_t n, const uint8_t *
     g_decl_rebuild = (decl_src_rebuild_fn)sig_addr_by_name(results, n, "DeclSourceRebuild");
     g_buffer_cmd   = (buffer_cmd_fn)      sig_addr_by_name(results, n, "BufferCommandText");
     g_add_command  = (add_command_fn)     sig_addr_by_name(results, n, "AddCommand");
+    /* Guards an entity edit that turns Static off; without it the edit applies unguarded. */
+    g_budget_update = (budget_update_fn)  sig_addr_by_name(results, n, "EditorBudgetUpdate");
     /* Diagnostic addresses only; kind 2 injects an action without calling either. */
     g_paste_instantiate = (paste_instantiate_fn)sig_addr_by_name(results, n, "PasteInstantiate");
     g_enter_prefab_grab = (enter_prefab_grab_fn)sig_addr_by_name(results, n, "EnterAddPrefabGrab");

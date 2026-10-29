@@ -204,9 +204,185 @@ static void test_start_menu_update_lifecycle(void)
     nav_test_allowed = 0;
 }
 
+/* isNetworkStatic: an entity edit mirrors the property into the counted byte
+ * (holder +0x320) and refuses to turn Static off over the editor limits. The
+ * engine calls are fakes; the text round trip is a pointer hand-off. */
+static int ns_allowed, ns_budget_calls, ns_tight, ns_budget_writes;
+static uint8_t *ns_holder;
+static const char *ns_lexed;
+static char ns_committed[512];
+static void *ns_reflect_vtbl[0x20];
+static void *ns_declmgr = ns_reflect_vtbl;
+
+static void *ns_reflect(void *self) { (void)self; return ns_reflect_vtbl; }
+static void ns_def_ctor(void *self) { (void)self; }
+static void ns_def_dtor(void *self) { (void)self; }
+static void ns_node_ctor(void *self, int kind) { (void)self; (void)kind; }
+static void ns_node_dtor(void *self) { (void)self; }
+static void ns_lex_ctor(void *self) { (void)self; }
+static void *ns_idstr_ctor(void *self, const char *text)
+{
+    *(const char **)((uint8_t *)self + IDSTR_DATA_OFF) = text;
+    *(int *)((uint8_t *)self + IDSTR_LEN_OFF) = (int)strlen(text);
+    return self;
+}
+static void ns_idstr_dtor(void *self) { (void)self; }
+static void ns_idstr_assign(void *dst, const char *text) { (void)dst; (void)text; assert(0); }
+static char ns_lexer(void *lexer, void *src, void *node, int one)
+{
+    (void)lexer; (void)node; (void)one;
+    ns_lexed = *(const char **)((uint8_t *)src + IDSTR_DATA_OFF);
+    return 1;
+}
+static char ns_deser(void *reflect, const char *type, void *dst, void *node, void *arg5, void *unused)
+{
+    (void)reflect; (void)node; (void)arg5; (void)unused;
+    assert(!strcmp(type, "idSnapEntity"));
+    *(const char **)((uint8_t *)dst + TDEF_SOURCE_OFF) = ns_lexed;
+    *(const char **)((uint8_t *)dst + TDEF_CLASS_OFF) = "";
+    *(const char **)((uint8_t *)dst + TDEF_INHERIT_OFF) = "";
+    return 1;
+}
+static void ns_rebuild(void *defsub, const char *src, int rebuild)
+{
+    (void)defsub; (void)rebuild;
+    strcpy_s(ns_committed, sizeof ns_committed, src);
+}
+static void ns_clone(void *base, void *tmp, int one)
+{ (void)tmp; (void)one; assert((uint8_t *)base == ns_holder + ENT_VALID_OFF); }
+static char ns_ser(void *reflect, const char *type, void *src, void *tree, void *arg5, void *unused)
+{ (void)reflect; (void)type; (void)src; (void)tree; (void)arg5; (void)unused; return 1; }
+static void ns_render(void *tree, void *out)
+{ (void)tree; ns_idstr_ctor(out, ns_committed); }
+/* Network usage 30 against a limit of 31: the entity's 1 reaches it. */
+static void ns_budget(void *editor)
+{
+    uint8_t *ed = (uint8_t *)editor;
+    ns_budget_calls++;
+    if (!ns_budget_writes) return;              /* snapEdit_skipLimits: nothing written */
+    ed[ED_LIMITS_REACHED_OFF] = (uint8_t)(ns_tight && ns_holder[ENT_NET_STATIC_OFF] == 0);
+}
+
+static void test_network_static_edit(void)
+{
+    static const char off_json[] = "{\"entityDef\":{\"state\":{\"edit\":{\"isNetworkStatic\":false}}}}";
+    static const char on_json[]  = "{\"entityDef\":{\"state\":{\"edit\":{\"isNetworkStatic\": true}}}}";
+    static const char none_json[] = "{\"entityDef\":{\"state\":{\"edit\":{\"displayName\":\"box\"}}}}";
+    uint8_t *editor = calloc(1, ED_LIMITS_REACHED_OFF + 16);
+    uint8_t map[0x700] = {0}, sedef[0x400] = {0}, defsub[0x100] = {0};
+    void *array[2] = {0};
+    const uint8_t *previous = g_editor;
+    assert(editor);
+
+    /* The text scan. */
+    assert(ae_text_network_static(off_json) == 0);
+    assert(ae_text_network_static(on_json) == 1);
+    assert(ae_text_network_static(none_json) == -1);
+    assert(ae_text_network_static("edit = { isNetworkStatic = 1; }") == 1);
+    assert(ae_text_network_static("edit = { isNetworkStatic = false; }") == 0);
+    assert(ae_text_network_static("{\"isNetworkStatic\":\"true\"}") == -1);
+    assert(ae_text_network_static("{\"isNetworkStaticX\":true}") == -1);
+    assert(ae_text_network_static("{\"notisNetworkStatic\":true}") == -1);
+    assert(ae_text_network_static("{\"isNetworkStatic\":true,\"a\":{\"isNetworkStatic\":false}}") == -1);
+    assert(ae_text_network_static("{\"isNetworkStatic\":true,\"a\":{\"isNetworkStatic\":true}}") == 1);
+    assert(ae_text_network_static("{\"isNetworkStatic\":truest}") == -1);
+    assert(ae_text_network_static(NULL) == -1);
+
+    /* A synthetic entity: holder refcount 1, entry +0 the sedef, holder +0x158 the defsub. */
+    ns_holder = calloc(1, 0x6f8);
+    assert(ns_holder);
+    *(int *)ns_holder = 1;
+    *(void **)(ns_holder + ENT_VALID_OFF + ENTRY_SEDEF_OFF) = sedef;
+    *(void **)(ns_holder + ENT_DEFSUB_OFF) = defsub;
+    *(int *)(sedef + SEDEF_NET_STATIC_PATH_NUM) = 1;
+    array[1] = ns_holder;
+    *(void **)(map + ARR_ENT_ARRAY_OFF) = array;
+    *(uint32_t *)(map + ARR_ENT_COUNT_OFF) = 2;
+    *(void **)(editor + ED_MAP_OBJ_OFF) = map;
+    g_editor = editor;
+    ns_reflect_vtbl[VSLOT_REFLECT_ACCESSOR / sizeof(void *)] = (void *)ns_reflect;
+    ns_declmgr = ns_reflect_vtbl;
+    ns_allowed = 1;
+    g_def_ctor = ns_def_ctor; g_def_dtor = ns_def_dtor;
+    g_node_ctor = ns_node_ctor; g_node_dtor = ns_node_dtor; g_lex_ctor = ns_lex_ctor;
+    g_idstr_ctor = ns_idstr_ctor; g_idstr_dtor = ns_idstr_dtor; g_idstr_assign = ns_idstr_assign;
+    g_lexer = ns_lexer; g_deser = ns_deser; g_decl_rebuild = ns_rebuild;
+    g_entity_clone = ns_clone; g_ser = ns_ser; g_render = ns_render;
+    g_budget_update = ns_budget; ns_budget_writes = 1;
+    assert(ae_entity_static_supported(ns_holder));
+
+    /* false clears the byte; the guard recomputes once and allows it. */
+    ns_holder[ENT_NET_STATIC_OFF] = 1;
+    strcpy_s(ns_committed, sizeof ns_committed, "previous");
+    assert(ae_apply_one(1, off_json) == 1);
+    assert(ns_holder[ENT_NET_STATIC_OFF] == 0 && ns_budget_calls == 1);
+    assert(!strcmp(ns_committed, off_json));
+    /* true sets it without a recompute; it only lowers usage. */
+    assert(ae_apply_one(1, on_json) == 1);
+    assert(ns_holder[ENT_NET_STATIC_OFF] == 1 && ns_budget_calls == 1);
+    /* Text without the property leaves the byte alone either way. */
+    assert(ae_apply_one(1, none_json) == 1 && ns_holder[ENT_NET_STATIC_OFF] == 1);
+    ns_holder[ENT_NET_STATIC_OFF] = 0;
+    assert(ae_apply_one(1, none_json) == 1 && ns_holder[ENT_NET_STATIC_OFF] == 0);
+    /* Already off: no transition, no recompute, even at the limit. */
+    ns_tight = 1;
+    assert(ae_apply_one(1, off_json) == 1 && ns_holder[ENT_NET_STATIC_OFF] == 0 && ns_budget_calls == 1);
+
+    /* Over the limit: the byte and the text go back and the apply reports 0. */
+    ns_holder[ENT_NET_STATIC_OFF] = 1;
+    strcpy_s(ns_committed, sizeof ns_committed, "{\"entityDef\":{\"state\":{\"edit\":{}}}}");
+    assert(ae_apply_one(1, off_json) == 0);
+    assert(ns_holder[ENT_NET_STATIC_OFF] == 1);
+    assert(!strcmp(ns_committed, "{\"entityDef\":{\"state\":{\"edit\":{}}}}"));
+    assert(ns_budget_calls == 3 && editor[ED_LIMITS_REACHED_OFF] == 0);
+
+    /* snapEdit_skipLimits: the recompute writes nothing, a stale reached byte
+     * is cleared, and the edit applies as the engine's gates would allow. */
+    ns_budget_writes = 0;
+    editor[ED_LIMITS_REACHED_OFF] = 1;
+    assert(ae_apply_one(1, off_json) == 1 && ns_holder[ENT_NET_STATIC_OFF] == 0);
+    assert(editor[ED_LIMITS_REACHED_OFF] == 0);
+    ns_budget_writes = 1;
+
+    /* Without the budget function the edit applies unguarded. */
+    g_budget_update = NULL;
+    ns_holder[ENT_NET_STATIC_OFF] = 1;
+    assert(ae_apply_one(1, off_json) == 1 && ns_holder[ENT_NET_STATIC_OFF] == 0);
+    g_budget_update = ns_budget;
+
+    /* A sedef with an empty networkStaticPath: the engine never reads the
+     * property, so neither does the apply. */
+    *(int *)(sedef + SEDEF_NET_STATIC_PATH_NUM) = 0;
+    assert(!ae_entity_static_supported(ns_holder));
+    ns_holder[ENT_NET_STATIC_OFF] = 0;
+    assert(ae_apply_one(1, on_json) == 1 && ns_holder[ENT_NET_STATIC_OFF] == 0);
+
+    /* The byte helper alone. */
+    *(int *)(sedef + SEDEF_NET_STATIC_PATH_NUM) = 1;
+    ns_tight = 0;
+    ns_holder[ENT_NET_STATIC_OFF] = 1;
+    assert(ae_static_after_commit(ns_holder, editor, -1, 1, 1) == AE_STATIC_UNCHANGED);
+    assert(ae_static_after_commit(ns_holder, editor, 1, 1, 1) == AE_STATIC_UNCHANGED);
+    assert(ae_static_after_commit(ns_holder, editor, 0, 1, 1) == AE_STATIC_WRITTEN && ns_holder[ENT_NET_STATIC_OFF] == 0);
+    ns_tight = 1;
+    ns_holder[ENT_NET_STATIC_OFF] = 1;
+    assert(ae_static_after_commit(ns_holder, editor, 0, 1, 1) == AE_STATIC_REFUSED && ns_holder[ENT_NET_STATIC_OFF] == 1);
+    assert(ae_static_after_commit(ns_holder, editor, 0, 1, 0) == AE_STATIC_WRITTEN && ns_holder[ENT_NET_STATIC_OFF] == 0);
+
+    g_def_ctor = NULL; g_def_dtor = NULL; g_node_ctor = NULL; g_node_dtor = NULL; g_lex_ctor = NULL;
+    g_idstr_ctor = NULL; g_idstr_dtor = NULL; g_idstr_assign = NULL;
+    g_lexer = NULL; g_deser = NULL; g_decl_rebuild = NULL;
+    g_entity_clone = NULL; g_ser = NULL; g_render = NULL; g_budget_update = NULL;
+    ns_allowed = 0; ns_tight = 0;
+    g_editor = previous;
+    free(ns_holder); ns_holder = NULL;
+    free(editor);
+}
+
 int main(void)
 {
     snapshot_dimensions_follow_array_order();
+    test_network_static_edit();
     unsigned char editor[0x20500] = {0};
     sh_apply_item item = {0, 1, "original"};
     g_editor = editor;
@@ -299,7 +475,7 @@ int main(void)
 
 /* Dependencies outside the dispatch boundary must never run in this test. */
 uintptr_t sig_addr_by_name(const sig_result *r, size_t n, const char *name) { (void)r; (void)n; (void)name; assert(0); return 0; }
-void *sh_typeinfo_get_declmgr(void) { assert(0); return NULL; }
+void *sh_typeinfo_get_declmgr(void) { assert(ns_allowed); return &ns_declmgr; }
 int sh_iface_class_inherit_ok(int id, const char *c, const char *h) { (void)id; (void)c; (void)h; assert(0); return 0; }
 const char *ie_resolve_id_string(int id, char *buf, int cap) { (void)id; (void)buf; (void)cap; assert(0); return NULL; }
 uintptr_t glb_resolve(const uint8_t *base, const char *name, glb_status *status) { (void)base; (void)name; (void)status; assert(0); return 0; }

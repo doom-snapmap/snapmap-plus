@@ -287,6 +287,12 @@ successful rollback; `-2` means rollback also faulted. Only complete success
 permits a dependent source rebuild. SEH contains memory faults; it cannot promise
 that every native engine operation can be undone.
 
+An entity edit whose text sets `isNetworkStatic` on an entity whose palette
+definition names a `networkStaticPath` also writes the network-static byte the
+editor budget counts (entity holder +0x320), which replacing the definition
+text does not reread, and turning Static off is refused and rolled back, as the
+native toggle does, when the recomputed budget is then at or over a limit.
+
 Prefab Load/Place stages data and queues the native paste action after checking
 editor state and the copy/paste cvar. Queue acceptance does not confirm that the
 engine has entered placement mode. The engine consumes that action later.
