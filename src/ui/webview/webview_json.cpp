@@ -61,6 +61,42 @@ static size_t find_value(const std::wstring &j, const wchar_t *key)
     }
     return std::wstring::npos;
 }
+/* Decode the string body starting just after its opening quote; returns the index after the
+ * closing quote (or the end of the text). */
+static size_t read_string_body(const std::wstring &j, size_t p, std::wstring &out)
+{
+    out.clear();
+    while (p < j.size()) {
+        wchar_t c = j[p++];
+        if (c == L'"') break;
+        if (c == L'\\' && p < j.size()) {
+            wchar_t e = j[p++];
+            switch (e) {
+            case L'"': out += L'"'; break; case L'\\': out += L'\\'; break; case L'/': out += L'/'; break;
+            case L'n': out += L'\n'; break; case L'r': out += L'\r'; break; case L't': out += L'\t'; break;
+            case L'b': out += L'\b'; break; case L'f': out += L'\f'; break;
+            case L'u': if (p + 4 <= j.size()) { wchar_t h[5] = {j[p],j[p+1],j[p+2],j[p+3],0}; out += (wchar_t)wcstoul(h, nullptr, 16); p += 4; } break;
+            default: out += e; break;
+            }
+        } else out += c;
+    }
+    return p;
+}
+void get_string_array(const std::wstring &j, const wchar_t *key, std::vector<std::wstring> &out)
+{
+    out.clear();
+    size_t p = find_value(j, key);
+    if (p == std::wstring::npos) return;
+    while (p < j.size() && j[p] != L'[') p++;
+    if (p >= j.size()) return; p++;
+    while (p < j.size() && j[p] != L']') {
+        while (p < j.size() && (j[p] == L' ' || j[p] == L',' || j[p] == L'\t' || j[p] == L'\r' || j[p] == L'\n')) p++;
+        if (p >= j.size() || j[p] != L'"') break;
+        std::wstring s;
+        p = read_string_body(j, p + 1, s);
+        out.push_back(s);
+    }
+}
 bool get_string(const std::wstring &j, const wchar_t *key, std::wstring &out)
 {
     size_t p = find_value(j, key);

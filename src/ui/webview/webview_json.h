@@ -12,5 +12,7 @@ std::string to_utf8(const std::wstring &value);
 bool get_string(const std::wstring &json, const wchar_t *key, std::wstring &out);
 bool get_int(const std::wstring &json, const wchar_t *key, int *out);
 void get_int_array(const std::wstring &json, const wchar_t *key, std::vector<int> &out);
+// Strings of a JSON array value; a non-string element ends the read.
+void get_string_array(const std::wstring &json, const wchar_t *key, std::vector<std::wstring> &out);
 bool get_double(const std::wstring &json, const wchar_t *key, double *out);
 }

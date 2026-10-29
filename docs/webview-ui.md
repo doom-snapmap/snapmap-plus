@@ -74,6 +74,14 @@ rename, delete and folder operations are native filesystem work. Feedback and
 crash submission use a short-lived HTTPS worker in the host and the
 [feedback pipeline](feedback.md).
 
+## Driving the page from a test
+
+A file `%LOCALAPPDATA%\snapmap-plus\devtools-port` containing one port number (1024 to
+65535) makes the host open Chromium's remote debugging on `127.0.0.1` at that port when
+the window is created; the log says `devtools: remote debugging on ...`. Nothing is opened
+when the file is absent or malformed. The research daemon's `webview` step writes and
+removes this file and drives the page over it. Remove the file when you are done.
+
 ## Threading and polling
 
 WebView callbacks capture pending edits. The host applies them from its UI

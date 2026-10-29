@@ -116,6 +116,15 @@ static const config_descriptor g_registry[] = {
         SH_CONFIG_UI_READ | SH_CONFIG_UI_WRITE,
         NULL,
         normalize_bool
+    },
+    {
+        /* The Prefabs tab folders the user has open; every other folder
+         * starts collapsed.
+         */
+        "prefabs.open_folders", SH_JSON_ARRAY, "[]",
+        SH_CONFIG_UI_READ | SH_CONFIG_UI_WRITE,
+        NULL,
+        NULL
     }
 };
 

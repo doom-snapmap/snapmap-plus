@@ -392,11 +392,18 @@
   .pf-caret .ui-icon { width: 12px; height: 12px; }
   .pf-folder:not(.pf-open) .pf-folder-body { display: none; }
   .pf-folder:not(.pf-open) .pf-caret { transform: rotate(-90deg); }
-  .pf-folder-body { padding-left: 14px; }
+  /* A guide line runs from under the caret (6px padding + half the 12px caret) down the open
+     folder's rows, so each family reads as one block. */
+  .pf-folder-body { position: relative; margin-left: 12px; padding-left: 6px; }
+  .pf-folder-body::before { content: ""; position: absolute; left: 0; top: 0; bottom: 2px; width: 1px; background: var(--border2); pointer-events: none; }
+  .pf-fcount { margin-left: 6px; color: var(--muted); font-size: 11px; font-weight: 400; }
+  .pf-folder-head.selected { background: var(--sel); color: var(--selText); }
+  .pf-folder-head.selected .pf-caret, .pf-folder-head.selected .pf-fcount, .pf-folder-head.selected .pf-folder-del { color: var(--selText); }
   .pf-item { padding: 3px 8px; border-radius: 4px; color: var(--link); white-space: nowrap; cursor: default; }
   .pf-item:hover { background: var(--panel2); }
   .pf-item.selected { background: var(--sel); color: var(--selText); }
-  .pf-item.dragging { opacity: 0.4; }
+  .pf-item.dragging, .pf-folder-head.dragging { opacity: 0.4; }
+  .pf-drag-ghost { position: fixed; top: -1000px; left: -1000px; display: none; padding: 3px 10px; border-radius: 4px; background: var(--sel); color: var(--selText); font-size: 12px; white-space: nowrap; }
   .pf-folder.drop-target > .pf-folder-head { background: var(--sel); color: var(--selText); }
   #prefabTree.drop-target-root { outline: 1px dashed var(--accent); outline-offset: -1px; }
   .pf-folder-del { width: 20px; height: 20px; margin-left: auto; padding: 0; border: 0; background: transparent; color: var(--muted); cursor: pointer; opacity: 0; }

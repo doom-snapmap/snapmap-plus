@@ -184,7 +184,7 @@ if ($Only.Count) { exit 0 }
 
 $node = Get-Command node -ErrorAction SilentlyContinue
 if (-not $node) { Write-Host "[FAIL] node not found (required for decl editor tests)"; exit 1 }
-$jsTests = @("decl_overlay_test.js", "decl_index_order_test.js", "decl_enum_values_test.js", "decl_language_test.js", "ui_assets_test.js", "asset_browser_test.js", "entity_list_test.js", "prefab_transform_test.js", "prefab_viewport_contract_test.js", "window_chrome_contract_test.js", "feedback_channel_test.js", "feedback_renderer_test.js", "feedback_game_test.js", "issues_retest_test.js", "worker_body_test.js", "rawmap_menu_test.js", "delete_result_test.js")
+$jsTests = @("decl_overlay_test.js", "decl_index_order_test.js", "decl_enum_values_test.js", "decl_language_test.js", "ui_assets_test.js", "asset_browser_test.js", "entity_list_test.js", "prefab_transform_test.js", "prefab_viewport_contract_test.js", "window_chrome_contract_test.js", "feedback_channel_test.js", "feedback_renderer_test.js", "feedback_game_test.js", "issues_retest_test.js", "worker_body_test.js", "rawmap_menu_test.js", "delete_result_test.js", "prefab_tree_test.js")
 foreach ($jsTest in $jsTests) {
     & $node.Source (Join-Path $here $jsTest)
     if ($LASTEXITCODE -ne 0) { Write-Host "[FAIL] $jsTest (exit $LASTEXITCODE)"; exit 1 }

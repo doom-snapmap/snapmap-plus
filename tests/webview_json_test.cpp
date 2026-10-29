@@ -41,6 +41,18 @@ int main()
     CHECK(get_string(named, L"name", value) && value == L"body");
     const std::wstring moved = L"{\"cmd\":\"movePrefabToFolder\",\"name\":\"toFolder\",\"toFolder\":\"dst\"}";
     CHECK(get_string(moved, L"toFolder", value) && value == L"dst");
+    std::vector<std::wstring> names;
+    const std::wstring batch = L"{\"cmd\":\"movePrefabs\",\"names\":[\"a b\", \"q\\\"uote\",\"\\u00e9\"],\"fromFolders\":[\"\",\"f\",\"g\"],\"toFolder\":\"dst\"}";
+    get_string_array(batch, L"names", names);
+    CHECK(names.size() == 3 && names[0] == L"a b" && names[1] == L"q\"uote" && names[2] == L"\x00e9");
+    get_string_array(batch, L"fromFolders", names);
+    CHECK(names.size() == 3 && names[0].empty() && names[1] == L"f" && names[2] == L"g");
+    get_string_array(L"{\"names\":[]}", L"names", names);
+    CHECK(names.empty());
+    get_string_array(L"{\"names\":[1,\"x\"]}", L"names", names);
+    CHECK(names.empty());
+    get_string_array(batch, L"missing", names);
+    CHECK(names.empty());
     std::printf("webview_json_test: %d failures\n", failed);
     return failed != 0;
 }
