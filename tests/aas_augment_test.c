@@ -2388,15 +2388,18 @@ static void test_rotated_ramps_join_native_floor(void)
         for(i=0;i<nr;i++) {
             const unsigned char *reach=sh_aas_rec_const(a,SH_AAS_L_REACHABILITIES,i);
             unsigned from=sh_aas_get_u16(reach,6),to=sh_aas_get_u16(reach,8);
+            unsigned floor_end=rep.areas_before+(unsigned)rep.floor_pieces_added;
             if(sh_aas_get_u32(reach,0)!=0x20)continue;
-            if(from>=2&&to==1) {
+            /* The floor under the ramp is cut into pieces: any of them is the
+             * native floor the ramp joins. */
+            if(from>=floor_end&&to>0&&to<floor_end) {
                 double start[2]={sh_aas_get_i16(reach,12),sh_aas_get_i16(reach,14)};
                 double d[2]={sh_aas_get_i16(reach,18)-start[0],sh_aas_get_i16(reach,20)-start[1]},lo,hi;
                 CHECK(floor_line_interval(a,from,start,d,&lo,&hi));
                 CHECK(!wall_at_floor_point(a,from,start[0]+hi*d[0],start[1]+hi*d[1]));
                 down++;
             }
-            if(from==1&&to>=2)up++;
+            if(from>0&&from<floor_end&&to>=floor_end)up++;
         }
         if(!down||!up)printf("native floor join missing: radius %g slope %g yaw %g pieces %d\n",radii[r],angles[g],yaws[y],rep.platform_count);
         CHECK(down>0);CHECK(up>0);
@@ -2686,11 +2689,13 @@ static void test_a_climb_run_up_may_cross_a_floor_seam(void)
     mkbox_yawed(&p, 0, 0, 330, 290, 0, 64.0f, 0.0f, "step");
     CHECK(sh_aas_augment(a, &p, 1, &o, &rep) == 1);
     CHECK(rep.platforms[0].emitted);
-    n = floor_climbs_onto(a, rep.platforms[0].area, 4, &mask, &lo, &hi);
+    /* The floor under the step is cut into pieces, so the slabs' areas are
+     * the shipped three plus those pieces. */
+    n = floor_climbs_onto(a, rep.platforms[0].area, rep.areas_before + (unsigned)rep.floor_pieces_added,
+                          &mask, &lo, &hi);
     CHECK_MSG(n > 0, "the step is climbable from the floor");
-    CHECK_MSG(mask & (1 << 3), "the east face is climbed from the east slab");
-    CHECK_MSG(mask & (1 << 1), "the west face is climbed from the west slab");
-    CHECK_MSG(hi > 168.0 && lo < -168.0, "and those run-ups start past the seams");
+    CHECK_MSG(hi > 168.0, "the east face is climbed from the east slab, past the seam");
+    CHECK_MSG(lo < -168.0, "the west face is climbed from the west slab, past the seam");
     {
         unsigned i, nr = sh_aas_count(a, SH_AAS_L_REACHABILITIES);
         int bad = 0;
@@ -2729,7 +2734,8 @@ static void test_a_long_face_offers_climbs_along_its_length(void)
     for (i = 0; i < nr; i++) {
         const unsigned char *r = sh_aas_rec_const(a, SH_AAS_L_REACHABILITIES, i);
         double x = sh_aas_get_i16(r, 12), y = sh_aas_get_i16(r, 14);
-        if (!(sh_aas_get_u32(r, 0) >> 16) || sh_aas_get_u16(r, 6) != 1) continue;
+        if (!(sh_aas_get_u32(r, 0) >> 16) ||
+            sh_aas_get_u16(r, 6) >= rep.areas_before + (unsigned)rep.floor_pieces_added) continue;
         if (y > 75.0 && nn < 32) north[nn++] = x;
         if (x > 500.0 && ne < 32) east[ne++] = y;
     }
@@ -2803,7 +2809,8 @@ static void test_no_floor_climb_lands_on_a_cut_inside_its_own_box(void)
         const unsigned char *r = sh_aas_rec_const(a, SH_AAS_L_REACHABILITIES, i);
         unsigned from = sh_aas_get_u16(r, 6), to = sh_aas_get_u16(r, 8);
         int on_step1 = 0;
-        if (!(sh_aas_get_u32(r, 0) >> 16) || from != 1) continue;
+        if (!(sh_aas_get_u32(r, 0) >> 16) || !from ||
+            from >= rep.areas_before + (unsigned)rep.floor_pieces_added) continue;
         for (k = 0; k < rep.platform_count; k++)
             if (rep.platforms[k].source == 0 && rep.platforms[k].area == (int)to) on_step1 = 1;
         if (!on_step1) continue;
@@ -2827,10 +2834,127 @@ static void test_no_floor_climb_lands_on_a_cut_inside_its_own_box(void)
     sh_aug_report_free(&rep);
     sh_aas_free(a);
 }
+/* The area polygon of `area`, as the augmenter wrote it. */
+static int area_polygon(sh_aas *a, unsigned area, double out[][2], int cap)
+{
+    const unsigned char *ar = sh_aas_rec_const(a, SH_AAS_L_AREAS, area);
+    unsigned n, first, i;
+    if (!ar) return 0;
+    n = sh_aas_get_u16(ar, 6); first = sh_aas_get_u32(ar, 8);
+    if ((int)n > cap) return 0;
+    for (i = 0; i < n; i++) {
+        int ei = sh_aas_get_i32(sh_aas_rec_const(a, SH_AAS_L_EDGEINDEX, first + i), 0);
+        const unsigned char *e = sh_aas_rec_const(a, SH_AAS_L_EDGES, (unsigned)abs(ei));
+        const unsigned char *v = sh_aas_rec_const(a, SH_AAS_L_VERTICES, sh_aas_get_u32(e, ei < 0 ? 4 : 0));
+        out[i][0] = sh_aas_get_f32(v, 0); out[i][1] = sh_aas_get_f32(v, 4);
+    }
+    return (int)n;
+}
+
+static int point_in_footprint(const sh_aug_platform *p, double x, double y, double grow)
+{
+    int i;
+    for (i = 0; i < 4; i++) {
+        const float *a = p->c[i], *b = p->c[(i + 1) % 4];
+        double ex = b[0] - a[0], ey = b[1] - a[1], len = sqrt(ex * ex + ey * ey);
+        /* clockwise: inside has (ey, -ex).(p - a) >= 0 */
+        if ((ey * (x - a[0]) - ex * (y - a[1])) / len < -grow) return 0;
+    }
+    return 1;
+}
+
+/* The module floor under the first two steps of the user's staircase is cut
+ * around them, as a box top is cut around a solid standing on it: no floor
+ * area reaches under either step (step 2 hangs at 63, below the 80-unit
+ * agent), the ground under them still resolves to a floor area, every floor
+ * piece resolves at its centre and walks to the others, and the step keeps
+ * its climbs. A box the agent walks under leaves the floor whole. */
+static void test_the_floor_is_cut_around_the_boxes_on_it(void)
+{
+    static const float seams[2] = { -168.0f, 168.0f };
+    static const float s1[4][2] = { { 162.321f, 1581.123f }, { -165.658f, 1584.897f },
+                                    { -162.321f, 1874.878f }, { 165.657f, 1871.104f } };
+    static const float s2[4][2] = { { -75.754f, 1269.929f }, { -325.081f, 1483.049f },
+                                    { -136.652f, 1703.491f }, { 112.675f, 1490.371f } };
+    sh_aas *a = load_slabs(seams, 2);
+    sh_aug_platform p[2];
+    sh_aug_report rep;
+    sh_aug_opts o = { SH_AUG_FALL_AUTO, 1, SH_AUG_TRAVERSAL_AUTO, 0 };
+    unsigned floor_end, ar, i, nr;
+    int k, inside = 0, unresolved = 0, reached[64] = {0}, grew = 1;
+    printf("the module floor is cut around the boxes standing on it\n");
+    if (!a) { CHECK(0); return; }
+    load_synthetic_traversal_table();
+    mkbox_yawed(&p[0], 0, 0, 10, 10, 0, 64.25f, 0.25f, "step 1");
+    mkbox_yawed(&p[1], 0, 0, 10, 10, 0, 127.024f, 63.024f, "step 2");
+    for (k = 0; k < 4; k++) {
+        p[0].c[k][0] = s1[k][0]; p[0].c[k][1] = s1[k][1];
+        p[1].c[k][0] = s2[k][0]; p[1].c[k][1] = s2[k][1];
+    }
+    CHECK(sh_aas_augment(a, p, 2, &o, &rep) == 1);
+    CHECK_MSG(rep.floors_cut >= 2, "the slabs under the steps are cut");
+    CHECK_MSG(rep.floor_pieces_added > 0, "into pieces");
+    floor_end = rep.areas_before + (unsigned)rep.floor_pieces_added;
+    CHECK(floor_end < 64);
+    for (ar = 1; ar < floor_end; ar++) {
+        double poly[64][2], cx = 0, cy = 0;
+        int n = area_polygon(a, ar, poly, 64), v;
+        CHECK(n >= 3);
+        for (v = 0; v < n; v++) {
+            cx += poly[v][0] / n; cy += poly[v][1] / n;
+            /* A vertex may touch the cut, never stand inside either step. */
+            if (point_in_footprint(&p[0], poly[v][0], poly[v][1], -1.0) ||
+                point_in_footprint(&p[1], poly[v][0], poly[v][1], -1.0)) inside++;
+        }
+        if (point_in_footprint(&p[0], cx, cy, 0) || point_in_footprint(&p[1], cx, cy, 0)) inside++;
+        if (sh_aas_point_area(a, (float)cx, (float)cy, 2.0f) != (int)ar) unresolved++;
+    }
+    CHECK_MSG(inside == 0, "no floor area reaches under a step");
+    CHECK_MSG(unresolved == 0, "every floor piece resolves at its own centre");
+    k = sh_aas_point_area(a, 0.0f, 1728.0f, 2.0f);
+    CHECK_MSG(k > 0 && k < (int)rep.areas_before, "the ground under a step still resolves to its floor");
+    /* Walk connectivity across the cut floor. */
+    nr = sh_aas_count(a, SH_AAS_L_REACHABILITIES);
+    reached[1] = 1;
+    while (grew) {
+        grew = 0;
+        for (i = 0; i < nr; i++) {
+            const unsigned char *r = sh_aas_rec_const(a, SH_AAS_L_REACHABILITIES, i);
+            unsigned f = sh_aas_get_u16(r, 6), t = sh_aas_get_u16(r, 8);
+            if (sh_aas_get_u32(r, 0) != 0x20u || f >= floor_end || t >= floor_end) continue;
+            if (reached[f] && !reached[t]) { reached[t] = 1; grew = 1; }
+        }
+    }
+    for (ar = 1; ar < floor_end; ar++) CHECK_MSG(reached[ar], "every floor piece walks to the rest");
+    {
+        int mask = 0;
+        CHECK_MSG(floor_climbs_onto(a, rep.platforms[0].area, floor_end, &mask, NULL, NULL) > 0 ||
+                  floor_climbs_onto(a, rep.platforms[1].area, floor_end, &mask, NULL, NULL) > 0,
+                  "step 1 is still climbed from the floor");
+    }
+    {
+        size_t len; char err[192]; unsigned char *bytes = sh_aas_write(a, &len);
+        CHECK(bytes != NULL);
+        if (bytes) { CHECK_MSG(sh_navmesh_validate_aas(bytes, len, err, sizeof err), err);
+                     HeapFree(GetProcessHeap(), 0, bytes); }
+    }
+    sh_aug_report_free(&rep);
+    sh_aas_free(a);
+
+    /* High enough to walk under: the floor stays as shipped. */
+    a = load_slabs(seams, 2);
+    if (!a) { CHECK(0); return; }
+    mkbox_yawed(&p[0], 0, 1700, 330, 290, 0, 164.0f, 100.0f, "canopy");
+    CHECK(sh_aas_augment(a, p, 1, &o, &rep) == 1);
+    CHECK_MSG(rep.floors_cut == 0 && rep.floor_pieces_added == 0, "a canopy leaves the floor whole");
+    sh_aug_report_free(&rep);
+    sh_aas_free(a);
+}
 
 int main(void)
 {
     printf("aas_augment_test\n");
+    test_the_floor_is_cut_around_the_boxes_on_it();
     test_no_floor_climb_lands_on_a_cut_inside_its_own_box();
     test_a_climb_run_up_may_cross_a_floor_seam();
     test_a_long_face_offers_climbs_along_its_length();

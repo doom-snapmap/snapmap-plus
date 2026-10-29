@@ -123,6 +123,14 @@ typedef struct sh_aug_report {
     int      blamed[SH_AUG_MAX_BLAMED];
     int      blamed_count;
     int      anchors_reduced;           /* alternative basic/traversal samples removed */
+    /* Module floor areas cut around the boxes standing on them (or hanging
+     * lower over them than this class is tall), the areas their pieces added,
+     * floors left whole because their pieces did not fit, and shipped routes
+     * removed because an endpoint lay in the cut-out ground. */
+    int      floors_cut;
+    int      floor_pieces_added;
+    int      floors_left_whole;
+    int      shipped_routes_removed;
     int      climbs_declined;           /* climbs/leaps omitted because a source area already owns traversal points */
 } sh_aug_report;
 

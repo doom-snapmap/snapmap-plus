@@ -989,6 +989,9 @@ static void bake_run(const char *name, const sh_aug_platform *in_plats, int in_c
         SH_PERF_BEGIN(ta);
         augmented = sh_aas_augment(model, plats, plat_count, &opts, &rep);
         SH_PERF_END(SH_PERF_BAKE_AUGMENT, ta);
+        /* Pieces of the cut module floor come first among the added areas;
+         * the preview draws only what stands on the boxes. */
+        o->first_area += (unsigned)rep.floor_pieces_added;
         /* The loader refuses a tree past 128 deep. Rather than lose the copy,
          * keep three quarters of the floors (every wall stays) and try again,
          * a few times at most; what was left out is reported. */
@@ -1264,6 +1267,13 @@ static void bake_run(const char *name, const sh_aug_platform *in_plats, int in_c
         if (cut)
             bake_append(o->reason, sizeof o->reason,
                         "; %d volume(s) cut around the solids standing in them", cut);
+        if (rep.floors_cut)
+            bake_append(o->reason, sizeof o->reason,
+                        "; floor cut around the boxes on it (%d area(s), %d piece(s) added)",
+                        rep.floors_cut, rep.floor_pieces_added);
+        if (rep.floors_left_whole)
+            bake_append(o->reason, sizeof o->reason,
+                        "; %d floor area(s) under too many boxes left whole", rep.floors_left_whole);
         /* Keep optional notes last so truncation preserves the cut-volume count. */
         if (rep.dead_gaps)
             bake_append(o->reason, sizeof o->reason,

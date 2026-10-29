@@ -40,6 +40,25 @@ int sh_nav_geometry_build_budget(const sh_aug_platform *boxes, int count,
     int *source, int *pieces, unsigned char *buried, int capacity,
     sh_nav_geometry_stats *stats);
 
+/* Cut walkable support polygons -- a module's own floor areas -- around the
+ * marked solids standing on them or hanging lower over them than the agent is
+ * tall, by exactly the rule a box face is cut around the solids standing in
+ * it: the occupied standing space of each solid, grown by the agent's
+ * clearance, is subtracted and the remainder merged into convex pieces.
+ * A solid whose top is within step height of the support, or whose underside
+ * is at least the agent's height above it, leaves the support whole.
+ * Walls that only block (obstacle_only) are not cut out.
+ *
+ * Pieces of support[i] go to out[] with owner[k] = i; cut[i] is 1 when support
+ * i lost ground, 0 when it is untouched (and then it emits nothing), and 2 when
+ * its pieces would not fit `per_support` and it was left whole. Returns the
+ * piece count, or -1 for invalid input. */
+int sh_nav_geometry_cut_support(const sh_aug_platform *boxes, int count,
+    const sh_aug_platform *support, int support_count,
+    double radius, double height, double floor_cos, double step,
+    sh_aug_platform *out, int *owner, unsigned char *cut, int capacity,
+    int per_support);
+
 /* Continuous segment/solid test for a standing agent. Support solids at the
  * two traversal endpoints may be excluded by their source indices. */
 int sh_nav_geometry_path_clear(const sh_aug_platform *boxes, int count,

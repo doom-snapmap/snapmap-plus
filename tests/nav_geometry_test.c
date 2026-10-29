@@ -192,9 +192,98 @@ static void test_rotated_obstacle_occupancy(void)
     }
     printf("rotated obstacle body-point checks: %d\n",checked);
 }
+/* A module floor is cut around the marked boxes on it by the same rule as a
+ * box top: the cut is the box's occupied standing space grown by the agent's
+ * square body, nothing for a box the agent walks under or steps onto. */
+static double support_area_after(int nboxes, double r, double h, double step, int *cut_state)
+{
+    sh_aug_platform floor;
+    static sh_aug_platform out[256];
+    int owner[256], n, i, k;
+    unsigned char cut[1];
+    double sum = 0;
+    memset(&floor, 0, sizeof floor);
+    floor.corners = 4; floor.n[2] = 1;
+    floor.c[0][0] = -500; floor.c[0][1] = 500; floor.c[1][0] = 500; floor.c[1][1] = 500;
+    floor.c[2][0] = 500; floor.c[2][1] = -500; floor.c[3][0] = -500; floor.c[3][1] = -500;
+    n = sh_nav_geometry_cut_support(boxes, nboxes, &floor, 1, r, h, 0.7, step, out, owner, cut, 256, 64);
+    *cut_state = cut[0];
+    if (n < 0) return -1;
+    for (i = 0; i < n; i++) {
+        CHECK(owner[i] == 0);
+        CHECK(out[i].corners >= 3);
+        for (k = 0; k < out[i].corners; k++) {
+            int j = (k + 1) % out[i].corners;
+            sum += out[i].c[j][0] * out[i].c[k][1] - out[i].c[k][0] * out[i].c[j][1];
+            CHECK(fabs(out[i].c[k][2]) < 1e-3);
+        }
+    }
+    return sum * 0.5;
+}
+
+static void test_support_cut_around_boxes(void)
+{
+    int state;
+    double a;
+    /* A box standing on the floor takes its footprint plus the body's
+     * clearance on every side: (200 + 2*24)^2 for an upright box. */
+    box(0, -100, -100, 100, 100, 0, 64);
+    a = support_area_after(1, 24, 80, 18, &state);
+    CHECK(state == 1);
+    CHECK(fabs(a - (1000.0 * 1000.0 - 248.0 * 248.0)) < 1.0);
+    /* A box resting a quarter unit up is still standing on it. */
+    box(0, -100, -100, 100, 100, 0.25f, 64.25f);
+    a = support_area_after(1, 24, 80, 18, &state);
+    CHECK(state == 1);
+    CHECK(fabs(a - (1000.0 * 1000.0 - 248.0 * 248.0)) < 1.0);
+    /* One whose top is within step height is walked onto: only the ground
+     * under it goes, with no clearance moat. */
+    box(0, -100, -100, 100, 100, 0, 16);
+    a = support_area_after(1, 24, 80, 18, &state);
+    CHECK(state == 1);
+    CHECK(fabs(a - (1000.0 * 1000.0 - 200.0 * 200.0)) < 1.0);
+    /* A box hanging lower than the agent is tall blocks the same ground. */
+    box(0, -100, -100, 100, 100, 63, 127);
+    a = support_area_after(1, 24, 80, 18, &state);
+    CHECK(state == 1);
+    CHECK(fabs(a - (1000.0 * 1000.0 - 248.0 * 248.0)) < 1.0);
+    /* One high enough to walk under leaves the floor whole. */
+    box(0, -100, -100, 100, 100, 81, 145);
+    a = support_area_after(1, 24, 80, 18, &state);
+    CHECK(state == 0);
+    CHECK(fabs(a) < 1e-6);
+    /* So does a wall that only blocks: native avoidance owns it. */
+    box(0, -100, -100, 100, 100, 0, 64); boxes[0].obstacle_only = 1;
+    a = support_area_after(1, 24, 80, 18, &state);
+    CHECK(state == 0);
+    boxes[0].obstacle_only = 0;
+    /* Past the per-support piece budget the floor is left whole, not cut
+     * partly. */
+    {
+        int i;
+        for (i = 0; i < 8; i++) box(i, -480 + i * 120, -40, -440 + i * 120, 40, 0, 64);
+        {
+            sh_aug_platform floor;
+            static sh_aug_platform out[8];
+            int owner[8], n;
+            unsigned char cut[1];
+            memset(&floor, 0, sizeof floor);
+            floor.corners = 4; floor.n[2] = 1;
+            floor.c[0][0] = -500; floor.c[0][1] = 500; floor.c[1][0] = 500; floor.c[1][1] = 500;
+            floor.c[2][0] = 500; floor.c[2][1] = -500; floor.c[3][0] = -500; floor.c[3][1] = -500;
+            n = sh_nav_geometry_cut_support(boxes, 8, &floor, 1, 24, 80, 0.7, 18, out, owner, cut, 8, 4);
+            CHECK(n == 0);
+            CHECK(cut[0] == 2);
+        }
+    }
+    /* Invalid input refuses. */
+    CHECK(sh_nav_geometry_cut_support(boxes, 1, NULL, 1, 24, 80, 0.7, 18, result, source, buried, 8, 4) == -1);
+}
+
 int main(void)
 {
     test_body_ray_exit();
+    test_support_cut_around_boxes();
     test_step_clearance();
     int n,i,k;double a;
     test_union_oracle();

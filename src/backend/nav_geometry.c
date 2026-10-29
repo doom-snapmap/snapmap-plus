@@ -6,6 +6,10 @@
 
 #define NG_EPS 0.001
 #define NG_MAX SH_AUG_MAX_CORNERS
+/* The smallest floor piece kept when a support is cut: below either, a
+ * piece is a sliver along the cut. */
+#define NG_MIN_PIECE_AREA  64.0
+#define NG_MIN_PIECE_WIDTH 4.0
 typedef struct ng_poly { int n; double p[NG_MAX][3]; } ng_poly;
 typedef struct ng_box { double c[3], axis[3][3], half[3]; int solid; } ng_box;
 typedef struct ng_face { ng_poly p; double normal[3]; int source, face; } ng_face;
@@ -325,7 +329,56 @@ static int ng_merge(const ng_poly *a,const ng_poly *b,ng_poly *out)
     if(n-1>NG_MAX||n<4)return 0;
     out->n=n-1;
     for(i=0;i<out->n;i++)memcpy(out->p[i],hull[out->n-1-i],sizeof hull[0]);
+    /* Near-collinear vertices a fraction of a unit apart can make the hull
+     * drop a real corner whose loss the area test then happens to balance:
+     * every input vertex must lie in the hull as well. */
+    for(i=0;i<total;i++)for(j=0;j<out->n;j++) {
+        int k2=(j+1)%out->n;
+        double ex=out->p[k2][0]-out->p[j][0],ey=out->p[k2][1]-out->p[j][1];
+        double len=sqrt(ex*ex+ey*ey);
+        if(len<1e-9)continue;
+        if((ey*(pts[i][0]-out->p[j][0])-ex*(pts[i][1]-out->p[j][1]))/len< -1e-4)return 0;
+    }
     return fabs(ng_area(out)-ng_area(a)-ng_area(b))<1e-5;
+}
+
+/* Subtract one solid's occupied standing space from the pieces a[0..np).
+ * A walkable-topped marked solid first loses its own footprint at the
+ * standing point, then the space its body blocks above the step band; walls
+ * that only block and steep solids keep full clearance. Box faces and module
+ * floors are cut by this same rule. Returns 0 when the pieces overflow. */
+static int ng_cut_solid(const ng_face *face,const sh_aug_platform *src,const ng_box *box,
+    double radius,double height,double floor_cos,double step,
+    ng_poly **a,ng_poly **b,int *np,int capacity)
+{
+    double step_clearance=0.0;int axis;ng_poly cut;
+    if(!src->obstacle_only)for(axis=0;axis<3;axis++)
+        if(fabs(box->axis[axis][2])+1e-7>=floor_cos)step_clearance=step;
+    /* Remove buried/overhead geometry at the actual standing point.
+     * At a marked step, the expanded body starts above the step band:
+     * its riser must not erode an agent-width moat between the floors.
+     * Unmarked obstacles, steep walls and headroom retain full checks. */
+    if(step_clearance>0.0) {
+        if(!ng_obstacle(face,box,0.0,height,floor_cos,1,0.0,&cut))return 0;
+        if(cut.n&&!ng_cut_all(a,b,np,&cut,capacity))return 0;
+    }
+    if(!ng_obstacle(face,box,radius,height,floor_cos,!src->obstacle_only,step_clearance,&cut))
+        return 0;
+    if(cut.n&&!ng_cut_all(a,b,np,&cut,capacity))return 0;
+    return 1;
+}
+
+/* Merge pieces whose union is convex, so partition seams do not survive. */
+static void ng_merge_all(ng_poly *a,int *count)
+{
+    int i,j,np=*count;
+    for(i=0;i<np;i++)for(j=i+1;j<np;) {
+        ng_poly merged;
+        if(ng_merge(&a[i],&a[j],&merged)) {
+            a[i]=merged;a[j]=a[--np];i=-1;break;
+        } else j++;
+    }
+    *count=np;
 }
 
 /* An agent-footprint strip is the hull of eight points, so it is stored at
@@ -344,7 +397,7 @@ static int ng_build(const sh_aug_platform *src,int count,
     double height,double floor_cos,double step,sh_aug_platform *out,int *source,int *pieces,
     unsigned char *buried,int capacity,sh_nav_geometry_stats *stats)
 {
-    ng_box *boxes=NULL;ng_face *faces=NULL;ng_poly *mem=NULL,*a,*b,cut;
+    ng_box *boxes=NULL;ng_face *faces=NULL;ng_poly *mem=NULL,*a,*b;
     ng_interval *iv=NULL,*next=NULL;
     ng_strip *boundaries=NULL;
     unsigned char *strip_missing=NULL;
@@ -448,33 +501,15 @@ static int ng_build(const sh_aug_platform *src,int count,
             if(!ng_cut_all(&a,&b,&np,&faces[j].p,capacity))goto fail_face;
         /* Subtract occupied standing space, including the actual underside of
          * an elevated box. Steep boxes remain obstacles even with no nav face. */
-        for(j=0;j<count&&np;j++)if(j!=face->source&&boxes[j].solid) {
-            double step_clearance=0.0;int axis;
-            if(!src[j].obstacle_only)for(axis=0;axis<3;axis++)
-                if(fabs(boxes[j].axis[axis][2])+1e-7>=floor_cos)step_clearance=step;
-            /* Remove buried/overhead geometry at the actual standing point.
-             * At a marked step, the expanded body starts above the step band:
-             * its riser must not erode an agent-width moat between the floors.
-             * Unmarked obstacles, steep walls and headroom retain full checks. */
-            if(step_clearance>0.0) {
-                if(!ng_obstacle(face,&boxes[j],0.0,height,floor_cos,1,0.0,&cut))goto fail_face;
-                if(cut.n&&!ng_cut_all(&a,&b,&np,&cut,capacity))goto fail_face;
-            }
-            if(!ng_obstacle(face,&boxes[j],radius,height,floor_cos,
-                           !src[j].obstacle_only,step_clearance,&cut))goto fail_face;
-            if(cut.n&&!ng_cut_all(&a,&b,&np,&cut,capacity))goto fail_face;
-        }
+        for(j=0;j<count&&np;j++)if(j!=face->source&&boxes[j].solid)
+            if(!ng_cut_solid(face,&src[j],&boxes[j],radius,height,floor_cos,step,
+                             &a,&b,&np,capacity))goto fail_face;
         for(i=0;i<nb&&np;i++)if(ng_coplanar(face,&faces[boundaries[i].face])) {
             ng_poly strip;
             ng_strip_poly(&boundaries[i],&strip);
             if(!ng_cut_all(&a,&b,&np,&strip,capacity))goto fail_face;
         }
-        for(i=0;i<np;i++)for(j=i+1;j<np;) {
-            ng_poly merged;
-            if(ng_merge(&a[i],&a[j],&merged)) {
-                a[i]=merged;a[j]=a[--np];i=-1;break;
-            } else j++;
-        }
+        ng_merge_all(a,&np);
         /* All of this face's pieces fit, or none of them is emitted. */
         if(nout+np>capacity) {
             if(!stats)goto done;
@@ -515,6 +550,96 @@ drop_face:
     rc=nout;
 done:
     free(strip_missing);free(boundaries);free(iv);free(mem);free(faces);free(boxes);return rc;
+}
+
+int sh_nav_geometry_cut_support(const sh_aug_platform *src,int count,
+    const sh_aug_platform *support,int support_count,double radius,double height,
+    double floor_cos,double step,sh_aug_platform *out,int *owner,unsigned char *cut,
+    int capacity,int per_support)
+{
+    ng_box *boxes=NULL;ng_poly *mem=NULL,*a,*b;
+    int i,j,k,nout=0,rc=-1;
+    if(count<0||count>SH_AUG_MAX_PLATFORMS||(count&&!src)||support_count<0||
+       (support_count&&!support)||!out||!owner||!cut||capacity<0||per_support<1||
+       radius<0.0||height<=0.0||floor_cos<=0.0||floor_cos>1.0||step<0.0||step>=height||
+       !isfinite(radius)||!isfinite(height)||!isfinite(floor_cos)||!isfinite(step))return -1;
+    boxes=(ng_box*)calloc(count?count:1,sizeof *boxes);
+    mem=(ng_poly*)malloc(2*(size_t)per_support*sizeof *mem);
+    if(!boxes||!mem)goto done;
+    for(i=0;i<count;i++)if(!ng_box_read(&src[i],&boxes[i]))goto done;
+    for(i=0;i<support_count;i++) {
+        ng_face face;int np=1,touched=0,ok=1;double lo=1e30,hi=-1e30,x0=1e30,x1=-1e30,y0=1e30,y1=-1e30;
+        cut[i]=0;
+        if(support[i].corners<3||support[i].corners>NG_MAX)continue;
+        face.p.n=support[i].corners;face.source=-1;face.face=4;
+        for(k=0;k<3;k++)face.normal[k]=support[i].n[k];
+        for(j=0;j<face.p.n;j++) {
+            for(k=0;k<3;k++)face.p.p[j][k]=support[i].c[j][k];
+            if(face.p.p[j][2]<lo)lo=face.p.p[j][2];if(face.p.p[j][2]>hi)hi=face.p.p[j][2];
+            if(face.p.p[j][0]<x0)x0=face.p.p[j][0];if(face.p.p[j][0]>x1)x1=face.p.p[j][0];
+            if(face.p.p[j][1]<y0)y0=face.p.p[j][1];if(face.p.p[j][1]>y1)y1=face.p.p[j][1];
+        }
+        if(face.normal[2]+1e-7<floor_cos)continue;
+        a=mem;b=mem+per_support;a[0]=face.p;
+        for(j=0;j<count&&np&&ok;j++) {
+            const ng_box *bx=&boxes[j];double ext[3];int axis,m;
+            if(!bx->solid||src[j].obstacle_only)continue;
+            /* Cheap reject: the solid's bounds against the support's, grown
+             * by the agent's square body and height. */
+            for(axis=0;axis<3;axis++) {
+                ext[axis]=0;
+                for(m=0;m<3;m++)ext[axis]+=bx->half[m]*fabs(bx->axis[m][axis]);
+            }
+            if(bx->c[0]-ext[0]>x1+radius||bx->c[0]+ext[0]<x0-radius||
+               bx->c[1]-ext[1]>y1+radius||bx->c[1]+ext[1]<y0-radius||
+               bx->c[2]-ext[2]>=hi+height||bx->c[2]+ext[2]<=lo)continue;
+            touched=1;
+            ok=ng_cut_solid(&face,&src[j],bx,radius,height,floor_cos,step,&a,&b,&np,per_support);
+        }
+        if(!touched)continue;
+        if(!ok||!np){cut[i]=2;continue;}
+        ng_merge_all(a,&np);
+        /* Slivers along a cut hold no standing room worth a route: they stay
+         * with the ground cut out of the support. */
+        for(j=0;j<np;) {
+            double width=1e30;int e,v;
+            for(e=0;e<a[j].n;e++) {
+                int f=(e+1)%a[j].n;double ex=a[j].p[f][0]-a[j].p[e][0],ey=a[j].p[f][1]-a[j].p[e][1];
+                double len=sqrt(ex*ex+ey*ey),far=0;
+                if(len<1e-9)continue;
+                for(v=0;v<a[j].n;v++){double d=fabs(ex*(a[j].p[v][1]-a[j].p[e][1])-ey*(a[j].p[v][0]-a[j].p[e][0]))/len;if(d>far)far=d;}
+                if(far<width)width=far;
+            }
+            if(ng_area(&a[j])<NG_MIN_PIECE_AREA||width<NG_MIN_PIECE_WIDTH)a[j]=a[--np];else j++;
+        }
+        if(!np){cut[i]=2;continue;}
+        if(np==1&&fabs(ng_area(&a[0])-ng_area(&face.p))<1e-3)continue;
+        if(nout+np>capacity){cut[i]=2;continue;}
+        for(j=0;j<np;j++) {
+            sh_aug_platform *dst=&out[nout];
+            int corners=0;
+            memset(dst,0,sizeof *dst);
+            /* Clipping can leave two corners a hair apart; such an edge has no
+             * direction to split the navigation tree by. */
+            for(k=0;k<a[j].n;k++) {
+                int x;
+                if(corners&&fabs(a[j].p[k][0]-dst->c[corners-1][0])<0.01&&
+                   fabs(a[j].p[k][1]-dst->c[corners-1][1])<0.01)continue;
+                for(x=0;x<3;x++)dst->c[corners][x]=(float)a[j].p[k][x];
+                corners++;
+            }
+            while(corners>1&&fabs(dst->c[0][0]-dst->c[corners-1][0])<0.01&&
+                  fabs(dst->c[0][1]-dst->c[corners-1][1])<0.01)corners--;
+            if(corners<3)continue;
+            dst->corners=corners;dst->prepared=1;dst->face=4;
+            for(k=0;k<3;k++)dst->n[k]=support[i].n[k];
+            owner[nout++]=i;
+        }
+        cut[i]=1;
+    }
+    rc=nout;
+done:
+    free(mem);free(boxes);return rc;
 }
 
 int sh_nav_geometry_build_supported(const sh_aug_platform *src,int count,
