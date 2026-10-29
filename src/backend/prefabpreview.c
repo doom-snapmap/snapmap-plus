@@ -19,6 +19,9 @@
 #define PP_NAME_CAP         512u
 #define PP_REQUEST_CAP      128u
 #define PP_RESULT_CAP       32u
+/* Per-model triangle bound for the preview; larger meshes are clustered to fit (see
+ * pp_limit_triangles). About 2.5 MB of blob at the bound. */
+#define PP_PREVIEW_TRIANGLES 65536u
 
 typedef struct pp_vertex {
     float x, y, z;
@@ -223,7 +226,26 @@ static int pp_decode_bmodel(const unsigned char *data, size_t len, pp_mesh *mesh
     return mesh->vertex_count > 0 && mesh->index_count > 0 && len - r.pos >= 24u;
 }
 
-static int pp_decode_md6(const unsigned char *data, size_t len, pp_mesh *mesh)
+/* Surface names an md6Def lists in its damage and highlight mesh kits. The engine shows those
+ * surfaces only on demand (wounds, gore, melee highlights), so drawing them in the bind pose would
+ * stack overlays on the body. */
+#define PP_HIDDEN_CAP  64u
+#define PP_HIDDEN_NAME 96u
+typedef struct pp_names {
+    unsigned count;
+    char name[PP_HIDDEN_CAP][PP_HIDDEN_NAME];
+} pp_names;
+
+static int pp_names_has(const pp_names *names, const unsigned char *s, uint32_t n)
+{
+    if (!names || !s) return 0;
+    for (unsigned i = 0; i < names->count; ++i)
+        if (strlen(names->name[i]) == n && _strnicmp(names->name[i], (const char *)s, n) == 0) return 1;
+    return 0;
+}
+
+static int pp_decode_md6_ex(const unsigned char *data, size_t len, pp_mesh *mesh,
+                            const pp_names *hidden)
 {
     static const unsigned char magic[4] = { 0x2b, 0x02, 0x4d, 0x4d };
     if (!data || len < 16 || memcmp(data, magic, 4) != 0) return 0;
@@ -238,20 +260,30 @@ static int pp_decode_md6(const unsigned char *data, size_t len, pp_mesh *mesh)
     for (uint32_t i = 0; i < n; ++i) if (!pp_idstr(&r, &p, NULL)) return 0;
     if (!pp_take(&r, 36, NULL) || !pp_u32be(&r, &n) || n == 0 || n > PP_MAX_SURFACES) return 0;
 
+    /* Surface: name, material, u8, u32 texture sets, u32 vertices, u32 triangles, 24-byte bounds,
+     * 48-byte vertices (big-endian XYZ at +0, packed normal at +0x14, skin data after), u16 indices,
+     * 12 bytes, a morph flag with its optional table, and the blend weights. The vertices are the
+     * bind pose in model units; no skeleton is applied. */
     for (uint32_t s = 0; s < n; ++s) {
-        uint32_t texsets = 0;
-        if (!pp_idstr(&r, &p, NULL) || !pp_idstr(&r, &p, NULL) || !pp_u8(&r, &small_value) ||
+        uint32_t texsets = 0, surface_len = 0;
+        const unsigned char *surface = NULL;
+        if (!pp_idstr(&r, &surface, &surface_len) || !pp_idstr(&r, &p, NULL) || !pp_u8(&r, &small_value) ||
             !pp_u32be(&r, &texsets) || !pp_u32be(&r, &nv) || !pp_u32be(&r, &nt) ||
-            nt > UINT32_MAX / 3u || !pp_take(&r, 24, NULL) ||
-            !pp_reserve(mesh, nv, nt * 3u)) return 0;
-        uint32_t base = mesh->vertex_count;
-        for (uint32_t i = 0; i < nv; ++i) {
-            if (!pp_take(&r, 48, &p) || !pp_add_vertex(mesh, p)) return 0;
-        }
-        for (uint32_t i = 0; i < nt * 3u; ++i) {
-            unsigned local = 0;
-            if (!pp_u16be(&r, &local) || local >= nv) return 0;
-            mesh->indices[mesh->index_count++] = base + local;
+            nt > UINT32_MAX / 3u || !pp_take(&r, 24, NULL)) return 0;
+        if (pp_names_has(hidden, surface, surface_len)) {
+            if (nv > SIZE_MAX / 48u || !pp_take(&r, (size_t)nv * 48u, NULL) ||
+                !pp_take(&r, (size_t)nt * 6u, NULL)) return 0;
+        } else {
+            if (!pp_reserve(mesh, nv, nt * 3u)) return 0;
+            uint32_t base = mesh->vertex_count;
+            for (uint32_t i = 0; i < nv; ++i) {
+                if (!pp_take(&r, 48, &p) || !pp_add_vertex(mesh, p)) return 0;
+            }
+            for (uint32_t i = 0; i < nt * 3u; ++i) {
+                unsigned local = 0;
+                if (!pp_u16be(&r, &local) || local >= nv) return 0;
+                mesh->indices[mesh->index_count++] = base + local;
+            }
         }
         if (!pp_take(&r, 12, NULL) || !pp_u8(&r, &small_value)) return 0;
         unsigned has_morph = small_value;
@@ -273,6 +305,11 @@ static int pp_decode_md6(const unsigned char *data, size_t len, pp_mesh *mesh)
         if (!pp_idstr(&r, &p, NULL) || !pp_take(&r, 12, NULL)) return 0;
     if (!pp_take(&r, 4, &p) || memcmp(p, magic, 4) != 0 || r.pos != r.len) return 0;
     return mesh->vertex_count > 0 && mesh->index_count > 0;
+}
+
+static int pp_decode_md6(const unsigned char *data, size_t len, pp_mesh *mesh)
+{
+    return pp_decode_md6_ex(data, len, mesh, NULL);
 }
 
 static int pp_ascii_space(unsigned char c)
@@ -497,6 +534,77 @@ int sh_prefabpreview_resolve_model(const char *inherit_name, char *out_model, si
             SH_PREFAB_DEFAULT_MODEL) != 0;
 }
 
+int sh_prefabpreview_is_mesh_name(const char *name)
+{
+    size_t n = name ? strlen(name) : 0;
+    return (n > 4 && _stricmp(name + n - 4, ".lwo") == 0) ||
+           (n > 4 && _stricmp(name + n - 4, ".md6") == 0) ||
+           (n > 7 && _stricmp(name + n - 7, ".bmodel") == 0);
+}
+
+/* The first occurrence of `field` at brace depth 0 of [start, end), skipping quoted text, so a
+ * renderInfo's own renderModelName wins over its attachments' nested ones. */
+static int pp_decl_top_string(const unsigned char *data, size_t start, size_t end,
+                              const char *field, char *out, size_t cap)
+{
+    int depth = 0, quote = 0, escape = 0;
+    for (size_t i = start; i < end; ++i) {
+        unsigned char c = data[i];
+        if (quote) {
+            if (escape) escape = 0;
+            else if (c == '\\') escape = 1;
+            else if (c == '"') quote = 0;
+            continue;
+        }
+        if (c == '"') { quote = 1; continue; }
+        if (c == '{') { depth++; continue; }
+        if (c == '}') { depth--; continue; }
+        if (depth == 0 && pp_decl_token_at(data, end, i, field))
+            return pp_decl_string_in_range(data, i, end, field, out, cap);
+    }
+    return 0;
+}
+
+int sh_prefabpreview_editor_model(const char *sedef_name, char *out_model, size_t out_capacity,
+                                  float out_size[3])
+{
+    char current[PP_NAME_CAP], next[PP_NAME_CAP];
+    int flags = 0;
+    if (!out_model || out_capacity < 2 || !out_size) return 0;
+    out_model[0] = '\0';
+    out_size[0] = out_size[1] = out_size[2] = 0.0f;
+    if (!sedef_name || !sedef_name[0] || strlen(sedef_name) >= sizeof current) return 0;
+    strcpy_s(current, sizeof current, sedef_name);
+    for (int depth = 0; depth < 20; ++depth) {
+        unsigned char *decl = NULL; size_t len = 0, rs = 0, re = 0, ss = 0, se = 0;
+        if (!sh_imgpreview_read_payload(SH_ASSET_SNAPDEF, current, PP_MAX_SOURCE_BYTES, &decl, &len)) break;
+        if (pp_decl_block_range(decl, 0, len, "renderInfo", &rs, &re)) {
+            if (!(flags & SH_PREFAB_DEFAULT_MODEL) &&
+                pp_decl_top_string(decl, rs, re, "renderModelName", out_model, out_capacity) &&
+                out_model[0])
+                flags |= SH_PREFAB_DEFAULT_MODEL;
+            if (!(flags & SH_PREFAB_DEFAULT_SIZE) &&
+                pp_decl_block_range(decl, rs, re, "size", &ss, &se)) {
+                float v[3];
+                if (pp_decl_float_in_range(decl, ss, se, "x", &v[0]) &&
+                    pp_decl_float_in_range(decl, ss, se, "y", &v[1]) &&
+                    pp_decl_float_in_range(decl, ss, se, "z", &v[2])) {
+                    memcpy(out_size, v, sizeof v);
+                    flags |= SH_PREFAB_DEFAULT_SIZE;
+                }
+            }
+        }
+        next[0] = '\0';
+        int inherited = pp_decl_string_in_range(decl, 0, len, "inherit", next, sizeof next);
+        free(decl);
+        if ((flags & SH_PREFAB_DEFAULT_MODEL) && (flags & SH_PREFAB_DEFAULT_SIZE)) break;
+        if (!inherited || !next[0] || _stricmp(next, current) == 0) break;
+        strcpy_s(current, sizeof current, next);
+    }
+    if (!(flags & SH_PREFAB_DEFAULT_MODEL)) out_model[0] = '\0';
+    return flags;
+}
+
 static int pp_read_logical_model(const char *name, unsigned char **out, size_t *out_len)
 {
     int kinds[3] = { SH_ASSET_MODEL, SH_ASSET_BMODEL, SH_ASSET_MODULE };
@@ -506,7 +614,8 @@ static int pp_read_logical_model(const char *name, unsigned char **out, size_t *
                                       PP_MAX_SOURCE_BYTES, out, out_len);
 }
 
-static int pp_decode_payload(const unsigned char *data, size_t len, pp_mesh *mesh)
+static int pp_decode_payload(const unsigned char *data, size_t len, pp_mesh *mesh,
+                             const pp_names *hidden)
 {
     pp_mesh trial;
     memset(&trial, 0, sizeof trial);
@@ -514,31 +623,188 @@ static int pp_decode_payload(const unsigned char *data, size_t len, pp_mesh *mes
         pp_mesh_free(mesh); *mesh = trial; return 1;
     }
     pp_mesh_free(&trial);
-    if (pp_decode_md6(data, len, &trial)) {
+    if (pp_decode_md6_ex(data, len, &trial, hidden)) {
         pp_mesh_free(mesh); *mesh = trial; return 1;
     }
     pp_mesh_free(&trial);
     return 0;
 }
 
+/* Collect the quoted surface names of the md6Def's Gore and Melee_Highlight mesh kits:
+ * `meshKits { Gore 13 { "wound_body_B" = "wounds_body_B" ... } }`. Both sides of each pair are
+ * kept; the right-hand name is the surface. */
+static void pp_md6_hidden_kits(const unsigned char *data, size_t len, pp_names *names)
+{
+    static const char *kits[2] = { "Gore", "Melee_Highlight" };
+    size_t ks = 0, ke = 0;
+    names->count = 0;
+    if (!data || !pp_decl_block_range(data, 0, len, "meshKits", &ks, &ke)) return;
+    for (unsigned k = 0; k < 2; ++k) {
+        size_t kit_len = strlen(kits[k]);
+        for (size_t i = ks; i < ke; ++i) {
+            if (!pp_decl_token_at(data, ke, i, kits[k])) continue;
+            size_t p = i + kit_len;
+            while (p < ke && pp_ascii_space(data[p])) ++p;
+            while (p < ke && data[p] >= '0' && data[p] <= '9') ++p;
+            while (p < ke && pp_ascii_space(data[p])) ++p;
+            if (p >= ke || data[p] != '{') continue;
+            for (++p; p < ke && data[p] != '}'; ++p) {
+                if (data[p] != '"') continue;
+                size_t q = ++p;
+                while (p < ke && data[p] != '"') ++p;
+                if (p > q && p - q < PP_HIDDEN_NAME && names->count < PP_HIDDEN_CAP) {
+                    memcpy(names->name[names->count], data + q, p - q);
+                    names->name[names->count][p - q] = '\0';
+                    names->count++;
+                }
+            }
+            break;
+        }
+    }
+}
+
+static float pp_unpack_normal(unsigned char b) { return (float)b / 255.0f * 2.0f - 1.0f; }
+
+static unsigned char pp_pack_normal(float v)
+{
+    float q = (v * 0.5f + 0.5f) * 255.0f + 0.5f;
+    if (!(q > 0.0f)) return 0;
+    if (q > 255.0f) return 255;
+    return (unsigned char)q;
+}
+
+/* One vertex-clustering pass on a `grid`-cell lattice over the mesh bounds: vertices in a cell
+ * merge to their mean position and normal; collapsed and repeated triangles are dropped (the
+ * preview draws both faces, so winding does not matter). */
+static int pp_cluster_pass(const pp_mesh *src, unsigned grid, pp_mesh *out)
+{
+    float span = 0.0f, cell;
+    size_t cap = 1;
+    uint64_t *keys = NULL, *tri_keys = NULL;
+    uint32_t *slot_index = NULL, *remap = NULL, *counts = NULL;
+    float *acc = NULL;
+    uint32_t merged = 0;
+    int ok = 0;
+    memset(out, 0, sizeof *out);
+    for (unsigned a = 0; a < 3; ++a)
+        if (src->bounds[a + 3] - src->bounds[a] > span) span = src->bounds[a + 3] - src->bounds[a];
+    cell = span > 0.0f ? span / (float)grid : 1.0f;
+    while (cap < (size_t)src->vertex_count * 2u) cap <<= 1;
+    keys = (uint64_t *)calloc(cap, sizeof *keys);
+    slot_index = (uint32_t *)malloc(cap * sizeof *slot_index);
+    remap = (uint32_t *)malloc(((size_t)src->vertex_count + 1u) * sizeof *remap);
+    acc = (float *)calloc(((size_t)src->vertex_count + 1u) * 6u, sizeof *acc);
+    counts = (uint32_t *)calloc((size_t)src->vertex_count + 1u, sizeof *counts);
+    if (!keys || !slot_index || !remap || !acc || !counts) goto done;
+    for (uint32_t i = 0; i < src->vertex_count; ++i) {
+        const pp_vertex *v = &src->vertices[i];
+        float c[3] = { v->x, v->y, v->z };
+        uint64_t key = 1;
+        for (unsigned a = 0; a < 3; ++a) {
+            float f = (c[a] - src->bounds[a]) / cell;
+            uint64_t q = f > 0.0f ? (uint64_t)f : 0u;
+            if (q > grid) q = grid;
+            key |= q << (1u + 21u * a);
+        }
+        size_t h = (size_t)((key * 0x9E3779B97F4A7C15ull) >> 20) & (cap - 1u);
+        while (keys[h] && keys[h] != key) h = (h + 1u) & (cap - 1u);
+        if (!keys[h]) { keys[h] = key; slot_index[h] = merged++; }
+        uint32_t m = slot_index[h];
+        remap[i] = m;
+        counts[m]++;
+        acc[m * 6u + 0] += v->x; acc[m * 6u + 1] += v->y; acc[m * 6u + 2] += v->z;
+        acc[m * 6u + 3] += pp_unpack_normal(v->normal[0]);
+        acc[m * 6u + 4] += pp_unpack_normal(v->normal[1]);
+        acc[m * 6u + 5] += pp_unpack_normal(v->normal[2]);
+    }
+    if (!pp_reserve(out, merged, 0)) goto done;
+    for (uint32_t m = 0; m < merged; ++m) {
+        float inv = 1.0f / (float)counts[m];
+        float nx = acc[m * 6u + 3], ny = acc[m * 6u + 4], nz = acc[m * 6u + 5];
+        float nl = sqrtf(nx * nx + ny * ny + nz * nz);
+        pp_vertex *v = &out->vertices[out->vertex_count++];
+        v->x = acc[m * 6u + 0] * inv; v->y = acc[m * 6u + 1] * inv; v->z = acc[m * 6u + 2] * inv;
+        if (nl > 1e-6f) { nx /= nl; ny /= nl; nz /= nl; } else { nx = 0.0f; ny = 0.0f; nz = 1.0f; }
+        v->normal[0] = pp_pack_normal(nx); v->normal[1] = pp_pack_normal(ny);
+        v->normal[2] = pp_pack_normal(nz); v->normal[3] = 255;
+    }
+    memcpy(out->bounds, src->bounds, sizeof out->bounds);
+    out->have_bounds = 1;
+    cap = 1;
+    while (cap < (size_t)src->index_count) cap <<= 1;
+    tri_keys = (uint64_t *)calloc(cap, sizeof *tri_keys);
+    if (!tri_keys) goto done;
+    for (uint32_t t = 0; t + 2u < src->index_count; t += 3u) {
+        uint32_t a = remap[src->indices[t]], b = remap[src->indices[t + 1u]], c = remap[src->indices[t + 2u]];
+        if (a == b || b == c || a == c) continue;
+        uint32_t lo = a < b ? (a < c ? a : c) : (b < c ? b : c);
+        uint32_t hi = a > b ? (a > c ? a : c) : (b > c ? b : c);
+        uint32_t mid = a ^ b ^ c ^ lo ^ hi;
+        uint64_t key = 1u | ((uint64_t)lo << 1) | ((uint64_t)mid << 22) | ((uint64_t)hi << 43);
+        size_t h = (size_t)((key * 0x9E3779B97F4A7C15ull) >> 20) & (cap - 1u);
+        while (tri_keys[h] && tri_keys[h] != key) h = (h + 1u) & (cap - 1u);
+        if (tri_keys[h]) continue;
+        tri_keys[h] = key;
+        if (!pp_reserve(out, 0, 3)) goto done;
+        out->indices[out->index_count++] = a;
+        out->indices[out->index_count++] = b;
+        out->indices[out->index_count++] = c;
+    }
+    ok = out->vertex_count > 0 && out->index_count > 0;
+done:
+    free(keys); free(slot_index); free(remap); free(acc); free(counts); free(tri_keys);
+    if (!ok) pp_mesh_free(out);
+    return ok;
+}
+
+/* Bound a model to max_triangles by clustering on successively coarser lattices. A mesh already
+ * within the bound is left untouched. Returns 1 when the mesh is within the bound afterwards. */
+static int pp_limit_triangles(pp_mesh *mesh, uint32_t max_triangles)
+{
+    static const unsigned grids[] = { 1024u, 768u, 512u, 384u, 256u, 192u, 128u, 96u, 64u, 48u, 32u };
+    const unsigned last = (unsigned)(sizeof grids / sizeof grids[0]) - 1u;
+    if (!mesh || mesh->index_count / 3u <= max_triangles) return 1;
+    if (mesh->vertex_count >= (1u << 21)) return 0;
+    for (unsigned g = 0; g <= last; ++g) {
+        pp_mesh trial;
+        if (!pp_cluster_pass(mesh, grids[g], &trial)) continue;
+        if (trial.index_count / 3u <= max_triangles || g == last) {
+            pp_mesh_free(mesh);
+            *mesh = trial;
+            return mesh->index_count / 3u <= max_triangles;
+        }
+        pp_mesh_free(&trial);
+    }
+    return 0;
+}
+
+/* A model name is a logical model (an .lwo, .bmodel or module record, or an md6Def that names its
+ * cooked .md6mesh). The md6 path hides the md6Def's damage-kit surfaces, then bounds the triangle
+ * count for the preview. */
 static int pp_load_model(const char *name, pp_mesh *mesh)
 {
     unsigned char *body = NULL, *cooked = NULL;
     size_t len = 0, cooked_len = 0;
     int ok = 0;
     if (!pp_read_logical_model(name, &body, &len)) return 0;
-    if (pp_decode_payload(body, len, mesh)) {
+    if (pp_decode_payload(body, len, mesh, NULL)) {
         ok = 1;
     } else {
         char mesh_name[PP_NAME_CAP];
         if (pp_find_decl_mesh(body, len, mesh_name, sizeof mesh_name) &&
             sh_imgpreview_read_payload(SH_IMGPREVIEW_BASEMODEL_KIND, mesh_name,
                                        PP_MAX_SOURCE_BYTES, &cooked, &cooked_len)) {
-            ok = pp_decode_payload(cooked, cooked_len, mesh);
+            pp_names *hidden = (pp_names *)calloc(1, sizeof *hidden);
+            if (hidden) pp_md6_hidden_kits(body, len, hidden);
+            ok = pp_decode_payload(cooked, cooked_len, mesh, hidden);
+            /* A model made only of kit surfaces still previews whole. */
+            if (!ok && hidden && hidden->count) ok = pp_decode_payload(cooked, cooked_len, mesh, NULL);
+            free(hidden);
         }
     }
     free(cooked);
     free(body);
+    if (ok) ok = pp_limit_triangles(mesh, PP_PREVIEW_TRIANGLES);
     if (!ok) pp_mesh_free(mesh);
     return ok;
 }
@@ -632,13 +898,14 @@ static DWORD WINAPI pp_worker(void *unused)
             if (!pp_build_blob(req.generation, req.name, ok ? &mesh : NULL, &blob, &bytes)) {
                 free(blob); blob = NULL; bytes = 0;
             }
+            uint32_t triangles = mesh.index_count / 3u, vertices = mesh.vertex_count;
             pp_mesh_free(&mesh);
             pp_publish_result(req.generation, blob, bytes);
 
             char line[760];
             _snprintf_s(line, sizeof line, _TRUNCATE,
-                        "B2: prefabpreview -- %s '%s' in %llu ms",
-                        ok ? "decoded" : "proxy fallback for", req.name,
+                        "B2: prefabpreview -- %s '%s' (%u vertices, %u triangles, %d blob bytes) in %llu ms",
+                        ok ? "decoded" : "proxy fallback for", req.name, vertices, triangles, bytes,
                         (unsigned long long)(GetTickCount64() - started));
             backend_log(line);
         }

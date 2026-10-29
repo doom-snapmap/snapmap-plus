@@ -2816,12 +2816,13 @@ static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventA
                 sh_webview_json::get_int(json, L"generation", &generation);
                 sh_webview_json::get_string(json, L"inherit", inherit);
                 std::string inherit8 = sh_webview_json::to_utf8(inherit);
-                char model[512] = {0}; float scale[3] = {1.0f, 1.0f, 1.0f}; int flags = 0;
+                /* scale[0..2] renderModelInfo.scale, scale[3..5] the palette row's renderInfo.size. */
+                char model[512] = {0}; float scale[6] = {1.0f, 1.0f, 1.0f, 0.0f, 0.0f, 0.0f}; int flags = 0;
                 if (generation >= 0 && inherit8.size() < 512 && g_iface && g_iface->vtbl) {
                     if (g_iface->vtbl->resolve_prefab_defaults)
                         flags = g_iface->vtbl->resolve_prefab_defaults(g_iface, inherit8.c_str(),
                                                                        model, (int)sizeof model,
-                                                                       scale, 3);
+                                                                       scale, 6);
                     /* Keep ext 20 as an ABI-compatible model-only fallback. New paired builds use
                      * ext 23 so sparse prefab scale can be merged with the installed entityDef. */
                     if (!(flags & SH_PREFAB_DEFAULT_MODEL) &&
@@ -2840,6 +2841,14 @@ static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventA
                     m += L"["; m += std::to_wstring(scale[0]); m += L",";
                     m += std::to_wstring(scale[1]); m += L",";
                     m += std::to_wstring(scale[2]); m += L"]";
+                } else m += L"null";
+                m += L",\"editorModel\":";
+                m += (flags & SH_PREFAB_DEFAULT_EDITOR) ? L"true" : L"false";
+                m += L",\"size\":";
+                if (flags & SH_PREFAB_DEFAULT_SIZE) {
+                    m += L"["; m += std::to_wstring(scale[3]); m += L",";
+                    m += std::to_wstring(scale[4]); m += L",";
+                    m += std::to_wstring(scale[5]); m += L"]";
                 } else m += L"null";
                 m += L"}";
                 poc_post_json(m.c_str());

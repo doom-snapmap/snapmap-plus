@@ -1,7 +1,9 @@
 /* Asynchronous cooked-geometry previews for the Prefab Details viewport.
  * Resolve installed resources and decode positions, normals and indices into
  * a bounded neutral mesh for WebView2. Payloads are read on demand; this path
- * does not decode textures, skeletons or animation.
+ * does not decode textures, skeletons or animation: an md6 model is drawn in its
+ * cooked bind pose without its damage-kit surfaces, and any model above
+ * PP_PREVIEW_TRIANGLES is clustered down to it.
  */
 #ifndef BACKEND_PREFABPREVIEW_H
 #define BACKEND_PREFABPREVIEW_H
@@ -34,6 +36,8 @@ typedef struct sh_prefab_mesh_blob_header {
 #ifndef SH_PREFAB_DEFAULT_MODEL
 #define SH_PREFAB_DEFAULT_MODEL 0x1
 #define SH_PREFAB_DEFAULT_SCALE 0x2
+#define SH_PREFAB_DEFAULT_EDITOR 0x4 /* model is the palette row's renderInfo.renderModelName */
+#define SH_PREFAB_DEFAULT_SIZE  0x8 /* out_scale[3..5] holds that row's renderInfo.size */
 #endif
 
 /* Starts one bounded worker. Resource indexes and payloads remain lazy until the first request. */
@@ -53,6 +57,17 @@ int sh_prefabpreview_resolve_model(const char *inherit_name, char *out_model, si
  * Derived decl components win over base components, including semantic pickup entityStatic links. */
 int sh_prefabpreview_resolve_defaults(const char *inherit_name, char *out_model,
                                       size_t out_capacity, float out_scale[3]);
+
+/* 1 when the name is a model the decoder can draw: an .lwo, a .bmodel, or an .md6 (an md6Def that
+ * names a cooked .md6mesh). */
+int sh_prefabpreview_is_mesh_name(const char *name);
+
+/* File fallback for the model the editor draws for a palette row: renderInfo.renderModelName and
+ * renderInfo.size from the installed snapEditorEntityDef `sedef_name` and its inherits (derived
+ * wins; the row's own name, never an attachment's). Returns SH_PREFAB_DEFAULT_MODEL and/or
+ * SH_PREFAB_DEFAULT_SIZE. */
+int sh_prefabpreview_editor_model(const char *sedef_name, char *out_model, size_t out_capacity,
+                                  float out_size[3]);
 
 /* Consume the oldest completion. Returns 0 when none exists, -required_bytes for a size query or short
  * destination, and positive bytes copied when the completion was consumed. */

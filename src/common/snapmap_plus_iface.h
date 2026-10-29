@@ -224,6 +224,8 @@ typedef int (*sh_get_prefab_mesh_fn)(struct sh_iface *self, void *out_blob, int 
 #ifndef SH_PREFAB_DEFAULT_MODEL
 #define SH_PREFAB_DEFAULT_MODEL 0x1
 #define SH_PREFAB_DEFAULT_SCALE 0x2
+#define SH_PREFAB_DEFAULT_EDITOR 0x4 /* model is the palette row's renderInfo.renderModelName */
+#define SH_PREFAB_DEFAULT_SIZE  0x8 /* out_scale[3..5] holds that row's renderInfo.size */
 #endif
 /* The navigation view. `update` asks for it to be brought up to date on the
  * game's next frame; 0 only reports. Writes {"stale","pending","floors","walls",
@@ -373,6 +375,11 @@ typedef struct sh_budget_call {
 } sh_budget_call;
 typedef int (*sh_budget_fn)(struct sh_iface *self, sh_budget_call *call); /* +0x370 (ext 33) */
 
+/* +0x320 (ext 23): the preview model and renderModelInfo.scale for an entityDef inherit, as
+ * SH_PREFAB_DEFAULT_* bits. When the def chain names no .lwo/.bmodel/.md6, the model is the one the
+ * editor draws for the inherit's palette row (SH_PREFAB_DEFAULT_EDITOR). With out_scale_count >= 6,
+ * out_scale[3..5] receives that row's renderInfo.size (SH_PREFAB_DEFAULT_SIZE); callers passing 3
+ * get the original three-float result. */
 typedef int (*sh_resolve_prefab_defaults_fn)(struct sh_iface *self, const char *inherit_name,
                                              char *out_model, int out_capacity,
                                              float *out_scale, int out_scale_count);

@@ -98,5 +98,63 @@ check(html.includes("d.grab === 'corrected'") && html.includes('d.result === 3')
       host.includes('sh_prefab_grab_json_check(buf') && host.includes('L",\\"grab\\":\\"corrected\\""'),
       'Create reports a corrected grab point and refuses only an unusable frame');
 
+/* Demons and player starts: role, model source and status text, run against the real viewport code
+   with no DOM (no canvas, so no GL; the pure helpers are exported as `testing`). */
+{
+  const posted=[];
+  const viewport=new Function('prefabTransform','document','window','requestAnimationFrame',
+    'MutationObserver','getComputedStyle','post',js+'\nreturn prefabViewport;')(
+    require(path.join(root,'src','ui','webview','prefab_transform.js')),
+    {getElementById:()=>null,documentElement:{classList:{contains:()=>false}}},
+    {addEventListener:()=>{}},()=>0,function(){this.observe=()=>{};},()=>({getPropertyValue:()=>''}),
+    m=>posted.push(m));
+  const t=viewport.testing;
+  check(t && typeof t.entityRole==='function','viewport exports its pure helpers for tests');
+  check(t.entityRole('idPlaceableSnapAIEncounter','snapmaps/placeablesnapaiencounter/imp',{})==='demon',
+        'an imp encounter is a demon');
+  check(t.entityRole('idSnapMapGameEntity_ComboStart','player/coop/player_start',{})==='player',
+        'a player start is a player, not a generic prop');
+  check(t.entityRole('idSnapMapGameEntity_Light','snapmaps/lights/user_point',{})==='system' &&
+        t.entityRole('idSnapMapLogic_Counter','snapmaps/logic/count',{})==='logic' &&
+        t.entityRole('idDynamicStamp','snapmaps/fx/decal',{})==='decal' &&
+        t.entityRole('idProp2','snapmaps/props/new/crate01',{})==='prop',
+        'lights, logic, decals and props keep their roles');
+  check(t.roleColor('demon','')[0]>0.7 && t.roleColor('player','')[2]>0.6,'demons are red, players pink');
+  check(html.includes('pc-legend-dot demon') && html.includes('pc-legend-dot player') &&
+        /\.pc-legend-dot\.demon\s*\{\s*background:\s*#c76357;/.test(css) &&
+        /\.pc-legend-dot\.player\s*\{\s*background:\s*#e07ab3;/.test(css),
+        'the legend explains the demon and player tints');
+  const frame=[[1,0,0],[0,1,0],[0,0,1]];
+  const imp=t.entityFromJson({entityDef:{className:'idPlaceableSnapAIEncounter',
+    inherit:'snapmaps/placeablesnapaiencounter/imp',state:{edit:{spawnPosition:{x:10,y:0,z:0}}}}},frame);
+  const start=t.entityFromJson({entityDef:{className:'idSnapMapGameEntity_ComboStart',
+    inherit:'player/coop/player_start',state:{edit:{}}}},frame);
+  check(imp.model==='' && imp.resolveModel && start.resolveModel,
+        'demons and player starts ask the backend for their model (the def names none)');
+  check(Math.abs(imp.proxyMatrix[10]-96)<1e-4 && Math.abs(imp.proxyMatrix[14]-48)<1e-4,
+        'an unresolved demon proxy is a 48x48x96 feet-origin box, not a 32-unit cube');
+  check(t.modelUnavailable(imp),'an entity with no model is reported unavailable');
+  posted.length=0;
+  t.resolve([imp,start],'player/coop/player_start',
+    {model:'zion/characters/humans/mp_male/player_snapeditor.md6',scale:null,size:[32,32,96],editorModel:true});
+  check(start.model==='zion/characters/humans/mp_male/player_snapeditor.md6' && imp.model==='',
+        'the resolved editor model goes to the entities of that inherit only');
+  check(posted.some(m=>m.cmd==='requestPrefabMesh' && m.model===start.model),'the md6 is requested as a mesh');
+  check(Math.abs(start.proxyMatrix[0]-32)<1e-4 && Math.abs(start.proxyMatrix[10]-96)<1e-4,
+        'the palette row size sizes the player start box');
+  check(!t.modelUnavailable(start),'a requested mesh is pending, not unavailable');
+  check(t.statusText(3,0,0,0)==='Interactive preview' && t.statusText(3,0,1,0)==='1 model unavailable' &&
+        t.statusText(3,0,2,0)==='2 models unavailable' && t.statusText(3,1,2,0)==='Loading installed geometry...' &&
+        t.statusText(0,0,0,0)==='No renderable entities' &&
+        /over the triangle budget/.test(t.statusText(3,0,0,1)),
+        'the status names unavailable models instead of claiming an interactive preview');
+  check(host.includes('scale, 6);') && host.includes('SH_PREFAB_DEFAULT_EDITOR') &&
+        host.includes('SH_PREFAB_DEFAULT_SIZE'),'the host asks for and forwards the palette row model and size');
+  check(common.includes('#define SH_PREFAB_DEFAULT_EDITOR 0x4') && common.includes('#define SH_PREFAB_DEFAULT_SIZE  0x8'),
+        'the editor-model and size bits are part of the shared ABI');
+  check(iface.includes('sh_budget_table_row_model(') && iface.includes('sh_prefabpreview_editor_model('),
+        'the backend reads the palette row model live, with the installed sedef as fallback');
+}
+
 if(failures){console.error('prefab_viewport_contract_test: '+failures+' failure(s)');process.exit(1);}
 console.log('prefab_viewport_contract_test: OK');

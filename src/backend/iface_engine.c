@@ -443,19 +443,76 @@ static void slot_sound_session(sh_iface *self, int on)
     sh_soundpreview_set_session(on);
 }
 
-/* Resolve prefab models from decl/installed data; mesh extraction is asynchronous. */
-static int slot_resolve_prefab_model(sh_iface *self, const char *inherit_name,
-                                     char *out_model, int out_capacity)
+/* The entityDef's own model, from decl/installed data. */
+static int prefab_def_model(const char *inherit_name, char *out_model, int out_capacity)
 {
-    (void)self;
     if (out_capacity <= 0) return 0;
     /* Spawners can inherit an editor helper model. Prefer the installed
- * spawnerEntityPair.entityStatic route to display the actual pickup. */
+     * spawnerEntityPair.entityStatic route to display the actual pickup. */
     if (inherit_name && strstr(inherit_name, "spawner") &&
         sh_prefabpreview_resolve_model(inherit_name, out_model, (size_t)out_capacity)) return 1;
     if (sh_typeinfo_inherit_model(inherit_name, out_model, (size_t)out_capacity)) return 1;
     /* Follow the installed spawner-to-pickup model chain if live lookup missed. */
     return sh_prefabpreview_resolve_model(inherit_name, out_model, (size_t)out_capacity);
+}
+
+/* The model the editor draws for the palette row that owns the inherit: the
+ * row's renderInfo read live at the last palette build, else the installed
+ * sedef text of that row. Demons (an encounter entityDef) and the player start
+ * have no renderModelInfo of their own; their rows name an md6. */
+static int prefab_editor_model(const char *inherit_name, char *out_model, int out_capacity,
+                               float size[3], int *have_size)
+{
+    char sedef[260], model[512], file_model[512];
+    float live_size[3], file_size[3];
+    int row, file = 0;
+    *have_size = 0;
+    if (out_capacity <= 0) return 0;
+    row = sh_budget_table_row_model(inherit_name, sedef, sizeof sedef, model, sizeof model, live_size);
+    if (!(row & SH_BT_ROW_FOUND)) return 0;
+    if (!(row & SH_BT_ROW_MODEL) || !(row & SH_BT_ROW_SIZE))
+        file = sh_prefabpreview_editor_model(sedef, file_model, sizeof file_model, file_size);
+    if (!(row & SH_BT_ROW_MODEL) && (file & SH_PREFAB_DEFAULT_MODEL))
+        memcpy(model, file_model, sizeof model);
+    if (row & SH_BT_ROW_SIZE) { memcpy(size, live_size, sizeof live_size); *have_size = 1; }
+    else if (file & SH_PREFAB_DEFAULT_SIZE) { memcpy(size, file_size, sizeof file_size); *have_size = 1; }
+    if (!(row & SH_BT_ROW_MODEL) && !(file & SH_PREFAB_DEFAULT_MODEL)) return 0;
+    if (!sh_prefabpreview_is_mesh_name(model) || strlen(model) >= (size_t)out_capacity) return 0;
+    memcpy(out_model, model, strlen(model) + 1);
+    return 1;
+}
+
+/* Draw what the editor draws: the entityDef's model when it is a mesh the
+ * decoder handles, else the palette row's renderInfo model. Returns
+ * SH_PREFAB_DEFAULT_MODEL, plus SH_PREFAB_DEFAULT_EDITOR for a row model. */
+static int prefab_model_rule(const char *inherit_name, char *out_model, int out_capacity,
+                             float size[3], int *have_size)
+{
+    char editor[512];
+    int def = prefab_def_model(inherit_name, out_model, out_capacity);
+    *have_size = 0;
+    if (def && sh_prefabpreview_is_mesh_name(out_model)) {
+        (void)prefab_editor_model(inherit_name, editor, sizeof editor, size, have_size);
+        return SH_PREFAB_DEFAULT_MODEL;
+    }
+    if (prefab_editor_model(inherit_name, editor, sizeof editor, size, have_size) &&
+        strlen(editor) < (size_t)out_capacity) {
+        memcpy(out_model, editor, strlen(editor) + 1);
+        return SH_PREFAB_DEFAULT_MODEL | SH_PREFAB_DEFAULT_EDITOR;
+    }
+    if (!def && out_capacity > 0) out_model[0] = '\0';
+    return def ? SH_PREFAB_DEFAULT_MODEL : 0;
+}
+
+/* Resolve prefab models from decl/installed data; mesh extraction is asynchronous. */
+static int slot_resolve_prefab_model(sh_iface *self, const char *inherit_name,
+                                     char *out_model, int out_capacity)
+{
+    float size[3];
+    int have_size;
+    (void)self;
+    return (prefab_model_rule(inherit_name, out_model, out_capacity, size, &have_size) &
+            SH_PREFAB_DEFAULT_MODEL) != 0;
 }
 
 static int slot_request_prefab_mesh(sh_iface *self, unsigned long generation, const char *model_name)
@@ -519,14 +576,20 @@ static int slot_resolve_prefab_defaults(sh_iface *self, const char *inherit_name
                                         char *out_model, int out_capacity,
                                         float *out_scale, int out_scale_count)
 {
+    float size[3];
+    int have_size = 0, rule;
+    (void)self;
     if (!out_model || out_capacity <= 0 || !out_scale || out_scale_count < 3) return 0;
     int flags = sh_prefabpreview_resolve_defaults(inherit_name, out_model,
                                                   (size_t)out_capacity, out_scale);
     /* Keep live-model preference while the installed resolver supplies scale. */
-    if (slot_resolve_prefab_model(self, inherit_name, out_model, out_capacity))
-        flags |= SH_PREFAB_DEFAULT_MODEL;
-    else {
-        out_model[0] = '\0'; flags &= ~SH_PREFAB_DEFAULT_MODEL;
+    rule = prefab_model_rule(inherit_name, out_model, out_capacity, size, &have_size);
+    flags &= ~(SH_PREFAB_DEFAULT_MODEL | SH_PREFAB_DEFAULT_EDITOR);
+    if (rule & SH_PREFAB_DEFAULT_MODEL) flags |= rule;
+    else out_model[0] = '\0';
+    if (out_scale_count >= 6 && have_size) {
+        memcpy(out_scale + 3, size, sizeof size);
+        flags |= SH_PREFAB_DEFAULT_SIZE;
     }
     return flags;
 }

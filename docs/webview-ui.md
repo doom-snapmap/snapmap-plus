@@ -66,7 +66,7 @@ The header defines the complete ABI. These are the main entry points:
 | Timeline tile | `timeline_tile` at `+0x368` reports the toybox tile's palette row, its prototype record class and the rebind counts. The page does not call it; the `+0x298` normaliser is retired. |
 | Prefab limits | `budget` at `+0x370`: TABLE copies the budget table the backend built after the last palette build, USAGE the map's limits, usage and reached byte from the last editor frame. |
 | Persistent settings | `config_get_json` at `+0x2B0` and `config_set_json` at `+0x2B8`. |
-| Prefab geometry | Model lookup and request/completion slots at `+0x308` through `+0x320`. |
+| Prefab geometry | Model lookup and request/completion slots at `+0x308` through `+0x320`. `resolve_prefab_defaults` (`+0x320`) also reports a palette-row model (`SH_PREFAB_DEFAULT_EDITOR`) and, given six floats, that row's `renderInfo.size` (`SH_PREFAB_DEFAULT_SIZE`); see [Prefabs 3D preview](#prefabs-3d-preview). |
 | File menu rawmap I/O | `rawmap_status` at `+0x328`, `rawmap_configure` at `+0x330` and `rawmap_load_now` at `+0x338`. The picker is host-side and touches no engine state. Loading stages a file: the swap substitutes it into the next map the engine parses. |
 | View menu navigation | `navmesh_view` at `+0x340` reports whether the preview is out of date and, when asked, requests an update on the game's next frame. |
 | Engine edits | `run_on_main` at `+0x348`. Selection, delete, Entity State save and camera writes run on the game's thread; the page waits up to one second, then drops the edit and logs it. |
@@ -88,6 +88,43 @@ crash submission use a short-lived HTTPS worker in the host and the
 | page to host | `budgetUsage` | The map's current `{limits, usage, reached}` as `budgetUsage {data}`; asked when the Prefabs tab opens and on each prefab selection. |
 | host to page | `prefabDetail {..., folder, sig}` | The selected prefab now also carries its folder and a `size:mtime` content signature, and a module prefab carries its scene, so the Limits section can count its entities. |
 | page to host | `setDisplayNames {eids, names}` | Batch display-name writes through the `set_displayname` slot; the Timelines tree uses them for folder moves and renames. |
+
+## Prefabs 3D preview
+
+`prefab_viewport.js` gives each entity a role from its class and inherit, and
+each role its own drawing:
+
+| Role | Drawn as |
+|---|---|
+| Prop, pickup, interactable | Its model, neutral grey (amber for interactables). A pickup spawner draws the pickup its `spawnerEntityPair.entityStatic` names. |
+| Demon (`idPlaceableSnapAIEncounter`, `ai/` inherits) | The md6 its palette row draws in the editor, red, in the bind pose. |
+| Player start (`ComboStart`, `player/` inherits) | The same rule; pink. |
+| Blocking Box, trigger | Their shell models or a box of their saved or default size (triggers translucent with an outline; AI Navigation boxes green). |
+| Logic, listener, action, filter, light, speaker | The editor's hexagon, circle and diamond glyphs. |
+| Decal | A flat translucent slab of the stamp size; no texture. |
+
+The model comes from the backend, keyed by the entity's inherit: the entityDef's
+`renderModelInfo` model when it is an `.lwo`, `.bmodel` or `.md6`, otherwise the
+`renderInfo.renderModelName` of the palette row that owns the inherit, read live
+at the last palette build with the installed snapEditorEntityDef text as the
+fallback. That row's `renderInfo.size` sizes the box a demon or player start
+falls back to. The page holds no model table of its own.
+
+The backend reads geometry from the installed resource containers on its preview
+worker. An `.md6` is an md6Def whose `mesh` names a cooked `.md6mesh`; the
+decoder takes every surface's bind-pose positions, normals and indices, leaves
+out the surfaces the md6Def lists in its `Gore` and `Melee_Highlight` mesh kits,
+and draws no attachment (the player start's shotgun). A model above 65,536
+triangles is vertex-clustered down to that bound, which keeps a blob near 1 MB
+(the player start: 92,238 triangles without its kits, clustered to 62,086, 1.09 MB;
+the imp: 16,328 triangles, 0.35 MB).
+The blob format is unchanged. The page draws at most 400,000 triangles a frame
+and keeps 24 MB of meshes, evicting the least recently used mesh no entity uses.
+
+The status line reads `N models unavailable` when an entity that should have a
+model is drawn as a box because its model resolved to nothing or could not be
+decoded or delivered; Blocking Boxes, triggers, glyphs and decals never count.
+Models skipped by the triangle budget are reported separately.
 
 ## Prefabs Limits section
 

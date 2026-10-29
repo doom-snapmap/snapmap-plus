@@ -178,11 +178,11 @@ static int bt_seen_insert(sh_bt_table *t, char ns, const char *key)
     return 1;
 }
 
-void sh_bt_table_add_sedef(sh_bt_table *t, const char *name, const char *inherit,
-                           const int limits[SH_BT_FIELDS], int automation, int network_static)
+int sh_bt_table_add_sedef(sh_bt_table *t, const char *name, const char *inherit,
+                          const int limits[SH_BT_FIELDS], int automation, int network_static)
 {
-    if (!t || !name || !*name) return;
-    if (!bt_seen_insert(t, 's', name)) return;   /* a row name is keyed once */
+    if (!t || !name || !*name) return 0;
+    if (!bt_seen_insert(t, 's', name)) return 0;   /* a row name is keyed once */
     sh_bt_puts(&t->sedefs, t->nsedef++ ? "," : "");
     sh_bt_put_str(&t->sedefs, name);
     sh_bt_puts(&t->sedefs, ":{\"l\":");
@@ -197,7 +197,9 @@ void sh_bt_table_add_sedef(sh_bt_table *t, const char *name, const char *inherit
         sh_bt_put_str(&t->inherits, inherit);
         sh_bt_puts(&t->inherits, ":");
         sh_bt_put_str(&t->inherits, name);
+        return 1;
     }
+    return 0;
 }
 
 void sh_bt_parts_add(sh_bt_parts *ps, unsigned mask, int kind, const int block[SH_BT_FIELDS])
@@ -366,6 +368,12 @@ char *sh_bt_error_json(const char *message, unsigned generation)
 #define LAYERS_SOUND_OFF    0x8c
 #define LAYERS_AUTOVIEW_OFF 0x94
 #define NAME_CAP            260
+/* idDeclSnapEditorEntity::renderInfo (snapEntityRenderInfo_t), the model the
+ * editor draws for a row: renderModelName is an idStr whose data pointer is at
+ * +0x10, size an idVec3 at +0x94. */
+#define SEDEF_RENDERINFO_OFF 0x1e0
+#define RI_MODEL_DATA_OFF    0x10
+#define RI_SIZE_OFF          0x94
 
 typedef void *(*type_fn)(void *, const char *);
 typedef void *(*find_decl_fn)(void *, const char *, unsigned char);
@@ -380,6 +388,11 @@ static char *g_table;                   /* under g_lock */
 static size_t g_table_len;
 static unsigned g_generation;           /* under g_lock */
 static int g_limits[SH_BT_FIELDS], g_usage[SH_BT_FIELDS], g_reached, g_usage_ok;
+
+/* Per inherit, the owning palette row and the model it draws (under g_lock). */
+typedef struct bt_row_model { char *inherit, *sedef, *model; float size[3]; int have_size; } bt_row_model;
+typedef struct bt_row_models { bt_row_model *row; int count, cap, with_model; } bt_row_models;
+static bt_row_models g_rows;
 
 static volatile LONG g_dirty = 1;
 static void *g_built_editor;
@@ -402,6 +415,70 @@ static int rd_str(const void *p, char *out, size_t cap)
     if (!p) return 0;
     __try { strncpy_s(out, cap, (const char *)p, _TRUNCATE); return 1; }
     __except (EXCEPTION_EXECUTE_HANDLER) { out[0] = 0; return 0; }
+}
+
+static int rd_floats(const void *p, float *out, int n)
+{
+    __try { memcpy(out, p, sizeof(float) * (size_t)n); return 1; }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+}
+
+static void bt_rows_free(bt_row_models *rows)
+{
+    int i;
+    for (i = 0; i < rows->count; ++i) {
+        free(rows->row[i].inherit); free(rows->row[i].sedef); free(rows->row[i].model);
+    }
+    free(rows->row);
+    memset(rows, 0, sizeof *rows);
+}
+
+static char *bt_dup(const char *s)
+{
+    size_t n = strlen(s) + 1;
+    char *d = (char *)malloc(n);
+    if (d) memcpy(d, s, n);
+    return d;
+}
+
+/* Record the row that owns `inherit` and its renderInfo model and size. A
+ * model string that is not plain path text is dropped; the caller then falls
+ * back to the installed sedef text. */
+static void bt_rows_add(bt_row_models *rows, const char *inherit, const char *name,
+                        const unsigned char *sedef)
+{
+    void *mp = NULL;
+    char model[NAME_CAP];
+    float size[3];
+    int have_size, i, printable = 1;
+    bt_row_model *r;
+    model[0] = 0;
+    if (rd_ptr(sedef + SEDEF_RENDERINFO_OFF + RI_MODEL_DATA_OFF, &mp) && mp)
+        (void)rd_str(mp, model, sizeof model);
+    for (i = 0; model[i]; ++i)
+        if ((unsigned char)model[i] < 0x21 || (unsigned char)model[i] > 0x7e) { printable = 0; break; }
+    if (!printable) model[0] = 0;
+    have_size = rd_floats(sedef + SEDEF_RENDERINFO_OFF + RI_SIZE_OFF, size, 3);
+    for (i = 0; have_size && i < 3; ++i)
+        if (!(size[i] > 0.0f && size[i] < 100000.0f)) have_size = 0;
+    if (rows->count == rows->cap) {
+        int cap = rows->cap ? rows->cap * 2 : 512;
+        bt_row_model *n = (bt_row_model *)realloc(rows->row, (size_t)cap * sizeof *n);
+        if (!n) return;
+        rows->row = n; rows->cap = cap;
+    }
+    r = &rows->row[rows->count];
+    memset(r, 0, sizeof *r);
+    r->inherit = bt_dup(inherit);
+    r->sedef = bt_dup(name);
+    r->model = bt_dup(model);
+    if (!r->inherit || !r->sedef || !r->model) {
+        free(r->inherit); free(r->sedef); free(r->model);
+        return;
+    }
+    if (have_size) { memcpy(r->size, size, sizeof size); r->have_size = 1; }
+    if (model[0]) rows->with_model++;
+    rows->count++;
 }
 
 static void *clean(const sig_result *r, size_t n, const char *name)
@@ -489,7 +566,7 @@ static void bt_sum_templates(const unsigned char *list, unsigned filter, int vie
 }
 
 static void bt_build(unsigned char *ed, sh_bt_table *t, sh_bt_head *head, int limits[SH_BT_FIELDS],
-                     int usage[SH_BT_FIELDS], const char **error)
+                     int usage[SH_BT_FIELDS], const char **error, bt_row_models *rows)
 {
     unsigned char *pal = ed + ED_PALETTE_OFF, *mp = ed + ED_MODULES_OFF;
     void *entries = NULL, *pool = NULL;
@@ -519,7 +596,8 @@ static void bt_build(unsigned char *ed, sh_bt_table *t, sh_bt_head *head, int li
         inherit[0] = 0;
         if (rd_ptr(e + ENTRY_RECORD_OFF, &rec) && rec && rd_ptr((unsigned char *)rec + RECORD_INHERIT_OFF, &ip))
             (void)rd_str(ip, inherit, sizeof inherit);
-        sh_bt_table_add_sedef(t, name, inherit, l, automation, e[ENTRY_STATIC_OFF] != 0);
+        if (sh_bt_table_add_sedef(t, name, inherit, l, automation, e[ENTRY_STATIC_OFF] != 0))
+            bt_rows_add(rows, inherit, name, (const unsigned char *)sedef);
     }
     if (!rd_ptr(mp + MP_POOL_OFF, &pool) || !rd_i32(mp + MP_POOL_COUNT_OFF, &pool_count) ||
         pool_count < 0 || pool_count > WRAPPER_MAX) { *error = "module palette unreadable"; return; }
@@ -568,8 +646,10 @@ static void bt_build(unsigned char *ed, sh_bt_table *t, sh_bt_head *head, int li
         {
             char line[200];
             _snprintf_s(line, sizeof line, _TRUNCATE,
-                        "BUDGET: table built: %d rows, %d modules, layers %s (autoView 0x%x, sound 0x%x)",
-                        t->nsedef, t->nmodule, head->layers_source, head->auto_view_mask, head->sound_mask);
+                        "BUDGET: table built: %d rows, %d modules, layers %s (autoView 0x%x, sound 0x%x); "
+                        "%d of %d inherits draw a renderInfo model",
+                        t->nsedef, t->nmodule, head->layers_source, head->auto_view_mask, head->sound_mask,
+                        rows->with_model, rows->count);
             backend_log(line);
         }
     }
@@ -605,6 +685,7 @@ void sh_budget_table_tick(void *editor)
     {
         sh_bt_table t;
         sh_bt_head head;
+        bt_row_models rows;
         const char *error = NULL;
         char *json;
         unsigned gen;
@@ -612,12 +693,13 @@ void sh_budget_table_tick(void *editor)
         g_built_editor = ed;
         sh_bt_table_init(&t);
         memset(&head, 0, sizeof head);
+        memset(&rows, 0, sizeof rows);
         AcquireSRWLockShared(&g_lock);
         gen = g_generation + 1;
         ReleaseSRWLockShared(&g_lock);
         if (!gen) gen = 1;
         head.generation = gen;
-        __try { bt_build(ed, &t, &head, limits, usage, &error); }
+        __try { bt_build(ed, &t, &head, limits, usage, &error, &rows); }
         __except (EXCEPTION_EXECUTE_HANDLER) { error = "the palette walk faulted"; }
         head.limits = limits; head.usage = usage;
         json = error ? sh_bt_error_json(error, gen) : sh_bt_table_finish(&t, &head);
@@ -627,14 +709,40 @@ void sh_budget_table_tick(void *editor)
             _snprintf_s(line, sizeof line, _TRUNCATE, "BUDGET: table unavailable: %s", error);
             backend_log(line);
         }
-        if (!json) return;
+        if (!json) { bt_rows_free(&rows); return; }
         AcquireSRWLockExclusive(&g_lock);
         free(g_table);
         g_table = json;
         g_table_len = strlen(json);
         g_generation = gen;
+        if (!error) { bt_row_models old = g_rows; g_rows = rows; rows = old; }
         ReleaseSRWLockExclusive(&g_lock);
+        bt_rows_free(&rows);
     }
+}
+
+int sh_budget_table_row_model(const char *inherit, char *sedef, size_t sedef_cap,
+                              char *model, size_t model_cap, float size[3])
+{
+    int i, flags = 0;
+    if (sedef && sedef_cap) sedef[0] = 0;
+    if (model && model_cap) model[0] = 0;
+    if (!inherit || !*inherit) return 0;
+    AcquireSRWLockShared(&g_lock);
+    for (i = 0; i < g_rows.count; ++i) {
+        const bt_row_model *r = &g_rows.row[i];
+        if (_stricmp(r->inherit, inherit)) continue;
+        flags = SH_BT_ROW_FOUND;
+        if (sedef && sedef_cap) strncpy_s(sedef, sedef_cap, r->sedef, _TRUNCATE);
+        if (r->model[0] && model && model_cap > strlen(r->model)) {
+            memcpy(model, r->model, strlen(r->model) + 1);
+            flags |= SH_BT_ROW_MODEL;
+        }
+        if (r->have_size && size) { memcpy(size, r->size, sizeof r->size); flags |= SH_BT_ROW_SIZE; }
+        break;
+    }
+    ReleaseSRWLockShared(&g_lock);
+    return flags;
 }
 
 int sh_budget_table_slot(struct sh_iface *self, sh_budget_call *call)

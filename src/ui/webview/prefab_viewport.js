@@ -22,10 +22,12 @@ var prefabViewport = (function () {
   var generation = 0;
   var entities = [];
   var requested = {}, resolving = {}, inheritModels = {};
-  var pending = 0, failures = 0;
+  var pending = 0, budgetSkips = 0;
   var meshCache = {}, cacheBytes = 0, cacheClock = 0;
   var CACHE_LIMIT = 24 * 1024 * 1024;
-  var TRIANGLE_BUDGET = 250000;
+  /* The backend bounds one model at 65536 triangles (an md6 character is clustered down to it), so
+     this admits a handful of characters plus the props around them before boxes stand in. */
+  var TRIANGLE_BUDGET = 400000;
   var framePending = false;
   var yaw = 0.75, pitch = 0.48, distance = 256;
   var target = [0, 0, 0], sceneCenter = [0, 0, 0], sceneRadius = 64;
@@ -52,6 +54,9 @@ var prefabViewport = (function () {
     logic:[8,43,37.5], system:[8,43,37.5],
     input:[4,21.5,21.5], output:[4,21.5,21.5], filter:[4,28,28]
   };
+  /* Feet-origin characters. Their palette row's renderInfo.size replaces these when it resolves. */
+  var CHARACTER_SIZES = { demon:[48,48,96], player:[32,32,96] };
+  var DEMON_COLOR = [0.78,0.39,0.34], PLAYER_COLOR = [0.88,0.48,0.70];
 
   function setStatus(text) { if (status) status.textContent = text || ''; }
 
@@ -277,6 +282,11 @@ var prefabViewport = (function () {
     if (c.indexOf('snapmaplogic') !== -1 || c.indexOf('target_timeline') !== -1 ||
         h.indexOf('snapmaps/logic/') === 0) return 'logic';
     if (c.indexOf('dynamicstamp') !== -1 || h.indexOf('snapmaps/fx/decal') === 0) return 'decal';
+    /* Demons and player starts draw the md6 their palette row draws in the editor. */
+    if (c.indexOf('snapaiencounter') !== -1 || h.indexOf('snapmaps/placeablesnapaiencounter/') === 0 ||
+        h.indexOf('ai/') === 0) return 'demon';
+    if (c.indexOf('combostart') !== -1 || c.indexOf('playerstart') !== -1 ||
+        h.indexOf('player/') === 0) return 'player';
     if (c.indexOf('snapmapgameentity_spawner') === -1 &&
         /snapmapgameentity_(?:player|worldtext|light|speaker|codexmessage|message)/.test(c)) return 'system';
     if (c.indexOf('volume_trigger') !== -1 || h.indexOf('snapmaps/triggers/') === 0) return 'trigger';
@@ -293,6 +303,8 @@ var prefabViewport = (function () {
     if (role === 'filter') return [0.72,0.50,0.75];
     if (role === 'system') return [0.42,0.58,0.80];
     if (role === 'decal') return [0.70,0.74,0.78];
+    if (role === 'demon') return DEMON_COLOR;
+    if (role === 'player') return PLAYER_COLOR;
     var c=String(className||'').toLowerCase();
     if (c.indexOf('ai') !== -1 || c.indexOf('monster') !== -1) return [0.78,0.39,0.34];
     return [0.64,0.67,0.71];
@@ -340,6 +352,9 @@ var prefabViewport = (function () {
     var size;
     if (entity.role === 'decal') {
       size=[.5,Math.abs(finite(entity.stampSize.x,12)),Math.abs(finite(entity.stampSize.y,12))];
+    } else if (CHARACTER_SIZES[entity.role]) {
+      var box=entity.editorSize||CHARACTER_SIZES[entity.role];
+      size=[box[0]*Math.abs(scale[0]),box[1]*Math.abs(scale[1]),box[2]*Math.abs(scale[2])];
     } else if (MARKER_PROXY_SIZES[entity.role]) {
       var markerSize=MARKER_PROXY_SIZES[entity.role];
       size=[markerSize[0]*Math.abs(scale[0]),markerSize[1]*Math.abs(scale[1]),
@@ -355,7 +370,7 @@ var prefabViewport = (function () {
     /* Preserve thin slabs and decals; only expand dimensions that make a singular proxy. */
     for (i = 0; i < 3; i++) if (size[i] < .01) size[i] = .01;
     entity.modelMatrix=composeMatrix(entity.position,entity.axes,displayScale);
-    entity.proxyMatrix=(entity.role==='blocker'||entity.role==='trigger')
+    entity.proxyMatrix=(entity.role==='blocker'||entity.role==='trigger'||CHARACTER_SIZES[entity.role])
       ? composeBottomAnchoredBox(entity.position,entity.axes,size)
       : composeMatrix(entity.position,entity.axes,size);
     entity.helperShape=/cylinder/i.test(entity.inherit+entity.model)?'cylinder':'box';
@@ -380,7 +395,7 @@ var prefabViewport = (function () {
       hasScalePatch:!!(rmi.scale&&typeof rmi.scale==='object'),
       clipSizePatch:(edit.clipModelInfo||{}).size||null,
       hasClipSizePatch:!!(edit.clipModelInfo&&(edit.clipModelInfo.size)), stampSize:edit.size||{},
-      modelMatrix:null, proxyMatrix:null, helperShape:'box'};
+      editorSize:null, modelMatrix:null, proxyMatrix:null, helperShape:'box'};
     if (role === 'blocker') updateEntityTransform(entity,BLOCKING_DEFAULT_SIZE,true);
     else updateEntityTransform(entity,[1,1,1],false);
     return entity;
@@ -476,18 +491,36 @@ var prefabViewport = (function () {
       var entity=entities[i];
       if (!entity.resolveModel || entity.inherit !== inherit) continue;
       if (!entity.model && info.model) entity.model=info.model;
+      if (info.size && CHARACTER_SIZES[entity.role]) entity.editorSize=info.size;
       if (!info.scale && entity.role === 'blocker') updateEntityTransform(entity,BLOCKING_DEFAULT_SIZE,true);
       else updateEntityTransform(entity,info.scale||[1,1,1],!!info.scale);
       if (entity.model) requestMesh(entity.model);
     }
   }
 
+  /* An entity whose model resolved to nothing, or whose mesh could not be decoded or delivered, is
+     drawn as a box. Blocking boxes and triggers are boxes by design; markers and decals never ask. */
+  function modelUnavailable(entity) {
+    if (!entity.resolveModel || entity.role === 'blocker' || entity.role === 'trigger') return false;
+    if (entity.model) return !meshCache[entity.model] && requested[entity.model] !== 'pending';
+    return !resolving[entity.inherit];
+  }
+
+  function statusText(count, pendingCount, unavailable, skipped) {
+    if (!count) return 'No renderable entities';
+    if (pendingCount > 0) return 'Loading installed geometry...';
+    if (unavailable > 0) return unavailable + (unavailable === 1 ? ' model' : ' models') + ' unavailable';
+    if (skipped > 0)
+      return 'Interactive preview - ' + skipped + (skipped === 1 ? ' model' : ' models') +
+             ' over the triangle budget';
+    return 'Interactive preview';
+  }
+
   function updateStatus() {
     if (!gl) return;
-    if (!entities.length) setStatus('No renderable entities');
-    else if (pending > 0) setStatus('Loading installed geometry...');
-    else if (failures > 0) setStatus('Interactive preview - simplified where needed');
-    else setStatus('Interactive preview');
+    var unavailable = 0;
+    for (var i = 0; i < entities.length; i++) if (modelUnavailable(entities[i])) unavailable++;
+    setStatus(statusText(entities.length, pending, unavailable, budgetSkips));
   }
 
   function activeModel(name) {
@@ -531,11 +564,11 @@ var prefabViewport = (function () {
     if (requested[name] === 'pending') pending--;
     requested[name] = statusCode === 1 ? 'ready' : 'failed';
     if (statusCode !== 1 || !vertexCount || !indexCount) {
-      failures++; updateStatus(); markDirty(); return;
+      requested[name] = 'failed'; updateStatus(); markDirty(); return;
     }
     if (meshCache[name]) { updateStatus(); return; }
     if (!evictFor(vertexBytes + indexBytes)) {
-      failures++; requested[name] = 'failed'; updateStatus(); return;
+      requested[name] = 'failed'; updateStatus(); return;
     }
     var bounds = [];
     for (var b = 0; b < 6; b++) bounds.push(view.getFloat32(24 + b*4, true));
@@ -550,7 +583,10 @@ var prefabViewport = (function () {
     delete resolving[d.inherit]; pending--;
     var scale=Array.isArray(d.scale)&&d.scale.length>=3
       ? [finite(d.scale[0],1),finite(d.scale[1],1),finite(d.scale[2],1)] : null;
-    var info={model:d.model||'',scale:scale};
+    var size=Array.isArray(d.size)&&d.size.length>=3
+      ? [finite(d.size[0],0),finite(d.size[1],0),finite(d.size[2],0)] : null;
+    if (size && !(size[0]>0 && size[1]>0 && size[2]>0)) size=null;
+    var info={model:d.model||'',scale:scale,size:size,editorModel:!!d.editorModel};
     inheritModels[d.inherit]=info;
     applyResolvedModel(d.inherit,info);
     refreshBounds(!cameraTouched); updateStatus();
@@ -558,7 +594,7 @@ var prefabViewport = (function () {
 
   function meshUnavailable(d) {
     if (!d || d.generation !== generation || requested[d.model] !== 'pending') return;
-    requested[d.model] = 'failed'; pending--; failures++;
+    requested[d.model] = 'failed'; pending--;
     updateStatus(); markDirty();
   }
 
@@ -667,7 +703,7 @@ var prefabViewport = (function () {
       gl.disable(gl.BLEND);
     }
 
-    var triangles = 0;
+    var triangles = 0, skipped = 0;
     for (var i=0;i<entities.length;i++) {
       var e=entities[i];
       if (e.role === 'trigger' || e.role === 'decal') continue;
@@ -676,6 +712,7 @@ var prefabViewport = (function () {
         triangles += mesh.count/3; mesh.lastUse=++cacheClock;
         drawMesh(mesh,e.modelMatrix,e.color,1,false);
       } else {
+        if (mesh) skipped++;
         var fallback=markerMeshes[e.role]||cube;
         if (fallback) drawMesh(fallback,e.proxyMatrix,e.color,1,false);
       }
@@ -695,11 +732,12 @@ var prefabViewport = (function () {
     }
     gl.depthMask(true); gl.disable(gl.BLEND);
     gl.bindVertexArray(null);
+    if (skipped !== budgetSkips) { budgetSkips = skipped; updateStatus(); }
   }
 
   function newGeneration() {
     generation = (generation + 1) & 0x7fffffff; if (!generation) generation = 1;
-    requested = {}; resolving = {}; pending = 0; failures = 0;
+    requested = {}; resolving = {}; pending = 0; budgetSkips = 0;
     if (typeof post === 'function') post({cmd:'requestPrefabMesh', generation:generation, model:''});
   }
 
@@ -765,7 +803,19 @@ var prefabViewport = (function () {
   }
   new MutationObserver(function(){ markDirty(); }).observe(document.documentElement,{attributes:true,attributeFilter:['class']});
 
+  function transportUnavailable() {
+    for (var name in requested) if (Object.prototype.hasOwnProperty.call(requested, name) &&
+                                    requested[name] === 'pending') requested[name] = 'failed';
+    pending = 0; updateStatus(); markDirty();
+  }
+
   return {load:load, clear:clear, modelResolved:modelResolved,
           meshUnavailable:meshUnavailable, receiveMeshBuffer:receiveMeshBuffer,
-          transportUnavailable:function(){ failures++; pending=0; updateStatus(); markDirty(); }};
+          transportUnavailable:transportUnavailable,
+          /* Pure pieces for the contract tests; no GL or DOM. */
+          testing:{entityRole:entityRole, roleColor:roleColor, selectEntityModel:selectEntityModel,
+                   entityFromJson:entityFromJson, statusText:statusText,
+                   modelUnavailable:modelUnavailable,
+                   resolve:function(list, inherit, info){ var keep=entities; entities=list;
+                     try { applyResolvedModel(inherit, info); } finally { entities=keep; } }}};
 })();

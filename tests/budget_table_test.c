@@ -68,11 +68,12 @@ static void test_table(void)
     char *json;
     int i;
     sh_bt_table_init(&t);
-    sh_bt_table_add_sedef(&t, "unknown/unknown", "snapmaps/unknown", unk, 0, 0);
-    sh_bt_table_add_sedef(&t, "custom/timeline", "snapmaps/unknown", unk, 1, 0);   /* inherit kept by the first row */
+    /* The return value names the row that owns its inherit; the palette render-model lookup keys on it. */
+    CHECK(sh_bt_table_add_sedef(&t, "unknown/unknown", "snapmaps/unknown", unk, 0, 0) == 1);
+    CHECK(sh_bt_table_add_sedef(&t, "custom/timeline", "snapmaps/unknown", unk, 1, 0) == 0);   /* inherit kept by the first row */
     sh_bt_table_add_sedef(&t, "prop/new/crate01", "snapmaps/props/new/crate01", crate, 0, 0);
     sh_bt_table_add_sedef(&t, "volume/blocking", "snapmaps/volume/blocking", box, 0, 1);
-    sh_bt_table_add_sedef(&t, "volume/blocking", "other", box, 0, 1);              /* duplicate row name */
+    CHECK(sh_bt_table_add_sedef(&t, "volume/blocking", "other", box, 0, 1) == 0);              /* duplicate row name */
     sh_bt_table_add_sedef(&t, "odd\"name", NULL, box, 0, 0);
     /* Many rows exercise the key set's growth. */
     for (i = 0; i < 3000; ++i) {

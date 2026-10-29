@@ -20,7 +20,8 @@
  *            usage, +0x236d0 limits-reached byte
  *   entry    +0x000 sedef, +0x150 prototype record (+0x58 inherit),
  *            +0x318 network-static byte
- *   sedef    +0x08 name, +0x3c8 moduleAutomation, +0x3d8 limits (12 ints)
+ *   sedef    +0x08 name, +0x1e0 renderInfo (+0x10 renderModelName data,
+ *            +0x94 size), +0x3c8 moduleAutomation, +0x3d8 limits (12 ints)
  *   wrapper  +0x00 idDeclSnapModule (+0x08 name, +0xf0 portal count,
  *            +0x100 layerMask), +0x80 snapmoduleinfo card (+0x118 floors,
  *            +0x130 walls, +0x174/+0x178/+0x17c render/collision/general KB),
@@ -77,9 +78,10 @@ typedef struct sh_bt_table {
 void sh_bt_table_init(sh_bt_table *t);
 void sh_bt_table_free(sh_bt_table *t);
 /* One palette row. The first row of an inherit owns it, as when map load and
- * paste bind an entity to the first matching row. */
-void sh_bt_table_add_sedef(sh_bt_table *t, const char *name, const char *inherit,
-                           const int limits[SH_BT_FIELDS], int automation, int network_static);
+ * paste bind an entity to the first matching row. Returns 1 when this row
+ * became the owner of its inherit. */
+int sh_bt_table_add_sedef(sh_bt_table *t, const char *name, const char *inherit,
+                          const int limits[SH_BT_FIELDS], int automation, int network_static);
 /* A module's template entities grouped by layer mask and kind, so a caller
  * can apply the instance layer mask a prefab actually saved. */
 #define SH_BT_PART_GAME 0
@@ -127,6 +129,16 @@ void sh_budget_table_palette_rebuilt(void);
 
 /* Called by the EditorFrame detour after the engine's frame, on the game thread. */
 void sh_budget_table_tick(void *editor);
+
+/* The palette row that owns an entityDef inherit, as of the last palette
+ * build, and the model it draws (renderInfo.renderModelName and .size, read
+ * live). Any thread. Returns SH_BT_ROW_* bits; 0 when no row owns it or no
+ * table has been built. */
+#define SH_BT_ROW_FOUND 0x1
+#define SH_BT_ROW_MODEL 0x2
+#define SH_BT_ROW_SIZE  0x4
+int sh_budget_table_row_model(const char *inherit, char *sedef, size_t sedef_cap,
+                              char *model, size_t model_cap, float size[3]);
 
 /* The +0x370 slot body (see snapmap_plus_iface.h). */
 int sh_budget_table_slot(struct sh_iface *self, sh_budget_call *call);

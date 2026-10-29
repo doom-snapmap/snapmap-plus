@@ -436,6 +436,8 @@
   .pc-legend-dot.blocker { background: #5794c7; }
   .pc-legend-dot.navigation { background: #5cb86b; }
   .pc-legend-dot.interactable { background: #dba849; }
+  .pc-legend-dot.demon { background: #c76357; }
+  .pc-legend-dot.player { background: #e07ab3; }
   .pc-legend-dot.logic { background: linear-gradient(90deg, #9c78d1 0 34%, #db6e4f 34% 67%, #47adca 67%); }
   .pc-legend-dot.helper { background: rgba(56,184,194,.18); border: 1px solid #38b8c2; box-shadow: none; }
   /* Typography deliberately comes from the same global input/textarea rule as Entity State. */
