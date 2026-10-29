@@ -190,6 +190,8 @@ unsigned sh_aas_tree_depth(const sh_aas *a);
  * accommodate each demon animation's different floor-side offset.
  */
 int sh_aug_test_trav_anchors(double lo, double hi, double *out, int cap);
+/* Lower the per-class floor piece ceiling (1024); 0 restores it. Returns the previous one. */
+int sh_aug_test_set_floor_piece_cap(int cap);
 /* Corners of `area` as the augmenter reads its floor polygon, or -1. */
 int sh_aug_test_floor_corners(const sh_aas *a, unsigned area);
 /* Set the per-demon anchor cap; 0 is uncapped. Returns the previous cap. */

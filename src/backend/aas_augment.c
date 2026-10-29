@@ -883,14 +883,17 @@ static void aug_clip_cell(aug_box *cell, const unsigned char *p, int front)
  * carve void leaves: their field4 encoding is unresolved, so overhangs
  * outside existing navigation remain unavailable. Returns carved slot count.
  */
-static int aug_carve_only(aug_ctx *c, int area, const aug_quad *eff, int only);
+static int aug_carve_leaves(aug_ctx *c, int area, const aug_quad *eff, int only, int dry);
 static int aug_carve(aug_ctx *c, int area, const aug_quad *eff)
-{ return aug_carve_only(c, area, eff, 0); }
+{ return aug_carve_leaves(c, area, eff, 0, 0); }
+static int aug_carve_only(aug_ctx *c, int area, const aug_quad *eff, int only)
+{ return aug_carve_leaves(c, area, eff, only, 0); }
 
 /* As aug_carve, but when `only` is nonzero only leaves of that area are
  * replaced: a floor piece claims its own floor's ground and never the leaves
- * of a surface above it. */
-static int aug_carve_only(aug_ctx *c, int area, const aug_quad *eff, int only)
+ * of a surface above it. With `dry` nothing in the tree changes; the return is
+ * the number of leaves a real carve would replace. */
+static int aug_carve_leaves(aug_ctx *c, int area, const aug_quad *eff, int only, int dry)
 {
     typedef struct { int node; aug_box cell; } aug_frame;
     struct { int plane; int f4; } split[SH_AUG_MAX_CORNERS + 1];
@@ -969,6 +972,18 @@ static int aug_carve_only(aug_ctx *c, int area, const aug_quad *eff, int only)
             }
             if (child == 0) continue;           /* void: never carved, see above */
             if (only && child != -only) continue;
+            if (dry) {
+                int k, outside = 0, inside = 1;
+                for (k = 0; k < eff->count + 1 && !outside; k++) {
+                    const unsigned char *sp = sh_aas_rec_const(c->a, SH_AAS_L_PLANES,
+                                                               (unsigned)split[k].plane);
+                    int s = sp ? aug_box_side(&sub, sp, 0.0) : -1;
+                    if (s == -1) outside = 1;
+                    else if (s != 1) inside = 0;
+                }
+                if (!outside && !(inside && child == -area)) carved++;
+                continue;
+            }
             {
                 /* Build the chain, dropping any split plane this cell already
                  * satisfies -- that is what keeps the tree shallow. */
@@ -2833,6 +2848,15 @@ static void aug_relink(aug_ctx *c)
  * either the area is left whole and counted; the bake goes on. */
 #define AUG_FLOOR_PIECES_PER_AREA 192
 #define AUG_MAX_FLOOR_PIECES      1024
+static int g_floor_piece_cap = AUG_MAX_FLOOR_PIECES;
+#ifdef SH_AUG_TESTING
+int sh_aug_test_set_floor_piece_cap(int cap)
+{
+    int was = g_floor_piece_cap;
+    g_floor_piece_cap = cap > 0 && cap <= AUG_MAX_FLOOR_PIECES ? cap : AUG_MAX_FLOOR_PIECES;
+    return was;
+}
+#endif
 
 static double aug_quad_area(const aug_quad *q)
 {
@@ -2901,7 +2925,8 @@ static int aug_cut_floors(aug_ctx *c, const sh_aug_platform *solids, int nsolids
                           const sh_aug_platform *support, const int *support_area, int ns)
 {
     sh_aug_platform *pieces = NULL, *keep = NULL;
-    int *owner = NULL, *areas = NULL;
+    aug_quad *qs = NULL;
+    int *owner = NULL, *areas = NULL, *qid = NULL;
     unsigned char *cut = NULL, *blocked = NULL, *group = NULL, *drop = NULL;
     unsigned *remap = NULL;
     unsigned na = sh_aas_count(c->a, SH_AAS_L_AREAS), i, nr, ntp;
@@ -2917,7 +2942,9 @@ static int aug_cut_floors(aug_ctx *c, const sh_aug_platform *solids, int nsolids
     c->floor_quads = (aug_quad *)malloc(AUG_MAX_FLOOR_PIECES * sizeof *c->floor_quads);
     c->floor_ids = (int *)malloc(AUG_MAX_FLOOR_PIECES * sizeof *c->floor_ids);
     c->floor_parent = (int *)calloc(AUG_MAX_FLOOR_PIECES + 1, sizeof *c->floor_parent);
-    if (!pieces || !keep || !owner || !areas || !cut || !blocked || !group ||
+    qs = (aug_quad *)malloc(AUG_FLOOR_PIECES_PER_AREA * sizeof *qs);
+    qid = (int *)malloc(AUG_FLOOR_PIECES_PER_AREA * sizeof *qid);
+    if (!pieces || !keep || !owner || !areas || !cut || !blocked || !group || !qs || !qid ||
         !c->floor_quads || !c->floor_ids || !c->floor_parent) goto done;
     /* Areas whose shipped traversal points or portals name them stay whole. */
     ntp = sh_aas_count(c->a, SH_AAS_L_TRAVERSALPOINTS);
@@ -2957,41 +2984,48 @@ static int aug_cut_floors(aug_ctx *c, const sh_aug_platform *solids, int nsolids
                 best_area = aug_quad_area(&q); best = j;
             }
         }
-        if (best < 0) continue;
-        if (c->floor_count + 1 > AUG_MAX_FLOOR_PIECES ||
-            sh_aas_count(c->a, SH_AAS_L_AREAS) >= SH_AAS_MAX_AREAS) { c->rep->floors_left_whole++; continue; }
-        src = sh_aas_rec_const(c->a, SH_AAS_L_AREAS, (unsigned)f);
+        if (best < 0) { c->rep->floors_left_whole++; continue; }
+        /* Every piece must be a usable polygon that some leaf of this floor
+         * reaches, and all of them must fit, before the floor gives up any
+         * ground; otherwise the floor stays whole. */
         {
-            unsigned flags = sh_aas_get_u32(src, AR_FLAGS), travel = sh_aas_get_u16(src, AR_TRAVEL_FLAGS);
-            aug_quad q;
-            if (!aug_quad_from_platform(&q, &pieces[best]) || !aug_set_area_polygon(c, f, &q)) goto done;
-            c->floor_quads[c->floor_count] = q; c->floor_ids[c->floor_count++] = f;
-            for (j = 0; j < np; j++) if (owner[j] == k && j != best) {
-                int area;
-                unsigned char *ar;
-                if (!aug_quad_from_platform(&q, &pieces[j])) continue;
-                {
-                    int e2, flat = 0;
-                    for (e2 = 0; e2 < q.count; e2++) {
-                        double nin[2];
-                        aug_edge_normal_in(&q, e2, nin);
-                        if (nin[0] == 0.0 && nin[1] == 0.0) flat = 1;
-                    }
-                    if (flat) continue;     /* an edge with no direction cannot split the tree */
+            int nq = 0, bad = 0, e2;
+            for (j = 0; j < np && !bad; j++) if (owner[j] == k) {
+                aug_quad *q = &qs[nq];
+                if (!aug_quad_from_platform(q, &pieces[j])) { bad = 1; break; }
+                for (e2 = 0; e2 < q->count; e2++) {
+                    double nin[2];
+                    aug_edge_normal_in(q, e2, nin);
+                    if (nin[0] == 0.0 && nin[1] == 0.0) bad = 1;   /* no direction to split by */
                 }
-                if (c->floor_count >= AUG_MAX_FLOOR_PIECES ||
-                    sh_aas_count(c->a, SH_AAS_L_AREAS) >= SH_AAS_MAX_AREAS) break;
-                area = aug_add_area(c, &q, f);
-                if (area < 0) goto done;
-                ar = sh_aas_rec(c->a, SH_AAS_L_AREAS, (unsigned)area);
-                sh_aas_put_u32(ar, AR_FLAGS, flags);
-                sh_aas_put_u16(ar, AR_TRAVEL_FLAGS, (uint16_t)travel);
-                c->floor_parent[area - (int)c->original_areas] = f;
-                /* A piece no leaf of its floor reaches stays an area nothing
-                 * resolves to, and gets no route; the rest of the floor goes on. */
-                if (aug_carve_only(c, area, &q, f) <= 0) c->rep->floors_left_whole++;
-                c->floor_quads[c->floor_count] = q; c->floor_ids[c->floor_count++] = area;
-                c->rep->floor_pieces_added++;
+                qid[nq++] = j;
+            }
+            if (!bad && (c->floor_count + nq > g_floor_piece_cap ||
+                         sh_aas_count(c->a, SH_AAS_L_AREAS) + (unsigned)(nq - 1) >= SH_AAS_MAX_AREAS)) bad = 1;
+            for (j = 0; j < nq && !bad; j++)
+                if (qid[j] != best && aug_carve_leaves(c, 0, &qs[j], f, 1) <= 0) bad = 1;
+            if (bad) { c->rep->floors_left_whole++; continue; }
+            src = sh_aas_rec_const(c->a, SH_AAS_L_AREAS, (unsigned)f);
+            {
+                unsigned flags = sh_aas_get_u32(src, AR_FLAGS), travel = sh_aas_get_u16(src, AR_TRAVEL_FLAGS);
+                for (j = 0; j < nq; j++) if (qid[j] == best) {
+                    if (!aug_set_area_polygon(c, f, &qs[j])) goto done;
+                    c->floor_quads[c->floor_count] = qs[j]; c->floor_ids[c->floor_count++] = f;
+                }
+                for (j = 0; j < nq; j++) if (qid[j] != best) {
+                    int area = aug_add_area(c, &qs[j], f);
+                    unsigned char *ar;
+                    if (area < 0) goto done;
+                    ar = sh_aas_rec(c->a, SH_AAS_L_AREAS, (unsigned)area);
+                    sh_aas_put_u32(ar, AR_FLAGS, flags);
+                    sh_aas_put_u16(ar, AR_TRAVEL_FLAGS, (uint16_t)travel);
+                    c->floor_parent[area - (int)c->original_areas] = f;
+                    /* The dry run found leaves for it; a real carve that finds
+                     * none would leave ground the floor no longer covers. */
+                    if (aug_carve_only(c, area, &qs[j], f) <= 0) goto done;
+                    c->floor_quads[c->floor_count] = qs[j]; c->floor_ids[c->floor_count++] = area;
+                    c->rep->floor_pieces_added++;
+                }
             }
         }
         group[f] = 1;
@@ -3043,7 +3077,7 @@ static int aug_cut_floors(aug_ctx *c, const sh_aug_platform *solids, int nsolids
     ok = 1;
 done:
     free(pieces); free(keep); free(owner); free(areas); free(cut); free(blocked); free(group);
-    free(drop); free(remap);
+    free(drop); free(remap); free(qs); free(qid);
     return ok;
 }
 

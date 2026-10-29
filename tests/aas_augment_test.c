@@ -3119,10 +3119,43 @@ static void test_a_portal_floor_is_never_cut(void)
     sh_aug_report_free(&rep);
     sh_aas_free(a);
 }
+/* A floor whose pieces do not all fit is left exactly as shipped: nothing is
+ * shrunk first, and only floors that were really cut are counted as cut. */
+static void test_a_floor_whose_pieces_do_not_fit_stays_whole(void)
+{
+    static const float seams[2] = { -168.0f, 168.0f };
+    static const float xs[4] = { -2000.0f, -168.0f, 168.0f, 2000.0f };
+    sh_aas *a = load_slabs(seams, 2);
+    sh_aug_platform p[2];
+    sh_aug_report rep;
+    sh_aug_opts o = { SH_AUG_FALL_AUTO, 1, SH_AUG_TRAVERSAL_NEVER, 0 };
+    int was, k, changed = 0;
+    printf("a floor whose pieces do not all fit stays as shipped\n");
+    if (!a) { CHECK(0); return; }
+    /* Two boxes straddling both seams: every slab needs several pieces. */
+    mkbox_yawed(&p[0], 0, 600, 600, 200, 0, 64.0f, 0.0f, "west-east box");
+    mkbox_yawed(&p[1], 0, -600, 600, 200, 0, 64.0f, 0.0f, "second box");
+    was = sh_aug_test_set_floor_piece_cap(5);
+    CHECK(sh_aas_augment(a, p, 2, &o, &rep) == 1);
+    sh_aug_test_set_floor_piece_cap(was);
+    CHECK_MSG(rep.floors_left_whole > 0, "the floors past the cap are counted as left whole");
+    for (k = 1; k <= 3; k++) {
+        const unsigned char *b = sh_aas_rec_const(a, SH_AAS_L_AREABOUNDS, (unsigned)k);
+        if (sh_aas_get_i16(b, 0) != (int)xs[k - 1] || sh_aas_get_i16(b, 6) != (int)xs[k] ||
+            sh_aas_get_i16(b, 2) != -2000 || sh_aas_get_i16(b, 8) != 2000) changed++;
+    }
+    CHECK_MSG(changed == rep.floors_cut, "only the floors counted as cut lost ground");
+    CHECK_MSG(rep.floors_cut + rep.floors_left_whole == 3, "every slab is either cut or whole");
+    CHECK_MSG(sh_aug_test_floor_corners(a, 1) >= 4 && sh_aug_test_floor_corners(a, 3) >= 4,
+              "the outer slabs read back");
+    sh_aug_report_free(&rep);
+    sh_aas_free(a);
+}
 
 int main(void)
 {
     printf("aas_augment_test\n");
+    test_a_floor_whose_pieces_do_not_fit_stays_whole();
     test_a_portal_floor_is_never_cut();
     test_a_floor_split_past_the_corner_limit_still_reads();
     test_barrier_jumps_only_when_built_with_them();
