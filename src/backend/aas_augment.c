@@ -1726,8 +1726,13 @@ failed:
 
 /* Try midpoint anchors first, then spread along the edge. Per-demon animation
  * offsets need different amounts of clear floor, so one anchor can reject an
- * otherwise usable route.
+ * otherwise usable route. Every anchor that works and stands at least
+ * TRAV_ANCHOR_GAP from the ones already placed on that segment for that demon
+ * becomes its own link, so a long edge offers more than one place to climb;
+ * the per-area route budget keeps those alternatives only while there is room.
  */
+#define TRAV_ANCHOR_SPACING 192.0
+#define TRAV_ANCHOR_GAP     128.0
 #ifdef SH_AUG_TESTING
 /* Test-only anchor cap; 0 leaves sampling uncapped. */
 static int g_test_anchor_cap;
@@ -1739,23 +1744,38 @@ int sh_aug_test_set_anchor_cap(int n)
 }
 #endif
 
+/* Positions along [lo, hi] in world units: the midpoint, then evenly spaced
+ * points about TRAV_ANCHOR_SPACING apart with the ends inset by
+ * WALK_END_INSET, nearest the midpoint first. */
 static int aug_trav_anchors(double lo, double hi, double *out, int cap)
 {
-    double mid;
-    double ts[24];
-    int n, i, count = 0;
+    double mid, a, b;
+    int n, i, k, count = 0;
 
     if (cap <= 0) return 0;
     if (hi < lo) { double t = lo; lo = hi; hi = t; }
 
     mid = (lo + hi) / 2.0;
     out[count++] = mid;
-
-    n = aug_samples((float)lo, (float)hi, ts, (int)(sizeof ts / sizeof ts[0]));
-    for (i = 0; i < n && count < cap; i++) {
-        int dup = 0, k;
-        for (k = 0; k < count; k++) if (out[k] == ts[i]) { dup = 1; break; }
-        if (!dup) out[count++] = ts[i];
+    a = lo + WALK_END_INSET;
+    b = hi - WALK_END_INSET;
+    if (b <= a) return count;
+    n = (int)ceil((b - a) / TRAV_ANCHOR_SPACING);
+    if (n < 1) n = 1;
+    if (n > cap) n = cap;
+    for (i = 0; i <= n && count < cap; i++) {
+        double v = a + (b - a) * (double)i / (double)n;
+        int dup = 0;
+        for (k = 0; k < count; k++) if (fabs(out[k] - v) < 1e-6) { dup = 1; break; }
+        if (!dup) out[count++] = v;
+    }
+    /* Nearest the midpoint first; ties keep the lower position first. */
+    for (i = 2; i < count; i++) {
+        double v = out[i], dv = fabs(v - mid);
+        for (k = i; k > 1 && (fabs(out[k - 1] - mid) > dv ||
+                             (fabs(out[k - 1] - mid) == dv && out[k - 1] > v)); k--)
+            out[k] = out[k - 1];
+        out[k] = v;
     }
     return count;
 }
@@ -1888,10 +1908,11 @@ static int aug_traversal_specs(aug_ctx *c, int ai, const aug_quad *eff,
 
         seglen = sqrt((sides[i].p1[0] - sides[i].p0[0]) * (sides[i].p1[0] - sides[i].p0[0]) +
                       (sides[i].p1[1] - sides[i].p0[1]) * (sides[i].p1[1] - sides[i].p0[1]));
-        (void)seglen;
-        /* Sample the contact segment so partial neighbours remain reachable. */
-        na = aug_trav_anchors(0.0, 1.0, anchors,
+        /* Sample the contact segment by its length so partial neighbours and
+         * partly shadowed edges remain reachable; anchors are edge fractions. */
+        na = aug_trav_anchors(0.0, seglen, anchors,
                               (int)(sizeof anchors / sizeof anchors[0]));
+        for (k = 0; k < na; k++) anchors[k] = seglen > 1e-9 ? anchors[k] / seglen : 0.5;
 #ifdef SH_AUG_TESTING
         if (g_test_anchor_cap > 0 && na > g_test_anchor_cap) na = g_test_anchor_cap;
 #endif
@@ -1904,7 +1925,7 @@ static int aug_traversal_specs(aug_ctx *c, int ai, const aug_quad *eff,
                 float off = 0.0f;
                 int dist = 0, time = 0, aidx, placed = 0, dirn, inward;
                 int floor_at = sides[i].floor_area;
-                double inner_pt[3], outer_pt[3], dirs;
+                double inner_pt[3], outer_pt[3], dirs, used[24];
                 aug_trav_spec *sp;
 
                 if (!m) continue;
@@ -1918,6 +1939,12 @@ static int aug_traversal_specs(aug_ctx *c, int ai, const aug_quad *eff,
                     double t = anchors[aidx];
                     double bx = sides[i].p0[0] + t * (sides[i].p1[0] - sides[i].p0[0]);
                     double by = sides[i].p0[1] + t * (sides[i].p1[1] - sides[i].p0[1]);
+                    {
+                        int q, crowded = 0;
+                        for (q = 0; q < placed; q++)
+                            if (fabs(t - used[q]) * seglen < TRAV_ANCHOR_GAP) crowded = 1;
+                        if (crowded) continue;
+                    }
                     inner_pt[0] = bx - sides[i].out[0] * TRAVERSAL_INNER_INSET;
                     inner_pt[1] = by - sides[i].out[1] * TRAVERSAL_INNER_INSET;
                     inner_pt[2] = aug_z_at(eff, inner_pt[0], inner_pt[1]);
@@ -1978,35 +2005,37 @@ static int aug_traversal_specs(aug_ctx *c, int ai, const aug_quad *eff,
                            !sh_nav_geometry_path_clear(c->solids,c->solid_count,-1,-1,
                                stored,stored,c->radius,c->height))continue;
                     }
-                    placed = 1;
-                    break;
-                }
-                if (!placed) continue;      /* nowhere on this segment works for it */
+                    used[placed++] = t;
 
-                sp = aug_trav_append(c, buffer);
-                if (!sp) return count;
-                count++;
-                memset(sp, 0, sizeof *sp);
-                sp->travel_flags = m->travel_flags;
-                sp->d30 = m->d30;
-                sp->travel_time = time;
-                /* Pair ownership follows geometry/index order, not elevation.
-                 * A lower bridge can own its higher support: select the actual
-                 * uphill/downhill direction independently of which is 'ours'. */
-                inward=leap?up:(up==(inner_pt[2]>outer_pt[2]));
-                sp->from_area = inward ? floor_at : ai;
-                sp->to_area   = inward ? ai : floor_at;
-                memcpy(sp->start, inward ? outer_pt : inner_pt, sizeof sp->start);
-                memcpy(sp->end,   inward ? inner_pt : outer_pt, sizeof sp->end);
-                /* Facing follows XY travel: inward arriving, outward
-                 * departing. Store it in the donor fixed-point scale;
-                 * diagonal vectors are valid.
-                 */
-                dirs = inward ? -1.0 : 1.0;
-                sp->dir[0] = sides[i].out[0] * dirs;
-                sp->dir[1] = sides[i].out[1] * dirs;
-                sp->is_leap = leap;
-                _snprintf_s(sp->anim, sizeof sp->anim, _TRUNCATE, "%s", path);
+                    sp = aug_trav_append(c, buffer);
+                    if (!sp) return count;
+                    count++;
+                    memset(sp, 0, sizeof *sp);
+                    sp->travel_flags = m->travel_flags;
+                    sp->d30 = m->d30;
+                    sp->travel_time = time;
+                    /* Pair ownership follows geometry/index order, not elevation.
+                     * A lower bridge can own its higher support: select the actual
+                     * uphill/downhill direction independently of which is 'ours'. */
+                    inward=leap?up:(up==(inner_pt[2]>outer_pt[2]));
+                    sp->from_area = inward ? floor_at : ai;
+                    sp->to_area   = inward ? ai : floor_at;
+                    memcpy(sp->start, inward ? outer_pt : inner_pt, sizeof sp->start);
+                    memcpy(sp->end,   inward ? inner_pt : outer_pt, sizeof sp->end);
+                    /* Facing follows XY travel: inward arriving, outward
+                     * departing. Store it in the donor fixed-point scale;
+                     * diagonal vectors are valid.
+                     */
+                    dirs = inward ? -1.0 : 1.0;
+                    sp->dir[0] = sides[i].out[0] * dirs;
+                    sp->dir[1] = sides[i].out[1] * dirs;
+                    sp->is_leap = leap;
+                    _snprintf_s(sp->anim, sizeof sp->anim, _TRUNCATE, "%s", path);
+                    /* A leap keeps the landing its span was chosen for, so
+                     * it gets only the one link. */
+                    if (leap) break;
+                }
+                (void)placed;               /* nowhere on this segment may work for it */
             }
         }
     }

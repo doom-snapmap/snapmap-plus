@@ -440,7 +440,29 @@ static void test_traversal_anchor_pattern(void)
     n = sh_aug_test_trav_anchors(-100000.0, 100000.0, a, 4);
     CHECK_MSG(n <= 4, "the anchor list must never overrun the caller buffer");
     CHECK(n >= 1);
+
+    /* Spacing follows the edge's length in world units, not a unit interval:
+     * a 300-unit edge gets its ends as well as its middle, and a 2000-unit
+     * edge is sampled about every 192 units. */
+    n = sh_aug_test_trav_anchors(0.0, 300.0, a, 24);
+    CHECK_MSG(n == 3, "a 300-unit edge offers its middle and both inset ends");
+    CHECK(a[0] == 150.0);
+    n = sh_aug_test_trav_anchors(-1000.0, 1000.0, a, 24);
+    CHECK_MSG(n >= 11, "a 2000-unit edge is sampled every 192 units or closer");
+    for (i = 2; i < n; i++)
+        CHECK_MSG(fabs(a[i]) >= fabs(a[i - 1]), "anchors run outward from the midpoint");
+    {
+        double s[24];
+        int m = n, k;
+        memcpy(s, a, sizeof s);
+        for (i = 1; i < m; i++) for (k = i; k > 0 && s[k] < s[k - 1]; k--) {
+            double t = s[k]; s[k] = s[k - 1]; s[k - 1] = t;
+        }
+        for (i = 1; i < m; i++)
+            CHECK_MSG(s[i] - s[i - 1] <= 192.0 + 1e-6, "no stretch of edge goes unsampled");
+    }
 }
+
 
 /* ==================================================================== */
 /* oriented geometry                                                     */
@@ -2686,11 +2708,51 @@ static void test_a_climb_run_up_may_cross_a_floor_seam(void)
     sh_aug_report_free(&rep);
     sh_aas_free(a);
 }
+/* Climbs along a 1000-unit face come from several places, at least 128 units
+ * apart, and a 150-unit face keeps one: a demon beside a long step need not
+ * walk to its middle. */
+static void test_a_long_face_offers_climbs_along_its_length(void)
+{
+    sh_aas *a = load_slabs(NULL, 0);
+    sh_aug_platform p;
+    sh_aug_report rep;
+    sh_aug_opts o = { SH_AUG_FALL_AUTO, 1, SH_AUG_TRAVERSAL_AUTO, 0 };
+    unsigned i, nr;
+    double north[32], east[32];
+    int nn = 0, ne = 0, j, k, spaced = 1;
+    printf("a long face carries climbs along its length, a short one keeps one\n");
+    if (!a) { CHECK(0); return; }
+    load_synthetic_traversal_table();
+    mkbox_yawed(&p, 0, 0, 1000, 150, 0, 64.0f, 0.0f, "long step");
+    CHECK(sh_aas_augment(a, &p, 1, &o, &rep) == 1);
+    nr = sh_aas_count(a, SH_AAS_L_REACHABILITIES);
+    for (i = 0; i < nr; i++) {
+        const unsigned char *r = sh_aas_rec_const(a, SH_AAS_L_REACHABILITIES, i);
+        double x = sh_aas_get_i16(r, 12), y = sh_aas_get_i16(r, 14);
+        if (!(sh_aas_get_u32(r, 0) >> 16) || sh_aas_get_u16(r, 6) != 1) continue;
+        if (y > 75.0 && nn < 32) north[nn++] = x;
+        if (x > 500.0 && ne < 32) east[ne++] = y;
+    }
+    CHECK_MSG(nn >= 4, "the 1000-unit north face is climbable from several places");
+    CHECK_MSG(ne == 1, "the 150-unit east face keeps a single climb");
+    for (j = 0; j < nn; j++) for (k = j + 1; k < nn; k++)
+        if (fabs(north[j] - north[k]) < 128.0) spaced = 0;
+    CHECK_MSG(spaced, "climbs on one face stand at least 128 units apart");
+    {
+        size_t len; char err[192]; unsigned char *bytes = sh_aas_write(a, &len);
+        CHECK(bytes != NULL);
+        if (bytes) { CHECK_MSG(sh_navmesh_validate_aas(bytes, len, err, sizeof err), err);
+                     HeapFree(GetProcessHeap(), 0, bytes); }
+    }
+    sh_aug_report_free(&rep);
+    sh_aas_free(a);
+}
 
 int main(void)
 {
     printf("aas_augment_test\n");
     test_a_climb_run_up_may_cross_a_floor_seam();
+    test_a_long_face_offers_climbs_along_its_length();
     test_traversal_collection_grows_without_losing_demon_routes();
     test_climb_floor_endpoints_clear_rotated_solids();
     test_rotated_ramps_join_native_floor();
