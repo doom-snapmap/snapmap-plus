@@ -455,6 +455,7 @@ typedef struct aug_ctx {
     int solid_count;
     int prepared_geometry;
     unsigned original_areas;
+    unsigned floor_end;             /* areas below this are module floor */
     struct aug_side *sides;         /* AUG_MAX_SIDES, shared by the link passes */
 } aug_ctx;
 
@@ -1827,8 +1828,30 @@ static int aug_floor_traversal_point(aug_ctx *c,const aug_peer *owner,
     return 1;
 }
 
+/* A floor-side endpoint may land in any walkable module floor area, not only
+ * the one the edge's outward probe found: module floors are split into slabs
+ * whose seams need not keep a climb's run-up on the edge's own slab. Accept a
+ * floor area whose surface at the point is within step height of it. */
+static int aug_floor_accepts(aug_ctx *c, int area, const double p[3])
+{
+    const unsigned char *ar;
+    aug_quad floor;
+    float box[6];
+    double z;
+    if (area <= 0 || (unsigned)area >= c->floor_end) return 0;
+    ar = sh_aas_rec_const(c->a, SH_AAS_L_AREAS, (unsigned)area);
+    if (!ar || !(sh_aas_get_u32(ar, AR_FLAGS) & AREA_FLAGS_FLOOR)) return 0;
+    if (aug_original_floor(c->a, (unsigned)area, &floor)) {
+        if (floor.n[2] < c->min_floor_cos) return 0;
+        z = aug_z_at(&floor, p[0], p[1]);
+    } else if (aug_area_box(c->a, (unsigned)area, box)) z = box[5];
+    else return 0;
+    return fabs(z - p[2]) <= (double)c->step;
+}
+
 /* Collect per-demon climbs and leaps for usable edge segments in both
- * directions. Refuse endpoints that resolve outside their claimed BSP areas.
+ * directions. Refuse endpoints that resolve outside their claimed BSP areas,
+ * except that a floor endpoint may stand on any walkable module floor.
  */
 static int aug_traversal_specs(aug_ctx *c, int ai, const aug_quad *eff,
                                const aug_quad *req, const aug_peer *peers,
@@ -1880,6 +1903,7 @@ static int aug_traversal_specs(aug_ctx *c, int ai, const aug_quad *eff,
                 char path[SH_TRAV_PATH_CAP];
                 float off = 0.0f;
                 int dist = 0, time = 0, aidx, placed = 0, dirn, inward;
+                int floor_at = sides[i].floor_area;
                 double inner_pt[3], outer_pt[3], dirs;
                 aug_trav_spec *sp;
 
@@ -1939,15 +1963,17 @@ static int aug_traversal_specs(aug_ctx *c, int ai, const aug_quad *eff,
                     }
                     if (sh_aas_point_area(c->a, (float)inner_pt[0], (float)inner_pt[1],
                                           (float)(inner_pt[2] + 2.0)) != ai) continue;
-                    if (sh_aas_point_area(c->a, (float)outer_pt[0], (float)outer_pt[1],
-                                          (float)(outer_pt[2] + 2.0)) != sides[i].floor_area)
+                    floor_at = sh_aas_point_area(c->a, (float)outer_pt[0], (float)outer_pt[1],
+                                                 (float)(outer_pt[2] + 2.0));
+                    if (floor_at != sides[i].floor_area &&
+                        (sides[i].generated || !aug_floor_accepts(c, floor_at, outer_pt)))
                         continue;
-                    if (!aug_path_is_clear(c, peers, npeers, ai, sides[i].floor_area,
+                    if (!aug_path_is_clear(c, peers, npeers, ai, floor_at,
                                            inner_pt, outer_pt)) continue;
                     {
                         double stored[3];
                         if(!aug_reach_point(c->a,ai,inner_pt,stored)||
-                           !aug_reach_point(c->a,sides[i].floor_area,outer_pt,stored))continue;
+                           !aug_reach_point(c->a,floor_at,outer_pt,stored))continue;
                         if(!sides[i].generated&&
                            !sh_nav_geometry_path_clear(c->solids,c->solid_count,-1,-1,
                                stored,stored,c->radius,c->height))continue;
@@ -1968,8 +1994,8 @@ static int aug_traversal_specs(aug_ctx *c, int ai, const aug_quad *eff,
                  * A lower bridge can own its higher support: select the actual
                  * uphill/downhill direction independently of which is 'ours'. */
                 inward=leap?up:(up==(inner_pt[2]>outer_pt[2]));
-                sp->from_area = inward ? sides[i].floor_area : ai;
-                sp->to_area   = inward ? ai : sides[i].floor_area;
+                sp->from_area = inward ? floor_at : ai;
+                sp->to_area   = inward ? ai : floor_at;
                 memcpy(sp->start, inward ? outer_pt : inner_pt, sizeof sp->start);
                 memcpy(sp->end,   inward ? inner_pt : outer_pt, sizeof sp->end);
                 /* Facing follows XY travel: inward arriving, outward
@@ -2709,6 +2735,7 @@ int sh_aas_augment(sh_aas *a, const sh_aug_platform *plats, int n,
 
     c.a = a; c.o = opts; c.rep = out; c.failed = 0;c.prepared_geometry=0;c.sides=NULL;
     c.solids=plats;c.solid_count=n;c.original_areas=sh_aas_count(a,SH_AAS_L_AREAS);
+    c.floor_end=c.original_areas;
     c.radius = opts->inset ? aug_agent_radius(a) : 0.0f;
     c.height = aug_agent_height(a);
     c.step = sh_aas_setting_f32(a, SET_MAX_STEP_HEIGHT);

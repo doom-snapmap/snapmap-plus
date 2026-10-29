@@ -2482,9 +2482,215 @@ static void test_climb_floor_endpoints_clear_rotated_solids(void)
     sh_trav_test_reset();
 }
 
+/* ==================================================================== */
+/* a module floor split into slabs, as the Grid Room's is                */
+/* ==================================================================== */
+
+/* Floor slabs spanning +/-2000 in y at z = 0, side by side in x, split at
+ * `seams`. Areas 1..n carry the shipped floor flag 0x8 and a clockwise edge
+ * loop, so the augmenter reads their polygons the way it reads a real module.
+ * The BSP is the band -9.6 < z < 200, then one x-plane per seam. */
+static sh_aas *load_slabs(const float *seams, int nseams)
+{
+    unsigned counts[22];
+    size_t total = 394, off, len;
+    unsigned i, k, ns = (unsigned)nseams, na = ns + 1;
+    unsigned char *p;
+    size_t o[22];
+    char err[192];
+    sh_aas *a;
+    float xs[16];
+
+    if (ns > 14) return NULL;
+    xs[0] = -2000.0f;
+    for (i = 0; i < ns; i++) xs[i + 1] = seams[i];
+    xs[ns + 1] = 2000.0f;
+    memset(counts, 0, sizeof counts);
+    counts[SH_AAS_L_PLANES] = 2 + ns;
+    counts[SH_AAS_L_VERTICES] = 4 * na;
+    counts[SH_AAS_L_EDGES] = 4 * na;
+    counts[SH_AAS_L_EDGEINDEX] = 4 * na;
+    counts[SH_AAS_L_AREAS] = 1 + na;
+    counts[SH_AAS_L_NODES] = 3 + ns;
+    counts[SH_AAS_L_CLUSTERS] = 1;
+    counts[SH_AAS_L_OBSTACLEPVS] = 2 * (1 + na);
+    counts[SH_AAS_L_TREES] = 1;
+    counts[SH_AAS_L_AREABOUNDS] = 1 + na;
+    for (i = 0; i < 22; i++) total += 4 + (size_t)counts[i] * REC[i];
+    p = (unsigned char *)calloc(1, total);
+    if (!p) return NULL;
+    memcpy(p, "2SAA", 4);
+    p[4] = 3; p[5] = 29;
+    putf(p + SETW(0), -24.0f); putf(p + SETW(1), -24.0f); putf(p + SETW(2), 0.0f);
+    putf(p + SETW(3),  24.0f); putf(p + SETW(4),  24.0f); putf(p + SETW(5), 80.0f);
+    putf(p + SETW(12), 18.0f);
+    putf(p + SETW(15), 0.0f);
+    putf(p + SETW(16), 0.7f);
+    put32(p + SETW(35), 100);           /* tt_barrierJump */
+    put32(p + SETW(36), 100);
+    off = 394;
+    for (i = 0; i < 22; i++) {
+        put32(p + off, counts[i]);
+        off += 4; o[i] = off;
+        off += (size_t)counts[i] * REC[i];
+    }
+    putf(p + o[SH_AAS_L_PLANES] + 8, 1.0f);
+    putf(p + o[SH_AAS_L_PLANES] + 12, 9.6f);
+    putf(p + o[SH_AAS_L_PLANES] + 16 + 8, -1.0f);
+    putf(p + o[SH_AAS_L_PLANES] + 16 + 12, 200.0f);
+    for (i = 0; i < ns; i++) {              /* x - seam > 0 is the far slab */
+        putf(p + o[SH_AAS_L_PLANES] + 32 + i * 16, 1.0f);
+        putf(p + o[SH_AAS_L_PLANES] + 32 + i * 16 + 12, -seams[i]);
+    }
+    for (k = 0; k < na; k++) {
+        float x0 = xs[k], x1 = xs[k + 1];
+        float cx[4], cy[4];
+        unsigned char *ar = p + o[SH_AAS_L_AREAS] + (k + 1) * 44;
+        unsigned char *b = p + o[SH_AAS_L_AREABOUNDS] + (k + 1) * 12;
+        cx[0] = x0; cy[0] = 2000.0f; cx[1] = x1; cy[1] = 2000.0f;
+        cx[2] = x1; cy[2] = -2000.0f; cx[3] = x0; cy[3] = -2000.0f;
+        for (i = 0; i < 4; i++) {
+            unsigned v = k * 4 + i;
+            putf(p + o[SH_AAS_L_VERTICES] + v * 12, cx[i]);
+            putf(p + o[SH_AAS_L_VERTICES] + v * 12 + 4, cy[i]);
+            put32(p + o[SH_AAS_L_EDGES] + v * 12, v);
+            put32(p + o[SH_AAS_L_EDGES] + v * 12 + 4, k * 4 + (i + 1) % 4);
+            put32(p + o[SH_AAS_L_EDGES] + v * 12 + 8, 0x0C01);
+            put32(p + o[SH_AAS_L_EDGEINDEX] + v * 4, v);
+        }
+        put32(ar + 0x00, 8);
+        put16(ar + 0x04, 0x000A);
+        put16(ar + 0x06, 4);
+        put32(ar + 0x08, k * 4);
+        put16(ar + 0x0E, (unsigned)k);
+        put32(ar + 0x10, 2 * (k + 1));
+        put32(ar + 0x14, 0xFFFFFFFFu);
+        put32(ar + 0x18, 0xFFFFFFFFu);
+        put16(b + 0, (unsigned)(short)x0); put16(b + 2, (unsigned)(short)-2000);
+        put16(b + 6, (unsigned)(short)x1); put16(b + 8, 2000);
+    }
+    put32(p + o[SH_AAS_L_AREAS] + 0x14, 0xFFFFFFFFu);
+    put32(p + o[SH_AAS_L_AREAS] + 0x18, 0xFFFFFFFFu);
+    put32(p + o[SH_AAS_L_CLUSTERS], na); put32(p + o[SH_AAS_L_CLUSTERS] + 4, na);
+    /* every area sees every area: one literal row of seven set bits each */
+    for (i = 0; i < 1 + na; i++) {
+        p[o[SH_AAS_L_OBSTACLEPVS] + 2 * i] = 0x7F;
+        p[o[SH_AAS_L_OBSTACLEPVS] + 2 * i + 1] = 0x7F;
+    }
+    {
+        unsigned char *n = p + o[SH_AAS_L_NODES];
+        put32(n + 16 + 0, 0); put32(n + 16 + 8, 2); put32(n + 16 + 12, 0);
+        put32(n + 32 + 0, 1); put32(n + 32 + 8, ns ? 3 : 0xFFFFFFFFu); put32(n + 32 + 12, 0);
+        for (i = 0; i < ns; i++) {          /* node 3+i tests seam i */
+            unsigned char *q = n + (3 + i) * 16;
+            put32(q + 0, 2 + i);
+            put32(q + 8, i + 1 < ns ? 4 + i : (unsigned)-(int)(i + 2));
+            put32(q + 12, (unsigned)-(int)(i + 1));
+        }
+    }
+    putf(p + o[SH_AAS_L_TREES] + 8, 1.0f);
+    put32(p + o[SH_AAS_L_TREES] + 12, 1);
+    put32(p + o[SH_AAS_L_TREES] + 16, 1);
+    put32(p + o[SH_AAS_L_TREES] + 20, 1 + na);
+    len = total; err[0] = 0;
+    a = sh_aas_parse(p, len, err, sizeof err);
+    if (!a) printf("  (slab fixture did not parse: %s)\n", err);
+    free(p);
+    return a;
+}
+
+/* A box of the given size centred at (cx, cy), yawed by deg, top at `top`,
+ * standing on z = bottom. */
+static void mkbox_yawed(sh_aug_platform *p, double cx, double cy, double w, double d,
+                        double deg, float top, float bottom, const char *name)
+{
+    double r = deg * 3.14159265358979323846 / 180.0, cs = cos(r), sn = sin(r);
+    double lx[4] = { -w / 2,  w / 2,  w / 2, -w / 2 };
+    double ly[4] = {  d / 2,  d / 2, -d / 2, -d / 2 };
+    int i;
+    memset(p, 0, sizeof *p);
+    for (i = 0; i < 4; i++) {
+        p->c[i][0] = (float)(cx + cs * lx[i] - sn * ly[i]);
+        p->c[i][1] = (float)(cy + sn * lx[i] + cs * ly[i]);
+        p->c[i][2] = top;
+    }
+    p->n[2] = 1.0f;
+    p->face = 4;
+    p->depth = top - bottom;
+    _snprintf_s(p->name, sizeof p->name, _TRUNCATE, "%s", name);
+}
+
+/* Traversal reachabilities that rise from a floor area (1..floor_end-1) onto
+ * `top`, and the lowest/highest x their floor start takes. */
+static int floor_climbs_onto(sh_aas *a, int top, unsigned floor_end, int *from_area_mask,
+                             double *min_x, double *max_x)
+{
+    unsigned i, n = sh_aas_count(a, SH_AAS_L_REACHABILITIES);
+    int count = 0;
+    if (from_area_mask) *from_area_mask = 0;
+    if (min_x) *min_x = 1e9;
+    if (max_x) *max_x = -1e9;
+    for (i = 0; i < n; i++) {
+        const unsigned char *r = sh_aas_rec_const(a, SH_AAS_L_REACHABILITIES, i);
+        unsigned from = sh_aas_get_u16(r, 6), to = sh_aas_get_u16(r, 8);
+        double x;
+        if (!(sh_aas_get_u32(r, 0) >> 16) || (int)to != top || from == 0 || from >= floor_end) continue;
+        count++;
+        if (from_area_mask && from < 31) *from_area_mask |= 1 << from;
+        x = sh_aas_get_i16(r, 12);
+        if (min_x && x < *min_x) *min_x = x;
+        if (max_x && x > *max_x) *max_x = x;
+    }
+    return count;
+}
+
+/* The Grid Room's door-axis strip ends at x = +/-168, three units past the
+ * sides of a 330-wide step centred on it. The run-up of an east or west climb
+ * crosses that seam; it must land on the neighbouring slab, not be dropped. */
+static void test_a_climb_run_up_may_cross_a_floor_seam(void)
+{
+    static const float seams[2] = { -168.0f, 168.0f };
+    sh_aas *a = load_slabs(seams, 2);
+    sh_aug_platform p;
+    sh_aug_report rep;
+    sh_aug_opts o = { SH_AUG_FALL_AUTO, 1, SH_AUG_TRAVERSAL_AUTO, 0 };
+    int mask = 0, n;
+    double lo, hi;
+    printf("a climb whose run-up crosses a floor seam lands on the next slab\n");
+    if (!a) { CHECK(0); return; }
+    CHECK_MSG(sh_aas_point_area(a, 0, 0, 2) == 2 && sh_aas_point_area(a, 200, 0, 2) == 3 &&
+              sh_aas_point_area(a, -200, 0, 2) == 1, "the slab fixture resolves by seam");
+    load_synthetic_traversal_table();
+    mkbox_yawed(&p, 0, 0, 330, 290, 0, 64.0f, 0.0f, "step");
+    CHECK(sh_aas_augment(a, &p, 1, &o, &rep) == 1);
+    CHECK(rep.platforms[0].emitted);
+    n = floor_climbs_onto(a, rep.platforms[0].area, 4, &mask, &lo, &hi);
+    CHECK_MSG(n > 0, "the step is climbable from the floor");
+    CHECK_MSG(mask & (1 << 3), "the east face is climbed from the east slab");
+    CHECK_MSG(mask & (1 << 1), "the west face is climbed from the west slab");
+    CHECK_MSG(hi > 168.0 && lo < -168.0, "and those run-ups start past the seams");
+    {
+        unsigned i, nr = sh_aas_count(a, SH_AAS_L_REACHABILITIES);
+        int bad = 0;
+        for (i = 0; i < nr; i++) {
+            const unsigned char *r = sh_aas_rec_const(a, SH_AAS_L_REACHABILITIES, i);
+            unsigned from = sh_aas_get_u16(r, 6), to = sh_aas_get_u16(r, 8);
+            if (!(sh_aas_get_u32(r, 0) >> 16)) continue;
+            if (sh_aas_point_area(a, sh_aas_get_i16(r, 12), sh_aas_get_i16(r, 14),
+                                  (float)(sh_aas_get_i16(r, 16) + 2)) != (int)from) bad++;
+            if (sh_aas_point_area(a, sh_aas_get_i16(r, 18), sh_aas_get_i16(r, 20),
+                                  (float)(sh_aas_get_i16(r, 22) + 2)) != (int)to) bad++;
+        }
+        CHECK_MSG(bad == 0, "every climb endpoint resolves to the area it names");
+    }
+    sh_aug_report_free(&rep);
+    sh_aas_free(a);
+}
+
 int main(void)
 {
     printf("aas_augment_test\n");
+    test_a_climb_run_up_may_cross_a_floor_seam();
     test_traversal_collection_grows_without_losing_demon_routes();
     test_climb_floor_endpoints_clear_rotated_solids();
     test_rotated_ramps_join_native_floor();
