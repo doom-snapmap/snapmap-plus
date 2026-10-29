@@ -29,6 +29,7 @@
 #include "rawmap.h"
 #include "editor_delete.h"
 #include "module_prefab.h"
+#include "timeline_tile.h"
 #include "engine_build.h"
 
 /* Editor layout. */
@@ -1213,6 +1214,7 @@ int sh_iface_engine_install(const sig_result *results, size_t n, const uint8_t *
     slots.delete_entities        = slot_delete_entities;      /* +0x350 ext 29 */
     slots.prefab_grab_status     = slot_prefab_grab_status;   /* +0x358 ext 30 */
     slots.module_prefab          = sh_module_prefab_slot;     /* +0x360 ext 31 */
+    slots.timeline_tile          = sh_timeline_tile_slot;     /* +0x368 ext 32 */
 
     slots.enum_decls_of_resclass = slot_enum_decls_of_resclass;/* +0x110 */
 
@@ -1228,7 +1230,7 @@ int sh_iface_engine_install(const sig_result *results, size_t n, const uint8_t *
     /* Apply installation runs first; collect its checked callbacks into this binding. */
     sh_apply_engine_get_slots(&slots.serialize_entity, &slots.apply_edit, &slots.read_prefab,
                               &slots.apply_sync,        /* +0x290 synchronous apply, marshaled when available. */
-                              &slots.normalize_timeline_inherit); /* +0x298 palette-timeline portable-inherit */
+                              &slots.normalize_timeline_inherit); /* +0x298 retired, returns 1 */
 
     sh_apply_engine_get_serialize_selection(&slots.serialize_selection);
     sh_apply_engine_get_run_on_main(&slots.run_on_main);         /* +0x348 ext 28 */

@@ -135,7 +135,7 @@ typedef void (*memlocal_popheap_fn)(void *self);
 #define PREFAB_POPULATE_RVA    SH_RVA(0x11ADB30u, 0x11ACD30u)
 #define PREFAB_DTOR_RVA        SH_RVA(0x117DC40u, 0x117CCC0u)
 #define PREFAB_TEMP_SIZE       0x2000      /* Headroom above the constructor/populate write range. */
-#define ENT_DESHARE_RVA        SH_RVA(0x118C2C0u, 0x118B420u)   /* Optional copy-on-write helper, resolved for diagnostics but not used by apply. */
+#define ENT_DESHARE_RVA        SH_RVA(0x118C2C0u, 0x118B420u)   /* Optional copy-on-write helper (ae_deshare_slot). */
 
 /* Reflection object layouts. */
 /* Scratch objects must fit engine constructor and parser writes. */
@@ -243,7 +243,7 @@ static idstr_ctor_fn       g_idstr_ctor  = NULL;
 static idstr_dtor_fn       g_idstr_dtor  = NULL;
 static idstr_assign_fn     g_idstr_assign= NULL;
 static decl_src_rebuild_fn g_decl_rebuild= NULL;
-static ent_deshare_fn      g_deshare     = NULL;   /* Optional COW helper; ae_apply_one currently commits the existing defsub. */
+static ent_deshare_fn      g_deshare     = NULL;   /* Optional COW helper; see ae_deshare_slot. */
 static buffer_cmd_fn       g_buffer_cmd  = NULL;
 static add_command_fn      g_add_command = NULL;
 static prefab_ctor_fn      g_prefab_ctor     = NULL;
@@ -305,11 +305,9 @@ static unsigned long long g_pending_serial;
 #define AE_SYNC_ABANDONED   4   /* the waiter gave up mid-run; the drain resets to EMPTY when done */
 typedef struct ae_sync_request {
     int              state;     /* AE_SYNC_* */
-    apply_item_copy *items;     /* batch form (fn_kind 0); drain-owned once RUNNING */
+    apply_item_copy *items;     /* drain-owned once RUNNING */
     int              count;
     char             op[32];
-    int              fn_kind;   /* 0 = item batch; 1 = normalize-timeline-inherit on norm_id */
-    int              norm_id;
     int              applied;
 } ae_sync_request;
 static ae_sync_request g_sync_req;              /* guarded by g_pending_lock */
@@ -949,6 +947,34 @@ static int ae_extract_field(const char *text, const char *field, char *buf, size
     return 0;
 }
 
+/* Undo snapshots share entity holders by the refcount at holder+0, so a
+ * write to a shared holder also rewrites those snapshots. EntityDeshare takes
+ * the array cell, replaces a shared holder with a private copy and returns
+ * holder+8. Returns 1 when the cell now holds an unshared holder (or the
+ * helper is unbound, which keeps the old in-place behaviour), 0 on failure. */
+static int ae_deshare_slot(void **cell)
+{
+    void *ent = NULL, *se = NULL;
+    int refs = 0;
+    if (!cell || !ae_read_ptr(cell, &ent) || !ent) return 0;
+    if (!g_deshare) return 1;
+    if (!ae_read_u32_safe((const uint8_t *)ent, &refs)) return 0;
+    if (refs == 1) return 1;
+    __try { se = g_deshare(cell); } __except (EXCEPTION_EXECUTE_HANDLER) { se = NULL; }
+    if (!se || !ae_read_ptr(cell, &ent) || !ent || se != (void *)((uint8_t *)ent + 8)) return 0;
+    return 1;
+}
+
+int sh_apply_engine_deshare(void **cell)
+{
+    return ae_deshare_slot(cell);
+}
+
+int sh_apply_engine_deshare_bound(void)
+{
+    return g_deshare != NULL;
+}
+
 /* Deserialize patched text into a temporary entity, then commit source,
  * class, and inherit to the live defsub. */
 static int ae_apply_one(int id, const char *patched_text)
@@ -956,13 +982,12 @@ static int ae_apply_one(int id, const char *patched_text)
     if (!ae_deserialize_bound() || !ae_commit_bound() || !patched_text) return 0;
     void *array = NULL; uint32_t count = 0;
     if (!ae_entity_array(&array, &count)) return 0;
+    if (id < 0 || (uint32_t)id >= count) return 0;
+    if (!ae_deshare_slot((void **)array + id)) return 0;
     void *ent = ae_entity_ptr(array, count, id);
     if (!ent) return 0;
     void *defsub = NULL;
     if (!ae_read_ptr((const uint8_t *)ent + ENT_DEFSUB_OFF, &defsub) || defsub == NULL) return 0;
-
-    /* Commit the existing defsub in place; the optional COW helper is not invoked. */
-    (void)g_deshare;
 
     /* Preserve live class/inherit when omitted. Empty replacements can trigger
  * fatal engine declaration errors. */
@@ -1046,6 +1071,44 @@ static int ae_apply_one(int id, const char *patched_text)
 
     /* Leave registration teardown to the entity owner. Removing an unregistered
  * per-entity decl through Remove_Locked can raise a fatal engine error. */
+    return applied;
+}
+
+/* Rebuild a definition record that no entity owns, such as a palette
+ * prototype, from idSnapEntity JSON with the same primitives as ae_apply_one.
+ * The class is assigned before DeclSourceRebuild as well as after it: the
+ * rebuild writes a class line only when the record's class differs from the
+ * inherited one, and copies of the record reparse that text. Main thread. */
+int sh_apply_engine_commit_record(void *record, const char *json)
+{
+    if (!ae_deserialize_bound() || !ae_commit_bound() || !record || !json) return 0;
+    if (ae_on_main_thread() != 1) return 0;
+    uint8_t tmpDef[TEMP_DEF_SIZE];
+    memset(tmpDef, 0, sizeof tmpDef);
+    int def_ctored = 0, applied = 0;
+    __try {
+        g_def_ctor(tmpDef); def_ctored = 1;
+        if (ae_deserialize_to_obj(json, tmpDef, "idSnapEntity")) {
+            const char *src = *(const char * const *)(tmpDef + TDEF_SOURCE_OFF);
+            const char *cls = *(const char * const *)(tmpDef + TDEF_CLASS_OFF);
+            const char *inh = *(const char * const *)(tmpDef + TDEF_INHERIT_OFF);
+            if (src && cls && *cls && inh && *inh) {
+                int pushed = ae_push_heap_global();
+                __try {
+                    g_idstr_assign((uint8_t *)record + DEFSUB_CLASS_OFF, cls);
+                    g_decl_rebuild(record, src, 1);
+                    g_idstr_assign((uint8_t *)record + DEFSUB_CLASS_OFF, cls);
+                    g_idstr_assign((uint8_t *)record + DEFSUB_INHERIT_OFF, inh);
+                    applied = 1;
+                } __finally {
+                    if (pushed) ae_pop_heap();
+                }
+            }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        applied = 0;
+    }
+    if (def_ctored) { __try { g_def_dtor(tmpDef); } __except (EXCEPTION_EXECUTE_HANDLER) {} }
     return applied;
 }
 
@@ -1342,21 +1405,18 @@ static int ae_run_item(int kind, int id, const char *text)
 }
 
 
-static int ae_normalize_timeline_inherit_body(int id);
-
 /* Consume a blocking request on the engine command drain. Batch execution
- * owns the result toast; timeline normalization remains silent. */
+ * owns the result toast. */
 static void ae_sync_consume_and_run(void)
 {
     apply_item_copy *items = NULL;
-    int count = 0, fn_kind = 0, norm_id = -1, take = 0;
+    int count = 0, take = 0;
     char op[32]; op[0] = '\0';
 
     if (!g_pending_lock_init) return;
     EnterCriticalSection(&g_pending_lock);
     if (g_sync_req.state == AE_SYNC_PUBLISHED) {
         items   = g_sync_req.items;  count   = g_sync_req.count;
-        fn_kind = g_sync_req.fn_kind; norm_id = g_sync_req.norm_id;
         memcpy(op, g_sync_req.op, sizeof op); op[sizeof op - 1] = '\0';
         g_sync_req.items = NULL; g_sync_req.count = 0;
         g_sync_req.state = AE_SYNC_RUNNING;
@@ -1366,13 +1426,9 @@ static void ae_sync_consume_and_run(void)
     if (!take) return;
 
     int applied = 0;
-    if (fn_kind == 1) {
-        applied = ae_normalize_timeline_inherit_body(norm_id);
-    } else {
-        for (int i = 0; i < count; i++)
-            if (items && ae_run_item(items[i].kind, items[i].id, items[i].text)) applied++;
-        ae_toast_result(op, applied, count);
-    }
+    for (int i = 0; i < count; i++)
+        if (items && ae_run_item(items[i].kind, items[i].id, items[i].text)) applied++;
+    ae_toast_result(op, applied, count);
     if (items) { for (int i = 0; i < count; i++) free(items[i].text); free(items); }
 
     EnterCriticalSection(&g_pending_lock);
@@ -1443,7 +1499,7 @@ static int ae_ensure_command(void)
  * with the drain. BufferCommandText itself has no cross-thread queue lock,
  * so publication can race other engine command-buffer appends. */
 static int ae_marshal_publish_and_wait(apply_item_copy *copy, int built, const char *op,
-                                       int fn_kind, int norm_id, int *out_applied)
+                                       int *out_applied)
 {
     *out_applied = 0;
     if (!g_pending_lock_init || !g_sync_ev || !g_buffer_cmd || !g_cmdsys || !ae_ensure_command()) {
@@ -1461,7 +1517,6 @@ static int ae_marshal_publish_and_wait(apply_item_copy *copy, int built, const c
     }
     ResetEvent(g_sync_ev);
     g_sync_req.items   = copy;  g_sync_req.count  = built;
-    g_sync_req.fn_kind = fn_kind; g_sync_req.norm_id = norm_id;
     if (op) strncpy_s(g_sync_req.op, sizeof g_sync_req.op, op, _TRUNCATE);
     else    g_sync_req.op[0] = '\0';
     g_sync_req.applied = 0;
@@ -1535,7 +1590,7 @@ static int ae_apply_marshal(const sh_apply_item *items, int count, const char *o
         free(copy);
         return AE_MARSHAL_UNAVAILABLE;
     }
-    return ae_marshal_publish_and_wait(copy, built, op, 0, -1, out_applied);
+    return ae_marshal_publish_and_wait(copy, built, op, out_applied);
 }
 
 /* Shared interface slots. */
@@ -2757,91 +2812,12 @@ static void ae_nav_refresh_poll(void)
     ae_nav_refresh_queue();
 }
 
-/* Normalize palette timelines to the portable inherit value. */
-#define TL_PLACEHOLDER_INHERIT "snapmaps/editor_only/placeholder_target"
-#define TL_PORTABLE_INHERIT    "snapmaps/unknown"
-/* Allocate normalization scratch per call; do not retain large static buffers. */
-#define TL_NORMALIZE_BUF_CAP   (256 * 1024)
-
-/* Replace every placeholder occurrence without re-rendering JSON numbers.
- * Return replacement count; zero means absent or insufficient capacity. */
-static int tl_splice_portable_inherit(const char *src, char *out, int cap)
-{
-    static const char ph[] = TL_PLACEHOLDER_INHERIT;
-    static const char pv[] = TL_PORTABLE_INHERIT;
-    const int phlen = (int)(sizeof(ph) - 1), pvlen = (int)(sizeof(pv) - 1);
-    int replaced = 0, w = 0;
-    const char *p = src;
-    while (*p) {
-        if (strncmp(p, ph, (size_t)phlen) == 0) {
-            if (w + pvlen >= cap) return 0;
-            memcpy(out + w, pv, (size_t)pvlen); w += pvlen; p += phlen;
-            replaced++;
-        } else {
-            if (w + 1 >= cap) return 0;
-            out[w++] = *p++;
-        }
-    }
-    out[w] = '\0';
-    return replaced;
-}
-
-/* Serialize, splice portable inherit, and commit on the verified main thread. */
-static int ae_normalize_timeline_inherit_body(int id)
-{
-#ifdef SH_APPLY_ENGINE_TESTING
-    return g_apply_test_executor ? g_apply_test_executor(4, id, "normalize") : 0;
-#else
-    int result = 0;
-    char *json = NULL, *patched = NULL;
-    __try {
-        json = (char *)malloc(TL_NORMALIZE_BUF_CAP);
-        if (!json) { result = 0; goto done; }
-        int n = slot_serialize_entity(NULL, id, json, TL_NORMALIZE_BUF_CAP);
-        if (n <= 0) { result = 0; goto done; }
-
-        patched = (char *)malloc(TL_NORMALIZE_BUF_CAP);
-        if (!patched) { result = 0; goto done; }
-        if (tl_splice_portable_inherit(json, patched, TL_NORMALIZE_BUF_CAP) <= 0) { result = 0; goto done; }
-
-        result = ae_apply_one(id, patched) ? 1 : 0;
-    } __except (EXCEPTION_EXECUTE_HANDLER) { result = 0; }
-done:
-    if (json) free(json);
-    if (patched) free(patched);
-    return result;
-#endif
-}
-
-/* Check the decl blob before allocating/serializing. A matching placeholder
- * takes the synchronous marshal path when thread identity and transport allow it. */
+/* Retired +0x298 slot: palette timelines are placed on snapmaps/unknown
+ * directly (timeline_tile.c), so there is nothing to normalize. */
 static int slot_normalize_timeline_inherit(sh_iface *self, int id)
 {
-    (void)self;
-    int gate = 0;
-    __try {
-        void *array = NULL; uint32_t count = 0;
-        void *ent = NULL, *defsub = NULL, *blob = NULL;
-        if (ae_entity_array(&array, &count) &&
-            (ent = ae_entity_ptr(array, count, id)) != NULL &&
-            ae_read_ptr((const uint8_t *)ent + ENT_DEFSUB_OFF, &defsub) && defsub &&
-            /* Gate on the source blob, not raw inherit: source rebuild precedes inherit
- * assignment, so the blob can lag one commit. Retry until the blob itself
- * contains the portable value used by get_inherit and map serialization. */
-            ae_read_ptr((const uint8_t *)defsub + DECL_BLOB_OFF, &blob) && blob &&
-            strstr((const char *)blob, TL_PLACEHOLDER_INHERIT) != NULL)
-            gate = 1;
-    } __except (EXCEPTION_EXECUTE_HANDLER) { gate = 0; }
-    if (!gate) return 0;
-
-    if (ae_on_main_thread() != 1) {
-        if (ae_on_main_thread() < 0) return 0;
-        int applied = 0;
-        int mr = ae_marshal_publish_and_wait(NULL, 0, "tl-inherit-portable", 1, id, &applied);
-        if (mr == AE_MARSHAL_DONE) return applied;
-        return 0;
-    }
-    return ae_normalize_timeline_inherit_body(id);
+    (void)self; (void)id;
+    return 1;
 }
 
 /* Deep-copy a batch and request execution through the engine command buffer. */

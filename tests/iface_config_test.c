@@ -42,7 +42,9 @@ SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, delete_entities) == 0x350);
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, prefab_grab_status) == 0x358);
 /* ext 31: Blueprint module prefabs (state, save, place, status). */
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, module_prefab) == 0x360);
-SH_STATIC_ASSERT(sizeof(sh_iface_vtbl) == 0x368);
+/* ext 32: the Timeline palette tile (status). */
+SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, timeline_tile) == 0x368);
+SH_STATIC_ASSERT(sizeof(sh_iface_vtbl) == 0x370);
 SH_STATIC_ASSERT(sizeof(sh_prefab_grab_info) == 16);
 SH_STATIC_ASSERT(sizeof(sh_delete_result) == 40);
 SH_STATIC_ASSERT(offsetof(sh_iface, sub) == 0x58);
@@ -81,6 +83,15 @@ static int stub_module_prefab(sh_iface *self, sh_module_prefab_call *call)
     if (call->op == SH_MODULE_PREFAB_STATE) { call->blueprint = 1; call->entity_mode = 0; return 1; }
     return -1;
 }
+static int stub_timeline_tile(sh_iface *self, sh_timeline_tile_call *call)
+{
+    (void)self;
+    if (!call || call->op != SH_TIMELINE_TILE_STATUS) return 0;
+    call->tile_row = 7; call->unknown_row = 6; call->last_rebinds = 1; call->total_rebinds = 3;
+    call->registered = 1;
+    strcpy(call->record_class, "idTarget_Timeline");
+    return 1;
+}
 /* A frontend must never read a slot the backend's vtable does not have. */
 static int check_vtable_size_contract(sh_iface *iface)
 {
@@ -93,6 +104,7 @@ static int check_vtable_size_contract(sh_iface *iface)
     if (SH_IFACE_HAS_SLOT(&legacy, delete_entities)) return 0;
     if (SH_IFACE_HAS_SLOT(&legacy, prefab_grab_status)) return 0;
     if (SH_IFACE_HAS_SLOT(&legacy, module_prefab)) return 0;
+    if (SH_IFACE_HAS_SLOT(&legacy, timeline_tile)) return 0;
     if (!SH_IFACE_HAS_SLOT(&legacy, run_on_main)) return 0;   /* nonzero filler counts as bound */
     if (sh_iface_vtbl_bytes(NULL) != 0) return 0;
     if (sh_iface_vtbl_bytes(iface) != (uint32_t)sizeof(sh_iface_vtbl)) return 0;
@@ -192,6 +204,24 @@ int main(void)
         if (!SH_IFACE_HAS_SLOT(iface, module_prefab) ||
             iface->vtbl->module_prefab(iface, &call) != 1 || call.blueprint != 1) {
             fprintf(stderr, "iface_config_test: module-prefab slot was not bound\n");
+            return 1;
+        }
+    }
+
+    if (SH_IFACE_HAS_SLOT(iface, timeline_tile)) {
+        fprintf(stderr, "iface_config_test: unbound timeline-tile slot reported present\n");
+        return 1;
+    }
+    engine_slots.timeline_tile = stub_timeline_tile;
+    sh_iface_bind_engine_slots(&engine_slots);
+    {
+        sh_timeline_tile_call call;
+        memset(&call, 0, sizeof call);
+        call.op = SH_TIMELINE_TILE_STATUS;
+        if (!SH_IFACE_HAS_SLOT(iface, timeline_tile) ||
+            iface->vtbl->timeline_tile(iface, &call) != 1 || call.tile_row != 7 ||
+            strcmp(call.record_class, "idTarget_Timeline") != 0) {
+            fprintf(stderr, "iface_config_test: timeline-tile slot was not bound\n");
             return 1;
         }
     }

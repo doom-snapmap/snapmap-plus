@@ -1264,5 +1264,13 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "40 53 48 83 EC 20 44 8B 51 0C 48 8B DA 41 83 EA 01 74 2B 41 83 FA 01 74 11 33 C9 48 8B 01 FF 50 38 48 8B C3 48 83 C4 20", 0x1257640u, 0x1256B40u },
     { "EditorBudgetUpdate", /* void(editor): recompute the editor budget; writes the limits-reached byte editor+0x236d0. VK 118b070, GL 118a1d0. */
       "40 55 B8 50 41 00 00 E8 ?? ?? ?? ?? 48 2B E0 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 84 24 F0 40 00 00 83 3D ?? ?? ?? ?? 00", 0x118B070u, 0x118A1D0u },
+    { "SnapPaletteBuild",   /* void(palette [rcx], progress [rdx]): rebuild the editor entity palette at
+                             * editor+0x20660 from every snapEditorEntityDef decl. Called once, from editor
+                             * initialization. The tail anchors on its first writes: selected index +0x08 = 0
+                             * and end pointer +0x28 = +0x10. The first 18 bytes are whole and register-only.
+                             * VK 0x1411aa710, GL 0x1411a9820. */
+      "48 8B C4 56 57 41 54 41 56 41 57 48 81 EC 70 07 00 00 48 C7 44 24 50 FE FF FF FF "
+      "48 89 58 18 48 89 68 20 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 84 24 60 07 00 00 "
+      "4C 8B F2 4C 8B F9 33 DB 89 59 08 48 8B 41 10 48 89 41 28", 0x11AA710u, 0x11A9820u },
     { NULL, NULL, 0 }   /* terminator */
 };

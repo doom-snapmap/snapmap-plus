@@ -482,13 +482,6 @@ static void poc_rescan_timelines(int n)
             poc_logf("poc_rescan_timelines: get_classname_copy FAULTED for id=%lu (skipped)", (unsigned long)g_ents[i].eid);
         }
         if (c && (strcmp(c, "idTarget_Timeline") == 0 || strcmp(c, "idEncounterManager") == 0)) {
-            /* Replace the palette placeholder inherit with the portable Timeline inherit.
-             * The backend slot is idempotent and cheap on nonmatches; the state poll
-             * refreshes an open panel after this normalization. */
-            if (strcmp(c, "idTarget_Timeline") == 0 && g_iface->vtbl->normalize_timeline_inherit) {
-                __try { g_iface->vtbl->normalize_timeline_inherit(g_iface, g_ents[i].eid); }
-                __except (EXCEPTION_EXECUTE_HANDLER) {}
-            }
             g_tls[tn].eid = g_ents[i].eid;
             strncpy_s(g_tls[tn].id, POC_ID_CAP, g_ents[i].id, _TRUNCATE);
             strncpy_s(g_tls[tn].name, POC_NAME_CAP, g_ents[i].name, _TRUNCATE);

@@ -2,7 +2,7 @@
  * interface object and callbacks; both DLLs must build against this header.
  * The 0x60-byte object has a vtable at +0 and subobject pointer at +0x58.
  * The original 77-slot prefix ends at +0x260; append-only extensions end
- * at +0x360, making the current vtable 0x368 bytes. The backend records that
+ * at +0x368, making the current vtable 0x370 bytes. The backend records that
  * size in the object (see sh_iface_vtbl_bytes); check it before calling a
  * slot at or past +0x350.
  * Engine layouts remain private to backend implementations. Reserved cells
@@ -120,11 +120,8 @@ struct sh_apply_item;
 typedef int          (*sh_apply_sync_fn)(struct sh_iface *self, const struct sh_apply_item *items,
                                          int count, const char *op_label);                        /* +0x290 (ext 5) */
 
-/* Normalize palette timelines from snapmaps/editor_only/placeholder_target
- * to portable snapmaps/unknown without changing class or numeric formatting.
- * Gate on the source blob, which can lag a raw inherit assignment by one
- * commit, so rescans may retry. Execution requires a verified main thread or
- * successful marshaling, as for apply_sync. */
+/* Retired: timelines are placed on snapmaps/unknown directly, so there is
+ * nothing to normalize. The slot stays for the ABI and returns 1. */
 typedef int          (*sh_normalize_timeline_inherit_fn)(struct sh_iface *self, int id);          /* +0x298 (ext 6) */
 
 /* Push IDs with deduplication onto the backend stack shared with console commands. */
@@ -336,6 +333,22 @@ typedef struct sh_module_prefab_call {
     int         entity_mode; /* STATE out */
 } sh_module_prefab_call;
 typedef int (*sh_module_prefab_fn)(struct sh_iface *self, sh_module_prefab_call *call); /* +0x360 (ext 31) */
+/* Timeline tile: the product palette row on snapmaps/unknown whose prototype
+ * record carries class idTarget_Timeline (backend/timeline_tile.c).
+ *   STATUS any thread. Fills the fields below from the last editor frame and
+ *          returns 1, or 0 when no editor is open. Row indexes are -1 when the
+ *          row is not in the palette. */
+#define SH_TIMELINE_TILE_STATUS 1
+typedef struct sh_timeline_tile_call {
+    int  op;
+    int  tile_row;          /* palette index of the Timeline tile */
+    int  unknown_row;       /* palette index of the Unknown tile */
+    int  last_rebinds;      /* entities rebound by the most recent pass */
+    int  total_rebinds;     /* entities rebound since the backend loaded */
+    int  registered;        /* 1 once the tile decl is registered */
+    char record_class[64];  /* class of the tile's prototype record */
+} sh_timeline_tile_call;
+typedef int (*sh_timeline_tile_fn)(struct sh_iface *self, sh_timeline_tile_call *call); /* +0x368 (ext 32) */
 
 typedef int (*sh_resolve_prefab_defaults_fn)(struct sh_iface *self, const char *inherit_name,
                                              char *out_model, int out_capacity,
@@ -521,7 +534,7 @@ typedef struct sh_iface_vtbl {
     sh_id_dev_layer_hidden_fn id_dev_layer_hidden;   /* +0x280 (ext 3) dev-layer entity-hidden query */
     sh_wire_edit_generation_fn wire_edit_generation; /* +0x288 (ext 4) wire-edit generation */
     sh_apply_sync_fn           apply_sync;           /* +0x290 (ext 5) synchronous apply */
-    sh_normalize_timeline_inherit_fn normalize_timeline_inherit; /* +0x298 (ext 6) portable timeline inherit */
+    sh_normalize_timeline_inherit_fn normalize_timeline_inherit; /* +0x298 (ext 6) retired, returns 1 */
     sh_push_to_stack_fn        push_to_stack;        /* +0x2A0 (ext 7) stack push */
     sh_clear_stack_fn          clear_stack;          /* +0x2A8 (ext 8) stack clear */
     sh_config_get_json_fn      config_get_json;      /* +0x2B0 (ext 9) registered setting -> JSON */
@@ -547,6 +560,7 @@ typedef struct sh_iface_vtbl {
     sh_delete_entities_fn      delete_entities;      /* +0x350 (ext 29) native batch delete */
     sh_prefab_grab_status_fn   prefab_grab_status;   /* +0x358 (ext 30) Create grab-frame guard result */
     sh_module_prefab_fn        module_prefab;        /* +0x360 (ext 31) Blueprint module prefabs */
+    sh_timeline_tile_fn        timeline_tile;        /* +0x368 (ext 32) Timeline palette tile */
 } sh_iface_vtbl;
 
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, config_get_json) == 0x2B0);
@@ -572,7 +586,8 @@ SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, run_on_main) == 0x348);
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, delete_entities) == 0x350);
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, prefab_grab_status) == 0x358);
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, module_prefab) == 0x360);
-SH_STATIC_ASSERT(sizeof(sh_iface_vtbl) == 0x368);
+SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, timeline_tile) == 0x368);
+SH_STATIC_ASSERT(sizeof(sh_iface_vtbl) == 0x370);
 SH_STATIC_ASSERT(sizeof(sh_prefab_grab_info) == 16);
 SH_STATIC_ASSERT(sizeof(sh_delete_result) == 40);
 
@@ -738,6 +753,7 @@ typedef struct sh_iface_engine_slots {
     sh_delete_entities_fn      delete_entities;             /* +0x350 (ext 29) */
     sh_prefab_grab_status_fn   prefab_grab_status;          /* +0x358 (ext 30) */
     sh_module_prefab_fn        module_prefab;               /* +0x360 (ext 31) */
+    sh_timeline_tile_fn        timeline_tile;               /* +0x368 (ext 32) */
 } sh_iface_engine_slots;
 
 void sh_iface_bind_engine_slots(const sh_iface_engine_slots *slots);

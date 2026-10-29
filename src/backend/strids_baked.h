@@ -42,7 +42,7 @@ static const strid_baked_t g_strids_baked[] = {
      * shows the tab + names with no external strings file; overrides_baked.h ships the matching decls. */
     { "sh_category_1",    "*Custom" },
     { "sh_timeline",      "Timeline" },
-    { "sh_timeline_desc", "A timeline that sequences entity events over time. Place it, then open it in the Timeline Editor to author events.^7 Class: ^OidTarget_Timeline" },
+    { "sh_timeline_desc", "A timeline that sequences entity events over time. Place it, then open it in the Timelines tab of the Snapmap+ window to author events.^7 Class: ^OidTarget_Timeline" },
     { "sh_unknown",       "Unknown" },
     { "sh_unknown_desc",  "An unknown entity not normally available in the palette." },
 

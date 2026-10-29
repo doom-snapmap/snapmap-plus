@@ -18,7 +18,7 @@
 #include "grid_room_asset.h"
 #include "navmesh.h"                /* baked AI navigation, served under the module's own names */
 #include "nav_bake.h"           /* navigation baked from the map's own marked volumes */
-#include "overrides_baked.h"        /* the built-in "*Custom"-tab default decls (Timeline + Unknown) */
+#include "overrides_baked.h"        /* the built-in "*Custom"-tab default decls (Timeline tile, Unknown, Lift, Blocking) */
 #include "engine_build.h"
 
 /* Provider open slot offset: +0x148 on build 13954591 (+0xf8 in 2018); the
@@ -492,12 +492,37 @@ static int ov_name_eq(const char *a, const char *b)
     }
 }
 
+/* Case- and separator-tolerant prefix test; returns the text after it, or NULL. */
+static const char *ov_after_prefix(const char *name, const char *prefix)
+{
+    for (; *prefix; name++, prefix++) {
+        char ca = *name, cb = *prefix;
+        if (ca == '\\') ca = '/';
+        if (ca >= 'A' && ca <= 'Z') ca = (char)(ca - 'A' + 'a');
+        if (ca != cb) return NULL;
+    }
+    return name;
+}
+
+/* Decls DOOM never shipped. A runtime registration loads them from the loose
+ * source tree (decltree/<type>/<name>.decl) rather than from generated/decls/,
+ * so these also answer that spelling. Shipped names keep the exact match. */
+static const char *const g_ov_product_decls[] = { "snapeditorentitydef/custom/" };
+
 /* The baked default for `name`, or NULL if `name` is not a built-in. */
 static const ov_baked_decl_t *find_baked(const char *name)
 {
+    const char *tree;
     if (!name) return NULL;
     for (size_t i = 0; i < sizeof g_ov_baked_decls / sizeof g_ov_baked_decls[0]; i++)
         if (ov_name_eq(name, g_ov_baked_decls[i].name)) return &g_ov_baked_decls[i];
+    tree = ov_after_prefix(name, "decltree/");
+    if (!tree) return NULL;
+    for (size_t i = 0; i < sizeof g_ov_baked_decls / sizeof g_ov_baked_decls[0]; i++) {
+        const char *rel = ov_after_prefix(g_ov_baked_decls[i].name, "generated/decls/");
+        for (size_t k = 0; rel && k < sizeof g_ov_product_decls / sizeof g_ov_product_decls[0]; k++)
+            if (ov_after_prefix(rel, g_ov_product_decls[k]) && ov_name_eq(tree, rel)) return &g_ov_baked_decls[i];
+    }
     return NULL;
 }
 

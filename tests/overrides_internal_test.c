@@ -274,6 +274,23 @@ static void test_builtin_defaults_without_user_files(void)
     if (stream) sh_overrides_test_stream_close(stream);
     /* Mode 2 bypasses the shadow entirely. */
     CHECK(sh_overrides_test_open("generated/decls/snapeditorentitydef/func/lift.decl", 2) == NULL);
+    /* The Timeline tile is a decl DOOM never shipped: its runtime registration
+     * loads the loose source-tree name, which is served too, in either case. */
+    stream = sh_overrides_test_open("generated/decls/snapeditorentitydef/custom/timeline.decl", 0);
+    CHECK(stream != NULL);
+    if (stream) sh_overrides_test_stream_close(stream);
+    stream = sh_overrides_test_open("decltree/snapeditorentitydef/custom/timeline.decl", 0);
+    CHECK(stream != NULL);
+    if (stream) {
+        CHECK(sh_overrides_test_stream_read(stream, bytes, 1) == 1 && bytes[0] == '{');
+        sh_overrides_test_stream_close(stream);
+    }
+    stream = sh_overrides_test_open("decltree/snapEditorEntityDef/custom/timeline.decl", 0);
+    CHECK(stream != NULL);
+    if (stream) sh_overrides_test_stream_close(stream);
+    /* Shipped tiles keep their compiled name only. */
+    CHECK(sh_overrides_test_open("decltree/snapeditorentitydef/func/lift.decl", 0) == NULL);
+    CHECK(sh_overrides_test_open("decltree/snapeditorentitydef/custom/other.decl", 0) == NULL);
     /* A name that only a user package could have supplied is not served. */
     CHECK(sh_overrides_test_open("generated/decls/entitydef/custom/user_package_only.decl", 0) == NULL);
     CHECK(sh_overrides_test_open("strings/policy.json", 0) == NULL);

@@ -33,7 +33,18 @@ void sh_apply_engine_get_slots(sh_serialize_entity_fn *serialize_entity,
                                sh_schedule_apply_fn   *apply_edit,
                                sh_read_prefab_fn      *read_prefab,
                                sh_apply_sync_fn       *apply_sync,   /* +0x290 synchronous apply, with main-thread marshal when available. */
-                               sh_normalize_timeline_inherit_fn *normalize_timeline_inherit); /* +0x298 */
+                               sh_normalize_timeline_inherit_fn *normalize_timeline_inherit); /* +0x298 retired, returns 1 */
+
+/* Make an entity holder unshared before writing it: cell is the entity
+ * array cell. Returns 1 when the cell holds an unshared holder, or when
+ * EntityDeshare is unbound (writes then stay in place); 0 on failure. */
+int sh_apply_engine_deshare(void **cell);
+int sh_apply_engine_deshare_bound(void);
+
+/* Rebuild an unowned definition record (a palette prototype) from
+ * idSnapEntity JSON: source text, class and inherit. Main thread only;
+ * returns 1 when committed. */
+int sh_apply_engine_commit_record(void *record, const char *json);
 
 /* Export the main-thread call slot. Calls drain in sh_apply_prefab_poll_play,
  * so they time out unrun while the frame hook is missing or suppressed. */

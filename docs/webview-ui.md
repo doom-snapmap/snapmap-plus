@@ -62,7 +62,7 @@ The header defines the complete ABI. These are the main entry points:
 | Create prefab | `serialize_selection` at `+0xB0`; the engine requires hovering a selected entity. |
 | Load / Place | `apply_edit` at `+0xD0`, kind 2: stage the prefab and request the native paste action. Engine state can force a stage-only fallback, reported by toast. |
 | Save Timeline | `apply_sync` at `+0x290`, kind 0, with the target entity ID. |
-| Timeline inheritance | The normalization slot at `+0x298`. |
+| Timeline tile | `timeline_tile` at `+0x368` reports the toybox tile's palette row, its prototype record class and the rebind counts. The page does not call it; the `+0x298` normaliser is retired. |
 | Persistent settings | `config_get_json` at `+0x2B0` and `config_set_json` at `+0x2B8`. |
 | Prefab geometry | Model lookup and request/completion slots at `+0x308` through `+0x320`. |
 | File menu rawmap I/O | `rawmap_status` at `+0x328`, `rawmap_configure` at `+0x330` and `rawmap_load_now` at `+0x338`. The picker is host-side and touches no engine state. Loading stages a file: the swap substitutes it into the next map the engine parses. |
