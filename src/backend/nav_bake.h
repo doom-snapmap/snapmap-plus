@@ -203,6 +203,15 @@ int sh_nav_bake_test_run(const char *name, const struct sh_aug_platform *plats, 
 void sh_nav_bake_test_preview_outcome(int slot, int state, const char *brief);
 /* The full reason and payload length of the last sh_nav_bake_test_run. */
 const char *sh_nav_bake_test_last_reason(void);
+/* sh_navmesh's face table for synthetic rows: per row a volume number, four
+ * compass octants (0 = east, counter-clockwise) and four face codes (0 no
+ * floor edge, 1 blocked, 2 no floor, 3 edge, 4 too high, 5 inside, 6 walk,
+ * 0x80 | n for n demons climbing). */
+void sh_nav_bake_test_print_faces(void (*out)(const char *fmt, ...), const unsigned *volumes,
+                                  const unsigned char (*dir)[4], const unsigned char (*code)[4],
+                                  int rows, int demons, int climbed, int total);
+/* The last test bake's class block, as sh_navmesh prints it under `cls`. */
+void sh_nav_bake_test_print_last(void (*out)(const char *fmt, ...), const char *cls);
 /* The last test bake's floor climbs per box face, as sh_navmesh prints them. */
 const char *sh_nav_bake_test_last_faces(void);
 size_t      sh_nav_bake_test_last_length(void);

@@ -1261,7 +1261,7 @@ void sh_navmesh_report(void (*out)(const char *fmt, ...))
     if (!out) return;
 
     /* Always report the last map-load scan before current serving state. */
-    out("navigation: %lu map load(s) seen this session; the last found %zu baked set(s).\n",
+    out("navigation: %lu map load(s) this session; the last found %zu baked set(s)\n",
         (unsigned long)InterlockedCompareExchange(&g_build_count, 0, 0), g_last_build_sets);
 
     if (InterlockedCompareExchange(&g_faulted, 0, 0) != 0) {

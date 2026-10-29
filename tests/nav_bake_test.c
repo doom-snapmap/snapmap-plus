@@ -889,6 +889,52 @@ static void report_line(const char *fmt, ...)
     backend_log(line);
 }
 
+/* sh_navmesh's per-face table: one row per volume with a floor edge, compass
+ * labels in the header when every box has the same ones and in the cells
+ * otherwise, all-"no floor edge" rows omitted and counted, and runs of
+ * identical rows collapsed once the table would pass 40 rows. */
+static void test_face_table_layout(void)
+{
+    static unsigned vol[60];
+    static unsigned char dir[60][4], code[60][4];
+    int i, longest = 0;
+    printf("sh_navmesh lays the per-face report out as a table\n");
+    for (i = 0; i < 3; i++) { vol[i] = 3 + i; dir[i][0] = 6; dir[i][1] = 4; dir[i][2] = 2; dir[i][3] = 0; }
+    memcpy(code[0], "\x05\x05\x89\x89", 4);
+    memcpy(code[1], "\x05\x01\x05\x05", 4);
+    memset(code[2], 0, 4);
+    g_log_count = 0;
+    sh_nav_bake_test_print_faces(report_line, vol, (const unsigned char (*)[4])dir,
+                                 (const unsigned char (*)[4])code, 3, 9, 2, 12);
+    CHECK(log_contains("    floor climbs on 2 of 12 box face(s)"));
+    CHECK(log_contains("      vol   S          W          N          E"));
+    CHECK(log_contains("      3     inside     inside     9/9        9/9"));
+    CHECK(log_contains("      4     inside     blocked    inside     inside"));
+    CHECK(log_contains("      (1 volume(s) with no floor edge omitted)"));
+    /* A rotated box carries its own labels. */
+    dir[1][0] = 5; dir[1][1] = 3; dir[1][2] = 1; dir[1][3] = 7;
+    g_log_count = 0;
+    sh_nav_bake_test_print_faces(report_line, vol, (const unsigned char (*)[4])dir,
+                                 (const unsigned char (*)[4])code, 3, 9, 2, 12);
+    CHECK(log_contains("SW inside") && log_contains("NW blocked") && log_contains("S inside"));
+    /* Fifty listed rows collapse runs of identical ones. */
+    for (i = 0; i < 50; i++) {
+        vol[i] = 10 + i; dir[i][0] = 6; dir[i][1] = 4; dir[i][2] = 2; dir[i][3] = 0;
+        memset(code[i], i < 10 ? 5 : 1, 4);
+        if (i == 20) memcpy(code[i], "\x89\x05\x05\x05", 4);
+    }
+    g_log_count = 0;
+    sh_nav_bake_test_print_faces(report_line, vol, (const unsigned char (*)[4])dir,
+                                 (const unsigned char (*)[4])code, 50, 9, 1, 200);
+    CHECK(log_contains("      volumes 10-19 (10): all faces inside"));
+    CHECK(log_contains("      volumes 20-29 (10): all faces blocked"));
+    CHECK(log_contains("      30    9/9        inside     inside     inside"));
+    CHECK(log_contains("      volumes 31-59 (29): all faces blocked"));
+    CHECK(g_log_count < 12);
+    for (i = 0; i < g_log_count; i++) if ((int)strlen(g_log[i]) > longest) longest = (int)strlen(g_log[i]);
+    CHECK_MSG(longest < 110, "table lines fit the console");
+}
+
 /* The toast names the room and the reason, and tells partial success from
  * total failure, inside the native help-row width. */
 static void test_toast_names_the_room_and_reason(void)
@@ -914,9 +960,18 @@ static void test_toast_names_the_room_and_reason(void)
     /* sh_navmesh lists every class of every copy with its outcome. */
     g_log_count = 0;
     sh_nav_bake_report(report_line);
-    CHECK(log_contains("monster48: keeps its shipped navigation -- its own routes"));
-    CHECK(log_contains("monster96: not baked yet (baked when Play loads it)"));
-    CHECK(log_contains("monster48: built"));
+    CHECK(log_contains("  monster48   keeps its shipped navigation"));
+    CHECK(log_contains("    its own routes already fill one area"));
+    CHECK(log_contains("  monster96   not baked yet (baked when Play loads it)"));
+    CHECK(log_contains("  monster48   built"));
+    CHECK(log_contains("  ind_dlc/room  copy 1  "));
+    CHECK(log_contains("status"));
+    CHECK(log_contains("  bake cache: "));
+    {
+        int i, longest = 0;
+        for (i = 0; i < g_log_count; i++) if ((int)strlen(g_log[i]) > longest) longest = (int)strlen(g_log[i]);
+        CHECK_MSG(longest < 110, "every sh_navmesh line fits the console");
+    }
 
     sh_nav_bake_test_preview_outcome(1, SH_NAV_CLASS_PARTIAL, "12 route(s) left out at the 256-per-area limit");
     sh_nav_bake_summary_get(&s);
@@ -1452,6 +1507,7 @@ int main(void)
     test_prepare_collects_worker_without_drawing();
     test_classes_refuse_independently();
     test_toast_names_the_room_and_reason();
+    test_face_table_layout();
     test_map_text_keeps_default_sized_and_drops_only_bad_boxes();
     test_plans_past_the_old_tables();
     test_tree_depth_limit_keeps_most_floors();

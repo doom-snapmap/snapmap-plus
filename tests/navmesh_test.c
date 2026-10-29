@@ -503,7 +503,7 @@ static void test_report(void)
     CHECK(build_aas(&b, 0, NODES_TREE, 0));
     sh_navmesh_test_reset();
     report_capture();
-    CHECK(strstr(g_report, "0 map load(s) seen") != NULL);
+    CHECK(strstr(g_report, "0 map load(s) this session") != NULL);
     CHECK(strstr(g_report, "carries no bake") != NULL);
 
     map = make_map(base_map(BASE_MODULE), BASE_MODULE, "monster48",
@@ -512,7 +512,7 @@ static void test_report(void)
     if (map) {
         sh_navmesh_build_from_map(map, map_len);
         report_capture();
-        CHECK(strstr(g_report, "1 map load(s) seen") != NULL);
+        CHECK(strstr(g_report, "1 map load(s) this session") != NULL);
         CHECK(strstr(g_report, "the last found 1 baked set(s)") != NULL);
         CHECK(strstr(g_report, "ind_totally_blank_room_4x.baas_monster48") != NULL);
 
@@ -520,7 +520,7 @@ static void test_report(void)
          * and the table is empty -- the stale-clear rule, said out loud */
         sh_navmesh_build_from_map(base_map(BASE_MODULE), strlen(base_map(BASE_MODULE)));
         report_capture();
-        CHECK(strstr(g_report, "2 map load(s) seen") != NULL);
+        CHECK(strstr(g_report, "2 map load(s) this session") != NULL);
         CHECK(strstr(g_report, "the last found 0 baked set(s)") != NULL);
         CHECK(strstr(g_report, "carries no bake") != NULL);
         free(map);
