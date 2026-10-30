@@ -201,7 +201,10 @@ int sh_grid_asset_open(const char *name,sh_grid_asset_read_fn read,
     sh_grid_asset_release_fn release,void *context,unsigned char **out,size_t *len)
 {
     (void)read;(void)release;(void)context;
-    assert(strstr(name,"smpgrid/v1/")||strstr(name,"mods/t.arena/"));++preflights;
+    /* As the real one: only Grid Room names are claimed (13954591 live: a
+     * bundle module's preflight through here was refused, validator 4). */
+    if(!strstr(name,"smpgrid/v1/"))return 0;
+    ++preflights;
     *out=malloc(1);assert(*out);**out=0;*len=1;return 1;
 }
 static void *heap_get(void){return heap_state;}
@@ -452,12 +455,17 @@ static int served_calls;
 static int fake_served(const char *request,int module)
 {
     ++served_calls;
-    if(module)return !_stricmp(request,ARENA)||!_stricmp(request,"maps/modules/mods/t.arena/nocm.decl");
-    return strstr(request,"mods/t.arena/arena/_combo/world.bcm")!=NULL;
+    if(module)return !_stricmp(request,ARENA)||!_stricmp(request,"maps/modules/mods/t.arena/nocm.decl")||
+        !_stricmp(request,"maps/modules/mods/t.arena/noinfo.decl");
+    {static const char *const served[]={"maps/modules/mods/t.arena/arena/_combo/world.bcm",
+        "generated/decls/snapmoduleinfo/mods/t.arena/arena.decl","generated/decls/snapmoduleinfo/mods/t.arena/nocm.decl",
+        "maps/modules/mods/t.arena/noinfo/_combo/world.bcm",NULL};int k;
+     for(k=0;served[k];++k)if(!strcmp(request,served[k]))return 1;}
+    return 0;
 }
 static void bundle_module_checks(void)
 {
-    unsigned before=loads,count;void *r,*end=end_record(editor+0x206c0);char logical[160];
+    unsigned before=loads,count,preflights_before=preflights;void *r,*end=end_record(editor+0x206c0);char logical[160];
     assert(sh_grid_module_logical(ARENA,logical,sizeof logical)&&!strcmp(logical,"mods/t.arena/arena"));
     assert(!sh_grid_module_logical("maps/modules/palettes/mega_blessed/mods/t.arena/arena.decl",logical,sizeof logical));
     assert(!sh_grid_module_logical("maps/modules/mods/t.arena/arena.bmodel",logical,sizeof logical));
@@ -479,6 +487,12 @@ static void bundle_module_checks(void)
     /* A served module whose collision is not served is refused before the loader. */
     assert(find_variant(editor+0x206c0,"maps/modules/mods/t.arena/nocm.decl")==end&&loads==before+1);
     assert(g_step&&strstr(g_step,"world collision is not served")&&g_count==count);
+    assert(strstr(last_log,"MODS: module maps/modules/mods/t.arena/nocm.decl refused: world collision is not served"));
+    assert(find_variant(editor+0x206c0,"maps/modules/mods/t.arena/noinfo.decl")==end&&loads==before+1);
+    assert(strstr(last_log,"MODS: module maps/modules/mods/t.arena/noinfo.decl refused: its snapModuleInfo is not served"));
+    /* The same refusal again is not logged twice. */
+    last_log[0]=0;assert(find_variant(editor+0x206c0,"maps/modules/mods/t.arena/noinfo.decl")==end&&!last_log[0]);
+    assert(preflights==preflights_before);
     assert(*(int*)(heap_state+0xc4)==0&&constructors==destructors);
     sh_grid_native_set_module_source(NULL);
 }

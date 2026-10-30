@@ -305,10 +305,11 @@ static void *load_private(void *palette,const sh_grid_size *size,const char *mod
     }
     entry->record=result;entry->state=result?2:-1;
     if(!grid){char message[300];
-        snprintf(message,sizeof message,result?"MODS: module %s loaded into a private palette (%s)":
-            "MODS: module %s refused at %s",module,result?palette_name:(g_step?g_step:"the native module loader"));
+        /* A refusal is logged once by find_variant, with g_step. */
+        if(!result)return NULL;
+        snprintf(message,sizeof message,"MODS: module %s loaded into a private palette (%s)",module,palette_name);
         backend_log(message);
-        if(result)log_census("module",*(unsigned char**)result);
+        log_census("module",*(unsigned char**)result);
         return result;
     }
     backend_log(result?"GRID: independent native module variant loaded":"GRID: native module variant refused");
@@ -393,29 +394,39 @@ static void *create_bundle(void *palette,const char *name)
     slash=strchr(render+22,'/');len=(size_t)(slash-render-22);
     if(!len||len>=sizeof palette_name)REFUSE("stock template: unexpected palette name");
     memcpy(palette_name,render+22,len);palette_name[len]=0;
-    snprintf(info,sizeof info,"decltree/snapmoduleinfo/%s.decl",logical);
-    if(!preflight(name))REFUSE("resource preflight: module declaration");
-    if(!preflight(info))REFUSE("resource preflight: module catalog declaration");
-    /* The geometry is checked as served, not read: a multiplayer map's
-     * collision alone is 48 MB, and the native loader reads it next. */
+    /* Bundle files are checked in the serving index, never read here: the
+     * Grid preflight reads through sh_grid_asset_open, which claims only
+     * Grid Room names, and a multiplayer map's collision alone is 48 MB. */
+    if(!g_module_served)REFUSE("no serving index is bound");
+    snprintf(info,sizeof info,"generated/decls/snapmoduleinfo/%s.decl",logical);
+    if(g_module_served(info,0)!=1)REFUSE("its snapModuleInfo is not served");
     snprintf(request,sizeof request,"maps/modules/%s/_combo/world.bcm",logical);
-    if(g_module_served&&!g_module_served(request,0))REFUSE("resource preflight: world collision is not served");
+    if(g_module_served(request,0)!=1)REFUSE("world collision is not served");
     memset(&none,0,sizeof none);
     return load_private(palette,&none,name,stock_wrapper,palette_name,name,0);
 }
 static void *find_variant(void *palette,const char *name)
 {
-    sh_grid_size size;void *record=NULL;int bundle=0;
+    sh_grid_size size;void *record=NULL;int bundle=0;const char *step;
     if(!sh_grid_parse_name(name,&size)){
         bundle=g_module_served&&name&&g_module_served(name,1)==1;
         if(!bundle)return g_find(palette,name);
     }
     if(InterlockedCompareExchange(&g_faulted,0,0)){g_step="variant creation disabled after an earlier fault";return end_record(palette);}
     if(InterlockedCompareExchange(&g_busy,1,0)){g_step="another variant construction is in progress";return end_record(palette);}
+    g_step=NULL;
     __try {record=bundle?create_bundle(palette,name):create(palette,&size);}
     __except(EXCEPTION_EXECUTE_HANDLER){InterlockedExchange(&g_faulted,1);g_step="variant construction faulted";
         backend_log("GRID: native variant creation faulted; disabled");}
     InterlockedExchange(&g_busy,0);
+    if(bundle&&!record){
+        /* One line per module and cause: the membership probe and the lookup
+         * ask the same name several times during one map load. */
+        static char last[400];char line[400];
+        step=g_step?g_step:"the native module loader";
+        snprintf(line,sizeof line,"MODS: module %s refused: %s",name,step);
+        if(strcmp(line,last)){strcpy_s(last,sizeof last,line);backend_log(line);}
+    }
     return record?record:end_record(palette);
 }
 static unsigned char has_variant(void *palette,const char *name)
