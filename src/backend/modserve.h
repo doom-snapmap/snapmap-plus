@@ -88,6 +88,11 @@ typedef struct sh_modserve_hit {
  * path, else 0. */
 int sh_modserve_lookup(const char *request, sh_modserve_hit *out);
 
+/* 1 when an admitted bundle serves `module_name` (maps/modules/...decl, any
+ * case) as a snapModule decl: the name a saved map's moduleName holds and the
+ * private module palette (grid_room_native.c) is asked to find. */
+int sh_modserve_module_served(const char *module_name);
+
 /* Serve `request`: 1 with a process-heap copy of the bytes in *bytes (the
  * caller or the idFile stream frees it with HeapFree), 0 when no bundle
  * serves the name, -1 when a bundle serves it but the file could not be read
@@ -118,7 +123,8 @@ typedef struct sh_modserve_step {
     const char *bundle_id;
     int         rank;        /* 0 other decls, 1 md6Def, 2 entityDef, 3 snapEditorEntityDef */
     int         persist;     /* 1: keep through map purges (lifetime 4) */
-    int         shadow;      /* a grandfathered bundle's shadow: skipped as stock when the engine has its source */
+    int         shadow;      /* a grandfathered bundle's shadow, or a restored stock decl (modbundle.h
+                                sh_mb_stock_restore): skipped as stock when the engine has its source */
     const char *blocked;     /* NULL, or the first cause (static or index-owned text) */
     int         file;        /* index-internal file number */
     int         ready;       /* set by sh_modserve_plan_run: 1 ready, -1 not ready, 0 not run */

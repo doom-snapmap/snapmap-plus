@@ -27,6 +27,20 @@
  * Pointers are not counted in the size caps and the extension whitelist does
  * not apply to them; the store never receives their bytes, and a client whose
  * game lacks the entry with that hash refuses the bundle with the first cause.
+ * Some kinds are admitted only as pointers (sh_mb_pointer_only_kind): the
+ * per-map sound BSP, light grid, occlusion tome and virtual-texture page file.
+ *
+ * A pointer that restores installed content under the game's own name
+ * (sh_mb_stock_restore: the request is the source itself, or the generated
+ * decl of an own-path decl source) replaces nothing, so it needs no shadows
+ * entry and sits outside the mod namespace; the serving layer registers it
+ * only when the running game does not already know the name (SnapMap does not
+ * see campaign and multiplayer content in gameresources).
+ *
+ * SnapMap modules: maps/modules/<path>.decl (outside maps/modules/palettes/)
+ * provides snapModule "<that request>", the name a saved map's moduleName
+ * holds; it must be well formed and its snapModuleInfo,
+ * generated/decls/snapmoduleinfo/<path>.decl, must be in the same bundle.
  *
  * Pure file and text work: no engine calls, no allocation on the engine heap.
  * Stock and installed resources are consulted through caller callbacks; the
@@ -69,6 +83,7 @@ typedef struct sh_mb_file {
     sh_mb_need *needs;
     size_t need_count, need_cap;
     int is_decl;           /* under generated/decls/ */
+    int is_module;         /* a snapModule decl: maps/modules/<path>.decl */
     int shadowed;          /* request path listed in shadows */
     int stock;             /* a stock pointer: blob is the installed bytes' SHA-256, nothing is carried */
     char *stock_source;    /* the installed resource path a stock pointer names */
@@ -225,6 +240,23 @@ int  sh_mb_check_request(const char *request, char *cause, size_t cause_cap);
 /* Extension whitelist (Contract 1). A .bswf movie is admitted only under
  * generated/swf/. */
 int  sh_mb_extension_allowed(const char *request);
+
+/* Kinds a bundle admits only as stock pointers, never as carried bytes:
+ * .sbsp, .ambientsh, .tome and .pages (per-map engine files, never authored
+ * by hand and too large to carry for a multiplayer map). 1 when `request` is
+ * one of them. */
+int  sh_mb_pointer_only_kind(const char *request);
+
+/* 1 when a stock pointer from `request` to `source` restores installed
+ * content under the game's own name: request == source, or request is
+ * generated/decls/<type>/<source>.decl for an own-path decl source (a
+ * material such as maps/.../mega.decl, which models name with ".decl"). */
+int  sh_mb_stock_restore(const char *request, const char *source);
+
+/* For a snapModule decl request maps/modules/<path>.decl, the snapModuleInfo
+ * request it needs (generated/decls/snapmoduleinfo/<path>.decl). 1 on
+ * success; 0 when the request is not a module decl. */
+int  sh_mb_module_info_request(const char *request, char *out, size_t cap);
 
 /* A private virtual-texture family member:
  * virtualtextures/mods/<id>/[<folders>/]<family>_sq<N>.mega2, N 1 to 16 with

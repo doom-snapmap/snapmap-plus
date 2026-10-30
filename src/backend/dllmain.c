@@ -114,6 +114,12 @@ static void resolve_doom(void)
 
 /* Startup binds no early resource observer: every signature resolves in the
  * ordinary passes. */
+/* What the private module palette asks the serving index (grid_room_native.h). */
+static int bundle_module_served(const char *request, int module)
+{
+    return module ? sh_modserve_module_served(request) : sh_modserve_lookup(request, NULL);
+}
+
 static int no_priority_signature(const char *name) { (void)name; return 0; }
 static int no_priority_ready(const sig_result *results, size_t count)
 { (void)results; (void)count; return 1; }
@@ -366,6 +372,8 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
         int grid_installed = overrides_installed && sh_grid_native_install(results, db, g_doom_base);
         if (overrides_installed && !grid_installed)
             backend_log("GRID: native module variants unavailable on this build");
+        /* Bundle modules take the same private palette route. */
+        if (grid_installed) sh_grid_native_set_module_source(bundle_module_served);
         if (grid_installed && !sh_grid_snap_install(results, db, g_doom_base))
             backend_log("GRID: exact doorway attachment unavailable on this build");
 

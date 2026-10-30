@@ -201,7 +201,7 @@ int sh_grid_asset_open(const char *name,sh_grid_asset_read_fn read,
     sh_grid_asset_release_fn release,void *context,unsigned char **out,size_t *len)
 {
     (void)read;(void)release;(void)context;
-    assert(strstr(name,"smpgrid/v1/"));++preflights;
+    assert(strstr(name,"smpgrid/v1/")||strstr(name,"mods/t.arena/"));++preflights;
     *out=malloc(1);assert(*out);**out=0;*len=1;return 1;
 }
 static void *heap_get(void){return heap_state;}
@@ -226,7 +226,7 @@ static void string_dtor(void *p)
 static void *get_type(void *r,const char *name)
 {assert(r==registry_object&&!strcmp(name,"snapModuleInfo"));return registry_object;}
 static void *find_source(void *r,const char *name)
-{assert(r==registry_object&&strstr(name,"smpgrid/v1/"));return registry_object;}
+{assert(r==registry_object&&(strstr(name,"smpgrid/v1/")||strstr(name,"mods/t.arena/")));return registry_object;}
 static unsigned char register_file(void *r,const void *name,void *unused)
 {(void)r;(void)name;(void)unused;assert(0);return 0;}
 static void *find_decl(void *r,const char *name,unsigned char create)
@@ -255,7 +255,9 @@ static unsigned char load_variant(void *palette,void *palette_decl,void *palette
     assert(*(unsigned*)(p+0x60)==0x50000&&*(unsigned*)(p+0x78)==0x50000);
     assert(*(int*)(heap_state+0xc4)>=1&&*(int*)(heap_state+0xc4)<=2);strcpy(copy,name);
     *(void**)record=wrapper;*(void**)wrapper=module;*(void**)(module+8)=copy;
-    {sh_grid_size size;assert(sh_grid_parse_name(name,&size));geometry(module,&size);}
+    {sh_grid_size size;
+        if(strstr(name,"mods/t.arena/")){float b[6]={-3456,-6656,-1024,4352,-384,2688};memcpy(module+0xa0,b,sizeof b);}
+        else {assert(sh_grid_parse_name(name,&size));geometry(module,&size);}}
     *(void**)(wrapper+0x80)=allocate(0x240);*(void**)(wrapper+0x88)=allocate(0x80);
     *(void**)(p+0x10)=record;*(int*)(p+0x18)=1;
     *(void**)(p+0x68)=wrapper;*(int*)(p+0x70)=1;++loads;return 1;
@@ -444,6 +446,42 @@ static void palette_order_checks(void)
     assert(sh_grid_native_wrapper(&fresh)&&loads==before+2);
     *(void**)(editor+0x206d0)=stock_records;g_find=saved;
 }
+/* Bundle modules: a served snapModule takes the private palette route. */
+#define ARENA "maps/modules/mods/t.arena/arena.decl"
+static int served_calls;
+static int fake_served(const char *request,int module)
+{
+    ++served_calls;
+    if(module)return !_stricmp(request,ARENA)||!_stricmp(request,"maps/modules/mods/t.arena/nocm.decl");
+    return strstr(request,"mods/t.arena/arena/_combo/world.bcm")!=NULL;
+}
+static void bundle_module_checks(void)
+{
+    unsigned before=loads,count;void *r,*end=end_record(editor+0x206c0);char logical[160];
+    assert(sh_grid_module_logical(ARENA,logical,sizeof logical)&&!strcmp(logical,"mods/t.arena/arena"));
+    assert(!sh_grid_module_logical("maps/modules/palettes/mega_blessed/mods/t.arena/arena.decl",logical,sizeof logical));
+    assert(!sh_grid_module_logical("maps/modules/mods/t.arena/arena.bmodel",logical,sizeof logical));
+    assert(!sh_grid_module_logical("maps/game/mp/x.decl",logical,sizeof logical));
+    /* No serving index: the stock lookup answers, as before. */
+    sh_grid_native_set_module_source(NULL);
+    assert(find_variant(editor+0x206c0,ARENA)==end&&loads==before);
+    sh_grid_native_set_module_source(fake_served);
+    r=find_variant(editor+0x206c0,ARENA);
+    assert(r&&r!=end&&loads==before+1);
+    count=g_count;
+    assert(!g_entries[count-1].size.kind&&!strcmp(g_entries[count-1].module,ARENA)&&g_entries[count-1].state==2);
+    assert(g_entries[count-1].size.xyz[2]==3712);   /* the containment fallback's height */
+    /* Cached by name in any case; the membership probe agrees. */
+    assert(find_variant(editor+0x206c0,"MAPS/MODULES/MODS/T.ARENA/ARENA.DECL")==r&&loads==before+1);
+    assert(has_variant(editor+0x206c0,ARENA)&&loads==before+1);
+    /* A name the bundle does not serve is the stock palette's question. */
+    assert(find_variant(editor+0x206c0,"maps/modules/mods/t.arena/other.decl")==end);
+    /* A served module whose collision is not served is refused before the loader. */
+    assert(find_variant(editor+0x206c0,"maps/modules/mods/t.arena/nocm.decl")==end&&loads==before+1);
+    assert(g_step&&strstr(g_step,"world collision is not served")&&g_count==count);
+    assert(*(int*)(heap_state+0xc4)==0&&constructors==destructors);
+    sh_grid_native_set_module_source(NULL);
+}
 int main(void)
 {
     sh_grid_size compact={SH_GRID_MODERN,{1536,1024,512}},large={SH_GRID_MODERN,{8192,6144,4096}},read;
@@ -486,11 +524,11 @@ int main(void)
         editor[8]=1;assert(loads==3&&catalog_loads==3);}
     /* Already parsed catalogs are never torn down. Empty in-progress objects
      * and source loads that still lack geometry must not reach the loader. */
-    catalog_empty=0;assert(catalog("smpgrid/v1/m/1536_1024_512")&&catalog_loads==3);
+    catalog_empty=0;assert(catalog("smpgrid/v1/m/1536_1024_512",1)&&catalog_loads==3);
     catalog_empty=1;catalog_state=1;
-    assert(!catalog("smpgrid/v1/m/1536_1024_512")&&catalog_loads==3);
+    assert(!catalog("smpgrid/v1/m/1536_1024_512",1)&&catalog_loads==3);
     catalog_state=2;catalog_fail=1;
-    assert(!catalog("smpgrid/v1/m/1536_1024_512")&&catalog_loads==4);
+    assert(!catalog("smpgrid/v1/m/1536_1024_512",1)&&catalog_loads==4);
     catalog_state=0;catalog_fail=0;
     assert(*(int*)(heap_state+0xc4)==0&&constructors==destructors);
     assert(*(unsigned*)((char*)*(void**)a+0x28)==4);
@@ -630,6 +668,7 @@ int main(void)
     adaptive_area_checks();
     census_checks();
     containment_checks();
+    bundle_module_checks();
     assert(find_variant(editor+0x206c0,"unrelated.decl")==end_record(editor+0x206c0));
     /* A native string destructor fault must still restore the heap scope. */
     compact.xyz[0]=1600;throw_dtor=1;assert(!sh_grid_native_wrapper(&compact));

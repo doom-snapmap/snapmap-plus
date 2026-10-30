@@ -53,10 +53,11 @@ typedef void (*tree_destroy_fn)(void *);
 typedef void (*tree_free_fn)(void *,size_t);
 typedef union native_string {void *align;unsigned char bytes[48];} native_string;
 typedef struct grid_native_entry {
-    sh_grid_size size;
+    sh_grid_size size; /* kind 0 for a bundle module; xyz[2] its height */
     int state; /* 1 constructing, 2 ready, -1 retained failed native allocation. */
     void *record;
     union {void *align;unsigned char bytes[128];} palette;
+    char module[160]; /* a bundle module's decl name, else empty */
 } grid_native_entry;
 #define GRID_NATIVE_CAP 64
 static grid_native_entry g_entries[GRID_NATIVE_CAP];
@@ -95,6 +96,7 @@ static tree_float_fn g_tree_float;
 static tree_destroy_fn g_tree_destroy;
 static tree_free_fn g_tree_free;
 static sh_process_heap_api g_heap;
+static sh_grid_module_served_fn g_module_served;
 
 static int grid_containing_module(void *collision,const float *point)
 {
@@ -182,7 +184,7 @@ static void *registry(void)
     if(!vt||vt[7]!=(void*)g_register||vt[11]!=(void*)g_type)return NULL;
     return r;
 }
-static int catalog(const char *logical)
+static int catalog(const char *logical,int grid)
 {
     void *r=registry(),*manager,*decl;native_string source;char path[160];unsigned char state;
     if(!r){backend_log("GRID: declaration registry unavailable");return 0;}
@@ -214,7 +216,7 @@ static int catalog(const char *logical)
     if(state&3){
         char message[128];snprintf(message,sizeof message,"GRID: module catalog state 0x%02x is not ready",state);
         backend_log(message);return 0;}
-    if(*(int*)((unsigned char*)decl+0x118)!=1||*(int*)((unsigned char*)decl+0x130)!=4){
+    if(grid&&(*(int*)((unsigned char*)decl+0x118)!=1||*(int*)((unsigned char*)decl+0x130)!=4)){
         char message[160];snprintf(message,sizeof message,
             "GRID: module catalog has %d floors and %d walls (state 0x%02x); variant refused",
             *(int*)((unsigned char*)decl+0x118),*(int*)((unsigned char*)decl+0x130),state);
@@ -249,12 +251,75 @@ static void *palette_find(void *palette,const char *name)
 static const char *g_step;
 #define REFUSE(step) do{g_step=(step);return NULL;}while(0)
 static void log_census(const char *label,const unsigned char *wrapper);
+/* Load one module into a private one-module palette with the editor palette's
+ * own loader: the native LoadSnapModule path (VK 0x141213860 / GL 0x141212c70)
+ * names the render model maps/modules/palettes/<palette_name>/<decl path>.bmodel
+ * and finds the snapModuleInfo by the decl path. `grid` 1 for a Grid Room
+ * variant (its catalog must have one floor and four walls), 0 for a bundle
+ * module named `module`. Engine thread. */
+static void *load_private(void *palette,const sh_grid_size *size,const char *module,
+    unsigned char *stock_wrapper,const char *palette_name,const char *variant,int grid)
+{
+    grid_native_entry *entry;unsigned char *p;
+    native_string palette_string,module_string;void *loaded,*result=NULL;
+    sh_process_heap_scope heap={0};int strings=0;
+    if(!sh_process_heap_enter(&g_heap,&heap))REFUSE("heap scope: not on the engine thread");
+    entry=&g_entries[g_count++];memset(entry,0,sizeof *entry);entry->size=*size;entry->state=1;
+    if(module)strncpy_s(entry->module,sizeof entry->module,module,_TRUNCATE);
+    __try {
+        char logical[160];size_t k=strlen(variant+13)-5;
+        if(k>=sizeof logical){g_step="module name too long";__leave;}
+        memcpy(logical,variant+13,k);logical[k]=0;
+        g_step="module catalog declaration (see the previous GRID line)";
+        if(!catalog(logical,grid))__leave;
+        p=entry->palette.bytes;
+        /* Same empty list construction as the editor's module palette. The
+         * private palette never enters a stock array or a stock destructor. */
+        *(void**)p=*(void**)palette;
+        *(unsigned*)(p+0x20)=*(unsigned*)(p+0x38)=
+            *(unsigned*)(p+0x60)=*(unsigned*)(p+0x78)=0x50000;
+        g_step="native module loader";
+        g_ctor(&palette_string,palette_name);strings=1;
+        g_ctor(&module_string,variant);strings=2;
+        if(!g_load(p,*(void**)(stock_wrapper+0x90),&palette_string,&module_string,g_editor+0x20660)){
+            backend_log("GRID: native module loader rejected the variant");__leave;}
+        if(*(int*)(p+0x18)!=1||*(int*)(p+0x70)!=1){backend_log("GRID: private module palette has unexpected counts");__leave;}
+        g_step="private palette: the loaded record has no wrapper";
+        result=*(void**)(p+0x10);if(!result||!*(void**)result)__leave;
+        loaded=**(void***)result;
+        if(!loaded||!*(void**)((unsigned char*)*(void**)result+0x80)||
+           !*(void**)((unsigned char*)*(void**)result+0x88)) {
+            g_step="private palette: the loaded wrapper lacks its declaration, card or templates";result=NULL;__leave;}
+        *(unsigned*)((unsigned char*)loaded+0x28)=4;
+        if(!grid){
+            /* The local bounds (module +0xa0) give the containment fallback its height. */
+            const float *b=(const float*)((unsigned char*)loaded+0xa0);
+            float h=b[5]-b[2];
+            entry->size.xyz[2]=isfinite(h)&&h>0&&h<65536?(unsigned)h:0;
+        }
+    } __finally {
+        __try {
+            __try {if(strings>=2)g_dtor(&module_string);}
+            __finally {if(strings>=1)g_dtor(&palette_string);}
+        } __finally {if(!sh_process_heap_leave(&heap)){result=NULL;g_step="heap scope restore";}}
+    }
+    entry->record=result;entry->state=result?2:-1;
+    if(!grid){char message[300];
+        snprintf(message,sizeof message,result?"MODS: module %s loaded into a private palette (%s)":
+            "MODS: module %s refused at %s",module,result?palette_name:(g_step?g_step:"the native module loader"));
+        backend_log(message);
+        if(result)log_census("module",*(unsigned char**)result);
+        return result;
+    }
+    backend_log(result?"GRID: independent native module variant loaded":"GRID: native module variant refused");
+    if(result){log_census("variant",*(unsigned char**)result);log_census("stock",stock_wrapper);}
+    return result;
+}
 static void *create(void *palette,const sh_grid_size *size)
 {
-    unsigned i;grid_native_entry *entry;unsigned char *stock_record,*stock_wrapper,*p;
+    unsigned i;unsigned char *stock_record,*stock_wrapper;
     const char *render,*slash;char stock[128],variant[128],info[160],palette_name[128];
-    native_string palette_string,module_string;void *module,*result=NULL;
-    sh_process_heap_scope heap={0};size_t len;int strings=0;
+    size_t len;
     for(i=0;i<g_count;++i)if(g_entries[i].size.kind==size->kind&&
         !memcmp(g_entries[i].size.xyz,size->xyz,sizeof size->xyz)){
         if(g_entries[i].state==2)return g_entries[i].record;
@@ -291,50 +356,63 @@ static void *create(void *palette,const sh_grid_size *size)
         for(i=0;i<3;++i){snprintf(nav,sizeof nav,"generated/%s/%s.baas_monster%u",identity,leaf,agents[i]);
             if(!preflight(nav)){backend_log("GRID: resized navigation preflight failed");REFUSE("resource preflight: navigation");}}
     }
-    if(!sh_process_heap_enter(&g_heap,&heap))REFUSE("heap scope: not on the engine thread");
-    entry=&g_entries[g_count++];memset(entry,0,sizeof *entry);entry->size=*size;entry->state=1;
-    __try {
-        char logical[112];size_t k=strlen(variant+13)-5;
-        memcpy(logical,variant+13,k);logical[k]=0;
-        g_step="module catalog declaration (see the previous GRID line)";
-        if(!catalog(logical))__leave;
-        p=entry->palette.bytes;
-        /* Same empty list construction as the editor's module palette. The
-         * private palette never enters a stock array or a stock destructor. */
-        *(void**)p=*(void**)palette;
-        *(unsigned*)(p+0x20)=*(unsigned*)(p+0x38)=
-            *(unsigned*)(p+0x60)=*(unsigned*)(p+0x78)=0x50000;
-        g_step="native module loader";
-        g_ctor(&palette_string,palette_name);strings=1;
-        g_ctor(&module_string,variant);strings=2;
-        if(!g_load(p,*(void**)(stock_wrapper+0x90),&palette_string,&module_string,g_editor+0x20660)){
-            backend_log("GRID: native module loader rejected the variant");__leave;}
-        if(*(int*)(p+0x18)!=1||*(int*)(p+0x70)!=1){backend_log("GRID: private module palette has unexpected counts");__leave;}
-        g_step="private palette: the loaded record has no wrapper";
-        result=*(void**)(p+0x10);if(!result||!*(void**)result)__leave;
-        module=**(void***)result;
-        if(!module||!*(void**)((unsigned char*)*(void**)result+0x80)||
-           !*(void**)((unsigned char*)*(void**)result+0x88)) {
-            g_step="private palette: the loaded wrapper lacks its declaration, card or templates";result=NULL;__leave;}
-        *(unsigned*)((unsigned char*)module+0x28)=4;
-    } __finally {
-        __try {
-            __try {if(strings>=2)g_dtor(&module_string);}
-            __finally {if(strings>=1)g_dtor(&palette_string);}
-        } __finally {if(!sh_process_heap_leave(&heap)){result=NULL;g_step="heap scope restore";}}
-    }
-    entry->record=result;entry->state=result?2:-1;
-    backend_log(result?"GRID: independent native module variant loaded":"GRID: native module variant refused");
-    if(result){log_census("variant",*(unsigned char**)result);log_census("stock",stock_wrapper);}
-    return result;
+    return load_private(palette,size,NULL,stock_wrapper,palette_name,variant,1);
+}
+void sh_grid_native_set_module_source(sh_grid_module_served_fn served){g_module_served=served;}
+int sh_grid_module_logical(const char *name,char *out,size_t cap)
+{
+    size_t n=name?strlen(name):0;
+    if(n<19||_strnicmp(name,"maps/modules/",13)||_strnicmp(name,"maps/modules/palettes/",22)==0||
+       _stricmp(name+n-5,".decl")||n-18+1>cap)return 0;
+    memcpy(out,name+13,n-18);out[n-18]=0;
+    return 1;
+}
+/* A bundle module: a snapModule decl a mod bundle serves (modserve.c). It takes
+ * the Grid Room variant route: a private one-module palette loaded with the
+ * native loader, never an entry in the stock palette's arrays, retained for the
+ * process. The stock palette's first record lends the loader its context
+ * (wrapper +0x90) and its palette group: every stock module's render model is
+ * under maps/modules/palettes/mega_blessed/, so a bundle module's is
+ * maps/modules/palettes/mega_blessed/<decl path without maps/modules/>.bmodel. */
+static void *create_bundle(void *palette,const char *name)
+{
+    unsigned i;unsigned char *records,*stock_wrapper=NULL;int n,k;
+    const char *render=NULL,*slash;char info[220],logical[160],palette_name[128],request[260];
+    sh_grid_size none;size_t len;
+    for(i=0;i<g_count;++i)if(!g_entries[i].size.kind&&!_stricmp(g_entries[i].module,name)){
+        if(g_entries[i].state==2)return g_entries[i].record;
+        REFUSE("module cache: an earlier construction of this module failed in this session");}
+    if(g_count==GRID_NATIVE_CAP)REFUSE("variant cache full");
+    if(palette!=g_editor+0x206c0)REFUSE("lookup is not on the editor module palette");
+    if(strlen(name)>=sizeof g_entries[0].module||!sh_grid_module_logical(name,logical,sizeof logical))REFUSE("module name");
+    records=*(unsigned char**)((unsigned char*)palette+0x10);n=*(int*)((unsigned char*)palette+0x18);
+    if(!records||n<1||n>100000)REFUSE("stock template lookup: the module palette is empty");
+    for(k=0;k<n&&!render;++k){unsigned char *w=*(unsigned char**)(records+(size_t)k*0x98);const char *r;
+        if(w&&(r=*(const char**)(w+0x18))!=NULL&&!strncmp(r,"maps/modules/palettes/",22)&&strchr(r+22,'/')){stock_wrapper=w;render=r;}}
+    if(!render)REFUSE("stock template: no stock module has a palette render model");
+    slash=strchr(render+22,'/');len=(size_t)(slash-render-22);
+    if(!len||len>=sizeof palette_name)REFUSE("stock template: unexpected palette name");
+    memcpy(palette_name,render+22,len);palette_name[len]=0;
+    snprintf(info,sizeof info,"decltree/snapmoduleinfo/%s.decl",logical);
+    if(!preflight(name))REFUSE("resource preflight: module declaration");
+    if(!preflight(info))REFUSE("resource preflight: module catalog declaration");
+    /* The geometry is checked as served, not read: a multiplayer map's
+     * collision alone is 48 MB, and the native loader reads it next. */
+    snprintf(request,sizeof request,"maps/modules/%s/_combo/world.bcm",logical);
+    if(g_module_served&&!g_module_served(request,0))REFUSE("resource preflight: world collision is not served");
+    memset(&none,0,sizeof none);
+    return load_private(palette,&none,name,stock_wrapper,palette_name,name,0);
 }
 static void *find_variant(void *palette,const char *name)
 {
-    sh_grid_size size;void *record=NULL;
-    if(!sh_grid_parse_name(name,&size))return g_find(palette,name);
+    sh_grid_size size;void *record=NULL;int bundle=0;
+    if(!sh_grid_parse_name(name,&size)){
+        bundle=g_module_served&&name&&g_module_served(name,1)==1;
+        if(!bundle)return g_find(palette,name);
+    }
     if(InterlockedCompareExchange(&g_faulted,0,0)){g_step="variant creation disabled after an earlier fault";return end_record(palette);}
     if(InterlockedCompareExchange(&g_busy,1,0)){g_step="another variant construction is in progress";return end_record(palette);}
-    __try {record=create(palette,&size);}
+    __try {record=bundle?create_bundle(palette,name):create(palette,&size);}
     __except(EXCEPTION_EXECUTE_HANDLER){InterlockedExchange(&g_faulted,1);g_step="variant construction faulted";
         backend_log("GRID: native variant creation faulted; disabled");}
     InterlockedExchange(&g_busy,0);
@@ -398,6 +476,10 @@ int sh_grid_native_templates(void (*print)(const char *line))
         if(stock&&stock!=end_record(g_editor+0x206c0)&&census(*(unsigned char**)stock,text,sizeof text)){
             snprintf(line,sizeof line,"stock modern: %s",text);print(line);}}
     for(i=0;i<g_count;++i){
+        if(!g_entries[i].size.kind){
+            if(g_entries[i].state!=2||!census(*(unsigned char**)g_entries[i].record,text,sizeof text))
+                snprintf(text,sizeof text,"not ready (state %d)",g_entries[i].state);
+            snprintf(line,sizeof line,"module %s: %s",g_entries[i].module,text);print(line);continue;}
         if(g_entries[i].state!=2){
             snprintf(line,sizeof line,"variant %c %u x %u x %u: not ready (state %d)",
                 g_entries[i].size.kind==SH_GRID_MODERN?'m':'c',g_entries[i].size.xyz[0],

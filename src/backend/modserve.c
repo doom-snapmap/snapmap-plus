@@ -39,6 +39,7 @@ typedef struct ms_file {
     uint64_t size;
     const char *ptype, *pname, *reg;
     int is_decl, is_shadow, is_sedef, rank;
+    int is_restore;                       /* a stock pointer restoring installed content under its own name */
     int need_first, need_count;
     int served;
     const unsigned char *body;            /* composed bytes served instead of the disk file (arena), or NULL */
@@ -528,6 +529,7 @@ static void ms_parse_file(ms_index *x, ms_bundle *b, ms_json *c, char **shadows,
     f->need_count = need_count;
     /* shadows[] is sorted (ms_parse_bundle). */
     f->is_shadow = nshadows > 0 && bsearch(&request, shadows, (size_t)nshadows, sizeof(char *), ms_str_cmp) != NULL;
+    f->is_restore = stock && stock[0] && sh_mb_stock_restore(request, stock);
     if (!strncmp(request, "generated/decls/", 16)) {
         const char *rest = request + 16, *slash = strchr(rest, '/');
         size_t n = strlen(rest);
@@ -569,7 +571,7 @@ static void ms_parse_file(ms_index *x, ms_bundle *b, ms_json *c, char **shadows,
      * skins decls, which are named by their mesh path) may spell the id the
      * way the engine's name sanitiser derives it ('-' becomes '_'), as the
      * bundle builder accepts. */
-    if (!b->legacy && !f->is_shadow) {
+    if (!b->legacy && !f->is_shadow && !f->is_restore) {
         char ns[96], ns_s[96], sid[80];
         int inside;
         _snprintf_s(ns, sizeof ns, _TRUNCATE, "mods/%s/", b->id);
@@ -1740,6 +1742,20 @@ static const ms_file *ms_lookup_file(const ms_index **out_index, const char *req
     return &x->files[f];
 }
 
+int sh_modserve_module_served(const char *module_name)
+{
+    const ms_index *x = NULL;
+    const ms_file *f;
+    char prefix[14];
+    int i;
+    if (!module_name) return 0;
+    for (i = 0; i < 13 && module_name[i]; ++i) prefix[i] = module_name[i] == '\\' ? '/' : module_name[i];
+    prefix[i] = 0;
+    if (_stricmp(prefix, "maps/modules/") != 0) return 0;
+    f = ms_lookup_file(&x, module_name);
+    return f && f->ptype && !strcmp(f->ptype, "snapModule");
+}
+
 int sh_modserve_lookup(const char *request, sh_modserve_hit *out)
 {
     const ms_index *x = NULL;
@@ -2056,7 +2072,9 @@ static int ms_plan_from(const ms_index *x, const unsigned char *root_mark, int p
         /* The editor plan keeps every step for the session: a row is kept, and
          * what its parse points at must outlive the purges around Play. */
         s->persist = persist_sedefs;
-        s->shadow = f->is_shadow;
+        /* A restored stock decl is planned like a shadow: left to the provider
+         * when the engine knows its source, registered when it does not. */
+        s->shadow = f->is_shadow || f->is_restore;
         s->blocked = cause[order[i]];
         s->file = order[i];
         if (s->blocked) out->blocked++;
@@ -2729,9 +2747,12 @@ int modserve_bundles_for_names(const char *const *names, int n_names,
         strcpy_s(lower, sizeof lower, names[i]);
         ms_lower(lower);
         f = ms_provider(x, "entitydef", lower);
+        /* A placed decl name, or a module instance's moduleName (a snapModule
+         * decl is served as a raw file named by its own path). */
         if (f < 0)
             for (k = 0; k < x->nfiles && f < 0; ++k)
-                if (x->files[k].served && x->files[k].is_decl && !strcmp(x->files[k].pname, lower)) f = k;
+                if (x->files[k].served && !strcmp(x->files[k].pname, lower) &&
+                    (x->files[k].is_decl || !strcmp(x->files[k].ptype, "snapModule"))) f = k;
         if (f >= 0 && !seen_file[f]) { seen_file[f] = 1; queue[nq++] = f; }
     }
     while (qh < nq) {
@@ -2771,9 +2792,12 @@ size_t modserve_bundles_for_names_visit(const char *const *names, size_t count,
         strcpy_s(lower, sizeof lower, names[i]);
         ms_lower(lower);
         f = ms_provider(x, "entitydef", lower);
+        /* A placed decl name, or a module instance's moduleName (a snapModule
+         * decl is served as a raw file named by its own path). */
         if (f < 0)
             for (k = 0; k < x->nfiles && f < 0; ++k)
-                if (x->files[k].served && x->files[k].is_decl && !strcmp(x->files[k].pname, lower)) f = k;
+                if (x->files[k].served && !strcmp(x->files[k].pname, lower) &&
+                    (x->files[k].is_decl || !strcmp(x->files[k].ptype, "snapModule"))) f = k;
         if (f < 0) continue;
         b = &x->bundles[x->files[f].bundle];
         visit(context, b->id, b->version, b->hash, (unsigned long long)b->total, names[i]);

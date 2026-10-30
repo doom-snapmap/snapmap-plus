@@ -922,6 +922,57 @@ int sh_mb_extension_allowed(const char *request)
     return 0;
 }
 
+int sh_mb_pointer_only_kind(const char *request)
+{
+    static const char *const kinds[] = { ".sbsp", ".ambientsh", ".tome", ".pages", NULL };
+    const char *slash, *dot;
+    size_t i;
+    if (!request) return 0;
+    slash = strrchr(request, '/');
+    dot = strrchr(slash ? slash : request, '.');
+    if (!dot) return 0;
+    for (i = 0; kinds[i]; i++) if (mb_ieq_n(dot, strlen(dot), kinds[i])) return 1;
+    return 0;
+}
+
+int sh_mb_stock_restore(const char *request, const char *source)
+{
+    size_t rn, sn;
+    const char *slash;
+    if (!request || !source || !request[0] || !source[0]) return 0;
+    if (_stricmp(request, source) == 0) return 1;
+    /* generated/decls/<type>/<source>.decl, for a source that is itself an
+     * own-path decl file of a type this game ships. */
+    if (_strnicmp(request, "generated/decls/", 16) != 0) return 0;
+    slash = strchr(request + 16, '/');
+    if (!slash || slash == request + 16 || !sh_mb_decl_type(request + 16, (size_t)(slash - (request + 16)))) return 0;
+    rn = strlen(slash + 1);
+    sn = strlen(source);
+    return mb_iends(source, sn, ".decl") && _strnicmp(source, "generated/", 10) != 0 &&
+           rn == sn + 5 && _strnicmp(slash + 1, source, sn) == 0 && _stricmp(slash + 1 + sn, ".decl") == 0;
+}
+
+/* maps/modules/<path>.decl outside maps/modules/palettes/: a snapModule decl. */
+static int mb_is_module_request(const char *r)
+{
+    size_t n = r ? strlen(r) : 0;
+    return n > 18 && _strnicmp(r, "maps/modules/", 13) == 0 && _strnicmp(r, "maps/modules/palettes/", 22) != 0 &&
+           mb_iends(r, n, ".decl");
+}
+
+int sh_mb_module_info_request(const char *request, char *out, size_t cap)
+{
+    size_t n;
+    if (!mb_is_module_request(request)) return 0;
+    n = strlen(request);
+    /* "maps/modules/" + <path> + ".decl" -> "generated/decls/snapmoduleinfo/" + <path> + ".decl" */
+    if (31 + (n - 13) + 1 > cap) return 0;
+    memcpy(out, "generated/decls/snapmoduleinfo/", 31);
+    memcpy(out + 31, request + 13, n - 13 + 1);
+    mb_lower(out);
+    return 1;
+}
+
 /* The mega2 loader opens <path without extension>_sq1..16.mega2 for the path
  * SetSource is given, and modvt.c gives "virtualtextures/" + the family name +
  * ".pages", so a member's family is the request without "virtualtextures/"
@@ -1094,6 +1145,8 @@ int sh_mb_logical_name(const char *r, char *type, size_t tcap, char *name, size_
         memcpy(name, r + 10, s); memcpy(name + s, ".swf", 5);
         return 1;
     }
+    /* A SnapMap module decl is named by its own path, as a map's moduleName holds it. */
+    if (mb_is_module_request(r)) return mb_copy_out(type, tcap, "snapModule", 10) && mb_copy_out(name, ncap, r, n);
     /* A permutation decl (generated/renderprogs/permutations/<program>_<mask>.decl)
      * is named by its request path: that is the string the permutation lookup
      * formats and passes to DeclFind (VK 0x141910010). It is decl text but not
@@ -1987,7 +2040,10 @@ static void mb_walk_dir(mb_walk *w, const wchar_t *dir, const char *rel, int dep
             } else if (mb_rp_forbidden(req_lower)) {
                 mb_error(w->b, "%s may not ship: %s", child, mb_rp_forbidden(req_lower));
             } else if (!sh_mb_extension_allowed(req_lower) && !(defer && (deferred = 1))) {
-                mb_error(w->b, "file type not allowed: %s", child);
+                if (sh_mb_pointer_only_kind(req_lower))
+                    mb_error(w->b, "%s can only be a stock pointer to the installed game, never carried "
+                             "(the game's resource reader is unavailable)", child);
+                else mb_error(w->b, "file type not allowed: %s", child);
             } else if (size == 0) {
                 mb_error(w->b, "empty file: %s", child);
             } else if (size > SH_MB_MAX_FILE && !(defer && (deferred = deferred ? deferred : 2))) {
@@ -2664,6 +2720,7 @@ static void mb_check_files(sh_mb_bundle *b, const wchar_t *root, const sh_mb_res
         f->ptype = mb_strdup(type);
         f->pname = mb_strdup(name);
         f->is_decl = mb_starts(f->request, "generated/decls/");
+        f->is_module = strcmp(f->ptype ? f->ptype : type, "snapModule") == 0;
         f->shadowed = mb_is_shadow(b, f->request);
         if (!f->ptype || !f->pname) { mb_error(b, "out of memory"); continue; }
 
@@ -2676,7 +2733,7 @@ static void mb_check_files(sh_mb_bundle *b, const wchar_t *root, const sh_mb_res
             f->size = sz;
             f->stock_source = mb_strdup(d->source);
             if (!f->stock_source) { mb_error(b, "out of memory"); continue; }
-            if (f->is_decl) {
+            if (f->is_decl || f->is_module) {
                 unsigned char *text = NULL;
                 size_t len = 0;
                 char cause[SH_MB_CAUSE_MAX];
@@ -2686,6 +2743,8 @@ static void mb_check_files(sh_mb_bundle *b, const wchar_t *root, const sh_mb_res
                 }
                 if (!sh_decl_text_well_formed(text, len)) {
                     mb_error(b, "%s points at %s, which is not a well-formed decl", f->path, d->source);
+                } else if (f->is_module) {
+                    /* A module's entity texts are quoted strings: nothing to scan. */
                 } else {
                     mb_need_ctx nc = { f, 0 };
                     sh_mb_scan_needs(f->ptype, text, len, mb_need_cb, &nc);
@@ -2711,7 +2770,7 @@ static void mb_check_files(sh_mb_bundle *b, const wchar_t *root, const sh_mb_res
         free(wrel);
         if (!full) { mb_error(b, "out of memory"); continue; }
 
-        if (f->is_decl) {
+        if (f->is_decl || f->is_module) {
             size_t len = 0;
             unsigned char *text = mb_read_wfile(full, SH_MB_MAX_FILE, &len);
             if (!text) { mb_error(b, "cannot read %s", f->path); free(full); continue; }
@@ -2719,6 +2778,8 @@ static void mb_check_files(sh_mb_bundle *b, const wchar_t *root, const sh_mb_res
             got = len;
             if (!sh_decl_text_well_formed(text, len)) {
                 mb_error(b, "%s is not a well-formed decl (unbalanced braces, quotes or comments, or a NUL byte)", f->path);
+            } else if (f->is_module) {
+                /* A module's entity texts are quoted strings: nothing to scan. */
             } else {
                 mb_need_ctx nc = { f, 0 };
                 sh_mb_scan_needs(f->ptype, text, len, mb_need_cb, &nc);
@@ -2771,7 +2832,10 @@ static void mb_check_files(sh_mb_bundle *b, const wchar_t *root, const sh_mb_res
             }
         }
         if (!f->stock && f->deferred) {
-            if (f->deferred == 1) mb_error(b, "file type not allowed: %s", f->path);
+            if (f->deferred == 1 && sh_mb_pointer_only_kind(f->request))
+                mb_error(b, "%s is not installed content: a .sbsp, .ambientsh, .tome or .pages file can only be a "
+                         "stock pointer to the installed game, never carried", f->path);
+            else if (f->deferred == 1) mb_error(b, "file type not allowed: %s", f->path);
             else mb_error(b, "file larger than 64 MiB: %s", f->path);
             continue;
         }
@@ -2779,11 +2843,20 @@ static void mb_check_files(sh_mb_bundle *b, const wchar_t *root, const sh_mb_res
 names:
         /* Namespace: new names live under the mod's own id. A skins decl is
          * named by the mesh path it skins, so it passes the way a raw file
-         * does: the name contains /mods/<id>/ or the engine's '_' spelling. */
+         * does: the name contains /mods/<id>/ or the engine's '_' spelling.
+         * A pointer restoring installed content under the game's own name
+         * replaces nothing and is exempt. A module lives in maps/modules/mods/<id>/. */
         if (f->shadowed && mb_ends(f->request, ".bnk") && !b->legacy)
             mb_error(b, "%s: a stock sound bank cannot be replaced (the game loads every stock bank before mods are read)",
                      f->path);
-        if (!f->shadowed) {
+        if (f->stock && f->stock_source && sh_mb_stock_restore(f->request, f->stock_source)) {
+            /* restored stock content */
+        } else if (f->is_module && !f->shadowed) {
+            char mod_ns[SH_MB_ID_MAX + 32];
+            _snprintf_s(mod_ns, sizeof mod_ns, _TRUNCATE, "maps/modules/mods/%s/", b->id);
+            if (!mb_starts(f->request, mod_ns))
+                mb_error(b, "%s: a snapModule decl must be maps/modules/mods/%s/<name>.decl", f->path, b->id);
+        } else if (!f->shadowed) {
             if (f->is_decl && _stricmp(f->ptype, "skins") == 0) {
                 char slashed[SH_MB_REQUEST_MAX + 18];
                 _snprintf_s(slashed, sizeof slashed, _TRUNCATE, "/%s", f->pname);
@@ -2814,6 +2887,15 @@ names:
                              f->path, b->id);
             }
         }
+    }
+
+    /* A module is placed through its snapModuleInfo, which must travel with it. */
+    for (i = 0; i < b->file_count; i++) {
+        char info[SH_MB_REQUEST_MAX + 32];
+        if (!b->files[i].is_module) continue;
+        if (!sh_mb_module_info_request(b->files[i].request, info, sizeof info) || !mb_req_has(&own, info))
+            mb_error(b, "%s: a snapModule needs its snapModuleInfo assets/%s in the same bundle", b->files[i].path,
+                     sh_mb_module_info_request(b->files[i].request, info, sizeof info) ? info : "?");
     }
 
     /* Pointers carry nothing: the caps count the carried files only. */
@@ -3227,6 +3309,7 @@ static int mb_load_file(sh_mb_bundle *b, const mbj *e, size_t index)
     f->ptype = mb_strdup(type);
     f->pname = mb_strdup(name);
     f->is_decl = mb_starts(expect, "generated/decls/");
+    f->is_module = strcmp(type, "snapModule") == 0;
     f->shadowed = 0;
     if (stock) {
         f->stock = 1;

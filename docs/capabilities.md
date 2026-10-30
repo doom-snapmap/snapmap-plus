@@ -197,6 +197,16 @@ Converting assets from other games is Doomforge's job, not this product's. New n
   loads, and right away when the mod is installed during a session. Entities the mod adds can name
   those sounds (`soundShader`). A changed bank takes effect after a restart. Music, switch and
   blend containers and streamed media still need Wwise itself.
+- A mod can serve a SnapMap module, including a multiplayer map's arena: a module decl at
+  `maps/modules/mods/<id>/<name>.decl` with its `snapModuleInfo`, and stock pointers for the render
+  model, collision, navigation, sound BSP (`.sbsp`), light grid (`.ambientsh`), occlusion tome,
+  light probes and virtual texture (`.pages`) under the names the game derives from the module.
+  `.sbsp`, `.ambientsh`, `.tome` and `.pages` files are accepted only as pointers to the installed
+  game, never carried. A material the multiplayer map uses and SnapMap's archive lacks is pointed at
+  under its own name and needs no `shadows` entry. The module has no tile in the Add browser: a map
+  or a module prefab that names it loads it into its own private palette, as resized Grid Rooms
+  are, and it then moves, saves and plays like a stock module. Saved maps name its mod in their
+  `smpmod1.` rows.
 - A mod can carry its own virtual-texture family (the page format a material streams its
   diffuse, specular and normal detail from): the members `virtualtextures/mods/<id>/<family>_sq<N>.mega2`
   (N 1 to 16), and materials naming it with `landpagefile "mods/<id>/<family>"` and an explicit
