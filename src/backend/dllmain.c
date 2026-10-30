@@ -27,6 +27,7 @@
 #include "module_prefab.h"
 #include "timeline_tile.h"
 #include "modserve.h"
+#include "modmigrate.h"
 #include "modpublished.h"
 #include "budget_table.h"
 #include "map_render.h"
@@ -337,6 +338,7 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
         int overrides_installed = 0;
         /* Installed mods: read every bundle index before the provider can be
          * asked for a file, so the first open already sees the table. */
+        (void)sh_modmigrate_boot();   /* the retired overrides folder, once (modmigrate.h) */
         (void)sh_modserve_index_boot();
         if (SH_IDFILE_SLOTS != SH_OVERRIDES_STREAM_SLOTS || SH_PROVIDER_OPEN_SLOT != SH_OVERRIDES_OPEN_SLOT)
             backend_log("B1: overrides file-shadow SKIPPED -- the override stream implements the 31-slot "

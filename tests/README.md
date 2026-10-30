@@ -88,7 +88,29 @@ Checks native helpers, engine-interface contracts, frontend JavaScript and optio
   `smpmod1.` row and activated on the next load; a legacy-form bundle with
   non-stock shadows builds and registers only its new names; skins decls pass
   by their mesh path. With `SH_MODLEGACY_FIXTURES` set, each carrier map is
-  converted with the real builder and activated in the same parse.
+  converted with the real builder and activated in the same parse. Set
+  `SH_MODLEGACY_BETA19` to the path of one rawmap file written by
+  v0.2.1-beta.19 (the owner's acceptance map; not in the repository, its
+  carriers hold game files) to add a pass that converts every carrier in it,
+  prints per carrier what the bundle provides and how many placed names it
+  covers, the parse time and the process peak working set, then checks that a
+  second parse is answered by the memo and a fresh-process parse by the folders
+  on disk without a build. `MOD_PIPELINE_ECHO=1` prints the log lines and the
+  placed names each bundle covers.
+- `modmigrate_test.c` moves a small synthetic `overrides\` tree into a
+  temporary store with the real builder, store and legacy converter: an era C
+  pack (an unsupported cvar dropped, strings and composes kept, a sidecar left
+  out), an era B pack without an id, two packs with one id, a delivered
+  `map-<16 hex>\<package>`, a stray ZIP, a folder holding one package one level
+  down (migrated under its id) and one holding two (skipped), a folder over the 512 MiB cap and one over the bundle cap (sparse
+  files, no disk cost), and an empty `override-backups`. It checks the store,
+  `mods\.migrated.json`, the log lines, that `overrides\` is byte for byte
+  unchanged, that a second pass does nothing and `--again` rebuilds the same
+  bundles, that a map carrying the same delivery or the same authored tree is
+  answered by the migrated bundle without a conversion, a non-empty
+  `override-backups` left alone, the boot split (a small folder before the
+  index, a large one on the worker, then one rescan) and the rerun of an
+  unfinished record. `MODMIGRATE_ECHO=1` prints the log lines.
 - `modui_test.c` runs the Mods tab's backend against a temporary store, the
   real serving index and the map manifest: the document on an empty store,
   install through the tab, every state string, manifest rows and the placed

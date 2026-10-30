@@ -392,11 +392,12 @@ and a player who opens that map is asked first and downloads only what they
 approve in the dialog, verified by hash (`modnet.c`, `modsync.c`, `modpublished.c`;
 see [Published maps and missing mods](#published-maps-and-missing-mods)); an
 exported rawmap is a ZIP that carries the bundles itself (`modexport.c`), so
-sharing a rawmap stays offline. Plain saves never upload. Nothing is read from
-the retired `%LOCALAPPDATA%\snapmap-plus\overrides\` tree, and no
-`package-cache` or `package-staging` folder is created.
+sharing a rawmap stays offline. Plain saves never upload. The retired
+`%LOCALAPPDATA%\snapmap-plus\overrides\` tree is read once, by the migration
+below, and never served or written; no `package-cache` or `package-staging`
+folder is created.
 
-Seven backend files share the work:
+Eight backend files share the work:
 
 - `modbundle.c` builds a mod folder into a bundle: a SHA-256 per file, the
   logical name each file provides, the names its decls need, the namespace and
@@ -434,6 +435,8 @@ Seven backend files share the work:
 - `modpublished.c` holds a published or My Maps launch whose manifest names a
   bundle that is not installed, asks the player, and fetches and resumes it or
   drops it, as in [Published maps and missing mods](#published-maps-and-missing-mods).
+- `modmigrate.c` moves the retired `overrides\` tree into the store once, as in
+  [Migration of the retired overrides folder](#migration-of-the-retired-overrides-folder).
 
 The provider open (`ov_open_body` in `overrides.c`) serves, in order: the
 placement grid, map navigation, the generated Grid Room variants, the built-in
@@ -450,7 +453,17 @@ A complete carrier whose ZIP and `package.json` read is unpacked once into
 `mods\legacy\<id>@<digest16>\` (older `decls/`, `images/` and `shaders/`
 layouts moved under `assets/`), built into a bundle and named by a manifest row;
 the serving table is then rebuilt when that bundle is not in it yet, so the same
-parse can activate it. Any other carrier, and the unreleased `smpbind.` and
+parse can activate it. A first-generation package served every file under
+`assets/`; a file a bundle cannot carry (a type outside the bundle whitelist,
+such as the `.materials.txt` sidecars every beta.19 model pack shipped or a
+`.bswf` movie, an empty file, a path the request rules refuse) is left out and
+counted on the `LEGACY: unpacked` line instead of refusing the package, and a
+cvar requirement other than the two supported blacklist gates is left out the
+same way. A beta.16-19 carrier names its tree (`smpkg.delivery.<tree>`), so
+before converting one the converter also looks for a legacy folder whose
+`mod.json` records that key and for a bundle the overrides migration built from
+the same tree (`mods\.migrated.json`, `trees`); either answers the carrier
+without a second copy. Any other carrier, and the unreleased `smpbind.` and
 `smpref.` rows, are removed. Each carrier logs one `LEGACY:` verdict line. After
 the navigation strip, `modmanifest.c` reads and strips the manifest rows before
 the engine replicates map variables and activates the bundles they name.
@@ -474,12 +487,66 @@ in the map it returns at once and the save is the engine's own bytes.
 
 Threads: the table is built on the bootstrap thread before the provider hook is
 published and replaced only by a rescan (`sh_mods install`, a build inside the
-store, a legacy conversion, `sh_mods rescan`). Readers see one complete table;
+store, a legacy conversion, the end of the overrides migration's worker,
+`sh_mods rescan`). Readers see one complete table;
 retired tables are never freed, because a provider open on another thread may
 still read one. Registration, activation and the palette rebuild run on DOOM's
 main thread only. With an empty `mods\` folder the table is empty and every hook
 above passes through: the differences from a build without mods are the
 `sh_mods` command and its `MODS:` log lines.
+
+### Migration of the retired overrides folder
+
+Releases up to v0.2.1-beta.19 kept packages in `overrides\`. At backend start,
+before the serving table is built, `modmigrate.c` runs once when `overrides\`
+exists and `mods\.migrated.json` does not (or records an unfinished pass):
+
+- each direct child folder with `package.json` or `mod.json` is converted the
+  way a carrier is (layout moved under `assets/`, files a bundle cannot carry
+  left out) into a staging folder outside the store and installed by
+  `modstore.c` as `mods\<id>@<version>+<build>\` with blobs. The descriptor is
+  the authoring descriptor: its id (or, for an era B pack without one, its
+  folder name), version (else `0.0.0`), requirements, strings and hud are
+  carried, its other keys (`composes`, an era B `schema`) are kept under
+  `extra`, and a `legacy` block (`source`, `folder`, `tree`) grandfathers its
+  names as shadows. When another installed build of the same id and version
+  comes from a different tree, the version gets the tree's first 8 hex, so two
+  folders with one id are both built and the duplicate is reported;
+- each delivered package, `overrides\map-<16 hex>\<package>\`, becomes a legacy
+  bundle `mods\legacy\<id>@<tree16>\` keyed `delivery.<tree>`, the beta.19 tree
+  fingerprint (entries sorted case-insensitively, then by bytes; a `d` or `f`
+  byte, the NUL-terminated relative path and the file's SHA-256), which is the
+  key a map's carrier of the same delivery has; a later load of that map reuses
+  it;
+- a folder without a descriptor whose only package is one direct child folder
+  (beta.19 read unmarked folders as groups) has that child migrated under the
+  child's own id, and its line says so; a folder without a descriptor and with
+  none or several such children, a ZIP and any other file are skipped with the
+  reason; a folder over
+  512 MiB or 8192 files is skipped before it is read, and one whose carried part
+  is over the bundle caps (4096 files, 256 MiB) is refused before it is hashed;
+- nothing under `overrides\` is created, changed or deleted; an empty
+  `override-backups\` folder is removed and a non-empty one is left alone.
+
+Folders of at most 32 files and 16 MiB are migrated before the serving table,
+within about a second of boot time; the rest go to a worker thread that runs
+while the game boots, writes the record and rebuilds the serving table when it
+is done (editor rows it adds after the first palette build need
+`sh_mods palette rebuild`). The record lists every folder with its kind,
+outcome, reason, id, version, store folder, bundle hash and tree, and a `trees`
+map from tree to store folder; it says `"complete": false` until the worker
+ends, and an unfinished record makes the next start run the pass again (every
+step is idempotent). Each folder logs one `MODS: migration:` line and the pass
+one summary line; a line that leaves files out names how many and how many of
+them are `.bswf` movies, which bundles do not carry (SWF content bypasses the
+provider once the game has loaded). A migrated pack keeps its id, so where it
+shares one with a delivered or converted package (the beta.19 `doors` packs),
+the most recently installed bundle serves every path they share, whichever
+map is open. `sh_mods migrate [--again]` runs the same pass on the worker.
+Stock names are not checked during the migration because the game's resource
+reader is not up at boot, so unresolved needs only warn, as for a converted
+carrier. The worker shares the store with `sh_mods install`, which does not wait
+for it; an install typed while the first-start pass runs can race it.
 
 ### Published maps and missing mods
 
