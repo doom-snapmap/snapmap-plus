@@ -7,6 +7,7 @@
 
 /* The published-map gates poll from the same frame; tested in modpublished_test. */
 void sh_modpublished_poll(void) {}
+void sh_modpublish_poll(void) {}
 
 static DWORD engine_id;
 static HANDLE start_event, entered_event, release_event;

@@ -11,6 +11,7 @@
 #include "snapmap_plus_iface.h"
 #include "apply_engine.h"
 #include "modpublished.h"
+#include "modpublish.h"
 #include "typeinfo.h"
 #include "ui_bridge.h"
 #include "iface_engine.h"
@@ -3435,6 +3436,7 @@ void sh_apply_prefab_poll_play(void)
     /* Held published or My Maps launches: the question, its answer, the fetch
      * and the resume. Runs in menus too, where the editor frame does not. */
     sh_modpublished_poll();
+    sh_modpublish_poll();   /* held publishes, their uploads and claims */
     if (!g_doom_base) return;
 
 #if AE_PASTE_DIAG_ON

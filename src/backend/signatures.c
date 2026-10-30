@@ -1317,5 +1317,35 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "40 57 48 83 EC 30 48 C7 44 24 20 FE FF FF FF 48 89 5C 24 40 48 89 74 24 48 48 8B F9 0F B6 81 83 05 00 00 "
       "33 F6 84 C0 74 ?? 2C 03 3C 01 77 ?? 48 8B 89 70 05 00 00 48 85 C9 74 ?? 8B 97 7C 05 00 00 E8 ?? ?? ?? ?? "
       "90 48 89 B7 70 05 00 00 89 B7 7C 05 00 00 89 B7 78 05 00 00", 0xF969A0u, 0xF95ED0u },
+    /* Publish-time mod upload, claims and the copy gate (modpublish.c; snaphak-re
+     * mod-system-reinstatement lane N4). Unique on both build 13954591
+     * executables; steal windows audited by detour_windows_test. */
+    { "PublishAfterSave", /* the Save state's publish callback (editorLocal): vtbl+0x160(4), then TryCloudSave; nothing is sent before it. Steal 15. */
+      "40 57 48 83 EC 60 48 C7 44 24 20 FE FF FF FF 48 89 5C 24 70 48 8B F9 48 8B 01 BA 04 00 00 00 FF 90 60 01 00 00"
+      , 0x119A8C0u, 0x1199B20u },
+    { "PublishFail", /* (editorLocal): the publish-failed toast on editor+0x21088, then EditorBusyClear. Its twin VK 119a930 (the success toast) differs only after the RET, so the pattern ends on the padding and the next thunk's E9. Not hooked. */
+      "40 53 48 81 EC 90 00 00 00 48 C7 44 24 20 FE FF FF FF 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 84 24 88 00 00 00 48 8B D9 48 "
+      "83 B9 88 10 02 00 00 74 50 48 8D 15 ?? ?? ?? ?? 48 8D 4C 24 58 E8 ?? ?? ?? ?? 90 48 8D 15 ?? ?? ?? ?? 48 8D 4C 24 28 E8 "
+      "?? ?? ?? ?? 90 4C 8D 44 24 58 48 8D 54 24 28 48 8B 8B 88 10 02 00 E8 ?? ?? ?? ?? 90 48 8D 4C 24 28 E8 ?? ?? ?? ?? 90 48 "
+      "8D 4C 24 58 E8 ?? ?? ?? ?? 48 8B CB E8 ?? ?? ?? ?? 48 8B 8C 24 88 00 00 00 48 33 CC E8 ?? ?? ?? ?? 48 81 C4 90 00 00 00 "
+      "5B C3 CC CC CC CC CC CC CC CC CC CC CC CC CC CC E9"
+      , 0x119ABE0u, 0x1199E40u },
+    { "PublishFeedPost", /* (idSnapMapEdit*, const idPublishedMapModel&): both publish success paths; item id idStr at model+0, revision at +0x30. Steal 15. */
+      "48 89 5C 24 10 48 89 74 24 18 57 48 83 EC 20 48 8B F9 48 8B F2 B9 18 00 00 00 E8 ?? ?? ?? ?? 48 89 44 24 30 48 8B D8 48 "
+      "85 C0 74 1B 48 8D 05 ?? ?? ?? ?? 48 89 7B 08 48 89 03 48 8D 05 ?? ?? ?? ?? 48 89 43 10 EB 02 33 DB B9 18 00 00 00 E8"
+      , 0x11F91D0u, 0x11F83F0u },
+    { "MapInfoUnpublishDone", /* MapInfo screen unpublish success (screen, ctx, const idStr &itemId), bound by the confirm at VK 1090ea0 / GL 108ffb0. The delete completion VK 1092810 / GL 1091920 is mapped, not hooked. Steal 14. */
+      "48 89 5C 24 08 57 48 83 EC 20 48 8B 41 18 48 8B D9 48 85 C0 75 09 48 8B 49 20 E8 ?? ?? ?? ?? 48 8B C8 E8 ?? ?? ?? ?? 48 "
+      "8B F8 48 85 C0 74 3F"
+      , 0x1092790u, 0x10918A0u },
+    { "MapInfoCopyToMyMaps", /* MapInfo screen copy (branch) entry (screen): record +0x300 of kind 1, model at record+0x18 -> +8, then CopyRequestWrap. Steal 19. */
+      "48 8B C4 57 48 81 EC 90 00 00 00 48 C7 40 B0 FE FF FF FF 48 89 58 10 48 89 70 18 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 84 "
+      "24 80 00 00 00 48 8B D9 48 8B 41 18 48 85 C0 75 09 48 8B 49 20 E8 ?? ?? ?? ?? 48 8B C8 E8 ?? ?? ?? ?? 48 8B F8 48 85 C0 "
+      "0F 84 ?? ?? ?? ?? 8B 93 00 03 00 00 48 8B C8 E8 ?? ?? ?? ?? 48 8B F0 48 85 C0 0F 84 ?? ?? ?? ?? 83 78 0C 01"
+      , 0x1090A10u, 0x108FB20u },
+    { "BrowserCopyToMyMaps", /* browser copy (branch) entry (browser, flag): record kind 5, entry model +0x28 -> +8, then CopyRequestWrap. Called after the wait widget is shown. Steal 16. */
+      "48 89 6C 24 20 57 48 83 EC 40 0F B6 EA 48 8B F9 8B 51 08 48 8B 49 10 E8 ?? ?? ?? ?? 48 85 C0 0F 84 ?? ?? ?? ?? 83 78 0C "
+      "05"
+      , 0xFCE5E0u, 0xFCDAE0u },
     { NULL, NULL, 0 }   /* terminator */
 };

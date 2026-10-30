@@ -437,6 +437,10 @@ Eight backend files share the work:
   drops it, as in [Published maps and missing mods](#published-maps-and-missing-mods).
 - `modmigrate.c` moves the retired `overrides\` tree into the store once, as in
   [Migration of the retired overrides folder](#migration-of-the-retired-overrides-folder).
+- `modpublish.c` uploads a map's bundles when the map is published, claims
+  them under the published item, releases the claim at unpublish, and refuses
+  a copy to My Maps that the map service would reject, as in
+  [Publishing a map with mods](#publishing-a-map-with-mods).
 
 The provider open (`ov_open_body` in `overrides.c`) serves, in order: the
 placement grid, map navigation, the generated Grid Room variants, the built-in
@@ -603,6 +607,51 @@ changed drops the hold: nothing is launched, the progress widget is hidden, and
 a one-button notice names the mod. Another map load, or a newer held launch,
 abandons the hold silently and cancels its fetch. The engine thread never waits:
 the network runs on the worker and the dialog is polled.
+
+### Publishing a map with mods
+
+What is sent: the bundles the published map names in its `smpmod1.` rows, and
+only those, at publish time. The `SerializeToJson` detour reports each save's
+final text (`sh_rawmap_set_save_observer`); `PublishAfterSave`, the Save
+state's callback that runs before the first request to the map service, is
+detoured (`modpublish.c`). A save without rows publishes natively. A text over
+the service's 10,485,760-byte bound is refused through the engine's own
+`PublishFail`, with a toast giving the size and the overage. Otherwise the
+publish is held: the Save state returns with the publish pacifier up, as the
+engine's own asynchronous chain leaves it. The first publish with mods on an
+installation asks once through `sh_engine_dialog_ask` (Yes sets
+`mods.upload_confirmed`); the ask site is one function, and an alternative
+route shows the explanation as `PublishFail`'s editor toast instead, cancels
+that publish, and treats the next one as the agreement. One worker job then
+uploads every bundle (`modsync_upload_bundles`: missing blobs, the canonical
+manifests, one claim) under a provisional ref `publish-pending-<16 hex>`, and a
+main tick resumes the original `PublishAfterSave`. A No, a failed upload, a
+question that cannot be shown or a busy worker cancels through `PublishFail`
+and a toast naming the cause; nothing reached the map service. The editor
+leaving abandons the hold; another save cancels it.
+
+The claim and its secret: `PublishFeedPost`, the one function both success
+paths reach, carries the item id and revision. The worker claims the bundle
+set under the item id. On a republish the stored secret re-claims that ref,
+which replaces the set (Contract 4); a republish without rows releases the
+item's claim. The claim id and secret live in `mods\claims.json` (modsync);
+the secret is never logged. The provisional claim is released once the item
+claim succeeds, or when its publish never reaches the feed post.
+
+Release: the MapInfo screen's unpublish completion (`(screen, ctx, const
+idStr &id)`, bound by the unpublish confirm) releases the item's claim on the
+worker. Deleting a map from My Maps releases nothing: it removes the local
+slot and the cloud-saved item, and the published item stays playable for
+everyone, so its claim must stay. A copy to My Maps of a published map whose
+cached text (`%LOCALAPPDATA%\id Software\DOOM\base\doomsnapmaps\published-maps\<id>_<rev>_map.decl`)
+is over the bound is refused at the MapInfo and browser entries, before the
+engine creates the saved item, with a one-button notice.
+
+The retry queue: a failure modsync can retry stays in
+`mods\pending-uploads.json`. At startup the backend settles provisional refs
+left by a closed game (their claims are released and their queued uploads
+dropped, since their publish never completed), then retries the rest of the
+queue once on the worker and logs the counts.
 
 ## Failure reporting
 
