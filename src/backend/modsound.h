@@ -24,8 +24,13 @@
  *     the engine's listed-bank filter and prints its own result line
  *     ("async load success id <signed id> : <name>").
  *   - LoadBanks: its one vtable slot is swapped so `s_loadBanks`,
- *     `s_reloadAudioEvents` and `s_restart` (which rebuilds Wwise) are
- *     followed by a fresh submit of every served bank.
+ *     `s_reloadAudioEvents` and `s_restart` (which rebuilds Wwise) run in
+ *     process heap 0 on the main thread and are followed by a fresh submit
+ *     of every served bank. Wwise allocates through the engine allocator
+ *     with heap -1 (the top of the heap stack), so the engine's own rerun
+ *     from the console in the editor put the reloaded stream packages in the
+ *     map heap; the map unload at Play freed them and the next streamed
+ *     open (by id, through the package list) read a freed package.
  *   - The hardware object is soundSystem+0x140, both decoded from the
  *     s_loadBanks console function (SoundLoadBanksCmd: LEA RCX,[soundSystem];
  *     CALL; MOV RCX,[soundSystem+0x140]; JMP [RAX+0x30]); a submit waits
@@ -144,6 +149,9 @@ int32_t sh_modsound_test_open(void *self, const wchar_t *name, int32_t mode, con
 void sh_modsound_test_loadbanks(void *hardware);
 /* The pass, with "on the main thread" forced. Returns the number submitted. */
 int  sh_modsound_test_pass(void);
+/* Stand-ins for entering and leaving process heap 0 (enter returns 1 when
+ * entered). */
+void sh_modsound_test_heap(int (*enter)(void), void (*leave)(void));
 #endif
 
 #ifdef __cplusplus

@@ -100,6 +100,9 @@ static int n_orig_open, n_orig_lb, n_submit;
 static char last_submit[128];
 static void *last_submit_hw;
 static int submit_result = 1;
+static int heap_depth, heap_refuse, lb_depth, submit_depth;
+static int fake_enter(void) { if (heap_refuse) return 0; heap_depth++; return 1; }
+static void fake_leave(void) { heap_depth--; }
 
 static int32_t fake_open(void *self, const wchar_t *name, int32_t mode, const void *flags, uint8_t *sync,
                          sh_modsound_file_desc *desc)
@@ -108,10 +111,11 @@ static int32_t fake_open(void *self, const wchar_t *name, int32_t mode, const vo
     n_orig_open++;
     return 0x42;   /* AK_FileNotFound */
 }
-static void fake_loadbanks(void *hw) { (void)hw; n_orig_lb++; }
+static void fake_loadbanks(void *hw) { (void)hw; n_orig_lb++; lb_depth = heap_depth; }
 static int fake_submit(void *hw, const char *name)
 {
     n_submit++;
+    submit_depth = heap_depth;
     last_submit_hw = hw;
     strcpy_s(last_submit, sizeof last_submit, name);
     return submit_result;
@@ -141,6 +145,7 @@ static void test_routes(void)
     memset(&t, 0, sizeof t);
     CHECK(sh_modsound_table_add(&t, "sound/soundbanks/pc/p6probe_sfx.bnk", path, sizeof bytes, "p6probe", 0) == 1);
     sh_modsound_test_bind(fake_open, fake_loadbanks, fake_submit, hardware, &t);
+    sh_modsound_test_heap(fake_enter, fake_leave);
 
     /* The bank's name: the bundle file, as the default hook would open it. */
     memset(&d, 0xCC, sizeof d);
@@ -164,21 +169,32 @@ static void test_routes(void)
           last_submit_hw == hardware);
     /* Once per sound-system lifetime. */
     CHECK(sh_modsound_test_pass() == 0 && n_submit == 1);
-    /* s_loadBanks / s_restart: the engine's LoadBanks, then every bank again. */
+    CHECK(submit_depth == 1 && heap_depth == 0);
+    /* s_loadBanks / s_restart: the engine's LoadBanks inside process heap 0
+     * (the stream packages it loads must outlive the open map), then every
+     * bank again, each submit in its own scope. */
     sh_modsound_test_loadbanks(hardware);
     CHECK(n_orig_lb == 1 && n_submit == 2);
-    CHECK(sh_modsound_test_pass() == 0 && n_submit == 2);
+    CHECK(lb_depth == 1 && submit_depth == 1 && heap_depth == 0);
+    /* A scope that cannot be entered still runs the engine's LoadBanks
+     * (s_restart must rebuild Wwise) but submits nothing outside heap 0. */
+    heap_refuse = 1;
+    sh_modsound_test_loadbanks(hardware);
+    CHECK(n_orig_lb == 2 && lb_depth == 0 && n_submit == 2 && heap_depth == 0);
+    heap_refuse = 0;
+    CHECK(sh_modsound_test_pass() == 1 && n_submit == 3);
+    CHECK(sh_modsound_test_pass() == 0 && n_submit == 3);
     /* A refused submit is not retried in the same lifetime. */
     submit_result = 2;
     sh_modsound_test_loadbanks(hardware);
-    CHECK(n_orig_lb == 2 && n_submit == 3 && sh_modsound_test_pass() == 0);
+    CHECK(n_orig_lb == 3 && n_submit == 4 && sh_modsound_test_pass() == 0);
     submit_result = 1;
 
     /* A rebuilt table keeps what was already submitted under the same name;
      * a new bank is submitted at the next pass. */
     CHECK(sh_modsound_table_add(&t, "sound/soundbanks/pc/p6probe_more.bnk", path, sizeof bytes, "p6probe", 0) == 1);
     sh_modsound_test_bind(fake_open, fake_loadbanks, fake_submit, hardware, &t);
-    CHECK(sh_modsound_test_pass() == 1 && n_submit == 4 && !strcmp(last_submit, "p6probe_more.bnk"));
+    CHECK(sh_modsound_test_pass() == 1 && n_submit == 5 && !strcmp(last_submit, "p6probe_more.bnk"));
 
     /* The file no longer has the indexed size: the engine answers. */
     f = fopen(path, "ab");
