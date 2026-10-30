@@ -13,8 +13,7 @@
  *   WORKER        wait for the modnet worker to be free
  *   UPLOADING     one worker job uploads every bundle and claims them under a
  *                 provisional ref
- *   (resume)      on a main tick, the search tag, then the original
- *                 PublishAfterSave(editorLocal)
+ *   (resume)      on a main tick, the original PublishAfterSave(editorLocal)
  *
  * A No, a failed upload, a question that could not be shown, or a worker
  * that stayed busy cancels the publish through the engine's PublishFail and
@@ -198,6 +197,52 @@ void sh_modpublish_save_seen(const char *text, size_t length)
         mp_logf("MODS: publish: %u manifest row(s) of the save did not read; the publish will not be gated", rejected);
     }
     sh_modmanifest_list_free(&rows);
+}
+
+/* ------------------------------------------------------------ search tag */
+
+/* The tag must be in the local save's metadata: the cloud save that
+ * TryCloudSave starts re-reads it from the profile, so a tag added to the
+ * editor's model after the save never reaches the cloud save or the item.
+ * PublishStart arms; the save observer then sees the rows; the local save's
+ * WriteLocalSavedMapText takes the tag into the model it writes. */
+#define MP_TAG_ARM_MS 10000ull   /* PublishStart to the save is about 60 frames */
+
+static struct {
+    int armed;
+    ULONGLONG at;
+    char local[MP_ID_CAP];
+    unsigned long tagged_sequence;   /* the save whose metadata got (or had) the tag */
+} g_tag;
+
+void sh_modpublish_publish_started(const char *local_id)
+{
+    if (!g_ops_set || !mp_on_main()) return;
+    g_tag.armed = 1;
+    g_tag.at = GetTickCount64();
+    g_tag.local[0] = 0;
+    if (local_id && strlen(local_id) < sizeof g_tag.local) strcpy_s(g_tag.local, sizeof g_tag.local, local_id);
+}
+
+int sh_modpublish_save_tag(const char *local_id, void *model)
+{
+    int tagged;
+    if (!g_ops_set || !g_tag.armed || !mp_on_main()) return 0;
+    if (GetTickCount64() - g_tag.at > MP_TAG_ARM_MS) { g_tag.armed = 0; return 0; }
+    if (g_tag.local[0] && (!local_id || strcmp(local_id, g_tag.local))) return 0;   /* another slot */
+    g_tag.armed = 0;
+    /* The observer reported this save's text just before its write. */
+    if (!g_save.valid || !g_save.count || GetTickCount64() - g_save.at > MP_SAVE_FRESH_MS) return 0;
+    if (!g_ops.add_tag || !model) return 0;
+    tagged = g_ops.add_tag(g_ops.context, model, SH_MODPUBLISH_TAG);
+    if (tagged >= 0) g_tag.tagged_sequence = g_save.sequence;
+    if (tagged > 0)
+        mp_log("MODS: publish: search tag '" SH_MODPUBLISH_TAG "' written into the saved map's tags (the map needs "
+               "mods, so players without Snapmap+ cannot play it)");
+    else if (tagged < 0)
+        mp_log("MODS: publish: the search tag '" SH_MODPUBLISH_TAG "' could not be written; the map publishes "
+               "without it");
+    return tagged;
 }
 
 /* ------------------------------------------------------------ jobs */
@@ -616,6 +661,10 @@ int sh_modpublish_after_save(void *editor)
     h->state = confirmed ? HOLD_WORKER : HOLD_RAISE;
     mp_logf("MODS: publish held: the map uses %d mod(s), %llu bytes%s", h->count, h->bytes,
             confirmed ? "" : "; asking before the first upload");
+    if (g_tag.tagged_sequence != g_save.sequence)
+        mp_log("MODS: publish: the search tag '" SH_MODPUBLISH_TAG "' was not written with this save; the published "
+               "map will not carry it");
+    g_tag.armed = 0;
     return 0;
 }
 
@@ -1119,17 +1168,6 @@ static void mp_upload_finished(void)
     mp_job_free(h->job);
     h->job = NULL;
     mp_hold_free();
-    /* Before the original runs: TryCloudSave compares the edit's tags with the
-     * cloud save, so an added tag is cloud-saved and carried to the item. */
-    if (g_ops.add_tag) {
-        int tagged = g_ops.add_tag(g_ops.context, editor, SH_MODPUBLISH_TAG);
-        if (tagged > 0)
-            mp_log("MODS: publish: search tag '" SH_MODPUBLISH_TAG "' added (the map needs mods, so players "
-                   "without Snapmap+ cannot play it)");
-        else if (tagged < 0)
-            mp_log("MODS: publish: the search tag '" SH_MODPUBLISH_TAG "' could not be added; the map publishes "
-                   "without it");
-    }
     InterlockedExchange(&g_resuming, 1);
     if (g_ops.resume) g_ops.resume(g_ops.context, editor);
     InterlockedExchange(&g_resuming, 0);
@@ -1290,6 +1328,7 @@ void sh_modpublish_test_reset(void)
     mp_save_clear(&g_save);
     g_notice[0] = 0; g_notice_ticket = 0; g_notice_waited = 0;
     InterlockedExchange(&g_resuming, 0);
+    memset(&g_tag, 0, sizeof g_tag);
     while (g_checks) { mp_check *c = g_checks; g_checks = c->next; free(c); }
     AcquireSRWLockExclusive(&g_answer_lock);
     while (g_answers) { mp_answer *a = g_answers; g_answers = a->next; free(a->items); free(a); }
@@ -1306,6 +1345,7 @@ void sh_modpublish_test_age_delete_checks(unsigned long long ms)
     for (mp_check *c = g_checks; c; c = c->next) c->at -= ms;
 }
 void sh_modpublish_test_set_link_min_age(long long seconds) { g_link_min_age = seconds; }
+void sh_modpublish_test_age_tag_arm(unsigned long long ms) { g_tag.at -= ms; }
 int sh_modpublish_test_state(void) { return g_hold.state; }
 const char *sh_modpublish_test_notice(void) { return g_notice; }
 const char *sh_modpublish_test_provisional(void)
@@ -1352,6 +1392,8 @@ typedef void (*eng_object_fn)(void *);
 typedef void (*eng_toast_fn)(void *, void *, void *);
 typedef void (*eng_state_fn)(void *, int);
 typedef void (*eng_deleted_fn)(void *, void *, const void *, const void *);
+typedef void (*eng_publish_start_fn)(void *, unsigned char);
+typedef unsigned (*eng_write_local_fn)(const char *, void *, const char *);
 typedef unsigned char (*eng_grow_fn)(void *);
 typedef void (*eng_assign_fn)(void *, const void *);
 typedef void *(*eng_query_fn)(void *, const char *, const char *, void *, void *);
@@ -1360,16 +1402,18 @@ typedef void *(*eng_query_fn)(void *, const char *, const char *, void *, void *
  * elements of 0x30), its saved-map ids, and the published-items answer. */
 #define ENG_EDIT_TAGS       0x998
 #define ENG_EDIT_LOCAL_ID   0x7F8      /* idLocalSavedMapModel at edit+0x7F8: localId idStr first */
+#define ENG_MODEL_TAGS      0x1A0      /* idLocalSavedMapModel tags (edit+0x998 is the edit's copy's) */
 #define ENG_EDIT_CLOUD_ID   0x9B0      /* its cloudSavedItemId idStr (+0x1B8) */
 #define ENG_TAG_STRIDE      0x30
 #define ENG_TAGS_MAX        4096
 #define ENG_PUBLISHED_STRIDE 0x588     /* idPublishedMapModel in the search answer; id idStr at +0 */
 
-enum { ENG_AFTER_SAVE, ENG_FEED_POST, ENG_UNPUBLISHED, ENG_MAPINFO_COPY, ENG_BROWSER_COPY, ENG_DELETED, ENG_HOOKS };
+enum { ENG_AFTER_SAVE, ENG_FEED_POST, ENG_UNPUBLISHED, ENG_MAPINFO_COPY, ENG_BROWSER_COPY, ENG_DELETED,
+       ENG_PUBLISH_START, ENG_WRITE_LOCAL, ENG_HOOKS };
 static const char *const ENG_HOOK_NAMES[ENG_HOOKS] = {
     "PublishAfterSave", "PublishFeedPost", "MapInfoUnpublishDone", "MapInfoCopyToMyMaps", "BrowserCopyToMyMaps",
-    "MapInfoDeleteDone" };
-static const size_t ENG_STEAL[ENG_HOOKS] = { 15, 15, 14, 19, 16, 14 };
+    "MapInfoDeleteDone", "PublishStart", "WriteLocalSavedMapText" };
+static const size_t ENG_STEAL[ENG_HOOKS] = { 15, 15, 14, 19, 16, 14, 15, 20 };
 
 static struct {
     const uint8_t *site[ENG_HOOKS];
@@ -1524,20 +1568,18 @@ static int eng_upload_question_toast(void *c, void *editor, size_t count, unsign
     return SH_MODPUBLISH_ASKED_BY_TOAST;
 }
 
-/* The search tag, appended the way PublishStart appends map:dev: grow the
- * list when it is full, assign into list[num], num++. Main thread, inside the
- * editor session the hold was decided in. */
-static int eng_add_tag(void *c, void *editor, const char *tag)
+/* The search tag, appended to a saved-map model's tag list the way
+ * PublishStart appends map:dev to the edit's: grow the list when it is full,
+ * assign into list[num], num++. Main thread, inside the local save write. */
+static int eng_add_tag(void *c, void *model, const char *tag)
 {
     __declspec(align(16)) uint8_t text[ENG_IDSTR_SIZE];
     int built = 0, result = -1;
     (void)c;
-    if (!editor || !tag) return -1;
+    if (!model || !tag) return -1;
     __try {
-        uint8_t *edit = *(uint8_t **)((uint8_t *)editor + ENG_EDITOR_EDIT);
-        uint8_t *list = edit ? edit + ENG_EDIT_TAGS : NULL;
+        uint8_t *list = (uint8_t *)model + ENG_MODEL_TAGS;
         int num, size;
-        if (!list) return -1;
         num = *(int *)(list + 8);
         size = *(int *)(list + 0xC);
         if (num < 0 || size < num || num > ENG_TAGS_MAX || (num && !*(uint8_t **)list)) return -1;
@@ -1714,6 +1756,31 @@ static void eng_deleted_detour(void *screen, void *context, const void *local_st
     ((eng_deleted_fn)g_eng.original[ENG_DELETED])(screen, context, local_string, cloud_string);
 }
 
+/* PublishStart(editorLocal, overwrite): arm the search tag for the edit's
+ * local save, which the Save state writes about 60 frames later. */
+static void eng_publish_start_detour(void *editor, unsigned char overwrite)
+{
+    ((eng_publish_start_fn)g_eng.original[ENG_PUBLISH_START])(editor, overwrite);
+    if (!eng_live()) return;
+    __try {
+        uint8_t *edit = editor ? *(uint8_t **)((uint8_t *)editor + ENG_EDITOR_EDIT) : NULL;
+        char local[MP_ID_CAP];
+        if (!edit || !eng_string(edit + ENG_EDIT_LOCAL_ID, local, sizeof local)) local[0] = 0;
+        if (edit) sh_modpublish_publish_started(local);
+    } __except (EXCEPTION_EXECUTE_HANDLER) { backend_log("MODS: publish: the publish-start step faulted"); }
+}
+
+/* WriteLocalSavedMapText(localId, model, text): the local save writes the
+ * model as the slot's metadata, which the cloud save reads back. */
+static unsigned eng_write_local_detour(const char *local_id, void *model, const char *text)
+{
+    if (eng_live()) {
+        __try { (void)sh_modpublish_save_tag(local_id, model); }
+        __except (EXCEPTION_EXECUTE_HANDLER) { backend_log("MODS: publish: the search tag step faulted"); }
+    }
+    return ((eng_write_local_fn)g_eng.original[ENG_WRITE_LOCAL])(local_id, model, text);
+}
+
 /* The published model a MapInfo screen shows: what its copy entry reads. */
 static const void *eng_mapinfo_model(void *screen)
 {
@@ -1802,7 +1869,7 @@ static int eng_bind(const sig_result *results, size_t count, const uint8_t *base
     fail = eng_site(results, count, base, "PublishFail");
     ctor = eng_site(results, count, base, "IdStrCtor");
     dtor = eng_site(results, count, base, "IdStrDtor");
-    start = eng_site(results, count, base, "PublishStart");
+    start = g_eng.site[ENG_PUBLISH_START];
     query = eng_site(results, count, base, "PublishedPrevQuery");
     thread = glb_resolve(base, "main_thread_id", NULL);
     if (!fail || !ctor || !dtor || !start || !query || !thread) {
@@ -1871,7 +1938,8 @@ int sh_modpublish_install(const sig_result *results, size_t count, const uint8_t
 {
     void *detours[ENG_HOOKS] = { (void *)eng_after_save_detour, (void *)eng_feed_post_detour,
                                  (void *)eng_unpublished_detour, (void *)eng_mapinfo_copy_detour,
-                                 (void *)eng_browser_copy_detour, (void *)eng_deleted_detour };
+                                 (void *)eng_browser_copy_detour, (void *)eng_deleted_detour,
+                                 (void *)eng_publish_start_detour, (void *)eng_write_local_detour };
     if (InterlockedCompareExchange(&g_eng.ready, 0, 0)) return 1;
     if (!results || !module_base || !eng_bind(results, count, module_base)) {
         backend_log("MODS: publish hooks are not installed on this build; maps publish natively and their mods "

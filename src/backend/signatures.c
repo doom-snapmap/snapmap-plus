@@ -576,8 +576,13 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
 
 
     { "WriteLocalSavedMapText",
-      /* Same: no wildcards, unique at 20 bytes by both tools (target 0x576530). */
-      "40 55 56 57 41 54 41 55 41 56 41 57 48 8D AC 24 20 BE FF FF",
+      /* Same: no wildcards, unique at 20 bytes by both tools (target 0x576530).
+       * (localId, const idLocalSavedMapModel *, text): serializes the model as the
+       * slot's "metadata" and the text as map.decl. Hooked by modpublish.c, steal 20
+       * (the pushes and lea rbp; the __chkstk call after them stays in place), so
+       * the pattern carries the fixed bytes after the steal as well. */
+      "40 55 56 57 41 54 41 55 41 56 41 57 48 8D AC 24 20 BE FF FF B8 E0 42 00 00 E8 ?? ?? ?? ?? 48 2B E0 48 C7 45 50 "
+      "FE FF FF FF",
       0x11D2DC0u, 0x11D20F0u },
     { "EditorFrame",       /* idSnapEditorLocal's per-frame Think (0x523140). The FIRST execution point
                             * this product has on DOOM's own main thread at a frame boundary -- every
@@ -1385,7 +1390,7 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "48 8B D8 48 85 C0 74 3F 8B 97 00 03 00 00 48 8B C8 E8 ?? ?? ?? ?? 48 85 C0 74 13 48 8B 08 48 85 C9 74 0B 48 8B 01 BA "
       "03 00 00 00 FF 50 08"
       , 0x1092810u, 0x1091920u },
-    { "PublishStart", /* (editorLocal, overwrite): adds or removes the reserved map:dev / map:dlc1 tags on the edit's tag list (edit+0x998, idList<idStr>), arms PublishAfterSave. Not hooked: its list grow (+0xB3) and idStr assign (+0xD5) calls are bound to append the search tag. */
+    { "PublishStart", /* (editorLocal, overwrite): adds or removes the reserved map:dev / map:dlc1 tags on the edit's tag list (edit+0x998, idList<idStr>), arms PublishAfterSave. Hooked (steal 15) to arm the search tag for the local save that follows; its list grow (+0xB3) and idStr assign (+0xD5) calls are bound to append the tag. */
       "4C 8B DC 57 41 56 41 57 48 81 EC 90 00 00 00 48 C7 44 24 20 FE FF FF FF 49 89 5B 10 49 89 6B 18 49 89 73 20 48 8B 05 "
       "?? ?? ?? ??"
       , 0x119AD00u, 0x1199F60u },

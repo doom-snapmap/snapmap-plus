@@ -749,14 +749,20 @@ route shows the explanation as `PublishFail`'s editor toast instead, cancels
 that publish, and treats the next one as the agreement. One worker job then
 uploads every bundle (`modsync_upload_bundles`: missing blobs, the canonical
 manifests, one claim) under a provisional ref `publish-pending-<16 hex>`, and a
-main tick resumes the original `PublishAfterSave`. Just before the resume the
-search tag `mods` is added to the edit's tag list (`edit+0x998`,
-`idList<idStr>`) when absent, the way `PublishStart` adds `map:dev` and
-`SnapMapAddBranchTag` adds `map:branch` (the list grow and idStr assignment
-are bound from `PublishStart`'s own calls): `TryCloudSave` compares the edit's
-tags with the cloud save, so the tag is cloud-saved and copied to the
-published item, and players can see that the map needs Snapmap+. A tag that
-cannot be written is logged and the map publishes without it. A No, a failed upload, a
+main tick resumes the original `PublishAfterSave`. A publish whose save
+carries rows also carries the search tag `mods`, so players can see that the
+map needs Snapmap+. The tag has to be in the local save's metadata: the cloud
+save `TryCloudSave` starts reads the slot's metadata back from the profile
+(`ReadLocalSaveMeta`) rather than the editor's model, and the published item
+copies the cloud save's tags, so a tag added to the editor after the save is
+lost. `PublishStart` is therefore detoured to arm the tag for the edit's local
+id, and `WriteLocalSavedMapText` (the local save's metadata and `map.decl`
+write) to append `mods` to the model it writes, when it is that slot's save
+and the save observer saw rows, the way `PublishStart` appends `map:dev` (the
+list grow and idStr assignment are bound from its own calls). The save then
+copies that model back to the editor. A tag that cannot be written is logged
+and the map publishes without it; a held publish whose save was not tagged
+logs that too. A No, a failed upload, a
 question that cannot be shown or a busy worker cancels through `PublishFail`
 and a toast naming the cause; nothing reached the map service. The editor
 leaving abandons the hold; another save cancels it.

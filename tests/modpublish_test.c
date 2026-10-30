@@ -51,8 +51,8 @@ static struct {
     char asked[256], toast[256];
     int toast_route;
     /* the search tag: calls, the tag asked for, what the fake returns, and
-     * whether the tag was on the list at the resume */
-    int tag_calls, tag_result, tagged_at_resume, tags_present;
+     * whether the fake model already has it */
+    int tag_calls, tag_result, tags_present;
     char tag[32];
     /* the published edit's saved-map ids, and the published-items queries */
     char cloud[64], local[64];
@@ -82,12 +82,15 @@ static void f_resume(void *c, void *editor)
     (void)c;
     if (editor != EDITOR) return;
     F.resumes++;
-    F.tagged_at_resume = F.tags_present;
 }
-static int f_add_tag(void *c, void *editor, const char *tag)
+/* The saved-map model the local save writes (a fake address). */
+static void *const MODEL = (void *)(uintptr_t)0x2000;
+#define LOCAL_ID "LOCAL0001"
+
+static int f_add_tag(void *c, void *model, const char *tag)
 {
     (void)c;
-    if (editor != EDITOR) return -1;
+    if (model != MODEL) return -1;
     F.tag_calls++;
     strcpy_s(F.tag, sizeof F.tag, tag);
     if (F.tag_result > 0 && F.tags_present) return 0;   /* already on the list */
@@ -189,6 +192,15 @@ static char *map_with(const char *const *hashes, const char *const *ids, int n, 
     if (!text) fprintf(stderr, "map_with: %s\n", err);
     sh_modmanifest_list_free(&rows);
     return text;
+}
+
+/* A publish's local save as the engine runs it: PublishStart, the save text
+ * through the observer, then the metadata write of the same slot. */
+static void publish_save(const char *text, size_t len)
+{
+    sh_modpublish_publish_started(LOCAL_ID);
+    sh_modpublish_save_seen(text, len);
+    (void)sh_modpublish_save_tag(LOCAL_ID, MODEL);
 }
 
 static int setting_confirmed(void)
@@ -331,8 +343,13 @@ int main(int argc, char **argv)
     printf("-- first time: Yes sets the setting, uploads and resumes\n");
     {
         stub_claim *c;
-        sh_modpublish_save_seen(text, len);
+        size_t mark = g_log_n;
+        publish_save(text, len);
+        /* The search tag is written into the saved metadata, before the hold. */
+        CHECK(F.tag_calls == 1 && !strcmp(F.tag, SH_MODPUBLISH_TAG) && F.tags_present);
+        CHECK(strstr(g_log + mark, "search tag 'mods' written into the saved map's tags") != NULL);
         CHECK(sh_modpublish_after_save(EDITOR) == 0);
+        CHECK(strstr(g_log + mark, "was not written with this save") == NULL);
         F.answer = 0;
         sh_modpublish_poll();
         F.answer = 1;   /* accepted */
@@ -342,9 +359,7 @@ int main(int argc, char **argv)
         PUMP_UNTIL(!sh_modpublish_holding());
         CHECK(setting_confirmed() == 1);
         CHECK(F.resumes == 1 && F.fails == 2);
-        /* The search tag goes on before the original runs. */
-        CHECK(F.tag_calls == 1 && !strcmp(F.tag, SH_MODPUBLISH_TAG) && F.tagged_at_resume == 1);
-        CHECK(strstr(g_log, "search tag 'mods' added") != NULL);
+        CHECK(F.tag_calls == 1);   /* nothing more at the resume */
         CHECK(stub_has_bundle(hA) && stub_has_bundle(hB));
         c = stub_live_claim(provisional);
         CHECK(c && c->nb == 2);
@@ -380,12 +395,16 @@ int main(int argc, char **argv)
         strcpy_s(before, sizeof before, stub_live_claim("aaaaaaaaaaaaaaaaaaaaaaa1")->id);
         only_a = map_with(one_h, one_id, 1, &a_len);
         CHECK(only_a != NULL);
-        sh_modpublish_save_seen(only_a, a_len);
-        CHECK(sh_modpublish_after_save(EDITOR) == 0);
+        {
+            size_t mark = g_log_n;
+            publish_save(only_a, a_len);
+            CHECK(sh_modpublish_after_save(EDITOR) == 0);
+            CHECK(F.tag_calls == 2);   /* asked again; present already, the fake answered 0 */
+            CHECK(strstr(g_log + mark, "was not written with this save") == NULL);
+        }
         CHECK(sh_modpublish_test_state() == 4);   /* agreed already: straight to the worker */
         PUMP_UNTIL(!sh_modpublish_holding());
         CHECK(F.resumes == 2 && F.asks == asks);
-        CHECK(F.tag_calls == 2 && F.tagged_at_resume == 1);   /* present already: the fake answered 0 */
         sh_modpublish_feed_post((void *)(uintptr_t)F.token, "aaaaaaaaaaaaaaaaaaaaaaa1", "rev2");
         PUMP_UNTIL(idle_all());
         c = stub_live_claim("aaaaaaaaaaaaaaaaaaaaaaa1");
@@ -397,7 +416,7 @@ int main(int argc, char **argv)
 
     printf("-- a republish without mods releases the item's claim\n");
     {
-        sh_modpublish_save_seen(EMPTY_MAP, strlen(EMPTY_MAP));
+        publish_save(EMPTY_MAP, strlen(EMPTY_MAP));
         CHECK(sh_modpublish_after_save(EDITOR) == 1);
         sh_modpublish_feed_post((void *)(uintptr_t)F.token, "aaaaaaaaaaaaaaaaaaaaaaa1", "rev3");
         PUMP_UNTIL(idle_all());
@@ -534,16 +553,51 @@ int main(int argc, char **argv)
         CHECK(!file_contains(path, "hhhhhhhhhhhhhhhhhhhhhhh8"));
     }
 
+    printf("-- the search tag goes only into the armed publish's own save\n");
+    {
+        int calls = F.tag_calls;
+        size_t mark;
+        F.tags_present = 0;
+        /* A plain save: never armed. */
+        sh_modpublish_save_seen(text, len);
+        CHECK(sh_modpublish_save_tag(LOCAL_ID, MODEL) == 0 && F.tag_calls == calls);
+        /* Another slot's write does not take the arm; the publish's own does. */
+        sh_modpublish_publish_started(LOCAL_ID);
+        sh_modpublish_save_seen(text, len);
+        CHECK(sh_modpublish_save_tag("OTHER0002", MODEL) == 0 && F.tag_calls == calls);
+        CHECK(sh_modpublish_save_tag(LOCAL_ID, MODEL) == 1 && F.tag_calls == calls + 1);
+        CHECK(sh_modpublish_save_tag(LOCAL_ID, MODEL) == 0 && F.tag_calls == calls + 1);   /* one shot */
+        /* A map without a local id yet: the next write is taken. */
+        F.tags_present = 0;
+        sh_modpublish_publish_started("");
+        sh_modpublish_save_seen(text, len);
+        CHECK(sh_modpublish_save_tag("NEW0003", MODEL) == 1 && F.tag_calls == calls + 2);
+        /* An arm older than the save window is dropped. */
+        F.tags_present = 0;
+        sh_modpublish_publish_started(LOCAL_ID);
+        sh_modpublish_test_age_tag_arm(20000);
+        sh_modpublish_save_seen(text, len);
+        CHECK(sh_modpublish_save_tag(LOCAL_ID, MODEL) == 0 && F.tag_calls == calls + 2);
+        /* A publish whose save was not tagged says so at the hold. */
+        mark = g_log_n;
+        sh_modpublish_save_seen(text, len);
+        CHECK(sh_modpublish_after_save(EDITOR) == 0);
+        CHECK(strstr(g_log + mark, "'mods' was not written with this save; the published map will not carry it") != NULL);
+        PUMP_UNTIL(!sh_modpublish_holding());
+        sh_modpublish_feed_post((void *)(uintptr_t)F.token, "jjjjjjjjjjjjjjjjjjjjjj11", "rev1");
+        PUMP_UNTIL(idle_all());
+    }
+
     printf("-- a search tag that cannot be written does not stop the publish\n");
     {
         int resumes = F.resumes;
         F.tag_result = -1;
         F.tags_present = 0;
-        sh_modpublish_save_seen(text, len);
+        publish_save(text, len);
         CHECK(sh_modpublish_after_save(EDITOR) == 0);
         PUMP_UNTIL(!sh_modpublish_holding());
-        CHECK(F.resumes == resumes + 1 && F.tagged_at_resume == 0);
-        CHECK(strstr(g_log, "could not be added; the map publishes without it") != NULL);
+        CHECK(F.resumes == resumes + 1);
+        CHECK(strstr(g_log, "could not be written; the map publishes without it") != NULL);
         sh_modpublish_feed_post((void *)(uintptr_t)F.token, "iiiiiiiiiiiiiiiiiiiiii10", "rev1");
         PUMP_UNTIL(idle_all());
         F.tag_result = 1;

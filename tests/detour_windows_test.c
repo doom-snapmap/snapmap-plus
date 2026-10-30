@@ -95,6 +95,8 @@ static const site SITES[] = {
     { "modpublish.c",         "PublishFeedPost",            SITE_SIG, 0, 15, REPLAYS, 0 },
     { "modpublish.c",         "MapInfoUnpublishDone",       SITE_SIG, 0, 14, REPLAYS, 0 },
     { "modpublish.c",         "MapInfoDeleteDone",          SITE_SIG, 0, 14, REPLAYS, 0 },
+    { "modpublish.c",         "PublishStart",               SITE_SIG, 0, 15, REPLAYS, 0 },
+    { "modpublish.c",         "WriteLocalSavedMapText",     SITE_SIG, 0, 20, REPLAYS, 0 },
     { "modpublish.c",         "MapInfoCopyToMyMaps",        SITE_SIG, 0, 19, REPLAYS, 0 },
     { "modpublish.c",         "BrowserCopyToMyMaps",        SITE_SIG, 0, 16, REPLAYS, 0 },
     { "wiring_cleandirect.c", "ConnectOutputCreator",       SITE_SIG, 0, 15, REPLAYS, 0 },

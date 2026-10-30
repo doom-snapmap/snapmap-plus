@@ -77,7 +77,9 @@ Checks native helpers, engine-interface contracts, frontend JavaScript and optio
   upload cancelling, the editor leaving and another save, the claim at the
   feed post with and without a stored secret, a republish replacing the set,
   release on a republish without mods and on unpublish, the `mods` search tag
-  added before the resume (and a tag that cannot be written not stopping the
+  written into the armed publish's own local save only (not a plain save,
+  another slot, a second write or an expired arm; a held publish whose save
+  was not tagged logs it; a tag that cannot be written does not stop the
   publish), the delete check (no link, no cloud-saved id, still published, a
   failed, late or unstarted answer all keep the claim; an item missing from
   the answer is released and its link forgotten), the copy gate on both sides

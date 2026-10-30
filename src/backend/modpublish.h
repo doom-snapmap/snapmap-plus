@@ -28,11 +28,15 @@
  *   launch        leftover provisional claims (a publish that never reached
  *                 the feed post) are released, then queued uploads retried.
  *
- *   search tag    a resumed publish adds the search tag "mods" to the map's
- *                 tags (the edit's tag list, which the cloud save and the
- *                 published item copy) when it is absent: a player without
- *                 Snapmap+ cannot play a map that needs mods, and the tag
- *                 lets the browser filter it.
+ *   search tag    a publish whose save carries rows writes the search tag
+ *                 "mods" into the saved map's metadata when it is absent: a
+ *                 player without Snapmap+ cannot play a map that needs mods.
+ *                 The cloud save re-reads the local save's metadata from the
+ *                 profile (ReadLocalSaveMeta) instead of the editor's model,
+ *                 so the tag has to be in the model WriteLocalSavedMapText
+ *                 writes: PublishStart arms it for the edit's local id, and
+ *                 the next write of that local save, once the save observer
+ *                 has seen its rows, gets the tag.
  *   delete from My Maps   removes the local slot and the cloud-saved item
  *                 only; a published item stays playable for everyone. The
  *                 delete completion therefore releases a claim only when its
@@ -81,6 +85,17 @@ extern "C" {
 void sh_modpublish_save_seen(const char *text, size_t length);
 
 /* ------------------------------------------------------------ decisions */
+
+/* PublishStart(editorLocal): a publish begins; its local save follows. Arms
+ * the search tag for this local id ("" when the map has none yet: the next
+ * write is taken). Main thread. */
+void sh_modpublish_publish_started(const char *local_id);
+
+/* WriteLocalSavedMapText(localId, model, text), before the original: when it
+ * is the armed publish's save and the save carried rows, ops.add_tag writes
+ * the search tag into `model` (an idLocalSavedMapModel). Disarms. Returns the
+ * add_tag result, or 0 when nothing was asked. */
+int  sh_modpublish_save_tag(const char *local_id, void *model);
 
 /* PublishAfterSave(editorLocal): 1 to call the original now, 0 when the
  * publish was held or refused (the detour returns without the original). */
@@ -157,9 +172,10 @@ typedef struct sh_modpublish_ops {
      * Yes/No dialog. */
     int  (*upload_question)(void *c, void *editor, size_t count, unsigned long long bytes);
     void (*log)(void *c, const char *line);
-    /* Add `tag` to the editor's map tags when absent: 1 added, 0 present,
-     * -1 failed. Called right before the resume. NULL: no tag. */
-    int  (*add_tag)(void *c, void *editor, const char *tag);
+    /* Add `tag` to a saved-map model's tags (idLocalSavedMapModel, tags at
+     * +0x1A0) when absent: 1 added, 0 present, -1 failed. Called from the
+     * local save write of an armed publish. NULL: no tag. */
+    int  (*add_tag)(void *c, void *model, const char *tag);
     /* The published edit's cloud-saved item id and local id at the feed post
      * (either may come back ""). 0 when neither could be read. */
     int  (*edit_ids)(void *c, void *edit, char *cloud, size_t cloud_cap, char *local, size_t local_cap);
@@ -181,14 +197,16 @@ void sh_modpublish_test_set_cache_root(const char *root);
 int  sh_modpublish_test_delete_checks(void);      /* delete checks waiting for an answer */
 void sh_modpublish_test_age_delete_checks(unsigned long long ms);   /* make them older */
 void sh_modpublish_test_set_link_min_age(long long seconds);        /* default 3600 */
+void sh_modpublish_test_age_tag_arm(unsigned long long ms);         /* make the armed tag older */
 #endif
 
 /* ------------------------------------------------------------ engine */
 #ifndef SH_MODPUBLISH_PURE
 #include "signatures.h"
-/* Bind PublishAfterSave, PublishFail, PublishFeedPost, the unpublish and
- * delete completions and the two copy entries (all or none), the tag-list
- * helpers PublishStart uses and the published-items query, register the save
+/* Bind PublishAfterSave, PublishFail, PublishFeedPost, PublishStart,
+ * WriteLocalSavedMapText, the unpublish and delete completions and the two
+ * copy entries (all or none), the tag-list helpers PublishStart uses and the
+ * published-items query, register the save
  * observer, and run the launch step. Install after the engine dialog.
  * Returns 1 when the hooks are armed. */
 int sh_modpublish_install(const sig_result *results, size_t count, const uint8_t *module_base);
