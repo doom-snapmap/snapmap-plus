@@ -441,6 +441,8 @@ These backend files share the work:
   drops it, as in [Published maps and missing mods](#published-maps-and-missing-mods).
 - `modmigrate.c` moves the retired `overrides\` tree into the store once, as in
   [Migration of the retired overrides folder](#migration-of-the-retired-overrides-folder).
+- `modsound.c` delivers the Wwise sound banks bundles carry, as in
+  [Mod sounds](#mod-sounds).
 - `modvt.c` registers each private virtual-texture family a bundle carries
   (`virtualtextures/mods/<id>/<family>_sq<N>.mega2`, the builder's only form of
   `.mega2`) as one page-source record, as in
@@ -523,6 +525,44 @@ admits `.bswf` only under `generated/swf/`, names it as the consumer does
 shadow, a new one lives under `generated/swf/mods/<id>/` with its atlas
 `generated/swf/mods/<id>/<stem>.bimage` beside it. Each served movie logs
 `MODS: swf: served <request> (<bundle>) at load state N` (the first 32).
+
+### Mod sounds
+
+A sound decl a mod carries (`generated/decls/sound/mods/<id>/<stem>.decl`)
+names the Wwise event `play_<stem>`: the engine computes the event id from the
+decl's own name, so a decl whose stem is a stock event's (an alias) plays that
+stock sound with no bank, and one whose event lives in the mod's own bank
+plays once that bank is loaded. The builder makes a `soundShader` or `sound`
+key naming `mods/...` a need of type `sound`; a stock event name is not a need.
+A bank is admitted only as `sound/soundbanks/pc/<stem>.bnk` (Wwise opens banks
+by file name in that one folder), with the stem `<id>_<rest>` (the id's `.` and
+`-` as `_`), letters, digits and `_` only, and without `_sp`, `_snapmaps` or
+`initial`, which the engine's listed-bank filter skips in some game mode; its
+BKHD chunk must be version 113 and carry the id the game loads it as, FNV-1 of
+the lower-cased stem, so a renamed bank is refused rather than loading under
+the wrong id. A bank is always carried: never a stock pointer, never a shadow.
+A converted first-generation package keeps its banks as plain files.
+
+Wwise reads banks with its own `CreateFileW`, not through the provider, and
+the engine lists the bank folder only inside LoadBanks, so `modsound.c`
+delivers them itself, with two vtable-slot swaps and no code patch: the
+resolver's open by name (`AudioFileOpenName`, held in two read-only vtables)
+answers a served bank's file name by opening the bundle's file and filling the
+`AkFileDesc` as the engine's default hook does, and every served bank is
+submitted to the engine's own per-bank wrapper (`AudioBankSubmit`, the
+filter and the async LoadBank) on the main thread inside process heap 0, at
+the first editor entry or map load once Wwise is up (the hardware object is
+`soundSystem+0x140`, decoded from the `s_loadBanks` function), and at once
+when `sh_mods install` rebuilds the index. The engine prints its own result,
+`async load success id <id> : <name>` with the id as a signed number. The
+LoadBanks slot (`AudioLoadBanks`, hardware vtable `+0x30`) resubmits every
+bank after `s_loadBanks` and `s_restart`. A mod installed mid-session plays at
+its next map; a bank whose bytes change keeps the loaded copy (Wwise keeps the
+first bytes for a bank id) until the game restarts, and a removed bank stays
+loaded until then. `sh_mods status` lists each bank and whether it was
+submitted. The events file (`soundbanksinfo.events`) is not extended: a mod
+event needs no record to play (it only feeds the by-id lookup; without one
+the event is never distance-virtualized).
 
 ### Mod virtual-texture families
 

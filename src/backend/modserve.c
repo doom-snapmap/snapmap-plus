@@ -98,7 +98,8 @@ static SRWLOCK g_build_lock = SRWLOCK_INIT;
 static char g_last_root[MAX_PATH];
 static volatile LONG g_opens_served, g_open_failures, g_probe_claims, g_cache_hits;
 volatile LONG g_modserve_editor_ok, g_modserve_editor_failed;   /* written by modserve_engine.c */
-static sh_modserve_index_fn volatile g_index_listener;   /* modvt.c */
+#define MS_LISTENERS 4
+static sh_modserve_index_fn volatile g_index_listener[MS_LISTENERS];   /* modvt.c, modsound.c */
 
 /* ------------------------------------------------------------------ logging */
 
@@ -1685,11 +1686,17 @@ int sh_modserve_index_build(const char *mods_root)
     ms_log("index built in %.1f ms (%d bundles, %d files)%s%s", x->build_ms, x->admitted, x->served_files,
            x->nbundles > x->admitted ? "; skipped bundles are listed above" : "",
            x->conflicts ? "; conflicts are listed above" : "");
-    if (g_index_listener) g_index_listener();
+    { int i; for (i = 0; i < MS_LISTENERS; i++) if (g_index_listener[i]) g_index_listener[i](); }
     return x->admitted;
 }
 
-void sh_modserve_set_index_listener(sh_modserve_index_fn fn) { g_index_listener = fn; }
+void sh_modserve_set_index_listener(sh_modserve_index_fn fn)
+{
+    int i;
+    if (!fn) { for (i = 0; i < MS_LISTENERS; i++) g_index_listener[i] = NULL; return; }
+    for (i = 0; i < MS_LISTENERS; i++) if (g_index_listener[i] == fn) return;
+    for (i = 0; i < MS_LISTENERS; i++) if (!g_index_listener[i]) { g_index_listener[i] = fn; return; }
+}
 
 int sh_modserve_index_boot(void)
 {

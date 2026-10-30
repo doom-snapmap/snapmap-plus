@@ -164,6 +164,21 @@ Checks native helpers, engine-interface contracts, frontend JavaScript and optio
   `FileResourceLoad` decodes to the recorded engine calls, its open-into helper
   calls `+0x148`, and one read-only qword (the idFileResource vtable `+0x40`)
   holds it.
+- `modsound_test.c` checks mod sound banks (`modsound.c`) and the builder's
+  bank and sound rules: the served request to Wwise file name rule, the
+  `s_loadBanks` decode, the bank table (stock pointers, duplicates and the cap
+  refused), the open-by-name replacement against a real temporary file (the
+  `AkFileDesc` the engine's default hook fills, another name, a write open or
+  a changed size going to the original), the submit pass (nothing before
+  Wwise is up, once per sound-system lifetime, again after LoadBanks, a new
+  bank after a rebuilt table), and the builder (FNV-1 bank ids, the stem,
+  folder and filter rules, the BKHD version and id, no bank shadows, a
+  `mods/` `soundShader` as a `sound` need and a stock one as none). With the
+  executables, the four signatures resolve at their recorded RVAs, the
+  console function decodes to `soundSystem` and its `+0x140`, and exactly
+  two read-only slots hold the open by name and one the LoadBanks.
+  `SH_MODSOUND_FIXTURE` names a source mod folder (snaphak-re's `p6probe`)
+  to build and print.
 - `modvt_test.c` checks mod virtual-texture families: the builder's member
   rule (`virtualtextures/mods/<id>/<family>_sq<N>.mega2`, N 1 to 16, no
   `_vmtr`, the mod's own id), the families the real serving index yields (two

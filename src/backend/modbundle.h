@@ -37,6 +37,7 @@
 #define SNAPMAP_PLUS_MODBUNDLE_H
 
 #include <stddef.h>
+#include <stdint.h>
 
 #define SH_MB_FORMAT          1
 #define SH_MB_ID_MAX          64u
@@ -232,6 +233,25 @@ int  sh_mb_extension_allowed(const char *request);
  * landpagefile) and N; else 0. The only form in which a .mega2 is admitted.
  * A member can never be a shadow: no stock family lives under mods/. */
 int  sh_mb_vt_member(const char *request, char *family, size_t family_cap, int *member);
+
+/* Sound banks. Wwise opens a bank by file name under one folder, and the bank
+ * id is FNV-1 of the lower-cased stem, so a mod bank is admitted only as
+ * sound/soundbanks/pc/<stem>.bnk with stem = "<id, '.' and '-' as '_'>_<rest>"
+ * of [a-z0-9_], without "_sp", "_snapmaps" or "initial" (the engine's
+ * listed-bank filter skips those in some game mode), carried (never a stock
+ * pointer or a shadow), whose BKHD chunk is version 113 and carries id
+ * FNV-1(stem). Its logical name is type "soundBank", the request path. */
+#define SH_MB_BANK_STEM_MAX  64u
+#define SH_MB_BANK_VERSION   0x71u
+/* 32-bit FNV-1 (multiply, then xor) of the ASCII-lower-cased first n bytes:
+ * Wwise's GetIDFromString. */
+uint32_t sh_mb_fnv1_lower(const char *s, size_t n);
+/* 1 and the stem when request is sound/soundbanks/pc/<stem>.bnk (one level). */
+int  sh_mb_bank_stem(const char *request, char *stem, size_t cap);
+/* The stem rules above for mod `id`; 0 with the cause. */
+int  sh_mb_bank_rule(const char *request, const char *id, char *cause, size_t cap);
+/* The header rule above on the bank's first bytes; 0 with the cause. */
+int  sh_mb_bank_header_ok(const unsigned char *bytes, size_t len, const char *stem, char *cause, size_t cap);
 
 /* Logical name of a request path (Contract 1 table). Returns 1 and fills type
  * and name; 0 when the path is under generated/decls/ but names no known decl

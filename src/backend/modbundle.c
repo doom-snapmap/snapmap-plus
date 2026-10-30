@@ -964,6 +964,91 @@ static int mb_copy_out(char *dst, size_t cap, const char *src, size_t n)
     return 1;
 }
 
+/* ----------------------------------------------------- sound banks ---- */
+
+uint32_t sh_mb_fnv1_lower(const char *s, size_t n)
+{
+    uint32_t h = 2166136261u;
+    size_t i;
+    for (i = 0; i < n && s[i]; i++) {
+        unsigned char c = (unsigned char)s[i];
+        if (c >= 'A' && c <= 'Z') c = (unsigned char)(c - 'A' + 'a');
+        h = h * 16777619u;
+        h ^= c;
+    }
+    return h;
+}
+
+int sh_mb_bank_stem(const char *request, char *stem, size_t cap)
+{
+    static const char dir[] = "sound/soundbanks/pc/";
+    const char *leaf;
+    size_t n;
+    if (!request || _strnicmp(request, dir, sizeof dir - 1) != 0) return 0;
+    leaf = request + sizeof dir - 1;
+    n = strlen(leaf);
+    if (n <= 4 || _stricmp(leaf + n - 4, ".bnk") != 0 || strchr(leaf, '/') || strchr(leaf, 0x5C)) return 0;
+    if (stem) {
+        if (n - 4 + 1 > cap) return 0;
+        memcpy(stem, leaf, n - 4);
+        stem[n - 4] = 0;
+    }
+    return 1;
+}
+
+int sh_mb_bank_rule(const char *request, const char *id, char *cause, size_t cap)
+{
+    char stem[SH_MB_BANK_STEM_MAX + 1], prefix[SH_MB_ID_MAX + 2], low[SH_MB_BANK_STEM_MAX + 1];
+    size_t i, n, pn;
+    if (!sh_mb_bank_stem(request, stem, sizeof stem))
+        return mb_cause(cause, cap, "%s: a sound bank must be sound/soundbanks/pc/<stem>.bnk with a stem of at most %u "
+                        "characters (Wwise opens banks by file name in that one folder)", request ? request : "",
+                        (unsigned)SH_MB_BANK_STEM_MAX);
+    for (i = 0; id[i] && i < SH_MB_ID_MAX; i++) prefix[i] = (id[i] == '.' || id[i] == '-') ? '_' : id[i];
+    prefix[i] = '_';
+    prefix[i + 1] = 0;
+    pn = i + 1;
+    n = strlen(stem);
+    for (i = 0; i < n; i++) {
+        char c = stem[i];
+        if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+        if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_'))
+            return mb_cause(cause, cap, "%s: a sound bank stem may hold only letters, digits and '_'", request);
+        low[i] = c;
+    }
+    low[n] = 0;
+    if (n <= pn || strncmp(low, prefix, pn) != 0)
+        return mb_cause(cause, cap, "%s: a sound bank stem must start with '%s' (the mod id with '.' and '-' as '_') and "
+                        "name something after it", request, prefix);
+    /* The engine's listed-bank filter skips these in some game mode (doom_*_sp
+     * in SnapMap, *_snapmaps outside it, *initial* and Init always), and the
+     * product submits banks through that filter. */
+    if (strstr(low, "_sp") || strstr(low, "_snapmaps") || strstr(low, "initial") || !strcmp(low, "init"))
+        return mb_cause(cause, cap, "%s: a sound bank stem must not contain '_sp', '_snapmaps' or 'initial' (the "
+                        "engine skips such banks)", request);
+    return 1;
+}
+
+int sh_mb_bank_header_ok(const unsigned char *bytes, size_t len, const char *stem, char *cause, size_t cap)
+{
+    uint32_t size, version, id, want;
+    if (!bytes || len < 16 || memcmp(bytes, "BKHD", 4) != 0)
+        return mb_cause(cause, cap, "%s.bnk does not start with a Wwise BKHD chunk", stem);
+    memcpy(&size, bytes + 4, 4);
+    memcpy(&version, bytes + 8, 4);
+    memcpy(&id, bytes + 12, 4);
+    if (size < 8 || (size_t)size + 8 > len)
+        return mb_cause(cause, cap, "%s.bnk has a truncated BKHD chunk", stem);
+    if (version != SH_MB_BANK_VERSION)
+        return mb_cause(cause, cap, "%s.bnk is Wwise bank version %u; this game reads only version %u", stem,
+                        (unsigned)version, (unsigned)SH_MB_BANK_VERSION);
+    want = sh_mb_fnv1_lower(stem, strlen(stem));
+    if (id != want)
+        return mb_cause(cause, cap, "%s.bnk carries bank id %u, but the game loads it by name as id %u (FNV-1 of the "
+                        "stem); rebuild it under this name", stem, (unsigned)id, (unsigned)want);
+    return 1;
+}
+
 /* Contract 1 logical-name table, on a lower-cased request path. */
 int sh_mb_logical_name(const char *r, char *type, size_t tcap, char *name, size_t ncap)
 {
@@ -1009,7 +1094,8 @@ int sh_mb_logical_name(const char *r, char *type, size_t tcap, char *name, size_
         memcpy(name, r + 10, s); memcpy(name + s, ".swf", 5);
         return 1;
     }
-    if (mb_ends(r, ".bmodel")) cls = "model";
+    if (sh_mb_bank_stem(r, NULL, 0)) cls = "soundBank";
+    else if (mb_ends(r, ".bmodel")) cls = "model";
     else if (mb_ends(r, ".bcm")) cls = "cm";
     else if (strstr(r, ".baas_") && !strchr(strstr(r, ".baas_"), '/')) cls = "aas";
     else if (mb_starts(r, "generated/renderprogs/") || mb_starts(r, "generated/spirv/") ||
@@ -1122,7 +1208,8 @@ int sh_mb_need_requests(const char *type, const char *name, char out[][SH_MB_REQ
  *   *program           material (quoted or bare word) -> renderProg
  *   *map, *mask, editorimage, qer_editorimage  material -> image
  * Values that are empty or start with '_' (engine-internal names) are skipped.
- * Not scanned: animWebDecl, fxDecl, sounds and sound events, aiVoiceOver,
+ *   soundShader, sound any decl, only a "mods/..." name -> sound
+ * Not scanned: animWebDecl, fxDecl, stock sounds and sound events, aiVoiceOver,
  * damage and projectile decls, inventory items, particles, skins, ".break"
  * models, table references inside material expressions, md6Def meshKits, and
  * every other reference key. */
@@ -1225,6 +1312,12 @@ static void mb_scan_value(mb_scan *sc, const mb_tok *key, const mb_tok *val)
         return;
     }
     if (mb_ieq_n(k, kn, "md6Def")) { sc->fn(sc->ctx, "md6Def", v, vn); return; }
+    /* A sound decl a mod provides: stock names are Wwise events registered
+     * from the events file, not files, so only a mods/ name is a need. */
+    if ((mb_ieq_n(k, kn, "soundShader") || mb_ieq_n(k, kn, "sound")) && vn > 5 && mb_ieq_n(v, 5, "mods/")) {
+        sc->fn(sc->ctx, "sound", v, vn);
+        return;
+    }
     /* renderModelInfo customMaterial names the material the decl's model is
      * drawn with, so the plan registers it before the entityDef that names it. */
     if (mb_ieq_n(k, kn, "customMaterial")) { sc->fn(sc->ctx, "material", v, vn); return; }
@@ -2133,6 +2226,18 @@ static void mb_check_files(sh_mb_bundle *b, const wchar_t *root, const sh_mb_res
                 qsort(f->needs, f->need_count, sizeof(sh_mb_need), mb_need_cmp);
             }
             free(text);
+        } else if (mb_ends(f->request, ".bnk") && !b->legacy) {
+            /* A bank is read whole: its header must name the id the game will
+             * load it as. */
+            size_t len = 0;
+            unsigned char *bytes = mb_read_wfile(full, SH_MB_MAX_FILE, &len);
+            char stem[SH_MB_BANK_STEM_MAX + 1], cause[SH_MB_CAUSE_MAX];
+            if (!bytes) { mb_error(b, "cannot read %s", f->path); free(full); continue; }
+            sh_mb_sha256_hex(bytes, len, f->blob);
+            got = len;
+            if (sh_mb_bank_stem(f->request, stem, sizeof stem) && !sh_mb_bank_header_ok(bytes, len, stem, cause, sizeof cause))
+                mb_error(b, "%s: %s", f->path, cause);
+            free(bytes);
         } else if (!mb_hash_wfile(full, &got, f->blob)) {
             mb_error(b, "cannot read %s", f->path);
             free(full);
@@ -2175,6 +2280,9 @@ names:
         /* Namespace: new names live under the mod's own id. A skins decl is
          * named by the mesh path it skins, so it passes the way a raw file
          * does: the name contains /mods/<id>/ or the engine's '_' spelling. */
+        if (f->shadowed && mb_ends(f->request, ".bnk") && !b->legacy)
+            mb_error(b, "%s: a stock sound bank cannot be replaced (the game loads every stock bank before mods are read)",
+                     f->path);
         if (!f->shadowed) {
             if (f->is_decl && _stricmp(f->ptype, "skins") == 0) {
                 char slashed[SH_MB_REQUEST_MAX + 18];
@@ -2187,6 +2295,12 @@ names:
                 if (!mb_starts(f->pname, ns_decl))
                     mb_error(b, "%s: decl %s %s is outside mods/%s/ and is not listed in shadows",
                              f->path, f->ptype, f->pname, b->id);
+            } else if (mb_ends(f->request, ".bnk") && !b->legacy) {
+                /* A converted first-generation package keeps the raw-file rule
+                 * below: its banks are carried, never delivered to Wwise. */
+                char cause[SH_MB_CAUSE_MAX];
+                if (f->stock) mb_error(b, "%s: a sound bank is carried, never a pointer to installed content", f->path);
+                else if (!sh_mb_bank_rule(f->request, b->id, cause, sizeof cause)) mb_error(b, "%s", cause);
             } else {
                 char slashed[SH_MB_REQUEST_MAX + 2];
                 _snprintf_s(slashed, sizeof slashed, _TRUNCATE, "/%s", f->request);

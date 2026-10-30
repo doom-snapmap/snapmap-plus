@@ -28,6 +28,7 @@
 #include "timeline_tile.h"
 #include "modserve.h"
 #include "modswf.h"
+#include "modsound.h"
 #include "modhud.h"
 #include "modmigrate.h"
 #include "modstock.h"
@@ -379,6 +380,9 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
         if (overrides_installed) (void)sh_modvt_install(results, db, g_doom_base);
         /* Cooked movies (FileResource Load slot) and bundle ammo displays (modswf.h, modhud.h). */
         if (overrides_installed) (void)sh_modswf_install(results, db, g_doom_base);
+        /* Mod sound banks: Wwise open-by-name and LoadBanks slots, the engine's per-bank
+         * submit at the first main-thread pass (modsound.h). */
+        if (overrides_installed) (void)sh_modsound_install(results, db, g_doom_base);
         (void)sh_modhud_install(results, db);
 
         /* Register cvars before commands. Commands additionally need cmdSystem;
