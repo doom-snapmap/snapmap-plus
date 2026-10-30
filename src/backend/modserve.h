@@ -155,6 +155,39 @@ typedef struct sh_modserve_engine_ops {
 int sh_modserve_plan_run(sh_modserve_plan *plan, const sh_modserve_engine_ops *ops,
                          const char *phase);
 
+/* Editor rows at map load (lane M6). The palette is built once per process,
+ * at editor init, and the map validator (RepairAndMigrate) looks every placed
+ * entity up in it; a bundle converted or named mid-session can bring
+ * snapEditorEntityDef rows that build never saw. `palette_ready` answers 1
+ * when the editor palette exists, `in_palette` 1 when a row for that sedef
+ * name is in it, and `rebuild` runs the heap-scoped palette rebuild (whose
+ * editor pass registers pending rows first) and returns 1 when the builder
+ * ran, else the refusal code. */
+typedef struct sh_modserve_palette_ops {
+    void *context;
+    int (*palette_ready)(void *context);
+    int (*in_palette)(void *context, const char *sedef_name);
+    int (*rebuild)(void *context, int *rows_before, int *rows_after);
+} sh_modserve_palette_ops;
+
+typedef struct sh_modserve_rows_sync {
+    int rows;          /* editor rows the named bundles provide */
+    int missing;       /* of them, absent from the palette and never registered */
+    int rebuild;       /* 0 not requested, else what ops->rebuild returned */
+    int registered;    /* missing rows registered by the rebuild's editor pass */
+    int admitted;      /* missing rows in the palette after the rebuild */
+    int rows_before, rows_after;   /* palette row counts around the rebuild (-1 unknown) */
+} sh_modserve_rows_sync;
+
+/* For exactly the named bundles (64-hex hashes): when the palette exists and
+ * lacks at least one of their rows that no editor pass has visited, request
+ * one rebuild. Nothing is asked of ops for n <= 0 or bundles without rows,
+ * and nothing past palette_ready when no palette exists yet (the first
+ * editor entry's build registers every row). Returns 1 when the rebuild was
+ * requested, 0 when not, -1 on unusable ops or no memory. */
+int sh_modserve_map_rows_sync(const char *const *bundle_hashes, int n, const sh_modserve_palette_ops *ops,
+                              sh_modserve_rows_sync *out);
+
 /* ------------------------------------------------------------------ queries */
 
 /* 1 installed and admitted, 0 not installed, -1 installed but skipped (the
@@ -235,8 +268,11 @@ int modserve_palette_rebuild_requested(void);
  * registered yet. Called by the map manifest (modmanifest.c) on every parse,
  * main thread only. n <= 0 returns 0 and logs nothing, so a map without
  * manifest rows costs nothing. Logs "MODS: activated B bundles (S steps, R
- * ready) in N ms". Returns the number of ready steps, or -1 when refused (not
- * the main thread, registry unavailable). */
+ * ready) in N ms". Then, before the map parses, the bundles' editor rows the
+ * built palette lacks are registered and the palette is rebuilt once
+ * (sh_modserve_map_rows_sync; refused while an entity or a wire is held),
+ * logged as one "MODS: map rows: ..." line. Returns the number of ready
+ * steps, or -1 when refused (not the main thread, registry unavailable). */
 int modserve_activate_bundles(const char *const *bundle_hashes, int n);
 
 /* The serving subcommands of the sh_mods console command (modcmd.c owns the

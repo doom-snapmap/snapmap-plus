@@ -10,7 +10,10 @@
  * builder, rescans the index and is activated in the same parse.
  *
  * Engine stand-ins: modserve_activate_bundles runs the real plan against
- * fake registry operations, and modbundle_build_folder is the real builder
+ * fake registry operations and then the real map-row check against a fake
+ * palette (lane M6: rows of a named bundle that the built palette lacks are
+ * registered by one rebuild before the map parses), and
+ * modbundle_build_folder is the real builder
  * with a fixed stock list (the product's own entry in modcmd.c reads the
  * game's archives instead). */
 #define WIN32_LEAN_AND_MEAN
@@ -85,22 +88,35 @@ int modbundle_build_folder(const char *folder, char *first_cause, size_t n)
 
 #define MAX_REC 1024
 static char g_registered[MAX_REC][160];
+static char g_registered_type[MAX_REC][32];
 static int g_nregistered, g_loads, g_activations;
 static int g_last_steps, g_last_ready, g_last_stock;
 
-static int fake_known(const char *name)
+/* The engine's own decls: anything without one of these prefixes
+ * (acceptance/ is the carrier-1 package's first-generation namespace). */
+static int fake_stock(const char *name)
+{
+    return strncmp(name, "mods/", 5) && strncmp(name, "custom/", 7) && strncmp(name, "local/", 6) &&
+           strncmp(name, "acceptance/", 11);
+}
+
+/* Typed, as the engine's managers are: an entityDef and a sedef may share a name. */
+static int fake_known(const char *type, const char *name)
 {
     int i;
-    /* The engine's own decls: anything without a mods/ or custom/ prefix. */
-    if (strncmp(name, "mods/", 5) && strncmp(name, "custom/", 7) && strncmp(name, "local/", 6)) return 1;
-    for (i = 0; i < g_nregistered; i++) if (!_stricmp(g_registered[i], name)) return 1;
+    if (fake_stock(name)) return 1;
+    for (i = 0; i < g_nregistered; i++)
+        if (!_stricmp(g_registered[i], name) && !_stricmp(g_registered_type[i], type)) return 1;
     return 0;
 }
-static int op_source(void *c, const char *type, const char *name) { (void)c; (void)type; return fake_known(name); }
+static int op_source(void *c, const char *type, const char *name) { (void)c; return fake_known(type, name); }
 static int op_register(void *c, const char *type, const char *name, const char *reg)
 {
-    (void)c; (void)type; (void)reg;
-    if (g_nregistered < MAX_REC) strncpy_s(g_registered[g_nregistered++], 160, name, _TRUNCATE);
+    (void)c; (void)reg;
+    if (g_nregistered < MAX_REC) {
+        strncpy_s(g_registered_type[g_nregistered], 32, type, _TRUNCATE);
+        strncpy_s(g_registered[g_nregistered++], 160, name, _TRUNCATE);
+    }
     return 1;
 }
 static int op_load(void *c, const char *type, const char *name, int persist, unsigned *state, unsigned *lifetime)
@@ -112,6 +128,45 @@ static int op_load(void *c, const char *type, const char *name, int persist, uns
     return 1;
 }
 static const sh_modserve_engine_ops OPS = { NULL, op_source, op_register, op_load };
+
+/* ---- palette stand-in: the engine's own rows plus what a rebuild admitted -------------------- */
+
+static int g_pal_built, g_pal_count, g_rebuilds, g_rebuild_result = 1;
+static char g_pal_rows[MAX_REC][160];
+static sh_modserve_rows_sync g_last_sync;
+static int g_last_sync_r;
+
+static int pal_ready(void *c) { (void)c; return g_pal_built; }
+static int pal_has(void *c, const char *name)
+{
+    int i;
+    (void)c;
+    if (fake_stock(name)) return 1;
+    for (i = 0; i < g_pal_count; i++) if (!_stricmp(g_pal_rows[i], name)) return 1;
+    return 0;
+}
+/* As the detour does: the editor pass registers pending rows, then the
+ * builder admits every ready row. */
+static int pal_rebuild(void *c, int *before, int *after)
+{
+    sh_modserve_plan plan;
+    int i;
+    (void)c;
+    g_rebuilds++;
+    *before = 1000 + g_pal_count;
+    if (g_rebuild_result != 1) { *after = -1; return g_rebuild_result; }
+    if (sh_modserve_plan_editor(&plan) >= 0) {
+        sh_modserve_plan_run(&plan, &OPS, "editor");
+        for (i = 0; i < plan.count; i++)
+            if (plan.steps[i].rank == 3 && plan.steps[i].ready == 1 && !pal_has(NULL, plan.steps[i].name) &&
+                g_pal_count < MAX_REC)
+                strncpy_s(g_pal_rows[g_pal_count++], 160, plan.steps[i].name, _TRUNCATE);
+        sh_modserve_plan_free(&plan);
+    }
+    *after = 1000 + g_pal_count;
+    return 1;
+}
+static const sh_modserve_palette_ops PAL_OPS = { NULL, pal_ready, pal_has, pal_rebuild };
 
 int modserve_activate_bundles(const char *const *bundle_hashes, int n)
 {
@@ -126,6 +181,7 @@ int modserve_activate_bundles(const char *const *bundle_hashes, int n)
     g_last_stock = 0;
     for (i = 0; i < plan.count; i++) if (plan.steps[i].shadow && plan.steps[i].ready == 1) g_last_stock++;
     sh_modserve_plan_free(&plan);
+    g_last_sync_r = sh_modserve_map_rows_sync(bundle_hashes, n, &PAL_OPS, &g_last_sync);
     return ready;
 }
 
@@ -133,6 +189,14 @@ static int registered(const char *name)
 {
     int i;
     for (i = 0; i < g_nregistered; i++) if (!_stricmp(g_registered[i], name)) return 1;
+    return 0;
+}
+
+static int registered_as(const char *type, const char *name)
+{
+    int i;
+    for (i = 0; i < g_nregistered; i++)
+        if (!_stricmp(g_registered_type[i], type) && !_stricmp(g_registered[i], name)) return 1;
     return 0;
 }
 
@@ -236,21 +300,76 @@ static void fresh_mod(const char *fixture, const char *root)
               !strcmp(rows.rows[0].bundle, b.hash) && rows.rows[0].size == b.total_size &&
               rows.rows[0].name_count == 1 && !strcmp(rows.rows[0].names[0], "mods/alex.r2-imp/imp_copy"));
         sh_modmanifest_list_free(&rows);
-        /* Load: the row is stripped and exactly that bundle's gameplay decls register. */
+        /* Load: the row is stripped and exactly that bundle's gameplay decls
+         * register. No palette has been built yet (the first editor entry's
+         * build registers the rows), so no rebuild is asked for. */
         g_activations = 0;
         g_nregistered = 0;
+        g_pal_built = 0;
+        g_rebuilds = 0;
         loaded = sh_modmanifest_prepare_load(saved, saved_len, &loaded_len);
         CHECK(loaded != NULL && !strstr(loaded, "smpmod1."));
         CHECK(g_activations == 1 && g_last_steps > 0 && g_last_ready == g_last_steps);
         CHECK(registered("mods/alex.r2-imp/imp_copy") && registered("mods/alex.r2-imp/imp_copy.md6") &&
               registered("mods/alex.r2-imp/imp_copy_b.md6"));
+        CHECK(!registered_as("snapEditorEntityDef", "mods/alex.r2-imp/imp_copy") &&
+              !registered_as("snapEditorEntityDef", "mods/alex.r2-imp/imp_copy_b"));
+        CHECK(g_last_sync_r == 0 && g_last_sync.rows == 2 && g_last_sync.missing == 0 && g_rebuilds == 0);
         if (loaded) HeapFree(GetProcessHeap(), 0, loaded);
+
+        /* The palette exists and lacks both rows (the bundle arrived after
+         * the build), but the editor holds an entity: the rebuild is refused,
+         * reported, and the rows stay unvisited, so each later load asks
+         * again, once. */
+        printf("-- a refused rebuild is asked once per load\n");
+        g_pal_built = 1;
+        g_pal_count = 0;
+        g_rebuild_result = -1;
+        loaded = sh_modmanifest_prepare_load(saved, saved_len, &loaded_len);
+        CHECK(loaded != NULL && g_last_sync_r == 1 && g_last_sync.rebuild == -1 && g_last_sync.missing == 2 &&
+              g_last_sync.registered == 0 && g_rebuilds == 1);
+        CHECK(!registered_as("snapEditorEntityDef", "mods/alex.r2-imp/imp_copy"));
+        if (loaded) HeapFree(GetProcessHeap(), 0, loaded);
+        loaded = sh_modmanifest_prepare_load(saved, saved_len, &loaded_len);
+        CHECK(loaded != NULL && g_last_sync_r == 1 && g_rebuilds == 2);
+        if (loaded) HeapFree(GetProcessHeap(), 0, loaded);
+        g_rebuild_result = 1;
+
+        /* Released: the same load registers them through one rebuild. */
+        printf("-- a map naming a bundle whose editor rows the built palette lacks registers them by one rebuild\n");
+        g_activations = 0;
+        g_rebuilds = 0;
+        loaded = sh_modmanifest_prepare_load(saved, saved_len, &loaded_len);
+        CHECK(loaded != NULL && g_activations == 1);
+        CHECK(g_last_sync_r == 1 && g_rebuilds == 1 && g_last_sync.rebuild == 1);
+        CHECK(g_last_sync.rows == 2 && g_last_sync.missing == 2 && g_last_sync.registered == 2 &&
+              g_last_sync.admitted == 2 && g_last_sync.rows_after == g_last_sync.rows_before + 2);
+        CHECK(registered_as("snapEditorEntityDef", "mods/alex.r2-imp/imp_copy") &&
+              registered_as("snapEditorEntityDef", "mods/alex.r2-imp/imp_copy_b"));
+        CHECK(pal_has(NULL, "mods/alex.r2-imp/imp_copy") && pal_has(NULL, "mods/alex.r2-imp/imp_copy_b"));
+        if (loaded) HeapFree(GetProcessHeap(), 0, loaded);
+
+        /* The palette already holds them: nothing is requested. */
+        printf("-- the same map again: the palette holds its rows, nothing is requested\n");
+        g_rebuilds = 0;
+        loaded = sh_modmanifest_prepare_load(saved, saved_len, &loaded_len);
+        CHECK(loaded != NULL && g_last_sync_r == 0 && g_last_sync.missing == 0 && g_rebuilds == 0);
+        if (loaded) HeapFree(GetProcessHeap(), 0, loaded);
+
         HeapFree(GetProcessHeap(), 0, saved);
     }
-    /* A map without rows costs nothing. */
+    /* A map without rows costs nothing: no activation, no palette check. */
     g_activations = 0;
+    g_rebuilds = 0;
+    g_last_sync_r = -7;
     loaded = sh_modmanifest_prepare_load(MAP, sizeof MAP - 1, &loaded_len);
-    CHECK(loaded == NULL && g_activations == 0);
+    CHECK(loaded == NULL && g_activations == 0 && g_rebuilds == 0 && g_last_sync_r == -7);
+    /* The check itself asks nothing for an empty list. */
+    {
+        sh_modserve_rows_sync res;
+        CHECK(sh_modserve_map_rows_sync(NULL, 0, &PAL_OPS, &res) == 0 && res.rows == 0 && g_rebuilds == 0);
+    }
+    g_pal_built = 0;
     sh_mb_free(&b);
 }
 
@@ -371,6 +490,10 @@ static void carrier_conversion(const char *root)
     CHECK(sh_modserve_index_build(mods) >= 0);   /* the index the boot would have built */
     sh_modlegacy_set_data_root(root);
     sh_modlegacy_reset();
+    /* The editor palette exists (a mid-session open): a converted package's
+     * editor rows are registered by one rebuild in the same parse. */
+    g_pal_built = 1;
+    g_pal_count = 0;
     for (i = 0; i < sizeof maps / sizeof maps[0]; i++) {
         size_t n = 0, on = 0, ln = 0, verdicts;
         char *text, *out, *loaded;
@@ -395,16 +518,24 @@ static void carrier_conversion(const char *root)
         /* The manifest step of the same parse activates what was converted. */
         if (out) {
             g_activations = 0;
+            g_rebuilds = 0;
             loaded = sh_modmanifest_prepare_load(out, on, &ln);
             CHECK(loaded != NULL && g_activations == 1 && g_last_steps > 0 && g_last_ready == g_last_steps);
-            printf("  %s: %u converted (%d build(s)), %llu ms; activation %d step(s), %d ready, %d stock shadow(s)\n",
+            CHECK(g_rebuilds == (g_last_sync.missing ? 1 : 0) && g_last_sync.registered == g_last_sync.missing &&
+                  g_last_sync.admitted == g_last_sync.missing);
+            /* carrier-1 (acceptance.r137.mixed-rows) carries two editor rows (R-002 finding 4). */
+            if (strstr(maps[i].file, "carrier-1-")) CHECK(g_last_sync.missing == 2 && g_rebuilds == 1);
+            printf("  %s: %u converted (%d build(s)), %llu ms; activation %d step(s), %d ready, %d stock shadow(s); "
+                   "editor rows %d, %d missing, %d rebuild(s), %d registered\n",
                    maps[i].file, converted, g_builds, (unsigned long long)(GetTickCount64() - t0), g_last_steps,
-                   g_last_ready, g_last_stock);
+                   g_last_ready, g_last_stock, g_last_sync.rows, g_last_sync.missing, g_rebuilds,
+                   g_last_sync.registered);
             if (loaded) HeapFree(GetProcessHeap(), 0, loaded);
             HeapFree(GetProcessHeap(), 0, out);
         }
         free(text);
     }
+    g_pal_built = 0;
     sh_modlegacy_set_data_root(NULL);
 }
 

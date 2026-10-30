@@ -405,6 +405,73 @@ int modserve_palette_rebuild_requested(void)
 
 /* ------------------------------------------------------------------ per-map */
 
+static const char *me_rebuild_reason(int r)
+{
+    switch (r) {
+    case SH_TL_REBUILD_BUSY: return "the editor holds an entity or a wire";
+    case SH_TL_REBUILD_HEAP: return "process heap 0 could not be entered";
+    case SH_TL_REBUILD_DISABLED: return "disabled after an unbalanced heap scope earlier this session";
+    case SH_TL_REBUILD_FAULTED: return "the builder FAULTED";
+    case SH_TL_REBUILD_HEAP_LEAVE: return "the heap scope did not balance; rebuilds are now disabled";
+    default: return "no palette build hook";
+    }
+}
+
+static int pal_ready(void *context)
+{
+    int rows = -1;
+    (void)context;
+    return me_count_mod_rows(sh_timeline_tile_palette(), &rows) >= 0 && rows > 0;
+}
+
+/* Linear over the rows (about 1,300 on 13954591): the array is sorted by the
+ * synthesized record's inherit name, not by sedef name. */
+static int pal_has(void *context, const char *sedef_name)
+{
+    unsigned char *palette = (unsigned char *)sh_timeline_tile_palette();
+    void *entries = NULL;
+    int count = 0, i, found = 0;
+    (void)context;
+    if (!palette || !sedef_name || !me_rd_ptr(palette + PAL_ENTRIES_OFF, &entries) ||
+        !me_rd_i32(palette + PAL_COUNT_OFF, &count) || !entries || count <= 0 || count > PAL_MAX) return 0;
+    for (i = 0; i < count && !found; ++i) {
+        void *sedef = NULL, *name = NULL;
+        const unsigned char *entry = (const unsigned char *)entries + (size_t)i * PAL_STRIDE;
+        if (!me_rd_ptr(entry, &sedef) || !sedef || !me_rd_ptr((unsigned char *)sedef + SEDEF_NAME_OFF, &name) || !name)
+            continue;
+        __try { found = !_stricmp((const char *)name, sedef_name); }
+        __except (EXCEPTION_EXECUTE_HANDLER) { found = 0; }
+    }
+    return found;
+}
+
+static int pal_rebuild(void *context, int *before, int *after)
+{
+    (void)context;
+    return sh_timeline_tile_rebuild_palette(before, after);
+}
+
+/* Inside the load gate, after activation and before the map parses: rows the
+ * built palette lacks are registered by the rebuild's editor pass, so the
+ * validator's palette lookup finds them. One call per activation. */
+static void me_sync_rows(const char *const *bundle_hashes, int n)
+{
+    static const sh_modserve_palette_ops ops = { NULL, pal_ready, pal_has, pal_rebuild };
+    sh_modserve_rows_sync res;
+    double t0 = me_now_ms();
+    int r = sh_modserve_map_rows_sync(bundle_hashes, n, &ops, &res);
+    if (r < 0) { me_log("map rows: check refused (out of memory)"); return; }
+    if (!r) return;
+    if (res.rebuild == SH_TL_REBUILD_OK)
+        me_log("map rows: %d of %d editor row(s) missing from the palette; %d registered, %d now in the palette; "
+               "palette rebuilt in %.1f ms (%d -> %d rows)", res.missing, res.rows, res.registered, res.admitted,
+               me_now_ms() - t0, res.rows_before, res.rows_after);
+    else
+        me_log("map rows: %d of %d editor row(s) missing from the palette; rebuild refused after %.1f ms: %s "
+               "(%d rows); the map's placed rows will not validate", res.missing, res.rows, me_now_ms() - t0,
+               me_rebuild_reason(res.rebuild), res.rows_before);
+}
+
 int modserve_activate_bundles(const char *const *bundle_hashes, int n)
 {
     sh_modserve_plan plan;
@@ -421,6 +488,7 @@ int modserve_activate_bundles(const char *const *bundle_hashes, int n)
     me_log("activated %d bundles (%d steps, %d ready, %d blocked, %d not installed) in %.1f ms", n - unknown,
            plan.count, ready < 0 ? 0 : ready, plan.blocked, unknown, me_now_ms() - t0);
     sh_modserve_plan_free(&plan);
+    if (ready >= 0) me_sync_rows(bundle_hashes, n);
     return ready;
 }
 

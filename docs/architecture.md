@@ -428,8 +428,8 @@ placement grid, map navigation, the generated Grid Room variants, the built-in
 defaults, installed mods, then the engine. Opens with mode 2 or higher are
 never served. A shadow applies to every map while its bundle is installed; a new
 name applies once it is registered: editor rows at the first palette build (or
-`sh_mods palette rebuild`), gameplay decls when a map that names their bundle
-loads. When two builds of one mod id serve a path, the most recently installed
+`sh_mods palette rebuild`, or the load of a map that names their bundle, below),
+gameplay decls when a map that names their bundle loads. When two builds of one mod id serve a path, the most recently installed
 serves it, and a map naming the older bundle gets the newer files with a logged
 line.
 
@@ -441,7 +441,21 @@ the serving table is then rebuilt when that bundle is not in it yet, so the same
 parse can activate it. Any other carrier, and the unreleased `smpbind.` and
 `smpref.` rows, are removed. Each carrier logs one `LEGACY:` verdict line. After
 the navigation strip, `modmanifest.c` reads and strips the manifest rows before
-the engine replicates map variables and activates the bundles they name. On
+the engine replicates map variables and activates the bundles they name.
+The editor palette is built once per process, and the map validator
+(`RepairAndMigrate`) looks every placed entity up in it, so after activation
+the same step checks the named bundles' editor rows against the built palette.
+When at least one row is absent and was never registered (a package converted
+mid-session, or a bundle installed after the build), it runs the heap-scoped
+palette rebuild once (the same path as `sh_mods palette rebuild`: main thread,
+verified process heap 0, pending rows registered first, the builder with a
+NULL progress through the detour, product palette caches reset) before the
+buffer returns to the engine, and logs one line:
+`MODS: map rows: M of R editor row(s) missing from the palette; K registered,
+A now in the palette; palette rebuilt in N ms (B -> C rows)`. It is refused,
+with the reason on the same line, while the editor holds an entity or a wire;
+before the first palette build it does nothing, because that build registers
+every row. A map without manifest rows never reaches it. On
 save it appends one row per bundle that provides a placed name (and each bundle
 their needs reach), after any navigation shards; with an empty table and no rows
 in the map it returns at once and the save is the engine's own bytes.

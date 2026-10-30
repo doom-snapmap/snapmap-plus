@@ -68,6 +68,10 @@ enum {
 };
 int sh_timeline_tile_rebuild_palette(int *rows_before, int *rows_after);
 
+/* The editor palette (editor+0x20660) once the builder has completed at least
+ * once this process, else NULL. */
+void *sh_timeline_tile_palette(void);
+
 /* The +0x368 slot body (see snapmap_plus_iface.h). */
 int sh_timeline_tile_slot(struct sh_iface *self, sh_timeline_tile_call *call);
 #endif

@@ -101,6 +101,7 @@ static volatile LONG g_rebuild_disabled;  /* an unbalanced heap scope ends runti
 static volatile LONG g_registered;    /* 1 registered, -1 refused for this process */
 static int g_register_tries;
 static void * volatile g_editor;      /* last editor seen by the frame tick */
+static void * volatile g_built_palette; /* editor+0x20660 of the last completed build (its one call site) */
 
 /* Palette cache, revalidated each frame by entry pointer, count and sedef. */
 static const unsigned char *g_pal_entries;
@@ -282,6 +283,7 @@ static void tl_palette_build(void *palette, void *progress)
     if (!InterlockedCompareExchange(&g_faulted, 0, 0)) tl_register();
     sh_modserve_palette_before_build();   /* installed mods' editor rows */
     g_build_orig(palette, progress);
+    g_built_palette = palette;
     sh_modserve_palette_after_build(palette);
     g_pal_entries = NULL;   /* force a rescan and a fresh patch on the next tick */
     g_patch_failed_entries = NULL;
@@ -493,9 +495,18 @@ int sh_timeline_tile_install(const sig_result *results, size_t count, const uint
  * keeps entity-row pointers is an open trace. Main thread only, from a point
  * where no native frame is iterating the palette (the caller checks the
  * thread). */
+void *sh_timeline_tile_palette(void)
+{
+    return g_built_palette;
+}
+
 int sh_timeline_tile_rebuild_palette(int *rows_before, int *rows_after)
 {
-    unsigned char *ed = (unsigned char *)g_editor;
+    /* A map opened from the browser can parse before the editor's first frame
+     * tick; the builder's only call site passes editor+0x20660, so the last
+     * built palette names the editor too. */
+    unsigned char *ed = g_editor ? (unsigned char *)g_editor
+                      : g_built_palette ? (unsigned char *)g_built_palette - ED_PALETTE_OFF : NULL;
     sh_process_heap_scope heap = {0};
     int substate = 0, result = SH_TL_REBUILD_OK;
     if (rows_before) *rows_before = -1;

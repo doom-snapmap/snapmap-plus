@@ -1390,6 +1390,66 @@ int sh_modserve_plan_bundles(const char *const *bundle_hashes, int n, sh_modserv
     return r;
 }
 
+/* The editor rows of the bundles a map names, checked against the built
+ * palette at load (lane M6). A row counts as missing when the palette lacks
+ * it and no editor pass has visited it yet (reg_state 0): a row registered
+ * before an earlier build that is still absent was rejected by the builder's
+ * admission, and another rebuild would not admit it. Bundles are selected as
+ * sh_modserve_plan_bundles selects them, superseded builds included. */
+int sh_modserve_map_rows_sync(const char *const *bundle_hashes, int n, const sh_modserve_palette_ops *ops,
+                              sh_modserve_rows_sync *out)
+{
+    const ms_index *x = g_index;
+    unsigned char *cand;
+    int i, k, r = 0;
+    sh_modserve_rows_sync res;
+    memset(&res, 0, sizeof res);
+    res.rows_before = res.rows_after = -1;
+    if (out) *out = res;
+    if (n <= 0 || !bundle_hashes || !x || !x->nfiles) return 0;
+    if (!ops || !ops->palette_ready || !ops->in_palette || !ops->rebuild) return -1;
+    cand = (unsigned char *)calloc((size_t)x->nfiles + 1, 1);
+    if (!cand) return -1;
+    for (i = 0; i < n; ++i) {
+        int b = ms_bundle_by_hash(x, bundle_hashes[i], 1);
+        if (b < 0) continue;
+        for (k = x->bundles[b].first_file; k < x->bundles[b].first_file + x->bundles[b].file_count; ++k) {
+            const ms_file *f = &x->files[k];
+            int use = k;
+            if (!f->served) {
+                int w = ms_find(x->slots, x->mask, f->request);
+                if (w < 0 || strcmp(x->bundles[x->files[w].bundle].id, x->bundles[b].id)) continue;
+                use = w;
+            }
+            f = &x->files[use];
+            if (f->served && f->is_sedef && ms_plannable(x, f) && !cand[use]) { cand[use] = 1; res.rows++; }
+        }
+    }
+    /* No palette yet: the first editor entry's build registers every row. */
+    if (!res.rows || ops->palette_ready(ops->context) != 1) goto done;
+    for (i = 0; i < x->nfiles; ++i) {
+        if (!cand[i]) continue;
+        if (x->files[i].reg_state != 0 || ops->in_palette(ops->context, x->files[i].pname) == 1) { cand[i] = 0; continue; }
+        cand[i] = 2;
+        res.missing++;
+    }
+    if (!res.missing) goto done;
+    /* Once per call: the rebuild's editor pass registers the rows (and the
+     * closure they need) before the builder runs. */
+    res.rebuild = ops->rebuild(ops->context, &res.rows_before, &res.rows_after);
+    r = 1;
+    if (res.rebuild == 1)
+        for (i = 0; i < x->nfiles; ++i) {
+            if (cand[i] != 2) continue;
+            if (x->files[i].reg_state == 1) res.registered++;
+            if (ops->in_palette(ops->context, x->files[i].pname) == 1) res.admitted++;
+        }
+done:
+    free(cand);
+    if (out) *out = res;
+    return r;
+}
+
 void sh_modserve_plan_free(sh_modserve_plan *plan)
 {
     if (!plan) return;
