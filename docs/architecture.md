@@ -511,7 +511,12 @@ no md6Def for, since the engine's parse throws on it: a stock animWeb it
 shadowed is served by the game again, and a new name is not registered. Before
 the Play level load the SnapBuild detour re-checks the bundles' blacklist
 requirements (`MODS: play: requirements live: ...`); the engine itself does not
-reset those two gates between the editor and the level load.
+reset those two gates between the editor and the level load. The editor pass
+also raises to the session lifetime (4) the decls an editor row points at
+directly (its editor animWeb, its md6 render model, its preview material): the
+row is kept for the session, but those objects were created after the boot
+promotion at level 1, so the purge on entering Play freed them and the editor
+entity rebuilt after Play bound a freed animWeb.
 
 On every parse the `DeserializeFromJson` detour sees, `modlegacy.c` runs first.
 A complete carrier whose ZIP and `package.json` read is unpacked once into

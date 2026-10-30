@@ -2198,6 +2198,48 @@ static int ms_animweb_unresolved(const ms_index *x, const ms_file *f, const sh_m
     return found;
 }
 
+int sh_modserve_editor_refs(const sh_modserve_plan *plan, sh_modserve_ref_fn fn, void *context)
+{
+    const ms_index *x = g_index;
+    int i, calls = 0;
+    if (!plan || !fn || !x) return 0;
+    for (i = 0; i < plan->count; ++i) {
+        const sh_modserve_step *s = &plan->steps[i];
+        size_t len = 0;
+        unsigned char *text;
+        mc_lex l;
+        mc_tok t;
+        if (s->rank != 3 || s->ready != 1 || s->file < 0 || s->file >= x->nfiles) continue;
+        text = ms_file_bytes(&x->files[s->file], &len);
+        if (!text) continue;
+        l.t = (const char *)text;
+        l.len = len;
+        l.pos = 0;
+        while ((t = mc_next(&l)).kind != MC_END) {
+            const char *type = NULL;
+            mc_tok v;
+            char name[MS_NAME_MAX];
+            if (t.kind != MC_WORD) continue;
+            if (t.n == 11 && !_strnicmp(t.p, "animWebDecl", 11)) type = "animWeb";
+            else if (t.n == 15 && !_strnicmp(t.p, "renderModelName", 15)) type = "md6Def";
+            else if (t.n == 12 && !_strnicmp(t.p, "previewImage", 12)) type = "material";
+            else continue;
+            if (mc_peek(&l).kind != MC_EQ) continue;
+            mc_next(&l);
+            v = mc_next(&l);
+            if (v.kind != MC_STR || v.n < 3 || v.n - 2 >= sizeof name) continue;
+            memcpy(name, v.p + 1, v.n - 2);
+            name[v.n - 2] = 0;
+            /* A render model that is not an md6 is not a decl. */
+            if (!strcmp(type, "md6Def") && (strlen(name) < 4 || _stricmp(name + strlen(name) - 4, ".md6"))) continue;
+            fn(context, type, name, s->name);
+            calls++;
+        }
+        HeapFree(GetProcessHeap(), 0, text);
+    }
+    return calls;
+}
+
 int sh_modserve_plan_run(sh_modserve_plan *plan, const sh_modserve_engine_ops *ops, const char *phase)
 {
     ms_index *x = g_index;

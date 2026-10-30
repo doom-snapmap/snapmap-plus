@@ -160,6 +160,20 @@ typedef struct sh_modserve_engine_ops {
 int sh_modserve_plan_run(sh_modserve_plan *plan, const sh_modserve_engine_ops *ops,
                          const char *phase);
 
+/* The decls an editor row points at directly, which must live as long as the
+ * row does. A snapEditorEntityDef is kept for the session (lifetime 4) and its
+ * parse stores pointers to the decls its edit block names; a decl the engine
+ * created for one of those names after boot sits at level 1, and the purge at
+ * the next map unload (entering Play, and leaving it) frees the object while
+ * the row still points at it. The editor entity rebuilt after Play then binds
+ * the freed animWeb (lane MG2: AV in the animator's node set-up, VK
+ * 0x14170a5d3). Stock rows never meet this: everything they name was alive at
+ * the boot promotion. For every ready row of the plan, this calls `fn` once per
+ * reference: eventInfo animWebDecl (animWeb), renderInfo renderModelName ending
+ * ".md6" (md6Def), previewImage (material). Returns the number of calls. */
+typedef void (*sh_modserve_ref_fn)(void *context, const char *type, const char *name, const char *row);
+int sh_modserve_editor_refs(const sh_modserve_plan *plan, sh_modserve_ref_fn fn, void *context);
+
 /* Editor rows at map load (lane M6). The palette is built once per process,
  * at editor init, and the map validator (RepairAndMigrate) looks every placed
  * entity up in it; a bundle converted or named mid-session can bring

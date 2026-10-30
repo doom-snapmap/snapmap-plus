@@ -1171,6 +1171,66 @@ static void test_conflicts(void)
     gates_reset(1, 1, SH_MODSERVE_GATE_SET);
 }
 
+/* ------------------------------------------------------------------ editor row references (lane MG2) */
+
+static char g_refs[2048];
+static void collect_ref(void *c, const char *type, const char *name, const char *row)
+{
+    size_t at = strlen(g_refs);
+    (void)c;
+    _snprintf_s(g_refs + at, sizeof g_refs - at, _TRUNCATE, "%s:%s<%s;", type, name, row);
+}
+
+static void test_editor_refs(void)
+{
+    char top[MAX_PATH], root[MAX_PATH];
+    char *slash;
+    sh_modserve_plan p;
+    static const fx_file row[] = {
+        { "generated/decls/snapeditorentitydef/demons/cyberdemon_enc.decl",
+          "{\n\tinherit = \"demons/demon_base\";\n\tedit = {\n"
+          "\t\tpreviewImage = \"textures/guis/snapmaps/entity_icons/demons/cyberdemon_enc\";\n"
+          "\t\tentityDef = \"snapmaps/placeablesnapaiencounter/cyberdemon\";\n"
+          "\t\trenderInfo = {\n\t\t\trenderModelName = \"zion/characters/monsters/cyberdemon/base/cyberdemon_snapeditor.md6\";\n\t\t}\n"
+          "\t\teventInfo = {\n\t\t\tanimWebDecl = \"zion/snapmap/demons/cyberdemon_snapeditor\";\n\t\t}\n\t}\n}\n",
+          -1, "snapEditorEntityDef", "demons/cyberdemon_enc", NULL, '1' },
+        { "generated/decls/snapeditorentitydef/prop/crate.decl",
+          "{\n\tedit = {\n\t\trenderInfo = {\n\t\t\trenderModelName = \"models/mapobjects/crate.lwo\";\n\t\t}\n\t}\n}\n",
+          -1, "snapEditorEntityDef", "prop/crate", NULL, '2' },
+        { "generated/decls/animweb/zion/snapmap/demons/cyberdemon_snapeditor.decl", "{ web }", -1, "animWeb",
+          "zion/snapmap/demons/cyberdemon_snapeditor", NULL, '3' },
+    };
+    strcpy_s(top, sizeof top, g_root);
+    slash = strrchr(top, '\\');
+    if (slash) *slash = 0;
+    _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\edrefs\\mods", top);
+    mkdirs(root);
+    g_bundle_extra = "\"extra\": {\"legacy\": {}},\n  ";
+    make_bundle(root, "local.cyberdemon@0.0.0+1", "local.cyberdemon", "0.0.0", '9',
+                "\"generated/decls/snapeditorentitydef/demons/cyberdemon_enc.decl\", "
+                "\"generated/decls/snapeditorentitydef/prop/crate.decl\", "
+                "\"generated/decls/animweb/zion/snapmap/demons/cyberdemon_snapeditor.decl\"", row, 3, NULL);
+    g_bundle_extra = NULL;
+    CHECK(sh_modserve_index_build(root) == 1);
+    CHECK(sh_modserve_plan_editor(&p) == 2);
+    /* Rows that did not get ready point at nothing yet. */
+    g_refs[0] = 0;
+    CHECK(sh_modserve_editor_refs(&p, collect_ref, NULL) == 0 && !g_refs[0]);
+    g_already = NULL;
+    CHECK(sh_modserve_plan_run(&p, &g_fake, "editor") == 2);
+    g_refs[0] = 0;
+    CHECK(sh_modserve_editor_refs(&p, collect_ref, NULL) == 3);
+    /* The editor animWeb, the md6 render model and the preview material; the
+     * entityDef (re-resolved by name) and a non-md6 model are not decls a row
+     * holds this way. */
+    CHECK(strstr(g_refs, "animWeb:zion/snapmap/demons/cyberdemon_snapeditor<demons/cyberdemon_enc;") != NULL);
+    CHECK(strstr(g_refs, "md6Def:zion/characters/monsters/cyberdemon/base/cyberdemon_snapeditor.md6<demons/cyberdemon_enc;") != NULL);
+    CHECK(strstr(g_refs, "material:textures/guis/snapmaps/entity_icons/demons/cyberdemon_enc<demons/cyberdemon_enc;") != NULL);
+    CHECK(!strstr(g_refs, "crate") && !strstr(g_refs, "entityDef"));
+    CHECK(sh_modserve_editor_refs(NULL, collect_ref, NULL) == 0 && sh_modserve_editor_refs(&p, NULL, NULL) == 0);
+    sh_modserve_plan_free(&p);
+}
+
 static void remove_tree(const char *dir)
 {
     char pattern[MAX_PATH], path[MAX_PATH];
@@ -1207,6 +1267,7 @@ int main(void)
     test_rescan();
     test_requirements();
     test_conflicts();
+    test_editor_refs();
     strcpy_s(top, sizeof top, g_root);
     slash = strrchr(top, '\\');
     if (slash) { *slash = 0; remove_tree(top); }

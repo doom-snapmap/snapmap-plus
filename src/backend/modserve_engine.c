@@ -399,6 +399,32 @@ int sh_modserve_install(const sig_result *results, size_t count, const uint8_t *
 
 /* ------------------------------------------------------------------ palette */
 
+/* Keep the decls an editor row points at for the session (modserve.h,
+ * sh_modserve_editor_refs): an object the engine created at level 1 after
+ * boot is raised to 4, as everything a stock row names was at the boot
+ * promotion. The row's parse normally made the object; one it did not is
+ * created by name first. Only the level changes: contents load on demand. */
+typedef struct me_keep { int kept, permanent, created, missing; } me_keep;
+
+static void me_keep_ref(void *context, const char *type, const char *name, const char *row)
+{
+    me_keep *k = (me_keep *)context;
+    char before[ERROR_TEXT_MAX];
+    me_error_text(before, sizeof before);
+    __try {
+        void *m = me_manager(type), *decl = m ? g_decl(m, name, 0) : NULL;
+        /* Not created by the row's parse yet: create it now, so it is born
+         * before the first purge and kept like the others. */
+        if (!decl && m) { decl = g_decl(m, name, 1); if (decl) k->created++; }
+        if (!decl) { k->missing++; return; }
+        if (*(unsigned *)((unsigned char *)decl + RES_LIFETIME_OFF) == 1) {
+            *(unsigned *)((unsigned char *)decl + RES_LIFETIME_OFF) = 4;
+            k->kept++;
+            me_log("editor: %s '%s' kept for the session (editor row '%s' points at it)", type, name, row);
+        } else k->permanent++;
+    } __except (me_fault_filter(GetExceptionCode())) { me_log_fault("keep", type, name, before); }
+}
+
 void sh_modserve_palette_before_build(void)
 {
     sh_modserve_plan plan;
@@ -410,6 +436,19 @@ void sh_modserve_palette_before_build(void)
     if (sh_modserve_plan_editor(&plan) < 0) { me_log("editor rows: plan refused (out of memory)"); return; }
     if (!plan.count) { sh_modserve_plan_free(&plan); if (first) me_log("editor rows registered in 0.0 ms (0 rows)"); return; }
     ready = me_run(&plan, "editor");
+    {
+        me_keep keep = { 0, 0, 0, 0 };
+        sh_process_heap_scope heap = { 0 };
+        int refs = 0;
+        /* Inside process heap 0, as registration: an object created here outlives every map. */
+        if (sh_process_heap_enter(&g_heap, &heap)) {
+            __try { refs = sh_modserve_editor_refs(&plan, me_keep_ref, &keep); }
+            __finally { if (!sh_process_heap_leave(&heap)) me_log("editor: process heap scope did not balance"); }
+        }
+        if (refs && (keep.kept || keep.missing))
+            me_log("editor: %d decl(s) editor rows point at kept for the session (%d created here), %d already permanent, %d not found",
+                   keep.kept, keep.created, keep.permanent, keep.missing);
+    }
     for (i = 0; i < plan.count; ++i) {
         if (plan.steps[i].rank != 3) continue;
         if (plan.steps[i].ready == 1) rows_ok++;
