@@ -127,7 +127,7 @@ var noticeClient = &http.Client{Timeout: 5 * time.Second}
 // latestDefaultTag returns the default release tag, or an empty string when
 // the bounded update check fails. Failure suppresses only the notice.
 func latestDefaultTag() string {
-	req, err := http.NewRequest("GET", "https://api.github.com/repos/"+repoSlug+"/releases?per_page=30", nil)
+	req, err := http.NewRequest("GET", releasesURL()+"?per_page=30", nil)
 	if err != nil {
 		return ""
 	}
@@ -188,13 +188,20 @@ func pause() {
 
 // isInteractive reports whether stdin is a real terminal -- so we only prompt when a human can answer.
 // Scripts / CI / piped input skip the confirmation automatically; force-skip with --yes.
-func isInteractive() bool {
+// Tests replace it so a console-attached test run never waits on a prompt.
+var isInteractive = func() bool {
 	fi, err := os.Stdin.Stat()
 	return err == nil && (fi.Mode()&os.ModeCharDevice) != 0
 }
 
-// confirm prints a yes/no prompt and returns true on yes (Enter / "y" / "yes").
+// confirm prints a yes/no prompt and returns true on yes (Enter / "y" / "yes"). Input that ends
+// before an answer counts as no.
 func confirm(prompt string) bool {
 	fmt.Print(prompt + " [Y/n] ")
-	return isYes(readLine())
+	answer, open := readLineEOF()
+	if !open {
+		fmt.Println()
+		return false
+	}
+	return isYes(answer)
 }

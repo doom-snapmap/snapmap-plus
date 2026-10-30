@@ -42,8 +42,8 @@ embed the Windows resources. Use `build.ps1` for distributable executables.
 ## Commands
 
 ```text
-snapmap-plus install   [--doom <path>] [--local <dist-dir>] [--release <tag>] [--beta] [--yes]
-snapmap-plus update    [--doom <path>] [--release <tag>] [--beta] [--yes]
+snapmap-plus install   [--doom <path>] [--local <dist-dir>] [--release <tag>] [--beta] [--force] [--yes]
+snapmap-plus update    [--doom <path>] [--release <tag>] [--beta] [--no-self] [--force] [--yes]
 snapmap-plus uninstall [--doom <path>] [--yes]
 snapmap-plus changelog [<version>|latest|all]
 snapmap-plus status
@@ -53,7 +53,9 @@ snapmap-plus help
 
 With no arguments, the executable opens an interactive prompt. Installation,
 update and uninstall ask for confirmation after checks; `--yes` or `-y` skips
-that prompt. Both DOOM executables must be closed before changing installed DLLs.
+that prompt, and input that ends before an answer counts as no. Both DOOM executables
+must be closed before changing installed DLLs: the check looks for any running
+`DOOMx64vk.exe` or `DOOMx64.exe` process by name, wherever it was started from.
 The Go lifecycle tests use temporary game and profile directories with a controlled
 process check; they can run while your real game is open.
 
@@ -62,6 +64,25 @@ process check; they can run while your real game is open.
 reported fallback to the newest beta while no stable release exists. `--beta`
 selects the newest beta; `--release` selects a specific tag. Updates also refresh
 the installer unless `--no-self` is supplied.
+
+The installer identifies the DOOM build from the executables' SHA-256 before it
+downloads anything. On the 2018 build (Steam build 2642713) install, update and
+reinstall download v0.2.1-beta.19's own `snapmap-plus.exe`, verify it, and run its
+`install` under the name `snapmap-plus-v0.2.1-beta.19.exe`, so that release's own
+steps happen; its copy of itself is then removed from `%LOCALAPPDATA%\snapmap-plus`
+and the current installer remains the stable copy (see
+[packaging](../docs/packaging.md#supported-build-and-the-final-2018-release)).
+
+Every downloaded release asset must match the size and `sha256:` digest GitHub
+publishes for it; a short, failed or altered download is refused and its temporary
+files are removed before anything is installed or replaced. The bundle's files are
+then checked against its `MANIFEST.sha256`.
+
+For testing, `SNAPMAP_PLUS_API_BASE` replaces `https://api.github.com` with a local
+mock of the Releases API. Only a loopback URL (`127.0.0.1`, `localhost` or `[::1]`)
+is accepted; any other value is ignored with a notice. `install.ps1` honours the same
+variable. The Go suite runs install, update, self-update and uninstall against such a
+mock, including corrupt, mismatched and interrupted downloads.
 
 The changelog command reads GitHub release bodies derived from reviewed
 [CHANGELOG.md](../CHANGELOG.md) entries. It shows the newest release and an older
@@ -73,7 +94,9 @@ while preserving command names such as `sh_pretty_on`.
 
 The installer verifies every manifest-listed bundle file before changing DOOM.
 Pre-existing files are backed up as `<file>.snapmap-plus-bak`; installed paths
-and backups are recorded in `%LOCALAPPDATA%\snapmap-plus\install.json`.
+and backups are recorded in `%LOCALAPPDATA%\snapmap-plus\install.json`. There is one
+record, so installing into a second DOOM folder replaces the record of the first;
+uninstall the first folder before installing into another.
 Uninstall reverses that record and removes created directories only when empty.
 
 Legacy SnapHak detection requires identifying files from that tool, so an
@@ -87,7 +110,10 @@ metadata directory also remain there. The installer scaffolds `strings\` and
 `prefabs\` only; retired package folders (`overrides`, `package-cache`,
 `package-staging`, `override-backups`) are never copied, created or removed.
 
-Stable installer copies are tracked by name and SHA-256 in `installer-files.json`.
+Stable installer copies are tracked by name and SHA-256 in `installer-files.json`,
+and by release in `installer-versions.json`. An installer older than the stable copy
+refuses to replace it, naming both versions, unless `--force` is given; a copy left by
+an earlier installer carries no version and is replaced as before.
 Uninstall removes only recorded copies whose bytes still match, while retaining
 the running image. Unrecorded executables and files replaced by the user remain.
 Self-updates stage and verify the replacement before renaming the old image; a
@@ -104,16 +130,15 @@ and uninstall cycle.
 The installer checks for WebView2 and offers Microsoft's runtime bootstrapper
 when needed. See [packaging](../docs/packaging.md) for the installed file contract.
 
-## Packages
+## Mods and retired package folders
 
-The package system is being rebuilt for the April 2024 DOOM update (Steam build
-13954591). This release reads, installs and carries no packages: nothing is
-loaded from `%LOCALAPPDATA%\snapmap-plus\overrides\`, no `package-cache` or
-`package-staging` folder is created, and a map saved or published with packages
-by an earlier release loads as a plain map without them. Folders that earlier
-releases left are not touched; you can keep or delete them.
-The installer therefore converts no packages and has no `migrate-overrides`
-command.
+The installer never creates, changes, converts or removes `mods\`, and treats the
+retired package folders (`overrides\`, `override-backups\`, `package-cache\`,
+`package-staging\`) the same way across install, update, uninstall and reinstall.
+The backend owns both at DOOM start: its first start converts a `mods\` folder
+from earlier releases to the current layout and moves the packages in
+`overrides\` into `mods\` (see [Mods](../docs/capabilities.md#mods)). The
+installer has no `migrate-overrides` command; `sh_mods migrate` repeats the move.
 
 ## Private release repositories
 

@@ -125,40 +125,14 @@ func TestInstallSupportedBuildTakesLatest(t *testing.T) {
 	}
 }
 
-// The 2018 build downloads the final 2018 release by tag and installs it as that release would;
-// moving the game to the supported build later replaces it with the current release.
-func TestInstall2018BuildTakesLegacyRelease(t *testing.T) {
-	syntheticProcessGuard(t, false)
-	tmp := t.TempDir()
-	t.Setenv("LOCALAPPDATA", filepath.Join(tmp, "appdata"))
-	asked := stubDownloads(t, tmp)
-	doom := doomWith(t, tmp, fake2018, fake2018)
-	if err := cmdInstall(flags{doom: doom, yes: true, beta: true}); err != nil {
-		t.Fatalf("install on 2018: %v", err)
-	}
-	if len(*asked) != 1 || (*asked)[0] != legacyReleaseTag {
-		t.Fatalf("download requests = %q, want %s", *asked, legacyReleaseTag)
-	}
-	if readF(t, filepath.Join(doom, "XINPUT1_3.dll")) != "backend-legacy" || exists(filepath.Join(doom, "XINPUT1_4.dll")) {
-		t.Fatal("the 2018 build must get the legacy release's XINPUT1_3.dll")
-	}
-	if rec, err := loadRecord(); err != nil || rec.Version != legacyReleaseTag {
-		t.Fatalf("record = %+v, %v", rec, err)
-	}
-
-	writeF(t, filepath.Join(doom, "DOOMx64vk.exe"), fakeExe)
-	writeF(t, filepath.Join(doom, "DOOMx64.exe"), fakeExe)
-	if err := cmdInstall(flags{doom: doom, yes: true}); err != nil {
-		t.Fatalf("update after the game moved to 13954591: %v", err)
-	}
-	if !exists(filepath.Join(doom, "XINPUT1_4.dll")) || exists(filepath.Join(doom, "XINPUT1_3.dll")) {
-		t.Fatal("after the move only the current release's XINPUT1_4.dll may remain")
-	}
-}
-
 // Unknown, mixed and mismatched requests are refused before any download or write.
 func TestInstallRefusalsDownloadNothing(t *testing.T) {
 	syntheticProcessGuard(t, false)
+	running := filepath.Join(t.TempDir(), selfExeAsset)
+	writeF(t, running, "installer")
+	savedExe := executablePath
+	executablePath = func() (string, error) { return running, nil }
+	t.Cleanup(func() { executablePath = savedExe })
 	cases := []struct {
 		vk, gl string
 		f      flags
@@ -182,6 +156,9 @@ func TestInstallRefusalsDownloadNothing(t *testing.T) {
 		}
 		if len(*asked) != 0 {
 			t.Errorf("case %d: refused install still downloaded %q", i, *asked)
+		}
+		if exists(filepath.Join(tmp, "appdata", "snapmap-plus", selfExeAsset)) {
+			t.Errorf("case %d: a refused install copied snapmap-plus.exe into app data", i)
 		}
 		entries, _ := os.ReadDir(doom)
 		if len(entries) > 2 {
@@ -314,5 +291,27 @@ func TestDescribeDoomGames(t *testing.T) {
 	}
 	if got := describeDoomGames(t.TempDir()); len(got) != 0 {
 		t.Errorf("empty folder: %q", got)
+	}
+}
+
+// install.ps1 resolves releases the way snapmap-plus.exe does: through the Releases API, falling
+// back to the newest beta (releases/latest/download never serves one), verifying the downloaded
+// installer against the published digest and stopping when an installer exits with an error.
+func TestBootstrapScriptResolvesAndVerifiesReleases(t *testing.T) {
+	script, err := os.ReadFile("install.ps1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(script)
+	if strings.Contains(s, "releases/latest/download") {
+		t.Error("install.ps1 downloads from releases/latest/download, which 404s while only betas are published")
+	}
+	for _, want := range []string{"Get-FileHash", "$asset.digest", "$asset.size", "SNAPMAP_PLUS_API_BASE", "-not $_.prerelease"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("install.ps1 lacks %q", want)
+		}
+	}
+	if n := strings.Count(s, "if ($LASTEXITCODE -ne 0)"); n != 2 {
+		t.Errorf("install.ps1 checks %d installer exit codes, want 2 (the 2018 and the current path)", n)
 	}
 }

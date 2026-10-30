@@ -60,12 +60,14 @@ top-level `webview2\` folder is renamed into `cache\` at the window's first star
 
 ### Mods
 
-The bundle ships no mods. Installed mods live in `%LOCALAPPDATA%\snapmap-plus\mods\`, which the backend
-reads at startup but never creates there: the folder appears when `sh_mods install` adds a mod or a map
-carrying a first-generation package is converted into a mod folder. Nothing is loaded from the retired
-`%LOCALAPPDATA%\snapmap-plus\overrides\` tree, and no `package-cache` or `package-staging` folder is
-created. Folders that earlier releases left are not touched; you can keep or delete them. The installer
-does not touch `mods\`. See [Mods](architecture.md#mods).
+The bundle ships no mods. Installed mods live in `%LOCALAPPDATA%\snapmap-plus\mods\`. The installer
+never creates, changes or removes `mods\` or the retired package folders (`overrides\`,
+`override-backups\`, `package-cache\`, `package-staging\`) on install, update, uninstall or reinstall.
+The backend owns both, at the first start of DOOM with this release: it converts a `mods\` folder of
+earlier releases in place to one folder per mod with a `mod.json`, and moves the packages in the retired
+`overrides\` folder into `mods\` once, changing nothing in `overrides\` and removing only an empty
+`override-backups\`. No `package-cache` or `package-staging` folder is created. See
+[Mods](capabilities.md#mods) for what each step does and [Mods](architecture.md#mods) for the design.
 
 The bundle also ships no `config.json`. That file is runtime-owned player data, separate from the
 installer's executable and `install.json` record. The installer never rewrites it and preserves it across
@@ -99,7 +101,12 @@ executables are separate links with no uniform delta between them.
 SteamStub-wrapped executables are `DOOMx64vk.exe` 139763E94F1A75B5310179F9EEEB8A949A1F53C49ACBC722FCFC5DFE7BB6D323
 and `DOOMx64.exe` D46CA967824DA6FFC40F1CE0B6D7F4AFA868FE12B795124D3E31A1BDB646A8E5). The
 installer and `install.ps1` identify that build by those digests and install
-v0.2.1-beta.19 by tag, so that release and its assets (`install.ps1`, `snapmap-plus.exe`,
+v0.2.1-beta.19 by tag: both download that release's own `snapmap-plus.exe`, check it against the
+size and digest GitHub publishes, and run its `install`, so its own steps (converting `overrides\`
+packages, the `my-overrides` starter) happen as they always did. The Go installer runs it as
+`snapmap-plus-v0.2.1-beta.19.exe` and removes that copy from `%LOCALAPPDATA%\snapmap-plus` afterwards,
+so the current installer stays the one kept there and the 2018 install keeps routing to that release on
+every update and reinstall. That release and its assets (`install.ps1`, `snapmap-plus.exe`,
 `snapmap-plus-bundle.zip`, `snapmap-plus-symbols.zip`) must stay published unchanged.
 `release.yml` must never delete, rebuild or overwrite it; it refuses to run for that tag.
 The tag lives in one constant, `legacyReleaseTag` in `installer/doombuild.go` (mirrored in
