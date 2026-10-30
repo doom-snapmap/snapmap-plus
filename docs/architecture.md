@@ -472,9 +472,21 @@ blob store and there are no hard links: a mod's files live in its own
 `assets\` only. A folder the author drops in keeps its name; one the product
 makes (an install, a download, a migration, a delivered package) is `<id>`,
 else `<id>@<version>`. Identity is the id: two folders declaring one id are
-both kept and both flagged. A delivered copy whose content an installed mod of
-the same id already serves is not stored; its hash is recorded as an alias of
-the installed bundle. `mods\snapmap-plus.json` is the product's one record:
+both kept and both flagged. A delivered copy or a download whose content an
+installed mod of the same id already serves is not stored; its hash is
+recorded as an alias of the installed bundle. A folder built again with new
+content (the rebuild rule, `sh_mods build`, an install replacing the folder of
+the same id and version) records the hash its product block named before as an
+alias of the new one, so a map saved against any earlier build loads the
+current one. The aliases stay flat: an alias naming the old hash is re-pointed
+at the new one, so one hop always resolves. Every lookup of a map's pinned
+hash goes through `sh_ms_resolve` (or the serving index's alias-aware lookup):
+activation, the Mods tab's This map pane, upload (which sends and claims the
+current build) and export (which carries the current build and rewrites the
+exported map's rows to name it). Saving a map writes rows from the serving
+index, so they name the build that serves. Removing a folder keeps its
+aliases while a folder of that id remains and drops them once none does.
+`mods\snapmap-plus.json` is the product's one record:
 `claims`, `links`, `pending`, `migration`, `cache` (tree hash to bundle hash)
 and `aliases`, each section written whole under one lock.
 

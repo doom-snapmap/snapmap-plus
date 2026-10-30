@@ -468,18 +468,17 @@ int modsync_pending_count(void)
 int modsync_find_installed(const char *hash, char *folder, size_t cap)
 {
     sh_ms_list l;
-    size_t i;
     int found = 0;
     if (folder && cap) folder[0] = 0;
     if (!modnet_valid_hash(hash)) return 0;
     modsync_store_lock();
     if (sh_ms_enumerate(&l)) {
-        for (i = 0; i < l.count && !found; i++) {
-            const sh_ms_entry *e = &l.items[i];
-            if (sh_ms_entry_usable(e) && strcmp(e->bundle.hash, hash) == 0) {
-                found = 1;
-                if (folder && cap) strncpy_s(folder, cap, e->folder, _TRUNCATE);
-            }
+        /* A hash an alias names (an earlier build, a deduplicated copy) is
+         * installed as the bundle the alias resolves to. */
+        const sh_ms_entry *e = sh_ms_resolve(&l, hash);
+        if (e && sh_ms_entry_usable(e)) {
+            found = 1;
+            if (folder && cap) strncpy_s(folder, cap, e->folder, _TRUNCATE);
         }
         sh_ms_list_free(&l);
     }
@@ -652,22 +651,7 @@ int modsync_install_manifest(const char *canonical, size_t len, const char *hash
         if (!sh_ms_entry_usable(e) || strcmp(e->bundle.id, b.id)) continue;
         sh_mb_content_key(&e->bundle, key);
         if (strcmp(key, content)) continue;
-        {
-            char *text_aliases = NULL, *out;
-            size_t n;
-            mpj *aliases = NULL;
-            sh_mb_record_lock();
-            if (sh_mb_record_get(root, "aliases", &text_aliases) == 1 && text_aliases)
-                aliases = mpj_parse(text_aliases, strlen(text_aliases));
-            free(text_aliases);
-            if (!aliases || aliases->type != MPJ_OBJ) { mpj_free(aliases); aliases = mpj_new(MPJ_OBJ); }
-            if (aliases && mpj_set(aliases, hash, mpj_new_str(e->bundle.hash)) && (out = mpj_dump(aliases, &n)) != NULL) {
-                sh_mb_record_put(root, "aliases", out);
-                free(out);
-            }
-            mpj_free(aliases);
-            sh_mb_record_unlock();
-        }
+        sh_ms_alias_note(hash, e->bundle.hash);
         msy_log("MODS: pull %.16s: %s serves the same content; recorded as an alias of %.16s, nothing stored", hash,
                 e->name, e->bundle.hash);
         strncpy_s(info->rel, sizeof info->rel, e->name, _TRUNCATE);
@@ -865,12 +849,16 @@ static int msy_up_collect(msy_up *u, const char *const *hashes, int n, char *cau
         unsigned char *text;
         size_t len = 0, k;
         int dup = 0, j;
-        for (j = 0; j < u->nb && !dup; j++) dup = strcmp(u->bundles[j].hash, hashes[i]) == 0;
-        if (dup) continue;
-        for (k = 0; k < l.count && !e; k++)
-            if (sh_ms_entry_usable(&l.items[k]) && strcmp(l.items[k].bundle.hash, hashes[i]) == 0) e = &l.items[k];
+        /* The map may pin an earlier build: what serves it now is uploaded. */
+        e = sh_ms_resolve(&l, hashes[i]);
+        if (e && !sh_ms_entry_usable(e)) e = NULL;
         if (!e) { ok = msy_cause(cause, cap, "bundle %.16s is not installed (or failed verification)", hashes[i]); break; }
-        strcpy_s(ub->hash, sizeof ub->hash, hashes[i]);
+        for (j = 0; j < u->nb && !dup; j++) dup = strcmp(u->bundles[j].hash, e->bundle.hash) == 0;
+        if (dup) continue;
+        if (strcmp(e->bundle.hash, hashes[i]))
+            msy_log("MODS: push: bundle %.16s was built again; uploading its current build %s (%.16s)", hashes[i],
+                    e->key, e->bundle.hash);
+        strcpy_s(ub->hash, sizeof ub->hash, e->bundle.hash);
         strncpy_s(ub->label, sizeof ub->label, e->key, _TRUNCATE);
         /* The canonical manifest, derived from mod.json in memory: the exact
          * bytes whose SHA-256 is the bundle hash, the only text the store accepts. */
@@ -880,7 +868,7 @@ static int msy_up_collect(msy_up *u, const char *const *hashes, int n, char *cau
         len = e->bundle.canonical_len;
         text[len] = 0;
         sh_mb_sha256_hex(text, len, actual);
-        if (strcmp(actual, hashes[i]) != 0) { free(text); ok = msy_cause(cause, cap, "%s: the canonical manifest does not hash to the bundle", e->key); break; }
+        if (strcmp(actual, ub->hash) != 0) { free(text); ok = msy_cause(cause, cap, "%s: the canonical manifest does not hash to the bundle", e->key); break; }
         ub->canonical = (char *)text;
         ub->len = len;
         ub->blobs = (char (*)[MODNET_HASH_HEX + 1])calloc(e->bundle.file_count ? e->bundle.file_count : 1, sizeof *ub->blobs);

@@ -4159,6 +4159,7 @@ int sh_mb_build(const char *folder, const sh_mb_resolver *resolver, sh_mb_bundle
     mb_finish(out);
     out->validated = out->errors == 0;
     out->built = (have_prev && !strcmp(prev.hash, out->hash) && prev.built > 0) ? prev.built : mb_now();
+    if (have_prev) memcpy(out->prev_hash, prev.hash, SH_MB_HASH_HEX + 1);
 finish:
     for (k = 0; k < ncarry; k++) { free(carry[k].request); free(carry[k].source); }
     free(carry);

@@ -256,13 +256,22 @@ typedef struct mu_model {
     int root_ok;
 } mu_model;
 
+/* The entry serving `hash`: its own bundle, or the one an alias of it names
+ * (an earlier build of a folder, a deduplicated copy). */
 static int mu_find_hash(const mu_model *m, const char *hash)
 {
-    size_t i;
-    if (!hash || !hash[0]) return -1;
-    for (i = 0; i < m->list.count; i++)
-        if (m->list.items[i].loaded && !strcmp(m->list.items[i].bundle.hash, hash)) return (int)i;
-    return -1;
+    const sh_ms_entry *e = sh_ms_resolve(&m->list, hash);
+    if (!e || !e->loaded) return -1;
+    return (int)(e - m->list.items);
+}
+
+/* Whether two pinned hashes name the same installed bundle. */
+static int mu_same_bundle(const mu_model *m, const char *a, const char *b)
+{
+    int x;
+    if (!strcmp(a, b)) return 1;
+    x = mu_find_hash(m, a);
+    return x >= 0 && x == mu_find_hash(m, b);
 }
 
 static int mu_find_id(const mu_model *m, const char *id, int except)
@@ -764,11 +773,12 @@ static void mu_map_free(mu_map *mp)
     mu_closure_free(&mp->closure);
 }
 
-static int mu_map_references(const mu_map *mp, const char *hash)
+/* Whether the open map pins `hash`, directly or through an alias. */
+static int mu_map_references(const mu_model *m, const mu_map *mp, const char *hash)
 {
     size_t i;
-    for (i = 0; i < mp->rows.count; i++) if (!strcmp(mp->rows.rows[i].bundle, hash)) return 1;
-    for (i = 0; i < mp->closure.count; i++) if (!strcmp(mp->closure.items[i].hash, hash)) return 1;
+    for (i = 0; i < mp->rows.count; i++) if (mu_same_bundle(m, mp->rows.rows[i].bundle, hash)) return 1;
+    for (i = 0; i < mp->closure.count; i++) if (mu_same_bundle(m, mp->closure.items[i].hash, hash)) return 1;
     return 0;
 }
 
@@ -810,7 +820,7 @@ static void mu_put_map(mu_buf *b, const mu_model *m, const mu_map *mp)
     for (i = 0; i < mp->closure.count; i++) {
         const mu_closure_bundle *cb = &mp->closure.items[i];
         int at = mu_find_hash(m, cb->hash), in_manifest = 0;
-        for (k = 0; k < mp->rows.count; k++) if (!strcmp(mp->rows.rows[k].bundle, cb->hash)) in_manifest = 1;
+        for (k = 0; k < mp->rows.count; k++) if (mu_same_bundle(m, mp->rows.rows[k].bundle, cb->hash)) in_manifest = 1;
         if (i) mu_putn(b, ",", 1);
         mu_putn(b, "{", 1);
         mu_kstr(b, "id", cb->id, 1);
@@ -1100,7 +1110,7 @@ static size_t mu_candidates(const mu_model *m, const mu_map *mp, mu_candidate *o
         int newer = -1;
         if (!e->loaded || e->delivered || !sh_ms_entry_usable(e)) continue;
         if (!mu_product_folder(e)) continue;
-        if (mu_map_references(mp, e->bundle.hash)) continue;
+        if (mu_map_references(m, mp, e->bundle.hash)) continue;
         for (k = 0; k < m->list.count; k++) {
             const sh_ms_entry *o = &m->list.items[k];
             if (k == i || !sh_ms_entry_usable(o) || strcmp(o->bundle.id, e->bundle.id)) continue;
@@ -1273,6 +1283,11 @@ static void mu_remove_marked(const mu_model *m, unsigned char *removing, mu_remo
         }
         free(from);
     }
+    /* Aliases naming a removed build stay while a folder of its id remains
+     * (a map pinning it loads that folder's build); else they are dropped. */
+    for (i = 0; i < n; i++)
+        if (removing[i] && m->list.items[i].loaded)
+            sh_ms_alias_forget(m->list.items[i].bundle.id, m->list.items[i].bundle.hash);
     if (out->removed) mu_rescan(out->note, sizeof out->note);
     for (i = 0; i < n; i++) {
         const sh_ms_entry *e = &m->list.items[i];
@@ -1384,7 +1399,7 @@ static int mu_remove(const char *key)
     for (i = 0; i < m.list.count; i++) {
         if (m.entries[i].row != row) continue;
         removing[i] = 1;
-        if (m.list.items[i].loaded && mu_map_references(&mp, m.list.items[i].bundle.hash)) used = 1;
+        if (m.list.items[i].loaded && mu_map_references(&m, &mp, m.list.items[i].bundle.hash)) used = 1;
     }
     if (used) {
         for (i = 0; i < m.list.count; i++) removing[i] = 0;

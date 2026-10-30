@@ -6,7 +6,8 @@
  *   409 at the manifest renegotiated, claim and re-claim with the secret
  *   kept in the claims section of mods\snapmap-plus.json, release, a 503
  *   queued in its pending section and retried, a 422 not queued, a cancelled
- *   push queued, and downloads into empty stores: installed as mods\<id> with
+ *   push queued, a map pinning an earlier build of a folder uploading its
+ *   current build, and downloads into empty stores: installed as mods\<id> with
  *   mod.json, verified and in the serving index, the same bundle again
  *   fetched from nowhere, a file an installed mod already holds copied
  *   instead of fetched, and a blob or manifest whose bytes do not match its
@@ -102,6 +103,9 @@ static const char *const B_FILES[] = { "assets/generated/image/mods/test.beta/sh
 static const char *const B_BYTES[] = { "bytes both bundles carry", "beta only bytes", NULL };
 static const char *const G_FILES[] = { "assets/generated/image/mods/test.gamma/g.bimage", NULL };
 static const char *const G_BYTES[] = { "gamma bytes", NULL };
+static const char *const D_FILES[] = { "assets/generated/image/mods/test.delta/d.bimage", NULL };
+static const char *const D_BYTES[] = { "delta bytes", NULL };
+static const char *const D2_BYTES[] = { "delta bytes, edited", NULL };
 static const char *const X_FILES[] = { "assets/generated/image/mods/test.extra/x.bimage", NULL };
 static const char *const X_BYTES[] = { "extra bytes", NULL };
 
@@ -231,6 +235,23 @@ int main(int argc, char **argv)
         CHECK(!modsync_upload_bundles(one, 1, "map-5", NULL, &st) && st.code == MODNET_E_ARG && !st.queued);
         CHECK(g_stub.requests == before);
         CHECK(!modsync_upload_bundles(one, 1, "", NULL, &st) && st.code == MODNET_E_ARG);
+    }
+
+    /* ---- a map pinning an earlier build: the current build is uploaded ---- */
+    {
+        char keyD[SH_MS_KEY_MAX + 1], hD1[65], hD2[65], folder[MAX_PATH * 4];
+        const char *old[] = { hD1 }, *both[] = { hD1, hD2 };
+        _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\delta", src);
+        make_mod(dir, "test.delta", NULL, D_FILES, D_BYTES);
+        CHECK(install(dir, keyD, hD1));
+        make_mod(dir, "test.delta", NULL, D_FILES, D2_BYTES);
+        CHECK(install(dir, keyD, hD2) && strcmp(hD1, hD2));   /* the same folder, build 2 */
+        CHECK(modsync_find_installed(hD1, folder, sizeof folder) && strstr(folder, "test.delta"));
+        CHECK(modsync_upload_bundles(old, 1, "map-6", NULL, &st));
+        CHECK(st.bundles == 1 && stub_has_bundle(hD2) && !stub_has_bundle(hD1));
+        CHECK(strstr(g_log, "was built again; uploading its current build test.delta@1.0.0+2") != NULL);
+        /* Both hashes name one bundle: it is sent and claimed once. */
+        CHECK(modsync_upload_bundles(both, 2, "map-6", NULL, &st) && st.bundles == 1 && stub_claim_bundles("map-6", NULL) == 1);
     }
 
     /* ---- release ---- */

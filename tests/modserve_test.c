@@ -632,6 +632,31 @@ static void test_plan(void)
     sh_modserve_plan_free(&p);
 }
 
+/* A map pinning an earlier build of a folder: the record's alias names the
+ * current build, and the plan resolves the pinned hash through it. */
+static void test_plan_alias(void)
+{
+    static const char OLD[] = "1234567890123456789012345678901234567890123456789012345678901234";
+    char aliases[160];
+    sh_modserve_plan p;
+    const char *hashes[1];
+    int unknown = 0, n;
+    _snprintf_s(aliases, sizeof aliases, _TRUNCATE, "{\"%s\":\"%s\"}", OLD, g_hash_a);
+    CHECK(sh_mb_record_put(g_root, "aliases", aliases));
+    n = sh_modserve_index_build(g_root);
+    CHECK(n == 6);
+    hashes[0] = OLD;
+    CHECK(sh_modserve_plan_bundles(hashes, 1, &p, &unknown) >= 1 && unknown == 0);
+    CHECK(step_index(&p, "entityDef", "mods/alex.pink-imp/fireball") >= 0);
+    sh_modserve_plan_free(&p);
+    CHECK(sh_modserve_bundle_state(OLD, NULL, 0) == 1);
+    /* Without the alias the pinned hash is unknown. */
+    CHECK(sh_mb_record_put(g_root, "aliases", NULL));
+    CHECK(sh_modserve_index_build(g_root) == n);
+    CHECK(sh_modserve_plan_bundles(hashes, 1, &p, &unknown) == 0 && unknown == 1);
+    sh_modserve_plan_free(&p);
+}
+
 static void test_plan_run(void)
 {
     sh_modserve_plan p;
@@ -1541,6 +1566,7 @@ int main(void)
     test_precedence();
     test_probe();
     test_plan();
+    test_plan_alias();
     test_plan_run();
     test_bundles_for_names();
     test_cost();

@@ -170,7 +170,7 @@ static void mc_build(const char *folder)
     else {
         mc_line("MODS: build %s: bundle %s written to mod.json's \"snapmap-plus\" block", folder, b.hash);
         if (mc_in_store(folder)) {
-            sh_ms_cache_note(folder, b.hash);
+            sh_ms_note_build(folder, &b);
             mc_rescan("build");
         }
     }
@@ -704,7 +704,7 @@ int modbundle_build_folder(const char *folder_acp, char *first_cause, size_t n)
         mc_line("MODS: build %s: valid but not written: %s", folder, cause);
     } else {
         ok = 1;
-        if (mc_in_store(folder)) sh_ms_cache_note(folder, b.hash);   /* built from its current tree */
+        if (mc_in_store(folder)) sh_ms_note_build(folder, &b);   /* built from its current tree; an earlier build becomes an alias */
         mc_line("MODS: build %s: %s@%s+%llu, %zu file(s), %llu byte(s); bundle %s written", folder, b.id,
                 b.version, b.build, b.file_count, b.total_size, b.hash);
         mc_needs_line("build", &b);

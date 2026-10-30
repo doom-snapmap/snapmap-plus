@@ -72,9 +72,17 @@ typedef struct sh_ms_entry {
     sh_mb_bundle bundle;
 } sh_ms_entry;
 
+/* One alias of the record: a bundle hash a map may pin that answers as `to`. */
+typedef struct sh_ms_alias {
+    char from[SH_MB_HASH_HEX + 1];
+    char to[SH_MB_HASH_HEX + 1];
+} sh_ms_alias;
+
 typedef struct sh_ms_list {
     sh_ms_entry *items;
     size_t count, cap;
+    sh_ms_alias *aliases;       /* the record's aliases when the list was read */
+    size_t alias_count;
 } sh_ms_list;
 
 /* An entry's bundle may serve names: loaded, sizes match, and validated. */
@@ -85,11 +93,42 @@ int  sh_ms_entry_usable(const sh_ms_entry *entry);
  * case-insensitively. */
 int  sh_ms_entry_matches(const sh_ms_entry *entry, const char *spec);
 
-/* List every mod folder under the root. Folders with a descriptor but no
- * built product block are listed unloaded with the cause. Returns 1 when the
- * root could be read (an absent root is an empty list). */
+/* List every mod folder under the root, and the record's aliases. Folders
+ * with a descriptor but no built product block are listed unloaded with the
+ * cause. Returns 1 when the root could be read (an absent root is an empty
+ * list). */
 int  sh_ms_enumerate(sh_ms_list *out);
 void sh_ms_list_free(sh_ms_list *list);
+
+/* Aliases (the record's "aliases" section, hash -> hash) keep a map that pins
+ * an earlier bundle hash loading: a delivered copy or a download whose content
+ * an installed mod already serves, and every earlier build of a folder that
+ * was built again (a rebuild on rescan, sh_mods build, an install replacing
+ * the folder of the same id and version). The section is flat: every target
+ * is a bundle hash, never another alias, so one hop always resolves.
+ *
+ * sh_ms_resolve finds the entry serving `hash`: an entry whose bundle hash is
+ * `hash` (a usable one first), else the entry the alias of `hash` names.
+ * Every lookup of a map's pinned hash goes through it. NULL when neither. */
+const sh_ms_entry *sh_ms_resolve(const sh_ms_list *list, const char *hash);
+
+/* Record that `old_hash` now answers as `new_hash`: aliases naming old_hash
+ * are re-pointed at new_hash, old_hash -> new_hash is added, and an alias
+ * from new_hash (a build returning to earlier content) is dropped. Returns
+ * the number of aliases now naming new_hash, 0 when nothing was recorded. */
+int  sh_ms_alias_note(const char *old_hash, const char *new_hash);
+
+/* After a folder of `id` serving `hash` was removed: when no folder of the
+ * store serves `hash` and none declares `id`, the aliases naming `hash` are
+ * dropped (they could resolve nothing). Otherwise they stay. Returns the
+ * number dropped. */
+int  sh_ms_alias_forget(const char *id, const char *hash);
+
+/* A folder of the store was built and its mod.json written: the build cache
+ * notes it (sh_ms_cache_note) and, when the product block named another
+ * bundle before (b->prev_hash), that hash becomes an alias of the new one.
+ * Returns 1 when the cache note was written. */
+int  sh_ms_note_build(const char *folder, const sh_mb_bundle *b);
 
 typedef struct sh_ms_install_stats {
     unsigned copied;            /* carried files copied into the store */

@@ -5,8 +5,10 @@
  * shared file restored from the other bundle's entry, the serving index
  * holding both, the map text returned unchanged); a second import installs
  * nothing; a damaged entry, a mislabelled manifest and a map naming an
- * uninstalled bundle are refused; the rawmap hooks take ANSI paths and
- * return process-heap text. Pure file work: no network.
+ * uninstalled bundle are refused; a map pinning an earlier build of a folder
+ * exports the current build and names it in the exported map; the rawmap
+ * hooks take ANSI paths and return process-heap text. Pure file work: no
+ * network.
  */
 #include <windows.h>
 #include <stdio.h>
@@ -344,6 +346,53 @@ int main(int argc, char **argv)
         if (heap) HeapFree(GetProcessHeap(), 0, heap);
         CHECK(sh_modserve_bundle_state(ra.bundle, NULL, 0) == 1);
         CHECK(modexport_read_text(plain, &len) == NULL);
+    }
+
+    /* ---- a map pinning an earlier build of a folder ---- */
+    {
+        static const char *const C2_BYTES[] = { "gamma bytes, edited", NULL };
+        sh_modmanifest_row rc2;
+        sh_modmanifest_list got;
+        unsigned rejected = 0;
+        char zip3[MAX_PATH * 2], storeD[MAX_PATH * 2], *pinned, *text;
+        size_t pl = 0, len = 0;
+        _snprintf_s(zip3, sizeof zip3, _TRUNCATE, "%s\\pinned.zip", tmp);
+        _snprintf_s(storeD, sizeof storeD, _TRUNCATE, "%s\\storeD", tmp);
+        CHECK(sh_ms_set_root(storeA));
+        _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\gamma", src);
+        make_mod(dir, "test.gamma", C_FILES, C2_BYTES);
+        CHECK(install(dir, keyC, &rc2) && strcmp(rc2.bundle, rc.bundle));   /* the same folder, build 2 */
+        memset(&rows, 0, sizeof rows);
+        CHECK(sh_modmanifest_list_add(&rows, &ra) && sh_modmanifest_list_add(&rows, &rc));
+        pinned = sh_modmanifest_write(BASE_MAP, sizeof BASE_MAP - 1, &rows, &pl, err, sizeof err);
+        sh_modmanifest_list_free(&rows);
+        CHECK(pinned && strstr(pinned, rc.bundle));
+        CHECK(pinned && modexport_write(pinned, pl, zip3, &st, cause, sizeof cause));
+        if (!pinned || !st.bundles) fprintf(stderr, "pinned export: %s\n", cause);
+        CHECK(st.bundles == 2);
+        CHECK(sh_ms_set_root(storeD));
+        CHECK(sh_modserve_index_build(storeD) == 0);
+        text = modexport_read(zip3, &len, &st, cause, sizeof cause);
+        if (!text) fprintf(stderr, "pinned import: %s\n", cause);
+        CHECK(text && st.bundles_installed == 2);
+        /* The exported map names the build the export carries. */
+        memset(&got, 0, sizeof got);
+        if (text) sh_modmanifest_read(text, len, &got, &rejected);
+        CHECK(got.count == 2 && rejected == 0);
+        CHECK(got.count == 2 && (!strcmp(got.rows[0].bundle, rc2.bundle) || !strcmp(got.rows[1].bundle, rc2.bundle)));
+        CHECK(text && !strstr(text, rc.bundle));
+        CHECK(sh_modserve_bundle_state(rc2.bundle, NULL, 0) == 1);
+        sh_modmanifest_list_free(&got);
+        free(text);
+        if (pinned) HeapFree(GetProcessHeap(), 0, pinned);
+        /* Two rows naming two builds of one folder become one row. */
+        CHECK(sh_ms_set_root(storeA));
+        memset(&rows, 0, sizeof rows);
+        CHECK(sh_modmanifest_list_add(&rows, &rc) && sh_modmanifest_list_add(&rows, &rc2));
+        pinned = sh_modmanifest_write(BASE_MAP, sizeof BASE_MAP - 1, &rows, &pl, err, sizeof err);
+        sh_modmanifest_list_free(&rows);
+        CHECK(pinned && modexport_write(pinned, pl, zip3, &st, cause, sizeof cause) && st.bundles == 1);
+        if (pinned) HeapFree(GetProcessHeap(), 0, pinned);
     }
 
     HeapFree(GetProcessHeap(), 0, map);

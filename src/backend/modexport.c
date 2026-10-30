@@ -538,6 +538,7 @@ int modexport_write(const char *map_json, size_t len, const char *zip_path, mode
     size_t i, k, total_files = 0;
     double t0 = me_now_ms();
     int ok = 0, listed = 0, locked = 0;
+    char *moved_map = NULL;
 
     memset(st, 0, sizeof *st);
     memset(&rows, 0, sizeof rows);
@@ -558,15 +559,62 @@ int modexport_write(const char *map_json, size_t len, const char *zip_path, mode
     picked = (const sh_ms_entry **)calloc(rows.count ? rows.count : 1, sizeof *picked);
     if (!picked) { me_cause(cause, cap, "out of memory"); goto done; }
     for (i = 0; i < rows.count; i++) {
-        for (k = 0; k < l.count && !picked[i]; k++)
-            if (sh_ms_entry_usable(&l.items[k]) && strcmp(l.items[k].bundle.hash, rows.rows[i].bundle) == 0) picked[i] = &l.items[k];
+        picked[i] = sh_ms_resolve(&l, rows.rows[i].bundle);
+        if (picked[i] && !sh_ms_entry_usable(picked[i])) picked[i] = NULL;
         if (!picked[i]) {
             me_cause(cause, cap, "the map needs %s@%s (bundle %.16s), which is not installed or failed verification",
                      rows.rows[i].id, rows.rows[i].version, rows.rows[i].bundle);
             goto done;
         }
-        total_files += picked[i]->bundle.file_count;
     }
+    {
+        /* A row may pin an earlier build (an alias): the export carries the
+         * build serving it now, and the exported map's rows name that build,
+         * so the importer needs no alias. */
+        sh_modmanifest_list fixed;
+        size_t moved = 0, map_len = 0;
+        char err[160] = "";
+        for (i = 0; i < rows.count; i++) if (strcmp(picked[i]->bundle.hash, rows.rows[i].bundle)) moved++;
+        if (moved) {
+            memset(&fixed, 0, sizeof fixed);
+            for (i = 0; i < rows.count; i++) {
+                const sh_mb_bundle *b = &picked[i]->bundle;
+                sh_modmanifest_row *r = NULL;
+                for (k = 0; k < fixed.count && !r; k++) if (!strcmp(fixed.rows[k].bundle, b->hash)) r = &fixed.rows[k];
+                if (r) {
+                    for (k = 0; k < rows.rows[i].name_count; k++)
+                        if (!sh_modmanifest_row_add_name(r, rows.rows[i].names[k])) { r = NULL; break; }
+                    if (!r) { sh_modmanifest_list_free(&fixed); me_cause(cause, cap, "out of memory"); goto done; }
+                    continue;
+                }
+                if (!sh_modmanifest_list_add(&fixed, &rows.rows[i])) {
+                    sh_modmanifest_list_free(&fixed);
+                    me_cause(cause, cap, "out of memory");
+                    goto done;
+                }
+                r = &fixed.rows[fixed.count - 1];
+                strcpy_s(r->bundle, sizeof r->bundle, b->hash);
+                strncpy_s(r->id, sizeof r->id, b->id, _TRUNCATE);
+                strncpy_s(r->version, sizeof r->version, b->version, _TRUNCATE);
+                r->size = b->total_size;
+            }
+            moved_map = sh_modmanifest_write(map_json, len, &fixed, &map_len, err, sizeof err);
+            if (!moved_map) {
+                sh_modmanifest_list_free(&fixed);
+                me_cause(cause, cap, "the map's rows could not be moved to the current builds: %s", err[0] ? err : "unknown");
+                goto done;
+            }
+            me_log("MODS: export: %zu row(s) pinned an earlier build; the export carries and names the current one(s)", moved);
+            map_json = moved_map;
+            len = map_len;
+            sh_modmanifest_list_free(&rows);
+            rows = fixed;
+            for (i = 0; i < rows.count; i++) picked[i] = sh_ms_resolve(&l, rows.rows[i].bundle);
+            st->bundles = (unsigned)rows.count;
+            st->map_bytes = len;
+        }
+    }
+    for (i = 0; i < rows.count; i++) total_files += picked[i]->bundle.file_count;
     if (!me_hset_init(&written, total_files + 1)) { me_cause(cause, cap, "out of memory"); goto done; }
 
     /* export.json: what the importer installs, in row order. */
@@ -655,6 +703,7 @@ done:
     me_hset_free(&written);
     free(index.p);
     free(picked);
+    free(moved_map);
     free(wfinal);
     free(wtmp);
     if (listed) sh_ms_list_free(&l);
@@ -799,12 +848,15 @@ static int me_import_open(me_import *im, const char *zip_path, int manifests, ch
 static void me_installed_mark(me_import *im)
 {
     sh_ms_list l;
-    size_t i, k;
+    size_t i;
     modsync_store_lock();
     if (sh_ms_enumerate(&l)) {
-        for (i = 0; i < im->nb; i++)
-            for (k = 0; k < l.count && !im->bundles[i].present; k++)
-                im->bundles[i].present = sh_ms_entry_usable(&l.items[k]) && strcmp(l.items[k].bundle.hash, im->bundles[i].hash) == 0;
+        for (i = 0; i < im->nb; i++) {
+            /* A hash an alias names here (an earlier build of an installed
+             * folder) is present: the imported map loads what it resolves to. */
+            const sh_ms_entry *e = sh_ms_resolve(&l, im->bundles[i].hash);
+            im->bundles[i].present = e && sh_ms_entry_usable(e);
+        }
         sh_ms_list_free(&l);
     }
     modsync_store_unlock();

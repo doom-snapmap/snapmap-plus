@@ -165,6 +165,8 @@ typedef struct sh_mb_bundle {
     char *canonical;       /* canonical manifest text (NUL-terminated) */
     size_t canonical_len;
     char  hash[SH_MB_HASH_HEX + 1];   /* SHA-256 of canonical */
+    char  prev_hash[SH_MB_HASH_HEX + 1];   /* sh_mb_build: the bundle hash the folder's product
+                                              block named before this build, "" when none */
     char  descriptor[16];  /* "mod.json", "package.json" or "bundle.json" (a manifest text) */
     int   legacy;          /* the descriptor (or the manifest's extra) carries a "legacy" object:
                               shadows need not be stock and unresolved needs only warn */

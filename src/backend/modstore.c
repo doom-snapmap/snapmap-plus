@@ -465,6 +465,7 @@ void sh_ms_list_free(sh_ms_list *l)
         free(l->items[i].folder);
     }
     free(l->items);
+    free(l->aliases);
     memset(l, 0, sizeof *l);
 }
 
@@ -540,6 +541,53 @@ static void ms_load_entry(sh_ms_list *l, const wchar_t *folder, const wchar_t *l
                   _TRUNCATE);
 }
 
+static int ms_is_hash(const char *h)
+{
+    size_t i;
+    if (!h) return 0;
+    for (i = 0; i < SH_MB_HASH_HEX; i++)
+        if (!((h[i] >= '0' && h[i] <= '9') || (h[i] >= 'a' && h[i] <= 'f') || (h[i] >= 'A' && h[i] <= 'F'))) return 0;
+    return h[SH_MB_HASH_HEX] == 0;
+}
+
+/* The entry whose bundle hash is `hash`, a usable one first. */
+static const sh_ms_entry *ms_by_hash(const sh_ms_list *l, const char *hash)
+{
+    const sh_ms_entry *first = NULL;
+    size_t i;
+    for (i = 0; i < l->count; i++) {
+        const sh_ms_entry *e = &l->items[i];
+        if (!e->bundle.hash[0] || _stricmp(e->bundle.hash, hash)) continue;
+        if (sh_ms_entry_usable(e)) return e;
+        if (!first) first = e;
+    }
+    return first;
+}
+
+/* The record's aliases into the list (an unreadable section is no aliases). */
+static void ms_load_aliases(sh_ms_list *out)
+{
+    char root[MAX_PATH * 4], *text = NULL;
+    sh_json_object o;
+    size_t i;
+    memset(&o, 0, sizeof o);
+    if (!sh_ms_root(root, sizeof root)) return;
+    if (sh_mb_record_get(root, "aliases", &text) == 1 && text && sh_json_parse_object(text, strlen(text), 4, &o) &&
+        o.count && (out->aliases = (sh_ms_alias *)calloc(o.count, sizeof *out->aliases)) != NULL) {
+        for (i = 0; i < o.count; i++) {
+            const char *v = o.members[i].value_json;
+            sh_ms_alias *a = &out->aliases[out->alias_count];
+            if (!ms_is_hash(o.members[i].key) || !v || v[0] != '"' || strlen(v) != SH_MB_HASH_HEX + 2) continue;
+            memcpy(a->from, o.members[i].key, SH_MB_HASH_HEX + 1);
+            memcpy(a->to, v + 1, SH_MB_HASH_HEX);
+            a->to[SH_MB_HASH_HEX] = 0;
+            if (ms_is_hash(a->to)) out->alias_count++;
+        }
+    }
+    sh_json_object_free(&o);
+    free(text);
+}
+
 static int ms_entry_cmp(const void *a, const void *b)
 {
     const sh_ms_entry *x = (const sh_ms_entry *)a, *y = (const sh_ms_entry *)b;
@@ -572,7 +620,102 @@ int sh_ms_enumerate(sh_ms_list *out)
     }
     free(root);
     if (out->count > 1) qsort(out->items, out->count, sizeof(sh_ms_entry), ms_entry_cmp);
+    ms_load_aliases(out);
     return 1;
+}
+
+/* ---------------------------------------------------------- aliases ---- */
+
+const sh_ms_entry *sh_ms_resolve(const sh_ms_list *l, const char *hash)
+{
+    const sh_ms_entry *e;
+    size_t i;
+    if (!l || !hash || !hash[0]) return NULL;
+    if ((e = ms_by_hash(l, hash)) != NULL) return e;
+    for (i = 0; i < l->alias_count; i++)
+        if (!_stricmp(l->aliases[i].from, hash)) return ms_by_hash(l, l->aliases[i].to);
+    return NULL;
+}
+
+static int ms_alias_rewrite(const char *old_hash, const char *new_hash, const char *forget, int *count)
+{
+    char root[MAX_PATH * 4], *text = NULL, *out, value[SH_MB_HASH_HEX + 3], old_value[SH_MB_HASH_HEX + 3];
+    char forget_value[SH_MB_HASH_HEX + 3];
+    sh_json_object cur, next;
+    size_t i;
+    int ok = 0, n = 0, dropped = 0, changed = 0;
+    if (!sh_ms_root(root, sizeof root)) return 0;
+    memset(&cur, 0, sizeof cur);
+    memset(&next, 0, sizeof next);
+    value[0] = old_value[0] = forget_value[0] = 0;
+    if (new_hash) _snprintf_s(value, sizeof value, _TRUNCATE, "\"%s\"", new_hash);
+    if (old_hash) _snprintf_s(old_value, sizeof old_value, _TRUNCATE, "\"%s\"", old_hash);
+    if (forget) _snprintf_s(forget_value, sizeof forget_value, _TRUNCATE, "\"%s\"", forget);
+    sh_mb_record_lock();
+    if (sh_mb_record_get(root, "aliases", &text) == 1 && text) sh_json_parse_object(text, strlen(text), 4, &cur);
+    for (i = 0; i < cur.count; i++) {
+        const sh_json_member *m = &cur.members[i];
+        const char *v = m->value_json;
+        if (new_hash && !_stricmp(m->key, new_hash)) { changed = 1; continue; }   /* a build returned to that content */
+        if (old_hash && !_stricmp(m->key, old_hash)) { changed = 1; continue; }   /* set again below */
+        if (forget && !_stricmp(v, forget_value)) { dropped++; changed = 1; continue; }
+        if (old_hash && !_stricmp(v, old_value)) { v = value; changed = 1; }    /* flat: one hop */
+        if (!sh_json_object_set(&next, m->key, v, 4)) goto done;
+        if (new_hash && !_stricmp(v, value)) n++;
+    }
+    if (old_hash && new_hash) {
+        if (!sh_json_object_set(&next, old_hash, value, 4)) goto done;
+        n++;
+        changed = 1;
+    }
+    ok = 1;
+    if (changed) {
+        out = sh_json_serialize_object(&next, 0, NULL);
+        ok = out && sh_mb_record_put(root, "aliases", next.count ? out : NULL);
+        free(out);
+    }
+done:
+    sh_mb_record_unlock();
+    sh_json_object_free(&cur);
+    sh_json_object_free(&next);
+    free(text);
+    if (count) *count = forget ? dropped : n;
+    return ok;
+}
+
+int sh_ms_alias_note(const char *old_hash, const char *new_hash)
+{
+    int n = 0;
+    if (!ms_is_hash(old_hash) || !ms_is_hash(new_hash) || !_stricmp(old_hash, new_hash)) return 0;
+    return ms_alias_rewrite(old_hash, new_hash, NULL, &n) ? n : 0;
+}
+
+int sh_ms_alias_forget(const char *id, const char *hash)
+{
+    sh_ms_list l;
+    size_t i;
+    int n = 0, keep = 0;
+    if (!ms_is_hash(hash)) return 0;
+    if (!sh_ms_enumerate(&l)) return 0;
+    for (i = 0; i < l.count && !keep; i++) {
+        const sh_ms_entry *e = &l.items[i];
+        if (!_stricmp(e->bundle.hash, hash) || (id && id[0] && !strcmp(e->bundle.id, id))) keep = 1;
+    }
+    sh_ms_list_free(&l);
+    if (keep) return 0;
+    if (!ms_alias_rewrite(NULL, NULL, hash, &n)) return 0;
+    if (n) ms_log("MODS: store: %d alias(es) of bundle %.16s dropped: no folder of %s remains", n, hash,
+                  id && id[0] ? id : "it");
+    return n;
+}
+
+int sh_ms_note_build(const char *folder, const sh_mb_bundle *b)
+{
+    int ok;
+    if (!folder || !b) return 0;
+    ok = sh_ms_cache_note(folder, b->hash);
+    if (b->prev_hash[0] && _stricmp(b->prev_hash, b->hash)) sh_ms_alias_note(b->prev_hash, b->hash);
+    return ok;
 }
 
 /* ---------------------------------------------------------- resolve ---- */
@@ -793,7 +936,7 @@ static int ms_build_in_place(const char *folder, const sh_mb_resolver *resolver,
         return ms_cause(cause, cap, "%s", one);
     }
     ms_note_cause(folder, NULL);
-    sh_ms_cache_note(folder, b->hash);
+    sh_ms_note_build(folder, b);
     return 1;
 }
 
@@ -843,7 +986,7 @@ static int ms_install_locked(const char *folder, const char *as_name, const sh_m
     sh_ms_list list;
     wchar_t *root = NULL, *src = NULL, *final = NULL, *staging = NULL, *old = NULL;
     char rootu[MAX_PATH * 4], name[SH_MS_NAME_MAX + 1], one[SH_MB_CAUSE_MAX];
-    char *author = NULL, *text = NULL;
+    char *author = NULL, *text = NULL, replaced_hash[SH_MB_HASH_HEX + 1] = "";
     size_t i, author_len = 0, text_len = 0;
     int ok = 0, have_list;
 
@@ -898,6 +1041,7 @@ static int ms_install_locked(const char *folder, const char *as_name, const sh_m
             else b.built = same->bundle.built;
         }
         if (same && (!as_name || !as_name[0])) strncpy_s(name, sizeof name, same->name, _TRUNCATE);
+        if (same) strcpy_s(replaced_hash, sizeof replaced_hash, same->bundle.hash);
     }
     if (as_name && as_name[0]) {
         strncpy_s(name, sizeof name, as_name, _TRUNCATE);
@@ -980,8 +1124,16 @@ static int ms_install_locked(const char *folder, const char *as_name, const sh_m
         goto done;
     }
     if (st->replaced) {
+        int earlier = 0;
         ms_rmtree(old, root);
-        ms_log("MODS: replaced the installed %s with a new build of %s@%s", name, b.id, b.version);
+        /* Maps that pin the replaced build (or one before it) load this one. */
+        if (replaced_hash[0] && _stricmp(replaced_hash, b.hash)) earlier = sh_ms_alias_note(replaced_hash, b.hash);
+        if (earlier)
+            ms_log("MODS: replaced the installed %s with a new build of %s@%s+%llu, bundle %.16s; "
+                   "%d earlier bundle(s) now resolve to it (alias of %.16s)", name, b.id, b.version, b.build, b.hash,
+                   earlier, replaced_hash);
+        else
+            ms_log("MODS: replaced the installed %s with a new build of %s@%s", name, b.id, b.version);
     }
     {
         char *fu = sh_mb_utf8(final);
@@ -1048,11 +1200,15 @@ int sh_ms_sync(const sh_mb_resolver *resolver, sh_ms_sync_stats *st)
                 char cause[SH_MB_CAUSE_MAX];
                 ULONGLONG b0 = GetTickCount64();
                 if (ms_build_in_place(folder, resolver, &b, cause, sizeof cause)) {
+                    char lineage[96] = "";
                     st->rebuilt++;
-                    ms_log("MODS: store: %s built: %s@%s+%llu, bundle %.16s, %zu file(s) (%u stock pointer(s)), %llu ms%s",
+                    if (b.prev_hash[0] && _stricmp(b.prev_hash, b.hash))
+                        _snprintf_s(lineage, sizeof lineage, _TRUNCATE, "; bundle %.16s is now an alias of it", b.prev_hash);
+                    ms_log("MODS: store: %s built: %s@%s+%llu, bundle %.16s, %zu file(s) (%u stock pointer(s)), %llu ms%s%s",
                            ms_leaf(folder), b.id, b.version, b.build, b.hash, b.file_count, b.stock_count,
                            (unsigned long long)(GetTickCount64() - b0),
-                           have[0] && strcmp(have, b.hash) ? ", its tree changed" : (have[0] ? ", unchanged content" : ""));
+                           have[0] && strcmp(have, b.hash) ? ", its tree changed" : (have[0] ? ", unchanged content" : ""),
+                           lineage);
                     strcpy_s(have, sizeof have, b.hash);
                     sh_mb_tree_hash(folder, tree);   /* a package.json became mod.json: same author bytes */
                     _snprintf_s(value, sizeof value, _TRUNCATE, "\"%s\"", have);

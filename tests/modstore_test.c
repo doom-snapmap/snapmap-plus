@@ -4,7 +4,9 @@
  * and build cache), resolve_need hit, miss, dedupe and conflict, the store
  * lock (a second installer waits, two installers at once both succeed), and
  * the upgrade of the retired layout (bundle.json, .state.json, blobs\ with
- * hard links, legacy\, the product files) to mod.json folders.
+ * hard links, legacy\, the product files) to mod.json folders, and the
+ * aliases a rebuild leaves (every earlier build of a folder resolves to the
+ * current one in one hop; removal drops them only when nothing of the id is left).
  *
  *   modstore_test.exe <tests\fixtures\mods\alex.r2-imp>
  */
@@ -121,6 +123,50 @@ static void make_small_mod(const char *dir, const char *id)
     _snprintf_s(rel, sizeof rel, _TRUNCATE, "assets\\generated\\image\\mods\\%s\\a.bimage", id);
     _snprintf_s(text, sizeof text, _TRUNCATE, "bytes of %s for the lock test", id);
     mt_write(dir, rel, text);
+}
+
+/* ------------------------------------------------------------ aliases */
+
+static const char *alias_of(const sh_ms_list *l, const char *from)
+{
+    size_t i;
+    for (i = 0; i < l->alias_count; i++) if (!strcmp(l->aliases[i].from, from)) return l->aliases[i].to;
+    return NULL;
+}
+
+static int alias_targets(const sh_ms_list *l, const char *to)
+{
+    size_t i;
+    int n = 0;
+    for (i = 0; i < l->alias_count; i++) if (!strcmp(l->aliases[i].to, to)) n++;
+    return n;
+}
+
+/* The section stays flat: a chain of notes re-points every earlier alias. */
+static void test_alias_note(void)
+{
+    sh_ms_list l;
+    const char *A = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const char *B = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const char *C = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+    CHECK(sh_ms_alias_note(A, B) == 1);
+    CHECK(sh_ms_alias_note(B, C) == 2);
+    CHECK(sh_ms_enumerate(&l));
+    CHECK(alias_of(&l, A) && !strcmp(alias_of(&l, A), C));
+    CHECK(alias_of(&l, B) && !strcmp(alias_of(&l, B), C));
+    CHECK(!alias_of(&l, C));
+    sh_ms_list_free(&l);
+    /* Back to A's content under A's hash: A is a bundle again, not an alias. */
+    CHECK(sh_ms_alias_note(C, A) == 2);
+    CHECK(sh_ms_enumerate(&l));
+    CHECK(!alias_of(&l, A) && alias_of(&l, B) && !strcmp(alias_of(&l, B), A) && !strcmp(alias_of(&l, C), A));
+    sh_ms_list_free(&l);
+    CHECK(sh_ms_alias_note(A, A) == 0 && sh_ms_alias_note("nothex", A) == 0);
+    /* No folder serves A and none declares the id: its aliases go. */
+    CHECK(sh_ms_alias_forget("test.nobody", A) == 2);
+    CHECK(sh_ms_enumerate(&l));
+    CHECK(!alias_of(&l, B) && !alias_of(&l, C));
+    sh_ms_list_free(&l);
 }
 
 /* ------------------------------------------------------------ the retired layout */
@@ -318,7 +364,7 @@ int main(int argc, char **argv)
     sh_ms_hit hit;
     sh_mb_bundle b;
     const sh_ms_entry *e;
-    char h1[65];
+    char h1[65], h0[65], d1[65] = "", d2[65] = "", d3[65] = "";
 
     if (!GetFullPathNameA(argc > 1 ? argv[1] : "fixtures\\mods\\alex.r2-imp", sizeof fixture, fixture, NULL)) return 2;
     if (!mt_temp_dir("modstore", tmp, sizeof tmp)) { fprintf(stderr, "no temp dir\n"); return 2; }
@@ -355,6 +401,7 @@ int main(int argc, char **argv)
     CHECK(links_of(path) == 1);
     CHECK(!(GetFileAttributesA(path) & FILE_ATTRIBUTE_READONLY));
     strcpy_s(h1, sizeof h1, b.hash);
+    strcpy_s(h0, sizeof h0, b.hash);
     sh_mb_free(&b);
 
     /* Enumeration reads mod.json and checks sizes. */
@@ -392,8 +439,19 @@ int main(int argc, char **argv)
     /* Changed content of the same version replaces it as build 2 (no blobs). */
     mt_append(src, "assets\\generated\\decls\\entitydef\\mods\\alex.r2-imp\\imp_copy.decl", "\r\n// edited\r\n");
     mt_write(src, "mod.json", slurp(fixture, "mod.json", NULL));
+    g_logged = 0;
     CHECK(sh_ms_install_from_folder(src, &RESOLVER, key, sizeof key, &st, &b, cause, sizeof cause));
     CHECK(!strcmp(key, "alex.r2-imp") && st.replaced && b.build == 2 && strcmp(b.hash, h1));
+    /* A map pinning build 1 loads build 2: the replaced hash is an alias. */
+    CHECK(log_has("1 earlier bundle(s) now resolve to it"));
+    CHECK(sh_ms_enumerate(&list));
+    CHECK(alias_of(&list, h1) && !strcmp(alias_of(&list, h1), b.hash));
+    e = sh_ms_resolve(&list, h1);
+    CHECK(e && !strcmp(e->name, "alex.r2-imp") && !strcmp(e->bundle.hash, b.hash));
+    CHECK(sh_ms_resolve(&list, b.hash) == e);
+    CHECK(!sh_ms_resolve(&list, "0000000000000000000000000000000000000000000000000000000000000000"));
+    sh_ms_list_free(&list);
+    strcpy_s(h1, sizeof h1, b.hash);
     sh_mb_free(&b);
 
     /* A second version installs beside it as <id>@<version>. */
@@ -469,16 +527,25 @@ int main(int argc, char **argv)
     e = find_entry(&list, "My Dropped Mod");
     CHECK(e && sh_ms_entry_usable(e) && !e->bundle.origin[0]);
     sh_ms_list_free(&list);
+    CHECK(sh_ms_enumerate(&list));
+    e = find_entry(&list, "My Dropped Mod");
+    if (e) strcpy_s(d1, sizeof d1, e->bundle.hash);
+    sh_ms_list_free(&list);
     /* Unchanged trees are not built again: the cache answers. */
     g_logged = 0;
     CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.rebuilt == 0 && ss.failed == 0);
-    /* An edit under assets is a new tree: built again (build 2). */
+    /* An edit under assets is a new tree: built again (build 2), and build 1's
+     * hash becomes an alias of it, so a map saved against build 1 still loads. */
     mt_write(hand, "assets\\generated\\decls\\entitydef\\mods\\alex.dropped\\thing.decl",
              "{\r\n\tinherit = \"mods/alex.r2-imp/imp_copy\";\r\n\t// edited\r\n}");
     CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.rebuilt == 1);
+    CHECK(log_has("its tree changed; bundle ") && log_has(" is now an alias of it"));
     CHECK(sh_ms_enumerate(&list));
     e = find_entry(&list, "My Dropped Mod");
     CHECK(e && sh_ms_entry_usable(e) && e->bundle.build == 2);
+    if (e) strcpy_s(d2, sizeof d2, e->bundle.hash);
+    CHECK(strcmp(d1, d2) && alias_of(&list, d1) && !strcmp(alias_of(&list, d1), d2));
+    CHECK(sh_ms_resolve(&list, d1) == e);
     sh_ms_list_free(&list);
     /* A refused rebuild leaves the cause on the folder, which stops serving. */
     mt_write(hand, "assets\\generated\\decls\\entitydef\\other\\x.decl", "{\r\n}");
@@ -489,6 +556,22 @@ int main(int argc, char **argv)
     sh_ms_list_free(&list);
     mt_delete(hand, "assets\\generated\\decls\\entitydef\\other\\x.decl");
     CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.rebuilt == 1 && ss.failed == 0);
+    /* Another edit: build 3. Chained rebuilds stay one hop: builds 1 and 2
+     * both name build 3, and no alias names an alias. */
+    mt_write(hand, "assets\\generated\\decls\\entitydef\\mods\\alex.dropped\\thing.decl",
+             "{\r\n\tinherit = \"mods/alex.r2-imp/imp_copy\";\r\n\t// edited twice\r\n}");
+    CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.rebuilt == 1 && ss.failed == 0);
+    CHECK(sh_ms_enumerate(&list));
+    e = find_entry(&list, "My Dropped Mod");
+    CHECK(e && e->bundle.build == 3);
+    if (e) {
+        CHECK(alias_of(&list, d1) && !strcmp(alias_of(&list, d1), e->bundle.hash));
+        CHECK(alias_of(&list, d2) && !strcmp(alias_of(&list, d2), e->bundle.hash));
+        CHECK(!alias_of(&list, e->bundle.hash) && alias_targets(&list, e->bundle.hash) == 2);
+        CHECK(sh_ms_resolve(&list, d1) == e && sh_ms_resolve(&list, d2) == e);
+        strcpy_s(d3, sizeof d3, e->bundle.hash);
+    }
+    sh_ms_list_free(&list);
     /* sh_mods install of a store folder builds it in place. */
     CHECK(sh_ms_install_from_folder(hand, &RESOLVER, key, sizeof key, &st, NULL, cause, sizeof cause));
     CHECK(st.in_place && !strcmp(key, "My Dropped Mod"));
@@ -543,12 +626,36 @@ int main(int argc, char **argv)
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\alex.r2-imp\\assets", root);
     CHECK(!sh_ms_install_from_folder(path, &RESOLVER, key, sizeof key, &st, NULL, cause, sizeof cause));
 
+    /* Removing a folder: its aliases stay while a folder of the id remains,
+     * and go once none does. */
+    {
+        char other[MAX_PATH * 2];
+        _snprintf_s(other, sizeof other, _TRUNCATE, "%s\\My Dropped Copy", root);
+        CHECK(mt_copy_tree(hand, other));
+        CHECK(sh_ms_remove_folder(hand));
+        CHECK(sh_ms_alias_forget("alex.dropped", d3) == 0);
+        CHECK(sh_ms_enumerate(&list));
+        CHECK(alias_of(&list, d1) && alias_of(&list, d2));
+        e = sh_ms_resolve(&list, d1);
+        CHECK(e && !strcmp(e->name, "My Dropped Copy"));
+        sh_ms_list_free(&list);
+        CHECK(sh_ms_remove_folder(other));
+        g_logged = 0;
+        CHECK(sh_ms_alias_forget("alex.dropped", d3) == 2);
+        CHECK(log_has("2 alias(es) of bundle"));
+        CHECK(sh_ms_enumerate(&list));
+        CHECK(!alias_of(&list, d1) && !alias_of(&list, d2) && !sh_ms_resolve(&list, d1));
+        CHECK(alias_of(&list, h0) != NULL);   /* another mod's aliases are untouched */
+        sh_ms_list_free(&list);
+    }
+    test_alias_note();
+
     test_upgrade(fixture, tmp);
 
     sh_ms_set_root(NULL);
     mt_remove_tree(tmp);
     if (failures) { fprintf(stderr, "modstore_test: %d failure(s)\n", failures); return 1; }
-    printf("modstore_test: install, copies, verify, corruption, second version, rebuild rule, resolve_need, lock and "
+    printf("modstore_test: install, copies, verify, corruption, second version, rebuild rule, resolve_need, lock, rebuild aliases and "
            "store upgrade pass\n");
     return 0;
 }
