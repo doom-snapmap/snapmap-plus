@@ -19,6 +19,7 @@
 #include "backend_log.h"
 #include "modlegacy.h"
 #include "modmanifest.h"
+#include "modexport.h"   /* a .zip rawmap is an export that carries its mods */
 #include "signatures.h"
 #include "config.h"
 #include "navmesh.h"
@@ -141,6 +142,7 @@ static char *read_source_file(size_t *out_len)
     char buf_path[MAX_PATH];
     resolve_source_path(buf_path, sizeof buf_path);
     const char *path = buf_path;
+    if (modexport_is_zip_path(path)) return modexport_read_text(path, out_len);
 
     HANDLE h = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, NULL,
                            OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
@@ -1085,6 +1087,7 @@ static unsigned long long write_shadow_to(const char *data, size_t len, const ch
 
     if (!data || !len || !path || !path[0]) return 0;
     if (!dest_dir_part(path, dir, sizeof dir) || !ensure_dir(dir)) return 0;
+    if (modexport_is_zip_path(path)) return modexport_write_text(data, len, path);
     /* CREATE_NEW never truncates someone else's scratch file. Separate writers
      * must own separate temporaries until each publishes its complete result. */
     for (attempt = 0; attempt < 64; ++attempt) {
@@ -1525,6 +1528,7 @@ int sh_rawmap_validate_source(const char *path, char *out_msg, int msg_capacity)
         if (out_msg) strncpy_s(out_msg, (size_t)msg_capacity, "no path given", _TRUNCATE);
         return 0;
     }
+    if (modexport_is_zip_path(path)) return modexport_validate_source(path, out_msg, msg_capacity);
 
     h = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, NULL,
                     OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);

@@ -11,6 +11,12 @@
 #include "modserve.h"
 #include "overrides.h"
 #include "backend_log.h"
+#include "modnet.h"
+#include "modsync.h"
+#include "modexport.h"
+#include "rawmap.h"
+#include "editor_frame.h"
+#include "apply_engine.h"
 
 /* A stock resource every 13954591 SnapMap install ships; reading it proves the
  * installed-resource reader works before its answers are trusted. */
@@ -272,17 +278,297 @@ static void mc_verify(const char *key)
     else mc_line("MODS: verify %s: FAILED: %s", key, cause);
 }
 
+/* ------------------------------------------------------- store client ---- */
+
+/* Console lines from the network worker. Each is logged at once; the
+ * console prints them on DOOM's main thread (the main-thread call slot),
+ * or at the next sh_mods command when that slot is busy or unavailable. */
+#define MC_OUTBOX_LINES 64
+static CRITICAL_SECTION g_mc_out_cs;
+static INIT_ONCE g_mc_out_once = INIT_ONCE_STATIC_INIT;
+static char g_mc_out[MC_OUTBOX_LINES][512];
+static int  g_mc_out_n, g_mc_out_dropped;
+
+static BOOL CALLBACK mc_out_init(PINIT_ONCE once, PVOID p, PVOID *ctx)
+{
+    (void)once; (void)p; (void)ctx;
+    InitializeCriticalSection(&g_mc_out_cs);
+    return TRUE;
+}
+
+/* Print every queued line. Console thread or main thread only. */
+static void mc_outbox_flush(void)
+{
+    int i;
+    InitOnceExecuteOnce(&g_mc_out_once, mc_out_init, NULL, NULL);
+    EnterCriticalSection(&g_mc_out_cs);
+    if (g_mc_out_dropped) sh_printf("MODS: (%d earlier line(s) are only in the backend log)\n", g_mc_out_dropped);
+    for (i = 0; i < g_mc_out_n; i++) sh_printf("%s\n", g_mc_out[i]);
+    g_mc_out_n = 0;
+    g_mc_out_dropped = 0;
+    LeaveCriticalSection(&g_mc_out_cs);
+}
+
+static int mc_outbox_flush_main(void *ctx)
+{
+    (void)ctx;
+    mc_outbox_flush();
+    return 1;
+}
+
+static void mc_async_line(const char *fmt, ...)
+{
+    char line[512];
+    va_list ap;
+    sh_run_on_main_fn run = NULL;
+    int res = 0;
+    va_start(ap, fmt);
+    _vsnprintf_s(line, sizeof line, _TRUNCATE, fmt, ap);
+    va_end(ap);
+    backend_log(line);
+    InitOnceExecuteOnce(&g_mc_out_once, mc_out_init, NULL, NULL);
+    EnterCriticalSection(&g_mc_out_cs);
+    if (g_mc_out_n == MC_OUTBOX_LINES) {
+        memmove(g_mc_out[0], g_mc_out[1], sizeof g_mc_out[0] * (MC_OUTBOX_LINES - 1));
+        g_mc_out_n--;
+        g_mc_out_dropped++;
+    }
+    strcpy_s(g_mc_out[g_mc_out_n++], sizeof g_mc_out[0], line);
+    LeaveCriticalSection(&g_mc_out_cs);
+    /* Printed on the main thread when its call slot takes the request within
+     * 1.5 s; otherwise the next sh_mods command prints it. */
+    sh_apply_engine_get_run_on_main(&run);
+    if (run) run(NULL, mc_outbox_flush_main, NULL, 1500, &res);
+}
+
+static double mc_mib(unsigned long long b) { return (double)b / (1024.0 * 1024.0); }
+
+/* One job at a time; its arguments live here until the job ends. */
+typedef enum { MC_JOB_PUSH, MC_JOB_PULL, MC_JOB_RELEASE, MC_JOB_RETRY, MC_JOB_IMPORT } mc_job_kind;
+
+typedef struct mc_job {
+    mc_job_kind kind;
+    char verb[16];
+    char hash[MODNET_HASH_HEX + 1];
+    char label[SH_MS_KEY_MAX + 1];
+    char ref[4 * MODNET_REF_MAX + 1];
+    char path[MAX_PATH * 4];
+    unsigned last_quarter;
+    ULONGLONG started;
+} mc_job;
+
+static mc_job g_mc_job;
+
+/* A progress line at each quarter of a transfer. */
+static void mc_job_progress(void *ctx, unsigned long long done, unsigned long long total)
+{
+    mc_job *j = (mc_job *)ctx;
+    unsigned q;
+    if (!total) return;
+    q = (unsigned)(done * 4 / total);
+    if (q > 4) q = 4;
+    if (q <= j->last_quarter || q == 4) return;
+    j->last_quarter = q;
+    mc_async_line("MODS: %s: %.1f of %.1f MiB", j->verb, mc_mib(done), mc_mib(total));
+}
+
+static int mc_job_run(void *ctx, const modnet_io *io)
+{
+    mc_job *j = (mc_job *)ctx;
+    modsync_stats st;
+    int ok = 0;
+    switch (j->kind) {
+    case MC_JOB_PUSH: {
+        const char *h = j->hash;
+        ok = modsync_upload_bundles(&h, 1, j->ref, io, &st);
+        if (ok)
+            mc_async_line("MODS: push %s: done in %.0f ms: %u of %u blob(s) were missing and sent, %llu byte(s) up, "
+                          "%llu down, bundle %s, claim %s%s", j->label, st.ms, st.blobs_transferred, st.blobs_total,
+                          st.bytes_up, st.bytes_down, st.bundles_created ? "uploaded" : "already stored", st.claim,
+                          st.reclaimed ? " (re-claimed with the stored secret)" : " (new)");
+        else
+            mc_async_line("MODS: push %s: FAILED after %.0f ms (%llu byte(s) up): %s%s", j->label, st.ms, st.bytes_up,
+                          st.cause, st.queued ? "; queued for 'sh_mods retry'" : "");
+        break;
+    }
+    case MC_JOB_PULL:
+        ok = modsync_fetch_bundle(j->hash, io, &st);
+        if (ok && st.already_installed)
+            mc_async_line("MODS: pull %.16s: already installed; nothing fetched", j->hash);
+        else if (ok)
+            mc_async_line("MODS: pull %.16s: installed as %s in %.0f ms: %u blob(s) fetched, %llu byte(s) down, %u request(s)",
+                          j->hash, st.key, st.ms, st.blobs_transferred, st.bytes_down, st.requests);
+        else
+            mc_async_line("MODS: pull %.16s: FAILED after %.0f ms (%llu byte(s) down): %s", j->hash, st.ms, st.bytes_down, st.cause);
+        break;
+    case MC_JOB_RELEASE:
+        ok = modsync_release(j->ref, io, &st);
+        if (ok) mc_async_line("MODS: release: claim %s released in %.0f ms%s%s", st.claim, st.ms, st.cause[0] ? "; " : "", st.cause);
+        else mc_async_line("MODS: release: FAILED: %s", st.cause);
+        break;
+    case MC_JOB_RETRY: {
+        unsigned done = 0, dropped = 0;
+        int left = modsync_retry_pending(io, &done, &dropped, &st);
+        ok = left == 0;
+        if (left < 0) mc_async_line("MODS: retry: %s cannot be read", MODSYNC_PENDING_FILE);
+        else mc_async_line("MODS: retry: %u upload(s) done, %u dropped, %d still queued (%.0f ms)", done, dropped, left,
+                           (double)(GetTickCount64() - j->started));
+        break;
+    }
+    case MC_JOB_IMPORT: {
+        modexport_stats es;
+        char cause[320], why[192];
+        size_t len = 0;
+        char *text = modexport_read(j->path, &len, &es, cause, sizeof cause);
+        why[0] = 0;
+        if (!text) { mc_async_line("MODS: import %s: FAILED: %s", j->path, cause); break; }
+        free(text);
+        mc_async_line("MODS: import %s: %u bundle(s) (%u installed, %u already present), %u blob(s), map %llu byte(s), "
+                      "%llu byte(s) read in %.0f ms", j->path, es.bundles, es.bundles_installed, es.bundles_present,
+                      es.blobs_written, es.map_bytes, es.zip_bytes, es.ms);
+        /* Stage it as 'sh_rawmaps load <path>' does: the next map open reads it. */
+        if (!sh_rawmap_validate_source(j->path, why, (int)sizeof why) || !sh_rawmap_swap_set_source(j->path)) {
+            mc_async_line("MODS: import %s: the bundles are installed, but the map could not be staged: %s", j->path,
+                          why[0] ? why : "the path is not usable");
+            break;
+        }
+        sh_rawmap_load_arm_once();
+        mc_async_line("MODS: import %s: staged; open any map, or run 'sh_rawmaps load', and it opens as a new map", j->path);
+        ok = 1;
+        break;
+    }
+    }
+    return ok;
+}
+
+static void mc_job_launch(const mc_job *spec)
+{
+    char busy[64];
+    int started;
+    if (modnet_job_busy(busy, sizeof busy)) {
+        mc_line("MODS: %s: '%s' is still running; wait for it or run 'sh_mods cancel'", spec->verb, busy);
+        return;
+    }
+    g_mc_job = *spec;
+    g_mc_job.last_quarter = 0;
+    g_mc_job.started = GetTickCount64();
+    started = modnet_job_start(spec->verb, mc_job_run, NULL, mc_job_progress, &g_mc_job, &g_mc_job);
+    if (started == 1) mc_line("MODS: %s: started in the background; the result prints here when it is done", spec->verb);
+    else if (started == 0) mc_line("MODS: %s: another job is running", spec->verb);
+    else mc_line("MODS: %s: the worker thread could not be started", spec->verb);
+}
+
+/* A bundle named by id@version+build (or its 64-hex hash) among the usable
+ * installed bundles. */
+static int mc_find_bundle(const char *name, char hash[MODNET_HASH_HEX + 1], char *label, size_t label_cap)
+{
+    sh_ms_list l;
+    size_t i;
+    int found = 0;
+    modsync_store_lock();
+    if (sh_ms_enumerate(&l)) {
+        for (i = 0; i < l.count && !found; i++) {
+            const sh_ms_entry *e = &l.items[i];
+            if (!sh_ms_entry_usable(e)) continue;
+            if (_stricmp(e->key, name) == 0 || strcmp(e->bundle.hash, name) == 0) {
+                strcpy_s(hash, MODNET_HASH_HEX + 1, e->bundle.hash);
+                strncpy_s(label, label_cap, e->key, _TRUNCATE);
+                found = 1;
+            }
+        }
+        sh_ms_list_free(&l);
+    }
+    modsync_store_unlock();
+    return found;
+}
+
+/* push, pull, release, retry, export, import, cancel. Returns 1 when the
+ * verb is one of them. */
+static int mc_store_command(idCmdArgs *a, const char *verb)
+{
+    mc_job spec;
+    char arg[MAX_PATH * 4];
+    memset(&spec, 0, sizeof spec);
+    strncpy_s(spec.verb, sizeof spec.verb, verb, _TRUNCATE);
+    _strlwr_s(spec.verb, sizeof spec.verb);
+    if (!_stricmp(verb, "cancel")) {
+        char busy[64];
+        if (modnet_job_busy(busy, sizeof busy) && modnet_job_cancel()) mc_line("MODS: cancel: asked '%s' to stop", busy);
+        else mc_line("MODS: cancel: nothing is running");
+        return 1;
+    }
+    if (!_stricmp(verb, "push")) {
+        const char *name = cmd_argv(a, 2);
+        mc_join_args(a, 3, spec.ref, sizeof spec.ref);
+        if (!name || !name[0] || !spec.ref[0]) { sh_printf("usage: sh_mods push \"<id@version+build>\" \"<ref>\"\n"); return 1; }
+        if (!modnet_valid_ref(spec.ref)) { mc_line("MODS: push: the ref must be 1-64 characters of text"); return 1; }
+        if (!mc_find_bundle(name, spec.hash, spec.label, sizeof spec.label)) {
+            mc_line("MODS: push %s: no installed, verified bundle has that name ('sh_mods list' shows them)", name);
+            return 1;
+        }
+        spec.kind = MC_JOB_PUSH;
+        mc_line("MODS: push %s (bundle %.16s) under ref '%s'", spec.label, spec.hash, spec.ref);
+        mc_job_launch(&spec);
+        return 1;
+    }
+    if (!_stricmp(verb, "pull")) {
+        mc_join_args(a, 2, arg, sizeof arg);
+        if (!modnet_valid_hash(arg)) { sh_printf("usage: sh_mods pull \"<64-hex bundle hash>\"\n"); return 1; }
+        strcpy_s(spec.hash, sizeof spec.hash, arg);
+        spec.kind = MC_JOB_PULL;
+        mc_job_launch(&spec);
+        return 1;
+    }
+    if (!_stricmp(verb, "release")) {
+        mc_join_args(a, 2, spec.ref, sizeof spec.ref);
+        if (!spec.ref[0]) { sh_printf("usage: sh_mods release \"<ref>\"\n"); return 1; }
+        spec.kind = MC_JOB_RELEASE;
+        mc_job_launch(&spec);
+        return 1;
+    }
+    if (!_stricmp(verb, "retry")) {
+        int n = modsync_pending_count();
+        if (n == 0) { mc_line("MODS: retry: no upload is queued"); return 1; }
+        spec.kind = MC_JOB_RETRY;
+        mc_line("MODS: retry: %d queued upload(s)", n);
+        mc_job_launch(&spec);
+        return 1;
+    }
+    if (!_stricmp(verb, "export") || !_stricmp(verb, "import")) {
+        mc_join_args(a, 2, arg, sizeof arg);
+        if (!arg[0] || !modexport_is_zip_path(arg)) { sh_printf("usage: sh_mods %s \"<path.zip>\"\n", spec.verb); return 1; }
+        if (!_stricmp(verb, "export")) {
+            char why[192] = "";
+            /* The open map through the rawmap writer, which writes a .zip
+             * destination as an export (as 'sh_rawmaps save <path.zip>'). */
+            if (sh_editor_frame_request_rawmap_save_to(arg, why, (int)sizeof why))
+                mc_line("MODS: export: writing the open map and its mods to %s (the result is logged as 'MODS: export')", arg);
+            else
+                mc_line("MODS: export: cannot save: %s", why[0] ? why : "the editor is not ready");
+            return 1;
+        }
+        strncpy_s(spec.path, sizeof spec.path, arg, _TRUNCATE);
+        spec.kind = MC_JOB_IMPORT;
+        mc_job_launch(&spec);
+        return 1;
+    }
+    return 0;
+}
+
 void h_sh_mods(idCmdArgs *a)
 {
     const char *verb = cmd_argv(a, 1);
     char arg[MAX_PATH * 4], folder[MAX_PATH * 4];
     if (verb && (!_stricmp(verb, "help") || !strcmp(verb, "?"))) {
         sh_printf("%s\n", SH_MODCMD_HELP);
+        sh_printf("%s\n", SH_MODCMD_HELP_STORE);
         return;
     }
     /* Serving verbs (modserve_engine.c): status (also the bare command),
      * rescan, palette rebuild. */
     if (!verb || !verb[0]) verb = "status";
+    mc_outbox_flush();
+    if (mc_store_command(a, verb)) return;
     if (sh_modserve_command(a, verb)) return;
     if (!_stricmp(verb, "list")) { mc_list(); return; }
     mc_join_args(a, 2, arg, sizeof arg);

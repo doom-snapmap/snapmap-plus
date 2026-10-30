@@ -68,6 +68,7 @@ static const char *normalize_theme(const char *value_json);
 static const char *normalize_bool(const char *value_json);
 static int validate_entity_selection_mode(const char *value_json);
 static const char *normalize_entity_selection_mode(const char *value_json);
+static int validate_mods_store(const char *value_json);
 
 static const config_descriptor g_registry[] = {
     {
@@ -133,6 +134,15 @@ static const config_descriptor g_registry[] = {
         "timelines.open_folders", SH_JSON_ARRAY, "[]",
         SH_CONFIG_UI_READ | SH_CONFIG_UI_WRITE,
         NULL,
+        NULL
+    },
+    {
+        /* The mod store the backend uploads bundles to and downloads them
+         * from (modnet.c): an https URL, or http for a loopback test host.
+         */
+        "mods.store", SH_JSON_STRING, "\"https://api.snapmapplus.com\"",
+        SH_CONFIG_BACKEND_READ | SH_CONFIG_BACKEND_WRITE,
+        validate_mods_store,
         NULL
     }
 };
@@ -281,6 +291,24 @@ static int find_descriptor_n(const char *key, size_t key_length)
             return (int)i;
     }
     return -1;
+}
+
+/* https://<host>[...], or http:// for a loopback host; printable ASCII
+ * without spaces, quotes or backslashes, at most 511 bytes. */
+static int validate_mods_store(const char *value_json)
+{
+    char decoded[512];
+    size_t length = 0, i;
+    if (!value_json || !sh_json_decode_string(value_json, strlen(value_json), decoded, sizeof decoded, &length) ||
+        length == 0 || length >= sizeof decoded)
+        return 0;
+    for (i = 0; i < length; i++)
+        if ((unsigned char)decoded[i] <= 0x20 || (unsigned char)decoded[i] >= 0x7f || decoded[i] == '"' || decoded[i] == '\\')
+            return 0;
+    decoded[length] = 0;
+    if (strncmp(decoded, "https://", 8) == 0) return length > 8;
+    return strncmp(decoded, "http://127.0.0.1", 16) == 0 || strncmp(decoded, "http://localhost", 16) == 0 ||
+           strncmp(decoded, "http://[::1]", 12) == 0;
 }
 
 static int validate_theme(const char *value_json)
