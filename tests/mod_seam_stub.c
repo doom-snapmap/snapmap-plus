@@ -5,12 +5,14 @@
  * The serving index reports no bundle as indexed, so every conversion asks
  * for a rescan; g_mod_stub_rescans counts the requests. Define
  * SH_MOD_STUB_NO_BUILDER when the test supplies its own
- * modbundle_build_folder. */
+ * modbundle_build_folder. The rawmap ZIP export (modexport.c) is not linked:
+ * a .zip path is recognised and refused. */
 #include <stddef.h>
 #include <string.h>
 
 #include "../src/backend/modserve.h"
 #include "../src/backend/modbundle.h"
+#include "../src/backend/modexport.h"
 
 int g_mod_stub_rescans;
 int g_mod_stub_activations;
@@ -41,6 +43,32 @@ int sh_modserve_active(void) { return 0; }
 int sh_modserve_index_rescan(void)
 {
     g_mod_stub_rescans++;
+    return 0;
+}
+
+int modexport_is_zip_path(const char *path)
+{
+    size_t n = path ? strlen(path) : 0;
+    return n > 4 && _stricmp(path + n - 4, ".zip") == 0;
+}
+
+unsigned long long modexport_write_text(const char *data, size_t len, const char *path_acp)
+{
+    (void)data; (void)len; (void)path_acp;
+    return 0;
+}
+
+char *modexport_read_text(const char *path_acp, size_t *out_len)
+{
+    (void)path_acp;
+    if (out_len) *out_len = 0;
+    return NULL;
+}
+
+int modexport_validate_source(const char *path_acp, char *out_msg, int msg_capacity)
+{
+    (void)path_acp;
+    if (out_msg && msg_capacity > 0) strncpy_s(out_msg, (size_t)msg_capacity, "the rawmap export is not linked into this test", _TRUNCATE);
     return 0;
 }
 

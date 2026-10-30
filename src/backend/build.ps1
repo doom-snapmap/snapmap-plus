@@ -30,7 +30,9 @@ param(
                            # Boot preload pacing (load-screen video lock, read poll).
                            "boot_pacing.c",
                            # Mod bundles, the local mods store and the sh_mods command.
-                           "modbundle.c", "modstore.c", "modcmd.c"),
+                           "modbundle.c", "modstore.c", "modcmd.c",
+                           # The mod store client (WinHTTP), upload/download and the rawmap ZIP export.
+                           "modnet.c", "modsync.c", "modexport.c"),
     [string]$Out = "XINPUT1_4.dll",
     # Diag adds SH_DIAG and the crash/environment logger for troubleshooting.
     [switch]$Diag,
