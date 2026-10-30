@@ -51,7 +51,8 @@ typedef struct modsync_stats {
     char cause[256];
 } modsync_stats;
 
-/* Serialise store work across the command and worker threads. */
+/* Serialise store work across the command and worker threads: the store
+ * lock of modstore.h (modstore_lock), under its older names. */
 void modsync_store_lock(void);
 void modsync_store_unlock(void);
 

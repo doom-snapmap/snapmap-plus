@@ -28,9 +28,24 @@
  *   launch        leftover provisional claims (a publish that never reached
  *                 the feed post) are released, then queued uploads retried.
  *
- * Delete from My Maps releases nothing: it removes the local slot and the
- * cloud-saved item only, and the published item (with its claim) stays
- * playable for everyone (snaphak-re mod-system-reinstatement lane N4).
+ *   search tag    a resumed publish adds the search tag "mods" to the map's
+ *                 tags (the edit's tag list, which the cloud save and the
+ *                 published item copy) when it is absent: a player without
+ *                 Snapmap+ cannot play a map that needs mods, and the tag
+ *                 lets the browser filter it.
+ *   delete from My Maps   removes the local slot and the cloud-saved item
+ *                 only; a published item stays playable for everyone. The
+ *                 delete completion therefore releases a claim only when its
+ *                 item is no longer published: the engine keeps no link from
+ *                 a saved map to its published items, so the feed post
+ *                 records one (item -> cloud-saved item id and local id, in
+ *                 mods\publish-links.json); at delete, the linked items with
+ *                 a stored claim are checked against the engine's own query
+ *                 of the items published from that cloud-saved item, and
+ *                 only an item missing from a successful answer is
+ *                 released. No link, no claim, a link younger than an hour,
+ *                 a full search page, a failed or late answer, or no
+ *                 cloud-saved id: nothing is released.
  *
  * Threads: every entry point runs on DOOM's main thread; store work runs on
  * the modnet worker; the dialog and the job results are polled from the
@@ -51,6 +66,12 @@ extern "C" {
 #define SH_MODPUBLISH_TEXT_BOUND  10485760ull
 /* Provisional claims are named with this prefix and a 16-hex token. */
 #define SH_MODPUBLISH_PENDING_PREFIX "publish-pending-"
+/* The search tag a publish with mods carries. */
+#define SH_MODPUBLISH_TAG "mods"
+/* Item -> saved-map links written at the feed post, in the store root. */
+#define SH_MODPUBLISH_LINKS_FILE "publish-links.json"
+/* A delete check waits this long for the engine's published-items answer. */
+#define SH_MODPUBLISH_DELETE_CHECK_MS 60000ull
 
 /* ------------------------------------------------------------ save */
 
@@ -71,6 +92,16 @@ void sh_modpublish_feed_post(void *edit, const char *item_id, const char *revisi
 
 /* The unpublish completion for this item id: queues the release. */
 void sh_modpublish_unpublished(const char *item_id);
+
+/* The My Maps delete completion with the deleted slot's local id and
+ * cloud-saved item id (either may be ""). Starts the published-items check
+ * for linked items that hold a claim; does nothing otherwise. */
+void sh_modpublish_deleted(const char *local_id, const char *cloud_id);
+
+/* The engine's answer to a published-items query started through
+ * ops.published_query: ok with the item ids published from that cloud-saved
+ * item, or !ok. Any thread; consumed on the main tick. */
+void sh_modpublish_published_result(unsigned ticket, int ok, const char *const *item_ids, int count);
 
 /* Copy to My Maps of (item id, revision): 1 to call the original, 0 when it
  * was refused (a notice is queued). */
@@ -126,6 +157,16 @@ typedef struct sh_modpublish_ops {
      * Yes/No dialog. */
     int  (*upload_question)(void *c, void *editor, size_t count, unsigned long long bytes);
     void (*log)(void *c, const char *line);
+    /* Add `tag` to the editor's map tags when absent: 1 added, 0 present,
+     * -1 failed. Called right before the resume. NULL: no tag. */
+    int  (*add_tag)(void *c, void *editor, const char *tag);
+    /* The published edit's cloud-saved item id and local id at the feed post
+     * (either may come back ""). 0 when neither could be read. */
+    int  (*edit_ids)(void *c, void *edit, char *cloud, size_t cloud_cap, char *local, size_t local_cap);
+    /* Start the engine's query of the items published from this cloud-saved
+     * item; its answer arrives through sh_modpublish_published_result with
+     * `ticket`. 1 started, 0 not. NULL: delete never releases. */
+    int  (*published_query)(void *c, const char *cloud_id, unsigned ticket);
 } sh_modpublish_ops;
 
 #ifdef SH_MODPUBLISH_TESTING
@@ -137,13 +178,17 @@ const char *sh_modpublish_test_notice(void);      /* pending menu notice, or "" 
 const char *sh_modpublish_test_provisional(void); /* the live publish context's provisional ref, or "" */
 int  sh_modpublish_test_background_busy(void);    /* queued or running background jobs */
 void sh_modpublish_test_set_cache_root(const char *root);
+int  sh_modpublish_test_delete_checks(void);      /* delete checks waiting for an answer */
+void sh_modpublish_test_age_delete_checks(unsigned long long ms);   /* make them older */
+void sh_modpublish_test_set_link_min_age(long long seconds);        /* default 3600 */
 #endif
 
 /* ------------------------------------------------------------ engine */
 #ifndef SH_MODPUBLISH_PURE
 #include "signatures.h"
-/* Bind PublishAfterSave, PublishFail, PublishFeedPost, the unpublish
- * completion and the two copy entries (all or none), register the save
+/* Bind PublishAfterSave, PublishFail, PublishFeedPost, the unpublish and
+ * delete completions and the two copy entries (all or none), the tag-list
+ * helpers PublishStart uses and the published-items query, register the save
  * observer, and run the launch step. Install after the engine dialog.
  * Returns 1 when the hooks are armed. */
 int sh_modpublish_install(const sig_result *results, size_t count, const uint8_t *module_base);

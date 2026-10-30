@@ -1334,7 +1334,7 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "48 89 5C 24 10 48 89 74 24 18 57 48 83 EC 20 48 8B F9 48 8B F2 B9 18 00 00 00 E8 ?? ?? ?? ?? 48 89 44 24 30 48 8B D8 48 "
       "85 C0 74 1B 48 8D 05 ?? ?? ?? ?? 48 89 7B 08 48 89 03 48 8D 05 ?? ?? ?? ?? 48 89 43 10 EB 02 33 DB B9 18 00 00 00 E8"
       , 0x11F91D0u, 0x11F83F0u },
-    { "MapInfoUnpublishDone", /* MapInfo screen unpublish success (screen, ctx, const idStr &itemId), bound by the confirm at VK 1090ea0 / GL 108ffb0. The delete completion VK 1092810 / GL 1091920 is mapped, not hooked. Steal 14. */
+    { "MapInfoUnpublishDone", /* MapInfo screen unpublish success (screen, ctx, const idStr &itemId), bound by the confirm at VK 1090ea0 / GL 108ffb0. Steal 14. */
       "48 89 5C 24 08 57 48 83 EC 20 48 8B 41 18 48 8B D9 48 85 C0 75 09 48 8B 49 20 E8 ?? ?? ?? ?? 48 8B C8 E8 ?? ?? ?? ?? 48 "
       "8B F8 48 85 C0 74 3F"
       , 0x1092790u, 0x10918A0u },
@@ -1366,5 +1366,21 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "E8 ?? ?? ?? ?? 84 C0 74 45 48 8B 83 F8 01 00 00 48 85 C0 74 09 80 B8 41 06 00 00 00 75 30", 0xC73F47u, 0xC739C7u },
     { "WeaponHudGameMode", /* bool(game*): game+0x45338 -> +0x18 == 1; modhud checks the decoded call lands here. */
       "48 8B 81 38 53 04 00 83 78 18 01 0F 94 C0 C3", 0x398C50u, 0x398560u },
+    /* Publish search tag and delete-time claim release (modpublish.c; snaphak-re
+     * mod-system-reinstatement lane P4). Unique on both build 13954591
+     * executables; evidence logs/shared-ghidra/mod-system-p4/. */
+    { "MapInfoDeleteDone", /* MapInfo screen My Maps delete success (screen, ctx, const idStr &localId, const idStr &cloudItemId), bound by the delete confirm at VK 1090fc0 / GL 10900d0. Its twin MapInfoUnpublishDone differs at +0xF (mov rdi vs rbx). Steal 14. */
+      "48 89 5C 24 08 57 48 83 EC 20 48 8B 41 18 48 8B F9 48 85 C0 75 09 48 8B 49 20 E8 ?? ?? ?? ?? 48 8B C8 E8 ?? ?? ?? ?? "
+      "48 8B D8 48 85 C0 74 3F 8B 97 00 03 00 00 48 8B C8 E8 ?? ?? ?? ?? 48 85 C0 74 13 48 8B 08 48 85 C9 74 0B 48 8B 01 BA "
+      "03 00 00 00 FF 50 08"
+      , 0x1092810u, 0x1091920u },
+    { "PublishStart", /* (editorLocal, overwrite): adds or removes the reserved map:dev / map:dlc1 tags on the edit's tag list (edit+0x998, idList<idStr>), arms PublishAfterSave. Not hooked: its list grow (+0xB3) and idStr assign (+0xD5) calls are bound to append the search tag. */
+      "4C 8B DC 57 41 56 41 57 48 81 EC 90 00 00 00 48 C7 44 24 20 FE FF FF FF 49 89 5B 10 49 89 6B 18 49 89 73 20 48 8B 05 "
+      "?? ?? ?? ??"
+      , 0x119AD00u, 0x1199F60u },
+    { "PublishedPrevQuery", /* (ctx, const char *parentItemId, const char *cursor, ok, fail): the maps_pub_prev_pub search for the items the player published from one cloud-saved item; ok gets idList<idPublishedMapModel> (stride 0x588, id idStr at +0). Not hooked: called by the delete check. */
+      "40 55 53 56 57 41 54 41 55 41 56 41 57 48 8D AC 24 C8 FE FF FF 48 81 EC 38 02 00 00 48 C7 45 E0 FE FF FF FF 48 8B 05 "
+      "?? ?? ?? ?? 48 33 C4 48 89 85 20 01 00 00 4D 8B E1 49 8B F0 4C 8B EA 48 8B D9 48 89 4D D0 4C 8B B5 A0 01 00 00"
+      , 0x11C4160u, 0x11C3530u },
     { NULL, NULL, 0 }   /* terminator */
 };

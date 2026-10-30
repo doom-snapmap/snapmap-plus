@@ -54,7 +54,9 @@ auto under `--yes`). This never blocks the mod install — the DLLs deploy regar
 
 The bundle ships no player content. At startup the backend creates `%LOCALAPPDATA%\snapmap-plus\`
 with its `strings\` and `prefabs\` folders, and nothing else. Snapmap+'s small built-in default
-declarations are served from memory by the backend DLL.
+declarations are served from memory by the backend DLL. The companion window keeps its WebView2
+profile in `cache\webview2\`, regenerable data the installer never backs up or copies (an older
+top-level `webview2\` folder is renamed into `cache\` at the window's first start).
 
 ### Mods
 

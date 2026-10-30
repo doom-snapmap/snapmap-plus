@@ -13,7 +13,8 @@
  *   WORKER        wait for the modnet worker to be free
  *   UPLOADING     one worker job uploads every bundle and claims them under a
  *                 provisional ref
- *   (resume)      on a main tick, the original PublishAfterSave(editorLocal)
+ *   (resume)      on a main tick, the search tag, then the original
+ *                 PublishAfterSave(editorLocal)
  *
  * A No, a failed upload, a question that could not be shown, or a worker
  * that stayed busy cancels the publish through the engine's PublishFail and
@@ -28,6 +29,11 @@
  *
  * Background jobs (claims, releases, the launch step) run one at a time on
  * the same worker, in order, whenever it is free.
+ *
+ * Delete checks: the delete completion queues one check per deleted map with
+ * linked, claimed items; the next tick starts the engine's published-items
+ * query, whose callbacks post an answer (any thread) that a later tick
+ * settles. An unanswered check expires and keeps its claims.
  */
 #define _CRT_RAND_S
 #define WIN32_LEAN_AND_MEAN
@@ -58,6 +64,10 @@
 #define MP_TEXT_CAP        256     /* the native dialog body */
 #define MP_REF_CAP         (4 * MODNET_REF_MAX + 1)
 #define MP_SETTING         "mods.upload_confirmed"
+#define MP_ID_CAP          160     /* a saved-map or item id in the links file */
+
+static void mp_link_record(const char *item, const char *cloud, const char *local);
+static void mp_link_forget(const char *item);
 
 enum { MP_DIALOG_PENDING = 0, MP_DIALOG_ACCEPTED = 1 };
 enum { HOLD_IDLE = 0, HOLD_RAISE, HOLD_ASKING, HOLD_UPLOADING, HOLD_WORKER };
@@ -422,6 +432,7 @@ static void mp_job_report(mp_job *job)
         else if (job->ok) mp_logf("MODS: publish: released the claim for '%s'%s%s", job->ref,
                                   job->st.cause[0] ? ": " : "", job->st.cause);
         else mp_logf("MODS: publish: the release of '%s' failed: %s", job->ref, cause);
+        if (job->ok || !job->had_claim) mp_link_forget(job->ref);
         break;
     case JOB_LAUNCH:
         mp_logf("MODS: launch: %u provisional ref(s) settled; queued uploads: %u retried, %u dropped, %d left",
@@ -634,6 +645,14 @@ void sh_modpublish_feed_post(void *edit, const char *item_id, const char *revisi
         mp_queue_push(job);
         mp_logf("MODS: publish: item '%s' revision '%s' published with %d mod(s); claim queued", item_id,
                 revision ? revision : "", g_ctx.count);
+        {
+            /* The engine keeps no link from the saved map to this item; the
+             * delete check needs one. */
+            char cloud[MP_ID_CAP] = "", local[MP_ID_CAP] = "";
+            if (!g_ops.edit_ids || !g_ops.edit_ids(g_ops.context, edit, cloud, sizeof cloud, local, sizeof local))
+                cloud[0] = local[0] = 0;
+            mp_link_record(item_id, cloud, local);
+        }
         break;
     case CTX_NO_ROWS:
         /* A republish without mods: the item's old set (if any) is no longer
@@ -660,6 +679,294 @@ void sh_modpublish_unpublished(const char *item_id)
         return;
     }
     (void)mp_queue_release(item_id, "the map was unpublished");
+}
+
+/* ------------------------------------------------------------ links */
+
+/* mods\publish-links.json: {"format":1,"links":{"<item>":{"cloud":"..","local":".."}}}.
+ * Main thread only (feed post, delete, job reports); written through a
+ * temporary and a rename. Ids are kept only when they are plain (letters,
+ * digits, '-', '_', '.', ':'), so the file needs no escaping. */
+
+static int mp_link_id(const char *s)
+{
+    size_t n = s ? strlen(s) : 0;
+    if (!n || n >= MP_ID_CAP) return 0;
+    for (; *s; s++)
+        if (!((*s >= '0' && *s <= '9') || (*s >= 'a' && *s <= 'z') || (*s >= 'A' && *s <= 'Z') || *s == '-' ||
+              *s == '_' || *s == '.' || *s == ':')) return 0;
+    return 1;
+}
+
+static int mp_links_path(char *out, size_t cap)
+{
+    char root[MAX_PATH * 4];
+    if (!sh_ms_root(root, sizeof root)) return 0;
+    _snprintf_s(out, cap, _TRUNCATE, "%s\\%s", root, SH_MODPUBLISH_LINKS_FILE);
+    return 1;
+}
+
+/* The links document, or a fresh empty one; NULL only without memory. */
+static mpj *mp_links_load(void)
+{
+    char path[MAX_PATH * 4];
+    size_t len = 0;
+    unsigned char *text = mp_links_path(path, sizeof path) ? sh_mb_read_file(path, 1 << 20, &len) : NULL;
+    mpj *doc = text ? mpj_parse((const char *)text, len) : NULL;
+    free(text);
+    if (doc && (doc->type != MPJ_OBJ || !mpj_get(doc, "links") || mpj_get(doc, "links")->type != MPJ_OBJ)) {
+        mpj_free(doc);
+        doc = NULL;
+    }
+    if (!doc) {
+        doc = mpj_new(MPJ_OBJ);
+        if (doc && (!mpj_set(doc, "format", mpj_new_int(1)) || !mpj_set(doc, "links", mpj_new(MPJ_OBJ)))) {
+            mpj_free(doc);
+            doc = NULL;
+        }
+    }
+    return doc;
+}
+
+static int mp_links_save(const mpj *doc)
+{
+    char path[MAX_PATH * 4], tmp[MAX_PATH * 4 + 16];
+    wchar_t *wpath, *wtmp;
+    size_t len = 0;
+    char *text = mpj_dump(doc, &len);
+    FILE *fp = NULL;
+    int ok = 0;
+    if (!text || !mp_links_path(path, sizeof path)) { free(text); return 0; }
+    _snprintf_s(tmp, sizeof tmp, _TRUNCATE, "%s.tmp-%lu", path, GetCurrentProcessId());
+    wpath = sh_mb_wpath(path);
+    wtmp = sh_mb_wpath(tmp);
+    if (wpath && wtmp && !_wfopen_s(&fp, wtmp, L"wb") && fp) {
+        ok = fwrite(text, 1, len, fp) == len;
+        ok = !fclose(fp) && ok;
+        ok = ok && MoveFileExW(wtmp, wpath, MOVEFILE_REPLACE_EXISTING);
+        if (!ok) DeleteFileW(wtmp);
+    }
+    free(wpath);
+    free(wtmp);
+    free(text);
+    return ok;
+}
+
+/* Record that `item` was published from this saved map. */
+static void mp_link_record(const char *item, const char *cloud, const char *local)
+{
+    mpj *doc, *link;
+    if (!mp_link_id(item) || (!mp_link_id(cloud) && !mp_link_id(local))) {
+        mp_logf("MODS: publish: item '%s' has no readable saved-map id; deleting the map will not release its claim",
+                item ? item : "");
+        return;
+    }
+    if (!(doc = mp_links_load())) return;
+    link = mpj_new(MPJ_OBJ);
+    if (link && mp_link_id(cloud)) (void)mpj_set(link, "cloud", mpj_new_str(cloud));
+    if (link && mp_link_id(local)) (void)mpj_set(link, "local", mpj_new_str(local));
+    if (link) (void)mpj_set(link, "at", mpj_new_int((long long)time(NULL)));
+    if (!link || !mpj_set(mpj_get(doc, "links"), item, link) || !mp_links_save(doc))
+        mp_logf("MODS: publish: the saved-map link of item '%s' could not be written", item);
+    mpj_free(doc);
+}
+
+static void mp_link_forget(const char *item)
+{
+    mpj *doc, *links;
+    int found = -1;
+    if (!mp_link_id(item) || !(doc = mp_links_load())) return;
+    links = mpj_get(doc, "links");
+    for (int i = 0; i < links->n && found < 0; i++) if (links->keys[i] && !strcmp(links->keys[i], item)) found = i;
+    if (found >= 0) {
+        mpj_free(links->items[found]);
+        free(links->keys[found]);
+        memmove(&links->items[found], &links->items[found + 1], (size_t)(links->n - found - 1) * sizeof(*links->items));
+        memmove(&links->keys[found], &links->keys[found + 1], (size_t)(links->n - found - 1) * sizeof(*links->keys));
+        links->n--;
+        (void)mp_links_save(doc);
+    }
+    mpj_free(doc);
+}
+
+/* ------------------------------------------------------------ delete */
+
+#define MP_DELETE_ITEMS 16
+#define MP_ANSWER_ITEMS 256
+/* The search answers in pages of 30 (200 for the first query of a session);
+ * an answer this long may be a first page, so it proves nothing missing. */
+#define MP_ANSWER_PAGE  30
+
+/* A link younger than this is never released at delete: a fresh item may not
+ * be in the search yet. */
+static long long g_link_min_age = 3600;
+
+typedef struct mp_check {
+    struct mp_check *next;
+    unsigned ticket;
+    int started;
+    ULONGLONG at;
+    char cloud[MP_ID_CAP];
+    int count;
+    char items[MP_DELETE_ITEMS][MP_ID_CAP];
+} mp_check;
+
+typedef struct mp_answer {
+    struct mp_answer *next;
+    unsigned ticket;
+    int ok, count;
+    char (*items)[MP_ID_CAP];
+} mp_answer;
+
+static mp_check *g_checks;                 /* main thread */
+static mp_answer *volatile g_answers;      /* any thread, under g_answer_lock */
+static SRWLOCK g_answer_lock = SRWLOCK_INIT;
+static volatile LONG g_ticket;
+
+void sh_modpublish_published_result(unsigned ticket, int ok, const char *const *item_ids, int count)
+{
+    mp_answer *a = calloc(1, sizeof(*a));
+    if (!a) return;
+    a->ticket = ticket;
+    a->ok = ok;
+    if (ok && count > 0 && item_ids) {
+        if (count > MP_ANSWER_ITEMS) count = MP_ANSWER_ITEMS;
+        a->items = calloc((size_t)count, sizeof(*a->items));
+        if (!a->items) { free(a); return; }
+        for (int i = 0; i < count; i++)
+            if (item_ids[i]) strncpy_s(a->items[a->count++], MP_ID_CAP, item_ids[i], _TRUNCATE);
+    }
+    AcquireSRWLockExclusive(&g_answer_lock);
+    a->next = g_answers;
+    g_answers = a;
+    ReleaseSRWLockExclusive(&g_answer_lock);
+}
+
+void sh_modpublish_deleted(const char *local_id, const char *cloud_id)
+{
+    mp_check *check;
+    mpj *doc, *links;
+    int found = 0, young = 0;
+    long long now = (long long)time(NULL);
+    if (!g_ops_set) return;
+    if (!mp_on_main()) {
+        mp_log("MODS: delete: the delete completion ran off the main thread; no claim is checked");
+        return;
+    }
+    if (!mp_link_id(cloud_id) && !mp_link_id(local_id)) return;
+    {
+        /* Nothing published from this installation: no file, nothing to do. */
+        char path[MAX_PATH * 4];
+        wchar_t *w = mp_links_path(path, sizeof path) ? sh_mb_wpath(path) : NULL;
+        DWORD attributes = w ? GetFileAttributesW(w) : INVALID_FILE_ATTRIBUTES;
+        free(w);
+        if (attributes == INVALID_FILE_ATTRIBUTES) return;
+    }
+    if (!(check = calloc(1, sizeof(*check)))) return;
+    if (mp_link_id(cloud_id)) strcpy_s(check->cloud, sizeof check->cloud, cloud_id);
+    if (!(doc = mp_links_load())) { free(check); return; }
+    links = mpj_get(doc, "links");
+    for (int i = 0; i < links->n && check->count < MP_DELETE_ITEMS; i++) {
+        const mpj *link = links->items[i];
+        const mpj *cloud = link ? mpj_get(link, "cloud") : NULL, *local = link ? mpj_get(link, "local") : NULL;
+        const char *item = links->keys[i];
+        int same = (check->cloud[0] && mpj_str_is(cloud, check->cloud)) ||
+                   (mp_link_id(local_id) && mpj_str_is(local, local_id));
+        const mpj *at = link ? mpj_get(link, "at") : NULL;
+        if (!same || !item || !modnet_valid_ref(item)) continue;
+        found++;
+        if (!modsync_claim_lookup(item, NULL, NULL)) continue;   /* released already */
+        if (!at || !mpj_is_num(at) || now - mpj_int(at) < g_link_min_age) { young++; continue; }
+        strcpy_s(check->items[check->count++], MP_ID_CAP, item);
+    }
+    mpj_free(doc);
+    if (young)
+        mp_logf("MODS: delete: %d claimed item(s) of the deleted map were published less than %lld minute(s) ago; "
+                "their claims are kept", young, g_link_min_age / 60);
+    if (!check->count) {
+        if (found && !young)
+            mp_logf("MODS: delete: the deleted map's %d published item(s) hold no claim; nothing to release", found);
+        free(check);
+        return;
+    }
+    if (!check->cloud[0]) {
+        mp_logf("MODS: delete: the deleted map has no cloud-saved id, so whether its %d claimed item(s) are still "
+                "published cannot be checked; the claims are kept", check->count);
+        free(check);
+        return;
+    }
+    /* The query starts on the next main tick, outside the engine's completion. */
+    check->ticket = (unsigned)InterlockedIncrement(&g_ticket);
+    check->at = GetTickCount64();
+    check->next = g_checks;
+    g_checks = check;
+}
+
+static void mp_start_checks(void)
+{
+    mp_check **link = &g_checks;
+    while (*link) {
+        mp_check *check = *link;
+        if (check->started) { link = &check->next; continue; }
+        if (!g_ops.published_query || !g_ops.published_query(g_ops.context, check->cloud, check->ticket)) {
+            mp_logf("MODS: delete: the published-items check for '%s' could not start; %d claim(s) kept",
+                    check->cloud, check->count);
+            *link = check->next;
+            free(check);
+            continue;
+        }
+        check->started = 1;
+        check->at = GetTickCount64();
+        mp_logf("MODS: delete: checking whether the %d claimed item(s) published from '%s' are still published",
+                check->count, check->cloud);
+        link = &check->next;
+    }
+}
+
+/* Main tick: settle the answered checks and drop the expired ones. */
+static void mp_poll_checks(void)
+{
+    mp_answer *answers, *a;
+    mp_check **link;
+    mp_start_checks();
+    AcquireSRWLockExclusive(&g_answer_lock);
+    answers = g_answers;
+    g_answers = NULL;
+    ReleaseSRWLockExclusive(&g_answer_lock);
+    while ((a = answers) != NULL) {
+        mp_check *check = NULL;
+        answers = a->next;
+        for (link = &g_checks; *link; link = &(*link)->next)
+            if ((*link)->ticket == a->ticket) { check = *link; *link = check->next; break; }
+        if (check && !a->ok) {
+            mp_logf("MODS: delete: the published-items check for '%s' failed; %d claim(s) kept", check->cloud,
+                    check->count);
+        } else if (check && a->count >= MP_ANSWER_PAGE) {
+            mp_logf("MODS: delete: '%s' answered a full page of %d published item(s); %d claim(s) kept",
+                    check->cloud, a->count, check->count);
+        } else if (check) {
+            int released = 0, kept = 0;
+            for (int i = 0; i < check->count; i++) {
+                int listed = 0;
+                for (int k = 0; k < a->count && !listed; k++) listed = !strcmp(a->items[k], check->items[i]);
+                if (listed) { kept++; continue; }
+                if (mp_queue_release(check->items[i], "the deleted map's item is no longer published")) released++;
+            }
+            mp_logf("MODS: delete: '%s' has %d published item(s) now; %d claim(s) released, %d kept (still published)",
+                    check->cloud, a->count, released, kept);
+        }
+        free(check);
+        free(a->items);
+        free(a);
+    }
+    for (link = &g_checks; *link;) {
+        mp_check *check = *link;
+        if (GetTickCount64() - check->at <= SH_MODPUBLISH_DELETE_CHECK_MS) { link = &check->next; continue; }
+        *link = check->next;
+        mp_logf("MODS: delete: no published-items answer for '%s' within %llu s; %d claim(s) kept", check->cloud,
+                SH_MODPUBLISH_DELETE_CHECK_MS / 1000ull, check->count);
+        free(check);
+    }
 }
 
 /* ------------------------------------------------------------ copy gate */
@@ -812,6 +1119,17 @@ static void mp_upload_finished(void)
     mp_job_free(h->job);
     h->job = NULL;
     mp_hold_free();
+    /* Before the original runs: TryCloudSave compares the edit's tags with the
+     * cloud save, so an added tag is cloud-saved and carried to the item. */
+    if (g_ops.add_tag) {
+        int tagged = g_ops.add_tag(g_ops.context, editor, SH_MODPUBLISH_TAG);
+        if (tagged > 0)
+            mp_log("MODS: publish: search tag '" SH_MODPUBLISH_TAG "' added (the map needs mods, so players "
+                   "without Snapmap+ cannot play it)");
+        else if (tagged < 0)
+            mp_log("MODS: publish: the search tag '" SH_MODPUBLISH_TAG "' could not be added; the map publishes "
+                   "without it");
+    }
     InterlockedExchange(&g_resuming, 1);
     if (g_ops.resume) g_ops.resume(g_ops.context, editor);
     InterlockedExchange(&g_resuming, 0);
@@ -942,9 +1260,10 @@ void sh_modpublish_poll(void)
 {
     if (!g_ops_set) return;
     if (g_hold.state == HOLD_IDLE && g_ctx.kind == CTX_NONE && !g_queue && !g_orphans && !g_notice[0] &&
-        !g_notice_ticket) return;
+        !g_notice_ticket && !g_checks && !g_answers) return;
     if (!mp_on_main()) return;
     mp_orphans_retire();
+    mp_poll_checks();
     mp_poll_hold();
     if (g_ctx.kind != CTX_NONE && g_hold.state == HOLD_IDLE &&
         (mp_token(g_ctx.editor) != g_ctx.token || GetTickCount64() - g_ctx.at > MP_CONTEXT_MS))
@@ -971,7 +1290,22 @@ void sh_modpublish_test_reset(void)
     mp_save_clear(&g_save);
     g_notice[0] = 0; g_notice_ticket = 0; g_notice_waited = 0;
     InterlockedExchange(&g_resuming, 0);
+    while (g_checks) { mp_check *c = g_checks; g_checks = c->next; free(c); }
+    AcquireSRWLockExclusive(&g_answer_lock);
+    while (g_answers) { mp_answer *a = g_answers; g_answers = a->next; free(a->items); free(a); }
+    ReleaseSRWLockExclusive(&g_answer_lock);
 }
+int sh_modpublish_test_delete_checks(void)
+{
+    int n = 0;
+    for (const mp_check *c = g_checks; c; c = c->next) n++;
+    return n;
+}
+void sh_modpublish_test_age_delete_checks(unsigned long long ms)
+{
+    for (mp_check *c = g_checks; c; c = c->next) c->at -= ms;
+}
+void sh_modpublish_test_set_link_min_age(long long seconds) { g_link_min_age = seconds; }
 int sh_modpublish_test_state(void) { return g_hold.state; }
 const char *sh_modpublish_test_notice(void) { return g_notice; }
 const char *sh_modpublish_test_provisional(void)
@@ -1017,11 +1351,25 @@ typedef void (*eng_idstr_ctor_fn)(void *, const char *);
 typedef void (*eng_object_fn)(void *);
 typedef void (*eng_toast_fn)(void *, void *, void *);
 typedef void (*eng_state_fn)(void *, int);
+typedef void (*eng_deleted_fn)(void *, void *, const void *, const void *);
+typedef unsigned char (*eng_grow_fn)(void *);
+typedef void (*eng_assign_fn)(void *, const void *);
+typedef void *(*eng_query_fn)(void *, const char *, const char *, void *, void *);
 
-enum { ENG_AFTER_SAVE, ENG_FEED_POST, ENG_UNPUBLISHED, ENG_MAPINFO_COPY, ENG_BROWSER_COPY, ENG_HOOKS };
+/* The edit's tag list (idList<idStr>: data +0, num +8, size +0xC; idStr
+ * elements of 0x30), its saved-map ids, and the published-items answer. */
+#define ENG_EDIT_TAGS       0x998
+#define ENG_EDIT_LOCAL_ID   0x7F8      /* idLocalSavedMapModel at edit+0x7F8: localId idStr first */
+#define ENG_EDIT_CLOUD_ID   0x9B0      /* its cloudSavedItemId idStr (+0x1B8) */
+#define ENG_TAG_STRIDE      0x30
+#define ENG_TAGS_MAX        4096
+#define ENG_PUBLISHED_STRIDE 0x588     /* idPublishedMapModel in the search answer; id idStr at +0 */
+
+enum { ENG_AFTER_SAVE, ENG_FEED_POST, ENG_UNPUBLISHED, ENG_MAPINFO_COPY, ENG_BROWSER_COPY, ENG_DELETED, ENG_HOOKS };
 static const char *const ENG_HOOK_NAMES[ENG_HOOKS] = {
-    "PublishAfterSave", "PublishFeedPost", "MapInfoUnpublishDone", "MapInfoCopyToMyMaps", "BrowserCopyToMyMaps" };
-static const size_t ENG_STEAL[ENG_HOOKS] = { 15, 15, 14, 19, 16 };
+    "PublishAfterSave", "PublishFeedPost", "MapInfoUnpublishDone", "MapInfoCopyToMyMaps", "BrowserCopyToMyMaps",
+    "MapInfoDeleteDone" };
+static const size_t ENG_STEAL[ENG_HOOKS] = { 15, 15, 14, 19, 16, 14 };
 
 static struct {
     const uint8_t *site[ENG_HOOKS];
@@ -1035,6 +1383,9 @@ static struct {
     eng_lookup_fn entry;                         /* browser: (list at +0x38, index) -> entry */
     eng_state_fn browser_state;                  /* browser: the state change its cancel path makes */
     eng_object_fn hide_progress;                 /* manager: hide the request-wait widget */
+    eng_grow_fn tags_grow;                       /* idList<idStr> grow, as PublishStart calls it */
+    eng_assign_fn idstr_assign;                  /* idStr = idStr */
+    eng_query_fn published_query;                /* PublishedPrevQuery */
     DWORD *main_thread;
     volatile LONG ready;
 } g_eng;
@@ -1173,11 +1524,133 @@ static int eng_upload_question_toast(void *c, void *editor, size_t count, unsign
     return SH_MODPUBLISH_ASKED_BY_TOAST;
 }
 
+/* The search tag, appended the way PublishStart appends map:dev: grow the
+ * list when it is full, assign into list[num], num++. Main thread, inside the
+ * editor session the hold was decided in. */
+static int eng_add_tag(void *c, void *editor, const char *tag)
+{
+    __declspec(align(16)) uint8_t text[ENG_IDSTR_SIZE];
+    int built = 0, result = -1;
+    (void)c;
+    if (!editor || !tag) return -1;
+    __try {
+        uint8_t *edit = *(uint8_t **)((uint8_t *)editor + ENG_EDITOR_EDIT);
+        uint8_t *list = edit ? edit + ENG_EDIT_TAGS : NULL;
+        int num, size;
+        if (!list) return -1;
+        num = *(int *)(list + 8);
+        size = *(int *)(list + 0xC);
+        if (num < 0 || size < num || num > ENG_TAGS_MAX || (num && !*(uint8_t **)list)) return -1;
+        for (int i = 0; i < num; i++) {
+            char have[64];
+            if (eng_string(*(uint8_t **)list + (size_t)i * ENG_TAG_STRIDE, have, sizeof have) && !_stricmp(have, tag))
+                return 0;
+        }
+        g_eng.idstr_ctor(text, tag);
+        built = 1;
+        if (num == size && !g_eng.tags_grow(list)) result = -1;
+        else if (*(int *)(list + 8) < *(int *)(list + 0xC) && *(uint8_t **)list) {
+            num = *(int *)(list + 8);
+            g_eng.idstr_assign(*(uint8_t **)list + (size_t)num * ENG_TAG_STRIDE, text);
+            *(int *)(list + 8) = num + 1;
+            result = 1;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        backend_log("MODS: publish: the tag list write faulted");
+        result = -1;
+    }
+    if (built) {
+        __try { g_eng.idstr_dtor(text); }
+        __except (EXCEPTION_EXECUTE_HANDLER) { }
+    }
+    return result;
+}
+
+/* The published edit's saved-map ids, read at the feed post (the cloud save
+ * of this publish has completed, so the cloud-saved id is set). */
+static int eng_edit_ids(void *c, void *edit, char *cloud, size_t cloud_cap, char *local, size_t local_cap)
+{
+    int a, b;
+    (void)c;
+    if (!edit) return 0;
+    __try {
+        a = eng_string((uint8_t *)edit + ENG_EDIT_CLOUD_ID, cloud, cloud_cap);
+        b = eng_string((uint8_t *)edit + ENG_EDIT_LOCAL_ID, local, local_cap);
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+    return a || b;
+}
+
+/* The published-items query's result callbacks: engine callback objects
+ * (vtable slot 0 deleting destructor, +8 invoke, +0x10 clone) built here, so
+ * the engine's own request context invokes and destroys them. They only post
+ * the answer; the main tick acts on it. */
+typedef struct eng_callback { void *const *vtable; unsigned ticket; } eng_callback;
+
+static void *eng_cb_destroy(eng_callback *self, unsigned flags) { if (flags & 1) free(self); return self; }
+static eng_callback *eng_cb_clone(const eng_callback *self)
+{
+    eng_callback *copy = malloc(sizeof(*copy));
+    if (copy) *copy = *self;
+    return copy;
+}
+static void eng_cb_ok(eng_callback *self, void *context, const void *list, const void *cursor)
+{
+    const char *ids[MP_ANSWER_ITEMS];
+    char (*text)[MP_ID_CAP] = NULL;
+    int n = 0, ok = 0;
+    (void)context; (void)cursor;
+    __try {
+        const uint8_t *data = *(const uint8_t *const *)list;
+        int num = *(const int *)((const uint8_t *)list + 8);
+        if (num >= 0 && (!num || data)) {
+            if (num > MP_ANSWER_ITEMS) num = MP_ANSWER_ITEMS;
+            text = num ? calloc((size_t)num, sizeof(*text)) : NULL;
+            ok = !num || text != NULL;
+            for (int i = 0; ok && i < num; i++)
+                if (eng_string(data + (size_t)i * ENG_PUBLISHED_STRIDE, text[n], MP_ID_CAP)) { ids[n] = text[n]; n++; }
+                else ok = 0;   /* an unreadable entry: no answer rather than a short one */
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) { ok = 0; }
+    sh_modpublish_published_result(self->ticket, ok, ids, ok ? n : 0);
+    free(text);
+}
+static void eng_cb_fail(eng_callback *self, void *context, int code)
+{
+    (void)context; (void)code;
+    sh_modpublish_published_result(self->ticket, 0, NULL, 0);
+}
+static void *eng_cb_unused(void) { return NULL; }
+
+static void *const ENG_CB_OK_VTABLE[4] = { (void *)eng_cb_destroy, (void *)eng_cb_ok, (void *)eng_cb_clone,
+                                           (void *)eng_cb_unused };
+static void *const ENG_CB_FAIL_VTABLE[4] = { (void *)eng_cb_destroy, (void *)eng_cb_fail, (void *)eng_cb_clone,
+                                             (void *)eng_cb_unused };
+
+static int eng_published_query(void *c, const char *cloud_id, unsigned ticket)
+{
+    eng_callback *ok = malloc(sizeof(*ok)), *fail = malloc(sizeof(*fail));
+    (void)c;
+    if (!ok || !fail || !cloud_id || !cloud_id[0]) { free(ok); free(fail); return 0; }
+    ok->vtable = ENG_CB_OK_VTABLE;
+    ok->ticket = ticket;
+    fail->vtable = ENG_CB_FAIL_VTABLE;
+    fail->ticket = ticket;
+    __try {
+        /* The engine owns both objects from here (its context destroys them),
+         * also when it answers at once without a signed-in session. */
+        (void)g_eng.published_query(NULL, cloud_id, NULL, ok, fail);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        backend_log("MODS: delete: the published-items query faulted");
+        return 0;
+    }
+    return 1;
+}
+
 #define ENG_UPLOAD_QUESTION eng_upload_question_dialog
 
 static const sh_modpublish_ops ENG_OPS = {
     NULL, eng_on_main, eng_can_ask, eng_ask, eng_poll, eng_release, eng_editor_token, eng_publish_fail,
-    eng_resume, eng_editor_notice, ENG_UPLOAD_QUESTION, eng_log
+    eng_resume, eng_editor_notice, ENG_UPLOAD_QUESTION, eng_log, eng_add_tag, eng_edit_ids, eng_published_query
 };
 
 /* ------------------------------------------------------------ detours */
@@ -1224,6 +1697,21 @@ static void eng_unpublished_detour(void *screen, void *context, const void *id_s
         } __except (EXCEPTION_EXECUTE_HANDLER) { backend_log("MODS: unpublish: the release step faulted"); }
     }
     ((eng_unpub_fn)g_eng.original[ENG_UNPUBLISHED])(screen, context, id_string);
+}
+
+/* The MapInfo screen's My Maps delete success: (screen, context, const idStr
+ * &localId, const idStr &cloudItemId); either id may be empty. */
+static void eng_deleted_detour(void *screen, void *context, const void *local_string, const void *cloud_string)
+{
+    char local[MP_ID_CAP], cloud[MP_ID_CAP];
+    if (eng_live()) {
+        __try {
+            if (!eng_string(local_string, local, sizeof local)) local[0] = 0;
+            if (!eng_string(cloud_string, cloud, sizeof cloud)) cloud[0] = 0;
+            sh_modpublish_deleted(local, cloud);
+        } __except (EXCEPTION_EXECUTE_HANDLER) { backend_log("MODS: delete: the claim check faulted"); }
+    }
+    ((eng_deleted_fn)g_eng.original[ENG_DELETED])(screen, context, local_string, cloud_string);
 }
 
 /* The published model a MapInfo screen shows: what its copy entry reads. */
@@ -1301,7 +1789,7 @@ static void eng_save_observer(const char *text, size_t length)
 
 static int eng_bind(const sig_result *results, size_t count, const uint8_t *base)
 {
-    const uint8_t *fail, *copy, *browser, *on_error, *ctor, *dtor;
+    const uint8_t *fail, *copy, *browser, *on_error, *ctor, *dtor, *start, *query;
     uintptr_t thread;
     for (size_t i = 0; i < ENG_HOOKS; i++)
         if (!(g_eng.site[i] = eng_site(results, count, base, ENG_HOOK_NAMES[i]))) {
@@ -1314,9 +1802,12 @@ static int eng_bind(const sig_result *results, size_t count, const uint8_t *base
     fail = eng_site(results, count, base, "PublishFail");
     ctor = eng_site(results, count, base, "IdStrCtor");
     dtor = eng_site(results, count, base, "IdStrDtor");
+    start = eng_site(results, count, base, "PublishStart");
+    query = eng_site(results, count, base, "PublishedPrevQuery");
     thread = glb_resolve(base, "main_thread_id", NULL);
-    if (!fail || !ctor || !dtor || !thread) {
-        backend_log("MODS: a publish helper (PublishFail, IdStrCtor, IdStrDtor, main thread) did not resolve");
+    if (!fail || !ctor || !dtor || !start || !query || !thread) {
+        backend_log("MODS: a publish helper (PublishFail, PublishStart, PublishedPrevQuery, IdStrCtor, IdStrDtor, "
+                    "main thread) did not resolve");
         return 0;
     }
     copy = g_eng.site[ENG_MAPINFO_COPY];
@@ -1354,7 +1845,21 @@ static int eng_bind(const sig_result *results, size_t count, const uint8_t *base
             !(g_eng.browser_state = (eng_state_fn)eng_call(on_error + 0x49)) ||
             memcmp(on_error + 0x4E, "\x48\x8b\x4b\x10\x48\x83\xc4\x40\x5f\x5e\x5b", 11) ||
             !(g_eng.hide_progress = (eng_object_fn)eng_call(on_error + 0x59))) return 0;
+        /* PublishStart's map:dev append: IdStrCtor at +0x55, the tag list at
+         * editor->edit + 0x998, grow when num == size (+0xB3), assign into
+         * list[num * 0x30] (+0xD5), num++; its Save callback is PublishAfterSave. */
+        if (eng_call(start + 0x55) != (void *)ctor ||
+            memcmp(start + 0x5B, "\x49\x8b\xb6\xc8\x04\x02\x00\x48\x81\xc6\x98\x09\x00\x00", 14) ||
+            memcmp(start + 0xA8, "\x8b\x46\x0c\x39\x46\x08\x75\x0c\x48\x8b\xce\xe8", 12) ||
+            !(g_eng.tags_grow = (eng_grow_fn)eng_call(start + 0xB3)) ||
+            memcmp(start + 0xB8, "\x84\xc0\x74\x21\x48\x63\x46\x08\x3b\x46\x0c\x7d\x18\x48\x8d\x0c\x40\x48\xc1\xe1\x04"
+                                 "\x48\x03\x0e\x48\x8d\x54\x24\x28\xe8", 30) ||
+            !(g_eng.idstr_assign = (eng_assign_fn)eng_call(start + 0xD5)) ||
+            memcmp(start + 0xDA, "\xff\x46\x08", 3) ||
+            eng_rip(start + 0x1F5, "\x4c\x8d\x05", 3) != (void *)g_eng.site[ENG_AFTER_SAVE] ||
+            eng_call(start + 0x140) != (void *)dtor) return 0;
     } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+    g_eng.published_query = (eng_query_fn)query;
     g_eng.publish_fail = (eng_editor_fn)fail;
     g_eng.idstr_ctor = (eng_idstr_ctor_fn)ctor;
     g_eng.idstr_dtor = (eng_object_fn)dtor;
@@ -1366,7 +1871,7 @@ int sh_modpublish_install(const sig_result *results, size_t count, const uint8_t
 {
     void *detours[ENG_HOOKS] = { (void *)eng_after_save_detour, (void *)eng_feed_post_detour,
                                  (void *)eng_unpublished_detour, (void *)eng_mapinfo_copy_detour,
-                                 (void *)eng_browser_copy_detour };
+                                 (void *)eng_browser_copy_detour, (void *)eng_deleted_detour };
     if (InterlockedCompareExchange(&g_eng.ready, 0, 0)) return 1;
     if (!results || !module_base || !eng_bind(results, count, module_base)) {
         backend_log("MODS: publish hooks are not installed on this build; maps publish natively and their mods "
@@ -1380,8 +1885,8 @@ int sh_modpublish_install(const sig_result *results, size_t count, const uint8_t
     for (size_t i = 0; i < ENG_HOOKS; i++) if (hook_commit(g_eng.original[i]) != B2_PATCH_OK) goto failed;
     sh_rawmap_set_save_observer(eng_save_observer);
     InterlockedExchange(&g_eng.ready, 1);
-    backend_log("MODS: publish hooks installed (upload at publish, claim at the feed post, release at unpublish, "
-                "copy-to-My-Maps size gate)");
+    backend_log("MODS: publish hooks installed (upload at publish, search tag, claim at the feed post, release at "
+                "unpublish and at a delete whose item is no longer published, copy-to-My-Maps size gate)");
     sh_modpublish_launch();
     return 1;
 failed:

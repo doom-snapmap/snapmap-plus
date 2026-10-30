@@ -577,7 +577,9 @@ void h_sh_mods(idCmdArgs *a)
         const char *flag = cmd_argv(a, 2);
         int again = flag && !_stricmp(flag, "--again"), r;
         if (flag && flag[0] && !again) { sh_printf("usage: sh_mods migrate [--again]\n"); return; }
+        modstore_lock();   /* the pass's scan waits for a store step in progress */
         r = sh_modmigrate_start(again);
+        modstore_unlock();
         if (r > 0) mc_line("MODS: migration: started on a background thread%s; its MODS: migration: lines go to the "
                            "backend log, then the serving index is rebuilt ('sh_mods list' shows the result)", again ? " (--again)" : "");
         else if (r < 0) mc_line("MODS: migration: a migration pass is already running or could not start");
@@ -611,7 +613,12 @@ void h_sh_mods(idCmdArgs *a)
     if (!arg[0]) { sh_printf("usage: sh_mods %s \"<folder>\"\n", verb); return; }
     if (!mc_resolve_folder(arg, folder, sizeof folder)) { mc_line("MODS: %s: the store folder cannot be resolved", verb); return; }
     if (!_stricmp(verb, "build")) mc_build(folder);
-    else mc_install(folder);
+    else {
+        /* Waits for a migration folder or a download in progress. */
+        modstore_lock();
+        mc_install(folder);
+        modstore_unlock();
+    }
 }
 
 int modbundle_build_folder(const char *folder_acp, char *first_cause, size_t n)

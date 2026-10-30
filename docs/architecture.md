@@ -611,8 +611,16 @@ the most recently installed bundle serves every path they share, whichever
 map is open. `sh_mods migrate [--again]` runs the same pass on the worker.
 Stock names are not checked during the migration because the game's resource
 reader is not up at boot, so unresolved needs only warn, as for a converted
-carrier. The worker shares the store with `sh_mods install`, which does not wait
-for it; an install typed while the first-start pass runs can race it.
+carrier.
+
+Every writer of the store serialises on one recursive lock, `modstore_lock`
+(`modstore.c`; `modsync_store_lock` is the same lock under its older name).
+Each install and verification takes it; each migration folder, a download
+install, `sh_mods install`, `sh_mods migrate` and an export hold it around their
+whole step. A second writer waits for the first instead of failing, and logs
+one `MODS: store: waiting` line; because the migration takes the lock per
+folder, an install on the main thread (the Mods tab or `sh_mods install`) waits
+for at most one folder, not for the whole pass.
 
 ### Published maps and missing mods
 
@@ -687,7 +695,14 @@ route shows the explanation as `PublishFail`'s editor toast instead, cancels
 that publish, and treats the next one as the agreement. One worker job then
 uploads every bundle (`modsync_upload_bundles`: missing blobs, the canonical
 manifests, one claim) under a provisional ref `publish-pending-<16 hex>`, and a
-main tick resumes the original `PublishAfterSave`. A No, a failed upload, a
+main tick resumes the original `PublishAfterSave`. Just before the resume the
+search tag `mods` is added to the edit's tag list (`edit+0x998`,
+`idList<idStr>`) when absent, the way `PublishStart` adds `map:dev` and
+`SnapMapAddBranchTag` adds `map:branch` (the list grow and idStr assignment
+are bound from `PublishStart`'s own calls): `TryCloudSave` compares the edit's
+tags with the cloud save, so the tag is cloud-saved and copied to the
+published item, and players can see that the map needs Snapmap+. A tag that
+cannot be written is logged and the map publishes without it. A No, a failed upload, a
 question that cannot be shown or a busy worker cancels through `PublishFail`
 and a toast naming the cause; nothing reached the map service. The editor
 leaving abandons the hold; another save cancels it.
@@ -702,9 +717,23 @@ claim succeeds, or when its publish never reaches the feed post.
 
 Release: the MapInfo screen's unpublish completion (`(screen, ctx, const
 idStr &id)`, bound by the unpublish confirm) releases the item's claim on the
-worker. Deleting a map from My Maps releases nothing: it removes the local
-slot and the cloud-saved item, and the published item stays playable for
-everyone, so its claim must stay. A copy to My Maps of a published map whose
+worker. Deleting a map from My Maps removes the local slot and the cloud-saved
+item; the published item stays playable for everyone, so its claim normally
+stays. The delete completion (`(screen, ctx, const idStr &localId, const idStr
+&cloudItemId)`) releases a claim only when its item is no longer published,
+for example after an unpublish this installation never saw. Neither saved-map
+model links to a published item (their reflected fields hold only the local
+id, the cloud-saved id and branch parents), so the feed post records the link
+itself in `mods\publish-links.json` (item id to cloud-saved id and local id).
+At delete, the linked items that still hold a claim are checked with the
+engine's own `maps_pub_prev_pub` search (`PublishedPrevQuery`, by parent
+cloud-saved item and owner), issued on the main tick with two callback objects
+the engine's request context invokes and destroys; only an item missing from a
+successful answer is released. No link, no stored claim, no cloud-saved id, a
+link younger than an hour (a fresh item may not be searchable yet), an answer
+as long as a search page (30 items, it may be partial), a failed answer or
+none within 60 seconds keeps every claim. A release or an
+unpublish forgets the link. A copy to My Maps of a published map whose
 cached text (`%LOCALAPPDATA%\id Software\DOOM\base\doomsnapmaps\published-maps\<id>_<rev>_map.decl`)
 is over the bound is refused at the MapInfo and browser entries, before the
 engine creates the saved item, with a one-button notice.

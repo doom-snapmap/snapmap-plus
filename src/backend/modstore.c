@@ -12,6 +12,43 @@
 
 #define MS_CHUNK (1u << 20)
 
+/* ------------------------------------------------------------ lock ----- */
+
+/* The store lock: one critical section for every writer of mods\ (installs,
+ * downloads, the migration, exports, claims). It is recursive on purpose: the
+ * install and verification below take it themselves, and their callers (the
+ * migration pass, a download) already hold it around a larger step. */
+static INIT_ONCE        g_ms_lock_once = INIT_ONCE_STATIC_INIT;
+static CRITICAL_SECTION g_ms_lock;
+static volatile LONG    g_ms_lock_waits;
+
+static BOOL CALLBACK ms_lock_init(PINIT_ONCE once, PVOID p, PVOID *ctx)
+{
+    (void)once; (void)p; (void)ctx;
+    InitializeCriticalSection(&g_ms_lock);
+    return TRUE;
+}
+
+void modstore_lock(void)
+{
+    InitOnceExecuteOnce(&g_ms_lock_once, ms_lock_init, NULL, NULL);
+    if (TryEnterCriticalSection(&g_ms_lock)) return;
+    /* Held by another thread: wait for it rather than fail. */
+    InterlockedIncrement(&g_ms_lock_waits);
+    backend_log("MODS: store: waiting for another store operation to finish (an install, a download or the migration)");
+    EnterCriticalSection(&g_ms_lock);
+}
+
+void modstore_unlock(void)
+{
+    LeaveCriticalSection(&g_ms_lock);
+}
+
+unsigned modstore_lock_waits(void)
+{
+    return (unsigned)InterlockedCompareExchange(&g_ms_lock_waits, 0, 0);
+}
+
 static char g_ms_root[MAX_PATH * 4];
 static int  g_ms_root_set;
 static int  g_ms_force_copy;
@@ -566,7 +603,18 @@ static int ms_verify_folder(const wchar_t *root, const wchar_t *folder, const sh
     return 1;
 }
 
+static int ms_verify_locked(const char *key, sh_ms_verify_stats *st, char *cause, size_t cap);
+
 int sh_ms_verify(const char *key, sh_ms_verify_stats *st, char *cause, size_t cap)
+{
+    int ok;
+    modstore_lock();
+    ok = ms_verify_locked(key, st, cause, cap);
+    modstore_unlock();
+    return ok;
+}
+
+static int ms_verify_locked(const char *key, sh_ms_verify_stats *st, char *cause, size_t cap)
 {
     sh_ms_list l;
     wchar_t *root;
@@ -700,9 +748,26 @@ static int ms_lay_out(const wchar_t *blobs, const wchar_t *dir, const sh_mb_bund
     return 1;
 }
 
+static int ms_install_locked(const char *folder, const sh_mb_resolver *resolver,
+                             char *key_out, size_t key_cap, sh_ms_install_stats *stats,
+                             sh_mb_bundle *bundle_out, char *cause, size_t cap);
+
+/* Every install runs under the store lock: two installs share the staging and
+ * blob temporary names (both are named by process id). */
 int sh_ms_install_from_folder(const char *folder, const sh_mb_resolver *resolver,
                               char *key_out, size_t key_cap, sh_ms_install_stats *stats,
                               sh_mb_bundle *bundle_out, char *cause, size_t cap)
+{
+    int ok;
+    modstore_lock();
+    ok = ms_install_locked(folder, resolver, key_out, key_cap, stats, bundle_out, cause, cap);
+    modstore_unlock();
+    return ok;
+}
+
+static int ms_install_locked(const char *folder, const sh_mb_resolver *resolver,
+                             char *key_out, size_t key_cap, sh_ms_install_stats *stats,
+                             sh_mb_bundle *bundle_out, char *cause, size_t cap)
 {
     sh_ms_install_stats st_local;
     sh_ms_install_stats *st = stats ? stats : &st_local;

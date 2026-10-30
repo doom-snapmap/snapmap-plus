@@ -28,6 +28,21 @@ func retiredContent(rel string) bool {
 	return false
 }
 
+// regenerableContent reports whether a path relative to a content root is regenerable cache: the
+// cache folder (the companion window's WebView2 profile lives in cache\webview2) and the webview2
+// folder earlier releases kept at the top level. The game rebuilds it, so it is never backed up,
+// copied or required at a destination.
+func regenerableContent(rel string) bool {
+	first := strings.ToLower(strings.SplitN(filepath.ToSlash(rel), "/", 2)[0])
+	return first == "cache" || first == "webview2"
+}
+
+// outsideMigration reports content the user-data migration leaves where it is: retired package
+// folders and regenerable cache.
+func outsideMigration(rel string) bool {
+	return rel != "." && (retiredContent(rel) || regenerableContent(rel))
+}
+
 // oldUserContentDir is the legacy home-root data folder; empty if USERPROFILE is unset.
 func oldUserContentDir() string {
 	base := os.Getenv("USERPROFILE")
@@ -81,7 +96,7 @@ func migrateUserData() {
 	ensureUserDataTree()
 
 	// 1) User content: %USERPROFILE%\snaphak -> the app-data dir, then remove the old folder if fully
-	// mirrored. Retired package folders stay where they are.
+	// mirrored. Retired package folders and regenerable cache stay where they are.
 	if old := oldUserContentDir(); old != "" && !sameFile(old, dir) {
 		if _, err := os.Stat(old); err == nil {
 			_, copyErr := copyTreeMissing(old, dir)
@@ -114,7 +129,7 @@ func migrateUserData() {
 	}
 }
 
-// fullyMirrored rejects missing entries, byte differences, links and read errors. Retired package
+// fullyMirrored rejects missing entries, byte differences, links and read errors. Retired package and cache
 // content is outside the migration and is not required at the destination.
 func fullyMirrored(src, dst string) bool {
 	err := filepath.WalkDir(src, func(path string, d os.DirEntry, err error) error {
@@ -125,7 +140,7 @@ func fullyMirrored(src, dst string) bool {
 		if rerr != nil {
 			return rerr
 		}
-		if rel != "." && retiredContent(rel) {
+		if outsideMigration(rel) {
 			if d.IsDir() {
 				return filepath.SkipDir
 			}
@@ -142,7 +157,7 @@ func fullyMirrored(src, dst string) bool {
 	return err == nil
 }
 
-// copyTreeMissing never overwrites a destination and reports incomplete copies. Retired package
+// copyTreeMissing never overwrites a destination and reports incomplete copies. Retired package and cache
 // content is not copied.
 func copyTreeMissing(src, dst string) (int, error) {
 	copied := 0
@@ -157,7 +172,7 @@ func copyTreeMissing(src, dst string) (int, error) {
 			failures = errors.Join(failures, rerr)
 			return nil
 		}
-		if rel != "." && retiredContent(rel) {
+		if outsideMigration(rel) {
 			if d.IsDir() {
 				return filepath.SkipDir
 			}
@@ -245,7 +260,7 @@ func copyMissingFile(src, dst string) error {
 }
 
 // Recheck each source and remove empty directories only. Late additions survive, and retired
-// package content (with the folders that hold it) stays in place.
+// package content and regenerable cache (with the folders that hold them) stay in place.
 func removeMirroredTree(src, dst string) error {
 	var dirs []string
 	kept := false
@@ -257,7 +272,7 @@ func removeMirroredTree(src, dst string) error {
 		if err != nil {
 			return err
 		}
-		if rel != "." && retiredContent(rel) {
+		if outsideMigration(rel) {
 			kept = true
 			if d.IsDir() {
 				return filepath.SkipDir
