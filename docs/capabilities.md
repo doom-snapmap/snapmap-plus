@@ -190,6 +190,13 @@ Converting assets from other games is Doomforge's job, not this product's. New n
   and full bar) instead of SnapMap's forced number. It changes only the display, applies to every
   installed mod at startup, and two mods asking different things for one weapon turn the setting off
   for all weapons, with both named in the log.
+- A mod can carry sounds: a sound decl under `generated/decls/sound/mods/<id>/` plays the Wwise
+  event its name gives (`<stem>` plays `play_<stem>`), so it can reuse any stock sound without a
+  bank, and a mod's own Wwise bank (`sound/soundbanks/pc/<id>_<name>.bnk`, built with Wwise or
+  snaphak-re's `make_bank.py`) is loaded into the game when the editor is first opened or a map
+  loads, and right away when the mod is installed during a session. Entities the mod adds can name
+  those sounds (`soundShader`). A changed bank takes effect after a restart. Music, switch and
+  blend containers and streamed media still need Wwise itself.
 - A mod can carry its own virtual-texture family (the page format a material streams its
   diffuse, specular and normal detail from): the members `virtualtextures/mods/<id>/<family>_sq<N>.mega2`
   (N 1 to 16), and materials naming it with `landpagefile "mods/<id>/<family>"` and an explicit

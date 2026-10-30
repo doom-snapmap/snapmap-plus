@@ -52,6 +52,7 @@
 #include "engine_build.h"
 #include "engine_cvar_read.h"
 #include "modvt.h"
+#include "modsound.h"
 
 #define RES_LIFETIME_OFF    0x28
 #define RES_STATE_OFF       0x2c
@@ -446,6 +447,8 @@ void sh_modserve_palette_before_build(void)
     /* Mod virtual-texture families first: a material binds to its family only
      * when the family's record exists when the material is parsed. */
     sh_modvt_before_pass("editor");
+    /* Mod sound banks: submitted once the sound system is up (modsound.h). */
+    sh_modsound_before_pass("editor");
     if (!g_bound || !sh_modserve_active()) return;
     me_ensure_probe();
     t0 = me_now_ms();
@@ -639,6 +642,7 @@ int modserve_activate_bundles(const char *const *bundle_hashes, int n)
     if (main != 1) { me_log("activation refused: not on the main thread"); return -1; }
     if (!g_bound) { me_log("activation refused: decl registry unavailable"); return -1; }
     sh_modvt_before_pass("map");
+    sh_modsound_before_pass("map");
     me_ensure_probe();
     t0 = me_now_ms();
     if (sh_modserve_plan_bundles(bundle_hashes, n, &plan, &unknown) < 0) { me_log("activation refused: out of memory"); return -1; }
@@ -678,6 +682,7 @@ int sh_modserve_command(void *args, const char *verb)
                   st.editor_rows_failed, g_bound ? "bound" : "unavailable", g_probe_orig ? "hooked" : "not hooked");
         sh_modserve_each_bundle(me_print_bundle, NULL);
         sh_modvt_print_status();
+        sh_modsound_print_status();
         return 1;
     }
     if (!_stricmp(verb, "rescan")) {

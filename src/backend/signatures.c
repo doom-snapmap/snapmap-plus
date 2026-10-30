@@ -1376,6 +1376,29 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "E8 ?? ?? ?? ?? 48 89 44 24 60 48 85 C0 74 0D 48 8B C8 E8 ?? ?? ?? ?? 48 8B F8 EB 02 33 FF 48 8B 4B 38 48 3B CF "
       "74 13 48 85 C9 74 0A 48 8B 01 BA 01 00 00 00 FF 10 48 89 7B 38 33 C0 EB 5B B9 80 01 00 00 E8 ?? ?? ?? ?? "
       "48 89 44 24 60 48 85 C0 74 11 48 8B 53 08 48 8B C8 E8 ?? ?? ?? ?? 48 8B F8", 0x172B3B0u, 0x172C040u },
+    /* Mod sound banks (modsound.c): vtable slots and one direct call, no steal. Re-find through the
+     * strings "sound/soundbanks/%s/" (LoadBanks), "force load success id %6d : %s" (the per-bank
+     * wrapper), the resolver vtable after AudioFileResolverInit, and "s_loadBanks" (its console
+     * function). Frame sizes changed from the 2018 build (0x420 -> 0x2F0, 0x190 -> 0x1C0). */
+    { "AudioLoadBanks",     /* void(hardware): idSoundHardware_WWise vtable +0x30. Init.bnk, doom_initial, initial.pck,
+                             * then ListFiles("sound/soundbanks/pc/", "bnk") through the per-bank wrapper. */
+      "40 55 41 54 41 55 41 56 41 57 48 81 EC F0 02 00 00 48 8D 6C 24 30 48 C7 45 10 FE FF FF FF "
+      "48 89 9D F0 02 00 00 48 89 B5 F8 02 00 00 48 89 BD 00 03 00 00 48 8B 05 ?? ?? ?? ?? 48 33 C5 "
+      "48 89 85 B0 02 00 00 48 8B F1 48 8D 4D 50 E8", 0x19F6340u, 0x1A123F0u },
+    { "AudioBankSubmit",    /* int(hardware, const char *file): name normalised, listed-bank filter (_sp, _snapmaps,
+                             * initial), then async LoadBank with the "async load success id %6d : %s" callback. */
+      "48 8B C4 55 48 8D A8 38 FF FF FF 48 81 EC C0 01 00 00 48 C7 44 24 38 FE FF FF FF 48 89 58 08 "
+      "48 89 70 18 48 89 78 20 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 85 B0 00 00 00 48 8B F2 48 8B D9 BF 01 00 00 00",
+      0x19F6A20u, 0x1A12AD0u },
+    { "AudioFileOpenName",  /* AKRESULT(resolver, const wchar_t *name, mode, flags, bool *sync, AkFileDesc *): packages
+                             * at resolver+0x648 first, then the default blocking hook (CreateFileW, device +0x630). */
+      "48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18 57 41 56 41 57 48 83 EC 30 4C 8B 74 24 78 49 8B F9 "
+      "45 8B F8 48 8B EA 48 8B F1 45 85 C0 0F 85 B0 00 00 00 4D 85 C9 0F 84 A7 00 00 00 41 8B 01 85 C0 75 5F "
+      "41 39 41 04 75 59 48 8B 99 48 06 00 00", 0x19F6D60u, 0x1A12E10u },
+    { "SoundLoadBanksCmd",  /* s_loadBanks / s_reloadAudioEvents: events registration on soundSystem, then
+                             * soundSystem+0x140 (the hardware) vtable +0x30. modsound decodes both addresses. */
+      "48 83 EC 28 48 8D 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? 48 8B 0D ?? ?? ?? ?? 48 8B 01 48 83 C4 28 48 FF 60 30",
+      0x1689010u, 0x16895F0u },
     { "WeaponHudModeCall", /* WeaponInfo::Update: CALL WeaponHudGameMode; TEST AL,AL; JZ; then the widget's weapon decl
                             * at RBX+0x1F8 and its +0x641 flag. The beta.19 pattern, unchanged on 13954591; modhud
                             * swaps the call's aligned rel32 (no steal). */

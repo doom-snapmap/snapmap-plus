@@ -396,8 +396,9 @@ typedef void (*sh_modserve_file_fn)(void *context, const char *request, uint64_t
                                     const char *version, const char *bundle_hash);
 void sh_modserve_each_served(sh_modserve_file_fn fn, void *context);
 
-/* One function called after every table this layer publishes (boot, rescan),
- * on the thread that built it, outside the build lock. NULL clears it. */
+/* Functions called after every table this layer publishes (boot, rescan),
+ * on the thread that built it, outside the build lock, in the order they
+ * were added (up to four; adding one twice is ignored). NULL clears all. */
 typedef void (*sh_modserve_index_fn)(void);
 void sh_modserve_set_index_listener(sh_modserve_index_fn fn);
 
