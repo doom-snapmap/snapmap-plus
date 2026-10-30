@@ -97,6 +97,7 @@ static int g_gates_original[SH_MODSERVE_REQ_COUNT];
 static SRWLOCK g_build_lock = SRWLOCK_INIT;
 static char g_last_root[MAX_PATH];
 static volatile LONG g_opens_served, g_open_failures, g_probe_claims, g_cache_hits;
+static volatile LONG g_renderprog_logged;   /* render-program serve lines written */
 volatile LONG g_modserve_editor_ok, g_modserve_editor_failed;   /* written by modserve_engine.c */
 #define MS_LISTENERS 4
 static sh_modserve_index_fn volatile g_index_listener[MS_LISTENERS];   /* modvt.c, modsound.c */
@@ -1887,7 +1888,14 @@ int sh_modserve_open(const char *request, unsigned char **bytes, size_t *length)
         }
         if (InterlockedCompareExchange(&g_cache_enabled, 0, 0)) ms_cache_put(f, buf, len);
     }
-    InterlockedIncrement((volatile LONG *)&f->opens);
+    /* A render program's files are named once each (the first 64): which of
+     * them the engine opened shows which variant this GPU binds. */
+    if (InterlockedIncrement((volatile LONG *)&f->opens) == 1 &&
+        (!strncmp(f->request, "generated/renderprogs/", 22) || !strncmp(f->request, "generated/spirv/", 16) ||
+         !strncmp(f->request, "generated/decls/renderprog/", 27)) &&
+        InterlockedIncrement(&g_renderprog_logged) <= 64)
+        ms_log("renderprog: served %s (%s@%s, %zu bytes%s)", f->request, x->bundles[f->bundle].id,
+               x->bundles[f->bundle].version, len, f->stock ? ", installed content" : "");
     InterlockedIncrement(&g_opens_served);
     if (f->is_shadow && !InterlockedExchange((volatile LONG *)&f->shadow_logged, 1))
         ms_log("shadow '%s' served from %s@%s (%zu bytes%s)", f->request, x->bundles[f->bundle].id,

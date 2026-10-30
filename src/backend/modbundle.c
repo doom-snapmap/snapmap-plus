@@ -1094,6 +1094,11 @@ int sh_mb_logical_name(const char *r, char *type, size_t tcap, char *name, size_
         memcpy(name, r + 10, s); memcpy(name + s, ".swf", 5);
         return 1;
     }
+    /* A permutation decl (generated/renderprogs/permutations/<program>_<mask>.decl)
+     * is named by its request path: that is the string the permutation lookup
+     * formats and passes to DeclFind (VK 0x141910010). It is decl text but not
+     * a generated/decls/ decl, so it is never registered; it is served when
+     * opened and checked with its program (mb_check_renderprogs). */
     if (sh_mb_bank_stem(r, NULL, 0)) cls = "soundBank";
     else if (mb_ends(r, ".bmodel")) cls = "model";
     else if (mb_ends(r, ".bcm")) cls = "cm";
@@ -1927,6 +1932,8 @@ typedef struct mb_walk {
     int stock;              /* a stock reader is registered: defer type and size refusals */
 } mb_walk;
 
+static const char *mb_rp_forbidden(const char *request);
+
 static int mb_is_top_allowed(const char *name)
 {
     return _stricmp(name, "mod.json") == 0 || _stricmp(name, "package.json") == 0 ||
@@ -1977,6 +1984,8 @@ static void mb_walk_dir(mb_walk *w, const wchar_t *dir, const char *rel, int dep
             mb_lower(req_lower);
             if (!sh_mb_check_request(req_lower, cause, sizeof cause)) {
                 mb_error(w->b, "%s: %s", child, cause);
+            } else if (mb_rp_forbidden(req_lower)) {
+                mb_error(w->b, "%s may not ship: %s", child, mb_rp_forbidden(req_lower));
             } else if (!sh_mb_extension_allowed(req_lower) && !(defer && (deferred = 1))) {
                 mb_error(w->b, "file type not allowed: %s", child);
             } else if (size == 0) {
@@ -2127,6 +2136,492 @@ static int mb_resolve_one(sh_mb_bundle *b, const mb_req_index *own, const sh_mb_
     return unknown ? -1 : 0;
 }
 
+/* ----------------------------------------------------- render programs ---- */
+/* A bundle that carries a render program must carry what the engine checks:
+ * the cooked program's checksum is MD5fold of the served decl text, each
+ * SPIR-V header names the stage text it was compiled from, and every stage
+ * and permutation the engine binds is present (a missing stage file is a
+ * fatal error at bind). MD5fold is MD5 with its four 32-bit words XORed
+ * together (VK 0x1402d6a90). */
+
+static const uint32_t MB_MD5_K[64] = {
+    0xd76aa478u, 0xe8c7b756u, 0x242070dbu, 0xc1bdceeeu, 0xf57c0fafu, 0x4787c62au, 0xa8304613u, 0xfd469501u,
+    0x698098d8u, 0x8b44f7afu, 0xffff5bb1u, 0x895cd7beu, 0x6b901122u, 0xfd987193u, 0xa679438eu, 0x49b40821u,
+    0xf61e2562u, 0xc040b340u, 0x265e5a51u, 0xe9b6c7aau, 0xd62f105du, 0x02441453u, 0xd8a1e681u, 0xe7d3fbc8u,
+    0x21e1cde6u, 0xc33707d6u, 0xf4d50d87u, 0x455a14edu, 0xa9e3e905u, 0xfcefa3f8u, 0x676f02d9u, 0x8d2a4c8au,
+    0xfffa3942u, 0x8771f681u, 0x6d9d6122u, 0xfde5380cu, 0xa4beea44u, 0x4bdecfa9u, 0xf6bb4b60u, 0xbebfbc70u,
+    0x289b7ec6u, 0xeaa127fau, 0xd4ef3085u, 0x04881d05u, 0xd9d4d039u, 0xe6db99e5u, 0x1fa27cf8u, 0xc4ac5665u,
+    0xf4292244u, 0x432aff97u, 0xab9423a7u, 0xfc93a039u, 0x655b59c3u, 0x8f0ccc92u, 0xffeff47du, 0x85845dd1u,
+    0x6fa87e4fu, 0xfe2ce6e0u, 0xa3014314u, 0x4e0811a1u, 0xf7537e82u, 0xbd3af235u, 0x2ad7d2bbu, 0xeb86d391u
+};
+static const unsigned char MB_MD5_S[16] = { 7, 12, 17, 22, 5, 9, 14, 20, 4, 11, 16, 23, 6, 10, 15, 21 };
+
+static void mb_md5_block(uint32_t h[4], const unsigned char *p)
+{
+    uint32_t m[16], a = h[0], b = h[1], c = h[2], d = h[3];
+    int i;
+    for (i = 0; i < 16; i++)
+        m[i] = (uint32_t)p[4 * i] | ((uint32_t)p[4 * i + 1] << 8) | ((uint32_t)p[4 * i + 2] << 16) |
+               ((uint32_t)p[4 * i + 3] << 24);
+    for (i = 0; i < 64; i++) {
+        uint32_t f, t;
+        int g, s = MB_MD5_S[(i >> 4) * 4 + (i & 3)];
+        if (i < 16) { f = (b & c) | (~b & d); g = i; }
+        else if (i < 32) { f = (d & b) | (~d & c); g = (5 * i + 1) & 15; }
+        else if (i < 48) { f = b ^ c ^ d; g = (3 * i + 5) & 15; }
+        else { f = c ^ (b | ~d); g = (7 * i) & 15; }
+        t = f + a + MB_MD5_K[i] + m[g];
+        a = d; d = c; c = b;
+        b = b + ((t << s) | (t >> (32 - s)));
+    }
+    h[0] += a; h[1] += b; h[2] += c; h[3] += d;
+}
+
+void sh_mb_md5(const void *data, size_t len, unsigned char digest[16])
+{
+    uint32_t h[4] = { 0x67452301u, 0xefcdab89u, 0x98badcfeu, 0x10325476u };
+    const unsigned char *p = (const unsigned char *)data;
+    unsigned char tail[128];
+    uint64_t bits = (uint64_t)len * 8u;
+    size_t done = 0, rest, pad, i;
+    for (; done + 64 <= len; done += 64) mb_md5_block(h, p + done);
+    rest = len - done;
+    memcpy(tail, p + done, rest);
+    tail[rest] = 0x80;
+    pad = rest < 56 ? 64 : 128;
+    memset(tail + rest + 1, 0, pad - rest - 1);
+    for (i = 0; i < 8; i++) tail[pad - 8 + i] = (unsigned char)(bits >> (8 * i));
+    mb_md5_block(h, tail);
+    if (pad == 128) mb_md5_block(h, tail + 64);
+    for (i = 0; i < 16; i++) digest[i] = (unsigned char)(h[i / 4] >> (8 * (i % 4)));
+}
+
+unsigned sh_mb_md5fold(const void *data, size_t len)
+{
+    unsigned char d[16];
+    uint32_t w[4];
+    int i;
+    sh_mb_md5(data, len, d);
+    for (i = 0; i < 4; i++)
+        w[i] = (uint32_t)d[4 * i] | ((uint32_t)d[4 * i + 1] << 8) | ((uint32_t)d[4 * i + 2] << 16) |
+               ((uint32_t)d[4 * i + 3] << 24);
+    return w[0] ^ w[1] ^ w[2] ^ w[3];
+}
+
+static uint32_t mb_be32(const unsigned char *p)
+{
+    return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | (uint32_t)p[3];
+}
+
+static uint32_t mb_le32(const unsigned char *p)
+{
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+static int mb_stage_text_ok(const unsigned char *t, size_t n)
+{
+    size_t i;
+    for (i = 0; i < n; i++)
+        if (!(t[i] == '\t' || t[i] == '\n' || t[i] == '\r' || (t[i] >= 0x20 && t[i] < 0x7f))) return 0;
+    return 1;
+}
+
+/* The body reader (VK 0x14190f4a0, GL 0x141904030) ends with three stage
+ * records -- u32, u32, u16 (big-endian), then the stage text as a
+ * little-endian u32 length and that many bytes -- and a 36-byte trailer of
+ * nine u32 fields. The fields before the records depend on the renderparm
+ * types the engine resolves while reading, so the records are found from the
+ * end: the one offset whose three records end exactly at the trailer. */
+int sh_mb_rp_stages(const unsigned char *bin, size_t len, size_t off[3], size_t n[3])
+{
+    size_t p, found = 0, o[3] = { 0, 0, 0 }, c[3] = { 0, 0, 0 };
+    if (!bin || len < 8 + 3 * 14 + 36) return 0;
+    for (p = 8; p + 3 * 14 + 36 <= len; p++) {
+        size_t q = p, to[3], tn[3];
+        int k;
+        for (k = 0; k < 3; k++) {
+            uint32_t ln;
+            if (q + 14 > len - 36) break;
+            ln = mb_le32(bin + q + 10);
+            if (ln > len - 36 - (q + 14)) break;
+            if (!mb_stage_text_ok(bin + q + 14, ln)) break;
+            to[k] = q + 14; tn[k] = ln;
+            q += 14 + ln;
+        }
+        if (k == 3 && q == len - 36) {
+            if (++found > 1) return -1;
+            memcpy(o, to, sizeof o); memcpy(c, tn, sizeof c);
+        }
+    }
+    if (!found) return 0;
+    if (off) memcpy(off, o, sizeof o);
+    if (n) memcpy(n, c, sizeof c);
+    return 1;
+}
+
+/* The stage loader's file name: "generated/spirv/" + the program's name with
+ * its extension replaced, where a basename (extension included) of 38 or more
+ * characters is cut into 30-character components. */
+int sh_mb_spirv_request(const char *name, const char *ext, char *out, size_t cap)
+{
+    char stem[SH_MB_REQUEST_MAX + 1];
+    const char *slash = strrchr(name, '/'), *base = slash ? slash + 1 : name, *dot = strrchr(base, '.');
+    size_t dir_n = (size_t)(base - name), base_n = dot ? (size_t)(dot - base) : strlen(base), ext_n = strlen(ext);
+    size_t pos = 0, i;
+    if (dir_n + base_n + ext_n + 1 > sizeof stem) return 0;
+    if (16 + dir_n + base_n + base_n / 30 + ext_n + 1 > cap) return 0;
+    memcpy(stem, name, dir_n + base_n);
+    stem[dir_n + base_n] = 0;
+    memcpy(out, "generated/spirv/", 16); pos = 16;
+    memcpy(out + pos, stem, dir_n); pos += dir_n;
+    if (base_n + ext_n < 38) {
+        memcpy(out + pos, stem + dir_n, base_n); pos += base_n;
+    } else {
+        for (i = 0; i < base_n; i++) {
+            if (i && i % 30 == 0) out[pos++] = '/';
+            out[pos++] = stem[dir_n + i];
+        }
+    }
+    memcpy(out + pos, ext, ext_n + 1);
+    return 1;
+}
+
+/* generated/renderprogs/permutations/<program>_<16 hex digits>.decl: the name
+ * the permutation lookup formats (VK 0x141910010) and passes to DeclFind. */
+int sh_mb_rp_permutation(const char *request, char *program, size_t cap, char mask[17])
+{
+    static const char prefix[] = "generated/renderprogs/permutations/";
+    size_t n = strlen(request), pn = sizeof prefix - 1, i, prog_n;
+    const char *m;
+    if (n < pn + 1 + 1 + 16 + 5 || strncmp(request, prefix, pn) != 0 || strcmp(request + n - 5, ".decl") != 0)
+        return 0;
+    m = request + n - 5 - 16;
+    if (m[-1] != '_') return 0;
+    for (i = 0; i < 16; i++)
+        if (!((m[i] >= '0' && m[i] <= '9') || (m[i] >= 'a' && m[i] <= 'f'))) return 0;
+    prog_n = (size_t)(m - 1 - (request + pn));
+    if (prog_n == 0 || prog_n + 1 > cap) return 0;
+    memcpy(program, request + pn, prog_n);
+    program[prog_n] = 0;
+    if (mask) { memcpy(mask, m, 16); mask[16] = 0; }
+    return 1;
+}
+
+/* Files the engine writes or shares between every program (check 7). */
+static const char *mb_rp_forbidden(const char *r)
+{
+    const char *slash = strrchr(r, '/');
+    if (mb_starts(r, "decls/renderprogs/"))
+        return "a shared render-program include (decls/renderprogs/) changes every program that includes it";
+    if (!strcmp(slash ? slash + 1 : r, "vulkan_pipelines.bin"))
+        return "vulkan_pipelines.bin is the engine's pipeline warm-up list";
+    if (mb_starts(r, "generated/glslbinaries/"))
+        return "generated/glslBinaries/ is the OpenGL driver's binary cache";
+    if (mb_starts(r, "generated/glsl/"))
+        return "generated/glsl/ is the engine's debug dump of generated GLSL";
+    return NULL;
+}
+
+typedef struct mb_rp {
+    sh_mb_bundle *b;
+    const wchar_t *root;
+    unsigned char *used;
+} mb_rp;
+
+#define MB_RP_ERR(strict, ...) do { if (strict) mb_error(rp->b, __VA_ARGS__); else mb_warn(rp->b, __VA_ARGS__); } while (0)
+
+static sh_mb_file *mb_rp_find(mb_rp *rp, const char *request)
+{
+    size_t i;
+    for (i = 0; i < rp->b->file_count; i++)
+        if (!strcmp(rp->b->files[i].request, request)) { rp->used[i] = 1; return &rp->b->files[i]; }
+    return NULL;
+}
+
+/* The file's bytes: a carried file from the folder, a pointer from the
+ * installed game. Free with mb_rp_release. */
+static unsigned char *mb_rp_bytes(mb_rp *rp, const sh_mb_file *f, size_t *len, int *heap)
+{
+    *heap = 0;
+    *len = 0;
+    if (f->stock) {
+        unsigned char *bytes = NULL;
+        char cause[SH_MB_CAUSE_MAX];
+        if (!f->stock_source || sh_mb_stock_read(f->stock_source, f->blob, &bytes, len, f->path, cause, sizeof cause) != SH_MB_STOCK_OK) {
+            mb_error(rp->b, "cannot read %s to check its render program", f->path);
+            return NULL;
+        }
+        *heap = 1;
+        return bytes;
+    } else {
+        char *rel = mb_strdup(f->path);
+        wchar_t *wrel = NULL, *full;
+        unsigned char *bytes;
+        int wn;
+        if (!rel) return NULL;
+        for (char *p = rel; *p; p++) if (*p == '/') *p = '\\';
+        wn = MultiByteToWideChar(CP_UTF8, 0, rel, -1, NULL, 0);
+        if (wn > 0 && (wrel = (wchar_t *)malloc(sizeof(wchar_t) * (size_t)wn)) != NULL)
+            MultiByteToWideChar(CP_UTF8, 0, rel, -1, wrel, wn);
+        free(rel);
+        full = wrel ? mb_wjoin(rp->root, wrel) : NULL;
+        free(wrel);
+        if (!full) return NULL;
+        bytes = mb_read_wfile(full, SH_MB_MAX_FILE, len);
+        free(full);
+        if (!bytes) mb_error(rp->b, "cannot read %s to check its render program", f->path);
+        return bytes;
+    }
+}
+
+static void mb_rp_release(unsigned char *p, int heap)
+{
+    if (!p) return;
+    if (heap) HeapFree(GetProcessHeap(), 0, p);
+    else free(p);
+}
+
+/* Check 1: magic 0xB68800AD, then the checksum SetText (VK 0x141563030)
+ * stores: MD5fold of the decl text without trailing spaces, CRs and LFs.
+ * Returns the cooked bytes on success (the caller releases them). */
+static unsigned char *mb_rp_check_bin(mb_rp *rp, const sh_mb_file *decl, const sh_mb_file *bin, int strict,
+                                      size_t *bin_len, int *bin_heap)
+{
+    size_t dlen = 0, blen = 0;
+    int dheap = 0, bheap = 0;
+    unsigned char *d = mb_rp_bytes(rp, decl, &dlen, &dheap), *c;
+    unsigned want, got;
+    if (!d) return NULL;
+    while (dlen && (d[dlen - 1] == ' ' || d[dlen - 1] == '\r' || d[dlen - 1] == '\n')) dlen--;
+    want = sh_mb_md5fold(d, dlen);
+    mb_rp_release(d, dheap);
+    c = mb_rp_bytes(rp, bin, &blen, &bheap);
+    if (!c) return NULL;
+    if (blen < 8 || mb_be32(c) != 0xB68800ADu) {
+        MB_RP_ERR(strict, "%s is not a cooked render program (magic 0xB68800AD missing)", bin->path);
+        mb_rp_release(c, bheap);
+        return NULL;
+    }
+    got = mb_be32(c + 4);
+    if (got != want) {
+        MB_RP_ERR(strict, "%s has checksum %08x but MD5fold of %s is %08x: the engine ignores it and compiles the decl text",
+                  bin->path, got, decl->path, want);
+        mb_rp_release(c, bheap);
+        return NULL;
+    }
+    *bin_len = blen;
+    *bin_heap = bheap;
+    return c;
+}
+
+/* Check 2 on one SPIR-V file: header {4, hashA, hashB, length}, big-endian;
+ * hashA is MD5fold of the stage text when it is known (stage != NULL). */
+static void mb_rp_check_spirv(mb_rp *rp, const sh_mb_file *f, const unsigned char *stage, size_t stage_n, int strict)
+{
+    size_t len = 0;
+    int heap = 0;
+    unsigned char *s = mb_rp_bytes(rp, f, &len, &heap);
+    if (!s) return;
+    if (len < 16 || mb_be32(s) != 4u)
+        MB_RP_ERR(strict, "%s: SPIR-V header version is not 4 (the engine stops with \"out of date\" at a map load)", f->path);
+    else if (mb_be32(s + 12) != len - 16)
+        MB_RP_ERR(strict, "%s: SPIR-V header length %u but %llu bytes follow it", f->path, mb_be32(s + 12),
+                  (unsigned long long)(len - 16));
+    else if (stage && mb_be32(s + 4) != sh_mb_md5fold(stage, stage_n))
+        MB_RP_ERR(strict, "%s: SPIR-V hash %08x is not MD5fold of its stage text in the cooked program (%08x): "
+                  "the engine stops with \"out of date\" at a map load",
+                  f->path, mb_be32(s + 4), sh_mb_md5fold(stage, stage_n));
+    mb_rp_release(s, heap);
+}
+
+/* One program unit (the program or one permutation): checks 1 to 3 for the
+ * Vulkan files, check 1 for an OpenGL _pc.bin if one ships. `name` is what
+ * the engine builds the SPIR-V names from. */
+static void mb_rp_unit(mb_rp *rp, const sh_mb_file *decl, const char *stem, const char *name, int strict)
+{
+    static const char *const ext[3] = { ".vspv", ".fspv", ".cspv" };
+    static const char *const stage_name[3] = { "vertex", "fragment", "compute" };
+    char req[SH_MB_REQUEST_MAX + 32];
+    const sh_mb_file *bin, *gl;
+    unsigned char *c;
+    size_t blen = 0, off[3], n[3];
+    int heap = 0, k, r;
+
+    _snprintf_s(req, sizeof req, _TRUNCATE, "%s_pc.bin", stem);
+    gl = mb_rp_find(rp, req);
+    if (gl) {
+        size_t gl_len = 0;
+        int gl_heap = 0;
+        mb_rp_release(mb_rp_check_bin(rp, decl, gl, strict, &gl_len, &gl_heap), gl_heap);
+    }
+    _snprintf_s(req, sizeof req, _TRUNCATE, "%s_pc_vulkan.bin", stem);
+    bin = mb_rp_find(rp, req);
+    if (!bin) {
+        MB_RP_ERR(strict, "%s ships no assets/%s: Vulkan needs the cooked program", decl->path, req);
+        return;
+    }
+    c = mb_rp_check_bin(rp, decl, bin, strict, &blen, &heap);
+    if (!c) return;
+    r = sh_mb_rp_stages(c, blen, off, n);
+    for (k = 0; k < 3; k++) {
+        const sh_mb_file *s;
+        if (r == 1 && n[k] == 0) continue;
+        if (!sh_mb_spirv_request(name, ext[k], req, sizeof req)) { mb_error(rp->b, "%s: name too long", decl->path); break; }
+        s = mb_rp_find(rp, req);
+        if (!s) {
+            /* With the stage texts unknown, only the two stages every
+             * drawing program has are required. */
+            if (r == 1 || k < 2)
+                MB_RP_ERR(strict, "%s needs assets/%s (its %s stage): the engine stops with \"not found\" when it binds",
+                          decl->path, req, stage_name[k]);
+            continue;
+        }
+        mb_rp_check_spirv(rp, s, r == 1 ? c + off[k] : NULL, r == 1 ? n[k] : 0, strict);
+    }
+    if (r != 1)
+        mb_warn(rp->b, "%s: the stage texts were not found, so SPIR-V hashes were not checked (version and length only)",
+                bin->path);
+    mb_rp_release(c, heap);
+}
+
+/* A permutation decl is decl text the engine parses like the program's. */
+static int mb_rp_decl_ok(mb_rp *rp, const sh_mb_file *f, int strict)
+{
+    size_t len = 0;
+    int heap = 0, ok;
+    unsigned char *t = mb_rp_bytes(rp, f, &len, &heap);
+    if (!t) return 0;
+    ok = sh_decl_text_well_formed(t, len);
+    if (!ok) MB_RP_ERR(strict, "%s is not a well-formed decl", f->path);
+    mb_rp_release(t, heap);
+    return ok;
+}
+
+static int mb_rp_last_has_dot(const char *name, size_t n)
+{
+    size_t i = n;
+    while (i > 0 && name[i - 1] != '/') i--;
+    return memchr(name + i, '.', n - i) != NULL;
+}
+
+/* Check 6: a material names a program in quotes (the lexer cuts a bare name
+ * at '/', '.' or '-'), and a mod program has no '.' in its last component
+ * (the cooked-name builder strips from the last '.'). */
+static void mb_rp_check_material(mb_rp *rp, const sh_mb_file *f)
+{
+    static const char *const keys[] = { "addProgram", "ambientProgram", "blendProgram", "depthFixupProgram",
+                                        "fadePerturbProgram", "interactionProgram", "particleLightAtlasProgram",
+                                        "shadowProgram", "stageProgram", "zprepassProgram", NULL };
+    size_t len = 0, pos = 0;
+    int heap = 0, strict = !rp->b->legacy;
+    unsigned char *t = mb_rp_bytes(rp, f, &len, &heap);
+    mb_tok prev = { TK_END, NULL, 0 }, k;
+    if (!t) return;
+    for (;;) {
+        k = mb_next_tok(t, len, &pos);
+        if (k.kind == TK_END) break;
+        if (prev.kind == TK_WORD && (k.kind == TK_WORD || k.kind == TK_STR)) {
+            int i;
+            for (i = 0; keys[i]; i++) if (mb_ieq_n(prev.p, prev.n, keys[i])) break;
+            if (keys[i]) {
+                size_t j;
+                int bare_bad = 0;
+                if (k.kind == TK_WORD)
+                    for (j = 0; j < k.n; j++) if (strchr("/\\:.$-", k.p[j])) { bare_bad = 1; break; }
+                if (bare_bad)
+                    MB_RP_ERR(strict, "%s: %s %.*s must be quoted (the engine reads a bare program name only up to '/', '.' or '-')",
+                              f->path, keys[i], (int)k.n, k.p);
+                else if (k.n > 5 && mb_ieq_n(k.p, 5, "mods/") && mb_rp_last_has_dot(k.p, k.n))
+                    MB_RP_ERR(strict, "%s: program %.*s has a '.' in its last component, which the engine's file names cut",
+                              f->path, (int)k.n, k.p);
+                prev.kind = TK_END;
+                continue;
+            }
+        }
+        prev = k;
+    }
+    mb_rp_release(t, heap);
+}
+
+static int mb_rp_relevant(const char *r)
+{
+    return mb_starts(r, "generated/renderprogs/") || mb_starts(r, "generated/spirv/") ||
+           mb_starts(r, "generated/decls/renderprog/");
+}
+
+static void mb_check_renderprogs(sh_mb_bundle *b, const wchar_t *root)
+{
+    mb_rp ctx, *rp = &ctx;
+    size_t i, j, any = 0;
+    char program[SH_MB_REQUEST_MAX + 1], mask[17], stem[SH_MB_REQUEST_MAX + 64];
+    ctx.b = b;
+    ctx.root = root;
+    ctx.used = (unsigned char *)calloc(b->file_count ? b->file_count : 1, 1);
+    if (!ctx.used) { mb_error(b, "out of memory"); return; }
+
+    for (i = 0; i < b->file_count; i++) {
+        const sh_mb_file *f = &b->files[i];
+        if (!f->ptype || !f->pname) continue;
+        if (f->is_decl && (!strcmp(f->ptype, "material") || !strcmp(f->ptype, "material2"))) mb_rp_check_material(rp, f);
+        if (mb_rp_relevant(f->request)) any = 1;
+    }
+    if (!any) { free(ctx.used); return; }
+
+    /* Each program decl, its permutations and their files. A shadow replaces
+     * a stock program, whose other files the game may still provide, so its
+     * missing files only warn; a legacy bundle's refusals only warn. */
+    for (i = 0; i < b->file_count; i++) {
+        const sh_mb_file *f = &b->files[i];
+        int strict, perms = 0;
+        if (!f->is_decl || !f->ptype || !f->pname || strcmp(f->ptype, "renderProg") != 0) continue;
+        ctx.used[i] = 1;
+        strict = !b->legacy && !f->shadowed;
+        if (f->shadowed)
+            mb_warn(b, "%s replaces the built-in render program %s for every material that names it", f->path, f->pname);
+        if (mb_rp_last_has_dot(f->pname, strlen(f->pname))) {
+            MB_RP_ERR(!b->legacy, "%s: program %s has a '.' in its last component, which the engine's file names cut",
+                      f->path, f->pname);
+            continue;
+        }
+        _snprintf_s(stem, sizeof stem, _TRUNCATE, "generated/renderprogs/%s", f->pname);
+        mb_rp_unit(rp, f, stem, f->pname, strict);
+        for (j = 0; j < b->file_count; j++) {
+            const sh_mb_file *p = &b->files[j];
+            size_t sn;
+            if (!sh_mb_rp_permutation(p->request, program, sizeof program, mask) || strcmp(program, f->pname) != 0) continue;
+            ctx.used[j] = 1;
+            perms++;
+            if (!mb_rp_decl_ok(rp, p, strict)) continue;
+            sn = strlen(p->request) - 5;   /* the stem is the request without ".decl" */
+            _snprintf_s(stem, sizeof stem, _TRUNCATE, "%.*s", (int)sn, p->request);
+            mb_rp_unit(rp, p, stem, p->request, strict);
+        }
+        if (!perms)
+            MB_RP_ERR(strict, "%s ships no permutation decl (generated/renderprogs/permutations/%s_<16 hex digits>.decl): "
+                      "on GPUs with the AMD shader extensions the program binds no shaders",
+                      f->path, f->pname);
+    }
+
+    /* Render-program files no program of the bundle reads. */
+    for (i = 0; i < b->file_count; i++) {
+        const sh_mb_file *f = &b->files[i];
+        const char *r = f->request;
+        if (ctx.used[i] || !f->ptype) continue;
+        if (mb_starts(r, "generated/renderprogs/permutations/") && mb_ends(r, ".decl")) {
+            if (sh_mb_rp_permutation(r, program, sizeof program, mask))
+                MB_RP_ERR(!b->legacy, "%s is a permutation of %s, which the bundle does not ship", f->path, program);
+            else
+                MB_RP_ERR(!b->legacy, "%s: a permutation decl is named <program>_<16 hex digits>.decl", f->path);
+        } else if (mb_starts(r, "generated/renderprogs/") && mb_ends(r, ".bin")) {
+            MB_RP_ERR(!b->legacy, "%s: no render program in the bundle reads it (ship its decl)", f->path);
+        } else if (mb_starts(r, "generated/spirv/")) {
+            mb_rp_check_spirv(rp, f, NULL, 0, !b->legacy);
+            mb_warn(b, "%s: no render program in the bundle binds it", f->path);
+        }
+    }
+    free(ctx.used);
+}
+
 static void mb_check_files(sh_mb_bundle *b, const wchar_t *root, const sh_mb_resolver *r)
 {
     char sanitized[SH_MB_ID_MAX + 1], ns_decl[SH_MB_ID_MAX + 8], ns_raw[SH_MB_ID_MAX + 8],
@@ -2155,7 +2650,12 @@ static void mb_check_files(sh_mb_bundle *b, const wchar_t *root, const sh_mb_res
         char type[64], name[SH_MB_REQUEST_MAX + 16], *rel;
         wchar_t *wrel, *full;
         unsigned long long got = 0;
+        const char *forbidden = mb_rp_forbidden(f->request);
 
+        if (forbidden) {
+            mb_error(b, "%s may not ship: %s", f->path, forbidden);
+            continue;
+        }
         if (!sh_mb_logical_name(f->request, type, sizeof type, name, sizeof name)) {
             if (f->deferred == 1) mb_error(b, "file type not allowed: %s", f->path);
             else mb_error(b, "%s: generated/decls/<type>/ names no decl type this game ships, or the name is empty", f->path);
@@ -2376,6 +2876,7 @@ names:
         }
     }
     free(own.req);
+    if (!b->errors) mb_check_renderprogs(b, root);
 }
 
 /* ------------------------------------------------------------ manifest ---- */

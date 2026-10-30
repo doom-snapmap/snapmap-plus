@@ -1,5 +1,6 @@
 /* modbundle_test.c -- mod bundle builder: hashes, canonical manifest, logical
- * names, decl needs, validation refusals and build numbering.
+ * names, decl needs, validation refusals, render-program checks and build
+ * numbering.
  *
  *   modbundle_test.exe <tests\fixtures\mods\alex.r2-imp> [--write-golden]
  */
@@ -553,6 +554,232 @@ static void test_refusals(const char *fixture, const char *tmp)
     }
 }
 
+/* ------------------------------------------------------ render programs ---- */
+
+static void test_md5fold(void)
+{
+    unsigned char d[16];
+    char a[120];
+    sh_mb_md5("abc", 3, d);
+    CHECK(d[0] == 0x90 && d[1] == 0x01 && d[15] == 0x72);
+    CHECK(sh_mb_md5fold("", 0) == 0x3b75655eu);
+    CHECK(sh_mb_md5fold("abc", 3) == 0x275fa452u);
+    memset(a, 'a', sizeof a);
+    CHECK(sh_mb_md5fold(a, 56) == 0x1fc94972u);    /* padding crosses a block */
+    CHECK(sh_mb_md5fold(a, 64) == 0x994388a2u);
+    CHECK(sh_mb_md5fold(a, 119) == 0x4709fc8au);
+}
+
+static void test_spirv_names(void)
+{
+    char out[512], prog[256], mask[17];
+    CHECK(sh_mb_spirv_request("mods/a/tint", ".vspv", out, sizeof out) && !strcmp(out, "generated/spirv/mods/a/tint.vspv"));
+    CHECK(sh_mb_spirv_request("generated/renderprogs/permutations/mods/a/tint_0000000000000001.decl", ".fspv", out, sizeof out) &&
+          !strcmp(out, "generated/spirv/generated/renderprogs/permutations/mods/a/tint_0000000000000001.fspv"));
+    /* The spellings the archive and the engine use (19- and 17-character names). */
+    CHECK(sh_mb_spirv_request("generated/renderprogs/permutations/cyberdemonshockwave_0000000000000001.decl", ".fspv", out, sizeof out) &&
+          !strcmp(out, "generated/spirv/generated/renderprogs/permutations/cyberdemonshockwave_0000000000/000001.fspv"));
+    CHECK(sh_mb_spirv_request("generated/renderprogs/permutations/abcdefghijklmnopq_0000000000000001.decl", ".vspv", out, sizeof out) &&
+          !strcmp(out, "generated/spirv/generated/renderprogs/permutations/abcdefghijklmnopq_000000000000/0001.vspv"));
+    /* 37 characters with the extension stay whole; 38 split. */
+    CHECK(sh_mb_spirv_request("mods/a/abcdefghijklmnopqrstuvwxyz012345", ".vspv", out, sizeof out) &&
+          !strcmp(out, "generated/spirv/mods/a/abcdefghijklmnopqrstuvwxyz012345.vspv"));
+    CHECK(sh_mb_spirv_request("mods/a/abcdefghijklmnopqrstuvwxyz0123456", ".vspv", out, sizeof out) &&
+          !strcmp(out, "generated/spirv/mods/a/abcdefghijklmnopqrstuvwxyz0123/456.vspv"));
+    CHECK(sh_mb_rp_permutation("generated/renderprogs/permutations/mods/a/tint_0000000000000001.decl", prog, sizeof prog, mask) &&
+          !strcmp(prog, "mods/a/tint") && !strcmp(mask, "0000000000000001"));
+    CHECK(!sh_mb_rp_permutation("generated/renderprogs/permutations/mods/a/x_1.decl", prog, sizeof prog, mask));
+    CHECK(!sh_mb_rp_permutation("generated/renderprogs/permutations/mods/a/tint_000000000000000g.decl", prog, sizeof prog, mask));
+    CHECK(!sh_mb_rp_permutation("generated/renderprogs/permutations/_0000000000000001.decl", prog, sizeof prog, mask));
+    CHECK(!sh_mb_rp_permutation("generated/renderprogs/mods/a/tint_0000000000000001.decl", prog, sizeof prog, mask));
+}
+
+static void rp_put(const char *folder, const char *rel, const void *data, size_t n)
+{
+    char path[MAX_PATH * 2];
+    FILE *f = NULL;
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", folder, rel);
+    for (char *p = path + strlen(folder) + 1; *p; p++) if (*p == '/') *p = '\\';
+    mt_mkdirs_for(path);
+    if (fopen_s(&f, path, "wb") == 0 && f) { fwrite(data, 1, n, f); fclose(f); }
+}
+
+static void rp_be32(unsigned char *p, unsigned v)
+{
+    p[0] = (unsigned char)(v >> 24); p[1] = (unsigned char)(v >> 16); p[2] = (unsigned char)(v >> 8); p[3] = (unsigned char)v;
+}
+
+#define RP_VS "#version 450 core\nvoid main() { gl_Position = vec4( 0.0 ); }\n"
+#define RP_FS "#version 450 core\nlayout( location = 0 ) out vec4 o;\nvoid main() { o = vec4( 1.0 ); }\n"
+#define RP_DECL "{\r\n\tparms {\r\n\t\tstageSort\tsortEmit\r\n\t}\r\n}"
+#define RP_PERM "{\r\n\tpermutations {\r\n\t\tdefault AMD_VK_EXTENSIONS\r\n\t}\r\n}"
+#define RP_MAT "{\r\nstageprogram\t\"mods/t.rp/tint\"\r\ntransmap\t_white\r\n}\r\n"
+
+/* A cooked program: magic, checksum of `decl`, 16 bytes standing in for the
+ * parm blocks, three stage records and the 36-byte trailer. */
+static size_t rp_bin(unsigned char *out, const char *decl, unsigned checksum_xor, unsigned magic)
+{
+    const char *st[3] = { RP_VS, RP_FS, "" };
+    size_t pos = 0, k, n = strlen(decl);
+    while (n && (decl[n - 1] == '\n' || decl[n - 1] == '\r' || decl[n - 1] == ' ')) n--;
+    rp_be32(out, magic);
+    rp_be32(out + 4, sh_mb_md5fold(decl, n) ^ checksum_xor);
+    pos = 8;
+    memset(out + pos, 0, 16); pos += 16;
+    for (k = 0; k < 3; k++) {
+        size_t ln = strlen(st[k]);
+        memset(out + pos, 0xff, 10); out[pos + 8] = 0; out[pos + 9] = (unsigned char)(k == 1 ? 1 : 3); pos += 10;
+        out[pos] = (unsigned char)ln; out[pos + 1] = (unsigned char)(ln >> 8); out[pos + 2] = 0; out[pos + 3] = 0; pos += 4;
+        memcpy(out + pos, st[k], ln); pos += ln;
+    }
+    memset(out + pos, 0xff, 36); pos += 36;
+    return pos;
+}
+
+/* A SPIR-V file: the engine's header and 8 bytes of module. */
+static size_t rp_spv(unsigned char *out, const char *stage, unsigned version, unsigned hash_xor, unsigned len_add)
+{
+    rp_be32(out, version);
+    rp_be32(out + 4, sh_mb_md5fold(stage, strlen(stage)) ^ hash_xor);
+    rp_be32(out + 8, 0x12345678u);
+    rp_be32(out + 12, 8 + len_add);
+    memcpy(out + 16, "\x03\x02\x23\x07\x00\x00\x01\x00", 8);
+    return 24;
+}
+
+enum { RP_OK, RP_BAD_SUM, RP_BAD_MAGIC, RP_BAD_HASH, RP_BAD_VERSION, RP_BAD_LENGTH, RP_NO_FSPV, RP_NO_PERM_SPV,
+       RP_NO_PERM, RP_NO_BIN, RP_BARE_NAME, RP_DOT_NAME, RP_INCLUDE, RP_PIPELINES, RP_GLSLBIN, RP_GLSL,
+       RP_ORPHAN_PERM, RP_GL_BIN_SUM, RP_GL_BIN_OK, RP_ORPHAN_SPV };
+
+static void rp_case(const char *tmp, int which, const char *needle)
+{
+    char folder[MAX_PATH];
+    unsigned char buf[2048];
+    size_t n;
+    sh_mb_bundle b;
+    const char *prog = which == RP_DOT_NAME ? "mods/t.rp/ti.nt" : "mods/t.rp/tint";
+    char rel[512];
+    _snprintf_s(folder, sizeof folder, _TRUNCATE, "%s\\case%d", tmp, ++g_case);
+    CreateDirectoryA(folder, NULL);
+    mt_write(folder, "mod.json", "{\"id\":\"t.rp\",\"name\":\"render program probe\"}");
+    _snprintf_s(rel, sizeof rel, _TRUNCATE, "assets/generated/decls/renderprog/%s.decl", prog);
+    rp_put(folder, rel, RP_DECL, strlen(RP_DECL));
+    if (which != RP_NO_BIN) {
+        n = rp_bin(buf, RP_DECL, which == RP_BAD_SUM ? 1u : 0u, which == RP_BAD_MAGIC ? 0xB68800AEu : 0xB68800ADu);
+        _snprintf_s(rel, sizeof rel, _TRUNCATE, "assets/generated/renderprogs/%s_pc_vulkan.bin", prog);
+        rp_put(folder, rel, buf, n);
+    }
+    n = rp_spv(buf, RP_VS, 4, 0, 0);
+    _snprintf_s(rel, sizeof rel, _TRUNCATE, "assets/generated/spirv/%s.vspv", prog);
+    rp_put(folder, rel, buf, n);
+    if (which != RP_NO_FSPV) {
+        n = rp_spv(buf, RP_FS, which == RP_BAD_VERSION ? 3u : 4u, which == RP_BAD_HASH ? 1u : 0u, which == RP_BAD_LENGTH ? 4u : 0u);
+        _snprintf_s(rel, sizeof rel, _TRUNCATE, "assets/generated/spirv/%s.fspv", prog);
+        rp_put(folder, rel, buf, n);
+    }
+    if (which != RP_NO_PERM) {
+        const char *pp = which == RP_ORPHAN_PERM ? "mods/t.rp/other" : prog;
+        _snprintf_s(rel, sizeof rel, _TRUNCATE, "assets/generated/renderprogs/permutations/%s_0000000000000001.decl", pp);
+        rp_put(folder, rel, RP_PERM, strlen(RP_PERM));
+        n = rp_bin(buf, RP_PERM, 0, 0xB68800ADu);
+        _snprintf_s(rel, sizeof rel, _TRUNCATE, "assets/generated/renderprogs/permutations/%s_0000000000000001_pc_vulkan.bin", pp);
+        rp_put(folder, rel, buf, n);
+        n = rp_spv(buf, RP_VS, 4, 0, 0);
+        _snprintf_s(rel, sizeof rel, _TRUNCATE, "assets/generated/spirv/generated/renderprogs/permutations/%s_0000000000000001.vspv", pp);
+        rp_put(folder, rel, buf, n);
+        if (which != RP_NO_PERM_SPV) {
+            n = rp_spv(buf, RP_FS, 4, 0, 0);
+            _snprintf_s(rel, sizeof rel, _TRUNCATE, "assets/generated/spirv/generated/renderprogs/permutations/%s_0000000000000001.fspv", pp);
+            rp_put(folder, rel, buf, n);
+        }
+    }
+    if (which == RP_ORPHAN_PERM) {   /* the program's own permutation, so only the orphan is wrong */
+        _snprintf_s(rel, sizeof rel, _TRUNCATE, "assets/generated/renderprogs/permutations/%s_0000000000000001.decl", prog);
+        rp_put(folder, rel, RP_PERM, strlen(RP_PERM));
+        n = rp_bin(buf, RP_PERM, 0, 0xB68800ADu);
+        _snprintf_s(rel, sizeof rel, _TRUNCATE, "assets/generated/renderprogs/permutations/%s_0000000000000001_pc_vulkan.bin", prog);
+        rp_put(folder, rel, buf, n);
+        n = rp_spv(buf, RP_VS, 4, 0, 0);
+        _snprintf_s(rel, sizeof rel, _TRUNCATE, "assets/generated/spirv/generated/renderprogs/permutations/%s_0000000000000001.vspv", prog);
+        rp_put(folder, rel, buf, n);
+        n = rp_spv(buf, RP_FS, 4, 0, 0);
+        _snprintf_s(rel, sizeof rel, _TRUNCATE, "assets/generated/spirv/generated/renderprogs/permutations/%s_0000000000000001.fspv", prog);
+        rp_put(folder, rel, buf, n);
+    }
+    if (which == RP_GL_BIN_SUM || which == RP_GL_BIN_OK) {
+        n = rp_bin(buf, RP_DECL, which == RP_GL_BIN_SUM ? 2u : 0u, 0xB68800ADu);
+        rp_put(folder, "assets/generated/renderprogs/mods/t.rp/tint_pc.bin", buf, n);
+    }
+    if (which == RP_ORPHAN_SPV) {
+        n = rp_spv(buf, RP_FS, 4, 0, 0);
+        rp_put(folder, "assets/generated/spirv/mods/t.rp/unused.fspv", buf, n);
+    }
+    if (which != RP_DOT_NAME) {
+        if (which == RP_BARE_NAME)
+            mt_write(folder, "assets\\generated\\decls\\material\\mods\\t.rp\\tintmat.decl",
+                     "{\r\nstageprogram\tmods/t.rp/tint\r\ntransmap\t_white\r\n}\r\n");
+        else
+            mt_write(folder, "assets\\generated\\decls\\material\\mods\\t.rp\\tintmat.decl", RP_MAT);
+    }
+    if (which == RP_INCLUDE) rp_put(folder, "assets/decls/renderprogs/global.inc", "x", 1);
+    if (which == RP_PIPELINES) rp_put(folder, "assets/generated/vulkan_pipelines.bin", "x", 1);
+    if (which == RP_GLSLBIN) rp_put(folder, "assets/generated/glslbinaries/mods/t.rp/tint.bin", "x", 1);
+    if (which == RP_GLSL) rp_put(folder, "assets/generated/glsl/mods/t.rp/tint.fspv", "x", 1);
+
+    if (!needle) {
+        CHECK(sh_mb_build(folder, &RESOLVER, &b));
+        if (b.errors) fprintf(stderr, "  render-program case %d refused: %s\n", g_case, b.first_cause);
+        CHECK(b.errors == 0);
+        if (which == RP_ORPHAN_SPV) CHECK(b.warnings == 1 && strstr(b.first_warning, "no render program in the bundle binds it"));
+        else CHECK(b.warnings == 0);
+        if (which == RP_OK) {
+            const sh_mb_file *p = find_file(&b, "generated/renderprogs/permutations/mods/t.rp/tint_0000000000000001.decl");
+            const sh_mb_file *m = find_file(&b, "generated/decls/material/mods/t.rp/tintmat.decl");
+            CHECK(p && !strcmp(p->ptype, "renderProg") && !strcmp(p->pname, p->request) && !p->is_decl);
+            CHECK(m && has_need(m, "renderProg", "mods/t.rp/tint"));
+            CHECK(b.file_count == 9);
+        }
+    } else {
+        CHECK(!sh_mb_build(folder, &RESOLVER, &b));
+        CHECK_CAUSE(b, needle);
+    }
+    sh_mb_free(&b);
+}
+
+static void test_renderprogs(const char *tmp)
+{
+    test_md5fold();
+    test_spirv_names();
+    {
+        unsigned char buf[2048];
+        size_t off[3], n[3], len = rp_bin(buf, RP_DECL, 0, 0xB68800ADu);
+        CHECK(sh_mb_rp_stages(buf, len, off, n) == 1 && n[0] == strlen(RP_VS) && n[1] == strlen(RP_FS) && n[2] == 0 &&
+              !memcmp(buf + off[1], RP_FS, n[1]));
+        CHECK(sh_mb_rp_stages(buf, len - 1, off, n) == 0);
+        CHECK(sh_mb_rp_stages(buf, 20, off, n) == 0);
+    }
+    rp_case(tmp, RP_OK, NULL);
+    rp_case(tmp, RP_GL_BIN_OK, NULL);
+    rp_case(tmp, RP_ORPHAN_SPV, NULL);
+    rp_case(tmp, RP_BAD_SUM, "has checksum");                 /* check 1 */
+    rp_case(tmp, RP_BAD_MAGIC, "magic 0xB68800AD missing");
+    rp_case(tmp, RP_GL_BIN_SUM, "tint_pc.bin has checksum");
+    rp_case(tmp, RP_BAD_HASH, "is not MD5fold of its stage text");   /* check 2 */
+    rp_case(tmp, RP_BAD_VERSION, "version is not 4");
+    rp_case(tmp, RP_BAD_LENGTH, "header length");
+    rp_case(tmp, RP_NO_FSPV, "tint.fspv (its fragment stage)");     /* check 3 */
+    rp_case(tmp, RP_NO_PERM_SPV, "permutations/mods/t.rp/tint_0000000000000001.fspv (its fragment stage)");
+    rp_case(tmp, RP_NO_PERM, "ships no permutation decl");
+    rp_case(tmp, RP_NO_BIN, "tint_pc_vulkan.bin: Vulkan needs the cooked program");
+    rp_case(tmp, RP_ORPHAN_PERM, "permutation of mods/t.rp/other, which the bundle does not ship");
+    rp_case(tmp, RP_BARE_NAME, "must be quoted");                   /* check 6 */
+    rp_case(tmp, RP_DOT_NAME, "'.' in its last component");
+    rp_case(tmp, RP_INCLUDE, "shared render-program include");      /* check 7 */
+    rp_case(tmp, RP_PIPELINES, "pipeline warm-up list");
+    rp_case(tmp, RP_GLSLBIN, "driver's binary cache");
+    rp_case(tmp, RP_GLSL, "debug dump of generated GLSL");
+}
+
 int main(int argc, char **argv)
 {
     char tmp[MAX_PATH];
@@ -569,6 +796,7 @@ int main(int argc, char **argv)
     test_fixture(full, tmp, write_golden);
     test_build_numbers(full, tmp);
     test_refusals(full, tmp);
+    test_renderprogs(tmp);
     mt_remove_tree(tmp);
     if (failures) { fprintf(stderr, "modbundle_test: %d failure(s)\n", failures); return 1; }
     printf("modbundle_test: hashes, canonical form, logical names, needs, %d refusal/acceptance cases and build numbers pass\n", g_case);
