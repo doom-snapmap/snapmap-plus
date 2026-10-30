@@ -129,6 +129,7 @@ $tests = @(
     @{ name = "modnet_test"; src = 'modnet_test.c ..\src\backend\modnet.c ..\src\backend\modbundle.c ..\src\backend\mp_json.c ..\src\backend\config.c ..\src\backend\config_json.c ..\src\backend\decl_text.c ..\src\common\snapmap_plus_iface.c'; libs = 'winhttp.lib ws2_32.lib shell32.lib ole32.lib'; arg = "" }
     @{ name = "modsync_test"; src = 'modsync_test.c ..\src\backend\modsync.c ..\src\backend\modnet.c ..\src\backend\modstore.c ..\src\backend\modserve.c ..\src\backend\modbundle.c ..\src\backend\mp_json.c ..\src\backend\config.c ..\src\backend\config_json.c ..\src\backend\decl_text.c ..\src\common\snapmap_plus_iface.c'; libs = 'winhttp.lib ws2_32.lib shell32.lib ole32.lib'; arg = "" }
     @{ name = "modexport_test"; src = 'modexport_test.c ..\src\backend\modexport.c ..\src\backend\modsync.c ..\src\backend\modnet.c ..\src\backend\modstore.c ..\src\backend\modserve.c ..\src\backend\modmanifest.c ..\src\backend\map_shards.c ..\src\backend\raw_deflate.c ..\src\backend\modbundle.c ..\src\backend\mp_json.c ..\src\backend\config.c ..\src\backend\config_json.c ..\src\backend\decl_text.c ..\src\common\snapmap_plus_iface.c'; libs = 'winhttp.lib ws2_32.lib shell32.lib ole32.lib'; arg = "" }
+    @{ name = "modui_test"; src = 'modui_test.c ..\src\backend\modui.c ..\src\backend\modstore.c ..\src\backend\modbundle.c ..\src\backend\modserve.c ..\src\backend\modmanifest.c ..\src\backend\map_shards.c ..\src\backend\config_json.c ..\src\backend\decl_text.c'; defs = '/DSH_MODUI_PURE /DSH_MODUI_TESTING /DSH_MODSERVE_PURE'; libs = 'shell32.lib ole32.lib'; arg = @((Join-Path $here 'fixtures\mods\alex.r2-imp'), (Join-Path $here 'fixtures\mods_tab_payload.json')) }
     @{ name = "serialization_buffer_test"; src = 'serialization_buffer_test.cpp'; cxx = $true;     arg = "" }
 )
 if ($Doom) {
@@ -200,7 +201,7 @@ if ($Only.Count) { exit 0 }
 
 $node = Get-Command node -ErrorAction SilentlyContinue
 if (-not $node) { Write-Host "[FAIL] node not found (required for decl editor tests)"; exit 1 }
-$jsTests = @("decl_overlay_test.js", "decl_index_order_test.js", "decl_enum_values_test.js", "decl_language_test.js", "ui_assets_test.js", "asset_browser_test.js", "entity_list_test.js", "prefab_transform_test.js", "prefab_viewport_contract_test.js", "window_chrome_contract_test.js", "feedback_channel_test.js", "feedback_renderer_test.js", "feedback_game_test.js", "issues_retest_test.js", "worker_body_test.js", "rawmap_menu_test.js", "delete_result_test.js", "prefab_tree_test.js", "timeline_tree_test.js", "prefab_budget_test.js")
+$jsTests = @("decl_overlay_test.js", "decl_index_order_test.js", "decl_enum_values_test.js", "decl_language_test.js", "ui_assets_test.js", "asset_browser_test.js", "entity_list_test.js", "prefab_transform_test.js", "prefab_viewport_contract_test.js", "window_chrome_contract_test.js", "feedback_channel_test.js", "feedback_renderer_test.js", "feedback_game_test.js", "issues_retest_test.js", "worker_body_test.js", "rawmap_menu_test.js", "delete_result_test.js", "prefab_tree_test.js", "timeline_tree_test.js", "prefab_budget_test.js", "mods_tab_test.js")
 foreach ($jsTest in $jsTests) {
     & $node.Source (Join-Path $here $jsTest)
     if ($LASTEXITCODE -ne 0) { Write-Host "[FAIL] $jsTest (exit $LASTEXITCODE)"; exit 1 }

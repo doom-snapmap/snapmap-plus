@@ -46,7 +46,9 @@ SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, module_prefab) == 0x360);
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, timeline_tile) == 0x368);
 /* ext 33: the editor budget table (table, usage). */
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, budget) == 0x370);
-SH_STATIC_ASSERT(sizeof(sh_iface_vtbl) == 0x378);
+/* ext 34: the Mods tab (list, run, fetch, root). */
+SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, mods) == 0x378);
+SH_STATIC_ASSERT(sizeof(sh_iface_vtbl) == 0x380);
 SH_STATIC_ASSERT(sizeof(sh_prefab_grab_info) == 16);
 SH_STATIC_ASSERT(sizeof(sh_delete_result) == 40);
 SH_STATIC_ASSERT(offsetof(sh_iface, sub) == 0x58);
@@ -105,6 +107,17 @@ static int stub_budget(sh_iface *self, sh_budget_call *call)
     memcpy(call->out, table, sizeof table);
     return 1;
 }
+static int stub_mods(sh_iface *self, sh_mods_call *call)
+{
+    static const char doc[] = "{\"v\":1}";
+    (void)self;
+    if (!call || call->op != SH_MODS_FETCH) return 0;
+    call->generation = 2;
+    call->needed = (int)strlen(doc);
+    if (!call->out || call->out_cap <= call->needed) return -1;
+    memcpy(call->out, doc, sizeof doc);
+    return 1;
+}
 /* A frontend must never read a slot the backend's vtable does not have. */
 static int check_vtable_size_contract(sh_iface *iface)
 {
@@ -119,6 +132,7 @@ static int check_vtable_size_contract(sh_iface *iface)
     if (SH_IFACE_HAS_SLOT(&legacy, module_prefab)) return 0;
     if (SH_IFACE_HAS_SLOT(&legacy, timeline_tile)) return 0;
     if (SH_IFACE_HAS_SLOT(&legacy, budget)) return 0;
+    if (SH_IFACE_HAS_SLOT(&legacy, mods)) return 0;
     if (!SH_IFACE_HAS_SLOT(&legacy, run_on_main)) return 0;   /* nonzero filler counts as bound */
     if (sh_iface_vtbl_bytes(NULL) != 0) return 0;
     if (sh_iface_vtbl_bytes(iface) != (uint32_t)sizeof(sh_iface_vtbl)) return 0;
@@ -259,6 +273,28 @@ int main(void)
         call.out = buf; call.out_cap = (int)sizeof buf;
         if (iface->vtbl->budget(iface, &call) != 1 || call.generation != 4 || strcmp(buf, "{\"gen\":4}") != 0) {
             fprintf(stderr, "iface_config_test: budget slot was not bound\n");
+            return 1;
+        }
+    }
+
+    if (SH_IFACE_HAS_SLOT(iface, mods)) {
+        fprintf(stderr, "iface_config_test: unbound mods slot reported present\n");
+        return 1;
+    }
+    engine_slots.mods = stub_mods;
+    sh_iface_bind_engine_slots(&engine_slots);
+    {
+        sh_mods_call call;
+        char buf[16];
+        memset(&call, 0, sizeof call);
+        call.op = SH_MODS_FETCH;
+        if (!SH_IFACE_HAS_SLOT(iface, mods) || iface->vtbl->mods(iface, &call) != -1 || call.needed != 7) {
+            fprintf(stderr, "iface_config_test: mods size query failed\n");
+            return 1;
+        }
+        call.out = buf; call.out_cap = (int)sizeof buf;
+        if (iface->vtbl->mods(iface, &call) != 1 || call.generation != 2 || strcmp(buf, "{\"v\":1}") != 0) {
+            fprintf(stderr, "iface_config_test: mods slot was not bound\n");
             return 1;
         }
     }

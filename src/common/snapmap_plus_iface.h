@@ -2,7 +2,7 @@
  * interface object and callbacks; both DLLs must build against this header.
  * The 0x60-byte object has a vtable at +0 and subobject pointer at +0x58.
  * The original 77-slot prefix ends at +0x260; append-only extensions end
- * at +0x370, making the current vtable 0x378 bytes. The backend records that
+ * at +0x378, making the current vtable 0x380 bytes. The backend records that
  * size in the object (see sh_iface_vtbl_bytes); check it before calling a
  * slot at or past +0x350.
  * Engine layouts remain private to backend implementations. Reserved cells
@@ -374,6 +374,44 @@ typedef struct sh_budget_call {
     int          reached;      /* out: the limits-reached byte (USAGE) */
 } sh_budget_call;
 typedef int (*sh_budget_fn)(struct sh_iface *self, sh_budget_call *call); /* +0x370 (ext 33) */
+/* Mods tab (backend/modui.c). Text crosses as UTF-8 JSON through one buffer the
+ * backend keeps: LIST and RUN fill it, FETCH copies it.
+ *   LIST   main thread (call inside run_on_main). Builds the tab's document:
+ *          installed bundles and their serving state, the open map's manifest
+ *          rows and placed-name closure, shadows and conflicts. Returns 1, or 0
+ *          when refused (off the main thread, no memory). needed is set.
+ *   RUN    main thread. Runs `action` with `arg` (INSTALL: absolute folder;
+ *          VERIFY: id@version+build, "" for every build; PRUNE_APPLY:
+ *          newline-separated keys) and keeps its result document. Returns 1
+ *          when the action ran (the document's "ok" says whether it
+ *          succeeded), 0 when refused before it ran.
+ *   FETCH  any thread. Copies the buffer: 1 copied, -1 a size query (out NULL
+ *          or out_cap not above needed; needed set, out untouched), 0 nothing
+ *          built yet.
+ *   ROOT   any thread. Copies the store folder as UTF-8: 1, -1 too small, 0
+ *          unresolved.
+ * generation is set by every op; it changes after each action that can change
+ * the store or the serving index. */
+#define SH_MODS_LIST  1
+#define SH_MODS_RUN   2
+#define SH_MODS_FETCH 3
+#define SH_MODS_ROOT  4
+#define SH_MODS_ACT_INSTALL     1
+#define SH_MODS_ACT_VERIFY      2
+#define SH_MODS_ACT_RESCAN      3
+#define SH_MODS_ACT_PALETTE     4
+#define SH_MODS_ACT_PRUNE_LIST  5
+#define SH_MODS_ACT_PRUNE_APPLY 6
+typedef struct sh_mods_call {
+    int          op;
+    int          action;       /* RUN */
+    const char  *arg;          /* RUN */
+    char        *out;
+    int          out_cap;
+    int          needed;       /* out: bytes excluding the NUL */
+    unsigned int generation;   /* out */
+} sh_mods_call;
+typedef int (*sh_mods_fn)(struct sh_iface *self, sh_mods_call *call); /* +0x378 (ext 34) */
 
 /* +0x320 (ext 23): the preview model and renderModelInfo.scale for an entityDef inherit, as
  * SH_PREFAB_DEFAULT_* bits. When the def chain names no .lwo/.bmodel/.md6, the model is the one the
@@ -592,6 +630,7 @@ typedef struct sh_iface_vtbl {
     sh_module_prefab_fn        module_prefab;        /* +0x360 (ext 31) Blueprint module prefabs */
     sh_timeline_tile_fn        timeline_tile;        /* +0x368 (ext 32) Timeline palette tile */
     sh_budget_fn               budget;               /* +0x370 (ext 33) editor budget table */
+    sh_mods_fn                 mods;                 /* +0x378 (ext 34) Mods tab */
 } sh_iface_vtbl;
 
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, config_get_json) == 0x2B0);
@@ -619,7 +658,8 @@ SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, prefab_grab_status) == 0x358);
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, module_prefab) == 0x360);
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, timeline_tile) == 0x368);
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, budget) == 0x370);
-SH_STATIC_ASSERT(sizeof(sh_iface_vtbl) == 0x378);
+SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, mods) == 0x378);
+SH_STATIC_ASSERT(sizeof(sh_iface_vtbl) == 0x380);
 SH_STATIC_ASSERT(sizeof(sh_prefab_grab_info) == 16);
 SH_STATIC_ASSERT(sizeof(sh_delete_result) == 40);
 
@@ -787,6 +827,7 @@ typedef struct sh_iface_engine_slots {
     sh_module_prefab_fn        module_prefab;               /* +0x360 (ext 31) */
     sh_timeline_tile_fn        timeline_tile;               /* +0x368 (ext 32) */
     sh_budget_fn               budget;                      /* +0x370 (ext 33) */
+    sh_mods_fn                 mods;                        /* +0x378 (ext 34) */
 } sh_iface_engine_slots;
 
 void sh_iface_bind_engine_slots(const sh_iface_engine_slots *slots);

@@ -2352,6 +2352,298 @@ static void poc_budget_poll()
     if (call.generation && call.generation != g_budget_sent_gen) poc_send_budget_table();
 }
 
+/* The Mods tab (mods_tab.js; backend/modui.c behind the `mods` slot). The page asks for the
+ * document (modsList) when the tab opens and on Refresh, and for an action (modsAction); nothing
+ * polls. Every slot operation that reads or changes the store runs on DOOM's main thread, so it
+ * goes through run_on_main, from a short-lived worker thread rather than this one: an install
+ * rehashes every file and can take seconds, and the window must keep painting meanwhile. While it
+ * runs, run_on_main is occupied, so other edits from this window are refused as when the game is
+ * busy. The worker touches no page state; it hands its documents back through g_mods_done and the
+ * think loop posts them (poc_mods_finish), the same handoff as the rawmap picker. Each job ends
+ * with a fresh document, so the list follows every action without being asked. */
+#define POC_MODS_START_MS   8000   /* how long a job waits for the game to start running it */
+#define POC_MODS_DOC_MAX    (64 * 1024 * 1024)
+
+struct PocModsJob {
+    int         action;    /* SH_MODS_ACT_*, or 0 for the document only */
+    bool        pick;      /* ask for the folder first (install) */
+    std::string arg;
+    int         run_rc;    /* 1 ran, 0 refused, -1 not run in time, -3 the picker was cancelled */
+    int         list_rc;
+    std::string run_doc, list_doc;
+};
+static PocModsJob    g_mods_job;
+static volatile LONG g_mods_busy = 0;
+static volatile LONG g_mods_done = 0;
+
+struct PocModsMain { sh_mods_call call; int rc; };
+
+static int poc_mods_slot(sh_mods_call *call)
+{
+    if (!SH_IFACE_HAS_SLOT(g_iface, mods)) return 0;
+    __try { return g_iface->vtbl->mods(g_iface, call); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+}
+
+/* Runs on DOOM's main thread inside run_on_main. */
+static int poc_mods_main_call(void *ctx)
+{
+    PocModsMain *m = (PocModsMain *)ctx;
+    m->rc = poc_mods_slot(&m->call);
+    return m->rc;
+}
+
+/* run_on_main holds one call at a time and refuses another at once, so retry until the game has
+ * started this one or the start budget is spent. Once started, run_on_main waits it out. */
+static bool poc_mods_on_main(PocModsMain *m)
+{
+    ULONGLONG until = GetTickCount64() + POC_MODS_START_MS;
+    if (!g_iface || !g_iface->vtbl || !g_iface->vtbl->run_on_main) return false;
+    for (;;) {
+        int r = 0;
+        if (g_iface->vtbl->run_on_main(g_iface, poc_mods_main_call, m, 1000, &r) == 1) return true;
+        if (GetTickCount64() >= until) return false;
+        Sleep(40);
+    }
+}
+
+/* Copy the backend's current document (FETCH runs on any thread). */
+static bool poc_mods_fetch(std::string &out)
+{
+    sh_mods_call call;
+    out.clear();
+    memset(&call, 0, sizeof call);
+    call.op = SH_MODS_FETCH;
+    if (poc_mods_slot(&call) != -1 || call.needed <= 0 || call.needed > POC_MODS_DOC_MAX) return false;
+    std::vector<char> buf((size_t)call.needed + 1);
+    call.out = buf.data();
+    call.out_cap = (int)buf.size();
+    if (poc_mods_slot(&call) != 1) return false;
+    out.assign(buf.data());
+    return true;
+}
+
+/* The folder dialog for Install, on the worker thread (its own apartment). */
+static bool poc_pick_mod_folder(std::wstring &out)
+{
+    IFileOpenDialog *dlg = nullptr;
+    bool ok = false;
+    out.clear();
+    if (FAILED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dlg))) || !dlg)
+        return false;
+    FILEOPENDIALOGOPTIONS opt = 0;
+    if (SUCCEEDED(dlg->GetOptions(&opt)))
+        dlg->SetOptions(opt | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_NOCHANGEDIR | FOS_DONTADDTORECENT | FOS_PATHMUSTEXIST);
+    dlg->SetTitle(L"Install a mod: choose the folder that holds mod.json and assets");
+    dlg->SetOkButtonLabel(L"Install");
+    {
+        static const GUID kModFolderPickerGuid =
+            { 0x3c5e8a12, 0x47d1, 0x4b9e, { 0xa6, 0x0f, 0x5b, 0x21, 0xc4, 0x7e, 0x93, 0x08 } };
+        dlg->SetClientGuid(kModFolderPickerGuid);
+    }
+    {
+        wchar_t dir[MAX_PATH];
+        if (SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_LOCAL_APPDATA, nullptr, 0, dir))) {
+            wcsncat_s(dir, L"\\snapmap-plus", _TRUNCATE);
+            IShellItem *folder = nullptr;
+            if (SUCCEEDED(SHCreateItemFromParsingName(dir, nullptr, IID_PPV_ARGS(&folder))) && folder) {
+                dlg->SetDefaultFolder(folder);
+                folder->Release();
+            }
+        }
+    }
+    if (SUCCEEDED(dlg->Show(g_hwnd))) {
+        IShellItem *item = nullptr;
+        if (SUCCEEDED(dlg->GetResult(&item)) && item) {
+            PWSTR path = nullptr;
+            if (SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &path)) && path) {
+                out = path;
+                ok = !out.empty();
+                CoTaskMemFree(path);
+            }
+            item->Release();
+        }
+    }
+    dlg->Release();
+    return ok;
+}
+
+static DWORD WINAPI poc_mods_thread(LPVOID)
+{
+    PocModsJob &job = g_mods_job;
+    job.run_rc = 0;
+    job.list_rc = 0;
+    if (job.pick) {
+        std::wstring picked;
+        HRESULT init = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+        bool ok = poc_pick_mod_folder(picked);
+        if (SUCCEEDED(init)) CoUninitialize();
+        if (ok) job.arg = sh_webview_json::to_utf8(picked);
+        else job.run_rc = -3;
+    }
+    if (job.action && job.run_rc != -3) {
+        PocModsMain m;
+        memset(&m, 0, sizeof m);
+        m.call.op = SH_MODS_RUN;
+        m.call.action = job.action;
+        m.call.arg = job.arg.c_str();
+        if (!poc_mods_on_main(&m)) job.run_rc = -1;
+        else job.run_rc = (m.rc == 1 && poc_mods_fetch(job.run_doc)) ? 1 : 0;
+    }
+    {
+        PocModsMain m;
+        memset(&m, 0, sizeof m);
+        m.call.op = SH_MODS_LIST;
+        if (!poc_mods_on_main(&m)) job.list_rc = -1;
+        else job.list_rc = (m.rc == 1 && poc_mods_fetch(job.list_doc)) ? 1 : 0;
+    }
+    InterlockedExchange(&g_mods_done, 1);   /* last: publishes the job above */
+    return 0;
+}
+
+static const wchar_t *poc_mods_action_name(int action)
+{
+    switch (action) {
+    case SH_MODS_ACT_INSTALL:     return L"install";
+    case SH_MODS_ACT_VERIFY:      return L"verify";
+    case SH_MODS_ACT_RESCAN:      return L"rescan";
+    case SH_MODS_ACT_PALETTE:     return L"palette";
+    case SH_MODS_ACT_PRUNE_LIST:  return L"pruneList";
+    case SH_MODS_ACT_PRUNE_APPLY: return L"pruneApply";
+    default:                      return L"";
+    }
+}
+
+static int poc_mods_action_code(const std::wstring &name)
+{
+    if (name == L"install")    return SH_MODS_ACT_INSTALL;
+    if (name == L"verify")     return SH_MODS_ACT_VERIFY;
+    if (name == L"rescan")     return SH_MODS_ACT_RESCAN;
+    if (name == L"palette")    return SH_MODS_ACT_PALETTE;
+    if (name == L"pruneList")  return SH_MODS_ACT_PRUNE_LIST;
+    if (name == L"pruneApply") return SH_MODS_ACT_PRUNE_APPLY;
+    return 0;
+}
+
+/* Splice backend JSON (UTF-8) into an envelope. */
+static void poc_mods_post(const std::wstring &head, const std::string &body, const wchar_t *tail)
+{
+    std::wstring m = head;
+    int wl = body.empty() ? 0 : MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, body.c_str(), (int)body.size(), nullptr, 0);
+    if (wl <= 0) m += L"null";
+    else {
+        std::wstring wb((size_t)wl, L'\0');
+        MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, body.c_str(), (int)body.size(), &wb[0], wl);
+        m += wb;
+    }
+    m += tail;
+    poc_post_json(m.c_str());
+}
+
+static void poc_mods_post_result(const wchar_t *action, bool ok, const wchar_t *message, const wchar_t *data)
+{
+    std::wstring m = L"{\"kind\":\"modsActionResult\",\"action\":\"";
+    m += action;
+    m += L"\",\"ok\":";
+    m += ok ? L"true" : L"false";
+    m += L",\"message\":\"";
+    m += message;
+    m += L"\",\"data\":";
+    m += data ? data : L"null";
+    m += L"}";
+    poc_post_json(m.c_str());
+}
+
+/* Start a job unless one is running. Returns false (and says so) when busy. */
+static bool poc_mods_begin(int action, bool pick, const std::string &arg)
+{
+    const wchar_t *name = poc_mods_action_name(action);
+    if (!SH_IFACE_HAS_SLOT(g_iface, mods)) {
+        if (action) poc_mods_post_result(name, false, L"This build's backend has no Mods tab.", nullptr);
+        else poc_post_json(L"{\"kind\":\"mods\",\"data\":null,\"error\":\"This build's backend has no Mods tab.\"}");
+        return false;
+    }
+    if (InterlockedCompareExchange(&g_mods_busy, 1, 0) != 0) {
+        /* A running job always ends with a fresh document, so a list request is already answered. */
+        if (action) poc_mods_post_result(name, false, L"Another mods action is still running.", nullptr);
+        return false;
+    }
+    g_mods_job.action = action;
+    g_mods_job.pick = pick;
+    g_mods_job.arg = arg;
+    g_mods_job.run_doc.clear();
+    g_mods_job.list_doc.clear();
+    HANDLE h = CreateThread(nullptr, 0, poc_mods_thread, nullptr, 0, nullptr);
+    if (!h) {
+        InterlockedExchange(&g_mods_busy, 0);
+        if (action) poc_mods_post_result(name, false, L"Could not start the mods action.", nullptr);
+        else poc_post_json(L"{\"kind\":\"mods\",\"data\":null,\"error\":\"Could not read the mods list.\"}");
+        return false;
+    }
+    CloseHandle(h);
+    if (action) {
+        char l[160];
+        _snprintf_s(l, sizeof l, _TRUNCATE, "mods: %ls started", name);
+        poc_log(l);
+    }
+    return true;
+}
+
+/* A finished job, on the UI thread. */
+static void poc_mods_finish()
+{
+    PocModsJob &job = g_mods_job;
+    const wchar_t *name = poc_mods_action_name(job.action);
+    if (job.action) {
+        if (job.run_rc == -3)
+            poc_mods_post_result(name, false, L"", L"{\"cancelled\":true}");
+        else if (job.run_rc == 1)
+            poc_mods_post(std::wstring(L"{\"kind\":\"modsActionResult\",\"action\":\"") + name + L"\",\"data\":", job.run_doc, L"}");
+        else if (job.run_rc == -1)
+            poc_mods_post_result(name, false, L"The game did not run the request in time. Try again with the editor open.", nullptr);
+        else
+            poc_mods_post_result(name, false, L"The backend refused the request.", nullptr);
+        char l[160];
+        _snprintf_s(l, sizeof l, _TRUNCATE, "mods: %ls finished (run %d, list %d)", name, job.run_rc, job.list_rc);
+        poc_log(l);
+    }
+    if (job.list_rc == 1) poc_mods_post(L"{\"kind\":\"mods\",\"data\":", job.list_doc, L"}");
+    else poc_post_json(job.list_rc == -1
+        ? L"{\"kind\":\"mods\",\"data\":null,\"error\":\"The game did not answer in time. The list is read while the editor is open.\"}"
+        : L"{\"kind\":\"mods\",\"data\":null,\"error\":\"The mods list is unavailable.\"}");
+    job.run_doc.clear();
+    job.list_doc.clear();
+    InterlockedExchange(&g_mods_done, 0);
+    InterlockedExchange(&g_mods_busy, 0);
+}
+
+/* Open the store folder in Explorer, creating it when it is not there yet. */
+static void poc_mods_open_folder()
+{
+    sh_mods_call call;
+    char root[MAX_PATH * 4];
+    bool ok = false;
+    memset(&call, 0, sizeof call);
+    call.op = SH_MODS_ROOT;
+    call.out = root;
+    call.out_cap = (int)sizeof root;
+    if (poc_mods_slot(&call) == 1) {
+        int wl = MultiByteToWideChar(CP_UTF8, 0, root, -1, nullptr, 0);
+        if (wl > 0) {
+            std::wstring w((size_t)wl, L'\0');
+            MultiByteToWideChar(CP_UTF8, 0, root, -1, &w[0], wl);
+            w.resize(wcslen(w.c_str()));
+            SHCreateDirectoryExW(nullptr, w.c_str(), nullptr);
+            PIDLIST_ABSOLUTE pidl = nullptr;
+            if (SUCCEEDED(SHParseDisplayName(w.c_str(), nullptr, &pidl, 0, nullptr)) && pidl) {
+                ok = SUCCEEDED(SHOpenFolderAndSelectItems(pidl, 0, nullptr, 0));
+                CoTaskMemFree(pidl);
+            }
+        }
+    }
+    poc_mods_post_result(L"openFolder", ok, ok ? L"" : L"The mods folder could not be opened.", nullptr);
+}
+
 /* Extract flat sidecar tags and re-escape each value. Never splice sidecar
  * bytes into an outgoing JSON envelope. */
 static bool poc_read_meta_tags(const std::string &folder, const std::string &name, std::vector<std::string> &tags)
@@ -2811,6 +3103,21 @@ static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventA
                 poc_send_budget_table();
             } else if (cmd == L"budgetUsage") {
                 poc_send_budget_usage();
+            } else if (cmd == L"modsList") {
+                poc_mods_begin(0, false, std::string());
+            } else if (cmd == L"modsAction") {
+                /* Install always asks for its folder here, in the native picker: the page never
+                 * names a path to install. */
+                std::wstring act, arg;
+                sh_webview_json::get_string(json, L"action", act);
+                sh_webview_json::get_string(json, L"arg", arg);
+                if (act == L"openFolder") poc_mods_open_folder();
+                else {
+                    int code = poc_mods_action_code(act);
+                    if (!code) poc_mods_post_result(L"unknown", false, L"Unknown mods action.", nullptr);
+                    else if (code == SH_MODS_ACT_INSTALL) poc_mods_begin(code, true, std::string());
+                    else poc_mods_begin(code, false, sh_webview_json::to_utf8(arg));
+                }
             } else if (cmd == L"resolvePrefabModel") {
                 int generation = 0; std::wstring inherit;
                 sh_webview_json::get_int(json, L"generation", &generation);
@@ -3384,6 +3691,8 @@ static void poc_think_loop()
         /* A finished file picker. Its thread only carried the dialog; everything that touches the
          * backend happens here, on the UI thread, like every other deferred action above. */
         if (InterlockedCompareExchange(&g_pick_done, 0, 0) != 0) poc_finish_pick();
+        /* A finished Mods tab job: post its documents from this thread. */
+        if (InterlockedCompareExchange(&g_mods_done, 0, 0) != 0) poc_mods_finish();
         if (g_pending_sound_session) { poc_apply_sound_session(); g_pending_sound_session = false; }
         if (g_pending_sound_preview) { poc_apply_sound_preview(); g_pending_sound_preview = false; did_sound_preview = true; }
         if (g_pending_create_folder) { poc_apply_create_folder(); g_pending_create_folder = false; did_create_folder = true; }

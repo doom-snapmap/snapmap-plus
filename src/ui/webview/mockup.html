@@ -134,6 +134,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     <div class="tab active" data-tab="entities">Entities</div>
     <div class="tab" data-tab="prefabs">Prefabs</div>
     <div class="tab" data-tab="timelines">Timelines</div>
+    <div class="tab" data-tab="mods">Mods</div>
   </div>
 
   <div class="content" id="panel-entities">
@@ -322,6 +323,63 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     </div>
   </div>
 
+  <!-- Mods tab (mods_tab.js): installed bundles, what the open map needs, shadows and conflicts, and
+       the sh_mods actions. The host answers modsList / modsAction from the game thread; nothing polls. -->
+  <div class="content" id="panel-mods" style="display:none;">
+    <div class="split-workspace primary-split" data-split-workspace>
+    <div class="panel left-pane">
+      <div class="panel-head">
+        <span class="panel-title">Mods</span><span class="badge" id="modsBadge">0</span>
+        <div class="panel-actions">
+          <button type="button" class="btn icon icon-button" id="modsRefreshBtn" title="Refresh: read the installed mods and the open map again" aria-label="Refresh the mods list"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-refresh-cw"></use></svg></button>
+          <button type="button" class="btn primary" id="modsInstallBtn" title="Choose a mod folder to check, copy into the mods store and verify">Install...</button>
+        </div>
+      </div>
+      <div class="panel-toolbar">
+        <input type="text" id="modsFilter" placeholder="Filter by name, id or state...">
+        <div class="mods-actions">
+          <button type="button" class="btn" id="modsRescanBtn" title="Reread the mods folder, for a mod copied in by hand">Rescan</button>
+          <button type="button" class="btn" id="modsVerifyBtn" title="Rehash every file of every installed build">Verify all</button>
+          <button type="button" class="btn" id="modsPaletteBtn" title="Add the editor rows of mods installed after the editor opened">Rebuild palette</button>
+          <button type="button" class="btn" id="modsPruneBtn" title="List builds that a newer build of the same mod covers; nothing is removed until you confirm">Remove unused...</button>
+          <button type="button" class="btn" id="modsFolderBtn" title="Open the mods folder in Explorer">Open folder</button>
+        </div>
+        <div class="mods-status" id="modsStatus" role="status" aria-live="polite"></div>
+      </div>
+      <div class="panel-body list mods-list" id="modsList" role="listbox" aria-label="Installed mods"><div class="list-empty">Open this tab to list installed mods.</div></div>
+    </div>
+    <div class="pane-splitter" role="separator" tabindex="0"
+         aria-label="Resize Mods and Mod Details" aria-orientation="vertical"
+         aria-valuemin="220" aria-valuemax="1200" aria-valuenow="576"
+         data-split-variable="--split-primary" data-split-shared="app" data-split-side="before"
+         data-min-before="220" data-min-after="280" data-split-label="Mods"
+         title="Drag to resize Mods and Mod Details; double-click to reset"></div>
+    <div class="panel right-pane">
+      <div class="panel-head">
+        <span class="panel-title">Mod Details</span>
+        <div class="panel-actions">
+          <button type="button" class="btn" id="modsVerifyOneBtn" disabled title="Rehash every file of the selected build">Verify</button>
+        </div>
+      </div>
+      <div class="panel-body pad mods-side">
+        <section class="mods-section" aria-labelledby="modsDetailHead">
+          <div class="mods-section-head" id="modsDetailHead">Selected mod</div>
+          <div id="modsDetail"></div>
+        </section>
+        <section class="mods-section" aria-labelledby="modsMapHead">
+          <div class="mods-section-head" id="modsMapHead">This map</div>
+          <div id="modsMap"></div>
+        </section>
+        <details class="mods-section mods-shadows" id="modsShadows">
+          <summary id="modsShadowsSummary">Shadows and conflicts</summary>
+          <div class="mods-shadows-body" id="modsShadowsBody"></div>
+        </details>
+        <div class="mods-root" id="modsRoot"></div>
+      </div>
+    </div>
+    </div>
+  </div>
+
   <div class="statusbar">
     <div class="status-group status-main">
       <span><span class="dot" id="bridgeDot" role="status" aria-label="Connecting" title="Connecting"></span><b id="verText">Snapmap+</b></span>
@@ -429,6 +487,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 <script src="prefab_transform.js"></script>
 <script src="prefab_viewport.js"></script>
 <script src="prefab_budget.js"></script>
+<script src="mods_tab.js"></script>
 <script>
   var allEntities = [];      // last list from backend
   var visibleEntities = [];  // full filtered logical list; only a bounded window is mounted in the DOM
@@ -1097,7 +1156,29 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     'textures/whitecollar/wc_floor_red\ntextures/whitecollar/wc_panel_2b\n' +
     'textures/whitecollar/wc_panel_maint_1e\ntextures/whitecollar/wc_panel_maint_tall_1a\n' +
     'textures/whitecollar/wc_panel_tall_1d\nweapons/har/harbase\nweapons/har/harbase_bloody\n';
+  // Browser-preview stand-in for the Mods tab's document (backend/modui.c writes the real one).
+  var PREVIEW_MODS = {v:1, gen:1, root:'C:\\Users\\you\\AppData\\Local\\snapmap-plus\\mods', storeReadable:true,
+    index:{bundles:3, admitted:2, files:15, conflicts:0, shadows:1, editorRowsRegistered:2},
+    bundles:[
+      {key:'alex.r2-imp@1.0.0+2', id:'alex.r2-imp', name:'R2 Imp copy', author:'alex', version:'1.0.0', build:2, hash:'9a8b7c6d5e4f3021', size:1843230, files:13,
+       state:'active', cause:'', legacy:false, verified:true, installedAt:1761700500, editorRows:2, shadows:0, supersededPaths:0, supersededBy:'', folder:'alex.r2-imp@1.0.0+2'},
+      {key:'alex.r2-imp@1.0.0+1', id:'alex.r2-imp', name:'R2 Imp copy', author:'alex', version:'1.0.0', build:1, hash:'3f0c6c2a9d0d6bb1', size:1843202, files:13,
+       state:'superseded', cause:'', legacy:false, verified:true, installedAt:1761700000, editorRows:2, shadows:0, supersededPaths:1, supersededBy:'alex.r2-imp@1.0.0+2', folder:'alex.r2-imp@1.0.0+1'},
+      {key:'pat.loud-shotgun@2.1+4', id:'pat.loud-shotgun', name:'Loud shotgun', author:'pat', version:'2.1', build:4, hash:'2222222222222222', size:8803, files:2,
+       state:'active', cause:'', legacy:false, verified:true, installedAt:1761650000, editorRows:0, shadows:1, supersededPaths:0, supersededBy:'', folder:'pat.loud-shotgun@2.1+4'}],
+    map:{entities:42, names:18,
+      rows:[{id:'alex.r2-imp', version:'1.0.0', bundle:'3f0c6c2a9d0d6bb1', size:1843202, state:'superseded', cause:'', key:'alex.r2-imp@1.0.0+1', otherKey:'', nameCount:1, names:['mods/alex.r2-imp/imp_copy']}],
+      placed:[{id:'alex.r2-imp', version:'1.0.0', bundle:'9a8b7c6d5e4f3021', size:1843230, key:'alex.r2-imp@1.0.0+2', viaNeeds:false, inManifest:false, nameCount:1, names:['mods/alex.r2-imp/imp_copy']}]},
+    shadows:[{request:'sound/soundbanks/pc/shotgun.snd', kind:'stock', shadow:true, served:'pat.loud-shotgun@2.1+4', bundles:['pat.loud-shotgun@2.1+4']}],
+    shadowTotals:{stock:1, legacy:0, conflict:0, total:1, sent:1}};
   function previewHandle(o) {
+    if (o.cmd === 'modsList') { onMessage({kind:'mods', data: PREVIEW_MODS}); return; }
+    if (o.cmd === 'modsAction') {
+      var pr = {kind:'modsActionResult', action:o.action, ok:false, message:'Browser preview: the mods store is not available here.', data:{}};
+      if (o.action === 'pruneList') { pr.ok = true; pr.data = {candidates:[{key:'alex.r2-imp@1.0.0+1', size:1843202, coveredBy:'alex.r2-imp@1.0.0+2'}]}; pr.message = '1 build(s) can be removed.'; }
+      if (o.action !== 'openFolder') onMessage(pr);
+      return;
+    }
     // The File menu in browser preview: no native picker and no backend, so answer with the default
     // pair the backend would report. Without this the menu's readout would sit on "Loading..." and
     // the layout could never be checked outside the game.
@@ -2815,6 +2896,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
   // ---- messages from native ----
   function onMessage(d) {
+    if (typeof modsUi !== 'undefined' && modsUi.onMessage(d)) return;
     if (d.kind === 'navmeshState') {
       if (!d.ok) { navmeshNote('This build has no navigation view.'); return; }
       var st = d.state || {};
@@ -4281,14 +4363,24 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     window.addEventListener('resize', queueSplitConstrain);
   }
 
-  // top-level tab switching (Entities / Prefabs / Timelines)
+  // ---- Mods tab (mods_tab.js) ----
+  var modsUi = modsTab.create({
+    document: document,
+    byId: function(id){ return document.getElementById(id); },
+    post: post, toast: toast,
+    confirm: function(text, ok){ showConfirm(text, ok); },
+    raf: function(fn){ requestAnimationFrame(fn); }
+  });
+  modsUi.bind();
+
+  // top-level tab switching (Entities / Prefabs / Timelines / Assets / Mods)
   document.querySelectorAll('.tabstrip .tab').forEach(function(tab){
     tab.addEventListener('click', function(){
       acClose();   // the decl editor's completion popup shouldn't survive a tab switch
       document.querySelectorAll('.tabstrip .tab').forEach(function(t){ t.classList.remove('active'); });
       this.classList.add('active');
       var which = this.getAttribute('data-tab');
-      ['entities','prefabs','timelines','assets'].forEach(function(name){
+      ['entities','prefabs','timelines','assets','mods'].forEach(function(name){
         document.getElementById('panel-' + name).style.display = (name === which) ? 'flex' : 'none';
       });
       queueSplitConstrain();
@@ -4298,7 +4390,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
         if (!pfBudgetAsked) { pfBudgetAsked = true; post({cmd:'budgetTable'}); }
         post({cmd:'budgetUsage'});
       }
-      if (which === 'timelines') tlMaybeAutoRefresh();   // catch stale content from a play-mode round-trip that happened while this tab wasn't visible
+      if (which === 'timelines') tlMaybeAutoRefresh();
+      if (which === 'mods') modsUi.show();   // read on demand: tab open, Refresh, and after each action   // catch stale content from a play-mode round-trip that happened while this tab wasn't visible
       // The selected catalog is cached after its first fetch, so later visits do not cross the bridge.
       if (which === 'assets') { abActive = abTabMount; abOpenCatalog(abTabMount); }
       else if (typeof abTabMount !== 'undefined') {

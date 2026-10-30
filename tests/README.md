@@ -78,6 +78,15 @@ Checks native helpers, engine-interface contracts, frontend JavaScript and optio
   non-stock shadows builds and registers only its new names; skins decls pass
   by their mesh path. With `SH_MODLEGACY_FIXTURES` set, each carrier map is
   converted with the real builder and activated in the same parse.
+- `modui_test.c` runs the Mods tab's backend against a temporary store, the
+  real serving index and the map manifest: the document on an empty store,
+  install through the tab, every state string, manifest rows and the placed
+  closure, stock shadows and a conflict, the removal of a covered build, the
+  main-thread refusal and the slot's size query. It also checks that every key
+  in `fixtures\mods_tab_payload.json` is one the backend writes.
+- `mods_tab_test.js` renders the Mods tab from that fixture with a minimal DOM:
+  the windowed lists, the lazily built shadow list, the action messages, the
+  empty and error states, and the page, host and interface contract.
 - `startup_dirs_test.c` runs the startup folder creation and settings
   initialization against a temporary root and checks that only the root,
   `strings\` and `prefabs\` appear, then scans the backend, frontend and

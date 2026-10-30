@@ -31,6 +31,8 @@
 #include "module_prefab.h"
 #include "timeline_tile.h"
 #include "budget_table.h"
+#include "modui.h"
+#include "modserve.h"
 #include "engine_build.h"
 
 /* Editor layout. */
@@ -1216,6 +1218,66 @@ static int slot_clear_stack(sh_iface *self, int index)
 
 /* Installation. */
 
+/* The Mods tab's placed names (modui.c): every valid entity's inherit and the
+ * other quoted string values of its decl text, the names the save-time
+ * closure reads from the serialized map. Main thread only (inside run_on_main). */
+#define IE_MODS_DECL_MAX 16384
+static const uint8_t *g_mods_main_thread_at;
+
+static int ie_mods_on_main(void)
+{
+    int id = 0;
+    if (!g_mods_main_thread_at || !ie_read_s32(g_mods_main_thread_at, &id) || id == 0) return -1;
+    return (DWORD)id == GetCurrentThreadId() ? 1 : 0;
+}
+
+static int ie_mods_copy_text(const void *blob, char *text, int cap)
+{
+    int len = 0;
+    __try {
+        const char *p = (const char *)blob;
+        for (; len < cap - 1 && p[len]; len++) text[len] = p[len];
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return -1; }
+    text[len] = 0;
+    return len;
+}
+
+static int ie_mods_placed_names(sh_modui_name_fn emit, void *context)
+{
+    void *array = NULL;
+    uint32_t count = 0, id;
+    int read = 0;
+    char *text;
+    if (!emit || !entity_array(&array, &count)) return -1;
+    text = (char *)malloc(IE_MODS_DECL_MAX);
+    if (!text) return -1;
+    for (id = 0; id < count; id++) {
+        void *ent = entity_ptr(array, count, (int)id), *vflag = NULL, *defsub = NULL, *blob = NULL;
+        char name[512];
+        const char *p;
+        if (!ent || !ie_read_ptr((const uint8_t *)ent + ENT_VALID_OFF, &vflag) || !vflag) continue;
+        if (!ie_read_ptr((const uint8_t *)ent + ENT_DEFSUB_OFF, &defsub) || !defsub) continue;
+        if (!ie_read_ptr((const uint8_t *)defsub + DECL_BLOB_B_OFF, &blob) || !blob) continue;
+        if (ie_mods_copy_text(blob, text, IE_MODS_DECL_MAX) < 0) continue;
+        read++;
+        for (p = text; (p = strchr(p, '"')) != NULL;) {
+            const char *q = ++p;
+            size_t len;
+            while (*q && *q != '"') q += (q[0] == '\\' && q[1]) ? 2 : 1;
+            len = (size_t)(q - p);
+            if (len && len < sizeof name) {
+                memcpy(name, p, len);
+                name[len] = 0;
+                emit(context, name);
+            }
+            if (!*q) break;
+            p = q + 1;
+        }
+    }
+    free(text);
+    return read;
+}
+
 int sh_iface_engine_install(const sig_result *results, size_t n, const uint8_t *module_base)
 {
     if (InterlockedCompareExchange(&g_installed, 1, 0) != 0) return 0;
@@ -1280,6 +1342,16 @@ int sh_iface_engine_install(const sig_result *results, size_t n, const uint8_t *
     slots.module_prefab          = sh_module_prefab_slot;     /* +0x360 ext 31 */
     slots.timeline_tile          = sh_timeline_tile_slot;     /* +0x368 ext 32 */
     slots.budget                 = sh_budget_table_slot;      /* +0x370 ext 33 */
+    {
+        /* The Mods tab: the store, the serving index and the open map's names. */
+        sh_modui_engine mods;
+        memset(&mods, 0, sizeof mods);
+        if (module_base) g_mods_main_thread_at = (const uint8_t *)glb_resolve(module_base, "main_thread_id", NULL);
+        mods.on_main_thread = g_mods_main_thread_at ? ie_mods_on_main : NULL;
+        mods.placed_names   = ie_mods_placed_names;
+        sh_modui_bind(&mods);
+    }
+    slots.mods                   = sh_modui_slot;             /* +0x378 ext 34 */
 
     slots.enum_decls_of_resclass = slot_enum_decls_of_resclass;/* +0x110 */
 

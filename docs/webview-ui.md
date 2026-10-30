@@ -15,6 +15,7 @@ operations use the interface in `src/common/snapmap_plus_iface.h`.
 | `src/ui/webview/decl_language.js` | Declaration tokens, parsing, schema checks, highlighting and completion; each instance owns its schema cache. |
 | `src/ui/webview/prefab_viewport.js` | Prefab rendering, mesh transport, framing and orbit controls. |
 | `src/ui/webview/prefab_transform.js` | Sparse saved transforms and inherited scale composition. |
+| `src/ui/webview/mods_tab.js` | The Mods tab: payload model, state and shadow explanations, the windowed bundle and shadow lists, and the action messages. |
 | `src/ui/webview/prefab_budget.js` | What a prefab adds to the editor's limits: block sums, the five HUD meter ratios, the reached rule and a bounded memo. No DOM. |
 | `src/ui/webview/schema_slice.js` | Declaration schema slicing for the property editor. |
 | `src/ui/webview/config_message.{h,cpp}` | Bounded extraction of configuration messages. |
@@ -64,6 +65,7 @@ The header defines the complete ABI. These are the main entry points:
 | Load / Place | `apply_edit` at `+0xD0`, kind 2: stage the prefab and request the native paste action. Engine state can force a stage-only fallback, reported by toast. |
 | Save Timeline | `apply_sync` at `+0x290`, kind 0, with the target entity ID. |
 | Timeline tile | `timeline_tile` at `+0x368` reports the toybox tile's palette row, its prototype record class and the rebind counts. The page does not call it; the `+0x298` normaliser is retired. |
+| Mods tab | `mods` at `+0x378`: LIST and RUN build a document on the game thread (call them inside `run_on_main`), FETCH copies it on any thread, ROOT returns the store folder. See [Mods tab](#mods-tab). |
 | Prefab limits | `budget` at `+0x370`: TABLE copies the budget table the backend built after the last palette build, USAGE the map's limits, usage and reached byte from the last editor frame. |
 | Persistent settings | `config_get_json` at `+0x2B0` and `config_set_json` at `+0x2B8`. |
 | Prefab geometry | Model lookup and request/completion slots at `+0x308` through `+0x320`. `resolve_prefab_defaults` (`+0x320`) also reports a palette-row model (`SH_PREFAB_DEFAULT_EDITOR`) and, given six floats, that row's `renderInfo.size` (`SH_PREFAB_DEFAULT_SIZE`); see [Prefabs 3D preview](#prefabs-3d-preview). |
@@ -145,6 +147,47 @@ over the KB limit sum), MEMORY = max(render models, lights, world areas,
 decals), DEMONS = AI / 64 and DECALS = decals / limit; a result is red when
 NETWORK, OBJECTS or MEMORY would reach 1.0 or DEMONS would pass it. The limits
 and usage are always read live, never hard-coded.
+
+## Mods tab
+
+`mods_tab.js` renders the tab; `backend/modui.c` builds its document behind the
+`mods` slot at `+0x378`. The page asks for the document when the tab opens and on
+Refresh, and receives it again after every action. Nothing polls.
+
+The document has four parts:
+
+| Part | Source | Shown as |
+|---|---|---|
+| `bundles` | modstore enumeration, the serving index's `sh_modserve_bundle_state` and `sh_modserve_lookup` | One row per store folder: name, key (`id@version+build`), size, file count and state. `active` and `legacy` serve their files; `superseded` means a newer build of the same mod serves at least one of its paths with different bytes; `unindexed` was installed after the last scan; `skipped` carries the first cause. A build the index serves whose store check fails stays `active` with the cause as a warning, because the index falls back to the blob copies. |
+| `map.rows` | modmanifest's record of the last load | The `smpmod1.` rows the map carried, each with whether its bundle is installed and active, missing (with any other installed build of the mod), skipped or not scanned. |
+| `map.placed` | the save-time closure, `modserve_bundles_for_names_visit` over each placed entity's inherit and decl string values | The bundles the next save will record, marked when they are new since the load or reached only through another mod's needs. The summary line compares this with `map.rows`. |
+| `shadows` | each admitted bundle's shadowed paths, and admitted paths the index serves from no bundle | Grouped by request path: a stock shadow ("Applies on this machine only."), a legacy shadow from a converted package ("Changes what maps mean.") or a conflict ("Two mods supply this name; neither is served."). At most 4,000 rows are sent; the totals always count all of them. |
+
+The actions are the `sh_mods` verbs, run on the game thread through `run_on_main`
+from a short-lived host worker, so the window keeps painting during an install:
+
+| Page to host | Runs | Notes |
+|---|---|---|
+| `modsList` | LIST | Answered with `mods {data}`, or `mods {data: null, error}` when the game did not run it in time or the backend has no slot. |
+| `modsAction {action: "install"}` | the native folder picker, then INSTALL | The folder always comes from the picker; the page never names a path. A successful install rebuilds the serving index; editor rows still need Rebuild palette. |
+| `modsAction {action: "verify", arg?}` | VERIFY | `arg` is one build's key; without it every build is rehashed. |
+| `modsAction {action: "rescan"}` / `"palette"` | RESCAN / PALETTE | `sh_mods rescan` and `sh_mods palette rebuild`; the rebuild is refused while the editor holds an entity or a wire. |
+| `modsAction {action: "pruneList"}` then `{action: "pruneApply", arg}` | PRUNE_LIST / PRUNE_APPLY | Lists builds that a newer installed build of the same mod covers path for path and that neither the open map's record nor its placed names reference; legacy conversions and skipped builds are never listed. The page asks for confirmation, then sends exactly the listed keys, which the backend checks again. Each removed folder is moved aside, out of both scans, before the index is rebuilt and the folder deleted; blobs no remaining build references are deleted too. |
+| `modsAction {action: "openFolder"}` | ROOT | Opens the store folder in Explorer, creating it when absent. |
+
+Each action is answered with `modsActionResult {action, data}` (the backend's
+result document, with `ok` and `message`) or `{action, ok: false, message}` when
+it could not run, followed by a fresh `mods` document. One job runs at a time.
+While it runs, `run_on_main` is occupied, so other edits from the window are
+refused as when the game is busy.
+
+The bundle list and the shadow list mount only the rows in view: rows have a
+fixed height (40 and 38 pixels, matching `studio.css`) inside a sizer that
+carries the scroll range, and the shadow list is not built until its section is
+opened. `tests/modui_test.c` checks the backend document against a temporary
+store and `tests/mods_tab_test.js` renders the page from
+`tests/fixtures/mods_tab_payload.json`; the native test also checks that every
+key the fixture uses is one the backend writes.
 
 ## Driving the page from a test
 
