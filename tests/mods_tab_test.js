@@ -571,7 +571,7 @@ test('Remove from map: the dry run drives the confirmation; two buttons; the doc
   const btns = modalButtons(h);
   assert.deepEqual(btns.map(b => b.textContent), ['Cancel', 'Delete from map'], 'exactly two buttons; the label carries the scope');
   const notes = h.nodes.modsMapHost.all('mods-note').map(n => n.textContent);
-  assert.deepEqual(notes.slice(0, 2), [modsTab.SCOPE.mapRemoveMod, 'This cannot be undone. Removing it:'], 'the scope sentence comes first');
+  assert.deepEqual(notes.slice(0, 2), [modsTab.SCOPE.mapRemoveMod, 'Ctrl+Z in the editor brings the entities back, also after a Play round. Removing it:'], 'the scope sentence comes first');
   assert.equal(modsTab.SCOPE.mapRemoveMod, 'Only this map changes. The mod stays installed on this computer and keeps its Toybox rows.');
   /* the buttons are a footer: the dialog's last child, after the scrolling consequence list */
   const hostKids = h.nodes.modsMapHost.children;

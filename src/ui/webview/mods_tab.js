@@ -709,7 +709,9 @@ var modsTab = (function () {
       var body = el('div', 'mods-map-body');
       host.appendChild(body);
       body.appendChild(el('div', 'mods-note mods-scope', scopeText(pv)));
-      body.appendChild(el('div', 'mods-note', 'This cannot be undone. ' + (uninstall ? 'Uninstalling' : 'Removing it') + ':'));
+      body.appendChild(el('div', 'mods-note', uninstall
+        ? 'This cannot be undone. Uninstalling:'
+        : 'Ctrl+Z in the editor brings the entities back, also after a Play round. Removing it:'));
       var ul = el('ul', 'mods-consequences');
       consequenceLines(pv).forEach(function (c) {
         var li = el('li', '', c.text);
