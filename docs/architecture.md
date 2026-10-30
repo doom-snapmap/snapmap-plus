@@ -230,7 +230,7 @@ still reference them. Save files contain the dimension-bearing module identity;
 players need Snapmap+ to reconstruct its resources. Vanilla loading is unsupported.
 
 The shared object uses an append-only vtable. Its original 77-slot prefix is
-retained, with extensions through `+0x370`; the current table occupies `0x378`
+retained, with extensions through `+0x378`; the current table occupies `0x380`
 bytes. The File menu's rawmap surface is `rawmap_status` (`+0x328`),
 `rawmap_configure` (`+0x330`) and `rawmap_load_now` (`+0x338`). The last three
 are `navmesh_view` (`+0x340`), `run_on_main` (`+0x348`), `delete_entities`
@@ -239,7 +239,8 @@ Blueprint module-prefab state, save, place and status operations),
 `timeline_tile` (`+0x368`, the Timeline palette tile's status) and `budget`
 (`+0x370`, the editor budget table and usage for the Prefabs tab's Limits
 section, built on the game thread after each palette build by
-`budget_table.c`). The retired
+`budget_table.c`) and `mods` (`+0x378`, the Mods tab's document and actions,
+`modui.c`, run on the game thread through `run_on_main`). The retired
 timeline-inherit normaliser at `+0x298` stays in the table and returns 1. The backend writes a marker and the table's size into the object's
 first reserved cell (`+0x08`); older backends left it zero and had `0x350`
 bytes. Check `SH_IFACE_HAS_SLOT` before calling any slot at or past `+0x350`,
@@ -390,7 +391,7 @@ present only when the player installed them, and nothing is uploaded. Nothing is
 read from the retired `%LOCALAPPDATA%\snapmap-plus\overrides\` tree, and no
 `package-cache` or `package-staging` folder is created.
 
-Six backend files share the work:
+Seven backend files share the work:
 
 - `modbundle.c` builds a mod folder into a bundle: a SHA-256 per file, the
   logical name each file provides, the names its decls need, the namespace and
@@ -422,6 +423,9 @@ Six backend files share the work:
   already knowing the source marks a stock decl, which is left to the provider.
 - `modmanifest.c` owns the `smpmod1.<index>.<count>` manifest rows, and
   `modlegacy.c` the retired `smpkg.` carriers, as below.
+- `modui.c` is the WebView Mods tab's backend: it reads the store, the serving
+  index and the manifest record into one document and runs the `sh_mods` verbs
+  for the tab on the main thread (see [WebView UI](webview-ui.md#mods-tab)).
 
 The provider open (`ov_open_body` in `overrides.c`) serves, in order: the
 placement grid, map navigation, the generated Grid Room variants, the built-in

@@ -235,10 +235,10 @@ int main(int argc, char **argv)
     CHECK(strstr(html,
           ".pane-splitter:hover, .pane-splitter:focus-visible, .pane-splitter.dragging { background: var(--accent); box-shadow: -1px 0 var(--accent), 1px 0 var(--accent); }") != NULL);
     CHECK(count_text(html,
-          "class=\"split-workspace primary-split\" data-split-workspace") == 3);
-    CHECK(count_text(html, "data-split-variable=\"--split-primary\"") == 3);
-    CHECK(count_text(html, "data-split-shared=\"app\"") == 3);
-    CHECK(count_text(html, "class=\"pane-splitter\"") == 3);
+          "class=\"split-workspace primary-split\" data-split-workspace") == 4);
+    CHECK(count_text(html, "data-split-variable=\"--split-primary\"") == 4);
+    CHECK(count_text(html, "data-split-shared=\"app\"") == 4);
+    CHECK(count_text(html, "class=\"pane-splitter\"") == 4);
     CHECK(strstr(html, "data-split-variable=\"--split-rail\"") == NULL);
     CHECK(strstr(html, "data-split-variable=\"--split-inspector\"") == NULL);
     CHECK(strstr(html, "<div class=\"ab-grid\" id=\"abTabHost\"></div>") != NULL);

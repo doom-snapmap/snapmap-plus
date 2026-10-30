@@ -29,8 +29,8 @@ param(
                            "settings_tab.c", "map_bounds.c", "editor_zoom.c",
                            # Boot preload pacing (load-screen video lock, read poll).
                            "boot_pacing.c",
-                           # Mod bundles, the local mods store and the sh_mods command.
-                           "modbundle.c", "modstore.c", "modcmd.c"),
+                           # Mod bundles, the local mods store, the sh_mods command and the Mods tab.
+                           "modbundle.c", "modstore.c", "modcmd.c", "modui.c"),
     [string]$Out = "XINPUT1_4.dll",
     # Diag adds SH_DIAG and the crash/environment logger for troubleshooting.
     [switch]$Diag,

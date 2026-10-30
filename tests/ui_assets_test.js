@@ -10,7 +10,7 @@ const root = path.resolve(__dirname, '..');
 const web = path.join(root, 'src/ui/webview');
 const embed = path.join(root, 'src/ui/embed-page.ps1');
 const updater = path.join(root, 'tools/update-avatar.ps1');
-const names = ['mockup.html', 'studio.css', 'decl_language.js', 'schema_slice.js', 'prefab_transform.js', 'prefab_viewport.js', 'prefab_budget.js'];
+const names = ['mockup.html', 'studio.css', 'decl_language.js', 'schema_slice.js', 'prefab_transform.js', 'prefab_viewport.js', 'prefab_budget.js', 'mods_tab.js'];
 const hash = name => crypto.createHash('sha256').update(fs.readFileSync(path.join(web, name))).digest('hex');
 const before = names.map(hash);
 const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'snapmap-ui-assets-'));

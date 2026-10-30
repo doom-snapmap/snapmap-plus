@@ -568,3 +568,44 @@
   .menu-note { width: 296px; padding: 3px 8px 2px; color: var(--textDim, var(--text)); font-size: 11px; line-height: 1.5; opacity: .85; overflow-wrap: anywhere; }
   .menu-note > div + div { margin-top: 1px; }
   .menu-note b { font-weight: 600; opacity: .8; }
+  /* Mods tab (mods_tab.js). Rows are absolutely placed inside a sizer so only the rows in view exist;
+     their heights match ROW_HEIGHT (40) and SHADOW_ROW_HEIGHT (38). */
+  .mods-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+  .mods-status { min-height: 15px; color: var(--muted); overflow-wrap: anywhere; }
+  .mods-status.ok { color: #2e7d46; }
+  :root.dark .mods-status.ok, :root.dark .mods-pill.ok, :root.dark .mods-note.ok { color: #6cc68a; }
+  .mods-status.err { color: var(--danger); }
+  .mods-status.busy { font-style: italic; }
+  .mods-list { position: relative; }
+  .mods-sizer { position: relative; width: 100%; }
+  .mods-row { position: absolute; left: 0; right: 0; height: 40px; padding: 4px 7px; border-radius: 4px; cursor: default; overflow: hidden; }
+  .mods-row:hover { background: var(--panel2); }
+  .mods-row.selected { background: var(--sel); }
+  .mods-row-top { display: flex; align-items: center; gap: 6px; min-width: 0; }
+  .mods-row-name { font-weight: 600; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+  .mods-row.selected .mods-row-name { color: var(--selText); }
+  .mods-row-sub { margin-top: 2px; color: var(--muted); font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .mods-map-row .mods-row-sub { white-space: normal; overflow-wrap: anywhere; }
+  .mods-pill { flex: none; padding: 0 6px; border: 1px solid var(--border2); border-radius: 9px; background: var(--panel2); color: var(--muted); font-size: 10px; line-height: 15px; }
+  .mods-pill.ok { color: #2e7d46; border-color: currentColor; }
+  .mods-pill.warn { color: var(--sqWarn); border-color: currentColor; }
+  .mods-pill.err { color: var(--danger); border-color: currentColor; }
+  .mods-side { display: flex; flex-direction: column; gap: 14px; }
+  .mods-section-head, .mods-shadows > summary { margin-bottom: 6px; color: var(--muted); font-size: 10px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; }
+  .mods-shadows > summary { cursor: pointer; }
+  .mods-detail-head { display: flex; align-items: center; gap: 8px; margin-bottom: 2px; }
+  .mods-detail-name { font-size: 13px; font-weight: 600; overflow-wrap: anywhere; }
+  .mods-field { display: flex; gap: 8px; padding: 2px 0; }
+  .mods-field-label { flex: 0 0 84px; color: var(--muted); }
+  .mods-field-value { min-width: 0; overflow-wrap: anywhere; user-select: text; -webkit-user-select: text; }
+  .mods-note { margin: 2px 0 6px; color: var(--muted); line-height: 1.45; }
+  .mods-note.ok { color: #2e7d46; }
+  .mods-note.warn { color: var(--sqWarn); }
+  .mods-note.err { color: var(--danger); }
+  .mods-sub { margin: 8px 0 2px; font-weight: 600; }
+  .mods-map-row { padding: 4px 0; border-top: 1px solid var(--border); }
+  .mods-shadows-body { position: relative; max-height: 260px; overflow-y: auto; }
+  .mods-shadow-row { position: absolute; left: 0; right: 0; height: 38px; padding: 3px 2px; overflow: hidden; }
+  .mods-shadow-path { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); font-family: Consolas, "Courier New", monospace; }
+  .mods-root { margin-top: auto; color: var(--muted); font-family: Consolas, "Courier New", monospace; font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .mods-error { color: var(--danger); font-style: normal; }
