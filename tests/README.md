@@ -144,7 +144,6 @@ Checks native helpers, engine-interface contracts, frontend JavaScript and optio
   call-site relay on an owned synthetic caller under a concurrent thread; with
   the executables, that the HUD call decodes to the predicate at an aligned
   rel32 with the widget in RBX.
-
 - `modshadow_test.c` measures those rules on a player's real retired
   `overrides\` tree: `SH_MODSHADOW_DATA` names a scratch data root holding a
   copy of it and `SH_MODSHADOW_GAME_NAMES` a `type<TAB>name` list of
