@@ -433,9 +433,14 @@ These backend files share the work:
   already knowing the source marks a stock decl, which is left to the provider.
 - `modmanifest.c` owns the `smpmod1.<index>.<count>` manifest rows, and
   `modlegacy.c` the retired `smpkg.` carriers, as below.
-- `modui.c` is the WebView Mods tab's backend: it reads the store, the serving
-  index and the manifest record into one document and runs the `sh_mods` verbs
-  for the tab on the main thread (see [WebView UI](webview-ui.md#mods-tab)).
+- `modui.c` is the WebView Mods tab's backend. It groups the store's folders
+  into one row per mod (the serving build shown, other builds counted, two
+  folders declaring one id flagged, `legacy\` left out), marks each installed
+  or needing attention with its cause, reports whether `overrides\` still holds
+  entries to migrate, and runs Install, Remove, Migrate and rescan on the main
+  thread. What the tab does not show, every bundle's state with legacy ones,
+  conflicts with their winners, shadows and verification, it prints as
+  `sh_mods doctor [verify]` (see [WebView UI](webview-ui.md#mods-tab)).
 - `modpublished.c` holds a published or My Maps launch whose manifest names a
   bundle that is not installed, asks the player, and fetches and resumes it or
   drops it, as in [Published maps and missing mods](#published-maps-and-missing-mods).
@@ -706,7 +711,7 @@ text is a decl that differs from the others only inside lists (a block of
 the whitelist inspectors' `validEncounters`, which every boss pack extends),
 the winner's text is served with the other providers' entries appended, so
 several boss packs work together. One `MODS: conflict:` line names the
-providers, the winner and the reason; the Mods tab shows the same. A
+providers, the winner and the reason; `sh_mods doctor` prints the same. A
 registration pass (editor rows, map activation) also withdraws an animWeb
 whose models block names a model that no bundle provides and the engine has
 no md6Def for, since the engine's parse throws on it: a stock animWeb it
