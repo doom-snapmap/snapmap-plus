@@ -8,6 +8,8 @@
 /* The published-map gates poll from the same frame; tested in modpublished_test. */
 void sh_modpublished_poll(void) {}
 void sh_modpublish_poll(void) {}
+int sh_modui_poll_due(void) { return 0; }
+int sh_modui_poll_main(void *context) { (void)context; return 0; }
 
 static DWORD engine_id;
 static HANDLE start_event, entered_event, release_event;

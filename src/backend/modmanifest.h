@@ -128,6 +128,13 @@ char *sh_modmanifest_prepare_load(const char *json, size_t length, size_t *out_l
  * logged; the engine's bytes are then saved unchanged. */
 char *sh_modmanifest_on_save(const char *json, size_t length, size_t *out_length);
 
+/* The save step's restore hook (modui.c's recycle bin, the modserve.h
+ * sh_modserve_restore_fn contract with `names`): when `armed` says a recycled
+ * mod could be needed, the placed names go to `restore` before the rows are
+ * built, so a mod the map still places is reinstated and gets its row. */
+void sh_modmanifest_set_restore(int (*restore)(const char *const *hashes, int hash_count, const char *const *names,
+                                               size_t name_count, int when), int (*armed)(void));
+
 /* A copy of the manifest of the map last parsed (rows from its text). Free
  * with sh_modmanifest_list_free. Returns the row count. */
 size_t sh_modmanifest_current(sh_modmanifest_list *out);

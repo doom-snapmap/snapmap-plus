@@ -12,6 +12,7 @@
 #include "apply_engine.h"
 #include "modpublished.h"
 #include "modpublish.h"
+#include "modui.h"
 #include "typeinfo.h"
 #include "ui_bridge.h"
 #include "iface_engine.h"
@@ -3443,6 +3444,9 @@ void sh_apply_prefab_poll_play(void)
      * and the resume. Runs in menus too, where the editor frame does not. */
     sh_modpublished_poll();
     sh_modpublish_poll();   /* held publishes, their uploads and claims */
+    /* Mods: an uninstalled mod the open map needs again (Ctrl+Z, a load, a
+     * save): the owed refresh and its toast, and the undo watch. */
+    if (sh_modui_poll_due()) (void)ae_main_call_invoke(sh_modui_poll_main, NULL);
     if (!g_doom_base) return;
 
 #if AE_PASTE_DIAG_ON

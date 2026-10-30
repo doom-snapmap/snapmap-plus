@@ -97,6 +97,13 @@ typedef struct sh_modui_engine {
     /* 1 with the cause when the game cannot take a change now (Play is
      * running, a map is loading), else 0. */
     int (*busy)(char *cause, size_t cap);
+    /* 1 when the open editor map holds the entity with this uniqueId. Main
+     * thread. The undo watch (sh_modui_poll_main) reads it. */
+    int (*entity_valid)(int uid);
+    /* The editor toast with a title and literal text; nothing outside the editor. */
+    void (*toast)(const char *title, const char *text);
+    /* One line in the game console (no newline). */
+    void (*print)(const char *line);
 } sh_modui_engine;
 
 typedef struct sh_modui_map_info {
@@ -117,11 +124,26 @@ int  sh_modui_list(void);
  * {"action","ok","message",...} in the shared buffer. `arg` is the folder for
  * INSTALL (absolute), the key for VERIFY ("" verifies every installed build),
  * newline-separated keys for PRUNE_APPLY and a row's key for REMOVE, which
- * removes every build of that row unless the open map uses one. A laid-out
- * build is deleted; a folder built in place is moved out of the store to
- * snapmap-plus\removed-mods\. MIGRATE starts the migration on its worker
- * (sh_modui_wait follows it). Returns the result length, or -1 when refused
- * before the action ran. */
+ * removes every build of that row unless the open map uses one. Nothing is
+ * deleted by REMOVE, PRUNE_APPLY or UNINSTALL: every folder moves out of the
+ * store to snapmap-plus\removed-mods\ (the recycle bin) and the record's
+ * "removed" section keeps its bundle hashes, aliases, id, version, old name
+ * and time. REMOVED_EMPTY deletes the bin's folders (arg: the
+ * newline-separated folder names the confirmation listed, "" all) and their
+ * records; REMOVED_RESTORE puts one back (arg: its folder in the bin, or an
+ * id) and rescans. MIGRATE starts the migration on its worker (sh_modui_wait
+ * follows it). Returns the result length, or -1 when refused before the
+ * action ran.
+ *
+ * Reinstatement: binding registers the restore hook with modserve.h and
+ * modmanifest.h. When a map load names a bundle that resolves to nothing
+ * installed, a save or a Play entry finds placed names under mods/<id>/ of an
+ * id no installed folder declares, or an entity Uninstall deleted from the
+ * open map is back (Ctrl+Z), the matching recorded folder moves back into
+ * mods\ (its old name, else its id, else a free name), the rebuild rule and
+ * the serving index run, and on the next editor tick the game-side refresh
+ * runs and one toast and one console line say "<title> was reinstalled
+ * because the map still uses it." */
 int  sh_modui_run(int action, const char *arg);
 
 /* The console verbs that share the tab's dry runs and actions:
@@ -129,10 +151,21 @@ int  sh_modui_run(int action, const char *arg);
  *                               with its placed entities and references
  *   map remove "<key|id>" [--yes]   the dry run; with --yes it is performed
  *   uninstall "<key>" [--yes]       the dry run; with --yes it is performed
+ *   removed                     the recycle bin: each folder in removed-mods
+ *   removed empty [--yes]       what emptying deletes; with --yes it is done
+ *   removed restore "<id>"      puts one folder back into mods\ and rescans
  * argv[0] is the verb. Lines start "MODS: ". Returns 1 when the verb was
  * handled (whatever its outcome), 0 for a verb that is not one of these, -1
  * off the main thread. */
 int  sh_modui_command(int argc, const char *const *argv, sh_modui_line_fn line, void *context);
+
+/* The main-thread tick after each native frame: sh_modui_poll_due is cheap
+ * (nothing watched or owed, or under 250 ms since the last tick: 0); when it
+ * returns 1 the caller runs sh_modui_poll_main inside the process heap scope
+ * its main-thread calls use. The tick waits out Play and loads, then runs an
+ * owed refresh, checks the undo watch and shows the reinstatement toast. */
+int  sh_modui_poll_due(void);
+int  sh_modui_poll_main(void *context);
 
 /* Wait up to `ms` for a migration to finish. 1 idle, 0 still running. Any thread. */
 int  sh_modui_wait(unsigned ms);

@@ -326,8 +326,11 @@ static int me_run(sh_modserve_plan *plan, const char *phase)
 void sh_modserve_play_begin(void)
 {
     int on_main;
-    if (!sh_modserve_requirements()) return;
     on_main = me_on_main();
+    /* An uninstalled mod the map being played still places comes back first;
+     * the game-side refresh waits for the return to the editor. */
+    if (on_main == 1) (void)sh_modserve_restore(NULL, 0, NULL, 0, SH_MODSERVE_RESTORE_PLAY);
+    if (!sh_modserve_requirements()) return;
     if (on_main != 1) {
         me_log("play: requirements not re-checked (%s)", on_main ? "the main thread is unknown" : "not on the main thread");
         return;
@@ -1171,6 +1174,13 @@ int modserve_activate_bundles(const char *const *bundle_hashes, int n)
     me_ensure_probe();
     t0 = me_now_ms();
     if (sh_modserve_plan_bundles(bundle_hashes, n, &plan, &unknown) < 0) { me_log("activation refused: out of memory"); return -1; }
+    /* A bundle the map names that is not installed may be an uninstalled mod
+     * still in removed-mods: reinstated, the index rebuilt, planned again. */
+    if (unknown > 0 && sh_modserve_restore(bundle_hashes, n, NULL, 0, SH_MODSERVE_RESTORE_LOAD) > 0) {
+        sh_modserve_plan_free(&plan);
+        unknown = 0;
+        if (sh_modserve_plan_bundles(bundle_hashes, n, &plan, &unknown) < 0) { me_log("activation refused: out of memory"); return -1; }
+    }
     if (plan.count) ready = me_run(&plan, "map");
     else { me_refresh_apply("map", 0, NULL); me_reparse_early("map", 0); me_reload_ungated("map", 0); ready = 0; }
     me_log("activated %d bundles (%d steps, %d ready, %d blocked, %d not installed) in %.1f ms", n - unknown,

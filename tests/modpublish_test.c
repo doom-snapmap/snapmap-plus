@@ -52,7 +52,7 @@ static struct {
     int toast_route;
     /* the search tag: calls, the tag asked for, what the fake returns, and
      * whether the fake model already has it */
-    int tag_calls, tag_result, tags_present;
+    int tag_calls, tag_result, tags_present, untag_calls;
     char tag[32];
     /* the published edit's saved-map ids, and the published-items queries */
     char cloud[64], local[64];
@@ -97,6 +97,15 @@ static int f_add_tag(void *c, void *model, const char *tag)
     if (F.tag_result > 0) F.tags_present = 1;
     return F.tag_result;
 }
+static int f_remove_tag(void *c, void *model, const char *tag)
+{
+    (void)c;
+    if (model != MODEL || strcmp(tag, SH_MODPUBLISH_TAG)) return -1;
+    F.untag_calls++;
+    if (!F.tags_present) return 0;
+    F.tags_present = 0;
+    return 1;
+}
 static int f_edit_ids(void *c, void *edit, char *cloud, size_t ccap, char *local, size_t lcap)
 {
     (void)c; (void)edit;
@@ -130,6 +139,7 @@ static void set_ops(int toast_route)
     ops.upload_question = toast_route ? f_toast_question : NULL;
     ops.log = f_log;
     ops.add_tag = f_add_tag;
+    ops.remove_tag = f_remove_tag;
     ops.edit_ids = f_edit_ids;
     ops.published_query = f_published_query;
     sh_modpublish_test_set_ops(&ops);
@@ -563,31 +573,37 @@ int main(int argc, char **argv)
         CHECK(!section_contains(store, "links", "hhhhhhhhhhhhhhhhhhhhhhh8"));
     }
 
-    printf("-- the search tag goes only into the armed publish's own save\n");
+    printf("-- every local save makes the search tag match it: present with rows, absent without\n");
     {
-        int calls = F.tag_calls;
+        int calls = F.tag_calls, untags = F.untag_calls;
         size_t mark;
         F.tags_present = 0;
-        /* A plain save: never armed. */
+        /* A plain save with rows: tagged, no publish needed. */
         sh_modpublish_save_seen(text, len);
-        CHECK(sh_modpublish_save_tag(LOCAL_ID, MODEL) == 0 && F.tag_calls == calls);
-        /* Another slot's write does not take the arm; the publish's own does. */
+        CHECK(sh_modpublish_save_tag(LOCAL_ID, MODEL) == 1 && F.tag_calls == calls + 1 && F.tags_present);
+        CHECK(sh_modpublish_save_tag(LOCAL_ID, MODEL) == 0 && F.tag_calls == calls + 2);   /* present already */
+        CHECK(F.untag_calls == untags);
+        /* A save without rows (the last mod removed, the entities deleted): the tag goes. */
+        sh_modpublish_save_seen(EMPTY_MAP, strlen(EMPTY_MAP));
+        CHECK(sh_modpublish_save_tag(LOCAL_ID, MODEL) == 2 && F.untag_calls == untags + 1 && !F.tags_present);
+        CHECK(sh_modpublish_save_tag(LOCAL_ID, MODEL) == 0 && F.untag_calls == untags + 2);   /* absent */
+        CHECK(F.tag_calls == calls + 2);
+        /* Back with rows (Ctrl+Z, then save): the tag returns. */
+        sh_modpublish_save_seen(text, len);
+        CHECK(sh_modpublish_save_tag(LOCAL_ID, MODEL) == 1 && F.tags_present && F.tag_calls == calls + 3);
+        CHECK(sh_modpublish_save_tag(LOCAL_ID, NULL) == 0 && F.tag_calls == calls + 3);   /* no model: nothing asked */
+        /* An armed publish's own write disarms it; another slot's save is still a save. */
+        F.tags_present = 0;
         sh_modpublish_publish_started(LOCAL_ID);
         sh_modpublish_save_seen(text, len);
-        CHECK(sh_modpublish_save_tag("OTHER0002", MODEL) == 0 && F.tag_calls == calls);
-        CHECK(sh_modpublish_save_tag(LOCAL_ID, MODEL) == 1 && F.tag_calls == calls + 1);
-        CHECK(sh_modpublish_save_tag(LOCAL_ID, MODEL) == 0 && F.tag_calls == calls + 1);   /* one shot */
-        /* A map without a local id yet: the next write is taken. */
+        CHECK(sh_modpublish_save_tag("OTHER0002", MODEL) == 1 && F.tag_calls == calls + 4);
         F.tags_present = 0;
-        sh_modpublish_publish_started("");
-        sh_modpublish_save_seen(text, len);
-        CHECK(sh_modpublish_save_tag("NEW0003", MODEL) == 1 && F.tag_calls == calls + 2);
-        /* An arm older than the save window is dropped. */
+        CHECK(sh_modpublish_save_tag(LOCAL_ID, MODEL) == 1 && F.tag_calls == calls + 5);
         F.tags_present = 0;
         sh_modpublish_publish_started(LOCAL_ID);
         sh_modpublish_test_age_tag_arm(20000);
         sh_modpublish_save_seen(text, len);
-        CHECK(sh_modpublish_save_tag(LOCAL_ID, MODEL) == 0 && F.tag_calls == calls + 2);
+        CHECK(sh_modpublish_save_tag(LOCAL_ID, MODEL) == 1 && F.tag_calls == calls + 6);
         /* A publish whose save was not tagged says so at the hold. */
         mark = g_log_n;
         sh_modpublish_save_seen(text, len);

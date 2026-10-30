@@ -68,7 +68,7 @@ class FakeNode {
 }
 const IDS = ['modsList', 'modsStatus', 'modsBadge', 'modsAttnBtn', 'modsRoot', 'modsDetail', 'modsFilter', 'modsInstallBtn',
              'modsFolderBtn', 'modsMigrateBtn', 'modsUninstallBtn', 'modsRebuildBtn', 'modsVerifyBtn', 'modsRefreshBtn',
-             'modsMapBtn', 'modsMapModal', 'modsMapHost'];
+             'modsMapBtn', 'modsMapModal', 'modsMapHost', 'modsRemoved', 'modsRemovedText', 'modsEmptyBtn'];
 const GONE = ['modsRemoveBtn', 'modsMap', 'modsMapHead', 'modsDetailHead', 'modsRescanBtn', 'modsVerifyOneBtn', 'modsPaletteBtn',
               'modsPruneBtn', 'modsShadows'];
 /* store: a stand-in host (modsTab.standIn) that answers every modsAction synchronously, as the
@@ -231,7 +231,7 @@ test('formatting: sizes, dates, the row line, the count lines', () => {
 });
 test('action messages', () => {
   assert.deepEqual(modsTab.ACTIONS, ['install', 'migrate', 'rescan', 'openFolder', 'rebuild', 'verify',
-                                     'mapRemoveModPreview', 'mapRemoveMod', 'uninstallPreview', 'uninstall']);
+                                     'mapRemoveModPreview', 'mapRemoveMod', 'uninstallPreview', 'uninstall', 'removedEmpty']);
   assert.deepEqual(modsTab.actionMessage('rescan'), {cmd: 'modsAction', action: 'rescan'});
   assert.deepEqual(modsTab.actionMessage('uninstall', 'a'), {cmd: 'modsAction', action: 'uninstall', arg: 'a'});
   for (const gone of ['remove', 'palette', 'pruneList', 'pruneApply', 'format-c']) assert.equal(modsTab.actionMessage(gone), null);
@@ -635,11 +635,13 @@ test('Uninstall: with the open map using the mod, and without', () => {
   assert.equal(items[1], 'Severs 1 wire or timeline reference to those entities. wire: Arena gate: open on wave 3');
   assert.ok(items.indexOf('Removes 4 Toybox rows from the editor (Lift door, Blast door, Hell gate, Vent door).') >= 0);
   assert.ok(items.indexOf("Removes the mod's row from the map's list of mods.") >= 0);
-  assert.ok(items.indexOf('Deletes the folder mods\\doors and its files.') >= 0, 'a folder the product made is deleted');
+  assert.ok(items.indexOf('Moves the folder mods\\doors to removed-mods\\, where it stays until you empty the removed mods.') >= 0,
+            'a folder the product made moves to removed-mods too');
   assert.equal(items[items.length - 1], modsTab.OTHER_MAPS_NOTE);
   assert.deepEqual(modalButtons(h).map(b => b.textContent), ['Cancel', 'Uninstall']);
   assert.equal(h.nodes.modsMapHost.all('mods-scope')[0].textContent, 'Removes the mod from this computer. The open map is cleaned of it first.');
-  assert.equal(h.nodes.modsMapHost.all('mods-note')[1].textContent, 'This cannot be undone. Uninstalling:');
+  assert.equal(h.nodes.modsMapHost.all('mods-note')[1].textContent, modsTab.UNINSTALL_UNDO);
+  assert.equal(modsTab.UNINSTALL_UNDO, 'Ctrl+Z in the editor, or opening a map that uses it, puts it back. Uninstalling:');
   assert.match(modalButtons(h)[1].className, /danger-solid/);
   modalButtons(h)[0].click();
   assert.equal(h.nodes.modsMapModal.style.display, 'none', 'Cancel from the details pane closes the dialog');
@@ -657,7 +659,7 @@ test('Uninstall: with the open map using the mod, and without', () => {
   h.nodes.modsUninstallBtn.click();
   items = h.nodes.modsMapHost.tags('li').map(n => n.textContent);
   assert.deepEqual(items, ['Removes 2 Toybox rows from the editor (Basin floor, Basin rim).',
-                           'Moves your folder mods\\alex.mp-basin to removed-mods\\alex.mp-basin.',
+                           'Moves the folder mods\\alex.mp-basin to removed-mods\\, where it stays until you empty the removed mods.',
                            modsTab.OTHER_MAPS_NOTE]);
   assert.equal(h.nodes.modsMapHost.all('mods-scope')[0].textContent, 'Removes the mod from this computer. The open map does not use it.');
   modalButtons(h)[1].click();
@@ -668,6 +670,52 @@ test('Uninstall: with the open map using the mod, and without', () => {
   modalButtons(h)[1].click();
   assert.equal(iconOf(rowOf(h, 'local.cyberdemon@0.0.0-05238b2e')), 'ok');
   assert.equal(h.nodes.modsAttnBtn.style.display, 'none');
+});
+test('removed mods: the footer line, the Empty confirmation and its result', () => {
+  const h = live();
+  assert.equal(h.nodes.modsRemoved.style.display, 'none', 'nothing removed, nothing shown');
+  /* an uninstall moves the folder there; the footer counts it */
+  rowOf(h, 'doors').click();
+  h.nodes.modsUninstallBtn.click();
+  modalButtons(h)[1].click();
+  rowOf(h, 'alex.mp-basin').click();
+  h.nodes.modsUninstallBtn.click();
+  modalButtons(h)[1].click();
+  assert.match(h.toasts.slice(-1)[0].text, /Its folder was moved to removed-mods\\alex\.mp-basin\.$/);
+  const r = h.ui.state().model.removed;
+  assert.equal(r.count, 2);
+  assert.equal(h.nodes.modsRemoved.style.display, '');
+  assert.equal(h.nodes.modsRemovedText.textContent, 'Removed mods: 2, ' + modsTab.formatSize(r.bytes));
+  /* Empty asks first: the folders listed, Cancel and Empty */
+  h.nodes.modsEmptyBtn.click();
+  assert.equal(h.nodes.modsMapModal.style.display, 'flex');
+  assert.equal(h.nodes.modsMapHost.all('modal-title')[0].textContent, 'Empty the removed mods?');
+  assert.equal(h.nodes.modsMapHost.all('mods-scope')[0].textContent, modsTab.EMPTY_NOTE);
+  const items = h.nodes.modsMapHost.tags('li').map(n => n.textContent);
+  assert.equal(items.length, 2);
+  assert.match(items[0], /^removed-mods\\doors \(All doors\), /);
+  assert.match(items[1], /^removed-mods\\alex\.mp-basin /);
+  assert.deepEqual(modalButtons(h).map(b => b.textContent), ['Cancel', 'Empty']);
+  assert.match(modalButtons(h)[1].className, /danger-solid/);
+  modalButtons(h)[0].click();
+  assert.equal(h.nodes.modsMapModal.style.display, 'none', 'Cancel closes it');
+  assert.equal(activeElement, h.nodes.modsEmptyBtn);
+  assert.equal(h.ui.state().model.removed.count, 2, 'Cancel deletes nothing');
+  const posted = h.sent.length;
+  h.nodes.modsEmptyBtn.click();
+  modalButtons(h)[1].click();
+  assert.deepEqual(h.sent[posted], {cmd: 'modsAction', action: 'removedEmpty', arg: 'doors\nalex.mp-basin'});
+  assert.equal(h.nodes.modsMapModal.style.display, 'none');
+  assert.equal(h.nodes.modsRemoved.style.display, 'none', 'emptied: the line goes');
+  assert.equal(h.toasts.slice(-1)[0].kind, 'ok');
+  /* the backend's own document drives it; a v3 document without the object shows nothing */
+  const h2 = harness();
+  shown(h2, Object.assign(clone(v3), {removed: {folder: 'C:\\x\\removed-mods', count: 1, bytes: 12900000,
+    items: [{folder: 'hell-guards', id: 'local.hell-guard', version: '1.0.0', name: 'Hell Guards', bytes: 12900000, at: 1, restorable: true}]}}));
+  assert.equal(h2.nodes.modsRemovedText.textContent, 'Removed mods: 1, 12 MB');
+  assert.equal(h2.nodes.modsRemovedText.title, 'C:\\x\\removed-mods');
+  assert.equal(modsTab.normalize(v3).removed, null);
+  assert.equal(modsTab.normalize({removed: {count: 'x', items: [{}, {folder: 'a', bytes: 5}]}}).removed.count, 1);
 });
 test('the stand-in host answers as the host does', () => {
   const store = modsTab.standIn(v3);
@@ -733,7 +781,8 @@ test('page contract', () => {
   /* the payload spec */
   for (const k of ['"description"', '"origin"', '"migratedFrom"', '"servedBy"', '"builtAt"', '"bundle"', '"counts"', '"requirements"',
                    '"editorRowNames"', '"carriedPaths"', '"publishedMaps"', '"placedEntities"', '"references"', '"vanilla"',
-                   'mapRemoveModPreview', 'uninstallPreview', '`editorRows`', 'files minus pointers', '`wire`'])
+                   'mapRemoveModPreview', 'uninstallPreview', '`editorRows`', 'files minus pointers', '`wire`',
+                   '"removed"', 'removedEmpty', '"restorable"'])
     assert.ok(docs.indexOf(k) >= 0, 'docs/webview-ui.md documents ' + k);
 });
 test('host and interface contract', () => {
@@ -754,6 +803,7 @@ test('host and interface contract', () => {
     assert.ok(host.includes('if (name == L"' + a + '")'), 'every page action reaches the backend: ' + a);
   assert.ok(host.includes('if (act == L"openFolder") poc_mods_open_folder(arg);'), 'openFolder opens the named mod folder');
   assert.match(iface, /#define SH_MODS_ACT_MAP_REMOVE_PREVIEW 13/);
+  assert.match(iface, /#define SH_MODS_ACT_REMOVED_EMPTY      14/);
   assert.ok(host.includes('poc_mods_post_result(L"unknown", false, L"Unknown mods action.", nullptr);'));
 });
 

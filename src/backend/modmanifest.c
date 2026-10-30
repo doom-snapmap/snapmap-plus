@@ -882,6 +882,16 @@ char *sh_modmanifest_prepare_load(const char *json, size_t length, size_t *out_l
 
 typedef struct mm_save_ctx { sh_modmanifest_list list; int failed; } mm_save_ctx;
 
+static int (*volatile g_restore)(const char *const *, int, const char *const *, size_t, int);
+static int (*volatile g_restore_armed)(void);
+
+void sh_modmanifest_set_restore(int (*restore)(const char *const *hashes, int hash_count, const char *const *names,
+                                               size_t name_count, int when), int (*armed)(void))
+{
+    g_restore = restore;
+    g_restore_armed = armed;
+}
+
 static void mm_save_visit(void *context, const char *bundle_id, const char *version,
                           const char *bundle_hash, unsigned long long size, const char *name)
 {
@@ -925,7 +935,7 @@ char *sh_modmanifest_on_save(const char *json, size_t length, size_t *out_length
 {
     char **names = NULL;
     size_t count, i, written = 0;
-    int failed = 0, stale;
+    int failed = 0, stale, restore;
     mm_save_ctx ctx;
     char *out = NULL;
     char err[192] = "", line[512], described[320];
@@ -936,13 +946,17 @@ char *sh_modmanifest_on_save(const char *json, size_t length, size_t *out_length
     stale = sh_shard_find(json, length, SH_MODMANIFEST_MAGIC, SH_MODMANIFEST_MAGIC_LEN) != NULL;
     /* No installed bundle serves anything and the map carries no rows: the
      * save is the engine's own bytes, without walking the map. */
-    if (!stale && !sh_modserve_active()) return NULL;
+    restore = g_restore && g_restore_armed && g_restore_armed() > 0;
+    if (!stale && !restore && !sh_modserve_active()) return NULL;
     count = sh_modmanifest_placed_names(json, length, &names, &failed);
     if (failed) {
         backend_log("MODS: save manifest skipped -- the saved map's JSON did not read cleanly; "
                     "the save carries no manifest rows");
         return NULL;
     }
+    /* An uninstalled mod the map still places is reinstated first (its
+     * folder back in mods\, the index rebuilt), so the save writes its row. */
+    if (restore && count) (void)g_restore(NULL, 0, (const char *const *)names, count, SH_MODSERVE_RESTORE_SAVE);
     if (count) modserve_bundles_for_names_visit((const char *const *)names, count, mm_save_visit, &ctx);
     sh_modmanifest_names_free(names, count);
     if (ctx.failed) {

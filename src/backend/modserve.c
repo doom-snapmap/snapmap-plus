@@ -1980,6 +1980,16 @@ int sh_modserve_index_rescan(void)
     return sh_modserve_index_build(root);
 }
 
+static sh_modserve_restore_fn volatile g_restore_fn;
+
+void sh_modserve_set_restore(sh_modserve_restore_fn fn) { g_restore_fn = fn; }
+
+int sh_modserve_restore(const char *const *hashes, int hash_count, const char *const *names, size_t name_count, int when)
+{
+    sh_modserve_restore_fn fn = g_restore_fn;
+    return fn ? fn(hashes, hash_count, names, name_count, when) : 0;
+}
+
 int sh_modserve_active(void)
 {
     const ms_index *x = g_index;

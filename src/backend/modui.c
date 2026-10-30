@@ -100,6 +100,9 @@ static void mu_defaults(sh_modui_engine *e)
 #endif
 }
 
+static int mu_restore(const char *const *hashes, int hash_count, const char *const *names, size_t name_count, int when);
+static int mu_bin_armed(void);
+
 void sh_modui_bind(const sh_modui_engine *engine)
 {
     mu_defaults(&g_engine);
@@ -118,8 +121,14 @@ void sh_modui_bind(const sh_modui_engine *engine)
         if (engine->delete_entities) g_engine.delete_entities = engine->delete_entities;
         if (engine->remove_tag) g_engine.remove_tag = engine->remove_tag;
         if (engine->busy) g_engine.busy = engine->busy;
+        if (engine->entity_valid) g_engine.entity_valid = engine->entity_valid;
+        if (engine->toast) g_engine.toast = engine->toast;
+        if (engine->print) g_engine.print = engine->print;
     }
     g_engine_bound = 1;
+    /* The points where a map's needs become known reach the recycle bin. */
+    sh_modserve_set_restore(mu_restore);
+    sh_modmanifest_set_restore(mu_restore, mu_bin_armed);
 }
 
 static const sh_modui_engine *mu_engine(void)
@@ -1552,6 +1561,9 @@ static void mu_put_map(mu_buf *b, const mu_model *m, const mu_map *mp)
 
 /* ------------------------------------------------------------------ the document */
 
+typedef struct mu_bin mu_bin;
+static void mu_put_bin_of(mu_buf *b, const char *root);
+
 int sh_modui_list(void)
 {
     mu_model m;
@@ -1577,6 +1589,7 @@ int sh_modui_list(void)
     }
     mu_putn(&b, "]", 1);
     mu_put_migrate(&b);
+    if (m.root_ok) mu_put_bin_of(&b, m.root);
     mu_put_map(&b, &m, &mp);
     mu_putn(&b, "}", 1);
     mu_map_free(&mp);
@@ -1604,6 +1617,8 @@ static const char *mu_action_name(int action)
     case SH_MODS_ACT_UNINSTALL_PREVIEW: return "uninstallPreview";
     case SH_MODS_ACT_MAP_REMOVE: return "mapRemoveMod";
     case SH_MODS_ACT_MAP_REMOVE_PREVIEW: return "mapRemoveModPreview";
+    case SH_MODS_ACT_REMOVED_EMPTY: return "removedEmpty";
+    case SH_MODS_ACT_REMOVED_RESTORE: return "removedRestore";
     default: return "unknown";
     }
 }
@@ -1945,9 +1960,12 @@ typedef struct mu_removal {
     size_t removed, failed, blobs, kept;
     unsigned long long freed;
     char first_fail[SH_MS_KEY_MAX + 80];
-    char kept_at[MAX_PATH * 4];  /* where the last folder built in place went */
+    char kept_at[MAX_PATH * 4];  /* where the last folder went (in removed-mods, absolute) */
+    char moved[SH_MS_NAME_MAX + 1];   /* its name in removed-mods */
     char note[160];              /* the rescan's note */
 } mu_removal;
+
+static const char *mu_entry_title(const sh_ms_entry *s);
 
 /* removed-mods beside the store folder (<root>\..\removed-mods). */
 static int mu_removed_dir(const char *root, char *out, size_t cap)
@@ -1959,90 +1977,339 @@ static int mu_removed_dir(const char *root, char *out, size_t cap)
     return 1;
 }
 
-/* Take the marked entries out of the store, under the store lock. A folder
- * the product made (its product block names an origin) is moved aside first,
- * out of both scans (the store skips ".old-" folders and the serving index
- * skips names starting with '.'), the index is rebuilt, and then the folder is
- * deleted. A folder the author made holds the author's own files: it is moved
- * to removed-mods instead and kept. An entry whose folder cannot be moved is
- * unmarked and counted as failed. */
+/* ---- the recycle bin: removed-mods\ beside the store, and the record's
+ * "removed" section. An uninstalled folder is never deleted: it moves here
+ * and the record keeps, under its name here, what brings it back (the bundle
+ * hash and the aliases that answered as it, the id and version, the folder's
+ * name in mods\, its title, when). A map that still needs one of those
+ * bundles reinstates it (mu_restore); emptying the bin deletes the folders. */
+
+#define MU_BIN_HASHES 16
+
+typedef struct mu_bin_item {
+    char folder[SH_MS_NAME_MAX + 1];      /* its name in removed-mods\ */
+    char from[SH_MS_NAME_MAX + 1];        /* its name in mods\ before */
+    char id[SH_MB_ID_MAX + 1];
+    char version[SH_MB_VERSION_MAX + 1];
+    char name[256];                       /* the title the tab showed */
+    char hashes[MU_BIN_HASHES][SH_MB_HASH_HEX + 1];
+    int hash_count;
+    long long at;                         /* Unix seconds */
+    long long seq;                        /* removal order: the newest is the largest */
+    unsigned long long bytes;
+    int recorded, present;
+} mu_bin_item;
+
+struct mu_bin {
+    char dir[MAX_PATH * 4];
+    mu_bin_item *items;
+    size_t count;
+    unsigned long long bytes;
+    int dir_ok;
+};
+
+static void mu_bin_free(mu_bin *b) { free(b->items); memset(b, 0, sizeof *b); }
+
+static mu_bin_item *mu_bin_add(mu_bin *b)
+{
+    mu_bin_item *n = (mu_bin_item *)realloc(b->items, (b->count + 1) * sizeof *n);
+    if (!n) return NULL;
+    b->items = n;
+    memset(&n[b->count], 0, sizeof *n);
+    return &n[b->count++];
+}
+
+static mu_bin_item *mu_bin_find(mu_bin *b, const char *folder)
+{
+    size_t i;
+    for (i = 0; i < b->count; i++) if (!_stricmp(b->items[i].folder, folder)) return &b->items[i];
+    return NULL;
+}
+
+static wchar_t *mu_wchild(const wchar_t *dir, const wchar_t *leaf)
+{
+    size_t dl = wcslen(dir), cl = wcslen(leaf);
+    wchar_t *child = (wchar_t *)malloc((dl + cl + 2) * sizeof(wchar_t));
+    if (!child) return NULL;
+    memcpy(child, dir, dl * sizeof(wchar_t));
+    child[dl] = L'\\';
+    memcpy(child + dl + 1, leaf, (cl + 1) * sizeof(wchar_t));
+    return child;
+}
+
+/* Bytes under dir, links not followed. */
+static unsigned long long mu_tree_bytes(const wchar_t *dir)
+{
+    WIN32_FIND_DATAW fd;
+    wchar_t *pattern = mu_wchild(dir, L"*");
+    unsigned long long total = 0;
+    HANDLE h;
+    if (!pattern) return 0;
+    h = FindFirstFileExW(pattern, FindExInfoBasic, &fd, FindExSearchNameMatch, NULL, 0);
+    free(pattern);
+    if (h == INVALID_HANDLE_VALUE) return 0;
+    do {
+        if (!wcscmp(fd.cFileName, L".") || !wcscmp(fd.cFileName, L"..")) continue;
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+            wchar_t *child;
+            if (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) continue;
+            child = mu_wchild(dir, fd.cFileName);
+            if (child) total += mu_tree_bytes(child);
+            free(child);
+        } else total += ((unsigned long long)fd.nFileSizeHigh << 32) | fd.nFileSizeLow;
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+    return total;
+}
+
+/* The record's entries into b (folder present or not). Under the record lock. */
+static void mu_bin_read_record(const char *root, mu_bin *b)
+{
+    char *text = NULL;
+    mpj *x;
+    int i, k;
+    x = sh_mb_record_get(root, "removed", &text) == 1 && text ? mpj_parse(text, strlen(text)) : NULL;
+    free(text);
+    for (i = 0; x && x->type == MPJ_OBJ && i < x->n; i++) {
+        const mpj *v = x->items[i], *h = mpj_get(v, "hashes");
+        char *key = sh_mm_decode(x->keys[i]);
+        mu_bin_item *it;
+        if (!key || !key[0] || !v || v->type != MPJ_OBJ || strlen(key) > SH_MS_NAME_MAX || mu_bin_find(b, key) ||
+            !(it = mu_bin_add(b))) { free(key); continue; }
+        strncpy_s(it->folder, sizeof it->folder, key, _TRUNCATE);
+        free(key);
+        mu_copy_str(it->from, sizeof it->from, mpj_get(v, "from"));
+        mu_copy_str(it->id, sizeof it->id, mpj_get(v, "id"));
+        mu_copy_str(it->version, sizeof it->version, mpj_get(v, "version"));
+        mu_copy_str(it->name, sizeof it->name, mpj_get(v, "name"));
+        it->at = mpj_int(mpj_get(v, "removedAt"));
+        it->seq = mpj_int(mpj_get(v, "seq"));
+        it->bytes = (unsigned long long)mpj_int(mpj_get(v, "bytes"));
+        for (k = 0; h && h->type == MPJ_ARR && k < h->n && it->hash_count < MU_BIN_HASHES; k++)
+            if (h->items[k] && h->items[k]->type == MPJ_STR && strlen(h->items[k]->text) == SH_MB_HASH_HEX)
+                strcpy_s(it->hashes[it->hash_count++], SH_MB_HASH_HEX + 1, h->items[k]->text);
+        it->recorded = 1;
+    }
+    mpj_free(x);
+}
+
+/* -1 unknown, else the number of recorded entries whose folder is present. */
+static volatile LONG g_bin_records = -1;
+
+/* Write the section from b's recorded entries whose folder is present (an
+ * entry whose folder went is dropped). Under the record lock. */
+static int mu_bin_write_record(const char *root, const mu_bin *b)
+{
+    mu_buf t;
+    size_t i, k, n = 0;
+    int ok;
+    memset(&t, 0, sizeof t);
+    mu_putn(&t, "{", 1);
+    for (i = 0; i < b->count; i++) {
+        const mu_bin_item *it = &b->items[i];
+        if (!it->recorded || !it->present) continue;
+        if (n++) mu_putn(&t, ",", 1);
+        mu_str(&t, it->folder);
+        mu_puts(&t, ":{");
+        mu_kstr(&t, "id", it->id, 1);
+        mu_kstr(&t, "version", it->version, 0);
+        mu_kstr(&t, "name", it->name, 0);
+        mu_kstr(&t, "from", it->from, 0);
+        mu_puts(&t, ",\"hashes\":[");
+        for (k = 0; k < (size_t)it->hash_count; k++) { if (k) mu_putn(&t, ",", 1); mu_str(&t, it->hashes[k]); }
+        mu_putn(&t, "]", 1);
+        mu_knum(&t, "bytes", it->bytes, 0);
+        mu_kint(&t, "removedAt", it->at, 0);
+        mu_kint(&t, "seq", it->seq, 0);
+        mu_putn(&t, "}", 1);
+    }
+    mu_putn(&t, "}", 1);
+    if (t.oom) { free(t.p); return 0; }
+    ok = sh_mb_record_put(root, "removed", n ? t.p : NULL);
+    free(t.p);
+    if (ok) InterlockedExchange(&g_bin_records, (LONG)n);
+    return ok;
+}
+
+/* What removed-mods\ holds: every folder in it, with what the record says of
+ * it, sorted by folder name. 0 when the store root has no parent. */
+static int mu_bin_load(const char *root, mu_bin *b)
+{
+    WIN32_FIND_DATAW fd;
+    wchar_t *wd, *pattern;
+    HANDLE h;
+    size_t i, n = 0;
+    memset(b, 0, sizeof *b);
+    if (!root || !root[0] || !mu_removed_dir(root, b->dir, sizeof b->dir)) return 0;
+    b->dir_ok = 1;
+    sh_mb_record_lock();
+    mu_bin_read_record(root, b);
+    sh_mb_record_unlock();
+    wd = sh_mb_wpath(b->dir);
+    pattern = wd ? mu_wchild(wd, L"*") : NULL;
+    h = pattern ? FindFirstFileExW(pattern, FindExInfoBasic, &fd, FindExSearchNameMatch, NULL, 0) : INVALID_HANDLE_VALUE;
+    free(pattern);
+    if (h != INVALID_HANDLE_VALUE) {
+        do {
+            char leaf[SH_MS_NAME_MAX * 4 + 1];
+            mu_bin_item *it;
+            wchar_t *child;
+            if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || !wcscmp(fd.cFileName, L".") || !wcscmp(fd.cFileName, L".."))
+                continue;
+            if (!WideCharToMultiByte(CP_UTF8, 0, fd.cFileName, -1, leaf, (int)sizeof leaf, NULL, NULL) ||
+                strlen(leaf) > SH_MS_NAME_MAX)
+                continue;
+            it = mu_bin_find(b, leaf);
+            if (!it && (it = mu_bin_add(b)) != NULL) strncpy_s(it->folder, sizeof it->folder, leaf, _TRUNCATE);
+            if (!it) continue;
+            it->present = 1;
+            child = (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) ? NULL : mu_wchild(wd, fd.cFileName);
+            if (child) it->bytes = mu_tree_bytes(child);
+            free(child);
+        } while (FindNextFileW(h, &fd));
+        FindClose(h);
+    }
+    free(wd);
+    /* Entries whose folder is gone are neither shown nor restorable. */
+    for (i = 0; i < b->count;) {
+        if (!b->items[i].present) { b->items[i] = b->items[--b->count]; continue; }
+        if (b->items[i].recorded) n++;
+        b->bytes += b->items[i].bytes;
+        if (!b->items[i].id[0]) strncpy_s(b->items[i].id, sizeof b->items[i].id, b->items[i].folder, _TRUNCATE);
+        i++;
+    }
+    for (i = 1; i < b->count; i++) {   /* a handful: insertion sort by folder */
+        mu_bin_item t = b->items[i];
+        size_t k = i;
+        while (k > 0 && _stricmp(b->items[k - 1].folder, t.folder) > 0) { b->items[k] = b->items[k - 1]; k--; }
+        b->items[k] = t;
+    }
+    InterlockedExchange(&g_bin_records, (LONG)n);
+    return 1;
+}
+
+/* 1 when a recorded folder could still be needed (cheap after the first
+ * read; the save step's gate). */
+static int mu_bin_armed(void)
+{
+    LONG n = InterlockedCompareExchange(&g_bin_records, 0, 0);
+    if (n < 0) {
+        char root[MAX_PATH * 4];
+        mu_bin b;
+        if (!sh_ms_root(root, sizeof root)) return 0;
+        (void)mu_bin_load(root, &b);
+        mu_bin_free(&b);
+        n = InterlockedCompareExchange(&g_bin_records, 0, 0);
+    }
+    return n > 0;
+}
+
+/* A free name under dir: `want`, else want-2, want-3, ... */
+static int mu_free_name(const char *dir, const char *want, char *out, size_t cap)
+{
+    int k;
+    for (k = 1; k < 1000; k++) {
+        char path[MAX_PATH * 4];
+        wchar_t *w;
+        DWORD at;
+        if (k == 1) strncpy_s(out, cap, want, _TRUNCATE);
+        else _snprintf_s(out, cap, _TRUNCATE, "%s-%d", want, k);
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", dir, out);
+        w = sh_mb_wpath(path);
+        at = w ? GetFileAttributesW(w) : 0;
+        free(w);
+        if (at == INVALID_FILE_ATTRIBUTES) return 1;
+    }
+    return 0;
+}
+
+/* Take the marked entries out of the store, under the store lock. Nothing
+ * is deleted: every folder, the product's or the author's own, moves to
+ * removed-mods\ (a clash there gets a suffix) and the record's "removed"
+ * section keeps what brings it back. An entry whose folder cannot be moved
+ * is unmarked and counted as failed. */
 static void mu_remove_marked(const mu_model *m, unsigned char *removing, mu_removal *out)
 {
-    size_t n = m->list.count, i;
-    char (*staged)[MAX_PATH * 4];
-    wchar_t **to;
-    unsigned char *kept;
+    size_t n = m->list.count, i, k;
+    char dir[MAX_PATH * 4];
+    mu_bin bin;
+    wchar_t *wd;
     memset(out, 0, sizeof *out);
-    staged = (char (*)[MAX_PATH * 4])calloc(n ? n : 1, sizeof *staged);
-    to = (wchar_t **)calloc(n ? n : 1, sizeof *to);
-    kept = (unsigned char *)calloc(n ? n : 1, 1);
-    if (!staged || !to || !kept) {
+    if (!mu_removed_dir(m->root, dir, sizeof dir)) {
         for (i = 0; i < n; i++) if (removing[i]) { removing[i] = 0; out->failed++; }
-        strncpy_s(out->first_fail, sizeof out->first_fail, "out of memory", _TRUNCATE);
-        free(staged); free(to); free(kept);
+        strncpy_s(out->first_fail, sizeof out->first_fail, "the store folder has no parent for removed-mods", _TRUNCATE);
         return;
     }
     modstore_lock();
+    sh_mb_record_lock();
+    (void)mu_bin_load(m->root, &bin);
+    wd = sh_mb_wpath(dir);
+    if (wd) CreateDirectoryW(wd, NULL);
+    free(wd);
     for (i = 0; i < n; i++) {
         const sh_ms_entry *e = &m->list.items[i];
         const char *leaf = mu_leaf(e->folder);
-        wchar_t *from;
+        char dest[SH_MS_NAME_MAX + 1], to_path[MAX_PATH * 4];
+        wchar_t *from, *to = NULL;
+        int moved;
         if (!removing[i]) continue;
-        if (!mu_product_folder(e)) {
-            char dir[MAX_PATH * 4];
-            wchar_t *wd;
-            kept[i] = 1;
-            if (mu_removed_dir(m->root, dir, sizeof dir)) {
-                wd = sh_mb_wpath(dir);
-                if (wd) CreateDirectoryW(wd, NULL);
-                free(wd);
-                _snprintf_s(staged[i], MAX_PATH * 4, _TRUNCATE, "%s\\%s", dir, leaf);
-                to[i] = sh_mb_wpath(staged[i]);
-                if (to[i] && GetFileAttributesW(to[i]) != INVALID_FILE_ATTRIBUTES) {
-                    free(to[i]);
-                    _snprintf_s(staged[i], MAX_PATH * 4, _TRUNCATE, "%s\\%s-%lu", dir, leaf, GetTickCount());
-                    to[i] = sh_mb_wpath(staged[i]);
-                }
-            }
-        } else {
-            _snprintf_s(staged[i], MAX_PATH * 4, _TRUNCATE, "%s\\.old-%s-%lu", m->root, leaf, GetTickCount());
-            to[i] = sh_mb_wpath(staged[i]);
+        if (mu_free_name(dir, leaf, dest, sizeof dest)) {
+            _snprintf_s(to_path, sizeof to_path, _TRUNCATE, "%s\\%s", dir, dest);
+            to = sh_mb_wpath(to_path);
         }
         from = sh_mb_wpath(e->folder);
-        if (!from || !to[i] || !MoveFileExW(from, to[i], 0)) {
+        moved = from && to && MoveFileExW(from, to, 0);
+        if (!moved) {
             out->failed++;
             if (!out->first_fail[0])
                 _snprintf_s(out->first_fail, sizeof out->first_fail, _TRUNCATE, "%s could not be moved", e->name);
             removing[i] = 0;
             mu_log("remove %s: the folder could not be moved (error %lu)", e->name, GetLastError());
         } else {
+            mu_bin_item *it = mu_bin_add(&bin);
             out->removed++;
+            out->kept++;
             out->freed += e->bundle.total_size;
-            if (kept[i]) {
-                out->kept++;
-                strncpy_s(out->kept_at, sizeof out->kept_at, staged[i], _TRUNCATE);
-                mu_log("remove %s: the author's own folder, so it was moved to %s", e->name, staged[i]);
-            } else mu_log("remove %s: moved aside", e->name);
+            strncpy_s(out->kept_at, sizeof out->kept_at, to_path, _TRUNCATE);
+            strncpy_s(out->moved, sizeof out->moved, dest, _TRUNCATE);
+            if (it) {
+                strncpy_s(it->folder, sizeof it->folder, dest, _TRUNCATE);
+                strncpy_s(it->from, sizeof it->from, leaf, _TRUNCATE);
+                strncpy_s(it->id, sizeof it->id, e->loaded && e->bundle.id[0] ? e->bundle.id : leaf, _TRUNCATE);
+                if (e->loaded && !sh_mb_version_generated(e->bundle.version))
+                    strncpy_s(it->version, sizeof it->version, e->bundle.version, _TRUNCATE);
+                strncpy_s(it->name, sizeof it->name, mu_entry_title(e), _TRUNCATE);
+                if (e->loaded && e->bundle.hash[0]) {
+                    strcpy_s(it->hashes[it->hash_count++], SH_MB_HASH_HEX + 1, e->bundle.hash);
+                    for (k = 0; k < m->list.alias_count && it->hash_count < MU_BIN_HASHES; k++)
+                        if (!_stricmp(m->list.aliases[k].to, e->bundle.hash))
+                            strcpy_s(it->hashes[it->hash_count++], SH_MB_HASH_HEX + 1, m->list.aliases[k].from);
+                }
+                it->at = (long long)time(NULL);
+                {
+                    size_t q;
+                    for (q = 0; q + 1 < bin.count; q++) if (bin.items[q].seq >= it->seq) it->seq = bin.items[q].seq + 1;
+                }
+                it->bytes = mu_tree_bytes(to);
+                it->recorded = it->present = 1;
+            }
+            mu_log("remove %s: moved to removed-mods\\%s (kept until the removed mods are emptied)", e->name, dest);
         }
         free(from);
+        free(to);
     }
+    if (out->removed && !mu_bin_write_record(m->root, &bin))
+        mu_log("remove: the record's removed section could not be written; the moved folders stay in removed-mods");
+    sh_mb_record_unlock();
+    mu_bin_free(&bin);
     /* Aliases naming a removed build stay while a folder of its id remains
-     * (a map pinning it loads that folder's build); else they are dropped. */
+     * (a map pinning it loads that folder's build); else they are dropped,
+     * and the removed section keeps them for a reinstatement. */
     for (i = 0; i < n; i++)
         if (removing[i] && m->list.items[i].loaded)
             sh_ms_alias_forget(m->list.items[i].bundle.id, m->list.items[i].bundle.hash);
     if (out->removed) mu_rescan(out->note, sizeof out->note);
-    for (i = 0; i < n; i++) {
-        const sh_ms_entry *e = &m->list.items[i];
-        if (!removing[i]) continue;
-        if (!kept[i] && !mu_remove_tree(to[i]))
-            mu_log("remove %s: some files of the moved folder could not be deleted; the store ignores it", e->name);
-    }
     modstore_unlock();
-    for (i = 0; i < n; i++) free(to[i]);
-    free(to);
-    free(staged);
-    free(kept);
 }
 
 static void mu_put_removed(mu_buf *b, const mu_model *m, const unsigned char *removing, const mu_removal *rm)
@@ -2154,8 +2421,7 @@ static int mu_remove(const char *key)
         mu_remove_marked(&m, removing, &rm);
         mu_log("remove %s: %zu folder(s) removed, %zu failed", key, rm.removed, rm.failed);
         ok = rm.removed > 0 && rm.failed == 0;
-        if (ok && rm.kept) _snprintf_s(msg, sizeof msg, _TRUNCATE, "Removed %s. Its folder was moved to %s.", shown, rm.kept_at);
-        else if (ok) _snprintf_s(msg, sizeof msg, _TRUNCATE, "Removed %s.", shown);
+        if (ok) _snprintf_s(msg, sizeof msg, _TRUNCATE, "Removed %s. Its folder was moved to %s.", shown, rm.kept_at);
         else if (rm.removed) _snprintf_s(msg, sizeof msg, _TRUNCATE, "Removed %zu of %zu builds of %s; %s.", rm.removed,
                                          rm.removed + rm.failed, shown, rm.first_fail);
         else _snprintf_s(msg, sizeof msg, _TRUNCATE, "%s could not be removed: %s. Close any program using its folder and try again.",
@@ -2192,6 +2458,479 @@ static int mu_busy(char *cause, size_t cap)
     const sh_modui_engine *e = mu_engine();
     cause[0] = 0;
     return e->busy && e->busy(cause, cap) == 1;
+}
+
+/* "12.3 MB", as the page writes sizes. */
+static void mu_size_text(unsigned long long n, char *out, size_t cap)
+{
+    if (n < 1024) _snprintf_s(out, cap, _TRUNCATE, "%llu B", n);
+    else if (n < 1024ull * 1024) _snprintf_s(out, cap, _TRUNCATE, n < 10240 ? "%.1f KB" : "%.0f KB", n / 1024.0);
+    else if (n < 1024ull * 1024 * 1024) _snprintf_s(out, cap, _TRUNCATE, n < 10485760 ? "%.1f MB" : "%.0f MB", n / 1048576.0);
+    else _snprintf_s(out, cap, _TRUNCATE, "%.1f GB", n / 1073741824.0);
+}
+
+/* The rebuild rule and the serving index, without the game-side refresh. */
+static int mu_rescan_index(char *note, size_t cap)
+{
+    const sh_modui_engine *e = mu_engine();
+    sh_ms_sync_stats sync;
+    sh_mb_resolver r;
+    mu_stock stock = { 0 };
+    int n;
+    if (!e->rescan) { strncpy_s(note, cap, "the serving index cannot be rebuilt from here", _TRUNCATE); return -1; }
+    r.installed = NULL;
+    r.installed_context = NULL;
+    r.stock = mu_stock_exists;
+    r.stock_context = &stock;
+    if (sh_ms_sync(&r, &sync) && (sync.rebuilt || sync.failed))
+        mu_log("rescan: %u folder(s) built again, %u refused (%llu ms)", sync.rebuilt, sync.failed, sync.ms);
+    n = e->rescan();
+    InterlockedIncrement(&g_gen);
+    if (n < 0) strncpy_s(note, cap, "the serving index could not be rebuilt; try Rescan", _TRUNCATE);
+    else _snprintf_s(note, cap, _TRUNCATE, "%d mod(s) active", n);
+    return n;
+}
+
+/* ---- automatic reinstatement */
+
+/* What the next main-thread tick owes after a reinstatement made where the
+ * game could not take it (a load, a save, a Play entry): the game-side
+ * refresh, then one toast and one console line naming the mods. */
+static volatile LONG g_owed_refresh;
+static char g_announce[600];
+static int g_announce_count;
+static SRWLOCK g_announce_lock = SRWLOCK_INIT;
+
+static void mu_announce_add(const char *title)
+{
+    size_t at;
+    AcquireSRWLockExclusive(&g_announce_lock);
+    at = strlen(g_announce);
+    if (at + strlen(title) + 8 < sizeof g_announce)
+        _snprintf_s(g_announce + at, sizeof g_announce - at, _TRUNCATE, "%s%s", at ? "\n" : "", title);
+    g_announce_count++;
+    ReleaseSRWLockExclusive(&g_announce_lock);
+}
+
+/* "Hell Guards was reinstalled because the map still uses it." for one,
+ * "A, B and C were reinstalled because the map still uses them." for more. */
+static int mu_announce_take(char *out, size_t cap)
+{
+    char titles[sizeof g_announce], *parts[16];
+    int n = 0, i;
+    size_t at = 0;
+    char *p, *ctx = NULL;
+    AcquireSRWLockExclusive(&g_announce_lock);
+    strcpy_s(titles, sizeof titles, g_announce);
+    g_announce[0] = 0;
+    g_announce_count = 0;
+    ReleaseSRWLockExclusive(&g_announce_lock);
+    if (!titles[0]) return 0;
+    for (p = strtok_s(titles, "\n", &ctx); p && n < 16; p = strtok_s(NULL, "\n", &ctx)) parts[n++] = p;
+    out[0] = 0;
+    for (i = 0; i < n; i++) {
+        int w = _snprintf_s(out + at, cap - at, _TRUNCATE, "%s%s", i == 0 ? "" : i == n - 1 ? " and " : ", ", parts[i]);
+        if (w < 0) break;
+        at += (size_t)w;
+    }
+    _snprintf_s(out + at, cap - at, _TRUNCATE, n == 1 ? " was reinstalled because the map still uses it."
+                                                      : " were reinstalled because the map still uses them.");
+    return 1;
+}
+
+/* Undo can bring back entities of a mod Uninstall took out of the open map.
+ * Their ids are watched: one coming back makes the next tick read the map. */
+#define MU_WATCH_MAX 256
+static int g_watch_uid[MU_WATCH_MAX];
+static unsigned char g_watch_on[MU_WATCH_MAX];
+static int g_watch_n;
+static ULONGLONG g_poll_next;
+
+static void mu_watch_add(const int *uids, size_t n)
+{
+    size_t i;
+    int k;
+    for (i = 0; i < n; i++) {
+        for (k = 0; k < g_watch_n && g_watch_uid[k] != uids[i]; k++) { }
+        if (k < g_watch_n) { g_watch_on[k] = 0; continue; }
+        if (g_watch_n >= MU_WATCH_MAX) break;
+        g_watch_uid[g_watch_n] = uids[i];
+        g_watch_on[g_watch_n++] = 0;
+    }
+}
+
+/* The id a placed name lives under (mods/<id>/...), lowercase, or "". */
+static void mu_name_id(const char *name, char *out, size_t cap)
+{
+    const char *p = name, *end;
+    size_t n;
+    out[0] = 0;
+    for (;;) {
+        if (!_strnicmp(p, "mods/", 5)) break;
+        p = strchr(p, '/');
+        if (!p) return;
+        p++;
+    }
+    p += 5;
+    end = strchr(p, '/');
+    if (!end) return;
+    n = (size_t)(end - p);
+    if (!n || n >= cap) return;
+    memcpy(out, p, n);
+    out[n] = 0;
+    _strlwr_s(out, cap);
+}
+
+/* A namespace segment names `id` as spelled, or as the engine spells binary
+ * names ('-' becomes '_'). */
+static int mu_seg_is_id(const char *seg, const char *id)
+{
+    size_t i;
+    if (!_stricmp(seg, id)) return 1;
+    if (strlen(seg) != strlen(id)) return 0;
+    for (i = 0; id[i]; i++) {
+        char a = (char)tolower((unsigned char)seg[i]), b = (char)tolower((unsigned char)id[i]);
+        if (a != b && !(a == '_' && b == '-')) return 0;
+    }
+    return 1;
+}
+
+static int mu_id_installed(const sh_ms_list *l, const char *id)
+{
+    size_t i;
+    for (i = 0; i < l->count; i++)
+        if (l->items[i].loaded && !_stricmp(l->items[i].bundle.id, id)) return 1;
+    return 0;
+}
+
+/* Move one folder of the bin back into mods\: its old name, else its id,
+ * else a free name from the id. The aliases it held are recorded again.
+ * Under the store and record locks. 1 moved (`as` names it). */
+static int mu_bin_restore_one(const char *root, mu_bin *bin, mu_bin_item *it, char *as, size_t cap)
+{
+    char from[MAX_PATH * 4], to[MAX_PATH * 4];
+    wchar_t *wf, *wt;
+    int ok, k;
+    const char *want = it->from[0] ? it->from : it->id;
+    _snprintf_s(to, sizeof to, _TRUNCATE, "%s\\%s", root, want);
+    wt = sh_mb_wpath(to);
+    if (!wt || GetFileAttributesW(wt) != INVALID_FILE_ATTRIBUTES) {
+        free(wt);
+        if (!mu_free_name(root, it->id[0] ? it->id : it->folder, as, cap)) return 0;
+        _snprintf_s(to, sizeof to, _TRUNCATE, "%s\\%s", root, as);
+        wt = sh_mb_wpath(to);
+    } else strncpy_s(as, cap, want, _TRUNCATE);
+    _snprintf_s(from, sizeof from, _TRUNCATE, "%s\\%s", bin->dir, it->folder);
+    wf = sh_mb_wpath(from);
+    ok = wf && wt && MoveFileExW(wf, wt, 0);
+    if (!ok) mu_log("restore %s: removed-mods\\%s could not be moved back (error %lu)", it->id, it->folder, GetLastError());
+    free(wf);
+    free(wt);
+    if (!ok) return 0;
+    for (k = 1; k < it->hash_count; k++) sh_ms_alias_note(it->hashes[k], it->hashes[0]);
+    it->present = 0;   /* its record entry goes with the next write */
+    return 1;
+}
+
+/* The restore hook (modserve.h sh_modserve_restore_fn): reinstates every
+ * recycled mod a needed bundle hash or a placed name asks for. Hashes match
+ * a recorded hash that resolves to nothing installed; a placed name under
+ * mods/<id>/ matches the newest recorded folder of an id no installed folder
+ * declares. With neither, the open map's placed names are read. */
+static int mu_restore(const char *const *hashes, int hash_count, const char *const *names, size_t name_count, int when)
+{
+    static const char *const WHEN[] = { "", "map load", "save", "Play entry", "undo" };
+    const sh_modui_engine *e = mu_engine();
+    sh_ms_list list;
+    mu_bin bin;
+    mu_names placed;
+    unsigned char *want = NULL;
+    char root[MAX_PATH * 4], note[160];
+    size_t i, k;
+    int restored = 0, h;
+    if (!mu_bin_armed() || !mu_on_main() || !sh_ms_root(root, sizeof root)) return 0;
+    memset(&placed, 0, sizeof placed);
+    if (!hashes && !names) {
+        if (!e->placed_names || e->placed_names(mu_names_add, &placed) < 0) { mu_names_free(&placed); return 0; }
+        names = (const char *const *)placed.items;
+        name_count = placed.count;
+    }
+    modstore_lock();
+    sh_mb_record_lock();
+    if (!sh_ms_enumerate(&list)) memset(&list, 0, sizeof list);
+    if (mu_bin_load(root, &bin) && bin.count) want = (unsigned char *)calloc(bin.count, 1);
+    for (h = 0; want && hashes && h < hash_count; h++) {
+        if (!hashes[h] || strlen(hashes[h]) != SH_MB_HASH_HEX || sh_ms_resolve(&list, hashes[h])) continue;
+        for (i = 0; i < bin.count; i++)
+            for (k = 0; bin.items[i].recorded && k < (size_t)bin.items[i].hash_count; k++)
+                if (!_stricmp(bin.items[i].hashes[k], hashes[h])) want[i] = 1;
+    }
+    for (k = 0; want && names && k < name_count; k++) {
+        char seg[SH_MB_ID_MAX + 1];
+        size_t best = (size_t)-1;
+        if (!names[k]) continue;
+        mu_name_id(names[k], seg, sizeof seg);
+        if (!seg[0]) continue;
+        for (i = 0; i < bin.count; i++) {
+            const mu_bin_item *it = &bin.items[i];
+            if (!it->recorded || !mu_seg_is_id(seg, it->id) || mu_id_installed(&list, it->id)) continue;
+            if (best == (size_t)-1 || it->seq > bin.items[best].seq) best = i;
+        }
+        if (best != (size_t)-1) want[best] = 1;
+    }
+    for (i = 0; want && i < bin.count; i++) {
+        char as[SH_MS_NAME_MAX + 1];
+        mu_bin_item *it = &bin.items[i];
+        if (!want[i] || !mu_bin_restore_one(root, &bin, it, as, sizeof as)) continue;
+        restored++;
+        mu_log("restore %s@%s: the %s found the map still uses it; removed-mods\\%s moved back to mods\\%s", it->id,
+               it->version, WHEN[when >= 0 && when <= 4 ? when : 0], it->folder, as);
+        mu_announce_add(it->name[0] ? it->name : it->id);
+    }
+    if (restored) (void)mu_bin_write_record(root, &bin);
+    sh_mb_record_unlock();
+    if (restored) {
+        note[0] = 0;
+        /* After an undo the tick is the editor's own: everything at once.
+         * Elsewhere only the index, so the load or save in progress sees the
+         * mod; the game-side refresh follows on the next editor tick. */
+        if (when == SH_MODSERVE_RESTORE_UNDO) (void)mu_rescan(note, sizeof note);
+        else { (void)mu_rescan_index(note, sizeof note); InterlockedExchange(&g_owed_refresh, 1); }
+        mu_log("restore: %d mod(s) reinstated (%s)", restored, note);
+    }
+    modstore_unlock();
+    free(want);
+    mu_bin_free(&bin);
+    sh_ms_list_free(&list);
+    mu_names_free(&placed);
+    return restored;
+}
+
+int sh_modui_poll_due(void)
+{
+    ULONGLONG now;
+    if (!InterlockedCompareExchange(&g_owed_refresh, 0, 0) && !g_watch_n && !g_announce[0]) return 0;
+    now = GetTickCount64();
+    if (now < g_poll_next) return 0;
+    g_poll_next = now + 250;
+    return 1;
+}
+
+int sh_modui_poll_main(void *context)
+{
+    const sh_modui_engine *e = mu_engine();
+    sh_modui_map_info info;
+    char cause[200], text[700];
+    int i, back = 0;
+    (void)context;
+    if (!mu_on_main() || mu_busy(cause, sizeof cause)) return 0;   /* Play or a load: later */
+    if (!e->map_info || e->map_info(&info) != 1) return 0;          /* the editor, with a map */
+    if (InterlockedExchange(&g_owed_refresh, 0) && e->refresh) {
+        sh_modserve_refresh rf;
+        memset(&rf, 0, sizeof rf);
+        (void)e->refresh(&rf);
+        InterlockedIncrement(&g_gen);
+    }
+    for (i = 0; e->entity_valid && i < g_watch_n; i++) {
+        int on = e->entity_valid(g_watch_uid[i]) == 1;
+        if (on && !g_watch_on[i]) back = 1;
+        g_watch_on[i] = (unsigned char)on;
+    }
+    if (back) (void)mu_restore(NULL, 0, NULL, 0, SH_MODSERVE_RESTORE_UNDO);
+    if (mu_announce_take(text, sizeof text)) {
+        char line[760];
+        if (e->toast) e->toast("Mods", text);
+        _snprintf_s(line, sizeof line, _TRUNCATE, "MODS: %s", text);
+        if (e->print) e->print(line);
+        backend_log(line);
+        InterlockedIncrement(&g_gen);
+    }
+    if (!mu_bin_armed()) g_watch_n = 0;
+    return 1;
+}
+
+/* ---- the bin's actions: empty it, put one back by hand */
+
+static void mu_put_bin(mu_buf *b, const mu_bin *bin)
+{
+    size_t i;
+    mu_key(b, "removed", 0);
+    mu_putn(b, "{", 1);
+    mu_kstr(b, "folder", bin->dir, 1);
+    mu_knum(b, "count", (unsigned long long)bin->count, 0);
+    mu_knum(b, "bytes", bin->bytes, 0);
+    mu_puts(b, ",\"items\":[");
+    for (i = 0; i < bin->count; i++) {
+        const mu_bin_item *it = &bin->items[i];
+        if (i) mu_putn(b, ",", 1);
+        mu_putn(b, "{", 1);
+        mu_kstr(b, "folder", it->folder, 1);
+        mu_kstr(b, "id", it->id, 0);
+        mu_kstr(b, "version", it->version, 0);
+        mu_kstr(b, "name", it->name, 0);
+        mu_knum(b, "bytes", it->bytes, 0);
+        mu_kint(b, "at", it->at, 0);
+        mu_kbool(b, "restorable", it->recorded && it->hash_count > 0, 0);
+        mu_putn(b, "}", 1);
+    }
+    mu_puts(b, "]}");
+}
+
+static void mu_put_bin_of(mu_buf *b, const char *root)
+{
+    mu_bin bin;
+    if (mu_bin_load(root, &bin)) mu_put_bin(b, &bin);
+    mu_bin_free(&bin);
+}
+
+/* Empty the bin: every folder in it (or only the newline-separated `keys`
+ * the confirmation listed), and their record entries. apply 0 lists. */
+static int mu_bin_empty(int apply, const char *keys, const mu_out *o)
+{
+    mu_bin bin;
+    mu_buf b;
+    char root[MAX_PATH * 4], msg[400], size[32];
+    size_t i, deleted = 0, failed = 0, chosen = 0;
+    unsigned long long freed = 0;
+    int ok;
+    memset(&b, 0, sizeof b);
+    if (!sh_ms_root(root, sizeof root) || !mu_bin_load(root, &bin)) {
+        mu_line(o, "removed: the store folder cannot be resolved");
+        return mu_simple_result(SH_MODS_ACT_REMOVED_EMPTY, 0, "The removed-mods folder cannot be found.");
+    }
+    modstore_lock();
+    sh_mb_record_lock();
+    for (i = 0; i < bin.count; i++) {
+        mu_bin_item *it = &bin.items[i];
+        char path[MAX_PATH * 4];
+        wchar_t *w;
+        if (keys && keys[0] && !mu_key_listed(keys, it->folder)) continue;
+        chosen++;
+        if (!apply) {
+            mu_size_text(it->bytes, size, sizeof size);
+            mu_line(o, "removed empty: deletes removed-mods\\%s (%s, %s)", it->folder, it->id, size);
+            continue;
+        }
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", bin.dir, it->folder);
+        w = sh_mb_wpath(path);
+        if (w && mu_remove_tree(w)) {
+            deleted++;
+            freed += it->bytes;
+            it->present = 0;
+            mu_log("removed: deleted removed-mods\\%s (%s)", it->folder, it->id);
+        } else {
+            failed++;
+            if (w && GetFileAttributesW(w) == INVALID_FILE_ATTRIBUTES) it->present = 0;
+            mu_log("removed: removed-mods\\%s could not be deleted completely (error %lu)", it->folder, GetLastError());
+        }
+        free(w);
+    }
+    if (apply) (void)mu_bin_write_record(root, &bin);
+    sh_mb_record_unlock();
+    modstore_unlock();
+    mu_size_text(apply ? freed : bin.bytes, size, sizeof size);
+    if (!apply) {
+        if (chosen) mu_line(o, "removed empty: dry run; add --yes to delete %zu folder(s), %s", chosen, size);
+        else mu_line(o, "removed empty: removed-mods holds no folder");
+        _snprintf_s(msg, sizeof msg, _TRUNCATE, "%zu folder(s) can be deleted.", chosen);
+        ok = 1;
+    } else if (!chosen) {
+        _snprintf_s(msg, sizeof msg, _TRUNCATE, "Nothing to empty: removed-mods holds no folder.");
+        ok = 0;
+    } else if (!failed) {
+        _snprintf_s(msg, sizeof msg, _TRUNCATE, "Deleted %zu removed mod folder(s), %s.", deleted, size);
+        ok = 1;
+    } else {
+        _snprintf_s(msg, sizeof msg, _TRUNCATE, "Deleted %zu removed mod folder(s), %s; %zu could not be deleted completely. "
+                    "Close any program using them and try again.", deleted, size, failed);
+        ok = 0;
+    }
+    if (apply) mu_line(o, "removed empty: %s", msg);
+    InterlockedIncrement(&g_gen);
+    mu_result_head(&b, SH_MODS_ACT_REMOVED_EMPTY, ok, msg);
+    mu_knum(&b, "deleted", (unsigned long long)deleted, 0);
+    mu_knum(&b, "failed", (unsigned long long)failed, 0);
+    mu_knum(&b, "freed", freed, 0);
+    mu_bin_free(&bin);
+    return mu_result_tail(&b);
+}
+
+/* Put one folder back by hand: `key` is an id (its newest folder in the
+ * bin), else a folder name in the bin. Then the full rescan. */
+static int mu_bin_restore_key(const char *key, const mu_out *o)
+{
+    mu_bin bin;
+    mu_buf b;
+    char root[MAX_PATH * 4], msg[MAX_PATH + 400], cause[200], as[SH_MS_NAME_MAX + 1], note[160];
+    mu_bin_item *it = NULL;
+    size_t i;
+    int ok = 0;
+    memset(&b, 0, sizeof b);
+    if (!key || !key[0]) {
+        mu_line(o, "removed restore: usage: sh_mods removed restore \"<id>\"");
+        return mu_simple_result(SH_MODS_ACT_REMOVED_RESTORE, 0, "Name a removed mod to put back.");
+    }
+    if (mu_busy(cause, sizeof cause)) {
+        _snprintf_s(msg, sizeof msg, _TRUNCATE, "Not now: %s.", cause);
+        mu_line(o, "removed restore %s: refused: %s", key, cause);
+        return mu_simple_result(SH_MODS_ACT_REMOVED_RESTORE, 0, msg);
+    }
+    if (!sh_ms_root(root, sizeof root) || !mu_bin_load(root, &bin))
+        return mu_simple_result(SH_MODS_ACT_REMOVED_RESTORE, 0, "The removed-mods folder cannot be found.");
+    modstore_lock();
+    sh_mb_record_lock();
+    for (i = 0; i < bin.count; i++)
+        if (!_stricmp(bin.items[i].id, key) && (!it || bin.items[i].seq > it->seq)) it = &bin.items[i];
+    if (!it) it = mu_bin_find(&bin, key);
+    if (!it) _snprintf_s(msg, sizeof msg, _TRUNCATE, "removed-mods holds no folder of %s.", key);
+    else if (!mu_bin_restore_one(root, &bin, it, as, sizeof as))
+        _snprintf_s(msg, sizeof msg, _TRUNCATE, "removed-mods\\%s could not be moved back. Close any program using it and try again.",
+                    it->folder);
+    else {
+        ok = 1;
+        (void)mu_bin_write_record(root, &bin);
+        mu_log("restore %s: by hand; removed-mods\\%s moved back to mods\\%s", it->id, it->folder, as);
+    }
+    sh_mb_record_unlock();
+    if (ok) {
+        note[0] = 0;
+        (void)mu_rescan(note, sizeof note);
+        _snprintf_s(msg, sizeof msg, _TRUNCATE, "Reinstalled %s: removed-mods\\%s is mods\\%s again (%s).",
+                    it->name[0] ? it->name : it->id, it->folder, as, note);
+    }
+    modstore_unlock();
+    mu_line(o, "removed restore %s: %s", key, msg);
+    InterlockedIncrement(&g_gen);
+    mu_result_head(&b, SH_MODS_ACT_REMOVED_RESTORE, ok, msg);
+    mu_kstr(&b, "key", ok ? as : "", 0);
+    mu_bin_free(&bin);
+    return mu_result_tail(&b);
+}
+
+/* `sh_mods removed`: what the bin holds. */
+static void mu_say_bin(const mu_out *o)
+{
+    mu_bin bin;
+    char root[MAX_PATH * 4], size[32];
+    size_t i;
+    if (!sh_ms_root(root, sizeof root) || !mu_bin_load(root, &bin)) { mu_line(o, "removed: the store folder cannot be resolved"); return; }
+    mu_size_text(bin.bytes, size, sizeof size);
+    mu_line(o, "removed: %zu folder(s), %s, in %s", bin.count, size, bin.dir);
+    for (i = 0; i < bin.count; i++) {
+        const mu_bin_item *it = &bin.items[i];
+        char when[64] = "unknown";
+        if (it->at > 0) {
+            time_t t = (time_t)it->at;
+            struct tm tm;
+            if (!localtime_s(&tm, &t)) strftime(when, sizeof when, "%Y-%m-%d %H:%M", &tm);
+        }
+        mu_size_text(it->bytes, size, sizeof size);
+        mu_line(o, "removed:   %s: %s%s%s%s%s%s, %s, removed %s%s", it->folder, it->id, it->version[0] ? "@" : "", it->version,
+                it->name[0] ? " (" : "", it->name, it->name[0] ? ")" : "", size, when,
+                it->recorded ? "" : "; not recorded, so no map brings it back");
+    }
+    if (bin.count) mu_line(o, "removed: 'sh_mods removed empty --yes' deletes them, 'sh_mods removed restore \"<id>\"' puts one back");
+    mu_bin_free(&bin);
 }
 
 /* The map entry `key` names: the installed folder's build (or an alias of
@@ -2430,8 +3169,7 @@ static int mu_map_action(int action, const char *key, const mu_out *o)
     } else if (!apply) {
         /* The dry run: the consequence list the confirmation shows. */
         const sh_ms_entry *s = entry >= 0 ? &m.list.items[entry] : NULL;
-        int product = s && mu_product_folder(s);
-        char moved[MAX_PATH];
+        char moved[MAX_PATH], dir[MAX_PATH * 4], dest[SH_MS_NAME_MAX + 1];
         mu_result_head(&b, action, 1, "");
         mu_puts(&b, ",\"preview\":{");
         mu_kstr(&b, "action", uninstall ? "uninstall" : "mapRemoveMod", 1);
@@ -2442,11 +3180,14 @@ static int mu_map_action(int action, const char *key, const mu_out *o)
         mu_key(&b, "install", 0);
         if (!uninstall) mu_puts(&b, "null");
         else {
-            _snprintf_s(moved, sizeof moved, _TRUNCATE, "removed-mods\\%s", mu_leaf(s->folder));
+            /* Every origin moves to removed-mods; a clash there gets a suffix. */
+            if (!mu_removed_dir(m.root, dir, sizeof dir) || !mu_free_name(dir, mu_leaf(s->folder), dest, sizeof dest))
+                strncpy_s(dest, sizeof dest, mu_leaf(s->folder), _TRUNCATE);
+            _snprintf_s(moved, sizeof moved, _TRUNCATE, "removed-mods\\%s", dest);
             mu_putn(&b, "{", 1);
             mu_kstr(&b, "folder", mu_leaf(s->folder), 1);
-            mu_kstr(&b, "disposition", product ? "delete" : "move", 0);
-            mu_kstr(&b, "movedTo", product ? "" : moved, 0);
+            mu_kstr(&b, "disposition", "move", 0);
+            mu_kstr(&b, "movedTo", moved, 0);
             mu_putn(&b, "}", 1);
             mu_puts(&b, ",\"editorRows\":[");
             for (i = 0; i < (size_t)m.entries[entry].row_count; i++) {
@@ -2463,9 +3204,10 @@ static int mu_map_action(int action, const char *key, const mu_out *o)
                 if (m.entries[entry].row_count)
                     mu_line(o, "%s: removes %d Toybox row(s) from the editor", verb, m.entries[entry].row_count);
                 for (i = 0; i < (size_t)m.entries[entry].row_count; i++) mu_line(o, "%s:   %s", verb, m.entries[entry].row_names[i]);
-                if (product) mu_line(o, "%s: deletes the folder mods\\%s and its files", verb, mu_leaf(s->folder));
-                else mu_line(o, "%s: moves your folder mods\\%s to %s", verb, mu_leaf(s->folder), moved);
-                mu_line(o, "%s: other saved maps that use it are not changed; they ask for it when opened", verb);
+                mu_line(o, "%s: moves the folder mods\\%s to removed-mods\\%s (kept there until the removed mods are "
+                        "emptied)", verb, mu_leaf(s->folder), strcmp(dest, mu_leaf(s->folder)) ? dest : "");
+                mu_line(o, "%s: other saved maps that use it are not changed; opening one, or undoing this in the editor, "
+                        "puts it back", verb);
             }
             mu_line(o, "%s %s: dry run; add --yes to do it", verb, key);
         }
@@ -2500,14 +3242,13 @@ static int mu_map_action(int action, const char *key, const mu_out *o)
                 mu_remove_marked(&m, removing, &rm);
                 ok = rm.removed > 0 && rm.failed == 0;
             }
-            mu_log("uninstall %s: %s%s", key, ok ? "removed" : "the folder could not be removed",
+            mu_log("uninstall %s: %s%s", key, ok ? "moved to removed-mods" : "the folder could not be moved",
                    removed_from_map ? " after the open map was cleaned of it" : "");
-            if (ok && rm.kept)
-                _snprintf_s(msg, sizeof msg, _TRUNCATE, "Uninstalled %s%s. Your folder was moved to %s.", title,
-                            removed_from_map ? " and removed it from the open map" : "", rm.kept_at);
-            else if (ok)
-                _snprintf_s(msg, sizeof msg, _TRUNCATE, "Uninstalled %s%s.", title,
-                            removed_from_map ? " and removed it from the open map" : "");
+            /* Ctrl+Z can bring its entities back: watch for them. */
+            if (ok && removed_from_map && mp.mods[p.mod].uid_count) mu_watch_add(mp.mods[p.mod].uids, mp.mods[p.mod].uid_count);
+            if (ok)
+                _snprintf_s(msg, sizeof msg, _TRUNCATE, "Uninstalled %s%s. Its folder was moved to removed-mods\\%s.", title,
+                            removed_from_map ? " and removed it from the open map" : "", rm.moved);
             else
                 _snprintf_s(msg, sizeof msg, _TRUNCATE, "%s could not be uninstalled: %s. Close any program using its folder and "
                             "try again.%s", title, rm.first_fail[0] ? rm.first_fail : "nothing was moved",
@@ -2650,8 +3391,19 @@ int sh_modui_command(int argc, const char *const *argv, sh_modui_line_fn line, v
     o.fn = line;
     o.context = context;
     if (!verb) return 0;
-    if (_stricmp(verb, "map") && _stricmp(verb, "uninstall")) return 0;
+    if (_stricmp(verb, "map") && _stricmp(verb, "uninstall") && _stricmp(verb, "removed")) return 0;
     if (!mu_on_main()) return -1;
+    if (!_stricmp(verb, "removed")) {
+        if (argc == 1) { mu_say_bin(&o); return 1; }
+        if (!_stricmp(argv[1], "empty")) {
+            for (i = 2; i < argc; i++) if (!_stricmp(argv[i], "--yes")) yes = 1;
+            (void)mu_bin_empty(yes, NULL, &o);
+            return 1;
+        }
+        if (!_stricmp(argv[1], "restore") && argc == 3) { (void)mu_bin_restore_key(argv[2], &o); return 1; }
+        mu_line(&o, "removed: usage: sh_mods removed, sh_mods removed empty [--yes], or sh_mods removed restore \"<id>\"");
+        return 1;
+    }
     if (!_stricmp(verb, "map") && argc == 1) { mu_say_map(&o); return 1; }
     first = !_stricmp(verb, "map") ? 2 : 1;
     if (!_stricmp(verb, "map") && _stricmp(argv[1], "remove")) {
@@ -2844,6 +3596,10 @@ int sh_modui_run(int action, const char *arg)
     case SH_MODS_ACT_MAP_REMOVE:
     case SH_MODS_ACT_MAP_REMOVE_PREVIEW:
         return mu_map_action(action, arg, NULL);
+    case SH_MODS_ACT_REMOVED_EMPTY:
+        return mu_bin_empty(1, arg, NULL);
+    case SH_MODS_ACT_REMOVED_RESTORE:
+        return mu_bin_restore_key(arg, NULL);
     default:
         return mu_simple_result(action, 0, "Unknown action.");
     }
@@ -2899,5 +3655,10 @@ void sh_modui_test_reset(void)
     ReleaseSRWLockExclusive(&g_lock);
     g_engine_bound = 0;
     memset(&g_engine, 0, sizeof g_engine);
+    g_watch_n = 0;
+    g_poll_next = 0;
+    InterlockedExchange(&g_owed_refresh, 0);
+    InterlockedExchange(&g_bin_records, -1);
+    g_announce[0] = 0;
 }
 #endif
