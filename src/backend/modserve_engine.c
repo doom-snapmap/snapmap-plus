@@ -38,6 +38,7 @@
 #include <stdio.h>
 #include <stdarg.h>
 #include <string.h>
+#include <stdlib.h>
 #include "modserve.h"
 #include "overrides.h"
 #include "modstock.h"
@@ -522,11 +523,104 @@ static void me_reparse_early(const char *phase, int in_heap)
            r.failed, r.faulted, r.pending, offered);
 }
 
+/* Models and images a gated bundle serves that the engine loaded before the
+ * gates were live (modserve.h, sh_modserve_each_ungated_raw): each one the
+ * resource lists hold is loaded again in place, which resolves its materials
+ * and pixels with the blacklists off. Matched by name within the list of its
+ * class (idMD6Model, idImage), since a material and an image can share one. */
+#define ME_RAW_MAX 4096
+typedef struct me_raw_name { const char *name; int image; int hit; } me_raw_name;
+typedef struct me_raw {
+    me_raw_name *names; int n, cap;
+    int reloaded, models, images, failed, faulted;
+    char first[700];
+} me_raw;
+
+static int me_raw_collect(void *context, const char *type, const char *name, const char *request, const char *bundle_id)
+{
+    me_raw *r = (me_raw *)context;
+    (void)request; (void)bundle_id;
+    if (r->n < r->cap) {
+        r->names[r->n].name = name;
+        r->names[r->n].image = !_stricmp(type, "image");
+        r->names[r->n].hit = 0;
+        r->n++;
+    }
+    return 0;
+}
+
+static int me_raw_settle(void *context, const char *type, const char *name, const char *request, const char *bundle_id)
+{
+    (void)context; (void)type; (void)name; (void)request; (void)bundle_id;
+    return 1;
+}
+
+static void me_raw_one(void *context, const char *list_class, void *resource, const char *name)
+{
+    me_raw *r = (me_raw *)context;
+    int i, image;
+    if (!list_class) return;
+    if (!_stricmp(list_class, "idImage")) image = 1;
+    else if (!_stricmp(list_class, "idMD6Model")) image = 0;
+    else return;
+    for (i = 0; i < r->n; ++i) {
+        unsigned char *d;
+        if (r->names[i].hit || r->names[i].image != image || _stricmp(r->names[i].name, name)) continue;
+        r->names[i].hit = 1;
+        d = (unsigned char *)resource;
+        __try {
+            if (d[RES_STATE_OFF] & 2) return;   /* not loaded: its next load sees the live gates */
+            d[RES_STATE_OFF] = (unsigned char)(d[RES_STATE_OFF] & ~3);
+            g_generic_load(resource);
+            if (d[RES_STATE_OFF] & 1) r->failed++;
+            r->reloaded++;
+            if (image) r->images++; else r->models++;
+            if (strlen(r->first) + strlen(name) + 3 < sizeof r->first)
+                _snprintf_s(r->first + strlen(r->first), sizeof r->first - strlen(r->first), _TRUNCATE, "%s%s",
+                            r->first[0] ? ", " : "", name);
+        } __except (me_fault_filter(GetExceptionCode())) {
+            r->faulted++;
+            me_log("reload: %s '%s' FAULTED (exception 0x%08lx)", list_class, name, (unsigned long)g_fault_code);
+        }
+        return;
+    }
+}
+
+static void me_reload_ungated(const char *phase, int in_heap)
+{
+    me_raw r;
+    sh_process_heap_scope heap = { 0 };
+    double t0 = me_now_ms();
+    if (!g_bound || !g_res_head || !sh_modserve_active() || me_on_main() != 1) return;
+    memset(&r, 0, sizeof r);
+    r.cap = ME_RAW_MAX;
+    r.names = (me_raw_name *)calloc((size_t)r.cap, sizeof *r.names);
+    if (!r.names) return;
+    (void)sh_modserve_each_ungated_raw(me_raw_collect, &r);
+    if (!r.n) { free(r.names); return; }
+    if (!in_heap && !sh_process_heap_enter(&g_heap, &heap)) {
+        me_log("%s: gated models and images not reloaded (process heap scope unavailable)", phase);
+        free(r.names);
+        return;
+    }
+    __try { (void)sh_modserve_resource_each(g_res_head, me_raw_one, &r); }
+    __finally {
+        if (!in_heap && !sh_process_heap_leave(&heap)) me_log("%s: gated reload heap scope did not balance", phase);
+    }
+    (void)sh_modserve_each_ungated_raw(me_raw_settle, NULL);
+    me_log("%s: reloaded %d model(s) and %d image(s) loaded before their bundles' requirements were live in %.1f ms "
+           "(%d failed, %d faulted; %d of %d not held)%s%s%s", phase, r.models, r.images, me_now_ms() - t0, r.failed,
+           r.faulted, r.n - r.reloaded - r.faulted, r.n, r.first[0] ? ": " : "", r.first,
+           r.reloaded > 0 && strlen(r.first) + 40 >= sizeof r.first ? ", ..." : "");
+    free(r.names);
+}
+
 /* The plan's sources are registered; its loads have not run (me_run). */
 static void op_sources_published(void *context)
 {
     (void)context;
     me_reparse_early(g_reparse_phase, 1);
+    me_reload_ungated(g_reparse_phase, 1);
 }
 
 /* ------------------------------------------------------------------ palette */
@@ -584,6 +678,7 @@ void sh_modserve_palette_before_build(void)
     if (!plan.count) {
         sh_modserve_plan_free(&plan);
         me_reparse_early("editor", 0);
+        me_reload_ungated("editor", 0);
         if (first) me_log("editor rows registered in 0.0 ms (0 rows)");
         return;
     }
@@ -781,7 +876,7 @@ int modserve_activate_bundles(const char *const *bundle_hashes, int n)
     t0 = me_now_ms();
     if (sh_modserve_plan_bundles(bundle_hashes, n, &plan, &unknown) < 0) { me_log("activation refused: out of memory"); return -1; }
     if (plan.count) ready = me_run(&plan, "map");
-    else { me_reparse_early("map", 0); ready = 0; }
+    else { me_reparse_early("map", 0); me_reload_ungated("map", 0); ready = 0; }
     me_log("activated %d bundles (%d steps, %d ready, %d blocked, %d not installed) in %.1f ms", n - unknown,
            plan.count, ready < 0 ? 0 : ready, plan.blocked, unknown, me_now_ms() - t0);
     sh_modserve_plan_free(&plan);

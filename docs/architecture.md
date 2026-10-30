@@ -804,8 +804,21 @@ inherits a shadow the bundle's values. A shadow the engine has not parsed yet is
 left to the provider. Each file is settled once; a rescan keeps the mark while
 the bytes are unchanged, also when the open landed in the table it replaced.
 The pass logs `MODS: reparsed <n> <type> decl(s) the engine parsed before the
-serving index (...)` per type and one summary line. Raw resources (models,
-skeletons, images) are not re-read by it.
+serving index (...)` per type and one summary line.
+
+The same race decides what a bundle's requirements mean for a resource: the
+cut-content blacklist gates are applied only at the first registration pass,
+and anything the engine loaded before that resolved its names with the
+blacklists on. A model loaded then keeps no materials and draws nothing: this
+is why the Spider Mastermind body (stock-named mesh, loaded at boot, its
+materials and images on the blacklists) was invisible on 13954591 while its AI
+ran, and why the same bytes under a new mesh name drew. The provider therefore
+records whether a file was first served while one of its bundle's gates was not
+live; a decl first served then is re-parsed by the pass above, and each
+`baseModel` and `image` first served then is loaded again in place, found by
+name in the engine's `idMD6Model` and `idImage` resource lists, once the gates
+are live: `MODS: editor: reloaded <n> model(s) and <m> image(s) loaded before
+their bundles' requirements were live`.
 
 ### Migration of the retired overrides folder
 

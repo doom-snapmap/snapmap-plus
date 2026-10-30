@@ -49,6 +49,7 @@ typedef struct ms_file {
     volatile LONG reg_state;              /* 0 none, 1 ready, -1 failed (main thread) */
     volatile LONG withdrawn;              /* a shadow taken back by a registration pass: lookups miss it */
     volatile LONG reparse_tried;          /* the early-decl pass re-parsed it (main thread) */
+    volatile LONG opened_ungated;         /* first served while one of its bundle's requirement gates was not live */
 } ms_file;
 
 /* One path several bundles provide with different bytes, and what serves it. */
@@ -102,6 +103,7 @@ static SRWLOCK g_build_lock = SRWLOCK_INIT;
 static char g_last_root[MAX_PATH];
 static volatile LONG g_opens_served, g_open_failures, g_probe_claims, g_cache_hits;
 static volatile LONG g_renderprog_logged;   /* render-program serve lines written */
+static volatile LONG g_gates_live;          /* requirement gates the last pass read back as live (SH_MODSERVE_REQ_* bits) */
 volatile LONG g_modserve_editor_ok, g_modserve_editor_failed;   /* written by modserve_engine.c */
 #define MS_LISTENERS 4
 static sh_modserve_index_fn volatile g_index_listener[MS_LISTENERS];   /* modvt.c, modsound.c, modserve_engine.c */
@@ -1707,9 +1709,22 @@ int sh_modserve_index_build(const char *mods_root)
             if (o >= 0 && ms_same_bytes(f, &old->files[o])) {
                 f->opens = old->files[o].opens;
                 f->reparse_tried = old->files[o].reparse_tried;
+                f->opened_ungated = old->files[o].opened_ungated;
             }
         }
     }
+    if (old)
+        for (i = 0; i < x->nfiles; ++i) {
+            ms_file *f = &x->files[i];
+            int o;
+            if (f->is_decl || !f->served) continue;
+            o = ms_find(old->slots, old->mask, f->request);
+            if (o >= 0 && ms_same_bytes(f, &old->files[o])) {
+                f->opens = old->files[o].opens;
+                f->reparse_tried = old->files[o].reparse_tried;
+                f->opened_ungated = old->files[o].opened_ungated;
+            }
+        }
     x->prev = old;
     /* Publish the complete table; the old one is retired, never freed, since
      * a provider open on another thread may be inside it. */
@@ -1902,6 +1917,7 @@ int sh_modserve_open(const char *request, unsigned char **bytes, size_t *length)
     const ms_file *f;
     unsigned char *buf = NULL;
     size_t len = 0;
+    int first;
     if (bytes) *bytes = NULL;
     if (length) *length = 0;
     if (!bytes || !length) return 0;
@@ -1934,8 +1950,13 @@ int sh_modserve_open(const char *request, unsigned char **bytes, size_t *length)
         if (InterlockedCompareExchange(&g_cache_enabled, 0, 0)) ms_cache_put(f, buf, len);
     }
     /* A render program's files are named once each (the first 64): which of
-     * them the engine opened shows which variant this GPU binds. */
-    if (InterlockedIncrement((volatile LONG *)&f->opens) == 1 &&
+     * them the engine opened shows which variant this GPU binds. A file first
+     * served before its bundle's requirement gates were live was resolved by
+     * the engine against the cut-content blacklists (modserve.h). */
+    first = InterlockedIncrement((volatile LONG *)&f->opens) == 1;
+    if (first && (x->bundles[f->bundle].req & ~(unsigned)InterlockedCompareExchange(&g_gates_live, 0, 0)))
+        InterlockedExchange((volatile LONG *)&f->opened_ungated, 1);
+    if (first &&
         (!strncmp(f->request, "generated/renderprogs/", 22) || !strncmp(f->request, "generated/spirv/", 16) ||
          !strncmp(f->request, "generated/decls/renderprog/", 27)) &&
         InterlockedIncrement(&g_renderprog_logged) <= 64)
@@ -2433,6 +2454,24 @@ int sh_modserve_watermark_raise(const void *head_slot, const sh_modserve_waterma
     return ok;
 }
 
+/* Every resource the engine's lists hold: fn(context, list class, resource, name). */
+typedef struct ms_each_res { sh_modserve_resource_fn fn; void *context; } ms_each_res;
+static void ms_each_res_one(void *context, const unsigned char *list, unsigned char *res)
+{
+    ms_each_res *e = (ms_each_res *)context;
+    const char *ln = *(const char *const *)(list + MS_RL_NAME), *rn = *(const char *const *)(res + 8);
+    if (rn) e->fn(e->context, ln, res, rn);
+}
+
+int sh_modserve_resource_each(const void *head_slot, sh_modserve_resource_fn fn, void *context)
+{
+    ms_each_res e;
+    if (!fn) return 0;
+    e.fn = fn;
+    e.context = context;
+    return ms_res_walk(head_slot, ms_each_res_one, &e, NULL);
+}
+
 void sh_modserve_watermark_free(sh_modserve_watermark *w)
 {
     if (!w) return;
@@ -2680,6 +2719,7 @@ int sh_modserve_requirements_apply(const sh_modserve_gate_ops *ops, const char *
     for (g = 0; g < SH_MODSERVE_REQ_COUNT; ++g)
         if (r.restored & (1u << g) && (r.changed & (1u << g)))
             ms_log("%s: requirement released: %s restored to %d (no active bundle needs it)", phase, MS_GATES[g], want[g]);
+    InterlockedExchange(&g_gates_live, (LONG)r.live);
     r.not_live = needed & ~r.live;
     if (r.not_live) {
         ms_gate_names(r.not_live, names, sizeof names);
@@ -2979,6 +3019,24 @@ void sh_modserve_each_served(sh_modserve_file_fn fn, void *context)
 /* An earlier table served these bytes or re-parsed them: an open on the
  * provider thread can land in the table a rescan is replacing, after the
  * rescan copied the marks. */
+static int ms_settled_before(const ms_index *x, const ms_file *f);
+
+/* The bundle's requirement gates are all live now. */
+static int ms_gates_live_for(const ms_index *x, const ms_file *f)
+{
+    unsigned req = x->bundles[f->bundle].req;
+    return req && !(req & ~(unsigned)InterlockedCompareExchange(&g_gates_live, 0, 0));
+}
+
+/* What the engine holds for this file may not be the bundle's: never opened
+ * through the provider (and not settled by an earlier table), or first opened
+ * before the bundle's requirement gates were live and live now. */
+static int ms_stale(const ms_index *x, const ms_file *f)
+{
+    if (!InterlockedCompareExchange((volatile LONG *)&f->opens, 0, 0)) return !ms_settled_before(x, f);
+    return InterlockedCompareExchange((volatile LONG *)&f->opened_ungated, 0, 0) && ms_gates_live_for(x, f);
+}
+
 static int ms_settled_before(const ms_index *x, const ms_file *f)
 {
     const ms_index *p;
@@ -3003,13 +3061,33 @@ int sh_modserve_each_unopened_shadow(sh_modserve_unopened_fn fn, void *context)
             if (f->rank != rank || !f->is_decl || !f->is_shadow || f->is_restore || !f->served || f->withdrawn ||
                 !x->bundles[f->bundle].admitted || !f->ptype || !f->pname)
                 continue;
-            if (InterlockedCompareExchange(&f->opens, 0, 0) || InterlockedCompareExchange(&f->reparse_tried, 0, 0) ||
-                ms_settled_before(x, f))
-                continue;
+            if (InterlockedCompareExchange(&f->reparse_tried, 0, 0) || !ms_stale(x, f)) continue;
             visited++;
             if (fn(context, f->ptype, f->pname, f->request, x->bundles[f->bundle].id) == 1)
                 InterlockedExchange(&f->reparse_tried, 1);
         }
+    return visited;
+}
+
+/* Raw resources first served before their bundle's gates were live: the
+ * models and images whose load resolved names against the blacklists. */
+int sh_modserve_each_ungated_raw(sh_modserve_unopened_fn fn, void *context)
+{
+    const ms_index *x = g_index;
+    int i, visited = 0;
+    if (!x || !fn) return 0;
+    for (i = 0; i < x->nfiles; ++i) {
+        ms_file *f = (ms_file *)&x->files[i];
+        if (f->is_decl || !f->served || f->withdrawn || !x->bundles[f->bundle].admitted || !f->ptype || !f->pname ||
+            (_stricmp(f->ptype, "baseModel") && _stricmp(f->ptype, "image")))
+            continue;
+        if (InterlockedCompareExchange(&f->reparse_tried, 0, 0) || !InterlockedCompareExchange(&f->opened_ungated, 0, 0) ||
+            !ms_gates_live_for(x, f))
+            continue;
+        visited++;
+        if (fn(context, f->ptype, f->pname, f->request, x->bundles[f->bundle].id) == 1)
+            InterlockedExchange(&f->reparse_tried, 1);
+    }
     return visited;
 }
 

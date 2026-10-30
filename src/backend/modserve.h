@@ -431,6 +431,21 @@ typedef int (*sh_modserve_unopened_fn)(void *context, const char *type, const ch
                                        const char *bundle_id);
 int sh_modserve_each_unopened_shadow(sh_modserve_unopened_fn fn, void *context);
 
+/* A bundle's requirement gates (the cut-content blacklists) are applied at
+ * the first registration pass, after DOOM loaded its boot resources: a model
+ * or image served before then was resolved against the blacklists (the Spider
+ * Mastermind mesh held no materials and drew nothing). Visit every served
+ * baseModel and image first opened while one of its bundle's gates was not
+ * live, once those gates are live; `fn` returns 1 when it reloaded the
+ * resource (not offered again). The early-decl visit above also offers decls
+ * first opened before their gates were live. Returns the number visited. */
+int sh_modserve_each_ungated_raw(sh_modserve_unopened_fn fn, void *context);
+
+/* Walk the engine's resource lists (decl_resource_head): fn(context, the
+ * list's class name, the resource, its name). 1 when the walk completed. */
+typedef void (*sh_modserve_resource_fn)(void *context, const char *list_class, void *resource, const char *name);
+int sh_modserve_resource_each(const void *head_slot, sh_modserve_resource_fn fn, void *context);
+
 /* How many times the provider served `request` from the published table. */
 long sh_modserve_open_count(const char *request);
 

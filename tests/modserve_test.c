@@ -1044,6 +1044,72 @@ static int cf_stock(void *c, const char *request)
 }
 static const sh_modserve_engine_ops g_cf = { NULL, cf_source, fake_register, fake_load, cf_stock };
 
+/* ------------------------------------------------------------------ gated raw resources */
+
+#define GT_MODEL "generated/basemodel/md6/mods/gt.raw/body.bmd6model"
+#define GT_IMAGE "generated/image/mods/gt.raw/skin.bimage"
+#define GT_ANIM  "cooked/anim/md6/mods/gt.raw/idle.bmd6anim"
+#define GT_LATE  "generated/image/mods/gt.raw/late.bimage"
+
+static int raw_visit(void *context, const char *type, const char *name, const char *request, const char *bundle_id)
+{
+    char *seen = (char *)context;
+    size_t at = strlen(seen);
+    (void)request;
+    _snprintf_s(seen + at, 1024 - at, _TRUNCATE, "%s:%s:%s;", type, name, bundle_id);
+    return 1;
+}
+
+/* A model or image a gated bundle serves before its gates are live is
+ * offered once the gates are live, once; one first served after the gates
+ * were live, and other kinds, are never offered. */
+static void test_ungated_raw(void)
+{
+    static const fx_file gt[] = {
+        { GT_MODEL, "MODEL", -1, "baseModel", "md6/mods/gt.raw/body.md6mesh", NULL, '1' },
+        { GT_IMAGE, "IMAGE", -1, "image", "mods/gt.raw/skin", NULL, '2' },
+        { GT_ANIM, "ANIM", -1, "anim", "md6/mods/gt.raw/idle.md6anim", NULL, '3' },
+        { GT_LATE, "LATE", -1, "image", "mods/gt.raw/late", NULL, '4' },
+    };
+    char top[MAX_PATH], root[MAX_PATH], text[64], seen[1024];
+    char *slash;
+    sh_modserve_gates r;
+    strcpy_s(top, sizeof top, g_root);
+    slash = strrchr(top, '\\');
+    if (slash) *slash = 0;
+    _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\gated\\mods", top);
+    mkdirs(root);
+    g_bundle_extra = "\"requirements\": {\"cvars\": {\"g_useResourceBlackList\": \"0\", \"g_useImageBlackList\": \"0\"}},\n  ";
+    make_bundle(root, "gt.raw@1.0.0", "gt.raw", "1.0.0", '6', NULL, gt, 4, NULL);
+    g_bundle_extra = NULL;
+    CHECK(sh_modserve_index_build(root) == 1);
+    /* The gates cannot be set: not live; the boot-time opens are ungated. */
+    gates_reset(1, 1, 0);
+    CHECK(sh_modserve_requirements_apply(&g_gates, "editor", &r) == -1 && r.live == 0);
+    CHECK(open_text(GT_MODEL, text, sizeof text) == 1 && open_text(GT_IMAGE, text, sizeof text) == 1 &&
+          open_text(GT_ANIM, text, sizeof text) == 1);
+    seen[0] = 0;
+    CHECK(sh_modserve_each_ungated_raw(raw_visit, seen) == 0 && !seen[0]);
+    /* Live now: the model and the image are offered, the anim is not. */
+    gates_reset(1, 1, SH_MODSERVE_GATE_SET);
+    CHECK(sh_modserve_requirements_apply(&g_gates, "editor", &r) == 1 && r.live == 3);
+    CHECK(open_text(GT_LATE, text, sizeof text) == 1);
+    seen[0] = 0;
+    CHECK(sh_modserve_each_ungated_raw(raw_visit, seen) == 2);
+    CHECK(strstr(seen, "baseModel:md6/mods/gt.raw/body.md6mesh:gt.raw;") && strstr(seen, "image:mods/gt.raw/skin:gt.raw;"));
+    CHECK(!strstr(seen, "idle") && !strstr(seen, "late"));
+    /* Settled: not offered again, also after a rescan of the same bytes. */
+    seen[0] = 0;
+    CHECK(sh_modserve_each_ungated_raw(raw_visit, seen) == 0 && !seen[0]);
+    CHECK(sh_modserve_index_rescan() == 1);
+    CHECK(sh_modserve_each_ungated_raw(raw_visit, seen) == 0 && !seen[0]);
+    CHECK(sh_modserve_each_ungated_raw(NULL, NULL) == 0);
+    gates_reset(1, 1, SH_MODSERVE_GATE_SET);
+    /* Leave the table test_requirements left. */
+    _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\plain\\mods", top);
+    (void)sh_modserve_index_build(root);
+}
+
 static void test_compose_unit(void)
 {
     const char *t[3];
@@ -1455,6 +1521,7 @@ int main(void)
     test_cost();
     test_rescan();
     test_requirements();
+    test_ungated_raw();
     test_conflicts();
     test_editor_refs();
     test_watermark();
