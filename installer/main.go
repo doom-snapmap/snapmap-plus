@@ -42,8 +42,8 @@ With no argument it shows the newest release and lists the earlier ones.
 With no --local, install/update download from GitHub. Uninstall restores any files it
 replaced and leaves your Snapmap+ modding data untouched.
 
-The package system is being rebuilt for the April 2024 DOOM update; this release installs and
-reads no packages, and leaves any package folders from earlier releases untouched.
+The installer never changes your mods folder or the package folders of earlier releases;
+Snapmap+ converts them itself the first time DOOM starts with it.
 
 Running snapmap-plus with no arguments (a double-click) opens an interactive prompt: it offers
 to install (or to update when a newer version is out), and takes any command above.

@@ -115,16 +115,15 @@ and uninstall cycle.
 The installer checks for WebView2 and offers Microsoft's runtime bootstrapper
 when needed. See [packaging](../docs/packaging.md) for the installed file contract.
 
-## Packages
+## Mods and retired package folders
 
-The package system is being rebuilt for the April 2024 DOOM update (Steam build
-13954591). This release reads, installs and carries no packages: nothing is
-loaded from `%LOCALAPPDATA%\snapmap-plus\overrides\`, no `package-cache` or
-`package-staging` folder is created, and a map saved or published with packages
-by an earlier release loads as a plain map without them. Folders that earlier
-releases left are not touched; you can keep or delete them.
-The installer therefore converts no packages and has no `migrate-overrides`
-command.
+The installer never creates, changes, converts or removes `mods\`, and treats the
+retired package folders (`overrides\`, `override-backups\`, `package-cache\`,
+`package-staging\`) the same way across install, update, uninstall and reinstall.
+The backend owns both at DOOM start: its first start converts a `mods\` folder
+from earlier releases to the current layout and moves the packages in
+`overrides\` into `mods\` (see [Mods](../docs/capabilities.md#mods)). The
+installer has no `migrate-overrides` command; `sh_mods migrate` repeats the move.
 
 ## Private release repositories
 
