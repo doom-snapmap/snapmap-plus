@@ -5,6 +5,7 @@
     --bg:#eef0f3; --chrome:#f7f8fa; --panel:#ffffff; --panel2:#fbfbfc; --border:#e4e6ea; --border2:#d3d6db;
     --text:#1b1d21; --muted:#6b7280; --accent:#2f7ad6; --accentText:#ffffff; --sel:#e7f0fb; --selText:#123a63;
     --link:#2a68b8; --field:#ffffff; --danger:#a3352f;
+    --ok:#3f8a35; --warnBg:#f6ecd0; --warnText:#7d5d10;
     --tkKey:#0550ae; --tkStr:#9a3b22; --tkNum:#116329; --tkBool:#8250df; --sqErr:#d1372c; --sqWarn:#b58a1f;
     color-scheme: light;
   }
@@ -12,6 +13,7 @@
     --bg:#191a1d; --chrome:#232428; --panel:#26272b; --panel2:#2b2d31; --border:#33353b; --border2:#45474e;
     --text:#e7e8ea; --muted:#9aa0a8; --accent:#4a9eff; --accentText:#0c1116; --sel:#2d4257; --selText:#cfe4fb;
     --link:#6fb2ff; --field:#1f2024; --danger:#c9483d;
+    --ok:#6aa84f; --warnBg:#3d3420; --warnText:#e0b552;
     --tkKey:#7cb5ff; --tkStr:#ce9178; --tkNum:#9fd394; --tkBool:#c39ce8; --sqErr:#f14c4c; --sqWarn:#d7a944;
     color-scheme: dark;
   }
@@ -568,42 +570,83 @@
   .menu-note { width: 296px; padding: 3px 8px 2px; color: var(--textDim, var(--text)); font-size: 11px; line-height: 1.5; opacity: .85; overflow-wrap: anywhere; }
   .menu-note > div + div { margin-top: 1px; }
   .menu-note b { font-weight: 600; opacity: .8; }
-  /* Mods tab (mods_tab.js). A plain list: every row is mounted and #modsList (a .panel-body, flex: 1,
-     min-height: 0, overflow-y: auto) scrolls it natively with the wheel, the scrollbar and the keyboard. */
-  .mods-actions { display: flex; flex-wrap: wrap; gap: 6px; }
-  .mods-status { min-height: 15px; color: var(--muted); overflow-wrap: anywhere; }
-  .mods-status.ok { color: #2e7d46; }
-  :root.dark .mods-status.ok, :root.dark .mods-pill.ok, :root.dark .mods-note.ok { color: #6cc68a; }
-  .mods-status.err { color: var(--danger); }
-  .mods-status.busy { font-style: italic; }
+  /* Mods tab (mods_tab.js). A plain list: every row of an open group is mounted and #modsList (a
+     .panel-body, flex: 1, min-height: 0, overflow-y: auto) scrolls it natively with the wheel, the
+     scrollbar and the keyboard. Group headers reuse the prefab tree's folder head and caret. */
+  .mods-toolbar.panel-toolbar { flex-direction: row; align-items: center; }
+  .mods-toolbar input[type=text] { flex: 1 1 auto; width: auto; min-width: 0; }
+  .mods-toolbar .btn { flex: none; }
+  .mods-attn { display: inline-flex; align-items: center; gap: 3px; border: 1px solid transparent; font-family: inherit; line-height: inherit; cursor: pointer;
+               background: var(--warnBg); color: var(--warnText); }
+  .mods-attn .ui-icon { width: 10px; height: 10px; }
+  .mods-attn:hover { border-color: var(--sqWarn); }
+  .mods-attn.on { background: var(--sqWarn); color: var(--panel); }
+  .mods-attn:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
   .mods-list:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
-  .mods-row { padding: 4px 7px; border-radius: 4px; cursor: default; }
+  .mods-group + .mods-group { margin-top: 4px; }
+  .mods-group-head { border-radius: 4px; font-weight: 600; }
+  .mods-group-head:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+  .mods-row { display: flex; align-items: flex-start; gap: 7px; padding: 4px 7px; border-radius: 4px; cursor: default; }
   .mods-row:hover { background: var(--panel2); }
   .mods-row.selected { background: var(--sel); }
-  .mods-row-top { display: flex; align-items: center; gap: 6px; min-width: 0; }
-  .mods-row-name { font-weight: 600; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+  .mods-row-text { flex: 1 1 auto; min-width: 0; }
+  .mods-row-name { font-weight: 600; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .mods-row.selected .mods-row-name { color: var(--selText); }
-  .mods-row-sub { margin-top: 2px; color: var(--muted); font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .mods-row-detail { margin-top: 1px; color: var(--muted); font-size: 10px; overflow-wrap: anywhere; }
-  .mods-row-detail.warn { color: var(--sqWarn); }
-  .mods-map-row .mods-row-sub { white-space: normal; overflow-wrap: anywhere; }
-  .mods-pill { flex: none; padding: 0 6px; border: 1px solid var(--border2); border-radius: 9px; background: var(--panel2); color: var(--muted); font-size: 10px; line-height: 15px; }
-  .mods-pill.ok { color: #2e7d46; border-color: currentColor; }
-  .mods-pill.warn { color: var(--sqWarn); border-color: currentColor; }
-  .mods-pill.err { color: var(--danger); border-color: currentColor; }
-  .mods-side { display: flex; flex-direction: column; gap: 14px; }
-  .mods-side > * { flex: none; }
-  .mods-section-head { margin-bottom: 6px; color: var(--muted); font-size: 10px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; }
-  .mods-detail-head { display: flex; align-items: center; gap: 8px; margin-bottom: 2px; }
-  .mods-detail-name { font-size: 13px; font-weight: 600; overflow-wrap: anywhere; }
-  .mods-field { display: flex; gap: 8px; padding: 2px 0; }
-  .mods-field-label { flex: 0 0 84px; color: var(--muted); }
-  .mods-field-value { min-width: 0; overflow-wrap: anywhere; user-select: text; -webkit-user-select: text; }
-  .mods-note { margin: 2px 0 6px; color: var(--muted); line-height: 1.45; }
-  .mods-note.ok { color: #2e7d46; }
-  .mods-note.warn { color: var(--sqWarn); }
-  .mods-note.err { color: var(--danger); }
-  .mods-sub { margin: 8px 0 2px; font-weight: 600; }
-  .mods-map-row { padding: 4px 0; border-top: 1px solid var(--border); }
-  .mods-root { margin-top: auto; color: var(--muted); font-family: Consolas, "Courier New", monospace; font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .mods-row-sub { margin-top: 1px; color: var(--muted); font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .mods-status-icon { flex: 0 0 14px; width: 14px; display: inline-grid; place-items: center; margin-top: 1px; }
+  .mods-status-icon .ui-icon { width: 14px; height: 14px; }
+  .mods-status-icon.ok { color: var(--ok); }
+  .mods-status-icon.warn { color: var(--sqWarn); }
+  .mods-status-icon.info { color: var(--muted); }
+  .mods-foot { flex: none; display: flex; flex-direction: column; gap: 2px; padding: 5px var(--pane-inline, 10px) 6px; border-top: 1px solid var(--border); }
+  .mods-status { color: var(--muted); overflow-wrap: anywhere; }
+  .mods-status:empty { display: none; }
+  .mods-status.ok { color: var(--ok); }
+  .mods-status.err { color: var(--danger); }
+  .mods-status.busy { font-style: italic; }
+  .mods-root { color: var(--muted); font-family: Consolas, "Courier New", monospace; font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .mods-error { color: var(--danger); font-style: normal; }
+  .mods-side { display: flex; flex-direction: column; gap: 12px; user-select: text; -webkit-user-select: text; }
+  .mods-side > * { flex: none; }
+  .mods-detail-head { display: flex; align-items: center; gap: 8px; }
+  .mods-detail-head .mods-status-icon { margin-top: 0; flex-basis: 16px; width: 16px; }
+  .mods-detail-head .mods-status-icon .ui-icon { width: 16px; height: 16px; }
+  .mods-detail-name { font-size: 13px; font-weight: 600; overflow-wrap: anywhere; }
+  .mods-detail-sentence { margin-top: -8px; color: var(--muted); line-height: 1.45; overflow-wrap: anywhere; }
+  .mods-detail-sentence.warn { color: var(--warnText); }
+  .mods-section { display: flex; flex-direction: column; gap: 1px; }
+  .mods-section-head { margin-bottom: 4px; color: var(--muted); font-size: 10px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; }
+  .mods-field { display: flex; gap: 8px; padding: 2px 0; }
+  .mods-field-label { flex: 0 0 104px; color: var(--muted); }
+  .mods-field-value { min-width: 0; overflow-wrap: anywhere; }
+  .mods-field-long .mods-field-value { line-height: 1.45; }
+  .mods-line { padding: 2px 0; }
+  .mods-rows-list { display: flex; flex-direction: column; gap: 1px; }
+  .mono, .mods-bundle .mods-field-value { font-family: Consolas, "Courier New", monospace; }
+  .mods-link { padding: 0; border: 0; background: none; color: var(--link); font: inherit; text-align: left; cursor: pointer; }
+  .mods-link:hover { text-decoration: underline; }
+  .mods-link:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
+  .mods-note { margin: 3px 0 2px; color: var(--muted); line-height: 1.45; }
+  .mods-side .muted { color: var(--muted); }
+  .mods-paths summary { margin-top: 2px; }
+  .mods-paths-list { max-height: 260px; overflow: auto; padding: 3px 0 0 12px; font-family: Consolas, "Courier New", monospace; font-size: 10px; line-height: 1.5; overflow-wrap: anywhere; }
+  .mods-howto { padding: 10px 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--panel2); line-height: 1.5; }
+  .mods-howto-head { margin-bottom: 4px; font-weight: 600; }
+  .mods-howto p { margin: 0 0 4px; color: var(--muted); }
+  .mods-howto p:last-child { margin-bottom: 0; }
+  /* The map modal reuses the expanded Decl Text modal (.modal.decl-focus-modal, .decl-focus-host). */
+  .modal.decl-focus-modal.mods-map-modal { width: min(720px, 94vw); height: min(620px, 88vh); padding: 14px 16px; }
+  .mods-map-host { flex-direction: column; gap: 10px; overflow: hidden; }
+  .mods-map-head { display: flex; align-items: center; gap: 8px; flex: none; }
+  .mods-map-head .modal-title { flex: 1 1 auto; min-width: 0; margin: 0; overflow-wrap: anywhere; }
+  .mods-map-body { display: flex; flex-direction: column; gap: 12px; min-height: 0; overflow-y: auto; user-select: text; -webkit-user-select: text; }
+  .mods-map-row { display: flex; align-items: flex-start; gap: 7px; padding: 6px 0; border-top: 1px solid var(--border); }
+  .mods-map-row:first-of-type { border-top: 0; }
+  .mods-map-row .btn { flex: none; }
+  .mods-map-uses { margin-top: 2px; color: var(--muted); overflow-wrap: anywhere; }
+  .mods-vanilla { padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--panel2); color: var(--ok); }
+  .mods-consequences { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 5px; line-height: 1.45; }
+  .mods-consequence-names { color: var(--muted); font-size: 10px; padding-top: 1px; }
+  .mods-paths-list.mods-names { font-family: inherit; font-size: 11px; }
+  .btn.danger-solid { background: var(--danger); border-color: var(--danger); color: #ffffff; }
+  .btn.danger-solid:hover:not(:disabled) { filter: brightness(1.12); }

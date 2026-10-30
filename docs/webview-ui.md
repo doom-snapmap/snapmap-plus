@@ -15,7 +15,7 @@ operations use the interface in `src/common/snapmap_plus_iface.h`.
 | `src/ui/webview/decl_language.js` | Declaration tokens, parsing, schema checks, highlighting and completion; each instance owns its schema cache. |
 | `src/ui/webview/prefab_viewport.js` | Prefab rendering, mesh transport, framing and orbit controls. |
 | `src/ui/webview/prefab_transform.js` | Sparse saved transforms and inherited scale composition. |
-| `src/ui/webview/mods_tab.js` | The Mods tab: payload model, the installed-mods list, the open map, and the action messages. |
+| `src/ui/webview/mods_tab.js` | The Mods tab: payload model, the grouped installed-mods list, the selected mod's details, the map modal and its confirmations, the action messages, and the browser preview's stand-in host. |
 | `src/ui/webview/prefab_budget.js` | What a prefab adds to the editor's limits: block sums, the five HUD meter ratios, the reached rule and a bounded memo. No DOM. |
 | `src/ui/webview/schema_slice.js` | Declaration schema slicing for the property editor. |
 | `src/ui/webview/config_message.{h,cpp}` | Bounded extraction of configuration messages. |
@@ -150,24 +150,109 @@ and usage are always read live, never hard-coded.
 
 ## Mods tab
 
-`mods_tab.js` renders the tab from the document `backend/modui.c` builds behind the `mods` slot:
-`mods` holds one row per mod folder (`key` and `folder` are the folder's name;
-`otherBuilds` is 0; two folders declaring one id are a row each with `duplicateId`;
-packages maps delivered are rows like any other), each `installed` or `attention`
-with the first cause, `migrate` counts the `overrides\` entries the migration record does not
-cover (the Migrate button shows only while that is above zero), and `map` holds the open map's
-manifest rows and placed closure. Showing the tab and the refresh button send
-`modsAction {action: "rescan"}`; the other actions are `install` (the native folder picker),
-`remove` (a row's key, after the page's confirmation; the backend refuses a mod the open map
-uses, deletes a folder the product made and moves the author's own folder to `removed-mods\`), `migrate`
-(the host follows the worker with WAIT before the list) and `openFolder`. Every action is
-answered with `modsActionResult` and then a fresh `mods` document, one job at a time, and
-nothing polls. The list is a plain list scrolled natively by the panel body (a store holds tens
-of mods); the earlier windowed list rebuilt itself on every scroll event and read `scrollTop`
-after removing its sizer, which clamped the position to zero. Every bundle's state, conflicts,
-shadows and verification moved to `sh_mods doctor [verify]`. `tests/modui_test.c` checks the
-document, the actions and the doctor against a temporary store, and `tests/mods_tab_test.js`
-renders `tests/fixtures/mods_tab_payload.json`, whose keys the native test checks.
+`mods_tab.js` renders the tab from the document `backend/modui.c` builds behind the `mods` slot.
+Showing the tab and the refresh button send `modsAction {action: "rescan"}`. Every action is
+answered with `modsActionResult` and then a fresh `mods` document, one job at a time, and nothing
+polls. The page renders only from the last document and the last dry run, never from its own
+bookkeeping, so counts, manifest rows and the published state are always what the backend just
+read. Every bundle's state, conflicts, shadows and verification stay in `sh_mods doctor [verify]`.
+
+**List pane.** The panel head carries the mod count and, when any mod needs attention, a yellow
+badge button with that number; pressing it (`aria-pressed`) shows only those rows. One toolbar row
+holds the filter, refresh, Open mods folder, Migrate (only while `migrate.pending > 0`) and install.
+Rows are grouped under collapsible headers (the prefab tree's folder head and caret) by origin:
+Your mods (no origin, or `migration`: those were the owner's overrides), Installed (`install`) and
+From maps you played (`download`, `delivery`). The collapsed groups are the setting
+`mods.collapsed_groups`, a list of group ids (`yours`, `installed`, `maps`) saved through the
+configuration service like `prefabs.open_folders`; `config.c` must add it (`SH_JSON_ARRAY`, `"[]"`,
+UI read and write), and until it does the backend refuses it and the groups fold for the session
+only. Browser preview never saves it. A filter or the attention badge shows matches in every group;
+a header folded while filtering is not saved. Each
+row is a status icon, the name, and `id · version · size`. The three icons cover every backend
+state: a green check (`installed`), a yellow triangle (`attention` or `duplicateId`; the hover
+title is the cause) and a grey info dot (`installed` with `servedBy` set). The list is a plain list
+scrolled natively by the panel body; arrows, Home and End move the selection over the rows shown.
+
+**Details pane.** The selected mod's name, icon and one sentence ("Installed and serving 500
+files", "Needs attention: ..."), then About, What it adds, Files (carried count and size, the files
+read from the installed game, and the carried paths in the Limits section's `details` primitive),
+Requirements (console settings and the note that every player needs Snapmap+) and Sharing. The head
+actions are Verify, Rebuild and Uninstall. With nothing selected the pane explains how mods work.
+
+**Map modal.** The map button in the list pane's head opens the decl editor's focus modal
+(`.modal.decl-focus-modal` in `#modsMapModal`; the backdrop and Escape close it, Tab stays inside,
+focus returns to the opener) with the open map's details and one row per mod the map is linked to,
+each with Remove from map. Remove from map and Uninstall first send a dry run; its answer is the
+consequence list the confirmation shows, with exactly two buttons (Cancel, and Delete or
+Uninstall). After the real action the next document redraws the modal; a map left with no mods
+reads as vanilla.
+
+In the browser preview, `modsTab.standIn` stands in for the host: it answers each action with a
+result and a fresh document and changes its copy as the backend would, starting from
+`tests/fixtures/mods_tab_payload_v3.json` (the 36 folders of the owner's store; the page's
+`PREVIEW_MODS` must equal it). `tests/modui_test.c` checks the v2 document against a temporary
+store, including that every key of `tests/fixtures/mods_tab_payload.json` (v2) is one the backend
+writes; `tests/mods_tab_test.js` renders both fixtures.
+
+### Payload v3 (to implement in `modui.c`)
+
+v3 is v2 plus the fields below, with `"v": 3`. Every v2 key stays. Each new field is optional: the
+page leaves out what is absent, so a v2 document still renders. When the backend writes v3, point
+`modui_test`'s key check at the v3 fixture.
+
+Per entry of `mods`:
+
+| Key | Type | Meaning |
+|---|---|---|
+| `"description"` | string | mod.json's description, "" when none. |
+| `"origin"` | string | The product block's origin: `install`, `download`, `migration`, `delivery`, or "" for a folder the author made. |
+| `"migratedFrom"` | string | For `migration`: the folder it was built from, as `mu_origin` writes it (`overrides\hell-guards`). |
+| `"servedBy"` | string | The key of another folder whose build serves this mod's paths (superseded); "" when it serves its own. Drives the grey icon. |
+| `"builtAt"` | number | Unix seconds of the product block's `built`; 0 when unknown. |
+| `"bundle"` | string | The full bundle hash (64 hex). The page shows the first 16 for support questions. |
+| `"counts"` | object | `{shadows, sounds, movies, modules, vt}`: replaced stock files, sound banks, movies, snapModule decls, virtual textures. |
+| `"requirements"` | object | `{cvars: {name: "value"}}` from mod.json's requirements; `{cvars: {}}` when none. |
+| `"editorRowNames"` | string[] | Display names of the Toybox rows it adds (`editorRows` resolved through strings when available, else the decl names). |
+| `"carriedPaths"` | string[] | Carried request paths below `assets/` (stock pointers excluded), sorted. May be capped; the page says how many more there are. |
+| `"publishedMaps"` | number | How many of the player's published maps record it; absent when unknown. |
+
+`files` stays every file including stock pointers, and `pointers` the stock pointers; the page shows
+`files - pointers` as carried, with `size` as their bytes.
+
+`map` keeps its v2 keys (`entities` is -1 when no map is open, `names`, `rows`, `placed`) and adds:
+
+| Key | Type | Meaning |
+|---|---|---|
+| `name`, `id` | string | The map's name and saved-map id (the page shows 16 characters). |
+| `saved` | number | Unix seconds of the last save; 0 when unknown. |
+| `published` | object | `{state: "published" or "unpublished", at}`. |
+| `uploaded` | object | `{claimed, at}`: whether a mod-store claim exists for this map. |
+| `tagged` | bool | The search tag `mods` is present. |
+| `mods` | array | One per `smpmod1.` manifest row: `{key, id, version, state, "placedEntities", placedCount, "references", size}`. `key` is the installed folder ("" when not installed); `state` is `installed`, `superseded`, `unindexed`, `skipped` or `missing`; `placedEntities` are display names; `references` are `[{kind, name}]` with `kind` one of `toybox`, `module`, `timeline`, `logic`; `size` is carried bytes. |
+| `"vanilla"` | bool | The map lists no mods and plays without Snapmap+. |
+
+### Actions
+
+`arg` is a mod's `key` (for a map row that is not installed, its `id`). Each is answered with
+`modsActionResult {action, ok, message, data}` and then a fresh `mods` document whose `map` is read
+again.
+
+| Action | Meaning |
+|---|---|
+| `rescan`, `install`, `migrate`, `openFolder` | As in v2. `openFolder` may now carry `arg`, a folder name under `mods\` to open instead of the mods folder; today's host ignores it. |
+| `rebuild` | Build the folder again from its files (as `sh_mods build`). |
+| `verify` | Rehash that one build's files (today's host maps `verify` to the whole-store check). |
+| `mapRemoveModPreview` | Dry run: `data.preview` is the consequence list of removing the mod from the open map. Changes nothing. |
+| `mapRemoveMod` | Delete the placed entities that use the mod, sever the references to them, drop the manifest row and, with the last row, the `mods` tag. The published copy changes only when the map is published again. |
+| `uninstallPreview` | Dry run: `data.preview` for uninstalling: the map part when the open map uses the mod, and the installation part. |
+| `uninstall` | `mapRemoveMod` on the open map when it uses the mod, then v2's `remove`: a folder the product made is deleted, the author's own folder moves to `removed-mods\`. Closed maps are not edited; they ask for the mod again when loaded. Replaces `remove`. |
+
+`data.preview` is `{action, key, name, map, install}`. `map` is null when the open map does not use
+the mod, else `{name, entities: [display names], entityCount, references: [{kind, name}],
+manifestRow, tagRemoved, vanillaAfter, published}`; `install` is null for `mapRemoveMod`, else
+`{folder, disposition: "delete" or "move", movedTo}`. A refused dry run is `ok: false` with the
+reason in `message`. Until the backend lane lands, the host answers `rebuild`, `uninstall` and the
+map actions with "Unknown mods action."
 
 ## Driving the page from a test
 
