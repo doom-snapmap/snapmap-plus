@@ -2539,23 +2539,28 @@ static int mu_announce_take(char *out, size_t cap)
 }
 
 /* Undo can bring back entities of a mod Uninstall took out of the open map.
- * Their ids are watched: one coming back makes the next tick read the map. */
+ * Their ids are watched with the bundle hash they came from: one coming back
+ * reinstates that bundle (whatever its names look like); a watched id with
+ * no hash makes the tick read the map's placed names. */
 #define MU_WATCH_MAX 256
 static int g_watch_uid[MU_WATCH_MAX];
 static unsigned char g_watch_on[MU_WATCH_MAX];
+static char g_watch_hash[MU_WATCH_MAX][SH_MB_HASH_HEX + 1];
 static int g_watch_n;
 static ULONGLONG g_poll_next;
 
-static void mu_watch_add(const int *uids, size_t n)
+static void mu_watch_add(const int *uids, size_t n, const char *hash)
 {
     size_t i;
     int k;
     for (i = 0; i < n; i++) {
         for (k = 0; k < g_watch_n && g_watch_uid[k] != uids[i]; k++) { }
-        if (k < g_watch_n) { g_watch_on[k] = 0; continue; }
-        if (g_watch_n >= MU_WATCH_MAX) break;
-        g_watch_uid[g_watch_n] = uids[i];
-        g_watch_on[g_watch_n++] = 0;
+        if (k >= g_watch_n) {
+            if (g_watch_n >= MU_WATCH_MAX) break;
+            g_watch_uid[g_watch_n++] = uids[i];
+        }
+        g_watch_on[k] = 0;
+        strncpy_s(g_watch_hash[k], sizeof g_watch_hash[k], hash ? hash : "", _TRUNCATE);
     }
 }
 
@@ -2731,12 +2736,28 @@ int sh_modui_poll_main(void *context)
         (void)e->refresh(&rf);
         InterlockedIncrement(&g_gen);
     }
-    for (i = 0; e->entity_valid && i < g_watch_n; i++) {
-        int on = e->entity_valid(g_watch_uid[i]) == 1;
-        if (on && !g_watch_on[i]) back = 1;
-        g_watch_on[i] = (unsigned char)on;
+    {
+        const char *hashes[MU_WATCH_MAX];
+        int nh = 0, k, unhashed = 0;
+        for (i = 0; e->entity_valid && i < g_watch_n; i++) {
+            int on = e->entity_valid(g_watch_uid[i]) == 1;
+            if (on && !g_watch_on[i]) {
+                back++;
+                if (!g_watch_hash[i][0]) unhashed = 1;
+                else {
+                    for (k = 0; k < nh && strcmp(hashes[k], g_watch_hash[i]); k++) { }
+                    if (k == nh) hashes[nh++] = g_watch_hash[i];
+                }
+            }
+            g_watch_on[i] = (unsigned char)on;
+        }
+        if (back) {
+            mu_log("undo watch: %d entit%s Uninstall deleted from the open map %s back", back, back == 1 ? "y" : "ies",
+                   back == 1 ? "is" : "are");
+            if (nh) (void)mu_restore(hashes, nh, NULL, 0, SH_MODSERVE_RESTORE_UNDO);
+            if (unhashed) (void)mu_restore(NULL, 0, NULL, 0, SH_MODSERVE_RESTORE_UNDO);
+        }
     }
-    if (back) (void)mu_restore(NULL, 0, NULL, 0, SH_MODSERVE_RESTORE_UNDO);
     if (mu_announce_take(text, sizeof text)) {
         char line[760];
         if (e->toast) e->toast("Mods", text);
@@ -3245,7 +3266,8 @@ static int mu_map_action(int action, const char *key, const mu_out *o)
             mu_log("uninstall %s: %s%s", key, ok ? "moved to removed-mods" : "the folder could not be moved",
                    removed_from_map ? " after the open map was cleaned of it" : "");
             /* Ctrl+Z can bring its entities back: watch for them. */
-            if (ok && removed_from_map && mp.mods[p.mod].uid_count) mu_watch_add(mp.mods[p.mod].uids, mp.mods[p.mod].uid_count);
+            if (ok && removed_from_map && mp.mods[p.mod].uid_count)
+                mu_watch_add(mp.mods[p.mod].uids, mp.mods[p.mod].uid_count, m.list.items[entry].loaded ? m.list.items[entry].bundle.hash : NULL);
             if (ok)
                 _snprintf_s(msg, sizeof msg, _TRUNCATE, "Uninstalled %s%s. Its folder was moved to removed-mods\\%s.", title,
                             removed_from_map ? " and removed it from the open map" : "", rm.moved);

@@ -526,7 +526,8 @@ of that id), or Ctrl+Z bringing back an entity Uninstall deleted from the open
 map: the main-thread tick after each native frame (`sh_modui_poll_main`, run
 on the process heap like the other main-thread calls, every 250 ms while
 anything is watched or owed) checks those uniqueIds and, when one is back,
-reads the open map's placed names. The folder moves back under its old name,
+reinstates the bundle they were deleted with, by its hash, whatever its names
+look like. The folder moves back under its old name,
 else its id, else a free name; its aliases are recorded again; the rebuild
 rule and the serving index run at once, so the load or save in progress sees
 the mod (the dropped `cache` entry makes the rebuild rule build it again,
