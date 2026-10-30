@@ -159,6 +159,11 @@ func TestInstall2018BuildTakesLegacyRelease(t *testing.T) {
 // Unknown, mixed and mismatched requests are refused before any download or write.
 func TestInstallRefusalsDownloadNothing(t *testing.T) {
 	syntheticProcessGuard(t, false)
+	running := filepath.Join(t.TempDir(), selfExeAsset)
+	writeF(t, running, "installer")
+	savedExe := executablePath
+	executablePath = func() (string, error) { return running, nil }
+	t.Cleanup(func() { executablePath = savedExe })
 	cases := []struct {
 		vk, gl string
 		f      flags
@@ -182,6 +187,9 @@ func TestInstallRefusalsDownloadNothing(t *testing.T) {
 		}
 		if len(*asked) != 0 {
 			t.Errorf("case %d: refused install still downloaded %q", i, *asked)
+		}
+		if exists(filepath.Join(tmp, "appdata", "snapmap-plus", selfExeAsset)) {
+			t.Errorf("case %d: a refused install copied snapmap-plus.exe into app data", i)
 		}
 		entries, _ := os.ReadDir(doom)
 		if len(entries) > 2 {

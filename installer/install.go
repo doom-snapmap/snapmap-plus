@@ -74,9 +74,6 @@ func saveRecord(rec *installRecord) error {
 }
 
 func cmdInstall(f flags) error {
-	if f.local == "" {
-		selfInstall() // a real (release) install -> keep a stable copy of snapmap-plus.exe; skip for dev --local builds
-	}
 	doom, err := resolveDoom(f.doom)
 	if err != nil {
 		return err
@@ -92,6 +89,11 @@ func cmdInstall(f flags) error {
 	}
 	if f, err = routeRelease(f, build); err != nil {
 		return err
+	}
+	// A release install keeps a stable copy of snapmap-plus.exe; a refused one changes nothing,
+	// and a dev --local build is never copied.
+	if f.local == "" {
+		selfInstall()
 	}
 	if checkDoomRunning() {
 		return fmt.Errorf("DOOM is running -- close it and run this again (Snapmap+'s files can't be replaced while the game has them open)")
