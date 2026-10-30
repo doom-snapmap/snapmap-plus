@@ -452,6 +452,45 @@ gameplay decls when a map that names their bundle loads. When two builds of one 
 serves it, and a map naming the older bundle gets the newer files with a logged
 line.
 
+Cooked movies need a second route (`modswf.c`). A `.bswf` is an idFileResource,
+and its Load (vtable `+0x40`, signature `FileResourceLoad`) opens through the
+provider only while the map-load lifecycle state is below 2; from 2 on it asks
+the resource manager (`+0x68`), which reads the mounted containers unless
+`resource_loadLooseAssets` is set, and a miss becomes an empty file returned as
+success, so a bundle's movie used to load blank with no message. `modswf.c`
+swaps that one vtable slot (the only read-only qword holding the Load; no code
+is patched). For a `generated/swf/...bswf` request the serving table answers,
+it runs the engine's own below-2 sequence at any state: a named memory file at
+the resource's `+0x38`, then the open-into helper, which opens through the
+provider and copies the bundle's bytes. Everything else, and a served movie
+whose open fails, goes to the original Load. The four engine calls it uses are
+decoded from the resolved Load body, and the open-into helper must call
+`+0x148`. The cvar is not used: it is read by four engine paths on each
+executable, two of them generic opens, and would make every file and JSON
+resource load walk the search paths on disk. A served movie applies at that
+resource's next Load: a movie first loaded in a map is purged at map unload, so
+a shadow installed between maps applies at the next map load; a movie resident
+since boot is served only when its bundle is installed at boot. The builder
+admits `.bswf` only under `generated/swf/`, names it as the consumer does
+(`swf/<stem>.swf`), and applies the usual rules: a stock movie is a listed
+shadow, a new one lives under `generated/swf/mods/<id>/` with its atlas
+`generated/swf/mods/<id>/<stem>.bimage` beside it. Each served movie logs
+`MODS: swf: served <request> (<bundle>) at load state N` (the first 32).
+
+A bundle descriptor's `hud` key (kept under `bundle.json` `extra`) selects how
+the stock ammo widget shows a weapon (`modhud.c`, the beta.19 `weapon_hud`
+contract: `{"weapons": {"<weapon decl>": {"ammo_display": "weapon" | "engine"}}}`).
+`weapon` removes the multiplayer mode's forced numeric display for that weapon,
+so a nonpositive capacity shows the widget's infinity frame; no ammunition,
+decl or widget field changes. Rules are read at startup from every admitted
+bundle, installed or legacy; identical rules compose and conflicting ones
+refuse the whole table with both bundle ids logged. The widget update's one
+call to the mode predicate (`WeaponHudModeCall`, `WeaponHudGameMode`) has its
+aligned rel32 swapped to a near relay that passes the widget, whose weapon decl
+is at `+0x1F8`; every other caller of the predicate is untouched. Logs:
+`weapon-hud compiled: N rules`, `weapon-hud installed: ...`, and
+`weapon-hud active: ...` on first use.
+
 On every parse the `DeserializeFromJson` detour sees, `modlegacy.c` runs first.
 A complete carrier whose ZIP and `package.json` read is unpacked once into
 `mods\legacy\<id>@<digest16>\` (older `decls/`, `images/` and `shaders/`
@@ -460,7 +499,7 @@ the serving table is then rebuilt when that bundle is not in it yet, so the same
 parse can activate it. A first-generation package served every file under
 `assets/`; a file a bundle cannot carry (a type outside the bundle whitelist,
 such as the `.materials.txt` sidecars every beta.19 model pack shipped or a
-`.bswf` movie, an empty file, a path the request rules refuse) is left out and
+`.bswf` movie outside `generated/swf/`, an empty file, a path the request rules refuse) is left out and
 counted on the `LEGACY: unpacked` line instead of refusing the package, and a
 cvar requirement other than the two supported blacklist gates is left out the
 same way. A beta.16-19 carrier names its tree (`smpkg.delivery.<tree>`), so
@@ -542,8 +581,9 @@ map from tree to store folder; it says `"complete": false` until the worker
 ends, and an unfinished record makes the next start run the pass again (every
 step is idempotent). Each folder logs one `MODS: migration:` line and the pass
 one summary line; a line that leaves files out names how many and how many of
-them are `.bswf` movies, which bundles do not carry (SWF content bypasses the
-provider once the game has loaded). A migrated pack keeps its id, so where it
+them are `.bswf` movies (bundles carry movies under `generated/swf/` only, served
+by `modswf.c`; a pack migrated before that was left out can be migrated again
+with `sh_mods migrate --again`). A migrated pack keeps its id, so where it
 shares one with a delivered or converted package (the beta.19 `doors` packs),
 the most recently installed bundle serves every path they share, whichever
 map is open. `sh_mods migrate [--again]` runs the same pass on the worker.

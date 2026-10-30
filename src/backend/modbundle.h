@@ -149,7 +149,8 @@ int  sh_mb_version_valid(const char *version);
  * SH_MB_REQUEST_MAX bytes). 1 when valid, else 0 with the cause. */
 int  sh_mb_check_request(const char *request, char *cause, size_t cause_cap);
 
-/* Extension whitelist (Contract 1). */
+/* Extension whitelist (Contract 1). A .bswf movie is admitted only under
+ * generated/swf/. */
 int  sh_mb_extension_allowed(const char *request);
 
 /* Logical name of a request path (Contract 1 table). Returns 1 and fills type

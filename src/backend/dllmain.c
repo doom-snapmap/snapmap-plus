@@ -27,6 +27,8 @@
 #include "module_prefab.h"
 #include "timeline_tile.h"
 #include "modserve.h"
+#include "modswf.h"
+#include "modhud.h"
 #include "modmigrate.h"
 #include "modpublished.h"
 #include "modpublish.h"
@@ -366,6 +368,9 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
         /* Mod decl registration and the existence probe (needs the provider). */
         if (overrides_installed) (void)sh_modserve_install(results, db, g_doom_base);
         else backend_log("MODS: mods are not served; the override provider is not installed");
+        /* Cooked movies (FileResource Load slot) and bundle ammo displays (modswf.h, modhud.h). */
+        if (overrides_installed) (void)sh_modswf_install(results, db, g_doom_base);
+        (void)sh_modhud_install(results, db);
 
         /* Register cvars before commands. Commands additionally need cmdSystem;
          * each registration path handles missing dependencies independently. */
