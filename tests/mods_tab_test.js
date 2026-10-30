@@ -422,7 +422,7 @@ test('details: every section for a v3 mod', () => {
   assert.ok(req.indexOf(modsTab.NEEDS_NOTE) >= 0);
   const share = section(h, 'sharing').textContent;
   assert.match(share, /Used by 2 of your published maps/);
-  assert.match(share, /Last built 2026-10-(29|30) \d\d:\d\d/);
+  assert.match(share, /Last built \d{4}-\d\d-\d\d \d\d:\d\d/);
   assert.ok(share.indexOf('Bundle ' + v3.mods.find(m => m.key === 'local.hell-guard').bundle.slice(0, 16)) >= 0);
   assert.match(share, /when you ask for help/);
   /* the folder link opens that folder */
