@@ -417,7 +417,10 @@ int main(int argc, char **argv)
         g_placed_count = 1;
         doc = list_doc();
         CHECK(has(doc, "\"rows\":[{\"id\":\"alex.r2-imp\"") && has(doc, "\"placed\":[{\"id\":\"alex.r2-imp\""));
-        CHECK(has(doc, "\"kind\":\"conflict\",\"shadow\":true,\"served\":\"\",\"bundles\":[\"alex.shade-a@1.0.0+1\",\"alex.shade-b@1.0.0+1\"]"));
+        /* Two mods' shadows with different bytes: one serves (here the later
+         * install; the texts differ outside lists), and the tab says why. */
+        CHECK(has(doc, "\"kind\":\"conflict\",\"shadow\":true,\"served\":\"alex.shade-b@1.0.0+1\",\"resolution\":\"chosen\","
+                       "\"reason\":\"installed most recently\",\"bundles\":[\"alex.shade-a@1.0.0+1\",\"alex.shade-b@1.0.0+1\"]"));
         CHECK(has(doc, "\"conflict\":1,\"total\":1"));
         keys_match_fixture(payload, doc);
         free(doc);

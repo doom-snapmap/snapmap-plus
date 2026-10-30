@@ -107,6 +107,14 @@ test('state and shadow explanations', () => {
   assert.equal(modsTab.shadowInfo({kind: 'stock'}).text, 'Applies on this machine only.');
   assert.equal(modsTab.shadowInfo({kind: 'legacy'}).text, 'Changes what maps mean.');
   assert.equal(modsTab.shadowInfo({kind: 'conflict'}).text, 'Two mods supply this name; neither is served.');
+  assert.equal(modsTab.shadowInfo({kind: 'conflict', resolution: 'chosen', served: 'local.cyberdemon@0.0.0+1',
+    reason: 'most providers carry these bytes'}).text,
+    'Several mods supply this name; local.cyberdemon@0.0.0+1 serves it (most providers carry these bytes).');
+  assert.match(modsTab.shadowInfo({kind: 'conflict', resolution: 'composed'}).text, /entries of all of them are served/);
+  assert.match(modsTab.shadowInfo({kind: 'conflict', resolution: 'withdrawn'}).text, /game copy is used/);
+  assert.equal(modsTab.shadowInfo({kind: 'conflict', resolution: 'chosen'}).tone, 'warn');
+  assert.equal(modsTab.normalize({ok: true, bundles: [], shadows: [{request: 'a', kind: 'conflict', resolution: 'composed',
+    reason: 'composed: 2 list entries'}]}).shadows[0].resolution, 'composed');
   assert.match(modsTab.rowInfo({state: 'missing', otherKey: 'a@1+2'}).detail, /another build \(a@1\+2\)/);
   assert.equal(modsTab.rowInfo({state: 'missing'}).tone, 'err');
 });
@@ -199,7 +207,7 @@ test('shadows open lazily with their explanations', () => {
   const s = h.nodes.modsShadowsBody.all('mods-shadow-row');
   assert.equal(s.length, 4);
   assert.match(s[2].textContent, /Conflict sound\/soundbanks\/pc\/shotgun\.snd/);
-  assert.match(s[2].textContent, /Two mods supply this name; neither is served\. From pat\.<loud>-shotgun@2\.1\+4, tom\.shotgun@1\.0\.0\+1\./);
+  assert.match(s[2].textContent, /Several mods supply this name; tom\.shotgun@1\.0\.0\+1 serves it \(installed most recently\)\. From pat\.<loud>-shotgun@2\.1\+4, tom\.shotgun@1\.0\.0\+1\./);
   assert.match(s[0].textContent, /Changes what maps mean\. By local\.my-overrides/);
   assert.match(s[3].textContent, /Applies on this machine only\./);
   assert.match(h.nodes.modsShadowsBody.textContent, /60 more not listed/);

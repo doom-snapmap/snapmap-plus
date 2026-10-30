@@ -242,6 +242,13 @@ typedef struct sh_modserve_gates {
  * called), 1 when every needed gate is live, -1 otherwise. Main thread only. */
 int sh_modserve_requirements_apply(const sh_modserve_gate_ops *ops, const char *phase, sh_modserve_gates *out);
 
+/* sh_modserve_requirements_apply for a point where nothing is registered
+ * (the Play level load): the same disarm and verify, plus one line when every
+ * needed gate was already live, so the log shows the gates held:
+ *   MODS: play: requirements live: g_useImageBlackList=0, g_useResourceBlackList=0 (unchanged since the last pass)
+ * Returns what sh_modserve_requirements_apply returns. */
+int sh_modserve_requirements_check(const sh_modserve_gate_ops *ops, const char *phase, sh_modserve_gates *out);
+
 /* Block the steps of bundles whose requirements `gates` reports not live
  * (first cause "requirement <cvar>=0 is not live"), except steps already
  * registered. Returns how many were blocked. */
@@ -281,9 +288,34 @@ typedef void (*sh_modserve_closure_fn)(void *context, const char *bundle_id, con
 size_t modserve_bundles_for_names_visit(const char *const *names, size_t count,
                                         sh_modserve_closure_fn visit, void *context);
 
+/* A path several admitted bundles of different mods provide with different
+ * bytes. One provider always serves it (the path is never left to the
+ * engine, whose SnapMap archives may hold no copy of campaign content). The
+ * winner is the provider with the fewest needs no admitted bundle provides,
+ * then the bytes most providers carry, then an installed mod over a copy a
+ * map delivered (legacy\), then the most recently installed. When every
+ * provider's text is a decl that differs only inside lists (a block of
+ * `num = N;` and `item[i]` members, such as the encounter conductor's
+ * aiTypeList or a whitelist inspector's validEncounters), the winner's text
+ * is served with the other providers' list entries appended (composed). One
+ * MODS: line per conflict names the providers, the winner and why:
+ *   MODS: conflict: shadow '<path>' is provided by a@1, b@2; serving a@1 (<reason>)
+ *   MODS: conflict: shadow '<path>' is provided by ...; serving a@1's text with the others' list entries (N added)
+ * Pointers stay valid for the process. */
+typedef struct sh_modserve_conflict {
+    const char *request, *providers, *reason;
+    const char *served_id, *served_version, *served_hash;
+    int count;        /* providers */
+    int composed;     /* 1: list entries of every provider merged */
+    int withdrawn;    /* 1: a registration pass withdrew the winner (see plan_run) */
+} sh_modserve_conflict;
+
+/* 1 and *out filled when `request` (any case) is such a path, else 0. */
+int sh_modserve_conflict_info(const char *request, sh_modserve_conflict *out);
+
 /* Counts for the status command and tests. */
 typedef struct sh_modserve_stats {
-    int bundles_seen, bundles_admitted, files, keys, conflicts, shadows;
+    int bundles_seen, bundles_admitted, files, keys, conflicts, conflicts_composed, shadows;
     unsigned long opens_served, open_failures, probe_claims, cache_hits;
     double build_ms;
     int editor_rows_registered, editor_rows_failed;
@@ -346,6 +378,16 @@ int modserve_palette_rebuild_requested(void);
  * logged as one "MODS: map rows: ..." line. Returns the number of ready
  * steps, or -1 when refused (not the main thread, registry unavailable). */
 int modserve_activate_bundles(const char *const *bundle_hashes, int n);
+
+/* Called before the Play level load (the SnapBuild detour in nav_play.c),
+ * on the main thread: re-checks the admitted bundles' requirements with
+ * sh_modserve_requirements_check (phase "play"). The engine does not reset
+ * either gate between the editor and the level load on 13954591 (lane MG2:
+ * each gate's int has one reader, its matcher, and no engine writer; both are
+ * plain bool cvars that no shipped config names), so this normally logs
+ * "requirements live"; a gate someone set back to 1 is disarmed again before
+ * the level's decls load. No-op when no bundle has requirements. */
+void sh_modserve_play_begin(void);
 
 /* The serving subcommands of the sh_mods console command (modcmd.c owns the
  * command and dispatches here): status, rescan, palette rebuild. `args` is

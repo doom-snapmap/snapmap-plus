@@ -491,6 +491,28 @@ is at `+0x1F8`; every other caller of the predicate is untouched. Logs:
 `weapon-hud compiled: N rules`, `weapon-hud installed: ...`, and
 `weapon-hud active: ...` on first use.
 
+When bundles of different mods provide one path with different bytes, one of
+them always serves it: leaving it to the engine broke every boss pack at Play,
+because their other files are served and name it, and the game's SnapMap
+archive has no copy of campaign content to fall back to (the Cyberdemon's
+animWeb defaulted to an empty one and `AnimWeb ... has no nodes` ended the
+process). The winner is the provider with the fewest needs no admitted bundle
+provides, then the bytes most providers carry, then an installed mod over a
+copy a map delivered, then the most recently installed. When every provider's
+text is a decl that differs from the others only inside lists (a block of
+`num = N;` and `item[i]` members, as the encounter conductor's `aiTypeList` or
+the whitelist inspectors' `validEncounters`, which every boss pack extends),
+the winner's text is served with the other providers' entries appended, so
+several boss packs work together. One `MODS: conflict:` line names the
+providers, the winner and the reason; the Mods tab shows the same. A
+registration pass (editor rows, map activation) also withdraws an animWeb
+whose models block names a model that no bundle provides and the engine has
+no md6Def for, since the engine's parse throws on it: a stock animWeb it
+shadowed is served by the game again, and a new name is not registered. Before
+the Play level load the SnapBuild detour re-checks the bundles' blacklist
+requirements (`MODS: play: requirements live: ...`); the engine itself does not
+reset those two gates between the editor and the level load.
+
 On every parse the `DeserializeFromJson` detour sees, `modlegacy.c` runs first.
 A complete carrier whose ZIP and `package.json` read is unpacked once into
 `mods\legacy\<id>@<digest16>\` (older `decls/`, `images/` and `shaders/`

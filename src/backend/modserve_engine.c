@@ -292,6 +292,18 @@ static int me_run(sh_modserve_plan *plan, const char *phase)
     return ready;
 }
 
+void sh_modserve_play_begin(void)
+{
+    int on_main;
+    if (!sh_modserve_requirements()) return;
+    on_main = me_on_main();
+    if (on_main != 1) {
+        me_log("play: requirements not re-checked (%s)", on_main ? "the main thread is unknown" : "not on the main thread");
+        return;
+    }
+    sh_modserve_requirements_check(g_cvar_set && g_cvar_slot ? &g_gate_ops : NULL, "play", NULL);
+}
+
 /* ------------------------------------------------------------------ probe */
 
 static unsigned char me_probe_hook(void *self, const char *path, void *a, void *b, void *c, void *d, uint64_t quiet)
@@ -571,8 +583,9 @@ int sh_modserve_command(void *args, const char *verb)
     if (!verb || !_stricmp(verb, "status")) {
         sh_modserve_stats st;
         sh_modserve_get_stats(&st);
-        sh_printf("sh_mods: %d of %d bundles active, %d files (%d paths), %d shadows, %d conflicts; index %.1f ms\n",
-                  st.bundles_admitted, st.bundles_seen, st.files, st.keys, st.shadows, st.conflicts, st.build_ms);
+        sh_printf("sh_mods: %d of %d bundles active, %d files (%d paths), %d shadows, %d conflicts (%d composed); index %.1f ms\n",
+                  st.bundles_admitted, st.bundles_seen, st.files, st.keys, st.shadows, st.conflicts,
+                  st.conflicts_composed, st.build_ms);
         sh_printf("sh_mods: served %lu opens (%lu cache hits, %lu read failures), %lu probe answers; "
                   "editor rows %d ready, %d failed; registry %s, probe %s\n",
                   st.opens_served, st.cache_hits, st.open_failures, st.probe_claims, st.editor_rows_registered,

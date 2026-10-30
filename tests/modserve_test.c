@@ -408,7 +408,10 @@ static void test_index_and_isolation(void)
     CHECK(log_has("bundle 'erin.ns@1.0.0' skipped: 'generated/decls/entitydef/monster/sneaky.decl' is outside mods/erin.ns/"));
     CHECK(log_has("bundle 'unbuilt' skipped: no bundle.json"));
     CHECK(log_count("skipped:") == 4);   /* one line per skipped bundle */
-    CHECK(log_has("conflict: shadow '" SHADOW "' is provided by alex.pink-imp@1.0.0, bob.skins@2.0.0; serving neither"));
+    /* Two mods' shadows of one stock decl: one serves (here the more
+     * recently installed; the texts are outside the composable grammar). */
+    CHECK(log_has("conflict: shadow '" SHADOW "' is provided by alex.pink-imp@1.0.0, bob.skins@2.0.0; serving "
+                  "alex.pink-imp@1.0.0 (installed most recently)"));
     CHECK(log_has("bundle alex.pink-imp@1.0.0: superseded by alex.pink-imp@1.1.0"));
     CHECK(log_has("MODS: index built in ") && log_has("(5 bundles, "));
     CHECK(sh_modserve_bundle_state(g_hash_a, NULL, 0) == 1);
@@ -433,9 +436,18 @@ static void test_lookup(void)
     /* The registration source read and the sanitised raw spelling. */
     CHECK(sh_modserve_lookup("decltree/md6def/mods/alex.pink-imp/imp.md6.decl", NULL));
     CHECK(sh_modserve_lookup("generated/baseModel/md6/mods/alex.pink_imp/mesh/imp.bmd6model", NULL));
-    /* Misses: stock, the conflicted shadow, a skipped bundle's file, near names. */
+    /* Misses: stock, a skipped bundle's file, near names. */
     CHECK(!sh_modserve_lookup("generated/decls/entitydef/monster/hellknight.decl", NULL));
-    CHECK(!sh_modserve_lookup(SHADOW, NULL));
+    {
+        sh_modserve_hit w;
+        sh_modserve_conflict c;
+        CHECK(sh_modserve_lookup(SHADOW, &w) && !strcmp(w.bundle_id, "alex.pink-imp"));
+        CHECK(sh_modserve_conflict_info("GENERATED/decls/entitydef/monster/imp.decl", &c) && c.count == 2 &&
+              !c.composed && !strcmp(c.served_id, "alex.pink-imp") && !strcmp(c.reason, "installed most recently") &&
+              !strcmp(c.providers, "alex.pink-imp@1.0.0, bob.skins@2.0.0"));
+        CHECK(!sh_modserve_conflict_info(A_ENT, &c));
+        CHECK(open_text(SHADOW, text, sizeof text) == 1 && !strcmp(text, "entityDef pink { }"));
+    }
     CHECK(!sh_modserve_lookup(C_ONLY, NULL));
     CHECK(!sh_modserve_lookup("generated/decls/entitydef/mods/dave.x/a.decl", NULL));
     CHECK(!sh_modserve_lookup(A_ENT "x", NULL));
@@ -476,7 +488,7 @@ static void test_probe(void)
     CHECK(sh_modserve_probe_claims("generated/decls/md6Def/mods/alex.pink-imp/imp.md6.decl"));
     CHECK(sh_modserve_probe_claims("generated/decls/snapEditorEntityDef/mods/alex.pink-imp/imp.decl"));
     CHECK(!sh_modserve_probe_claims(A_MESH));                 /* raw files are not decls */
-    CHECK(!sh_modserve_probe_claims(SHADOW));                 /* conflicted */
+    CHECK(sh_modserve_probe_claims(SHADOW));                  /* conflicted, and served by its winner */
     CHECK(!sh_modserve_probe_claims("generated/decls/entitydef/monster/hellknight.decl"));
     CHECK(sh_modserve_is_mod_sedef("mods/alex.pink-imp/imp"));
     CHECK(sh_modserve_is_mod_sedef("MODS/alex.pink-imp/IMP"));
@@ -898,6 +910,249 @@ static void test_requirements(void)
     gates_reset(1, 1, SH_MODSERVE_GATE_SET);
 }
 
+/* ------------------------------------------------------------------ conflicts (lane MG2) */
+
+char *sh_modserve_test_compose(const char *const *texts, int n, int *added);
+
+#define CONDUCTOR "generated/decls/entitydef/ai/conductor/coop/snapmap_default.decl"
+#define WHITELIST "generated/decls/snappropertyinspector_whitelistencounterdecl/single_encounters_white_list_inspector.decl"
+#define CYB_AW    "generated/decls/animweb/zion/boss/cyberdemon_ai.decl"
+#define NEEDY     "generated/decls/aipaingraph/cyberdemon_ai.decl"
+
+#define CONDUCTOR_HEAD \
+    "{\r\n\tinherit = \"ai/base/conductor\";\r\n\tclass = \"idAIConductor_Coop\";\r\n" \
+    "\teditorVars {\r\n\t\tcolor = ( 1, 1, 1, 1 );\r\n\t}\r\n\tedit = {\r\n\t\taiTypeList = {\r\n"
+#define CONDUCTOR_STOCK_ITEMS \
+    "\t\t\titem[0] = {\r\n\t\t\t\taiType = \"SPAWN_AI_TYPE_IMP\";\r\n\t\t\t\tentityDef = \"ai/demon/imp_coop\";\r\n\t\t\t}\r\n" \
+    "\t\t\titem[1] = {\r\n\t\t\t\taiType = \"SPAWN_AI_TYPE_ARCHVILE\";\r\n\t\t\t\tentityDef = \"ai/demon/archvile_coop\";\r\n\t\t\t}\r\n"
+#define CONDUCTOR_TAIL "\t\t}\r\n\t\tglobalAIMods = {\r\n\t\t\tnum = 1;\r\n\t\t\titem[0] = {\r\n\t\t\t\taiType = \"SPAWN_AI_TYPE_IMP\";\r\n\t\t\t}\r\n\t\t}\r\n\t}\r\n}"
+#define ITEM(n, type, def) "\t\t\titem[" #n "] = {\r\n\t\t\t\taiType = \"" type "\";\r\n\t\t\t\tentityDef = \"" def "\";\r\n\t\t\t}\r\n"
+
+#define CONDUCTOR_CYBER CONDUCTOR_HEAD "\t\t\tnum = 3;\r\n" CONDUCTOR_STOCK_ITEMS \
+    ITEM(2, "524288", "ai/demon/cyberdemon_hell") CONDUCTOR_TAIL
+#define CONDUCTOR_GUARD CONDUCTOR_HEAD "\t\t\tnum = 4;\r\n" CONDUCTOR_STOCK_ITEMS \
+    ITEM(2, "2097152", "ai/demon/talismanguard/staff") ITEM(3, "4194304", "ai/demon/talismanguard/hammer") CONDUCTOR_TAIL
+#define CONDUCTOR_SPIDER CONDUCTOR_HEAD "\t\t\tnum = 3;\r\n" CONDUCTOR_STOCK_ITEMS \
+    ITEM(2, "1048576", "ai/demon/spider_mastermind_base") CONDUCTOR_TAIL
+
+#define WL_A "{\n\tedit = {\n\t\tvalidEncounters = {\n\t\t\tnum = 3;\n\t\t\titem[0] = \"single_archvile\";\n" \
+    "\t\t\titem[1] = \"single_zombie\";\n\t\t\titem[2] = \"single_cyberdemon\";\n\t\t}\n\t}\n}\n"
+#define WL_B "{\n\tedit = {\n\t\tvalidEncounters = {\n\t\t\tnum = 3;\n\t\t\titem[0] = \"single_archvile\";\n" \
+    "\t\t\titem[1] = \"single_zombie\";\n\t\t\titem[2] = \"single_spider_mastermind\";\n\t\t}\n\t}\n}\n"
+
+/* animWeb-style text: outside the composable grammar (no '='). */
+#define AW_TEXT(extra) "{\n\tprops {\n\t\tgridSize 32\n\t\tmodelInfos {\n\t\t\t\"zion/characters/monsters/cyberdemon/base/cyberdemon.md6\" \"\"\n\t\t}\n\t}\n" extra "}\n"
+
+static int cf_source(void *c, const char *type, const char *name)
+{
+    (void)c;
+    if (!_stricmp(type, "animWeb") && !_stricmp(name, "player/fp_hands_mp")) return 1;
+    if (!_stricmp(type, "md6Def") && !_stricmp(name, "zion/stock/known.md6")) return 1;
+    return 0;
+}
+static const sh_modserve_engine_ops g_cf = { NULL, cf_source, fake_register, fake_load };
+
+static void test_compose_unit(void)
+{
+    const char *t[3];
+    char *out;
+    int added = -1;
+    /* Three packs each appending to one list: the union, renumbered. */
+    t[0] = CONDUCTOR_CYBER; t[1] = CONDUCTOR_GUARD; t[2] = CONDUCTOR_SPIDER;
+    out = sh_modserve_test_compose(t, 3, &added);
+    CHECK(out && added == 3);
+    if (out) {
+        CHECK(strstr(out, "aiTypeList = {\n\t\t\tnum = 6;\n") != NULL);
+        CHECK(strstr(out, "item[2] = {\n\t\t\t\taiType = \"524288\";") != NULL);
+        CHECK(strstr(out, "item[3] = {\n\t\t\t\taiType = \"2097152\";") != NULL);
+        CHECK(strstr(out, "item[5] = {\n\t\t\t\taiType = \"1048576\";\n\t\t\t\tentityDef = \"ai/demon/spider_mastermind_base\";") != NULL);
+        CHECK(strstr(out, "globalAIMods = {\n\t\t\tnum = 1;") != NULL);
+        CHECK(strstr(out, "color = ( 1, 1, 1, 1 );") != NULL && strstr(out, "editorVars {\n") != NULL);
+        CHECK(strstr(out, "inherit = \"ai/base/conductor\";") != NULL);
+        /* The result composes again with an input unchanged (a fixed point). */
+        {
+            int again = -1;
+            char *twice;
+            t[0] = out; t[1] = CONDUCTOR_GUARD;
+            twice = sh_modserve_test_compose(t, 2, &again);
+            CHECK(twice && again == 0 && !strcmp(twice, out));
+            free(twice);
+        }
+        free(out);
+    }
+    /* Scalar items match by value, wherever they sit. */
+    t[0] = WL_A; t[1] = WL_B;
+    out = sh_modserve_test_compose(t, 2, &added);
+    CHECK(out && added == 1 && strstr(out, "num = 4;") && strstr(out, "item[3] = \"single_spider_mastermind\";"));
+    free(out);
+    /* One entry with two meanings, a scalar that differs outside a list, a
+     * member only one text has, and texts outside the grammar: no composition. */
+    t[0] = CONDUCTOR_CYBER;
+    t[1] = CONDUCTOR_HEAD "\t\t\tnum = 3;\r\n" CONDUCTOR_STOCK_ITEMS ITEM(2, "524288", "ai/demon/something_else") CONDUCTOR_TAIL;
+    CHECK(sh_modserve_test_compose(t, 2, &added) == NULL);
+    t[0] = "{\n\tinherit = \"a\";\n}\n"; t[1] = "{\n\tinherit = \"b\";\n}\n";
+    CHECK(sh_modserve_test_compose(t, 2, &added) == NULL);
+    t[0] = "{\n\tinherit = \"a\";\n}\n"; t[1] = "{\n\tinherit = \"a\";\n\tclass = \"x\";\n}\n";
+    CHECK(sh_modserve_test_compose(t, 2, &added) == NULL);
+    t[0] = AW_TEXT(""); t[1] = AW_TEXT("\tlayers {\n\t}\n");
+    CHECK(sh_modserve_test_compose(t, 2, &added) == NULL);
+    t[0] = "{ unterminated"; t[1] = WL_A;
+    CHECK(sh_modserve_test_compose(t, 2, &added) == NULL);
+}
+
+static void test_conflicts(void)
+{
+    char top[MAX_PATH], root[MAX_PATH], legacy[MAX_PATH], text[4096], aw_hash[65];
+    char *slash;
+    sh_modserve_conflict c;
+    sh_modserve_hit hit;
+    sh_modserve_plan p;
+    sh_modserve_gates r;
+    const char *hashes[1];
+    int unknown = 0, ready;
+    test_compose_unit();
+    strcpy_s(top, sizeof top, g_root);
+    slash = strrchr(top, '\\');
+    if (slash) *slash = 0;
+    _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\conflicts\\mods", top);
+    _snprintf_s(legacy, sizeof legacy, _TRUNCATE, "%s\\legacy", root);
+    mkdirs(legacy);
+    g_bundle_extra = "\"extra\": {\"legacy\": {}},\n  ";
+    {
+        /* The owner's tree, reduced: two builds of one authored boss mod with
+         * the same animWeb bytes, the map-delivered copy of it with one line
+         * different, and two more bosses, all appending to the conductor and
+         * the whitelist. */
+        static const fx_file cy[] = {
+            { CYB_AW, AW_TEXT("\tcustomFlags AW_CF_IDLE_CYCLE\n"), -1, "animWeb", "zion/boss/cyberdemon_ai", NULL, 'a' },
+            { CONDUCTOR, CONDUCTOR_CYBER, -1, "entityDef", "ai/conductor/coop/snapmap_default", NULL, 'c' },
+            { WHITELIST, WL_A, -1, "snapPropertyInspector_WhiteListEncounterDecl", "single_encounters_white_list_inspector", NULL, 'w' },
+        };
+        static const fx_file dl[] = {
+            { CYB_AW, AW_TEXT(""), -1, "animWeb", "zion/boss/cyberdemon_ai", NULL, 'b' },
+            { CONDUCTOR, CONDUCTOR_CYBER, -1, "entityDef", "ai/conductor/coop/snapmap_default", NULL, 'c' },
+        };
+        static const fx_file gd[] = {
+            { CONDUCTOR, CONDUCTOR_GUARD, -1, "entityDef", "ai/conductor/coop/snapmap_default", NULL, 'd' },
+        };
+        static const fx_file sp[] = {
+            { CONDUCTOR, CONDUCTOR_SPIDER, -1, "entityDef", "ai/conductor/coop/snapmap_default", NULL, 'e' },
+            { WHITELIST, WL_B, -1, "snapPropertyInspector_WhiteListEncounterDecl", "single_encounters_white_list_inspector", NULL, 'f' },
+        };
+        make_bundle(root, "local.cyberdemon@0.0.0+1", "local.cyberdemon", "0.0.0", '1',
+                    "\"" CYB_AW "\", \"" CONDUCTOR "\", \"" WHITELIST "\"", cy, 3, "{\"validated\": true, \"installedAt\": 10}");
+        make_bundle(root, "local.cyberdemon@0.0.0-05238b2e+1", "local.cyberdemon", "0.0.0-05238b2e", '2',
+                    "\"" CYB_AW "\", \"" CONDUCTOR "\", \"" WHITELIST "\"", cy, 3, "{\"validated\": true, \"installedAt\": 11}");
+        make_bundle(legacy, "cyberdemon@3d0fabc7bbc8194f", "cyberdemon", "legacy-3d0fabc7bbc8194f", '3',
+                    "\"" CYB_AW "\", \"" CONDUCTOR "\"", dl, 2, "{\"validated\": true, \"installedAt\": 99}");
+        make_bundle(root, "local.hell-guard@0.0.0+1", "local.hell-guard", "0.0.0", '4', "\"" CONDUCTOR "\"", gd, 1,
+                    "{\"validated\": true, \"installedAt\": 12}");
+        make_bundle(root, "local.spider-mastermind@0.0.0+1", "local.spider-mastermind", "0.0.0", '5',
+                    "\"" CONDUCTOR "\", \"" WHITELIST "\"", sp, 2, "{\"validated\": true, \"installedAt\": 13}");
+    }
+    {
+        /* Needs decide: the later-installed copy names an md6Def nothing installed provides. */
+        static const fx_file n1[] = {
+            { NEEDY, "{ pain a }", -1, "aiPainGraph", "cyberdemon_ai", "[{\"type\":\"md6Def\",\"name\":\"zion/nowhere.md6\"}]", '1' },
+        };
+        static const fx_file n2[] = {
+            { NEEDY, "{ pain b }", -1, "aiPainGraph", "cyberdemon_ai", "[{\"type\":\"md6Def\",\"name\":\"zion/here.md6\"}]", '2' },
+            { "generated/decls/md6def/zion/here.md6.decl", "{ md6 }", -1, "md6Def", "zion/here.md6", NULL, '3' },
+        };
+        make_bundle(root, "needs.late@1.0.0", "needs.late", "1.0.0", '6', "\"" NEEDY "\"", n1, 1,
+                    "{\"validated\": true, \"installedAt\": 500}");
+        make_bundle(root, "needs.ok@1.0.0", "needs.ok", "1.0.0", '7', "\"" NEEDY "\", \"generated/decls/md6def/zion/here.md6.decl\"",
+                    n2, 2, "{\"validated\": true, \"installedAt\": 400}");
+    }
+    {
+        /* animWebs naming models: missing (a new name and a stock shadow),
+         * provided by the bundle, and known to the engine. */
+        static const fx_file aw[] = {
+            { "generated/decls/animweb/designsystems/med_station.decl",
+              "{\n\tprops {\n\t\tmodelInfos {\n\t\t\t\"zion/objects/props_set/kiosks/wallhealthstation.md6\" \"\"\t// modelIndex 0\n\t\t}\n\t}\n}\n",
+              -1, "animWeb", "designsystems/med_station", NULL, '1' },
+            { "generated/decls/animweb/designsystems/good.decl",
+              "{\n\tprops {\n\t\tmodelInfos {\n\t\t\t\"zion/props/door.md6\" \"\"\n\t\t\t\"zion/stock/known.md6\" \"\"\n\t\t}\n\t}\n}\n",
+              -1, "animWeb", "designsystems/good", NULL, '2' },
+            { "generated/decls/md6def/zion/props/door.md6.decl", "{ md6 }", -1, "md6Def", "zion/props/door.md6", NULL, '3' },
+            { "generated/decls/animweb/player/fp_hands_mp.decl",
+              "{\n\tprops {\n\t\tmodelInfos {\n\t\t\t\"zion/player/human/base/mp.md6\" \"\"\n\t\t}\n\t}\n}\n",
+              -1, "animWeb", "player/fp_hands_mp", NULL, '4' },
+        };
+        g_bundle_extra = "\"extra\": {\"legacy\": {}},\n  \"requirements\": {\"cvars\": {\"g_useResourceBlackList\": \"0\"}},\n  ";
+        make_bundle(root, "aw.pack@0.0.0+1", "aw.pack", "0.0.0", '8',
+                    "\"generated/decls/animweb/designsystems/med_station.decl\", \"generated/decls/animweb/designsystems/good.decl\", "
+                    "\"generated/decls/md6def/zion/props/door.md6.decl\", \"generated/decls/animweb/player/fp_hands_mp.decl\"",
+                    aw, 4, NULL);
+        hash64('8', aw_hash);
+    }
+    g_bundle_extra = NULL;
+
+    log_clear();
+    CHECK(sh_modserve_index_build(root) == 8);
+    /* The animWeb the boss bundles carry: one copy serves, never none. */
+    CHECK(log_has("conflict: shadow '" CYB_AW "' is provided by local.cyberdemon@0.0.0, local.cyberdemon@0.0.0-05238b2e, "
+                  "cyberdemon@legacy-3d0fabc7bbc8194f; serving local.cyberdemon@0.0.0-05238b2e (most providers carry these bytes)"));
+    CHECK(sh_modserve_lookup(CYB_AW, &hit) && !strcmp(hit.bundle_id, "local.cyberdemon"));
+    CHECK(open_text(CYB_AW, text, sizeof text) == 1 && strstr(text, "AW_CF_IDLE_CYCLE"));
+    CHECK(sh_modserve_probe_claims(CYB_AW));
+    /* The conductor: every boss's aiTypeList entry is served. */
+    CHECK(log_has("conflict: shadow '" CONDUCTOR "' is provided by local.cyberdemon@0.0.0, local.cyberdemon@0.0.0-05238b2e, "
+                  "local.hell-guard@0.0.0, local.spider-mastermind@0.0.0, cyberdemon@legacy-3d0fabc7bbc8194f; serving "));
+    CHECK(log_has("'s text with the others' list entries (3 added)"));
+    CHECK(sh_modserve_conflict_info(CONDUCTOR, &c) && c.composed && c.count == 5 && strstr(c.reason, "composed: 3 list entries"));
+    CHECK(open_text(CONDUCTOR, text, sizeof text) == 1 && strstr(text, "num = 6;") && strstr(text, "\"524288\"") &&
+          strstr(text, "\"2097152\"") && strstr(text, "\"4194304\"") && strstr(text, "\"1048576\""));
+    CHECK(sh_modserve_lookup(CONDUCTOR, &hit) && hit.size == strlen(text));
+    CHECK(open_text(WHITELIST, text, sizeof text) == 1 && strstr(text, "single_cyberdemon") && strstr(text, "single_spider_mastermind"));
+    {
+        sh_modserve_stats st;
+        sh_modserve_get_stats(&st);
+        CHECK(st.conflicts == 4 && st.conflicts_composed == 2);
+    }
+    /* Needs before recency. */
+    CHECK(log_has("conflict: shadow '" NEEDY "' is provided by needs.late@1.0.0, needs.ok@1.0.0; serving needs.ok@1.0.0 "
+                  "(its needs resolve against the installed bundles where the others' do not)"));
+    CHECK(open_text(NEEDY, text, sizeof text) == 1 && !strcmp(text, "{ pain b }"));
+    CHECK(!log_has("serving neither"));
+
+    /* Registration: an animWeb whose models block names a model nothing
+     * provides is withdrawn; the stock one is served by the game again. */
+    hashes[0] = aw_hash;
+    CHECK(sh_modserve_plan_bundles(hashes, 1, &p, &unknown) == 4 && unknown == 0);
+    log_clear();
+    g_calls[0] = 0;
+    ready = sh_modserve_plan_run(&p, &g_cf, "map");
+    CHECK(ready == 3);
+    CHECK(log_has("map: animWeb 'designsystems/med_station' (aw.pack) NOT READY: it names model "
+                  "'zion/objects/props_set/kiosks/wallhealthstation.md6', which neither a bundle nor the game provides"));
+    CHECK(log_has("map: animWeb 'player/fp_hands_mp' (aw.pack) shadow WITHDRAWN: it names model 'zion/player/human/base/mp.md6'"));
+    CHECK(log_has("map: animWeb 'designsystems/good' (aw.pack) READY"));
+    CHECK(!sh_modserve_lookup("generated/decls/animweb/designsystems/med_station.decl", NULL));
+    CHECK(!sh_modserve_probe_claims("generated/decls/animweb/designsystems/med_station.decl"));
+    CHECK(!sh_modserve_lookup("generated/decls/animweb/player/fp_hands_mp.decl", NULL));
+    CHECK(sh_modserve_lookup("generated/decls/animweb/designsystems/good.decl", NULL));
+    sh_modserve_plan_free(&p);
+    /* A rescan (an install, a conversion) keeps them withdrawn. */
+    CHECK(sh_modserve_index_rescan() == 8);
+    CHECK(!sh_modserve_lookup("generated/decls/animweb/designsystems/med_station.decl", NULL));
+    CHECK(!sh_modserve_lookup("generated/decls/animweb/player/fp_hands_mp.decl", NULL));
+    CHECK(sh_modserve_lookup("generated/decls/animweb/designsystems/good.decl", NULL));
+    CHECK(sh_modserve_lookup(CONDUCTOR, &hit) && hit.size > 0);
+
+    /* The Play-time re-check: live gates log once and set nothing; a gate set
+     * back to 1 is disarmed again. */
+    gates_reset(1, 0, SH_MODSERVE_GATE_SET);
+    log_clear();
+    CHECK(sh_modserve_requirements_check(&g_gates, "play", &r) == 1 && g_gate_sets == 0);
+    CHECK(log_has("MODS: play: requirements live: g_useResourceBlackList=0 (unchanged since the last pass)"));
+    gates_reset(1, 1, SH_MODSERVE_GATE_SET);
+    log_clear();
+    CHECK(sh_modserve_requirements_check(&g_gates, "play", &r) == 1 && g_gate_val[1] == 0 && r.changed == SH_MODSERVE_REQ_RESOURCE);
+    CHECK(log_has("MODS: play: requirements applied: g_useResourceBlackList=0") && !log_has("requirements live"));
+    gates_reset(1, 1, SH_MODSERVE_GATE_SET);
+}
+
 static void remove_tree(const char *dir)
 {
     char pattern[MAX_PATH], path[MAX_PATH];
@@ -933,6 +1188,7 @@ int main(void)
     test_cost();
     test_rescan();
     test_requirements();
+    test_conflicts();
     strcpy_s(top, sizeof top, g_root);
     slash = strrchr(top, '\\');
     if (slash) { *slash = 0; remove_tree(top); }
