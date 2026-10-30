@@ -34,7 +34,9 @@ param(
                            # The one-time move of the retired overrides folder into the mods store.
                            "modmigrate.c",
                            # The mod store client (WinHTTP), upload/download and the rawmap ZIP export.
-                           "modnet.c", "modsync.c", "modexport.c"),
+                           "modnet.c", "modsync.c", "modexport.c",
+                           # Mod virtual-texture families, and the sh_vt diagnostic.
+                           "modvt.c", "vt_harness.c"),
     [string]$Out = "XINPUT1_4.dll",
     # Diag adds SH_DIAG and the crash/environment logger for troubleshooting.
     [switch]$Diag,

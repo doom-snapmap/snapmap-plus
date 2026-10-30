@@ -932,6 +932,17 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "40 55 56 57 41 54 41 55 41 56 41 57 48 81 EC 30 01 00 00 48 8D 6C 24 40 "
       "48 C7 45 10 FE FF FF FF 48 89 9D 40 01 00 00 48 8B 05 ?? ?? ?? ??",
       0x1A4BC80u, 0x1A64C70u },
+    /* Mod virtual-texture families (modvt.c) and the sh_vt diagnostic. */
+    { "VtSetSource",        /* idVirtualTexture::SetSource(rec, name, path, flavor, type, direct, reader) -> bool.
+                             * Its head calls the VT-system flush with LEA RCX,[sys] and then Release(rec). */
+      "40 55 53 56 57 41 54 41 55 41 56 41 57 48 8D AC 24 ?? BE FF FF B8 ?? 42 00 00 E8 ?? ?? ?? ?? "
+      "48 2B E0 48 C7 45 ?? FE FF FF FF 48 8B 05 ?? ?? ?? ??",
+      0x185AC30u, 0x185BC90u },
+    { "VtForMaterial",      /* idVirtualTextureSystem::VirtualTextureForMaterial(sys, material) -> record.
+                             * MOV RAX,[R13+table+8] returns record 1 for "_vmtr". */
+      "41 ?? 41 ?? 48 81 EC 88 01 00 00 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 84 24 50 01 00 00 "
+      "4C 8B ?? E0 00 00 00 4C 8B E9 48 89 54 24 40 4D 85 ??",
+      0x17E8230u, 0x17E9100u },
     { "PrefabDtor",         /* void(prefab). Destroy temporary storage after selection serialization. */
       "40 57 48 83 EC 30 48 C7 44 24 20 FE FF FF FF 48 89 5C 24 40 48 8B F9 "
       "48 81 C1 20 01 00 00 E8 ?? ?? ?? ?? 90 48 8D 8F F0 00 00 00",

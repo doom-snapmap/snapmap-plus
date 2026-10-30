@@ -181,6 +181,18 @@ Converting assets from other games is Doomforge's job, not this product's. New n
   and full bar) instead of SnapMap's forced number. It changes only the display, applies to every
   installed mod at startup, and two mods asking different things for one weapon turn the setting off
   for all weapons, with both named in the log.
+- A mod can carry its own virtual-texture family (the page format a material streams its
+  diffuse, specular and normal detail from): the members `virtualtextures/mods/<id>/<family>_sq<N>.mega2`
+  (N 1 to 16), and materials naming it with `landpagefile "mods/<id>/<family>"` and an explicit
+  `virtualmapping`. The family is registered with the game when the mod is installed (or, for mods
+  present at startup, when the editor is first opened or a map using it loads), before any of its
+  materials is read, with no console command; `sh_mods status` and `sh_vt list` show it. Each family
+  takes one of the game's 30 usable page-source records and about 14 MB of memory; a family that
+  finds them all in use is not registered and its materials draw with default images. On OpenGL a
+  family is registered only when the graphics driver offers AMD sparse textures; otherwise the log
+  says it cannot be served. Removing the mod releases the family, unless the editor or a map has
+  been opened since it was registered, in which case it stays until DOOM exits. The format a tool
+  must write is in [vt-baker.md](vt-baker.md).
 - The first start of this release moves the packages in the retired
   `%LOCALAPPDATA%\snapmap-plus\overrides\` folder into `mods\`, once. Each folder there with a
   `package.json` or `mod.json` becomes an installed mod (`<id>@<version>+<build>`, its requirements,
@@ -225,6 +237,7 @@ Registered with the engine command system; run from the DOOM console.
 | `sh_gridsize` | Print the selected Grid Room's size, or `sh_gridsize <x> <y> <z> [instance]` to resize it through the same path as Module Properties. Prints the applied size and the reason any axis was limited or the edit refused. `sh_gridsize templates` lists, for the stock modern room and each resized variant, the module entity templates a loaded room receives (diagnostic). Without an instance it uses the Blueprint selection, then the room whose properties are open. |
 | `sh_help` | List every Snapmap+ console command and cvar with its description in one place. |
 | `sh_mods` | Installed mods (see [Mods](#mods)). Bare or `status`: what the serving table holds and serves. `rescan` rereads the mods folder; `palette rebuild` adds rows of mods installed after the editor first opened. `build "<folder>"` checks a mod and writes its `bundle.json`; `install "<folder>"` adds it to the store, verifies it and rescans; `list` shows every bundle folder and its state; `verify "<id@version+build>"` rehashes one installed build (`id@version` checks every build). `copystock "<engine path>" "<file>"` writes the bytes of an installed game file to a new file, so a stock mesh or animation can be placed in a mod under a new name; it never replaces a file. `migrate` moves the retired `overrides\` folder into the store again in the background (`--again` repeats a completed move; see [Mods](#mods)). A folder or file without a drive is taken relative to the mods folder. |
+| `sh_vt` | Virtual-texture diagnostic. `status` and `list` show the game's page-source records, marking those registered for an installed mod's family; `sync` registers the installed mods' families now; `register "<name>" "<path>" [flavor]` and `release "<name>"` create and remove a record by hand for format experiments (never a mod's); `decode <family> <level> <x> <y> <out>` decodes one stored page to its five planes. |
 | `sh_navmesh` | Report the baked AI navigation the loaded map is serving — for each marked module copy, each demon size's outcome (built, built with parts left out, keeps its shipped navigation, or not baked yet) with its reason and which faces of each marked box carry a floor climb for how many demons (or the commonest reason none does), and every box the map read left out with why; it also says which map the last Play read its boxes from. Leads with how many map loads have reached the navigation table this session and what the last one found, so a map that quietly brought none is distinguishable from a load that never happened. |
 | `sh_navmesh marks <n>` | Mark the first `n` marked volumes of every module red, the way a refused bake marks the ones it could not place, so the marks can be checked without a map that refuses. `0` clears them. |
 | `sh_superscriptop` | Dump SuperScript / eventDef data (e.g. emit the eventDef table as a header). |

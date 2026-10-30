@@ -381,6 +381,18 @@ typedef void (*sh_modserve_bundle_fn)(void *context, const char *id, const char 
                                       int files, int legacy);
 void sh_modserve_each_bundle(sh_modserve_bundle_fn fn, void *context);
 
+/* Visit every file the published table serves (admitted bundles, conflict
+ * winners, not withdrawn), in index order. The strings stay valid for the
+ * process. Used by modvt.c to find the bundles' virtual-texture members. */
+typedef void (*sh_modserve_file_fn)(void *context, const char *request, uint64_t size, const char *bundle_id,
+                                    const char *version, const char *bundle_hash);
+void sh_modserve_each_served(sh_modserve_file_fn fn, void *context);
+
+/* One function called after every table this layer publishes (boot, rescan),
+ * on the thread that built it, outside the build lock. NULL clears it. */
+typedef void (*sh_modserve_index_fn)(void);
+void sh_modserve_set_index_listener(sh_modserve_index_fn fn);
+
 /* Whether `name` is a snapEditorEntityDef that an admitted bundle provides
  * (palette reporting). */
 int sh_modserve_is_mod_sedef(const char *name);
