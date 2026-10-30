@@ -72,12 +72,12 @@ int sh_ui_bridge_install(void)
 
     /* Load the frontend and its dependencies from the deployed overlay directory. */
     SetDllDirectoryA(".\\snapmap-plus\\");
-    g_ui_dll = LoadLibraryA(".\\snapmap-plus\\snapmap-plus-ui.dll");
+    g_ui_dll = LoadLibraryA(SH_UI_DLL_PATH);
     if (!g_ui_dll) {
         DWORD e = GetLastError();
-        char line[160];
+        char line[200];
         _snprintf_s(line, sizeof line, _TRUNCATE,
-            "C0: LoadLibraryA(.\\snapmap-plus\\snapmap-plus-ui.dll) FAILED err=%lu "
+            "C0: LoadLibraryA(" SH_UI_DLL_PATH ") FAILED err=%lu "
             "(interface still created; sh will report it exists)", e);
         backend_log(line);
         /* Interface creation succeeded even though the window cannot start. */
@@ -99,6 +99,6 @@ int sh_ui_bridge_install(void)
         return 1;
     }
     CloseHandle(h);
-    backend_log("C0: snapmap-plus-ui.dll loaded + sh_ui_init thread spun (interface handed over)");
+    backend_log("C0: " SH_UI_DLL_PATH " loaded + sh_ui_init thread spun (interface handed over)");
     return 1;
 }

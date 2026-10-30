@@ -73,6 +73,15 @@ steps happen; its copy of itself is then removed from `%LOCALAPPDATA%\snapmap-pl
 and the current installer remains the stable copy (see
 [packaging](../docs/packaging.md#supported-build-and-the-final-2018-release)).
 
+Release bundles also carry v0.2.1-beta.19's `XINPUT1_3.dll` and
+`snapmap-plus\snapmap-plus-ui.dll` byte for byte, so an update by an installer without
+build detection never changes a 2018 install's working files (see
+[packaging](../docs/packaging.md#the-bundle)). On the April 2024 build this installer
+installs only `XINPUT1_4.dll` and `snapmap-plus\snapmap-plus-ui-13954591.dll`, and
+removes the two 2018 files when an earlier installer left them: recorded ones, and
+unrecorded ones whose bytes are the bundle's. In the interactive prompt, a 2018 install
+whose record names another release is offered the update that restores it.
+
 Every downloaded release asset must match the size and `sha256:` digest GitHub
 publishes for it; a short, failed or altered download is refused and its temporary
 files are removed before anything is installed or replaced. The bundle's files are

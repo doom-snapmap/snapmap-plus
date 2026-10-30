@@ -58,7 +58,7 @@ func TestLegacyMigrationOnInstall(t *testing.T) {
 	if exists(filepath.Join(doom, "snaphak", "snaphakui.dll")) {
 		t.Error("the original's snaphak\\snaphakui.dll should be removed (ours deploys under snapmap-plus\\)")
 	}
-	if got := readF(t, filepath.Join(doom, "snapmap-plus", "snapmap-plus-ui.dll")); got != "ui-v1" {
+	if got := readF(t, filepath.Join(doom, "snapmap-plus", "snapmap-plus-ui-13954591.dll")); got != "ui-v1" {
 		t.Errorf("snapmap-plus-ui.dll = %q, want ours (%q)", got, "ui-v1")
 	}
 	for _, rel := range []string{"superscriptx64.dll", "bink2w64.dll", "DOOMx64vk.exe"} {

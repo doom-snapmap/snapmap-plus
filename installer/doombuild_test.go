@@ -36,7 +36,7 @@ func bundleDir(t *testing.T, dir, proxy, tag string) string {
 	t.Helper()
 	overlay := map[string]string{
 		proxy: "backend-" + tag,
-		filepath.Join("snapmap-plus", "snapmap-plus-ui.dll"): "ui-" + tag,
+		filepath.Join("snapmap-plus", "snapmap-plus-ui-13954591.dll"): "ui-" + tag,
 	}
 	manifest := ""
 	for rel, content := range overlay {

@@ -29,8 +29,8 @@ func TestInstallUninstallRoundTrip(t *testing.T) {
 	// a synthetic dist with a MANIFEST.sha256 (matches package.ps1's "hash  relpath" format)
 	overlay := map[string]string{
 		"XINPUT1_4.dll": "backend",
-		filepath.Join("snapmap-plus", "snapmap-plus-ui.dll"): "ui",
-		filepath.Join("platforms", "qwindows.dll"):           "qt",
+		filepath.Join("snapmap-plus", "snapmap-plus-ui-13954591.dll"): "ui",
+		filepath.Join("platforms", "qwindows.dll"):                    "qt",
 	}
 	manifest := ""
 	for rel, content := range overlay {
@@ -212,8 +212,8 @@ func synthDist(t *testing.T, dir, tag string) string {
 	dist := filepath.Join(dir, "dist-"+tag)
 	overlay := map[string]string{
 		"XINPUT1_4.dll": "backend-" + tag,
-		filepath.Join("snapmap-plus", "snapmap-plus-ui.dll"): "ui-" + tag,
-		filepath.Join("platforms", "qwindows.dll"):           "qt-" + tag,
+		filepath.Join("snapmap-plus", "snapmap-plus-ui-13954591.dll"): "ui-" + tag,
+		filepath.Join("platforms", "qwindows.dll"):                    "qt-" + tag,
 	}
 	manifest := ""
 	for rel, content := range overlay {
