@@ -291,37 +291,28 @@ static mp_job *mp_job_new(int kind, const char *ref, const char (*hashes)[SH_MOD
 
 /* Refs of provisional claims this installation still holds: claims and queued
  * uploads named with the provisional prefix (read-only: modsync owns both
- * files). Returns a malloc'd array of `*n` refs. */
+ * sections of mods\snapmap-plus.json). Returns a malloc'd array of `*n` refs. */
 static char (*mp_provisional_refs(int *n))[MP_REF_CAP]
 {
-    static const char *const files[2][2] = { { MODSYNC_CLAIMS_FILE, "claims" }, { MODSYNC_PENDING_FILE, "pending" } };
-    char root[MAX_PATH * 4], path[MAX_PATH * 4];
+    static const char *const sections[2] = { MODSYNC_CLAIMS_SECTION, MODSYNC_PENDING_SECTION };
+    char root[MAX_PATH * 4];
     char (*out)[MP_REF_CAP] = NULL;
     int count = 0, cap = 0;
     size_t prefix = strlen(SH_MODPUBLISH_PENDING_PREFIX);
     *n = 0;
     if (!sh_ms_root(root, sizeof root)) return NULL;
     for (int f = 0; f < 2; f++) {
-        FILE *fp;
-        long size;
-        char *text;
+        char *text = NULL;
+        size_t size;
         mpj *doc, *member;
-        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", root, files[f][0]);
-        modsync_store_lock();   /* modsync writes these files under the store lock */
-        if (fopen_s(&fp, path, "rb") || !fp) { modsync_store_unlock(); continue; }
-        fseek(fp, 0, SEEK_END);
-        size = ftell(fp);
-        fseek(fp, 0, SEEK_SET);
-        text = size > 0 && size < (8 << 20) ? malloc((size_t)size + 1) : NULL;
-        if (text && fread(text, 1, (size_t)size, fp) != (size_t)size) { free(text); text = NULL; }
-        fclose(fp);
+        modsync_store_lock();   /* modsync writes these sections under the store lock */
+        if (sh_mb_record_get(root, sections[f], &text) != 1 || !text) { free(text); modsync_store_unlock(); continue; }
         modsync_store_unlock();
-        if (!text) continue;
-        text[size] = 0;
-        doc = mpj_parse(text, (size_t)size);
-        SecureZeroMemory(text, (size_t)size);
+        size = strlen(text);
+        doc = mpj_parse(text, size);
+        SecureZeroMemory(text, size);
         free(text);
-        member = doc ? mpj_get(doc, files[f][1]) : NULL;
+        member = doc;
         if (member && member->type == MPJ_OBJ) {
             for (int i = 0; i < member->n; i++) {
                 const char *key = member->keys[i];
@@ -732,10 +723,11 @@ void sh_modpublish_unpublished(const char *item_id)
 
 /* ------------------------------------------------------------ links */
 
-/* mods\publish-links.json: {"format":1,"links":{"<item>":{"cloud":"..","local":".."}}}.
- * Main thread only (feed post, delete, job reports); written through a
+/* The "links" section of mods\snapmap-plus.json: {"<item>":{"cloud":"..","local":"..","at":..}},
+ * edited here as the document {"format":1,"links":{...}}. Main thread only
+ * (feed post, delete, job reports); the record layer writes through a
  * temporary and a rename. Ids are kept only when they are plain (letters,
- * digits, '-', '_', '.', ':'), so the file needs no escaping. */
+ * digits, '-', '_', '.', ':'), so the section needs no escaping. */
 
 static int mp_link_id(const char *s)
 {
@@ -747,56 +739,30 @@ static int mp_link_id(const char *s)
     return 1;
 }
 
-static int mp_links_path(char *out, size_t cap)
-{
-    char root[MAX_PATH * 4];
-    if (!sh_ms_root(root, sizeof root)) return 0;
-    _snprintf_s(out, cap, _TRUNCATE, "%s\\%s", root, SH_MODPUBLISH_LINKS_FILE);
-    return 1;
-}
-
 /* The links document, or a fresh empty one; NULL only without memory. */
 static mpj *mp_links_load(void)
 {
-    char path[MAX_PATH * 4];
-    size_t len = 0;
-    unsigned char *text = mp_links_path(path, sizeof path) ? sh_mb_read_file(path, 1 << 20, &len) : NULL;
-    mpj *doc = text ? mpj_parse((const char *)text, len) : NULL;
+    char root[MAX_PATH * 4], *text = NULL;
+    mpj *doc, *links = NULL;
+    if (sh_ms_root(root, sizeof root) && sh_mb_record_get(root, SH_MODPUBLISH_LINKS_SECTION, &text) == 1 && text)
+        links = mpj_parse(text, strlen(text));
     free(text);
-    if (doc && (doc->type != MPJ_OBJ || !mpj_get(doc, "links") || mpj_get(doc, "links")->type != MPJ_OBJ)) {
+    if (links && links->type != MPJ_OBJ) { mpj_free(links); links = NULL; }
+    doc = mpj_new(MPJ_OBJ);
+    if (doc && (!mpj_set(doc, "format", mpj_new_int(1)) || !mpj_set(doc, "links", links ? links : mpj_new(MPJ_OBJ)))) {
         mpj_free(doc);
         doc = NULL;
-    }
-    if (!doc) {
-        doc = mpj_new(MPJ_OBJ);
-        if (doc && (!mpj_set(doc, "format", mpj_new_int(1)) || !mpj_set(doc, "links", mpj_new(MPJ_OBJ)))) {
-            mpj_free(doc);
-            doc = NULL;
-        }
     }
     return doc;
 }
 
 static int mp_links_save(const mpj *doc)
 {
-    char path[MAX_PATH * 4], tmp[MAX_PATH * 4 + 16];
-    wchar_t *wpath, *wtmp;
+    char root[MAX_PATH * 4];
+    const mpj *links = doc ? mpj_get(doc, "links") : NULL;
     size_t len = 0;
-    char *text = mpj_dump(doc, &len);
-    FILE *fp = NULL;
-    int ok = 0;
-    if (!text || !mp_links_path(path, sizeof path)) { free(text); return 0; }
-    _snprintf_s(tmp, sizeof tmp, _TRUNCATE, "%s.tmp-%lu", path, GetCurrentProcessId());
-    wpath = sh_mb_wpath(path);
-    wtmp = sh_mb_wpath(tmp);
-    if (wpath && wtmp && !_wfopen_s(&fp, wtmp, L"wb") && fp) {
-        ok = fwrite(text, 1, len, fp) == len;
-        ok = !fclose(fp) && ok;
-        ok = ok && MoveFileExW(wtmp, wpath, MOVEFILE_REPLACE_EXISTING);
-        if (!ok) DeleteFileW(wtmp);
-    }
-    free(wpath);
-    free(wtmp);
+    char *text = links ? mpj_dump(links, &len) : NULL;
+    int ok = text && sh_ms_root(root, sizeof root) && sh_mb_record_put(root, SH_MODPUBLISH_LINKS_SECTION, text);
     free(text);
     return ok;
 }
@@ -904,12 +870,11 @@ void sh_modpublish_deleted(const char *local_id, const char *cloud_id)
     }
     if (!mp_link_id(cloud_id) && !mp_link_id(local_id)) return;
     {
-        /* Nothing published from this installation: no file, nothing to do. */
-        char path[MAX_PATH * 4];
-        wchar_t *w = mp_links_path(path, sizeof path) ? sh_mb_wpath(path) : NULL;
-        DWORD attributes = w ? GetFileAttributesW(w) : INVALID_FILE_ATTRIBUTES;
-        free(w);
-        if (attributes == INVALID_FILE_ATTRIBUTES) return;
+        /* Nothing published from this installation: no links, nothing to do. */
+        char root[MAX_PATH * 4], *text = NULL;
+        int has = sh_ms_root(root, sizeof root) && sh_mb_record_get(root, SH_MODPUBLISH_LINKS_SECTION, &text) == 1;
+        free(text);
+        if (!has) return;
     }
     if (!(check = calloc(1, sizeof(*check)))) return;
     if (mp_link_id(cloud_id)) strcpy_s(check->cloud, sizeof check->cloud, cloud_id);

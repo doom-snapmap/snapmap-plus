@@ -1908,30 +1908,64 @@ static int mb_common_fields(sh_mb_bundle *b, const mbj *root, int manifest)
     return 1;
 }
 
-static int mb_parse_descriptor(sh_mb_bundle *b, const char *text, size_t len)
+/* The author block of a descriptor (mod.json without its "snapmap-plus"
+ * member, or package.json). `block` is the product block of the same file, or
+ * NULL: a "legacy" object there (a converted first-generation package, whose
+ * author keys are the package's own) joins "extra" as if the author had
+ * written it, and its "shadows" join the author's, so a rebuild keeps the
+ * grandfathered names. */
+static int mb_descriptor_root(sh_mb_bundle *b, const mbj *root, const mbj *block)
 {
     char cause[SH_MB_CAUSE_MAX];
-    mbj *root = mbj_parse(text, len, cause, sizeof cause);
     mb_buf extra = {0};
     size_t i, kept = 0;
-    int ok = 0;
-    if (!root) { mb_error(b, "%s: %s", b->descriptor, cause); return 0; }
-    if (root->t != MBJ_OBJ) { mb_error(b, "%s must contain one JSON object", b->descriptor); goto done; }
+    const mbj *block_legacy = NULL;
+    if (root->t != MBJ_OBJ) { mb_error(b, "%s must contain one JSON object", b->descriptor); return 0; }
     if (mbj_get(root, "files") || mbj_get(root, "bundle")) {
         mb_error(b, "%s may not contain files or bundle; they are computed when the bundle is built", b->descriptor);
-        goto done;
+        return 0;
     }
-    if (!mb_common_fields(b, root, 0)) goto done;
+    if (block && block->t != MBJ_OBJ) { mb_error(b, "%s \"" SH_MB_BLOCK_KEY "\" must be an object", b->descriptor); return 0; }
+    if (!mb_common_fields(b, root, 0)) return 0;
     {
         /* A converted first-generation package (modlegacy.c) carries a
          * "legacy" object; it stays in "extra" and grandfathers its names. */
         const mbj *lg = mbj_get(root, "legacy");
-        if (lg && lg->t != MBJ_OBJ) { mb_error(b, "%s legacy must be an object", b->descriptor); goto done; }
+        if (lg && lg->t != MBJ_OBJ) { mb_error(b, "%s legacy must be an object", b->descriptor); return 0; }
         b->legacy = lg != NULL;
+        if (!lg && block) {
+            block_legacy = mbj_get(block, "legacy");
+            if (block_legacy && block_legacy->t != MBJ_OBJ) {
+                mb_error(b, "%s \"" SH_MB_BLOCK_KEY "\".legacy must be an object", b->descriptor);
+                return 0;
+            }
+            if (block_legacy) { b->legacy = 1; b->block_legacy = 1; }
+        }
+    }
+    if (block_legacy) {
+        /* The grandfathered shadows the product recorded join the author's. */
+        const mbj *own = mbj_get(root, "shadows"), *kept_list = mbj_get(block, "shadows");
+        if (kept_list && kept_list->t == MBJ_ARR && kept_list->count) {
+            mbj merged;
+            int set;
+            memset(&merged, 0, sizeof merged);
+            merged.t = MBJ_ARR;
+            for (i = 0; own && own->t == MBJ_ARR && i < own->count; i++)
+                if (!mbj_push(&merged, own->items[i], NULL, 0)) { free(merged.items); mb_error(b, "out of memory"); return 0; }
+            for (i = 0; i < kept_list->count; i++)
+                if (!mbj_push(&merged, kept_list->items[i], NULL, 0)) { free(merged.items); mb_error(b, "out of memory"); return 0; }
+            for (i = 0; i < b->shadow_count; i++) free(b->shadows[i]);
+            free(b->shadows);
+            b->shadows = NULL;
+            b->shadow_count = 0;
+            set = mb_set_shadows(b, &merged, 0);
+            free(merged.items);   /* the items belong to root and block */
+            if (!set) return 0;
+        }
     }
     {
         const mbj *st = mbj_get(root, "stock");
-        if (st && !mb_set_stock_decls(b, st)) goto done;
+        if (st && !mb_set_stock_decls(b, st)) return 0;
     }
     /* Everything else (the legacy strings and hud keys, composes, description,
      * an era B schema) is preserved verbatim under "extra". */
@@ -1941,7 +1975,7 @@ static int mb_parse_descriptor(sh_mb_bundle *b, const char *text, size_t len)
         tmp.t = MBJ_OBJ;
         for (i = 0; i < root->count; i++) {
             static const char *const known[] = { "format", "id", "version", "name", "author", "homepage",
-                                                 "requirements", "shadows", "stock", NULL };
+                                                 "requirements", "shadows", "stock", SH_MB_BLOCK_KEY, NULL };
             int k, is_known = 0;
             for (k = 0; known[k]; k++)
                 if (strlen(known[k]) == root->klen[i] && memcmp(known[k], root->keys[i], root->klen[i]) == 0) is_known = 1;
@@ -1950,12 +1984,20 @@ static int mb_parse_descriptor(sh_mb_bundle *b, const char *text, size_t len)
                 (root->klen[i] == 3 && memcmp(root->keys[i], "hud", 3) == 0 && root->items[i]->t != MBJ_OBJ)) {
                 mb_error(b, "%s %s must be an object", b->descriptor, root->keys[i]);
                 free(tmp.items); free(tmp.keys); free(tmp.klen);
-                goto done;
+                return 0;
             }
             if (!mbj_push(&tmp, root->items[i], root->keys[i], root->klen[i])) {
                 free(tmp.items); free(tmp.keys); free(tmp.klen);
                 mb_error(b, "out of memory");
-                goto done;
+                return 0;
+            }
+            kept++;
+        }
+        if (block_legacy) {
+            if (!mbj_push(&tmp, (mbj *)block_legacy, (char *)"legacy", 6)) {
+                free(tmp.items); free(tmp.keys); free(tmp.klen);
+                mb_error(b, "out of memory");
+                return 0;
             }
             kept++;
         }
@@ -1964,16 +2006,13 @@ static int mb_parse_descriptor(sh_mb_bundle *b, const char *text, size_t len)
                 mb_error(b, "%s: %s", b->descriptor, cause);
                 free(tmp.items); free(tmp.keys); free(tmp.klen);
                 free(extra.p);
-                goto done;
+                return 0;
             }
             b->extra = extra.p;
         }
-        free(tmp.items); free(tmp.keys); free(tmp.klen);   /* items and keys belong to root */
+        free(tmp.items); free(tmp.keys); free(tmp.klen);   /* items and keys belong to root and block */
     }
-    ok = 1;
-done:
-    mbj_free(root);
-    return ok;
+    return 1;
 }
 
 /* ---------------------------------------------------------------- walk ---- */
@@ -1989,7 +2028,11 @@ static const char *mb_rp_forbidden(const char *request);
 
 static int mb_is_top_allowed(const char *name)
 {
+    /* The descriptor and mod.json's write-through temporary. The retired
+     * bundle.json, bundle.canonical.json and .state.json of a folder the store
+     * upgrade has not reached yet are tolerated. */
     return _stricmp(name, "mod.json") == 0 || _stricmp(name, "package.json") == 0 ||
+           _strnicmp(name, "mod.json.tmp", 12) == 0 ||
            _stricmp(name, "bundle.json") == 0 || _stricmp(name, "bundle.canonical.json") == 0 ||
            _stricmp(name, ".state.json") == 0;
 }
@@ -2127,6 +2170,7 @@ static void mb_add_declared(sh_mb_bundle *b)
             if (!f->path || !f->request) { mb_error(b, "out of memory"); return; }
             _snprintf_s(f->path, n, _TRUNCATE, "assets/%s", d->request);
             f->stock = 1;
+            f->absent = 1;
         }
         f->declared = (int)k + 1;
     }
@@ -3050,6 +3094,8 @@ static char *mb_emit(const sh_mb_bundle *b, int with_bundle, int with_build, siz
     return o.p;
 }
 
+static void mb_mark_delivered(sh_mb_bundle *b);
+
 static void mb_finish(sh_mb_bundle *b)
 {
     free(b->canonical);
@@ -3057,91 +3103,6 @@ static void mb_finish(sh_mb_bundle *b)
     if (!b->canonical) { mb_error(b, "out of memory"); return; }
     if (b->canonical_len > SH_MB_MANIFEST_MAX) mb_error(b, "the bundle manifest is larger than 1 MiB");
     sh_mb_sha256_hex(b->canonical, b->canonical_len, b->hash);
-}
-
-/* Contract 1 "build": the previous bundle.json in the folder decides it. Equal
- * content (ignoring build and bundle) keeps its number, changed content takes
- * the next one, and a folder without a readable previous build starts at 1. A
- * previous manifest that fails its own checks but still names a build counts
- * as changed, so a number is never reused for different content. */
-static void mb_number_build(sh_mb_bundle *b, const char *folder)
-{
-    char path[MAX_PATH * 4];
-    sh_mb_bundle prev;
-    char *now, *then;
-    size_t n_now = 0, n_then = 0;
-    b->build = 1;
-    if (b->errors) return;
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\bundle.json", folder);
-    if (!sh_mb_load(path, &prev)) {
-        if (prev.build) b->build = prev.build + 1;
-        sh_mb_free(&prev);
-        return;
-    }
-    now = mb_emit(b, 0, 0, &n_now);
-    then = mb_emit(&prev, 0, 0, &n_then);
-    b->build = (now && then && n_now == n_then && memcmp(now, then, n_now) == 0) ? prev.build : prev.build + 1;
-    free(now);
-    free(then);
-    sh_mb_free(&prev);
-}
-
-int sh_mb_build(const char *folder, const sh_mb_resolver *resolver, sh_mb_bundle *out)
-{
-    wchar_t *root, *desc_mod, *desc_pkg;
-    DWORD attr;
-    int has_mod, has_pkg;
-    unsigned char *text;
-    size_t len = 0;
-    mb_walk w;
-
-    if (!out) return 0;
-    memset(out, 0, sizeof *out);
-    root = folder ? sh_mb_wpath(folder) : NULL;
-    if (!root) { mb_error(out, "no mod folder given"); return 0; }
-    attr = GetFileAttributesW(root);
-    if (attr == INVALID_FILE_ATTRIBUTES || !(attr & FILE_ATTRIBUTE_DIRECTORY)) {
-        mb_error(out, "%s is not a folder", folder);
-        free(root);
-        return 0;
-    }
-    if (attr & FILE_ATTRIBUTE_REPARSE_POINT) {
-        mb_error(out, "the mod folder is a symbolic link or junction");
-        free(root);
-        return 0;
-    }
-    desc_mod = mb_wjoin(root, L"mod.json");
-    desc_pkg = mb_wjoin(root, L"package.json");
-    has_mod = desc_mod && GetFileAttributesW(desc_mod) != INVALID_FILE_ATTRIBUTES;
-    has_pkg = desc_pkg && GetFileAttributesW(desc_pkg) != INVALID_FILE_ATTRIBUTES;
-    if (has_mod && has_pkg) {
-        mb_error(out, "the mod folder has both mod.json and package.json; keep one");
-    } else if (!has_mod && !has_pkg) {
-        mb_error(out, "the mod folder has no mod.json or package.json");
-    } else {
-        strcpy_s(out->descriptor, sizeof out->descriptor, has_mod ? "mod.json" : "package.json");
-        text = mb_read_wfile(has_mod ? desc_mod : desc_pkg, SH_MB_DESCRIPTOR_MAX, &len);
-        if (!text) mb_error(out, "cannot read %s (missing, unreadable or over 1 MiB)", out->descriptor);
-        else { mb_parse_descriptor(out, (const char *)text, len); free(text); }
-    }
-    free(desc_mod);
-    free(desc_pkg);
-    if (out->errors) { free(root); return 0; }
-
-    w.b = out;
-    w.root = root;
-    w.stopped = 0;
-    w.stock = mb_stock() != NULL && mb_stock()->match != NULL;
-    mb_walk_top(&w);
-    if (out->stock_decl_count && !mb_stock())
-        mb_error(out, "%s names stock pointers, which cannot be resolved (the installed-content reader is unavailable)",
-                 out->descriptor);
-    mb_add_declared(out);
-    mb_check_files(out, root, resolver);
-    free(root);
-    mb_number_build(out, folder);
-    mb_finish(out);
-    return out->errors == 0;
 }
 
 char *sh_mb_bundle_json(const sh_mb_bundle *b, size_t *out_len)
@@ -3180,31 +3141,6 @@ static int mb_write_wfile(const wchar_t *path, const void *data, size_t len)
     return ok;
 }
 
-int sh_mb_write(const sh_mb_bundle *b, const char *folder, char *cause, size_t cap)
-{
-    wchar_t *root, *path;
-    char *text;
-    size_t len = 0;
-    int ok;
-    if (!b || b->errors || !b->canonical) return mb_cause(cause, cap, "the bundle has errors and is not written");
-    root = sh_mb_wpath(folder);
-    path = root ? mb_wjoin(root, L"bundle.json") : NULL;
-    free(root);
-    text = sh_mb_bundle_json(b, &len);
-    if (!path || !text) { free(path); free(text); return mb_cause(cause, cap, "out of memory"); }
-    ok = mb_write_wfile(path, text, len);
-    free(path);
-    free(text);
-    if (!ok) return mb_cause(cause, cap, "cannot write bundle.json (error %lu)", GetLastError());
-    /* The exact bytes whose SHA-256 is the bundle hash: the body the store receives. */
-    root = sh_mb_wpath(folder);
-    path = root ? mb_wjoin(root, L"bundle.canonical.json") : NULL;
-    free(root);
-    ok = path && mb_write_wfile(path, b->canonical, b->canonical_len);
-    free(path);
-    if (!ok) return mb_cause(cause, cap, "cannot write bundle.canonical.json (error %lu)", GetLastError());
-    return 1;
-}
 
 /* ---------------------------------------------------------------- load ---- */
 
@@ -3340,7 +3276,10 @@ static int mb_load_file(sh_mb_bundle *b, const mbj *e, size_t index)
     return 1;
 }
 
-int sh_mb_load_text(const char *text, size_t len, sh_mb_bundle *out)
+/* The bundle.json form (Contract 1 with "bundle"): a download, a rawmap ZIP,
+ * a folder of the retired layout. Its pointers have no file in any folder the
+ * product creates. */
+int sh_mb_load_manifest_text(const char *text, size_t len, sh_mb_bundle *out)
 {
     static const char *const keys[] = { "author", "build", "bundle", "extra", "files", "format", "homepage", "id",
                                         "name", "requirements", "shadows", "version", NULL };
@@ -3403,47 +3342,1130 @@ int sh_mb_load_text(const char *text, size_t len, sh_mb_bundle *out)
             }
     }
     if (out->total_size > SH_MB_MAX_TOTAL) { mb_error(out, "bundle.json files exceed 256 MiB"); goto done; }
-    for (i = 0; i < out->file_count; i++) out->files[i].shadowed = mb_is_shadow(out, out->files[i].request);
+    for (i = 0; i < out->file_count; i++) {
+        out->files[i].shadowed = mb_is_shadow(out, out->files[i].request);
+        out->files[i].absent = out->files[i].stock;
+    }
     mb_finish(out);
     if (!out->errors && strcmp(out->hash, bundle->s) != 0)
         mb_error(out, "bundle.json does not match its bundle hash (edited or damaged)");
+    out->validated = 1;
+    mb_mark_delivered(out);
 done:
     mbj_free(root);
     return out->errors == 0;
 }
 
+
+/* ------------------------------------------------------------ mod.json ---- */
+
+static long long mb_now(void)
+{
+    FILETIME ft;
+    ULARGE_INTEGER u;
+    GetSystemTimeAsFileTime(&ft);
+    u.LowPart = ft.dwLowDateTime;
+    u.HighPart = ft.dwHighDateTime;
+    return (long long)((u.QuadPart - 116444736000000000ull) / 10000000ull);
+}
+
+/* A "legacy" object without "source": "overrides" (the retired package folder) is a package a map
+ * delivered (a converted carrier, or a beta.16-19 delivery the overrides
+ * migration moved). */
+static void mb_mark_delivered(sh_mb_bundle *b)
+{
+    mbj *extra;
+    const mbj *lg, *src;
+    b->delivered = 0;
+    if (!b->extra) return;
+    extra = mbj_parse(b->extra, strlen(b->extra), NULL, 0);
+    lg = extra ? mbj_get(extra, "legacy") : NULL;
+    if (lg && lg->t == MBJ_OBJ) {
+        src = mbj_get(lg, "source");
+        b->delivered = !(src && src->t == MBJ_STR && strcmp(src->s, "overrides") == 0);   /* the retired package folder */
+    }
+    mbj_free(extra);
+}
+
+/* One entry of the product block's "files" (pointer 0) or "stock" (pointer 1) list. */
+static int mb_load_block_file(sh_mb_bundle *b, const mbj *e, size_t index, int pointer)
+{
+    static const char *const keys[] = { "needs", "path", "provides", "sha256", "size", NULL };
+    static const char *const pkeys[] = { "inAssets", "needs", "path", "provides", "sha256", "source", NULL };
+    const char *list = pointer ? "stock" : "files";
+    const mbj *sha, *needs, *path, *prov, *size, *src, *in_assets, *pt, *pn;
+    char cause[SH_MB_CAUSE_MAX], type[64], name[SH_MB_REQUEST_MAX + 16], *expect;
+    sh_mb_file *f;
+    size_t k;
+    unsigned long long sz = 0;
+    if (e->t != MBJ_OBJ || !mb_only_keys(e, pointer ? pkeys : keys)) {
+        mb_error(b, "mod.json " SH_MB_BLOCK_KEY ".%s[%zu] must have exactly %s", list, index,
+                 pointer ? "path, sha256, source, provides, needs and inAssets (optional)"
+                         : "path, sha256, size, provides and needs");
+        return 0;
+    }
+    sha = mbj_get(e, "sha256");
+    needs = mbj_get(e, "needs");
+    path = mbj_get(e, "path");
+    prov = mbj_get(e, "provides");
+    size = mbj_get(e, "size");
+    src = mbj_get(e, "source");
+    in_assets = mbj_get(e, "inAssets");
+    if (!sha || !needs || !path || !prov || (pointer ? !src : !size)) {
+        mb_error(b, "mod.json " SH_MB_BLOCK_KEY ".%s[%zu] is missing a member", list, index);
+        return 0;
+    }
+    if (path->t != MBJ_STR || strlen(path->s) != path->n || !mb_starts(path->s, "assets/")) {
+        mb_error(b, "mod.json " SH_MB_BLOCK_KEY ".%s[%zu].path must start with assets/", list, index);
+        return 0;
+    }
+    expect = mb_strdup(path->s + 7);
+    if (!expect) { mb_error(b, "out of memory"); return 0; }
+    mb_lower(expect);
+    if (!sh_mb_check_request(expect, cause, sizeof cause)) { mb_error(b, "mod.json %s: %s", path->s, cause); free(expect); return 0; }
+    if (!pointer && !sh_mb_extension_allowed(expect)) { mb_error(b, "mod.json: file type not allowed: %s", path->s); free(expect); return 0; }
+    pt = prov->t == MBJ_OBJ ? mbj_get(prov, "type") : NULL;
+    pn = prov->t == MBJ_OBJ ? mbj_get(prov, "name") : NULL;
+    if (!sh_mb_logical_name(expect, type, sizeof type, name, sizeof name) || !pt || !pn || prov->count != 2 ||
+        pt->t != MBJ_STR || pn->t != MBJ_STR || strcmp(pt->s, type) != 0 || strcmp(pn->s, name) != 0) {
+        mb_error(b, "mod.json %s: provides does not match the request path", path->s);
+        free(expect);
+        return 0;
+    }
+    if (!mb_is_hex64(sha)) { mb_error(b, "mod.json %s: sha256 must be 64 lowercase hex characters", path->s); free(expect); return 0; }
+    if (pointer) {
+        char *lower;
+        int same;
+        if (src->t != MBJ_STR || strlen(src->s) != src->n || !sh_mb_check_source(src->s, cause, sizeof cause)) {
+            mb_error(b, "mod.json %s: source must be an installed path", path->s);
+            free(expect);
+            return 0;
+        }
+        lower = mb_path_dup(src->s, src->n);
+        same = lower && strcmp(lower, src->s) == 0;
+        free(lower);
+        if (!same) { mb_error(b, "mod.json %s: source must be lower-case with '/' separators", path->s); free(expect); return 0; }
+        if (in_assets && in_assets->t != MBJ_BOOL) { mb_error(b, "mod.json %s: inAssets must be true or false", path->s); free(expect); return 0; }
+    } else if (size->t != MBJ_NUM || !mb_plain_integer(size->s, size->n) || size->s[0] == '-' ||
+               (sz = _strtoui64(size->s, NULL, 10)) == 0 || sz > SH_MB_MAX_FILE) {
+        mb_error(b, "mod.json %s: size must be 1 to 64 MiB", path->s);
+        free(expect);
+        return 0;
+    }
+    if (needs->t != MBJ_ARR) { mb_error(b, "mod.json %s: needs must be an array", path->s); free(expect); return 0; }
+    f = mb_add_file(b);
+    if (!f) { mb_error(b, "out of memory"); free(expect); return 0; }
+    f->path = mb_strdup(path->s);
+    f->request = expect;
+    memcpy(f->blob, sha->s, SH_MB_HASH_HEX + 1);
+    f->size = sz;
+    f->ptype = mb_strdup(type);
+    f->pname = mb_strdup(name);
+    f->is_decl = mb_starts(expect, "generated/decls/");
+    f->is_module = strcmp(type, "snapModule") == 0;
+    if (pointer) {
+        f->stock = 1;
+        f->stock_source = mb_strdup(src->s);
+        f->absent = in_assets && !in_assets->b;
+        b->stock_count++;
+        if (!f->stock_source) { mb_error(b, "out of memory"); return 0; }
+    }
+    b->total_size += sz;
+    for (k = 0; k < needs->count; k++) {
+        const mbj *n = needs->items[k], *nt = mbj_get(n, "type"), *nn = mbj_get(n, "name");
+        if (n->t != MBJ_OBJ || n->count != 2 || !nt || !nn || nt->t != MBJ_STR || nn->t != MBJ_STR ||
+            !nt->n || !nn->n || strlen(nn->s) != nn->n || strlen(nt->s) != nt->n) {
+            mb_error(b, "mod.json %s: needs[%zu] must be {\"type\",\"name\"}", path->s, k);
+            return 0;
+        }
+        if (f->need_count) {
+            sh_mb_need probe;
+            probe.type = nt->s;
+            probe.name = nn->s;
+            if (mb_need_cmp(&f->needs[f->need_count - 1], &probe) >= 0) {
+                mb_error(b, "mod.json %s: needs are not sorted and unique", path->s);
+                return 0;
+            }
+        }
+        if (!mb_add_need(f, nt->s, nn->s, nn->n)) { mb_error(b, "out of memory"); return 0; }
+    }
+    if (!f->path || !f->ptype || !f->pname) { mb_error(b, "out of memory"); return 0; }
+    return 1;
+}
+
+/* A built mod.json: the author block, then the product block's manifest. */
+static int mb_load_root(sh_mb_bundle *out, const mbj *root, int check)
+{
+    static const char *const bkeys[] = { "build", "built", "bundle", "cause", "files", "format", "legacy", "origin",
+                                         "shadows", "stock", "validated", NULL };
+    const mbj *block, *v, *files, *stock, *bundle, *sh;
+    size_t i, total;
+    if (root->t != MBJ_OBJ) { mb_error(out, "mod.json must contain one JSON object"); return 0; }
+    block = mbj_get(root, SH_MB_BLOCK_KEY);
+    if (!block || block->t != MBJ_OBJ || !mbj_get(block, "bundle")) {
+        mb_error(out, "mod.json has not been built yet (no \"" SH_MB_BLOCK_KEY "\" block with a bundle)");
+        return 0;
+    }
+    if (!mb_only_keys(block, bkeys)) { mb_error(out, "mod.json \"" SH_MB_BLOCK_KEY "\" has a key this release does not know"); return 0; }
+    if (!mb_descriptor_root(out, root, block)) return 0;
+    v = mbj_get(block, "format");
+    if (!v || v->t != MBJ_NUM || strcmp(v->s, "1") != 0) {
+        mb_error(out, "mod.json \"" SH_MB_BLOCK_KEY "\" format %s is not supported (this release reads format 1)",
+                 v && v->t == MBJ_NUM ? v->s : "(missing)");
+        return 0;
+    }
+    v = mbj_get(block, "build");
+    if (!v || v->t != MBJ_NUM || !mb_plain_integer(v->s, v->n) || v->s[0] == '-' ||
+        (out->build = _strtoui64(v->s, NULL, 10)) == 0) {
+        out->build = 0;
+        mb_error(out, "mod.json \"" SH_MB_BLOCK_KEY "\" build must be a positive integer");
+        return 0;
+    }
+    v = mbj_get(block, "built");
+    if (v && (v->t != MBJ_NUM || !mb_plain_integer(v->s, v->n) || v->s[0] == '-')) {
+        mb_error(out, "mod.json \"" SH_MB_BLOCK_KEY "\" built must be a time in seconds");
+        return 0;
+    }
+    out->built = v ? _strtoi64(v->s, NULL, 10) : 0;
+    v = mbj_get(block, "validated");
+    if (v && v->t != MBJ_BOOL) { mb_error(out, "mod.json \"" SH_MB_BLOCK_KEY "\" validated must be true or false"); return 0; }
+    out->validated = v ? v->b : 1;
+    v = mbj_get(block, "cause");
+    if (v && v->t == MBJ_STR) strncpy_s(out->state_cause, sizeof out->state_cause, v->s, _TRUNCATE);
+    v = mbj_get(block, "origin");
+    if (v && v->t == MBJ_STR) strncpy_s(out->origin, sizeof out->origin, v->s, _TRUNCATE);
+    /* The built shadows replace the author's input list. */
+    for (i = 0; i < out->shadow_count; i++) free(out->shadows[i]);
+    free(out->shadows);
+    out->shadows = NULL;
+    out->shadow_count = 0;
+    sh = mbj_get(block, "shadows");
+    if (sh) {
+        if (!mb_set_shadows(out, sh, 1)) return 0;
+        for (i = 1; i < out->shadow_count; i++)
+            if (strcmp(out->shadows[i - 1], out->shadows[i]) >= 0) {
+                mb_error(out, "mod.json \"" SH_MB_BLOCK_KEY "\" shadows are not sorted and unique");
+                return 0;
+            }
+    }
+    bundle = mbj_get(block, "bundle");
+    if (!mb_is_hex64(bundle)) { mb_error(out, "mod.json \"" SH_MB_BLOCK_KEY "\" bundle must be 64 lowercase hex characters"); return 0; }
+    files = mbj_get(block, "files");
+    stock = mbj_get(block, "stock");
+    if ((files && files->t != MBJ_ARR) || (stock && stock->t != MBJ_ARR)) {
+        mb_error(out, "mod.json \"" SH_MB_BLOCK_KEY "\" files and stock must be arrays");
+        return 0;
+    }
+    total = (files ? files->count : 0) + (stock ? stock->count : 0);
+    if (total > SH_MB_MAX_FILES) { mb_error(out, "mod.json lists more than %u files", SH_MB_MAX_FILES); return 0; }
+    for (i = 0; files && i < files->count; i++) if (!mb_load_block_file(out, files->items[i], i, 0)) return 0;
+    for (i = 0; stock && i < stock->count; i++) if (!mb_load_block_file(out, stock->items[i], i, 1)) return 0;
+    qsort(out->files, out->file_count, sizeof(sh_mb_file), mb_file_cmp);
+    for (i = 1; i < out->file_count; i++) {
+        size_t k;
+        if (strcmp(out->files[i - 1].path, out->files[i].path) == 0) {
+            mb_error(out, "mod.json lists %s twice", out->files[i].path);
+            return 0;
+        }
+        for (k = 0; k < i; k++)
+            if (strcmp(out->files[k].request, out->files[i].request) == 0) {
+                mb_error(out, "mod.json has two files with request %s", out->files[i].request);
+                return 0;
+            }
+    }
+    if (out->total_size > SH_MB_MAX_TOTAL) { mb_error(out, "mod.json files exceed 256 MiB"); return 0; }
+    for (i = 0; i < out->file_count; i++) out->files[i].shadowed = mb_is_shadow(out, out->files[i].request);
+    mb_finish(out);
+    if (!out->errors && check && strcmp(out->hash, bundle->s) != 0)
+        mb_error(out, "mod.json changed since it was built (the author block or the product block was edited); "
+                 "a rescan of the Mods tab or 'sh_mods build' rebuilds it");
+    mb_mark_delivered(out);
+    return out->errors == 0;
+}
+
+static int mb_load_modjson(const char *text, size_t len, sh_mb_bundle *out, int check)
+{
+    char cause[SH_MB_CAUSE_MAX];
+    mbj *root;
+    int ok;
+    if (!out) return 0;
+    memset(out, 0, sizeof *out);
+    strcpy_s(out->descriptor, sizeof out->descriptor, "mod.json");
+    if (!text) { mb_error(out, "cannot read mod.json"); return 0; }
+    root = mbj_parse(text, len, cause, sizeof cause);
+    if (!root) { mb_error(out, "mod.json: %s", cause); return 0; }
+    ok = mb_load_root(out, root, check);
+    mbj_free(root);
+    return ok;
+}
+
+int sh_mb_load_text(const char *text, size_t len, sh_mb_bundle *out)
+{
+    return mb_load_modjson(text, len, out, 1);
+}
+
+#define MB_MODJSON_MAX (16u * 1024u * 1024u)
+
 int sh_mb_load(const char *path, sh_mb_bundle *out)
 {
     size_t len = 0;
-    unsigned char *text = sh_mb_read_file(path, SH_MB_MANIFEST_MAX + 65536, &len);
-    int ok;
-    if (!text) {
-        if (out) {
-            memset(out, 0, sizeof *out);
-            strcpy_s(out->descriptor, sizeof out->descriptor, "bundle.json");
-            mb_error(out, "cannot read bundle.json");
-        }
-        return 0;
-    }
-    ok = sh_mb_load_text((const char *)text, len, out);
+    unsigned char *text = sh_mb_read_file(path, MB_MODJSON_MAX, &len);
+    int ok = mb_load_modjson((const char *)text, len, out, 1);
     free(text);
     return ok;
 }
 
-/* ---------------------------------------------------------------- state ---- */
-
-char *sh_mb_state_format(int validated, const char *first_cause, long long installed_at)
+int sh_mb_load_folder(const char *folder, sh_mb_bundle *out)
 {
+    char path[MAX_PATH * 4];
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\mod.json", folder ? folder : "");
+    return sh_mb_load(path, out);
+}
+
+/* ----------------------------------------------------------- splicing ---- */
+
+typedef struct mb_member { size_t key_at, key_end, value_at, value_end; } mb_member;
+
+static size_t mb_skip_ws(const char *t, size_t n, size_t i)
+{
+    while (i < n && (t[i] == ' ' || t[i] == '\t' || t[i] == '\r' || t[i] == '\n')) i++;
+    return i;
+}
+
+/* Index after the string starting at t[i] == '"', or 0. */
+static size_t mb_skip_string(const char *t, size_t n, size_t i)
+{
+    for (i++; i < n; i++) {
+        if (t[i] == '\\') { i++; continue; }
+        if (t[i] == '"') return i + 1;
+    }
+    return 0;
+}
+
+/* Index after the value starting at t[i], or 0. */
+static size_t mb_skip_value(const char *t, size_t n, size_t i)
+{
+    int depth = 0;
+    if (i >= n) return 0;
+    if (t[i] == '"') return mb_skip_string(t, n, i);
+    if (t[i] != '{' && t[i] != '[') {
+        while (i < n && !strchr(",}] \t\r\n", t[i])) i++;
+        return i;
+    }
+    while (i < n) {
+        if (t[i] == '"') { i = mb_skip_string(t, n, i); if (!i) return 0; continue; }
+        if (t[i] == '{' || t[i] == '[') depth++;
+        else if ((t[i] == '}' || t[i] == ']') && --depth == 0) return i + 1;
+        i++;
+    }
+    return 0;
+}
+
+/* The top-level members of a JSON object text (malloc'd array, *count of
+ * them); *open is the index of the object's '{'. NULL when the text is not
+ * an object. */
+static mb_member *mb_members(const char *t, size_t n, size_t *count, size_t *open)
+{
+    size_t i = 0, cap = 16;
+    mb_member *m = (mb_member *)malloc(sizeof *m * cap);
+    *count = 0;
+    if (!m) return NULL;
+    if (n >= 3 && (unsigned char)t[0] == 0xEF && (unsigned char)t[1] == 0xBB && (unsigned char)t[2] == 0xBF) i = 3;
+    i = mb_skip_ws(t, n, i);
+    if (i >= n || t[i] != '{') { free(m); return NULL; }
+    *open = i;
+    i = mb_skip_ws(t, n, i + 1);
+    if (i < n && t[i] == '}') return m;
+    for (;;) {
+        mb_member one;
+        if (i >= n || t[i] != '"') break;
+        one.key_at = i;
+        one.key_end = mb_skip_string(t, n, i);
+        if (!one.key_end) break;
+        i = mb_skip_ws(t, n, one.key_end);
+        if (i >= n || t[i] != ':') break;
+        one.value_at = mb_skip_ws(t, n, i + 1);
+        one.value_end = mb_skip_value(t, n, one.value_at);
+        if (!one.value_end) break;
+        if (*count == cap) {
+            mb_member *grown = (mb_member *)realloc(m, sizeof *m * cap * 2);
+            if (!grown) break;
+            m = grown;
+            cap *= 2;
+        }
+        m[(*count)++] = one;
+        i = mb_skip_ws(t, n, one.value_end);
+        if (i < n && t[i] == ',') { i = mb_skip_ws(t, n, i + 1); continue; }
+        if (i < n && t[i] == '}') return m;
+        break;
+    }
+    free(m);
+    return NULL;
+}
+
+static int mb_member_is(const char *t, const mb_member *m, const char *key)
+{
+    size_t k = strlen(key);
+    return m->key_end - m->key_at == k + 2 && memcmp(t + m->key_at + 1, key, k) == 0;
+}
+
+char *sh_mb_author_bytes(const char *t, size_t n, size_t *out_len, int *had_block)
+{
+    size_t count = 0, open = 0, i, cut_from = 0, cut_to = 0;
+    mb_member *m = t ? mb_members(t, n, &count, &open) : NULL;
+    char *out;
+    if (had_block) *had_block = 0;
+    if (!m) return NULL;
+    for (i = 0; i < count; i++) {
+        if (!mb_member_is(t, &m[i], SH_MB_BLOCK_KEY)) continue;
+        if (had_block) *had_block = 1;
+        if (i > 0) { cut_from = m[i - 1].value_end; cut_to = m[i].value_end; }
+        else if (count > 1) { cut_from = m[0].key_at; cut_to = m[1].key_at; }
+        else { cut_from = open + 1; cut_to = m[0].value_end; }
+        break;
+    }
+    free(m);
+    out = (char *)malloc(n - (cut_to - cut_from) + 1);
+    if (!out) return NULL;
+    memcpy(out, t, cut_from);
+    memcpy(out + cut_from, t + cut_to, n - cut_to);
+    out[n - (cut_to - cut_from)] = 0;
+    if (out_len) *out_len = n - (cut_to - cut_from);
+    return out;
+}
+
+/* Insert ,NL NL "snapmap-plus": <block> after the last member of `own`. The
+ * block text is json_pretty output; its lines are indented by two more
+ * spaces. NL is CRLF when the author's file uses CRLF. */
+static char *mb_splice(const char *own, size_t n, const char *block, size_t *out_len)
+{
+    size_t count = 0, open = 0, at, i;
+    mb_member *m = mb_members(own, n, &count, &open);
+    const char *nl;
     mb_buf o = {0};
-    char t[32];
-    mb_puts(&o, "{\"firstCause\":");
-    mb_put_jcstr(&o, first_cause ? first_cause : "");
-    _snprintf_s(t, sizeof t, _TRUNCATE, ",\"installedAt\":%lld", installed_at);
-    mb_puts(&o, t);
-    mb_puts(&o, validated ? ",\"validated\":true}\n" : ",\"validated\":false}\n");
+    size_t bl = strlen(block);
+    if (!m) return NULL;
+    nl = strstr(own, "\r\n") ? "\r\n" : "\n";
+    at = count ? m[count - 1].value_end : open + 1;
+    free(m);
+    while (bl && (block[bl - 1] == '\n' || block[bl - 1] == '\r')) bl--;
+    mb_put(&o, own, at);
+    if (count) { mb_puts(&o, ","); mb_puts(&o, nl); }
+    mb_puts(&o, nl);
+    mb_puts(&o, "  \"" SH_MB_BLOCK_KEY "\": ");
+    for (i = 0; i < bl; i++) {
+        if (block[i] == '\n') { mb_puts(&o, nl); mb_puts(&o, "  "); }
+        else mb_put(&o, &block[i], 1);
+    }
+    if (!count) mb_puts(&o, nl);
+    mb_put(&o, own + at, n - at);
     if (o.oom) { free(o.p); return NULL; }
+    if (out_len) *out_len = o.n;
     return o.p;
 }
+
+static char *mb_pretty(const char *compact, size_t n)
+{
+    size_t need = json_pretty(compact, n, NULL, 0);
+    char *p;
+    if (!need) return NULL;
+    p = (char *)malloc(need + 1);
+    if (!p) return NULL;
+    json_pretty(compact, n, p, need);
+    p[need] = 0;
+    return p;
+}
+
+/* The canonical text of `key` in the bundle's extra, or NULL. */
+static char *mb_extra_member(const sh_mb_bundle *b, const char *key)
+{
+    mbj *extra;
+    const mbj *v;
+    mb_buf o = {0};
+    if (!b->extra) return NULL;
+    extra = mbj_parse(b->extra, strlen(b->extra), NULL, 0);
+    v = extra ? mbj_get(extra, key) : NULL;
+    if (v && !mbj_canon(v, &o, NULL, 0)) { free(o.p); o.p = NULL; }
+    mbj_free(extra);
+    return v ? o.p : NULL;
+}
+
+static void mb_put_needs(mb_buf *o, const sh_mb_file *f)
+{
+    size_t k;
+    mb_puts(o, ",\"provides\":{\"type\":");
+    mb_put_jcstr(o, f->ptype ? f->ptype : "");
+    mb_puts(o, ",\"name\":");
+    mb_put_jcstr(o, f->pname ? f->pname : "");
+    mb_puts(o, "},\"needs\":[");
+    for (k = 0; k < f->need_count; k++) {
+        if (k) mb_put(o, ",", 1);
+        mb_puts(o, "{\"type\":");
+        mb_put_jcstr(o, f->needs[k].type);
+        mb_puts(o, ",\"name\":");
+        mb_put_jcstr(o, f->needs[k].name);
+        mb_put(o, "}", 1);
+    }
+    mb_put(o, "]", 1);
+}
+
+/* The product block, pretty-printed. `root` (optional) is the folder whose
+ * assets/ decides each pointer's inAssets; else the files' absent flags. */
+static char *mb_block_text(const sh_mb_bundle *b, const wchar_t *root, int with_legacy)
+{
+    mb_buf o = {0};
+    char num[32], *legacy = NULL, *pretty;
+    size_t i, pointers = 0;
+    int first;
+    mb_puts(&o, "{\"format\":1,\"build\":");
+    mb_put_u64(&o, b->build);
+    mb_puts(&o, ",\"bundle\":");
+    mb_put_jcstr(&o, b->hash);
+    _snprintf_s(num, sizeof num, _TRUNCATE, ",\"built\":%lld", b->built > 0 ? b->built : mb_now());
+    mb_puts(&o, num);
+    mb_puts(&o, b->validated ? ",\"validated\":true" : ",\"validated\":false");
+    if (!b->validated && b->state_cause[0]) { mb_puts(&o, ",\"cause\":"); mb_put_jcstr(&o, b->state_cause); }
+    if (b->origin[0]) { mb_puts(&o, ",\"origin\":"); mb_put_jcstr(&o, b->origin); }
+    if (with_legacy && (legacy = mb_extra_member(b, "legacy")) != NULL) { mb_puts(&o, ",\"legacy\":"); mb_puts(&o, legacy); }
+    free(legacy);
+    if (b->shadow_count) {
+        mb_puts(&o, ",\"shadows\":[");
+        for (i = 0; i < b->shadow_count; i++) {
+            if (i) mb_put(&o, ",", 1);
+            mb_put_jcstr(&o, b->shadows[i]);
+        }
+        mb_put(&o, "]", 1);
+    }
+    mb_puts(&o, ",\"files\":[");
+    for (i = 0, first = 1; i < b->file_count; i++) {
+        const sh_mb_file *f = &b->files[i];
+        if (f->stock) { pointers++; continue; }
+        if (!first) mb_put(&o, ",", 1);
+        first = 0;
+        mb_puts(&o, "{\"path\":");
+        mb_put_jcstr(&o, f->path);
+        mb_puts(&o, ",\"sha256\":");
+        mb_put_jcstr(&o, f->blob);
+        mb_puts(&o, ",\"size\":");
+        mb_put_u64(&o, f->size);
+        mb_put_needs(&o, f);
+        mb_put(&o, "}", 1);
+    }
+    mb_put(&o, "]", 1);
+    if (pointers) {
+        mb_puts(&o, ",\"stock\":[");
+        for (i = 0, first = 1; i < b->file_count; i++) {
+            const sh_mb_file *f = &b->files[i];
+            int absent = f->absent;
+            if (!f->stock) continue;
+            if (root) {
+                wchar_t *p = NULL, *w;
+                int wn = MultiByteToWideChar(CP_UTF8, 0, f->path, -1, NULL, 0);
+                w = wn > 0 ? (wchar_t *)malloc(sizeof(wchar_t) * (size_t)wn) : NULL;
+                if (w) {
+                    wchar_t *q;
+                    MultiByteToWideChar(CP_UTF8, 0, f->path, -1, w, wn);
+                    for (q = w; *q; q++) if (*q == L'/') *q = L'\\';
+                    p = mb_wjoin(root, w);
+                    free(w);
+                }
+                absent = !p || GetFileAttributesW(p) == INVALID_FILE_ATTRIBUTES;
+                free(p);
+            }
+            if (!first) mb_put(&o, ",", 1);
+            first = 0;
+            mb_puts(&o, "{\"path\":");
+            mb_put_jcstr(&o, f->path);
+            mb_puts(&o, ",\"sha256\":");
+            mb_put_jcstr(&o, f->blob);
+            mb_puts(&o, ",\"source\":");
+            mb_put_jcstr(&o, f->stock_source ? f->stock_source : "");
+            mb_put_needs(&o, f);
+            if (absent) mb_puts(&o, ",\"inAssets\":false");
+            mb_put(&o, "}", 1);
+        }
+        mb_put(&o, "]", 1);
+    }
+    mb_put(&o, "}", 1);
+    if (o.oom) { free(o.p); return NULL; }
+    pretty = mb_pretty(o.p, o.n);
+    free(o.p);
+    return pretty;
+}
+
+/* An author block for a bundle known only by its manifest (a download, a
+ * laid-out folder of the retired layout): identity, the optional display
+ * keys, requirements, shadows (a converted package keeps them in the product
+ * block), and every extra key but "legacy". */
+static char *mb_author_synth(const sh_mb_bundle *b, size_t *out_len)
+{
+    mb_buf o = {0};
+    mbj *extra = NULL;
+    char *pretty;
+    size_t i;
+    mb_puts(&o, "{\"id\":");
+    mb_put_jcstr(&o, b->id);
+    mb_puts(&o, ",\"name\":");
+    mb_put_jcstr(&o, b->name ? b->name : b->id);
+    mb_puts(&o, ",\"version\":");
+    mb_put_jcstr(&o, b->version);
+    if (b->author) { mb_puts(&o, ",\"author\":"); mb_put_jcstr(&o, b->author); }
+    if (b->homepage) { mb_puts(&o, ",\"homepage\":"); mb_put_jcstr(&o, b->homepage); }
+    if (b->requirements) { mb_puts(&o, ",\"requirements\":"); mb_puts(&o, b->requirements); }
+    if (b->shadow_count && !b->legacy) {
+        mb_puts(&o, ",\"shadows\":[");
+        for (i = 0; i < b->shadow_count; i++) {
+            if (i) mb_put(&o, ",", 1);
+            mb_put_jcstr(&o, b->shadows[i]);
+        }
+        mb_put(&o, "]", 1);
+    }
+    if (b->extra) extra = mbj_parse(b->extra, strlen(b->extra), NULL, 0);
+    for (i = 0; extra && extra->t == MBJ_OBJ && i < extra->count; i++) {
+        if (extra->klen[i] == 6 && memcmp(extra->keys[i], "legacy", 6) == 0) continue;
+        mb_put(&o, ",", 1);
+        mb_put_jstr(&o, extra->keys[i], extra->klen[i]);
+        mb_put(&o, ":", 1);
+        if (!mbj_canon(extra->items[i], &o, NULL, 0)) o.oom = 1;
+    }
+    mbj_free(extra);
+    mb_put(&o, "}", 1);
+    if (o.oom) { free(o.p); return NULL; }
+    pretty = mb_pretty(o.p, o.n);
+    free(o.p);
+    if (pretty && out_len) *out_len = strlen(pretty);
+    return pretty;
+}
+
+/* The author block of `own` has a top-level "legacy" member. */
+static int mb_author_has(const char *own, size_t n, const char *key)
+{
+    size_t count = 0, open = 0, i;
+    mb_member *m = mb_members(own, n, &count, &open);
+    int hit = 0;
+    for (i = 0; m && i < count && !hit; i++) hit = mb_member_is(own, &m[i], key);
+    free(m);
+    return hit;
+}
+
+static char *mb_modjson(const sh_mb_bundle *b, const char *author, size_t alen, const wchar_t *root, size_t *out_len)
+{
+    char *own, *block, *out;
+    size_t own_len = 0;
+    if (!b || !b->canonical) return NULL;
+    own = author ? sh_mb_author_bytes(author, alen, &own_len, NULL) : mb_author_synth(b, &own_len);
+    if (!own) return NULL;
+    block = mb_block_text(b, root, b->legacy && !mb_author_has(own, own_len, "legacy"));
+    out = block ? mb_splice(own, own_len, block, out_len) : NULL;
+    free(own);
+    free(block);
+    return out;
+}
+
+void sh_mb_renumber(sh_mb_bundle *b, unsigned long long build)
+{
+    if (!b || !build || b->errors) return;
+    b->build = build;
+    mb_finish(b);
+}
+
+char *sh_mb_modjson_text(const sh_mb_bundle *b, const char *author_text, size_t author_len, size_t *out_len)
+{
+    return mb_modjson(b, author_text, author_len, NULL, out_len);
+}
+
+int sh_mb_write(const sh_mb_bundle *b, const char *folder, char *cause, size_t cap)
+{
+    wchar_t *root, *mod_path = NULL, *pkg_path = NULL;
+    unsigned char *existing = NULL;
+    char *text = NULL;
+    size_t elen = 0, len = 0;
+    int from_pkg = 0, ok;
+    if (!b || b->errors || !b->canonical) return mb_cause(cause, cap, "the bundle has errors and is not written");
+    root = folder ? sh_mb_wpath(folder) : NULL;
+    if (root) { mod_path = mb_wjoin(root, L"mod.json"); pkg_path = mb_wjoin(root, L"package.json"); }
+    if (!mod_path || !pkg_path) { free(root); free(mod_path); free(pkg_path); return mb_cause(cause, cap, "out of memory"); }
+    existing = mb_read_wfile(mod_path, MB_MODJSON_MAX, &elen);
+    if (!existing) {
+        existing = mb_read_wfile(pkg_path, SH_MB_DESCRIPTOR_MAX, &elen);
+        from_pkg = existing != NULL;
+    }
+    text = mb_modjson(b, (const char *)existing, elen, root, &len);
+    ok = text && mb_write_wfile(mod_path, text, len);
+    if (!ok) mb_cause(cause, cap, text ? "cannot write mod.json (error %lu)" : "mod.json could not be composed (is it a JSON object?)",
+                      GetLastError());
+    if (ok && from_pkg) {
+        /* package.json became mod.json, with the same author keys and bytes. */
+        SetFileAttributesW(pkg_path, FILE_ATTRIBUTE_NORMAL);
+        DeleteFileW(pkg_path);
+    }
+    free(text);
+    free(existing);
+    free(root);
+    free(mod_path);
+    free(pkg_path);
+    return ok;
+}
+
+int sh_mb_set_state(const char *folder, int validated, const char *cause, char *why, size_t cap)
+{
+    sh_mb_bundle b;
+    int ok;
+    if (!sh_mb_load_folder(folder, &b)) {
+        mb_cause(why, cap, "%s", b.first_cause);
+        sh_mb_free(&b);
+        return 0;
+    }
+    if (b.validated == (validated != 0) && strcmp(b.state_cause, validated ? "" : (cause ? cause : "")) == 0) {
+        sh_mb_free(&b);
+        return 1;
+    }
+    b.validated = validated != 0;
+    strncpy_s(b.state_cause, sizeof b.state_cause, validated ? "" : (cause ? cause : ""), _TRUNCATE);
+    ok = sh_mb_write(&b, folder, why, cap);
+    sh_mb_free(&b);
+    return ok;
+}
+
+/* -------------------------------------------------------------- build ---- */
+
+int sh_mb_build(const char *folder, const sh_mb_resolver *resolver, sh_mb_bundle *out)
+{
+    wchar_t *root, *desc_mod, *desc_pkg;
+    DWORD attr;
+    int has_mod, has_pkg, have_prev = 0;
+    unsigned char *text = NULL;
+    size_t len = 0, i, k, ncarry = 0;
+    unsigned long long prev_build = 0;
+    sh_mb_bundle prev;
+    sh_mb_stock_decl *carry = NULL;
+    mbj *rootj = NULL;
+    mb_walk w;
+
+    if (!out) return 0;
+    memset(out, 0, sizeof *out);
+    memset(&prev, 0, sizeof prev);
+    root = folder ? sh_mb_wpath(folder) : NULL;
+    if (!root) { mb_error(out, "no mod folder given"); return 0; }
+    attr = GetFileAttributesW(root);
+    if (attr == INVALID_FILE_ATTRIBUTES || !(attr & FILE_ATTRIBUTE_DIRECTORY)) {
+        mb_error(out, "%s is not a folder", folder);
+        free(root);
+        return 0;
+    }
+    if (attr & FILE_ATTRIBUTE_REPARSE_POINT) {
+        mb_error(out, "the mod folder is a symbolic link or junction");
+        free(root);
+        return 0;
+    }
+    desc_mod = mb_wjoin(root, L"mod.json");
+    desc_pkg = mb_wjoin(root, L"package.json");
+    has_mod = desc_mod && GetFileAttributesW(desc_mod) != INVALID_FILE_ATTRIBUTES;
+    has_pkg = desc_pkg && GetFileAttributesW(desc_pkg) != INVALID_FILE_ATTRIBUTES;
+    if (has_mod && has_pkg) {
+        mb_error(out, "the mod folder has both mod.json and package.json; keep one");
+    } else if (!has_mod && !has_pkg) {
+        mb_error(out, "the mod folder has no mod.json or package.json");
+    } else {
+        char cause[SH_MB_CAUSE_MAX];
+        strcpy_s(out->descriptor, sizeof out->descriptor, has_mod ? "mod.json" : "package.json");
+        text = mb_read_wfile(has_mod ? desc_mod : desc_pkg, has_mod ? MB_MODJSON_MAX : SH_MB_DESCRIPTOR_MAX, &len);
+        if (!text) mb_error(out, "cannot read %s (missing, unreadable or over %u MiB)", out->descriptor,
+                            (has_mod ? MB_MODJSON_MAX : SH_MB_DESCRIPTOR_MAX) >> 20);
+        else if (!(rootj = mbj_parse((const char *)text, len, cause, sizeof cause))) mb_error(out, "%s: %s", out->descriptor, cause);
+        else {
+            const mbj *block = has_mod ? mbj_get(rootj, SH_MB_BLOCK_KEY) : NULL;
+            if (mb_descriptor_root(out, rootj, block) && block && block->t == MBJ_OBJ) {
+                const mbj *pb = mbj_get(block, "build"), *st = mbj_get(block, "stock"), *po = mbj_get(block, "origin");
+                if (pb && pb->t == MBJ_NUM && mb_plain_integer(pb->s, pb->n) && pb->s[0] != '-')
+                    prev_build = _strtoui64(pb->s, NULL, 10);
+                /* Where the folder came from is the product's memory, kept across builds. */
+                if (po && po->t == MBJ_STR) strncpy_s(out->origin, sizeof out->origin, po->s, _TRUNCATE);
+                {
+                    /* The previous build's identity: its hash stands for its
+                     * content, since the author block may have changed since. */
+                    const mbj *ph = mbj_get(block, "bundle"), *pt = mbj_get(block, "built");
+                    if (mb_is_hex64(ph) && prev_build) {
+                        memcpy(prev.hash, ph->s, SH_MB_HASH_HEX + 1);
+                        have_prev = 1;
+                    }
+                    if (pt && pt->t == MBJ_NUM && mb_plain_integer(pt->s, pt->n) && pt->s[0] != '-')
+                        prev.built = _strtoi64(pt->s, NULL, 10);
+                }
+                /* Pointers the block holds without a file under assets/ (a
+                 * download, a migration) stay pointers unless a file now takes
+                 * their place. */
+                if (st && st->t == MBJ_ARR && st->count)
+                    carry = (sh_mb_stock_decl *)calloc(st->count, sizeof *carry);
+                for (i = 0; carry && i < st->count; i++) {
+                    const mbj *e = st->items[i], *in = mbj_get(e, "inAssets"), *p = mbj_get(e, "path"),
+                              *src = mbj_get(e, "source"), *sha = mbj_get(e, "sha256");
+                    sh_mb_stock_decl *d = &carry[ncarry];
+                    if (!(in && in->t == MBJ_BOOL && !in->b) || !p || p->t != MBJ_STR || !mb_starts(p->s, "assets/") ||
+                        !src || src->t != MBJ_STR || !mb_is_hex64(sha)) continue;
+                    d->request = mb_path_dup(p->s + 7, p->n - 7);
+                    d->source = mb_path_dup(src->s, src->n);
+                    memcpy(d->sha256, sha->s, SH_MB_HASH_HEX + 1);
+                    if (!d->request || !d->source) { free(d->request); free(d->source); continue; }
+                    ncarry++;
+                }
+            }
+        }
+        free(text);
+    }
+    mbj_free(rootj);
+    free(desc_mod);
+    free(desc_pkg);
+    if (out->errors) goto finish;
+
+    w.b = out;
+    w.root = root;
+    w.stopped = 0;
+    w.stock = mb_stock() != NULL && mb_stock()->match != NULL;
+    mb_walk_top(&w);
+    /* Carried-forward pointers join the declared ones when nothing under
+     * assets/ and nothing the author declared names their request. */
+    for (k = 0; k < ncarry; k++) {
+        int taken = 0;
+        for (i = 0; i < out->file_count && !taken; i++) taken = strcmp(out->files[i].request, carry[k].request) == 0;
+        for (i = 0; i < out->stock_decl_count && !taken; i++) taken = strcmp(out->stock_decls[i].request, carry[k].request) == 0;
+        if (taken) continue;
+        {
+            sh_mb_stock_decl *grown = (sh_mb_stock_decl *)realloc(out->stock_decls,
+                                                                  sizeof *grown * (out->stock_decl_count + 1));
+            if (!grown) { mb_error(out, "out of memory"); break; }
+            out->stock_decls = grown;
+            out->stock_decls[out->stock_decl_count++] = carry[k];
+            memset(&carry[k], 0, sizeof carry[k]);
+        }
+    }
+    if (out->stock_decl_count > 1) qsort(out->stock_decls, out->stock_decl_count, sizeof(sh_mb_stock_decl), mb_decl_cmp);
+    if (out->stock_decl_count && !mb_stock())
+        mb_error(out, "%s names stock pointers, which cannot be resolved (the installed-content reader is unavailable)",
+                 out->descriptor);
+    mb_add_declared(out);
+    mb_check_files(out, root, resolver);
+    /* Contract 1 "build": equal content (ignoring build and bundle) keeps the
+     * previous number, changed content takes the next one, a folder without a
+     * previous product block starts at 1. The content is equal exactly when
+     * the canonical text with the previous number hashes to the previous
+     * bundle hash the block records. */
+    out->build = 1;
+    if (!out->errors && prev_build) {
+        out->build = prev_build;
+        mb_finish(out);
+        if (!have_prev || strcmp(out->hash, prev.hash) != 0) out->build = prev_build + 1;
+    }
+    mb_finish(out);
+    out->validated = out->errors == 0;
+    out->built = (have_prev && !strcmp(prev.hash, out->hash) && prev.built > 0) ? prev.built : mb_now();
+finish:
+    for (k = 0; k < ncarry; k++) { free(carry[k].request); free(carry[k].source); }
+    free(carry);
+    sh_mb_free(&prev);
+    free(root);
+    return out->errors == 0;
+}
+
+/* ---------------------------------------------------------- tree hash ---- */
+
+typedef struct mb_tent { char *rel; unsigned long long size, mtime; } mb_tent;
+typedef struct mb_tlist { mb_tent *e; size_t n, cap; int failed; } mb_tlist;
+
+static void mb_tree_walk(mb_tlist *l, const wchar_t *dir, const char *rel, int depth)
+{
+    WIN32_FIND_DATAW fd;
+    wchar_t *pattern = mb_wjoin(dir, L"*");
+    HANDLE h;
+    if (!pattern || depth > MB_WALK_DEPTH) { free(pattern); l->failed = 1; return; }
+    h = FindFirstFileExW(pattern, FindExInfoBasic, &fd, FindExSearchNameMatch, NULL, 0);
+    free(pattern);
+    if (h == INVALID_HANDLE_VALUE) return;
+    do {
+        char *name, *child;
+        size_t cn;
+        if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0) continue;
+        name = sh_mb_utf8(fd.cFileName);
+        if (!name) { l->failed = 1; continue; }
+        cn = strlen(rel) + strlen(name) + 2;
+        child = (char *)malloc(cn);
+        if (!child) { free(name); l->failed = 1; continue; }
+        _snprintf_s(child, cn, _TRUNCATE, "%s/%s", rel, name);
+        free(name);
+        if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) && !(fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) {
+            wchar_t *sub = mb_wjoin(dir, fd.cFileName);
+            if (sub) { mb_tree_walk(l, sub, child, depth + 1); free(sub); }
+            free(child);
+            continue;
+        }
+        if (l->n == l->cap) {
+            size_t cap = l->cap ? l->cap * 2 : 256;
+            mb_tent *grown = (mb_tent *)realloc(l->e, sizeof *grown * cap);
+            if (!grown) { free(child); l->failed = 1; continue; }
+            l->e = grown;
+            l->cap = cap;
+        }
+        l->e[l->n].rel = child;
+        l->e[l->n].size = ((unsigned long long)fd.nFileSizeHigh << 32) | fd.nFileSizeLow;
+        l->e[l->n].mtime = ((unsigned long long)fd.ftLastWriteTime.dwHighDateTime << 32) | fd.ftLastWriteTime.dwLowDateTime;
+        l->n++;
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+}
+
+static int mb_tent_cmp(const void *a, const void *b)
+{
+    return strcmp(((const mb_tent *)a)->rel, ((const mb_tent *)b)->rel);
+}
+
+int sh_mb_tree_hash(const char *folder, char out[SH_MB_HASH_HEX + 1])
+{
+    wchar_t *root = folder ? sh_mb_wpath(folder) : NULL, *p, *assets;
+    unsigned char *text = NULL;
+    char *own = NULL;
+    size_t len = 0, own_len = 0, i;
+    mb_tlist l;
+    mb_sha256 s;
+    int ok = 0;
+    out[0] = 0;
+    if (!root) return 0;
+    memset(&l, 0, sizeof l);
+    p = mb_wjoin(root, L"mod.json");
+    if (p) text = mb_read_wfile(p, MB_MODJSON_MAX, &len);
+    free(p);
+    if (text) own = sh_mb_author_bytes((const char *)text, len, &own_len, NULL);
+    else {
+        p = mb_wjoin(root, L"package.json");
+        if (p) text = mb_read_wfile(p, SH_MB_DESCRIPTOR_MAX, &len);
+        free(p);
+        if (text) { own = mb_strndup((const char *)text, len); own_len = len; }
+    }
+    if (!own) goto done;
+    mb_sha_init(&s);
+    mb_sha_update(&s, "snapmap-plus tree 1\n", 20);
+    mb_sha_update(&s, own, own_len);
+    mb_sha_update(&s, "\n", 1);
+    assets = mb_wjoin(root, L"assets");
+    if (assets) { mb_tree_walk(&l, assets, "assets", 1); free(assets); }
+    if (l.failed) goto done;
+    if (l.n > 1) qsort(l.e, l.n, sizeof *l.e, mb_tent_cmp);
+    for (i = 0; i < l.n; i++) {
+        char meta[64];
+        int n = _snprintf_s(meta, sizeof meta, _TRUNCATE, " %llu %llu\n", l.e[i].size, l.e[i].mtime);
+        mb_sha_update(&s, l.e[i].rel, strlen(l.e[i].rel));
+        if (n > 0) mb_sha_update(&s, meta, (size_t)n);
+    }
+    mb_sha_hex(&s, out);
+    ok = 1;
+done:
+    for (i = 0; i < l.n; i++) free(l.e[i].rel);
+    free(l.e);
+    free(own);
+    free(text);
+    free(root);
+    return ok;
+}
+
+void sh_mb_content_key(const sh_mb_bundle *b, char out[SH_MB_HASH_HEX + 1])
+{
+    mb_buf o = {0};
+    mbj *extra = NULL;
+    size_t i;
+    out[0] = 0;
+    if (!b) return;
+    mb_puts(&o, b->id);
+    mb_puts(&o, "\n");
+    if (b->requirements) mb_puts(&o, b->requirements);
+    mb_puts(&o, "\n");
+    for (i = 0; i < b->shadow_count; i++) { mb_puts(&o, b->shadows[i]); mb_puts(&o, "\n"); }
+    mb_puts(&o, "--\n");
+    if (b->extra) extra = mbj_parse(b->extra, strlen(b->extra), NULL, 0);
+    for (i = 0; extra && extra->t == MBJ_OBJ && i < extra->count; i++) {
+        if (extra->klen[i] == 6 && memcmp(extra->keys[i], "legacy", 6) == 0) continue;
+        mb_put_jstr(&o, extra->keys[i], extra->klen[i]);
+        mb_put(&o, ":", 1);
+        if (!mbj_canon(extra->items[i], &o, NULL, 0)) o.oom = 1;
+        mb_puts(&o, "\n");
+    }
+    mbj_free(extra);
+    mb_puts(&o, "--\n");
+    for (i = 0; i < b->file_count; i++) {
+        const sh_mb_file *f = &b->files[i];
+        char size[32];
+        mb_puts(&o, f->request);
+        mb_puts(&o, f->stock ? "\tstock " : "\tcarried ");
+        if (f->stock) mb_puts(&o, f->stock_source ? f->stock_source : "");
+        mb_puts(&o, "\t");
+        mb_puts(&o, f->blob);
+        _snprintf_s(size, sizeof size, _TRUNCATE, "\t%llu\n", f->stock ? 0ull : f->size);
+        mb_puts(&o, size);
+    }
+    if (!o.oom) sh_mb_sha256_hex(o.p, o.n, out);
+    free(o.p);
+}
+
+int sh_mb_folder_name(const char *mods_root, const char *id, const char *version, const char *hash,
+                      char *out, size_t cap)
+{
+    int round;
+    if (!mods_root || !id || !id[0] || !out || !cap) return 0;
+    for (round = 0; round < 4; round++) {
+        char leaf[SH_MB_ID_MAX + 4 * SH_MB_VERSION_MAX + 32], path[MAX_PATH * 4];
+        wchar_t *w;
+        DWORD a;
+        if (round == 0) strcpy_s(leaf, sizeof leaf, id);
+        else if (round == 1) _snprintf_s(leaf, sizeof leaf, _TRUNCATE, "%s@%s", id, version ? version : "0.0.0");
+        else _snprintf_s(leaf, sizeof leaf, _TRUNCATE, "%s@%s-%.*s", id, version ? version : "0.0.0",
+                         round == 2 ? 8 : 16, hash ? hash : "0000000000000000");
+        if (round && (!version || !version[0])) continue;
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", mods_root, leaf);
+        w = sh_mb_wpath(path);
+        a = w ? GetFileAttributesW(w) : INVALID_FILE_ATTRIBUTES;
+        free(w);
+        if (a == INVALID_FILE_ATTRIBUTES) { strncpy_s(out, cap, leaf, _TRUNCATE); return 1; }
+        if (hash && (a & FILE_ATTRIBUTE_DIRECTORY)) {
+            sh_mb_bundle have;
+            int same = sh_mb_load_folder(path, &have) && strcmp(have.hash, hash) == 0;
+            sh_mb_free(&have);
+            if (same) { strncpy_s(out, cap, leaf, _TRUNCATE); return 2; }
+        }
+    }
+    return 0;
+}
+
+/* ---------------------------------------------------- product record ---- */
+
+static INIT_ONCE        g_rec_once = INIT_ONCE_STATIC_INIT;
+static CRITICAL_SECTION g_rec_lock;
+
+static BOOL CALLBACK mb_rec_init(PINIT_ONCE once, PVOID p, PVOID *ctx)
+{
+    (void)once; (void)p; (void)ctx;
+    InitializeCriticalSection(&g_rec_lock);
+    return TRUE;
+}
+
+void sh_mb_record_lock(void)
+{
+    InitOnceExecuteOnce(&g_rec_once, mb_rec_init, NULL, NULL);
+    EnterCriticalSection(&g_rec_lock);
+}
+
+void sh_mb_record_unlock(void)
+{
+    LeaveCriticalSection(&g_rec_lock);
+}
+
+static wchar_t *mb_record_path(const char *mods_root)
+{
+    char path[MAX_PATH * 4];
+    if (!mods_root || !mods_root[0]) return NULL;
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\" SH_MB_RECORD_FILE, mods_root);
+    return sh_mb_wpath(path);
+}
+
+/* The record's root object: *state 1 read, 0 absent, -1 unreadable. */
+static mbj *mb_record_read(const wchar_t *path, int *state)
+{
+    unsigned char *text;
+    size_t len = 0;
+    mbj *root;
+    *state = 0;
+    if (!path || GetFileAttributesW(path) == INVALID_FILE_ATTRIBUTES) return NULL;
+    text = mb_read_wfile(path, 64u * 1024u * 1024u, &len);
+    root = text ? mbj_parse((const char *)text, len, NULL, 0) : NULL;
+    free(text);
+    if (!root || root->t != MBJ_OBJ) { mbj_free(root); *state = -1; return NULL; }
+    *state = 1;
+    return root;
+}
+
+int sh_mb_record_get(const char *mods_root, const char *section, char **json_out)
+{
+    wchar_t *path = mb_record_path(mods_root);
+    mbj *root;
+    const mbj *v;
+    mb_buf o = {0};
+    int state, r = 0;
+    if (json_out) *json_out = NULL;
+    if (!path || !section) { free(path); return -1; }
+    sh_mb_record_lock();
+    root = mb_record_read(path, &state);
+    sh_mb_record_unlock();
+    free(path);
+    if (state < 0) return -1;
+    v = root ? mbj_get(root, section) : NULL;
+    if (v && mbj_canon(v, &o, NULL, 0) && !o.oom) {
+        r = 1;
+        if (json_out) { *json_out = o.p; o.p = NULL; }
+    }
+    free(o.p);
+    mbj_free(root);
+    return r;
+}
+
+int sh_mb_record_put(const char *mods_root, const char *section, const char *json)
+{
+    wchar_t *path = mb_record_path(mods_root), *dir;
+    mbj *root, *value = NULL;
+    mb_buf o = {0};
+    char *pretty = NULL;
+    size_t i;
+    int state, placed = 0, ok = 0;
+    if (!path || !section || !section[0] || !strcmp(section, "format")) { free(path); return 0; }
+    if (json && !(value = mbj_parse(json, strlen(json), NULL, 0))) { free(path); return 0; }
+    sh_mb_record_lock();
+    root = mb_record_read(path, &state);
+    if (state < 0) {
+        /* Never silently lost: the unreadable record is kept beside it. */
+        wchar_t aside[MAX_PATH * 4];
+        _snwprintf_s(aside, MAX_PATH * 4, _TRUNCATE, L"%s.unreadable-%lld", path, mb_now());
+        MoveFileExW(path, aside, MOVEFILE_REPLACE_EXISTING);
+    }
+    mb_puts(&o, "{\"format\":1");
+    for (i = 0; root && i < root->count; i++) {
+        const mbj *v = root->items[i];
+        if (root->klen[i] == 6 && memcmp(root->keys[i], "format", 6) == 0) continue;
+        if (root->klen[i] == strlen(section) && memcmp(root->keys[i], section, root->klen[i]) == 0) {
+            placed = 1;
+            if (!value) continue;
+            v = value;
+        }
+        mb_put(&o, ",", 1);
+        mb_put_jstr(&o, root->keys[i], root->klen[i]);
+        mb_put(&o, ":", 1);
+        if (!mbj_canon(v, &o, NULL, 0)) o.oom = 1;
+    }
+    if (!placed && value) {
+        mb_put(&o, ",", 1);
+        mb_put_jcstr(&o, section);
+        mb_put(&o, ":", 1);
+        if (!mbj_canon(value, &o, NULL, 0)) o.oom = 1;
+    }
+    mb_put(&o, "}", 1);
+    if (!o.oom) pretty = mb_pretty(o.p, o.n);
+    if (pretty) {
+        /* The store folder may not exist yet (a claim before any install). */
+        dir = (wchar_t *)malloc(sizeof(wchar_t) * (wcslen(path) + 1));
+        if (dir) {
+            wchar_t *slash;
+            wcscpy_s(dir, wcslen(path) + 1, path);
+            slash = wcsrchr(dir, L'\\');
+            if (slash) { *slash = 0; CreateDirectoryW(dir, NULL); }
+            free(dir);
+        }
+        ok = mb_write_wfile(path, pretty, strlen(pretty));
+    }
+    sh_mb_record_unlock();
+    free(pretty);
+    free(o.p);
+    mbj_free(root);
+    mbj_free(value);
+    free(path);
+    return ok;
+}
+
+/* ---------------------------------------------------------------- state ---- */
 
 int sh_mb_state_parse(const char *text, size_t len, int *validated, long long *installed_at,
                       char *cause, size_t cap)

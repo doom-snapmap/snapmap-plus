@@ -2,12 +2,16 @@
  * DESIGN.md section 11 policy.
  *
  * A complete "smpkg." set whose ZIP decodes and whose package.json parses is
- * CONVERTED: its tree is written to <data>\mods\legacy\<id>@<digest16>\ with
- * the era B layout migrated to assets/ (decls/ -> assets/generated/decls,
- * images/ -> assets/generated/image, shaders/generated/{spirv,renderprogs}/ ->
- * assets/generated/..., manifests, requirements, strings and hud/weapons.json
- * folded into the descriptor), the bundle builder writes bundle.json, and one
- * smpmod1 row per converted bundle is written into the text. Anything else is
+ * CONVERTED: its tree is written to an ordinary mod folder <data>\mods\<id>\
+ * (else <id>@<version>) with the era B layout migrated to assets/ (decls/ ->
+ * assets/generated/decls, images/ -> assets/generated/image,
+ * shaders/generated/{spirv,renderprogs}/ -> assets/generated/..., manifests,
+ * requirements, strings and hud/weapons.json folded into the author block of
+ * mod.json, the legacy record and the grandfathered shadows into its product
+ * block), the bundle builder completes mod.json, and one smpmod1 row per
+ * converted bundle is written into the text. A conversion whose content an
+ * installed mod already serves (the same bundle hash, or the same id and
+ * content) is not kept; that mod answers the carrier. Anything else is
  * CLEANED: stripped, with the key, digest and reason logged and kept for the
  * load gate. smpbind./smpref. rows (never released) are stripped silently.
  * Every carrier gets one "LEGACY:" log line. A published map by another
@@ -17,7 +21,7 @@
  * Contract 1 whitelist, an empty file, a request path the builder refuses)
  * is left out and counted rather than refusing the package; so is a cvar
  * requirement other than the supported blacklist gates. A delivery key
- * ("delivery.<tree>") memoises its conversion across ZIP encodings: a legacy
+ * ("delivery.<tree>") memoises its conversion across ZIP encodings: a mod
  * folder whose mod.json records the key, or the bundle the overrides
  * migration (modmigrate.c) built from the same tree, answers the carrier.
  */
@@ -185,8 +189,8 @@ typedef struct sh_modlegacy_origin {
 } sh_modlegacy_origin;
 
 /* Convert a delivered beta.16-19 package folder, read with
- * sh_modlegacy_zip_from_folder, into <data>\mods\legacy\<id>@<tree16> as a
- * legacy bundle whose key is "delivery.<tree>", the key a map carrier of the
+ * sh_modlegacy_zip_from_folder, into <data>\mods\<id>\ as a legacy bundle
+ * whose key is "delivery.<tree>", the key a map carrier of the
  * same tree has. An existing conversion of that key (from a map or an earlier
  * migration) is reused. Fills `verdict`; returns 1 for CONVERT. */
 int sh_modlegacy_convert_folder(const sh_modlegacy_zip *zip, const char *tree_hex,
@@ -195,16 +199,17 @@ int sh_modlegacy_convert_folder(const sh_modlegacy_zip *zip, const char *tree_he
 /* Write an authored first-generation folder, read with
  * sh_modlegacy_zip_from_folder, as an unbuilt mod folder at `dest` (which
  * must not exist): mod.json (the descriptor migrated as for a carrier, every
- * other key kept, a "legacy" block naming the source) and assets/ in the era C
+ * other key kept, a product block seeded with the "legacy" record naming the
+ * source and the grandfathered shadows) and assets/ in the era C
  * layout. The bundle builder is not run. Fills verdict->id, version, files,
  * shadows and skipped; returns 1 on success, 0 with verdict->reason. */
 int sh_modlegacy_stage_folder(const sh_modlegacy_zip *zip, const sh_modlegacy_origin *origin,
                               const char *dest, sh_modlegacy_verdict *verdict);
 
-/* The installed conversion of a carrier key, if any: a legacy\<id>@<digest16>
- * folder, a legacy folder whose mod.json records the same delivery key, or a
- * migrated bundle that .migrated.json lists for the same tree. `digest` may be
- * NULL. Returns 1 with the folder. */
+/* The installed conversion of a carrier key, if any: a mod folder whose
+ * mod.json legacy record has the same digest16 or delivery key, or a migrated
+ * bundle the record's migration section lists for the same tree. `digest`
+ * may be NULL. Returns 1 with the folder. */
 int sh_modlegacy_find_converted(const char *key, const char *digest, char *folder, size_t cap);
 
 /* The DeserializeFromJson step: convert or clean every legacy carrier, strip

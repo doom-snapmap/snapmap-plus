@@ -1,7 +1,7 @@
 /* modserve_test.c -- the installed-mod index and provider (modserve.c)
  * against a fixture mods tree written to a temporary folder: admission,
  * failure isolation (size mismatch, unvalidated state, namespace, unbuilt
- * folder), a shadow conflict, version supersession, the blob-store fallback,
+ * folder), a shadow conflict, version supersession, a delivered package,
  * lookups and their cost, provider precedence against navigation, the Grid
  * Room and built-in defaults (the real overrides.c), probe claims, the
  * registration plan's dependency order and blocking, plan runs through fake
@@ -142,30 +142,61 @@ static const char *hash64(char c, char *out)
     return out;
 }
 
-/* Raw JSON members (with a trailing comma) the next make_bundle writes. */
+/* Raw author-block members (with a trailing comma) the next make_bundle writes. */
 static const char *g_bundle_extra;
 
-/* Write <root>\<folder>\bundle.json and its files. */
+/* Write <root>\<folder>\mod.json (an author block and its product block) and
+ * its files. A folder written under <root>\legacy stands for a package a map
+ * delivered: it goes to <root> itself with a "legacy" record (Contract 5 has
+ * no legacy folder); an author "legacy" record elsewhere is a migrated pack's
+ * ("source": "overrides"). `state` is the old .state.json shape, mapped to
+ * the block's validated, cause and built. */
 static void make_bundle(const char *parent, const char *folder, const char *id, const char *version,
                         char hash_digit, const char *shadows, const fx_file *files, int n, const char *state)
 {
-    char dir[MAX_PATH], path[MAX_PATH], h[65];
+    char dir[MAX_PATH], path[MAX_PATH], h[65], top[MAX_PATH], author[2048];
     static char json[32768];
     size_t at = 0;
-    int i;
-    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\%s", parent, folder);
+    int i, delivered = 0;
+    const char *extra = g_bundle_extra ? g_bundle_extra : "";
+    strcpy_s(top, sizeof top, parent);
+    {
+        size_t tl = strlen(top);
+        if (tl > 7 && !_stricmp(top + tl - 7, "\\legacy")) { top[tl - 7] = 0; delivered = 1; }
+    }
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\%s", top, folder);
     mkdirs(dir);
+    author[0] = 0;
+    {
+        const char *lg = strstr(extra, "\"legacy\": {}");
+        if (lg && !delivered) {
+            /* A migrated pack: its legacy record names the overrides source. */
+            _snprintf_s(author, sizeof author, _TRUNCATE, "%.*s\"legacy\": {\"source\": \"overrides\"}%s", (int)(lg - extra), extra,
+                        lg + 12);
+        } else if (!lg && delivered) {
+            _snprintf_s(author, sizeof author, _TRUNCATE, "\"legacy\": {}, %s", extra);
+        } else strcpy_s(author, sizeof author, extra);
+    }
     at += _snprintf_s(json + at, sizeof json - at, _TRUNCATE,
-                      "{\n  \"format\": 1,\n  \"id\": \"%s\",\n  \"version\": \"%s\",\n  \"name\": \"%s\",\n"
-                      "  \"bundle\": \"%s\",\n  %s\"shadows\": [%s],\n  \"files\": [\n",
-                      id, version, id, hash64(hash_digit, h), g_bundle_extra ? g_bundle_extra : "",
-                      shadows ? shadows : "");
+                      "{\n  \"id\": \"%s\",\n  \"version\": \"%s\",\n  \"name\": \"%s\",\n  %s\n"
+                      "  \"snapmap-plus\": {\"format\": 1, \"build\": 1, \"bundle\": \"%s\"",
+                      id, version, id, author, hash64(hash_digit, h));
+    if (state) {
+        const char *v = strstr(state, "\"validated\": false"), *c = strstr(state, "\"firstCause\": \""), *t = strstr(state, "\"installedAt\": ");
+        if (v) at += _snprintf_s(json + at, sizeof json - at, _TRUNCATE, ", \"validated\": false");
+        if (c) {
+            const char *e = strchr(c + 15, '"');
+            at += _snprintf_s(json + at, sizeof json - at, _TRUNCATE, ", \"cause\": \"%.*s\"", (int)(e - c - 15), c + 15);
+        }
+        if (t) at += _snprintf_s(json + at, sizeof json - at, _TRUNCATE, ", \"built\": %d", atoi(t + 15));
+    }
+    at += _snprintf_s(json + at, sizeof json - at, _TRUNCATE, ",\n    \"shadows\": [%s],\n    \"files\": [\n", shadows ? shadows : "");
     for (i = 0; i < n; ++i) {
         const fx_file *f = &files[i];
         long long size = f->size >= 0 ? f->size : (long long)strlen(f->body ? f->body : "");
         char b[65];
         at += _snprintf_s(json + at, sizeof json - at, _TRUNCATE,
-                          "    {\"path\": \"assets/%s\", \"blob\": \"%s\", \"size\": %lld, "
+                          "      {\"path\": \"assets/%s\", \"sha256\": \"%s\", \"size\": %lld, "
                           "\"provides\": {\"type\": \"%s\", \"name\": \"%s\"}, \"needs\": %s}%s\n",
                           f->path, hash64(f->blob, b), size, f->ptype, f->pname, f->needs ? f->needs : "[]",
                           i + 1 < n ? "," : "");
@@ -176,13 +207,9 @@ static void make_bundle(const char *parent, const char *folder, const char *id, 
             write_file(path, f->body, strlen(f->body));
         }
     }
-    at += _snprintf_s(json + at, sizeof json - at, _TRUNCATE, "  ]\n}\n");
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\bundle.json", dir);
+    at += _snprintf_s(json + at, sizeof json - at, _TRUNCATE, "    ]\n  }\n}\n");
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\mod.json", dir);
     write_file(path, json, at);
-    if (state) {
-        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\.state.json", dir);
-        write_file(path, state, strlen(state));
-    }
 }
 
 #define A_MD6    "generated/decls/md6def/mods/alex.pink-imp/imp.md6.decl"
@@ -203,7 +230,7 @@ static char g_hash_a[65], g_hash_a2[65], g_hash_b[65], g_hash_c[65], g_hash_f[65
 
 static void build_fixture(void)
 {
-    char tmp[MAX_PATH], path[MAX_PATH], legacy[MAX_PATH], blobs[MAX_PATH], h[65];
+    char tmp[MAX_PATH], path[MAX_PATH], legacy[MAX_PATH];
     GetTempPathA(sizeof tmp, tmp);
     _snprintf_s(g_root, sizeof g_root, _TRUNCATE, "%smodserve_test_%lu\\mods", tmp, GetCurrentProcessId());
     mkdirs(g_root);
@@ -280,12 +307,10 @@ static void build_fixture(void)
         make_bundle(g_root, "erin.ns@1.0.0", "erin.ns", "1.0.0", '1', NULL, e, 1, NULL);
     }
     {
-        /* A file missing from the tree but present in the blob store. */
-        static const fx_file f[] = { { F_BLOB, NULL, 9, "image", "mods/fay.blob/tex", NULL, '2' } };
+        /* A raw file: its own tree holds it (there is no blob store). */
+        static const fx_file f[] = { { F_BLOB, "BLOBBYTES", 9, "image", "mods/fay.blob/tex", NULL, '2' } };
         make_bundle(g_root, "fay.blob@1.0.0", "fay.blob", "1.0.0", '2', NULL, f, 1, NULL);
         hash64('2', g_hash_f);
-        _snprintf_s(blobs, sizeof blobs, _TRUNCATE, "%s\\blobs\\%s", g_root, hash64('2', h));
-        write_file(blobs, "BLOBBYTES", 9);
     }
     {
         /* Converted first-generation package: its names are not namespaced. */
@@ -424,10 +449,10 @@ static void test_index_and_isolation(void)
     CHECK(st.bundles_seen == 11);
     CHECK(st.bundles_admitted == 6);
     CHECK(st.conflicts == 1);
-    CHECK(log_has("bundle 'carol.broken@1.0.0' skipped: size mismatch: '" C_ONLY "' is 17 bytes, bundle.json says 999"));
+    CHECK(log_has("bundle 'carol.broken@1.0.0' skipped: size mismatch: '" C_ONLY "' is 17 bytes, mod.json says 999"));
     CHECK(log_has("bundle 'dave.x@1.0.0' skipped: not validated: md6Def mesh missing"));
     CHECK(log_has("bundle 'erin.ns@1.0.0' skipped: 'generated/decls/entitydef/monster/sneaky.decl' is outside mods/erin.ns/"));
-    CHECK(log_has("bundle 'unbuilt' skipped: no bundle.json"));
+    CHECK(log_has("bundle 'unbuilt' skipped: not built yet"));
     CHECK(log_has("bundle 'hank.snd@1.0.0' skipped: 'sound/soundbanks/pc/other_fx.bnk' is outside mods/hank.snd/"));
     CHECK(!log_has("bundle 'gail.snd@1.0.0' skipped"));
     CHECK(log_count("skipped:") == 5);   /* one line per skipped bundle */
@@ -526,7 +551,7 @@ static void test_lookup(void)
     CHECK(!sh_modserve_lookup(A_ENT "x", NULL));
     CHECK(!sh_modserve_lookup("", NULL));
     CHECK(!sh_modserve_lookup(NULL, NULL));
-    /* Bytes, version supersession and the blob-store fallback. */
+    /* Bytes, version supersession and a delivered package. */
     CHECK(open_text(A_ENT, text, sizeof text) == 1 && !strcmp(text, "entityDef imp { inherit \"snapmaps/placeablesnapaiencounter/imp\" }"));
     CHECK(open_text(A_FIRE, text, sizeof text) == 1 && !strcmp(text, "entityDef fireball { v2 }"));
     CHECK(open_text(F_BLOB, text, sizeof text) == 1 && !strcmp(text, "BLOBBYTES"));
@@ -1175,7 +1200,7 @@ static void test_conflicts(void)
     _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\conflicts\\mods", top);
     _snprintf_s(legacy, sizeof legacy, _TRUNCATE, "%s\\legacy", root);
     mkdirs(legacy);
-    g_bundle_extra = "\"extra\": {\"legacy\": {}},\n  ";
+    g_bundle_extra = "\"legacy\": {},\n  ";
     {
         /* The owner's tree, reduced: two builds of one authored boss mod with
          * the same animWeb bytes, the map-delivered copy of it with one line
@@ -1240,7 +1265,7 @@ static void test_conflicts(void)
               "{\n\tprops {\n\t\tmodelInfos {\n\t\t\t\"zion/player/human/base/sp_gone.md6\" \"\"\n\t\t}\n\t}\n}\n",
               -1, "animWeb", "player/fp_hands_sp", NULL, '5' },
         };
-        g_bundle_extra = "\"extra\": {\"legacy\": {}},\n  \"requirements\": {\"cvars\": {\"g_useResourceBlackList\": \"0\"}},\n  ";
+        g_bundle_extra = "\"legacy\": {},\n  \"requirements\": {\"cvars\": {\"g_useResourceBlackList\": \"0\"}},\n  ";
         make_bundle(root, "aw.pack@0.0.0+1", "aw.pack", "0.0.0", '8',
                     "\"generated/decls/animweb/designsystems/med_station.decl\", \"generated/decls/animweb/designsystems/good.decl\", "
                     "\"generated/decls/md6def/zion/props/door.md6.decl\", \"generated/decls/animweb/player/fp_hands_mp.decl\", "
@@ -1253,14 +1278,14 @@ static void test_conflicts(void)
     log_clear();
     CHECK(sh_modserve_index_build(root) == 8);
     /* The animWeb the boss bundles carry: one copy serves, never none. */
-    CHECK(log_has("conflict: shadow '" CYB_AW "' is provided by local.cyberdemon@0.0.0, local.cyberdemon@0.0.0-05238b2e, "
-                  "cyberdemon@legacy-3d0fabc7bbc8194f; serving local.cyberdemon@0.0.0-05238b2e (most providers carry these bytes)"));
+    CHECK(log_has("conflict: shadow '" CYB_AW "' is provided by cyberdemon@legacy-3d0fabc7bbc8194f, local.cyberdemon@0.0.0, "
+                  "local.cyberdemon@0.0.0-05238b2e; serving local.cyberdemon@0.0.0-05238b2e (most providers carry these bytes)"));
     CHECK(sh_modserve_lookup(CYB_AW, &hit) && !strcmp(hit.bundle_id, "local.cyberdemon"));
     CHECK(open_text(CYB_AW, text, sizeof text) == 1 && strstr(text, "AW_CF_IDLE_CYCLE"));
     CHECK(sh_modserve_probe_claims(CYB_AW));
     /* The conductor: every boss's aiTypeList entry is served. */
-    CHECK(log_has("conflict: shadow '" CONDUCTOR "' is provided by local.cyberdemon@0.0.0, local.cyberdemon@0.0.0-05238b2e, "
-                  "local.hell-guard@0.0.0, local.spider-mastermind@0.0.0, cyberdemon@legacy-3d0fabc7bbc8194f; serving "));
+    CHECK(log_has("conflict: shadow '" CONDUCTOR "' is provided by cyberdemon@legacy-3d0fabc7bbc8194f, local.cyberdemon@0.0.0, "
+                  "local.cyberdemon@0.0.0-05238b2e, local.hell-guard@0.0.0, local.spider-mastermind@0.0.0; serving "));
     CHECK(log_has("'s text with the others' list entries (3 added)"));
     CHECK(sh_modserve_conflict_info(CONDUCTOR, &c) && c.composed && c.count == 5 && strstr(c.reason, "composed: 3 list entries"));
     CHECK(open_text(CONDUCTOR, text, sizeof text) == 1 && strstr(text, "num = 6;") && strstr(text, "\"524288\"") &&
@@ -1355,7 +1380,7 @@ static void test_editor_refs(void)
     if (slash) *slash = 0;
     _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\edrefs\\mods", top);
     mkdirs(root);
-    g_bundle_extra = "\"extra\": {\"legacy\": {}},\n  ";
+    g_bundle_extra = "\"legacy\": {},\n  ";
     make_bundle(root, "local.cyberdemon@0.0.0+1", "local.cyberdemon", "0.0.0", '9',
                 "\"generated/decls/snapeditorentitydef/demons/cyberdemon_enc.decl\", "
                 "\"generated/decls/snapeditorentitydef/prop/crate.decl\", "
@@ -1464,15 +1489,15 @@ static void test_bundle_extra(void)
     _snprintf_s(mods, sizeof mods, _TRUNCATE, "%s\\extra_mods", top);
     _snprintf_s(legacy, sizeof legacy, _TRUNCATE, "%s\\legacy", mods);
     mkdirs(mods);
-    g_bundle_extra = "\"extra\": {\"strings\": {\"en\": {\"zed_name\": \"Zed\"}}},";
+    g_bundle_extra = "\"strings\": {\"en\": {\"zed_name\": \"Zed\"}},";
     make_bundle(mods, "zed.mod@1.0.0", "zed.mod", "1.0.0", '7', NULL, z, 1, NULL);
-    g_bundle_extra = "\"extra\": {\"strings\": {\"en\": {\"abe_name\": \"Abe 2\"}}},";
+    g_bundle_extra = "\"strings\": {\"en\": {\"abe_name\": \"Abe 2\"}},";
     make_bundle(mods, "abe.mod@2.0.0", "abe.mod", "2.0.0", '8', NULL, a2, 1, NULL);
-    g_bundle_extra = "\"extra\": {\"hud\": {}, \"strings\": {\"en\": {\"abe_name\": \"Abe 1\"}}},";
+    g_bundle_extra = "\"hud\": {}, \"strings\": {\"en\": {\"abe_name\": \"Abe 1\"}},";
     make_bundle(mods, "abe.mod@1.0.0", "abe.mod", "1.0.0", '9', NULL, a1, 1, NULL);
-    g_bundle_extra = "\"extra\": {\"strings\": {\"en\": {\"bad_name\": \"Bad\"}}},";
+    g_bundle_extra = "\"strings\": {\"en\": {\"bad_name\": \"Bad\"}},";
     make_bundle(mods, "bad.size@1.0.0", "bad.size", "1.0.0", '0', NULL, bad, 1, NULL);
-    g_bundle_extra = "\"extra\": {\"legacy\": {}, \"strings\": {\"en\": {\"old_name\": \"Old\"}}},";
+    g_bundle_extra = "\"legacy\": {}, \"strings\": {\"en\": {\"old_name\": \"Old\"}},";
     make_bundle(legacy, "aaa.old@0123456789abcdef", "aaa.old", "0123456789abcdef", 'f', NULL, old, 1, NULL);
     g_bundle_extra = NULL;
     make_bundle(mods, "plain.mod@1.0.0", "plain.mod", "1.0.0", 'e', NULL, plain, 1, NULL);

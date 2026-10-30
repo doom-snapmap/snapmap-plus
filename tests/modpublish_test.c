@@ -209,6 +209,16 @@ static int setting_confirmed(void)
     return sh_config_get_bool("mods.upload_confirmed", &on, NULL) ? on : -1;
 }
 
+/* A section of the product record (mods\snapmap-plus.json) holds `needle`
+ * (canonical JSON: sorted keys, no spaces). */
+static int section_contains(const char *store, const char *section, const char *needle)
+{
+    char *text = NULL;
+    int hit = sh_mb_record_get(store, section, &text) == 1 && text && strstr(text, needle) != NULL;
+    free(text);
+    return hit;
+}
+
 static int file_contains(const char *path, const char *needle)
 {
     size_t len = 0;
@@ -371,7 +381,6 @@ int main(int argc, char **argv)
         stub_claim *c;
         char claim[33];
         int with_secret = g_stub.claim_with_secret;
-        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", store, MODSYNC_CLAIMS_FILE);
         sh_modpublish_feed_post((void *)(uintptr_t)F.token, "aaaaaaaaaaaaaaaaaaaaaaa1", "rev1");
         PUMP_UNTIL(idle_all());
         c = stub_live_claim("aaaaaaaaaaaaaaaaaaaaaaa1");
@@ -380,7 +389,7 @@ int main(int argc, char **argv)
         CHECK(stub_live_claim(provisional) == NULL);
         CHECK(modsync_claim_lookup("aaaaaaaaaaaaaaaaaaaaaaa1", claim, NULL) && !strcmp(claim, c->id));
         CHECK(!modsync_claim_lookup(provisional, NULL, NULL));
-        CHECK(file_contains(path, "aaaaaaaaaaaaaaaaaaaaaaa1") && !file_contains(path, provisional));
+        CHECK(section_contains(store, "claims", "aaaaaaaaaaaaaaaaaaaaaaa1") && !section_contains(store, "claims", provisional));
         CHECK(strstr(g_log, "claimed 2 bundle(s) under item 'aaaaaaaaaaaaaaaaaaaaaaa1'") != NULL);
     }
 
@@ -450,7 +459,6 @@ int main(int argc, char **argv)
         const char *still[2] = { "ggggggggggggggggggggggg7", "zzzzzzzzzzzzzzzzzzzzzzz9" };
         const char *other[1] = { "zzzzzzzzzzzzzzzzzzzzzzz9" };
         int queries, releases;
-        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", store, SH_MODPUBLISH_LINKS_FILE);
         /* Publish item g from cloud-saved item cloud-g, and item h from a map
          * whose cloud-saved id did not read. */
         strcpy_s(F.cloud, sizeof F.cloud, "cloud-g");
@@ -461,7 +469,8 @@ int main(int argc, char **argv)
         sh_modpublish_feed_post((void *)(uintptr_t)F.token, "ggggggggggggggggggggggg7", "rev1");
         PUMP_UNTIL(idle_all());
         CHECK(stub_live_claim("ggggggggggggggggggggggg7") != NULL);
-        CHECK(file_contains(path, "\"ggggggggggggggggggggggg7\":{\"cloud\":\"cloud-g\",\"local\":\"local-g\",\"at\":"));
+        CHECK(section_contains(store, "links", "\"ggggggggggggggggggggggg7\":{\"at\":") &&
+              section_contains(store, "links", ",\"cloud\":\"cloud-g\",\"local\":\"local-g\"}"));
         F.cloud[0] = 0;
         strcpy_s(F.local, sizeof F.local, "local-h");
         sh_modpublish_save_seen(text, len);
@@ -469,9 +478,10 @@ int main(int argc, char **argv)
         PUMP_UNTIL(!sh_modpublish_holding());
         sh_modpublish_feed_post((void *)(uintptr_t)F.token, "hhhhhhhhhhhhhhhhhhhhhhh8", "rev1");
         PUMP_UNTIL(idle_all());
-        CHECK(file_contains(path, "\"hhhhhhhhhhhhhhhhhhhhhhh8\":{\"local\":\"local-h\",\"at\":"));
+        CHECK(section_contains(store, "links", "\"hhhhhhhhhhhhhhhhhhhhhhh8\":{\"at\":") &&
+              section_contains(store, "links", ",\"local\":\"local-h\"}"));
         F.local[0] = 0;
-        CHECK(file_contains(path, "\"at\":"));
+        CHECK(section_contains(store, "links", "\"at\":"));
 
         /* Published within the hour: the search may not list it yet; kept. */
         queries = F.queries;
@@ -542,7 +552,7 @@ int main(int argc, char **argv)
         CHECK(stub_live_claim("ggggggggggggggggggggggg7") == NULL && g_stub.release_calls == releases + 1);
         CHECK(!modsync_claim_lookup("ggggggggggggggggggggggg7", NULL, NULL));
         CHECK(strstr(g_log, "1 claim(s) released, 0 kept") != NULL);
-        CHECK(!file_contains(path, "ggggggggggggggggggggggg7") && file_contains(path, "hhhhhhhhhhhhhhhhhhhhhhh8"));
+        CHECK(!section_contains(store, "links", "ggggggggggggggggggggggg7") && section_contains(store, "links", "hhhhhhhhhhhhhhhhhhhhhhh8"));
         /* Deleting it again: nothing linked any more. */
         queries = F.queries;
         sh_modpublish_deleted("local-g", "cloud-g");
@@ -550,7 +560,7 @@ int main(int argc, char **argv)
         /* An unpublish forgets the link too. */
         sh_modpublish_unpublished("hhhhhhhhhhhhhhhhhhhhhhh8");
         PUMP_UNTIL(idle_all());
-        CHECK(!file_contains(path, "hhhhhhhhhhhhhhhhhhhhhhh8"));
+        CHECK(!section_contains(store, "links", "hhhhhhhhhhhhhhhhhhhhhhh8"));
     }
 
     printf("-- the search tag goes only into the armed publish's own save\n");

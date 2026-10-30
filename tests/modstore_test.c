@@ -1,8 +1,8 @@
-/* modstore_test.c -- the mods\ store: install, hard links and the copy
- * fallback, enumeration, verification and detected corruption, in-place
- * builds, build-numbered folders, and resolve_need hit, miss, dedupe and
- * conflict, and the store lock (a second installer waits, two installers at
- * once both succeed).
+/* modstore_test.c -- the mods\ store (Contract 5): install as mods\<id> with
+ * real copies, enumeration, verification recorded in mod.json, detected
+ * corruption, folder names for a second version, the rebuild rule (tree hash
+ * and build cache), resolve_need hit, miss, dedupe and conflict, the store
+ * lock (a second installer waits, two installers at once both succeed).
  *
  *   modstore_test.exe <tests\fixtures\mods\alex.r2-imp>
  */
@@ -18,7 +18,18 @@ static int failures;
 #define CHECK(expr) do { if (!(expr)) { fprintf(stderr, "FAIL %s:%d: %s\n", __FILE__, __LINE__, #expr); failures++; } } while (0)
 
 static unsigned g_logged;
-void backend_log(const char *message) { (void)message; g_logged++; }
+static char g_log[64][600];
+void backend_log(const char *message)
+{
+    strncpy_s(g_log[g_logged % 64], sizeof g_log[0], message, _TRUNCATE);
+    g_logged++;
+}
+static int log_has(const char *needle)
+{
+    unsigned i, n = g_logged < 64 ? g_logged : 64;
+    for (i = 0; i < n; i++) if (strstr(g_log[i], needle)) return 1;
+    return 0;
+}
 
 static const char *const STOCK[] = {
     "generated/decls/material/textures/guis/snapmaps/entity_icons/demons/imp_enc.decl",
@@ -28,6 +39,7 @@ static const char *const STOCK[] = {
     "cooked/anim/md6/characters/monsters/imp/base/motion/combat/meleeforward01.bmd6anim",
     "cooked/anim/md6/characters/monsters/imp/base/motion/combat/meleeforward02.bmd6anim",
     "cooked/anim/md6/characters/monsters/imp/base/motion/combat/idle.bmd6anim",
+    "generated/decls/entitydef/monster/imp.decl",
     NULL
 };
 static int stock_exists(void *ctx, const char *request)
@@ -50,30 +62,18 @@ static DWORD links_of(const char *path)
     return n;
 }
 
-static unsigned count_blobs(const char *root)
-{
-    WIN32_FIND_DATAA fd;
-    char pattern[MAX_PATH * 2];
-    HANDLE h;
-    unsigned n = 0, ro = 0;
-    _snprintf_s(pattern, sizeof pattern, _TRUNCATE, "%s\\blobs\\*", root);
-    h = FindFirstFileA(pattern, &fd);
-    if (h == INVALID_HANDLE_VALUE) return 0;
-    do {
-        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
-        n++;
-        if (fd.dwFileAttributes & FILE_ATTRIBUTE_READONLY) ro++;
-    } while (FindNextFileA(h, &fd));
-    FindClose(h);
-    CHECK(ro == n);   /* every blob is read-only */
-    return n;
-}
-
-static const sh_ms_entry *find_entry(const sh_ms_list *l, const char *key)
+static const sh_ms_entry *find_entry(const sh_ms_list *l, const char *name)
 {
     size_t i;
-    for (i = 0; i < l->count; i++) if (!strcmp(l->items[i].key, key)) return &l->items[i];
+    for (i = 0; i < l->count; i++) if (!strcmp(l->items[i].name, name)) return &l->items[i];
     return NULL;
+}
+
+static char *slurp(const char *folder, const char *rel, size_t *len)
+{
+    char path[MAX_PATH * 2];
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", folder, rel);
+    return (char *)sh_mb_read_file(path, 16u << 20, len);
 }
 
 /* ------------------------------------------------------------ lock contention */
@@ -127,11 +127,12 @@ int main(int argc, char **argv)
     char hand[MAX_PATH];
     sh_ms_install_stats st;
     sh_ms_verify_stats vs;
+    sh_ms_sync_stats ss;
     sh_ms_list list;
     sh_ms_hit hit;
     sh_mb_bundle b;
     const sh_ms_entry *e;
-    unsigned blobs_after_first;
+    char h1[65];
 
     if (!GetFullPathNameA(argc > 1 ? argv[1] : "fixtures\\mods\\alex.r2-imp", sizeof fixture, fixture, NULL)) return 2;
     if (!mt_temp_dir("modstore", tmp, sizeof tmp)) { fprintf(stderr, "no temp dir\n"); return 2; }
@@ -153,31 +154,30 @@ int main(int argc, char **argv)
     CHECK(sh_ms_enumerate(&list) && list.count == 0);
     sh_ms_list_free(&list);
 
-    /* Install from outside the store: hard links. */
+    /* Install from outside the store: mods\<id>, real copies, the source untouched. */
     cause[0] = 0;
     CHECK(sh_ms_install_from_folder(src, &RESOLVER, key, sizeof key, &st, &b, cause, sizeof cause));
     if (b.errors || cause[0]) fprintf(stderr, "  install: %s\n", b.errors ? b.first_cause : cause);
-    CHECK(!strcmp(key, "alex.r2-imp@1.0.0+1"));
-    CHECK(st.blobs_written == 13 && st.blobs_reused == 0 && st.linked == 13 && st.copied == 0 && !st.in_place && !st.replaced);
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\bundle.json", src);
-    CHECK(mt_exists(path));   /* built in place */
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\alex.r2-imp@1.0.0+1\\bundle.json", root);
-    CHECK(mt_exists(path));   /* the store folder name carries the build */
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\alex.r2-imp@1.0.0+1\\.state.json", root);
-    CHECK(mt_exists(path));
+    CHECK(!strcmp(key, "alex.r2-imp"));
+    CHECK(st.copied == 13 && !st.in_place && !st.replaced);
+    CHECK(!mt_has(src, "bundle.json") && !strstr(slurp(src, "mod.json", NULL), "snapmap-plus"));   /* the source is not written */
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\alex.r2-imp", root);
+    CHECK(mt_has(path, "mod.json") && !mt_has(path, "bundle.json") && !mt_has(path, ".state.json") && !mt_has(root, "blobs"));
     _snprintf_s(path, sizeof path, _TRUNCATE,
-                "%s\\alex.r2-imp@1.0.0+1\\assets\\generated\\decls\\md6def\\mods\\alex.r2-imp\\imp_copy.md6.decl", root);
-    CHECK(links_of(path) >= 2);
-    CHECK(GetFileAttributesA(path) & FILE_ATTRIBUTE_READONLY);
-    blobs_after_first = count_blobs(root);
-    CHECK(blobs_after_first == 13);
+                "%s\\alex.r2-imp\\assets\\generated\\decls\\md6def\\mods\\alex.r2-imp\\imp_copy.md6.decl", root);
+    CHECK(links_of(path) == 1);
+    CHECK(!(GetFileAttributesA(path) & FILE_ATTRIBUTE_READONLY));
+    strcpy_s(h1, sizeof h1, b.hash);
     sh_mb_free(&b);
 
-    /* Enumeration trusts bundle.json and checks sizes. */
+    /* Enumeration reads mod.json and checks sizes. */
     CHECK(sh_ms_enumerate(&list) && list.count == 1);
-    e = find_entry(&list, "alex.r2-imp@1.0.0+1");
-    CHECK(e && e->loaded && e->sizes_ok && e->has_state && e->validated && sh_ms_entry_usable(e) && e->installed_at > 0);
-    CHECK(e && e->bundle.file_count == 13 && e->bundle.build == 1);
+    e = find_entry(&list, "alex.r2-imp");
+    CHECK(e && e->loaded && e->sizes_ok && e->validated && sh_ms_entry_usable(e) && e->installed_at > 0);
+    CHECK(e && e->bundle.file_count == 13 && e->bundle.build == 1 && !strcmp(e->key, "alex.r2-imp@1.0.0+1"));
+    CHECK(e && !strcmp(e->bundle.origin, "install") && !e->delivered);
+    CHECK(e && sh_ms_entry_matches(e, "alex.r2-imp") && sh_ms_entry_matches(e, "ALEX.R2-IMP@1.0.0") &&
+          sh_ms_entry_matches(e, "alex.r2-imp@1.0.0+1") && !sh_ms_entry_matches(e, "alex.r2-imp@1.0.1"));
 
     /* resolve_need: by logical name, by derived request path, and a miss. */
     CHECK(sh_ms_resolve_need(&list, "md6Def", "mods/alex.r2-imp/imp_copy.md6", &hit) == SH_MS_HIT && hit.providers == 1);
@@ -193,124 +193,118 @@ int main(int argc, char **argv)
     sh_ms_list_free(&list);
 
     /* Verification passes on the fresh install. */
-    CHECK(sh_ms_verify("alex.r2-imp@1.0.0+1", &vs, cause, sizeof cause));
-    CHECK(vs.entries == 1 && vs.files == 13 && vs.blobs_checked == 0);   /* hard links are the blobs */
-    CHECK(!sh_ms_verify("alex.r2-imp@9.9.9+1", &vs, cause, sizeof cause) && strstr(cause, "no installed bundle"));
+    CHECK(sh_ms_verify("alex.r2-imp", &vs, cause, sizeof cause));
+    CHECK(vs.entries == 1 && vs.files == 13);
+    CHECK(!sh_ms_verify("alex.r2-imp@9.9.9", &vs, cause, sizeof cause) && strstr(cause, "no installed mod"));
 
     /* Reinstalling unchanged content keeps build 1 and replaces the folder. */
     CHECK(sh_ms_install_from_folder(src, &RESOLVER, key, sizeof key, &st, NULL, cause, sizeof cause));
-    CHECK(!strcmp(key, "alex.r2-imp@1.0.0+1") && st.replaced && st.blobs_reused == 13 && st.blobs_written == 0);
-    CHECK(count_blobs(root) == 13);   /* blobs survive, still read-only, after the old tree is removed */
-    CHECK(sh_ms_verify("alex.r2-imp@1.0.0+1", &vs, cause, sizeof cause));
+    CHECK(!strcmp(key, "alex.r2-imp") && st.replaced && st.copied == 13);
+    CHECK(sh_ms_verify("alex.r2-imp", &vs, cause, sizeof cause));
 
-    /* Changed content takes build 2, laid out by the copy fallback. */
+    /* Changed content of the same version replaces it as build 2 (no blobs). */
     mt_append(src, "assets\\generated\\decls\\entitydef\\mods\\alex.r2-imp\\imp_copy.decl", "\r\n// edited\r\n");
-    sh_ms_test_force_copy(1);
-    CHECK(sh_ms_install_from_folder(src, &RESOLVER, key, sizeof key, &st, NULL, cause, sizeof cause));
-    sh_ms_test_force_copy(0);
-    CHECK(!strcmp(key, "alex.r2-imp@1.0.0+2"));
-    CHECK(st.blobs_written == 1 && st.blobs_reused == 12 && st.copied == 13 && st.linked == 0);
-    _snprintf_s(path, sizeof path, _TRUNCATE,
-                "%s\\alex.r2-imp@1.0.0+2\\assets\\generated\\decls\\md6def\\mods\\alex.r2-imp\\imp_copy.md6.decl", root);
-    CHECK(links_of(path) == 1);
-    CHECK(count_blobs(root) == 14);
-    CHECK(sh_ms_verify("alex.r2-imp@1.0.0+2", &vs, cause, sizeof cause));
-    CHECK(vs.files == 13 && vs.blobs_checked == 13);   /* copies: each blob hashed too */
+    mt_write(src, "mod.json", slurp(fixture, "mod.json", NULL));
+    CHECK(sh_ms_install_from_folder(src, &RESOLVER, key, sizeof key, &st, &b, cause, sizeof cause));
+    CHECK(!strcmp(key, "alex.r2-imp") && st.replaced && b.build == 2 && strcmp(b.hash, h1));
+    sh_mb_free(&b);
 
-    /* Two builds installed: a decl both provide is a conflict; a raw file
+    /* A second version installs beside it as <id>@<version>. */
+    {
+        char *desc = slurp(fixture, "mod.json", NULL), *v = desc ? strstr(desc, "1.0.0") : NULL;
+        if (v) v[4] = '1';
+        mt_write(src, "mod.json", desc ? desc : "");
+        free(desc);
+    }
+    CHECK(sh_ms_install_from_folder(src, &RESOLVER, key, sizeof key, &st, NULL, cause, sizeof cause));
+    CHECK(!strcmp(key, "alex.r2-imp@1.0.1") && !st.replaced);
+
+    /* Two folders of one id: a decl both provide is a conflict; a raw file
      * with equal bytes in both is a dedupe. */
     CHECK(sh_ms_enumerate(&list) && list.count == 2);
     CHECK(sh_ms_resolve_need(&list, "md6Def", "mods/alex.r2-imp/imp_copy.md6", &hit) == SH_MS_CONFLICT && hit.providers == 2);
     CHECK(sh_ms_resolve_need(&list, "baseModel", "md6/mods/alex.r2-imp/imp_copy/assets/mesh/imp_copy.md6mesh", &hit) == SH_MS_DEDUPE);
-    CHECK(!strcmp(list.items[hit.entry].key, "alex.r2-imp@1.0.0+1"));   /* first match wins */
     sh_ms_list_free(&list);
-    /* Verifying id@version covers every build. */
-    CHECK(sh_ms_verify("alex.r2-imp@1.0.0", &vs, cause, sizeof cause) && vs.entries == 2);
+    /* Verifying the id covers every folder of it. */
+    CHECK(sh_ms_verify("alex.r2-imp", &vs, cause, sizeof cause) && vs.entries == 2);
 
-    /* Corruption in the copied tree is detected and disables that build. */
+    /* Corruption is detected, recorded in mod.json, and disables that folder. */
     _snprintf_s(path, sizeof path, _TRUNCATE,
-                "%s\\alex.r2-imp@1.0.0+2\\assets\\generated\\basemodel\\md6\\mods\\alex.r2_imp\\imp_copy\\assets\\mesh\\imp_copy.bmd6model",
+                "%s\\alex.r2-imp@1.0.1\\assets\\generated\\basemodel\\md6\\mods\\alex.r2_imp\\imp_copy\\assets\\mesh\\imp_copy.bmd6model",
                 root);
-    SetFileAttributesA(path, FILE_ATTRIBUTE_NORMAL);
     {
         FILE *f = NULL;
         if (fopen_s(&f, path, "r+b") == 0 && f) { fputc('X', f); fclose(f); }
     }
-    CHECK(!sh_ms_verify("alex.r2-imp@1.0.0+2", &vs, cause, sizeof cause));
-    CHECK(strstr(cause, "imp_copy.bmd6model does not match bundle.json") != NULL);
+    CHECK(!sh_ms_verify("alex.r2-imp@1.0.1", &vs, cause, sizeof cause));
+    CHECK(strstr(cause, "imp_copy.bmd6model does not match mod.json") != NULL);
     CHECK(sh_ms_enumerate(&list));
-    e = find_entry(&list, "alex.r2-imp@1.0.0+2");
-    CHECK(e && e->loaded && e->sizes_ok && e->has_state && !e->validated && !sh_ms_entry_usable(e));
+    e = find_entry(&list, "alex.r2-imp@1.0.1");
+    CHECK(e && e->loaded && e->sizes_ok && !e->validated && !sh_ms_entry_usable(e));
     CHECK(e && strstr(e->cause, "does not match"));
     CHECK(sh_ms_resolve_need(&list, "md6Def", "mods/alex.r2-imp/imp_copy.md6", &hit) == SH_MS_HIT);
     sh_ms_list_free(&list);
+    {
+        char *text = slurp(root, "alex.r2-imp@1.0.1\\mod.json", NULL);
+        CHECK(text && strstr(text, "\"validated\": false") && strstr(text, "\"cause\": \"assets/"));
+        free(text);
+    }
     /* A missing file shows at enumeration without hashing. */
     _snprintf_s(path, sizeof path, _TRUNCATE,
-                "%s\\alex.r2-imp@1.0.0+2\\assets\\generated\\image\\mods\\alex.r2_imp\\imp_icon.bimage", root);
-    SetFileAttributesA(path, FILE_ATTRIBUTE_NORMAL);
+                "%s\\alex.r2-imp@1.0.1\\assets\\generated\\image\\mods\\alex.r2_imp\\imp_icon.bimage", root);
     DeleteFileA(path);
     CHECK(sh_ms_enumerate(&list));
-    e = find_entry(&list, "alex.r2-imp@1.0.0+2");
+    e = find_entry(&list, "alex.r2-imp@1.0.1");
     CHECK(e && !e->sizes_ok && strstr(e->cause, "missing"));
     sh_ms_list_free(&list);
 
-    /* A folder dropped into mods\ by hand is built in place. */
-    _snprintf_s(hand, sizeof hand, _TRUNCATE, "%s\\dropped", root);
-    CHECK(mt_copy_tree(fixture, hand));
-    mt_write(hand, "mod.json", "{\"id\":\"alex.dropped\",\"name\":\"Dropped\"}");
-    /* Its own namespace: a minimal decl. */
-    {
-        char rm[MAX_PATH * 2];
-        _snprintf_s(rm, sizeof rm, _TRUNCATE, "%s\\assets", hand);
-        mt_remove_tree(rm);
-    }
+    /* Removed: one folder of the id is left. */
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\alex.r2-imp@1.0.1", root);
+    CHECK(sh_ms_remove_folder(path) && !mt_has(root, "alex.r2-imp@1.0.1"));
+
+    /* A folder dropped into mods\ by hand keeps its name; unbuilt, it is
+     * listed as such, and the rebuild rule builds it in place. */
+    _snprintf_s(hand, sizeof hand, _TRUNCATE, "%s\\My Dropped Mod", root);
+    mt_write(hand, "package.json", "{\"id\":\"alex.dropped\",\"name\":\"Dropped\"}");
     mt_write(hand, "assets\\generated\\decls\\entitydef\\mods\\alex.dropped\\thing.decl",
              "{\r\n\tinherit = \"mods/alex.r2-imp/imp_copy\";\r\n}");
-    /* Unbuilt, it is listed as such. */
     CHECK(sh_ms_enumerate(&list));
-    e = find_entry(&list, "dropped");
+    e = find_entry(&list, "My Dropped Mod");
     CHECK(e && !e->loaded && strstr(e->cause, "not built"));
     sh_ms_list_free(&list);
-    cause[0] = 0;
-    CHECK(sh_ms_install_from_folder(hand, &RESOLVER, key, sizeof key, &st, NULL, cause, sizeof cause));
-    if (cause[0]) fprintf(stderr, "  dropped: %s\n", cause);
-    CHECK(!strcmp(key, "alex.dropped@0.0.0+1") && st.in_place && st.linked == 0 && st.copied == 0 && st.blobs_written == 1);
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\bundle.json", hand);
-    CHECK(mt_exists(path));
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\alex.dropped@0.0.0+1", root);
-    CHECK(!mt_exists(path));   /* no second copy of an in-place bundle */
+    g_logged = 0;
+    CHECK(sh_ms_sync(&RESOLVER, &ss));
+    CHECK(ss.folders == 2 && ss.failed == 0);
+    if (ss.failed) fprintf(stderr, "  sync: %s\n", g_log[(g_logged - 1) % 64]);
+    CHECK(ss.rebuilt >= 1 && log_has("MODS: store: My Dropped Mod built: alex.dropped@0.0.0+1"));
+    CHECK(mt_has(hand, "mod.json") && !mt_has(hand, "package.json"));   /* package.json became mod.json */
     CHECK(sh_ms_enumerate(&list));
-    e = find_entry(&list, "alex.dropped@0.0.0+1");
-    CHECK(e && sh_ms_entry_usable(e));
+    e = find_entry(&list, "My Dropped Mod");
+    CHECK(e && sh_ms_entry_usable(e) && !e->bundle.origin[0]);
     sh_ms_list_free(&list);
-    CHECK(sh_ms_verify("alex.dropped@0.0.0+1", &vs, cause, sizeof cause) && vs.blobs_checked == 1);
-
-    /* A refused build leaves the state on an in-store folder and installs nothing. */
+    /* Unchanged trees are not built again: the cache answers. */
+    g_logged = 0;
+    CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.rebuilt == 0 && ss.failed == 0);
+    /* An edit under assets is a new tree: built again (build 2). */
+    mt_write(hand, "assets\\generated\\decls\\entitydef\\mods\\alex.dropped\\thing.decl",
+             "{\r\n\tinherit = \"mods/alex.r2-imp/imp_copy\";\r\n\t// edited\r\n}");
+    CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.rebuilt == 1);
+    CHECK(sh_ms_enumerate(&list));
+    e = find_entry(&list, "My Dropped Mod");
+    CHECK(e && sh_ms_entry_usable(e) && e->bundle.build == 2);
+    sh_ms_list_free(&list);
+    /* A refused rebuild leaves the cause on the folder, which stops serving. */
     mt_write(hand, "assets\\generated\\decls\\entitydef\\other\\x.decl", "{\r\n}");
-    CHECK(!sh_ms_install_from_folder(hand, &RESOLVER, key, sizeof key, &st, NULL, cause, sizeof cause));
-    CHECK(strstr(cause, "outside mods/alex.dropped/") != NULL);
+    CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.failed == 1);
     CHECK(sh_ms_enumerate(&list));
-    e = find_entry(&list, "alex.dropped@0.0.0+1");
-    CHECK(e && e->has_state && !e->validated && !sh_ms_entry_usable(e));
+    e = find_entry(&list, "My Dropped Mod");
+    CHECK(e && !sh_ms_entry_usable(e) && strstr(e->cause, "outside mods/alex.dropped/"));
     sh_ms_list_free(&list);
-
-    /* A corrupted blob shared with a hard-linked tree is caught too. */
-    {
-        char blob[MAX_PATH * 2];
-        CHECK(sh_ms_enumerate(&list));
-        e = find_entry(&list, "alex.r2-imp@1.0.0+1");
-        CHECK(e != NULL);
-        if (e) {
-            _snprintf_s(blob, sizeof blob, _TRUNCATE, "%s\\blobs\\%s", root, e->bundle.files[0].blob);
-            SetFileAttributesA(blob, FILE_ATTRIBUTE_NORMAL);
-            {
-                FILE *f = NULL;
-                if (fopen_s(&f, blob, "r+b") == 0 && f) { fputc('Y', f); fclose(f); }
-            }
-            CHECK(!sh_ms_verify("alex.r2-imp@1.0.0+1", &vs, cause, sizeof cause));
-        }
-        sh_ms_list_free(&list);
-    }
+    mt_delete(hand, "assets\\generated\\decls\\entitydef\\other\\x.decl");
+    CHECK(sh_ms_sync(&RESOLVER, &ss) && ss.rebuilt == 1 && ss.failed == 0);
+    /* sh_mods install of a store folder builds it in place. */
+    CHECK(sh_ms_install_from_folder(hand, &RESOLVER, key, sizeof key, &st, NULL, cause, sizeof cause));
+    CHECK(st.in_place && !strcmp(key, "My Dropped Mod"));
 
     /* The store lock: a second installer waits for the holder (a migration
      * folder), it does not fail; two installers at once both succeed. */
@@ -349,22 +343,22 @@ int main(int argc, char **argv)
         if (!a.ok || !c.ok) fprintf(stderr, "  parallel installs: %s / %s\n", a.cause, c.cause);
         if (ti[0]) CloseHandle(ti[0]);
         if (ti[1]) CloseHandle(ti[1]);
-        CHECK(sh_ms_verify("test.lockone@1.0.0", &vs, cause, sizeof cause));
+        CHECK(sh_ms_verify("test.lockone", &vs, cause, sizeof cause));
         CHECK(sh_ms_verify("test.locktwo@1.0.0", &vs, cause, sizeof cause));
-        /* The lock is recursive on one thread: an install inside a held step. */
+        /* The lock is recursive on one thread: a verification inside a held step. */
         modstore_lock();
-        CHECK(sh_ms_verify("test.locktwo@1.0.0", &vs, cause, sizeof cause));
+        CHECK(sh_ms_verify("test.locktwo", &vs, cause, sizeof cause));
         modstore_unlock();
     }
 
-    /* The store itself is not a mod. */
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\blobs", root);
-    CHECK(!sh_ms_install_from_folder(path, &RESOLVER, key, sizeof key, &st, NULL, cause, sizeof cause));
+    /* The store itself is not a mod, nor a folder inside a mod. */
     CHECK(!sh_ms_install_from_folder(root, &RESOLVER, key, sizeof key, &st, NULL, cause, sizeof cause));
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\alex.r2-imp\\assets", root);
+    CHECK(!sh_ms_install_from_folder(path, &RESOLVER, key, sizeof key, &st, NULL, cause, sizeof cause));
 
     sh_ms_set_root(NULL);
     mt_remove_tree(tmp);
     if (failures) { fprintf(stderr, "modstore_test: %d failure(s)\n", failures); return 1; }
-    printf("modstore_test: install, hard link and copy, verify, corruption, in-place, build folders and resolve_need pass\n");
+    printf("modstore_test: install, copies, verify, corruption, second version, rebuild rule, resolve_need and lock pass\n");
     return 0;
 }

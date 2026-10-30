@@ -104,13 +104,14 @@ size_t sh_modmanifest_placed_names(const char *json, size_t length, char ***out_
                                    int *failed);
 void sh_modmanifest_names_free(char **names, size_t count);
 
-/* ------------------------------------------------------------ bundle.json - */
+/* ------------------------------------------------------------ mod.json --- */
 
-/* What the manifest needs from an installed bundle's bundle.json: its id,
- * version, bundle hash, total file size, and every file's provides.name
- * (stored as `names`). 1 on success; 0 with the reason in err. */
-int sh_modmanifest_read_bundle_json(const char *text, size_t length, sh_modmanifest_row *out,
-                                    char *err, size_t err_cap);
+/* What the manifest needs from an installed bundle's mod.json: its id and
+ * version (author block), bundle hash, total carried size, and every file's
+ * provides.name (product block "files" and "stock", stored as `names`). 1 on
+ * success; 0 with the reason in err. */
+int sh_modmanifest_read_mod_json(const char *text, size_t length, sh_modmanifest_row *out,
+                                 char *err, size_t err_cap);
 
 /* ------------------------------------------------------------ hooks ------ */
 

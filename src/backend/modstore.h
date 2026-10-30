@@ -1,28 +1,38 @@
 /* modstore.h -- the local mod store, %LOCALAPPDATA%\snapmap-plus\mods\.
  *
- *   blobs\<sha256>                  one read-only copy per distinct file
- *   <id>@<version>+<build>\bundle.json   the manifest with "bundle"
- *   <id>@<version>+<build>\assets\...    the tree, hard-linked to blobs, else copied
- *   <id>@<version>+<build>\.state.json   {"firstCause","installedAt","validated"}
- *   legacy\<id>@<digest16>\...      converted first-generation packages
+ *   <folder>\mod.json            the author block and the product block (modbundle.h)
+ *   <folder>\assets\...          the mod's files, real files only (no links, no blob store)
+ *   snapmap-plus.json            the product record (modbundle.h): claims, links,
+ *                                the migration record, the build cache, aliases
  *
- * A mod folder dropped into mods\ by hand is built in place: bundle.json is
- * written beside its descriptor and its files are copied into blobs\. Stock
- * pointers (modbundle.h) never reach blobs\ or the laid-out tree: they are
- * resolved against the installed game at install and on verification, and a
- * pointer the game lacks (or holds with other bytes) fails the bundle with
- * that first cause.
- * Installing from elsewhere builds the source folder in place, then lays the
- * tree out under <id>@<version>+<build>\. Verification (rehash every file) runs at
- * install and on request, never at boot; enumeration trusts bundle.json and
- * checks sizes only.
+ * A folder is a mod when it holds mod.json (or, before its first build,
+ * package.json). Folder names are the author's for a folder dropped in by
+ * hand and "<id>" (else "<id>@<version>", sh_mb_folder_name) for one the
+ * product creates. Identity is the id in mod.json: two folders declaring one
+ * id are both kept and both listed. Stock pointers (modbundle.h) are never
+ * stored: they are resolved against the installed game at install and on
+ * verification, and a pointer the game lacks (or holds with other bytes)
+ * fails the bundle with that first cause.
+ *
+ * Rebuild rule (sh_ms_sync): a folder is built again when its tree hash
+ * (sh_mb_tree_hash: the author block and the size and time of every file
+ * under assets\) is not the key of the record's cache entry for its bundle.
+ * Building needs the game's resource reader, so it runs on a rescan (the Mods
+ * tab, sh_mods rescan, install, build), never at boot; boot reads the product
+ * blocks and checks sizes only.
+ *
+ * Installing a folder from elsewhere builds it in memory (the source folder
+ * is not written), copies its mod.json author text and its carried files into
+ * a new folder (a folder with the same id and version is replaced), verifies
+ * the copy and records it. Verification (rehash every file) runs at install
+ * and on request, never at boot.
  *
  * File work only, on the calling thread; no engine calls. Every writer of the
- * store serialises on modstore_lock: the install and verification below take
- * it themselves, and longer steps (one migration folder, a download install,
- * `sh_mods install` and `sh_mods migrate`, an export) hold it around their
- * whole step. A second writer waits for the first, it never fails because of
- * it; the wait is one step long (a migration folder is at most a few seconds).
+ * store serialises on modstore_lock: the install, verification and sync
+ * below take them themselves, and longer steps (one migration folder, a
+ * download install, `sh_mods install` and `sh_mods migrate`, an export) hold
+ * it around their whole step. A second writer waits for the first, it never
+ * fails because of it; the wait is one step long.
  */
 #ifndef SNAPMAP_PLUS_MODSTORE_H
 #define SNAPMAP_PLUS_MODSTORE_H
@@ -40,6 +50,8 @@ unsigned modstore_lock_waits(void);
 
 /* id@version+build; version may hold up to 4 UTF-8 bytes per code point. */
 #define SH_MS_KEY_MAX (SH_MB_ID_MAX + 1 + 4 * SH_MB_VERSION_MAX + 1 + 20)
+/* A folder name under mods\. */
+#define SH_MS_NAME_MAX 255
 
 /* The store root. NULL or "" restores the default (%LOCALAPPDATA%\snapmap-plus\mods).
  * Tests point it at a temporary folder. Returns 1 when the root is set. */
@@ -48,15 +60,15 @@ int  sh_ms_set_root(const char *root_utf8);
 int  sh_ms_root(char *out, size_t cap);
 
 typedef struct sh_ms_entry {
-    char *folder;               /* absolute UTF-8 folder of the bundle */
-    char  key[SH_MS_KEY_MAX + 1];   /* id@version+build from the manifest, or the folder name when unbuilt */
-    int   legacy;               /* under legacy\ */
-    int   loaded;               /* bundle.json read and its hash matched */
-    int   sizes_ok;             /* every file present with its manifest size */
-    int   has_state;
-    int   validated;            /* .state.json "validated" */
-    long long installed_at;
-    char  cause[SH_MB_CAUSE_MAX];   /* why the entry is unusable, or the state's firstCause */
+    char *folder;               /* absolute UTF-8 folder of the mod */
+    char  name[SH_MS_NAME_MAX + 1];   /* the folder's own name under mods\ */
+    char  key[SH_MS_KEY_MAX + 1];     /* id@version+build from mod.json, or the folder name when unbuilt */
+    int   delivered;            /* a package a map delivered (its product block's legacy object) */
+    int   loaded;               /* mod.json read and its hash matched */
+    int   sizes_ok;             /* every carried file present with its recorded size */
+    int   validated;            /* the product block's "validated" */
+    long long installed_at;     /* the product block's "built" */
+    char  cause[SH_MB_CAUSE_MAX];   /* why the entry is unusable, or the block's cause */
     sh_mb_bundle bundle;
 } sh_ms_entry;
 
@@ -65,45 +77,72 @@ typedef struct sh_ms_list {
     size_t count, cap;
 } sh_ms_list;
 
-/* An entry's bundle may serve names: loaded, sizes match, and not marked
- * invalid by a previous verification. */
+/* An entry's bundle may serve names: loaded, sizes match, and validated. */
 int  sh_ms_entry_usable(const sh_ms_entry *entry);
 
-/* List every bundle folder under the root and legacy\. Folders with a
- * descriptor but no bundle.json are listed unloaded. Returns 1 when the root
- * could be read (an absent root is an empty list). */
+/* Whether `spec` names the entry: its folder name, id@version+build,
+ * id@version (every build of it) or id (every folder declaring it),
+ * case-insensitively. */
+int  sh_ms_entry_matches(const sh_ms_entry *entry, const char *spec);
+
+/* List every mod folder under the root. Folders with a descriptor but no
+ * built product block are listed unloaded with the cause. Returns 1 when the
+ * root could be read (an absent root is an empty list). */
 int  sh_ms_enumerate(sh_ms_list *out);
 void sh_ms_list_free(sh_ms_list *list);
 
 typedef struct sh_ms_install_stats {
-    unsigned blobs_written, blobs_reused;
-    unsigned linked, copied;
+    unsigned copied;            /* carried files copied into the store */
     int in_place;               /* the source folder was inside the store */
-    int replaced;               /* an earlier build of the same id@version was replaced */
+    int replaced;               /* a folder of the same id@version was replaced */
     unsigned stock_files;       /* stock pointers: nothing stored for them */
     unsigned long long stock_bytes;   /* their installed size */
 } sh_ms_install_stats;
 
-/* Build `folder` in place (writes its bundle.json), copy its files into
- * blobs\, lay out <id>@<version>+<build>\ (unless the folder is already in the store),
- * verify the result and write .state.json. `resolver` may be NULL; the store's
- * installed bundles are consulted in addition to it. On success key_out holds
- * id@version+build. bundle_out (optional) receives the built bundle; release it with
+/* Build `folder`: in place when it is a folder of the store (its mod.json
+ * product block is written), else into a new store folder named
+ * `as_name` when given, else by sh_mb_folder_name (a folder holding the
+ * same id and version is replaced); verify the result and record it in the
+ * build cache. `resolver` may be NULL; the store's installed bundles are
+ * consulted in addition to it. On success name_out holds the folder name.
+ * bundle_out (optional) receives the built bundle; release it with
  * sh_mb_free. Returns 1 on success, else 0 with the first cause. */
 int  sh_ms_install_from_folder(const char *folder, const sh_mb_resolver *resolver,
-                               char *key_out, size_t key_cap, sh_ms_install_stats *stats,
+                               char *name_out, size_t name_cap, sh_ms_install_stats *stats,
                                sh_mb_bundle *bundle_out, char *cause, size_t cause_cap);
+int  sh_ms_install_as(const char *folder, const char *as_name, const sh_mb_resolver *resolver,
+                      char *name_out, size_t name_cap, sh_ms_install_stats *stats,
+                      sh_mb_bundle *bundle_out, char *cause, size_t cause_cap);
 
 typedef struct sh_ms_verify_stats {
-    unsigned files, bytes_mb, blobs_checked, entries;
+    unsigned files, bytes_mb, entries;
     unsigned pointers;          /* of files, stock pointers resolved against the installed game */
 } sh_ms_verify_stats;
 
-/* Rehash every file of the bundle(s) installed as `key` against bundle.json
- * and their blobs, and record the result in .state.json. `key` is
- * id@version+build for one build, or id@version for every installed build.
- * Returns 1 when every matching entry passes. */
-int  sh_ms_verify(const char *key, sh_ms_verify_stats *stats, char *cause, size_t cause_cap);
+/* Rehash every file of the entries `spec` names (sh_ms_entry_matches)
+ * against their product blocks and record the result there ("validated",
+ * "cause"). Returns 1 when every matching entry passes. */
+int  sh_ms_verify(const char *spec, sh_ms_verify_stats *stats, char *cause, size_t cause_cap);
+
+typedef struct sh_ms_sync_stats {
+    unsigned folders;           /* folders looked at */
+    unsigned rebuilt;           /* built again: new, or their tree hash changed */
+    unsigned failed;            /* refused by the builder (the cause stays on the entry) */
+    unsigned long long ms;
+} sh_ms_sync_stats;
+
+/* The rebuild rule over every folder of the store, then the cache section of
+ * the record rewritten to the current folders. Logs one "MODS: store:" line
+ * per rebuilt or refused folder. Returns 1 when the store could be read. */
+int  sh_ms_sync(const sh_mb_resolver *resolver, sh_ms_sync_stats *stats);
+
+/* The first cause of the last refused build of `folder` in this process, or
+ * "" (sh_ms_sync and installs record it; enumeration reports it). */
+void sh_ms_build_cause(const char *folder, char *out, size_t cap);
+
+/* Record `folder` (absolute) as built from its current tree: cache[tree] =
+ * bundle hash. Returns 1 on success. */
+int  sh_ms_cache_note(const char *folder, const char *bundle_hash);
 
 enum { SH_MS_MISS = 0, SH_MS_HIT = 1, SH_MS_DEDUPE = 2, SH_MS_CONFLICT = 3 };
 
@@ -119,15 +158,18 @@ typedef struct sh_ms_hit {
  * whose request path is one the engine would ask for that name. The first
  * match wins. Two bundles providing it are a CONFLICT for decl names (and for
  * raw files with different bytes) and a DEDUPE for raw files with equal
- * blob hashes. Returns the status. */
+ * hashes. Returns the status. */
 int  sh_ms_resolve_need(const sh_ms_list *list, const char *type, const char *name, sh_ms_hit *hit);
 
 /* sh_mb_exists_fn over a list: 1 when a usable bundle ships `request`. */
 int  sh_ms_request_exists(void *list, const char *request);
 
-#ifdef SH_MODSTORE_TESTING
-/* Force the copy fallback instead of CreateHardLinkW. */
-void sh_ms_test_force_copy(int on);
-#endif
+/* Copy one file (wide long paths) through a temporary and a rename, never a
+ * link; the copy is writable. Returns 1. */
+int  sh_ms_copy_file(const wchar_t *from, const wchar_t *to);
+
+/* Remove a folder under the store root (reparse points are removed, never
+ * followed). Refuses anything outside the root and the root itself. */
+int  sh_ms_remove_folder(const char *folder);
 
 #endif /* SNAPMAP_PLUS_MODSTORE_H */

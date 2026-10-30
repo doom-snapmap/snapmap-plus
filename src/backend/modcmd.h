@@ -1,15 +1,16 @@
 /* modcmd.h -- the sh_mods console command.
  *
  *   sh_mods [status]               what the serving index holds and serves (modserve_engine.c)
- *   sh_mods rescan                 reread the mods folder into the serving index
+ *   sh_mods rescan                 build every mod folder whose tree changed (modstore.h, the
+ *                                  rebuild rule), then reread the mods folder into the serving index
  *   sh_mods palette rebuild        add editor rows of bundles indexed after the first palette build
- *   sh_mods build "<folder>"       build and validate a mod, write its bundle.json
- *   sh_mods install "<folder>"     build, copy into the store, lay out, verify, rescan
- *   sh_mods list                   bundle folders in the store and their state
+ *   sh_mods build "<folder>"       build and validate a mod, write mod.json's product block
+ *   sh_mods install "<folder>"     build, copy into the store as mods\<id>, verify, rescan
+ *   sh_mods list                   mod folders in the store and their state
  *   sh_mods doctor [verify]        what the Mods tab does not show: every bundle's state and
- *                                  cause (legacy ones too), duplicate ids, migration, conflicts
- *                                  with their winners, shadows; `verify` rehashes every build
- *   sh_mods verify "<id@version+build>"  rehash an installed bundle (id@version: every build)
+ *                                  cause, duplicate ids, migration, conflicts with their
+ *                                  winners, shadows; `verify` rehashes every build
+ *   sh_mods verify "<folder|id|id@version>"  rehash installed mods and record the result
  *   sh_mods copystock "<engine path>" "<file>"  write an installed game file's bytes to a file
  *                                  (authoring: a stock mesh or anim copied under a new name)
  *   sh_mods push "<id@version+build>" "<ref>"   upload a bundle to the mod store and claim it under ref
@@ -37,9 +38,9 @@
 #define SH_MODCMD_NAME "sh_mods"
 #define SH_MODCMD_HELP "Mods: 'sh_mods' or 'sh_mods status' shows what installed mods serve, 'sh_mods rescan' rereads " \
                        "the mods folder, 'sh_mods palette rebuild' adds new mod rows to the open editor, " \
-                       "'sh_mods build \"<folder>\"' checks a mod and writes its bundle.json, " \
+                       "'sh_mods build \"<folder>\"' checks a mod and writes the product block of its mod.json, " \
                        "'sh_mods install \"<folder>\"' adds it to the mods store, 'sh_mods list' shows " \
-                       "installed bundles, 'sh_mods doctor [verify]' explains every bundle's state, conflicts and shadows, 'sh_mods verify \"<id@version+build>\"' rehashes one (or every build of id@version), " \
+                       "mod folders, 'sh_mods doctor [verify]' explains every bundle's state, conflicts and shadows, 'sh_mods verify \"<folder>\"' rehashes one (a folder, id or id@version), " \
                        "'sh_mods copystock \"<engine path>\" \"<file>\"' writes an installed game file's bytes to a file. " \
                        "'sh_mods help' lists the mod store verbs."
 /* Printed by 'sh_mods help' after SH_MODCMD_HELP (each under the console's 1 KiB line). */

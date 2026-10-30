@@ -1,12 +1,13 @@
 /* modlegacy_test -- first-generation carriers under the section 11 policy:
  * header grammar per era, completeness and digest checks, ZIP reading
  * (stored and deflate), the era B to era C mapping table, conversion into
- * <data>\mods\legacy\<id>@<digest16>\, cleaning with logged verdicts, the
+ * an ordinary mod folder <data>\mods\<id>\, cleaning with logged verdicts, the
  * smpmod1 rows written for converted bundles, and an integration pass over
  * the campaign's three carrier maps when they are present.
  *
  * The bundle builder (modbundle_build_folder) is replaced by a double that
- * writes a bundle.json from the unpacked tree. The carrier maps are not in
+ * completes mod.json's product block from the unpacked tree, keeping the
+ * converter's seed (legacy record, shadows, origin). The carrier maps are not in
  * the repository (their packages hold game files); set SH_MODLEGACY_FIXTURES
  * to their folder to add the integration pass; it is skipped otherwise. */
 #define WIN32_LEAN_AND_MEAN
@@ -164,17 +165,28 @@ int modbundle_build_folder(const char *folder, char *first_cause, size_t n)
         sh_shard_digest16((const unsigned char *)salted, strlen(salted), hash + i * 16);
     }
     hash[64] = 0;
-    tb_put(&out, "{\"format\":1,\"id\":\"");
-    tb_put(&out, id ? id : "");
-    tb_put(&out, "\",\"version\":\"");
-    tb_put(&out, version ? version : "");
-    tb_put(&out, "\",\"files\":[");
+    tb_put(&out, "[");
     walk_assets(folder, "assets", &out, &first);
-    tb_put(&out, "],\"bundle\":\"");
-    tb_put(&out, hash);
-    tb_put(&out, "\"}");
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\bundle.json", folder);
-    write_all(path, out.p, out.n);
+    tb_put(&out, "]");
+    {
+        sh_json_object block = {0};
+        const char *seed = sh_json_object_get(&o, "snapmap-plus");
+        char quoted[80], *block_text, *text;
+        size_t text_len = 0;
+        if (seed) sh_json_parse_object(seed, strlen(seed), 24, &block);
+        _snprintf_s(quoted, sizeof quoted, _TRUNCATE, "\"%s\"", hash);
+        sh_json_object_set(&block, "format", "1", 4);
+        sh_json_object_set(&block, "build", "1", 4);
+        sh_json_object_set(&block, "bundle", quoted, 4);
+        sh_json_object_set(&block, "files", out.p, 8);
+        block_text = sh_json_serialize_object(&block, 2, NULL);
+        sh_json_object_set(&o, "snapmap-plus", block_text, 24);
+        text = sh_json_serialize_object(&o, 0, &text_len);
+        write_all(path, text, text_len);
+        free(text);
+        free(block_text);
+        sh_json_object_free(&block);
+    }
     free(out.p);
     free(id);
     free(version);
@@ -687,9 +699,10 @@ static void convert_era_c(void)
     CHECK(!strcmp(v[0].id, "acceptance.r137.mixed-rows") && !strncmp(v[0].version, "legacy-", 7) &&
           !strcmp(v[0].version + 7, digest) && v[0].key_form == SH_LEGACY_KEY_DELIVERY && v[0].files == 3);
     CHECK(v[0].shadows == 2);   /* the namespaced icon is not a shadow */
-    _snprintf_s(folder, sizeof folder, _TRUNCATE, "%s\\mods\\legacy\\acceptance.r137.mixed-rows@%s", g_root, digest);
+    _snprintf_s(folder, sizeof folder, _TRUNCATE, "%s\\mods\\acceptance.r137.mixed-rows", g_root);
+    (void)digest;
     CHECK(!_stricmp(v[0].folder, folder));
-    CHECK(file_exists_at(folder, "mod.json") && file_exists_at(folder, "bundle.json"));
+    CHECK(file_exists_at(folder, "mod.json") && !file_exists_at(folder, "bundle.json"));
     CHECK(file_exists_at(folder, "assets/generated/decls/entitydef/acceptance/r137/speaker_offset.decl"));
     CHECK(!file_exists_at(folder, "notes/readme.txt") && !file_exists_at(folder, "package.json"));
     {
@@ -774,7 +787,7 @@ static void convert_era_b(void)
     CHECK(out && g_convert_lines == 1);
     CHECK(sh_modlegacy_last_report(v, 2) == 1 && v[0].verdict == SH_MODLEGACY_CONVERT && v[0].layout == 'B' &&
           !strcmp(v[0].id, "testpack") && v[0].key_form == SH_LEGACY_KEY_FOLDER && v[0].files == 5);
-    _snprintf_s(folder, sizeof folder, _TRUNCATE, "%s\\mods\\legacy\\testpack@%s", g_root, digest);
+    _snprintf_s(folder, sizeof folder, _TRUNCATE, "%s\\mods\\testpack", g_root);
     CHECK(file_exists_at(folder, "assets/generated/decls/entitydef/testpack/foo.decl"));
     CHECK(file_exists_at(folder, "assets/generated/image/testpack/foo_d.bimage"));
     CHECK(file_exists_at(folder, "assets/generated/spirv/testpack/a.vspv"));

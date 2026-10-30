@@ -85,6 +85,13 @@ static void mt_put(const char *folder, const char *rel, const char *text, const 
 static void mt_write(const char *folder, const char *rel, const char *text) { mt_put(folder, rel, text, "wb"); }
 static void mt_append(const char *folder, const char *rel, const char *text) { mt_put(folder, rel, text, "ab"); }
 
+static int mt_has(const char *folder, const char *rel)
+{
+    char path[MAX_PATH * 2];
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", folder, rel);
+    return GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES;
+}
+
 static void mt_delete(const char *folder, const char *rel)
 {
     char path[MAX_PATH * 2];

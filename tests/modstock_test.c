@@ -234,7 +234,7 @@ static void test_builder(const char *tmp)
     CHECK(sh_mb_write(&b, dir, cause, sizeof cause));
     {
         char path[MAX_PATH * 2];
-        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\bundle.json", dir);
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\mod.json", dir);
         CHECK(sh_mb_load(path, &back));
         CHECK(!strcmp(back.hash, b.hash) && back.stock_count == 4 && back.total_size == sizeof OWN);
         f = find(&back, REQ_TOME);
@@ -309,7 +309,7 @@ static void test_builder(const char *tmp)
             _snprintf_s(file, sizeof file, _TRUNCATE, bad[k], h);
             _snprintf_s(text, sizeof text, _TRUNCATE, "{\"build\":1,\"bundle\":\"%s\",\"files\":[%s],\"format\":1,\"id\":\"t.stock\","
                         "\"name\":\"x\",\"version\":\"0.0.0\"}", h, file);
-            CHECK(!sh_mb_load_text(text, strlen(text), &b));
+            CHECK(!sh_mb_load_manifest_text(text, strlen(text), &b));
             CHECK(strstr(b.first_cause, "stock") != NULL);
             sh_mb_free(&b);
         }
@@ -334,16 +334,23 @@ static int serve_blob(void *ctx, const char *sha, unsigned long long size, unsig
     return 1;
 }
 
+/* Files below `dir`, recursively. */
 static int count_files(const char *dir)
 {
     WIN32_FIND_DATAA fd;
-    char pattern[MAX_PATH * 2];
+    char pattern[MAX_PATH * 2], sub[MAX_PATH * 2];
     HANDLE h;
     int n = 0;
     _snprintf_s(pattern, sizeof pattern, _TRUNCATE, "%s\\*", dir);
     h = FindFirstFileA(pattern, &fd);
     if (h == INVALID_HANDLE_VALUE) return 0;
-    do { if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) n++; } while (FindNextFileA(h, &fd));
+    do {
+        if (!strcmp(fd.cFileName, ".") || !strcmp(fd.cFileName, "..")) continue;
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+            _snprintf_s(sub, sizeof sub, _TRUNCATE, "%s\\%s", dir, fd.cFileName);
+            n += count_files(sub);
+        } else n++;
+    } while (FindNextFileA(h, &fd));
     FindClose(h);
     return n;
 }
@@ -367,11 +374,19 @@ static void test_store(const char *tmp, const char *d1, const char *d2)
     CHECK(sh_ms_set_root(store));
     CHECK(sh_ms_install_from_folder(dir, &RESOLVER, key, sizeof key, &st, &b, cause, sizeof cause));
     if (!key[0]) fprintf(stderr, "  install refused: %s\n", cause);
-    CHECK(st.stock_files == 4 && st.blobs_written == 1 && st.linked + st.copied == 1);
+    CHECK(st.stock_files == 4 && st.copied == 1);
     strcpy_s(hash, sizeof hash, b.hash);
     sh_mb_free(&b);
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\blobs", store);
+    /* The store folder holds the one carried file; the pointers are in its mod.json only. */
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s\\assets", store, key);
     CHECK(count_files(path) == 1);
+    {
+        char *text;
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s\\mod.json", store, key);
+        text = (char *)sh_mb_read_file(path, 1u << 20, NULL);
+        CHECK(text && strstr(text, "\"inAssets\": false") && strstr(text, "\"source\": \"" P_IMAGE "\""));
+        free(text);
+    }
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s\\assets\\" REQ_COPY, store, key);
     { char *q; for (q = path; *q; q++) if (*q == '/') *q = '\\'; }
     CHECK(!mt_exists(path));
@@ -398,7 +413,7 @@ static void test_store(const char *tmp, const char *d1, const char *d2)
         sh_mb_set_stock_ops(NULL);
         CHECK(sh_ms_install_from_folder(other, &RESOLVER, key2, sizeof key2, &st, NULL, cause, sizeof cause));
         sh_modstock_register();
-        CHECK(st.stock_files == 0 && st.blobs_written == 1);
+        CHECK(st.stock_files == 0 && st.copied == 1);
         CHECK(sh_modserve_index_build(store) == 2);
         CHECK(!sh_modserve_conflict_info(P_IMAGE, NULL));
         CHECK(sh_modserve_open(P_IMAGE, &bytes, &len) == 1 && len == sizeof IMG_B && !memcmp(bytes, IMG_B, len));
@@ -410,7 +425,7 @@ static void test_store(const char *tmp, const char *d1, const char *d2)
     sh_modstock_set_install(d2);
     CHECK(!sh_ms_verify(key, &vs, cause, sizeof cause));
     CHECK(strstr(cause, "assets/" REQ_ALIAS " points at installed content " P_DECL ", which this game does not have") != NULL);
-    CHECK(sh_modserve_index_build(store) == 1);   /* the failed verification is recorded in .state.json */
+    CHECK(sh_modserve_index_build(store) == 1);   /* the failed verification is recorded in mod.json */
     sh_modstock_set_install(d1);
     CHECK(sh_ms_verify(key, &vs, cause, sizeof cause));
     CHECK(sh_modserve_index_build(store) == 2);
@@ -439,8 +454,11 @@ static void test_store(const char *tmp, const char *d1, const char *d2)
     CHECK(modsync_fetch_bundle(hash, NULL, &ss));
     if (ss.code != MODNET_OK) fprintf(stderr, "  fetch: %s\n", ss.cause);
     CHECK(ss.blobs_transferred == 1 && ss.blobs_total == 1);
+    if (ss.blobs_transferred != 1 || ss.blobs_total != 1)
+        fprintf(stderr, "  fetch: %u of %u transferred, already %d, key %s\n", ss.blobs_transferred, ss.blobs_total,
+                ss.already_installed, ss.key);
     CHECK(sh_modserve_bundle_state(hash, NULL, 0) == 1);
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\blobs", store2);
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s\\assets", store2, ss.key);
     CHECK(count_files(path) == 1);
     /* A player on another revision: refused before anything is fetched. */
     _snprintf_s(store3, sizeof store3, _TRUNCATE, "%s\\store3", tmp);
@@ -482,11 +500,10 @@ static void test_store(const char *tmp, const char *d1, const char *d2)
 
 static void measure(const char *data, const char *doom)
 {
-    static const char *const names[] = { "alex.r2-imp", "local.cyberdemon@0.0.0+1", "local.cyberdemon@0.0.0-05238b2e+1",
-                                         "doors@0.0.0+1", NULL };
     LARGE_INTEGER fq, t0, t1;
     sh_modstock_stats ss;
-    int i;
+    sh_ms_list l;
+    size_t i;
     QueryPerformanceFrequency(&fq);
     sh_modstock_set_install(doom);
     QueryPerformanceCounter(&t0);
@@ -495,21 +512,21 @@ static void measure(const char *data, const char *doom)
     sh_modstock_get_stats(&ss);
     printf("modstock_test: measure: %s: index %u rows, %llu KiB held, loaded in %.1f ms (first question %.1f ms)\n", doom,
            ss.rows, ss.table_bytes >> 10, ss.load_ms, (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)fq.QuadPart);
-    printf("modstock_test: measure: %-36s %6s %8s %12s %12s %12s %9s\n", "bundle", "files", "pointers", "bytes", "not stored",
+    printf("modstock_test: measure: %-36s %6s %8s %12s %12s %12s %9s\n", "folder", "files", "pointers", "bytes", "not stored",
            "hashed", "ms");
-    for (i = 0; names[i]; i++) {
-        char path[MAX_PATH * 2];
-        sh_mb_bundle b;
+    sh_ms_set_root(data);
+    if (!sh_ms_enumerate(&l)) memset(&l, 0, sizeof l);
+    for (i = 0; i < l.count; i++) {
+        const sh_mb_bundle *b = &l.items[i].bundle;
         size_t k;
         unsigned ptr = 0, same = 0, renamed = 0;
         unsigned long long bytes = 0, kept = 0, hashed0;
+        if (!l.items[i].loaded) { printf("modstock_test: measure: %s: not loadable: %s\n", l.items[i].name, l.items[i].cause); continue; }
         sh_modstock_get_stats(&ss);
         hashed0 = ss.bytes_hashed;
-        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s\\bundle.json", data, names[i]);
-        if (!sh_mb_load(path, &b)) { printf("modstock_test: measure: %s: not loadable: %s\n", names[i], b.first_cause); sh_mb_free(&b); continue; }
         QueryPerformanceCounter(&t0);
-        for (k = 0; k < b.file_count; k++) {
-            const sh_mb_file *f = &b.files[k];
+        for (k = 0; k < b->file_count; k++) {
+            const sh_mb_file *f = &b->files[k];
             char src[SH_MB_REQUEST_MAX + 1];
             if (f->stock) { ptr++; continue; }
             bytes += f->size;
@@ -522,11 +539,12 @@ static void measure(const char *data, const char *doom)
         }
         QueryPerformanceCounter(&t1);
         sh_modstock_get_stats(&ss);
-        printf("modstock_test: measure: %-36s %6zu %8u %12llu %12llu %12llu %9.1f  (same path %u, renamed %u)\n", names[i],
-               b.file_count, ptr, bytes, kept, ss.bytes_hashed - hashed0,
+        printf("modstock_test: measure: %-36s %6zu %8u %12llu %12llu %12llu %9.1f  (same path %u, renamed %u)\n", l.items[i].name,
+               b->file_count, ptr, bytes, kept, ss.bytes_hashed - hashed0,
                (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)fq.QuadPart, same, renamed);
-        sh_mb_free(&b);
     }
+    sh_ms_list_free(&l);
+    sh_ms_set_root(NULL);
     sh_modstock_set_install(NULL);
 }
 

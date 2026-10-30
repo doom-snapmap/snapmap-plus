@@ -64,11 +64,11 @@ typedef struct ms_conflict {
 
 typedef struct ms_bundle {
     const char *dir, *folder, *id, *version, *hash, *name;
-    const char *extra;                    /* bundle.json "extra" object as JSON text, or NULL */
-    int legacy, admitted, first_file, file_count;
-    int grandfathered;                    /* under legacy\ or bundle.json extra.legacy: shadows may be new names */
+    const char *extra;                    /* the author block's other keys (and a product-block legacy) as JSON, or NULL */
+    int legacy, admitted, first_file, file_count;   /* legacy: a package a map delivered */
+    int grandfathered;                    /* a "legacy" object (author or product block): shadows may be new names */
     uint64_t total;                       /* sum of file sizes (the manifest row's size) */
-    unsigned req;                         /* SH_MODSERVE_REQ_* bits from bundle.json requirements */
+    unsigned req;                         /* SH_MODSERVE_REQ_* bits from mod.json requirements */
     double installed_at;
     char cause[MS_CAUSE_MAX];
 } ms_bundle;
@@ -86,6 +86,7 @@ typedef struct ms_index {
     ms_slot *slots; uint32_t mask; int nkeys;
     ms_slot *pslots; uint32_t pmask;
     ms_conflict *conflict_list; int nconflict_list, cconflict_list;   /* sorted by request */
+    struct { const char *from, *to; } *aliases; int naliases;         /* dropped copy's hash -> kept bundle's hash */
     int admitted, served_files, conflicts, composed, shadows;
     double build_ms;
     struct ms_index *prev;                /* the table this one replaced (retired, never freed) */
@@ -163,6 +164,7 @@ static void ms_index_free(ms_index *x)
     if (!x) return;
     for (c = x->arena; c; c = n) { n = c->next; free(c); }
     free(x->bundles); free(x->files); free(x->needs); free(x->slots); free(x->pslots); free(x->conflict_list);
+    free(x->aliases);
     free(x);
 }
 
@@ -442,7 +444,8 @@ static int ms_rank(const char *type)
 /* One files[] element. */
 static int ms_str_cmp(const void *a, const void *b) { return strcmp(*(char *const *)a, *(char *const *)b); }
 
-static void ms_parse_file(ms_index *x, ms_bundle *b, ms_json *c, char **shadows, int nshadows)
+/* One entry of the product block's "files" (pointer 0) or "stock" (pointer 1). */
+static void ms_parse_file(ms_index *x, ms_bundle *b, ms_json *c, char **shadows, int nshadows, int pointer)
 {
     char key[64];
     const char *v, *ve;
@@ -455,7 +458,8 @@ static void ms_parse_file(ms_index *x, ms_bundle *b, ms_json *c, char **shadows,
     while (ms_jnext(c, '}')) {
         if (!ms_jmember(c, key, sizeof key, &v, &ve)) { ms_fail(b, "malformed files[] entry"); return; }
         if (!strcmp(key, "path")) path = ms_jstr(x, v, ve, 511);
-        else if (!strcmp(key, "blob")) blob = ms_jstr(x, v, ve, 64);
+        else if (!strcmp(key, "sha256") || !strcmp(key, "blob")) blob = ms_jstr(x, v, ve, 64);
+        else if (pointer && !strcmp(key, "source")) stock = ms_jstr(x, v, ve, 511);
         else if (!strcmp(key, "stock")) {
             /* A stock pointer (modbundle.h): installed content, no blob, no size. */
             ms_json p = { v, ve };
@@ -503,6 +507,7 @@ static void ms_parse_file(ms_index *x, ms_bundle *b, ms_json *c, char **shadows,
             }
         }
     }
+    if (pointer && !stock) stock = "";
     if (!path || !ms_valid_rel(path)) { ms_fail(b, "files[] path '%s' is not a plain assets/ path", path ? path : "?"); return; }
     if (stock) {
         if (!stock[0] || !blob || !ms_valid_hash(blob)) { ms_fail(b, "'%s' is a stock pointer without a source and hash", path); return; }
@@ -617,39 +622,6 @@ static void ms_parse_file(ms_index *x, ms_bundle *b, ms_json *c, char **shadows,
     x->nfiles++;
 }
 
-static void ms_read_state(ms_index *x, ms_bundle *b)
-{
-    char path[MAX_PATH], key[64];
-    unsigned char *text;
-    size_t len = 0;
-    sh_json_kind kind;
-    ms_json c;
-    const char *v, *ve;
-    int validated = 1;
-    char *cause = NULL;
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\.state.json", b->dir);
-    text = ms_read_whole(path, 65536, &len);
-    if (!text) return;   /* no state: the builder's manifest is trusted */
-    if (!sh_json_validate((const char *)text, len, MS_JSON_DEPTH, &kind) || kind != SH_JSON_OBJECT) {
-        ms_fail(b, ".state.json is not a JSON object");
-        HeapFree(GetProcessHeap(), 0, text);
-        return;
-    }
-    c.p = (const char *)text;
-    c.e = c.p + len;
-    if (ms_jenter(&c, '{')) while (ms_jnext(&c, '}')) {
-        if (!ms_jmember(&c, key, sizeof key, &v, &ve)) break;
-        if (!strcmp(key, "validated")) validated = !(ve - v == 5 && !memcmp(v, "false", 5));
-        else if (!strcmp(key, "firstCause")) cause = ms_jstr(x, v, ve, 160);
-        else if (!strcmp(key, "installedAt")) {
-            double t;
-            if (ms_jnum(v, ve, &t)) b->installed_at = t;
-        }
-    }
-    if (!validated) ms_fail(b, "not validated: %s", cause && *cause ? cause : "(no cause recorded)");
-    HeapFree(GetProcessHeap(), 0, text);
-}
-
 /* ------------------------------------------------------------------ requirements */
 
 /* The only engine settings a bundle may require. Bit i of a requirement mask
@@ -695,8 +667,57 @@ static void ms_parse_requirements(ms_bundle *b, const char *v, const char *ve)
     }
 }
 
-/* Parse <dir>\bundle.json into the index; leaves b->cause set on failure. */
-static void ms_parse_bundle(ms_index *x, ms_bundle *b, const char *blobs_dir)
+/* A growable text for the "extra" object. */
+typedef struct ms_text { char *p; size_t n, cap; int oom; } ms_text;
+
+static void ms_text_put(ms_text *t, const char *s, size_t n)
+{
+    if (t->oom) return;
+    if (t->n + n + 1 > t->cap) {
+        size_t cap = t->cap ? t->cap * 2 : 1024;
+        char *grown;
+        while (cap < t->n + n + 1) cap *= 2;
+        grown = (char *)realloc(t->p, cap);
+        if (!grown) { t->oom = 1; return; }
+        t->p = grown;
+        t->cap = cap;
+    }
+    memcpy(t->p + t->n, s, n);
+    t->n += n;
+    t->p[t->n] = 0;
+}
+
+/* Trim ASCII spaces in place (arena text). */
+static char *ms_trim(char *s)
+{
+    char *e;
+    if (!s) return s;
+    while (*s == ' ' || *s == '\t' || *s == '\r' || *s == '\n') ++s;
+    e = s + strlen(s);
+    while (e > s && (e[-1] == ' ' || e[-1] == '\t' || e[-1] == '\r' || e[-1] == '\n')) *--e = 0;
+    return s;
+}
+
+/* A "legacy" object whose "source" is not "overrides" (the retired package folder): a package a map delivered. */
+static int ms_delivered(const char *v, const char *ve)
+{
+    ms_json o = { v, ve };
+    char key[64];
+    const char *sv, *se;
+    if (!ms_jenter(&o, '{')) return 0;
+    while (ms_jnext(&o, '}')) {
+        if (!ms_jmember(&o, key, sizeof key, &sv, &se)) break;
+        if (!strcmp(key, "source")) return !(se - sv == 11 && !memcmp(sv, "\"overrides\"", 11));
+    }
+    return 1;
+}
+
+/* Parse <dir>\mod.json into the index; leaves b->cause set on failure. The
+ * author block gives the identity, the requirements and "extra" (every key the
+ * product does not read itself: strings, hud, description, ...); the product
+ * block ("snapmap-plus") gives the bundle hash, the files, the shadows and the
+ * verification state. Sizes only: hashes were verified when it was built. */
+static void ms_parse_bundle(ms_index *x, ms_bundle *b)
 {
     char path[MAX_PATH], key[64];
     unsigned char *text;
@@ -704,105 +725,151 @@ static void ms_parse_bundle(ms_index *x, ms_bundle *b, const char *blobs_dir)
     sh_json_kind kind;
     sh_json_error err = { 0, NULL };
     ms_json c;
-    const char *v, *ve, *files_v = NULL, *files_e = NULL, *req_v = NULL, *req_e = NULL;
+    const char *v, *ve, *files_v = NULL, *files_e = NULL, *stock_v = NULL, *stock_e = NULL, *req_v = NULL, *req_e = NULL;
+    const char *block_v = NULL, *block_e = NULL, *legacy_v = NULL, *legacy_e = NULL, *shadows_v = NULL, *shadows_e = NULL;
+    const char *author_legacy_v = NULL, *author_legacy_e = NULL;
     /* A converted first-generation package lists every name it carries, so
      * shadows run up to the file cap. */
-    char **shadows = NULL;
-    int nshadows = 0, cshadows = 0, i;
-    double format = -1;
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\bundle.json", b->dir);
+    char **shadows = NULL, *id = NULL, *version = NULL, *name = NULL, *state_cause = NULL;
+    int nshadows = 0, cshadows = 0, i, validated = 1, members = 0;
+    double format = -1, built = 0;
+    ms_text extra = { NULL, 0, 0, 0 };
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\mod.json", b->dir);
     text = ms_read_whole(path, SH_MODSERVE_MAX_JSON, &len);
     if (!text) {
-        ms_fail(b, ms_file_size(path) < 0 ? "no bundle.json (the folder is not built)" : "bundle.json unreadable or over 1 MiB");
+        char pkg[MAX_PATH];
+        _snprintf_s(pkg, sizeof pkg, _TRUNCATE, "%s\\package.json", b->dir);
+        if (ms_file_size(path) >= 0) ms_fail(b, "mod.json unreadable or over %u MiB", SH_MODSERVE_MAX_JSON >> 20);
+        else if (ms_file_size(pkg) >= 0) ms_fail(b, "not built yet (package.json only; a rescan of the Mods tab builds it)");
+        else ms_fail(b, "no mod.json");
         return;
     }
     if (!sh_json_validate_ex((const char *)text, len, MS_JSON_DEPTH, &kind, &err) || kind != SH_JSON_OBJECT) {
-        ms_fail(b, "bundle.json is not a valid JSON object (%s at byte %zu)", err.reason ? err.reason : "not an object",
+        ms_fail(b, "mod.json is not a valid JSON object (%s at byte %zu)", err.reason ? err.reason : "not an object",
                 err.offset);
         HeapFree(GetProcessHeap(), 0, text);
         return;
     }
     c.p = (const char *)text;
     c.e = c.p + len;
+    if (len >= 3 && text[0] == 0xEF && text[1] == 0xBB && text[2] == 0xBF) c.p += 3;
     ms_jenter(&c, '{');
     while (ms_jnext(&c, '}')) {
+        const char *ks = c.p;
         if (!ms_jmember(&c, key, sizeof key, &v, &ve)) break;
-        if (!strcmp(key, "format")) { if (!ms_jnum(v, ve, &format)) format = -1; }
-        else if (!strcmp(key, "id")) b->id = ms_jstr(x, v, ve, 64);
-        else if (!strcmp(key, "version")) b->version = ms_jstr(x, v, ve, 32);
-        else if (!strcmp(key, "name")) b->name = ms_jstr(x, v, ve, 80);
-        else if (!strcmp(key, "bundle")) b->hash = ms_jstr(x, v, ve, 64);
-        else if (!strcmp(key, "files")) { files_v = v; files_e = ve; }
+        if (!strcmp(key, "id")) id = ms_jstr(x, v, ve, 96);
+        else if (!strcmp(key, "version")) version = ms_jstr(x, v, ve, 160);
+        else if (!strcmp(key, "name")) name = ms_jstr(x, v, ve, 400);
         else if (!strcmp(key, "requirements")) { req_v = v; req_e = ve; }
-        else if (!strcmp(key, "extra")) {
-            /* The builder preserves descriptor keys it does not own under
-             * "extra"; a "legacy" object there marks a grandfathered bundle. */
-            ms_json o = { v, ve };
-            if (v < ve && *v == '{') b->extra = ms_strndup(x, v, (size_t)(ve - v));
-            if (ms_jenter(&o, '{')) while (ms_jnext(&o, '}')) {
-                const char *ev, *eve;
-                char ek[64];
-                if (!ms_jmember(&o, ek, sizeof ek, &ev, &eve)) break;
-                if (!strcmp(ek, "legacy") && ev < eve && *ev == '{') b->grandfathered = 1;
-            }
-        }
-        else if (!strcmp(key, "shadows")) {
-            ms_json a = { v, ve };
-            if (ms_jenter(&a, '[')) while (ms_jnext(&a, ']')) {
-                const char *sv = a.p, *se = ms_jskip(a.p, a.e);
-                char *s = ms_jstr(x, sv, se, 511);
-                a.p = se;
-                if (!s) continue;
-                if (nshadows == (int)SH_MODSERVE_MAX_FILES) { ms_fail(b, "more than %u shadows", SH_MODSERVE_MAX_FILES); break; }
-                if (!ms_grow((void **)&shadows, &cshadows, nshadows + 1, sizeof(char *))) { ms_fail(b, "out of memory"); break; }
-                ms_lower(s);
-                shadows[nshadows++] = s;
-            }
+        else if (!strcmp(key, SH_MB_BLOCK_KEY)) { block_v = v; block_e = ve; }
+        else if (!strcmp(key, "format") || !strcmp(key, "author") || !strcmp(key, "homepage") ||
+                 !strcmp(key, "shadows") || !strcmp(key, "stock")) continue;
+        else {
+            /* Everything else is the author's, kept for the readers of
+             * "extra" (strids.c, modhud.c); a "legacy" object grandfathers. */
+            if (!strcmp(key, "legacy") && v < ve && *v == '{') { author_legacy_v = v; author_legacy_e = ve; }
+            ms_text_put(&extra, members++ ? "," : "{", 1);
+            ms_text_put(&extra, ks, (size_t)(ve - ks));
         }
     }
-    if (format != 1) ms_fail(b, "bundle format %g is not supported (this build reads format 1)", format);
+    if (block_v) {
+        ms_json o = { block_v, block_e };
+        if (ms_jenter(&o, '{')) while (ms_jnext(&o, '}')) {
+            if (!ms_jmember(&o, key, sizeof key, &v, &ve)) break;
+            if (!strcmp(key, "format")) { if (!ms_jnum(v, ve, &format)) format = -1; }
+            else if (!strcmp(key, "bundle")) b->hash = ms_jstr(x, v, ve, 64);
+            else if (!strcmp(key, "files")) { files_v = v; files_e = ve; }
+            else if (!strcmp(key, "stock")) { stock_v = v; stock_e = ve; }
+            else if (!strcmp(key, "shadows")) { shadows_v = v; shadows_e = ve; }
+            else if (!strcmp(key, "legacy") && v < ve && *v == '{') { legacy_v = v; legacy_e = ve; }
+            else if (!strcmp(key, "validated")) validated = !(ve - v == 5 && !memcmp(v, "false", 5));
+            else if (!strcmp(key, "cause")) state_cause = ms_jstr(x, v, ve, 160);
+            else if (!strcmp(key, "built")) { if (!ms_jnum(v, ve, &built)) built = 0; }
+        }
+    }
+    if (author_legacy_v) {
+        b->grandfathered = 1;
+        b->legacy = ms_delivered(author_legacy_v, author_legacy_e);
+    } else if (legacy_v) {
+        /* A converted package keeps its legacy object in the product block;
+         * readers of "extra" see it where the manifest has it. */
+        b->grandfathered = 1;
+        b->legacy = ms_delivered(legacy_v, legacy_e);
+        ms_text_put(&extra, members++ ? "," : "{", 1);
+        ms_text_put(&extra, "\"legacy\":", 9);
+        ms_text_put(&extra, legacy_v, (size_t)(legacy_e - legacy_v));
+    }
+    if (members) {
+        ms_text_put(&extra, "}", 1);
+        if (!extra.oom) b->extra = ms_strndup(x, extra.p, extra.n);
+    }
+    free(extra.p);
+    if (shadows_v) {
+        ms_json a = { shadows_v, shadows_e };
+        if (ms_jenter(&a, '[')) while (ms_jnext(&a, ']')) {
+            const char *sv = a.p, *se = ms_jskip(a.p, a.e);
+            char *s = ms_jstr(x, sv, se, 511);
+            a.p = se;
+            if (!s) continue;
+            if (nshadows == (int)SH_MODSERVE_MAX_FILES) { ms_fail(b, "more than %u shadows", SH_MODSERVE_MAX_FILES); break; }
+            if (!ms_grow((void **)&shadows, &cshadows, nshadows + 1, sizeof(char *))) { ms_fail(b, "out of memory"); break; }
+            ms_lower(s);
+            shadows[nshadows++] = s;
+        }
+    }
+    id = ms_trim(id);
+    if (id) ms_lower(id);
+    b->id = id;
+    b->version = ms_trim(version);
+    b->name = ms_trim(name);
+    b->installed_at = built;
+    if (!block_v) ms_fail(b, "not built yet (mod.json has no \"" SH_MB_BLOCK_KEY "\" block; a rescan of the Mods tab builds it)");
+    else if (format != 1) ms_fail(b, "mod.json product block format %g is not supported (this build reads format 1)", format);
     if (!b->id || !ms_valid_id(b->id)) ms_fail(b, "bundle id '%s' is not valid", b->id ? b->id : "");
     if (!b->version) b->version = "";
-    if (!b->hash || !ms_valid_hash((char *)b->hash)) ms_fail(b, "bundle.json has no bundle hash");
-    if (b->legacy) b->grandfathered = 1;
-    if (!files_v) ms_fail(b, "bundle.json has no files");
+    if (!b->hash || !ms_valid_hash((char *)b->hash)) ms_fail(b, "mod.json has no bundle hash");
+    if (!files_v && !stock_v) ms_fail(b, "mod.json lists no files");
     if (req_v && !b->cause[0]) ms_parse_requirements(b, req_v, req_e);
     if (nshadows > 1) qsort(shadows, (size_t)nshadows, sizeof(char *), ms_str_cmp);
     if (!b->cause[0]) {
-        ms_json a = { files_v, files_e };
+        int pass;
         b->first_file = x->nfiles;
-        if (ms_jenter(&a, '[')) while (!b->cause[0] && ms_jnext(&a, ']')) {
-            ms_json one = { a.p, ms_jskip(a.p, a.e) };
-            a.p = one.e;
-            if (x->nfiles - b->first_file >= (int)SH_MODSERVE_MAX_FILES) { ms_fail(b, "more than %u files", SH_MODSERVE_MAX_FILES); break; }
-            ms_parse_file(x, b, &one, shadows, nshadows);
+        for (pass = 0; pass < 2 && !b->cause[0]; ++pass) {
+            ms_json a;
+            a.p = pass ? stock_v : files_v;
+            a.e = pass ? stock_e : files_e;
+            if (!a.p) continue;
+            if (ms_jenter(&a, '[')) while (!b->cause[0] && ms_jnext(&a, ']')) {
+                ms_json one = { a.p, ms_jskip(a.p, a.e) };
+                a.p = one.e;
+                if (x->nfiles - b->first_file >= (int)SH_MODSERVE_MAX_FILES) { ms_fail(b, "more than %u files", SH_MODSERVE_MAX_FILES); break; }
+                ms_parse_file(x, b, &one, shadows, nshadows, pass);
+            }
         }
         b->file_count = x->nfiles - b->first_file;
         for (i = b->first_file; i < b->first_file + b->file_count; ++i) b->total += x->files[i].size;   /* a pointer's is 0 */
     }
     free(shadows);
     HeapFree(GetProcessHeap(), 0, text);
-    if (!b->cause[0]) ms_read_state(x, b);
-    /* Sizes only; hashes were verified at install. A file missing from the
-     * tree is taken from the blob store when the blob has the right size. */
+    if (!b->cause[0] && !validated)
+        ms_fail(b, "not validated: %s", state_cause && *state_cause ? state_cause : "(no cause recorded)");
+    /* Sizes only; hashes were verified at the build and install. */
     for (i = b->first_file; !b->cause[0] && i < b->first_file + b->file_count; ++i) {
         ms_file *f = &x->files[i];
         long long got;
         if (f->stock) continue;   /* resolved against the installed game at install, read when served */
         got = ms_file_size(f->disk);
         if (got == (long long)f->size) continue;
-        if (f->blob && blobs_dir[0]) {
-            char alt[MS_PATH_MAX];
-            _snprintf_s(alt, sizeof alt, _TRUNCATE, "%s\\%s", blobs_dir, f->blob);
-            if (ms_file_size(alt) == (long long)f->size) { f->disk = ms_strdup(x, alt); if (f->disk) continue; }
-        }
         if (got < 0) ms_fail(b, "'%s' is missing", f->request);
-        else ms_fail(b, "size mismatch: '%s' is %lld bytes, bundle.json says %llu", f->request, got,
+        else ms_fail(b, "size mismatch: '%s' is %lld bytes, mod.json says %llu", f->request, got,
                      (unsigned long long)f->size);
     }
 }
 
-static void ms_scan_folder(ms_index *x, const char *dir, int legacy, const char *blobs_dir)
+/* Every folder under the store root that holds mod.json (or a package.json
+ * not built yet). The retired blobs\ and legacy\ folders, hidden folders and
+ * install staging are not mods. */
+static void ms_scan_folder(ms_index *x, const char *dir)
 {
     char pattern[MAX_PATH];
     WIN32_FIND_DATAA fd;
@@ -812,33 +879,62 @@ static void ms_scan_folder(ms_index *x, const char *dir, int legacy, const char 
     if (h == INVALID_HANDLE_VALUE) return;
     do {
         ms_bundle *b;
-        char sub[MAX_PATH];
+        char sub[MAX_PATH], probe[MAX_PATH];
         int mark_files = x->nfiles, mark_needs = x->nneeds;
         if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT))
             continue;
         if (fd.cFileName[0] == '.') continue;
-        if (!legacy && (!_stricmp(fd.cFileName, "blobs") || !_stricmp(fd.cFileName, "legacy"))) continue;
+        if (!_stricmp(fd.cFileName, "blobs") || !_stricmp(fd.cFileName, "legacy")) continue;
+        if (strstr(fd.cFileName, ".staging-") || strstr(fd.cFileName, ".old-")) continue;
+        _snprintf_s(sub, sizeof sub, _TRUNCATE, "%s\\%s", dir, fd.cFileName);
+        _snprintf_s(probe, sizeof probe, _TRUNCATE, "%s\\mod.json", sub);
+        if (ms_file_size(probe) < 0) {
+            _snprintf_s(probe, sizeof probe, _TRUNCATE, "%s\\package.json", sub);
+            if (ms_file_size(probe) < 0) continue;   /* not a mod folder */
+        }
         if (!ms_grow((void **)&x->bundles, &x->cbundles, x->nbundles + 1, sizeof(ms_bundle))) break;
         b = &x->bundles[x->nbundles++];
         memset(b, 0, sizeof *b);
-        _snprintf_s(sub, sizeof sub, _TRUNCATE, "%s\\%s", dir, fd.cFileName);
         b->dir = ms_strdup(x, sub);
         b->folder = ms_strdup(x, fd.cFileName);
-        b->legacy = legacy;
         b->first_file = x->nfiles;
         if (!b->dir || !b->folder) { ms_fail(b, "out of memory"); }
-        else ms_parse_bundle(x, b, blobs_dir);
+        else ms_parse_bundle(x, b);
         if (b->cause[0]) {
             /* Failure isolation: drop this bundle's rows, keep everything else. */
             x->nfiles = mark_files;
             x->nneeds = mark_needs;
             b->file_count = 0;
-            ms_log("bundle '%s%s' skipped: %s", legacy ? "legacy\\" : "", fd.cFileName, b->cause);
+            ms_log("bundle '%s' skipped: %s", fd.cFileName, b->cause);
         } else {
             b->admitted = 1;
         }
     } while (FindNextFileA(h, &fd));
     FindClose(h);
+}
+
+/* The record's aliases: a delivered copy the store upgrade dropped because an
+ * installed mod serves the same content answers by the kept bundle's hash. */
+static void ms_load_aliases(ms_index *x, const char *mods_root)
+{
+    char *text = NULL, key[80];
+    ms_json o;
+    const char *v, *ve;
+    int cap = 0;
+    if (sh_mb_record_get(mods_root, "aliases", &text) != 1 || !text) { free(text); return; }
+    o.p = text;
+    o.e = text + strlen(text);
+    if (ms_jenter(&o, '{')) while (ms_jnext(&o, '}')) {
+        char *to;
+        if (!ms_jmember(&o, key, sizeof key, &v, &ve)) break;
+        to = ms_jstr(x, v, ve, 64);
+        if (strlen(key) != 64 || !to || !ms_valid_hash(to)) continue;
+        if (!ms_grow((void **)&x->aliases, &cap, x->naliases + 1, sizeof *x->aliases)) break;
+        x->aliases[x->naliases].from = ms_strdup(x, key);
+        x->aliases[x->naliases].to = to;
+        if (x->aliases[x->naliases].from) x->naliases++;
+    }
+    free(text);
 }
 
 /* ------------------------------------------------------------------ conflicts and table */
@@ -1653,7 +1749,6 @@ static int ms_same_bytes(const ms_file *a, const ms_file *b)
 int sh_modserve_index_build(const char *mods_root)
 {
     ms_index *x, *old;
-    char blobs[MAX_PATH], legacy[MAX_PATH];
     double t0 = ms_now_ms();
     int i;
     if (!mods_root) return -1;
@@ -1662,10 +1757,8 @@ int sh_modserve_index_build(const char *mods_root)
     if (!x) { ReleaseSRWLockExclusive(&g_build_lock); ms_log("index refused: out of memory"); return -1; }
     strncpy_s(x->root, sizeof x->root, mods_root, _TRUNCATE);
     strncpy_s(g_last_root, sizeof g_last_root, mods_root, _TRUNCATE);
-    _snprintf_s(blobs, sizeof blobs, _TRUNCATE, "%s\\blobs", mods_root);
-    _snprintf_s(legacy, sizeof legacy, _TRUNCATE, "%s\\legacy", mods_root);
-    ms_scan_folder(x, mods_root, 0, blobs);
-    ms_scan_folder(x, legacy, 1, blobs);
+    ms_scan_folder(x, mods_root);
+    ms_load_aliases(x, mods_root);
     if (!ms_resolve(x) || !ms_build_tables(x)) {
         ReleaseSRWLockExclusive(&g_build_lock);
         ms_log("index refused: out of memory; the previous table stays");
@@ -2157,11 +2250,16 @@ int sh_modserve_plan_editor(sh_modserve_plan *out)
 
 static int ms_bundle_by_hash(const ms_index *x, const char *hash, int admitted_only)
 {
-    int i;
-    if (!hash) return -1;
-    for (i = 0; i < x->nbundles; ++i)
-        if (x->bundles[i].hash && !_stricmp(x->bundles[i].hash, hash) && (!admitted_only || x->bundles[i].admitted))
-            return i;
+    int i, round;
+    for (round = 0; round < 2 && hash; ++round) {
+        for (i = 0; i < x->nbundles; ++i)
+            if (x->bundles[i].hash && !_stricmp(x->bundles[i].hash, hash) && (!admitted_only || x->bundles[i].admitted))
+                return i;
+        /* A delivered copy the store upgrade dropped answers as the kept bundle. */
+        for (i = 0; i < x->naliases; ++i)
+            if (!_stricmp(x->aliases[i].from, hash)) break;
+        hash = i < x->naliases ? x->aliases[i].to : NULL;
+    }
     return -1;
 }
 

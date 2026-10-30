@@ -2,7 +2,7 @@
  *
  * A mod's descriptor may carry
  *   "hud": { "weapons": { "<weapon decl>": { "ammo_display": "weapon" | "engine" } } }
- * which the builder keeps verbatim under bundle.json "extra". "weapon" removes
+ * in mod.json's author block (the manifest keeps it under "extra"). "weapon" removes
  * the multiplayer mode's forced numeric ammo display for that weapon, so the
  * stock ammo widget shows the weapon's own capacity: numbers for a positive
  * maximum, its infinity frame with a full bar for a nonpositive one (the
@@ -10,8 +10,8 @@
  * weapon. It changes no ammunition, firing, decl or widget field.
  *
  * Rules come from every admitted bundle (installed mods and converted map
- * deliveries alike), read once at install from <data>\mods\*\bundle.json and
- * <data>\mods\legacy\*\bundle.json; sh_modhud_reload re-reads them. Identical
+ * deliveries alike), read once at install from every <data>\mods\<folder>\mod.json;
+ * sh_modhud_reload re-reads them. Identical
  * rules for one weapon compose; different rules refuse the whole table (the
  * engine decision stays everywhere) with both bundle ids in the log.
  *

@@ -242,25 +242,6 @@ static int msy_rmtree_w(const wchar_t *path, const wchar_t *root, int top)
     return ok;
 }
 
-/* Keep every blob a bundle names read-only (a cleared attribute on a hard
- * link clears it on the blob). */
-static void msy_protect_blobs(const char *root, const sh_mb_bundle *b)
-{
-    size_t i;
-    for (i = 0; i < b->file_count; i++) {
-        char p[MAX_PATH * 4];
-        wchar_t *w;
-        if (b->files[i].stock) continue;
-        _snprintf_s(p, sizeof p, _TRUNCATE, "%s\\blobs\\%s", root, b->files[i].blob);
-        w = sh_mb_wpath(p);
-        if (w) {
-            DWORD a = GetFileAttributesW(w);
-            if (a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_READONLY)) SetFileAttributesW(w, a | FILE_ATTRIBUTE_READONLY);
-            free(w);
-        }
-    }
-}
-
 /* JSON string body (no quotes) with '"', '\\' and controls escaped. */
 static char *msy_escape(const char *s)
 {
@@ -315,55 +296,37 @@ static int msy_root(char *out, size_t cap)
 
 /* ------------------------------------------------------------ docs ------ */
 
-/* Load <root>\<file> as {"format":1,"<member>":{...}}. A missing file is an
- * empty document; an unreadable one is moved aside (never silently lost). */
-static mpj *msy_doc_load(const char *file, const char *member)
+/* A section of the product record (mods\snapmap-plus.json) as the document
+ * {"format":1,"<member>":{...}} the code below edits. A missing section is an
+ * empty one; an unreadable record is moved aside by the record layer when
+ * the section is written next (never silently lost). */
+static mpj *msy_doc_load(const char *section, const char *member)
 {
-    char root[MAX_PATH * 4], path[MAX_PATH * 4];
-    unsigned char *text = NULL;
-    size_t len = 0;
-    mpj *doc = NULL, *m;
+    char root[MAX_PATH * 4], *text = NULL;
+    mpj *doc, *m = NULL;
     if (!msy_root(root, sizeof root)) return NULL;
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", root, file);
-    if (msy_exists(path, NULL, NULL)) {
-        text = sh_mb_read_file(path, MSY_DOC_MAX, &len);
-        doc = text ? mpj_parse((const char *)text, len) : NULL;
-        free(text);
-        if (!doc || doc->type != MPJ_OBJ || !(m = mpj_get(doc, member)) || m->type != MPJ_OBJ) {
-            char aside[MAX_PATH * 4];
-            wchar_t *wa, *wp;
-            mpj_free(doc);
-            doc = NULL;
-            _snprintf_s(aside, sizeof aside, _TRUNCATE, "%s.unreadable-%lld", path, (long long)time(NULL));
-            wa = sh_mb_wpath(aside);
-            wp = sh_mb_wpath(path);
-            if (wa && wp) MoveFileExW(wp, wa, 0);
-            free(wa);
-            free(wp);
-            msy_log("MODS: %s could not be read; it was moved aside and a new one started", file);
-        }
-    }
-    if (!doc) {
-        doc = mpj_new(MPJ_OBJ);
-        if (!doc || !mpj_set(doc, "format", mpj_new_int(1)) || !mpj_set(doc, member, mpj_new(MPJ_OBJ))) {
-            mpj_free(doc);
-            return NULL;
-        }
+    if (sh_mb_record_get(root, section, &text) == 1 && text) m = mpj_parse(text, strlen(text));
+    if (text) { SecureZeroMemory(text, strlen(text)); free(text); }
+    if (m && m->type != MPJ_OBJ) { mpj_free(m); m = NULL; }
+    doc = mpj_new(MPJ_OBJ);
+    if (!doc || !mpj_set(doc, "format", mpj_new_int(1)) || !mpj_set(doc, member, m ? m : mpj_new(MPJ_OBJ))) {
+        mpj_free(doc);
+        return NULL;
     }
     return doc;
 }
 
-static int msy_doc_save(const char *file, const mpj *doc)
+static int msy_doc_save(const char *section, const mpj *doc)
 {
-    char root[MAX_PATH * 4], path[MAX_PATH * 4];
+    char root[MAX_PATH * 4];
+    const mpj *m = doc ? mpj_get(doc, section) : NULL;
     size_t len = 0;
     char *text;
     int ok;
-    if (!msy_root(root, sizeof root) || !msy_mkdirs(root)) return 0;
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", root, file);
-    text = mpj_dump(doc, &len);
+    if (!m || !msy_root(root, sizeof root)) return 0;
+    text = mpj_dump(m, &len);
     if (!text) return 0;
-    ok = msy_write_file(path, text, len, 0);
+    ok = sh_mb_record_put(root, section, text);
     SecureZeroMemory(text, len);
     free(text);
     return ok;
@@ -389,7 +352,7 @@ int modsync_claim_lookup(const char *ref, char claim_out[MODNET_CLAIM_HEX + 1], 
     if (secret_out) secret_out[0] = 0;
     if (!ref || !(key = msy_escape(ref))) return 0;
     modsync_store_lock();
-    doc = msy_doc_load(MODSYNC_CLAIMS_FILE, "claims");
+    doc = msy_doc_load(MODSYNC_CLAIMS_SECTION, "claims");
     modsync_store_unlock();
     claims = doc ? mpj_get(doc, "claims") : NULL;
     e = claims ? mpj_get(claims, key) : NULL;
@@ -416,12 +379,12 @@ static int msy_claim_store(const char *ref, const char *claim, const char *secre
     int ok = 0;
     if (!key) return 0;
     modsync_store_lock();
-    doc = msy_doc_load(MODSYNC_CLAIMS_FILE, "claims");
+    doc = msy_doc_load(MODSYNC_CLAIMS_SECTION, "claims");
     claims = doc ? mpj_get(doc, "claims") : NULL;
     e = claims ? mpj_new(MPJ_OBJ) : NULL;
     if (e && mpj_set(e, "bundles", msy_hash_array(hashes, n)) && mpj_set(e, "claim", mpj_new_str(claim)) &&
         mpj_set(e, "secret", mpj_new_str(secret)) && mpj_set(e, "updated", mpj_new_int((long long)time(NULL)))) {
-        if (mpj_set(claims, key, e)) { e = NULL; ok = msy_doc_save(MODSYNC_CLAIMS_FILE, doc); }
+        if (mpj_set(claims, key, e)) { e = NULL; ok = msy_doc_save(MODSYNC_CLAIMS_SECTION, doc); }
     }
     mpj_free(e);
     mpj_free(doc);
@@ -437,9 +400,9 @@ static int msy_claim_forget(const char *ref)
     int ok = 0;
     if (!key) return 0;
     modsync_store_lock();
-    doc = msy_doc_load(MODSYNC_CLAIMS_FILE, "claims");
+    doc = msy_doc_load(MODSYNC_CLAIMS_SECTION, "claims");
     claims = doc ? mpj_get(doc, "claims") : NULL;
-    if (claims) { msy_obj_remove(claims, key); ok = msy_doc_save(MODSYNC_CLAIMS_FILE, doc); }
+    if (claims) { msy_obj_remove(claims, key); ok = msy_doc_save(MODSYNC_CLAIMS_SECTION, doc); }
     mpj_free(doc);
     modsync_store_unlock();
     free(key);
@@ -456,7 +419,7 @@ static int msy_pending_put(const char *ref, const char *const *hashes, int n, co
     if (!key) return 0;
     msy_plain(error, plain, sizeof plain);
     modsync_store_lock();
-    doc = msy_doc_load(MODSYNC_PENDING_FILE, "pending");
+    doc = msy_doc_load(MODSYNC_PENDING_SECTION, "pending");
     pend = doc ? mpj_get(doc, "pending") : NULL;
     old = pend ? mpj_get(pend, key) : NULL;
     att = old ? mpj_get(old, "attempts") : NULL;
@@ -464,7 +427,7 @@ static int msy_pending_put(const char *ref, const char *const *hashes, int n, co
     e = pend ? mpj_new(MPJ_OBJ) : NULL;
     if (e && mpj_set(e, "attempts", mpj_new_int(attempts)) && mpj_set(e, "bundles", msy_hash_array(hashes, n)) &&
         mpj_set(e, "lastError", mpj_new_str(plain)) && mpj_set(e, "queuedAt", mpj_new_int((long long)time(NULL)))) {
-        if (mpj_set(pend, key, e)) { e = NULL; ok = msy_doc_save(MODSYNC_PENDING_FILE, doc); }
+        if (mpj_set(pend, key, e)) { e = NULL; ok = msy_doc_save(MODSYNC_PENDING_SECTION, doc); }
     }
     mpj_free(e);
     mpj_free(doc);
@@ -479,9 +442,9 @@ static void msy_pending_drop(const char *ref)
     char *key = msy_escape(ref);
     if (!key) return;
     modsync_store_lock();
-    doc = msy_doc_load(MODSYNC_PENDING_FILE, "pending");
+    doc = msy_doc_load(MODSYNC_PENDING_SECTION, "pending");
     pend = doc ? mpj_get(doc, "pending") : NULL;
-    if (pend && mpj_get(pend, key)) { msy_obj_remove(pend, key); msy_doc_save(MODSYNC_PENDING_FILE, doc); }
+    if (pend && mpj_get(pend, key)) { msy_obj_remove(pend, key); msy_doc_save(MODSYNC_PENDING_SECTION, doc); }
     mpj_free(doc);
     modsync_store_unlock();
     free(key);
@@ -492,7 +455,7 @@ int modsync_pending_count(void)
     mpj *doc, *pend;
     int n;
     modsync_store_lock();
-    doc = msy_doc_load(MODSYNC_PENDING_FILE, "pending");
+    doc = msy_doc_load(MODSYNC_PENDING_SECTION, "pending");
     modsync_store_unlock();
     pend = doc ? mpj_get(doc, "pending") : NULL;
     n = pend ? pend->n : -1;
@@ -525,7 +488,7 @@ int modsync_find_installed(const char *hash, char *folder, size_t cap)
 }
 
 /* The bundle.json form of a canonical manifest: the same members plus
- * "bundle", which sh_mb_load_text needs and checks against the text. */
+ * "bundle", which sh_mb_load_manifest_text needs and checks against the text. */
 static char *msy_with_bundle(const char *canonical, size_t len, const char *hash)
 {
     size_t need = len + 96;
@@ -538,38 +501,84 @@ static char *msy_with_bundle(const char *canonical, size_t len, const char *hash
     return out;
 }
 
-static int msy_place_blob(const char *root, const sh_mb_file *f, modsync_blob_source_fn source, void *ctx,
-                          modsync_install_info *info, char *cause, size_t cap)
+/* A carried file of an installed mod with this hash: its path (UTF-8), so a
+ * download copies it instead of fetching it again. */
+typedef struct msy_local { char sha[SH_MB_HASH_HEX + 1]; char *path; } msy_local;
+
+static void msy_locals_free(msy_local *l, size_t n)
 {
-    char path[MAX_PATH * 4], actual[SH_MB_HASH_HEX + 1], why[256];
-    unsigned long long size = 0;
+    size_t i;
+    for (i = 0; i < n; i++) free(l[i].path);
+    free(l);
+}
+
+static msy_local *msy_locals(const sh_ms_list *l, const sh_mb_bundle *b, size_t *count)
+{
+    msy_local *out = (msy_local *)calloc(b->file_count ? b->file_count : 1, sizeof *out);
+    size_t i, k, f, n = 0;
+    *count = 0;
+    if (!out) return NULL;
+    for (f = 0; f < b->file_count; f++) {
+        int found = 0;
+        if (b->files[f].stock) continue;
+        for (k = 0; k < n && !found; k++) found = !strcmp(out[k].sha, b->files[f].blob);
+        for (i = 0; i < l->count && !found; i++) {
+            const sh_ms_entry *e = &l->items[i];
+            if (!sh_ms_entry_usable(e)) continue;
+            for (k = 0; k < e->bundle.file_count && !found; k++) {
+                const sh_mb_file *g = &e->bundle.files[k];
+                char path[MAX_PATH * 4];
+                if (g->stock || strcmp(g->blob, b->files[f].blob)) continue;
+                msy_join(path, sizeof path, e->folder, g->path);
+                strcpy_s(out[n].sha, sizeof out[n].sha, g->blob);
+                out[n].path = _strdup(path);
+                if (out[n].path) { n++; found = 1; }
+            }
+        }
+    }
+    *count = n;
+    return out;
+}
+
+/* Put one carried file at `dst`: a local copy of the same bytes, else the
+ * source; the bytes are checked against the manifest either way. */
+static int msy_place_file(const char *dst, const sh_mb_file *f, const msy_local *locals, size_t nlocals,
+                          modsync_blob_source_fn source, void *ctx, modsync_install_info *info, char *cause, size_t cap)
+{
+    char actual[SH_MB_HASH_HEX + 1], why[256];
     unsigned char *bytes = NULL;
-    size_t len = 0;
-    int is_dir = 0, ok;
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\blobs\\%s", root, f->blob);
-    if (msy_exists(path, &size, &is_dir)) {
-        if (is_dir || size != f->size)
-            return msy_cause(cause, cap, "blob %.16s in the store has the wrong size; it is damaged (run sh_mods verify)", f->blob);
-        info->blobs_present++;
-        return 1;
+    size_t len = 0, i;
+    int ok, fetched = 0;
+    for (i = 0; i < nlocals && !bytes; i++) {
+        if (strcmp(locals[i].sha, f->blob)) continue;
+        bytes = sh_mb_read_file(locals[i].path, (size_t)f->size + 1, &len);
+        if (bytes) {
+            sh_mb_sha256_hex(bytes, len, actual);
+            if (len != f->size || strcmp(actual, f->blob)) { free(bytes); bytes = NULL; }
+        }
     }
-    why[0] = 0;
-    if (!source || !source(ctx, f->blob, f->size, &bytes, &len, why, sizeof why))
-        return msy_cause(cause, cap, "blob %.16s for %s: %s", f->blob, f->path, why[0] ? why : "not available");
-    sh_mb_sha256_hex(bytes, len, actual);
-    if (len != f->size || strcmp(actual, f->blob) != 0) {
-        free(bytes);
-        return msy_cause(cause, cap, "blob %.16s for %s does not match the manifest; refused", f->blob, f->path);
+    if (!bytes) {
+        why[0] = 0;
+        if (!source || !source(ctx, f->blob, f->size, &bytes, &len, why, sizeof why))
+            return msy_cause(cause, cap, "%s (%.16s): %s", f->path, f->blob, why[0] ? why : "not available");
+        fetched = 1;
+        sh_mb_sha256_hex(bytes, len, actual);
+        if (len != f->size || strcmp(actual, f->blob) != 0) {
+            free(bytes);
+            return msy_cause(cause, cap, "%s (%.16s) does not match the manifest; refused", f->path, f->blob);
+        }
     }
-    ok = msy_write_file(path, bytes, len, 1);
+    {
+        char parent[MAX_PATH * 4], *slash;
+        strcpy_s(parent, sizeof parent, dst);
+        slash = strrchr(parent, '\\');
+        if (slash) { *slash = 0; msy_mkdirs(parent); }
+    }
+    ok = msy_write_file(dst, bytes, len, 0);
     free(bytes);
-    if (!ok) {
-        /* Another writer may have placed the same blob meanwhile. */
-        if (msy_exists(path, &size, NULL) && size == f->size) { info->blobs_present++; return 1; }
-        return msy_cause(cause, cap, "cannot write blob %.16s (error %lu)", f->blob, GetLastError());
-    }
-    info->blobs_fetched++;
-    info->bytes_fetched += len;
+    if (!ok) return msy_cause(cause, cap, "cannot write %s (error %lu)", f->path, GetLastError());
+    if (fetched) { info->blobs_fetched++; info->bytes_fetched += len; }
+    else info->blobs_present++;
     return 1;
 }
 
@@ -579,22 +588,26 @@ int modsync_install_manifest(const char *canonical, size_t len, const char *hash
 {
     modsync_install_info local;
     sh_mb_bundle b;
+    sh_ms_list list;
+    msy_local *locals = NULL;
+    size_t nlocals = 0, i;
     char actual[SH_MB_HASH_HEX + 1], root[MAX_PATH * 4], final[MAX_PATH * 4], staging[MAX_PATH * 4],
-         old[MAX_PATH * 4], key[MSY_KEY_MAX], one[SH_MB_CAUSE_MAX];
-    char *with = NULL;
+         old[MAX_PATH * 4], name[SH_MS_NAME_MAX + 1], one[SH_MB_CAUSE_MAX], content[SH_MB_HASH_HEX + 1];
+    char *with = NULL, *text = NULL;
+    size_t text_len = 0;
     wchar_t *wroot = NULL, *wfinal = NULL, *wstaging = NULL, *wold = NULL;
-    int ok = 0, replace = 0, is_dir = 0;
-    size_t i;
+    int ok = 0, replace = 0, named, listed = 0;
     if (!info) info = &local;
     memset(info, 0, sizeof *info);
     memset(&b, 0, sizeof b);
+    memset(&list, 0, sizeof list);
     if (cause && cap) cause[0] = 0;
     if (!canonical || !len || !modnet_valid_hash(hash)) return msy_cause(cause, cap, "no manifest");
     sh_mb_sha256_hex(canonical, len, actual);
     if (strcmp(actual, hash) != 0) return msy_cause(cause, cap, "the manifest does not hash to %.16s", hash);
     with = msy_with_bundle(canonical, len, hash);
     if (!with) return msy_cause(cause, cap, "the manifest is not a JSON object");
-    if (!sh_mb_load_text(with, strlen(with), &b)) {
+    if (!sh_mb_load_manifest_text(with, strlen(with), &b)) {
         msy_cause(cause, cap, "the manifest is not a bundle this release accepts: %s", b.first_cause);
         free(with);
         sh_mb_free(&b);
@@ -605,8 +618,6 @@ int modsync_install_manifest(const char *canonical, size_t len, const char *hash
         sh_mb_free(&b);
         return msy_cause(cause, cap, "the manifest is not in canonical form");
     }
-    _snprintf_s(key, sizeof key, _TRUNCATE, "%s@%s+%llu", b.id, b.version, b.build);
-    _snprintf_s(info->rel, sizeof info->rel, _TRUNCATE, "%s%s", b.legacy ? "legacy\\" : "", key);
     /* Stock pointers name this player's installed game: a game that lacks an
      * entry (or holds other bytes, a different revision) refuses the bundle
      * before anything is fetched. */
@@ -620,63 +631,55 @@ int modsync_install_manifest(const char *canonical, size_t len, const char *hash
         }
         info->stock_files++;
     }
+    sh_mb_content_key(&b, content);
 
     modsync_store_lock();
     if (!msy_root(root, sizeof root)) { msy_cause(cause, cap, "the store folder cannot be resolved"); goto done; }
     /* Installed already, in whatever folder (a hand-built mod is built in place). */
     if (modsync_find_installed(hash, final, sizeof final)) {
+        strncpy_s(info->rel, sizeof info->rel, strrchr(final, '\\') ? strrchr(final, '\\') + 1 : final, _TRUNCATE);
         info->already_installed = 1;
         ok = 1;
         goto done;
     }
-    _snprintf_s(final, sizeof final, _TRUNCATE, "%s\\%s", root, info->rel);
-    if (msy_exists(final, NULL, &is_dir)) {
-        char bj[MAX_PATH * 4];
-        sh_mb_bundle have;
-        int loaded;
-        sh_ms_verify_stats vs;
-        msy_join(bj, sizeof bj, final, "bundle.json");
-        loaded = sh_mb_load(bj, &have);
-        if (loaded && strcmp(have.hash, hash) != 0) {
-            msy_cause(cause, cap, "a different bundle (%.16s) is installed as %s; remove it first", have.hash, info->rel);
-            sh_mb_free(&have);
-            goto done;
+    listed = sh_ms_enumerate(&list);
+    /* A copy of what an installed mod of the same id already serves is not
+     * stored twice: the hash answers as the installed bundle's (an alias in
+     * the record, which the serving index reads). */
+    for (i = 0; listed && i < list.count; i++) {
+        const sh_ms_entry *e = &list.items[i];
+        char key[SH_MB_HASH_HEX + 1];
+        if (!sh_ms_entry_usable(e) || strcmp(e->bundle.id, b.id)) continue;
+        sh_mb_content_key(&e->bundle, key);
+        if (strcmp(key, content)) continue;
+        {
+            char *text_aliases = NULL, *out;
+            size_t n;
+            mpj *aliases = NULL;
+            sh_mb_record_lock();
+            if (sh_mb_record_get(root, "aliases", &text_aliases) == 1 && text_aliases)
+                aliases = mpj_parse(text_aliases, strlen(text_aliases));
+            free(text_aliases);
+            if (!aliases || aliases->type != MPJ_OBJ) { mpj_free(aliases); aliases = mpj_new(MPJ_OBJ); }
+            if (aliases && mpj_set(aliases, hash, mpj_new_str(e->bundle.hash)) && (out = mpj_dump(aliases, &n)) != NULL) {
+                sh_mb_record_put(root, "aliases", out);
+                free(out);
+            }
+            mpj_free(aliases);
+            sh_mb_record_unlock();
         }
-        sh_mb_free(&have);
-        if (loaded && sh_ms_verify(key, &vs, one, sizeof one)) {
-            info->already_installed = 1;
-            ok = 1;
-            goto done;
-        }
-        replace = 1;   /* the same bundle, damaged or unbuilt: lay it out again */
-    }
-    {
-        char blobs[MAX_PATH * 4];
-        _snprintf_s(blobs, sizeof blobs, _TRUNCATE, "%s\\blobs", root);
-        if (!msy_mkdirs(blobs)) { msy_cause(cause, cap, "cannot create the store folder (error %lu)", GetLastError()); goto done; }
-    }
-    /* Blobs are write-once through a temporary and a rename, so they are
-     * fetched without the store lock: a long download never holds up a save
-     * or an export on another thread. */
-    modsync_store_unlock();
-    for (i = 0; i < b.file_count; i++) {
-        size_t k;
-        int seen = 0;
-        if (b.files[i].stock) continue;   /* never fetched: the installed game holds it */
-        for (k = 0; k < i && !seen; k++) seen = !b.files[k].stock && strcmp(b.files[k].blob, b.files[i].blob) == 0;
-        if (seen) continue;
-        if (!msy_place_blob(root, &b.files[i], source, ctx, info, one, sizeof one)) {
-            msy_cause(cause, cap, "%s", one);
-            modsync_store_lock();
-            goto done;
-        }
-    }
-    modsync_store_lock();
-    if (modsync_find_installed(hash, NULL, 0)) {   /* another thread finished it meanwhile */
+        msy_log("MODS: pull %.16s: %s serves the same content; recorded as an alias of %.16s, nothing stored", hash,
+                e->name, e->bundle.hash);
+        strncpy_s(info->rel, sizeof info->rel, e->name, _TRUNCATE);
         info->already_installed = 1;
         ok = 1;
         goto done;
     }
+    named = sh_mb_folder_name(root, b.id, b.version, hash, name, sizeof name);
+    if (!named) { msy_cause(cause, cap, "no free folder for %s@%s in the store", b.id, b.version); goto done; }
+    replace = named == 2;   /* the same bundle, damaged or unbuilt: placed again */
+    strncpy_s(info->rel, sizeof info->rel, name, _TRUNCATE);
+    _snprintf_s(final, sizeof final, _TRUNCATE, "%s\\%s", root, name);
     _snprintf_s(staging, sizeof staging, _TRUNCATE, "%s.staging-%lu", final, GetCurrentProcessId());
     _snprintf_s(old, sizeof old, _TRUNCATE, "%s.old-%lu", final, GetCurrentProcessId());
     wroot = sh_mb_wpath(root);
@@ -684,70 +687,79 @@ int modsync_install_manifest(const char *canonical, size_t len, const char *hash
     wstaging = sh_mb_wpath(staging);
     wold = sh_mb_wpath(old);
     if (!wroot || !wfinal || !wstaging || !wold) { msy_cause(cause, cap, "out of memory"); goto done; }
+    if (!msy_mkdirs(root)) { msy_cause(cause, cap, "cannot create the store folder (error %lu)", GetLastError()); goto done; }
     if (msy_exists_w(wstaging, NULL, NULL)) msy_rmtree_w(wstaging, wroot, 1);
-    if (!msy_mkdirs_w(wstaging)) { msy_cause(cause, cap, "cannot create %s (error %lu)", info->rel, GetLastError()); goto done; }
-    if (!sh_mb_write(&b, staging, one, sizeof one)) {
-        msy_rmtree_w(wstaging, wroot, 1);
-        msy_cause(cause, cap, "%s", one);
-        goto done;
-    }
+    if (!msy_mkdirs_w(wstaging)) { msy_cause(cause, cap, "cannot create %s (error %lu)", name, GetLastError()); goto done; }
+    locals = listed ? msy_locals(&list, &b, &nlocals) : NULL;
+    sh_ms_list_free(&list);
+    listed = 0;
+    /* Files are fetched without the store lock: a long download never holds
+     * up a save or an export on another thread. The staging folder is this
+     * process's own. */
+    modsync_store_unlock();
     for (i = 0; i < b.file_count; i++) {
-        char dst[MAX_PATH * 4], blob[MAX_PATH * 4];
-        wchar_t *wd, *wb;
-        int placed = 0;
-        if (b.files[i].stock) continue;
+        char dst[MAX_PATH * 4];
+        if (b.files[i].stock) { b.files[i].absent = 1; continue; }   /* never fetched: the installed game holds it */
         msy_join(dst, sizeof dst, staging, b.files[i].path);
-        _snprintf_s(blob, sizeof blob, _TRUNCATE, "%s\\blobs\\%s", root, b.files[i].blob);
-        wd = sh_mb_wpath(dst);
-        wb = sh_mb_wpath(blob);
-        if (wd && wb && msy_mkdirs_parent_w(wd))
-            placed = CreateHardLinkW(wd, wb, NULL) || CopyFileW(wb, wd, TRUE);
-        free(wd);
-        free(wb);
-        if (!placed) {
-            DWORD e = GetLastError();
+        if (!msy_place_file(dst, &b.files[i], locals, nlocals, source, ctx, info, one, sizeof one)) {
+            msy_cause(cause, cap, "%s", one);
+            modsync_store_lock();
             msy_rmtree_w(wstaging, wroot, 1);
-            msy_protect_blobs(root, &b);
-            msy_cause(cause, cap, "cannot place %s (error %lu)", b.files[i].path, e);
             goto done;
         }
     }
-    if (replace) {
+    modsync_store_lock();
+    if (modsync_find_installed(hash, NULL, 0)) {   /* another thread finished it meanwhile */
+        msy_rmtree_w(wstaging, wroot, 1);
+        info->already_installed = 1;
+        ok = 1;
+        goto done;
+    }
+    /* mod.json: an author block from the manifest (the download has no other)
+     * and the product block. */
+    strcpy_s(b.origin, sizeof b.origin, SH_MB_ORIGIN_DOWNLOAD);
+    text = sh_mb_modjson_text(&b, NULL, 0, &text_len);
+    {
+        char mj[MAX_PATH * 4];
+        msy_join(mj, sizeof mj, staging, "mod.json");
+        if (!text || !msy_write_file(mj, text, text_len, 0)) {
+            msy_rmtree_w(wstaging, wroot, 1);
+            msy_cause(cause, cap, "cannot write mod.json for %s", name);
+            goto done;
+        }
+    }
+    if (replace || msy_exists_w(wfinal, NULL, NULL)) {
         if (msy_exists_w(wold, NULL, NULL)) msy_rmtree_w(wold, wroot, 1);
         if (!MoveFileExW(wfinal, wold, 0)) {
             DWORD e = GetLastError();
             msy_rmtree_w(wstaging, wroot, 1);
-            msy_protect_blobs(root, &b);
-            msy_cause(cause, cap, "cannot replace the damaged %s; is a file in it open? (error %lu)", info->rel, e);
+            msy_cause(cause, cap, "cannot replace the damaged %s; is a file in it open? (error %lu)", name, e);
             goto done;
         }
-    } else {
-        char parent[MAX_PATH * 4];
-        char *slash;
-        strcpy_s(parent, sizeof parent, final);
-        slash = strrchr(parent, '\\');
-        if (slash) { *slash = 0; msy_mkdirs(parent); }
+        replace = 1;
     }
     if (!MoveFileExW(wstaging, wfinal, 0)) {
         DWORD e = GetLastError();
         if (replace) MoveFileExW(wold, wfinal, 0);
         msy_rmtree_w(wstaging, wroot, 1);
-        msy_protect_blobs(root, &b);
-        msy_cause(cause, cap, "cannot place %s (error %lu)", info->rel, e);
+        msy_cause(cause, cap, "cannot place %s (error %lu)", name, e);
         goto done;
     }
     if (replace) msy_rmtree_w(wold, wroot, 1);
-    msy_protect_blobs(root, &b);
     {
         sh_ms_verify_stats vs;
-        if (!sh_ms_verify(key, &vs, one, sizeof one)) {
+        if (!sh_ms_verify(name, &vs, one, sizeof one)) {
             msy_cause(cause, cap, "installed, but verification failed: %s", one);
             goto done;
         }
     }
+    sh_ms_cache_note(final, hash);
     ok = 1;
 done:
     modsync_store_unlock();
+    if (listed) sh_ms_list_free(&list);
+    msy_locals_free(locals, nlocals);
+    free(text);
     free(wroot); free(wfinal); free(wstaging); free(wold);
     sh_mb_free(&b);
     return ok;
@@ -807,7 +819,7 @@ typedef struct msy_up_bundle {
 typedef struct msy_up_blob {
     char sha[MODNET_HASH_HEX + 1];
     unsigned long long size;
-    char *fallback;            /* the bundle folder's file, when blobs\ lacks it */
+    char *fallback;            /* the mod folder's file holding these bytes */
 } msy_up_blob;
 
 typedef struct msy_up {
@@ -860,20 +872,15 @@ static int msy_up_collect(msy_up *u, const char *const *hashes, int n, char *cau
         if (!e) { ok = msy_cause(cause, cap, "bundle %.16s is not installed (or failed verification)", hashes[i]); break; }
         strcpy_s(ub->hash, sizeof ub->hash, hashes[i]);
         strncpy_s(ub->label, sizeof ub->label, e->key, _TRUNCATE);
-        /* The exact bytes the builder wrote; the store accepts only those. */
-        msy_join(path, sizeof path, e->folder, "bundle.canonical.json");
-        text = sh_mb_read_file(path, SH_MB_MANIFEST_MAX, &len);
-        if (text) sh_mb_sha256_hex(text, len, actual);
-        if (!text || strcmp(actual, hashes[i]) != 0) {
-            free(text);
-            text = (unsigned char *)malloc(e->bundle.canonical_len + 1);
-            if (!text) { ok = msy_cause(cause, cap, "out of memory"); break; }
-            memcpy(text, e->bundle.canonical, e->bundle.canonical_len);
-            len = e->bundle.canonical_len;
-            text[len] = 0;
-            sh_mb_sha256_hex(text, len, actual);
-            if (strcmp(actual, hashes[i]) != 0) { free(text); ok = msy_cause(cause, cap, "%s: the canonical manifest does not hash to the bundle", e->key); break; }
-        }
+        /* The canonical manifest, derived from mod.json in memory: the exact
+         * bytes whose SHA-256 is the bundle hash, the only text the store accepts. */
+        text = (unsigned char *)malloc(e->bundle.canonical_len + 1);
+        if (!text) { ok = msy_cause(cause, cap, "out of memory"); break; }
+        memcpy(text, e->bundle.canonical, e->bundle.canonical_len);
+        len = e->bundle.canonical_len;
+        text[len] = 0;
+        sh_mb_sha256_hex(text, len, actual);
+        if (strcmp(actual, hashes[i]) != 0) { free(text); ok = msy_cause(cause, cap, "%s: the canonical manifest does not hash to the bundle", e->key); break; }
         ub->canonical = (char *)text;
         ub->len = len;
         ub->blobs = (char (*)[MODNET_HASH_HEX + 1])calloc(e->bundle.file_count ? e->bundle.file_count : 1, sizeof *ub->blobs);
@@ -908,21 +915,14 @@ static int msy_up_collect(msy_up *u, const char *const *hashes, int n, char *cau
 
 static int msy_read_blob(const msy_up_blob *ob, unsigned char **bytes, size_t *len)
 {
-    char root[MAX_PATH * 4], path[MAX_PATH * 4], actual[SH_MB_HASH_HEX + 1];
+    char actual[SH_MB_HASH_HEX + 1];
     unsigned char *t = NULL;
-    int pass;
     *bytes = NULL;
     *len = 0;
-    if (!msy_root(root, sizeof root)) return 0;
-    for (pass = 0; pass < 2 && !t; pass++) {
-        if (pass == 0) _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\blobs\\%s", root, ob->sha);
-        else if (ob->fallback) strcpy_s(path, sizeof path, ob->fallback);
-        else break;
-        t = sh_mb_read_file(path, (size_t)MODNET_MAX_BLOB, len);
-        if (t) {
-            sh_mb_sha256_hex(t, *len, actual);
-            if (*len != ob->size || strcmp(actual, ob->sha) != 0) { free(t); t = NULL; *len = 0; }
-        }
+    if (ob->fallback) t = sh_mb_read_file(ob->fallback, (size_t)MODNET_MAX_BLOB, len);
+    if (t) {
+        sh_mb_sha256_hex(t, *len, actual);
+        if (*len != ob->size || strcmp(actual, ob->sha) != 0) { free(t); t = NULL; *len = 0; }
     }
     *bytes = t;
     return t != NULL;
@@ -943,7 +943,7 @@ static int msy_send_blobs(msy_up *u, char (*want)[MODNET_HASH_HEX + 1], int nwan
         if (msy_cancelled(io)) return msy_stats_fail(st, MODNET_E_CANCELLED, "cancelled");
         if (!ob) return msy_stats_fail(st, MODNET_E_PROTOCOL, "the store asked for blob %.16s, which no bundle names", want[i]);
         if (!msy_read_blob(ob, &bytes, &len))
-            return msy_stats_fail(st, MODNET_E_ARG, "blob %.16s is missing or damaged in the local store (run sh_mods verify)", ob->sha);
+            return msy_stats_fail(st, MODNET_E_ARG, "file %.16s is missing or damaged in the local store (run sh_mods doctor verify)", ob->sha);
         sub = msy_sub_io(io, prog);
         code = modnet_put_blob(ob->sha, bytes, len, &sub, &r);
         free(bytes);
@@ -1042,8 +1042,8 @@ static int msy_upload(const char *const *hashes, int n, const char *ref, const m
             if (!msy_claim_store(ref, claim, secret, bh, u.nb)) {
                 free(bh);
                 SecureZeroMemory(secret, sizeof secret);
-                msy_stats_fail(st, MODNET_E_ARG, "claimed as %s, but %s could not be written; the claim cannot be released later",
-                               claim, MODSYNC_CLAIMS_FILE);
+                msy_stats_fail(st, MODNET_E_ARG, "claimed as %s, but the claims section of mods\\snapmap-plus.json could not "
+                               "be written; the claim cannot be released later", claim);
                 goto done;
             }
         }
@@ -1142,7 +1142,7 @@ int modsync_fetch_bundle(const char *hash, const modnet_io *io, modsync_stats *s
         memset(&b, 0, sizeof b);
         memset(&prog, 0, sizeof prog);
         prog.outer = io;
-        if (with && sh_mb_load_text(with, strlen(with), &b)) {
+        if (with && sh_mb_load_manifest_text(with, strlen(with), &b)) {
             size_t i;
             st->blobs_total = (unsigned)(b.file_count - b.stock_count);
             for (i = 0; i < b.file_count; i++) prog.total += b.files[i].size;   /* a pointer's size is 0 */
@@ -1212,7 +1212,7 @@ int modsync_retry_pending(const modnet_io *io, unsigned *done, unsigned *dropped
     if (dropped) *dropped = 0;
     if (last) memset(last, 0, sizeof *last);
     modsync_store_lock();
-    doc = msy_doc_load(MODSYNC_PENDING_FILE, "pending");
+    doc = msy_doc_load(MODSYNC_PENDING_SECTION, "pending");
     modsync_store_unlock();
     pend = doc ? mpj_get(doc, "pending") : NULL;
     if (!pend) { mpj_free(doc); return -1; }

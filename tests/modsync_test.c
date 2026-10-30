@@ -4,11 +4,13 @@
  *   missing negotiation (a blob two bundles share is sent once), blob
  *   upload idempotence, the exact canonical manifest as the bundle body, a
  *   409 at the manifest renegotiated, claim and re-claim with the secret
- *   kept in claims.json, release, a 503 queued in pending-uploads.json and
- *   retried, a 422 not queued, a cancelled push queued, and downloads into
- *   empty stores: installed and verified and in the serving index, the same
- *   bundle again fetched from nowhere, and a blob or manifest whose bytes do
- *   not match its hash refused with nothing installed.
+ *   kept in the claims section of mods\snapmap-plus.json, release, a 503
+ *   queued in its pending section and retried, a 422 not queued, a cancelled
+ *   push queued, and downloads into empty stores: installed as mods\<id> with
+ *   mod.json, verified and in the serving index, the same bundle again
+ *   fetched from nowhere, a file an installed mod already holds copied
+ *   instead of fetched, and a blob or manifest whose bytes do not match its
+ *   hash refused with nothing installed.
  */
 #include "mod_store_stub.h"
 #include "../src/backend/modnet.h"
@@ -74,7 +76,13 @@ static unsigned count_files(const char *dir)
     _snprintf_s(pattern, sizeof pattern, _TRUNCATE, "%s\\*", dir);
     h = FindFirstFileA(pattern, &fd);
     if (h == INVALID_HANDLE_VALUE) return 0;
-    do { if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) n++; } while (FindNextFileA(h, &fd));
+    do {
+        char sub[MAX_PATH * 2];
+        if (!strcmp(fd.cFileName, ".") || !strcmp(fd.cFileName, "..")) continue;
+        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) { n++; continue; }
+        _snprintf_s(sub, sizeof sub, _TRUNCATE, "%s\\%s", dir, fd.cFileName);
+        n += count_files(sub);   /* files below, recursively */
+    } while (FindNextFileA(h, &fd));
     FindClose(h);
     return n;
 }
@@ -138,7 +146,7 @@ int main(int argc, char **argv)
         CHECK(stub_has_bundle(hA) && g_stub.blob_created == 2);
         CHECK(modsync_claim_lookup("map-1", claim1, secret1) && strcmp(claim1, st.claim) == 0 && modnet_valid_hash(secret1));
         CHECK(stub_claim_bundles("map-1", claim_again) == 1 && strcmp(claim_again, claim1) == 0);
-        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", storeA, MODSYNC_CLAIMS_FILE);
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\snapmap-plus.json", storeA);
         CHECK(file_contains(path, "\"map-1\"") && file_contains(path, secret1) && file_contains(path, hA));
         /* The secret never reaches the log. */
         CHECK(strstr(g_log, secret1) == NULL);
@@ -191,12 +199,12 @@ int main(int argc, char **argv)
         CHECK(!modsync_upload_bundles(one, 1, "map-3", NULL, &st));
         CHECK(st.code == MODNET_E_UNAVAILABLE && st.queued && strstr(st.cause, "503") != NULL);
         CHECK(modsync_pending_count() == 1);
-        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", storeA, MODSYNC_PENDING_FILE);
-        CHECK(file_contains(path, "\"map-3\"") && file_contains(path, hG) && file_contains(path, "\"attempts\":1"));
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\snapmap-plus.json", storeA);
+        CHECK(file_contains(path, "\"map-3\"") && file_contains(path, hG) && file_contains(path, "\"attempts\": 1"));
         /* A second failure counts the attempt. */
         stub_fail_next("POST /mods/missing", 503);
         CHECK(!modsync_upload_bundles(one, 1, "map-3", NULL, &st) && st.queued);
-        CHECK(file_contains(path, "\"attempts\":2") && modsync_pending_count() == 1);
+        CHECK(file_contains(path, "\"attempts\": 2") && modsync_pending_count() == 1);
     }
     {
         /* A cancelled push is queued too; it never reached the store. */
@@ -251,9 +259,13 @@ int main(int argc, char **argv)
         char cause[SH_MB_CAUSE_MAX];
         CHECK(sh_ms_verify(keyB, &vs, cause, sizeof cause) && vs.files == 2);
         _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s\\bundle.canonical.json", storeB, keyB);
-        CHECK(mt_exists(path));
-        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\blobs", storeB);
+        CHECK(!mt_exists(path));
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s\\mod.json", storeB, keyB);
+        CHECK(mt_exists(path) && file_contains(path, "\"origin\": \"download\""));
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s\\assets", storeB, keyB);
         CHECK(count_files(path) == 2);
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\blobs", storeB);
+        CHECK(!mt_exists(path));
     }
     CHECK(sh_modserve_bundle_state(hB, NULL, 0) == 1);   /* the serving index was rebuilt */
     {
@@ -262,8 +274,9 @@ int main(int argc, char **argv)
         CHECK(g_stub.blob_gets + g_stub.bundle_gets == gets);
     }
     {
-        /* alpha shares a blob with the installed beta: one blob fetched. The
-         * stored body carries "bundle", as the Worker may keep it. */
+        /* alpha shares a file with the installed beta: that one is copied from
+         * beta's folder, one blob fetched. The stored body carries "bundle", as
+         * the Worker may keep it. */
         g_stub.serve_bundle_member = 1;
         CHECK(modsync_fetch_bundle(hA, NULL, &st));
         g_stub.serve_bundle_member = 0;
@@ -279,8 +292,8 @@ int main(int argc, char **argv)
     CHECK(st.code == MODNET_E_HASH && strstr(st.cause, "hash") != NULL);
     {
         sh_ms_list l;
-        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\blobs", storeC);
-        CHECK(count_files(path) == 0);
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\test.gamma", storeC);
+        CHECK(!mt_exists(path));
         CHECK(sh_ms_enumerate(&l) && l.count == 0);
         sh_ms_list_free(&l);
     }

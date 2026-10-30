@@ -5,10 +5,11 @@
  * authored pack carrying both entries unchanged (one at its own path, one
  * renamed under the pack's id) beside one edited file, and a delivered package
  * carrying one of them. After the pass: the authored pack's bundle names two
- * pointers and blobs\ holds only the edited file, the delivered package's
- * legacy bundle names one pointer, each folder's log line and the summary
- * say how many files became pointers and how many bytes were not stored, and
- * the record carries the counts.
+ * pointers and its store folder holds only the edited file, the delivered
+ * package's folder names one pointer, each folder's log line and the summary
+ * say how many files became pointers and how many bytes were not stored, the
+ * record carries the counts, and a rebuild of the migrated folder (an edit
+ * under its assets) keeps the pointers its product block holds without files.
  *
  * Links the real builder, store, legacy converter and bridge; the serving
  * index is the seam stub (mod_seam_stub.c). */
@@ -51,13 +52,19 @@ static unsigned char IMG[400], ANIM[200], EDITED[64];
 static int count_files(const char *dir)
 {
     WIN32_FIND_DATAA fd;
-    char pattern[MAX_PATH * 2];
+    char pattern[MAX_PATH * 2], sub[MAX_PATH * 2];
     HANDLE h;
     int n = 0;
     _snprintf_s(pattern, sizeof pattern, _TRUNCATE, "%s\\*", dir);
     h = FindFirstFileA(pattern, &fd);
     if (h == INVALID_HANDLE_VALUE) return 0;
-    do { if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) n++; } while (FindNextFileA(h, &fd));
+    do {
+        if (!strcmp(fd.cFileName, ".") || !strcmp(fd.cFileName, "..")) continue;
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+            _snprintf_s(sub, sizeof sub, _TRUNCATE, "%s\\%s", dir, fd.cFileName);
+            n += count_files(sub);
+        } else n++;
+    } while (FindNextFileA(h, &fd));
     FindClose(h);
     return n;
 }
@@ -105,9 +112,11 @@ int main(void)
     CHECK(strstr(g_log, "2 file(s), 1 of them stock pointer(s) to installed content, 0 KiB not stored") != NULL);
     CHECK(strstr(g_log, "3 file(s) became stock pointers, 0 KiB not stored") != NULL);
 
-    /* The authored pack's store holds only the edited file. */
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\blobs", mods);
+    /* The authored pack's store folder holds only the edited file. */
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\cyber\\assets", mods);
     CHECK(count_files(path) == 1);
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\blobs", mods);
+    CHECK(GetFileAttributesA(path) == INVALID_FILE_ATTRIBUTES);
     CHECK(sh_ms_enumerate(&l));
     for (i = 0; i < l.count; i++) {
         const sh_mb_bundle *b = &l.items[i].bundle;
@@ -115,7 +124,7 @@ int main(void)
         if (!l.items[i].loaded) continue;
         for (k = 0; k < b->file_count; k++) ptr += b->files[k].stock != 0;
         if (!strcmp(b->id, "local.cyber")) { authored = 1; CHECK(ptr == 2 && b->file_count == 3 && sh_ms_entry_usable(&l.items[i])); }
-        if (!strcmp(b->id, "doors")) { delivered = 1; CHECK(ptr == 1 && b->file_count == 2 && l.items[i].legacy); }
+        if (!strcmp(b->id, "doors")) { delivered = 1; CHECK(ptr == 1 && b->file_count == 2 && l.items[i].delivered); }
     }
     CHECK(authored && delivered);
     sh_ms_list_free(&l);
@@ -127,10 +136,28 @@ int main(void)
     {
         char *record;
         size_t len = 0;
-        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\.migrated.json", mods);
-        record = (char *)sh_mb_read_file(path, 1u << 20, &len);
-        CHECK(record && strstr(record, "\"stockPointers\": 2, \"stockBytes\": 600") && strstr(record, "\"stockPointers\": 1, \"stockBytes\": 200"));
+        (void)len;
+        CHECK(sh_mb_record_get(mods, "migration", &record) == 1);
+        CHECK(record && strstr(record, "\"stockBytes\":600,\"stockPointers\":2") && strstr(record, "\"stockBytes\":200,\"stockPointers\":1"));
         free(record);
+    }
+    {
+        /* The rebuild rule over the migrated folder: the pointers live in its
+         * product block only ("inAssets": false) and survive a rebuild. */
+        sh_ms_sync_stats ss;
+        sh_mb_bundle b;
+        char *text;
+        CHECK(sh_ms_sync(NULL, &ss) && ss.rebuilt == 0 && ss.failed == 0);
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\cyber\\mod.json", mods);
+        text = (char *)sh_mb_read_file(path, 1u << 20, NULL);
+        CHECK(text && strstr(text, "\"inAssets\": false") && strstr(text, "\"origin\": \"migration\""));
+        free(text);
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\cyber", mods);
+        put_rel(path, "assets\\generated\\image\\mods\\local.cyber\\added.bimage", EDITED, sizeof EDITED - 1);
+        CHECK(sh_ms_sync(NULL, &ss) && ss.rebuilt == 1 && ss.failed == 0);
+        if (ss.failed) fprintf(stderr, "%s", g_log);
+        CHECK(sh_mb_load_folder(path, &b) && b.file_count == 4 && b.stock_count == 2 && b.build == 2 && b.legacy);
+        sh_mb_free(&b);
     }
 
     sh_modmigrate_set_data_root(NULL);

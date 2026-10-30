@@ -221,14 +221,18 @@ int main(int argc, char **argv)
     {
         size_t zl = 0, zl2 = 0;
         unsigned char *z = slurp(zip, &zl), *z2;
-        char name[MAX_PATH];
+        char name[MAX_PATH], zkA[SH_MS_KEY_MAX + 1], zkB[SH_MS_KEY_MAX + 1];
+        /* The ZIP keeps its own folder names (id@version+build), whatever the
+         * store folders are called. */
+        _snprintf_s(zkA, sizeof zkA, _TRUNCATE, "%s@%s+1", ra.id, ra.version);
+        _snprintf_s(zkB, sizeof zkB, _TRUNCATE, "%s@%s+1", rb.id, rb.version);
         CHECK(z && zl == st.zip_bytes && z[0] == 'P' && z[1] == 'K');
         /* Each bundle folder as in the store; the shared file only under alpha. */
-        _snprintf_s(name, sizeof name, _TRUNCATE, "mods/%s/bundle.canonical.json", keyA);
+        _snprintf_s(name, sizeof name, _TRUNCATE, "mods/%s/bundle.canonical.json", zkA);
         CHECK(entry_data(z, zl, name) != 0);
-        _snprintf_s(name, sizeof name, _TRUNCATE, "mods/%s/assets/generated/image/mods/test.alpha/shared.bimage", keyA);
+        _snprintf_s(name, sizeof name, _TRUNCATE, "mods/%s/assets/generated/image/mods/test.alpha/shared.bimage", zkA);
         CHECK(entry_data(z, zl, name) != 0);
-        _snprintf_s(name, sizeof name, _TRUNCATE, "mods/%s/assets/generated/image/mods/test.beta/shared.bimage", keyB);
+        _snprintf_s(name, sizeof name, _TRUNCATE, "mods/%s/assets/generated/image/mods/test.beta/shared.bimage", zkB);
         CHECK(entry_data(z, zl, name) == 0);
         CHECK(count_entries_named(z, zl, "/bundle.json") == 2 && count_entries_named(z, zl, "export.json") == 1);
         CHECK(entry_data(z, zl, "map.rawmap.json") != 0);
@@ -239,7 +243,7 @@ int main(int argc, char **argv)
         free(z2);
 
         /* A damaged copy: one byte of a stored asset changed. */
-        _snprintf_s(name, sizeof name, _TRUNCATE, "mods/%s/assets/generated/image/mods/test.beta/b.bimage", keyB);
+        _snprintf_s(name, sizeof name, _TRUNCATE, "mods/%s/assets/generated/image/mods/test.beta/b.bimage", zkB);
         {
             size_t at = entry_data(z, zl, name);
             CHECK(at != 0);

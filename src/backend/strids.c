@@ -561,7 +561,7 @@ static void inject_pairs(const char *buf, size_t length)
 
 /* ------------------------------------------------------------------ bundle layer */
 
-/* bundle.json is validated at this depth by the serving index (modserve.c). */
+/* mod.json is validated at this depth by the serving index (modserve.c). */
 #define STRIDS_BUNDLE_JSON_DEPTH 16u
 
 /* Per-bundle supply lines are written only when this environment variable is

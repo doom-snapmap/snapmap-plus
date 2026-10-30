@@ -606,40 +606,29 @@ int modexport_write(const char *map_json, size_t len, const char *zip_path, mode
         for (k = 0; k < i && !dup; k++) dup = picked[k] == e;
         if (dup) continue;
         me_folder(b, folder, sizeof folder);
-        me_join_native(path, sizeof path, e->folder, "bundle.json");
-        bytes = sh_mb_read_file(path, SH_MB_MANIFEST_MAX + 65536, &blen);
-        if (!bytes) { me_cause(cause, cap, "cannot read %s", path); goto done; }
-        _snprintf_s(name, sizeof name, _TRUNCATE, "%s/bundle.json", folder);
-        me_add(&w, name, bytes, blen);
-        free(bytes);
-        /* The exact text whose SHA-256 is the bundle hash. */
-        me_join_native(path, sizeof path, e->folder, "bundle.canonical.json");
-        bytes = sh_mb_read_file(path, SH_MB_MANIFEST_MAX, &blen);
-        if (bytes) sh_mb_sha256_hex(bytes, blen, actual);
+        /* The ZIP keeps the bundle.json form: both texts are derived from
+         * mod.json in memory; the canonical one is the exact text whose
+         * SHA-256 is the bundle hash. */
+        {
+            char *pretty = sh_mb_bundle_json(b, &blen);
+            if (!pretty) { me_cause(cause, cap, "out of memory"); goto done; }
+            _snprintf_s(name, sizeof name, _TRUNCATE, "%s/bundle.json", folder);
+            me_add(&w, name, pretty, blen);
+            free(pretty);
+        }
         _snprintf_s(name, sizeof name, _TRUNCATE, "%s/bundle.canonical.json", folder);
-        if (bytes && strcmp(actual, b->hash) == 0) me_add(&w, name, bytes, blen);
-        else me_add(&w, name, b->canonical, b->canonical_len);
-        free(bytes);
+        me_add(&w, name, b->canonical, b->canonical_len);
         for (k = 0; k < b->file_count && !w.failed; k++) {
             const sh_mb_file *f = &b->files[k];
-            int pass;
             if (f->stock) continue;   /* installed content: the ZIP carries only the pointer */
             if (me_hset_find(&written, f->blob, 0) >= 0) { st->blobs_deduped++; continue; }
-            bytes = NULL;
-            for (pass = 0; pass < 2 && !bytes; pass++) {
-                if (pass == 0) me_join_native(path, sizeof path, e->folder, f->path);
-                else {
-                    char root[MAX_PATH * 4];
-                    if (!sh_ms_root(root, sizeof root)) break;
-                    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\blobs\\%s", root, f->blob);
-                }
-                bytes = sh_mb_read_file(path, (size_t)SH_MB_MAX_FILE, &blen);
-                if (bytes) {
-                    sh_mb_sha256_hex(bytes, blen, actual);
-                    if (blen != f->size || strcmp(actual, f->blob) != 0) { free(bytes); bytes = NULL; }
-                }
+            me_join_native(path, sizeof path, e->folder, f->path);
+            bytes = sh_mb_read_file(path, (size_t)SH_MB_MAX_FILE, &blen);
+            if (bytes) {
+                sh_mb_sha256_hex(bytes, blen, actual);
+                if (blen != f->size || strcmp(actual, f->blob) != 0) { free(bytes); bytes = NULL; }
             }
-            if (!bytes) { me_cause(cause, cap, "%s %s is missing or damaged (run sh_mods verify)", e->key, f->path); goto done; }
+            if (!bytes) { me_cause(cause, cap, "%s %s is missing or damaged (run sh_mods doctor verify)", e->name, f->path); goto done; }
             _snprintf_s(name, sizeof name, _TRUNCATE, "%s/%s", folder, f->path);
             me_add(&w, name, bytes, blen);
             free(bytes);
@@ -771,7 +760,7 @@ static int me_import_open(me_import *im, const char *zip_path, int manifests, ch
             return me_cause(cause, cap, "%s does not hash to the bundle %.16s it is listed as", name, ib->hash);
         }
         with = me_with_bundle(ib->canonical, ib->len, ib->hash);
-        if (!with || !sh_mb_load_text(with, strlen(with), &ib->b)) {
+        if (!with || !sh_mb_load_manifest_text(with, strlen(with), &ib->b)) {
             free(with);
             me_cause(cause, cap, "%s is not a bundle this release accepts: %s", name, ib->b.first_cause);
             me_import_free(im);

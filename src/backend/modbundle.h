@@ -1,10 +1,44 @@
-/* modbundle.h -- build, validate and read mod bundle manifests (bundle.json).
+/* modbundle.h -- build, validate and read mod bundles (mod.json).
  *
- * A mod is a folder holding one descriptor (mod.json or package.json) and an
- * assets/ tree at exact engine request paths. Building it hashes every file,
- * names what each file provides, scans decl text for what it needs, checks the
- * namespace and structural rules, and produces the canonical manifest whose
- * SHA-256 is the bundle hash.
+ * A mod is a folder holding mod.json (or, before its first build, a
+ * package.json) and an assets/ tree at exact engine request paths. Building it
+ * hashes every file, names what each file provides, scans decl text for what
+ * it needs, checks the namespace and structural rules, and produces the
+ * canonical manifest whose SHA-256 is the bundle hash.
+ *
+ * mod.json (Contract 5) has two blocks in one JSON object. The author block is
+ * every top-level key except "snapmap-plus": id, name, version, author,
+ * homepage, requirements, shadows, stock (pointers the author declares), and
+ * any other key (description, strings, hud, ...), which is kept and becomes
+ * the manifest's "extra". The product block, the member "snapmap-plus", is the
+ * whole built manifest and is written only by the product:
+ *
+ *   "snapmap-plus": {
+ *     "format": 1, "build": 3, "bundle": "<sha256>", "built": <unix seconds>,
+ *     "validated": true, "cause": "<first cause when not validated>",
+ *     "origin": "install" | "download" | "migration" | "delivery",   absent for the author's own folder
+ *     "legacy": {...},                 converted first-generation packages only
+ *     "shadows": ["<request>", ...],
+ *     "files": [{"path", "sha256", "size", "provides": {"type", "name"}, "needs": [...]}],
+ *     "stock": [{"path", "sha256", "source", "provides", "needs", "inAssets": false}]
+ *   }
+ *
+ * Writing the block never touches the author block: the file is spliced. The
+ * old block member is cut out (from the end of the member before it to the
+ * end of its value), and the new one is inserted after the last author member
+ * as ",\n\n  \"snapmap-plus\": {...}" (CRLF when the file uses CRLF). Cutting
+ * the block out of any written file therefore gives back the author's bytes
+ * exactly (sh_mb_author_bytes). A file without an author text (a download, a
+ * store upgrade of a laid-out folder) gets a synthesized author block. A
+ * "legacy" object and its grandfathered "shadows" in the product block are
+ * build inputs as if the author had written them (a converted package keeps
+ * its own author keys). A stock pointer with "inAssets": false has no file
+ * under assets/ (product-created folders never hold pointer bytes); a rebuild
+ * keeps it from the block.
+ *
+ * The canonical manifest (below) is derived in memory, never stored: it is
+ * the text uploaded to the store and the input of the bundle hash, unchanged
+ * from Contract 1.
  *
  * Canonical manifest: UTF-8 JSON, object keys sorted by their UTF-8 bytes, no
  * whitespace, files sorted by path, "bundle" omitted. Strings escape only '"',
@@ -67,6 +101,14 @@
 #define SH_MB_MANIFEST_MAX    (1024u * 1024u)   /* the store's bundle JSON cap */
 #define SH_MB_CAUSE_MAX       512u
 #define SH_MB_HASH_HEX        64u
+#define SH_MB_BLOCK_KEY       "snapmap-plus"   /* mod.json's product block */
+/* Product block "origin": the product created the folder (a copy it may
+ * delete on Remove). A folder without one is the author's (Remove keeps its
+ * files, moved to removed-mods). */
+#define SH_MB_ORIGIN_INSTALL   "install"        /* copied in by Install folder or sh_mods install */
+#define SH_MB_ORIGIN_DOWNLOAD  "download"       /* fetched from the mod store or a rawmap export */
+#define SH_MB_ORIGIN_MIGRATION "migration"      /* converted from the retired overrides folder */
+#define SH_MB_ORIGIN_DELIVERY  "delivery"       /* converted from a package a map delivered */
 
 typedef struct sh_mb_need {
     char *type;            /* engine spelling: md6Def, baseModel, anim, material, ... */
@@ -89,6 +131,7 @@ typedef struct sh_mb_file {
     char *stock_source;    /* the installed resource path a stock pointer names */
     int deferred;          /* builder: 1 type not allowed, 2 over 64 MiB, refused unless it is a pointer */
     int declared;          /* builder: named by the descriptor's stock object */
+    int absent;            /* a stock pointer with no file under assets/ ("inAssets": false) */
 } sh_mb_file;
 
 /* A pointer an author wrote in the descriptor's "stock" object. */
@@ -122,9 +165,15 @@ typedef struct sh_mb_bundle {
     char *canonical;       /* canonical manifest text (NUL-terminated) */
     size_t canonical_len;
     char  hash[SH_MB_HASH_HEX + 1];   /* SHA-256 of canonical */
-    char  descriptor[16];  /* "mod.json", "package.json" or "bundle.json" */
-    int   legacy;          /* the descriptor (or bundle.json extra) carries a "legacy" object:
+    char  descriptor[16];  /* "mod.json", "package.json" or "bundle.json" (a manifest text) */
+    int   legacy;          /* the descriptor (or the manifest's extra) carries a "legacy" object:
                               shadows need not be stock and unresolved needs only warn */
+    int   block_legacy;    /* that object came from mod.json's product block, not the author block */
+    int   delivered;       /* "legacy" without "source": "overrides" (the retired package folder): delivered by a map */
+    long long built;       /* product block "built": when this bundle was first written in its folder */
+    int   validated;       /* product block "validated" (1 after a build without errors) */
+    char  state_cause[SH_MB_CAUSE_MAX];   /* product block "cause" when not validated */
+    char  origin[16];      /* product block "origin": SH_MB_ORIGIN_*, "" for a folder the author made */
     sh_mb_need_stats needs;
     unsigned errors, warnings;
     char  first_cause[SH_MB_CAUSE_MAX];
@@ -187,25 +236,92 @@ int  sh_mb_check_source(const char *source, char *cause, size_t cause_cap);
 /* Build the bundle for `folder` (UTF-8 path). Returns 1 when the bundle has no
  * errors, 0 otherwise; out->first_cause and out->errors describe the refusal.
  * out is always initialised and must be released with sh_mb_free. Nothing is
- * written to disk. The build number comes from the folder's previous
- * bundle.json: kept when the content (without build and bundle) is unchanged,
- * previous + 1 when it changed, 1 when there is none. */
+ * written to disk. The build number comes from the folder's previous product
+ * block: kept when the content (without build and bundle) is unchanged,
+ * previous + 1 when it changed, 1 when there is none; "built" is kept while
+ * the bundle hash is unchanged. */
 int  sh_mb_build(const char *folder, const sh_mb_resolver *resolver, sh_mb_bundle *out);
 
-/* Write `<folder>\bundle.json` (pretty-printed, with "bundle") and
- * `<folder>\bundle.canonical.json` (the exact canonical bytes, without
- * "bundle", whose SHA-256 is the bundle hash: the body the store receives).
- * Refuses a bundle with errors. Returns 1 on success. */
+/* Write `<folder>\mod.json`: the author block (the folder's mod.json without
+ * its product block, else its package.json, which is then deleted, else a
+ * synthesized one) and the product block from `bundle`, including its
+ * validated, cause and built fields. A pointer whose file is absent from
+ * `<folder>\assets\` is written "inAssets": false. Write-through temporary
+ * and rename. Refuses a bundle with errors. Returns 1 on success. */
 int  sh_mb_write(const sh_mb_bundle *bundle, const char *folder, char *cause, size_t cause_cap);
 
-/* The pretty-printed bundle.json text (malloc'd, NUL-terminated), or NULL. */
+/* Give a built bundle another build number and recompute its canonical text
+ * and hash (an install continuing the counter of the copy it replaces). */
+void sh_mb_renumber(sh_mb_bundle *bundle, unsigned long long build);
+
+/* Record a verification result in `<folder>\mod.json`'s product block
+ * (validated, cause) without changing anything else. Returns 1 on success. */
+int  sh_mb_set_state(const char *folder, int validated, const char *cause, char *why, size_t why_cap);
+
+/* The complete mod.json text for `bundle` (malloc'd), splicing the product
+ * block into `author_text` (a mod.json or package.json text, its own block
+ * ignored) or, when author_text is NULL, into a synthesized author block. */
+char *sh_mb_modjson_text(const sh_mb_bundle *bundle, const char *author_text, size_t author_len, size_t *out_len);
+
+/* The author's bytes of a mod.json text: the text without its "snapmap-plus"
+ * member (malloc'd). *had_block (optional) says whether there was one.
+ * NULL when the text is not a JSON object. */
+char *sh_mb_author_bytes(const char *text, size_t len, size_t *out_len, int *had_block);
+
+/* The bundle.json form (pretty-printed, with "bundle"): what a rawmap export
+ * ZIP carries (malloc'd, NUL-terminated), or NULL. */
 char *sh_mb_bundle_json(const sh_mb_bundle *bundle, size_t *out_len);
 
-/* Read and check a bundle.json: structure, id, version, paths, logical names
- * and the bundle hash recomputed from the canonical form. Files on disk are not
- * read. Returns 1 when valid. */
-int  sh_mb_load(const char *bundle_json_path, sh_mb_bundle *out);
+/* Read and check a built mod.json: the author block, the product block,
+ * structure, id, version, paths, logical names and the bundle hash recomputed
+ * from the canonical form. Files on disk are not read. Returns 1 when valid;
+ * a mod.json without a product block fails with "not built yet". */
+int  sh_mb_load(const char *mod_json_path, sh_mb_bundle *out);
 int  sh_mb_load_text(const char *text, size_t len, sh_mb_bundle *out);
+/* `<folder>\mod.json`. */
+int  sh_mb_load_folder(const char *folder, sh_mb_bundle *out);
+
+/* Read and check a manifest in the bundle.json form (Contract 1, with
+ * "bundle"): a download, a rawmap ZIP, a folder of the retired layout. */
+int  sh_mb_load_manifest_text(const char *text, size_t len, sh_mb_bundle *out);
+
+/* Tree hash of a mod folder, the rebuild rule's key: SHA-256 over the
+ * author's bytes of mod.json (else package.json), then every file under
+ * assets/ sorted by path with its size and last-write time. Cheap: no file is
+ * read. Returns 1 and the hex. */
+int  sh_mb_tree_hash(const char *folder, char out[SH_MB_HASH_HEX + 1]);
+
+/* What a bundle serves, independent of its label: SHA-256 over id,
+ * requirements, shadows, extra without "legacy", and every file's request,
+ * kind, hash and size. Two bundles with one key serve the same bytes under
+ * the same names. */
+void sh_mb_content_key(const sh_mb_bundle *bundle, char out[SH_MB_HASH_HEX + 1]);
+
+/* A folder name under `mods_root` for a product-created folder of this
+ * bundle: "<id>", else "<id>@<version>", else "<id>@<version>-<hash 8>", else
+ * "<id>@<version>-<hash 16>". Returns 1 with a free name, 2 when that folder
+ * already holds this bundle hash, 0 when none is available. */
+int  sh_mb_folder_name(const char *mods_root, const char *id, const char *version, const char *hash,
+                       char *out, size_t cap);
+
+/* ------------------------------------------------- the product record ---- */
+/* <mods_root>\snapmap-plus.json, the product's one file under mods\:
+ *   {"format": 1, "claims": {...}, "links": {...}, "pending": {...},
+ *    "migration": {...}, "cache": {"<tree hash>": "<bundle hash>"},
+ *    "aliases": {"<bundle hash>": "<bundle hash>"}}
+ * Each section is owned by one module and read and written whole. Writes are
+ * a read, a replace of that section and a write-through rename, under one
+ * recursive lock (sh_mb_record_lock) that a caller may also hold around its
+ * own read-modify-write. An unreadable file is moved aside, logged, and a new
+ * one started. */
+#define SH_MB_RECORD_FILE "snapmap-plus.json"
+void sh_mb_record_lock(void);
+void sh_mb_record_unlock(void);
+/* 1 with the section's JSON text (malloc'd, compact), 0 when absent, -1 when
+ * the record cannot be read. */
+int  sh_mb_record_get(const char *mods_root, const char *section, char **json_out);
+/* Replace (json != NULL) or remove (NULL) one section. 1 on success. */
+int  sh_mb_record_put(const char *mods_root, const char *section, const char *json);
 
 void sh_mb_free(sh_mb_bundle *bundle);
 
@@ -331,8 +447,8 @@ void sh_mb_sha256_hex(const void *data, size_t len, char out[SH_MB_HASH_HEX + 1]
 int  sh_mb_sha256_file(const char *path, unsigned long long *size,
                        char out[SH_MB_HASH_HEX + 1]);
 
-/* Install state file (.state.json) text: {"firstCause","installedAt","validated"}. */
-char *sh_mb_state_format(int validated, const char *first_cause, long long installed_at);
+/* The retired install state file (.state.json) of the old layout, for the
+ * store upgrade: {"firstCause","installedAt","validated"}. */
 int  sh_mb_state_parse(const char *text, size_t len, int *validated,
                        long long *installed_at, char *cause, size_t cause_cap);
 

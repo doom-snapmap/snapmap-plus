@@ -1,6 +1,7 @@
 /* modbundle_test.c -- mod bundle builder: hashes, canonical manifest, logical
- * names, decl needs, validation refusals, render-program checks and build
- * numbering.
+ * names, decl needs, validation refusals, render-program checks, build
+ * numbering, mod.json (the author block kept byte for byte, the product
+ * block), the tree hash of the rebuild rule and the product record.
  *
  *   modbundle_test.exe <tests\fixtures\mods\alex.r2-imp> [--write-golden]
  */
@@ -245,7 +246,7 @@ static void test_fixture(const char *fixture, const char *tmp, int write_golden)
     sh_mb_bundle b, again;
     char folder[MAX_PATH], path[MAX_PATH], cause[512];
     const sh_mb_file *f;
-    size_t i, len = 0;
+    size_t i, len = 0, blen_unused = 0;
     unsigned char *text;
 
     CHECK(sh_mb_build(fixture, &RESOLVER, &b));
@@ -339,34 +340,75 @@ static void test_fixture(const char *fixture, const char *tmp, int write_golden)
     CHECK(!strcmp(again.hash, b.hash) && !strcmp(again.descriptor, "package.json"));
     sh_mb_free(&again);
 
-    /* Write, then read back: the manifest and the canonical bytes. */
+    /* Write, then read back: package.json becomes mod.json, its bytes the
+     * author block, and the canonical text derived from mod.json is the
+     * golden one: what the Worker receives does not change. */
     CHECK(sh_mb_write(&b, folder, cause, sizeof cause));
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\bundle.json", folder);
+    CHECK(!mt_has(folder, "package.json") && mt_has(folder, "mod.json"));
+    CHECK(!mt_has(folder, "bundle.json") && !mt_has(folder, "bundle.canonical.json") && !mt_has(folder, ".state.json"));
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\mod.json", folder);
     CHECK(sh_mb_load(path, &again));
     if (again.errors) fprintf(stderr, "  reload: %s\n", again.first_cause);
-    CHECK(!strcmp(again.hash, b.hash) && again.file_count == b.file_count && again.build == 1);
+    CHECK(!strcmp(again.hash, b.hash) && again.file_count == b.file_count && again.build == 1 && again.validated);
     CHECK(again.canonical_len == b.canonical_len && !memcmp(again.canonical, b.canonical, b.canonical_len));
+    if (!write_golden) {
+        /* The text the Worker receives for this unchanged mod, derived from
+         * mod.json, is the golden text of the bundle.json era, byte for byte. */
+        char golden_path[MAX_PATH];
+        size_t glen = 0;
+        unsigned char *golden;
+        _snprintf_s(golden_path, sizeof golden_path, _TRUNCATE, "%s.canonical.json", fixture);
+        golden = sh_mb_read_file(golden_path, 1 << 20, &glen);
+        CHECK(golden && glen == again.canonical_len && !memcmp(golden, again.canonical, glen));
+        CHECK(!strcmp(again.hash, GOLDEN_HASH));
+        free(golden);
+    }
     sh_mb_free(&again);
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\bundle.canonical.json", folder);
     text = sh_mb_read_file(path, 1 << 20, &len);
-    CHECK(text && len == b.canonical_len && !memcmp(text, b.canonical, len));
+    {
+        char *own = text ? sh_mb_author_bytes((const char *)text, len, &blen_unused, NULL) : NULL;
+        static const char pkg[] = "{\"id\":\"alex.r2-imp\",\"version\":\"1.0.0\",\"name\":\"R2 Imp copy\",\"author\":\"alex\","
+                                  "\"strings\":{\"english\":{\"#str_mod_alex_r2_imp\":\"Imp copy\"}}}";
+        CHECK(own && blen_unused == sizeof pkg - 1 && !memcmp(own, pkg, sizeof pkg - 1));
+        CHECK(text && strstr((const char *)text, "\"snapmap-plus\": {") && strstr((const char *)text, "\"sha256\": \""));
+        free(own);
+    }
     free(text);
 
-    /* A tampered manifest is refused. */
+    /* A tampered product block is refused. */
+    {
+        size_t mlen = 0;
+        unsigned char *mod = sh_mb_read_file(path, 1 << 20, &mlen);
+        char *at = mod ? strstr((char *)mod, "\"size\": 3001") : NULL;
+        CHECK(at != NULL);
+        if (at) {
+            at[9] = '2';
+            CHECK(!sh_mb_load_text((const char *)mod, mlen, &again));
+            CHECK_CAUSE(again, "changed since it was built");
+            sh_mb_free(&again);
+        }
+        free(mod);
+    }
+
+    /* The bundle.json form (a rawmap ZIP, a download) loads back to the same
+     * canonical text; a tampered one is refused. */
     {
         size_t blen = 0;
         char *pretty = sh_mb_bundle_json(&b, &blen), *at;
         CHECK(pretty != NULL);
         if (pretty) {
+            CHECK(sh_mb_load_manifest_text(pretty, blen, &again));
+            CHECK(again.canonical_len == b.canonical_len && !memcmp(again.canonical, b.canonical, b.canonical_len));
+            sh_mb_free(&again);
             at = strstr(pretty, "\"size\": 3001");
             CHECK(at != NULL);
             if (at) at[9] = '2';
-            CHECK(!sh_mb_load_text(pretty, blen, &again));
+            CHECK(!sh_mb_load_manifest_text(pretty, blen, &again));
             CHECK_CAUSE(again, "does not match its bundle hash");
             sh_mb_free(&again);
             at = strstr(pretty, "\"path\": \"assets/");
             if (at) memcpy(at + 9, "assets/../", 10);
-            CHECK(!sh_mb_load_text(pretty, blen, &again));
+            CHECK(!sh_mb_load_manifest_text(pretty, blen, &again));
             CHECK(again.errors > 0);
             sh_mb_free(&again);
             free(pretty);
@@ -395,11 +437,174 @@ static void test_build_numbers(const char *fixture, const char *tmp)
     sh_mb_free(&b);
     CHECK(sh_mb_build(folder, &RESOLVER, &b) && b.build == 2);
     sh_mb_free(&b);
-    /* A version change is content too. */
-    mt_write(folder, "mod.json", "{\"id\":\"alex.r2-imp\",\"name\":\"R2 Imp copy\",\"author\":\"alex\","
-                                 "\"strings\":{\"english\":{\"#str_mod_alex_r2_imp\":\"Imp copy\"}}}");
+    /* A version change is content too: the author edits mod.json, which
+     * keeps its product block (the counter's memory). */
+    {
+        char path[MAX_PATH];
+        size_t len = 0;
+        char *text, *at;
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\mod.json", folder);
+        text = (char *)sh_mb_read_file(path, 1 << 20, &len);
+        at = text ? strstr(text, "\"version\": \"1.0.0\",") : NULL;
+        CHECK(at != NULL);
+        if (at) {
+            memmove(at, at + 19, strlen(at + 19) + 1);
+            mt_write(folder, "mod.json", text);
+        }
+        free(text);
+    }
     CHECK(sh_mb_build(folder, &RESOLVER, &b) && b.build == 3 && !strcmp(b.version, "0.0.0"));
+    if (b.build != 3) fprintf(stderr, "  build %llu errors %u: %s\n", b.build, b.errors, b.first_cause);
     sh_mb_free(&b);
+    /* A mod.json replaced without its product block starts counting again. */
+    mt_write(folder, "mod.json", "{\"id\":\"alex.r2-imp\",\"name\":\"R2 Imp copy\",\"author\":\"alex\"}");
+    CHECK(sh_mb_build(folder, &RESOLVER, &b) && b.build == 1);
+    sh_mb_free(&b);
+}
+
+/* mod.json: the author block is kept byte for byte (any formatting, unknown
+ * keys, CRLF), a rebuild of unchanged content rewrites nothing, and a
+ * download's manifest gets an author block that reproduces its hash. */
+static void test_modjson(const char *fixture, const char *tmp)
+{
+    static const char author[] =
+        "\xef\xbb\xbf{\r\n\t\"name\" :  \"R2 Imp copy\",\r\n\t\"id\":\"alex.r2-imp\", \"version\": \"1.0.0\",\r\n"
+        "\t\"author\": \"alex\",\r\n\t\"strings\": {\"english\": {\"#str_mod_alex_r2_imp\": \"Imp copy\"}},\r\n"
+        "\t\"x-notes\": [1, 2, {\"kept\": true}]   \r\n}\r\n";
+    sh_mb_bundle b, again;
+    char folder[MAX_PATH], path[MAX_PATH], cause[512], tree1[65], tree2[65];
+    unsigned char *first, *second;
+    size_t n1 = 0, n2 = 0, own_len = 0;
+    char *own;
+    int had = 0;
+    _snprintf_s(folder, sizeof folder, _TRUNCATE, "%s\\authored", tmp);
+    CHECK(mt_copy_tree(fixture, folder));
+    mt_write(folder, "mod.json", author);
+    CHECK(sh_mb_tree_hash(folder, tree1));
+    CHECK(sh_mb_build(folder, &RESOLVER, &b));
+    CHECK(sh_mb_write(&b, folder, cause, sizeof cause));
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\mod.json", folder);
+    first = sh_mb_read_file(path, 1 << 20, &n1);
+    own = first ? sh_mb_author_bytes((const char *)first, n1, &own_len, &had) : NULL;
+    CHECK(had && own && own_len == sizeof author - 1 && !memcmp(own, author, sizeof author - 1));
+    free(own);
+    /* CRLF in, CRLF out; the block follows the last author member. */
+    CHECK(first && strstr((const char *)first, "\"x-notes\": [1, 2, {\"kept\": true}],\r\n\r\n  \"snapmap-plus\": {\r\n    \"format\": 1,"));
+    /* The unknown key travels in the manifest's extra; the hash is the one
+     * the same content had without it, plus that key. */
+    CHECK(b.extra && strstr(b.extra, "\"x-notes\":[1,2,{\"kept\":true}]"));
+    /* The tree hash does not see the product block. */
+    CHECK(sh_mb_tree_hash(folder, tree2) && !strcmp(tree1, tree2));
+    CHECK(sh_mb_load(path, &again) && !strcmp(again.hash, b.hash) && again.build == 1);
+    sh_mb_free(&again);
+    /* An unchanged rebuild writes the same bytes (build and built kept). */
+    sh_mb_free(&b);
+    CHECK(sh_mb_build(folder, &RESOLVER, &b) && b.build == 1);
+    CHECK(sh_mb_write(&b, folder, cause, sizeof cause));
+    second = sh_mb_read_file(path, 1 << 20, &n2);
+    CHECK(first && second && n1 == n2 && !memcmp(first, second, n1));
+    free(second);
+    /* The state is recorded in the block only. */
+    CHECK(sh_mb_set_state(folder, 0, "a file was edited", cause, sizeof cause));
+    CHECK(sh_mb_load(path, &again) && !again.validated && !strcmp(again.state_cause, "a file was edited"));
+    sh_mb_free(&again);
+    second = sh_mb_read_file(path, 1 << 20, &n2);
+    own = second ? sh_mb_author_bytes((const char *)second, n2, &own_len, NULL) : NULL;
+    CHECK(own && own_len == sizeof author - 1 && !memcmp(own, author, sizeof author - 1));
+    CHECK(second && strstr((const char *)second, "\"validated\": false,\r\n    \"cause\": \"a file was edited\""));
+    free(own);
+    free(second);
+    CHECK(sh_mb_set_state(folder, 1, "", cause, sizeof cause));
+    /* Editing the author block changes the tree hash; the old block no longer loads. */
+    mt_write(folder, "mod.json", "{\"id\":\"alex.r2-imp\",\"version\":\"1.0.1\",\"name\":\"R2 Imp copy\"}");
+    CHECK(sh_mb_tree_hash(folder, tree2) && strcmp(tree1, tree2));
+    /* Touching a file under assets changes it too. */
+    mt_write(folder, "mod.json", author);
+    mt_append(folder, "assets\\generated\\decls\\entitydef\\mods\\alex.r2-imp\\imp_copy.decl", "\r\n");
+    CHECK(sh_mb_tree_hash(folder, tree2) && strcmp(tree1, tree2));
+    free(first);
+
+    /* A manifest alone (a download) gets a synthesized author block; the
+     * written mod.json reloads with the manifest's hash. */
+    {
+        size_t blen = 0, tlen = 0;
+        char *pretty = sh_mb_bundle_json(&b, &blen), *modtext;
+        sh_mb_bundle m;
+        CHECK(pretty && sh_mb_load_manifest_text(pretty, blen, &m));
+        modtext = sh_mb_modjson_text(&m, NULL, 0, &tlen);
+        CHECK(modtext && sh_mb_load_text(modtext, tlen, &again));
+        if (again.errors) fprintf(stderr, "  synthesized: %s\n", again.first_cause);
+        CHECK(!strcmp(again.hash, b.hash) && again.canonical_len == b.canonical_len &&
+              !memcmp(again.canonical, b.canonical, b.canonical_len));
+        sh_mb_free(&again);
+        sh_mb_free(&m);
+        free(modtext);
+        free(pretty);
+    }
+    sh_mb_free(&b);
+}
+
+/* A converted package: its legacy record and grandfathered shadows live in
+ * the product block, are build inputs, survive a rebuild and keep the hash. */
+static void test_block_legacy(const char *fixture, const char *tmp)
+{
+    sh_mb_bundle b, again;
+    char folder[MAX_PATH], cause[512], hash1[65];
+    _snprintf_s(folder, sizeof folder, _TRUNCATE, "%s\\converted", tmp);
+    CHECK(mt_copy_tree(fixture, folder));
+    mt_write(folder, "assets\\generated\\decls\\entitydef\\smp\\oldthing.decl", "{\r\n}");
+    mt_write(folder, "mod.json", "{\"id\":\"alex.r2-imp\",\"version\":\"1.0.0\",\"name\":\"R2 Imp copy\",\"description\":\"old pack\","
+                                 "\"snapmap-plus\":{\"origin\":\"migration\",\"legacy\":{\"source\":\"overrides\",\"folder\":\"r2\"},"
+                                 "\"shadows\":[\"generated/decls/entitydef/smp/oldthing.decl\"]}}");
+    CHECK(sh_mb_build(folder, &RESOLVER, &b));
+    if (b.errors) fprintf(stderr, "  converted: %s\n", b.first_cause);
+    CHECK(b.legacy && b.block_legacy && !b.delivered && b.shadow_count == 1 && !strcmp(b.origin, "migration"));
+    CHECK(b.extra && strstr(b.extra, "\"legacy\":{\"folder\":\"r2\",\"source\":\"overrides\"}"));
+    CHECK(sh_mb_write(&b, folder, cause, sizeof cause));
+    strcpy_s(hash1, sizeof hash1, b.hash);
+    sh_mb_free(&b);
+    CHECK(sh_mb_load_folder(folder, &again) && !strcmp(again.hash, hash1) && again.legacy && !strcmp(again.origin, "migration"));
+    sh_mb_free(&again);
+    CHECK(sh_mb_build(folder, &RESOLVER, &b) && !strcmp(b.hash, hash1) && b.build == 1 && b.shadow_count == 1);
+    sh_mb_free(&b);
+}
+
+/* The product record: sections replaced and removed one at a time, others
+ * kept; an unreadable record is moved aside, not lost. */
+static void test_record(const char *tmp)
+{
+    char root[MAX_PATH], *text = NULL, path[MAX_PATH];
+    _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\recordmods", tmp);
+    CHECK(sh_mb_record_get(root, "claims", &text) == 0 && !text);
+    CHECK(sh_mb_record_put(root, "claims", "{\"map-1\":{\"claim\":\"c1\",\"secret\":\"s1\"}}"));
+    CHECK(sh_mb_record_put(root, "cache", "{\"aa\":\"bb\"}"));
+    CHECK(sh_mb_record_put(root, "claims", "{\"map-2\":{\"claim\":\"c2\"}}"));
+    CHECK(sh_mb_record_get(root, "claims", &text) == 1 && text && !strcmp(text, "{\"map-2\":{\"claim\":\"c2\"}}"));
+    free(text);
+    CHECK(sh_mb_record_get(root, "cache", &text) == 1 && text && !strcmp(text, "{\"aa\":\"bb\"}"));
+    free(text);
+    CHECK(sh_mb_record_put(root, "cache", NULL));
+    CHECK(sh_mb_record_get(root, "cache", &text) == 0);
+    free(text);
+    CHECK(!sh_mb_record_put(root, "format", "2") && !sh_mb_record_put(root, "links", "{not json"));
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\snapmap-plus.json", root);
+    text = (char *)sh_mb_read_file(path, 1 << 20, NULL);
+    CHECK(text && !strncmp(text, "{\n  \"format\": 1,\n  \"claims\": {", 30));
+    free(text);
+    mt_write(root, "snapmap-plus.json", "{broken");
+    CHECK(sh_mb_record_get(root, "claims", &text) == -1);
+    CHECK(sh_mb_record_put(root, "links", "{}"));
+    CHECK(sh_mb_record_get(root, "links", &text) == 1);
+    free(text);
+    {
+        WIN32_FIND_DATAA fd;
+        char pattern[MAX_PATH];
+        HANDLE h;
+        _snprintf_s(pattern, sizeof pattern, _TRUNCATE, "%s\\snapmap-plus.json.unreadable-*", root);
+        h = FindFirstFileA(pattern, &fd);
+        CHECK(h != INVALID_HANDLE_VALUE);
+        if (h != INVALID_HANDLE_VALUE) FindClose(h);
+    }
 }
 
 /* Apply one change to a fresh copy and expect a refusal naming `needle`. */
@@ -795,10 +1000,14 @@ int main(int argc, char **argv)
     test_scan();
     test_fixture(full, tmp, write_golden);
     test_build_numbers(full, tmp);
+    test_modjson(full, tmp);
+    test_block_legacy(full, tmp);
+    test_record(tmp);
     test_refusals(full, tmp);
     test_renderprogs(tmp);
     mt_remove_tree(tmp);
     if (failures) { fprintf(stderr, "modbundle_test: %d failure(s)\n", failures); return 1; }
-    printf("modbundle_test: hashes, canonical form, logical names, needs, %d refusal/acceptance cases and build numbers pass\n", g_case);
+    printf("modbundle_test: hashes, canonical form, logical names, needs, %d refusal/acceptance cases, build numbers, "
+           "mod.json round trip, tree hash and product record pass\n", g_case);
     return 0;
 }

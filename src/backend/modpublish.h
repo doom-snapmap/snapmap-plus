@@ -43,7 +43,7 @@
  *                 item is no longer published: the engine keeps no link from
  *                 a saved map to its published items, so the feed post
  *                 records one (item -> cloud-saved item id and local id, in
- *                 mods\publish-links.json); at delete, the linked items with
+ *                 the "links" section of mods\snapmap-plus.json); at delete, the linked items with
  *                 a stored claim are checked against the engine's own query
  *                 of the items published from that cloud-saved item, and
  *                 only an item missing from a successful answer is
@@ -73,7 +73,7 @@ extern "C" {
 /* The search tag a publish with mods carries. */
 #define SH_MODPUBLISH_TAG "mods"
 /* Item -> saved-map links written at the feed post, in the store root. */
-#define SH_MODPUBLISH_LINKS_FILE "publish-links.json"
+#define SH_MODPUBLISH_LINKS_SECTION "links"   /* the section of mods\snapmap-plus.json */
 /* A delete check waits this long for the engine's published-items answer. */
 #define SH_MODPUBLISH_DELETE_CHECK_MS 60000ull
 

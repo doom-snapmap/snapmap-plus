@@ -106,7 +106,7 @@ static int mc_resolve_folder(const char *arg, char *out, size_t cap)
     return 1;
 }
 
-/* The serving index reads bundle.json at boot and on rescan only, so a bundle
+/* The serving index reads mod.json at boot and on rescan only, so a bundle
  * written or installed now is invisible until the table is rebuilt. */
 static void mc_rescan(const char *why)
 {
@@ -168,8 +168,11 @@ static void mc_build(const char *folder)
     if (!sh_mb_write(&b, folder, cause, sizeof cause))
         mc_line("MODS: build %s: valid but not written: %s", folder, cause);
     else {
-        mc_line("MODS: build %s: bundle %s written to bundle.json", folder, b.hash);
-        if (mc_in_store(folder)) mc_rescan("build");
+        mc_line("MODS: build %s: bundle %s written to mod.json's \"snapmap-plus\" block", folder, b.hash);
+        if (mc_in_store(folder)) {
+            sh_ms_cache_note(folder, b.hash);
+            mc_rescan("build");
+        }
     }
     sh_mb_free(&b);
     sh_ms_list_free(&list);
@@ -181,7 +184,7 @@ static void mc_install(const char *folder)
     sh_ms_install_stats st;
     sh_mb_bundle b;
     mc_stock stock = { 0, 0 };
-    char key[SH_MS_KEY_MAX + 1], cause[SH_MB_CAUSE_MAX];
+    char key[SH_MS_NAME_MAX + 1], cause[SH_MB_CAUSE_MAX];
     int ok;
     mc_line("MODS: install %s: building", folder);
     r.installed = NULL;
@@ -191,22 +194,35 @@ static void mc_install(const char *folder)
     ok = sh_ms_install_from_folder(folder, &r, key, sizeof key, &st, &b, cause, sizeof cause);
     if (b.id[0]) {
         mc_line("MODS: install %s: %s@%s+%llu from %s, %zu file(s), %llu byte(s)%s", folder, b.id, b.version, b.build,
-                b.descriptor, b.file_count, b.total_size, b.errors ? "" : ", bundle.json written");
+                b.descriptor, b.file_count, b.total_size, b.errors ? "" : ", mod.json written");
         mc_needs_line("install", &b);
     }
     if (b.id[0]) mc_stock_line("install", folder, &b);
-    if (st.blobs_written || st.blobs_reused)
-        mc_line("MODS: install %s: blobs written %u, already stored %u", folder, st.blobs_written, st.blobs_reused);
-    if (st.linked || st.copied)
-        mc_line("MODS: install %s: tree laid out, %u hard link(s), %u copie(s)%s", folder, st.linked, st.copied,
+    if (st.copied)
+        mc_line("MODS: install %s: %u file(s) copied into the store%s", folder, st.copied,
                 st.replaced ? ", replacing the earlier build" : "");
     if (st.in_place && ok) mc_line("MODS: install %s: already in the store; built in place", folder);
     if (!ok) mc_line("MODS: install %s: refused: %s", folder, cause);
     else {
-        mc_line("MODS: install %s: installed and verified as %s (bundle %s)", folder, key, b.hash);
+        mc_line("MODS: install %s: installed and verified as mods\\%s (bundle %s)", folder, key, b.hash);
         mc_rescan("install");
     }
     sh_mb_free(&b);
+}
+
+/* The rebuild rule (modstore.h): every folder whose tree changed since its
+ * last build is built again, with the game's resource reader. */
+static void mc_sync(void)
+{
+    sh_ms_sync_stats st;
+    sh_mb_resolver r;
+    mc_stock stock = { 0, 0 };
+    r.installed = NULL;
+    r.installed_context = NULL;
+    r.stock = mc_stock_exists;
+    r.stock_context = &stock;
+    if (!sh_ms_sync(&r, &st)) { mc_line("MODS: rescan: the store cannot be read"); return; }
+    mc_line("MODS: rescan: %u folder(s) checked, %u built again, %u refused (%llu ms)", st.folders, st.rebuilt, st.failed, st.ms);
 }
 
 static void mc_list(void)
@@ -216,17 +232,16 @@ static void mc_list(void)
     size_t i;
     if (!sh_ms_root(root, sizeof root)) { mc_line("MODS: list: the store folder cannot be resolved"); return; }
     if (!sh_ms_enumerate(&list)) { mc_line("MODS: list: %s cannot be read", root); return; }
-    mc_line("MODS: list: %zu bundle folder(s) under %s", list.count, root);
+    mc_line("MODS: list: %zu mod folder(s) under %s", list.count, root);
     for (i = 0; i < list.count; i++) {
         const sh_ms_entry *e = &list.items[i];
-        const char *state = sh_ms_entry_usable(e) ? (e->has_state ? "verified" : "built, not installed")
-                                                  : "unavailable";
+        const char *state = sh_ms_entry_usable(e) ? "installed" : "needs attention";
         if (e->loaded)
-            mc_line("MODS: list: %s%s  %.16s  %zu file(s)  %llu byte(s)  %s%s%s", e->legacy ? "legacy " : "", e->key,
-                    e->bundle.hash, e->bundle.file_count, e->bundle.total_size, state,
-                    e->cause[0] ? ": " : "", e->cause);
+            mc_line("MODS: list: mods\\%s  %s%s  %.16s  %zu file(s)  %llu byte(s)  %s%s%s", e->name, e->key,
+                    e->delivered ? " (delivered by a map)" : "", e->bundle.hash, e->bundle.file_count,
+                    e->bundle.total_size, state, e->cause[0] ? ": " : "", e->cause);
         else
-            mc_line("MODS: list: %s%s  %s: %s", e->legacy ? "legacy " : "", e->key, state, e->cause);
+            mc_line("MODS: list: mods\\%s  %s: %s", e->name, state, e->cause);
     }
     sh_ms_list_free(&list);
 }
@@ -291,8 +306,8 @@ static void mc_verify(const char *key)
     int ok;
     mc_line("MODS: verify %s: rehashing", key);
     ok = sh_ms_verify(key, &st, cause, sizeof cause);
-    mc_line("MODS: verify %s: %u folder(s), %u file(s), %u MiB, %u separate blob(s) checked", key, st.entries,
-            st.files, st.bytes_mb, st.blobs_checked);
+    mc_line("MODS: verify %s: %u folder(s), %u file(s) (%u stock pointer(s)), %u MiB checked", key, st.entries,
+            st.files, st.pointers, st.bytes_mb);
     if (ok) mc_line("MODS: verify %s: pass", key);
     else mc_line("MODS: verify %s: FAILED: %s", key, cause);
 }
@@ -429,7 +444,7 @@ static int mc_job_run(void *ctx, const modnet_io *io)
         unsigned done = 0, dropped = 0;
         int left = modsync_retry_pending(io, &done, &dropped, &st);
         ok = left == 0;
-        if (left < 0) mc_async_line("MODS: retry: %s cannot be read", MODSYNC_PENDING_FILE);
+        if (left < 0) mc_async_line("MODS: retry: the pending section of mods\\snapmap-plus.json cannot be read");
         else mc_async_line("MODS: retry: %u upload(s) done, %u dropped, %d still queued (%.0f ms)", done, dropped, left,
                            (double)(GetTickCount64() - j->started));
         break;
@@ -489,7 +504,7 @@ static int mc_find_bundle(const char *name, char hash[MODNET_HASH_HEX + 1], char
         for (i = 0; i < l.count && !found; i++) {
             const sh_ms_entry *e = &l.items[i];
             if (!sh_ms_entry_usable(e)) continue;
-            if (_stricmp(e->key, name) == 0 || strcmp(e->bundle.hash, name) == 0) {
+            if (sh_ms_entry_matches(e, name) || strcmp(e->bundle.hash, name) == 0) {
                 strcpy_s(hash, MODNET_HASH_HEX + 1, e->bundle.hash);
                 strncpy_s(label, label_cap, e->key, _TRUNCATE);
                 found = 1;
@@ -588,7 +603,7 @@ void h_sh_mods(idCmdArgs *a)
     if (verb && (!_stricmp(verb, "help") || !strcmp(verb, "?"))) {
         sh_printf("%s\n", SH_MODCMD_HELP);
         sh_printf("%s\n", SH_MODCMD_HELP_STORE);
-        sh_printf("Migration: 'sh_mods migrate' moves the retired overrides folder into the mods store once more (it ran at the first start of this release; mods\\.migrated.json records it), 'sh_mods migrate --again' repeats it after you change overrides.\n");
+        sh_printf("Migration: 'sh_mods migrate' moves the retired overrides folder into the mods store once more (it ran at the first start of this release; the migration section of mods\\snapmap-plus.json records it), 'sh_mods migrate --again' repeats it after you change overrides.\n");
         return;
     }
     /* Serving verbs (modserve_engine.c): status (also the bare command),
@@ -596,6 +611,7 @@ void h_sh_mods(idCmdArgs *a)
     if (!verb || !verb[0]) verb = "status";
     mc_outbox_flush();
     if (mc_store_command(a, verb)) return;
+    if (!_stricmp(verb, "rescan")) mc_sync();   /* the rebuild rule first; then the serving index */
     if (sh_modserve_command(a, verb)) return;
     if (!_stricmp(verb, "migrate")) {
         /* The migration of the retired overrides folder (modmigrate.c), on its worker thread. */
@@ -608,7 +624,7 @@ void h_sh_mods(idCmdArgs *a)
         if (r > 0) mc_line("MODS: migration: started on a background thread%s; its MODS: migration: lines go to the "
                            "backend log, then the serving index is rebuilt ('sh_mods list' shows the result)", again ? " (--again)" : "");
         else if (r < 0) mc_line("MODS: migration: a migration pass is already running or could not start");
-        else sh_printf("MODS: migration: nothing to do (no overrides folder, or mods\\.migrated.json says it is done; "
+        else sh_printf("MODS: migration: nothing to do (no overrides folder, or mods\\snapmap-plus.json says it is done; "
                        "'sh_mods migrate --again' repeats it)\n");
         return;
     }
@@ -688,6 +704,7 @@ int modbundle_build_folder(const char *folder_acp, char *first_cause, size_t n)
         mc_line("MODS: build %s: valid but not written: %s", folder, cause);
     } else {
         ok = 1;
+        if (mc_in_store(folder)) sh_ms_cache_note(folder, b.hash);   /* built from its current tree */
         mc_line("MODS: build %s: %s@%s+%llu, %zu file(s), %llu byte(s); bundle %s written", folder, b.id,
                 b.version, b.build, b.file_count, b.total_size, b.hash);
         mc_needs_line("build", &b);

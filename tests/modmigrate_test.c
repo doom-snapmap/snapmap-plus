@@ -264,12 +264,46 @@ static void make_tree(const char *ov)
     put_sparse(ov, "big\\assets\\generated\\image\\big\\sky.bimage", (300ull << 20));
 }
 
-static int bundle_of(const char *store, const char *key, sh_mb_bundle *b)
+/* A store folder's mod.json. */
+static int bundle_of(const char *store, const char *folder, sh_mb_bundle *b)
 {
     char path[MAX_PATH * 2];
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s\\bundle.json", store, key);
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s\\mod.json", store, folder);
     memset(b, 0, sizeof *b);
     return sh_mb_load(path, b);
+}
+
+/* The migration record: the "migration" section of mods\snapmap-plus.json
+ * (canonical JSON: sorted keys, no spaces). */
+static char *record_of(const char *mods)
+{
+    char *text = NULL;
+    if (sh_mb_record_get(mods, "migration", &text) != 1) { free(text); return NULL; }
+    return text;
+}
+
+/* The record's entry for overrides\<folder> holds every needle. */
+static int entry_has(const char *record, const char *folder, const char *a, const char *b)
+{
+    char key[MAX_PATH];
+    const char *at, *start, *end;
+    _snprintf_s(key, sizeof key, _TRUNCATE, "\"folder\":\"%s\"", folder);
+    at = record ? strstr(record, key) : NULL;
+    if (!at) return 0;
+    for (start = at; start > record && *start != '{'; start--) {}
+    end = strchr(at, '}');
+    if (!end) return 0;
+    {
+        size_t n = (size_t)(end - start);
+        char *one = (char *)malloc(n + 1);
+        int ok;
+        if (!one) return 0;
+        memcpy(one, start, n);
+        one[n] = 0;
+        ok = (!a || strstr(one, a)) && (!b || strstr(one, b));
+        free(one);
+        return ok;
+    }
 }
 
 static int has_file(const sh_mb_bundle *b, const char *request)
@@ -334,7 +368,7 @@ static void full_pass(const char *root)
     char *record;
     sh_ms_list list;
     size_t i, n = 0;
-    char dupe_b_key[SH_MS_KEY_MAX + 1] = "";
+    char dupe_b_key[SH_MS_KEY_MAX + 1] = "dupe-b";
     char *hash_c = NULL;
 
     printf("-- the synthetic overrides tree migrates into the store\n");
@@ -361,8 +395,10 @@ static void full_pass(const char *root)
     if (before.text && after.text && strcmp(before.text, after.text))
         fprintf(stderr, "before:\n%s\nafter:\n%s\n", before.text, after.text);
 
-    /* The era C pack: requirements filtered, strings and composes kept, the sidecar left out. */
-    CHECK(bundle_of(mods, "alex.door@0.0.0+1", &b) == 1);
+    /* The era C pack: in mods\<its folder>, requirements filtered, strings and
+     * composes kept, the sidecar left out, package.json now its mod.json. */
+    CHECK(bundle_of(mods, "pack-c", &b) == 1);
+    CHECK(!strcmp(b.origin, "migration") && !b.delivered);
     CHECK(b.legacy && b.requirements && !strcmp(b.requirements, "{\"cvars\":{\"g_useResourceBlackList\":\"0\"}}"));
     CHECK(b.extra && strstr(b.extra, "\"composes\":{\"hands\":[\"alex/door\"]}") && strstr(b.extra, "\"strings\"") &&
           strstr(b.extra, "\"source\":\"overrides\"") && strstr(b.extra, "\"folder\":\"pack-c\""));
@@ -370,42 +406,45 @@ static void full_pass(const char *root)
     hash_c = _strdup(b.hash);
     sh_mb_free(&b);
     /* The era B pack: named by its folder, its version kept, its layout migrated. */
-    CHECK(bundle_of(mods, "old-pack@1.0.0+1", &b) == 1);
+    CHECK(bundle_of(mods, "Old Pack", &b) == 1 && !strcmp(b.id, "old-pack") && !strcmp(b.version, "1.0.0"));
     CHECK(b.file_count == 1 && has_file(&b, "generated/decls/entitydef/old/thing.decl") &&
           b.extra && strstr(b.extra, "\"schema\":\"snapmap-plus.override-package.v1\"") && strstr(b.extra, "\"layout\":\"B\""));
     sh_mb_free(&b);
-    /* The duplicate pair: both built, the second under a distinct version. */
-    CHECK(bundle_of(mods, "local.dupe@0.0.0+1", &b) == 1);
+    /* The duplicate pair: both built, each in its own folder, one id. */
+    CHECK(bundle_of(mods, "dupe-a", &b) == 1 && !strcmp(b.id, "local.dupe"));
+    sh_mb_free(&b);
+    CHECK(bundle_of(mods, dupe_b_key, &b) == 1 && !strcmp(b.id, "local.dupe") && !strcmp(b.version, "0.0.0"));
     sh_mb_free(&b);
     memset(&list, 0, sizeof list);
     CHECK(sh_ms_enumerate(&list) == 1);
-    for (i = 0; i < list.count; i++)
-        if (!strncmp(list.items[i].key, "local.dupe@0.0.0-", 17)) strncpy_s(dupe_b_key, sizeof dupe_b_key, list.items[i].key, _TRUNCATE);
-    CHECK(dupe_b_key[0] != 0);
-    /* The delivered package: a legacy bundle under the tree's first 16 hex. */
+    /* The delivered package: an ordinary folder named by its id, keyed by its tree. */
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\map-0123456789abcdef\\doors", ov);
     CHECK(tree_of(path, tree_d) == 1);
-    _snprintf_s(path, sizeof path, _TRUNCATE, "legacy\\doors@%.16s", tree_d);
-    CHECK(bundle_of(mods, path, &b) == 1);
-    CHECK(b.legacy && b.extra && strstr(b.extra, "\"source\":\"delivered\"") && strstr(b.extra, tree_d));
+    CHECK(bundle_of(mods, "doors", &b) == 1);
+    CHECK(b.legacy && b.delivered && b.extra && strstr(b.extra, "\"source\":\"delivered\"") && strstr(b.extra, tree_d));
+    CHECK(!strcmp(b.origin, "delivery"));
     sh_mb_free(&b);
     sh_ms_list_free(&list);
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\legacy", mods);
+    CHECK(!exists(path));
     /* Nothing was staged inside the store, and the staging area is gone. */
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\mods-migrate.tmp", root);
     CHECK(!exists(path));
 
-    /* The record and the log. */
+    /* The record (a section of mods\snapmap-plus.json, no .migrated.json) and the log. */
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\.migrated.json", mods);
-    record = read_all(path, &n);
-    CHECK(record && strstr(record, "\"complete\": true") && strstr(record, "\"duplicateOf\": \"dupe-a\""));
-    CHECK(record && strstr(record, "\"folder\": \"stray.zip\", \"kind\": \"zip\", \"outcome\": \"skipped\""));
-    CHECK(record && strstr(record, "\"folder\": \"huge\", \"kind\": \"package\", \"outcome\": \"skipped\""));
+    CHECK(!exists(path));
+    record = record_of(mods);
+    (void)n;
+    CHECK(record && strstr(record, "\"complete\":true") && strstr(record, "\"duplicateOf\":\"dupe-a\""));
+    CHECK(entry_has(record, "stray.zip", "\"kind\":\"zip\"", "\"outcome\":\"skipped\""));
+    CHECK(entry_has(record, "huge", "\"kind\":\"package\"", "\"outcome\":\"skipped\""));
     CHECK(record && strstr(record, "it holds 2 package folders one level down (first: twodesc\\\\"));
-    CHECK(record && strstr(record, "\"folder\": \"nodesc/inner\", \"kind\": \"package\", \"outcome\": \"built\"") &&
-          strstr(record, "\"nested\": true"));
-    CHECK(bundle_of(mods, "inner@0.0.0+1", &b) == 1);
+    CHECK(entry_has(record, "nodesc/inner", "\"outcome\":\"built\"", "\"nested\":true"));
+    CHECK(entry_has(record, "pack-c", "\"store\":\"pack-c\"", NULL));
+    CHECK(bundle_of(mods, "inner", &b) == 1);
     sh_mb_free(&b);
-    CHECK(strstr(g_log, "MODS: migration: overrides\\nodesc\\inner: built mods\\inner@0.0.0+1") != NULL &&
+    CHECK(strstr(g_log, "MODS: migration: overrides\\nodesc\\inner: built mods\\inner,") != NULL &&
           strstr(g_log, "the one package folder inside overrides\\nodesc, which has no descriptor of its own, "
                         "migrated under its own id") != NULL);
     CHECK(record && strstr(record, tree_d));
@@ -413,11 +452,11 @@ static void full_pass(const char *root)
     CHECK(strstr(g_log, "MODS: migration: overrides\\huge: skipped -- over the migration cap") != NULL);
     CHECK(strstr(g_log, "MODS: migration: overrides\\big: refused -- a bundle of it would hold at least 1 file(s), 300 MiB, "
                         "over the bundle caps") != NULL);
-    CHECK(strstr(g_log, "MODS: migration: overrides\\dupe-b: built mods\\local.dupe@0.0.0-") != NULL &&
+    CHECK(strstr(g_log, "MODS: migration: overrides\\dupe-b: built mods\\dupe-b,") != NULL &&
           strstr(g_log, "duplicate id local.dupe (also overrides\\dupe-a), both kept") != NULL);
     CHECK(strstr(g_log, "MODS: migration: overrides\\map-0123456789abcdef\\doors: delivered package converted to "
-                        "mods\\legacy\\doors@") != NULL);
-    CHECK(strstr(g_log, "MODS: migration: overrides\\pack-c: built mods\\alex.door@0.0.0+1") != NULL &&
+                        "mods\\doors,") != NULL);
+    CHECK(strstr(g_log, "MODS: migration: overrides\\pack-c: built mods\\pack-c,") != NULL &&
           strstr(g_log, "1 file(s) a bundle cannot carry left out (0 of them .bswf movies), first: assets/cooked/model/models/door.materials.txt") != NULL);
     CHECK(strstr(g_log, "MODS: migration: 10 entries in overrides: 5 built, 1 delivered converted") != NULL);
     free(record);
@@ -433,7 +472,7 @@ static void full_pass(const char *root)
         CHECK(map != NULL);
         out = map ? sh_modlegacy_process(map, mn, &on) : NULL;
         CHECK(out && sh_modlegacy_last_report(v, 2) == 1 && v[0].verdict == SH_MODLEGACY_CONVERT &&
-              strstr(v[0].folder, "doors@") && !strcmp(v[0].id, "doors"));
+              strstr(v[0].folder, "\\mods\\doors") && !strcmp(v[0].id, "doors"));
         if (out) HeapFree(GetProcessHeap(), 0, out);
         if (map) HeapFree(GetProcessHeap(), 0, map);
         /* ... and the same authored tree through the record's "trees". */
@@ -453,15 +492,15 @@ static void full_pass(const char *root)
     CHECK(sh_modmigrate_run(0, &st) == 0 && st.ran == 0);
     CHECK(strstr(g_log, "MODS: migration: nothing to do") != NULL);
 
-    /* --again repeats it: the same bundles, same builds, the duplicate under the same version. */
+    /* --again repeats it: the same bundles, same builds, the same folders. */
     g_log[0] = 0;
     CHECK(sh_modmigrate_run(1, &st) == 1);
     CHECK(st.built == 5 && st.reused == 1 && st.converted == 0 && st.skipped == 3 && st.refused == 1 && st.duplicates == 1);
-    CHECK(bundle_of(mods, "alex.door@0.0.0+1", &b) == 1 && hash_c && !strcmp(b.hash, hash_c));
+    CHECK(bundle_of(mods, "pack-c", &b) == 1 && hash_c && !strcmp(b.hash, hash_c));
     sh_mb_free(&b);
     CHECK(bundle_of(mods, dupe_b_key, &b) == 1);
     sh_mb_free(&b);
-    CHECK(strstr(g_log, "delivered package already converted as mods\\legacy\\doors@") != NULL);
+    CHECK(strstr(g_log, "delivered package already converted as mods\\doors ") != NULL);
     {
         unsigned bundles = 0;
         memset(&list, 0, sizeof list);
@@ -514,15 +553,15 @@ static void boot_split(const char *root)
     rescans = g_mod_stub_rescans;
     CHECK(sh_modmigrate_boot() == 1);
     /* At return the small one is built; the record says incomplete until the worker ends. */
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\mods\\small@0.0.0+1\\bundle.json", root);
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\mods\\small\\mod.json", root);
     CHECK(exists(path));
     CHECK(strstr(g_log, "1 more folder(s)") != NULL);
     CHECK(sh_modmigrate_wait(120000) == 1);
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\mods\\large@0.0.0+1\\bundle.json", root);
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\mods\\large\\mod.json", root);
     CHECK(exists(path));
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\mods\\.migrated.json", root);
-    record = read_all(path, NULL);
-    CHECK(record && strstr(record, "\"complete\": true") && strstr(record, "\"built\": 2"));
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\mods", root);
+    record = record_of(path);
+    CHECK(record && strstr(record, "\"complete\":true") && strstr(record, "\"built\":2"));
     free(record);
     sh_modmigrate_last(&st);
     printf("  boot part %llu ms, whole pass %llu ms\n", st.boot_ms, st.ms);
@@ -541,12 +580,13 @@ static void incomplete_record(const char *root)
     _snprintf_s(ov, sizeof ov, _TRUNCATE, "%s\\overrides", root);
     put_file(ov, "tiny/package.json", "{\"id\": \"tiny\", \"name\": \"Tiny\"}");
     put_file(ov, "tiny/assets/generated/decls/entitydef/tiny/t.decl", DECL_A);
-    put_file(root, "mods/.migrated.json", "{\n  \"format\": 1,\n  \"complete\": false\n}\n");
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\mods", root);
+    CHECK(sh_mb_record_put(path, "migration", "{\"format\":1,\"complete\":false}"));
     configure(root);
     g_log[0] = 0;
     CHECK(sh_modmigrate_run(0, &st) == 1 && st.built == 1);
     CHECK(strstr(g_log, "the record says the last pass did not finish") != NULL);
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\mods\\tiny@0.0.0+1\\bundle.json", root);
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\mods\\tiny\\mod.json", root);
     CHECK(exists(path));
 }
 
@@ -643,9 +683,9 @@ static void store_lock_contention(const char *root)
     CHECK(installs >= 1 && failed == 0);
     sh_modmigrate_last(&st);
     CHECK(st.built == 2 && st.refused == 0);
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\mods\\large@0.0.0+1\\bundle.json", root);
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\mods\\large\\mod.json", root);
     CHECK(exists(path));
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\mods\\test.lockmod@1.0.0+1\\bundle.json", root);
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\mods\\test.lockmod\\mod.json", root);
     CHECK(exists(path));
 }
 

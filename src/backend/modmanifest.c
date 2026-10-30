@@ -700,63 +700,74 @@ bad:
 }
 
 /* ==================================================================== */
-/* bundle.json                                                           */
+/* mod.json                                                              */
 /* ==================================================================== */
 
-int sh_modmanifest_read_bundle_json(const char *text, size_t length, sh_modmanifest_row *out,
-                                    char *err, size_t err_cap)
+/* The provides names and sizes of one product-block list into `out`. */
+static int mm_block_list(const char *list, sh_modmanifest_row *out)
 {
-    sh_json_object object = {0};
-    const char *files;
+    const char *cursor = list, *end = list + strlen(list), *elem;
+    size_t elem_len;
+    int r;
+    while ((r = mm_array_next(&cursor, end, &elem, &elem_len)) == 1) {
+        sh_json_object file = {0}, provides = {0};
+        unsigned long long size = 0;
+        const char *raw;
+        if (!sh_json_parse_object(elem, elem_len, 8, &file)) { r = -1; break; }
+        if (mm_member_uint(&file, "size", &size)) {
+            if (size > ULLONG_MAX - out->size) size = ULLONG_MAX - out->size;
+            out->size += size;
+        }
+        raw = sh_json_object_get(&file, "provides");
+        if (raw && sh_json_parse_object(raw, strlen(raw), 4, &provides)) {
+            char name[SH_MODMANIFEST_NAME_MAX + 1];
+            if (mm_member_text(&provides, "name", name, sizeof name, 1) && name[0] &&
+                !sh_modmanifest_row_add_name(out, name)) r = -1;
+        }
+        sh_json_object_free(&provides);
+        sh_json_object_free(&file);
+        if (r < 0) break;
+    }
+    return r >= 0;
+}
+
+int sh_modmanifest_read_mod_json(const char *text, size_t length, sh_modmanifest_row *out,
+                                 char *err, size_t err_cap)
+{
+    sh_json_object object = {0}, block = {0};
+    const char *raw, *files, *stock;
+    size_t i;
     int ok = 0;
     if (err && err_cap) err[0] = 0;
     if (!out) return 0;
     memset(out, 0, sizeof *out);
     if (text && length >= 3 && !memcmp(text, "\xef\xbb\xbf", 3)) { text += 3; length -= 3; }
     while (length && sh_shard_is_ws(*text)) { text++; length--; }
-    if (!text || !length || !sh_json_parse_object(text, length, 16, &object)) {
-        MM_ERR("bundle.json is not a JSON object");
+    if (!text || !length || !sh_json_parse_object(text, length, 24, &object)) {
+        MM_ERR("mod.json is not a JSON object");
         return 0;
     }
-    if (!mm_member_text(&object, "id", out->id, sizeof out->id, 1) || !sh_modmanifest_valid_id(out->id)) {
-        MM_ERR("bundle.json has no valid id"); goto done;
+    if (!mm_member_text(&object, "id", out->id, sizeof out->id, 1)) { MM_ERR("mod.json has no id"); goto done; }
+    for (i = 0; out->id[i]; i++) if (out->id[i] >= 'A' && out->id[i] <= 'Z') out->id[i] = (char)(out->id[i] + 32);
+    if (!sh_modmanifest_valid_id(out->id)) { MM_ERR("mod.json has no valid id"); goto done; }
+    if (!mm_member_text(&object, "version", out->version, sizeof out->version, 1)) strcpy_s(out->version, sizeof out->version, "0.0.0");
+    raw = sh_json_object_get(&object, "snapmap-plus");
+    if (!raw || *raw != '{' || !sh_json_parse_object(raw, strlen(raw), 16, &block)) {
+        MM_ERR("mod.json has not been built (no snapmap-plus block)"); goto done;
     }
-    if (!mm_member_text(&object, "version", out->version, sizeof out->version, 1)) {
-        MM_ERR("bundle.json has no valid version"); goto done;
-    }
-    if (!mm_member_text(&object, "bundle", out->bundle, sizeof out->bundle, 1) ||
+    if (!mm_member_text(&block, "bundle", out->bundle, sizeof out->bundle, 1) ||
         !sh_modmanifest_valid_hash(out->bundle, strlen(out->bundle))) {
-        MM_ERR("bundle.json has no bundle hash"); goto done;
+        MM_ERR("mod.json has no bundle hash"); goto done;
     }
-    files = sh_json_object_get(&object, "files");
-    if (!files) { MM_ERR("bundle.json has no files list"); goto done; }
-    {
-        const char *cursor = files, *end = files + strlen(files), *elem;
-        size_t elem_len;
-        int r;
-        while ((r = mm_array_next(&cursor, end, &elem, &elem_len)) == 1) {
-            sh_json_object file = {0}, provides = {0};
-            unsigned long long size = 0;
-            const char *raw;
-            if (!sh_json_parse_object(elem, elem_len, 8, &file)) { r = -1; break; }
-            if (mm_member_uint(&file, "size", &size)) {
-                if (size > ULLONG_MAX - out->size) size = ULLONG_MAX - out->size;
-                out->size += size;
-            }
-            raw = sh_json_object_get(&file, "provides");
-            if (raw && sh_json_parse_object(raw, strlen(raw), 4, &provides)) {
-                char name[SH_MODMANIFEST_NAME_MAX + 1];
-                if (mm_member_text(&provides, "name", name, sizeof name, 1) && name[0] &&
-                    !sh_modmanifest_row_add_name(out, name)) r = -1;
-            }
-            sh_json_object_free(&provides);
-            sh_json_object_free(&file);
-            if (r < 0) break;
-        }
-        if (r < 0) { MM_ERR("bundle.json has a malformed files list"); goto done; }
+    files = sh_json_object_get(&block, "files");
+    stock = sh_json_object_get(&block, "stock");
+    if (!files && !stock) { MM_ERR("mod.json has no files list"); goto done; }
+    if ((files && !mm_block_list(files, out)) || (stock && !mm_block_list(stock, out))) {
+        MM_ERR("mod.json has a malformed files list"); goto done;
     }
     ok = 1;
 done:
+    sh_json_object_free(&block);
     sh_json_object_free(&object);
     if (!ok) sh_modmanifest_row_free(out);
     return ok;

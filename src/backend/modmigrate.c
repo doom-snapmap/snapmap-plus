@@ -128,6 +128,25 @@ static wchar_t *mg_wide(const char *acp, const char *tail_u8)
     return w;
 }
 
+/* The store folder as plain UTF-8 (no \\?\ prefix), for the product record. */
+static int mg_mods_u8(const wchar_t *mods_w, char *out, size_t cap)
+{
+    char *u = mods_w ? sh_mb_utf8(mods_w) : NULL;
+    if (!u) return 0;
+    strncpy_s(out, cap, strncmp(u, "\\\\?\\", 4) ? u : u + 4, _TRUNCATE);
+    free(u);
+    return 1;
+}
+
+/* The record's text ("migration" section, compact canonical JSON), or NULL. */
+static char *mg_record_text(const wchar_t *mods_w)
+{
+    char mods[MAX_PATH * 4], *text = NULL;
+    if (!mg_mods_u8(mods_w, mods, sizeof mods)) return NULL;
+    if (sh_mb_record_get(mods, SH_MODMIGRATE_RECORD, &text) != 1) { free(text); return NULL; }
+    return text;
+}
+
 static wchar_t *mg_wjoin(const wchar_t *dir, const wchar_t *leaf)
 {
     size_t a = wcslen(dir), b = wcslen(leaf);
@@ -484,60 +503,33 @@ static void mg_identity(const sh_modlegacy_zip *zip, const char *name, char *id,
     sh_json_object_free(&o);
 }
 
-/* A version label for id that no other installed bundle uses: the wanted
- * one, unless a bundle of another source tree already holds id@wanted; then
- * the wanted label with the first 8 (then 16) hex of this tree. */
-static void mg_pick_version(const mg_ctx *c, const char *id, const char *wanted, const char *tree, char *out, size_t cap)
+/* The store folder for an authored package: mods\<its overrides folder
+ * name>, the same folder again on a repeated pass (its legacy record names
+ * this tree or this overrides folder), else that name with the tree's first
+ * 8 hex when another mod holds it. */
+static void mg_target_name(const mg_ctx *c, const mg_item *it, char *out, size_t cap)
 {
+    const char *leaf = strrchr(it->name, '/');
     int round;
+    leaf = leaf ? leaf + 1 : it->name;
     for (round = 0; round < 3; round++) {
-        WIN32_FIND_DATAW fd;
-        wchar_t *pattern;
-        char leaf[SH_MS_KEY_MAX + 8];
-        HANDLE h;
-        int taken = 0;
-        if (round == 0) strncpy_s(out, cap, wanted, _TRUNCATE);
-        else _snprintf_s(out, cap, _TRUNCATE, "%.*s-%.*s", (int)(SH_MB_VERSION_MAX - 17), wanted, round == 1 ? 8 : 16, tree);
-        /* Only <id>@<version>+<build> folders can hold this id@version. */
-        _snprintf_s(leaf, sizeof leaf, _TRUNCATE, "%s@%s+*", id, out);
-        {
-            int n = MultiByteToWideChar(CP_UTF8, 0, leaf, -1, NULL, 0);
-            wchar_t *wleaf = n > 0 ? (wchar_t *)malloc(sizeof(wchar_t) * (size_t)n) : NULL;
-            if (wleaf) MultiByteToWideChar(CP_UTF8, 0, leaf, -1, wleaf, n);
-            pattern = wleaf ? mg_wjoin(c->mods_w, wleaf) : NULL;
-            free(wleaf);
-        }
-        h = pattern ? FindFirstFileExW(pattern, FindExInfoBasic, &fd, FindExSearchNameMatch, NULL, 0) : INVALID_HANDLE_VALUE;
-        free(pattern);
-        if (h != INVALID_HANDLE_VALUE) {
-            do {
-                wchar_t *folder, *bj;
-                HANDLE f;
-                if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || wcsstr(fd.cFileName, L".staging-") ||
-                    wcsstr(fd.cFileName, L".old-")) continue;
-                folder = mg_wjoin(c->mods_w, fd.cFileName);
-                bj = folder ? mg_wjoin(folder, L"bundle.json") : NULL;
-                free(folder);
-                f = bj ? CreateFileW(bj, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL) : INVALID_HANDLE_VALUE;
-                free(bj);
-                taken = 1;   /* a folder of id@version whose bundle.json does not name this tree */
-                if (f != INVALID_HANDLE_VALUE) {
-                    LARGE_INTEGER size;
-                    char *text = NULL;
-                    DWORD got = 0;
-                    if (GetFileSizeEx(f, &size) && size.QuadPart > 0 && size.QuadPart < (16 << 20) &&
-                        (text = (char *)malloc((size_t)size.QuadPart + 1)) != NULL &&
-                        ReadFile(f, text, (DWORD)size.QuadPart, &got, NULL)) {
-                        text[got] = 0;
-                        if (strstr(text, tree)) taken = 0;
-                    }
-                    free(text);
-                    CloseHandle(f);
-                }
-            } while (!taken && FindNextFileW(h, &fd));
-            FindClose(h);
-        }
-        if (!taken) break;
+        char folder[MAX_PATH * 4], mods[MAX_PATH * 4];
+        wchar_t *w;
+        sh_mb_bundle b;
+        int mine = 0;
+        DWORD a;
+        if (round == 0) strncpy_s(out, cap, leaf, _TRUNCATE);
+        else _snprintf_s(out, cap, _TRUNCATE, "%s-%.*s", leaf, round == 1 ? 8 : 16, it->tree);
+        if (!mg_mods_u8(c->mods_w, mods, sizeof mods)) return;
+        _snprintf_s(folder, sizeof folder, _TRUNCATE, "%s\\%s", mods, out);
+        w = sh_mb_wpath(folder);
+        a = w ? GetFileAttributesW(w) : INVALID_FILE_ATTRIBUTES;
+        free(w);
+        if (a == INVALID_FILE_ATTRIBUTES) return;
+        if (sh_mb_load_folder(folder, &b) && b.extra)
+            mine = (it->tree[0] && strstr(b.extra, it->tree)) != 0;
+        sh_mb_free(&b);
+        if (mine) return;
     }
 }
 
@@ -576,6 +568,7 @@ static int mg_build_legacy(const char *folder_acp, char *first_cause, size_t n)
         if (first_cause && n) strncpy_s(first_cause, n, cause, _TRUNCATE);
     } else {
         ok = 1;
+        sh_ms_cache_note(folder, b.hash);   /* built from its current tree */
         g_mg_pointers = b.stock_count;
         g_mg_pointer_bytes = b.stock_bytes;
     }
@@ -729,19 +722,18 @@ static void mg_do_item(mg_ctx *c, mg_item *it, size_t index)
         it->movies = v.movies;
         {
             const char *leaf = strrchr(v.folder, '\\');
-            _snprintf_s(it->store, sizeof it->store, _TRUNCATE, "%s%s", strstr(v.folder, "\\legacy\\") ? "legacy/" : "",
-                        leaf ? leaf + 1 : v.folder);
+            strncpy_s(it->store, sizeof it->store, leaf ? leaf + 1 : v.folder, _TRUNCATE);
         }
     } else {
-        char id[SH_MB_ID_MAX + 1], wanted[4 * SH_MB_VERSION_MAX + 1], staging[MAX_PATH], key[SH_MS_KEY_MAX + 1];
+        char id[SH_MB_ID_MAX + 1], staging[MAX_PATH], key[SH_MS_NAME_MAX + 1], target[SH_MS_NAME_MAX + 1];
         char cause[SH_MB_CAUSE_MAX] = "";
         wchar_t *wstage, *wparent;
         sh_ms_install_stats st;
         sh_mb_bundle b;
         char *stage_u8;
         int installed;
-        mg_identity(&zip, it->name, id, sizeof id, wanted, sizeof wanted);
-        mg_pick_version(c, id, wanted, it->tree, it->version, sizeof it->version);
+        mg_identity(&zip, it->name, id, sizeof id, it->version, sizeof it->version);
+        mg_target_name(c, it, target, sizeof target);
         origin.source = MG_OVERRIDES;
         origin.version = it->version;
         _snprintf_s(staging, sizeof staging, _TRUNCATE, "%s\\mods-migrate.tmp\\%zu-%lu", c->root, index,
@@ -770,7 +762,7 @@ static void mg_do_item(mg_ctx *c, mg_item *it, size_t index)
         memset(&b, 0, sizeof b);
         memset(&st, 0, sizeof st);
         t1 = GetTickCount64();
-        installed = stage_u8 && sh_ms_install_from_folder(stage_u8, NULL, key, sizeof key, &st, &b, cause, sizeof cause);
+        installed = stage_u8 && sh_ms_install_as(stage_u8, target, NULL, key, sizeof key, &st, &b, cause, sizeof cause);
         it->ms_store = GetTickCount64() - t1;
         free(stage_u8);
         mg_rmtree(wstage);
@@ -904,7 +896,7 @@ static int mg_write_record(mg_ctx *c, int complete)
     sh_modmigrate_stats s;
     size_t i;
     int first = 1, ok;
-    wchar_t *path, *tmp;
+    char mods[MAX_PATH * 4];
     FILETIME ft;
     unsigned long long now;
     mg_stats(c, &s);
@@ -962,21 +954,7 @@ static int mg_write_record(mg_ctx *c, int complete)
     mg_puts(&b, first ? "}\n}\n" : "\n  }\n}\n");
     if (b.failed) { free(b.p); return 0; }
     CreateDirectoryW(c->mods_w, NULL);
-    path = mg_wjoin(c->mods_w, L".migrated.json");
-    tmp = mg_wjoin(c->mods_w, L".migrated.json.tmp");
-    ok = 0;
-    if (path && tmp) {
-        HANDLE h = CreateFileW(tmp, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-        DWORD put = 0;
-        if (h != INVALID_HANDLE_VALUE) {
-            ok = WriteFile(h, b.p, (DWORD)b.n, &put, NULL) && put == (DWORD)b.n && FlushFileBuffers(h);
-            CloseHandle(h);
-            ok = ok && MoveFileExW(tmp, path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
-            if (!ok) DeleteFileW(tmp);
-        }
-    }
-    free(path);
-    free(tmp);
+    ok = mg_mods_u8(c->mods_w, mods, sizeof mods) && sh_mb_record_put(mods, SH_MODMIGRATE_RECORD, b.p);
     free(b.p);
     return ok;
 }
@@ -984,22 +962,11 @@ static int mg_write_record(mg_ctx *c, int complete)
 /* 1 when the record exists and says the pass completed. */
 static int mg_record_complete(const mg_ctx *c, int *exists)
 {
-    wchar_t *path = mg_wjoin(c->mods_w, L".migrated.json");
-    HANDLE h;
-    char buf[512];
-    DWORD got = 0;
-    int complete = 0;
-    *exists = 0;
-    if (!path) return 0;
-    h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-    free(path);
-    if (h == INVALID_HANDLE_VALUE) return 0;
-    *exists = 1;
-    if (ReadFile(h, buf, sizeof buf - 1, &got, NULL)) {
-        buf[got] = 0;
-        complete = strstr(buf, "\"complete\": true") != NULL;
-    }
-    CloseHandle(h);
+    char *text = mg_record_text(c->mods_w);
+    int complete;
+    *exists = text != NULL;
+    complete = text && strstr(text, "\"complete\":true") != NULL;
+    free(text);
     return complete;
 }
 
@@ -1078,7 +1045,7 @@ static void mg_finish(mg_ctx *c)
            "%u refused, %u duplicate id(s); %llu MiB in %llu ms (%llu ms before the serving index); %u file(s) became "
            "stock pointers, %llu KiB not stored; record %s; the " MG_OVERRIDES " folder is unchanged",
            s.entries, s.entries == 1 ? "y" : "ies", s.built, s.converted, s.reused, s.skipped, s.refused, s.duplicates,
-           s.bytes >> 20, s.ms, s.boot_ms, s.pointers, s.pointer_bytes >> 10, wrote ? "mods\\.migrated.json" : "NOT written");
+           s.bytes >> 20, s.ms, s.boot_ms, s.pointers, s.pointer_bytes >> 10, wrote ? "mods\\snapmap-plus.json (migration)" : "NOT written");
     mg_publish_stats(c);
 }
 
@@ -1249,19 +1216,21 @@ static int mg_record_status(const char *text, const char *name)
     mg_buf exact = {0}, prefix = {0};
     const char *p;
     int status = 0;
-    mg_puts(&exact, "\"folder\": ");
+    mg_puts(&exact, "\"folder\":");
     mg_putq(&exact, name);
-    mg_puts(&prefix, "\"folder\": ");
+    mg_puts(&prefix, "\"folder\":");
     mg_putq(&prefix, name);
     if (exact.failed || prefix.failed || !text) { free(exact.p); free(prefix.p); return 0; }
     prefix.p[--prefix.n] = 0;          /* drop the closing quote ... */
     mg_puts(&prefix, "/");             /* ... so "name/child" matches */
-    for (p = text; (p = strstr(p, "\"folder\": ")) != NULL; p++) {
+    /* The record is canonical (sorted keys, no spaces): in each folder entry
+     * "outcome" follows "folder". */
+    for (p = text; (p = strstr(p, "\"folder\":")) != NULL; p++) {
         const char *end = strchr(p, '}'), *o;
         if (strncmp(p, exact.p, exact.n) && strncmp(p, prefix.p, prefix.n)) continue;
-        o = strstr(p, "\"outcome\": \"");
+        o = strstr(p, "\"outcome\":\"");
         if (!o || (end && o > end)) continue;
-        o += 12;
+        o += 11;
         {
             const char *q = strchr(o, '"');
             size_t n = q ? (size_t)(q - o) : 0;
@@ -1313,24 +1282,13 @@ int sh_modmigrate_pending(unsigned *entries)
     if (entries) *entries = 0;
     if (!mg_data_root(root, sizeof root)) return -1;
     overrides = mg_wide(root, MG_OVERRIDES);
-    record = mg_wide(root, "mods\\" SH_MODMIGRATE_RECORD);
+    record = mg_wide(root, "mods");
     if (!overrides || !record) { free(overrides); free(record); return -1; }
     if (!mg_is_dir(overrides)) { free(overrides); free(record); return 0; }
-    h = CreateFileW(record, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING,
-                    FILE_ATTRIBUTE_NORMAL, NULL);
-    if (h != INVALID_HANDLE_VALUE) {
-        LARGE_INTEGER size;
-        if (GetFileSizeEx(h, &size) && size.QuadPart > 0 && size.QuadPart < (32ll << 20)) {
-            DWORD got = 0;
-            text = (char *)malloc((size_t)size.QuadPart + 1);
-            if (text && ReadFile(h, text, (DWORD)size.QuadPart, &got, NULL)) text[got] = 0;
-            else { free(text); text = NULL; }
-        }
-        CloseHandle(h);
-    }
+    text = mg_record_text(record);
     if (text) {
-        const char *m = strstr(text, "\"migratedAt\": ");
-        if (m) migrated_at = _strtoui64(m + 14, NULL, 10);
+        const char *m = strstr(text, "\"migratedAt\":");
+        if (m) migrated_at = _strtoui64(m + 13, NULL, 10);
     }
     pattern = mg_wjoin(overrides, L"*");
     h = pattern ? FindFirstFileExW(pattern, FindExInfoBasic, &fd, FindExSearchNameMatch, NULL, 0) : INVALID_HANDLE_VALUE;

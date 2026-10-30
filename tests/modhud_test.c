@@ -90,12 +90,15 @@ static void put(const char *rel, const char *text)
     fclose(f);
 }
 
-static void bundle(const char *rel, const char *id, const char *hash, const char *extra)
+/* A built mod folder: the author block (with `author` keys such as "hud")
+ * and the product block naming the bundle hash. */
+static void bundle(const char *rel, const char *id, const char *hash, const char *author)
 {
     char text[2048];
     _snprintf_s(text, sizeof text, _TRUNCATE,
-        "{\"build\": 1, \"bundle\": \"%s\", %s\"files\": [], \"format\": 1, \"id\": \"%s\", \"name\": \"%s\", \"version\": \"1\"}",
-        hash, extra, id, id);
+        "{\"id\": \"%s\", \"name\": \"%s\", \"version\": \"1\", %s\n\n"
+        "  \"snapmap-plus\": {\"format\": 1, \"build\": 1, \"bundle\": \"%s\", \"files\": []}}",
+        id, id, author, hash);
     put(rel, text);
 }
 
@@ -104,36 +107,36 @@ static void test_tree(void)
     char tmp[MAX_PATH];
     GetTempPathA(sizeof tmp, tmp);
     _snprintf_s(g_root, sizeof g_root, _TRUNCATE, "%ssh_modhud_test_%lu\\mods", tmp, GetCurrentProcessId());
-    /* The owner's converted sp-pistol, as the migration wrote it. */
-    bundle("legacy\\local.sp-pistol@856c0b308aaa62e5\\bundle.json", "local.sp-pistol", H_PISTOL,
-           "\"extra\": {\"description\": \"Enable campaign pistol firing\", \"hud\": {\"weapons\": "
+    /* The owner's converted sp-pistol, as the migration wrote it: a delivered
+     * package is an ordinary folder now. */
+    bundle("local.sp-pistol\\mod.json", "local.sp-pistol", H_PISTOL,
+           "\"description\": \"Enable campaign pistol firing\", \"hud\": {\"weapons\": "
            "{\"weapon/zion/player/sp/pistol\": {\"ammo_display\": \"weapon\"}, "
-           "\"weapon/zion/player/sp/pistol_secondary_charge_shot\": {\"ammo_display\": \"weapon\"}}}, "
-           "\"legacy\": {\"digest16\": \"856c0b308aaa62e5\"}}, ");
-    bundle("alex.other@1\\bundle.json", "alex.other", H_OTHER, "");
+           "\"weapon/zion/player/sp/pistol_secondary_charge_shot\": {\"ammo_display\": \"weapon\"}}},");
+    bundle("alex.other\\mod.json", "alex.other", H_OTHER, "");
     /* Not admitted: its conflicting rule is ignored. */
-    bundle("alex.gone@1\\bundle.json", "alex.gone", H_GONE,
-           "\"extra\": {\"hud\": {\"weapons\": {\"weapon/zion/player/sp/pistol\": {\"ammo_display\": \"engine\"}}}}, ");
-    put("blobs\\deadbeef", "x");
+    bundle("alex.gone\\mod.json", "alex.gone", H_GONE,
+           "\"hud\": {\"weapons\": {\"weapon/zion/player/sp/pistol\": {\"ammo_display\": \"engine\"}}},");
+    /* A folder without mod.json is not a mod. */
+    put("notes\\readme.txt", "x");
     CHECK(sh_modhud_load_tree(g_root, admitted) == 2);
     CHECK(sh_modhud_select("weapon/zion/player/sp/pistol", 1) == 0);
     /* An admitted bundle with a different rule for the pistol refuses the table. */
-    bundle("alex.other@1\\bundle.json", "alex.other", H_OTHER,
-           "\"extra\": {\"hud\": {\"weapons\": {\"weapon/zion/player/sp/pistol\": {\"ammo_display\": \"engine\"}}}}, ");
+    bundle("alex.other\\mod.json", "alex.other", H_OTHER,
+           "\"hud\": {\"weapons\": {\"weapon/zion/player/sp/pistol\": {\"ammo_display\": \"engine\"}}},");
     CHECK(sh_modhud_load_tree(g_root, admitted) == -1 && sh_modhud_count() == 0);
     CHECK(sh_modhud_select("weapon/zion/player/sp/pistol", 1) == 1);
     /* A malformed hud object refuses too. */
-    bundle("alex.other@1\\bundle.json", "alex.other", H_OTHER, "\"extra\": {\"hud\": {\"weapons\": 3}}, ");
+    bundle("alex.other\\mod.json", "alex.other", H_OTHER, "\"hud\": {\"weapons\": 3},");
     CHECK(sh_modhud_load_tree(g_root, admitted) == -1);
-    bundle("alex.other@1\\bundle.json", "alex.other", H_OTHER, "");
+    bundle("alex.other\\mod.json", "alex.other", H_OTHER, "");
     CHECK(sh_modhud_load_tree(g_root, admitted) == 2);
     /* A missing folder is an empty table. */
     CHECK(sh_modhud_load_tree("C:\\nonexistent\\sh_modhud\\mods", admitted) == 0);
     {
-        static const char *const files[] = { "legacy\\local.sp-pistol@856c0b308aaa62e5\\bundle.json",
-            "alex.other@1\\bundle.json", "alex.gone@1\\bundle.json", "blobs\\deadbeef", NULL };
-        static const char *const dirs[] = { "legacy\\local.sp-pistol@856c0b308aaa62e5", "legacy", "alex.other@1",
-            "alex.gone@1", "blobs", NULL };
+        static const char *const files[] = { "local.sp-pistol\\mod.json",
+            "alex.other\\mod.json", "alex.gone\\mod.json", "notes\\readme.txt", NULL };
+        static const char *const dirs[] = { "local.sp-pistol", "alex.other", "alex.gone", "notes", NULL };
         char path[MAX_PATH];
         for (int i = 0; files[i]; i++) { _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", g_root, files[i]); DeleteFileA(path); }
         for (int i = 0; dirs[i]; i++) { _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", g_root, dirs[i]); RemoveDirectoryA(path); }

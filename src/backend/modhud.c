@@ -19,7 +19,7 @@
 #endif
 
 #define HUD_JSON_DEPTH   24
-#define HUD_BUNDLE_CAP   (1u << 20)        /* bundle.json, as modserve caps it */
+#define HUD_BUNDLE_CAP   (4u << 20)        /* mod.json, as modserve caps it */
 #define HUD_OWNER_CAP    80
 
 typedef struct hud_rule {
@@ -186,30 +186,31 @@ static char *hud_read(const char *path, size_t cap, size_t *len)
     return buf;
 }
 
-/* One bundle folder: 1 parsed (or no hud), 0 refused. Unadmitted bundles and
- * unreadable manifests are skipped (the index logs those). */
+/* One mod folder: 1 parsed (or no hud), 0 refused. Unadmitted bundles and
+ * unreadable mod.json files are skipped (the index logs those). The rules are
+ * the author block's "hud" key; the bundle hash is the product block's. */
 static int hud_bundle(const char *dir, int (*admitted)(const char *))
 {
     char path[MAX_PATH], hash[80], id[HUD_OWNER_CAP];
     size_t len = 0;
     char *text;
-    sh_json_object root = {0}, extra = {0};
+    sh_json_object root = {0}, block = {0};
     const char *raw;
     int ok = 1;
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\bundle.json", dir);
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\mod.json", dir);
     text = hud_read(path, HUD_BUNDLE_CAP, &len);
     if (!text) return 1;
     if (!sh_json_parse_object(text, len, HUD_JSON_DEPTH, &root)) goto done;
-    if (!hud_string(sh_json_object_get(&root, "bundle"), hash, sizeof hash) || !admitted || !admitted(hash)) goto done;
-    raw = sh_json_object_get(&root, "extra");
-    if (!raw || *raw != '{' || !sh_json_parse_object(raw, strlen(raw), HUD_JSON_DEPTH, &extra)) goto done;
-    raw = sh_json_object_get(&extra, "hud");
+    raw = sh_json_object_get(&root, "snapmap-plus");
+    if (!raw || *raw != '{' || !sh_json_parse_object(raw, strlen(raw), HUD_JSON_DEPTH, &block)) goto done;
+    if (!hud_string(sh_json_object_get(&block, "bundle"), hash, sizeof hash) || !admitted || !admitted(hash)) goto done;
+    raw = sh_json_object_get(&root, "hud");
     if (!raw) goto done;
     if (!hud_string(sh_json_object_get(&root, "id"), id, sizeof id)) strcpy_s(id, sizeof id, "?");
     ok = sh_modhud_parse(raw, strlen(raw), id);
     if (!ok) hud_log("weapon-hud REFUSED: the hud object of %s is not a valid weapon ammo-display table", id);
 done:
-    sh_json_object_free(&extra);
+    sh_json_object_free(&block);
     sh_json_object_free(&root);
     free(text);
     return ok;
@@ -226,7 +227,7 @@ static int hud_scan(const char *folder, int (*admitted)(const char *))
     if (h == INVALID_HANDLE_VALUE) return 1;
     do {
         if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) ||
-            fd.cFileName[0] == '.' || !strchr(fd.cFileName, '@')) continue;
+            fd.cFileName[0] == '.' || !_stricmp(fd.cFileName, "blobs") || !_stricmp(fd.cFileName, "legacy")) continue;
         _snprintf_s(sub, sizeof sub, _TRUNCATE, "%s\\%s", folder, fd.cFileName);
         if (!hud_bundle(sub, admitted)) ok = 0;
     } while (ok && FindNextFileA(h, &fd));
@@ -236,14 +237,9 @@ static int hud_scan(const char *folder, int (*admitted)(const char *))
 
 int sh_modhud_load_tree(const char *mods_root, int (*admitted)(const char *bundle_hash))
 {
-    char legacy[MAX_PATH];
     int ok;
     sh_modhud_begin();
     ok = mods_root && hud_scan(mods_root, admitted);
-    if (ok) {
-        _snprintf_s(legacy, sizeof legacy, _TRUNCATE, "%s\\legacy", mods_root);
-        ok = hud_scan(legacy, admitted);
-    }
     sh_modhud_publish(ok);
     hud_log("weapon-hud %s: %zu rules", ok ? "compiled" : "REFUSED", sh_modhud_count());
     return ok ? (int)sh_modhud_count() : -1;

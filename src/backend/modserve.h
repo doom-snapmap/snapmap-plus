@@ -2,15 +2,16 @@
  * the resource provider, decl registration for editor rows and per-map
  * gameplay activation.
  *
- * Layout read (built by the bundle builder, never written here):
- *   <data>\mods\<id>@<version>\bundle.json      the bundle manifest
- *   <data>\mods\<id>@<version>\.state.json      {"validated": bool, "firstCause": ...}
- *   <data>\mods\<id>@<version>\assets\...       the files at engine paths
- *   <data>\mods\blobs\<sha256>                  fallback copy of any file by its blob hash
- *   <data>\mods\legacy\<id>@<digest16>\...      converted first-generation packages
- * <data> is %LOCALAPPDATA%\snapmap-plus.
+ * Layout read (Contract 5, written by the builder and the store, never here):
+ *   <data>\mods\<folder>\mod.json      the author block and the product block
+ *                                      ("snapmap-plus": hash, files, shadows, validated)
+ *   <data>\mods\<folder>\assets\...    the files at engine paths
+ *   <data>\mods\snapmap-plus.json      the product record; its "aliases" map a
+ *                                      dropped delivered copy's hash to the kept bundle
+ * <data> is %LOCALAPPDATA%\snapmap-plus. A delivered package (a "legacy"
+ * object without "source": "overrides", the retired package folder) is an ordinary folder.
  *
- * Boot reads every bundle.json, checks each file's size (never its hash) and
+ * Boot reads every mod.json, checks each file's size (never its hash) and
  * builds one immutable table from the lowercased request path to the file.
  * A stock pointer (modbundle.h) has no file to check: it was resolved at
  * install and is read from the installed game when first opened.
@@ -41,7 +42,7 @@ extern "C" {
 #define SH_MODSERVE_HASH_HEX    64
 #define SH_MODSERVE_MAX_FILES   4096u            /* per bundle, as the builder caps it */
 #define SH_MODSERVE_MAX_FILE    (64ull << 20)    /* per file */
-#define SH_MODSERVE_MAX_JSON    (1u << 20)       /* bundle.json */
+#define SH_MODSERVE_MAX_JSON    (4u << 20)       /* mod.json */
 #define SH_MODSERVE_CACHE_FILE  (1u << 20)       /* files below this are cached */
 #define SH_MODSERVE_CACHE_TOTAL (8u << 20)       /* the cache's total byte bound */
 
@@ -262,7 +263,7 @@ int sh_modserve_map_rows_sync(const char *const *bundle_hashes, int n, const sh_
 
 /* ------------------------------------------------------------------ requirements */
 
-/* A bundle.json may carry {"requirements": {"cvars": {...}}} naming the two
+/* A mod.json may carry {"requirements": {"cvars": {...}}} naming the two
  * cut-content blacklist gates with the value "0" (or 0): nothing else. The
  * index collects them per bundle; a bundle naming any other key, cvar or value
  * is skipped with that first cause. Each admitted bundle's requirements are
@@ -400,9 +401,9 @@ typedef void (*sh_modserve_bundle_fn)(void *context, const char *id, const char 
                                       int files, int legacy);
 void sh_modserve_each_bundle(sh_modserve_bundle_fn fn, void *context);
 
-/* Visit every admitted bundle whose bundle.json carries an "extra" object (the
- * descriptor keys the builder preserves, such as "strings" and "hud"), in a
- * fixed order: installed mods before bundles a map delivered (legacy\), then
+/* Visit every admitted bundle whose mod.json author block carries keys the
+ * product does not read itself (the manifest's "extra", such as "strings" and
+ * "hud"), in a fixed order: installed mods before bundles a map delivered, then
  * by id (case-insensitive), then by version. `extra` is the object's JSON
  * text; the strings stay valid for the process. Returns the number visited,
  * or -1 when the order could not be allocated (nothing is visited). Used by

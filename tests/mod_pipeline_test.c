@@ -293,7 +293,7 @@ static void fresh_mod(const char *fixture, const char *root)
     CreateDirectoryA(mods, NULL);
     CHECK(mt_copy_tree(fixture, folder));
     CHECK(modbundle_build_folder(folder, cause, sizeof cause) == 1);
-    _snprintf_s(cause, sizeof cause, _TRUNCATE, "%s\\bundle.json", folder);
+    _snprintf_s(cause, sizeof cause, _TRUNCATE, "%s\\mod.json", folder);
     CHECK(sh_mb_load(cause, &b) == 1);
 
     /* The serving index admits what the builder accepted, including raw
@@ -424,9 +424,9 @@ static void legacy_form(const char *root)
 
     printf("-- a legacy bundle: non-stock shadows build, new names register, stock shadows stay served\n");
     _snprintf_s(mods, sizeof mods, _TRUNCATE, "%s\\mods", root);
-    _snprintf_s(legacy, sizeof legacy, _TRUNCATE, "%s\\legacy", mods);
+    /* A delivered package is an ordinary folder of the store. */
+    _snprintf_s(legacy, sizeof legacy, _TRUNCATE, "%s", mods);
     _snprintf_s(folder, sizeof folder, _TRUNCATE, "%s\\local.thing@0123456789abcdef", legacy);
-    CreateDirectoryA(legacy, NULL);
     CreateDirectoryA(folder, NULL);
     mt_write(folder, "assets\\generated\\decls\\entitydef\\custom\\thing.decl",
              "{\r\n\tinherit = \"monster/imp\";\r\n\tedit = {\r\n\t\trenderModelInfo = {\r\n\t\t\tmodel = \"custom/missing.md6\";\r\n\t\t}\r\n\t}\r\n}");
@@ -442,7 +442,7 @@ static void legacy_form(const char *root)
     CHECK(sh_mb_write(&b, folder, cause, sizeof cause) == 1);
     hashes[0] = b.hash;
     desc_path = cause;
-    _snprintf_s(desc_path, sizeof cause, _TRUNCATE, "%s\\bundle.json", folder);
+    _snprintf_s(desc_path, sizeof cause, _TRUNCATE, "%s\\mod.json", folder);
     {
         sh_mb_bundle back;
         CHECK(sh_mb_load(desc_path, &back) == 1 && back.legacy == 1);
@@ -658,7 +658,7 @@ static void beta19_conversion(const char *root)
         if (v[k].verdict != SH_MODLEGACY_CONVERT) continue;
         converted++;
         CHECK(sh_modserve_bundle_state(v[k].bundle, NULL, 0) == 1);
-        _snprintf_s(bj, sizeof bj, _TRUNCATE, "%s\\bundle.json", v[k].folder);
+        _snprintf_s(bj, sizeof bj, _TRUNCATE, "%s\\mod.json", v[k].folder);
         memset(&b, 0, sizeof b);
         CHECK(sh_mb_load(bj, &b) == 1);
         for (i = 0; i < b.file_count; i++) {
@@ -735,7 +735,7 @@ static void cut_content(const char *root)
     const char *hashes[1];
     printf("-- a bundle requiring both blacklist gates: collected at index time, applied before its registration\n");
     _snprintf_s(mods, sizeof mods, _TRUNCATE, "%s\\cutmods", root);
-    _snprintf_s(folder, sizeof folder, _TRUNCATE, "%s\\legacy\\local.cut@00000000000000aa", mods);
+    _snprintf_s(folder, sizeof folder, _TRUNCATE, "%s\\local.cut@00000000000000aa", mods);
     mt_write(folder, "assets\\generated\\decls\\entitydef\\custom\\cut.decl", "{\r\n\tinherit = \"monster/imp\";\r\n}");
     mt_write(folder, "mod.json", CUT_DESC);
     CHECK(sh_mb_build(folder, &r, &b) == 1 && b.requirements != NULL);

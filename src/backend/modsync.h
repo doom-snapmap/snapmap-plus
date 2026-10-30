@@ -7,21 +7,23 @@
  * lacks the entry or holds other bytes.
  *
  * Upload (publish, lobby host, an explicit push): for every bundle, the
- * blobs the store lacks are negotiated and sent from mods\blobs\<sha>, then
- * the exact canonical manifest (bundle.canonical.json), then one claim names
+ * blobs the store lacks are negotiated and sent from the mod folder's own
+ * files, then the exact canonical manifest (derived from mod.json in memory,
+ * byte-identical to what Contract 4 always received), then one claim names
  * every bundle under the caller's ref. The claim id and its secret are kept
- * in <data>\mods\claims.json, keyed by ref; uploading for a ref that has a
- * claim re-claims with the stored secret, which replaces its bundle set. A
- * failure after the first request that a retry could fix is queued in
- * <data>\mods\pending-uploads.json and retried by modsync_retry_pending.
+ * in the "claims" section of <data>\mods\snapmap-plus.json, keyed by ref;
+ * uploading for a ref that has a claim re-claims with the stored secret,
+ * which replaces its bundle set. A failure after the first request that a
+ * retry could fix is queued in its "pending" section and retried by
+ * modsync_retry_pending.
  *
- * Download: the bundle manifest is fetched and verified against its hash,
- * the blobs the local store lacks are fetched and verified into blobs\, the
- * bundle folder is laid out exactly as an install lays it out (bundle.json,
- * bundle.canonical.json, assets\ hard-linked to the blobs, else copied),
- * verified by sh_ms_verify (which writes .state.json), and the serving index
- * is rebuilt. A bundle whose descriptor carried a "legacy" block goes under
- * legacy\, every other one under <id>@<version>+<build>\.
+ * Download: the bundle manifest is fetched and verified against its hash;
+ * each file is copied from an installed mod that holds the same bytes, else
+ * fetched, and verified; the folder <data>\mods\<id>\ (else <id>@<version>,
+ * sh_mb_folder_name) gets mod.json (an author block from the manifest and the
+ * product block) and assets\, is verified by sh_ms_verify, and the serving
+ * index is rebuilt. A bundle whose content an installed mod of the same id
+ * already serves is not stored twice: its hash is recorded as an alias.
  *
  * Every call blocks and does file and network work: never on DOOM's main
  * thread for the network calls. Calls into the store are serialised by
@@ -34,8 +36,8 @@
 #include "modnet.h"
 #include "modbundle.h"
 
-#define MODSYNC_CLAIMS_FILE  "claims.json"
-#define MODSYNC_PENDING_FILE "pending-uploads.json"
+#define MODSYNC_CLAIMS_SECTION  "claims"    /* sections of mods\snapmap-plus.json */
+#define MODSYNC_PENDING_SECTION "pending"
 #define MODSYNC_MAX_BUNDLES  MODNET_MAX_CLAIM
 
 typedef struct modsync_stats {
@@ -100,14 +102,14 @@ typedef struct modsync_install_info {
     unsigned stock_files;           /* stock pointers resolved against the installed game */
     unsigned long long bytes_fetched;
     int already_installed;
-    char rel[SH_MB_ID_MAX + 1 + 4 * SH_MB_VERSION_MAX + 1 + 20 + 8];   /* <key> or legacy\<key> */
+    char rel[SH_MB_ID_MAX + 1 + 4 * SH_MB_VERSION_MAX + 1 + 20 + 8];   /* the folder under mods\ */
 } modsync_install_info;
 
 /* Install a bundle from its canonical manifest text (whose SHA-256 must be
- * hash) with blobs from `source`: blobs the store lacks are fetched,
- * verified and written to blobs\; the folder is laid out, verified and
- * recorded. Does not rescan the serving index. Takes the store lock.
- * Returns 1 on success. */
+ * hash) with file bytes from `source` (for the files no installed mod
+ * already holds): verified, written to a new folder with mod.json, verified
+ * again and recorded. Does not rescan the serving index. Takes the store
+ * lock. Returns 1 on success. */
 int  modsync_install_manifest(const char *canonical, size_t len, const char *hash,
                               modsync_blob_source_fn source, void *context,
                               modsync_install_info *info, char *cause, size_t cause_cap);

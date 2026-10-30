@@ -9,31 +9,35 @@
  * serving index is built, does this once:
  *
  *   - every direct child folder with a descriptor is built by the normal
- *     builder into mods\<id>@<version>+<build> with blobs (modstore.c). The
- *     descriptor is the authoring descriptor: its era B or C layout is
- *     migrated to assets/ (modlegacy.c), its requirements, strings and hud are
- *     carried, every other key (composes, an era B schema) is preserved under
- *     "extra", and a "legacy" block grandfathers its non-namespaced names;
- *   - every map-<16 hex>\<package> folder is built as a legacy bundle under
- *     mods\legacy\<id>@<tree16>, keyed by the beta.16-19 tree fingerprint that
- *     is also the "smpkg.delivery.<tree>" key a map carries for it, so a later
- *     load of a map carrying the same delivery reuses it instead of converting
- *     again;
+ *     builder into mods\<folder>\ (the overrides folder's own name; with the
+ *     tree's first 8 hex when another mod holds that name) as mod.json and
+ *     assets\ (modstore.c). The author block is the package's descriptor: its
+ *     era B or C layout is migrated to assets/ (modlegacy.c), its requirements,
+ *     strings and hud are carried, every other key (composes, an era B schema)
+ *     is kept, and the product block's "legacy" record grandfathers its
+ *     non-namespaced names; package.json is not carried as a file;
+ *   - every map-<16 hex>\<package> folder is built as an ordinary mod folder
+ *     mods\<id>\, its legacy record keyed by the beta.16-19 tree fingerprint
+ *     that is also the "smpkg.delivery.<tree>" key a map carries for it, so a
+ *     later load of a map carrying the same delivery reuses it instead of
+ *     converting again; a delivery an installed mod already serves is not
+ *     stored twice;
  *   - a folder without a descriptor whose one package is a direct child
  *     folder has that child migrated under the child's id (beta.19 read such
  *     folders as groups); with none or several, it is skipped, and a ZIP and
- *     any other file are listed as skipped with the reason; two folders with one id are both built (the
- *     second under a distinct version) and the duplicate is reported;
+ *     any other file are listed as skipped with the reason; two folders with one id are both built (in
+ *     their own folders) and the duplicate is reported;
  *   - a folder over 512 MiB or 8192 files is skipped with its size;
  *   - a file byte-identical to installed game content (any archive, the
  *     .patch store included, or a loose install file) becomes a stock
- *     pointer: blobs\ never receives it, and each folder's line and the
+ *     pointer: the store never receives it, and each folder's line and the
  *     summary say how many files became pointers and how many bytes were not
  *     stored;
  *   - nothing under overrides\ is created, changed or deleted; an empty
  *     backups folder (beta.15) is removed and a non-empty one is left alone.
  *
- * The outcome per folder goes to mods\.migrated.json and to one "MODS:
+ * The outcome per folder goes to the "migration" section of
+ * mods\snapmap-plus.json (modbundle.h) and to one "MODS:
  * migration:" log line per folder plus a summary line. Folders up to
  * SH_MODMIGRATE_BOOT_BYTES and SH_MODMIGRATE_BOOT_FILES are done at boot; larger ones are done on a worker
  * thread that rebuilds the serving index when it finishes. The record is
@@ -60,7 +64,7 @@
 #define SH_MODMIGRATE_BOOT_TOTAL  (64ull << 20)    /* at most this many bytes ... */
 #define SH_MODMIGRATE_BOOT_TOTAL_FILES 256u        /* ... and files are migrated during boot */
 #define SH_MODMIGRATE_BOOT_MS     1000u            /* and no folder starts after this much boot time */
-#define SH_MODMIGRATE_RECORD      ".migrated.json"
+#define SH_MODMIGRATE_RECORD      "migration"      /* the section of mods\snapmap-plus.json */
 
 /* Per-folder outcomes in the record. */
 enum {
@@ -77,7 +81,7 @@ typedef struct sh_modmigrate_stats {
     unsigned built, converted, reused, skipped, refused, duplicates, pending;
     unsigned long long bytes;    /* bytes of the folders that were built or converted */
     unsigned pointers;           /* files that became stock pointers to installed content */
-    unsigned long long pointer_bytes;   /* their bytes: never written to blobs\ or uploaded */
+    unsigned long long pointer_bytes;   /* their bytes: never stored or uploaded */
     unsigned long long ms;       /* wall time of the pass so far */
     unsigned long long boot_ms;  /* the part done before the serving index (boot only) */
     int ran;                     /* 1 when a pass ran; 0 when it had nothing to do */

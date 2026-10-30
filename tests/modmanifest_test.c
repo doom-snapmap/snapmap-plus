@@ -445,26 +445,29 @@ static void load_step(void)
     sh_modmanifest_reset();
 }
 
-static void bundle_json(void)
+static void mod_json(void)
 {
     static const char text[] =
-        "\xef\xbb\xbf{\n  \"format\": 1, \"id\": \"alex.pink-imp\", \"version\": \"1.0.0\", \"name\": \"Pink Imp\",\n"
+        "\xef\xbb\xbf{\n  \"id\": \"Alex.Pink-Imp\", \"version\": \"1.0.0\", \"name\": \"Pink Imp\", \"x-note\": [1],\n"
+        "  \"snapmap-plus\": {\"format\": 1, \"build\": 2, \"bundle\": \"" HASH_A "\",\n"
         "  \"files\": [\n"
-        "    {\"path\": \"assets/generated/decls/md6def/mods/alex.pink-imp/imp.md6.decl\", \"blob\": \"" HASH_B "\","
-        " \"size\": 11782, \"request\": \"generated/decls/md6def/mods/alex.pink-imp/imp.md6.decl\","
-        " \"provides\": {\"type\": \"md6Def\", \"name\": \"mods/alex.pink-imp/imp.md6\"}, \"needs\": []},\n"
-        "    {\"path\": \"assets/x.bin\", \"blob\": \"" HASH_B "\", \"size\": 18, \"provides\": {\"type\": \"file\", \"name\": \"x.bin\"}}\n"
-        "  ],\n  \"bundle\": \"" HASH_A "\"\n}\n";
+        "    {\"path\": \"assets/generated/decls/md6def/mods/alex.pink-imp/imp.md6.decl\", \"sha256\": \"" HASH_B "\","
+        " \"size\": 11782, \"provides\": {\"type\": \"md6Def\", \"name\": \"mods/alex.pink-imp/imp.md6\"}, \"needs\": []},\n"
+        "    {\"path\": \"assets/x.bin\", \"sha256\": \"" HASH_B "\", \"size\": 18, \"provides\": {\"type\": \"file\", \"name\": \"x.bin\"}}\n"
+        "  ],\n  \"stock\": [{\"path\": \"assets/maps/a.sbsp\", \"sha256\": \"" HASH_B "\", \"source\": \"maps/a.sbsp\","
+        " \"provides\": {\"type\": \"file\", \"name\": \"maps/a.sbsp\"}, \"needs\": [], \"inAssets\": false}]}\n}\n";
     sh_modmanifest_row info;
     char err[160];
-    printf("-- bundle.json reader\n");
-    CHECK(sh_modmanifest_read_bundle_json(text, sizeof text - 1, &info, err, sizeof err));
+    printf("-- mod.json reader\n");
+    CHECK(sh_modmanifest_read_mod_json(text, sizeof text - 1, &info, err, sizeof err));
     CHECK(!strcmp(info.id, "alex.pink-imp") && !strcmp(info.version, "1.0.0") && !strcmp(info.bundle, HASH_A));
-    CHECK(info.size == 11800 && info.name_count == 2 && !strcmp(info.names[0], "mods/alex.pink-imp/imp.md6"));
+    CHECK(info.size == 11800 && info.name_count == 3 && !strcmp(info.names[0], "mods/alex.pink-imp/imp.md6"));
     sh_modmanifest_row_free(&info);
     {
-        static const char nohash[] = "{\"id\":\"a\",\"version\":\"1\",\"files\":[]}";
-        CHECK(!sh_modmanifest_read_bundle_json(nohash, sizeof nohash - 1, &info, err, sizeof err));
+        static const char unbuilt[] = "{\"id\":\"a\",\"version\":\"1\",\"name\":\"a\"}";
+        static const char nohash[] = "{\"id\":\"a\",\"version\":\"1\",\"snapmap-plus\":{\"files\":[]}}";
+        CHECK(!sh_modmanifest_read_mod_json(unbuilt, sizeof unbuilt - 1, &info, err, sizeof err));
+        CHECK(!sh_modmanifest_read_mod_json(nohash, sizeof nohash - 1, &info, err, sizeof err));
     }
 }
 
@@ -478,7 +481,7 @@ int main(void)
     placed_names();
     save_closure();
     load_step();
-    bundle_json();
+    mod_json();
     printf("\n%s -- %d checks, %d failed\n", g_failed ? "FAILED" : "ok", g_checks, g_failed);
     return g_failed ? 1 : 0;
 }

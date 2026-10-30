@@ -3,9 +3,9 @@
  *   map.rawmap.json                         the map text, manifest rows included
  *   export.json                             {"format":1,"map":"map.rawmap.json",
  *                                            "bundles":[{"bundle","id","version","build","folder"}]}
- *   mods/<id>@<version>+<build>/bundle.json            each bundle the rows name, as in the store
- *   mods/<id>@<version>+<build>/bundle.canonical.json
- *   mods/<id>@<version>+<build>/assets/...
+ *   mods/<id>@<version>+<build>/bundle.json            each bundle the rows name, in the
+ *   mods/<id>@<version>+<build>/bundle.canonical.json  Contract 1 bundle.json form (derived
+ *   mods/<id>@<version>+<build>/assets/...             from mod.json; the ZIP format is unchanged)
  *   mods/legacy/<id>@<version>+<build>/...  a converted first-generation bundle
  *
  * Each distinct blob is stored once in the ZIP: a file whose bytes an
@@ -16,9 +16,9 @@
  * limited to 65535 entries and 4 GiB.
  *
  * Import verifies every manifest against its hash and every blob against
- * the manifest, installs the bundles through the same layout and
- * verification a download uses (modsync_install_manifest), rebuilds the
- * serving index, and returns the map text.
+ * the manifest, installs the bundles as mod folders exactly as a download
+ * does (modsync_install_manifest: mods\<id>\ with mod.json and assets\),
+ * rebuilds the serving index, and returns the map text.
  *
  * File work only, no network. Paths are UTF-8 unless marked ACP.
  */
