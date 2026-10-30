@@ -898,10 +898,7 @@ int sh_mb_extension_allowed(const char *request)
 {
     static const char *const allowed[] = { ".decl", ".bmd6model", ".bmd6skl", ".bmd6anim", ".bimage",
                                            ".bmodel", ".bcm", ".bnk", ".json", ".bin", ".vspv",
-                                           ".fspv", ".cspv", ".mrpr", ".dmodel",
-                                           /* Lane RC research harness only: a private virtual-texture
-                                            * family member (virtualtextures/mods/<id>/<fam>_sqN.mega2). */
-                                           ".mega2", NULL };
+                                           ".fspv", ".cspv", ".mrpr", ".dmodel", NULL };
     const char *slash = strrchr(request, '/');
     const char *dot = strrchr(slash ? slash : request, '.');
     size_t i;
@@ -909,6 +906,8 @@ int sh_mb_extension_allowed(const char *request)
     for (i = 0; allowed[i]; i++) if (mb_ieq_n(dot, strlen(dot), allowed[i])) return 1;
     /* A cooked movie only where the engine asks for one (modswf.c serves it). */
     if (mb_ieq_n(dot, strlen(dot), ".bswf")) return _strnicmp(request, "generated/swf/", 14) == 0;
+    /* A virtual-texture family member only at a name the engine's loader builds. */
+    if (mb_ieq_n(dot, strlen(dot), ".mega2")) return sh_mb_vt_member(request, NULL, 0, NULL);
     /* .baas_<class>, for example .baas_monster48 */
     if (strlen(dot) > 6 && mb_ieq_n(dot, 6, ".baas_")) {
         for (i = 6; dot[i]; i++)
@@ -917,6 +916,40 @@ int sh_mb_extension_allowed(const char *request)
         return 1;
     }
     return 0;
+}
+
+/* The mega2 loader opens <path without extension>_sq1..16.mega2 for the path
+ * SetSource is given, and modvt.c gives "virtualtextures/" + the family name +
+ * ".pages", so a member's family is the request without "virtualtextures/"
+ * and "_sq<N>.mega2". The family must sit in a folder below mods/ and must not
+ * contain "_vmtr": a material whose landpagefile contains it binds the stock
+ * family instead. */
+int sh_mb_vt_member(const char *request, char *family, size_t cap, int *member)
+{
+    const char *leaf, *digits, *end;
+    size_t n, fam_len, i;
+    int num;
+    if (!request || _strnicmp(request, "virtualtextures/mods/", 21) != 0) return 0;
+    n = strlen(request);
+    if (n < 28 || _stricmp(request + n - 6, ".mega2") != 0) return 0;
+    end = request + n - 6;                                  /* the '.' of .mega2 */
+    leaf = strrchr(request, '/');
+    if (leaf <= request + 21) return 0;                     /* no <id>/ folder below mods/ */
+    for (digits = end; digits > leaf + 1 && digits[-1] >= '0' && digits[-1] <= '9'; --digits) {}
+    if (end - digits < 1 || end - digits > 2 || digits[0] == '0') return 0;
+    if (digits - 3 <= leaf + 1 || _strnicmp(digits - 3, "_sq", 3) != 0) return 0;
+    num = atoi(digits);
+    if (num < 1 || num > 16) return 0;
+    fam_len = (size_t)(digits - 3 - (request + 16));        /* "mods/<id>/.../<family>" */
+    for (i = 16; i + 5 <= 16 + fam_len; ++i)
+        if (!_strnicmp(request + i, "_vmtr", 5)) return 0;
+    if (family) {
+        if (fam_len + 1 > cap) return 0;
+        memcpy(family, request + 16, fam_len);
+        family[fam_len] = 0;
+    }
+    if (member) *member = num;
+    return 1;
 }
 
 static int mb_copy_out(char *dst, size_t cap, const char *src, size_t n)
@@ -1188,9 +1221,8 @@ static void mb_scan_value(mb_scan *sc, const mb_tok *key, const mb_tok *val)
         return;
     }
     if (mb_ieq_n(k, kn, "md6Def")) { sc->fn(sc->ctx, "md6Def", v, vn); return; }
-    /* Lane RC research harness only: renderModelInfo customMaterial names a
-     * material the decl's model is drawn with, so the editor plan registers it
-     * before the entityDef that names it. */
+    /* renderModelInfo customMaterial names the material the decl's model is
+     * drawn with, so the plan registers it before the entityDef that names it. */
     if (mb_ieq_n(k, kn, "customMaterial")) { sc->fn(sc->ctx, "material", v, vn); return; }
     if (mb_ieq_n(k, kn, "entityDef")) { sc->fn(sc->ctx, "entityDef", v, vn); return; }
     if (parent && mb_ieq_n(parent, parent_n, "buildGameRefEntityDefs") && kn > 5 && mb_ieq_n(k, 5, "item[")) {
@@ -1869,6 +1901,12 @@ static void mb_check_files(sh_mb_bundle *b, const wchar_t *root, const sh_mb_res
                 _snprintf_s(slashed, sizeof slashed, _TRUNCATE, "/%s", f->request);
                 if (!strstr(slashed, ns_raw) && !strstr(slashed, ns_raw_s))
                     mb_error(b, "%s: the path does not contain /mods/%s/ and is not listed in shadows", f->path, b->id);
+                /* A family member is named by its family, which must be the mod's own. */
+                else if (sh_mb_vt_member(f->request, NULL, 0, NULL) &&
+                         _strnicmp(slashed + 16, ns_raw, strlen(ns_raw)) != 0 &&
+                         _strnicmp(slashed + 16, ns_raw_s, strlen(ns_raw_s)) != 0)
+                    mb_error(b, "%s: a virtual-texture family member must be virtualtextures/mods/%s/<family>_sq<N>.mega2",
+                             f->path, b->id);
             }
         }
     }

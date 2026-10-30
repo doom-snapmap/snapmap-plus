@@ -932,7 +932,7 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "40 55 56 57 41 54 41 55 41 56 41 57 48 81 EC 30 01 00 00 48 8D 6C 24 40 "
       "48 C7 45 10 FE FF FF FF 48 89 9D 40 01 00 00 48 8B 05 ?? ?? ?? ??",
       0x1A4BC80u, 0x1A64C70u },
-    /* Lane RC research harness only (vt_harness.c). */
+    /* Mod virtual-texture families (modvt.c) and the sh_vt diagnostic. */
     { "VtSetSource",        /* idVirtualTexture::SetSource(rec, name, path, flavor, type, direct, reader) -> bool.
                              * Its head calls the VT-system flush with LEA RCX,[sys] and then Release(rec). */
       "40 55 53 56 57 41 54 41 55 41 56 41 57 48 8D AC 24 ?? BE FF FF B8 ?? 42 00 00 E8 ?? ?? ?? ?? "

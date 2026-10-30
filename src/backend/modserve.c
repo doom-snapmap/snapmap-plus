@@ -96,6 +96,7 @@ static SRWLOCK g_build_lock = SRWLOCK_INIT;
 static char g_last_root[MAX_PATH];
 static volatile LONG g_opens_served, g_open_failures, g_probe_claims, g_cache_hits;
 volatile LONG g_modserve_editor_ok, g_modserve_editor_failed;   /* written by modserve_engine.c */
+static sh_modserve_index_fn volatile g_index_listener;   /* modvt.c */
 
 /* ------------------------------------------------------------------ logging */
 
@@ -1663,8 +1664,11 @@ int sh_modserve_index_build(const char *mods_root)
     ms_log("index built in %.1f ms (%d bundles, %d files)%s%s", x->build_ms, x->admitted, x->served_files,
            x->nbundles > x->admitted ? "; skipped bundles are listed above" : "",
            x->conflicts ? "; conflicts are listed above" : "");
+    if (g_index_listener) g_index_listener();
     return x->admitted;
 }
+
+void sh_modserve_set_index_listener(sh_modserve_index_fn fn) { g_index_listener = fn; }
 
 int sh_modserve_index_boot(void)
 {
@@ -2622,6 +2626,19 @@ void sh_modserve_each_bundle(sh_modserve_bundle_fn fn, void *context)
         const ms_bundle *b = &x->bundles[i];
         fn(context, b->id ? b->id : b->folder, b->version ? b->version : "", b->hash ? b->hash : "",
            b->admitted, b->cause, b->file_count, b->legacy);
+    }
+}
+
+void sh_modserve_each_served(sh_modserve_file_fn fn, void *context)
+{
+    const ms_index *x = g_index;
+    int i;
+    if (!x || !fn) return;
+    for (i = 0; i < x->nfiles; ++i) {
+        const ms_file *f = &x->files[i];
+        const ms_bundle *b = &x->bundles[f->bundle];
+        if (!f->served || f->withdrawn || !b->admitted) continue;
+        fn(context, f->request, f->size, b->id ? b->id : b->folder, b->version ? b->version : "", b->hash ? b->hash : "");
     }
 }
 

@@ -35,8 +35,8 @@ param(
                            "modmigrate.c",
                            # The mod store client (WinHTTP), upload/download and the rawmap ZIP export.
                            "modnet.c", "modsync.c", "modexport.c",
-                           # Lane RC research harness only (sh_vt); never part of a release.
-                           "vt_harness.c"),
+                           # Mod virtual-texture families, and the sh_vt diagnostic.
+                           "modvt.c", "vt_harness.c"),
     [string]$Out = "XINPUT1_4.dll",
     # Diag adds SH_DIAG and the crash/environment logger for troubleshooting.
     [switch]$Diag,

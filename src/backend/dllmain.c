@@ -52,6 +52,7 @@
 #include "typeinfo.h"
 #include "megapreview.h"
 #include "vt_harness.h"
+#include "modvt.h"
 #include "imgpreview.h"
 #include "prefabpreview.h"
 #include "soundpreview.h"
@@ -369,6 +370,9 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
         /* Mod decl registration and the existence probe (needs the provider). */
         if (overrides_installed) (void)sh_modserve_install(results, db, g_doom_base);
         else backend_log("MODS: mods are not served; the override provider is not installed");
+        /* Mod virtual-texture families: SetSource per family at the first main-thread
+         * pass once the VT system is up (modvt.h). Members are served by the provider. */
+        if (overrides_installed) (void)sh_modvt_install(results, db, g_doom_base);
         /* Cooked movies (FileResource Load slot) and bundle ammo displays (modswf.h, modhud.h). */
         if (overrides_installed) (void)sh_modswf_install(results, db, g_doom_base);
         (void)sh_modhud_install(results, db);
@@ -468,7 +472,7 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
         /* Decode virtual-texture previews from installed files through the signed
          * engine page decoder; no renderer or GPU calls are needed. */
         sh_megapreview_install(results, db, g_doom_base);
-        (void)sh_vt_harness_install(results, db, g_doom_base);   /* lane RC research harness */
+        (void)sh_vt_harness_install(results, db, g_doom_base);   /* sh_vt decode */
         /* Load installed-resource indexes for file-based image previews and catalogs. */
         sh_imgpreview_install();
         /* Start bounded prefab geometry previews using the installed-resource index. */

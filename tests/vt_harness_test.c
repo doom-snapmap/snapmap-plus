@@ -1,16 +1,16 @@
-/* vt_harness_test.c -- lane RC research harness (research branch only).
+/* vt_harness_test.c -- the sh_vt diagnostic's pure helpers, and the
+ * reference family bundle end to end.
  *
  *   vt_harness_test.exe [<rctest mod folder>]
  *
- * Without an argument: the pure helpers of vt_harness.c against the byte
- * sequences of both build 13954591 executables (SetSource head, the record
- * table load in VirtualTextureForMaterial), the page-header swap and the
- * member cell lookup. With the folder made by work/laneRC/make_family.py
- * (or SH_VT_RCTEST set to it): a copy is built by the real bundle builder
- * with a stock stand-in, admitted by the real serving index, its request
- * paths looked up, and the editor plan's order checked (the material before
- * the entityDef that names it through customMaterial, the sedef last). The
- * folder holds stock game bytes, so it is not part of the repository. */
+ * Without an argument: the page-header swap and the member cell lookup (the
+ * record decoding is modvt_test.c's). With the folder made by snaphak-re's
+ * lane RC make_family.py (or SH_VT_RCTEST set to it): a copy is built by the
+ * real bundle builder with a stock stand-in, admitted by the real serving
+ * index, its request paths looked up, its family collected as modvt.c
+ * registers it, and the editor plan's order checked (the material before the
+ * entityDef that names it through customMaterial, the sedef last). The folder
+ * holds stock game bytes, so it is not part of the repository. */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <stdio.h>
@@ -20,6 +20,7 @@
 #include "../src/backend/modbundle.h"
 #include "../src/backend/modserve.h"
 #include "../src/backend/vt_harness.h"
+#include "../src/backend/modvt.h"
 #include "mod_test_util.h"
 
 static int g_failed, g_checks;
@@ -35,26 +36,12 @@ void backend_log(const char *line) { (void)line; }
 
 static void helpers(void)
 {
-    /* SetSource +0x50 (VK) and +0x4E (GL): LEA RCX,[sys]; CALL; MOV RCX,RSI; CALL Release. */
-    static const unsigned char vk[] = { 0x48, 0x89, 0xF1, 0x48, 0x8D, 0x0D, 0xB9, 0x5C, 0xE8, 0x04, 0xE8, 0x64, 0xAD,
-                                        0xF8, 0xFF, 0x48, 0x8B, 0xCE, 0xE8, 0xEC, 0xE7, 0xFF, 0xFF, 0x48, 0x8D };
-    static const unsigned char gl[] = { 0x48, 0x8D, 0x0D, 0x3B, 0xA4, 0x78, 0x03, 0xE8, 0x86, 0xAB, 0xF8, 0xFF, 0x48,
-                                        0x8B, 0xCE, 0xE8, 0x6E, 0xE7, 0xFF, 0xFF };
-    /* VirtualTextureForMaterial +0x61 (VK) / +0x81 (GL): MOV RAX,[R13+table+8]; JMP. */
-    static const unsigned char tvk[] = { 0x75, 0x0C, 0x49, 0x8B, 0x85, 0x08, 0x8B, 0x00, 0x00, 0xE9, 0x38, 0x01 };
-    static const unsigned char tgl[] = { 0x49, 0x8B, 0x85, 0x08, 0xA4, 0x00, 0x00, 0xE9, 0x38, 0x01, 0x00, 0x00 };
     unsigned char page[16] = { 0x1E, 0x1E, 0x1E, 0x0C, 0x2A, 0xE5, 0x24, 0x43, 0x2B, 0x06, 0x04, 0xE6, 0x00, 0x00, 0x60, 0x00 };
     unsigned char h[0x170];
     int i;
     unsigned run = 0;
 
     printf("-- pure helpers\n");
-    CHECK(sh_vt_find_setsource_head(vk, sizeof vk) == 3);
-    CHECK(sh_vt_find_setsource_head(gl, sizeof gl) == 0);
-    CHECK(sh_vt_find_setsource_head(gl, 10) == -1);
-    CHECK(sh_vt_find_table_disp(tvk, sizeof tvk) == 0x8B08u);
-    CHECK(sh_vt_find_table_disp(tgl, sizeof tgl) == 0xA408u);
-    CHECK(sh_vt_find_table_disp(tgl, 7) == 0);
 
     sh_vt_swap_page_header(page);
     CHECK(page[4] == 0xE5 && page[5] == 0x2A && page[0xC] == 0 && page[0xE] == 0x60 && page[0] == 0x1E);
@@ -133,6 +120,15 @@ static void fixture(const char *src)
     CHECK(sh_modserve_lookup("virtualtextures/mods/rctest/fam_sq2.mega2", &hit) == 0);
     CHECK(sh_modserve_lookup("virtualtextures/mods/rctest/fam.pages", &hit) == 0);
     CHECK(sh_modserve_lookup("generated/decls/material/mods/rctest/vtprop.decl", &hit) == 1 && hit.is_decl);
+    {
+        sh_modvt_family fam[4];
+        int nf = sh_modvt_collect(fam, 4);
+        CHECK(nf == 1 && !strcmp(fam[0].name, "mods/rctest/fam") && fam[0].members == 1u &&
+              !strcmp(fam[0].path, "virtualtextures/mods/rctest/fam.pages") &&
+              sh_modserve_lookup("virtualtextures/mods/rctest/fam_sq1.mega2", &hit) == 1 && fam[0].bytes == hit.size);
+        if (nf == 1) printf("    family %s (%s): members 0x%X, %llu bytes\n", fam[0].name, fam[0].path, fam[0].members,
+                            (unsigned long long)fam[0].bytes);
+    }
 
     CHECK(sh_modserve_plan_editor(&plan) == 3 && plan.blocked == 0);
     for (i = 0; i < plan.count; ++i) {

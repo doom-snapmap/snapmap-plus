@@ -153,6 +153,14 @@ int  sh_mb_check_request(const char *request, char *cause, size_t cause_cap);
  * generated/swf/. */
 int  sh_mb_extension_allowed(const char *request);
 
+/* A private virtual-texture family member:
+ * virtualtextures/mods/<id>/[<folders>/]<family>_sq<N>.mega2, N 1 to 16 with
+ * no leading zero, no "_vmtr" in the family. Returns 1 and, when non-NULL,
+ * the family name ("mods/<id>/.../<family>", which a material names as its
+ * landpagefile) and N; else 0. The only form in which a .mega2 is admitted.
+ * A member can never be a shadow: no stock family lives under mods/. */
+int  sh_mb_vt_member(const char *request, char *family, size_t family_cap, int *member);
+
 /* Logical name of a request path (Contract 1 table). Returns 1 and fills type
  * and name; 0 when the path is under generated/decls/ but names no known decl
  * type or an empty name. */

@@ -139,6 +139,26 @@ Checks native helpers, engine-interface contracts, frontend JavaScript and optio
   `FileResourceLoad` decodes to the recorded engine calls, its open-into helper
   calls `+0x148`, and one read-only qword (the idFileResource vtable `+0x40`)
   holds it.
+- `modvt_test.c` checks mod virtual-texture families: the builder's member
+  rule (`virtualtextures/mods/<id>/<family>_sq<N>.mega2`, N 1 to 16, no
+  `_vmtr`, the mod's own id), the families the real serving index yields (two
+  per bundle, members folded) and the index listener, then registration
+  against a fake 32-slot record table: first free records with flavor 2 and
+  the `.pages` path, rescan idempotence, a changed build released and
+  registered again, release on removal, the hold after a registration pass
+  (logged once), a record the engine took back registered again in the same
+  slot, a name another record holds never taken or released, a full table
+  refused once with the stock records and record 31 untouched, OpenGL without
+  sparse page tables refused and with them flavor 4, a refused SetSource
+  retried, and a VT system that is not up. With the executables, VtSetSource
+  and VtForMaterial resolve at their recorded addresses and the VT system,
+  Release, the record table and (OpenGL) the sparse globals decode to the
+  recorded values. `MODVT_ECHO=1` prints the log lines.
+- `vt_harness_test.c` checks the `sh_vt` decoder's page-header swap and member
+  cell lookup; with `SH_VT_RCTEST` naming the reference family bundle (built
+  by snaphak-re's lane RC `make_family.py`; it holds stock page bytes, so it is
+  not in the repository) it builds, admits and serves it, collects its family
+  as `modvt.c` registers it, and checks the editor plan's order.
 - `modhud_test.c` checks the `hud` ammo-display grammar, conflicts across
   bundles, the tree read of admitted installed and legacy bundles, and the
   call-site relay on an owned synthetic caller under a concurrent thread; with

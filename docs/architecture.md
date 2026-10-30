@@ -397,7 +397,7 @@ sharing a rawmap stays offline. Plain saves never upload. The retired
 below, and never served or written; no `package-cache` or `package-staging`
 folder is created.
 
-Eight backend files share the work:
+Nine backend files share the work:
 
 - `modbundle.c` builds a mod folder into a bundle: a SHA-256 per file, the
   logical name each file provides, the names its decls need, the namespace and
@@ -437,6 +437,10 @@ Eight backend files share the work:
   drops it, as in [Published maps and missing mods](#published-maps-and-missing-mods).
 - `modmigrate.c` moves the retired `overrides\` tree into the store once, as in
   [Migration of the retired overrides folder](#migration-of-the-retired-overrides-folder).
+- `modvt.c` registers each private virtual-texture family a bundle carries
+  (`virtualtextures/mods/<id>/<family>_sq<N>.mega2`, the builder's only form of
+  `.mega2`) as one page-source record, as in
+  [Mod virtual-texture families](#mod-virtual-texture-families).
 - `modpublish.c` uploads a map's bundles when the map is published, claims
   them under the published item, releases the claim at unpublish, and refuses
   a copy to My Maps that the map service would reject, as in
@@ -476,6 +480,46 @@ admits `.bswf` only under `generated/swf/`, names it as the consumer does
 shadow, a new one lives under `generated/swf/mods/<id>/` with its atlas
 `generated/swf/mods/<id>/<stem>.bimage` beside it. Each served movie logs
 `MODS: swf: served <request> (<bundle>) at load state N` (the first 32).
+
+### Mod virtual-texture families
+
+A material binds to a virtual-texture family only when a page-source record
+with exactly the material's `landpagefile` name exists when the material is
+parsed; otherwise the engine classifies it as a unique family and it draws
+with default images. The engine creates such a record for a private family on
+no path of its own and never reads a private family's `.vmtr` rows, so
+`modvt.c` calls `idVirtualTexture::SetSource(record, "mods/<id>/<family>",
+"virtualtextures/mods/<id>/<family>.pages", flavor, 2, 0, NULL)` per family.
+SetSource's mega2 loader opens the served `_sq1` to `_sq16` members through the
+provider; no `.pages` file is needed, and materials carry an explicit
+`virtualmapping` instead of rows.
+
+- Thread and time: DOOM's main thread, inside process heap 0, once the VT
+  system has built record 1 (`_vmtr`). The serving index calls a listener after
+  every table it publishes; on the main thread (`sh_mods install`, rescan) the
+  families are registered at once, on another thread (boot, a fetch, a
+  migration) at the next decl registration pass. Every pass (the editor
+  palette build, a map's activation) registers first and then parses, so no
+  material of a bundle is parsed before its family's record exists. A sync is
+  idempotent.
+- Records: 32 slots, records 1 to 31. Record 31 is never taken
+  (VirtualTextureForMaterial releases it on any lookup miss), no record the
+  product did not create is touched, and a family that finds 1 to 30 in use is
+  refused with one `VT:` line. Each record costs about 14 MB (11,184,810 bytes
+  of host page table for the fixed 12 levels, the reader's index and the
+  page-table image; 13.9 MB measured on Vulkan).
+- Release: when a family's bundle leaves the index (or another build replaces
+  it) and no registration pass has run since the family was registered, its
+  record is released. After a pass its materials may hold the record, and the
+  decls stay registered for the process, so the record is kept until DOOM
+  exits, with one line.
+- Renderers: flavor 2 on Vulkan; on OpenGL, flavor 4 when the AMD sparse
+  texture extension and its cvar are both set (the test the engine's own
+  lookup makes), and no registration otherwise.
+- `sh_vt` (`vt_harness.c`) is the diagnostic on the same binding: `list`
+  marks the product's records `(product)`, `sync` runs a sync, and its manual
+  `register`/`release` never touch a product record. The member format is
+  [vt-baker.md](vt-baker.md).
 
 A bundle descriptor's `hud` key (kept under `bundle.json` `extra`) selects how
 the stock ammo widget shows a weapon (`modhud.c`, the beta.19 `weapon_hud`

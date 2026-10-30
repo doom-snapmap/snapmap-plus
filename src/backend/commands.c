@@ -30,7 +30,7 @@
 #include "engine_build.h"
 #include "grid_room_native.h"
 #include "modcmd.h"
-#include "vt_harness.h"   /* lane RC research harness */
+#include "vt_harness.h"
 
 /* Engine call contracts. */
 
