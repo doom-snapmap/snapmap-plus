@@ -1231,3 +1231,129 @@ void sh_modmigrate_last(sh_modmigrate_stats *out)
     *out = g_mg_last;
     ReleaseSRWLockShared(&g_mg_lock);
 }
+
+/* --------------------------------------------------------------- pending ---- */
+
+static int mg_outcome_done(const char *o, size_t n)
+{
+    return (n == 5 && !strncmp(o, "built", 5)) || (n == 9 && !strncmp(o, "converted", 9)) ||
+           (n == 6 && !strncmp(o, "reused", 6));
+}
+
+/* What the record says about overrides\<name>: 0 not listed, 1 every listed
+ * folder of it built, converted or reused, 2 listed with another outcome
+ * (skipped or refused), 3 listed as still pending. A name covers its own row
+ * and the rows of folders inside it (map-<hex>\<package>, a nested package). */
+static int mg_record_status(const char *text, const char *name)
+{
+    mg_buf exact = {0}, prefix = {0};
+    const char *p;
+    int status = 0;
+    mg_puts(&exact, "\"folder\": ");
+    mg_putq(&exact, name);
+    mg_puts(&prefix, "\"folder\": ");
+    mg_putq(&prefix, name);
+    if (exact.failed || prefix.failed || !text) { free(exact.p); free(prefix.p); return 0; }
+    prefix.p[--prefix.n] = 0;          /* drop the closing quote ... */
+    mg_puts(&prefix, "/");             /* ... so "name/child" matches */
+    for (p = text; (p = strstr(p, "\"folder\": ")) != NULL; p++) {
+        const char *end = strchr(p, '}'), *o;
+        if (strncmp(p, exact.p, exact.n) && strncmp(p, prefix.p, prefix.n)) continue;
+        o = strstr(p, "\"outcome\": \"");
+        if (!o || (end && o > end)) continue;
+        o += 12;
+        {
+            const char *q = strchr(o, '"');
+            size_t n = q ? (size_t)(q - o) : 0;
+            int s = mg_outcome_done(o, n) ? 1 : (n == 7 && !strncmp(o, "pending", 7)) ? 3 : 2;
+            if (s > status) status = s;
+        }
+    }
+    free(exact.p);
+    free(prefix.p);
+    return status;
+}
+
+static unsigned long long mg_unix_time(const FILETIME *ft)
+{
+    unsigned long long t = ((unsigned long long)ft->dwHighDateTime << 32) | ft->dwLowDateTime;
+    return t > 116444736000000000ull ? (t - 116444736000000000ull) / 10000000ull : 0;
+}
+
+/* The newest write time of the entry and, for a folder, of its descriptor:
+ * adding, removing or editing either marks a refused or skipped folder as
+ * changed since the record. */
+static unsigned long long mg_changed_at(const wchar_t *path, const WIN32_FIND_DATAW *fd)
+{
+    unsigned long long at = mg_unix_time(&fd->ftLastWriteTime);
+    static const wchar_t *const desc[] = { L"package.json", L"mod.json" };
+    size_t i;
+    if (!(fd->dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) return at;
+    for (i = 0; i < 2; i++) {
+        WIN32_FILE_ATTRIBUTE_DATA a;
+        wchar_t *f = mg_wjoin(path, desc[i]);
+        if (f && GetFileAttributesExW(f, GetFileExInfoStandard, &a)) {
+            unsigned long long t = mg_unix_time(&a.ftLastWriteTime);
+            if (t > at) at = t;
+        }
+        free(f);
+    }
+    return at;
+}
+
+int sh_modmigrate_pending(unsigned *entries)
+{
+    char root[MAX_PATH];
+    wchar_t *overrides = NULL, *record = NULL, *pattern = NULL;
+    char *text = NULL;
+    unsigned long long migrated_at = 0;
+    unsigned pending = 0, seen = 0;
+    WIN32_FIND_DATAW fd;
+    HANDLE h;
+    if (entries) *entries = 0;
+    if (!mg_data_root(root, sizeof root)) return -1;
+    overrides = mg_wide(root, MG_OVERRIDES);
+    record = mg_wide(root, "mods\\" SH_MODMIGRATE_RECORD);
+    if (!overrides || !record) { free(overrides); free(record); return -1; }
+    if (!mg_is_dir(overrides)) { free(overrides); free(record); return 0; }
+    h = CreateFileW(record, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING,
+                    FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h != INVALID_HANDLE_VALUE) {
+        LARGE_INTEGER size;
+        if (GetFileSizeEx(h, &size) && size.QuadPart > 0 && size.QuadPart < (32ll << 20)) {
+            DWORD got = 0;
+            text = (char *)malloc((size_t)size.QuadPart + 1);
+            if (text && ReadFile(h, text, (DWORD)size.QuadPart, &got, NULL)) text[got] = 0;
+            else { free(text); text = NULL; }
+        }
+        CloseHandle(h);
+    }
+    if (text) {
+        const char *m = strstr(text, "\"migratedAt\": ");
+        if (m) migrated_at = _strtoui64(m + 14, NULL, 10);
+    }
+    pattern = mg_wjoin(overrides, L"*");
+    h = pattern ? FindFirstFileExW(pattern, FindExInfoBasic, &fd, FindExSearchNameMatch, NULL, 0) : INVALID_HANDLE_VALUE;
+    if (h != INVALID_HANDLE_VALUE) {
+        do {
+            char *name;
+            wchar_t *path;
+            int status;
+            if (!wcscmp(fd.cFileName, L".") || !wcscmp(fd.cFileName, L"..")) continue;
+            seen++;
+            name = sh_mb_utf8(fd.cFileName);
+            path = mg_wjoin(overrides, fd.cFileName);
+            status = name ? mg_record_status(text, name) : 0;
+            if (status == 0 || status == 3 || (status == 2 && path && mg_changed_at(path, &fd) > migrated_at)) pending++;
+            free(name);
+            free(path);
+        } while (FindNextFileW(h, &fd));
+        FindClose(h);
+    }
+    free(pattern);
+    free(text);
+    free(overrides);
+    free(record);
+    if (entries) *entries = seen;
+    return (int)pending;
+}

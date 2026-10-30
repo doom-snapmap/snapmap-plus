@@ -10,7 +10,9 @@
  * and --again repeats it identically, that a map carrying the same delivery
  * (or the same authored tree) is answered by the migrated bundle without a
  * conversion, and the boot split: small folders before the index, the large
- * one on the worker, then the record completes.
+ * one on the worker, then the record completes. The Mods tab's Migrate button
+ * follows sh_modmigrate_pending: entries the record does not list, and
+ * skipped or refused ones changed since it was written.
  *
  * Links the real builder, store and legacy converter; the serving index and
  * the product's builder entry are the seam stub (mod_seam_stub.c), whose
@@ -561,6 +563,47 @@ static DWORD WINAPI mg_hold_thread(void *p)
     return 0;
 }
 
+/* What the Mods tab's Migrate button counts. */
+static void pending_entries(const char *root)
+{
+    char ov[MAX_PATH], path[MAX_PATH * 2];
+    sh_modmigrate_stats st;
+    unsigned entries = 99;
+    printf("-- pending: entries the record does not cover, and changed skipped ones\n");
+    CreateDirectoryA(root, NULL);
+    _snprintf_s(ov, sizeof ov, _TRUNCATE, "%s\\overrides", root);
+    configure(root);
+    CHECK(sh_modmigrate_pending(&entries) == 0 && entries == 0);   /* no overrides folder */
+    put_file(ov, "tiny/package.json", "{\"id\": \"tiny\", \"name\": \"Tiny\"}");
+    put_file(ov, "tiny/assets/generated/decls/entitydef/tiny/t.decl", DECL_A);
+    put_file(ov, "packed.zip", "PK");
+    CHECK(sh_modmigrate_pending(&entries) == 2 && entries == 2);   /* no record yet */
+    CHECK(sh_modmigrate_run(0, &st) == 1 && st.built == 1 && st.skipped == 1);
+    CHECK(sh_modmigrate_pending(&entries) == 0 && entries == 2);   /* built, and skipped unchanged */
+    put_file(ov, "later/package.json", "{\"id\": \"later\", \"name\": \"Later\"}");
+    put_file(ov, "later/assets/generated/decls/entitydef/later/t.decl", DECL_A);
+    CHECK(sh_modmigrate_pending(&entries) == 1 && entries == 3);   /* a folder added after the pass */
+    {
+        /* The skipped ZIP written after the record: the player replaced it. */
+        HANDLE h;
+        FILETIME ft;
+        ULARGE_INTEGER t;
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\packed.zip", ov);
+        h = CreateFileA(path, FILE_WRITE_ATTRIBUTES, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+        CHECK(h != INVALID_HANDLE_VALUE);
+        GetSystemTimeAsFileTime(&ft);
+        t.LowPart = ft.dwLowDateTime;
+        t.HighPart = ft.dwHighDateTime;
+        t.QuadPart += 120ull * 10000000ull;
+        ft.dwLowDateTime = t.LowPart;
+        ft.dwHighDateTime = t.HighPart;
+        if (h != INVALID_HANDLE_VALUE) { SetFileTime(h, NULL, NULL, &ft); CloseHandle(h); }
+    }
+    CHECK(sh_modmigrate_pending(&entries) == 2);
+    CHECK(sh_modmigrate_run(1, &st) == 1 && st.built == 2);
+    CHECK(sh_modmigrate_pending(&entries) == 1);                   /* the ZIP is still newer than the record */
+}
+
 static void store_lock_contention(const char *root)
 {
     char ov[MAX_PATH], path[MAX_PATH * 2], mod[MAX_PATH * 2], key[SH_MS_KEY_MAX + 1], cause[SH_MB_CAUSE_MAX];
@@ -626,6 +669,9 @@ int main(void)
     remove_tree(root);
     _snprintf_s(root, sizeof root, _TRUNCATE, "%ssmp_modmigrate_%lu_e", base, GetCurrentProcessId());
     store_lock_contention(root);
+    remove_tree(root);
+    _snprintf_s(root, sizeof root, _TRUNCATE, "%ssmp_modmigrate_%lu_f", base, GetCurrentProcessId());
+    pending_entries(root);
     remove_tree(root);
     sh_modmigrate_set_data_root(NULL);
     sh_modlegacy_set_data_root(NULL);

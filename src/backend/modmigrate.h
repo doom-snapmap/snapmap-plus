@@ -111,6 +111,14 @@ int sh_modmigrate_busy(void);
 /* Wait up to `ms` for the worker; 1 when it is idle. */
 int sh_modmigrate_wait(unsigned ms);
 
+/* Entries of overrides\ that a pass would still pick up: not in the record,
+ * listed as pending, or skipped or refused and changed (the entry or its
+ * descriptor written) since the record was written. Built, converted and
+ * reused entries never count. Returns the count (0 when there is no
+ * overrides\ folder) and sets *entries to the entries looked at, or -1 when
+ * the data folder cannot be resolved. File reads only. */
+int sh_modmigrate_pending(unsigned *entries);
+
 /* The statistics of the last pass (or the running one). */
 void sh_modmigrate_last(sh_modmigrate_stats *out);
 

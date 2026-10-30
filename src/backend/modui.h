@@ -1,23 +1,26 @@
 /* modui.h -- the WebView Mods tab's backend (the `mods` interface slot).
  *
- * One JSON document describes the installed mods and the open map:
- *   bundles   every folder in the store (modstore enumeration) with its state
- *             in the serving index (sh_modserve_bundle_state, sh_modserve_lookup):
- *             active, legacy (an active converted package), superseded (a newer
- *             build of the same mod serves its paths), unindexed (installed
- *             after the last rescan) or skipped (with the first cause)
+ * One JSON document describes what a player needs to see:
+ *   mods      one row per installed mod. The store's folders (modstore
+ *             enumeration) are grouped by id; the row shows the build that
+ *             serves (sh_modserve_bundle_state, sh_modserve_lookup), else the
+ *             newest, and counts the other builds. Two folders declaring one
+ *             id (the overrides folder a migrated bundle came from, or a
+ *             folder built in place, differ) are a row each, marked
+ *             duplicateId. A row is "installed" when its build serves with no
+ *             warning, else "attention" with the first cause. Map-delivered
+ *             bundles under legacy\ are not listed.
+ *   migrate   whether the retired overrides\ folder holds entries the
+ *             migration record does not cover (sh_modmigrate_pending)
  *   map       the manifest rows the last map load carried (modmanifest's
  *             current record), each with whether its bundle is installed and
  *             active, and the bundles the placed entities resolve to now (the
  *             save-time closure, modserve_bundles_for_names_visit)
- *   shadows   request paths an admitted bundle shadows, grouped by path: stock
- *             shadows, legacy shadows and conflicts (several mods provide the
- *             path with different bytes: "resolution" says whether one copy was
- *             chosen, the list entries of all were composed, the winner was
- *             withdrawn, or nothing serves it, and "reason" says why)
- * and the actions are the sh_mods verbs the console runs: install a folder,
- * verify, rescan, palette rebuild, and the conservative removal of builds that
- * a newer build of the same mod fully covers.
+ * The actions are install a folder, remove a listed mod, migrate, rescan, and
+ * the older verify, palette rebuild and removal of covered builds, which the
+ * tab no longer offers. What the tab stopped showing (every bundle's state,
+ * legacy ones included, conflicts with their winners, shadows, verification)
+ * is printed by sh_modui_doctor, the `sh_mods doctor` console verb.
  *
  * Threads: every operation except FETCH and ROOT runs on DOOM's main thread
  * (the frontend calls the slot inside run_on_main), serialized with the
@@ -57,6 +60,10 @@ typedef struct sh_modui_engine {
     /* Existence of an installed game resource: 1 present, 0 absent, -1 the
      * reader is unavailable (stock shadows and needs cannot be checked). */
     int (*stock_exists)(const char *request);
+    /* The overrides migration (modmigrate.h; none in a SH_MODUI_PURE build). */
+    int (*migrate_pending)(unsigned *entries);   /* sh_modmigrate_pending */
+    int (*migrate_start)(int again);             /* sh_modmigrate_start */
+    int (*migrate_busy)(void);                   /* sh_modmigrate_busy */
 } sh_modui_engine;
 
 /* Bind the engine operations. NULL binds only the product defaults: no
@@ -69,10 +76,27 @@ int  sh_modui_list(void);
 
 /* Run one action (SH_MODS_ACT_*) and keep its result document
  * {"action","ok","message",...} in the shared buffer. `arg` is the folder for
- * INSTALL (absolute), the key for VERIFY ("" verifies every installed build)
- * and newline-separated keys for PRUNE_APPLY. Returns the result length, or -1
- * when refused before the action ran. */
+ * INSTALL (absolute), the key for VERIFY ("" verifies every installed build),
+ * newline-separated keys for PRUNE_APPLY and a row's key for REMOVE, which
+ * removes every build of that row unless the open map uses one. A laid-out
+ * build is deleted; a folder built in place is moved out of the store to
+ * snapmap-plus\removed-mods\. MIGRATE starts the migration on its worker
+ * (sh_modui_wait follows it). Returns the result length, or -1 when refused
+ * before the action ran. */
 int  sh_modui_run(int action, const char *arg);
+
+/* Wait up to `ms` for a migration to finish. 1 idle, 0 still running. Any thread. */
+int  sh_modui_wait(unsigned ms);
+
+/* One console line (no newline). */
+typedef void (*sh_modui_line_fn)(void *context, const char *line);
+
+/* `sh_mods doctor [verify]`: every store folder with its state and cause
+ * (legacy ones included), duplicate ids, the migration's pending entries,
+ * conflicts with their winners, shadows, and with `verify` a rehash of every
+ * build. Each line starts "MODS: doctor:". Returns 1, or -1 off the main
+ * thread or out of memory. */
+int  sh_modui_doctor(int verify, sh_modui_line_fn line, void *context);
 
 /* Copy the shared buffer. Returns 1 copied, -1 when out is NULL or too small
  * (*needed set), 0 when nothing has been built. */

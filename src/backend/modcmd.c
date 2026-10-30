@@ -19,6 +19,7 @@
 #include "apply_engine.h"
 #include "modmigrate.h"
 #include "modstock.h"
+#include "modui.h"
 
 /* A stock resource every 13954591 SnapMap install ships; reading it proves the
  * installed-resource reader works before its answers are trusted. */
@@ -573,6 +574,13 @@ static int mc_store_command(idCmdArgs *a, const char *verb)
     return 0;
 }
 
+/* sh_modui_doctor's lines: the backend log and the console, as every MODS: line. */
+static void mc_doctor_line(void *context, const char *line)
+{
+    (void)context;
+    mc_line("%s", line);
+}
+
 void h_sh_mods(idCmdArgs *a)
 {
     const char *verb = cmd_argv(a, 1);
@@ -605,6 +613,16 @@ void h_sh_mods(idCmdArgs *a)
         return;
     }
     if (!_stricmp(verb, "list")) { mc_list(); return; }
+    if (!_stricmp(verb, "doctor")) {
+        /* What the Mods tab does not show (modui.c): every bundle's state, duplicate ids,
+         * migration, conflicts, shadows and, with 'verify', a rehash of every build. */
+        const char *flag = cmd_argv(a, 2);
+        int verify = flag && !_stricmp(flag, "verify");
+        if (flag && flag[0] && !verify) { sh_printf("usage: sh_mods doctor [verify]\n"); return; }
+        if (sh_modui_doctor(verify, mc_doctor_line, NULL) < 0)
+            mc_line("MODS: doctor: refused (not on the game's main thread, or out of memory)");
+        return;
+    }
     mc_join_args(a, 2, arg, sizeof arg);
     if (!_stricmp(verb, "verify")) {
         if (!arg[0]) { sh_printf("usage: sh_mods verify \"<id@version+build>\"\n"); return; }

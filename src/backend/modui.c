@@ -12,9 +12,11 @@
 #include "modserve.h"
 #include "modmanifest.h"
 #include "backend_log.h"
+#include "config_json.h"
 #ifndef SH_MODUI_PURE
 #include "overrides.h"
 #include "modstock.h"
+#include "modmigrate.h"
 #endif
 
 /* A stock resource every 13954591 SnapMap install ships (as modcmd.c probes):
@@ -26,6 +28,7 @@
 #define MU_MAX_ROW_NAMES     12     /* names listed per map bundle; the count is always reported */
 #define MU_MAX_PLACED        65536  /* distinct placed names read from the map */
 #define MU_NAME_MAX          512
+#define MU_ORIGIN_MAX        600    /* "overrides\<folder>" or "mods\<folder>" */
 
 /* ------------------------------------------------------------------ state */
 
@@ -80,6 +83,9 @@ static void mu_defaults(sh_modui_engine *e)
     e->rescan = sh_modserve_index_rescan;
     e->palette_rebuild = modserve_palette_rebuild_requested;
     e->stock_exists = mu_default_stock;
+    e->migrate_pending = sh_modmigrate_pending;
+    e->migrate_start = sh_modmigrate_start;
+    e->migrate_busy = sh_modmigrate_busy;
 #endif
 }
 
@@ -92,6 +98,9 @@ void sh_modui_bind(const sh_modui_engine *engine)
         if (engine->rescan) g_engine.rescan = engine->rescan;
         if (engine->palette_rebuild) g_engine.palette_rebuild = engine->palette_rebuild;
         if (engine->stock_exists) g_engine.stock_exists = engine->stock_exists;
+        if (engine->migrate_pending) g_engine.migrate_pending = engine->migrate_pending;
+        if (engine->migrate_start) g_engine.migrate_start = engine->migrate_start;
+        if (engine->migrate_busy) g_engine.migrate_busy = engine->migrate_busy;
     }
     g_engine_bound = 1;
 }
@@ -226,12 +235,23 @@ typedef struct mu_entry {
     int shadows;
     int legacy;                  /* under legacy\ or a "legacy" descriptor block */
     int admitted;                /* sh_modserve_bundle_state == 1 */
+    int row;                     /* its row in the tab, -1 for a legacy\ bundle */
+    char origin[MU_ORIGIN_MAX];  /* where it came from, "" when the store cannot tell */
 } mu_entry;
+
+/* One row of the tab: a mod as the player sees it. */
+typedef struct mu_row {
+    int serving;                 /* the entry shown: the build that serves, else the newest */
+    int builds;                  /* entries in the row */
+    int duplicate;               /* another row declares the same id from another folder */
+} mu_row;
 
 typedef struct mu_model {
     sh_ms_list list;
     int listed;
     mu_entry *entries;
+    mu_row *rows;
+    size_t row_count;
     char root[MAX_PATH * 4];
     int root_ok;
 } mu_model;
@@ -272,7 +292,95 @@ static void mu_model_free(mu_model *m)
 {
     if (m->listed) sh_ms_list_free(&m->list);
     free(m->entries);
+    free(m->rows);
     memset(m, 0, sizeof *m);
+}
+
+/* Where an entry came from, as far as the store can tell: the overrides
+ * folder the migration built it from (its "legacy" block), or its own folder
+ * when it was built in place (dropped into mods\ by hand). A laid-out copy
+ * installed from elsewhere says nothing: it may be any build of its mod. */
+static void mu_origin(const sh_ms_entry *e, char *out, size_t cap)
+{
+    out[0] = 0;
+    if (e->loaded && e->bundle.extra) {
+        sh_json_object extra, legacy;
+        const char *lv, *fv;
+        memset(&extra, 0, sizeof extra);
+        memset(&legacy, 0, sizeof legacy);
+        if (sh_json_parse_object(e->bundle.extra, strlen(e->bundle.extra), 16, &extra)) {
+            lv = sh_json_object_get(&extra, "legacy");
+            if (lv && lv[0] == '{' && sh_json_parse_object(lv, strlen(lv), 16, &legacy)) {
+                char folder[MU_ORIGIN_MAX];
+                size_t n = 0;
+                fv = sh_json_object_get(&legacy, "folder");
+                if (fv && fv[0] == '"' && sh_json_decode_string(fv, strlen(fv), folder, sizeof folder, &n) && n)
+                    _snprintf_s(out, cap, _TRUNCATE, "overrides\\%s", folder);   /* in the retired package folder */
+                sh_json_object_free(&legacy);
+            }
+            sh_json_object_free(&extra);
+        }
+        if (out[0]) return;
+    }
+    if (_stricmp(mu_leaf(e->folder), e->key)) _snprintf_s(out, cap, _TRUNCATE, "mods\\%s", mu_leaf(e->folder));
+}
+
+/* Which build of a row is shown: one that serves, then a superseded one,
+ * then one waiting for a scan, then a skipped one; the newest among equals. */
+static int mu_rank(const mu_entry *u)
+{
+    if (u->admitted && strcmp(u->state, "superseded")) return 3;
+    if (u->admitted) return 2;
+    return !strcmp(u->state, "unindexed") ? 1 : 0;
+}
+
+/* Group the entries into rows: every build of one id is one row, unless
+ * several known origins declare the id (two different folders), when each
+ * origin is its own row and every one of them is a duplicate. An entry
+ * without an id (unbuilt) is a row of its own. legacy\ is not listed. */
+static int mu_model_rows(mu_model *m)
+{
+    size_t i, k, n = m->list.count;
+    m->rows = (mu_row *)calloc(n ? n : 1, sizeof *m->rows);
+    if (!m->rows) return 0;
+    for (i = 0; i < n; i++) m->entries[i].row = -1;
+    for (i = 0; i < n; i++) {
+        mu_entry *u = &m->entries[i];
+        const sh_ms_entry *e = u->e;
+        mu_row *r;
+        int split = 0;
+        if (e->legacy || u->row >= 0) continue;
+        r = &m->rows[m->row_count];
+        r->serving = (int)i;
+        r->builds = 0;
+        if (e->loaded) {
+            const char *first = NULL;
+            for (k = 0; k < n && !split; k++) {
+                const mu_entry *o = &m->entries[k];
+                if (o->e->legacy || !o->e->loaded || strcmp(o->e->bundle.id, e->bundle.id) || !o->origin[0]) continue;
+                if (!first) first = o->origin;
+                else if (_stricmp(first, o->origin)) split = 1;
+            }
+        }
+        for (k = i; k < n; k++) {
+            mu_entry *o = &m->entries[k];
+            if (o->row >= 0 || o->e->legacy) continue;
+            if (k != i) {
+                if (!e->loaded || !o->e->loaded || strcmp(o->e->bundle.id, e->bundle.id)) continue;
+                if (split && _stricmp(o->origin, u->origin)) continue;
+            }
+            o->row = (int)m->row_count;
+            r->builds++;
+            if (k != i) {
+                const mu_entry *s = &m->entries[r->serving];
+                int a = mu_rank(o), b = mu_rank(s);
+                if (a > b || (a == b && mu_newer(o->e, s->e))) r->serving = (int)k;
+            }
+        }
+        r->duplicate = split;
+        m->row_count++;
+    }
+    return 1;
 }
 
 static int mu_model_build(mu_model *m)
@@ -291,6 +399,7 @@ static int mu_model_build(mu_model *m)
         u->e = e;
         u->superseded_by = -1;
         u->legacy = e->legacy || (e->loaded && e->bundle.legacy);
+        mu_origin(e, u->origin, sizeof u->origin);
         if (e->loaded)
             for (k = 0; k < e->bundle.file_count; k++) {
                 const sh_mb_file *f = &e->bundle.files[k];
@@ -317,12 +426,12 @@ static int mu_model_build(mu_model *m)
                 strncpy_s(u->cause, sizeof u->cause, e->cause[0] ? e->cause : "unusable", _TRUNCATE);
             } else {
                 u->state = "unindexed";
-                strncpy_s(u->cause, sizeof u->cause, "not in the serving index yet; Rescan to use it", _TRUNCATE);
+                strncpy_s(u->cause, sizeof u->cause, "not in the serving index yet; it is used after the next scan", _TRUNCATE);
             }
             continue;
         }
         if (!sh_ms_entry_usable(e) && e->cause[0])
-            _snprintf_s(u->cause, sizeof u->cause, _TRUNCATE, "%s; Verify to check the build", e->cause);
+            _snprintf_s(u->cause, sizeof u->cause, _TRUNCATE, "%s; 'sh_mods doctor verify' checks the build", e->cause);
         u->admitted = 1;
         u->state = u->legacy ? "legacy" : "active";
     }
@@ -354,14 +463,17 @@ static int mu_model_build(mu_model *m)
         }
         if (u->superseded_paths) u->state = "superseded";
     }
-    return 1;
+    return mu_model_rows(m);
 }
 
-static void mu_put_bundle(mu_buf *b, const mu_model *m, size_t i)
+/* One row of the tab. "attention" carries the shown build's first cause; a
+ * duplicate id is attention whatever its build's state. */
+static void mu_put_row(mu_buf *b, const mu_model *m, const mu_row *r)
 {
-    const mu_entry *u = &m->entries[i];
+    const mu_entry *u = &m->entries[r->serving];
     const sh_ms_entry *e = u->e;
     const sh_mb_bundle *bd = &e->bundle;
+    int ok = u->admitted && !u->cause[0] && !r->duplicate;
     mu_putn(b, "{", 1);
     mu_kstr(b, "key", e->key, 1);
     mu_kstr(b, "id", e->loaded ? bd->id : "", 0);
@@ -369,22 +481,46 @@ static void mu_put_bundle(mu_buf *b, const mu_model *m, size_t i)
     mu_kstr(b, "author", e->loaded && bd->author ? bd->author : "", 0);
     mu_kstr(b, "version", e->loaded ? bd->version : "", 0);
     mu_knum(b, "build", e->loaded ? bd->build : 0, 0);
-    mu_kstr(b, "hash", e->loaded ? bd->hash : "", 0);
     mu_knum(b, "size", e->loaded ? bd->total_size : 0, 0);
     mu_knum(b, "files", e->loaded ? bd->file_count : 0, 0);
     /* Of the files, stock pointers: served from the installed game, not stored. */
     mu_knum(b, "pointers", e->loaded ? bd->stock_count : 0, 0);
-    mu_kstr(b, "state", u->state, 0);
-    mu_kstr(b, "cause", u->cause, 0);
-    mu_kbool(b, "legacy", u->legacy, 0);
-    mu_kbool(b, "verified", e->has_state && e->validated, 0);
-    mu_kint(b, "installedAt", e->installed_at, 0);
+    mu_kstr(b, "state", ok ? "installed" : "attention", 0);
+    mu_kstr(b, "cause", ok ? "" : u->cause, 0);
+    mu_knum(b, "otherBuilds", (unsigned)(r->builds > 0 ? r->builds - 1 : 0), 0);
+    mu_kbool(b, "duplicateId", r->duplicate, 0);
     mu_knum(b, "editorRows", (unsigned)u->editor_rows, 0);
-    mu_knum(b, "shadows", (unsigned)u->shadows, 0);
-    mu_knum(b, "supersededPaths", (unsigned)u->superseded_paths, 0);
-    mu_kstr(b, "supersededBy", u->superseded_by >= 0 ? m->list.items[u->superseded_by].key : "", 0);
     mu_kstr(b, "folder", mu_leaf(e->folder), 0);
     mu_putn(b, "}", 1);
+}
+
+/* Whether overrides\ still holds entries to migrate, and whether a migration runs. */
+static void mu_put_migrate(mu_buf *b)
+{
+    const sh_modui_engine *e = mu_engine();
+    unsigned entries = 0;
+    int pending = e->migrate_pending ? e->migrate_pending(&entries) : 0;
+    mu_puts(b, ",\"migrate\":{");
+    mu_knum(b, "entries", entries, 1);
+    mu_knum(b, "pending", (unsigned)(pending > 0 ? pending : 0), 0);
+    mu_kbool(b, "running", e->migrate_busy && e->migrate_busy() == 1, 0);
+    mu_putn(b, "}", 1);
+}
+
+/* ------------------------------------------------------------------ console lines */
+
+typedef struct mu_out { sh_modui_line_fn fn; void *context; } mu_out;
+
+static void mu_say(const mu_out *o, const char *fmt, ...)
+{
+    char line[1024];
+    va_list ap;
+    if (!o || !o->fn) return;
+    memcpy(line, "MODS: doctor: ", 14);
+    va_start(ap, fmt);
+    _vsnprintf_s(line + 14, sizeof line - 14, _TRUNCATE, fmt, ap);
+    va_end(ap);
+    o->fn(o->context, line);
 }
 
 /* ------------------------------------------------------------------ shadows and conflicts */
@@ -399,12 +535,14 @@ static int mu_path_cmp(const void *a, const void *b)
 }
 
 /* Every path an admitted bundle shadows, and every admitted path nobody serves
- * (two bundles provide it with different bytes), grouped by path. */
-static void mu_put_shadows(mu_buf *b, const mu_model *m)
+ * (two bundles provide it with different bytes), grouped by path: conflicts
+ * first, with the copy that serves and why, then stock and legacy shadows. */
+static void mu_print_shadows(const mu_out *o, const mu_model *m)
 {
     mu_path *paths = NULL;
-    size_t n = 0, cap = 0, i, k, groups = 0, sent = 0;
+    size_t n = 0, cap = 0, i, k, printed = 0, groups = 0;
     unsigned stock = 0, legacy = 0, conflicts = 0;
+    int pass;
     for (i = 0; i < m->list.count; i++) {
         const mu_entry *u = &m->entries[i];
         if (!u->admitted) continue;
@@ -417,7 +555,7 @@ static void mu_put_shadows(mu_buf *b, const mu_model *m)
             if (n == cap) {
                 size_t nc = cap ? cap * 2 : 64;
                 mu_path *np = (mu_path *)realloc(paths, nc * sizeof *np);
-                if (!np) { b->oom = 1; free(paths); return; }
+                if (!np) { free(paths); mu_say(o, "shadows: out of memory"); return; }
                 paths = np;
                 cap = nc;
             }
@@ -429,57 +567,53 @@ static void mu_put_shadows(mu_buf *b, const mu_model *m)
         }
     }
     if (n > 1) qsort(paths, n, sizeof *paths, mu_path_cmp);
-    mu_puts(b, ",\"shadows\":[");
-    for (i = 0; i < n;) {
-        size_t j = i + 1, q;
-        int conflict = paths[i].conflict, any_legacy = m->entries[paths[i].entry].legacy, shadow = paths[i].shadow;
-        const char *kind;
-        sh_modserve_hit hit;
-        while (j < n && !strcmp(paths[j].request, paths[i].request)) {
-            conflict |= paths[j].conflict;
-            shadow |= paths[j].shadow;
-            any_legacy |= m->entries[paths[j].entry].legacy;
-            j++;
-        }
-        kind = conflict ? "conflict" : any_legacy ? "legacy" : "stock";
-        if (conflict) conflicts++;
-        else if (any_legacy) legacy++;
-        else stock++;
-        groups++;
-        if (sent < MU_MAX_SHADOW_GROUPS) {
-            int served = sh_modserve_lookup(paths[i].request, &hit) ? mu_find_hash(m, hit.bundle_hash) : -1;
-            if (sent) mu_putn(b, ",", 1);
-            mu_putn(b, "{", 1);
-            mu_kstr(b, "request", paths[i].request, 1);
-            mu_kstr(b, "kind", kind, 0);
-            mu_kbool(b, "shadow", shadow, 0);
-            mu_kstr(b, "served", served >= 0 ? m->list.items[served].key : "", 0);
-            /* The serving copy is a stock pointer: the installed game's bytes. */
-            mu_kbool(b, "installed", served >= 0 && hit.is_stock, 0);
+    for (pass = 0; pass < 2; pass++)
+        for (i = 0; i < n;) {
+            size_t j = i + 1, q, at = 0;
+            int conflict = paths[i].conflict, any_legacy = m->entries[paths[i].entry].legacy, served;
+            char who[700];
+            sh_modserve_hit hit;
+            while (j < n && !strcmp(paths[j].request, paths[i].request)) {
+                conflict |= paths[j].conflict;
+                any_legacy |= m->entries[paths[j].entry].legacy;
+                j++;
+            }
+            if (conflict != (pass == 0)) { i = j; continue; }
+            if (conflict) conflicts++;
+            else if (any_legacy) legacy++;
+            else stock++;
+            groups++;
+            if (printed >= MU_MAX_SHADOW_GROUPS) { i = j; continue; }
+            who[0] = 0;
+            for (q = i; q < j && at < sizeof who - 1; q++) {
+                int w = _snprintf_s(who + at, sizeof who - at, _TRUNCATE, "%s%s", q > i ? ", " : "",
+                                    m->list.items[paths[q].entry].key);
+                if (w < 0) break;
+                at += (size_t)w;
+            }
+            served = sh_modserve_lookup(paths[i].request, &hit) ? mu_find_hash(m, hit.bundle_hash) : -1;
             if (conflict) {
                 sh_modserve_conflict ci;
                 int known = sh_modserve_conflict_info(paths[i].request, &ci);
-                mu_kstr(b, "resolution", !known ? "neither" : ci.withdrawn ? "withdrawn" : ci.composed ? "composed" : "chosen", 0);
-                mu_kstr(b, "reason", known ? ci.reason : "", 0);
-            }
-            mu_key(b, "bundles", 0);
-            mu_putn(b, "[", 1);
-            for (q = i; q < j; q++) {
-                if (q > i) mu_putn(b, ",", 1);
-                mu_str(b, m->list.items[paths[q].entry].key);
-            }
-            mu_puts(b, "]}");
-            sent++;
+                if (!known || served < 0)
+                    mu_say(o, "conflict %s: nothing serves it; from %s", paths[i].request, who);
+                else if (ci.withdrawn)
+                    mu_say(o, "conflict %s: withdrawn, the game copy serves (%s); from %s", paths[i].request, ci.reason, who);
+                else if (ci.composed)
+                    mu_say(o, "conflict %s: composed, every provider's list entries are served (%s); from %s",
+                           paths[i].request, ci.reason, who);
+                else
+                    mu_say(o, "conflict %s: %s serves it (%s); from %s", paths[i].request, m->list.items[served].key,
+                           ci.reason, who);
+            } else
+                mu_say(o, "%s %s: by %s; served by %s%s", any_legacy ? "legacy shadow" : "shadow", paths[i].request, who,
+                       served >= 0 ? m->list.items[served].key : "nothing",
+                       served >= 0 && hit.is_stock ? " (the installed game's own copy)" : "");
+            printed++;
+            i = j;
         }
-        i = j;
-    }
-    mu_puts(b, "],\"shadowTotals\":{");
-    mu_knum(b, "stock", stock, 1);
-    mu_knum(b, "legacy", legacy, 0);
-    mu_knum(b, "conflict", conflicts, 0);
-    mu_knum(b, "total", (unsigned long long)groups, 0);
-    mu_knum(b, "sent", (unsigned long long)sent, 0);
-    mu_putn(b, "}", 1);
+    if (groups > printed) mu_say(o, "%zu more shadow or conflict path(s) not printed", groups - printed);
+    mu_say(o, "%u conflict(s), %u shadow(s), %u legacy shadow(s)", conflicts, stock, legacy);
     free(paths);
 }
 
@@ -725,35 +859,25 @@ int sh_modui_list(void)
     mu_model m;
     mu_map mp;
     mu_buf b;
-    sh_modserve_stats st;
     size_t i;
     int n;
     if (!mu_on_main()) return -1;
     memset(&b, 0, sizeof b);
     if (!mu_model_build(&m)) { mu_model_free(&m); return -1; }
     mu_map_build(&mp);
-    sh_modserve_get_stats(&st);
     mu_putn(&b, "{", 1);
-    mu_knum(&b, "v", 1, 1);
+    mu_knum(&b, "v", 2, 1);
     mu_knum(&b, "gen", (unsigned)g_gen, 0);
     mu_kstr(&b, "root", m.root_ok ? m.root : "", 0);
     mu_kbool(&b, "storeReadable", m.listed, 0);
-    mu_puts(&b, ",\"index\":{");
-    mu_kint(&b, "bundles", st.bundles_seen, 1);
-    mu_kint(&b, "admitted", st.bundles_admitted, 0);
-    mu_kint(&b, "files", st.files, 0);
-    mu_kint(&b, "conflicts", st.conflicts, 0);
-    mu_kint(&b, "shadows", st.shadows, 0);
-    mu_kint(&b, "editorRowsRegistered", st.editor_rows_registered, 0);
-    mu_putn(&b, "}", 1);
-    mu_puts(&b, ",\"bundles\":[");
-    for (i = 0; i < m.list.count; i++) {
+    mu_puts(&b, ",\"mods\":[");
+    for (i = 0; i < m.row_count; i++) {
         if (i) mu_putn(&b, ",", 1);
-        mu_put_bundle(&b, &m, i);
+        mu_put_row(&b, &m, &m.rows[i]);
     }
     mu_putn(&b, "]", 1);
+    mu_put_migrate(&b);
     mu_put_map(&b, &m, &mp);
-    mu_put_shadows(&b, &m);
     mu_putn(&b, "}", 1);
     mu_map_free(&mp);
     mu_model_free(&m);
@@ -772,6 +896,8 @@ static const char *mu_action_name(int action)
     case SH_MODS_ACT_PALETTE: return "palette";
     case SH_MODS_ACT_PRUNE_LIST: return "pruneList";
     case SH_MODS_ACT_PRUNE_APPLY: return "pruneApply";
+    case SH_MODS_ACT_REMOVE: return "remove";
+    case SH_MODS_ACT_MIGRATE: return "migrate";
     default: return "unknown";
     }
 }
@@ -856,7 +982,7 @@ static int mu_install(const char *folder)
         mu_log("install %s: installed and verified as %s (bundle %s)", folder, key, bd.hash);
         mu_rescan(note, sizeof note);
         _snprintf_s(msg, sizeof msg, _TRUNCATE, "Installed %s%s.", key,
-                    rows ? "; its editor rows appear after Rebuild palette" : "");
+                    rows ? "; its editor rows appear in the palette after the game restarts" : "");
     }
     mu_result_head(&b, SH_MODS_ACT_INSTALL, ok, msg);
     mu_kstr(&b, "key", ok ? key : "", 0);
@@ -879,49 +1005,74 @@ static int mu_install(const char *folder)
 
 /* ---- verify */
 
-static int mu_verify(const char *key)
+/* Rehash `key` (id@version+build, or id@version for every build of it), or
+ * every loaded build when key is empty, adding the results up. Each failure
+ * is also printed to `o` when given. Returns 0 when the store cannot be read. */
+static int mu_verify_core(const char *key, const mu_out *o, sh_ms_verify_stats *sum, unsigned *passed,
+                          unsigned *failed, char *first, size_t first_cap)
 {
     sh_ms_list list;
-    sh_ms_verify_stats st, sum;
-    char cause[SH_MB_CAUSE_MAX], first[SH_MB_CAUSE_MAX + SH_MS_KEY_MAX + 4], msg[SH_MB_CAUSE_MAX + 128];
-    unsigned passed = 0, failed = 0;
+    sh_ms_verify_stats st;
+    char cause[SH_MB_CAUSE_MAX];
     size_t i;
-    mu_buf b;
-    memset(&b, 0, sizeof b);
-    memset(&sum, 0, sizeof sum);
+    memset(sum, 0, sizeof *sum);
+    *passed = *failed = 0;
     first[0] = 0;
     if (key && key[0]) {
-        int ok = sh_ms_verify(key, &st, cause, sizeof cause);
-        sum = st;
-        if (ok) passed = st.entries ? st.entries : 1;
-        else { failed = 1; _snprintf_s(first, sizeof first, _TRUNCATE, "%s: %s", key, cause); }
-        mu_log("verify %s: %s%s%s", key, ok ? "pass" : "FAILED", ok ? "" : ": ", ok ? "" : cause);
-    } else {
-        if (!sh_ms_enumerate(&list)) return mu_simple_result(SH_MODS_ACT_VERIFY, 0, "The mods folder cannot be read.");
-        for (i = 0; i < list.count; i++) {
-            const sh_ms_entry *e = &list.items[i];
-            int ok;
-            if (!e->loaded) continue;
-            memset(&st, 0, sizeof st);
-            ok = sh_ms_verify(e->key, &st, cause, sizeof cause);
-            sum.files += st.files;
-            sum.bytes_mb += st.bytes_mb;
-            sum.blobs_checked += st.blobs_checked;
-            sum.entries += st.entries;
-            if (ok) passed++;
-            else {
-                failed++;
-                if (!first[0]) _snprintf_s(first, sizeof first, _TRUNCATE, "%s: %s", e->key, cause);
-            }
-            mu_log("verify %s: %s%s%s", e->key, ok ? "pass" : "FAILED", ok ? "" : ": ", ok ? "" : cause);
+        int ok;
+        memset(&st, 0, sizeof st);
+        ok = sh_ms_verify(key, &st, cause, sizeof cause);
+        *sum = st;
+        if (ok) *passed = st.entries ? st.entries : 1;
+        else {
+            *failed = 1;
+            _snprintf_s(first, first_cap, _TRUNCATE, "%s: %s", key, cause);
+            mu_say(o, "verify %s: FAILED: %s", key, cause);
         }
-        sh_ms_list_free(&list);
+        mu_log("verify %s: %s%s%s", key, ok ? "pass" : "FAILED", ok ? "" : ": ", ok ? "" : cause);
+        return 1;
     }
+    if (!sh_ms_enumerate(&list)) return 0;
+    for (i = 0; i < list.count; i++) {
+        const sh_ms_entry *e = &list.items[i];
+        int ok;
+        if (!e->loaded) continue;
+        memset(&st, 0, sizeof st);
+        ok = sh_ms_verify(e->key, &st, cause, sizeof cause);
+        sum->files += st.files;
+        sum->bytes_mb += st.bytes_mb;
+        sum->blobs_checked += st.blobs_checked;
+        sum->entries += st.entries;
+        if (ok) (*passed)++;
+        else {
+            (*failed)++;
+            if (!first[0]) _snprintf_s(first, first_cap, _TRUNCATE, "%s: %s", e->key, cause);
+            mu_say(o, "verify %s%s: FAILED: %s", e->legacy ? "legacy " : "", e->key, cause);
+        }
+        mu_log("verify %s: %s%s%s", e->key, ok ? "pass" : "FAILED", ok ? "" : ": ", ok ? "" : cause);
+    }
+    sh_ms_list_free(&list);
+    return 1;
+}
+
+static void mu_verify_message(unsigned passed, unsigned failed, const char *first, char *msg, size_t cap)
+{
+    if (!passed && !failed) _snprintf_s(msg, cap, _TRUNCATE, "No installed mod to verify.");
+    else if (!failed) _snprintf_s(msg, cap, _TRUNCATE, "Verified %u build(s): every file matches.", passed);
+    else _snprintf_s(msg, cap, _TRUNCATE, "%u of %u build(s) failed verification. First: %s", failed, passed + failed, first);
+}
+
+static int mu_verify(const char *key)
+{
+    sh_ms_verify_stats sum;
+    char first[SH_MB_CAUSE_MAX + SH_MS_KEY_MAX + 4], msg[SH_MB_CAUSE_MAX + SH_MS_KEY_MAX + 128];
+    unsigned passed = 0, failed = 0;
+    mu_buf b;
+    memset(&b, 0, sizeof b);
+    if (!mu_verify_core(key, NULL, &sum, &passed, &failed, first, sizeof first))
+        return mu_simple_result(SH_MODS_ACT_VERIFY, 0, "The mods folder cannot be read.");
     InterlockedIncrement(&g_gen);
-    if (!passed && !failed) _snprintf_s(msg, sizeof msg, _TRUNCATE, "No installed mod to verify.");
-    else if (!failed) _snprintf_s(msg, sizeof msg, _TRUNCATE, "Verified %u build(s): every file matches.", passed);
-    else _snprintf_s(msg, sizeof msg, _TRUNCATE, "%u of %u build(s) failed verification. First: %s", failed,
-                     passed + failed, first);
+    mu_verify_message(passed, failed, first, msg, sizeof msg);
     mu_result_head(&b, SH_MODS_ACT_VERIFY, failed == 0 && passed > 0, msg);
     mu_knum(&b, "passed", passed, 0);
     mu_knum(&b, "failed", failed, 0);
@@ -1066,34 +1217,163 @@ static int mu_key_listed(const char *keys, const char *key)
     return 0;
 }
 
+/* What one removal did. */
+typedef struct mu_removal {
+    size_t removed, failed, blobs, kept;
+    unsigned long long freed;
+    char first_fail[SH_MS_KEY_MAX + 80];
+    char kept_at[MAX_PATH * 4];  /* where the last folder built in place went */
+    char note[160];              /* the rescan's note */
+} mu_removal;
+
+/* removed-mods beside the store folder (<root>\..\removed-mods). */
+static int mu_removed_dir(const char *root, char *out, size_t cap)
+{
+    const char *a = strrchr(root, '\\'), *b = strrchr(root, '/');
+    const char *s = a > b ? a : b;
+    if (!s || s == root) return 0;
+    _snprintf_s(out, cap, _TRUNCATE, "%.*s\\removed-mods", (int)(s - root), root);
+    return 1;
+}
+
+/* Take the marked entries out of the store, under the store lock. A laid-out
+ * build (its folder named by its key) is moved aside first, out of both scans
+ * (the store skips ".old-" folders and the serving index skips names starting
+ * with '.'), the index is rebuilt, and then the folder is deleted with the
+ * blobs no remaining build uses. A folder built in place holds its author's
+ * own files: it is moved to removed-mods instead and kept. An entry whose
+ * folder cannot be moved is unmarked and counted as failed. */
+static void mu_remove_marked(const mu_model *m, unsigned char *removing, mu_removal *out)
+{
+    size_t n = m->list.count, i, k;
+    char (*staged)[MAX_PATH * 4];
+    wchar_t **to;
+    unsigned char *kept;
+    int all_loaded = 1;
+    memset(out, 0, sizeof *out);
+    staged = (char (*)[MAX_PATH * 4])calloc(n ? n : 1, sizeof *staged);
+    to = (wchar_t **)calloc(n ? n : 1, sizeof *to);
+    kept = (unsigned char *)calloc(n ? n : 1, 1);
+    if (!staged || !to || !kept) {
+        for (i = 0; i < n; i++) if (removing[i]) { removing[i] = 0; out->failed++; }
+        strncpy_s(out->first_fail, sizeof out->first_fail, "out of memory", _TRUNCATE);
+        free(staged); free(to); free(kept);
+        return;
+    }
+    for (i = 0; i < n; i++) if (!m->list.items[i].loaded) all_loaded = 0;
+    modstore_lock();
+    for (i = 0; i < n; i++) {
+        const sh_ms_entry *e = &m->list.items[i];
+        const char *leaf = mu_leaf(e->folder);
+        wchar_t *from;
+        if (!removing[i]) continue;
+        if (_stricmp(leaf, e->key)) {
+            char dir[MAX_PATH * 4];
+            wchar_t *wd;
+            kept[i] = 1;
+            if (mu_removed_dir(m->root, dir, sizeof dir)) {
+                wd = sh_mb_wpath(dir);
+                if (wd) CreateDirectoryW(wd, NULL);
+                free(wd);
+                _snprintf_s(staged[i], MAX_PATH * 4, _TRUNCATE, "%s\\%s", dir, leaf);
+                to[i] = sh_mb_wpath(staged[i]);
+                if (to[i] && GetFileAttributesW(to[i]) != INVALID_FILE_ATTRIBUTES) {
+                    free(to[i]);
+                    _snprintf_s(staged[i], MAX_PATH * 4, _TRUNCATE, "%s\\%s-%lu", dir, leaf, GetTickCount());
+                    to[i] = sh_mb_wpath(staged[i]);
+                }
+            }
+        } else {
+            _snprintf_s(staged[i], MAX_PATH * 4, _TRUNCATE, "%s\\.old-%s-%lu", m->root, e->key, GetTickCount());
+            to[i] = sh_mb_wpath(staged[i]);
+        }
+        from = sh_mb_wpath(e->folder);
+        if (!from || !to[i] || !MoveFileExW(from, to[i], 0)) {
+            out->failed++;
+            if (!out->first_fail[0])
+                _snprintf_s(out->first_fail, sizeof out->first_fail, _TRUNCATE, "%s could not be moved", e->key);
+            removing[i] = 0;
+            mu_log("remove %s: the folder could not be moved (error %lu)", e->key, GetLastError());
+        } else {
+            out->removed++;
+            out->freed += e->bundle.total_size;
+            if (kept[i]) {
+                out->kept++;
+                strncpy_s(out->kept_at, sizeof out->kept_at, staged[i], _TRUNCATE);
+                mu_log("remove %s: built in place, so its folder was moved to %s", e->key, staged[i]);
+            } else mu_log("remove %s: moved aside", e->key);
+        }
+        free(from);
+    }
+    if (out->removed) mu_rescan(out->note, sizeof out->note);
+    for (i = 0; i < n; i++) {
+        const sh_ms_entry *e = &m->list.items[i];
+        if (!removing[i]) continue;
+        if (!kept[i] && !mu_remove_tree(to[i]))
+            mu_log("remove %s: some files of the moved folder could not be deleted; the store ignores it", e->key);
+        /* Blobs no remaining build references. Skipped when a folder in the
+         * store could not be read, since its files are unknown. */
+        if (!all_loaded || !e->loaded) continue;
+        for (k = 0; k < e->bundle.file_count; k++) {
+            const char *blob = e->bundle.files[k].blob;
+            wchar_t *w;
+            size_t q;
+            int dup = 0;
+            if (e->bundle.files[k].stock) continue;   /* installed content: no blob in the store */
+            if (!blob[0] || mu_blob_used_elsewhere(m, blob, removing)) continue;
+            for (q = 0; q < k && !dup; q++) dup = !strcmp(e->bundle.files[q].blob, blob);
+            if (dup) continue;
+            w = mu_blob_path(m->root, blob);
+            if (w) {
+                SetFileAttributesW(w, FILE_ATTRIBUTE_NORMAL);
+                if (DeleteFileW(w)) out->blobs++;
+            }
+            free(w);
+        }
+    }
+    modstore_unlock();
+    for (i = 0; i < n; i++) free(to[i]);
+    free(to);
+    free(staged);
+    free(kept);
+}
+
+static void mu_put_removed(mu_buf *b, const mu_model *m, const unsigned char *removing, const mu_removal *rm)
+{
+    size_t i, k;
+    mu_puts(b, ",\"removed\":[");
+    for (i = 0, k = 0; i < m->list.count; i++) {
+        if (!removing[i]) continue;
+        if (k++) mu_putn(b, ",", 1);
+        mu_str(b, m->list.items[i].key);
+    }
+    mu_putn(b, "]", 1);
+    mu_knum(b, "bytes", rm->freed, 0);
+    mu_knum(b, "blobs", (unsigned long long)rm->blobs, 0);
+    mu_kstr(b, "movedTo", rm->kept_at, 0);
+    mu_kstr(b, "index", rm->note, 0);
+}
+
 static int mu_prune(int apply, const char *keys)
 {
     mu_model m;
     mu_map mp;
     mu_candidate *c;
     unsigned char *removing;
-    char (*staged)[MAX_PATH * 4];
-    wchar_t **to;
-    size_t n, i, k, removed = 0, failed = 0, blobs = 0;
-    unsigned long long freed = 0;
-    int all_loaded = 1;
-    char msg[512], note[160], first_fail[SH_MS_KEY_MAX + 80];
+    size_t n, i;
+    char msg[512];
     mu_buf b;
     memset(&b, 0, sizeof b);
-    note[0] = first_fail[0] = 0;
     if (!mu_model_build(&m)) { mu_model_free(&m); return -1; }
     mu_map_build(&mp);
     c = (mu_candidate *)calloc(m.list.count ? m.list.count : 1, sizeof *c);
     removing = (unsigned char *)calloc(m.list.count ? m.list.count : 1, 1);
-    staged = (char (*)[MAX_PATH * 4])calloc(m.list.count ? m.list.count : 1, sizeof *staged);
-    to = (wchar_t **)calloc(m.list.count ? m.list.count : 1, sizeof *to);
-    if (!c || !removing || !staged || !to) {
-        free(c); free(removing); free(staged); free(to);
+    if (!c || !removing) {
+        free(c); free(removing);
         mu_map_free(&mp); mu_model_free(&m);
         return -1;
     }
     n = mu_candidates(&m, &mp, c);
-    for (i = 0; i < m.list.count; i++) if (!m.list.items[i].loaded) all_loaded = 0;
     if (!apply) {
         unsigned long long total = 0;
         for (i = 0; i < n; i++) total += m.list.items[c[i].entry].bundle.total_size;
@@ -1103,82 +1383,199 @@ static int mu_prune(int apply, const char *keys)
         mu_put_candidates(&b, &m, c, n);
         mu_knum(&b, "bytes", total, 0);
     } else {
+        mu_removal rm;
         /* Only the keys the person confirmed, and only while still candidates. */
         for (i = 0; i < n; i++) {
             const sh_ms_entry *e = &m.list.items[c[i].entry];
             if (keys && mu_key_listed(keys, e->key)) removing[c[i].entry] = 1;
         }
-        for (i = 0; i < m.list.count; i++) {
-            const sh_ms_entry *e = &m.list.items[i];
-            wchar_t *from;
-            if (!removing[i]) continue;
-            /* Out of both scans first: the store skips ".old-" folders and the
-             * serving index skips names starting with '.'. */
-            _snprintf_s(staged[i], MAX_PATH * 4, _TRUNCATE, "%s\\.old-%s-%lu", m.root, e->key, GetTickCount());
-            from = sh_mb_wpath(e->folder);
-            to[i] = sh_mb_wpath(staged[i]);
-            if (!from || !to[i] || !MoveFileExW(from, to[i], 0)) {
-                failed++;
-                if (!first_fail[0]) _snprintf_s(first_fail, sizeof first_fail, _TRUNCATE, "%s could not be moved aside", e->key);
-                removing[i] = 0;
-                mu_log("remove %s: the folder could not be moved aside (error %lu)", e->key, GetLastError());
-            } else {
-                removed++;
-                freed += e->bundle.total_size;
-                mu_log("remove %s: moved aside (covered by a newer build)", e->key);
-            }
-            free(from);
-        }
-        if (removed) mu_rescan(note, sizeof note);
-        for (i = 0; i < m.list.count; i++) {
-            const sh_ms_entry *e = &m.list.items[i];
-            if (!removing[i]) continue;
-            if (!mu_remove_tree(to[i]))
-                mu_log("remove %s: some files of the moved folder could not be deleted; the store ignores it", e->key);
-            /* Blobs no remaining build references. Skipped when a folder in
-             * the store could not be read, since its files are unknown. */
-            if (!all_loaded) continue;
-            for (k = 0; k < e->bundle.file_count; k++) {
-                const char *blob = e->bundle.files[k].blob;
-                wchar_t *w;
-                size_t q;
-                int dup = 0;
-                if (e->bundle.files[k].stock) continue;   /* installed content: no blob in the store */
-                if (!blob[0] || mu_blob_used_elsewhere(&m, blob, removing)) continue;
-                for (q = 0; q < k && !dup; q++) dup = !strcmp(e->bundle.files[q].blob, blob);
-                if (dup) continue;
-                w = mu_blob_path(m.root, blob);
-                if (w) {
-                    SetFileAttributesW(w, FILE_ATTRIBUTE_NORMAL);
-                    if (DeleteFileW(w)) blobs++;
-                }
-                free(w);
-            }
-        }
-        if (!removed && !failed) _snprintf_s(msg, sizeof msg, _TRUNCATE, "Nothing removed: none of the chosen builds can be removed now.");
-        else if (!failed) _snprintf_s(msg, sizeof msg, _TRUNCATE, "Removed %zu build(s).", removed);
-        else _snprintf_s(msg, sizeof msg, _TRUNCATE, "Removed %zu build(s); %zu could not be removed (%s).", removed, failed, first_fail);
-        mu_log("remove: %zu build(s) removed, %zu failed, %zu blob(s) deleted", removed, failed, blobs);
-        mu_result_head(&b, SH_MODS_ACT_PRUNE_APPLY, failed == 0 && removed > 0, msg);
-        mu_puts(&b, ",\"removed\":[");
-        for (i = 0, k = 0; i < m.list.count; i++) {
-            if (!removing[i]) continue;
-            if (k++) mu_putn(&b, ",", 1);
-            mu_str(&b, m.list.items[i].key);
-        }
-        mu_putn(&b, "]", 1);
-        mu_knum(&b, "bytes", freed, 0);
-        mu_knum(&b, "blobs", (unsigned long long)blobs, 0);
-        mu_kstr(&b, "index", note, 0);
+        mu_remove_marked(&m, removing, &rm);
+        if (!rm.removed && !rm.failed) _snprintf_s(msg, sizeof msg, _TRUNCATE, "Nothing removed: none of the chosen builds can be removed now.");
+        else if (!rm.failed) _snprintf_s(msg, sizeof msg, _TRUNCATE, "Removed %zu build(s).", rm.removed);
+        else _snprintf_s(msg, sizeof msg, _TRUNCATE, "Removed %zu build(s); %zu could not be removed (%s).", rm.removed, rm.failed, rm.first_fail);
+        mu_log("remove: %zu build(s) removed, %zu failed, %zu blob(s) deleted", rm.removed, rm.failed, rm.blobs);
+        mu_result_head(&b, SH_MODS_ACT_PRUNE_APPLY, rm.failed == 0 && rm.removed > 0, msg);
+        mu_put_removed(&b, &m, removing, &rm);
     }
-    for (i = 0; i < m.list.count; i++) free(to[i]);
-    free(to);
-    free(staged);
     free(c);
     free(removing);
     mu_map_free(&mp);
     mu_model_free(&m);
     return mu_result_tail(&b);
+}
+
+/* ---- removal of one listed mod */
+
+/* Every build in the row that `key` belongs to, unless the open map uses one. */
+static int mu_remove(const char *key)
+{
+    mu_model m;
+    mu_map mp;
+    unsigned char *removing;
+    mu_removal rm;
+    int row = -1, used = 0, ok;
+    size_t i;
+    const char *shown;
+    char msg[MAX_PATH * 4 + 512];
+    mu_buf b;
+    memset(&b, 0, sizeof b);
+    memset(&rm, 0, sizeof rm);
+    if (!key || !key[0]) return mu_simple_result(SH_MODS_ACT_REMOVE, 0, "Select a mod to remove.");
+    if (!mu_model_build(&m)) { mu_model_free(&m); return -1; }
+    for (i = 0; i < m.list.count && row < 0; i++)
+        if (m.entries[i].row >= 0 && !strcmp(m.list.items[i].key, key)) row = m.entries[i].row;
+    if (row < 0) { mu_model_free(&m); return mu_simple_result(SH_MODS_ACT_REMOVE, 0, "That mod is no longer installed."); }
+    removing = (unsigned char *)calloc(m.list.count ? m.list.count : 1, 1);
+    if (!removing) { mu_model_free(&m); return -1; }
+    mu_map_build(&mp);
+    {
+        const sh_ms_entry *s = &m.list.items[m.rows[row].serving];
+        shown = s->loaded && s->bundle.name && s->bundle.name[0] ? s->bundle.name : s->loaded && s->bundle.id[0] ? s->bundle.id : s->key;
+    }
+    for (i = 0; i < m.list.count; i++) {
+        if (m.entries[i].row != row) continue;
+        removing[i] = 1;
+        if (m.list.items[i].loaded && mu_map_references(&mp, m.list.items[i].bundle.hash)) used = 1;
+    }
+    if (used) {
+        for (i = 0; i < m.list.count; i++) removing[i] = 0;
+        _snprintf_s(msg, sizeof msg, _TRUNCATE, "%s is used by the open map. Delete its entities and save the map, or open "
+                    "another map, then remove it.", shown);
+        mu_log("remove %s: refused, the open map uses it", key);
+        ok = 0;
+    } else {
+        mu_remove_marked(&m, removing, &rm);
+        mu_log("remove %s: %zu build(s) removed, %zu failed, %zu blob(s) deleted", key, rm.removed, rm.failed, rm.blobs);
+        ok = rm.removed > 0 && rm.failed == 0;
+        if (ok && rm.kept) _snprintf_s(msg, sizeof msg, _TRUNCATE, "Removed %s. Its folder was moved to %s.", shown, rm.kept_at);
+        else if (ok) _snprintf_s(msg, sizeof msg, _TRUNCATE, "Removed %s.", shown);
+        else if (rm.removed) _snprintf_s(msg, sizeof msg, _TRUNCATE, "Removed %zu of %zu builds of %s; %s.", rm.removed,
+                                         rm.removed + rm.failed, shown, rm.first_fail);
+        else _snprintf_s(msg, sizeof msg, _TRUNCATE, "%s could not be removed: %s. Close any program using its folder and try again.",
+                         shown, rm.first_fail[0] ? rm.first_fail : "nothing was moved");
+    }
+    mu_result_head(&b, SH_MODS_ACT_REMOVE, ok, msg);
+    mu_kbool(&b, "inUse", used, 0);
+    mu_put_removed(&b, &m, removing, &rm);
+    free(removing);
+    mu_map_free(&mp);
+    mu_model_free(&m);
+    return mu_result_tail(&b);
+}
+
+/* ---- migration */
+
+static int mu_migrate(void)
+{
+    const sh_modui_engine *e = mu_engine();
+    int r;
+    mu_buf b;
+    memset(&b, 0, sizeof b);
+    if (!e->migrate_start) return mu_simple_result(SH_MODS_ACT_MIGRATE, 0, "Migration is not available in this build.");
+    modstore_lock();   /* the pass's scan waits for a store step in progress */
+    r = e->migrate_start(1);
+    modstore_unlock();
+    InterlockedIncrement(&g_gen);
+    mu_log("migrate: %s", r > 0 ? "started on the background thread" : r == 0 ? "nothing to do" : "already running or could not start");
+    mu_result_head(&b, SH_MODS_ACT_MIGRATE, r >= 0, r > 0
+        ? "Moved your mods from the old overrides folder into the mods folder."
+        : r == 0 ? "Nothing to migrate." : "A migration is already running; try again when it finishes.");
+    mu_kbool(&b, "started", r > 0, 0);
+    return mu_result_tail(&b);
+}
+
+int sh_modui_wait(unsigned ms)
+{
+    const sh_modui_engine *e = mu_engine();
+    ULONGLONG until = GetTickCount64() + ms;
+    if (!e->migrate_busy) return 1;
+    while (e->migrate_busy() == 1) {
+        if (GetTickCount64() >= until) return 0;
+        Sleep(20);
+    }
+    return 1;
+}
+
+/* ------------------------------------------------------------------ the doctor */
+
+static void mu_print_entry(const mu_out *o, const mu_model *m, size_t i)
+{
+    const mu_entry *u = &m->entries[i];
+    const sh_ms_entry *e = u->e;
+    char state[SH_MS_KEY_MAX + 96];
+    if (!strcmp(u->state, "superseded"))
+        _snprintf_s(state, sizeof state, _TRUNCATE, "superseded, %s serves %d of its path(s)",
+                    u->superseded_by >= 0 ? m->list.items[u->superseded_by].key : "a newer build", u->superseded_paths);
+    else strncpy_s(state, sizeof state, u->state, _TRUNCATE);
+    mu_say(o, "%s %s: %s%s%s%s%s%s", e->legacy ? "legacy bundle" : u->legacy ? "migrated bundle" : "bundle", e->key, state,
+           u->cause[0] ? "; " : "", u->cause, u->origin[0] ? "; from " : "", u->origin,
+           u->row >= 0 && m->rows[u->row].serving != (int)i ? "; another build of it is listed" : "");
+}
+
+int sh_modui_doctor(int verify, sh_modui_line_fn line, void *context)
+{
+    const sh_modui_engine *e = mu_engine();
+    mu_model m;
+    mu_out o;
+    sh_modserve_stats st;
+    size_t i, k, legacy = 0;
+    unsigned entries = 0;
+    int pending;
+    if (!mu_on_main()) return -1;
+    o.fn = line;
+    o.context = context;
+    if (!mu_model_build(&m)) { mu_model_free(&m); return -1; }
+    sh_modserve_get_stats(&st);
+    for (i = 0; i < m.list.count; i++) if (m.list.items[i].legacy) legacy++;
+    mu_say(&o, "store %s: %zu folder(s); %zu mod(s) listed in the Mods tab; %zu map-delivered bundle(s) under legacy, not listed%s",
+           m.root_ok ? m.root : "(unresolved)", m.list.count, m.row_count, legacy, m.listed ? "" : "; the folder cannot be read");
+    mu_say(&o, "serving index: %d of %d bundle(s) active, %d file(s), %d shadow(s), %d conflict(s) (%d composed), %d editor row(s) registered",
+           st.bundles_admitted, st.bundles_seen, st.files, st.shadows, st.conflicts, st.conflicts_composed, st.editor_rows_registered);
+    for (i = 0; i < m.list.count; i++) mu_print_entry(&o, &m, i);
+    for (i = 0; i < m.row_count; i++) {
+        const char *id = m.list.items[m.rows[i].serving].bundle.id;
+        char keys[800];
+        size_t at = 0;
+        int earlier = 0;
+        if (!m.rows[i].duplicate) continue;
+        for (k = 0; k < i && !earlier; k++)
+            earlier = m.rows[k].duplicate && !strcmp(m.list.items[m.rows[k].serving].bundle.id, id);
+        if (earlier) continue;
+        keys[0] = 0;
+        for (k = i; k < m.row_count; k++) {
+            const mu_entry *u = &m.entries[m.rows[k].serving];
+            int w;
+            if (!m.rows[k].duplicate || strcmp(u->e->bundle.id, id)) continue;
+            w = _snprintf_s(keys + at, sizeof keys - at, _TRUNCATE, "%s%s (%s)", at ? ", " : "", u->e->key,
+                            u->origin[0] ? u->origin : "installed copy");
+            if (w < 0) break;
+            at += (size_t)w;
+        }
+        mu_say(&o, "duplicate id %s: %s; change one id in its mod.json", id, keys);
+    }
+    pending = e->migrate_pending ? e->migrate_pending(&entries) : -2;
+    if (pending == -2) mu_say(&o, "migration: not available in this build");
+    else if (pending < 0) mu_say(&o, "migration: the data folder cannot be resolved");
+    else if (!entries) mu_say(&o, "migration: no overrides folder, or it is empty");
+    else mu_say(&o, "migration: overrides holds %u entr%s, %d not migrated%s%s", entries, entries == 1 ? "y" : "ies", pending,
+                pending ? " (Migrate in the Mods tab, or 'sh_mods migrate --again'; mods\\.migrated.json has each one's outcome)" : "",
+                e->migrate_busy && e->migrate_busy() == 1 ? "; a migration is running" : "");
+    mu_print_shadows(&o, &m);
+    if (verify) {
+        sh_ms_verify_stats sum;
+        unsigned passed = 0, failed = 0;
+        char first[SH_MB_CAUSE_MAX + SH_MS_KEY_MAX + 4], msg[SH_MB_CAUSE_MAX + SH_MS_KEY_MAX + 128];
+        mu_say(&o, "verify: rehashing every build");
+        if (!mu_verify_core("", &o, &sum, &passed, &failed, first, sizeof first)) mu_say(&o, "verify: the mods folder cannot be read");
+        else {
+            mu_verify_message(passed, failed, first, msg, sizeof msg);
+            mu_say(&o, "verify: %s (%u file(s), %u MiB)", msg, sum.files, sum.bytes_mb);
+        }
+        InterlockedIncrement(&g_gen);
+    }
+    mu_say(&o, "done");
+    mu_model_free(&m);
+    return 1;
 }
 
 int sh_modui_run(int action, const char *arg)
@@ -1215,6 +1612,10 @@ int sh_modui_run(int action, const char *arg)
         return mu_prune(0, NULL);
     case SH_MODS_ACT_PRUNE_APPLY:
         return mu_prune(1, arg);
+    case SH_MODS_ACT_REMOVE:
+        return mu_remove(arg);
+    case SH_MODS_ACT_MIGRATE:
+        return mu_migrate();
     default:
         return mu_simple_result(action, 0, "Unknown action.");
     }
@@ -1241,6 +1642,9 @@ int sh_modui_slot(struct sh_iface *self, struct sh_mods_call *call)
         return n >= 0;
     case SH_MODS_FETCH:
         return sh_modui_fetch(call->out, call->out_cap, &call->needed, &call->generation);
+    case SH_MODS_WAIT:
+        call->needed = 0;
+        return sh_modui_wait(call->out_cap > 0 ? (unsigned)call->out_cap : 0);
     case SH_MODS_ROOT: {
         char root[MAX_PATH * 4];
         size_t len;

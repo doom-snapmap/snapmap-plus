@@ -6,6 +6,9 @@
  *   sh_mods build "<folder>"       build and validate a mod, write its bundle.json
  *   sh_mods install "<folder>"     build, copy into the store, lay out, verify, rescan
  *   sh_mods list                   bundle folders in the store and their state
+ *   sh_mods doctor [verify]        what the Mods tab does not show: every bundle's state and
+ *                                  cause (legacy ones too), duplicate ids, migration, conflicts
+ *                                  with their winners, shadows; `verify` rehashes every build
  *   sh_mods verify "<id@version+build>"  rehash an installed bundle (id@version: every build)
  *   sh_mods copystock "<engine path>" "<file>"  write an installed game file's bytes to a file
  *                                  (authoring: a stock mesh or anim copied under a new name)
@@ -36,7 +39,7 @@
                        "the mods folder, 'sh_mods palette rebuild' adds new mod rows to the open editor, " \
                        "'sh_mods build \"<folder>\"' checks a mod and writes its bundle.json, " \
                        "'sh_mods install \"<folder>\"' adds it to the mods store, 'sh_mods list' shows " \
-                       "installed bundles, 'sh_mods verify \"<id@version+build>\"' rehashes one (or every build of id@version), " \
+                       "installed bundles, 'sh_mods doctor [verify]' explains every bundle's state, conflicts and shadows, 'sh_mods verify \"<id@version+build>\"' rehashes one (or every build of id@version), " \
                        "'sh_mods copystock \"<engine path>\" \"<file>\"' writes an installed game file's bytes to a file. " \
                        "'sh_mods help' lists the mod store verbs."
 /* Printed by 'sh_mods help' after SH_MODCMD_HELP (each under the console's 1 KiB line). */
