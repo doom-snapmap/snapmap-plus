@@ -39,6 +39,7 @@
 #include <stdarg.h>
 #include <string.h>
 #include "modserve.h"
+#include "overrides.h"
 #include "signatures.h"
 #include "patch.h"
 #include "backend_log.h"
@@ -242,7 +243,24 @@ static int op_load(void *context, const char *type, const char *name, int persis
     return ok;
 }
 
-static const sh_modserve_engine_ops g_ops = { NULL, op_source_registered, op_register_file, op_load };
+/* The player's game archives, read through the engine provider (the same
+ * reader the builder's stock check uses). */
+static int op_stock_exists(void *context, const char *request)
+{
+    unsigned char *body = NULL;
+    size_t len = 0;
+    (void)context;
+    __try {
+        body = sh_overrides_read_engine_resource(request, &len);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return -1;
+    }
+    if (!body) return 0;
+    HeapFree(GetProcessHeap(), 0, body);
+    return 1;
+}
+
+static const sh_modserve_engine_ops g_ops = { NULL, op_source_registered, op_register_file, op_load, op_stock_exists };
 
 /* ------------------------------------------------------------------ gates */
 

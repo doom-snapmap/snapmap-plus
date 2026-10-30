@@ -947,10 +947,18 @@ static int cf_source(void *c, const char *type, const char *name)
 {
     (void)c;
     if (!_stricmp(type, "animWeb") && !_stricmp(name, "player/fp_hands_mp")) return 1;
+    if (!_stricmp(type, "animWeb") && !_stricmp(name, "player/fp_hands_sp")) return 1;
     if (!_stricmp(type, "md6Def") && !_stricmp(name, "zion/stock/known.md6")) return 1;
     return 0;
 }
-static const sh_modserve_engine_ops g_cf = { NULL, cf_source, fake_register, fake_load };
+/* The game archives: the player hands' md6Def is shipped although the
+ * registry has not registered its source yet (as live at map activation). */
+static int cf_stock(void *c, const char *request)
+{
+    (void)c;
+    return !strcmp(request, "generated/decls/md6def/zion/player/human/base/mp.md6.decl") ? 1 : 0;
+}
+static const sh_modserve_engine_ops g_cf = { NULL, cf_source, fake_register, fake_load, cf_stock };
 
 static void test_compose_unit(void)
 {
@@ -1078,12 +1086,16 @@ static void test_conflicts(void)
             { "generated/decls/animweb/player/fp_hands_mp.decl",
               "{\n\tprops {\n\t\tmodelInfos {\n\t\t\t\"zion/player/human/base/mp.md6\" \"\"\n\t\t}\n\t}\n}\n",
               -1, "animWeb", "player/fp_hands_mp", NULL, '4' },
+            { "generated/decls/animweb/player/fp_hands_sp.decl",
+              "{\n\tprops {\n\t\tmodelInfos {\n\t\t\t\"zion/player/human/base/sp_gone.md6\" \"\"\n\t\t}\n\t}\n}\n",
+              -1, "animWeb", "player/fp_hands_sp", NULL, '5' },
         };
         g_bundle_extra = "\"extra\": {\"legacy\": {}},\n  \"requirements\": {\"cvars\": {\"g_useResourceBlackList\": \"0\"}},\n  ";
         make_bundle(root, "aw.pack@0.0.0+1", "aw.pack", "0.0.0", '8',
                     "\"generated/decls/animweb/designsystems/med_station.decl\", \"generated/decls/animweb/designsystems/good.decl\", "
-                    "\"generated/decls/md6def/zion/props/door.md6.decl\", \"generated/decls/animweb/player/fp_hands_mp.decl\"",
-                    aw, 4, NULL);
+                    "\"generated/decls/md6def/zion/props/door.md6.decl\", \"generated/decls/animweb/player/fp_hands_mp.decl\", "
+                    "\"generated/decls/animweb/player/fp_hands_sp.decl\"",
+                    aw, 5, NULL);
         hash64('8', aw_hash);
     }
     g_bundle_extra = NULL;
@@ -1117,26 +1129,32 @@ static void test_conflicts(void)
     CHECK(!log_has("serving neither"));
 
     /* Registration: an animWeb whose models block names a model nothing
-     * provides is withdrawn; the stock one is served by the game again. */
+     * provides is withdrawn; the stock one is served by the game again. A
+     * model the registry does not know yet but the game archives hold (the
+     * player hands) keeps its shadow served. */
     hashes[0] = aw_hash;
-    CHECK(sh_modserve_plan_bundles(hashes, 1, &p, &unknown) == 4 && unknown == 0);
+    CHECK(sh_modserve_plan_bundles(hashes, 1, &p, &unknown) == 5 && unknown == 0);
     log_clear();
     g_calls[0] = 0;
     ready = sh_modserve_plan_run(&p, &g_cf, "map");
-    CHECK(ready == 3);
+    CHECK(ready == 4);
     CHECK(log_has("map: animWeb 'designsystems/med_station' (aw.pack) NOT READY: it names model "
                   "'zion/objects/props_set/kiosks/wallhealthstation.md6', which neither a bundle nor the game provides"));
-    CHECK(log_has("map: animWeb 'player/fp_hands_mp' (aw.pack) shadow WITHDRAWN: it names model 'zion/player/human/base/mp.md6'"));
+    CHECK(log_has("map: animWeb 'player/fp_hands_sp' (aw.pack) shadow WITHDRAWN: it names model 'zion/player/human/base/sp_gone.md6'"));
+    CHECK(log_has("map: animWeb 'player/fp_hands_mp' (aw.pack) shadows a stock decl; served by the provider"));
+    CHECK(!log_has("'player/fp_hands_mp' (aw.pack) shadow WITHDRAWN"));
     CHECK(log_has("map: animWeb 'designsystems/good' (aw.pack) READY"));
     CHECK(!sh_modserve_lookup("generated/decls/animweb/designsystems/med_station.decl", NULL));
     CHECK(!sh_modserve_probe_claims("generated/decls/animweb/designsystems/med_station.decl"));
-    CHECK(!sh_modserve_lookup("generated/decls/animweb/player/fp_hands_mp.decl", NULL));
+    CHECK(!sh_modserve_lookup("generated/decls/animweb/player/fp_hands_sp.decl", NULL));
+    CHECK(sh_modserve_lookup("generated/decls/animweb/player/fp_hands_mp.decl", NULL));
     CHECK(sh_modserve_lookup("generated/decls/animweb/designsystems/good.decl", NULL));
     sh_modserve_plan_free(&p);
     /* A rescan (an install, a conversion) keeps them withdrawn. */
     CHECK(sh_modserve_index_rescan() == 8);
     CHECK(!sh_modserve_lookup("generated/decls/animweb/designsystems/med_station.decl", NULL));
-    CHECK(!sh_modserve_lookup("generated/decls/animweb/player/fp_hands_mp.decl", NULL));
+    CHECK(!sh_modserve_lookup("generated/decls/animweb/player/fp_hands_sp.decl", NULL));
+    CHECK(sh_modserve_lookup("generated/decls/animweb/player/fp_hands_mp.decl", NULL));
     CHECK(sh_modserve_lookup("generated/decls/animweb/designsystems/good.decl", NULL));
     CHECK(sh_modserve_lookup(CONDUCTOR, &hit) && hit.size > 0);
 

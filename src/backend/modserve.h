@@ -144,6 +144,11 @@ typedef struct sh_modserve_engine_ops {
     int (*register_file)(void *context, const char *type, const char *name, const char *reg_path);
     int (*load)(void *context, const char *type, const char *name, int persist,
                 unsigned *state, unsigned *lifetime);
+    /* Optional: 1 when the player's game archives hold `request` (a lower-cased
+     * request path), 0 when they do not, -1 when the reader cannot tell. The
+     * registry answers 0 for a stock decl whose source is not registered yet,
+     * so the model check asks the archives before withdrawing an animWeb. */
+    int (*stock_exists)(void *context, const char *request);
 } sh_modserve_engine_ops;
 
 /* Run a plan: first DeclRegisterFile for every unblocked step whose source is

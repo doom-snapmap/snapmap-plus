@@ -2146,9 +2146,11 @@ static unsigned char *ms_file_bytes(const ms_file *f, size_t *len)
 }
 
 /* 1 with the first model an animWeb's modelInfos block names that no served
- * bundle file provides as an md6Def and the engine has no md6Def source for;
- * 0 when every model resolves (or the text cannot be read, or the engine
- * cannot tell). */
+ * bundle file provides as an md6Def, the engine has no md6Def source for and
+ * the game archives do not hold (the registry does not know a stock decl
+ * whose source is not registered yet: the player hands' md6Def at map
+ * activation); 0 when every model resolves (or the text cannot be read, or
+ * the engine cannot tell). */
 static int ms_animweb_unresolved(const ms_index *x, const ms_file *f, const sh_modserve_engine_ops *ops,
                                  char *model, size_t cap)
 {
@@ -2182,6 +2184,11 @@ static int ms_animweb_unresolved(const ms_index *x, const ms_file *f, const sh_m
             p = ms_find(x->pslots, x->pmask, key);
             if (p >= 0 && x->files[p].served && !x->files[p].withdrawn) continue;
             if (ops->source_registered(ops->context, "md6Def", name) != 0) continue;
+            if (ops->stock_exists) {
+                char request[MS_NAME_MAX + 32];
+                _snprintf_s(request, sizeof request, _TRUNCATE, "generated/decls/md6def/%s.decl", name);
+                if (ops->stock_exists(ops->context, request) != 0) continue;
+            }
             strncpy_s(model, cap, name, _TRUNCATE);
             found = 1;
             break;
