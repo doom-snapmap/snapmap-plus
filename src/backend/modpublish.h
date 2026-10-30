@@ -91,10 +91,14 @@ void sh_modpublish_save_seen(const char *text, size_t length);
  * write is taken). Main thread. */
 void sh_modpublish_publish_started(const char *local_id);
 
-/* WriteLocalSavedMapText(localId, model, text), before the original: when it
- * is the armed publish's save and the save carried rows, ops.add_tag writes
- * the search tag into `model` (an idLocalSavedMapModel). Disarms. Returns the
- * add_tag result, or 0 when nothing was asked. */
+/* WriteLocalSavedMapText(localId, model, text), before the original, for
+ * every local save the observer just reported: the search tag is made to
+ * match the save. A save that carries rows gets it (ops.add_tag into `model`,
+ * an idLocalSavedMapModel; the result, 1 added or 0 present), one without
+ * rows loses it (ops.remove_tag; 2 removed, 0 absent). The model is copied
+ * back to the editor after the write, so the edit's own list follows. An
+ * armed publish's own write disarms the arm. -1 when the list could not be
+ * changed, 0 when nothing was asked (no fresh save, no model). */
 int  sh_modpublish_save_tag(const char *local_id, void *model);
 
 /* PublishAfterSave(editorLocal): 1 to call the original now, 0 when the
@@ -183,6 +187,10 @@ typedef struct sh_modpublish_ops {
      * item; its answer arrives through sh_modpublish_published_result with
      * `ticket`. 1 started, 0 not. NULL: delete never releases. */
     int  (*published_query)(void *c, const char *cloud_id, unsigned ticket);
+    /* Remove `tag` from a saved-map model's tags: 1 removed, 0 absent, -1
+     * failed. Called from a local save write whose save carries no mod rows,
+     * so the search tag matches the save. NULL: the tag is never removed. */
+    int  (*remove_tag)(void *c, void *model, const char *tag);
 } sh_modpublish_ops;
 
 #ifdef SH_MODPUBLISH_TESTING

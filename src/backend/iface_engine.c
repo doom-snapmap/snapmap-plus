@@ -32,6 +32,7 @@
 #include "timeline_tile.h"
 #include "budget_table.h"
 #include "modui.h"
+#include "commands.h"
 #include "process_heap_scope.h"
 #include "modserve.h"
 #include "modpublish.h"
@@ -1360,6 +1361,11 @@ static int ie_mods_remove_tag(const char *tag)
     return r;
 }
 
+/* The Mods tab's undo watch, reinstatement toast and console line. */
+static int ie_mods_entity_valid(int uid) { return slot_is_valid_id(NULL, uid); }
+static void ie_mods_toast(const char *title, const char *text) { slot_toast(NULL, title, text); }
+static void ie_mods_print(const char *line) { if (line) sh_printf("%s\n", line); }
+
 /* Play, or a map between load states: the tab's changes wait. */
 static int ie_mods_busy(char *cause, size_t cap)
 {
@@ -1457,6 +1463,9 @@ int sh_iface_engine_install(const sig_result *results, size_t n, const uint8_t *
         (void)sh_process_heap_bind(&g_mods_heap, results, n, module_base); /* unbound: the tag edit refuses */
         mods.remove_tag      = ie_mods_remove_tag;
         mods.busy            = ie_mods_busy;
+        mods.entity_valid    = ie_mods_entity_valid;
+        mods.toast           = ie_mods_toast;
+        mods.print           = ie_mods_print;
         sh_modui_bind(&mods);
     }
     slots.mods                   = sh_modui_slot;             /* +0x378 ext 34 */

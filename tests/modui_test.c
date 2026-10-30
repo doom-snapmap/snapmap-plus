@@ -218,6 +218,12 @@ static int fake_remove_tag(const char *tag)
     return 1;
 }
 
+static char g_toast[600], g_print[600];
+static int g_toasts;
+static void fake_toast(const char *title, const char *text) { g_toasts++; _snprintf_s(g_toast, sizeof g_toast, _TRUNCATE, "%s: %s", title, text); }
+static void fake_print(const char *line) { strncpy_s(g_print, sizeof g_print, line, _TRUNCATE); }
+static int fake_entity_valid(int uid) { return g_map_on && ent_alive(uid); }
+
 static const char *g_busy;
 static int fake_busy(char *cause, size_t cap)
 {
@@ -258,6 +264,9 @@ static void bind_fakes(void)
     e.delete_entities = fake_delete;
     e.remove_tag = fake_remove_tag;
     e.busy = fake_busy;
+    e.entity_valid = fake_entity_valid;
+    e.toast = fake_toast;
+    e.print = fake_print;
     e.on_main_thread = fake_on_main;
     e.placed_names = fake_placed;
     e.rescan = fake_rescan;
@@ -690,7 +699,9 @@ int main(int argc, char **argv)
         CHECK(mt_exists(moved) && !mt_exists(b));
         doc = list_doc();
         CHECK(bundle_has(doc, "twin-a", "\"state\":\"installed\",\"cause\":\"\",\"otherBuilds\":0,\"duplicateId\":false"));
-        CHECK(!has(doc, "twin-b"));
+        CHECK(!has(doc, "\"key\":\"twin-b\""));
+        CHECK(has(doc, "\"removed\":{\"folder\":\"") && has(doc, "{\"folder\":\"twin-b\",\"id\":\"alex.twin\",\"version\":\"2.0.0\","
+                                                              "\"name\":\"Twin\",\"bytes\":"));
         free(doc);
         doc = run_doc(SH_MODS_ACT_REMOVE, "twin-b");
         CHECK(has(doc, "\"ok\":false") && has(doc, "no longer installed"));
@@ -747,9 +758,12 @@ int main(int argc, char **argv)
             free(doc);
         }
         doc = run_doc(SH_MODS_ACT_REMOVE, "old.pack");
-        CHECK(has(doc, "\"ok\":true") && has(doc, "\"movedTo\":\"\""));   /* the product made it: deleted */
+        CHECK(has(doc, "\"ok\":true") && has(doc, "removed-mods\\\\old.pack\""));   /* the product made it: moved too */
         free(doc);
         CHECK(!mt_exists(leg));
+        doc = list_doc();
+        CHECK(has(doc, "{\"folder\":\"old.gen\",\"id\":\"old.gen\",\"version\":\"\",\"name\":\"Gen\""));   /* no generated version */
+        free(doc);
     }
 
     printf("-- migrate: the button's state, the action, and the slot's WAIT\n");
@@ -902,8 +916,8 @@ int main(int argc, char **argv)
         sh_modmanifest_reset();
         g_placed_count = 0;
         doc = run_doc(SH_MODS_ACT_REMOVE, "alex.shade-a");
-        CHECK(has(doc, "\"action\":\"remove\",\"ok\":true") && has(doc, "\"message\":\"Removed Shade.\"") &&
-              has(doc, "\"removed\":[\"alex.shade-a\"]") && has(doc, "\"movedTo\":\"\"") && has(doc, "\"blobs\":0"));
+        CHECK(has(doc, "\"action\":\"remove\",\"ok\":true") && has(doc, "\"message\":\"Removed Shade. Its folder was moved to ") &&
+              has(doc, "\"removed\":[\"alex.shade-a\"]") && has(doc, "removed-mods\\\\alex.shade-a\"") && has(doc, "\"blobs\":0"));
         CHECK((unsigned)g_rescans == rescans + 1);
         free(doc);
         _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\alex.shade-a", g_root);
@@ -1088,12 +1102,14 @@ int main(int argc, char **argv)
         g_tagged = 1;
         doc = run_doc(SH_MODS_ACT_UNINSTALL_PREVIEW, "alex.req");
         CHECK(has(doc, "\"preview\":{\"action\":\"uninstall\",\"key\":\"alex.req\",\"name\":\"Gates\",\"map\":null,"
-                       "\"install\":{\"folder\":\"alex.req\",\"disposition\":\"delete\",\"movedTo\":\"\"},\"editorRows\":[]}"));
+                       "\"install\":{\"folder\":\"alex.req\",\"disposition\":\"move\",\"movedTo\":\"removed-mods\\\\alex.req\"},"
+                       "\"editorRows\":[]}"));
         free(doc);
         doc = run_doc(SH_MODS_ACT_UNINSTALL_PREVIEW, key2);
         CHECK(has(doc, "\"action\":\"uninstall\",\"key\":\"alex.r2-imp@1.0.1\""));
         CHECK(has(doc, "\"entityCount\":2,") && has(doc, "\"tagRemoved\":true,\"vanillaAfter\":true"));
-        CHECK(has(doc, "\"install\":{\"folder\":\"alex.r2-imp@1.0.1\",\"disposition\":\"delete\",\"movedTo\":\"\"},"
+        CHECK(has(doc, "\"install\":{\"folder\":\"alex.r2-imp@1.0.1\",\"disposition\":\"move\","
+                       "\"movedTo\":\"removed-mods\\\\alex.r2-imp@1.0.1\"},"
                        "\"editorRows\":[\"mods/alex.r2-imp/imp_copy\",\"mods/alex.r2-imp/imp_copy_b\"]}"));
         free(doc);
         CHECK(ent_alive(1) && ent_alive(2));
@@ -1127,7 +1143,8 @@ int main(int argc, char **argv)
             g_doctor[0] = 0;
             CHECK(sh_modui_command(2, un_argv, doctor_line, NULL) == 1);
             CHECK(has(g_doctor, "MODS: uninstall: removes 2 Toybox row(s) from the editor\n"));
-            CHECK(has(g_doctor, "MODS: uninstall: deletes the folder mods\\alex.r2-imp@1.0.1 and its files\n"));
+            CHECK(has(g_doctor, "MODS: uninstall: moves the folder mods\\alex.r2-imp@1.0.1 to removed-mods\\ (kept there until "
+                                "the removed mods are emptied)\n"));
             CHECK(has(g_doctor, "MODS: uninstall alex.r2-imp@1.0.1: dry run; add --yes to do it\n"));
             _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", g_root, key2);
             CHECK(mt_exists(path) && ent_alive(1));
@@ -1143,7 +1160,8 @@ int main(int argc, char **argv)
             {
                 unsigned rescans = (unsigned)g_rescans;
                 CHECK(sh_modui_command(3, un_yes, doctor_line, NULL) == 1);
-                CHECK(has(g_doctor, "MODS: uninstall alex.r2-imp@1.0.1: Uninstalled R2 Imp copy and removed it from the open map.\n"));
+                CHECK(has(g_doctor, "MODS: uninstall alex.r2-imp@1.0.1: Uninstalled R2 Imp copy and removed it from the open map. "
+                                    "Its folder was moved to removed-mods\\alex.r2-imp@1.0.1.\n"));
                 CHECK((unsigned)g_rescans == rescans + 1);
             }
             CHECK(g_deleted_n == 2 && !ent_alive(1) && !ent_alive(2) && g_tagged == 0);
@@ -1151,6 +1169,132 @@ int main(int argc, char **argv)
             doc = list_doc();
             CHECK(!has(doc, "\"key\":\"alex.r2-imp@1.0.1\"") && has(doc, "\"mods\":[],\"vanilla\":true}"));
             free(doc);
+        }
+
+        printf("-- the recycle bin: the uninstalled folder is kept and recorded\n");
+        {
+            char binned[MAX_PATH * 2], *rec = NULL;
+            _snprintf_s(binned, sizeof binned, _TRUNCATE, "%s\\store\\removed-mods\\alex.r2-imp@1.0.1\\mod.json", tmp);
+            CHECK(mt_exists(binned));
+            CHECK(sh_mb_record_get(g_root, "removed", &rec) == 1 && rec && strstr(rec, "\"alex.r2-imp@1.0.1\"") &&
+                  strstr(rec, "\"R2 Imp copy\"") && strstr(rec, hash2) && strstr(rec, "\"removedAt\"") && strstr(rec, "\"seq\""));
+            free(rec);
+            doc = list_doc();
+            CHECK(has(doc, "{\"folder\":\"alex.r2-imp@1.0.1\",\"id\":\"alex.r2-imp\",\"version\":\"1.0.1\",\"name\":\"R2 Imp copy\","));
+            CHECK(has(doc, "\"restorable\":true"));
+            free(doc);
+        }
+
+        printf("-- Ctrl+Z brings the entities back: the tick reinstates the mod, once\n");
+        {
+            unsigned rescans = (unsigned)g_rescans, refreshes = (unsigned)g_refreshes;
+            g_toast[0] = g_print[0] = 0;
+            g_toasts = 0;
+            /* Nothing back yet: nothing happens. */
+            CHECK(sh_modui_poll_due() == 1 && sh_modui_poll_main(NULL) == 1);
+            CHECK(!mt_exists(path) && (unsigned)g_rescans == rescans && g_toasts == 0);
+            /* The undo, during Play: the tick waits for the editor. */
+            g_ents[1].alive = g_ents[2].alive = 1;
+            g_placed[0] = "mods/alex.r2-imp/imp_copy";     /* what the editor's entities name again */
+            g_placed[1] = "player/coop/player_start";
+            g_placed_count = 2;
+            g_busy = "Play is running";
+            CHECK(sh_modui_poll_main(NULL) == 0 && !mt_exists(path));
+            g_busy = NULL;
+            CHECK(sh_modui_poll_main(NULL) == 1);
+            CHECK(mt_exists(path));                                   /* mods\alex.r2-imp@1.0.1 again */
+            CHECK((unsigned)g_rescans == rescans + 1 && (unsigned)g_refreshes == refreshes + 1);
+            CHECK(g_toasts == 1 && !strcmp(g_toast, "Mods: R2 Imp copy was reinstalled because the map still uses it."));
+            CHECK(!strcmp(g_print, "MODS: R2 Imp copy was reinstalled because the map still uses it."));
+            CHECK(sh_modui_poll_main(NULL) == 1 && g_toasts == 1);   /* once */
+            doc = list_doc();
+            CHECK(bundle_has(doc, key2, "\"state\":\"installed\""));
+            CHECK(has(doc, "\"removed\":{") && !has(doc, "{\"folder\":\"alex.r2-imp@1.0.1\""));
+            free(doc);
+            /* The save writes its row again. */
+            {
+                size_t len = 0, out_len = 0;
+                char *t = map_text(&len), *saved = sh_modmanifest_on_save(t, len, &out_len);
+                CHECK(saved && strstr(saved, "smpmod1.0.1") && strstr(saved, hash2));
+                if (saved) HeapFree(GetProcessHeap(), 0, saved);
+            }
+        }
+
+        printf("-- a map load that names the bundle, and a save that places its names, reinstate it too\n");
+        {
+            const char *un_yes[] = { "uninstall", "alex.r2-imp@1.0.1", "--yes" };
+            const char *hashes[1];
+            unsigned refreshes;
+            hashes[0] = hash2;
+            CHECK(sh_modui_command(3, un_yes, doctor_line, NULL) == 1 && !mt_exists(path));
+            /* The load: the index at once, the game-side refresh and the toast at the next editor tick. */
+            refreshes = (unsigned)g_refreshes;
+            g_toasts = 0;
+            CHECK(sh_modserve_restore(hashes, 1, NULL, 0, SH_MODSERVE_RESTORE_LOAD) == 1 && mt_exists(path));
+            CHECK((unsigned)g_refreshes == refreshes && g_toasts == 0);
+            CHECK(sh_modserve_restore(hashes, 1, NULL, 0, SH_MODSERVE_RESTORE_LOAD) == 0);   /* installed: nothing */
+            CHECK(sh_modui_poll_main(NULL) == 1 && (unsigned)g_refreshes == refreshes + 1 && g_toasts == 1);
+            /* The save: the placed names are under mods/alex.r2-imp/, no installed folder declares the id. */
+            g_ents[1].alive = g_ents[2].alive = 1;
+            open_test_map();
+            CHECK(sh_modui_command(3, un_yes, doctor_line, NULL) == 1 && !mt_exists(path));
+            g_ents[1].alive = g_ents[2].alive = 1;
+            {
+                size_t len = 0, out_len = 0;
+                char *t = map_text(&len), *saved = sh_modmanifest_on_save(t, len, &out_len);
+                CHECK(mt_exists(path));
+                CHECK(saved && strstr(saved, "smpmod1.0.1") && strstr(saved, hash2));
+                if (saved) HeapFree(GetProcessHeap(), 0, saved);
+            }
+            CHECK(sh_modui_poll_main(NULL) == 1 && g_toasts == 2);
+            /* The folder name taken meanwhile: it comes back under a free name. */
+            open_test_map();
+            CHECK(sh_modui_command(3, un_yes, doctor_line, NULL) == 1 && !mt_exists(path));
+            CreateDirectoryA(path, NULL);
+            mt_write(path, "notes.txt", "someone else's folder");
+            CHECK(sh_modserve_restore(hashes, 1, NULL, 0, SH_MODSERVE_RESTORE_LOAD) == 1);
+            {
+                char again[MAX_PATH * 2];
+                _snprintf_s(again, sizeof again, _TRUNCATE, "%s\\alex.r2-imp\\mod.json", g_root);
+                CHECK(mt_exists(again));                               /* its id */
+                mt_remove_tree(path);
+                _snprintf_s(again, sizeof again, _TRUNCATE, "%s\\alex.r2-imp", g_root);
+                CHECK(MoveFileA(again, path));
+                doc = run_doc(SH_MODS_ACT_RESCAN, NULL);
+                free(doc);
+            }
+            CHECK(sh_modui_poll_main(NULL) == 1);
+        }
+
+        printf("-- the console: removed, removed empty, removed restore\n");
+        {
+            const char *un_yes[] = { "uninstall", "alex.r2-imp@1.0.1", "--yes" };
+            const char *ls[] = { "removed" };
+            const char *empty_dry[] = { "removed", "empty" };
+            const char *restore[] = { "removed", "restore", "alex.r2-imp" };
+            const char *bad[] = { "removed", "frob" };
+            open_test_map();
+            CHECK(sh_modui_command(3, un_yes, doctor_line, NULL) == 1 && !mt_exists(path));
+            g_doctor[0] = 0;
+            CHECK(sh_modui_command(1, ls, doctor_line, NULL) == 1);
+            CHECK(has(g_doctor, "MODS: removed: ") && has(g_doctor, "MODS: removed:   alex.r2-imp@1.0.1: alex.r2-imp@1.0.1 (R2 Imp copy), "));
+            CHECK(has(g_doctor, "MODS: removed:   twin-b: alex.twin@2.0.0 (Twin), "));
+            g_doctor[0] = 0;
+            CHECK(sh_modui_command(2, empty_dry, doctor_line, NULL) == 1);
+            CHECK(has(g_doctor, "MODS: removed empty: deletes removed-mods\\alex.r2-imp@1.0.1 (alex.r2-imp, "));
+            CHECK(has(g_doctor, "dry run; add --yes to delete "));
+            g_doctor[0] = 0;
+            CHECK(sh_modui_command(3, restore, doctor_line, NULL) == 1);
+            CHECK(has(g_doctor, "MODS: removed restore alex.r2-imp: Reinstalled R2 Imp copy: removed-mods\\alex.r2-imp@1.0.1 is "
+                                "mods\\alex.r2-imp@1.0.1 again"));
+            CHECK(mt_exists(path));
+            g_doctor[0] = 0;
+            {
+                const char *nobody[] = { "removed", "restore", "nobody" };
+                CHECK(sh_modui_command(3, nobody, doctor_line, NULL) == 1 && has(g_doctor, "removed-mods holds no folder of nobody."));
+            }
+            g_doctor[0] = 0;
+            CHECK(sh_modui_command(2, bad, doctor_line, NULL) == 1 && has(g_doctor, "usage: sh_mods removed"));
         }
 
         printf("-- rebuild: the folder built again from its files, then a rescan\n");
@@ -1173,10 +1317,54 @@ int main(int argc, char **argv)
             CHECK(has(doc, "\"ok\":false,\"message\":\"Not now: a map is loading.\"") && mt_exists(path));
             free(doc);
             g_busy = NULL;
-            /* A folder the product made is deleted; the record keeps nothing of it. */
-            doc = run_doc(SH_MODS_ACT_UNINSTALL, "alex.req");
-            CHECK(has(doc, "\"action\":\"uninstall\",\"ok\":true,\"message\":\"Uninstalled Gates.\"") && !mt_exists(path));
+            /* A folder of that name already in removed-mods: the new one gets a suffix. */
+            {
+                char clash[MAX_PATH * 2];
+                _snprintf_s(clash, sizeof clash, _TRUNCATE, "%s\\store\\removed-mods\\alex.req", tmp);
+                CreateDirectoryA(clash, NULL);
+                mt_write(clash, "readme.txt", "an older copy");
+            }
+            doc = run_doc(SH_MODS_ACT_UNINSTALL_PREVIEW, "alex.req");
+            CHECK(has(doc, "\"movedTo\":\"removed-mods\\\\alex.req-2\""));
             free(doc);
+            doc = run_doc(SH_MODS_ACT_UNINSTALL, "alex.req");
+            CHECK(has(doc, "\"action\":\"uninstall\",\"ok\":true,\"message\":\"Uninstalled Gates. Its folder was moved to "
+                           "removed-mods\\\\alex.req-2.\"") && !mt_exists(path));
+            free(doc);
+        }
+
+        printf("-- Empty: only the folders the confirmation listed, then all; the records go with them\n");
+        {
+            char probe[MAX_PATH * 2], *rec = NULL;
+            doc = list_doc();
+            CHECK(has(doc, "{\"folder\":\"alex.req\",\"id\":\"alex.req\",\"version\":\"\",\"name\":\"\",\"bytes\":13,"));   /* not recorded */
+            CHECK(has(doc, "{\"folder\":\"alex.req-2\",\"id\":\"alex.req\",\"version\":\"1.0.0\",\"name\":\"Gates\""));
+            free(doc);
+            doc = run_doc(SH_MODS_ACT_REMOVED_EMPTY, "twin-b\nalex.req\n");
+            CHECK(has(doc, "\"action\":\"removedEmpty\",\"ok\":true,\"message\":\"Deleted 2 removed mod folder(s), ") &&
+                  has(doc, "\"deleted\":2,\"failed\":0"));
+            free(doc);
+            _snprintf_s(probe, sizeof probe, _TRUNCATE, "%s\\store\\removed-mods\\twin-b", tmp);
+            CHECK(!mt_exists(probe));
+            _snprintf_s(probe, sizeof probe, _TRUNCATE, "%s\\store\\removed-mods\\alex.req-2", tmp);
+            CHECK(mt_exists(probe));
+            CHECK(sh_mb_record_get(g_root, "removed", &rec) == 1 && rec && !strstr(rec, "\"twin-b\"") && strstr(rec, "\"alex.req-2\""));
+            free(rec);
+            rec = NULL;
+            doc = run_doc(SH_MODS_ACT_REMOVED_EMPTY, "");
+            CHECK(has(doc, "\"ok\":true") && has(doc, "\"failed\":0"));
+            free(doc);
+            CHECK(!mt_exists(probe));
+            CHECK(sh_mb_record_get(g_root, "removed", &rec) != 1 || !rec || !strstr(rec, "\"id\""));
+            free(rec);
+            doc = list_doc();
+            CHECK(has(doc, "\"removed\":{\"folder\":\"") && has(doc, "\"count\":0,\"bytes\":0,\"items\":[]}"));
+            free(doc);
+            doc = run_doc(SH_MODS_ACT_REMOVED_EMPTY, "");
+            CHECK(has(doc, "\"ok\":false,\"message\":\"Nothing to empty: removed-mods holds no folder.\""));
+            free(doc);
+            /* An empty bin arms nothing: the save step does not read the map for it. */
+            CHECK(sh_modserve_restore(NULL, 0, NULL, 0, SH_MODSERVE_RESTORE_PLAY) == 0);
         }
         g_map_on = 0;
         sh_modui_test_set_saves_root(NULL);

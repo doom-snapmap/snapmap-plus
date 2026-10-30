@@ -471,6 +471,39 @@ static void mod_json(void)
     }
 }
 
+/* The save step's restore hook: asked with the placed names while armed,
+ * before the rows are built, so a reinstated bundle gets its row. */
+static int g_armed, g_restore_calls, g_restore_when;
+static size_t g_restore_names;
+static int fake_armed(void) { return g_armed; }
+static int fake_restore(const char *const *hashes, int hash_count, const char *const *names, size_t name_count, int when)
+{
+    (void)hashes; (void)hash_count; (void)names;
+    g_restore_calls++;
+    g_restore_names = name_count;
+    g_restore_when = when;
+    g_installed_count = 2;   /* the bundle serves again */
+    return 1;
+}
+
+static void save_restore(void)
+{
+    char *out;
+    size_t n = 0;
+    printf("-- save: an uninstalled mod the map still places is reinstated before the rows are built\n");
+    sh_modmanifest_set_restore(fake_restore, fake_armed);
+    g_installed = INSTALLED;
+    g_installed_count = 0;
+    g_armed = 0;
+    CHECK(sh_modmanifest_on_save(MAP, sizeof MAP - 1, &n) == NULL && g_restore_calls == 0);   /* not armed */
+    g_armed = 1;
+    out = sh_modmanifest_on_save(MAP, sizeof MAP - 1, &n);
+    CHECK(g_restore_calls == 1 && g_restore_names > 0 && g_restore_when == SH_MODSERVE_RESTORE_SAVE);
+    CHECK(out && strstr(out, "\"smpmod1.0.1\""));
+    if (out) HeapFree(GetProcessHeap(), 0, out);
+    sh_modmanifest_set_restore(NULL, NULL);
+}
+
 int main(void)
 {
     printf("modmanifest_test\n");
@@ -480,6 +513,7 @@ int main(void)
     playtest_bound();
     placed_names();
     save_closure();
+    save_restore();
     load_step();
     mod_json();
     printf("\n%s -- %d checks, %d failed\n", g_failed ? "FAILED" : "ok", g_checks, g_failed);

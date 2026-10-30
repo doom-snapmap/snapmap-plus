@@ -15,7 +15,11 @@
  *   sh_mods map                    the open map and each mod it uses: placed entities, and the
  *                                  wires and Timelines pointing at them (modui.c)
  *   sh_mods map remove "<id>" [--yes]   what removing that mod from the open map does; --yes does it
- *   sh_mods uninstall "<id>" [--yes]    what uninstalling does (the map first, then the folder); --yes does it
+ *   sh_mods uninstall "<id>" [--yes]    what uninstalling does (the map first, then the folder moved to
+ *                                       removed-mods); --yes does it
+ *   sh_mods removed                     the removed mods: each folder in removed-mods, its id and size
+ *   sh_mods removed empty [--yes]       what emptying deletes; --yes deletes the folders and their records
+ *   sh_mods removed restore "<id>"      moves one back into mods and rescans
  *   sh_mods copystock "<engine path>" "<file>"  write an installed game file's bytes to a file
  *                                  (authoring: a stock mesh or anim copied under a new name)
  *   sh_mods push "<id@version+build>" "<ref>"   upload a bundle to the mod store and claim it under ref
@@ -55,7 +59,9 @@
                            "uses with its placed entities and the wires and Timelines pointing at them, 'sh_mods map remove " \
                            "\"<id>\"' prints what removing that mod from the map deletes and 'sh_mods map remove \"<id>\" --yes' " \
                            "does it (one undo step), 'sh_mods uninstall \"<id>\"' prints what uninstalling does (the open map " \
-                           "cleaned of it, its Toybox rows, its folder) and '--yes' does it, 'sh_mods rebuild \"<folder>\"' " \
+                           "cleaned of it, its Toybox rows, its folder moved to removed-mods) and '--yes' does it, " \
+                           "'sh_mods removed' lists the removed mods, 'sh_mods removed empty --yes' deletes them, " \
+                           "'sh_mods removed restore \"<id>\"' puts one back, 'sh_mods rebuild \"<folder>\"' " \
                            "builds a mod folder again and rescans."
 /* Printed by 'sh_mods help' after SH_MODCMD_HELP (each under the console's 1 KiB line). */
 #define SH_MODCMD_HELP_STORE "Mod store: 'sh_mods push \"<id@version+build>\" \"<ref>\"' uploads a bundle and claims it under ref, " \

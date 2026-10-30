@@ -506,8 +506,42 @@ exported map's rows to name it). Saving a map writes rows from the serving
 index, so they name the build that serves. Removing a folder keeps its
 aliases while a folder of that id remains and drops them once none does.
 `mods\snapmap-plus.json` is the product's one record:
-`claims`, `links`, `pending`, `migration`, `cache` (tree hash to bundle hash)
-and `aliases`, each section written whole under one lock.
+`claims`, `links`, `pending`, `migration`, `cache` (tree hash to bundle hash),
+`aliases` and `removed`, each section written whole under one lock.
+
+The recycle bin. No folder is deleted by Uninstall, Remove or the removal of
+covered builds: every one, the product's or the author's own, moves to
+`removed-mods\` beside `mods\` (a name already taken there gets `-2`, `-3`, ...),
+and the record's `removed` section keeps, under its name there, the bundle
+hash and every alias that answered as it, the id, version and title, its name
+in `mods\`, the time (`removedAt`, Unix seconds) and an order number (`seq`).
+The aliases themselves are dropped as above. A recorded folder comes back when
+a map still needs it (`modui.c`, `mu_restore`, behind `sh_modserve_restore`
+and the save step's hook): a map load whose manifest names a bundle that
+resolves to nothing installed (the hash, or one of its aliases, is recorded;
+`modserve_activate_bundles` asks before it plans and plans again), a save or a
+Play entry whose placed names live under `mods/<id>/` (or the id's `_`
+spelling) of an id no installed folder declares (the newest recorded folder
+of that id), or Ctrl+Z bringing back an entity Uninstall deleted from the open
+map: the main-thread tick after each native frame (`sh_modui_poll_main`, run
+on the process heap like the other main-thread calls, every 250 ms while
+anything is watched or owed) checks those uniqueIds and, when one is back,
+reinstates the bundle they were deleted with, by its hash, whatever its names
+look like. The folder moves back under its old name,
+else its id, else a free name; its aliases are recorded again; the rebuild
+rule and the serving index run at once, so the load or save in progress sees
+the mod (the dropped `cache` entry makes the rebuild rule build it again,
+with the same hash when nothing changed). The game-side refresh (decls,
+palette rows, strings) runs at once after an undo and otherwise on the next
+editor tick, and that tick shows one editor toast and one console line, "Hell
+Guards was reinstalled because the map still uses it."; during Play or a load
+the tick waits, as the deferred refresh does. Emptying the bin (the Mods tab's
+footer, `sh_mods removed empty --yes`) deletes the folders, links not
+followed, and their entries; a folder in `removed-mods\` the record does not
+know (one moved there by hand or by an earlier build) is listed and emptied
+but never brought back. `sh_mods removed restore "<id>"` moves one back by
+hand. Not covered: a published map's launch asks to download a missing bundle
+before activation, so it does not use the bin.
 
 The rebuild rule: a folder is built again when its tree hash (the author's bytes of `mod.json`
 and the path, size and time of every file under `assets\`) is not a key of the
@@ -1066,9 +1100,9 @@ last mod, the search tag `mods` is removed from the editor's tag list
 heap because the console command's own heap does not survive Play); the published
 copy is unchanged until the map is published again. A mod placed as
 Blueprint modules, or reached only through another mod's needs, is refused
-with the cause. Uninstall runs that on the open map first, then removes the
-folder as Remove does (a product folder deleted, the author's moved to
-`removed-mods\`), then rescans; the refresh rebuilds the palette without the
+with the cause. Uninstall runs that on the open map first, then moves the
+folder to `removed-mods\` as Remove does (every origin, recorded; see the
+recycle bin above), then rescans; the refresh rebuilds the palette without the
 mod's editor rows and, when the editor refuses the rebuild because the delete
 is still committing, retries it once the editor is free. Closed maps are not
 edited. Both flows, and Rebuild, are refused while Play runs or a map loads
@@ -1156,7 +1190,11 @@ uploads every bundle (`modsync_upload_bundles`: missing blobs, the canonical
 manifests, one claim) under a provisional ref `publish-pending-<16 hex>`, and a
 main tick resumes the original `PublishAfterSave`. A publish whose save
 carries rows also carries the search tag `mods`, so players can see that the
-map needs Snapmap+. The tag has to be in the local save's metadata: the cloud
+map needs Snapmap+. Every local save keeps the tag in step with its rows: the
+`WriteLocalSavedMapText` detour adds it to the model the save writes when the
+save observer saw rows and removes it when it saw none (the model is copied
+back to the editor), so an undo of the last mod's removal, or a save made
+without publishing, never leaves a map with mods untagged. The tag has to be in the local save's metadata: the cloud
 save `TryCloudSave` starts reads the slot's metadata back from the profile
 (`ReadLocalSaveMeta`) rather than the editor's model, and the published item
 copies the cloud save's tags, so a tag added to the editor after the save is

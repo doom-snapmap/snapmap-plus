@@ -226,22 +226,34 @@ void sh_modpublish_publish_started(const char *local_id)
 
 int sh_modpublish_save_tag(const char *local_id, void *model)
 {
-    int tagged;
-    if (!g_ops_set || !g_tag.armed || !mp_on_main()) return 0;
-    if (GetTickCount64() - g_tag.at > MP_TAG_ARM_MS) { g_tag.armed = 0; return 0; }
-    if (g_tag.local[0] && (!local_id || strcmp(local_id, g_tag.local))) return 0;   /* another slot */
-    g_tag.armed = 0;
-    /* The observer reported this save's text just before its write. */
-    if (!g_save.valid || !g_save.count || GetTickCount64() - g_save.at > MP_SAVE_FRESH_MS) return 0;
-    if (!g_ops.add_tag || !model) return 0;
+    int tagged, armed = 0;
+    if (!g_ops_set || !mp_on_main()) return 0;
+    if (g_tag.armed) {
+        if (GetTickCount64() - g_tag.at > MP_TAG_ARM_MS) g_tag.armed = 0;
+        else if (!g_tag.local[0] || (local_id && !strcmp(local_id, g_tag.local))) { armed = 1; g_tag.armed = 0; }
+    }
+    /* The observer reported this save's text just before its write. Every
+     * local save makes the tag match it: present with rows, absent without. */
+    if (!g_save.valid || GetTickCount64() - g_save.at > MP_SAVE_FRESH_MS || !model) return 0;
+    if (!g_save.count) {
+        if (!g_ops.remove_tag) return 0;
+        tagged = g_ops.remove_tag(g_ops.context, model, SH_MODPUBLISH_TAG);
+        if (tagged > 0)
+            mp_log("MODS: save: search tag '" SH_MODPUBLISH_TAG "' removed from the saved map's tags (the save carries "
+                   "no mod rows)");
+        else if (tagged < 0)
+            mp_log("MODS: save: the search tag '" SH_MODPUBLISH_TAG "' could not be removed from the saved map's tags");
+        return tagged > 0 ? 2 : tagged;
+    }
+    if (!g_ops.add_tag) return 0;
     tagged = g_ops.add_tag(g_ops.context, model, SH_MODPUBLISH_TAG);
     if (tagged >= 0) g_tag.tagged_sequence = g_save.sequence;
     if (tagged > 0)
-        mp_log("MODS: publish: search tag '" SH_MODPUBLISH_TAG "' written into the saved map's tags (the map needs "
-               "mods, so players without Snapmap+ cannot play it)");
+        mp_logf("MODS: %s: search tag '" SH_MODPUBLISH_TAG "' written into the saved map's tags (the map needs "
+                "mods, so players without Snapmap+ cannot play it)", armed ? "publish" : "save");
     else if (tagged < 0)
-        mp_log("MODS: publish: the search tag '" SH_MODPUBLISH_TAG "' could not be written; the map publishes "
-               "without it");
+        mp_logf("MODS: %s: the search tag '" SH_MODPUBLISH_TAG "' could not be written%s", armed ? "publish" : "save",
+                armed ? "; the map publishes without it" : "");
     return tagged;
 }
 
@@ -1573,6 +1585,46 @@ static int eng_add_tag(void *c, void *model, const char *tag)
     return result;
 }
 
+/* Take `tag` out of a tag list (idList<idStr>): the entries after it move
+ * down one through the engine's idStr assignment (the one PublishStart uses)
+ * and num shrinks by one, leaving the last slot constructed for the list's
+ * own destructor. remove 0 only asks. 1 removed (or present), 0 absent, -1
+ * unreadable or failed. Main thread. */
+static int eng_list_tag(uint8_t *list, const char *tag, int remove)
+{
+    char have[64];
+    int result = -1;
+    if (remove && (!InterlockedCompareExchange(&g_eng.ready, 0, 0) || !g_eng.idstr_assign)) return -1;
+    __try {
+        uint8_t *data = *(uint8_t **)list;
+        int num = *(int *)(list + 8), size = *(int *)(list + 0xC), at = -1, i;
+        if (num < 0 || size < num || num > ENG_TAGS_MAX || (num && !data)) return -1;
+        for (i = 0; i < num && at < 0; i++)
+            if (eng_string(data + (size_t)i * ENG_TAG_STRIDE, have, sizeof have) && !_stricmp(have, tag)) at = i;
+        if (at < 0) result = 0;
+        else if (!remove) result = 1;
+        else {
+            for (i = at; i < num - 1; i++)
+                g_eng.idstr_assign(data + (size_t)i * ENG_TAG_STRIDE, data + (size_t)(i + 1) * ENG_TAG_STRIDE);
+            *(int *)(list + 8) = num - 1;
+            result = 1;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        backend_log("MODS: a tag list could not be read or written");
+        result = -1;
+    }
+    return result;
+}
+
+/* The search tag out of the saved-map model a local save writes (tags at
+ * +0x1A0), inside that write. */
+static int eng_remove_tag(void *c, void *model, const char *tag)
+{
+    (void)c;
+    if (!model || !tag) return -1;
+    return eng_list_tag((uint8_t *)model + ENG_MODEL_TAGS, tag, 1);
+}
+
 /* The published edit's saved-map ids, read at the feed post (the cloud save
  * of this publish has completed, so the cloud-saved id is set). */
 static int eng_edit_ids(void *c, void *edit, char *cloud, size_t cloud_cap, char *local, size_t local_cap)
@@ -1657,7 +1709,8 @@ static int eng_published_query(void *c, const char *cloud_id, unsigned ticket)
 
 static const sh_modpublish_ops ENG_OPS = {
     NULL, eng_on_main, eng_can_ask, eng_ask, eng_poll, eng_release, eng_editor_token, eng_publish_fail,
-    eng_resume, eng_editor_notice, ENG_UPLOAD_QUESTION, eng_log, eng_add_tag, eng_edit_ids, eng_published_query
+    eng_resume, eng_editor_notice, ENG_UPLOAD_QUESTION, eng_log, eng_add_tag, eng_edit_ids, eng_published_query,
+    eng_remove_tag
 };
 
 /* ------------------------------------------------------------ detours */
@@ -1907,29 +1960,8 @@ static int eng_bind(const sig_result *results, size_t count, const uint8_t *base
  * -1 failed. Main thread. */
 int sh_modpublish_edit_tag(void *edit, const char *tag, int remove)
 {
-    char have[64];
-    int result = -1;
     if (!edit || !tag) return -1;
-    if (remove && (!InterlockedCompareExchange(&g_eng.ready, 0, 0) || !g_eng.idstr_assign)) return -1;
-    __try {
-        uint8_t *list = (uint8_t *)edit + ENG_EDIT_TAGS, *data = *(uint8_t **)list;
-        int num = *(int *)(list + 8), size = *(int *)(list + 0xC), at = -1, i;
-        if (num < 0 || size < num || num > ENG_TAGS_MAX || (num && !data)) return -1;
-        for (i = 0; i < num && at < 0; i++)
-            if (eng_string(data + (size_t)i * ENG_TAG_STRIDE, have, sizeof have) && !_stricmp(have, tag)) at = i;
-        if (at < 0) result = 0;
-        else if (!remove) result = 1;
-        else {
-            for (i = at; i < num - 1; i++)
-                g_eng.idstr_assign(data + (size_t)i * ENG_TAG_STRIDE, data + (size_t)(i + 1) * ENG_TAG_STRIDE);
-            *(int *)(list + 8) = num - 1;
-            result = 1;
-        }
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        backend_log("MODS: the edit's tag list could not be read or written");
-        result = -1;
-    }
-    return result;
+    return eng_list_tag((uint8_t *)edit + ENG_EDIT_TAGS, tag, remove);
 }
 
 int sh_modpublish_install(const sig_result *results, size_t count, const uint8_t *module_base)

@@ -69,6 +69,25 @@ int sh_modserve_index_rescan(void);
 /* Nonzero when the published table serves at least one path. */
 int sh_modserve_active(void);
 
+/* Reinstating an uninstalled mod the open map still needs (modui.c owns the
+ * recycle bin, removed-mods\, and binds the hook). The points where the
+ * backend learns what a map needs call sh_modserve_restore: the map rows at a
+ * load (`hashes`, the manifest's bundle hashes), the save observer (`names`,
+ * the placed names), a Play entry and the undo watch (neither: the hook reads
+ * the open map's placed names). A bundle that resolves to nothing installed
+ * but matches a recycled folder is moved back into mods\ and the serving
+ * index rebuilt before the call returns; what the running game still needs
+ * (registration, the palette, the toast) follows on a later main-thread tick.
+ * Returns the number of mods reinstated, 0 when none (or no hook). */
+#define SH_MODSERVE_RESTORE_LOAD 1
+#define SH_MODSERVE_RESTORE_SAVE 2
+#define SH_MODSERVE_RESTORE_PLAY 3
+#define SH_MODSERVE_RESTORE_UNDO 4
+typedef int (*sh_modserve_restore_fn)(const char *const *hashes, int hash_count, const char *const *names,
+                                      size_t name_count, int when);
+void sh_modserve_set_restore(sh_modserve_restore_fn fn);
+int  sh_modserve_restore(const char *const *hashes, int hash_count, const char *const *names, size_t name_count, int when);
+
 /* ------------------------------------------------------------------ serve */
 
 /* One lookup result. Pointers stay valid for the process. */
