@@ -1,0 +1,3 @@
+# Mod fixtures are hashed byte for byte (modbundle_test pins the bundle hash):
+# never convert their line endings.
+* -text

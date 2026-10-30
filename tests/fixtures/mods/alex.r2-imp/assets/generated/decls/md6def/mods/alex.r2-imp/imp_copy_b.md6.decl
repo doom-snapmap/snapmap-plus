@@ -1,0 +1,548 @@
+{
+	init {
+		mesh "md6/mods/alex.r2-imp/imp_copy_b/assets/mesh/imp_copy_b.md6mesh"
+		offset ( 0 0 0 )
+		calcRefBoundsFromJoints 0
+	}
+	userProps {
+	}
+	jointGroups {
+	}
+	events {
+		anim "md6/mods/alex.r2-imp/imp_copy/motion/rage_taunt.md6anim" {
+			event "ae_playAIVO" {
+				frame 3
+				row 0
+				locked 0
+				idDeclAIVoiceOver::aiVoiceOverCategory_t CALL_FOR_REINFORCEMENTS
+				aiVoiceOver "imp"
+			}
+		}
+		anim "md6/mods/alex.r2-imp/imp_copy/motion/meleeforward01.md6anim" {
+			event "ae_playAIVO" {
+				frame 4
+				row 3
+				locked 0
+				idDeclAIVoiceOver::aiVoiceOverCategory_t MELEE
+				aiVoiceOver "imp"
+			}
+			event "ae_soundWeapon" {
+				frame 7
+				row 4
+				locked 0
+				sound "play_imp_melee_swing"
+			}
+		}
+		anim "md6/mods/alex.r2-imp/imp_copy/motion/meleeforward02.md6anim" {
+			event "ae_playAIVO" {
+				frame 4
+				row 3
+				locked 0
+				idDeclAIVoiceOver::aiVoiceOverCategory_t MELEE
+				aiVoiceOver "imp"
+			}
+			event "ae_soundWeapon" {
+				frame 7
+				row 4
+				locked 0
+				sound "play_imp_melee_swing"
+			}
+		}
+	}
+	aliases {
+		alias {
+			name "idle/idle"
+			flags {
+				forceLoad
+			}
+			anim "md6/mods/alex.r2-imp/imp_copy/motion/idle.md6anim"
+		}
+		alias {
+			name "hover/hover_variant_1"
+			flags {
+				forceLoad
+			}
+			anim "md6/mods/alex.r2-imp/imp_copy/motion/meleeforward01.md6anim"
+		}
+		alias {
+			name "hover/hover_variant_2"
+			flags {
+				forceLoad
+			}
+			anim "md6/mods/alex.r2-imp/imp_copy/motion/meleeforward02.md6anim"
+		}
+		alias {
+			name "placed/placed"
+			anim "md6/mods/alex.r2-imp/imp_copy/motion/rage_taunt.md6anim"
+		}
+	}
+	props {
+		prop "_info" {
+			tag "gorefx_leftarm" {
+				trans ( 2.7859 6.9333 -0.6728 )
+				rot ( -0.140762 -0.163662 -0.703003 0.677633 )
+				parent "LeftArm"
+			}
+			tag "gorefx_rightarm" {
+				trans ( 1.3294 -7.1865 -1.0773 )
+				rot ( -0.704542 -0.659481 0.185386 -0.185303 )
+				parent "RightForeArm"
+			}
+			tag "mc_camera" {
+				trans ( -55.8505 -46.6016 92.0398 )
+				rot ( 0 0 0 1 )
+				parent "origin"
+			}
+			tag "gorefx_larm_dangle" {
+				trans ( -1.0249 7.2031 0.2821 )
+				rot ( 0 0 -0.682296 0.731076 )
+				parent "LeftForeArm"
+			}
+			tag "gorefx_lleg_dangle" {
+				trans ( -4.8014 -1.2045 -3.8791 )
+				rot ( 0.164793 -0.0767284 -0.0128596 0.983255 )
+				parent "LeftLeg"
+			}
+			tag "gorefx_rleg_dangle" {
+				trans ( 0 0 0 )
+				rot ( 0 0 0 1 )
+				parent "RightLeg"
+			}
+			tag "gorefx_left_leg" {
+				trans ( 0 0 0 )
+				rot ( 0 0 0 1 )
+				parent "LeftLeg"
+			}
+			tag "gorefx_right_leg" {
+				trans ( 0 0 0 )
+				rot ( 0 0 0 1 )
+				parent "RightLeg"
+			}
+			tag "gorefx_lshoulder" {
+				trans ( 5.4195 0 0 )
+				rot ( 0 0 0 1 )
+				parent "LeftArm"
+			}
+			tag "gorefx_rshoulder" {
+				trans ( -5.4195 0 0 )
+				rot ( 0 0 0 1 )
+				parent "RightForeArmRoll"
+			}
+			tag "gorefx_lwaist" {
+				trans ( 0 8.2716 0 )
+				rot ( 0 0 0 1 )
+				parent "hips"
+			}
+			tag "gorefx_rwaist" {
+				trans ( 0 -8.2716 0 )
+				rot ( 0 0 0 1 )
+				parent "hips"
+			}
+			tag "gorefx_ltorso" {
+				trans ( 0 5.1732 0 )
+				rot ( 0 0 0 1 )
+				parent "spine2"
+			}
+			tag "gorefx_rtorso" {
+				trans ( 0 -7.0701 10.3443 )
+				rot ( 0 0 0 1 )
+				parent "spine2"
+			}
+			tag "gorefx_crotch" {
+				trans ( 0 0 -3.1906 )
+				rot ( 0 0 0 1 )
+				parent "hips"
+			}
+			tag "gorefx_torso" {
+				trans ( 0 0 0 )
+				rot ( 0 0 0 1 )
+				parent "spine5"
+			}
+			tag "gorefx_decap_head" {
+				trans ( -2.8865 0 -2.4518 )
+				rot ( 0 -0.18403 0 0.982921 )
+				parent "head"
+			}
+			tag "gorefx_jaw_dangle" {
+				trans ( -1.0469 0.4622 1.8118 )
+				rot ( 0.70718 -0.148116 -0.135441 0.677949 )
+				parent "head"
+			}
+			tag "gorefx_guts_left" {
+				trans ( 4.5469 5.724 2.1217 )
+				rot ( 0 0 0 1 )
+				parent "spine3"
+			}
+			tag "gorefx_guts_right" {
+				trans ( 3.2491 -2.9354 -1.9974 )
+				rot ( 0 0 0 1 )
+				parent "spine4"
+			}
+			tag "gorefx_head_dangle" {
+				trans ( 0 0 0 )
+				rot ( 0 0 0 1 )
+				parent "neck3"
+			}
+			tag "gorefx_lchest_dangle" {
+				trans ( 7.0507 5.862 2.2791 )
+				rot ( 0.75094 0 0 0.66037 )
+				parent "leftclav"
+			}
+			tag "gorefx_head" {
+				trans ( 0 0 0 )
+				rot ( 0.102609 0.371803 -0.245447 0.889376 )
+				parent "neck1"
+			}
+			tag "gorefx_righteye" {
+				trans ( 0 -4.2396 3.4044 )
+				rot ( 0 0 0 1 )
+				parent "head"
+			}
+			tag "fx_chest" {
+				trans ( 4.4269 0 4.2253 )
+				rot ( 0 0 0 1 )
+				parent "spine5"
+			}
+			tag "fx_hand_left" {
+				trans ( 0 3.5 0 )
+				rot ( 0 0 0 1 )
+				parent "LeftHand"
+			}
+			tag "fx_hand_right" {
+				trans ( 0 -3.5 0 )
+				rot ( 0 0 0 1 )
+				parent "RightHand"
+			}
+			tag "fx_mouth" {
+				trans ( 3.8582 0 -0.6661 )
+				rot ( 0 -0.866577 0 0.499044 )
+				parent "head"
+			}
+			tag "fx_shoulder_right" {
+				trans ( 0 -9.6424 -3.836 )
+				rot ( 0 0 0 1 )
+				parent "rightclav"
+			}
+			tag "fx_shoulder_left" {
+				trans ( 0 11.5071 4.1883 )
+				rot ( 0 0 0 1 )
+				parent "leftclav"
+			}
+			tag "target_head" {
+				trans ( 16.242 0 12.3255 )
+				rot ( 0 0 0 1 )
+				parent "head"
+			}
+			tag "fx_head" {
+				trans ( 1.2559 0 4.6993 )
+				rot ( 0 0 0 1 )
+				parent "head"
+			}
+			tag "fx_arm_left" {
+				trans ( 0 0 0 )
+				rot ( 0 0 0 1 )
+				parent "LeftArmRoll"
+			}
+			tag "fx_elbow_left" {
+				trans ( 0 0 0 )
+				rot ( 0 0 0 1 )
+				parent "LeftForeArm"
+			}
+			tag "fx_forearm_left" {
+				trans ( 0 0 0 )
+				rot ( 0 0 0 1 )
+				parent "LeftForeArmRoll"
+			}
+			tag "fx_arm_right" {
+				trans ( 0 0 0 )
+				rot ( 0 0 0 1 )
+				parent "RightArm"
+			}
+			tag "fx_elbow_right" {
+				trans ( 0 0 0 )
+				rot ( 0 0 0 1 )
+				parent "RightForeArm"
+			}
+			tag "fx_forearm_right" {
+				trans ( 0 0 0 )
+				rot ( 0 0 0 1 )
+				parent "RightForeArmRoll"
+			}
+			tag "fx_stomach" {
+				trans ( 0 0 0 )
+				rot ( 0 0 0 1 )
+				parent "spine3"
+			}
+			tag "fx_crotch" {
+				trans ( 0 0 0 )
+				rot ( 0 0 0 1 )
+				parent "hips"
+			}
+			tag "fx_leg_right" {
+				trans ( 0 0 13.5703 )
+				rot ( 0 0 0 1 )
+				parent "RightUpLeg"
+			}
+			tag "fx_leg_left" {
+				trans ( 0 0 -13.6321 )
+				rot ( 0 0 0 1 )
+				parent "LeftUpLeg"
+			}
+			tag "fx_knee_left" {
+				trans ( 0 0 0 )
+				rot ( 0 0 0 1 )
+				parent "LeftLeg"
+			}
+			tag "fx_knee_right" {
+				trans ( 0 0 0 )
+				rot ( 0 0 0 1 )
+				parent "RightLeg"
+			}
+			tag "fx_calf_right" {
+				trans ( 7.2103 0 7.2242 )
+				rot ( 0 -0.382237 0 0.924064 )
+				parent "RightLeg"
+			}
+			tag "fx_calf_left" {
+				trans ( -6.1857 0 -6.7074 )
+				rot ( 0 -0.377155 0 0.92615 )
+				parent "LeftLeg"
+			}
+			tag "fx_foot_left" {
+				trans ( 0 0 0 )
+				rot ( 0 0 0 1 )
+				parent "LeftFoot"
+			}
+			tag "fx_foot_right" {
+				trans ( 0 0 0 )
+				rot ( 0 0 0 1 )
+				parent "RightFoot"
+			}
+			tag "fx_toe_right" {
+				trans ( 0 0 0 )
+				rot ( 0 0 0 1 )
+				parent "RightFootBall"
+			}
+			tag "fx_toe_left" {
+				trans ( 0 0 0 )
+				rot ( 0 0 0 1 )
+				parent "LeftFootBall"
+			}
+			tag "root" {
+				trans ( 0 0 0 )
+				rot ( 0 0 0 1 )
+				parent "origin"
+			}
+			tag "eyereferenceleft" {
+				trans ( 5.1657 3.3092 4.9118 )
+				rot ( 0 0 0 1 )
+				parent "head"
+			}
+			tag "eyereferenceright" {
+				trans ( 6.3062 -3.4159 3.7328 )
+				rot ( 0 0 0 1 )
+				parent "head"
+			}
+			tag "muzzlereference" {
+				trans ( -0.71 0 3.0233 )
+				rot ( 0 0.783782 0 0.621036 )
+				parent "RightHand"
+			}
+			tag "focus_aim" {
+				trans ( 11.8786 0 58.2666 )
+				rot ( 0 0 0 1 )
+				parent "origin"
+			}
+			tag "focus_look" {
+				trans ( 21.3894 -5.3596 68.0953 )
+				rot ( 0 0 0 1 )
+				parent "origin"
+			}
+			tag "orientation_aim" {
+				trans ( 0 0 34.8751 )
+				rot ( 0 0 0 1 )
+				parent "origin"
+			}
+			tag "orientation_look" {
+				trans ( 0 -0 0 )
+				rot ( 0 0 0 1 )
+				parent "head"
+			}
+			tag "aimassist_head" {
+				trans ( 0 0 0 )
+				rot ( 0 0 0 1 )
+				parent "head"
+			}
+			tag "aimassist_body" {
+				trans ( 0 0 0 )
+				rot ( 0 0 0 1 )
+				parent "spine1"
+			}
+			tag "sync_front" {
+				trans ( 50 0 0 )
+				rot ( 0 0 0 1 )
+				parent "origin"
+			}
+			tag "sync_back" {
+				trans ( -50 0 0 )
+				rot ( 0 0 0 1 )
+				parent "origin"
+			}
+			tag "sync_left" {
+				trans ( 0 50 0 )
+				rot ( 0 0 0 1 )
+				parent "origin"
+			}
+			tag "sync_right" {
+				trans ( 0 -50 0 )
+				rot ( 0 0 0 1 )
+				parent "origin"
+			}
+			tag "fx_fireball" {
+				trans ( 100 -30 50 )
+				rot ( 0 0 0 1 )
+				parent "origin"
+			}
+			tag "focus_look_precise" {
+				trans ( 7.2034 0 0 )
+				rot ( 0 0 0 1 )
+				parent "head"
+			}
+			tag "gorespray_neck" {
+				trans ( 0 0 0 )
+				rot ( 0 0 0 1 )
+				parent "neck1"
+			}
+			tag "gorefx_rarm_dangle" {
+				trans ( 0 1.5098 0 )
+				rot ( 0 0 0 1 )
+				parent "RightArmRoll"
+			}
+			tag "gorespray_rightleg" {
+				trans ( 0 0 -16.2845 )
+				rot ( 0 0 0 1 )
+				parent "RightLeg"
+			}
+			tag "gorespray_leftleg" {
+				trans ( -0.596 0 14.963 )
+				rot ( 0 -0.998473 0 0.0552454 )
+				parent "LeftLeg"
+			}
+			tag "gorespray_leftarm" {
+				trans ( 0 0 0 )
+				rot ( 0.696112 0 0 0.717933 )
+				parent "LeftArm"
+			}
+			tag "gorespray_rightarm" {
+				trans ( 0 0 0 )
+				rot ( -0.709967 0 0 0.704235 )
+				parent "RightArm"
+			}
+			tag "gorespray_ltorso" {
+				trans ( 0 0 -5.0235 )
+				rot ( -1 0 0 -8.74228e-008 )
+				parent "spine"
+			}
+			tag "gorespray_utorso" {
+				trans ( 0 0 9.4951 )
+				rot ( 0 -0.998139 0 -0.0609875 )
+				parent "spine"
+			}
+			tag "target_origin" {
+				trans ( 0 0 0 )
+				rot ( 0 0 0 1 )
+				parent "origin"
+			}
+			tag "gorespray_chest" {
+				trans ( 0.1904 0 3.7762 )
+				rot ( 0 -0.470817 0 0.882231 )
+				parent "spine3"
+			}
+			tag "melee_reference" {
+				trans ( 0 0 27.4405 )
+				rot ( 0 0 0 1 )
+				parent "spine1"
+			}
+			tag "orientation_aim_general" {
+				trans ( 0 0 34.1632 )
+				rot ( 0 0 0 1 )
+				parent "origin"
+			}
+			tag "rightfoot" {
+				trans ( 0 0 0 )
+				rot ( 0 0 0 1 )
+				parent "righttoemiddle1"
+			}
+			tag "leftfoot" {
+				trans ( 0 0 0 )
+				rot ( 0 0 0 1 )
+				parent "lefttoemiddle1"
+			}
+			tag "gorespray_leftforearm" {
+				trans ( 0 0 0 )
+				rot ( 0.707107 0 0 0.707107 )
+				parent "LeftForeArm"
+			}
+			tag "gorespray_rightforearm" {
+				trans ( 0 0 0 )
+				rot ( 0.707107 0 0 -0.707107 )
+				parent "RightForeArm"
+			}
+			tag "gorespray_leftupleg" {
+				trans ( 0 0 0 )
+				rot ( 1 0 0 0 )
+				parent "LeftUpLeg"
+			}
+			tag "gorespray_rightupleg" {
+				trans ( 0 0 0 )
+				rot ( 0 0 0 1 )
+				parent "RightUpLeg"
+			}
+			tag "gorespray_default" {
+				trans ( 0 0 0 )
+				rot ( 0 -0.707107 0 0.707107 )
+				parent "spine3"
+			}
+			tag "gorespray_torso" {
+				trans ( 0 0 0 )
+				rot ( 0 -1 0 1.98419e-009 )
+				parent "spine3"
+			}
+			tag "gorespray_crotch" {
+				trans ( 0 0 0 )
+				rot ( 0 0.996775 0 -0.080251 )
+				parent "hips"
+			}
+		}
+	}
+	eyeInfoCollection 0 {
+	}
+	meshKits {
+		Heads 0 {
+		}
+		Gear 0 {
+		}
+		Gore 13 {
+			"wound_arm_L" = "wound_arm_L"
+			"wound_arm_R" = "wound_arm_R"
+			"wound_chest_B_L" = "wound_chest_B_L"
+			"wound_chest_B_R" = "wound_chest_B_R"
+			"wound_chest_L" = "wound_chest_L"
+			"wound_chest_R" = "wound_chest_R"
+			"wound_chest_venti" = "wound_chest_venti"
+			"wound_gut" = "wound_gut"
+			"wound_leg_L" = "wound_leg_L"
+			"wound_leg_R" = "wound_leg_R"
+			"wound_neck" = "wound_neck"
+			"wound_body_B" = "wounds_body_B"
+			"wound_body_T" = "wounds_body_T"
+		}
+		Door 0 {
+		}
+		Melee_Highlight 0 {
+		}
+	}
+	userChannelWeightGroupOverride {
+		"MD6_WEIGHTGROUP_ALL"
+	}
+}

@@ -20,6 +20,7 @@
 #include "nav_bake.h"           /* navigation baked from the map's own marked volumes */
 #include "overrides_baked.h"        /* the built-in "*Custom"-tab default decls (Timeline tile, Unknown, Lift, Blocking) */
 #include "engine_build.h"
+#include "modserve.h"             /* installed mod bundles, after every product source */
 
 /* Provider open slot offset: +0x148 on build 13954591 (+0xf8 in 2018); the
  * provider vtable is at OV_PINNED_PROVIDER_VTABLE_RVA below.
@@ -781,6 +782,18 @@ static void *ov_open_body(void *self, const char *name, unsigned char b1, unsign
             return s;   /* the engine reads the override bytes through our idFile vtable */
         }
 
+    }
+
+    /* Installed mods: below navigation, the Grid Room and built-ins, above the
+     * engine. A file that cannot be read falls through to the engine. */
+    if (mode < 2 && name != NULL && sh_modserve_active()) {
+        unsigned char *bytes = NULL;
+        size_t length = 0;
+        if (sh_modserve_open(name, &bytes, &length) > 0) {
+            ov_stream *s = make_mem_stream(bytes, (long long)length, name, 1);
+            if (s) return s;
+            HeapFree(GetProcessHeap(), 0, bytes);
+        }
     }
     /* No shadow, or mode guard: chain with the original byte arguments. */
     {

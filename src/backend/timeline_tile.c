@@ -46,6 +46,7 @@ int sh_tl_substate_blocks_rebind(int substate)
 #include "process_heap_scope.h"
 #include "engine_globals.h"
 #include "budget_table.h"
+#include "modserve.h"
 
 #define ED_PALETTE_OFF      0x20660
 #define ED_MAP_OFF          0x204c8
@@ -96,6 +97,7 @@ static const char *g_last_error;      /* engine's last Error/FatalError text, 0x
 #define ERROR_TEXT_MAX 200
 
 static volatile LONG g_faulted;
+static volatile LONG g_rebuild_disabled;  /* an unbalanced heap scope ends runtime rebuilds */
 static volatile LONG g_registered;    /* 1 registered, -1 refused for this process */
 static int g_register_tries;
 static void * volatile g_editor;      /* last editor seen by the frame tick */
@@ -278,7 +280,9 @@ static void tl_palette_build(void *palette, void *progress)
 {
     /* The palette enumerates the decl manager, so register before it runs. */
     if (!InterlockedCompareExchange(&g_faulted, 0, 0)) tl_register();
+    sh_modserve_palette_before_build();   /* installed mods' editor rows */
     g_build_orig(palette, progress);
+    sh_modserve_palette_after_build(palette);
     g_pal_entries = NULL;   /* force a rescan and a fresh patch on the next tick */
     g_patch_failed_entries = NULL;
     sh_budget_table_palette_rebuilt();
@@ -477,6 +481,42 @@ int sh_timeline_tile_install(const sig_result *results, size_t count, const uint
     }
     backend_log("TL tile: palette build hook installed");
     return 1;
+}
+
+/* A runtime rebuild of the live editor palette, shaped like the engine's own
+ * callers of the builder (snaphak-re mod-system-reinstatement lane R3,
+ * section 3): process heap 0 is entered and verified, so the new array, rows
+ * and strings survive the Play transition that frees the ambient map heap;
+ * the detour then runs pending registrations inside that scope, the builder
+ * with a NULL progress object (guarded in the builder), and the cache resets
+ * after it. The module palette (editor+0x206c0) is not rebuilt; whether it
+ * keeps entity-row pointers is an open trace. Main thread only, from a point
+ * where no native frame is iterating the palette (the caller checks the
+ * thread). */
+int sh_timeline_tile_rebuild_palette(int *rows_before, int *rows_after)
+{
+    unsigned char *ed = (unsigned char *)g_editor;
+    sh_process_heap_scope heap = {0};
+    int substate = 0, result = SH_TL_REBUILD_OK;
+    if (rows_before) *rows_before = -1;
+    if (rows_after) *rows_after = -1;
+    if (!ed || !g_build_orig || !g_heap_ok) return SH_TL_REBUILD_UNAVAILABLE;
+    if (InterlockedCompareExchange(&g_rebuild_disabled, 0, 0)) return SH_TL_REBUILD_DISABLED;
+    if (rows_before) (void)rd_i32(ed + ED_PALETTE_OFF + PAL_COUNT_OFF, rows_before);
+    if (rd_i32(ed + ED_ENTITY_MODE_OFF + MODE_SUBSTATE_OFF, &substate) && sh_tl_substate_blocks_rebind(substate))
+        return SH_TL_REBUILD_BUSY;
+    if (!sh_process_heap_enter(&g_heap, &heap)) return SH_TL_REBUILD_HEAP;
+    __try {
+        __try { tl_palette_build(ed + ED_PALETTE_OFF, NULL); }
+        __except (EXCEPTION_EXECUTE_HANDLER) { result = SH_TL_REBUILD_FAULTED; }
+    } __finally {
+        if (!sh_process_heap_leave(&heap)) {
+            InterlockedExchange(&g_rebuild_disabled, 1);
+            result = SH_TL_REBUILD_HEAP_LEAVE;
+        }
+    }
+    if (rows_after) (void)rd_i32(ed + ED_PALETTE_OFF + PAL_COUNT_OFF, rows_after);
+    return result;
 }
 
 int sh_timeline_tile_slot(struct sh_iface *self, sh_timeline_tile_call *call)

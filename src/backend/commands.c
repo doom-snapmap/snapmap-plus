@@ -29,6 +29,7 @@
 #include "apply_engine.h"
 #include "engine_build.h"
 #include "grid_room_native.h"
+#include "modcmd.h"
 
 /* Engine call contracts. */
 
@@ -1915,6 +1916,7 @@ static const cmd_entry CMD_TABLE[] = {
     { "sh_dialogdump",       (void *)h_sh_dialogdump, "print the engine dialog queue: id, button set and flag bytes (diagnostic)" },
     { "sh_listres",          (void *)h_sh_listres,  "<resource classname (ex:idMaterial)> <optional: filter> list all resources of a given type" },
     { "sh_resread",          (void *)h_sh_resread,  "<engine path> [substring] print what the resource layer serves for one resource path (diagnostic)" },
+    { SH_MODCMD_NAME,        (void *)h_sh_mods,     SH_MODCMD_HELP },
     { "sh_alginfo",          (void *)h_alginfo,     "Prints CPU dispatcher info for the engine-math (algo) override layer." },
     { "sh_debugrender",      (void *)h_sh_debugrender,"Internal renderer-test mutators -- not for normal use" },
     { "cs_dontuse",          (void *)h_cs_dontuse,  "Overrides some calculations in the engine to be more precise, just for shiggles. probably degrades performance and breaks stuff." },
@@ -2144,6 +2146,7 @@ int sh_commands_install(void *add_command, void *cmdsys, void *printf_disp, void
     int n = 0;
     for (int i = 0; i < CMD_COUNT; i++)
         if (register_cmd(&CMD_TABLE[i])) n++;
+    (void)sh_modcmd_register();   /* logs the mods store root for sh_mods */
 
     char line[160];
     _snprintf_s(line, sizeof line, _TRUNCATE,

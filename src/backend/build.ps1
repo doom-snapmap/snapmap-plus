@@ -3,12 +3,12 @@
 # Add backend translation units to Sources below. Keep this script ASCII for PS 5.1.
 param(
     [string[]]$Sources = @("dllmain.c", "host_image.c", "signatures.c", "startup_bindings.c", "engine_globals.c", "hook.c", "smoke.c",
-                           "rawmap.c", "map_legacy_payload.c", "user_dirs.c", "editor_frame.c", "grid_room.c", "grid_room_resources.c", "grid_room_decl.c", "map_shards.c", "map_payload.c", "navmesh.c", "nav_regions.c", "nav_entitydef.c", "nav_bake.c", "nav_menu.c", "nav_play.c", "nav_snapshot.c", "nav_traversal.c", "aas_edit.c", "aas_augment.c", "nav_geometry.c", "nav_overlay.c", "nav_preview.c", "engine_dialog.c", "strids.c",
+                           "rawmap.c", "map_legacy_payload.c", "modmanifest.c", "modlegacy.c", "user_dirs.c", "editor_frame.c", "grid_room.c", "grid_room_resources.c", "grid_room_decl.c", "map_shards.c", "map_payload.c", "navmesh.c", "nav_regions.c", "nav_entitydef.c", "nav_bake.c", "nav_menu.c", "nav_play.c", "nav_snapshot.c", "nav_traversal.c", "aas_edit.c", "aas_augment.c", "nav_geometry.c", "nav_overlay.c", "nav_preview.c", "engine_dialog.c", "strids.c",
                            "overrides.c", "grid_room_editor.c", "map_render.c", "map_render_native.c", "map_render_editor.c", "grid_room_asset.c", "grid_room_nav.c", "grid_room_native.c", "grid_room_areas.c", "world_area_cell.c", "object_entry.c", "place_anywhere.c", "grid_room_snap.c", "grid_room_edit.c", "raw_deflate.c", "decl_text.c",
                            "cvars.c", "commands.c", "clipboard.c",
                            "config.c", "config_json.c",
                            "entity.c", "typeinfo.c", "preview.c", "megapreview.c", "imgpreview.c", "prefabpreview.c", "soundpreview.c", "bcn.c", "patch.c", "x64_len.c", "algo.c", "target_any.c", "wiring_cleandirect.c", "swf_textedit.c", "ui_bridge.c",
-                           "iface_engine.c", "editor_delete.c", "apply_engine.c", "prefab_grab.c", "fly_to.c", "module_prefab.c", "module_prefab_map.c", "timeline_tile.c", "budget_table.c", "mp_json.c", "../common/snapmap_plus_iface.c",
+                           "iface_engine.c", "editor_delete.c", "apply_engine.c", "prefab_grab.c", "fly_to.c", "module_prefab.c", "module_prefab_map.c", "timeline_tile.c", "modserve.c", "modserve_engine.c", "budget_table.c", "mp_json.c", "../common/snapmap_plus_iface.c",
                            "../common/log_rotate.c",
                            # The backend owns the SnapStack command handlers and stores.
                            "snapstack.c", "json_patch.c",
@@ -28,7 +28,9 @@ param(
                            # Map bounds, Blueprint zoom and the Snapmap+ settings tab.
                            "settings_tab.c", "map_bounds.c", "editor_zoom.c",
                            # Boot preload pacing (load-screen video lock, read poll).
-                           "boot_pacing.c"),
+                           "boot_pacing.c",
+                           # Mod bundles, the local mods store and the sh_mods command.
+                           "modbundle.c", "modstore.c", "modcmd.c"),
     [string]$Out = "XINPUT1_4.dll",
     # Diag adds SH_DIAG and the crash/environment logger for troubleshooting.
     [switch]$Diag,

@@ -381,20 +381,79 @@ Configuration descriptors in `src/backend/config.c` define available keys and
 change behavior. Deleting the file resets preferences at the next startup.
 Installer updates and uninstall preserve player configuration.
 
-## Packages
+## Mods
 
-The package system is being rebuilt for the April 2024 DOOM update (Steam build
-13954591). This release reads, installs and carries no packages: nothing is loaded
-from `%LOCALAPPDATA%\snapmap-plus\overrides\`, no `package-cache` or
-`package-staging` folder is created, and a map saved or published with packages by
-an earlier release loads as a plain map without them. Folders that earlier
-releases left are not touched; you can keep or delete them.
+Mods are installed under `%LOCALAPPDATA%\snapmap-plus\mods\`. A mod is a folder
+holding a descriptor (`mod.json`, or `package.json`) and an `assets/` tree at the
+engine's own request paths. This release has no download client: a map's mods are
+present only when the player installed them, and nothing is uploaded. Nothing is
+read from the retired `%LOCALAPPDATA%\snapmap-plus\overrides\` tree, and no
+`package-cache` or `package-staging` folder is created.
 
-The load path keeps one duty from that system: `map_legacy_payload.c` removes
-the retired `smpkg.` string variables before the native parse and logs one line.
-The resource provider (`overrides.c`) still serves map navigation, the generated
-Grid Room variants, the built-in defaults and the installed originals through
-`read_installed_resource`.
+Six backend files share the work:
+
+- `modbundle.c` builds a mod folder into a bundle: a SHA-256 per file, the
+  logical name each file provides, the names its decls need, the namespace and
+  structural rules, and the canonical `bundle.json` whose SHA-256 is the bundle
+  hash. New names live under `mods/<id>/`; raw files and skins decls may spell
+  the id the way the engine derives binary names (`-` becomes `_`). Stock files a
+  bundle replaces are listed as `shadows` and must be stock, except in a bundle
+  whose descriptor carries a `legacy` object (a converted first-generation
+  package), whose unresolved needs also only warn.
+- `modstore.c` owns the store layout: `blobs\<sha256>`, one
+  `<id>@<version>+<build>\` folder per installed build with its `.state.json`,
+  and `legacy\` for converted packages. Files are hashed at install and on
+  `sh_mods verify`, never at boot.
+- `modcmd.c` is the `sh_mods` console command. It dispatches the serving verbs
+  (`status`, `rescan`, `palette rebuild`) to `modserve_engine.c` and owns
+  `build`, `install`, `list` and `verify`. Its `modbundle_build_folder` is the
+  builder entry the legacy converter calls, with the game's archives as the
+  stock resolver.
+- `modserve.c` reads every `bundle.json` once at boot, checking sizes and never
+  hashes, into one immutable table from request path to file; a bundle that
+  fails is skipped with one `MODS:` line and nothing else is affected. Needs are
+  resolved once per table, through the same request paths the builder uses.
+  Lookups allocate nothing.
+- `modserve_engine.c` registers editor rows inside the palette build (Timeline
+  tile detour), answers the decl existence probe for served decls (the probe is
+  detoured only when the table holds a decl), activates a map's gameplay decls at
+  the engine's own level 1, and rebuilds the live palette inside process heap 0.
+  A grandfathered bundle's shadows are planned like new names; the engine
+  already knowing the source marks a stock decl, which is left to the provider.
+- `modmanifest.c` owns the `smpmod1.<index>.<count>` manifest rows, and
+  `modlegacy.c` the retired `smpkg.` carriers, as below.
+
+The provider open (`ov_open_body` in `overrides.c`) serves, in order: the
+placement grid, map navigation, the generated Grid Room variants, the built-in
+defaults, installed mods, then the engine. Opens with mode 2 or higher are
+never served. A shadow applies to every map while its bundle is installed; a new
+name applies once it is registered: editor rows at the first palette build (or
+`sh_mods palette rebuild`), gameplay decls when a map that names their bundle
+loads. When two builds of one mod id serve a path, the most recently installed
+serves it, and a map naming the older bundle gets the newer files with a logged
+line.
+
+On every parse the `DeserializeFromJson` detour sees, `modlegacy.c` runs first.
+A complete carrier whose ZIP and `package.json` read is unpacked once into
+`mods\legacy\<id>@<digest16>\` (older `decls/`, `images/` and `shaders/`
+layouts moved under `assets/`), built into a bundle and named by a manifest row;
+the serving table is then rebuilt when that bundle is not in it yet, so the same
+parse can activate it. Any other carrier, and the unreleased `smpbind.` and
+`smpref.` rows, are removed. Each carrier logs one `LEGACY:` verdict line. After
+the navigation strip, `modmanifest.c` reads and strips the manifest rows before
+the engine replicates map variables and activates the bundles they name. On
+save it appends one row per bundle that provides a placed name (and each bundle
+their needs reach), after any navigation shards; with an empty table and no rows
+in the map it returns at once and the save is the engine's own bytes.
+
+Threads: the table is built on the bootstrap thread before the provider hook is
+published and replaced only by a rescan (`sh_mods install`, a build inside the
+store, a legacy conversion, `sh_mods rescan`). Readers see one complete table;
+retired tables are never freed, because a provider open on another thread may
+still read one. Registration, activation and the palette rebuild run on DOOM's
+main thread only. With an empty `mods\` folder the table is empty and every hook
+above passes through: the differences from a build without mods are the
+`sh_mods` command and its `MODS:` log lines.
 
 ## Failure reporting
 

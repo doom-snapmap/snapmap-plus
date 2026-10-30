@@ -24,8 +24,10 @@
  * bridge. None of that is reachable from the destination rules -- those are two strings and a file
  * write -- so the collaborators are stubbed rather than linked. A stub that gets called would be a
  * bug in the test, so the ones with a return value return failure, which the caller under test
- * treats as "not available" and reports rather than ignores. The retired-package removal
- * (map_legacy_payload.c) and the shard walker (map_shards.c) are linked for real.
+ * treats as "not available" and reports rather than ignores. The legacy carrier policy
+ * (modlegacy.c, map_legacy_payload.c), the map manifest (modmanifest.c) and the shard walker
+ * (map_shards.c) are linked for real; the mod builder and serving layer resolve to their
+ * built-in defaults.
  */
 #include "signatures.h"
 #include "navmesh.h"
@@ -39,7 +41,8 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = { { NULL, NULL, 0u } };
 static int log_removed_payload;
 void backend_log(const char *line)
 {
-    if (line && strstr(line, "removed a retired package payload")) log_removed_payload++;
+    /* One verdict line per legacy carrier (modlegacy.c). */
+    if (line && !strncmp(line, "LEGACY: smpkg.", 14) && strstr(line, "): CLEAN -- ")) log_removed_payload++;
 }
 static int render_loaded_calls;
 void sh_map_render_loaded(void *map) { (void)map; render_loaded_calls++; }
@@ -632,7 +635,8 @@ static void large_sources_use_native_lengths(void)
 /* ---- R-021: maps load and save without the package layer ------------------------------------ */
 
 /* A map saved or published by the retired package system: its packages ride as "smpkg." string
- * variables beside an ordinary one, and allocCount[4] counts all three. */
+ * variables beside an ordinary one, and allocCount[4] counts all three. The two shards decode to
+ * bytes whose digest is not the header's, so the section 11 policy cleans the carrier. */
 static const char LEGACY_MAP[] =
     "{\"~type\":\"idSnapMap\",\"entities\":[],\"variables\":{\"allocCount\":[0,0,0,0,3],"
     "\"string\":["
@@ -662,8 +666,8 @@ static void a_retired_package_map_loads_plain(const char *json)
 }
 
 /* The engine's own load of a local save and of a published map both reach DeserializeFromJson
- * with the engine's JSON. With the package layer retired there is no preflight, consent or
- * activation: the payload is removed with one log line and the map parses natively. */
+ * with the engine's JSON. A carrier that cannot be converted is removed with one verdict line
+ * and the map parses natively. */
 static void saved_and_published_maps_load_without_packages(void)
 {
     static const char plain[] = "{\"~type\":\"idSnapMap\",\"entities\":[]}";

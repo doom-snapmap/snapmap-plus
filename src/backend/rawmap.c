@@ -17,7 +17,8 @@
 #include "rawmap.h"
 #include "hook.h"
 #include "backend_log.h"
-#include "map_legacy_payload.h"
+#include "modlegacy.h"
+#include "modmanifest.h"
 #include "signatures.h"
 #include "config.h"
 #include "navmesh.h"
@@ -168,15 +169,32 @@ static char *read_source_file(size_t *out_len)
     return buf;
 }
 
-/* Remove a retired package payload. Returns an owned process-heap buffer, or
- * NULL to keep the original on no change or failure. */
+/* Convert or clean first-generation package carriers (DESIGN.md section 11):
+ * converted packages become installed legacy bundles named by smpmod1 rows,
+ * everything else is stripped. Returns an owned process-heap buffer, or NULL
+ * to keep the original on no change or failure. */
 static char *legacy_strip_guarded(const char *json, size_t len)
 {
     __try {
         size_t out_len = 0;
         if (!json || len == 0) return NULL;
-        return sh_map_legacy_payload_strip(json, len, &out_len);
+        return sh_modlegacy_process(json, len, &out_len);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
+        backend_log("LEGACY: conversion FAULTED; the map loads with its legacy rows as inert strings");
+        return NULL;
+    }
+}
+
+/* Read the map manifest, keep it for the load, strip its rows before the
+ * engine parses and activate the bundles it names. Runs on every parse.
+ * Returns an owned process-heap buffer, or NULL to keep the input. */
+static char *manifest_prepare_guarded(const char *json, size_t len)
+{
+    __try {
+        size_t out_len = 0;
+        return sh_modmanifest_prepare_load(json, len, &out_len);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        backend_log("MODS: map manifest read FAULTED; the map loads without mod activation");
         return NULL;
     }
 }
@@ -328,7 +346,7 @@ int sh_rawmap_branch_install(const unsigned char *module_base)
  */
 static char *prepare_map_buffer(const char *json)
 {
-    char *legacy, *nav;
+    char *legacy, *nav, *manifest, *current;
     size_t len = json ? strlen(json) : 0;
     size_t nav_len = 0;
 
@@ -341,9 +359,15 @@ static char *prepare_map_buffer(const char *json)
 
     legacy = legacy_strip_guarded(json, len);
     nav = sh_navmesh_strip(legacy ? legacy : json, legacy ? strlen(legacy) : len, &nav_len);
-    if (!nav) return legacy;
-    if (legacy) HeapFree(GetProcessHeap(), 0, legacy);
-    return nav;
+    if (nav) {
+        if (legacy) HeapFree(GetProcessHeap(), 0, legacy);
+        current = nav;
+    } else current = legacy;
+    /* Last, so rows the legacy conversion wrote are read with the map's own. */
+    manifest = manifest_prepare_guarded(current ? current : json, current ? strlen(current) : len);
+    if (!manifest) return current;
+    if (current) HeapFree(GetProcessHeap(), 0, current);
+    return manifest;
 }
 
 /* Parse the chosen bytes after preparation and record the map's render settings. */
@@ -892,6 +916,7 @@ int sh_rawmap_live_serialize_ready(void)
  * map through the same encoders, so a rawmap carries what an engine save carries. */
 static void nav_embed_on_save(void *out_idstr);
 static void nav_regions_on_save(void *out_idstr);
+static void manifest_on_save(void *out_idstr);
 
 /* Serialize `map` and write it to the rawmap destination. MAIN THREAD ONLY -- it reads engine state
  * and allocates through the engine's allocator, so it is called from the editor-frame hook, never
@@ -937,6 +962,7 @@ int sh_rawmap_write_from_live(void *map, const char *destination, char *out_msg,
              * this buffer straight out drops the navigation its author baked. Each one
              * no-ops if its own dependencies are unresolved. */
             nav_embed_on_save(blk);
+            manifest_on_save(blk);
             nav_regions_on_save(blk);
 
             len  = *(const int *)(blk + IDSTR_LEN_OFF);
@@ -1224,6 +1250,30 @@ static void nav_embed_on_save(void *out_idstr)
     HeapFree(GetProcessHeap(), 0, body);
 }
 
+/* Append the map manifest: one smpmod1 row per bundle that provides a placed
+ * name, last in variables.string[] (after any navigation shards). */
+static void manifest_on_save(void *out_idstr)
+{
+    const char *data = NULL;
+    int len = 0;
+    char *body = NULL;
+    size_t body_len = 0;
+
+    if (!g_idstr_assign || out_idstr == NULL) return;
+    if (!read_out_idstr(out_idstr, &data, &len)) return;
+    __try {
+        body = sh_modmanifest_on_save(data, (size_t)len, &body_len);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        body = NULL;
+        backend_log("MODS: save manifest FAULTED; the save carries no manifest rows");
+    }
+    if (body == NULL) return;
+    if (!replace_out_idstr(out_idstr, body, body_len))
+        backend_log("MODS: the saved map could not be written back; its manifest rows are not in "
+                    "this save");
+    HeapFree(GetProcessHeap(), 0, body);
+}
+
 /* Serialize, embed delivery payloads, then optionally mirror output. Preserve
  * the native bool result on every return.
  */
@@ -1245,6 +1295,9 @@ static unsigned char sh_ser_detour(void *map, void *out_idstr, unsigned char com
 
     /* Restore retained navigation shards so ordinary saves preserve them. */
     nav_embed_on_save(out_idstr);
+
+    /* The map manifest goes last so its rows are the final string variables. */
+    manifest_on_save(out_idstr);
 
     /* Refresh navigation regions from the final serialized map. */
     nav_regions_on_save(out_idstr);

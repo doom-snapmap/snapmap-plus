@@ -56,13 +56,14 @@ The bundle ships no player content. At startup the backend creates `%LOCALAPPDAT
 with its `strings\` and `prefabs\` folders, and nothing else. Snapmap+'s small built-in default
 declarations are served from memory by the backend DLL.
 
-### Packages
+### Mods
 
-The package system is being rebuilt for the April 2024 DOOM update (Steam build 13954591). This release
-reads, installs and carries no packages: nothing is loaded from `%LOCALAPPDATA%\snapmap-plus\overrides\`,
-no `package-cache` or `package-staging` folder is created, and a map saved or published with packages by
-an earlier release loads as a plain map without them. Folders that earlier releases left are not touched;
-you can keep or delete them.
+The bundle ships no mods. Installed mods live in `%LOCALAPPDATA%\snapmap-plus\mods\`, which the backend
+reads at startup but never creates there: the folder appears when `sh_mods install` adds a mod or a map
+carrying a first-generation package is converted into `mods\legacy\`. Nothing is loaded from the retired
+`%LOCALAPPDATA%\snapmap-plus\overrides\` tree, and no `package-cache` or `package-staging` folder is
+created. Folders that earlier releases left are not touched; you can keep or delete them. The installer
+does not touch `mods\`. See [Mods](architecture.md#mods).
 
 The bundle also ships no `config.json`. That file is runtime-owned player data, separate from the
 installer's executable and `install.json` record. The installer never rewrites it and preserves it across

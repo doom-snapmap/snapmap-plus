@@ -26,6 +26,7 @@
 #include "fly_to.h"
 #include "module_prefab.h"
 #include "timeline_tile.h"
+#include "modserve.h"
 #include "budget_table.h"
 #include "map_render.h"
 #include "settings_tab.h"
@@ -333,6 +334,9 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
         /* The override stream implements the 31-slot idFile ABI; build 13954591's
          * idFile has 34 slots and its provider open slot is not established. */
         int overrides_installed = 0;
+        /* Installed mods: read every bundle index before the provider can be
+         * asked for a file, so the first open already sees the table. */
+        (void)sh_modserve_index_boot();
         if (SH_IDFILE_SLOTS != SH_OVERRIDES_STREAM_SLOTS || SH_PROVIDER_OPEN_SLOT != SH_OVERRIDES_OPEN_SLOT)
             backend_log("B1: overrides file-shadow SKIPPED -- the override stream implements the 31-slot "
                         "idFile ABI; build 13954591's idFile slot list and provider open slot are not "
@@ -354,6 +358,10 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
 
         /* Navigation uses the resource shadow and map funnel; report its startup state. */
         sh_navmesh_install();
+
+        /* Mod decl registration and the existence probe (needs the provider). */
+        if (overrides_installed) (void)sh_modserve_install(results, db, g_doom_base);
+        else backend_log("MODS: mods are not served; the override provider is not installed");
 
         /* Register cvars before commands. Commands additionally need cmdSystem;
          * each registration path handles missing dependencies independently. */

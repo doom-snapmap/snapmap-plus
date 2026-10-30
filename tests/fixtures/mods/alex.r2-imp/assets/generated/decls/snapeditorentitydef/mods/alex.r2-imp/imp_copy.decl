@@ -1,0 +1,46 @@
+{
+	inherit = "demons/demon_base";
+	edit = {
+		sortPriority = 80;
+		navMeshType = "NAVMESH_TYPE_48";
+		previewImage = "textures/guis/snapmaps/entity_icons/demons/imp_enc";
+		displayNameTag = "#str_snapentity_demon_imp";
+		displayDescriptionTag = "#str_snapentity_demon_imp_disp_desc";
+		entityDef = "mods/alex.r2-imp/imp_copy";
+		renderInfo = {
+			renderModelName = "mods/alex.r2-imp/imp_copy.md6";
+			alwaysDrawBounds = false;
+			alwaysDrawLabel = false;
+			size = {
+				x = 48;
+				y = 48;
+				z = 96;
+			}
+		}
+		eventInfo = {
+			animWebDecl = "zion/snapmap/demons/imp_snapeditor";
+			selectedEvent = {
+				sound = "play_pickup_imp";
+			}
+			placedEvent = {
+				sound = "play_putdown_imp";
+			}
+		}
+		fxInfo = {
+			fxDecl = "fx/creatures/imp";
+		}
+		propertySheets = {
+			item[0] = {
+				properties = {
+					item[4] = {
+						inspector = "snap_ai_spawn_behavior_enum_inspector_ranged";
+					}
+				}
+			}
+		}
+		buildGameRefEntityDefs = {
+			num = 1;
+			item[0] = "ai/demon/imp_coop";
+		}
+	}
+}

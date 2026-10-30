@@ -1,8 +1,10 @@
 /* Resource-provider file shadowing through the open-by-name vtable slot
  * (+0x148 on build 13954591). Private Grid Room resources are generated from
- * installed originals. Ordinary opens try map navigation, the generated Grid
- * Room variants, built-in defaults, then the engine. Mode >= 2 bypasses
- * shadowing. No user or package files are read.
+ * installed originals. Ordinary opens try, in order: the placement grid, map
+ * navigation, the generated Grid Room variants, built-in defaults, installed
+ * mod bundles (modserve.h; the table is read at startup and a file that cannot
+ * be read falls through), then the engine. Mode >= 2 bypasses shadowing. The
+ * only user files read are the files of installed mod bundles.
  *
  * Returned streams implement the supported 34-slot idFile ABI and own their
  * heap buffers. Installation requires clean constructor/helper signatures and

@@ -44,11 +44,40 @@ Checks native helpers, engine-interface contracts, frontend JavaScript and optio
   before and after repair, including signed boundaries, signature refusal and
   rollback of both sites after a partial failure. Rawmap path tests also read
   a file over 64 MiB.
-- `rawmap_paths_test.c` also drives the load and save detours without the
-  retired package layer: a local save, a published map and a staged rawmap that
-  carry `smpkg.` package variables load as plain maps (the variables removed,
-  `allocCount` corrected, one log line), lookalike names stay, and a save keeps
-  the engine's own bytes.
+- `rawmap_paths_test.c` also drives the load and save detours: a local save, a
+  published map and a staged rawmap that carry an unconvertible `smpkg.`
+  package load as plain maps (the variables removed, `allocCount` corrected, one
+  verdict line), lookalike names stay, and a save keeps the engine's own bytes.
+- `modmanifest_test.c` checks the `smpmod1.` manifest rows: grammar, the value
+  round trip, rows appended last and stripped with `allocCount` restored, the
+  per-row budget that keeps them out of the 4 KiB playtest message, placed names,
+  the save closure and the load step against serving-layer doubles.
+- `modlegacy_test.c` checks the legacy carrier policy: header grammar per era,
+  completeness and digest, stored and deflate ZIP members, the older layout
+  mapping, conversion, cleaning and verdict lines with a builder double, and
+  the serving-index rescan a new conversion requests. Set
+  `SH_MODLEGACY_FIXTURES` to a folder holding the campaign's carrier maps to add
+  an integration pass; it is skipped otherwise. The maps are not in the
+  repository because their packages contain game files.
+- `mod_seam_stub.c` stands in for the serving layer and the builder entry in
+  tests that link the map manifest or the legacy converter without them.
+- `modbundle_test.c` builds `fixtures\mods\alex.r2-imp` and pins its bundle
+  hash against `alex.r2-imp.canonical.json`; it also checks logical names, the
+  needs scan, build numbering and each refusal rule. The fixture files are
+  hashed byte for byte, so their line endings are never converted.
+- `modstore_test.c` installs the fixture into a temporary store: blobs, hard
+  links and the copy fallback, verification and corruption, in-place builds and
+  need resolution across installed bundles.
+- `modserve_test.c` checks the serving index: admission and failure isolation,
+  lookups in every spelling, provider precedence against the real `overrides.c`,
+  probe claims, registration plans and their order, the rescan and the lookup
+  cost.
+- `mod_pipeline_test.c` links the builder, the serving index, the manifest and
+  the legacy converter together: a built fixture is admitted, saved as one
+  `smpmod1.` row and activated on the next load; a legacy-form bundle with
+  non-stock shadows builds and registers only its new names; skins decls pass
+  by their mesh path. With `SH_MODLEGACY_FIXTURES` set, each carrier map is
+  converted with the real builder and activated in the same parse.
 - `startup_dirs_test.c` runs the startup folder creation and settings
   initialization against a temporary root and checks that only the root,
   `strings\` and `prefabs\` appear, then scans the backend, frontend and

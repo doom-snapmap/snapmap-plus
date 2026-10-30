@@ -85,6 +85,7 @@ static const site SITES[] = {
     { "strids.c",             "StridsSortBody",             SITE_SIG, 0, 16, REPLAYS, 0 },
     { "swf_textedit.c",       "SwfTextOnKeyCall",           SITE_SIG, 0, 15, REPLAYS, 0 },
     { "timeline_tile.c",      "SnapPaletteBuild",           SITE_SIG, 0, 18, REPLAYS, 0 },
+    { "modserve_engine.c",    "DeclResourceProbe",          SITE_SIG, 0, 21, REPLAYS, 0 },
     { "wiring_cleandirect.c", "ConnectOutputCreator",       SITE_SIG, 0, 15, REPLAYS, 0 },
     { "wiring_cleandirect.c", "WireConnectCreator1",        SITE_SIG, 0, 15, REPLAYS, 0 },
     { "fault_shield/mapload_guards.c", "EventLink",         SITE_SIG, 0, 15, REPLAYS, 0 },
@@ -299,7 +300,7 @@ static const struct { const char *file; int calls; } CENSUS[] = {
     { "backend\\nav_play.c", 2 }, { "backend\\nav_preview.c", 2 },
     { "backend\\patch.c", 2 }, { "backend\\rawmap.c", 3 },
     { "backend\\smoke.c", 1 }, { "backend\\strids.c", 1 }, { "backend\\swf_textedit.c", 1 },
-    { "backend\\timeline_tile.c", 1 },
+    { "backend\\timeline_tile.c", 1 }, { "backend\\modserve_engine.c", 1 },
     { "backend\\wiring_cleandirect.c", 2 }, { "fault_shield\\mapload_guards.c", 2 },
     { "fault_shield\\recovery.c", 1 }, { "backend\\settings_tab.c", 3 },
 };

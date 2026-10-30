@@ -55,6 +55,19 @@ int sh_timeline_tile_install(const sig_result *results, size_t count, const uint
 /* Called by the EditorFrame detour after the engine's frame, on the game thread. */
 void sh_timeline_tile_tick(void *editor);
 
+/* Rebuild the live editor palette inside process heap 0 (see timeline_tile.c).
+ * Main thread only. Row counts before and after are written when non-NULL. */
+enum {
+    SH_TL_REBUILD_OK = 1,
+    SH_TL_REBUILD_UNAVAILABLE = 0,    /* no editor seen, or the build hook is absent */
+    SH_TL_REBUILD_BUSY = -1,          /* an entity or a wire is held */
+    SH_TL_REBUILD_HEAP = -2,          /* process heap 0 could not be entered */
+    SH_TL_REBUILD_DISABLED = -3,      /* an earlier rebuild left the heap scope unbalanced */
+    SH_TL_REBUILD_FAULTED = -4,       /* the builder faulted */
+    SH_TL_REBUILD_HEAP_LEAVE = -5     /* the scope did not balance; rebuilds now refuse */
+};
+int sh_timeline_tile_rebuild_palette(int *rows_before, int *rows_after);
+
 /* The +0x368 slot body (see snapmap_plus_iface.h). */
 int sh_timeline_tile_slot(struct sh_iface *self, sh_timeline_tile_call *call);
 #endif

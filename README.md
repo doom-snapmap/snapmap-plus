@@ -94,19 +94,22 @@ Without a stable release, the installer reports its fallback to the newest beta.
 [CHANGELOG.md](CHANGELOG.md) is the release-note source. Maintainers prepare and
 review its entry before pushing a tag; follow [Cutting a release](docs/contributing.md#cutting-a-release-maintainer).
 
-## Settings and packages
+## Settings and mods
 
 The backend creates `config.json` at first launch and owns its validation and
 recovery. Deleting it resets preferences on the next startup. Manual changes
 are read at startup; UI settings use the registered service. The installer
 preserves this file.
 
-The package system is being rebuilt for the April 2024 DOOM update (Steam build
-13954591). This release reads, installs and carries no packages: nothing is
-loaded from `%LOCALAPPDATA%\snapmap-plus\overrides\`, no `package-cache` or
-`package-staging` folder is created, and a map saved or published with packages
-by an earlier release loads as a plain map without them. Folders that earlier
-releases left are not touched; you can keep or delete them.
+Mods live in `%LOCALAPPDATA%\snapmap-plus\mods\` and are added with the
+`sh_mods` console command; a saved map names the mods it uses, and the next load
+activates them. Nothing is downloaded in this release, so a map's mods are
+active only where they are installed. A map saved or published with packages by an
+earlier release has a complete package converted into a local mod on load; any
+other package is removed. Nothing is loaded from
+`%LOCALAPPDATA%\snapmap-plus\overrides\`, and folders that earlier releases
+left are not touched; you can keep or delete them. See
+[Mods](docs/capabilities.md#mods).
 
 ## Credits
 

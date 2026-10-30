@@ -1,0 +1,678 @@
+/* modserve_test.c -- the installed-mod index and provider (modserve.c)
+ * against a fixture mods tree written to a temporary folder: admission,
+ * failure isolation (size mismatch, unvalidated state, namespace, unbuilt
+ * folder), a shadow conflict, version supersession, the blob-store fallback,
+ * lookups and their cost, provider precedence against navigation, the Grid
+ * Room and built-in defaults (the real overrides.c), probe claims, the
+ * registration plan's dependency order and blocking, plan runs through fake
+ * engine operations, the save-time bundle closure and a rescan. */
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "modserve.h"
+#include "overrides.h"
+
+void sh_modserve_test_cache(int enabled);
+size_t sh_modserve_test_cache_bytes(void);
+void sh_modserve_test_reset_registration(void);
+
+static int g_failed;
+#define CHECK(expr) do {                                                        \
+    if (!(expr)) {                                                              \
+        fprintf(stderr, "%s:%d: CHECK failed: %s\n", __FILE__, __LINE__, #expr); \
+        g_failed++;                                                             \
+    }                                                                           \
+} while (0)
+
+/* ------------------------------------------------------------------ log capture */
+
+static char g_log[65536];
+static size_t g_log_len;
+
+void backend_log(const char *message)
+{
+    size_t n = message ? strlen(message) : 0;
+    if (g_log_len + n + 2 < sizeof g_log) {
+        memcpy(g_log + g_log_len, message, n);
+        g_log_len += n;
+        g_log[g_log_len++] = '\n';
+        g_log[g_log_len] = 0;
+    }
+}
+static void log_clear(void) { g_log_len = 0; g_log[0] = 0; }
+static int log_has(const char *needle) { return strstr(g_log, needle) != NULL; }
+static int log_count(const char *needle)
+{
+    int n = 0;
+    const char *p = g_log;
+    while ((p = strstr(p, needle)) != NULL) { n++; p++; }
+    return n;
+}
+
+/* ------------------------------------------------------------------ provider stubs */
+
+#include "../src/backend/nav_bake.h"
+void sh_nav_bake_source_update_begin(void) {}
+void sh_nav_bake_source_update_end(int committed) { (void)committed; }
+int sh_nav_bake_open(const char *name, sh_nav_bake_reader read_shipped, unsigned char **out_bytes, size_t *out_len)
+{
+    (void)name; (void)read_shipped;
+    if (out_bytes) *out_bytes = NULL;
+    if (out_len) *out_len = 0;
+    return 0;
+}
+int sh_nav_bake_overlay_open(const char *name, unsigned char **out, size_t *length)
+{
+    (void)name;
+    if (out) *out = NULL;
+    if (length) *length = 0;
+    return 0;
+}
+/* Map navigation claims exactly one name, which a bundle also ships. */
+#define NAV_NAME "maps/game/snapmap/test/nav_owned.decl"
+int sh_navmesh_open(const char *name, unsigned char **out_bytes, size_t *out_len)
+{
+    *out_bytes = NULL;
+    *out_len = 0;
+    if (name && !_stricmp(name, NAV_NAME)) {
+        *out_bytes = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, 3);
+        memcpy(*out_bytes, "NAV", 3);
+        *out_len = 3;
+        return 1;
+    }
+    return 0;
+}
+int sh_navmesh_validate_aas(const unsigned char *p, size_t n, char *e, size_t cap)
+{ (void)p; (void)n; if (e && cap) e[0] = 0; return 0; }
+
+/* ------------------------------------------------------------------ fixture */
+
+static char g_root[MAX_PATH];   /* ...\mods */
+
+static void mkdirs(const char *path)
+{
+    char tmp[MAX_PATH];
+    char *p;
+    strcpy_s(tmp, sizeof tmp, path);
+    for (p = tmp + 3; *p; ++p)
+        if (*p == '\\') { *p = 0; CreateDirectoryA(tmp, NULL); *p = '\\'; }
+    CreateDirectoryA(tmp, NULL);
+}
+
+static void write_file(const char *path, const char *body, size_t len)
+{
+    char dir[MAX_PATH];
+    char *slash;
+    FILE *f;
+    strcpy_s(dir, sizeof dir, path);
+    slash = strrchr(dir, '\\');
+    if (slash) { *slash = 0; mkdirs(dir); }
+    f = fopen(path, "wb");
+    if (!f) { fprintf(stderr, "cannot write %s\n", path); g_failed++; return; }
+    fwrite(body, 1, len, f);
+    fclose(f);
+}
+
+typedef struct fx_file {
+    const char *path;      /* under assets/ */
+    const char *body;      /* written to the tree (NULL: not written) */
+    long long size;        /* -1: the body's size */
+    const char *ptype, *pname;
+    const char *needs;     /* raw JSON array text or NULL */
+    char blob;             /* one hex digit repeated */
+} fx_file;
+
+static const char *hash64(char c, char *out)
+{
+    memset(out, c, 64);
+    out[64] = 0;
+    return out;
+}
+
+/* Write <root>\<folder>\bundle.json and its files. */
+static void make_bundle(const char *parent, const char *folder, const char *id, const char *version,
+                        char hash_digit, const char *shadows, const fx_file *files, int n, const char *state)
+{
+    char dir[MAX_PATH], path[MAX_PATH], h[65];
+    static char json[32768];
+    size_t at = 0;
+    int i;
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\%s", parent, folder);
+    mkdirs(dir);
+    at += _snprintf_s(json + at, sizeof json - at, _TRUNCATE,
+                      "{\n  \"format\": 1,\n  \"id\": \"%s\",\n  \"version\": \"%s\",\n  \"name\": \"%s\",\n"
+                      "  \"bundle\": \"%s\",\n  \"shadows\": [%s],\n  \"files\": [\n",
+                      id, version, id, hash64(hash_digit, h), shadows ? shadows : "");
+    for (i = 0; i < n; ++i) {
+        const fx_file *f = &files[i];
+        long long size = f->size >= 0 ? f->size : (long long)strlen(f->body ? f->body : "");
+        char b[65];
+        at += _snprintf_s(json + at, sizeof json - at, _TRUNCATE,
+                          "    {\"path\": \"assets/%s\", \"blob\": \"%s\", \"size\": %lld, "
+                          "\"provides\": {\"type\": \"%s\", \"name\": \"%s\"}, \"needs\": %s}%s\n",
+                          f->path, hash64(f->blob, b), size, f->ptype, f->pname, f->needs ? f->needs : "[]",
+                          i + 1 < n ? "," : "");
+        if (f->body) {
+            char *p;
+            _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\assets\\%s", dir, f->path);
+            for (p = path; *p; ++p) if (*p == '/') *p = '\\';
+            write_file(path, f->body, strlen(f->body));
+        }
+    }
+    at += _snprintf_s(json + at, sizeof json - at, _TRUNCATE, "  ]\n}\n");
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\bundle.json", dir);
+    write_file(path, json, at);
+    if (state) {
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\.state.json", dir);
+        write_file(path, state, strlen(state));
+    }
+}
+
+#define A_MD6    "generated/decls/md6def/mods/alex.pink-imp/imp.md6.decl"
+#define A_MESH   "generated/basemodel/md6/mods/alex.pink-imp/mesh/imp.bmd6model"
+#define A_ENT    "generated/decls/entitydef/mods/alex.pink-imp/imp.decl"
+#define A_SEDEF  "generated/decls/snapeditorentitydef/mods/alex.pink-imp/imp.decl"
+#define A_FIRE   "generated/decls/entitydef/mods/alex.pink-imp/fireball.decl"
+#define A_MAT    "generated/decls/material2/mods/alex.pink-imp/skin.decl"
+#define SHADOW   "generated/decls/entitydef/monster/imp.decl"
+#define LIFT     "generated/decls/snapeditorentitydef/func/lift.decl"
+#define GRID     "generated/decls/snapmoduleinfo/smpgrid/v1/c/512_768_384.decl"
+#define B_THING  "generated/decls/entitydef/mods/bob.skins/thing.decl"
+#define B_SEDEF  "generated/decls/snapeditorentitydef/mods/bob.skins/thing.decl"
+#define C_ONLY   "generated/decls/entitydef/mods/carol.broken/only.decl"
+#define F_BLOB   "generated/image/mods/fay.blob/tex.bimage"
+
+static char g_hash_a[65], g_hash_a2[65], g_hash_b[65], g_hash_c[65], g_hash_f[65], g_hash_l[65];
+
+static void build_fixture(void)
+{
+    char tmp[MAX_PATH], path[MAX_PATH], legacy[MAX_PATH], blobs[MAX_PATH], h[65];
+    GetTempPathA(sizeof tmp, tmp);
+    _snprintf_s(g_root, sizeof g_root, _TRUNCATE, "%smodserve_test_%lu\\mods", tmp, GetCurrentProcessId());
+    mkdirs(g_root);
+    {
+        static const fx_file a[] = {
+            { A_MESH, "MESHBYTES-0123456789", -1, "baseModel", "md6/mods/alex.pink-imp/mesh/imp.md6mesh", NULL, '1' },
+            { A_MAT, "material2 skin {}", -1, "material2", "mods/alex.pink-imp/skin", NULL, '2' },
+            { A_MD6, "md6Def imp { mesh \"md6/mods/alex.pink-imp/mesh/imp.md6mesh\" }", -1, "md6Def",
+              "mods/alex.pink-imp/imp.md6",
+              "[{\"type\":\"baseModel\",\"name\":\"md6/mods/alex.pink-imp/mesh/imp.md6mesh\"},"
+              "{\"type\":\"material2\",\"name\":\"mods/alex.pink-imp/skin\"},"
+              "{\"type\":\"material2\",\"name\":\"models/monsters/imp/imp\"}]", '3' },
+            { A_ENT, "entityDef imp { inherit \"snapmaps/placeablesnapaiencounter/imp\" }", -1, "entityDef",
+              "mods/alex.pink-imp/imp", "[{\"type\":\"md6Def\",\"name\":\"mods/alex.pink-imp/imp.md6\"}]", '4' },
+            /* Listed before its needs on purpose: the plan reorders. */
+            { A_SEDEF, "{ entityDef \"mods/alex.pink-imp/imp\" }", -1, "snapEditorEntityDef", "mods/alex.pink-imp/imp",
+              "[{\"type\":\"entityDef\",\"name\":\"mods/alex.pink-imp/imp\"},"
+              "{\"type\":\"md6Def\",\"name\":\"mods/alex.pink-imp/imp.md6\"}]", '5' },
+            { A_FIRE, "entityDef fireball {}", -1, "entityDef", "mods/alex.pink-imp/fireball", NULL, '6' },
+            { SHADOW, "entityDef pink { }", -1, "entityDef", "monster/imp", NULL, '7' },
+            { LIFT, "MODLIFT", -1, "snapEditorEntityDef", "func/lift", NULL, '8' },
+            { GRID, "MODGRID", -1, "snapModuleInfo", "smpgrid/v1/c/512_768_384", NULL, '9' },
+            { "maps/game/snapmap/test/nav_owned.decl", "MODNAV", -1, "file", "maps/game/snapmap/test/nav_owned.decl", NULL, 'a' },
+        };
+        /* The NAV shadow path is not namespaced; it is declared a shadow. */
+        make_bundle(g_root, "alex.pink-imp@1.0.0", "alex.pink-imp", "1.0.0", 'a',
+                    "\"" SHADOW "\", \"" LIFT "\", \"" GRID "\", \"maps/game/snapmap/test/nav_owned.decl\"",
+                    a, (int)(sizeof a / sizeof a[0]), "{\"validated\": true, \"installedAt\": 100}");
+        hash64('a', g_hash_a);
+    }
+    {
+        /* A later version of the same mod changing one file. */
+        static const fx_file a2[] = {
+            { A_FIRE, "entityDef fireball { v2 }", -1, "entityDef", "mods/alex.pink-imp/fireball", NULL, 'b' },
+        };
+        make_bundle(g_root, "alex.pink-imp@1.1.0", "alex.pink-imp", "1.1.0", 'b', NULL, a2, 1,
+                    "{\"validated\": true, \"installedAt\": 200}");
+        hash64('b', g_hash_a2);
+    }
+    {
+        /* Shadows the same stock entityDef: a conflict. Its editor row needs
+         * an md6Def nobody provides: blocked. */
+        static const fx_file b[] = {
+            { SHADOW, "entityDef bob { }", -1, "entityDef", "monster/imp", NULL, 'c' },
+            { B_THING, "entityDef thing {}", -1, "entityDef", "mods/bob.skins/thing",
+              "[{\"type\":\"md6Def\",\"name\":\"mods/alex.pink-imp/imp.md6\"}]", 'd' },
+            { B_SEDEF, "{ entityDef \"mods/bob.skins/thing\" }", -1, "snapEditorEntityDef", "mods/bob.skins/thing",
+              "[{\"type\":\"entityDef\",\"name\":\"mods/bob.skins/thing\"},"
+              "{\"type\":\"md6Def\",\"name\":\"mods/bob.skins/missing.md6\"}]", 'e' },
+        };
+        make_bundle(g_root, "bob.skins@2.0.0", "bob.skins", "2.0.0", 'c', "\"" SHADOW "\"", b, 3, NULL);
+        hash64('c', g_hash_b);
+    }
+    {
+        /* Size mismatch: skipped entirely. */
+        static const fx_file c[] = {
+            { C_ONLY, "entityDef only {}", 999, "entityDef", "mods/carol.broken/only", NULL, 'f' },
+        };
+        make_bundle(g_root, "carol.broken@1.0.0", "carol.broken", "1.0.0", 'd', NULL, c, 1, NULL);
+        hash64('d', g_hash_c);
+    }
+    {
+        static const fx_file d[] = {
+            { "generated/decls/entitydef/mods/dave.x/a.decl", "x", -1, "entityDef", "mods/dave.x/a", NULL, '1' },
+        };
+        make_bundle(g_root, "dave.x@1.0.0", "dave.x", "1.0.0", 'e', NULL, d, 1,
+                    "{\"validated\": false, \"firstCause\": \"md6Def mesh missing\"}");
+    }
+    {
+        /* A new name outside the namespace that is not declared a shadow. */
+        static const fx_file e[] = {
+            { "generated/decls/entitydef/monster/sneaky.decl", "x", -1, "entityDef", "monster/sneaky", NULL, '1' },
+        };
+        make_bundle(g_root, "erin.ns@1.0.0", "erin.ns", "1.0.0", '1', NULL, e, 1, NULL);
+    }
+    {
+        /* A file missing from the tree but present in the blob store. */
+        static const fx_file f[] = { { F_BLOB, NULL, 9, "image", "mods/fay.blob/tex", NULL, '2' } };
+        make_bundle(g_root, "fay.blob@1.0.0", "fay.blob", "1.0.0", '2', NULL, f, 1, NULL);
+        hash64('2', g_hash_f);
+        _snprintf_s(blobs, sizeof blobs, _TRUNCATE, "%s\\blobs\\%s", g_root, hash64('2', h));
+        write_file(blobs, "BLOBBYTES", 9);
+    }
+    {
+        /* Converted first-generation package: its names are not namespaced. */
+        static const fx_file l[] = {
+            { "generated/decls/entitydef/smp/oldthing.decl", "entityDef old {}", -1, "entityDef", "smp/oldthing", NULL, '3' },
+        };
+        _snprintf_s(legacy, sizeof legacy, _TRUNCATE, "%s\\legacy", g_root);
+        make_bundle(legacy, "old.pkg@0123456789abcdef", "old.pkg", "0123456789abcdef", '3', NULL, l, 1, NULL);
+        hash64('3', g_hash_l);
+    }
+    /* A hand-dropped folder that was never built. */
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\unbuilt\\mod.json", g_root);
+    write_file(path, "{}", 2);
+}
+
+/* ------------------------------------------------------------------ helpers */
+
+static int open_text(const char *name, char *out, size_t cap)
+{
+    unsigned char *bytes = NULL;
+    size_t len = 0;
+    int r = sh_modserve_open(name, &bytes, &len);
+    out[0] = 0;
+    if (r > 0) {
+        size_t n = len < cap - 1 ? len : cap - 1;
+        memcpy(out, bytes, n);
+        out[n] = 0;
+        HeapFree(GetProcessHeap(), 0, bytes);
+    }
+    return r;
+}
+
+static int provider_text(const char *name, unsigned mode, char *out, size_t cap)
+{
+    void *s = sh_overrides_test_open(name, mode);
+    long long n;
+    out[0] = 0;
+    if (!s) return 0;
+    n = sh_overrides_test_stream_length(s);
+    if (n > 0) {
+        size_t take = (size_t)n < cap - 1 ? (size_t)n : cap - 1;
+        sh_overrides_test_stream_read(s, out, take);
+        out[take] = 0;
+    }
+    sh_overrides_test_stream_close(s);
+    return 1;
+}
+
+static int step_index(const sh_modserve_plan *p, const char *type, const char *name)
+{
+    int i;
+    for (i = 0; i < p->count; ++i)
+        if (!_stricmp(p->steps[i].type, type) && !strcmp(p->steps[i].name, name)) return i;
+    return -1;
+}
+
+/* ------------------------------------------------------------------ fake engine */
+
+static char g_calls[8192];
+static int g_registered_count;
+static const char *g_fail_load;   /* this decl name fails to load */
+static const char *g_already;     /* this decl name already has a source */
+
+static void call_log(const char *kind, const char *type, const char *name)
+{
+    size_t at = strlen(g_calls);
+    _snprintf_s(g_calls + at, sizeof g_calls - at, _TRUNCATE, "%s:%s:%s;", kind, type, name);
+}
+static int fake_source(void *c, const char *type, const char *name)
+{
+    (void)c; (void)type;
+    return g_already && !strcmp(name, g_already);
+}
+static int fake_register(void *c, const char *type, const char *name, const char *reg)
+{
+    (void)c;
+    call_log("R", type, name);
+    if (!strstr(reg, ".decl")) return 0;
+    g_registered_count++;
+    return 1;
+}
+static int fake_load(void *c, const char *type, const char *name, int persist, unsigned *state, unsigned *lifetime)
+{
+    (void)c;
+    call_log(persist ? "P" : "L", type, name);
+    *lifetime = persist ? 4 : 1;
+    if (g_fail_load && !strcmp(name, g_fail_load)) { *state = 0x01; return 0; }
+    *state = 0xa0;
+    return 1;
+}
+static const sh_modserve_engine_ops g_fake = { NULL, fake_source, fake_register, fake_load };
+
+static double now_ns(void)
+{
+    LARGE_INTEGER f, c;
+    QueryPerformanceFrequency(&f);
+    QueryPerformanceCounter(&c);
+    return (double)c.QuadPart * 1e9 / (double)f.QuadPart;
+}
+
+/* ------------------------------------------------------------------ tests */
+
+static void test_empty_index(void)
+{
+    char missing[MAX_PATH];
+    unsigned char *b = (unsigned char *)1;
+    size_t n = 7;
+    log_clear();
+    _snprintf_s(missing, sizeof missing, _TRUNCATE, "%s\\does-not-exist", g_root);
+    CHECK(sh_modserve_index_build(missing) == 0);
+    CHECK(!sh_modserve_active());
+    CHECK(sh_modserve_open(A_ENT, &b, &n) == 0 && b == NULL && n == 0);
+    CHECK(log_has("MODS: index built in ") && log_has("(0 bundles, 0 files)"));
+}
+
+static void test_index_and_isolation(void)
+{
+    sh_modserve_stats st;
+    log_clear();
+    CHECK(sh_modserve_index_build(g_root) == 5);   /* alex x2, bob, fay, legacy */
+    sh_modserve_get_stats(&st);
+    CHECK(st.bundles_seen == 9);
+    CHECK(st.bundles_admitted == 5);
+    CHECK(st.conflicts == 1);
+    CHECK(log_has("bundle 'carol.broken@1.0.0' skipped: size mismatch: '" C_ONLY "' is 17 bytes, bundle.json says 999"));
+    CHECK(log_has("bundle 'dave.x@1.0.0' skipped: not validated: md6Def mesh missing"));
+    CHECK(log_has("bundle 'erin.ns@1.0.0' skipped: 'generated/decls/entitydef/monster/sneaky.decl' is outside mods/erin.ns/"));
+    CHECK(log_has("bundle 'unbuilt' skipped: no bundle.json"));
+    CHECK(log_count("skipped:") == 4);   /* one line per skipped bundle */
+    CHECK(log_has("conflict: shadow '" SHADOW "' is provided by alex.pink-imp@1.0.0, bob.skins@2.0.0; serving neither"));
+    CHECK(log_has("bundle alex.pink-imp@1.0.0: superseded by alex.pink-imp@1.1.0"));
+    CHECK(log_has("MODS: index built in ") && log_has("(5 bundles, "));
+    CHECK(sh_modserve_bundle_state(g_hash_a, NULL, 0) == 1);
+    {
+        char cause[200];
+        CHECK(sh_modserve_bundle_state(g_hash_c, cause, sizeof cause) == -1 && strstr(cause, "size mismatch"));
+    }
+    CHECK(sh_modserve_bundle_state("0000000000000000000000000000000000000000000000000000000000000000", NULL, 0) == 0);
+    printf("modserve_test: fixture index built in %.2f ms (%d bundles seen, %d files, %d keys)\n", st.build_ms,
+           st.bundles_seen, st.files, st.keys);
+}
+
+static void test_lookup(void)
+{
+    sh_modserve_hit hit;
+    char text[256];
+    CHECK(sh_modserve_lookup(A_MD6, &hit) && hit.is_decl && !hit.is_shadow && hit.size > 0 &&
+          !strcmp(hit.bundle_id, "alex.pink-imp"));
+    /* Case and separators fold; the engine spells md6Def and baseModel. */
+    CHECK(sh_modserve_lookup("generated/decls/md6Def/mods/alex.pink-imp/imp.md6.decl", NULL));
+    CHECK(sh_modserve_lookup("GENERATED\\baseModel\\md6\\mods\\alex.pink-imp\\mesh\\imp.bmd6model", NULL));
+    /* The registration source read and the sanitised raw spelling. */
+    CHECK(sh_modserve_lookup("decltree/md6def/mods/alex.pink-imp/imp.md6.decl", NULL));
+    CHECK(sh_modserve_lookup("generated/baseModel/md6/mods/alex.pink_imp/mesh/imp.bmd6model", NULL));
+    /* Misses: stock, the conflicted shadow, a skipped bundle's file, near names. */
+    CHECK(!sh_modserve_lookup("generated/decls/entitydef/monster/hellknight.decl", NULL));
+    CHECK(!sh_modserve_lookup(SHADOW, NULL));
+    CHECK(!sh_modserve_lookup(C_ONLY, NULL));
+    CHECK(!sh_modserve_lookup("generated/decls/entitydef/mods/dave.x/a.decl", NULL));
+    CHECK(!sh_modserve_lookup(A_ENT "x", NULL));
+    CHECK(!sh_modserve_lookup("", NULL));
+    CHECK(!sh_modserve_lookup(NULL, NULL));
+    /* Bytes, version supersession and the blob-store fallback. */
+    CHECK(open_text(A_ENT, text, sizeof text) == 1 && !strcmp(text, "entityDef imp { inherit \"snapmaps/placeablesnapaiencounter/imp\" }"));
+    CHECK(open_text(A_FIRE, text, sizeof text) == 1 && !strcmp(text, "entityDef fireball { v2 }"));
+    CHECK(open_text(F_BLOB, text, sizeof text) == 1 && !strcmp(text, "BLOBBYTES"));
+    CHECK(open_text("generated/decls/entitydef/smp/oldthing.decl", text, sizeof text) == 1);
+}
+
+static void test_precedence(void)
+{
+    char text[256];
+    log_clear();
+    /* A new mod name reaches the engine through the provider's stream. */
+    CHECK(provider_text(A_SEDEF, 0, text, sizeof text) && !strcmp(text, "{ entityDef \"mods/alex.pink-imp/imp\" }"));
+    CHECK(provider_text("generated/decls/snapEditorEntityDef/mods/alex.pink-imp/imp.decl", 1, text, sizeof text));
+    /* Mode 2 is never served. */
+    CHECK(!provider_text(A_SEDEF, 2, text, sizeof text));
+    /* Built-in defaults win over a bundle shadow of the same name. */
+    CHECK(provider_text(LIFT, 0, text, sizeof text) && text[0] == '{' && strcmp(text, "MODLIFT"));
+    /* Map navigation wins. */
+    CHECK(provider_text(NAV_NAME, 0, text, sizeof text) && !strcmp(text, "NAV"));
+    /* A Grid Room name is claimed by the Grid Room even when it cannot be
+     * built here, and never falls to the bundle's bytes. */
+    CHECK(!provider_text(GRID, 0, text, sizeof text) || strcmp(text, "MODGRID"));
+    /* The bundle still holds those names; only the order decides. */
+    CHECK(sh_modserve_lookup(LIFT, NULL) && sh_modserve_lookup(NAV_NAME, NULL) && sh_modserve_lookup(GRID, NULL));
+    /* A shadow that is served logs once. */
+    CHECK(open_text(LIFT, text, sizeof text) == 1 && open_text(LIFT, text, sizeof text) == 1);
+    CHECK(log_count("shadow '" LIFT "' served") == 1);
+}
+
+static void test_probe(void)
+{
+    CHECK(sh_modserve_probe_claims("generated/decls/md6Def/mods/alex.pink-imp/imp.md6.decl"));
+    CHECK(sh_modserve_probe_claims("generated/decls/snapEditorEntityDef/mods/alex.pink-imp/imp.decl"));
+    CHECK(!sh_modserve_probe_claims(A_MESH));                 /* raw files are not decls */
+    CHECK(!sh_modserve_probe_claims(SHADOW));                 /* conflicted */
+    CHECK(!sh_modserve_probe_claims("generated/decls/entitydef/monster/hellknight.decl"));
+    CHECK(sh_modserve_is_mod_sedef("mods/alex.pink-imp/imp"));
+    CHECK(sh_modserve_is_mod_sedef("MODS/alex.pink-imp/IMP"));
+    CHECK(!sh_modserve_is_mod_sedef("demons/imp_enc"));
+}
+
+static void test_plan(void)
+{
+    sh_modserve_plan p;
+    int md6, mat, ent, sedef, bsedef, bthing, i, unknown = 0;
+    const char *hashes[3];
+    CHECK(sh_modserve_plan_editor(&p) >= 4);
+    md6 = step_index(&p, "md6Def", "mods/alex.pink-imp/imp.md6");
+    mat = step_index(&p, "material2", "mods/alex.pink-imp/skin");
+    ent = step_index(&p, "entityDef", "mods/alex.pink-imp/imp");
+    sedef = step_index(&p, "snapEditorEntityDef", "mods/alex.pink-imp/imp");
+    bsedef = step_index(&p, "snapEditorEntityDef", "mods/bob.skins/thing");
+    bthing = step_index(&p, "entityDef", "mods/bob.skins/thing");
+    CHECK(md6 >= 0 && mat >= 0 && ent >= 0 && sedef >= 0 && bsedef >= 0 && bthing >= 0);
+    CHECK(mat < md6 && md6 < ent && ent < sedef);           /* dependency order */
+    CHECK(md6 < bthing);                                     /* across bundles */
+    CHECK(step_index(&p, "entityDef", "mods/alex.pink-imp/fireball") < 0);   /* gameplay only */
+    CHECK(step_index(&p, "entityDef", "monster/imp") < 0);   /* shadows are never registered */
+    for (i = 0; i < p.count; ++i) CHECK(_stricmp(p.steps[i].type, "baseModel"));   /* raw: no step */
+    CHECK(p.steps[sedef].persist == 1 && p.steps[ent].persist == 0 && p.steps[md6].persist == 0);
+    CHECK(!strcmp(p.steps[md6].reg_path, "md6def/mods/alex.pink-imp/imp.md6.decl"));
+    CHECK(p.steps[bsedef].blocked && strstr(p.steps[bsedef].blocked, "mods/bob.skins/missing.md6"));
+    CHECK(!p.steps[bthing].blocked && !p.steps[sedef].blocked);
+    CHECK(p.blocked == 1);
+    sh_modserve_plan_free(&p);
+
+    hashes[0] = g_hash_a;
+    hashes[1] = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+    hashes[2] = g_hash_a2;
+    CHECK(sh_modserve_plan_bundles(hashes, 3, &p, &unknown) >= 3);
+    CHECK(unknown == 1);
+    CHECK(step_index(&p, "entityDef", "mods/alex.pink-imp/fireball") >= 0);
+    CHECK(step_index(&p, "snapEditorEntityDef", "mods/alex.pink-imp/imp") < 0);
+    CHECK(step_index(&p, "md6Def", "mods/alex.pink-imp/imp.md6") < step_index(&p, "entityDef", "mods/alex.pink-imp/imp"));
+    CHECK(step_index(&p, "entityDef", "mods/bob.skins/thing") < 0);   /* not named */
+    for (i = 0; i < p.count; ++i) CHECK(!p.steps[i].persist);
+    sh_modserve_plan_free(&p);
+}
+
+static void test_plan_run(void)
+{
+    sh_modserve_plan p;
+    int ready, total;
+    const char *r_last, *l_first;
+    sh_modserve_test_reset_registration();
+    g_calls[0] = 0;
+    g_fail_load = "mods/alex.pink-imp/imp";       /* the alex entityDef fails to load */
+    g_already = "mods/alex.pink-imp/skin";        /* this source is already registered */
+    log_clear();
+    total = sh_modserve_plan_editor(&p);
+    ready = sh_modserve_plan_run(&p, &g_fake, "editor");
+    /* skin, md6 and bob's entityDef are ready; the alex entityDef fails, so
+     * its sedef is not loaded; bob's sedef is blocked. */
+    CHECK(ready == 3);
+    CHECK(!strstr(g_calls, "R:material2:mods/alex.pink-imp/skin"));    /* source existed */
+    CHECK(strstr(g_calls, "L:material2:mods/alex.pink-imp/skin") != NULL);
+    CHECK(strstr(g_calls, "R:md6Def:mods/alex.pink-imp/imp.md6") != NULL);
+    CHECK(strstr(g_calls, "L:entityDef:mods/alex.pink-imp/imp;") != NULL);
+    CHECK(strstr(g_calls, "R:snapEditorEntityDef:mods/alex.pink-imp/imp;") != NULL);
+    CHECK(!strstr(g_calls, "P:snapEditorEntityDef:mods/alex.pink-imp/imp;"));
+    CHECK(!strstr(g_calls, "snapEditorEntityDef:mods/bob.skins/thing"));
+    /* Every registration precedes every load. */
+    r_last = strrchr(g_calls, 'R');
+    l_first = strstr(g_calls, "L:");
+    CHECK(r_last && l_first && r_last < l_first);
+    CHECK(log_has("editor: entityDef 'mods/alex.pink-imp/imp' (alex.pink-imp) NOT READY: state 0x01"));
+    CHECK(log_has("editor: snapEditorEntityDef 'mods/alex.pink-imp/imp' (alex.pink-imp) NOT READY: needs entityDef 'mods/alex.pink-imp/imp', which failed"));
+    CHECK(log_has("editor: snapEditorEntityDef 'mods/bob.skins/thing' (bob.skins) BLOCKED"));
+    CHECK(log_has("editor: entityDef 'mods/bob.skins/thing' (bob.skins) READY: state 0xa0 lifetime 1"));
+    CHECK(log_has("editor: md6Def 'mods/alex.pink-imp/imp.md6' (alex.pink-imp) READY"));
+    CHECK(p.steps[step_index(&p, "entityDef", "mods/bob.skins/thing")].ready == 1);
+    CHECK(p.steps[step_index(&p, "snapEditorEntityDef", "mods/alex.pink-imp/imp")].ready == -1);
+    sh_modserve_plan_free(&p);
+    (void)total;
+
+    /* A second run repeats nothing that is ready; the failed steps retry. */
+    g_calls[0] = 0;
+    g_fail_load = NULL;
+    sh_modserve_plan_editor(&p);
+    ready = sh_modserve_plan_run(&p, &g_fake, "editor");
+    CHECK(!strstr(g_calls, "entityDef:mods/bob.skins/thing"));
+    CHECK(!strstr(g_calls, "md6Def:mods/alex.pink-imp/imp.md6"));
+    CHECK(strstr(g_calls, "L:entityDef:mods/alex.pink-imp/imp;") && strstr(g_calls, "P:snapEditorEntityDef:mods/alex.pink-imp/imp;"));
+    CHECK(ready == p.count - p.blocked);
+    sh_modserve_plan_free(&p);
+    g_already = NULL;
+}
+
+static void test_bundles_for_names(void)
+{
+    char out[4][SH_MODSERVE_HASH_HEX + 1];
+    const char *names[] = { "mods/alex.pink-imp/fireball", "snapmaps/placeablesnapaiencounter/imp", "MODS/bob.skins/thing" };
+    int n = modserve_bundles_for_names(names, 3, out, 4), i, has_a2 = 0, has_b = 0, has_a = 0;
+    /* fireball comes from 1.1.0; bob's thing needs alex 1.0.0's md6Def. */
+    CHECK(n == 3);
+    for (i = 0; i < n && i < 4; ++i) {
+        has_a |= !strcmp(out[i], g_hash_a);
+        has_a2 |= !strcmp(out[i], g_hash_a2);
+        has_b |= !strcmp(out[i], g_hash_b);
+    }
+    CHECK(has_a && has_a2 && has_b);
+    CHECK(modserve_bundles_for_names(names, 3, out, 1) == 3);   /* counts past cap */
+    CHECK(modserve_bundles_for_names(names + 1, 1, out, 4) == 0);   /* stock */
+}
+
+static void test_cost(void)
+{
+    const int N = 1000000;
+    const char *hit = "generated/decls/md6Def/mods/alex.pink-imp/imp.md6.decl";
+    const char *miss = "generated/decls/entitydef/characters/monsters/hellknight/hellknight_base.decl";
+    volatile int sink = 0;
+    double t0, hit_ns, miss_ns, cold_ns, warm_ns;
+    int i;
+    unsigned char *b;
+    size_t n;
+    t0 = now_ns();
+    for (i = 0; i < N; ++i) sink += sh_modserve_lookup(hit, NULL);
+    hit_ns = (now_ns() - t0) / N;
+    t0 = now_ns();
+    for (i = 0; i < N; ++i) sink += sh_modserve_lookup(miss, NULL);
+    miss_ns = (now_ns() - t0) / N;
+    CHECK(sink == N);
+    /* Opens: disk read each time versus the small-file cache. */
+    sh_modserve_test_cache(0);
+    t0 = now_ns();
+    for (i = 0; i < 2000; ++i) { CHECK(sh_modserve_open(A_MD6, &b, &n) == 1); HeapFree(GetProcessHeap(), 0, b); }
+    cold_ns = (now_ns() - t0) / 2000;
+    sh_modserve_test_cache(1);
+    t0 = now_ns();
+    for (i = 0; i < 2000; ++i) { CHECK(sh_modserve_open(A_MD6, &b, &n) == 1); HeapFree(GetProcessHeap(), 0, b); }
+    warm_ns = (now_ns() - t0) / 2000;
+    CHECK(sh_modserve_test_cache_bytes() > 0 && sh_modserve_test_cache_bytes() <= SH_MODSERVE_CACHE_TOTAL);
+    printf("modserve_test: lookup %.1f ns hit, %.1f ns miss; open %.1f us uncached, %.1f us cached\n",
+           hit_ns, miss_ns, cold_ns / 1000.0, warm_ns / 1000.0);
+    CHECK(miss_ns < 2000.0);   /* a gross bound; the figure itself is the evidence */
+}
+
+static void test_rescan(void)
+{
+    static const fx_file g[] = {
+        { "generated/decls/entitydef/mods/gus.new/a.decl", "entityDef a {}", -1, "entityDef", "mods/gus.new/a", NULL, '4' },
+    };
+    sh_modserve_plan p;
+    make_bundle(g_root, "gus.new@1.0.0", "gus.new", "1.0.0", '4', NULL, g, 1, NULL);
+    CHECK(!sh_modserve_lookup("generated/decls/entitydef/mods/gus.new/a.decl", NULL));
+    CHECK(sh_modserve_index_rescan() == 6);
+    CHECK(sh_modserve_lookup("generated/decls/entitydef/mods/gus.new/a.decl", NULL));
+    CHECK(sh_modserve_lookup(A_ENT, NULL));
+    /* Registrations made before the rescan are kept: nothing re-runs. */
+    g_calls[0] = 0;
+    sh_modserve_plan_editor(&p);
+    sh_modserve_plan_run(&p, &g_fake, "editor");
+    CHECK(!strstr(g_calls, "mods/alex.pink-imp/imp"));
+    sh_modserve_plan_free(&p);
+}
+
+static void remove_tree(const char *dir)
+{
+    char pattern[MAX_PATH], path[MAX_PATH];
+    WIN32_FIND_DATAA fd;
+    HANDLE h;
+    _snprintf_s(pattern, sizeof pattern, _TRUNCATE, "%s\\*", dir);
+    h = FindFirstFileA(pattern, &fd);
+    if (h != INVALID_HANDLE_VALUE) {
+        do {
+            if (!strcmp(fd.cFileName, ".") || !strcmp(fd.cFileName, "..")) continue;
+            _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", dir, fd.cFileName);
+            if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) remove_tree(path);
+            else DeleteFileA(path);
+        } while (FindNextFileA(h, &fd));
+        FindClose(h);
+    }
+    RemoveDirectoryA(dir);
+}
+
+int main(void)
+{
+    char top[MAX_PATH];
+    char *slash;
+    build_fixture();
+    test_empty_index();
+    test_index_and_isolation();
+    test_lookup();
+    test_precedence();
+    test_probe();
+    test_plan();
+    test_plan_run();
+    test_bundles_for_names();
+    test_cost();
+    test_rescan();
+    strcpy_s(top, sizeof top, g_root);
+    slash = strrchr(top, '\\');
+    if (slash) { *slash = 0; remove_tree(top); }
+    if (g_failed) {
+        fprintf(stderr, "modserve_test: %d check(s) failed\n--- log ---\n%s", g_failed, g_log);
+        return 1;
+    }
+    printf("modserve_test: all checks passed\n");
+    return 0;
+}

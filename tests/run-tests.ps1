@@ -80,14 +80,18 @@ $tests = @(
     @{ name = "dumpmap_path_test";  src = 'dumpmap_path_test.c';                                     arg = "" }
     @{ name = "json_pretty_test";   src = 'json_pretty_test.c';                                      arg = "" }
     @{ name = "editor_frame_test"; src = 'editor_frame_test.c'; libs = 'shell32.lib ole32.lib'; arg = "" }
-    @{ name = "rawmap_paths_test";  src = 'rawmap_paths_test.c ..\src\backend\map_legacy_payload.c ..\src\backend\nav_regions.c ..\src\backend\map_shards.c ..\src\backend\hook.c ..\src\backend\patch.c ..\src\backend\config.c ..\src\backend\config_json.c ..\src\common\snapmap_plus_iface.c map_bounds_link_stub.c'; defs = '/DSH_RAWMAP_TESTING /DSH_CONFIG_TESTING /DSH_PATCH_TESTING'; libs = 'shell32.lib ole32.lib'; arg = "" }
+    @{ name = "rawmap_paths_test";  src = 'rawmap_paths_test.c ..\src\backend\map_legacy_payload.c ..\src\backend\modlegacy.c ..\src\backend\modmanifest.c ..\src\backend\raw_deflate.c ..\src\backend\nav_regions.c ..\src\backend\map_shards.c ..\src\backend\hook.c ..\src\backend\patch.c ..\src\backend\config.c ..\src\backend\config_json.c ..\src\common\snapmap_plus_iface.c map_bounds_link_stub.c mod_seam_stub.c'; defs = '/DSH_RAWMAP_TESTING /DSH_CONFIG_TESTING /DSH_PATCH_TESTING'; libs = 'shell32.lib ole32.lib'; arg = "" }
+    @{ name = "modmanifest_test"; src = 'modmanifest_test.c ..\src\backend\modmanifest.c ..\src\backend\map_shards.c ..\src\backend\config_json.c'; arg = "" }
+    @{ name = "modlegacy_test"; src = 'modlegacy_test.c mod_seam_stub.c ..\src\backend\modlegacy.c ..\src\backend\modmanifest.c ..\src\backend\map_legacy_payload.c ..\src\backend\map_shards.c ..\src\backend\raw_deflate.c ..\src\backend\config_json.c'; defs = '/DSH_MOD_STUB_NO_BUILDER'; libs = 'shell32.lib'; arg = "" }
     @{ name = "config_json_test";   src = 'config_json_test.c ..\src\backend\config_json.c';         arg = "" }
     @{ name = "iface_config_test";  src = 'iface_config_test.c ..\src\common\snapmap_plus_iface.c';   arg = "" }
     @{ name = "editor_delete_test"; src = 'editor_delete_test.c ..\src\backend\editor_delete.c'; defs = '/DSH_EDITOR_DELETE_TESTING'; arg = "" }
     @{ name = "config_test";        src = 'config_test.c ..\src\backend\config.c ..\src\backend\config_json.c ..\src\common\snapmap_plus_iface.c'; defs = '/DSH_CONFIG_TESTING'; libs = 'shell32.lib ole32.lib'; arg = "" }
     @{ name = "startup_dirs_test"; src = 'startup_dirs_test.c ..\src\backend\user_dirs.c ..\src\backend\config.c ..\src\backend\config_json.c ..\src\common\snapmap_plus_iface.c'; defs = '/DSH_CONFIG_TESTING'; libs = 'shell32.lib ole32.lib'; arg = (Join-Path $here '..') }
     @{ name = "strids_test"; src = 'strids_test.c ..\src\backend\strids.c ..\src\backend\config_json.c'; defs = '/DSH_STRIDS_TESTING'; arg = "" }
-    @{ name = "overrides_internal_test"; src = 'overrides_internal_test.c ..\src\backend\perf.c ..\src\backend\overrides.c ..\src\backend\decl_text.c ..\src\backend\grid_room_asset.c ..\src\backend\grid_room_nav.c ..\src\backend\aas_edit.c ..\src\backend\grid_room.c ..\src\backend\grid_room_resources.c ..\src\backend\grid_room_decl.c ..\src\backend\config_json.c ..\src\backend\host_image.c'; defs = '/DSH_OVERRIDES_TESTING'; libs = 'shell32.lib'; arg = "" }
+    @{ name = "overrides_internal_test"; src = 'overrides_internal_test.c ..\src\backend\perf.c ..\src\backend\overrides.c ..\src\backend\modserve.c ..\src\backend\modbundle.c ..\src\backend\decl_text.c ..\src\backend\grid_room_asset.c ..\src\backend\grid_room_nav.c ..\src\backend\aas_edit.c ..\src\backend\grid_room.c ..\src\backend\grid_room_resources.c ..\src\backend\grid_room_decl.c ..\src\backend\config_json.c ..\src\backend\host_image.c'; defs = '/DSH_OVERRIDES_TESTING'; libs = 'shell32.lib'; arg = "" }
+    # Installed mod bundles: index, provider precedence, registration plan.
+    @{ name = "modserve_test"; src = 'modserve_test.c ..\src\backend\modserve.c ..\src\backend\modbundle.c ..\src\backend\perf.c ..\src\backend\overrides.c ..\src\backend\decl_text.c ..\src\backend\grid_room_asset.c ..\src\backend\grid_room_nav.c ..\src\backend\aas_edit.c ..\src\backend\grid_room.c ..\src\backend\grid_room_resources.c ..\src\backend\grid_room_decl.c ..\src\backend\config_json.c ..\src\backend\host_image.c'; defs = '/DSH_OVERRIDES_TESTING /DSH_MODSERVE_PURE /DSH_MODSERVE_TESTING'; libs = 'shell32.lib'; arg = "" }
     @{ name = "process_heap_scope_test"; src = 'process_heap_scope_test.c'; arg = "" }
     @{ name = "engine_dialog_test"; src = 'engine_dialog_test.c ..\src\backend\engine_dialog.c'; defs = '/DSH_ENGINE_DIALOG_TESTING'; arg = "" }
     @{ name = "navmesh_test"; src = 'navmesh_test.c ..\src\backend\navmesh.c ..\src\backend\map_shards.c'; defs = '/DSH_NAVMESH_TESTING'; arg = "" }
@@ -117,6 +121,10 @@ $tests = @(
     @{ name = "prefabpreview_test"; src = 'prefabpreview_test.c';                                  arg = "" }
     @{ name = "prefab_grab_test"; src = 'prefab_grab_test.c ..\src\backend\prefab_grab.c';          arg = "" }
     @{ name = "megapreview_io_test"; src = 'megapreview_io_test.c';                                 arg = "" }
+    @{ name = "modbundle_test"; src = 'modbundle_test.c ..\src\backend\modbundle.c ..\src\backend\config_json.c ..\src\backend\decl_text.c'; arg = (Join-Path $here 'fixtures\mods\alex.r2-imp') }
+    @{ name = "modstore_test"; src = 'modstore_test.c ..\src\backend\modstore.c ..\src\backend\modbundle.c ..\src\backend\config_json.c ..\src\backend\decl_text.c'; defs = '/DSH_MODSTORE_TESTING'; libs = 'shell32.lib ole32.lib'; arg = (Join-Path $here 'fixtures\mods\alex.r2-imp') }
+    # The builder, serving index, map manifest and legacy converter linked together.
+    @{ name = "mod_pipeline_test"; src = 'mod_pipeline_test.c ..\src\backend\modbundle.c ..\src\backend\modserve.c ..\src\backend\modmanifest.c ..\src\backend\modlegacy.c ..\src\backend\map_legacy_payload.c ..\src\backend\map_shards.c ..\src\backend\raw_deflate.c ..\src\backend\config_json.c ..\src\backend\decl_text.c'; libs = 'shell32.lib ole32.lib'; arg = (Join-Path $here 'fixtures\mods\alex.r2-imp') }
     @{ name = "serialization_buffer_test"; src = 'serialization_buffer_test.cpp'; cxx = $true;     arg = "" }
 )
 if ($Doom) {
