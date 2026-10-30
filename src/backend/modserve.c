@@ -578,7 +578,17 @@ static void ms_parse_file(ms_index *x, ms_bundle *b, ms_json *c, char **shadows,
         ms_sanitize(b->id, sid, sizeof sid);
         _snprintf_s(ns_s, sizeof ns_s, _TRUNCATE, "mods/%s/", sid);
         if (f->is_decl && _stricmp(ptype, "skins")) inside = !strncmp(f->pname, ns, strlen(ns));
-        else {
+        else if (!_stricmp(ptype, "soundBank")) {
+            /* A bank lives in the one folder Wwise lists, so its namespace is
+             * its stem: <id with '.' and '-' as '_'>_<rest>, as the builder
+             * requires (sh_mb_bank_stem). */
+            char stem[96], bid[80], *q;
+            size_t k;
+            _snprintf_s(bid, sizeof bid, _TRUNCATE, "%s_", b->id);
+            for (q = bid; *q; ++q) if (*q == '.' || *q == '-') *q = '_';
+            k = strlen(bid);
+            inside = sh_mb_bank_stem(request, stem, sizeof stem) && !_strnicmp(stem, bid, k);
+        } else {
             const char *subject = f->is_decl ? f->pname : request;
             char mid[100], mid_s[100];
             _snprintf_s(mid, sizeof mid, _TRUNCATE, "/%s", ns);

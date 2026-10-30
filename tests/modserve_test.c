@@ -290,6 +290,18 @@ static void build_fixture(void)
         make_bundle(legacy, "old.pkg@0123456789abcdef", "old.pkg", "0123456789abcdef", '3', NULL, l, 1, NULL);
         hash64('3', g_hash_l);
     }
+    {
+        /* A sound bank is named by its stem: <id with '.' and '-' as '_'>_<rest>
+         * is inside the namespace, any other stem is outside it. */
+        static const fx_file g[] = {
+            { "sound/soundbanks/pc/gail_snd_fx.bnk", "BKHD", -1, "soundBank", "sound/soundbanks/pc/gail_snd_fx.bnk", NULL, '5' },
+        };
+        static const fx_file h[] = {
+            { "sound/soundbanks/pc/other_fx.bnk", "BKHD", -1, "soundBank", "sound/soundbanks/pc/other_fx.bnk", NULL, '6' },
+        };
+        make_bundle(g_root, "gail.snd@1.0.0", "gail.snd", "1.0.0", '5', NULL, g, 1, NULL);
+        make_bundle(g_root, "hank.snd@1.0.0", "hank.snd", "1.0.0", '6', NULL, h, 1, NULL);
+    }
     /* A hand-dropped folder that was never built. */
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\unbuilt\\mod.json", g_root);
     write_file(path, "{}", 2);
@@ -399,22 +411,24 @@ static void test_index_and_isolation(void)
 {
     sh_modserve_stats st;
     log_clear();
-    CHECK(sh_modserve_index_build(g_root) == 5);   /* alex x2, bob, fay, legacy */
+    CHECK(sh_modserve_index_build(g_root) == 6);   /* alex x2, bob, fay, gail, legacy */
     sh_modserve_get_stats(&st);
-    CHECK(st.bundles_seen == 9);
-    CHECK(st.bundles_admitted == 5);
+    CHECK(st.bundles_seen == 11);
+    CHECK(st.bundles_admitted == 6);
     CHECK(st.conflicts == 1);
     CHECK(log_has("bundle 'carol.broken@1.0.0' skipped: size mismatch: '" C_ONLY "' is 17 bytes, bundle.json says 999"));
     CHECK(log_has("bundle 'dave.x@1.0.0' skipped: not validated: md6Def mesh missing"));
     CHECK(log_has("bundle 'erin.ns@1.0.0' skipped: 'generated/decls/entitydef/monster/sneaky.decl' is outside mods/erin.ns/"));
     CHECK(log_has("bundle 'unbuilt' skipped: no bundle.json"));
-    CHECK(log_count("skipped:") == 4);   /* one line per skipped bundle */
+    CHECK(log_has("bundle 'hank.snd@1.0.0' skipped: 'sound/soundbanks/pc/other_fx.bnk' is outside mods/hank.snd/"));
+    CHECK(!log_has("bundle 'gail.snd@1.0.0' skipped"));
+    CHECK(log_count("skipped:") == 5);   /* one line per skipped bundle */
     /* Two mods' shadows of one stock decl: one serves (here the more
      * recently installed; the texts are outside the composable grammar). */
     CHECK(log_has("conflict: shadow '" SHADOW "' is provided by alex.pink-imp@1.0.0, bob.skins@2.0.0; serving "
                   "alex.pink-imp@1.0.0 (installed most recently)"));
     CHECK(log_has("bundle alex.pink-imp@1.0.0: superseded by alex.pink-imp@1.1.0"));
-    CHECK(log_has("MODS: index built in ") && log_has("(5 bundles, "));
+    CHECK(log_has("MODS: index built in ") && log_has("(6 bundles, "));
     CHECK(sh_modserve_bundle_state(g_hash_a, NULL, 0) == 1);
     {
         char cause[200];
@@ -641,7 +655,7 @@ static void test_rescan(void)
     sh_modserve_plan p;
     make_bundle(g_root, "gus.new@1.0.0", "gus.new", "1.0.0", '4', NULL, g, 1, NULL);
     CHECK(!sh_modserve_lookup("generated/decls/entitydef/mods/gus.new/a.decl", NULL));
-    CHECK(sh_modserve_index_rescan() == 6);
+    CHECK(sh_modserve_index_rescan() == 7);
     CHECK(sh_modserve_lookup("generated/decls/entitydef/mods/gus.new/a.decl", NULL));
     CHECK(sh_modserve_lookup(A_ENT, NULL));
     /* Registrations made before the rescan are kept: nothing re-runs. */
