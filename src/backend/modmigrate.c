@@ -650,6 +650,9 @@ static void mg_do_item(mg_ctx *c, mg_item *it, size_t index)
     size_t i;
     int ok;
 
+    /* One folder is one store step: an install or download on another thread
+     * waits for it (modstore_lock), and this folder waits for theirs. */
+    modstore_lock();
     memset(&zip, 0, sizeof zip);
     memset(&origin, 0, sizeof origin);
     _snprintf_s(folder_u8, sizeof folder_u8, _TRUNCATE, "%s\\%s", c->overrides_u8, it->name);
@@ -771,6 +774,7 @@ out:
     sh_modlegacy_zip_free(&zip);
     it->ms = GetTickCount64() - t0;
     mg_log_item(it);
+    modstore_unlock();
 }
 
 /* ---------------------------------------------------------------- record ---- */

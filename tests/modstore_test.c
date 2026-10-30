@@ -1,7 +1,8 @@
 /* modstore_test.c -- the mods\ store: install, hard links and the copy
  * fallback, enumeration, verification and detected corruption, in-place
  * builds, build-numbered folders, and resolve_need hit, miss, dedupe and
- * conflict.
+ * conflict, and the store lock (a second installer waits, two installers at
+ * once both succeed).
  *
  *   modstore_test.exe <tests\fixtures\mods\alex.r2-imp>
  */
@@ -73,6 +74,51 @@ static const sh_ms_entry *find_entry(const sh_ms_list *l, const char *key)
     size_t i;
     for (i = 0; i < l->count; i++) if (!strcmp(l->items[i].key, key)) return &l->items[i];
     return NULL;
+}
+
+/* ------------------------------------------------------------ lock contention */
+
+typedef struct lock_job {
+    char folder[MAX_PATH * 2];
+    int ok;
+    ULONGLONG done_at;
+    char cause[512];
+} lock_job;
+
+static DWORD WINAPI install_thread(void *p)
+{
+    lock_job *j = (lock_job *)p;
+    sh_ms_install_stats st;
+    char key[160];
+    j->ok = sh_ms_install_from_folder(j->folder, &RESOLVER, key, sizeof key, &st, NULL, j->cause, sizeof j->cause);
+    j->done_at = GetTickCount64();
+    return 0;
+}
+
+typedef struct hold_job { DWORD ms; volatile LONG held; ULONGLONG released_at; } hold_job;
+
+/* Stands for a migration folder: holds the store lock for a while. */
+static DWORD WINAPI hold_thread(void *p)
+{
+    hold_job *h = (hold_job *)p;
+    modstore_lock();
+    modstore_lock();   /* recursive, as a migration step around an install is */
+    InterlockedExchange(&h->held, 1);
+    Sleep(h->ms);
+    h->released_at = GetTickCount64();
+    modstore_unlock();
+    modstore_unlock();
+    return 0;
+}
+
+static void make_small_mod(const char *dir, const char *id)
+{
+    char text[256], rel[MAX_PATH];
+    _snprintf_s(text, sizeof text, _TRUNCATE, "{\"id\":\"%s\",\"version\":\"1.0.0\",\"name\":\"%s\",\"author\":\"tester\"}", id, id);
+    mt_write(dir, "mod.json", text);
+    _snprintf_s(rel, sizeof rel, _TRUNCATE, "assets\\generated\\image\\mods\\%s\\a.bimage", id);
+    _snprintf_s(text, sizeof text, _TRUNCATE, "bytes of %s for the lock test", id);
+    mt_write(dir, rel, text);
 }
 
 int main(int argc, char **argv)
@@ -264,6 +310,51 @@ int main(int argc, char **argv)
             CHECK(!sh_ms_verify("alex.r2-imp@1.0.0+1", &vs, cause, sizeof cause));
         }
         sh_ms_list_free(&list);
+    }
+
+    /* The store lock: a second installer waits for the holder (a migration
+     * folder), it does not fail; two installers at once both succeed. */
+    {
+        hold_job h = { 400, 0, 0 };
+        lock_job a, c;
+        HANDLE th, ti[2];
+        unsigned waits = modstore_lock_waits();
+        memset(&a, 0, sizeof a);
+        memset(&c, 0, sizeof c);
+        _snprintf_s(a.folder, sizeof a.folder, _TRUNCATE, "%s\\authoring\\test.lockone", tmp);
+        _snprintf_s(c.folder, sizeof c.folder, _TRUNCATE, "%s\\authoring\\test.locktwo", tmp);
+        make_small_mod(a.folder, "test.lockone");
+        make_small_mod(c.folder, "test.locktwo");
+        th = CreateThread(NULL, 0, hold_thread, &h, 0, NULL);
+        CHECK(th != NULL);
+        while (th && !InterlockedCompareExchange(&h.held, 0, 0)) Sleep(1);
+        ti[0] = CreateThread(NULL, 0, install_thread, &a, 0, NULL);
+        CHECK(ti[0] != NULL);
+        if (ti[0]) WaitForSingleObject(ti[0], 60000);
+        if (th) WaitForSingleObject(th, 60000);
+        CHECK(a.ok);
+        if (!a.ok) fprintf(stderr, "  waiting install: %s\n", a.cause);
+        CHECK(a.done_at >= h.released_at);   /* it finished only after the holder let go */
+        CHECK(modstore_lock_waits() > waits);
+        if (ti[0]) CloseHandle(ti[0]);
+        if (th) CloseHandle(th);
+        /* Two installers at once (the Mods tab and sh_mods install). */
+        memset(&a, 0, sizeof a);
+        _snprintf_s(a.folder, sizeof a.folder, _TRUNCATE, "%s\\authoring\\test.lockone", tmp);
+        ti[0] = CreateThread(NULL, 0, install_thread, &a, 0, NULL);
+        ti[1] = CreateThread(NULL, 0, install_thread, &c, 0, NULL);
+        CHECK(ti[0] && ti[1]);
+        if (ti[0] && ti[1]) WaitForMultipleObjects(2, ti, TRUE, 60000);
+        CHECK(a.ok && c.ok);
+        if (!a.ok || !c.ok) fprintf(stderr, "  parallel installs: %s / %s\n", a.cause, c.cause);
+        if (ti[0]) CloseHandle(ti[0]);
+        if (ti[1]) CloseHandle(ti[1]);
+        CHECK(sh_ms_verify("test.lockone@1.0.0", &vs, cause, sizeof cause));
+        CHECK(sh_ms_verify("test.locktwo@1.0.0", &vs, cause, sizeof cause));
+        /* The lock is recursive on one thread: an install inside a held step. */
+        modstore_lock();
+        CHECK(sh_ms_verify("test.locktwo@1.0.0", &vs, cause, sizeof cause));
+        modstore_unlock();
     }
 
     /* The store itself is not a mod. */

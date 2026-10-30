@@ -13,14 +13,26 @@
  * install and on request, never at boot; enumeration trusts bundle.json and
  * checks sizes only.
  *
- * File work only, on the calling thread; no engine calls. Not reentrant: one
- * caller (the console command thread) at a time.
+ * File work only, on the calling thread; no engine calls. Every writer of the
+ * store serialises on modstore_lock: the install and verification below take
+ * it themselves, and longer steps (one migration folder, a download install,
+ * `sh_mods install` and `sh_mods migrate`, an export) hold it around their
+ * whole step. A second writer waits for the first, it never fails because of
+ * it; the wait is one step long (a migration folder is at most a few seconds).
  */
 #ifndef SNAPMAP_PLUS_MODSTORE_H
 #define SNAPMAP_PLUS_MODSTORE_H
 
 #include <stddef.h>
 #include "modbundle.h"
+
+/* The store lock (recursive). modsync_store_lock and modsync_store_unlock
+ * (modsync.h) are the same lock under their older names. A thread that finds
+ * it held logs one "MODS: store: waiting" line and waits. */
+void modstore_lock(void);
+void modstore_unlock(void);
+/* How many lock calls had to wait so far (tests, diagnostics). */
+unsigned modstore_lock_waits(void);
 
 /* id@version+build; version may hold up to 4 UTF-8 bytes per code point. */
 #define SH_MS_KEY_MAX (SH_MB_ID_MAX + 1 + 4 * SH_MB_VERSION_MAX + 1 + 20)

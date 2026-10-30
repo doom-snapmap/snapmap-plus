@@ -78,6 +78,48 @@ func TestMigrateUserData_leavesRetiredPackageFolders(t *testing.T) {
 	}
 }
 
+// The cache folder (the WebView2 profile) and an old top-level webview2 folder are regenerable:
+// never copied and not required at the destination, so the rest still moves and they stay put.
+func TestMigrateUserData_skipsRegenerableCache(t *testing.T) {
+	la, up := newDataDirs(t)
+	oldCache := filepath.Join(up, "snaphak", "cache", "webview2", "EBWebView", "Local State")
+	oldProfile := filepath.Join(up, "snaphak", "webview2", "EBWebView", "Local State")
+	oldPrefab := filepath.Join(up, "snaphak", "prefabs", "arena.json")
+	writeF(t, oldCache, "cache")
+	writeF(t, oldProfile, "profile")
+	writeF(t, oldPrefab, "MY PREFAB")
+
+	migrateUserData()
+
+	if got := readF(t, filepath.Join(la, "snapmap-plus", "prefabs", "arena.json")); got != "MY PREFAB" {
+		t.Fatalf("prefab not migrated: %q", got)
+	}
+	for _, sub := range []string{"cache", "webview2"} {
+		if exists(filepath.Join(la, "snapmap-plus", sub)) {
+			t.Errorf("migration copied the regenerable folder %s", sub)
+		}
+	}
+	if got := readF(t, oldCache); got != "cache" {
+		t.Fatalf("the old cache was not left in place: %q", got)
+	}
+	if got := readF(t, oldProfile); got != "profile" {
+		t.Fatalf("the old profile was not left in place: %q", got)
+	}
+	if exists(oldPrefab) {
+		t.Error("the migrated prefab was not retired from the old folder")
+	}
+	for _, rel := range []string{"cache", "Cache/webview2/x", "webview2", "webview2/EBWebView"} {
+		if !regenerableContent(rel) {
+			t.Errorf("%s should be regenerable", rel)
+		}
+	}
+	for _, rel := range []string{"prefabs", "strings/x.json", "cached", "mods"} {
+		if regenerableContent(rel) {
+			t.Errorf("%s should not be regenerable", rel)
+		}
+	}
+}
+
 // TestMigrateUserData_neverClobbersNewer: if the user already has a file at the new location, an old-location
 // file of the same name must NOT overwrite it (and re-running is a no-op).
 func TestMigrateUserData_neverClobbersNewer(t *testing.T) {

@@ -152,8 +152,11 @@ Converting assets from other games is Doomforge's job, not this product's. New n
 - Publishing a map that uses mods uploads those mods to the mod store first, so other players can
   download them; the first time, the game asks once (the `mods.upload_confirmed` setting records
   the answer), and No leaves the map unpublished. A map over the map service's 10 MB limit is
-  refused before anything is sent. Unpublishing a map releases its mods on the store; deleting a
-  map from My Maps does not, because its published copy stays available. A published map over the
+  refused before anything is sent. A published map that uses mods carries the search tag `mods`,
+  added at publish when it is missing, because players without Snapmap+ cannot play it.
+  Unpublishing a map releases its mods on the store; deleting a map from My Maps does not while its
+  published copy stays available, and releases them only when the game reports that copy is no
+  longer published (for example after an unpublish from another machine). A published map over the
   limit cannot be copied to My Maps.
 - The store the product talks to is the `mods.store` setting (default `https://api.snapmapplus.com`;
   https, or http only for a loopback host). A change applies to the next request, not the next launch.
@@ -282,6 +285,9 @@ goes to the `~` console with a summary toast.
 
 The Snapmap+ window — HTML/CSS/JS rendered in a WebView2 control, opened inside the SnapMap
 editor (run `sh` in the console if it doesn't auto-open). Full detail: [`webview-ui.md`](webview-ui.md).
+Its WebView2 profile is regenerable cache in `%LOCALAPPDATA%\snapmap-plus\cache\webview2\`; the first
+start of this release renames an older `snapmap-plus\webview2\` folder into it, and the installer never
+backs up or copies `cache\`.
 
 | Surface | What it does |
 |---|---|

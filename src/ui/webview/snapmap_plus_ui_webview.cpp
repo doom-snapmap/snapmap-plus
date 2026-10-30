@@ -33,6 +33,7 @@
 #include "host_image.h"     /* sh_host_renderer_name -- which renderer the player is actually running */
 #include "prefab_grab.h"    /* SH_PREFAB_GRAB_*, and the saved-file check when the backend has no guard */
 #include "game_identity.h"  /* the backend-provided game identity (startup argv) */
+#include "webview_profile.h" /* the WebView2 profile folder under cache\ */
 #include "../sh_entity_desc.h"/* generated entity descriptions */
 #include "../sh_event_catalog.h"/* generated event names and argument types */
 #include "../sh_entity_asset_lists.h"/* generated per-class model and animation choices */
@@ -3621,7 +3622,13 @@ static void poc_start_webview()
     wchar_t local[MAX_PATH] = {}; std::wstring udf = L".";
     bool have_local = SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_LOCAL_APPDATA, nullptr, 0, local));
     if (have_local) {
-        udf = std::wstring(local) + L"\\snapmap-plus\\webview2"; SHCreateDirectoryExW(nullptr, udf.c_str(), nullptr);
+        /* %LOCALAPPDATA%\snapmap-plus\cache\webview2; an older snapmap-plus\webview2 folder is renamed into
+         * cache\ once (webview_profile.h). */
+        int how = sh_webview_profile::created; DWORD error = 0;
+        udf = sh_webview_profile::choose(local, &how, &error);
+        if (how == sh_webview_profile::moved) poc_log("webview2 profile moved into cache\\webview2");
+        else if (how == sh_webview_profile::kept_old)
+            poc_logf("webview2 profile could not be moved into cache\\ (error %lu); using the old folder this time", (unsigned long)error);
     }
     ComPtr<ICoreWebView2EnvironmentOptions> options;
     int devtools_port = have_local ? poc_devtools_port(local) : 0;

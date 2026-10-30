@@ -76,9 +76,13 @@ Checks native helpers, engine-interface contracts, frontend JavaScript and optio
   uploads and resumes, the toast route agrees on the next publish), a failed
   upload cancelling, the editor leaving and another save, the claim at the
   feed post with and without a stored secret, a republish replacing the set,
-  release on a republish without mods and on unpublish, the copy gate on both
-  sides of the bound, and the launch step settling provisional refs and
-  retrying the queue.
+  release on a republish without mods and on unpublish, the `mods` search tag
+  added before the resume (and a tag that cannot be written not stopping the
+  publish), the delete check (no link, no cloud-saved id, still published, a
+  failed, late or unstarted answer all keep the claim; an item missing from
+  the answer is released and its link forgotten), the copy gate on both sides
+  of the bound, and the launch step settling provisional refs and retrying the
+  queue.
 - `mod_seam_stub.c` stands in for the serving layer and the builder entry in
   tests that link the map manifest or the legacy converter without them.
 - `modbundle_test.c` builds `fixtures\mods\alex.r2-imp` and pins its bundle
@@ -86,8 +90,10 @@ Checks native helpers, engine-interface contracts, frontend JavaScript and optio
   needs scan, build numbering and each refusal rule. The fixture files are
   hashed byte for byte, so their line endings are never converted.
 - `modstore_test.c` installs the fixture into a temporary store: blobs, hard
-  links and the copy fallback, verification and corruption, in-place builds and
-  need resolution across installed bundles.
+  links and the copy fallback, verification and corruption, in-place builds,
+  need resolution across installed bundles, and the store lock (an installer
+  waits for a holder instead of failing, two installers at once both succeed,
+  the lock is recursive).
 - `modserve_test.c` checks the serving index: admission and failure isolation,
   lookups in every spelling, provider precedence against the real `overrides.c`,
   probe claims, registration plans and their order, the rescan and the lookup
@@ -118,8 +124,15 @@ Checks native helpers, engine-interface contracts, frontend JavaScript and optio
   bundles, that a map carrying the same delivery or the same authored tree is
   answered by the migrated bundle without a conversion, a non-empty
   `override-backups` left alone, the boot split (a small folder before the
-  index, a large one on the worker, then one rescan) and the rerun of an
-  unfinished record. `MODMIGRATE_ECHO=1` prints the log lines.
+  index, a large one on the worker, then one rescan), the rerun of an
+  unfinished record, and the store lock (a pass waits for a holder, and
+  installs during a worker pass wait their turn and succeed).
+  `MODMIGRATE_ECHO=1` prints the log lines.
+- `webview_profile_test.cpp` checks where the companion window's WebView2
+  profile goes (`webview_profile.h`): created under `cache\webview2`, an older
+  top-level `webview2` folder renamed into it with the same files, an old
+  folder beside an existing new one left alone, and a failed rename keeping
+  the old folder.
 - `modui_test.c` runs the Mods tab's backend against a temporary store, the
   real serving index and the map manifest: the document on an empty store,
   install through the tab, every state string, manifest rows and the placed

@@ -50,6 +50,15 @@ static struct {
     int fails, resumes, asks, ask_buttons, answer;
     char asked[256], toast[256];
     int toast_route;
+    /* the search tag: calls, the tag asked for, what the fake returns, and
+     * whether the tag was on the list at the resume */
+    int tag_calls, tag_result, tagged_at_resume, tags_present;
+    char tag[32];
+    /* the published edit's saved-map ids, and the published-items queries */
+    char cloud[64], local[64];
+    int queries, query_start;
+    unsigned query_ticket;
+    char query_cloud[64];
 } F;
 
 static void *const EDITOR = (void *)(uintptr_t)0x1000;
@@ -68,7 +77,38 @@ static int f_poll(void *c, int ticket) { (void)c; (void)ticket; return F.answer;
 static void f_release(void *c, int ticket) { (void)c; (void)ticket; }
 static unsigned long long f_token(void *c, void *editor) { (void)c; return editor == EDITOR ? F.token : 0; }
 static void f_fail(void *c, void *editor) { (void)c; if (editor == EDITOR) F.fails++; }
-static void f_resume(void *c, void *editor) { (void)c; if (editor == EDITOR) F.resumes++; }
+static void f_resume(void *c, void *editor)
+{
+    (void)c;
+    if (editor != EDITOR) return;
+    F.resumes++;
+    F.tagged_at_resume = F.tags_present;
+}
+static int f_add_tag(void *c, void *editor, const char *tag)
+{
+    (void)c;
+    if (editor != EDITOR) return -1;
+    F.tag_calls++;
+    strcpy_s(F.tag, sizeof F.tag, tag);
+    if (F.tag_result > 0 && F.tags_present) return 0;   /* already on the list */
+    if (F.tag_result > 0) F.tags_present = 1;
+    return F.tag_result;
+}
+static int f_edit_ids(void *c, void *edit, char *cloud, size_t ccap, char *local, size_t lcap)
+{
+    (void)c; (void)edit;
+    strcpy_s(cloud, ccap, F.cloud);
+    strcpy_s(local, lcap, F.local);
+    return F.cloud[0] || F.local[0];
+}
+static int f_published_query(void *c, const char *cloud, unsigned ticket)
+{
+    (void)c;
+    F.queries++;
+    F.query_ticket = ticket;
+    strcpy_s(F.query_cloud, sizeof F.query_cloud, cloud);
+    return F.query_start;
+}
 static void f_notice(void *c, void *editor, const char *text) { (void)c; (void)editor; strcpy_s(F.toast, sizeof F.toast, text); }
 static int f_toast_question(void *c, void *editor, size_t count, unsigned long long bytes)
 {
@@ -86,6 +126,9 @@ static void set_ops(int toast_route)
     ops.editor_token = f_token; ops.publish_fail = f_fail; ops.resume = f_resume; ops.editor_notice = f_notice;
     ops.upload_question = toast_route ? f_toast_question : NULL;
     ops.log = f_log;
+    ops.add_tag = f_add_tag;
+    ops.edit_ids = f_edit_ids;
+    ops.published_query = f_published_query;
     sh_modpublish_test_set_ops(&ops);
 }
 
@@ -217,6 +260,8 @@ int main(int argc, char **argv)
     set_ops(0);
     memset(&F, 0, sizeof F);
     F.token = 0xED17;
+    F.tag_result = 1;
+    F.query_start = 1;
     CHECK(setting_confirmed() == 0);
 
     printf("-- the question text\n");
@@ -277,6 +322,7 @@ int main(int argc, char **argv)
         F.answer = 2;   /* declined */
         sh_modpublish_poll();
         CHECK(!sh_modpublish_holding() && F.fails == 2 && F.resumes == 0);
+        CHECK(F.tag_calls == 0);   /* a cancelled publish is not tagged */
         CHECK(strstr(F.toast, "only with your agreement") != NULL);
         CHECK(setting_confirmed() == 0);
         CHECK(g_stub.blob_puts == puts && g_stub.missing_calls == missing);
@@ -296,6 +342,9 @@ int main(int argc, char **argv)
         PUMP_UNTIL(!sh_modpublish_holding());
         CHECK(setting_confirmed() == 1);
         CHECK(F.resumes == 1 && F.fails == 2);
+        /* The search tag goes on before the original runs. */
+        CHECK(F.tag_calls == 1 && !strcmp(F.tag, SH_MODPUBLISH_TAG) && F.tagged_at_resume == 1);
+        CHECK(strstr(g_log, "search tag 'mods' added") != NULL);
         CHECK(stub_has_bundle(hA) && stub_has_bundle(hB));
         c = stub_live_claim(provisional);
         CHECK(c && c->nb == 2);
@@ -336,6 +385,7 @@ int main(int argc, char **argv)
         CHECK(sh_modpublish_test_state() == 4);   /* agreed already: straight to the worker */
         PUMP_UNTIL(!sh_modpublish_holding());
         CHECK(F.resumes == 2 && F.asks == asks);
+        CHECK(F.tag_calls == 2 && F.tagged_at_resume == 1);   /* present already: the fake answered 0 */
         sh_modpublish_feed_post((void *)(uintptr_t)F.token, "aaaaaaaaaaaaaaaaaaaaaaa1", "rev2");
         PUMP_UNTIL(idle_all());
         c = stub_live_claim("aaaaaaaaaaaaaaaaaaaaaaa1");
@@ -353,6 +403,7 @@ int main(int argc, char **argv)
         PUMP_UNTIL(idle_all());
         CHECK(stub_live_claim("aaaaaaaaaaaaaaaaaaaaaaa1") == NULL);
         CHECK(!modsync_claim_lookup("aaaaaaaaaaaaaaaaaaaaaaa1", NULL, NULL));
+        CHECK(F.tag_calls == 2);   /* no mods, no tag */
     }
 
     printf("-- unpublish releases the item's claim\n");
@@ -373,6 +424,129 @@ int main(int argc, char **argv)
         sh_modpublish_unpublished("ccccccccccccccccccccccc3");
         PUMP_UNTIL(idle_all());
         CHECK(g_stub.release_calls == releases);
+    }
+
+    printf("-- delete from My Maps releases a claim only when its item is no longer published\n");
+    {
+        const char *still[2] = { "ggggggggggggggggggggggg7", "zzzzzzzzzzzzzzzzzzzzzzz9" };
+        const char *other[1] = { "zzzzzzzzzzzzzzzzzzzzzzz9" };
+        int queries, releases;
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", store, SH_MODPUBLISH_LINKS_FILE);
+        /* Publish item g from cloud-saved item cloud-g, and item h from a map
+         * whose cloud-saved id did not read. */
+        strcpy_s(F.cloud, sizeof F.cloud, "cloud-g");
+        strcpy_s(F.local, sizeof F.local, "local-g");
+        sh_modpublish_save_seen(text, len);
+        CHECK(sh_modpublish_after_save(EDITOR) == 0);
+        PUMP_UNTIL(!sh_modpublish_holding());
+        sh_modpublish_feed_post((void *)(uintptr_t)F.token, "ggggggggggggggggggggggg7", "rev1");
+        PUMP_UNTIL(idle_all());
+        CHECK(stub_live_claim("ggggggggggggggggggggggg7") != NULL);
+        CHECK(file_contains(path, "\"ggggggggggggggggggggggg7\":{\"cloud\":\"cloud-g\",\"local\":\"local-g\",\"at\":"));
+        F.cloud[0] = 0;
+        strcpy_s(F.local, sizeof F.local, "local-h");
+        sh_modpublish_save_seen(text, len);
+        CHECK(sh_modpublish_after_save(EDITOR) == 0);
+        PUMP_UNTIL(!sh_modpublish_holding());
+        sh_modpublish_feed_post((void *)(uintptr_t)F.token, "hhhhhhhhhhhhhhhhhhhhhhh8", "rev1");
+        PUMP_UNTIL(idle_all());
+        CHECK(file_contains(path, "\"hhhhhhhhhhhhhhhhhhhhhhh8\":{\"local\":\"local-h\",\"at\":"));
+        F.local[0] = 0;
+        CHECK(file_contains(path, "\"at\":"));
+
+        /* Published within the hour: the search may not list it yet; kept. */
+        queries = F.queries;
+        sh_modpublish_deleted("local-g", "cloud-g");
+        sh_modpublish_poll();
+        CHECK(F.queries == queries && sh_modpublish_test_delete_checks() == 0);
+        CHECK(strstr(g_log, "published less than 60 minute(s) ago") != NULL);
+        sh_modpublish_test_set_link_min_age(0);
+
+        /* A map nothing was published from: no query. */
+        queries = F.queries;
+        sh_modpublish_deleted("local-x", "cloud-x");
+        CHECK(F.queries == queries && sh_modpublish_test_delete_checks() == 0);
+        /* Published from a map without a cloud-saved id: cannot be checked, kept. */
+        sh_modpublish_deleted("local-h", "");
+        CHECK(F.queries == queries && strstr(g_log, "no cloud-saved id") != NULL);
+        CHECK(stub_live_claim("hhhhhhhhhhhhhhhhhhhhhhh8") != NULL);
+
+        /* Still published: kept. The query starts on the next tick. */
+        sh_modpublish_deleted("local-g", "cloud-g");
+        CHECK(F.queries == queries && sh_modpublish_test_delete_checks() == 1);
+        sh_modpublish_poll();
+        CHECK(F.queries == queries + 1 && !strcmp(F.query_cloud, "cloud-g") && sh_modpublish_test_delete_checks() == 1);
+        sh_modpublish_published_result(F.query_ticket, 1, still, 2);
+        sh_modpublish_poll();
+        PUMP_UNTIL(idle_all());
+        CHECK(sh_modpublish_test_delete_checks() == 0 && stub_live_claim("ggggggggggggggggggggggg7") != NULL);
+        CHECK(strstr(g_log, "0 claim(s) released, 1 kept (still published)") != NULL);
+
+        /* A full page may be only the first page: kept. */
+        {
+            const char *page[30];
+            for (int i = 0; i < 30; i++) page[i] = "zzzzzzzzzzzzzzzzzzzzzzz9";
+            sh_modpublish_deleted("", "cloud-g");
+            sh_modpublish_poll();
+            sh_modpublish_published_result(F.query_ticket, 1, page, 30);
+            sh_modpublish_poll();
+            CHECK(strstr(g_log, "answered a full page of 30 published item(s); 1 claim(s) kept") != NULL);
+        }
+
+        /* A failed answer, a late answer, and a check that could not start: kept. */
+        sh_modpublish_deleted("", "cloud-g");
+        sh_modpublish_poll();
+        sh_modpublish_published_result(F.query_ticket, 0, NULL, 0);
+        sh_modpublish_poll();
+        CHECK(sh_modpublish_test_delete_checks() == 0 && strstr(g_log, "check for 'cloud-g' failed") != NULL);
+        sh_modpublish_deleted("", "cloud-g");
+        sh_modpublish_poll();
+        sh_modpublish_test_age_delete_checks(SH_MODPUBLISH_DELETE_CHECK_MS + 1000);
+        sh_modpublish_poll();
+        CHECK(sh_modpublish_test_delete_checks() == 0 && strstr(g_log, "no published-items answer for 'cloud-g'") != NULL);
+        sh_modpublish_published_result(F.query_ticket, 1, other, 1);   /* too late: ignored */
+        sh_modpublish_poll();
+        F.query_start = 0;
+        sh_modpublish_deleted("", "cloud-g");
+        sh_modpublish_poll();
+        CHECK(sh_modpublish_test_delete_checks() == 0 && strstr(g_log, "could not start") != NULL);
+        F.query_start = 1;
+        PUMP_UNTIL(idle_all());
+        CHECK(stub_live_claim("ggggggggggggggggggggggg7") != NULL);
+
+        /* No longer published: released, and its link forgotten. */
+        releases = g_stub.release_calls;
+        sh_modpublish_deleted("local-g", "cloud-g");
+        sh_modpublish_poll();
+        sh_modpublish_published_result(F.query_ticket, 1, other, 1);
+        PUMP_UNTIL(idle_all() && stub_live_claim("ggggggggggggggggggggggg7") == NULL);
+        CHECK(stub_live_claim("ggggggggggggggggggggggg7") == NULL && g_stub.release_calls == releases + 1);
+        CHECK(!modsync_claim_lookup("ggggggggggggggggggggggg7", NULL, NULL));
+        CHECK(strstr(g_log, "1 claim(s) released, 0 kept") != NULL);
+        CHECK(!file_contains(path, "ggggggggggggggggggggggg7") && file_contains(path, "hhhhhhhhhhhhhhhhhhhhhhh8"));
+        /* Deleting it again: nothing linked any more. */
+        queries = F.queries;
+        sh_modpublish_deleted("local-g", "cloud-g");
+        CHECK(F.queries == queries && sh_modpublish_test_delete_checks() == 0);
+        /* An unpublish forgets the link too. */
+        sh_modpublish_unpublished("hhhhhhhhhhhhhhhhhhhhhhh8");
+        PUMP_UNTIL(idle_all());
+        CHECK(!file_contains(path, "hhhhhhhhhhhhhhhhhhhhhhh8"));
+    }
+
+    printf("-- a search tag that cannot be written does not stop the publish\n");
+    {
+        int resumes = F.resumes;
+        F.tag_result = -1;
+        F.tags_present = 0;
+        sh_modpublish_save_seen(text, len);
+        CHECK(sh_modpublish_after_save(EDITOR) == 0);
+        PUMP_UNTIL(!sh_modpublish_holding());
+        CHECK(F.resumes == resumes + 1 && F.tagged_at_resume == 0);
+        CHECK(strstr(g_log, "could not be added; the map publishes without it") != NULL);
+        sh_modpublish_feed_post((void *)(uintptr_t)F.token, "iiiiiiiiiiiiiiiiiiiiii10", "rev1");
+        PUMP_UNTIL(idle_all());
+        F.tag_result = 1;
     }
 
     printf("-- a failed upload cancels the publish\n");

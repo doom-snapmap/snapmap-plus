@@ -548,6 +548,64 @@ static void incomplete_record(const char *root)
     CHECK(exists(path));
 }
 
+typedef struct mg_hold { DWORD ms; volatile LONG held; ULONGLONG released_at; } mg_hold;
+
+static DWORD WINAPI mg_hold_thread(void *p)
+{
+    mg_hold *h = (mg_hold *)p;
+    modstore_lock();
+    InterlockedExchange(&h->held, 1);
+    Sleep(h->ms);
+    h->released_at = GetTickCount64();
+    modstore_unlock();
+    return 0;
+}
+
+static void store_lock_contention(const char *root)
+{
+    char ov[MAX_PATH], path[MAX_PATH * 2], mod[MAX_PATH * 2], key[SH_MS_KEY_MAX + 1], cause[SH_MB_CAUSE_MAX];
+    sh_modmigrate_stats st;
+    sh_ms_install_stats ist;
+    mg_hold h = { 300, 0, 0 };
+    HANDLE t;
+    ULONGLONG done;
+    unsigned waits, installs = 0, failed = 0;
+    printf("-- the store lock: the pass waits for a store step, an install during the pass waits for a folder\n");
+    CreateDirectoryA(root, NULL);
+    _snprintf_s(ov, sizeof ov, _TRUNCATE, "%s\\overrides", root);
+    put_file(ov, "tiny/package.json", "{\"id\": \"tiny\", \"name\": \"Tiny\"}");
+    put_file(ov, "tiny/assets/generated/decls/entitydef/tiny/t.decl", DECL_A);
+    put_file(ov, "large/package.json", "{\"id\": \"large\", \"name\": \"Large\"}");
+    put_bytes(ov, "large/assets/generated/image/large/sky.bimage", (size_t)SH_MODMIGRATE_BOOT_BYTES + 4096, 7);
+    _snprintf_s(mod, sizeof mod, _TRUNCATE, "%s\\authoring\\test.lockmod", root);
+    put_file(mod, "mod.json", "{\"id\": \"test.lockmod\", \"version\": \"1.0.0\", \"name\": \"Lock\", \"author\": \"tester\"}");
+    put_file(mod, "assets/generated/image/mods/test.lockmod/a.bimage", "bytes for the lock test");
+    configure(root);
+    /* Another thread holds the lock (an install or a download): the pass waits, then runs. */
+    waits = modstore_lock_waits();
+    t = CreateThread(NULL, 0, mg_hold_thread, &h, 0, NULL);
+    CHECK(t != NULL);
+    while (t && !InterlockedCompareExchange(&h.held, 0, 0)) Sleep(1);
+    CHECK(sh_modmigrate_run(0, &st) == 1 && st.built == 2 && st.refused == 0);
+    done = GetTickCount64();
+    if (t) { WaitForSingleObject(t, 60000); CloseHandle(t); }
+    CHECK(done >= h.released_at && modstore_lock_waits() > waits);
+    /* An install while the worker migrates: every one waits its turn and succeeds. */
+    CHECK(sh_modmigrate_start(1) == 1);
+    do {
+        if (sh_ms_install_from_folder(mod, NULL, key, sizeof key, &ist, NULL, cause, sizeof cause)) installs++;
+        else { failed++; fprintf(stderr, "  install during the pass: %s\n", cause); }
+    } while (sh_modmigrate_busy() && installs < 50);
+    CHECK(sh_modmigrate_wait(120000) == 1);
+    CHECK(installs >= 1 && failed == 0);
+    sh_modmigrate_last(&st);
+    CHECK(st.built == 2 && st.refused == 0);
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\mods\\large@0.0.0+1\\bundle.json", root);
+    CHECK(exists(path));
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\mods\\test.lockmod@1.0.0+1\\bundle.json", root);
+    CHECK(exists(path));
+}
+
 int main(void)
 {
     char base[MAX_PATH], root[MAX_PATH];
@@ -565,6 +623,9 @@ int main(void)
     remove_tree(root);
     _snprintf_s(root, sizeof root, _TRUNCATE, "%ssmp_modmigrate_%lu_d", base, GetCurrentProcessId());
     incomplete_record(root);
+    remove_tree(root);
+    _snprintf_s(root, sizeof root, _TRUNCATE, "%ssmp_modmigrate_%lu_e", base, GetCurrentProcessId());
+    store_lock_contention(root);
     remove_tree(root);
     sh_modmigrate_set_data_root(NULL);
     sh_modlegacy_set_data_root(NULL);
