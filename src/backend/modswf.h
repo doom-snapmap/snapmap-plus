@@ -39,6 +39,18 @@
  *   MODS: swf: served <request> (<bundle id>) at load state N      first 32
  *   MODS: swf: open of served <request> failed (N); engine load used
  */
+/* The same route serves a SnapMap module's per-map files (lane P8i, live
+ * 13954591): BuildSoundWorld (VK 0x141151440 / GL 0x141150640),
+ * idUmbraContext::SetTome (0x14181a4b0 / 0x14181b280) and
+ * idAmbientLighting::LoadAmbientLighting (0x1418a1f20 / 0x1418983e0) each
+ * ResourceMaterialize an idFileResource on the file-resource list at Play
+ * (state 2 or above) and read its file's length; a container miss gave an
+ * empty file and "file not found". A bundle-served .sbsp, .ambientsh, .tome
+ * or lightprobes/ .bimage takes the movie path above.
+ *   MODS: file: served <request> (<bundle id>) at load state N      first 128
+ *   MODS: file: <request> is not served by an installed bundle; engine load used
+ *   MODS: file: open of served <request> failed (N); engine load used
+ */
 #ifndef SH_MODSWF_H
 #define SH_MODSWF_H
 
@@ -70,6 +82,10 @@ typedef struct sh_modswf_engine {
 /* 1 when `name` is a cooked movie request: generated/swf/...<x>.bswf, any
  * case, either separator. Pure. */
 int sh_modswf_is_movie(const char *name);
+
+/* 1 for a module file the route serves: a .sbsp, .ambientsh or .tome, or a
+ * .bimage under a lightprobes/ folder. Case and separators are ignored. */
+int sh_modswf_is_module_file(const char *name);
 
 /* Decode the four engine calls from a resolved Load body and verify the
  * fixed bytes between them (the state test, the +0x68 manager call, the

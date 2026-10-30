@@ -79,6 +79,16 @@ static void test_predicate(void)
     CHECK(!sh_modswf_is_movie("generated/decls/weapon/x.decl"));
     CHECK(!sh_modswf_is_movie("generated/swfx/a.bswf"));
     CHECK(!sh_modswf_is_movie(NULL));
+    /* A module's per-map files take the same route. */
+    CHECK(sh_modswf_is_module_file("maps/modules/mods/alex.mp-basin/basin/basin.sbsp"));
+    CHECK(sh_modswf_is_module_file("maps/modules/mods/alex.mp-basin/basin/basin.ambientsh"));
+    CHECK(sh_modswf_is_module_file("Maps\\Modules\\Mods\\a\\b\\_combo\\_world.TOME"));
+    CHECK(sh_modswf_is_module_file("maps/modules/mods/a/b/lightprobes/lightprobe_light_probe_10_compressed.bimage"));
+    CHECK(!sh_modswf_is_module_file("generated/image/mods/a/lightprobes.bimage"));
+    CHECK(!sh_modswf_is_module_file("maps/modules/mods/a/b/_combo/world.bcm"));
+    CHECK(!sh_modswf_is_module_file("maps/modules/mods/a/b/.sbsp"));
+    CHECK(!sh_modswf_is_module_file("maps/modules/mods/a/b.sbsp/x.decl"));
+    CHECK(!sh_modswf_is_module_file(NULL));
 }
 
 static void test_routing(void)
@@ -118,6 +128,22 @@ static void test_routing(void)
     served_name = res.name;
     r = sh_modswf_test_load(&res, NULL);
     CHECK(r == 7 && n_orig == 1 && n_lookup == 0 && n_alloc == 0);
+
+    /* A served module file (a stock pointer in the bundle) takes the movie path. */
+    reset();
+    memset(&res, 0, sizeof res);
+    res.name = "maps/modules/mods/alex.mp-basin/basin/_combo/_world.tome";
+    served_name = res.name;
+    r = sh_modswf_test_load(&res, NULL);
+    CHECK(r == 0 && n_alloc == 1 && n_ctor == 1 && n_open == 1 && n_orig == 0 && n_lookup == 1);
+    free(res.file);
+
+    /* An unserved one is the engine's. */
+    reset();
+    memset(&res, 0, sizeof res);
+    res.name = "maps/modules/classic/classic_blank_room/classic_blank_room.sbsp";
+    r = sh_modswf_test_load(&res, NULL);
+    CHECK(r == 7 && n_orig == 1 && n_alloc == 0 && n_lookup == 1);
 
     /* The open fails: the original Load replaces what was put at +0x38. */
     reset();

@@ -117,12 +117,32 @@ typedef int (*state_fn)(void);
 typedef void *(*alloc_fn)(size_t size);
 typedef void *(*named_ctor_fn)(void *mem, const char *name);
 typedef uint8_t (*open_into_fn)(void *resource, void **slot, const char *name, char must_exist, void *arg);
+int sh_modswf_is_module_file(const char *name)
+{
+    static const char *const kinds[] = { ".sbsp", ".ambientsh", ".tome", NULL };
+    const char *slash, *dot;
+    size_t i, n;
+    if (!name) return 0;
+    slash = strrchr(name, '/');
+    if (!slash) slash = strrchr(name, '\\');
+    dot = strrchr(slash ? slash : name, '.');
+    if (!dot || dot[1] == 0) return 0;
+    for (i = 0; kinds[i]; i++) if (_stricmp(dot, kinds[i]) == 0) return dot > (slash ? slash + 1 : name);
+    /* A module's light probe image: <module>/lightprobes/<entity>_compressed.bimage. */
+    n = strlen(name);
+    if (n > 24 && _stricmp(dot, ".bimage") == 0) {
+        for (i = 0; i + 13 <= n; i++)
+            if (!_strnicmp(name + i, "/lightprobes/", 13) || !_strnicmp(name + i, "\\lightprobes\\", 13)) return 1;
+    }
+    return 0;
+}
+
 typedef void (*dtor_fn)(void *self, int flags);
 
 static sh_modswf_engine g_engine;
 static load_fn g_original;
 static void **g_slot;
-static volatile LONG g_served, g_failed;
+static volatile LONG g_served, g_failed, g_files, g_files_failed, g_files_missed;
 
 #ifdef SH_MODSWF_TESTING
 static int (*g_test_lookup)(const char *request, const char **bundle_id);
@@ -155,13 +175,21 @@ static int swf_served(const char *name, const char **bundle_id)
 static int64_t swf_load(void *resource, void *arg)
 {
     const char *name = NULL, *bundle = "";
+    int movie;
     unsigned char **file_slot;
     void *mem, *file;
     uint8_t r;
     __try { name = *(const char *const *)((const uint8_t *)resource + 8); }
     __except (EXCEPTION_EXECUTE_HANDLER) { name = NULL; }
-    if (!name || !sh_modswf_is_movie(name) || !swf_served(name, &bundle))
+    if (!name) return g_original(resource, arg);
+    movie = sh_modswf_is_movie(name);
+    if (!movie && !sh_modswf_is_module_file(name)) return g_original(resource, arg);
+    if (!swf_served(name, &bundle)) {
+        /* A module file no bundle serves: the stock module's, or a miss. */
+        if (!movie && _strnicmp(name, "maps/modules/mods/", 18) == 0 && InterlockedIncrement(&g_files_missed) <= 32)
+            swf_log("MODS: file: %s is not served by an installed bundle; engine load used", name);
         return g_original(resource, arg);
+    }
 
     /* The engine's below-2 branch: a named memory file at +0x38, then the
      * open-into helper (file system +0x148, the provider). */
@@ -176,14 +204,15 @@ static int64_t swf_load(void *resource, void *arg)
     }
     r = ((open_into_fn)g_engine.open_into)(resource, (void **)file_slot, name, 1, arg);
     if (r == 0) {
-        LONG n = InterlockedIncrement(&g_served);
-        if (n <= 32)
-            swf_log("MODS: swf: served %s (%s) at load state %d", name, bundle ? bundle : "",
-                    ((state_fn)g_engine.state)());
+        LONG n = InterlockedIncrement(movie ? &g_served : &g_files);
+        if (n <= (movie ? 32 : 128))
+            swf_log(movie ? "MODS: swf: served %s (%s) at load state %d" : "MODS: file: served %s (%s) at load state %d",
+                    name, bundle ? bundle : "", ((state_fn)g_engine.state)());
         return 0;
     }
-    if (InterlockedIncrement(&g_failed) <= 32)
-        swf_log("MODS: swf: open of served %s failed (%u); engine load used", name, (unsigned)r);
+    if (InterlockedIncrement(movie ? &g_failed : &g_files_failed) <= 32)
+        swf_log(movie ? "MODS: swf: open of served %s failed (%u); engine load used"
+                      : "MODS: file: open of served %s failed (%u); engine load used", name, (unsigned)r);
     return g_original(resource, arg);
 }
 

@@ -101,7 +101,11 @@ Checks native helpers, engine-interface contracts, frontend JavaScript and optio
   activation plan. Set `SH_MODMODULE_SOURCE` to a source mod folder (and
   `SH_MODMODULE_DOOM` to the install) to build it against the real game and
   write its `bundle.json`; `SH_MODMODULE_PREFAB` adds a check of a module
-  prefab that names its module.
+  prefab that names its module, `SH_MODMODULE_MERGE_INTO` and
+  `SH_MODMODULE_MERGE_OUT` merge it into a map as Load / Place does and write
+  that map with its `smpmod1.` row, and `SH_MODMODULE_SLOTS_FROM` names a map
+  whose entities give the reference slot counts the merged entities must match
+  (the map validator refuses a mismatch with result 4).
 - `modstore_test.c` installs the fixture into a temporary store: blobs, hard
   links and the copy fallback, verification and corruption, in-place builds,
   need resolution across installed bundles, and the store lock (an installer

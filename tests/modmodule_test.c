@@ -34,6 +34,7 @@
 #include "../src/backend/modstock.h"
 #include "../src/backend/module_prefab_map.h"
 #include "../src/backend/modmanifest.h"
+#include "../src/backend/mp_json.h"
 #include "mod_test_util.h"
 #include "mod_stock_fixture.h"
 
@@ -168,6 +169,22 @@ static void make_module_mod(const char *dir, const char *id, const char *decl_re
         put_rel(dir, rel, module_text, strlen(module_text));
     }
     if (with_info) put_rel(dir, "assets\\" R_INFO, INFO_TEXT, sizeof INFO_TEXT - 1);
+}
+
+static int slot_disagreements(const char *json, size_t len, const char *ref, size_t ref_len);
+
+static void test_slots(void)
+{
+    static const char good[] =
+        "{\"entities\":[{\"uniqueId\":0,\"entityDef\":{\"inherit\":\"cap\"}},{\"uniqueId\":1,\"entityDef\":{\"inherit\":\"cap\"}}],"
+        "\"references\":{\"entityEntRefs\":{\"keyValues\":[0,1,2],\"values\":[-1,-1]},\"entityVarRefs\":{\"keyValues\":[0,0,0],\"values\":[]}}}";
+    static const char bad[] =
+        "{\"entities\":[{\"uniqueId\":0,\"entityDef\":{\"inherit\":\"cap\"}},{\"uniqueId\":1,\"entityDef\":{\"inherit\":\"cap\"}}],"
+        "\"references\":{\"entityEntRefs\":{\"keyValues\":[0,1,1],\"values\":[-1]},\"entityVarRefs\":{\"keyValues\":[0,0,0],\"values\":[]}}}";
+    CHECK(slot_disagreements(good, sizeof good - 1, NULL, 0) == 0);
+    CHECK(slot_disagreements(bad, sizeof bad - 1, NULL, 0) == 2);
+    CHECK(slot_disagreements(bad, sizeof bad - 1, good, sizeof good - 1) == 2);
+    CHECK(slot_disagreements(good, sizeof good - 1, bad, sizeof bad - 1) == 2);
 }
 
 /* --------------------------------------------------------------- names ---- */
@@ -401,6 +418,50 @@ static void test_serving(const char *tmp, const char *install)
 
 /* ------------------------------------------------------ acceptance build ---- */
 
+/* The map validator (RepairAndMigrate's entity check, VK 0x14124f0b0 / GL
+ * 0x14124e6e0) requires every entity's entityEntRefs and entityVarRefs slot
+ * counts to equal its palette row's. Offline the palette is not available, so
+ * check that entities with one inherit agree on both counts across the map:
+ * a prefab cap written with no slots beside the map's own caps (one EntRef
+ * slot each) is what made the first live placement fail with validator 4.
+ * Returns the number of disagreeing entities. */
+typedef struct slot_row { char inherit[160]; long long ent, var; } slot_row;
+/* Collect each entity's inherit and slot counts; -1 when the document does not read. */
+static int slot_rows(const char *json, size_t len, slot_row *rows, int cap)
+{
+    mpj *root = json ? mpj_parse(json, len) : NULL, *ents, *refs;
+    int i, j, n = 0;
+    if (!root || !(ents = mpj_get(root, "entities")) || !(refs = mpj_get(root, "references"))) { mpj_free(root); return -1; }
+    for (i = 0; i < ents->n && n < cap; i++, n++) {
+        long long u = mpj_int(mpj_get(ents->items[i], "uniqueId"));
+        const mpj *inh = mpj_get(mpj_get(ents->items[i], "entityDef"), "inherit");
+        strncpy_s(rows[n].inherit, sizeof rows[n].inherit, inh && inh->text ? inh->text : "", _TRUNCATE);
+        for (j = 0; j < 2; j++) {
+            const mpj *kv = mpj_get(mpj_get(refs, j ? "entityVarRefs" : "entityEntRefs"), "keyValues");
+            long long c = kv && u >= 0 && u + 1 < kv->n ? mpj_int(kv->items[u + 1]) - mpj_int(kv->items[u]) : -1;
+            if (j) rows[n].var = c; else rows[n].ent = c;
+        }
+    }
+    mpj_free(root);
+    return n;
+}
+/* Entities of `json` whose slot counts are unreadable or differ from another
+ * entity with the same inherit in `json` or in the reference map `ref`. */
+static int slot_disagreements(const char *json, size_t len, const char *ref, size_t ref_len)
+{
+    static slot_row rows[1024];
+    int n = slot_rows(json, len, rows, 512), m = 0, i, j, bad = 0;
+    if (n < 0) return -1;
+    if (ref && (m = slot_rows(ref, ref_len, rows + n, 512)) < 0) m = 0;
+    for (i = 0; i < n; i++) {
+        if (rows[i].ent < 0 || rows[i].var < 0) { bad++; continue; }
+        for (j = 0; j < n + m; j++)
+            if (j != i && !strcmp(rows[i].inherit, rows[j].inherit) &&
+                (rows[i].ent != rows[j].ent || rows[i].var != rows[j].var)) { bad++; break; }
+    }
+    return bad;
+}
+
 static void inspect_prefab(const char *path, const sh_mb_bundle *b, const char *hash)
 {
     FILE *f = NULL;
@@ -446,6 +507,28 @@ static void inspect_prefab(const char *path, const sh_mb_bundle *b, const char *
             err[0] = 0;
             CHECK(map && sh_mp_merge(map, mlen, text, (size_t)n, at, &merged, &olen, &first, &added, err, (int)sizeof err) == 1);
             printf("modmodule_test: merge into %s: first %d, added %d, %zu bytes %s\n", into, first, added, olen, err);
+            if (merged) {
+                /* SH_MODMODULE_SLOTS_FROM: a map or prefab whose entities give the
+                 * reference slot counts (the prefab template's own cap). */
+                char refp[MAX_PATH * 2];
+                char *ref = NULL;
+                size_t rlen = 0;
+                DWORD rn = GetEnvironmentVariableA("SH_MODMODULE_SLOTS_FROM", refp, sizeof refp);
+                if (rn && rn < sizeof refp && !fopen_s(&g, refp, "rb") && g) {
+                    long q;
+                    fseek(g, 0, SEEK_END); q = ftell(g); fseek(g, 0, SEEK_SET);
+                    ref = (char *)malloc((size_t)q + 1);
+                    if (ref && fread(ref, 1, (size_t)q, g) == (size_t)q) { ref[q] = 0; rlen = (size_t)q; }
+                    fclose(g);
+                }
+                {
+                    int bad = slot_disagreements(merged, olen, ref, rlen);
+                    printf("modmodule_test: merged map reference slots: %d disagreement(s)%s\n", bad,
+                           ref ? " (with the reference map)" : "");
+                    CHECK(bad == 0);
+                }
+                free(ref);
+            }
             if (merged) {
                 /* The map names the bundle the way a save does: one smpmod1. row
                  * holding the module name, so a load activates its decls. */
@@ -513,6 +596,7 @@ int main(void)
     make_install(install);
     sh_modstock_register();
     test_names();
+    test_slots();
     test_builder(tmp, install);
     test_serving(tmp, install);
     sh_modstock_reset();
