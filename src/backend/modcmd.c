@@ -17,6 +17,7 @@
 #include "rawmap.h"
 #include "editor_frame.h"
 #include "apply_engine.h"
+#include "modmigrate.h"
 
 /* A stock resource every 13954591 SnapMap install ships; reading it proves the
  * installed-resource reader works before its answers are trusted. */
@@ -562,6 +563,7 @@ void h_sh_mods(idCmdArgs *a)
     if (verb && (!_stricmp(verb, "help") || !strcmp(verb, "?"))) {
         sh_printf("%s\n", SH_MODCMD_HELP);
         sh_printf("%s\n", SH_MODCMD_HELP_STORE);
+        sh_printf("Migration: 'sh_mods migrate' moves the retired overrides folder into the mods store once more (it ran at the first start of this release; mods\\.migrated.json records it), 'sh_mods migrate --again' repeats it after you change overrides.\n");
         return;
     }
     /* Serving verbs (modserve_engine.c): status (also the bare command),
@@ -570,6 +572,21 @@ void h_sh_mods(idCmdArgs *a)
     mc_outbox_flush();
     if (mc_store_command(a, verb)) return;
     if (sh_modserve_command(a, verb)) return;
+    if (!_stricmp(verb, "migrate")) {
+        /* The migration of the retired overrides folder (modmigrate.c), on its worker thread. */
+        const char *flag = cmd_argv(a, 2);
+        int again = flag && !_stricmp(flag, "--again"), r;
+        if (flag && flag[0] && !again) { sh_printf("usage: sh_mods migrate [--again]\n"); return; }
+        modstore_lock();   /* the pass's scan waits for a store step in progress */
+        r = sh_modmigrate_start(again);
+        modstore_unlock();
+        if (r > 0) mc_line("MODS: migration: started on a background thread%s; its MODS: migration: lines go to the "
+                           "backend log, then the serving index is rebuilt ('sh_mods list' shows the result)", again ? " (--again)" : "");
+        else if (r < 0) mc_line("MODS: migration: a migration pass is already running or could not start");
+        else sh_printf("MODS: migration: nothing to do (no overrides folder, or mods\\.migrated.json says it is done; "
+                       "'sh_mods migrate --again' repeats it)\n");
+        return;
+    }
     if (!_stricmp(verb, "list")) { mc_list(); return; }
     mc_join_args(a, 2, arg, sizeof arg);
     if (!_stricmp(verb, "verify")) {
@@ -596,7 +613,12 @@ void h_sh_mods(idCmdArgs *a)
     if (!arg[0]) { sh_printf("usage: sh_mods %s \"<folder>\"\n", verb); return; }
     if (!mc_resolve_folder(arg, folder, sizeof folder)) { mc_line("MODS: %s: the store folder cannot be resolved", verb); return; }
     if (!_stricmp(verb, "build")) mc_build(folder);
-    else mc_install(folder);
+    else {
+        /* Waits for a migration folder or a download in progress. */
+        modstore_lock();
+        mc_install(folder);
+        modstore_unlock();
+    }
 }
 
 int modbundle_build_folder(const char *folder_acp, char *first_cause, size_t n)

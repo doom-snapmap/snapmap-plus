@@ -21,6 +21,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <psapi.h>
 
 #include "../src/backend/modbundle.h"
 #include "../src/backend/modserve.h"
@@ -578,6 +579,146 @@ static void carrier_conversion(const char *root)
     sh_modlegacy_set_data_root(NULL);
 }
 
+/* ---- 4b: the beta.19 author's map ---------------------------------------------------------------- */
+
+/* SH_MODLEGACY_BETA19 names one rawmap file written by v0.2.1-beta.19 (the
+ * owner's acceptance fixture; not in the repository because its carriers hold
+ * game files). Every carrier converts with the real builder into a fresh data
+ * root; the pass prints, per carrier, what the bundle provides and which
+ * placed names it covers, the time and the process memory the parse cost,
+ * then the memoised second parse and a fresh-process parse of the same text. */
+static int pt_ci_eq(const char *a, const char *b) { return _stricmp(a, b) == 0; }
+
+/* A placed name the bundle file provides: its logical name, or for a raw
+ * model the request path the engine derives from the .lwo/.md6 name. */
+static int pt_provides(const sh_mb_file *f, const char *placed)
+{
+    char req[SH_MB_REQUEST_MAX + 1];
+    size_t n = strlen(placed);
+    if (f->pname && pt_ci_eq(f->pname, placed)) return 1;
+    if (n > 4 && n < sizeof req - 20 && !_stricmp(placed + n - 4, ".lwo")) {
+        _snprintf_s(req, sizeof req, _TRUNCATE, "cooked/model/%.*s.bmodel", (int)(n - 4), placed);
+        if (pt_ci_eq(f->request, req)) return 1;
+    }
+    return 0;
+}
+
+static unsigned long long pt_peak_mb(void)
+{
+    PROCESS_MEMORY_COUNTERS_EX pm;
+    memset(&pm, 0, sizeof pm);
+    pm.cb = sizeof pm;
+    if (!K32GetProcessMemoryInfo(GetCurrentProcess(), (PROCESS_MEMORY_COUNTERS *)&pm, sizeof pm)) return 0;
+    return (unsigned long long)pm.PeakWorkingSetSize >> 20;
+}
+
+static void beta19_conversion(const char *root)
+{
+    char path[MAX_PATH * 2], data[MAX_PATH], mods[MAX_PATH];
+    char *text, *out, *again, **placed = NULL;
+    size_t n = 0, on = 0, an = 0, nplaced = 0, verdicts, k, i, p;
+    sh_modlegacy_verdict v[16];
+    unsigned long long peak0, peak1;
+    ULONGLONG t0, t1;
+    int failed = 0, converted = 0;
+    DWORD got = GetEnvironmentVariableA("SH_MODLEGACY_BETA19", path, sizeof path);
+    printf("-- the beta.19 author's map converts with the real builder (SH_MODLEGACY_BETA19)\n");
+    if (!got || got >= sizeof path) {
+        printf("  [skip] SH_MODLEGACY_BETA19 does not name a beta.19 rawmap file\n");
+        return;
+    }
+    text = read_all(path, &n);
+    if (!text) { printf("  [skip] %s is not readable\n", path); return; }
+    _snprintf_s(data, sizeof data, _TRUNCATE, "%s\\b19", root);
+    _snprintf_s(mods, sizeof mods, _TRUNCATE, "%s\\mods", data);
+    CreateDirectoryA(data, NULL);
+    CHECK(sh_modserve_index_build(mods) >= 0);
+    sh_modlegacy_set_data_root(data);
+    sh_modlegacy_reset();
+    nplaced = sh_modmanifest_placed_names(text, n, &placed, &failed);
+    CHECK(!failed && nplaced > 0);
+    g_builds = 0;
+    g_echo = getenv("MOD_PIPELINE_ECHO") != NULL;
+    peak0 = pt_peak_mb();
+    t0 = GetTickCount64();
+    out = sh_modlegacy_process(text, n, &on);
+    t1 = GetTickCount64();
+    peak1 = pt_peak_mb();
+    verdicts = sh_modlegacy_last_report(v, 16);
+    printf("  %zu bytes -> %zu, %zu carrier(s), %d build(s), %llu ms, peak working set %llu -> %llu MiB; %zu placed name(s)\n",
+           n, on, verdicts, g_builds, (unsigned long long)(t1 - t0), peak0, peak1, nplaced);
+    CHECK(out != NULL && verdicts >= 1);
+    for (k = 0; k < verdicts && k < 16; k++) {
+        sh_mb_bundle b;
+        char bj[MAX_PATH + 16];
+        unsigned sedef = 0, edef = 0, decls = 0, raw = 0, covered = 0;
+        printf("  carrier %.25s... digest %s, %u/%u shards: %s%s%s\n", v[k].key, v[k].digest, v[k].present, v[k].total,
+               v[k].verdict == SH_MODLEGACY_CONVERT ? "CONVERT" : "CLEAN -- ", v[k].verdict == SH_MODLEGACY_CONVERT ? "" : v[k].reason,
+               "");
+        if (v[k].verdict != SH_MODLEGACY_CONVERT) continue;
+        converted++;
+        CHECK(sh_modserve_bundle_state(v[k].bundle, NULL, 0) == 1);
+        _snprintf_s(bj, sizeof bj, _TRUNCATE, "%s\\bundle.json", v[k].folder);
+        memset(&b, 0, sizeof b);
+        CHECK(sh_mb_load(bj, &b) == 1);
+        for (i = 0; i < b.file_count; i++) {
+            const sh_mb_file *f = &b.files[i];
+            if (!f->is_decl) raw++;
+            else if (!_stricmp(f->ptype, "snapEditorEntityDef")) sedef++;
+            else if (!_stricmp(f->ptype, "entityDef")) edef++;
+            else decls++;
+        }
+        printf("    %s@%s layout %c, %u file(s), %llu byte(s), %u shadow name(s), bundle %.16s; provides %u editor row(s), "
+               "%u entityDef(s), %u other decl(s), %u raw asset(s); requirements %s\n",
+               v[k].id, v[k].version, v[k].layout ? v[k].layout : '?', v[k].files, v[k].size, v[k].shadows, v[k].bundle,
+               sedef, edef, decls, raw, b.requirements ? b.requirements : "none");
+        for (p = 0; p < nplaced; p++) {
+            for (i = 0; i < b.file_count; i++) if (pt_provides(&b.files[i], placed[p])) break;
+            if (i < b.file_count) {
+                covered++;
+                if (getenv("MOD_PIPELINE_ECHO")) printf("      placed %s <- %s\n", placed[p], b.files[i].request);
+            }
+        }
+        printf("    placed names it provides: %u\n", covered);
+        sh_mb_free(&b);
+    }
+    CHECK(converted == (int)verdicts);
+    if (out) {
+        size_t ln = 0;
+        char *loaded;
+        CHECK(!strstr(out, "\"smpkg.") && strstr(out, "\"smpmod1.") != NULL);
+        g_activations = 0;
+        g_nregistered = 0;
+        g_pal_built = 0;
+        t0 = GetTickCount64();
+        loaded = sh_modmanifest_prepare_load(out, on, &ln);
+        printf("  activation of the converted rows: %d step(s), %d ready, %d stock shadow(s), %llu ms\n", g_last_steps,
+               g_last_ready, g_last_stock, (unsigned long long)(GetTickCount64() - t0));
+        CHECK(loaded != NULL && g_activations == 1);
+        if (loaded) HeapFree(GetProcessHeap(), 0, loaded);
+    }
+    /* The same text again in this process: the memo answers. */
+    t0 = GetTickCount64();
+    again = sh_modlegacy_process(text, n, &an);
+    printf("  second parse (memo): %llu ms, %zu bytes\n", (unsigned long long)(GetTickCount64() - t0), an);
+    CHECK(again && out && an == on && !memcmp(again, out, on));
+    if (again) HeapFree(GetProcessHeap(), 0, again);
+    /* A new process: the converted folders on disk answer. */
+    sh_modlegacy_reset();
+    g_builds = 0;
+    t0 = GetTickCount64();
+    again = sh_modlegacy_process(text, n, &an);
+    printf("  fresh-process parse (folders on disk): %llu ms, %d build(s)\n", (unsigned long long)(GetTickCount64() - t0),
+           g_builds);
+    CHECK(again && out && an == on && !memcmp(again, out, on) && g_builds == 0);
+    if (again) HeapFree(GetProcessHeap(), 0, again);
+    if (out) HeapFree(GetProcessHeap(), 0, out);
+    sh_modmanifest_names_free(placed, nplaced);
+    free(text);
+    g_echo = 0;
+    sh_modlegacy_set_data_root(NULL);
+}
+
 /* ---- 5: a cut-content bundle's requirements ----------------------------------------------------- */
 
 static const char CUT_DESC[] =
@@ -629,6 +770,7 @@ int main(int argc, char **argv)
     /* No bundle so far needs a requirement: the gates were never read or set. */
     CHECK(g_gate_reads == 0 && g_gate_sets == 0);
     carrier_conversion(root);
+    beta19_conversion(root);
     cut_content(root);
     mt_remove_tree(root);
     printf("\n%s -- %d checks, %d failed\n", g_failed ? "FAILED" : "ok", g_checks, g_failed);

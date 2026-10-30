@@ -17,25 +17,16 @@
 
 /* ------------------------------------------------------------ lock ------ */
 
-static INIT_ONCE        g_once = INIT_ONCE_STATIC_INIT;
-static CRITICAL_SECTION g_store_cs;
-
-static BOOL CALLBACK msy_init(PINIT_ONCE once, PVOID p, PVOID *ctx)
-{
-    (void)once; (void)p; (void)ctx;
-    InitializeCriticalSection(&g_store_cs);
-    return TRUE;
-}
-
+/* The store lock lives in modstore.c (modstore_lock); these are its older
+ * names, kept for the callers that already use them. */
 void modsync_store_lock(void)
 {
-    InitOnceExecuteOnce(&g_once, msy_init, NULL, NULL);
-    EnterCriticalSection(&g_store_cs);
+    modstore_lock();
 }
 
 void modsync_store_unlock(void)
 {
-    LeaveCriticalSection(&g_store_cs);
+    modstore_unlock();
 }
 
 /* ------------------------------------------------------------ helpers --- */

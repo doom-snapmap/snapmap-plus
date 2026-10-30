@@ -1328,5 +1328,70 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "40 57 48 83 EC 30 48 C7 44 24 20 FE FF FF FF 48 89 5C 24 40 48 89 74 24 48 48 8B F9 0F B6 81 83 05 00 00 "
       "33 F6 84 C0 74 ?? 2C 03 3C 01 77 ?? 48 8B 89 70 05 00 00 48 85 C9 74 ?? 8B 97 7C 05 00 00 E8 ?? ?? ?? ?? "
       "90 48 89 B7 70 05 00 00 89 B7 7C 05 00 00 89 B7 78 05 00 00", 0xF969A0u, 0xF95ED0u },
+    /* Publish-time mod upload, claims and the copy gate (modpublish.c; snaphak-re
+     * mod-system-reinstatement lane N4). Unique on both build 13954591
+     * executables; steal windows audited by detour_windows_test. */
+    { "PublishAfterSave", /* the Save state's publish callback (editorLocal): vtbl+0x160(4), then TryCloudSave; nothing is sent before it. Steal 15. */
+      "40 57 48 83 EC 60 48 C7 44 24 20 FE FF FF FF 48 89 5C 24 70 48 8B F9 48 8B 01 BA 04 00 00 00 FF 90 60 01 00 00"
+      , 0x119A8C0u, 0x1199B20u },
+    { "PublishFail", /* (editorLocal): the publish-failed toast on editor+0x21088, then EditorBusyClear. Its twin VK 119a930 (the success toast) differs only after the RET, so the pattern ends on the padding and the next thunk's E9. Not hooked. */
+      "40 53 48 81 EC 90 00 00 00 48 C7 44 24 20 FE FF FF FF 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 84 24 88 00 00 00 48 8B D9 48 "
+      "83 B9 88 10 02 00 00 74 50 48 8D 15 ?? ?? ?? ?? 48 8D 4C 24 58 E8 ?? ?? ?? ?? 90 48 8D 15 ?? ?? ?? ?? 48 8D 4C 24 28 E8 "
+      "?? ?? ?? ?? 90 4C 8D 44 24 58 48 8D 54 24 28 48 8B 8B 88 10 02 00 E8 ?? ?? ?? ?? 90 48 8D 4C 24 28 E8 ?? ?? ?? ?? 90 48 "
+      "8D 4C 24 58 E8 ?? ?? ?? ?? 48 8B CB E8 ?? ?? ?? ?? 48 8B 8C 24 88 00 00 00 48 33 CC E8 ?? ?? ?? ?? 48 81 C4 90 00 00 00 "
+      "5B C3 CC CC CC CC CC CC CC CC CC CC CC CC CC CC E9"
+      , 0x119ABE0u, 0x1199E40u },
+    { "PublishFeedPost", /* (idSnapMapEdit*, const idPublishedMapModel&): both publish success paths; item id idStr at model+0, revision at +0x30. Steal 15. */
+      "48 89 5C 24 10 48 89 74 24 18 57 48 83 EC 20 48 8B F9 48 8B F2 B9 18 00 00 00 E8 ?? ?? ?? ?? 48 89 44 24 30 48 8B D8 48 "
+      "85 C0 74 1B 48 8D 05 ?? ?? ?? ?? 48 89 7B 08 48 89 03 48 8D 05 ?? ?? ?? ?? 48 89 43 10 EB 02 33 DB B9 18 00 00 00 E8"
+      , 0x11F91D0u, 0x11F83F0u },
+    { "MapInfoUnpublishDone", /* MapInfo screen unpublish success (screen, ctx, const idStr &itemId), bound by the confirm at VK 1090ea0 / GL 108ffb0. Steal 14. */
+      "48 89 5C 24 08 57 48 83 EC 20 48 8B 41 18 48 8B D9 48 85 C0 75 09 48 8B 49 20 E8 ?? ?? ?? ?? 48 8B C8 E8 ?? ?? ?? ?? 48 "
+      "8B F8 48 85 C0 74 3F"
+      , 0x1092790u, 0x10918A0u },
+    { "MapInfoCopyToMyMaps", /* MapInfo screen copy (branch) entry (screen): record +0x300 of kind 1, model at record+0x18 -> +8, then CopyRequestWrap. Steal 19. */
+      "48 8B C4 57 48 81 EC 90 00 00 00 48 C7 40 B0 FE FF FF FF 48 89 58 10 48 89 70 18 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 84 "
+      "24 80 00 00 00 48 8B D9 48 8B 41 18 48 85 C0 75 09 48 8B 49 20 E8 ?? ?? ?? ?? 48 8B C8 E8 ?? ?? ?? ?? 48 8B F8 48 85 C0 "
+      "0F 84 ?? ?? ?? ?? 8B 93 00 03 00 00 48 8B C8 E8 ?? ?? ?? ?? 48 8B F0 48 85 C0 0F 84 ?? ?? ?? ?? 83 78 0C 01"
+      , 0x1090A10u, 0x108FB20u },
+    { "BrowserCopyToMyMaps", /* browser copy (branch) entry (browser, flag): record kind 5, entry model +0x28 -> +8, then CopyRequestWrap. Called after the wait widget is shown. Steal 16. */
+      "48 89 6C 24 20 57 48 83 EC 40 0F B6 EA 48 8B F9 8B 51 08 48 8B 49 10 E8 ?? ?? ?? ?? 48 85 C0 0F 84 ?? ?? ?? ?? 83 78 0C "
+      "05"
+      , 0xFCE5E0u, 0xFCDAE0u },
+    /* Cooked movies and weapon ammo displays (modswf.c, modhud.c; snaphak-re
+     * mod-system-reinstatement lane P3). Unique on both build 13954591
+     * executables. Neither is a detour: modswf swaps the idFileResource
+     * vtable slot that holds FileResourceLoad, modhud swaps one call's rel32. */
+    { "FileResourceLoad", /* idFileResource Load (vtable +0x40): state < 2 opens through FS +0x148 (named idFile_Memory,
+                           * open-into helper), else the resource manager's +0x68. modswf decodes the state getter,
+                           * operator new, named ctor and open-into from this body. No steal. */
+      "40 57 48 83 EC 40 48 C7 44 24 30 FE FF FF FF 48 89 5C 24 50 48 89 6C 24 58 48 89 74 24 68 48 8B EA 48 8B D9 "
+      "E8 ?? ?? ?? ?? 83 F8 02 7C 7B 48 8B 0D ?? ?? ?? ?? 48 8B 01 48 8B 53 08 FF 50 68 48 8B F8 48 8B 4B 38 48 3B C8 "
+      "74 14 48 85 C9 74 0B 4C 8B 01 BA 01 00 00 00 41 FF 10 48 89 7B 38 48 83 7B 38 00 75 3F B9 80 01 00 00 "
+      "E8 ?? ?? ?? ?? 48 89 44 24 60 48 85 C0 74 0D 48 8B C8 E8 ?? ?? ?? ?? 48 8B F8 EB 02 33 FF 48 8B 4B 38 48 3B CF "
+      "74 13 48 85 C9 74 0A 48 8B 01 BA 01 00 00 00 FF 10 48 89 7B 38 33 C0 EB 5B B9 80 01 00 00 E8 ?? ?? ?? ?? "
+      "48 89 44 24 60 48 85 C0 74 11 48 8B 53 08 48 8B C8 E8 ?? ?? ?? ?? 48 8B F8", 0x172B3B0u, 0x172C040u },
+    { "WeaponHudModeCall", /* WeaponInfo::Update: CALL WeaponHudGameMode; TEST AL,AL; JZ; then the widget's weapon decl
+                            * at RBX+0x1F8 and its +0x641 flag. The beta.19 pattern, unchanged on 13954591; modhud
+                            * swaps the call's aligned rel32 (no steal). */
+      "E8 ?? ?? ?? ?? 84 C0 74 45 48 8B 83 F8 01 00 00 48 85 C0 74 09 80 B8 41 06 00 00 00 75 30", 0xC73F47u, 0xC739C7u },
+    { "WeaponHudGameMode", /* bool(game*): game+0x45338 -> +0x18 == 1; modhud checks the decoded call lands here. */
+      "48 8B 81 38 53 04 00 83 78 18 01 0F 94 C0 C3", 0x398C50u, 0x398560u },
+    /* Publish search tag and delete-time claim release (modpublish.c; snaphak-re
+     * mod-system-reinstatement lane P4). Unique on both build 13954591
+     * executables; evidence logs/shared-ghidra/mod-system-p4/. */
+    { "MapInfoDeleteDone", /* MapInfo screen My Maps delete success (screen, ctx, const idStr &localId, const idStr &cloudItemId), bound by the delete confirm at VK 1090fc0 / GL 10900d0. Its twin MapInfoUnpublishDone differs at +0xF (mov rdi vs rbx). Steal 14. */
+      "48 89 5C 24 08 57 48 83 EC 20 48 8B 41 18 48 8B F9 48 85 C0 75 09 48 8B 49 20 E8 ?? ?? ?? ?? 48 8B C8 E8 ?? ?? ?? ?? "
+      "48 8B D8 48 85 C0 74 3F 8B 97 00 03 00 00 48 8B C8 E8 ?? ?? ?? ?? 48 85 C0 74 13 48 8B 08 48 85 C9 74 0B 48 8B 01 BA "
+      "03 00 00 00 FF 50 08"
+      , 0x1092810u, 0x1091920u },
+    { "PublishStart", /* (editorLocal, overwrite): adds or removes the reserved map:dev / map:dlc1 tags on the edit's tag list (edit+0x998, idList<idStr>), arms PublishAfterSave. Not hooked: its list grow (+0xB3) and idStr assign (+0xD5) calls are bound to append the search tag. */
+      "4C 8B DC 57 41 56 41 57 48 81 EC 90 00 00 00 48 C7 44 24 20 FE FF FF FF 49 89 5B 10 49 89 6B 18 49 89 73 20 48 8B 05 "
+      "?? ?? ?? ??"
+      , 0x119AD00u, 0x1199F60u },
+    { "PublishedPrevQuery", /* (ctx, const char *parentItemId, const char *cursor, ok, fail): the maps_pub_prev_pub search for the items the player published from one cloud-saved item; ok gets idList<idPublishedMapModel> (stride 0x588, id idStr at +0). Not hooked: called by the delete check. */
+      "40 55 53 56 57 41 54 41 55 41 56 41 57 48 8D AC 24 C8 FE FF FF 48 81 EC 38 02 00 00 48 C7 45 E0 FE FF FF FF 48 8B 05 "
+      "?? ?? ?? ?? 48 33 C4 48 89 85 20 01 00 00 4D 8B E1 49 8B F0 4C 8B EA 48 8B D9 48 89 4D D0 4C 8B B5 A0 01 00 00"
+      , 0x11C4160u, 0x11C3530u },
     { NULL, NULL, 0 }   /* terminator */
 };

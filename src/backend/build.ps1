@@ -8,7 +8,7 @@ param(
                            "cvars.c", "commands.c", "clipboard.c",
                            "config.c", "config_json.c",
                            "entity.c", "typeinfo.c", "preview.c", "megapreview.c", "imgpreview.c", "prefabpreview.c", "soundpreview.c", "bcn.c", "patch.c", "x64_len.c", "algo.c", "target_any.c", "wiring_cleandirect.c", "swf_textedit.c", "ui_bridge.c",
-                           "iface_engine.c", "editor_delete.c", "apply_engine.c", "prefab_grab.c", "fly_to.c", "module_prefab.c", "module_prefab_map.c", "timeline_tile.c", "modserve.c", "modserve_engine.c", "modpublished.c", "budget_table.c", "mp_json.c", "../common/snapmap_plus_iface.c",
+                           "iface_engine.c", "editor_delete.c", "apply_engine.c", "prefab_grab.c", "fly_to.c", "module_prefab.c", "module_prefab_map.c", "timeline_tile.c", "modserve.c", "modserve_engine.c", "modswf.c", "modhud.c", "modpublished.c", "modpublish.c", "budget_table.c", "mp_json.c", "../common/snapmap_plus_iface.c",
                            "../common/log_rotate.c",
                            # The backend owns the SnapStack command handlers and stores.
                            "snapstack.c", "json_patch.c",
@@ -31,6 +31,8 @@ param(
                            "boot_pacing.c",
                            # Mod bundles, the local mods store, the sh_mods command and the Mods tab.
                            "modbundle.c", "modstore.c", "modcmd.c", "modui.c",
+                           # The one-time move of the retired overrides folder into the mods store.
+                           "modmigrate.c",
                            # The mod store client (WinHTTP), upload/download and the rawmap ZIP export.
                            "modnet.c", "modsync.c", "modexport.c",
                            # Lane RC research harness only (sh_vt); never part of a release.

@@ -70,6 +70,19 @@ Checks native helpers, engine-interface contracts, frontend JavaScript and optio
 - `modnet_test.c`, `modsync_test.c` and `modexport_test.c` cover the store client, the upload,
   download, release and retry flows, and the rawmap ZIP export and import against a loopback stub
   of the store (`mod_store_stub.h`); no real network is used.
+- `modpublish_test.c` checks the publish side against the loopback stub with
+  engine doubles: a save without rows passing through, the over-bound refusal,
+  the first-time question (No cancels and leaves the setting, Yes sets it,
+  uploads and resumes, the toast route agrees on the next publish), a failed
+  upload cancelling, the editor leaving and another save, the claim at the
+  feed post with and without a stored secret, a republish replacing the set,
+  release on a republish without mods and on unpublish, the `mods` search tag
+  added before the resume (and a tag that cannot be written not stopping the
+  publish), the delete check (no link, no cloud-saved id, still published, a
+  failed, late or unstarted answer all keep the claim; an item missing from
+  the answer is released and its link forgotten), the copy gate on both sides
+  of the bound, and the launch step settling provisional refs and retrying the
+  queue.
 - `mod_seam_stub.c` stands in for the serving layer and the builder entry in
   tests that link the map manifest or the legacy converter without them.
 - `modbundle_test.c` builds `fixtures\mods\alex.r2-imp` and pins its bundle
@@ -77,18 +90,73 @@ Checks native helpers, engine-interface contracts, frontend JavaScript and optio
   needs scan, build numbering and each refusal rule. The fixture files are
   hashed byte for byte, so their line endings are never converted.
 - `modstore_test.c` installs the fixture into a temporary store: blobs, hard
-  links and the copy fallback, verification and corruption, in-place builds and
-  need resolution across installed bundles.
+  links and the copy fallback, verification and corruption, in-place builds,
+  need resolution across installed bundles, and the store lock (an installer
+  waits for a holder instead of failing, two installers at once both succeed,
+  the lock is recursive).
 - `modserve_test.c` checks the serving index: admission and failure isolation,
   lookups in every spelling, provider precedence against the real `overrides.c`,
   probe claims, registration plans and their order, the rescan and the lookup
-  cost.
+  cost, and the conflicts between mods: the winner rules (needs, shared bytes,
+  installed over delivered, recency), the composition of list decls (the boss
+  packs' conductor and whitelist), the animWebs a registration pass withdraws
+  for a model nothing provides, and the Play-time requirements check.
 - `mod_pipeline_test.c` links the builder, the serving index, the manifest and
   the legacy converter together: a built fixture is admitted, saved as one
   `smpmod1.` row and activated on the next load; a legacy-form bundle with
   non-stock shadows builds and registers only its new names; skins decls pass
   by their mesh path. With `SH_MODLEGACY_FIXTURES` set, each carrier map is
-  converted with the real builder and activated in the same parse.
+  converted with the real builder and activated in the same parse. Set
+  `SH_MODLEGACY_BETA19` to the path of one rawmap file written by
+  v0.2.1-beta.19 (the owner's acceptance map; not in the repository, its
+  carriers hold game files) to add a pass that converts every carrier in it,
+  prints per carrier what the bundle provides and how many placed names it
+  covers, the parse time and the process peak working set, then checks that a
+  second parse is answered by the memo and a fresh-process parse by the folders
+  on disk without a build. `MOD_PIPELINE_ECHO=1` prints the log lines and the
+  placed names each bundle covers.
+- `modmigrate_test.c` moves a small synthetic `overrides\` tree into a
+  temporary store with the real builder, store and legacy converter: an era C
+  pack (an unsupported cvar dropped, strings and composes kept, a sidecar left
+  out), an era B pack without an id, two packs with one id, a delivered
+  `map-<16 hex>\<package>`, a stray ZIP, a folder holding one package one level
+  down (migrated under its id) and one holding two (skipped), a folder over the 512 MiB cap and one over the bundle cap (sparse
+  files, no disk cost), and an empty `override-backups`. It checks the store,
+  `mods\.migrated.json`, the log lines, that `overrides\` is byte for byte
+  unchanged, that a second pass does nothing and `--again` rebuilds the same
+  bundles, that a map carrying the same delivery or the same authored tree is
+  answered by the migrated bundle without a conversion, a non-empty
+  `override-backups` left alone, the boot split (a small folder before the
+  index, a large one on the worker, then one rescan), the rerun of an
+  unfinished record, and the store lock (a pass waits for a holder, and
+  installs during a worker pass wait their turn and succeed).
+  `MODMIGRATE_ECHO=1` prints the log lines.
+- `modswf_test.c` drives the cooked-movie Load replacement against synthetic
+  engine functions (a served `generated/swf/...bswf` takes the engine's below-2
+  open; anything else, a failed open or a failed allocation goes to the
+  original), checks that the builder admits `.bswf` only under `generated/swf/`
+  with the shadow and `mods/<id>/` rules, and, with the executables, that
+  `FileResourceLoad` decodes to the recorded engine calls, its open-into helper
+  calls `+0x148`, and one read-only qword (the idFileResource vtable `+0x40`)
+  holds it.
+- `modhud_test.c` checks the `hud` ammo-display grammar, conflicts across
+  bundles, the tree read of admitted installed and legacy bundles, and the
+  call-site relay on an owned synthetic caller under a concurrent thread; with
+  the executables, that the HUD call decodes to the predicate at an aligned
+  rel32 with the widget in RBX.
+- `modshadow_test.c` measures those rules on a player's real retired
+  `overrides\` tree: `SH_MODSHADOW_DATA` names a scratch data root holding a
+  copy of it and `SH_MODSHADOW_GAME_NAMES` a `type<TAB>name` list of
+  `snap_gameresources`; the migration builds the tree, the index resolves its
+  conflicts, and the editor plan and every bundle's gameplay plan run against a
+  registry that knows those names. It prints each conflict and, per bundle,
+  every animWeb withdrawn. Skipped without the two variables (the tree holds
+  game files); `SH_MODSHADOW_DUMP` names a folder for the composed texts.
+- `webview_profile_test.cpp` checks where the companion window's WebView2
+  profile goes (`webview_profile.h`): created under `cache\webview2`, an older
+  top-level `webview2` folder renamed into it with the same files, an old
+  folder beside an existing new one left alone, and a failed rename keeping
+  the old folder.
 - `modui_test.c` runs the Mods tab's backend against a temporary store, the
   real serving index and the map manifest: the document on an empty store,
   install through the tab, every state string, manifest rows and the placed

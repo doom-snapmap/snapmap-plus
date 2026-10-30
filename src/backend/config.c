@@ -144,6 +144,16 @@ static const config_descriptor g_registry[] = {
         SH_CONFIG_BACKEND_READ | SH_CONFIG_BACKEND_WRITE,
         validate_mods_store,
         NULL
+    },
+    {
+        /* The player has agreed, once per installation, that publishing a
+         * map uploads the mods it uses to the mod store (modpublish.c). The
+         * first publish of a map with mods asks; Yes sets this.
+         */
+        "mods.upload_confirmed", SH_JSON_BOOL, "false",
+        SH_CONFIG_BACKEND_READ | SH_CONFIG_BACKEND_WRITE,
+        NULL,
+        normalize_bool
     }
 };
 

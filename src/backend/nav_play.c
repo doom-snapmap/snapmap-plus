@@ -15,6 +15,7 @@
 #include "world_area_cell.h"
 #include "apply_engine.h"
 #include "grid_room_native.h"
+#include "modserve.h"
 
 void backend_log(const char *message);
 
@@ -242,6 +243,8 @@ static int nav_snapbuild_detour(void *a, void *b, void *c)
          * being played (editor+0x23C98); the navigation snapshot reads it. */
         sh_apply_engine_nav_build_begin(b);
         sh_nav_bake_build_begin();
+        /* Mods: the cut-content gates hold for the level load. */
+        sh_modserve_play_begin();
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         backend_log("NAV: the pre-build editor snapshot faulted");
     }

@@ -17,7 +17,8 @@
 enum {
     SH_LEGACY_KEY_FOLDER = 1,   /* beta.6-13: the package folder name, no dots */
     SH_LEGACY_KEY_DESCRIPTOR,   /* beta.14-15: the descriptor id, dotted */
-    SH_LEGACY_KEY_DELIVERY      /* beta.16-19: "delivery.<64 hex tree fingerprint>" */
+    SH_LEGACY_KEY_DELIVERY,     /* beta.16-19: "delivery.<64 hex tree fingerprint>" */
+    SH_LEGACY_KEY_OVERRIDES     /* not a carrier: a retired overrides folder migrated by modmigrate.c */
 };
 
 typedef struct sh_legacy_header {

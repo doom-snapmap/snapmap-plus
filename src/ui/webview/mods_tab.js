@@ -64,7 +64,7 @@ var modsTab = (function () {
     s = s && typeof s === 'object' ? s : {};
     var kind = Object.prototype.hasOwnProperty.call(SHADOW_KINDS, s.kind) ? s.kind : 'stock';
     return {request: str(s.request), kind: kind, shadow: bool(s.shadow), served: str(s.served),
-            bundles: arr(s.bundles).map(str)};
+            bundles: arr(s.bundles).map(str), resolution: str(s.resolution), reason: str(s.reason)};
   }
 
   /* The host's payload as the tab uses it. error is set for an unusable payload. */
@@ -115,7 +115,20 @@ var modsTab = (function () {
     if (r.state === 'skipped' && r.cause) detail = 'Installed but skipped: ' + r.cause;
     return {label: s.label, tone: s.tone, detail: detail};
   }
-  function shadowInfo(s) { return SHADOW_KINDS[s.kind] || SHADOW_KINDS.stock; }
+  /* A conflict says which copy serves and why (the backend's resolution). */
+  var CONFLICT_TEXT = {
+    composed:  'Several mods add entries to this list; the entries of all of them are served.',
+    withdrawn: 'Several mods supply this name; the copy chosen names a model nothing provides, so the game copy is used.'
+  };
+  function shadowInfo(s) {
+    var info = SHADOW_KINDS[s.kind] || SHADOW_KINDS.stock;
+    if (s.kind !== 'conflict') return info;
+    if (CONFLICT_TEXT[s.resolution]) return {label: info.label, tone: 'warn', text: CONFLICT_TEXT[s.resolution]};
+    if (s.resolution === 'chosen')
+      return {label: info.label, tone: 'warn', text: 'Several mods supply this name; ' + (s.served || 'one of them') + ' serves it' +
+        (s.reason ? ' (' + s.reason + ')' : '') + '.'};
+    return info;
+  }
 
   function filterBundles(bundles, query) {
     var q = str(query).trim().toLowerCase();

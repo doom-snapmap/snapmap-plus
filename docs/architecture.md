@@ -392,11 +392,12 @@ and a player who opens that map is asked first and downloads only what they
 approve in the dialog, verified by hash (`modnet.c`, `modsync.c`, `modpublished.c`;
 see [Published maps and missing mods](#published-maps-and-missing-mods)); an
 exported rawmap is a ZIP that carries the bundles itself (`modexport.c`), so
-sharing a rawmap stays offline. Plain saves never upload. Nothing is read from
-the retired `%LOCALAPPDATA%\snapmap-plus\overrides\` tree, and no
-`package-cache` or `package-staging` folder is created.
+sharing a rawmap stays offline. Plain saves never upload. The retired
+`%LOCALAPPDATA%\snapmap-plus\overrides\` tree is read once, by the migration
+below, and never served or written; no `package-cache` or `package-staging`
+folder is created.
 
-Seven backend files share the work:
+Eight backend files share the work:
 
 - `modbundle.c` builds a mod folder into a bundle: a SHA-256 per file, the
   logical name each file provides, the names its decls need, the namespace and
@@ -434,6 +435,12 @@ Seven backend files share the work:
 - `modpublished.c` holds a published or My Maps launch whose manifest names a
   bundle that is not installed, asks the player, and fetches and resumes it or
   drops it, as in [Published maps and missing mods](#published-maps-and-missing-mods).
+- `modmigrate.c` moves the retired `overrides\` tree into the store once, as in
+  [Migration of the retired overrides folder](#migration-of-the-retired-overrides-folder).
+- `modpublish.c` uploads a map's bundles when the map is published, claims
+  them under the published item, releases the claim at unpublish, and refuses
+  a copy to My Maps that the map service would reject, as in
+  [Publishing a map with mods](#publishing-a-map-with-mods).
 
 The provider open (`ov_open_body` in `overrides.c`) serves, in order: the
 placement grid, map navigation, the generated Grid Room variants, the built-in
@@ -445,12 +452,83 @@ gameplay decls when a map that names their bundle loads. When two builds of one 
 serves it, and a map naming the older bundle gets the newer files with a logged
 line.
 
+Cooked movies need a second route (`modswf.c`). A `.bswf` is an idFileResource,
+and its Load (vtable `+0x40`, signature `FileResourceLoad`) opens through the
+provider only while the map-load lifecycle state is below 2; from 2 on it asks
+the resource manager (`+0x68`), which reads the mounted containers unless
+`resource_loadLooseAssets` is set, and a miss becomes an empty file returned as
+success, so a bundle's movie used to load blank with no message. `modswf.c`
+swaps that one vtable slot (the only read-only qword holding the Load; no code
+is patched). For a `generated/swf/...bswf` request the serving table answers,
+it runs the engine's own below-2 sequence at any state: a named memory file at
+the resource's `+0x38`, then the open-into helper, which opens through the
+provider and copies the bundle's bytes. Everything else, and a served movie
+whose open fails, goes to the original Load. The four engine calls it uses are
+decoded from the resolved Load body, and the open-into helper must call
+`+0x148`. The cvar is not used: it is read by four engine paths on each
+executable, two of them generic opens, and would make every file and JSON
+resource load walk the search paths on disk. A served movie applies at that
+resource's next Load: a movie first loaded in a map is purged at map unload, so
+a shadow installed between maps applies at the next map load; a movie resident
+since boot is served only when its bundle is installed at boot. The builder
+admits `.bswf` only under `generated/swf/`, names it as the consumer does
+(`swf/<stem>.swf`), and applies the usual rules: a stock movie is a listed
+shadow, a new one lives under `generated/swf/mods/<id>/` with its atlas
+`generated/swf/mods/<id>/<stem>.bimage` beside it. Each served movie logs
+`MODS: swf: served <request> (<bundle>) at load state N` (the first 32).
+
+A bundle descriptor's `hud` key (kept under `bundle.json` `extra`) selects how
+the stock ammo widget shows a weapon (`modhud.c`, the beta.19 `weapon_hud`
+contract: `{"weapons": {"<weapon decl>": {"ammo_display": "weapon" | "engine"}}}`).
+`weapon` removes the multiplayer mode's forced numeric display for that weapon,
+so a nonpositive capacity shows the widget's infinity frame; no ammunition,
+decl or widget field changes. Rules are read at startup from every admitted
+bundle, installed or legacy; identical rules compose and conflicting ones
+refuse the whole table with both bundle ids logged. The widget update's one
+call to the mode predicate (`WeaponHudModeCall`, `WeaponHudGameMode`) has its
+aligned rel32 swapped to a near relay that passes the widget, whose weapon decl
+is at `+0x1F8`; every other caller of the predicate is untouched. Logs:
+`weapon-hud compiled: N rules`, `weapon-hud installed: ...`, and
+`weapon-hud active: ...` on first use.
+
+When bundles of different mods provide one path with different bytes, one of
+them always serves it: leaving it to the engine broke every boss pack at Play,
+because their other files are served and name it, and the game's SnapMap
+archive has no copy of campaign content to fall back to (the Cyberdemon's
+animWeb defaulted to an empty one and `AnimWeb ... has no nodes` ended the
+process). The winner is the provider with the fewest needs no admitted bundle
+provides, then the bytes most providers carry, then an installed mod over a
+copy a map delivered, then the most recently installed. When every provider's
+text is a decl that differs from the others only inside lists (a block of
+`num = N;` and `item[i]` members, as the encounter conductor's `aiTypeList` or
+the whitelist inspectors' `validEncounters`, which every boss pack extends),
+the winner's text is served with the other providers' entries appended, so
+several boss packs work together. One `MODS: conflict:` line names the
+providers, the winner and the reason; the Mods tab shows the same. A
+registration pass (editor rows, map activation) also withdraws an animWeb
+whose models block names a model that no bundle provides and the engine has
+no md6Def for, since the engine's parse throws on it: a stock animWeb it
+shadowed is served by the game again, and a new name is not registered. Before
+the Play level load the SnapBuild detour re-checks the bundles' blacklist
+requirements (`MODS: play: requirements live: ...`); the engine itself does not
+reset those two gates between the editor and the level load.
+
 On every parse the `DeserializeFromJson` detour sees, `modlegacy.c` runs first.
 A complete carrier whose ZIP and `package.json` read is unpacked once into
 `mods\legacy\<id>@<digest16>\` (older `decls/`, `images/` and `shaders/`
 layouts moved under `assets/`), built into a bundle and named by a manifest row;
 the serving table is then rebuilt when that bundle is not in it yet, so the same
-parse can activate it. Any other carrier, and the unreleased `smpbind.` and
+parse can activate it. A first-generation package served every file under
+`assets/`; a file a bundle cannot carry (a type outside the bundle whitelist,
+such as the `.materials.txt` sidecars every beta.19 model pack shipped or a
+`.bswf` movie outside `generated/swf/`, an empty file, a path the request rules refuse) is left out and
+counted on the `LEGACY: unpacked` line instead of refusing the package, and a
+cvar requirement other than the two supported blacklist gates is left out the
+same way. A beta.16-19 carrier names its tree (`smpkg.delivery.<tree>`), so
+before converting one the converter also looks for a legacy folder whose
+`mod.json` records that key and for a bundle the overrides migration built from
+the same tree (`mods\.migrated.json`, `trees`); either answers the carrier
+without a second copy. Any other carrier, and the unreleased `smpbind.` and
 `smpref.` rows, are removed. Each carrier logs one `LEGACY:` verdict line. After
 the navigation strip, `modmanifest.c` reads and strips the manifest rows before
 the engine replicates map variables and activates the bundles they name.
@@ -474,12 +552,75 @@ in the map it returns at once and the save is the engine's own bytes.
 
 Threads: the table is built on the bootstrap thread before the provider hook is
 published and replaced only by a rescan (`sh_mods install`, a build inside the
-store, a legacy conversion, `sh_mods rescan`). Readers see one complete table;
+store, a legacy conversion, the end of the overrides migration's worker,
+`sh_mods rescan`). Readers see one complete table;
 retired tables are never freed, because a provider open on another thread may
 still read one. Registration, activation and the palette rebuild run on DOOM's
 main thread only. With an empty `mods\` folder the table is empty and every hook
 above passes through: the differences from a build without mods are the
 `sh_mods` command and its `MODS:` log lines.
+
+### Migration of the retired overrides folder
+
+Releases up to v0.2.1-beta.19 kept packages in `overrides\`. At backend start,
+before the serving table is built, `modmigrate.c` runs once when `overrides\`
+exists and `mods\.migrated.json` does not (or records an unfinished pass):
+
+- each direct child folder with `package.json` or `mod.json` is converted the
+  way a carrier is (layout moved under `assets/`, files a bundle cannot carry
+  left out) into a staging folder outside the store and installed by
+  `modstore.c` as `mods\<id>@<version>+<build>\` with blobs. The descriptor is
+  the authoring descriptor: its id (or, for an era B pack without one, its
+  folder name), version (else `0.0.0`), requirements, strings and hud are
+  carried, its other keys (`composes`, an era B `schema`) are kept under
+  `extra`, and a `legacy` block (`source`, `folder`, `tree`) grandfathers its
+  names as shadows. When another installed build of the same id and version
+  comes from a different tree, the version gets the tree's first 8 hex, so two
+  folders with one id are both built and the duplicate is reported;
+- each delivered package, `overrides\map-<16 hex>\<package>\`, becomes a legacy
+  bundle `mods\legacy\<id>@<tree16>\` keyed `delivery.<tree>`, the beta.19 tree
+  fingerprint (entries sorted case-insensitively, then by bytes; a `d` or `f`
+  byte, the NUL-terminated relative path and the file's SHA-256), which is the
+  key a map's carrier of the same delivery has; a later load of that map reuses
+  it;
+- a folder without a descriptor whose only package is one direct child folder
+  (beta.19 read unmarked folders as groups) has that child migrated under the
+  child's own id, and its line says so; a folder without a descriptor and with
+  none or several such children, a ZIP and any other file are skipped with the
+  reason; a folder over
+  512 MiB or 8192 files is skipped before it is read, and one whose carried part
+  is over the bundle caps (4096 files, 256 MiB) is refused before it is hashed;
+- nothing under `overrides\` is created, changed or deleted; an empty
+  `override-backups\` folder is removed and a non-empty one is left alone.
+
+Folders of at most 32 files and 16 MiB are migrated before the serving table,
+within about a second of boot time; the rest go to a worker thread that runs
+while the game boots, writes the record and rebuilds the serving table when it
+is done (editor rows it adds after the first palette build need
+`sh_mods palette rebuild`). The record lists every folder with its kind,
+outcome, reason, id, version, store folder, bundle hash and tree, and a `trees`
+map from tree to store folder; it says `"complete": false` until the worker
+ends, and an unfinished record makes the next start run the pass again (every
+step is idempotent). Each folder logs one `MODS: migration:` line and the pass
+one summary line; a line that leaves files out names how many and how many of
+them are `.bswf` movies (bundles carry movies under `generated/swf/` only, served
+by `modswf.c`; a pack migrated before that was left out can be migrated again
+with `sh_mods migrate --again`). A migrated pack keeps its id, so where it
+shares one with a delivered or converted package (the beta.19 `doors` packs),
+the most recently installed bundle serves every path they share, whichever
+map is open. `sh_mods migrate [--again]` runs the same pass on the worker.
+Stock names are not checked during the migration because the game's resource
+reader is not up at boot, so unresolved needs only warn, as for a converted
+carrier.
+
+Every writer of the store serialises on one recursive lock, `modstore_lock`
+(`modstore.c`; `modsync_store_lock` is the same lock under its older name).
+Each install and verification takes it; each migration folder, a download
+install, `sh_mods install`, `sh_mods migrate` and an export hold it around their
+whole step. A second writer waits for the first instead of failing, and logs
+one `MODS: store: waiting` line; because the migration takes the lock per
+folder, an install on the main thread (the Mods tab or `sh_mods install`) waits
+for at most one folder, not for the whole pass.
 
 ### Published maps and missing mods
 
@@ -536,6 +677,72 @@ changed drops the hold: nothing is launched, the progress widget is hidden, and
 a one-button notice names the mod. Another map load, or a newer held launch,
 abandons the hold silently and cancels its fetch. The engine thread never waits:
 the network runs on the worker and the dialog is polled.
+
+### Publishing a map with mods
+
+What is sent: the bundles the published map names in its `smpmod1.` rows, and
+only those, at publish time. The `SerializeToJson` detour reports each save's
+final text (`sh_rawmap_set_save_observer`); `PublishAfterSave`, the Save
+state's callback that runs before the first request to the map service, is
+detoured (`modpublish.c`). A save without rows publishes natively. A text over
+the service's 10,485,760-byte bound is refused through the engine's own
+`PublishFail`, with a toast giving the size and the overage. Otherwise the
+publish is held: the Save state returns with the publish pacifier up, as the
+engine's own asynchronous chain leaves it. The first publish with mods on an
+installation asks once through `sh_engine_dialog_ask` (Yes sets
+`mods.upload_confirmed`); the ask site is one function, and an alternative
+route shows the explanation as `PublishFail`'s editor toast instead, cancels
+that publish, and treats the next one as the agreement. One worker job then
+uploads every bundle (`modsync_upload_bundles`: missing blobs, the canonical
+manifests, one claim) under a provisional ref `publish-pending-<16 hex>`, and a
+main tick resumes the original `PublishAfterSave`. Just before the resume the
+search tag `mods` is added to the edit's tag list (`edit+0x998`,
+`idList<idStr>`) when absent, the way `PublishStart` adds `map:dev` and
+`SnapMapAddBranchTag` adds `map:branch` (the list grow and idStr assignment
+are bound from `PublishStart`'s own calls): `TryCloudSave` compares the edit's
+tags with the cloud save, so the tag is cloud-saved and copied to the
+published item, and players can see that the map needs Snapmap+. A tag that
+cannot be written is logged and the map publishes without it. A No, a failed upload, a
+question that cannot be shown or a busy worker cancels through `PublishFail`
+and a toast naming the cause; nothing reached the map service. The editor
+leaving abandons the hold; another save cancels it.
+
+The claim and its secret: `PublishFeedPost`, the one function both success
+paths reach, carries the item id and revision. The worker claims the bundle
+set under the item id. On a republish the stored secret re-claims that ref,
+which replaces the set (Contract 4); a republish without rows releases the
+item's claim. The claim id and secret live in `mods\claims.json` (modsync);
+the secret is never logged. The provisional claim is released once the item
+claim succeeds, or when its publish never reaches the feed post.
+
+Release: the MapInfo screen's unpublish completion (`(screen, ctx, const
+idStr &id)`, bound by the unpublish confirm) releases the item's claim on the
+worker. Deleting a map from My Maps removes the local slot and the cloud-saved
+item; the published item stays playable for everyone, so its claim normally
+stays. The delete completion (`(screen, ctx, const idStr &localId, const idStr
+&cloudItemId)`) releases a claim only when its item is no longer published,
+for example after an unpublish this installation never saw. Neither saved-map
+model links to a published item (their reflected fields hold only the local
+id, the cloud-saved id and branch parents), so the feed post records the link
+itself in `mods\publish-links.json` (item id to cloud-saved id and local id).
+At delete, the linked items that still hold a claim are checked with the
+engine's own `maps_pub_prev_pub` search (`PublishedPrevQuery`, by parent
+cloud-saved item and owner), issued on the main tick with two callback objects
+the engine's request context invokes and destroys; only an item missing from a
+successful answer is released. No link, no stored claim, no cloud-saved id, a
+link younger than an hour (a fresh item may not be searchable yet), an answer
+as long as a search page (30 items, it may be partial), a failed answer or
+none within 60 seconds keeps every claim. A release or an
+unpublish forgets the link. A copy to My Maps of a published map whose
+cached text (`%LOCALAPPDATA%\id Software\DOOM\base\doomsnapmaps\published-maps\<id>_<rev>_map.decl`)
+is over the bound is refused at the MapInfo and browser entries, before the
+engine creates the saved item, with a one-button notice.
+
+The retry queue: a failure modsync can retry stays in
+`mods\pending-uploads.json`. At startup the backend settles provisional refs
+left by a closed game (their claims are released and their queued uploads
+dropped, since their publish never completed), then retries the rest of the
+queue once on the worker and logs the counts.
 
 ## Failure reporting
 

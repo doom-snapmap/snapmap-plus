@@ -83,6 +83,7 @@ const char *sh_map_legacy_key_form_name(int key_form)
     case SH_LEGACY_KEY_FOLDER:     return "folder-id key (beta.6-13)";
     case SH_LEGACY_KEY_DESCRIPTOR: return "descriptor-id key (beta.14-15)";
     case SH_LEGACY_KEY_DELIVERY:   return "delivery key (beta.16-19)";
+    case SH_LEGACY_KEY_OVERRIDES:  return "overrides folder (beta.4-19)";
     default:                       return "unknown key";
     }
 }

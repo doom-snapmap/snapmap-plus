@@ -11,7 +11,10 @@
  *             active, and the bundles the placed entities resolve to now (the
  *             save-time closure, modserve_bundles_for_names_visit)
  *   shadows   request paths an admitted bundle shadows, grouped by path: stock
- *             shadows, legacy shadows and conflicts (no bundle serves the path)
+ *             shadows, legacy shadows and conflicts (several mods provide the
+ *             path with different bytes: "resolution" says whether one copy was
+ *             chosen, the list entries of all were composed, the winner was
+ *             withdrawn, or nothing serves it, and "reason" says why)
  * and the actions are the sh_mods verbs the console runs: install a folder,
  * verify, rescan, palette rebuild, and the conservative removal of builds that
  * a newer build of the same mod fully covers.
