@@ -27,6 +27,7 @@
 #include "module_prefab.h"
 #include "timeline_tile.h"
 #include "modserve.h"
+#include "modpublished.h"
 #include "budget_table.h"
 #include "map_render.h"
 #include "settings_tab.h"
@@ -442,6 +443,11 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
          * leaves the OS message-box fallback available. */
         sh_engine_dialog_set_trace(sh_live_verify());
         sh_engine_dialog_install(results, db, g_doom_base);
+
+        /* Published-map and offline-play gates: a map whose manifest names a
+         * missing bundle is held for the native Yes/No, needs the parse
+         * detour's classification and the dialog binding above. */
+        (void)sh_modpublished_install(results, db, g_doom_base);
 
         /* Bind dependencies for the already-registered entity commands. */
         sh_entity_install(results, db, g_doom_base, cmdsys);

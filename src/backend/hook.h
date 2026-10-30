@@ -19,6 +19,12 @@ const char *hook_last_failure(void);
  * whole and position-independent. Reject any other opcode/addressing form. */
 void *hook_prepare_rip_lea(void *target, void *detour, size_t stolen, size_t lea_offset);
 
+/* Like hook_prepare_rip_lea, for one caller-verified 64-bit load
+ * MOV reg,[RIP+disp32] at load_offset (a security-cookie read, for example):
+ * it becomes MOV reg,imm64 then MOV reg,[reg]. RSP, RBP, R12 and R13 as the
+ * destination are refused. */
+void *hook_prepare_rip_load(void *target, void *detour, size_t stolen, size_t load_offset);
+
 /* Expand one caller-verified E8 rel32 call to an indirect absolute call without
  * consuming a scratch register. The callee returns past the inline address.
  * Other stolen instructions must be whole and position-independent; calls back

@@ -10,6 +10,7 @@
 #include <string.h>
 #include "snapmap_plus_iface.h"
 #include "apply_engine.h"
+#include "modpublished.h"
 #include "typeinfo.h"
 #include "ui_bridge.h"
 #include "iface_engine.h"
@@ -3431,6 +3432,9 @@ void sh_apply_prefab_poll_play(void)
     if (ae_on_main_thread() != 1) return;
     ae_main_call_poll();
     ae_nav_refresh_poll();
+    /* Held published or My Maps launches: the question, its answer, the fetch
+     * and the resume. Runs in menus too, where the editor frame does not. */
+    sh_modpublished_poll();
     if (!g_doom_base) return;
 
 #if AE_PASTE_DIAG_ON

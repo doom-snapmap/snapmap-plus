@@ -27,7 +27,7 @@ enum site_kind { SITE_SIG, SITE_CALL_IN_SIG, SITE_FRAME_RVA, SITE_SLOT, SITE_ISB
 enum site_policy {
     REPLAYS,          /* the trampoline runs: the window must be position independent */
     NEVER_REPLAYED,   /* the detour replaces the function; the trampoline never runs */
-    RELOCATES_AT,     /* one RIP-relative LEA or E8 at reloc is rewritten by the hook */
+    RELOCATES_AT,     /* one RIP-relative LEA, 64-bit load or E8 at reloc is rewritten by the hook */
     STUB_PADDING      /* a never-replayed stub: its ret at reloc is followed by int3 padding */
 };
 
@@ -86,6 +86,11 @@ static const site SITES[] = {
     { "swf_textedit.c",       "SwfTextOnKeyCall",           SITE_SIG, 0, 15, REPLAYS, 0 },
     { "timeline_tile.c",      "SnapPaletteBuild",           SITE_SIG, 0, 18, REPLAYS, 0 },
     { "modserve_engine.c",    "DeclResourceProbe",          SITE_SIG, 0, 21, REPLAYS, 0 },
+    { "modpublished.c",       "PublishedOnSnapPlayDone",    SITE_SIG, 0, 18, RELOCATES_AT, 11 },
+    { "modpublished.c",       "PublishedBrowserPlayDone",   SITE_SIG, 0, 20, REPLAYS, 0 },
+    { "modpublished.c",       "PublishedMapCacheReady",     SITE_SIG, 0, 15, RELOCATES_AT, 7 },
+    { "modpublished.c",       "CacheMapForLobby",           SITE_SIG, 0, 20, REPLAYS, 0 },
+    { "modpublished.c",       "LaunchLocalSnapMapForOfflinePlay", SITE_SIG, 0, 22, REPLAYS, 0 },
     { "wiring_cleandirect.c", "ConnectOutputCreator",       SITE_SIG, 0, 15, REPLAYS, 0 },
     { "wiring_cleandirect.c", "WireConnectCreator1",        SITE_SIG, 0, 15, REPLAYS, 0 },
     { "fault_shield/mapload_guards.c", "EventLink",         SITE_SIG, 0, 15, REPLAYS, 0 },
@@ -295,19 +300,20 @@ static const struct { const char *file; int calls; } CENSUS[] = {
     { "backend\\algo.c", 1 }, { "backend\\apply_engine.c", 1 }, { "backend\\commands.c", 2 },
     { "backend\\editor_frame.c", 1 }, { "backend\\engine_dialog.c", 2 },
     { "backend\\grid_room_editor.c", 5 }, { "backend\\grid_room_native.c", 4 },
-    { "backend\\grid_room_snap.c", 4 }, { "backend\\hook.c", 3 },
+    { "backend\\grid_room_snap.c", 4 }, { "backend\\hook.c", 4 },
     { "backend\\nav_menu.c", 4 },
     { "backend\\nav_play.c", 2 }, { "backend\\nav_preview.c", 2 },
     { "backend\\patch.c", 2 }, { "backend\\rawmap.c", 3 },
     { "backend\\smoke.c", 1 }, { "backend\\strids.c", 1 }, { "backend\\swf_textedit.c", 1 },
     { "backend\\timeline_tile.c", 1 }, { "backend\\modserve_engine.c", 1 },
+    { "backend\\modpublished.c", 5 },
     { "backend\\wiring_cleandirect.c", 2 }, { "fault_shield\\mapload_guards.c", 2 },
     { "fault_shield\\recovery.c", 1 }, { "backend\\settings_tab.c", 3 },
 };
 
 static int count_calls(const char *text)
 {
-    static const char *const tokens[] = { "hook_prepare(", "hook_prepare_rip_lea(",
+    static const char *const tokens[] = { "hook_prepare(", "hook_prepare_rip_lea(", "hook_prepare_rip_load(",
                                           "hook_prepare_relative_call(", "sh_prepare_detour_sig(" };
     int n = 0;
     for (size_t t = 0; t < sizeof tokens / sizeof tokens[0]; t++)

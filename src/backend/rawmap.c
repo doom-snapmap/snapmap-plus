@@ -19,6 +19,7 @@
 #include "backend_log.h"
 #include "modlegacy.h"
 #include "modmanifest.h"
+#include "modpublished.h"
 #include "signatures.h"
 #include "config.h"
 #include "navmesh.h"
@@ -370,11 +371,18 @@ static char *prepare_map_buffer(const char *json)
     return manifest;
 }
 
+/* What kind of read the current parse is (modpublished.h), classified at the
+ * detour's entry by the engine caller's return address. */
+static __declspec(thread) int g_parse_kind;
+
 /* Parse the chosen bytes after preparation and record the map's render settings. */
 static int deser_prepared(const char *json, void *out_map)
 {
     char *prepared = prepare_map_buffer(json);
     int rc = g_deser_orig(prepared ? prepared : json, out_map);
+    /* Beside the manifest the preparation kept: which read this was, the map it
+     * filled, and the text, for the published-map and offline-play gates. */
+    sh_modpublished_parse_seen(g_parse_kind, json, out_map, rc);
     if (rc) sh_map_render_loaded(out_map);
     if (rc) sh_map_bounds_loaded(out_map);
     if (rc) sh_world_area_cell_map_opened();
@@ -385,6 +393,10 @@ static int deser_prepared(const char *json, void *out_map)
 static int sh_deser_detour(const char *json, void *out_map)
 {
     if (g_deser_orig == NULL) return 0;   /* defensive: should never happen once installed */
+    /* The detour is entered by the prologue jump, so this is the engine caller's
+     * return address: PublishedMapRead+0x12A or SnapMapReadSizeLimit+0x5D for a
+     * published read. */
+    g_parse_kind = sh_modpublished_classify(_ReturnAddress());
     sh_map_render_loaded(NULL);
     sh_map_bounds_loaded(NULL);
 
