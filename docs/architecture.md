@@ -793,6 +793,38 @@ main thread only. With an empty `mods\` folder the table is empty and every hook
 above passes through: the differences from a build without mods are the
 `sh_mods` command and its `MODS:` log lines.
 
+Early decls: the provider hook is published after the backend's signature scan,
+about seven seconds into the process, while DOOM's main thread is already
+parsing its boot decls, so whether a given shadow was parsed from the game's
+bytes or the bundle's depends on that race (the boss packs' `aiFSMManager`
+states were served in 3 of 18 boots on 13954591, and 113 and 180 shadows of the
+installed packs lost it in the two boots measured after the fix). Each registration pass therefore
+re-parses, between publishing its sources and running its loads, every served
+shadow decl the provider has never opened and the engine already holds parsed:
+`ResourceGenericLoad` with the state bits cleared, inside process heap 0, which
+reads the bundle's bytes through the provider. Running it after the sources are
+published lets a shadow that names a new identity (an editor `animWeb` naming a
+new `md6Def`) find it; running it before the loads gives a new decl that
+inherits a shadow the bundle's values. A shadow the engine has not parsed yet is
+left to the provider. Each file is settled once; a rescan keeps the mark while
+the bytes are unchanged, also when the open landed in the table it replaced.
+The pass logs `MODS: reparsed <n> <type> decl(s) the engine parsed before the
+serving index (...)` per type and one summary line.
+
+The same race decides what a bundle's requirements mean for a resource: the
+cut-content blacklist gates are applied only at the first registration pass,
+and anything the engine loaded before that resolved its names with the
+blacklists on. A model loaded then keeps no materials and draws nothing: this
+is why the Spider Mastermind body (stock-named mesh, loaded at boot, its
+materials and images on the blacklists) was invisible on 13954591 while its AI
+ran, and why the same bytes under a new mesh name drew. The provider therefore
+records whether a file was first served while one of its bundle's gates was not
+live; a decl first served then is re-parsed by the pass above, and each
+`baseModel` and `image` first served then is loaded again in place, found by
+name in the engine's `idMD6Model` and `idImage` resource lists, once the gates
+are live: `MODS: editor: reloaded <n> model(s) and <m> image(s) loaded before
+their bundles' requirements were live`.
+
 ### Migration of the retired overrides folder
 
 Releases up to v0.2.1-beta.19 kept packages in `overrides\`. At backend start,

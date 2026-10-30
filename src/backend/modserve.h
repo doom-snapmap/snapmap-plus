@@ -163,6 +163,11 @@ typedef struct sh_modserve_engine_ops {
      * registry answers 0 for a stock decl whose source is not registered yet,
      * so the model check asks the archives before withdrawing an animWeb. */
     int (*stock_exists)(void *context, const char *request);
+    /* Optional: called once between the source registrations and the loads,
+     * so shadows the engine parsed before the serving index can be re-parsed
+     * (sh_modserve_each_unopened_shadow) after the new identities they name
+     * have sources and before a new decl that inherits one is parsed. */
+    void (*sources_published)(void *context);
 } sh_modserve_engine_ops;
 
 /* Run a plan: first DeclRegisterFile for every unblocked step whose source is
@@ -412,6 +417,37 @@ int sh_modserve_each_bundle_extra(sh_modserve_extra_fn fn, void *context);
 typedef void (*sh_modserve_file_fn)(void *context, const char *request, uint64_t size, const char *bundle_id,
                                     const char *version, const char *bundle_hash);
 void sh_modserve_each_served(sh_modserve_file_fn fn, void *context);
+
+/* Early decls. The serving index and the provider are published after the
+ * backend's signature scan, while the engine is already parsing boot decls,
+ * so a shadow parsed before then holds the game's bytes. Visit, in plan rank
+ * order, every served shadow decl (type and name in the engine's spelling)
+ * that the provider has never opened and that no earlier visit settled; `fn`
+ * returns 1 when it re-parsed the decl (the file is not offered again) and 0
+ * when the engine has not parsed it yet (offered again at the next pass). A
+ * rescan keeps both marks for files whose bytes did not change. Returns the
+ * number visited. */
+typedef int (*sh_modserve_unopened_fn)(void *context, const char *type, const char *name, const char *request,
+                                       const char *bundle_id);
+int sh_modserve_each_unopened_shadow(sh_modserve_unopened_fn fn, void *context);
+
+/* A bundle's requirement gates (the cut-content blacklists) are applied at
+ * the first registration pass, after DOOM loaded its boot resources: a model
+ * or image served before then was resolved against the blacklists (the Spider
+ * Mastermind mesh held no materials and drew nothing). Visit every served
+ * baseModel and image first opened while one of its bundle's gates was not
+ * live, once those gates are live; `fn` returns 1 when it reloaded the
+ * resource (not offered again). The early-decl visit above also offers decls
+ * first opened before their gates were live. Returns the number visited. */
+int sh_modserve_each_ungated_raw(sh_modserve_unopened_fn fn, void *context);
+
+/* Walk the engine's resource lists (decl_resource_head): fn(context, the
+ * list's class name, the resource, its name). 1 when the walk completed. */
+typedef void (*sh_modserve_resource_fn)(void *context, const char *list_class, void *resource, const char *name);
+int sh_modserve_resource_each(const void *head_slot, sh_modserve_resource_fn fn, void *context);
+
+/* How many times the provider served `request` from the published table. */
+long sh_modserve_open_count(const char *request);
 
 /* Functions called after every table this layer publishes (boot, rescan),
  * on the thread that built it, outside the build lock, in the order they

@@ -38,6 +38,7 @@
 #include <stdio.h>
 #include <stdarg.h>
 #include <string.h>
+#include <stdlib.h>
 #include "modserve.h"
 #include "overrides.h"
 #include "modstock.h"
@@ -266,7 +267,10 @@ static int op_stock_exists(void *context, const char *request)
     return 1;
 }
 
-static const sh_modserve_engine_ops g_ops = { NULL, op_source_registered, op_register_file, op_load, op_stock_exists };
+static void op_sources_published(void *context);
+static const char *g_reparse_phase = "plan";   /* the running pass, for the early-decl lines */
+static const sh_modserve_engine_ops g_ops = { NULL, op_source_registered, op_register_file, op_load, op_stock_exists,
+                                              op_sources_published };
 
 /* ------------------------------------------------------------------ gates */
 
@@ -309,6 +313,7 @@ static int me_run(sh_modserve_plan *plan, const char *phase)
         sh_modserve_plan_block_unmet(plan, &gates);
     }
     if (!sh_process_heap_enter(&g_heap, &heap)) { me_log("%s: process heap scope unavailable; nothing registered", phase); return -1; }
+    g_reparse_phase = phase;
     __try { ready = sh_modserve_plan_run(plan, &g_ops, phase); }
     __finally {
         if (!sh_process_heap_leave(&heap)) { me_log("%s: process heap scope did not balance", phase); ready = -1; }
@@ -428,6 +433,196 @@ int sh_modserve_install(const sig_result *results, size_t count, const uint8_t *
     return g_bound;
 }
 
+/* ------------------------------------------------------------------ early decls */
+
+/* Shadows the engine parsed from its own bytes before the provider existed
+ * (modserve.h, sh_modserve_each_unopened_shadow). Each one the engine holds
+ * parsed is loaded again through ResourceGenericLoad with its state bits
+ * cleared, the sequence op_load uses for a new identity: the load reads the
+ * source through the provider, which now serves the bundle's bytes. One the
+ * engine has not parsed yet is left for the provider. Main thread, inside
+ * process heap 0 (a re-parsed decl lives for the process). */
+#define ME_REPARSE_TYPES 12
+typedef struct me_reparse_type { const char *type; int count; char names[160]; } me_reparse_type;
+typedef struct me_reparse {
+    me_reparse_type types[ME_REPARSE_TYPES];
+    int ntypes, reparsed, through_provider, failed, faulted, pending;
+} me_reparse;
+
+static me_reparse_type *me_reparse_slot(me_reparse *r, const char *type)
+{
+    int i;
+    for (i = 0; i < r->ntypes; ++i) if (!strcmp(r->types[i].type, type)) return &r->types[i];
+    if (r->ntypes == ME_REPARSE_TYPES) return &r->types[ME_REPARSE_TYPES - 1];
+    r->types[r->ntypes].type = type;
+    return &r->types[r->ntypes++];
+}
+
+static int me_reparse_one(void *context, const char *type, const char *name, const char *request, const char *bundle_id)
+{
+    me_reparse *r = (me_reparse *)context;
+    char before[ERROR_TEXT_MAX];
+    int result = 0;
+    (void)bundle_id;
+    me_error_text(before, sizeof before);
+    __try {
+        void *m = me_manager(type), *decl = m ? g_decl(m, name, 0) : NULL;
+        unsigned char *d = (unsigned char *)decl, state;
+        if (!d) return 0;
+        state = d[RES_STATE_OFF];
+        if (state & 2) { r->pending++; return 0; }   /* not parsed yet: the provider will serve it */
+        {
+            me_reparse_type *t = me_reparse_slot(r, type);
+            size_t at = strlen(t->names);
+            d[RES_STATE_OFF] = (unsigned char)(state & ~3);
+            g_generic_load(decl);
+            state = d[RES_STATE_OFF];
+            r->reparsed++;
+            t->count++;
+            if (at < sizeof t->names - 4)
+                _snprintf_s(t->names + at, sizeof t->names - at, _TRUNCATE, "%s%s", at ? ", " : "", name);
+            if (sh_modserve_open_count(request) > 0) r->through_provider++;
+            if (state & 1) {
+                r->failed++;
+                me_log("reparse: %s '%s' (%s) failed to parse the bundle's bytes (state 0x%02x)", type, name,
+                       bundle_id, state);
+            }
+        }
+        result = 1;
+    } __except (me_fault_filter(GetExceptionCode())) {
+        me_log_fault("reparse", type, name, before);
+        r->faulted++;
+        result = 1;   /* not offered again */
+    }
+    return result;
+}
+
+/* Inside process heap 0: from me_run's scope, or entered here. */
+static void me_reparse_early(const char *phase, int in_heap)
+{
+    me_reparse r;
+    sh_process_heap_scope heap = { 0 };
+    double t0 = me_now_ms();
+    int offered = 0, i;
+    if (!g_bound || !sh_modserve_active() || me_on_main() != 1) return;
+    memset(&r, 0, sizeof r);
+    if (!in_heap && !sh_process_heap_enter(&g_heap, &heap)) {
+        me_log("%s: early decls not re-parsed (process heap scope unavailable)", phase);
+        return;
+    }
+    __try { offered = sh_modserve_each_unopened_shadow(me_reparse_one, &r); }
+    __finally {
+        if (!in_heap && !sh_process_heap_leave(&heap)) me_log("%s: early-decl re-parse heap scope did not balance", phase);
+    }
+    if (!r.reparsed && !r.faulted) return;
+    for (i = 0; i < r.ntypes; ++i)
+        me_log("reparsed %d %s decl(s) the engine parsed before the serving index (%s%s)", r.types[i].count,
+               r.types[i].type, r.types[i].names, strlen(r.types[i].names) >= sizeof r.types[i].names - 5 ? ", ..." : "");
+    me_log("%s: early decls: %d re-parsed in %.1f ms (%d read through the provider, %d failed, %d faulted); "
+           "%d of %d unserved shadow(s) not parsed yet", phase, r.reparsed, me_now_ms() - t0, r.through_provider,
+           r.failed, r.faulted, r.pending, offered);
+}
+
+/* Models and images a gated bundle serves that the engine loaded before the
+ * gates were live (modserve.h, sh_modserve_each_ungated_raw): each one the
+ * resource lists hold is loaded again in place, which resolves its materials
+ * and pixels with the blacklists off. Matched by name within the list of its
+ * class (idMD6Model, idImage), since a material and an image can share one. */
+#define ME_RAW_MAX 4096
+typedef struct me_raw_name { const char *name; int image; int hit; } me_raw_name;
+typedef struct me_raw {
+    me_raw_name *names; int n, cap;
+    int reloaded, models, images, failed, faulted;
+    char first[700];
+} me_raw;
+
+static int me_raw_collect(void *context, const char *type, const char *name, const char *request, const char *bundle_id)
+{
+    me_raw *r = (me_raw *)context;
+    (void)request; (void)bundle_id;
+    if (r->n < r->cap) {
+        r->names[r->n].name = name;
+        r->names[r->n].image = !_stricmp(type, "image");
+        r->names[r->n].hit = 0;
+        r->n++;
+    }
+    return 0;
+}
+
+static int me_raw_settle(void *context, const char *type, const char *name, const char *request, const char *bundle_id)
+{
+    (void)context; (void)type; (void)name; (void)request; (void)bundle_id;
+    return 1;
+}
+
+static void me_raw_one(void *context, const char *list_class, void *resource, const char *name)
+{
+    me_raw *r = (me_raw *)context;
+    int i, image;
+    if (!list_class) return;
+    if (!_stricmp(list_class, "idImage")) image = 1;
+    else if (!_stricmp(list_class, "idMD6Model")) image = 0;
+    else return;
+    for (i = 0; i < r->n; ++i) {
+        unsigned char *d;
+        if (r->names[i].hit || r->names[i].image != image || _stricmp(r->names[i].name, name)) continue;
+        r->names[i].hit = 1;
+        d = (unsigned char *)resource;
+        __try {
+            if (d[RES_STATE_OFF] & 2) return;   /* not loaded: its next load sees the live gates */
+            d[RES_STATE_OFF] = (unsigned char)(d[RES_STATE_OFF] & ~3);
+            g_generic_load(resource);
+            if (d[RES_STATE_OFF] & 1) r->failed++;
+            r->reloaded++;
+            if (image) r->images++; else r->models++;
+            if (strlen(r->first) + strlen(name) + 3 < sizeof r->first)
+                _snprintf_s(r->first + strlen(r->first), sizeof r->first - strlen(r->first), _TRUNCATE, "%s%s",
+                            r->first[0] ? ", " : "", name);
+        } __except (me_fault_filter(GetExceptionCode())) {
+            r->faulted++;
+            me_log("reload: %s '%s' FAULTED (exception 0x%08lx)", list_class, name, (unsigned long)g_fault_code);
+        }
+        return;
+    }
+}
+
+static void me_reload_ungated(const char *phase, int in_heap)
+{
+    me_raw r;
+    sh_process_heap_scope heap = { 0 };
+    double t0 = me_now_ms();
+    if (!g_bound || !g_res_head || !sh_modserve_active() || me_on_main() != 1) return;
+    memset(&r, 0, sizeof r);
+    r.cap = ME_RAW_MAX;
+    r.names = (me_raw_name *)calloc((size_t)r.cap, sizeof *r.names);
+    if (!r.names) return;
+    (void)sh_modserve_each_ungated_raw(me_raw_collect, &r);
+    if (!r.n) { free(r.names); return; }
+    if (!in_heap && !sh_process_heap_enter(&g_heap, &heap)) {
+        me_log("%s: gated models and images not reloaded (process heap scope unavailable)", phase);
+        free(r.names);
+        return;
+    }
+    __try { (void)sh_modserve_resource_each(g_res_head, me_raw_one, &r); }
+    __finally {
+        if (!in_heap && !sh_process_heap_leave(&heap)) me_log("%s: gated reload heap scope did not balance", phase);
+    }
+    (void)sh_modserve_each_ungated_raw(me_raw_settle, NULL);
+    me_log("%s: reloaded %d model(s) and %d image(s) loaded before their bundles' requirements were live in %.1f ms "
+           "(%d failed, %d faulted; %d of %d not held)%s%s%s", phase, r.models, r.images, me_now_ms() - t0, r.failed,
+           r.faulted, r.n - r.reloaded - r.faulted, r.n, r.first[0] ? ": " : "", r.first,
+           r.reloaded > 0 && strlen(r.first) + 40 >= sizeof r.first ? ", ..." : "");
+    free(r.names);
+}
+
+/* The plan's sources are registered; its loads have not run (me_run). */
+static void op_sources_published(void *context)
+{
+    (void)context;
+    me_reparse_early(g_reparse_phase, 1);
+    me_reload_ungated(g_reparse_phase, 1);
+}
+
 /* ------------------------------------------------------------------ palette */
 
 /* Keep the decls an editor row points at for the session (modserve.h,
@@ -480,7 +675,13 @@ void sh_modserve_palette_before_build(void)
     me_ensure_probe();
     t0 = me_now_ms();
     if (sh_modserve_plan_editor(&plan) < 0) { me_log("editor rows: plan refused (out of memory)"); return; }
-    if (!plan.count) { sh_modserve_plan_free(&plan); if (first) me_log("editor rows registered in 0.0 ms (0 rows)"); return; }
+    if (!plan.count) {
+        sh_modserve_plan_free(&plan);
+        me_reparse_early("editor", 0);
+        me_reload_ungated("editor", 0);
+        if (first) me_log("editor rows registered in 0.0 ms (0 rows)");
+        return;
+    }
     /* Everything the pass creates from here on is the rows' closure. */
     if (!g_res_head || !sh_modserve_watermark_take(g_res_head, &mark))
         me_log("editor: resource watermark unavailable (%s); only the decls rows name are kept",
@@ -674,7 +875,8 @@ int modserve_activate_bundles(const char *const *bundle_hashes, int n)
     me_ensure_probe();
     t0 = me_now_ms();
     if (sh_modserve_plan_bundles(bundle_hashes, n, &plan, &unknown) < 0) { me_log("activation refused: out of memory"); return -1; }
-    ready = plan.count ? me_run(&plan, "map") : 0;
+    if (plan.count) ready = me_run(&plan, "map");
+    else { me_reparse_early("map", 0); me_reload_ungated("map", 0); ready = 0; }
     me_log("activated %d bundles (%d steps, %d ready, %d blocked, %d not installed) in %.1f ms", n - unknown,
            plan.count, ready < 0 ? 0 : ready, plan.blocked, unknown, me_now_ms() - t0);
     sh_modserve_plan_free(&plan);
