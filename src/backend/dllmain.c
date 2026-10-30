@@ -28,6 +28,7 @@
 #include "timeline_tile.h"
 #include "modserve.h"
 #include "modpublished.h"
+#include "modpublish.h"
 #include "budget_table.h"
 #include "map_render.h"
 #include "settings_tab.h"
@@ -448,6 +449,7 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
          * missing bundle is held for the native Yes/No, needs the parse
          * detour's classification and the dialog binding above. */
         (void)sh_modpublished_install(results, db, g_doom_base);
+        (void)sh_modpublish_install(results, db, g_doom_base);   /* upload at publish, claims, copy gate */
 
         /* Bind dependencies for the already-registered entity commands. */
         sh_entity_install(results, db, g_doom_base, cmdsys);

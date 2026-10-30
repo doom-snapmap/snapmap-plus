@@ -70,6 +70,15 @@ Checks native helpers, engine-interface contracts, frontend JavaScript and optio
 - `modnet_test.c`, `modsync_test.c` and `modexport_test.c` cover the store client, the upload,
   download, release and retry flows, and the rawmap ZIP export and import against a loopback stub
   of the store (`mod_store_stub.h`); no real network is used.
+- `modpublish_test.c` checks the publish side against the loopback stub with
+  engine doubles: a save without rows passing through, the over-bound refusal,
+  the first-time question (No cancels and leaves the setting, Yes sets it,
+  uploads and resumes, the toast route agrees on the next publish), a failed
+  upload cancelling, the editor leaving and another save, the claim at the
+  feed post with and without a stored secret, a republish replacing the set,
+  release on a republish without mods and on unpublish, the copy gate on both
+  sides of the bound, and the launch step settling provisional refs and
+  retrying the queue.
 - `mod_seam_stub.c` stands in for the serving layer and the builder entry in
   tests that link the map manifest or the legacy converter without them.
 - `modbundle_test.c` builds `fixtures\mods\alex.r2-imp` and pins its bundle

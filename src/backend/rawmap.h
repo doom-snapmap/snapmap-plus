@@ -59,6 +59,11 @@ unsigned long sh_rawmap_swap_complete_count(void);
  */
 int sh_rawmap_save_install(void *serialize_fn, int serialize_status_ok);
 
+/* Observe every successful save's final text (after the manifest rows are
+ * written), on the thread that saved. One observer; NULL removes it. */
+typedef void (*sh_rawmap_save_observer)(const char *text, size_t length);
+void sh_rawmap_set_save_observer(sh_rawmap_save_observer observer);
+
 /* Resolve native idStr assignment for navigation embedding. Without
  * it, save-output replacement is unavailable.
  */

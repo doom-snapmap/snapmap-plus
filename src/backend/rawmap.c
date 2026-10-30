@@ -587,6 +587,12 @@ unsigned long sh_rawmap_swap_complete_count(void)
 typedef unsigned char (*serialize_fn_t)(void *map, void *out_idstr, unsigned char compact);
 
 static serialize_fn_t g_ser_orig = NULL;   /* the trampoline -> the real engine SerializeToJson */
+static sh_rawmap_save_observer volatile g_save_observer;   /* modpublish.c: the text a publish sends */
+
+void sh_rawmap_set_save_observer(sh_rawmap_save_observer observer)
+{
+    g_save_observer = observer;
+}
 static __declspec(thread) int g_snapshot_depth;
 static __declspec(thread) sh_rawmap_snapshot_visit g_snapshot_visit;
 static __declspec(thread) void *g_snapshot_visit_ctx;
@@ -1313,6 +1319,11 @@ static unsigned char sh_ser_detour(void *map, void *out_idstr, unsigned char com
 
     /* The map manifest goes last so its rows are the final string variables. */
     manifest_on_save(out_idstr);
+    if (g_save_observer) {
+        const char *saved = NULL;
+        int saved_len = 0;
+        if (read_out_idstr(out_idstr, &saved, &saved_len)) g_save_observer(saved, (size_t)saved_len);
+    }
 
     /* Refresh navigation regions from the final serialized map. */
     nav_regions_on_save(out_idstr);

@@ -149,6 +149,12 @@ Converting assets from other games is Doomforge's job, not this product's. New n
   inert strings. A mod the map names but this machine does not have is logged as not installed and
   nothing activates for it until it is fetched. Uploads happen only when a map is published; plain
   saves never upload, and an exported rawmap ZIP carries its mods itself.
+- Publishing a map that uses mods uploads those mods to the mod store first, so other players can
+  download them; the first time, the game asks once (the `mods.upload_confirmed` setting records
+  the answer), and No leaves the map unpublished. A map over the map service's 10 MB limit is
+  refused before anything is sent. Unpublishing a map releases its mods on the store; deleting a
+  map from My Maps does not, because its published copy stays available. A published map over the
+  limit cannot be copied to My Maps.
 - The store the product talks to is the `mods.store` setting (default `https://api.snapmapplus.com`;
   https, or http only for a loopback host). A change applies to the next request, not the next launch.
 - Playing a published map (or a My Maps map) that names a mod this machine does not have asks first,
