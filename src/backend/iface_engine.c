@@ -32,6 +32,7 @@
 #include "timeline_tile.h"
 #include "budget_table.h"
 #include "modui.h"
+#include "process_heap_scope.h"
 #include "modserve.h"
 #include "modpublish.h"
 #include "engine_build.h"
@@ -1339,10 +1340,24 @@ static int ie_mods_delete(const int *ids, int count)
     return sh_editor_delete_batch(ids, count, NULL);
 }
 
+/* The idStr assignments that shift the tag list can reallocate an entry. The
+ * list lives in the edit, which outlives Play, so they run on the process heap:
+ * a console command's current heap is the map heap, which Play releases. */
+static sh_process_heap_api g_mods_heap;
+
 static int ie_mods_remove_tag(const char *tag)
 {
+    sh_process_heap_scope scope;
     void *edit = ie_mods_edit();
-    return edit ? sh_modpublish_edit_tag(edit, tag, 1) : -1;
+    int r;
+    if (!edit) return -1;
+    if (!sh_process_heap_enter(&g_mods_heap, &scope)) return -1;
+    r = sh_modpublish_edit_tag(edit, tag, 1);
+    if (!sh_process_heap_leave(&scope)) {
+        backend_log("MODS: the process-heap scope could not be restored after the tag edit");
+        return -1;
+    }
+    return r;
 }
 
 /* Play, or a map between load states: the tab's changes wait. */
@@ -1439,6 +1454,7 @@ int sh_iface_engine_install(const sig_result *results, size_t n, const uint8_t *
         mods.map_json        = ie_mods_map_json;
         mods.map_info        = ie_mods_map_info;
         mods.delete_entities = ie_mods_delete;
+        (void)sh_process_heap_bind(&g_mods_heap, results, n, module_base); /* unbound: the tag edit refuses */
         mods.remove_tag      = ie_mods_remove_tag;
         mods.busy            = ie_mods_busy;
         sh_modui_bind(&mods);

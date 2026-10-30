@@ -306,7 +306,13 @@ and calls the engine's Delete Selection. The engine checks eligibility,
 releases the entities and empties the selection; the "Delete Selection" undo
 step and the return to idle follow on later native frames. Until they do, the
 selection guard refuses product selection writes and reports `2`. Every refusal
-before the action restores the previous selection. Portal doors and frames are
+before the action restores the previous selection. The selection setup and the
+action run inside a verified process-heap scope, as the Delete key runs inside
+the editor frame: they grow the selected-ID array and the wire animation list,
+which outlive the call, and on a console command's map heap Play would release
+them under the editor, so the next Ctrl+Z, which frees the selected-ID array,
+stopped DOOM with "Memory corruption before block!". A request whose scope
+cannot be verified is refused unchanged. Portal doors and frames are
 refused before anything changes. The page edits its own selection and announces
 success only from the returned status.
 
@@ -1047,7 +1053,7 @@ built:
 
 Remove from map deletes the mod's entities through `sh_editor_delete_batch`,
 DOOM's own Delete Selection, in one batch: one native undo step that Ctrl+Z
-reverts. The native delete drops the wires to the entities with them (a save
+reverts, before or after a Play round, from the tab or from `sh_mods map remove`. The native delete drops the wires to the entities with them (a save
 right after shows no connection to a deleted entity), so the product severs
 nothing itself; an entity the editor would ask about (its referenced-entity
 confirmation) is refused, with the whole request, before anything changes.
@@ -1056,7 +1062,8 @@ live: the dry run lists it, and the next save is the engine's own. Then the mod'
 current manifest record (`sh_modmanifest_current_remove`); the next save
 rebuilds the rows from the placed entities and writes none for it. With the
 last mod, the search tag `mods` is removed from the editor's tag list
-(`sh_modpublish_edit_tag`, the engine's own idStr assignment); the published
+(`sh_modpublish_edit_tag`, the engine's own idStr assignment, run on the process
+heap because the console command's own heap does not survive Play); the published
 copy is unchanged until the map is published again. A mod placed as
 Blueprint modules, or reached only through another mod's needs, is refused
 with the cause. Uninstall runs that on the open map first, then removes the

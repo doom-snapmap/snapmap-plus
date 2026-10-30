@@ -22,6 +22,18 @@
  * Selection substate's commit phase and rebuilds capabilities. The following
  * EntityMode updates finish the deletion natively: they wait for the wire
  * animation, commit the undo step "Delete Selection" and return to idle.
+ *
+ * Heap scope. The native key runs all of this inside the editor frame, which
+ * has pushed heap 0 (the process heap). AddToSelection grows the selected-ID
+ * array at selection+0x80 (idList growth through the current heap), and the
+ * action grows the wire animation list at EntityMode+0x128+0x30 and the
+ * editor's sound-event list; both outlive the call. Run from a console
+ * command the current heap is the map heap: Play releases it, and the next
+ * Ctrl+Z, whose undo step first frees selection+0x50/+0x68/+0x80/+0xA8
+ * (13954591 Vulkan RVA 0x117E0C0, called from 0x1203DB0), frees the released array and the
+ * allocator stops DOOM with "Memory corruption before block!". So every
+ * native call from the selection setup to the action runs in a verified
+ * process-heap scope, and a request without one is refused unchanged.
  */
 #include <windows.h>
 #include <stdlib.h>
@@ -32,6 +44,7 @@
 #include <stdio.h>
 #include "engine_globals.h"
 #include "backend_log.h"
+#include "process_heap_scope.h"
 #endif
 
 /* Editor object. Field layouts are identical in both executables. */
@@ -166,7 +179,7 @@ int sh_editor_delete_bind(const sh_editor_delete_engine *engine)
     g_bound = 0;
     if (!engine || !engine->editor || !engine->clear_selection || !engine->add_to_selection ||
         !engine->clear_hover || !engine->refresh_capabilities || !engine->blocked ||
-        !engine->delete_selection)
+        !engine->delete_selection || !engine->heap_enter || !engine->heap_leave)
         return 0;
     g_engine = *engine;
     g_bound = 1;
@@ -208,6 +221,7 @@ static int portal_owned(uint8_t *map, size_t list_off, int id)
 /* Everything the dispatch decided, so a refusal can restore it. */
 typedef struct ed_ctx {
     uint8_t *ed, *map, *sel, *mode, *selection_sub;
+    int heap_scoped;
     uint8_t *ents;
     uint32_t ent_count;
     int cur;
@@ -342,6 +356,14 @@ static int batch(const int *ids, int count, sh_editor_delete_result *r)
             }
     }
 
+    /* The native calls below allocate editor-owned storage; they run on the
+     * process heap, as inside the editor frame, or not at all. */
+    if (!g_engine.heap_enter()) {
+        status = SH_EDITOR_DELETE_NOT_READY;
+        goto done;
+    }
+    c.heap_scoped = 1;
+
     /* From here every refusal restores the snapshot. */
     int ok = call_clear_selection(c.sel);
     for (int i = 0; ok && i < ntargets; i++) ok = call_add(c.sel, targets[i]);
@@ -401,6 +423,8 @@ static int batch(const int *ids, int count, sh_editor_delete_result *r)
     status = r->released == ntargets ? SH_EDITOR_DELETE_DISPATCHED : SH_EDITOR_DELETE_INCOMPLETE;
 
 done:
+    if (c.heap_scoped && !g_engine.heap_leave() && status != SH_EDITOR_DELETE_DISPATCHED)
+        status = SH_EDITOR_DELETE_FAULT;
     free(c.prior);
     free(targets);
     free(bits);
@@ -473,6 +497,17 @@ uintptr_t sh_editor_delete_decode_clear_hover(const uint8_t *action, const uint8
 
 #ifndef SH_EDITOR_DELETE_TESTING
 static const uint8_t *g_main_thread_at;
+static sh_process_heap_api g_heap_api;
+static sh_process_heap_scope g_heap_scope;   /* main thread only; batch() does not nest */
+
+static int heap_enter(void) { return sh_process_heap_enter(&g_heap_api, &g_heap_scope); }
+
+static int heap_leave(void)
+{
+    if (sh_process_heap_leave(&g_heap_scope)) return 1;
+    backend_log("editor delete: the process-heap scope could not be restored after a delete");
+    return 0;
+}
 
 static int on_main_thread(void)
 {
@@ -509,15 +544,20 @@ int sh_editor_delete_install(const sig_result *results, size_t n, const uint8_t 
     e.blocked = (unsigned char (*)(void *, uint32_t))sig_addr_by_name(results, n, "GridPropertiesBlocked");
     e.delete_selection = (void (*)(void *, void *, void *))action;
     e.manipulation_in_progress = manipulation_in_progress;
+    if (sh_process_heap_bind(&g_heap_api, results, n, module_base)) {
+        e.heap_enter = heap_enter;
+        e.heap_leave = heap_leave;
+    }
     if (module_base) g_main_thread_at = (const uint8_t *)glb_resolve(module_base, "main_thread_id", NULL);
     e.on_main_thread = on_main_thread;
     int bound = g_main_thread_at && sh_editor_delete_bind(&e);
     if (!bound) sh_editor_delete_bind(NULL);
     _snprintf_s(line, sizeof line, _TRUNCATE,
-        "editor delete: %s (action=%p caps=%p clear_hover=%p blocked=%p add=%p clear=%p main=%p)",
+        "editor delete: %s (action=%p caps=%p clear_hover=%p blocked=%p add=%p clear=%p main=%p heap=%p)",
         bound ? "native Delete Selection bound" : "unavailable; window deletion refuses",
         (void *)action, (void *)e.refresh_capabilities, (void *)clear, (void *)e.blocked,
-        (void *)e.add_to_selection, (void *)e.clear_selection, (void *)g_main_thread_at);
+        (void *)e.add_to_selection, (void *)e.clear_selection, (void *)g_main_thread_at,
+        (void *)g_heap_api.push);
     backend_log(line);
     return bound;
 }

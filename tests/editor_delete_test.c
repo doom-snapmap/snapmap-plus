@@ -95,6 +95,13 @@ enum { C_CLEAR_SEL = 1, C_ADD_SEL, C_CLEAR_HOVER, C_CAPS, C_BLOCKED, C_DELETE, C
        C_ACTION_CLEAR_HOVER, C_EXIT_EMPTY, C_ENTER_EMPTY, C_EXIT_SELECTION, C_ENTER_SELECTION,
        C_COMMIT, C_SET_IDLE };
 static int g_log[512], g_nlog;
+/* Heap scope. DOOM grows idLists on the calling thread's current heap; a
+ * console command runs on the map heap, which Play releases. The model tags
+ * each selected-ID array growth with the heap it landed on. */
+static int g_heap_depth, g_heap_enters, g_heap_leaves, g_heap_enter_fails, g_heap_leave_fails;
+static int g_unscoped_calls;    /* native calls the adapter made outside its process-heap scope */
+static int g_sel_alloc_cap;     /* capacity of the modelled selected-ID array */
+static int g_sel_buf_on_map;    /* 1 when its last growth ran outside the process-heap scope */
 static int g_caps_calls;
 static int g_commits;
 static int g_destroyed[T_ENTITIES], g_ndestroyed;
@@ -149,6 +156,8 @@ static void world_reset(void)
     g_force_referenced = 0; g_fault_caps_after = 0; g_fault_delete = 0; g_action_skips_id = -1;
     g_nlog = 0; g_caps_calls = 0; g_commits = 0; g_ndestroyed = 0;
     g_hover_at_delete = -2; g_count_at_delete = -1; g_cur_at_delete = -1;
+    g_heap_depth = 0; g_heap_enters = 0; g_heap_leaves = 0; g_heap_enter_fails = 0; g_heap_leave_fails = 0;
+    g_unscoped_calls = 0; g_sel_alloc_cap = 1; g_sel_buf_on_map = 0;
 }
 
 /* ------------------------------------------------------- native doubles -- */
@@ -175,6 +184,7 @@ static void fake_clear_selection(void *sel)
 {
     CHECK(sel == g_sel);
     logc(C_CLEAR_SEL);
+    if (g_heap_depth != 1) g_unscoped_calls++;
     *i32(g_sel, T_SEL_COUNT) = 0;
 }
 
@@ -191,6 +201,11 @@ static unsigned char fake_add_to_selection(void *sel, uint32_t id)
 {
     CHECK(sel == g_sel);
     logc(C_ADD_SEL);
+    if (g_heap_depth != 1) g_unscoped_calls++;
+    if (sel_count() >= g_sel_alloc_cap && !sel_has((int)id)) {   /* idList growth */
+        g_sel_alloc_cap *= 2;
+        g_sel_buf_on_map = g_heap_depth == 0;
+    }
     return model_add((int)id);
 }
 
@@ -258,6 +273,7 @@ static void fake_delete(void *substate, void *m, void *editor)
 {
     CHECK(substate == selsub() && m == mode() && editor == g_ed);
     logc(C_DELETE);
+    if (g_heap_depth != 1) g_unscoped_calls++;
     g_hover_at_delete = hover(); g_count_at_delete = sel_count(); g_cur_at_delete = cur();
     if (g_fault_delete) RaiseException(EXCEPTION_ACCESS_VIOLATION, 0, 0, NULL);
     uint8_t caps = *(uint8_t *)(selsub() + T_SELSUB_CAPS);
@@ -275,6 +291,20 @@ static void fake_delete(void *substate, void *m, void *editor)
 }
 
 static int fake_on_main(void) { return g_on_main; }
+static int fake_heap_enter(void)
+{
+    g_heap_enters++;
+    if (g_heap_enter_fails) return 0;
+    g_heap_depth++;
+    return 1;
+}
+static int fake_heap_leave(void)
+{
+    g_heap_leaves++;
+    if (g_heap_leave_fails) return 0;
+    g_heap_depth--;
+    return 1;
+}
 static int fake_manipulation(void) { return g_manipulating; }
 
 /* ------------------------------------------------------- native frames -- */
@@ -359,6 +389,8 @@ static void bind_model(void)
     e.delete_selection = fake_delete;
     e.on_main_thread = fake_on_main;
     e.manipulation_in_progress = fake_manipulation;
+    e.heap_enter = fake_heap_enter;
+    e.heap_leave = fake_heap_leave;
     CHECK(sh_editor_delete_bind(&e) == 1);
 }
 
@@ -867,6 +899,90 @@ static void decode_rejects_wrong_shape_extra_site_and_out_of_image(void)
     CHECK(sh_editor_delete_decode_clear_hover(NULL, g_image, sizeof g_image) == 0);
 }
 
+/* The selected-ID array and the action's lists outlive the call, so every
+ * native call runs on the process heap, as inside DOOM's editor frame. A
+ * console command's map heap is what Play releases before Ctrl+Z frees the
+ * array ("Memory corruption before block!"). */
+static void native_calls_run_inside_the_process_heap_scope(void)
+{
+    world_reset(); bind_model();
+    int one[] = { 9 };
+    select_natively(one, 1, 9);                    /* one native slot: the batch must grow it */
+    int ids[] = { 3, 4, 5 };
+    sh_editor_delete_result r;
+    CHECK(run(ids, 3, &r) == SH_EDITOR_DELETE_DISPATCHED);
+    CHECK(g_sel_alloc_cap >= 3 && g_sel_buf_on_map == 0);
+    CHECK(g_unscoped_calls == 0);
+    CHECK(g_heap_enters == 1 && g_heap_leaves == 1 && g_heap_depth == 0);
+    model_frame();
+    CHECK(g_commits == 1 && g_null_reads == 0);
+}
+
+static void unverified_heap_scope_refuses_before_any_engine_mutation(void)
+{
+    world_reset(); bind_model();
+    int prior[] = { 8 };
+    select_natively(prior, 1, 8);
+    g_heap_enter_fails = 1;
+    int ids[] = { 3, 4 };
+    sh_editor_delete_result r;
+    CHECK(run(ids, 2, &r) == SH_EDITOR_DELETE_NOT_READY);
+    CHECK(log_count(C_CLEAR_SEL) == 0 && log_count(C_ADD_SEL) == 0 && log_count(C_DELETE) == 0);
+    CHECK(log_count(C_CLEAR_HOVER) == 0 && log_count(C_CAPS) == 0);
+    CHECK(alive(3) && alive(4) && sel_count() == 1 && g_sel_ids[0] == 8 && hover() == 8);
+    CHECK(cur() == T_SELECTED && g_heap_leaves == 0 && g_heap_depth == 0);
+    CHECK(r.rolled_back == 0 && r.released == 0);
+}
+
+static void refusal_inside_the_scope_still_leaves_it(void)
+{
+    world_reset(); bind_model();
+    *(uint32_t *)(g_slots[4] + T_SLOT_RESTRICT) = 4;      /* protected */
+    int ids[] = { 3, 4 };
+    sh_editor_delete_result r;
+    CHECK(run(ids, 2, &r) == SH_EDITOR_DELETE_PROTECTED);
+    CHECK(r.rolled_back == 1 && g_unscoped_calls == 0);
+    CHECK(g_heap_enters == 1 && g_heap_leaves == 1 && g_heap_depth == 0);
+}
+
+static void unrestored_scope_turns_a_refusal_into_a_fault(void)
+{
+    world_reset(); bind_model();
+    *(uint32_t *)(g_slots[4] + T_SLOT_RESTRICT) = 4;
+    g_heap_leave_fails = 1;
+    int ids[] = { 4 };
+    sh_editor_delete_result r;
+    CHECK(run(ids, 1, &r) == SH_EDITOR_DELETE_FAULT && r.status == SH_EDITOR_DELETE_FAULT);
+    /* A dispatched delete happened; its status stays dispatched. */
+    world_reset(); bind_model();
+    g_heap_leave_fails = 1;
+    int ok_ids[] = { 3 };
+    CHECK(run(ok_ids, 1, &r) == SH_EDITOR_DELETE_DISPATCHED && !alive(3));
+}
+
+static void binding_requires_the_heap_scope(void)
+{
+    sh_editor_delete_engine e;
+    memset(&e, 0, sizeof e);
+    e.editor = g_ed;
+    e.clear_selection = fake_clear_selection;
+    e.add_to_selection = fake_add_to_selection;
+    e.clear_hover = fake_clear_hover;
+    e.refresh_capabilities = fake_caps;
+    e.blocked = fake_blocked;
+    e.delete_selection = fake_delete;
+    CHECK(sh_editor_delete_bind(&e) == 0);
+    e.heap_enter = fake_heap_enter;
+    CHECK(sh_editor_delete_bind(&e) == 0);
+    e.heap_leave = fake_heap_leave;
+    CHECK(sh_editor_delete_bind(&e) == 1);
+    int ids[] = { 3 };
+    sh_editor_delete_result r;
+    world_reset();
+    CHECK(sh_editor_delete_bind(&e) == 1);
+    CHECK(run(ids, 1, &r) == SH_EDITOR_DELETE_DISPATCHED);
+}
+
 int main(void)
 {
     legacy_leaf_loop_reaches_stale_hover_consumer();
@@ -899,6 +1015,11 @@ int main(void)
     native_pending_tracks_native_owners();
     decode_finds_the_action_callee();
     decode_rejects_wrong_shape_extra_site_and_out_of_image();
+    native_calls_run_inside_the_process_heap_scope();
+    unverified_heap_scope_refuses_before_any_engine_mutation();
+    refusal_inside_the_scope_still_leaves_it();
+    unrestored_scope_turns_a_refusal_into_a_fault();
+    binding_requires_the_heap_scope();
     if (failed) { fprintf(stderr, "editor_delete_test: %d check(s) failed\n", failed); return 1; }
     printf("editor_delete_test: all checks passed\n");
     return 0;
