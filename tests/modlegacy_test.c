@@ -604,6 +604,63 @@ static void completeness_and_digest(void)
     free(zip);
 }
 
+/* Files a bundle cannot carry are left out, not fatal; a delivery key
+ * memoises its conversion across ZIP encodings. */
+static void left_out_members(void)
+{
+    static const zmember m[] = {
+        { "package.json", "{\"id\": \"lo.pack\", \"name\": \"Left out\", \"requirements\": {\"cvars\": "
+                          "{\"g_useImageBlackList\": 0, \"sv_cheats\": \"1\"}}}", 0 },
+        { "assets/generated/decls/entitydef/lo/kept.decl", "{\r\n\tinherit = \"monster/imp\";\r\n}", 1 },
+        { "assets/cooked/model/models/lo/door.materials.txt", "textures/door\n", 0 },
+        { "assets/generated/decls/entitydef/lo/empty.decl", "", 0 },
+    };
+    static const char KEY[] = "delivery.1111111111111111111111111111111111111111111111111111111111111111";
+    unsigned char *zip, *zip2;
+    size_t zn, zn2, mn, on = 0;
+    char *map, *out, path[MAX_PATH * 2], *text;
+    sh_modlegacy_verdict v[2], first;
+    int builds;
+    printf("-- members a bundle cannot carry are left out; a delivery key memoises across encodings\n");
+    sh_modlegacy_reset();
+    reset_counts();
+    zip = zip_build(m, 4, 0, &zn);
+    map = carrier_map(BASE_MAP, KEY, zip, zn, 8192, -1, -1, NULL, &mn);
+    g_build_calls = 0;
+    out = sh_modlegacy_process(map, mn, &on);
+    CHECK(out && sh_modlegacy_last_report(v, 2) == 1 && v[0].verdict == SH_MODLEGACY_CONVERT);
+    CHECK(v[0].files == 1 && v[0].skipped == 2 && strstr(v[0].first_skipped, "materials.txt"));
+    CHECK(file_exists_at(v[0].folder, "assets/generated/decls/entitydef/lo/kept.decl") &&
+          !file_exists_at(v[0].folder, "assets/cooked/model/models/lo/door.materials.txt") &&
+          !file_exists_at(v[0].folder, "assets/generated/decls/entitydef/lo/empty.decl"));
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\mod.json", v[0].folder);
+    text = read_all(path, NULL);
+    CHECK(text && strstr(text, "\"g_useImageBlackList\": \"0\"") && !strstr(text, "sv_cheats"));
+    free(text);
+    first = v[0];
+    if (out) HeapFree(GetProcessHeap(), 0, out);
+    HeapFree(GetProcessHeap(), 0, map);
+    /* The same tree in another ZIP (the decl stored instead of deflated): a new
+     * digest, the same key; a fresh process finds the folder by its key. */
+    {
+        zmember m2[4];
+        memcpy(m2, m, sizeof m2);
+        m2[1].deflate = 0;
+        zip2 = zip_build(m2, 4, 0, &zn2);
+    }
+    sh_modlegacy_reset();
+    builds = g_build_calls;
+    map = carrier_map(BASE_MAP, KEY, zip2, zn2, 8192, -1, -1, NULL, &mn);
+    out = sh_modlegacy_process(map, mn, &on);
+    CHECK(out && sh_modlegacy_last_report(v, 2) == 1 && v[0].verdict == SH_MODLEGACY_CONVERT &&
+          strcmp(v[0].digest, first.digest) && !strcmp(v[0].folder, first.folder) && !strcmp(v[0].bundle, first.bundle));
+    CHECK(g_build_calls == builds);
+    if (out) HeapFree(GetProcessHeap(), 0, out);
+    HeapFree(GetProcessHeap(), 0, map);
+    free(zip);
+    free(zip2);
+}
+
 static void convert_era_c(void)
 {
     unsigned char *zip;
@@ -730,7 +787,7 @@ static void convert_era_b(void)
         _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\mod.json", folder);
         text = read_all(path, NULL);
         CHECK(text && strstr(text, "\"id\": \"testpack\"") && strstr(text, "\"name\": \"testpack\""));
-        CHECK(text && strstr(text, "\"g_useResourceBlackList\": 0") && !strstr(text, "sv_cheats"));
+        CHECK(text && strstr(text, "\"g_useResourceBlackList\": \"0\"") && !strstr(text, "sv_cheats"));
         CHECK(text && strstr(text, "\"testpack_title\": \"Foo\""));
         CHECK(text && strstr(text, "\"weapon/testpack/gun\""));
         CHECK(text && strstr(text, "\"description\": \"old pack\"") && !strstr(text, "priority") &&
@@ -876,6 +933,14 @@ static void fixtures(void)
         return;
     }
     sh_modlegacy_reset();
+    /* A data root of its own: the synthetic carriers above reuse a real
+     * delivery key, and a delivery key memoises its conversion. */
+    {
+        char own[MAX_PATH];
+        _snprintf_s(own, sizeof own, _TRUNCATE, "%s\\fixtures", g_root);
+        CreateDirectoryA(own, NULL);
+        sh_modlegacy_set_data_root(own);
+    }
     g_echo = 1;
     for (i = 0; i < sizeof maps / sizeof maps[0]; i++) {
         size_t n = 0, on = 0;
@@ -917,6 +982,7 @@ static void fixtures(void)
         free(text);
     }
     g_echo = 0;
+    sh_modlegacy_set_data_root(g_root);
 }
 
 int main(void)
@@ -934,6 +1000,7 @@ int main(void)
     completeness_and_digest();
     convert_era_c();
     convert_era_b();
+    left_out_members();
     clean_verdicts();
     unreleased_rows();
     fixtures();
