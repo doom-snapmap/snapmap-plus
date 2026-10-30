@@ -1899,6 +1899,39 @@ static int eng_bind(const sig_result *results, size_t count, const uint8_t *base
     return 1;
 }
 
+/* The edit's own tag list (edit+0x998, the model the next local save writes,
+ * idList<idStr>). remove 0: 1 when `tag` is present, 0 absent, -1 unreadable.
+ * remove 1: the entries after it move down one through the engine's idStr
+ * assignment (the one PublishStart uses) and num shrinks by one, leaving the
+ * last slot constructed for the list's own destructor: 1 removed, 0 absent,
+ * -1 failed. Main thread. */
+int sh_modpublish_edit_tag(void *edit, const char *tag, int remove)
+{
+    char have[64];
+    int result = -1;
+    if (!edit || !tag) return -1;
+    if (remove && (!InterlockedCompareExchange(&g_eng.ready, 0, 0) || !g_eng.idstr_assign)) return -1;
+    __try {
+        uint8_t *list = (uint8_t *)edit + ENG_EDIT_TAGS, *data = *(uint8_t **)list;
+        int num = *(int *)(list + 8), size = *(int *)(list + 0xC), at = -1, i;
+        if (num < 0 || size < num || num > ENG_TAGS_MAX || (num && !data)) return -1;
+        for (i = 0; i < num && at < 0; i++)
+            if (eng_string(data + (size_t)i * ENG_TAG_STRIDE, have, sizeof have) && !_stricmp(have, tag)) at = i;
+        if (at < 0) result = 0;
+        else if (!remove) result = 1;
+        else {
+            for (i = at; i < num - 1; i++)
+                g_eng.idstr_assign(data + (size_t)i * ENG_TAG_STRIDE, data + (size_t)(i + 1) * ENG_TAG_STRIDE);
+            *(int *)(list + 8) = num - 1;
+            result = 1;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        backend_log("MODS: the edit's tag list could not be read or written");
+        result = -1;
+    }
+    return result;
+}
+
 int sh_modpublish_install(const sig_result *results, size_t count, const uint8_t *module_base)
 {
     void *detours[ENG_HOOKS] = { (void *)eng_after_save_detour, (void *)eng_feed_post_detour,

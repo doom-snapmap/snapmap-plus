@@ -9,9 +9,15 @@
  * closure, the conservative removal of covered builds, `sh_mods doctor` (every
  * bundle with its state, conflicts with their winners, shadows, duplicate ids,
  * migration, verification), the main-thread refusal, the slot's size query,
- * and that every key the page's fixture uses is a key the backend writes.
+ * payload v3 (what each mod carries, the open map's details from its saved
+ * game.details and the record's links and claims, each mod it uses with its
+ * entities, wires and Timeline references), Remove from map and Uninstall
+ * with their dry runs against a fake editor that records deletions (Play and
+ * a load refused, one batch, the row and the search tag dropped, the next
+ * save writing no row), Rebuild, the console verbs with their --yes gate, and
+ * that every key the page's v3 fixture uses is a key the backend writes.
  *
- *   modui_test.exe <tests\fixtures\mods\alex.r2-imp> <tests\fixtures\mods_tab_payload.json>
+ *   modui_test.exe <tests\fixtures\mods\alex.r2-imp> <tests\fixtures\mods_tab_payload_v3.json>
  */
 #include <windows.h>
 #include <stdio.h>
@@ -24,6 +30,7 @@
 #include "modserve.h"
 #include "modmanifest.h"
 #include "mod_test_util.h"
+#include "editor_delete.h"
 
 static int failures, checks;
 #define CHECK(expr) do { checks++; if (!(expr)) { fprintf(stderr, "FAIL %s:%d: %s\n", __FILE__, __LINE__, #expr); failures++; } } while (0)
@@ -116,10 +123,141 @@ static int fake_refresh(sh_modserve_refresh *out)
     return g_refresh_mode;
 }
 
+/* The open map as the editor would serialize it: entities by uniqueId, wires
+ * and one Timeline's entity reference. A delete releases entities the way the
+ * native Delete Selection does (their wires and references go with them). */
+typedef struct fake_ent { int uid; const char *inherit, *cls, *label; int alive; } fake_ent;
+static fake_ent g_ents[8];
+static int g_ent_n, g_map_on;
+static int g_wire_src[8], g_wire_dst[8], g_wire_n;
+static int g_tl_uid = -1, g_tl_ref = -1;      /* the Timeline and the entity it references */
+static int g_module_mod;                      /* 1: an instance whose moduleName the imp mod provides */
+
+static int ent_alive(int uid)
+{
+    int i;
+    for (i = 0; i < g_ent_n; i++) if (g_ents[i].uid == uid) return g_ents[i].alive;
+    return 0;
+}
+
+static char *map_text(size_t *len)
+{
+    static char t[8192];
+    size_t at = 0;
+    int i, first = 1, max = -1;
+#define PUT(...) at += (size_t)_snprintf_s(t + at, sizeof t - at, _TRUNCATE, __VA_ARGS__)
+    PUT("{\"entities\":[");
+    for (i = 0; i < g_ent_n; i++) {
+        if (!g_ents[i].alive) continue;
+        if (g_ents[i].uid > max) max = g_ents[i].uid;
+        PUT("%s{\"displayName\":\"%s\",\"entityDef\":{\"className\":\"%s\",\"inherit\":\"%s\",\"name\":\"\","
+            "\"state\":{\"edit\":{\"spawnPosition\":{\"x\":1}}}},\"uniqueId\":%d}", first ? "" : ",", g_ents[i].label,
+            g_ents[i].cls, g_ents[i].inherit, g_ents[i].uid);
+        first = 0;
+    }
+    PUT("],\"instances\":[{\"moduleName\":\"%s\"}],\"targets\":{\"connections\":[",
+        g_module_mod ? "mods/alex.r2-imp/imp_copy" : "maps/modules/stock/room_a");
+    for (i = 0, first = 1; i < g_wire_n; i++) {
+        if (!ent_alive(g_wire_src[i]) || !ent_alive(g_wire_dst[i])) continue;
+        PUT("%s%d,%d", first ? "" : ",", -(g_wire_src[i] + 1), g_wire_dst[i]);
+        first = 0;
+    }
+    PUT("]},\"references\":{\"entityEntRefs\":{\"keyValues\":[0");
+    for (i = 0; i <= (max > g_tl_uid ? max : g_tl_uid); i++) PUT(",%d", i >= g_tl_uid && g_tl_uid >= 0 && ent_alive(g_tl_uid) ? 1 : 0);
+    PUT("],\"values\":[");
+    if (g_tl_uid >= 0 && ent_alive(g_tl_uid)) PUT("%d", ent_alive(g_tl_ref) ? g_tl_ref : -1);
+    PUT("]}},\"variables\":{\"allocCount\":[0,0,0,0,0],\"string\":[]}}");
+#undef PUT
+    *len = at;
+    return t;
+}
+
+static int fake_map_json(char **out, size_t *len)
+{
+    char *t, *copy;
+    if (!g_map_on) return -1;   /* not bound for this map: the tab falls back to the placed names */
+    t = map_text(len);
+    copy = (char *)HeapAlloc(GetProcessHeap(), 0, *len + 1);
+    if (!copy) return -1;
+    memcpy(copy, t, *len + 1);
+    *out = copy;
+    return 1;
+}
+
+static int g_tagged = 1;
+static int fake_map_info(sh_modui_map_info *out)
+{
+    if (!g_map_on) return 0;
+    memset(out, 0, sizeof *out);
+    strcpy_s(out->local_id, sizeof out->local_id, "ABCDEF0123456789ABCD");
+    strcpy_s(out->cloud_id, sizeof out->cloud_id, "6ae40b378bf5037d3d63bd23");
+    out->tagged = g_tagged;
+    return 1;
+}
+
+static int g_delete_status = SH_EDITOR_DELETE_DISPATCHED, g_delete_calls, g_deleted[16], g_deleted_n;
+static int fake_delete(const int *ids, int count)
+{
+    int i, k;
+    g_delete_calls++;
+    if (g_delete_status != SH_EDITOR_DELETE_DISPATCHED) return g_delete_status;
+    for (i = 0; i < count; i++) {
+        if (g_deleted_n < 16) g_deleted[g_deleted_n++] = ids[i];
+        for (k = 0; k < g_ent_n; k++) if (g_ents[k].uid == ids[i]) g_ents[k].alive = 0;
+    }
+    return SH_EDITOR_DELETE_DISPATCHED;
+}
+
+static int g_tag_removals;
+static int fake_remove_tag(const char *tag)
+{
+    if (strcmp(tag, "mods")) return -1;
+    g_tag_removals++;
+    if (!g_tagged) return 0;
+    g_tagged = 0;
+    return 1;
+}
+
+static const char *g_busy;
+static int fake_busy(char *cause, size_t cap)
+{
+    if (!g_busy) return 0;
+    strcpy_s(cause, cap, g_busy);
+    return 1;
+}
+
+/* The map the tests open: a vanilla start, two entities of the imp mod
+ * (one named by the author), a relay wired to both, and a Timeline that
+ * references the second. */
+static void open_test_map(void)
+{
+    static const fake_ent ents[] = {
+        { 0, "player/coop/player_start", "idSnapMapGameEntity_ComboStart", "", 1 },
+        { 1, "mods/alex.r2-imp/imp_copy", "idSnapEntity", "", 1 },
+        { 2, "mods/alex.r2-imp/imp_copy", "idSnapEntity", "Gate imp", 1 },
+        { 3, "snapmaps/logic/relay", "idSnapEntity", "Relay", 1 },
+        { 4, "snapmaps/unknown", "idTarget_Timeline", "Wave 2", 1 },
+    };
+    memcpy(g_ents, ents, sizeof ents);
+    g_ent_n = 5;
+    g_wire_n = 2;
+    g_wire_src[0] = 3; g_wire_dst[0] = 1;   /* relay -> imp */
+    g_wire_src[1] = 2; g_wire_dst[1] = 3;   /* gate imp -> relay */
+    g_tl_uid = 4;
+    g_tl_ref = 2;
+    g_module_mod = 0;
+    g_map_on = 1;
+}
+
 static void bind_fakes(void)
 {
     sh_modui_engine e;
     memset(&e, 0, sizeof e);
+    e.map_json = fake_map_json;
+    e.map_info = fake_map_info;
+    e.delete_entities = fake_delete;
+    e.remove_tag = fake_remove_tag;
+    e.busy = fake_busy;
     e.on_main_thread = fake_on_main;
     e.placed_names = fake_placed;
     e.rescan = fake_rescan;
@@ -308,7 +446,7 @@ int main(int argc, char **argv)
     sh_ms_list list;
 
     if (!GetFullPathNameA(argc > 1 ? argv[1] : "fixtures\\mods\\alex.r2-imp", sizeof fixture, fixture, NULL)) return 2;
-    if (!GetFullPathNameA(argc > 2 ? argv[2] : "fixtures\\mods_tab_payload.json", sizeof payload, payload, NULL)) return 2;
+    if (!GetFullPathNameA(argc > 2 ? argv[2] : "fixtures\\mods_tab_payload_v3.json", sizeof payload, payload, NULL)) return 2;
     g_echo = GetEnvironmentVariableA("SH_MODUI_ECHO", NULL, 0) > 0;
     if (!mt_temp_dir("modui", tmp, sizeof tmp)) { fprintf(stderr, "no temp dir\n"); return 2; }
     _snprintf_s(g_root, sizeof g_root, _TRUNCATE, "%s\\store\\mods", tmp);
@@ -325,7 +463,7 @@ int main(int argc, char **argv)
     CHECK(sh_modserve_index_build(g_root) == 0);
     doc = list_doc();
     CHECK(doc != NULL);
-    CHECK(has(doc, "{\"v\":2,\"gen\":"));
+    CHECK(has(doc, "{\"v\":3,\"gen\":"));
     CHECK(has(doc, "\"storeReadable\":true"));
     CHECK(has(doc, "\"mods\":[]"));
     CHECK(has(doc, "\"migrate\":{\"entries\":0,\"pending\":0,\"running\":false}"));
@@ -678,7 +816,6 @@ int main(int argc, char **argv)
         doc = list_doc();
         CHECK(has(doc, "\"rows\":[{\"id\":\"alex.r2-imp\"") && has(doc, "\"placed\":[{\"id\":\"alex.r2-imp\""));
         CHECK(bundle_has(doc, "alex.shade-a", "\"state\":\"installed\""));   /* a conflict is the doctor's, not the tab's */
-        keys_match_fixture(payload, doc);
         free(doc);
         dr = doctor(1);
         CHECK(has(dr, "MODS: doctor: verify: rehashing every build\nMODS: doctor: verify: Verified 3 build(s): every file matches."));
@@ -785,6 +922,265 @@ int main(int argc, char **argv)
     doc = run_doc(SH_MODS_ACT_PALETTE, NULL);
     CHECK(has(doc, "\"ok\":true") && g_palette_calls == 2);
     free(doc);
+
+    printf("-- payload v3: what each mod carries, and the open map\n");
+    {
+        char req[MAX_PATH * 2], saves[MAX_PATH * 2], details[512];
+        _snprintf_s(req, sizeof req, _TRUNCATE, "%s\\authoring\\alex.req", tmp);
+        put_plain_mod(req, "alex.req", "1.0.0", "{\r\n}\r\n");
+        mt_write(req, "mod.json", "{\"id\":\"alex.req\",\"version\":\"1.0.0\",\"name\":\"Gates\",\"author\":\"tester\","
+                                  "\"description\":\"Turns the two blacklists off.\","
+                                  "\"requirements\":{\"cvars\":{\"g_useImageBlackList\":\"0\",\"g_useResourceBlackList\":\"0\"}}}");
+        doc = run_doc(SH_MODS_ACT_INSTALL, req);
+        CHECK(has(doc, "\"ok\":true"));
+        free(doc);
+        /* The saved map's game.details, and the record's link and claim for its published item. */
+        _snprintf_s(saves, sizeof saves, _TRUNCATE, "%s\\saves", tmp);
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\76561198000000000\\SNAPMAPSABCDEF0123456789ABCD", saves);
+        _snprintf_s(details, sizeof details, _TRUNCATE,
+                    "checksum=1\r\nitemId=6ae40b378bf5037d3d63bd23\r\nmetadata={\"localId\":\"ABCDEF0123456789ABCD\","
+                    "\"name\":\"Imp Arena\",\"lastModified\":1793364363900,\"tags\":[\"map:dlc1\",\"mods\"]}\r\nmodified=1793364363900\r\n");
+        mt_write(path, "game.details", details);
+        sh_modui_test_set_saves_root(saves);
+        {
+            char claims[400];
+            _snprintf_s(claims, sizeof claims, _TRUNCATE,
+                        "{\"item123\":{\"bundles\":[\"%s\"],\"claim\":\"c\",\"secret\":\"s\",\"updated\":1793164663},"
+                        "\"publish-pending-0123456789abcdef\":{\"bundles\":[\"%s\"],\"updated\":1}}", hash2, hash2);
+            CHECK(sh_mb_record_put(g_root, "claims", claims));
+            CHECK(sh_mb_record_put(g_root, "links", "{\"item123\":{\"cloud\":\"6ae40b378bf5037d3d63bd23\","
+                                                    "\"local\":\"ABCDEF0123456789ABCD\",\"at\":1793164563}}"));
+        }
+        load_map_naming("alex.r2-imp", hash2);
+        open_test_map();
+        g_tagged = 1;
+        doc = list_doc();
+        CHECK(has(doc, "{\"v\":3,"));
+        CHECK(bundle_has(doc, "alex.req", "\"description\":\"Turns the two blacklists off.\",\"origin\":\"install\","
+                                          "\"migratedFrom\":\"\",\"servedBy\":\"\",\"builtAt\":"));
+        CHECK(has(doc, "\"requirements\":{\"cvars\":{\"g_useImageBlackList\":\"0\",\"g_useResourceBlackList\":\"0\"}}"));
+        CHECK(bundle_has(doc, key2, "\"counts\":{\"shadows\":0,\"sounds\":0,\"movies\":0,\"modules\":0,\"vt\":0"));
+        CHECK(has(doc, "\"editorRowNames\":[\"mods/alex.r2-imp/imp_copy\",\"mods/alex.r2-imp/imp_copy_b\"]"));
+        CHECK(has(doc, "\"carriedPaths\":[\"cooked/anim/md6/mods/alex.r2_imp/imp_copy/motion/idle.bmd6anim\""));
+        CHECK(has(doc, "\"publishedMaps\":1"));          /* the provisional claim does not count */
+        CHECK(has(doc, "\"bundle\":\"") && has(doc, hash2));
+        /* The map object: details from the saved map and the record, then its mods. */
+        CHECK(has(doc, "\"name\":\"Imp Arena\",\"id\":\"ABCDEF0123456789ABCD\",\"saved\":1793364363,"
+                       "\"published\":{\"state\":\"published\",\"at\":1793164563},\"uploaded\":{\"claimed\":true,\"at\":1793164663},"
+                       "\"tagged\":true,\"mods\":[{\"key\":\"alex.r2-imp@1.0.1\",\"id\":\"alex.r2-imp\""));
+        CHECK(has(doc, "\"state\":\"installed\",\"placedEntities\":[\"mods/alex.r2-imp/imp_copy #1\",\"Gate imp #2\"],"
+                       "\"placedCount\":2,\"placedModules\":0,\"references\":[{\"kind\":\"wire\",\"name\":\"Relay #3 to "
+                       "mods/alex.r2-imp/imp_copy #1\"},{\"kind\":\"wire\",\"name\":\"Gate imp #2 to Relay #3\"},"
+                       "{\"kind\":\"timeline\",\"name\":\"Wave 2 #4\"}]"));
+        CHECK(has(doc, "\"vanilla\":false}"));
+        keys_match_fixture(payload, doc);
+        free(doc);
+
+        printf("-- map remove: the dry run, refusals, then the removal\n");
+        doc = run_doc(SH_MODS_ACT_MAP_REMOVE_PREVIEW, key2);
+        CHECK(has(doc, "\"action\":\"mapRemoveModPreview\",\"ok\":true"));
+        CHECK(has(doc, "\"preview\":{\"action\":\"mapRemoveMod\",\"key\":\"alex.r2-imp@1.0.1\",\"name\":\"R2 Imp copy\","
+                       "\"map\":{\"name\":\"Imp Arena\",\"entities\":[\"mods/alex.r2-imp/imp_copy #1\",\"Gate imp #2\"],"
+                       "\"entityCount\":2,\"references\":[{\"kind\":\"wire\""));
+        CHECK(has(doc, "\"manifestRow\":true,\"tagRemoved\":true,\"vanillaAfter\":true,\"published\":true},\"install\":null}"));
+        CHECK(!has(doc, "\"editorRows\":["));            /* Toybox rows are not a map consequence */
+        free(doc);
+        CHECK(g_delete_calls == 0 && ent_alive(1));      /* a dry run changes nothing */
+        doc = run_doc(SH_MODS_ACT_MAP_REMOVE_PREVIEW, "alex.req");
+        CHECK(has(doc, "\"ok\":false") && has(doc, "The open map does not use Gates."));
+        free(doc);
+        /* Play or a load: refused with the cause, before anything is read. */
+        g_busy = "Play is running";
+        doc = run_doc(SH_MODS_ACT_MAP_REMOVE, key2);
+        CHECK(has(doc, "\"action\":\"mapRemoveMod\",\"ok\":false,\"message\":\"Not now: Play is running.\""));
+        free(doc);
+        g_busy = NULL;
+        CHECK(g_delete_calls == 0);
+        /* The editor refuses the delete: nothing else changes. */
+        g_delete_status = SH_EDITOR_DELETE_REFERENCED;
+        doc = run_doc(SH_MODS_ACT_MAP_REMOVE, key2);
+        CHECK(has(doc, "\"ok\":false") && has(doc, "the editor asks before deleting them"));
+        free(doc);
+        CHECK(g_delete_calls == 1 && g_tagged == 1);
+        {
+            sh_modmanifest_list cur;
+            CHECK(sh_modmanifest_current(&cur) == 1);
+            sh_modmanifest_list_free(&cur);
+        }
+        g_delete_status = SH_EDITOR_DELETE_DISPATCHED;
+        /* Before: the save writes the mod's row. */
+        {
+            size_t len = 0, out_len = 0;
+            char *t = map_text(&len), *saved = sh_modmanifest_on_save(t, len, &out_len);
+            CHECK(saved && strstr(saved, "smpmod1.0.1"));
+            if (saved) HeapFree(GetProcessHeap(), 0, saved);
+        }
+        g_delete_calls = 0;
+        g_deleted_n = 0;
+        doc = run_doc(SH_MODS_ACT_MAP_REMOVE, key2);
+        CHECK(has(doc, "\"action\":\"mapRemoveMod\",\"ok\":true,\"message\":\"Removed R2 Imp copy from Imp Arena: 2 entities "
+                       "deleted; the map now plays without Snapmap+. Ctrl+Z in the editor brings them back.\""));
+        free(doc);
+        CHECK(g_delete_calls == 1 && g_deleted_n == 2 && g_deleted[0] == 1 && g_deleted[1] == 2);   /* one batch: one undo step */
+        CHECK(g_tagged == 0 && g_tag_removals == 1);
+        {
+            sh_modmanifest_list cur;
+            CHECK(sh_modmanifest_current(&cur) == 0);   /* the row is gone from the map's record */
+            sh_modmanifest_list_free(&cur);
+        }
+        /* After: the save rebuilds rows from the placed entities, and writes none. */
+        {
+            size_t len = 0, out_len = 0;
+            char *t = map_text(&len), *saved = sh_modmanifest_on_save(t, len, &out_len);
+            CHECK(saved == NULL);
+            if (saved) HeapFree(GetProcessHeap(), 0, saved);
+        }
+        doc = list_doc();
+        CHECK(has(doc, "\"tagged\":false,\"mods\":[],\"vanilla\":true}"));
+        free(doc);
+        doc = run_doc(SH_MODS_ACT_MAP_REMOVE, key2);
+        CHECK(has(doc, "\"ok\":false") && has(doc, "The open map does not use R2 Imp copy."));
+        free(doc);
+
+        printf("-- a row whose mod is not installed: its entities found by the names the row recorded\n");
+        open_test_map();
+        g_ents[1].inherit = "mods/alex.gone/thing";
+        g_ents[2].alive = 0;
+        {
+            sh_modmanifest_list rows;
+            sh_modmanifest_row row;
+            char err[256], *text, *loaded;
+            size_t tl = 0, ll = 0;
+            memset(&rows, 0, sizeof rows);
+            memset(&row, 0, sizeof row);
+            strcpy_s(row.id, sizeof row.id, "alex.gone");
+            strcpy_s(row.version, sizeof row.version, "1.0.0");
+            strcpy_s(row.bundle, sizeof row.bundle, "00000000000000000000000000000000000000000000000000000000000000cc");
+            row.size = 77;
+            CHECK(sh_modmanifest_row_add_name(&row, "mods/alex.gone/thing"));
+            CHECK(sh_modmanifest_list_add(&rows, &row));
+            sh_modmanifest_row_free(&row);
+            text = sh_modmanifest_write(MAP, sizeof MAP - 1, &rows, &tl, err, sizeof err);
+            loaded = text ? sh_modmanifest_prepare_load(text, tl, &ll) : NULL;
+            if (loaded) HeapFree(GetProcessHeap(), 0, loaded);
+            if (text) HeapFree(GetProcessHeap(), 0, text);
+            sh_modmanifest_list_free(&rows);
+        }
+        doc = list_doc();
+        CHECK(has(doc, "{\"key\":\"\",\"id\":\"alex.gone\",\"version\":\"1.0.0\",\"state\":\"missing\",\"placedEntities\":"
+                       "[\"thing #1\"],\"placedCount\":1"));
+        free(doc);
+        g_deleted_n = 0;
+        doc = run_doc(SH_MODS_ACT_MAP_REMOVE, "alex.gone");
+        CHECK(has(doc, "\"ok\":true") && g_deleted_n == 1 && g_deleted[0] == 1);
+        free(doc);
+
+        printf("-- a mod placed as a module, and one the map only needs through another: refused\n");
+        load_map_naming("alex.r2-imp", hash2);
+        open_test_map();
+        g_module_mod = 1;
+        doc = run_doc(SH_MODS_ACT_MAP_REMOVE_PREVIEW, key2);
+        CHECK(has(doc, "\"ok\":false") && has(doc, "the map places 1 of its modules; delete them in Blueprint mode first"));
+        free(doc);
+        g_module_mod = 0;
+
+        printf("-- uninstall: the dry run (map part, Toybox rows, folder), then in order\n");
+        g_tagged = 1;
+        doc = run_doc(SH_MODS_ACT_UNINSTALL_PREVIEW, "alex.req");
+        CHECK(has(doc, "\"preview\":{\"action\":\"uninstall\",\"key\":\"alex.req\",\"name\":\"Gates\",\"map\":null,"
+                       "\"install\":{\"folder\":\"alex.req\",\"disposition\":\"delete\",\"movedTo\":\"\"},\"editorRows\":[]}"));
+        free(doc);
+        doc = run_doc(SH_MODS_ACT_UNINSTALL_PREVIEW, key2);
+        CHECK(has(doc, "\"action\":\"uninstall\",\"key\":\"alex.r2-imp@1.0.1\""));
+        CHECK(has(doc, "\"entityCount\":2,") && has(doc, "\"tagRemoved\":true,\"vanillaAfter\":true"));
+        CHECK(has(doc, "\"install\":{\"folder\":\"alex.r2-imp@1.0.1\",\"disposition\":\"delete\",\"movedTo\":\"\"},"
+                       "\"editorRows\":[\"mods/alex.r2-imp/imp_copy\",\"mods/alex.r2-imp/imp_copy_b\"]}"));
+        free(doc);
+        CHECK(ent_alive(1) && ent_alive(2));
+        doc = run_doc(SH_MODS_ACT_UNINSTALL_PREVIEW, "nobody");
+        CHECK(has(doc, "\"ok\":false") && has(doc, "nobody is not installed."));
+        free(doc);
+
+        printf("-- the console verbs share the dry runs and actions; --yes performs them\n");
+        {
+            const char *map_argv[] = { "map" };
+            const char *rm_argv[] = { "map", "remove", "alex.r2-imp@1.0.1" };
+            const char *un_argv[] = { "uninstall", "alex.r2-imp@1.0.1" };
+            const char *un_yes[] = { "uninstall", "alex.r2-imp@1.0.1", "--yes" };
+            const char *bad[] = { "map", "frob" };
+            const char *other[] = { "list" };
+            g_doctor[0] = 0;
+            CHECK(sh_modui_command(1, map_argv, doctor_line, NULL) == 1);
+            CHECK(has(g_doctor, "MODS: map: Imp Arena (id ABCDEF0123456789ABCD), 5 entities, last saved "));
+            CHECK(has(g_doctor, "MODS: map: published as item item123; its mods are uploaded (a claim is stored)\n"));
+            CHECK(has(g_doctor, "MODS: map: search tag mods: present\n"));
+            CHECK(has(g_doctor, "MODS: map: mod alex.r2-imp@1.0.1 (alex.r2-imp@1.0.1, installed): 2 placed entities, 3 wire or "
+                                "timeline reference(s)\n"));
+            CHECK(has(g_doctor, "MODS: map:   entity Gate imp #2\n") && has(g_doctor, "MODS: map:   timeline Wave 2 #4\n"));
+            g_doctor[0] = 0;
+            CHECK(sh_modui_command(3, rm_argv, doctor_line, NULL) == 1);
+            CHECK(has(g_doctor, "MODS: map remove: deletes 2 placed entities from Imp Arena (one undo step)\n"));
+            CHECK(has(g_doctor, "MODS: map remove: severs 3 wire or timeline reference(s) to those entities\n"));
+            CHECK(has(g_doctor, "MODS: map remove: removes the search tag mods (the last mod the map uses)\n"));
+            CHECK(has(g_doctor, "MODS: map remove alex.r2-imp@1.0.1: dry run; add --yes to do it\n"));
+            CHECK(ent_alive(1) && ent_alive(2));
+            g_doctor[0] = 0;
+            CHECK(sh_modui_command(2, un_argv, doctor_line, NULL) == 1);
+            CHECK(has(g_doctor, "MODS: uninstall: removes 2 Toybox row(s) from the editor\n"));
+            CHECK(has(g_doctor, "MODS: uninstall: deletes the folder mods\\alex.r2-imp@1.0.1 and its files\n"));
+            CHECK(has(g_doctor, "MODS: uninstall alex.r2-imp@1.0.1: dry run; add --yes to do it\n"));
+            _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", g_root, key2);
+            CHECK(mt_exists(path) && ent_alive(1));
+            g_doctor[0] = 0;
+            CHECK(sh_modui_command(2, bad, doctor_line, NULL) == 1 && has(g_doctor, "usage: sh_mods map"));
+            CHECK(sh_modui_command(1, other, doctor_line, NULL) == 0);
+            g_main = 0;
+            CHECK(sh_modui_command(1, map_argv, doctor_line, NULL) == -1);
+            g_main = 1;
+            /* --yes: the map cleaned first, then the folder, then the rescan. */
+            g_doctor[0] = 0;
+            g_deleted_n = 0;
+            {
+                unsigned rescans = (unsigned)g_rescans;
+                CHECK(sh_modui_command(3, un_yes, doctor_line, NULL) == 1);
+                CHECK(has(g_doctor, "MODS: uninstall alex.r2-imp@1.0.1: Uninstalled R2 Imp copy and removed it from the open map.\n"));
+                CHECK((unsigned)g_rescans == rescans + 1);
+            }
+            CHECK(g_deleted_n == 2 && !ent_alive(1) && !ent_alive(2) && g_tagged == 0);
+            CHECK(!mt_exists(path));
+            doc = list_doc();
+            CHECK(!has(doc, "\"key\":\"alex.r2-imp@1.0.1\"") && has(doc, "\"mods\":[],\"vanilla\":true}"));
+            free(doc);
+        }
+
+        printf("-- rebuild: the folder built again from its files, then a rescan\n");
+        {
+            unsigned rescans = (unsigned)g_rescans;
+            _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\alex.req", g_root);
+            doc = run_doc(SH_MODS_ACT_REBUILD, "alex.req");
+            CHECK(has(doc, "\"action\":\"rebuild\",\"ok\":true,\"message\":\"Rebuilt alex.req: nothing changed (1 files).\""));
+            free(doc);
+            mt_append(path, "assets\\generated\\decls\\entitydef\\mods\\alex.req\\twin.decl", "// changed\r\n");
+            doc = run_doc(SH_MODS_ACT_REBUILD, "alex.req");
+            CHECK(has(doc, "\"ok\":true,\"message\":\"Rebuilt alex.req: build 2, 1 files.\""));
+            free(doc);
+            CHECK((unsigned)g_rescans == rescans + 2);
+            doc = run_doc(SH_MODS_ACT_REBUILD, "nobody");
+            CHECK(has(doc, "\"ok\":false") && has(doc, "no longer installed"));
+            free(doc);
+            g_busy = "a map is loading";
+            doc = run_doc(SH_MODS_ACT_UNINSTALL, "alex.req");
+            CHECK(has(doc, "\"ok\":false,\"message\":\"Not now: a map is loading.\"") && mt_exists(path));
+            free(doc);
+            g_busy = NULL;
+            /* A folder the product made is deleted; the record keeps nothing of it. */
+            doc = run_doc(SH_MODS_ACT_UNINSTALL, "alex.req");
+            CHECK(has(doc, "\"action\":\"uninstall\",\"ok\":true,\"message\":\"Uninstalled Gates.\"") && !mt_exists(path));
+            free(doc);
+        }
+        g_map_on = 0;
+        sh_modui_test_set_saves_root(NULL);
+    }
 
     printf("-- the slot: size query, fetch, root, generation\n");
     {

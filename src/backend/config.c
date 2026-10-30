@@ -137,6 +137,15 @@ static const config_descriptor g_registry[] = {
         NULL
     },
     {
+        /* The Mods tab's collapsed origin groups ("yours", "installed",
+         * "maps"); the others start open.
+         */
+        "mods.collapsed_groups", SH_JSON_ARRAY, "[]",
+        SH_CONFIG_UI_READ | SH_CONFIG_UI_WRITE,
+        NULL,
+        NULL
+    },
+    {
         /* The mod store the backend uploads bundles to and downloads them
          * from (modnet.c): an https URL, or http for a loopback test host.
          */

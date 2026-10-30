@@ -210,6 +210,13 @@ void sh_modpublish_test_age_tag_arm(unsigned long long ms);         /* make the 
  * observer, and run the launch step. Install after the engine dialog.
  * Returns 1 when the hooks are armed. */
 int sh_modpublish_install(const sig_result *results, size_t count, const uint8_t *module_base);
+
+/* The search tag in an open edit's own tags (edit+0x998: the model the next
+ * local save writes, which the cloud save copies). remove 0 asks: 1 present,
+ * 0 absent, -1 unreadable. remove 1 takes it out: 1 removed, 0 absent, -1
+ * failed (the hooks are not installed, or the list could not be written).
+ * The Mods tab removes "mods" when a map's last mod is removed. Main thread. */
+int sh_modpublish_edit_tag(void *edit, const char *tag, int remove);
 #endif
 
 #ifdef __cplusplus

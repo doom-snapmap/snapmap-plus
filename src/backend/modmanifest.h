@@ -131,6 +131,11 @@ char *sh_modmanifest_on_save(const char *json, size_t length, size_t *out_length
 /* A copy of the manifest of the map last parsed (rows from its text). Free
  * with sh_modmanifest_list_free. Returns the row count. */
 size_t sh_modmanifest_current(sh_modmanifest_list *out);
+/* Drop the current manifest's rows naming `bundle` (exact hash): the Mods
+ * tab removed that mod from the open map, so the map no longer carries it
+ * (the next save rebuilds the rows from the placed entities). Returns the
+ * number of rows dropped. */
+size_t sh_modmanifest_current_remove(const char *bundle);
 /* Forget the current manifest (tests). */
 void sh_modmanifest_reset(void);
 

@@ -2532,6 +2532,11 @@ static const wchar_t *poc_mods_action_name(int action)
     case SH_MODS_ACT_PRUNE_APPLY: return L"pruneApply";
     case SH_MODS_ACT_REMOVE:      return L"remove";
     case SH_MODS_ACT_MIGRATE:     return L"migrate";
+    case SH_MODS_ACT_REBUILD:     return L"rebuild";
+    case SH_MODS_ACT_UNINSTALL:   return L"uninstall";
+    case SH_MODS_ACT_UNINSTALL_PREVIEW:  return L"uninstallPreview";
+    case SH_MODS_ACT_MAP_REMOVE:         return L"mapRemoveMod";
+    case SH_MODS_ACT_MAP_REMOVE_PREVIEW: return L"mapRemoveModPreview";
     default:                      return L"";
     }
 }
@@ -2546,6 +2551,11 @@ static int poc_mods_action_code(const std::wstring &name)
     if (name == L"pruneApply") return SH_MODS_ACT_PRUNE_APPLY;
     if (name == L"remove")     return SH_MODS_ACT_REMOVE;
     if (name == L"migrate")    return SH_MODS_ACT_MIGRATE;
+    if (name == L"rebuild")    return SH_MODS_ACT_REBUILD;
+    if (name == L"uninstall")  return SH_MODS_ACT_UNINSTALL;
+    if (name == L"uninstallPreview")    return SH_MODS_ACT_UNINSTALL_PREVIEW;
+    if (name == L"mapRemoveMod")        return SH_MODS_ACT_MAP_REMOVE;
+    if (name == L"mapRemoveModPreview") return SH_MODS_ACT_MAP_REMOVE_PREVIEW;
     return 0;
 }
 
@@ -2643,12 +2653,27 @@ static void poc_mods_finish()
     InterlockedExchange(&g_mods_busy, 0);
 }
 
-/* Open the store folder in Explorer, creating it when it is not there yet. */
-static void poc_mods_open_folder()
+/* A mod folder's own name under mods\: no separators, no drive, not "." or "..". */
+static bool poc_mods_plain_folder(const std::wstring &name)
+{
+    if (name.empty() || name.size() > 200 || name == L"." || name == L"..") return false;
+    for (wchar_t c : name)
+        if (c == L'\\' || c == L'/' || c == L':' || c < 0x20 || c == L'*' || c == L'?' || c == L'"' || c == L'<' ||
+            c == L'>' || c == L'|') return false;
+    return true;
+}
+
+/* Open the store folder in Explorer, creating it when it is not there yet; with `folder`, that mod
+ * folder inside it instead (it must exist). */
+static void poc_mods_open_folder(const std::wstring &folder)
 {
     sh_mods_call call;
     char root[MAX_PATH * 4];
     bool ok = false;
+    if (!folder.empty() && !poc_mods_plain_folder(folder)) {
+        poc_mods_post_result(L"openFolder", false, L"That folder is not a mod folder.", nullptr);
+        return;
+    }
     memset(&call, 0, sizeof call);
     call.op = SH_MODS_ROOT;
     call.out = root;
@@ -2659,7 +2684,16 @@ static void poc_mods_open_folder()
             std::wstring w((size_t)wl, L'\0');
             MultiByteToWideChar(CP_UTF8, 0, root, -1, &w[0], wl);
             w.resize(wcslen(w.c_str()));
-            SHCreateDirectoryExW(nullptr, w.c_str(), nullptr);
+            if (folder.empty()) SHCreateDirectoryExW(nullptr, w.c_str(), nullptr);
+            else {
+                w += L"\\";
+                w += folder;
+                DWORD at = GetFileAttributesW(w.c_str());
+                if (at == INVALID_FILE_ATTRIBUTES || !(at & FILE_ATTRIBUTE_DIRECTORY)) {
+                    poc_mods_post_result(L"openFolder", false, L"That mod folder is no longer there.", nullptr);
+                    return;
+                }
+            }
             PIDLIST_ABSOLUTE pidl = nullptr;
             if (SUCCEEDED(SHParseDisplayName(w.c_str(), nullptr, &pidl, 0, nullptr)) && pidl) {
                 ok = SUCCEEDED(SHOpenFolderAndSelectItems(pidl, 0, nullptr, 0));
@@ -3137,7 +3171,7 @@ static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventA
                 std::wstring act, arg;
                 sh_webview_json::get_string(json, L"action", act);
                 sh_webview_json::get_string(json, L"arg", arg);
-                if (act == L"openFolder") poc_mods_open_folder();
+                if (act == L"openFolder") poc_mods_open_folder(arg);
                 else {
                     int code = poc_mods_action_code(act);
                     if (!code) poc_mods_post_result(L"unknown", false, L"Unknown mods action.", nullptr);

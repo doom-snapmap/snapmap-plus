@@ -3,8 +3,8 @@
    sections, the empty states, the map modal (the decl focus modal's mechanism), the dry-run-driven
    confirmations of Remove from map and Uninstall, the vanilla state, the stand-in host the browser
    preview uses, and the page and host contract around it. tests/fixtures/mods_tab_payload.json is the
-   v2 document (its keys are checked by modui_test.c against the backend); mods_tab_payload_v3.json is
-   the v3 document the follow-up backend writes, and the browser preview's stand-in data. A minimal
+   v2 document an older backend sends; mods_tab_payload_v3.json is the v3 document the backend writes
+   (its keys are checked by modui_test.c against the backend) and the browser preview's stand-in data. A minimal
    DOM stands in for the browser. Pure ASCII. */
 'use strict';
 const assert = require('node:assert/strict');
@@ -745,10 +745,15 @@ test('host and interface contract', () => {
   assert.ok(host.includes('L"{\\"kind\\":\\"mods\\",\\"data\\":"'));
   assert.ok(host.includes('{\\"kind\\":\\"modsActionResult\\",\\"action\\":\\"'));
   assert.ok(host.includes('SH_IFACE_HAS_SLOT(g_iface, mods)'), 'an older backend is never called past its table');
-  /* The host maps today's actions; rebuild, uninstall and the map actions are the backend lane's
-     (docs/webview-ui.md), and until then the host answers them "Unknown mods action." */
-  for (const a of ['install', 'verify', 'rescan', 'remove', 'migrate'])
+  /* The host maps every action the page sends to the backend's code (openFolder is the host's own,
+     with the folder name); only an unknown name is answered "Unknown mods action." */
+  for (const a of ['install', 'verify', 'rescan', 'remove', 'migrate', 'rebuild', 'uninstall', 'uninstallPreview',
+                   'mapRemoveMod', 'mapRemoveModPreview'])
     assert.ok(host.includes('if (name == L"' + a + '")'), 'host maps ' + a);
+  for (const a of modsTab.ACTIONS.filter((x) => x !== 'openFolder'))
+    assert.ok(host.includes('if (name == L"' + a + '")'), 'every page action reaches the backend: ' + a);
+  assert.ok(host.includes('if (act == L"openFolder") poc_mods_open_folder(arg);'), 'openFolder opens the named mod folder');
+  assert.match(iface, /#define SH_MODS_ACT_MAP_REMOVE_PREVIEW 13/);
   assert.ok(host.includes('poc_mods_post_result(L"unknown", false, L"Unknown mods action.", nullptr);'));
 });
 

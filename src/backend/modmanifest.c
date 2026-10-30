@@ -806,6 +806,21 @@ size_t sh_modmanifest_current(sh_modmanifest_list *out)
 
 void sh_modmanifest_reset(void) { mm_set_current(NULL); }
 
+size_t sh_modmanifest_current_remove(const char *bundle)
+{
+    size_t i, w, dropped = 0;
+    if (!bundle || !bundle[0]) return 0;
+    AcquireSRWLockExclusive(&g_current_lock);
+    for (i = 0, w = 0; i < g_current.count; i++) {
+        if (!strcmp(g_current.rows[i].bundle, bundle)) { sh_modmanifest_row_free(&g_current.rows[i]); dropped++; continue; }
+        if (w != i) g_current.rows[w] = g_current.rows[i];
+        w++;
+    }
+    g_current.count = w;
+    ReleaseSRWLockExclusive(&g_current_lock);
+    return dropped;
+}
+
 /* "id@version, id@version, ..." for a log line. */
 static void mm_describe(const sh_modmanifest_list *list, char *out, size_t cap)
 {

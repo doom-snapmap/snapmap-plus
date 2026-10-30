@@ -33,6 +33,7 @@
 #include "budget_table.h"
 #include "modui.h"
 #include "modserve.h"
+#include "modpublish.h"
 #include "engine_build.h"
 
 /* Editor layout. */
@@ -1278,6 +1279,91 @@ static int ie_mods_placed_names(sh_modui_name_fn emit, void *context)
     return read;
 }
 
+/* The Mods tab's map operations (modui.h). The open edit is editor+0x204c8
+ * (idSnapMapEdit); its saved-map model sits at +0x7F8 with the local id idStr
+ * first, the cloud-saved item id at +0x9B0 and the tags list at +0x998 (the
+ * offsets modpublish.c binds and checks against PublishStart). */
+#define IE_EDIT_LOCAL_ID 0x7F8
+#define IE_EDIT_CLOUD_ID 0x9B0
+#define ED_ACTIVE_BYTE_OFF   0x09       /* editor_set_active's byte: clear during SnapMap Play */
+#define ED_DEACT_REASON_OFF  0x2366c    /* 3: deactivated for Play */
+#define IE_LOAD_STATE_RUNNING 3
+static const uint8_t *g_mods_load_state_at;
+
+static void *ie_mods_edit(void)
+{
+    const uint8_t *ed = editor_session();
+    void *edit = NULL;
+    if (!ed || !ie_read_ptr(ed + ED_MAP_OBJ_OFF, &edit)) return NULL;
+    return edit;
+}
+
+static int ie_mods_map_json(char **out, size_t *len)
+{
+    void *edit = ie_mods_edit(), *screen = NULL;
+    if (out) *out = NULL;
+    if (len) *len = 0;
+    /* The map is the editor's while its screen is up; in the hub the pointer can persist. */
+    if (!edit || !g_editor || !ie_read_ptr(g_editor + ED_SCREEN_OFF, &screen) || !screen) return 0;
+    if (!sh_rawmap_live_serialize_ready()) return -1;
+    return sh_rawmap_serialize_live_copy(edit, out, len) ? 1 : -1;
+}
+
+static void ie_mods_idstr(const uint8_t *s, char *out, size_t cap)
+{
+    int length = 0;
+    void *data = NULL;
+    out[0] = 0;
+    if (!ie_read_s32(s + 8, &length) || !ie_read_ptr(s + 0x10, &data)) return;
+    if (length <= 0 || (size_t)length >= cap || !data) return;
+    __try { memcpy(out, data, (size_t)length); out[length] = 0; }
+    __except (EXCEPTION_EXECUTE_HANDLER) { out[0] = 0; }
+}
+
+static int ie_mods_map_info(sh_modui_map_info *out)
+{
+    uint8_t *edit = (uint8_t *)ie_mods_edit();
+    void *screen = NULL;
+    if (!out) return 0;
+    memset(out, 0, sizeof *out);
+    out->tagged = -1;
+    if (!edit || !ie_read_ptr(g_editor + ED_SCREEN_OFF, &screen) || !screen) return 0;
+    ie_mods_idstr(edit + IE_EDIT_LOCAL_ID, out->local_id, sizeof out->local_id);
+    ie_mods_idstr(edit + IE_EDIT_CLOUD_ID, out->cloud_id, sizeof out->cloud_id);
+    out->tagged = sh_modpublish_edit_tag(edit, "mods", 0);
+    return 1;
+}
+
+static int ie_mods_delete(const int *ids, int count)
+{
+    return sh_editor_delete_batch(ids, count, NULL);
+}
+
+static int ie_mods_remove_tag(const char *tag)
+{
+    void *edit = ie_mods_edit();
+    return edit ? sh_modpublish_edit_tag(edit, tag, 1) : -1;
+}
+
+/* Play, or a map between load states: the tab's changes wait. */
+static int ie_mods_busy(char *cause, size_t cap)
+{
+    uint8_t active = 1;
+    int reason = 0, state = IE_LOAD_STATE_RUNNING;
+    if (g_editor) {
+        __try {
+            active = g_editor[ED_ACTIVE_BYTE_OFF];
+            reason = *(const int *)(g_editor + ED_DEACT_REASON_OFF);
+        } __except (EXCEPTION_EXECUTE_HANDLER) { active = 1; reason = 0; }
+        if (!active && reason == 3) { strncpy_s(cause, cap, "Play is running; return to the editor first", _TRUNCATE); return 1; }
+    }
+    if (g_mods_load_state_at && ie_read_s32(g_mods_load_state_at, &state) && state != 0 && state != IE_LOAD_STATE_RUNNING) {
+        _snprintf_s(cause, cap, _TRUNCATE, "a map is loading (state %d); try again when it has loaded", state);
+        return 1;
+    }
+    return 0;
+}
+
 int sh_iface_engine_install(const sig_result *results, size_t n, const uint8_t *module_base)
 {
     if (InterlockedCompareExchange(&g_installed, 1, 0) != 0) return 0;
@@ -1349,6 +1435,12 @@ int sh_iface_engine_install(const sig_result *results, size_t n, const uint8_t *
         if (module_base) g_mods_main_thread_at = (const uint8_t *)glb_resolve(module_base, "main_thread_id", NULL);
         mods.on_main_thread = g_mods_main_thread_at ? ie_mods_on_main : NULL;
         mods.placed_names   = ie_mods_placed_names;
+        if (module_base) g_mods_load_state_at = (const uint8_t *)glb_resolve(module_base, "load_state", NULL);
+        mods.map_json        = ie_mods_map_json;
+        mods.map_info        = ie_mods_map_info;
+        mods.delete_entities = ie_mods_delete;
+        mods.remove_tag      = ie_mods_remove_tag;
+        mods.busy            = ie_mods_busy;
         sh_modui_bind(&mods);
     }
     slots.mods                   = sh_modui_slot;             /* +0x378 ext 34 */

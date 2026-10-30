@@ -384,7 +384,8 @@ typedef int (*sh_budget_fn)(struct sh_iface *self, sh_budget_call *call); /* +0x
  *   RUN    main thread. Runs `action` with `arg` (INSTALL: absolute folder;
  *          VERIFY: id@version+build, "" for every build; PRUNE_APPLY:
  *          newline-separated keys; REMOVE: the key of a listed mod; MIGRATE
- *          starts the migration's worker thread) and keeps its result
+ *          starts the migration's worker thread; REBUILD, UNINSTALL and the
+ *          map actions: a mod's key, see modui.h) and keeps its result
  *          document. Returns 1
  *          when the action ran (the document's "ok" says whether it
  *          succeeded), 0 when refused before it ran.
@@ -410,6 +411,11 @@ typedef int (*sh_budget_fn)(struct sh_iface *self, sh_budget_call *call); /* +0x
 #define SH_MODS_ACT_PRUNE_APPLY 6
 #define SH_MODS_ACT_REMOVE      7
 #define SH_MODS_ACT_MIGRATE     8
+#define SH_MODS_ACT_REBUILD             9    /* arg: a mod's key: build its folder again, then rescan */
+#define SH_MODS_ACT_UNINSTALL          10    /* arg: key: clean the open map of it, then remove the folder */
+#define SH_MODS_ACT_UNINSTALL_PREVIEW  11    /* arg: key: what UNINSTALL would do; changes nothing */
+#define SH_MODS_ACT_MAP_REMOVE         12    /* arg: key (or the id of a row not installed): remove it from the open map */
+#define SH_MODS_ACT_MAP_REMOVE_PREVIEW 13    /* arg: as MAP_REMOVE: what it would do; changes nothing */
 typedef struct sh_mods_call {
     int          op;
     int          action;       /* RUN */

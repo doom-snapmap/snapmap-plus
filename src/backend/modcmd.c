@@ -608,6 +608,7 @@ void h_sh_mods(idCmdArgs *a)
     char arg[MAX_PATH * 4], folder[MAX_PATH * 4];
     if (verb && (!_stricmp(verb, "help") || !strcmp(verb, "?"))) {
         sh_printf("%s\n", SH_MODCMD_HELP);
+        sh_printf("%s\n", SH_MODCMD_HELP_TAB);
         sh_printf("%s\n", SH_MODCMD_HELP_STORE);
         sh_printf("Migration: 'sh_mods migrate' moves the retired overrides folder into the mods store once more (it ran at the first start of this release; the migration section of mods\\snapmap-plus.json records it), 'sh_mods migrate --again' repeats it after you change overrides.\n");
         return;
@@ -636,6 +637,16 @@ void h_sh_mods(idCmdArgs *a)
         return;
     }
     if (!_stricmp(verb, "list")) { mc_list(); return; }
+    if (!_stricmp(verb, "map") || !_stricmp(verb, "uninstall")) {
+        /* The Mods tab's map details, Remove from map and Uninstall (modui.c):
+         * the same dry runs and actions; --yes performs one. */
+        const char *argv[8];
+        int argc = 0, i, n = cmd_argc(a);
+        for (i = 1; i < n && argc < 8; i++) if (cmd_argv(a, i)) argv[argc++] = cmd_argv(a, i);
+        if (sh_modui_command(argc, argv, mc_doctor_line, NULL) < 0)
+            mc_line("MODS: %s: refused (not on the game's main thread)", verb);
+        return;
+    }
     if (!_stricmp(verb, "doctor")) {
         /* What the Mods tab does not show (modui.c): every bundle's state, duplicate ids,
          * migration, conflicts, shadows and, with 'verify', a rehash of every build. */
@@ -664,14 +675,18 @@ void h_sh_mods(idCmdArgs *a)
         mc_copystock(request, folder);
         return;
     }
-    if (_stricmp(verb, "build") && _stricmp(verb, "install")) {
+    if (_stricmp(verb, "build") && _stricmp(verb, "install") && _stricmp(verb, "rebuild")) {
         sh_printf("sh_mods: unknown verb '%s'. %s\n", verb, SH_MODCMD_HELP);
         return;
     }
     if (!arg[0]) { sh_printf("usage: sh_mods %s \"<folder>\"\n", verb); return; }
     if (!mc_resolve_folder(arg, folder, sizeof folder)) { mc_line("MODS: %s: the store folder cannot be resolved", verb); return; }
     if (!_stricmp(verb, "build")) mc_build(folder);
-    else {
+    else if (!_stricmp(verb, "rebuild")) {
+        /* build, then the rescan the tab's Rebuild runs (a folder in the store rescans in mc_build). */
+        mc_build(folder);
+        if (!mc_in_store(folder)) mc_rescan("rebuild");
+    } else {
         /* Waits for a migration folder or a download in progress. */
         modstore_lock();
         mc_install(folder);

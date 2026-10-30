@@ -434,11 +434,16 @@ These backend files share the work:
   `modlegacy.c` the retired `smpkg.` carriers, as below.
 - `modui.c` is the WebView Mods tab's backend. It lists one row per mod
   folder (two folders declaring one id both flagged, a package a map delivered
-  listed like any other), marks each installed or needing attention with its
-  cause, reports whether `overrides\` still holds entries to migrate, and runs
-  Install, Remove, Migrate and rescan on the main thread. What the tab does not show, every bundle's state with legacy ones,
+  listed like any other) with what each carries, marks each installed or
+  needing attention with its cause, reports whether `overrides\` still holds
+  entries to migrate, describes the open map and the mods it uses, and runs
+  Install, Verify, Rebuild, Uninstall, Remove from map, their dry runs, Migrate
+  and rescan on the main thread, as in
+  [The Mods tab's map scope](#the-mods-tabs-map-scope). What the tab does not show, every bundle's state with legacy ones,
   conflicts with their winners, shadows and verification, it prints as
   `sh_mods doctor [verify]` (see [WebView UI](webview-ui.md#mods-tab)).
+  `modmap.c` reads the open map's entities, wires and Timeline references from
+  its serialized JSON for it.
 - `modpublished.c` holds a published or My Maps launch whose manifest names a
   bundle that is not installed, asks the player, and fetches and resumes it or
   drops it, as in [Published maps and missing mods](#published-maps-and-missing-mods).
@@ -1013,6 +1018,61 @@ whole step. A second writer waits for the first instead of failing, and logs
 one `MODS: store: waiting` line; because the migration takes the lock per
 folder, an install on the main thread (the Mods tab or `sh_mods install`) waits
 for at most one folder, not for the whole pass.
+
+### The Mods tab's map scope
+
+The tab's map object and its two destructive flows (Remove from map,
+Uninstall) work on the map open in the editor, read when the document is
+built:
+
+- Entities, wires and references come from the map serialized as a save would
+  write it (`sh_rawmap_serialize_live_copy`, a snapshot with no save side
+  effects), parsed by `modmap.c`. An entity uses a mod when one of its placed
+  names (its inherit and every string under an `edit` object, the save-time
+  closure's rule) is a name the mod provides (`modserve_bundles_for_names_visit`);
+  a module instance uses one through its `moduleName`. A manifest row whose mod
+  is not installed is matched through the names the row recorded. The
+  editor's entity ids are the JSON `uniqueId`s.
+- A reference to those entities is a wire (`targets.connections`, a
+  run-length list) with exactly one end on them, or a Timeline
+  (`idTarget_Timeline`) whose `entityEntRefs` row names one. The same edge model
+  is what the module-prefab save walks when it cuts a selection.
+- The map's details: its saved-map id and cloud-saved id from the editor's
+  copy of the saved-map model (edit+0x7F8, +0x9B0), the search tag from that
+  copy's tag list (edit+0x998, the list the next local save writes), the name
+  and last save from the slot's `game.details` under
+  `Saved Games\id Software\DOOM\base\savegame.user\<profile>\SNAPMAPS<id>\`,
+  and the published and uploaded state from the record's `links` and
+  `claims`. What none of these say is left out of the document, never guessed.
+
+Remove from map deletes the mod's entities through `sh_editor_delete_batch`,
+DOOM's own Delete Selection, in one batch: one native undo step that Ctrl+Z
+reverts. The native delete drops the wires to the entities with them (a save
+right after shows no connection to a deleted entity), so the product severs
+nothing itself; an entity the editor would ask about (its referenced-entity
+confirmation) is refused, with the whole request, before anything changes.
+How the native delete treats a Timeline's entity reference was not exercised
+live: the dry run lists it, and the next save is the engine's own. Then the mod's row leaves the
+current manifest record (`sh_modmanifest_current_remove`); the next save
+rebuilds the rows from the placed entities and writes none for it. With the
+last mod, the search tag `mods` is removed from the editor's tag list
+(`sh_modpublish_edit_tag`, the engine's own idStr assignment); the published
+copy is unchanged until the map is published again. A mod placed as
+Blueprint modules, or reached only through another mod's needs, is refused
+with the cause. Uninstall runs that on the open map first, then removes the
+folder as Remove does (a product folder deleted, the author's moved to
+`removed-mods\`), then rescans; the refresh rebuilds the palette without the
+mod's editor rows and, when the editor refuses the rebuild because the delete
+is still committing, retries it once the editor is free. Closed maps are not
+edited. Both flows, and Rebuild, are refused while Play runs or a map loads
+(the editor's deactivation reason, the engine's load state).
+
+Accuracy: the page renders only from the documents the backend returns. Each
+action is answered with its result and then a fresh document whose map object
+is read again from the editor, so the confirmation lists exactly what the dry
+run computed and the modal redraws from what the backend found afterwards.
+The console verbs `sh_mods map`, `sh_mods map remove "<id>" [--yes]` and
+`sh_mods uninstall "<id>" [--yes]` share the dry runs and the actions.
 
 ### Published maps and missing mods
 

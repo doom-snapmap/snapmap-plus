@@ -11,6 +11,11 @@
  *                                  cause, duplicate ids, migration, conflicts with their
  *                                  winners, shadows; `verify` rehashes every build
  *   sh_mods verify "<folder|id|id@version>"  rehash installed mods and record the result
+ *   sh_mods rebuild "<folder>"     build again and rescan (the Mods tab's Rebuild)
+ *   sh_mods map                    the open map and each mod it uses: placed entities, and the
+ *                                  wires and Timelines pointing at them (modui.c)
+ *   sh_mods map remove "<id>" [--yes]   what removing that mod from the open map does; --yes does it
+ *   sh_mods uninstall "<id>" [--yes]    what uninstalling does (the map first, then the folder); --yes does it
  *   sh_mods copystock "<engine path>" "<file>"  write an installed game file's bytes to a file
  *                                  (authoring: a stock mesh or anim copied under a new name)
  *   sh_mods push "<id@version+build>" "<ref>"   upload a bundle to the mod store and claim it under ref
@@ -44,7 +49,14 @@
                        "'sh_mods install \"<folder>\"' adds it to the mods store, 'sh_mods list' shows " \
                        "mod folders, 'sh_mods doctor [verify]' explains every bundle's state, conflicts and shadows, 'sh_mods verify \"<folder>\"' rehashes one (a folder, id or id@version), " \
                        "'sh_mods copystock \"<engine path>\" \"<file>\"' writes an installed game file's bytes to a file. " \
-                       "'sh_mods help' lists the mod store verbs."
+                       "'sh_mods help' lists the Mods tab and mod store verbs."
+/* Printed by 'sh_mods help' after SH_MODCMD_HELP: the Mods tab's actions, sharing its dry runs. */
+#define SH_MODCMD_HELP_TAB "Mods tab: 'sh_mods map' prints the open map (name, id, published state, search tag) and each mod it " \
+                           "uses with its placed entities and the wires and Timelines pointing at them, 'sh_mods map remove " \
+                           "\"<id>\"' prints what removing that mod from the map deletes and 'sh_mods map remove \"<id>\" --yes' " \
+                           "does it (one undo step), 'sh_mods uninstall \"<id>\"' prints what uninstalling does (the open map " \
+                           "cleaned of it, its Toybox rows, its folder) and '--yes' does it, 'sh_mods rebuild \"<folder>\"' " \
+                           "builds a mod folder again and rescans."
 /* Printed by 'sh_mods help' after SH_MODCMD_HELP (each under the console's 1 KiB line). */
 #define SH_MODCMD_HELP_STORE "Mod store: 'sh_mods push \"<id@version+build>\" \"<ref>\"' uploads a bundle and claims it under ref, " \
                              "'sh_mods pull \"<bundle hash>\"' downloads and installs one, 'sh_mods release \"<ref>\"' drops " \

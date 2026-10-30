@@ -15,10 +15,16 @@
  *   map       the manifest rows the last map load carried (modmanifest's
  *             current record), each with whether its bundle is installed and
  *             active, and the bundles the placed entities resolve to now (the
- *             save-time closure, modserve_bundles_for_names_visit)
- * The actions are install a folder, remove a listed mod, migrate, rescan, and
- * the older verify, palette rebuild and removal of covered builds, which the
- * tab no longer offers. What the tab stopped showing (every bundle's state,
+ *             save-time closure, modserve_bundles_for_names_visit); with the
+ *             map's JSON bound (payload v3) also its name, saved-map id, last
+ *             save, published and uploaded state (the record's links and
+ *             claims), the search tag, and one entry per mod it uses with the
+ *             entities that use it and the wires and Timelines pointing at
+ *             them (modmap.h)
+ * The actions are install a folder, rebuild one, verify one, uninstall one
+ * (the open map cleaned of it first), remove a mod from the open map, their
+ * dry runs, migrate, rescan, and the older palette rebuild, Remove and removal
+ * of covered builds, which the tab no longer offers. What the tab stopped showing (every bundle's state,
  * legacy ones included, conflicts with their winners, shadows, verification)
  * is printed by sh_modui_doctor, the `sh_mods doctor` console verb.
  *
@@ -41,6 +47,9 @@ extern "C" {
 struct sh_iface;
 struct sh_mods_call;
 
+/* One console line (no newline). */
+typedef void (*sh_modui_line_fn)(void *context, const char *line);
+
 /* Called once per placed name the open map holds (duplicates allowed). */
 typedef void (*sh_modui_name_fn)(void *context, const char *name);
 
@@ -50,6 +59,7 @@ typedef void (*sh_modui_name_fn)(void *context, const char *name);
  * otherwise unavailable: the matching part of the document is omitted or the
  * action refuses. */
 struct sh_modserve_refresh;
+struct sh_modui_map_info;
 
 typedef struct sh_modui_engine {
     int (*on_main_thread)(void);        /* 1 main, 0 other, negative unknown */
@@ -70,7 +80,30 @@ typedef struct sh_modui_engine {
     int (*migrate_pending)(unsigned *entries);   /* sh_modmigrate_pending */
     int (*migrate_start)(int again);             /* sh_modmigrate_start */
     int (*migrate_busy)(void);                   /* sh_modmigrate_busy */
+    /* The open editor map serialized as a save would (no save side effects),
+     * in a process-heap buffer the caller frees with HeapFree. 1 with *out,
+     * 0 no editor map, -1 failed. Main thread only. */
+    int (*map_json)(char **out, size_t *len);
+    /* The open map's saved-map ids and search tag (the editor's own model,
+     * which the next local save writes). 1 when a map is open; tagged is 1,
+     * 0, or -1 unknown. Main thread only. */
+    int (*map_info)(struct sh_modui_map_info *out);
+    /* Delete editor entities (uniqueIds) through DOOM's own Delete Selection
+     * in one undo step (sh_editor_delete_batch). Returns its status
+     * (SH_EDITOR_DELETE_*: 1 dispatched). Main thread only. */
+    int (*delete_entities)(const int *ids, int count);
+    /* Remove `tag` from the open map's tags. 1 removed, 0 absent, -1 failed. */
+    int (*remove_tag)(const char *tag);
+    /* 1 with the cause when the game cannot take a change now (Play is
+     * running, a map is loading), else 0. */
+    int (*busy)(char *cause, size_t cap);
 } sh_modui_engine;
+
+typedef struct sh_modui_map_info {
+    char local_id[64];     /* the saved-map id, "" before the first save */
+    char cloud_id[64];     /* its cloud-saved item id, "" when none */
+    int  tagged;           /* the search tag "mods": 1, 0, or -1 unknown */
+} sh_modui_map_info;
 
 /* Bind the engine operations. NULL binds only the product defaults: no
  * main-thread check and no placed names. */
@@ -91,11 +124,19 @@ int  sh_modui_list(void);
  * before the action ran. */
 int  sh_modui_run(int action, const char *arg);
 
+/* The console verbs that share the tab's dry runs and actions:
+ *   map                         the open map: details, then each mod it uses
+ *                               with its placed entities and references
+ *   map remove "<key|id>" [--yes]   the dry run; with --yes it is performed
+ *   uninstall "<key>" [--yes]       the dry run; with --yes it is performed
+ * argv[0] is the verb. Lines start "MODS: ". Returns 1 when the verb was
+ * handled (whatever its outcome), 0 for a verb that is not one of these, -1
+ * off the main thread. */
+int  sh_modui_command(int argc, const char *const *argv, sh_modui_line_fn line, void *context);
+
 /* Wait up to `ms` for a migration to finish. 1 idle, 0 still running. Any thread. */
 int  sh_modui_wait(unsigned ms);
 
-/* One console line (no newline). */
-typedef void (*sh_modui_line_fn)(void *context, const char *line);
 
 /* `sh_mods doctor [verify]`: every store folder with its state and cause
  * (legacy ones included), duplicate ids, the migration's pending entries,
@@ -116,6 +157,9 @@ int  sh_modui_slot(struct sh_iface *self, struct sh_mods_call *call);
 
 #ifdef SH_MODUI_TESTING
 void sh_modui_test_reset(void);
+/* Where saved maps are read (SNAPMAPS<id>\game.details under each child
+ * folder); NULL restores Saved Games\id Software\DOOM\base\savegame.user. */
+void sh_modui_test_set_saves_root(const char *path);
 #endif
 
 #ifdef __cplusplus

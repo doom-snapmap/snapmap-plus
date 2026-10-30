@@ -164,9 +164,8 @@ Rows are grouped under collapsible headers (the prefab tree's folder head and ca
 Your mods (no origin, or `migration`: those were the owner's overrides), Installed (`install`) and
 From maps you played (`download`, `delivery`). The collapsed groups are the setting
 `mods.collapsed_groups`, a list of group ids (`yours`, `installed`, `maps`) saved through the
-configuration service like `prefabs.open_folders`; `config.c` must add it (`SH_JSON_ARRAY`, `"[]"`,
-UI read and write), and until it does the backend refuses it and the groups fold for the session
-only. Browser preview never saves it. A filter or the attention badge shows matches in every group;
+configuration service like `prefabs.open_folders` (`config.c`: `SH_JSON_ARRAY`, `"[]"`, UI read and
+write). Browser preview never saves it. A filter or the attention badge shows matches in every group;
 a header folded while filtering is not saved. Each
 row is a status icon, the name, and `id · version · size`. The three icons cover every backend
 state: a green check (`installed`), a yellow triangle (`attention` or `duplicateId`; the hover
@@ -190,15 +189,15 @@ reads as vanilla.
 In the browser preview, `modsTab.standIn` stands in for the host: it answers each action with a
 result and a fresh document and changes its copy as the backend would, starting from
 `tests/fixtures/mods_tab_payload_v3.json` (the 36 folders of the owner's store; the page's
-`PREVIEW_MODS` must equal it). `tests/modui_test.c` checks the v2 document against a temporary
-store, including that every key of `tests/fixtures/mods_tab_payload.json` (v2) is one the backend
-writes; `tests/mods_tab_test.js` renders both fixtures.
+`PREVIEW_MODS` must equal it). `tests/modui_test.c` checks the v3 document against a temporary
+store and a fake editor, including that every key of `tests/fixtures/mods_tab_payload_v3.json` is
+one the backend writes; `tests/mods_tab_test.js` renders both fixtures (`mods_tab_payload.json` is
+the v2 document an older backend sends).
 
-### Payload v3 (to implement in `modui.c`)
+### Payload v3 (`modui.c`)
 
 v3 is v2 plus the fields below, with `"v": 3`. Every v2 key stays. Each new field is optional: the
-page leaves out what is absent, so a v2 document still renders. When the backend writes v3, point
-`modui_test`'s key check at the v3 fixture.
+page leaves out what is absent, so a v2 document still renders.
 
 Per entry of `mods`:
 
@@ -225,13 +224,15 @@ and `size` is the carried bytes.
 
 | Key | Type | Meaning |
 |---|---|---|
-| `name`, `id` | string | The map's name and saved-map id (the page shows 16 characters). |
-| `saved` | number | Unix seconds of the last save; 0 when unknown. |
-| `published` | object | `{state: "published" or "unpublished", at}`. |
-| `uploaded` | object | `{claimed, at}`: whether a mod-store claim exists for this map. |
-| `tagged` | bool | The search tag `mods` is present. |
-| `mods` | array | One per `smpmod1.` manifest row: `{key, id, version, state, "placedEntities", placedCount, "references", size}`. `key` is the installed folder ("" when not installed); `state` is `installed`, `superseded`, `unindexed`, `skipped` or `missing`; `placedEntities` are display names; `references` are `[{kind, name}]`, what removing the mod from the map severs: `kind` is `wire` (a wire to one of its placed entities) or `timeline` (a timeline event referencing one); the page ignores other kinds; `size` is carried bytes. |
+| `name`, `id` | string | The map's name (its last local save's `game.details`, "" before the first save) and saved-map id (the editor's local id; the page shows 16 characters). |
+| `saved` | number | Unix seconds of the last local save (`game.details` `modified`); 0 when unknown. |
+| `published` | object | `{state: "published", at}` when the record's `links` section holds an item published from this map (written by a publish with mods from this installation, dropped at its unpublish); `at` is the link's time. Absent otherwise: the product cannot tell an unpublished map from one published without mods or elsewhere, so it never sends `unpublished`. |
+| `uploaded` | object | `{claimed, at}`, sent with `published`: whether the record's `claims` section holds that item's claim, and its time. |
+| `tagged` | bool | The search tag `mods` is in the editor's copy of the map's tags (what the next local save writes); absent when it cannot be read. |
+| `mods` | array | One per `smpmod1.` manifest row of the map's record, and one per mod its placed entities reach that has no row yet (the next save adds it): `{key, id, version, state, "placedEntities", placedCount, placedModules, "references", size, inManifest, viaNeeds}`. `key` is the installed folder ("" when not installed); `state` is `installed`, `superseded`, `unindexed`, `skipped` or `missing`; `placedEntities` are display names (the entity's label, else its Toybox row's name, else the last part of what it inherits, then `#` and its id; the first 64); `references` are `[{kind, name}]`, what removing the mod from the map severs: `kind` is `wire` (a wire with one end on one of its placed entities) or `timeline` (a Timeline whose entity references name one); the page ignores other kinds; `size` is carried bytes. `placedModules` counts Blueprint modules placed from it, `inManifest` says the row is in the record and `viaNeeds` that only another mod's needs reach it; the page does not read these three. |
 | `"vanilla"` | bool | The map lists no mods and plays without Snapmap+. |
+
+The v3 map keys are sent only while a map is open in the editor (`entities` is not -1).
 
 ### Actions
 
@@ -241,9 +242,9 @@ again.
 
 | Action | Meaning |
 |---|---|
-| `rescan`, `install`, `migrate`, `openFolder` | As in v2. `openFolder` may now carry `arg`, a folder name under `mods\` to open instead of the mods folder; today's host ignores it. |
-| `rebuild` | Build the folder again from its files (as `sh_mods build`). |
-| `verify` | Rehash that one build's files (today's host maps `verify` to the whole-store check). |
+| `rescan`, `install`, `migrate`, `openFolder` | As in v2. `openFolder` may carry `arg`, a folder name under `mods\` (no separators) that the host opens instead of the mods folder. |
+| `rebuild` | Build the folder again from its files (as `sh_mods build`), then rescan. |
+| `verify` | Rehash that one folder's build (`""` still checks every build). |
 | `mapRemoveModPreview` | Dry run: `data.preview` is the consequence list of removing the mod from the open map: placed entities, and the wires and timeline references to them. Toybox rows are not consequences, so it carries no `editorRows`. Changes nothing. |
 | `mapRemoveMod` | Delete the placed entities that use the mod, sever the wires and timeline references to them, drop the manifest row and, with the last row, the `mods` tag. The published copy changes only when the map is published again. |
 | `uninstallPreview` | Dry run: `data.preview` for uninstalling: the map part when the open map uses the mod, the Toybox rows it takes out of the editor (`editorRows`, whether or not the map uses it), and the installation part. |
@@ -254,8 +255,21 @@ again.
 the mod, else `{name, entities: [display names], entityCount, references: [{kind, name}],
 manifestRow, tagRemoved, vanillaAfter, published}`; `install` is null for `mapRemoveMod`, else
 `{folder, disposition: "delete" or "move", movedTo}`. A refused dry run is `ok: false` with the
-reason in `message`. Until the backend lane lands, the host answers `rebuild`, `uninstall` and the
-map actions with "Unknown mods action."
+reason in `message`: the open map does not use the mod, the mod is not installed, Play is running or
+a map is loading, the mod is placed as Blueprint modules (removed in Blueprint mode), or only another
+mod the map uses needs it. The real actions refuse the same way, and also when the editor refuses
+the delete (it is not in Object mode, an entity or wire is held, or another object refers to an
+entity, where the editor would ask first); nothing changes then.
+
+The backend runs `mapRemoveMod` as: the placed entities in one `sh_editor_delete_batch` (DOOM's own
+Delete Selection, one undo step "Delete Selection"; the editor drops the wires to them with the
+entities), the mod's row dropped from the map's manifest record (the
+next save rebuilds the rows from the placed entities, so it writes none for the mod), and with the
+last mod the search tag removed from the editor's copy of the map's tags. `uninstall` runs that on
+the open map first, then removes the folder (as `remove`) and rescans; the rescan's refresh rebuilds
+the editor palette without the mod's rows (when the editor refuses the rebuild because an edit is
+still finishing, it is retried once the editor is free). `sh_mods map`, `sh_mods map remove "<id>"
+[--yes]` and `sh_mods uninstall "<id>" [--yes]` print the same dry runs and run the same actions.
 
 ## Driving the page from a test
 

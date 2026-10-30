@@ -55,6 +55,7 @@
 #include "modvt.h"
 #include "modsound.h"
 #include "strids.h"
+#include "editor_delete.h"
 
 #define RES_LIFETIME_OFF    0x28
 #define RES_STATE_OFF       0x2c
@@ -799,22 +800,27 @@ static int me_refresh_main(void *context)
     me_rlog("refresh: deferred changes applied at the return to the editor: %d re-parsed, %d reloaded, %d registered, "
             "palette %s, %d failed, %d still pending", r.reparsed, r.reloaded, r.registered,
             r.palette > 0 ? "rebuilt" : r.palette < 0 ? "refused" : "unchanged", r.failed, d.pending);
-    return 1;
+    /* A refused palette rebuild is tried again on a later pass. */
+    return r.palette < 0 ? 0 : 1;
 }
 
 static DWORD WINAPI me_refresh_watcher(LPVOID unused)
 {
     sh_run_on_main_fn run = NULL;
-    int i, result = 0;
+    int i, tries, result = 0;
     (void)unused;
     sh_apply_engine_get_run_on_main(&run);
-    /* Up to an hour; any registration pass in between applies the same marks. */
-    for (i = 0; run && i < 7200; ++i) {
+    /* Up to an hour; any registration pass in between applies the same marks.
+     * A palette rebuild the editor refuses (an entity or a wire held, or a
+     * native edit such as the Mods tab's Delete Selection still committing)
+     * is tried again once the editor is free, at most 40 times. */
+    for (i = 0, tries = 0; run && i < 7200 && tries < 40; ++i) {
         sh_modserve_diff d;
         Sleep(500);
         sh_modserve_last_diff(&d);
         if (!d.pending && !InterlockedCompareExchange(&g_palette_wanted, 0, 0)) break;
-        if (me_in_play() == 1) continue;
+        if (me_in_play() == 1 || sh_editor_delete_native_pending()) continue;
+        tries++;
         if (run(NULL, me_refresh_main, NULL, 1000, &result) == 1 && result == 1) break;
     }
     InterlockedExchange(&g_refresh_watch, 0);
@@ -861,6 +867,11 @@ int sh_modserve_refresh_after_rescan(sh_modserve_refresh *out)
     r.needs_map_reload = d.changed_map + (r.palette < 0 ? rows : 0);
     r.needs_restart = d.changed_restart + d.gone_names;
     r.state = why && r.pending ? 2 : 1;
+    if (!why && r.palette < 0 && g_bound) {
+        /* The editor refused the palette rebuild for now: retried when it is free. */
+        me_refresh_watch();
+        me_refresh_note(&r, "the editor palette is rebuilt when the editor is free");
+    }
     if (why && r.pending) {
         if (play == 1 && g_bound) me_refresh_watch();
         me_rlog("refresh: deferred: %d change(s) wait for the return to the editor or the next map load (%s)", r.pending,

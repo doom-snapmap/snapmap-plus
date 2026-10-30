@@ -13,6 +13,11 @@
 #include "modmanifest.h"
 #include "backend_log.h"
 #include "config_json.h"
+#include "modmap.h"
+#include "mp_json.h"
+#include "editor_delete.h"
+#include <shlobj.h>
+#include <time.h>
 #ifndef SH_MODUI_PURE
 #include "overrides.h"
 #include "modstock.h"
@@ -29,6 +34,11 @@
 #define MU_MAX_PLACED        65536  /* distinct placed names read from the map */
 #define MU_NAME_MAX          512
 #define MU_ORIGIN_MAX        600    /* "overrides\<folder>" or "mods\<folder>" */
+#define MU_MAX_CARRIED       200    /* carried paths listed per mod; the page says how many more */
+#define MU_MAX_ROW_DECL      (256u * 1024u)   /* an editor row decl read for its display name */
+#define MU_MAX_MAP_ENTITIES  64     /* placed entity names listed per mod; the count is always sent */
+#define MU_MAX_MAP_REFS      64     /* references listed per mod */
+#define MU_TAG               "mods" /* the search tag a map with mods carries (modpublish.h) */
 
 /* ------------------------------------------------------------------ state */
 
@@ -103,6 +113,11 @@ void sh_modui_bind(const sh_modui_engine *engine)
         if (engine->migrate_pending) g_engine.migrate_pending = engine->migrate_pending;
         if (engine->migrate_start) g_engine.migrate_start = engine->migrate_start;
         if (engine->migrate_busy) g_engine.migrate_busy = engine->migrate_busy;
+        if (engine->map_json) g_engine.map_json = engine->map_json;
+        if (engine->map_info) g_engine.map_info = engine->map_info;
+        if (engine->delete_entities) g_engine.delete_entities = engine->delete_entities;
+        if (engine->remove_tag) g_engine.remove_tag = engine->remove_tag;
+        if (engine->busy) g_engine.busy = engine->busy;
     }
     g_engine_bound = 1;
 }
@@ -239,6 +254,9 @@ typedef struct mu_entry {
     int admitted;                /* sh_modserve_bundle_state == 1 */
     int row;                     /* its row in the tab */
     char origin[MU_ORIGIN_MAX];  /* where it came from, "" when the store cannot tell */
+    char **row_names;            /* its editor rows' display names (strings resolved, else the decl name) */
+    char **row_defs;             /* each row's entityDef: what a placed entity of that row inherits */
+    int row_count;
 } mu_entry;
 
 /* One row of the tab: one mod folder. */
@@ -301,6 +319,13 @@ static int mu_newer(const sh_ms_entry *a, const sh_ms_entry *b)
 
 static void mu_model_free(mu_model *m)
 {
+    size_t i;
+    int k;
+    for (i = 0; m->entries && i < m->list.count; i++) {
+        for (k = 0; k < m->entries[i].row_count; k++) { free(m->entries[i].row_names[k]); free(m->entries[i].row_defs[k]); }
+        free(m->entries[i].row_names);
+        free(m->entries[i].row_defs);
+    }
     if (m->listed) sh_ms_list_free(&m->list);
     free(m->entries);
     free(m->rows);
@@ -358,6 +383,128 @@ static int mu_rank(const mu_entry *u)
     if (u->admitted && strcmp(u->state, "superseded")) return 3;
     if (u->admitted) return 2;
     return !strcmp(u->state, "unindexed") ? 1 : 0;
+}
+
+/* ------------------------------------------------------------------ what a mod carries */
+
+/* A decoded top-level string of the author block's preserved keys (extra),
+ * malloc'd, or NULL. */
+static char *mu_extra_string(const sh_mb_bundle *b, const char *key)
+{
+    mpj *x;
+    const mpj *v;
+    char *out = NULL;
+    if (!b->extra) return NULL;
+    x = mpj_parse(b->extra, strlen(b->extra));
+    v = x ? mpj_get(x, key) : NULL;
+    if (v && v->type == MPJ_STR) out = sh_mm_decode(v->text);
+    mpj_free(x);
+    return out;
+}
+
+/* The text of a "#str_" key in a bundle's strings.en (keys omit the prefix,
+ * matched case-insensitively), malloc'd, or NULL. */
+static char *mu_bundle_text(const sh_mb_bundle *b, const char *tag)
+{
+    mpj *x;
+    const mpj *s, *en;
+    char *out = NULL;
+    int i;
+    if (!b->extra || !tag) return NULL;
+    if (!_strnicmp(tag, "#str_", 5)) tag += 5;
+    x = mpj_parse(b->extra, strlen(b->extra));
+    s = x ? mpj_get(x, "strings") : NULL;
+    en = s && s->type == MPJ_OBJ ? mpj_get(s, "en") : NULL;
+    for (i = 0; en && en->type == MPJ_OBJ && i < en->n && !out; i++)
+        if (!_stricmp(en->keys[i], tag) && en->items[i] && en->items[i]->type == MPJ_STR) out = sh_mm_decode(en->items[i]->text);
+    mpj_free(x);
+    return out;
+}
+
+/* The first `field = "value"` of a decl text, malloc'd, or NULL. */
+static char *mu_decl_field(const char *text, const char *field)
+{
+    size_t fl = strlen(field);
+    const char *p = text;
+    while (p && (p = strstr(p, field)) != NULL) {
+        const char *q = p + fl, *end;
+        int word = p == text || !((p[-1] >= 'a' && p[-1] <= 'z') || (p[-1] >= 'A' && p[-1] <= 'Z') || p[-1] == '_');
+        p = q;
+        if (!word) continue;
+        while (*q == ' ' || *q == '\t') q++;
+        if (*q != '=') continue;
+        q++;
+        while (*q == ' ' || *q == '\t') q++;
+        if (*q != '"') continue;
+        end = strchr(++q, '"');
+        if (!end) return NULL;
+        {
+            char *out = (char *)malloc((size_t)(end - q) + 1);
+            if (!out) return NULL;
+            memcpy(out, q, (size_t)(end - q));
+            out[end - q] = 0;
+            return out;
+        }
+    }
+    return NULL;
+}
+
+static char *mu_strdup(const char *s)
+{
+    size_t n = strlen(s ? s : "");
+    char *d = (char *)malloc(n + 1);
+    if (d) memcpy(d, s ? s : "", n + 1);
+    return d;
+}
+
+/* The editor rows of entry i: each snapEditorEntityDef file's display name
+ * (its displayNameTag through the bundle's strings, then any installed
+ * mod's, else the decl name) and the entityDef a placed entity of it
+ * inherits. */
+static void mu_entry_rows(mu_model *m, size_t i)
+{
+    mu_entry *u = &m->entries[i];
+    const sh_ms_entry *e = u->e;
+    size_t k, q;
+    if (!e->loaded || !u->editor_rows) return;
+    u->row_names = (char **)calloc((size_t)u->editor_rows, sizeof(char *));
+    u->row_defs = (char **)calloc((size_t)u->editor_rows, sizeof(char *));
+    if (!u->row_names || !u->row_defs) return;
+    for (k = 0; k < e->bundle.file_count && u->row_count < u->editor_rows; k++) {
+        const sh_mb_file *f = &e->bundle.files[k];
+        char path[MAX_PATH * 4], *text = NULL, *tag = NULL, *def = NULL, *name = NULL, *c;
+        if (!f->ptype || _stricmp(f->ptype, "snapEditorEntityDef")) continue;
+        if (!f->stock) {
+            _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", e->folder, f->path);
+            for (c = path; *c; c++) if (*c == '/') *c = '\\';
+            text = (char *)sh_mb_read_file(path, MU_MAX_ROW_DECL, NULL);
+        }
+        if (text) {
+            tag = mu_decl_field(text, "displayNameTag");
+            def = mu_decl_field(text, "entityDef");
+        }
+        if (tag) name = mu_bundle_text(&e->bundle, tag);
+        for (q = 0; tag && !name && q < m->list.count; q++)
+            if (q != i && m->list.items[q].loaded) name = mu_bundle_text(&m->list.items[q].bundle, tag);
+        if (!name) name = mu_strdup(f->pname ? f->pname : f->request);
+        u->row_names[u->row_count] = name;
+        u->row_defs[u->row_count] = def ? def : mu_strdup("");
+        u->row_count++;
+        free(tag);
+        free(text);
+    }
+}
+
+/* The display name of the editor row whose entityDef is `inherit`, or NULL. */
+static const char *mu_row_name_for(const mu_model *m, const char *inherit)
+{
+    size_t i;
+    int k;
+    if (!inherit || !inherit[0]) return NULL;
+    for (i = 0; i < m->list.count; i++)
+        for (k = 0; k < m->entries[i].row_count; k++)
+            if (m->entries[i].row_defs[k] && !_stricmp(m->entries[i].row_defs[k], inherit)) return m->entries[i].row_names[k];
+    return NULL;
 }
 
 /* One row per folder. Identity is the id in mod.json: two folders declaring
@@ -461,12 +608,186 @@ static int mu_model_build(mu_model *m)
         }
         if (u->superseded_paths) u->state = "superseded";
     }
+    for (i = 0; i < m->list.count; i++) mu_entry_rows(m, i);
     return mu_model_rows(m);
+}
+
+/* ------------------------------------------------------------------ published maps */
+
+/* The record's claims (modsync: a published item's uploaded bundle set) and
+ * links (modpublish: which saved map an item was published from). Only the
+ * bundle hashes and times are read; a claim's secret is never kept. */
+typedef struct mu_claim {
+    char ref[160];
+    long long updated;
+    char (*hashes)[SH_MB_HASH_HEX + 1];
+    int count;
+} mu_claim;
+
+typedef struct mu_link { char item[160], cloud[160], local[160]; long long at; } mu_link;
+
+typedef struct mu_record {
+    int claims_read;             /* the claims section was readable (absent counts as empty) */
+    mu_claim *claims;
+    size_t claim_count;
+    mu_link *links;
+    size_t link_count;
+} mu_record;
+
+static void mu_record_free(mu_record *r)
+{
+    size_t i;
+    for (i = 0; i < r->claim_count; i++) free(r->claims[i].hashes);
+    free(r->claims);
+    free(r->links);
+    memset(r, 0, sizeof *r);
+}
+
+static void mu_copy_str(char *out, size_t cap, const mpj *v)
+{
+    char *d = v && v->type == MPJ_STR ? sh_mm_decode(v->text) : NULL;
+    strncpy_s(out, cap, d ? d : "", _TRUNCATE);
+    free(d);
+}
+
+static void mu_record_load(const mu_model *m, mu_record *r)
+{
+    char *text = NULL;
+    mpj *x;
+    int i, k, got;
+    memset(r, 0, sizeof *r);
+    if (!m->root_ok) return;
+    got = sh_mb_record_get(m->root, "claims", &text);
+    r->claims_read = got >= 0;
+    x = got == 1 && text ? mpj_parse(text, strlen(text)) : NULL;
+    if (text) { SecureZeroMemory(text, strlen(text)); free(text); text = NULL; }
+    if (x && x->type == MPJ_OBJ && x->n) {
+        r->claims = (mu_claim *)calloc((size_t)x->n, sizeof *r->claims);
+        for (i = 0; r->claims && i < x->n; i++) {
+            const mpj *c = x->items[i], *h = mpj_get(c, "bundles");
+            mu_claim *cl = &r->claims[r->claim_count];
+            if (!c || c->type != MPJ_OBJ || !strncmp(x->keys[i], "publish-pending-", 16)) continue;
+            strncpy_s(cl->ref, sizeof cl->ref, x->keys[i], _TRUNCATE);
+            cl->updated = mpj_int(mpj_get(c, "updated"));
+            if (h && h->type == MPJ_ARR && h->n) {
+                cl->hashes = (char (*)[SH_MB_HASH_HEX + 1])calloc((size_t)h->n, sizeof *cl->hashes);
+                for (k = 0; cl->hashes && k < h->n; k++)
+                    if (h->items[k] && h->items[k]->type == MPJ_STR) {
+                        strncpy_s(cl->hashes[cl->count], SH_MB_HASH_HEX + 1, h->items[k]->text, _TRUNCATE);
+                        cl->count++;
+                    }
+            }
+            r->claim_count++;
+        }
+    }
+    if (x) {
+        /* The tree holds the secrets' text too; clear it before release. */
+        for (i = 0; x->type == MPJ_OBJ && i < x->n; i++) {
+            mpj *s = mpj_get(x->items[i], "secret");
+            if (s && s->type == MPJ_STR && s->text) SecureZeroMemory(s->text, strlen(s->text));
+        }
+        mpj_free(x);
+    }
+    x = sh_mb_record_get(m->root, "links", &text) == 1 && text ? mpj_parse(text, strlen(text)) : NULL;
+    free(text);
+    if (x && x->type == MPJ_OBJ && x->n) {
+        r->links = (mu_link *)calloc((size_t)x->n, sizeof *r->links);
+        for (i = 0; r->links && i < x->n; i++) {
+            const mpj *l = x->items[i];
+            mu_link *ln = &r->links[r->link_count];
+            if (!l || l->type != MPJ_OBJ) continue;
+            strncpy_s(ln->item, sizeof ln->item, x->keys[i], _TRUNCATE);
+            mu_copy_str(ln->cloud, sizeof ln->cloud, mpj_get(l, "cloud"));
+            mu_copy_str(ln->local, sizeof ln->local, mpj_get(l, "local"));
+            ln->at = mpj_int(mpj_get(l, "at"));
+            r->link_count++;
+        }
+    }
+    mpj_free(x);
+}
+
+/* How many claims' bundle sets name entry i's build (directly or through an alias). */
+static unsigned mu_published_maps(const mu_model *m, const mu_record *r, int entry)
+{
+    size_t i;
+    int k;
+    unsigned n = 0;
+    for (i = 0; i < r->claim_count; i++) {
+        int hit = 0;
+        for (k = 0; k < r->claims[i].count && !hit; k++)
+            hit = mu_find_hash(m, r->claims[i].hashes[k]) == entry;
+        n += hit;
+    }
+    return n;
+}
+
+/* ------------------------------------------------------------------ the rows */
+
+static int mu_path_sort(const void *a, const void *b)
+{
+    return strcmp(*(const char *const *)a, *(const char *const *)b);
+}
+
+static int mu_suffix(const char *s, const char *suffix)
+{
+    size_t n = strlen(s), k = strlen(suffix);
+    return n >= k && !_stricmp(s + n - k, suffix);
+}
+
+/* Payload v3's fields of one mod (webview-ui.md, Mods tab). */
+static void mu_put_row_v3(mu_buf *b, const mu_model *m, const mu_record *rec, const mu_entry *u)
+{
+    const sh_ms_entry *e = u->e;
+    const sh_mb_bundle *bd = &e->bundle;
+    char *desc = e->loaded ? mu_extra_string(bd, "description") : NULL;
+    const char **carried = NULL;
+    size_t k, ncar = 0;
+    unsigned sounds = 0, movies = 0, modules = 0, vt = 0;
+    int i;
+    mu_kstr(b, "description", desc ? desc : "", 0);
+    free(desc);
+    mu_kstr(b, "origin", e->loaded ? bd->origin : "", 0);
+    mu_kstr(b, "migratedFrom", !strncmp(u->origin, "overrides\\", 10) ? u->origin : "", 0);   /* the retired package folder */
+    mu_kstr(b, "servedBy", !strcmp(u->state, "superseded") && u->superseded_by >= 0 ? m->list.items[u->superseded_by].name : "", 0);
+    mu_knum(b, "builtAt", e->loaded && bd->built > 0 ? (unsigned long long)bd->built : 0, 0);
+    mu_kstr(b, "bundle", e->loaded ? bd->hash : "", 0);
+    if (e->loaded && bd->file_count) carried = (const char **)calloc(bd->file_count, sizeof *carried);
+    for (k = 0; e->loaded && k < bd->file_count; k++) {
+        const sh_mb_file *f = &bd->files[k];
+        if (mu_suffix(f->request, ".bnk")) sounds++;
+        if (mu_suffix(f->request, ".bswf")) movies++;
+        if (f->is_module) modules++;
+        if (mu_suffix(f->request, ".mega2")) vt++;
+        if (!f->stock && carried) carried[ncar++] = f->request;
+    }
+    mu_puts(b, ",\"counts\":{");
+    mu_knum(b, "shadows", (unsigned)u->shadows, 1);
+    mu_knum(b, "sounds", sounds, 0);
+    mu_knum(b, "movies", movies, 0);
+    mu_knum(b, "modules", modules, 0);
+    mu_knum(b, "vt", vt, 0);
+    mu_puts(b, "},\"requirements\":");
+    /* Canonical {"cvars":{...}} from the builder (the only supported key). */
+    mu_puts(b, e->loaded && bd->requirements && strstr(bd->requirements, "\"cvars\"") ? bd->requirements : "{\"cvars\":{}}");
+    mu_puts(b, ",\"editorRowNames\":[");
+    for (i = 0; i < u->row_count; i++) {
+        if (i) mu_putn(b, ",", 1);
+        mu_str(b, u->row_names[i]);
+    }
+    mu_puts(b, "],\"carriedPaths\":[");
+    if (ncar > 1) qsort(carried, ncar, sizeof *carried, mu_path_sort);
+    for (k = 0; k < ncar && k < MU_MAX_CARRIED; k++) {
+        if (k) mu_putn(b, ",", 1);
+        mu_str(b, carried[k]);
+    }
+    mu_putn(b, "]", 1);
+    free((void *)carried);
+    if (rec->claims_read) mu_knum(b, "publishedMaps", mu_published_maps(m, rec, (int)(u - m->entries)), 0);
 }
 
 /* One row of the tab. "attention" carries the shown build's first cause; a
  * duplicate id is attention whatever its build's state. */
-static void mu_put_row(mu_buf *b, const mu_model *m, const mu_row *r)
+static void mu_put_row(mu_buf *b, const mu_model *m, const mu_record *rec, const mu_row *r)
 {
     const mu_entry *u = &m->entries[r->serving];
     const sh_ms_entry *e = u->e;
@@ -489,6 +810,7 @@ static void mu_put_row(mu_buf *b, const mu_model *m, const mu_row *r)
     mu_kbool(b, "duplicateId", r->duplicate, 0);
     mu_knum(b, "editorRows", (unsigned)u->editor_rows, 0);
     mu_kstr(b, "folder", mu_leaf(e->folder), 0);
+    mu_put_row_v3(b, m, rec, u);
     mu_putn(b, "}", 1);
 }
 
@@ -753,37 +1075,294 @@ static void mu_closure_free(mu_closure *c)
     memset(c, 0, sizeof *c);
 }
 
-/* The current map's view: manifest rows (its load-time record) and the
- * bundles its placed names resolve to now. */
+/* A mod the open map uses: a manifest row, a bundle its placed names resolve
+ * to now, or both. */
+typedef struct mu_mapmod {
+    char hash[SH_MODSERVE_HASH_HEX + 1];
+    char id[SH_MB_ID_MAX + 1];
+    char version[SH_MB_VERSION_MAX + 1];
+    unsigned long long size;
+    int in_rows;              /* the current manifest has a row for it */
+    int in_closure;           /* the placed names resolve to it now */
+    int named;                /* reached by a placed name (not only through another mod's needs) */
+    int *uids;                /* the entities that use it */
+    size_t uid_count, uid_cap;
+    int modules;              /* placed modules (Blueprint instances) that use it */
+} mu_mapmod;
+
+/* A (placed name, mod) match of the closure. */
+typedef struct mu_hit { char *name; int mod; } mu_hit;
+
+/* The current map's view: manifest rows (its load-time record, less the rows
+ * the tab removed since), the bundles its placed names resolve to now, and,
+ * with the map's JSON, its entities, wires and references, and its details. */
 typedef struct mu_map {
     sh_modmanifest_list rows;
     mu_closure closure;
     int entities;             /* entities read, -1 no editor map, -2 not available */
     size_t names;
+    int have_mm;              /* mm holds the parsed map */
+    sh_mm_map mm;
+    mu_mapmod *mods;
+    size_t mod_count, mod_cap;
+    mu_hit *hits;
+    size_t hit_count, hit_cap;
+    int oom;
+    int have_info;            /* info holds the editor's saved-map ids and tag */
+    sh_modui_map_info info;
+    char name[256];           /* the saved map's name, "" when unknown */
+    long long saved;          /* the last save, Unix seconds; 0 when unknown */
+    const mu_link *link;      /* the record's link of this map's published item, or NULL */
+    const mu_claim *claim;    /* that item's claim, or NULL */
 } mu_map;
 
-static void mu_map_build(mu_map *mp)
+static int mu_mapmod_add(mu_map *mp, const char *hash, const char *id, const char *version, unsigned long long size)
+{
+    size_t i;
+    for (i = 0; i < mp->mod_count; i++) if (!strcmp(mp->mods[i].hash, hash)) return (int)i;
+    if (mp->mod_count == mp->mod_cap) {
+        size_t nc = mp->mod_cap ? mp->mod_cap * 2 : 8;
+        mu_mapmod *nm = (mu_mapmod *)realloc(mp->mods, nc * sizeof *nm);
+        if (!nm) { mp->oom = 1; return -1; }
+        mp->mods = nm;
+        mp->mod_cap = nc;
+    }
+    memset(&mp->mods[mp->mod_count], 0, sizeof *mp->mods);
+    strncpy_s(mp->mods[mp->mod_count].hash, sizeof mp->mods[0].hash, hash, _TRUNCATE);
+    strncpy_s(mp->mods[mp->mod_count].id, sizeof mp->mods[0].id, id ? id : "", _TRUNCATE);
+    strncpy_s(mp->mods[mp->mod_count].version, sizeof mp->mods[0].version, version ? version : "", _TRUNCATE);
+    mp->mods[mp->mod_count].size = size;
+    return (int)mp->mod_count++;
+}
+
+static void mu_mapmod_uid(mu_map *mp, int mod, int uid)
+{
+    mu_mapmod *x = &mp->mods[mod];
+    size_t i;
+    for (i = 0; i < x->uid_count; i++) if (x->uids[i] == uid) return;
+    if (x->uid_count == x->uid_cap) {
+        size_t nc = x->uid_cap ? x->uid_cap * 2 : 16;
+        int *nu = (int *)realloc(x->uids, nc * sizeof *nu);
+        if (!nu) { mp->oom = 1; return; }
+        x->uids = nu;
+        x->uid_cap = nc;
+    }
+    x->uids[x->uid_count++] = uid;
+}
+
+typedef struct mu_visit { mu_closure *closure; mu_map *mp; } mu_visit;
+
+static void mu_map_visit(void *context, const char *bundle_id, const char *version, const char *bundle_hash,
+                         unsigned long long size, const char *name)
+{
+    mu_visit *v = (mu_visit *)context;
+    mu_map *mp = v->mp;
+    int mod;
+    mu_closure_visit(v->closure, bundle_id, version, bundle_hash, size, name);
+    if (!bundle_hash || mp->oom) return;
+    mod = mu_mapmod_add(mp, bundle_hash, bundle_id, version, size);
+    if (mod < 0) return;
+    mp->mods[mod].in_closure = 1;
+    if (!name) return;
+    mp->mods[mod].named = 1;
+    if (mp->hit_count == mp->hit_cap) {
+        size_t nc = mp->hit_cap ? mp->hit_cap * 2 : 64;
+        mu_hit *nh = (mu_hit *)realloc(mp->hits, nc * sizeof *nh);
+        if (!nh) { mp->oom = 1; return; }
+        mp->hits = nh;
+        mp->hit_cap = nc;
+    }
+    mp->hits[mp->hit_count].name = mu_strdup(name);
+    mp->hits[mp->hit_count].mod = mod;
+    if (!mp->hits[mp->hit_count].name) { mp->oom = 1; return; }
+    mp->hit_count++;
+}
+
+/* Which mods each entity and module uses: an entity whose placed names
+ * include one a mod provides (the save closure's own matching), and, for a
+ * manifest row the closure does not reach (its mod is not installed), one
+ * whose placed names include a name the row recorded. */
+static void mu_map_attribute(mu_map *mp)
+{
+    size_t i, k, h, r;
+    for (i = 0; i < mp->mm.ent_count; i++) {
+        const sh_mm_entity *e = &mp->mm.ents[i];
+        for (k = 0; k < e->name_count; k++)
+            for (h = 0; h < mp->hit_count; h++)
+                if (!_stricmp(e->names[k], mp->hits[h].name)) mu_mapmod_uid(mp, mp->hits[h].mod, e->uid);
+    }
+    for (i = 0; i < mp->mm.module_count; i++)
+        for (h = 0; h < mp->hit_count; h++)
+            if (!_stricmp(mp->mm.modules[i], mp->hits[h].name)) { mp->mods[mp->hits[h].mod].modules++; break; }
+    for (r = 0; r < mp->rows.count; r++) {
+        const sh_modmanifest_row *row = &mp->rows.rows[r];
+        int mod = -1;
+        for (h = 0; h < mp->mod_count && mod < 0; h++) if (!strcmp(mp->mods[h].hash, row->bundle)) mod = (int)h;
+        if (mod < 0 || mp->mods[mod].in_closure) continue;
+        for (i = 0; i < mp->mm.ent_count; i++) {
+            const sh_mm_entity *e = &mp->mm.ents[i];
+            for (k = 0; k < e->name_count; k++) {
+                size_t q;
+                int hit = 0;
+                for (q = 0; q < row->name_count && !hit; q++) hit = !_stricmp(e->names[k], row->names[q]);
+                if (hit) { mu_mapmod_uid(mp, mod, e->uid); break; }
+            }
+        }
+        for (i = 0; i < mp->mm.module_count; i++) {
+            size_t q;
+            for (q = 0; q < row->name_count; q++)
+                if (!_stricmp(mp->mm.modules[i], row->names[q])) { mp->mods[mod].modules++; break; }
+        }
+    }
+}
+
+/* ---- the saved map's details */
+
+static char g_saves_root[MAX_PATH * 4];   /* "" the default */
+
+#ifdef SH_MODUI_TESTING
+void sh_modui_test_set_saves_root(const char *path)
+{
+    g_saves_root[0] = 0;
+    if (path) strncpy_s(g_saves_root, sizeof g_saves_root, path, _TRUNCATE);
+}
+#endif
+
+static int mu_saves_root(char *out, size_t cap)
+{
+    PWSTR saved = NULL;
+    char *utf8;
+    if (g_saves_root[0]) { strncpy_s(out, cap, g_saves_root, _TRUNCATE); return 1; }
+    if (FAILED(SHGetKnownFolderPath(&FOLDERID_SavedGames, 0, NULL, &saved)) || !saved) return 0;
+    utf8 = sh_mb_utf8(saved);
+    CoTaskMemFree(saved);
+    if (!utf8) return 0;
+    _snprintf_s(out, cap, _TRUNCATE, "%s\\id Software\\DOOM\\base\\savegame.user", utf8);
+    free(utf8);
+    return 1;
+}
+
+/* The local save's game.details (savegame.user\<profile>\SNAPMAPS<id>\):
+ * its metadata's name and its modified time. 1 when found. */
+static int mu_saved_details(const char *local_id, char *name, size_t name_cap, long long *saved)
+{
+    char root[MAX_PATH * 4], pattern[MAX_PATH * 4 + 8], path[MAX_PATH * 4 + 128];
+    WIN32_FIND_DATAA fd;
+    HANDLE h;
+    char *text = NULL;
+    const char *c;
+    size_t i;
+    name[0] = 0;
+    *saved = 0;
+    if (!local_id || !local_id[0] || strlen(local_id) > 40) return 0;
+    for (c = local_id; *c; c++) if (!((*c >= '0' && *c <= '9') || (*c >= 'A' && *c <= 'Z') || (*c >= 'a' && *c <= 'z'))) return 0;
+    if (!mu_saves_root(root, sizeof root)) return 0;
+    _snprintf_s(pattern, sizeof pattern, _TRUNCATE, "%s\\*", root);
+    h = FindFirstFileA(pattern, &fd);
+    if (h == INVALID_HANDLE_VALUE) return 0;
+    do {
+        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || fd.cFileName[0] == '.') continue;
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s\\SNAPMAPS%s\\game.details", root, fd.cFileName, local_id);
+        text = (char *)sh_mb_read_file(path, 1u << 20, NULL);
+    } while (!text && FindNextFileA(h, &fd));
+    FindClose(h);
+    if (!text) return 0;
+    /* Lines: checksum=, itemId=, metadata=<JSON>, modified=<epoch ms>. */
+    for (c = text; c && *c;) {
+        const char *end = strchr(c, '\n');
+        size_t len = end ? (size_t)(end - c) : strlen(c);
+        if (len > 9 && !strncmp(c, "modified=", 9)) *saved = _strtoi64(c + 9, NULL, 10) / 1000;
+        if (len > 9 && !strncmp(c, "metadata=", 9)) {
+            mpj *meta = mpj_parse(c + 9, len - 9 - (len > 9 && c[len - 1] == '\r'));
+            const mpj *nm = meta ? mpj_get(meta, "name") : NULL;
+            if (nm && nm->type == MPJ_STR) mu_copy_str(name, name_cap, nm);
+            if (!*saved) *saved = meta ? mpj_int(mpj_get(meta, "lastModified")) / 1000 : 0;
+            mpj_free(meta);
+        }
+        c = end ? end + 1 : NULL;
+    }
+    for (i = 0; name[i]; i++) if ((unsigned char)name[i] < 0x20) name[i] = ' ';
+    free(text);
+    return 1;
+}
+
+static void mu_map_build(mu_map *mp, const mu_model *m, const mu_record *rec)
 {
     const sh_modui_engine *e = mu_engine();
+    mu_visit visit;
+    char **names = NULL;
+    size_t count = 0;
     memset(mp, 0, sizeof *mp);
     sh_modmanifest_current(&mp->rows);
     mp->entities = -2;
-    if (e->placed_names) {
-        mu_names names;
-        memset(&names, 0, sizeof names);
-        mp->entities = e->placed_names(mu_names_add, &names);
-        mp->names = names.count;
-        if (mp->entities >= 0 && names.count && sh_modserve_active())
-            modserve_bundles_for_names_visit((const char *const *)names.items, names.count, mu_closure_visit,
-                                             &mp->closure);
-        mu_names_free(&names);
+    visit.closure = &mp->closure;
+    visit.mp = mp;
+    if (e->map_json) {
+        char *json = NULL, err[160];
+        size_t len = 0;
+        int r = e->map_json(&json, &len);
+        if (r == 0) mp->entities = -1;
+        else if (r > 0 && json) {
+            int failed = 0;
+            if (sh_mm_parse(json, len, &mp->mm, err, sizeof err)) {
+                mp->have_mm = 1;
+                mp->entities = (int)mp->mm.ent_count;
+                count = sh_modmanifest_placed_names(json, len, &names, &failed);
+                if (failed) { count = 0; names = NULL; }
+            } else mu_log("map: the open map's JSON could not be read (%s)", err);
+        }
+        if (json) HeapFree(GetProcessHeap(), 0, json);
+    }
+    if (!mp->have_mm && mp->entities != -1 && e->placed_names) {
+        mu_names nm;
+        memset(&nm, 0, sizeof nm);
+        mp->entities = e->placed_names(mu_names_add, &nm);
+        mp->names = nm.count;
+        if (mp->entities >= 0 && nm.count && sh_modserve_active())
+            modserve_bundles_for_names_visit((const char *const *)nm.items, nm.count, mu_map_visit, &visit);
+        mu_names_free(&nm);
+    } else if (mp->have_mm) {
+        mp->names = count;
+        if (count && sh_modserve_active()) modserve_bundles_for_names_visit((const char *const *)names, count, mu_map_visit, &visit);
+        sh_modmanifest_names_free(names, count);
+    }
+    if (mp->entities >= 0) {
+        size_t i, k;
+        for (i = 0; i < mp->rows.count; i++) {
+            const sh_modmanifest_row *row = &mp->rows.rows[i];
+            int mod = -1;
+            /* A row naming an alias of a bundle the closure reached is that mod. */
+            for (k = 0; k < mp->mod_count && mod < 0; k++)
+                if (mu_same_bundle(m, mp->mods[k].hash, row->bundle)) mod = (int)k;
+            if (mod < 0) mod = mu_mapmod_add(mp, row->bundle, row->id, row->version, row->size);
+            if (mod >= 0) mp->mods[mod].in_rows = 1;
+        }
+        if (mp->have_mm) mu_map_attribute(mp);
+        if (e->map_info && e->map_info(&mp->info) == 1) {
+            mp->have_info = 1;
+            (void)mu_saved_details(mp->info.local_id, mp->name, sizeof mp->name, &mp->saved);
+            for (i = 0; rec && i < rec->link_count && !mp->link; i++) {
+                const mu_link *l = &rec->links[i];
+                if ((mp->info.local_id[0] && !strcmp(l->local, mp->info.local_id)) ||
+                    (mp->info.cloud_id[0] && !strcmp(l->cloud, mp->info.cloud_id))) mp->link = l;
+            }
+            for (i = 0; mp->link && i < rec->claim_count && !mp->claim; i++)
+                if (!strcmp(rec->claims[i].ref, mp->link->item)) mp->claim = &rec->claims[i];
+        }
     }
 }
 
 static void mu_map_free(mu_map *mp)
 {
+    size_t i;
     sh_modmanifest_list_free(&mp->rows);
     mu_closure_free(&mp->closure);
+    for (i = 0; i < mp->mod_count; i++) free(mp->mods[i].uids);
+    free(mp->mods);
+    for (i = 0; i < mp->hit_count; i++) free(mp->hits[i].name);
+    free(mp->hits);
+    if (mp->have_mm) sh_mm_free(&mp->mm);
+    memset(mp, 0, sizeof *mp);
 }
 
 /* Whether the open map pins `hash`, directly or through an alias. */
@@ -794,6 +1373,79 @@ static int mu_map_references(const mu_model *m, const mu_map *mp, const char *ha
     for (i = 0; i < mp->closure.count; i++) if (mu_same_bundle(m, mp->closure.items[i].hash, hash)) return 1;
     return 0;
 }
+
+/* The mod a map entry's bundle is installed as (entry index), or -1. */
+static int mu_mapmod_entry(const mu_model *m, const mu_mapmod *x)
+{
+    return mu_find_hash(m, x->hash);
+}
+
+/* The state a map entry shows: installed, superseded, unindexed, skipped, missing. */
+static const char *mu_mapmod_state(const mu_model *m, const mu_mapmod *x)
+{
+    int st = sh_modserve_bundle_state(x->hash, NULL, 0), at = mu_mapmod_entry(m, x);
+    if (st > 0) return at >= 0 && m->entries[at].superseded_paths ? "superseded" : "installed";
+    if (st < 0) return "skipped";
+    return at >= 0 ? "unindexed" : "missing";
+}
+
+/* "<name> #<uniqueId>": the entity's own label, else its editor row's name,
+ * else the last part of what it inherits. */
+static void mu_entity_label(const mu_model *m, const sh_mm_entity *ent, int uid, char *out, size_t cap)
+{
+    const char *label = ent && ent->label[0] ? ent->label : NULL;
+    if (!label && ent) label = mu_row_name_for(m, ent->inherit);
+    if (!label && ent && ent->timeline) label = "Timeline";
+    if (!label && ent && ent->inherit[0]) label = strrchr(ent->inherit, '/') ? strrchr(ent->inherit, '/') + 1 : ent->inherit;
+    _snprintf_s(out, cap, _TRUNCATE, "%s #%d", label ? label : "Entity", uid);
+}
+
+static void mu_ref_name(const mu_model *m, const mu_map *mp, const sh_mm_ref *r, char *out, size_t cap)
+{
+    char a[300], b[300];
+    mu_entity_label(m, sh_mm_find(&mp->mm, r->from_uid), r->from_uid, a, sizeof a);
+    if (r->kind == SH_MM_REF_TIMELINE) { strncpy_s(out, cap, a, _TRUNCATE); return; }
+    mu_entity_label(m, sh_mm_find(&mp->mm, r->to_uid), r->to_uid, b, sizeof b);
+    _snprintf_s(out, cap, _TRUNCATE, "%s to %s", a, b);
+}
+
+/* [{kind, name}] of what points at the map entry's entities. */
+static size_t mu_put_refs(mu_buf *b, const mu_model *m, const mu_map *mp, const mu_mapmod *x)
+{
+    sh_mm_ref *refs = NULL;
+    size_t n = mp->have_mm && x->uid_count ? sh_mm_references(&mp->mm, x->uids, x->uid_count, &refs) : 0, i;
+    if (n == (size_t)-1) n = 0;
+    mu_putn(b, "[", 1);
+    for (i = 0; i < n && i < MU_MAX_MAP_REFS; i++) {
+        char name[700];
+        mu_ref_name(m, mp, &refs[i], name, sizeof name);
+        if (i) mu_putn(b, ",", 1);
+        mu_putn(b, "{", 1);
+        mu_kstr(b, "kind", refs[i].kind == SH_MM_REF_TIMELINE ? "timeline" : "wire", 1);
+        mu_kstr(b, "name", name, 0);
+        mu_putn(b, "}", 1);
+    }
+    mu_putn(b, "]", 1);
+    free(refs);
+    return n;
+}
+
+static void mu_put_entity_names(mu_buf *b, const mu_model *m, const mu_map *mp, const mu_mapmod *x)
+{
+    size_t i;
+    mu_putn(b, "[", 1);
+    for (i = 0; i < x->uid_count && i < MU_MAX_MAP_ENTITIES; i++) {
+        char name[300];
+        mu_entity_label(m, sh_mm_find(&mp->mm, x->uids[i]), x->uids[i], name, sizeof name);
+        if (i) mu_putn(b, ",", 1);
+        mu_str(b, name);
+    }
+    mu_putn(b, "]", 1);
+}
+
+/* The map entries the payload lists: every manifest row and every mod a
+ * placed name reaches (one only another mod needs is listed too). */
+static size_t mu_map_mod_count(const mu_map *mp) { return mp->mod_count; }
 
 static void mu_put_map(mu_buf *b, const mu_model *m, const mu_map *mp)
 {
@@ -852,7 +1504,50 @@ static void mu_put_map(mu_buf *b, const mu_model *m, const mu_map *mp)
         }
         mu_puts(b, "]}");
     }
-    mu_puts(b, "]}");
+    mu_putn(b, "]", 1);
+    if (mp->entities >= 0) {
+        /* Payload v3: what the map is and which mods it uses. Fields the
+         * product cannot know are left out. */
+        mu_kstr(b, "name", mp->name, 0);
+        mu_kstr(b, "id", mp->have_info ? mp->info.local_id : "", 0);
+        mu_knum(b, "saved", mp->saved > 0 ? (unsigned long long)mp->saved : 0, 0);
+        if (mp->link) {
+            /* A link is written when an item is published with mods from this
+             * installation and dropped at its unpublish. */
+            mu_puts(b, ",\"published\":{");
+            mu_kstr(b, "state", "published", 1);
+            mu_knum(b, "at", mp->link->at > 0 ? (unsigned long long)mp->link->at : 0, 0);
+            mu_puts(b, "},\"uploaded\":{");
+            mu_kbool(b, "claimed", mp->claim != NULL, 1);
+            mu_knum(b, "at", mp->claim && mp->claim->updated > 0 ? (unsigned long long)mp->claim->updated : 0, 0);
+            mu_putn(b, "}", 1);
+        }
+        if (mp->have_info && mp->info.tagged >= 0) mu_kbool(b, "tagged", mp->info.tagged, 0);
+        mu_puts(b, ",\"mods\":[");
+        for (i = 0; i < mu_map_mod_count(mp); i++) {
+            const mu_mapmod *x = &mp->mods[i];
+            int at = mu_mapmod_entry(m, x);
+            if (i) mu_putn(b, ",", 1);
+            mu_putn(b, "{", 1);
+            mu_kstr(b, "key", at >= 0 ? m->list.items[at].name : "", 1);
+            mu_kstr(b, "id", x->id, 0);
+            mu_kstr(b, "version", mu_version(x->version), 0);
+            mu_kstr(b, "state", mu_mapmod_state(m, x), 0);
+            mu_key(b, "placedEntities", 0);
+            mu_put_entity_names(b, m, mp, x);
+            mu_knum(b, "placedCount", (unsigned long long)x->uid_count, 0);
+            mu_knum(b, "placedModules", (unsigned)x->modules, 0);
+            mu_key(b, "references", 0);
+            (void)mu_put_refs(b, m, mp, x);
+            mu_knum(b, "size", x->size, 0);
+            mu_kbool(b, "inManifest", x->in_rows, 0);
+            mu_kbool(b, "viaNeeds", x->in_closure && !x->named, 0);
+            mu_putn(b, "}", 1);
+        }
+        mu_putn(b, "]", 1);
+        mu_kbool(b, "vanilla", mp->mod_count == 0, 0);
+    }
+    mu_putn(b, "}", 1);
 }
 
 /* ------------------------------------------------------------------ the document */
@@ -861,28 +1556,31 @@ int sh_modui_list(void)
 {
     mu_model m;
     mu_map mp;
+    mu_record rec;
     mu_buf b;
     size_t i;
     int n;
     if (!mu_on_main()) return -1;
     memset(&b, 0, sizeof b);
     if (!mu_model_build(&m)) { mu_model_free(&m); return -1; }
-    mu_map_build(&mp);
+    mu_record_load(&m, &rec);
+    mu_map_build(&mp, &m, &rec);
     mu_putn(&b, "{", 1);
-    mu_knum(&b, "v", 2, 1);
+    mu_knum(&b, "v", 3, 1);
     mu_knum(&b, "gen", (unsigned)g_gen, 0);
     mu_kstr(&b, "root", m.root_ok ? m.root : "", 0);
     mu_kbool(&b, "storeReadable", m.listed, 0);
     mu_puts(&b, ",\"mods\":[");
     for (i = 0; i < m.row_count; i++) {
         if (i) mu_putn(&b, ",", 1);
-        mu_put_row(&b, &m, &m.rows[i]);
+        mu_put_row(&b, &m, &rec, &m.rows[i]);
     }
     mu_putn(&b, "]", 1);
     mu_put_migrate(&b);
     mu_put_map(&b, &m, &mp);
     mu_putn(&b, "}", 1);
     mu_map_free(&mp);
+    mu_record_free(&rec);
     mu_model_free(&m);
     n = mu_publish(&b);
     return n;
@@ -901,6 +1599,11 @@ static const char *mu_action_name(int action)
     case SH_MODS_ACT_PRUNE_APPLY: return "pruneApply";
     case SH_MODS_ACT_REMOVE: return "remove";
     case SH_MODS_ACT_MIGRATE: return "migrate";
+    case SH_MODS_ACT_REBUILD: return "rebuild";
+    case SH_MODS_ACT_UNINSTALL: return "uninstall";
+    case SH_MODS_ACT_UNINSTALL_PREVIEW: return "uninstallPreview";
+    case SH_MODS_ACT_MAP_REMOVE: return "mapRemoveMod";
+    case SH_MODS_ACT_MAP_REMOVE_PREVIEW: return "mapRemoveModPreview";
     default: return "unknown";
     }
 }
@@ -1369,7 +2072,7 @@ static int mu_prune(int apply, const char *keys)
     mu_buf b;
     memset(&b, 0, sizeof b);
     if (!mu_model_build(&m)) { mu_model_free(&m); return -1; }
-    mu_map_build(&mp);
+    mu_map_build(&mp, &m, NULL);
     c = (mu_candidate *)calloc(m.list.count ? m.list.count : 1, sizeof *c);
     removing = (unsigned char *)calloc(m.list.count ? m.list.count : 1, 1);
     if (!c || !removing) {
@@ -1431,7 +2134,7 @@ static int mu_remove(const char *key)
     if (row < 0) { mu_model_free(&m); return mu_simple_result(SH_MODS_ACT_REMOVE, 0, "That mod is no longer installed."); }
     removing = (unsigned char *)calloc(m.list.count ? m.list.count : 1, 1);
     if (!removing) { mu_model_free(&m); return -1; }
-    mu_map_build(&mp);
+    mu_map_build(&mp, &m, NULL);
     {
         const sh_ms_entry *s = &m.list.items[m.rows[row].serving];
         shown = s->loaded && s->bundle.name && s->bundle.name[0] ? s->bundle.name : s->loaded && s->bundle.id[0] ? s->bundle.id : s->name;
@@ -1465,6 +2168,508 @@ static int mu_remove(const char *key)
     mu_map_free(&mp);
     mu_model_free(&m);
     return mu_result_tail(&b);
+}
+
+/* ---- the open map: removal of one mod, and uninstall */
+
+/* One console line, "MODS: " and the text (the console verbs share these
+ * actions with the tab). */
+static void mu_line(const mu_out *o, const char *fmt, ...)
+{
+    char line[1024];
+    va_list ap;
+    if (!o || !o->fn) return;
+    memcpy(line, "MODS: ", 6);
+    va_start(ap, fmt);
+    _vsnprintf_s(line + 6, sizeof line - 6, _TRUNCATE, fmt, ap);
+    va_end(ap);
+    o->fn(o->context, line);
+}
+
+/* 1 with the cause when the game cannot take a change now. */
+static int mu_busy(char *cause, size_t cap)
+{
+    const sh_modui_engine *e = mu_engine();
+    cause[0] = 0;
+    return e->busy && e->busy(cause, cap) == 1;
+}
+
+/* The map entry `key` names: the installed folder's build (or an alias of
+ * it), else a row whose mod is not installed, by id. -1 when the map does
+ * not use it. */
+static int mu_map_find(const mu_model *m, const mu_map *mp, const char *key)
+{
+    size_t i;
+    int entry = -1;
+    for (i = 0; i < m->list.count && entry < 0; i++)
+        if (!strcmp(m->list.items[i].name, key) && m->list.items[i].loaded) entry = (int)i;
+    for (i = 0; entry >= 0 && i < mp->mod_count; i++)
+        if (mu_same_bundle(m, mp->mods[i].hash, m->list.items[entry].bundle.hash)) return (int)i;
+    for (i = 0; i < mp->mod_count; i++)
+        if (mu_mapmod_entry(m, &mp->mods[i]) < 0 && !strcmp(mp->mods[i].id, key)) return (int)i;
+    return -1;
+}
+
+/* What removing one mod from the open map does. */
+typedef struct mu_plan {
+    int mod;                  /* the map entry, -1 when the map does not use it */
+    char refusal[400];        /* why it cannot be done, "" when it can */
+    sh_mm_ref *refs;
+    size_t ref_count;
+    int manifest_row, tag_removed, vanilla_after, published;
+} mu_plan;
+
+/* A map entry that only another mod's needs reach: it goes with that mod. */
+static int mu_mapmod_follows(const mu_mapmod *x)
+{
+    return x->in_closure && !x->named && !x->uid_count && !x->modules;
+}
+
+static void mu_plan_build(const mu_model *m, const mu_map *mp, const char *key, mu_plan *p)
+{
+    const mu_mapmod *x;
+    size_t i, others = 0;
+    memset(p, 0, sizeof *p);
+    p->mod = mp->entities >= 0 ? mu_map_find(m, mp, key) : -1;
+    if (p->mod < 0) return;
+    x = &mp->mods[p->mod];
+    if (!mp->have_mm)
+        strncpy_s(p->refusal, sizeof p->refusal, "the open map's entities cannot be read on this build", _TRUNCATE);
+    else if (x->modules)
+        _snprintf_s(p->refusal, sizeof p->refusal, _TRUNCATE, "the map places %d of its modules; delete them in Blueprint mode first",
+                    x->modules);
+    else if (mu_mapmod_follows(x))
+        strncpy_s(p->refusal, sizeof p->refusal, "another mod this map uses needs it; remove that mod from the map first", _TRUNCATE);
+    else if (x->uid_count > SH_EDITOR_DELETE_MAX)
+        _snprintf_s(p->refusal, sizeof p->refusal, _TRUNCATE, "it has %zu placed entities, more than one delete takes (%d)",
+                    x->uid_count, SH_EDITOR_DELETE_MAX);
+    if (x->uid_count && mp->have_mm) {
+        p->ref_count = sh_mm_references(&mp->mm, x->uids, x->uid_count, &p->refs);
+        if (p->ref_count == (size_t)-1) { p->ref_count = 0; p->refs = NULL; }
+    }
+    for (i = 0; i < mp->mod_count; i++) if ((int)i != p->mod && !mu_mapmod_follows(&mp->mods[i])) others++;
+    p->manifest_row = x->in_rows;
+    p->vanilla_after = others == 0;
+    p->tag_removed = p->vanilla_after && mp->have_info && mp->info.tagged == 1;
+    p->published = mp->link != NULL;
+}
+
+static void mu_plan_free(mu_plan *p) { free(p->refs); p->refs = NULL; }
+
+static const char *mu_delete_cause(int status)
+{
+    switch (status) {
+    case SH_EDITOR_DELETE_NOT_MAIN:    return "the request did not run on the game's main thread";
+    case SH_EDITOR_DELETE_NOT_READY:   return "the editor is not ready; open the map in the editor and try again";
+    case SH_EDITOR_DELETE_NOT_ENTITY:  return "the editor is not in Object mode; switch to it and try again";
+    case SH_EDITOR_DELETE_BUSY:        return "the editor is busy (an entity or a wire is held, or an edit is finishing); try again";
+    case SH_EDITOR_DELETE_INVALID:     return "an entity is no longer in the map; refresh and try again";
+    case SH_EDITOR_DELETE_RESTRICTED:  return "this map does not allow deleting entities";
+    case SH_EDITOR_DELETE_PORTAL:      return "one of its entities is a portal door or cap; delete it in the editor";
+    case SH_EDITOR_DELETE_PROTECTED:   return "the editor does not allow deleting one of its entities";
+    case SH_EDITOR_DELETE_REFERENCED:  return "another object refers to these entities and the editor asks before deleting them; "
+                                              "delete them in the editor, then try again";
+    case SH_EDITOR_DELETE_FAULT:       return "the delete faulted; check the map";
+    case SH_EDITOR_DELETE_INCOMPLETE:  return "the delete did not take every entity; check the map";
+    default:                           return "the editor's delete is not available on this build";
+    }
+}
+
+/* Remove the planned mod from the open map: its entities in one native
+ * Delete Selection (one undo step; the editor drops the wires and references
+ * to them with the entities), its manifest row, and with the last mod the
+ * search tag. 1 done, 0 refused (msg says why; nothing changed). */
+static int mu_map_apply(const mu_model *m, mu_map *mp, const mu_plan *p, const char *key, char *msg, size_t cap)
+{
+    const sh_modui_engine *e = mu_engine();
+    const mu_mapmod *x = &mp->mods[p->mod];
+    size_t i, rows = 0;
+    int tag = 0;
+    if (p->refusal[0]) { _snprintf_s(msg, cap, _TRUNCATE, "%s", p->refusal); return 0; }
+    if (x->uid_count) {
+        int st;
+        if (!e->delete_entities) { strncpy_s(msg, cap, mu_delete_cause(SH_EDITOR_DELETE_UNAVAILABLE), _TRUNCATE); return 0; }
+        st = e->delete_entities(x->uids, (int)x->uid_count);
+        if (st != SH_EDITOR_DELETE_DISPATCHED) {
+            mu_log("map remove %s: the delete of %zu entit%s was refused (status %d)", key, x->uid_count,
+                   x->uid_count == 1 ? "y" : "ies", st);
+            strncpy_s(msg, cap, mu_delete_cause(st), _TRUNCATE);
+            return 0;
+        }
+    }
+    /* Its row goes; with the last mod, so do the rows of mods only it needed. */
+    for (i = 0; i < mp->rows.count; i++) {
+        size_t k;
+        int drop = 0;
+        for (k = 0; k < mp->mod_count && !drop; k++)
+            if (mu_same_bundle(m, mp->rows.rows[i].bundle, mp->mods[k].hash))
+                drop = (int)k == p->mod || (p->vanilla_after && mu_mapmod_follows(&mp->mods[k]));
+        if (drop) rows += sh_modmanifest_current_remove(mp->rows.rows[i].bundle);
+    }
+    if (p->tag_removed && e->remove_tag) tag = e->remove_tag(MU_TAG);
+    InterlockedIncrement(&g_gen);
+    mu_log("map remove %s: %zu entit%s deleted%s, %zu manifest row(s) dropped%s", key, x->uid_count,
+           x->uid_count == 1 ? "y" : "ies", x->uid_count ? " in one undo step" : "", rows,
+           !p->tag_removed ? "" : tag > 0 ? ", search tag 'mods' removed" : tag == 0 ? ", the search tag was already absent"
+                                                                             : ", the search tag could not be removed");
+    msg[0] = 0;
+    return 1;
+}
+
+static void mu_put_entities_json(mu_buf *b, const mu_model *m, const mu_map *mp, const mu_mapmod *x)
+{
+    mu_put_entity_names(b, m, mp, x);
+}
+
+/* data.preview's map part. */
+static void mu_put_plan(mu_buf *b, const mu_model *m, const mu_map *mp, const mu_plan *p)
+{
+    const mu_mapmod *x = &mp->mods[p->mod];
+    size_t i;
+    mu_putn(b, "{", 1);
+    mu_kstr(b, "name", mp->name, 1);
+    mu_key(b, "entities", 0);
+    mu_put_entities_json(b, m, mp, x);
+    mu_knum(b, "entityCount", (unsigned long long)x->uid_count, 0);
+    mu_puts(b, ",\"references\":[");
+    for (i = 0; i < p->ref_count && i < MU_MAX_MAP_REFS; i++) {
+        char name[700];
+        mu_ref_name(m, mp, &p->refs[i], name, sizeof name);
+        if (i) mu_putn(b, ",", 1);
+        mu_putn(b, "{", 1);
+        mu_kstr(b, "kind", p->refs[i].kind == SH_MM_REF_TIMELINE ? "timeline" : "wire", 1);
+        mu_kstr(b, "name", name, 0);
+        mu_putn(b, "}", 1);
+    }
+    mu_putn(b, "]", 1);
+    mu_kbool(b, "manifestRow", p->manifest_row, 0);
+    mu_kbool(b, "tagRemoved", p->tag_removed, 0);
+    mu_kbool(b, "vanillaAfter", p->vanilla_after, 0);
+    mu_kbool(b, "published", p->published, 0);
+    mu_putn(b, "}", 1);
+}
+
+/* The dry run's lines for the console. */
+static void mu_say_plan(const mu_out *o, const char *verb, const mu_model *m, const mu_map *mp, const mu_plan *p)
+{
+    const mu_mapmod *x = &mp->mods[p->mod];
+    size_t i;
+    const char *where = mp->name[0] ? mp->name : "the open map";
+    if (x->uid_count) mu_line(o, "%s: deletes %zu placed entit%s from %s (one undo step)", verb, x->uid_count,
+                              x->uid_count == 1 ? "y" : "ies", where);
+    for (i = 0; i < x->uid_count && i < MU_MAX_MAP_ENTITIES; i++) {
+        char name[300];
+        mu_entity_label(m, sh_mm_find(&mp->mm, x->uids[i]), x->uids[i], name, sizeof name);
+        mu_line(o, "%s:   %s", verb, name);
+    }
+    if (p->ref_count) mu_line(o, "%s: severs %zu wire or timeline reference(s) to those entities", verb, p->ref_count);
+    for (i = 0; i < p->ref_count && i < MU_MAX_MAP_REFS; i++) {
+        char name[700];
+        mu_ref_name(m, mp, &p->refs[i], name, sizeof name);
+        mu_line(o, "%s:   %s: %s", verb, p->refs[i].kind == SH_MM_REF_TIMELINE ? "timeline" : "wire", name);
+    }
+    if (p->manifest_row) mu_line(o, "%s: removes the mod's row from the map's list of mods", verb);
+    if (p->tag_removed) mu_line(o, "%s: removes the search tag mods (the last mod the map uses)", verb);
+    if (p->vanilla_after) mu_line(o, "%s: the map then needs no mods and plays without Snapmap+", verb);
+    if (p->published) mu_line(o, "%s: the published copy on the server is unaffected until you publish the map again", verb);
+}
+
+static const char *mu_entry_title(const sh_ms_entry *s)
+{
+    return s->loaded && s->bundle.name && s->bundle.name[0] ? s->bundle.name : s->loaded && s->bundle.id[0] ? s->bundle.id : s->name;
+}
+
+/* mapRemoveModPreview, mapRemoveMod, uninstallPreview and uninstall, for the
+ * tab and the console (o non-NULL prints the same consequences). */
+static int mu_map_action(int action, const char *key, const mu_out *o)
+{
+    int uninstall = action == SH_MODS_ACT_UNINSTALL || action == SH_MODS_ACT_UNINSTALL_PREVIEW;
+    int apply = action == SH_MODS_ACT_UNINSTALL || action == SH_MODS_ACT_MAP_REMOVE;
+    const char *verb = uninstall ? "uninstall" : "map remove";
+    mu_model m;
+    mu_map mp;
+    mu_record rec;
+    mu_plan p;
+    mu_buf b;
+    char msg[MAX_PATH * 4 + 600], cause[300], title[300];
+    int entry = -1, ok = 1;
+    size_t i;
+    memset(&b, 0, sizeof b);
+    if (!key || !key[0]) {
+        mu_line(o, "%s: no mod named", verb);
+        return mu_simple_result(action, 0, "Select a mod first.");
+    }
+    if (mu_busy(cause, sizeof cause)) {
+        _snprintf_s(msg, sizeof msg, _TRUNCATE, "Not now: %s.", cause);
+        mu_line(o, "%s %s: refused: %s", verb, key, cause);
+        return mu_simple_result(action, 0, msg);
+    }
+    if (!mu_model_build(&m)) { mu_model_free(&m); return -1; }
+    mu_record_load(&m, &rec);
+    mu_map_build(&mp, &m, &rec);
+    for (i = 0; i < m.list.count && entry < 0; i++) if (!strcmp(m.list.items[i].name, key)) entry = (int)i;
+    mu_plan_build(&m, &mp, key, &p);
+    if (entry >= 0) strncpy_s(title, sizeof title, mu_entry_title(&m.list.items[entry]), _TRUNCATE);
+    else if (p.mod >= 0) strncpy_s(title, sizeof title, mp.mods[p.mod].id, _TRUNCATE);
+    else strncpy_s(title, sizeof title, key, _TRUNCATE);
+    msg[0] = 0;
+    if (uninstall && entry < 0) {
+        ok = 0;
+        _snprintf_s(msg, sizeof msg, _TRUNCATE, "%s is not installed.", key);
+    } else if (!uninstall && p.mod < 0) {
+        ok = 0;
+        _snprintf_s(msg, sizeof msg, _TRUNCATE, mp.entities < 0 ? "No map is open in the editor." : "The open map does not use %s.", title);
+    } else if (p.mod >= 0 && p.refusal[0]) {
+        ok = 0;
+        _snprintf_s(msg, sizeof msg, _TRUNCATE, "%s cannot be removed from %s: %s.", title, mp.name[0] ? mp.name : "the open map",
+                    p.refusal);
+    }
+    if (!ok) {
+        mu_line(o, "%s %s: %s", verb, key, msg);
+        mu_result_head(&b, action, 0, msg);
+    } else if (!apply) {
+        /* The dry run: the consequence list the confirmation shows. */
+        const sh_ms_entry *s = entry >= 0 ? &m.list.items[entry] : NULL;
+        int product = s && mu_product_folder(s);
+        char moved[MAX_PATH];
+        mu_result_head(&b, action, 1, "");
+        mu_puts(&b, ",\"preview\":{");
+        mu_kstr(&b, "action", uninstall ? "uninstall" : "mapRemoveMod", 1);
+        mu_kstr(&b, "key", key, 0);
+        mu_kstr(&b, "name", title, 0);
+        mu_key(&b, "map", 0);
+        if (p.mod >= 0) mu_put_plan(&b, &m, &mp, &p); else mu_puts(&b, "null");
+        mu_key(&b, "install", 0);
+        if (!uninstall) mu_puts(&b, "null");
+        else {
+            _snprintf_s(moved, sizeof moved, _TRUNCATE, "removed-mods\\%s", mu_leaf(s->folder));
+            mu_putn(&b, "{", 1);
+            mu_kstr(&b, "folder", mu_leaf(s->folder), 1);
+            mu_kstr(&b, "disposition", product ? "delete" : "move", 0);
+            mu_kstr(&b, "movedTo", product ? "" : moved, 0);
+            mu_putn(&b, "}", 1);
+            mu_puts(&b, ",\"editorRows\":[");
+            for (i = 0; i < (size_t)m.entries[entry].row_count; i++) {
+                if (i) mu_putn(&b, ",", 1);
+                mu_str(&b, m.entries[entry].row_names[i]);
+            }
+            mu_putn(&b, "]", 1);
+        }
+        mu_putn(&b, "}", 1);
+        if (o) {
+            if (p.mod >= 0) mu_say_plan(o, verb, &m, &mp, &p);
+            else if (uninstall) mu_line(o, "%s: the open map does not use it", verb);
+            if (uninstall) {
+                if (m.entries[entry].row_count)
+                    mu_line(o, "%s: removes %d Toybox row(s) from the editor", verb, m.entries[entry].row_count);
+                for (i = 0; i < (size_t)m.entries[entry].row_count; i++) mu_line(o, "%s:   %s", verb, m.entries[entry].row_names[i]);
+                if (product) mu_line(o, "%s: deletes the folder mods\\%s and its files", verb, mu_leaf(s->folder));
+                else mu_line(o, "%s: moves your folder mods\\%s to %s", verb, mu_leaf(s->folder), moved);
+                mu_line(o, "%s: other saved maps that use it are not changed; they ask for it when opened", verb);
+            }
+            mu_line(o, "%s %s: dry run; add --yes to do it", verb, key);
+        }
+    } else {
+        /* In order: the open map, then the folder, then the rescan (serving
+         * index, palette rows, strings). */
+        char mapmsg[400] = "";
+        int removed_from_map = 0;
+        if (p.mod >= 0) {
+            ok = mu_map_apply(&m, &mp, &p, key, mapmsg, sizeof mapmsg);
+            removed_from_map = ok;
+        }
+        if (!ok) {
+            _snprintf_s(msg, sizeof msg, _TRUNCATE, "%s was not %s: %s.", title, uninstall ? "uninstalled" : "removed from the map",
+                        mapmsg);
+        } else if (!uninstall) {
+            const mu_mapmod *x = &mp.mods[p.mod];
+            if (!x->uid_count)
+                _snprintf_s(msg, sizeof msg, _TRUNCATE, "Removed %s from %s: no entity used it, so only its row was dropped%s.",
+                            title, mp.name[0] ? mp.name : "the open map", p.vanilla_after ? "; the map now plays without Snapmap+" : "");
+            else
+                _snprintf_s(msg, sizeof msg, _TRUNCATE, "Removed %s from %s: %zu entit%s deleted%s. Ctrl+Z in the editor brings %s back.",
+                            title, mp.name[0] ? mp.name : "the open map", x->uid_count, x->uid_count == 1 ? "y" : "ies",
+                            p.vanilla_after ? "; the map now plays without Snapmap+" : "", x->uid_count == 1 ? "it" : "them");
+        } else {
+            unsigned char *removing = (unsigned char *)calloc(m.list.count ? m.list.count : 1, 1);
+            mu_removal rm;
+            memset(&rm, 0, sizeof rm);
+            if (!removing) ok = 0;
+            else {
+                removing[entry] = 1;
+                mu_remove_marked(&m, removing, &rm);
+                ok = rm.removed > 0 && rm.failed == 0;
+            }
+            mu_log("uninstall %s: %s%s", key, ok ? "removed" : "the folder could not be removed",
+                   removed_from_map ? " after the open map was cleaned of it" : "");
+            if (ok && rm.kept)
+                _snprintf_s(msg, sizeof msg, _TRUNCATE, "Uninstalled %s%s. Your folder was moved to %s.", title,
+                            removed_from_map ? " and removed it from the open map" : "", rm.kept_at);
+            else if (ok)
+                _snprintf_s(msg, sizeof msg, _TRUNCATE, "Uninstalled %s%s.", title,
+                            removed_from_map ? " and removed it from the open map" : "");
+            else
+                _snprintf_s(msg, sizeof msg, _TRUNCATE, "%s could not be uninstalled: %s. Close any program using its folder and "
+                            "try again.%s", title, rm.first_fail[0] ? rm.first_fail : "nothing was moved",
+                            removed_from_map ? " It was removed from the open map." : "");
+            free(removing);
+        }
+        mu_line(o, "%s %s: %s", verb, key, msg);
+        mu_result_head(&b, action, ok, msg);
+    }
+    mu_plan_free(&p);
+    mu_map_free(&mp);
+    mu_record_free(&rec);
+    mu_model_free(&m);
+    return mu_result_tail(&b);
+}
+
+/* ---- rebuild */
+
+/* Build one folder again from its files (as 'sh_mods build'), write its
+ * product block, then rescan so the game serves the new build. */
+static int mu_rebuild(const char *key)
+{
+    mu_model m;
+    sh_mb_resolver r;
+    sh_mb_bundle bd;
+    mu_stock stock = { 0 };
+    char folder[MAX_PATH * 4], cause[SH_MB_CAUSE_MAX], msg[SH_MB_CAUSE_MAX + 400], note[160], before[SH_MB_HASH_HEX + 1] = "";
+    int entry = -1, ok;
+    size_t i;
+    if (!key || !key[0]) return mu_simple_result(SH_MODS_ACT_REBUILD, 0, "Select a mod to rebuild.");
+    if (mu_busy(cause, sizeof cause)) {
+        _snprintf_s(msg, sizeof msg, _TRUNCATE, "Not now: %s.", cause);
+        return mu_simple_result(SH_MODS_ACT_REBUILD, 0, msg);
+    }
+    if (!mu_model_build(&m)) { mu_model_free(&m); return -1; }
+    for (i = 0; i < m.list.count && entry < 0; i++) if (!strcmp(m.list.items[i].name, key)) entry = (int)i;
+    if (entry < 0) { mu_model_free(&m); return mu_simple_result(SH_MODS_ACT_REBUILD, 0, "That mod is no longer installed."); }
+    strncpy_s(folder, sizeof folder, m.list.items[entry].folder, _TRUNCATE);
+    if (m.list.items[entry].loaded) strncpy_s(before, sizeof before, m.list.items[entry].bundle.hash, _TRUNCATE);
+    r.installed = sh_ms_request_exists;
+    r.installed_context = &m.list;
+    r.stock = mu_stock_exists;
+    r.stock_context = &stock;
+    mu_log("rebuild %s: building", key);
+    ok = sh_mb_build(folder, &r, &bd);
+    cause[0] = 0;
+    if (!ok) strncpy_s(cause, sizeof cause, bd.first_cause[0] ? bd.first_cause : "the mod could not be built", _TRUNCATE);
+    else {
+        modstore_lock();
+        ok = sh_mb_write(&bd, folder, cause, sizeof cause);
+        if (ok) sh_ms_note_build(folder, &bd);
+        modstore_unlock();
+    }
+    mu_model_free(&m);
+    note[0] = 0;
+    if (!ok) {
+        mu_log("rebuild %s: refused: %s", key, cause);
+        _snprintf_s(msg, sizeof msg, _TRUNCATE, "Not rebuilt: %s", cause);
+    } else {
+        int same = !strcmp(before, bd.hash);
+        mu_log("rebuild %s: %s@%s+%llu, bundle %s%s", key, bd.id, bd.version, bd.build, bd.hash, same ? " (unchanged)" : "");
+        mu_rescan(note, sizeof note);
+        if (same) _snprintf_s(msg, sizeof msg, _TRUNCATE, "Rebuilt %s: nothing changed (%zu files).", key, bd.file_count);
+        else _snprintf_s(msg, sizeof msg, _TRUNCATE, "Rebuilt %s: build %llu, %zu files.", key, bd.build, bd.file_count);
+    }
+    InterlockedIncrement(&g_gen);
+    {
+        mu_buf b;
+        memset(&b, 0, sizeof b);
+        mu_result_head(&b, SH_MODS_ACT_REBUILD, ok, msg);
+        mu_kstr(&b, "key", key, 0);
+        mu_kstr(&b, "bundle", ok ? bd.hash : "", 0);
+        mu_kstr(&b, "cause", ok ? "" : cause, 0);
+        mu_kstr(&b, "index", note, 0);
+        sh_mb_free(&bd);
+        return mu_result_tail(&b);
+    }
+}
+
+/* ---- the console verbs */
+
+static void mu_say_map(const mu_out *o)
+{
+    mu_model m;
+    mu_map mp;
+    mu_record rec;
+    size_t i, k;
+    if (!mu_model_build(&m)) { mu_model_free(&m); mu_line(o, "map: out of memory"); return; }
+    mu_record_load(&m, &rec);
+    mu_map_build(&mp, &m, &rec);
+    if (mp.entities < 0) mu_line(o, "map: %s", mp.entities == -1 ? "no map is open in the editor" : "the open map cannot be read on this build");
+    else {
+        char when[64] = "unknown";
+        if (mp.saved > 0) {
+            time_t t = (time_t)mp.saved;
+            struct tm tm;
+            if (!localtime_s(&tm, &t)) strftime(when, sizeof when, "%Y-%m-%d %H:%M", &tm);
+        }
+        mu_line(o, "map: %s (id %s), %d entities, last saved %s", mp.name[0] ? mp.name : "(not saved yet)",
+                mp.have_info && mp.info.local_id[0] ? mp.info.local_id : "none", mp.entities, when);
+        if (mp.link) mu_line(o, "map: published as item %s; its mods %s", mp.link->item, mp.claim ? "are uploaded (a claim is stored)" : "have no stored claim");
+        else mu_line(o, "map: no publish of it with mods is recorded on this computer");
+        mu_line(o, "map: search tag mods: %s", !mp.have_info || mp.info.tagged < 0 ? "unknown" : mp.info.tagged ? "present" : "absent");
+        if (!mp.mod_count) mu_line(o, "map: uses no mods; it plays without Snapmap+");
+        for (i = 0; i < mp.mod_count; i++) {
+            const mu_mapmod *x = &mp.mods[i];
+            int at = mu_mapmod_entry(&m, x);
+            sh_mm_ref *refs = NULL;
+            size_t n = mp.have_mm && x->uid_count ? sh_mm_references(&mp.mm, x->uids, x->uid_count, &refs) : 0;
+            if (n == (size_t)-1) n = 0;
+            mu_line(o, "map: mod %s%s%s (%s, %s): %zu placed entit%s%s, %zu wire or timeline reference(s)%s%s", x->id,
+                    x->version[0] && mu_version(x->version)[0] ? "@" : "", mu_version(x->version),
+                    at >= 0 ? m.list.items[at].name : "not installed", mu_mapmod_state(&m, x), x->uid_count,
+                    x->uid_count == 1 ? "y" : "ies", x->modules ? ", placed modules" : "", n,
+                    x->in_rows ? "" : ", no row yet (the next save adds it)", mu_mapmod_follows(x) ? ", needed by another mod" : "");
+            for (k = 0; k < x->uid_count && k < MU_MAX_MAP_ENTITIES; k++) {
+                char name[300];
+                mu_entity_label(&m, sh_mm_find(&mp.mm, x->uids[k]), x->uids[k], name, sizeof name);
+                mu_line(o, "map:   entity %s", name);
+            }
+            for (k = 0; k < n && k < MU_MAX_MAP_REFS; k++) {
+                char name[700];
+                mu_ref_name(&m, &mp, &refs[k], name, sizeof name);
+                mu_line(o, "map:   %s %s", refs[k].kind == SH_MM_REF_TIMELINE ? "timeline" : "wire", name);
+            }
+            free(refs);
+        }
+    }
+    mu_map_free(&mp);
+    mu_record_free(&rec);
+    mu_model_free(&m);
+}
+
+int sh_modui_command(int argc, const char *const *argv, sh_modui_line_fn line, void *context)
+{
+    mu_out o;
+    const char *verb = argc > 0 ? argv[0] : NULL;
+    const char *key = NULL;
+    int yes = 0, i, first;
+    o.fn = line;
+    o.context = context;
+    if (!verb) return 0;
+    if (_stricmp(verb, "map") && _stricmp(verb, "uninstall")) return 0;
+    if (!mu_on_main()) return -1;
+    if (!_stricmp(verb, "map") && argc == 1) { mu_say_map(&o); return 1; }
+    first = !_stricmp(verb, "map") ? 2 : 1;
+    if (!_stricmp(verb, "map") && _stricmp(argv[1], "remove")) {
+        mu_line(&o, "map: usage: sh_mods map, or sh_mods map remove \"<id>\" [--yes]");
+        return 1;
+    }
+    for (i = first; i < argc; i++) {
+        if (!_stricmp(argv[i], "--yes")) yes = 1;
+        else if (!key) key = argv[i];
+        else { key = NULL; break; }
+    }
+    if (!key || !key[0]) {
+        mu_line(&o, "%s: usage: sh_mods %s \"<id>\" [--yes]", verb, !_stricmp(verb, "map") ? "map remove" : "uninstall");
+        return 1;
+    }
+    if (!_stricmp(verb, "map")) (void)mu_map_action(yes ? SH_MODS_ACT_MAP_REMOVE : SH_MODS_ACT_MAP_REMOVE_PREVIEW, key, &o);
+    else (void)mu_map_action(yes ? SH_MODS_ACT_UNINSTALL : SH_MODS_ACT_UNINSTALL_PREVIEW, key, &o);
+    return 1;
 }
 
 /* ---- migration */
@@ -1632,6 +2837,13 @@ int sh_modui_run(int action, const char *arg)
         return mu_remove(arg);
     case SH_MODS_ACT_MIGRATE:
         return mu_migrate();
+    case SH_MODS_ACT_REBUILD:
+        return mu_rebuild(arg);
+    case SH_MODS_ACT_UNINSTALL:
+    case SH_MODS_ACT_UNINSTALL_PREVIEW:
+    case SH_MODS_ACT_MAP_REMOVE:
+    case SH_MODS_ACT_MAP_REMOVE_PREVIEW:
+        return mu_map_action(action, arg, NULL);
     default:
         return mu_simple_result(action, 0, "Unknown action.");
     }
