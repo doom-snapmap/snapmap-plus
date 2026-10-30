@@ -1304,6 +1304,52 @@ static void test_watermark(void)
     lm.next = NULL;
 }
 
+/* sh_modserve_each_bundle_extra: admitted bundles with an extra object only,
+ * installed before map-delivered, then id, then version. */
+static char g_extra_seen[1024];
+static void collect_extra(void *c, const char *id, const char *version, int legacy, const char *extra)
+{
+    (void)c;
+    CHECK(extra && extra[0] == '{' && strstr(extra, "\"strings\""));
+    _snprintf_s(g_extra_seen + strlen(g_extra_seen), sizeof g_extra_seen - strlen(g_extra_seen), _TRUNCATE,
+                "%s@%s%s;", id, version, legacy ? "(legacy)" : "");
+}
+
+static void test_bundle_extra(void)
+{
+    static const fx_file z[] = { { "generated/decls/entitydef/mods/zed.mod/a.decl", "x", -1, "entityDef", "mods/zed.mod/a", NULL, '1' } };
+    static const fx_file a1[] = { { "generated/decls/entitydef/mods/abe.mod/a1.decl", "x", -1, "entityDef", "mods/abe.mod/a1", NULL, '2' } };
+    static const fx_file a2[] = { { "generated/decls/entitydef/mods/abe.mod/a2.decl", "x", -1, "entityDef", "mods/abe.mod/a2", NULL, '3' } };
+    static const fx_file bad[] = { { "generated/decls/entitydef/mods/bad.size/a.decl", "x", 99, "entityDef", "mods/bad.size/a", NULL, '4' } };
+    static const fx_file plain[] = { { "generated/decls/entitydef/mods/plain.mod/a.decl", "x", -1, "entityDef", "mods/plain.mod/a", NULL, '5' } };
+    static const fx_file old[] = { { "generated/decls/entitydef/smp/aaa_old.decl", "x", -1, "entityDef", "smp/aaa_old", NULL, '6' } };
+    char top[MAX_PATH], mods[MAX_PATH], legacy[MAX_PATH], *slash;
+    strcpy_s(top, sizeof top, g_root);
+    slash = strrchr(top, '\\');
+    if (slash) *slash = 0;
+    _snprintf_s(mods, sizeof mods, _TRUNCATE, "%s\\extra_mods", top);
+    _snprintf_s(legacy, sizeof legacy, _TRUNCATE, "%s\\legacy", mods);
+    mkdirs(mods);
+    g_bundle_extra = "\"extra\": {\"strings\": {\"en\": {\"zed_name\": \"Zed\"}}},";
+    make_bundle(mods, "zed.mod@1.0.0", "zed.mod", "1.0.0", '7', NULL, z, 1, NULL);
+    g_bundle_extra = "\"extra\": {\"strings\": {\"en\": {\"abe_name\": \"Abe 2\"}}},";
+    make_bundle(mods, "abe.mod@2.0.0", "abe.mod", "2.0.0", '8', NULL, a2, 1, NULL);
+    g_bundle_extra = "\"extra\": {\"hud\": {}, \"strings\": {\"en\": {\"abe_name\": \"Abe 1\"}}},";
+    make_bundle(mods, "abe.mod@1.0.0", "abe.mod", "1.0.0", '9', NULL, a1, 1, NULL);
+    g_bundle_extra = "\"extra\": {\"strings\": {\"en\": {\"bad_name\": \"Bad\"}}},";
+    make_bundle(mods, "bad.size@1.0.0", "bad.size", "1.0.0", '0', NULL, bad, 1, NULL);
+    g_bundle_extra = "\"extra\": {\"legacy\": {}, \"strings\": {\"en\": {\"old_name\": \"Old\"}}},";
+    make_bundle(legacy, "aaa.old@0123456789abcdef", "aaa.old", "0123456789abcdef", 'f', NULL, old, 1, NULL);
+    g_bundle_extra = NULL;
+    make_bundle(mods, "plain.mod@1.0.0", "plain.mod", "1.0.0", 'e', NULL, plain, 1, NULL);
+    CHECK(sh_modserve_index_build(mods) == 5);
+    g_extra_seen[0] = 0;
+    CHECK(sh_modserve_each_bundle_extra(collect_extra, NULL) == 4);
+    CHECK(!strcmp(g_extra_seen, "abe.mod@1.0.0;abe.mod@2.0.0;zed.mod@1.0.0;aaa.old@0123456789abcdef(legacy);"));
+    if (strcmp(g_extra_seen, "abe.mod@1.0.0;abe.mod@2.0.0;zed.mod@1.0.0;aaa.old@0123456789abcdef(legacy);"))
+        fprintf(stderr, "bundle extra order: %s\n", g_extra_seen);
+}
+
 static void remove_tree(const char *dir)
 {
     char pattern[MAX_PATH], path[MAX_PATH];
@@ -1342,6 +1388,7 @@ int main(void)
     test_conflicts();
     test_editor_refs();
     test_watermark();
+    test_bundle_extra();
     strcpy_s(top, sizeof top, g_root);
     slash = strrchr(top, '\\');
     if (slash) { *slash = 0; remove_tree(top); }

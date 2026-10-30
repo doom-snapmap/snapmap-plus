@@ -526,6 +526,22 @@ shadow, a new one lives under `generated/swf/mods/<id>/` with its atlas
 `generated/swf/mods/<id>/<stem>.bimage` beside it. Each served movie logs
 `MODS: swf: served <request> (<bundle>) at load state N` (the first 32).
 
+Display text reaches the engine's `#str_` table through `strids.c`, which reads
+three layers and keeps the first writer of each key (case-insensitive): the
+user's `%LOCALAPPDATA%\snapmap-plus\strings\strids.json`, then the
+`extra.strings.en` object of every admitted bundle (installed mods before
+bundles a map delivered, then by id and version, through
+`sh_modserve_each_bundle_extra`), then the baked defaults. Keys omit the
+`#str_` prefix decls use, and only `en` is read. When two bundles give one key
+different text the first stands and one `B1: strids REFUSED` line names both;
+identical text is not a conflict. The first injection runs after the boot index
+is built, so it already carries bundle strings. Every later index build
+(`sh_mods rescan`, an install, a migration, a fetched bundle) requests a
+refresh that re-reads the layers and re-sorts the table on the main thread: at
+once when the build ran there, otherwise through the apply call slot or at the
+next editor palette build or map activation. A refresh updates changed text in
+place and retires keys no layer supplies any more.
+
 ### Mod sounds
 
 A sound decl a mod carries (`generated/decls/sound/mods/<id>/<stem>.decl`)

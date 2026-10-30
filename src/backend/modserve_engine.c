@@ -53,6 +53,7 @@
 #include "engine_cvar_read.h"
 #include "modvt.h"
 #include "modsound.h"
+#include "strids.h"
 
 #define RES_LIFETIME_OFF    0x28
 #define RES_STATE_OFF       0x2c
@@ -369,9 +370,33 @@ static void *me_clean(const sig_result *r, size_t n, const char *name)
     return NULL;
 }
 
+/* Bundle strings (strids.c) follow the published index. A table published
+ * on the main thread (sh_mods rescan) refreshes them at once; one published
+ * elsewhere (an install job, the Mods tab) asks the main thread through the
+ * apply call slot, and when the slot is busy or the frame does not run the
+ * request stays pending for the next editor or map pass below. */
+static int me_strings_main(void *context)
+{
+    (void)context;
+    return sh_strids_refresh_pending() != 0;
+}
+
+static void me_index_changed(void)
+{
+    sh_run_on_main_fn run = NULL;
+    int result = 0;
+    sh_strids_request_refresh();
+    if (me_on_main() == 1) { (void)sh_strids_refresh_pending(); return; }
+    sh_apply_engine_get_run_on_main(&run);
+    if (run) (void)run(NULL, me_strings_main, NULL, 1500, &result);
+}
+
 int sh_modserve_install(const sig_result *results, size_t count, const uint8_t *module_base)
 {
     size_t i;
+    /* The boot index was built before this point, and the string injector
+     * (installed after it) read that table in its first pass. */
+    sh_modserve_set_index_listener(me_index_changed);
     g_ctor = (str_ctor_fn)me_clean(results, count, "IdStrCtor");
     g_dtor = (str_dtor_fn)me_clean(results, count, "IdStrDtor");
     g_anchor = (const unsigned char *)me_clean(results, count, "DeclRegistryAnchor");
@@ -449,6 +474,8 @@ void sh_modserve_palette_before_build(void)
     sh_modvt_before_pass("editor");
     /* Mod sound banks: submitted once the sound system is up (modsound.h). */
     sh_modsound_before_pass("editor");
+    /* Bundle strings of an index published off the main thread. */
+    (void)sh_strids_refresh_pending();
     if (!g_bound || !sh_modserve_active()) return;
     me_ensure_probe();
     t0 = me_now_ms();
@@ -643,6 +670,7 @@ int modserve_activate_bundles(const char *const *bundle_hashes, int n)
     if (!g_bound) { me_log("activation refused: decl registry unavailable"); return -1; }
     sh_modvt_before_pass("map");
     sh_modsound_before_pass("map");
+    (void)sh_strids_refresh_pending();
     me_ensure_probe();
     t0 = me_now_ms();
     if (sh_modserve_plan_bundles(bundle_hashes, n, &plan, &unknown) < 0) { me_log("activation refused: out of memory"); return -1; }

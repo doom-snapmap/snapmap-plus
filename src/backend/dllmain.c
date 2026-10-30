@@ -294,23 +294,6 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
         void *get_decls = (void *)sig_addr_by_name(results, db, "GetDeclsOfType");
 
 
-        /* Inject custom #str_ entries before the first top-level language-table sort.
-         * The detour needs a clean prologue; helper functions come from the same scan. */
-        void *sort_body = NULL;
-        int   sort_clean = 0;
-        for (size_t i = 0; i < db; i++) {
-            if (results[i].name && strcmp(results[i].name, "StridsSortBody") == 0) {
-                if (results[i].status == SIG_OK || results[i].status == SIG_OK_HOOKED)
-                    sort_body = (void *)results[i].addr;
-                sort_clean = (results[i].status == SIG_OK);
-                break;
-            }
-        }
-        void *strids_lea   = (void *)sig_addr_by_name(results, db, "StridsTableLea");
-        void *strids_ins   = (void *)sig_addr_by_name(results, db, "StridsInsert");
-        void *strids_hash  = (void *)sig_addr_by_name(results, db, "StridsHash");
-        void *idstr_ctor   = (void *)sig_addr_by_name(results, db, "IdStrAssign");
-        sh_strids_install(sort_body, sort_clean, strids_lea, strids_ins, strids_hash, idstr_ctor);
 
         /* Replace resource-provider open-by-name slot +0x148 after validating the audited
          * provider ABI. It serves map navigation, Grid Room variants, built-in defaults
@@ -356,6 +339,26 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
         sh_modstock_register();
         (void)sh_modmigrate_boot();   /* the retired overrides folder, once (modmigrate.h) */
         (void)sh_modserve_index_boot();
+
+        /* Inject custom #str_ entries before the first top-level language-table sort,
+         * after the serving index so the first pass already carries the admitted
+         * bundles' strings (later index builds refresh them, modserve_engine.c).
+         * The detour needs a clean prologue; helper functions come from the same scan. */
+        void *sort_body = NULL;
+        int   sort_clean = 0;
+        for (size_t i = 0; i < db; i++) {
+            if (results[i].name && strcmp(results[i].name, "StridsSortBody") == 0) {
+                if (results[i].status == SIG_OK || results[i].status == SIG_OK_HOOKED)
+                    sort_body = (void *)results[i].addr;
+                sort_clean = (results[i].status == SIG_OK);
+                break;
+            }
+        }
+        void *strids_lea   = (void *)sig_addr_by_name(results, db, "StridsTableLea");
+        void *strids_ins   = (void *)sig_addr_by_name(results, db, "StridsInsert");
+        void *strids_hash  = (void *)sig_addr_by_name(results, db, "StridsHash");
+        void *idstr_ctor   = (void *)sig_addr_by_name(results, db, "IdStrAssign");
+        sh_strids_install(sort_body, sort_clean, strids_lea, strids_ins, strids_hash, idstr_ctor);
         if (SH_IDFILE_SLOTS != SH_OVERRIDES_STREAM_SLOTS || SH_PROVIDER_OPEN_SLOT != SH_OVERRIDES_OPEN_SLOT)
             backend_log("B1: overrides file-shadow SKIPPED -- the override stream implements the 31-slot "
                         "idFile ABI; build 13954591's idFile slot list and provider open slot are not "

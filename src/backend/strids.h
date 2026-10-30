@@ -1,5 +1,9 @@
 /* Inject custom #str_ mappings into the native language dictionary. Read the
- * user strings/strids.json, then baked defaults. Keys are case-insensitive and first-writer-wins. Use the native
+ * user strings/strids.json, then the extra.strings.en object of every
+ * admitted mod bundle (sh_modserve_each_bundle_extra: installed before
+ * map-delivered, then id, then version), then baked defaults. Keys are
+ * case-insensitive and first-writer-wins; two bundles giving one key
+ * different text log one REFUSED line naming both. Use the native
  * hash, string pool and list append functions, then re-sort the table.
  *
  * Installation supplies the text; a rearm re-reads it, updates keys owned by
@@ -30,6 +34,16 @@ int sh_strids_install(void *sort_body_fn, int sort_status_ok,
  * reading, native mutation, or sorting failed. */
 int sh_strids_rearm(void);
 
+/* Any thread: a serving index was published (boot, rescan, install, migrate),
+ * so the bundle layer may have changed. Only marks the refresh pending. */
+void sh_strids_request_refresh(void);
+
+/* Engine main thread: when a refresh is pending and the first injection has
+ * run, clear the request and rearm. Returns -1 when nothing ran (no request,
+ * or the first injection is still to come and will read the index itself),
+ * else what sh_strids_rearm returned. */
+int sh_strids_refresh_pending(void);
+
 /* Set the user document path; NULL restores %LOCALAPPDATA%\snapmap-
  * plus\strings\strids.json. Returns 1 when set.
  */
@@ -42,7 +56,8 @@ unsigned long sh_strids_injected_count(void);
 /* Bind test doubles for the four engine entry points and run one inject pass; returns rows appended. */
 int sh_strids_test_inject(void *table_desc, void *insert, void *hash, void *idstr_ctor);
 void sh_strids_test_set_sort(void *sort);
-/* Read back how row `index` was attributed: its id and its owner ("<user>"). */
+/* Read back how row `index` was attributed: its id and its owner ("<user>" for
+ * the user document and baked defaults, "<id>@<version>" for a bundle). */
 int sh_strids_test_row(int index, const char **id_out, const char **owner_out);
 #endif
 

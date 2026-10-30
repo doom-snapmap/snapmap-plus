@@ -395,6 +395,17 @@ typedef void (*sh_modserve_bundle_fn)(void *context, const char *id, const char 
                                       int files, int legacy);
 void sh_modserve_each_bundle(sh_modserve_bundle_fn fn, void *context);
 
+/* Visit every admitted bundle whose bundle.json carries an "extra" object (the
+ * descriptor keys the builder preserves, such as "strings" and "hud"), in a
+ * fixed order: installed mods before bundles a map delivered (legacy\), then
+ * by id (case-insensitive), then by version. `extra` is the object's JSON
+ * text; the strings stay valid for the process. Returns the number visited,
+ * or -1 when the order could not be allocated (nothing is visited). Used by
+ * strids.c for the bundle string layer. */
+typedef void (*sh_modserve_extra_fn)(void *context, const char *id, const char *version, int legacy,
+                                     const char *extra);
+int sh_modserve_each_bundle_extra(sh_modserve_extra_fn fn, void *context);
+
 /* Visit every file the published table serves (admitted bundles, conflict
  * winners, not withdrawn), in index order. The strings stay valid for the
  * process. Used by modvt.c to find the bundles' virtual-texture members. */

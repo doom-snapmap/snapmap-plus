@@ -62,6 +62,7 @@ typedef struct ms_conflict {
 
 typedef struct ms_bundle {
     const char *dir, *folder, *id, *version, *hash, *name;
+    const char *extra;                    /* bundle.json "extra" object as JSON text, or NULL */
     int legacy, admitted, first_file, file_count;
     int grandfathered;                    /* under legacy\ or bundle.json extra.legacy: shadows may be new names */
     uint64_t total;                       /* sum of file sizes (the manifest row's size) */
@@ -101,7 +102,7 @@ static volatile LONG g_opens_served, g_open_failures, g_probe_claims, g_cache_hi
 static volatile LONG g_renderprog_logged;   /* render-program serve lines written */
 volatile LONG g_modserve_editor_ok, g_modserve_editor_failed;   /* written by modserve_engine.c */
 #define MS_LISTENERS 4
-static sh_modserve_index_fn volatile g_index_listener[MS_LISTENERS];   /* modvt.c, modsound.c */
+static sh_modserve_index_fn volatile g_index_listener[MS_LISTENERS];   /* modvt.c, modsound.c, modserve_engine.c */
 
 /* ------------------------------------------------------------------ logging */
 
@@ -733,6 +734,7 @@ static void ms_parse_bundle(ms_index *x, ms_bundle *b, const char *blobs_dir)
             /* The builder preserves descriptor keys it does not own under
              * "extra"; a "legacy" object there marks a grandfathered bundle. */
             ms_json o = { v, ve };
+            if (v < ve && *v == '{') b->extra = ms_strndup(x, v, (size_t)(ve - v));
             if (ms_jenter(&o, '{')) while (ms_jnext(&o, '}')) {
                 const char *ev, *eve;
                 char ek[64];
@@ -2894,6 +2896,45 @@ void sh_modserve_each_bundle(sh_modserve_bundle_fn fn, void *context)
         fn(context, b->id ? b->id : b->folder, b->version ? b->version : "", b->hash ? b->hash : "",
            b->admitted, b->cause, b->file_count, b->legacy);
     }
+}
+
+/* Installed mods before bundles a map delivered, then id, then version. */
+static const ms_index *g_extra_order_index;
+static int ms_extra_order(const void *a, const void *b)
+{
+    const ms_bundle *x = &g_extra_order_index->bundles[*(const int *)a];
+    const ms_bundle *y = &g_extra_order_index->bundles[*(const int *)b];
+    int c;
+    if (x->legacy != y->legacy) return x->legacy ? 1 : -1;
+    c = _stricmp(x->id ? x->id : "", y->id ? y->id : "");
+    if (!c) c = strcmp(x->version ? x->version : "", y->version ? y->version : "");
+    if (!c) c = strcmp(x->hash ? x->hash : "", y->hash ? y->hash : "");
+    return c;
+}
+
+int sh_modserve_each_bundle_extra(sh_modserve_extra_fn fn, void *context)
+{
+    static SRWLOCK order_lock = SRWLOCK_INIT;
+    const ms_index *x = g_index;
+    int *order, n = 0, i;
+    if (!x || !fn) return 0;
+    order = (int *)malloc(sizeof(int) * (size_t)(x->nbundles ? x->nbundles : 1));
+    if (!order) return -1;
+    for (i = 0; i < x->nbundles; ++i)
+        if (x->bundles[i].admitted && x->bundles[i].extra) order[n++] = i;
+    /* qsort has no context argument; the lock keeps the comparator's index
+     * pointer to one caller at a time. */
+    AcquireSRWLockExclusive(&order_lock);
+    g_extra_order_index = x;
+    if (n > 1) qsort(order, (size_t)n, sizeof(int), ms_extra_order);
+    g_extra_order_index = NULL;
+    ReleaseSRWLockExclusive(&order_lock);
+    for (i = 0; i < n; ++i) {
+        const ms_bundle *b = &x->bundles[order[i]];
+        fn(context, b->id ? b->id : b->folder, b->version ? b->version : "", b->legacy, b->extra);
+    }
+    free(order);
+    return n;
 }
 
 void sh_modserve_each_served(sh_modserve_file_fn fn, void *context)

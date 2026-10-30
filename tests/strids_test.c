@@ -1,7 +1,8 @@
-/* Tests #str_ injection from the user's strids.json and the baked defaults, with
- * user-over-default precedence, rearm, retirement and native-table refusal.
- * Engine string-pool and list operations are doubled to inspect appended
- * key/value pairs. */
+/* Tests #str_ injection from the user's strids.json, the admitted bundles'
+ * strings and the baked defaults, with user-over-bundle-over-default
+ * precedence, cross-bundle conflicts, rearm, retirement and native-table
+ * refusal. Engine string-pool and list operations and the serving index's
+ * bundle accessor are doubled to inspect appended key/value pairs. */
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -9,6 +10,7 @@
 
 #include "../src/backend/strids.h"
 #include "../src/backend/hook.h"
+#include "../src/backend/modserve.h"
 
 static int g_failed;
 #define CHECK(c) do { if (!(c)) { \
@@ -65,6 +67,39 @@ int hook_unpatch(void *tramp)
     g_hook_owned = NULL;
     g_hook_detour = NULL;
     return 1;
+}
+
+/* ------------------------------------------------------------------ serving index double */
+
+/* The fixture lists bundles in the accessor's order (installed before
+ * map-delivered, then id and version); like the real accessor, the double
+ * visits only admitted bundles that carry an extra object. */
+typedef struct fake_bundle {
+    const char *id, *version;
+    int legacy, admitted;
+    const char *extra;
+} fake_bundle;
+static fake_bundle g_bundles[8];
+static int g_nbundles, g_bundle_visits, g_bundle_refuse;
+
+int sh_modserve_each_bundle_extra(sh_modserve_extra_fn fn, void *context)
+{
+    int i, n = 0;
+    g_bundle_visits++;
+    if (g_bundle_refuse) return -1;
+    for (i = 0; i < g_nbundles; i++) {
+        if (!g_bundles[i].admitted || !g_bundles[i].extra) continue;
+        fn(context, g_bundles[i].id, g_bundles[i].version, g_bundles[i].legacy, g_bundles[i].extra);
+        n++;
+    }
+    return n;
+}
+
+static void set_bundles(const fake_bundle *list, int n)
+{
+    int i;
+    g_nbundles = n;
+    for (i = 0; i < n; i++) g_bundles[i] = list[i];
 }
 
 /* ------------------------------------------------------------------ engine doubles */
@@ -304,6 +339,134 @@ static void test_native_table_extent(void)
     free(large);
 }
 
+static int log_count(const char *needle)
+{
+    int n = 0;
+    const char *at = g_log;
+    while ((at = strstr(at, needle)) != NULL) { n++; at += strlen(needle); }
+    return n;
+}
+
+static const char *row_owner(const char *id)
+{
+    const char *row_id = NULL, *owner = NULL;
+    int i;
+    for (i = 0; sh_strids_test_row(i, &row_id, &owner); i++)
+        if (row_id && !_stricmp(row_id, id)) return owner;
+    return NULL;
+}
+
+/* The bundle layer sits under the user document and over the baked defaults;
+ * two bundles disagreeing log once and the first in the accessor's order
+ * stands; a rearm after an index rebuild adds the new bundles' keys and
+ * retires the keys of one that left. */
+static void test_bundle_layer(const char *user_path)
+{
+    static const fake_bundle first[] = {
+        { "alpha.mod", "1.0.0", 0, 1,
+          "{\"hud\":{\"x\":1},\"strings\":{\"en\":{\"shared_user_key\":\"Alpha text\","
+          "\"alpha_name\":\"Alpha\",\"clash_key\":\"From alpha\",\"same_key\":\"Same\","
+          "\"sh_bv_navigation_desc\":\"Alpha nav\"},\"fr\":{\"fr_only\":\"Francais\"}}}" },
+        { "beta.mod", "1.0.0", 0, 1,
+          "{\"strings\":{\"en\":{\"CLASH_KEY\":\"From beta\",\"same_key\":\"Same\",\"beta_name\":\"Beta\"}}}" },
+        { "gamma.off", "1.0.0", 0, 0, "{\"strings\":{\"en\":{\"gamma_name\":\"Gamma\"}}}" },
+        { "no.strings", "1.0.0", 0, 1, "{\"hud\":{}}" },
+        { "old.map", "0123456789abcdef", 1, 1,
+          "{\"legacy\":{},\"strings\":{\"en\":{\"clash_key\":\"From legacy\",\"legacy_name\":\"Legacy\"}}}" },
+    };
+    static const fake_bundle second[] = {
+        { "alpha.mod", "1.0.0", 0, 1,
+          "{\"strings\":{\"en\":{\"alpha_name\":\"Alpha\",\"clash_key\":\"From alpha\"}}}" },
+        { "delta.mod", "2.0.0", 0, 1, "{\"strings\":{\"en\":{\"delta_name\":\"Delta\"}}}" },
+        { "eps.bad", "1.0.0", 0, 1, "{\"strings\":{\"en\":{\"eps_name\":\"never\",\"bad\":{\"nested\":1}}}}" },
+        { "old.map", "0123456789abcdef", 1, 1,
+          "{\"strings\":{\"en\":{\"clash_key\":\"From legacy\",\"legacy_name\":\"Legacy\"}}}" },
+    };
+    const char *baked_nav;
+    unsigned int before;
+
+    CHECK(write_text(user_path, "{}"));
+    set_bundles(NULL, 0);
+    CHECK(rearm_strings() == 1);
+    baked_nav = value_for("sh_bv_navigation_desc");
+    CHECK(baked_nav != NULL && strcmp(baked_nav, "Alpha nav") != 0);
+    before = g_dictionary.count;
+
+    CHECK(write_text(user_path, "{\"shared_user_key\":\"User text\"}"));
+    set_bundles(first, (int)(sizeof first / sizeof first[0]));
+    g_log[0] = '\0';
+    CHECK(rearm_strings() == 1);
+    /* User over bundle, bundle over baked. */
+    CHECK(value_for("shared_user_key") && !strcmp(value_for("shared_user_key"), "User text"));
+    CHECK(value_for("sh_bv_navigation_desc") && !strcmp(value_for("sh_bv_navigation_desc"), "Alpha nav"));
+    CHECK(count_key("sh_bv_navigation_desc") == 1);
+    CHECK(value_for("alpha_name") && !strcmp(value_for("alpha_name"), "Alpha"));
+    CHECK(value_for("beta_name") && !strcmp(value_for("beta_name"), "Beta"));
+    CHECK(value_for("legacy_name") && !strcmp(value_for("legacy_name"), "Legacy"));
+    CHECK(row_owner("alpha_name") && !strcmp(row_owner("alpha_name"), "alpha.mod@1.0.0"));
+    CHECK(row_owner("legacy_name") && !strcmp(row_owner("legacy_name"), "old.map@0123456789abcdef"));
+    CHECK(row_owner("shared_user_key") && !strcmp(row_owner("shared_user_key"), "<user>"));
+    /* First writer wins across bundles; one line per disagreeing bundle. */
+    CHECK(count_key("clash_key") == 1 && !strcmp(value_for("clash_key"), "From alpha"));
+    CHECK(log_count("B1: strids REFUSED '#str_CLASH_KEY' from bundle beta.mod@1.0.0 -- bundle alpha.mod@1.0.0 "
+                    "already defines it with different text; the first definition stands") == 1);
+    CHECK(log_count("B1: strids REFUSED '#str_clash_key' from bundle old.map@0123456789abcdef -- bundle "
+                    "alpha.mod@1.0.0 already defines it") == 1);
+    CHECK(log_count("REFUSED '#str_") == 2);   /* equal text and user/baked precedence are not conflicts */
+    CHECK(count_key("same_key") == 1);
+    /* Only en; only admitted bundles. */
+    CHECK(count_key("fr_only") == 0 && count_key("gamma_name") == 0);
+    CHECK(strstr(g_log, "B1: strids runtime refresh complete: ") != NULL);
+    CHECK(strstr(g_log, " #str_ entries (user 1, bundles 6, baked ") != NULL);
+    CHECK(strstr(g_log, "supplied") == NULL);   /* quiet without the debug flag */
+    CHECK(g_dictionary.count == before + 6);    /* the user key and five new bundle keys */
+
+    /* The per-bundle line, once per bundle per pass, only with the flag. */
+    SetEnvironmentVariableA("SNAPMAP_PLUS_STRIDS_DEBUG", "1");
+    g_log[0] = '\0';
+    CHECK(rearm_strings() == 1);
+    CHECK(log_count("B1: strids: bundle alpha.mod@1.0.0 supplied 4 string(s)") == 1);
+    CHECK(log_count("B1: strids: bundle beta.mod@1.0.0 supplied 1 string(s)") == 1);
+    CHECK(log_count("B1: strids: bundle old.map@0123456789abcdef supplied 1 string(s)") == 1);
+    CHECK(log_count("supplied") == 3);
+    SetEnvironmentVariableA("SNAPMAP_PLUS_STRIDS_DEBUG", NULL);
+
+    /* An index rebuild: beta left, delta arrived, eps carries a malformed
+     * strings object and is refused alone. No duplicate rows appear. */
+    set_bundles(second, (int)(sizeof second / sizeof second[0]));
+    g_log[0] = '\0';
+    CHECK(rearm_strings() == 1);
+    CHECK(count_key("beta_name") == 0 && count_key("same_key") == 0);
+    CHECK(value_for("delta_name") && !strcmp(value_for("delta_name"), "Delta"));
+    CHECK(count_key("eps_name") == 0);
+    CHECK(strstr(g_log, "B1: strids REFUSED the strings of bundle eps.bad@1.0.0") != NULL);
+    CHECK(count_key("clash_key") == 1 && !strcmp(value_for("clash_key"), "From alpha"));
+    CHECK(log_count("REFUSED '#str_") == 1);
+    CHECK(value_for("sh_bv_navigation_desc") && !strcmp(value_for("sh_bv_navigation_desc"), baked_nav));
+    CHECK(count_key("alpha_name") == 1 && count_key("legacy_name") == 1);
+    for (unsigned int i = 1; i < g_dictionary.count; i++)
+        CHECK(*(unsigned int *)g_records[i - 1] <= *(unsigned int *)g_records[i]);
+
+    /* Before the first injection a refresh request waits for it. */
+    sh_strids_request_refresh();
+    CHECK(sh_strids_refresh_pending() == -1);
+
+    /* An unreadable bundle layer fails the pass and retires nothing. */
+    g_bundle_refuse = 1;
+    CHECK(rearm_strings() == 0);
+    CHECK(count_key("delta_name") == 1);
+    g_bundle_refuse = 0;
+
+    /* Every bundle gone: their keys retire, the baked default returns. */
+    set_bundles(NULL, 0);
+    CHECK(write_text(user_path, "{}"));
+    CHECK(rearm_strings() == 1);
+    CHECK(count_key("alpha_name") == 0 && count_key("delta_name") == 0 && count_key("legacy_name") == 0);
+    CHECK(count_key("clash_key") == 0 && count_key("shared_user_key") == 0);
+    CHECK(value_for("sh_bv_navigation_desc") && !strcmp(value_for("sh_bv_navigation_desc"), baked_nav));
+    CHECK(g_dictionary.count == before);
+}
+
 static void invoke_sort_hook(void)
 {
     int before = g_sorts;
@@ -357,12 +520,41 @@ static void test_sort_hook_recovery(const char *user_path)
 
     g_hook_unpatch_fail = 0;
     g_hook_commit_result = B2_PATCH_OK;
+    {
+        /* An index published before the first injection: that pass reads it. */
+        static const fake_bundle boot[] = {
+            { "boot.mod", "1.0.0", 0, 1, "{\"strings\":{\"en\":{\"boot_name\":\"Boot\"}}}" },
+        };
+        set_bundles(boot, 1);
+    }
+    g_log[0] = '\0';
     CHECK(sh_strids_install(fake_sort, 1, table_lea, fake_insert,
                            fake_hash, fake_idstr_ctor) == 1);
     CHECK(g_hook_prepares == prepares + 1 && hook_is_installed(g_hook_owned));
     CHECK(count_key("hook_recovery_key") == 1);
+    CHECK(count_key("boot_name") == 1 && !strcmp(value_for("boot_name"), "Boot"));
+    CHECK(strstr(g_log, "B1: strids injected ") != NULL && strstr(g_log, "(user 1, bundles 1, baked ") != NULL);
     CHECK(rearm_strings() == 1);
     CHECK(count_key("hook_recovery_key") == 1);
+    /* After it, a published index asks for one refresh, which rearms once. */
+    {
+        static const fake_bundle later[] = {
+            { "later.mod", "1.0.0", 0, 1, "{\"strings\":{\"en\":{\"later_name\":\"Later\"}}}" },
+        };
+        int visits;
+        set_bundles(later, 1);
+        CHECK(sh_strids_refresh_pending() == -1);   /* nothing requested */
+        sh_strids_request_refresh();
+        visits = g_bundle_visits;
+        CHECK(sh_strids_refresh_pending() == 1);
+        CHECK(g_bundle_visits == visits + 1);
+        CHECK(count_key("later_name") == 1 && count_key("boot_name") == 0);
+        CHECK(sh_strids_refresh_pending() == -1);
+        CHECK(g_bundle_visits == visits + 1);
+        set_bundles(NULL, 0);
+        sh_strids_request_refresh();
+        CHECK(sh_strids_refresh_pending() == 1 && count_key("later_name") == 0);
+    }
     prepares = g_hook_prepares;
     CHECK(sh_strids_install(fake_sort, 1, table_lea, fake_insert,
                            fake_hash, fake_idstr_ctor) == 1);
@@ -455,6 +647,7 @@ int main(void)
     CHECK(count_key("append_refusal") == 1);
     CHECK(write_text(path, "{}"));
     CHECK(rearm_strings() == 1);
+    test_bundle_layer(path);
     test_dictionary_retirement(path);
     test_sort_hook_recovery(path);
     /* A malformed suffix after NUL is still part of the input document. */
