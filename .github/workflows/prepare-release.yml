@@ -1,6 +1,6 @@
 # Draft one changelog entry for review. The draft job has the API key and no
 # write permission; the propose job can write but cannot read that key.
-# Restrict the changelog environment to main and configure a provider spend limit
+# Restrict the changelog environment to the release branches and configure a provider spend limit
 # as described in docs/services.md. Keep third-party actions pinned to SHAs.
 name: Prepare release
 
@@ -141,7 +141,9 @@ jobs:
         uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
         with:
           branch: changelog/${{ inputs.version }}
-          base: main
+          # The branch the workflow was dispatched from: a release line that is not
+          # main (the April 2024 port) gets its entry proposed against itself.
+          base: ${{ github.ref_name }}
           title: 'changelog: ${{ inputs.version }}'
           commit-message: |
             Add the release notes for ${{ inputs.version }}
@@ -169,7 +171,7 @@ jobs:
             echo "::warning::Enable Settings -> Actions -> General -> 'Allow GitHub Actions to"
             echo "::warning::create and approve pull requests' (it may be locked at the org level),"
             echo "::warning::or open it by hand:"
-            echo "::warning::  ${{ github.server_url }}/${{ github.repository }}/compare/main...$BRANCH?expand=1"
+            echo "::warning::  ${{ github.server_url }}/${{ github.repository }}/compare/${{ github.ref_name }}...$BRANCH?expand=1"
             exit 0
           fi
           echo "::error::Neither a pull request nor the branch $BRANCH exists -- the draft was lost."
