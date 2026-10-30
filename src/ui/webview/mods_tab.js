@@ -1,48 +1,42 @@
-/* The Mods tab: installed mod bundles, what the open map needs, shadows and conflicts, and the
-   sh_mods actions. Browser global + CommonJS test export. Pure ASCII.
+/* The Mods tab: the installed mods, what the open map needs, and the few actions a player uses
+   (install a folder, open the mods folder, remove a mod, migrate the old overrides folder).
+   Browser global + CommonJS test export. Pure ASCII.
 
-   The backend (backend/modui.c, the `mods` interface slot) builds one document on the game thread;
-   the host posts it as {kind:'mods', data} when the page asks (modsList) and again after every
-   action. Nothing here polls. The bundle list and the shadow list mount only the rows in view
-   (fixed row heights, a sizer for the scroll range); the shadow list is not built at all until its
-   section is opened. All text goes through textContent. */
+   The backend (backend/modui.c, the `mods` interface slot) builds one document on the game thread:
+   one row per installed mod, already grouped (the build that serves, other builds counted, legacy
+   map-delivered bundles left out), whether overrides\ still holds entries to migrate, and the open
+   map. The host posts it as {kind:'mods', data} after every action; showing the tab asks for a
+   rescan, so the folder is reread whenever the player looks. Nothing polls. Diagnostics (every
+   bundle's state, conflicts, shadows, verification) are the console's `sh_mods doctor`, not this
+   tab's. The list is a plain list: a store holds tens of mods, a few hundred at most, and the page
+   scrolls it natively (wheel, scrollbar, keyboard). All text goes through textContent. */
 var modsTab = (function () {
-  var ROW_HEIGHT = 40, SHADOW_ROW_HEIGHT = 38, OVERSCAN = 6;
-
   var STATES = {
-    active:     {label: 'Active', tone: 'ok', detail: 'Installed and serving its files.'},
-    legacy:     {label: 'Legacy', tone: 'ok', detail: 'A converted first-generation package, serving its files.'},
-    superseded: {label: 'Superseded', tone: 'warn', detail: 'A newer build of this mod serves its files.'},
-    unindexed:  {label: 'Not scanned', tone: 'warn', detail: 'Installed after the last scan; Rescan to use it.'},
-    skipped:    {label: 'Skipped', tone: 'err', detail: 'Not served.'}
+    installed: {label: 'Installed', tone: 'ok'},
+    attention: {label: 'Needs attention', tone: 'warn'}
   };
+  var DUPLICATE_TEXT = 'another installed mod declares this id; change one id in its mod.json';
   var ROW_STATES = {
     active:     {label: 'Installed', tone: 'ok', detail: 'Installed and active on this machine.'},
     superseded: {label: 'Installed', tone: 'ok', detail: 'Installed; a newer build of the mod serves its files.'},
-    unindexed:  {label: 'Not scanned', tone: 'warn', detail: 'Installed but not scanned yet; Rescan, then reload the map.'},
-    skipped:    {label: 'Skipped', tone: 'err', detail: 'Installed but skipped.'},
+    unindexed:  {label: 'Not scanned', tone: 'warn', detail: 'Installed but not scanned yet; reopen the Mods tab, then reload the map.'},
+    skipped:    {label: 'Needs attention', tone: 'err', detail: 'Installed but not in use.'},
     missing:    {label: 'Missing', tone: 'err', detail: 'Not installed. Entities that need it will not load.'}
   };
-  var SHADOW_KINDS = {
-    stock:    {label: 'Shadow', tone: 'warn', text: 'Applies on this machine only.'},
-    legacy:   {label: 'Legacy shadow', tone: 'warn', text: 'Changes what maps mean.'},
-    conflict: {label: 'Conflict', tone: 'err', text: 'Two mods supply this name; neither is served.'}
-  };
-  var ACTIONS = ['install', 'verify', 'rescan', 'palette', 'pruneList', 'pruneApply', 'openFolder'];
+  var ACTIONS = ['install', 'remove', 'migrate', 'rescan', 'openFolder'];
 
   function str(v) { return typeof v === 'string' ? v : (v === null || v === undefined ? '' : String(v)); }
   function num(v) { var n = Number(v); return isFinite(n) ? n : 0; }
   function arr(v) { return Array.isArray(v) ? v : []; }
   function bool(v) { return v === true; }
 
-  function normBundle(b) {
+  function normMod(b) {
     b = b && typeof b === 'object' ? b : {};
-    var state = Object.prototype.hasOwnProperty.call(STATES, b.state) ? b.state : 'skipped';
+    var state = Object.prototype.hasOwnProperty.call(STATES, b.state) ? b.state : 'attention';
     return {key: str(b.key), id: str(b.id), name: str(b.name), author: str(b.author), version: str(b.version),
-            build: num(b.build), hash: str(b.hash), size: num(b.size), files: num(b.files), pointers: num(b.pointers), state: state,
-            cause: str(b.cause), legacy: bool(b.legacy), verified: bool(b.verified), installedAt: num(b.installedAt),
-            editorRows: num(b.editorRows), shadows: num(b.shadows), supersededPaths: num(b.supersededPaths),
-            supersededBy: str(b.supersededBy), folder: str(b.folder)};
+            build: num(b.build), size: num(b.size), files: num(b.files), pointers: num(b.pointers), state: state,
+            cause: str(b.cause), otherBuilds: num(b.otherBuilds), duplicateId: bool(b.duplicateId),
+            editorRows: num(b.editorRows), folder: str(b.folder)};
   }
   function normNames(v) { return arr(v).map(str).filter(function (s) { return s.length > 0; }); }
   function normRow(r) {
@@ -60,33 +54,25 @@ var modsTab = (function () {
             viaNeeds: bool(p.viaNeeds), inManifest: bool(p.inManifest), names: names,
             nameCount: Math.max(num(p.nameCount), names.length)};
   }
-  function normShadow(s) {
-    s = s && typeof s === 'object' ? s : {};
-    var kind = Object.prototype.hasOwnProperty.call(SHADOW_KINDS, s.kind) ? s.kind : 'stock';
-    return {request: str(s.request), kind: kind, shadow: bool(s.shadow), served: str(s.served), installed: bool(s.installed),
-            bundles: arr(s.bundles).map(str), resolution: str(s.resolution), reason: str(s.reason)};
-  }
+  function title(b) { return b.name || b.id || b.key; }
 
   /* The host's payload as the tab uses it. error is set for an unusable payload. */
   function normalize(payload) {
     if (!payload || typeof payload !== 'object' || Array.isArray(payload))
-      return {ok: false, error: 'The mods list is unavailable.', bundles: [], rows: [], placed: [], shadows: [],
-              totals: {stock: 0, legacy: 0, conflict: 0, total: 0, sent: 0}, entities: -2, names: 0, root: '', gen: 0, index: {}};
+      return {ok: false, error: 'The mods list is unavailable.', mods: [], rows: [], placed: [], entities: -2, names: 0,
+              root: '', gen: 0, migrate: {entries: 0, pending: 0, running: false}};
     var map = payload.map && typeof payload.map === 'object' ? payload.map : {};
-    var t = payload.shadowTotals && typeof payload.shadowTotals === 'object' ? payload.shadowTotals : {};
-    var shadows = arr(payload.shadows).map(normShadow);
-    var bundles = arr(payload.bundles).map(normBundle);
-    bundles.sort(function (a, b) {
-      var x = (a.name || a.id || a.key).toLowerCase(), y = (b.name || b.id || b.key).toLowerCase();
-      if (x !== y) return x < y ? -1 : 1;
-      return b.build - a.build;
+    var mg = payload.migrate && typeof payload.migrate === 'object' ? payload.migrate : {};
+    var mods = arr(payload.mods).map(normMod);
+    mods.sort(function (a, b) {
+      var x = title(a).toLowerCase(), y = title(b).toLowerCase();
+      return x === y ? (a.key < b.key ? -1 : a.key > b.key ? 1 : 0) : (x < y ? -1 : 1);
     });
     return {ok: true, error: payload.storeReadable === false ? 'The mods folder cannot be read.' : '',
-            root: str(payload.root), gen: num(payload.gen), index: payload.index && typeof payload.index === 'object' ? payload.index : {},
-            bundles: bundles, rows: arr(map.rows).map(normRow), placed: arr(map.placed).map(normPlaced),
-            entities: map.entities === undefined ? -2 : num(map.entities), names: num(map.names), shadows: shadows,
-            totals: {stock: num(t.stock), legacy: num(t.legacy), conflict: num(t.conflict),
-                     total: Math.max(num(t.total), shadows.length), sent: Math.max(num(t.sent), shadows.length)}};
+            root: str(payload.root), gen: num(payload.gen), mods: mods,
+            migrate: {entries: num(mg.entries), pending: num(mg.pending), running: bool(mg.running)},
+            rows: arr(map.rows).map(normRow), placed: arr(map.placed).map(normPlaced),
+            entities: map.entities === undefined ? -2 : num(map.entities), names: num(map.names)};
   }
 
   function formatSize(bytes) {
@@ -97,63 +83,34 @@ var modsTab = (function () {
     return (n / 1073741824).toFixed(1) + ' GB';
   }
   function plural(n, one, many) { return n + ' ' + (n === 1 ? one : (many || one + 's')); }
-  function versionText(b) { return (b.version || '0.0.0') + (b.build ? ' build ' + b.build : ''); }
   /* "12 files" or "12 files, 9 from the installed game" (stock pointers: nothing stored for them). */
   function filesText(b) {
     var p = num(b.pointers);
     return plural(b.files, 'file') + (p > 0 ? ', ' + p + ' from the installed game' : '');
   }
-  function title(b) { return b.name || b.id || b.key; }
+  /* id@version, the name a map records; the folder for a mod that was never built. */
+  function idText(b) { return b.id ? b.id + '@' + (b.version || '0.0.0') : b.key; }
 
-  /* The label, tone and one-line explanation of a bundle's state. */
+  /* The label, tone and detail line of a row. */
   function stateInfo(b) {
-    var s = STATES[b.state] || STATES.skipped, detail = s.detail;
-    if (b.state === 'superseded' && b.supersededBy)
-      detail = 'A newer build (' + b.supersededBy + ') serves ' + (b.supersededPaths === 1 ? '1 of its files' : b.supersededPaths + ' of its files') + '.';
-    if (b.state === 'skipped' && b.cause) detail = 'Not served: ' + b.cause;
-    if ((b.state === 'active' || b.state === 'legacy') && b.cause) detail = s.detail + ' Warning: ' + b.cause;
-    return {label: s.label, tone: s.tone, detail: detail};
+    var s = STATES[b.state] || STATES.attention, parts = [];
+    if (b.duplicateId) parts.push(DUPLICATE_TEXT);
+    else if (b.state === 'attention') parts.push(b.cause || 'not in use');
+    if (b.otherBuilds > 0) parts.push(plural(b.otherBuilds, 'other build') + ' installed');
+    return {label: b.duplicateId ? STATES.attention.label : s.label, tone: b.duplicateId ? STATES.attention.tone : s.tone,
+            detail: parts.join('; ')};
   }
   function rowInfo(r) {
     var s = ROW_STATES[r.state] || ROW_STATES.missing, detail = s.detail;
     if (r.state === 'missing' && r.otherKey) detail = 'Not installed; another build (' + r.otherKey + ') is, but the map names this one.';
-    if (r.state === 'skipped' && r.cause) detail = 'Installed but skipped: ' + r.cause;
+    if (r.state === 'skipped' && r.cause) detail = 'Installed but not in use: ' + r.cause;
     return {label: s.label, tone: s.tone, detail: detail};
   }
-  /* A conflict says which copy serves and why (the backend's resolution). */
-  var CONFLICT_TEXT = {
-    composed:  'Several mods add entries to this list; the entries of all of them are served.',
-    withdrawn: 'Several mods supply this name; the copy chosen names a model nothing provides, so the game copy is used.'
-  };
-  function shadowInfo(s) {
-    var info = SHADOW_KINDS[s.kind] || SHADOW_KINDS.stock;
-    /* A stock pointer serves the path: the installed game's bytes. */
-    if (s.kind !== 'conflict' && s.installed)
-      return {label: info.label, tone: info.tone, text: info.text + " Served from the installed game's own copy."};
-    if (s.kind !== 'conflict') return info;
-    if (CONFLICT_TEXT[s.resolution]) return {label: info.label, tone: 'warn', text: CONFLICT_TEXT[s.resolution]};
-    if (s.resolution === 'chosen')
-      return {label: info.label, tone: 'warn', text: 'Several mods supply this name; ' + (s.served || 'one of them') + ' serves it' +
-        (s.reason ? ' (' + s.reason + ')' : '') + '.'};
-    return info;
-  }
 
-  function filterBundles(bundles, query) {
+  function filterMods(mods, query) {
     var q = str(query).trim().toLowerCase();
-    if (!q) return bundles.slice();
-    return bundles.filter(function (b) {
-      return (b.name + '\n' + b.id + '\n' + b.key + '\n' + b.author + '\n' + b.state).toLowerCase().indexOf(q) !== -1;
-    });
-  }
-
-  /* Rows [start, end) to mount for a scroll position; never more than the viewport plus overscan. */
-  function windowRange(scrollTop, viewport, rowHeight, count, overscan) {
-    var h = rowHeight > 0 ? rowHeight : ROW_HEIGHT, o = overscan === undefined ? OVERSCAN : overscan;
-    var top = Math.max(0, num(scrollTop)), vh = Math.max(0, num(viewport));
-    var start = Math.min(Math.max(0, count), Math.max(0, Math.floor(top / h) - o));
-    var end = Math.min(count, Math.ceil((top + (vh || h * 20)) / h) + o);
-    if (end < start) end = start;
-    return {start: start, end: end};
+    if (!q) return mods.slice();
+    return mods.filter(function (b) { return (b.name + '\n' + b.id + '\n' + b.key).toLowerCase().indexOf(q) !== -1; });
   }
 
   /* What saving the open map would record, compared with what it carried when it loaded. */
@@ -181,25 +138,21 @@ var modsTab = (function () {
     return m;
   }
 
-  function pruneConfirmText(candidates) {
-    var lines = ['Remove ' + plural(candidates.length, 'build') + ' that a newer build of the same mod covers?', ''];
-    candidates.slice(0, 12).forEach(function (c) {
-      lines.push(str(c.key) + ' (' + formatSize(c.size) + '), covered by ' + str(c.coveredBy));
-    });
-    if (candidates.length > 12) lines.push('...and ' + (candidates.length - 12) + ' more');
-    lines.push('', 'Maps that name a removed build get the newer build\'s files. This cannot be undone.');
+  function removeConfirmText(b) {
+    var lines = ['Remove ' + title(b) + ' (' + idText(b) + ')?', ''];
+    if (b.otherBuilds > 0) lines.push('Its ' + plural(b.otherBuilds, 'other installed build') + ' ' + (b.otherBuilds === 1 ? 'goes' : 'go') + ' too.');
+    lines.push('Its files are deleted from the mods folder; a folder you made there yourself is moved to removed-mods instead. ' +
+               'Maps that use it will miss its entities until it is installed again.');
     return lines.join('\n');
   }
 
   /* ------------------------------------------------------------------------------------------ DOM */
 
-  /* env: {document, byId(id), post(message), toast(text, kind), confirm(text, onOk), raf(fn)} */
+  /* env: {document, byId(id), post(message), toast(text, kind), confirm(text, onOk)} */
   function create(env) {
     var doc = env.document, byId = env.byId;
-    var model = normalize(null), loaded = false, waiting = false, busy = '', selectedKey = '';
-    var view = [], filter = '', shadowsOpen = false, lastError = '';
-    var listQueued = false, shadowQueued = false;
-    var raf = env.raf || function (fn) { fn(); };
+    var model = normalize(null), loaded = false, waiting = false, busy = '', quiet = false, selectedKey = '';
+    var view = [], filter = '', lastError = '';
 
     function el(tag, cls, text) {
       var n = doc.createElement(tag);
@@ -216,74 +169,93 @@ var modsTab = (function () {
       s.textContent = str(text);
       s.className = 'mods-status' + (tone ? ' ' + tone : '');
     }
+    var BUSY_TEXT = {install: 'Installing...', remove: 'Removing...', rescan: 'Reading the mods folder...',
+                     migrate: 'Migrating the old overrides folder; this can take a minute...'};
 
-    function setBusy(action) {
-      busy = action || '';
-      ['modsInstallBtn', 'modsRescanBtn', 'modsVerifyBtn', 'modsPaletteBtn', 'modsPruneBtn', 'modsVerifyOneBtn'].forEach(function (id) {
-        var b = byId(id);
-        if (b) b.disabled = !!busy || (id === 'modsVerifyOneBtn' && !selectedBundle());
-      });
-      if (busy) setStatus(BUSY_TEXT[busy] || 'Working...', 'busy');
-    }
-    var BUSY_TEXT = {install: 'Installing...', verify: 'Verifying files...', rescan: 'Rereading the mods folder...',
-                     palette: 'Rebuilding the editor palette...', pruneList: 'Looking for removable builds...',
-                     pruneApply: 'Removing builds...', list: 'Reading installed mods...'};
-
-    function selectedBundle() {
-      for (var i = 0; i < model.bundles.length; i++) if (model.bundles[i].key === selectedKey) return model.bundles[i];
+    function selectedMod() {
+      for (var i = 0; i < model.mods.length; i++) if (model.mods[i].key === selectedKey) return model.mods[i];
       return null;
     }
 
-    /* ---- bundle list (windowed) */
+    function renderButtons() {
+      ['modsInstallBtn', 'modsRemoveBtn', 'modsMigrateBtn', 'modsRefreshBtn'].forEach(function (id) {
+        var b = byId(id);
+        if (b) b.disabled = !!busy || (id === 'modsRemoveBtn' && !selectedMod());
+      });
+      var mg = byId('modsMigrateBtn');
+      if (mg) {
+        var show = loaded && model.migrate.pending > 0 && !model.migrate.running;
+        mg.style.display = show || busy === 'migrate' ? '' : 'none';
+        mg.title = 'Move ' + plural(model.migrate.pending, 'entry', 'entries') +
+                   ' of the old overrides folder into the mods folder';
+      }
+    }
+    function setBusy(action) {
+      busy = action || '';
+      renderButtons();
+      if (busy && !(busy === 'rescan' && quiet)) setStatus(BUSY_TEXT[busy] || 'Working...', 'busy');
+    }
+
+    /* ---- the installed list (plain: every row is mounted, the browser scrolls it) */
     function renderList() {
-      listQueued = false;
       var box = byId('modsList');
       if (!box) return;
       clear(box);
       if (!loaded) { box.appendChild(el('div', 'list-empty', waiting ? 'Reading installed mods...' : 'Open this tab to list installed mods.')); return; }
       if (lastError) { box.appendChild(el('div', 'list-empty mods-error', lastError)); return; }
-      if (!model.bundles.length) {
-        box.appendChild(el('div', 'list-empty', 'No mods installed. Use Install to add a mod folder, or put one in the mods folder and Rescan.'));
+      if (!model.mods.length) {
+        box.appendChild(el('div', 'list-empty', 'No mods installed. Use Install folder to add one, or put a mod folder in the mods folder.'));
         return;
       }
       if (!view.length) { box.appendChild(el('div', 'list-empty', 'No installed mod matches the filter.')); return; }
-      /* A shorter list (filter, refresh) leaves the old scroll position past its end. */
-      var maxTop = Math.max(0, view.length * ROW_HEIGHT - box.clientHeight);
-      if (box.scrollTop > maxTop) box.scrollTop = maxTop;
-      var range = windowRange(box.scrollTop, box.clientHeight, ROW_HEIGHT, view.length, OVERSCAN);
-      var sizer = el('div', 'mods-sizer');
-      sizer.style.height = (view.length * ROW_HEIGHT) + 'px';
-      box.appendChild(sizer);
-      for (var i = range.start; i < range.end; i++) sizer.appendChild(bundleRow(view[i], i));
+      for (var i = 0; i < view.length; i++) box.appendChild(modRow(view[i]));
     }
-    function bundleRow(b, i) {
-      var info = stateInfo(b);
-      var row = el('div', 'mods-row' + (b.key === selectedKey ? ' selected' : ''));
-      row.style.top = (i * ROW_HEIGHT) + 'px';
+    function modRow(b) {
+      var info = stateInfo(b), on = b.key === selectedKey;
+      var row = el('div', 'mods-row' + (on ? ' selected' : ''));
       row.setAttribute('role', 'option');
       row.setAttribute('data-key', b.key);
-      row.setAttribute('aria-selected', b.key === selectedKey ? 'true' : 'false');
+      row.setAttribute('aria-selected', on ? 'true' : 'false');
       var top = el('div', 'mods-row-top');
       top.appendChild(el('span', 'mods-row-name', title(b)));
       top.appendChild(pill(info.label, info.tone));
-      if (b.legacy && b.state !== 'legacy') top.appendChild(pill('Legacy', ''));
-      var sub = el('div', 'mods-row-sub', b.key + ' \u00b7 ' + formatSize(b.size) + ' \u00b7 ' + filesText(b));
-      row.title = info.detail;
       row.appendChild(top);
-      row.appendChild(sub);
+      row.appendChild(el('div', 'mods-row-sub', idText(b) + ' \u00b7 ' + formatSize(b.size) + ' \u00b7 ' + filesText(b)));
+      if (info.detail) row.appendChild(el('div', 'mods-row-detail' + (b.state === 'attention' || b.duplicateId ? ' warn' : ''), info.detail));
       row.addEventListener('click', function () { select(b.key); });
       return row;
     }
-    function queueList() { if (!listQueued) { listQueued = true; raf(renderList); } }
 
     function select(key) {
       selectedKey = key;
-      queueList();
+      var box = byId('modsList');
+      if (box) {
+        /* Restyle in place: rebuilding the rows would lose nothing, but this keeps the scroll anchor. */
+        var rows = box.children || [];
+        for (var i = 0; i < rows.length; i++) {
+          var r = rows[i], on = r.getAttribute && r.getAttribute('data-key') === key;
+          if (!r.getAttribute || r.getAttribute('data-key') === null) continue;
+          r.className = 'mods-row' + (on ? ' selected' : '');
+          r.setAttribute('aria-selected', on ? 'true' : 'false');
+          if (on && r.scrollIntoView) r.scrollIntoView({block: 'nearest'});
+        }
+      }
       renderDetail();
-      setBusy(busy);
+      renderButtons();
+    }
+    /* Arrow keys, Home and End move the selection; Page Up and Page Down scroll natively. */
+    function onListKey(e) {
+      var keys = {ArrowDown: 1, ArrowUp: -1, Home: -Infinity, End: Infinity};
+      if (!view.length || !Object.prototype.hasOwnProperty.call(keys, e.key)) return;
+      var at = -1;
+      for (var i = 0; i < view.length; i++) if (view[i].key === selectedKey) at = i;
+      var step = keys[e.key];
+      var next = step === -Infinity ? 0 : step === Infinity ? view.length - 1 : at < 0 ? 0 : Math.max(0, Math.min(view.length - 1, at + step));
+      if (e.preventDefault) e.preventDefault();
+      select(view[next].key);
     }
 
-    /* ---- selected bundle */
+    /* ---- the selected mod */
     function field(box, label, value) {
       var r = el('div', 'mods-field');
       r.appendChild(el('span', 'mods-field-label', label));
@@ -294,23 +266,18 @@ var modsTab = (function () {
       var box = byId('modsDetail');
       if (!box) return;
       clear(box);
-      var b = selectedBundle();
-      if (!b) { box.appendChild(el('div', 'mods-note', loaded && model.bundles.length ? 'Select a mod to see its details.' : '')); return; }
+      var b = selectedMod();
+      if (!b) { box.appendChild(el('div', 'mods-note', loaded && model.mods.length ? 'Select a mod to see its details.' : '')); return; }
       var info = stateInfo(b);
       var head = el('div', 'mods-detail-head');
       head.appendChild(el('span', 'mods-detail-name', title(b)));
       head.appendChild(pill(info.label, info.tone));
       box.appendChild(head);
-      box.appendChild(el('div', 'mods-note' + (info.tone === 'err' ? ' err' : ''), info.detail));
-      field(box, 'Mod', b.id || '(unbuilt)');
-      field(box, 'Version', versionText(b));
+      if (info.detail) box.appendChild(el('div', 'mods-note' + (b.state === 'attention' || b.duplicateId ? ' warn' : ''), info.detail));
+      field(box, 'Mod', idText(b));
       if (b.author) field(box, 'Author', b.author);
       field(box, 'Size', formatSize(b.size) + ', ' + filesText(b));
-      field(box, 'Editor rows', String(b.editorRows));
-      if (b.shadows) field(box, 'Shadows', plural(b.shadows, 'stock file'));
-      field(box, 'Verified', b.verified ? 'Yes' : 'No');
-      if (b.installedAt) field(box, 'Installed', new Date(b.installedAt * 1000).toLocaleString());
-      if (b.hash) field(box, 'Bundle', b.hash.slice(0, 16));
+      if (b.editorRows) field(box, 'Editor rows', String(b.editorRows));
       field(box, 'Folder', b.folder || b.key);
     }
 
@@ -355,82 +322,50 @@ var modsTab = (function () {
       }
     }
 
-    /* ---- shadows and conflicts (built only when opened, windowed) */
-    function renderShadowSummary() {
-      var s = byId('modsShadowsSummary');
-      if (!s) return;
-      var t = model.totals;
-      s.textContent = 'Shadows and conflicts' + (loaded ? ' (' + plural(t.stock, 'shadow') + ', ' + plural(t.legacy, 'legacy shadow') +
-        ', ' + plural(t.conflict, 'conflict') + ')' : '');
-    }
-    function renderShadows() {
-      shadowQueued = false;
-      var box = byId('modsShadowsBody');
-      if (!box) return;
-      clear(box);
-      if (!shadowsOpen || !loaded) return;
-      if (!model.shadows.length) { box.appendChild(el('div', 'mods-note', 'No installed mod replaces a game file or another mod\'s file.')); return; }
-      var range = windowRange(box.scrollTop, box.clientHeight, SHADOW_ROW_HEIGHT, model.shadows.length, OVERSCAN);
-      var sizer = el('div', 'mods-sizer');
-      sizer.style.height = (model.shadows.length * SHADOW_ROW_HEIGHT) + 'px';
-      box.appendChild(sizer);
-      for (var i = range.start; i < range.end; i++) {
-        var sh = model.shadows[i], info = shadowInfo(sh);
-        var row = el('div', 'mods-shadow-row');
-        row.style.top = (i * SHADOW_ROW_HEIGHT) + 'px';
-        var top = el('div', 'mods-row-top');
-        top.appendChild(pill(info.label, info.tone));
-        top.appendChild(el('span', 'mods-shadow-path', sh.request));
-        row.appendChild(top);
-        row.appendChild(el('div', 'mods-row-sub', info.text + ' ' + (sh.kind === 'conflict' ? 'From ' : 'By ') + sh.bundles.join(', ') + '.'));
-        row.title = sh.request;
-        sizer.appendChild(row);
-      }
-      if (model.totals.total > model.shadows.length) {
-        var more = el('div', 'mods-note', (model.totals.total - model.shadows.length) + ' more not listed.');
-        more.style.marginTop = (model.shadows.length * SHADOW_ROW_HEIGHT) + 'px';
-        box.appendChild(more);
-      }
-    }
-    function queueShadows() { if (!shadowQueued) { shadowQueued = true; raf(renderShadows); } }
-
     function renderHead() {
       var badge = byId('modsBadge');
-      if (badge) badge.textContent = String(model.bundles.length);
+      if (badge) badge.textContent = String(model.mods.length);
       var rootLine = byId('modsRoot');
       if (rootLine) { rootLine.textContent = model.root; rootLine.title = model.root; }
     }
 
     function renderAll() {
-      view = filterBundles(model.bundles, filter);
-      if (selectedKey && !selectedBundle()) selectedKey = '';
+      view = filterMods(model.mods, filter);
+      if (selectedKey && !selectedMod()) selectedKey = '';
       renderHead();
       renderList();
       renderDetail();
       renderMap();
-      renderShadowSummary();
-      renderShadows();
-      setBusy(busy);
+      renderButtons();
     }
 
     /* ---- requests */
-    function refresh() {
-      if (waiting) return false;
-      waiting = true;
-      env.post({cmd: 'modsList'});
-      if (!loaded) renderList();
-      return true;
-    }
     function act(action, arg) {
       if (busy) { env.toast('Another mods action is still running.', 'warn'); return false; }
       var m = actionMessage(action, arg);
       if (!m) return false;
+      quiet = false;
       if (action !== 'openFolder') setBusy(action);
       env.post(m);
       return true;
     }
+    /* Reread the folder: a rescan, which the host follows with a fresh document. Quiet: its result
+       only shows when it fails. A running action already ends with a fresh document. */
+    function refresh() {
+      if (busy || waiting) return false;
+      waiting = true;
+      quiet = true;
+      setBusy('rescan');
+      env.post(actionMessage('rescan'));
+      if (!loaded) renderList();
+      return true;
+    }
 
     /* ---- messages */
+    function attentionText() {
+      var n = model.mods.filter(function (b) { return b.state === 'attention' || b.duplicateId; }).length;
+      return n ? plural(n, 'mod needs', 'mods need') + ' attention.' : '';
+    }
     function onMods(d) {
       waiting = false;
       loaded = true;
@@ -440,52 +375,51 @@ var modsTab = (function () {
       } else {
         model = normalize(d.data);
         lastError = model.ok ? model.error : 'The mods list is unavailable.';
-        if (!busy) setStatus(model.index && model.index.admitted !== undefined
-          ? plural(num(model.index.admitted), 'mod') + ' serving, ' + plural(num(model.index.files), 'file') + '.' : '', '');
+        if (!busy) setStatus(attentionText(), '');
       }
       renderAll();
     }
     function onResult(d) {
       var action = str(d.action), data = d.data && typeof d.data === 'object' ? d.data : {};
       var message = str(d.message || data.message), ok = d.ok === true || data.ok === true;
+      var wasQuiet = quiet && action === 'rescan';
+      quiet = false;
       setBusy('');
-      if (action === 'pruneList' && ok) {
-        var cands = arr(data.candidates);
-        if (!cands.length) { env.toast(message || 'No build can be removed.', ''); setStatus(message, ''); return; }
-        setStatus(message, '');
-        env.confirm(pruneConfirmText(cands), function () {
-          act('pruneApply', cands.map(function (c) { return str(c.key); }).join('\n'));
-        });
+      if (action === 'install' && data.cancelled) { setStatus('', ''); return; }
+      if (wasQuiet) {
+        /* A failed rescan is followed by a document unless the host cannot reach the backend at all. */
+        waiting = false;
+        if (!ok && !loaded) { loaded = true; lastError = message || 'The mods list is unavailable.'; renderAll(); }
+        if (!ok) setStatus(message, 'err');
         return;
       }
-      if (action === 'install' && data.cancelled) { setStatus('', ''); return; }
       setStatus(message, ok ? 'ok' : 'err');
-      if (message) env.toast(message, ok ? 'ok' : (d.busy ? 'warn' : 'err'));
+      if (message) env.toast(message, ok ? 'ok' : 'err');
       if (action === 'install' && ok && data.key) selectedKey = str(data.key);
+      if (action === 'remove' && ok) selectedKey = '';
     }
 
     /* ---- wiring */
     function bind() {
       var on = function (id, ev, fn) { var n = byId(id); if (n) n.addEventListener(ev, fn); };
       on('modsInstallBtn', 'click', function () { act('install'); });
-      on('modsRescanBtn', 'click', function () { act('rescan'); });
-      on('modsVerifyBtn', 'click', function () { act('verify'); });
-      on('modsVerifyOneBtn', 'click', function () { var b = selectedBundle(); if (b) act('verify', b.key); });
-      on('modsPaletteBtn', 'click', function () { act('palette'); });
-      on('modsPruneBtn', 'click', function () { act('pruneList'); });
       on('modsFolderBtn', 'click', function () { act('openFolder'); });
+      on('modsMigrateBtn', 'click', function () { act('migrate'); });
+      on('modsRemoveBtn', 'click', function () {
+        var b = selectedMod();
+        if (!b || busy) return;
+        env.confirm(removeConfirmText(b), function () { act('remove', b.key); });
+      });
       on('modsRefreshBtn', 'click', function () { refresh(); });
-      on('modsFilter', 'input', function () { filter = str(byId('modsFilter').value); view = filterBundles(model.bundles, filter); byId('modsList').scrollTop = 0; renderList(); });
-      on('modsList', 'scroll', queueList);
-      on('modsShadowsBody', 'scroll', queueShadows);
-      on('modsShadows', 'toggle', function () { shadowsOpen = !!byId('modsShadows').open; renderShadows(); });
-      setBusy('');
+      on('modsFilter', 'input', function () { filter = str(byId('modsFilter').value); view = filterMods(model.mods, filter); renderList(); });
+      on('modsList', 'keydown', onListKey);
+      renderButtons();
     }
 
     return {
       bind: bind,
-      /* The tab became visible: read the current state (explicit demand, never a timer). */
-      show: function () { refresh(); queueList(); },
+      /* The tab became visible: reread the folder (explicit demand, never a timer). */
+      show: function () { refresh(); },
       refresh: refresh,
       act: act,
       select: select,
@@ -495,14 +429,14 @@ var modsTab = (function () {
         if (d.kind === 'modsActionResult') { onResult(d); return true; }
         return false;
       },
-      state: function () { return {model: model, loaded: loaded, waiting: waiting, busy: busy, selectedKey: selectedKey, view: view, shadowsOpen: shadowsOpen, error: lastError}; }
+      state: function () { return {model: model, loaded: loaded, waiting: waiting, busy: busy, selectedKey: selectedKey, view: view, error: lastError}; }
     };
   }
 
-  return {ROW_HEIGHT: ROW_HEIGHT, SHADOW_ROW_HEIGHT: SHADOW_ROW_HEIGHT, OVERSCAN: OVERSCAN, STATES: STATES, ROW_STATES: ROW_STATES,
-          SHADOW_KINDS: SHADOW_KINDS, ACTIONS: ACTIONS, normalize: normalize, formatSize: formatSize, stateInfo: stateInfo,
-          rowInfo: rowInfo, shadowInfo: shadowInfo, filesText: filesText, filterBundles: filterBundles, windowRange: windowRange, mapSummary: mapSummary,
-          actionMessage: actionMessage, pruneConfirmText: pruneConfirmText, create: create};
+  return {STATES: STATES, ROW_STATES: ROW_STATES, ACTIONS: ACTIONS, DUPLICATE_TEXT: DUPLICATE_TEXT, normalize: normalize,
+          formatSize: formatSize, stateInfo: stateInfo, rowInfo: rowInfo, filesText: filesText, idText: idText,
+          filterMods: filterMods, mapSummary: mapSummary, actionMessage: actionMessage, removeConfirmText: removeConfirmText,
+          create: create};
 })();
 
 if (typeof module !== 'undefined' && module.exports) module.exports = modsTab;

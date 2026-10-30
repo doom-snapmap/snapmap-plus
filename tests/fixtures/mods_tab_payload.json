@@ -1,35 +1,33 @@
 {
-  "v": 1,
+  "v": 2,
   "gen": 7,
   "root": "C:\\Users\\player\\AppData\\Local\\snapmap-plus\\mods",
   "storeReadable": true,
-  "index": {"bundles": 6, "admitted": 4, "files": 92, "conflicts": 1, "shadows": 64, "editorRowsRegistered": 4},
-  "bundles": [
-    {"key": "alex.r2-imp@1.0.0+1", "id": "alex.r2-imp", "name": "R2 Imp copy", "author": "alex", "version": "1.0.0", "build": 1,
-     "hash": "3f0c6c2a9d0d6bb1c0b3d5b3c5e4c7b6a1f2e3d4c5b6a7980112233445566778", "size": 1843202, "files": 13,
-     "state": "superseded", "cause": "", "legacy": false, "verified": true, "installedAt": 1761700000,
-     "editorRows": 2, "shadows": 0, "supersededPaths": 1, "supersededBy": "alex.r2-imp@1.0.0+2", "folder": "alex.r2-imp@1.0.0+1"},
+  "mods": [
     {"key": "alex.r2-imp@1.0.0+2", "id": "alex.r2-imp", "name": "R2 Imp copy", "author": "alex", "version": "1.0.0", "build": 2,
-     "hash": "9a8b7c6d5e4f30211203f4e5d6c7b8a99a8b7c6d5e4f30211203f4e5d6c7b8a9", "size": 1843230, "files": 13,
-     "state": "active", "cause": "", "legacy": false, "verified": true, "installedAt": 1761700500,
-     "editorRows": 2, "shadows": 0, "supersededPaths": 0, "supersededBy": "", "folder": "alex.r2-imp@1.0.0+2"},
+     "size": 1843230, "files": 13, "pointers": 0, "state": "installed", "cause": "", "otherBuilds": 1, "duplicateId": false,
+     "editorRows": 2, "folder": "alex.r2-imp@1.0.0+2"},
     {"key": "local.my-overrides@0.0.0+1", "id": "local.my-overrides", "name": "My overrides", "author": "", "version": "0.0.0", "build": 1,
-     "hash": "1111111111111111111111111111111111111111111111111111111111111111", "size": 402113, "files": 63, "pointers": 41,
-     "state": "legacy", "cause": "", "legacy": true, "verified": true, "installedAt": 1761600000,
-     "editorRows": 62, "shadows": 62, "supersededPaths": 0, "supersededBy": "", "folder": "local.my-overrides@3c1f0a9e2b7d4c58"},
+     "size": 402113, "files": 63, "pointers": 41, "state": "installed", "cause": "", "otherBuilds": 0, "duplicateId": false,
+     "editorRows": 62, "folder": "local.my-overrides@0.0.0+1"},
     {"key": "pat.<loud>-shotgun@2.1+4", "id": "pat.loud-shotgun", "name": "Loud \"shotgun\" <b>sounds</b>", "author": "pat & co", "version": "2.1", "build": 4,
-     "hash": "2222222222222222222222222222222222222222222222222222222222222222", "size": 8803, "files": 2,
-     "state": "active", "cause": "", "legacy": false, "verified": true, "installedAt": 1761650000,
-     "editorRows": 0, "shadows": 1, "supersededPaths": 0, "supersededBy": "", "folder": "pat.loud-shotgun@2.1+4"},
+     "size": 8803, "files": 2, "pointers": 0, "state": "installed", "cause": "", "otherBuilds": 0, "duplicateId": false,
+     "editorRows": 0, "folder": "pat.loud-shotgun@2.1+4"},
     {"key": "sam.quiet-shotgun@1.0.0+1", "id": "sam.quiet-shotgun", "name": "Quiet shotgun", "author": "sam", "version": "1.0.0", "build": 1,
-     "hash": "3333333333333333333333333333333333333333333333333333333333333333", "size": 9120, "files": 1,
-     "state": "skipped", "cause": "assets/sound/soundbanks/pc/shotgun.snd is not the size bundle.json records", "legacy": false, "verified": false, "installedAt": 1761660000,
-     "editorRows": 0, "shadows": 1, "supersededPaths": 0, "supersededBy": "", "folder": "sam.quiet-shotgun@1.0.0+1"},
-    {"key": "kim.new-crates@0.3.0+1", "id": "kim.new-crates", "name": "New crates", "author": "kim", "version": "0.3.0", "build": 1,
-     "hash": "4444444444444444444444444444444444444444444444444444444444444444", "size": 120500, "files": 5,
-     "state": "unindexed", "cause": "not in the serving index yet; Rescan to use it", "legacy": false, "verified": true, "installedAt": 1761700900,
-     "editorRows": 1, "shadows": 0, "supersededPaths": 0, "supersededBy": "", "folder": "kim.new-crates@0.3.0+1"}
+     "size": 9120, "files": 1, "pointers": 0, "state": "attention",
+     "cause": "assets/sound/soundbanks/pc/shotgun.snd is not the size bundle.json records", "otherBuilds": 0, "duplicateId": false,
+     "editorRows": 0, "folder": "sam.quiet-shotgun@1.0.0+1"},
+    {"key": "local.cyberdemon@0.0.0+1", "id": "local.cyberdemon", "name": "cyberdemon", "author": "", "version": "0.0.0", "build": 1,
+     "size": 52113201, "files": 310, "pointers": 120, "state": "attention", "cause": "", "otherBuilds": 0, "duplicateId": true,
+     "editorRows": 1, "folder": "local.cyberdemon@0.0.0+1"},
+    {"key": "local.cyberdemon@0.0.0-05238b2e+1", "id": "local.cyberdemon", "name": "Cyberdemon (Boss)", "author": "", "version": "0.0.0-05238b2e", "build": 1,
+     "size": 50110220, "files": 298, "pointers": 118, "state": "attention", "cause": "", "otherBuilds": 0, "duplicateId": true,
+     "editorRows": 1, "folder": "local.cyberdemon@0.0.0-05238b2e+1"},
+    {"key": "unbuilt-folder", "id": "", "name": "", "author": "", "version": "", "build": 0,
+     "size": 0, "files": 0, "pointers": 0, "state": "attention", "cause": "not built yet: bundle.json is missing", "otherBuilds": 0, "duplicateId": false,
+     "editorRows": 0, "folder": "unbuilt-folder"}
   ],
+  "migrate": {"entries": 34, "pending": 2, "running": false},
   "map": {
     "entities": 214,
     "names": 96,
@@ -45,17 +43,5 @@
       {"id": "alex.imp-anims", "version": "1.0.0", "bundle": "6666666666666666666666666666666666666666666666666666666666666666", "size": 404,
        "key": "alex.imp-anims@1.0.0+1", "viaNeeds": true, "inManifest": false, "nameCount": 0, "names": []}
     ]
-  },
-  "shadows": [
-    {"request": "generated/decls/snapeditorentitydef/action/listener/output_base.decl", "kind": "legacy", "shadow": true,
-     "served": "local.my-overrides@0.0.0+1", "bundles": ["local.my-overrides@0.0.0+1"]},
-    {"request": "generated/decls/snapeditorentitydef/demons/imp.decl", "kind": "legacy", "shadow": true,
-     "served": "local.my-overrides@0.0.0+1", "installed": true, "bundles": ["local.my-overrides@0.0.0+1"]},
-    {"request": "sound/soundbanks/pc/shotgun.snd", "kind": "conflict", "shadow": true,
-     "served": "tom.shotgun@1.0.0+1", "resolution": "chosen", "reason": "installed most recently",
-     "bundles": ["pat.<loud>-shotgun@2.1+4", "tom.shotgun@1.0.0+1"]},
-    {"request": "generated/image/textures/crate_d.bimage", "kind": "stock", "shadow": true,
-     "served": "pat.<loud>-shotgun@2.1+4", "bundles": ["pat.<loud>-shotgun@2.1+4"]}
-  ],
-  "shadowTotals": {"stock": 1, "legacy": 62, "conflict": 1, "total": 64, "sent": 4}
+  }
 }

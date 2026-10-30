@@ -377,12 +377,15 @@ typedef int (*sh_budget_fn)(struct sh_iface *self, sh_budget_call *call); /* +0x
 /* Mods tab (backend/modui.c). Text crosses as UTF-8 JSON through one buffer the
  * backend keeps: LIST and RUN fill it, FETCH copies it.
  *   LIST   main thread (call inside run_on_main). Builds the tab's document:
- *          installed bundles and their serving state, the open map's manifest
- *          rows and placed-name closure, shadows and conflicts. Returns 1, or 0
- *          when refused (off the main thread, no memory). needed is set.
+ *          installed mods (one row per mod), whether the retired overrides
+ *          folder still holds entries to migrate, and the open map's manifest
+ *          rows and placed-name closure. Returns 1, or 0 when refused (off the
+ *          main thread, no memory). needed is set.
  *   RUN    main thread. Runs `action` with `arg` (INSTALL: absolute folder;
  *          VERIFY: id@version+build, "" for every build; PRUNE_APPLY:
- *          newline-separated keys) and keeps its result document. Returns 1
+ *          newline-separated keys; REMOVE: the key of a listed mod; MIGRATE
+ *          starts the migration's worker thread) and keeps its result
+ *          document. Returns 1
  *          when the action ran (the document's "ok" says whether it
  *          succeeded), 0 when refused before it ran.
  *   FETCH  any thread. Copies the buffer: 1 copied, -1 a size query (out NULL
@@ -390,18 +393,23 @@ typedef int (*sh_budget_fn)(struct sh_iface *self, sh_budget_call *call); /* +0x
  *          built yet.
  *   ROOT   any thread. Copies the store folder as UTF-8: 1, -1 too small, 0
  *          unresolved.
+ *   WAIT   any thread. Waits up to out_cap milliseconds (out unused) for a
+ *          migration MIGRATE started to finish: 1 idle, 0 still running.
  * generation is set by every op; it changes after each action that can change
  * the store or the serving index. */
 #define SH_MODS_LIST  1
 #define SH_MODS_RUN   2
 #define SH_MODS_FETCH 3
 #define SH_MODS_ROOT  4
+#define SH_MODS_WAIT  5
 #define SH_MODS_ACT_INSTALL     1
 #define SH_MODS_ACT_VERIFY      2
 #define SH_MODS_ACT_RESCAN      3
 #define SH_MODS_ACT_PALETTE     4
 #define SH_MODS_ACT_PRUNE_LIST  5
 #define SH_MODS_ACT_PRUNE_APPLY 6
+#define SH_MODS_ACT_REMOVE      7
+#define SH_MODS_ACT_MIGRATE     8
 typedef struct sh_mods_call {
     int          op;
     int          action;       /* RUN */

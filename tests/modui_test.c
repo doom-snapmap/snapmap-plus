@@ -1,11 +1,15 @@
 /* modui_test.c -- the Mods tab's backend (modui.c) against the real store,
  * serving index and map manifest in a temporary folder: the document's shape
- * on an empty store, an install through the tab's action with every state
- * string the page reads (active, unindexed, superseded, skipped), the open
- * map's manifest rows and placed closure, stock shadows and conflicts, the
- * conservative removal of covered builds, the main-thread refusal, the slot's
- * size query, and that every key the page's fixture uses is a key the backend
- * writes.
+ * on an empty store, an install through the tab's action, one row per mod
+ * (a second build counted, not listed; two folders declaring one id listed
+ * twice as duplicates; legacy\ bundles left out), "installed" and "attention"
+ * with their causes, the Migrate state and action with the slot's WAIT, Remove
+ * (a laid-out build deleted, a folder built in place moved to removed-mods, a
+ * mod the open map uses refused), the open map's manifest rows and placed
+ * closure, the conservative removal of covered builds, `sh_mods doctor` (every
+ * bundle with its state, conflicts with their winners, shadows, duplicate ids,
+ * migration, verification), the main-thread refusal, the slot's size query,
+ * and that every key the page's fixture uses is a key the backend writes.
  *
  *   modui_test.exe <tests\fixtures\mods\alex.r2-imp> <tests\fixtures\mods_tab_payload.json>
  */
@@ -82,6 +86,19 @@ static int fake_placed(sh_modui_name_fn emit, void *context)
     return g_placed_count;
 }
 
+/* The overrides migration: what it reports pending, and a worker that stays
+ * busy for a number of polls after it starts. */
+static int g_mig_pending = 0, g_mig_entries = 0, g_mig_started, g_mig_again = -1, g_mig_start_result = 1;
+static volatile LONG g_mig_busy_polls;
+static int fake_mig_pending(unsigned *entries) { if (entries) *entries = (unsigned)g_mig_entries; return g_mig_pending; }
+static int fake_mig_start(int again)
+{
+    g_mig_again = again;
+    if (g_mig_start_result > 0) { g_mig_started++; InterlockedExchange(&g_mig_busy_polls, 3); g_mig_pending = 0; }
+    return g_mig_start_result;
+}
+static int fake_mig_busy(void) { return InterlockedDecrement(&g_mig_busy_polls) >= 0 ? 1 : 0; }
+
 static void bind_fakes(void)
 {
     sh_modui_engine e;
@@ -91,7 +108,25 @@ static void bind_fakes(void)
     e.rescan = fake_rescan;
     e.palette_rebuild = fake_palette;
     e.stock_exists = fake_stock;
+    e.migrate_pending = fake_mig_pending;
+    e.migrate_start = fake_mig_start;
+    e.migrate_busy = fake_mig_busy;
     sh_modui_bind(&e);
+}
+
+/* sh_modui_doctor's lines, one per line. */
+static char g_doctor[1 << 16];
+static void doctor_line(void *context, const char *line)
+{
+    size_t at = strlen(g_doctor), n = strlen(line);
+    (void)context;
+    if (g_echo) printf("    %s\n", line);
+    if (at + n + 2 < sizeof g_doctor) { memcpy(g_doctor + at, line, n); g_doctor[at + n] = '\n'; g_doctor[at + n + 1] = 0; }
+}
+static const char *doctor(int verify)
+{
+    g_doctor[0] = 0;
+    return sh_modui_doctor(verify, doctor_line, NULL) == 1 ? g_doctor : NULL;
 }
 
 /* ---- document access ------------------------------------------------------------------------- */
@@ -122,7 +157,7 @@ static char *run_doc(int action, const char *arg)
 
 static int has(const char *doc, const char *needle) { return doc && strstr(doc, needle) != NULL; }
 
-/* The JSON object of the bundle whose key is `key` inside doc's "bundles". */
+/* The JSON object of the row whose key is `key` inside doc's "mods". */
 static int bundle_has(const char *doc, const char *key, const char *needle)
 {
     char k[256];
@@ -181,7 +216,7 @@ static void keys_match_fixture(const char *fixture_path, const char *doc)
         p = q + 1;
     }
     printf("  fixture keys checked: %u, missing: %u\n", seen, missing);
-    CHECK(seen > 30 && missing == 0);
+    CHECK(seen > 25 && missing == 0);
     free(text);
 }
 
@@ -222,6 +257,17 @@ static void load_map_naming(const char *id, const char *hash)
     sh_modmanifest_list_free(&rows);
 }
 
+/* A mod declaring `id` at `version` with one namespaced decl. */
+static void put_plain_mod(const char *folder, const char *id, const char *version, const char *body)
+{
+    char desc[512], rel[256];
+    _snprintf_s(desc, sizeof desc, _TRUNCATE, "{\"id\":\"%s\",\"version\":\"%s\",\"name\":\"Twin\",\"author\":\"tester\"}", id, version);
+    CreateDirectoryA(folder, NULL);
+    mt_write(folder, "mod.json", desc);
+    _snprintf_s(rel, sizeof rel, _TRUNCATE, "assets\\generated\\decls\\entitydef\\mods\\%s\\twin.decl", id);
+    mt_write(folder, rel, body);
+}
+
 static void put_shadow_mod(const char *folder, const char *id, const char *body)
 {
     char desc[512];
@@ -240,8 +286,8 @@ int main(int argc, char **argv)
     char fixture[MAX_PATH], payload[MAX_PATH], tmp[MAX_PATH], src[MAX_PATH], path[MAX_PATH * 2];
     char key1[160] = "", key2[160] = "", hash1[80] = "", hash2[80] = "";
     char *doc;
+    const char *dr;
     sh_ms_list list;
-    size_t i;
 
     if (!GetFullPathNameA(argc > 1 ? argv[1] : "fixtures\\mods\\alex.r2-imp", sizeof fixture, fixture, NULL)) return 2;
     if (!GetFullPathNameA(argc > 2 ? argv[2] : "fixtures\\mods_tab_payload.json", sizeof payload, payload, NULL)) return 2;
@@ -261,19 +307,24 @@ int main(int argc, char **argv)
     CHECK(sh_modserve_index_build(g_root) == 0);
     doc = list_doc();
     CHECK(doc != NULL);
-    CHECK(has(doc, "{\"v\":1,\"gen\":"));
+    CHECK(has(doc, "{\"v\":2,\"gen\":"));
     CHECK(has(doc, "\"storeReadable\":true"));
-    CHECK(has(doc, "\"bundles\":[]"));
+    CHECK(has(doc, "\"mods\":[]"));
+    CHECK(has(doc, "\"migrate\":{\"entries\":0,\"pending\":0,\"running\":false}"));
     CHECK(has(doc, "\"map\":{\"entities\":-1,\"names\":0,\"rows\":[],\"placed\":[]}"));
-    CHECK(has(doc, "\"shadows\":[]"));
-    CHECK(has(doc, "\"shadowTotals\":{\"stock\":0,\"legacy\":0,\"conflict\":0,\"total\":0,\"sent\":0}"));
+    CHECK(!has(doc, "\"bundles\":") && !has(doc, "\"shadows\":") && !has(doc, "\"shadowTotals\":"));
     CHECK(has(doc, "\"root\":\"") && has(doc, "store\\\\mods\""));
     free(doc);
+    dr = doctor(0);
+    CHECK(has(dr, "MODS: doctor: store ") && has(dr, ": 0 folder(s); 0 mod(s) listed in the Mods tab; 0 map-delivered bundle(s)"));
+    CHECK(has(dr, "MODS: doctor: migration: no overrides folder, or it is empty\n"));
+    CHECK(has(dr, "MODS: doctor: 0 conflict(s), 0 shadow(s), 0 legacy shadow(s)\nMODS: doctor: done\n"));
 
     printf("-- the main thread only: refused elsewhere, the previous document kept\n");
     g_main = 0;
     CHECK(sh_modui_list() == -1);
     CHECK(sh_modui_run(SH_MODS_ACT_RESCAN, NULL) == -1);
+    CHECK(sh_modui_doctor(0, doctor_line, NULL) == -1);
     {
         sh_mods_call call;
         memset(&call, 0, sizeof call);
@@ -284,7 +335,7 @@ int main(int argc, char **argv)
     }
     g_main = 1;
 
-    printf("-- install through the tab: verified, indexed, active\n");
+    printf("-- install through the tab: verified, indexed, installed\n");
     doc = run_doc(SH_MODS_ACT_INSTALL, "relative\\folder");
     CHECK(has(doc, "\"action\":\"install\",\"ok\":false"));
     free(doc);
@@ -292,21 +343,19 @@ int main(int argc, char **argv)
     CHECK(has(doc, "\"action\":\"install\",\"ok\":true"));
     CHECK(has(doc, "\"key\":\"alex.r2-imp@1.0.0+1\""));
     CHECK(has(doc, "\"editorRows\":2"));
-    CHECK(has(doc, "editor rows appear after Rebuild palette"));
+    CHECK(has(doc, "its editor rows appear in the palette after the game restarts"));
     CHECK(has(doc, "\"stockUnchecked\":false"));
     CHECK(g_rescans == 1);
-    free(doc);
-    doc = list_doc();
-    CHECK(bundle_has(doc, "alex.r2-imp@1.0.0+1", "\"state\":\"active\""));
-    CHECK(bundle_has(doc, "alex.r2-imp@1.0.0+1", "\"name\":\"R2 Imp copy\",\"author\":\"alex\",\"version\":\"1.0.0\",\"build\":1"));
-    CHECK(bundle_has(doc, "alex.r2-imp@1.0.0+1", "\"verified\":true"));
-    CHECK(bundle_has(doc, "alex.r2-imp@1.0.0+1", "\"files\":13"));
-    CHECK(bundle_has(doc, "alex.r2-imp@1.0.0+1", "\"legacy\":false"));
     {
-        const char *h = doc ? strstr(doc, "\"hash\":\"") : NULL;
-        if (h) { memcpy(hash1, h + 8, 64); hash1[64] = 0; }
+        const char *h = doc ? strstr(doc, "\"bundle\":\"") : NULL;
+        if (h) { memcpy(hash1, h + 10, 64); hash1[64] = 0; }
         CHECK(strlen(hash1) == 64);
     }
+    free(doc);
+    doc = list_doc();
+    CHECK(bundle_has(doc, "alex.r2-imp@1.0.0+1", "\"id\":\"alex.r2-imp\",\"name\":\"R2 Imp copy\",\"author\":\"alex\",\"version\":\"1.0.0\",\"build\":1"));
+    CHECK(bundle_has(doc, "alex.r2-imp@1.0.0+1", "\"files\":13"));
+    CHECK(bundle_has(doc, "alex.r2-imp@1.0.0+1", "\"state\":\"installed\",\"cause\":\"\",\"otherBuilds\":0,\"duplicateId\":false,\"editorRows\":2"));
     strcpy_s(key1, sizeof key1, "alex.r2-imp@1.0.0+1");
     free(doc);
 
@@ -319,11 +368,18 @@ int main(int argc, char **argv)
     doc = list_doc();
     CHECK(has(doc, "\"map\":{\"entities\":2,\"names\":2,"));
     CHECK(has(doc, "\"rows\":[{\"id\":\"alex.r2-imp\",\"version\":\"1.0.0\""));
-    CHECK(count_of(doc, "\"state\":\"active\"") == 2);   /* the bundle and its manifest row */
+    CHECK(count_of(doc, "\"state\":\"active\"") == 1);   /* the manifest row */
     CHECK(has(doc, "\"key\":\"alex.r2-imp@1.0.0+1\",\"otherKey\":\"\",\"nameCount\":1,\"names\":[\"mods/alex.r2-imp/imp_copy\"]"));
     CHECK(has(doc, "\"placed\":[{\"id\":\"alex.r2-imp\""));
     CHECK(has(doc, "\"viaNeeds\":false,\"inManifest\":true,\"nameCount\":1,\"names\":[\"mods/alex.r2-imp/imp_copy\"]"));
     free(doc);
+    /* Removing a mod the open map uses is refused, and nothing moves. */
+    doc = run_doc(SH_MODS_ACT_REMOVE, key1);
+    CHECK(has(doc, "\"action\":\"remove\",\"ok\":false") && has(doc, "is used by the open map") &&
+          has(doc, "\"inUse\":true,\"removed\":[]"));
+    free(doc);
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", g_root, key1);
+    CHECK(mt_exists(path));
     /* A row naming a bundle that is not installed, while a build of the mod is. */
     load_map_naming("alex.r2-imp", "00000000000000000000000000000000000000000000000000000000000000aa");
     doc = list_doc();
@@ -335,7 +391,7 @@ int main(int argc, char **argv)
     CHECK(has(doc, "\"state\":\"missing\",\"cause\":\"\",\"key\":\"\",\"otherKey\":\"\""));
     free(doc);
 
-    printf("-- a second build: the first is superseded and becomes removable\n");
+    printf("-- a second build: one row that counts the other build; the first is removable\n");
     mt_append(src, "assets\\generated\\decls\\md6def\\mods\\alex.r2-imp\\imp_copy_b.md6.decl", "\r\n// changed\r\n");
     doc = run_doc(SH_MODS_ACT_INSTALL, src);
     CHECK(has(doc, "\"ok\":true") && has(doc, "\"key\":\"alex.r2-imp@1.0.0+2\""));
@@ -346,10 +402,14 @@ int main(int argc, char **argv)
     }
     free(doc);
     doc = list_doc();
-    CHECK(bundle_has(doc, key1, "\"state\":\"superseded\""));
-    CHECK(bundle_has(doc, key1, "\"supersededPaths\":1,\"supersededBy\":\"alex.r2-imp@1.0.0+2\""));
-    CHECK(bundle_has(doc, key2, "\"state\":\"active\""));
+    CHECK(bundle_has(doc, key2, "\"state\":\"installed\",\"cause\":\"\",\"otherBuilds\":1,\"duplicateId\":false"));
+    CHECK(!bundle_has(doc, key1, "\"key\""));      /* the superseded build is not a row */
+    CHECK(count_of(doc, "\"otherBuilds\":") == 1);
     free(doc);
+    dr = doctor(0);
+    CHECK(has(dr, "MODS: doctor: bundle alex.r2-imp@1.0.0+1: superseded, alex.r2-imp@1.0.0+2 serves 1 of its path(s); "
+                  "another build of it is listed\n"));
+    CHECK(has(dr, "MODS: doctor: bundle alex.r2-imp@1.0.0+2: active\n"));
     /* While the open map's record names build 1 it is kept. */
     load_map_naming("alex.r2-imp", hash1);
     doc = run_doc(SH_MODS_ACT_PRUNE_LIST, NULL);
@@ -391,8 +451,117 @@ int main(int argc, char **argv)
     doc = run_doc(SH_MODS_ACT_VERIFY, "");
     CHECK(has(doc, "\"action\":\"verify\",\"ok\":true") && has(doc, "\"passed\":1,\"failed\":0"));
     free(doc);
+    doc = list_doc();
+    CHECK(bundle_has(doc, key2, "\"otherBuilds\":0"));
+    free(doc);
 
-    printf("-- stock shadows and a conflict between two mods\n");
+    printf("-- two folders declaring one id: a row each, both marked\n");
+    {
+        char a[MAX_PATH * 2], b[MAX_PATH * 2], moved[MAX_PATH * 2];
+        _snprintf_s(a, sizeof a, _TRUNCATE, "%s\\twin-a", g_root);
+        _snprintf_s(b, sizeof b, _TRUNCATE, "%s\\twin-b", g_root);
+        put_plain_mod(a, "alex.twin", "1.0.0", "{\r\n}\r\n");
+        put_plain_mod(b, "alex.twin", "2.0.0", "{\r\n\t// the other one\r\n}\r\n");
+        doc = run_doc(SH_MODS_ACT_INSTALL, a);       /* built in place: the folder is in the store */
+        CHECK(has(doc, "\"ok\":true") && has(doc, "\"inPlace\":true"));
+        free(doc);
+        doc = run_doc(SH_MODS_ACT_INSTALL, b);
+        CHECK(has(doc, "\"ok\":true") && has(doc, "\"inPlace\":true"));
+        free(doc);
+        doc = list_doc();
+        CHECK(bundle_has(doc, "alex.twin@1.0.0+1", "\"state\":\"attention\"") &&
+              bundle_has(doc, "alex.twin@1.0.0+1", "\"otherBuilds\":0,\"duplicateId\":true"));
+        CHECK(bundle_has(doc, "alex.twin@2.0.0+1", "\"state\":\"attention\"") &&
+              bundle_has(doc, "alex.twin@2.0.0+1", "\"otherBuilds\":0,\"duplicateId\":true"));
+        free(doc);
+        dr = doctor(0);
+        CHECK(has(dr, "MODS: doctor: duplicate id alex.twin: alex.twin@1.0.0+1 (mods\\twin-a), alex.twin@2.0.0+1 (mods\\twin-b); "
+                      "change one id in its mod.json\n"));
+        CHECK(has(dr, "MODS: doctor: bundle alex.twin@1.0.0+1: superseded, alex.twin@2.0.0+1 serves 1 of its path(s); from mods\\twin-a\n"));
+        /* Remove one: built in place, so its folder is moved out of the store, not deleted. */
+        doc = run_doc(SH_MODS_ACT_REMOVE, "alex.twin@2.0.0+1");
+        CHECK(has(doc, "\"action\":\"remove\",\"ok\":true") && has(doc, "Removed Twin. Its folder was moved to ") &&
+              has(doc, "\"inUse\":false,\"removed\":[\"alex.twin@2.0.0+1\"]") && has(doc, "removed-mods\\\\twin-b\""));
+        free(doc);
+        _snprintf_s(moved, sizeof moved, _TRUNCATE, "%s\\store\\removed-mods\\twin-b\\mod.json", tmp);
+        CHECK(mt_exists(moved) && !mt_exists(b));
+        doc = list_doc();
+        CHECK(bundle_has(doc, "alex.twin@1.0.0+1", "\"state\":\"installed\",\"cause\":\"\",\"otherBuilds\":0,\"duplicateId\":false"));
+        CHECK(!has(doc, "alex.twin@2.0.0+1"));
+        free(doc);
+        doc = run_doc(SH_MODS_ACT_REMOVE, "alex.twin@2.0.0+1");
+        CHECK(has(doc, "\"ok\":false") && has(doc, "no longer installed"));
+        free(doc);
+        doc = run_doc(SH_MODS_ACT_REMOVE, "alex.twin@1.0.0+1");
+        CHECK(has(doc, "\"ok\":true"));
+        free(doc);
+    }
+
+    printf("-- legacy\\ bundles are not listed, and the doctor names them\n");
+    {
+        char leg[MAX_PATH * 2];
+        _snprintf_s(leg, sizeof leg, _TRUNCATE, "%s\\legacy\\old.pack@0123456789abcdef", g_root);
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\legacy", g_root);
+        CreateDirectoryA(path, NULL);
+        put_plain_mod(leg, "old.pack", "1.0.0", "{\r\n}\r\n");
+        doc = run_doc(SH_MODS_ACT_INSTALL, leg);
+        free(doc);
+        CHECK(sh_ms_enumerate(&list));
+        {
+            size_t i;
+            int seen = 0;
+            for (i = 0; i < list.count; i++) seen |= list.items[i].legacy;
+            CHECK(seen);
+        }
+        sh_ms_list_free(&list);
+        doc = list_doc();
+        CHECK(!has(doc, "old.pack"));
+        free(doc);
+        dr = doctor(0);
+        CHECK(has(dr, "MODS: doctor: legacy bundle "));
+        CHECK(has(dr, "1 map-delivered bundle(s) under legacy, not listed"));
+        doc = run_doc(SH_MODS_ACT_REMOVE, "old.pack@1.0.0+1");
+        CHECK(has(doc, "\"ok\":false") && has(doc, "no longer installed"));   /* not a row, so not removable here */
+        free(doc);
+        mt_remove_tree(path);
+    }
+
+    printf("-- migrate: the button's state, the action, and the slot's WAIT\n");
+    g_mig_entries = 34;
+    g_mig_pending = 2;
+    doc = list_doc();
+    CHECK(has(doc, "\"migrate\":{\"entries\":34,\"pending\":2,\"running\":false}"));
+    free(doc);
+    dr = doctor(0);
+    CHECK(has(dr, "MODS: doctor: migration: overrides holds 34 entries, 2 not migrated (Migrate in the Mods tab"));
+    doc = run_doc(SH_MODS_ACT_MIGRATE, NULL);
+    CHECK(has(doc, "\"action\":\"migrate\",\"ok\":true") && has(doc, "\"started\":true"));
+    CHECK(g_mig_started == 1 && g_mig_again == 1);
+    free(doc);
+    {
+        sh_mods_call call;
+        memset(&call, 0, sizeof call);
+        call.op = SH_MODS_WAIT;
+        call.out_cap = 0;
+        CHECK(sh_modui_slot(NULL, &call) == 0);      /* still running, no time to wait */
+        call.out_cap = 2000;
+        CHECK(sh_modui_slot(NULL, &call) == 1);      /* finished within the wait */
+    }
+    doc = list_doc();
+    CHECK(has(doc, "\"migrate\":{\"entries\":34,\"pending\":0,\"running\":false}"));
+    free(doc);
+    g_mig_start_result = 0;
+    doc = run_doc(SH_MODS_ACT_MIGRATE, NULL);
+    CHECK(has(doc, "\"ok\":true") && has(doc, "Nothing to migrate.") && has(doc, "\"started\":false"));
+    free(doc);
+    g_mig_start_result = -1;
+    doc = run_doc(SH_MODS_ACT_MIGRATE, NULL);
+    CHECK(has(doc, "\"ok\":false") && has(doc, "already running"));
+    free(doc);
+    g_mig_start_result = 1;
+    g_mig_entries = 0;
+
+    printf("-- stock shadows and a conflict between two mods: the doctor prints them\n");
     {
         char a[MAX_PATH * 2], b[MAX_PATH * 2];
         _snprintf_s(a, sizeof a, _TRUNCATE, "%s\\authoring\\alex.shade-a", tmp);
@@ -401,32 +570,33 @@ int main(int argc, char **argv)
         doc = run_doc(SH_MODS_ACT_INSTALL, a);
         CHECK(has(doc, "\"ok\":true"));
         free(doc);
-        doc = list_doc();
-        CHECK(bundle_has(doc, "alex.shade-a@1.0.0+1", "\"shadows\":1"));
-        CHECK(has(doc, "\"shadows\":[{\"request\":\"generated/decls/entitydef/monster/imp.decl\",\"kind\":\"stock\",\"shadow\":true,"
-                       "\"served\":\"alex.shade-a@1.0.0+1\",\"installed\":false,\"bundles\":[\"alex.shade-a@1.0.0+1\"]}]"));
-        CHECK(has(doc, "\"shadowTotals\":{\"stock\":1,\"legacy\":0,\"conflict\":0,\"total\":1,\"sent\":1}"));
-        free(doc);
+        dr = doctor(0);
+        CHECK(has(dr, "MODS: doctor: shadow generated/decls/entitydef/monster/imp.decl: by alex.shade-a@1.0.0+1; served by alex.shade-a@1.0.0+1\n"));
+        CHECK(has(dr, "MODS: doctor: 0 conflict(s), 1 shadow(s), 0 legacy shadow(s)\n"));
         put_shadow_mod(b, "alex.shade-b", "{\r\n\tinherit = \"snapmaps/placeablesnapaiencounter/imp\";\r\n\tsize = \"2\";\r\n}");
         doc = run_doc(SH_MODS_ACT_INSTALL, b);
         CHECK(has(doc, "\"ok\":true"));
         free(doc);
+        /* Two mods' shadows with different bytes: one serves (here the later
+         * install; the texts differ outside lists), and the doctor says why. */
+        dr = doctor(0);
+        CHECK(has(dr, "MODS: doctor: conflict generated/decls/entitydef/monster/imp.decl: alex.shade-b@1.0.0+1 serves it "
+                      "(installed most recently); from alex.shade-a@1.0.0+1, alex.shade-b@1.0.0+1\n"));
+        CHECK(has(dr, "MODS: doctor: 1 conflict(s), 0 shadow(s), 0 legacy shadow(s)\n"));
         /* Every section populated for the key comparison with the page's fixture. */
         load_map_naming("alex.r2-imp", hash2);
         g_placed[0] = "mods/alex.r2-imp/imp_copy";
         g_placed_count = 1;
         doc = list_doc();
         CHECK(has(doc, "\"rows\":[{\"id\":\"alex.r2-imp\"") && has(doc, "\"placed\":[{\"id\":\"alex.r2-imp\""));
-        /* Two mods' shadows with different bytes: one serves (here the later
-         * install; the texts differ outside lists), and the tab says why. */
-        CHECK(has(doc, "\"kind\":\"conflict\",\"shadow\":true,\"served\":\"alex.shade-b@1.0.0+1\",\"installed\":false,\"resolution\":\"chosen\","
-                       "\"reason\":\"installed most recently\",\"bundles\":[\"alex.shade-a@1.0.0+1\",\"alex.shade-b@1.0.0+1\"]"));
-        CHECK(has(doc, "\"conflict\":1,\"total\":1"));
+        CHECK(bundle_has(doc, "alex.shade-a@1.0.0+1", "\"state\":\"installed\""));   /* a conflict is the doctor's, not the tab's */
         keys_match_fixture(payload, doc);
         free(doc);
+        dr = doctor(1);
+        CHECK(has(dr, "MODS: doctor: verify: rehashing every build\nMODS: doctor: verify: Verified 3 build(s): every file matches."));
     }
 
-    printf("-- unindexed and skipped builds\n");
+    printf("-- attention: a warning, an unbuilt folder, an unindexed build\n");
     {
         char hand[MAX_PATH * 2], file[MAX_PATH * 2];
         /* A store file changed size after install: the index still serves the
@@ -445,9 +615,14 @@ int main(int argc, char **argv)
         CreateDirectoryA(hand, NULL);
         mt_write(hand, "mod.json", "{\"id\":\"alex.by-hand\",\"version\":\"1.0.0\",\"name\":\"By hand\"}");
         doc = list_doc();
-        CHECK(bundle_has(doc, "alex.shade-b@1.0.0+1", "\"state\":\"active\",\"cause\":\"assets/generated/decls/entitydef/monster/imp.decl is not the size bundle.json records; Verify to check the build\""));
-        CHECK(bundle_has(doc, "by-hand", "\"state\":\"skipped\",\"cause\":\"not built yet"));
+        CHECK(bundle_has(doc, "alex.shade-b@1.0.0+1", "\"state\":\"attention\",\"cause\":\"assets/generated/decls/entitydef/monster/imp.decl "
+                                                      "is not the size bundle.json records; 'sh_mods doctor verify' checks the build\""));
+        CHECK(bundle_has(doc, "by-hand", "\"id\":\"\",\"name\":\"\""));
+        CHECK(bundle_has(doc, "by-hand", "\"state\":\"attention\",\"cause\":\"not built yet"));
         free(doc);
+        dr = doctor(1);
+        CHECK(has(dr, "MODS: doctor: verify alex.shade-b@1.0.0+1: FAILED: "));
+        CHECK(has(dr, "MODS: doctor: verify: 1 of 3 build(s) failed verification. First: alex.shade-b@1.0.0+1: "));
         /* A damaged bundle.json: skipped by the store and, after the tab's
          * rescan, by the index, which ends the conflict. */
         _snprintf_s(file, sizeof file, _TRUNCATE, "%s\\alex.shade-b@1.0.0+1", g_root);
@@ -456,11 +631,13 @@ int main(int argc, char **argv)
         CHECK(has(doc, "\"action\":\"rescan\",\"ok\":true") && has(doc, "Mods folder reread"));
         free(doc);
         doc = list_doc();
-        CHECK(bundle_has(doc, "alex.shade-b@1.0.0+1", "\"state\":\"skipped\",\"cause\":\""));
+        CHECK(bundle_has(doc, "alex.shade-b@1.0.0+1", "\"state\":\"attention\",\"cause\":\""));
         CHECK(!bundle_has(doc, "alex.shade-b@1.0.0+1", "\"cause\":\"\""));
-        CHECK(bundle_has(doc, "alex.shade-a@1.0.0+1", "\"state\":\"active\""));
-        CHECK(has(doc, "\"shadowTotals\":{\"stock\":1,\"legacy\":0,\"conflict\":0,"));
+        CHECK(bundle_has(doc, "alex.shade-a@1.0.0+1", "\"state\":\"installed\""));
         free(doc);
+        dr = doctor(0);
+        CHECK(has(dr, "MODS: doctor: bundle alex.shade-b@1.0.0+1: skipped; "));
+        CHECK(has(dr, "MODS: doctor: 0 conflict(s), 1 shadow(s), 0 legacy shadow(s)\n"));
         /* Installed while the index is stale: unindexed until a rescan. */
         sh_modserve_index_build(g_root);
         {
@@ -469,21 +646,45 @@ int main(int argc, char **argv)
             memset(&e, 0, sizeof e);
             e.on_main_thread = fake_on_main;
             e.stock_exists = fake_stock;
-            sh_modui_bind(&e);                          /* no rescan bound in this build */
+            sh_modui_bind(&e);                          /* no rescan or migration bound in this build */
             _snprintf_s(c, sizeof c, _TRUNCATE, "%s\\authoring\\alex.shade-c", tmp);
             put_shadow_mod(c, "alex.shade-c", "{\r\n\tinherit = \"snapmaps/placeablesnapaiencounter/imp\";\r\n\tsize = \"3\";\r\n}");
             doc = run_doc(SH_MODS_ACT_INSTALL, c);
             CHECK(has(doc, "\"ok\":true") && has(doc, "\"index\":\"the serving index cannot be rebuilt from here\""));
             free(doc);
             doc = list_doc();
-            CHECK(bundle_has(doc, "alex.shade-c@1.0.0+1", "\"state\":\"unindexed\",\"cause\":\"not in the serving index yet; Rescan to use it\""));
+            CHECK(bundle_has(doc, "alex.shade-c@1.0.0+1", "\"state\":\"attention\",\"cause\":\"not in the serving index yet; it is used after the next scan\""));
             CHECK(has(doc, "\"map\":{\"entities\":-2,"));   /* no placed-name reader bound */
+            CHECK(has(doc, "\"migrate\":{\"entries\":0,\"pending\":0,\"running\":false}"));
             free(doc);
+            dr = doctor(0);
+            CHECK(has(dr, "MODS: doctor: migration: not available in this build\n"));
+            doc = run_doc(SH_MODS_ACT_MIGRATE, NULL);
+            CHECK(has(doc, "\"action\":\"migrate\",\"ok\":false") && has(doc, "not available"));
+            free(doc);
+            CHECK(sh_modui_wait(0) == 1);                /* nothing to wait for */
             doc = run_doc(SH_MODS_ACT_PALETTE, NULL);
             CHECK(has(doc, "\"action\":\"palette\",\"ok\":false"));
             free(doc);
             bind_fakes();
         }
+    }
+
+    printf("-- remove a laid-out build: deleted; blobs stay while a store folder cannot be read\n");
+    {
+        unsigned rescans = (unsigned)g_rescans;
+        sh_modmanifest_reset();
+        g_placed_count = 0;
+        doc = run_doc(SH_MODS_ACT_REMOVE, "alex.shade-a@1.0.0+1");
+        CHECK(has(doc, "\"action\":\"remove\",\"ok\":true") && has(doc, "\"message\":\"Removed Shade.\"") &&
+              has(doc, "\"removed\":[\"alex.shade-a@1.0.0+1\"]") && has(doc, "\"movedTo\":\"\"") && has(doc, "\"blobs\":0"));   /* by-hand and shade-b are unreadable */
+        CHECK((unsigned)g_rescans == rescans + 1);
+        free(doc);
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\alex.shade-a@1.0.0+1", g_root);
+        CHECK(!mt_exists(path));
+        doc = run_doc(SH_MODS_ACT_REMOVE, "");
+        CHECK(has(doc, "\"ok\":false") && has(doc, "Select a mod to remove."));
+        free(doc);
     }
 
     printf("-- palette rebuild reports refusal and success\n");
@@ -521,8 +722,6 @@ int main(int argc, char **argv)
     }
 
     mt_remove_tree(tmp);
-    (void)i;
-    (void)hash2;
     printf("modui_test: %d check(s), %d failure(s)\n", checks, failures);
     return failures ? 1 : 0;
 }
