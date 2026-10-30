@@ -153,7 +153,8 @@ Converting assets from other games is Doomforge's job, not this product's. New n
   download them; the first time, the game asks once (the `mods.upload_confirmed` setting records
   the answer), and No leaves the map unpublished. A map over the map service's 10 MB limit is
   refused before anything is sent. A published map that uses mods carries the search tag `mods`,
-  added at publish when it is missing, because players without Snapmap+ cannot play it.
+  written into the map's tags by the publish's own save when it is missing, because players
+  without Snapmap+ cannot play it.
   Unpublishing a map releases its mods on the store; deleting a map from My Maps does not while its
   published copy stays available, and releases them only when the game reports that copy is no
   longer published (for example after an unpublish from another machine). A published map over the
