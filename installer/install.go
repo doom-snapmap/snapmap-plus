@@ -100,6 +100,9 @@ func cmdInstall(f flags) error {
 	if checkDoomRunning() {
 		return fmt.Errorf("DOOM is running -- close it and run this again (Snapmap+'s files can't be replaced while the game has them open)")
 	}
+	if build.build == build2018 {
+		return installLegacyRelease(f, doom)
+	}
 	b, cleanup, err := acquireBundle(f)
 	if err != nil {
 		return err

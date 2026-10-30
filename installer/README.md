@@ -65,6 +65,14 @@ reported fallback to the newest beta while no stable release exists. `--beta`
 selects the newest beta; `--release` selects a specific tag. Updates also refresh
 the installer unless `--no-self` is supplied.
 
+The installer identifies the DOOM build from the executables' SHA-256 before it
+downloads anything. On the 2018 build (Steam build 2642713) install, update and
+reinstall download v0.2.1-beta.19's own `snapmap-plus.exe`, verify it, and run its
+`install` under the name `snapmap-plus-v0.2.1-beta.19.exe`, so that release's own
+steps happen; its copy of itself is then removed from `%LOCALAPPDATA%\snapmap-plus`
+and the current installer remains the stable copy (see
+[packaging](../docs/packaging.md#supported-build-and-the-final-2018-release)).
+
 Every downloaded release asset must match the size and `sha256:` digest GitHub
 publishes for it; a short, failed or altered download is refused and its temporary
 files are removed before anything is installed or replaced. The bundle's files are

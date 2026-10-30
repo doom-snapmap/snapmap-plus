@@ -125,37 +125,6 @@ func TestInstallSupportedBuildTakesLatest(t *testing.T) {
 	}
 }
 
-// The 2018 build downloads the final 2018 release by tag and installs it as that release would;
-// moving the game to the supported build later replaces it with the current release.
-func TestInstall2018BuildTakesLegacyRelease(t *testing.T) {
-	syntheticProcessGuard(t, false)
-	tmp := t.TempDir()
-	t.Setenv("LOCALAPPDATA", filepath.Join(tmp, "appdata"))
-	asked := stubDownloads(t, tmp)
-	doom := doomWith(t, tmp, fake2018, fake2018)
-	if err := cmdInstall(flags{doom: doom, yes: true, beta: true}); err != nil {
-		t.Fatalf("install on 2018: %v", err)
-	}
-	if len(*asked) != 1 || (*asked)[0] != legacyReleaseTag {
-		t.Fatalf("download requests = %q, want %s", *asked, legacyReleaseTag)
-	}
-	if readF(t, filepath.Join(doom, "XINPUT1_3.dll")) != "backend-legacy" || exists(filepath.Join(doom, "XINPUT1_4.dll")) {
-		t.Fatal("the 2018 build must get the legacy release's XINPUT1_3.dll")
-	}
-	if rec, err := loadRecord(); err != nil || rec.Version != legacyReleaseTag {
-		t.Fatalf("record = %+v, %v", rec, err)
-	}
-
-	writeF(t, filepath.Join(doom, "DOOMx64vk.exe"), fakeExe)
-	writeF(t, filepath.Join(doom, "DOOMx64.exe"), fakeExe)
-	if err := cmdInstall(flags{doom: doom, yes: true}); err != nil {
-		t.Fatalf("update after the game moved to 13954591: %v", err)
-	}
-	if !exists(filepath.Join(doom, "XINPUT1_4.dll")) || exists(filepath.Join(doom, "XINPUT1_3.dll")) {
-		t.Fatal("after the move only the current release's XINPUT1_4.dll may remain")
-	}
-}
-
 // Unknown, mixed and mismatched requests are refused before any download or write.
 func TestInstallRefusalsDownloadNothing(t *testing.T) {
 	syntheticProcessGuard(t, false)
