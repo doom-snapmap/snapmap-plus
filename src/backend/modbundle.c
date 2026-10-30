@@ -904,6 +904,8 @@ int sh_mb_extension_allowed(const char *request)
     size_t i;
     if (!dot) return 0;
     for (i = 0; allowed[i]; i++) if (mb_ieq_n(dot, strlen(dot), allowed[i])) return 1;
+    /* A cooked movie only where the engine asks for one (modswf.c serves it). */
+    if (mb_ieq_n(dot, strlen(dot), ".bswf")) return _strnicmp(request, "generated/swf/", 14) == 0;
     /* .baas_<class>, for example .baas_monster48 */
     if (strlen(dot) > 6 && mb_ieq_n(dot, 6, ".baas_")) {
         for (i = 6; dot[i]; i++)
@@ -959,6 +961,13 @@ int sh_mb_logical_name(const char *r, char *type, size_t tcap, char *name, size_
     }
     if (mb_starts(r, "generated/image/") && mb_ends(r, ".bimage") && n > 23) {
         return mb_copy_out(type, tcap, "image", 5) && mb_copy_out(name, ncap, r + 16, n - 16 - 7);
+    }
+    /* generated/swf/<stem>.bswf is the movie a consumer names swf/<stem>.swf. */
+    if (mb_starts(r, "generated/swf/") && mb_ends(r, ".bswf") && n > 19) {
+        size_t s = n - 10 - 5;   /* "swf/<stem>" */
+        if (!mb_copy_out(type, tcap, "swf", 3) || s + 5 > ncap) return 0;
+        memcpy(name, r + 10, s); memcpy(name + s, ".swf", 5);
+        return 1;
     }
     if (mb_ends(r, ".bmodel")) cls = "model";
     else if (mb_ends(r, ".bcm")) cls = "cm";

@@ -120,6 +120,19 @@ Checks native helpers, engine-interface contracts, frontend JavaScript and optio
   `override-backups` left alone, the boot split (a small folder before the
   index, a large one on the worker, then one rescan) and the rerun of an
   unfinished record. `MODMIGRATE_ECHO=1` prints the log lines.
+- `modswf_test.c` drives the cooked-movie Load replacement against synthetic
+  engine functions (a served `generated/swf/...bswf` takes the engine's below-2
+  open; anything else, a failed open or a failed allocation goes to the
+  original), checks that the builder admits `.bswf` only under `generated/swf/`
+  with the shadow and `mods/<id>/` rules, and, with the executables, that
+  `FileResourceLoad` decodes to the recorded engine calls, its open-into helper
+  calls `+0x148`, and one read-only qword (the idFileResource vtable `+0x40`)
+  holds it.
+- `modhud_test.c` checks the `hud` ammo-display grammar, conflicts across
+  bundles, the tree read of admitted installed and legacy bundles, and the
+  call-site relay on an owned synthetic caller under a concurrent thread; with
+  the executables, that the HUD call decodes to the predicate at an aligned
+  rel32 with the widget in RBX.
 - `modui_test.c` runs the Mods tab's backend against a temporary store, the
   real serving index and the map manifest: the document on an empty store,
   install through the tab, every state string, manifest rows and the placed

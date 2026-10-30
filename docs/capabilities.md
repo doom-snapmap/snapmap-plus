@@ -166,8 +166,18 @@ Converting assets from other games is Doomforge's job, not this product's. New n
 - Maps saved or published with packages by v0.2.1-beta.6 to beta.19 are handled on load (see
   Retired package payloads below): a complete package becomes a local legacy mod and the map gets a
   manifest row for it; anything else is removed. Files a mod cannot carry (for example the
-  `.materials.txt` sidecars beside models, or `.bswf` movies) are left out of it and counted in the
-  log, so the rest of the package still loads.
+  `.materials.txt` sidecars beside models, or `.bswf` movies outside `generated/swf/`) are left out
+  of it and counted in the log, so the rest of the package still loads.
+- A mod can carry cooked Flash movies (`.bswf`, with their `.bimage` atlases) under
+  `generated/swf/`: a replacement for a stock movie is listed in `shadows`, a new movie lives under
+  `generated/swf/mods/<id>/`. They load whenever the game asks for the movie, in the editor and in
+  Play; a replaced movie the game already holds changes at the next map load, and one held since
+  startup after a restart.
+- A mod's `hud` setting chooses how the ammo panel shows a weapon: `"ammo_display": "weapon"` for a
+  weapon decl lets the panel show the weapon's own capacity (the campaign pistol's infinity symbol
+  and full bar) instead of SnapMap's forced number. It changes only the display, applies to every
+  installed mod at startup, and two mods asking different things for one weapon turn the setting off
+  for all weapons, with both named in the log.
 - The first start of this release moves the packages in the retired
   `%LOCALAPPDATA%\snapmap-plus\overrides\` folder into `mods\`, once. Each folder there with a
   `package.json` or `mod.json` becomes an installed mod (`<id>@<version>+<build>`, its requirements,
@@ -175,7 +185,7 @@ Converting assets from other games is Doomforge's job, not this product's. New n
   delivered (`overrides\map-<16 hex>\<package>`) becomes a legacy mod that a later load of that map
   reuses. A folder without a descriptor that holds exactly one package folder becomes that
   package's mod; other folders without a descriptor, ZIP files and loose files are listed as skipped
-  with the reason, and `.bswf` movies, which mods do not carry, are counted when left out; two folders with the same id are both
+  with the reason, and `.bswf` movies outside `generated/swf/` are counted when left out; two folders with the same id are both
   kept, the second under its own version. A folder over 512 MiB or 8192 files is skipped, and one
   larger than a mod can be (4096 files, 256 MiB) is refused. Nothing in `overrides\` is changed or
   deleted, and you can keep or delete it afterwards; an empty `override-backups\` folder is removed.
