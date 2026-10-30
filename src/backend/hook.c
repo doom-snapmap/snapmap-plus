@@ -1,5 +1,6 @@
 /* Reversible 14-byte absolute detours. Callers choose instruction boundaries.
- * One explicit preparation variant relocates a verified RIP-relative LEA. */
+ * Explicit preparation variants relocate one verified RIP-relative LEA, one
+ * RIP-relative 64-bit load or one relative call. */
 #include <windows.h>
 #include <stdint.h>
 #include <string.h>
@@ -50,6 +51,16 @@ static void *prepare(void *target, void *detour, size_t stolen, size_t offset, i
         if ((lea[0] != 0x48 && lea[0] != 0x4c) || lea[1] != 0x8d ||
             (lea[2] & 0xc7) != 0x05) return NULL;
         emitted += 3;
+    } else if (relocation == 3) {
+        /* REX.W 8B /r with mod 00, rm 101: mov reg,[rip+disp32]. RSP, RBP,
+         * R12 and R13 would need a SIB byte or name RIP again in the rewrite. */
+        const uint8_t *load;
+        if (offset > stolen - 7) return NULL;
+        load = original + offset;
+        if ((load[0] != 0x48 && load[0] != 0x4c) || load[1] != 0x8b ||
+            (load[2] & 0xc7) != 0x05 || ((load[2] >> 3) & 7) == 4 ||
+            ((load[2] >> 3) & 7) == 5) return NULL;
+        emitted += 6;
     } else if (relocation == 2) {
         int32_t displacement;
         if (offset > stolen - 5 || original[offset] != 0xe8) return NULL;
@@ -89,6 +100,23 @@ static void *prepare(void *target, void *detour, size_t stolen, size_t offset, i
         tramp[offset + 1] = (uint8_t)(0xb8 | ((lea[2] >> 3) & 7));
         memcpy(tramp + offset + 2, &address, sizeof(address));
         memcpy(tramp + offset + 10, original + offset + 7, stolen - offset - 7);
+    } else if (relocation == 3) {
+        /* mov reg,imm64 (the absolute address), then mov reg,[reg]: the same
+         * register and value, no scratch register, no flags touched. */
+        const uint8_t *load = original + offset;
+        int32_t displacement;
+        uintptr_t address;
+        uint8_t reg = (uint8_t)((load[2] >> 3) & 7), high = (uint8_t)((load[0] & 4) ? 1 : 0);
+        memcpy(&displacement, load + 3, sizeof(displacement));
+        address = (uintptr_t)target + offset + 7 + (intptr_t)displacement;
+        memcpy(tramp, original, offset);
+        tramp[offset] = (uint8_t)(0x48 | high);
+        tramp[offset + 1] = (uint8_t)(0xb8 | reg);
+        memcpy(tramp + offset + 2, &address, sizeof(address));
+        tramp[offset + 10] = (uint8_t)(0x48 | (high ? 5 : 0));
+        tramp[offset + 11] = 0x8b;
+        tramp[offset + 12] = (uint8_t)((reg << 3) | reg);
+        memcpy(tramp + offset + 13, original + offset + 7, stolen - offset - 7);
     } else if (relocation == 2) {
         memcpy(tramp, original, offset);
         memcpy(tramp + offset, "\xff\x15\x02\x00\x00\x00\xeb\x08", 8);
@@ -119,6 +147,12 @@ void *hook_prepare_rip_lea(void *target, void *detour, size_t stolen, size_t lea
 {
     if (lea_offset == SIZE_MAX) return NULL;
     return prepare(target, detour, stolen, lea_offset, 1);
+}
+
+void *hook_prepare_rip_load(void *target, void *detour, size_t stolen, size_t load_offset)
+{
+    if (load_offset == SIZE_MAX) return NULL;
+    return prepare(target, detour, stolen, load_offset, 3);
 }
 
 void *hook_prepare_relative_call(void *target, void *detour, size_t stolen, size_t call_offset)

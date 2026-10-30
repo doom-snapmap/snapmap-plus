@@ -147,9 +147,14 @@ Converting assets from other games is Doomforge's job, not this product's. New n
 - A saved map records each mod a placed entity needs as one `smpmod1.` string variable, and the
   next load activates exactly those mods. The game and clients without the product read the rows as
   inert strings. A mod the map names but this machine does not have is logged as not installed and
-  nothing activates for it until it is fetched: a published map's missing mods are offered in a
-  dialog and only what the player approves is downloaded, verified by hash. Uploads happen only when
-  a map is published; plain saves never upload, and an exported rawmap ZIP carries its mods itself.
+  nothing activates for it until it is fetched. Uploads happen only when a map is published; plain
+  saves never upload, and an exported rawmap ZIP carries its mods itself.
+- Playing a published map (or a My Maps map) that names a mod this machine does not have asks first,
+  in the game's own Yes/No dialog, naming the mods and their size. Yes downloads only what you
+  approve in the dialog, verified by hash, installs it, and starts the map; No leaves the map
+  unloaded and says which mod it needs. Joining a lobby asks the same way and checks that the host
+  still runs that map before going on. Maps whose mods are installed, and maps without mods, start
+  exactly as before.
 - Maps saved or published with packages by v0.2.1-beta.6 to beta.19 are handled on load (see
   Retired package payloads below): a complete package becomes a local legacy mod and the map gets a
   manifest row for it; anything else is removed. Nothing is read from the retired
@@ -399,7 +404,7 @@ this file as player data and preserves it across update, uninstall, and reinstal
 
 ## Network use
 
-The clone makes exactly **one** kind of network request, and only on an explicit user action: clicking
+The clone makes network requests only on an explicit user action. Clicking
 **Send** in the feedback dialog — or in the crash-report dialog — POSTs the typed report (category /
 title / details / optional contact), the installed version string, and one token naming the renderer the
 game is running (`vulkan` / `opengl`, read from which renderer library the process loaded — nothing
@@ -407,8 +412,10 @@ else about the machine is gathered) over HTTPS to the project's feedback relay
 ([`feedback/`](../feedback/README.md)), which files it as a public issue on this repo's tracker. A
 crash report can additionally attach the tails of the local log files, but only when its
 "Attach recent logs" box is checked, and the text is anonymized first (account / profile / machine
-names scrubbed — see [`feedback.md`](feedback.md)); the local crash dump is never uploaded. Nothing is
-downloaded, nothing runs in the background, and nothing else is ever sent. (The installer
+names scrubbed — see [`feedback.md`](feedback.md)); the local crash dump is never uploaded. The one
+download is a map's missing mods, and only after you answer Yes to the question that names them (see
+[Mods](#mods)): it downloads only what you approve in the dialog, verified by hash. Nothing else runs
+in the background, and nothing else is ever sent. (The installer
 separately talks to GitHub Releases for `snapmap-plus update`, and to Microsoft's bootstrapper if the
 WebView2 runtime is missing — both documented in [`packaging.md`](packaging.md).)
 

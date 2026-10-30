@@ -82,6 +82,72 @@ static void rip_lea_preserves_addresses(void)
     VirtualFree(code, 0, MEM_RELEASE);
 }
 
+static uint64_t (*load_original)(void);
+static uint64_t load_detour(void) { return load_original() + 1; }
+
+/* A RIP-relative 64-bit load inside the window (the security-cookie read at
+ * the head of many engine functions) reads the same qword from the trampoline;
+ * destinations that cannot be rewritten without SIB or RIP forms are refused. */
+static void rip_load_preserves_values(void)
+{
+    const unsigned registers[] = {0, 1, 2, 8, 9, 10, 11};   /* volatile: the scratch code clobbers them */
+    const unsigned refused[] = {4, 5, 12, 13};
+    unsigned char original[18], *code;
+    size_t i;
+    int sign, before = hook_owned_count();
+    code = VirtualAlloc(NULL, 128, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    CHECK(code != NULL); if (!code) return;
+    for (i = 0; i < sizeof(registers) / sizeof(registers[0]) + sizeof(refused) / sizeof(refused[0]); ++i) {
+        int refuse = i >= sizeof(registers) / sizeof(registers[0]);
+        unsigned reg = refuse ? refused[i - sizeof(registers) / sizeof(registers[0])] : registers[i];
+        for (sign = -1; sign <= 1; sign += 2) {
+            unsigned char *slot = sign < 0 ? code + 64 : code + 96;
+            uint64_t value = 0x1122334455667700ull + reg * 2 + (sign > 0);
+            int32_t displacement = (int32_t)(slot - (code + 14));
+            if (sign < 0) {   /* a negative displacement: put the code after the slot */
+                slot = code; value ^= 0xff; displacement = (int32_t)(slot - (code + 16 + 14));
+            }
+            memset(code, 0xcc, 128);
+            memcpy(slot, &value, 8);
+            memset(original, 0x90, sizeof(original));
+            original[7] = (unsigned char)(reg >= 8 ? 0x4c : 0x48);
+            original[8] = 0x8b; original[9] = (unsigned char)(5 | ((reg & 7) << 3));
+            memcpy(original + 10, &displacement, 4);
+            original[14] = (unsigned char)(reg >= 8 ? 0x4c : 0x48); original[15] = 0x89;
+            original[16] = (unsigned char)(0xc0 | ((reg & 7) << 3)); original[17] = 0xc3;
+            {
+                unsigned char *fn = sign < 0 ? code + 16 : code;
+                memcpy(fn, original, sizeof(original));
+                FlushInstructionCache(GetCurrentProcess(), code, 128);
+                if (refuse) {
+                    CHECK(!hook_prepare_rip_load(fn, load_detour, 14, 7));
+                    continue;
+                }
+                CHECK(((uint64_t (*)(void))fn)() == value);
+                CHECK(!hook_prepare_rip_load(fn, load_detour, 14, SIZE_MAX));
+                CHECK(!hook_prepare_rip_load(fn, load_detour, 14, 8));
+                CHECK(!hook_prepare_rip_load(fn, load_detour, 14, 0));
+                load_original = (uint64_t (*)(void))hook_prepare_rip_load(fn, load_detour, 14, 7);
+                CHECK(load_original != NULL);
+                if (!load_original) continue;
+                CHECK(load_original() == value);
+                CHECK(!memcmp(fn, original, sizeof(original)));
+                CHECK(hook_commit((void *)load_original) == B2_PATCH_OK);
+                CHECK(((uint64_t (*)(void))fn)() == value + 1);
+                CHECK(hook_unpatch((void *)load_original)); load_original = NULL;
+                CHECK(!memcmp(fn, original, sizeof(original)));
+            }
+        }
+    }
+    /* An LEA is not a load. */
+    memset(original, 0x90, sizeof(original));
+    memcpy(original + 7, "\x48\x8d\x05\x00\x00\x00\x00\xc3", 8);
+    memcpy(code, original, sizeof(original));
+    CHECK(!hook_prepare_rip_load(code, load_detour, 14, 7));
+    CHECK(hook_owned_count() == before);
+    VirtualFree(code, 0, MEM_RELEASE);
+}
+
 static void relative_call_preserves_execution(void)
 {
     unsigned char *page = VirtualAlloc(NULL, 256, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
@@ -126,6 +192,7 @@ static void relative_call_preserves_execution(void)
 int main(void)
 {
     rip_lea_preserves_addresses();
+    rip_load_preserves_values();
     relative_call_preserves_execution();
     unsigned char *code = VirtualAlloc(NULL, 64, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
     scratch_fn target = (scratch_fn)code;

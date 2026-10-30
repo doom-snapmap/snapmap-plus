@@ -388,10 +388,12 @@ Mods are installed under `%LOCALAPPDATA%\snapmap-plus\mods\`. A mod is a folder
 holding a descriptor (`mod.json`, or `package.json`) and an `assets/` tree at the
 engine's own request paths. Mods reach other machines two ways: a published map's
 bundles are uploaded to the Community API's mod store when the map is published,
-and a player who opens that map downloads only what they approve in the dialog,
-verified by hash (`modnet.c`, `modsync.c`); an exported rawmap is a ZIP that
-carries the bundles itself (`modexport.c`), so sharing a rawmap stays offline.
-Plain saves never upload. Nothing is read from the retired `%LOCALAPPDATA%\snapmap-plus\overrides\` tree, and no
+and a player who opens that map is asked first and downloads only what they
+approve in the dialog, verified by hash (`modnet.c`, `modsync.c`, `modpublished.c`;
+see [Published maps and missing mods](#published-maps-and-missing-mods)); an
+exported rawmap is a ZIP that carries the bundles itself (`modexport.c`), so
+sharing a rawmap stays offline. Plain saves never upload. Nothing is read from
+the retired `%LOCALAPPDATA%\snapmap-plus\overrides\` tree, and no
 `package-cache` or `package-staging` folder is created.
 
 Seven backend files share the work:
@@ -429,6 +431,9 @@ Seven backend files share the work:
 - `modui.c` is the WebView Mods tab's backend: it reads the store, the serving
   index and the manifest record into one document and runs the `sh_mods` verbs
   for the tab on the main thread (see [WebView UI](webview-ui.md#mods-tab)).
+- `modpublished.c` holds a published or My Maps launch whose manifest names a
+  bundle that is not installed, asks the player, and fetches and resumes it or
+  drops it, as in [Published maps and missing mods](#published-maps-and-missing-mods).
 
 The provider open (`ov_open_body` in `overrides.c`) serves, in order: the
 placement grid, map navigation, the generated Grid Room variants, the built-in
@@ -475,6 +480,62 @@ still read one. Registration, activation and the palette rebuild run on DOOM's
 main thread only. With an empty `mods\` folder the table is empty and every hook
 above passes through: the differences from a build without mods are the
 `sh_mods` command and its `MODS:` log lines.
+
+### Published maps and missing mods
+
+A published map is native by default: the product touches its launch only when
+its text carries `smpmod1.` rows naming a bundle that is not installed and
+admitted. Everything else, vanilla maps and maps whose mods are all installed,
+reaches the engine unchanged.
+
+Identification. The `DeserializeFromJson` detour classifies each parse by the
+engine caller's return address: `PublishedMapRead`+0x12A is the offline read of
+the cached `map.decl`, `SnapMapReadSizeLimit`+0x5D the profile reader under
+`PublishedMapComplete`; anything else (editor, My Maps, a rawmap, the product's
+own resume) is another parse. After the manifest step and the native parse,
+`sh_modpublished_parse_seen` records beside the kept rows the kind of read, the
+map object it filled and, when a named bundle is missing, a copy of the text.
+`sh_modpublished_last_parse` exposes the record.
+
+Hold points. The completion that follows a read receives the same map object,
+so each gate uses exactly that parse's record:
+
+| Gate | Vulkan / OpenGL RVA | Steal | Resume |
+|---|---|---|---|
+| `OnSnapPlay` read completion | 0xFA4A80 / 0xFA3FB0 | 18, the cookie load at +11 rewritten | `(manager, NULL, metadata, map)` |
+| Browser published play | 0xFD1E30 / 0xFD1320 | 20 | `(browser, NULL, metadata, map)` |
+| `PublishedMapCacheReady` (joiner) | 0xFA1D60 / 0xFA1290 | 15, stack-probe call at +7 | `(manager, NULL, metadata, map)` after the lobby host's item is re-checked |
+| `CacheMapForLobby`, warm cache (joiner) | 0xF9A170 / 0xF99620 | 20 | the function's own cold branch: wait text, CacheReady and error callbacks, `PublishedMapRead` |
+| `LaunchLocalSnapMapForOfflinePlay` (My Maps) | 0xF9FCF0 / 0xF9F220 | 22 | `(manager, model, map)` when the model is unchanged |
+
+None of these completions reads its request argument. The SnapMap feed
+completion (VK 0x112B440) is not gated: its resume needs the issuer's action int
+at request+8. The warm-cache branch never parses, so it uses the manifest this
+session saw for that item and revision at an earlier gated completion; an item
+never seen is not gated.
+
+The hold. When bundles are missing the gate retains a deep copy of the published
+metadata (the copy constructor `PublishedMapSelectionConstruct` uses, inside
+process heap 0) and the text, does what the completion itself would have done to
+the screen first (`OnSnapPlay` clears its wait dialog, GDM 0x63, and hides the
+progress widget; browser play clears its pending state; the joiner hides the
+progress widget), and returns without the original. On a later main-thread tick
+(`sh_modpublished_poll`, after every native frame, menus included) it raises the
+engine's Yes/No (GDM 0x29, button set 6) once the dialog surface is idle:
+"This map needs N mod(s): <names> (<size>). Download and install now?".
+
+Yes starts one job on the modsync worker that fetches every missing bundle by
+hash and logs a progress line every two seconds. When the job is done, on a main
+tick, the index is rescanned, every fetched bundle must be admitted, the screen
+the hold came from must still be current (and, for a joiner, the lobby must
+still host that item and revision), the manifest's bundles are activated, a
+fresh `idSnapMap` is constructed, the retained text is parsed through the normal
+detour (which strips the rows and activates), and the original completion runs
+with it. No, a failed fetch, a bundle that will not install or a lobby that
+changed drops the hold: nothing is launched, the progress widget is hidden, and
+a one-button notice names the mod. Another map load, or a newer held launch,
+abandons the hold silently and cancels its fetch. The engine thread never waits:
+the network runs on the worker and the dialog is polled.
 
 ## Failure reporting
 

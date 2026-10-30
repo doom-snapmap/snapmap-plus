@@ -1272,5 +1272,50 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "48 8B C4 56 57 41 54 41 56 41 57 48 81 EC 70 07 00 00 48 C7 44 24 50 FE FF FF FF "
       "48 89 58 18 48 89 68 20 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 84 24 60 07 00 00 "
       "4C 8B F2 4C 8B F9 33 DB 89 59 08 48 8B 41 10 48 89 41 28", 0x11AA710u, 0x11A9820u },
+    /* Published-map and offline-play gates (modpublished.c; snaphak-re
+     * mod-system-reinstatement lane N1a section 5). Unique on both build
+     * 13954591 executables; steal windows audited by detour_windows_test. */
+    { "PublishedOnSnapPlayDone",   /* idMenuManager_Shell::OnSnapPlay read completion (manager, request,
+                                    * metadata, map): ClearDialog(0x63), progress hide, PushHistorySetCache,
+                                    * PublishedMapLobbyLaunch(manager, 0). Steal 18: 11 bytes of pushes and
+                                    * sub, then the cookie load MOV RAX,[RIP+d32] relocated. */
+      "40 53 56 57 48 81 EC E0 00 00 00 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 84 24 D0 00 00 00",
+      0xFA4A80u, 0xFA3FB0u },
+    { "PublishedBrowserPlayDone",  /* browser published-play read completion (browser, request, metadata,
+                                    * map); manager at browser+0x10; lobby launch or offline fallback. Steal 20. */
+      "48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18 57 48 83 EC 20 48 8B D9 49 8B F1 48 8B 49 10 49 8B E8 E8 ?? ?? ?? ??",
+      0xFD1E30u, 0xFD1320u },
+    { "PublishedMapCacheReady",    /* joiner readiness after the host map's read (manager, request, metadata,
+                                    * map); never reads request. Steal 15 with the stack-probe call at +7. */
+      "40 57 B8 80 17 00 00 E8 ?? ?? ?? ?? 48 2B E0 48 C7 44 24 20 FE FF FF FF 48 89 9C 24 98 17 00 00 "
+      "48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 84 24 70 17 00 00 49 8B F9 49 8B D8 48 8B 89 38 0A 00 00 "
+      "48 85 C9 74 ?? 48 8B 01 33 D2 FF 50 30 48 8B 0D ?? ?? ?? ?? 48 8B 01", 0xFA1D60u, 0xFA1290u },
+    { "CacheMapForLobby",          /* char(manager, id idStr*, revision idStr*): 1 when the in-memory cache
+                                    * holds the map (no read), else the read toward CacheReady and 0. N1a's
+                                    * 28-byte head also matches VK fab300 / GL faa830, so this runs through
+                                    * the cache query. Steal 20. */
+      "40 55 56 57 48 81 EC 80 00 00 00 48 C7 44 24 38 FE FF FF FF 48 89 9C 24 B8 00 00 00 "
+      "48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 44 24 70 49 8B E8 48 8B F2 48 8B F9 E8 ?? ?? ?? ?? "
+      "48 8B 10 48 8B C8 FF 52 38 4C 8B 08 4C 8B C5 48 8B D6 48 8B C8 41 FF 91 B0 01 00 00 "
+      "84 C0 74 07 B0 01 E9 ?? ?? ?? ?? 48 8D 15 ?? ?? ?? ??", 0xF9A170u, 0xF99620u },
+    { "LaunchLocalSnapMapForOfflinePlay", /* (manager, localSavedModel*, idSnapMap*): My Maps play, offline
+                                    * only; its caller (VK fd2080) parses into a stack map. Steal 22. */
+      "40 55 53 56 57 41 56 48 8D AC 24 50 FF FF FF 48 81 EC B0 01 00 00 48 C7 44 24 28 FE FF FF FF",
+      0xF9FCF0u, 0xF9F220u },
+    { "PublishedMapRead",          /* (ctx, id, revision, ok, fail): offline parses inline at +0x125, so a
+                                    * DeserializeFromJson returning to +0x12A is the offline published read.
+                                    * Not hooked. */
+      "40 55 53 56 57 41 54 41 55 41 56 41 57 48 8D AC 24 F8 F2 FF FF 48 81 EC 08 0E 00 00 48 C7 45 B0 FE FF FF FF "
+      "48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 85 F8 0C 00 00 49 8B D9 4D 8B F0 48 8B F2 4C 8B E1 4C 8B BD 70 0D 00 00 "
+      "48 8B 0D ?? ?? ?? ?? 48 8B 01 33 D2 FF 50 48", 0x11C4AA0u, 0x11C3E70u },
+    { "PublishedMapSelectionConstruct", /* allocates 0x590 at +0x45 and copy-constructs the metadata at +0x69;
+                                    * the gates call that copy constructor. Not hooked. */
+      "48 89 4C 24 08 57 48 83 EC 30 48 C7 44 24 20 FE FF FF FF 48 89 5C 24 48 48 89 74 24 50 49 8B F0 48 8B D9 "
+      "48 C7 01 00 00 00 00 89 51 08 C7 41 0C 01 00 00 00 48 8D 05 ?? ?? ?? ?? 48 89 41 10 FF 05 ?? ?? ?? ?? "
+      "B9 90 05 00 00 E8 ?? ?? ?? ?? 48 8B F8 48 89 44 24 58", 0xFD5FA0u, 0xFD5490u },
+    { "PublishedMapMetadataDestroy", /* idPublishedMapModel destructor, paired with the copy above. Not hooked. */
+      "40 57 48 83 EC 30 48 C7 44 24 20 FE FF FF FF 48 89 5C 24 40 48 89 74 24 48 48 8B F9 0F B6 81 83 05 00 00 "
+      "33 F6 84 C0 74 ?? 2C 03 3C 01 77 ?? 48 8B 89 70 05 00 00 48 85 C9 74 ?? 8B 97 7C 05 00 00 E8 ?? ?? ?? ?? "
+      "90 48 89 B7 70 05 00 00 89 B7 7C 05 00 00 89 B7 78 05 00 00", 0xF969A0u, 0xF95ED0u },
     { NULL, NULL, 0 }   /* terminator */
 };

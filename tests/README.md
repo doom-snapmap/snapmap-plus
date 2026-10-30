@@ -26,8 +26,9 @@ Checks native helpers, engine-interface contracts, frontend JavaScript and optio
 - `nav_heap_hook_test.c` checks queue hook publication, rollback and bounded
   insertion through the installed detour with an authored native-code fixture.
 - `hook_test.c` executes hook publication and restoration, including explicit
-  RIP-relative LEA and relative-call relocation with positive and negative
-  displacements, preserved call arguments and return flow.
+  RIP-relative LEA, RIP-relative 64-bit load and relative-call relocation with
+  positive and negative displacements, preserved call arguments and return flow,
+  and the refused load destinations.
 - `rawmap_paths_test.c` checks save destinations, live exports and read-only
   snapshots that leave no save side effects.
 - `config_json_test.c` separates strict UTF-8 documents from native byte strings,
@@ -52,6 +53,13 @@ Checks native helpers, engine-interface contracts, frontend JavaScript and optio
   round trip, rows appended last and stripped with `allocCount` restored, the
   per-row budget that keeps them out of the 4 KiB playtest message, placed names,
   the save closure and the load step against serving-layer doubles.
+- `modpublished_test.c` checks the published-map and offline-play gates with
+  the real manifest and engine doubles: return-address classification, vanilla
+  and installed maps passing through, the hold and the question on a later
+  tick, Yes fetching on a worker thread then activating and resuming with the
+  retained text, No, a failed fetch, a bundle that will not install, another
+  load or a newer launch abandoning the hold mid-fetch, the joiner's host
+  re-check, the warm-cache joiner branch and My Maps play.
 - `modlegacy_test.c` checks the legacy carrier policy: header grammar per era,
   completeness and digest, stored and deflate ZIP members, the older layout
   mapping, conversion, cleaning and verdict lines with a builder double, and

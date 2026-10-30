@@ -103,8 +103,8 @@ preserves this file.
 
 Mods live in `%LOCALAPPDATA%\snapmap-plus\mods\` and are added with the
 `sh_mods` console command; a saved map names the mods it uses, and the next load
-activates them. Nothing is downloaded in this release, so a map's mods are
-active only where they are installed. A map saved or published with packages by an
+activates them. A map that names a mod you do not have asks first; it downloads
+only what you approve in the dialog, verified by hash. A map saved or published with packages by an
 earlier release has a complete package converted into a local mod on load; any
 other package is removed. Nothing is loaded from
 `%LOCALAPPDATA%\snapmap-plus\overrides\`, and folders that earlier releases
