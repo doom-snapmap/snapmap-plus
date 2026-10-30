@@ -255,6 +255,24 @@ typedef void (*sh_mb_need_fn)(void *context, const char *type,
 void sh_mb_scan_needs(const char *decl_type, const unsigned char *text, size_t len,
                       sh_mb_need_fn callback, void *context);
 
+/* Render programs. MD5 of data, and MD5fold: the four little-endian 32-bit
+ * words of the digest XORed together, the engine's decl and stage checksum. */
+void     sh_mb_md5(const void *data, size_t len, unsigned char digest[16]);
+unsigned sh_mb_md5fold(const void *data, size_t len);
+/* The three stage texts (vertex, fragment, compute) of a cooked program
+ * (generated/renderprogs/<name>_pc_vulkan.bin): offsets and lengths into bin.
+ * Returns 1, 0 when none are found, -1 when the layout is ambiguous. */
+int  sh_mb_rp_stages(const unsigned char *bin, size_t len, size_t off[3], size_t n[3]);
+/* The SPIR-V request the stage loader builds for a program name (a program
+ * decl name, or a permutation decl's request path) and extension (".vspv",
+ * ".fspv", ".cspv"): "generated/spirv/" + the name with its extension
+ * replaced, a basename of 38 or more characters cut into 30-character
+ * components. Returns 1, or 0 when it does not fit. */
+int  sh_mb_spirv_request(const char *name, const char *ext, char *out, size_t cap);
+/* generated/renderprogs/permutations/<program>_<16 lowercase hex>.decl:
+ * returns 1 with the program name and the mask, else 0. */
+int  sh_mb_rp_permutation(const char *request, char *program, size_t program_cap, char mask[17]);
+
 /* SHA-256 as 64 lowercase hex characters. */
 void sh_mb_sha256_hex(const void *data, size_t len, char out[SH_MB_HASH_HEX + 1]);
 /* Hash a file (UTF-8 path). Returns 1 and sets *size. */

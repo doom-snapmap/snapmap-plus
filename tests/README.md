@@ -89,7 +89,10 @@ Checks native helpers, engine-interface contracts, frontend JavaScript and optio
   tests that link the map manifest or the legacy converter without them.
 - `modbundle_test.c` builds `fixtures\mods\alex.r2-imp` and pins its bundle
   hash against `alex.r2-imp.canonical.json`; it also checks logical names, the
-  needs scan, build numbering and each refusal rule. The fixture files are
+  needs scan, build numbering and each refusal rule, and the render-program
+  checks on small synthetic cooked programs and SPIR-V files (MD5fold, stage
+  texts, SPIR-V names, checksum, header, closure, quoting and refused files).
+  The fixture files are
   hashed byte for byte, so their line endings are never converted.
 - `modstore_test.c` installs the fixture into a temporary store: blobs, hard
   links and the copy fallback, verification and corruption, in-place builds,

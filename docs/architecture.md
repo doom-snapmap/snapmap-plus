@@ -524,6 +524,30 @@ shadow, a new one lives under `generated/swf/mods/<id>/` with its atlas
 `generated/swf/mods/<id>/<stem>.bimage` beside it. Each served movie logs
 `MODS: swf: served <request> (<bundle>) at load state N` (the first 32).
 
+### Render programs
+
+A mod can ship a new render program `mods/<id>/<name>` (no `.` in the last
+component) and a material that names it in quotes; the engine opens every file
+of it through the provider and needs no restart. The builder checks what the
+engine checks (`mb_check_renderprogs`): each `_pc_vulkan.bin` (and an OpenGL
+`_pc.bin`, if shipped) starts with 0xB68800AD and carries MD5fold of its decl
+text, trailing spaces and line ends removed (otherwise the engine silently
+compiles the text); each SPIR-V header is `{4, hashA, hashB, length}` with
+hashA equal to MD5fold of the matching stage text in the `.bin`, which the
+engine enforces at a map load with "out of date"; and every stage and
+permutation is present: the decl, the `.bin` and `generated/spirv/<name>.vspv`
+and `.fspv` for the program, and the same for each
+`generated/renderprogs/permutations/<name>_<mask>.decl` under
+`generated/spirv/generated/renderprogs/permutations/` (Vulkan binds the base
+files on GPUs without AMD's three shader extensions and the permutation on GPUs
+with them; a missing stage file is fatal at bind). A permutation decl is named
+by its request path, the string the engine looks it up by; it is served, not
+registered. A bare program name in a material, shared includes under
+`decls/renderprogs/`, `vulkan_pipelines.bin`, `generated/glslBinaries/` and
+`generated/glsl/` are refused. MD5fold is MD5 with its four words XORed
+together. OpenGL compiles the decl text by default (`r_useGeneratedRenderprogs`
+0) and may write the permutation decl into the player's `base\generated\`.
+
 ### Mod virtual-texture families
 
 A material binds to a virtual-texture family only when a page-source record
