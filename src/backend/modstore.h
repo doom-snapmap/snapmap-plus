@@ -28,8 +28,8 @@
  * and on request, never at boot.
  *
  * File work only, on the calling thread; no engine calls. Every writer of the
- * store serialises on modstore_lock: the install, verification and sync
- * below take them themselves, and longer steps (one migration folder, a
+ * store serialises on modstore_lock: the install, verification, sync and
+ * upgrade below take it themselves, and longer steps (one migration folder, a
  * download install, `sh_mods install` and `sh_mods migrate`, an export) hold
  * it around their whole step. A second writer waits for the first, it never
  * fails because of it; the wait is one step long.
@@ -143,6 +143,31 @@ void sh_ms_build_cause(const char *folder, char *out, size_t cap);
 /* Record `folder` (absolute) as built from its current tree: cache[tree] =
  * bundle hash. Returns 1 on success. */
 int  sh_ms_cache_note(const char *folder, const char *bundle_hash);
+
+typedef struct sh_ms_upgrade_stats {
+    int ran;                    /* the retired layout was found */
+    unsigned folders;           /* built folders converted to mod.json */
+    unsigned renamed;           /* of them, moved to <id> or <id>@<version> */
+    unsigned delivered;         /* legacy\ folders moved into mods\ */
+    unsigned dropped;           /* legacy\ folders dropped: an installed mod serves the same content */
+    unsigned failed;            /* folders left as they were (logged) */
+    unsigned unlinked;          /* hard-linked files replaced by real copies */
+    unsigned restored;          /* files restored from blobs\ */
+    int blobs_removed;          /* blobs\ was deleted */
+    unsigned long long blob_bytes;
+    unsigned records;           /* product files folded into snapmap-plus.json */
+    unsigned long long ms;
+} sh_ms_upgrade_stats;
+
+/* Convert the retired layout (<id>@<version>+<build>\ with bundle.json,
+ * bundle.canonical.json and .state.json, hard links into blobs\, legacy\,
+ * claims.json, publish-links.json, pending-uploads.json, .migrated.json) to
+ * Contract 5, logging one "MODS: store:" line per folder and a summary.
+ * Idempotent and safe to interrupt: each folder's mod.json is written (and
+ * read back with the same bundle hash) before the old files go, and a record
+ * file is folded before it is deleted. Returns 1 when it ran, 0 when there
+ * was nothing to do, -1 when the store could not be read. */
+int  sh_ms_upgrade(sh_ms_upgrade_stats *stats);
 
 enum { SH_MS_MISS = 0, SH_MS_HIT = 1, SH_MS_DEDUPE = 2, SH_MS_CONFLICT = 3 };
 

@@ -2,7 +2,9 @@
  * real copies, enumeration, verification recorded in mod.json, detected
  * corruption, folder names for a second version, the rebuild rule (tree hash
  * and build cache), resolve_need hit, miss, dedupe and conflict, the store
- * lock (a second installer waits, two installers at once both succeed).
+ * lock (a second installer waits, two installers at once both succeed), and
+ * the upgrade of the retired layout (bundle.json, .state.json, blobs\ with
+ * hard links, legacy\, the product files) to mod.json folders.
  *
  *   modstore_test.exe <tests\fixtures\mods\alex.r2-imp>
  */
@@ -121,6 +123,190 @@ static void make_small_mod(const char *dir, const char *id)
     mt_write(dir, rel, text);
 }
 
+/* ------------------------------------------------------------ the retired layout */
+
+/* Lay out `src` the way the retired store did: blobs\<sha256> (read-only),
+ * <folder>\bundle.json, bundle.canonical.json, .state.json and assets\
+ * hard-linked to the blobs (with_links) or copied. `descriptor` keeps the
+ * folder's own mod.json (a folder built in place). Returns the bundle hash. */
+static void old_layout(const char *root, const char *src, const char *folder, const char *extra_desc, int with_links,
+                       int descriptor, int validated, char hash_out[65])
+{
+    sh_mb_bundle b;
+    char dir[MAX_PATH * 2], path[MAX_PATH * 2], blob[MAX_PATH * 2], state[200];
+    size_t i, n = 0;
+    char *pretty;
+    if (extra_desc) mt_write(src, "mod.json", extra_desc);
+    CHECK(sh_mb_build(src, &RESOLVER, &b));
+    if (b.errors) fprintf(stderr, "  old layout build: %s\n", b.first_cause);
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\%s", root, folder);
+    CreateDirectoryA(root, NULL);
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\blobs", root);
+    CreateDirectoryA(path, NULL);
+    mt_mkdirs_for(dir);
+    CreateDirectoryA(dir, NULL);
+    for (i = 0; i < b.file_count; i++) {
+        if (b.files[i].stock) continue;
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", src, b.files[i].path);
+        _snprintf_s(blob, sizeof blob, _TRUNCATE, "%s\\blobs\\%s", root, b.files[i].blob);
+        for (char *q = path; *q; q++) if (*q == '/') *q = '\\';
+        if (GetFileAttributesA(blob) == INVALID_FILE_ATTRIBUTES) {
+            CopyFileA(path, blob, FALSE);
+            SetFileAttributesA(blob, FILE_ATTRIBUTE_READONLY);
+        }
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", dir, b.files[i].path);
+        for (char *q = path; *q; q++) if (*q == '/') *q = '\\';
+        mt_mkdirs_for(path);
+        if (!(with_links && CreateHardLinkA(path, blob, NULL))) CopyFileA(blob, path, TRUE);
+    }
+    pretty = sh_mb_bundle_json(&b, &n);
+    mt_write(dir, "bundle.json", pretty ? pretty : "");
+    free(pretty);
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\bundle.canonical.json", dir);
+    {
+        FILE *f = NULL;
+        if (fopen_s(&f, path, "wb") == 0 && f) { fwrite(b.canonical, 1, b.canonical_len, f); fclose(f); }
+    }
+    _snprintf_s(state, sizeof state, _TRUNCATE, "{\"firstCause\":\"%s\",\"installedAt\":1793344545,\"validated\":%s}\n",
+                validated ? "" : "edited", validated ? "true" : "false");
+    mt_write(dir, ".state.json", state);
+    if (descriptor) {
+        char *desc = slurp(src, "mod.json", NULL);
+        mt_write(dir, "mod.json", desc ? desc : "{}");
+        free(desc);
+    }
+    strcpy_s(hash_out, 65, b.hash);
+    sh_mb_free(&b);
+}
+
+static void test_upgrade(const char *fixture, const char *tmp)
+{
+    char root[MAX_PATH], src[MAX_PATH], src2[MAX_PATH], h_main[65], h_v2[65], h_legacy_same[65], h_legacy_alias[65],
+         h_legacy_other[65], h_hand[65], h_mig[65], path[MAX_PATH * 2];
+    sh_ms_upgrade_stats us;
+    sh_ms_list list;
+    const sh_ms_entry *e;
+    char *text;
+    static const char base[] = "{\"id\":\"alex.r2-imp\",\"version\":\"1.0.0\",\"name\":\"R2 Imp copy\",\"author\":\"alex\","
+                               "\"strings\":{\"english\":{\"#str_mod_alex_r2_imp\":\"Imp copy\"}}";
+    char desc[1024];
+    _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\upgrade\\mods", tmp);
+    _snprintf_s(src, sizeof src, _TRUNCATE, "%s\\upgrade-src\\one", tmp);
+    _snprintf_s(src2, sizeof src2, _TRUNCATE, "%s\\upgrade-src\\two", tmp);
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\upgrade", tmp);
+    CreateDirectoryA(path, NULL);
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\upgrade-src", tmp);
+    CreateDirectoryA(path, NULL);
+    CHECK(mt_copy_tree(fixture, src));
+    CHECK(sh_ms_set_root(root));
+
+    /* A laid-out build with hard links, a second version of the same id, a
+     * delivered copy of the same content (legacy\, same hash: dropped), a
+     * delivered copy with only its legacy record different (alias), a
+     * delivered package of another id, a folder built in place by hand with
+     * its own descriptor, and a migrated overrides pack. */
+    _snprintf_s(desc, sizeof desc, _TRUNCATE, "%s}", base);
+    old_layout(root, src, "alex.r2-imp@1.0.0+1", desc, 1, 0, 1, h_main);
+    _snprintf_s(desc, sizeof desc, _TRUNCATE, "%s}", base);
+    desc[strstr(desc, "1.0.0") - desc + 4] = '1';   /* 1.0.1 */
+    old_layout(root, src, "alex.r2-imp@1.0.1+1", desc, 0, 0, 1, h_v2);
+    _snprintf_s(desc, sizeof desc, _TRUNCATE, "%s}", base);
+    old_layout(root, src, "legacy\\alex.r2-imp@0123456789abcdef", desc, 1, 1, 1, h_legacy_same);
+    _snprintf_s(desc, sizeof desc, _TRUNCATE, "%s,\"legacy\":{\"digest16\":\"fedcba9876543210\",\"key\":\"delivery.%064d\","
+                "\"keyForm\":\"delivery\"}}", base, 7);
+    old_layout(root, src, "legacy\\alex.r2-imp@fedcba9876543210", desc, 0, 1, 1, h_legacy_alias);
+    mt_write(src2, "mod.json", "{\"id\":\"bob.thing\",\"version\":\"legacy-1111111111111111\",\"name\":\"Bob\","
+                               "\"legacy\":{\"digest16\":\"1111111111111111\",\"key\":\"delivery.x\",\"keyForm\":\"delivery\"},"
+                               "\"shadows\":[\"generated/decls/entitydef/monster/imp.decl\"]}");
+    mt_write(src2, "assets\\generated\\decls\\entitydef\\monster\\imp.decl", "{\r\n}");
+    old_layout(root, src2, "legacy\\bob.thing@1111111111111111", NULL, 0, 1, 1, h_legacy_other);
+    _snprintf_s(desc, sizeof desc, _TRUNCATE, "{\"id\":\"alex.hand\",\"name\":\"Hand made\"}");
+    {
+        char hand_src[MAX_PATH];
+        _snprintf_s(hand_src, sizeof hand_src, _TRUNCATE, "%s\\upgrade-src\\hand", tmp);
+        mt_write(hand_src, "assets\\generated\\decls\\entitydef\\mods\\alex.hand\\x.decl", "{\r\n}");
+        old_layout(root, hand_src, "my hand folder", "{\r\n  \"id\": \"alex.hand\",\r\n  \"name\": \"Hand made\"\r\n}\r\n",
+                   0, 1, 0, h_hand);
+        mt_write(hand_src, "mod.json", "{\"id\":\"local.mig\",\"version\":\"0.0.0\",\"name\":\"Migrated\","
+                                       "\"legacy\":{\"source\":\"overrides\",\"folder\":\"mig\",\"tree\":\"abc\"}}");
+        mt_remove_tree(hand_src);
+        mt_write(hand_src, "assets\\generated\\decls\\entitydef\\mods\\local.mig\\x.decl", "{\r\n}");
+        old_layout(root, hand_src, "local.mig@0.0.0+1",
+                   "{\"id\":\"local.mig\",\"version\":\"0.0.0\",\"name\":\"Migrated\","
+                   "\"legacy\":{\"source\":\"overrides\",\"folder\":\"mig\",\"tree\":\"abc\"}}", 1, 0, 1, h_mig);
+    }
+    mt_write(root, "claims.json", "{\"format\":1,\"claims\":{\"map-1\":{\"claim\":\"c1\",\"secret\":\"s1\",\"bundles\":[]}}}");
+    mt_write(root, "publish-links.json", "{\"format\":1,\"links\":{\"item-1\":{\"cloud\":\"c\",\"local\":\"l\",\"at\":1}}}");
+    mt_write(root, "pending-uploads.json", "{\"format\":1,\"pending\":{}}");
+    mt_write(root, ".migrated.json", "{\n  \"format\": 1,\n  \"complete\": true,\n  \"migratedAt\": 1,\n  \"folders\": [\n"
+                                     "    {\"folder\": \"mig\", \"kind\": \"package\", \"outcome\": \"built\", \"store\": \"local.mig@0.0.0+1\"}],\n"
+                                     "  \"trees\": {\"abc\": \"local.mig@0.0.0+1\", \"def\": \"legacy/alex.r2-imp@fedcba9876543210\"}\n}\n");
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\alex.r2-imp@1.0.0+1\\assets\\generated\\decls\\md6def\\mods\\alex.r2-imp\\imp_copy.md6.decl", root);
+    CHECK(links_of(path) >= 2);
+
+    g_logged = 0;
+    CHECK(sh_ms_upgrade(&us) == 1);
+    CHECK(us.ran && us.folders == 4 && us.failed == 0);
+    CHECK(us.dropped == 2 && us.delivered == 1);
+    CHECK(us.unlinked >= 13 && us.blobs_removed && us.records == 4);
+    if (us.folders != 4 || us.dropped != 2 || us.delivered != 1 || us.failed)
+        fprintf(stderr, "  upgrade: %u folders, %u dropped, %u delivered, %u failed, %u renamed\n", us.folders, us.dropped,
+                us.delivered, us.failed, us.renamed);
+    CHECK(log_has("MODS: store: alex.r2-imp@1.0.0+1: mod.json written for alex.r2-imp@1.0.0+1"));
+    CHECK(log_has("MODS: store: alex.r2-imp@1.0.0+1 -> alex.r2-imp@1.0.0"));   /* two versions of one id */
+    CHECK(log_has("MODS: store: legacy\\bob.thing@1111111111111111 -> bob.thing"));
+    CHECK(log_has("MODS: store: upgraded to the mod.json layout"));
+    CHECK(!mt_has(root, "blobs") && !mt_has(root, "legacy") && !mt_has(root, "claims.json") &&
+          !mt_has(root, "publish-links.json") && !mt_has(root, "pending-uploads.json") && !mt_has(root, ".migrated.json"));
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\alex.r2-imp@1.0.0\\assets\\generated\\decls\\md6def\\mods\\alex.r2-imp\\imp_copy.md6.decl", root);
+    CHECK(links_of(path) == 1);
+    CHECK(!(GetFileAttributesA(path) & FILE_ATTRIBUTE_READONLY));
+    CHECK(sh_ms_enumerate(&list) && list.count == 5);
+    e = find_entry(&list, "alex.r2-imp@1.0.0");
+    CHECK(e && sh_ms_entry_usable(e) && !strcmp(e->bundle.hash, h_main) && !strcmp(e->bundle.origin, "install"));
+    CHECK(e && e->installed_at == 1793344545);
+    e = find_entry(&list, "alex.r2-imp@1.0.1");
+    CHECK(e && sh_ms_entry_usable(e) && !strcmp(e->bundle.hash, h_v2));
+    e = find_entry(&list, "bob.thing");
+    CHECK(e && sh_ms_entry_usable(e) && !strcmp(e->bundle.hash, h_legacy_other) && e->delivered && !strcmp(e->bundle.origin, "delivery"));
+    e = find_entry(&list, "my hand folder");
+    CHECK(e && e->loaded && !e->validated && !strcmp(e->bundle.hash, h_hand) && !e->bundle.origin[0]);   /* its state kept */
+    e = find_entry(&list, "local.mig");
+    CHECK(e && sh_ms_entry_usable(e) && !strcmp(e->bundle.hash, h_mig) && !strcmp(e->bundle.origin, "migration"));
+    sh_ms_list_free(&list);
+    /* The hand-made folder's author block is its own bytes. */
+    text = slurp(root, "my hand folder\\mod.json", NULL);
+    CHECK(text && !strncmp(text, "{\r\n  \"id\": \"alex.hand\",\r\n  \"name\": \"Hand made\",\r\n\r\n  \"snapmap-plus\": {", 60));
+    free(text);
+    /* A converted package's legacy record and shadows are in its product block. */
+    text = slurp(root, "bob.thing\\mod.json", NULL);
+    CHECK(text && strstr(text, "\"legacy\"") && !strstr(strstr(text, "\"legacy\"") + 1, "\"legacy\""));   /* once: the author's */
+    free(text);
+    /* The record: claims, links, pending, migration (names updated), cache, aliases. */
+    {
+        char *section = NULL;
+        CHECK(sh_mb_record_get(root, "claims", &section) == 1 && section && strstr(section, "\"map-1\""));
+        free(section);
+        CHECK(sh_mb_record_get(root, "links", &section) == 1 && section && strstr(section, "\"item-1\""));
+        free(section);
+        CHECK(sh_mb_record_get(root, "migration", &section) == 1 && section && strstr(section, "\"abc\":\"local.mig\"") &&
+              strstr(section, "\"def\":\"alex.r2-imp@1.0.0\"") && strstr(section, "\"store\":\"local.mig\""));
+        free(section);
+        CHECK(sh_mb_record_get(root, "aliases", &section) == 1 && section && strstr(section, h_legacy_alias) &&
+              strstr(section, h_main));
+        free(section);
+        CHECK(sh_mb_record_get(root, "cache", &section) == 1 && section && strstr(section, h_main) && strstr(section, h_hand));
+        free(section);
+    }
+    /* Idempotent: a second pass finds nothing to do. */
+    CHECK(sh_ms_upgrade(&us) == 0);
+    /* Interrupted after mod.json was written: the leftovers go on the next pass. */
+    mt_write(root, "local.mig\\bundle.canonical.json", "{}");
+    CHECK(sh_ms_upgrade(&us) == 1 && us.failed == 0 && !mt_has(root, "local.mig\\bundle.canonical.json"));
+    CHECK(sh_ms_enumerate(&list) && list.count == 5);
+    sh_ms_list_free(&list);
+}
+
 int main(int argc, char **argv)
 {
     char tmp[MAX_PATH], root[MAX_PATH], src[MAX_PATH], path[MAX_PATH * 2], key[160], cause[512] = "", fixture[MAX_PATH];
@@ -150,9 +336,10 @@ int main(int argc, char **argv)
         CHECK(sh_ms_set_root(root));
     }
 
-    /* An empty or absent store lists nothing. */
+    /* An empty or absent store lists nothing and needs no upgrade. */
     CHECK(sh_ms_enumerate(&list) && list.count == 0);
     sh_ms_list_free(&list);
+    CHECK(sh_ms_upgrade(NULL) == 0);
 
     /* Install from outside the store: mods\<id>, real copies, the source untouched. */
     cause[0] = 0;
@@ -356,9 +543,12 @@ int main(int argc, char **argv)
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\alex.r2-imp\\assets", root);
     CHECK(!sh_ms_install_from_folder(path, &RESOLVER, key, sizeof key, &st, NULL, cause, sizeof cause));
 
+    test_upgrade(fixture, tmp);
+
     sh_ms_set_root(NULL);
     mt_remove_tree(tmp);
     if (failures) { fprintf(stderr, "modstore_test: %d failure(s)\n", failures); return 1; }
-    printf("modstore_test: install, copies, verify, corruption, second version, rebuild rule, resolve_need and lock pass\n");
+    printf("modstore_test: install, copies, verify, corruption, second version, rebuild rule, resolve_need, lock and "
+           "store upgrade pass\n");
     return 0;
 }

@@ -31,6 +31,7 @@
 #include "modsound.h"
 #include "modhud.h"
 #include "modmigrate.h"
+#include "modstore.h"
 #include "modstock.h"
 #include "modpublished.h"
 #include "modpublish.h"
@@ -337,6 +338,7 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
         /* Stock pointers read the installed game through the bridge (modstock.h);
          * registering it loads nothing until a pointer is built, verified or served. */
         sh_modstock_register();
+        (void)sh_ms_upgrade(NULL);    /* the retired store layout, once (modstore.h): mod.json folders */
         (void)sh_modmigrate_boot();   /* the retired overrides folder, once (modmigrate.h) */
         (void)sh_modserve_index_boot();
 

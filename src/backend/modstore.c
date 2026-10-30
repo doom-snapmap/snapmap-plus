@@ -1,5 +1,5 @@
 /* modstore.c -- see modstore.h. The mods\ folders, install, verification,
- * and the rebuild rule. */
+ * the rebuild rule and the upgrade from the retired layout. */
 #include <windows.h>
 #include <shlobj.h>
 #include <stdio.h>
@@ -1082,5 +1082,501 @@ int sh_ms_sync(const sh_mb_resolver *resolver, sh_ms_sync_stats *st)
     sh_json_object_free(&next);
     free(root);
     st->ms = GetTickCount64() - t0;
+    return 1;
+}
+
+/* ---------------------------------------------------------- upgrade ---- */
+/* The retired layout (Contract 2): <id>@<version>+<build>\ folders with
+ * bundle.json, bundle.canonical.json and .state.json, their assets\ hard-linked
+ * to blobs\<sha256> where the volume allowed it, legacy\<id>@<digest16>\ for
+ * delivered packages, and claims.json, publish-links.json,
+ * pending-uploads.json and .migrated.json beside them. */
+
+typedef struct ms_up_item {
+    wchar_t *dir;               /* where it is now */
+    char from[SH_MS_NAME_MAX + 16];   /* its name before the upgrade ("legacy\..." for a delivered one) */
+    char name[SH_MS_NAME_MAX + 1];    /* its name after */
+    int legacy;                 /* under legacy\ */
+    int product;                /* named <id>@<version>+<build> by the product: renamed */
+    int dropped;                /* a delivered copy an installed mod already serves */
+    size_t kept;                /* when dropped: the item that serves it */
+    sh_mb_bundle b;
+    char content[SH_MB_HASH_HEX + 1];
+} ms_up_item;
+
+typedef struct ms_up_ctx {
+    wchar_t *root, *blobs;
+    char rootu[MAX_PATH * 4];
+    ms_up_item *items;
+    size_t count, cap;
+    sh_ms_upgrade_stats *st;
+} ms_up_ctx;
+
+/* Something of the retired layout is present. */
+static int ms_up_needed(const wchar_t *root)
+{
+    static const wchar_t *const files[] = { L"blobs", L"legacy", L"claims.json", L"publish-links.json",
+                                            L"pending-uploads.json", L".migrated.json", NULL };
+    WIN32_FIND_DATAW fd;
+    wchar_t *pattern;
+    HANDLE h;
+    int i, found = 0;
+    for (i = 0; files[i] && !found; i++) found = ms_has_file(root, files[i]);
+    if (found) return 1;
+    pattern = ms_wjoin(root, L"*");
+    h = pattern ? FindFirstFileExW(pattern, FindExInfoBasic, &fd, FindExSearchNameMatch, NULL, 0) : INVALID_HANDLE_VALUE;
+    free(pattern);
+    if (h == INVALID_HANDLE_VALUE) return 0;
+    do {
+        wchar_t *child;
+        if (!ms_candidate(&fd)) continue;
+        child = ms_wjoin(root, fd.cFileName);
+        found = child && (ms_has_file(child, L"bundle.json") || ms_has_file(child, L".state.json") ||
+                          ms_has_file(child, L"bundle.canonical.json"));
+        free(child);
+    } while (!found && FindNextFileW(h, &fd));
+    FindClose(h);
+    return found;
+}
+
+/* Put every carried file of `b` in place as a real file: restored from
+ * blobs\ when missing or of the wrong size, copied over a hard link. */
+static int ms_up_files(ms_up_ctx *c, const wchar_t *dir, const sh_mb_bundle *b, unsigned *unlinked, unsigned *restored,
+                       char *cause, size_t cap)
+{
+    size_t i;
+    for (i = 0; i < b->file_count; i++) {
+        const sh_mb_file *f = &b->files[i];
+        wchar_t *p, *blob;
+        unsigned long long size = 0;
+        int ok = 1;
+        if (f->stock) continue;
+        p = ms_wjoin_utf8(dir, f->path);
+        if (!p) return ms_cause(cause, cap, "out of memory");
+        if (!ms_file_size(p, &size) || size != f->size) {
+            unsigned long long bsize = 0;
+            blob = c->blobs ? ms_wjoin_utf8(c->blobs, f->blob) : NULL;
+            ok = blob && ms_file_size(blob, &bsize) && bsize == f->size && sh_ms_copy_file(blob, p);
+            free(blob);
+            if (!ok) { free(p); return ms_cause(cause, cap, "%s is missing and blobs\\ has no copy of it", f->path); }
+            (*restored)++;
+        } else if (ms_link_count(p) > 1) {
+            /* Editing a linked file would edit every copy: the folder gets its own. */
+            size_t n = wcslen(p) + 16;
+            wchar_t *tmp = (wchar_t *)malloc(sizeof(wchar_t) * n);
+            ok = 0;
+            if (tmp) {
+                _snwprintf_s(tmp, n, _TRUNCATE, L"%s.unlink", p);
+                ms_delete_file(tmp);
+                if (CopyFileW(p, tmp, FALSE)) {
+                    SetFileAttributesW(tmp, FILE_ATTRIBUTE_NORMAL);
+                    ok = ms_delete_file(p) && MoveFileExW(tmp, p, 0);
+                    if (!ok) ms_delete_file(tmp);
+                }
+                free(tmp);
+            }
+            if (!ok) { free(p); return ms_cause(cause, cap, "%s is a hard link that could not be replaced by a copy (error %lu)", f->path, GetLastError()); }
+            (*unlinked)++;
+        } else {
+            DWORD a = GetFileAttributesW(p);
+            if (a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_READONLY)) SetFileAttributesW(p, a & ~FILE_ATTRIBUTE_READONLY);
+        }
+        free(p);
+    }
+    return 1;
+}
+
+/* Convert one folder of the retired layout in place: mod.json written and read
+ * back with the bundle's hash, then the old files removed. A folder already
+ * converted is loaded. Returns 1 converted or loaded, 0 not a built folder,
+ * -1 left as it was (logged). */
+static int ms_up_convert(ms_up_ctx *c, ms_up_item *it)
+{
+    wchar_t *bj = ms_wjoin(it->dir, L"bundle.json");
+    char *dir = sh_mb_utf8(it->dir), *text = NULL, cause[SH_MB_CAUSE_MAX];
+    size_t len = 0;
+    unsigned unlinked = 0, restored = 0;
+    int r = -1, author = 0;
+    sh_mb_bundle chk;
+    memset(&chk, 0, sizeof chk);
+    cause[0] = 0;
+    if (!bj || !dir) goto out;
+    if (!ms_exists(bj)) {
+        /* Converted already (an interrupted pass: the leftovers go now), or
+         * not a built folder. */
+        r = sh_mb_load_folder(dir, &it->b) ? 1 : 0;
+        if (!r) { sh_mb_free(&it->b); memset(&it->b, 0, sizeof it->b); }
+        else {
+            wchar_t *p = ms_wjoin(it->dir, L"bundle.canonical.json");
+            if (p && ms_exists(p)) ms_delete_file(p);
+            free(p);
+            p = ms_wjoin(it->dir, L".state.json");
+            if (p && ms_exists(p)) ms_delete_file(p);
+            free(p);
+        }
+        goto out;
+    }
+    text = ms_read_text(bj, SH_MB_MANIFEST_MAX + 65536, &len);
+    if (!text || !sh_mb_load_manifest_text(text, len, &it->b)) {
+        _snprintf_s(cause, sizeof cause, _TRUNCATE, "bundle.json does not read: %s", it->b.first_cause);
+        goto out;
+    }
+    {
+        /* .state.json carries the verification result and the install time. */
+        wchar_t *sp = ms_wjoin(it->dir, L".state.json");
+        size_t sl = 0;
+        char *s = ms_read_text(sp, 65536, &sl), sc[SH_MB_CAUSE_MAX] = "";
+        int validated = 1;
+        long long at = 0;
+        if (s && sh_mb_state_parse(s, sl, &validated, &at, sc, sizeof sc)) {
+            it->b.validated = validated;
+            it->b.built = at;
+            if (!validated) strncpy_s(it->b.state_cause, sizeof it->b.state_cause, sc, _TRUNCATE);
+        }
+        free(s);
+        free(sp);
+    }
+    if (!ms_up_files(c, it->dir, &it->b, &unlinked, &restored, cause, sizeof cause)) goto out;
+    {
+        /* A folder the product laid out (named by its key) or a delivered
+         * package is the product's; a folder built in place is the author's. */
+        char key[SH_MS_KEY_MAX + 1];
+        _snprintf_s(key, sizeof key, _TRUNCATE, "%s@%s+%llu", it->b.id, it->b.version, it->b.build);
+        if (it->legacy || it->b.delivered) strcpy_s(it->b.origin, sizeof it->b.origin, SH_MB_ORIGIN_DELIVERY);
+        else if (!_stricmp(key, it->name))
+            strcpy_s(it->b.origin, sizeof it->b.origin, it->b.legacy ? SH_MB_ORIGIN_MIGRATION : SH_MB_ORIGIN_INSTALL);
+    }
+    author = ms_has_file(it->dir, L"mod.json") || ms_has_file(it->dir, L"package.json");
+    if (!sh_mb_write(&it->b, dir, cause, sizeof cause)) goto out;
+    if (!sh_mb_load_folder(dir, &chk) || strcmp(chk.hash, it->b.hash) != 0) {
+        /* A hand-made folder whose author block was edited after its last
+         * build no longer hashes to it; its block still records that build,
+         * and the next rescan builds it again. Anything else stops here. */
+        if (!(author && strstr(chk.first_cause, "changed since it was built"))) {
+            _snprintf_s(cause, sizeof cause, _TRUNCATE, "the written mod.json does not read back as bundle %.16s: %s",
+                        it->b.hash, chk.first_cause[0] ? chk.first_cause : chk.hash);
+            goto out;
+        }
+    }
+    {
+        static const wchar_t *const gone[] = { L"bundle.json", L"bundle.canonical.json", L".state.json", NULL };
+        int i;
+        for (i = 0; gone[i]; i++) {
+            wchar_t *p = ms_wjoin(it->dir, gone[i]);
+            if (p && ms_exists(p)) ms_delete_file(p);
+            free(p);
+        }
+    }
+    c->st->unlinked += unlinked;
+    c->st->restored += restored;
+    {
+        char extra[160] = "";
+        if (unlinked || restored)
+            _snprintf_s(extra, sizeof extra, _TRUNCATE, "; %u hard link(s) replaced by copies, %u file(s) restored from blobs\\",
+                        unlinked, restored);
+        ms_log("MODS: store: %s: mod.json written for %s@%s+%llu (bundle %.16s, %zu file(s), %u stock pointer(s)); "
+               "bundle.json, bundle.canonical.json and .state.json removed%s",
+               it->from, it->b.id, it->b.version, it->b.build, it->b.hash, it->b.file_count, it->b.stock_count, extra);
+    }
+    r = 1;
+out:
+    if (r < 0) {
+        c->st->failed++;
+        ms_log("MODS: store: %s: left as it was: %s", it->from, cause[0] ? cause : "it cannot be read");
+    }
+    sh_mb_free(&chk);
+    free(text);
+    free(dir);
+    free(bj);
+    return r;
+}
+
+static ms_up_item *ms_up_add(ms_up_ctx *c)
+{
+    if (c->count == c->cap) {
+        size_t cap = c->cap ? c->cap * 2 : 32;
+        ms_up_item *grown = (ms_up_item *)realloc(c->items, sizeof *grown * cap);
+        if (!grown) return NULL;
+        c->items = grown;
+        c->cap = cap;
+    }
+    memset(&c->items[c->count], 0, sizeof c->items[0]);
+    return &c->items[c->count++];
+}
+
+static void ms_up_scan(ms_up_ctx *c, const wchar_t *dir, int legacy)
+{
+    WIN32_FIND_DATAW fd;
+    wchar_t *pattern = ms_wjoin(dir, L"*");
+    HANDLE h = pattern ? FindFirstFileExW(pattern, FindExInfoBasic, &fd, FindExSearchNameMatch, NULL, 0) : INVALID_HANDLE_VALUE;
+    free(pattern);
+    if (h == INVALID_HANDLE_VALUE) return;
+    do {
+        ms_up_item *it;
+        char *leaf;
+        int r;
+        if (!ms_candidate(&fd)) continue;
+        it = ms_up_add(c);
+        if (!it) break;
+        it->dir = ms_wjoin(dir, fd.cFileName);
+        it->legacy = legacy;
+        leaf = sh_mb_utf8(fd.cFileName);
+        if (leaf) {
+            _snprintf_s(it->from, sizeof it->from, _TRUNCATE, "%s%s", legacy ? "legacy\\" : "", leaf);
+            strncpy_s(it->name, sizeof it->name, leaf, _TRUNCATE);
+            free(leaf);
+        }
+        r = it->dir ? ms_up_convert(c, it) : -1;
+        if (r != 1) {
+            /* Not a built folder, or left as it was: not renamed, not counted. */
+            sh_mb_free(&it->b);
+            free(it->dir);
+            c->count--;
+            continue;
+        }
+        {
+            char key[SH_MS_KEY_MAX + 1];
+            _snprintf_s(key, sizeof key, _TRUNCATE, "%s@%s+%llu", it->b.id, it->b.version, it->b.build);
+            it->product = legacy || !_stricmp(key, it->name);
+        }
+        sh_mb_content_key(&it->b, it->content);
+        if (!legacy) c->st->folders++;
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+}
+
+/* A name for an upgraded product folder: "<id>" when it is the only folder
+ * of its id, else "<id>@<version>", then with "+<build>", then with the
+ * hash; never one in use or taken by an earlier item. */
+static void ms_up_pick(ms_up_ctx *c, size_t k)
+{
+    ms_up_item *it = &c->items[k];
+    size_t i, same_id = 0;
+    int round;
+    for (i = 0; i < c->count; i++) if (!c->items[i].dropped && !strcmp(c->items[i].b.id, it->b.id)) same_id++;
+    for (round = same_id > 1 ? 1 : 0; round < 5; round++) {
+        char leaf[SH_MS_NAME_MAX + 1];
+        wchar_t *p;
+        int taken = 0;
+        if (round == 0) strncpy_s(leaf, sizeof leaf, it->b.id, _TRUNCATE);
+        else if (round == 1) _snprintf_s(leaf, sizeof leaf, _TRUNCATE, "%s@%s", it->b.id, it->b.version);
+        else if (round == 2) _snprintf_s(leaf, sizeof leaf, _TRUNCATE, "%s@%s+%llu", it->b.id, it->b.version, it->b.build);
+        else _snprintf_s(leaf, sizeof leaf, _TRUNCATE, "%s@%s-%.*s", it->b.id, it->b.version, round == 3 ? 8 : 16, it->b.hash);
+        if (!it->legacy && !_stricmp(leaf, it->name)) return;   /* already there */
+        /* Folders are renamed one at a time, so the disk says what is taken. */
+        p = ms_wjoin_utf8(c->root, leaf);
+        taken = !p || ms_exists(p);
+        free(p);
+        if (!taken) { strncpy_s(it->name, sizeof it->name, leaf, _TRUNCATE); return; }
+    }
+}
+
+/* Replace every quoted occurrence of `from` with `to` (record folder names). */
+static char *ms_up_rename_text(char *text, const char *from, const char *to)
+{
+    char qf[SH_MS_NAME_MAX + 24], qt[SH_MS_NAME_MAX + 24];
+    size_t lf, lt;
+    char *hit;
+    _snprintf_s(qf, sizeof qf, _TRUNCATE, "\"%s\"", from);
+    _snprintf_s(qt, sizeof qt, _TRUNCATE, "\"%s\"", to);
+    lf = strlen(qf);
+    lt = strlen(qt);
+    while (text && (hit = strstr(text, qf)) != NULL) {
+        size_t at = (size_t)(hit - text), n = strlen(text);
+        char *next = (char *)malloc(n - lf + lt + 1);
+        if (!next) break;
+        memcpy(next, text, at);
+        memcpy(next + at, qt, lt);
+        memcpy(next + at + lt, hit + lf, n - at - lf + 1);
+        free(text);
+        text = next;
+    }
+    return text;
+}
+
+/* Fold one retired product file into the record and delete it. `member`
+ * names the object inside it that becomes the section (NULL: the whole). */
+static int ms_up_fold(ms_up_ctx *c, const wchar_t *leaf, const char *member, const char *section, int renames)
+{
+    wchar_t *p = ms_wjoin(c->root, leaf);
+    size_t len = 0, i;
+    char *text = p ? ms_read_text(p, 64u << 20, &len) : NULL, *value = NULL;
+    sh_json_object o;
+    int ok = 0;
+    memset(&o, 0, sizeof o);
+    if (!text) { free(p); return 0; }
+    if (sh_json_parse_object(text, len, 32, &o)) {
+        const char *v = member ? sh_json_object_get(&o, member) : NULL;
+        value = member ? (v && v[0] == '{' ? _strdup(v) : NULL) : _strdup(text);
+    }
+    if (value && renames) {
+        for (i = 0; i < c->count; i++) {
+            char from[SH_MS_NAME_MAX + 24];
+            const ms_up_item *it = &c->items[i];
+            const char *to = it->name;
+            size_t k;
+            if (it->dropped) to = c->items[it->kept].name;
+            strcpy_s(from, sizeof from, it->from);
+            for (k = 0; from[k]; k++) if (from[k] == '\\') from[k] = '/';
+            if (strcmp(from, to)) value = ms_up_rename_text(value, from, to);
+        }
+    }
+    if (value && sh_mb_record_put(c->rootu, section, value)) {
+        ok = 1;
+        ms_delete_file(p);
+        c->st->records++;
+        ms_log("MODS: store: %ls folded into snapmap-plus.json (%s) and removed", leaf, section);
+    } else {
+        ms_log("MODS: store: %ls could not be folded into snapmap-plus.json; it is left in place", leaf);
+    }
+    sh_json_object_free(&o);
+    free(value);
+    free(text);
+    free(p);
+    return ok;
+}
+
+static unsigned long long ms_tree_bytes(const wchar_t *dir)
+{
+    WIN32_FIND_DATAW fd;
+    wchar_t *pattern = ms_wjoin(dir, L"*");
+    HANDLE h = pattern ? FindFirstFileExW(pattern, FindExInfoBasic, &fd, FindExSearchNameMatch, NULL, 0) : INVALID_HANDLE_VALUE;
+    unsigned long long n = 0;
+    free(pattern);
+    if (h == INVALID_HANDLE_VALUE) return 0;
+    do {
+        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) n += ((unsigned long long)fd.nFileSizeHigh << 32) | fd.nFileSizeLow;
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+    return n;
+}
+
+int sh_ms_upgrade(sh_ms_upgrade_stats *stats)
+{
+    sh_ms_upgrade_stats local;
+    ms_up_ctx c;
+    wchar_t *legacy;
+    ULONGLONG t0 = GetTickCount64();
+    size_t i, k;
+    sh_json_object aliases;
+    if (!stats) stats = &local;
+    memset(stats, 0, sizeof *stats);
+    memset(&c, 0, sizeof c);
+    memset(&aliases, 0, sizeof aliases);
+    c.st = stats;
+    c.root = ms_wroot();
+    if (!c.root || !sh_ms_root(c.rootu, sizeof c.rootu)) { free(c.root); return -1; }
+    if (!ms_exists(c.root) || !ms_up_needed(c.root)) { free(c.root); return 0; }
+    modstore_lock();
+    stats->ran = 1;
+    c.blobs = ms_wjoin(c.root, L"blobs");
+    if (c.blobs && !ms_is_dir(c.blobs)) { free(c.blobs); c.blobs = NULL; }
+    ms_log("MODS: store: upgrading %s to the mod.json layout (Contract 5)", c.rootu);
+
+    /* 1. Every built folder, then every delivered package, converted in place. */
+    ms_up_scan(&c, c.root, 0);
+    legacy = ms_wjoin(c.root, L"legacy");
+    if (legacy && ms_is_dir(legacy)) ms_up_scan(&c, legacy, 1);
+
+    /* 2. A delivered copy that an installed mod already serves is dropped: the
+     * same bundle hash, or the same content (an alias keeps the maps that name
+     * the copy's hash resolving to the kept one). */
+    {
+        char *text = NULL;
+        if (sh_mb_record_get(c.rootu, "aliases", &text) == 1) sh_json_parse_object(text, strlen(text), 4, &aliases);
+        free(text);
+    }
+    for (i = 0; i < c.count; i++) {
+        ms_up_item *it = &c.items[i];
+        if (!it->legacy) continue;
+        for (k = 0; k < c.count && !it->dropped; k++) {
+            const ms_up_item *o = &c.items[k];
+            if (k == i || o->dropped || (o->legacy && k > i)) continue;
+            if (!strcmp(o->b.hash, it->b.hash) || (!strcmp(o->b.id, it->b.id) && !strcmp(o->content, it->content))) {
+                char value[SH_MB_HASH_HEX + 3], *dir = sh_mb_utf8(it->dir);
+                it->dropped = 1;
+                it->kept = k;
+                if (strcmp(o->b.hash, it->b.hash)) {
+                    _snprintf_s(value, sizeof value, _TRUNCATE, "\"%s\"", o->b.hash);
+                    sh_json_object_set(&aliases, it->b.hash, value, 4);
+                }
+                ms_log("MODS: store: %s: dropped, %s serves the same content%s%.16s%s%.16s%s", it->from, o->from,
+                       strcmp(o->b.hash, it->b.hash) ? " (alias " : " (same bundle ", it->b.hash,
+                       strcmp(o->b.hash, it->b.hash) ? " -> " : "", strcmp(o->b.hash, it->b.hash) ? o->b.hash : "", ")");
+                if (dir) { sh_ms_remove_folder(dir); free(dir); }
+                stats->dropped++;
+            }
+        }
+    }
+    /* 3. Names: product folders become <id> (or <id>@<version>); delivered
+     * packages move out of legacy\ the same way. */
+    for (i = 0; i < c.count; i++) {
+        ms_up_item *it = &c.items[i];
+        wchar_t *to;
+        char before[SH_MS_NAME_MAX + 16];
+        if (it->dropped || !it->product) continue;
+        strcpy_s(before, sizeof before, it->name);
+        ms_up_pick(&c, i);
+        if (!it->legacy && !_stricmp(before, it->name)) continue;
+        to = ms_wjoin_utf8(c.root, it->name);
+        if (to && MoveFileExW(it->dir, to, 0)) {
+            free(it->dir);
+            it->dir = to;
+            if (it->legacy) stats->delivered++;
+            else stats->renamed++;
+            ms_log("MODS: store: %s -> %s", it->from, it->name);
+        } else {
+            DWORD err = GetLastError();
+            free(to);
+            strcpy_s(it->name, sizeof it->name, before);
+            ms_log("MODS: store: %s could not be renamed to its new folder (error %lu); it keeps its name", it->from, err);
+            if (it->legacy) stats->failed++;
+        }
+    }
+    if (legacy && ms_is_dir(legacy) && RemoveDirectoryW(legacy)) ms_log("MODS: store: legacy\\ removed (empty)");
+
+    /* 4. blobs\ goes when every folder holds its own files. */
+    if (c.blobs) {
+        if (!stats->failed) {
+            stats->blob_bytes = ms_tree_bytes(c.blobs);
+            stats->blobs_removed = ms_rmtree(c.blobs, c.root);
+            ms_log("MODS: store: blobs\\ %s (%llu MiB)", stats->blobs_removed ? "removed" : "could not be removed completely",
+                   stats->blob_bytes >> 20);
+        } else {
+            ms_log("MODS: store: blobs\\ kept: %u folder(s) of the retired layout still need it", stats->failed);
+        }
+    }
+
+    /* 5. The product's files become sections of the one record. */
+    if (ms_has_file(c.root, L"claims.json")) ms_up_fold(&c, L"claims.json", "claims", "claims", 0);
+    if (ms_has_file(c.root, L"publish-links.json")) ms_up_fold(&c, L"publish-links.json", "links", "links", 0);
+    if (ms_has_file(c.root, L"pending-uploads.json")) ms_up_fold(&c, L"pending-uploads.json", "pending", "pending", 0);
+    if (ms_has_file(c.root, L".migrated.json")) ms_up_fold(&c, L".migrated.json", NULL, "migration", 1);
+    if (aliases.count) {
+        char *out = sh_json_serialize_object(&aliases, 0, NULL);
+        if (out) { sh_mb_record_put(c.rootu, "aliases", out); free(out); }
+    }
+
+    /* 6. The build cache: every converted folder is current. */
+    for (i = 0; i < c.count; i++) {
+        char *dir;
+        if (c.items[i].dropped || !c.items[i].dir) continue;
+        dir = sh_mb_utf8(c.items[i].dir);
+        if (dir) { sh_ms_cache_note(dir, c.items[i].b.hash); free(dir); }
+    }
+    stats->ms = GetTickCount64() - t0;
+    ms_log("MODS: store: upgraded to the mod.json layout in %llu ms: %u folder(s) converted (%u renamed), %u delivered "
+           "package(s) moved out of legacy\\, %u dropped as copies of an installed mod, %u hard link(s) replaced by copies, "
+           "%u file(s) restored from blobs\\, blobs\\ %s, %u record file(s) folded into snapmap-plus.json, %u folder(s) "
+           "left as they were",
+           stats->ms, stats->folders, stats->renamed, stats->delivered, stats->dropped, stats->unlinked, stats->restored,
+           stats->blobs_removed ? "removed" : (c.blobs ? "kept" : "absent"), stats->records, stats->failed);
+    modstore_unlock();
+    for (i = 0; i < c.count; i++) { sh_mb_free(&c.items[i].b); free(c.items[i].dir); }
+    free(c.items);
+    free(legacy);
+    free(c.blobs);
+    free(c.root);
+    sh_json_object_free(&aliases);
     return 1;
 }
