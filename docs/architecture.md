@@ -556,7 +556,11 @@ the first editor entry or map load once Wwise is up (the hardware object is
 when `sh_mods install` rebuilds the index. The engine prints its own result,
 `async load success id <id> : <name>` with the id as a signed number. The
 LoadBanks slot (`AudioLoadBanks`, hardware vtable `+0x30`) resubmits every
-bank after `s_loadBanks` and `s_restart`. A mod installed mid-session plays at
+bank after `s_loadBanks` and `s_restart`, and runs them in process heap 0:
+Wwise allocates through the engine allocator's current heap, so a rerun from
+the console with a map open put the reloaded stream packages in the map heap,
+the map unload freed them, and the next streamed sound read a freed package
+(a crash at the Play load). A mod installed mid-session plays at
 its next map; a bank whose bytes change keeps the loaded copy (Wwise keeps the
 first bytes for a bank id) until the game restarts, and a removed bank stays
 loaded until then. `sh_mods status` lists each bank and whether it was

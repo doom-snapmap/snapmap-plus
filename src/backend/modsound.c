@@ -179,12 +179,27 @@ static volatile LONG g_gen = 1;       /* LoadBanks generation: bumped after each
 static volatile LONG g_opened, g_open_failed, g_submits, g_pending;
 static int g_live;
 
+/* Process heap 0 around every engine call that allocates Wwise memory.
+ * Wwise's allocation hook (VK 0x1419f5b10, GL 0x141a11bc0) is the engine
+ * allocator with heap -1, which takes the top of the main thread's heap
+ * stack: a LoadBanks run from the console while a map is open (s_loadBanks,
+ * s_restart) put the new stream packages' pools in the map heap, the map
+ * unload freed them, and the next streamed open walked a freed package
+ * (VK 0x141ad832c). */
 #ifdef SH_MODSOUND_PURE
+typedef struct ms_scope { int active; } ms_scope;
+static int (*g_test_enter)(void);
+static void (*g_test_leave)(void);
+static int ms_heap_enter(ms_scope *s) { s->active = g_test_enter ? g_test_enter() : 1; return s->active; }
+static int ms_heap_leave(ms_scope *s) { if (s->active && g_test_leave) g_test_leave(); s->active = 0; return 1; }
 #define ms_log(...) ((void)0)
 static int ms_on_main(void) { return 1; }
 #else
 static const uint8_t *g_main_thread_at;
 static sh_process_heap_api g_heap;
+typedef sh_process_heap_scope ms_scope;
+static int ms_heap_enter(ms_scope *s) { return sh_process_heap_enter(&g_heap, s); }
+static int ms_heap_leave(ms_scope *s) { return sh_process_heap_leave(s); }
 static int ms_on_main(void)
 {
     uint32_t id = 0;
@@ -258,9 +273,9 @@ static int32_t __fastcall ms_open_name(void *self, const wchar_t *name, int32_t 
 static int ms_submit_one(void *hw, sh_modsound_bank *b, LONG gen, const char *phase)
 {
     int r = 0, ok = 0;
-#ifndef SH_MODSOUND_PURE
-    sh_process_heap_scope heap = { 0 };
-    if (!sh_process_heap_enter(&g_heap, &heap)) {
+    ms_scope heap;
+    memset(&heap, 0, sizeof heap);
+    if (!ms_heap_enter(&heap)) {
         ms_log("%s: %s not submitted (the process heap scope could not be entered)", phase, b->leaf);
         return 0;
     }
@@ -268,12 +283,8 @@ static int ms_submit_one(void *hw, sh_modsound_bank *b, LONG gen, const char *ph
         __try { r = g_submit(hw, b->leaf); ok = 1; }
         __except (EXCEPTION_EXECUTE_HANDLER) { ok = 0; }
     } __finally {
-        if (!sh_process_heap_leave(&heap)) ms_log("%s: the process heap scope did not balance", phase);
+        if (!ms_heap_leave(&heap)) ms_log("%s: the process heap scope did not balance", phase);
     }
-#else
-    r = g_submit(hw, b->leaf);
-    ok = 1;
-#endif
     if (!ok) { ms_log("%s: submit of %s FAULTED; not retried", phase, b->leaf); InterlockedExchange(&b->submitted_gen, gen); return 0; }
     InterlockedExchange(&b->submitted_gen, gen);
     InterlockedIncrement(&g_submits);
@@ -308,7 +319,22 @@ static int ms_pass(const char *phase)
 
 static void __fastcall ms_loadbanks(void *hardware)
 {
-    g_loadbanks_orig(hardware);
+    ms_scope heap;
+    int scoped = 0;
+    memset(&heap, 0, sizeof heap);
+    /* On the main thread (s_loadBanks, s_reloadAudioEvents, s_restart, which
+     * may run with a map heap on top), LoadBanks runs in process heap 0 so
+     * the stream packages it loads outlive the map. */
+    if (ms_on_main() == 1) {
+        scoped = ms_heap_enter(&heap);
+        if (!scoped) ms_log("LoadBanks: the process heap scope could not be entered; packages it loads now may not "
+                            "outlive the open map");
+    }
+    __try {
+        g_loadbanks_orig(hardware);
+    } __finally {
+        if (scoped && !ms_heap_leave(&heap)) ms_log("LoadBanks: the process heap scope did not balance");
+    }
     /* A new Wwise lifetime (s_restart) or a rerun (s_loadBanks): submit
      * again; an already-loaded bank answers "async load failure 69". */
     InterlockedIncrement(&g_gen);
@@ -372,6 +398,7 @@ int32_t sh_modsound_test_open(void *self, const wchar_t *name, int32_t mode, con
 { return ms_open_name(self, name, mode, flags, sync, desc); }
 void sh_modsound_test_loadbanks(void *hardware) { ms_loadbanks(hardware); }
 int sh_modsound_test_pass(void) { return ms_pass("test"); }
+void sh_modsound_test_heap(int (*enter)(void), void (*leave)(void)) { g_test_enter = enter; g_test_leave = leave; }
 #endif
 
 /* ------------------------------------------------------------------ engine */
