@@ -13,6 +13,14 @@
  * the native action has released every target before the call returns. The
  * native undo commit and the return to idle complete on later EntityMode
  * updates, which the engine drives; this module queues nothing across frames.
+ *
+ * Every native call from the selection setup to the action runs inside a
+ * verified process-heap scope, as DOOM's own Delete key does inside the editor
+ * frame. Those calls grow editor-owned lists (the selected-ID array, the wire
+ * animation list) on the caller's current heap; from a console command that is
+ * the map heap, which Play releases, and the next Ctrl+Z then frees the
+ * released selected-ID array and DOOM exits with "Memory corruption before
+ * block!". A request whose scope cannot be verified is refused unchanged.
  */
 #ifndef BACKEND_EDITOR_DELETE_H
 #define BACKEND_EDITOR_DELETE_H
@@ -28,7 +36,7 @@ enum sh_editor_delete_status {
     SH_EDITOR_DELETE_DISPATCHED  =   1, /* native action released every target; its commit is pending */
     SH_EDITOR_DELETE_UNAVAILABLE =   0, /* an engine boundary did not resolve */
     SH_EDITOR_DELETE_NOT_MAIN    =  -1, /* called off the engine main thread */
-    SH_EDITOR_DELETE_NOT_READY   =  -2, /* no editor/map/screen, or the editor is changing state */
+    SH_EDITOR_DELETE_NOT_READY   =  -2, /* no editor/map/screen, the editor is changing state, or no process-heap scope */
     SH_EDITOR_DELETE_NOT_ENTITY  =  -3, /* the editor is not in EntityMode */
     SH_EDITOR_DELETE_BUSY        =  -4, /* see busy for the native owner of the selection */
     SH_EDITOR_DELETE_INVALID     =  -5, /* empty/oversized request, or a dead/out-of-range ID */
@@ -75,15 +83,18 @@ typedef struct sh_editor_delete_engine {
     void (*delete_selection)(void *substate, void *mode, void *editor);
     int  (*on_main_thread)(void);        /* 1 main, 0 other, negative unknown; null skips */
     int  (*manipulation_in_progress)(void);  /* product selection guard; null skips */
+    int  (*heap_enter)(void);   /* push the process heap; 1 only when the push is verified */
+    int  (*heap_leave)(void);   /* pop what heap_enter pushed; 1 when the caller's scope is back */
 } sh_editor_delete_engine;
 
-/* Bind every boundary at once. Return 1 when all required callbacks and the
- * editor are present; otherwise unbind and return 0. Passing null unbinds. */
+/* Bind every boundary at once. Return 1 when all required callbacks (the heap
+ * scope included) and the editor are present; otherwise unbind and return 0.
+ * Passing null unbinds. */
 int sh_editor_delete_bind(const sh_editor_delete_engine *engine);
 
 /* Resolve SelectionDeleteAction, SelectionCapabilities, GridPropertiesBlocked,
- * AddToSelection and ClearSelection from shared signature results, decode the
- * hover-clear callee from the action, and bind. editor is the inline editor
+ * AddToSelection, ClearSelection and the MemLocal heap scope from shared
+ * signature results, decode the hover-clear callee from the action, and bind. editor is the inline editor
  * object (sh_iface_engine_editor_base). manipulation_in_progress may be null.
  * Return 1 when bound. */
 int sh_editor_delete_install(const sig_result *results, size_t n, const uint8_t *module_base,
