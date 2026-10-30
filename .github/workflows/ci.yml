@@ -6,7 +6,7 @@ name: CI
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: [main, port/build-13954591]
   # Allow maintainers to rerun validation without another commit.
   workflow_dispatch:
 

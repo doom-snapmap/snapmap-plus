@@ -275,7 +275,7 @@ test('the list: origin groups with counts, one status icon per row, two lines pe
   }
   assert.equal(rowOf(h, 'local.cyberdemon@0.0.0').all('mods-status-icon')[0].children[0].children[0].getAttribute('href'), '#icon-triangle-alert');
   const maps = groups(h)[2];
-  assert.deepEqual(maps.all('mods-row').map(n => n.getAttribute('data-key')), ['acceptance.r137.mixed-rows', 'female.models']);
+  assert.deepEqual(maps.all('mods-row').map(n => n.getAttribute('data-key')), ['acceptance.mixed-rows', 'female.models']);
   assert.ok(groups(h)[1].all('mods-row').some(n => n.getAttribute('data-key') === 'test.shader-tint'));
   /* the grey info state */
   const sup = clone(v3);
