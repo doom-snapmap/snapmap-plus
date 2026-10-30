@@ -48,6 +48,7 @@ typedef struct ms_file {
     volatile LONG opens, fail_logged, shadow_logged;
     volatile LONG reg_state;              /* 0 none, 1 ready, -1 failed (main thread) */
     volatile LONG withdrawn;              /* a shadow taken back by a registration pass: lookups miss it */
+    volatile LONG reparse_tried;          /* the early-decl pass re-parsed it (main thread) */
 } ms_file;
 
 /* One path several bundles provide with different bytes, and what serves it. */
@@ -86,6 +87,7 @@ typedef struct ms_index {
     ms_conflict *conflict_list; int nconflict_list, cconflict_list;   /* sorted by request */
     int admitted, served_files, conflicts, composed, shadows;
     double build_ms;
+    struct ms_index *prev;                /* the table this one replaced (retired, never freed) */
 } ms_index;
 
 static ms_index *volatile g_index;
@@ -1638,6 +1640,14 @@ static void ms_resolve_needs(ms_index *x)
 
 /* ------------------------------------------------------------------ build and publish */
 
+/* Two files of successive tables that serve the same bytes. */
+static int ms_same_bytes(const ms_file *a, const ms_file *b)
+{
+    if (a->body || b->body)
+        return a->body && b->body && a->body_len == b->body_len && !memcmp(a->body, b->body, a->body_len);
+    return a->blob && b->blob && !strcmp(a->blob, b->blob);
+}
+
 int sh_modserve_index_build(const char *mods_root)
 {
     ms_index *x, *old;
@@ -1692,8 +1702,15 @@ int sh_modserve_index_build(const char *mods_root)
             if (o >= 0 && old->files[o].withdrawn && f->blob && old->files[o].blob && !strcmp(f->blob, old->files[o].blob) &&
                 !old->files[o].body && !f->body)
                 f->withdrawn = 1;
+            /* The engine holds what an earlier table served: a shadow whose
+             * bytes did not change is not offered to the early-decl pass again. */
+            if (o >= 0 && ms_same_bytes(f, &old->files[o])) {
+                f->opens = old->files[o].opens;
+                f->reparse_tried = old->files[o].reparse_tried;
+            }
         }
     }
+    x->prev = old;
     /* Publish the complete table; the old one is retired, never freed, since
      * a provider open on another thread may be inside it. */
     InterlockedExchangePointer((void *volatile *)&g_index, x);
@@ -2523,6 +2540,7 @@ int sh_modserve_plan_run(sh_modserve_plan *plan, const sh_modserve_engine_ops *o
                    s->bundle_id, s->reg_path);
         }
     }
+    if (ops->sources_published) ops->sources_published(ops->context);
     /* 2: load in dependency order; a step whose needed decl failed is skipped. */
     for (i = 0; i < plan->count; ++i) {
         sh_modserve_step *s = &plan->steps[i];
@@ -2948,6 +2966,57 @@ void sh_modserve_each_served(sh_modserve_file_fn fn, void *context)
         if (!f->served || f->withdrawn || !b->admitted) continue;
         fn(context, f->request, f->size, b->id ? b->id : b->folder, b->version ? b->version : "", b->hash ? b->hash : "");
     }
+}
+
+/* Early decls: the provider is published seconds into the process, after
+ * the signature scan, while the engine is already parsing its boot decls on
+ * the main thread. A shadow it parsed before then holds the game's bytes
+ * until something re-parses it; which shadows, and how many, depends on the
+ * race (the boss packs' aiFSMManager states were served in 3 of 18 boots).
+ * Offered: winners of admitted bundles that shadow a stock decl, never
+ * opened through the provider, never tried, not withdrawn. Restored stock
+ * decls are the game's own bytes and are not offered. */
+/* An earlier table served these bytes or re-parsed them: an open on the
+ * provider thread can land in the table a rescan is replacing, after the
+ * rescan copied the marks. */
+static int ms_settled_before(const ms_index *x, const ms_file *f)
+{
+    const ms_index *p;
+    for (p = x->prev; p; p = p->prev) {
+        int o = p->nkeys ? ms_find(p->slots, p->mask, f->request) : -1;
+        if (o >= 0 && ms_same_bytes(f, &p->files[o]) &&
+            (InterlockedCompareExchange((volatile LONG *)&p->files[o].opens, 0, 0) ||
+             InterlockedCompareExchange((volatile LONG *)&p->files[o].reparse_tried, 0, 0)))
+            return 1;
+    }
+    return 0;
+}
+
+int sh_modserve_each_unopened_shadow(sh_modserve_unopened_fn fn, void *context)
+{
+    const ms_index *x = g_index;
+    int rank, i, visited = 0;
+    if (!x || !fn) return 0;
+    for (rank = 0; rank <= 3; ++rank)
+        for (i = 0; i < x->nfiles; ++i) {
+            ms_file *f = (ms_file *)&x->files[i];
+            if (f->rank != rank || !f->is_decl || !f->is_shadow || f->is_restore || !f->served || f->withdrawn ||
+                !x->bundles[f->bundle].admitted || !f->ptype || !f->pname)
+                continue;
+            if (InterlockedCompareExchange(&f->opens, 0, 0) || InterlockedCompareExchange(&f->reparse_tried, 0, 0) ||
+                ms_settled_before(x, f))
+                continue;
+            visited++;
+            if (fn(context, f->ptype, f->pname, f->request, x->bundles[f->bundle].id) == 1)
+                InterlockedExchange(&f->reparse_tried, 1);
+        }
+    return visited;
+}
+
+long sh_modserve_open_count(const char *request)
+{
+    const ms_file *f = ms_lookup_file(NULL, request);
+    return f ? InterlockedCompareExchange((volatile LONG *)&f->opens, 0, 0) : 0;
 }
 
 int sh_modserve_is_mod_sedef(const char *name)

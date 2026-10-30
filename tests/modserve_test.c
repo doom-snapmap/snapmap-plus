@@ -46,6 +46,12 @@ void backend_log(const char *message)
         g_log[g_log_len] = 0;
     }
 }
+static int log_count_in(const char *hay, const char *needle)
+{
+    int n = 0;
+    while ((hay = strstr(hay, needle)) != NULL) { n++; hay++; }
+    return n;
+}
 static void log_clear(void) { g_log_len = 0; g_log[0] = 0; }
 static int log_has(const char *needle) { return strstr(g_log, needle) != NULL; }
 static int log_count(const char *needle)
@@ -383,6 +389,8 @@ static int fake_load(void *c, const char *type, const char *name, int persist, u
     return 1;
 }
 static const sh_modserve_engine_ops g_fake = { NULL, fake_source, fake_register, fake_load };
+static void fake_published(void *c) { (void)c; call_log("S", "", ""); }
+static const sh_modserve_engine_ops g_fake_published = { NULL, fake_source, fake_register, fake_load, NULL, fake_published };
 
 static double now_ns(void)
 {
@@ -437,6 +445,56 @@ static void test_index_and_isolation(void)
     CHECK(sh_modserve_bundle_state("0000000000000000000000000000000000000000000000000000000000000000", NULL, 0) == 0);
     printf("modserve_test: fixture index built in %.2f ms (%d bundles seen, %d files, %d keys)\n", st.build_ms,
            st.bundles_seen, st.files, st.keys);
+}
+
+/* ------------------------------------------------------------------ early decls */
+
+typedef struct unopened_seen { char order[1024]; int settle_lift; } unopened_seen;
+static int unopened_visit(void *context, const char *type, const char *name, const char *request, const char *bundle_id)
+{
+    unopened_seen *u = (unopened_seen *)context;
+    size_t at = strlen(u->order);
+    (void)request;
+    _snprintf_s(u->order + at, sizeof u->order - at, _TRUNCATE, "%s:%s:%s;", type, name, bundle_id);
+    return u->settle_lift && !strcmp(name, "func/lift");
+}
+
+/* Shadows the provider has not opened are offered in plan rank order, the
+ * conflict winner only; a settled one and an opened one are not offered again. */
+static void test_unopened_shadows(void)
+{
+    unopened_seen u;
+    char text[256];
+    CHECK(sh_modserve_open_count(SHADOW) == 0 && sh_modserve_open_count(LIFT) == 0);
+    memset(&u, 0, sizeof u);
+    CHECK(sh_modserve_each_unopened_shadow(unopened_visit, &u) >= 2);
+    CHECK(strstr(u.order, "entityDef:monster/imp:alex.pink-imp;") && strstr(u.order, "snapEditorEntityDef:func/lift:alex.pink-imp;"));
+    CHECK(strstr(u.order, "entityDef:monster/imp:") < strstr(u.order, "snapEditorEntityDef:func/lift:"));
+    CHECK(!strstr(u.order, "bob.skins"));
+    CHECK(!strstr(u.order, "mods/"));   /* new identities are registered, never re-parsed */
+    /* The lift is settled; the imp is not parsed yet and is offered again. */
+    memset(&u, 0, sizeof u); u.settle_lift = 1;
+    sh_modserve_each_unopened_shadow(unopened_visit, &u);
+    memset(&u, 0, sizeof u);
+    sh_modserve_each_unopened_shadow(unopened_visit, &u);
+    CHECK(strstr(u.order, "monster/imp") && !strstr(u.order, "func/lift"));
+    /* Once the provider serves the imp it is not offered either. */
+    CHECK(open_text(SHADOW, text, sizeof text) == 1 && sh_modserve_open_count(SHADOW) == 1);
+    memset(&u, 0, sizeof u);
+    sh_modserve_each_unopened_shadow(unopened_visit, &u);
+    CHECK(!strstr(u.order, "monster/imp") && !strstr(u.order, "func/lift"));
+    CHECK(sh_modserve_each_unopened_shadow(NULL, NULL) == 0);
+}
+
+/* A rescan that serves the same bytes keeps opened and settled shadows
+ * settled: the engine still holds what the earlier table served. */
+static void test_unopened_after_rescan(void)
+{
+    unopened_seen u;
+    CHECK(sh_modserve_index_rescan() >= 0);
+    memset(&u, 0, sizeof u);
+    sh_modserve_each_unopened_shadow(unopened_visit, &u);
+    CHECK(!strstr(u.order, "monster/imp") && !strstr(u.order, "func/lift"));
 }
 
 static void test_lookup(void)
@@ -560,7 +618,7 @@ static void test_plan_run(void)
     g_already = "mods/alex.pink-imp/skin";        /* this source is already registered */
     log_clear();
     total = sh_modserve_plan_editor(&p);
-    ready = sh_modserve_plan_run(&p, &g_fake, "editor");
+    ready = sh_modserve_plan_run(&p, &g_fake_published, "editor");
     /* skin, md6 and bob's entityDef are ready; the alex entityDef fails, so
      * its sedef is not loaded; bob's sedef is blocked. */
     CHECK(ready == 3);
@@ -575,6 +633,8 @@ static void test_plan_run(void)
     r_last = strrchr(g_calls, 'R');
     l_first = strstr(g_calls, "P:");
     CHECK(r_last && l_first && r_last < l_first);
+    /* The early-decl hook runs once, after the registrations and before the loads. */
+    CHECK(log_count_in(g_calls, "S::;") == 1 && strstr(g_calls, "S::;") > r_last && strstr(g_calls, "S::;") < l_first);
     CHECK(log_has("editor: entityDef 'mods/alex.pink-imp/imp' (alex.pink-imp) NOT READY: state 0x01"));
     CHECK(log_has("editor: snapEditorEntityDef 'mods/alex.pink-imp/imp' (alex.pink-imp) NOT READY: needs entityDef 'mods/alex.pink-imp/imp', which failed"));
     CHECK(log_has("editor: snapEditorEntityDef 'mods/bob.skins/thing' (bob.skins) BLOCKED"));
@@ -664,6 +724,14 @@ static void test_rescan(void)
     sh_modserve_plan_run(&p, &g_fake, "editor");
     CHECK(!strstr(g_calls, "mods/alex.pink-imp/imp"));
     sh_modserve_plan_free(&p);
+    /* Opened and settled shadows with unchanged bytes stay settled. */
+    {
+        unopened_seen u;
+        memset(&u, 0, sizeof u);
+        sh_modserve_each_unopened_shadow(unopened_visit, &u);
+        CHECK(!strstr(u.order, "monster/imp") && !strstr(u.order, "func/lift"));
+        CHECK(sh_modserve_open_count(SHADOW) > 0);
+    }
 }
 
 /* ------------------------------------------------------------------ requirements */
@@ -1376,6 +1444,8 @@ int main(void)
     build_fixture();
     test_empty_index();
     test_index_and_isolation();
+    test_unopened_shadows();
+    test_unopened_after_rescan();
     test_lookup();
     test_precedence();
     test_probe();
