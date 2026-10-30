@@ -54,6 +54,7 @@ var modsTab = (function () {
   var OTHER_MAPS_NOTE = 'Other saved maps that use this mod bring it back from removed-mods when they are opened.';
   /* Under the Uninstall confirmation's scope line: what undoes it. */
   var UNINSTALL_UNDO = 'Ctrl+Z in the editor, or opening a map that uses it, puts it back. Uninstalling:';
+  var UNINSTALL_REOPEN = 'Opening a map that uses it puts it back. Uninstalling:';
   /* The removed mods (payload.removed): the footer line and the Empty confirmation. */
   var EMPTY_NOTE = 'Deletes these folders from removed-mods for good. A saved map that still uses one of them can no longer bring it back.';
   /* The scope sentence under each confirmation's title, so the two dialogs read differently. */
@@ -732,7 +733,7 @@ var modsTab = (function () {
       host.appendChild(body);
       body.appendChild(el('div', 'mods-note mods-scope', scopeText(pv)));
       body.appendChild(el('div', 'mods-note', uninstall
-        ? UNINSTALL_UNDO
+        ? (pv.map ? UNINSTALL_UNDO : UNINSTALL_REOPEN)
         : 'Ctrl+Z in the editor brings the entities back, also after a Play round. Removing it:'));
       var ul = el('ul', 'mods-consequences');
       consequenceLines(pv).forEach(function (c) {
@@ -1086,7 +1087,7 @@ var modsTab = (function () {
           normalize: normalize, formatSize: formatSize, formatDate: formatDate, statusInfo: statusInfo, servingText: servingText, groupOf: groupOf,
           groupMods: groupMods, originText: originText, countLines: countLines, idText: idText, subText: subText,
           filterMods: filterMods, actionMessage: actionMessage, consequenceLines: consequenceLines, normPreview: normPreview,
-          mapModStatus: mapModStatus, OTHER_MAPS_NOTE: OTHER_MAPS_NOTE, UNINSTALL_UNDO: UNINSTALL_UNDO, EMPTY_NOTE: EMPTY_NOTE,
+          mapModStatus: mapModStatus, OTHER_MAPS_NOTE: OTHER_MAPS_NOTE, UNINSTALL_UNDO: UNINSTALL_UNDO, UNINSTALL_REOPEN: UNINSTALL_REOPEN, EMPTY_NOTE: EMPTY_NOTE,
           SCOPE: SCOPE, standIn: standIn, create: create};
 })();
 

@@ -662,6 +662,7 @@ test('Uninstall: with the open map using the mod, and without', () => {
                            'Moves the folder mods\\alex.mp-basin to removed-mods\\, where it stays until you empty the removed mods.',
                            modsTab.OTHER_MAPS_NOTE]);
   assert.equal(h.nodes.modsMapHost.all('mods-scope')[0].textContent, 'Removes the mod from this computer. The open map does not use it.');
+  assert.equal(h.nodes.modsMapHost.all('mods-note')[1].textContent, modsTab.UNINSTALL_REOPEN, 'no undo to offer when the map does not use it');
   modalButtons(h)[1].click();
   assert.equal(rowOf(h, 'alex.mp-basin'), undefined);
   /* uninstalling one of two duplicates clears the other's attention */
