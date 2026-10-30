@@ -44,7 +44,9 @@ var modsTab = (function () {
      runs that answer with the consequence list the confirmation shows. */
   var ACTIONS = ['install', 'migrate', 'rescan', 'openFolder', 'rebuild', 'verify',
                  'mapRemoveModPreview', 'mapRemoveMod', 'uninstallPreview', 'uninstall'];
-  var REF_KINDS = {toybox: 'Toybox row', module: 'module', timeline: 'timeline', logic: 'logic'};
+  /* What removing a mod from a map severs: wires and timeline references to its placed entities.
+     Other reference kinds are not consequences of the removal and are not shown. */
+  var REF_KINDS = {wire: 'wire', timeline: 'timeline'};
   var MAP_STATES = {installed: 'ok', active: 'ok', superseded: 'info'};
   var MAP_CAUSES = {missing: 'not installed on this machine', unindexed: 'not scanned yet; reopen the Mods tab',
                     skipped: 'installed but not in use', attention: 'needs attention'};
@@ -111,12 +113,13 @@ var modsTab = (function () {
   /* The open map (payload v3 map object). null: no map object at all; open false: no map is open
      (v2's entities -1). Absent v3 fields stay null and are left out of the modal. */
   function normRef(r) { r = obj(r) || {}; return {kind: str(r.kind), name: str(r.name)}; }
+  function normRefs(v) { return arr(v).map(normRef).filter(function (r) { return has(REF_KINDS, r.kind); }); }
   function normMapMod(m) {
     m = obj(m) || {};
     var names = normNames(m.placedEntities);
     return {key: str(m.key), id: str(m.id), version: str(m.version), state: str(m.state) || 'missing',
             placedEntities: names, placedCount: Math.max(num(m.placedCount), names.length),
-            references: arr(m.references).map(normRef), size: num(m.size)};
+            references: normRefs(m.references), size: num(m.size)};
   }
   function normMap(m) {
     m = obj(m);
@@ -137,17 +140,19 @@ var modsTab = (function () {
     var mp = obj(v.map), ins = obj(v.install), names = mp ? normNames(mp.entities) : [];
     return {action: str(v.action), key: str(v.key), name: str(v.name),
             map: mp ? {name: str(mp.name), entities: names, entityCount: Math.max(num(mp.entityCount), names.length),
-                       references: arr(mp.references).map(normRef), manifestRow: bool(mp.manifestRow),
+                       references: normRefs(mp.references), manifestRow: bool(mp.manifestRow),
                        tagRemoved: bool(mp.tagRemoved), vanillaAfter: bool(mp.vanillaAfter), published: bool(mp.published)} : null,
             install: ins ? {folder: str(ins.folder), disposition: ins.disposition === 'move' ? 'move' : 'delete',
-                            movedTo: str(ins.movedTo)} : null};
+                            movedTo: str(ins.movedTo)} : null,
+            /* uninstallPreview only: the Toybox rows uninstalling takes out of the editor */
+            editorRows: normNames(v.editorRows)};
   }
   function mapModStatus(r) {
     var tone = MAP_STATES[r.state] || 'warn';
     var cause = tone === 'ok' ? 'Installed' : tone === 'info' ? 'Installed; another build serves its files' : (MAP_CAUSES[r.state] || r.state);
     return {tone: tone, icon: STATUS[tone].icon, label: tone === 'warn' ? STATUS.warn.label : STATUS[tone].label, cause: cause};
   }
-  function refText(r) { return (REF_KINDS[r.kind] || r.kind || 'reference') + ': ' + r.name; }
+  function refText(r) { return REF_KINDS[r.kind] + ': ' + r.name; }
   /* The consequence lines of a dry run, in the order the confirmation lists them. Each line is
      {text, list?} where list is the names behind a count. */
   function consequenceLines(pv) {
@@ -155,13 +160,15 @@ var modsTab = (function () {
     if (pv.map) {
       var m = pv.map, where = m.name ? ' from ' + m.name : '';
       if (m.entityCount > 0) out.push({text: 'Deletes ' + plural(m.entityCount, 'placed entity', 'placed entities') + where + '.', list: m.entities});
-      if (m.references.length) out.push({text: 'Severs ' + plural(m.references.length, 'timeline or logic reference') + ' to those entities.',
+      if (m.references.length) out.push({text: 'Severs ' + plural(m.references.length, 'wire or timeline reference') + ' to those entities.',
                                          list: m.references.map(refText)});
       if (m.manifestRow) out.push({text: "Removes the mod's row from the map's list of mods."});
       if (m.tagRemoved) out.push({text: 'Removes the search tag mods: this is the last mod the map uses.'});
       if (m.vanillaAfter) out.push({text: 'The map then needs no mods and plays without Snapmap+.'});
       if (m.published) out.push({text: 'The published copy on the server is unaffected until you publish the map again.'});
     }
+    if (pv.action === 'uninstall' && pv.editorRows.length)
+      out.push({text: 'Removes ' + plural(pv.editorRows.length, 'Toybox row') + ' from the editor (' + pv.editorRows.join(', ') + ').'});
     if (pv.install) {
       var f = 'mods\\' + pv.install.folder;
       out.push({text: pv.install.disposition === 'move'
@@ -216,8 +223,13 @@ var modsTab = (function () {
       return {tone: 'info', icon: STATUS.info.icon, label: STATUS.info.label, cause: cause,
               sentence: 'Installed; ' + cause + '.'};
     }
-    cause = 'Installed and serving ' + plural(b.files, 'file');
+    cause = servingText(b);
     return {tone: 'ok', icon: STATUS.ok.icon, label: STATUS.ok.label, cause: cause, sentence: cause};
+  }
+  /* Carried files only (files minus stock pointers), the pointers as a second clause. */
+  function servingText(b) {
+    var carried = Math.max(0, num(b.files) - num(b.pointers)), p = num(b.pointers);
+    return 'Installed and serving ' + plural(carried, 'file') + (p > 0 ? ', ' + p + ' more read from your install' : '');
   }
   function needsAttention(b) { return statusInfo(b).tone === 'warn'; }
 
@@ -530,7 +542,7 @@ var modsTab = (function () {
       var files = section(box, 'files', 'Files');
       var carried = Math.max(0, b.files - b.pointers);
       field(files, 'Carried', plural(carried, 'file') + ', ' + formatSize(b.size));
-      if (b.pointers > 0) field(files, 'From the game', plural(b.pointers, 'file') + ' read from your install');
+      if (b.pointers > 0) field(files, 'From the game', b.pointers + ' more read from your install');
       files.appendChild(el('div', 'mods-note', FILES_NOTE));
       if (b.carriedPaths && b.carriedPaths.length) {
         var det = el('details', 'pc-limits-details mods-paths');
@@ -711,7 +723,8 @@ var modsTab = (function () {
         ul.appendChild(li);
       });
       body.appendChild(ul);
-      var acts = el('div', 'modal-actions');
+      /* The footer stays at the dialog's bottom edge; the consequence list scrolls above it. */
+      var acts = el('div', 'modal-actions mods-map-foot');
       acts.appendChild(modalButton('Cancel', '', function () {
         if (modal.from === 'uninstall') closeMap();
         else { modal.page = 'list'; modal.preview = null; renderModal(); }
@@ -946,7 +959,8 @@ var modsTab = (function () {
         else data.preview = {action: 'mapRemoveMod', key: key, name: nameOf(r.key, r.id), map: mapPart(r), install: null};
       } else if (a === 'uninstallPreview') {
         if (!b) { ok = false; msg = key + ' is not installed.'; }
-        else data.preview = {action: 'uninstall', key: key, name: nameOf(key), map: r ? mapPart(r) : null, install: installPart(b)};
+        else data.preview = {action: 'uninstall', key: key, name: nameOf(key), map: r ? mapPart(r) : null, install: installPart(b),
+                             editorRows: arr(b.editorRowNames).slice()};
       } else if (a === 'mapRemoveMod') {
         if (!r) { ok = false; msg = 'The open map does not use ' + key + '.'; }
         else { msg = 'Removed ' + nameOf(r.key, r.id) + ' from ' + docu.map.name + ': ' + plural(num(r.placedCount), 'entity', 'entities') + ' deleted.'; removeFromMap(r); }
@@ -967,7 +981,7 @@ var modsTab = (function () {
 
   return {STATES: STATES, STATUS: STATUS, ORIGINS: ORIGINS, GROUPS: GROUPS, ACTIONS: ACTIONS, DUPLICATE_TEXT: DUPLICATE_TEXT,
           COLLAPSE_KEY: COLLAPSE_KEY, FILES_NOTE: FILES_NOTE, NEEDS_NOTE: NEEDS_NOTE,
-          normalize: normalize, formatSize: formatSize, formatDate: formatDate, statusInfo: statusInfo, groupOf: groupOf,
+          normalize: normalize, formatSize: formatSize, formatDate: formatDate, statusInfo: statusInfo, servingText: servingText, groupOf: groupOf,
           groupMods: groupMods, originText: originText, countLines: countLines, idText: idText, subText: subText,
           filterMods: filterMods, actionMessage: actionMessage, consequenceLines: consequenceLines, normPreview: normPreview,
           mapModStatus: mapModStatus, OTHER_MAPS_NOTE: OTHER_MAPS_NOTE, standIn: standIn, create: create};

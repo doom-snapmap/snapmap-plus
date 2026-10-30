@@ -173,8 +173,8 @@ state: a green check (`installed`), a yellow triangle (`attention` or `duplicate
 title is the cause) and a grey info dot (`installed` with `servedBy` set). The list is a plain list
 scrolled natively by the panel body; arrows, Home and End move the selection over the rows shown.
 
-**Details pane.** The selected mod's name, icon and one sentence ("Installed and serving 500
-files", "Needs attention: ..."), then About, What it adds, Files (carried count and size, the files
+**Details pane.** The selected mod's name, icon and one sentence ("Installed and serving 24
+files, 476 more read from your install", "Needs attention: ..."), then About, What it adds, Files (carried count and size, the files
 read from the installed game, and the carried paths in the Limits section's `details` primitive),
 Requirements (console settings and the note that every player needs Snapmap+) and Sharing. The head
 actions are Verify, Rebuild and Uninstall. With nothing selected the pane explains how mods work.
@@ -216,8 +216,10 @@ Per entry of `mods`:
 | `"carriedPaths"` | string[] | Carried request paths below `assets/` (stock pointers excluded), sorted. May be capped; the page says how many more there are. |
 | `"publishedMaps"` | number | How many of the player's published maps record it; absent when unknown. |
 
-`files` stays every file including stock pointers, and `pointers` the stock pointers; the page shows
-`files - pointers` as carried, with `size` as their bytes.
+`files` stays every file including stock pointers, and `pointers` the stock pointers. The page
+derives the carried count as files minus pointers: the head sentence counts carried files only, with
+the pointers as a second clause ("Installed and serving 24 files, 476 more read from your install"),
+and `size` is the carried bytes.
 
 `map` keeps its v2 keys (`entities` is -1 when no map is open, `names`, `rows`, `placed`) and adds:
 
@@ -228,7 +230,7 @@ Per entry of `mods`:
 | `published` | object | `{state: "published" or "unpublished", at}`. |
 | `uploaded` | object | `{claimed, at}`: whether a mod-store claim exists for this map. |
 | `tagged` | bool | The search tag `mods` is present. |
-| `mods` | array | One per `smpmod1.` manifest row: `{key, id, version, state, "placedEntities", placedCount, "references", size}`. `key` is the installed folder ("" when not installed); `state` is `installed`, `superseded`, `unindexed`, `skipped` or `missing`; `placedEntities` are display names; `references` are `[{kind, name}]` with `kind` one of `toybox`, `module`, `timeline`, `logic`; `size` is carried bytes. |
+| `mods` | array | One per `smpmod1.` manifest row: `{key, id, version, state, "placedEntities", placedCount, "references", size}`. `key` is the installed folder ("" when not installed); `state` is `installed`, `superseded`, `unindexed`, `skipped` or `missing`; `placedEntities` are display names; `references` are `[{kind, name}]`, what removing the mod from the map severs: `kind` is `wire` (a wire to one of its placed entities) or `timeline` (a timeline event referencing one); the page ignores other kinds; `size` is carried bytes. |
 | `"vanilla"` | bool | The map lists no mods and plays without Snapmap+. |
 
 ### Actions
@@ -242,12 +244,13 @@ again.
 | `rescan`, `install`, `migrate`, `openFolder` | As in v2. `openFolder` may now carry `arg`, a folder name under `mods\` to open instead of the mods folder; today's host ignores it. |
 | `rebuild` | Build the folder again from its files (as `sh_mods build`). |
 | `verify` | Rehash that one build's files (today's host maps `verify` to the whole-store check). |
-| `mapRemoveModPreview` | Dry run: `data.preview` is the consequence list of removing the mod from the open map. Changes nothing. |
-| `mapRemoveMod` | Delete the placed entities that use the mod, sever the references to them, drop the manifest row and, with the last row, the `mods` tag. The published copy changes only when the map is published again. |
-| `uninstallPreview` | Dry run: `data.preview` for uninstalling: the map part when the open map uses the mod, and the installation part. |
+| `mapRemoveModPreview` | Dry run: `data.preview` is the consequence list of removing the mod from the open map: placed entities, and the wires and timeline references to them. Toybox rows are not consequences, so it carries no `editorRows`. Changes nothing. |
+| `mapRemoveMod` | Delete the placed entities that use the mod, sever the wires and timeline references to them, drop the manifest row and, with the last row, the `mods` tag. The published copy changes only when the map is published again. |
+| `uninstallPreview` | Dry run: `data.preview` for uninstalling: the map part when the open map uses the mod, the Toybox rows it takes out of the editor (`editorRows`, whether or not the map uses it), and the installation part. |
 | `uninstall` | `mapRemoveMod` on the open map when it uses the mod, then v2's `remove`: a folder the product made is deleted, the author's own folder moves to `removed-mods\`. Closed maps are not edited; they ask for the mod again when loaded. Replaces `remove`. |
 
-`data.preview` is `{action, key, name, map, install}`. `map` is null when the open map does not use
+`data.preview` is `{action, key, name, map, install}`, plus `editorRows` (display names) for
+`uninstallPreview` only. `map` is null when the open map does not use
 the mod, else `{name, entities: [display names], entityCount, references: [{kind, name}],
 manifestRow, tagRemoved, vanillaAfter, published}`; `install` is null for `mapRemoveMod`, else
 `{folder, disposition: "delete" or "move", movedTo}`. A refused dry run is `ok: false` with the

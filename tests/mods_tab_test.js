@@ -170,12 +170,19 @@ test('normalize: hostile and missing values', () => {
   assert.match(m.error, /cannot be read/);
   assert.equal(modsTab.normPreview(null), null);
   assert.equal(modsTab.normPreview({action: 'uninstall', install: {disposition: 'shred'}}).install.disposition, 'delete');
+  const pv = modsTab.normPreview({action: 'mapRemoveMod', map: {references: [{kind: 'toybox', name: 'a'}, {kind: 'module', name: 'b'},
+                                  {kind: 'wire', name: 'c'}, {kind: 'timeline', name: 'd'}]}});
+  assert.deepEqual(pv.map.references.map(r => r.kind), ['wire', 'timeline'], 'only wires and timeline references are severed');
+  assert.deepEqual(pv.editorRows, []);
 });
 test('three states: every backend state and cause maps onto check, triangle or info', () => {
   const s = b => modsTab.statusInfo(Object.assign({state: 'installed', files: 3, cause: '', duplicateId: false, servedBy: ''}, b));
   assert.deepEqual([s({}).tone, s({}).icon], ['ok', 'check']);
   assert.equal(s({}).sentence, 'Installed and serving 3 files');
   assert.equal(s({files: 1}).sentence, 'Installed and serving 1 file');
+  assert.equal(s({files: 500, pointers: 476}).sentence, 'Installed and serving 24 files, 476 more read from your install',
+    'carried files only (files minus pointers), the pointers as a second clause');
+  assert.equal(modsTab.servingText({files: 2, pointers: 1}), 'Installed and serving 1 file, 1 more read from your install');
   const dup = s({state: 'attention', duplicateId: true});
   assert.deepEqual([dup.tone, dup.icon], ['warn', 'triangle-alert']);
   assert.equal(dup.sentence, 'Needs attention: another installed mod declares this id; change one id in its mod.json');
@@ -258,7 +265,7 @@ test('the list: origin groups with counts, one status icon per row, two lines pe
   assert.ok(!/files|installed game/.test(hg.textContent), 'the file counts left the row');
   assert.equal(hg.all('mods-pill').length, 0, 'no pills');
   assert.equal(iconOf(hg), 'ok');
-  assert.equal(hg.title, 'Installed and serving 500 files');
+  assert.equal(hg.title, 'Installed and serving 24 files, 476 more read from your install');
   const icon = hg.all('mods-status-icon')[0];
   assert.equal(icon.children[0].ns, 'http://www.w3.org/2000/svg');
   assert.equal(icon.children[0].children[0].getAttribute('href'), '#icon-check');
@@ -390,7 +397,7 @@ test('details: every section for a v3 mod', () => {
   const d = h.nodes.modsDetail;
   assert.equal(d.all('mods-detail-name')[0].textContent, 'Hell Guards');
   assert.equal(d.all('mods-detail-head')[0].all('mods-status-icon')[0].getAttribute('data-status'), 'ok');
-  assert.equal(d.all('mods-detail-sentence')[0].textContent, 'Installed and serving 500 files');
+  assert.equal(d.all('mods-detail-sentence')[0].textContent, 'Installed and serving 24 files, 476 more read from your install');
   assert.deepEqual(d.all('mods-section').map(n => n.getAttribute('data-section')), ['about', 'adds', 'files', 'requirements', 'sharing']);
   const about = section(h, 'about').textContent;
   for (const s of ['Id local.hell-guard', 'Version 0.0.0', 'Build 2', 'Description The three Hell Guard brothers',
@@ -404,7 +411,7 @@ test('details: every section for a v3 mod', () => {
   assert.ok(!/movie|module|virtual/.test(adds), 'zero counts are left out');
   const files = section(h, 'files');
   assert.match(files.textContent, /Carried 24 files, 1\.2 MB/);
-  assert.match(files.textContent, /From the game 476 files read from your install/);
+  assert.match(files.textContent, /From the game 476 more read from your install/);
   assert.ok(files.textContent.indexOf(modsTab.FILES_NOTE) >= 0);
   const det = files.tags('details')[0];
   assert.match(det.className, /pc-limits-details/, 'the Limits section\'s details primitive');
@@ -518,7 +525,7 @@ test('the map modal opens and closes like the decl focus modal', () => {
     assert.ok(t.indexOf(s) >= 0, s);
   const mr = h.nodes.modsMapHost.all('mods-map-row');
   assert.equal(mr.length, 5);
-  assert.match(mr[0].textContent, /^Hell Guards local\.hell-guard \u00b7 0\.0\.0 \u00b7 1\.2 MB 12 placed entities use it Also used by timeline: Wave 2: spawn the guards, logic: Relay: all guards dead, Toybox row: Hell Guard \(hammer\) Remove from map$/);
+  assert.match(mr[0].textContent, /^Hell Guards local\.hell-guard \u00b7 0\.0\.0 \u00b7 1\.2 MB 12 placed entities use it Also used by timeline: Wave 2: spawn the guards, wire: Relay: all guards dead Remove from map$/);
   assert.equal(iconOf(mr[4]), 'warn');
   assert.match(mr[4].textContent, /jo\.lava-floor .* 2 placed entities use it; not installed on this machine/);
   /* Escape, the backdrop and the close button each close it; focus returns to the opener */
@@ -556,12 +563,18 @@ test('Remove from map: the dry run drives the confirmation; two buttons; the doc
   const items = h.nodes.modsMapHost.tags('li').map(n => n.textContent);
   assert.match(items[0], /^Deletes 12 placed entities from Hell Guard Arena\. Show all 12 Hell Guard \(hammer\) 1/);
   assert.equal(h.nodes.modsMapHost.tags('li')[0].tags('details').length, 1, 'a long name list is collapsible');
-  assert.match(items[1], /^Severs 3 timeline or logic references to those entities\. timeline: Wave 2: spawn the guards logic: Relay: all guards dead Toybox row: Hell Guard \(hammer\)$/);
+  assert.match(items[1], /^Severs 2 wire or timeline references to those entities\. timeline: Wave 2: spawn the guards wire: Relay: all guards dead$/);
+  assert.ok(!items.some(t => /Toybox/.test(t)), 'Toybox rows are not a consequence of removing a mod from a map');
   assert.equal(items[2], "Removes the mod's row from the map's list of mods.");
   assert.equal(items[3], 'The published copy on the server is unaffected until you publish the map again.');
   assert.equal(items.length, 4, 'not the last mod: the tag stays');
   const btns = modalButtons(h);
   assert.deepEqual(btns.map(b => b.textContent), ['Cancel', 'Delete'], 'exactly two buttons');
+  /* the buttons are a footer: the dialog's last child, after the scrolling consequence list */
+  const hostKids = h.nodes.modsMapHost.children;
+  assert.match(hostKids[hostKids.length - 1].className, /^modal-actions mods-map-foot$/);
+  assert.match(hostKids[hostKids.length - 2].className, /^mods-map-body$/);
+  assert.equal(hostKids[hostKids.length - 2].all('mods-consequences').length, 1);
   assert.match(btns[1].className, /danger-solid/);
   btns[0].click();
   assert.equal(h.ui.state().modal.page, 'list', 'Cancel goes back to the list');
@@ -616,7 +629,8 @@ test('Uninstall: with the open map using the mod, and without', () => {
   assert.equal(h.nodes.modsMapHost.all('modal-title')[0].textContent, 'Uninstall All doors?');
   let items = h.nodes.modsMapHost.tags('li').map(n => n.textContent);
   assert.match(items[0], /^Deletes 5 placed entities from Hell Guard Arena\. Blast door 1 Blast door 2 Blast door 3 Lift door 1 Lift door 2$/);
-  assert.match(items[1], /^Severs 2 timeline or logic references/);
+  assert.equal(items[1], 'Severs 1 wire or timeline reference to those entities. wire: Arena gate: open on wave 3');
+  assert.ok(items.indexOf('Removes 4 Toybox rows from the editor (Lift door, Blast door, Hell gate, Vent door).') >= 0);
   assert.ok(items.indexOf("Removes the mod's row from the map's list of mods.") >= 0);
   assert.ok(items.indexOf('Deletes the folder mods\\doors and its files.') >= 0, 'a folder the product made is deleted');
   assert.equal(items[items.length - 1], modsTab.OTHER_MAPS_NOTE);
@@ -637,7 +651,8 @@ test('Uninstall: with the open map using the mod, and without', () => {
   rowOf(h, 'alex.mp-basin').click();
   h.nodes.modsUninstallBtn.click();
   items = h.nodes.modsMapHost.tags('li').map(n => n.textContent);
-  assert.deepEqual(items, ['Moves your folder mods\\alex.mp-basin to removed-mods\\alex.mp-basin.',
+  assert.deepEqual(items, ['Removes 2 Toybox rows from the editor (Basin floor, Basin rim).',
+                           'Moves your folder mods\\alex.mp-basin to removed-mods\\alex.mp-basin.',
                            'The open map does not use this mod.', modsTab.OTHER_MAPS_NOTE]);
   modalButtons(h)[1].click();
   assert.equal(rowOf(h, 'alex.mp-basin'), undefined);
@@ -656,6 +671,9 @@ test('the stand-in host answers as the host does', () => {
   assert.deepEqual(store({cmd: 'modsAction', action: 'openFolder'}), []);
   assert.equal(store({cmd: 'modsAction', action: 'install'})[0].ok, false);
   assert.equal(store({cmd: 'modsAction', action: 'uninstallPreview', arg: 'nope'})[0].ok, false);
+  assert.ok(!('editorRows' in store({cmd: 'modsAction', action: 'mapRemoveModPreview', arg: 'doors'})[0].data.preview));
+  assert.deepEqual(store({cmd: 'modsAction', action: 'uninstallPreview', arg: 'local.hell-guard'})[0].data.preview.editorRows,
+    ['Hell Guard (hammer)', 'Hell Guard (shield)', 'Hell Guard (fist)']);
   assert.equal(v3.mods.length, 36, 'the fixture is untouched');
 });
 
@@ -709,7 +727,7 @@ test('page contract', () => {
   /* the payload spec */
   for (const k of ['"description"', '"origin"', '"migratedFrom"', '"servedBy"', '"builtAt"', '"bundle"', '"counts"', '"requirements"',
                    '"editorRowNames"', '"carriedPaths"', '"publishedMaps"', '"placedEntities"', '"references"', '"vanilla"',
-                   'mapRemoveModPreview', 'uninstallPreview'])
+                   'mapRemoveModPreview', 'uninstallPreview', '`editorRows`', 'files minus pointers', '`wire`'])
     assert.ok(docs.indexOf(k) >= 0, 'docs/webview-ui.md documents ' + k);
 });
 test('host and interface contract', () => {

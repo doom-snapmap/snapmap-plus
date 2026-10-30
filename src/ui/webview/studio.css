@@ -639,7 +639,7 @@
   .mods-map-host { flex-direction: column; gap: 10px; overflow: hidden; }
   .mods-map-head { display: flex; align-items: center; gap: 8px; flex: none; }
   .mods-map-head .modal-title { flex: 1 1 auto; min-width: 0; margin: 0; overflow-wrap: anywhere; }
-  .mods-map-body { display: flex; flex-direction: column; gap: 12px; min-height: 0; overflow-y: auto; user-select: text; -webkit-user-select: text; }
+  .mods-map-body { flex: 1 1 auto; display: flex; flex-direction: column; gap: 12px; min-height: 0; overflow-y: auto; user-select: text; -webkit-user-select: text; }
   .mods-map-row { display: flex; align-items: flex-start; gap: 7px; padding: 6px 0; border-top: 1px solid var(--border); }
   .mods-map-row:first-of-type { border-top: 0; }
   .mods-map-row .btn { flex: none; }
@@ -648,5 +648,6 @@
   .mods-consequences { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 5px; line-height: 1.45; }
   .mods-consequence-names { color: var(--muted); font-size: 10px; padding-top: 1px; }
   .mods-paths-list.mods-names { font-family: inherit; font-size: 11px; }
+  .modal-actions.mods-map-foot { flex: none; margin-top: 0; padding-top: 10px; border-top: 1px solid var(--border); }
   .btn.danger-solid { background: var(--danger); border-color: var(--danger); color: #ffffff; }
   .btn.danger-solid:hover:not(:disabled) { filter: brightness(1.12); }
