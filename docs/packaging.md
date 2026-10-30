@@ -62,7 +62,7 @@ top-level `webview2\` folder is renamed into `cache\` at the window's first star
 
 The bundle ships no mods. Installed mods live in `%LOCALAPPDATA%\snapmap-plus\mods\`, which the backend
 reads at startup but never creates there: the folder appears when `sh_mods install` adds a mod or a map
-carrying a first-generation package is converted into `mods\legacy\`. Nothing is loaded from the retired
+carrying a first-generation package is converted into a mod folder. Nothing is loaded from the retired
 `%LOCALAPPDATA%\snapmap-plus\overrides\` tree, and no `package-cache` or `package-staging` folder is
 created. Folders that earlier releases left are not touched; you can keep or delete them. The installer
 does not touch `mods\`. See [Mods](architecture.md#mods).

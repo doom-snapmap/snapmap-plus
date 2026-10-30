@@ -3,10 +3,11 @@
    Browser global + CommonJS test export. Pure ASCII.
 
    The backend (backend/modui.c, the `mods` interface slot) builds one document on the game thread:
-   one row per installed mod, already grouped (the build that serves, other builds counted, legacy
-   map-delivered bundles left out), whether overrides\ still holds entries to migrate, and the open
-   map. The host posts it as {kind:'mods', data} after every action; showing the tab asks for a
-   rescan, so the folder is reread whenever the player looks. Nothing polls. Diagnostics (every
+   one row per mod folder in mods\ (its key is the folder name; two folders declaring one id are both
+   rows, marked duplicateId; a package a map delivered is a row like any other), whether overrides\
+   still holds entries to migrate, and the open map. The host posts it as {kind:'mods', data} after
+   every action; showing the tab asks for a rescan (which also builds every mod folder whose files
+   or mod.json changed), so the folder is reread whenever the player looks. Nothing polls. Diagnostics (every
    bundle's state, conflicts, shadows, verification) are the console's `sh_mods doctor`, not this
    tab's. The list is a plain list: a store holds tens of mods, a few hundred at most, and the page
    scrolls it natively (wheel, scrollbar, keyboard). All text goes through textContent. */

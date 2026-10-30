@@ -151,15 +151,15 @@ and usage are always read live, never hard-coded.
 ## Mods tab
 
 `mods_tab.js` renders the tab from the document `backend/modui.c` builds behind the `mods` slot:
-`mods` holds one row per installed mod (the build that serves, else the newest, with
-`otherBuilds` counting the rest; two folders declaring one id are a row each with
-`duplicateId`; bundles under `mods\legacy\` are left out), each `installed` or `attention`
+`mods` holds one row per mod folder (`key` and `folder` are the folder's name;
+`otherBuilds` is 0; two folders declaring one id are a row each with `duplicateId`;
+packages maps delivered are rows like any other), each `installed` or `attention`
 with the first cause, `migrate` counts the `overrides\` entries the migration record does not
 cover (the Migrate button shows only while that is above zero), and `map` holds the open map's
 manifest rows and placed closure. Showing the tab and the refresh button send
 `modsAction {action: "rescan"}`; the other actions are `install` (the native folder picker),
 `remove` (a row's key, after the page's confirmation; the backend refuses a mod the open map
-uses, deletes laid-out builds and moves a folder built in place to `removed-mods\`), `migrate`
+uses, deletes a folder the product made and moves the author's own folder to `removed-mods\`), `migrate`
 (the host follows the worker with WAIT before the list) and `openFolder`. Every action is
 answered with `modsActionResult` and then a fresh `mods` document, one job at a time, and
 nothing polls. The list is a plain list scrolled natively by the panel body (a store holds tens

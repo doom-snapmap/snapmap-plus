@@ -385,8 +385,9 @@ Installer updates and uninstall preserve player configuration.
 ## Mods
 
 Mods are installed under `%LOCALAPPDATA%\snapmap-plus\mods\`. A mod is a folder
-holding a descriptor (`mod.json`, or `package.json`) and an `assets/` tree at the
-engine's own request paths. Mods reach other machines two ways: a published map's
+holding `mod.json` and an `assets/` tree at the engine's own request paths
+(a `package.json` is accepted until the folder's first build turns it into
+`mod.json`). Mods reach other machines two ways: a published map's
 bundles are uploaded to the Community API's mod store when the map is published,
 and a player who opens that map is asked first and downloads only what they
 approve in the dialog, verified by hash (`modnet.c`, `modsync.c`, `modpublished.c`;
@@ -397,30 +398,28 @@ sharing a rawmap stays offline. Plain saves never upload. The retired
 below, and never served or written; no `package-cache` or `package-staging`
 folder is created.
 
-Nine backend files share the work:
-
 These backend files share the work:
 
 - `modbundle.c` builds a mod folder into a bundle: a SHA-256 per file, the
   logical name each file provides, the names its decls need, the namespace and
-  structural rules, and the canonical `bundle.json` whose SHA-256 is the bundle
-  hash. New names live under `mods/<id>/`; raw files and skins decls may spell
-  the id the way the engine derives binary names (`-` becomes `_`). Stock files a
-  bundle replaces are listed as `shadows` and must be stock, except in a bundle
-  whose descriptor carries a `legacy` object (a converted first-generation
-  package), whose unresolved needs also only warn.
-- `modstore.c` owns the store layout: `blobs\<sha256>`, one
-  `<id>@<version>+<build>\` folder per installed build with its `.state.json`,
-  and `legacy\` for converted packages. Files are hashed at install and on
-  `sh_mods verify`, never at boot.
+  structural rules, and the canonical manifest whose SHA-256 is the bundle hash.
+  It reads and writes `mod.json` and the product record (below). New names live
+  under `mods/<id>/`; raw files and skins decls may spell the id the way the
+  engine derives binary names (`-` becomes `_`). Stock files a bundle replaces
+  are listed as `shadows` and must be stock, except in a bundle with a `legacy`
+  record (a converted first-generation package), whose unresolved needs also
+  only warn.
+- `modstore.c` owns the store: the mod folders, install, verification, the
+  rebuild rule and the one-time upgrade of the retired layout, below. Files are
+  hashed at install and on `sh_mods doctor verify`, never at boot.
 - `modstock.c` is the read-only installed-resource bridge behind stock
   pointers, below.
 - `modcmd.c` is the `sh_mods` console command. It dispatches the serving verbs
-  (`status`, `rescan`, `palette rebuild`) to `modserve_engine.c` and owns
-  `build`, `install`, `list` and `verify`. Its `modbundle_build_folder` is the
-  builder entry the legacy converter calls, with the game's archives as the
-  stock resolver.
-- `modserve.c` reads every `bundle.json` once at boot, checking sizes and never
+  (`status`, `rescan`, `palette rebuild`) to `modserve_engine.c` (a rescan runs
+  the rebuild rule first) and owns `build`, `install`, `list` and `verify`. Its
+  `modbundle_build_folder` is the builder entry the legacy converter calls, with
+  the game's archives as the stock resolver.
+- `modserve.c` reads every `mod.json` once at boot, checking sizes and never
   hashes, into one immutable table from request path to file; a bundle that
   fails is skipped with one `MODS:` line and nothing else is affected. Needs are
   resolved once per table, through the same request paths the builder uses.
@@ -433,12 +432,11 @@ These backend files share the work:
   already knowing the source marks a stock decl, which is left to the provider.
 - `modmanifest.c` owns the `smpmod1.<index>.<count>` manifest rows, and
   `modlegacy.c` the retired `smpkg.` carriers, as below.
-- `modui.c` is the WebView Mods tab's backend. It groups the store's folders
-  into one row per mod (the serving build shown, other builds counted, two
-  folders declaring one id flagged, `legacy\` left out), marks each installed
-  or needing attention with its cause, reports whether `overrides\` still holds
-  entries to migrate, and runs Install, Remove, Migrate and rescan on the main
-  thread. What the tab does not show, every bundle's state with legacy ones,
+- `modui.c` is the WebView Mods tab's backend. It lists one row per mod
+  folder (two folders declaring one id both flagged, a package a map delivered
+  listed like any other), marks each installed or needing attention with its
+  cause, reports whether `overrides\` still holds entries to migrate, and runs
+  Install, Remove, Migrate and rescan on the main thread. What the tab does not show, every bundle's state with legacy ones,
   conflicts with their winners, shadows and verification, it prints as
   `sh_mods doctor [verify]` (see [WebView UI](webview-ui.md#mods-tab)).
 - `modpublished.c` holds a published or My Maps launch whose manifest names a
@@ -457,6 +455,44 @@ These backend files share the work:
   a copy to My Maps that the map service would reject, as in
   [Publishing a map with mods](#publishing-a-map-with-mods).
 
+The store. A folder is `mod.json` plus `assets\`. `mod.json` has
+two blocks in one object: every key but `snapmap-plus` is the author's (id,
+name, version, description, author, strings, requirements, hud, shadows,
+stock, and any other key, kept and carried as the manifest's `extra`), and
+`snapmap-plus` is the product's, the whole built manifest: format, build,
+bundle hash, built time, validated and cause, origin, shadows, a converted
+package's legacy record, `files` (path, sha256, size, provides, needs) and
+`stock` (pointers; `"inAssets": false` when no file stands behind one). The
+product writes the block by splicing: the old member is cut from the end of
+the member before it, the new one appended after the author's last member, so
+the author's bytes, order and formatting never change. The canonical manifest
+is derived from both blocks in memory, for the hash and for the upload; its
+text is the Contract 1 text, so an unchanged mod keeps its hash. There is no
+blob store and there are no hard links: a mod's files live in its own
+`assets\` only. A folder the author drops in keeps its name; one the product
+makes (an install, a download, a migration, a delivered package) is `<id>`,
+else `<id>@<version>`. Identity is the id: two folders declaring one id are
+both kept and both flagged. A delivered copy whose content an installed mod of
+the same id already serves is not stored; its hash is recorded as an alias of
+the installed bundle. `mods\snapmap-plus.json` is the product's one record:
+`claims`, `links`, `pending`, `migration`, `cache` (tree hash to bundle hash)
+and `aliases`, each section written whole under one lock.
+
+The rebuild rule: a folder is built again when its tree hash (the author's bytes of `mod.json`
+and the path, size and time of every file under `assets\`) is not a key of the
+cache for its bundle; that runs on a rescan (the Mods tab, `sh_mods rescan`,
+an install), never at boot, because a build needs the game's resource reader.
+At the first start of this build `sh_ms_upgrade` converts the retired layout
+once (before the overrides migration and the serving index): every
+`<id>@<version>+<build>\` folder gets `mod.json` from its `bundle.json` and
+`.state.json` (read back with the same hash before the old files go), hard
+links become copies, a missing file is restored from `blobs\`, product folders
+are renamed to `<id>` (or `<id>@<version>` when one id has several), `legacy\`
+folders move into `mods\` or are dropped as aliases, `blobs\` is removed, and
+`claims.json`, `publish-links.json`, `pending-uploads.json` and
+`.migrated.json` are folded into the record. It logs one `MODS: store:` line
+per folder and a summary, and every step can be repeated.
+
 A bundle file may be a stock pointer instead of carried bytes: Contract 1's
 file kind `stock`, `{"needs", "path", "provides", "request", "stock":
 {"sha256", "source"}}` with no `blob` and no `size`, where `source` is an
@@ -467,9 +503,9 @@ bytes equal installed content, and an author writes one in the descriptor's
 "<optional>"}}`, the hash filled in by the builder) to alias installed content
 under a mod name. Pointers do not count toward the 64 MiB and 256 MiB caps and
 the extension whitelist does not apply to them, because nothing is carried;
-the store never receives their bytes (no blob, no laid-out file, nothing
-uploaded), so a converted package or a copy-of-stock mod uploads only its
-authored and edited files. `modstock.c` answers them from the player's own
+the store never receives their bytes (no copied file, nothing uploaded), so a
+converted package or a copy-of-stock mod uploads only its authored and edited
+files. `modstock.c` answers them from the player's own
 install, read-only: it parses `base\snap_gameresources.pindex` and
 `base\gameresources.pindex` once, on the first question (about 171,000 rows
 with bytes, 20 MB held, 125 ms on build 13954591; an empty `mods\` never loads
@@ -534,8 +570,8 @@ shadow, a new one lives under `generated/swf/mods/<id>/` with its atlas
 Display text reaches the engine's `#str_` table through `strids.c`, which reads
 three layers and keeps the first writer of each key (case-insensitive): the
 user's `%LOCALAPPDATA%\snapmap-plus\strings\strids.json`, then the
-`extra.strings.en` object of every admitted bundle (installed mods before
-bundles a map delivered, then by id and version, through
+`strings.en` object of every admitted bundle's author block (installed mods
+before bundles a map delivered, then by id and version, through
 `sh_modserve_each_bundle_extra`), then the baked defaults. Keys omit the
 `#str_` prefix decls use, and only `en` is read. When two bundles give one key
 different text the first stands and one `B1: strids REFUSED` line names both;
@@ -700,7 +736,7 @@ provider; no `.pages` file is needed, and materials carry an explicit
   `register`/`release` never touch a product record. The member format is
   [vt-baker.md](vt-baker.md).
 
-A bundle descriptor's `hud` key (kept under `bundle.json` `extra`) selects how
+A mod's `hud` key (the author block of `mod.json`) selects how
 the stock ammo widget shows a weapon (`modhud.c`, the beta.19 `weapon_hud`
 contract: `{"weapons": {"<weapon decl>": {"ammo_display": "weapon" | "engine"}}}`).
 `weapon` removes the multiplayer mode's forced numeric display for that weapon,
@@ -747,9 +783,12 @@ still at level 1, and every step of the editor plan is registered at the
 session lifetime.
 
 On every parse the `DeserializeFromJson` detour sees, `modlegacy.c` runs first.
-A complete carrier whose ZIP and `package.json` read is unpacked once into
-`mods\legacy\<id>@<digest16>\` (older `decls/`, `images/` and `shaders/`
-layouts moved under `assets/`), built into a bundle and named by a manifest row;
+A complete carrier whose ZIP and `package.json` read is unpacked once into an
+ordinary mod folder `mods\<id>\` (older `decls/`, `images/` and `shaders/`
+layouts moved under `assets/`; the package's keys become the author block, the
+legacy record and its grandfathered shadows seed the product block), built into
+a bundle and named by a manifest row; a conversion an installed mod of the same
+id already serves is dropped and that mod answers;
 the serving table is then rebuilt when that bundle is not in it yet, so the same
 parse can activate it. A first-generation package served every file under
 `assets/`; a file a bundle cannot carry (a type outside the bundle whitelist,
@@ -758,10 +797,11 @@ such as the `.materials.txt` sidecars every beta.19 model pack shipped or a
 counted on the `LEGACY: unpacked` line instead of refusing the package, and a
 cvar requirement other than the two supported blacklist gates is left out the
 same way. A beta.16-19 carrier names its tree (`smpkg.delivery.<tree>`), so
-before converting one the converter also looks for a legacy folder whose
-`mod.json` records that key and for a bundle the overrides migration built from
-the same tree (`mods\.migrated.json`, `trees`); either answers the carrier
-without a second copy. Any other carrier, and the unreleased `smpbind.` and
+before converting one the converter also looks for a mod folder whose
+`mod.json` legacy record has that key (or the carrier's digest) and for a
+bundle the overrides migration built from the same tree (the record's
+`migration` section, `trees`); either answers the carrier without a second
+copy. Any other carrier, and the unreleased `smpbind.` and
 `smpref.` rows, are removed. Each carrier logs one `LEGACY:` verdict line. After
 the navigation strip, `modmanifest.c` reads and strips the manifest rows before
 the engine replicates map variables and activates the bundles they name.
@@ -828,22 +868,23 @@ their bundles' requirements were live`.
 ### Migration of the retired overrides folder
 
 Releases up to v0.2.1-beta.19 kept packages in `overrides\`. At backend start,
-before the serving table is built, `modmigrate.c` runs once when `overrides\`
-exists and `mods\.migrated.json` does not (or records an unfinished pass):
+after the store upgrade and before the serving table is built, `modmigrate.c`
+runs once when `overrides\` exists and the record's `migration` section does
+not (or records an unfinished pass):
 
 - each direct child folder with `package.json` or `mod.json` is converted the
   way a carrier is (layout moved under `assets/`, files a bundle cannot carry
   left out) into a staging folder outside the store and installed by
-  `modstore.c` as `mods\<id>@<version>+<build>\` with blobs. The descriptor is
-  the authoring descriptor: its id (or, for an era B pack without one, its
-  folder name), version (else `0.0.0`), requirements, strings and hud are
-  carried, its other keys (`composes`, an era B `schema`) are kept under
-  `extra`, and a `legacy` block (`source`, `folder`, `tree`) grandfathers its
-  names as shadows. When another installed build of the same id and version
-  comes from a different tree, the version gets the tree's first 8 hex, so two
-  folders with one id are both built and the duplicate is reported;
-- each delivered package, `overrides\map-<16 hex>\<package>\`, becomes a legacy
-  bundle `mods\legacy\<id>@<tree16>\` keyed `delivery.<tree>`, the beta.19 tree
+  `modstore.c` as `mods\<folder>\` (its own name; with the tree's first 8 hex
+  when another mod holds that name), `mod.json` and real files. The package's
+  keys are the author block: its id (or, for an era B pack without one, its
+  folder name), version (else `0.0.0`), requirements, strings and hud, and its
+  other keys (`composes`, an era B `schema`) kept; the product block's `legacy`
+  record (`source`, `folder`, `tree`) grandfathers its names as shadows. Two
+  folders with one id are both built, each in its own folder, and the duplicate
+  is reported;
+- each delivered package, `overrides\map-<16 hex>\<package>\`, becomes a mod
+  folder `mods\<id>\` keyed `delivery.<tree>`, the beta.19 tree
   fingerprint (entries sorted case-insensitively, then by bytes; a `d` or `f`
   byte, the NUL-terminated relative path and the file's SHA-256), which is the
   key a map's carrier of the same delivery has; a later load of that map reuses
@@ -856,7 +897,7 @@ exists and `mods\.migrated.json` does not (or records an unfinished pass):
   512 MiB or 8192 files is skipped before it is read, and one whose carried part
   is over the bundle caps (4096 files, 256 MiB) is refused before it is hashed;
 - a file byte-identical to installed game content becomes a stock pointer (see
-  above): `blobs\` never receives it and an upload never sends it. Each
+  above): the store never receives it and an upload never sends it. Each
   folder's line says `N file(s), P of them stock pointer(s) to installed
   content, K KiB not stored`, the summary line totals them, and the record
   carries `stockPointers` and `stockBytes`. Measured on the owner's packs:
@@ -989,9 +1030,11 @@ The claim and its secret: `PublishFeedPost`, the one function both success
 paths reach, carries the item id and revision. The worker claims the bundle
 set under the item id. On a republish the stored secret re-claims that ref,
 which replaces the set (Contract 4); a republish without rows releases the
-item's claim. The claim id and secret live in `mods\claims.json` (modsync);
-the secret is never logged. The provisional claim is released once the item
-claim succeeds, or when its publish never reaches the feed post.
+item's claim. The claim id and secret live in the record's `claims`
+section (modsync); the secret is never logged. The provisional claim is released once the item
+claim succeeds, or when its publish never reaches the feed post. Claims,
+links and the retry queue are the `claims`, `links` and `pending` sections of
+`mods\snapmap-plus.json`.
 
 Release: the MapInfo screen's unpublish completion (`(screen, ctx, const
 idStr &id)`, bound by the unpublish confirm) releases the item's claim on the
@@ -1002,7 +1045,7 @@ stays. The delete completion (`(screen, ctx, const idStr &localId, const idStr
 for example after an unpublish this installation never saw. Neither saved-map
 model links to a published item (their reflected fields hold only the local
 id, the cloud-saved id and branch parents), so the feed post records the link
-itself in `mods\publish-links.json` (item id to cloud-saved id and local id).
+itself in the record's `links` section (item id to cloud-saved id and local id).
 At delete, the linked items that still hold a claim are checked with the
 engine's own `maps_pub_prev_pub` search (`PublishedPrevQuery`, by parent
 cloud-saved item and owner), issued on the main tick with two callback objects
@@ -1016,8 +1059,8 @@ cached text (`%LOCALAPPDATA%\id Software\DOOM\base\doomsnapmaps\published-maps\<
 is over the bound is refused at the MapInfo and browser entries, before the
 engine creates the saved item, with a one-button notice.
 
-The retry queue: a failure modsync can retry stays in
-`mods\pending-uploads.json`. At startup the backend settles provisional refs
+The retry queue: a failure modsync can retry stays in the record's `pending`
+section. At startup the backend settles provisional refs
 left by a closed game (their claims are released and their queued uploads
 dropped, since their publish never completed), then retries the rest of the
 queue once on the worker and logs the counts.
