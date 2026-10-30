@@ -30,7 +30,7 @@
  * editor's sound-event list; both outlive the call. Run from a console
  * command the current heap is the map heap: Play releases it, and the next
  * Ctrl+Z, whose undo step first frees selection+0x50/+0x68/+0x80/+0xA8
- * (Vulkan 0x117E0C0 from 0x1203DB0), frees the released array and the
+ * (13954591 Vulkan RVA 0x117E0C0, called from 0x1203DB0), frees the released array and the
  * allocator stops DOOM with "Memory corruption before block!". So every
  * native call from the selection setup to the action runs in a verified
  * process-heap scope, and a request without one is refused unchanged.
