@@ -51,6 +51,13 @@ var modsTab = (function () {
   var MAP_CAUSES = {missing: 'not installed on this machine', unindexed: 'not scanned yet; reopen the Mods tab',
                     skipped: 'installed but not in use', attention: 'needs attention'};
   var OTHER_MAPS_NOTE = 'Other saved maps that use this mod will ask for it again when loaded.';
+  /* The scope sentence under each confirmation's title, so the two dialogs read differently. */
+  var SCOPE = {
+    mapRemoveMod: 'Only this map changes. The mod stays installed on this computer and keeps its Toybox rows.',
+    uninstallUsed: 'Removes the mod from this computer. The open map is cleaned of it first.',
+    uninstallUnused: 'Removes the mod from this computer. The open map does not use it.'
+  };
+  function scopeText(pv) { return pv.action === 'uninstall' ? (pv.map ? SCOPE.uninstallUsed : SCOPE.uninstallUnused) : SCOPE.mapRemoveMod; }
   var COLLAPSE_KEY = 'mods.collapsed_groups';
   var FILES_NOTE = "Files identical to the game's own are never stored or uploaded; Snapmap+ reads them from your install.";
   var NEEDS_NOTE = 'Every player needs Snapmap+ to play a map that uses this mod.';
@@ -176,7 +183,6 @@ var modsTab = (function () {
         : 'Deletes the folder ' + f + ' and its files.'});
     }
     if (pv.action === 'uninstall') {
-      if (!pv.map) out.push({text: 'The open map does not use this mod.'});
       out.push({text: OTHER_MAPS_NOTE});
     }
     return out;
@@ -702,6 +708,7 @@ var modsTab = (function () {
       modalHead(host, uninstall ? 'Uninstall ' + name + '?' : 'Remove ' + name + ' from ' + (pv.map && pv.map.name ? pv.map.name : 'this map') + '?');
       var body = el('div', 'mods-map-body');
       host.appendChild(body);
+      body.appendChild(el('div', 'mods-note mods-scope', scopeText(pv)));
       body.appendChild(el('div', 'mods-note', 'This cannot be undone. ' + (uninstall ? 'Uninstalling' : 'Removing it') + ':'));
       var ul = el('ul', 'mods-consequences');
       consequenceLines(pv).forEach(function (c) {
@@ -729,7 +736,7 @@ var modsTab = (function () {
         if (modal.from === 'uninstall') closeMap();
         else { modal.page = 'list'; modal.preview = null; renderModal(); }
       }));
-      acts.appendChild(modalButton(uninstall ? 'Uninstall' : 'Delete', 'danger-solid', function () {
+      acts.appendChild(modalButton(uninstall ? 'Uninstall' : 'Delete from map', 'danger-solid', function () {
         act(uninstall ? 'uninstall' : 'mapRemoveMod', pv.key);
       }));
       host.appendChild(acts);
@@ -984,7 +991,7 @@ var modsTab = (function () {
           normalize: normalize, formatSize: formatSize, formatDate: formatDate, statusInfo: statusInfo, servingText: servingText, groupOf: groupOf,
           groupMods: groupMods, originText: originText, countLines: countLines, idText: idText, subText: subText,
           filterMods: filterMods, actionMessage: actionMessage, consequenceLines: consequenceLines, normPreview: normPreview,
-          mapModStatus: mapModStatus, OTHER_MAPS_NOTE: OTHER_MAPS_NOTE, standIn: standIn, create: create};
+          mapModStatus: mapModStatus, OTHER_MAPS_NOTE: OTHER_MAPS_NOTE, SCOPE: SCOPE, standIn: standIn, create: create};
 })();
 
 if (typeof module !== 'undefined' && module.exports) module.exports = modsTab;
