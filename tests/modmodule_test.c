@@ -33,6 +33,7 @@
 #include "../src/backend/modserve.h"
 #include "../src/backend/modstock.h"
 #include "../src/backend/module_prefab_map.h"
+#include "../src/backend/modmanifest.h"
 #include "mod_test_util.h"
 #include "mod_stock_fixture.h"
 
@@ -60,6 +61,9 @@ void backend_log(const char *line)
     size_t n = line ? strlen(line) : 0;
     if (n && g_log_n + n + 2 < sizeof g_log) { memcpy(g_log + g_log_n, line, n); g_log_n += n; g_log[g_log_n++] = '\n'; g_log[g_log_n] = 0; }
 }
+
+/* The manifest reader activates bundles through the engine side (modserve_engine.c). */
+int modserve_activate_bundles(const char *const *bundle_hashes, int n) { (void)bundle_hashes; (void)n; return 0; }
 
 /* ------------------------------------------------------------ fixtures ---- */
 
@@ -397,7 +401,7 @@ static void test_serving(const char *tmp, const char *install)
 
 /* ------------------------------------------------------ acceptance build ---- */
 
-static void inspect_prefab(const char *path, const sh_mb_bundle *b)
+static void inspect_prefab(const char *path, const sh_mb_bundle *b, const char *hash)
 {
     FILE *f = NULL;
     char *text = NULL, err[256] = "";
@@ -420,6 +424,54 @@ static void inspect_prefab(const char *path, const sh_mb_bundle *b)
     printf("modmodule_test: prefab %s: %d module(s) %s, %d entities, %d door slot(s), environments %d\n", path,
            sum.module_count, sum.module_count ? sum.modules[0].name : "-", sum.entity_count, sum.door_count, sum.env_count);
     CHECK(sum.module_count == 1 && sum.door_count == 1 && named);
+    {
+        /* SH_MODMODULE_MERGE_INTO: merge the prefab into that map as Load/Place does and
+         * write the result to SH_MODMODULE_MERGE_OUT for inspection. */
+        char into[MAX_PATH * 2], outp[MAX_PATH * 2];
+        DWORD a = GetEnvironmentVariableA("SH_MODMODULE_MERGE_INTO", into, sizeof into);
+        DWORD c = GetEnvironmentVariableA("SH_MODMODULE_MERGE_OUT", outp, sizeof outp);
+        if (a && a < sizeof into && c && c < sizeof outp) {
+            FILE *g = NULL;
+            char *map = NULL, *merged = NULL;
+            size_t mlen = 0, olen = 0;
+            long gn;
+            int first = -1, added = 0;
+            float at[3] = { 7040, 8448, 0 };
+            if (!fopen_s(&g, into, "rb") && g) {
+                fseek(g, 0, SEEK_END); gn = ftell(g); fseek(g, 0, SEEK_SET);
+                map = (char *)malloc((size_t)gn + 1);
+                if (map && fread(map, 1, (size_t)gn, g) == (size_t)gn) { map[gn] = 0; mlen = (size_t)gn; }
+                fclose(g);
+            }
+            err[0] = 0;
+            CHECK(map && sh_mp_merge(map, mlen, text, (size_t)n, at, &merged, &olen, &first, &added, err, (int)sizeof err) == 1);
+            printf("modmodule_test: merge into %s: first %d, added %d, %zu bytes %s\n", into, first, added, olen, err);
+            if (merged) {
+                /* The map names the bundle the way a save does: one smpmod1. row
+                 * holding the module name, so a load activates its decls. */
+                sh_modmanifest_list rows;
+                sh_modmanifest_row row;
+                char *named = NULL, werr[192] = "";
+                size_t wlen = 0;
+                memset(&rows, 0, sizeof rows);
+                memset(&row, 0, sizeof row);
+                strcpy_s(row.id, sizeof row.id, b->id);
+                strcpy_s(row.version, sizeof row.version, b->version);
+                strcpy_s(row.bundle, sizeof row.bundle, hash);
+                row.size = b->total_size;
+                CHECK(sh_modmanifest_row_add_name(&row, sum.modules[0].name));
+                CHECK(sh_modmanifest_list_add(&rows, &row));
+                named = sh_modmanifest_write(merged, olen, &rows, &wlen, werr, sizeof werr);
+                CHECK(named != NULL);
+                if (named && !fopen_s(&g, outp, "wb") && g) { fwrite(named, 1, wlen, g); fclose(g); }
+                printf("modmodule_test: wrote %s with one smpmod1. row (%zu bytes) %s\n", outp, wlen, werr);
+                free(named);
+                sh_modmanifest_list_free(&rows);
+                sh_modmanifest_row_free(&row);
+            }
+            free(map); free(merged);
+        }
+    }
     sh_mp_summary_free(&sum);
     free(text);
 }
@@ -448,7 +500,7 @@ static void build_acceptance(const char *source, const char *doom, const char *p
     if (b.warnings) printf("  first warning: %s\n", b.first_warning);
     CHECK(b.errors == 0);
     if (!b.errors) CHECK(sh_mb_write(&b, source, cause, sizeof cause));
-    if (prefab && prefab[0]) inspect_prefab(prefab, &b);
+    if (prefab && prefab[0]) inspect_prefab(prefab, &b, b.hash);
     sh_mb_free(&b);
 }
 

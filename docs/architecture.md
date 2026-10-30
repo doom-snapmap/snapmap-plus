@@ -551,7 +551,14 @@ the Grid Room route: the FindModule and HasModule detours ask the serving index
 module is loaded with the native loader into a private one-module palette whose
 loader context comes from the stock palette's first record; the snapModuleInfo
 is registered the same way as a variant's, without the one-floor, four-wall
-check. The private palette's collision is retained across Play like a
+check. Its snapModuleInfo and collision are checked in the serving index,
+never read through the Grid preflight (which claims only Grid Room names); a
+refusal logs `MODS: module <name> refused: <step>` once, and a load logs
+`MODS: module <name> loaded into a private palette (mega_blessed)`. The map
+validator (RepairAndMigrate, VK 0x1412488e0 / GL 0x141247f10) asks HasModule
+for every instance near its end, drops a module it refuses ("Couldn't load
+module") and then returns 4 when the entity check fails or no instance is
+left. The private palette's collision is retained across Play like a
 variant's. There is no Add-browser tile; a saved map or a module prefab that
 names the module places it. The module decl's bounds decide the placement
 limit check; for a multiplayer map they cover the arena, so it fits the native
