@@ -3,6 +3,48 @@
 Every Snapmap+ release, newest first. Beta versions are opt-in previews; the
 latest stable version is what `snapmap-plus update` installs.
 
+## v0.2.1-beta.20 -- 2026-10-30 (beta)
+
+**April 2024 DOOM support and a new mods system**
+
+Snapmap+ now runs on the April 2024 DOOM update (Steam build 13954591) and replaces the old package system with mods: folders you install, maps that remember which mods they need, and uploads when you publish. The editor also gains unlocked view distance and map bounds, module prefabs, timeline folders, and navigation that bakes for maps played outside the editor.
+
+### New
+- **Mods:** Install mods as folders in the mods folder; a saved map records the mods it uses and activates them at the next load.
+- **Mods:** A map that needs a mod you do not have asks first, then downloads and hash-checks only what you approve.
+- **Mods:** Publishing a map uploads the mods it uses so other players can play it, asking once before the first upload.
+- **Mods:** A mod can bring its own sounds and sound banks, HUD movies, a multiplayer arena as a placeable module, and virtual textures.
+- **Mods tab:** A new Mods tab lists your installed mods with their status, what each one adds, and buttons to verify, rebuild or uninstall.
+- **Mods tab:** See which mods the open map uses, remove one from the map, or uninstall it after a preview of exactly what changes.
+- **Mods tab:** An uninstalled mod moves to a removed-mods folder and comes back on its own when a map still needs it.
+- **Mods:** Packages left by earlier releases are converted into mods the first time this release starts, and your old folders are left untouched.
+- **Mods:** A rescan applies your mod edits to the running game, so changed decls, models and Toybox rows show up without a restart.
+- **Editor:** An Unlock View Distance toggle per map draws the whole room in the editor and in Play instead of stopping at the environment's fog.
+- **Editor:** An Unlock Map Bounds toggle lets modules spread further and zooms Blueprint out enough to see the whole map.
+- **Editor:** You can now place demons, player starts, spawners, path points and pickups in open air.
+- **Prefabs:** Save selected modules as a module prefab and place it in Blueprint, grabbed like a duplicate.
+- **Prefabs:** A Limits section shows what the selected prefab adds to each of the editor's five meters before you place it.
+- **Timelines:** Create new timelines and sort them into folders that travel inside the map.
+- **Entities:** Fly to entity puts the camera in front of the selected entity from either editing mode.
+- **Navigation:** Maps started from the hub, a published listing or a saved slot now get custom navigation for marked boxes too.
+
+### Improved
+- **Startup:** Reaching the main menu takes about 20 seconds instead of about 160.
+- **Install:** The installer checks which DOOM build you have and installs the matching release, refusing unrecognized or mixed copies with an explanation.
+- **Navigation:** Each room copy and demon size bakes on its own, so one dense room no longer fails the whole map, and unchanged rooms reuse their earlier bake.
+- **Navigation:** The floor is cut around marked boxes and climbs and drops are swept clear of solids, so demons stop walking through them.
+- **Prefabs:** Demons and player starts draw their real editor models in the preview instead of plain boxes.
+- **Editor:** Built-in Grid Room lights scale with the room on every axis, and a resize changes only the axes you edited.
+
+### Fixed
+- **Editor:** Tab from Blueprint lands on the floor of a very tall Grid Room instead of leaving you on its roof.
+- **Maps:** A very large map builds with coarser culling cells so it loads instead of hanging on the loading screen.
+- **Entities:** Editing isNetworkStatic changes the counted network cost right away rather than after a map reload.
+- **Prefabs:** Prefab previews read scenes written by the April 2024 build again, and a prefab created with the cursor off a box keeps its real placement.
+- **Install:** The bootstrap script finds a download again, every download is checked against its published size and digest, and a refused install leaves your files unchanged.
+
+_Plus 101 smaller fixes and internal changes._
+
 ## v0.2.1-beta.19 -- 2026-10-22 (beta)
 
 **Published maps start again, plus safer remote delete**
