@@ -957,12 +957,18 @@ static int ae_extract_field(const char *text, const char *field, char *buf, size
 static int ae_deshare_slot(void **cell)
 {
     void *ent = NULL, *se = NULL;
-    int refs = 0;
+    int refs = 0, pushed;
     if (!cell || !ae_read_ptr(cell, &ent) || !ent) return 0;
     if (!g_deshare) return 1;
     if (!ae_read_u32_safe((const uint8_t *)ent, &refs)) return 0;
     if (refs == 1) return 1;
+    /* The private copy (holder, record and its text) must outlive the map: on
+     * the main thread the allocator otherwise inherits map lifetime, the Play
+     * transition frees it, and the next Play build reads the freed record text
+     * (the second Play of a map with Timeline tiles faulted in EntityClone). */
+    pushed = ae_push_heap_global();
     __try { se = g_deshare(cell); } __except (EXCEPTION_EXECUTE_HANDLER) { se = NULL; }
+    if (pushed) ae_pop_heap();
     if (!se || !ae_read_ptr(cell, &ent) || !ent || se != (void *)((uint8_t *)ent + 8)) return 0;
     return 1;
 }
