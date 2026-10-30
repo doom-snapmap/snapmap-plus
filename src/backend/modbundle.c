@@ -18,6 +18,10 @@
 #define MB_WALK_DEPTH   48
 #define MB_SCAN_DEPTH   128
 #define MB_READ_CHUNK   (1u << 20)
+/* With a stock reader, files over the caps or of a type a bundle cannot carry
+ * are hashed before they are refused (a stock copy becomes a pointer), so the
+ * walk itself stops at this many listed bytes. */
+#define MB_MAX_WALK     (2048ull * 1024u * 1024u)
 
 /* ------------------------------------------------------------ SHA-256 ---- */
 
@@ -1323,6 +1327,7 @@ static void mb_file_free(sh_mb_file *f)
     free(f->request);
     free(f->ptype);
     free(f->pname);
+    free(f->stock_source);
     for (i = 0; i < f->need_count; i++) { free(f->needs[i].type); free(f->needs[i].name); }
     free(f->needs);
 }
@@ -1335,6 +1340,8 @@ void sh_mb_free(sh_mb_bundle *b)
     free(b->files);
     for (i = 0; i < b->shadow_count; i++) free(b->shadows[i]);
     free(b->shadows);
+    for (i = 0; i < b->stock_decl_count; i++) { free(b->stock_decls[i].request); free(b->stock_decls[i].source); }
+    free(b->stock_decls);
     free(b->name);
     free(b->author);
     free(b->homepage);
@@ -1512,6 +1519,163 @@ static int mb_set_shadows(sh_mb_bundle *b, const mbj *arr, int from_manifest)
     return 1;
 }
 
+/* ------------------------------------------------------ stock pointers ---- */
+
+static sh_mb_stock_ops g_stock;
+static volatile LONG g_stock_set;
+
+void sh_mb_set_stock_ops(const sh_mb_stock_ops *ops)
+{
+    InterlockedExchange(&g_stock_set, 0);
+    if (ops) memcpy(&g_stock, ops, sizeof g_stock);
+    else memset(&g_stock, 0, sizeof g_stock);
+    if (ops) InterlockedExchange(&g_stock_set, 1);
+}
+
+int sh_mb_stock_available(void)
+{
+    return InterlockedCompareExchange(&g_stock_set, 0, 0) != 0;
+}
+
+static const sh_mb_stock_ops *mb_stock(void)
+{
+    return sh_mb_stock_available() ? &g_stock : NULL;
+}
+
+static void mb_stock_cause(int r, const char *source, const char *path, char *cause, size_t cap)
+{
+    const char *who = path && path[0] ? path : source;
+    if (!cause || !cap) return;
+    if (r == SH_MB_STOCK_UNAVAILABLE)
+        _snprintf_s(cause, cap, _TRUNCATE, "%s points at installed content %s, which cannot be checked (the "
+                    "installed-content reader is unavailable)", who, source);
+    else if (r == SH_MB_STOCK_MISMATCH)
+        _snprintf_s(cause, cap, _TRUNCATE, "%s points at installed content %s, which this game holds with other "
+                    "bytes (a different game revision)", who, source);
+    else
+        _snprintf_s(cause, cap, _TRUNCATE, "%s points at installed content %s, which this game does not have",
+                    who, source);
+}
+
+int sh_mb_stock_verify(const char *source, const char *sha256, unsigned long long *size,
+                       const char *path, char *cause, size_t cap)
+{
+    const sh_mb_stock_ops *ops = mb_stock();
+    unsigned long long got = 0;
+    int r = ops && ops->verify ? ops->verify(ops->context, source, sha256, &got) : SH_MB_STOCK_UNAVAILABLE;
+    if (size) *size = r == SH_MB_STOCK_OK ? got : 0;
+    if (r != SH_MB_STOCK_OK) mb_stock_cause(r, source, path, cause, cap);
+    return r;
+}
+
+int sh_mb_stock_read(const char *source, const char *sha256, unsigned char **bytes, size_t *len,
+                     const char *path, char *cause, size_t cap)
+{
+    const sh_mb_stock_ops *ops = mb_stock();
+    int r;
+    if (bytes) *bytes = NULL;
+    if (len) *len = 0;
+    if (!bytes || !len) return SH_MB_STOCK_UNAVAILABLE;
+    r = ops && ops->read ? ops->read(ops->context, source, sha256, bytes, len) : SH_MB_STOCK_UNAVAILABLE;
+    if (r != SH_MB_STOCK_OK) {
+        if (*bytes) HeapFree(GetProcessHeap(), 0, *bytes);
+        *bytes = NULL;
+        *len = 0;
+        mb_stock_cause(r, source, path, cause, cap);
+    }
+    return r;
+}
+
+int sh_mb_check_source(const char *source, char *cause, size_t cap)
+{
+    if (!source || !source[0]) return mb_cause(cause, cap, "the stock source is empty");
+    return sh_mb_check_request(source, cause, cap);
+}
+
+/* Lower-case, '/' separators: the spelling a request or a source is kept in. */
+static char *mb_path_dup(const char *s, size_t n)
+{
+    char *d = mb_strndup(s, n), *p;
+    if (!d) return NULL;
+    for (p = d; *p; p++) if (*p == '\\') *p = '/';
+    mb_lower(d);
+    return d;
+}
+
+static int mb_hex64_text(const char *s, size_t n, char out[SH_MB_HASH_HEX + 1])
+{
+    size_t i;
+    if (n != SH_MB_HASH_HEX) return 0;
+    for (i = 0; i < n; i++) {
+        char c = s[i];
+        if (c >= 'A' && c <= 'F') c = (char)(c - 'A' + 'a');
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return 0;
+        out[i] = c;
+    }
+    out[n] = 0;
+    return 1;
+}
+
+static int mb_decl_cmp(const void *a, const void *b)
+{
+    return strcmp(((const sh_mb_stock_decl *)a)->request, ((const sh_mb_stock_decl *)b)->request);
+}
+
+/* The descriptor's "stock" object: {"<request>": {"source": "...", "sha256": "..."}}. */
+static int mb_set_stock_decls(sh_mb_bundle *b, const mbj *o)
+{
+    static const char *const keys[] = { "sha256", "source", NULL };
+    char cause[SH_MB_CAUSE_MAX];
+    size_t i, k;
+    if (o->t != MBJ_OBJ) { mb_error(b, "%s stock must be an object of request paths", b->descriptor); return 0; }
+    if (o->count > SH_MB_MAX_FILES) { mb_error(b, "%s stock names more than %u files", b->descriptor, SH_MB_MAX_FILES); return 0; }
+    b->stock_decls = (sh_mb_stock_decl *)calloc(o->count ? o->count : 1, sizeof(sh_mb_stock_decl));
+    if (!b->stock_decls) { mb_error(b, "out of memory"); return 0; }
+    for (i = 0; i < o->count; i++) {
+        const mbj *v = o->items[i], *src, *sha;
+        sh_mb_stock_decl *d = &b->stock_decls[b->stock_decl_count];
+        size_t kk;
+        int bad = 0;
+        if (v->t != MBJ_OBJ) { mb_error(b, "%s stock.%.200s must be {\"source\", \"sha256\"}", b->descriptor, o->keys[i]); return 0; }
+        for (kk = 0; kk < v->count; kk++) {
+            int hit = 0;
+            for (k = 0; keys[k]; k++)
+                if (strlen(keys[k]) == v->klen[kk] && memcmp(keys[k], v->keys[kk], v->klen[kk]) == 0) hit = 1;
+            if (!hit) bad = 1;
+        }
+        src = mbj_get(v, "source");
+        sha = mbj_get(v, "sha256");
+        if (bad || !src || src->t != MBJ_STR || strlen(src->s) != src->n || (sha && sha->t != MBJ_STR)) {
+            mb_error(b, "%s stock.%.200s must be {\"source\", \"sha256\"} with string values", b->descriptor, o->keys[i]);
+            return 0;
+        }
+        d->request = mb_path_dup(o->keys[i], o->klen[i]);
+        d->source = mb_path_dup(src->s, src->n);
+        b->stock_decl_count++;
+        if (!d->request || !d->source) { mb_error(b, "out of memory"); return 0; }
+        if (mb_starts(d->request, "assets/")) {
+            mb_error(b, "%s stock entry %s must be a request path, without assets/", b->descriptor, d->request);
+            return 0;
+        }
+        if (!sh_mb_check_request(d->request, cause, sizeof cause)) { mb_error(b, "%s stock entry: %s", b->descriptor, cause); return 0; }
+        if (!sh_mb_check_source(d->source, cause, sizeof cause)) {
+            mb_error(b, "%s stock.%s source: %s", b->descriptor, d->request, cause);
+            return 0;
+        }
+        if (sha && !mb_hex64_text(sha->s, sha->n, d->sha256)) {
+            mb_error(b, "%s stock.%s sha256 must be 64 hex characters", b->descriptor, d->request);
+            return 0;
+        }
+    }
+    qsort(b->stock_decls, b->stock_decl_count, sizeof(sh_mb_stock_decl), mb_decl_cmp);
+    for (i = 1; i < b->stock_decl_count; i++)
+        if (strcmp(b->stock_decls[i - 1].request, b->stock_decls[i].request) == 0) {
+            mb_error(b, "%s stock names %s twice", b->descriptor, b->stock_decls[i].request);
+            return 0;
+        }
+    return 1;
+}
+
 /* Fields shared by descriptors and manifests. kind 0 = descriptor, 1 = manifest. */
 static int mb_common_fields(sh_mb_bundle *b, const mbj *root, int manifest)
 {
@@ -1614,6 +1778,10 @@ static int mb_parse_descriptor(sh_mb_bundle *b, const char *text, size_t len)
         if (lg && lg->t != MBJ_OBJ) { mb_error(b, "%s legacy must be an object", b->descriptor); goto done; }
         b->legacy = lg != NULL;
     }
+    {
+        const mbj *st = mbj_get(root, "stock");
+        if (st && !mb_set_stock_decls(b, st)) goto done;
+    }
     /* Everything else (the legacy strings and hud keys, composes, description,
      * an era B schema) is preserved verbatim under "extra". */
     {
@@ -1622,7 +1790,7 @@ static int mb_parse_descriptor(sh_mb_bundle *b, const char *text, size_t len)
         tmp.t = MBJ_OBJ;
         for (i = 0; i < root->count; i++) {
             static const char *const known[] = { "format", "id", "version", "name", "author", "homepage",
-                                                 "requirements", "shadows", NULL };
+                                                 "requirements", "shadows", "stock", NULL };
             int k, is_known = 0;
             for (k = 0; known[k]; k++)
                 if (strlen(known[k]) == root->klen[i] && memcmp(known[k], root->keys[i], root->klen[i]) == 0) is_known = 1;
@@ -1663,6 +1831,7 @@ typedef struct mb_walk {
     sh_mb_bundle *b;
     wchar_t *root;          /* the mod folder, long form */
     int stopped;            /* a cap was hit; stop collecting */
+    int stock;              /* a stock reader is registered: defer type and size refusals */
 } mb_walk;
 
 static int mb_is_top_allowed(const char *name)
@@ -1705,21 +1874,30 @@ static void mb_walk_dir(mb_walk *w, const wchar_t *dir, const char *rel, int dep
             const char *request = child + 7;   /* below "assets/" */
             char *req_lower = mb_strdup(request);
             sh_mb_file *f;
+            /* With a stock reader a file of a type a bundle cannot carry, or
+             * over 64 MiB, is refused only after it is found not to be a copy
+             * of installed content; the 256 MiB total is checked on the
+             * carried files after the matching. */
+            int defer = w->stock;
+            int deferred = 0;
             if (!req_lower) { mb_error(w->b, "out of memory"); free(name); break; }
             mb_lower(req_lower);
             if (!sh_mb_check_request(req_lower, cause, sizeof cause)) {
                 mb_error(w->b, "%s: %s", child, cause);
-            } else if (!sh_mb_extension_allowed(req_lower)) {
+            } else if (!sh_mb_extension_allowed(req_lower) && !(defer && (deferred = 1))) {
                 mb_error(w->b, "file type not allowed: %s", child);
             } else if (size == 0) {
                 mb_error(w->b, "empty file: %s", child);
-            } else if (size > SH_MB_MAX_FILE) {
+            } else if (size > SH_MB_MAX_FILE && !(defer && (deferred = deferred ? deferred : 2))) {
                 mb_error(w->b, "file larger than 64 MiB: %s", child);
             } else if (w->b->file_count >= SH_MB_MAX_FILES) {
                 mb_error(w->b, "more than %u files under assets/", SH_MB_MAX_FILES);
                 w->stopped = 1;
-            } else if (w->b->total_size + size > SH_MB_MAX_TOTAL) {
+            } else if (!defer && w->b->total_size + size > SH_MB_MAX_TOTAL) {
                 mb_error(w->b, "assets/ larger than 256 MiB");
+                w->stopped = 1;
+            } else if (defer && w->b->total_size + size > MB_MAX_WALK) {
+                mb_error(w->b, "assets/ larger than %llu MiB, counting copies of installed content", MB_MAX_WALK >> 20);
                 w->stopped = 1;
             } else if ((f = mb_add_file(w->b)) == NULL) {
                 mb_error(w->b, "out of memory");
@@ -1728,6 +1906,7 @@ static void mb_walk_dir(mb_walk *w, const wchar_t *dir, const char *rel, int dep
                 f->request = req_lower;
                 req_lower = NULL;
                 f->size = size;
+                f->deferred = deferred;
                 w->b->total_size += size;
                 if (!f->path) mb_error(w->b, "out of memory");
             }
@@ -1767,6 +1946,55 @@ static void mb_walk_top(mb_walk *w)
     } while (FindNextFileW(h, &fd));
     FindClose(h);
     if (!have_assets) mb_error(w->b, "the mod folder has no assets/ folder");
+}
+
+/* The descriptor's stock pointers join the walked files: a pointer whose path
+ * is also carried marks that file (its bytes must be the installed ones), any
+ * other adds a file with nothing on disk. */
+static void mb_add_declared(sh_mb_bundle *b)
+{
+    size_t k, i;
+    for (k = 0; k < b->stock_decl_count; k++) {
+        const sh_mb_stock_decl *d = &b->stock_decls[k];
+        sh_mb_file *f = NULL;
+        for (i = 0; i < b->file_count; i++)
+            if (strcmp(b->files[i].request, d->request) == 0) { f = &b->files[i]; break; }
+        if (!f) {
+            size_t n = strlen(d->request) + 8;
+            if (b->file_count >= SH_MB_MAX_FILES) { mb_error(b, "more than %u files under assets/", SH_MB_MAX_FILES); return; }
+            f = mb_add_file(b);
+            if (!f) { mb_error(b, "out of memory"); return; }
+            f->path = (char *)malloc(n);
+            f->request = mb_strdup(d->request);
+            if (!f->path || !f->request) { mb_error(b, "out of memory"); return; }
+            _snprintf_s(f->path, n, _TRUNCATE, "assets/%s", d->request);
+            f->stock = 1;
+        }
+        f->declared = (int)k + 1;
+    }
+}
+
+/* Resolve a declared pointer against the installed game: its hash (checked
+ * when the author gave one) and size. Returns 1 when resolved. */
+static int mb_resolve_declared(sh_mb_bundle *b, sh_mb_file *f, const sh_mb_stock_decl *d,
+                               char sha[SH_MB_HASH_HEX + 1], unsigned long long *size)
+{
+    const sh_mb_stock_ops *ops = mb_stock();
+    char cause[SH_MB_CAUSE_MAX];
+    int r;
+    *size = 0;
+    sha[0] = 0;
+    if (d->sha256[0]) {
+        r = sh_mb_stock_verify(d->source, d->sha256, size, f->path, cause, sizeof cause);
+        if (r == SH_MB_STOCK_OK) { memcpy(sha, d->sha256, SH_MB_HASH_HEX + 1); return 1; }
+    } else {
+        r = ops && ops->identify ? ops->identify(ops->context, d->source, sha, size) : SH_MB_STOCK_UNAVAILABLE;
+        if (r == SH_MB_STOCK_OK && strlen(sha) == SH_MB_HASH_HEX) return 1;
+        if (r == SH_MB_STOCK_OK) r = SH_MB_STOCK_UNAVAILABLE;
+        mb_stock_cause(r, d->source, f->path, cause, sizeof cause);
+    }
+    mb_error(b, "%s", cause);
+    return 0;
 }
 
 /* ------------------------------------------------------ needs, namespace ---- */
@@ -1812,6 +2040,7 @@ static void mb_check_files(sh_mb_bundle *b, const wchar_t *root, const sh_mb_res
          ns_raw_s[SH_MB_ID_MAX + 8];
     mb_req_index own = { NULL, 0 };
     sh_mb_resolver no_stock = { NULL, NULL, NULL, NULL };
+    const sh_mb_stock_ops *stock = mb_stock();
     size_t i, k;
 
     sh_mb_id_sanitized(b->id, sanitized);
@@ -1835,7 +2064,8 @@ static void mb_check_files(sh_mb_bundle *b, const wchar_t *root, const sh_mb_res
         unsigned long long got = 0;
 
         if (!sh_mb_logical_name(f->request, type, sizeof type, name, sizeof name)) {
-            mb_error(b, "%s: generated/decls/<type>/ names no decl type this game ships, or the name is empty", f->path);
+            if (f->deferred == 1) mb_error(b, "file type not allowed: %s", f->path);
+            else mb_error(b, "%s: generated/decls/<type>/ names no decl type this game ships, or the name is empty", f->path);
             continue;
         }
         f->ptype = mb_strdup(type);
@@ -1843,6 +2073,36 @@ static void mb_check_files(sh_mb_bundle *b, const wchar_t *root, const sh_mb_res
         f->is_decl = mb_starts(f->request, "generated/decls/");
         f->shadowed = mb_is_shadow(b, f->request);
         if (!f->ptype || !f->pname) { mb_error(b, "out of memory"); continue; }
+
+        if (f->stock) {
+            /* A declared pointer with nothing carried: the installed bytes
+             * are the file (a decl's text is read to scan its needs). */
+            const sh_mb_stock_decl *d = &b->stock_decls[f->declared - 1];
+            unsigned long long sz = 0;
+            if (!mb_resolve_declared(b, f, d, f->blob, &sz)) continue;
+            f->size = sz;
+            f->stock_source = mb_strdup(d->source);
+            if (!f->stock_source) { mb_error(b, "out of memory"); continue; }
+            if (f->is_decl) {
+                unsigned char *text = NULL;
+                size_t len = 0;
+                char cause[SH_MB_CAUSE_MAX];
+                if (sh_mb_stock_read(d->source, f->blob, &text, &len, f->path, cause, sizeof cause) != SH_MB_STOCK_OK) {
+                    mb_error(b, "%s", cause);
+                    continue;
+                }
+                if (!sh_decl_text_well_formed(text, len)) {
+                    mb_error(b, "%s points at %s, which is not a well-formed decl", f->path, d->source);
+                } else {
+                    mb_need_ctx nc = { f, 0 };
+                    sh_mb_scan_needs(f->ptype, text, len, mb_need_cb, &nc);
+                    if (nc.oom) mb_error(b, "out of memory");
+                    qsort(f->needs, f->need_count, sizeof(sh_mb_need), mb_need_cmp);
+                }
+                HeapFree(GetProcessHeap(), 0, text);
+            }
+            goto names;
+        }
 
         rel = mb_strdup(f->path);
         if (!rel) { mb_error(b, "out of memory"); continue; }
@@ -1881,6 +2141,37 @@ static void mb_check_files(sh_mb_bundle *b, const wchar_t *root, const sh_mb_res
         free(full);
         if (got != f->size) { mb_error(b, "%s changed while the bundle was built", f->path); continue; }
 
+        /* A carried copy of installed content becomes a stock pointer: one the
+         * descriptor declares must hold exactly the installed bytes, any other
+         * is matched by size and hash (path first, then renamed copies). */
+        if (f->declared) {
+            const sh_mb_stock_decl *d = &b->stock_decls[f->declared - 1];
+            char sha[SH_MB_HASH_HEX + 1];
+            unsigned long long sz = 0;
+            if (!mb_resolve_declared(b, f, d, sha, &sz)) continue;
+            if (sz != f->size || strcmp(sha, f->blob) != 0) {
+                mb_error(b, "%s is carried with other bytes than the installed %s its stock pointer names", f->path, d->source);
+                continue;
+            }
+            f->stock = 1;
+            f->stock_source = mb_strdup(d->source);
+            if (!f->stock_source) { mb_error(b, "out of memory"); continue; }
+        } else if (stock && stock->match) {
+            char source[SH_MB_REQUEST_MAX + 1], cause[SH_MB_CAUSE_MAX];
+            if (stock->match(stock->context, f->request, f->size, f->blob, source, sizeof source) == SH_MB_STOCK_OK &&
+                sh_mb_check_source(source, cause, sizeof cause)) {
+                f->stock = 1;
+                f->stock_source = mb_strdup(source);
+                if (!f->stock_source) { mb_error(b, "out of memory"); continue; }
+            }
+        }
+        if (!f->stock && f->deferred) {
+            if (f->deferred == 1) mb_error(b, "file type not allowed: %s", f->path);
+            else mb_error(b, "file larger than 64 MiB: %s", f->path);
+            continue;
+        }
+
+names:
         /* Namespace: new names live under the mod's own id. A skins decl is
          * named by the mesh path it skins, so it passes the way a raw file
          * does: the name contains /mods/<id>/ or the engine's '_' spelling. */
@@ -1910,6 +2201,16 @@ static void mb_check_files(sh_mb_bundle *b, const wchar_t *root, const sh_mb_res
             }
         }
     }
+
+    /* Pointers carry nothing: the caps count the carried files only. */
+    b->total_size = 0;
+    b->stock_count = 0;
+    b->stock_bytes = 0;
+    for (i = 0; i < b->file_count; i++) {
+        if (b->files[i].stock) { b->stock_count++; b->stock_bytes += b->files[i].size; }
+        else b->total_size += b->files[i].size;
+    }
+    if (b->total_size > SH_MB_MAX_TOTAL) mb_error(b, "assets/ larger than 256 MiB");
 
     /* Every shadow is a stock resource this bundle ships. A legacy bundle's
      * shadows are every name its first-generation package carried, new names
@@ -1974,7 +2275,8 @@ static void mb_key(mb_buf *o, int *first, const char *key)
 }
 
 /* Keys in byte order: author build bundle extra files format homepage id name
- * requirements shadows version; file keys: blob needs path provides request size.
+ * requirements shadows version; file keys: blob needs path provides request size,
+ * or for a stock pointer needs path provides request stock{sha256 source}.
  * with_build 0 gives the content compared to decide whether build advances. */
 static char *mb_emit(const sh_mb_bundle *b, int with_bundle, int with_build, size_t *out_len)
 {
@@ -1991,9 +2293,12 @@ static char *mb_emit(const sh_mb_bundle *b, int with_bundle, int with_build, siz
     for (i = 0; i < b->file_count; i++) {
         const sh_mb_file *f = &b->files[i];
         if (i) mb_put(&o, ",", 1);
-        mb_puts(&o, "{\"blob\":");
-        mb_put_jcstr(&o, f->blob);
-        mb_puts(&o, ",\"needs\":[");
+        if (f->stock) mb_puts(&o, "{\"needs\":[");
+        else {
+            mb_puts(&o, "{\"blob\":");
+            mb_put_jcstr(&o, f->blob);
+            mb_puts(&o, ",\"needs\":[");
+        }
         for (k = 0; k < f->need_count; k++) {
             if (k) mb_put(&o, ",", 1);
             mb_puts(&o, "{\"name\":");
@@ -2010,8 +2315,16 @@ static char *mb_emit(const sh_mb_bundle *b, int with_bundle, int with_build, siz
         mb_put_jcstr(&o, f->ptype ? f->ptype : "");
         mb_puts(&o, "},\"request\":");
         mb_put_jcstr(&o, f->request);
-        mb_puts(&o, ",\"size\":");
-        mb_put_u64(&o, f->size);
+        if (f->stock) {
+            mb_puts(&o, ",\"stock\":{\"sha256\":");
+            mb_put_jcstr(&o, f->blob);
+            mb_puts(&o, ",\"source\":");
+            mb_put_jcstr(&o, f->stock_source ? f->stock_source : "");
+            mb_put(&o, "}", 1);
+        } else {
+            mb_puts(&o, ",\"size\":");
+            mb_put_u64(&o, f->size);
+        }
         mb_put(&o, "}", 1);
     }
     mb_put(&o, "]", 1);
@@ -2121,7 +2434,12 @@ int sh_mb_build(const char *folder, const sh_mb_resolver *resolver, sh_mb_bundle
     w.b = out;
     w.root = root;
     w.stopped = 0;
+    w.stock = mb_stock() != NULL && mb_stock()->match != NULL;
     mb_walk_top(&w);
+    if (out->stock_decl_count && !mb_stock())
+        mb_error(out, "%s names stock pointers, which cannot be resolved (the installed-content reader is unavailable)",
+                 out->descriptor);
+    mb_add_declared(out);
     mb_check_files(out, root, resolver);
     free(root);
     mb_number_build(out, folder);
@@ -2217,15 +2535,42 @@ static int mb_only_keys(const mbj *o, const char *const *keys)
 static int mb_load_file(sh_mb_bundle *b, const mbj *e, size_t index)
 {
     static const char *const keys[] = { "blob", "needs", "path", "provides", "request", "size", NULL };
+    static const char *const stock_keys[] = { "needs", "path", "provides", "request", "stock", NULL };
+    static const char *const pointer_keys[] = { "sha256", "source", NULL };
     const mbj *blob = mbj_get(e, "blob"), *needs = mbj_get(e, "needs"), *path = mbj_get(e, "path"),
               *prov = mbj_get(e, "provides"), *req = mbj_get(e, "request"), *size = mbj_get(e, "size");
     const mbj *pt = prov ? mbj_get(prov, "type") : NULL, *pn = prov ? mbj_get(prov, "name") : NULL;
+    const mbj *stock = e->t == MBJ_OBJ ? mbj_get(e, "stock") : NULL, *ssha = NULL, *ssrc = NULL;
     char cause[SH_MB_CAUSE_MAX], type[64], name[SH_MB_REQUEST_MAX + 16], *expect;
     sh_mb_file *f;
     size_t k;
-    unsigned long long sz;
+    unsigned long long sz = 0;
 
-    if (e->t != MBJ_OBJ || !mb_only_keys(e, keys) || !blob || !needs || !path || !prov || !req || !size) {
+    if (stock) {
+        /* A stock pointer: no blob and no size. */
+        if (!mb_only_keys(e, stock_keys) || !needs || !path || !prov || !req) {
+            mb_error(b, "bundle.json files[%zu] is a stock pointer and must have exactly needs, path, provides, request "
+                     "and stock", index);
+            return 0;
+        }
+        ssha = stock->t == MBJ_OBJ ? mbj_get(stock, "sha256") : NULL;
+        ssrc = stock->t == MBJ_OBJ ? mbj_get(stock, "source") : NULL;
+        if (stock->t != MBJ_OBJ || !mb_only_keys(stock, pointer_keys) || !mb_is_hex64(ssha) || !ssrc ||
+            ssrc->t != MBJ_STR || strlen(ssrc->s) != ssrc->n || !sh_mb_check_source(ssrc->s, cause, sizeof cause)) {
+            mb_error(b, "bundle.json files[%zu].stock must be {\"sha256\": 64 lowercase hex, \"source\": an installed path}",
+                     index);
+            return 0;
+        }
+        {
+            char *lower = mb_path_dup(ssrc->s, ssrc->n);
+            int same = lower && strcmp(lower, ssrc->s) == 0;
+            free(lower);
+            if (!same) {
+                mb_error(b, "bundle.json files[%zu].stock.source must be lower-case with '/' separators", index);
+                return 0;
+            }
+        }
+    } else if (e->t != MBJ_OBJ || !mb_only_keys(e, keys) || !blob || !needs || !path || !prov || !req || !size) {
         mb_error(b, "bundle.json files[%zu] must have exactly blob, needs, path, provides, request and size", index);
         return 0;
     }
@@ -2237,7 +2582,7 @@ static int mb_load_file(sh_mb_bundle *b, const mbj *e, size_t index)
     if (!expect) { mb_error(b, "out of memory"); return 0; }
     mb_lower(expect);
     if (!sh_mb_check_request(expect, cause, sizeof cause)) { mb_error(b, "bundle.json %s: %s", path->s, cause); free(expect); return 0; }
-    if (!sh_mb_extension_allowed(expect)) { mb_error(b, "bundle.json: file type not allowed: %s", path->s); free(expect); return 0; }
+    if (!stock && !sh_mb_extension_allowed(expect)) { mb_error(b, "bundle.json: file type not allowed: %s", path->s); free(expect); return 0; }
     if (req->t != MBJ_STR || strcmp(req->s, expect) != 0) {
         mb_error(b, "bundle.json %s: request must be %s", path->s, expect);
         free(expect);
@@ -2250,9 +2595,9 @@ static int mb_load_file(sh_mb_bundle *b, const mbj *e, size_t index)
         free(expect);
         return 0;
     }
-    if (!mb_is_hex64(blob)) { mb_error(b, "bundle.json %s: blob must be 64 lowercase hex characters", path->s); free(expect); return 0; }
-    if (size->t != MBJ_NUM || !mb_plain_integer(size->s, size->n) || size->s[0] == '-' ||
-        (sz = _strtoui64(size->s, NULL, 10)) == 0 || sz > SH_MB_MAX_FILE) {
+    if (!stock && !mb_is_hex64(blob)) { mb_error(b, "bundle.json %s: blob must be 64 lowercase hex characters", path->s); free(expect); return 0; }
+    if (!stock && (size->t != MBJ_NUM || !mb_plain_integer(size->s, size->n) || size->s[0] == '-' ||
+        (sz = _strtoui64(size->s, NULL, 10)) == 0 || sz > SH_MB_MAX_FILE)) {
         mb_error(b, "bundle.json %s: size must be 1 to 64 MiB", path->s);
         free(expect);
         return 0;
@@ -2262,12 +2607,18 @@ static int mb_load_file(sh_mb_bundle *b, const mbj *e, size_t index)
     if (!f) { mb_error(b, "out of memory"); free(expect); return 0; }
     f->path = mb_strdup(path->s);
     f->request = expect;
-    memcpy(f->blob, blob->s, SH_MB_HASH_HEX + 1);
+    memcpy(f->blob, stock ? ssha->s : blob->s, SH_MB_HASH_HEX + 1);
     f->size = sz;
     f->ptype = mb_strdup(type);
     f->pname = mb_strdup(name);
     f->is_decl = mb_starts(expect, "generated/decls/");
     f->shadowed = 0;
+    if (stock) {
+        f->stock = 1;
+        f->stock_source = mb_strdup(ssrc->s);
+        b->stock_count++;
+        if (!f->stock_source) { mb_error(b, "out of memory"); return 0; }
+    }
     b->total_size += sz;
     for (k = 0; k < needs->count; k++) {
         const mbj *n = needs->items[k], *nt = mbj_get(n, "type"), *nn = mbj_get(n, "name");

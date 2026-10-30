@@ -14,6 +14,7 @@
 #include "backend_log.h"
 #ifndef SH_MODUI_PURE
 #include "overrides.h"
+#include "modstock.h"
 #endif
 
 /* A stock resource every 13954591 SnapMap install ships (as modcmd.c probes):
@@ -61,10 +62,12 @@ static int mu_default_stock(const char *request)
         if (body) HeapFree(GetProcessHeap(), 0, body);
         body = NULL;
     }
-    if (probed < 0) return -1;
+    /* The installed archives themselves answer what the engine provider
+     * cannot see (campaign-only content in gameresources). */
+    if (probed < 0) return sh_modstock_exists(request);
     __try { body = sh_overrides_read_engine_resource(request, &len); }
-    __except (EXCEPTION_EXECUTE_HANDLER) { return -1; }
-    if (!body) return 0;
+    __except (EXCEPTION_EXECUTE_HANDLER) { return sh_modstock_exists(request); }
+    if (!body) return sh_modstock_exists(request) == 1 ? 1 : 0;
     HeapFree(GetProcessHeap(), 0, body);
     return 1;
 }
@@ -369,6 +372,8 @@ static void mu_put_bundle(mu_buf *b, const mu_model *m, size_t i)
     mu_kstr(b, "hash", e->loaded ? bd->hash : "", 0);
     mu_knum(b, "size", e->loaded ? bd->total_size : 0, 0);
     mu_knum(b, "files", e->loaded ? bd->file_count : 0, 0);
+    /* Of the files, stock pointers: served from the installed game, not stored. */
+    mu_knum(b, "pointers", e->loaded ? bd->stock_count : 0, 0);
     mu_kstr(b, "state", u->state, 0);
     mu_kstr(b, "cause", u->cause, 0);
     mu_kbool(b, "legacy", u->legacy, 0);
@@ -449,6 +454,8 @@ static void mu_put_shadows(mu_buf *b, const mu_model *m)
             mu_kstr(b, "kind", kind, 0);
             mu_kbool(b, "shadow", shadow, 0);
             mu_kstr(b, "served", served >= 0 ? m->list.items[served].key : "", 0);
+            /* The serving copy is a stock pointer: the installed game's bytes. */
+            mu_kbool(b, "installed", served >= 0 && hit.is_stock, 0);
             if (conflict) {
                 sh_modserve_conflict ci;
                 int known = sh_modserve_conflict_info(paths[i].request, &ci);
@@ -945,7 +952,8 @@ static int mu_blob_used_elsewhere(const mu_model *m, const char *blob, const uns
     for (i = 0; i < m->list.count; i++) {
         const sh_ms_entry *e = &m->list.items[i];
         if (removing[i] || !e->loaded) continue;
-        for (k = 0; k < e->bundle.file_count; k++) if (!strcmp(e->bundle.files[k].blob, blob)) return 1;
+        for (k = 0; k < e->bundle.file_count; k++)
+            if (!e->bundle.files[k].stock && !strcmp(e->bundle.files[k].blob, blob)) return 1;
     }
     return 0;
 }
@@ -1135,6 +1143,7 @@ static int mu_prune(int apply, const char *keys)
                 wchar_t *w;
                 size_t q;
                 int dup = 0;
+                if (e->bundle.files[k].stock) continue;   /* installed content: no blob in the store */
                 if (!blob[0] || mu_blob_used_elsewhere(&m, blob, removing)) continue;
                 for (q = 0; q < k && !dup; q++) dup = !strcmp(e->bundle.files[q].blob, blob);
                 if (dup) continue;

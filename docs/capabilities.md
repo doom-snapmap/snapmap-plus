@@ -140,6 +140,14 @@ Converting assets from other games is Doomforge's job, not this product's. New n
   `sh_mods verify` and `sh_mods status` report what is installed, whether its files still match, and
   what it serves. The Studio window's Mods tab runs the same actions and shows what the open map
   needs (see [The Studio window](#the-studio-window)).
+- A mod file that is an unchanged copy of the game's own content is not stored or uploaded: the
+  bundle names it as a stock pointer to the installed file (any archive, the `.patch` store
+  included, or a loose file such as a `.pages`), and it is read from your install when the game
+  asks for it. `sh_mods build` and `sh_mods install` say how many files are installed content; the
+  Mods tab shows them as "from the installed game". A descriptor's `stock` object
+  (`{"<request path>": {"source": "<installed path>"}}`) names installed content under a mod's own
+  name without copying it. A player whose game lacks that content, or holds a different revision
+  of it, is told so and the mod is not installed.
 - Installed mods are served after the product's own files and before the game's archives. A mod's
   new editor rows appear in the palette when the editor is first opened; a mod installed after that
   needs `sh_mods palette rebuild`. A mod that fails a check is skipped on its own with one logged

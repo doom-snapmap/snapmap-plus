@@ -133,6 +133,29 @@ Checks native helpers, engine-interface contracts, frontend JavaScript and optio
   unfinished record, and the store lock (a pass waits for a holder, and
   installs during a worker pass wait their turn and succeed).
   `MODMIGRATE_ECHO=1` prints the log lines.
+- `modstock_test.c` covers stock pointers end to end over two synthetic
+  installs (`mod_stock_fixture.h` writes `gameresources` and
+  `snap_gameresources` indexes with `.resources` and `.patch` slices, stored
+  and raw-DEFLATE, and loose files under `base\` and the install root; the
+  second install is another game revision): the bridge's match at the file's
+  own path, of a renamed copy, in the `.patch` store and of a loose file, its
+  identify, verify and read; the builder turning carried copies into pointers
+  (no blob or size, outside the size total, a `.tome` admitted only because it
+  is installed content), the descriptor's `stock` object and its refusals,
+  the manifest grammar; the store (nothing stored or laid out for a pointer,
+  verification, the first cause on the other revision); the store client
+  against the loopback stub (an upload sends only carried blobs, a download
+  fetches only them and is refused before any fetch on the other revision);
+  and serving (installed bytes, a carried copy of the same bytes is not a
+  conflict, a pointer the install cannot answer falls through). With
+  `SH_MODSTOCK_DATA` naming a mods store (and `SH_MODSTOCK_DOOM` the install,
+  default the Steam path) it measures the Imp, both cyberdemon packs and the
+  doors pack: files, pointers, bytes not stored, bytes hashed and time;
+  skipped otherwise.
+- `modstock_migrate_test.c` runs the overrides migration over a synthetic
+  install and tree: an authored pack and a delivered package whose unchanged
+  stock files become pointers, with the counts in each folder's line, the
+  summary and `mods\.migrated.json`, and only the edited file in `blobs\`.
 - `modswf_test.c` drives the cooked-movie Load replacement against synthetic
   engine functions (a served `generated/swf/...bswf` takes the engine's below-2
   open; anything else, a failed open or a failed allocation goes to the
@@ -184,7 +207,8 @@ Checks native helpers, engine-interface contracts, frontend JavaScript and optio
   install through the tab, every state string, manifest rows and the placed
   closure, stock shadows and a conflict, the removal of a covered build, the
   main-thread refusal and the slot's size query. It also checks that every key
-  in `fixtures\mods_tab_payload.json` is one the backend writes.
+  in `fixtures\mods_tab_payload.json` is one the backend writes (including a
+  bundle's `pointers` and a shadow's `installed`, for stock pointers).
 - `mods_tab_test.js` renders the Mods tab from that fixture with a minimal DOM:
   the windowed lists, the lazily built shadow list, the action messages, the
   empty and error states, and the page, host and interface contract.

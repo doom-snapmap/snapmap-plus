@@ -30,6 +30,7 @@
 #include "modswf.h"
 #include "modhud.h"
 #include "modmigrate.h"
+#include "modstock.h"
 #include "modpublished.h"
 #include "modpublish.h"
 #include "budget_table.h"
@@ -343,6 +344,9 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
         int overrides_installed = 0;
         /* Installed mods: read every bundle index before the provider can be
          * asked for a file, so the first open already sees the table. */
+        /* Stock pointers read the installed game through the bridge (modstock.h);
+         * registering it loads nothing until a pointer is built, verified or served. */
+        sh_modstock_register();
         (void)sh_modmigrate_boot();   /* the retired overrides folder, once (modmigrate.h) */
         (void)sh_modserve_index_boot();
         if (SH_IDFILE_SLOTS != SH_OVERRIDES_STREAM_SLOTS || SH_PROVIDER_OPEN_SLOT != SH_OVERRIDES_OPEN_SLOT)

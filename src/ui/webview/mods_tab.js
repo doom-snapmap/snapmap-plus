@@ -39,7 +39,7 @@ var modsTab = (function () {
     b = b && typeof b === 'object' ? b : {};
     var state = Object.prototype.hasOwnProperty.call(STATES, b.state) ? b.state : 'skipped';
     return {key: str(b.key), id: str(b.id), name: str(b.name), author: str(b.author), version: str(b.version),
-            build: num(b.build), hash: str(b.hash), size: num(b.size), files: num(b.files), state: state,
+            build: num(b.build), hash: str(b.hash), size: num(b.size), files: num(b.files), pointers: num(b.pointers), state: state,
             cause: str(b.cause), legacy: bool(b.legacy), verified: bool(b.verified), installedAt: num(b.installedAt),
             editorRows: num(b.editorRows), shadows: num(b.shadows), supersededPaths: num(b.supersededPaths),
             supersededBy: str(b.supersededBy), folder: str(b.folder)};
@@ -63,7 +63,7 @@ var modsTab = (function () {
   function normShadow(s) {
     s = s && typeof s === 'object' ? s : {};
     var kind = Object.prototype.hasOwnProperty.call(SHADOW_KINDS, s.kind) ? s.kind : 'stock';
-    return {request: str(s.request), kind: kind, shadow: bool(s.shadow), served: str(s.served),
+    return {request: str(s.request), kind: kind, shadow: bool(s.shadow), served: str(s.served), installed: bool(s.installed),
             bundles: arr(s.bundles).map(str), resolution: str(s.resolution), reason: str(s.reason)};
   }
 
@@ -98,6 +98,11 @@ var modsTab = (function () {
   }
   function plural(n, one, many) { return n + ' ' + (n === 1 ? one : (many || one + 's')); }
   function versionText(b) { return (b.version || '0.0.0') + (b.build ? ' build ' + b.build : ''); }
+  /* "12 files" or "12 files, 9 from the installed game" (stock pointers: nothing stored for them). */
+  function filesText(b) {
+    var p = num(b.pointers);
+    return plural(b.files, 'file') + (p > 0 ? ', ' + p + ' from the installed game' : '');
+  }
   function title(b) { return b.name || b.id || b.key; }
 
   /* The label, tone and one-line explanation of a bundle's state. */
@@ -122,6 +127,9 @@ var modsTab = (function () {
   };
   function shadowInfo(s) {
     var info = SHADOW_KINDS[s.kind] || SHADOW_KINDS.stock;
+    /* A stock pointer serves the path: the installed game's bytes. */
+    if (s.kind !== 'conflict' && s.installed)
+      return {label: info.label, tone: info.tone, text: info.text + " Served from the installed game's own copy."};
     if (s.kind !== 'conflict') return info;
     if (CONFLICT_TEXT[s.resolution]) return {label: info.label, tone: 'warn', text: CONFLICT_TEXT[s.resolution]};
     if (s.resolution === 'chosen')
@@ -259,7 +267,7 @@ var modsTab = (function () {
       top.appendChild(el('span', 'mods-row-name', title(b)));
       top.appendChild(pill(info.label, info.tone));
       if (b.legacy && b.state !== 'legacy') top.appendChild(pill('Legacy', ''));
-      var sub = el('div', 'mods-row-sub', b.key + ' \u00b7 ' + formatSize(b.size) + ' \u00b7 ' + plural(b.files, 'file'));
+      var sub = el('div', 'mods-row-sub', b.key + ' \u00b7 ' + formatSize(b.size) + ' \u00b7 ' + filesText(b));
       row.title = info.detail;
       row.appendChild(top);
       row.appendChild(sub);
@@ -297,7 +305,7 @@ var modsTab = (function () {
       field(box, 'Mod', b.id || '(unbuilt)');
       field(box, 'Version', versionText(b));
       if (b.author) field(box, 'Author', b.author);
-      field(box, 'Size', formatSize(b.size) + ', ' + plural(b.files, 'file'));
+      field(box, 'Size', formatSize(b.size) + ', ' + filesText(b));
       field(box, 'Editor rows', String(b.editorRows));
       if (b.shadows) field(box, 'Shadows', plural(b.shadows, 'stock file'));
       field(box, 'Verified', b.verified ? 'Yes' : 'No');
@@ -493,7 +501,7 @@ var modsTab = (function () {
 
   return {ROW_HEIGHT: ROW_HEIGHT, SHADOW_ROW_HEIGHT: SHADOW_ROW_HEIGHT, OVERSCAN: OVERSCAN, STATES: STATES, ROW_STATES: ROW_STATES,
           SHADOW_KINDS: SHADOW_KINDS, ACTIONS: ACTIONS, normalize: normalize, formatSize: formatSize, stateInfo: stateInfo,
-          rowInfo: rowInfo, shadowInfo: shadowInfo, filterBundles: filterBundles, windowRange: windowRange, mapSummary: mapSummary,
+          rowInfo: rowInfo, shadowInfo: shadowInfo, filesText: filesText, filterBundles: filterBundles, windowRange: windowRange, mapSummary: mapSummary,
           actionMessage: actionMessage, pruneConfirmText: pruneConfirmText, create: create};
 })();
 

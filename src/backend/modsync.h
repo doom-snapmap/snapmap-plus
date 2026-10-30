@@ -1,6 +1,11 @@
 /* modsync.h -- upload, download and claims between the local mod store
  * (modstore.c) and the product's mod store (modnet.c, Contract 4).
  *
+ * Stock pointers (modbundle.h) carry no blob: an upload never sends their
+ * bytes, and a download resolves each one against the installed game before
+ * anything is fetched, refusing the bundle with the first cause when the game
+ * lacks the entry or holds other bytes.
+ *
  * Upload (publish, lobby host, an explicit push): for every bundle, the
  * blobs the store lacks are negotiated and sent from mods\blobs\<sha>, then
  * the exact canonical manifest (bundle.canonical.json), then one claim names
@@ -39,6 +44,7 @@ typedef struct modsync_stats {
     unsigned blobs_total;           /* distinct blobs named */
     unsigned blobs_missing;         /* the store lacked (upload) or the local store lacked (download) */
     unsigned blobs_transferred;
+    unsigned stock_files;           /* upload: stock pointers named, whose bytes are never sent */
     unsigned long long bytes_up, bytes_down;
     unsigned requests;
     double ms;
@@ -91,6 +97,7 @@ typedef int (*modsync_blob_source_fn)(void *context, const char *sha, unsigned l
 
 typedef struct modsync_install_info {
     unsigned blobs_present, blobs_fetched;
+    unsigned stock_files;           /* stock pointers resolved against the installed game */
     unsigned long long bytes_fetched;
     int already_installed;
     char rel[SH_MB_ID_MAX + 1 + 4 * SH_MB_VERSION_MAX + 1 + 20 + 8];   /* <key> or legacy\<key> */

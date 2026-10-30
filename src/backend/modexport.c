@@ -623,6 +623,7 @@ int modexport_write(const char *map_json, size_t len, const char *zip_path, mode
         for (k = 0; k < b->file_count && !w.failed; k++) {
             const sh_mb_file *f = &b->files[k];
             int pass;
+            if (f->stock) continue;   /* installed content: the ZIP carries only the pointer */
             if (me_hset_find(&written, f->blob, 0) >= 0) { st->blobs_deduped++; continue; }
             bytes = NULL;
             for (pass = 0; pass < 2 && !bytes; pass++) {
@@ -793,6 +794,7 @@ static int me_import_open(me_import *im, const char *zip_path, int manifests, ch
         for (k = 0; k < b->file_count; k++) {
             char name[MAX_PATH * 2];
             long e, s;
+            if (b->files[k].stock) continue;
             if (me_hset_find(&im->blobs, b->files[k].blob, 0) >= 0) continue;
             _snprintf_s(name, sizeof name, _TRUNCATE, "%s/%s", im->bundles[i].folder, b->files[k].path);
             e = me_find(&im->zr, name);

@@ -43,6 +43,7 @@ typedef struct ms_file {
     int served;
     const unsigned char *body;            /* composed bytes served instead of the disk file (arena), or NULL */
     size_t body_len;
+    const char *stock;                    /* a stock pointer's installed source (blob is its SHA-256), or NULL */
     volatile LONG opens, fail_logged, shadow_logged;
     volatile LONG reg_state;              /* 0 none, 1 ready, -1 failed (main thread) */
     volatile LONG withdrawn;              /* a shadow taken back by a registration pass: lookups miss it */
@@ -87,6 +88,7 @@ typedef struct ms_index {
 
 static ms_index *volatile g_index;
 static int ms_bundle_by_hash(const ms_index *x, const char *hash, int admitted_only);
+static unsigned char *ms_file_raw(const ms_file *f, size_t *len);
 /* Gates this layer changed and the values it displaced: a gate is restored
  * only when no admitted bundle needs it any more and nobody else has changed
  * it since. Main thread only, like every registration pass. */
@@ -437,6 +439,7 @@ static void ms_parse_file(ms_index *x, ms_bundle *b, ms_json *c, char **shadows,
     char key[64];
     const char *v, *ve;
     char *path = NULL, *blob = NULL, *request = NULL, *ptype = NULL, *pname = NULL;
+    const char *stock = NULL;
     double size = -1;
     int need_first = x->nneeds, need_count = 0;
     ms_file *f;
@@ -445,6 +448,17 @@ static void ms_parse_file(ms_index *x, ms_bundle *b, ms_json *c, char **shadows,
         if (!ms_jmember(c, key, sizeof key, &v, &ve)) { ms_fail(b, "malformed files[] entry"); return; }
         if (!strcmp(key, "path")) path = ms_jstr(x, v, ve, 511);
         else if (!strcmp(key, "blob")) blob = ms_jstr(x, v, ve, 64);
+        else if (!strcmp(key, "stock")) {
+            /* A stock pointer (modbundle.h): installed content, no blob, no size. */
+            ms_json p = { v, ve };
+            stock = "";
+            if (ms_jenter(&p, '{')) while (ms_jnext(&p, '}')) {
+                const char *pv, *pve;
+                if (!ms_jmember(&p, key, sizeof key, &pv, &pve)) break;
+                if (!strcmp(key, "source")) stock = ms_jstr(x, pv, pve, 511);
+                else if (!strcmp(key, "sha256")) blob = ms_jstr(x, pv, pve, 64);
+            }
+        }
         else if (!strcmp(key, "request")) request = ms_jstr(x, v, ve, 511);
         else if (!strcmp(key, "size")) { if (!ms_jnum(v, ve, &size)) size = -1; }
         else if (!strcmp(key, "provides")) {
@@ -482,7 +496,10 @@ static void ms_parse_file(ms_index *x, ms_bundle *b, ms_json *c, char **shadows,
         }
     }
     if (!path || !ms_valid_rel(path)) { ms_fail(b, "files[] path '%s' is not a plain assets/ path", path ? path : "?"); return; }
-    if (size < 0 || size > (double)SH_MODSERVE_MAX_FILE || size != (double)(uint64_t)size) {
+    if (stock) {
+        if (!stock[0] || !blob || !ms_valid_hash(blob)) { ms_fail(b, "'%s' is a stock pointer without a source and hash", path); return; }
+        size = 0;
+    } else if (size < 0 || size > (double)SH_MODSERVE_MAX_FILE || size != (double)(uint64_t)size) {
         ms_fail(b, "'%s' has no valid size", path);
         return;
     }
@@ -503,6 +520,7 @@ static void ms_parse_file(ms_index *x, ms_bundle *b, ms_json *c, char **shadows,
     f->bundle = (int)(b - x->bundles);
     f->request = request;
     f->blob = blob;
+    f->stock = stock;
     f->size = (uint64_t)size;
     f->need_first = need_first;
     f->need_count = need_count;
@@ -740,7 +758,7 @@ static void ms_parse_bundle(ms_index *x, ms_bundle *b, const char *blobs_dir)
             ms_parse_file(x, b, &one, shadows, nshadows);
         }
         b->file_count = x->nfiles - b->first_file;
-        for (i = b->first_file; i < b->first_file + b->file_count; ++i) b->total += x->files[i].size;
+        for (i = b->first_file; i < b->first_file + b->file_count; ++i) b->total += x->files[i].size;   /* a pointer's is 0 */
     }
     free(shadows);
     HeapFree(GetProcessHeap(), 0, text);
@@ -749,7 +767,9 @@ static void ms_parse_bundle(ms_index *x, ms_bundle *b, const char *blobs_dir)
      * tree is taken from the blob store when the blob has the right size. */
     for (i = b->first_file; !b->cause[0] && i < b->first_file + b->file_count; ++i) {
         ms_file *f = &x->files[i];
-        long long got = ms_file_size(f->disk);
+        long long got;
+        if (f->stock) continue;   /* resolved against the installed game at install, read when served */
+        got = ms_file_size(f->disk);
         if (got == (long long)f->size) continue;
         if (f->blob && blobs_dir[0]) {
             char alt[MS_PATH_MAX];
@@ -1407,8 +1427,9 @@ static int ms_resolve(ms_index *x)
                     }
                     if (k >= 0 && f->blob && x->files[winner].blob && !strcmp(f->blob, x->files[winner].blob)) dup = 1;
                     if (dup) continue;
-                    owned[nt] = ms_read_whole(f->disk, SH_MODSERVE_CACHE_FILE, &lens[nt]);
-                    if (!owned[nt] || lens[nt] != f->size) { ok = 0; break; }
+                    /* A stock pointer's text is the installed decl's. */
+                    owned[nt] = ms_file_raw(f, &lens[nt]);
+                    if (!owned[nt] || lens[nt] > SH_MODSERVE_CACHE_FILE) { ok = 0; break; }
                     texts[nt] = owned[nt];
                     nt++;
                 }
@@ -1724,8 +1745,33 @@ int sh_modserve_lookup(const char *request, sh_modserve_hit *out)
         out->bundle_hash = x->bundles[f->bundle].hash;
         out->is_decl = f->is_decl;
         out->is_shadow = f->is_shadow;
+        out->is_stock = f->stock != NULL;
+        out->stock_source = f->stock;
     }
     return 1;
+}
+
+/* The bytes of one indexed file (process heap), or NULL: a stock pointer's
+ * installed bytes, else the file at its indexed size. A pointer the reader
+ * cannot answer falls back to a copy in the bundle folder with the same
+ * hash. */
+static unsigned char *ms_file_raw(const ms_file *f, size_t *len)
+{
+    unsigned char *buf = NULL;
+    *len = 0;
+    if (f->stock) {
+        char cause[SH_MB_CAUSE_MAX], hex[SH_MB_HASH_HEX + 1];
+        if (sh_mb_stock_read(f->stock, f->blob, &buf, len, f->request, cause, sizeof cause) == SH_MB_STOCK_OK) return buf;
+        buf = ms_read_whole(f->disk, SH_MODSERVE_MAX_FILE, len);
+        if (buf) {
+            sh_mb_sha256_hex(buf, *len, hex);
+            if (strcmp(hex, f->blob) != 0) { HeapFree(GetProcessHeap(), 0, buf); buf = NULL; *len = 0; }
+        }
+        return buf;
+    }
+    buf = ms_read_whole(f->disk, SH_MODSERVE_MAX_FILE, len);
+    if (buf && (uint64_t)*len != f->size) { HeapFree(GetProcessHeap(), 0, buf); buf = NULL; *len = 0; }
+    return buf;
 }
 
 /* Bounded cache of small files: decls are opened three times while they are
@@ -1817,14 +1863,19 @@ int sh_modserve_open(const char *request, unsigned char **bytes, size_t *length)
     } else if (InterlockedCompareExchange(&g_cache_enabled, 0, 0)) buf = ms_cache_copy(f, &len);
     if (buf && !f->body) InterlockedIncrement(&g_cache_hits);
     else if (!buf) {
-        buf = ms_read_whole(f->disk, SH_MODSERVE_MAX_FILE, &len);
-        if (buf && (uint64_t)len != f->size) { HeapFree(GetProcessHeap(), 0, buf); buf = NULL; }
+        buf = ms_file_raw(f, &len);
         if (!buf) {
             InterlockedIncrement(&g_open_failures);
-            if (!InterlockedExchange((volatile LONG *)&f->fail_logged, 1))
-                ms_log("'%s' from %s@%s could not be read at its indexed size (%llu bytes) from '%s'; "
-                       "the engine's own resolution is used", f->request, x->bundles[f->bundle].id,
-                       x->bundles[f->bundle].version, (unsigned long long)f->size, f->disk);
+            if (!InterlockedExchange((volatile LONG *)&f->fail_logged, 1)) {
+                if (f->stock)
+                    ms_log("'%s' from %s@%s points at installed content '%s' (sha256 %.16s), which could not be read "
+                           "with that hash; the engine's own resolution is used", f->request, x->bundles[f->bundle].id,
+                           x->bundles[f->bundle].version, f->stock, f->blob);
+                else
+                    ms_log("'%s' from %s@%s could not be read at its indexed size (%llu bytes) from '%s'; "
+                           "the engine's own resolution is used", f->request, x->bundles[f->bundle].id,
+                           x->bundles[f->bundle].version, (unsigned long long)f->size, f->disk);
+            }
             return -1;
         }
         if (InterlockedCompareExchange(&g_cache_enabled, 0, 0)) ms_cache_put(f, buf, len);
@@ -2146,9 +2197,7 @@ static unsigned char *ms_file_bytes(const ms_file *f, size_t *len)
         if (b) { memcpy(b, f->body, f->body_len); *len = f->body_len; }
         return b;
     }
-    b = ms_read_whole(f->disk, SH_MODSERVE_MAX_FILE, len);
-    if (b && *len != f->size) { HeapFree(GetProcessHeap(), 0, b); b = NULL; *len = 0; }
-    return b;
+    return ms_file_raw(f, len);
 }
 
 /* 1 with the first model an animWeb's modelInfos block names that no served

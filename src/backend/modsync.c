@@ -250,6 +250,7 @@ static void msy_protect_blobs(const char *root, const sh_mb_bundle *b)
     for (i = 0; i < b->file_count; i++) {
         char p[MAX_PATH * 4];
         wchar_t *w;
+        if (b->files[i].stock) continue;
         _snprintf_s(p, sizeof p, _TRUNCATE, "%s\\blobs\\%s", root, b->files[i].blob);
         w = sh_mb_wpath(p);
         if (w) {
@@ -606,6 +607,19 @@ int modsync_install_manifest(const char *canonical, size_t len, const char *hash
     }
     _snprintf_s(key, sizeof key, _TRUNCATE, "%s@%s+%llu", b.id, b.version, b.build);
     _snprintf_s(info->rel, sizeof info->rel, _TRUNCATE, "%s%s", b.legacy ? "legacy\\" : "", key);
+    /* Stock pointers name this player's installed game: a game that lacks an
+     * entry (or holds other bytes, a different revision) refuses the bundle
+     * before anything is fetched. */
+    for (i = 0; i < b.file_count; i++) {
+        if (!b.files[i].stock) continue;
+        if (sh_mb_stock_verify(b.files[i].stock_source, b.files[i].blob, NULL, b.files[i].path, one, sizeof one) !=
+            SH_MB_STOCK_OK) {
+            msy_cause(cause, cap, "refused: %s", one);
+            sh_mb_free(&b);
+            return 0;
+        }
+        info->stock_files++;
+    }
 
     modsync_store_lock();
     if (!msy_root(root, sizeof root)) { msy_cause(cause, cap, "the store folder cannot be resolved"); goto done; }
@@ -648,7 +662,8 @@ int modsync_install_manifest(const char *canonical, size_t len, const char *hash
     for (i = 0; i < b.file_count; i++) {
         size_t k;
         int seen = 0;
-        for (k = 0; k < i && !seen; k++) seen = strcmp(b.files[k].blob, b.files[i].blob) == 0;
+        if (b.files[i].stock) continue;   /* never fetched: the installed game holds it */
+        for (k = 0; k < i && !seen; k++) seen = !b.files[k].stock && strcmp(b.files[k].blob, b.files[i].blob) == 0;
         if (seen) continue;
         if (!msy_place_blob(root, &b.files[i], source, ctx, info, one, sizeof one)) {
             msy_cause(cause, cap, "%s", one);
@@ -680,6 +695,7 @@ int modsync_install_manifest(const char *canonical, size_t len, const char *hash
         char dst[MAX_PATH * 4], blob[MAX_PATH * 4];
         wchar_t *wd, *wb;
         int placed = 0;
+        if (b.files[i].stock) continue;
         msy_join(dst, sizeof dst, staging, b.files[i].path);
         _snprintf_s(blob, sizeof blob, _TRUNCATE, "%s\\blobs\\%s", root, b.files[i].blob);
         wd = sh_mb_wpath(dst);
@@ -799,6 +815,7 @@ typedef struct msy_up {
     int nb;
     msy_up_blob *blobs;
     size_t nblob, capblob;
+    unsigned stock_files;      /* stock pointers named: never uploaded */
 } msy_up;
 
 static void msy_up_free(msy_up *u)
@@ -863,7 +880,9 @@ static int msy_up_collect(msy_up *u, const char *const *hashes, int n, char *cau
         if (!ub->blobs) { ok = msy_cause(cause, cap, "out of memory"); break; }
         for (k = 0; k < e->bundle.file_count && ok; k++) {
             const sh_mb_file *f = &e->bundle.files[k];
-            msy_up_blob *ob = msy_up_find_blob(u, f->blob);
+            msy_up_blob *ob;
+            if (f->stock) { u->stock_files++; continue; }   /* the store never receives installed content */
+            ob = msy_up_find_blob(u, f->blob);
             strcpy_s(ub->blobs[ub->nblobs++], MODNET_HASH_HEX + 1, f->blob);
             if (ob) continue;
             if (u->nblob == u->capblob) {
@@ -956,6 +975,7 @@ static int msy_upload(const char *const *hashes, int n, const char *ref, const m
     }
     st->bundles = (unsigned)u.nb;
     st->blobs_total = (unsigned)u.nblob;
+    st->stock_files = u.stock_files;
     memset(&prog, 0, sizeof prog);
     prog.outer = io;
 
@@ -1124,8 +1144,8 @@ int modsync_fetch_bundle(const char *hash, const modnet_io *io, modsync_stats *s
         prog.outer = io;
         if (with && sh_mb_load_text(with, strlen(with), &b)) {
             size_t i;
-            st->blobs_total = (unsigned)b.file_count;
-            for (i = 0; i < b.file_count; i++) prog.total += b.files[i].size;
+            st->blobs_total = (unsigned)(b.file_count - b.stock_count);
+            for (i = 0; i < b.file_count; i++) prog.total += b.files[i].size;   /* a pointer's size is 0 */
         }
         sh_mb_free(&b);
         free(with);

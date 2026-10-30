@@ -40,6 +40,7 @@
 #include <string.h>
 #include "modserve.h"
 #include "overrides.h"
+#include "modstock.h"
 #include "signatures.h"
 #include "patch.h"
 #include "backend_log.h"
@@ -246,7 +247,8 @@ static int op_load(void *context, const char *type, const char *name, int persis
 }
 
 /* The player's game archives, read through the engine provider (the same
- * reader the builder's stock check uses). */
+ * reader the builder's stock check uses), then the installed archives
+ * themselves (modstock.c), which also hold campaign-only content. */
 static int op_stock_exists(void *context, const char *request)
 {
     unsigned char *body = NULL;
@@ -255,9 +257,9 @@ static int op_stock_exists(void *context, const char *request)
     __try {
         body = sh_overrides_read_engine_resource(request, &len);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return -1;
+        return sh_modstock_exists(request);
     }
-    if (!body) return 0;
+    if (!body) return sh_modstock_exists(request) == 1 ? 1 : 0;
     HeapFree(GetProcessHeap(), 0, body);
     return 1;
 }
