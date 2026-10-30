@@ -900,6 +900,50 @@ name in the engine's `idMD6Model` and `idImage` resource lists, once the gates
 are live: `MODS: editor: reloaded <n> model(s) and <m> image(s) loaded before
 their bundles' requirements were live`.
 
+Refresh: a rescan (the Mods tab's refresh, `sh_mods rescan`, a console build
+or install) publishes a new table while the engine keeps every decl it parsed
+and every model and image it loaded from the old one. Each table therefore
+compares itself with the table it replaces, per served request path: a path
+whose bytes differ is changed, one only the new table serves is new, one only
+the old table served is gone. Changed decls, models and images and gone
+shadow decls are marked pending, and the marks carry over to later tables
+while the bytes stay the same. Before applying, the served decls whose
+top-level `inherit` names a pending decl are marked too, transitively, since
+the engine resolves a parent when the child is parsed (measured: re-parsing
+only the Hell Guard's base entityDef left the spawned child at its old
+health). Applying uses the two primitives above: each marked decl the engine
+holds parsed is re-parsed (state bits cleared, `ResourceGenericLoad` inside
+process heap 0), parents before children, a gone shadow so that the engine
+reads its own bytes again; each marked model and image it holds loaded is
+reloaded in place by name, only once its bundle's gates are live. A decl the
+engine has not parsed, or a resource it has not loaded, is settled, since its
+next load reads the current bytes, and a settled decl is no early decl. The
+rescan applies the marks at once on the main thread, except during SnapMap
+Play (the editor inactive with deactivate reason 3): then they wait, and a
+watcher thread hands them to the main-thread call slot, which drains in
+editor frames, at the return to the editor; every registration pass also
+applies them between publishing its sources and running its loads. Editor
+content follows in the same step: new gameplay decls of a mod a registration
+pass already registered this session are registered at once (the map's
+activation plan for just those files), and when editor rows were added,
+changed or removed the live palette is rebuilt through the
+`sh_mods palette rebuild` path, whose editor pass registers new rows first. A
+removed row is re-parsed without a source, resolves no entityDef and is left
+out by the rebuild; the strids layer re-reads bundle strings on every
+published table, so a new row shows its `#str_` name. Without a palette yet,
+the first editor entry builds it with every row; a refused rebuild (an entity
+or wire held) is retried by `sh_mods palette rebuild`. What stays reported
+rather than applied: new names of a mod no map has used this session (they
+register when a map that names the mod loads), a changed movie (read at the
+next map load), and changed files nothing reloads in this process (sound
+banks, animations and other raw files besides models and images) or removed
+non-row decl names, which need a restart; a stock decl no bundle serves that
+inherits a changed one cannot be found from the index. The log carries one `MODS: refresh:` line
+per category and a summary; the Mods tab's rescan result carries
+`refresh: {reparsed, reloaded, needsMapReload, needsRestart, pending,
+deferred, note}`, and `sh_mods rescan` (or `sh_mods refresh`) echoes the same
+lines to the console; `sh_mods status` says when changes are pending.
+
 ### Migration of the retired overrides folder
 
 Releases up to v0.2.1-beta.19 kept packages in `overrides\`. At backend start,

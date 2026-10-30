@@ -99,6 +99,23 @@ static int fake_mig_start(int again)
 }
 static int fake_mig_busy(void) { return InterlockedDecrement(&g_mig_busy_polls) >= 0 ? 1 : 0; }
 
+/* The refresh after a rescan (sh_modserve_refresh_after_rescan): what it
+ * reports, and how often it ran. Mode 0 nothing changed, 1 applied, 2 deferred. */
+static int g_refresh_mode, g_refreshes;
+static int fake_refresh(sh_modserve_refresh *out)
+{
+    g_refreshes++;
+    memset(out, 0, sizeof *out);
+    if (g_refresh_mode == 1) {
+        out->reparsed = 3; out->reloaded = 1; out->needs_map_reload = 2; out->needs_restart = 1;
+        strcpy_s(out->note, sizeof out->note, "3 decl(s) re-parsed, 1 model(s) and image(s) reloaded");
+    } else if (g_refresh_mode == 2) {
+        out->pending = 4;
+        strcpy_s(out->note, sizeof out->note, "4 change(s) apply at the next editor pass or map load (Play is running)");
+    } else strcpy_s(out->note, sizeof out->note, "no served file changed");
+    return g_refresh_mode;
+}
+
 static void bind_fakes(void)
 {
     sh_modui_engine e;
@@ -106,6 +123,7 @@ static void bind_fakes(void)
     e.on_main_thread = fake_on_main;
     e.placed_names = fake_placed;
     e.rescan = fake_rescan;
+    e.refresh = fake_refresh;
     e.palette_rebuild = fake_palette;
     e.stock_exists = fake_stock;
     e.migrate_pending = fake_mig_pending;
@@ -334,6 +352,40 @@ int main(int argc, char **argv)
         CHECK(sh_modui_slot(NULL, &call) == -1 && call.needed > 0);   /* the earlier document remains */
     }
     g_main = 1;
+
+    printf("-- rescan: the result carries what the refresh did in the game\n");
+    g_refresh_mode = 1;
+    g_refreshes = 0;
+    doc = run_doc(SH_MODS_ACT_RESCAN, NULL);
+    CHECK(g_refreshes == 1);
+    CHECK(has(doc, "\"action\":\"rescan\",\"ok\":true"));
+    CHECK(has(doc, "In the game: 3 decl(s) re-parsed, 1 model(s) and image(s) reloaded."));
+    CHECK(has(doc, "\"refresh\":{\"reparsed\":3,\"reloaded\":1,\"needsMapReload\":2,\"needsRestart\":1,"
+                   "\"pending\":0,\"deferred\":false,\"note\":\"3 decl(s) re-parsed, 1 model(s) and image(s) reloaded\"}"));
+    free(doc);
+    g_refresh_mode = 2;
+    doc = run_doc(SH_MODS_ACT_RESCAN, NULL);
+    CHECK(has(doc, "\"refresh\":{\"reparsed\":0,\"reloaded\":0,\"needsMapReload\":0,\"needsRestart\":0,"
+                   "\"pending\":4,\"deferred\":true,\"note\":\"4 change(s) apply at the next editor pass or map load (Play is running)\"}"));
+    free(doc);
+    g_refresh_mode = 0;
+    doc = run_doc(SH_MODS_ACT_RESCAN, NULL);
+    CHECK(has(doc, "\"deferred\":false,\"note\":\"no served file changed\"}") && has(doc, "Mods folder reread: 0 mod(s) active."));
+    CHECK(!has(doc, "In the game:"));
+    free(doc);
+    /* A refused rescan runs no refresh and carries none. */
+    g_refreshes = 0;
+    {
+        sh_modui_engine e;
+        memset(&e, 0, sizeof e);
+        e.on_main_thread = fake_on_main;
+        sh_modui_bind(&e);   /* no rescan bound in a SH_MODUI_PURE build */
+        doc = run_doc(SH_MODS_ACT_RESCAN, NULL);
+        CHECK(has(doc, "\"ok\":false") && !has(doc, "\"refresh\"") && g_refreshes == 0);
+        free(doc);
+        bind_fakes();
+    }
+    g_rescans = 0;
 
     printf("-- install through the tab: verified, indexed, installed\n");
     doc = run_doc(SH_MODS_ACT_INSTALL, "relative\\folder");
