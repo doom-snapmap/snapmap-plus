@@ -111,6 +111,7 @@ static void test_names(void)
     CHECK(sh_mb_extension_allowed("a/b.vspv"));
     CHECK(sh_mb_extension_allowed("a/b.fspv"));
     CHECK(sh_mb_extension_allowed("a/b.cspv"));
+    CHECK(sh_mb_extension_allowed("generated/discreteanimation/models/mapobjects/hell/smm_pillar/smm_pillar_breakable.dmodel"));
     CHECK(sh_mb_extension_allowed("a/b.mrpr"));
     CHECK(!sh_mb_extension_allowed("a/b.baas_"));
     CHECK(!sh_mb_extension_allowed("a/b.exe"));

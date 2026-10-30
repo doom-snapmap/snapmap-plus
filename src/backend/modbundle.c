@@ -898,7 +898,7 @@ int sh_mb_extension_allowed(const char *request)
 {
     static const char *const allowed[] = { ".decl", ".bmd6model", ".bmd6skl", ".bmd6anim", ".bimage",
                                            ".bmodel", ".bcm", ".bnk", ".json", ".bin", ".vspv",
-                                           ".fspv", ".cspv", ".mrpr", NULL };
+                                           ".fspv", ".cspv", ".mrpr", ".dmodel", NULL };
     const char *slash = strrchr(request, '/');
     const char *dot = strrchr(slash ? slash : request, '.');
     size_t i;
@@ -975,6 +975,7 @@ int sh_mb_logical_name(const char *r, char *type, size_t tcap, char *name, size_
     else if (mb_starts(r, "generated/renderprogs/") || mb_starts(r, "generated/spirv/") ||
              mb_ends(r, ".vspv") || mb_ends(r, ".fspv") || mb_ends(r, ".cspv") ||
              mb_ends(r, ".mrpr")) cls = "renderProg";
+    else if (mb_starts(r, "generated/discreteanimation/") || mb_ends(r, ".dmodel")) cls = "discreteAnimation";
     else if (mb_starts(r, "generated/anim/")) cls = "anim";
     else if (mb_starts(r, "generated/decalatlas/")) cls = "decalatlas";
     else if (mb_starts(r, "generated/lightatlas/")) cls = "lightatlas";
