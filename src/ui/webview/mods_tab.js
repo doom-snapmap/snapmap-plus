@@ -204,7 +204,7 @@ var modsTab = (function () {
       if (!loaded) { box.appendChild(el('div', 'list-empty', waiting ? 'Reading installed mods...' : 'Open this tab to list installed mods.')); return; }
       if (lastError) { box.appendChild(el('div', 'list-empty mods-error', lastError)); return; }
       if (!model.mods.length) {
-        box.appendChild(el('div', 'list-empty', 'No mods installed. Use Install folder to add one, or put a mod folder in the mods folder.'));
+        box.appendChild(el('div', 'list-empty', 'No mods installed. Use the install button (the download icon) to add one, or put a mod folder in the mods folder.'));
         return;
       }
       if (!view.length) { box.appendChild(el('div', 'list-empty', 'No installed mod matches the filter.')); return; }

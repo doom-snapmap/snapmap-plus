@@ -279,7 +279,7 @@ test('empty and error states', () => {
   const empty = clone(fixture);
   empty.mods = []; empty.map = {entities: -1, names: 0, rows: [], placed: []}; empty.migrate = {entries: 0, pending: 0, running: false};
   shown(h, empty);
-  assert.match(h.nodes.modsList.textContent, /No mods installed\. Use Install folder/);
+  assert.match(h.nodes.modsList.textContent, /No mods installed\. Use the install button/);
   assert.match(h.nodes.modsMap.textContent, /Open a map in the editor/);
   assert.equal(h.nodes.modsBadge.textContent, '0');
   assert.equal(h.nodes.modsStatus.textContent, '');
@@ -344,7 +344,8 @@ test('page contract', () => {
   IDS.forEach(id => assert.ok(html.includes('id="' + id + '"'), 'mockup.html has #' + id));
   GONE.forEach(id => assert.ok(!html.includes('id="' + id + '"'), 'mockup.html no longer has #' + id));
   const panel = html.slice(html.indexOf('<div class="content" id="panel-mods"'), html.indexOf('<script src="mods_tab.js">'));
-  for (const label of ['>Install folder<', '>Open mods folder<', '>Remove<', '>Migrate<']) assert.ok(panel.includes(label), 'button ' + label);
+  for (const label of ['>Open mods folder<', '>Remove<', '>Migrate<']) assert.ok(panel.includes(label), 'button ' + label);
+  assert.ok(panel.includes('id="modsInstallBtn"') && panel.includes('aria-label="Install a mod folder"') && panel.includes('#icon-download'), 'the install button is the download icon');
   assert.ok(!/Verify|Rebuild palette|Remove unused|Shadows and conflicts/.test(panel.slice(0, panel.indexOf('</div>\n  </div>\n') + 1)));
   assert.match(html, /id="modsList" role="listbox" tabindex="0"/, 'the list takes keyboard focus');
   assert.match(html, /id="modsMigrateBtn" style="display:none"/);
