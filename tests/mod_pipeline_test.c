@@ -38,9 +38,12 @@ static int g_failed, g_checks;
 } while (0)
 
 static int g_echo;
+static char g_log[16384];
 void backend_log(const char *line)
 {
+    size_t at = strlen(g_log), n = line ? strlen(line) : 0;
     if (g_echo && line) printf("    %s\n", line);
+    if (line && at + n + 2 < sizeof g_log) { memcpy(g_log + at, line, n); g_log[at + n] = '\n'; g_log[at + n + 1] = 0; }
 }
 
 /* ---- stock names (as modbundle_test) -------------------------------------------------------- */
@@ -129,6 +132,31 @@ static int op_load(void *c, const char *type, const char *name, int persist, uns
 }
 static const sh_modserve_engine_ops OPS = { NULL, op_source, op_register, op_load };
 
+/* ---- cvar stand-in: the product's route (idCVar::Set, immediate) ---------------------------- */
+
+static int g_gate[2] = { 1, 1 };         /* g_useImageBlackList, g_useResourceBlackList */
+static int g_gate_reads, g_gate_sets, g_registered_at_first_set = -1;
+static int gate_slot(const char *cvar) { return !strcmp(cvar, "g_useImageBlackList") ? 0 : !strcmp(cvar, "g_useResourceBlackList") ? 1 : -1; }
+static int gate_read(void *c, const char *cvar, int *value)
+{
+    int g = gate_slot(cvar);
+    (void)c;
+    g_gate_reads++;
+    if (g < 0) return 0;
+    *value = g_gate[g];
+    return 1;
+}
+static int gate_set(void *c, const char *cvar, const char *value)
+{
+    int g = gate_slot(cvar);
+    (void)c;
+    if (g < 0) return 0;
+    if (!g_gate_sets++) g_registered_at_first_set = g_nregistered;
+    g_gate[g] = atoi(value);
+    return SH_MODSERVE_GATE_SET;
+}
+static const sh_modserve_gate_ops GATES = { NULL, gate_read, gate_set, NULL };
+
 /* ---- palette stand-in: the engine's own rows plus what a rebuild admitted -------------------- */
 
 static int g_pal_built, g_pal_count, g_rebuilds, g_rebuild_result = 1;
@@ -156,7 +184,7 @@ static int pal_rebuild(void *c, int *before, int *after)
     *before = 1000 + g_pal_count;
     if (g_rebuild_result != 1) { *after = -1; return g_rebuild_result; }
     if (sh_modserve_plan_editor(&plan) >= 0) {
-        sh_modserve_plan_run(&plan, &OPS, "editor");
+        sh_modserve_plan_run_gated(&plan, &OPS, &GATES, "editor", NULL);
         for (i = 0; i < plan.count; i++)
             if (plan.steps[i].rank == 3 && plan.steps[i].ready == 1 && !pal_has(NULL, plan.steps[i].name) &&
                 g_pal_count < MAX_REC)
@@ -175,7 +203,7 @@ int modserve_activate_bundles(const char *const *bundle_hashes, int n)
     if (n <= 0 || !bundle_hashes) return 0;
     g_activations++;
     if (sh_modserve_plan_bundles(bundle_hashes, n, &plan, &unknown) < 0) return -1;
-    if (plan.count) ready = sh_modserve_plan_run(&plan, &OPS, "map");
+    if (plan.count) ready = sh_modserve_plan_run_gated(&plan, &OPS, &GATES, "map", NULL);
     g_last_steps = plan.count;
     g_last_ready = ready;
     g_last_stock = 0;
@@ -517,9 +545,20 @@ static void carrier_conversion(const char *root)
         CHECK(out != NULL && verdicts == maps[i].carriers && converted == maps[i].carriers && indexed == converted);
         /* The manifest step of the same parse activates what was converted. */
         if (out) {
+            unsigned req = sh_modserve_requirements();
             g_activations = 0;
             g_rebuilds = 0;
+            g_gate[0] = g_gate[1] = 1;
+            g_gate_sets = 0;
+            g_registered_at_first_set = -1;
+            g_nregistered = 0;
             loaded = sh_modmanifest_prepare_load(out, on, &ln);
+            /* A converted package's cvar rows become bundle requirements; the
+             * activation sets them before its first registration. */
+            if (req) CHECK(g_gate_sets > 0 && g_registered_at_first_set == 0 && !(req & 1u && g_gate[0]) &&
+                           !(req & 2u && g_gate[1]));
+            printf("  %s: requirements %s%s%s\n", maps[i].file, req ? "" : "none",
+                   (req & 1u) ? "g_useImageBlackList=0 " : "", (req & 2u) ? "g_useResourceBlackList=0" : "");
             CHECK(loaded != NULL && g_activations == 1 && g_last_steps > 0 && g_last_ready == g_last_steps);
             CHECK(g_rebuilds == (g_last_sync.missing ? 1 : 0) && g_last_sync.registered == g_last_sync.missing &&
                   g_last_sync.admitted == g_last_sync.missing);
@@ -539,6 +578,46 @@ static void carrier_conversion(const char *root)
     sh_modlegacy_set_data_root(NULL);
 }
 
+/* ---- 5: a cut-content bundle's requirements ----------------------------------------------------- */
+
+static const char CUT_DESC[] =
+    "{\"id\":\"local.cut\",\"version\":\"legacy-00000000000000aa\",\"name\":\"Cut\","
+    "\"shadows\":[\"generated/decls/entitydef/custom/cut.decl\"],"
+    "\"requirements\":{\"cvars\":{\"g_useResourceBlackList\":\"0\",\"g_useImageBlackList\":\"0\"}},"
+    "\"legacy\":{\"digest16\":\"00000000000000aa\",\"key\":\"local.cut\",\"keyForm\":\"descriptor\",\"layout\":\"C\"}}";
+
+static void cut_content(const char *root)
+{
+    char mods[MAX_PATH], folder[MAX_PATH], cause[SH_MB_CAUSE_MAX];
+    sh_mb_bundle b;
+    sh_mb_resolver r = { NULL, NULL, stock_exists, NULL };
+    const char *hashes[1];
+    printf("-- a bundle requiring both blacklist gates: collected at index time, applied before its registration\n");
+    _snprintf_s(mods, sizeof mods, _TRUNCATE, "%s\\cutmods", root);
+    _snprintf_s(folder, sizeof folder, _TRUNCATE, "%s\\legacy\\local.cut@00000000000000aa", mods);
+    mt_write(folder, "assets\\generated\\decls\\entitydef\\custom\\cut.decl", "{\r\n\tinherit = \"monster/imp\";\r\n}");
+    mt_write(folder, "mod.json", CUT_DESC);
+    CHECK(sh_mb_build(folder, &r, &b) == 1 && b.requirements != NULL);
+    CHECK(sh_mb_write(&b, folder, cause, sizeof cause) == 1);
+    g_log[0] = 0;
+    CHECK(sh_modserve_index_build(mods) == 1);
+    CHECK(strstr(g_log, "MODS: requirements: g_useImageBlackList=0 for local.cut@legacy-00000000000000aa") &&
+          strstr(g_log, "MODS: requirements: g_useResourceBlackList=0 for local.cut@legacy-00000000000000aa"));
+    CHECK(sh_modserve_requirements() == 3);
+    g_gate[0] = g_gate[1] = 1;
+    g_gate_sets = 0;
+    g_registered_at_first_set = -1;
+    g_nregistered = 0;
+    hashes[0] = b.hash;
+    CHECK(modserve_activate_bundles(hashes, 1) == 1);
+    /* Both gates were set before the first DeclRegisterFile, and are 0. */
+    CHECK(g_gate_sets == 2 && g_registered_at_first_set == 0 && g_gate[0] == 0 && g_gate[1] == 0);
+    CHECK(registered("custom/cut"));
+    CHECK(strstr(g_log, "MODS: map: requirements applied: g_useImageBlackList=0, g_useResourceBlackList=0 "
+                        "(set directly, live immediately)") != NULL);
+    sh_mb_free(&b);
+}
+
 int main(int argc, char **argv)
 {
     char root[MAX_PATH];
@@ -547,7 +626,10 @@ int main(int argc, char **argv)
     fresh_mod(argv[1], root);
     legacy_form(root);
     skins_namespace(root);
+    /* No bundle so far needs a requirement: the gates were never read or set. */
+    CHECK(g_gate_reads == 0 && g_gate_sets == 0);
     carrier_conversion(root);
+    cut_content(root);
     mt_remove_tree(root);
     printf("\n%s -- %d checks, %d failed\n", g_failed ? "FAILED" : "ok", g_checks, g_failed);
     return g_failed ? 1 : 0;

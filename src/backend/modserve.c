@@ -50,6 +50,7 @@ typedef struct ms_bundle {
     int legacy, admitted, first_file, file_count;
     int grandfathered;                    /* under legacy\ or bundle.json extra.legacy: shadows may be new names */
     uint64_t total;                       /* sum of file sizes (the manifest row's size) */
+    unsigned req;                         /* SH_MODSERVE_REQ_* bits from bundle.json requirements */
     double installed_at;
     char cause[MS_CAUSE_MAX];
 } ms_bundle;
@@ -71,6 +72,12 @@ typedef struct ms_index {
 } ms_index;
 
 static ms_index *volatile g_index;
+static int ms_bundle_by_hash(const ms_index *x, const char *hash, int admitted_only);
+/* Gates this layer changed and the values it displaced: a gate is restored
+ * only when no admitted bundle needs it any more and nobody else has changed
+ * it since. Main thread only, like every registration pass. */
+static unsigned g_gates_owned;
+static int g_gates_original[SH_MODSERVE_REQ_COUNT];
 static SRWLOCK g_build_lock = SRWLOCK_INIT;
 static char g_last_root[MAX_PATH];
 static volatile LONG g_opens_served, g_open_failures, g_probe_claims, g_cache_hits;
@@ -591,6 +598,51 @@ static void ms_read_state(ms_index *x, ms_bundle *b)
     HeapFree(GetProcessHeap(), 0, text);
 }
 
+/* ------------------------------------------------------------------ requirements */
+
+/* The only engine settings a bundle may require. Bit i of a requirement mask
+ * is MS_GATES[i] = "0". Widening this is a product decision, not a format one. */
+static const char *const MS_GATES[SH_MODSERVE_REQ_COUNT] = { "g_useImageBlackList", "g_useResourceBlackList" };
+
+const char *sh_modserve_requirement_cvar(int index)
+{
+    return index >= 0 && index < SH_MODSERVE_REQ_COUNT ? MS_GATES[index] : NULL;
+}
+
+/* requirements: {"cvars": {<gate>: "0" | 0, ...}}. Anything else is a first
+ * cause: the bundle needs a setting this build will not change for it. */
+static void ms_parse_requirements(ms_bundle *b, const char *v, const char *ve)
+{
+    ms_json o = { v, ve };
+    char key[64];
+    const char *cv, *cve;
+    if (!ms_jenter(&o, '{')) { ms_fail(b, "requirements must be an object"); return; }
+    while (!b->cause[0] && ms_jnext(&o, '}')) {
+        ms_json c;
+        if (!ms_jmember(&o, key, sizeof key, &cv, &cve)) { ms_fail(b, "requirements is not a valid object"); return; }
+        if (strcmp(key, "cvars")) { ms_fail(b, "requirement '%.60s' is refused (only cvars are supported)", key); return; }
+        c.p = cv;
+        c.e = cve;
+        if (!ms_jenter(&c, '{')) { ms_fail(b, "requirements.cvars must be an object"); return; }
+        while (ms_jnext(&c, '}')) {
+            const char *xv, *xve;
+            int g, zero;
+            size_t n;
+            if (!ms_jmember(&c, key, sizeof key, &xv, &xve)) { ms_fail(b, "requirements.cvars is not a valid object"); return; }
+            n = (size_t)(xve - xv);
+            zero = (n == 3 && !memcmp(xv, "\"0\"", 3)) || (n == 1 && *xv == '0');
+            for (g = 0; g < SH_MODSERVE_REQ_COUNT; ++g)
+                if (!strcmp(key, MS_GATES[g])) break;
+            if (g == SH_MODSERVE_REQ_COUNT || !zero) {
+                ms_fail(b, "requirement %.60s=%.*s is refused (this build applies only g_useImageBlackList=0 and "
+                        "g_useResourceBlackList=0)", key, (int)(n > 24 ? 24 : n), xv);
+                return;
+            }
+            b->req |= 1u << g;
+        }
+    }
+}
+
 /* Parse <dir>\bundle.json into the index; leaves b->cause set on failure. */
 static void ms_parse_bundle(ms_index *x, ms_bundle *b, const char *blobs_dir)
 {
@@ -600,7 +652,7 @@ static void ms_parse_bundle(ms_index *x, ms_bundle *b, const char *blobs_dir)
     sh_json_kind kind;
     sh_json_error err = { 0, NULL };
     ms_json c;
-    const char *v, *ve, *files_v = NULL, *files_e = NULL;
+    const char *v, *ve, *files_v = NULL, *files_e = NULL, *req_v = NULL, *req_e = NULL;
     /* A converted first-generation package lists every name it carries, so
      * shadows run up to the file cap. */
     char **shadows = NULL;
@@ -629,6 +681,7 @@ static void ms_parse_bundle(ms_index *x, ms_bundle *b, const char *blobs_dir)
         else if (!strcmp(key, "name")) b->name = ms_jstr(x, v, ve, 80);
         else if (!strcmp(key, "bundle")) b->hash = ms_jstr(x, v, ve, 64);
         else if (!strcmp(key, "files")) { files_v = v; files_e = ve; }
+        else if (!strcmp(key, "requirements")) { req_v = v; req_e = ve; }
         else if (!strcmp(key, "extra")) {
             /* The builder preserves descriptor keys it does not own under
              * "extra"; a "legacy" object there marks a grandfathered bundle. */
@@ -660,6 +713,7 @@ static void ms_parse_bundle(ms_index *x, ms_bundle *b, const char *blobs_dir)
     if (!b->hash || !ms_valid_hash((char *)b->hash)) ms_fail(b, "bundle.json has no bundle hash");
     if (b->legacy) b->grandfathered = 1;
     if (!files_v) ms_fail(b, "bundle.json has no files");
+    if (req_v && !b->cause[0]) ms_parse_requirements(b, req_v, req_e);
     if (nshadows > 1) qsort(shadows, (size_t)nshadows, sizeof(char *), ms_str_cmp);
     if (!b->cause[0]) {
         ms_json a = { files_v, files_e };
@@ -986,6 +1040,20 @@ int sh_modserve_index_build(const char *mods_root)
     x->build_ms = ms_now_ms() - t0;
     /* Previously registered decls keep their state across a rescan. */
     old = g_index;
+    /* One line per bundle and requirement, the first time an index carries
+     * that bundle with it (a rescan does not repeat it). */
+    for (i = 0; i < x->nbundles; ++i) {
+        const ms_bundle *b = &x->bundles[i];
+        int g, seen = 0;
+        if (!b->admitted || !b->req) continue;
+        if (old) {
+            int o = ms_bundle_by_hash(old, b->hash, 1);
+            seen = o >= 0 && old->bundles[o].req == b->req;
+        }
+        if (seen) continue;
+        for (g = 0; g < SH_MODSERVE_REQ_COUNT; ++g)
+            if (b->req & (1u << g)) ms_log("requirements: %s=0 for %s@%s", MS_GATES[g], b->id, b->version);
+    }
     if (old) {
         for (i = 0; i < x->nfiles; ++i) {
             ms_file *f = &x->files[i];
@@ -1194,6 +1262,12 @@ void sh_modserve_test_reset_registration(void)
     int i;
     if (x) for (i = 0; i < x->nfiles; ++i) x->files[i].reg_state = 0;
 }
+void sh_modserve_test_reset_gates(void)
+{
+    g_gates_owned = 0;
+    memset(g_gates_original, 0, sizeof g_gates_original);
+}
+unsigned sh_modserve_test_gates_owned(void) { return g_gates_owned; }
 #endif
 
 /* ------------------------------------------------------------------ plan */
@@ -1541,6 +1615,143 @@ int sh_modserve_plan_run(sh_modserve_plan *plan, const sh_modserve_engine_ops *o
     return ready;
 }
 
+
+/* ------------------------------------------------------------------ requirements (apply) */
+
+unsigned sh_modserve_requirements(void)
+{
+    const ms_index *x = g_index;
+    unsigned all = 0;
+    int i;
+    if (!x) return 0;
+    for (i = 0; i < x->nbundles; ++i)
+        if (x->bundles[i].admitted) all |= x->bundles[i].req;
+    return all;
+}
+
+static void ms_gate_names(unsigned mask, char *out, size_t cap)
+{
+    int g;
+    size_t at = 0;
+    out[0] = 0;
+    for (g = 0; g < SH_MODSERVE_REQ_COUNT; ++g)
+        if (mask & (1u << g))
+            at += (size_t)_snprintf_s(out + at, cap - at, _TRUNCATE, "%s%s=0", at ? ", " : "", MS_GATES[g]);
+}
+
+int sh_modserve_requirements_apply(const sh_modserve_gate_ops *ops, const char *phase, sh_modserve_gates *out)
+{
+    sh_modserve_gates r;
+    unsigned needed = sh_modserve_requirements(), restore = g_gates_owned & ~needed, touch, refused = 0;
+    int g, before[SH_MODSERVE_REQ_COUNT] = { 0 }, want[SH_MODSERVE_REQ_COUNT] = { 0 };
+    char names[160];
+    memset(&r, 0, sizeof r);
+    r.needed = needed;
+    if (!phase) phase = "plan";
+    /* No admitted bundle needs a gate and none is held: nothing is read or set. */
+    if (!needed && !restore) { if (out) *out = r; return 0; }
+    if (!ops || !ops->read || !ops->set) {
+        ms_gate_names(needed, names, sizeof names);
+        ms_log("%s: requirements %s NOT applied: the cvar system is unavailable", phase, names);
+        r.not_live = needed;
+        if (out) *out = r;
+        return needed ? -1 : 0;
+    }
+    touch = needed | restore;
+    /* Phase 1, disarm: read every affected gate, then set what differs. */
+    for (g = 0; g < SH_MODSERVE_REQ_COUNT; ++g) {
+        unsigned bit = 1u << g;
+        int set;
+        char text[16];
+        if (!(touch & bit)) continue;
+        if (ops->read(ops->context, MS_GATES[g], &before[g]) != 1) { refused |= bit; continue; }
+        if (needed & bit) want[g] = 0;
+        else want[g] = before[g] == 0 ? g_gates_original[g] : before[g];   /* changed by someone else: theirs */
+        if (before[g] == want[g]) continue;
+        _snprintf_s(text, sizeof text, _TRUNCATE, "%d", want[g]);
+        set = ops->set(ops->context, MS_GATES[g], text);
+        if (set != SH_MODSERVE_GATE_SET && set != SH_MODSERVE_GATE_QUEUED) { refused |= bit; continue; }
+        r.changed |= bit;
+        if (set == SH_MODSERVE_GATE_QUEUED) r.queued |= bit;
+        if ((needed & bit) && !(g_gates_owned & bit)) { g_gates_original[g] = before[g]; g_gates_owned |= bit; }
+    }
+    /* A queued set reaches the gate only when the command buffer runs: drain
+     * it here, between the phases, so the registration that follows is never
+     * asked to parse a name the matcher still refuses. */
+    if (r.queued) {
+        if (ops->drain && ops->drain(ops->context) == 1) r.drained = 1;
+        else {
+            ms_gate_names(r.queued & needed, names, sizeof names);
+            ms_log("%s: requirement set%s %s queued but the command buffer could not be drained", phase,
+                   (r.queued & (r.queued - 1)) ? "s" : "", names[0] ? names : "(restore)");
+        }
+    }
+    /* Phase 2, verify: the registration pass runs only against read-back values. */
+    for (g = 0; g < SH_MODSERVE_REQ_COUNT; ++g) {
+        unsigned bit = 1u << g;
+        int now = -1;
+        if (!(touch & bit) || (refused & bit)) continue;
+        if (ops->read(ops->context, MS_GATES[g], &now) != 1) { refused |= bit; continue; }
+        if (needed & bit) { if (now == 0) r.live |= bit; }
+        else if (now == want[g]) { r.restored |= bit; g_gates_owned &= ~bit; }
+    }
+    if (r.changed & needed & r.live) {
+        ms_gate_names(r.changed & needed & r.live, names, sizeof names);
+        ms_log("%s: requirements applied: %s (%s)", phase, names,
+               r.drained ? "queued, live after a command-buffer drain" : "set directly, live immediately");
+    }
+    for (g = 0; g < SH_MODSERVE_REQ_COUNT; ++g)
+        if (r.restored & (1u << g) && (r.changed & (1u << g)))
+            ms_log("%s: requirement released: %s restored to %d (no active bundle needs it)", phase, MS_GATES[g], want[g]);
+    r.not_live = needed & ~r.live;
+    if (r.not_live) {
+        ms_gate_names(r.not_live, names, sizeof names);
+        ms_log("%s: requirements %s are NOT live; the steps of bundles that need them are blocked", phase, names);
+    }
+    if (out) *out = r;
+    if (!needed) return 0;
+    return r.not_live ? -1 : 1;
+}
+
+static const char *ms_unmet_cause(unsigned unmet)
+{
+    if ((unmet & 3u) == 3u) return "requirements g_useImageBlackList=0, g_useResourceBlackList=0 are not live";
+    if (unmet & 2u) return "requirement g_useResourceBlackList=0 is not live";
+    return "requirement g_useImageBlackList=0 is not live";
+}
+
+int sh_modserve_plan_block_unmet(sh_modserve_plan *plan, const sh_modserve_gates *gates)
+{
+    const ms_index *x = g_index;
+    int i, n = 0;
+    if (!plan || !gates || !gates->not_live || !x) return 0;
+    for (i = 0; i < plan->count; ++i) {
+        sh_modserve_step *s = &plan->steps[i];
+        unsigned unmet = x->bundles[x->files[s->file].bundle].req & gates->not_live;
+        /* A step registered while its gates were live stays ready. */
+        if (unmet && !s->blocked && x->files[s->file].reg_state != 1) {
+            s->blocked = ms_unmet_cause(unmet);
+            plan->blocked++;
+            n++;
+        }
+    }
+    return n;
+}
+
+int sh_modserve_plan_run_gated(sh_modserve_plan *plan, const sh_modserve_engine_ops *ops,
+                               const sh_modserve_gate_ops *gates, const char *phase, sh_modserve_gates *out)
+{
+    sh_modserve_gates r;
+    if (out) memset(out, 0, sizeof *out);
+    if (!plan || !g_index) return -1;
+    if (!plan->count) return 0;
+    /* Phases 1 and 2 (disarm, then verify after any drain) finish before the
+     * plan's first DeclRegisterFile. */
+    sh_modserve_requirements_apply(gates, phase, &r);
+    sh_modserve_plan_block_unmet(plan, &r);
+    if (out) *out = r;
+    return sh_modserve_plan_run(plan, ops, phase);
+}
 
 /* ------------------------------------------------------------------ queries */
 

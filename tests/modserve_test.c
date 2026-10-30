@@ -19,6 +19,8 @@
 void sh_modserve_test_cache(int enabled);
 size_t sh_modserve_test_cache_bytes(void);
 void sh_modserve_test_reset_registration(void);
+void sh_modserve_test_reset_gates(void);
+unsigned sh_modserve_test_gates_owned(void);
 
 static int g_failed;
 #define CHECK(expr) do {                                                        \
@@ -133,6 +135,9 @@ static const char *hash64(char c, char *out)
     return out;
 }
 
+/* Raw JSON members (with a trailing comma) the next make_bundle writes. */
+static const char *g_bundle_extra;
+
 /* Write <root>\<folder>\bundle.json and its files. */
 static void make_bundle(const char *parent, const char *folder, const char *id, const char *version,
                         char hash_digit, const char *shadows, const fx_file *files, int n, const char *state)
@@ -145,8 +150,9 @@ static void make_bundle(const char *parent, const char *folder, const char *id, 
     mkdirs(dir);
     at += _snprintf_s(json + at, sizeof json - at, _TRUNCATE,
                       "{\n  \"format\": 1,\n  \"id\": \"%s\",\n  \"version\": \"%s\",\n  \"name\": \"%s\",\n"
-                      "  \"bundle\": \"%s\",\n  \"shadows\": [%s],\n  \"files\": [\n",
-                      id, version, id, hash64(hash_digit, h), shadows ? shadows : "");
+                      "  \"bundle\": \"%s\",\n  %s\"shadows\": [%s],\n  \"files\": [\n",
+                      id, version, id, hash64(hash_digit, h), g_bundle_extra ? g_bundle_extra : "",
+                      shadows ? shadows : "");
     for (i = 0; i < n; ++i) {
         const fx_file *f = &files[i];
         long long size = f->size >= 0 ? f->size : (long long)strlen(f->body ? f->body : "");
@@ -632,6 +638,266 @@ static void test_rescan(void)
     sh_modserve_plan_free(&p);
 }
 
+/* ------------------------------------------------------------------ requirements */
+
+/* A fake cvar system with both gates. A queued set lands only on drain; the
+ * gate events and the registrations share one event sequence. */
+static int g_gate_val[2], g_gate_pending[2], g_gate_has_pending[2];
+static int g_gate_mode;          /* SH_MODSERVE_GATE_SET, _QUEUED, or 0 to refuse */
+static int g_gate_reads, g_gate_sets, g_gate_drains;
+static char g_events[8192];
+static void event(const char *e)
+{
+    size_t at = strlen(g_events);
+    _snprintf_s(g_events + at, sizeof g_events - at, _TRUNCATE, "%s;", e);
+}
+static int gate_index(const char *cvar)
+{
+    return !strcmp(cvar, "g_useImageBlackList") ? 0 : !strcmp(cvar, "g_useResourceBlackList") ? 1 : -1;
+}
+static int gate_read(void *c, const char *cvar, int *value)
+{
+    int g = gate_index(cvar);
+    (void)c;
+    g_gate_reads++;
+    if (g < 0) return 0;
+    *value = g_gate_val[g];
+    return 1;
+}
+static int gate_set(void *c, const char *cvar, const char *value)
+{
+    char e[96];
+    int g = gate_index(cvar);
+    (void)c;
+    g_gate_sets++;
+    _snprintf_s(e, sizeof e, _TRUNCATE, "S:%s=%s", cvar, value);
+    event(e);
+    if (g < 0 || !g_gate_mode) return 0;
+    if (g_gate_mode == SH_MODSERVE_GATE_SET) g_gate_val[g] = atoi(value);
+    else { g_gate_pending[g] = atoi(value); g_gate_has_pending[g] = 1; }
+    return g_gate_mode;
+}
+static int gate_drain(void *c)
+{
+    int g;
+    (void)c;
+    g_gate_drains++;
+    event("D");
+    for (g = 0; g < 2; ++g) if (g_gate_has_pending[g]) { g_gate_val[g] = g_gate_pending[g]; g_gate_has_pending[g] = 0; }
+    return 1;
+}
+static const sh_modserve_gate_ops g_gates = { NULL, gate_read, gate_set, gate_drain };
+static const sh_modserve_gate_ops g_gates_nodrain = { NULL, gate_read, gate_set, NULL };
+
+/* The registration fakes, recording into the same event sequence. */
+static int ev_source(void *c, const char *type, const char *name) { (void)c; (void)type; (void)name; return 0; }
+static int ev_register(void *c, const char *type, const char *name, const char *reg)
+{
+    char e[300];
+    (void)c; (void)reg;
+    _snprintf_s(e, sizeof e, _TRUNCATE, "R:%s:%s", type, name);
+    event(e);
+    return 1;
+}
+static int ev_load(void *c, const char *type, const char *name, int persist, unsigned *state, unsigned *lifetime)
+{
+    char e[300];
+    (void)c;
+    _snprintf_s(e, sizeof e, _TRUNCATE, "L:%s:%s", type, name);
+    event(e);
+    *state = 0;
+    *lifetime = persist ? 4 : 1;
+    return 1;
+}
+static const sh_modserve_engine_ops g_ev = { NULL, ev_source, ev_register, ev_load };
+
+static void gates_reset(int image, int resource, int mode)
+{
+    g_gate_val[0] = image;
+    g_gate_val[1] = resource;
+    g_gate_has_pending[0] = g_gate_has_pending[1] = 0;
+    g_gate_mode = mode;
+    g_gate_reads = g_gate_sets = g_gate_drains = 0;
+    g_events[0] = 0;
+    sh_modserve_test_reset_gates();
+    sh_modserve_test_reset_registration();
+}
+
+/* Offset of the first and last occurrence of `needle` in g_events, or -1. */
+static long ev_first(const char *needle) { const char *p = strstr(g_events, needle); return p ? (long)(p - g_events) : -1; }
+static long ev_last(const char *needle)
+{
+    const char *p = g_events, *last = NULL;
+    while ((p = strstr(p, needle)) != NULL) { last = p; p++; }
+    return last ? (long)(last - g_events) : -1;
+}
+
+#define CY_MD6   "generated/decls/md6def/mods/cyd.cut/cyber.md6.decl"
+#define CY_ENT   "generated/decls/entitydef/mods/cyd.cut/cyber.decl"
+#define CY_SEDEF "generated/decls/snapeditorentitydef/mods/cyd.cut/cyber.decl"
+#define IM_SEDEF "generated/decls/snapeditorentitydef/mods/img.only/font.decl"
+#define PL_SEDEF "generated/decls/snapeditorentitydef/mods/plain.mod/thing.decl"
+
+static void make_plain(const char *root)
+{
+    static const fx_file p[] = {
+        { PL_SEDEF, "{ plain }", -1, "snapEditorEntityDef", "mods/plain.mod/thing", NULL, '1' },
+    };
+    g_bundle_extra = NULL;
+    make_bundle(root, "plain.mod@1.0.0", "plain.mod", "1.0.0", '7', NULL, p, 1, NULL);
+}
+
+static void build_requirements_fixture(const char *root)
+{
+    static const fx_file cy[] = {
+        { CY_MD6, "md6Def cyber {}", -1, "md6Def", "mods/cyd.cut/cyber.md6", NULL, '1' },
+        { CY_ENT, "entityDef cyber {}", -1, "entityDef", "mods/cyd.cut/cyber",
+          "[{\"type\":\"md6Def\",\"name\":\"mods/cyd.cut/cyber.md6\"}]", '2' },
+        { CY_SEDEF, "{ entityDef \"mods/cyd.cut/cyber\" }", -1, "snapEditorEntityDef", "mods/cyd.cut/cyber",
+          "[{\"type\":\"entityDef\",\"name\":\"mods/cyd.cut/cyber\"}]", '3' },
+    };
+    static const fx_file im[] = {
+        { IM_SEDEF, "{ font }", -1, "snapEditorEntityDef", "mods/img.only/font", NULL, '4' },
+    };
+    static const fx_file one[] = {
+        { "generated/decls/entitydef/mods/bad.x/a.decl", "x", -1, "entityDef", "mods/bad.x/a", NULL, '5' },
+    };
+    /* Both gates, in the converter's spelling and as a number. */
+    g_bundle_extra = "\"requirements\": {\"cvars\": {\"g_useResourceBlackList\": \"0\", \"g_useImageBlackList\": 0}},\n  ";
+    make_bundle(root, "cyd.cut@1.0.0", "cyd.cut", "1.0.0", '1', NULL, cy, 3, NULL);
+    g_bundle_extra = "\"requirements\": {\"cvars\": {\"g_useImageBlackList\": \"0\"}},\n  ";
+    make_bundle(root, "img.only@2.0.0", "img.only", "2.0.0", '2', NULL, im, 1, NULL);
+    g_bundle_extra = "\"requirements\": {\"cvars\": {\"com_maxfps\": \"0\"}},\n  ";
+    make_bundle(root, "bad.cvar@1.0.0", "bad.x", "1.0.0", '3', NULL, one, 1, NULL);
+    g_bundle_extra = "\"requirements\": {\"cvars\": {\"g_useResourceBlackList\": \"1\"}},\n  ";
+    make_bundle(root, "bad.value@1.0.0", "bad.x", "1.0.0", '4', NULL, one, 1, NULL);
+    g_bundle_extra = "\"requirements\": {\"dlls\": {\"x\": \"0\"}},\n  ";
+    make_bundle(root, "bad.key@1.0.0", "bad.x", "1.0.0", '5', NULL, one, 1, NULL);
+    make_plain(root);
+    g_bundle_extra = NULL;
+}
+
+static void test_requirements(void)
+{
+    char top[MAX_PATH], req_root[MAX_PATH], plain_root[MAX_PATH];
+    char *slash;
+    sh_modserve_plan p;
+    sh_modserve_gates r;
+    strcpy_s(top, sizeof top, g_root);
+    slash = strrchr(top, '\\');
+    if (slash) *slash = 0;
+    _snprintf_s(req_root, sizeof req_root, _TRUNCATE, "%s\\req\\mods", top);
+    _snprintf_s(plain_root, sizeof plain_root, _TRUNCATE, "%s\\plain\\mods", top);
+    mkdirs(req_root);
+    mkdirs(plain_root);
+    build_requirements_fixture(req_root);
+    make_plain(plain_root);
+
+    /* Collection at index time: only the two gates at "0"; anything else is
+     * that bundle's first cause; each requirement is logged once per bundle. */
+    log_clear();
+    CHECK(sh_modserve_index_build(req_root) == 3);
+    CHECK(log_count("MODS: requirements: g_useResourceBlackList=0 for cyd.cut@1.0.0") == 1);
+    CHECK(log_count("MODS: requirements: g_useImageBlackList=0 for cyd.cut@1.0.0") == 1);
+    CHECK(log_count("MODS: requirements: g_useImageBlackList=0 for img.only@2.0.0") == 1);
+    CHECK(log_count("MODS: requirements:") == 3);
+    CHECK(log_has("bundle 'bad.cvar@1.0.0' skipped: requirement com_maxfps=\"0\" is refused (this build applies only "
+                  "g_useImageBlackList=0 and g_useResourceBlackList=0)"));
+    CHECK(log_has("bundle 'bad.value@1.0.0' skipped: requirement g_useResourceBlackList=\"1\" is refused"));
+    CHECK(log_has("bundle 'bad.key@1.0.0' skipped: requirement 'dlls' is refused (only cvars are supported)"));
+    CHECK(!log_has("plain.mod@1.0.0' skipped"));
+    /* Union of the admitted bundles. */
+    CHECK(sh_modserve_requirements() == (SH_MODSERVE_REQ_IMAGE | SH_MODSERVE_REQ_RESOURCE));
+    CHECK(!strcmp(sh_modserve_requirement_cvar(0), "g_useImageBlackList") &&
+          !strcmp(sh_modserve_requirement_cvar(1), "g_useResourceBlackList") && !sh_modserve_requirement_cvar(2));
+    /* A rescan of the same bundles does not repeat the lines. */
+    log_clear();
+    CHECK(sh_modserve_index_rescan() == 3);
+    CHECK(!log_has("MODS: requirements:"));
+
+    /* Queued sets: phase 1 disarms, the buffer is drained, phase 2 reads back,
+     * and only then does the first DeclRegisterFile run. */
+    gates_reset(1, 1, SH_MODSERVE_GATE_QUEUED);
+    log_clear();
+    CHECK(sh_modserve_plan_editor(&p) == 5);
+    CHECK(sh_modserve_plan_run_gated(&p, &g_ev, &g_gates, "editor", &r) == 5);
+    CHECK(r.needed == 3 && r.changed == 3 && r.queued == 3 && r.drained == 1 && r.live == 3 && !r.not_live);
+    CHECK(g_gate_val[0] == 0 && g_gate_val[1] == 0 && g_gate_drains == 1 && g_gate_sets == 2);
+    CHECK(ev_first("S:g_useImageBlackList=0") >= 0 && ev_first("S:g_useResourceBlackList=0") >= 0);
+    CHECK(ev_last("S:") < ev_first("D;") && ev_first("D;") < ev_first("R:"));
+    CHECK(ev_first("R:md6Def:mods/cyd.cut/cyber.md6") > ev_first("D;"));
+    CHECK(log_has("MODS: editor: requirements applied: g_useImageBlackList=0, g_useResourceBlackList=0 "
+                  "(queued, live after a command-buffer drain)"));
+    CHECK(sh_modserve_test_gates_owned() == 3);
+    sh_modserve_plan_free(&p);
+
+    /* Already live: read, never set or drained, and nothing logged. */
+    sh_modserve_test_reset_registration();
+    g_gate_sets = g_gate_drains = 0;
+    log_clear();
+    sh_modserve_plan_editor(&p);
+    CHECK(sh_modserve_plan_run_gated(&p, &g_ev, &g_gates, "editor", &r) == 5);
+    CHECK(r.live == 3 && !r.changed && g_gate_sets == 0 && g_gate_drains == 0 && !log_has("requirements applied"));
+    sh_modserve_plan_free(&p);
+
+    /* An immediate route needs no drain. */
+    gates_reset(1, 1, SH_MODSERVE_GATE_SET);
+    sh_modserve_plan_editor(&p);
+    CHECK(sh_modserve_plan_run_gated(&p, &g_ev, &g_gates_nodrain, "editor", &r) == 5);
+    CHECK(r.live == 3 && r.changed == 3 && !r.queued && !r.drained && g_gate_drains == 0);
+    CHECK(ev_last("S:") < ev_first("R:"));
+    sh_modserve_plan_free(&p);
+
+    /* Queued with nothing to drain it: the gates are not live, so the bundles
+     * that need them are blocked and register nothing; the plain bundle runs. */
+    gates_reset(1, 1, SH_MODSERVE_GATE_QUEUED);
+    log_clear();
+    sh_modserve_plan_editor(&p);
+    CHECK(sh_modserve_plan_run_gated(&p, &g_ev, &g_gates_nodrain, "editor", &r) == 1);
+    CHECK(r.not_live == 3 && !r.live && !r.drained);
+    CHECK(ev_first("R:snapEditorEntityDef:mods/plain.mod/thing") >= 0);
+    CHECK(ev_first("cyd.cut") < 0 && ev_first("img.only") < 0);
+    CHECK(log_has("queued but the command buffer could not be drained"));
+    CHECK(log_has("editor: md6Def 'mods/cyd.cut/cyber.md6' (cyd.cut) BLOCKED: requirements g_useImageBlackList=0, "
+                  "g_useResourceBlackList=0 are not live"));
+    CHECK(log_has("(img.only) BLOCKED: requirement g_useImageBlackList=0 is not live"));
+    sh_modserve_plan_free(&p);
+
+    /* A refused set and an unavailable cvar system block the same way. */
+    gates_reset(1, 0, 0);
+    sh_modserve_plan_editor(&p);
+    CHECK(sh_modserve_plan_run_gated(&p, &g_ev, &g_gates, "editor", &r) == 1);
+    CHECK(r.not_live == SH_MODSERVE_REQ_IMAGE && r.live == SH_MODSERVE_REQ_RESOURCE);
+    sh_modserve_plan_free(&p);
+    gates_reset(1, 1, SH_MODSERVE_GATE_SET);
+    log_clear();
+    CHECK(sh_modserve_requirements_apply(NULL, "map", &r) == -1 && r.not_live == 3);
+    CHECK(log_has("MODS: map: requirements g_useImageBlackList=0, g_useResourceBlackList=0 NOT applied"));
+
+    /* Gates are released when no admitted bundle needs them any more, to the
+     * value they displaced; after that nothing is touched again. */
+    gates_reset(1, 1, SH_MODSERVE_GATE_SET);
+    CHECK(sh_modserve_requirements_apply(&g_gates, "editor", &r) == 1 && sh_modserve_test_gates_owned() == 3);
+    CHECK(sh_modserve_index_build(plain_root) == 1);
+    log_clear();
+    CHECK(sh_modserve_requirements_apply(&g_gates, "editor", &r) == 0);
+    CHECK(r.restored == 3 && g_gate_val[0] == 1 && g_gate_val[1] == 1 && sh_modserve_test_gates_owned() == 0);
+    CHECK(log_has("requirement released: g_useResourceBlackList restored to 1"));
+    g_gate_reads = g_gate_sets = 0;
+    CHECK(sh_modserve_requirements_apply(&g_gates, "editor", &r) == 0 && g_gate_reads == 0 && g_gate_sets == 0);
+
+    /* The empty case: no bundle needs a requirement, so the cvars are never
+     * read or set, by the apply or by a gated plan run. */
+    gates_reset(1, 1, SH_MODSERVE_GATE_SET);
+    CHECK(sh_modserve_requirements() == 0);
+    CHECK(sh_modserve_requirements_apply(&g_gates, "editor", &r) == 0 && r.needed == 0);
+    sh_modserve_plan_editor(&p);
+    CHECK(p.count == 1 && sh_modserve_plan_run_gated(&p, &g_ev, &g_gates, "editor", &r) == 1);
+    CHECK(g_gate_reads == 0 && g_gate_sets == 0 && g_gate_drains == 0 && ev_first("S:") < 0);
+    sh_modserve_plan_free(&p);
+    gates_reset(1, 1, SH_MODSERVE_GATE_SET);
+}
+
 static void remove_tree(const char *dir)
 {
     char pattern[MAX_PATH], path[MAX_PATH];
@@ -666,6 +932,7 @@ int main(void)
     test_bundles_for_names();
     test_cost();
     test_rescan();
+    test_requirements();
     strcpy_s(top, sizeof top, g_root);
     slash = strrchr(top, '\\');
     if (slash) { *slash = 0; remove_tree(top); }

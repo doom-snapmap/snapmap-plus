@@ -18,6 +18,20 @@
  * The registration sequence is the one lane R2 ran live (R-001): source
  * registration with a native idStr, a true probe answer, bytes through the
  * provider, DeclFind, then the generic load once for a new identity.
+ *
+ * Bundle requirements (the cut-content gates) are applied before every pass,
+ * by me_run, through idCVar::Set(cvar, "0", force 1) (CvarSetString, VK
+ * 0x140295780 / GL 0x1402959a0), the setter map_bounds.c already uses. That
+ * route is immediate, so it needs no drain: Set parses the text into the int
+ * at idCVar+0x30 before returning, and both blacklist matchers read exactly
+ * that int on 13954591 (VK: resource matcher 0x140395150 reads the
+ * g_useResourceBlackList object 0x145b13bd0 +0x30, the image matcher at
+ * 0x140394fc0 reads g_useImageBlackList 0x145b13a90 +0x30; Ghidra jobs in
+ * snaphak-re logs/shared-ghidra/mod-system-reinstatement/laneRQ). The retired
+ * route buffered "<cvar> 0" console text, which stays queued until the
+ * command buffer runs, and so needed CmdExecuteBuffer between the disarm and
+ * the registration; modserve.c keeps that two-phase shape for any queued set,
+ * and verifies every gate by reading +0x30 back before registering.
  */
 #include <windows.h>
 #include <stdint.h>
@@ -33,6 +47,8 @@
 #include "commands.h"
 #include "timeline_tile.h"
 #include "apply_engine.h"
+#include "engine_build.h"
+#include "engine_cvar_read.h"
 
 #define RES_LIFETIME_OFF    0x28
 #define RES_STATE_OFF       0x2c
@@ -52,6 +68,7 @@ typedef unsigned char (*register_fn)(void *, const void *, void *);
 typedef void *(*source_fn)(void *, const char *);
 typedef void *(*find_decl_fn)(void *, const char *, unsigned char);
 typedef void (*generic_load_fn)(void *);
+typedef unsigned char (*cvar_set_fn)(void *, const char *, unsigned char);
 typedef unsigned char (*probe_fn)(void *, const char *, void *, void *, void *, void *, uint64_t);
 typedef union ms_string { void *align; unsigned char bytes[48]; } ms_string;
 
@@ -72,6 +89,8 @@ static sig_result g_probe_sig;
 static int g_probe_sig_ok;
 static volatile LONG g_editor_pass_done;
 static DWORD g_fault_code;
+static cvar_set_fn g_cvar_set;
+static const void *g_cvar_slot;
 
 extern volatile LONG g_modserve_editor_ok, g_modserve_editor_failed;   /* modserve.c */
 
@@ -225,12 +244,46 @@ static int op_load(void *context, const char *type, const char *name, int persis
 
 static const sh_modserve_engine_ops g_ops = { NULL, op_source_registered, op_register_file, op_load };
 
-/* Run a plan inside process heap 0: decl objects outlive every map. */
+/* ------------------------------------------------------------------ gates */
+
+static void *me_gate_cvar(const char *name)
+{
+    return sh_engine_cvar_find(g_cvar_slot, SH_IDCVAR_NAME_FOR_LOOKUP, name);
+}
+
+static int gate_read(void *context, const char *cvar, int *value)
+{
+    (void)context;
+    return sh_engine_cvar_read_int(me_gate_cvar(cvar), value);
+}
+
+/* Immediate: the value is in idCVar+0x30 when Set returns. */
+static int gate_set(void *context, const char *cvar, const char *value)
+{
+    void *c = me_gate_cvar(cvar);
+    unsigned char ok = 0;
+    (void)context;
+    if (!c || !g_cvar_set) return 0;
+    __try { ok = g_cvar_set(c, value, 1); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { ok = 0; }
+    return ok ? SH_MODSERVE_GATE_SET : 0;
+}
+
+static const sh_modserve_gate_ops g_gate_ops = { NULL, gate_read, gate_set, NULL };
+
+/* Run a plan inside process heap 0: decl objects outlive every map. The
+ * bundles' requirements are applied and read back first, outside the scope
+ * (as map_bounds.c sets its cvars), and gate-blocked steps are marked. */
 static int me_run(sh_modserve_plan *plan, const char *phase)
 {
     sh_process_heap_scope heap = { 0 };
+    sh_modserve_gates gates;
     int ready = -1;
     if (!g_bound) { me_log("%s: decl registry unavailable on this build", phase); return -1; }
+    if (plan->count) {
+        sh_modserve_requirements_apply(g_cvar_set && g_cvar_slot ? &g_gate_ops : NULL, phase, &gates);
+        sh_modserve_plan_block_unmet(plan, &gates);
+    }
     if (!sh_process_heap_enter(&g_heap, &heap)) { me_log("%s: process heap scope unavailable; nothing registered", phase); return -1; }
     __try { ready = sh_modserve_plan_run(plan, &g_ops, phase); }
     __finally {
@@ -292,6 +345,10 @@ int sh_modserve_install(const sig_result *results, size_t count, const uint8_t *
     g_source = (source_fn)me_clean(results, count, "DeclSourceFind");
     g_decl = (find_decl_fn)me_clean(results, count, "DeclFind");
     g_generic_load = (generic_load_fn)me_clean(results, count, "ResourceGenericLoad");
+    /* The requirement gates: optional, so a build without them still
+     * registers every bundle that needs none. */
+    g_cvar_set = (cvar_set_fn)me_clean(results, count, "CvarSetString");
+    g_cvar_slot = (const void *)glb_resolve(module_base, "cvar_system_slot", NULL);
     g_last_error = (const char *)glb_resolve(module_base, "last_error_msg", NULL);
     g_main_thread_at = (const uint8_t *)glb_resolve(module_base, "main_thread_id", NULL);
     g_bound = g_ctor && g_dtor && g_anchor && g_type && g_register && g_source && g_decl && g_generic_load &&
@@ -303,6 +360,9 @@ int sh_modserve_install(const sig_result *results, size_t count, const uint8_t *
         }
     if (!g_bound) me_log("decl registration unavailable on this build (registry, heap scope or main thread unresolved)");
     if (!g_probe_sig_ok) me_log("existence probe unavailable (DeclResourceProbe is not a clean match)");
+    if (!g_cvar_set || !g_cvar_slot)
+        me_log("bundle requirements unavailable (%s unresolved); bundles that need a blacklist gate are blocked",
+               !g_cvar_set ? "CvarSetString" : "the cvar system");
     if (g_bound) me_ensure_probe();
     return g_bound;
 }

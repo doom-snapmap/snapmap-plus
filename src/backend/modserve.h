@@ -188,6 +188,73 @@ typedef struct sh_modserve_rows_sync {
 int sh_modserve_map_rows_sync(const char *const *bundle_hashes, int n, const sh_modserve_palette_ops *ops,
                               sh_modserve_rows_sync *out);
 
+/* ------------------------------------------------------------------ requirements */
+
+/* A bundle.json may carry {"requirements": {"cvars": {...}}} naming the two
+ * cut-content blacklist gates with the value "0" (or 0): nothing else. The
+ * index collects them per bundle; a bundle naming any other key, cvar or value
+ * is skipped with that first cause. Each admitted bundle's requirements are
+ * logged once, the first time an index carries it:
+ *   MODS: requirements: g_useResourceBlackList=0 for <id>@<version>
+ * Disarming a gate is global (S1 consequence 16): with g_useImageBlackList 0
+ * the five stock font-atlas directories load as well. */
+#define SH_MODSERVE_REQ_IMAGE    1u   /* g_useImageBlackList 0 */
+#define SH_MODSERVE_REQ_RESOURCE 2u   /* g_useResourceBlackList 0 */
+#define SH_MODSERVE_REQ_COUNT    2
+
+/* The cvar name of requirement bit `index` (0 or 1), else NULL. */
+const char *sh_modserve_requirement_cvar(int index);
+
+/* The union of the admitted bundles' requirement bits. */
+unsigned sh_modserve_requirements(void);
+
+/* How the gates are read and set. `read` returns 1 with the integer value.
+ * `set` returns SH_MODSERVE_GATE_SET when the value is in the cvar on return
+ * (idCVar::Set), SH_MODSERVE_GATE_QUEUED when it was only buffered as console
+ * text, or 0 when refused. `drain` executes the command buffer and returns 1;
+ * it may be NULL for a route whose sets are never queued. */
+#define SH_MODSERVE_GATE_SET    1
+#define SH_MODSERVE_GATE_QUEUED 2
+typedef struct sh_modserve_gate_ops {
+    void *context;
+    int (*read)(void *context, const char *cvar, int *value);
+    int (*set)(void *context, const char *cvar, const char *value);
+    int (*drain)(void *context);
+} sh_modserve_gate_ops;
+
+typedef struct sh_modserve_gates {
+    unsigned needed;     /* union of admitted bundles' requirements */
+    unsigned changed;    /* gates set by this call (needed or restored) */
+    unsigned queued;     /* of them, sets that were only buffered */
+    int drained;         /* 1 when the command buffer was drained between the phases */
+    unsigned live;       /* needed gates read back as 0 */
+    unsigned not_live;   /* needed & ~live */
+    unsigned restored;   /* gates no bundle needs any more, returned to their displaced value */
+} sh_modserve_gates;
+
+/* Make the union live before a registration pass, in two phases. Phase 1
+ * (disarm) reads each needed gate and sets it to 0 when it is not; when any
+ * set was queued, the command buffer is drained before phase 2. Phase 2
+ * (verify) reads every gate back; only a read-back 0 counts as live. A gate
+ * this layer changed and no admitted bundle needs any more is restored to the
+ * value it displaced, unless someone else changed it meanwhile. Returns 0
+ * when no gate is needed (and when none is held either, ops is never
+ * called), 1 when every needed gate is live, -1 otherwise. Main thread only. */
+int sh_modserve_requirements_apply(const sh_modserve_gate_ops *ops, const char *phase, sh_modserve_gates *out);
+
+/* Block the steps of bundles whose requirements `gates` reports not live
+ * (first cause "requirement <cvar>=0 is not live"), except steps already
+ * registered. Returns how many were blocked. */
+int sh_modserve_plan_block_unmet(sh_modserve_plan *plan, const sh_modserve_gates *gates);
+
+/* sh_modserve_requirements_apply, then sh_modserve_plan_run: no
+ * DeclRegisterFile is issued before the gates are verified. Steps of a bundle
+ * whose requirement is not live are blocked with that first cause (unless
+ * already registered), and steps needing them fail with it. An empty plan
+ * touches nothing. Returns what sh_modserve_plan_run returns. */
+int sh_modserve_plan_run_gated(sh_modserve_plan *plan, const sh_modserve_engine_ops *ops,
+                               const sh_modserve_gate_ops *gates, const char *phase, sh_modserve_gates *out);
+
 /* ------------------------------------------------------------------ queries */
 
 /* 1 installed and admitted, 0 not installed, -1 installed but skipped (the
@@ -247,7 +314,12 @@ int sh_modserve_install(const sig_result *results, size_t count, const uint8_t *
 /* Called by the Timeline tile's SnapPaletteBuild detour before the original
  * builder runs, on the main thread: registers the editor plan's steps that
  * are not registered yet (the first build registers every editor row), and
- * logs "MODS: editor rows registered in N ms (R rows)". */
+ * logs "MODS: editor rows registered in N ms (R rows)". Like every pass here
+ * (per-map activation, the map-rows sync and the runtime rebuild, which both
+ * come back through this point), it first applies the admitted bundles'
+ * requirements with sh_modserve_requirements_apply through idCVar::Set,
+ * which is immediate (no drain needed), and blocks what they would not let
+ * load. */
 void sh_modserve_palette_before_build(void);
 
 /* Called after the original builder: logs the row count and how many rows
