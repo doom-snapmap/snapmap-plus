@@ -54,3 +54,22 @@ func TestSplitArgs(t *testing.T) {
 		}
 	}
 }
+
+// A 2018 install whose record names another release is offered the restoring update.
+func TestLegacyNeedsUpdate(t *testing.T) {
+	old := doomBuild{build: build2018}
+	cur := doomBuild{build: build2024}
+	for _, c := range []struct {
+		b    doomBuild
+		v    string
+		want bool
+	}{
+		{old, "v0.2.1-beta.20", true},
+		{old, legacyReleaseTag, false},
+		{cur, "v0.2.1-beta.19", false},
+	} {
+		if got := legacyNeedsUpdate(c.b, c.v); got != c.want {
+			t.Errorf("legacyNeedsUpdate(%s, %s) = %v", c.b.build, c.v, got)
+		}
+	}
+}

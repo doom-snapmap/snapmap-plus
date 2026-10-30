@@ -39,6 +39,20 @@ func interactiveMain() {
 		latest = latestDefaultTag()
 	}
 	enter := enterDefault(installed, installedVersion, latest)
+	legacyFix := false
+	if installed {
+		if b, err := detectDoomBuild(rec.DoomPath); err == nil && legacyNeedsUpdate(b, installedVersion) {
+			enter, legacyFix = "update", true
+		}
+	}
+	switch {
+	case legacyFix:
+		fmt.Printf("\nYour DOOM is the %s, whose release is Snapmap+ %s; the install record says %s.\n",
+			label2018, legacyReleaseTag, installedVersion)
+		fmt.Println("Press Enter to update now (this restores that release's files only), or type a command.")
+		commandLoop(enter)
+		return
+	}
 	switch enter {
 	case "install":
 		fmt.Println("\nPress Enter to install now, or type a command (help lists them).")
@@ -63,6 +77,12 @@ func enterDefault(installed bool, installedVersion, latestTag string) string {
 		return "update"
 	}
 	return ""
+}
+
+// legacyNeedsUpdate reports a 2018 install whose record names another release, which an earlier
+// installer's update leaves behind: the next update restores a clean legacyReleaseTag install.
+func legacyNeedsUpdate(b doomBuild, installedVersion string) bool {
+	return b.build == build2018 && installedVersion != legacyReleaseTag
 }
 
 // commandLoop reads and runs commands until quit / EOF. enterCmd is what the first bare Enter runs

@@ -1,15 +1,33 @@
 # Packaging — the deployable bundle
 
 `package.ps1` assembles the **deployable overlay** into `dist/`: the two clone DLLs (built by `build.ps1`),
-laid out exactly as they drop into a DOOM install. This is the artifact an end user installs; `dist/` is
-gitignored (binaries are never committed).
+laid out exactly as they drop into a DOOM install, and for a release the final 2018 release's two files.
+This is the artifact an end user installs; `dist/` is gitignored (binaries are never committed).
 
-## The bundle — 2 files
+## The bundle
 
 | File | Source | What |
 |---|---|---|
 | `XINPUT1_4.dll` | `build/` | the backend: XInput proxy + hook layer + cvar-unlock + fault-shield + the SnapStack subsystem (all merged in) |
-| `snapmap-plus\snapmap-plus-ui.dll` | `build/webview/` | the frontend: the Snapmap+ UI, rendered in a Microsoft Edge **WebView2** control (HTML/CSS/JS), with the HTML embedded in the DLL |
+| `snapmap-plus\snapmap-plus-ui-13954591.dll` | `build/webview/snapmap-plus-ui.dll` | the frontend: the Snapmap+ UI, rendered in a Microsoft Edge **WebView2** control (HTML/CSS/JS), with the HTML embedded in the DLL. The path names the supported build; it is `SH_UI_DLL_PATH` in `src/backend/ui_bridge.h` |
+| `XINPUT1_3.dll` | v0.2.1-beta.19's bundle (releases only) | the 2018 release's backend, byte for byte |
+| `snapmap-plus\snapmap-plus-ui.dll` | v0.2.1-beta.19's bundle (releases only) | the 2018 release's frontend, byte for byte |
+
+**Why a release carries the 2018 files.** Installers up to and including v0.2.1-beta.19 have no build
+detection: their `update` installs every file the newest bundle's `MANIFEST.sha256` lists, overwrites
+files in place, removes only files their previous install recorded and the new manifest drops, and then
+updates the installer itself. With the 2018 files in every bundle, such an update on the 2018 build
+leaves `XINPUT1_3.dll` and its frontend byte-identical and adds two inert files; on the April 2024
+build it installs a working Snapmap+ beside two inert ones. Either way the installer updates itself to
+one that detects the build, and its next `update` leaves a clean install: on the 2018 build it runs
+v0.2.1-beta.19's own installer, which removes the recorded 2024 files; on the April 2024 build it
+installs only the first two files and removes the 2018 ones (recorded ones, and unrecorded ones whose
+bytes are this bundle's). The other build's files are inert because each build's executables import
+only their own XInput name (2018: `XINPUT1_3.dll`, April 2024: `XINPUT1_4.dll`), the game's only
+dynamic XInput load first takes whichever XInput module is already loaded, and each backend loads only
+its own frontend path. `release.yml` downloads v0.2.1-beta.19's `snapmap-plus-bundle.zip` by tag, and
+`package.ps1 -LegacyBundle` checks it against the digest GitHub publishes and its own manifest before
+adding the two files. CI packages without them.
 
 Plus `MANIFEST.sha256` (the installer's file list + per-file hash verify). **Nothing else ships** — the
 frontend renders in the **system-installed WebView2 runtime** (preinstalled on Windows 11; the evergreen
@@ -26,10 +44,11 @@ overlay remains the same two DLLs. Configuration is runtime-owned and installer-
 <DOOM install root>/            # the folder with DOOMx64vk.exe and DOOMx64.exe
 ├── XINPUT1_4.dll
 └── snapmap-plus/
-    └── snapmap-plus-ui.dll
+    └── snapmap-plus-ui-13954591.dll
 ```
 
-`dist/` mirrors this tree. The installer (`snapmap-plus.exe`) — or a manual drop-in — merges it into the DOOM
+`dist/` mirrors this tree (a release's `dist/` also holds the two 2018 files, which the installer
+does not install on the April 2024 build). The installer (`snapmap-plus.exe`) — or a manual drop-in — merges it into the DOOM
 root. The Snapmap+ window opens in the SnapMap editor (run `sh` in the console if it doesn't
 auto-open).
 

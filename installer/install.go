@@ -111,7 +111,9 @@ func cmdInstall(f flags) error {
 	if err := checkBundleForBuild(b.files, build); err != nil {
 		return err
 	}
-	files := b.files
+	// The bundle also carries the 2018 release's files for installers without build detection;
+	// the supported build installs only its own.
+	files, legacyFiles := splitBundleForBuild(b.files)
 
 	// Keep the original backups across updates. Backing up an earlier Snapmap+ DLL
 	// would make uninstall restore the mod instead of the pre-install file.
@@ -212,6 +214,17 @@ func cmdInstall(f flags) error {
 				fmt.Printf("  - removed superseded %s\n", rel)
 			}
 			removeIfEmpty(filepath.Dir(filepath.Join(doom, rel)))
+		}
+	}
+	// An earlier installer may have left the 2018 files without recording them; remove them only
+	// while their bytes are the ones this bundle carries.
+	for _, e := range legacyFiles {
+		target := filepath.Join(doom, e.rel)
+		if ours[e.rel] {
+			continue // recorded files were handled above
+		}
+		if got, err := fileSHA256(target); err == nil && got == e.sha256 && os.Remove(target) == nil {
+			fmt.Printf("  - removed the 2018 release's %s\n", e.rel)
 		}
 	}
 	migrateLegacyLogs(doom) // runtime logs live in snapmap-plus\logs\ -- fold older locations (snaphak_logs\, snaphak\logs\) in (best-effort)

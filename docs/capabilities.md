@@ -362,6 +362,9 @@ goes to the `~` console with a summary toast.
 
 The Snapmap+ window — HTML/CSS/JS rendered in a WebView2 control, opened inside the SnapMap
 editor (run `sh` in the console if it doesn't auto-open). Full detail: [`webview-ui.md`](webview-ui.md).
+The backend loads it from `<DOOM>\snapmap-plus\snapmap-plus-ui-13954591.dll`, a path that names the
+supported build; a `snapmap-plus\snapmap-plus-ui.dll` beside it is the 2018 release's frontend, which
+release bundles also carry (see [packaging](packaging.md#the-bundle)), and is never loaded.
 Its WebView2 profile is regenerable cache in `%LOCALAPPDATA%\snapmap-plus\cache\webview2\`; the first
 start of this release renames an older `snapmap-plus\webview2\` folder into it, and the installer never
 backs up or copies `cache\`.

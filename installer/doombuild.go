@@ -20,6 +20,40 @@ const legacyReleaseTag = "v0.2.1-beta.19"
 // currentProxy is the backend's file name for the supported build.
 const currentProxy = "XINPUT1_4.dll"
 
+// currentUIDll is the supported build's frontend, at a path that names the build so it never
+// collides with the 2018 release's frontend. It is SH_UI_DLL_PATH in src/backend/ui_bridge.h and
+// $uiRel in package.ps1 (a test checks all three).
+const currentUIDll = `snapmap-plus\snapmap-plus-ui-13954591.dll`
+
+// legacyBundleFiles are the 2018 release's files, which every release bundle also carries byte for
+// byte. Installers without build detection (legacyReleaseTag and earlier) install every file a
+// bundle lists, so on the 2018 build their update leaves these in place and the 2024 files are
+// inert (the 2018 executables import XINPUT1_3.dll). This installer never installs them for the
+// supported build, and removes them when an earlier installer left them there.
+var legacyBundleFiles = []string{"XINPUT1_3.dll", `snapmap-plus\snapmap-plus-ui.dll`}
+
+func isLegacyBundleFile(rel string) bool {
+	for _, l := range legacyBundleFiles {
+		if strings.EqualFold(filepath.Clean(rel), l) {
+			return true
+		}
+	}
+	return false
+}
+
+// splitBundleForBuild returns the files to install for the supported build and the 2018 files
+// the bundle also carries.
+func splitBundleForBuild(files []manifestEntry) (install, legacy []manifestEntry) {
+	for _, e := range files {
+		if isLegacyBundleFile(e.rel) {
+			legacy = append(legacy, e)
+		} else {
+			install = append(install, e)
+		}
+	}
+	return install, legacy
+}
+
 const (
 	build2018    = "2018"
 	build2024    = "13954591"
@@ -155,16 +189,23 @@ func routeRelease(f flags, b doomBuild) (flags, error) {
 }
 
 // checkBundleForBuild refuses a bundle that cannot serve the detected build: the supported build
-// needs the XINPUT1_4.dll backend. A 2018 bundle is installed exactly as its own installer would.
+// needs the XINPUT1_4.dll backend and its frontend at currentUIDll. The 2018 build is installed by
+// the 2018 release's own installer.
 func checkBundleForBuild(files []manifestEntry, b doomBuild) error {
 	if b.build != build2024 {
 		return nil
 	}
-	for _, e := range files {
-		if strings.EqualFold(e.rel, currentProxy) {
-			return nil
+	for _, need := range []string{currentProxy, currentUIDll} {
+		found := false
+		for _, e := range files {
+			if strings.EqualFold(filepath.Clean(e.rel), need) {
+				found = true
+			}
+		}
+		if !found {
+			return fmt.Errorf("this Snapmap+ bundle has no %s, so it does not support the %s you have installed. Nothing was changed",
+				need, label2024)
 		}
 	}
-	return fmt.Errorf("this Snapmap+ bundle has no %s, so it does not support the %s you have installed. Nothing was changed",
-		currentProxy, label2024)
+	return nil
 }

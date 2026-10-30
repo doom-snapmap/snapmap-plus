@@ -136,11 +136,11 @@ func (m *mockGitHub) serve(w http.ResponseWriter, req *http.Request) {
 func zipBundle(t *testing.T, tag string, badManifest bool) []byte {
 	t.Helper()
 	files := map[string]string{
-		"XINPUT1_4.dll":                    "backend-" + tag,
-		"snapmap-plus/snapmap-plus-ui.dll": "ui-" + tag,
+		"XINPUT1_4.dll": "backend-" + tag,
+		"snapmap-plus/snapmap-plus-ui-13954591.dll": "ui-" + tag,
 	}
 	manifest := ""
-	for _, rel := range []string{"XINPUT1_4.dll", "snapmap-plus/snapmap-plus-ui.dll"} {
+	for _, rel := range []string{"XINPUT1_4.dll", "snapmap-plus/snapmap-plus-ui-13954591.dll"} {
 		sum := sha256Hex([]byte(files[rel]))
 		if badManifest && rel == "XINPUT1_4.dll" {
 			sum = sha256Hex([]byte("something else"))
@@ -150,7 +150,7 @@ func zipBundle(t *testing.T, tag string, badManifest bool) []byte {
 	files["MANIFEST.sha256"] = manifest
 	var buf bytes.Buffer
 	zw := zip.NewWriter(&buf)
-	for _, name := range []string{"MANIFEST.sha256", "XINPUT1_4.dll", "snapmap-plus/snapmap-plus-ui.dll"} {
+	for _, name := range []string{"MANIFEST.sha256", "XINPUT1_4.dll", "snapmap-plus/snapmap-plus-ui-13954591.dll"} {
 		f, err := zw.Create(name)
 		if err != nil {
 			t.Fatal(err)
@@ -294,13 +294,13 @@ func (r *updateRig) installed(t *testing.T, tag string) {
 	if got := readF(t, filepath.Join(r.doom, "XINPUT1_4.dll")); got != "backend-"+tag {
 		t.Errorf("XINPUT1_4.dll = %q, want the %s backend", got, tag)
 	}
-	if got := readF(t, filepath.Join(r.doom, "snapmap-plus", "snapmap-plus-ui.dll")); got != "ui-"+tag {
+	if got := readF(t, filepath.Join(r.doom, "snapmap-plus", "snapmap-plus-ui-13954591.dll")); got != "ui-"+tag {
 		t.Errorf("snapmap-plus-ui.dll = %q, want the %s frontend", got, tag)
 	}
 	if rec, err := loadRecord(); err != nil || rec.Version != tag {
 		t.Errorf("install.json = %+v, %v; want version %s", rec, err, tag)
 	}
-	for _, rel := range []string{"XINPUT1_4.dll.snapmap-plus-bak", `snapmap-plus\snapmap-plus-ui.dll.snapmap-plus-bak`} {
+	for _, rel := range []string{"XINPUT1_4.dll.snapmap-plus-bak", `snapmap-plus\snapmap-plus-ui-13954591.dll.snapmap-plus-bak`} {
 		if exists(filepath.Join(r.doom, rel)) {
 			t.Errorf("an update backed up the installer's own %s", rel)
 		}
