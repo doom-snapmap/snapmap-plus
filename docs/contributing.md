@@ -336,7 +336,13 @@ still apply, so choose a version that has no tag, changelog entry or draft branc
    feature names, explain unavoidable technical terms, and preserve important limits and required actions.
    Be respectful, avoid baby talk, and never invent a benefit to make an explanation simpler. The drafter's
    prompt in `tools/draft_changelog.py` follows this policy and does not use older notes as a style example.
-   Six bullets is a ceiling, not a target: combine related changes and aim for 25 words or fewer per bullet.
+   The bullet ceiling scales with the release: six bullets for a release of up to twelve user-facing
+   commits, one more for every five commits past that, up to thirty, and the summary grows from 320 to 600
+   characters over the same range (`item_budget` and `summary_budget` in `tools/draft_changelog.py`; the
+   workflow log prints the budgets it used). A ceiling is not a target: combine related changes and aim for
+   25 words or fewer per bullet, but a large release should describe its work rather than collapse it into
+   the unnamed count. Above eight bullets every bullet starts with a short bold theme label such as
+   **Mods:** so the list reads in groups; the website renders the bold and the installer strips it.
    Describe visible outcomes, leaving out implementation mechanics and optional troubleshooting commands.
    Keep headlines literal, and check that simplification has not turned an example into a general rule or
    broadened a limited fix into a guarantee, including in the summary.

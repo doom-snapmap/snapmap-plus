@@ -371,3 +371,41 @@ class TestDocsAreCollected(unittest.TestCase):
         root = pathlib.Path(dc.__file__).resolve().parent.parent
         for path in dc.DOC_PATHS:
             self.assertTrue((root / path).is_file(), path)
+
+
+class TestBudgets(unittest.TestCase):
+    def test_small_release_keeps_the_floor(self):
+        for n in (0, 1, 6, 12):
+            self.assertEqual(dc.item_budget(n), dc.MAX_ITEMS)
+            self.assertEqual(dc.summary_budget(n), dc.MAX_SUMMARY)
+
+    def test_budget_grows_with_the_release(self):
+        self.assertEqual(dc.item_budget(13), dc.MAX_ITEMS + 1)
+        self.assertEqual(dc.item_budget(17), dc.MAX_ITEMS + 1)
+        self.assertEqual(dc.item_budget(18), dc.MAX_ITEMS + 2)
+        self.assertGreater(dc.summary_budget(36), dc.MAX_SUMMARY)
+        self.assertLess(dc.summary_budget(36), dc.MAX_SUMMARY_LARGE)
+
+    def test_budget_has_a_ceiling(self):
+        self.assertEqual(dc.item_budget(140), min(dc.MAX_ITEMS + 26, dc.MAX_ITEMS_CEILING))
+        self.assertEqual(dc.item_budget(10000), dc.MAX_ITEMS_CEILING)
+        self.assertEqual(dc.summary_budget(60), dc.MAX_SUMMARY_LARGE)
+        self.assertEqual(dc.summary_budget(10000), dc.MAX_SUMMARY_LARGE)
+
+    def test_validate_honours_the_budget(self):
+        many = ["Outcome %d." % i for i in range(20)]
+        with self.assertRaises(dc.DraftRejected):
+            dc.validate(make(added=many, improved=[]))
+        dc.validate(make(added=many, improved=[]), max_items=20)
+        long_summary = "x" * 500
+        with self.assertRaises(dc.DraftRejected):
+            dc.validate(make(summary=long_summary))
+        dc.validate(make(summary=long_summary), max_summary=600)
+
+    def test_system_prompt_carries_the_budgets(self):
+        text = dc.system_prompt(28, 600)
+        self.assertIn("At most 28 named bullets", text)
+        self.assertIn("at most 600 characters", text)
+        self.assertNotIn("{MAX_ITEMS}", text)
+        self.assertNotIn("{MAX_SUMMARY}", text)
+        self.assertNotIn("At most 6 ", dc.SYSTEM)

@@ -14,14 +14,14 @@ import sys
 
 MODEL = "claude-opus-5"
 MAX_TOKENS = 16000
-MAX_BODY_CHARS = 800      # one commit body; git permits megabyte messages
-MAX_PROMPT_CHARS = 60000  # the assembled prompt
-MAX_INPUT_TOKENS = 40000  # counted before spending
+MAX_BODY_CHARS = 800       # one commit body; git permits megabyte messages
+MAX_PROMPT_CHARS = 240000  # the assembled prompt; a release of 150 commits fits
+MAX_INPUT_TOKENS = 160000  # counted before spending
 
 # Include changed feature documentation so drafts can describe how users reach a
 # feature.
 DOC_PATHS = ["docs/capabilities.md", "installer/README.md", "README.md"]
-MAX_DOC_CHARS = 24000
+MAX_DOC_CHARS = 60000
 
 # Require interface-location words to appear in the inputs. This catches invented
 # UI surfaces, but it does not establish that every drafted claim is true.
@@ -29,9 +29,17 @@ UI_NOUNS = ("tab", "panel", "button", "menu", "dialog", "checkbox", "slider",
             "toolbar", "sidebar", "window", "dropdown", "wizard", "toggle")
 
 MAX_HEADLINE = 60
-MAX_SUMMARY = 320
-MAX_ITEMS = 6
-MAX_SKELETON_SUBJECTS = 20
+# The bullet and summary budgets grow with the release. A small release keeps
+# the six-bullet ceiling; a release with many user-facing commits earns more
+# room so that its work is described rather than collapsed into a count.
+MAX_SUMMARY = 320          # the floor, for releases up to SMALL_RELEASE commits
+MAX_SUMMARY_LARGE = 600    # the ceiling, reached at LARGE_RELEASE commits
+MAX_ITEMS = 6              # the floor
+MAX_ITEMS_CEILING = 30
+SMALL_RELEASE = 12         # user-facing commits that fit the floor budgets
+ITEMS_PER_EXTRA_COMMITS = 5  # one more bullet for every N commits past SMALL_RELEASE
+LARGE_RELEASE = 60         # user-facing commits at which the summary ceiling applies
+MAX_SKELETON_SUBJECTS = 60
 
 # Canonical user-facing commit filter; keep contributing.md aligned.
 INTERNAL_PREFIX_RE = re.compile(
@@ -54,16 +62,23 @@ that unlocks its SnapMap editor. You are given the commits in one release. Produ
 the entry a player reads.
 
 Rules:
-- At most 6 named bullets in TOTAL across New, Improved and Fixed, one sentence \
-each, present tense. Six is a ceiling, not a target: combine related changes \
-and use fewer bullets when there are fewer distinct player-visible outcomes.
+- At most {MAX_ITEMS} named bullets in TOTAL across New, Improved and Fixed, one \
+sentence each, present tense. That number is a ceiling, not a target: combine \
+related changes and use fewer bullets when there are fewer distinct \
+player-visible outcomes. It was computed from the size of this release, so a \
+large release is expected to use most of it rather than collapse its work into \
+the unnamed count.
+- When the ceiling is above 8, start every bullet with a short bold theme label \
+of one or two words followed by a colon, for example **Mods:** or **Editor:**, \
+and give bullets about the same theme the same label so the list reads in groups. \
+Below that ceiling, use no labels.
 - Name a fix only if a user could have hit it and remembered it. Everything a user \
 could never have noticed is counted in collapsed_count and never described.
 - Plain language. No symbol names, addresses, file paths, test counts, commit \
 subjects copied verbatim, or internal jargon.
 - headline: at most 60 characters, the one thing this release is about.
-- summary: at most 320 characters, one to three sentences on what changed and what \
-it means for someone using Snapmap+.
+- summary: at most {MAX_SUMMARY} characters, one to three sentences on what changed \
+and what it means for someone using Snapmap+.
 - sources: the short commit hashes backing your named bullets, lowercase hex only, \
 for maintainer review.
 - Never use newlines, square brackets, angle brackets, or backticks inside any \
@@ -139,7 +154,27 @@ def _reject_forbidden(where, value):
             )
 
 
-def validate(draft, min_collapsed=0):
+def item_budget(user_facing_commits):
+    """How many named bullets a release of this size may carry."""
+    n = max(0, int(user_facing_commits))
+    if n <= SMALL_RELEASE:
+        return MAX_ITEMS
+    extra = (n - SMALL_RELEASE + ITEMS_PER_EXTRA_COMMITS - 1) // ITEMS_PER_EXTRA_COMMITS
+    return min(MAX_ITEMS + extra, MAX_ITEMS_CEILING)
+
+
+def summary_budget(user_facing_commits):
+    """How long the summary may be for a release of this size."""
+    n = max(0, int(user_facing_commits))
+    if n <= SMALL_RELEASE:
+        return MAX_SUMMARY
+    if n >= LARGE_RELEASE:
+        return MAX_SUMMARY_LARGE
+    span = LARGE_RELEASE - SMALL_RELEASE
+    return MAX_SUMMARY + (MAX_SUMMARY_LARGE - MAX_SUMMARY) * (n - SMALL_RELEASE) // span
+
+
+def validate(draft, min_collapsed=0, max_items=MAX_ITEMS, max_summary=MAX_SUMMARY):
     """Raise DraftRejected unless every field is safe and short enough."""
     groups = {"added": draft.added, "improved": draft.improved, "fixed": draft.fixed}
 
@@ -156,14 +191,14 @@ def validate(draft, min_collapsed=0):
     if len(draft.headline) > MAX_HEADLINE:
         raise DraftRejected("headline is %d characters (max %d)"
                             % (len(draft.headline), MAX_HEADLINE))
-    if len(draft.summary) > MAX_SUMMARY:
+    if len(draft.summary) > max_summary:
         raise DraftRejected("summary is %d characters (max %d)"
-                            % (len(draft.summary), MAX_SUMMARY))
+                            % (len(draft.summary), max_summary))
     # Enforce the item limit across all groups combined.
     total = sum(len(items) for items in groups.values())
-    if total > MAX_ITEMS:
+    if total > max_items:
         raise DraftRejected("%d named bullets across New, Improved and Fixed "
-                            "(max %d in total)" % (total, MAX_ITEMS))
+                            "(max %d in total)" % (total, max_items))
     for name, items in groups.items():
         for item in items:
             if not item.strip():
@@ -298,7 +333,13 @@ def check_grounded(draft, corpus):
                         "lives: %s" % (name, noun, _one_line(item, 120)))
 
 
-def draft(commits, omitted_count, docs=""):
+def system_prompt(max_items=MAX_ITEMS, max_summary=MAX_SUMMARY):
+    """SYSTEM with this release's budgets filled in."""
+    return (SYSTEM.replace("{MAX_ITEMS}", str(int(max_items)))
+                  .replace("{MAX_SUMMARY}", str(int(max_summary))))
+
+
+def draft(commits, omitted_count, docs="", max_items=MAX_ITEMS, max_summary=MAX_SUMMARY):
     """The one API call. pydantic and anthropic are imported here, not above."""
     import anthropic
     from pydantic import BaseModel
@@ -328,7 +369,9 @@ def draft(commits, omitted_count, docs=""):
     prompt += (
         "\nFinal editing pass before returning the structured entry:\n"
         "- Treat the material above as evidence, not prose to copy. Write for a player.\n"
-        "- Keep only distinct, supported outcomes a player can understand; do not fill six slots.\n"
+"- Keep only distinct, supported outcomes a player can understand; do not fill the "
+        "slots for their own sake, but do not collapse distinct outcomes of a large release "
+        "into the unnamed count either.\n"
         "- Delete bullets about compiler internals, list counts, numbering or duplicate-entry repairs.\n"
         "- Delete optional diagnostic commands and troubleshooting procedures.\n"
         "- Rewrite unfamiliar developer terms as the behavior they describe, or omit the detail "
@@ -339,8 +382,9 @@ def draft(commits, omitted_count, docs=""):
         "only one or exactly two are skipped.\n"
     )
 
+    system = system_prompt(max_items, max_summary)
     counted = client.messages.count_tokens(
-        model=MODEL, system=SYSTEM, messages=[{"role": "user", "content": prompt}]
+        model=MODEL, system=system, messages=[{"role": "user", "content": prompt}]
     )
     if counted.input_tokens > MAX_INPUT_TOKENS:
         raise DraftRejected("input is %d tokens (max %d)"
@@ -351,7 +395,7 @@ def draft(commits, omitted_count, docs=""):
         max_tokens=MAX_TOKENS,
         thinking={"type": "adaptive"},
         output_config={"effort": "medium"},
-        system=SYSTEM,
+        system=system,
         messages=[{"role": "user", "content": prompt}],
         output_format=ChangelogDraftSchema,
     )
@@ -386,8 +430,12 @@ def main(argv=None):
         # a skeleton like every other failure, not kill the workflow.
         commits, subjects, omitted = collect(args.base)
         docs = collect_docs(args.base)
-        parsed = draft(commits, omitted, docs)
-        validate(parsed, omitted)
+        max_items, max_summary = item_budget(len(subjects)), summary_budget(len(subjects))
+        if not args.dry_run:   # the preview's stderr carries only the sources table
+            print("::notice::%d user-facing commits in range: up to %d bullets, summary up to %d "
+                  "characters" % (len(subjects), max_items, max_summary), file=sys.stderr)
+        parsed = draft(commits, omitted, docs, max_items, max_summary)
+        validate(parsed, omitted, max_items, max_summary)
         check_grounded(parsed, _corpus(commits, docs))
         section, sources = render(args.tag, date, parsed), render_sources(parsed)
     except Exception as exc:            # noqa: BLE001 -- file mode retains its fallback
