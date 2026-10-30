@@ -1631,7 +1631,10 @@ static void lg_rmtree(const char *dir)
 }
 
 /* An installed mod that already serves what the folder just built serves:
- * the same bundle hash, or the same id and content (sh_mb_content_key). A
+ * the same bundle hash, or the same id and content (sh_mb_content_key). For
+ * a package a map delivered, also an installed mod that was not itself
+ * delivered and has its id (whatever the content), or provides every path it
+ * provides under another id (sh_ms_delivered_counterpart's rules). A
  * delivered copy is then not stored twice: the new folder goes and the
  * installed one answers the carrier. Returns 1 with that folder. */
 static int lg_installed_copy(const char *mods, const char *built, char *out, size_t cap)
@@ -1641,11 +1644,14 @@ static int lg_installed_copy(const char *mods, const char *built, char *out, siz
     WIN32_FIND_DATAA fd;
     HANDLE h;
     sh_mb_bundle b;
-    int hit = 0;
+    char cover[MAX_PATH] = "";
+    size_t cover_files = 0;
+    int hit = 0, delivered;
     if (!MultiByteToWideChar(CP_ACP, 0, built, -1, wide, MAX_PATH) ||
         !WideCharToMultiByte(CP_UTF8, 0, wide, -1, u8, (int)sizeof u8, NULL, NULL)) return 0;
     if (!sh_mb_load_folder(u8, &b)) { sh_mb_free(&b); return 0; }
     sh_mb_content_key(&b, key);
+    delivered = sh_mb_is_delivered(&b);
     _snprintf_s(pattern, sizeof pattern, _TRUNCATE, "%s\\*", mods);
     h = FindFirstFileA(pattern, &fd);
     if (h != INVALID_HANDLE_VALUE) {
@@ -1656,28 +1662,48 @@ static int lg_installed_copy(const char *mods, const char *built, char *out, siz
             if (!_stricmp(other, built)) continue;
             if (!MultiByteToWideChar(CP_ACP, 0, other, -1, wide, MAX_PATH) ||
                 !WideCharToMultiByte(CP_UTF8, 0, wide, -1, u8, (int)sizeof u8, NULL, NULL)) continue;
-            if (sh_mb_load_folder(u8, &o) && o.validated &&
-                (!strcmp(o.hash, b.hash) || (!strcmp(o.id, b.id) && (sh_mb_content_key(&o, okey), !strcmp(okey, key))))) {
-                strncpy_s(out, cap, other, _TRUNCATE);
-                hit = 1;
+            if (sh_mb_load_folder(u8, &o) && o.validated) {
+                if (!strcmp(o.hash, b.hash) || (!strcmp(o.id, b.id) && (sh_mb_content_key(&o, okey), !strcmp(okey, key)))) {
+                    strncpy_s(out, cap, other, _TRUNCATE);
+                    hit = 1;
+                } else if (delivered && !sh_mb_is_delivered(&o)) {
+                    /* The same id is the installed mod; another id that
+                     * provides every path is a copy of it (fewest files). */
+                    if (!strcmp(o.id, b.id)) {
+                        strncpy_s(out, cap, other, _TRUNCATE);
+                        hit = 1;
+                    } else if (sh_mb_requests_cover(&o, &b) && (!cover_files || o.file_count < cover_files)) {
+                        strncpy_s(cover, sizeof cover, other, _TRUNCATE);
+                        cover_files = o.file_count;
+                    }
+                }
             }
             sh_mb_free(&o);
         } while (!hit && FindNextFileA(h, &fd));
         FindClose(h);
+    }
+    if (!hit && cover[0]) {
+        strncpy_s(out, cap, cover, _TRUNCATE);
+        hit = 1;
     }
     sh_mb_free(&b);
     return hit;
 }
 
 /* A free folder for a converted package: <id>, else <id>@<version>, else
- * <id>@<version>-<digest16>. */
+ * <id>@<version>-<digest16>. A generated version (sh_mb_version_generated)
+ * never names a folder: <id>, else <id>-<digest16>. */
 static int lg_pick_folder(const char *mods, const char *id, const char *version, const char *digest,
                           char *out, size_t cap)
 {
-    int round;
+    int round, generated = sh_mb_version_generated(version);
     for (round = 0; round < 3; round++) {
         DWORD a;
         if (round == 0) _snprintf_s(out, cap, _TRUNCATE, "%s\\%s", mods, id);
+        else if (generated) {
+            if (round == 1) continue;
+            _snprintf_s(out, cap, _TRUNCATE, "%s\\%s-%s", mods, id, digest);
+        }
         else if (round == 1) _snprintf_s(out, cap, _TRUNCATE, "%s\\%s@%s", mods, id, version);
         else _snprintf_s(out, cap, _TRUNCATE, "%s\\%s@%s-%s", mods, id, version, digest);
         a = GetFileAttributesA(out);
@@ -1815,7 +1841,7 @@ static int lg_convert_tree(const sh_modlegacy_zip *zip, const sh_legacy_header *
     }
     if (lg_installed_copy(mods, folder, kept, sizeof kept)) {
         char line[2 * MAX_PATH + 160];
-        _snprintf_s(line, sizeof line, _TRUNCATE, "LEGACY: %s serves the same content; the converted copy is not kept", kept);
+        _snprintf_s(line, sizeof line, _TRUNCATE, "LEGACY: the installed %s serves this package; the converted copy is not kept", kept);
         backend_log(line);
         lg_rmtree(folder);
         strcpy_s(folder, sizeof folder, kept);

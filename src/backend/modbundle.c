@@ -4308,13 +4308,17 @@ void sh_mb_content_key(const sh_mb_bundle *b, char out[SH_MB_HASH_HEX + 1])
 int sh_mb_folder_name(const char *mods_root, const char *id, const char *version, const char *hash,
                       char *out, size_t cap)
 {
-    int round;
+    int round, generated = sh_mb_version_generated(version);
     if (!mods_root || !id || !id[0] || !out || !cap) return 0;
     for (round = 0; round < 4; round++) {
         char leaf[SH_MB_ID_MAX + 4 * SH_MB_VERSION_MAX + 32], path[MAX_PATH * 4];
         wchar_t *w;
         DWORD a;
         if (round == 0) strcpy_s(leaf, sizeof leaf, id);
+        else if (generated) {
+            if (round == 1) continue;
+            _snprintf_s(leaf, sizeof leaf, _TRUNCATE, "%s-%.*s", id, round == 2 ? 8 : 16, hash ? hash : "0000000000000000");
+        }
         else if (round == 1) _snprintf_s(leaf, sizeof leaf, _TRUNCATE, "%s@%s", id, version ? version : "0.0.0");
         else _snprintf_s(leaf, sizeof leaf, _TRUNCATE, "%s@%s-%.*s", id, version ? version : "0.0.0",
                          round == 2 ? 8 : 16, hash ? hash : "0000000000000000");
@@ -4332,6 +4336,34 @@ int sh_mb_folder_name(const char *mods_root, const char *id, const char *version
         }
     }
     return 0;
+}
+
+int sh_mb_version_generated(const char *version)
+{
+    return version && !strncmp(version, "legacy-", 7);
+}
+
+int sh_mb_is_delivered(const sh_mb_bundle *b)
+{
+    return b && (b->delivered || !strcmp(b->origin, SH_MB_ORIGIN_DELIVERY));
+}
+
+int sh_mb_requests_cover(const sh_mb_bundle *big, const sh_mb_bundle *part)
+{
+    const char **have;
+    size_t i, n = 0;
+    int ok = 1;
+    if (!big || !part || !part->file_count || part->file_count > big->file_count) return 0;
+    have = (const char **)malloc(sizeof(char *) * big->file_count);
+    if (!have) return 0;
+    for (i = 0; i < big->file_count; i++) if (big->files[i].request) have[n++] = big->files[i].request;
+    qsort(have, n, sizeof *have, mb_req_cmp);
+    for (i = 0; i < part->file_count && ok; i++) {
+        const char *r = part->files[i].request;
+        ok = r && bsearch(&r, have, n, sizeof *have, mb_req_cmp) != NULL;
+    }
+    free(have);
+    return ok;
 }
 
 /* ---------------------------------------------------- product record ---- */

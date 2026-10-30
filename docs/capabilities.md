@@ -231,6 +231,9 @@ is listed in `shadows`.
   `bundle.json`, `.state.json`, the shared `blobs\` folder and `legacy\` go, each mod keeps its files
   in its own folder with a `mod.json`, and `claims.json`, `publish-links.json` and `.migrated.json`
   are folded into `snapmap-plus.json`; one `MODS: store:` log line per folder says what happened.
+  Then, once, a package a map delivered is removed when an installed mod has its id or provides
+  every file it provides (maps naming it load the installed mod), a mod folder left alone with its
+  id is renamed to the id, and no folder is named after a generated version.
 - The first start of this release moves the packages in the retired
   `%LOCALAPPDATA%\snapmap-plus\overrides\` folder into `mods\`, once. Each folder there with a
   `package.json` or `mod.json` becomes `mods\<that folder>\` with `mod.json` (its requirements,
@@ -242,9 +245,10 @@ is listed in `shadows`.
   kept, each in its own folder. A folder over 512 MiB or 8192 files is skipped, and one
   larger than a mod can be (4096 files, 256 MiB) is refused. Nothing in `overrides\` is changed or
   deleted, and you can keep or delete it afterwards; an empty `override-backups\` folder is removed.
-  Small folders are done during startup and the rest in the background. The outcome per folder is
-  in `mods\snapmap-plus.json` and in the log's `MODS: migration:` lines; `sh_mods migrate --again`
-  repeats the move after you change `overrides\`.
+  Small folders are done during startup and the rest in the background. The outcome is in the log's
+  `MODS: migration:` lines; once the move completes, `mods\snapmap-plus.json` keeps only when it
+  ran, from where, and the folders it skipped or refused. An `overrides\` entry added or changed
+  afterwards shows the **Migrate** button again; `sh_mods migrate --again` repeats the move.
 
 ## Console commands
 

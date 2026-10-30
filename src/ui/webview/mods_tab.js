@@ -89,8 +89,12 @@ var modsTab = (function () {
     var p = num(b.pointers);
     return plural(b.files, 'file') + (p > 0 ? ', ' + p + ' from the installed game' : '');
   }
-  /* id@version, the name a map records; the folder for a mod that was never built. */
-  function idText(b) { return b.id ? b.id + '@' + (b.version || '0.0.0') : b.key; }
+  /* id@version, the name a map records (just the id when the page is given no
+   * version: a package a map delivered without one); the folder for a mod that
+   * was never built. */
+  function idText(b) { return b.id ? (b.version ? b.id + '@' + b.version : b.id) : b.key; }
+  /* id and version of a map row, the version left out when there is none. */
+  function rowName(r) { return r.version ? r.id + ' ' + r.version : r.id; }
 
   /* The label, tone and detail line of a row. */
   function stateInfo(b) {
@@ -301,7 +305,7 @@ var modsTab = (function () {
         model.rows.forEach(function (r) {
           var info = rowInfo(r), line = el('div', 'mods-map-row');
           var top = el('div', 'mods-row-top');
-          top.appendChild(el('span', 'mods-row-name', r.id + ' ' + r.version));
+          top.appendChild(el('span', 'mods-row-name', rowName(r)));
           top.appendChild(pill(info.label, info.tone));
           line.appendChild(top);
           line.appendChild(el('div', 'mods-row-sub', info.detail + (r.nameCount ? ' Names: ' + namesText(r.names, r.nameCount) + '.' : '')));
@@ -312,7 +316,7 @@ var modsTab = (function () {
         box.appendChild(el('div', 'mods-sub', 'Placed now (recorded at save)'));
         model.placed.forEach(function (p) {
           var line = el('div', 'mods-map-row'), top = el('div', 'mods-row-top');
-          top.appendChild(el('span', 'mods-row-name', p.id + ' ' + p.version));
+          top.appendChild(el('span', 'mods-row-name', rowName(p)));
           if (!p.inManifest) top.appendChild(pill('New', 'warn'));
           if (p.viaNeeds) top.appendChild(pill('Needed by another mod', ''));
           line.appendChild(top);
@@ -435,7 +439,7 @@ var modsTab = (function () {
   }
 
   return {STATES: STATES, ROW_STATES: ROW_STATES, ACTIONS: ACTIONS, DUPLICATE_TEXT: DUPLICATE_TEXT, normalize: normalize,
-          formatSize: formatSize, stateInfo: stateInfo, rowInfo: rowInfo, filesText: filesText, idText: idText,
+          formatSize: formatSize, stateInfo: stateInfo, rowInfo: rowInfo, filesText: filesText, idText: idText, rowName: rowName,
           filterMods: filterMods, mapSummary: mapSummary, actionMessage: actionMessage, removeConfirmText: removeConfirmText,
           create: create};
 })();

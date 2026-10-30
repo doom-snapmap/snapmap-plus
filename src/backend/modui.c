@@ -336,6 +336,13 @@ static void mu_origin(const sh_ms_entry *e, char *out, size_t cap)
     else if (!strcmp(e->bundle.origin, SH_MB_ORIGIN_INSTALL)) strncpy_s(out, cap, "an installed copy", _TRUNCATE);
 }
 
+/* The version a row shows: a version the converter generated for a package
+ * a map delivered without one is part of its hash, not something to show. */
+static const char *mu_version(const char *v)
+{
+    return !v || sh_mb_version_generated(v) ? "" : v;
+}
+
 /* The product made the folder (a copy Remove deletes); else the author's. */
 static int mu_product_folder(const sh_ms_entry *e)
 {
@@ -468,7 +475,7 @@ static void mu_put_row(mu_buf *b, const mu_model *m, const mu_row *r)
     mu_kstr(b, "id", e->loaded ? bd->id : "", 0);
     mu_kstr(b, "name", e->loaded && bd->name ? bd->name : "", 0);
     mu_kstr(b, "author", e->loaded && bd->author ? bd->author : "", 0);
-    mu_kstr(b, "version", e->loaded ? bd->version : "", 0);
+    mu_kstr(b, "version", e->loaded ? mu_version(bd->version) : "", 0);
     mu_knum(b, "build", e->loaded ? bd->build : 0, 0);
     mu_knum(b, "size", e->loaded ? bd->total_size : 0, 0);
     mu_knum(b, "files", e->loaded ? bd->file_count : 0, 0);
@@ -525,12 +532,13 @@ static int mu_path_cmp(const void *a, const void *b)
 
 /* Every path an admitted bundle shadows, and every admitted path nobody serves
  * (two bundles provide it with different bytes), grouped by path: conflicts
- * first, with the copy that serves and why, then stock and legacy shadows. */
+ * first, with the copy that serves and why, then stock shadows, then the
+ * grandfathered shadows of converted packages (migrated, or delivered by a map). */
 static void mu_print_shadows(const mu_out *o, const mu_model *m)
 {
     mu_path *paths = NULL;
     size_t n = 0, cap = 0, i, k, printed = 0, groups = 0;
-    unsigned stock = 0, legacy = 0, conflicts = 0;
+    unsigned stock = 0, grandfathered = 0, conflicts = 0;
     int pass;
     for (i = 0; i < m->list.count; i++) {
         const mu_entry *u = &m->entries[i];
@@ -560,16 +568,18 @@ static void mu_print_shadows(const mu_out *o, const mu_model *m)
         for (i = 0; i < n;) {
             size_t j = i + 1, q, at = 0;
             int conflict = paths[i].conflict, any_legacy = m->entries[paths[i].entry].legacy, served;
+            int any_delivered = m->entries[paths[i].entry].legacy && sh_ms_entry_delivered(&m->list.items[paths[i].entry]);
             char who[700];
             sh_modserve_hit hit;
             while (j < n && !strcmp(paths[j].request, paths[i].request)) {
                 conflict |= paths[j].conflict;
                 any_legacy |= m->entries[paths[j].entry].legacy;
+                any_delivered |= m->entries[paths[j].entry].legacy && sh_ms_entry_delivered(&m->list.items[paths[j].entry]);
                 j++;
             }
             if (conflict != (pass == 0)) { i = j; continue; }
             if (conflict) conflicts++;
-            else if (any_legacy) legacy++;
+            else if (any_legacy) grandfathered++;
             else stock++;
             groups++;
             if (printed >= MU_MAX_SHADOW_GROUPS) { i = j; continue; }
@@ -595,14 +605,15 @@ static void mu_print_shadows(const mu_out *o, const mu_model *m)
                     mu_say(o, "conflict %s: %s serves it (%s); from %s", paths[i].request, m->list.items[served].name,
                            ci.reason, who);
             } else
-                mu_say(o, "%s %s: by %s; served by %s%s", any_legacy ? "legacy shadow" : "shadow", paths[i].request, who,
+                mu_say(o, "%s %s: by %s%s; served by %s%s", any_legacy ? "grandfathered shadow" : "shadow", paths[i].request,
+                       who, !any_legacy ? "" : any_delivered ? " (delivered by a map)" : " (migrated)",
                        served >= 0 ? m->list.items[served].name : "nothing",
                        served >= 0 && hit.is_stock ? " (the installed game's own copy)" : "");
             printed++;
             i = j;
         }
     if (groups > printed) mu_say(o, "%zu more shadow or conflict path(s) not printed", groups - printed);
-    mu_say(o, "%u conflict(s), %u shadow(s), %u legacy shadow(s)", conflicts, stock, legacy);
+    mu_say(o, "%u conflict(s), %u shadow(s), %u grandfathered shadow(s)", conflicts, stock, grandfathered);
     free(paths);
 }
 
@@ -800,7 +811,7 @@ static void mu_put_map(mu_buf *b, const mu_model *m, const mu_map *mp)
         if (i) mu_putn(b, ",", 1);
         mu_putn(b, "{", 1);
         mu_kstr(b, "id", r->id, 1);
-        mu_kstr(b, "version", r->version, 0);
+        mu_kstr(b, "version", mu_version(r->version), 0);
         mu_kstr(b, "bundle", r->bundle, 0);
         mu_knum(b, "size", r->size, 0);
         mu_kstr(b, "state", state, 0);
@@ -824,7 +835,7 @@ static void mu_put_map(mu_buf *b, const mu_model *m, const mu_map *mp)
         if (i) mu_putn(b, ",", 1);
         mu_putn(b, "{", 1);
         mu_kstr(b, "id", cb->id, 1);
-        mu_kstr(b, "version", cb->version, 0);
+        mu_kstr(b, "version", mu_version(cb->version), 0);
         mu_kstr(b, "bundle", cb->hash, 0);
         mu_knum(b, "size", cb->size, 0);
         mu_kstr(b, "key", at >= 0 ? m->list.items[at].name : "", 0);
@@ -1466,13 +1477,18 @@ static void mu_print_entry(const mu_out *o, const mu_model *m, size_t i)
 {
     const mu_entry *u = &m->entries[i];
     const sh_ms_entry *e = u->e;
-    char state[SH_MS_KEY_MAX + 96];
+    char state[SH_MS_KEY_MAX + 96], key[SH_MS_KEY_MAX + 1];
+    /* id@version+build, without a version the converter generated. */
+    if (e->loaded && sh_mb_version_generated(e->bundle.version))
+        _snprintf_s(key, sizeof key, _TRUNCATE, "%s+%llu", e->bundle.id, e->bundle.build);
+    else strncpy_s(key, sizeof key, e->key, _TRUNCATE);
     if (!strcmp(u->state, "superseded"))
         _snprintf_s(state, sizeof state, _TRUNCATE, "superseded, %s serves %d of its path(s)",
                     u->superseded_by >= 0 ? m->list.items[u->superseded_by].name : "a newer build", u->superseded_paths);
     else strncpy_s(state, sizeof state, u->state, _TRUNCATE);
-    mu_say(o, "%s mods\\%s (%s): %s%s%s%s%s", e->delivered ? "delivered bundle" : u->legacy ? "migrated bundle" : "bundle",
-           e->name, e->key, state, u->cause[0] ? "; " : "", u->cause, u->origin[0] ? "; from " : "", u->origin);
+    mu_say(o, "%s mods\\%s (%s): %s%s%s%s%s", e->delivered ? "bundle delivered by a map," : u->legacy ? "migrated bundle" : "bundle",
+           e->name, key, state, u->cause[0] ? "; " : "", u->cause, u->origin[0] && !e->delivered ? "; from " : "",
+           e->delivered ? "" : u->origin);
 }
 
 int sh_modui_doctor(int verify, sh_modui_line_fn line, void *context)

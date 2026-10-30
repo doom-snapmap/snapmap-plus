@@ -301,10 +301,24 @@ void sh_mb_content_key(const sh_mb_bundle *bundle, char out[SH_MB_HASH_HEX + 1])
 
 /* A folder name under `mods_root` for a product-created folder of this
  * bundle: "<id>", else "<id>@<version>", else "<id>@<version>-<hash 8>", else
- * "<id>@<version>-<hash 16>". Returns 1 with a free name, 2 when that folder
- * already holds this bundle hash, 0 when none is available. */
+ * "<id>@<version>-<hash 16>". A generated version (sh_mb_version_generated)
+ * never appears in a name: "<id>", else "<id>-<hash 8>", else "<id>-<hash 16>".
+ * Returns 1 with a free name, 2 when that folder already holds this bundle
+ * hash, 0 when none is available. */
 int  sh_mb_folder_name(const char *mods_root, const char *id, const char *version, const char *hash,
                        char *out, size_t cap);
+
+/* A version the converter generated for a package a map delivered without
+ * one ("legacy-<digest16>"): part of the manifest and its hash, never shown
+ * and never part of a folder name. */
+int  sh_mb_version_generated(const char *version);
+
+/* Whether the bundle is a package a map delivered: its legacy record has no
+ * overrides source, or its product block's origin is "delivery". */
+int  sh_mb_is_delivered(const sh_mb_bundle *bundle);
+
+/* Whether every request path of `part` (at least one) is one of `big`'s. */
+int  sh_mb_requests_cover(const sh_mb_bundle *big, const sh_mb_bundle *part);
 
 /* ------------------------------------------------- the product record ---- */
 /* <mods_root>\snapmap-plus.json, the product's one file under mods\:

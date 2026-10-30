@@ -9,6 +9,7 @@
 
 #include "modstore.h"
 #include "config_json.h"
+#include "mp_json.h"
 #include "backend_log.h"
 
 /* ------------------------------------------------------------ lock ----- */
@@ -1515,6 +1516,10 @@ static void ms_up_pick(ms_up_ctx *c, size_t k)
         wchar_t *p;
         int taken = 0;
         if (round == 0) strncpy_s(leaf, sizeof leaf, it->b.id, _TRUNCATE);
+        else if (sh_mb_version_generated(it->b.version)) {
+            if (round < 3) continue;
+            _snprintf_s(leaf, sizeof leaf, _TRUNCATE, "%s-%.*s", it->b.id, round == 3 ? 8 : 16, it->b.hash);
+        }
         else if (round == 1) _snprintf_s(leaf, sizeof leaf, _TRUNCATE, "%s@%s", it->b.id, it->b.version);
         else if (round == 2) _snprintf_s(leaf, sizeof leaf, _TRUNCATE, "%s@%s+%llu", it->b.id, it->b.version, it->b.build);
         else _snprintf_s(leaf, sizeof leaf, _TRUNCATE, "%s@%s-%.*s", it->b.id, it->b.version, round == 3 ? 8 : 16, it->b.hash);
@@ -1607,6 +1612,243 @@ static unsigned long long ms_tree_bytes(const wchar_t *dir)
     return n;
 }
 
+/* ------------------------------------------------- the second step ---- */
+
+int sh_ms_entry_delivered(const sh_ms_entry *e)
+{
+    return e && e->loaded && sh_mb_is_delivered(&e->bundle);
+}
+
+const sh_ms_entry *sh_ms_delivered_counterpart(const sh_ms_list *l, const sh_mb_bundle *d, int *rule)
+{
+    const sh_ms_entry *cover = NULL, *usable = NULL, *any = NULL, *other = NULL;
+    size_t i;
+    if (rule) *rule = 0;
+    if (!l || !d || !d->id[0]) return NULL;
+    for (i = 0; i < l->count; i++) {
+        const sh_ms_entry *e = &l->items[i];
+        if (!e->loaded || sh_ms_entry_delivered(e)) continue;
+        if (!strcmp(e->bundle.id, d->id)) {
+            if (!cover && sh_mb_requests_cover(&e->bundle, d)) cover = e;
+            if (!usable && sh_ms_entry_usable(e)) usable = e;
+            if (!any) any = e;
+        } else if (sh_mb_requests_cover(&e->bundle, d) &&
+                   (!other || e->bundle.file_count < other->bundle.file_count)) {
+            other = e;
+        }
+    }
+    if (cover || usable || any) {
+        if (rule) *rule = 1;
+        return cover ? cover : usable ? usable : any;
+    }
+    if (other && rule) *rule = 2;
+    return other;
+}
+
+/* A folder name the second step changed: `from` now answers as `to`. */
+typedef struct ms_pair {
+    char from[SH_MS_NAME_MAX + 1];
+    char to[SH_MS_NAME_MAX + 1];
+} ms_pair;
+
+/* The 64-hex tree a delivered package's legacy record keys it by
+ * ("delivery.<tree>"), or 0. */
+static int ms_delivery_tree(const sh_mb_bundle *b, char tree[SH_MB_HASH_HEX + 1])
+{
+    mpj *x = b->extra ? mpj_parse(b->extra, strlen(b->extra)) : NULL;
+    const mpj *lg = x ? mpj_get(x, "legacy") : NULL, *k = lg ? mpj_get(lg, "key") : NULL;
+    int ok = k && k->type == MPJ_STR && k->text && !strncmp(k->text, "delivery.", 9) && ms_is_hash(k->text + 9);
+    if (ok) memcpy(tree, k->text + 9, SH_MB_HASH_HEX + 1);
+    mpj_free(x);
+    return ok;
+}
+
+static const char *ms_pair_apply(const ms_pair *p, size_t n, const char *name)
+{
+    size_t i;
+    for (i = 0; i < n; i++) if (!strcmp(p[i].from, name)) name = p[i].to;
+    return name;
+}
+
+static int ms_outcome_done(const mpj *row)
+{
+    const mpj *o = mpj_get(row, "outcome");
+    return mpj_str_is(o, "built") || mpj_str_is(o, "converted") || mpj_str_is(o, "reused");
+}
+
+/* The migration section after the drops and renames; collapsed once complete. */
+static void ms_tidy_migration(const char *rootu, const ms_pair *p, size_t np, mpj *trees_add, sh_ms_upgrade_stats *st)
+{
+    char *text = NULL, *out;
+    mpj *m, *next;
+    size_t len = 0;
+    int i, k, complete, dropped = 0;
+    if (sh_mb_record_get(rootu, "migration", &text) != 1 || !text) { free(text); return; }
+    m = mpj_parse(text, strlen(text));
+    free(text);
+    if (!m || m->type != MPJ_OBJ || !(next = mpj_new(MPJ_OBJ))) { mpj_free(m); return; }
+    {
+        const mpj *c = mpj_get(m, "complete");
+        complete = c && c->type == MPJ_BOOL && c->b;
+    }
+    for (i = 0; i < m->n; i++) {
+        const char *key = m->keys[i];
+        const mpj *v = m->items[i];
+        mpj *copy = NULL;
+        if (!strcmp(key, "trees") && v->type == MPJ_OBJ) {
+            copy = mpj_new(MPJ_OBJ);
+            for (k = 0; copy && k < v->n; k++) {
+                const mpj *to = v->items[k];
+                const char *name = to->type == MPJ_STR && to->text ? ms_pair_apply(p, np, to->text) : NULL;
+                if (!trees_add || !mpj_get(trees_add, v->keys[k]))
+                    mpj_set(copy, v->keys[k], name ? mpj_new_str(name) : mpj_clone(to));
+            }
+            for (k = 0; copy && trees_add && k < trees_add->n; k++) {
+                const mpj *to = trees_add->items[k];
+                mpj_set(copy, trees_add->keys[k], to->type == MPJ_STR && to->text ? mpj_new_str(ms_pair_apply(p, np, to->text))
+                                                                                  : mpj_clone(to));
+            }
+        } else if (!strcmp(key, "folders") && v->type == MPJ_ARR) {
+            copy = mpj_new(MPJ_ARR);
+            for (k = 0; copy && k < v->n; k++) {
+                mpj *row;
+                const mpj *store;
+                if (complete && ms_outcome_done(v->items[k])) { dropped++; continue; }
+                row = mpj_clone(v->items[k]);
+                store = row ? mpj_get(row, "store") : NULL;
+                if (store && store->type == MPJ_STR && store->text && strcmp(ms_pair_apply(p, np, store->text), store->text))
+                    mpj_set(row, "store", mpj_new_str(ms_pair_apply(p, np, store->text)));
+                if (row) mpj_push(copy, row);
+            }
+        } else if (!complete || !strcmp(key, "complete") || !strcmp(key, "migratedAt") || !strcmp(key, "source")) {
+            copy = mpj_clone(v);
+        } else {
+            dropped++;   /* a counter of the finished pass */
+        }
+        if (copy) mpj_set(next, key, copy);
+    }
+    if (complete && !mpj_get(next, "folders")) mpj_set(next, "folders", mpj_new(MPJ_ARR));
+    out = mpj_dump(next, &len);
+    if (out && sh_mb_record_put(rootu, "migration", out)) st->migration_collapsed = complete && dropped > 0;
+    free(out);
+    mpj_free(next);
+    mpj_free(m);
+}
+
+/* Rename one product folder; 1 when it moved. */
+static int ms_tidy_move(const char *folder, const char *rootu, const char *to)
+{
+    char path[MAX_PATH * 4];
+    wchar_t *from = sh_mb_wpath(folder), *dst;
+    int ok;
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", rootu, to);
+    dst = sh_mb_wpath(path);
+    ok = from && dst && !ms_exists(dst) && MoveFileExW(from, dst, 0);
+    free(from);
+    free(dst);
+    return ok;
+}
+
+static int ms_tidy(sh_ms_upgrade_stats *st, const char *rootu)
+{
+    char *text = NULL;
+    sh_ms_list l;
+    ms_pair *pairs = NULL;
+    size_t np = 0, i;
+    mpj *trees_add;
+    ULONGLONG t0 = GetTickCount64();
+    int done = sh_mb_record_get(rootu, "layout", &text) == 1 && text && atoi(text) >= 2;
+    free(text);
+    if (done) return 0;
+    modstore_lock();
+    st->tidied = 1;
+    trees_add = mpj_new(MPJ_OBJ);
+    if (!sh_ms_enumerate(&l)) { modstore_unlock(); mpj_free(trees_add); return -1; }
+    pairs = (ms_pair *)calloc(l.count * 2 + 1, sizeof *pairs);
+    if (!pairs) { sh_ms_list_free(&l); modstore_unlock(); mpj_free(trees_add); return -1; }
+
+    /* 1. A package a map delivered that copies an installed mod goes; its
+     * hash answers as the installed mod's. */
+    for (i = 0; i < l.count; i++) {
+        const sh_ms_entry *d = &l.items[i], *m;
+        char tree[SH_MB_HASH_HEX + 1];
+        int rule = 0;
+        if (!sh_ms_entry_delivered(d)) continue;
+        m = sh_ms_delivered_counterpart(&l, &d->bundle, &rule);
+        if (!m) continue;
+        if (!sh_ms_remove_folder(d->folder)) {
+            st->tidy_failed++;
+            ms_log("MODS: store: %s: a copy of %s that a map delivered, but it could not be removed; it stays", d->name, m->name);
+            continue;
+        }
+        if (_stricmp(d->bundle.hash, m->bundle.hash)) sh_ms_alias_note(d->bundle.hash, m->bundle.hash);
+        strcpy_s(pairs[np].from, sizeof pairs[np].from, d->name);
+        strcpy_s(pairs[np].to, sizeof pairs[np].to, m->name);
+        np++;
+        if (trees_add && ms_delivery_tree(&d->bundle, tree)) mpj_set(trees_add, tree, mpj_new_str(m->name));
+        if (rule == 1) {
+            st->same_id++;
+            ms_log("MODS: store: %s: dropped, delivered by a map under the id of the installed %s; bundle %.16s now "
+                   "resolves to %.16s", d->name, m->name, d->bundle.hash, m->bundle.hash);
+        } else {
+            st->covered++;
+            ms_log("MODS: store: %s: dropped, delivered by a map as %s; the installed %s (%s) provides all %zu of its "
+                   "path(s); bundle %.16s now resolves to %.16s", d->name, d->bundle.id, m->name, m->bundle.id,
+                   d->bundle.file_count, d->bundle.hash, m->bundle.hash);
+        }
+    }
+    sh_ms_list_free(&l);
+
+    /* 2. Names: a product folder alone with its id is "<id>"; a generated
+     * version never names a folder. */
+    if (sh_ms_enumerate(&l)) {
+        for (i = 0; i < l.count; i++) {
+            const sh_ms_entry *e = &l.items[i];
+            char to[SH_MS_NAME_MAX + 1], prefix[SH_MB_ID_MAX + 2];
+            size_t k, same = 0, pl;
+            int generated;
+            if (!e->loaded || !e->bundle.origin[0] || !e->bundle.id[0] || !_stricmp(e->name, e->bundle.id)) continue;
+            for (k = 0; k < l.count; k++) if (l.items[k].loaded && !strcmp(l.items[k].bundle.id, e->bundle.id)) same++;
+            _snprintf_s(prefix, sizeof prefix, _TRUNCATE, "%s@", e->bundle.id);
+            pl = strlen(prefix);
+            generated = strstr(e->name, "@legacy-") != NULL;
+            if (same == 1 && !_strnicmp(e->name, prefix, pl) && ms_tidy_move(e->folder, rootu, e->bundle.id))
+                strcpy_s(to, sizeof to, e->bundle.id);
+            else if (generated) {
+                _snprintf_s(to, sizeof to, _TRUNCATE, "%s-%.8s", e->bundle.id, e->bundle.hash);
+                if (!ms_tidy_move(e->folder, rootu, to)) {
+                    _snprintf_s(to, sizeof to, _TRUNCATE, "%s-%.16s", e->bundle.id, e->bundle.hash);
+                    if (!ms_tidy_move(e->folder, rootu, to)) {
+                        st->tidy_failed++;
+                        ms_log("MODS: store: %s could not be renamed (error %lu); it keeps its name", e->name, GetLastError());
+                        continue;
+                    }
+                }
+            } else continue;
+            st->tidy_renamed++;
+            ms_log("MODS: store: %s -> %s", e->name, to);
+            strcpy_s(pairs[np].from, sizeof pairs[np].from, e->name);
+            strcpy_s(pairs[np].to, sizeof pairs[np].to, to);
+            np++;
+        }
+        sh_ms_list_free(&l);
+    }
+
+    /* 3. The migration record. */
+    ms_tidy_migration(rootu, pairs, np, trees_add, st);
+    if (!st->tidy_failed) sh_mb_record_put(rootu, "layout", "2");
+    st->tidy_ms = GetTickCount64() - t0;
+    ms_log("MODS: store: tidied in %llu ms: %u package(s) a map delivered dropped as copies of an installed mod (%u by "
+           "id, %u by paths), %u folder(s) renamed, the migration record %s%s",
+           st->tidy_ms, st->same_id + st->covered, st->same_id, st->covered, st->tidy_renamed,
+           st->migration_collapsed ? "keeps only the folders not yet done" : "unchanged",
+           st->tidy_failed ? "; some folders were left as they were, so this runs again at the next start" : "");
+    modstore_unlock();
+    free(pairs);
+    mpj_free(trees_add);
+    return 1;
+}
+
 int sh_ms_upgrade(sh_ms_upgrade_stats *stats)
 {
     sh_ms_upgrade_stats local;
@@ -1622,7 +1864,12 @@ int sh_ms_upgrade(sh_ms_upgrade_stats *stats)
     c.st = stats;
     c.root = ms_wroot();
     if (!c.root || !sh_ms_root(c.rootu, sizeof c.rootu)) { free(c.root); return -1; }
-    if (!ms_exists(c.root) || !ms_up_needed(c.root)) { free(c.root); return 0; }
+    if (!ms_exists(c.root)) { free(c.root); return 0; }
+    if (!ms_up_needed(c.root)) {
+        int tidied = ms_tidy(stats, c.rootu);
+        free(c.root);
+        return tidied;
+    }
     modstore_lock();
     stats->ran = 1;
     c.blobs = ms_wjoin(c.root, L"blobs");
@@ -1727,6 +1974,7 @@ int sh_ms_upgrade(sh_ms_upgrade_stats *stats)
            "left as they were",
            stats->ms, stats->folders, stats->renamed, stats->delivered, stats->dropped, stats->unlinked, stats->restored,
            stats->blobs_removed ? "removed" : (c.blobs ? "kept" : "absent"), stats->records, stats->failed);
+    ms_tidy(stats, c.rootu);
     modstore_unlock();
     for (i = 0; i < c.count; i++) { sh_mb_free(&c.items[i].b); free(c.items[i].dir); }
     free(c.items);

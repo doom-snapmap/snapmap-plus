@@ -471,10 +471,18 @@ text is the Contract 1 text, so an unchanged mod keeps its hash. There is no
 blob store and there are no hard links: a mod's files live in its own
 `assets\` only. A folder the author drops in keeps its name; one the product
 makes (an install, a download, a migration, a delivered package) is `<id>`,
-else `<id>@<version>`. Identity is the id: two folders declaring one id are
-both kept and both flagged. A delivered copy or a download whose content an
-installed mod of the same id already serves is not stored; its hash is
-recorded as an alias of the installed bundle. A folder built again with new
+else `<id>@<version>`. A package a map delivered without a version gets one
+generated from its digest (`legacy-<digest16>`); it is part of the manifest
+and its hash, so it stays in `mod.json`, but it never names a folder (`<id>`,
+else `<id>-<hash 8>`) and the Mods tab and the doctor do not show it.
+Identity is the id: two folders declaring one id are both kept and both
+flagged. A download whose content an installed mod of the same id already
+serves is not stored; its hash is recorded as an alias of the installed
+bundle. A package a map delivered is not stored when an installed mod that
+was not itself delivered declares its id (whatever the content), or provides
+every path it provides under another id (a copy renamed by its packager);
+the installed mod answers the carrier, and the second upgrade step records
+the copy's hash as an alias of it. A folder built again with new
 content (the rebuild rule, `sh_mods build`, an install replacing the folder of
 the same id and version) records the hash its product block named before as an
 alias of the new one, so a map saved against any earlier build loads the
@@ -503,7 +511,22 @@ are renamed to `<id>` (or `<id>@<version>` when one id has several), `legacy\`
 folders move into `mods\` or are dropped as aliases, `blobs\` is removed, and
 `claims.json`, `publish-links.json`, `pending-uploads.json` and
 `.migrated.json` are folded into the record. It logs one `MODS: store:` line
-per folder and a summary, and every step can be repeated.
+per folder and a summary, and every step can be repeated. A second step runs
+once per store, also on one that went through the first already (the record's
+`layout` section becomes 2): it removes every delivered package an installed
+mod answers by the rule above and aliases its hash, renames a product folder
+left alone with its id under `<id>@<version>` to `<id>` and any folder named
+after a generated version, and collapses a completed `migration` section to
+`complete`, `migratedAt`, `source`, the rows of folders not done (skipped,
+refused or pending) and `trees`, which maps each converted overrides tree to
+its folder and still resolves maps published before Contract 5 (aliases map
+hashes, not trees); the folder names in it follow the drops and renames. A
+pass of the overrides migration writes the same collapsed section when it
+completes, and the Migrate button counts an `overrides\` entry the section
+does not list as done unless it was created or written after `migratedAt`.
+The product block's `legacy` record (tree fingerprint, grandfathered shadows)
+is kept as it is. One `MODS: store:` line per dropped or renamed folder and a
+summary.
 
 A bundle file may be a stock pointer instead of carried bytes: Contract 1's
 file kind `stock`, `{"needs", "path", "provides", "request", "stock":

@@ -88,6 +88,16 @@ typedef struct sh_ms_list {
 /* An entry's bundle may serve names: loaded, sizes match, and validated. */
 int  sh_ms_entry_usable(const sh_ms_entry *entry);
 
+/* A loaded entry that is a package a map delivered (sh_mb_is_delivered). */
+int  sh_ms_entry_delivered(const sh_ms_entry *entry);
+
+/* The installed mod a delivered package `d` is a copy of, or NULL: a loaded
+ * folder that was not itself delivered, declaring d's id (rule 1, whatever
+ * the content: one whose paths cover d's first, then a usable one), else
+ * one under another id providing every path d provides (rule 2, the one with
+ * the fewest files). *rule receives 1 or 2. */
+const sh_ms_entry *sh_ms_delivered_counterpart(const sh_ms_list *list, const sh_mb_bundle *d, int *rule);
+
 /* Whether `spec` names the entry: its folder name, id@version+build,
  * id@version (every build of it) or id (every folder declaring it),
  * case-insensitively. */
@@ -196,6 +206,14 @@ typedef struct sh_ms_upgrade_stats {
     unsigned long long blob_bytes;
     unsigned records;           /* product files folded into snapmap-plus.json */
     unsigned long long ms;
+    /* The second step (record "layout" 2): */
+    int tidied;                 /* it ran */
+    unsigned same_id;           /* delivered packages dropped: an installed mod has their id */
+    unsigned covered;           /* delivered packages dropped: an installed mod under another id provides every path */
+    unsigned tidy_renamed;      /* folders renamed to <id> (or away from a generated version) */
+    unsigned tidy_failed;       /* folders that could not be removed or renamed */
+    int migration_collapsed;    /* the completed migration record lost its finished folder rows */
+    unsigned long long tidy_ms;
 } sh_ms_upgrade_stats;
 
 /* Convert the retired layout (<id>@<version>+<build>\ with bundle.json,
@@ -204,8 +222,21 @@ typedef struct sh_ms_upgrade_stats {
  * Contract 5, logging one "MODS: store:" line per folder and a summary.
  * Idempotent and safe to interrupt: each folder's mod.json is written (and
  * read back with the same bundle hash) before the old files go, and a record
- * file is folded before it is deleted. Returns 1 when it ran, 0 when there
- * was nothing to do, -1 when the store could not be read. */
+ * file is folded before it is deleted.
+ *
+ * Then, once per store (until the record's "layout" section is 2), the
+ * second step: every package a map delivered that copies an installed mod
+ * (sh_ms_delivered_counterpart) is removed and its bundle hash becomes an
+ * alias of that mod's; a product folder left alone with its id under
+ * "<id>@<version>" is renamed "<id>", and no folder keeps a generated version
+ * in its name; a completed migration record keeps only "complete",
+ * "migratedAt", "source", "trees" (the folder each converted tree became,
+ * which resolves maps published before Contract 5; folder names follow the
+ * drops and renames) and the rows of folders not yet done. One "MODS: store:"
+ * line per dropped or renamed folder and a summary.
+ *
+ * Returns 1 when either step ran, 0 when there was nothing to do, -1 when the
+ * store could not be read. */
 int  sh_ms_upgrade(sh_ms_upgrade_stats *stats);
 
 enum { SH_MS_MISS = 0, SH_MS_HIT = 1, SH_MS_DEDUPE = 2, SH_MS_CONFLICT = 3 };

@@ -436,12 +436,14 @@ static void full_pass(const char *root)
     CHECK(!exists(path));
     record = record_of(mods);
     (void)n;
-    CHECK(record && strstr(record, "\"complete\":true") && strstr(record, "\"duplicateOf\":\"dupe-a\""));
+    /* Complete: only the folders not done keep a row; the trees stay. */
+    CHECK(record && strstr(record, "\"complete\":true") && !strstr(record, "\"duplicateOf\"") &&
+          !strstr(record, "\"outcome\":\"built\"") && !strstr(record, "\"entries\""));
     CHECK(entry_has(record, "stray.zip", "\"kind\":\"zip\"", "\"outcome\":\"skipped\""));
     CHECK(entry_has(record, "huge", "\"kind\":\"package\"", "\"outcome\":\"skipped\""));
     CHECK(record && strstr(record, "it holds 2 package folders one level down (first: twodesc\\\\"));
-    CHECK(entry_has(record, "nodesc/inner", "\"outcome\":\"built\"", "\"nested\":true"));
-    CHECK(entry_has(record, "pack-c", "\"store\":\"pack-c\"", NULL));
+    CHECK(record && !strstr(record, "\"nodesc/inner\"") && strstr(record, "\":\"pack-c\""));   /* pack-c's tree */
+    CHECK(entry_has(record, "big", "\"outcome\":\"refused\"", NULL));
     CHECK(bundle_of(mods, "inner", &b) == 1);
     sh_mb_free(&b);
     CHECK(strstr(g_log, "MODS: migration: overrides\\nodesc\\inner: built mods\\inner,") != NULL &&
@@ -561,7 +563,7 @@ static void boot_split(const char *root)
     CHECK(exists(path));
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\mods", root);
     record = record_of(path);
-    CHECK(record && strstr(record, "\"complete\":true") && strstr(record, "\"built\":2"));
+    CHECK(record && strstr(record, "\"complete\":true") && strstr(record, "\"folders\":[]"));
     free(record);
     sh_modmigrate_last(&st);
     printf("  boot part %llu ms, whole pass %llu ms\n", st.boot_ms, st.ms);
@@ -620,6 +622,10 @@ static void pending_entries(const char *root)
     CHECK(sh_modmigrate_pending(&entries) == 2 && entries == 2);   /* no record yet */
     CHECK(sh_modmigrate_run(0, &st) == 1 && st.built == 1 && st.skipped == 1);
     CHECK(sh_modmigrate_pending(&entries) == 0 && entries == 2);   /* built, and skipped unchanged */
+    /* migratedAt has a resolution of one second, and a completed record lists
+     * only the folders not done: an entry it does not list is pending when it
+     * was created or written after the pass. */
+    Sleep(1100);
     put_file(ov, "later/package.json", "{\"id\": \"later\", \"name\": \"Later\"}");
     put_file(ov, "later/assets/generated/decls/entitydef/later/t.decl", DECL_A);
     CHECK(sh_modmigrate_pending(&entries) == 1 && entries == 3);   /* a folder added after the pass */

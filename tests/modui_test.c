@@ -318,7 +318,7 @@ int main(int argc, char **argv)
     dr = doctor(0);
     CHECK(has(dr, "MODS: doctor: store ") && has(dr, ": 0 mod folder(s), 0 of them delivered by maps; all listed in the Mods tab"));
     CHECK(has(dr, "MODS: doctor: migration: no overrides folder, or it is empty\n"));
-    CHECK(has(dr, "MODS: doctor: 0 conflict(s), 0 shadow(s), 0 legacy shadow(s)\nMODS: doctor: done\n"));
+    CHECK(has(dr, "MODS: doctor: 0 conflict(s), 0 shadow(s), 0 grandfathered shadow(s)\nMODS: doctor: done\n"));
 
     printf("-- the main thread only: refused elsewhere, the previous document kept\n");
     g_main = 0;
@@ -532,8 +532,30 @@ int main(int argc, char **argv)
         CHECK(bundle_has(doc, "old.pack", "\"state\":\"installed\""));
         free(doc);
         dr = doctor(0);
-        CHECK(has(dr, "MODS: doctor: delivered bundle mods\\old.pack (old.pack@1.0.0+1): active; from a map that delivered it\n"));
+        CHECK(has(dr, "MODS: doctor: bundle delivered by a map, mods\\old.pack (old.pack@1.0.0+1): active\n"));
         CHECK(has(dr, "1 of them delivered by maps"));
+        /* One delivered without a version: the converter's generated version
+         * is in its hash, never in its folder name, the page or the doctor. */
+        {
+            char gen[MAX_PATH * 2];
+            _snprintf_s(gen, sizeof gen, _TRUNCATE, "%s\\authoring\\old.gen", tmp);
+            put_plain_mod(gen, "old.gen", "1.0.0", "{\r\n}\r\n");
+            mt_write(gen, "mod.json", "{\"id\":\"old.gen\",\"version\":\"legacy-0123456789abcdef\",\"name\":\"Gen\","
+                                      "\"legacy\":{\"keyForm\":\"delivery\"},\"snapmap-plus\":{\"origin\":\"delivery\"}}");
+            doc = run_doc(SH_MODS_ACT_INSTALL, gen);
+            CHECK(has(doc, "\"ok\":true"));
+            free(doc);
+            doc = list_doc();
+            CHECK(bundle_has(doc, "old.gen", "\"version\":\"\""));
+            CHECK(!has(doc, "legacy-0123456789abcdef"));
+            free(doc);
+            dr = doctor(0);
+            CHECK(has(dr, "MODS: doctor: bundle delivered by a map, mods\\old.gen (old.gen+1): active\n"));
+            CHECK(!has(dr, "legacy"));
+            doc = run_doc(SH_MODS_ACT_REMOVE, "old.gen");
+            CHECK(has(doc, "\"ok\":true"));
+            free(doc);
+        }
         doc = run_doc(SH_MODS_ACT_REMOVE, "old.pack");
         CHECK(has(doc, "\"ok\":true") && has(doc, "\"movedTo\":\"\""));   /* the product made it: deleted */
         free(doc);
@@ -586,7 +608,7 @@ int main(int argc, char **argv)
         free(doc);
         dr = doctor(0);
         CHECK(has(dr, "MODS: doctor: shadow generated/decls/entitydef/monster/imp.decl: by alex.shade-a; served by alex.shade-a\n"));
-        CHECK(has(dr, "MODS: doctor: 0 conflict(s), 1 shadow(s), 0 legacy shadow(s)\n"));
+        CHECK(has(dr, "MODS: doctor: 0 conflict(s), 1 shadow(s), 0 grandfathered shadow(s)\n"));
         put_shadow_mod(b, "alex.shade-b", "{\r\n\tinherit = \"snapmaps/placeablesnapaiencounter/imp\";\r\n\tsize = \"2\";\r\n}");
         doc = run_doc(SH_MODS_ACT_INSTALL, b);
         CHECK(has(doc, "\"ok\":true"));
@@ -596,7 +618,7 @@ int main(int argc, char **argv)
         dr = doctor(0);
         CHECK(has(dr, "MODS: doctor: conflict generated/decls/entitydef/monster/imp.decl: alex.shade-b serves it "
                       "(installed most recently); from alex.shade-a, alex.shade-b\n"));
-        CHECK(has(dr, "MODS: doctor: 1 conflict(s), 0 shadow(s), 0 legacy shadow(s)\n"));
+        CHECK(has(dr, "MODS: doctor: 1 conflict(s), 0 shadow(s), 0 grandfathered shadow(s)\n"));
         /* Every section populated for the key comparison with the page's fixture. */
         load_map_naming("alex.r2-imp", hash2);
         g_placed[0] = "mods/alex.r2-imp/imp_copy";
@@ -652,7 +674,7 @@ int main(int argc, char **argv)
         free(doc);
         dr = doctor(0);
         CHECK(has(dr, "MODS: doctor: bundle mods\\alex.shade-b (alex.shade-b): skipped; "));
-        CHECK(has(dr, "MODS: doctor: 0 conflict(s), 1 shadow(s), 0 legacy shadow(s)\n"));
+        CHECK(has(dr, "MODS: doctor: 0 conflict(s), 1 shadow(s), 0 grandfathered shadow(s)\n"));
         /* Installed while the index is stale: unindexed until a rescan. */
         sh_modserve_index_build(g_root);
         {

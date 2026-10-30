@@ -137,8 +137,10 @@ int main(void)
         char *record;
         size_t len = 0;
         (void)len;
+        /* The pass's totals; the completed record keeps no rows for folders it built. */
+        CHECK(st.pointers == 3 && st.pointer_bytes == 800);
         CHECK(sh_mb_record_get(mods, "migration", &record) == 1);
-        CHECK(record && strstr(record, "\"stockBytes\":600,\"stockPointers\":2") && strstr(record, "\"stockBytes\":200,\"stockPointers\":1"));
+        CHECK(record && strstr(record, "\"complete\":true") && !strstr(record, "\"stockPointers\""));
         free(record);
     }
     {

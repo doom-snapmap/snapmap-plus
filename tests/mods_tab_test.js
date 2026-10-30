@@ -124,6 +124,10 @@ test('states: one pill, the cause or the duplicate id as the detail, other build
   assert.equal(modsTab.filesText(by('local.my-overrides@0.0.0+1')), '63 files, 41 from the installed game');
   assert.equal(modsTab.idText(by('local.cyberdemon@0.0.0-05238b2e+1')), 'local.cyberdemon@0.0.0-05238b2e');
   assert.equal(modsTab.idText(by('unbuilt-folder')), 'unbuilt-folder');
+  /* A package a map delivered without a version: the page is given none and shows the id alone. */
+  assert.equal(modsTab.idText({id: 'female.models', version: '', key: 'female.models'}), 'female.models');
+  assert.equal(modsTab.rowName({id: 'female.models', version: ''}), 'female.models');
+  assert.equal(modsTab.rowName({id: 'alex.r2-imp', version: '1.0.0'}), 'alex.r2-imp 1.0.0');
   assert.match(modsTab.rowInfo({state: 'missing', otherKey: 'a@1+2'}).detail, /another build \(a@1\+2\)/);
   assert.equal(modsTab.rowInfo({state: 'missing'}).tone, 'err');
 });

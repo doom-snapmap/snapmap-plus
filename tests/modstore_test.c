@@ -169,6 +169,147 @@ static void test_alias_note(void)
     sh_ms_list_free(&l);
 }
 
+
+/* ------------------------------------------------------------ the second step */
+
+static void tidy_mod(const char *tmp, const char *root, const char *as_name, const char *id, const char *version,
+                     const char *block, const char *const *rels, const char *const *bodies, char hash_out[65])
+{
+    char src[MAX_PATH * 2], desc[1024], key[160], cause[512] = "";
+    sh_ms_install_stats st;
+    sh_mb_bundle b;
+    int i;
+    (void)root;
+    _snprintf_s(src, sizeof src, _TRUNCATE, "%s\\tidy-src\\%s", tmp, as_name);
+    _snprintf_s(desc, sizeof desc, _TRUNCATE, "{\"id\":\"%s\",\"version\":\"%s\",\"name\":\"%s\",%s}", id, version, id, block);
+    mt_write(src, "mod.json", desc);
+    for (i = 0; rels[i]; i++) mt_write(src, rels[i], bodies[i]);
+    memset(&b, 0, sizeof b);
+    CHECK(sh_ms_install_as(src, as_name, &RESOLVER, key, sizeof key, &st, &b, cause, sizeof cause));
+    if (cause[0]) fprintf(stderr, "  tidy fixture %s: %s\n", as_name, cause);
+    CHECK(!strcmp(key, as_name));
+    strcpy_s(hash_out, 65, b.hash);
+    sh_mb_free(&b);
+}
+
+static int any_name_has(const char *root, const char *needle)
+{
+    WIN32_FIND_DATAA fd;
+    char pattern[MAX_PATH * 2];
+    HANDLE h;
+    int hit = 0;
+    _snprintf_s(pattern, sizeof pattern, _TRUNCATE, "%s\\*", root);
+    h = FindFirstFileA(pattern, &fd);
+    if (h == INVALID_HANDLE_VALUE) return 0;
+    do hit |= strstr(fd.cFileName, needle) != NULL; while (!hit && FindNextFileA(h, &fd));
+    FindClose(h);
+    return hit;
+}
+
+/* A store that went through the first upgrade: an installed mod and a copy a
+ * map delivered under its id with other content; a copy delivered under
+ * another id whose paths the installed mod provides; a delivered package
+ * with nothing installed of it (named with its generated version); the
+ * installed doors pack named doors@0.0.0 because of the copies; a completed
+ * migration record. The second step runs once. */
+static void test_tidy(const char *tmp)
+{
+    char root[MAX_PATH], h_doors[65], h_doors_copy[65], h_cyber[65], h_cyber_copy[65], h_female[65], *section = NULL;
+    sh_ms_upgrade_stats us;
+    sh_ms_list list;
+    const sh_ms_entry *e;
+    static const char T0[] = "0000000000000000000000000000000000000000000000000000000000000a0a";
+    static const char T1[] = "1111111111111111111111111111111111111111111111111111111111111111";
+    static const char T2[] = "2222222222222222222222222222222222222222222222222222222222222222";
+    static const char *const DOOR[] = { "assets\\generated\\decls\\entitydef\\mods\\doors\\a.decl", NULL };
+    static const char *const DOOR_BODY[] = { "{\r\n}", NULL };
+    static const char *const DOOR2[] = { "assets\\generated\\decls\\entitydef\\mods\\doors\\b.decl", NULL };
+    static const char *const DOOR2_BODY[] = { "{\r\n\tsize = \"2\";\r\n}", NULL };
+    static const char *const CYB[] = { "assets\\generated\\decls\\entitydef\\monster\\imp.decl",
+                                       "assets\\generated\\decls\\entitydef\\mods\\local.cyberdemon\\boss.decl", NULL };
+    static const char *const CYB_BODY[] = { "{\r\n}", "{\r\n}", NULL };
+    static const char *const CYB2[] = { "assets\\generated\\decls\\entitydef\\monster\\imp.decl", NULL };
+    static const char *const CYB2_BODY[] = { "{\r\n\tsize = \"3\";\r\n}", NULL };
+    static const char *const FEM[] = { "assets\\generated\\decls\\entitydef\\mods\\female.models\\f.decl", NULL };
+    char block[512];
+
+    _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\tidy\\mods", tmp);
+    CHECK(sh_ms_set_root(root));
+    _snprintf_s(block, sizeof block, _TRUNCATE, "\"legacy\":{\"source\":\"overrides\",\"folder\":\"all doors\",\"tree\":\"%s\"},"
+                "\"snapmap-plus\":{\"origin\":\"migration\"}", T0);
+    tidy_mod(tmp, root, "doors@0.0.0", "doors", "0.0.0", block, DOOR, DOOR_BODY, h_doors);
+    _snprintf_s(block, sizeof block, _TRUNCATE, "\"legacy\":{\"keyForm\":\"delivery\",\"key\":\"delivery.%s\"},"
+                "\"snapmap-plus\":{\"origin\":\"delivery\"}", T1);
+    tidy_mod(tmp, root, "doors@legacy-aaaaaaaaaaaaaaaa", "doors", "legacy-aaaaaaaaaaaaaaaa", block, DOOR2, DOOR2_BODY, h_doors_copy);
+    tidy_mod(tmp, root, "local.cyberdemon", "local.cyberdemon", "0.0.0",
+             "\"shadows\":[\"generated/decls/entitydef/monster/imp.decl\"],"
+             "\"legacy\":{\"source\":\"overrides\",\"folder\":\"cyberdemon\"},\"snapmap-plus\":{\"origin\":\"migration\"}",
+             CYB, CYB_BODY, h_cyber);
+    _snprintf_s(block, sizeof block, _TRUNCATE, "\"shadows\":[\"generated/decls/entitydef/monster/imp.decl\"],"
+                "\"legacy\":{\"keyForm\":\"delivery\",\"key\":\"delivery.%s\"},\"snapmap-plus\":{\"origin\":\"delivery\"}", T2);
+    tidy_mod(tmp, root, "cyberdemon", "cyberdemon", "legacy-cccccccccccccccc", block, CYB2, CYB2_BODY, h_cyber_copy);
+    tidy_mod(tmp, root, "female.models@legacy-bbbbbbbbbbbbbbbb", "female.models", "legacy-bbbbbbbbbbbbbbbb",
+             "\"legacy\":{\"keyForm\":\"delivery\",\"key\":\"delivery.x\"},\"snapmap-plus\":{\"origin\":\"delivery\"}",
+             FEM, DOOR_BODY, h_female);
+    {
+        char mig[1024];
+        _snprintf_s(mig, sizeof mig, _TRUNCATE,
+                    "{\"format\":1,\"complete\":true,\"migratedAt\":5,\"source\":\"C:\\\\o\",\"entries\":3,\"built\":2,"
+                    "\"folders\":[{\"folder\":\"all doors\",\"kind\":\"package\",\"outcome\":\"built\",\"store\":\"doors@0.0.0\"},"
+                    "{\"folder\":\"map-1/doors\",\"kind\":\"delivered\",\"outcome\":\"reused\",\"store\":\"doors@legacy-aaaaaaaaaaaaaaaa\"},"
+                    "{\"folder\":\"z.zip\",\"kind\":\"zip\",\"outcome\":\"skipped\",\"reason\":\"a ZIP archive\"}],"
+                    "\"trees\":{\"%s\":\"doors@0.0.0\",\"%s\":\"doors@legacy-aaaaaaaaaaaaaaaa\"}}", T0, T1);
+        CHECK(sh_mb_record_put(root, "migration", mig));
+    }
+
+    g_logged = 0;
+    CHECK(sh_ms_upgrade(&us) == 1);
+    CHECK(!us.ran && us.tidied && us.same_id == 1 && us.covered == 1 && us.tidy_renamed == 2 && !us.tidy_failed);
+    CHECK(us.migration_collapsed);
+    CHECK(log_has("MODS: store: doors@legacy-aaaaaaaaaaaaaaaa: dropped, delivered by a map under the id of the installed doors@0.0.0"));
+    CHECK(log_has("MODS: store: cyberdemon: dropped, delivered by a map as cyberdemon; the installed local.cyberdemon "
+                  "(local.cyberdemon) provides all 1 of its path(s)"));
+    CHECK(log_has("MODS: store: doors@0.0.0 -> doors"));
+    CHECK(log_has("MODS: store: female.models@legacy-bbbbbbbbbbbbbbbb -> female.models"));
+    CHECK(log_has("MODS: store: tidied in "));
+    CHECK(!any_name_has(root, "legacy"));
+    CHECK(sh_ms_enumerate(&list) && list.count == 3);
+    e = find_entry(&list, "doors");
+    CHECK(e && !strcmp(e->bundle.hash, h_doors));
+    CHECK(sh_ms_resolve(&list, h_doors_copy) == e);
+    e = find_entry(&list, "local.cyberdemon");
+    CHECK(e && sh_ms_resolve(&list, h_cyber_copy) == e && !strcmp(e->bundle.hash, h_cyber));
+    e = find_entry(&list, "female.models");
+    CHECK(e && sh_ms_entry_delivered(e) && !strcmp(e->bundle.origin, "delivery") && !strcmp(e->bundle.hash, h_female));
+    sh_ms_list_free(&list);
+    /* The migration record keeps what idempotence and the Migrate button need. */
+    CHECK(sh_mb_record_get(root, "migration", &section) == 1 && section);
+    if (section) {
+        char want[160];
+        CHECK(strstr(section, "\"complete\":true") && strstr(section, "\"migratedAt\":5") && strstr(section, "\"source\":"));
+        CHECK(strstr(section, "\"z.zip\"") && !strstr(section, "\"all doors\"") && !strstr(section, "map-1/doors"));
+        CHECK(!strstr(section, "\"entries\"") && !strstr(section, "\"built\"") && !strstr(section, "\"format\""));
+        _snprintf_s(want, sizeof want, _TRUNCATE, "\"%s\":\"doors\"", T0);
+        CHECK(strstr(section, want) != NULL);
+        _snprintf_s(want, sizeof want, _TRUNCATE, "\"%s\":\"doors\"", T1);
+        CHECK(strstr(section, want) != NULL);
+        _snprintf_s(want, sizeof want, _TRUNCATE, "\"%s\":\"local.cyberdemon\"", T2);
+        CHECK(strstr(section, want) != NULL);
+        CHECK(!strstr(section, "legacy-"));
+    }
+    free(section);
+    /* Once: a second start does nothing. */
+    g_logged = 0;
+    CHECK(sh_ms_upgrade(&us) == 0 && !us.tidied && g_logged == 0);
+    /* A download or install of a delivered package without a version is
+     * never named after its generated version. */
+    {
+        char name[SH_MS_NAME_MAX + 1];
+        CHECK(sh_mb_folder_name(root, "female.models", "legacy-bbbbbbbbbbbbbbbb", "abcdef0123456789", name, sizeof name) == 1);
+        CHECK(!strcmp(name, "female.models-abcdef01"));
+    }
+}
+
 /* ------------------------------------------------------------ the retired layout */
 
 /* Lay out `src` the way the retired store did: blobs\<sha256> (read-only),
@@ -335,8 +476,10 @@ static void test_upgrade(const char *fixture, const char *tmp)
         free(section);
         CHECK(sh_mb_record_get(root, "links", &section) == 1 && section && strstr(section, "\"item-1\""));
         free(section);
+        /* Completed: the names follow the folders, the finished rows are gone. */
         CHECK(sh_mb_record_get(root, "migration", &section) == 1 && section && strstr(section, "\"abc\":\"local.mig\"") &&
-              strstr(section, "\"def\":\"alex.r2-imp@1.0.0\"") && strstr(section, "\"store\":\"local.mig\""));
+              strstr(section, "\"def\":\"alex.r2-imp@1.0.0\"") && strstr(section, "\"folders\":[]") &&
+              !strstr(section, "\"format\""));
         free(section);
         CHECK(sh_mb_record_get(root, "aliases", &section) == 1 && section && strstr(section, h_legacy_alias) &&
               strstr(section, h_main));
@@ -649,13 +792,14 @@ int main(int argc, char **argv)
         sh_ms_list_free(&list);
     }
     test_alias_note();
+    test_tidy(tmp);
 
     test_upgrade(fixture, tmp);
 
     sh_ms_set_root(NULL);
     mt_remove_tree(tmp);
     if (failures) { fprintf(stderr, "modstore_test: %d failure(s)\n", failures); return 1; }
-    printf("modstore_test: install, copies, verify, corruption, second version, rebuild rule, resolve_need, lock, rebuild aliases and "
+    printf("modstore_test: install, copies, verify, corruption, second version, rebuild rule, resolve_need, lock, rebuild aliases, the second upgrade step and "
            "store upgrade pass\n");
     return 0;
 }

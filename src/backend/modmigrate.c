@@ -902,18 +902,26 @@ static int mg_write_record(mg_ctx *c, int complete)
     mg_stats(c, &s);
     GetSystemTimeAsFileTime(&ft);
     now = ((((unsigned long long)ft.dwHighDateTime << 32) | ft.dwLowDateTime) - 116444736000000000ull) / 10000000ull;
-    mg_puts(&b, "{\n  \"format\": 1,\n  \"complete\": ");
-    mg_puts(&b, complete ? "true" : "false");
+    /* A completed pass keeps what idempotence and the Migrate button need:
+     * complete, migratedAt, source, the rows of folders not done (skipped or
+     * refused) and the trees (which resolve maps published before Contract 5).
+     * A pass in progress writes everything. */
+    mg_puts(&b, complete ? "{\n  \"complete\": true" : "{\n  \"format\": 1,\n  \"complete\": false");
     mg_putf(&b, ",\n  \"migratedAt\": %llu,\n  \"source\": ", now);
     mg_putq(&b, c->overrides_u8);
-    mg_putf(&b, ",\n  \"entries\": %u,\n  \"built\": %u,\n  \"converted\": %u,\n  \"reused\": %u,\n  \"skipped\": %u,"
-                "\n  \"refused\": %u,\n  \"duplicates\": %u,\n  \"pending\": %u,\n  \"bootMs\": %llu,\n  \"ms\": %llu,"
-                "\n  \"overrideBackupsRemoved\": %s,\n  \"folders\": [",
-            s.entries, s.built, s.converted, s.reused, s.skipped, s.refused, s.duplicates, s.pending, s.boot_ms, s.ms,
-            c->backups_removed ? "true" : "false");
+    if (!complete)
+        mg_putf(&b, ",\n  \"entries\": %u,\n  \"built\": %u,\n  \"converted\": %u,\n  \"reused\": %u,\n  \"skipped\": %u,"
+                    "\n  \"refused\": %u,\n  \"duplicates\": %u,\n  \"pending\": %u,\n  \"bootMs\": %llu,\n  \"ms\": %llu,"
+                    "\n  \"overrideBackupsRemoved\": %s",
+                s.entries, s.built, s.converted, s.reused, s.skipped, s.refused, s.duplicates, s.pending, s.boot_ms, s.ms,
+                c->backups_removed ? "true" : "false");
+    mg_puts(&b, ",\n  \"folders\": [");
     for (i = 0; i < c->count; i++) {
         const mg_item *it = &c->items[i];
-        mg_puts(&b, i ? ",\n    {" : "\n    {");
+        if (complete && (it->outcome == SH_MODMIGRATE_BUILT || it->outcome == SH_MODMIGRATE_CONVERTED ||
+                         it->outcome == SH_MODMIGRATE_REUSED)) continue;
+        mg_puts(&b, first ? "\n    {" : ",\n    {");
+        first = 0;
         mg_puts(&b, "\"folder\": "); mg_putq(&b, it->name);
         mg_puts(&b, ", \"kind\": "); mg_putq(&b, mg_kind_name(it->kind));
         mg_puts(&b, ", \"outcome\": "); mg_putq(&b, mg_outcome_name(it->outcome));
@@ -933,7 +941,8 @@ static int mg_write_record(mg_ctx *c, int complete)
         if (it->ms) mg_putf(&b, ", \"ms\": %llu", it->ms);
         mg_puts(&b, "}");
     }
-    mg_puts(&b, "\n  ],\n  \"trees\": {");
+    mg_puts(&b, first ? "],\n  \"trees\": {" : "\n  ],\n  \"trees\": {");
+    first = 1;
     for (i = 0; i < c->count; i++) {
         const mg_item *it = &c->items[i];
         size_t k;
@@ -1249,13 +1258,14 @@ static unsigned long long mg_unix_time(const FILETIME *ft)
     return t > 116444736000000000ull ? (t - 116444736000000000ull) / 10000000ull : 0;
 }
 
-/* The newest write time of the entry and, for a folder, of its descriptor:
+/* The newest write or creation time of the entry and, for a folder, of its descriptor:
  * adding, removing or editing either marks a refused or skipped folder as
  * changed since the record. */
 static unsigned long long mg_changed_at(const wchar_t *path, const WIN32_FIND_DATAW *fd)
 {
-    unsigned long long at = mg_unix_time(&fd->ftLastWriteTime);
+    unsigned long long at = mg_unix_time(&fd->ftLastWriteTime), made = mg_unix_time(&fd->ftCreationTime);
     static const wchar_t *const desc[] = { L"package.json", L"mod.json" };
+    if (made > at) at = made;   /* a copied entry keeps its source's write time, not its creation time */
     size_t i;
     if (!(fd->dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) return at;
     for (i = 0; i < 2; i++) {
@@ -1277,6 +1287,7 @@ int sh_modmigrate_pending(unsigned *entries)
     char *text = NULL;
     unsigned long long migrated_at = 0;
     unsigned pending = 0, seen = 0;
+    int complete = 0;
     WIN32_FIND_DATAW fd;
     HANDLE h;
     if (entries) *entries = 0;
@@ -1289,6 +1300,7 @@ int sh_modmigrate_pending(unsigned *entries)
     if (text) {
         const char *m = strstr(text, "\"migratedAt\":");
         if (m) migrated_at = _strtoui64(m + 13, NULL, 10);
+        complete = strstr(text, "\"complete\":true") != NULL;
     }
     pattern = mg_wjoin(overrides, L"*");
     h = pattern ? FindFirstFileExW(pattern, FindExInfoBasic, &fd, FindExSearchNameMatch, NULL, 0) : INVALID_HANDLE_VALUE;
@@ -1302,6 +1314,9 @@ int sh_modmigrate_pending(unsigned *entries)
             name = sh_mb_utf8(fd.cFileName);
             path = mg_wjoin(overrides, fd.cFileName);
             status = name ? mg_record_status(text, name) : 0;
+            /* A completed record lists only the folders not done: one it does
+             * not list was done, unless it was added or changed since. */
+            if (status == 0 && complete && path && mg_changed_at(path, &fd) <= migrated_at) status = 1;
             if (status == 0 || status == 3 || (status == 2 && path && mg_changed_at(path, &fd) > migrated_at)) pending++;
             free(name);
             free(path);
