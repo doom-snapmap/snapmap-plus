@@ -188,13 +188,20 @@ func pause() {
 
 // isInteractive reports whether stdin is a real terminal -- so we only prompt when a human can answer.
 // Scripts / CI / piped input skip the confirmation automatically; force-skip with --yes.
-func isInteractive() bool {
+// Tests replace it so a console-attached test run never waits on a prompt.
+var isInteractive = func() bool {
 	fi, err := os.Stdin.Stat()
 	return err == nil && (fi.Mode()&os.ModeCharDevice) != 0
 }
 
-// confirm prints a yes/no prompt and returns true on yes (Enter / "y" / "yes").
+// confirm prints a yes/no prompt and returns true on yes (Enter / "y" / "yes"). Input that ends
+// before an answer counts as no.
 func confirm(prompt string) bool {
 	fmt.Print(prompt + " [Y/n] ")
-	return isYes(readLine())
+	answer, open := readLineEOF()
+	if !open {
+		fmt.Println()
+		return false
+	}
+	return isYes(answer)
 }

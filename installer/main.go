@@ -15,8 +15,8 @@ func usage() {
 	fmt.Print(`snapmap-plus -- the Snapmap+ installer (` + version + `)
 
 Usage:
-  snapmap-plus install   [--doom <path>] [--local <dist-dir>] [--release <tag>] [--beta] [--yes]
-  snapmap-plus update    [--doom <path>] [--release <tag>] [--beta] [--no-self] [--yes]
+  snapmap-plus install   [--doom <path>] [--local <dist-dir>] [--release <tag>] [--beta] [--force] [--yes]
+  snapmap-plus update    [--doom <path>] [--release <tag>] [--beta] [--no-self] [--force] [--yes]
   snapmap-plus uninstall [--doom <path>] [--yes]
   snapmap-plus changelog [<version>|latest|all]
   snapmap-plus status
@@ -31,6 +31,7 @@ Options:
   --release <tag>     Install a specific release version instead of the latest.
   --beta              Install the latest beta (pre-release) instead of the latest stable.
   --no-self           With "update": don't also update snapmap-plus.exe itself (overlay only).
+  --force             Let this snapmap-plus.exe replace a newer copy kept in %LOCALAPPDATA%\snapmap-plus.
   --yes, -y           Skip the "are you sure?" confirmation (for scripts / automation).
 
 With "changelog", a bare version shows just that release (the leading v is optional):
@@ -115,6 +116,7 @@ type flags struct {
 	token   string
 	yes     bool
 	noSelf  bool // with `update`: skip refreshing snapmap-plus.exe itself
+	force   bool // replace a newer stable copy of snapmap-plus.exe with this older one
 }
 
 // parseFlags is a tiny "--key value" parser (the tool's option surface is small + fixed).
@@ -141,6 +143,8 @@ func parseFlags(a []string) flags {
 			f.beta = true
 		case "--no-self":
 			f.noSelf = true
+		case "--force":
+			f.force = true
 		case "--yes", "-y":
 			f.yes = true
 		case "--token":

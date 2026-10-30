@@ -24,33 +24,43 @@ func sameFile(a, b string) bool {
 	return ea == nil && eb == nil && os.SameFile(sa, sb)
 }
 
-// selfInstall keeps a stable executable copy in app data. It skips the running
-// location and ignores copy failures so the original launch can continue.
-func selfInstall() {
+// selfInstall keeps a stable executable copy in app data. Unless force is set it refuses when that
+// copy is a newer release than this one; copy failures are ignored so the launch can continue.
+func selfInstall(force bool) error {
 	dir := appDataDir()
 	if dir == "" {
-		return
+		return nil
 	}
 	exe, err := executablePath()
 	if err != nil {
-		return
+		return nil
 	}
 	// Preserve the running executable's name.
 	target := filepath.Join(dir, filepath.Base(exe))
 	if sameFile(exe, target) {
-		_ = installSelfCopy(exe, target)
-		return // already running from the installed location
+		if installSelfCopy(exe, target) == nil {
+			noteCopyVersion(target, version)
+		}
+		return nil // already running from the installed location
+	}
+	if installed := copyVersionOf(target); installed != "" && !force {
+		if c, ok := compareVersions(version, installed); ok && c < 0 {
+			return fmt.Errorf("this snapmap-plus.exe is %s, older than the %s installed at %s -- run that one instead, "+
+				"or pass --force to replace it with this one. Nothing was changed", version, installed, target)
+		}
 	}
 	_, existed := os.Stat(target)
 	if os.MkdirAll(dir, 0o755) != nil {
-		return
+		return nil
 	}
 	if installSelfCopy(exe, target) != nil {
-		return
+		return nil
 	}
+	noteCopyVersion(target, version)
 	if existed != nil { // first time -> let the user know where it went
 		fmt.Printf("(snapmap-plus is now installed at %s -- run it from there in future, or add that folder to your PATH)\n", target)
 	}
+	return nil
 }
 
 // cleanupAppData removes metadata and unchanged, recorded executable copies.
@@ -64,6 +74,7 @@ func cleanupAppData() {
 	os.Remove(filepath.Join(dir, "token"))
 	exe, _ := executablePath()
 	cleanupOwnedExecutables(dir, exe)
+	pruneCopyVersions(dir)
 	// Remove only empty content folders, then the parent if empty.
 	for _, sub := range userContentSubdirs {
 		removeIfEmpty(filepath.Join(dir, sub))

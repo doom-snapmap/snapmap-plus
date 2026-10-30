@@ -91,11 +91,13 @@ func selfUpdate(f flags, token string) {
 	// Keep the stable %LOCALAPPDATA% copy current too, if we're running from somewhere else.
 	if dir := appDataDir(); dir != "" {
 		if filepath.Clean(filepath.Dir(exe)) == filepath.Clean(dir) {
-			_ = installSelfCopy(exe, exe)
+			if installSelfCopy(exe, exe) == nil {
+				noteCopyVersion(exe, rel.TagName)
+			}
 		}
 		if stable := filepath.Join(dir, selfExeAsset); !sameFile(stable, exe) {
-			if os.MkdirAll(dir, 0o755) == nil {
-				_ = installSelfCopy(newExe, stable) // best-effort
+			if os.MkdirAll(dir, 0o755) == nil && installSelfCopy(newExe, stable) == nil { // best-effort
+				noteCopyVersion(stable, rel.TagName)
 			}
 		}
 	}

@@ -42,8 +42,8 @@ embed the Windows resources. Use `build.ps1` for distributable executables.
 ## Commands
 
 ```text
-snapmap-plus install   [--doom <path>] [--local <dist-dir>] [--release <tag>] [--beta] [--yes]
-snapmap-plus update    [--doom <path>] [--release <tag>] [--beta] [--yes]
+snapmap-plus install   [--doom <path>] [--local <dist-dir>] [--release <tag>] [--beta] [--force] [--yes]
+snapmap-plus update    [--doom <path>] [--release <tag>] [--beta] [--no-self] [--force] [--yes]
 snapmap-plus uninstall [--doom <path>] [--yes]
 snapmap-plus changelog [<version>|latest|all]
 snapmap-plus status
@@ -53,7 +53,9 @@ snapmap-plus help
 
 With no arguments, the executable opens an interactive prompt. Installation,
 update and uninstall ask for confirmation after checks; `--yes` or `-y` skips
-that prompt. Both DOOM executables must be closed before changing installed DLLs.
+that prompt, and input that ends before an answer counts as no. Both DOOM executables
+must be closed before changing installed DLLs: the check looks for any running
+`DOOMx64vk.exe` or `DOOMx64.exe` process by name, wherever it was started from.
 The Go lifecycle tests use temporary game and profile directories with a controlled
 process check; they can run while your real game is open.
 
@@ -84,7 +86,9 @@ while preserving command names such as `sh_pretty_on`.
 
 The installer verifies every manifest-listed bundle file before changing DOOM.
 Pre-existing files are backed up as `<file>.snapmap-plus-bak`; installed paths
-and backups are recorded in `%LOCALAPPDATA%\snapmap-plus\install.json`.
+and backups are recorded in `%LOCALAPPDATA%\snapmap-plus\install.json`. There is one
+record, so installing into a second DOOM folder replaces the record of the first;
+uninstall the first folder before installing into another.
 Uninstall reverses that record and removes created directories only when empty.
 
 Legacy SnapHak detection requires identifying files from that tool, so an
@@ -98,7 +102,10 @@ metadata directory also remain there. The installer scaffolds `strings\` and
 `prefabs\` only; retired package folders (`overrides`, `package-cache`,
 `package-staging`, `override-backups`) are never copied, created or removed.
 
-Stable installer copies are tracked by name and SHA-256 in `installer-files.json`.
+Stable installer copies are tracked by name and SHA-256 in `installer-files.json`,
+and by release in `installer-versions.json`. An installer older than the stable copy
+refuses to replace it, naming both versions, unless `--force` is given; a copy left by
+an earlier installer carries no version and is replaced as before.
 Uninstall removes only recorded copies whose bytes still match, while retaining
 the running image. Unrecorded executables and files replaced by the user remain.
 Self-updates stage and verify the replacement before renaming the old image; a

@@ -93,7 +93,9 @@ func cmdInstall(f flags) error {
 	// A release install keeps a stable copy of snapmap-plus.exe; a refused one changes nothing,
 	// and a dev --local build is never copied.
 	if f.local == "" {
-		selfInstall()
+		if err := selfInstall(f.force); err != nil {
+			return err
+		}
 	}
 	if checkDoomRunning() {
 		return fmt.Errorf("DOOM is running -- close it and run this again (Snapmap+'s files can't be replaced while the game has them open)")

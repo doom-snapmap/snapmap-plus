@@ -228,7 +228,8 @@ func fetchRelease(f flags, token string) (*ghRelease, error) {
 		var list []ghRelease
 		if lerr := apiGet(base+"?per_page=30", token, &list); lerr == nil {
 			if pick, isBeta := pickDefaultRelease(list); pick != nil {
-				if isBeta {
+				if isBeta && !betaFallbackNoted {
+					betaFallbackNoted = true
 					fmt.Printf("No stable release has been published yet -- using the newest beta (%s).\n", pick.TagName)
 				}
 				return pick, nil
@@ -237,6 +238,10 @@ func fetchRelease(f flags, token string) (*ghRelease, error) {
 		return nil, err
 	}
 }
+
+// betaFallbackNoted keeps the newest-beta fallback notice to one line per run (an update resolves
+// the release twice: for the bundle and for the installer itself).
+var betaFallbackNoted bool
 
 // pickDefaultRelease expects newest-first input. It returns the newest stable
 // release, or the newest prerelease and a true fallback flag. An empty list returns
@@ -385,7 +390,9 @@ func cmdSetToken(args []string) error {
 	if len(args) < 1 || strings.TrimSpace(args[0]) == "" {
 		return fmt.Errorf("usage: snapmap-plus set-token <github-token>")
 	}
-	selfInstall() // a tester's first command -> keep a stable copy of snapmap-plus.exe
+	if err := selfInstall(false); err != nil { // a tester's first command -> keep a stable copy of snapmap-plus.exe
+		fmt.Printf("(%v)\n", err)
+	}
 	p, err := tokenPath()
 	if err != nil {
 		return err
