@@ -12,11 +12,26 @@
  * text equals JSON.stringify of the parsed value with sorted keys. Numbers are
  * plain integers. "build" is the product's content counter for the folder
  * (see sh_mb_build) and is part of the canonical text. Optional top-level keys (author, homepage, requirements,
- * shadows, extra) are omitted when absent or empty; every file always carries
+ * shadows, extra) are omitted when absent or empty. A carried file has exactly
  * blob, needs (possibly []), path, provides, request and size.
  *
+ * Stock pointers (file kind "stock"): a file may instead name installed game
+ * content, {"needs","path","provides","request","stock":{"sha256","source"}},
+ * with no blob and no size. "source" is the installed resource path (an
+ * archive entry of gameresources or snap_gameresources, .patch or .resources,
+ * or a loose file under the install's base\ or root), lower-cased with '/';
+ * "sha256" is the SHA-256 of the installed bytes (64 lowercase hex). The
+ * builder emits one when a file's bytes equal an installed entry, and an author
+ * writes one in the descriptor's "stock" object:
+ *   "stock": {"<request path>": {"source": "<installed path>", "sha256": "<hex, optional>"}}
+ * Pointers are not counted in the size caps and the extension whitelist does
+ * not apply to them; the store never receives their bytes, and a client whose
+ * game lacks the entry with that hash refuses the bundle with the first cause.
+ *
  * Pure file and text work: no engine calls, no allocation on the engine heap.
- * Stock and installed resources are consulted through caller callbacks.
+ * Stock and installed resources are consulted through caller callbacks; the
+ * installed content behind stock pointers through the registered stock ops
+ * (sh_mb_set_stock_ops, implemented by modstock.c).
  */
 #ifndef SNAPMAP_PLUS_MODBUNDLE_H
 #define SNAPMAP_PLUS_MODBUNDLE_H
@@ -54,7 +69,18 @@ typedef struct sh_mb_file {
     size_t need_count, need_cap;
     int is_decl;           /* under generated/decls/ */
     int shadowed;          /* request path listed in shadows */
+    int stock;             /* a stock pointer: blob is the installed bytes' SHA-256, nothing is carried */
+    char *stock_source;    /* the installed resource path a stock pointer names */
+    int deferred;          /* builder: 1 type not allowed, 2 over 64 MiB, refused unless it is a pointer */
+    int declared;          /* builder: named by the descriptor's stock object */
 } sh_mb_file;
+
+/* A pointer an author wrote in the descriptor's "stock" object. */
+typedef struct sh_mb_stock_decl {
+    char *request;         /* lower-cased request path */
+    char *source;          /* lower-cased installed path */
+    char  sha256[SH_MB_HASH_HEX + 1];   /* "" when the author left it to the builder */
+} sh_mb_stock_decl;
 
 /* Where each need of a build was found. */
 typedef struct sh_mb_need_stats {
@@ -72,7 +98,11 @@ typedef struct sh_mb_bundle {
     size_t shadow_count;
     sh_mb_file *files;     /* sorted by path */
     size_t file_count, file_cap;
-    unsigned long long total_size;
+    unsigned long long total_size;   /* carried bytes: stock pointers are not counted */
+    unsigned stock_count;  /* files that are stock pointers */
+    unsigned long long stock_bytes;  /* their installed size (known when built, 0 when loaded) */
+    sh_mb_stock_decl *stock_decls;   /* the descriptor's stock object */
+    size_t stock_decl_count;
     char *canonical;       /* canonical manifest text (NUL-terminated) */
     size_t canonical_len;
     char  hash[SH_MB_HASH_HEX + 1];   /* SHA-256 of canonical */
@@ -95,6 +125,48 @@ typedef struct sh_mb_resolver {
     sh_mb_exists_fn stock;       /* the player's installed game archives; may be NULL */
     void *stock_context;
 } sh_mb_resolver;
+
+/* ----------------------------------------------------- stock pointers ---- */
+
+/* Results of the stock operations. */
+#define SH_MB_STOCK_UNAVAILABLE (-1)   /* the installed-content reader is not available */
+#define SH_MB_STOCK_ABSENT      0      /* the game has no such entry */
+#define SH_MB_STOCK_OK          1
+#define SH_MB_STOCK_MISMATCH    2      /* the entry exists with other bytes */
+
+typedef struct sh_mb_stock_ops {
+    void *context;
+    /* An installed entry whose bytes are `size` bytes hashing to `sha256`,
+     * preferring `request` itself: SH_MB_STOCK_OK with its path in `source`,
+     * ABSENT or UNAVAILABLE. */
+    int (*match)(void *context, const char *request, unsigned long long size, const char *sha256,
+                 char *source, size_t source_cap);
+    /* Hash the installed entry `source`: OK with sha256 and size, ABSENT or UNAVAILABLE. */
+    int (*identify)(void *context, const char *source, char sha256[SH_MB_HASH_HEX + 1],
+                    unsigned long long *size);
+    /* Whether `source` holds bytes hashing to `sha256`: OK (size set), MISMATCH,
+     * ABSENT or UNAVAILABLE. */
+    int (*verify)(void *context, const char *source, const char *sha256, unsigned long long *size);
+    /* Read those bytes into a process-heap buffer (HeapAlloc on GetProcessHeap;
+     * the caller frees it with HeapFree): OK, MISMATCH, ABSENT or UNAVAILABLE. */
+    int (*read)(void *context, const char *source, const char *sha256, unsigned char **bytes, size_t *len);
+} sh_mb_stock_ops;
+
+/* Register the installed-content reader (copied; NULL clears). Without one the
+ * builder emits no pointers, a descriptor's stock object is refused, and stock
+ * files cannot be verified or served. */
+void sh_mb_set_stock_ops(const sh_mb_stock_ops *ops);
+/* 1 when a reader is registered. */
+int  sh_mb_stock_available(void);
+/* The registered operations, with a first cause naming `path` when not OK. */
+int  sh_mb_stock_verify(const char *source, const char *sha256, unsigned long long *size,
+                        const char *path, char *cause, size_t cause_cap);
+int  sh_mb_stock_read(const char *source, const char *sha256, unsigned char **bytes, size_t *len,
+                      const char *path, char *cause, size_t cause_cap);
+
+/* Validate a stock source path: the request-path rules without the extension
+ * whitelist. 1 when valid. */
+int  sh_mb_check_source(const char *source, char *cause, size_t cause_cap);
 
 /* Build the bundle for `folder` (UTF-8 path). Returns 1 when the bundle has no
  * errors, 0 otherwise; out->first_cause and out->errors describe the refusal.

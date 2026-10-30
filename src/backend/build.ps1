@@ -30,7 +30,7 @@ param(
                            # Boot preload pacing (load-screen video lock, read poll).
                            "boot_pacing.c",
                            # Mod bundles, the local mods store, the sh_mods command and the Mods tab.
-                           "modbundle.c", "modstore.c", "modcmd.c", "modui.c",
+                           "modbundle.c", "modstock.c", "modstore.c", "modcmd.c", "modui.c",
                            # The one-time move of the retired overrides folder into the mods store.
                            "modmigrate.c",
                            # The mod store client (WinHTTP), upload/download and the rawmap ZIP export.

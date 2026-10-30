@@ -113,6 +113,12 @@ test('state and shadow explanations', () => {
   assert.match(modsTab.shadowInfo({kind: 'conflict', resolution: 'composed'}).text, /entries of all of them are served/);
   assert.match(modsTab.shadowInfo({kind: 'conflict', resolution: 'withdrawn'}).text, /game copy is used/);
   assert.equal(modsTab.shadowInfo({kind: 'conflict', resolution: 'chosen'}).tone, 'warn');
+  /* Stock pointers: files served from the installed game's own copy. */
+  assert.equal(modsTab.filesText(by('local.my-overrides@0.0.0+1')), '63 files, 41 from the installed game');
+  assert.equal(modsTab.filesText(by('alex.r2-imp@1.0.0+2')), '13 files');
+  assert.ok(m.shadows.find(s => s.request === 'generated/decls/snapeditorentitydef/demons/imp.decl').installed);
+  assert.match(modsTab.shadowInfo({kind: 'legacy', installed: true}).text, /^Changes what maps mean\. Served from the installed game's own copy\.$/);
+  assert.equal(modsTab.shadowInfo({kind: 'stock', installed: false}).text, 'Applies on this machine only.');
   assert.equal(modsTab.normalize({ok: true, bundles: [], shadows: [{request: 'a', kind: 'conflict', resolution: 'composed',
     reason: 'composed: 2 list entries'}]}).shadows[0].resolution, 'composed');
   assert.match(modsTab.rowInfo({state: 'missing', otherKey: 'a@1+2'}).detail, /another build \(a@1\+2\)/);

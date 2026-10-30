@@ -404,7 +404,7 @@ int main(int argc, char **argv)
         doc = list_doc();
         CHECK(bundle_has(doc, "alex.shade-a@1.0.0+1", "\"shadows\":1"));
         CHECK(has(doc, "\"shadows\":[{\"request\":\"generated/decls/entitydef/monster/imp.decl\",\"kind\":\"stock\",\"shadow\":true,"
-                       "\"served\":\"alex.shade-a@1.0.0+1\",\"bundles\":[\"alex.shade-a@1.0.0+1\"]}]"));
+                       "\"served\":\"alex.shade-a@1.0.0+1\",\"installed\":false,\"bundles\":[\"alex.shade-a@1.0.0+1\"]}]"));
         CHECK(has(doc, "\"shadowTotals\":{\"stock\":1,\"legacy\":0,\"conflict\":0,\"total\":1,\"sent\":1}"));
         free(doc);
         put_shadow_mod(b, "alex.shade-b", "{\r\n\tinherit = \"snapmaps/placeablesnapaiencounter/imp\";\r\n\tsize = \"2\";\r\n}");
@@ -419,7 +419,7 @@ int main(int argc, char **argv)
         CHECK(has(doc, "\"rows\":[{\"id\":\"alex.r2-imp\"") && has(doc, "\"placed\":[{\"id\":\"alex.r2-imp\""));
         /* Two mods' shadows with different bytes: one serves (here the later
          * install; the texts differ outside lists), and the tab says why. */
-        CHECK(has(doc, "\"kind\":\"conflict\",\"shadow\":true,\"served\":\"alex.shade-b@1.0.0+1\",\"resolution\":\"chosen\","
+        CHECK(has(doc, "\"kind\":\"conflict\",\"shadow\":true,\"served\":\"alex.shade-b@1.0.0+1\",\"installed\":false,\"resolution\":\"chosen\","
                        "\"reason\":\"installed most recently\",\"bundles\":[\"alex.shade-a@1.0.0+1\",\"alex.shade-b@1.0.0+1\"]"));
         CHECK(has(doc, "\"conflict\":1,\"total\":1"));
         keys_match_fixture(payload, doc);

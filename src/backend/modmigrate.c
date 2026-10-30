@@ -41,6 +41,8 @@ typedef struct mg_item {
     char tree[SH_MB_HASH_HEX + 1];
     char duplicate_of[MG_NAME_MAX];    /* the first folder with the same id */
     unsigned bundle_files, left_out, warnings;
+    unsigned pointers;                 /* of bundle_files, stock pointers to installed content */
+    unsigned long long pointer_bytes;  /* their bytes, which the store did not receive */
     unsigned long long ms;
     unsigned long long ms_read, ms_stage, ms_store;   /* walk and hash, write the staged tree, build and store */
 } mg_item;
@@ -539,8 +541,15 @@ static void mg_pick_version(const mg_ctx *c, const char *id, const char *wanted,
     }
 }
 
+/* What the last mg_build_legacy built: its stock pointers (the migration
+ * runs one folder at a time under the store lock). */
+static unsigned g_mg_pointers;
+static unsigned long long g_mg_pointer_bytes;
+
 /* modlegacy's builder for a delivered package: the normal builder over the
- * installed bundles, without the game's resource reader (not up at boot). */
+ * installed bundles, without the game's resource reader (not up at boot).
+ * Copies of installed content still become stock pointers: the stock bridge
+ * reads the installed archives from disk, not through the engine. */
 static int mg_build_legacy(const char *folder_acp, char *first_cause, size_t n)
 {
     wchar_t wide[MAX_PATH * 2];
@@ -565,7 +574,11 @@ static int mg_build_legacy(const char *folder_acp, char *first_cause, size_t n)
         if (first_cause && n) strncpy_s(first_cause, n, b.first_cause, _TRUNCATE);
     } else if (!sh_mb_write(&b, folder, cause, sizeof cause)) {
         if (first_cause && n) strncpy_s(first_cause, n, cause, _TRUNCATE);
-    } else ok = 1;
+    } else {
+        ok = 1;
+        g_mg_pointers = b.stock_count;
+        g_mg_pointer_bytes = b.stock_bytes;
+    }
     sh_mb_free(&b);
     sh_ms_list_free(&list);
     return ok;
@@ -596,6 +609,11 @@ static void mg_display(const char *name, char *out, size_t cap)
 static void mg_log_item(const mg_item *it)
 {
     char shown[MG_NAME_MAX], store[MG_NAME_MAX], dup[2 * MG_NAME_MAX + 200] = "", left[MG_CAUSE_MAX + 64] = "";
+    char ptr[128];
+    /* Files byte-identical to installed game content became stock pointers:
+     * the bundle names them and the store keeps (and uploads) nothing. */
+    _snprintf_s(ptr, sizeof ptr, _TRUNCATE, ", %u of them stock pointer(s) to installed content, %llu KiB not stored",
+                it->pointers, it->pointer_bytes >> 10);
     mg_display(it->name, shown, sizeof shown);
     mg_display(it->store, store, sizeof store);
     if (it->duplicate_of[0]) {
@@ -615,13 +633,13 @@ static void mg_log_item(const mg_item *it)
     }
     switch (it->outcome) {
     case SH_MODMIGRATE_BUILT:
-        mg_log("MODS: migration: " MG_OVERRIDES "\\%s: built mods\\%s, bundle %.16s, %u file(s), %llu KiB, %u warning(s)%s%s, %llu ms (read %llu, stage %llu, store %llu)",
-               shown, store, it->bundle, it->bundle_files, it->bytes >> 10, it->warnings, left, dup, it->ms, it->ms_read, it->ms_stage, it->ms_store);
+        mg_log("MODS: migration: " MG_OVERRIDES "\\%s: built mods\\%s, bundle %.16s, %u file(s)%s, %llu KiB, %u warning(s)%s%s, %llu ms (read %llu, stage %llu, store %llu)",
+               shown, store, it->bundle, it->bundle_files, ptr, it->bytes >> 10, it->warnings, left, dup, it->ms, it->ms_read, it->ms_stage, it->ms_store);
         break;
     case SH_MODMIGRATE_CONVERTED:
-        mg_log("MODS: migration: " MG_OVERRIDES "\\%s: delivered package converted to mods\\%s, bundle %.16s, %u file(s), "
+        mg_log("MODS: migration: " MG_OVERRIDES "\\%s: delivered package converted to mods\\%s, bundle %.16s, %u file(s)%s, "
                "%llu KiB, key delivery.%.16s...%s%s, %llu ms (read %llu, convert %llu)",
-               shown, store, it->bundle, it->bundle_files, it->bytes >> 10, it->tree, left, dup, it->ms, it->ms_read, it->ms_stage);
+               shown, store, it->bundle, it->bundle_files, ptr, it->bytes >> 10, it->tree, left, dup, it->ms, it->ms_read, it->ms_stage);
         break;
     case SH_MODMIGRATE_REUSED:
         mg_log("MODS: migration: " MG_OVERRIDES "\\%s: delivered package already converted as mods\\%s (key delivery.%.16s...), "
@@ -691,7 +709,11 @@ static void mg_do_item(mg_ctx *c, mg_item *it, size_t index)
         origin.source = "delivered";
         origin.build = mg_build_legacy;
         t1 = GetTickCount64();
+        g_mg_pointers = 0;
+        g_mg_pointer_bytes = 0;
         ok = sh_modlegacy_convert_folder(&zip, it->tree, &origin, &v);
+        it->pointers = g_mg_pointers;
+        it->pointer_bytes = g_mg_pointer_bytes;
         it->ms_stage = GetTickCount64() - t1;
         if (!ok) {
             it->outcome = SH_MODMIGRATE_REFUSED;
@@ -765,6 +787,8 @@ static void mg_do_item(mg_ctx *c, mg_item *it, size_t index)
         strncpy_s(it->store, sizeof it->store, key, _TRUNCATE);
         strncpy_s(it->bundle, sizeof it->bundle, b.hash, _TRUNCATE);
         it->bundle_files = (unsigned)b.file_count;
+        it->pointers = st.stock_files;
+        it->pointer_bytes = st.stock_bytes;
         it->warnings = b.warnings;
         sh_mb_free(&b);
     }
@@ -868,6 +892,8 @@ static void mg_stats(const mg_ctx *c, sh_modmigrate_stats *s)
         default: s->pending++; break;
         }
         if (it->duplicate_of[0]) s->duplicates++;
+        s->pointers += it->pointers;
+        s->pointer_bytes += it->pointer_bytes;
         (void)k;
     }
 }
@@ -906,6 +932,7 @@ static int mg_write_record(mg_ctx *c, int complete)
         if (it->bundle[0]) { mg_puts(&b, ", \"bundle\": "); mg_putq(&b, it->bundle); }
         if (it->tree[0]) { mg_puts(&b, ", \"tree\": "); mg_putq(&b, it->tree); }
         if (it->bundle_files) mg_putf(&b, ", \"bundleFiles\": %u", it->bundle_files);
+        if (it->pointers) mg_putf(&b, ", \"stockPointers\": %u, \"stockBytes\": %llu", it->pointers, it->pointer_bytes);
         if (it->left_out) mg_putf(&b, ", \"leftOut\": %u, \"moviesLeftOut\": %u", it->left_out, it->movies);
         if (it->nested) mg_puts(&b, ", \"nested\": true");
         if (it->warnings) mg_putf(&b, ", \"warnings\": %u", it->warnings);
@@ -1048,10 +1075,10 @@ static void mg_finish(mg_ctx *c)
     int wrote = mg_write_record(c, 1);
     mg_stats(c, &s);
     mg_log("MODS: migration: %u entr%s in " MG_OVERRIDES ": %u built, %u delivered converted, %u delivered reused, %u skipped, "
-           "%u refused, %u duplicate id(s); %llu MiB in %llu ms (%llu ms before the serving index); record %s; "
-           "the " MG_OVERRIDES " folder is unchanged",
+           "%u refused, %u duplicate id(s); %llu MiB in %llu ms (%llu ms before the serving index); %u file(s) became "
+           "stock pointers, %llu KiB not stored; record %s; the " MG_OVERRIDES " folder is unchanged",
            s.entries, s.entries == 1 ? "y" : "ies", s.built, s.converted, s.reused, s.skipped, s.refused, s.duplicates,
-           s.bytes >> 20, s.ms, s.boot_ms, wrote ? "mods\\.migrated.json" : "NOT written");
+           s.bytes >> 20, s.ms, s.boot_ms, s.pointers, s.pointer_bytes >> 10, wrote ? "mods\\.migrated.json" : "NOT written");
     mg_publish_stats(c);
 }
 

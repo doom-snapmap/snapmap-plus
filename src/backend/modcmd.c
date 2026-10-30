@@ -18,6 +18,7 @@
 #include "editor_frame.h"
 #include "apply_engine.h"
 #include "modmigrate.h"
+#include "modstock.h"
 
 /* A stock resource every 13954591 SnapMap install ships; reading it proves the
  * installed-resource reader works before its answers are trusted. */
@@ -51,13 +52,27 @@ static int mc_read_stock(const char *request)
 
 typedef struct mc_stock { int state; unsigned asked; } mc_stock;   /* state: 0 unprobed, 1 ok, -1 unavailable */
 
+/* The engine provider first, then the installed archives themselves (the
+ * stock bridge): SnapMap's provider does not see campaign-only content in
+ * gameresources, which is still stock to a bundle that shadows it. */
 static int mc_stock_exists(void *ctx, const char *request)
 {
     mc_stock *s = (mc_stock *)ctx;
+    int got;
     if (s->state == 0) s->state = mc_read_stock(MC_STOCK_PROBE) == 1 ? 1 : -1;
-    if (s->state < 0) return -1;
+    if (s->state < 0) return sh_modstock_exists(request);
     s->asked++;
-    return mc_read_stock(request);
+    got = mc_read_stock(request);
+    if (got == 0 && sh_modstock_exists(request) == 1) got = 1;
+    return got;
+}
+
+/* One line per build or install that holds stock pointers. */
+static void mc_stock_line(const char *verb, const char *folder, const sh_mb_bundle *b)
+{
+    if (b->stock_count)
+        mc_line("MODS: %s %s: %u file(s) are installed game content (stock pointers), %llu byte(s) not stored", verb,
+                folder, b->stock_count, b->stock_bytes);
 }
 
 /* Rejoin a path the console split into several tokens. */
@@ -148,6 +163,7 @@ static void mc_build(const char *folder)
     mc_line("MODS: build %s: %s@%s+%llu from %s, %zu file(s), %llu byte(s) hashed", folder, b.id, b.version, b.build,
             b.descriptor, b.file_count, b.total_size);
     mc_needs_line("build", &b);
+    mc_stock_line("build", folder, &b);
     if (!sh_mb_write(&b, folder, cause, sizeof cause))
         mc_line("MODS: build %s: valid but not written: %s", folder, cause);
     else {
@@ -177,6 +193,7 @@ static void mc_install(const char *folder)
                 b.descriptor, b.file_count, b.total_size, b.errors ? "" : ", bundle.json written");
         mc_needs_line("install", &b);
     }
+    if (b.id[0]) mc_stock_line("install", folder, &b);
     if (st.blobs_written || st.blobs_reused)
         mc_line("MODS: install %s: blobs written %u, already stored %u", folder, st.blobs_written, st.blobs_reused);
     if (st.linked || st.copied)
@@ -656,6 +673,7 @@ int modbundle_build_folder(const char *folder_acp, char *first_cause, size_t n)
         mc_line("MODS: build %s: %s@%s+%llu, %zu file(s), %llu byte(s); bundle %s written", folder, b.id,
                 b.version, b.build, b.file_count, b.total_size, b.hash);
         mc_needs_line("build", &b);
+        mc_stock_line("build", folder, &b);
     }
     if (stock.state < 0) mc_line("MODS: build %s: the game's resource reader is unavailable; stock names were not checked", folder);
     sh_mb_free(&b);

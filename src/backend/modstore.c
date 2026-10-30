@@ -255,7 +255,7 @@ static void ms_protect_blobs(const wchar_t *root, const sh_mb_bundle *b)
     wchar_t *blobs = ms_wjoin(root, L"blobs");
     if (!blobs) return;
     for (i = 0; i < b->file_count; i++) {
-        wchar_t *p = ms_wjoin_utf8(blobs, b->files[i].blob);
+        wchar_t *p = b->files[i].stock ? NULL : ms_wjoin_utf8(blobs, b->files[i].blob);
         if (p) {
             DWORD a = GetFileAttributesW(p);
             if (a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_READONLY))
@@ -423,8 +423,11 @@ static void ms_load_entry(sh_ms_list *l, const wchar_t *folder, const wchar_t *l
     e->sizes_ok = 1;
     for (i = 0; i < e->bundle.file_count; i++) {
         unsigned long long size = 0;
-        wchar_t *p = ms_wjoin_utf8(folder, e->bundle.files[i].path);
-        int present = p && ms_file_size(p, &size);
+        wchar_t *p;
+        int present;
+        if (e->bundle.files[i].stock) continue;   /* installed content: checked at install and verify */
+        p = ms_wjoin_utf8(folder, e->bundle.files[i].path);
+        present = p && ms_file_size(p, &size);
         free(p);
         if (!present || size != e->bundle.files[i].size) {
             e->sizes_ok = 0;
@@ -571,9 +574,18 @@ static int ms_verify_folder(const wchar_t *root, const wchar_t *folder, const sh
     if (!blobs) return ms_cause(cause, cap, "out of memory");
     for (i = 0; i < b->file_count && ok; i++) {
         const sh_mb_file *f = &b->files[i];
-        wchar_t *p = ms_wjoin_utf8(folder, f->path), *bp = ms_wjoin_utf8(blobs, f->blob);
+        wchar_t *p, *bp;
         char hex[SH_MB_HASH_HEX + 1];
         unsigned long long size = 0;
+        if (f->stock) {
+            /* A stock pointer resolves against this player's installed game:
+             * a different revision lacks the entry or holds other bytes. */
+            if (sh_mb_stock_verify(f->stock_source, f->blob, &size, f->path, first, sizeof first) != SH_MB_STOCK_OK) ok = 0;
+            else if (st) { st->files++; st->pointers++; }
+            continue;
+        }
+        p = ms_wjoin_utf8(folder, f->path);
+        bp = ms_wjoin_utf8(blobs, f->blob);
         if (!p || !bp) { ok = 0; strcpy_s(first, sizeof first, "out of memory"); }
         else if (!ms_hash_wfile(p, &size, hex)) {
             ok = 0;
@@ -730,8 +742,12 @@ static int ms_lay_out(const wchar_t *blobs, const wchar_t *dir, const sh_mb_bund
     size_t i;
     for (i = 0; i < b->file_count; i++) {
         const sh_mb_file *f = &b->files[i];
-        wchar_t *dst = ms_wjoin_utf8(dir, f->path), *blob = ms_wjoin_utf8(blobs, f->blob);
-        int ok = dst && blob && ms_mkdirs_parent(dst);
+        wchar_t *dst, *blob;
+        int ok;
+        if (f->stock) continue;   /* served from the installed game */
+        dst = ms_wjoin_utf8(dir, f->path);
+        blob = ms_wjoin_utf8(blobs, f->blob);
+        ok = dst && blob && ms_mkdirs_parent(dst);
         if (ok && !g_ms_force_copy && CreateHardLinkW(dst, blob, NULL)) {
             st->linked++;
         } else if (ok && CopyFileW(blob, dst, TRUE)) {
@@ -815,8 +831,11 @@ static int ms_install_locked(const char *folder, const sh_mb_resolver *resolver,
     if (!sh_mb_write(&b, folder, one, sizeof one)) { ms_cause(cause, cap, "%s", one); goto done; }
 
     for (i = 0; i < b.file_count; i++) {
-        wchar_t *p = ms_wjoin_utf8(src, b.files[i].path);
+        wchar_t *p;
         int put;
+        /* The store never receives installed content. */
+        if (b.files[i].stock) { st->stock_files++; st->stock_bytes += b.files[i].size; continue; }
+        p = ms_wjoin_utf8(src, b.files[i].path);
         if (!p) { ms_cause(cause, cap, "out of memory"); goto done; }
         put = ms_put_blob(blobs, p, &b.files[i], st, one, sizeof one);
         free(p);

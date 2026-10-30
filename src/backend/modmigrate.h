@@ -25,6 +25,11 @@
  *     any other file are listed as skipped with the reason; two folders with one id are both built (the
  *     second under a distinct version) and the duplicate is reported;
  *   - a folder over 512 MiB or 8192 files is skipped with its size;
+ *   - a file byte-identical to installed game content (any archive, the
+ *     .patch store included, or a loose install file) becomes a stock
+ *     pointer: blobs\ never receives it, and each folder's line and the
+ *     summary say how many files became pointers and how many bytes were not
+ *     stored;
  *   - nothing under overrides\ is created, changed or deleted; an empty
  *     backups folder (beta.15) is removed and a non-empty one is left alone.
  *
@@ -71,6 +76,8 @@ typedef struct sh_modmigrate_stats {
     unsigned entries;            /* direct children of overrides\ looked at (and delivered packages) */
     unsigned built, converted, reused, skipped, refused, duplicates, pending;
     unsigned long long bytes;    /* bytes of the folders that were built or converted */
+    unsigned pointers;           /* files that became stock pointers to installed content */
+    unsigned long long pointer_bytes;   /* their bytes: never written to blobs\ or uploaded */
     unsigned long long ms;       /* wall time of the pass so far */
     unsigned long long boot_ms;  /* the part done before the serving index (boot only) */
     int ran;                     /* 1 when a pass ran; 0 when it had nothing to do */

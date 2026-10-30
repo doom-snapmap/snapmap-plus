@@ -7,7 +7,11 @@
  *   legacy\<id>@<digest16>\...      converted first-generation packages
  *
  * A mod folder dropped into mods\ by hand is built in place: bundle.json is
- * written beside its descriptor and its files are copied into blobs\.
+ * written beside its descriptor and its files are copied into blobs\. Stock
+ * pointers (modbundle.h) never reach blobs\ or the laid-out tree: they are
+ * resolved against the installed game at install and on verification, and a
+ * pointer the game lacks (or holds with other bytes) fails the bundle with
+ * that first cause.
  * Installing from elsewhere builds the source folder in place, then lays the
  * tree out under <id>@<version>+<build>\. Verification (rehash every file) runs at
  * install and on request, never at boot; enumeration trusts bundle.json and
@@ -76,6 +80,8 @@ typedef struct sh_ms_install_stats {
     unsigned linked, copied;
     int in_place;               /* the source folder was inside the store */
     int replaced;               /* an earlier build of the same id@version was replaced */
+    unsigned stock_files;       /* stock pointers: nothing stored for them */
+    unsigned long long stock_bytes;   /* their installed size */
 } sh_ms_install_stats;
 
 /* Build `folder` in place (writes its bundle.json), copy its files into
@@ -90,6 +96,7 @@ int  sh_ms_install_from_folder(const char *folder, const sh_mb_resolver *resolve
 
 typedef struct sh_ms_verify_stats {
     unsigned files, bytes_mb, blobs_checked, entries;
+    unsigned pointers;          /* of files, stock pointers resolved against the installed game */
 } sh_ms_verify_stats;
 
 /* Rehash every file of the bundle(s) installed as `key` against bundle.json

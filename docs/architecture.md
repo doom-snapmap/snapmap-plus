@@ -397,7 +397,7 @@ sharing a rawmap stays offline. Plain saves never upload. The retired
 below, and never served or written; no `package-cache` or `package-staging`
 folder is created.
 
-Eight backend files share the work:
+These backend files share the work:
 
 - `modbundle.c` builds a mod folder into a bundle: a SHA-256 per file, the
   logical name each file provides, the names its decls need, the namespace and
@@ -411,6 +411,8 @@ Eight backend files share the work:
   `<id>@<version>+<build>\` folder per installed build with its `.state.json`,
   and `legacy\` for converted packages. Files are hashed at install and on
   `sh_mods verify`, never at boot.
+- `modstock.c` is the read-only installed-resource bridge behind stock
+  pointers, below.
 - `modcmd.c` is the `sh_mods` console command. It dispatches the serving verbs
   (`status`, `rescan`, `palette rebuild`) to `modserve_engine.c` and owns
   `build`, `install`, `list` and `verify`. Its `modbundle_build_folder` is the
@@ -441,6 +443,45 @@ Eight backend files share the work:
   them under the published item, releases the claim at unpublish, and refuses
   a copy to My Maps that the map service would reject, as in
   [Publishing a map with mods](#publishing-a-map-with-mods).
+
+A bundle file may be a stock pointer instead of carried bytes: Contract 1's
+file kind `stock`, `{"needs", "path", "provides", "request", "stock":
+{"sha256", "source"}}` with no `blob` and no `size`, where `source` is an
+installed resource path and `sha256` the hash of the installed bytes
+(`modbundle.h` has the grammar). The builder makes one of every file whose
+bytes equal installed content, and an author writes one in the descriptor's
+`stock` object (`{"<request>": {"source": "<installed path>", "sha256":
+"<optional>"}}`, the hash filled in by the builder) to alias installed content
+under a mod name. Pointers do not count toward the 64 MiB and 256 MiB caps and
+the extension whitelist does not apply to them, because nothing is carried;
+the store never receives their bytes (no blob, no laid-out file, nothing
+uploaded), so a converted package or a copy-of-stock mod uploads only its
+authored and edited files. `modstock.c` answers them from the player's own
+install, read-only: it parses `base\snap_gameresources.pindex` and
+`base\gameresources.pindex` once, on the first question (about 171,000 rows
+with bytes, 20 MB held, 125 ms on build 13954591; an empty `mods\` never loads
+it), reads a row's slice from `.resources` or `.patch` with one positional
+read, inflates the engine's sync-flush raw DEFLATE (`raw_deflate.c`), and
+falls back to loose files under `base\` and the install root (a `.pages`
+virtual texture). It reads the archives directly rather than through the
+engine provider because SnapMap's provider does not see campaign-only
+content in `gameresources`, which is what the boss packs copy. Identity is
+size first: the builder hashes only entries whose decoded size equals the
+file's, at the file's own path, then entries of the same size and extension
+elsewhere (a renamed copy; at most 64 candidates and 256 MiB hashed per
+file), and each slice is hashed at most once per process; measured on the
+owner's packs, a build hashes about the bytes that become pointers, never the
+archives. Installing a downloaded bundle resolves every pointer first, and a
+game that lacks the entry or holds other bytes (a different revision) refuses
+the bundle with that first cause before anything is fetched; `sh_mods verify`
+checks pointers the same way. The serving index never reads the archives at
+boot; a pointer is read when it is first opened, accepted only with its hash,
+and a pointer the install cannot answer falls through to the engine with one
+logged line. For the conflict rules a pointer's bytes are the installed bytes
+(its hash stands for its blob), so a carried copy and a pointer to the same
+bytes are one file, and a composed list decl reads a pointer's installed text.
+The builder's and the Mods tab's stock-name checks ask the bridge when the
+engine provider does not have a name.
 
 The provider open (`ov_open_body` in `overrides.c`) serves, in order: the
 placement grid, map navigation, the generated Grid Room variants, the built-in
@@ -590,6 +631,13 @@ exists and `mods\.migrated.json` does not (or records an unfinished pass):
   reason; a folder over
   512 MiB or 8192 files is skipped before it is read, and one whose carried part
   is over the bundle caps (4096 files, 256 MiB) is refused before it is hashed;
+- a file byte-identical to installed game content becomes a stock pointer (see
+  above): `blobs\` never receives it and an upload never sends it. Each
+  folder's line says `N file(s), P of them stock pointer(s) to installed
+  content, K KiB not stored`, the summary line totals them, and the record
+  carries `stockPointers` and `stockBytes`. Measured on the owner's packs:
+  453 of 472 files of the cyberdemon pack (9.1 of 9.7 MB), 306 of 388 of the
+  doors pack (8.1 of 8.3 MB), and 6 of the Imp's 11 (renamed copies, 1.8 MB);
 - nothing under `overrides\` is created, changed or deleted; an empty
   `override-backups\` folder is removed and a non-empty one is left alone.
 

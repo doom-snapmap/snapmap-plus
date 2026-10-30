@@ -12,6 +12,8 @@
  *
  * Boot reads every bundle.json, checks each file's size (never its hash) and
  * builds one immutable table from the lowercased request path to the file.
+ * A stock pointer (modbundle.h) has no file to check: it was resolved at
+ * install and is read from the installed game when first opened.
  * A bundle that fails (manifest, state, size, path, namespace) is skipped with
  * one MODS: line naming the first cause; other bundles and the product's own
  * sources are unaffected. Lookups fold case and '\' to '/', allocate nothing
@@ -77,6 +79,8 @@ typedef struct sh_modserve_hit {
     const char *bundle_hash;
     int         is_decl;     /* request is generated/decls/... */
     int         is_shadow;   /* request is a stock path the bundle replaces */
+    int         is_stock;    /* a stock pointer: served from the installed game (size 0) */
+    const char *stock_source;/* its installed source, or NULL */
 } sh_modserve_hit;
 
 /* Constant-time, allocation-free lookup of an engine request path (any case,
@@ -88,7 +92,11 @@ int sh_modserve_lookup(const char *request, sh_modserve_hit *out);
  * caller or the idFile stream frees it with HeapFree), 0 when no bundle
  * serves the name, -1 when a bundle serves it but the file could not be read
  * at its indexed size (logged once per file; the caller falls through to the
- * engine). Shadows are logged on their first serve. */
+ * engine). A stock pointer is answered with the installed entry's bytes read
+ * through the registered stock reader (modstock.c), accepted only with the
+ * pointer's SHA-256; a pointer whose bytes are equal to another provider's
+ * is the same file for the conflict rules. Shadows are logged on their first
+ * serve. */
 int sh_modserve_open(const char *request, unsigned char **bytes, size_t *length);
 
 /* Whether the decl existence probe should answer true for `path`: a served
