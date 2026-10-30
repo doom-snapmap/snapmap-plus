@@ -569,7 +569,10 @@ test('Remove from map: the dry run drives the confirmation; two buttons; the doc
   assert.equal(items[3], 'The published copy on the server is unaffected until you publish the map again.');
   assert.equal(items.length, 4, 'not the last mod: the tag stays');
   const btns = modalButtons(h);
-  assert.deepEqual(btns.map(b => b.textContent), ['Cancel', 'Delete'], 'exactly two buttons');
+  assert.deepEqual(btns.map(b => b.textContent), ['Cancel', 'Delete from map'], 'exactly two buttons; the label carries the scope');
+  const notes = h.nodes.modsMapHost.all('mods-note').map(n => n.textContent);
+  assert.deepEqual(notes.slice(0, 2), [modsTab.SCOPE.mapRemoveMod, 'This cannot be undone. Removing it:'], 'the scope sentence comes first');
+  assert.equal(modsTab.SCOPE.mapRemoveMod, 'Only this map changes. The mod stays installed on this computer and keeps its Toybox rows.');
   /* the buttons are a footer: the dialog's last child, after the scrolling consequence list */
   const hostKids = h.nodes.modsMapHost.children;
   assert.match(hostKids[hostKids.length - 1].className, /^modal-actions mods-map-foot$/);
@@ -635,6 +638,8 @@ test('Uninstall: with the open map using the mod, and without', () => {
   assert.ok(items.indexOf('Deletes the folder mods\\doors and its files.') >= 0, 'a folder the product made is deleted');
   assert.equal(items[items.length - 1], modsTab.OTHER_MAPS_NOTE);
   assert.deepEqual(modalButtons(h).map(b => b.textContent), ['Cancel', 'Uninstall']);
+  assert.equal(h.nodes.modsMapHost.all('mods-scope')[0].textContent, 'Removes the mod from this computer. The open map is cleaned of it first.');
+  assert.equal(h.nodes.modsMapHost.all('mods-note')[1].textContent, 'This cannot be undone. Uninstalling:');
   assert.match(modalButtons(h)[1].className, /danger-solid/);
   modalButtons(h)[0].click();
   assert.equal(h.nodes.modsMapModal.style.display, 'none', 'Cancel from the details pane closes the dialog');
@@ -653,7 +658,8 @@ test('Uninstall: with the open map using the mod, and without', () => {
   items = h.nodes.modsMapHost.tags('li').map(n => n.textContent);
   assert.deepEqual(items, ['Removes 2 Toybox rows from the editor (Basin floor, Basin rim).',
                            'Moves your folder mods\\alex.mp-basin to removed-mods\\alex.mp-basin.',
-                           'The open map does not use this mod.', modsTab.OTHER_MAPS_NOTE]);
+                           modsTab.OTHER_MAPS_NOTE]);
+  assert.equal(h.nodes.modsMapHost.all('mods-scope')[0].textContent, 'Removes the mod from this computer. The open map does not use it.');
   modalButtons(h)[1].click();
   assert.equal(rowOf(h, 'alex.mp-basin'), undefined);
   /* uninstalling one of two duplicates clears the other's attention */
