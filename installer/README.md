@@ -63,6 +63,17 @@ reported fallback to the newest beta while no stable release exists. `--beta`
 selects the newest beta; `--release` selects a specific tag. Updates also refresh
 the installer unless `--no-self` is supplied.
 
+Every downloaded release asset must match the size and `sha256:` digest GitHub
+publishes for it; a short, failed or altered download is refused and its temporary
+files are removed before anything is installed or replaced. The bundle's files are
+then checked against its `MANIFEST.sha256`.
+
+For testing, `SNAPMAP_PLUS_API_BASE` replaces `https://api.github.com` with a local
+mock of the Releases API. Only a loopback URL (`127.0.0.1`, `localhost` or `[::1]`)
+is accepted; any other value is ignored with a notice. `install.ps1` honours the same
+variable. The Go suite runs install, update, self-update and uninstall against such a
+mock, including corrupt, mismatched and interrupted downloads.
+
 The changelog command reads GitHub release bodies derived from reviewed
 [CHANGELOG.md](../CHANGELOG.md) entries. It shows the newest release and an older
 release index by default; a version, `latest`, or `all` selects another view.

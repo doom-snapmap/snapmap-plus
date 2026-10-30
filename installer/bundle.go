@@ -6,9 +6,11 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,6 +18,33 @@ import (
 
 // repoSlug is the GitHub "owner/repo" the installer downloads releases from.
 const repoSlug = "doom-snapmap/snapmap-plus"
+
+// githubAPI is the GitHub REST API root every release lookup uses.
+const githubAPI = "https://api.github.com"
+
+// apiBaseEnv names a test seam: a loopback URL (http://127.0.0.1:<port>) that replaces githubAPI so
+// the real executable can run against a local mock of the Releases API. It is unset in normal use,
+// and any value that is not a loopback URL is ignored, so it cannot redirect downloads elsewhere.
+const apiBaseEnv = "SNAPMAP_PLUS_API_BASE"
+
+// apiBase returns githubAPI, or the loopback override named by apiBaseEnv.
+func apiBase() string {
+	v := strings.TrimRight(strings.TrimSpace(os.Getenv(apiBaseEnv)), "/")
+	if v == "" {
+		return githubAPI
+	}
+	if u, err := url.Parse(v); err == nil && (u.Scheme == "http" || u.Scheme == "https") {
+		switch u.Hostname() {
+		case "127.0.0.1", "::1", "localhost":
+			return v
+		}
+	}
+	fmt.Fprintf(os.Stderr, "(ignoring %s=%q: only a loopback URL is accepted)\n", apiBaseEnv, v)
+	return githubAPI
+}
+
+// releasesURL is the Releases API collection for repoSlug.
+func releasesURL() string { return apiBase() + "/repos/" + repoSlug + "/releases" }
 
 // releaseAsset is the stable asset name CI publishes on every release (so latest/download works).
 const releaseAsset = "snapmap-plus-bundle.zip"
@@ -125,6 +154,7 @@ type ghAsset struct {
 	URL                string `json:"url"`                  // API URL (token-authed private download)
 	BrowserDownloadURL string `json:"browser_download_url"` // public URL
 	Digest             string `json:"digest"`               // "sha256:<hex>" (may be empty)
+	Size               int64  `json:"size"`                 // bytes (0 when unknown)
 }
 
 // downloadReleaseFn is the download step; tests replace it so routing runs without a network.
@@ -171,7 +201,7 @@ func downloadRelease(f flags) (dir string, tag string, cleanup func(), err error
 // fetchRelease picks: an explicit --release tag, the latest --beta pre-release, or the latest stable
 // (falling back to the newest beta while no stable has been published yet).
 func fetchRelease(f flags, token string) (*ghRelease, error) {
-	base := "https://api.github.com/repos/" + repoSlug + "/releases"
+	base := releasesURL()
 	switch {
 	case f.release != "":
 		var r ghRelease
@@ -293,9 +323,29 @@ func downloadAsset(a *ghAsset, token, dest string) error {
 	if err != nil {
 		return err
 	}
-	defer out.Close()
-	_, err = io.Copy(out, resp.Body)
-	return err
+	h := sha256.New()
+	n, copyErr := io.Copy(io.MultiWriter(out, h), resp.Body)
+	closeErr := out.Close()
+	if err := assetCheck(a, n, hex.EncodeToString(h.Sum(nil)), errors.Join(copyErr, closeErr)); err != nil {
+		os.Remove(dest)
+		return err
+	}
+	return nil
+}
+
+// assetCheck refuses an incomplete or altered download: a transfer error, a byte count that
+// differs from the release's asset size, or bytes whose SHA-256 differs from the asset digest.
+func assetCheck(a *ghAsset, n int64, sum string, transferErr error) error {
+	if transferErr != nil {
+		return fmt.Errorf("the download of %s did not complete (%v) -- check your internet connection and try again", a.Name, transferErr)
+	}
+	if a.Size > 0 && n != a.Size {
+		return fmt.Errorf("the download of %s is incomplete (%d of %d bytes) -- try again", a.Name, n, a.Size)
+	}
+	if want, ok := strings.CutPrefix(a.Digest, "sha256:"); ok && want != "" && !strings.EqualFold(want, sum) {
+		return fmt.Errorf("integrity check failed on %s (SHA-256 differs from the release) -- the download may be corrupted or tampered. Try again", a.Name)
+	}
+	return nil
 }
 
 // Token storage.
@@ -356,7 +406,7 @@ func cmdSetToken(args []string) error {
 func cmdChangelog(f flags, args []string) error {
 	token := resolveToken(f)
 	var list []ghRelease
-	if err := apiGet("https://api.github.com/repos/"+repoSlug+"/releases?per_page=30", token, &list); err != nil {
+	if err := apiGet(releasesURL()+"?per_page=30", token, &list); err != nil {
 		return err
 	}
 	// Drafts are not published releases; nobody can install one.

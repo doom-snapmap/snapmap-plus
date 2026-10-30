@@ -10,6 +10,9 @@ import (
 // selfExeAsset is the standalone CLI published alongside each release's overlay bundle.
 const selfExeAsset = "snapmap-plus.exe"
 
+// executablePath locates the running image; tests point it at a stand-in so the test binary is never replaced.
+var executablePath = os.Executable
+
 // shouldSelfUpdate decides whether the running snapmap-plus.exe should replace itself with the resolved release's
 // exe. It stays put for a dev/local build (version "dev" -- never clobber a hand-built binary) or when the
 // running version already matches the release tag.
@@ -58,7 +61,7 @@ func selfUpdate(f flags, token string) {
 		return // this release doesn't ship a standalone exe
 	}
 
-	exe, err := os.Executable()
+	exe, err := executablePath()
 	if err != nil {
 		fmt.Printf("(couldn't locate the running snapmap-plus.exe to update it: %v)\n", err)
 		return
@@ -157,7 +160,7 @@ func replaceExeWithOps(path, newExe string, ops replaceExeOps) error {
 
 // Clean recorded backups after a successful update. Locked images remain.
 func cleanupSelfUpdateLeftovers() {
-	if exe, err := os.Executable(); err == nil {
+	if exe, err := executablePath(); err == nil {
 		removeOldLeftovers(exe)
 	}
 }

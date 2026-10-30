@@ -31,7 +31,7 @@ func selfInstall() {
 	if dir == "" {
 		return
 	}
-	exe, err := os.Executable()
+	exe, err := executablePath()
 	if err != nil {
 		return
 	}
@@ -62,7 +62,7 @@ func cleanupAppData() {
 	}
 	os.Remove(filepath.Join(dir, "install.json"))
 	os.Remove(filepath.Join(dir, "token"))
-	exe, _ := os.Executable()
+	exe, _ := executablePath()
 	cleanupOwnedExecutables(dir, exe)
 	// Remove only empty content folders, then the parent if empty.
 	for _, sub := range userContentSubdirs {

@@ -127,7 +127,7 @@ var noticeClient = &http.Client{Timeout: 5 * time.Second}
 // latestDefaultTag returns the default release tag, or an empty string when
 // the bounded update check fails. Failure suppresses only the notice.
 func latestDefaultTag() string {
-	req, err := http.NewRequest("GET", "https://api.github.com/repos/"+repoSlug+"/releases?per_page=30", nil)
+	req, err := http.NewRequest("GET", releasesURL()+"?per_page=30", nil)
 	if err != nil {
 		return ""
 	}
