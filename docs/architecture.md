@@ -547,6 +547,9 @@ registered. A bare program name in a material, shared includes under
 `generated/glsl/` are refused. MD5fold is MD5 with its four words XORed
 together. OpenGL compiles the decl text by default (`r_useGeneratedRenderprogs`
 0) and may write the permutation decl into the player's `base\generated\`.
+The first open of each served render-program file logs
+`MODS: renderprog: served <request> (<id>@<version>, <n> bytes)` (the first 64),
+which shows the variant this GPU binds.
 
 ### Mod virtual-texture families
 
