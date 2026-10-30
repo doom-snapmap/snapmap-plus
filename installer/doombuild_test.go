@@ -324,3 +324,25 @@ func TestDescribeDoomGames(t *testing.T) {
 		t.Errorf("empty folder: %q", got)
 	}
 }
+
+// install.ps1 resolves releases the way snapmap-plus.exe does: through the Releases API, falling
+// back to the newest beta (releases/latest/download never serves one), verifying the downloaded
+// installer against the published digest and stopping when an installer exits with an error.
+func TestBootstrapScriptResolvesAndVerifiesReleases(t *testing.T) {
+	script, err := os.ReadFile("install.ps1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(script)
+	if strings.Contains(s, "releases/latest/download") {
+		t.Error("install.ps1 downloads from releases/latest/download, which 404s while only betas are published")
+	}
+	for _, want := range []string{"Get-FileHash", "$asset.digest", "$asset.size", "SNAPMAP_PLUS_API_BASE", "-not $_.prerelease"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("install.ps1 lacks %q", want)
+		}
+	}
+	if n := strings.Count(s, "if ($LASTEXITCODE -ne 0)"); n != 2 {
+		t.Errorf("install.ps1 checks %d installer exit codes, want 2 (the 2018 and the current path)", n)
+	}
+}

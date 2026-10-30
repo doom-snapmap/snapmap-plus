@@ -67,10 +67,53 @@ foreach ($n in $exeNames) {
     Write-Host ("Game: {0}: DOOM 2016 build {1} ({2}, {3}, {4})" -f $n, $steam, $binary, $renderer, $hash.Substring(0, 8))
 }
 
+# Releases are looked up through the GitHub API, as snapmap-plus.exe does. SNAPMAP_PLUS_API_BASE
+# (a loopback URL only) points the lookups at a local mock for testing.
+$api = "https://api.github.com"
+if ($env:SNAPMAP_PLUS_API_BASE -match '^https?://(127\.0\.0\.1|localhost|\[::1\])(:\d+)?/?$') {
+    $api = $env:SNAPMAP_PLUS_API_BASE.TrimEnd("/")
+}
+$releases = "$api/repos/$repo/releases"
+$headers = @{ "User-Agent" = "snapmap-plus-installer"; "Accept" = "application/vnd.github+json" }
+
+function Get-Release([string]$tag) {
+    if ($tag) { return Invoke-RestMethod -UseBasicParsing -Uri "$releases/tags/$tag" -Headers $headers }
+    # The newest stable release, or the newest beta while none is published. The
+    # latest-release download link cannot be used: it never serves a beta.
+    $all = Invoke-RestMethod -UseBasicParsing -Uri ($releases + "?per_page=30") -Headers $headers
+    $list = @($all | Where-Object { -not $_.draft })
+    $stable = @($list | Where-Object { -not $_.prerelease })
+    if ($stable.Count -gt 0) { return $stable[0] }
+    if ($list.Count -gt 0) { return $list[0] }
+    throw "No Snapmap+ release has been published yet."
+}
+
+# Download a release's snapmap-plus.exe and check it against the size and digest GitHub publishes.
+function Save-Installer($release, [string]$out) {
+    $asset = @($release.assets | Where-Object { $_.name -eq "snapmap-plus.exe" }) | Select-Object -First 1
+    if (-not $asset) { throw "Release $($release.tag_name) has no snapmap-plus.exe yet; try again in a minute." }
+    $part = "$out.download"
+    try {
+        Invoke-WebRequest -UseBasicParsing -Uri $asset.browser_download_url -OutFile $part
+        $size = (Get-Item -LiteralPath $part).Length
+        if ($asset.size -and $size -ne $asset.size) {
+            throw "snapmap-plus.exe from $($release.tag_name) is incomplete ($size of $($asset.size) bytes); run this again."
+        }
+        if ("$($asset.digest)" -match '^sha256:([0-9a-fA-F]{64})$') {
+            $want = $Matches[1]
+            if ((Get-FileHash -LiteralPath $part -Algorithm SHA256).Hash -ne $want) {
+                throw "snapmap-plus.exe from $($release.tag_name) failed its integrity check; run this again."
+            }
+        }
+        Move-Item -LiteralPath $part -Destination $out -Force
+    } finally {
+        Remove-Item -LiteralPath $part -Force -ErrorAction SilentlyContinue
+    }
+}
+
 $dest = Join-Path $env:LOCALAPPDATA "snapmap-plus"
 New-Item -ItemType Directory -Force $dest | Out-Null
 $exe = Join-Path $dest "snapmap-plus.exe"
-$current = "https://github.com/$repo/releases/latest/download/snapmap-plus.exe"
 
 if ($build -eq "2018") {
     # Run the final 2018 release's own installer, pinned by tag.
@@ -79,7 +122,7 @@ if ($build -eq "2018") {
     New-Item -ItemType Directory -Force $work | Out-Null
     try {
         $legacy = Join-Path $work "snapmap-plus.exe"
-        Invoke-WebRequest -Uri "https://github.com/$repo/releases/download/$legacyTag/snapmap-plus.exe" -OutFile $legacy
+        Save-Installer (Get-Release $legacyTag) $legacy
         & $legacy install --doom $doom --release $legacyTag
         if ($LASTEXITCODE -ne 0) { throw "the $legacyTag installer failed (exit $LASTEXITCODE)" }
     } finally {
@@ -88,12 +131,13 @@ if ($build -eq "2018") {
     # Keep the current installer for later commands: it identifies the build on every update,
     # so the 2018 install keeps receiving $legacyTag instead of a release for the 2024 build.
     Write-Host "Downloading the current snapmap-plus.exe for later updates ..."
-    Invoke-WebRequest -Uri $current -OutFile $exe
+    Save-Installer (Get-Release "") $exe
 } else {
     Write-Host "Your DOOM is the April 2024 update (Steam build 13954591). Downloading snapmap-plus.exe ..."
-    Invoke-WebRequest -Uri $current -OutFile $exe
+    Save-Installer (Get-Release "") $exe
     Write-Host "Installing Snapmap+ ..."
     & $exe install --doom $doom
+    if ($LASTEXITCODE -ne 0) { throw "snapmap-plus.exe install failed (exit $LASTEXITCODE); nothing more was changed." }
 }
 
 Write-Host ""
