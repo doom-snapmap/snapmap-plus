@@ -898,7 +898,10 @@ int sh_mb_extension_allowed(const char *request)
 {
     static const char *const allowed[] = { ".decl", ".bmd6model", ".bmd6skl", ".bmd6anim", ".bimage",
                                            ".bmodel", ".bcm", ".bnk", ".json", ".bin", ".vspv",
-                                           ".fspv", ".mrpr", NULL };
+                                           ".fspv", ".mrpr",
+                                           /* Lane RC research harness only: a private virtual-texture
+                                            * family member (virtualtextures/mods/<id>/<fam>_sqN.mega2). */
+                                           ".mega2", NULL };
     const char *slash = strrchr(request, '/');
     const char *dot = strrchr(slash ? slash : request, '.');
     size_t i;
@@ -1174,6 +1177,10 @@ static void mb_scan_value(mb_scan *sc, const mb_tok *key, const mb_tok *val)
         return;
     }
     if (mb_ieq_n(k, kn, "md6Def")) { sc->fn(sc->ctx, "md6Def", v, vn); return; }
+    /* Lane RC research harness only: renderModelInfo customMaterial names a
+     * material the decl's model is drawn with, so the editor plan registers it
+     * before the entityDef that names it. */
+    if (mb_ieq_n(k, kn, "customMaterial")) { sc->fn(sc->ctx, "material", v, vn); return; }
     if (mb_ieq_n(k, kn, "entityDef")) { sc->fn(sc->ctx, "entityDef", v, vn); return; }
     if (parent && mb_ieq_n(parent, parent_n, "buildGameRefEntityDefs") && kn > 5 && mb_ieq_n(k, 5, "item[")) {
         sc->fn(sc->ctx, "entityDef", v, vn);

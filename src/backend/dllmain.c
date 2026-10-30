@@ -47,6 +47,7 @@
 #include "entity.h"
 #include "typeinfo.h"
 #include "megapreview.h"
+#include "vt_harness.h"
 #include "imgpreview.h"
 #include "prefabpreview.h"
 #include "soundpreview.h"
@@ -458,6 +459,7 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
         /* Decode virtual-texture previews from installed files through the signed
          * engine page decoder; no renderer or GPU calls are needed. */
         sh_megapreview_install(results, db, g_doom_base);
+        (void)sh_vt_harness_install(results, db, g_doom_base);   /* lane RC research harness */
         /* Load installed-resource indexes for file-based image previews and catalogs. */
         sh_imgpreview_install();
         /* Start bounded prefab geometry previews using the installed-resource index. */

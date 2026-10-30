@@ -32,7 +32,9 @@ param(
                            # Mod bundles, the local mods store, the sh_mods command and the Mods tab.
                            "modbundle.c", "modstore.c", "modcmd.c", "modui.c",
                            # The mod store client (WinHTTP), upload/download and the rawmap ZIP export.
-                           "modnet.c", "modsync.c", "modexport.c"),
+                           "modnet.c", "modsync.c", "modexport.c",
+                           # Lane RC research harness only (sh_vt); never part of a release.
+                           "vt_harness.c"),
     [string]$Out = "XINPUT1_4.dll",
     # Diag adds SH_DIAG and the crash/environment logger for troubleshooting.
     [switch]$Diag,
