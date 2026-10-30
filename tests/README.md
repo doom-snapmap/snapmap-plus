@@ -59,6 +59,9 @@ Checks native helpers, engine-interface contracts, frontend JavaScript and optio
   `SH_MODLEGACY_FIXTURES` to a folder holding the campaign's carrier maps to add
   an integration pass; it is skipped otherwise. The maps are not in the
   repository because their packages contain game files.
+- `modnet_test.c`, `modsync_test.c` and `modexport_test.c` cover the store client, the upload,
+  download, release and retry flows, and the rawmap ZIP export and import against a loopback stub
+  of the store (`mod_store_stub.h`); no real network is used.
 - `mod_seam_stub.c` stands in for the serving layer and the builder entry in
   tests that link the map manifest or the legacy converter without them.
 - `modbundle_test.c` builds `fixtures\mods\alex.r2-imp` and pins its bundle

@@ -386,9 +386,12 @@ Installer updates and uninstall preserve player configuration.
 
 Mods are installed under `%LOCALAPPDATA%\snapmap-plus\mods\`. A mod is a folder
 holding a descriptor (`mod.json`, or `package.json`) and an `assets/` tree at the
-engine's own request paths. This release has no download client: a map's mods are
-present only when the player installed them, and nothing is uploaded. Nothing is
-read from the retired `%LOCALAPPDATA%\snapmap-plus\overrides\` tree, and no
+engine's own request paths. Mods reach other machines two ways: a published map's
+bundles are uploaded to the Community API's mod store when the map is published,
+and a player who opens that map downloads only what they approve in the dialog,
+verified by hash (`modnet.c`, `modsync.c`); an exported rawmap is a ZIP that
+carries the bundles itself (`modexport.c`), so sharing a rawmap stays offline.
+Plain saves never upload. Nothing is read from the retired `%LOCALAPPDATA%\snapmap-plus\overrides\` tree, and no
 `package-cache` or `package-staging` folder is created.
 
 Seven backend files share the work:

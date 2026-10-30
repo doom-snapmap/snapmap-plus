@@ -147,7 +147,9 @@ Converting assets from other games is Doomforge's job, not this product's. New n
 - A saved map records each mod a placed entity needs as one `smpmod1.` string variable, and the
   next load activates exactly those mods. The game and clients without the product read the rows as
   inert strings. A mod the map names but this machine does not have is logged as not installed and
-  nothing activates for it; nothing is downloaded or uploaded in this release.
+  nothing activates for it until it is fetched: a published map's missing mods are offered in a
+  dialog and only what the player approves is downloaded, verified by hash. Uploads happen only when
+  a map is published; plain saves never upload, and an exported rawmap ZIP carries its mods itself.
 - Maps saved or published with packages by v0.2.1-beta.6 to beta.19 are handled on load (see
   Retired package payloads below): a complete package becomes a local legacy mod and the map gets a
   manifest row for it; anything else is removed. Nothing is read from the retired
