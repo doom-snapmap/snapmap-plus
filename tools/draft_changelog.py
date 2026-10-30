@@ -39,6 +39,7 @@ MAX_ITEMS_CEILING = 30
 SMALL_RELEASE = 12         # user-facing commits that fit the floor budgets
 ITEMS_PER_EXTRA_COMMITS = 5  # one more bullet for every N commits past SMALL_RELEASE
 LARGE_RELEASE = 60         # user-facing commits at which the summary ceiling applies
+PROMPT_MARGIN = 2          # bullets held back from the prompt so a one-over draft still validates
 MAX_SKELETON_SUBJECTS = 60
 
 # Canonical user-facing commit filter; keep contributing.md aligned.
@@ -333,9 +334,15 @@ def check_grounded(draft, corpus):
                         "lives: %s" % (name, noun, _one_line(item, 120)))
 
 
+def prompt_items(max_items):
+    """The ceiling told to the model: a little under the validated one, so a draft
+    that runs one or two bullets over is still accepted instead of discarded."""
+    return max(MAX_ITEMS, int(max_items) - PROMPT_MARGIN)
+
+
 def system_prompt(max_items=MAX_ITEMS, max_summary=MAX_SUMMARY):
     """SYSTEM with this release's budgets filled in."""
-    return (SYSTEM.replace("{MAX_ITEMS}", str(int(max_items)))
+    return (SYSTEM.replace("{MAX_ITEMS}", str(prompt_items(max_items)))
                   .replace("{MAX_SUMMARY}", str(int(max_summary))))
 
 
@@ -390,22 +397,37 @@ def draft(commits, omitted_count, docs="", max_items=MAX_ITEMS, max_summary=MAX_
         raise DraftRejected("input is %d tokens (max %d)"
                             % (counted.input_tokens, MAX_INPUT_TOKENS))
 
-    response = client.messages.parse(
-        model=MODEL,
-        max_tokens=MAX_TOKENS,
-        thinking={"type": "adaptive"},
-        output_config={"effort": "medium"},
-        system=system,
-        messages=[{"role": "user", "content": prompt}],
-        output_format=ChangelogDraftSchema,
-    )
-    if response.stop_reason == "refusal":
-        raise DraftRejected("the model declined this request")
-    if response.stop_reason == "max_tokens":
-        raise DraftRejected("the response hit the token cap and is incomplete")
-    if response.parsed_output is None:
-        raise DraftRejected("no structured output in the response")
-    return ChangelogDraft(**response.parsed_output.model_dump())
+    messages = [{"role": "user", "content": prompt}]
+    for attempt in range(2):
+        response = client.messages.parse(
+            model=MODEL,
+            max_tokens=MAX_TOKENS,
+            thinking={"type": "adaptive"},
+            output_config={"effort": "medium"},
+            system=system,
+            messages=messages,
+            output_format=ChangelogDraftSchema,
+        )
+        if response.stop_reason == "refusal":
+            raise DraftRejected("the model declined this request")
+        if response.stop_reason == "max_tokens":
+            raise DraftRejected("the response hit the token cap and is incomplete")
+        if response.parsed_output is None:
+            raise DraftRejected("no structured output in the response")
+        parsed = ChangelogDraft(**response.parsed_output.model_dump())
+        total = len(parsed.added) + len(parsed.improved) + len(parsed.fixed)
+        if total <= max_items or attempt == 1:
+            return parsed
+        # One retry: the draft ran over the ceiling; ask for it to be merged down.
+        messages = messages + [
+            {"role": "assistant", "content": response.parsed_output.model_dump_json()},
+            {"role": "user", "content":
+                "That draft has %d named bullets; the ceiling is %d. Merge related bullets "
+                "until there are at most %d, keeping every player-visible outcome and the "
+                "theme labels, and return the structured entry again."
+                % (total, prompt_items(max_items), prompt_items(max_items))},
+        ]
+    return parsed
 
 
 def main(argv=None):

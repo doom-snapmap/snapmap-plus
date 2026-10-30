@@ -402,8 +402,13 @@ class TestBudgets(unittest.TestCase):
             dc.validate(make(summary=long_summary))
         dc.validate(make(summary=long_summary), max_summary=600)
 
+    def test_prompt_holds_back_a_margin(self):
+        self.assertEqual(dc.prompt_items(30), 28)
+        self.assertEqual(dc.prompt_items(7), 6)
+        self.assertEqual(dc.prompt_items(6), 6)
+
     def test_system_prompt_carries_the_budgets(self):
-        text = dc.system_prompt(28, 600)
+        text = dc.system_prompt(30, 600)
         self.assertIn("At most 28 named bullets", text)
         self.assertIn("at most 600 characters", text)
         self.assertNotIn("{MAX_ITEMS}", text)
