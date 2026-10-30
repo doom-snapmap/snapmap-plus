@@ -11,14 +11,14 @@ Snapmap+ now runs on the April 2024 DOOM update (Steam build 13954591) and repla
 
 ### New
 - **Mods:** Install mods as folders in the mods folder; a saved map records the mods it uses and activates them at the next load.
-- **Mods:** A map that needs a mod you do not have asks first, then downloads and hash-checks only what you approve.
+- **Mods:** A map that needs a mod you do not have asks first, then downloads and checks only what you approve.
 - **Mods:** Publishing a map uploads the mods it uses so other players can play it, asking once before the first upload.
 - **Mods:** A mod can bring its own sounds and sound banks, HUD movies, a multiplayer arena as a placeable module, and virtual textures.
 - **Mods tab:** A new Mods tab lists your installed mods with their status, what each one adds, and buttons to verify, rebuild or uninstall.
 - **Mods tab:** See which mods the open map uses, remove one from the map, or uninstall it after a preview of exactly what changes.
 - **Mods tab:** An uninstalled mod moves to a removed-mods folder and comes back on its own when a map still needs it.
 - **Mods:** Packages left by earlier releases are converted into mods the first time this release starts, and your old folders are left untouched.
-- **Mods:** A rescan applies your mod edits to the running game, so changed decls, models and Toybox rows show up without a restart.
+- **Mods:** A rescan applies your mod edits to the running game, so changed definitions, models and Toybox rows show up without a restart.
 - **Editor:** An Unlock View Distance toggle per map draws the whole room in the editor and in Play instead of stopping at the environment's fog.
 - **Editor:** An Unlock Map Bounds toggle lets modules spread further and zooms Blueprint out enough to see the whole map.
 - **Editor:** You can now place demons, player starts, spawners, path points and pickups in open air.
@@ -30,7 +30,7 @@ Snapmap+ now runs on the April 2024 DOOM update (Steam build 13954591) and repla
 
 ### Improved
 - **Startup:** Reaching the main menu takes about 20 seconds instead of about 160.
-- **Install:** The installer checks which DOOM build you have and installs the matching release, refusing unrecognized or mixed copies with an explanation.
+- **Install:** The installer checks which DOOM build you have and installs the matching release (the 2018 build stays on v0.2.1-beta.19), refusing unrecognized or mixed copies with an explanation.
 - **Navigation:** Each room copy and demon size bakes on its own, so one dense room no longer fails the whole map, and unchanged rooms reuse their earlier bake.
 - **Navigation:** The floor is cut around marked boxes and climbs and drops are swept clear of solids, so demons stop walking through them.
 - **Prefabs:** Demons and player starts draw their real editor models in the preview instead of plain boxes.
