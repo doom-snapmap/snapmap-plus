@@ -80,8 +80,9 @@ subjects copied verbatim, or internal jargon.
 - headline: at most 60 characters, the one thing this release is about.
 - summary: at most {MAX_SUMMARY} characters, one to three sentences on what changed \
 and what it means for someone using Snapmap+.
-- sources: the short commit hashes backing your named bullets, lowercase hex only, \
-for maintainer review.
+- sources: the short commit hashes backing your named bullets, copied exactly from \
+the "commit" lines you were given (seven lowercase hex characters, never abbreviated \
+or shortened with dots), for maintainer review.
 - Never use newlines, square brackets, angle brackets, or backticks inside any \
 string. Text containing them is rejected and your draft is discarded.
 
@@ -213,12 +214,12 @@ def validate(draft, min_collapsed=0, max_items=MAX_ITEMS, max_summary=MAX_SUMMAR
             "collapsed_count is %d but at least %d commits are not described"
             % (draft.collapsed_count, min_collapsed))
 
-    # sources reaches the pull-request description, and reaches git as argv.
-    for sha in draft.sources:
-        _reject_forbidden("sources item", sha)
-        if not SHA_RE.match(sha):
-            raise DraftRejected("sources contains %r, which is not a commit hash"
-                                % sha)
+    # sources reaches the pull-request description, and reaches git as argv. It is
+    # advisory, so an entry that is not a plain commit hash is dropped rather than
+    # discarding the whole draft; the renderer never sees it.
+    draft.sources = [sha for sha in draft.sources
+                     if isinstance(sha, str) and SHA_RE.match(sha)
+                     and not any(ch in sha for ch in FORBIDDEN)]
 
 
 def render(tag, date, draft):

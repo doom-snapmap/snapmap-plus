@@ -107,18 +107,20 @@ class TestValidateRejectsInjection(unittest.TestCase):
 class TestValidateSources(unittest.TestCase):
     """Source SHAs let reviewers trace a drafted bullet to its evidence."""
 
-    def test_rejects_non_hex(self):
-        with self.assertRaises(dc.DraftRejected):
-            dc.validate(make(sources=["not-a-sha"]))
+    def test_drops_non_hex(self):
+        d = make(sources=["not-a-sha", "abc1234", "4a7..."])
+        dc.validate(d)
+        self.assertEqual(d.sources, ["abc1234"])
 
-    def test_rejects_markdown_in_a_sha(self):
-        with self.assertRaises(dc.DraftRejected):
-            dc.validate(make(sources=["abc1234 | x](https://evil.example)"]))
+    def test_drops_markdown_in_a_sha(self):
+        d = make(sources=["abc1234 | x](https://evil.example)"])
+        dc.validate(d)
+        self.assertEqual(d.sources, [])
 
-    def test_rejects_leading_dash(self):
-        """git would parse it as an option."""
-        with self.assertRaises(dc.DraftRejected):
-            dc.validate(make(sources=["--upload-pack=touch"]))
+    def test_drops_leading_dash(self):
+        d = make(sources=["--upload-pack=touch"])
+        dc.validate(d)
+        self.assertEqual(d.sources, [])
 
     def test_accepts_real_shas(self):
         dc.validate(make(sources=["abc1234", "a" * 40]))
