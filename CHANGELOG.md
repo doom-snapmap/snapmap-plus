@@ -3,6 +3,74 @@
 Every Snapmap+ release, newest first. Beta versions are opt-in previews; the
 latest stable version is what `snapmap-plus update` installs.
 
+## v0.2.1-beta.20 -- 2026-10-30 (beta)
+
+**NEEDS WRITING**
+
+Automatic drafting did not run (DraftRejected: sources contains '4a7...', which is not a commit hash), so this entry is the raw commit list and must be rewritten before merging.
+
+### New
+- Ask the drafter for two bullets under the ceiling and retry once
+- Offer only the undo that applies in the Uninstall confirmation
+- Propose release notes against the dispatching branch
+- Reinstate an undone mod by its hash, not its names
+- Keep uninstalled mods in a recycle bin and reinstate them on undo
+- Say that removing a mod from the map can be undone
+- Carry the 2018 release's files in every bundle
+- Describe who converts mods and overrides in the packaging guide
+- Install the 2018 build with v0.2.1-beta.19's own installer
+- Keep a newer stable installer and stop treating closed input as yes
+- Keep Remove from map undoable after Play when run from the console
+- State that the backend, not the installer, converts mods and overrides
+- Resolve install.ps1 downloads through the Releases API
+- Leave app data alone when an install is refused
+- Verify every release download against its published size and digest
+- Scale the release notes budget with the size of the release
+- Remove mods from the open map and uninstall them from the Mods tab
+- State the scope of the Mods tab's removal confirmations
+- Apply mod edits to the running game on rescan
+- Count carried files and keep Toybox rows out of map removal
+- Redesign the Mods tab around grouped status rows and a map modal
+- Drop delivered copies of installed mods and hide generated versions
+- Keep earlier builds of a mod resolvable after a rebuild
+- Document the mod.json store
+- Convert the retired mods layout at the first start
+- Keep each mod's built manifest in its mod.json
+- Reload models loaded before a bundle's blacklist gates were live
+- Make the Mods tab install button a download icon
+- Re-parse shadow decls the engine parsed before the serving index
+- Reduce the Mods tab to installed mods and fix its scrolling
+- Inject mod bundle strings into the engine string table
+- Serve a bundle module's sound BSP, light grid and tome at Play
+- Check bundle modules in the serving index, not the Grid preflight
+- Keep stream packages reloaded by s_loadBanks alive past the open map
+- Admit a bundle's own sound bank in the serving index
+- Keep a deshared entity holder alive across Play
+- Serve SnapMap modules from mod bundles
+- Load the Wwise sound banks that installed mods carry
+- Log the first serve of each render-program file
+- Check render programs a mod ships before it installs
+- Point at installed game content instead of carrying it
+- Write the mods search tag into the saved map the publish uploads
+- Register a bundle's virtual-texture family with the engine at index time
+- Keep the whole closure the editor rows create alive across Play
+- Keep the decls that editor rows point at alive across Play
+- Add the virtual-texture live harness
+- Carry cooked discrete-animation models in a bundle
+- Ask the game archives before withdrawing an animWeb for a missing model
+- Join the test list after the lane merges
+- Admit compute SPIR-V stages in the bundle builder
+- Tag published maps that use mods, release claims at delete, lock the store, move the WebView2 profile
+- Serve one copy of a conflicting shadow and withdraw animWebs naming missing models
+- Serve HUD movies and apply package HUD rules
+- Convert beta.19 packages with unlisted sidecars and migrate the overrides folder
+- Upload a map's mods when it is published and claim them under the item
+- Reopen the store session when the mods.store setting changes
+- Gate published and My Maps play on the mods a map needs
+- Describe the store client, the consent download and the export ZIP in the docs
+- Add the Mods tab to the WebView
+- Add the store client, upload and download flows and the rawmap ZIP export
+
 ## v0.2.1-beta.19 -- 2026-10-22 (beta)
 
 **Published maps start again, plus safer remote delete**
