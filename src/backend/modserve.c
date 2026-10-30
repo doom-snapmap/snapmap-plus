@@ -41,9 +41,22 @@ typedef struct ms_file {
     int is_decl, is_shadow, is_sedef, rank;
     int need_first, need_count;
     int served;
+    const unsigned char *body;            /* composed bytes served instead of the disk file (arena), or NULL */
+    size_t body_len;
     volatile LONG opens, fail_logged, shadow_logged;
     volatile LONG reg_state;              /* 0 none, 1 ready, -1 failed (main thread) */
+    volatile LONG withdrawn;              /* a shadow taken back by a registration pass: lookups miss it */
 } ms_file;
+
+/* One path several bundles provide with different bytes, and what serves it. */
+typedef struct ms_conflict {
+    const char *request;
+    const char *providers;                /* "a@1, b@2" in index order */
+    const char *reason;                   /* why the winner was chosen, or how the text was composed */
+    int winner;                           /* the file that serves the path */
+    int count;                            /* providers */
+    int composed;                         /* 1: the list entries of every provider were merged */
+} ms_conflict;
 
 typedef struct ms_bundle {
     const char *dir, *folder, *id, *version, *hash, *name;
@@ -67,7 +80,8 @@ typedef struct ms_index {
     ms_need *needs; int nneeds, cneeds;
     ms_slot *slots; uint32_t mask; int nkeys;
     ms_slot *pslots; uint32_t pmask;
-    int admitted, served_files, conflicts, shadows;
+    ms_conflict *conflict_list; int nconflict_list, cconflict_list;   /* sorted by request */
+    int admitted, served_files, conflicts, composed, shadows;
     double build_ms;
 } ms_index;
 
@@ -137,7 +151,7 @@ static void ms_index_free(ms_index *x)
     ms_chunk *c, *n;
     if (!x) return;
     for (c = x->arena; c; c = n) { n = c->next; free(c); }
-    free(x->bundles); free(x->files); free(x->needs); free(x->slots); free(x->pslots);
+    free(x->bundles); free(x->files); free(x->needs); free(x->slots); free(x->pslots); free(x->conflict_list);
     free(x);
 }
 
@@ -806,18 +820,521 @@ static int ms_newer(const ms_index *x, int a, int b)   /* bundle a newer than bu
     return strcmp(ba->folder, bb->folder) > 0;
 }
 
+/* ------------------------------------------------------------------ decl list composition
+ *
+ * Several mods often shadow one stock list decl to append their own entries:
+ * every boss pack adds its demon to the encounter conductor's aiTypeList and
+ * its encounter to the whitelist inspectors' validEncounters. Serving one
+ * pack's copy drops the others' entries; serving none drops them all. When
+ * every provider's text parses in the strict assignment grammar
+ *
+ *   text  := '{' stmt* '}'
+ *   stmt  := key '=' value [';'] | key ['='] '{' stmt* '}' [';']
+ *   key   := word | "string"     value := word | "string" | ( group )
+ *
+ * and the texts agree everywhere except inside lists (a block holding
+ * `num = N;` and only `item[i]` members), the served text is the winner's
+ * with every other provider's list items appended that the winner lacks
+ * (matched by value, or by a block item's first scalar member such as
+ * aiType), renumbered, and `num` set to the count. Any other difference, a
+ * provider that lists an existing item with different content, or a text
+ * outside the grammar leaves the winner's bytes as they are. Removal cannot
+ * be expressed (no stock text is read here), so composition is a union. */
+
+#define MC_DEPTH 32
+
+typedef struct mc_node {
+    const char *key; size_t key_n;
+    const char *val; size_t val_n;        /* scalar value text, quotes included; NULL for a block */
+    struct mc_node **kids; int nkids, ckids;
+    int block, eq;
+} mc_node;
+
+typedef struct mc_arena { struct mc_arena *next; size_t used; char data[16384]; } mc_arena;
+typedef struct mc_ctx { mc_arena *arena; int failed; } mc_ctx;
+
+static void *mc_alloc(mc_ctx *c, size_t n)
+{
+    mc_arena *a = c->arena;
+    n = (n + 7u) & ~(size_t)7u;
+    if (n > sizeof a->data) { c->failed = 1; return NULL; }
+    if (!a || sizeof a->data - a->used < n) {
+        mc_arena *k = (mc_arena *)malloc(sizeof *k);
+        if (!k) { c->failed = 1; return NULL; }
+        k->next = a; k->used = 0;
+        c->arena = a = k;
+    }
+    a->used += n;
+    return a->data + a->used - n;
+}
+
+static void mc_free(mc_ctx *c)
+{
+    mc_arena *a, *n;
+    for (a = c->arena; a; a = n) { n = a->next; free(a); }
+    c->arena = NULL;
+}
+
+static int mc_add_kid(mc_ctx *c, mc_node *parent, mc_node *kid)
+{
+    if (parent->nkids == parent->ckids) {
+        int cap = parent->ckids ? parent->ckids * 2 : 8;
+        mc_node **k = (mc_node **)mc_alloc(c, sizeof(mc_node *) * (size_t)cap);
+        if (!k) return 0;
+        if (parent->nkids) memcpy(k, parent->kids, sizeof(mc_node *) * (size_t)parent->nkids);
+        parent->kids = k;
+        parent->ckids = cap;
+    }
+    parent->kids[parent->nkids++] = kid;
+    return 1;
+}
+
+enum { MC_END, MC_WORD, MC_STR, MC_LB, MC_RB, MC_EQ, MC_SEMI, MC_GROUP, MC_BAD };
+typedef struct mc_tok { int kind; const char *p; size_t n; } mc_tok;
+typedef struct mc_lex { const char *t; size_t len, pos; } mc_lex;
+
+static mc_tok mc_next(mc_lex *l)
+{
+    mc_tok k = { MC_END, NULL, 0 };
+    const char *t = l->t;
+    size_t i = l->pos, len = l->len;
+    for (;;) {
+        while (i < len && (t[i] == ' ' || t[i] == '\t' || t[i] == '\r' || t[i] == '\n')) i++;
+        if (i + 1 < len && t[i] == '/' && t[i + 1] == '/') { while (i < len && t[i] != '\n') i++; continue; }
+        if (i + 1 < len && t[i] == '/' && t[i + 1] == '*') {
+            i += 2;
+            while (i + 1 < len && !(t[i] == '*' && t[i + 1] == '/')) i++;
+            i = i + 2 <= len ? i + 2 : len;
+            continue;
+        }
+        break;
+    }
+    if (i >= len) { l->pos = len; return k; }
+    k.p = t + i;
+    switch (t[i]) {
+    case '"':
+        for (++i; i < len && t[i] != '"' && t[i] != '\n'; ++i) {}
+        if (i >= len || t[i] != '"') { k.kind = MC_BAD; break; }
+        ++i;
+        k.kind = MC_STR;
+        break;
+    case '{': k.kind = MC_LB; ++i; break;
+    case '}': k.kind = MC_RB; ++i; break;
+    case '=': k.kind = MC_EQ; ++i; break;
+    case ';': k.kind = MC_SEMI; ++i; break;
+    case '(': {
+        int depth = 0;
+        for (; i < len; ++i) {
+            if (t[i] == '(') depth++;
+            else if (t[i] == ')' && --depth == 0) { ++i; break; }
+            else if (t[i] == '{' || t[i] == '}' || t[i] == ';') { depth = -1; break; }
+        }
+        k.kind = depth == 0 ? MC_GROUP : MC_BAD;
+        break;
+    }
+    default: {
+        size_t s = i;
+        while (i < len && !strchr(" \t\r\n{}=;\"()", t[i])) i++;
+        k.kind = i > s ? MC_WORD : MC_BAD;
+        if (i == s) i++;
+        break;
+    }
+    }
+    k.n = (size_t)(t + i - k.p);
+    l->pos = i;
+    return k;
+}
+
+static mc_tok mc_peek(mc_lex *l)
+{
+    size_t at = l->pos;
+    mc_tok k = mc_next(l);
+    l->pos = at;
+    return k;
+}
+
+/* Statements up to the closing brace (consumed). */
+static int mc_parse_block(mc_ctx *c, mc_lex *l, mc_node *parent, int depth)
+{
+    if (depth > MC_DEPTH) return 0;
+    for (;;) {
+        mc_tok key = mc_next(l), t;
+        mc_node *n;
+        if (key.kind == MC_RB) return 1;
+        if (key.kind != MC_WORD && key.kind != MC_STR) return 0;
+        n = (mc_node *)mc_alloc(c, sizeof *n);
+        if (!n) return 0;
+        memset(n, 0, sizeof *n);
+        n->key = key.p;
+        n->key_n = key.n;
+        t = mc_next(l);
+        if (t.kind == MC_EQ) { n->eq = 1; t = mc_next(l); }
+        if (t.kind == MC_LB) {
+            n->block = 1;
+            if (!mc_parse_block(c, l, n, depth + 1)) return 0;
+        } else if (n->eq && (t.kind == MC_WORD || t.kind == MC_STR || t.kind == MC_GROUP)) {
+            n->val = t.p;
+            n->val_n = t.n;
+        } else return 0;
+        if (mc_peek(l).kind == MC_SEMI) mc_next(l);
+        if (!mc_add_kid(c, parent, n)) return 0;
+    }
+}
+
+static mc_node *mc_parse(mc_ctx *c, const char *text, size_t len)
+{
+    mc_lex l = { text, len, 0 };
+    mc_node *root = (mc_node *)mc_alloc(c, sizeof *root);
+    if (!root) return NULL;
+    memset(root, 0, sizeof *root);
+    root->block = 1;
+    if (mc_next(&l).kind != MC_LB || !mc_parse_block(c, &l, root, 0) || mc_next(&l).kind != MC_END) return NULL;
+    return root;
+}
+
+typedef struct mc_buf { char *p; size_t n, cap; int failed; } mc_buf;
+
+static void mc_put(mc_buf *b, const char *s, size_t n)
+{
+    if (b->failed) return;
+    if (b->n + n + 1 > b->cap) {
+        size_t cap = b->cap ? b->cap * 2 : 4096;
+        char *g;
+        while (cap < b->n + n + 1) cap *= 2;
+        g = (char *)realloc(b->p, cap);
+        if (!g) { b->failed = 1; return; }
+        b->p = g;
+        b->cap = cap;
+    }
+    memcpy(b->p + b->n, s, n);
+    b->n += n;
+    b->p[b->n] = 0;
+}
+
+static int mc_key_is(const mc_node *n, const char *word)
+{
+    size_t w = strlen(word);
+    return n->key_n == w && !_strnicmp(n->key, word, w);
+}
+
+/* item[<digits>] */
+static int mc_is_item(const mc_node *n)
+{
+    size_t i;
+    if (n->key_n < 7 || _strnicmp(n->key, "item[", 5) || n->key[n->key_n - 1] != ']') return 0;
+    for (i = 5; i + 1 < n->key_n; ++i) if (n->key[i] < '0' || n->key[i] > '9') return 0;
+    return 1;
+}
+
+static int mc_is_list(const mc_node *n)
+{
+    int i, num = 0;
+    if (!n->block) return 0;
+    for (i = 0; i < n->nkids; ++i) {
+        const mc_node *k = n->kids[i];
+        if (mc_key_is(k, "num") && !k->block) { num++; continue; }
+        if (!mc_is_item(k)) return 0;
+    }
+    return num == 1;
+}
+
+static void mc_indent(mc_buf *b, int depth) { int i; for (i = 0; i < depth; ++i) mc_put(b, "\t", 1); }
+
+/* Serialise `n`'s members at `depth`; lists are renumbered. */
+static void mc_write_members(mc_buf *b, const mc_node *n, int depth)
+{
+    int i, item = 0, list = mc_is_list(n);
+    char tmp[48];
+    if (list) {
+        int count = 0;
+        for (i = 0; i < n->nkids; ++i) if (!mc_key_is(n->kids[i], "num")) count++;
+        mc_indent(b, depth);
+        _snprintf_s(tmp, sizeof tmp, _TRUNCATE, "num = %d;\n", count);
+        mc_put(b, tmp, strlen(tmp));
+    }
+    for (i = 0; i < n->nkids; ++i) {
+        const mc_node *k = n->kids[i];
+        if (list && mc_key_is(k, "num")) continue;
+        mc_indent(b, depth);
+        if (list) {
+            _snprintf_s(tmp, sizeof tmp, _TRUNCATE, "item[%d]", item++);
+            mc_put(b, tmp, strlen(tmp));
+        } else mc_put(b, k->key, k->key_n);
+        if (k->block) {
+            mc_put(b, k->eq ? " = {\n" : " {\n", k->eq ? 5 : 3);
+            mc_write_members(b, k, depth + 1);
+            mc_indent(b, depth);
+            mc_put(b, "}\n", 2);
+        } else {
+            mc_put(b, " = ", 3);
+            mc_put(b, k->val, k->val_n);
+            mc_put(b, ";\n", 2);
+        }
+    }
+}
+
+/* The canonical text of one node (for equality and identity). Malloc'd. */
+static char *mc_text(const mc_node *n, size_t *len)
+{
+    mc_buf b = { NULL, 0, 0, 0 };
+    if (n->block) { mc_put(&b, "{\n", 2); mc_write_members(&b, n, 1); mc_put(&b, "}", 1); }
+    else mc_put(&b, n->val, n->val_n);
+    if (b.failed) { free(b.p); return NULL; }
+    if (len) *len = b.n;
+    return b.p ? b.p : _strdup("");
+}
+
+static int mc_equal(const mc_node *a, const mc_node *b)
+{
+    char *x, *y;
+    int eq;
+    if (a->block != b->block) return 0;
+    if (!a->block) return a->val_n == b->val_n && !memcmp(a->val, b->val, a->val_n);
+    x = mc_text(a, NULL);
+    y = mc_text(b, NULL);
+    eq = x && y && !strcmp(x, y);
+    free(x);
+    free(y);
+    return eq;
+}
+
+/* A list item's identity: a scalar's value, or a block's first scalar member. */
+static char *mc_identity(const mc_node *n)
+{
+    int i;
+    if (n->block)
+        for (i = 0; i < n->nkids; ++i)
+            if (!n->kids[i]->block) {
+                const mc_node *k = n->kids[i];
+                char *s = (char *)malloc(k->key_n + k->val_n + 2);
+                if (!s) return NULL;
+                memcpy(s, k->key, k->key_n);
+                s[k->key_n] = '=';
+                memcpy(s + k->key_n + 1, k->val, k->val_n);
+                s[k->key_n + k->val_n + 1] = 0;
+                for (char *p = s; p < s + k->key_n; ++p) *p = ms_fold(*p);
+                return s;
+            }
+    return mc_text(n, NULL);
+}
+
+static int mc_count_key(const mc_node *n, const mc_node *like)
+{
+    int i, c = 0;
+    for (i = 0; i < n->nkids; ++i)
+        if (n->kids[i]->key_n == like->key_n && !_strnicmp(n->kids[i]->key, like->key, like->key_n)) c++;
+    return c;
+}
+
+/* Merge `other` into `base`; 0 when they disagree outside lists. *added
+ * counts the list items appended. */
+static int mc_merge(mc_ctx *c, mc_node *base, const mc_node *other, int *added)
+{
+    int i, k;
+    if (mc_is_list(base) && mc_is_list(other)) {
+        for (i = 0; i < other->nkids; ++i) {
+            const mc_node *it = other->kids[i];
+            char *id;
+            int found = -1;
+            if (mc_key_is(it, "num")) continue;
+            id = mc_identity(it);
+            if (!id) return 0;
+            for (k = 0; k < base->nkids && found < 0; ++k) {
+                char *bid;
+                if (mc_key_is(base->kids[k], "num")) continue;
+                bid = mc_identity(base->kids[k]);
+                if (!bid) { free(id); return 0; }
+                if (!strcmp(id, bid)) found = k;
+                free(bid);
+            }
+            free(id);
+            if (found >= 0) {
+                if (!mc_equal(base->kids[found], it)) return 0;   /* one entry, two meanings */
+                continue;
+            }
+            if (!mc_add_kid(c, base, (mc_node *)it)) return 0;
+            (*added)++;
+        }
+        return 1;
+    }
+    if (mc_is_list(base) || mc_is_list(other)) return 0;
+    if (mc_equal(base, other)) return 1;
+    for (i = 0; i < other->nkids; ++i) {
+        const mc_node *o = other->kids[i];
+        mc_node *b = NULL;
+        if (mc_count_key(other, o) != 1 || mc_count_key(base, o) > 1) return 0;
+        for (k = 0; k < base->nkids; ++k)
+            if (base->kids[k]->key_n == o->key_n && !_strnicmp(base->kids[k]->key, o->key, o->key_n)) { b = base->kids[k]; break; }
+        if (!b) return 0;   /* a member only one text has: an edit this cannot place without the stock text */
+        if (b->block && o->block) { if (!mc_merge(c, b, o, added)) return 0; }
+        else if (!mc_equal(b, o)) return 0;
+    }
+    /* Members only the base has are another edit of the same kind. */
+    for (k = 0; k < base->nkids; ++k) {
+        int found = 0;
+        for (i = 0; i < other->nkids && !found; ++i)
+            found = base->kids[k]->key_n == other->kids[i]->key_n &&
+                    !_strnicmp(base->kids[k]->key, other->kids[i]->key, other->kids[i]->key_n);
+        if (!found) return 0;
+    }
+    return 1;
+}
+
+/* Compose texts[0] (the winner) with the others. Returns the composed text
+ * (malloc'd, *len set) with *added list items appended, or NULL when the
+ * texts cannot be composed. */
+static char *ms_compose(const unsigned char *const *texts, const size_t *lens, int n, size_t *len, int *added)
+{
+    mc_ctx c = { NULL, 0 };
+    mc_node *base;
+    mc_buf out = { NULL, 0, 0, 0 };
+    int i;
+    *added = 0;
+    *len = 0;
+    base = mc_parse(&c, (const char *)texts[0], lens[0]);
+    for (i = 1; base && i < n; ++i) {
+        mc_node *o = mc_parse(&c, (const char *)texts[i], lens[i]);
+        if (!o || !mc_merge(&c, base, o, added)) base = NULL;
+    }
+    if (base && !c.failed) {
+        mc_put(&out, "{\n", 2);
+        mc_write_members(&out, base, 1);
+        mc_put(&out, "}\n", 2);
+    }
+    mc_free(&c);
+    if (!base || c.failed || out.failed) { free(out.p); return NULL; }
+    *len = out.n;
+    return out.p;
+}
+
+#ifdef SH_MODSERVE_TESTING
+char *sh_modserve_test_compose(const char *const *texts, int n, int *added)
+{
+    const unsigned char *t[8];
+    size_t l[8], len;
+    int i;
+    if (n < 1 || n > 8) return NULL;
+    for (i = 0; i < n; ++i) { t[i] = (const unsigned char *)texts[i]; l[i] = strlen(texts[i]); }
+    return ms_compose(t, l, n, &len, added);
+}
+#endif
+
+/* ------------------------------------------------------------------ conflict winner
+ *
+ * When several bundles of different mods provide one path with different
+ * bytes, one of them serves it (the path is never left to the engine: a pack's
+ * other files are served and name it, and for campaign content the game has no
+ * SnapMap copy to fall back to; lane MG2). In order:
+ *   1. the provider with the fewest needs no admitted bundle provides (needs
+ *      the game satisfies count alike for every provider, so the difference
+ *      is what one copy names that nothing installed supplies);
+ *   2. the bytes most providers carry;
+ *   3. an authored or migrated mod over a copy a map delivered (legacy\);
+ *   4. the most recently installed, then the folder name. */
+
+typedef struct ms_avail { char **keys; int n; } ms_avail;   /* sorted "type\x01name" and request keys of admitted files */
+
+static int ms_pstr_cmp(const void *a, const void *b) { return strcmp(*(char *const *)a, *(char *const *)b); }
+
+static int ms_avail_build(ms_index *x, ms_avail *av)
+{
+    int i, n = 0;
+    av->n = 0;
+    av->keys = (char **)malloc(sizeof(char *) * (size_t)(x->nfiles * 2 + 1));
+    if (!av->keys) return 0;
+    for (i = 0; i < x->nfiles; ++i) {
+        const ms_file *f = &x->files[i];
+        char buf[MS_NAME_MAX];
+        if (!x->bundles[f->bundle].admitted) continue;
+        _snprintf_s(buf, sizeof buf, _TRUNCATE, "%s\x01%s", f->ptype, f->pname);
+        ms_lower(buf);
+        av->keys[n] = ms_strdup(x, buf);
+        if (av->keys[n]) n++;
+        av->keys[n++] = (char *)f->request;
+    }
+    qsort(av->keys, (size_t)n, sizeof(char *), ms_pstr_cmp);
+    av->n = n;
+    return 1;
+}
+
+static int ms_avail_has(const ms_avail *av, const char *key)
+{
+    return av->n && bsearch(&key, av->keys, (size_t)av->n, sizeof(char *), ms_pstr_cmp) != NULL;
+}
+
+static int ms_unresolved(const ms_index *x, const ms_avail *av, const ms_file *f)
+{
+    int k, missing = 0;
+    for (k = 0; k < f->need_count; ++k) {
+        const ms_need *nd = &x->needs[f->need_first + k];
+        char buf[MS_NAME_MAX], cand[2][SH_MB_REQUEST_MAX + 1];
+        int c, nc, ok;
+        _snprintf_s(buf, sizeof buf, _TRUNCATE, "%s\x01%s", nd->type, nd->name);
+        ms_lower(buf);
+        ok = ms_avail_has(av, buf);
+        nc = ok ? 0 : sh_mb_need_requests(nd->type, nd->name, cand, 2);
+        for (c = 0; c < nc && !ok; ++c) ok = ms_avail_has(av, cand[c]);
+        if (!ok) missing++;
+    }
+    return missing;
+}
+
+/* Index of the winning key in keys[i..j), and the reason. */
+static int ms_pick(const ms_index *x, const ms_avail *av, const ms_key *keys, int i, int j, const char **reason)
+{
+    int k, best = i, unres[64], share[64], m = j - i > 64 ? 64 : j - i, tie_un = 1, tie_sh = 1, tie_leg = 1;
+    for (k = 0; k < m; ++k) {
+        const ms_file *f = &x->files[keys[i + k].file];
+        int q;
+        unres[k] = ms_unresolved(x, av, f);
+        share[k] = 0;
+        for (q = 0; q < m; ++q) {
+            const ms_file *g = &x->files[keys[i + q].file];
+            if (f->blob && g->blob && !strcmp(f->blob, g->blob)) share[k]++;
+        }
+    }
+    for (k = 1; k < m; ++k) {
+        const ms_file *f = &x->files[keys[i + k].file], *b = &x->files[keys[best].file];
+        int fl = x->bundles[f->bundle].legacy, bl = x->bundles[b->bundle].legacy, kb = best - i;
+        if (unres[k] != unres[kb]) { if (unres[k] < unres[kb]) best = i + k; continue; }
+        if (share[k] != share[kb]) { if (share[k] > share[kb]) best = i + k; continue; }
+        if (fl != bl) { if (!fl) best = i + k; continue; }
+        if (ms_newer(x, f->bundle, b->bundle)) best = i + k;
+    }
+    for (k = 0; k < m; ++k) {
+        const ms_file *f = &x->files[keys[i + k].file], *b = &x->files[keys[best].file];
+        if (unres[k] != unres[best - i]) tie_un = 0;
+        if (share[k] != share[best - i]) tie_sh = 0;
+        if (x->bundles[f->bundle].legacy != x->bundles[b->bundle].legacy) tie_leg = 0;
+    }
+    if (!tie_un) *reason = "its needs resolve against the installed bundles where the others' do not";
+    else if (!tie_sh) *reason = "most providers carry these bytes";
+    else if (!tie_leg) *reason = "an installed mod is preferred over a copy a map delivered";
+    else *reason = "installed most recently";
+    return best;
+}
+
+static int ms_conflict_cmp(const void *a, const void *b)
+{
+    return strcmp(*(const char *const *)a, ((const ms_conflict *)b)->request);
+}
+
 /* Decide which files serve their request path. Returns 0 on allocation failure. */
 static int ms_resolve(ms_index *x)
 {
     ms_key *keys;
-    int i, n = 0, logged = 0;
+    int i, n = 0, logged = 0, avail_built = 0;
     int *superseded_by;
+    ms_avail avail = { NULL, 0 };
+    x->conflicts = x->composed = x->nconflict_list = 0;
     keys = (ms_key *)malloc(sizeof(ms_key) * (size_t)(x->nfiles ? x->nfiles : 1));
     superseded_by = (int *)malloc(sizeof(int) * (size_t)(x->nbundles ? x->nbundles : 1));
     if (!keys || !superseded_by) { free(keys); free(superseded_by); return 0; }
     for (i = 0; i < x->nbundles; ++i) superseded_by[i] = -1;
     for (i = 0; i < x->nfiles; ++i) {
         x->files[i].served = 0;
+        x->files[i].body = NULL;
+        x->files[i].body_len = 0;
         if (x->bundles[x->files[i].bundle].admitted) { keys[n].key = x->files[i].request; keys[n].file = i; keys[n].alias = 0; n++; }
     }
     qsort(keys, (size_t)n, sizeof *keys, ms_key_cmp);
@@ -841,6 +1358,7 @@ static int ms_resolve(ms_index *x)
                     ms_log("bundle '%s' skipped: %s", b->folder, b->cause);
                 }
             free(keys); free(superseded_by);
+            if (avail_built) free(avail.keys);
             return ms_resolve(x);   /* rare; restart without that bundle */
         }
         if (j - i == 1 || same_blob) {
@@ -853,23 +1371,92 @@ static int ms_resolve(ms_index *x)
             for (k = i; k < j; ++k)
                 if (keys[k].file != winner) superseded_by[x->files[keys[k].file].bundle] = x->files[winner].bundle;
         } else {
+            char who[1024], how[200];
+            size_t at = 0;
+            const char *reason = NULL;
+            int pick, composed = 0, added = 0;
+            ms_conflict *c;
             x->conflicts++;
-            if (logged++ < MS_CONFLICT_LOGS) {
-                char who[400];
-                size_t at = 0;
-                who[0] = 0;
-                for (k = i; k < j && at + 2 < sizeof who; ++k) {
-                    const ms_bundle *b = &x->bundles[x->files[keys[k].file].bundle];
-                    int w = _snprintf_s(who + at, sizeof who - at, _TRUNCATE, "%s%s@%s", k > i ? ", " : "", b->id, b->version);
-                    if (w < 0) break;
-                    at += (size_t)w;
+            if (!avail_built) { if (!ms_avail_build(x, &avail)) { free(keys); free(superseded_by); return 0; } avail_built = 1; }
+            pick = ms_pick(x, &avail, keys, i, j, &reason);
+            winner = keys[pick].file;
+            who[0] = 0;
+            for (k = i; k < j && at + 2 < sizeof who; ++k) {
+                const ms_bundle *b = &x->bundles[x->files[keys[k].file].bundle];
+                int w = _snprintf_s(who + at, sizeof who - at, _TRUNCATE, "%s%s@%s", k > i ? ", " : "", b->id, b->version);
+                if (w < 0) break;
+                at += (size_t)w;
+            }
+            /* Decls whose providers only add list entries are composed. */
+            {
+                const unsigned char *texts[64];
+                size_t lens[64];
+                unsigned char *owned[64];
+                int nt = 0, ok = 1, q;
+                memset(owned, 0, sizeof owned);
+                for (k = -1; k < j - i && ok && nt < 64; ++k) {
+                    int file = k < 0 ? winner : keys[i + k].file, dup = 0;
+                    const ms_file *f = &x->files[file];
+                    if (k >= 0 && file == winner) continue;
+                    if (!f->is_decl || f->size > SH_MODSERVE_CACHE_FILE) { ok = 0; break; }
+                    /* Identical bytes add nothing. */
+                    for (q = i; q < i + k && !dup; ++q) {
+                        const ms_file *g = &x->files[keys[q].file];
+                        if (g->blob && f->blob && !strcmp(g->blob, f->blob)) dup = 1;
+                    }
+                    if (k >= 0 && f->blob && x->files[winner].blob && !strcmp(f->blob, x->files[winner].blob)) dup = 1;
+                    if (dup) continue;
+                    owned[nt] = ms_read_whole(f->disk, SH_MODSERVE_CACHE_FILE, &lens[nt]);
+                    if (!owned[nt] || lens[nt] != f->size) { ok = 0; break; }
+                    texts[nt] = owned[nt];
+                    nt++;
                 }
-                ms_log("conflict: %s '%s' is provided by %s; serving neither",
-                       any_shadow ? "shadow" : "path", keys[i].key, who);
+                if (ok && nt > 1) {
+                    size_t len = 0;
+                    char *text = ms_compose(texts, lens, nt, &len, &added);
+                    if (text) {
+                        unsigned char *body = (unsigned char *)ms_alloc(x, len ? len : 1);
+                        if (body) {
+                            memcpy(body, text, len);
+                            x->files[winner].body = body;
+                            x->files[winner].body_len = len;
+                            composed = 1;
+                        }
+                        free(text);
+                    }
+                }
+                for (q = 0; q < nt; ++q) if (owned[q]) HeapFree(GetProcessHeap(), 0, owned[q]);
+            }
+            x->files[winner].served = 1;
+            if (composed) {
+                x->composed++;
+                _snprintf_s(how, sizeof how, _TRUNCATE, "composed: %d list entr%s of the other providers added to %s@%s's text",
+                            added, added == 1 ? "y" : "ies", x->bundles[x->files[winner].bundle].id,
+                            x->bundles[x->files[winner].bundle].version);
+            } else _snprintf_s(how, sizeof how, _TRUNCATE, "%s", reason);
+            if (ms_grow((void **)&x->conflict_list, &x->cconflict_list, x->nconflict_list + 1, sizeof(ms_conflict))) {
+                c = &x->conflict_list[x->nconflict_list++];
+                c->request = x->files[winner].request;
+                c->providers = ms_strdup(x, who);
+                c->reason = ms_strdup(x, how);
+                c->winner = winner;
+                c->count = j - i;
+                c->composed = composed;
+            }
+            if (logged++ < MS_CONFLICT_LOGS) {
+                if (composed)
+                    ms_log("conflict: %s '%s' is provided by %s; serving %s@%s's text with the others' list entries "
+                           "(%d added)", any_shadow ? "shadow" : "path", keys[i].key, who,
+                           x->bundles[x->files[winner].bundle].id, x->bundles[x->files[winner].bundle].version, added);
+                else
+                    ms_log("conflict: %s '%s' is provided by %s; serving %s@%s (%s)", any_shadow ? "shadow" : "path",
+                           keys[i].key, who, x->bundles[x->files[winner].bundle].id,
+                           x->bundles[x->files[winner].bundle].version, reason);
             }
         }
         i = j;
     }
+    if (avail_built) free(avail.keys);
     if (logged > MS_CONFLICT_LOGS) ms_log("%d more conflicts not listed", logged - MS_CONFLICT_LOGS);
     for (i = 0; i < x->nbundles; ++i)
         if (superseded_by[i] >= 0)
@@ -1061,6 +1648,12 @@ int sh_modserve_index_build(const char *mods_root)
             if (!f->is_decl || !f->served) continue;
             o = ms_find(old->slots, old->mask, f->request);
             if (o >= 0 && old->files[o].reg_state) f->reg_state = old->files[o].reg_state;
+            /* A shadow a registration pass withdrew stays withdrawn while the
+             * same bytes serve the path (the pass that withdrew it marked it
+             * done and does not look at it again). */
+            if (o >= 0 && old->files[o].withdrawn && f->blob && old->files[o].blob && !strcmp(f->blob, old->files[o].blob) &&
+                !old->files[o].body && !f->body)
+                f->withdrawn = 1;
         }
     }
     /* Publish the complete table; the old one is retired, never freed, since
@@ -1109,7 +1702,7 @@ static const ms_file *ms_lookup_file(const ms_index **out_index, const char *req
     if (!x || !x->nkeys || !request) return NULL;
     __try { f = ms_find(x->slots, x->mask, request); }
     __except (EXCEPTION_EXECUTE_HANDLER) { f = -1; }
-    if (f < 0) return NULL;
+    if (f < 0 || x->files[f].withdrawn) return NULL;
     if (out_index) *out_index = x;
     return &x->files[f];
 }
@@ -1122,7 +1715,7 @@ int sh_modserve_lookup(const char *request, sh_modserve_hit *out)
     if (out) {
         out->request = f->request;
         out->disk_path = f->disk;
-        out->size = f->size;
+        out->size = f->body ? (uint64_t)f->body_len : f->size;
         out->bundle_id = x->bundles[f->bundle].id;
         out->bundle_hash = x->bundles[f->bundle].hash;
         out->is_decl = f->is_decl;
@@ -1211,9 +1804,15 @@ int sh_modserve_open(const char *request, unsigned char **bytes, size_t *length)
     if (!bytes || !length) return 0;
     f = ms_lookup_file(&x, request);
     if (!f) return 0;
-    if (InterlockedCompareExchange(&g_cache_enabled, 0, 0)) buf = ms_cache_copy(f, &len);
-    if (buf) InterlockedIncrement(&g_cache_hits);
-    else {
+    if (f->body) {
+        /* A composed text (ms_resolve): the index holds the bytes. */
+        len = f->body_len;
+        buf = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, len ? len : 1u);
+        if (!buf) return -1;
+        memcpy(buf, f->body, len);
+    } else if (InterlockedCompareExchange(&g_cache_enabled, 0, 0)) buf = ms_cache_copy(f, &len);
+    if (buf && !f->body) InterlockedIncrement(&g_cache_hits);
+    else if (!buf) {
         buf = ms_read_whole(f->disk, SH_MODSERVE_MAX_FILE, &len);
         if (buf && (uint64_t)len != f->size) { HeapFree(GetProcessHeap(), 0, buf); buf = NULL; }
         if (!buf) {
@@ -1229,8 +1828,8 @@ int sh_modserve_open(const char *request, unsigned char **bytes, size_t *length)
     InterlockedIncrement((volatile LONG *)&f->opens);
     InterlockedIncrement(&g_opens_served);
     if (f->is_shadow && !InterlockedExchange((volatile LONG *)&f->shadow_logged, 1))
-        ms_log("shadow '%s' served from %s@%s (%zu bytes)", f->request, x->bundles[f->bundle].id,
-               x->bundles[f->bundle].version, len);
+        ms_log("shadow '%s' served from %s@%s (%zu bytes%s)", f->request, x->bundles[f->bundle].id,
+               x->bundles[f->bundle].version, len, f->body ? ", composed with the other providers' list entries" : "");
     *bytes = buf;
     *length = len;
     return 1;
@@ -1531,6 +2130,67 @@ void sh_modserve_plan_free(sh_modserve_plan *plan)
     memset(plan, 0, sizeof *plan);
 }
 
+/* The bytes a file serves (HeapAlloc'd), composed or from disk. */
+static unsigned char *ms_file_bytes(const ms_file *f, size_t *len)
+{
+    unsigned char *b;
+    *len = 0;
+    if (f->body) {
+        b = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, f->body_len ? f->body_len : 1u);
+        if (b) { memcpy(b, f->body, f->body_len); *len = f->body_len; }
+        return b;
+    }
+    b = ms_read_whole(f->disk, SH_MODSERVE_MAX_FILE, len);
+    if (b && *len != f->size) { HeapFree(GetProcessHeap(), 0, b); b = NULL; *len = 0; }
+    return b;
+}
+
+/* 1 with the first model an animWeb's modelInfos block names that no served
+ * bundle file provides as an md6Def and the engine has no md6Def source for;
+ * 0 when every model resolves (or the text cannot be read, or the engine
+ * cannot tell). */
+static int ms_animweb_unresolved(const ms_index *x, const ms_file *f, const sh_modserve_engine_ops *ops,
+                                 char *model, size_t cap)
+{
+    size_t len = 0;
+    unsigned char *text = ms_file_bytes(f, &len);
+    mc_lex l;
+    mc_tok t;
+    int found = 0;
+    model[0] = 0;
+    if (!text) return 0;
+    l.t = (const char *)text;
+    l.len = len;
+    l.pos = 0;
+    while (!found && (t = mc_next(&l)).kind != MC_END) {
+        if (t.kind != MC_WORD || t.n != 10 || _strnicmp(t.p, "modelInfos", 10)) continue;
+        if (mc_next(&l).kind != MC_LB) continue;
+        for (;;) {
+            mc_tok m = mc_next(&l), v;
+            char name[MS_NAME_MAX], key[MS_NAME_MAX + 8];
+            int p;
+            if (m.kind == MC_RB || m.kind == MC_END || m.kind == MC_BAD) break;
+            if (m.kind != MC_STR) continue;
+            v = mc_peek(&l);
+            if (v.kind != MC_STR) continue;
+            mc_next(&l);
+            if (m.n < 3 || m.n - 2 >= sizeof name) continue;
+            memcpy(name, m.p + 1, m.n - 2);
+            name[m.n - 2] = 0;
+            ms_lower(name);
+            _snprintf_s(key, sizeof key, _TRUNCATE, "md6def\x01%s", name);
+            p = ms_find(x->pslots, x->pmask, key);
+            if (p >= 0 && x->files[p].served && !x->files[p].withdrawn) continue;
+            if (ops->source_registered(ops->context, "md6Def", name) != 0) continue;
+            strncpy_s(model, cap, name, _TRUNCATE);
+            found = 1;
+            break;
+        }
+    }
+    HeapFree(GetProcessHeap(), 0, text);
+    return found;
+}
+
 int sh_modserve_plan_run(sh_modserve_plan *plan, const sh_modserve_engine_ops *ops, const char *phase)
 {
     ms_index *x = g_index;
@@ -1552,11 +2212,35 @@ int sh_modserve_plan_run(sh_modserve_plan *plan, const sh_modserve_engine_ops *o
             continue;
         }
         if (f->reg_state == 1) continue;
-        if (ops->source_registered(ops->context, s->type, s->name) == 1) {
-            /* A shadow the engine already knows is a stock decl: the provider
-             * serves its bytes, and it is never reloaded here. */
-            if (s->shadow) stock[i] = 1;
-            continue;
+        {
+            int known = ops->source_registered(ops->context, s->type, s->name) == 1;
+            char model[MS_NAME_MAX];
+            /* An animWeb whose models block names a model nothing provides is
+             * refused by the engine's parse (a C++ throw per load). Its file
+             * is withdrawn from serving: a stock decl it shadowed serves
+             * again, and a new name is never registered. */
+            if (!_stricmp(s->type, "animWeb") && ms_animweb_unresolved(x, f, ops, model, sizeof model)) {
+                InterlockedExchange(&f->withdrawn, 1);
+                if (known && s->shadow) {
+                    InterlockedExchange(&f->reg_state, 1);
+                    stock[i] = 2;
+                    ms_log("%s: animWeb '%s' (%s) shadow WITHDRAWN: it names model '%s', which neither a bundle nor "
+                           "the game provides; the game's own animWeb is served", phase, s->name, s->bundle_id, model);
+                } else {
+                    failed[i] = 1;
+                    InterlockedExchange(&f->reg_state, -1);
+                    ms_log("%s: animWeb '%s' (%s) NOT READY: it names model '%s', which neither a bundle nor the game "
+                           "provides; withdrawn and not registered (the engine would refuse it)", phase, s->name,
+                           s->bundle_id, model);
+                }
+                continue;
+            }
+            if (known) {
+                /* A shadow the engine already knows is a stock decl: the provider
+                 * serves its bytes, and it is never reloaded here. */
+                if (s->shadow) stock[i] = 1;
+                continue;
+            }
         }
         if (!ops->register_file(ops->context, s->type, s->name, s->reg_path)) {
             failed[i] = 1;
@@ -1573,6 +2257,7 @@ int sh_modserve_plan_run(sh_modserve_plan *plan, const sh_modserve_engine_ops *o
         int dep_failed = -1;
         if (failed[i]) { s->ready = -1; continue; }
         if (f->reg_state == 1) { s->ready = 1; ready++; continue; }
+        if (stock[i] == 2) { s->ready = 1; ready++; continue; }   /* withdrawn: the stock decl serves */
         if (stock[i]) {
             /* Remembered as ready, so later loads of the map skip it quietly. */
             InterlockedExchange(&f->reg_state, 1);
@@ -1711,6 +2396,19 @@ int sh_modserve_requirements_apply(const sh_modserve_gate_ops *ops, const char *
     if (out) *out = r;
     if (!needed) return 0;
     return r.not_live ? -1 : 1;
+}
+
+int sh_modserve_requirements_check(const sh_modserve_gate_ops *ops, const char *phase, sh_modserve_gates *out)
+{
+    sh_modserve_gates r;
+    int result = sh_modserve_requirements_apply(ops, phase, &r);
+    if (result == 1 && !(r.changed & r.needed)) {
+        char names[160];
+        ms_gate_names(r.live, names, sizeof names);
+        ms_log("%s: requirements live: %s (unchanged since the last pass)", phase ? phase : "plan", names);
+    }
+    if (out) *out = r;
+    return result;
 }
 
 static const char *ms_unmet_cause(unsigned unmet)
@@ -1868,6 +2566,7 @@ void sh_modserve_get_stats(sh_modserve_stats *out)
         out->files = x->served_files;
         out->keys = x->nkeys;
         out->conflicts = x->conflicts;
+        out->conflicts_composed = x->composed;
         out->shadows = x->shadows;
         out->build_ms = x->build_ms;
     }
@@ -1877,6 +2576,34 @@ void sh_modserve_get_stats(sh_modserve_stats *out)
     out->cache_hits = (unsigned long)g_cache_hits;
     out->editor_rows_registered = (int)g_modserve_editor_ok;
     out->editor_rows_failed = (int)g_modserve_editor_failed;
+}
+
+int sh_modserve_conflict_info(const char *request, sh_modserve_conflict *out)
+{
+    const ms_index *x = g_index;
+    char key[MS_NAME_MAX];
+    const char *k = key;
+    const ms_conflict *c;
+    const ms_file *f;
+    if (out) memset(out, 0, sizeof *out);
+    if (!x || !request || !x->nconflict_list || strlen(request) >= sizeof key) return 0;
+    strcpy_s(key, sizeof key, request);
+    ms_lower(key);
+    c = (const ms_conflict *)bsearch(&k, x->conflict_list, (size_t)x->nconflict_list, sizeof *c, ms_conflict_cmp);
+    if (!c) return 0;
+    if (out) {
+        f = &x->files[c->winner];
+        out->request = c->request;
+        out->providers = c->providers ? c->providers : "";
+        out->reason = c->reason ? c->reason : "";
+        out->served_id = x->bundles[f->bundle].id;
+        out->served_version = x->bundles[f->bundle].version;
+        out->served_hash = x->bundles[f->bundle].hash;
+        out->count = c->count;
+        out->composed = c->composed;
+        out->withdrawn = f->withdrawn != 0;
+    }
+    return 1;
 }
 
 void sh_modserve_each_bundle(sh_modserve_bundle_fn fn, void *context)

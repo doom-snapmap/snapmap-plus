@@ -52,7 +52,8 @@
     {"request": "generated/decls/snapeditorentitydef/demons/imp.decl", "kind": "legacy", "shadow": true,
      "served": "local.my-overrides@0.0.0+1", "bundles": ["local.my-overrides@0.0.0+1"]},
     {"request": "sound/soundbanks/pc/shotgun.snd", "kind": "conflict", "shadow": true,
-     "served": "", "bundles": ["pat.<loud>-shotgun@2.1+4", "tom.shotgun@1.0.0+1"]},
+     "served": "tom.shotgun@1.0.0+1", "resolution": "chosen", "reason": "installed most recently",
+     "bundles": ["pat.<loud>-shotgun@2.1+4", "tom.shotgun@1.0.0+1"]},
     {"request": "generated/image/textures/crate_d.bimage", "kind": "stock", "shadow": true,
      "served": "pat.<loud>-shotgun@2.1+4", "bundles": ["pat.<loud>-shotgun@2.1+4"]}
   ],

@@ -405,7 +405,9 @@ static void mu_put_shadows(mu_buf *b, const mu_model *m)
         if (!u->admitted) continue;
         for (k = 0; k < u->e->bundle.file_count; k++) {
             const sh_mb_file *f = &u->e->bundle.files[k];
-            int conflict = !sh_modserve_lookup(f->request, NULL);
+            /* Several mods provide the path with different bytes (one of
+             * them serves it, possibly composed), or nothing serves it. */
+            int conflict = sh_modserve_conflict_info(f->request, NULL) || !sh_modserve_lookup(f->request, NULL);
             if (!f->shadowed && !conflict) continue;
             if (n == cap) {
                 size_t nc = cap ? cap * 2 : 64;
@@ -447,6 +449,12 @@ static void mu_put_shadows(mu_buf *b, const mu_model *m)
             mu_kstr(b, "kind", kind, 0);
             mu_kbool(b, "shadow", shadow, 0);
             mu_kstr(b, "served", served >= 0 ? m->list.items[served].key : "", 0);
+            if (conflict) {
+                sh_modserve_conflict ci;
+                int known = sh_modserve_conflict_info(paths[i].request, &ci);
+                mu_kstr(b, "resolution", !known ? "neither" : ci.withdrawn ? "withdrawn" : ci.composed ? "composed" : "chosen", 0);
+                mu_kstr(b, "reason", known ? ci.reason : "", 0);
+            }
             mu_key(b, "bundles", 0);
             mu_putn(b, "[", 1);
             for (q = i; q < j; q++) {

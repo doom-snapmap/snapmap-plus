@@ -91,7 +91,10 @@ Checks native helpers, engine-interface contracts, frontend JavaScript and optio
 - `modserve_test.c` checks the serving index: admission and failure isolation,
   lookups in every spelling, provider precedence against the real `overrides.c`,
   probe claims, registration plans and their order, the rescan and the lookup
-  cost.
+  cost, and the conflicts between mods: the winner rules (needs, shared bytes,
+  installed over delivered, recency), the composition of list decls (the boss
+  packs' conductor and whitelist), the animWebs a registration pass withdraws
+  for a model nothing provides, and the Play-time requirements check.
 - `mod_pipeline_test.c` links the builder, the serving index, the manifest and
   the legacy converter together: a built fixture is admitted, saved as one
   `smpmod1.` row and activated on the next load; a legacy-form bundle with
@@ -120,6 +123,14 @@ Checks native helpers, engine-interface contracts, frontend JavaScript and optio
   `override-backups` left alone, the boot split (a small folder before the
   index, a large one on the worker, then one rescan) and the rerun of an
   unfinished record. `MODMIGRATE_ECHO=1` prints the log lines.
+- `modshadow_test.c` measures those rules on a player's real retired
+  `overrides\` tree: `SH_MODSHADOW_DATA` names a scratch data root holding a
+  copy of it and `SH_MODSHADOW_GAME_NAMES` a `type<TAB>name` list of
+  `snap_gameresources`; the migration builds the tree, the index resolves its
+  conflicts, and the editor plan and every bundle's gameplay plan run against a
+  registry that knows those names. It prints each conflict and, per bundle,
+  every animWeb withdrawn. Skipped without the two variables (the tree holds
+  game files); `SH_MODSHADOW_DUMP` names a folder for the composed texts.
 - `modui_test.c` runs the Mods tab's backend against a temporary store, the
   real serving index and the map manifest: the document on an empty store,
   install through the tab, every state string, manifest rows and the placed
