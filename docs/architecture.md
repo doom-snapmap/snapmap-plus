@@ -516,7 +516,12 @@ also raises to the session lifetime (4) the decls an editor row points at
 directly (its editor animWeb, its md6 render model, its preview material): the
 row is kept for the session, but those objects were created after the boot
 promotion at level 1, so the purge on entering Play freed them and the editor
-entity rebuilt after Play bound a freed animWeb.
+entity rebuilt after Play bound a freed animWeb. The rest of the closure (an
+md6Def's MD6 model and skeleton, an animWeb's anims, a material's images) is
+raised the same way: the pass takes a watermark of the engine's resource
+lists before it runs and keeps every resource created since then that is
+still at level 1, and every step of the editor plan is registered at the
+session lifetime.
 
 On every parse the `DeserializeFromJson` detour sees, `modlegacy.c` runs first.
 A complete carrier whose ZIP and `package.json` read is unpacked once into

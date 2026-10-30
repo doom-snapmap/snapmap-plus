@@ -174,6 +174,40 @@ int sh_modserve_plan_run(sh_modserve_plan *plan, const sh_modserve_engine_ops *o
 typedef void (*sh_modserve_ref_fn)(void *context, const char *type, const char *name, const char *row);
 int sh_modserve_editor_refs(const sh_modserve_plan *plan, sh_modserve_ref_fn fn, void *context);
 
+/* The rest of a row's closure: what the editor pass created. Keeping the
+ * decls a row names is not enough: an md6Def holds its MD6 model (+0x60), the
+ * model its skeleton and joint tables, an animWeb its anims, a material its
+ * images, all separate resources the engine created at level 1 while the pass
+ * loaded the row (lane MG2: the second site, idJointAnimator's joint blend
+ * reading a freed model's table, VK 0x14173fb46). The engine records no such
+ * closure, so the pass takes a watermark of every resource before it runs and
+ * raises every resource created since then that is still at level 1 to 4, as
+ * a boot-time row's closure was raised by the boot promotion.
+ *
+ * Layout read (13954591, both renderers: the purge driver and GetDeclsOfType
+ * walk it): `head_slot` is the address of the global list-of-lists head
+ * (engine global decl_resource_head); each idResourceList holds its class
+ * name (char *) at +0x10, the next list at +0x18, its entries at +0x20 and
+ * their count (int) at +0x28; each resource holds its level at +0x28. Reads
+ * are bounded and fault-protected; main thread only, like every pass here. */
+typedef struct sh_modserve_watermark {
+    uintptr_t *res;   /* sorted resource addresses (malloc) */
+    size_t n;
+    int ok;           /* 1 when the walk completed */
+} sh_modserve_watermark;
+
+typedef struct sh_modserve_raised {
+    unsigned raised;      /* new resources raised from level 1 to 4 */
+    unsigned created;     /* new resources seen (any level) */
+    unsigned lists;       /* lists walked */
+    char summary[200];    /* "anim 40, md6Def 2, ..." by class, largest first */
+} sh_modserve_raised;
+
+int  sh_modserve_watermark_take(const void *head_slot, sh_modserve_watermark *w);
+/* Raise what the walk now finds beyond `w`; returns 1 when the walk completed. */
+int  sh_modserve_watermark_raise(const void *head_slot, const sh_modserve_watermark *w, sh_modserve_raised *out);
+void sh_modserve_watermark_free(sh_modserve_watermark *w);
+
 /* Editor rows at map load (lane M6). The palette is built once per process,
  * at editor init, and the map validator (RepairAndMigrate) looks every placed
  * entity up in it; a bundle converted or named mid-session can bring

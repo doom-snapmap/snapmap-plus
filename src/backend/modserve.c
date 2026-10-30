@@ -1983,7 +1983,9 @@ static int ms_plan_from(const ms_index *x, const unsigned char *root_mark, int p
         s->reg_path = f->reg;
         s->bundle_id = x->bundles[f->bundle].id;
         s->rank = f->rank;
-        s->persist = persist_sedefs && f->is_sedef;
+        /* The editor plan keeps every step for the session: a row is kept, and
+         * what its parse points at must outlive the purges around Play. */
+        s->persist = persist_sedefs;
         s->shadow = f->is_shadow;
         s->blocked = cause[order[i]];
         s->file = order[i];
@@ -2196,6 +2198,131 @@ static int ms_animweb_unresolved(const ms_index *x, const ms_file *f, const sh_m
     }
     HeapFree(GetProcessHeap(), 0, text);
     return found;
+}
+
+/* ------------------------------------------------------------------ resource watermark */
+
+#define MS_RL_NAME    0x10
+#define MS_RL_NEXT    0x18
+#define MS_RL_ENTRIES 0x20
+#define MS_RL_COUNT   0x28
+#define MS_RES_LEVEL  0x28
+#define MS_RL_MAX_LISTS   4096
+#define MS_RL_MAX_ENTRIES (1 << 22)
+
+static int ms_uptr_cmp(const void *a, const void *b)
+{
+    uintptr_t x = *(const uintptr_t *)a, y = *(const uintptr_t *)b;
+    return x < y ? -1 : x > y;
+}
+
+/* Visit every resource: fn(context, list, resource). 1 when the walk completed. */
+typedef void (*ms_res_fn)(void *context, const unsigned char *list, unsigned char *res);
+static int ms_res_walk(const void *head_slot, ms_res_fn fn, void *context, unsigned *lists)
+{
+    int ok = 0;
+    unsigned nl = 0;
+    if (lists) *lists = 0;
+    if (!head_slot) return 0;
+    __try {
+        const unsigned char *l = *(const unsigned char *const *)head_slot;
+        size_t total = 0;
+        for (; l && nl < MS_RL_MAX_LISTS; l = *(const unsigned char *const *)(l + MS_RL_NEXT), nl++) {
+            unsigned char *const *entries = *(unsigned char *const *const *)(l + MS_RL_ENTRIES);
+            int count = *(const int *)(l + MS_RL_COUNT), i;
+            if (count < 0 || count > MS_RL_MAX_ENTRIES || (count && !entries)) break;
+            total += (size_t)count;
+            if (total > MS_RL_MAX_ENTRIES) break;
+            for (i = 0; i < count; ++i) if (entries[i]) fn(context, l, entries[i]);
+        }
+        ok = !l;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { ok = 0; }
+    if (lists) *lists = nl;
+    return ok;
+}
+
+typedef struct ms_take { sh_modserve_watermark *w; size_t cap; int oom; } ms_take;
+static void ms_take_one(void *context, const unsigned char *list, unsigned char *res)
+{
+    ms_take *t = (ms_take *)context;
+    (void)list;
+    if (t->oom) return;
+    if (t->w->n == t->cap) {
+        size_t cap = t->cap ? t->cap * 2 : 65536;
+        uintptr_t *g = (uintptr_t *)realloc(t->w->res, cap * sizeof(uintptr_t));
+        if (!g) { t->oom = 1; return; }
+        t->w->res = g;
+        t->cap = cap;
+    }
+    t->w->res[t->w->n++] = (uintptr_t)res;
+}
+
+int sh_modserve_watermark_take(const void *head_slot, sh_modserve_watermark *w)
+{
+    ms_take t;
+    if (!w) return 0;
+    memset(w, 0, sizeof *w);
+    t.w = w;
+    t.cap = 0;
+    t.oom = 0;
+    w->ok = ms_res_walk(head_slot, ms_take_one, &t, NULL) && !t.oom;
+    if (w->ok && w->n > 1) qsort(w->res, w->n, sizeof(uintptr_t), ms_uptr_cmp);
+    return w->ok;
+}
+
+typedef struct ms_raise_cls { const unsigned char *list; unsigned n; } ms_raise_cls;
+typedef struct ms_raise { const sh_modserve_watermark *w; sh_modserve_raised *out; ms_raise_cls cls[64]; int ncls; } ms_raise;
+static void ms_raise_one(void *context, const unsigned char *list, unsigned char *res)
+{
+    ms_raise *r = (ms_raise *)context;
+    uintptr_t key = (uintptr_t)res;
+    int c;
+    if (r->w->n && bsearch(&key, r->w->res, r->w->n, sizeof(uintptr_t), ms_uptr_cmp)) return;
+    r->out->created++;
+    if (*(unsigned *)(res + MS_RES_LEVEL) != 1) return;
+    *(unsigned *)(res + MS_RES_LEVEL) = 4;
+    r->out->raised++;
+    for (c = 0; c < r->ncls && r->cls[c].list != list; ++c) {}
+    if (c == r->ncls && r->ncls < 64) { r->cls[c].list = list; r->cls[c].n = 0; r->ncls++; }
+    if (c < r->ncls) r->cls[c].n++;
+}
+
+int sh_modserve_watermark_raise(const void *head_slot, const sh_modserve_watermark *w, sh_modserve_raised *out)
+{
+    ms_raise r;
+    sh_modserve_raised local;
+    int ok, i, j;
+    size_t at = 0;
+    if (!out) out = &local;
+    memset(out, 0, sizeof *out);
+    if (!w || !w->ok) return 0;
+    memset(&r, 0, sizeof r);
+    r.w = w;
+    r.out = out;
+    ok = ms_res_walk(head_slot, ms_raise_one, &r, &out->lists);
+    /* The classes, largest first, for the log. */
+    for (i = 0; i < r.ncls; ++i)
+        for (j = i + 1; j < r.ncls; ++j)
+            if (r.cls[j].n > r.cls[i].n) { ms_raise_cls t = r.cls[i]; r.cls[i] = r.cls[j]; r.cls[j] = t; }
+    for (i = 0; i < r.ncls && at + 40 < sizeof out->summary; ++i) {
+        char name[32] = "?";
+        int w2;
+        __try {
+            const char *s = *(const char *const *)(r.cls[i].list + MS_RL_NAME);
+            if (s) { strncpy_s(name, sizeof name, s, _TRUNCATE); }
+        } __except (EXCEPTION_EXECUTE_HANDLER) { strcpy_s(name, sizeof name, "?"); }
+        w2 = _snprintf_s(out->summary + at, sizeof out->summary - at, _TRUNCATE, "%s%s %u", i ? ", " : "", name, r.cls[i].n);
+        if (w2 < 0) break;
+        at += (size_t)w2;
+    }
+    return ok;
+}
+
+void sh_modserve_watermark_free(sh_modserve_watermark *w)
+{
+    if (!w) return;
+    free(w->res);
+    memset(w, 0, sizeof *w);
 }
 
 int sh_modserve_editor_refs(const sh_modserve_plan *plan, sh_modserve_ref_fn fn, void *context)

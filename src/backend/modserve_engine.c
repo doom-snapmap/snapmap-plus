@@ -85,6 +85,7 @@ static sh_process_heap_api g_heap;
 static int g_bound;
 static const char *g_last_error;
 static const uint8_t *g_main_thread_at;
+static const void *g_res_head;        /* decl_resource_head: the resource list-of-lists (watermark) */
 static probe_fn g_probe_orig;
 static sig_result g_probe_sig;
 static int g_probe_sig_ok;
@@ -381,6 +382,7 @@ int sh_modserve_install(const sig_result *results, size_t count, const uint8_t *
     g_cvar_slot = (const void *)glb_resolve(module_base, "cvar_system_slot", NULL);
     g_last_error = (const char *)glb_resolve(module_base, "last_error_msg", NULL);
     g_main_thread_at = (const uint8_t *)glb_resolve(module_base, "main_thread_id", NULL);
+    g_res_head = (const void *)glb_resolve(module_base, "decl_resource_head", NULL);
     g_bound = g_ctor && g_dtor && g_anchor && g_type && g_register && g_source && g_decl && g_generic_load &&
               sh_process_heap_bind(&g_heap, results, count, module_base) && g_main_thread_at;
     for (i = 0; i < count; ++i)
@@ -404,7 +406,7 @@ int sh_modserve_install(const sig_result *results, size_t count, const uint8_t *
  * boot is raised to 4, as everything a stock row names was at the boot
  * promotion. The row's parse normally made the object; one it did not is
  * created by name first. Only the level changes: contents load on demand. */
-typedef struct me_keep { int kept, permanent, created, missing; } me_keep;
+typedef struct me_keep { int kept, permanent, created, missing, loaded; } me_keep;
 
 static void me_keep_ref(void *context, const char *type, const char *name, const char *row)
 {
@@ -417,6 +419,13 @@ static void me_keep_ref(void *context, const char *type, const char *name, const
          * before the first purge and kept like the others. */
         if (!decl && m) { decl = g_decl(m, name, 1); if (decl) k->created++; }
         if (!decl) { k->missing++; return; }
+        /* Created by reference and not parsed yet: parse it now, inside the
+         * pass's watermark, so the resources it creates are raised with it. */
+        if ((((unsigned char *)decl)[RES_STATE_OFF] & 3) == 2) {
+            ((unsigned char *)decl)[RES_STATE_OFF] &= (unsigned char)~2;
+            g_generic_load(decl);
+            k->loaded++;
+        }
         if (*(unsigned *)((unsigned char *)decl + RES_LIFETIME_OFF) == 1) {
             *(unsigned *)((unsigned char *)decl + RES_LIFETIME_OFF) = 4;
             k->kept++;
@@ -428,6 +437,7 @@ static void me_keep_ref(void *context, const char *type, const char *name, const
 void sh_modserve_palette_before_build(void)
 {
     sh_modserve_plan plan;
+    sh_modserve_watermark mark = { NULL, 0, 0 };
     double t0;
     int ready, i, rows_ok = 0, rows_failed = 0, first = !InterlockedExchange(&g_editor_pass_done, 1);
     if (!g_bound || !sh_modserve_active()) return;
@@ -435,9 +445,13 @@ void sh_modserve_palette_before_build(void)
     t0 = me_now_ms();
     if (sh_modserve_plan_editor(&plan) < 0) { me_log("editor rows: plan refused (out of memory)"); return; }
     if (!plan.count) { sh_modserve_plan_free(&plan); if (first) me_log("editor rows registered in 0.0 ms (0 rows)"); return; }
+    /* Everything the pass creates from here on is the rows' closure. */
+    if (!g_res_head || !sh_modserve_watermark_take(g_res_head, &mark))
+        me_log("editor: resource watermark unavailable (%s); only the decls rows name are kept",
+               g_res_head ? "the resource lists could not be walked" : "decl_resource_head unresolved");
     ready = me_run(&plan, "editor");
     {
-        me_keep keep = { 0, 0, 0, 0 };
+        me_keep keep = { 0, 0, 0, 0, 0 };
         sh_process_heap_scope heap = { 0 };
         int refs = 0;
         /* Inside process heap 0, as registration: an object created here outlives every map. */
@@ -446,9 +460,17 @@ void sh_modserve_palette_before_build(void)
             __finally { if (!sh_process_heap_leave(&heap)) me_log("editor: process heap scope did not balance"); }
         }
         if (refs && (keep.kept || keep.missing))
-            me_log("editor: %d decl(s) editor rows point at kept for the session (%d created here), %d already permanent, %d not found",
-                   keep.kept, keep.created, keep.permanent, keep.missing);
+            me_log("editor: %d decl(s) editor rows point at kept for the session (%d created here, %d parsed here), %d already permanent, %d not found",
+                   keep.kept, keep.created, keep.loaded, keep.permanent, keep.missing);
     }
+    if (mark.ok) {
+        sh_modserve_raised raised;
+        if (sh_modserve_watermark_raise(g_res_head, &mark, &raised) && raised.created)
+            me_log("editor: %u resource(s) the rows' closure created kept for the session (%u new, %u lists): %s",
+                   raised.raised, raised.created, raised.lists, raised.summary);
+        else if (!raised.lists) me_log("editor: resource lists could not be walked after the pass; closure not raised");
+    }
+    sh_modserve_watermark_free(&mark);
     for (i = 0; i < plan.count; ++i) {
         if (plan.steps[i].rank != 3) continue;
         if (plan.steps[i].ready == 1) rows_ok++;

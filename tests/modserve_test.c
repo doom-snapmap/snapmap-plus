@@ -9,6 +9,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <stdint.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -513,7 +514,8 @@ static void test_plan(void)
     CHECK(step_index(&p, "entityDef", "mods/alex.pink-imp/fireball") < 0);   /* gameplay only */
     CHECK(step_index(&p, "entityDef", "monster/imp") < 0);   /* shadows are never registered */
     for (i = 0; i < p.count; ++i) CHECK(_stricmp(p.steps[i].type, "baseModel"));   /* raw: no step */
-    CHECK(p.steps[sedef].persist == 1 && p.steps[ent].persist == 0 && p.steps[md6].persist == 0);
+    /* The editor plan keeps every step for the session (lane MG2). */
+    CHECK(p.steps[sedef].persist == 1 && p.steps[ent].persist == 1 && p.steps[md6].persist == 1);
     CHECK(!strcmp(p.steps[md6].reg_path, "md6def/mods/alex.pink-imp/imp.md6.decl"));
     CHECK(p.steps[bsedef].blocked && strstr(p.steps[bsedef].blocked, "mods/bob.skins/missing.md6"));
     CHECK(!p.steps[bthing].blocked && !p.steps[sedef].blocked);
@@ -549,20 +551,20 @@ static void test_plan_run(void)
      * its sedef is not loaded; bob's sedef is blocked. */
     CHECK(ready == 3);
     CHECK(!strstr(g_calls, "R:material2:mods/alex.pink-imp/skin"));    /* source existed */
-    CHECK(strstr(g_calls, "L:material2:mods/alex.pink-imp/skin") != NULL);
+    CHECK(strstr(g_calls, "P:material2:mods/alex.pink-imp/skin") != NULL);
     CHECK(strstr(g_calls, "R:md6Def:mods/alex.pink-imp/imp.md6") != NULL);
-    CHECK(strstr(g_calls, "L:entityDef:mods/alex.pink-imp/imp;") != NULL);
+    CHECK(strstr(g_calls, "P:entityDef:mods/alex.pink-imp/imp;") != NULL);
     CHECK(strstr(g_calls, "R:snapEditorEntityDef:mods/alex.pink-imp/imp;") != NULL);
     CHECK(!strstr(g_calls, "P:snapEditorEntityDef:mods/alex.pink-imp/imp;"));
     CHECK(!strstr(g_calls, "snapEditorEntityDef:mods/bob.skins/thing"));
     /* Every registration precedes every load. */
     r_last = strrchr(g_calls, 'R');
-    l_first = strstr(g_calls, "L:");
+    l_first = strstr(g_calls, "P:");
     CHECK(r_last && l_first && r_last < l_first);
     CHECK(log_has("editor: entityDef 'mods/alex.pink-imp/imp' (alex.pink-imp) NOT READY: state 0x01"));
     CHECK(log_has("editor: snapEditorEntityDef 'mods/alex.pink-imp/imp' (alex.pink-imp) NOT READY: needs entityDef 'mods/alex.pink-imp/imp', which failed"));
     CHECK(log_has("editor: snapEditorEntityDef 'mods/bob.skins/thing' (bob.skins) BLOCKED"));
-    CHECK(log_has("editor: entityDef 'mods/bob.skins/thing' (bob.skins) READY: state 0xa0 lifetime 1"));
+    CHECK(log_has("editor: entityDef 'mods/bob.skins/thing' (bob.skins) READY: state 0xa0 lifetime 4"));
     CHECK(log_has("editor: md6Def 'mods/alex.pink-imp/imp.md6' (alex.pink-imp) READY"));
     CHECK(p.steps[step_index(&p, "entityDef", "mods/bob.skins/thing")].ready == 1);
     CHECK(p.steps[step_index(&p, "snapEditorEntityDef", "mods/alex.pink-imp/imp")].ready == -1);
@@ -576,7 +578,7 @@ static void test_plan_run(void)
     ready = sh_modserve_plan_run(&p, &g_fake, "editor");
     CHECK(!strstr(g_calls, "entityDef:mods/bob.skins/thing"));
     CHECK(!strstr(g_calls, "md6Def:mods/alex.pink-imp/imp.md6"));
-    CHECK(strstr(g_calls, "L:entityDef:mods/alex.pink-imp/imp;") && strstr(g_calls, "P:snapEditorEntityDef:mods/alex.pink-imp/imp;"));
+    CHECK(strstr(g_calls, "P:entityDef:mods/alex.pink-imp/imp;") && strstr(g_calls, "P:snapEditorEntityDef:mods/alex.pink-imp/imp;"));
     CHECK(ready == p.count - p.blocked);
     sh_modserve_plan_free(&p);
     g_already = NULL;
@@ -1231,6 +1233,63 @@ static void test_editor_refs(void)
     sh_modserve_plan_free(&p);
 }
 
+/* ------------------------------------------------------------------ resource watermark (lane MG2) */
+
+/* The engine's list-of-lists, as the purge driver walks it: a list holds its
+ * class name at +0x10, the next list at +0x18, entries at +0x20, count at
+ * +0x28; a resource holds its level at +0x28. */
+typedef struct fake_res { unsigned char pad[0x28]; unsigned level; unsigned state; } fake_res;
+typedef struct fake_list {
+    unsigned char pad[0x10];
+    const char *name;
+    struct fake_list *next;
+    fake_res **entries;
+    int count, cap;
+} fake_list;
+
+static void test_watermark(void)
+{
+    static fake_res r[8];
+    static fake_res *anims[8], *models[8];
+    static fake_list la, lm, bad;
+    fake_list *head = &la;
+    sh_modserve_watermark w;
+    sh_modserve_raised out;
+    int i;
+    CHECK(offsetof(fake_list, name) == 0x10 && offsetof(fake_list, next) == 0x18 &&
+          offsetof(fake_list, entries) == 0x20 && offsetof(fake_list, count) == 0x28 && offsetof(fake_res, level) == 0x28);
+    for (i = 0; i < 8; ++i) r[i].level = 4;
+    la.name = "anim"; la.next = &lm; la.entries = anims;
+    lm.name = "md6Def"; lm.next = NULL; lm.entries = models;
+    /* Before the pass: one stock anim (4) and one map-scoped md6Def (1). */
+    anims[0] = &r[0]; la.count = 1;
+    r[1].level = 1; models[0] = &r[1]; lm.count = 1;
+    CHECK(sh_modserve_watermark_take(&head, &w) == 1 && w.ok && w.n == 2);
+    /* The pass creates three anims and an md6Def at level 1, and one at 2. */
+    r[2].level = 1; r[3].level = 1; r[4].level = 1; r[5].level = 2; r[6].level = 1;
+    anims[1] = &r[2]; anims[2] = &r[3]; anims[3] = &r[4]; anims[4] = &r[5]; la.count = 5;
+    models[1] = &r[6]; lm.count = 2;
+    CHECK(sh_modserve_watermark_raise(&head, &w, &out) == 1);
+    CHECK(out.raised == 4 && out.created == 5 && out.lists == 2);
+    CHECK(!strcmp(out.summary, "anim 3, md6Def 1"));
+    CHECK(r[2].level == 4 && r[3].level == 4 && r[4].level == 4 && r[6].level == 4);
+    /* What existed before the pass keeps its level; another level is left. */
+    CHECK(r[1].level == 1 && r[5].level == 2 && r[0].level == 4);
+    /* A second raise finds nothing new at level 1. */
+    CHECK(sh_modserve_watermark_raise(&head, &w, &out) == 1 && out.raised == 0 && out.created == 5);
+    sh_modserve_watermark_free(&w);
+    CHECK(w.res == NULL && w.n == 0 && !w.ok);
+    /* A list that does not read as one stops the walk: no watermark, nothing raised. */
+    bad.name = "bad"; bad.next = NULL; bad.entries = NULL; bad.count = 3;
+    lm.next = &bad;
+    CHECK(sh_modserve_watermark_take(&head, &w) == 0 && !w.ok);
+    CHECK(sh_modserve_watermark_raise(&head, &w, &out) == 0 && out.raised == 0);
+    sh_modserve_watermark_free(&w);
+    CHECK(sh_modserve_watermark_take(NULL, &w) == 0);
+    sh_modserve_watermark_free(&w);
+    lm.next = NULL;
+}
+
 static void remove_tree(const char *dir)
 {
     char pattern[MAX_PATH], path[MAX_PATH];
@@ -1268,6 +1327,7 @@ int main(void)
     test_requirements();
     test_conflicts();
     test_editor_refs();
+    test_watermark();
     strcpy_s(top, sizeof top, g_root);
     slash = strrchr(top, '\\');
     if (slash) { *slash = 0; remove_tree(top); }
