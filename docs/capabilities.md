@@ -149,6 +149,8 @@ Converting assets from other games is Doomforge's job, not this product's. New n
   inert strings. A mod the map names but this machine does not have is logged as not installed and
   nothing activates for it until it is fetched. Uploads happen only when a map is published; plain
   saves never upload, and an exported rawmap ZIP carries its mods itself.
+- The store the product talks to is the `mods.store` setting (default `https://api.snapmapplus.com`;
+  https, or http only for a loopback host). A change applies to the next request, not the next launch.
 - Playing a published map (or a My Maps map) that names a mod this machine does not have asks first,
   in the game's own Yes/No dialog, naming the mods and their size. Yes downloads only what you
   approve in the dialog, verified by hash, installs it, and starts the map; No leaves the map

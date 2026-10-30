@@ -37,6 +37,7 @@ static HINTERNET g_session;
 static char      g_override[MODNET_URL_MAX];
 static int       g_override_set;
 static wchar_t   g_host[256];
+static char      g_session_url[MODNET_URL_MAX];   /* the base URL the pooled session was opened with */
 static INTERNET_PORT g_port;
 static int       g_secure;
 static wchar_t   g_prefix[256];      /* base path without a trailing '/' */
@@ -212,6 +213,7 @@ static void mn_close_session_locked(void)
     g_session = NULL;
     g_host[0] = 0;
     g_prefix[0] = 0;
+    g_session_url[0] = 0;
 }
 
 int modnet_set_base_url(const char *url)
@@ -250,6 +252,7 @@ static int mn_open_session_locked(char *why, size_t why_cap)
         if (n <= 0) strcpy_s(url, sizeof url, MODNET_DEFAULT_STORE);
     }
     if (!mn_parse_url(url, g_host, 256, &g_port, &g_secure, g_prefix, 256, why, why_cap)) return 0;
+    strncpy_s(g_session_url, sizeof g_session_url, url, _TRUNCATE);
     if (mn_is_loopback(g_host)) {
         g_session = WinHttpOpen(MN_AGENT, WINHTTP_ACCESS_TYPE_NO_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     } else {
@@ -278,11 +281,18 @@ static int mn_open_session_locked(char *why, size_t why_cap)
 /* Take the shared lock with an open session. Returns 1 holding the lock. */
 static int mn_acquire(char *why, size_t why_cap)
 {
+    char wanted[MODNET_URL_MAX];
+    /* The setting is read on every request so a changed "mods.store" takes
+     * effect at the next request, not at the next launch: a session opened
+     * for another base URL is dropped (after the requests in flight finish)
+     * and reopened for the current one. */
+    if (!modnet_base_url(wanted, sizeof wanted)) wanted[0] = 0;
     for (;;) {
         AcquireSRWLockShared(&g_lock);
-        if (g_session) return 1;
+        if (g_session && (!wanted[0] || strcmp(g_session_url, wanted) == 0)) return 1;
         ReleaseSRWLockShared(&g_lock);
         AcquireSRWLockExclusive(&g_lock);
+        if (g_session && wanted[0] && strcmp(g_session_url, wanted) != 0) mn_close_session_locked();
         if (!mn_open_session_locked(why, why_cap)) { ReleaseSRWLockExclusive(&g_lock); return 0; }
         ReleaseSRWLockExclusive(&g_lock);
     }
