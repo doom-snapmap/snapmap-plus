@@ -442,6 +442,83 @@ int sh_modserve_each_unopened_shadow(sh_modserve_unopened_fn fn, void *context);
  * first opened before their gates were live. Returns the number visited. */
 int sh_modserve_each_ungated_raw(sh_modserve_unopened_fn fn, void *context);
 
+/* Refresh. A rescan replaces the table while the engine keeps every decl it
+ * parsed and every model and image it loaded from the bytes the old table
+ * served. Each table publication compares, per served request path, the new
+ * table with the one it replaced: a path whose bytes differ is "changed", one
+ * only the new table serves is "new" and one only the old table served is
+ * "gone". Changed decls, models and images, and gone shadow decls (which
+ * return to the game's bytes), are marked pending; marks carry over to later
+ * tables while the bytes stay the same, so changes recorded during Play are
+ * applied at the next safe point. New requests are reported, never applied:
+ * a new decl name registers at the next map load of a map that names its
+ * bundle, a new editor row at 'sh_mods palette rebuild'. */
+#define SH_MODSERVE_RF_DECL  1
+#define SH_MODSERVE_RF_MODEL 2   /* baseModel */
+#define SH_MODSERVE_RF_IMAGE 3
+
+typedef struct sh_modserve_diff {
+    int changed;                          /* served requests whose bytes changed */
+    int changed_decls, changed_models, changed_images;
+    int changed_map;                      /* other files the next map load reads again (generated/swf/) */
+    int changed_restart;                  /* other files nothing reloads in this process (sound banks, anims, ...) */
+    int added, added_decls, added_rows;   /* new requests; of them new decl names; of those editor rows */
+    int added_active;                     /* new gameplay decl names of mods registered this session */
+    int changed_rows;                     /* changed editor rows (snapEditorEntityDef) */
+    int gone, gone_shadows, gone_names;   /* gone requests; shadow decls; decls of new names (kept registered) */
+    int gone_rows;                        /* gone editor rows: re-parsed without a source, then left out of the palette */
+    int dependents;                       /* served decls marked by sh_modserve_refresh_expand */
+    int pending;                          /* items still waiting (every table), counted at the call */
+    char restart_first[200];              /* the first files that need a restart, for the log */
+} sh_modserve_diff;
+
+/* The published table's diff against the table it replaced (zero for the
+ * first table), plus the pending items now. */
+void sh_modserve_last_diff(sh_modserve_diff *out);
+
+/* Mark, once per table, every served decl that inherits (top-level
+ * `inherit`, any depth) from a changed or gone decl, since the engine
+ * resolves a parent when the child is parsed. Reads those types' served
+ * decls (stock pointers from the installed game). Main thread. Returns the
+ * number marked. */
+int sh_modserve_refresh_expand(void);
+
+/* The gameplay decls a rescan added to a mod this session already
+ * registered (diff added_active), as a registration plan; the marks are
+ * consumed. Returns the step count or -1. Main thread. */
+int sh_modserve_plan_refresh(sh_modserve_plan *out);
+
+typedef struct sh_modserve_refresh_item {
+    const char *type, *name, *request, *bundle_id;
+    int kind;          /* SH_MODSERVE_RF_* */
+    int gone;          /* 1: no bundle serves the request now; the engine's own bytes answer it */
+    int shadow;        /* a stock path */
+    int gates_live;    /* the bundle's requirement gates are live (1 when it has none) */
+} sh_modserve_refresh_item;
+
+/* Visit every pending item: changed decls in plan rank order, then gone
+ * shadow decls, then changed models and images. `fn` returns 1 when the item
+ * is settled (re-parsed, reloaded, or not held by the engine, whose next load
+ * reads the current bytes) and 0 to keep it pending. A decl settled here is
+ * not offered to the early-decl visit. Returns the number visited. */
+typedef int (*sh_modserve_refresh_fn)(void *context, const sh_modserve_refresh_item *item);
+int sh_modserve_each_refresh(sh_modserve_refresh_fn fn, void *context);
+
+/* What a refresh did (modserve_engine.c fills it; the Mods tab's rescan
+ * result carries it as {reparsed, reloaded, needsMapReload, needsRestart, note}). */
+typedef struct sh_modserve_refresh {
+    int state;             /* 0 nothing changed, 1 applied, 2 deferred to the next safe point */
+    int reparsed;          /* decls re-parsed */
+    int reloaded;          /* models and images reloaded in place */
+    int needs_map_reload;  /* new decl names and editor rows, files the next map load reads */
+    int needs_restart;     /* changes nothing reloads in this process */
+    int registered;        /* new decls registered */
+    int palette;           /* 1 the palette was rebuilt, 0 not needed, -1 refused */
+    int pending;           /* items left for the next safe point */
+    int failed;            /* re-parses or reloads that failed or faulted */
+    char note[300];
+} sh_modserve_refresh;
+
 /* Walk the engine's resource lists (decl_resource_head): fn(context, the
  * list's class name, the resource, its name). 1 when the walk completed. */
 typedef void (*sh_modserve_resource_fn)(void *context, const char *list_class, void *resource, const char *name);
@@ -516,6 +593,14 @@ int modserve_activate_bundles(const char *const *bundle_hashes, int n);
  * "requirements live"; a gate someone set back to 1 is disarmed again before
  * the level's decls load. No-op when no bundle has requirements. */
 void sh_modserve_play_begin(void);
+
+/* After a rescan published a table: apply its pending changes now (main
+ * thread, not during Play) or leave them for the next registration pass
+ * (the editor palette pass, a map's activation), which applies them between
+ * publishing its sources and running its loads. Logs one MODS: refresh: line
+ * per category and a summary. Fills *out (when non-NULL) and returns its
+ * state: 0 nothing changed, 1 applied, 2 deferred. */
+int sh_modserve_refresh_after_rescan(sh_modserve_refresh *out);
 
 /* The serving subcommands of the sh_mods console command (modcmd.c owns the
  * command and dispatches here): status, rescan, palette rebuild. `args` is

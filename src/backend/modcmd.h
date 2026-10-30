@@ -36,8 +36,10 @@
 #include "commands.h"
 
 #define SH_MODCMD_NAME "sh_mods"
-#define SH_MODCMD_HELP "Mods: 'sh_mods' or 'sh_mods status' shows what installed mods serve, 'sh_mods rescan' rereads " \
-                       "the mods folder, 'sh_mods palette rebuild' adds new mod rows to the open editor, " \
+#define SH_MODCMD_HELP "Mods: 'sh_mods' or 'sh_mods status' shows what installed mods serve, 'sh_mods rescan' (or " \
+                       "'sh_mods refresh') rebuilds changed mod folders, rereads the mods folder and applies what " \
+                       "changed to the running game (decls re-parsed, models and images reloaded; what needs a map " \
+                       "reload or a restart is listed), 'sh_mods palette rebuild' adds new mod rows to the open editor, " \
                        "'sh_mods build \"<folder>\"' checks a mod and writes the product block of its mod.json, " \
                        "'sh_mods install \"<folder>\"' adds it to the mods store, 'sh_mods list' shows " \
                        "mod folders, 'sh_mods doctor [verify]' explains every bundle's state, conflicts and shadows, 'sh_mods verify \"<folder>\"' rehashes one (a folder, id or id@version), " \

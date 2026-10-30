@@ -112,8 +112,14 @@ static void mc_rescan(const char *why)
 {
     int n = sh_modserve_index_rescan();
     if (n < 0) mc_line("MODS: %s: the serving index could not be rebuilt; run 'sh_mods rescan'", why);
-    else mc_line("MODS: %s: serving index rebuilt (%d bundle(s) active); new editor rows need 'sh_mods palette rebuild'",
-                 why, n);
+    else {
+        sh_modserve_refresh rf;
+        mc_line("MODS: %s: serving index rebuilt (%d bundle(s) active); new editor rows need 'sh_mods palette rebuild'",
+                why, n);
+        /* What the build changed under the running game (modserve.h). */
+        (void)sh_modserve_refresh_after_rescan(&rf);
+        sh_printf("sh_mods: refresh: %s\n", rf.note);
+    }
 }
 
 /* 1 when `folder` is inside the store root (a bundle the index will read). */
@@ -611,7 +617,8 @@ void h_sh_mods(idCmdArgs *a)
     if (!verb || !verb[0]) verb = "status";
     mc_outbox_flush();
     if (mc_store_command(a, verb)) return;
-    if (!_stricmp(verb, "rescan")) mc_sync();   /* the rebuild rule first; then the serving index */
+    /* The rebuild rule first; then the serving index and the refresh. */
+    if (!_stricmp(verb, "rescan") || !_stricmp(verb, "refresh")) mc_sync();
     if (sh_modserve_command(a, verb)) return;
     if (!_stricmp(verb, "migrate")) {
         /* The migration of the retired overrides folder (modmigrate.c), on its worker thread. */

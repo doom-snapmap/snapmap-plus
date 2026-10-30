@@ -81,6 +81,7 @@ static void mu_defaults(sh_modui_engine *e)
     memset(e, 0, sizeof *e);
 #ifndef SH_MODUI_PURE
     e->rescan = sh_modserve_index_rescan;
+    e->refresh = sh_modserve_refresh_after_rescan;
     e->palette_rebuild = modserve_palette_rebuild_requested;
     e->stock_exists = mu_default_stock;
     e->migrate_pending = sh_modmigrate_pending;
@@ -96,6 +97,7 @@ void sh_modui_bind(const sh_modui_engine *engine)
         if (engine->on_main_thread) g_engine.on_main_thread = engine->on_main_thread;
         if (engine->placed_names) g_engine.placed_names = engine->placed_names;
         if (engine->rescan) g_engine.rescan = engine->rescan;
+        if (engine->refresh) g_engine.refresh = engine->refresh;
         if (engine->palette_rebuild) g_engine.palette_rebuild = engine->palette_rebuild;
         if (engine->stock_exists) g_engine.stock_exists = engine->stock_exists;
         if (engine->migrate_pending) g_engine.migrate_pending = engine->migrate_pending;
@@ -941,13 +943,16 @@ static int mu_stock_exists(void *context, const char *request)
     return r;
 }
 
-static int mu_rescan(char *note, size_t cap)
+/* The rebuild rule, the serving index, then the refresh of what changed
+ * under the running game (*rf filled when non-NULL; state -1: not run). */
+static int mu_rescan_refresh(char *note, size_t cap, sh_modserve_refresh *rf)
 {
     const sh_modui_engine *e = mu_engine();
     sh_ms_sync_stats sync;
     sh_mb_resolver r;
     mu_stock stock = { 0 };
     int n;
+    if (rf) { memset(rf, 0, sizeof *rf); rf->state = -1; }
     if (!e->rescan) { strncpy_s(note, cap, "the serving index cannot be rebuilt from here", _TRUNCATE); return -1; }
     /* The rebuild rule first: a folder whose tree changed is built again. */
     r.installed = NULL;
@@ -960,7 +965,31 @@ static int mu_rescan(char *note, size_t cap)
     InterlockedIncrement(&g_gen);
     if (n < 0) strncpy_s(note, cap, "the serving index could not be rebuilt; try Rescan", _TRUNCATE);
     else _snprintf_s(note, cap, _TRUNCATE, "%d mod(s) active", n);
+    if (n >= 0 && e->refresh) {
+        sh_modserve_refresh local;
+        sh_modserve_refresh *out = rf ? rf : &local;
+        memset(out, 0, sizeof *out);
+        out->state = e->refresh(out);
+    }
     return n;
+}
+
+static int mu_rescan(char *note, size_t cap) { return mu_rescan_refresh(note, cap, NULL); }
+
+/* "refresh":{reparsed, reloaded, needsMapReload, needsRestart, note} plus
+ * what is still pending and whether it was deferred. */
+static void mu_put_refresh(mu_buf *b, const sh_modserve_refresh *rf)
+{
+    mu_key(b, "refresh", 0);
+    mu_putn(b, "{", 1);
+    mu_knum(b, "reparsed", (unsigned)(rf->reparsed < 0 ? 0 : rf->reparsed), 1);
+    mu_knum(b, "reloaded", (unsigned)(rf->reloaded < 0 ? 0 : rf->reloaded), 0);
+    mu_knum(b, "needsMapReload", (unsigned)(rf->needs_map_reload < 0 ? 0 : rf->needs_map_reload), 0);
+    mu_knum(b, "needsRestart", (unsigned)(rf->needs_restart < 0 ? 0 : rf->needs_restart), 0);
+    mu_knum(b, "pending", (unsigned)(rf->pending < 0 ? 0 : rf->pending), 0);
+    mu_kbool(b, "deferred", rf->state == 2, 0);
+    mu_kstr(b, "note", rf->note, 0);
+    mu_putn(b, "}", 1);
 }
 
 static int mu_install(const char *folder)
@@ -1569,13 +1598,21 @@ int sh_modui_run(int action, const char *arg)
         return mu_verify(arg);
     case SH_MODS_ACT_RESCAN: {
         int n;
-        char msg[200];
+        char msg[520];
+        sh_modserve_refresh rf;
+        mu_buf b;
         note[0] = 0;
-        n = mu_rescan(note, sizeof note);
+        n = mu_rescan_refresh(note, sizeof note, &rf);
         mu_log("rescan: %s", note);
-        if (n >= 0) _snprintf_s(msg, sizeof msg, _TRUNCATE, "Mods folder reread: %s.", note);
+        if (n >= 0 && rf.state > 0)
+            _snprintf_s(msg, sizeof msg, _TRUNCATE, "Mods folder reread: %s. In the game: %s.", note, rf.note);
+        else if (n >= 0) _snprintf_s(msg, sizeof msg, _TRUNCATE, "Mods folder reread: %s.", note);
         else _snprintf_s(msg, sizeof msg, _TRUNCATE, "Rescan failed: %s.", note);
-        return mu_simple_result(action, n >= 0, msg);
+        if (n < 0 || rf.state < 0) return mu_simple_result(action, n >= 0, msg);
+        memset(&b, 0, sizeof b);
+        mu_result_head(&b, action, 1, msg);
+        mu_put_refresh(&b, &rf);
+        return mu_result_tail(&b);
     }
     case SH_MODS_ACT_PALETTE: {
         int r;

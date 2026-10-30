@@ -98,6 +98,7 @@ static volatile LONG g_editor_pass_done;
 static DWORD g_fault_code;
 static cvar_set_fn g_cvar_set;
 static const void *g_cvar_slot;
+static const unsigned char *g_editor;  /* editor_singleton: idSnapEditorLocal, constructed in place */
 
 extern volatile LONG g_modserve_editor_ok, g_modserve_editor_failed;   /* modserve.c */
 
@@ -417,6 +418,7 @@ int sh_modserve_install(const sig_result *results, size_t count, const uint8_t *
     g_last_error = (const char *)glb_resolve(module_base, "last_error_msg", NULL);
     g_main_thread_at = (const uint8_t *)glb_resolve(module_base, "main_thread_id", NULL);
     g_res_head = (const void *)glb_resolve(module_base, "decl_resource_head", NULL);
+    g_editor = (const unsigned char *)glb_resolve(module_base, "editor_singleton", NULL);
     g_bound = g_ctor && g_dtor && g_anchor && g_type && g_register && g_source && g_decl && g_generic_load &&
               sh_process_heap_bind(&g_heap, results, count, module_base) && g_main_thread_at;
     for (i = 0; i < count; ++i)
@@ -615,10 +617,292 @@ static void me_reload_ungated(const char *phase, int in_heap)
     free(r.names);
 }
 
-/* The plan's sources are registered; its loads have not run (me_run). */
+/* ------------------------------------------------------------------ refresh */
+
+/* What a rescan changed under the engine (modserve.h, sh_modserve_each_refresh):
+ * each changed decl the engine holds parsed is re-parsed with the early-decl
+ * primitive (me_reparse_one), a gone shadow decl the same way (the provider
+ * no longer answers it, so the engine reads its own bytes), and each changed
+ * model and image it holds loaded is reloaded in place with the gated-reload
+ * primitive (me_raw_one). Main thread, inside process heap 0; never during
+ * Play (sh_modserve_refresh_after_rescan defers to the next pass). */
+#define ED_ACTIVE_OFF       0x09      /* editor_set_active's byte: clear during SnapMap Play */
+
+/* `sh_mods rescan` prints every refresh line to the console as well. */
+static int g_refresh_echo;
+static void me_rlog(const char *fmt, ...)
+{
+    char line[1024];
+    va_list ap;
+    memcpy(line, "MODS: ", 6);
+    va_start(ap, fmt);
+    _vsnprintf_s(line + 6, sizeof line - 6, _TRUNCATE, fmt, ap);
+    va_end(ap);
+    backend_log(line);
+    if (g_refresh_echo) sh_printf("%s\n", line);
+}
+#define ED_DEACT_REASON_OFF 0x2366c   /* 3: deactivated for Play */
+
+/* 1 during SnapMap Play, 0 otherwise, -1 unknown. */
+static int me_in_play(void)
+{
+    unsigned char active = 1;
+    int reason = 0;
+    if (!g_editor) return -1;
+    __try {
+        active = g_editor[ED_ACTIVE_OFF];
+        reason = *(const int *)(g_editor + ED_DEACT_REASON_OFF);
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return -1; }
+    return !active && reason == 3;
+}
+
+typedef struct me_refresh {
+    me_reparse decls;
+    me_raw raw;
+    int stage;            /* 0 decls and collect, 1 settle the collected models and images */
+    int not_held, gated;
+} me_refresh;
+
+static int me_refresh_visit(void *context, const sh_modserve_refresh_item *it)
+{
+    me_refresh *c = (me_refresh *)context;
+    if (!it->gates_live) { if (!c->stage) c->gated++; return 0; }
+    if (it->kind == SH_MODSERVE_RF_DECL) {
+        int before = c->decls.reparsed + c->decls.faulted;
+        (void)me_reparse_one(&c->decls, it->type, it->name, it->request, it->bundle_id);
+        if (c->decls.reparsed + c->decls.faulted == before) c->not_held++;   /* its next parse reads the current bytes */
+        return 1;
+    }
+    if (c->stage) return 1;
+    (void)me_raw_collect(&c->raw, it->type, it->name, it->request, it->bundle_id);
+    return 0;
+}
+
+static void me_refresh_apply(const char *phase, int in_heap, sh_modserve_refresh *out)
+{
+    me_refresh c;
+    sh_process_heap_scope heap = { 0 };
+    double t0 = me_now_ms(), t1;
+    int i;
+    if (!g_bound || me_on_main() != 1) return;
+    (void)sh_modserve_refresh_expand();
+    memset(&c, 0, sizeof c);
+    c.raw.cap = ME_RAW_MAX;
+    c.raw.names = (me_raw_name *)calloc((size_t)c.raw.cap, sizeof *c.raw.names);
+    if (!c.raw.names) return;
+    if (!in_heap && !sh_process_heap_enter(&g_heap, &heap)) {
+        me_rlog("refresh: changes not applied at the %s (process heap scope unavailable)", phase);
+        free(c.raw.names);
+        return;
+    }
+    __try {
+        if (sh_modserve_each_refresh(me_refresh_visit, &c) && c.raw.n && g_res_head)
+            (void)sh_modserve_resource_each(g_res_head, me_raw_one, &c.raw);
+    } __finally {
+        if (!in_heap && !sh_process_heap_leave(&heap)) me_rlog("refresh: heap scope did not balance at the %s", phase);
+    }
+    t1 = me_now_ms();
+    c.stage = 1;
+    if (c.raw.n && g_res_head) (void)sh_modserve_each_refresh(me_refresh_visit, &c);
+    if (c.decls.reparsed || c.decls.faulted || c.not_held) {
+        for (i = 0; i < c.decls.ntypes; ++i)
+            me_rlog("refresh: re-parsed %d %s decl(s) whose served bytes or parent changed (%s%s)", c.decls.types[i].count,
+                   c.decls.types[i].type, c.decls.types[i].names,
+                   strlen(c.decls.types[i].names) >= sizeof c.decls.types[i].names - 5 ? ", ..." : "");
+        me_rlog("refresh: decls: %d re-parsed at the %s in %.1f ms (%d read through the provider, %d failed, %d faulted; "
+               "%d not held, read at their next parse)", c.decls.reparsed, phase, t1 - t0, c.decls.through_provider,
+               c.decls.failed, c.decls.faulted, c.not_held);
+    }
+    if (c.raw.n)
+        me_rlog("refresh: models and images: reloaded %d model(s) and %d image(s) at the %s (%d failed, %d faulted; "
+               "%d of %d not held, read at their next load)%s%s%s", c.raw.models, c.raw.images, phase, c.raw.failed,
+               c.raw.faulted, c.raw.n - c.raw.reloaded - c.raw.faulted, c.raw.n, c.raw.first[0] ? ": " : "",
+               c.raw.first, c.raw.reloaded > 0 && strlen(c.raw.first) + 40 >= sizeof c.raw.first ? ", ..." : "");
+    if (!g_res_head && c.raw.n)
+        me_rlog("refresh: %d model(s) and image(s) not reloaded (decl_resource_head unresolved)", c.raw.n);
+    if (c.gated)
+        me_rlog("refresh: %d change(s) wait for their bundles' requirements, applied at the next editor pass or map load",
+               c.gated);
+    if (out) {
+        out->reparsed += c.decls.reparsed;
+        out->reloaded += c.raw.reloaded;
+        out->failed += c.decls.failed + c.decls.faulted + c.raw.failed + c.raw.faulted;
+    }
+    free(c.raw.names);
+}
+
+static void me_refresh_note(sh_modserve_refresh *r, const char *fmt, ...)
+{
+    size_t at = strlen(r->note);
+    va_list ap;
+    if (at + 3 >= sizeof r->note) return;
+    if (at) { memcpy(r->note + at, "; ", 3); at += 2; }
+    va_start(ap, fmt);
+    _vsnprintf_s(r->note + at, sizeof r->note - at, _TRUNCATE, fmt, ap);
+    va_end(ap);
+}
+
+/* A deferred refresh waits for the editor: a watcher thread hands it to the
+ * main-thread call slot, which drains in editor frames only, once Play has
+ * ended (the next registration pass applies it too, whichever comes first).
+ * Changes still waiting for their bundles' gates stay for the next pass. */
+static volatile LONG g_refresh_watch;
+
+/* The editor side of a refresh, main thread, not in Play: new gameplay decls
+ * of mods this session registered are registered now (as a map's activation
+ * would), and when a rescan added, changed or removed editor rows the live
+ * palette is rebuilt (the 'sh_mods palette rebuild' path, whose editor pass
+ * registers new rows first). Without a palette yet the first editor entry
+ * builds it with every row. */
+static volatile LONG g_palette_wanted;
+
+static void me_refresh_editor(const char *phase, sh_modserve_refresh *r)
+{
+    sh_modserve_plan plan;
+    int ready;
+    if (sh_modserve_plan_refresh(&plan) > 0) {
+        double t0 = me_now_ms();
+        ready = me_run(&plan, "refresh");
+        r->registered += ready > 0 ? ready : 0;
+        me_rlog("refresh: registered %d of %d new decl(s) of mods in use at the %s in %.1f ms (%d blocked)",
+                ready < 0 ? 0 : ready, plan.count, phase, me_now_ms() - t0, plan.blocked);
+    }
+    sh_modserve_plan_free(&plan);
+    if (!InterlockedCompareExchange(&g_palette_wanted, 0, 0)) return;
+    if (!sh_timeline_tile_palette()) {
+        InterlockedExchange(&g_palette_wanted, 0);
+        me_rlog("refresh: editor rows changed; no editor palette yet, the first editor entry builds it with them");
+        return;
+    }
+    if (modserve_palette_rebuild_requested()) {
+        InterlockedExchange(&g_palette_wanted, 0);
+        r->palette = 1;
+        me_rlog("refresh: editor rows changed; palette rebuilt at the %s (see the palette line above)", phase);
+    } else {
+        r->palette = -1;
+        me_rlog("refresh: editor rows changed; palette rebuild refused at the %s (see the line above); "
+                "'sh_mods palette rebuild' retries it", phase);
+    }
+}
+
+static int me_refresh_main(void *context)
+{
+    sh_modserve_refresh r;
+    sh_modserve_diff d;
+    (void)context;
+    if (me_in_play() == 1 || me_on_main() != 1) return 0;
+    sh_modserve_last_diff(&d);
+    memset(&r, 0, sizeof r);
+    if (d.pending) me_refresh_apply("return to the editor", 0, &r);
+    me_refresh_editor("return to the editor", &r);
+    sh_modserve_last_diff(&d);
+    me_rlog("refresh: deferred changes applied at the return to the editor: %d re-parsed, %d reloaded, %d registered, "
+            "palette %s, %d failed, %d still pending", r.reparsed, r.reloaded, r.registered,
+            r.palette > 0 ? "rebuilt" : r.palette < 0 ? "refused" : "unchanged", r.failed, d.pending);
+    return 1;
+}
+
+static DWORD WINAPI me_refresh_watcher(LPVOID unused)
+{
+    sh_run_on_main_fn run = NULL;
+    int i, result = 0;
+    (void)unused;
+    sh_apply_engine_get_run_on_main(&run);
+    /* Up to an hour; any registration pass in between applies the same marks. */
+    for (i = 0; run && i < 7200; ++i) {
+        sh_modserve_diff d;
+        Sleep(500);
+        sh_modserve_last_diff(&d);
+        if (!d.pending && !InterlockedCompareExchange(&g_palette_wanted, 0, 0)) break;
+        if (me_in_play() == 1) continue;
+        if (run(NULL, me_refresh_main, NULL, 1000, &result) == 1 && result == 1) break;
+    }
+    InterlockedExchange(&g_refresh_watch, 0);
+    return 0;
+}
+
+static void me_refresh_watch(void)
+{
+    HANDLE h;
+    if (InterlockedCompareExchange(&g_refresh_watch, 1, 0)) return;
+    h = CreateThread(NULL, 0, me_refresh_watcher, NULL, 0, NULL);
+    if (h) CloseHandle(h);
+    else InterlockedExchange(&g_refresh_watch, 0);
+}
+
+int sh_modserve_refresh_after_rescan(sh_modserve_refresh *out)
+{
+    sh_modserve_refresh r;
+    sh_modserve_diff d;
+    int play, main = me_on_main(), rows, later;
+    const char *why = NULL;
+    memset(&r, 0, sizeof r);
+    if (main == 1) (void)sh_modserve_refresh_expand();
+    sh_modserve_last_diff(&d);
+    rows = d.added_rows + d.changed_rows + d.gone_rows;
+    later = d.added_decls - d.added_rows - d.added_active;   /* new names of mods no map has used yet */
+    if (rows) InterlockedExchange(&g_palette_wanted, 1);
+    if (!d.changed && !d.gone && !d.added_decls && !d.pending) {
+        strncpy_s(r.note, sizeof r.note, "no served file changed", _TRUNCATE);
+        me_rlog("refresh: no served file changed");
+        if (out) *out = r;
+        return 0;
+    }
+    play = me_in_play();
+    if (!g_bound) why = "decl registration is unavailable on this build";
+    else if (main != 1) why = "not on the main thread";
+    else if (play == 1) why = "Play is running";
+    if (!why) {
+        if (d.pending) me_refresh_apply("rescan", 0, &r);
+        me_refresh_editor("rescan", &r);
+        sh_modserve_last_diff(&d);
+    }
+    r.pending = d.pending + (why ? d.added_active : 0) + (InterlockedCompareExchange(&g_palette_wanted, 0, 0) && why ? 1 : 0);
+    r.needs_map_reload = d.changed_map + (r.palette < 0 ? rows : 0);
+    r.needs_restart = d.changed_restart + d.gone_names;
+    r.state = why && r.pending ? 2 : 1;
+    if (why && r.pending) {
+        if (play == 1 && g_bound) me_refresh_watch();
+        me_rlog("refresh: deferred: %d change(s) wait for the return to the editor or the next map load (%s)", r.pending,
+                why);
+        me_refresh_note(&r, "%d change(s) apply on returning to the editor or at the next map load (%s)", r.pending, why);
+    } else {
+        me_refresh_note(&r, "%d decl(s) re-parsed, %d model(s) and image(s) reloaded%s", r.reparsed, r.reloaded,
+                        r.failed ? " (some failed; see the log)" : "");
+        if (r.registered) me_refresh_note(&r, "%d new decl(s) registered", r.registered);
+        if (r.palette > 0) me_refresh_note(&r, "editor palette rebuilt (%d row change(s))", rows);
+        if (d.pending) me_refresh_note(&r, "%d wait for the bundles' requirements (next editor pass)", d.pending);
+    }
+    if (later)
+        me_rlog("refresh: %d new decl name(s) of mods no map has used this session register when a map that uses the "
+                "mod loads", later);
+    if (r.needs_map_reload) {
+        me_rlog("refresh: needs a map reload: %d changed movie(s)%s", d.changed_map,
+                r.palette < 0 ? ", and the editor rows until the palette is rebuilt" : "");
+        me_refresh_note(&r, "%d change(s) need a map reload%s", r.needs_map_reload,
+                        r.palette < 0 ? " ('sh_mods palette rebuild' applies the editor rows)" : "");
+    }
+    if (r.needs_restart) {
+        me_rlog("refresh: needs a restart: %d changed file(s) nothing reloads in this process%s%s, %d removed decl name(s) "
+                "stay registered", d.changed_restart, d.restart_first[0] ? ": " : "", d.restart_first, d.gone_names);
+        me_refresh_note(&r, "%d change(s) need a restart", r.needs_restart);
+    }
+    me_rlog("refresh: summary: %d changed, %d new, %d gone, %d inheriting decl(s) follow their parents; %d "
+            "re-parsed, %d reloaded, %d registered, palette %s, %d need a map reload, %d need a restart, %d pending",
+            d.changed, d.added, d.gone, d.dependents, r.reparsed, r.reloaded, r.registered,
+            r.palette > 0 ? "rebuilt" : r.palette < 0 ? "refused" : rows ? "deferred" : "unchanged",
+            r.needs_map_reload, r.needs_restart, r.pending);
+    if (out) *out = r;
+    return r.state;
+}
+
+/* The plan's sources are registered; its loads have not run (me_run). A
+ * rescan's pending changes are applied first, so a file whose bytes changed
+ * is re-parsed as a change, not as an early decl. */
 static void op_sources_published(void *context)
 {
     (void)context;
+    me_refresh_apply(g_reparse_phase, 1, NULL);
     me_reparse_early(g_reparse_phase, 1);
     me_reload_ungated(g_reparse_phase, 1);
 }
@@ -677,6 +961,7 @@ void sh_modserve_palette_before_build(void)
     if (sh_modserve_plan_editor(&plan) < 0) { me_log("editor rows: plan refused (out of memory)"); return; }
     if (!plan.count) {
         sh_modserve_plan_free(&plan);
+        me_refresh_apply("editor", 0, NULL);
         me_reparse_early("editor", 0);
         me_reload_ungated("editor", 0);
         if (first) me_log("editor rows registered in 0.0 ms (0 rows)");
@@ -876,7 +1161,7 @@ int modserve_activate_bundles(const char *const *bundle_hashes, int n)
     t0 = me_now_ms();
     if (sh_modserve_plan_bundles(bundle_hashes, n, &plan, &unknown) < 0) { me_log("activation refused: out of memory"); return -1; }
     if (plan.count) ready = me_run(&plan, "map");
-    else { me_reparse_early("map", 0); me_reload_ungated("map", 0); ready = 0; }
+    else { me_refresh_apply("map", 0, NULL); me_reparse_early("map", 0); me_reload_ungated("map", 0); ready = 0; }
     me_log("activated %d bundles (%d steps, %d ready, %d blocked, %d not installed) in %.1f ms", n - unknown,
            plan.count, ready < 0 ? 0 : ready, plan.blocked, unknown, me_now_ms() - t0);
     sh_modserve_plan_free(&plan);
@@ -911,15 +1196,30 @@ int sh_modserve_command(void *args, const char *verb)
                   st.opens_served, st.cache_hits, st.open_failures, st.probe_claims, st.editor_rows_registered,
                   st.editor_rows_failed, g_bound ? "bound" : "unavailable", g_probe_orig ? "hooked" : "not hooked");
         sh_modserve_each_bundle(me_print_bundle, NULL);
+        {
+            sh_modserve_diff d;
+            sh_modserve_last_diff(&d);
+            if (d.pending)
+                sh_printf("sh_mods: refresh: %d change(s) pending%s; they apply on returning to the editor or at the next "
+                          "map load ('sh_mods refresh' in the editor applies them now)\n", d.pending,
+                          me_in_play() == 1 ? " (Play is running)" : "");
+        }
         sh_modvt_print_status();
         sh_modsound_print_status();
         return 1;
     }
-    if (!_stricmp(verb, "rescan")) {
+    if (!_stricmp(verb, "rescan") || !_stricmp(verb, "refresh")) {
+        sh_modserve_refresh r;
         int n = sh_modserve_index_rescan();
         me_ensure_probe();
         sh_printf("sh_mods: rescan %s (%d bundles active); new editor rows need 'sh_mods palette rebuild'\n",
                   n < 0 ? "refused" : "done", n < 0 ? 0 : n);
+        if (n >= 0) {
+            g_refresh_echo = 1;
+            (void)sh_modserve_refresh_after_rescan(&r);
+            g_refresh_echo = 0;
+            sh_printf("sh_mods: refresh: %s\n", r.note);
+        }
         return 1;
     }
     if (!_stricmp(verb, "palette")) {

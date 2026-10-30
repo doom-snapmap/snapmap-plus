@@ -49,6 +49,8 @@ typedef void (*sh_modui_name_fn)(void *context, const char *name);
  * palette rebuild and the stock reader; none in a SH_MODUI_PURE build) and is
  * otherwise unavailable: the matching part of the document is omitted or the
  * action refuses. */
+struct sh_modserve_refresh;
+
 typedef struct sh_modui_engine {
     int (*on_main_thread)(void);        /* 1 main, 0 other, negative unknown */
     /* Emit every placed name of the open editor map: each entity's inherit
@@ -56,6 +58,10 @@ typedef struct sh_modui_engine {
      * read, or -1 when no editor map is open. Main thread only. */
     int (*placed_names)(sh_modui_name_fn emit, void *context);
     int (*rescan)(void);                /* sh_modserve_index_rescan */
+    /* Propagate what the rescan changed into the running game
+     * (sh_modserve_refresh_after_rescan): 0 nothing changed, 1 applied,
+     * 2 deferred. Main thread, after rescan. */
+    int (*refresh)(struct sh_modserve_refresh *out);
     int (*palette_rebuild)(void);       /* modserve_palette_rebuild_requested: 1 ran, 0 refused */
     /* Existence of an installed game resource: 1 present, 0 absent, -1 the
      * reader is unavailable (stock shadows and needs cannot be checked). */

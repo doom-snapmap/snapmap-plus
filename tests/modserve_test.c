@@ -1160,6 +1160,179 @@ static void test_ungated_raw(void)
     (void)sh_modserve_index_build(root);
 }
 
+/* ------------------------------------------------------------------ refresh */
+
+#define RF_SH      "generated/decls/entitydef/monster/zombie.decl"
+#define RF_SH_GONE "generated/decls/entitydef/monster/gonezombie.decl"
+#define RF_KEEP    "generated/decls/entitydef/mods/rf.mod/keep.decl"
+#define RF_NAME    "generated/decls/entitydef/mods/rf.mod/name.decl"
+#define RF_OLD     "generated/decls/entitydef/mods/rf.mod/oldname.decl"
+#define RF_MODEL   "generated/basemodel/md6/mods/rf.mod/body.bmd6model"
+#define RF_IMAGE   "generated/image/mods/rf.mod/skin.bimage"
+#define RF_ANIM    "cooked/anim/md6/mods/rf.mod/idle.bmd6anim"
+#define RF_NEW     "generated/decls/entitydef/mods/rf.mod/new.decl"
+#define RF_ROW     "generated/decls/snapeditorentitydef/mods/rf.mod/new.decl"
+#define RF_CHILD   "generated/decls/entitydef/mods/rf.mod/child.decl"
+#define RF_GRAND   "generated/decls/entitydef/mods/rf.mod/grandchild.decl"
+#define RF_ORPHAN  "generated/decls/entitydef/mods/rf.mod/orphan.decl"
+#define RF_DECOY   "generated/decls/entitydef/mods/rf.mod/decoy.decl"
+#define RF_OLDROW  "generated/decls/snapeditorentitydef/mods/rf.mod/oldrow.decl"
+#define RF_INHERIT_CHILD  "{\n\tinherit = \"mods/rf.mod/name\";\n}\n"
+#define RF_INHERIT_GRAND  "{\n\t// a parent\n\tinherit = \"mods/rf.mod/child\";\n}\n"
+#define RF_INHERIT_ORPHAN "{\n\tinherit=\"monster/gonezombie\";\n}\n"
+#define RF_INHERIT_DECOY  "{\n\t// inherit = \"mods/rf.mod/name\"\n\tedit = { inherit = \"mods/rf.mod/name\"; }\n}\n"
+
+typedef struct rf_seen { char order[2048]; int keep_raw; int visits; } rf_seen;
+static int rf_visit(void *context, const sh_modserve_refresh_item *it)
+{
+    rf_seen *s = (rf_seen *)context;
+    size_t at = strlen(s->order);
+    s->visits++;
+    _snprintf_s(s->order + at, sizeof s->order - at, _TRUNCATE, "%d:%s:%s:%s%s;", it->kind, it->type, it->name,
+                it->gone ? "gone" : "now", it->gates_live ? "" : ":gated");
+    return it->kind == SH_MODSERVE_RF_DECL || !s->keep_raw;
+}
+
+/* A rescan that changed a bundle's files: the diff against the replaced
+ * table classifies changed, new and gone requests; the refresh visit offers
+ * exactly the changed decls, models and images and the gone shadows, in plan
+ * rank order with gone shadows after the decls and raw files last; marks
+ * carry over a rescan of the same bytes; a settled decl is no early decl. */
+static void test_refresh(void)
+{
+    static const fx_file v1[] = {
+        { RF_SH, "entityDef z1 {}", -1, "entityDef", "monster/zombie", NULL, '1' },
+        { RF_SH_GONE, "entityDef g1 {}", -1, "entityDef", "monster/gonezombie", NULL, '3' },
+        { RF_KEEP, "entityDef keep {}", -1, "entityDef", "mods/rf.mod/keep", NULL, '4' },
+        { RF_NAME, "entityDef n1 {}", -1, "entityDef", "mods/rf.mod/name", NULL, '5' },
+        { RF_OLD, "entityDef old {}", -1, "entityDef", "mods/rf.mod/oldname", NULL, '7' },
+        { RF_MODEL, "MODEL1", -1, "baseModel", "md6/mods/rf.mod/body.md6mesh", NULL, '8' },
+        { RF_IMAGE, "IMAGE", -1, "image", "mods/rf.mod/skin", NULL, 'a' },
+        { RF_ANIM, "ANIM1", -1, "anim", "md6/mods/rf.mod/idle.md6anim", NULL, 'b' },
+        { RF_CHILD, RF_INHERIT_CHILD, -1, "entityDef", "mods/rf.mod/child", NULL, 'f' },
+        { RF_GRAND, RF_INHERIT_GRAND, -1, "entityDef", "mods/rf.mod/grandchild", NULL, '0' },
+        { RF_ORPHAN, RF_INHERIT_ORPHAN, -1, "entityDef", "mods/rf.mod/orphan", NULL, '1' },
+        { RF_DECOY, RF_INHERIT_DECOY, -1, "entityDef", "mods/rf.mod/decoy", NULL, '2' },
+        { RF_OLDROW, "{ entityDef \"mods/rf.mod/keep\" }", -1, "snapEditorEntityDef", "mods/rf.mod/oldrow",
+          "[{\"type\":\"entityDef\",\"name\":\"mods/rf.mod/keep\"}]", '3' },
+    };
+    static const fx_file v2[] = {
+        { RF_SH, "entityDef z2 {}", -1, "entityDef", "monster/zombie", NULL, '2' },
+        { RF_KEEP, "entityDef keep {}", -1, "entityDef", "mods/rf.mod/keep", NULL, '4' },
+        { RF_NAME, "entityDef n2 {}", -1, "entityDef", "mods/rf.mod/name", NULL, '6' },
+        { RF_MODEL, "MODEL2", -1, "baseModel", "md6/mods/rf.mod/body.md6mesh", NULL, '9' },
+        { RF_IMAGE, "IMAGE", -1, "image", "mods/rf.mod/skin", NULL, 'a' },
+        { RF_ANIM, "ANIM2", -1, "anim", "md6/mods/rf.mod/idle.md6anim", NULL, 'c' },
+        { RF_NEW, "entityDef new {}", -1, "entityDef", "mods/rf.mod/new", NULL, 'd' },
+        { RF_ROW, "{ entityDef \"mods/rf.mod/new\" }", -1, "snapEditorEntityDef", "mods/rf.mod/new",
+          "[{\"type\":\"entityDef\",\"name\":\"mods/rf.mod/new\"}]", 'e' },
+        { RF_CHILD, RF_INHERIT_CHILD, -1, "entityDef", "mods/rf.mod/child", NULL, 'f' },
+        { RF_GRAND, RF_INHERIT_GRAND, -1, "entityDef", "mods/rf.mod/grandchild", NULL, '0' },
+        { RF_ORPHAN, RF_INHERIT_ORPHAN, -1, "entityDef", "mods/rf.mod/orphan", NULL, '1' },
+        { RF_DECOY, RF_INHERIT_DECOY, -1, "entityDef", "mods/rf.mod/decoy", NULL, '2' },
+    };
+    char top[MAX_PATH], root[MAX_PATH], text[64];
+    char *slash;
+    sh_modserve_diff d;
+    rf_seen s;
+    unopened_seen u;
+    strcpy_s(top, sizeof top, g_root);
+    slash = strrchr(top, '\\');
+    if (slash) *slash = 0;
+    _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\refresh\\mods", top);
+    mkdirs(root);
+    make_bundle(root, "rf.mod", "rf.mod", "1.0.0", '1', "\"" RF_SH "\", \"" RF_SH_GONE "\"", v1, 13, NULL);
+    CHECK(sh_modserve_index_build(root) == 1);
+    /* The first table of this root replaces another root's: every file is
+     * new. Shadows the earlier tables served and no table serves since are
+     * still pending as gone (the engine holds their bundles' text); settle them. */
+    sh_modserve_last_diff(&d);
+    CHECK(d.changed == 0 && d.added == 13 && d.pending > 0);
+    memset(&s, 0, sizeof s);
+    CHECK(sh_modserve_each_refresh(rf_visit, &s) == d.pending);
+    CHECK(strstr(s.order, "1:entityDef:monster/imp:gone;") && !strstr(s.order, "now;") && !strstr(s.order, "rf.mod"));
+    sh_modserve_last_diff(&d);
+    CHECK(d.pending == 0);
+    /* The engine read some of v1 through the provider. */
+    CHECK(open_text(RF_SH, text, sizeof text) == 1 && open_text(RF_NAME, text, sizeof text) == 1 &&
+          open_text(RF_MODEL, text, sizeof text) == 1);
+    /* A map used the mod: its gameplay decls are registered this session. */
+    {
+        sh_modserve_plan p;
+        const char *h[1];
+        char hash[65];
+        h[0] = hash64('1', hash);
+        CHECK(sh_modserve_plan_bundles(h, 1, &p, NULL) > 0);
+        CHECK(sh_modserve_plan_run(&p, &g_fake, "map") > 0);
+        sh_modserve_plan_free(&p);
+        CHECK(sh_modserve_plan_refresh(&p) == 0 && p.count == 0);
+        sh_modserve_plan_free(&p);
+    }
+
+    /* The author edits the folder; the rebuild rule writes v2; the rescan publishes it. */
+    make_bundle(root, "rf.mod", "rf.mod", "1.0.0", '2', "\"" RF_SH "\"", v2, 12, NULL);
+    log_clear();
+    CHECK(sh_modserve_index_rescan() == 1);
+    sh_modserve_last_diff(&d);
+    CHECK(d.changed == 4 && d.changed_decls == 2 && d.changed_models == 1 && d.changed_images == 0);
+    CHECK(d.changed_restart == 1 && strstr(d.restart_first, RF_ANIM) && d.changed_map == 0);
+    CHECK(d.added == 2 && d.added_decls == 2 && d.added_rows == 1 && d.added_active == 1 && d.changed_rows == 0);
+    CHECK(d.gone == 3 && d.gone_shadows == 1 && d.gone_names == 1 && d.gone_rows == 1);
+    CHECK(d.pending == 5 && d.dependents == 0);
+    /* The new gameplay decl of the mod in use is planned once; the new row is the palette's. */
+    {
+        sh_modserve_plan p;
+        CHECK(sh_modserve_plan_refresh(&p) == 1 && p.count == 1 && !strcmp(p.steps[0].name, "mods/rf.mod/new"));
+        sh_modserve_plan_free(&p);
+        CHECK(sh_modserve_plan_refresh(&p) == 0);
+        sh_modserve_plan_free(&p);
+    }
+    /* The decls that inherit from a changed or gone decl follow it, at any
+     * depth; a commented or nested inherit is no parent. Once per table. */
+    CHECK(sh_modserve_refresh_expand() == 3);
+    CHECK(sh_modserve_refresh_expand() == 0);
+    sh_modserve_last_diff(&d);
+    CHECK(d.pending == 8 && d.dependents == 3);
+    /* Exactly the changed decls, the gone shadow, the inheriting decls by
+     * generation and the changed model, in that order. */
+    memset(&s, 0, sizeof s);
+    s.keep_raw = 1;
+    CHECK(sh_modserve_each_refresh(rf_visit, &s) == 8);
+    CHECK(strstr(s.order, "1:snapEditorEntityDef:mods/rf.mod/oldrow:gone;"));
+    CHECK(strstr(s.order, "mods/rf.mod/child:now;") && strstr(s.order, "mods/rf.mod/orphan:now;") &&
+          strstr(s.order, "mods/rf.mod/grandchild:now;") && !strstr(s.order, "decoy"));
+    CHECK(strstr(s.order, "gonezombie:gone;") < strstr(s.order, "rf.mod/child:") &&
+          strstr(s.order, "rf.mod/child:") < strstr(s.order, "rf.mod/grandchild:") &&
+          strstr(s.order, "rf.mod/grandchild:") < strstr(s.order, "baseModel"));
+    CHECK(strstr(s.order, "1:entityDef:monster/zombie:now;") && strstr(s.order, "1:entityDef:mods/rf.mod/name:now;"));
+    CHECK(strstr(s.order, "1:entityDef:monster/gonezombie:gone;"));
+    CHECK(strstr(s.order, "2:baseModel:md6/mods/rf.mod/body.md6mesh:now;"));
+    CHECK(strstr(s.order, "mods/rf.mod/name:now;") < strstr(s.order, "gonezombie") &&
+          strstr(s.order, "gonezombie") < strstr(s.order, "baseModel"));
+    CHECK(!strstr(s.order, "keep") && !strstr(s.order, "skin") && !strstr(s.order, "idle") &&
+          !strstr(s.order, "rf.mod/new") && !strstr(s.order, "oldname") && !strstr(s.order, ":gated"));
+    /* The decls are settled and no early decl; the model is still pending. */
+    sh_modserve_last_diff(&d);
+    CHECK(d.pending == 1);
+    memset(&u, 0, sizeof u);
+    sh_modserve_each_unopened_shadow(unopened_visit, &u);
+    CHECK(!strstr(u.order, "monster/zombie"));
+    /* A rescan of the same bytes changes nothing and keeps the pending model. */
+    CHECK(sh_modserve_index_rescan() == 1);
+    sh_modserve_last_diff(&d);
+    CHECK(d.changed == 0 && d.added == 0 && d.gone == 0 && d.pending == 1);
+    memset(&s, 0, sizeof s);
+    CHECK(sh_modserve_each_refresh(rf_visit, &s) == 1 && strstr(s.order, "baseModel"));
+    sh_modserve_last_diff(&d);
+    CHECK(d.pending == 0);
+    memset(&s, 0, sizeof s);
+    CHECK(sh_modserve_each_refresh(rf_visit, &s) == 0);
+    CHECK(sh_modserve_each_refresh(NULL, NULL) == 0);
+    /* Leave the table test_requirements left. */
+    _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\plain\\mods", top);
+    (void)sh_modserve_index_build(root);
+}
+
 static void test_compose_unit(void)
 {
     const char *t[3];
@@ -1573,6 +1746,7 @@ int main(void)
     test_rescan();
     test_requirements();
     test_ungated_raw();
+    test_refresh();
     test_conflicts();
     test_editor_refs();
     test_watermark();
