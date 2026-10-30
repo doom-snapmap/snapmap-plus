@@ -524,6 +524,39 @@ shadow, a new one lives under `generated/swf/mods/<id>/` with its atlas
 `generated/swf/mods/<id>/<stem>.bimage` beside it. Each served movie logs
 `MODS: swf: served <request> (<bundle>) at load state N` (the first 32).
 
+### Mod modules
+
+A bundle module is `maps/modules/mods/<id>/<leaf>.decl` (provides `snapModule`,
+named by that path, the name a map's `moduleName` holds) plus
+`generated/decls/snapmoduleinfo/mods/<id>/<leaf>.decl`, which the builder
+requires in the same bundle. Every other file is a name the engine derives: the
+render model `maps/modules/palettes/mega_blessed/mods/<id>/<leaf>.bmodel` (the
+loader's palette group is the stock palette's, `mega_blessed`), and under
+`maps/modules/mods/<id>/<leaf>/` the collision `_combo/world.bcm` and
+`<leaf>_floor_collision.bcm`, navigation `generated/.../<leaf>.baas_monster48`,
+96 and 128, `<leaf>.sbsp`, `<leaf>.ambientsh`, `_combo/_world.tome` and
+`lightprobes/<entity>_compressed.bimage` (the probe path is built from the
+module's `name` and the probe entity's name). A multiplayer map's files are
+byte-identical stock pointers at those names. The per-map kinds `.sbsp`,
+`.ambientsh`, `.tome` and `.pages` are admitted only as pointers
+(`sh_mb_pointer_only_kind`). A pointer that restores installed content under
+its own name (`sh_mb_stock_restore`: the request is its source, or
+`generated/decls/<type>/<source>.decl` for an own-path decl such as a map's
+`mega.decl`, which models name with `.decl`) sits outside the namespace without
+a `shadows` entry; the activation plan treats it as a shadow, leaving it to the
+provider when the engine knows the name and registering it when it does not
+(SnapMap does not see multiplayer content in `gameresources`). Placement reuses
+the Grid Room route: the FindModule and HasModule detours ask the serving index
+(`sh_modserve_module_served`) about a name the stock palette lacks, and a served
+module is loaded with the native loader into a private one-module palette whose
+loader context comes from the stock palette's first record; the snapModuleInfo
+is registered the same way as a variant's, without the one-floor, four-wall
+check. The private palette's collision is retained across Play like a
+variant's. There is no Add-browser tile; a saved map or a module prefab that
+names the module places it. The module decl's bounds decide the placement
+limit check; for a multiplayer map they cover the arena, so it fits the native
+16000 bound at the origin.
+
 ### Mod virtual-texture families
 
 A material binds to a virtual-texture family only when a page-source record

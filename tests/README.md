@@ -91,6 +91,14 @@ Checks native helpers, engine-interface contracts, frontend JavaScript and optio
   hash against `alex.r2-imp.canonical.json`; it also checks logical names, the
   needs scan, build numbering and each refusal rule. The fixture files are
   hashed byte for byte, so their line endings are never converted.
+- `modmodule_test.c` covers SnapMap modules served from a bundle over a
+  synthetic install: snapModule typing, the pointer-only kinds (`.sbsp`,
+  `.ambientsh`, `.tome`, `.pages`) refused as carried bytes, stock restores
+  outside the namespace, a module without its snapModuleInfo, serving and the
+  activation plan. Set `SH_MODMODULE_SOURCE` to a source mod folder (and
+  `SH_MODMODULE_DOOM` to the install) to build it against the real game and
+  write its `bundle.json`; `SH_MODMODULE_PREFAB` adds a check of a module
+  prefab that names its module.
 - `modstore_test.c` installs the fixture into a temporary store: blobs, hard
   links and the copy fallback, verification and corruption, in-place builds,
   need resolution across installed bundles, and the store lock (an installer

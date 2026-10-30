@@ -267,7 +267,7 @@ static void test_builder(const char *tmp)
     make_mod(dir, NULL);
     put_rel(dir, "assets\\maps\\mods\\t.stock\\other.tome", OWN, sizeof OWN);
     CHECK(!sh_mb_build(dir, &RESOLVER, &b));
-    CHECK_CAUSE(b, "file type not allowed: assets/maps/mods/t.stock/other.tome");
+    CHECK_CAUSE(b, "assets/maps/mods/t.stock/other.tome is not installed content: a .sbsp, .ambientsh, .tome or .pages file can only be a stock pointer");
     sh_mb_free(&b);
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\mod6", tmp);
     make_mod(dir, ",\"stock\":{\"assets/x.decl\":{\"source\":\"" P_DECL "\"}}");

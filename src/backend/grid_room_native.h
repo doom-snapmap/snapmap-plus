@@ -8,6 +8,15 @@
 /* Bind the private module lookup on a quiescent boot thread. Runtime creation
  * occurs only on the engine thread, through the native module loader. */
 int sh_grid_native_install(const sig_result *results,size_t count,const uint8_t *base);
+/* Bundle modules. `served(request, module)` answers 1 when an installed mod
+ * bundle serves `request` (module 1: as a snapModule decl, the name a map's
+ * moduleName holds). A module lookup the stock palette cannot answer and the
+ * bundle serves is loaded into its own private palette, as a Grid Room variant
+ * is (log line "MODS: module <name> loaded into a private palette"). */
+typedef int (*sh_grid_module_served_fn)(const char *request,int module);
+void sh_grid_native_set_module_source(sh_grid_module_served_fn served);
+/* "maps/modules/<path>.decl" -> "<path>" (the snapModuleInfo name). 1 ok. */
+int sh_grid_module_logical(const char *name,char *out,size_t cap);
 int sh_grid_native_read(void *edit_data,int instance,sh_grid_size *size);
 int sh_grid_native_apply(void *edit_data,int instance,const sh_grid_size *size);
 void *sh_grid_native_wrapper(const sh_grid_size *size);
