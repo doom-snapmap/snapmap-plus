@@ -138,8 +138,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     <!-- Tab order and the initially active Entities tab are independent. -->
     <div class="tab" data-tab="assets">Assets</div>
     <div class="tab active" data-tab="entities">Entities</div>
-    <div class="tab" data-tab="prefabs">Prefabs</div>
     <div class="tab" data-tab="timelines">Timelines</div>
+    <div class="tab" data-tab="prefabs">Prefabs</div>
     <div class="tab" data-tab="mods">Mods</div>
   </div>
 
@@ -3287,7 +3287,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       else { var plt = pfPlaceToast(d); toast(plt.text, plt.level); }
     } else if (d.kind === 'deletePrefabResult') {
       if (d.result === 1) {
-        toast('Deleted "' + d.name + '"', 'ok');
+        toast('Moved "' + d.name + '" to the Recycle Bin', 'ok');
         clearPrefabSelection();
       } else if (d.result === 0) toast('Could not delete "' + d.name + '" (missing or in use)', 'err');
       else toast('Could not delete "' + d.name + '" (see log)', 'err');
@@ -3320,7 +3320,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       if (movedNames.length) { toast('Moved ' + movedNames.length + ' prefab' + (movedNames.length === 1 ? '' : 's') + (d.toFolder ? ' to "' + d.toFolder + '"' : ' to the root list'), 'ok'); pfAfterMove(d.toFolder || '', movedNames); }
       if (d.failed) toast('Could not move ' + d.failed + ' prefab' + (d.failed === 1 ? '' : 's') + ' (a name collision, most likely)', 'err');
     } else if (d.kind === 'deletePrefabsResult') {
-      if (d.deleted) toast('Deleted ' + d.deleted + ' prefab' + (d.deleted === 1 ? '' : 's'), 'ok');
+      if (d.deleted) toast('Moved ' + d.deleted + ' prefab' + (d.deleted === 1 ? '' : 's') + ' to the Recycle Bin', 'ok');
       if (d.failed) toast('Could not delete ' + d.failed + ' prefab' + (d.failed === 1 ? '' : 's') + ' (missing or in use)', 'err');
       clearPrefabSelection();
     } else if (d.kind === 'timelineData') {

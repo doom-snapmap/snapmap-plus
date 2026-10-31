@@ -1124,16 +1124,41 @@ static void poc_list_json_dir(const std::string &dirPath, std::vector<std::strin
     std::sort(names.begin(), names.end());
 }
 
-/* Delete a prefab: 1 = deleted, 0 = file operation failed, -1 = path refused. */
+/* Move a file to the Windows Recycle Bin (SHFileOperationW with FOF_ALLOWUNDO,
+ * no dialogs). Falls back to an outright delete when the shell refuses, so a
+ * file is always gone afterwards when this returns 1. 0 = still there. */
+static int poc_recycle_file(const char *path)
+{
+    wchar_t wide[1024], full[1024 + 2];
+    int n = MultiByteToWideChar(CP_ACP, 0, path, -1, wide, (int)(sizeof wide / sizeof wide[0]));
+    if (n > 0) {
+        DWORD len = GetFullPathNameW(wide, 1024, full, NULL);
+        if (len > 0 && len < 1024) {
+            full[len + 1] = 0;   /* double NUL: one path */
+            SHFILEOPSTRUCTW op;
+            memset(&op, 0, sizeof op);
+            op.wFunc = FO_DELETE;
+            op.pFrom = full;
+            op.fFlags = FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT | FOF_NOERRORUI;
+            if (SHFileOperationW(&op) == 0 && !op.fAnyOperationsAborted &&
+                GetFileAttributesW(full) == INVALID_FILE_ATTRIBUTES) return 1;
+        }
+    }
+    poc_log((std::string("recycle: the Recycle Bin did not take ") + path + "; deleting it outright").c_str());
+    return DeleteFileA(path) ? 1 : 0;
+}
+
+/* Delete a prefab (to the Recycle Bin): 1 = gone, 0 = file operation failed, -1 = path refused. */
 static int poc_delete_one_prefab(const std::string &folder, const std::string &name)
 {
     if (name.empty()) return -1;
     char path[1024];
     if (!poc_prefab_file_path(folder, name, path, (int)sizeof path)) return -1;
-    int result = DeleteFileA(path) ? 1 : 0;
+    int result = poc_recycle_file(path);
     if (result == 1) {   /* the sidecar goes with its prefab; absent is fine */
         char mp[1024];
-        if (poc_prefab_meta_path(folder, name, mp, (int)sizeof mp)) DeleteFileA(mp);
+        if (poc_prefab_meta_path(folder, name, mp, (int)sizeof mp) && GetFileAttributesA(mp) != INVALID_FILE_ATTRIBUTES)
+            poc_recycle_file(mp);
     }
     return result;
 }
