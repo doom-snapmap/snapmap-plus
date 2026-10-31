@@ -67,9 +67,10 @@ Checks native helpers, engine-interface contracts, frontend JavaScript and optio
   `SH_MODLEGACY_FIXTURES` to a folder holding the campaign's carrier maps to add
   an integration pass; it is skipped otherwise. The maps are not in the
   repository because their packages contain game files.
-- `modnet_test.c`, `modsync_test.c` and `modexport_test.c` cover the store client, the upload,
-  download, release and retry flows, and the rawmap ZIP export and import against a loopback stub
-  of the store (`mod_store_stub.h`); no real network is used.
+- `modnet_test.c` and `modsync_test.c` cover the store client, the upload, download, release and
+  retry flows against a loopback stub of the store (`mod_store_stub.h`); no real network is used.
+  `modexport_test.c` covers the map and prefab ZIP exports, which carry each mod as its installed
+  folder, and their import as the ordinary install of each folder, with pure file work.
 - `modpublish_test.c` checks the publish side against the loopback stub with
   engine doubles: a save without rows passing through, the over-bound refusal,
   the first-time question (No cancels and leaves the setting, Yes sets it,
