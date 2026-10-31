@@ -1291,6 +1291,11 @@ static int ie_mods_placed_names(sh_modui_name_fn emit, void *context)
 #define ED_DEACT_REASON_OFF  0x2366c    /* 3: deactivated for Play */
 #define IE_LOAD_STATE_RUNNING 3
 static const uint8_t *g_mods_load_state_at;
+/* idLoadScreen (glb "load_screen"): its thread's running byte at +0x4b2 is set
+ * while a map (the hub's shell map included) loads; load_state reads 3 then,
+ * as with any map loaded, so it cannot tell a load in progress. */
+#define IE_LOAD_SCREEN_RUNNING_OFF 0x4b2
+static const uint8_t *g_mods_load_screen_at;
 
 static void *ie_mods_edit(void)
 {
@@ -1381,6 +1386,18 @@ static int ie_mods_busy(char *cause, size_t cap)
     if (g_mods_load_state_at && ie_read_s32(g_mods_load_state_at, &state) && state != 0 && state != IE_LOAD_STATE_RUNNING) {
         _snprintf_s(cause, cap, _TRUNCATE, "a map is loading (state %d); try again when it has loaded", state);
         return 1;
+    }
+    if (g_mods_load_screen_at) {
+        const uint8_t *thread = NULL;
+        uint8_t running = 0;
+        __try {
+            thread = *(const uint8_t *const *)g_mods_load_screen_at;
+            running = thread ? thread[IE_LOAD_SCREEN_RUNNING_OFF] : 0;
+        } __except (EXCEPTION_EXECUTE_HANDLER) { running = 0; }
+        if (running) {
+            strncpy_s(cause, cap, "a map is loading; try again when it has loaded", _TRUNCATE);
+            return 1;
+        }
     }
     return 0;
 }
@@ -1475,6 +1492,7 @@ int sh_iface_engine_install(const sig_result *results, size_t n, const uint8_t *
         mods.on_main_thread = g_mods_main_thread_at ? ie_mods_on_main : NULL;
         mods.placed_names   = ie_mods_placed_names;
         if (module_base) g_mods_load_state_at = (const uint8_t *)glb_resolve(module_base, "load_state", NULL);
+        if (module_base) g_mods_load_screen_at = (const uint8_t *)glb_resolve(module_base, "load_screen", NULL);
         mods.map_json        = ie_mods_map_json;
         mods.map_info        = ie_mods_map_info;
         mods.delete_entities = ie_mods_delete;
