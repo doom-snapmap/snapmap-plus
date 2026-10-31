@@ -28,7 +28,6 @@ typedef struct mg_item {
     char name[MG_NAME_MAX];            /* overrides-relative, '/' */
     int kind;
     int outcome;
-    int deferred;                      /* left for the worker */
     int nested;                        /* the one package folder inside an unmarked folder */
     unsigned movies;                   /* .bswf movies left out */
     unsigned files;                    /* files found by the measuring walk */
@@ -58,7 +57,6 @@ typedef struct mg_ctx {
     int again;
     int backups_removed;
     ULONGLONG started;
-    unsigned long long boot_ms;
 } mg_ctx;
 
 static SRWLOCK g_mg_lock = SRWLOCK_INIT;
@@ -539,7 +537,8 @@ static unsigned g_mg_pointers;
 static unsigned long long g_mg_pointer_bytes;
 
 /* modlegacy's builder for a delivered package: the normal builder over the
- * installed bundles, without the game's resource reader (not up at boot).
+ * installed bundles, without the game's resource reader (the store tool
+ * runs without the engine; in the game the pass runs on a worker).
  * Copies of installed content still become stock pointers: the stock bridge
  * reads the installed archives from disk, not through the engine. */
 static int mg_build_legacy(const char *folder_acp, char *first_cause, size_t n)
@@ -871,7 +870,6 @@ static void mg_stats(const mg_ctx *c, sh_modmigrate_stats *s)
     s->entries = c->entries;
     s->ran = 1;
     s->backups_removed = c->backups_removed;
-    s->boot_ms = c->boot_ms;
     s->ms = GetTickCount64() - c->started;
     for (i = 0; i < c->count; i++) {
         const mg_item *it = &c->items[i];
@@ -911,9 +909,9 @@ static int mg_write_record(mg_ctx *c, int complete)
     mg_putq(&b, c->overrides_u8);
     if (!complete)
         mg_putf(&b, ",\n  \"entries\": %u,\n  \"built\": %u,\n  \"converted\": %u,\n  \"reused\": %u,\n  \"skipped\": %u,"
-                    "\n  \"refused\": %u,\n  \"duplicates\": %u,\n  \"pending\": %u,\n  \"bootMs\": %llu,\n  \"ms\": %llu,"
+                    "\n  \"refused\": %u,\n  \"duplicates\": %u,\n  \"pending\": %u,\n  \"ms\": %llu,"
                     "\n  \"overrideBackupsRemoved\": %s",
-                s.entries, s.built, s.converted, s.reused, s.skipped, s.refused, s.duplicates, s.pending, s.boot_ms, s.ms,
+                s.entries, s.built, s.converted, s.reused, s.skipped, s.refused, s.duplicates, s.pending, s.ms,
                 c->backups_removed ? "true" : "false");
     mg_puts(&b, ",\n  \"folders\": [");
     for (i = 0; i < c->count; i++) {
@@ -1051,10 +1049,10 @@ static void mg_finish(mg_ctx *c)
     int wrote = mg_write_record(c, 1);
     mg_stats(c, &s);
     mg_log("MODS: migration: %u entr%s in " MG_OVERRIDES ": %u built, %u delivered converted, %u delivered reused, %u skipped, "
-           "%u refused, %u duplicate id(s); %llu MiB in %llu ms (%llu ms before the serving index); %u file(s) became "
+           "%u refused, %u duplicate id(s); %llu MiB in %llu ms; %u file(s) became "
            "stock pointers, %llu KiB not stored; record %s; the " MG_OVERRIDES " folder is unchanged",
            s.entries, s.entries == 1 ? "y" : "ies", s.built, s.converted, s.reused, s.skipped, s.refused, s.duplicates,
-           s.bytes >> 20, s.ms, s.boot_ms, s.pointers, s.pointer_bytes >> 10, wrote ? "mods\\snapmap-plus.json (migration)" : "NOT written");
+           s.bytes >> 20, s.ms, s.pointers, s.pointer_bytes >> 10, wrote ? "mods\\snapmap-plus.json (migration)" : "NOT written");
     mg_publish_stats(c);
 }
 
@@ -1087,56 +1085,6 @@ static int mg_spawn(mg_ctx *c)
     t = CreateThread(NULL, 0, mg_worker, c, 0, NULL);
     if (!t) return 0;
     g_mg_thread = t;
-    return 1;
-}
-
-int sh_modmigrate_boot(void)
-{
-    mg_ctx *c;
-    int why;
-    size_t i;
-    unsigned long long budget = 0;
-    unsigned files = 0;
-    if (InterlockedCompareExchange(&g_mg_busy, 1, 0) != 0) return -1;
-    c = mg_prepare(0, &why);
-    if (!c) { InterlockedExchange(&g_mg_busy, 0); return why; }
-    /* Small folders now, so the serving index built next already has them. */
-    for (i = 0; i < c->count; i++) {
-        mg_item *it = &c->items[i];
-        if (it->outcome != SH_MODMIGRATE_PENDING) { mg_log_item(it); continue; }
-        if (it->bytes <= SH_MODMIGRATE_BOOT_BYTES && it->files <= SH_MODMIGRATE_BOOT_FILES &&
-            budget + it->bytes <= SH_MODMIGRATE_BOOT_TOTAL && files + it->files <= SH_MODMIGRATE_BOOT_TOTAL_FILES &&
-            GetTickCount64() - c->started < SH_MODMIGRATE_BOOT_MS) {
-            budget += it->bytes;
-            files += it->files;
-            mg_do_item(c, it, i);
-        } else it->deferred = 1;
-    }
-    c->boot_ms = GetTickCount64() - c->started;
-    mg_publish_stats(c);
-    {
-        unsigned deferred = 0;
-        unsigned long long bytes = 0;
-        for (i = 0; i < c->count; i++)
-            if (c->items[i].outcome == SH_MODMIGRATE_PENDING) { deferred++; bytes += c->items[i].bytes; }
-        if (!deferred) {
-            mg_finish(c);
-            mg_ctx_free(c);
-            InterlockedExchange(&g_mg_busy, 0);
-            return 1;
-        }
-        mg_write_record(c, 0);
-        mg_log("MODS: migration: %llu ms at boot; %u more folder(s) (%llu MiB) continue on a background thread and "
-               "the serving index is rebuilt when they are done", c->boot_ms, deferred, bytes >> 20);
-        if (!mg_spawn(c)) {
-            mg_log("MODS: migration: the background thread could not start; the larger folders are done now");
-            for (i = 0; i < c->count; i++)
-                if (c->items[i].outcome == SH_MODMIGRATE_PENDING) mg_do_item(c, &c->items[i], i);
-            mg_finish(c);
-            mg_ctx_free(c);
-            InterlockedExchange(&g_mg_busy, 0);
-        }
-    }
     return 1;
 }
 

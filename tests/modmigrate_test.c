@@ -9,8 +9,8 @@
  * that overrides\ is byte-for-byte unchanged, that a second pass does nothing
  * and --again repeats it identically, that a map carrying the same delivery
  * (or the same authored tree) is answered by the migrated bundle without a
- * conversion, and the boot split: small folders before the index, the large
- * one on the worker, then the record completes. The Mods tab's Migrate button
+ * conversion, and the in-game pass on the worker (sh_mods migrate): the
+ * record completes and the serving index is rebuilt. The Mods tab's Migrate button
  * follows sh_modmigrate_pending: entries the record does not list, and
  * skipped or refused ones changed since it was written.
  *
@@ -28,6 +28,9 @@
 #include "../src/backend/modlegacy.h"
 #include "../src/backend/modstore.h"
 #include "../src/backend/modbundle.h"
+
+/* A folder big enough that the worker is still busy while the test installs. */
+#define MG_TEST_LARGE ((16ull << 20) + 4096)
 #include "../src/backend/map_shards.h"
 
 static int g_failed, g_checks;
@@ -538,27 +541,26 @@ static void kept_backups(const char *root)
     CHECK(exists(path) && strstr(g_log, "override-backups is not empty; it is left in place") != NULL);
 }
 
-static void boot_split(const char *root)
+/* `sh_mods migrate` in the game: the pass on the worker, then the serving index rebuilt. */
+static void worker_pass(const char *root)
 {
     char ov[MAX_PATH], path[MAX_PATH * 2], *record;
     sh_modmigrate_stats st;
     int rescans;
-    printf("-- boot: the small folder before the index, the large one on the worker\n");
+    printf("-- sh_mods migrate: the pass on the worker, then the serving index\n");
     CreateDirectoryA(root, NULL);
     _snprintf_s(ov, sizeof ov, _TRUNCATE, "%s\\overrides", root);
     put_file(ov, "small/package.json", "{\"id\": \"small\", \"name\": \"Small\"}");
     put_file(ov, "small/assets/generated/decls/entitydef/small/s.decl", DECL_A);
     put_file(ov, "large/package.json", "{\"id\": \"large\", \"name\": \"Large\"}");
-    put_bytes(ov, "large/assets/generated/image/large/sky.bimage", (size_t)SH_MODMIGRATE_BOOT_BYTES + 4096, 7);
+    put_bytes(ov, "large/assets/generated/image/large/sky.bimage", (size_t)MG_TEST_LARGE, 7);
     configure(root);
     g_log[0] = 0;
     rescans = g_mod_stub_rescans;
-    CHECK(sh_modmigrate_boot() == 1);
-    /* At return the small one is built; the record says incomplete until the worker ends. */
+    CHECK(sh_modmigrate_start(0) == 1);
+    CHECK(sh_modmigrate_wait(120000) == 1);
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\mods\\small\\mod.json", root);
     CHECK(exists(path));
-    CHECK(strstr(g_log, "1 more folder(s)") != NULL);
-    CHECK(sh_modmigrate_wait(120000) == 1);
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\mods\\large\\mod.json", root);
     CHECK(exists(path));
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\mods", root);
@@ -566,11 +568,10 @@ static void boot_split(const char *root)
     CHECK(record && strstr(record, "\"complete\":true") && strstr(record, "\"folders\":[]"));
     free(record);
     sh_modmigrate_last(&st);
-    printf("  boot part %llu ms, whole pass %llu ms\n", st.boot_ms, st.ms);
-    CHECK(st.built == 2 && st.pending == 0 && st.boot_ms <= st.ms);
+    CHECK(st.built == 2 && st.pending == 0);
     CHECK(g_mod_stub_rescans == rescans + 1 && strstr(g_log, "serving index rebuilt after the background pass") != NULL);
-    /* The next start does nothing. */
-    CHECK(sh_modmigrate_boot() == 0);
+    /* Done: the next pass without --again has nothing to do. */
+    CHECK(sh_modmigrate_start(0) == 0);
 }
 
 static void incomplete_record(const char *root)
@@ -665,7 +666,7 @@ static void store_lock_contention(const char *root)
     put_file(ov, "tiny/package.json", "{\"id\": \"tiny\", \"name\": \"Tiny\"}");
     put_file(ov, "tiny/assets/generated/decls/entitydef/tiny/t.decl", DECL_A);
     put_file(ov, "large/package.json", "{\"id\": \"large\", \"name\": \"Large\"}");
-    put_bytes(ov, "large/assets/generated/image/large/sky.bimage", (size_t)SH_MODMIGRATE_BOOT_BYTES + 4096, 7);
+    put_bytes(ov, "large/assets/generated/image/large/sky.bimage", (size_t)MG_TEST_LARGE, 7);
     _snprintf_s(mod, sizeof mod, _TRUNCATE, "%s\\authoring\\test.lockmod", root);
     put_file(mod, "mod.json", "{\"id\": \"test.lockmod\", \"version\": \"1.0.0\", \"name\": \"Lock\", \"author\": \"tester\"}");
     put_file(mod, "assets/generated/image/mods/test.lockmod/a.bimage", "bytes for the lock test");
@@ -708,7 +709,7 @@ int main(void)
     kept_backups(root);
     remove_tree(root);
     _snprintf_s(root, sizeof root, _TRUNCATE, "%ssmp_modmigrate_%lu_c", base, GetCurrentProcessId());
-    boot_split(root);
+    worker_pass(root);
     remove_tree(root);
     _snprintf_s(root, sizeof root, _TRUNCATE, "%ssmp_modmigrate_%lu_d", base, GetCurrentProcessId());
     incomplete_record(root);
