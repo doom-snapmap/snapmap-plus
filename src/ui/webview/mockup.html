@@ -2319,6 +2319,15 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     tlSavePendingEid = tlModel.eid;
     post({cmd:'openTimeline', eid: tlModel.eid});
   }
+  // A timeline resolves each "Runs on" entity once, when the map starts. Players spawn later, so a
+  // player1..player8 target is reported as a bad entity and its events never run. Entity-typed
+  // arguments are resolved when the event fires, so a player name works there.
+  function tlRuntimeTargetNote(ref) {
+    if (!/^player[1-8]$/i.test(String(ref || '').trim())) return '';
+    return 'Players do not exist yet when a timeline starts, so events on ' + String(ref).trim() +
+           ' never run. Target a map entity instead: for example "activate" on a Set (String) node whose' +
+           ' value is an smp: command, with ' + String(ref).trim() + ' as the activator.';
+  }
   // Show both ID and display name; the ID disambiguates entities with the same name.
   function tlEntityLabel(ref) {
     if (!ref) return '(no entity)';
@@ -2384,7 +2393,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     if (tlEntityComboActive >= out.length) tlEntityComboActive = out.length - 1;
     var h = '';
     for (var j = 0; j < out.length; j++) h += '<div class="combo-opt' + (j === tlEntityComboActive ? ' active' : '') + '" data-id="' + esc(out[j].id) + '">' + esc(out[j].label) + '</div>';
-    if (out.length === 0) h = '<div class="combo-empty">no matches -- free text is fine (e.g. player1)</div>';
+    if (out.length === 0) h = '<div class="combo-empty">no matches -- free text is fine (a map entity name)</div>';
     else if (out.length >= cap) h += '<div class="combo-hint">first ' + cap + ' shown -- type to narrow</div>';
     listEl.innerHTML = h;
     var act = listEl.querySelector('.combo-opt.active');
@@ -2509,7 +2518,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
        + '<div class="entity-picker-opts">'
        +   '<button type="button" class="btn" id="tlUseSelection" title="Set Runs on to the entity currently selected in the SnapMap editor (must be exactly one)">Use current selection</button>'
        + '</div>'
-       + '</div>';
+       + '</div>'
+       + '<div class="muted" id="tlRunsOnNote" style="margin:2px 0 6px;">' + esc(tlRuntimeTargetNote(tab.entity)) + '</div>';
 
     // Append a blank event to the local tab model; Save performs the native commit.
     h += '<div><button type="button" class="btn" id="tlAddEventcall">Add Eventcall</button></div>';
@@ -6622,6 +6632,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       if (tlModel) tlMarkDirty();   // one gate for every typed edit below (Runs-on, time, eventDef, arg inputs incl. combo picks that re-dispatch 'input')
       if (e.target && e.target.id === 'tlRunsOn' && tlModel) {
         tlModel.tabs[tlModel.active].entity = e.target.value;
+        var runsOnNote = document.getElementById('tlRunsOnNote');
+        if (runsOnNote) runsOnNote.textContent = tlRuntimeTargetNote(e.target.value);
         tlEntityComboActive = -1;
         tlRenderEntityCombo();
         var listEl = document.querySelector('#tlBody .entity-picker .combo-list');
@@ -6698,6 +6710,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
         e.target.value = picked.label;
         tlModel.tabs[tlModel.active].entity = picked.id;
         listEl.style.display = 'none';
+        var pickedNote = document.getElementById('tlRunsOnNote'); if (pickedNote) pickedNote.textContent = '';
       }
     });
     bodyEl.addEventListener('change', function(e){
@@ -6730,6 +6743,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
         tlMarkDirty();
         document.getElementById('tlRunsOn').value = opt.textContent;
         tlModel.tabs[tlModel.active].entity = opt.getAttribute('data-id');
+        var pickedNote = document.getElementById('tlRunsOnNote'); if (pickedNote) pickedNote.textContent = '';
         var ownList = opt.closest('.combo-list');
         if (ownList) ownList.style.display = 'none';
         return;
