@@ -1332,6 +1332,7 @@ static void test_ungated_raw(void)
 #define RF_ORPHAN  "generated/decls/entitydef/mods/rf.mod/orphan.decl"
 #define RF_DECOY   "generated/decls/entitydef/mods/rf.mod/decoy.decl"
 #define RF_OLDROW  "generated/decls/snapeditorentitydef/mods/rf.mod/oldrow.decl"
+#define RF_SHROW   "generated/decls/snapeditorentitydef/func/shadowrow.decl"   /* a stock editor row the mod shadows */
 #define RF_INHERIT_CHILD  "{\n\tinherit = \"mods/rf.mod/name\";\n}\n"
 #define RF_INHERIT_GRAND  "{\n\t// a parent\n\tinherit = \"mods/rf.mod/child\";\n}\n"
 #define RF_INHERIT_ORPHAN "{\n\tinherit=\"monster/gonezombie\";\n}\n"
@@ -1370,6 +1371,8 @@ static void test_refresh(void)
         { RF_DECOY, RF_INHERIT_DECOY, -1, "entityDef", "mods/rf.mod/decoy", NULL, '2' },
         { RF_OLDROW, "{ entityDef \"mods/rf.mod/keep\" }", -1, "snapEditorEntityDef", "mods/rf.mod/oldrow",
           "[{\"type\":\"entityDef\",\"name\":\"mods/rf.mod/keep\"}]", '3' },
+        { RF_SHROW, "{ entityDef \"monster/zombie\" }", -1, "snapEditorEntityDef", "func/shadowrow",
+          "[{\"type\":\"entityDef\",\"name\":\"monster/zombie\"}]", 'g' },
     };
     static const fx_file v2[] = {
         { RF_SH, "entityDef z2 {}", -1, "entityDef", "monster/zombie", NULL, '2' },
@@ -1396,7 +1399,7 @@ static void test_refresh(void)
     if (slash) *slash = 0;
     _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\refresh\\mods", top);
     mkdirs(root);
-    make_bundle(root, "rf.mod", "rf.mod", "1.0.0", '1', "\"" RF_SH "\", \"" RF_SH_GONE "\"", v1, 13, NULL);
+    make_bundle(root, "rf.mod", "rf.mod", "1.0.0", '1', "\"" RF_SH "\", \"" RF_SH_GONE "\", \"" RF_SHROW "\"", v1, 14, NULL);
     CHECK(sh_modserve_index_build(root) == 1);
     /* The first table of this root replaces another root's: every file is
      * new. Shadows the earlier tables served and no table serves since are
@@ -1404,7 +1407,7 @@ static void test_refresh(void)
      * new shadows are pending too (the engine may hold the game's text for
      * them); new names of the mod are not. Settle them. */
     sh_modserve_last_diff(&d);
-    CHECK(d.changed == 0 && d.added == 13 && d.changed_decls == 2 && d.pending > 0);
+    CHECK(d.changed == 0 && d.added == 14 && d.changed_decls == 3 && d.pending > 0);
     memset(&s, 0, sizeof s);
     CHECK(sh_modserve_each_refresh(rf_visit, &s) == d.pending);
     CHECK(strstr(s.order, "1:entityDef:monster/imp:gone;") && strstr(s.order, "1:entityDef:monster/zombie:now;") &&
@@ -1435,8 +1438,10 @@ static void test_refresh(void)
     CHECK(d.changed == 4 && d.changed_decls == 2 && d.changed_models == 1 && d.changed_images == 0);
     CHECK(d.changed_restart == 1 && strstr(d.restart_first, RF_ANIM) && d.changed_map == 0);
     CHECK(d.added == 2 && d.added_decls == 2 && d.added_rows == 1 && d.added_active == 1 && d.changed_rows == 0);
-    CHECK(d.gone == 3 && d.gone_shadows == 1 && d.gone_names == 1 && d.gone_rows == 1);
-    CHECK(d.pending == 5 && d.dependents == 0);
+    /* The shadowed stock editor row that went counts as a gone row too (the
+     * palette must be built again without the mod's version of it). */
+    CHECK(d.gone == 4 && d.gone_shadows == 2 && d.gone_names == 1 && d.gone_rows == 2);
+    CHECK(d.pending == 6 && d.dependents == 0);
     /* The new gameplay decl of the mod in use is planned once; the new row is the palette's. */
     {
         sh_modserve_plan p;
@@ -1450,12 +1455,12 @@ static void test_refresh(void)
     CHECK(sh_modserve_refresh_expand() == 3);
     CHECK(sh_modserve_refresh_expand() == 0);
     sh_modserve_last_diff(&d);
-    CHECK(d.pending == 8 && d.dependents == 3);
+    CHECK(d.pending == 9 && d.dependents == 3);
     /* Exactly the changed decls, the gone shadow, the inheriting decls by
      * generation and the changed model, in that order. */
     memset(&s, 0, sizeof s);
     s.keep_raw = 1;
-    CHECK(sh_modserve_each_refresh(rf_visit, &s) == 8);
+    CHECK(sh_modserve_each_refresh(rf_visit, &s) == 9);
     CHECK(strstr(s.order, "1:snapEditorEntityDef:mods/rf.mod/oldrow:gone;"));
     CHECK(strstr(s.order, "mods/rf.mod/child:now;") && strstr(s.order, "mods/rf.mod/orphan:now;") &&
           strstr(s.order, "mods/rf.mod/grandchild:now;") && !strstr(s.order, "decoy"));

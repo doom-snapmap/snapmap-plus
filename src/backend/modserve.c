@@ -2004,13 +2004,14 @@ static void ms_diff(ms_index *x, const ms_index *old)
         d->gone++;
         /* A shadow the map scope had withdrawn: the engine holds the game's bytes already. */
         if (of->is_shadow && !of->is_restore && ms_scoped(old, i) < 0) continue;
+        /* A removed editor row, the mod's own or a shadow of a stock one: re-parsed
+         * without the mod's bytes it resolves no entityDef, or the game's own row,
+         * so the palette must be built again without it. */
+        if (of->is_sedef && of->ptype && of->pname) d->gone_rows++;
         if (of->is_decl && of->is_shadow && !of->is_restore && of->ptype && of->pname) {
             d->gone_shadows++;
             if (!ms_add_gone(x, &cap, old, i, 1)) ms_log("refresh: out of memory; a removed shadow keeps its bundle's text");
         } else if (of->is_sedef && of->ptype && of->pname) {
-            /* A removed editor row: re-parsed without a source it resolves no
-             * entityDef, so the next palette build leaves it out. */
-            d->gone_rows++;
             if (!ms_add_gone(x, &cap, old, i, 1)) ms_log("refresh: out of memory; a removed editor row stays in the palette");
         } else if (of->is_decl) d->gone_names++;
     }
