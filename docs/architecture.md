@@ -1085,9 +1085,10 @@ at:
   last has its screen down, neither Play nor a load runs, and the engine's
   `map_left` (`iface_engine.c`) says the editor has left the map: no map
   object, or the editor state at `+0x23618` is 0 (no state runs: the hub or
-  the browser) or 8 (exiting). The Settings screen opened from the Start menu
-  also takes the editor screen down but leaves the state running, so the
-  listing stays. The tick sets the listing again from the open map when an
+  the browser) or 8 (exiting) with the deactivate reason at `+0x2366C` not
+  equal to 4. The Settings screen opened from the Start menu also takes the
+  editor screen down and also reads state 8, but with reason 4 (shutdown
+  reads 1), so the listing stays. The tick sets the listing again from the open map when an
   editor map is open without one;
 - the Mods tab's and the console's map add and Remove from map, at once.
 
