@@ -776,7 +776,7 @@ static void mu_put_row_v3(mu_buf *b, const mu_model *m, const mu_record *rec, co
     mu_knum(b, "modules", modules, 0);
     mu_knum(b, "vt", vt, 0);
     mu_puts(b, "},\"requirements\":");
-    /* Canonical {"cvars":{...}} from the builder (the only supported key). */
+    /* The builder's canonical {"commands":{...},"cvars":{...}}; "cvars" is always there. */
     mu_puts(b, e->loaded && bd->requirements && strstr(bd->requirements, "\"cvars\"") ? bd->requirements : "{\"cvars\":{}}");
     mu_puts(b, ",\"editorRowNames\":[");
     for (i = 0; i < u->row_count; i++) {
@@ -3499,6 +3499,8 @@ static void mu_print_entry(const mu_out *o, const mu_model *m, size_t i)
            e->delivered ? "" : u->origin);
 }
 
+static void mu_say_requirement(void *context, const char *line) { mu_say((const mu_out *)context, "%s", line); }
+
 int sh_modui_doctor(int verify, sh_modui_line_fn line, void *context)
 {
     const sh_modui_engine *e = mu_engine();
@@ -3519,6 +3521,7 @@ int sh_modui_doctor(int verify, sh_modui_line_fn line, void *context)
     mu_say(&o, "serving index: %d of %d bundle(s) active, %d file(s), %d shadow(s), %d conflict(s) (%d composed), %d editor row(s) registered",
            st.bundles_admitted, st.bundles_seen, st.files, st.shadows, st.conflicts, st.conflicts_composed, st.editor_rows_registered);
     for (i = 0; i < m.list.count; i++) mu_print_entry(&o, &m, i);
+    (void)sh_modserve_requirements_report(mu_say_requirement, &o);
     for (i = 0; i < m.row_count; i++) {
         const char *id = m.list.items[m.rows[i].serving].bundle.id;
         char keys[800];

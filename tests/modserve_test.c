@@ -786,11 +786,16 @@ static void test_rescan(void)
 
 /* ------------------------------------------------------------------ requirements */
 
-/* A fake cvar system with both gates. A queued set lands only on drain; the
- * gate events and the registrations share one event sequence. */
+/* A fake cvar system: the two blacklist gates as ints (as the engine's
+ * matchers read them) and a few other cvars as text, one of them read-only.
+ * A queued set lands only on drain; the cvar events, the console lines and
+ * the registrations share one event sequence. */
 static int g_gate_val[2], g_gate_pending[2], g_gate_has_pending[2];
 static int g_gate_mode;          /* SH_MODSERVE_GATE_SET, _QUEUED, or 0 to refuse */
-static int g_gate_reads, g_gate_sets, g_gate_drains;
+static int g_gate_reads, g_gate_sets, g_gate_drains, g_gate_lines;
+#define FAKE_TEXT 4
+static const char *const FAKE_NAMES[FAKE_TEXT] = { "com_maxFps", "r_fancy", "ro_locked", "g_label" };
+static char g_text_val[FAKE_TEXT][64];
 static char g_events[8192];
 static void event(const char *e)
 {
@@ -801,24 +806,32 @@ static int gate_index(const char *cvar)
 {
     return !strcmp(cvar, "g_useImageBlackList") ? 0 : !strcmp(cvar, "g_useResourceBlackList") ? 1 : -1;
 }
-static int gate_read(void *c, const char *cvar, int *value)
+static int text_index(const char *cvar)
 {
-    int g = gate_index(cvar);
+    int i;
+    for (i = 0; i < FAKE_TEXT; ++i) if (!strcmp(cvar, FAKE_NAMES[i])) return i;
+    return -1;
+}
+static int gate_read(void *c, const char *cvar, char *value, size_t cap)
+{
+    int g = gate_index(cvar), t = text_index(cvar);
     (void)c;
     g_gate_reads++;
-    if (g < 0) return 0;
-    *value = g_gate_val[g];
-    return 1;
+    if (g >= 0) { _snprintf_s(value, cap, _TRUNCATE, "%d", g_gate_val[g]); return 1; }
+    if (t >= 0) { strncpy_s(value, cap, g_text_val[t], _TRUNCATE); return 1; }
+    return 0;
 }
 static int gate_set(void *c, const char *cvar, const char *value)
 {
-    char e[96];
-    int g = gate_index(cvar);
+    char e[160];
+    int g = gate_index(cvar), t = text_index(cvar);
     (void)c;
     g_gate_sets++;
     _snprintf_s(e, sizeof e, _TRUNCATE, "S:%s=%s", cvar, value);
     event(e);
-    if (g < 0 || !g_gate_mode) return 0;
+    if (t == 2) return SH_MODSERVE_GATE_READ_ONLY;
+    if ((g < 0 && t < 0) || !g_gate_mode) return 0;
+    if (t >= 0) { strncpy_s(g_text_val[t], sizeof g_text_val[t], value, _TRUNCATE); return SH_MODSERVE_GATE_SET; }
     if (g_gate_mode == SH_MODSERVE_GATE_SET) g_gate_val[g] = atoi(value);
     else { g_gate_pending[g] = atoi(value); g_gate_has_pending[g] = 1; }
     return g_gate_mode;
@@ -832,8 +845,17 @@ static int gate_drain(void *c)
     for (g = 0; g < 2; ++g) if (g_gate_has_pending[g]) { g_gate_val[g] = g_gate_pending[g]; g_gate_has_pending[g] = 0; }
     return 1;
 }
-static const sh_modserve_gate_ops g_gates = { NULL, gate_read, gate_set, gate_drain };
-static const sh_modserve_gate_ops g_gates_nodrain = { NULL, gate_read, gate_set, NULL };
+static int gate_line(void *c, const char *line)
+{
+    char e[300];
+    (void)c;
+    g_gate_lines++;
+    _snprintf_s(e, sizeof e, _TRUNCATE, "C:%s", line);
+    event(e);
+    return 1;
+}
+static const sh_modserve_gate_ops g_gates = { NULL, gate_read, gate_set, gate_drain, gate_line };
+static const sh_modserve_gate_ops g_gates_nodrain = { NULL, gate_read, gate_set, NULL, gate_line };
 
 /* The registration fakes, recording into the same event sequence. */
 static int ev_source(void *c, const char *type, const char *name) { (void)c; (void)type; (void)name; return 0; }
@@ -859,11 +881,14 @@ static const sh_modserve_engine_ops g_ev = { NULL, ev_source, ev_register, ev_lo
 
 static void gates_reset(int image, int resource, int mode)
 {
+    static const char *const defaults[FAKE_TEXT] = { "200", "0", "0", "" };
+    int i;
     g_gate_val[0] = image;
     g_gate_val[1] = resource;
     g_gate_has_pending[0] = g_gate_has_pending[1] = 0;
+    for (i = 0; i < FAKE_TEXT; ++i) strcpy_s(g_text_val[i], sizeof g_text_val[i], defaults[i]);
     g_gate_mode = mode;
-    g_gate_reads = g_gate_sets = g_gate_drains = 0;
+    g_gate_reads = g_gate_sets = g_gate_drains = g_gate_lines = 0;
     g_events[0] = 0;
     sh_modserve_test_reset_gates();
     sh_modserve_test_reset_registration();
@@ -913,12 +938,16 @@ static void build_requirements_fixture(const char *root)
     make_bundle(root, "cyd.cut@1.0.0", "cyd.cut", "1.0.0", '1', NULL, cy, 3, NULL);
     g_bundle_extra = "\"requirements\": {\"cvars\": {\"g_useImageBlackList\": \"0\"}},\n  ";
     make_bundle(root, "img.only@2.0.0", "img.only", "2.0.0", '2', NULL, im, 1, NULL);
-    g_bundle_extra = "\"requirements\": {\"cvars\": {\"com_maxfps\": \"0\"}},\n  ";
+    /* What the builder refuses: a name that is not a cvar's, a decimal
+     * number, a line holding two commands, an unknown key. */
+    g_bundle_extra = "\"requirements\": {\"cvars\": {\"9lives\": \"0\"}},\n  ";
     make_bundle(root, "bad.cvar@1.0.0", "bad.x", "1.0.0", '3', NULL, one, 1, NULL);
-    g_bundle_extra = "\"requirements\": {\"cvars\": {\"g_useResourceBlackList\": \"1\"}},\n  ";
+    g_bundle_extra = "\"requirements\": {\"cvars\": {\"com_maxFps\": 0.5}},\n  ";
     make_bundle(root, "bad.value@1.0.0", "bad.x", "1.0.0", '4', NULL, one, 1, NULL);
     g_bundle_extra = "\"requirements\": {\"dlls\": {\"x\": \"0\"}},\n  ";
     make_bundle(root, "bad.key@1.0.0", "bad.x", "1.0.0", '5', NULL, one, 1, NULL);
+    g_bundle_extra = "\"requirements\": {\"commands\": {\"activate\": [\"echo a; quit\"]}},\n  ";
+    make_bundle(root, "bad.line@1.0.0", "bad.x", "1.0.0", '6', NULL, one, 1, NULL);
     make_plain(root);
     g_bundle_extra = NULL;
 }
@@ -939,42 +968,40 @@ static void test_requirements(void)
     build_requirements_fixture(req_root);
     make_plain(plain_root);
 
-    /* Collection at index time: only the two gates at "0"; anything else is
-     * that bundle's first cause; each requirement is logged once per bundle. */
+    /* Collection at index time: what the builder refuses is that bundle's
+     * first cause; each requirement is logged once per bundle. */
     log_clear();
     CHECK(sh_modserve_index_build(req_root) == 3);
     CHECK(log_count("MODS: requirements: g_useResourceBlackList=0 for cyd.cut@1.0.0") == 1);
     CHECK(log_count("MODS: requirements: g_useImageBlackList=0 for cyd.cut@1.0.0") == 1);
     CHECK(log_count("MODS: requirements: g_useImageBlackList=0 for img.only@2.0.0") == 1);
     CHECK(log_count("MODS: requirements:") == 3);
-    CHECK(log_has("bundle 'bad.cvar@1.0.0' skipped: requirement com_maxfps=\"0\" is refused (this build applies only "
-                  "g_useImageBlackList=0 and g_useResourceBlackList=0)"));
-    CHECK(log_has("bundle 'bad.value@1.0.0' skipped: requirement g_useResourceBlackList=\"1\" is refused"));
-    CHECK(log_has("bundle 'bad.key@1.0.0' skipped: requirement 'dlls' is refused (only cvars are supported)"));
+    CHECK(log_has("bundle 'bad.cvar@1.0.0' skipped: requirements.cvars key 9lives is not a cvar name"));
+    CHECK(log_has("bundle 'bad.value@1.0.0' skipped: requirements.cvars.com_maxFps must be a string, an integer or a boolean"));
+    CHECK(log_has("bundle 'bad.key@1.0.0' skipped: requirements key dlls is not supported (cvars, commands)"));
+    CHECK(log_has("bundle 'bad.line@1.0.0' skipped: requirements.commands.activate[0] must be one console command"));
     CHECK(!log_has("plain.mod@1.0.0' skipped"));
-    /* Union of the admitted bundles. */
-    CHECK(sh_modserve_requirements() == (SH_MODSERVE_REQ_IMAGE | SH_MODSERVE_REQ_RESOURCE));
-    CHECK(!strcmp(sh_modserve_requirement_cvar(0), "g_useImageBlackList") &&
-          !strcmp(sh_modserve_requirement_cvar(1), "g_useResourceBlackList") && !sh_modserve_requirement_cvar(2));
+    /* The distinct cvars the admitted bundles set. */
+    CHECK(sh_modserve_requirements() == 2 && sh_modserve_requirements_held() == 1);
     /* A rescan of the same bundles does not repeat the lines. */
     log_clear();
     CHECK(sh_modserve_index_rescan() == 3);
     CHECK(!log_has("MODS: requirements:"));
 
-    /* Queued sets: phase 1 disarms, the buffer is drained, phase 2 reads back,
+    /* Queued sets: phase 1 sets, the buffer is drained, phase 2 reads back,
      * and only then does the first DeclRegisterFile run. */
     gates_reset(1, 1, SH_MODSERVE_GATE_QUEUED);
     log_clear();
     CHECK(sh_modserve_plan_editor(&p) == 5);
     CHECK(sh_modserve_plan_run_gated(&p, &g_ev, &g_gates, "editor", &r) == 5);
-    CHECK(r.needed == 3 && r.changed == 3 && r.queued == 3 && r.drained == 1 && r.live == 3 && !r.not_live);
+    CHECK(r.needed == 2 && r.changed == 2 && r.queued == 2 && r.drained == 1 && r.live == 2 && !r.not_live);
     CHECK(g_gate_val[0] == 0 && g_gate_val[1] == 0 && g_gate_drains == 1 && g_gate_sets == 2);
     CHECK(ev_first("S:g_useImageBlackList=0") >= 0 && ev_first("S:g_useResourceBlackList=0") >= 0);
     CHECK(ev_last("S:") < ev_first("D;") && ev_first("D;") < ev_first("R:"));
     CHECK(ev_first("R:md6Def:mods/cyd.cut/cyber.md6") > ev_first("D;"));
     CHECK(log_has("MODS: editor: requirements applied: g_useImageBlackList=0, g_useResourceBlackList=0 "
                   "(queued, live after a command-buffer drain)"));
-    CHECK(sh_modserve_test_gates_owned() == 3);
+    CHECK(sh_modserve_test_gates_owned() == 2);
     sh_modserve_plan_free(&p);
 
     /* Already live: read, never set or drained, and nothing logged. */
@@ -983,24 +1010,24 @@ static void test_requirements(void)
     log_clear();
     sh_modserve_plan_editor(&p);
     CHECK(sh_modserve_plan_run_gated(&p, &g_ev, &g_gates, "editor", &r) == 5);
-    CHECK(r.live == 3 && !r.changed && g_gate_sets == 0 && g_gate_drains == 0 && !log_has("requirements applied"));
+    CHECK(r.live == 2 && !r.changed && g_gate_sets == 0 && g_gate_drains == 0 && !log_has("requirements applied"));
     sh_modserve_plan_free(&p);
 
     /* An immediate route needs no drain. */
     gates_reset(1, 1, SH_MODSERVE_GATE_SET);
     sh_modserve_plan_editor(&p);
     CHECK(sh_modserve_plan_run_gated(&p, &g_ev, &g_gates_nodrain, "editor", &r) == 5);
-    CHECK(r.live == 3 && r.changed == 3 && !r.queued && !r.drained && g_gate_drains == 0);
+    CHECK(r.live == 2 && r.changed == 2 && !r.queued && !r.drained && g_gate_drains == 0);
     CHECK(ev_last("S:") < ev_first("R:"));
     sh_modserve_plan_free(&p);
 
-    /* Queued with nothing to drain it: the gates are not live, so the bundles
+    /* Queued with nothing to drain it: the cvars are not live, so the bundles
      * that need them are blocked and register nothing; the plain bundle runs. */
     gates_reset(1, 1, SH_MODSERVE_GATE_QUEUED);
     log_clear();
     sh_modserve_plan_editor(&p);
     CHECK(sh_modserve_plan_run_gated(&p, &g_ev, &g_gates_nodrain, "editor", &r) == 1);
-    CHECK(r.not_live == 3 && !r.live && !r.drained);
+    CHECK(r.not_live == 2 && !r.live && !r.drained);
     CHECK(ev_first("R:snapEditorEntityDef:mods/plain.mod/thing") >= 0);
     CHECK(ev_first("cyd.cut") < 0 && ev_first("img.only") < 0);
     CHECK(log_has("queued but the command buffer could not be drained"));
@@ -1013,21 +1040,21 @@ static void test_requirements(void)
     gates_reset(1, 0, 0);
     sh_modserve_plan_editor(&p);
     CHECK(sh_modserve_plan_run_gated(&p, &g_ev, &g_gates, "editor", &r) == 1);
-    CHECK(r.not_live == SH_MODSERVE_REQ_IMAGE && r.live == SH_MODSERVE_REQ_RESOURCE);
+    CHECK(r.not_live == 1 && r.live == 1);
     sh_modserve_plan_free(&p);
     gates_reset(1, 1, SH_MODSERVE_GATE_SET);
     log_clear();
-    CHECK(sh_modserve_requirements_apply(NULL, "map", &r) == -1 && r.not_live == 3);
+    CHECK(sh_modserve_requirements_apply(NULL, "map", &r) == -1 && r.not_live == 2);
     CHECK(log_has("MODS: map: requirements g_useImageBlackList=0, g_useResourceBlackList=0 NOT applied"));
 
     /* Gates are released when no admitted bundle needs them any more, to the
      * value they displaced; after that nothing is touched again. */
     gates_reset(1, 1, SH_MODSERVE_GATE_SET);
-    CHECK(sh_modserve_requirements_apply(&g_gates, "editor", &r) == 1 && sh_modserve_test_gates_owned() == 3);
+    CHECK(sh_modserve_requirements_apply(&g_gates, "editor", &r) == 1 && sh_modserve_test_gates_owned() == 2);
     CHECK(sh_modserve_index_build(plain_root) == 1);
     log_clear();
     CHECK(sh_modserve_requirements_apply(&g_gates, "editor", &r) == 0);
-    CHECK(r.restored == 3 && g_gate_val[0] == 1 && g_gate_val[1] == 1 && sh_modserve_test_gates_owned() == 0);
+    CHECK(r.restored == 2 && g_gate_val[0] == 1 && g_gate_val[1] == 1 && sh_modserve_test_gates_owned() == 0);
     CHECK(log_has("requirement released: g_useResourceBlackList restored to 1"));
     g_gate_reads = g_gate_sets = 0;
     CHECK(sh_modserve_requirements_apply(&g_gates, "editor", &r) == 0 && g_gate_reads == 0 && g_gate_sets == 0);
@@ -1035,12 +1062,137 @@ static void test_requirements(void)
     /* The empty case: no bundle needs a requirement, so the cvars are never
      * read or set, by the apply or by a gated plan run. */
     gates_reset(1, 1, SH_MODSERVE_GATE_SET);
-    CHECK(sh_modserve_requirements() == 0);
+    CHECK(sh_modserve_requirements() == 0 && sh_modserve_requirements_held() == 0);
     CHECK(sh_modserve_requirements_apply(&g_gates, "editor", &r) == 0 && r.needed == 0);
     sh_modserve_plan_editor(&p);
     CHECK(p.count == 1 && sh_modserve_plan_run_gated(&p, &g_ev, &g_gates, "editor", &r) == 1);
     CHECK(g_gate_reads == 0 && g_gate_sets == 0 && g_gate_drains == 0 && ev_first("S:") < 0);
     sh_modserve_plan_free(&p);
+    gates_reset(1, 1, SH_MODSERVE_GATE_SET);
+}
+
+/* Requirements name no cvar or command the product knows: any cvar at any
+ * value, console lines when they start and stop, the later install losing a
+ * conflict, a cvar the engine refuses blocking only its own bundle. */
+static char g_report[8192];
+static void report_line(void *c, const char *line)
+{
+    size_t at = strlen(g_report);
+    (void)c;
+    _snprintf_s(g_report + at, sizeof g_report - at, _TRUNCATE, "%s\n", line);
+}
+
+static void make_gen(const char *root, const char *id, char digit, const char *req, int installed)
+{
+    char folder[64], pname[96], path[160], state[64], extra[512];
+    fx_file f[1];
+    _snprintf_s(folder, sizeof folder, _TRUNCATE, "%s@1.0.0", id);
+    _snprintf_s(pname, sizeof pname, _TRUNCATE, "mods/%s/thing", id);
+    _snprintf_s(path, sizeof path, _TRUNCATE, "generated/decls/snapeditorentitydef/mods/%s/thing.decl", id);
+    _snprintf_s(state, sizeof state, _TRUNCATE, "\"installedAt\": %d", installed);
+    _snprintf_s(extra, sizeof extra, _TRUNCATE, "\"requirements\": %s,\n  ", req);
+    f[0].path = path; f[0].body = "{ thing }"; f[0].size = -1; f[0].ptype = "snapEditorEntityDef"; f[0].pname = pname;
+    f[0].needs = NULL; f[0].blob = digit;
+    g_bundle_extra = extra;
+    make_bundle(root, folder, id, "1.0.0", digit, NULL, f, 1, state);
+    g_bundle_extra = NULL;
+}
+
+static void test_requirements_general(void)
+{
+    char top[MAX_PATH], root[MAX_PATH], root2[MAX_PATH], plain_root[MAX_PATH];
+    char *slash;
+    sh_modserve_plan p;
+    sh_modserve_gates r;
+    static const char *const A = "{\"cvars\": {\"r_fancy\": true, \"com_maxFps\": 120}, \"commands\": "
+                                 "{\"deactivate\": [\"echo first off\"], \"activate\": [\"echo first on\", \" bind x \\\"say hi\\\" \"]}}";
+    static const char *const B = "{\"cvars\": {\"com_maxFps\": \"60\"}, \"commands\": {\"activate\": [\"echo second on\"]}}";
+    static const char *const C = "{\"cvars\": {\"ro_locked\": \"1\"}}";
+    static const char *const D = "{\"cvars\": {\"com_maxFps\": \"120.0\", \"g_label\": \"two words\"}}";
+    static const char *const E = "{\"commands\": {\"deactivate\": [\"echo e off\"]}}";
+    strcpy_s(top, sizeof top, g_root);
+    slash = strrchr(top, '\\');
+    if (slash) *slash = 0;
+    _snprintf_s(root, sizeof root, _TRUNCATE, "%s\\reqgen\\mods", top);
+    _snprintf_s(root2, sizeof root2, _TRUNCATE, "%s\\reqgen2\\mods", top);
+    _snprintf_s(plain_root, sizeof plain_root, _TRUNCATE, "%s\\plain\\mods", top);
+    mkdirs(root);
+    mkdirs(root2);
+    make_gen(root, "a.first", 'a', A, 100);
+    make_gen(root, "b.second", 'b', B, 200);
+    make_gen(root, "c.locked", 'c', C, 300);
+    make_gen(root, "d.same", 'd', D, 400);
+    make_gen(root, "e.lines", 'e', E, 500);
+    make_gen(root2, "c.locked", 'c', C, 300);
+    make_gen(root2, "d.same", 'd', D, 400);
+    make_gen(root2, "e.lines", 'e', E, 500);
+
+    gates_reset(1, 1, SH_MODSERVE_GATE_SET);
+    log_clear();
+    CHECK(sh_modserve_index_build(root) == 5);
+    /* The later install asking another value loses, both named. */
+    CHECK(log_has("MODS: requirements: conflict: com_maxFps: b.second@1.0.0 asks \"60\", a.first@1.0.0 asks \"120\"; "
+                  "b.second@1.0.0, the later install, loses"));
+    CHECK(log_has("MODS: requirements: com_maxFps=120 for a.first@1.0.0") && log_has("MODS: requirements: r_fancy=1 for a.first@1.0.0"));
+    CHECK(log_has("MODS: requirements: 2 activate and 1 deactivate command(s) for a.first@1.0.0"));
+    CHECK(log_has("MODS: requirements: com_maxFps=120.0 for d.same@1.0.0") && !log_has("for b.second@1.0.0"));
+    CHECK(sh_modserve_requirements() == 4);
+
+    log_clear();
+    CHECK(sh_modserve_requirements_apply(&g_gates, "editor", &r) == -1);
+    CHECK(r.needed == 4 && r.live == 3 && r.not_live == 1 && r.commands == 2);
+    CHECK(!strcmp(g_text_val[0], "120") && !strcmp(g_text_val[1], "1") && !strcmp(g_text_val[3], "two words") &&
+          !strcmp(g_text_val[2], "0"));
+    /* Activate lines run after the cvars, in order, trimmed, once. */
+    CHECK(ev_first("C:echo first on") > ev_last("S:") && ev_first("C:bind x \"say hi\";") > ev_first("C:echo first on"));
+    CHECK(ev_first("C:echo second on") < 0 && ev_first("C:echo e off") < 0 && ev_first("C:echo first off") < 0);
+    CHECK(log_has("MODS: requirements: a.first: command \"echo first on\""));
+    CHECK(log_has("MODS: requirements: a.first: command \"bind x \"say hi\"\""));
+    CHECK(log_has("MODS: editor: requirement ro_locked=1 (c.locked@1.0.0) is not live: the engine marks it read-only"));
+    /* Only the bundles whose requirements are not live are blocked. */
+    sh_modserve_plan_editor(&p);
+    CHECK(p.count == 5);
+    log_clear();
+    CHECK(sh_modserve_plan_run_gated(&p, &g_ev, &g_gates, "editor", &r) == 3);
+    CHECK(log_has("(b.second) BLOCKED: requirement com_maxFps=60 lost to a.first@1.0.0, installed earlier, which asks \"120\""));
+    CHECK(log_has("(c.locked) BLOCKED: requirement ro_locked=1 is not live"));
+    CHECK(ev_first("R:snapEditorEntityDef:mods/a.first/thing") >= 0 && ev_first("R:snapEditorEntityDef:mods/d.same/thing") >= 0 &&
+          ev_first("R:snapEditorEntityDef:mods/e.lines/thing") >= 0);
+    sh_modserve_plan_free(&p);
+    /* Nothing runs twice. */
+    CHECK(g_gate_lines == 2 && !log_has("command \""));
+    g_report[0] = 0;
+    CHECK(sh_modserve_requirements_report(report_line, NULL) >= 8);
+    CHECK(strstr(g_report, "requirements: a.first@1.0.0: cvar com_maxFps=120: live\n") != NULL);
+    CHECK(strstr(g_report, "requirements: d.same@1.0.0: cvar g_label=two words: live\n") != NULL);
+    CHECK(strstr(g_report, "requirements: a.first@1.0.0: activate command \"echo first on\": ran\n") != NULL);
+    CHECK(strstr(g_report, "requirements: a.first@1.0.0: deactivate command \"echo first off\": runs when the mod stops\n") != NULL);
+    CHECK(strstr(g_report, "requirements: b.second@1.0.0: cvar com_maxFps=60: NOT live (com_maxFps=60 lost to a.first@1.0.0") != NULL);
+    CHECK(strstr(g_report, "requirements: b.second@1.0.0: activate command \"echo second on\": not run") != NULL);
+    CHECK(strstr(g_report, "requirements: c.locked@1.0.0: cvar ro_locked=1: NOT live (the engine marks it read-only; its steps are blocked)\n") != NULL);
+    CHECK(strstr(g_report, "requirements: e.lines@1.0.0: deactivate command \"echo e off\": runs when the mod stops\n") != NULL);
+
+    /* a.first and b.second go: a.first's deactivate line runs, r_fancy is
+     * restored, com_maxFps stays (d.same asks the same number). */
+    CHECK(sh_modserve_index_build(root2) == 3);
+    log_clear();
+    g_events[0] = 0;
+    (void)sh_modserve_requirements_apply(&g_gates, "rescan", &r);
+    CHECK(ev_first("C:echo first off") >= 0 && ev_first("C:echo second on") < 0 && r.commands == 1);
+    CHECK(log_has("MODS: rescan: requirements of a.first@1.0.0 stopped; running its deactivate commands"));
+    CHECK(!strcmp(g_text_val[1], "0") && log_has("requirement released: r_fancy restored to 0"));
+    CHECK(!strcmp(g_text_val[0], "120") && r.restored == 1);
+
+    /* Nothing installed asks anything: com_maxFps and g_label return to what
+     * they displaced, e.lines's line runs, and nothing is held. */
+    CHECK(sh_modserve_index_build(plain_root) == 1);
+    g_events[0] = 0;
+    log_clear();
+    CHECK(sh_modserve_requirements_apply(&g_gates, "editor", &r) == 0);
+    CHECK(!strcmp(g_text_val[0], "200") && !strcmp(g_text_val[3], "") && ev_first("C:echo e off") >= 0);
+    CHECK(sh_modserve_test_gates_owned() == 0 && sh_modserve_requirements_held() == 0);
+    g_report[0] = 0;
+    CHECK(sh_modserve_requirements_report(report_line, NULL) == 1 && strstr(g_report, "requirements: none"));
     gates_reset(1, 1, SH_MODSERVE_GATE_SET);
 }
 
@@ -1142,7 +1294,7 @@ static void test_ungated_raw(void)
     CHECK(sh_modserve_each_ungated_raw(raw_visit, seen) == 0 && !seen[0]);
     /* Live now: the model and the image are offered, the anim is not. */
     gates_reset(1, 1, SH_MODSERVE_GATE_SET);
-    CHECK(sh_modserve_requirements_apply(&g_gates, "editor", &r) == 1 && r.live == 3);
+    CHECK(sh_modserve_requirements_apply(&g_gates, "editor", &r) == 1 && r.live == 2);
     CHECK(open_text(GT_LATE, text, sizeof text) == 1);
     seen[0] = 0;
     CHECK(sh_modserve_each_ungated_raw(raw_visit, seen) == 2);
@@ -1542,7 +1694,7 @@ static void test_conflicts(void)
     CHECK(log_has("MODS: play: requirements live: g_useResourceBlackList=0 (unchanged since the last pass)"));
     gates_reset(1, 1, SH_MODSERVE_GATE_SET);
     log_clear();
-    CHECK(sh_modserve_requirements_check(&g_gates, "play", &r) == 1 && g_gate_val[1] == 0 && r.changed == SH_MODSERVE_REQ_RESOURCE);
+    CHECK(sh_modserve_requirements_check(&g_gates, "play", &r) == 1 && g_gate_val[1] == 0 && r.changed == 1);
     CHECK(log_has("MODS: play: requirements applied: g_useResourceBlackList=0") && !log_has("requirements live"));
     gates_reset(1, 1, SH_MODSERVE_GATE_SET);
 }
@@ -1749,6 +1901,7 @@ int main(void)
     test_rescan();
     test_requirements();
     test_ungated_raw();
+    test_requirements_general();
     test_refresh();
     test_conflicts();
     test_editor_refs();

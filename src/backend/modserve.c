@@ -50,7 +50,7 @@ typedef struct ms_file {
     volatile LONG reg_state;              /* 0 none, 1 ready, -1 failed (main thread) */
     volatile LONG withdrawn;              /* a shadow taken back by a registration pass: lookups miss it */
     volatile LONG reparse_tried;          /* the early-decl pass re-parsed it (main thread) */
-    volatile LONG opened_ungated;         /* first served while one of its bundle's requirement gates was not live */
+    volatile LONG opened_ungated;         /* first served while its bundle's cvar requirements were not live */
     volatile LONG refresh;                /* 1: its bytes changed at a rescan and the engine may hold the old ones */
     volatile LONG refresh_gen;            /* 0 changed; N: inherits (N levels up) from a changed or gone decl */
     volatile LONG refresh_new;            /* a new gameplay decl of a mod this session registered: register it now */
@@ -66,13 +66,21 @@ typedef struct ms_conflict {
     int composed;                         /* 1: the list entries of every provider were merged */
 } ms_conflict;
 
+typedef struct ms_req_cvar { const char *name, *value; } ms_req_cvar;   /* canonical value text */
+
 typedef struct ms_bundle {
     const char *dir, *folder, *id, *version, *hash, *name;
     const char *extra;                    /* the author block's other keys (and a product-block legacy) as JSON, or NULL */
     int legacy, admitted, first_file, file_count;   /* legacy: a package a map delivered */
     int grandfathered;                    /* a "legacy" object (author or product block): shadows may be new names */
     uint64_t total;                       /* sum of file sizes (the manifest row's size) */
-    unsigned req;                         /* SH_MODSERVE_REQ_* bits from mod.json requirements */
+    const char *req_text;                 /* canonical requirements (sh_mb_requirements_canonical), or NULL */
+    ms_req_cvar *req_cvars; int req_ncvars;
+    const char **req_act; int req_nact;   /* console lines run when its requirements go live */
+    const char **req_deact; int req_ndeact;   /* and when they stop */
+    const char *req_lost;                 /* a cvar an earlier install asks another value of, or NULL */
+    volatile LONG req_live;               /* every cvar requirement read back as asked (read on any thread) */
+    char req_cause[MS_CAUSE_MAX];         /* why they are not live (main thread) */
     double installed_at;
     char cause[MS_CAUSE_MAX];
 } ms_bundle;
@@ -106,16 +114,11 @@ typedef struct ms_index {
 static ms_index *volatile g_index;
 static int ms_bundle_by_hash(const ms_index *x, const char *hash, int admitted_only);
 static unsigned char *ms_file_raw(const ms_file *f, size_t *len);
-/* Gates this layer changed and the values it displaced: a gate is restored
- * only when no admitted bundle needs it any more and nobody else has changed
- * it since. Main thread only, like every registration pass. */
-static unsigned g_gates_owned;
-static int g_gates_original[SH_MODSERVE_REQ_COUNT];
+static void ms_req_index(ms_index *x, const ms_index *old);
 static SRWLOCK g_build_lock = SRWLOCK_INIT;
 static char g_last_root[MAX_PATH];
 static volatile LONG g_opens_served, g_open_failures, g_probe_claims, g_cache_hits;
 static volatile LONG g_renderprog_logged;   /* render-program serve lines written */
-static volatile LONG g_gates_live;          /* requirement gates the last pass read back as live (SH_MODSERVE_REQ_* bits) */
 volatile LONG g_modserve_editor_ok, g_modserve_editor_failed;   /* written by modserve_engine.c */
 #define MS_LISTENERS 4
 static sh_modserve_index_fn volatile g_index_listener[MS_LISTENERS];   /* modvt.c, modsound.c, modserve_engine.c */
@@ -444,6 +447,10 @@ static void ms_fail(ms_bundle *b, const char *fmt, ...)
     va_end(ap);
 }
 
+/* A bundle whose content waits for its requirements: it sets cvars, or an
+ * earlier install holds one of them at another value. Lines alone never wait. */
+static int ms_req_needs(const ms_bundle *b) { return b->req_ncvars > 0 || b->req_lost != NULL; }
+
 static int ms_rank(const char *type)
 {
     if (!_stricmp(type, "md6Def")) return 1;
@@ -635,45 +642,71 @@ static void ms_parse_file(ms_index *x, ms_bundle *b, ms_json *c, char **shadows,
 
 /* ------------------------------------------------------------------ requirements */
 
-/* The only engine settings a bundle may require. Bit i of a requirement mask
- * is MS_GATES[i] = "0". Widening this is a product decision, not a format one. */
-static const char *const MS_GATES[SH_MODSERVE_REQ_COUNT] = { "g_useImageBlackList", "g_useResourceBlackList" };
-
-const char *sh_modserve_requirement_cvar(int index)
+/* requirements: the builder's canonical text (sh_mb_requirements_canonical)
+ * is the only reading of the author's value, so the index and the bundle hash
+ * see the same cvars and lines. No cvar or command is known here by name. */
+static void ms_parse_requirements(ms_index *x, ms_bundle *b, const char *v, const char *ve)
 {
-    return index >= 0 && index < SH_MODSERVE_REQ_COUNT ? MS_GATES[index] : NULL;
-}
-
-/* requirements: {"cvars": {<gate>: "0" | 0, ...}}. Anything else is a first
- * cause: the bundle needs a setting this build will not change for it. */
-static void ms_parse_requirements(ms_bundle *b, const char *v, const char *ve)
-{
-    ms_json o = { v, ve };
-    char key[64];
-    const char *cv, *cve;
-    if (!ms_jenter(&o, '{')) { ms_fail(b, "requirements must be an object"); return; }
+    char cause[SH_MB_CAUSE_MAX], key[SH_MB_REQ_NAME_MAX + 16];
+    char *canon = sh_mb_requirements_canonical(v, (size_t)(ve - v), cause, sizeof cause);
+    ms_json o;
+    const char *mv, *mve;
+    if (!canon) { ms_fail(b, "%s", cause[0] ? cause : "requirements could not be read (out of memory)"); return; }
+    b->req_text = ms_strdup(x, canon);
+    free(canon);
+    if (!b->req_text) { ms_fail(b, "out of memory"); return; }
+    o.p = b->req_text;
+    o.e = b->req_text + strlen(b->req_text);
+    if (!ms_jenter(&o, '{')) { ms_fail(b, "requirements could not be read"); return; }
     while (!b->cause[0] && ms_jnext(&o, '}')) {
         ms_json c;
-        if (!ms_jmember(&o, key, sizeof key, &cv, &cve)) { ms_fail(b, "requirements is not a valid object"); return; }
-        if (strcmp(key, "cvars")) { ms_fail(b, "requirement '%.60s' is refused (only cvars are supported)", key); return; }
-        c.p = cv;
-        c.e = cve;
-        if (!ms_jenter(&c, '{')) { ms_fail(b, "requirements.cvars must be an object"); return; }
-        while (ms_jnext(&c, '}')) {
-            const char *xv, *xve;
-            int g, zero;
-            size_t n;
-            if (!ms_jmember(&c, key, sizeof key, &xv, &xve)) { ms_fail(b, "requirements.cvars is not a valid object"); return; }
-            n = (size_t)(xve - xv);
-            zero = (n == 3 && !memcmp(xv, "\"0\"", 3)) || (n == 1 && *xv == '0');
-            for (g = 0; g < SH_MODSERVE_REQ_COUNT; ++g)
-                if (!strcmp(key, MS_GATES[g])) break;
-            if (g == SH_MODSERVE_REQ_COUNT || !zero) {
-                ms_fail(b, "requirement %.60s=%.*s is refused (this build applies only g_useImageBlackList=0 and "
-                        "g_useResourceBlackList=0)", key, (int)(n > 24 ? 24 : n), xv);
-                return;
+        if (!ms_jmember(&o, key, sizeof key, &mv, &mve)) { ms_fail(b, "requirements could not be read"); return; }
+        c.p = mv;
+        c.e = mve;
+        if (!strcmp(key, "cvars")) {
+            int n = 0;
+            ms_json k = c;
+            if (ms_jenter(&k, '{')) while (ms_jnext(&k, '}')) {
+                if (!ms_jmember(&k, key, sizeof key, &mv, &mve)) break;
+                n++;
             }
-            b->req |= 1u << g;
+            if (!n) continue;
+            b->req_cvars = (ms_req_cvar *)ms_alloc(x, sizeof(ms_req_cvar) * (size_t)n);
+            if (!b->req_cvars) { ms_fail(b, "out of memory"); return; }
+            if (ms_jenter(&c, '{')) while (b->req_ncvars < n && ms_jnext(&c, '}')) {
+                ms_req_cvar *r = &b->req_cvars[b->req_ncvars];
+                if (!ms_jmember(&c, key, sizeof key, &mv, &mve)) break;
+                r->name = ms_strdup(x, key);
+                r->value = ms_jstr(x, mv, mve, SH_MB_REQ_VALUE_MAX);
+                if (!r->name || !r->value) { ms_fail(b, "out of memory"); return; }
+                b->req_ncvars++;
+            }
+        } else if (!strcmp(key, "commands")) {
+            if (!ms_jenter(&c, '{')) continue;
+            while (ms_jnext(&c, '}')) {
+                const char **lines;
+                int *count, n = 0;
+                ms_json a, k;
+                if (!ms_jmember(&c, key, sizeof key, &mv, &mve)) break;
+                if (!strcmp(key, "activate")) { count = &b->req_nact; }
+                else if (!strcmp(key, "deactivate")) { count = &b->req_ndeact; }
+                else continue;
+                a.p = k.p = mv;
+                a.e = k.e = mve;
+                if (ms_jenter(&k, '[')) while (ms_jnext(&k, ']')) { k.p = ms_jskip(k.p, k.e); n++; }
+                if (!n) continue;
+                lines = (const char **)ms_alloc(x, sizeof(char *) * (size_t)n);
+                if (!lines) { ms_fail(b, "out of memory"); return; }
+                if (ms_jenter(&a, '[')) while (*count < n && ms_jnext(&a, ']')) {
+                    const char *sv = a.p, *se = ms_jskip(a.p, a.e);
+                    a.p = se;
+                    lines[*count] = ms_jstr(x, sv, se, SH_MB_REQ_LINE_MAX);
+                    if (!lines[*count]) { ms_fail(b, "out of memory"); return; }
+                    (*count)++;
+                }
+                if (count == &b->req_nact) b->req_act = lines;
+                else b->req_deact = lines;
+            }
         }
     }
 }
@@ -840,7 +873,7 @@ static void ms_parse_bundle(ms_index *x, ms_bundle *b)
     if (!b->version) b->version = "";
     if (!b->hash || !ms_valid_hash((char *)b->hash)) ms_fail(b, "mod.json has no bundle hash");
     if (!files_v && !stock_v) ms_fail(b, "mod.json lists no files");
-    if (req_v && !b->cause[0]) ms_parse_requirements(b, req_v, req_e);
+    if (req_v && !b->cause[0]) ms_parse_requirements(x, b, req_v, req_e);
     if (nshadows > 1) qsort(shadows, (size_t)nshadows, sizeof(char *), ms_str_cmp);
     if (!b->cause[0]) {
         int pass;
@@ -1901,20 +1934,8 @@ int sh_modserve_index_build(const char *mods_root)
     x->build_ms = ms_now_ms() - t0;
     /* Previously registered decls keep their state across a rescan. */
     old = g_index;
-    /* One line per bundle and requirement, the first time an index carries
-     * that bundle with it (a rescan does not repeat it). */
-    for (i = 0; i < x->nbundles; ++i) {
-        const ms_bundle *b = &x->bundles[i];
-        int g, seen = 0;
-        if (!b->admitted || !b->req) continue;
-        if (old) {
-            int o = ms_bundle_by_hash(old, b->hash, 1);
-            seen = o >= 0 && old->bundles[o].req == b->req;
-        }
-        if (seen) continue;
-        for (g = 0; g < SH_MODSERVE_REQ_COUNT; ++g)
-            if (b->req & (1u << g)) ms_log("requirements: %s=0 for %s@%s", MS_GATES[g], b->id, b->version);
-    }
+    /* Requirement conflicts, the log lines, and what is live already. */
+    ms_req_index(x, old);
     if (old) {
         for (i = 0; i < x->nfiles; ++i) {
             ms_file *f = &x->files[i];
@@ -2189,7 +2210,8 @@ int sh_modserve_open(const char *request, unsigned char **bytes, size_t *length)
      * served before its bundle's requirement gates were live was resolved by
      * the engine against the cut-content blacklists (modserve.h). */
     first = InterlockedIncrement((volatile LONG *)&f->opens) == 1;
-    if (first && (x->bundles[f->bundle].req & ~(unsigned)InterlockedCompareExchange(&g_gates_live, 0, 0)))
+    if (first && ms_req_needs(&x->bundles[f->bundle]) &&
+        !InterlockedCompareExchange((volatile LONG *)&x->bundles[f->bundle].req_live, 0, 0))
         InterlockedExchange((volatile LONG *)&f->opened_ungated, 1);
     if (first &&
         (!strncmp(f->request, "generated/renderprogs/", 22) || !strncmp(f->request, "generated/spirv/", 16) ||
@@ -2232,12 +2254,6 @@ void sh_modserve_test_reset_registration(void)
     int i;
     if (x) for (i = 0; i < x->nfiles; ++i) x->files[i].reg_state = 0;
 }
-void sh_modserve_test_reset_gates(void)
-{
-    g_gates_owned = 0;
-    memset(g_gates_original, 0, sizeof g_gates_original);
-}
-unsigned sh_modserve_test_gates_owned(void) { return g_gates_owned; }
 #endif
 
 /* ------------------------------------------------------------------ plan */
@@ -2874,133 +2890,488 @@ int sh_modserve_plan_run(sh_modserve_plan *plan, const sh_modserve_engine_ops *o
 
 /* ------------------------------------------------------------------ requirements (apply) */
 
-unsigned sh_modserve_requirements(void)
+/* The cvars the requirements set and the bundles whose lines ran, across
+ * tables (a rescan replaces the index, not this state). A cvar entry exists
+ * while an accepted bundle needs it or while this layer holds the value it
+ * displaced; a cvar is restored only when no bundle needs it any more and
+ * nobody else changed it since. Written by the pass (main thread) under
+ * g_req_lock; the reports and an index build read it shared. */
+#define MS_REQ_ORIGINAL_MAX 512
+#define MS_WHO_MAX          200
+typedef struct ms_held {
+    char name[SH_MB_REQ_NAME_MAX + 1];
+    char want[SH_MB_REQ_VALUE_MAX + 1];   /* the value the accepted bundles ask */
+    char original[MS_REQ_ORIGINAL_MAX];   /* what this layer displaced (owned only) */
+    char owner[MS_WHO_MAX];               /* id@version of the earliest install asking it */
+    int needed;                           /* an accepted bundle asks it (this pass) */
+    int owned;                            /* this layer changed it and restores `original` */
+    int state;                            /* 1 live, 0 not applied yet, -1 not live */
+    char why[120];                        /* not live: the cause */
+} ms_held;
+
+typedef struct ms_active {
+    char id[100], who[MS_WHO_MAX];
+    char *deact[SH_MB_REQ_COMMANDS_MAX];  /* its deactivate lines, run when it stops */
+    int ndeact, act_ran, act_total;
+} ms_active;
+
+static SRWLOCK g_req_lock = SRWLOCK_INIT;
+static ms_held *g_held;
+static int g_nheld, g_cheld;
+static ms_active *g_active;
+static int g_nactive, g_cactive;
+
+static int ms_req_accepted(const ms_bundle *b)
 {
-    const ms_index *x = g_index;
-    unsigned all = 0;
-    int i;
-    if (!x) return 0;
-    for (i = 0; i < x->nbundles; ++i)
-        if (x->bundles[i].admitted) all |= x->bundles[i].req;
-    return all;
+    return b->admitted && b->req_text && !b->req_lost && (b->req_ncvars || b->req_nact || b->req_ndeact);
 }
 
-static void ms_gate_names(unsigned mask, char *out, size_t cap)
+/* Two values the engine would hold alike: the same text, or the same number. */
+static int ms_req_same(const char *a, const char *b)
 {
-    int g;
+    char *ea, *eb;
+    double x, y;
+    if (!strcmp(a, b)) return 1;
+    if (!*a || !*b) return 0;
+    x = strtod(a, &ea);
+    y = strtod(b, &eb);
+    return !*ea && !*eb && x == y;
+}
+
+static ms_held *ms_held_find(const char *name)
+{
+    int i;
+    for (i = 0; i < g_nheld; ++i) if (!_stricmp(g_held[i].name, name)) return &g_held[i];
+    return NULL;
+}
+
+static ms_active *ms_active_find(const char *id)
+{
+    int i;
+    for (i = 0; i < g_nactive; ++i) if (!strcmp(g_active[i].id, id)) return &g_active[i];
+    return NULL;
+}
+
+static void ms_active_drop(int i)
+{
+    int k;
+    for (k = 0; k < g_active[i].ndeact; ++k) free(g_active[i].deact[k]);
+    memmove(&g_active[i], &g_active[i + 1], sizeof *g_active * (size_t)(g_nactive - i - 1));
+    g_nactive--;
+}
+
+/* A bundle's cvars are live when each one's entry is live at its value.
+ * Caller holds g_req_lock (shared is enough: it writes only the bundle). */
+static void ms_req_mark_bundle(ms_bundle *b)
+{
+    int k, unmet = 0;
+    size_t at = 0;
+    char names[MS_CAUSE_MAX];
+    names[0] = 0;
+    if (b->req_lost) {
+        _snprintf_s(b->req_cause, sizeof b->req_cause, _TRUNCATE, "requirement %s", b->req_lost);
+        InterlockedExchange(&b->req_live, 0);
+        return;
+    }
+    for (k = 0; k < b->req_ncvars; ++k) {
+        const ms_held *h = ms_held_find(b->req_cvars[k].name);
+        int w;
+        if (h && h->state == 1 && ms_req_same(h->want, b->req_cvars[k].value)) continue;
+        w = _snprintf_s(names + at, sizeof names - at, _TRUNCATE, "%s%s=%s", at ? ", " : "", b->req_cvars[k].name,
+                        b->req_cvars[k].value);
+        if (w > 0) at += (size_t)w;
+        unmet++;
+    }
+    if (unmet) _snprintf_s(b->req_cause, sizeof b->req_cause, _TRUNCATE, "requirement%s %s %s not live", unmet > 1 ? "s" : "",
+                           names, unmet > 1 ? "are" : "is");
+    else b->req_cause[0] = 0;
+    InterlockedExchange(&b->req_live, unmet ? 0 : 1);
+}
+
+/* At index build: bundles in install order (ms_newer); one asking a cvar an
+ * earlier accepted bundle asks at another value loses. Then the log lines
+ * (once per bundle and requirements text) and the liveness the held state
+ * already gives, so a bundle whose cvars a pass made live serves as live. */
+static void ms_req_index(ms_index *x, const ms_index *old)
+{
+    int *order, n = 0, i, j, k, m;
+    order = (int *)malloc(sizeof(int) * (size_t)(x->nbundles ? x->nbundles : 1));
+    if (!order) return;
+    for (i = 0; i < x->nbundles; ++i)
+        if (x->bundles[i].admitted && x->bundles[i].req_text) order[n++] = i;
+    for (i = 1; i < n; ++i)   /* oldest install first */
+        for (j = i; j > 0 && ms_newer(x, order[j - 1], order[j]); --j) { int t = order[j]; order[j] = order[j - 1]; order[j - 1] = t; }
+    for (i = 0; i < n; ++i) {
+        ms_bundle *b = &x->bundles[order[i]];
+        for (k = 0; k < b->req_ncvars && !b->req_lost; ++k)
+            for (j = 0; j < i && !b->req_lost; ++j) {
+                const ms_bundle *e = &x->bundles[order[j]];
+                if (e->req_lost) continue;
+                for (m = 0; m < e->req_ncvars; ++m) {
+                    char text[MS_CAUSE_MAX];
+                    if (_stricmp(e->req_cvars[m].name, b->req_cvars[k].name) ||
+                        ms_req_same(e->req_cvars[m].value, b->req_cvars[k].value))
+                        continue;
+                    _snprintf_s(text, sizeof text, _TRUNCATE, "%s=%s lost to %s@%s, installed earlier, which asks \"%s\"",
+                                b->req_cvars[k].name, b->req_cvars[k].value, e->id, e->version, e->req_cvars[m].value);
+                    b->req_lost = ms_strdup(x, text);
+                    if (!b->req_lost) b->req_lost = "a cvar lost to an earlier install";
+                    ms_log("requirements: conflict: %s: %s@%s asks \"%s\", %s@%s asks \"%s\"; %s@%s, the later install, loses "
+                           "and its requirements are not applied", b->req_cvars[k].name, b->id, b->version,
+                           b->req_cvars[k].value, e->id, e->version, e->req_cvars[m].value, b->id, b->version);
+                    break;
+                }
+            }
+    }
+    for (i = 0; i < n; ++i) {
+        const ms_bundle *b = &x->bundles[order[i]];
+        int seen = 0;
+        if (old) {
+            int o = ms_bundle_by_hash(old, b->hash, 1);
+            seen = o >= 0 && old->bundles[o].req_text && !strcmp(old->bundles[o].req_text, b->req_text) &&
+                   !old->bundles[o].req_lost == !b->req_lost;
+        }
+        if (seen || b->req_lost) continue;
+        for (k = 0; k < b->req_ncvars; ++k)
+            ms_log("requirements: %s=%s for %s@%s", b->req_cvars[k].name, b->req_cvars[k].value, b->id, b->version);
+        if (b->req_nact || b->req_ndeact)
+            ms_log("requirements: %d activate and %d deactivate command(s) for %s@%s", b->req_nact, b->req_ndeact, b->id,
+                   b->version);
+    }
+    free(order);
+    AcquireSRWLockShared(&g_req_lock);
+    for (i = 0; i < x->nbundles; ++i)
+        if (x->bundles[i].admitted && ms_req_needs(&x->bundles[i])) ms_req_mark_bundle(&x->bundles[i]);
+    ReleaseSRWLockShared(&g_req_lock);
+}
+
+int sh_modserve_requirements(void)
+{
+    const ms_index *x = g_index;
+    int i, k, n = 0, j, dup;
+    if (!x) return 0;
+    for (i = 0; i < x->nbundles; ++i) {
+        const ms_bundle *b = &x->bundles[i];
+        if (!ms_req_accepted(b)) continue;
+        for (k = 0; k < b->req_ncvars; ++k) {
+            dup = 0;
+            for (j = 0; j < i && !dup; ++j) {
+                const ms_bundle *e = &x->bundles[j];
+                int m;
+                if (!ms_req_accepted(e)) continue;
+                for (m = 0; m < e->req_ncvars && !dup; ++m) dup = !_stricmp(e->req_cvars[m].name, b->req_cvars[k].name);
+            }
+            for (j = 0; j < k && !dup; ++j) dup = !_stricmp(b->req_cvars[j].name, b->req_cvars[k].name);
+            n += !dup;
+        }
+    }
+    return n;
+}
+
+int sh_modserve_requirements_held(void)
+{
+    const ms_index *x = g_index;
+    int i, any;
+    AcquireSRWLockShared(&g_req_lock);
+    any = g_nheld > 0 || g_nactive > 0;
+    ReleaseSRWLockShared(&g_req_lock);
+    for (i = 0; !any && x && i < x->nbundles; ++i) any = ms_req_accepted(&x->bundles[i]);
+    return any;
+}
+
+/* "a=0, b=1" of the entries selected by `pick` (1 needed, 2 not live, 3 changed and live). */
+static void ms_held_names(int pick, const unsigned char *flag, char *out, size_t cap)
+{
+    int i;
     size_t at = 0;
     out[0] = 0;
-    for (g = 0; g < SH_MODSERVE_REQ_COUNT; ++g)
-        if (mask & (1u << g))
-            at += (size_t)_snprintf_s(out + at, cap - at, _TRUNCATE, "%s%s=0", at ? ", " : "", MS_GATES[g]);
+    for (i = 0; i < g_nheld; ++i) {
+        const ms_held *h = &g_held[i];
+        int w;
+        if (!h->needed) continue;
+        if (pick == 2 && h->state == 1) continue;
+        if (pick == 3 && !(flag && flag[i] && h->state == 1)) continue;
+        w = _snprintf_s(out + at, cap - at, _TRUNCATE, "%s%s=%s", at ? ", " : "", h->name, h->want);
+        if (w < 0) break;
+        at += (size_t)w;
+    }
+}
+
+static int ms_req_line(const sh_modserve_gate_ops *ops, const char *phase, const char *id, const char *line)
+{
+    int ok = 0;
+    if (ops && ops->command) ok = ops->command(ops->context, line) == 1;
+    if (ok) ms_log("requirements: %s: command \"%s\"", id, line);
+    else ms_log("%s: requirements: %s: command \"%s\" NOT run (the command buffer is unavailable)", phase, id, line);
+    return ok;
+}
+
+static const char *ms_refusal(int code)
+{
+    if (code == SH_MODSERVE_GATE_READ_ONLY) return "the engine marks it read-only";
+    if (code == SH_MODSERVE_GATE_INIT_ONLY) return "the engine allows it only on the command line";
+    return "the engine refused the value";
 }
 
 int sh_modserve_requirements_apply(const sh_modserve_gate_ops *ops, const char *phase, sh_modserve_gates *out)
 {
+    ms_index *x = g_index;
     sh_modserve_gates r;
-    unsigned needed = sh_modserve_requirements(), restore = g_gates_owned & ~needed, touch, refused = 0;
-    int g, before[SH_MODSERVE_REQ_COUNT] = { 0 }, want[SH_MODSERVE_REQ_COUNT] = { 0 };
-    char names[160];
+    unsigned char *changed = NULL, *queued = NULL, *restoring = NULL, *refused = NULL;
+    char (*target)[MS_REQ_ORIGINAL_MAX] = NULL;
+    char names[600];
+    int i, k, result;
     memset(&r, 0, sizeof r);
-    r.needed = needed;
     if (!phase) phase = "plan";
-    /* No admitted bundle needs a gate and none is held: nothing is read or set. */
-    if (!needed && !restore) { if (out) *out = r; return 0; }
-    if (!ops || !ops->read || !ops->set) {
-        ms_gate_names(needed, names, sizeof names);
-        ms_log("%s: requirements %s NOT applied: the cvar system is unavailable", phase, names);
-        r.not_live = needed;
+    AcquireSRWLockExclusive(&g_req_lock);
+    for (i = 0; i < g_nheld; ++i) g_held[i].needed = 0;
+    /* What the accepted bundles ask, earliest install naming each cvar. */
+    if (x) {
+        int *order = (int *)malloc(sizeof(int) * (size_t)(x->nbundles ? x->nbundles : 1)), n = 0, j;
+        if (order) {
+            for (i = 0; i < x->nbundles; ++i) if (ms_req_accepted(&x->bundles[i])) order[n++] = i;
+            for (i = 1; i < n; ++i)
+                for (j = i; j > 0 && ms_newer(x, order[j - 1], order[j]); --j) { int t = order[j]; order[j] = order[j - 1]; order[j - 1] = t; }
+            for (i = 0; i < n; ++i) {
+                const ms_bundle *b = &x->bundles[order[i]];
+                for (k = 0; k < b->req_ncvars; ++k) {
+                    ms_held *h = ms_held_find(b->req_cvars[k].name);
+                    if (h && h->needed) continue;
+                    if (!h) {
+                        if (!ms_grow((void **)&g_held, &g_cheld, g_nheld + 1, sizeof *g_held)) continue;
+                        h = &g_held[g_nheld++];
+                        memset(h, 0, sizeof *h);
+                        strncpy_s(h->name, sizeof h->name, b->req_cvars[k].name, _TRUNCATE);
+                    }
+                    if (strcmp(h->want, b->req_cvars[k].value)) h->state = 0;
+                    strncpy_s(h->want, sizeof h->want, b->req_cvars[k].value, _TRUNCATE);
+                    _snprintf_s(h->owner, sizeof h->owner, _TRUNCATE, "%s@%s", b->id, b->version);
+                    h->needed = 1;
+                    r.needed++;
+                }
+            }
+            free(order);
+        }
+    }
+    /* Nothing asked and nothing held: no cvar is read or set, no line runs. */
+    if (!r.needed && !g_nheld && !g_nactive) {
+        for (i = 0; x && i < x->nbundles; ++i) if (x->bundles[i].admitted && ms_req_needs(&x->bundles[i])) ms_req_mark_bundle(&x->bundles[i]);
+        ReleaseSRWLockExclusive(&g_req_lock);
         if (out) *out = r;
-        return needed ? -1 : 0;
+        return 0;
     }
-    touch = needed | restore;
-    /* Phase 1, disarm: read every affected gate, then set what differs. */
-    for (g = 0; g < SH_MODSERVE_REQ_COUNT; ++g) {
-        unsigned bit = 1u << g;
+    /* Lines of bundles whose requirements stopped (uninstalled, removed, dropped
+     * by a rescan, lost a conflict) run first; their cvars are released below. */
+    for (i = g_nactive - 1; i >= 0; --i) {
+        int still = 0, b;
+        for (b = 0; x && b < x->nbundles && !still; ++b)
+            still = ms_req_accepted(&x->bundles[b]) && !strcmp(x->bundles[b].id, g_active[i].id);
+        if (still) continue;
+        if (g_active[i].ndeact && (!ops || !ops->command)) continue;   /* kept until a pass can run its lines */
+        ms_log("%s: requirements of %s stopped%s", phase, g_active[i].who,
+               g_active[i].ndeact ? "; running its deactivate commands" : "");
+        for (k = 0; k < g_active[i].ndeact; ++k)
+            r.commands += ms_req_line(ops, phase, g_active[i].id, g_active[i].deact[k]);
+        ms_active_drop(i);
+    }
+    if (!ops || !ops->read || !ops->set) {
+        ms_held_names(1, NULL, names, sizeof names);
+        if (r.needed) ms_log("%s: requirements %s NOT applied: the cvar system is unavailable", phase, names);
+        for (i = 0; i < g_nheld; ++i)
+            if (g_held[i].needed) {
+                g_held[i].state = -1;
+                strcpy_s(g_held[i].why, sizeof g_held[i].why, "the cvar system is unavailable");
+            }
+        r.not_live = r.needed;
+        goto finish;
+    }
+    changed = (unsigned char *)calloc((size_t)g_nheld + 1, 1);
+    queued = (unsigned char *)calloc((size_t)g_nheld + 1, 1);
+    restoring = (unsigned char *)calloc((size_t)g_nheld + 1, 1);
+    refused = (unsigned char *)calloc((size_t)g_nheld + 1, 1);
+    target = (char (*)[MS_REQ_ORIGINAL_MAX])calloc((size_t)g_nheld + 1, MS_REQ_ORIGINAL_MAX);
+    if (!changed || !queued || !restoring || !refused || !target) {
+        ms_log("%s: requirements NOT applied: out of memory", phase);
+        for (i = 0; i < g_nheld; ++i) if (g_held[i].needed) { g_held[i].state = -1; strcpy_s(g_held[i].why, sizeof g_held[i].why, "out of memory"); }
+        r.not_live = r.needed;
+        goto finish;
+    }
+    /* Phase 1: read every affected cvar, then set what differs. */
+    for (i = 0; i < g_nheld; ++i) {
+        ms_held *h = &g_held[i];
+        char now[MS_REQ_ORIGINAL_MAX];
         int set;
-        char text[16];
-        if (!(touch & bit)) continue;
-        if (ops->read(ops->context, MS_GATES[g], &before[g]) != 1) { refused |= bit; continue; }
-        if (needed & bit) want[g] = 0;
-        else want[g] = before[g] == 0 ? g_gates_original[g] : before[g];   /* changed by someone else: theirs */
-        if (before[g] == want[g]) continue;
-        _snprintf_s(text, sizeof text, _TRUNCATE, "%d", want[g]);
-        set = ops->set(ops->context, MS_GATES[g], text);
-        if (set != SH_MODSERVE_GATE_SET && set != SH_MODSERVE_GATE_QUEUED) { refused |= bit; continue; }
-        r.changed |= bit;
-        if (set == SH_MODSERVE_GATE_QUEUED) r.queued |= bit;
-        if ((needed & bit) && !(g_gates_owned & bit)) { g_gates_original[g] = before[g]; g_gates_owned |= bit; }
+        if (!h->needed && !h->owned) continue;
+        now[0] = 0;
+        if (ops->read(ops->context, h->name, now, sizeof now) != 1) {
+            refused[i] = 1;
+            if (h->needed) { h->state = -1; strcpy_s(h->why, sizeof h->why, "the engine has no such cvar"); }
+            else h->owned = 0;   /* gone: nothing to restore */
+            continue;
+        }
+        if (h->needed) {
+            strcpy_s(target[i], MS_REQ_ORIGINAL_MAX, h->want);
+            if (ms_req_same(now, h->want)) continue;
+            if (!h->owned && strlen(now) + 1 >= sizeof now) {
+                refused[i] = 1;
+                h->state = -1;
+                strcpy_s(h->why, sizeof h->why, "its current value is too long to restore later");
+                continue;
+            }
+        } else {
+            /* Changed by someone else since: theirs. */
+            restoring[i] = 1;
+            strcpy_s(target[i], MS_REQ_ORIGINAL_MAX, ms_req_same(now, h->want) ? h->original : now);
+            if (ms_req_same(now, target[i])) continue;
+        }
+        set = ops->set(ops->context, h->name, target[i]);
+        if (set != SH_MODSERVE_GATE_SET && set != SH_MODSERVE_GATE_QUEUED) {
+            refused[i] = 1;
+            if (h->needed) { h->state = -1; strcpy_s(h->why, sizeof h->why, ms_refusal(set)); }
+            else ms_log("%s: requirement release: %s could not be restored to \"%s\" (%s)", phase, h->name, target[i],
+                        ms_refusal(set));
+            continue;
+        }
+        changed[i] = 1;
+        r.changed++;
+        if (set == SH_MODSERVE_GATE_QUEUED) { queued[i] = 1; r.queued++; }
+        if (h->needed && !h->owned) { strcpy_s(h->original, sizeof h->original, now); h->owned = 1; }
     }
-    /* A queued set reaches the gate only when the command buffer runs: drain
+    /* A queued set reaches the cvar only when the command buffer runs: drain
      * it here, between the phases, so the registration that follows is never
-     * asked to parse a name the matcher still refuses. */
+     * asked to parse a name the engine still resolves the old way. */
     if (r.queued) {
         if (ops->drain && ops->drain(ops->context) == 1) r.drained = 1;
         else {
-            ms_gate_names(r.queued & needed, names, sizeof names);
+            size_t at = 0;
+            names[0] = 0;
+            for (i = 0; i < g_nheld; ++i)
+                if (queued[i] && g_held[i].needed) {
+                    int w = _snprintf_s(names + at, sizeof names - at, _TRUNCATE, "%s%s=%s", at ? ", " : "", g_held[i].name,
+                                        g_held[i].want);
+                    if (w > 0) at += (size_t)w;
+                }
             ms_log("%s: requirement set%s %s queued but the command buffer could not be drained", phase,
-                   (r.queued & (r.queued - 1)) ? "s" : "", names[0] ? names : "(restore)");
+                   r.queued > 1 ? "s" : "", names[0] ? names : "(restore)");
         }
     }
-    /* Phase 2, verify: the registration pass runs only against read-back values. */
-    for (g = 0; g < SH_MODSERVE_REQ_COUNT; ++g) {
-        unsigned bit = 1u << g;
-        int now = -1;
-        if (!(touch & bit) || (refused & bit)) continue;
-        if (ops->read(ops->context, MS_GATES[g], &now) != 1) { refused |= bit; continue; }
-        if (needed & bit) { if (now == 0) r.live |= bit; }
-        else if (now == want[g]) { r.restored |= bit; g_gates_owned &= ~bit; }
+    /* Phase 2: the registration pass runs only against read-back values. */
+    for (i = 0; i < g_nheld; ++i) {
+        ms_held *h = &g_held[i];
+        char now[MS_REQ_ORIGINAL_MAX];
+        if (refused[i] || (!h->needed && !restoring[i])) continue;
+        now[0] = 0;
+        if (ops->read(ops->context, h->name, now, sizeof now) != 1) {
+            if (h->needed) { h->state = -1; strcpy_s(h->why, sizeof h->why, "the engine has no such cvar"); }
+            continue;
+        }
+        if (h->needed) {
+            if (ms_req_same(now, h->want)) { h->state = 1; h->why[0] = 0; }
+            else {
+                h->state = -1;
+                _snprintf_s(h->why, sizeof h->why, _TRUNCATE, "the engine kept \"%.60s\"", now);
+            }
+        } else if (ms_req_same(now, target[i])) {
+            if (changed[i]) ms_log("%s: requirement released: %s restored to %s (no active bundle needs it)", phase, h->name,
+                                   target[i]);
+            r.restored++;
+            h->owned = 0;
+        }
     }
-    if (r.changed & needed & r.live) {
-        ms_gate_names(r.changed & needed & r.live, names, sizeof names);
+    for (i = 0; i < g_nheld; ++i) if (g_held[i].needed && g_held[i].state == 1) r.live++;
+    r.not_live = r.needed - r.live;
+    ms_held_names(3, changed, names, sizeof names);
+    if (names[0])
         ms_log("%s: requirements applied: %s (%s)", phase, names,
                r.drained ? "queued, live after a command-buffer drain" : "set directly, live immediately");
-    }
-    for (g = 0; g < SH_MODSERVE_REQ_COUNT; ++g)
-        if (r.restored & (1u << g) && (r.changed & (1u << g)))
-            ms_log("%s: requirement released: %s restored to %d (no active bundle needs it)", phase, MS_GATES[g], want[g]);
-    InterlockedExchange(&g_gates_live, (LONG)r.live);
-    r.not_live = needed & ~r.live;
     if (r.not_live) {
-        ms_gate_names(r.not_live, names, sizeof names);
+        ms_held_names(2, NULL, names, sizeof names);
         ms_log("%s: requirements %s are NOT live; the steps of bundles that need them are blocked", phase, names);
+        for (i = 0; i < g_nheld; ++i)
+            if (g_held[i].needed && g_held[i].state != 1)
+                ms_log("%s: requirement %s=%s (%s) is not live: %s", phase, g_held[i].name, g_held[i].want, g_held[i].owner,
+                       g_held[i].why[0] ? g_held[i].why : "not read back");
     }
+finish:
+    /* Entries neither asked nor holding a displaced value are done. */
+    for (i = g_nheld - 1; i >= 0; --i)
+        if (!g_held[i].needed && !g_held[i].owned) {
+            memmove(&g_held[i], &g_held[i + 1], sizeof *g_held * (size_t)(g_nheld - i - 1));
+            g_nheld--;
+        }
+    /* Lines of bundles whose requirements start now, after their cvars. */
+    for (i = 0; x && i < x->nbundles; ++i) {
+        ms_bundle *b = &x->bundles[i];
+        ms_active *a;
+        if (!ms_req_accepted(b)) continue;
+        a = ms_active_find(b->id);
+        if (!a) {
+            int ran = 0;
+            if (b->req_nact && (!ops || !ops->command)) {
+                ms_log("%s: requirements: %s@%s: %d activate command(s) wait for the command buffer", phase, b->id, b->version,
+                       b->req_nact);
+                continue;
+            }
+            if (!ms_grow((void **)&g_active, &g_cactive, g_nactive + 1, sizeof *g_active)) continue;
+            a = &g_active[g_nactive++];
+            memset(a, 0, sizeof *a);
+            strncpy_s(a->id, sizeof a->id, b->id, _TRUNCATE);
+            if (b->req_nact) ms_log("%s: requirements of %s@%s start; running its activate commands", phase, b->id, b->version);
+            for (k = 0; k < b->req_nact; ++k) ran += ms_req_line(ops, phase, b->id, b->req_act[k]);
+            r.commands += ran;
+            a->act_ran = ran;
+            a->act_total = b->req_nact;
+        }
+        /* The current build's lines run when it stops. */
+        _snprintf_s(a->who, sizeof a->who, _TRUNCATE, "%s@%s", b->id, b->version);
+        for (k = 0; k < a->ndeact; ++k) free(a->deact[k]);
+        a->ndeact = 0;
+        for (k = 0; k < b->req_ndeact && k < (int)SH_MB_REQ_COMMANDS_MAX; ++k) {
+            a->deact[a->ndeact] = _strdup(b->req_deact[k]);
+            if (a->deact[a->ndeact]) a->ndeact++;
+        }
+    }
+    for (i = 0; x && i < x->nbundles; ++i)
+        if (x->bundles[i].admitted && ms_req_needs(&x->bundles[i])) ms_req_mark_bundle(&x->bundles[i]);
+    ReleaseSRWLockExclusive(&g_req_lock);
+    free(changed);
+    free(queued);
+    free(restoring);
+    free(refused);
+    free(target);
     if (out) *out = r;
-    if (!needed) return 0;
-    return r.not_live ? -1 : 1;
+    result = !r.needed ? 0 : r.not_live ? -1 : 1;
+    return result;
 }
 
 int sh_modserve_requirements_check(const sh_modserve_gate_ops *ops, const char *phase, sh_modserve_gates *out)
 {
     sh_modserve_gates r;
     int result = sh_modserve_requirements_apply(ops, phase, &r);
-    if (result == 1 && !(r.changed & r.needed)) {
-        char names[160];
-        ms_gate_names(r.live, names, sizeof names);
+    if (result == 1 && !r.changed) {
+        char names[600];
+        AcquireSRWLockShared(&g_req_lock);
+        ms_held_names(1, NULL, names, sizeof names);
+        ReleaseSRWLockShared(&g_req_lock);
         ms_log("%s: requirements live: %s (unchanged since the last pass)", phase ? phase : "plan", names);
     }
     if (out) *out = r;
     return result;
 }
 
-static const char *ms_unmet_cause(unsigned unmet)
-{
-    if ((unmet & 3u) == 3u) return "requirements g_useImageBlackList=0, g_useResourceBlackList=0 are not live";
-    if (unmet & 2u) return "requirement g_useResourceBlackList=0 is not live";
-    return "requirement g_useImageBlackList=0 is not live";
-}
-
 int sh_modserve_plan_block_unmet(sh_modserve_plan *plan, const sh_modserve_gates *gates)
 {
     const ms_index *x = g_index;
     int i, n = 0;
-    if (!plan || !gates || !gates->not_live || !x) return 0;
+    (void)gates;
+    if (!plan || !x) return 0;
     for (i = 0; i < plan->count; ++i) {
         sh_modserve_step *s = &plan->steps[i];
-        unsigned unmet = x->bundles[x->files[s->file].bundle].req & gates->not_live;
-        /* A step registered while its gates were live stays ready. */
-        if (unmet && !s->blocked && x->files[s->file].reg_state != 1) {
-            s->blocked = ms_unmet_cause(unmet);
+        const ms_bundle *b = &x->bundles[x->files[s->file].bundle];
+        /* A step registered while its requirements were live stays ready. */
+        if (ms_req_needs(b) && !InterlockedCompareExchange((volatile LONG *)&b->req_live, 0, 0) && !s->blocked &&
+            x->files[s->file].reg_state != 1) {
+            s->blocked = b->req_cause[0] ? b->req_cause : "requirements are not live";
             plan->blocked++;
             n++;
         }
@@ -3015,13 +3386,95 @@ int sh_modserve_plan_run_gated(sh_modserve_plan *plan, const sh_modserve_engine_
     if (out) memset(out, 0, sizeof *out);
     if (!plan || !g_index) return -1;
     if (!plan->count) return 0;
-    /* Phases 1 and 2 (disarm, then verify after any drain) finish before the
+    /* Phases 1 and 2 (set, then verify after any drain) finish before the
      * plan's first DeclRegisterFile. */
     sh_modserve_requirements_apply(gates, phase, &r);
     sh_modserve_plan_block_unmet(plan, &r);
     if (out) *out = r;
     return sh_modserve_plan_run(plan, ops, phase);
 }
+
+int sh_modserve_requirements_report(sh_modserve_line_fn fn, void *context)
+{
+    const ms_index *x = g_index;
+    char line[900];
+    int i, k, lines = 0, any = 0;
+    if (!fn) return 0;
+    AcquireSRWLockShared(&g_req_lock);
+    for (i = 0; x && i < x->nbundles; ++i) {
+        const ms_bundle *b = &x->bundles[i];
+        const ms_active *a;
+        if (!b->admitted || !b->req_text || (!b->req_ncvars && !b->req_nact && !b->req_ndeact)) continue;
+        any = 1;
+        a = ms_active_find(b->id);
+        for (k = 0; k < b->req_ncvars; ++k) {
+            const ms_held *h = ms_held_find(b->req_cvars[k].name);
+            const char *state;
+            char why[200];
+            if (b->req_lost) state = "NOT live", _snprintf_s(why, sizeof why, _TRUNCATE, " (%s)", b->req_lost);
+            else if (!h || !h->needed || !ms_req_same(h->want, b->req_cvars[k].value)) state = "not applied yet", strcpy_s(why, sizeof why, " (no registration pass since it was installed)");
+            else if (h->state == 1) state = "live", why[0] = 0;
+            else if (h->state == 0) state = "not applied yet", strcpy_s(why, sizeof why, " (the next editor pass or map load applies it)");
+            else state = "NOT live", _snprintf_s(why, sizeof why, _TRUNCATE, " (%s; its steps are blocked)", h->why);
+            _snprintf_s(line, sizeof line, _TRUNCATE, "requirements: %s@%s: cvar %s=%s: %s%s", b->id, b->version,
+                        b->req_cvars[k].name, b->req_cvars[k].value, state, why);
+            fn(context, line);
+            lines++;
+        }
+        for (k = 0; k < b->req_nact; ++k) {
+            _snprintf_s(line, sizeof line, _TRUNCATE, "requirements: %s@%s: activate command \"%s\": %s", b->id, b->version,
+                        b->req_act[k], b->req_lost ? "not run (a cvar lost a conflict)" : a ? (k < a->act_ran ? "ran" : "NOT run")
+                        : "runs at the next editor pass or map load");
+            fn(context, line);
+            lines++;
+        }
+        for (k = 0; k < b->req_ndeact; ++k) {
+            _snprintf_s(line, sizeof line, _TRUNCATE, "requirements: %s@%s: deactivate command \"%s\": runs when the mod "
+                        "stops", b->id, b->version, b->req_deact[k]);
+            fn(context, line);
+            lines++;
+        }
+    }
+    for (i = 0; i < g_nheld; ++i)
+        if (!g_held[i].needed && g_held[i].owned) {
+            _snprintf_s(line, sizeof line, _TRUNCATE, "requirements: %s is restored to \"%.200s\" at the next editor pass or "
+                        "map load (no installed mod needs it)", g_held[i].name, g_held[i].original);
+            fn(context, line);
+            lines++;
+        }
+    for (i = 0; i < g_nactive; ++i) {
+        int still = 0, b;
+        for (b = 0; x && b < x->nbundles && !still; ++b)
+            still = ms_req_accepted(&x->bundles[b]) && !strcmp(x->bundles[b].id, g_active[i].id);
+        if (still) continue;
+        _snprintf_s(line, sizeof line, _TRUNCATE, "requirements: %s stopped; its %d deactivate command(s) run at the next "
+                    "editor pass or map load", g_active[i].who, g_active[i].ndeact);
+        fn(context, line);
+        lines++;
+    }
+    ReleaseSRWLockShared(&g_req_lock);
+    if (!any && !lines) { fn(context, "requirements: none (no installed mod sets a cvar or runs a command)"); lines++; }
+    return lines;
+}
+
+#ifdef SH_MODSERVE_TESTING
+/* Forget the held cvars and the lines that ran, without restoring anything. */
+void sh_modserve_test_reset_gates(void)
+{
+    int i;
+    AcquireSRWLockExclusive(&g_req_lock);
+    for (i = g_nactive - 1; i >= 0; --i) ms_active_drop(i);
+    g_nheld = 0;
+    ReleaseSRWLockExclusive(&g_req_lock);
+}
+unsigned sh_modserve_test_gates_owned(void)
+{
+    int i;
+    unsigned n = 0;
+    for (i = 0; i < g_nheld; ++i) n += g_held[i].owned ? 1u : 0u;
+    return n;
+}
+#endif
 
 /* ------------------------------------------------------------------ queries */
 
@@ -3261,11 +3714,11 @@ void sh_modserve_each_served(sh_modserve_file_fn fn, void *context)
  * rescan copied the marks. */
 static int ms_settled_before(const ms_index *x, const ms_file *f);
 
-/* The bundle's requirement gates are all live now. */
+/* The bundle has cvar requirements and they are all live now. */
 static int ms_gates_live_for(const ms_index *x, const ms_file *f)
 {
-    unsigned req = x->bundles[f->bundle].req;
-    return req && !(req & ~(unsigned)InterlockedCompareExchange(&g_gates_live, 0, 0));
+    const ms_bundle *b = &x->bundles[f->bundle];
+    return ms_req_needs(b) && InterlockedCompareExchange((volatile LONG *)&b->req_live, 0, 0);
 }
 
 /* What the engine holds for this file may not be the bundle's: never opened
@@ -3438,7 +3891,7 @@ int sh_modserve_refresh_expand(void)
 
 static int ms_gates_ok(const ms_index *x, const ms_file *f)
 {
-    return !x->bundles[f->bundle].req || ms_gates_live_for(x, f);
+    return !ms_req_needs(&x->bundles[f->bundle]) || ms_gates_live_for(x, f);
 }
 
 static int ms_refresh_one(const ms_index *x, ms_file *f, int kind, sh_modserve_refresh_fn fn, void *context)

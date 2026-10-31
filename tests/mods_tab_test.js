@@ -445,6 +445,25 @@ test('details: every section for a v3 mod', () => {
   h.nodes.modsVerifyBtn.click();
   assert.deepEqual(h.sent.pop(), {cmd: 'modsAction', action: 'verify', arg: 'local.cyberdemon@0.0.0-05238b2e'});
 });
+test('details: requirement commands are listed with the console settings', () => {
+  const doc = clone(v3);
+  const hg = doc.mods.find(m => m.key === 'local.hell-guard');
+  hg.requirements = {commands: {activate: ['bind x "say hi"', 'echo on'], deactivate: ['echo off']},
+                     cvars: {com_maxFps: '120'}};
+  const m = modsTab.normalize(doc).mods.find(b => b.key === 'local.hell-guard');
+  assert.deepEqual(m.commands, {activate: ['bind x "say hi"', 'echo on'], deactivate: ['echo off']});
+  assert.deepEqual(modsTab.normalize(v3).mods.find(b => b.key === 'local.hell-guard').commands, {activate: [], deactivate: []});
+  assert.equal(modsTab.normalize(v2).mods.find(b => b.key === 'alex.r2-imp@1.0.0+2').commands, null);
+  const h = harness();
+  shown(h, doc);
+  rowOf(h, 'local.hell-guard').click();
+  const req = section(h, 'requirements').textContent;
+  assert.match(req, /Console settings com_maxFps 120/);
+  assert.match(req, /Commands when active bind x "say hi" echo on/);
+  assert.match(req, /Commands when removed echo off/);
+  rowOf(h, 'doors').click();
+  assert.ok(!/Commands when/.test(section(h, 'requirements').textContent), 'no commands, no rows');
+});
 test('details: a v2 document renders with the v3 parts left out', () => {
   const h = harness();
   shown(h, v2);
