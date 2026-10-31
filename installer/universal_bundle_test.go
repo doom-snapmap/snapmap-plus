@@ -48,7 +48,8 @@ func zipFiles(t *testing.T, files map[string]string) []byte {
 	return buf.Bytes()
 }
 
-// universalRelease is a release whose bundle carries the 2024 files and the 2018 release's files.
+// universalRelease is a release whose bundle carries the 2024 files and the 2018 release's files, as
+// the bundles of v0.2.1-beta.20 and the releases after it did.
 func universalRelease(t *testing.T, tag string) *mockRelease {
 	t.Helper()
 	z := zipFiles(t, map[string]string{
@@ -81,17 +82,31 @@ func TestBundlePathsAgreeAcrossBackendPackagingAndInstaller(t *testing.T) {
 	if !strings.Contains(pkg, `$uiRel = "`+currentUIDll+`"`) {
 		t.Errorf("package.ps1 does not package the frontend as %s", currentUIDll)
 	}
-	if !strings.Contains(pkg, `$legacyRels = @("`+strings.Join(legacyBundleFiles, `", "`)+`")`) {
-		t.Errorf("package.ps1 does not carry the 2018 files %v", legacyBundleFiles)
+	// The bundle carries only the April 2024 pair: the 2018 release's files are no longer packaged.
+	for _, gone := range []string{"LegacyBundle", "$legacyRels", "XINPUT1_3.dll"} {
+		if strings.Contains(pkg, gone) {
+			t.Errorf("package.ps1 still mentions %q", gone)
+		}
 	}
-	if !strings.Contains(read(".github/workflows/ci.yml"), `"`+currentUIDll+`"`) {
+	mustNot := `$mustNot = @("XINPUT1_3.dll", "snapmap-plus\snapmap-plus-ui.dll")`
+	ci := read(".github/workflows/ci.yml")
+	if !strings.Contains(ci, `"`+currentUIDll+`"`) {
 		t.Errorf("the CI bundle guard does not require %s", currentUIDll)
 	}
+	if !strings.Contains(ci, mustNot) {
+		t.Errorf("the CI bundle guard does not refuse the 2018 pair")
+	}
 	rel := read(".github/workflows/release.yml")
-	for _, want := range []string{"releases/tags/" + legacyReleaseTag, "-LegacyBundle legacy-bundle.zip -LegacyBundleSha256", `dist\XINPUT1_3.dll`} {
-		if !strings.Contains(rel, want) {
-			t.Errorf("release.yml lacks %q", want)
+	if !strings.Contains(rel, `"$GITHUB_REF_NAME" = "`+legacyReleaseTag+`"`) {
+		t.Errorf("release.yml no longer refuses to republish %s", legacyReleaseTag)
+	}
+	for _, gone := range []string{"LegacyBundle", `dist\XINPUT1_3.dll`, "legacy-bundle.zip"} {
+		if strings.Contains(rel, gone) {
+			t.Errorf("release.yml still packages the 2018 files (%q)", gone)
 		}
+	}
+	if !strings.Contains(rel, mustNot) {
+		t.Errorf("release.yml does not refuse a bundle holding the 2018 pair")
 	}
 }
 
