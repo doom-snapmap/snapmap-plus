@@ -38,8 +38,8 @@ separate from the repository's write permissions. The intended deployment uses:
 
 1. **A monthly spend limit on a dedicated Anthropic workspace**, set in the Console. This is the only control
    that bounds the financial exposure, and it is deliberately outside GitHub.
-2. **The `changelog` environment's deployment branch policy, restricted to the release branches** (`main` and
-   `port/build-13954591`, the April 2024 line that releases from its own branch). A GitHub Environment
+2. **The `changelog` environment's deployment branch policy, restricted to the release branch** (`main`;
+   the former `port/build-13954591` branch is gone, main is the April 2024 line). A GitHub Environment
    defaults to "All branches", and `workflow_dispatch` lets the caller pick the ref — the workflow file that
    *runs* is the one on the chosen ref. Without this policy the key is scoped to a declared job, not to
    reviewed code.
