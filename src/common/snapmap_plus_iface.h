@@ -303,7 +303,7 @@ typedef struct sh_prefab_grab_info {
 } sh_prefab_grab_info;
 typedef int (*sh_prefab_grab_status_fn)(struct sh_iface *self, sh_prefab_grab_info *out); /* +0x358 (ext 30) */
 /* Module prefabs: Blueprint modules saved with their entities, placed in another
- * map's Blueprint mode (backend/module_prefab.c). One slot, four operations.
+ * map's Blueprint mode (backend/module_prefab.c). One slot; the operations below, and the mods a prefab needs.
  *   STATE  any thread. blueprint = editor in Blueprint (state 1), entity_mode =
  *          Object Mode (state 2). Returns 1, or 0 when no editor is open.
  *   SAVE   any thread except the game thread (it marshals its capture there and
@@ -327,23 +327,58 @@ typedef int (*sh_prefab_grab_status_fn)(struct sh_iface *self, sh_prefab_grab_in
  *          same module check for text without placing: out receives
  *          {"checked":true,"count":N,"missing":[...],"status":"..."} or
  *          {"checked":false}. Returns the missing count, -1 when it could not
- *          check (no editor, not a module prefab). */
+ *          check (no editor, not a module prefab). With meta_path, a module a
+ *          row of that sidecar provides is not missing (it is a mod, below).
+ * The mods a prefab needs (backend/prefab_mods.c), for both kinds of prefab:
+ *   MODS_RECORD   any thread. text: the prefab file just written; meta_path:
+ *          its sidecar. Writes the mod rows (the map manifest's save-time
+ *          closure over the prefab) into the sidecar; out receives the
+ *          sidecar body. Returns the row count, -1 failed.
+ *   MODS_STATUS   any thread. text: a sidecar body. out receives
+ *          {"count":N,"missing":M,"mods":[{"id","version","bundle","size",
+ *          "installed"}...]}. Returns M, -1 unreadable.
+ *   MODS_RESOLVE  not the game thread (it runs there and waits). text: the
+ *          prefab file; meta_path: its sidecar; name: its name. Returns 1
+ *          place now (every mod installed and in the open map), 2 held while
+ *          the mod store is asked (poll MODS_POLL with seq), -6 a module the
+ *          player cannot get (DLC), -7 refused, 0 the game did not answer;
+ *          out receives the message for -6, -7 and 2.
+ *   MODS_POLL     any thread. seq from MODS_RESOLVE: 2 waiting, 1 ready (place
+ *          it now), 0 refused or dropped (the game showed why).
+ *   META_WRITE    any thread. text: a sidecar body from the page ("" deletes);
+ *          meta_path. Keeps the recorded mod rows when the body has none.
+ *          1 written, -1 failed.
+ *   EXPORT        not the game thread. path: the prefab file; meta_path: its
+ *          sidecar; name; zip_path. Writes the prefab with its mods (the
+ *          rawmap export's layout). out: the message. 1 written, -1 refused.
+ *   IMPORT        not the game thread. zip_path; path: the prefabs folder.
+ *          Installs the mods, adds the prefab. out: {"ok","name","message"}.
+ *          1 added, 0 already in the library (nothing written), -1 refused. */
 #define SH_MODULE_PREFAB_STATE  1
 #define SH_MODULE_PREFAB_SAVE   2
 #define SH_MODULE_PREFAB_PLACE  3
 #define SH_MODULE_PREFAB_STATUS 4
 #define SH_MODULE_PREFAB_CHECK  5
+#define SH_MODULE_PREFAB_MODS_RECORD  6
+#define SH_MODULE_PREFAB_MODS_STATUS  7
+#define SH_MODULE_PREFAB_MODS_RESOLVE 8
+#define SH_MODULE_PREFAB_MODS_POLL    9
+#define SH_MODULE_PREFAB_META_WRITE   10
+#define SH_MODULE_PREFAB_EXPORT       11
+#define SH_MODULE_PREFAB_IMPORT       12
 typedef struct sh_module_prefab_call {
     int         op;
-    const char *path;        /* SAVE: prefab file */
-    const char *meta_path;   /* SAVE: sidecar file */
-    const char *text;        /* PLACE: prefab file text */
+    const char *path;        /* SAVE: prefab file; EXPORT: prefab file; IMPORT: prefabs folder */
+    const char *meta_path;   /* SAVE, CHECK, MODS_*, META_WRITE, EXPORT: sidecar file */
+    const char *text;        /* PLACE, CHECK, MODS_*: prefab file text; MODS_STATUS, META_WRITE: sidecar body */
     size_t      text_len;
     char       *out;         /* SAVE: sidecar body; STATUS/PLACE: message */
     int         out_cap;
-    int         seq;         /* PLACE out; STATUS in */
+    int         seq;         /* PLACE out; STATUS in; MODS_RESOLVE out; MODS_POLL in */
     int         blueprint;   /* STATE out */
     int         entity_mode; /* STATE out */
+    const char *name;        /* MODS_RESOLVE, EXPORT: the prefab's name */
+    const char *zip_path;    /* EXPORT, IMPORT: the ZIP */
 } sh_module_prefab_call;
 typedef int (*sh_module_prefab_fn)(struct sh_iface *self, sh_module_prefab_call *call); /* +0x360 (ext 31) */
 /* Timeline tile: the product palette row on snapmaps/unknown whose prototype

@@ -27,6 +27,8 @@
 
 #include <stddef.h>
 
+#include "modmanifest.h"
+
 #define MODEXPORT_FORMAT    1
 #define MODEXPORT_MAP_ENTRY "map.rawmap.json"
 #define MODEXPORT_INDEX     "export.json"
@@ -62,6 +64,38 @@ int   modexport_probe(const char *zip_path, char *cause, size_t cause_cap);
 /* Import: install every bundle the export carries (verifying hashes), then
  * return the map text (malloc'd, NUL-terminated), or NULL with the cause. */
 char *modexport_read(const char *zip_path, size_t *out_len, modexport_stats *st, char *cause, size_t cause_cap);
+
+/* ---------------------------------------------- prefab exports ------ */
+/* A prefab's export has the same layout, with the prefab in place of the map:
+ *
+ *   prefab.json         the prefab file as the library holds it
+ *   prefab.meta.json    its sidecar, whose "mods" rows name the builds carried
+ *   export.json         {"bundles":[...],"format":1,"kind":"prefab","name":"<name>","prefab":"prefab.json"}
+ *   mods/<id>@<version>+<build>/...   each bundle the rows name, as for a map
+ *
+ * A map's importer refuses a prefab's export and the other way round. */
+#define MODEXPORT_PREFAB_ENTRY "prefab.json"
+#define MODEXPORT_PREFAB_META  "prefab.meta.json"
+#define MODEXPORT_PREFAB_MAX   (16u * 1024u * 1024u)
+
+/* The sidecar to carry, written for the rows the export carries (a row that
+ * pinned an earlier build names the current one). malloc'd, *len set; NULL
+ * refuses the export. */
+typedef char *(*modexport_meta_fn)(void *ctx, const sh_modmanifest_list *rows, size_t *len);
+
+/* Write a prefab's export: every bundle `rows` names must be installed and
+ * usable. `meta` may be NULL (no sidecar entry). zip_path is UTF-8. */
+int modexport_write_prefab(const char *name, const char *prefab, size_t len, const sh_modmanifest_list *rows,
+                           modexport_meta_fn meta, void *meta_ctx, const char *zip_path, modexport_stats *st,
+                           char *cause, size_t cause_cap);
+
+/* Import a prefab's export: verify it, install the bundles the store does not
+ * hold (nothing already installed is written again), then return the prefab
+ * text and its sidecar (malloc'd; *meta NULL when the export has none) and the
+ * name export.json gives (may be empty). 1 on success, else 0 with the cause;
+ * a damaged export installs nothing. */
+int modexport_read_prefab(const char *zip_path, char **prefab, size_t *prefab_len, char **meta, size_t *meta_len,
+                          char *name, size_t name_cap, modexport_stats *st, char *cause, size_t cause_cap);
 
 /* ---------------------------------------------- rawmap file hooks ---- */
 /* The rawmap layer (rawmap.c) calls these for a path ending in .zip. Paths

@@ -407,6 +407,11 @@
   .pf-item.dragging, .pf-folder-head.dragging { opacity: 0.4; }
   .pf-kind { float: right; margin-left: 8px; padding: 0 6px; border-radius: 9px; font-size: 10px; line-height: 15px; color: var(--muted); background: var(--panel2); border: 1px solid var(--border2); }
   .pf-item.selected .pf-kind { color: var(--selText); border-color: transparent; background: rgba(255,255,255,0.14); }
+  /* The mods a prefab records: "Mods: <id>", or "Needs mods: <id>" when one is not installed. */
+  .pf-mods { float: right; max-width: 45%; overflow: hidden; text-overflow: ellipsis; margin-left: 8px; padding: 0 6px; border-radius: 9px;
+             font-size: 10px; line-height: 15px; color: var(--muted); background: var(--panel2); border: 1px solid var(--border2); }
+  .pf-mods.pf-mods-missing { color: var(--warnText); background: var(--warnBg); border-color: transparent; }
+  .pf-item.selected .pf-mods { color: var(--selText); border-color: transparent; background: rgba(255,255,255,0.14); }
   #timelineList .tl-item.open { font-weight: 600; }
   #timelineList .tl-item.open::before { content: ""; display: inline-block; width: 5px; height: 5px; margin-right: 6px; border-radius: 50%; background: var(--accent); vertical-align: middle; }
   .pf-drag-ghost { position: fixed; top: -1000px; left: -1000px; display: none; padding: 3px 10px; border-radius: 4px; background: var(--sel); color: var(--selText); font-size: 12px; white-space: nowrap; }
@@ -449,6 +454,15 @@
   .pc-needs { flex: 0 0 auto; display: flex; align-items: flex-start; gap: 6px; margin-top: 4px; padding: 4px 6px;
               background: var(--warnBg); color: var(--warnText); font-size: 11px; }
   .pc-needs .ui-icon { width: 12px; height: 12px; margin-top: 1px; }
+  /* Prefab Details: the mods the prefab records and whether each is installed. */
+  .pc-mods { flex: 0 0 auto; display: flex; flex-direction: column; gap: 3px; margin-top: 4px; }
+  .pc-mods-head { color: var(--muted); }
+  .pc-mods-rows { display: flex; flex-direction: column; gap: 1px; font-size: 11px; }
+  .pc-mods-row { display: flex; justify-content: space-between; gap: 12px; }
+  .pc-mods-row .pc-mods-state { color: var(--muted); }
+  .pc-mods-row.missing .pc-mods-state { color: var(--warnText); font-weight: 600; }
+  .pc-mods-note { color: var(--muted); font-size: 10px; }
+  .pc-mods.pc-mods-missing .pc-mods-note { color: var(--warnText); }
   /* Limits: what the selected prefab adds to the editor's five HUD meters. */
   .pc-limits { flex: 0 0 auto; display: flex; flex-direction: column; gap: 3px; margin-top: 4px; }
   .pc-limits-head { color: var(--muted); }

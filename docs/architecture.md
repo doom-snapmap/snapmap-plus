@@ -457,7 +457,11 @@ These backend files share the work:
   bundle that is not installed, asks the player, and fetches and resumes it or
   drops it, as in [Published maps and missing mods](#published-maps-and-missing-mods).
   It also holds a rawmap load whose mods are missing, as in
-  [Rawmaps that name mods](#rawmaps-that-name-mods).
+  [Rawmaps that name mods](#rawmaps-that-name-mods), and a prefab placement
+  whose mods are missing, as in [Prefabs that name mods](#prefabs-that-name-mods).
+- `prefab_mods.c` records the mods a prefab needs in its sidecar, resolves
+  them before Load / Place, and writes and reads a prefab's ZIP, as in
+  [Prefabs that name mods](#prefabs-that-name-mods).
 - `modmigrate.c` moves the retired `overrides\` tree into the store once, as in
   [Migration of the retired overrides folder](#migration-of-the-retired-overrides-folder).
 - `modsound.c` delivers the Wwise sound banks bundles carry, as in
@@ -1377,6 +1381,71 @@ rows writes only the JSON. `sh_rawmaps status` and the File menu's status
 for the open map) report what the last save wrote. A ZIP left beside a JSON by
 an earlier save is not deleted when the map later stops using mods.
 
+### Prefabs that name mods
+
+A prefab is never handed to the engine while a mod it uses is missing, for the
+same reason as a rawmap: an entity on a mod's decl, or an instance of a mod's
+module, has nothing to resolve to.
+
+Recording. Saving a prefab finds its mods exactly as a map's save does: the
+placed names of the prefab text (`sh_modmanifest_placed_names`: every
+`inherit`, `moduleName` and string inside an `edit` object) go through
+`modserve_bundles_for_names_visit`, which names every admitted bundle that
+provides one and the bundles its needs reach. Each bundle is one row in the
+manifest's form, `{"id","version","bundle","size","names"}`; a pinned hash an
+alias names resolves to the current build wherever a row is used, as for a map.
+The rows live in the prefab's sidecar, `<name>.meta.json`, under `"mods"`,
+beside the description, tags and a module prefab's summary; the prefab file
+itself stays the engine's bytes, so the engine never reads them and an older
+product ignores them. An object prefab's rows are written right after Create
+writes the file (`MODS_RECORD`), a module prefab's by the module save itself.
+A sidecar without `"mods"` (every prefab saved before this) names no mods and
+loads as before. The page's own sidecar writes keep the rows (`META_WRITE`).
+
+Resolving. Load / Place first reads the rows (`MODS_RESOLVE`, on the game
+thread):
+
+- a module prefab naming a module no row provides and the palette lacks (DLC
+  the player does not own) is refused with the module guard's toast and
+  console line, below; nothing is fetched, because nothing can install it;
+- missing rows first try the recycle bin (`sh_modserve_restore`);
+- with every row installed, the rows' bundles are activated for the open map
+  (`modserve_activate_bundles`) and each one the open map does not list (its
+  scope listing, else its manifest rows) is attached as a map-level row through
+  the Mods tab's Use in this map (`sh_modui_run(SH_MODS_ACT_MAP_ADD)`), with one
+  console line: "Prefab <name> uses <id> <version>; this map did not list it,
+  so it was added to the map (the Mods tab's Remove from map takes it out).".
+  Then the placement goes on unchanged;
+- otherwise the placement is held by `sh_modpub_prefab_hold`, the rawmap hold
+  with its own hook (`SH_MODPUB_PREFAB_PLACE`): the store is asked on the worker;
+  when it has every missing bundle the engine's Yes/No asks "This prefab needs
+  N mod(s): <names> (<size>). Download and install now?", Yes fetches and
+  installs them, and the ready callback runs the step above; the Prefabs tab,
+  polling `MODS_POLL`, then places the prefab through its ordinary Load /
+  Place. When the store lacks any or cannot be reached, the notice says "This
+  prefab was not placed. It needs mods you do not have ..." and one console line
+  names each mod (id and version) and asks for the prefab's `.zip` export. No,
+  a failed download and a bundle that will not install end as for a map, with
+  "The prefab was not placed.";
+- with the gates unbound (a build where the published-map gates did not
+  install) the same refusal is printed and toasted without asking the store.
+
+One hold runs at a time: a second placement while one waits is refused.
+
+Export and import. `sh_prefab export "<name>" "<path.zip>"` and the tab's
+Export write the rawmap export's layout (`modexport.h`) with the prefab in place
+of the map: `prefab.json`, `prefab.meta.json` (its rows naming the builds the ZIP
+carries), `export.json` with `"kind":"prefab"` and the name, and
+`mods/<id>@<version>+<build>/...`. A prefab saved before rows were recorded
+exports the closure of its text. Each importer refuses the other's ZIP.
+`sh_prefab import "<path.zip>"` and the tab's Import install the bundles the
+store lacks (hashes verified, nothing installed rewritten), rescan, and add the
+prefab under the name the export gives, else the ZIP's name; a prefab of that
+name with the same bytes is left alone (an import that finds everything already
+there writes nothing), one with other bytes is kept and the import takes
+"<name> (2)" and so on. `sh_prefab mods "<name>"` lists the rows and whether
+each is installed.
+
 ### Publishing a map with mods
 
 What is sent: the bundles the published map names in its `smpmod1.` rows, and
@@ -1469,6 +1538,10 @@ mod serves (`sh_modserve_module_served`) or one already loaded into a private
 palette. Any other name refuses the placement before the engine sees it: slot
 result -6, one console line `Module prefab: needs module <name>; this room is
 not in your palette (DLC or a mod you do not have)` and a toast naming the rooms.
+A module a served mod provides is a mod row like any other (see
+[Prefabs that name mods](#prefabs-that-name-mods)): the save records it, Load /
+Place downloads and installs it before this check, and the check then finds it
+served; a module no row provides and the palette lacks is DLC, refused here.
 The engine has no safe outcome for such a name. The map validator (VK
 0x1412488e0 / GL 0x141247f10) drops the instance through HasModule ("Couldn't
 load module") and keeps its entities, and the record builder SnapMapEditCtor runs
@@ -1476,7 +1549,8 @@ load module") and keeps its entities, and the record builder SnapMapEditCtor run
 modulePalette" when FindModule returns the palette's end record. The Prefabs tab
 runs the same check (`SH_MODULE_PREFAB_CHECK`) when a module prefab is selected
 and shows the missing rooms above Limits; the check names nothing when no editor
-palette is open.
+palette is open, and with the prefab's sidecar it leaves out the modules its
+mod rows provide, which the Prefabs tab lists as mods instead.
 
 ## Map behaviour carried by String Set nodes
 

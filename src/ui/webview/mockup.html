@@ -223,6 +223,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       <div class="panel-head">
         <span class="panel-title">Prefabs</span><span class="badge" id="pfBadge">0</span>
         <div class="panel-actions">
+          <button type="button" class="btn icon icon-button" id="prefabImportBtn" title="Import a prefab ZIP: its mods are installed and the prefab is added to the list" aria-label="Import Prefab"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-download"></use></svg></button>
           <button type="button" class="btn icon icon-button" id="newFolderBtn" title="New Folder" aria-label="New Folder"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-folder-plus"></use></svg></button>
           <button type="button" class="btn primary icon icon-button" id="prefabCreateBtn" title="Create from Selection" aria-label="Create from Selection"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-plus"></use></svg></button>
         </div>
@@ -243,6 +244,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       <div class="panel-head">
         <span class="panel-title">Prefab Details</span>
         <div class="panel-actions">
+          <button class="btn" id="prefabExportBtn" disabled title="Select a prefab first">Export</button>
           <button class="btn danger" id="prefabDeleteBtn" disabled title="Select a prefab first">Delete</button>
           <button class="btn primary" id="prefabLoadBtn" disabled title="Select a prefab first">Load / Place</button>
         </div>
@@ -268,6 +270,11 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
           <div class="pc-preview-help">Drag to orbit &middot; Wheel to zoom &middot; Double-click to frame</div>
         </div>
         <div class="pc-needs" id="pcNeeds" role="status" style="display:none;"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-triangle-alert"></use></svg><span id="pcNeedsText"></span></div>
+        <section class="pc-mods" id="pcMods" aria-labelledby="pcModsHead" style="display:none;">
+          <div class="pc-mods-head" id="pcModsHead">Mods</div>
+          <div class="pc-mods-rows" id="pcModsRows" role="list"></div>
+          <div class="pc-mods-note" id="pcModsNote"></div>
+        </section>
         <section class="pc-limits" id="pcLimits" aria-labelledby="pcLimitsHead">
           <div class="pc-limits-head" id="pcLimitsHead">Limits</div>
           <div class="pc-limits-rows" id="pcLimitsRows" role="table" aria-label="What this prefab adds to the map's limits"></div>
@@ -1340,6 +1347,12 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       previewPrefabDetails[o.name] = {count: editorSelCount, scene: previewPrefabScene([])};
       onMessage({kind:'createPrefabResult', result:1, name:o.name});
       previewSendPrefabs();
+    }
+    else if (o.cmd === 'exportPrefab') {
+      onMessage({kind:'prefabFileResult', op:'export', ok:true, message:'Exported prefab ' + o.name + ' to ' + o.name + '.zip; it uses no mods.'});
+    }
+    else if (o.cmd === 'importPrefab') {
+      onMessage({kind:'prefabFileResult', op:'import', ok:false, message:'Import needs the game: the file dialog opens there.'});
     }
     else if (o.cmd === 'deletePrefab') {
       var list = previewFolderList(o.folder || '');
@@ -3141,7 +3154,19 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       // a module prefab answers the words a reader would filter by, whatever its own tags say
       for (var pk in prefabKinds) if (prefabKinds.hasOwnProperty(pk) && prefabKinds[pk] === 'modules')
         prefabTags[pk] = (prefabTags[pk] || []).concat(['blueprint', 'modules']);
+      // the mods each prefab records, with their installed state; the filter finds "mods" and "needs mods"
+      prefabMods = {};
+      var dmods = d.mods && typeof d.mods === 'object' ? d.mods : {};
+      for (var mk2 in dmods) if (dmods.hasOwnProperty(mk2)) {
+        var mst = pfModsParse(dmods[mk2]);
+        if (!mst.count) continue;
+        prefabMods[mk2] = mst;
+        prefabTags[mk2] = (prefabTags[mk2] || []).concat(mst.missing ? ['mods', 'needs mods'] : ['mods']);
+      }
       renderPrefabList(d.root || [], d.folders || []);
+    } else if (d.kind === 'prefabFileResult') {
+      var pfr = pfFileResultToast(d);
+      if (pfr) toast(pfr.text, pfr.level);
     } else if (d.kind === 'editorMode') {
       edMode = {known: true, entityMode: d.entityMode ? 1 : 0, blueprint: d.blueprint ? 1 : 0};
       pfRefreshModeUi(); updateCreateBtn();
@@ -3234,8 +3259,11 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     } else if (d.kind === 'loadPrefabResult') {
       /* The backend drain owns the OUTCOME toast ("Ready -- move it into position..." vs the
          "press Ctrl+V" fallback), because only it knows whether the pick-up actually happened.
-         This one just confirms the request was accepted. */
-      if (d.prefabKind === 'modules') {
+         This one just confirms the request was accepted. A prefab whose mods are being fetched
+         or were refused says so first (prefab_mods.c). */
+      var pml = pfModsLoadToast(d);
+      if (pml) toast(pml.text, pml.level);
+      else if (d.prefabKind === 'modules') {
         if (d.result === 1) toast('"' + d.name + '" is under the cursor -- move it into place and press Space, or Esc to cancel', 'ok');
         else if (d.result === -1) toast('Could not read "' + d.name + '" (see log)', 'err');
         else if (d.result === -4) toast('Switch to Blueprint mode (Tab in the editor) to place a module prefab', 'warn');
@@ -3308,6 +3336,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   var pfListSeen = false;   // the open-folder set is pruned against disk only once a list has arrived
   var prefabTags = {};   // "<folder>/<name>" (or "<name>" at root) -> [tags], from the list message's meta map
   var prefabKinds = {};  // "<folder>/<name>" -> "modules" for module prefabs (object prefabs are absent)
+  var prefabMods = {};   // "<folder>/<name>" -> pfModsParse() of the mods its sidecar records (none are absent)
   var selectedPrefabKind = '';   // kind of the prefab whose details are shown
   var metaExtra = null;          // the loaded sidecar minus desc/tags (a module prefab's summary), kept on save
   // The editor's mode, posted by the host: module prefabs place only in Blueprint, object prefabs in Object mode.
@@ -3458,6 +3487,54 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     return out;
   }
   // --- prefab tree (pure) end ---
+  // --- prefab mods (pure) ---
+  // The mods a prefab records (backend/prefab_mods.c, MODS_STATUS), as the host sends them:
+  // {count, missing, mods:[{id, version, bundle, size, installed}]}, a JSON string or an object.
+  // Anything malformed reads as no mods.
+  function pfModsParse(text) {
+    var s = null;
+    if (typeof text === 'string' && text) { try { s = JSON.parse(text); } catch (e) { s = null; } }
+    else if (text && typeof text === 'object') s = text;
+    var mods = s && Array.isArray(s.mods) ? s.mods.filter(function(m){ return m && typeof m.id === 'string' && m.id; }) : [];
+    var missing = 0;
+    for (var i = 0; i < mods.length; i++) if (mods[i].installed !== true) missing++;
+    return {count: mods.length, missing: missing, mods: mods};
+  }
+  function pfModLabel(m) { return m.version ? m.id + ' ' + m.version : m.id; }
+  // The list row's pill: null without mods; "Needs mods: <id> +N" naming the missing ones when any
+  // is not installed, else "Mods: <id> +N". The title lists every mod with its state.
+  function pfModsBadge(st) {
+    if (!st || !st.count) return null;
+    var missing = st.mods.filter(function(m){ return m.installed !== true; });
+    var shown = missing.length ? missing : st.mods;
+    var first = shown[0].id + (shown.length > 1 ? ' +' + (shown.length - 1) : '');
+    var title = st.mods.map(function(m){ return pfModLabel(m) + (m.installed === true ? ' (installed)' : ' (not installed)'); }).join('\n');
+    return missing.length ? {text: 'Needs mods: ' + first, cls: 'pf-mods pf-mods-missing', title: title}
+                          : {text: 'Mods: ' + first, cls: 'pf-mods', title: title};
+  }
+  // Prefab Details: one row per mod and the line under them.
+  function pfModsDetail(st) {
+    if (!st || !st.count) return {rows: [], note: ''};
+    var rows = st.mods.map(function(m){ return {label: pfModLabel(m), state: m.installed === true ? 'Installed' : 'Not installed', missing: m.installed !== true}; });
+    var note = st.missing
+      ? 'Needs mods: ' + (st.missing === 1 ? '1 is' : st.missing + ' are') + ' not installed. Load / Place offers to download them when the mod store has them; otherwise ask the prefab\'s author for its ZIP export.'
+      : 'Every mod this prefab needs is installed.';
+    return {rows: rows, note: note};
+  }
+  // A Load / Place answer about mods: 3 the mod store is being asked, -7 refused. Others are null.
+  function pfModsLoadToast(d) {
+    if (!d) return null;
+    if (d.result === 3) return {text: d.message || ('Checking the mod store for the mods "' + d.name + '" needs'), level: 'ok'};
+    if (d.result === -7) return {text: d.message || ('"' + d.name + '" was not placed: its mods are not installed'), level: 'warn'};
+    return null;
+  }
+  // Export and Import answers ({op, ok, message, cancelled}); a cancelled dialog says nothing.
+  function pfFileResultToast(d) {
+    if (!d || d.cancelled) return null;
+    var fallback = d.op === 'import' ? (d.ok ? 'Prefab imported' : 'The prefab was not imported') : (d.ok ? 'Prefab exported' : 'The prefab was not exported');
+    return {text: d.message || fallback, level: d.ok ? 'ok' : 'err'};
+  }
+  // --- prefab mods (pure) end ---
   function renderPrefabTree() {
     var tree = document.getElementById('prefabTree'); if (!tree) return;
     var root = prefabData.root, folders = prefabData.folders;
@@ -3492,7 +3569,10 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       }
       if (!row.folder && openBody) { h += '</div></div>'; openBody = false; }
       h += '<div class="pf-item" draggable="true" data-folder="' + esc(row.folder) + '">' + esc(row.name)
-         + (pfKindOf(row.folder, row.name) === 'modules' ? '<span class="pf-kind" title="Module prefab: places in Blueprint mode">Blueprint</span>' : '') + '</div>';
+         + (pfKindOf(row.folder, row.name) === 'modules' ? '<span class="pf-kind" title="Module prefab: places in Blueprint mode">Blueprint</span>' : '');
+      var mbadge = pfModsBadge(prefabMods[(row.folder ? row.folder + '/' : '') + row.name]);
+      if (mbadge) h += '<span class="' + mbadge.cls + '" title="' + esc(mbadge.title) + '">' + esc(mbadge.text) + '</span>';
+      h += '</div>';
     }
     if (openBody) h += '</div></div>';
     tree.innerHTML = rows.length ? h : '<div class="list-empty">No matches.</div>';
@@ -3601,6 +3681,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     var doc = null;
     if (d.scene) { try { doc = prefabTransform.parseScene(d.scene); } catch (e) { doc = null; } }
     pfShowModuleCheck(selectedPrefabKind === 'modules' ? d.moduleCheck : null);
+    pfShowMods(pfModsParse(d.modsStatus));
     if (selectedPrefabKind === 'modules') {
       prefabViewport.clear();
       pfShowFootprint(meta);
@@ -3687,6 +3768,23 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   // alert icon, naming the modules this editor cannot build, so the player sees it before Load. The
   // backend refuses such a placement anyway; the line only explains it ahead of time. No check (no
   // editor open, an older backend) shows nothing.
+  // The mods the selected prefab records (Prefab Details): each with whether it is installed, and
+  // what Load / Place does about the missing ones. A prefab without mods hides the section.
+  function pfShowMods(st) {
+    var box = document.getElementById('pcMods'), rowsEl = document.getElementById('pcModsRows'), note = document.getElementById('pcModsNote');
+    var det = pfModsDetail(st);
+    if (!box || !rowsEl || !note) return;
+    box.style.display = det.rows.length ? 'flex' : 'none';
+    box.classList.toggle('pc-mods-missing', !!(st && st.missing));
+    rowsEl.textContent = '';
+    det.rows.forEach(function(r){
+      var row = document.createElement('div'), label = document.createElement('span'), state = document.createElement('span');
+      row.className = 'pc-mods-row' + (r.missing ? ' missing' : ''); row.setAttribute('role', 'listitem');
+      label.textContent = r.label; state.textContent = r.state; state.className = 'pc-mods-state';
+      row.appendChild(label); row.appendChild(state); rowsEl.appendChild(row);
+    });
+    note.textContent = det.note;
+  }
   function pfShowModuleCheck(text) {
     var box = document.getElementById('pcNeeds'), span = document.getElementById('pcNeedsText');
     var load = document.getElementById('prefabLoadBtn'), check = null;
@@ -6899,7 +6997,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   // selected (setPrefabButtons); clearPrefabSelection is the single teardown for every way a selection
   // ends -- blank-space click, the selected file disappearing from disk, or a successful Delete.
   function setPrefabButtons(on) {
-    ['prefabDeleteBtn', 'prefabLoadBtn'].forEach(function(id){
+    ['prefabExportBtn', 'prefabDeleteBtn', 'prefabLoadBtn'].forEach(function(id){
       var b = document.getElementById(id); if (!b) return;
       b.disabled = !on;
       if (on) b.removeAttribute('title'); else b.setAttribute('title', 'Select a prefab first');
@@ -7105,6 +7203,15 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     if (selectedPrefabKind === 'modules' && edMode.known && !edMode.blueprint) { toast('Switch to Blueprint mode (Tab in the editor) to place a module prefab', 'warn'); return; }
     post({cmd:'loadPrefab', name: name, folder: selectedPrefabFolder});
   });
+  // Export: the prefab and every mod it records, as one ZIP (the Windows Save dialog, as for rawmaps).
+  var prefabExportBtn = document.getElementById('prefabExportBtn');
+  if (prefabExportBtn) prefabExportBtn.addEventListener('click', function(){
+    var name = document.getElementById('pcName').value; if (!name) return;
+    post({cmd:'exportPrefab', name: name, folder: selectedPrefabFolder});
+  });
+  // Import: a prefab's ZIP; its mods are installed and the prefab joins the list.
+  var prefabImportBtn = document.getElementById('prefabImportBtn');
+  if (prefabImportBtn) prefabImportBtn.addEventListener('click', function(){ post({cmd:'importPrefab'}); });
   var prefabDeleteBtn = document.getElementById('prefabDeleteBtn');
   if (prefabDeleteBtn) prefabDeleteBtn.addEventListener('click', function(){
     var name = document.getElementById('pcName').value; if (!name) return;

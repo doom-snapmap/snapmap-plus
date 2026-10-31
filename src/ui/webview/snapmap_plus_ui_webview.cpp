@@ -132,10 +132,16 @@ static std::string   g_new_entity_json, g_new_entity_label;
  * write is the barrier and no lock is needed. */
 static volatile LONG g_pick_busy = 0;
 static volatile LONG g_pick_done = 0;
-static int           g_pick_kind = 0;        /* 0 = Load Rawmap, 1 = Save Rawmap As */
+static int           g_pick_kind = 0;        /* 0 = Load Rawmap, 1 = Save Rawmap As, 2 = Export Prefab, 3 = Import Prefab */
 static volatile LONG g_pick_mods = 0;        /* the open map's mods when the picker opened */
 static bool          g_pick_ok   = false;    /* false = cancelled */
 static std::wstring  g_pick_path;
+static std::wstring  g_pick_file_name;       /* Export Prefab: the name the dialog proposes */
+static std::string   g_pick_prefab_name, g_pick_prefab_folder;   /* Export Prefab: the prefab */
+/* A Load/Place held while its mods are fetched (backend/prefab_mods.c): the
+ * placement to poll, and the prefab to place again once they are installed. */
+static int           g_mods_wait_seq = 0;
+static std::string   g_mods_wait_name, g_mods_wait_folder;
 /* Keep the latest sound request until the drain; an empty name stops playback.
  * The backend marshals live audio changes to the engine thread. */
 static volatile bool g_pending_sound_preview = false;
@@ -835,6 +841,8 @@ static int poc_prefab_grab_status(sh_prefab_grab_info *info)
  * refused rather than written with collapsed positions.
  * Results: 1 = saved, 0 = empty, 2 = hover refused, 3 = no usable grab frame,
  * -1 = resolve/serialize/write failure. */
+static bool poc_prefab_meta_path(const std::string &folder, const std::string &name, char *out, int cap);   /* fwd */
+static int poc_module_prefab_call(sh_module_prefab_call *call);   /* fwd */
 static void poc_apply_create_prefab()
 {
     g_create_result = -1;
@@ -898,6 +906,20 @@ static void poc_apply_create_prefab()
     fclose(fp);
     poc_log("create-prefab: WROTE file ok");
     g_create_result = 1;
+    /* The mods its entities need go into its sidecar, found as a map's save finds them. */
+    {
+        char meta[1024];
+        if (poc_prefab_meta_path("", g_create_prefab_name, meta, (int)sizeof meta)) {
+            sh_module_prefab_call call;
+            memset(&call, 0, sizeof call);
+            call.op = SH_MODULE_PREFAB_MODS_RECORD;
+            call.text = buf;
+            call.text_len = (size_t)n;
+            call.meta_path = meta;
+            int r = poc_module_prefab_call(&call);
+            poc_logf("create-prefab: mods recorded in the sidecar=%lu", (unsigned long)(r > 0 ? r : 0));
+        }
+    }
 }
 /* folder="" -> the root prefabs\ dir; else prefabs\<folder>\ (one real level, no nesting). Shared by every
  * prefab/folder file op below so they all agree on where a folder actually lives on disk. */
@@ -926,6 +948,7 @@ static bool poc_prefab_meta_path(const std::string &folder, const std::string &n
     return poc_prefab_file_path(folder, name + ".meta", out, cap);
 }
 static int poc_module_prefab_call(sh_module_prefab_call *call);   /* fwd */
+static bool poc_read_small_file(const char *path, std::string &body);   /* fwd */
 /* Save the selected Blueprint modules, with every entity inside them, as a module
  * prefab at the prefab root. The backend writes the file and its sidecar.
  * Results: 1 saved, 0 the name exists, -1 failed, -2 not in Blueprint, -3 no module selected. */
@@ -1198,6 +1221,72 @@ static void poc_apply_place_module_prefab(const std::string &body)
     }
     g_load_result = (r == -1 || r == -4) ? r : 0;
 }
+/* The mods a prefab records come first (backend/prefab_mods.c): the engine never sees a
+ * prefab whose mods are missing. Returns true when the placement may go on now; otherwise
+ * g_load_result is 3 (held while the mod store is asked, followed by poc_poll_prefab_mods),
+ * -6 (a module the player cannot get) or -7 (refused), with the message in g_load_message.
+ * A prefab without a sidecar, or whose sidecar records no mods, goes on as before. */
+static bool poc_resolve_prefab_mods(const std::string &body)
+{
+    char meta[1024], msg[700] = "";
+    if (!poc_prefab_meta_path(g_load_prefab_folder, g_load_prefab_name, meta, (int)sizeof meta) ||
+        GetFileAttributesA(meta) == INVALID_FILE_ATTRIBUTES)
+        return true;
+    sh_module_prefab_call call;
+    memset(&call, 0, sizeof call);
+    call.op = SH_MODULE_PREFAB_MODS_RESOLVE;
+    call.text = body.c_str();
+    call.text_len = body.size();
+    call.meta_path = meta;
+    call.name = g_load_prefab_name.c_str();
+    call.out = msg;
+    call.out_cap = (int)sizeof msg;
+    int r = poc_module_prefab_call(&call);
+    char l[900];
+    _snprintf_s(l, sizeof l, _TRUNCATE, "load-prefab: mods of '%s' resolve=%d seq=%d (%s)", g_load_prefab_name.c_str(), r,
+                call.seq, msg);
+    poc_log(l);
+    if (r == 1) return true;                       /* every mod installed and in the open map */
+    if (r == 2 && call.seq > 0) {                  /* the mod store is asked; Yes downloads, then it is placed */
+        g_mods_wait_seq = call.seq;
+        g_mods_wait_name = g_load_prefab_name;
+        g_mods_wait_folder = g_load_prefab_folder;
+        g_load_result = 3;
+        g_load_message = msg;
+        return false;
+    }
+    g_load_result = r == -6 ? -6 : -7;
+    g_load_message = msg[0] ? msg : "This prefab's mods could not be checked, so it was not placed. Try again.";
+    return false;
+}
+/* Follow a held placement: once its mods are installed, place it again; a refusal (the game
+ * showed why) is told to the page. */
+static void poc_poll_prefab_mods()
+{
+    if (!g_mods_wait_seq) return;
+    sh_module_prefab_call call;
+    memset(&call, 0, sizeof call);
+    call.op = SH_MODULE_PREFAB_MODS_POLL;
+    call.seq = g_mods_wait_seq;
+    int r = poc_module_prefab_call(&call);
+    if (r == 2) return;
+    char l[400];
+    _snprintf_s(l, sizeof l, _TRUNCATE, "load-prefab: mods of '%s' (placement %d) finished %d", g_mods_wait_name.c_str(),
+                g_mods_wait_seq, r);
+    poc_log(l);
+    g_mods_wait_seq = 0;
+    if (r == 1) {
+        /* Placed through the ordinary Load/Place, which now finds every mod installed. */
+        g_load_prefab_name = g_mods_wait_name;
+        g_load_prefab_folder = g_mods_wait_folder;
+        g_pending_load_prefab = true;
+        return;
+    }
+    std::wstring m = L"{\"kind\":\"loadPrefabResult\",\"result\":-7,\"name\":\"";
+    m += sh_webview_json::escape_wide(g_mods_wait_name.c_str());
+    m += L"\",\"message\":\"\"}";
+    poc_post_json(m.c_str());
+}
 static void poc_apply_load_prefab()
 {
     g_load_result = -1;
@@ -1220,7 +1309,14 @@ static void poc_apply_load_prefab()
     /* A module prefab (an idSnapMap) places only in Blueprint, through the backend's
      * merge and install; an object prefab goes to the native paste below. */
     g_load_prefab_modules = false;
-    if (sh_webview_json::top_level_type(body) == "idSnapMap") {
+    if (sh_webview_json::top_level_type(body) == "idSnapMap") g_load_prefab_modules = true;
+    if (g_mods_wait_seq) {
+        g_load_result = -7;
+        g_load_message = "Another prefab is waiting for its mods. Answer that first, then place this one.";
+        return;
+    }
+    if (!poc_resolve_prefab_mods(body)) return;
+    if (g_load_prefab_modules) {
         g_load_prefab_modules = true;
         poc_apply_place_module_prefab(body);
         return;
@@ -1543,7 +1639,8 @@ static void poc_send_material_result(const char *name)
 /* Run the common item dialog. `save` picks the Save-As variant. Returns false when the person
  * cancelled (the overwhelmingly common non-success case, and not an error worth reporting).
  * Call from the picker thread, never from the message handler. */
-static bool poc_pick_rawmap_file(bool save, int map_mods, const wchar_t *title, std::wstring &out_path)
+static bool poc_pick_rawmap_file(bool save, int map_mods, const wchar_t *title, std::wstring &out_path,
+                                 bool prefab = false, const wchar_t *file_name = nullptr)
 {
     out_path.clear();
 
@@ -1558,7 +1655,8 @@ static bool poc_pick_rawmap_file(bool save, int map_mods, const wchar_t *title, 
                                   CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dlg));
     if (SUCCEEDED(hr) && dlg) {
         /* .json and .zip both: a .zip is the map with its mods (rawmap_picker.h). */
-        const sh_rawmap_picker::choice pick = sh_rawmap_picker::for_dialog(save, map_mods);
+        const sh_rawmap_picker::choice pick = prefab ? sh_rawmap_picker::for_prefab_dialog(save)
+                                                     : sh_rawmap_picker::for_dialog(save, map_mods);
         COMDLG_FILTERSPEC filters[4];
         for (unsigned i = 0; i < pick.count; ++i) {
             filters[i].pszName = pick.types[i].label;
@@ -1568,7 +1666,7 @@ static bool poc_pick_rawmap_file(bool save, int map_mods, const wchar_t *title, 
         dlg->SetFileTypeIndex(1);
         dlg->SetDefaultExtension(pick.extension);
         if (title) dlg->SetTitle(title);
-        if (save && pick.file_name) dlg->SetFileName(pick.file_name);
+        if (save && (file_name || pick.file_name)) dlg->SetFileName(file_name ? file_name : pick.file_name);
 
         /* Keep the dialog's own work down. FORCEFILESYSTEM refuses items with no path (nothing we
          * could open anyway); NOCHANGEDIR keeps it from moving the process's working directory out
@@ -1746,8 +1844,12 @@ static DWORD WINAPI poc_pick_thread(LPVOID param)
     bool ok;
 
     HRESULT init = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
-    ok = poc_pick_rawmap_file(kind == 1, (int)InterlockedCompareExchange(&g_pick_mods, 0, 0),
-                              kind == 1 ? L"Save Rawmap As" : L"Load Rawmap", picked);
+    if (kind >= 2)
+        ok = poc_pick_rawmap_file(kind == 2, 0, kind == 2 ? L"Export Prefab" : L"Import Prefab", picked, true,
+                                  kind == 2 && !g_pick_file_name.empty() ? g_pick_file_name.c_str() : nullptr);
+    else
+        ok = poc_pick_rawmap_file(kind == 1, (int)InterlockedCompareExchange(&g_pick_mods, 0, 0),
+                                  kind == 1 ? L"Save Rawmap As" : L"Load Rawmap", picked);
     if (SUCCEEDED(init)) CoUninitialize();
 
     g_pick_kind = kind;
@@ -1765,7 +1867,10 @@ static void poc_begin_pick(int kind)
     HANDLE h;
 
     if (InterlockedExchange(&g_pick_busy, 1) != 0) {
-        poc_send_rawmap_status(L"A file dialog is already open.");
+        if (kind >= 2)
+            poc_post_json(kind == 2 ? L"{\"kind\":\"prefabFileResult\",\"op\":\"export\",\"ok\":false,\"message\":\"A file dialog is already open.\"}"
+                                    : L"{\"kind\":\"prefabFileResult\",\"op\":\"import\",\"ok\":false,\"message\":\"A file dialog is already open.\"}");
+        else poc_send_rawmap_status(L"A file dialog is already open.");
         return;
     }
     /* Asked here, on the UI thread: the picker thread touches no backend slot. */
@@ -1786,6 +1891,77 @@ static void poc_begin_pick(int kind)
     CloseHandle(h);
 }
 
+static void poc_send_prefabs();   /* fwd */
+/* Export Prefab (kind 2) and Import Prefab (kind 3), once the dialog has a ZIP: the backend writes
+ * or reads it (backend/prefab_mods.c) and the page gets one prefabFileResult. UI thread. */
+static void poc_finish_prefab_pick(int kind, bool picked, const std::string &zip8)
+{
+    const wchar_t *op = kind == 2 ? L"export" : L"import";
+    if (!picked) {
+        std::wstring m = L"{\"kind\":\"prefabFileResult\",\"op\":\""; m += op; m += L"\",\"cancelled\":true}";
+        poc_post_json(m.c_str());
+        return;
+    }
+    static char out[4096];
+    out[0] = '\0';
+    sh_module_prefab_call call;
+    memset(&call, 0, sizeof call);
+    call.zip_path = zip8.c_str();
+    call.out = out;
+    call.out_cap = (int)sizeof out;
+    char path[1024] = "", meta[1024] = "";
+    int r;
+    if (kind == 2) {
+        if (!poc_prefab_file_path(g_pick_prefab_folder, g_pick_prefab_name, path, (int)sizeof path) ||
+            !poc_prefab_meta_path(g_pick_prefab_folder, g_pick_prefab_name, meta, (int)sizeof meta)) {
+            poc_post_json(L"{\"kind\":\"prefabFileResult\",\"op\":\"export\",\"ok\":false,\"message\":\"That prefab cannot be found.\"}");
+            return;
+        }
+        call.op = SH_MODULE_PREFAB_EXPORT;
+        call.path = path;
+        call.meta_path = meta;
+        call.name = g_pick_prefab_name.c_str();
+        r = poc_module_prefab_call(&call);
+    } else {
+        if (!poc_prefab_dir("", path, (int)sizeof path)) {
+            poc_post_json(L"{\"kind\":\"prefabFileResult\",\"op\":\"import\",\"ok\":false,\"message\":\"The prefabs folder cannot be found.\"}");
+            return;
+        }
+        call.op = SH_MODULE_PREFAB_IMPORT;
+        call.path = path;
+        r = poc_module_prefab_call(&call);
+    }
+    {
+        char l[1400];
+        _snprintf_s(l, sizeof l, _TRUNCATE, "prefab %s: result=%d zip='%s' %s", kind == 2 ? "export" : "import", r,
+                    zip8.c_str(), out);
+        poc_log(l);
+    }
+    std::wstring m = L"{\"kind\":\"prefabFileResult\",\"op\":\""; m += op;
+    m += L"\",\"ok\":"; m += r >= 0 && (kind == 3 || r == 1) ? L"true" : L"false";
+    m += L",\"result\":"; m += std::to_wstring(r);
+    if (kind == 2) {
+        m += L",\"message\":\""; m += sh_webview_json::escape_wide(out[0] ? out : "This backend cannot export prefabs."); m += L"\"";
+    } else {
+        /* the backend's {"ok","added","name","message"}: only its message and name are forwarded */
+        std::string text = out, message, name;
+        size_t at = text.find("\"message\":\"");
+        if (at != std::string::npos) {
+            size_t i = at + 11;
+            while (i < text.size() && text[i] != '"') { if (text[i] == '\\' && i + 1 < text.size()) i++; message += text[i]; i++; }
+        }
+        at = text.find("\"name\":\"");
+        if (at != std::string::npos) {
+            size_t i = at + 8;
+            while (i < text.size() && text[i] != '"') { if (text[i] == '\\' && i + 1 < text.size()) i++; name += text[i]; i++; }
+        }
+        m += L",\"message\":\""; m += sh_webview_json::escape_wide(message.empty() ? "This backend cannot import prefabs." : message.c_str());
+        m += L"\",\"name\":\""; m += sh_webview_json::escape_wide(name.c_str()); m += L"\"";
+    }
+    m += L"}";
+    poc_post_json(m.c_str());
+    if (kind == 3 && r == 1) poc_send_prefabs();
+}
 /* Act on a finished picker. Runs on the UI thread from the think loop, so every backend call below
  * is where it has always been. */
 static void poc_finish_pick()
@@ -1806,6 +1982,10 @@ static void poc_finish_pick()
     InterlockedExchange(&g_pick_done, 0);
     InterlockedExchange(&g_pick_busy, 0);
 
+    if (kind >= 2) {
+        poc_finish_prefab_pick(kind, picked, p8);
+        return;
+    }
     if (!picked) {
         poc_send_rawmap_status(L"");   /* cancelled -- refresh the readout, say nothing */
         return;
@@ -2242,7 +2422,7 @@ static bool poc_read_prefab_scene(const char *path, std::string &body)
 }
 /* The backend's module check for a module prefab's text (SH_MODULE_PREFAB_CHECK):
  * its JSON, or empty when this backend or editor cannot answer. */
-static std::string poc_module_prefab_check(const std::string &scene)
+static std::string poc_module_prefab_check(const std::string &scene, const char *meta_path)
 {
     static char out[16 * 1024];
     sh_module_prefab_call call;
@@ -2252,6 +2432,25 @@ static std::string poc_module_prefab_check(const std::string &scene)
     call.op = SH_MODULE_PREFAB_CHECK;
     call.text = scene.c_str();
     call.text_len = scene.size();
+    call.meta_path = meta_path;   /* a module one of its mods provides is listed under Mods instead */
+    call.out = out;
+    call.out_cap = (int)sizeof out;
+    int r = poc_module_prefab_call(&call);
+    if (r < 0 || !out[0]) return std::string();
+    return std::string(out);
+}
+/* The mods a sidecar records, with whether each is installed (SH_MODULE_PREFAB_MODS_STATUS):
+ * its JSON, or empty when the sidecar records none or this backend cannot answer. */
+static std::string poc_prefab_mods_status(const std::string &meta)
+{
+    static char out[64 * 1024];
+    if (meta.empty() || meta.find("\"mods\"") == std::string::npos) return std::string();
+    out[0] = '\0';
+    sh_module_prefab_call call;
+    memset(&call, 0, sizeof call);
+    call.op = SH_MODULE_PREFAB_MODS_STATUS;
+    call.text = meta.c_str();
+    call.text_len = meta.size();
     call.out = out;
     call.out_cap = (int)sizeof out;
     int r = poc_module_prefab_call(&call);
@@ -2280,7 +2479,8 @@ static void poc_send_prefab_detail(const std::string &name, const std::string &f
                 json += L"\",\"scene\":\""; json += sh_webview_json::escape_wide(scene.c_str());
                 json += L"\",\"count\":"; json += std::to_wstring(count < 0 ? 0 : count);
                 /* an escaped string, parsed by the page under try/catch like the sidecar */
-                json += L",\"moduleCheck\":\""; json += sh_webview_json::escape_wide(poc_module_prefab_check(scene).c_str());
+                json += L",\"moduleCheck\":\""; json += sh_webview_json::escape_wide(poc_module_prefab_check(scene, mp).c_str());
+                json += L"\",\"modsStatus\":\""; json += sh_webview_json::escape_wide(poc_prefab_mods_status(meta).c_str());
                 json += L"\"}";
                 g_webview->PostWebMessageAsJson(json.c_str());
                 return;
@@ -2313,7 +2513,8 @@ static void poc_send_prefab_detail(const std::string &name, const std::string &f
     json += L",\"meta\":\""; json += sh_webview_json::escape_wide(metaBody.c_str());
     json += L"\",\"scene\":\""; json += sh_webview_json::escape_wide(sceneBody.c_str());
     json += L"\",\"count\":"; json += std::to_wstring(entityCount);
-    json += L"}";
+    json += L",\"modsStatus\":\""; json += sh_webview_json::escape_wide(poc_prefab_mods_status(metaBody).c_str());
+    json += L"\"}";
     g_webview->PostWebMessageAsJson(json.c_str());
 }
 
@@ -2850,6 +3051,23 @@ static void poc_send_prefabs()
     for (size_t i = 0; i < rootNames.size(); i++) emitKind("", rootNames[i]);
     for (size_t i = 0; i < folders.size(); i++)
         for (size_t j = 0; j < folders[i].second.size(); j++) emitKind(folders[i].first, folders[i].second[j]);
+    /* mods: the mods each sidecar records, keyed like meta, as escaped status JSON the page parses. */
+    json += L"},\"mods\":{";
+    bool firstMods = true;
+    auto emitMods = [&](const std::string &folder, const std::string &name) {
+        char mp[1024];
+        std::string body;
+        if (!poc_prefab_meta_path(folder, name, mp, (int)sizeof mp) || !poc_read_small_file(mp, body)) return;
+        std::string status = poc_prefab_mods_status(body);
+        if (status.empty()) return;
+        if (!firstMods) json += L","; firstMods = false;
+        std::string key = folder.empty() ? name : (folder + "/" + name);
+        json += L"\""; json += sh_webview_json::escape_wide(key.c_str()); json += L"\":\"";
+        json += sh_webview_json::escape_wide(status.c_str()); json += L"\"";
+    };
+    for (size_t i = 0; i < rootNames.size(); i++) emitMods("", rootNames[i]);
+    for (size_t i = 0; i < folders.size(); i++)
+        for (size_t j = 0; j < folders[i].second.size(); j++) emitMods(folders[i].first, folders[i].second[j]);
     json += L"}}";
     g_webview->PostWebMessageAsJson(json.c_str());
     poc_post_editor_mode(true);
@@ -2863,7 +3081,16 @@ static void poc_apply_save_prefab_meta(const std::string &name, const std::strin
     int result = -1;
     char path[1024];
     if (!name.empty() && poc_prefab_meta_path(folder, name, path, (int)sizeof path)) {
-        if (body.empty()) {
+        /* The backend keeps the mods the sidecar records when the page's body has none. */
+        sh_module_prefab_call call;
+        memset(&call, 0, sizeof call);
+        call.op = SH_MODULE_PREFAB_META_WRITE;
+        call.text = body.c_str();
+        call.text_len = body.size();
+        call.meta_path = path;
+        int w = poc_module_prefab_call(&call);
+        if (w != 0) result = w == 1 ? 1 : -1;
+        else if (body.empty()) {
             DeleteFileA(path);   /* no metadata left -> no sidecar (a missing file is already the goal state) */
             result = 1;
         } else {
@@ -3404,6 +3631,17 @@ static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventA
                 poc_rawmap_configure(nullptr, nullptr, 5, nullptr);
             } else if (cmd == L"rawmapSavePick") {
                 poc_begin_pick(1);
+            } else if (cmd == L"exportPrefab") {
+                /* the prefab with its mods, as one ZIP: the Windows Save dialog first */
+                std::wstring nm, fo; sh_webview_json::get_string(json, L"name", nm); sh_webview_json::get_string(json, L"folder", fo);
+                if (InterlockedCompareExchange(&g_pick_busy, 0, 0) == 0) {
+                    g_pick_prefab_name = sh_webview_json::to_utf8(nm);
+                    g_pick_prefab_folder = sh_webview_json::to_utf8(fo);
+                    g_pick_file_name = nm + L".zip";
+                }
+                poc_begin_pick(2);
+            } else if (cmd == L"importPrefab") {
+                poc_begin_pick(3);
             } else if (cmd == L"navmeshState") {
                 poc_send_navmesh_state();
             } else if (cmd == L"navmeshUpdate") {
@@ -3886,6 +4124,7 @@ static void poc_think_loop()
             poc_post_json(m.c_str());
         }
         poc_poll_module_place();
+        poc_poll_prefab_mods();
         if (did_sound_preview) {
             std::wstring m = L"{\"kind\":\"soundPreviewResult\",\"playing\":";
             m += (g_sound_preview_result ? L"true" : L"false");

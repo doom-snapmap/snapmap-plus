@@ -5,7 +5,10 @@
  * together. Save Rawmap As offers .zip first when the open map uses a mod,
  * because the .json alone does not load for anyone who lacks the mods, and
  * .json first otherwise. Header-only and free of window state so the choice
- * is testable (tests/rawmap_picker_test.cpp). */
+ * is testable (tests/rawmap_picker_test.cpp).
+ *
+ * The Prefabs tab's Export and Import use the same dialogs for a prefab's ZIP
+ * (the prefab and every mod it records, backend/prefab_mods.c). */
 #ifndef SNAPMAP_PLUS_RAWMAP_PICKER_H
 #define SNAPMAP_PLUS_RAWMAP_PICKER_H
 
@@ -31,6 +34,7 @@ static const file_type kJson = { L"Rawmap JSON (*.json)", L"*.json" };
 static const file_type kJsonOnly = { L"Rawmap JSON only, without its mods (*.json)", L"*.json" };
 static const file_type kBoth = { L"Rawmaps (*.json, *.zip)", L"*.json;*.zip" };
 static const file_type kAll  = { L"All files (*.*)", L"*.*" };
+static const file_type kPrefabZip = { L"Prefab with its mods (*.zip)", L"*.zip" };
 
 /* The first type is the one selected when the dialog opens. */
 inline choice for_dialog(bool save, int map_mods)
@@ -54,6 +58,19 @@ inline choice for_dialog(bool save, int map_mods)
         c.extension = L"json";
         c.file_name = L"rawmap.json";
     }
+    return c;
+}
+
+/* Export Prefab (save) and Import Prefab (open): a prefab's ZIP only. The
+ * caller proposes "<name>.zip" when it saves. */
+inline choice for_prefab_dialog(bool save)
+{
+    choice c;
+    memset(&c, 0, sizeof c);
+    c.types[0] = kPrefabZip; c.types[1] = kAll;
+    c.count = 2;
+    c.extension = L"zip";
+    c.file_name = save ? L"prefab.zip" : nullptr;
     return c;
 }
 
